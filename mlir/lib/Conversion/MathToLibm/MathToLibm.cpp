@@ -175,6 +175,7 @@ void mlir::populateMathToLibmConversionPatterns(RewritePatternSet &patterns) {
   populatePatternsForOp<math::CosOp>(patterns, ctx, "cosf", "cos");
   populatePatternsForOp<math::CoshOp>(patterns, ctx, "coshf", "cosh");
   populatePatternsForOp<math::ErfOp>(patterns, ctx, "erff", "erf");
+  populatePatternsForOp<math::ErfcOp>(patterns, ctx, "erfcf", "erfc");
   populatePatternsForOp<math::ExpOp>(patterns, ctx, "expf", "exp");
   populatePatternsForOp<math::Exp2Op>(patterns, ctx, "exp2f", "exp2");
   populatePatternsForOp<math::ExpM1Op>(patterns, ctx, "expm1f", "expm1");
