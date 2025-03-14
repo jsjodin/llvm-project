@@ -2710,24 +2710,159 @@ convertOmpLoopNest(Operation &opInst, llvm::IRBuilderBase &builder,
 
     loopInfos.push_back(*loopResult);
   }
-
   // Collapse loops. Store the insertion point because LoopInfos may get
   // invalidated.
   llvm::OpenMPIRBuilder::InsertPointTy afterIP =
       loopInfos.front()->getAfterIP();
 
+  llvm::Function* Fun = loopInfos.front()->getCond()->getParent();
+  Fun->dump();
+  ompBuilder->dumpOutlineInfos();
+  llvm::errs() << "== Input Loops ==\n";
+  loopInfos[0]->dump();
+  loopInfos[1]->dump();
+
+  llvm::errs() << "======== Collapsed Loop!!! ========\n";
   // Update the stack frame created for this loop to point to the resulting loop
   // after applying transformations.
   moduleTranslation.stackWalk<OpenMPLoopInfoStackFrame>(
       [&](OpenMPLoopInfoStackFrame &frame) {
-        frame.loopInfo = ompBuilder->collapseLoops(ompLoc.DL, loopInfos, {});
+        auto newLoopInfo = ompBuilder->collapseLoops(ompLoc.DL, loopInfos, {});
+        newLoopInfo->dump();
+        frame.loopInfo = newLoopInfo;
         return WalkResult::interrupt();
       });
+  Fun->dump();
+  // Continue building IR after the loop. Note that the LoopInfo returned by
+  // `collapseLoops` points inside the outermost loop and is intended for
+  // potential further loop transformations. Use the insertion point stored
+  // before collapsing loops instead.
+  llvm::errs() << "========== AfterIP Block: "
+               << afterIP.getBlock()->getName()
+               <<  "====\n";
+  builder.restoreIP(afterIP);
+  return success();
+}
+
+/// Converts an OpenMP loop nest into LLVM IR using OpenMPIRBuilder.
+static LogicalResult
+convertOmpLoopNestTiled(Operation &opInst, llvm::IRBuilderBase &builder,
+                        LLVM::ModuleTranslation &moduleTranslation) {
+  llvm::OpenMPIRBuilder *ompBuilder = moduleTranslation.getOpenMPBuilder();
+  auto loopOp = cast<omp::LoopNestOp>(opInst);
+
+  // Set up the source location value for OpenMP runtime.
+  llvm::OpenMPIRBuilder::LocationDescription ompLoc(builder);
+
+  // Generator of the canonical loop body.
+  SmallVector<llvm::CanonicalLoopInfo *> loopInfos;
+  SmallVector<llvm::OpenMPIRBuilder::InsertPointTy> bodyInsertPoints;
+  auto bodyGen = [&](llvm::OpenMPIRBuilder::InsertPointTy ip,
+                     llvm::Value *iv) -> llvm::Error {
+    // Make sure further conversions know about the induction variable.
+    moduleTranslation.mapValue(
+        loopOp.getRegion().front().getArgument(loopInfos.size()), iv);
+
+    // Capture the body insertion point for use in nested loops. BodyIP of the
+    // CanonicalLoopInfo always points to the beginning of the entry block of
+    // the body.
+    bodyInsertPoints.push_back(ip);
+
+    if (loopInfos.size() != loopOp.getNumLoops() - 1)
+      return llvm::Error::success();
+
+    // Convert the body of the loop.
+    builder.restoreIP(ip);
+    llvm::Expected<llvm::BasicBlock *> regionBlock = convertOmpOpRegions(
+        loopOp.getRegion(), "omp.loop_nest.region", builder, moduleTranslation);
+    if (!regionBlock)
+      return regionBlock.takeError();
+
+    builder.SetInsertPoint(*regionBlock, (*regionBlock)->begin());
+    return llvm::Error::success();
+  };
+
+  // Delegate actual loop construction to the OpenMP IRBuilder.
+  // TODO: this currently assumes omp.loop_nest is semantically similar to SCF
+  // loop, i.e. it has a positive step, uses signed integer semantics.
+  // Reconsider this code when the nested loop operation clearly supports more
+  // cases.
+  for (unsigned i = 0, e = loopOp.getNumLoops(); i < e; ++i) {
+    llvm::Value *lowerBound =
+        moduleTranslation.lookupValue(loopOp.getLoopLowerBounds()[i]);
+    llvm::Value *upperBound =
+        moduleTranslation.lookupValue(loopOp.getLoopUpperBounds()[i]);
+    llvm::Value *step = moduleTranslation.lookupValue(loopOp.getLoopSteps()[i]);
+
+    // Make sure loop trip count are emitted in the preheader of the outermost
+    // loop at the latest so that they are all available for the new collapsed
+    // loop will be created below.
+    llvm::OpenMPIRBuilder::LocationDescription loc = ompLoc;
+    llvm::OpenMPIRBuilder::InsertPointTy computeIP = ompLoc.IP;
+    if (i != 0) {
+      loc = llvm::OpenMPIRBuilder::LocationDescription(bodyInsertPoints.back(),
+                                                       ompLoc.DL);
+      computeIP = loopInfos.front()->getPreheaderIP();
+    }
+
+    llvm::Expected<llvm::CanonicalLoopInfo *> loopResult =
+        ompBuilder->createCanonicalLoop(
+            loc, bodyGen, lowerBound, upperBound, step,
+            /*IsSigned=*/true, loopOp.getLoopInclusive(), computeIP);
+
+    if (failed(handleError(loopResult, *loopOp)))
+      return failure();
+
+    loopInfos.push_back(*loopResult);
+  }
+  llvm::errs() << "===================== NUM LOOPS: " << loopOp.getNumLoops() <<
+    "=================\n";
+  // @@@JAN:Tile loops here 10x10 tiles for right now hard coded
+  llvm::Type *IVType = loopInfos.front()->getIndVarType();
+  llvm::Function* Fun = loopInfos.front()->getCond()->getParent();
+  SmallVector<llvm::Value *> TileSizes;
+  llvm::Value *TenVal =  llvm::ConstantInt::get(IVType, 10);
+  TileSizes.push_back(TenVal);
+  TileSizes.push_back(TenVal);
+  Fun->dump();
+  ompBuilder->dumpOutlineInfos();
+  llvm::errs() << "== Input Loops ==\n";
+  loopInfos[0]->dump();
+  loopInfos[1]->dump();
+  llvm::errs() << "======== TILED LOOPS!!! ========\n";
+
+  std::vector<llvm::CanonicalLoopInfo*> NewLoops =
+    ompBuilder->tileLoops(ompLoc.DL, loopInfos, TileSizes);
+  llvm::errs() << "== Output Loops ==\n";
+  NewLoops[0]->dump();
+  NewLoops[1]->dump();
+  NewLoops[2]->dump();
+  NewLoops[3]->dump();
+
+  Fun->dump();
+  // Collapse loops. Store the insertion point because LoopInfos may get
+  // invalidated.
+  auto AfterBB = NewLoops.front()->getAfter();
+  auto AfterAfterBB = AfterBB->getSingleSuccessor();
+  llvm::OpenMPIRBuilder::InsertPointTy afterIP =
+    {AfterAfterBB, AfterAfterBB->begin()};
+
+  // Update the stack frame created for this loop to point to the resulting loop
+  // after applying transformations.
+  moduleTranslation.stackWalk<OpenMPLoopInfoStackFrame>(
+        [&](OpenMPLoopInfoStackFrame &frame) {
+          frame.loopInfo = NewLoops[0];
+          return WalkResult::interrupt();
+        });
 
   // Continue building IR after the loop. Note that the LoopInfo returned by
   // `collapseLoops` points inside the outermost loop and is intended for
   // potential further loop transformations. Use the insertion point stored
   // before collapsing loops instead.
+    llvm::errs() << "========== AfterIP Block: "
+               << afterIP.getBlock()->getName()
+               <<  "====\n";
+
   builder.restoreIP(afterIP);
   return success();
 }
@@ -5468,7 +5603,7 @@ convertHostOrTargetOperation(Operation *op, llvm::IRBuilderBase &builder,
             return convertOmpDistribute(*op, builder, moduleTranslation);
           })
           .Case([&](omp::LoopNestOp) {
-            return convertOmpLoopNest(*op, builder, moduleTranslation);
+            return convertOmpLoopNestTiled(*op, builder, moduleTranslation);
           })
           .Case<omp::MapInfoOp, omp::MapBoundsOp, omp::PrivateClauseOp>(
               [&](auto op) {

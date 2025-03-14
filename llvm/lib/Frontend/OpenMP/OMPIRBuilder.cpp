@@ -708,6 +708,10 @@ void OpenMPIRBuilder::finalize(Function *Fn) {
   SmallPtrSet<BasicBlock *, 32> ParallelRegionBlockSet;
   SmallVector<BasicBlock *, 32> Blocks;
   SmallVector<OutlineInfo, 16> DeferredOutlines;
+  dumpOutlineInfos();
+  if (OutlineInfos.size() > 0) {
+    OutlineInfos.front().EntryBB->getParent()->dump();
+  }
   for (OutlineInfo &OI : OutlineInfos) {
     // Skip functions that have not finalized yet; may happen with nested
     // function generation.
@@ -8500,6 +8504,16 @@ Error OpenMPIRBuilder::emitOffloadingArrays(
   return Error::success();
 }
 
+void OpenMPIRBuilder::dumpOutlineInfos() {
+  //@@@
+  errs() << "=== Outline Infos ====\n";
+  for (auto En : enumerate(OutlineInfos)) {
+    errs() << "[" << En.index() << "]: ";
+    En.value().dump();
+  }
+  errs() << "=== Outline Infos End ====\n";
+}
+
 void OpenMPIRBuilder::emitBranch(BasicBlock *Target) {
   BasicBlock *CurBB = Builder.GetInsertBlock();
 
@@ -9400,6 +9414,14 @@ void OpenMPIRBuilder::OutlineInfo::collectBlocks(
   }
 }
 
+void OpenMPIRBuilder::OutlineInfo::dump() {
+  errs() << "=== OutilneInfo == "
+         << " EntryBB: " << (EntryBB ? EntryBB->getName() : "n\a")
+         << " ExitBB: " << (ExitBB ? ExitBB->getName() : "n\a")
+         << " OuterAllocaBB: "
+         << (OuterAllocaBB ? OuterAllocaBB->getName() : "n/a") << "\n";
+}
+
 void OpenMPIRBuilder::createOffloadEntry(Constant *ID, Constant *Addr,
                                          uint64_t Size, int32_t Flags,
                                          GlobalValue::LinkageTypes,
@@ -10176,4 +10198,11 @@ void CanonicalLoopInfo::invalidate() {
   Cond = nullptr;
   Latch = nullptr;
   Exit = nullptr;
+}
+
+void CanonicalLoopInfo::dump() {
+  errs() << "CanonicaLoop == Header: " << (Header ? Header->getName() : "n/a")
+         << " Cond: " << (Cond ? Cond->getName() : "n/a")
+         << " Latch: " << (Latch ? Latch->getName() : "n/a")
+         << " Exit: " << (Exit ? Exit->getName() : "n/a") << "\n";
 }
