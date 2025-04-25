@@ -128,18 +128,6 @@ private:
     auto &beginDir{std::get<parser::OmpBeginLoopDirective>(x.t)};
     auto &dir{std::get<parser::OmpLoopDirective>(beginDir.t)};
 
-    //    if(dir.v == llvm::omp::Directive::OMPD_tile) {
-    //      messages_.Say(dir.source, "Top Level Tile Found!!"_en_US);
-    //    } else if (dir.v == llvm::omp::Directive::OMPD_parallel_do) {
-    //      messages_.Say(dir.source, "Top Level PARALLEL DO!!"_en_US);
-    //    }
-    //    messages_.Say(beginDir.source,
-    //                  "Begin Dir: %s"_en_US,
-    //                  parser::ToUpperCaseLetters(beginDir.source.ToString()));
-    //    messages_.Say(dir.source,
-    //                  "Dir: %s"_en_US,
-    //                  parser::ToUpperCaseLetters(dir.source.ToString()));
-
     nextIt = it;
     while (++nextIt != block.end()) {
       // Ignore compiler directives.
@@ -151,51 +139,31 @@ private:
       loops.push(&x);
       while (auto *innerConstruct{GetConstructIf<parser::OpenMPConstruct>(*nextIt)}) {
         if (auto *innerOmpLoop{std::get_if<parser::OpenMPLoopConstruct>(&innerConstruct->u)}) {
-          std::get<std::optional<common::Indirection<parser::OpenMPLoopConstruct>>>(loops.top()->t) =
-            std::move(innerOmpLoop);
-          loops.push(innerOmpLoop);
+          std::get<
+              std::optional<common::Indirection<parser::OpenMPLoopConstruct>>>(
+              loops.top()->t) = std::move(*innerOmpLoop);
+          // Retrieveing the address so that DoConstruct or inner loop can be set later.
+          loops.push(&(std::get<std::optional<
+                           common::Indirection<parser::OpenMPLoopConstruct>>>(
+              loops.top()->t)
+                           .value()
+                           .value()));
           nextIt = block.erase(nextIt);
         }
       }
-      // FIXME(Jan): Need a loop here that takes care of nested OpenMP constructs and
-      //  create a chain of them. We've added an optional indirection to the inner OpenMPLoopConstruct
-      // which can be populated, or the optional DoConstruct will be added.
-      //      bool hasExtraConstruct = GetConstructIf<parser::OpenMPConstruct>(*nextIt);
-      //      if(hasExtraConstruct) {
-      //        messages_.Say(dir.source, "Extra Construct Found!!"_en_US);
-      //        auto *ompConstruct{GetConstructIf<parser::OpenMPConstruct>(*nextIt)};
-      //if(auto *ompLoop{std::get_if<parser::OpenMPLoopConstruct>(&ompConstruct->u)}) {
-      //          auto &beginDir2{std::get<parser::OmpBeginLoopDirective>(ompLoop->t)};
-      //          auto &dir2{std::get<parser::OmpLoopDirective>(beginDir2.t)};
-      //          if(dir2.v == llvm::omp::Directive::OMPD_tile) {
-      //            messages_.Say(dir2.source, "Inner Level Tile Found!!"_en_US);
-      //  }
-      // }
-      //         ++nextIt;
-      //       }
-      
       if (auto *doCons{GetConstructIf<parser::DoConstruct>(*nextIt)}) {
         if (doCons->GetLoopControl()) {
-          //          messages_.Say(dir.source, "Found DoConstruct"_en_US);
-          // move DoConstruct
           std::get<std::optional<parser::DoConstruct>>(loops.top()->t) =
               std::move(*doCons);
           nextIt = block.erase(nextIt);
           // try to match OmpEndLoopDirective
-          //          if (hasExtraConstruct) {
-          //            ++nextIt;
-          //          }
-
-          //          if (nextIt != block.end()) {
           while (nextIt != block.end() && !loops.empty()) {
             if (auto *endDir{
                     GetConstructIf<parser::OmpEndLoopDirective>(*nextIt)}) {
-              //              messages_.Say(dir.source, "Found EndLoopDirective"_en_US);
               std::get<std::optional<parser::OmpEndLoopDirective>>(loops.top()->t) =
                   std::move(*endDir);
+              nextIt = block.erase(nextIt);
               loops.pop();
-              //              std::get<std::optional<parser::Block>>(x.t) = std::move(newBlock);
-              block.erase(nextIt);
             }
           }
         } else {

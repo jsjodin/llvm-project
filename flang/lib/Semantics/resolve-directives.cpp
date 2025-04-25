@@ -1894,7 +1894,14 @@ void OmpAttributeVisitor::PrivatizeAssociatedLoopIndexAndCheckLoopLevel(
     ivDSA = Symbol::Flag::OmpLastPrivate;
   }
 
-  const auto &outer{std::get<std::optional<parser::DoConstruct>>(x.t)};
+  const parser::OpenMPLoopConstruct *innerMostLoop = &x;
+  while (auto &innerLoop{
+      std::get<std::optional<common::Indirection<parser::OpenMPLoopConstruct>>>(
+          innerMostLoop->t)}) {
+    innerMostLoop = &innerLoop.value().value();
+  }
+
+  const auto &outer{std::get<std::optional<parser::DoConstruct>>(innerMostLoop->t)};
   if (outer.has_value()) {
     for (const parser::DoConstruct *loop{&*outer}; loop && level > 0; --level) {
       // go through all the nested do-loops and resolve index variables
