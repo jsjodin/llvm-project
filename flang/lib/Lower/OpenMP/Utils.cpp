@@ -50,14 +50,20 @@ namespace lower {
 namespace omp {
 
 int64_t getCollapseValue(const List<Clause> &clauses) {
-  auto iter = llvm::find_if(clauses, [](const Clause &clause) {
-    return clause.id == llvm::omp::Clause::OMPC_collapse;
-  });
-  if (iter != clauses.end()) {
-    const auto &collapse = std::get<clause::Collapse>(iter->u);
-    return evaluate::ToInt64(collapse.v).value();
+  int64_t collapseValue = 1;
+  int64_t numTileSizes = 0;
+  for (auto &clause : clauses) {
+    if (clause.id == llvm::omp::Clause::OMPC_collapse) {
+      const auto &collapse = std::get<clause::Collapse>(clause.u);
+      collapseValue = evaluate::ToInt64(collapse.v).value();
+    } else if (clause.id == llvm::omp::Clause::OMPC_sizes) {
+      const auto &sizes = std::get<clause::Sizes>(clause.u);
+      numTileSizes = sizes.v.size();
+    }
   }
-  return 1;
+  int64_t result =
+    collapseValue > numTileSizes ? collapseValue : numTileSizes;
+  return result;
 }
 
 void genObjectList(const ObjectList &objects,
@@ -619,6 +625,7 @@ bool collectLoopRelatedInfo(
     lower::pft::Evaluation &eval, const omp::List<omp::Clause> &clauses,
     mlir::omp::LoopRelatedClauseOps &result,
     llvm::SmallVectorImpl<const semantics::Symbol *> &iv) {
+
   bool found = false;
   fir::FirOpBuilder &firOpBuilder = converter.getFirOpBuilder();
 
@@ -634,6 +641,15 @@ bool collectLoopRelatedInfo(
     collapseValue = evaluate::ToInt64(clause->v).value();
     found = true;
   }
+  std::int64_t sizesLengthValue = 1l;
+  if (auto *clause =
+          ClauseFinder::findUniqueClause<omp::clause::Sizes>(clauses)) {
+    sizesLengthValue = clause->v.size();
+    found = true;
+  }
+
+  collapseValue =
+      collapseValue < sizesLengthValue ? sizesLengthValue : collapseValue;
 
   std::size_t loopVarTypeSize = 0;
   do {
@@ -667,7 +683,6 @@ bool collectLoopRelatedInfo(
   } while (collapseValue > 0);
 
   convertLoopBounds(converter, currentLocation, result, loopVarTypeSize);
-
   return found;
 }
 } // namespace omp

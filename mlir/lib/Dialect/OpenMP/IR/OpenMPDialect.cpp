@@ -55,6 +55,11 @@ makeDenseBoolArrayAttr(MLIRContext *ctx, const ArrayRef<bool> boolArray) {
   return boolArray.empty() ? nullptr : DenseBoolArrayAttr::get(ctx, boolArray);
 }
 
+static DenseI64ArrayAttr
+makeDenseI64ArrayAttr(MLIRContext *ctx, const ArrayRef<int64_t> intArray) {
+  return intArray.empty() ? nullptr : DenseI64ArrayAttr::get(ctx, intArray);
+}
+
 namespace {
 struct MemRefPointerLikeModel
     : public PointerLikeType::ExternalModel<MemRefPointerLikeModel,
@@ -2906,9 +2911,11 @@ void LoopNestOp::print(OpAsmPrinter &p) {
 
 void LoopNestOp::build(OpBuilder &builder, OperationState &state,
                        const LoopNestOperands &clauses) {
+  MLIRContext *ctx = builder.getContext();
   LoopNestOp::build(builder, state, clauses.loopLowerBounds,
                     clauses.loopUpperBounds, clauses.loopSteps,
-                    clauses.loopInclusive);
+                    clauses.loopInclusive, clauses.numCollapse,
+                    makeDenseI64ArrayAttr(ctx, clauses.tileSizes));
 }
 
 LogicalResult LoopNestOp::verify() {
