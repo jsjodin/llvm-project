@@ -2872,16 +2872,49 @@ ParseResult LoopNestOp::parse(OpAsmParser &parser, OperationState &result) {
   for (auto &iv : ivs)
     iv.type = loopVarType;
 
+  auto ctx = parser.getBuilder().getContext();
   // Parse "inclusive" flag.
   if (succeeded(parser.parseOptionalKeyword("inclusive")))
-    result.addAttribute("loop_inclusive",
-                        UnitAttr::get(parser.getBuilder().getContext()));
+    result.addAttribute("loop_inclusive", UnitAttr::get(ctx));
 
   // Parse step values.
   SmallVector<OpAsmParser::UnresolvedOperand> steps;
   if (parser.parseKeyword("step") ||
       parser.parseOperandList(steps, ivs.size(), OpAsmParser::Delimiter::Paren))
     return failure();
+
+  // Parse collapse
+  int64_t value = 0;
+  if (parser.parseKeyword("collapse") ||
+      parser.parseLParen() ||
+      parser.parseInteger(value) ||
+      parser.parseRParen())
+    return failure();
+  if (value > 1) {
+    result.addAttribute(
+        "num_collapse",
+        IntegerAttr::get(parser.getBuilder().getI64Type(), value));
+  }
+
+  // Parse tiles
+  SmallVector<int64_t> tiles;
+  auto parseTiles = [&]() -> ParseResult {
+    int64_t tile;
+    if (parser.parseInteger(tile))
+      return failure();
+    tiles.push_back(tile);
+    return success();
+  };
+
+  if (parser.parseKeyword("tiles") ||
+      parser.parseLParen() ||
+      parser.parseCommaSeparatedList(parseTiles) ||
+      parser.parseRParen())
+    return failure();
+
+  if (tiles.size() > 0) {
+    result.addAttribute("tile_sizes", DenseI64ArrayAttr::get(ctx, tiles));
+  }
 
   // Parse the body.
   Region *region = result.addRegion();
@@ -2906,6 +2939,13 @@ void LoopNestOp::print(OpAsmPrinter &p) {
   if (getLoopInclusive())
     p << "inclusive ";
   p << "step (" << getLoopSteps() << ") ";
+  if (int64_t numCollapse = getNumCollapse()) {
+    if (numCollapse > 1)
+      p << "collapse(" << numCollapse << ") ";
+  }
+  if (const auto tiles = getTileSizes()) {
+    p << "tiles(" << tiles.value() << ") ";
+  }
   p.printRegion(region, /*printEntryBlockArgs=*/false);
 }
 
