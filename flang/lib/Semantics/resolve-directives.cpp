@@ -2145,7 +2145,8 @@ void OmpAttributeVisitor::PrivatizeAssociatedLoopIndexAndCheckLoopLevel(
             std::get_if<common::Indirection<parser::OpenMPLoopConstruct>>(
                 innerMostNest)}) {
       innerMostLoop = &(innerLoop->value());
-    }
+    } else
+      break;
   }
 
   if (innerMostNest) {
