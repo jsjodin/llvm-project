@@ -937,7 +937,6 @@ static void genLoopVars(
     storeOp =
         createAndSetPrivatizedLoopVar(converter, loc, indexVal, argSymbol);
   }
-
   firOpBuilder.setInsertionPointAfter(storeOp);
 }
 
