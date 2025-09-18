@@ -501,8 +501,10 @@ static mlir::Type unwrapSeqOrBoxedType(mlir::Type ty) {
 template <typename OpType>
 static void createReductionAllocAndInitRegions(
     AbstractConverter &converter, mlir::Location loc, OpType &reductionDecl,
-    const ReductionProcessor::ReductionIdentifier redId, mlir::Type type,
-    bool isByRef) {
+    std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
+                              mlir::Type type)>
+        genInitValueCB,
+    mlir::Type type, bool isByRef) {
   fir::FirOpBuilder &builder = converter.getFirOpBuilder();
   auto yield = [&](mlir::Value ret) { genYield<OpType>(builder, loc, ret); };
 
@@ -523,9 +525,7 @@ static void createReductionAllocAndInitRegions(
 
   mlir::Type ty = fir::unwrapRefType(type);
   builder.setInsertionPointToEnd(initBlock);
-  mlir::Value initValue = ReductionProcessor::getReductionInitValue(
-      loc, unwrapSeqOrBoxedType(ty), redId, builder);
-
+  mlir::Value initValue = genInitValueCB(builder, loc, ty);
   if (isByRef) {
     populateByRefInitAndCleanupRegions(
         converter, loc, type, initValue, initBlock,
@@ -556,18 +556,24 @@ static void createReductionAllocAndInitRegions(
   yield(boxAlloca);
 }
 
-template <typename OpType>
-OpType ReductionProcessor::createDeclareReduction(
+template <typename DeclareRedType>
+DeclareRedType ReductionProcessor::createDeclareReductionHelper(
     AbstractConverter &converter, llvm::StringRef reductionOpName,
-    const ReductionIdentifier redId, mlir::Type type, mlir::Location loc,
-    bool isByRef) {
+    mlir::Type type, mlir::Location loc, bool isByRef,
+    std::function<void(fir::FirOpBuilder &builder, mlir::Location loc,
+                       mlir::Type type, mlir::Value op1, mlir::Value op2,
+                       bool isByRef)>
+        genCombinerCB,
+    std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
+                              mlir::Type type)>
+        genInitValueCB) {
   fir::FirOpBuilder &builder = converter.getFirOpBuilder();
   mlir::OpBuilder::InsertionGuard guard(builder);
   mlir::ModuleOp module = builder.getModule();
 
   assert(!reductionOpName.empty());
 
-  auto decl = module.lookupSymbol<OpType>(reductionOpName);
+  auto decl = module.lookupSymbol<DeclareRedType>(reductionOpName);
   if (decl)
     return decl;
 
@@ -576,20 +582,42 @@ OpType ReductionProcessor::createDeclareReduction(
   if (!isByRef)
     type = valTy;
 
-  decl = OpType::create(modBuilder, loc, reductionOpName, type);
-  createReductionAllocAndInitRegions(converter, loc, decl, redId, type,
+  decl = DeclareRedType::create(modBuilder, loc, reductionOpName, type);
+  createReductionAllocAndInitRegions(converter, loc, decl, genInitValueCB, type,
                                      isByRef);
-
   builder.createBlock(&decl.getReductionRegion(),
                       decl.getReductionRegion().end(), {type, type},
                       {loc, loc});
-
   builder.setInsertionPointToEnd(&decl.getReductionRegion().back());
   mlir::Value op1 = decl.getReductionRegion().front().getArgument(0);
   mlir::Value op2 = decl.getReductionRegion().front().getArgument(1);
-  genCombiner<OpType>(builder, loc, redId, type, op1, op2, isByRef);
-
+  genCombinerCB(builder, loc, type, op1, op2, isByRef);
+  decl.dump();
   return decl;
+}
+
+template <typename OpType>
+OpType ReductionProcessor::createDeclareReduction(
+    AbstractConverter &converter, llvm::StringRef reductionOpName,
+    const ReductionIdentifier redId, mlir::Type type, mlir::Location loc,
+    bool isByRef) {
+  auto genInitValueCB = [&](fir::FirOpBuilder &builder, mlir::Location loc,
+                            mlir::Type type) {
+    mlir::Type ty = fir::unwrapRefType(type);
+    mlir::Value initValue = ReductionProcessor::getReductionInitValue(
+        loc, unwrapSeqOrBoxedType(ty), redId, builder);
+    initValue.dump();
+    return initValue;
+  };
+  auto genCombinerCB = [&](fir::FirOpBuilder &builder, mlir::Location loc,
+                           mlir::Type type, mlir::Value op1, mlir::Value op2,
+                           bool isByRef) {
+    genCombiner<OpType>(builder, loc, redId, type, op1, op2, isByRef);
+  };
+
+  return createDeclareReductionHelper<OpType>(converter, reductionOpName, type,
+                                              loc, isByRef, genCombinerCB,
+                                              genInitValueCB);
 }
 
 static bool doReductionByRef(mlir::Value reductionVar) {

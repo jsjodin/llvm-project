@@ -109,6 +109,17 @@ public:
                                           ReductionIdentifier redId,
                                           mlir::Type type, mlir::Value op1,
                                           mlir::Value op2);
+  template <typename DeclareRedType>
+  static DeclareRedType createDeclareReductionHelper(
+      AbstractConverter &converter, llvm::StringRef reductionOpName,
+      mlir::Type type, mlir::Location loc, bool isByRef,
+      std::function<void(fir::FirOpBuilder &builder, mlir::Location loc,
+                         mlir::Type type, mlir::Value op1, mlir::Value op2,
+                         bool isByRef)>
+          genCombinerCB,
+      std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
+                                mlir::Type type)>
+          genInitValueCB);
 
   /// Creates an OpenMP reduction declaration and inserts it into the provided
   /// symbol table. The declaration has a constant initializer with the neutral

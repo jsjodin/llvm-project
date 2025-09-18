@@ -2,17 +2,6 @@
 ! RUN: %flang_fc1 -emit-hlfir -fopenmp -o - %s 2>&1 | FileCheck %s
 
 !CHECK-LABEL: omp.declare_reduction
-!CHECK-SAME: @[[RED_F32_NAME:.*]] : f32 init {
-!CHECK: ^bb0(%{{.*}}: f32):
-!CHECK:  %[[C0_1:.*]] = arith.constant 0.000000e+00 : f32
-!CHECK:  omp.yield(%[[C0_1]] : f32)
-!CHECK: } combiner {
-!CHECK: ^bb0(%[[ARG0:.*]]: f32, %[[ARG1:.*]]: f32):
-!CHECK:  %[[RES:.*]] = arith.addf %[[ARG0]], %[[ARG1]] {{.*}}: f32
-!CHECK:  omp.yield(%[[RES]] : f32)
-!CHECK: }
-
-!CHECK-LABEL: omp.declare_reduction
 !CHECK-SAME: @[[RED_I32_NAME:.*]] : i32 init {
 !CHECK: ^bb0(%{{.*}}: i32):
 !CHECK:  %[[C0_1:.*]] = arith.constant 0 : i32
@@ -21,6 +10,17 @@
 !CHECK: ^bb0(%[[ARG0:.*]]: i32, %[[ARG1:.*]]: i32):
 !CHECK:  %[[RES:.*]] = arith.addi %[[ARG0]], %[[ARG1]] : i32
 !CHECK:  omp.yield(%[[RES]] : i32)
+!CHECK: }
+
+!CHECK-LABEL: omp.declare_reduction
+!CHECK-SAME: @[[RED_F32_NAME:.*]] : f32 init {
+!CHECK: ^bb0(%{{.*}}: f32):
+!CHECK:  %[[C0_1:.*]] = arith.constant 0.000000e+00 : f32
+!CHECK:  omp.yield(%[[C0_1]] : f32)
+!CHECK: } combiner {
+!CHECK: ^bb0(%[[ARG0:.*]]: f32, %[[ARG1:.*]]: f32):
+!CHECK:  %[[RES:.*]] = arith.addf %[[ARG0]], %[[ARG1]] {{.*}}: f32
+!CHECK:  omp.yield(%[[RES]] : f32)
 !CHECK: }
 
 !CHECK-LABEL: func.func @_QPsimple_int_add
