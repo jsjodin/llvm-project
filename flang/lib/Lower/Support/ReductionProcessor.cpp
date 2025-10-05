@@ -556,6 +556,14 @@ static void createReductionAllocAndInitRegions(
   yield(boxAlloca);
 }
 
+void ReductionProcessor::genCombinerHelper(
+    fir::FirOpBuilder &builder, mlir::Location loc,
+    ReductionProcessor::ReductionIdentifier redId, mlir::Type ty,
+    mlir::Value lhs, mlir::Value rhs, bool isByRef) {
+  genCombiner<mlir::omp::DeclareReductionOp>(builder, loc, redId, ty, lhs, rhs,
+                                             isByRef);
+}
+
 template <typename DeclareRedType>
 DeclareRedType ReductionProcessor::createDeclareReductionHelper(
     AbstractConverter &converter, llvm::StringRef reductionOpName,
@@ -642,6 +650,8 @@ bool ReductionProcessor::processReductionArguments(
     llvm::SmallVectorImpl<bool> &reduceVarByRef,
     llvm::SmallVectorImpl<mlir::Attribute> &reductionDeclSymbols,
     const llvm::SmallVectorImpl<const semantics::Symbol *> &reductionSymbols) {
+  fir::FirOpBuilder &builder = converter.getFirOpBuilder();
+
   if constexpr (std::is_same_v<RedOperatorListTy,
                                omp::clause::ReductionOperatorList>) {
     // For OpenMP reduction clauses, check if the reduction operator is
@@ -655,7 +665,13 @@ bool ReductionProcessor::processReductionArguments(
               std::get_if<omp::clause::ProcedureDesignator>(&redOperator.u)) {
         if (!ReductionProcessor::supportedIntrinsicProcReduction(
                 *reductionIntrinsic)) {
-          return false;
+          // If not an intrinsic is has to be a custom reduction op, and should
+          // be available in the module.
+          semantics::Symbol *sym = reductionIntrinsic->v.sym();
+          mlir::ModuleOp module = builder.getModule();
+          auto decl = module.lookupSymbol<OpType>(getRealName(sym).ToString());
+          if (!decl)
+            return false;
         }
       } else {
         return false;
@@ -665,7 +681,6 @@ bool ReductionProcessor::processReductionArguments(
 
   // Reduction variable processing common to both intrinsic operators and
   // procedure designators
-  fir::FirOpBuilder &builder = converter.getFirOpBuilder();
   mlir::OpBuilder::InsertPoint dcIP;
   constexpr bool isDoConcurrent =
       std::is_same_v<OpType, fir::DeclareReductionOp>;
@@ -769,7 +784,13 @@ bool ReductionProcessor::processReductionArguments(
                          &redOperator.u)) {
         if (!ReductionProcessor::supportedIntrinsicProcReduction(
                 *reductionIntrinsic)) {
-          TODO(currentLocation, "Unsupported intrinsic proc reduction");
+          // Custom reductions we can just add to the symbols without
+          // generating the declare reduction op.
+          semantics::Symbol *sym = reductionIntrinsic->v.sym();
+          reductionDeclSymbols.push_back(mlir::SymbolRefAttr::get(
+              builder.getContext(), sym->name().ToString()));
+          ++idx;
+          continue;
         }
         redId = getReductionType(*reductionIntrinsic);
         reductionName =

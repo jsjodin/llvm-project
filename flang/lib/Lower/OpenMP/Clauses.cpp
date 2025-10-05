@@ -980,9 +980,28 @@ Init make(const parser::OmpClause::Init &inp,
   llvm_unreachable("Empty: init");
 }
 
+// Initializer make(const parser::OmpClause::Initializer &inp,
+//                  semantics::SemanticsContext &semaCtx) {
+//   return Fortran::common::visit(
+//       common::visitors{
+//           [&](const parser::AssignmentStmt &as) {
+//             auto &expr = std::get<parser::Expr>(as.t);
+//             return Initializer{makeExpr(expr, semaCtx)};
+//           },
+//           [&](const parser::OmpInitializerProc &proc) {
+//             return Initializer();
+//           },
+//       },
+//       inp.v.u);
+// }
+
 Initializer make(const parser::OmpClause::Initializer &inp,
                  semantics::SemanticsContext &semaCtx) {
-  llvm_unreachable("Empty: initializer");
+  if (const auto *as = std::get_if<parser::AssignmentStmt>(&inp.v.u)) {
+    auto &expr = std::get<parser::Expr>(as->t);
+    return Initializer{makeExpr(expr, semaCtx)};
+  } else {
+  }
 }
 
 InReduction make(const parser::OmpClause::InReduction &inp,

@@ -24,6 +24,7 @@
 #include "flang/Lower/DirectivesCommon.h"
 #include "flang/Lower/OpenMP/Clauses.h"
 #include "flang/Lower/StatementContext.h"
+#include "flang/Lower/Support/ReductionProcessor.h"
 #include "flang/Lower/SymbolMap.h"
 #include "flang/Optimizer/Builder/BoxValue.h"
 #include "flang/Optimizer/Builder/FIRBuilder.h"
@@ -31,6 +32,7 @@
 #include "flang/Optimizer/Dialect/FIRType.h"
 #include "flang/Optimizer/HLFIR/HLFIROps.h"
 #include "flang/Parser/characters.h"
+#include "flang/Parser/dump-parse-tree.h"
 #include "flang/Parser/openmp-utils.h"
 #include "flang/Parser/parse-tree.h"
 #include "flang/Parser/tools.h"
@@ -2821,13 +2823,13 @@ genTeamsOp(lower::AbstractConverter &converter, lower::SymMap &symTable,
   // TODO: Add private syms and vars.
   args.reduction.syms = reductionSyms;
   args.reduction.vars = clauseOps.reductionVars;
-
-  return genOpWithBody<mlir::omp::TeamsOp>(
+  mlir::omp::TeamsOp result = genOpWithBody<mlir::omp::TeamsOp>(
       OpWithBodyGenInfo(converter, symTable, semaCtx, loc, eval,
                         llvm::omp::Directive::OMPD_teams)
           .setClauses(&item->clauses)
           .setEntryBlockArgs(&args),
       queue, item, clauseOps);
+  return result;
 }
 
 static mlir::omp::WorkdistributeOp genWorkdistributeOp(
@@ -3541,8 +3543,51 @@ static void genOMP(
     lower::AbstractConverter &converter, lower::SymMap &symTable,
     semantics::SemanticsContext &semaCtx, lower::pft::Evaluation &eval,
     const parser::OpenMPDeclareReductionConstruct &declareReductionConstruct) {
-  if (!semaCtx.langOptions().OpenMPSimd)
-    TODO(converter.getCurrentLocation(), "OpenMPDeclareReductionConstruct");
+  if (!semaCtx.langOptions().OpenMPSimd) {
+    llvm::errs() << "Eval: ";
+    eval.dump();
+    std::string buf;
+    llvm::raw_string_ostream obuf(buf);
+    const auto &specifier =
+        std::get<common::Indirection<parser::OmpReductionSpecifier>>(
+            declareReductionConstruct.t);
+    obuf <<  "Specifier: ";
+    parser::DumpTree(obuf, specifier);
+    obuf << "\n";
+    auto &initializer = std::get<std::optional<parser::OmpClauseList>>(
+        declareReductionConstruct.t);
+    const Clause *initClause = nullptr;
+    if (initializer) {
+      obuf << "\n";
+      parser::DumpTree(obuf, initializer.value());
+      llvm::errs() << buf;
+      List<Clause> clauses = makeClauses(initializer.value(), semaCtx);
+      auto genInitValueCB = [&](fir::FirOpBuilder &builder, mlir::Location loc,
+                                mlir::Type type) {
+        mlir::Value initValue = ReductionProcessor::getReductionInitValue(
+            loc, type, ReductionProcessor::MAX, builder);
+        initValue.dump();
+        return initValue;
+      };
+
+      auto genCombinerCB = [](fir::FirOpBuilder &builder, mlir::Location loc,
+                              mlir::Type type, mlir::Value op1, mlir::Value op2,
+                              bool isByRef) {
+        ReductionProcessor::genCombinerHelper(
+            builder, loc, ReductionProcessor::MAX, type, op1, op2, isByRef);
+      };
+
+      mlir::omp::DeclareReductionOp declareOp =
+          ReductionProcessor::createDeclareReductionHelper<
+              mlir::omp::DeclareReductionOp>(
+              converter, "mymax",
+              converter.getFirOpBuilder().getI32Type(),
+              converter.getCurrentLocation(), false/*Byref*/, genCombinerCB,
+              genInitValueCB);
+      llvm::errs() << "Declare Reduction Operation:\n";
+      declareOp.dump();
+    }
+  }
 }
 
 static void

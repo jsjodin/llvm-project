@@ -109,6 +109,11 @@ public:
                                           ReductionIdentifier redId,
                                           mlir::Type type, mlir::Value op1,
                                           mlir::Value op2);
+  static void genCombinerHelper(fir::FirOpBuilder &builder, mlir::Location loc,
+                                ReductionProcessor::ReductionIdentifier redId,
+                                mlir::Type ty, mlir::Value lhs, mlir::Value rhs,
+                                bool isByRef);
+
   template <typename DeclareRedType>
   static DeclareRedType createDeclareReductionHelper(
       AbstractConverter &converter, llvm::StringRef reductionOpName,
