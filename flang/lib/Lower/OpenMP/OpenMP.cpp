@@ -3562,13 +3562,10 @@ static void genOMP(
       parser::DumpTree(obuf, initializer.value());
       llvm::errs() << buf;
       List<Clause> clauses = makeClauses(initializer.value(), semaCtx);
-      auto genInitValueCB = [&](fir::FirOpBuilder &builder, mlir::Location loc,
-                                mlir::Type type) {
-        mlir::Value initValue = ReductionProcessor::getReductionInitValue(
-            loc, type, ReductionProcessor::MAX, builder);
-        initValue.dump();
-        return initValue;
-      };
+      ClauseProcessor cp(converter, semaCtx, clauses);
+      std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
+                                mlir::Type type)> genInitValueCB;
+      cp.processInitializer(genInitValueCB);
 
       auto genCombinerCB = [](fir::FirOpBuilder &builder, mlir::Location loc,
                               mlir::Type type, mlir::Value op1, mlir::Value op2,

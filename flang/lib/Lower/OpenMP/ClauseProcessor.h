@@ -88,6 +88,9 @@ public:
   bool processHint(mlir::omp::HintClauseOps &result) const;
   bool processInclusive(mlir::Location currentLocation,
                         mlir::omp::InclusiveClauseOps &result) const;
+  bool processInitializer(
+      std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
+                                mlir::Type type)> &genInitValueCB) const;
   bool processMergeable(mlir::omp::MergeableClauseOps &result) const;
   bool processNogroup(mlir::omp::NogroupClauseOps &result) const;
   bool processNowait(mlir::omp::NowaitClauseOps &result) const;

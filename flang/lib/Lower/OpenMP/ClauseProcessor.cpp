@@ -401,6 +401,34 @@ bool ClauseProcessor::processInclusive(
   return false;
 }
 
+bool ClauseProcessor::processInitializer(
+    std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
+                              mlir::Type type)> &genInitValueCB) const {
+    if (auto *clause = findUniqueClause<omp::clause::Initializer>()) {
+      //                hlfir::EntityWithAttributes entity = convertExprToHLFIR(
+      //              converter.getCurrentLocation(), converter, expr, symMap, stmtCtx);
+      //          dependVar = entity.getBase();
+      /////////////// Codegen Bit ////// @@@
+
+      //      clause.v->dump();
+      //      const auto initExpr std::get<ExprTy>(clause->t)
+      //      fir::getBase(converter.genExprValue(upperBound, stmtCtx));
+
+
+      genInitValueCB = [](fir::FirOpBuilder &builder, mlir::Location loc,
+                          mlir::Type type) {
+        mlir::Value initValue = ReductionProcessor::getReductionInitValue(
+            loc, type, ReductionProcessor::MAX, builder);
+        initValue.dump();
+        return initValue;
+      };
+      ///////////// Codegen Bit end ///////
+      llvm::errs() << "=========== FOUND INITIALIZER CLAUSE!!!! =========\n";
+      return true;
+    }
+  return false;
+}
+
 bool ClauseProcessor::processMergeable(
     mlir::omp::MergeableClauseOps &result) const {
   return markClauseOccurrence<omp::clause::Mergeable>(result.mergeable);
