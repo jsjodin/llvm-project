@@ -410,10 +410,11 @@ bool ClauseProcessor::processInitializer(
       //          dependVar = entity.getBase();
       /////////////// Codegen Bit ////// @@@
 
-      //      clause.v->dump();
-      //      const auto initExpr std::get<ExprTy>(clause->t)
-      //      fir::getBase(converter.genExprValue(upperBound, stmtCtx));
-
+      clause->v.dump();
+      lower::StatementContext stmtCtx;
+      mlir::Value iv = fir::getBase(converter.genExprValue(clause->v, stmtCtx));
+      stmtCtx.finalizeAndPop();
+      iv.dump();
 
       genInitValueCB = [](fir::FirOpBuilder &builder, mlir::Location loc,
                           mlir::Type type) {
