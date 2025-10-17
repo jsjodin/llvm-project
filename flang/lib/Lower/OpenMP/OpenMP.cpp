@@ -3548,20 +3548,22 @@ static void genOMP(
     eval.dump();
     std::string buf;
     llvm::raw_string_ostream obuf(buf);
-    const auto &specifier =
-        std::get<common::Indirection<parser::OmpReductionSpecifier>>(
-            declareReductionConstruct.t);
-    obuf <<  "Specifier: ";
+
+    const parser::OmpArgumentList &args{
+        declareReductionConstruct.v.Arguments()};
+    const parser::OmpArgument &arg{args.v.front()};
+    const auto &specifier = std::get<parser::OmpReductionSpecifier>(arg.u);
+    obuf << "Specifier: ";
     parser::DumpTree(obuf, specifier);
     obuf << "\n";
-    auto &initializer = std::get<std::optional<parser::OmpClauseList>>(
-        declareReductionConstruct.t);
     const Clause *initClause = nullptr;
-    if (initializer) {
+    const parser::OmpClauseList &initializer =
+        declareReductionConstruct.v.Clauses();
+    if (initializer.v.size() > 0) {
       obuf << "\n";
-      parser::DumpTree(obuf, initializer.value());
+      parser::DumpTree(obuf, initializer);
       llvm::errs() << buf;
-      List<Clause> clauses = makeClauses(initializer.value(), semaCtx);
+      List<Clause> clauses = makeClauses(initializer, semaCtx);
       ClauseProcessor cp(converter, semaCtx, clauses);
       std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
                                 mlir::Type type)> genInitValueCB;
