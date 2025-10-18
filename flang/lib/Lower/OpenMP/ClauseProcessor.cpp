@@ -401,35 +401,25 @@ bool ClauseProcessor::processInclusive(
   return false;
 }
 
-bool ClauseProcessor::processInitializer(
+bool ClauseProcessor::processInitializer(lower::SymMap &symMap,
     std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
                               mlir::Type type)> &genInitValueCB) const {
     if (auto *clause = findUniqueClause<omp::clause::Initializer>()) {
-      //                hlfir::EntityWithAttributes entity = convertExprToHLFIR(
-      //              converter.getCurrentLocation(), converter, expr, symMap, stmtCtx);
-      //          dependVar = entity.getBase();
-      /////////////// Codegen Bit ////// @@@
-
-      clause->v.dump();
-      lower::StatementContext stmtCtx;
-      mlir::Value iv = fir::getBase(converter.genExprValue(clause->v, stmtCtx));
-      stmtCtx.finalizeAndPop();
-      iv.dump();
-
-      genInitValueCB = [](fir::FirOpBuilder &builder, mlir::Location loc,
-                          mlir::Type type) {
-        mlir::Value initValue = ReductionProcessor::getReductionInitValue(
-            loc, type, ReductionProcessor::MAX, builder);
-        initValue.dump();
-        return initValue;
+      genInitValueCB = [&, clause](fir::FirOpBuilder &builder,
+                           mlir::Location loc,
+                           mlir::Type type) {
+        // Generate the expression at the callback location
+        lower::StatementContext stmtCtx;
+        mlir::Value result =
+            fir::getBase(
+                convertExprToHLFIR(loc, converter, clause->v, symMap, stmtCtx));
+        stmtCtx.finalizeAndPop();
+        return result;
       };
-      ///////////// Codegen Bit end ///////
-      llvm::errs() << "=========== FOUND INITIALIZER CLAUSE!!!! =========\n";
       return true;
     }
   return false;
 }
-
 bool ClauseProcessor::processMergeable(
     mlir::omp::MergeableClauseOps &result) const {
   return markClauseOccurrence<omp::clause::Mergeable>(result.mergeable);

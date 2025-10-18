@@ -89,6 +89,7 @@ public:
   bool processInclusive(mlir::Location currentLocation,
                         mlir::omp::InclusiveClauseOps &result) const;
   bool processInitializer(
+      lower::SymMap &symMap,
       std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
                                 mlir::Type type)> &genInitValueCB) const;
   bool processMergeable(mlir::omp::MergeableClauseOps &result) const;

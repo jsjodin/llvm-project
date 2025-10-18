@@ -501,10 +501,8 @@ static mlir::Type unwrapSeqOrBoxedType(mlir::Type ty) {
 template <typename OpType>
 static void createReductionAllocAndInitRegions(
     AbstractConverter &converter, mlir::Location loc, OpType &reductionDecl,
-    std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
-                              mlir::Type type)>
-        genInitValueCB,
-    mlir::Type type, bool isByRef) {
+    ReductionProcessor::GenInitValueCBTy genInitValueCB, mlir::Type type,
+    bool isByRef) {
   fir::FirOpBuilder &builder = converter.getFirOpBuilder();
   auto yield = [&](mlir::Value ret) { genYield<OpType>(builder, loc, ret); };
 
@@ -525,7 +523,11 @@ static void createReductionAllocAndInitRegions(
 
   mlir::Type ty = fir::unwrapRefType(type);
   builder.setInsertionPointToEnd(initBlock);
-  mlir::Value initValue = genInitValueCB(builder, loc, ty);
+  llvm::errs() << "Block arg0: \n";
+  initBlock->getArgument(0).dump();
+  // JAN FIXME EXPERIMENTING
+  mlir::Value initValue =
+      genInitValueCB(builder, loc, ty);
   if (isByRef) {
     populateByRefInitAndCleanupRegions(
         converter, loc, type, initValue, initBlock,
@@ -568,13 +570,8 @@ template <typename DeclareRedType>
 DeclareRedType ReductionProcessor::createDeclareReductionHelper(
     AbstractConverter &converter, llvm::StringRef reductionOpName,
     mlir::Type type, mlir::Location loc, bool isByRef,
-    std::function<void(fir::FirOpBuilder &builder, mlir::Location loc,
-                       mlir::Type type, mlir::Value op1, mlir::Value op2,
-                       bool isByRef)>
-        genCombinerCB,
-    std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
-                              mlir::Type type)>
-        genInitValueCB) {
+    GenCombinerCBTy genCombinerCB,
+    GenInitValueCBTy genInitValueCB) {
   fir::FirOpBuilder &builder = converter.getFirOpBuilder();
   mlir::OpBuilder::InsertionGuard guard(builder);
   mlir::ModuleOp module = builder.getModule();
