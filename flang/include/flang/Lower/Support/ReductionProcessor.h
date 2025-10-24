@@ -40,8 +40,9 @@ namespace omp {
 
 class ReductionProcessor {
 public:
-  using GenInitValueCBTy = std::function<mlir::Value(
-      fir::FirOpBuilder &builder, mlir::Location loc, mlir::Type type)>;
+  using GenInitValueCBTy =
+      std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
+                                mlir::Type type, mlir::Value omp_orig)>;
   using GenCombinerCBTy = std::function<void(
       fir::FirOpBuilder &builder, mlir::Location loc, mlir::Type type,
       mlir::Value op1, mlir::Value op2, bool isByRef)>;

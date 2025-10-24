@@ -23,6 +23,19 @@
 #include "llvm/Frontend/OpenMP/OMP.h.inc"
 #include "llvm/Frontend/OpenMP/OMPIRBuilder.h"
 
+
+#include "flang/Common/indirection.h"
+#include "flang/Lower/AbstractConverter.h"
+#include "flang/Lower/ConvertVariable.h"
+#include "flang/Lower/IterationSpace.h"
+#include "flang/Lower/Support/PrivateReductionUtils.h"
+#include "flang/Optimizer/Builder/HLFIRTools.h"
+#include "flang/Optimizer/Builder/Todo.h"
+#include "flang/Optimizer/HLFIR/HLFIRDialect.h"
+#include "flang/Semantics/tools.h"
+#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
+
+
 namespace Fortran {
 namespace lower {
 namespace omp {
@@ -401,23 +414,69 @@ bool ClauseProcessor::processInclusive(
   return false;
 }
 
-bool ClauseProcessor::processInitializer(lower::SymMap &symMap,
-    std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
-                              mlir::Type type)> &genInitValueCB) const {
-    if (auto *clause = findUniqueClause<omp::clause::Initializer>()) {
-      genInitValueCB = [&, clause](fir::FirOpBuilder &builder,
-                           mlir::Location loc,
-                           mlir::Type type) {
-        // Generate the expression at the callback location
+bool ClauseProcessor::processInitializer(
+    lower::SymMap &symMap,
+    ReductionProcessor::GenInitValueCBTy &genInitValueCB) const {
+  if (auto *clause = findUniqueClause<omp::clause::Initializer>()) {
+    genInitValueCB = [&, clause](fir::FirOpBuilder &builder, mlir::Location loc,
+                                 mlir::Type type, mlir::Value omp_orig) {
+      // We need to create a symbol for omp_orig in case it occurs in the
+      // initializer expression. We keep omp_priv as well since it may be
+      // passed to a function.
+      semantics::UserReductionDetails reductionDetailsTemp;
+      semantics::UserReductionDetails reductionDetailsTemp2;
+      semantics::UserReductionDetails *reductionDetails{&reductionDetailsTemp};
+      semantics::UserReductionDetails *reductionDetails2{&reductionDetailsTemp2};
+
+      auto &currentScope = converter.getCurrentScopeMutable();
+      semantics::ObjectEntityDetails details{};
+      const auto &syms1 = currentScope.GetSymbols();
+      llvm::errs() << "Symbols before:\n";
+      for (const auto &symboll1 : syms1) {
+        llvm::errs() << symboll1.get().name() << "\n";
+      }
+      const auto &ompOrigSym =
+          currentScope.try_emplace(std::string("omp_orig"), semantics::Attrs{},
+                                   std::move(*reductionDetails));
+      semantics::ObjectEntityDetails details2{};
+      const auto &ompPrivSym =
+          currentScope.try_emplace(std::string("omp_priv"), semantics::Attrs{},
+                                   std::move(*reductionDetails2));
+      const auto &syms2 = currentScope.GetSymbols();
+      llvm::errs() << "Symbols after:\n";
+      for (const auto &symboll2 : syms2) {
+        llvm::errs() << symboll2.get().name() << "\n";
+      }
+      // Generate the expression at the callback location
+      // Find the symbol and map it to the proper block arg.
+      if (const semantics::Symbol *sym = currentScope.FindSymbol(std::string("omp_orig"))) {
+        llvm::errs() << "======> FOUND omp_orig symbol <=====\n";
+        lower::SymMapScope scope(symMap);
+        symMap.addSymbol(*sym, omp_orig);
+        symMap.dump();
+        sym->dump();
+        if (std::optional<fir::FortranVariableOpInterface> varDef =
+                symMap.lookupVariableDefinition(*sym)) {
+          llvm::errs() << "======> FOUND SYMBOL <=====\n";
+        } else {
+          llvm::errs() << "======> UNABLE TO FIND SYMBOL <=====\n";
+        }
+
         lower::StatementContext stmtCtx;
-        mlir::Value result =
-            fir::getBase(
-                convertExprToHLFIR(loc, converter, clause->v, symMap, stmtCtx));
+        mlir::Value result = fir::getBase(
+            convertExprToValue(loc, converter, clause->v, symMap, stmtCtx));
         stmtCtx.finalizeAndPop();
         return result;
-      };
-      return true;
-    }
+      } else {
+        // JAN FIXME
+        llvm::errs() << "======> Could not find omp_orig symbol <=====\n";
+        mlir::Value result2 = mlir::arith::ConstantOp::create(
+            builder, loc, type, builder.getIntegerAttr(type, 0));
+        return result2;
+      }
+    };
+    return true;
+  }
   return false;
 }
 bool ClauseProcessor::processMergeable(

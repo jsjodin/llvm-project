@@ -12,12 +12,14 @@
 #ifndef FORTRAN_LOWER_CLAUSEPROCESSOR_H
 #define FORTRAN_LOWER_CLAUSEPROCESSOR_H
 
+
 #include "ClauseFinder.h"
 #include "Utils.h"
 #include "flang/Lower/AbstractConverter.h"
 #include "flang/Lower/Bridge.h"
 #include "flang/Lower/DirectivesCommon.h"
 #include "flang/Lower/OpenMP/Clauses.h"
+#include "flang/Lower/Support/ReductionProcessor.h"
 #include "flang/Optimizer/Builder/Todo.h"
 #include "flang/Parser/dump-parse-tree.h"
 #include "flang/Parser/parse-tree.h"
@@ -90,8 +92,7 @@ public:
                         mlir::omp::InclusiveClauseOps &result) const;
   bool processInitializer(
       lower::SymMap &symMap,
-      std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
-                                mlir::Type type)> &genInitValueCB) const;
+      ReductionProcessor::GenInitValueCBTy &genInitValueCB) const;
   bool processMergeable(mlir::omp::MergeableClauseOps &result) const;
   bool processNogroup(mlir::omp::NogroupClauseOps &result) const;
   bool processNowait(mlir::omp::NowaitClauseOps &result) const;

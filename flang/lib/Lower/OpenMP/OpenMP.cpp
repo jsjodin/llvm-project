@@ -3565,8 +3565,7 @@ static void genOMP(
       llvm::errs() << buf;
       List<Clause> clauses = makeClauses(initializer, semaCtx);
       ClauseProcessor cp(converter, semaCtx, clauses);
-      std::function<mlir::Value(fir::FirOpBuilder &builder, mlir::Location loc,
-                                mlir::Type type)> genInitValueCB;
+      ReductionProcessor::GenInitValueCBTy genInitValueCB;
       cp.processInitializer(symTable, genInitValueCB);
 
       auto genCombinerCB = [](fir::FirOpBuilder &builder, mlir::Location loc,

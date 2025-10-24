@@ -1064,6 +1064,10 @@ public:
     return bridge.getSemanticsContext().FindScope(currentPosition);
   }
 
+  Fortran::semantics::Scope &getCurrentScopeMutable() override final {
+    return bridge.getSemanticsContext().FindScope(currentPosition);
+  }
+
   fir::FirOpBuilder &getFirOpBuilder() override final {
     CHECK(builder && "builder is not set before calling getFirOpBuilder");
     return *builder;

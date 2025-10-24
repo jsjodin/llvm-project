@@ -527,7 +527,7 @@ static void createReductionAllocAndInitRegions(
   initBlock->getArgument(0).dump();
   // JAN FIXME EXPERIMENTING
   mlir::Value initValue =
-      genInitValueCB(builder, loc, ty);
+    genInitValueCB(builder, loc, ty, initBlock->getArgument(0));
   if (isByRef) {
     populateByRefInitAndCleanupRegions(
         converter, loc, type, initValue, initBlock,
@@ -607,7 +607,7 @@ OpType ReductionProcessor::createDeclareReduction(
     const ReductionIdentifier redId, mlir::Type type, mlir::Location loc,
     bool isByRef) {
   auto genInitValueCB = [&](fir::FirOpBuilder &builder, mlir::Location loc,
-                            mlir::Type type) {
+                            mlir::Type type, mlir::Value val) {
     mlir::Type ty = fir::unwrapRefType(type);
     mlir::Value initValue = ReductionProcessor::getReductionInitValue(
         loc, unwrapSeqOrBoxedType(ty), redId, builder);
