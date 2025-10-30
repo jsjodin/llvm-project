@@ -416,69 +416,51 @@ bool ClauseProcessor::processInclusive(
 
 bool ClauseProcessor::processInitializer(
     lower::SymMap &symMap,
+    const parser::OmpClause::Initializer &inp,
     ReductionProcessor::GenInitValueCBTy &genInitValueCB) const {
   if (auto *clause = findUniqueClause<omp::clause::Initializer>()) {
     genInitValueCB = [&, clause](fir::FirOpBuilder &builder, mlir::Location loc,
                                  mlir::Type type, mlir::Value omp_orig) {
+      lower::SymMapScope scope(symMap);
+      const parser::OmpInitializerExpression &iexpr = inp.v.v;
+      const parser::OmpStylizedInstance &styleInstance = iexpr.v.front();
+      const std::list<parser::OmpStylizedDeclaration> &declList =
+        std::get<std::list<parser::OmpStylizedDeclaration>>(styleInstance.t);
+      for (const parser::OmpStylizedDeclaration &decl : declList) {
+        auto &name = std::get<parser::ObjectName>(decl.var.t);
+        llvm::errs() << "==== Found symbol: " << name.ToString() << "\n";
+        assert(name.symbol && "Names does not have a symbol!!!!!!!!!!!!!");
+
+        mlir::Value addr = omp_orig;
+        if (!fir::conformsWithPassByRef(omp_orig.getType())) {
+          addr = builder.createTemporary(loc, omp_orig.getType());
+          fir::StoreOp::create(builder, loc, omp_orig, addr);
+        }
+        fir::FortranVariableFlagsEnum extraFlags = {};
+        fir::FortranVariableFlagsAttr attributes =
+            Fortran::lower::translateSymbolAttributes(builder.getContext(),
+                                                      *name.symbol, extraFlags);
+        auto declareOp = hlfir::DeclareOp::create(
+            builder, loc, addr, name.ToString(), nullptr, {}, nullptr, nullptr,
+            0, attributes);
+        symMap.addVariableDefinition(*name.symbol, declareOp);
+        llvm::errs() << "=== Symbol gen done\n";
+      }
+
       // We need to create a symbol for omp_orig in case it occurs in the
       // initializer expression. We keep omp_priv as well since it may be
       // passed to a function.
-      semantics::UserReductionDetails reductionDetailsTemp;
-      semantics::UserReductionDetails reductionDetailsTemp2;
-      semantics::UserReductionDetails *reductionDetails{&reductionDetailsTemp};
-      semantics::UserReductionDetails *reductionDetails2{&reductionDetailsTemp2};
-
-      auto &currentScope = converter.getCurrentScopeMutable();
-      semantics::ObjectEntityDetails details{};
-      const auto &syms1 = currentScope.GetSymbols();
-      llvm::errs() << "Symbols before:\n";
-      for (const auto &symboll1 : syms1) {
-        llvm::errs() << symboll1.get().name() << "\n";
-      }
-      const auto &ompOrigSym =
-          currentScope.try_emplace(std::string("omp_orig"), semantics::Attrs{},
-                                   std::move(*reductionDetails));
-      semantics::ObjectEntityDetails details2{};
-      const auto &ompPrivSym =
-          currentScope.try_emplace(std::string("omp_priv"), semantics::Attrs{},
-                                   std::move(*reductionDetails2));
-      const auto &syms2 = currentScope.GetSymbols();
-      llvm::errs() << "Symbols after:\n";
-      for (const auto &symboll2 : syms2) {
-        llvm::errs() << symboll2.get().name() << "\n";
-      }
-      // Generate the expression at the callback location
-      // Find the symbol and map it to the proper block arg.
-      if (const semantics::Symbol *sym = currentScope.FindSymbol(std::string("omp_orig"))) {
-        llvm::errs() << "======> FOUND omp_orig symbol <=====\n";
-        lower::SymMapScope scope(symMap);
-        symMap.addSymbol(*sym, omp_orig);
-        symMap.dump();
-        sym->dump();
-        if (std::optional<fir::FortranVariableOpInterface> varDef =
-                symMap.lookupVariableDefinition(*sym)) {
-          llvm::errs() << "======> FOUND SYMBOL <=====\n";
-        } else {
-          llvm::errs() << "======> UNABLE TO FIND SYMBOL <=====\n";
-        }
-
-        lower::StatementContext stmtCtx;
-        mlir::Value result = fir::getBase(
-            convertExprToValue(loc, converter, clause->v, symMap, stmtCtx));
-        stmtCtx.finalizeAndPop();
-        return result;
-      } else {
-        // JAN FIXME
-        llvm::errs() << "======> Could not find omp_orig symbol <=====\n";
-        mlir::Value result2 = mlir::arith::ConstantOp::create(
-            builder, loc, type, builder.getIntegerAttr(type, 0));
-        return result2;
-      }
+      lower::StatementContext stmtCtx;
+      mlir::Value result = fir::getBase(
+          convertExprToValue(loc, converter, clause->v, symMap, stmtCtx));
+      stmtCtx.finalizeAndPop();
+      return result;
     };
     return true;
   }
   return false;
 }
+
 bool ClauseProcessor::processMergeable(
     mlir::omp::MergeableClauseOps &result) const {
   return markClauseOccurrence<omp::clause::Mergeable>(result.mergeable);

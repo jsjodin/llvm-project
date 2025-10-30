@@ -982,11 +982,23 @@ Init make(const parser::OmpClause::Init &inp,
 
 Initializer make(const parser::OmpClause::Initializer &inp,
                  semantics::SemanticsContext &semaCtx) {
-  if (const auto *as = std::get_if<parser::AssignmentStmt>(&inp.v.u)) {
-    auto &expr = std::get<parser::Expr>(as->t);
-    return Initializer{makeExpr(expr, semaCtx)};
-  } else {
-  }
+  const parser::OmpInitializerExpression &iexpr = inp.v.v;
+  const parser::OmpStylizedInstance &styleInstance = iexpr.v.front();
+  const parser::OmpStylizedInstance::Instance &instance =
+    std::get<parser::OmpStylizedInstance::Instance>(styleInstance.t);
+    if (const auto *as = std::get_if<parser::AssignmentStmt>(&instance.u)) {
+      auto &expr = std::get<parser::Expr>(as->t);
+      return Initializer{makeExpr(expr, semaCtx)};
+    } else if(const auto *call = std::get_if<parser::CallStmt>(&instance.u)) {
+
+      // JAN FIXME: Need to be able to generate a call, it would be possible to
+      // call by-ref internally and then just yield the result if the type is
+      // simple enough..
+
+      // return Initializer{makeExpr(call, semaCtx)};
+    } else {
+      llvm_unreachable("Unexpected initializer");
+    }
 }
 
 InReduction make(const parser::OmpClause::InReduction &inp,

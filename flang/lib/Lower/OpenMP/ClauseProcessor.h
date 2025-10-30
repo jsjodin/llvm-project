@@ -92,6 +92,7 @@ public:
                         mlir::omp::InclusiveClauseOps &result) const;
   bool processInitializer(
       lower::SymMap &symMap,
+      const parser::OmpClause::Initializer &inp,
       ReductionProcessor::GenInitValueCBTy &genInitValueCB) const;
   bool processMergeable(mlir::omp::MergeableClauseOps &result) const;
   bool processNogroup(mlir::omp::NogroupClauseOps &result) const;

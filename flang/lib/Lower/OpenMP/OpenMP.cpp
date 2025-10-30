@@ -3544,7 +3544,7 @@ static void genOMP(
     semantics::SemanticsContext &semaCtx, lower::pft::Evaluation &eval,
     const parser::OpenMPDeclareReductionConstruct &declareReductionConstruct) {
   if (!semaCtx.langOptions().OpenMPSimd) {
-    llvm::errs() << "Eval: ";
+    llvm::errs() << "=========== Eval: ";
     eval.dump();
     std::string buf;
     llvm::raw_string_ostream obuf(buf);
@@ -3553,32 +3553,43 @@ static void genOMP(
         declareReductionConstruct.v.Arguments()};
     const parser::OmpArgument &arg{args.v.front()};
     const auto &specifier = std::get<parser::OmpReductionSpecifier>(arg.u);
-    obuf << "Specifier: ";
+    obuf << "========== Specifier ===\n ";
     parser::DumpTree(obuf, specifier);
+    obuf << "========== END Specifier\n";
     obuf << "\n";
     const Clause *initClause = nullptr;
     const parser::OmpClauseList &initializer =
         declareReductionConstruct.v.Clauses();
     if (initializer.v.size() > 0) {
       obuf << "\n";
+      obuf  << "========== Initializer Tree =====\n";
       parser::DumpTree(obuf, initializer);
+      obuf << "========== Initializer Tree END =====\n";
       llvm::errs() << buf;
       List<Clause> clauses = makeClauses(initializer, semaCtx);
-      ClauseProcessor cp(converter, semaCtx, clauses);
       ReductionProcessor::GenInitValueCBTy genInitValueCB;
-      cp.processInitializer(symTable, genInitValueCB);
+      ClauseProcessor cp(converter, semaCtx, clauses);
+        // Need to process the symbol table here in that case, of pick up the
+        // symbols.
+
+      const parser::OmpClause::Initializer &iclause{
+          std::get<parser::OmpClause::Initializer>(initializer.v.front().u)};
+      // initclause.v.v;
+      //      const parser::OmpInitializerExpression &iexpr = iclause.v.v;
+      cp.processInitializer(symTable, iclause, genInitValueCB);
+
 
       auto genCombinerCB = [](fir::FirOpBuilder &builder, mlir::Location loc,
                               mlir::Type type, mlir::Value op1, mlir::Value op2,
                               bool isByRef) {
         ReductionProcessor::genCombinerHelper(
-            builder, loc, ReductionProcessor::MAX, type, op1, op2, isByRef);
+            builder, loc, ReductionProcessor::ADD, type, op1, op2, isByRef);
       };
 
       mlir::omp::DeclareReductionOp declareOp =
           ReductionProcessor::createDeclareReductionHelper<
               mlir::omp::DeclareReductionOp>(
-              converter, "mymax",
+              converter, "myadd",
               converter.getFirOpBuilder().getI32Type(),
               converter.getCurrentLocation(), false/*Byref*/, genCombinerCB,
               genInitValueCB);
