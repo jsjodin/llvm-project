@@ -3565,7 +3565,7 @@ processReductionCombiner(lower::AbstractConverter &converter,
     llvm::errs() << "======== FOUND INITIALIZER ASSIGNMENT ======\n";
     auto &expr = std::get<parser::Expr>(as->t);
     genCombinerCB = [&](fir::FirOpBuilder &builder, mlir::Location loc,
-                        mlir::Type type, mlir::Value op1, mlir::Value op2,
+                        mlir::Type type, mlir::Value lhs, mlir::Value rhs,
                         bool isByRef) {
       const auto &evalExpr = makeExpr(expr, semaCtx);
       lower::SymMapScope scope(symTable);
@@ -3574,35 +3574,44 @@ processReductionCombiner(lower::AbstractConverter &converter,
       for (const parser::OmpStylizedDeclaration &decl : declList) {
         auto &name = std::get<parser::ObjectName>(decl.var.t);
         llvm::errs() << "==== Found symbol: " << name.ToString() << "\n";
+
+        mlir::Value addr = lhs;
+        mlir::Type type = lhs.getType();
+        bool isRhs = name.ToString() == std::string("omp_in");
+        if (isRhs) {
+          llvm::errs() << "===== FOUND OMP_IN =========\n";
+          addr = rhs;
+          type = rhs.getType();
+        }
+
         assert(name.symbol && "Names does not have a symbol!!!!!!!!!!!!!");
-        mlir::Value addr = op1;
-        if (!fir::conformsWithPassByRef(op1.getType())) {
-          addr = builder.createTemporary(loc, op1.getType());
-          fir::StoreOp::create(builder, loc, op1, addr);
+        if (!fir::conformsWithPassByRef(type)) {
+            addr = builder.createTemporary(loc, type);
+            fir::StoreOp::create(builder, loc, isRhs ? rhs : lhs, addr);
         }
         fir::FortranVariableFlagsEnum extraFlags = {};
         fir::FortranVariableFlagsAttr attributes =
-            Fortran::lower::translateSymbolAttributes(builder.getContext(),
-                                                      *name.symbol, extraFlags);
+          Fortran::lower::translateSymbolAttributes(builder.getContext(),
+                                                    *name.symbol, extraFlags);
         auto declareOp = hlfir::DeclareOp::create(
             builder, loc, addr, name.ToString(), nullptr, {}, nullptr, nullptr,
             0, attributes);
         symTable.addVariableDefinition(*name.symbol, declareOp);
         llvm::errs() << "=== Symbol gen done\n";
       }
+
       lower::StatementContext stmtCtx;
       mlir::Value result = fir::getBase(
           convertExprToValue(loc, converter, evalExpr, symTable, stmtCtx));
 
       if (isByRef) {
-      fir::StoreOp::create(builder, loc, result, op1);
-      mlir::omp::YieldOp::create(builder, loc, op1);
-      //      genYield<DeclRedOpType>(builder, loc, op1);
-    } else {
+        fir::StoreOp::create(builder, loc, result, lhs);
+        mlir::omp::YieldOp::create(builder, loc, lhs);
+        //      genYield<DeclRedOpType>(builder, loc, op1);
+      } else {
         //      genYield<DeclRedOpType>(builder, loc, result);
-        mlir::omp::YieldOp::create(builder, loc, op1);
-
-    }
+        mlir::omp::YieldOp::create(builder, loc, result);
+      }
 
       stmtCtx.finalizeAndPop();
       return result;
@@ -3635,7 +3644,6 @@ static void genOMP(
     processReductionCombiner(converter, symTable, semaCtx, specifier,
                              genCombinerCB);
 
-    const Clause *initClause = nullptr;
     const parser::OmpClauseList &initializer =
         declareReductionConstruct.v.Clauses();
     if (initializer.v.size() > 0) {
@@ -3652,7 +3660,6 @@ static void genOMP(
 
       const parser::OmpClause::Initializer &iclause{
           std::get<parser::OmpClause::Initializer>(initializer.v.front().u)};
-      // initclause.v.v;
       //      const parser::OmpInitializerExpression &iexpr = iclause.v.v;
       cp.processInitializer(symTable, iclause, genInitValueCB);
 
