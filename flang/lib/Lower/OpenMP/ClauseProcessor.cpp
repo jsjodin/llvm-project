@@ -13,6 +13,7 @@
 #include "ClauseProcessor.h"
 #include "Utils.h"
 
+#include "flang/Lower/ConvertCall.h"
 #include "flang/Lower/ConvertExprToHLFIR.h"
 #include "flang/Lower/OpenMP/Clauses.h"
 #include "flang/Lower/PFTBuilder.h"
@@ -426,6 +427,8 @@ bool ClauseProcessor::processInitializer(
       const parser::OmpStylizedInstance &styleInstance = iexpr.v.front();
       const std::list<parser::OmpStylizedDeclaration> &declList =
         std::get<std::list<parser::OmpStylizedDeclaration>>(styleInstance.t);
+      mlir::Value omp_priv_var;
+      mlir::Value omp_orig_var;
       for (const parser::OmpStylizedDeclaration &decl : declList) {
         auto &name = std::get<parser::ObjectName>(decl.var.t);
         llvm::errs() << "==== Found symbol: " << name.ToString() << "\n";
@@ -443,6 +446,10 @@ bool ClauseProcessor::processInitializer(
         auto declareOp = hlfir::DeclareOp::create(
             builder, loc, addr, name.ToString(), nullptr, {}, nullptr, nullptr,
             0, attributes);
+        if (name.ToString() == "omp_priv")
+          omp_priv_var = declareOp.getResult(0);
+        else // omp_orig
+          omp_orig_var = declareOp.getResult(0);
         symMap.addVariableDefinition(*name.symbol, declareOp);
         llvm::errs() << "=== Symbol gen done\n";
       }
@@ -450,9 +457,22 @@ bool ClauseProcessor::processInitializer(
       // We need to create a symbol for omp_orig in case it occurs in the
       // initializer expression. We keep omp_priv as well since it may be
       // passed to a function.
+      llvm::errs() << "===== CONVERTING ===\n";
+      clause->v.dump();
       lower::StatementContext stmtCtx;
-      mlir::Value result = fir::getBase(
-          convertExprToValue(loc, converter, clause->v, symMap, stmtCtx));
+      mlir::Value result = common::visit(
+          common::visitors{
+              [&](const evaluate::ProcedureRef &procRef) -> mlir::Value {
+                convertCallToHLFIR(loc, converter, procRef, std::nullopt,
+                                   symMap, stmtCtx);
+                auto privVal = fir::LoadOp::create(builder, loc, omp_priv_var);
+                return privVal;
+              },
+              [&](const auto &expr) -> mlir::Value {
+                return fir::getBase(convertExprToValue(
+                    loc, converter, clause->v, symMap, stmtCtx));
+              }},
+          clause->v.u);
       stmtCtx.finalizeAndPop();
       return result;
     };
