@@ -1182,11 +1182,7 @@ mapInitializationArgs(T loop, llvm::IRBuilderBase &builder,
   mlir::Value mlirSource = loop.getReductionVars()[i];
   llvm::Value *llvmSource = moduleTranslation.lookupValue(mlirSource);
   assert(llvmSource && "lookup reduction var");
-  llvm::Value *origVal =
-      builder.CreateLoad(moduleTranslation.convertType(
-                             reduction.getInitializerMoldArg().getType()),
-                         llvmSource, "omp_orig");
-  moduleTranslation.mapValue(reduction.getInitializerMoldArg(), origVal);
+  moduleTranslation.mapValue(reduction.getInitializerMoldArg(), llvmSource);
 
   if (entry.getNumArguments() > 1) {
     llvm::Value *allocation =
