@@ -462,7 +462,7 @@ static void genCombiner(fir::FirOpBuilder &builder, mlir::Location loc,
                         bool isByRef) {
   ty = fir::unwrapRefType(ty);
 
-  if (fir::isa_trivial(ty)) {
+  if (fir::isa_trivial(ty) || fir::isa_derived(ty)) {
     mlir::Value lhsLoaded = builder.loadIfRef(loc, lhs);
     mlir::Value rhsLoaded = builder.loadIfRef(loc, rhs);
 
@@ -538,7 +538,7 @@ static void createReductionAllocAndInitRegions(
         /*isDoConcurrent*/ std::is_same_v<OpType, fir::DeclareReductionOp>);
   }
 
-  if (fir::isa_trivial(ty)) {
+  if (fir::isa_trivial(ty) || fir::isa_derived(ty)) {
     if (isByRef) {
       // alloc region
       builder.setInsertionPointToEnd(allocBlock);
@@ -633,7 +633,8 @@ static bool doReductionByRef(mlir::Value reductionVar) {
           mlir::dyn_cast<hlfir::DeclareOp>(reductionVar.getDefiningOp()))
     reductionVar = declare.getMemref();
 
-  if (!fir::isa_trivial(fir::unwrapRefType(reductionVar.getType())))
+  if (!fir::isa_trivial(fir::unwrapRefType(reductionVar.getType())) &&
+      !fir::isa_derived(fir::unwrapRefType(reductionVar.getType())))
     return true;
 
   return false;

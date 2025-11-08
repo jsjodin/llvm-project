@@ -429,6 +429,7 @@ bool ClauseProcessor::processInitializer(
         std::get<std::list<parser::OmpStylizedDeclaration>>(styleInstance.t);
       mlir::Value omp_priv_var;
       mlir::Value omp_orig_var;
+      bool isByRef = true;
       for (const parser::OmpStylizedDeclaration &decl : declList) {
         auto &name = std::get<parser::ObjectName>(decl.var.t);
         llvm::errs() << "==== Found symbol: " << name.ToString() << "\n";
@@ -436,6 +437,7 @@ bool ClauseProcessor::processInitializer(
 
         mlir::Value addr = omp_orig;
         if (!fir::conformsWithPassByRef(omp_orig.getType())) {
+          isByRef = false;
           addr = builder.createTemporary(loc, omp_orig.getType());
           fir::StoreOp::create(builder, loc, omp_orig, addr);
         }
@@ -469,8 +471,14 @@ bool ClauseProcessor::processInitializer(
                 return privVal;
               },
               [&](const auto &expr) -> mlir::Value {
-                return fir::getBase(convertExprToValue(
+                mlir::Value exprResult = fir::getBase(convertExprToValue(
                     loc, converter, clause->v, symMap, stmtCtx));
+                llvm::errs() << "======== EXPR RESULT ======\n";
+                exprResult.dump();
+                llvm::errs() << "======== END EXPR RESULT ======\n";
+                if (fir::isa_ref_type(exprResult.getType()) && !isByRef)
+                  exprResult = fir::LoadOp::create(builder, loc, exprResult);
+                return exprResult;
               }},
           clause->v.u);
       stmtCtx.finalizeAndPop();

@@ -3541,6 +3541,15 @@ genOMP(lower::AbstractConverter &converter, lower::SymMap &symTable,
     TODO(converter.getCurrentLocation(), "OmpDeclareVariantDirective");
 }
 
+template <typename T>
+void DumpTree(const T &x)  {
+  std::string buf;
+  llvm::raw_string_ostream obuf(buf);
+  parser::DumpTree(obuf, x);
+  llvm::errs() << buf;
+}
+
+
 static bool
 processReductionCombiner(lower::AbstractConverter &converter,
                          lower::SymMap &symTable,
@@ -3548,18 +3557,15 @@ processReductionCombiner(lower::AbstractConverter &converter,
                          const parser::OmpReductionSpecifier &specifier,
                          ReductionProcessor::GenCombinerCBTy &genCombinerCB) {
   llvm::errs() << "=========== HERE HERE HERE==============\n";
-  std::string buf;
-  llvm::raw_string_ostream obuf(buf);
   const auto &combinerExpression =
       std::get<std::optional<parser::OmpCombinerExpression>>(specifier.t)
           .value();
   const parser::OmpStylizedInstance &combinerInstance =
       combinerExpression.v.front();
-  obuf << "========== CombinerInstance ===\n ";
-  parser::DumpTree(obuf, combinerInstance);
-  obuf << "========== END CombinerInstance\n";
-  obuf << "\n";
-  llvm::errs() << buf;
+  llvm::errs() << "========== CombinerInstance ===\n ";
+  DumpTree(combinerInstance);
+  llvm::errs() << "========== END CombinerInstance\n";
+  llvm::errs() << "\n";
   const parser::OmpStylizedInstance::Instance &instance =
     std::get<parser::OmpStylizedInstance::Instance>(combinerInstance.t);
   if (const auto *as = std::get_if<parser::AssignmentStmt>(&instance.u)) {
@@ -3604,14 +3610,15 @@ processReductionCombiner(lower::AbstractConverter &converter,
       lower::StatementContext stmtCtx;
       mlir::Value result = fir::getBase(
           convertExprToValue(loc, converter, evalExpr, symTable, stmtCtx));
-
+      if (fir::isa_ref_type(result.getType()) && !isByRef)
+        result = fir::LoadOp::create(builder, loc, result);
       stmtCtx.finalizeAndPop();
       if (isByRef) {
+        /// JAN FIXME this does not look correct
         fir::StoreOp::create(builder, loc, result, lhs);
         mlir::omp::YieldOp::create(builder, loc, lhs);
         //      genYield<DeclRedOpType>(builder, loc, op1);
       } else {
-        //      genYield<DeclRedOpType>(builder, loc, result);
         mlir::omp::YieldOp::create(builder, loc, result);
       }
 
@@ -3621,6 +3628,25 @@ processReductionCombiner(lower::AbstractConverter &converter,
   return true;
 }
 
+// Getting the type from a symbol compared to a DeclSpec is simpler
+// since we do not need to consider derived vs intrinsic types.
+// Semantics is guaranteed to generate these symbols.
+mlir::Type getReductionType(lower::AbstractConverter &converter,
+                         const parser::OmpReductionSpecifier &specifier) {
+  const auto &combinerExpression =
+      std::get<std::optional<parser::OmpCombinerExpression>>(specifier.t)
+          .value();
+  const parser::OmpStylizedInstance &combinerInstance =
+      combinerExpression.v.front();
+  const std::list<parser::OmpStylizedDeclaration> &declList =
+    std::get<std::list<parser::OmpStylizedDeclaration>>(combinerInstance.t);
+  const parser::OmpStylizedDeclaration &decl = declList.front();
+  const auto &name = std::get<parser::ObjectName>(decl.var.t);
+  const auto &symbol = semantics::SymbolRef(*name.symbol);
+  mlir::Type reductionType = converter.genType(symbol);
+  return reductionType;
+}
+
 static void genOMP(
     lower::AbstractConverter &converter, lower::SymMap &symTable,
     semantics::SemanticsContext &semaCtx, lower::pft::Evaluation &eval,
@@ -3628,42 +3654,24 @@ static void genOMP(
   if (!semaCtx.langOptions().OpenMPSimd) {
         llvm::errs() << "=========== Eval: ";
         eval.dump();
-        std::string buf;
-        llvm::raw_string_ostream obuf(buf);
-        obuf << "====== DeclareReductionConstruct ===\n";
-        parser::DumpTree(obuf, declareReductionConstruct);
-        obuf << "======= END DeclareReductionConstrucct ====\n";
+        llvm::errs() << "====== DeclareReductionConstruct ===\n";
+        DumpTree(declareReductionConstruct);
+        llvm::errs() << "======= END DeclareReductionConstrucct ====\n";
     const parser::OmpArgumentList &args{
         declareReductionConstruct.v.Arguments()};
     const parser::OmpArgument &arg{args.v.front()};
     const auto &specifier = std::get<parser::OmpReductionSpecifier>(arg.u);
-    //        obuf << "========== Specifier ===\n ";
-    //        parser::DumpTree(obuf, specifier);
-    //        obuf << "========== END Specifier\n";
-    //        obuf << "\n";
-    const parser::OmpTypeName &redType =
-        std::get<parser::OmpTypeNameList>(specifier.t).v.front();
-    const semantics::DeclTypeSpec *declTypeSpec = redType.declTypeSpec;
-    assert(declTypeSpec && "Missing declTypeSpec for reduction symbol");
-    const semantics::DerivedTypeSpec *derivedTypeSpec =
-        declTypeSpec->AsDerived();
-    mlir::Type reductionType = converter.genType(*derivedTypeSpec);
-    obuf << "=== Reduction Type ===\n"; // @@@ 
-    parser::DumpTree(obuf, redType);
-    obuf << "=== END Reduction Type === \n";
+    llvm::errs() << "========== Specifier ===\n ";
+    DumpTree(specifier);
+    llvm::errs() << "========== END Specifier\n";
+    llvm::errs() << "\n";
+    mlir::Type reductionType = getReductionType(converter, specifier);
     ReductionProcessor::GenCombinerCBTy genCombinerCB;
     processReductionCombiner(converter, symTable, semaCtx, specifier,
                              genCombinerCB);
-    llvm::errs() << buf;
-    reductionType.dump();
     const parser::OmpClauseList &initializer =
         declareReductionConstruct.v.Clauses();
     if (initializer.v.size() > 0) {
-      //      obuf << "\n";
-      //      obuf  << "========== Initializer Tree =====\n";
-      //      parser::DumpTree(obuf, initializer);
-      //      obuf << "========== Initializer Tree END =====\n";
-      //      llvm::errs() << buf;
       List<Clause> clauses = makeClauses(initializer, semaCtx);
       ReductionProcessor::GenInitValueCBTy genInitValueCB;
       ClauseProcessor cp(converter, semaCtx, clauses);
