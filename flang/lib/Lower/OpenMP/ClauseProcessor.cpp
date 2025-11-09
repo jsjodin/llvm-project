@@ -432,7 +432,6 @@ bool ClauseProcessor::processInitializer(
       bool isByRef = true;
       for (const parser::OmpStylizedDeclaration &decl : declList) {
         auto &name = std::get<parser::ObjectName>(decl.var.t);
-        llvm::errs() << "==== Found symbol: " << name.ToString() << "\n";
         assert(name.symbol && "Names does not have a symbol!!!!!!!!!!!!!");
 
         mlir::Value addr = omp_orig;
@@ -453,14 +452,11 @@ bool ClauseProcessor::processInitializer(
         else // omp_orig
           omp_orig_var = declareOp.getResult(0);
         symMap.addVariableDefinition(*name.symbol, declareOp);
-        llvm::errs() << "=== Symbol gen done\n";
       }
 
       // We need to create a symbol for omp_orig in case it occurs in the
       // initializer expression. We keep omp_priv as well since it may be
       // passed to a function.
-      llvm::errs() << "===== CONVERTING ===\n";
-      clause->v.dump();
       lower::StatementContext stmtCtx;
       mlir::Value result = common::visit(
           common::visitors{
@@ -473,9 +469,6 @@ bool ClauseProcessor::processInitializer(
               [&](const auto &expr) -> mlir::Value {
                 mlir::Value exprResult = fir::getBase(convertExprToValue(
                     loc, converter, clause->v, symMap, stmtCtx));
-                llvm::errs() << "======== EXPR RESULT ======\n";
-                exprResult.dump();
-                llvm::errs() << "======== END EXPR RESULT ======\n";
                 if (fir::isa_ref_type(exprResult.getType()) && !isByRef)
                   exprResult = fir::LoadOp::create(builder, loc, exprResult);
                 return exprResult;

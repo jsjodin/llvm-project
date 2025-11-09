@@ -3556,20 +3556,14 @@ processReductionCombiner(lower::AbstractConverter &converter,
                          semantics::SemanticsContext &semaCtx,
                          const parser::OmpReductionSpecifier &specifier,
                          ReductionProcessor::GenCombinerCBTy &genCombinerCB) {
-  llvm::errs() << "=========== HERE HERE HERE==============\n";
   const auto &combinerExpression =
       std::get<std::optional<parser::OmpCombinerExpression>>(specifier.t)
           .value();
   const parser::OmpStylizedInstance &combinerInstance =
       combinerExpression.v.front();
-  llvm::errs() << "========== CombinerInstance ===\n ";
-  DumpTree(combinerInstance);
-  llvm::errs() << "========== END CombinerInstance\n";
-  llvm::errs() << "\n";
   const parser::OmpStylizedInstance::Instance &instance =
     std::get<parser::OmpStylizedInstance::Instance>(combinerInstance.t);
   if (const auto *as = std::get_if<parser::AssignmentStmt>(&instance.u)) {
-    llvm::errs() << "======== FOUND INITIALIZER ASSIGNMENT ======\n";
     auto &expr = std::get<parser::Expr>(as->t);
     genCombinerCB = [&](fir::FirOpBuilder &builder, mlir::Location loc,
                         mlir::Type type, mlir::Value lhs, mlir::Value rhs,
@@ -3580,13 +3574,10 @@ processReductionCombiner(lower::AbstractConverter &converter,
         std::get<std::list<parser::OmpStylizedDeclaration>>(combinerInstance.t);
       for (const parser::OmpStylizedDeclaration &decl : declList) {
         auto &name = std::get<parser::ObjectName>(decl.var.t);
-        llvm::errs() << "==== Found symbol: " << name.ToString() << "\n";
-
         mlir::Value addr = lhs;
         mlir::Type type = lhs.getType();
         bool isRhs = name.ToString() == std::string("omp_in");
         if (isRhs) {
-          llvm::errs() << "===== FOUND OMP_IN =========\n";
           addr = rhs;
           type = rhs.getType();
         }
@@ -3604,14 +3595,12 @@ processReductionCombiner(lower::AbstractConverter &converter,
             builder, loc, addr, name.ToString(), nullptr, {}, nullptr, nullptr,
             0, attributes);
         symTable.addVariableDefinition(*name.symbol, declareOp);
-        llvm::errs() << "=== Symbol gen done\n";
       }
 
       lower::StatementContext stmtCtx;
       mlir::Value result = fir::getBase(
           convertExprToValue(loc, converter, evalExpr, symTable, stmtCtx));
-      if (fir::isa_ref_type(result.getType()) && !isByRef)
-        result = fir::LoadOp::create(builder, loc, result);
+      result = fir::LoadOp::create(builder, loc, result);
       stmtCtx.finalizeAndPop();
       if (isByRef) {
         /// JAN FIXME this does not look correct
@@ -3652,20 +3641,13 @@ static void genOMP(
     semantics::SemanticsContext &semaCtx, lower::pft::Evaluation &eval,
     const parser::OpenMPDeclareReductionConstruct &declareReductionConstruct) {
   if (!semaCtx.langOptions().OpenMPSimd) {
-        llvm::errs() << "=========== Eval: ";
-        eval.dump();
-        llvm::errs() << "====== DeclareReductionConstruct ===\n";
-        DumpTree(declareReductionConstruct);
-        llvm::errs() << "======= END DeclareReductionConstrucct ====\n";
     const parser::OmpArgumentList &args{
         declareReductionConstruct.v.Arguments()};
     const parser::OmpArgument &arg{args.v.front()};
     const auto &specifier = std::get<parser::OmpReductionSpecifier>(arg.u);
-    llvm::errs() << "========== Specifier ===\n ";
-    DumpTree(specifier);
-    llvm::errs() << "========== END Specifier\n";
-    llvm::errs() << "\n";
     mlir::Type reductionType = getReductionType(converter, specifier);
+    llvm::errs() << "======= Reduction Type: ";
+    reductionType.dump();
     ReductionProcessor::GenCombinerCBTy genCombinerCB;
     processReductionCombiner(converter, symTable, semaCtx, specifier,
                              genCombinerCB);
@@ -3690,9 +3672,8 @@ static void genOMP(
         std::get<parser::ProcedureDesignator>(identifier.u);
       const auto &reductionName =
         std::get<parser::Name>(designator.u);
-      /// @@@ FIXME
-      bool isByRef = fir::conformsWithPassByRef(reductionType);
-      llvm::errs() << "====== IS BY REF: " << isByRef << "\n";
+      bool isByRef = ReductionProcessor::doReductionByRef(reductionType);
+      llvm::errs() << "\n====== IS BY REF: " << isByRef << "\n";
       mlir::omp::DeclareReductionOp declareOp =
           ReductionProcessor::createDeclareReductionHelper<
               mlir::omp::DeclareReductionOp>(
@@ -3700,7 +3681,7 @@ static void genOMP(
               reductionType,
               converter.getCurrentLocation(), isByRef /*Byref*/, genCombinerCB,
               genInitValueCB);
-      llvm::errs() << "Declare Reduction Operation:\n";
+      llvm::errs() << "=============== Declare Reduction Operation:\n";
       declareOp.dump();
     }
   }

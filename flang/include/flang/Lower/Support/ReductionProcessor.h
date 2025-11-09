@@ -65,6 +65,9 @@ public:
     IEOR
   };
 
+  static bool doReductionByRef(mlir::Type reductionType);
+  static bool doReductionByRef(mlir::Value reductionVar);
+
   static ReductionIdentifier
   getReductionType(const omp::clause::ProcedureDesignator &pd);
 

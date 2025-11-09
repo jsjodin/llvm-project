@@ -611,7 +611,6 @@ OpType ReductionProcessor::createDeclareReduction(
     mlir::Type ty = fir::unwrapRefType(type);
     mlir::Value initValue = ReductionProcessor::getReductionInitValue(
         loc, unwrapSeqOrBoxedType(ty), redId, builder);
-    initValue.dump();
     return initValue;
   };
   auto genCombinerCB = [&](fir::FirOpBuilder &builder, mlir::Location loc,
@@ -625,7 +624,18 @@ OpType ReductionProcessor::createDeclareReduction(
                                               genInitValueCB);
 }
 
-static bool doReductionByRef(mlir::Value reductionVar) {
+bool ReductionProcessor::doReductionByRef(mlir::Type reductionType) {
+  if (forceByrefReduction)
+    return true;
+
+  if (!fir::isa_trivial(fir::unwrapRefType(reductionType)) &&
+      !fir::isa_derived(fir::unwrapRefType(reductionType)))
+    return true;
+
+    return false;
+}
+
+bool ReductionProcessor::doReductionByRef(mlir::Value reductionVar) {
   if (forceByrefReduction)
     return true;
 
@@ -633,11 +643,7 @@ static bool doReductionByRef(mlir::Value reductionVar) {
           mlir::dyn_cast<hlfir::DeclareOp>(reductionVar.getDefiningOp()))
     reductionVar = declare.getMemref();
 
-  if (!fir::isa_trivial(fir::unwrapRefType(reductionVar.getType())) &&
-      !fir::isa_derived(fir::unwrapRefType(reductionVar.getType())))
-    return true;
-
-  return false;
+  return doReductionByRef(reductionVar.getType());
 }
 
 template <typename OpType, typename RedOperatorListTy>

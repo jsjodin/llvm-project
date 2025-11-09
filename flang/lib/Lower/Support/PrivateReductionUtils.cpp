@@ -348,8 +348,10 @@ private:
 
   void initTrivialType() {
     builder.setInsertionPointToEnd(initBlock);
-    if (scalarInitValue)
+    if (scalarInitValue) {
+      llvm::errs() << "============= INIT TRIVIAL/DERIVED TYPE=====\n";
       builder.createStoreWithConvert(loc, scalarInitValue, allocatedPrivVarArg);
+    }
     createYield(allocatedPrivVarArg);
   }
 
@@ -624,7 +626,7 @@ void PopulateInitAndCleanupRegionsHelper::populateByRefInitAndCleanupRegions() {
     TODO(loc, "Privatization of assumed rank variable");
   mlir::Type valTy = fir::unwrapRefType(argType);
 
-  if (fir::isa_trivial(valTy)) {
+  if (fir::isa_trivial(valTy) || fir::isa_derived(valTy)) {
     initTrivialType();
     return;
   }

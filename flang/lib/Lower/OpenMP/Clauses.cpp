@@ -990,7 +990,6 @@ Initializer make(const parser::OmpClause::Initializer &inp,
     auto &expr = std::get<parser::Expr>(as->t);
     return Initializer{makeExpr(expr, semaCtx)};
   } else if (const auto *call = std::get_if<parser::CallStmt>(&instance.u)) {
-    llvm::errs() << "==== MAKING EXPR FROM CALL=====";
     if (call->typedCall) {
       const auto &procRef = *call->typedCall;
       semantics::SomeExpr evalProcRef{procRef};
