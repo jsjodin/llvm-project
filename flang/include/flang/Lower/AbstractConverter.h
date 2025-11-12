@@ -328,9 +328,6 @@ public:
   /// Get the converter's current scope
   virtual const Fortran::semantics::Scope &getCurrentScope() = 0;
 
-  /// Get the converter's current scope (non-const)
-  virtual Fortran::semantics::Scope &getCurrentScopeMutable() = 0;
-
   //===--------------------------------------------------------------------===//
   // FIR/MLIR
   //===--------------------------------------------------------------------===//
