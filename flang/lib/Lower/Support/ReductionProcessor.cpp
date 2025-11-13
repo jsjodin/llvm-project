@@ -594,7 +594,6 @@ DeclareRedType ReductionProcessor::createDeclareReductionHelper(
   mlir::Value op1 = decl.getReductionRegion().front().getArgument(0);
   mlir::Value op2 = decl.getReductionRegion().front().getArgument(1);
   genCombinerCB(builder, loc, type, op1, op2, isByRef);
-  decl.dump();
   return decl;
 }
 
