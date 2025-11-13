@@ -348,10 +348,8 @@ private:
 
   void initTrivialType() {
     builder.setInsertionPointToEnd(initBlock);
-    if (scalarInitValue) {
-      llvm::errs() << "============= INIT TRIVIAL/DERIVED TYPE=====\n";
+    if (scalarInitValue)
       builder.createStoreWithConvert(loc, scalarInitValue, allocatedPrivVarArg);
-    }
     createYield(allocatedPrivVarArg);
   }
 

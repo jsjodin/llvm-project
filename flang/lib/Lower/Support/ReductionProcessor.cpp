@@ -523,9 +523,6 @@ static void createReductionAllocAndInitRegions(
 
   mlir::Type ty = fir::unwrapRefType(type);
   builder.setInsertionPointToEnd(initBlock);
-  llvm::errs() << "Block arg0: \n";
-  initBlock->getArgument(0).dump();
-  // JAN FIXME EXPERIMENTING
   mlir::Value initValue =
     genInitValueCB(builder, loc, ty, initBlock->getArgument(0));
   if (isByRef) {

@@ -1169,8 +1169,7 @@ allocReductionVars(T loop, ArrayRef<BlockArgument> reductionArgs,
 /// Map input arguments to reduction initialization region
 template <typename T>
 static void
-mapInitializationArgs(T loop, llvm::IRBuilderBase &builder,
-                      LLVM::ModuleTranslation &moduleTranslation,
+mapInitializationArgs(T loop, LLVM::ModuleTranslation &moduleTranslation,
                       SmallVectorImpl<omp::DeclareReductionOp> &reductionDecls,
                       DenseMap<Value, llvm::Value *> &reductionVariableMap,
                       unsigned i) {
@@ -1255,7 +1254,7 @@ initReductionVars(OP op, ArrayRef<BlockArgument> reductionArgs,
     SmallVector<llvm::Value *, 1> phis;
 
     // map block argument to initializer region
-    mapInitializationArgs(op, builder, moduleTranslation, reductionDecls,
+    mapInitializationArgs(op, moduleTranslation, reductionDecls,
                           reductionVariableMap, i);
 
     // TODO In some cases (specially on the GPU), the init regions may
