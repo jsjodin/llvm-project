@@ -3573,7 +3573,7 @@ processReductionCombiner(lower::AbstractConverter &converter,
           type = rhs.getType();
         }
 
-        assert(name.symbol && "Names does not have a symbol!!!!!!!!!!!!!");
+        assert(name.symbol && "Reduction object name does not have a symbol");
         if (!fir::conformsWithPassByRef(type)) {
             addr = builder.createTemporary(loc, type);
             fir::StoreOp::create(builder, loc, isRhs ? rhs : lhs, addr);
@@ -3613,7 +3613,7 @@ processReductionCombiner(lower::AbstractConverter &converter,
 // since we do not need to consider derived vs intrinsic types.
 // Semantics is guaranteed to generate these symbols.
 mlir::Type getReductionType(lower::AbstractConverter &converter,
-                         const parser::OmpReductionSpecifier &specifier) {
+                            const parser::OmpReductionSpecifier &specifier) {
   const auto &combinerExpression =
       std::get<std::optional<parser::OmpCombinerExpression>>(specifier.t)
           .value();
@@ -3660,12 +3660,12 @@ static void genOMP(
       ReductionProcessor::createDeclareReductionHelper<
           mlir::omp::DeclareReductionOp>(
           converter, reductionName.ToString(), reductionType,
-          converter.getCurrentLocation(), isByRef /*Byref*/, genCombinerCB,
+          converter.getCurrentLocation(), isByRef, genCombinerCB,
           genInitValueCB);
     } else {
       fir::emitFatalError(
           converter.getCurrentLocation(),
-          "declare target without initializer clause is not yet supported");
+          "declare target without an initializer clause is not yet supported");
     }
   }
 }
