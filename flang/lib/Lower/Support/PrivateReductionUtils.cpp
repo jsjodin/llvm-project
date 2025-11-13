@@ -647,7 +647,7 @@ void PopulateInitAndCleanupRegionsHelper::populateByRefInitAndCleanupRegions() {
     mlir::Type innerTy = fir::unwrapRefType(boxTy.getEleTy());
     bool isDerived = fir::isa_derived(innerTy);
     bool isChar = fir::isa_char(innerTy);
-    if (fir::isa_trivial(innerTy) || isChar) {
+    if (fir::isa_trivial(innerTy) || isDerived || isChar) {
       // boxed non-sequence value e.g. !fir.box<!fir.heap<i32>>
       if ((isDerived || isChar) && (isReduction(kind) || scalarInitValue))
         TODO(loc, "Reduction of an unsupported boxed type");
