@@ -3541,15 +3541,6 @@ genOMP(lower::AbstractConverter &converter, lower::SymMap &symTable,
     TODO(converter.getCurrentLocation(), "OmpDeclareVariantDirective");
 }
 
-template <typename T>
-void DumpTree(const T &x)  {
-  std::string buf;
-  llvm::raw_string_ostream obuf(buf);
-  parser::DumpTree(obuf, x);
-  llvm::errs() << buf;
-}
-
-
 static bool
 processReductionCombiner(lower::AbstractConverter &converter,
                          lower::SymMap &symTable,
@@ -3600,13 +3591,14 @@ processReductionCombiner(lower::AbstractConverter &converter,
       lower::StatementContext stmtCtx;
       mlir::Value result = fir::getBase(
           convertExprToValue(loc, converter, evalExpr, symTable, stmtCtx));
-      result = fir::LoadOp::create(builder, loc, result);
+      if (auto refType =
+          llvm::dyn_cast<fir::ReferenceType>(result.getType()))
+        if (lhs.getType() == refType.getElementType())
+          result = fir::LoadOp::create(builder, loc, result);
       stmtCtx.finalizeAndPop();
       if (isByRef) {
-        /// JAN FIXME this does not look correct
         fir::StoreOp::create(builder, loc, result, lhs);
         mlir::omp::YieldOp::create(builder, loc, lhs);
-        //      genYield<DeclRedOpType>(builder, loc, op1);
       } else {
         mlir::omp::YieldOp::create(builder, loc, result);
       }
@@ -3646,8 +3638,6 @@ static void genOMP(
     const parser::OmpArgument &arg{args.v.front()};
     const auto &specifier = std::get<parser::OmpReductionSpecifier>(arg.u);
     mlir::Type reductionType = getReductionType(converter, specifier);
-    llvm::errs() << "======= Reduction Type: ";
-    reductionType.dump();
     ReductionProcessor::GenCombinerCBTy genCombinerCB;
     processReductionCombiner(converter, symTable, semaCtx, specifier,
                              genCombinerCB);
@@ -3657,32 +3647,25 @@ static void genOMP(
       List<Clause> clauses = makeClauses(initializer, semaCtx);
       ReductionProcessor::GenInitValueCBTy genInitValueCB;
       ClauseProcessor cp(converter, semaCtx, clauses);
-        // Need to process the symbol table here in that case, of pick up the
-        // symbols.
-
       const parser::OmpClause::Initializer &iclause{
           std::get<parser::OmpClause::Initializer>(initializer.v.front().u)};
-      //      const parser::OmpInitializerExpression &iexpr = iclause.v.v;
       cp.processInitializer(symTable, iclause, genInitValueCB);
-
       const auto &identifier =
         std::get<parser::OmpReductionIdentifier>(specifier.t);
-      // JAN FIXME (should be get_if since it could be a DefinedOperator)
       const auto &designator =
         std::get<parser::ProcedureDesignator>(identifier.u);
       const auto &reductionName =
         std::get<parser::Name>(designator.u);
       bool isByRef = ReductionProcessor::doReductionByRef(reductionType);
-      llvm::errs() << "\n====== IS BY REF: " << isByRef << "\n";
-      mlir::omp::DeclareReductionOp declareOp =
-          ReductionProcessor::createDeclareReductionHelper<
-              mlir::omp::DeclareReductionOp>(
-              converter, reductionName.ToString(),
-              reductionType,
-              converter.getCurrentLocation(), isByRef /*Byref*/, genCombinerCB,
-              genInitValueCB);
-      llvm::errs() << "=============== Declare Reduction Operation:\n";
-      declareOp.dump();
+      ReductionProcessor::createDeclareReductionHelper<
+          mlir::omp::DeclareReductionOp>(
+          converter, reductionName.ToString(), reductionType,
+          converter.getCurrentLocation(), isByRef /*Byref*/, genCombinerCB,
+          genInitValueCB);
+    } else {
+      fir::emitFatalError(
+          converter.getCurrentLocation(),
+          "declare target without initializer clause is not yet supported");
     }
   }
 }

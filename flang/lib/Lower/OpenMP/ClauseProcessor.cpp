@@ -429,17 +429,11 @@ bool ClauseProcessor::processInitializer(
         std::get<std::list<parser::OmpStylizedDeclaration>>(styleInstance.t);
       mlir::Value omp_priv_var;
       mlir::Value omp_orig_var;
-      bool isByRef = true;
       for (const parser::OmpStylizedDeclaration &decl : declList) {
         auto &name = std::get<parser::ObjectName>(decl.var.t);
-        assert(name.symbol && "Names does not have a symbol!!!!!!!!!!!!!");
-
-        mlir::Value addr = omp_orig;
-        if (!fir::conformsWithPassByRef(omp_orig.getType())) {
-          isByRef = false;
-          addr = builder.createTemporary(loc, omp_orig.getType());
-          fir::StoreOp::create(builder, loc, omp_orig, addr);
-        }
+        assert(name.symbol && "Name does not have a symbol");
+        mlir::Value addr = builder.createTemporary(loc, omp_orig.getType());
+        fir::StoreOp::create(builder, loc, omp_orig, addr);
         fir::FortranVariableFlagsEnum extraFlags = {};
         fir::FortranVariableFlagsAttr attributes =
             Fortran::lower::translateSymbolAttributes(builder.getContext(),
@@ -453,10 +447,7 @@ bool ClauseProcessor::processInitializer(
           omp_orig_var = declareOp.getResult(0);
         symMap.addVariableDefinition(*name.symbol, declareOp);
       }
-
-      // We need to create a symbol for omp_orig in case it occurs in the
-      // initializer expression. We keep omp_priv as well since it may be
-      // passed to a function.
+      // Lower the expression/function call
       lower::StatementContext stmtCtx;
       mlir::Value result = common::visit(
           common::visitors{
@@ -469,8 +460,10 @@ bool ClauseProcessor::processInitializer(
               [&](const auto &expr) -> mlir::Value {
                 mlir::Value exprResult = fir::getBase(convertExprToValue(
                     loc, converter, clause->v, symMap, stmtCtx));
-                if (fir::isa_ref_type(exprResult.getType()) && !isByRef)
-                  exprResult = fir::LoadOp::create(builder, loc, exprResult);
+                if (auto refType =
+                    llvm::dyn_cast<fir::ReferenceType>(exprResult.getType()))
+                  if (omp_priv_var.getType() == refType)
+                    exprResult = fir::LoadOp::create(builder, loc, exprResult);
                 return exprResult;
               }},
           clause->v.u);
