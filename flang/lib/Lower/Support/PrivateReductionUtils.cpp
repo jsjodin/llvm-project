@@ -624,7 +624,7 @@ void PopulateInitAndCleanupRegionsHelper::populateByRefInitAndCleanupRegions() {
     TODO(loc, "Privatization of assumed rank variable");
   mlir::Type valTy = fir::unwrapRefType(argType);
 
-  if (fir::isa_trivial(valTy) || fir::isa_derived(valTy)) {
+  if (fir::isa_trivial(valTy)) {
     initTrivialType();
     return;
   }
@@ -647,7 +647,7 @@ void PopulateInitAndCleanupRegionsHelper::populateByRefInitAndCleanupRegions() {
     mlir::Type innerTy = fir::unwrapRefType(boxTy.getEleTy());
     bool isDerived = fir::isa_derived(innerTy);
     bool isChar = fir::isa_char(innerTy);
-    if (fir::isa_trivial(innerTy) || isDerived || isChar) {
+    if (fir::isa_trivial(innerTy) || isChar) {
       // boxed non-sequence value e.g. !fir.box<!fir.heap<i32>>
       if ((isDerived || isChar) && (isReduction(kind) || scalarInitValue))
         TODO(loc, "Reduction of an unsupported boxed type");
