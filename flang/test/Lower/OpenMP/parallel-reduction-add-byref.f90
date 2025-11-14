@@ -2,25 +2,6 @@
 ! RUN: %flang_fc1 -emit-hlfir -fopenmp -mmlir --force-byref-reduction -o - %s 2>&1 | FileCheck %s
 
 !CHECK-LABEL: omp.declare_reduction
-!CHECK-SAME: @[[RED_I32_NAME:.*]] : !fir.ref<i32>
-!CHECK-SAME: alloc {
-!CHECK:  %[[REF:.*]] = fir.alloca i32
-!CHECK:  omp.yield(%[[REF]] : !fir.ref<i32>)
-!CHECK-LABEL: } init {
-!CHECK: ^bb0(%{{.*}}: !fir.ref<i32>, %[[ALLOC:.*]]: !fir.ref<i32>):
-!CHECK:  %[[C0_1:.*]] = arith.constant 0 : i32
-!CHECK:  fir.store %[[C0_1]] to %[[ALLOC]] : !fir.ref<i32>
-!CHECK:  omp.yield(%[[ALLOC]] : !fir.ref<i32>)
-!CHECK: } combiner {
-!CHECK: ^bb0(%[[ARG0:.*]]: !fir.ref<i32>, %[[ARG1:.*]]: !fir.ref<i32>):
-!CHECK:  %[[LD0:.*]] = fir.load %[[ARG0]] : !fir.ref<i32>
-!CHECK:  %[[LD1:.*]] = fir.load %[[ARG1]] : !fir.ref<i32>
-!CHECK:  %[[RES:.*]] = arith.addi %[[LD0]], %[[LD1]] : i32
-!CHECK:  fir.store %[[RES]] to %[[ARG0]] : !fir.ref<i32>
-!CHECK:  omp.yield(%[[ARG0]] : !fir.ref<i32>)
-!CHECK: }
-
-!CHECK-LABEL: omp.declare_reduction
 !CHECK-SAME: @[[RED_F32_NAME:.*]] : !fir.ref<f32>
 !CHECK-SAME: alloc {
 !CHECK:  %[[REF:.*]] = fir.alloca f32
@@ -37,6 +18,25 @@
 !CHECK:  %[[RES:.*]] = arith.addf %[[LD0]], %[[LD1]] {{.*}}: f32
 !CHECK:  fir.store %[[RES]] to %[[ARG0]] : !fir.ref<f32>
 !CHECK:  omp.yield(%[[ARG0]] : !fir.ref<f32>)
+!CHECK: }
+
+!CHECK-LABEL: omp.declare_reduction
+!CHECK-SAME: @[[RED_I32_NAME:.*]] : !fir.ref<i32>
+!CHECK-SAME: alloc {
+!CHECK:  %[[REF:.*]] = fir.alloca i32
+!CHECK:  omp.yield(%[[REF]] : !fir.ref<i32>)
+!CHECK-LABEL: } init {
+!CHECK: ^bb0(%{{.*}}: !fir.ref<i32>, %[[ALLOC:.*]]: !fir.ref<i32>):
+!CHECK:  %[[C0_1:.*]] = arith.constant 0 : i32
+!CHECK:  fir.store %[[C0_1]] to %[[ALLOC]] : !fir.ref<i32>
+!CHECK:  omp.yield(%[[ALLOC]] : !fir.ref<i32>)
+!CHECK: } combiner {
+!CHECK: ^bb0(%[[ARG0:.*]]: !fir.ref<i32>, %[[ARG1:.*]]: !fir.ref<i32>):
+!CHECK:  %[[LD0:.*]] = fir.load %[[ARG0]] : !fir.ref<i32>
+!CHECK:  %[[LD1:.*]] = fir.load %[[ARG1]] : !fir.ref<i32>
+!CHECK:  %[[RES:.*]] = arith.addi %[[LD0]], %[[LD1]] : i32
+!CHECK:  fir.store %[[RES]] to %[[ARG0]] : !fir.ref<i32>
+!CHECK:  omp.yield(%[[ARG0]] : !fir.ref<i32>)
 !CHECK: }
 
 !CHECK-LABEL: func.func @_QPsimple_int_add

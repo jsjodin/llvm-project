@@ -2,13 +2,13 @@
 ! RUN: %flang_fc1 -emit-hlfir -fopenmp -o - %s 2>&1 | FileCheck %s
 
 !CHECK-LABEL: omp.declare_reduction
-!CHECK-SAME: @[[ADD_RED_I32_NAME:.*]] : i32 init {
+!CHECK-SAME: @[[MIN_RED_I32_NAME:.*]] : i32 init {
 !CHECK: ^bb0(%{{.*}}: i32):
-!CHECK:  %[[C0_1:.*]] = arith.constant 0 : i32
+!CHECK:  %[[C0_1:.*]] = arith.constant 2147483647 : i32
 !CHECK:  omp.yield(%[[C0_1]] : i32)
 !CHECK: } combiner {
 !CHECK: ^bb0(%[[ARG0:.*]]: i32, %[[ARG1:.*]]: i32):
-!CHECK:  %[[RES:.*]] = arith.addi %[[ARG0]], %[[ARG1]] : i32
+!CHECK:  %[[RES:.*]] = arith.minsi %[[ARG0]], %[[ARG1]] : i32
 !CHECK:  omp.yield(%[[RES]] : i32)
 !CHECK: }
 
@@ -24,13 +24,13 @@
 !CHECK: }
 
 !CHECK-LABEL: omp.declare_reduction
-!CHECK-SAME: @[[MIN_RED_I32_NAME:.*]] : i32 init {
+!CHECK-SAME: @[[ADD_RED_I32_NAME:.*]] : i32 init {
 !CHECK: ^bb0(%{{.*}}: i32):
-!CHECK:  %[[C0_1:.*]] = arith.constant 2147483647 : i32
+!CHECK:  %[[C0_1:.*]] = arith.constant 0 : i32
 !CHECK:  omp.yield(%[[C0_1]] : i32)
 !CHECK: } combiner {
 !CHECK: ^bb0(%[[ARG0:.*]]: i32, %[[ARG1:.*]]: i32):
-!CHECK:  %[[RES:.*]] = arith.minsi %[[ARG0]], %[[ARG1]] : i32
+!CHECK:  %[[RES:.*]] = arith.addi %[[ARG0]], %[[ARG1]] : i32
 !CHECK:  omp.yield(%[[RES]] : i32)
 !CHECK: }
 
