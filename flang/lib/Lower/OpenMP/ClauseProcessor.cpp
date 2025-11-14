@@ -458,14 +458,6 @@ bool ClauseProcessor::processInitializer(
                 return privVal;
               },
               [&](const auto &expr) -> mlir::Value {
-                // TODO: Handle direct assignment expression with record type,
-                // maybe not useful, but legal with .e.g omp_priv = omp_orig
-                if (fir::isa_derived(type))
-                  fir::emitFatalError(
-                      converter.getCurrentLocation(),
-                      "Direct assignment of omp_priv of non-scalar type is not "
-                      "yet supported. Use a subroutine to initialize instead");
-
                 mlir::Value exprResult = fir::getBase(convertExprToValue(
                     loc, converter, clause->v, symMap, stmtCtx));
                 // Conversion can either give a value or a refrence to a value
