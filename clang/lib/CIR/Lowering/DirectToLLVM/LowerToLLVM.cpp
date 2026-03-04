@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "LowerToLLVM.h"
+#include "LowerModule.h"
 
 #include <array>
 #include <deque>
@@ -101,6 +102,29 @@ static mlir::Value createIntCast(mlir::OpBuilder &bld, mlir::Value src,
   if (dstWidth < srcWidth)
     return mlir::LLVM::TruncOp::create(bld, loc, dstTy, src);
   return mlir::LLVM::BitcastOp::create(bld, loc, dstTy, src);
+}
+
+static unsigned convertCIRAddrSpaceToTarget(cir::LangAddressSpaceAttr addrSpace,
+                                            cir::LowerModule *lowerModule) {
+  assert(lowerModule && "CIR AS map is not available");
+  return lowerModule->getTargetLoweringInfo()
+      .getTargetAddrSpaceFromCIRAddrSpace(addrSpace.getValue());
+}
+
+static unsigned
+getNumericASFromCIRAS(mlir::ptr::MemorySpaceAttrInterface asAttr,
+                      cir::LowerModule *lowerModule) {
+  if (!asAttr)
+    return 0; // default AS
+  if (auto targetAddrSpaceAttr =
+          mlir::dyn_cast_if_present<cir::TargetAddressSpaceAttr>(asAttr))
+    return targetAddrSpaceAttr.getValue();
+
+  if (auto langAddressSpaceAttr =
+          mlir::dyn_cast<cir::LangAddressSpaceAttr>(asAttr))
+    return convertCIRAddrSpaceToTarget(langAddressSpaceAttr, lowerModule);
+
+  llvm_unreachable("unexpected address space attribute kind");
 }
 
 static mlir::LLVM::Visibility
@@ -2488,10 +2512,8 @@ void CIRToLLVMGlobalOpLowering::setupRegionInitializedLLVMGlobalOp(
   //        in CIRToLLVMGlobalOpLowering::matchAndRewrite() but that will go
   //        away when the placeholders are no longer needed.
   const bool isConst = op.getConstant();
-  unsigned addrSpace = 0;
-  if (auto targetAS = mlir::dyn_cast_if_present<cir::TargetAddressSpaceAttr>(
-          op.getAddrSpaceAttr()))
-    addrSpace = targetAS.getValue();
+  const unsigned addrSpace =
+      getNumericASFromCIRAS(op.getAddrSpaceAttr(), lowerMod);
   const bool isDsoLocal = op.getDsoLocal();
   const bool isThreadLocal = (bool)op.getTlsModelAttr();
   const uint64_t alignment = op.getAlignment().value_or(0);
@@ -2548,13 +2570,9 @@ mlir::LogicalResult CIRToLLVMGlobalOpLowering::matchAndRewrite(
   const mlir::Type llvmType =
       convertTypeForMemory(*getTypeConverter(), dataLayout, cirSymType);
 
-  // FIXME: These default values are placeholders until the the equivalent
-  //        attributes are available on cir.global ops.
   const bool isConst = op.getConstant();
-  unsigned addrSpace = 0;
-  if (auto targetAS = mlir::dyn_cast_if_present<cir::TargetAddressSpaceAttr>(
-          op.getAddrSpaceAttr()))
-    addrSpace = targetAS.getValue();
+  const unsigned addrSpace =
+      getNumericASFromCIRAS(op.getAddrSpaceAttr(), lowerMod);
   const bool isDsoLocal = op.getDsoLocal();
   const bool isThreadLocal = (bool)op.getTlsModelAttr();
   const uint64_t alignment = op.getAlignment().value_or(0);
@@ -3260,20 +3278,14 @@ mlir::LogicalResult CIRToLLVMSelectOpLowering::matchAndRewrite(
 }
 
 static void prepareTypeConverter(mlir::LLVMTypeConverter &converter,
-                                 mlir::DataLayout &dataLayout) {
-  converter.addConversion([&](cir::PointerType type) -> mlir::Type {
-    mlir::ptr::MemorySpaceAttrInterface addrSpaceAttr = type.getAddrSpace();
-    unsigned numericAS = 0;
-
-    if (auto langAsAttr =
-            mlir::dyn_cast_if_present<cir::LangAddressSpaceAttr>(addrSpaceAttr))
-      llvm_unreachable("lowering LangAddressSpaceAttr NYI");
-    else if (auto targetAsAttr =
-                 mlir::dyn_cast_if_present<cir::TargetAddressSpaceAttr>(
-                     addrSpaceAttr))
-      numericAS = targetAsAttr.getValue();
-    return mlir::LLVM::LLVMPointerType::get(type.getContext(), numericAS);
-  });
+                                 mlir::DataLayout &dataLayout,
+                                 cir::LowerModule *lowerModule) {
+  converter.addConversion(
+      [&, lowerModule](cir::PointerType type) -> mlir::Type {
+        mlir::ptr::MemorySpaceAttrInterface addrSpaceAttr = type.getAddrSpace();
+        unsigned numericAS = getNumericASFromCIRAS(addrSpaceAttr, lowerModule);
+        return mlir::LLVM::LLVMPointerType::get(type.getContext(), numericAS);
+      });
   converter.addConversion([&](cir::VPtrType type) -> mlir::Type {
     assert(!cir::MissingFeatures::addressSpace());
     return mlir::LLVM::LLVMPointerType::get(type.getContext());
@@ -3565,8 +3577,10 @@ void ConvertCIRToLLVMPass::runOnOperation() {
 
   mlir::ModuleOp module = getOperation();
   mlir::DataLayout dl(module);
+  std::unique_ptr<cir::LowerModule> lowerModule =
+      cir::createLowerModule(module);
   mlir::LLVMTypeConverter converter(&getContext());
-  prepareTypeConverter(converter, dl);
+  prepareTypeConverter(converter, dl, lowerModule.get());
 
   /// Tracks the state required to lower CIR `LabelOp` and `BlockAddressOp`.
   /// Maps labels to their corresponding `BlockTagOp` and keeps bookkeeping
@@ -3576,6 +3590,8 @@ void ConvertCIRToLLVMPass::runOnOperation() {
   mlir::RewritePatternSet patterns(&getContext());
   patterns.add<CIRToLLVMBlockAddressOpLowering, CIRToLLVMLabelOpLowering>(
       converter, patterns.getContext(), dl, blockInfoAddr);
+  patterns.add<CIRToLLVMGlobalOpLowering>(converter, patterns.getContext(), dl,
+                                          lowerModule.get());
 
   patterns.add<
 #define GET_LLVM_LOWERING_PATTERNS_LIST

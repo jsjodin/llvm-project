@@ -2481,6 +2481,8 @@ def CIR_GlobalOp : CIR_Op<"global", [
   let hasCXXABILowering = true;
 
   let isLLVMLoweringRecursive = true;
+  let customLLVMLoweringConstructorDecl =
+    LoweringBuilders<(ins "cir::LowerModule *":$lowerMod)>;
   let extraLLVMLoweringPatternDecl = [{
     mlir::LogicalResult matchAndRewriteRegionInitializedGlobal(
       cir::GlobalOp op, mlir::Attribute init,

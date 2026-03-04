@@ -19,6 +19,8 @@
 
 namespace cir {
 
+class LowerModule;
+
 namespace direct {
 
 /// Convert a CIR attribute to an LLVM attribute. May use the datalayout for
