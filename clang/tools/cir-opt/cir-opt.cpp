@@ -25,6 +25,7 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
+#include "clang/CIR/Dialect/OpenMP/RegisterOpenMPExtensions.h"
 #include "clang/CIR/Dialect/Passes.h"
 #include "clang/CIR/Passes.h"
 
@@ -37,6 +38,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::BuiltinDialect, cir::CIRDialect,
                   mlir::memref::MemRefDialect, mlir::LLVM::LLVMDialect,
                   mlir::DLTIDialect, mlir::omp::OpenMPDialect>();
+  cir::omp::registerOpenMPExtensions(registry);
 
   ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
     return mlir::createCIRCanonicalizePass();

@@ -62,6 +62,7 @@ add_clang_library(clangCIR
   clangLex
   ${dialect_libs}
   CIROpenACCSupport
+  CIROpenMPSupport
   MLIRCIR
   MLIRCIRInterfaces
   MLIRTargetLLVMIRImport
