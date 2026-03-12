@@ -28,6 +28,7 @@
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
 #include "clang/CIR/Dialect/IR/CIROpsEnums.h"
 #include "clang/CIR/Dialect/IR/CIRTypes.h"
+#include "mlir/Dialect/OpenMP/OpenMPOffloadUtils.h"
 #include "clang/CIR/Interfaces/CIROpInterfaces.h"
 #include "clang/CIR/MissingFeatures.h"
 
@@ -133,6 +134,17 @@ CIRGenModule::CIRGenModule(mlir::MLIRContext &mlirContext,
                        cir::OptInfoAttr::get(&mlirContext,
                                              cgo.OptimizationLevel,
                                              cgo.OptimizeSize));
+
+  if (langOpts.OpenMP) {
+    mlir::omp::OffloadModuleOpts ompOpts(
+        langOpts.OpenMPTargetDebug, langOpts.OpenMPTeamSubscription,
+        langOpts.OpenMPThreadSubscription, langOpts.OpenMPNoThreadState,
+        langOpts.OpenMPNoNestedParallelism, langOpts.OpenMPIsTargetDevice,
+        getTriple().isNVPTX() || getTriple().isAMDGCN(),
+        langOpts.OpenMPForceUSM, langOpts.OpenMP, langOpts.OMPHostIRFile,
+        langOpts.OMPTargetTriples, langOpts.NoGPULib);
+    mlir::omp::setOffloadModuleInterfaceAttributes(theModule, ompOpts);
+  }
 
   if (langOpts.CUDA)
     createCUDARuntime();
