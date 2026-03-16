@@ -209,8 +209,28 @@ CIRGenFunction::emitOMPAtomicDirective(const OMPAtomicDirective &s) {
 }
 mlir::LogicalResult
 CIRGenFunction::emitOMPTargetDirective(const OMPTargetDirective &s) {
-  getCIRGenModule().errorNYI(s.getSourceRange(), "OpenMP OMPTargetDirective");
-  return mlir::failure();
+  mlir::LogicalResult res = mlir::success();
+  llvm::SmallVector<mlir::Type> retTy;
+  llvm::SmallVector<mlir::Value> operands;
+  mlir::Location begin = getLoc(s.getBeginLoc());
+  mlir::Location end = getLoc(s.getEndLoc());
+  auto targetOp =
+      mlir::omp::TargetOp::create(builder, begin, retTy, operands);
+  // FIXME(JAN): No clause support right now.
+  {
+    mlir::Block &block = targetOp.getRegion().emplaceBlock();
+    mlir::OpBuilder::InsertionGuard guardCase(builder);
+    builder.setInsertionPointToEnd(&block);
+
+    LexicalScope ls{*this, begin, builder.getInsertionBlock()};
+
+    const CapturedStmt *cs = s.getCapturedStmt(llvm::omp::OMPD_target);
+    const Stmt *bodyStmt = cs->getCapturedStmt();
+    res = emitStmt(bodyStmt, /*useCurrentScope=*/true);
+
+    mlir::omp::TerminatorOp::create(builder, end);
+  }
+  return res;
 }
 mlir::LogicalResult
 CIRGenFunction::emitOMPTeamsDirective(const OMPTeamsDirective &s) {
