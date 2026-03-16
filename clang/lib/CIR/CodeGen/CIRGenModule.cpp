@@ -2742,8 +2742,13 @@ cir::FuncOp CIRGenModule::getOrCreateCIRFunction(
     // For the device mark the function as one that should be emitted.
     if (getLangOpts().OpenMPIsTargetDevice && fd->isDefined() && !dontDefer &&
         !isForDefinition)
-      errorNYI(fd->getSourceRange(),
-               "getOrCreateCIRFunction: OpenMP target function");
+      {
+        // FIXME(Jan): Simple implementation for now, no C++ stuff
+        if (const FunctionDecl *fdDef = fd->getDefinition()) {
+          GlobalDecl gdDef = GlobalDecl(fdDef);
+          emitGlobal(gdDef);
+        }
+      }
 
     // Any attempts to use a MultiVersion function should result in retrieving
     // the iFunc instead. Name mangling will handle the rest of the changes.
