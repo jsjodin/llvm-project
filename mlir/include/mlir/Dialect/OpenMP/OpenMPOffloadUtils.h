@@ -6,8 +6,9 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Shared utilities for setting OpenMP offload module interface attributes.
-// These are used by both Flang and Clang (CIR) frontends.
+/// \file
+/// Shared utilities for setting OpenMP offload module interface attributes.
+/// These are used by both Flang and Clang (CIR) frontends.
 //
 //===----------------------------------------------------------------------===//
 
