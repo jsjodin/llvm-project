@@ -63,14 +63,13 @@ struct OffloadModuleOpts {
 /// Sets OpenMP offload module interface attributes on a ModuleOp, shared
 /// between Flang and Clang (CIR) frontends.
 [[maybe_unused]] static void
-setOffloadModuleInterfaceAttributes(mlir::ModuleOp module,
-                                    OffloadModuleOpts opts) {
-  if (auto offloadMod = llvm::dyn_cast<mlir::omp::OffloadModuleInterface>(
-          module.getOperation())) {
+setOffloadModuleInterfaceAttributes(ModuleOp module, OffloadModuleOpts opts) {
+  if (auto offloadMod =
+          llvm::dyn_cast<OffloadModuleInterface>(module.getOperation())) {
     offloadMod.setIsTargetDevice(opts.OpenMPIsTargetDevice);
     offloadMod.setIsGPU(opts.OpenMPIsGPU);
     if (opts.OpenMPForceUSM)
-      offloadMod.setRequires(mlir::omp::ClauseRequires::unified_shared_memory);
+      offloadMod.setRequires(ClauseRequires::unified_shared_memory);
     if (opts.OpenMPIsTargetDevice) {
       offloadMod.setFlags(
           opts.OpenMPTargetDebug, opts.OpenMPTeamSubscription,
@@ -87,17 +86,17 @@ setOffloadModuleInterfaceAttributes(mlir::ModuleOp module,
   }
 }
 
-[[maybe_unused]] static void setOpenMPVersionAttribute(mlir::ModuleOp module,
+[[maybe_unused]] static void setOpenMPVersionAttribute(ModuleOp module,
                                                        int64_t version) {
   module.getOperation()->setAttr(
-      mlir::StringAttr::get(module.getContext(), llvm::Twine{"omp.version"}),
-      mlir::omp::VersionAttr::get(module.getContext(), version));
+      StringAttr::get(module.getContext(), llvm::Twine{"omp.version"}),
+      VersionAttr::get(module.getContext(), version));
 }
 
 [[maybe_unused]] static int64_t
-getOpenMPVersionAttribute(mlir::ModuleOp module, int64_t fallback = -1) {
-  if (mlir::Attribute verAttr = module->getAttr("omp.version"))
-    return llvm::cast<mlir::omp::VersionAttr>(verAttr).getVersion();
+getOpenMPVersionAttribute(ModuleOp module, int64_t fallback = -1) {
+  if (Attribute verAttr = module->getAttr("omp.version"))
+    return llvm::cast<VersionAttr>(verAttr).getVersion();
   return fallback;
 }
 
