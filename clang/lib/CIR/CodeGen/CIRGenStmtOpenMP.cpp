@@ -13,6 +13,7 @@
 #include "CIRGenBuilder.h"
 #include "CIRGenFunction.h"
 #include "mlir/Dialect/OpenMP/OpenMPDialect.h"
+#include "clang/AST/OpenMPClause.h"
 #include "clang/AST/StmtOpenMP.h"
 #include "llvm/Frontend/OpenMP/OMPConstants.h"
 using namespace clang;
@@ -207,28 +208,152 @@ CIRGenFunction::emitOMPAtomicDirective(const OMPAtomicDirective &s) {
   getCIRGenModule().errorNYI(s.getSourceRange(), "OpenMP OMPAtomicDirective");
   return mlir::failure();
 }
+static mlir::omp::ClauseMapFlags
+mapClauseKindToFlags(OpenMPMapClauseKind kind) {
+  switch (kind) {
+  case OMPC_MAP_to:
+    return mlir::omp::ClauseMapFlags::to;
+  case OMPC_MAP_from:
+    return mlir::omp::ClauseMapFlags::from;
+  case OMPC_MAP_tofrom:
+    return mlir::omp::ClauseMapFlags::to | mlir::omp::ClauseMapFlags::from;
+  case OMPC_MAP_alloc:
+  case OMPC_MAP_release:
+    return mlir::omp::ClauseMapFlags::storage;
+  case OMPC_MAP_delete:
+    return mlir::omp::ClauseMapFlags::del;
+  default:
+    return mlir::omp::ClauseMapFlags::none;
+  }
+}
+
+static mlir::Value emitMapInfoForVar(CIRGenFunction &cgf,
+                                     mlir::OpBuilder &builder,
+                                     mlir::Location loc, const VarDecl *vd,
+                                     mlir::omp::ClauseMapFlags mapFlags) {
+  Address addr = cgf.getAddrOfLocalVar(vd);
+  mlir::Value varPtr = addr.getPointer();
+  auto varPtrType = mlir::cast<cir::PointerType>(varPtr.getType());
+  mlir::Type elementType = varPtrType.getPointee();
+
+  // The OpenMP runtime requires generic (default address space) pointers for
+  // data mapping. If the variable is in a non-default address space (e.g.,
+  // AMDGPU private), cast it to a generic pointer first.
+  if (varPtrType.getAddrSpace()) {
+    auto genericPtrType = cir::PointerType::get(builder.getContext(),
+                                                elementType);
+    varPtr = builder.create<cir::CastOp>(loc, genericPtrType,
+                                         cir::CastKind::address_space, varPtr);
+    varPtrType = genericPtrType;
+  }
+
+  return mlir::omp::MapInfoOp::create(
+      builder, loc,
+      /*omp_ptr=*/varPtrType,
+      /*var_ptr=*/varPtr,
+      /*var_type=*/elementType,
+      /*map_type=*/mapFlags,
+      /*map_capture_type=*/mlir::omp::VariableCaptureKind::ByRef,
+      /*var_ptr_ptr=*/mlir::Value{},
+      /*members=*/mlir::ValueRange{},
+      /*members_index=*/mlir::ArrayAttr{},
+      /*bounds=*/mlir::ValueRange{},
+      /*mapper_id=*/mlir::FlatSymbolRefAttr{},
+      /*name=*/builder.getStringAttr(vd->getName()),
+      /*partial_map=*/false);
+}
+
 mlir::LogicalResult
 CIRGenFunction::emitOMPTargetDirective(const OMPTargetDirective &s) {
   mlir::LogicalResult res = mlir::success();
-  llvm::SmallVector<mlir::Type> retTy;
-  llvm::SmallVector<mlir::Value> operands;
   mlir::Location begin = getLoc(s.getBeginLoc());
   mlir::Location end = getLoc(s.getEndLoc());
-  auto targetOp =
-      mlir::omp::TargetOp::create(builder, begin, retTy, operands);
-  // FIXME(JAN): No clause support right now.
+
+  llvm::SmallVector<mlir::Value> mapVars;
+  llvm::SmallVector<const VarDecl *> mappedVarDecls;
+  llvm::SmallPtrSet<const VarDecl *, 8> explicitlyMappedDecls;
+
+  // Process explicit map clauses.
+  for (const OMPClause *clause : s.clauses()) {
+    if (const auto *mapClause = dyn_cast<OMPMapClause>(clause)) {
+      mlir::omp::ClauseMapFlags mapFlags =
+          mapClauseKindToFlags(mapClause->getMapType());
+
+      for (const Expr *varExpr : mapClause->varlist()) {
+        const auto *refExpr = dyn_cast<DeclRefExpr>(varExpr->IgnoreImplicit());
+        if (!refExpr) {
+          getCIRGenModule().errorNYI(
+              varExpr->getExprLoc(),
+              "OpenMP map clause with non-DeclRefExpr variable");
+          continue;
+        }
+
+        const auto *vd = dyn_cast<VarDecl>(refExpr->getDecl());
+        if (!vd) {
+          getCIRGenModule().errorNYI(
+              varExpr->getExprLoc(),
+              "OpenMP map clause with non-VarDecl variable");
+          continue;
+        }
+
+        mapVars.push_back(emitMapInfoForVar(*this, builder, begin, vd,
+                                            mapFlags));
+        mappedVarDecls.push_back(vd);
+        explicitlyMappedDecls.insert(vd);
+      }
+    }
+  }
+
+  // Create implicit map entries for captured variables not explicitly mapped.
+  const CapturedStmt *cs = s.getCapturedStmt(llvm::omp::OMPD_target);
+  for (const auto &capture : cs->captures()) {
+    if (capture.capturesVariable()) {
+      const VarDecl *vd = capture.getCapturedVar();
+      if (explicitlyMappedDecls.contains(vd))
+        continue;
+
+      mlir::omp::ClauseMapFlags implicitFlags =
+          mlir::omp::ClauseMapFlags::to | mlir::omp::ClauseMapFlags::from |
+          mlir::omp::ClauseMapFlags::implicit;
+
+      mapVars.push_back(emitMapInfoForVar(*this, builder, begin, vd,
+                                          implicitFlags));
+      mappedVarDecls.push_back(vd);
+    }
+  }
+
+  mlir::omp::TargetOperands targetOperands;
+  targetOperands.mapVars = mapVars;
+  auto targetOp = mlir::omp::TargetOp::create(builder, begin, targetOperands);
+
   {
     mlir::Block &block = targetOp.getRegion().emplaceBlock();
+
+    for (mlir::Value mapVar : mapVars)
+      block.addArgument(mapVar.getType(), begin);
+
     mlir::OpBuilder::InsertionGuard guardCase(builder);
     builder.setInsertionPointToEnd(&block);
 
     LexicalScope ls{*this, begin, builder.getInsertionBlock()};
 
-    const CapturedStmt *cs = s.getCapturedStmt(llvm::omp::OMPD_target);
+    // Remap all mapped variables to their block arguments inside the region.
+    llvm::SmallVector<std::pair<const VarDecl *, Address>> savedAddrs;
+    for (auto [idx, vd] : llvm::enumerate(mappedVarDecls)) {
+      Address origAddr = getAddrOfLocalVar(vd);
+      savedAddrs.push_back({vd, origAddr});
+      mlir::Value blockArg = block.getArgument(idx);
+      replaceAddrOfLocalVar(vd, Address(blockArg, origAddr.getAlignment()));
+    }
+
     const Stmt *bodyStmt = cs->getCapturedStmt();
     res = emitStmt(bodyStmt, /*useCurrentScope=*/true);
 
     mlir::omp::TerminatorOp::create(builder, end);
+
+    // Restore original variable mappings.
+    for (auto &[vd, addr] : savedAddrs)
+      replaceAddrOfLocalVar(vd, addr);
   }
   return res;
 }
