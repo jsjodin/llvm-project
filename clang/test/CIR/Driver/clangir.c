@@ -1,3 +1,5 @@
+// Tests related to -fclangir option.
+
 // Verify that -fclangir is always forwarded to -cc1 by the driver, and
 // that the frontend ignores it when the input is LLVM IR.
 
