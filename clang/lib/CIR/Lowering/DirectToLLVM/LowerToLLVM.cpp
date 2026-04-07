@@ -4714,7 +4714,7 @@ void populateCIRToLLVMPasses(mlir::OpPassManager &pm) {
 
 std::unique_ptr<llvm::Module>
 lowerDirectlyFromCIRToLLVMIR(mlir::ModuleOp mlirModule, LLVMContext &llvmCtx,
-                             StringRef mlirSaveTempsOutFile) {
+                             llvm::raw_ostream *mlirOS) {
   llvm::TimeTraceScope scope("lower from CIR to LLVM directly");
 
   mlir::MLIRContext *mlirCtx = mlirModule.getContext();
@@ -4730,12 +4730,8 @@ lowerDirectlyFromCIRToLLVMIR(mlir::ModuleOp mlirModule, LLVMContext &llvmCtx,
         "The pass manager failed to lower CIR to LLVMIR dialect!");
   }
 
-  if (!mlirSaveTempsOutFile.empty()) {
-    std::error_code ec;
-    llvm::raw_fd_ostream out(mlirSaveTempsOutFile, ec);
-    if (!ec)
-      mlirModule->print(out);
-  }
+  if (mlirOS)
+    mlirModule->print(*mlirOS);
 
   mlir::registerBuiltinDialectTranslation(*mlirCtx);
   mlir::registerLLVMDialectTranslation(*mlirCtx);

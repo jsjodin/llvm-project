@@ -12,12 +12,12 @@
 #ifndef CLANG_CIR_LOWERTOLLVM_H
 #define CLANG_CIR_LOWERTOLLVM_H
 
-#include "llvm/ADT/StringRef.h"
 #include <memory>
 
 namespace llvm {
 class LLVMContext;
 class Module;
+class raw_ostream;
 } // namespace llvm
 
 namespace mlir {
@@ -30,7 +30,7 @@ namespace direct {
 std::unique_ptr<llvm::Module>
 lowerDirectlyFromCIRToLLVMIR(mlir::ModuleOp mlirModule,
                              llvm::LLVMContext &llvmCtx,
-                             llvm::StringRef mlirSaveTempsOutFile = {});
+                             llvm::raw_ostream *mlirOS = nullptr);
 } // namespace direct
 } // namespace cir
 

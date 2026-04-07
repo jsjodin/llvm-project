@@ -18,7 +18,6 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Path.h"
-#include "llvm/Support/raw_ostream.h"
 
 using namespace cir;
 using namespace clang;
@@ -48,9 +47,8 @@ getBackendActionFromOutputType(CIRGenAction::OutputType Action) {
 
 static std::unique_ptr<llvm::Module>
 lowerFromCIRToLLVMIR(mlir::ModuleOp MLIRModule, llvm::LLVMContext &LLVMCtx,
-                     llvm::StringRef mlirSaveTempsOutFile = {}) {
-  return direct::lowerDirectlyFromCIRToLLVMIR(MLIRModule, LLVMCtx,
-                                              mlirSaveTempsOutFile);
+                     llvm::raw_ostream *mlirOS = nullptr) {
+  return direct::lowerDirectlyFromCIRToLLVMIR(MLIRModule, LLVMCtx, mlirOS);
 }
 
 class CIRGenConsumer : public clang::ASTConsumer {
@@ -152,15 +150,21 @@ public:
       }
 
       if (!cirSaveTempsOutFile.empty()) {
-        std::error_code ec;
-        llvm::raw_fd_ostream out(cirSaveTempsOutFile, ec);
-        if (!ec)
-          MlirModule->print(out);
+        if (auto os = CI.createOutputFile(cirSaveTempsOutFile, /*Binary=*/false,
+                                          /*RemoveFileOnSignal=*/true,
+                                          /*UseTemporary=*/false))
+          MlirModule->print(*os);
       }
+
+      std::unique_ptr<raw_pwrite_stream> mlirOS;
+      if (!mlirSaveTempsOutFile.empty())
+        mlirOS = CI.createOutputFile(mlirSaveTempsOutFile, /*Binary=*/false,
+                                     /*RemoveFileOnSignal=*/true,
+                                     /*UseTemporary=*/false);
 
       llvm::LLVMContext LLVMCtx;
       std::unique_ptr<llvm::Module> LLVMModule =
-          lowerFromCIRToLLVMIR(MlirModule, LLVMCtx, mlirSaveTempsOutFile);
+          lowerFromCIRToLLVMIR(MlirModule, LLVMCtx, mlirOS.get());
 
       BackendAction BEAction = getBackendActionFromOutputType(Action);
       emitBackendOutput(
