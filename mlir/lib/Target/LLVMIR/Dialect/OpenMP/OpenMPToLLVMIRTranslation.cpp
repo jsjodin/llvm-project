@@ -33,6 +33,7 @@
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/ReplaceConstant.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/IOSandbox.h"
 #include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -4617,6 +4618,11 @@ getDeclareTargetRefPtrSuffix(LLVM::GlobalOp globalOp,
           llvm::StringRef(loc.getFilename()), loc.getLine());
     };
 
+    // FIXME(sandboxing): This should use a vfs::FileSystem passed into
+    // ModuleTranslation via translateModuleToLLVMIR, instead of constructing
+    // a real filesystem here. getRealFileSystem() triggers the IO sandbox
+    // when called from clang -cc1 (e.g. CIR pipeline with -fclangir).
+    auto BypassSandbox = llvm::sys::sandbox::scopedDisable();
     auto vfs = llvm::vfs::getRealFileSystem();
     os << llvm::format(
         "_%x",
@@ -6269,6 +6275,11 @@ static void getTargetEntryUniqueInfo(llvm::TargetRegionEntryInfo &targetInfo,
   assert(fileLoc && "No file found from location");
   StringRef fileName = fileLoc.getFilename().getValue();
 
+  // FIXME(sandboxing): This uses llvm::sys::fs directly, which violates the IO
+  // sandbox enforced in clang -cc1. The proper fix is to thread a
+  // vfs::FileSystem through translateModuleToLLVMIR / ModuleTranslation and
+  // use vfs::FileSystem::status() here instead of sys::fs::getUniqueID.
+  auto BypassSandbox = llvm::sys::sandbox::scopedDisable();
   llvm::sys::fs::UniqueID id;
   uint64_t line = fileLoc.getLine();
   if (auto ec = llvm::sys::fs::getUniqueID(fileName, id)) {
@@ -7223,6 +7234,11 @@ convertDeclareTargetAttr(Operation *op, mlir::omp::DeclareTargetAttr attribute,
                                                      lineNo);
       };
 
+      // FIXME(sandboxing): This should use a vfs::FileSystem passed into
+      // ModuleTranslation via translateModuleToLLVMIR, instead of constructing
+      // a real filesystem here. getRealFileSystem() triggers the IO sandbox
+      // when called from clang -cc1 (e.g. CIR pipeline with -fclangir).
+      auto BypassSandbox = llvm::sys::sandbox::scopedDisable();
       auto vfs = llvm::vfs::getRealFileSystem();
 
       ompBuilder->registerTargetGlobalVariable(
@@ -7305,6 +7321,11 @@ LogicalResult OpenMPDialectLLVMIRTranslationInterface::amendOperation(
               if (auto filepathAttr = dyn_cast<StringAttr>(attr)) {
                 llvm::OpenMPIRBuilder *ompBuilder =
                     moduleTranslation.getOpenMPBuilder();
+                // FIXME(sandboxing): This should use a vfs::FileSystem
+                // passed into ModuleTranslation via
+                // translateModuleToLLVMIR, instead of constructing a real
+                // filesystem here.
+                auto BypassSandbox = llvm::sys::sandbox::scopedDisable();
                 auto VFS = llvm::vfs::getRealFileSystem();
                 ompBuilder->loadOffloadInfoMetadata(*VFS,
                                                     filepathAttr.getValue());
