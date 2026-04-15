@@ -1117,8 +1117,7 @@ RValue CIRGenFunction::emitCall(const CIRGenFunctionInfo &funcInfo,
         if (argPtrTy && vPtrTy &&
             argPtrTy.getPointee() == vPtrTy.getPointee() &&
             argPtrTy.getAddrSpace() != vPtrTy.getAddrSpace()) {
-          v = builder.create<cir::CastOp>(loc, argPtrTy,
-                                          cir::CastKind::address_space, v);
+          v = performAddrSpaceCast(v, argPtrTy);
         }
       }
 
