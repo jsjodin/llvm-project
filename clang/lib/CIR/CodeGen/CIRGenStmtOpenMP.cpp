@@ -109,6 +109,42 @@ emitParallelOp(CIRGenFunction &cgf, const DirectiveTy &s, mlir::Location begin,
   return res;
 }
 
+template <typename DirectiveTy>
+static mlir::LogicalResult
+emitTeamsOp(CIRGenFunction &cgf, const DirectiveTy &s, mlir::Location begin,
+            mlir::Location end,
+            llvm::function_ref<mlir::LogicalResult()> emitBody) {
+  CIRGenBuilderTy &builder = cgf.getBuilder();
+  CIRGenModule &cgm = cgf.getCIRGenModule();
+
+  llvm::SmallVector<const OMPClause *> clauses =
+      getLeafClauses(cgf, s, llvm::omp::OMPD_teams);
+
+  // No teams clauses are emittable yet, so report each eligible clause as NYI
+  // rather than silently dropping it.
+  mlir::omp::TeamsOperands clauseOps;
+  OpenMPClauseEmitter ce(cgf, cgm, builder, begin, clauses);
+  ce.emitNYI</*supported=*/>(
+      /*nyi=*/OpenMPNYIClauseList<
+          OMPAllocateClause, OMPDefaultClause, OMPDynGroupprivateClause,
+          OMPFirstprivateClause, OMPIfClause, OMPNumTeamsClause,
+          OMPPrivateClause, OMPReductionClause, OMPSharedClause,
+          OMPThreadLimitClause, OMPXAttributeClause>{},
+      llvm::omp::Directive::OMPD_teams);
+
+  auto teamsOp = mlir::omp::TeamsOp::create(builder, begin, clauseOps);
+
+  mlir::Block &block = teamsOp.getRegion().emplaceBlock();
+  mlir::OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToEnd(&block);
+
+  CIRGenFunction::LexicalScope ls{cgf, begin, builder.getInsertionBlock()};
+
+  mlir::LogicalResult res = emitBody();
+  mlir::omp::TerminatorOp::create(builder, end);
+  return res;
+}
+
 mlir::LogicalResult
 CIRGenFunction::emitOMPParallelDirective(const OMPParallelDirective &s) {
   mlir::Location begin = getLoc(s.getBeginLoc());
@@ -591,8 +627,13 @@ CIRGenFunction::emitOMPTargetDirective(const OMPTargetDirective &s) {
 }
 mlir::LogicalResult
 CIRGenFunction::emitOMPTeamsDirective(const OMPTeamsDirective &s) {
-  getCIRGenModule().errorNYI(s.getSourceRange(), "OpenMP OMPTeamsDirective");
-  return mlir::failure();
+  mlir::Location begin = getLoc(s.getBeginLoc());
+  mlir::Location end = getLoc(s.getEndLoc());
+
+  return emitTeamsOp(*this, s, begin, end, [&]() -> mlir::LogicalResult {
+    const CapturedStmt *cs = s.getCapturedStmt(llvm::omp::OMPD_teams);
+    return emitStmt(cs->getCapturedStmt(), /*useCurrentScope=*/true);
+  });
 }
 mlir::LogicalResult CIRGenFunction::emitOMPCancellationPointDirective(
     const OMPCancellationPointDirective &s) {
@@ -807,9 +848,17 @@ mlir::LogicalResult CIRGenFunction::emitOMPTeamsGenericLoopDirective(
 }
 mlir::LogicalResult
 CIRGenFunction::emitOMPTargetTeamsDirective(const OMPTargetTeamsDirective &s) {
-  getCIRGenModule().errorNYI(s.getSourceRange(),
-                             "OpenMP OMPTargetTeamsDirective");
-  return mlir::failure();
+  mlir::Location begin = getLoc(s.getBeginLoc());
+  mlir::Location end = getLoc(s.getEndLoc());
+
+  // `target teams` decomposes into a `target` leaf wrapping a `teams` leaf, so
+  // nest an omp.teams inside an omp.target.
+  return emitTargetOp(*this, s, begin, end, [&]() -> mlir::LogicalResult {
+    return emitTeamsOp(*this, s, begin, end, [&]() -> mlir::LogicalResult {
+      const CapturedStmt *cs = s.getCapturedStmt(llvm::omp::OMPD_teams);
+      return emitStmt(cs->getCapturedStmt(), /*useCurrentScope=*/true);
+    });
+  });
 }
 mlir::LogicalResult CIRGenFunction::emitOMPTargetTeamsDistributeDirective(
     const OMPTargetTeamsDistributeDirective &s) {
