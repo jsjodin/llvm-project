@@ -76,10 +76,15 @@ void OpenMPClauseEmitter::emitNYI(OpenMPNYIClauseList<NYIClauses...>,
            llvm::omp::getOpenMPClauseName(c->getClauseKind()) + "' clause")
               .str();
       cgm.errorNYI(c->getBeginLoc(), msg);
-    } else if (!isa<SupportedClauses...>(c)) {
-      // Unknown/illegal clause encountered.
-      llvm_unreachable("unexpected OpenMP clause");
+      continue;
     }
+    // A directive with no supported clauses (empty SupportedClauses pack) treats
+    // every eligible clause as not-yet-implemented, so anything reaching here is
+    // an unknown/illegal clause.
+    if constexpr (sizeof...(SupportedClauses) > 0)
+      if (isa<SupportedClauses...>(c))
+        continue;
+    llvm_unreachable("unexpected OpenMP clause");
   }
 }
 

@@ -19,4 +19,16 @@ void do_things() {
   // expected-error@+1{{ClangIR code gen Not Yet Implemented: OpenMP TARGET 'private' clause}}
 #pragma omp target private(i)
   {}
+
+  // The worksharing loop supports no clauses yet, so every `for`-leaf clause is
+  // reported as not-yet-implemented, including on combined directives.
+  // expected-error@+1{{ClangIR code gen Not Yet Implemented: OpenMP FOR 'schedule' clause}}
+#pragma omp parallel for schedule(static)
+  for (int j = 0; j < 10; j++) {
+  }
+
+  // expected-error@+1{{ClangIR code gen Not Yet Implemented: OpenMP FOR 'collapse' clause}}
+#pragma omp parallel for collapse(1)
+  for (int j = 0; j < 10; j++) {
+  }
 }
