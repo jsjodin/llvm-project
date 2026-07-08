@@ -13,6 +13,7 @@
 #include "CIRGenBuilder.h"
 #include "CIRGenFunction.h"
 #include "CIRGenOpenMPClause.h"
+#include "CIRGenOpenMPConstructDecomposition.h"
 #include "mlir/Dialect/OpenMP/OpenMPDialect.h"
 #include "clang/AST/OpenMPClause.h"
 #include "clang/AST/StmtOpenMP.h"
@@ -33,17 +34,38 @@ CIRGenFunction::emitOMPErrorDirective(const OMPErrorDirective &s) {
   return mlir::failure();
 }
 
-/// Returns the subset of \p s's clauses that are allowed on the given leaf
-/// directive.
+/// Returns the clauses the OpenMP spec assigns to \p leaf within \p s. For a
+/// leaf directive this is just its own clauses; combined/composite directives
+/// carry the union of their leaves' clauses, so we run the shared construct
+/// decomposition (tomp::ConstructDecompositionT, as Flang does) to distribute
+/// them.
+///
+/// The decomposition can synthesize clauses that were not written by the user
+/// and have no Clang AST node (e.g. a `shared` on `parallel` derived from a
+/// `lastprivate`). Those cannot go through the AST-based emitters, so we report
+/// any synthesized clause landing on the lowered leaf as not-yet-implemented
+/// rather than dropping a spec-required clause. This is currently unreachable:
+/// CIR only lowers the leaf `parallel`/`target` directives, which trigger no
+/// synthesis.
 static llvm::SmallVector<const OMPClause *>
 getLeafClauses(CIRGenFunction &cgf, const OMPExecutableDirective &s,
                llvm::omp::Directive leaf) {
   unsigned version = cgf.getContext().getLangOpts().OpenMP;
+  llvm::SmallVector<omp::LeafWithClauses> leaves = omp::decompose(version, s);
+
   llvm::SmallVector<const OMPClause *> result;
-  for (const OMPClause *c : s.clauses())
-    if (llvm::omp::isAllowedClauseForDirective(leaf, c->getClauseKind(),
-                                               version))
-      result.push_back(c);
+  for (const omp::LeafWithClauses &l : leaves) {
+    if (l.id != leaf)
+      continue;
+    for (llvm::omp::Clause synth : l.synthesized)
+      cgf.getCIRGenModule().errorNYI(
+          s.getSourceRange(),
+          (llvm::Twine("OpenMP synthesized '") +
+           llvm::omp::getOpenMPClauseName(synth) +
+           "' clause from construct decomposition")
+              .str());
+    llvm::append_range(result, l.clauses);
+  }
   return result;
 }
 
