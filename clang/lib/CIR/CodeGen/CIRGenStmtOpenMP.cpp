@@ -250,29 +250,29 @@ emitOMPLoopNest(CIRGenFunction &cgf, const ForStmt &forStmt, mlir::Value lb,
   return bodyRes;
 }
 
-/// Lowers an OMPLoopDirective into an omp.wsloop + omp.loop_nest.
-/// The original loop bounds are passed directly to omp.loop_nest, which
-/// handles work distribution. The induction variable alloca is emitted before
-/// the wsloop region so that the loop body can reference it.
-static mlir::LogicalResult emitOMPWorksharingLoop(CIRGenFunction &cgf,
-                                                  const OMPLoopDirective &s) {
-  CIRGenBuilderTy &builder = cgf.getBuilder();
-  CIRGenModule &cgm = cgf.getCIRGenModule();
-  mlir::Location loc = cgf.getLoc(s.getBeginLoc());
+/// The iteration space of a canonical OpenMP loop, ready to be handed to
+/// omp.loop_nest. The bounds are builtin integers and the for-init (induction
+/// variable alloca) has already been emitted into the enclosing region.
+namespace {
+struct LoweredOMPLoop {
+  const ForStmt *forStmt = nullptr;
+  const VarDecl *inductionVar = nullptr;
+  mlir::Value lowerBound;
+  mlir::Value upperBound;
+  mlir::Value step;
+  bool inclusive = false;
+};
+} // namespace
 
-  // The worksharing loop emits no clauses yet, so route the `for`-leaf clauses
-  // through the decomposition and report each eligible clause as NYI rather
-  // than silently dropping it.
-  llvm::SmallVector<const OMPClause *> clauses =
-      getLeafClauses(cgf, s, llvm::omp::OMPD_for);
-  OpenMPClauseEmitter ce(cgf, cgm, builder, loc, clauses);
-  ce.emitNYI</*supported=*/>(
-      /*nyi=*/OpenMPNYIClauseList<
-          OMPAllocateClause, OMPCollapseClause, OMPFirstprivateClause,
-          OMPLastprivateClause, OMPLinearClause, OMPNowaitClause,
-          OMPOrderClause, OMPOrderedClause, OMPPrivateClause,
-          OMPReductionClause, OMPScheduleClause>{},
-      llvm::omp::Directive::OMPD_for);
+/// Emits the pre-inits and for-init of an OMPLoopDirective and computes the
+/// canonical loop bounds for omp.loop_nest. The induction variable alloca is
+/// emitted here (before any loop-wrapper op) so it stays visible to the loop
+/// body. Returns failure for loop shapes that are not yet supported.
+static mlir::LogicalResult emitLoweredOMPLoop(CIRGenFunction &cgf,
+                                              const OMPLoopDirective &s,
+                                              LoweredOMPLoop &out) {
+  CIRGenBuilderTy &builder = cgf.getBuilder();
+  mlir::Location loc = cgf.getLoc(s.getBeginLoc());
 
   if (doEmitPreinits(cgf, s.getPreInits()).failed())
     return mlir::failure();
@@ -349,16 +349,57 @@ static mlir::LogicalResult emitOMPWorksharingLoop(CIRGenFunction &cgf,
   if (!step)
     step = builder.getConstInt(loc, cirIntType, 1);
 
-  // The induction variable alloca must be visible in the wsloop region below,
-  // so emit the init before creating the wsloop op.
+  // The induction variable alloca must be visible in the loop-wrapper region
+  // created by the caller, so emit the init before that op is created.
   if (forStmt->getInit())
     if (cgf.emitStmt(forStmt->getInit(), /*useCurrentScope=*/true).failed())
       return mlir::failure();
 
   // omp.loop_nest requires IntLikeType operands, not CIR integer types.
-  mlir::Value stdLB = cirIntToStdInt(builder, loc, lowerBound);
-  mlir::Value stdUB = cirIntToStdInt(builder, loc, upperBound);
-  mlir::Value stdStep = cirIntToStdInt(builder, loc, step);
+  out.forStmt = forStmt;
+  out.inductionVar = varDecl;
+  out.lowerBound = cirIntToStdInt(builder, loc, lowerBound);
+  out.upperBound = cirIntToStdInt(builder, loc, upperBound);
+  out.step = cirIntToStdInt(builder, loc, step);
+  out.inclusive = inclusive;
+  return mlir::success();
+}
+
+/// Emits the omp.loop_nest for \p loop inside the wrapper region the caller has
+/// already entered (e.g. an omp.wsloop or omp.distribute block).
+static mlir::LogicalResult emitOMPLoopNestBody(CIRGenFunction &cgf,
+                                               const LoweredOMPLoop &loop) {
+  return emitOMPLoopNest(cgf, *loop.forStmt, loop.lowerBound, loop.upperBound,
+                         loop.step, loop.inclusive, loop.inductionVar);
+}
+
+/// Lowers an OMPLoopDirective into an omp.wsloop + omp.loop_nest.
+/// The original loop bounds are passed directly to omp.loop_nest, which
+/// handles work distribution. The induction variable alloca is emitted before
+/// the wsloop region so that the loop body can reference it.
+static mlir::LogicalResult emitOMPWorksharingLoop(CIRGenFunction &cgf,
+                                                  const OMPLoopDirective &s) {
+  CIRGenBuilderTy &builder = cgf.getBuilder();
+  CIRGenModule &cgm = cgf.getCIRGenModule();
+  mlir::Location loc = cgf.getLoc(s.getBeginLoc());
+
+  // The worksharing loop emits no clauses yet, so route the `for`-leaf clauses
+  // through the decomposition and report each eligible clause as NYI rather
+  // than silently dropping it.
+  llvm::SmallVector<const OMPClause *> clauses =
+      getLeafClauses(cgf, s, llvm::omp::OMPD_for);
+  OpenMPClauseEmitter ce(cgf, cgm, builder, loc, clauses);
+  ce.emitNYI</*supported=*/>(
+      /*nyi=*/OpenMPNYIClauseList<
+          OMPAllocateClause, OMPCollapseClause, OMPFirstprivateClause,
+          OMPLastprivateClause, OMPLinearClause, OMPNowaitClause,
+          OMPOrderClause, OMPOrderedClause, OMPPrivateClause,
+          OMPReductionClause, OMPScheduleClause>{},
+      llvm::omp::Directive::OMPD_for);
+
+  LoweredOMPLoop loop;
+  if (emitLoweredOMPLoop(cgf, s, loop).failed())
+    return mlir::failure();
 
   llvm::SmallVector<mlir::Type> retTy;
   llvm::SmallVector<mlir::Value> operands;
@@ -371,8 +412,43 @@ static mlir::LogicalResult emitOMPWorksharingLoop(CIRGenFunction &cgf,
   // loop region.
   mlir::OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToStart(innerBlock);
-  return emitOMPLoopNest(cgf, *forStmt, stdLB, stdUB, stdStep, inclusive,
-                         varDecl);
+  return emitOMPLoopNestBody(cgf, loop);
+}
+
+/// Lowers an OMPLoopDirective into an omp.distribute + omp.loop_nest. The
+/// distribute construct partitions loop iterations across the teams of the
+/// enclosing teams region; it shares the canonical loop lowering with the
+/// worksharing loop and only differs in the wrapper op and clause set.
+static mlir::LogicalResult emitOMPDistributeLoop(CIRGenFunction &cgf,
+                                                 const OMPLoopDirective &s) {
+  CIRGenBuilderTy &builder = cgf.getBuilder();
+  CIRGenModule &cgm = cgf.getCIRGenModule();
+  mlir::Location loc = cgf.getLoc(s.getBeginLoc());
+
+  // No distribute clauses are emittable yet, so report each eligible
+  // `distribute`-leaf clause as NYI rather than silently dropping it.
+  llvm::SmallVector<const OMPClause *> clauses =
+      getLeafClauses(cgf, s, llvm::omp::OMPD_distribute);
+  OpenMPClauseEmitter ce(cgf, cgm, builder, loc, clauses);
+  ce.emitNYI</*supported=*/>(
+      /*nyi=*/OpenMPNYIClauseList<
+          OMPAllocateClause, OMPCollapseClause, OMPDistScheduleClause,
+          OMPFirstprivateClause, OMPLastprivateClause, OMPOrderClause,
+          OMPPrivateClause>{},
+      llvm::omp::Directive::OMPD_distribute);
+
+  LoweredOMPLoop loop;
+  if (emitLoweredOMPLoop(cgf, s, loop).failed())
+    return mlir::failure();
+
+  mlir::omp::DistributeOperands clauseOps;
+  auto distributeOp = mlir::omp::DistributeOp::create(builder, loc, clauseOps);
+  mlir::Block *innerBlock = new mlir::Block();
+  distributeOp.getRegion().push_back(innerBlock);
+
+  mlir::OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(innerBlock);
+  return emitOMPLoopNestBody(cgf, loop);
 }
 
 mlir::LogicalResult
@@ -763,9 +839,7 @@ mlir::LogicalResult CIRGenFunction::emitOMPParallelMasterTaskLoopSimdDirective(
 }
 mlir::LogicalResult
 CIRGenFunction::emitOMPDistributeDirective(const OMPDistributeDirective &s) {
-  getCIRGenModule().errorNYI(s.getSourceRange(),
-                             "OpenMP OMPDistributeDirective");
-  return mlir::failure();
+  return emitOMPDistributeLoop(*this, s);
 }
 mlir::LogicalResult CIRGenFunction::emitOMPDistributeParallelForDirective(
     const OMPDistributeParallelForDirective &s) {
@@ -817,9 +891,14 @@ mlir::LogicalResult CIRGenFunction::emitOMPTargetUpdateDirective(
 }
 mlir::LogicalResult CIRGenFunction::emitOMPTeamsDistributeDirective(
     const OMPTeamsDistributeDirective &s) {
-  getCIRGenModule().errorNYI(s.getSourceRange(),
-                             "OpenMP OMPTeamsDistributeDirective");
-  return mlir::failure();
+  mlir::Location begin = getLoc(s.getBeginLoc());
+  mlir::Location end = getLoc(s.getEndLoc());
+
+  // `teams distribute` decomposes into a `teams` leaf wrapping a `distribute`
+  // leaf, so nest an omp.distribute inside an omp.teams.
+  return emitTeamsOp(*this, s, begin, end, [&]() -> mlir::LogicalResult {
+    return emitOMPDistributeLoop(*this, s);
+  });
 }
 mlir::LogicalResult CIRGenFunction::emitOMPTeamsDistributeSimdDirective(
     const OMPTeamsDistributeSimdDirective &s) {
@@ -862,9 +941,17 @@ CIRGenFunction::emitOMPTargetTeamsDirective(const OMPTargetTeamsDirective &s) {
 }
 mlir::LogicalResult CIRGenFunction::emitOMPTargetTeamsDistributeDirective(
     const OMPTargetTeamsDistributeDirective &s) {
-  getCIRGenModule().errorNYI(s.getSourceRange(),
-                             "OpenMP OMPTargetTeamsDistributeDirective");
-  return mlir::failure();
+  mlir::Location begin = getLoc(s.getBeginLoc());
+  mlir::Location end = getLoc(s.getEndLoc());
+
+  // `target teams distribute` decomposes into `target`, `teams` and
+  // `distribute` leaves, so nest an omp.distribute inside an omp.teams inside
+  // an omp.target.
+  return emitTargetOp(*this, s, begin, end, [&]() -> mlir::LogicalResult {
+    return emitTeamsOp(*this, s, begin, end, [&]() -> mlir::LogicalResult {
+      return emitOMPDistributeLoop(*this, s);
+    });
+  });
 }
 mlir::LogicalResult
 CIRGenFunction::emitOMPTargetTeamsDistributeParallelForDirective(
