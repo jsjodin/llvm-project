@@ -37,8 +37,34 @@ mapClauseKindToFlags(OpenMPMapClauseKind kind) {
   }
 }
 
+/// Build an omp.map.bounds op describing the full extent of a fixed-size
+/// array. Bounds are normalized (zero-based): lower_bound(0),
+/// upper_bound(size - 1), extent(size), stride(1) and start_idx(0). The
+/// operands are builtin integers, as required by the OpenMP dialect.
+static mlir::Value emitWholeArrayBounds(CIRGenBuilderTy &builder,
+                                        mlir::Location loc,
+                                        cir::ArrayType arrayType) {
+  cir::IntType cirI64 = builder.getSInt64Ty();
+  mlir::Type i64 = builder.getIntegerType(64);
+  auto constant = [&](int64_t value) -> mlir::Value {
+    mlir::Value c = builder.getConstInt(loc, cirI64, value);
+    return builder.createBuiltinIntCast(loc, c, i64);
+  };
+
+  uint64_t size = arrayType.getSize();
+  mlir::Value lowerBound = constant(0);
+  mlir::Value upperBound = constant(static_cast<int64_t>(size) - 1);
+  mlir::Value extent = constant(static_cast<int64_t>(size));
+  mlir::Value stride = constant(1);
+  mlir::Value startIdx = constant(0);
+
+  return mlir::omp::MapBoundsOp::create(
+      builder, loc, builder.getType<mlir::omp::MapBoundsType>(), lowerBound,
+      upperBound, extent, stride, /*stride_in_bytes=*/false, startIdx);
+}
+
 static mlir::Value emitMapInfoForVar(CIRGenFunction &cgf,
-                                     mlir::OpBuilder &builder,
+                                     CIRGenBuilderTy &builder,
                                      mlir::Location loc, const VarDecl *vd,
                                      mlir::omp::ClauseMapFlags mapFlags) {
   Address addr = cgf.getAddrOfLocalVar(vd);
@@ -55,6 +81,15 @@ static mlir::Value emitMapInfoForVar(CIRGenFunction &cgf,
     varPtrType = genericPtrType;
   }
 
+  // For a fixed-size array, emit bounds describing the whole array so that the
+  // runtime maps the entire buffer rather than just the first element. Bounds
+  // are host-only metadata used to compute transfer sizes; the device only
+  // needs the base pointer, so they are omitted during device compilation.
+  llvm::SmallVector<mlir::Value, 1> bounds;
+  if (!cgf.getLangOpts().OpenMPIsTargetDevice)
+    if (auto arrayType = mlir::dyn_cast<cir::ArrayType>(elementType))
+      bounds.push_back(emitWholeArrayBounds(builder, loc, arrayType));
+
   return mlir::omp::MapInfoOp::create(
       builder, loc,
       /*omp_ptr=*/varPtrType,
@@ -68,7 +103,7 @@ static mlir::Value emitMapInfoForVar(CIRGenFunction &cgf,
       /*var_ptr_ptr_type=*/mlir::TypeAttr{},
       /*members=*/mlir::ValueRange{},
       /*members_index=*/mlir::ArrayAttr{},
-      /*bounds=*/mlir::ValueRange{},
+      /*bounds=*/bounds,
       /*mapper_id=*/mlir::FlatSymbolRefAttr{},
       /*name=*/builder.getStringAttr(vd->getName()),
       /*partial_map=*/builder.getBoolAttr(false));
@@ -133,6 +168,19 @@ bool OpenMPClauseEmitter::emitMap(
         cgm.errorNYI(varExpr->getExprLoc(),
                      "OpenMP map clause with non-VarDecl variable");
         continue;
+      }
+
+      // Only whole, fixed-size (constant) arrays of non-array element type are
+      // supported. Multi-dimensional and variable-length arrays are NYI.
+      QualType varType = vd->getType().getCanonicalType();
+      if (varType->isArrayType()) {
+        const auto *cat = dyn_cast<ConstantArrayType>(varType);
+        if (!cat || cat->getElementType()->isArrayType()) {
+          cgm.errorNYI(varExpr->getExprLoc(),
+                       "OpenMP map clause with non-constant or "
+                       "multi-dimensional array");
+          continue;
+        }
       }
 
       result.mapVars.push_back(
