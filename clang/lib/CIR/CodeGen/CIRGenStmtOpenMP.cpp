@@ -70,6 +70,21 @@ getLeafClauses(CIRGenFunction &cgf, const OMPExecutableDirective &s,
   return result;
 }
 
+/// Whether the `parallel` leaf of \p dir wraps a `distribute` leaf, making it
+/// the composite `omp.parallel` of a `distribute parallel for` construct (which
+/// must carry the omp.composite marker). Otherwise the `parallel` leaf is a
+/// non-innermost combined leaf whenever a worksharing `for` follows it.
+static bool parallelLeafIsComposite(llvm::omp::Directive dir) {
+  switch (dir) {
+  case llvm::omp::OMPD_distribute_parallel_for:
+  case llvm::omp::OMPD_teams_distribute_parallel_for:
+  case llvm::omp::OMPD_target_teams_distribute_parallel_for:
+    return true;
+  default:
+    return false;
+  }
+}
+
 template <typename DirectiveTy>
 static mlir::LogicalResult
 emitParallelOp(CIRGenFunction &cgf, const DirectiveTy &s, mlir::Location begin,
@@ -92,6 +107,16 @@ emitParallelOp(CIRGenFunction &cgf, const DirectiveTy &s, mlir::Location begin,
       llvm::omp::Directive::OMPD_parallel);
 
   auto parallelOp = mlir::omp::ParallelOp::create(builder, begin, clauseOps);
+
+  // A `parallel` leaf that wraps a `distribute` is part of a composite
+  // construct; otherwise it is a combined leaf whenever it is not the innermost
+  // leaf (i.e. a worksharing `for` follows it).
+  llvm::omp::Directive dir = s.getDirectiveKind();
+  if (parallelLeafIsComposite(dir))
+    parallelOp.setComposite(true);
+  else if (dir != llvm::omp::OMPD_parallel &&
+           dir != llvm::omp::OMPD_target_parallel)
+    parallelOp.setCombined(true);
 
   mlir::Block &block = parallelOp.getRegion().emplaceBlock();
   mlir::OpBuilder::InsertionGuard guard(builder);
@@ -133,6 +158,13 @@ emitTeamsOp(CIRGenFunction &cgf, const DirectiveTy &s, mlir::Location begin,
       llvm::omp::Directive::OMPD_teams);
 
   auto teamsOp = mlir::omp::TeamsOp::create(builder, begin, clauseOps);
+
+  // `teams` is a combined leaf unless it is the innermost leaf of the construct
+  // (plain `teams` or `target teams`); a `distribute` leaf following it makes it
+  // non-innermost.
+  llvm::omp::Directive dir = s.getDirectiveKind();
+  if (dir != llvm::omp::OMPD_teams && dir != llvm::omp::OMPD_target_teams)
+    teamsOp.setCombined(true);
 
   mlir::Block &block = teamsOp.getRegion().emplaceBlock();
   mlir::OpBuilder::InsertionGuard guard(builder);
@@ -373,22 +405,14 @@ static mlir::LogicalResult emitOMPLoopNestBody(CIRGenFunction &cgf,
                          loop.step, loop.inclusive, loop.inductionVar);
 }
 
-/// Lowers an OMPLoopDirective into an omp.wsloop + omp.loop_nest.
-/// The original loop bounds are passed directly to omp.loop_nest, which
-/// handles work distribution. The induction variable alloca is emitted before
-/// the wsloop region so that the loop body can reference it.
-static mlir::LogicalResult emitOMPWorksharingLoop(CIRGenFunction &cgf,
-                                                  const OMPLoopDirective &s) {
-  CIRGenBuilderTy &builder = cgf.getBuilder();
-  CIRGenModule &cgm = cgf.getCIRGenModule();
-  mlir::Location loc = cgf.getLoc(s.getBeginLoc());
-
-  // The worksharing loop emits no clauses yet, so route the `for`-leaf clauses
-  // through the decomposition and report each eligible clause as NYI rather
-  // than silently dropping it.
+/// Reports each `for`-leaf clause as NYI. The worksharing loop emits no clauses
+/// yet, so anything routed to the `for` leaf is diagnosed rather than dropped.
+static void emitWorksharingLoopClausesNYI(CIRGenFunction &cgf,
+                                          const OMPLoopDirective &s) {
   llvm::SmallVector<const OMPClause *> clauses =
       getLeafClauses(cgf, s, llvm::omp::OMPD_for);
-  OpenMPClauseEmitter ce(cgf, cgm, builder, loc, clauses);
+  OpenMPClauseEmitter ce(cgf, cgf.getCIRGenModule(), cgf.getBuilder(),
+                         cgf.getLoc(s.getBeginLoc()), clauses);
   ce.emitNYI</*supported=*/>(
       /*nyi=*/OpenMPNYIClauseList<
           OMPAllocateClause, OMPCollapseClause, OMPFirstprivateClause,
@@ -396,22 +420,70 @@ static mlir::LogicalResult emitOMPWorksharingLoop(CIRGenFunction &cgf,
           OMPOrderClause, OMPOrderedClause, OMPPrivateClause,
           OMPReductionClause, OMPScheduleClause>{},
       llvm::omp::Directive::OMPD_for);
+}
+
+/// Reports each `distribute`-leaf clause as NYI (none are emittable yet).
+static void emitDistributeClausesNYI(CIRGenFunction &cgf,
+                                     const OMPLoopDirective &s) {
+  llvm::SmallVector<const OMPClause *> clauses =
+      getLeafClauses(cgf, s, llvm::omp::OMPD_distribute);
+  OpenMPClauseEmitter ce(cgf, cgf.getCIRGenModule(), cgf.getBuilder(),
+                         cgf.getLoc(s.getBeginLoc()), clauses);
+  ce.emitNYI</*supported=*/>(
+      /*nyi=*/OpenMPNYIClauseList<
+          OMPAllocateClause, OMPCollapseClause, OMPDistScheduleClause,
+          OMPFirstprivateClause, OMPLastprivateClause, OMPOrderClause,
+          OMPPrivateClause>{},
+      llvm::omp::Directive::OMPD_distribute);
+}
+
+namespace {
+/// The loop-wrapper ops CIR can stack around an omp.loop_nest.
+enum class LoopWrapperKind { Wsloop, Distribute };
+} // namespace
+
+/// Creates a loop-wrapper op of \p kind, pushes its region block, and moves the
+/// builder inside it (leaving the insertion point ready for the next nested
+/// wrapper or the omp.loop_nest). When \p composite the wrapper is marked with
+/// the omp.composite attribute required for composite constructs. The caller is
+/// responsible for restoring the insertion point (e.g. via an InsertionGuard).
+static void enterLoopWrapper(CIRGenFunction &cgf, mlir::Location loc,
+                             LoopWrapperKind kind, bool composite) {
+  CIRGenBuilderTy &builder = cgf.getBuilder();
+  mlir::Operation *op;
+  if (kind == LoopWrapperKind::Wsloop) {
+    llvm::SmallVector<mlir::Type> retTy;
+    llvm::SmallVector<mlir::Value> operands;
+    op = mlir::omp::WsloopOp::create(builder, loc, retTy, operands);
+  } else {
+    mlir::omp::DistributeOperands clauseOps;
+    op = mlir::omp::DistributeOp::create(builder, loc, clauseOps);
+  }
+  if (composite)
+    mlir::cast<mlir::omp::ComposableOpInterface>(op).setComposite(true);
+
+  mlir::Block *block = new mlir::Block();
+  op->getRegion(0).push_back(block);
+  builder.setInsertionPointToStart(block);
+}
+
+/// Lowers an OMPLoopDirective into an omp.wsloop + omp.loop_nest.
+/// The original loop bounds are passed directly to omp.loop_nest, which
+/// handles work distribution. The induction variable alloca is emitted before
+/// the wsloop region so that the loop body can reference it.
+static mlir::LogicalResult emitOMPWorksharingLoop(CIRGenFunction &cgf,
+                                                  const OMPLoopDirective &s) {
+  mlir::Location loc = cgf.getLoc(s.getBeginLoc());
+  emitWorksharingLoopClausesNYI(cgf, s);
 
   LoweredOMPLoop loop;
   if (emitLoweredOMPLoop(cgf, s, loop).failed())
     return mlir::failure();
 
-  llvm::SmallVector<mlir::Type> retTy;
-  llvm::SmallVector<mlir::Value> operands;
-  auto wsloopOp = mlir::omp::WsloopOp::create(builder, loc, retTy, operands);
-  mlir::Block *innerBlock = new mlir::Block();
-  wsloopOp.getRegion().push_back(innerBlock);
-
-  // Emit the omp.loop_nest directly inside the wsloop region. The for-init was
-  // already emitted above so the induction variable alloca lives outside the
-  // loop region.
-  mlir::OpBuilder::InsertionGuard guard(builder);
-  builder.setInsertionPointToStart(innerBlock);
+  // The for-init was emitted above so the induction variable alloca lives
+  // outside the standalone wsloop region.
+  mlir::OpBuilder::InsertionGuard guard(cgf.getBuilder());
+  enterLoopWrapper(cgf, loc, LoopWrapperKind::Wsloop, /*composite=*/false);
   return emitOMPLoopNestBody(cgf, loop);
 }
 
@@ -421,33 +493,38 @@ static mlir::LogicalResult emitOMPWorksharingLoop(CIRGenFunction &cgf,
 /// worksharing loop and only differs in the wrapper op and clause set.
 static mlir::LogicalResult emitOMPDistributeLoop(CIRGenFunction &cgf,
                                                  const OMPLoopDirective &s) {
-  CIRGenBuilderTy &builder = cgf.getBuilder();
-  CIRGenModule &cgm = cgf.getCIRGenModule();
   mlir::Location loc = cgf.getLoc(s.getBeginLoc());
-
-  // No distribute clauses are emittable yet, so report each eligible
-  // `distribute`-leaf clause as NYI rather than silently dropping it.
-  llvm::SmallVector<const OMPClause *> clauses =
-      getLeafClauses(cgf, s, llvm::omp::OMPD_distribute);
-  OpenMPClauseEmitter ce(cgf, cgm, builder, loc, clauses);
-  ce.emitNYI</*supported=*/>(
-      /*nyi=*/OpenMPNYIClauseList<
-          OMPAllocateClause, OMPCollapseClause, OMPDistScheduleClause,
-          OMPFirstprivateClause, OMPLastprivateClause, OMPOrderClause,
-          OMPPrivateClause>{},
-      llvm::omp::Directive::OMPD_distribute);
+  emitDistributeClausesNYI(cgf, s);
 
   LoweredOMPLoop loop;
   if (emitLoweredOMPLoop(cgf, s, loop).failed())
     return mlir::failure();
 
-  mlir::omp::DistributeOperands clauseOps;
-  auto distributeOp = mlir::omp::DistributeOp::create(builder, loc, clauseOps);
-  mlir::Block *innerBlock = new mlir::Block();
-  distributeOp.getRegion().push_back(innerBlock);
+  mlir::OpBuilder::InsertionGuard guard(cgf.getBuilder());
+  enterLoopWrapper(cgf, loc, LoopWrapperKind::Distribute, /*composite=*/false);
+  return emitOMPLoopNestBody(cgf, loop);
+}
 
-  mlir::OpBuilder::InsertionGuard guard(builder);
-  builder.setInsertionPointToStart(innerBlock);
+/// Lowers the `distribute parallel for` composite loop leaves into the stacked
+/// omp.distribute + omp.wsloop + omp.loop_nest, with both wrappers marked
+/// composite. This is emitted inside the composite omp.parallel created by the
+/// caller (which holds the sole omp.distribute child the verifier allows).
+static mlir::LogicalResult
+emitOMPDistributeParallelForLoop(CIRGenFunction &cgf,
+                                 const OMPLoopDirective &s) {
+  mlir::Location loc = cgf.getLoc(s.getBeginLoc());
+  emitDistributeClausesNYI(cgf, s);
+  emitWorksharingLoopClausesNYI(cgf, s);
+
+  LoweredOMPLoop loop;
+  if (emitLoweredOMPLoop(cgf, s, loop).failed())
+    return mlir::failure();
+
+  // Stack the composite loop wrappers around a single shared omp.loop_nest:
+  // omp.distribute {composite} > omp.wsloop {composite} > omp.loop_nest.
+  mlir::OpBuilder::InsertionGuard guard(cgf.getBuilder());
+  enterLoopWrapper(cgf, loc, LoopWrapperKind::Distribute, /*composite=*/true);
+  enterLoopWrapper(cgf, loc, LoopWrapperKind::Wsloop, /*composite=*/true);
   return emitOMPLoopNestBody(cgf, loop);
 }
 
@@ -659,7 +736,16 @@ emitTargetOp(CIRGenFunction &cgf, const DirectiveTy &s, mlir::Location begin,
 
   emitOMPTargetImplicitCaptures(cgf, s, mapSyms);
 
-  // Use generic for now.
+  // The omp.target metadata that distinguishes combined/SPMD target regions
+  // (the omp.combined marker and a non-generic kernel_type) is intentionally
+  // deferred: both are inseparable from host_eval. Marking the target combined
+  // makes ComposableOpInterface::findCapturedOp descend to the nested
+  // omp.loop_nest, and an spmd kernel_type or a target-teams-distribute pattern
+  // then makes TargetOp's verifier require the loop bounds to be host_eval block
+  // arguments (see TargetOp::hasHostEvalTripCount). Until host_eval is
+  // implemented, every target region stays generic and unmarked, with the loop
+  // bounds evaluated in-region, which is the representation already used for
+  // 'target teams distribute'.
   clauseOps.kernelType = mlir::omp::TargetExecModeAttr::get(
       &cgf.getMLIRContext(), mlir::omp::TargetExecMode::generic);
 
@@ -843,9 +929,14 @@ CIRGenFunction::emitOMPDistributeDirective(const OMPDistributeDirective &s) {
 }
 mlir::LogicalResult CIRGenFunction::emitOMPDistributeParallelForDirective(
     const OMPDistributeParallelForDirective &s) {
-  getCIRGenModule().errorNYI(s.getSourceRange(),
-                             "OpenMP OMPDistributeParallelForDirective");
-  return mlir::failure();
+  mlir::Location begin = getLoc(s.getBeginLoc());
+  mlir::Location end = getLoc(s.getEndLoc());
+
+  // `distribute parallel for` is a composite construct: a composite
+  // omp.parallel wrapping the composite omp.distribute + omp.wsloop stack.
+  return emitParallelOp(*this, s, begin, end, [&]() -> mlir::LogicalResult {
+    return emitOMPDistributeParallelForLoop(*this, s);
+  });
 }
 mlir::LogicalResult CIRGenFunction::emitOMPDistributeParallelForSimdDirective(
     const OMPDistributeParallelForSimdDirective &s) {
@@ -915,9 +1006,16 @@ CIRGenFunction::emitOMPTeamsDistributeParallelForSimdDirective(
 }
 mlir::LogicalResult CIRGenFunction::emitOMPTeamsDistributeParallelForDirective(
     const OMPTeamsDistributeParallelForDirective &s) {
-  getCIRGenModule().errorNYI(s.getSourceRange(),
-                             "OpenMP OMPTeamsDistributeParallelForDirective");
-  return mlir::failure();
+  mlir::Location begin = getLoc(s.getBeginLoc());
+  mlir::Location end = getLoc(s.getEndLoc());
+
+  // `teams distribute parallel for` nests the composite `distribute parallel
+  // for` stack inside an omp.teams.
+  return emitTeamsOp(*this, s, begin, end, [&]() -> mlir::LogicalResult {
+    return emitParallelOp(*this, s, begin, end, [&]() -> mlir::LogicalResult {
+      return emitOMPDistributeParallelForLoop(*this, s);
+    });
+  });
 }
 mlir::LogicalResult CIRGenFunction::emitOMPTeamsGenericLoopDirective(
     const OMPTeamsGenericLoopDirective &s) {
@@ -956,10 +1054,18 @@ mlir::LogicalResult CIRGenFunction::emitOMPTargetTeamsDistributeDirective(
 mlir::LogicalResult
 CIRGenFunction::emitOMPTargetTeamsDistributeParallelForDirective(
     const OMPTargetTeamsDistributeParallelForDirective &s) {
-  getCIRGenModule().errorNYI(
-      s.getSourceRange(),
-      "OpenMP OMPTargetTeamsDistributeParallelForDirective");
-  return mlir::failure();
+  mlir::Location begin = getLoc(s.getBeginLoc());
+  mlir::Location end = getLoc(s.getEndLoc());
+
+  // `target teams distribute parallel for` nests the composite `distribute
+  // parallel for` stack inside omp.teams inside an (SPMD) omp.target.
+  return emitTargetOp(*this, s, begin, end, [&]() -> mlir::LogicalResult {
+    return emitTeamsOp(*this, s, begin, end, [&]() -> mlir::LogicalResult {
+      return emitParallelOp(*this, s, begin, end, [&]() -> mlir::LogicalResult {
+        return emitOMPDistributeParallelForLoop(*this, s);
+      });
+    });
+  });
 }
 mlir::LogicalResult
 CIRGenFunction::emitOMPTargetTeamsDistributeParallelForSimdDirective(

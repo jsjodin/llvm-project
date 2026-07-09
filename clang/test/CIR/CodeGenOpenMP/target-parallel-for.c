@@ -74,7 +74,10 @@ void target_parallel_for() {
 // The combined `target parallel for` directive decomposes into `target`,
 // `parallel` and `for` leaves and lowers to the same nesting as the explicit
 // target/parallel/for above: an omp.wsloop + omp.loop_nest inside omp.parallel
-// inside omp.target.
+// inside omp.target. Unlike the separate-pragma form, the `parallel` leaf is
+// not the innermost leaf here, so it carries the omp.combined marker. The
+// omp.target itself stays generic and unmarked (its combined/SPMD metadata is
+// deferred together with host_eval).
 void combined_target_parallel_for() {
 #pragma omp target parallel for
   for (int i = 0; i < 10; i++) {
@@ -93,6 +96,7 @@ void combined_target_parallel_for() {
 // CIR-HOST: }
 // CIR-HOST: }
 // CIR-HOST: omp.terminator
+// CIR-HOST: } {omp.combined}
 // CIR-HOST: omp.terminator
 // CIR-HOST: }
 
@@ -106,5 +110,6 @@ void combined_target_parallel_for() {
 // CIR-DEVICE: }
 // CIR-DEVICE: }
 // CIR-DEVICE: omp.terminator
+// CIR-DEVICE: } {omp.combined}
 // CIR-DEVICE: omp.terminator
 // CIR-DEVICE: }

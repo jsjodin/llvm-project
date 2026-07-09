@@ -41,6 +41,8 @@ void standalone_distribute() {
 
 // The combined `teams distribute` directive decomposes into a `teams` leaf and
 // a `distribute` leaf, lowering to an omp.distribute nested inside an omp.teams.
+// The `teams` leaf is not the innermost leaf, so it carries the omp.combined
+// marker (unlike the standalone `teams` above).
 void teams_distribute() {
   // CHECK: cir.func{{.*}}@teams_distribute
 #pragma omp teams distribute
@@ -56,5 +58,5 @@ void teams_distribute() {
   // CHECK: }
   // CHECK: }
   // CHECK: omp.terminator
-  // CHECK: }
+  // CHECK: } {omp.combined}
 }

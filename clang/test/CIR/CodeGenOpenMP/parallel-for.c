@@ -4,7 +4,9 @@ void during(int);
 
 // The combined `parallel for` directive decomposes into a `parallel` leaf and a
 // `for` leaf. It lowers to an omp.wsloop + omp.loop_nest nested directly inside
-// an omp.parallel, mirroring the separate `parallel` / `for` nesting.
+// an omp.parallel, mirroring the separate `parallel` / `for` nesting. The
+// `parallel` leaf is not the innermost leaf, so it carries the omp.combined
+// marker.
 void parallel_for() {
   // CHECK: cir.func{{.*}}@{{.*}}parallel_for
 #pragma omp parallel for
@@ -36,5 +38,5 @@ void parallel_for() {
   // CHECK: }
   // CHECK: }
   // CHECK: omp.terminator
-  // CHECK: }
+  // CHECK: } {omp.combined}
 }
