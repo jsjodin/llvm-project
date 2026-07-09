@@ -33,6 +33,25 @@ struct OMPMapVar {
   bool isPointerSection = false;
 };
 
+/// The result of lowering the reduction clauses of an OpenMP leaf. The vectors
+/// are parallel and ordered to match the reduction clause operands expected by
+/// the OpenMP dialect leaf ops.
+struct OMPReductionInfo {
+  /// The reduction accumulator operands (addresses of the reduction variables,
+  /// i.e. CIR pointers).
+  llvm::SmallVector<mlir::Value> vars;
+  /// The omp.declare_reduction symbol referenced by each operand.
+  llvm::SmallVector<mlir::Attribute> syms;
+  /// Whether each reduction variable is passed by reference. Simple built-in
+  /// reductions on scalars use by-value semantics (all false), matching Flang.
+  llvm::SmallVector<bool> byref;
+  /// The reduction variables, used to rebind their addresses to the leaf's
+  /// reduction block arguments inside the region.
+  llvm::SmallVector<const VarDecl *> decls;
+
+  bool empty() const { return vars.empty(); }
+};
+
 /// A type-only list of OpenMP clause AST node types.
 template <typename... Clauses> struct OpenMPNYIClauseList {};
 
@@ -57,6 +76,13 @@ public:
   /// variables corresponding to each map operand, in operand order.
   bool emitMap(mlir::omp::MapClauseOps &result,
                llvm::SmallVectorImpl<OMPMapVar> *mapSyms = nullptr) const;
+
+  /// Emit reduction clauses, collecting the accumulator operands, the
+  /// omp.declare_reduction symbols, the by-reference flags and the reduction
+  /// variable decls into \p out. Only simple built-in `+` reductions on scalar
+  /// integer and floating types are supported; anything else is reported as
+  /// not-yet-implemented. Returns true if any reduction clause was present.
+  bool emitReduction(OMPReductionInfo &out) const;
 
   /// Verify the clauses of a directive to make sure all legal cases are either
   /// implemented or give a NYI error. The \p SupportedClauses and \p

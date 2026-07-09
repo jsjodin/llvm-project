@@ -58,13 +58,22 @@ getLeafClauses(CIRGenFunction &cgf, const OMPExecutableDirective &s,
   for (const omp::LeafWithClauses &l : leaves) {
     if (l.id != leaf)
       continue;
-    for (llvm::omp::Clause synth : l.synthesized)
+    for (llvm::omp::Clause synth : l.synthesized) {
+      // A synthesized `shared` clause (e.g. the reduction variable becoming
+      // shared on the `parallel` leaf of a combined reduction construct) is a
+      // no-op: shared variables already refer to their enclosing storage, which
+      // the region accesses directly. Other synthesized clauses have no AST
+      // node to drive their emitter, so report them as NYI rather than silently
+      // dropping a spec-required clause.
+      if (synth == llvm::omp::Clause::OMPC_shared)
+        continue;
       cgf.getCIRGenModule().errorNYI(
           s.getSourceRange(),
           (llvm::Twine("OpenMP synthesized '") +
            llvm::omp::getOpenMPClauseName(synth) +
            "' clause from construct decomposition")
               .str());
+    }
     llvm::append_range(result, l.clauses);
   }
   return result;
@@ -115,6 +124,23 @@ static bool parallelLeafIsComposite(llvm::omp::Directive dir) {
   }
 }
 
+/// Append one region block argument per reduction accumulator and rebind each
+/// reduction variable's address to its block argument (the leaf's private
+/// copy), so the nested body reads and updates the private copy. Returns the
+/// saved original addresses so the caller can restore them after the region.
+static llvm::SmallVector<std::pair<const VarDecl *, Address>>
+bindReductionBlockArgs(CIRGenFunction &cgf, mlir::Block &block,
+                       const OMPReductionInfo &reduction, mlir::Location loc) {
+  llvm::SmallVector<std::pair<const VarDecl *, Address>> savedAddrs;
+  for (auto [var, vd] : llvm::zip_equal(reduction.vars, reduction.decls)) {
+    Address origAddr = cgf.getAddrOfLocalVar(vd);
+    savedAddrs.push_back({vd, origAddr});
+    mlir::Value blockArg = block.addArgument(var.getType(), loc);
+    cgf.replaceAddrOfLocalVar(vd, Address(blockArg, origAddr.getAlignment()));
+  }
+  return savedAddrs;
+}
+
 template <typename DirectiveTy>
 static mlir::LogicalResult
 emitParallelOp(CIRGenFunction &cgf, const DirectiveTy &s, mlir::Location begin,
@@ -129,11 +155,15 @@ emitParallelOp(CIRGenFunction &cgf, const DirectiveTy &s, mlir::Location begin,
   mlir::omp::ParallelOperands clauseOps;
   OpenMPClauseEmitter ce(cgf, cgm, builder, begin, clauses);
   ce.emitProcBind(clauseOps);
-  ce.emitNYI</*supported=*/OMPProcBindClause>(
+  // A `shared` clause is a no-op here: shared variables already refer to their
+  // enclosing storage, which the region accesses directly. Reductions are
+  // carried by the `teams` and `for` leaves, not `parallel`, so the parallel
+  // leaf only sees the synthesized `shared` for the reduction variable.
+  ce.emitNYI</*supported=*/OMPProcBindClause, OMPSharedClause>(
       /*nyi=*/OpenMPNYIClauseList<
           OMPAllocateClause, OMPCopyinClause, OMPDefaultClause,
           OMPFirstprivateClause, OMPIfClause, OMPNumThreadsClause,
-          OMPPrivateClause, OMPReductionClause, OMPSharedClause>{},
+          OMPPrivateClause, OMPReductionClause>{},
       llvm::omp::Directive::OMPD_parallel);
 
   auto parallelOp = mlir::omp::ParallelOp::create(builder, begin, clauseOps);
@@ -175,15 +205,18 @@ emitTeamsOp(CIRGenFunction &cgf, const DirectiveTy &s, mlir::Location begin,
   llvm::SmallVector<const OMPClause *> clauses =
       getLeafClauses(cgf, s, llvm::omp::OMPD_teams);
 
-  // No teams clauses are emittable yet, so report each eligible clause as NYI
-  // rather than silently dropping it.
   mlir::omp::TeamsOperands clauseOps;
   OpenMPClauseEmitter ce(cgf, cgm, builder, begin, clauses);
-  ce.emitNYI</*supported=*/>(
+  OMPReductionInfo reduction;
+  ce.emitReduction(reduction);
+  clauseOps.reductionVars = reduction.vars;
+  clauseOps.reductionByref = reduction.byref;
+  clauseOps.reductionSyms = reduction.syms;
+  ce.emitNYI</*supported=*/OMPReductionClause, OMPSharedClause>(
       /*nyi=*/OpenMPNYIClauseList<
           OMPAllocateClause, OMPDefaultClause, OMPDynGroupprivateClause,
           OMPFirstprivateClause, OMPIfClause, OMPNumTeamsClause,
-          OMPPrivateClause, OMPReductionClause, OMPSharedClause,
+          OMPPrivateClause,
           OMPThreadLimitClause, OMPXAttributeClause>{},
       llvm::omp::Directive::OMPD_teams);
 
@@ -202,8 +235,16 @@ emitTeamsOp(CIRGenFunction &cgf, const DirectiveTy &s, mlir::Location begin,
 
   CIRGenFunction::LexicalScope ls{cgf, begin, builder.getInsertionBlock()};
 
+  // Reduction accumulators become block arguments; rebind each reduction
+  // variable to its team-private copy so the nested region uses it.
+  llvm::SmallVector<std::pair<const VarDecl *, Address>> savedAddrs =
+      bindReductionBlockArgs(cgf, block, reduction, begin);
+
   mlir::LogicalResult res = emitBody();
   mlir::omp::TerminatorOp::create(builder, end);
+
+  for (auto &[vd, addr] : savedAddrs)
+    cgf.replaceAddrOfLocalVar(vd, addr);
   return res;
 }
 
@@ -520,20 +561,25 @@ static mlir::LogicalResult emitOMPLoopNestBody(CIRGenFunction &cgf,
                          loop.step, loop.inclusive, loop.inductionVar);
 }
 
-/// Reports each `for`-leaf clause as NYI. The worksharing loop emits no clauses
-/// yet, so anything routed to the `for` leaf is diagnosed rather than dropped.
-static void emitWorksharingLoopClausesNYI(CIRGenFunction &cgf,
-                                          const OMPLoopDirective &s) {
+/// Emits the supported `for`-leaf clauses (reductions) into \p reduction and
+/// reports any remaining eligible clause as NYI. The reduction operands are
+/// captured from the current reduction-variable addresses, so this must be
+/// called at the insertion point where those addresses are live (e.g. inside
+/// the enclosing omp.teams region for a combined construct).
+static void emitWorksharingLoopClauses(CIRGenFunction &cgf,
+                                       const OMPLoopDirective &s,
+                                       OMPReductionInfo &reduction) {
   llvm::SmallVector<const OMPClause *> clauses =
       getLeafClauses(cgf, s, llvm::omp::OMPD_for);
   OpenMPClauseEmitter ce(cgf, cgf.getCIRGenModule(), cgf.getBuilder(),
                          cgf.getLoc(s.getBeginLoc()), clauses);
-  ce.emitNYI</*supported=*/>(
+  ce.emitReduction(reduction);
+  ce.emitNYI</*supported=*/OMPReductionClause>(
       /*nyi=*/OpenMPNYIClauseList<
           OMPAllocateClause, OMPCollapseClause, OMPFirstprivateClause,
           OMPLastprivateClause, OMPLinearClause, OMPNowaitClause,
           OMPOrderClause, OMPOrderedClause, OMPPrivateClause,
-          OMPReductionClause, OMPScheduleClause>{},
+          OMPScheduleClause>{},
       llvm::omp::Directive::OMPD_for);
 }
 
@@ -562,14 +608,25 @@ enum class LoopWrapperKind { Wsloop, Distribute };
 /// wrapper or the omp.loop_nest). When \p composite the wrapper is marked with
 /// the omp.composite attribute required for composite constructs. The caller is
 /// responsible for restoring the insertion point (e.g. via an InsertionGuard).
-static void enterLoopWrapper(CIRGenFunction &cgf, mlir::Location loc,
-                             LoopWrapperKind kind, bool composite) {
+///
+/// When \p reduction carries reduction accumulators (only meaningful for a
+/// Wsloop wrapper), they are attached as reduction clause operands, exposed as
+/// region block arguments, and the reduction variables are rebound to those
+/// arguments. The returned saved addresses must be restored by the caller once
+/// the wrapper's body has been emitted.
+static llvm::SmallVector<std::pair<const VarDecl *, Address>>
+enterLoopWrapper(CIRGenFunction &cgf, mlir::Location loc, LoopWrapperKind kind,
+                 bool composite, const OMPReductionInfo *reduction = nullptr) {
   CIRGenBuilderTy &builder = cgf.getBuilder();
   mlir::Operation *op;
   if (kind == LoopWrapperKind::Wsloop) {
-    llvm::SmallVector<mlir::Type> retTy;
-    llvm::SmallVector<mlir::Value> operands;
-    op = mlir::omp::WsloopOp::create(builder, loc, retTy, operands);
+    mlir::omp::WsloopOperands clauseOps;
+    if (reduction && !reduction->empty()) {
+      clauseOps.reductionVars = reduction->vars;
+      clauseOps.reductionByref = reduction->byref;
+      clauseOps.reductionSyms = reduction->syms;
+    }
+    op = mlir::omp::WsloopOp::create(builder, loc, clauseOps);
   } else {
     mlir::omp::DistributeOperands clauseOps;
     op = mlir::omp::DistributeOp::create(builder, loc, clauseOps);
@@ -580,6 +637,11 @@ static void enterLoopWrapper(CIRGenFunction &cgf, mlir::Location loc,
   mlir::Block *block = new mlir::Block();
   op->getRegion(0).push_back(block);
   builder.setInsertionPointToStart(block);
+
+  llvm::SmallVector<std::pair<const VarDecl *, Address>> savedAddrs;
+  if (kind == LoopWrapperKind::Wsloop && reduction && !reduction->empty())
+    savedAddrs = bindReductionBlockArgs(cgf, *block, *reduction, loc);
+  return savedAddrs;
 }
 
 /// Lowers an OMPLoopDirective into an omp.wsloop + omp.loop_nest.
@@ -589,7 +651,8 @@ static void enterLoopWrapper(CIRGenFunction &cgf, mlir::Location loc,
 static mlir::LogicalResult emitOMPWorksharingLoop(CIRGenFunction &cgf,
                                                   const OMPLoopDirective &s) {
   mlir::Location loc = cgf.getLoc(s.getBeginLoc());
-  emitWorksharingLoopClausesNYI(cgf, s);
+  OMPReductionInfo reduction;
+  emitWorksharingLoopClauses(cgf, s, reduction);
 
   LoweredOMPLoop loop;
   if (emitLoweredOMPLoop(cgf, s, loop).failed())
@@ -598,8 +661,13 @@ static mlir::LogicalResult emitOMPWorksharingLoop(CIRGenFunction &cgf,
   // The for-init was emitted above so the induction variable alloca lives
   // outside the standalone wsloop region.
   mlir::OpBuilder::InsertionGuard guard(cgf.getBuilder());
-  enterLoopWrapper(cgf, loc, LoopWrapperKind::Wsloop, /*composite=*/false);
-  return emitOMPLoopNestBody(cgf, loop);
+  llvm::SmallVector<std::pair<const VarDecl *, Address>> savedAddrs =
+      enterLoopWrapper(cgf, loc, LoopWrapperKind::Wsloop, /*composite=*/false,
+                       &reduction);
+  mlir::LogicalResult res = emitOMPLoopNestBody(cgf, loop);
+  for (auto &[vd, addr] : savedAddrs)
+    cgf.replaceAddrOfLocalVar(vd, addr);
+  return res;
 }
 
 /// Lowers an OMPLoopDirective into an omp.distribute + omp.loop_nest. The
@@ -629,7 +697,8 @@ emitOMPDistributeParallelForLoop(CIRGenFunction &cgf,
                                  const OMPLoopDirective &s) {
   mlir::Location loc = cgf.getLoc(s.getBeginLoc());
   emitDistributeClausesNYI(cgf, s);
-  emitWorksharingLoopClausesNYI(cgf, s);
+  OMPReductionInfo reduction;
+  emitWorksharingLoopClauses(cgf, s, reduction);
 
   LoweredOMPLoop loop;
   if (emitLoweredOMPLoop(cgf, s, loop).failed())
@@ -637,10 +706,16 @@ emitOMPDistributeParallelForLoop(CIRGenFunction &cgf,
 
   // Stack the composite loop wrappers around a single shared omp.loop_nest:
   // omp.distribute {composite} > omp.wsloop {composite} > omp.loop_nest.
+  // Only the wsloop carries the reduction (distribute never does).
   mlir::OpBuilder::InsertionGuard guard(cgf.getBuilder());
   enterLoopWrapper(cgf, loc, LoopWrapperKind::Distribute, /*composite=*/true);
-  enterLoopWrapper(cgf, loc, LoopWrapperKind::Wsloop, /*composite=*/true);
-  return emitOMPLoopNestBody(cgf, loop);
+  llvm::SmallVector<std::pair<const VarDecl *, Address>> savedAddrs =
+      enterLoopWrapper(cgf, loc, LoopWrapperKind::Wsloop, /*composite=*/true,
+                       &reduction);
+  mlir::LogicalResult res = emitOMPLoopNestBody(cgf, loop);
+  for (auto &[vd, addr] : savedAddrs)
+    cgf.replaceAddrOfLocalVar(vd, addr);
+  return res;
 }
 
 mlir::LogicalResult

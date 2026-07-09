@@ -211,6 +211,127 @@ static mlir::Value emitMapInfoForPointerSection(
       /*partial_map=*/builder.getBoolAttr(false));
 }
 
+/// Build a stable omp.declare_reduction symbol name for a `+` reduction on the
+/// scalar CIR type \p elemTy (e.g. "add_reduction_i32" / "add_reduction_f32").
+static std::string addReductionName(mlir::Type elemTy) {
+  std::string name = "add_reduction_";
+  if (auto intTy = mlir::dyn_cast<cir::IntType>(elemTy)) {
+    name += intTy.isSigned() ? "i" : "u";
+    name += std::to_string(intTy.getWidth());
+  } else {
+    auto fpTy = mlir::cast<cir::FPTypeInterface>(elemTy);
+    name += "f";
+    name += std::to_string(fpTy.getWidth());
+  }
+  return name;
+}
+
+/// Return the omp.declare_reduction op implementing a built-in `+` reduction
+/// for the scalar CIR type \p elemTy, creating it at module scope on first use
+/// and caching by symbol name. The reduction is by value (matching Flang): the
+/// declaration type is the value type, the init region yields the additive
+/// identity and the combiner region yields the sum of its two value arguments.
+static mlir::omp::DeclareReductionOp
+getOrCreateAddReduction(CIRGenModule &cgm, CIRGenBuilderTy &builder,
+                        mlir::Location loc, mlir::Type elemTy) {
+  mlir::ModuleOp module = cgm.getModule();
+  std::string name = addReductionName(elemTy);
+  if (auto existing = module.lookupSymbol<mlir::omp::DeclareReductionOp>(name))
+    return existing;
+
+  // Build the declaration and its regions at module scope, guarding the
+  // builder's insertion point so it is restored for the caller afterwards.
+  mlir::OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToEnd(&module.getBodyRegion().back());
+
+  auto decl = mlir::omp::DeclareReductionOp::create(
+      builder, loc, name, elemTy, /*byref_element_type=*/mlir::TypeAttr{});
+
+  const bool isFP = mlir::isa<cir::FPTypeInterface>(elemTy);
+
+  // init { ^bb0(%mold: elemTy): omp.yield(<identity>) }
+  builder.createBlock(&decl.getInitializerRegion(),
+                      decl.getInitializerRegion().end(), {elemTy}, {loc});
+  mlir::Value identity =
+      isFP ? cir::ConstantOp::create(builder, loc, cir::FPAttr::getZero(elemTy))
+                 .getResult()
+           : builder.getConstInt(loc, elemTy, 0).getResult();
+  mlir::omp::YieldOp::create(builder, loc, identity);
+
+  // combiner { ^bb0(%lhs: elemTy, %rhs: elemTy): omp.yield(%lhs + %rhs) }
+  mlir::Block *combBlock =
+      builder.createBlock(&decl.getReductionRegion(),
+                          decl.getReductionRegion().end(), {elemTy, elemTy},
+                          {loc, loc});
+  mlir::Value lhs = combBlock->getArgument(0);
+  mlir::Value rhs = combBlock->getArgument(1);
+  mlir::Value combined = isFP ? builder.createFAdd(loc, lhs, rhs)
+                              : builder.createAdd(loc, lhs, rhs);
+  mlir::omp::YieldOp::create(builder, loc, combined);
+
+  return decl;
+}
+
+bool OpenMPClauseEmitter::emitReduction(OMPReductionInfo &out) const {
+  bool found = false;
+  for (const OMPClause *clause : clauses) {
+    const auto *rc = dyn_cast<OMPReductionClause>(clause);
+    if (!rc)
+      continue;
+
+    found = true;
+
+    // Only the simple, built-in `+` reduction is supported for now.
+    if (rc->getNameInfo().getName().getAsString() != "operator+") {
+      cgm.errorNYI(rc->getBeginLoc(), "OpenMP non-'+' reduction");
+      continue;
+    }
+    if (rc->getModifier() != OMPC_REDUCTION_unknown) {
+      cgm.errorNYI(rc->getBeginLoc(), "OpenMP reduction modifier");
+      continue;
+    }
+
+    for (const Expr *varExpr : rc->varlist()) {
+      const auto *refExpr =
+          dyn_cast<DeclRefExpr>(varExpr->IgnoreParenImpCasts());
+      const auto *vd =
+          refExpr ? dyn_cast<VarDecl>(refExpr->getDecl()) : nullptr;
+      if (!vd) {
+        cgm.errorNYI(varExpr->getExprLoc(),
+                     "OpenMP reduction on non-variable");
+        continue;
+      }
+
+      QualType varType = vd->getType().getCanonicalType();
+      if (!varType->isScalarType() || varType->isPointerType() ||
+          varType->isAnyComplexType()) {
+        cgm.errorNYI(varExpr->getExprLoc(),
+                     "OpenMP reduction on non-scalar variable");
+        continue;
+      }
+
+      Address addr = cgf.getAddrOfLocalVar(vd);
+      mlir::Type elemTy = addr.getElementType();
+      if (!mlir::isa<cir::IntType>(elemTy) &&
+          !mlir::isa<cir::FPTypeInterface>(elemTy)) {
+        cgm.errorNYI(varExpr->getExprLoc(),
+                     "OpenMP reduction on unsupported scalar type");
+        continue;
+      }
+
+      mlir::omp::DeclareReductionOp decl =
+          getOrCreateAddReduction(cgm, builder, loc, elemTy);
+
+      out.vars.push_back(addr.getPointer());
+      out.syms.push_back(
+          mlir::SymbolRefAttr::get(builder.getContext(), decl.getSymName()));
+      out.byref.push_back(false);
+      out.decls.push_back(vd);
+    }
+  }
+  return found;
+}
+
 bool OpenMPClauseEmitter::emitProcBind(
     mlir::omp::ProcBindClauseOps &result) const {
   for (const OMPClause *clause : clauses) {
