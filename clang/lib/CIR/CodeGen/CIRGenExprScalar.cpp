@@ -608,8 +608,11 @@ public:
     return VisitUnaryPrePostIncDec(e);
   }
   mlir::Value emitScalarPrePostIncDec(const UnaryOperator *e, LValue lv) {
-    if (cgf.getLangOpts().OpenMP)
-      cgf.cgm.errorNYI(e->getSourceRange(), "inc/dec OpenMP");
+    // Under OpenMP, updating a `lastprivate(conditional:)` variable requires
+    // notifying the runtime after the store. That clause is not yet supported
+    // in ClangIR, so the notification is simply not emitted; the base
+    // increment/decrement code generation below is otherwise unaffected.
+    assert(!cir::MissingFeatures::openMPLastprivateConditional());
 
     QualType type = e->getSubExpr()->getType();
 
@@ -1603,8 +1606,9 @@ LValue ScalarExprEmitter::emitCompoundAssignLValue(
   else
     cgf.emitStoreThroughLValue(RValue::get(result), lhsLV);
 
-  if (cgf.getLangOpts().OpenMP)
-    cgf.cgm.errorNYI(e->getSourceRange(), "openmp");
+  // See emitScalarPrePostIncDec: the OpenMP `lastprivate(conditional:)` update
+  // notification is not yet implemented in ClangIR.
+  assert(!cir::MissingFeatures::openMPLastprivateConditional());
 
   return lhsLV;
 }
