@@ -63,6 +63,42 @@ static mlir::Value emitWholeArrayBounds(CIRGenBuilderTy &builder,
       upperBound, extent, stride, /*stride_in_bytes=*/false, startIdx);
 }
 
+/// Widen a CIR integer value to a signed 64-bit CIR integer, inserting an
+/// integral cast if necessary.
+static mlir::Value widenToCirI64(CIRGenBuilderTy &builder, mlir::Location loc,
+                                 mlir::Value value) {
+  cir::IntType cirI64 = builder.getSInt64Ty();
+  if (value.getType() == cirI64)
+    return value;
+  return builder.createCast(loc, cir::CastKind::integral, value, cirI64);
+}
+
+/// Build an omp.map.bounds op for an array section [lb, lb + extent - 1]. The
+/// \p lowerBound and \p extent are signed 64-bit CIR integers; the bounds
+/// arithmetic is performed in CIR and the operands are then converted to
+/// builtin integers, which the OpenMP dialect requires.
+static mlir::Value emitSectionBounds(CIRGenBuilderTy &builder,
+                                     mlir::Location loc, mlir::Value lowerBound,
+                                     mlir::Value extent) {
+  cir::IntType cirI64 = builder.getSInt64Ty();
+  mlir::Type i64 = builder.getIntegerType(64);
+  mlir::Value cirOne = builder.getConstInt(loc, cirI64, 1);
+  // upper_bound = lower_bound + extent - 1
+  mlir::Value upperBound = builder.createSub(
+      loc, builder.createAdd(loc, lowerBound, extent), cirOne);
+
+  auto toBuiltin = [&](mlir::Value v) {
+    return builder.createBuiltinIntCast(loc, v, i64);
+  };
+  mlir::Value zero =
+      toBuiltin(builder.getConstInt(loc, cirI64, 0));
+  return mlir::omp::MapBoundsOp::create(
+      builder, loc, builder.getType<mlir::omp::MapBoundsType>(),
+      toBuiltin(lowerBound), toBuiltin(upperBound), toBuiltin(extent),
+      /*stride=*/toBuiltin(cirOne), /*stride_in_bytes=*/false,
+      /*start_idx=*/zero);
+}
+
 static mlir::Value emitMapInfoForVar(CIRGenFunction &cgf,
                                      CIRGenBuilderTy &builder,
                                      mlir::Location loc, const VarDecl *vd,
@@ -109,6 +145,72 @@ static mlir::Value emitMapInfoForVar(CIRGenFunction &cgf,
       /*partial_map=*/builder.getBoolAttr(false));
 }
 
+/// Emit an omp.map.info for a pointer array section such as `map(p[lb:len])`
+/// where `p` is a pointer variable. The mapped entity is the pointed-to data:
+/// `var_ptr` is the loaded pointer value and the map carries bounds describing
+/// the section. The region receives the (device) data pointer as the block
+/// argument. Returns a null value and emits an NYI diagnostic on unsupported
+/// forms.
+static mlir::Value emitMapInfoForPointerSection(
+    CIRGenFunction &cgf, CIRGenModule &cgm, CIRGenBuilderTy &builder,
+    mlir::Location loc, const ArraySectionExpr *section, const VarDecl *vd,
+    mlir::omp::ClauseMapFlags mapFlags) {
+  // Load the pointer value; the pointed-to data is what gets mapped.
+  Address ptrAddr = cgf.getAddrOfLocalVar(vd);
+  mlir::Value varPtr =
+      cir::LoadOp::create(builder, loc, ptrAddr.getPointer()).getResult();
+  auto varPtrType = mlir::cast<cir::PointerType>(varPtr.getType());
+  mlir::Type elementType = varPtrType.getPointee();
+
+  // Cast to a generic pointer if the loaded value carries an address space.
+  if (varPtrType.getAddrSpace()) {
+    auto genericPtrType =
+        cir::PointerType::get(builder.getContext(), elementType);
+    varPtr = cir::CastOp::create(builder, loc, genericPtrType,
+                                 cir::CastKind::address_space, varPtr);
+    varPtrType = genericPtrType;
+  }
+
+  // Bounds are host-only metadata used to compute the transfer size; the device
+  // only needs the base pointer.
+  llvm::SmallVector<mlir::Value, 1> bounds;
+  if (!cgf.getLangOpts().OpenMPIsTargetDevice) {
+    mlir::Value lowerBound;
+    if (const Expr *lb = section->getLowerBound())
+      lowerBound = widenToCirI64(builder, loc, cgf.emitScalarExpr(lb));
+    else
+      lowerBound = builder.getConstInt(loc, builder.getSInt64Ty(), 0);
+
+    const Expr *lenExpr = section->getLength();
+    if (!lenExpr) {
+      cgm.errorNYI(section->getExprLoc(),
+                   "OpenMP pointer map array section without explicit length");
+      return {};
+    }
+    mlir::Value extent =
+        widenToCirI64(builder, loc, cgf.emitScalarExpr(lenExpr));
+    bounds.push_back(emitSectionBounds(builder, loc, lowerBound, extent));
+  }
+
+  return mlir::omp::MapInfoOp::create(
+      builder, loc,
+      /*omp_ptr=*/varPtrType,
+      /*var_ptr=*/varPtr,
+      /*var_ptr_type=*/mlir::TypeAttr::get(elementType),
+      /*map_type=*/builder.getAttr<mlir::omp::ClauseMapFlagsAttr>(mapFlags),
+      /*map_capture_type=*/
+      builder.getAttr<mlir::omp::VariableCaptureKindAttr>(
+          mlir::omp::VariableCaptureKind::ByRef),
+      /*var_ptr_ptr=*/mlir::Value{},
+      /*var_ptr_ptr_type=*/mlir::TypeAttr{},
+      /*members=*/mlir::ValueRange{},
+      /*members_index=*/mlir::ArrayAttr{},
+      /*bounds=*/bounds,
+      /*mapper_id=*/mlir::FlatSymbolRefAttr{},
+      /*name=*/builder.getStringAttr(vd->getName()),
+      /*partial_map=*/builder.getBoolAttr(false));
+}
+
 bool OpenMPClauseEmitter::emitProcBind(
     mlir::omp::ProcBindClauseOps &result) const {
   for (const OMPClause *clause : clauses) {
@@ -130,7 +232,7 @@ bool OpenMPClauseEmitter::emitProcBind(
 
 bool OpenMPClauseEmitter::emitMap(
     mlir::omp::MapClauseOps &result,
-    llvm::SmallVectorImpl<const VarDecl *> *mapSyms) const {
+    llvm::SmallVectorImpl<OMPMapVar> *mapSyms) const {
   bool found = false;
   for (const OMPClause *clause : clauses) {
     const auto *mc = dyn_cast<OMPMapClause>(clause);
@@ -156,7 +258,36 @@ bool OpenMPClauseEmitter::emitMap(
     mlir::omp::ClauseMapFlags mapFlags = mapClauseKindToFlags(mc->getMapType());
 
     for (const Expr *varExpr : mc->varlist()) {
-      const auto *refExpr = dyn_cast<DeclRefExpr>(varExpr->IgnoreImplicit());
+      const Expr *stripped = varExpr->IgnoreParenImpCasts();
+
+      // A pointer array section, e.g. map(p[0:n]) with `p` a pointer, maps the
+      // pointed-to data described by the section bounds.
+      if (const auto *section = dyn_cast<ArraySectionExpr>(stripped)) {
+        const auto *baseRef = dyn_cast<DeclRefExpr>(
+            section->getBase()->IgnoreParenImpCasts());
+        const auto *vd =
+            baseRef ? dyn_cast<VarDecl>(baseRef->getDecl()) : nullptr;
+        if (!vd || !vd->getType().getCanonicalType()->isPointerType()) {
+          cgm.errorNYI(varExpr->getExprLoc(),
+                       "OpenMP map clause array section on non-pointer base");
+          continue;
+        }
+        if (section->getStride()) {
+          cgm.errorNYI(varExpr->getExprLoc(),
+                       "OpenMP map clause array section with stride");
+          continue;
+        }
+        mlir::Value mapInfo = emitMapInfoForPointerSection(
+            cgf, cgm, builder, loc, section, vd, mapFlags);
+        if (!mapInfo)
+          continue;
+        result.mapVars.push_back(mapInfo);
+        if (mapSyms)
+          mapSyms->push_back({vd, /*isPointerSection=*/true});
+        continue;
+      }
+
+      const auto *refExpr = dyn_cast<DeclRefExpr>(stripped);
       if (!refExpr) {
         cgm.errorNYI(varExpr->getExprLoc(),
                      "OpenMP map clause with non-DeclRefExpr variable");
@@ -186,7 +317,7 @@ bool OpenMPClauseEmitter::emitMap(
       result.mapVars.push_back(
           emitMapInfoForVar(cgf, builder, loc, vd, mapFlags));
       if (mapSyms)
-        mapSyms->push_back(vd);
+        mapSyms->push_back({vd, /*isPointerSection=*/false});
     }
   }
   return found;

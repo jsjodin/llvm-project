@@ -794,7 +794,7 @@ CIRGenFunction::emitOMPAtomicDirective(const OMPAtomicDirective &s) {
 static void
 emitOMPTargetImplicitCaptures(CIRGenFunction &cgf,
                               const OMPExecutableDirective &s,
-                              llvm::ArrayRef<const VarDecl *> mapSyms) {
+                              llvm::ArrayRef<OMPMapVar> mapSyms) {
   const CapturedStmt *cs = s.getCapturedStmt(llvm::omp::OMPD_target);
   for (const auto &capture : cs->captures()) {
     if (capture.capturesThis()) {
@@ -802,6 +802,15 @@ emitOMPTargetImplicitCaptures(CIRGenFunction &cgf,
                                      "OpenMP target capture of 'this' pointer");
       continue;
     }
+
+    // A variable named by a map clause is captured for the sake of the mapping
+    // and is handled by emitMap; it is not an unsupported implicit capture,
+    // regardless of the capture kind (a pointer whose section is mapped is
+    // captured by copy, for instance).
+    const VarDecl *vd = capture.getCapturedVar();
+    if (llvm::any_of(mapSyms, [&](const OMPMapVar &m) { return m.decl == vd; }))
+      continue;
+
     if (capture.capturesVariableByCopy()) {
       cgf.getCIRGenModule().errorNYI(s.getBeginLoc(),
                                      "OpenMP target capture by copy");
@@ -814,10 +823,6 @@ emitOMPTargetImplicitCaptures(CIRGenFunction &cgf,
       continue;
     }
     if (capture.capturesVariable()) {
-      const VarDecl *vd = capture.getCapturedVar();
-      if (llvm::is_contained(mapSyms, vd))
-        continue;
-
       cgf.getCIRGenModule().errorNYI(s.getBeginLoc(),
                                      "OpenMP target implicit by-ref capture");
     }
@@ -836,7 +841,7 @@ emitTargetOp(CIRGenFunction &cgf, const DirectiveTy &s, mlir::Location begin,
       getLeafClauses(cgf, s, llvm::omp::OMPD_target);
 
   mlir::omp::TargetExtOperands clauseOps;
-  llvm::SmallVector<const VarDecl *> mapSyms;
+  llvm::SmallVector<OMPMapVar> mapSyms;
 
   OpenMPClauseEmitter ce(cgf, cgm, builder, begin, clauses);
   ce.emitMap(clauseOps, &mapSyms);
@@ -897,10 +902,23 @@ emitTargetOp(CIRGenFunction &cgf, const DirectiveTy &s, mlir::Location begin,
 
   unsigned numHostEvalArgs = clauseOps.hostEvalVars.size();
   llvm::SmallVector<std::pair<const VarDecl *, Address>> savedAddrs;
-  for (auto [idx, vd] : llvm::enumerate(mapSyms)) {
+  for (auto [idx, mapVar] : llvm::enumerate(mapSyms)) {
+    const VarDecl *vd = mapVar.decl;
     Address origAddr = cgf.getAddrOfLocalVar(vd);
     savedAddrs.push_back({vd, origAddr});
     mlir::Value blockArg = block.getArgument(numHostEvalArgs + idx);
+
+    if (mapVar.isPointerSection) {
+      // The block argument is the (device) data pointer, whereas the region
+      // body accesses the variable by loading the pointer then indexing. Give
+      // the pointer variable a fresh local slot initialized with the data
+      // pointer so the usual access pattern keeps working.
+      Address slot = cgf.createMemTemp(vd->getType(), begin, vd->getName());
+      builder.createStore(begin, blockArg, slot);
+      cgf.replaceAddrOfLocalVar(vd, slot);
+      continue;
+    }
+
     cgf.replaceAddrOfLocalVar(vd, Address(blockArg, origAddr.getAlignment()));
   }
 

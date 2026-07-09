@@ -22,6 +22,17 @@ namespace clang::CIRGen {
 
 class CIRGenFunction;
 
+/// Describes a variable referenced by a map clause, along with how the target
+/// region body must access it.
+struct OMPMapVar {
+  const VarDecl *decl = nullptr;
+  /// True for a pointer array section such as `map(p[0:n])` where `p` is a
+  /// pointer. The map operand (and hence the region block argument) is the
+  /// pointed-to data, so the region body needs a local slot holding that
+  /// pointer to preserve the usual "load pointer, then index" access pattern.
+  bool isPointerSection = false;
+};
+
 /// A type-only list of OpenMP clause AST node types.
 template <typename... Clauses> struct OpenMPNYIClauseList {};
 
@@ -43,9 +54,9 @@ public:
   bool emitProcBind(mlir::omp::ProcBindClauseOps &result) const;
 
   /// Emit map clauses. The optional \p mapSyms parameter collects the
-  /// VarDecls corresponding to each map operand.
+  /// variables corresponding to each map operand, in operand order.
   bool emitMap(mlir::omp::MapClauseOps &result,
-               llvm::SmallVectorImpl<const VarDecl *> *mapSyms = nullptr) const;
+               llvm::SmallVectorImpl<OMPMapVar> *mapSyms = nullptr) const;
 
   /// Verify the clauses of a directive to make sure all legal cases are either
   /// implemented or give a NYI error. The \p SupportedClauses and \p
