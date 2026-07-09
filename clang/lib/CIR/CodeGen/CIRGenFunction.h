@@ -2441,6 +2441,21 @@ public:
   //                         OpenMP Emission
   //===--------------------------------------------------------------------===//
 public:
+  /// The host-evaluated canonical loop bounds of the enclosing omp.target
+  /// region, forwarded as host_eval block arguments. Set while emitting a
+  /// target loop construct whose trip count must be evaluated on the host
+  /// (target parallel for, target teams distribute[ parallel for]) and consumed
+  /// exactly once by the nested omp.loop_nest emission. Mirrors the loop-bound
+  /// half of Flang's HostEvalInfo.
+  struct OMPHostEvalBounds {
+    mlir::Value lowerBound;
+    mlir::Value upperBound;
+    mlir::Value step;
+    bool inclusive = false;
+    bool applied = false;
+  };
+  std::optional<OMPHostEvalBounds> ompHostEvalBounds;
+
   mlir::LogicalResult emitOMPScopeDirective(const OMPScopeDirective &s);
   mlir::LogicalResult emitOMPErrorDirective(const OMPErrorDirective &s);
   mlir::LogicalResult emitOMPParallelDirective(const OMPParallelDirective &s);

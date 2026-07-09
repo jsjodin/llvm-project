@@ -70,6 +70,36 @@ getLeafClauses(CIRGenFunction &cgf, const OMPExecutableDirective &s,
   return result;
 }
 
+/// The kernel execution mode of an omp.target region, derived from the combined
+/// directive kind: the target SPMD constructs we emit (where a worksharing loop
+/// forms the whole target region) run in SPMD mode; everything else uses the
+/// conservative generic mode. This mirrors the subset of Flang's
+/// KernelTypeVisitor reachable by the directives we lower.
+static mlir::omp::TargetExecMode getTargetExecMode(llvm::omp::Directive dir) {
+  switch (dir) {
+  case llvm::omp::OMPD_target_parallel_for:
+  case llvm::omp::OMPD_target_teams_distribute_parallel_for:
+    return mlir::omp::TargetExecMode::spmd;
+  default:
+    return mlir::omp::TargetExecMode::generic;
+  }
+}
+
+/// Whether the enclosing omp.target of \p dir must evaluate its nested loop's
+/// trip count on the host and forward it via host_eval block arguments. This is
+/// required by TargetOp's verifier for target SPMD constructs and for the
+/// `target teams distribute` pattern (see TargetOp::hasHostEvalTripCount).
+static bool targetNeedsHostEvalBounds(llvm::omp::Directive dir) {
+  switch (dir) {
+  case llvm::omp::OMPD_target_parallel_for:
+  case llvm::omp::OMPD_target_teams_distribute:
+  case llvm::omp::OMPD_target_teams_distribute_parallel_for:
+    return true;
+  default:
+    return false;
+  }
+}
+
 /// Whether the `parallel` leaf of \p dir wraps a `distribute` leaf, making it
 /// the composite `omp.parallel` of a `distribute parallel for` construct (which
 /// must carry the omp.composite marker). Otherwise the `parallel` leaf is a
@@ -296,42 +326,44 @@ struct LoweredOMPLoop {
 };
 } // namespace
 
-/// Emits the pre-inits and for-init of an OMPLoopDirective and computes the
-/// canonical loop bounds for omp.loop_nest. The induction variable alloca is
-/// emitted here (before any loop-wrapper op) so it stays visible to the loop
-/// body. Returns failure for loop shapes that are not yet supported.
-static mlir::LogicalResult emitLoweredOMPLoop(CIRGenFunction &cgf,
-                                              const OMPLoopDirective &s,
-                                              LoweredOMPLoop &out) {
+/// Extracts the canonical ForStmt and its induction variable from a loop
+/// directive. Returns failure for loop shapes that are not yet supported.
+static mlir::LogicalResult extractOMPForStmt(const OMPLoopDirective &s,
+                                             const ForStmt *&forStmt,
+                                             const VarDecl *&inductionVar) {
+  const CapturedStmt *capturedStmt = s.getInnermostCapturedStmt();
+  forStmt = dyn_cast<ForStmt>(capturedStmt->getCapturedStmt());
+  if (!forStmt)
+    return mlir::failure();
+
+  const auto *declStmt = dyn_cast_or_null<DeclStmt>(forStmt->getInit());
+  inductionVar =
+      declStmt ? dyn_cast<VarDecl>(declStmt->getSingleDecl()) : nullptr;
+  return inductionVar ? mlir::success() : mlir::failure();
+}
+
+/// Emits the loop directive's pre-inits and computes its canonical iteration
+/// space (lower/upper bound, step and inclusiveness) as CIR integer values at
+/// the current insertion point. Does not emit the induction variable alloca.
+/// Returns failure for loop shapes that are not yet supported.
+static mlir::LogicalResult
+computeOMPLoopBounds(CIRGenFunction &cgf, const OMPLoopDirective &s,
+                     const ForStmt *forStmt, const VarDecl *inductionVar,
+                     mlir::Value &lowerBound, mlir::Value &upperBound,
+                     mlir::Value &step, bool &inclusive) {
   CIRGenBuilderTy &builder = cgf.getBuilder();
   mlir::Location loc = cgf.getLoc(s.getBeginLoc());
 
   if (doEmitPreinits(cgf, s.getPreInits()).failed())
     return mlir::failure();
 
-  const CapturedStmt *capturedStmt = s.getInnermostCapturedStmt();
-  const auto *forStmt = cast<ForStmt>(capturedStmt->getCapturedStmt());
-
-  // omp.loop_nest takes the original iteration space and stores its block
-  // argument directly into the user's loop variable.
-  mlir::Value lowerBound;
-  mlir::Value upperBound;
-  mlir::Value step;
-  bool inclusive = false;
-
-  const auto *declStmt = dyn_cast_or_null<DeclStmt>(forStmt->getInit());
-  const auto *varDecl =
-      declStmt ? dyn_cast<VarDecl>(declStmt->getSingleDecl()) : nullptr;
-  if (!varDecl)
-    return mlir::failure();
-
-  QualType loopVarQType = varDecl->getType();
+  QualType loopVarQType = inductionVar->getType();
   auto cirIntType = mlir::cast<cir::IntType>(cgf.convertType(loopVarQType));
 
-  if (!varDecl->hasInit())
+  if (!inductionVar->hasInit())
     return mlir::failure();
   {
-    mlir::Value v = cgf.emitScalarExpr(varDecl->getInit());
+    mlir::Value v = cgf.emitScalarExpr(inductionVar->getInit());
     lowerBound = ensureCIRIntType(builder, loc, v, cirIntType);
   }
 
@@ -368,9 +400,9 @@ static mlir::LogicalResult emitLoweredOMPLoop(CIRGenFunction &cgf,
         const Expr *lhs = sub->getLHS()->IgnoreImpCasts();
         const Expr *rhs = sub->getRHS()->IgnoreImpCasts();
         if (auto *lhsRef = dyn_cast<DeclRefExpr>(lhs))
-          stepExpr = (lhsRef->getDecl() == varDecl) ? rhs : lhs;
+          stepExpr = (lhsRef->getDecl() == inductionVar) ? rhs : lhs;
         else if (auto *rhsRef = dyn_cast<DeclRefExpr>(rhs))
-          stepExpr = (rhsRef->getDecl() == varDecl) ? lhs : rhs;
+          stepExpr = (rhsRef->getDecl() == inductionVar) ? lhs : rhs;
       }
     }
     if (stepExpr) {
@@ -381,15 +413,98 @@ static mlir::LogicalResult emitLoweredOMPLoop(CIRGenFunction &cgf,
   if (!step)
     step = builder.getConstInt(loc, cirIntType, 1);
 
+  return mlir::success();
+}
+
+/// Evaluates the canonical loop bounds of a target loop directive at the
+/// current (host) insertion point, returning them as builtin-integer values
+/// suitable for the enclosing omp.target's host_eval operands. The induction
+/// variable alloca is intentionally not emitted here; it belongs in the target
+/// region. Returns nullopt for loop shapes that are not yet supported.
+static std::optional<CIRGenFunction::OMPHostEvalBounds>
+emitHostEvalLoopBounds(CIRGenFunction &cgf, const OMPLoopDirective &s) {
+  CIRGenBuilderTy &builder = cgf.getBuilder();
+  mlir::Location loc = cgf.getLoc(s.getBeginLoc());
+
+  const ForStmt *forStmt = nullptr;
+  const VarDecl *inductionVar = nullptr;
+  if (extractOMPForStmt(s, forStmt, inductionVar).failed())
+    return std::nullopt;
+
+  mlir::Value lowerBound;
+  mlir::Value upperBound;
+  mlir::Value step;
+  bool inclusive = false;
+  if (computeOMPLoopBounds(cgf, s, forStmt, inductionVar, lowerBound,
+                           upperBound, step, inclusive)
+          .failed())
+    return std::nullopt;
+
+  CIRGenFunction::OMPHostEvalBounds hev;
+  hev.lowerBound = cirIntToStdInt(builder, loc, lowerBound);
+  hev.upperBound = cirIntToStdInt(builder, loc, upperBound);
+  hev.step = cirIntToStdInt(builder, loc, step);
+  hev.inclusive = inclusive;
+  return hev;
+}
+
+/// Emits the for-init and computes the canonical loop bounds for omp.loop_nest.
+/// The induction variable alloca is emitted here (before any loop-wrapper op)
+/// so it stays visible to the loop body. When the enclosing omp.target already
+/// host-evaluated the trip count (\see CIRGenFunction::ompHostEvalBounds), the
+/// forwarded host_eval block arguments are used as the bounds instead of
+/// recomputing them in-region. Returns failure for unsupported loop shapes.
+static mlir::LogicalResult emitLoweredOMPLoop(CIRGenFunction &cgf,
+                                              const OMPLoopDirective &s,
+                                              LoweredOMPLoop &out) {
+  CIRGenBuilderTy &builder = cgf.getBuilder();
+  mlir::Location loc = cgf.getLoc(s.getBeginLoc());
+
+  const ForStmt *forStmt = nullptr;
+  const VarDecl *inductionVar = nullptr;
+  if (extractOMPForStmt(s, forStmt, inductionVar).failed())
+    return mlir::failure();
+
   // The induction variable alloca must be visible in the loop-wrapper region
-  // created by the caller, so emit the init before that op is created.
-  if (forStmt->getInit())
-    if (cgf.emitStmt(forStmt->getInit(), /*useCurrentScope=*/true).failed())
+  // created by the caller, so emit the for-init before that op is created.
+  auto emitForInit = [&]() -> mlir::LogicalResult {
+    if (forStmt->getInit())
+      return cgf.emitStmt(forStmt->getInit(), /*useCurrentScope=*/true);
+    return mlir::success();
+  };
+
+  // The enclosing omp.target evaluated the trip count on the host; consume the
+  // forwarded host_eval block arguments (exactly once) instead of recomputing
+  // the bounds inside the target region.
+  if (cgf.ompHostEvalBounds && !cgf.ompHostEvalBounds->applied) {
+    CIRGenFunction::OMPHostEvalBounds &hev = *cgf.ompHostEvalBounds;
+    hev.applied = true;
+    if (emitForInit().failed())
       return mlir::failure();
+    out.forStmt = forStmt;
+    out.inductionVar = inductionVar;
+    out.lowerBound = hev.lowerBound;
+    out.upperBound = hev.upperBound;
+    out.step = hev.step;
+    out.inclusive = hev.inclusive;
+    return mlir::success();
+  }
+
+  mlir::Value lowerBound;
+  mlir::Value upperBound;
+  mlir::Value step;
+  bool inclusive = false;
+  if (computeOMPLoopBounds(cgf, s, forStmt, inductionVar, lowerBound,
+                           upperBound, step, inclusive)
+          .failed())
+    return mlir::failure();
+
+  if (emitForInit().failed())
+    return mlir::failure();
 
   // omp.loop_nest requires IntLikeType operands, not CIR integer types.
   out.forStmt = forStmt;
-  out.inductionVar = varDecl;
+  out.inductionVar = inductionVar;
   out.lowerBound = cirIntToStdInt(builder, loc, lowerBound);
   out.upperBound = cirIntToStdInt(builder, loc, upperBound);
   out.step = cirIntToStdInt(builder, loc, step);
@@ -736,22 +851,42 @@ emitTargetOp(CIRGenFunction &cgf, const DirectiveTy &s, mlir::Location begin,
 
   emitOMPTargetImplicitCaptures(cgf, s, mapSyms);
 
-  // The omp.target metadata that distinguishes combined/SPMD target regions
-  // (the omp.combined marker and a non-generic kernel_type) is intentionally
-  // deferred: both are inseparable from host_eval. Marking the target combined
-  // makes ComposableOpInterface::findCapturedOp descend to the nested
-  // omp.loop_nest, and an spmd kernel_type or a target-teams-distribute pattern
-  // then makes TargetOp's verifier require the loop bounds to be host_eval block
-  // arguments (see TargetOp::hasHostEvalTripCount). Until host_eval is
-  // implemented, every target region stays generic and unmarked, with the loop
-  // bounds evaluated in-region, which is the representation already used for
-  // 'target teams distribute'.
+  llvm::omp::Directive dir = s.getDirectiveKind();
+
+  // Target SPMD constructs and the `target teams distribute` pattern must
+  // evaluate their loop trip count on the host and forward it via host_eval so
+  // that TargetOp's verifier (see TargetOp::hasHostEvalTripCount) is satisfied.
+  // The bounds are computed here, at the host insertion point, before the
+  // omp.target is created; num_teams/num_threads/thread_limit host evaluation
+  // is not needed yet because those clauses are still NYI.
+  std::optional<CIRGenFunction::OMPHostEvalBounds> hostEval;
+  if (targetNeedsHostEvalBounds(dir)) {
+    const auto &loopDir =
+        llvm::cast<OMPLoopDirective>(static_cast<const OMPExecutableDirective &>(s));
+    hostEval = emitHostEvalLoopBounds(cgf, loopDir);
+    if (!hostEval) {
+      cgm.errorNYI(s.getSourceRange(),
+                   "OpenMP target host-evaluated loop bounds");
+      return mlir::failure();
+    }
+    clauseOps.hostEvalVars = {hostEval->lowerBound, hostEval->upperBound,
+                              hostEval->step};
+  }
+
   clauseOps.kernelType = mlir::omp::TargetExecModeAttr::get(
-      &cgf.getMLIRContext(), mlir::omp::TargetExecMode::generic);
+      &cgf.getMLIRContext(), getTargetExecMode(dir));
 
   auto targetOp = mlir::omp::TargetOp::create(builder, begin, clauseOps);
 
+  // `target` is a combined leaf whenever it is not a bare `#pragma omp target`.
+  if (dir != llvm::omp::OMPD_target)
+    targetOp.setCombined(true);
+
+  // Entry block arguments follow the order defined by BlockArgOpenMPOpInterface:
+  // host_eval arguments precede map arguments.
   mlir::Block &block = targetOp.getRegion().emplaceBlock();
+  for (mlir::Value hostEvalVar : clauseOps.hostEvalVars)
+    block.addArgument(hostEvalVar.getType(), begin);
   for (mlir::Value mapVar : clauseOps.mapVars)
     block.addArgument(mapVar.getType(), begin);
 
@@ -760,17 +895,33 @@ emitTargetOp(CIRGenFunction &cgf, const DirectiveTy &s, mlir::Location begin,
 
   CIRGenFunction::LexicalScope ls{cgf, begin, builder.getInsertionBlock()};
 
+  unsigned numHostEvalArgs = clauseOps.hostEvalVars.size();
   llvm::SmallVector<std::pair<const VarDecl *, Address>> savedAddrs;
   for (auto [idx, vd] : llvm::enumerate(mapSyms)) {
     Address origAddr = cgf.getAddrOfLocalVar(vd);
     savedAddrs.push_back({vd, origAddr});
-    mlir::Value blockArg = block.getArgument(idx);
+    mlir::Value blockArg = block.getArgument(numHostEvalArgs + idx);
     cgf.replaceAddrOfLocalVar(vd, Address(blockArg, origAddr.getAlignment()));
+  }
+
+  // Forward the host_eval block arguments to the nested omp.loop_nest emission,
+  // restoring any outer target's bounds on the way out.
+  std::optional<CIRGenFunction::OMPHostEvalBounds> savedHostEvalBounds =
+      std::move(cgf.ompHostEvalBounds);
+  cgf.ompHostEvalBounds.reset();
+  if (hostEval) {
+    CIRGenFunction::OMPHostEvalBounds boundArgs;
+    boundArgs.lowerBound = block.getArgument(0);
+    boundArgs.upperBound = block.getArgument(1);
+    boundArgs.step = block.getArgument(2);
+    boundArgs.inclusive = hostEval->inclusive;
+    cgf.ompHostEvalBounds = boundArgs;
   }
 
   mlir::LogicalResult res = emitBody();
   mlir::omp::TerminatorOp::create(builder, end);
 
+  cgf.ompHostEvalBounds = std::move(savedHostEvalBounds);
   for (auto &[vd, addr] : savedAddrs)
     cgf.replaceAddrOfLocalVar(vd, addr);
 

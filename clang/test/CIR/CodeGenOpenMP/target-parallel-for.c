@@ -72,12 +72,13 @@ void target_parallel_for() {
 // CIR-DEVICE: }
 
 // The combined `target parallel for` directive decomposes into `target`,
-// `parallel` and `for` leaves and lowers to the same nesting as the explicit
-// target/parallel/for above: an omp.wsloop + omp.loop_nest inside omp.parallel
-// inside omp.target. Unlike the separate-pragma form, the `parallel` leaf is
-// not the innermost leaf here, so it carries the omp.combined marker. The
-// omp.target itself stays generic and unmarked (its combined/SPMD metadata is
-// deferred together with host_eval).
+// `parallel` and `for` leaves and lowers to an omp.wsloop + omp.loop_nest
+// inside omp.parallel inside omp.target. This is a target SPMD construct, so
+// the omp.target is marked kernel_type(spmd) and combined, its loop trip count
+// is evaluated on the host and forwarded through host_eval block arguments, and
+// the omp.loop_nest bounds reference those block arguments. The `parallel` leaf
+// is also a non-innermost combined leaf, so it too carries the omp.combined
+// marker.
 void combined_target_parallel_for() {
 #pragma omp target parallel for
   for (int i = 0; i < 10; i++) {
@@ -86,11 +87,14 @@ void combined_target_parallel_for() {
 }
 
 // CIR-HOST: cir.func{{.*}}@combined_target_parallel_for
-// CIR-HOST: omp.target kernel_type(generic) {
+// CIR-HOST: %[[LB:.*]] = cir.builtin_int_cast %{{.*}} : !s32i -> i32
+// CIR-HOST: %[[UB:.*]] = cir.builtin_int_cast %{{.*}} : !s32i -> i32
+// CIR-HOST: %[[STEP:.*]] = cir.builtin_int_cast %{{.*}} : !s32i -> i32
+// CIR-HOST: omp.target kernel_type(spmd) host_eval(%[[LB]] -> %[[ALB:.*]], %[[UB]] -> %[[AUB:.*]], %[[STEP]] -> %[[ASTEP:.*]] : i32, i32, i32) {
 // CIR-HOST: omp.parallel {
 // CIR-HOST: %[[CI_ALLOCA:.*]] = cir.alloca "i" align(4) init : !cir.ptr<!s32i>
 // CIR-HOST: omp.wsloop {
-// CIR-HOST-NEXT: omp.loop_nest (%[[CIV:.*]]) : i32 = (%{{.*}}) to (%{{.*}}) step (%{{.*}}) {
+// CIR-HOST-NEXT: omp.loop_nest (%[[CIV:.*]]) : i32 = (%[[ALB]]) to (%[[AUB]]) step (%[[ASTEP]]) {
 // CIR-HOST: cir.call @{{.*}}during
 // CIR-HOST: omp.yield
 // CIR-HOST: }
@@ -98,13 +102,13 @@ void combined_target_parallel_for() {
 // CIR-HOST: omp.terminator
 // CIR-HOST: } {omp.combined}
 // CIR-HOST: omp.terminator
-// CIR-HOST: }
+// CIR-HOST: } {omp.combined}
 
 // CIR-DEVICE: cir.func{{.*}}@combined_target_parallel_for
-// CIR-DEVICE: omp.target kernel_type(generic) {
+// CIR-DEVICE: omp.target kernel_type(spmd) host_eval(%{{.*}} -> %[[ALB:.*]], %{{.*}} -> %[[AUB:.*]], %{{.*}} -> %[[ASTEP:.*]] : i32, i32, i32) {
 // CIR-DEVICE: omp.parallel {
 // CIR-DEVICE: omp.wsloop {
-// CIR-DEVICE-NEXT: omp.loop_nest (%{{.*}}) : i32 = (%{{.*}}) to (%{{.*}}) step (%{{.*}}) {
+// CIR-DEVICE-NEXT: omp.loop_nest (%{{.*}}) : i32 = (%[[ALB]]) to (%[[AUB]]) step (%[[ASTEP]]) {
 // CIR-DEVICE: cir.call @{{.*}}during
 // CIR-DEVICE: omp.yield
 // CIR-DEVICE: }
@@ -112,4 +116,4 @@ void combined_target_parallel_for() {
 // CIR-DEVICE: omp.terminator
 // CIR-DEVICE: } {omp.combined}
 // CIR-DEVICE: omp.terminator
-// CIR-DEVICE: }
+// CIR-DEVICE: } {omp.combined}

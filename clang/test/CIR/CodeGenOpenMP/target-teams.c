@@ -11,7 +11,10 @@ void use(int);
 
 // The combined 'target teams' directive decomposes into a 'target' leaf and a
 // 'teams' leaf and lowers to an omp.teams nested inside an omp.target, matching
-// the equivalent nesting of the separate 'target' and 'teams' directives.
+// the equivalent nesting of the separate 'target' and 'teams' directives. The
+// 'target' leaf is not the innermost leaf, so it carries the omp.combined
+// marker; the innermost 'teams' leaf does not. There is no loop trip count, so
+// no host_eval is needed.
 void target_teams(int x) {
   // CIR-HOST: cir.func{{.*}}@target_teams
   // CIR-HOST: %[[MAP:.*]] = omp.map.info {{.*}} map_clauses(tofrom) {{.*}} {name = "x"}
@@ -22,7 +25,7 @@ void target_teams(int x) {
   // CIR-HOST: omp.terminator
   // CIR-HOST: }
   // CIR-HOST: omp.terminator
-  // CIR-HOST: }
+  // CIR-HOST: } {omp.combined}
 
   // CIR-DEVICE: cir.func{{.*}}@target_teams
   // CIR-DEVICE: omp.target kernel_type(generic) {{.*}} {
@@ -31,7 +34,7 @@ void target_teams(int x) {
   // CIR-DEVICE: omp.terminator
   // CIR-DEVICE: }
   // CIR-DEVICE: omp.terminator
-  // CIR-DEVICE: }
+  // CIR-DEVICE: } {omp.combined}
 #pragma omp target teams map(tofrom : x)
   {
     use(x);

@@ -11,7 +11,9 @@ void use(int);
 
 // The combined 'target parallel' directive lowers to an omp.parallel nested
 // inside an omp.target, identical to the equivalent nesting of the separate
-// 'target' and 'parallel' directives.
+// 'target' and 'parallel' directives. The 'target' leaf is not the innermost
+// leaf, so it carries the omp.combined marker; the innermost 'parallel' leaf
+// does not. There is no loop trip count, so no host_eval is needed.
 void target_parallel(int x) {
   // CIR-HOST: cir.func{{.*}}@target_parallel
   // CIR-HOST: %[[MAP:.*]] = omp.map.info {{.*}} map_clauses(tofrom) {{.*}} {name = "x"}
@@ -22,7 +24,7 @@ void target_parallel(int x) {
   // CIR-HOST: omp.terminator
   // CIR-HOST: }
   // CIR-HOST: omp.terminator
-  // CIR-HOST: }
+  // CIR-HOST: } {omp.combined}
 
   // CIR-DEVICE: cir.func{{.*}}@target_parallel
   // CIR-DEVICE: omp.target kernel_type(generic) {{.*}} {
@@ -31,7 +33,7 @@ void target_parallel(int x) {
   // CIR-DEVICE: omp.terminator
   // CIR-DEVICE: }
   // CIR-DEVICE: omp.terminator
-  // CIR-DEVICE: }
+  // CIR-DEVICE: } {omp.combined}
 #pragma omp target parallel map(tofrom : x)
   {
     use(x);
@@ -47,7 +49,7 @@ void target_parallel_proc_bind(int x) {
   // CIR-HOST: omp.terminator
   // CIR-HOST: }
   // CIR-HOST: omp.terminator
-  // CIR-HOST: }
+  // CIR-HOST: } {omp.combined}
 #pragma omp target parallel proc_bind(spread) map(tofrom : x)
   {
     use(x);
