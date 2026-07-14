@@ -5206,6 +5206,7 @@ void populateCIRToLLVMPasses(mlir::OpPassManager &pm) {
   mlir::populateCIRPreLoweringPasses(pm);
   pm.addPass(mlir::omp::createMarkDeclareTargetPass());
   pm.addPass(createConvertCIRToLLVMPass());
+  pm.addPass(mlir::omp::createHostOpFilteringPass());
 }
 
 std::unique_ptr<llvm::Module>
