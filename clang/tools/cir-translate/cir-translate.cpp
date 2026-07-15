@@ -159,8 +159,13 @@ void registerToLLVMTranslation() {
           return mlir::failure();
 
         llvm::LLVMContext llvmContext;
+        bool enableOpenMP = false;
+        if (auto offloadMod = llvm::dyn_cast<mlir::omp::OffloadModuleInterface>(
+                cirModule.getOperation()))
+          enableOpenMP = offloadMod.getIsOpenMP();
         std::unique_ptr<llvm::Module> llvmModule =
-            cir::direct::lowerDirectlyFromCIRToLLVMIR(cirModule, llvmContext);
+            cir::direct::lowerDirectlyFromCIRToLLVMIR(cirModule, llvmContext,
+                                                      enableOpenMP);
         if (!llvmModule)
           return mlir::failure();
         llvmModule->print(output, nullptr);

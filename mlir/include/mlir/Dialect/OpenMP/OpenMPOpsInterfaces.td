@@ -475,6 +475,15 @@ def OffloadModuleInterface : OpInterface<"OffloadModuleInterface"> {
       }]>,
     InterfaceMethod<
       /*description=*/[{
+        Return true if the current module was generated with OpenMP enabled.
+        }],
+      /*retTy=*/"bool",
+      /*methodName=*/"getIsOpenMP",
+      (ins), [{}], [{
+        return $_op->hasAttr("omp.is_target_device");
+      }]>,
+    InterfaceMethod<
+      /*description=*/[{
       Set the attribute on the current module with the specified boolean
       argument.
       }],
