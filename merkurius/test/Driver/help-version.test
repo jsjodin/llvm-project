@@ -3,12 +3,14 @@ DRIVER:      OVERVIEW: Merkurius compiler
 DRIVER:      USAGE: merkc [options] file...
 DRIVER:      -###
 DRIVER:      -E
+DRIVER-NOT:  -fdebug-dump-provenance
 DRIVER:      -fopenmp
 
 RUN: merkc -fc1 -help | FileCheck %s --check-prefix=FC1
 FC1:         OVERVIEW: Merkurius frontend
 FC1-NOT:     -###
 FC1:         -E
+FC1:         -fdebug-dump-provenance
 FC1-NOT:     -###
 
 RUN: merkc --version | FileCheck %s --check-prefix=VERSION

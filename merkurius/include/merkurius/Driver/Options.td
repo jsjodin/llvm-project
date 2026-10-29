@@ -28,7 +28,7 @@ def version : Flag<["--"], "version">,
   HelpText<"Print version information">;
 
 def E : Flag<["-"], "E">,
-  HelpText<"Only run the prescanner, and print its output">;
+  HelpText<"Print the source as the lexer reads it">;
 def o : JoinedOrSeparate<["-"], "o">, MetaVarName<"<file>">,
   HelpText<"Write output to <file>">;
 
@@ -39,6 +39,21 @@ def fopenmp_version_EQ : Joined<["-"], "fopenmp-version=">,
   HelpText<"OpenMP version to accept, such as 52 for OpenMP 5.2">;
 
 } // let Visibility = [DefaultVis, FC1Option]
+
+//===----------------------------------------------------------------------===//
+// Frontend only
+//===----------------------------------------------------------------------===//
+
+let Visibility = [FC1Option] in {
+
+def fdebug_dump_provenance : Flag<["-"], "fdebug-dump-provenance">,
+  HelpText<"Dump the provenance table of the source files">;
+def fdebug_dump_tokens : Flag<["-"], "fdebug-dump-tokens">,
+  HelpText<"Dump the tokens of the source file">;
+def fdebug_unparse_tokens : Flag<["-"], "fdebug-unparse-tokens">,
+  HelpText<"Print the source file from its tokens and their trivia">;
+
+} // let Visibility = [FC1Option]
 
 //===----------------------------------------------------------------------===//
 // Driver only

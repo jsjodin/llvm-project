@@ -16,9 +16,16 @@ namespace merkurius::frontend {
 
 // The action -fc1 runs on each input.
 enum class ActionKind {
-  // -E: print the prescanner's output. Until the prescanner exists, this is
-  // the input unchanged.
+  // -E: print the source as the lexer reads it. There is no prescanner that
+  // rewrites it, so this is the input unchanged, byte order mark included.
   PrintPreprocessedInput,
+  // -fdebug-dump-provenance: dump the provenance table of the sources.
+  DebugDumpProvenance,
+  // -fdebug-dump-tokens: dump the tokens, one per line.
+  DebugDumpTokens,
+  // -fdebug-unparse-tokens: print every token's trivia and spelling, which
+  // gives back the source file byte for byte.
+  DebugUnparseTokens,
 };
 
 struct FrontendOptions {

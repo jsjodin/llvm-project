@@ -18,15 +18,16 @@ We will build a clean-room Mercury compiler on MLIR and LLVM, adding OpenMP-styl
 
 **Non-goals for the first versions:** Java and C# back ends, the Mercury debugger and deep profiler, tabling, trailing and solver types, partially instantiated data (until open types arrive; Language extensions), hot code loading, and binary compatibility with Melbourne Mercury.
 
-**Licensing stance:** the compiler and runtime are written from Melbourne Mercury's documentation, from published papers and from experiments on the code mmc generates, never from its source code (Provenance). That lets them use Apache 2.0 with the LLVM exception. The standard library is reimplemented too (Standard library section). This is an engineering position, not legal advice.
+**Licensing stance:** the compiler and runtime are written from Melbourne Mercury's documentation, from published papers and from experiments on the code mmc generates, never from its source code (Clean-room rules). That lets them use Apache 2.0 with the LLVM exception. The standard library is reimplemented too (Standard library section). This is an engineering position, not legal advice.
 
 **Decisions so far**
 
 | Area | Decision | Reason |
 | --- | --- | --- |
-| Front end | New, clean-room implementation | Licence freedom (Provenance); MLIR-native data structures |
+| Front end | New, clean-room implementation | Licence freedom (Clean-room rules); MLIR-native data structures |
 | Implementation language | C++ for the compiler and runtime | Direct use of MLIR, the LLVM data structures and TableGen |
 | Command line | Clang/GCC style: `-c`, `-o`, `-O2`, `-g`, `-fopenmp` | Fits Make, Ninja and CMake, and the habits of C, C++ and Fortran users (Driver) |
+| Source text | Read unchanged, with no prescanner; the lexer recognizes `%$omp` directives and line number directives | Both depend on token context: strings may span lines, and line number directives may occur anywhere a token may (Front end, Source manager) |
 | Parser | Recursive descent in two layers: a term reader with precedence climbing, then a converter per context | The manual defines items and goals as terms over a fixed operator table |
 | Front-end representation | Flang-style parse tree plus a small desugared semantic form; per-procedure tables for mode results | No separate IR; modes need the source structure and have no SSA form before analysis |
 | Parallel annotations | `%$omp` comment sentinel, attached to the next goal | The same source compiles with mmc; mirrors Fortran's `!$omp` |
@@ -48,7 +49,7 @@ We will build a clean-room Mercury compiler on MLIR and LLVM, adding OpenMP-styl
 | Distribution | Designed now, built in M6 | Handle and wire formats are hard to change later |
 | Wire format | Self-describing and pointer-free, after Erlang's external term format; constructors by type and functor number | Portable, validated on receipt, no atom table |
 
-## Provenance: what we use from Melbourne Mercury
+## Clean-room rules: what we use from Melbourne Mercury
 
 Our compiler and runtime are written without reading Melbourne Mercury's source code. Its compiler is GPL-2, and not reading it is what lets our code use Apache 2.0 with the LLVM exception. The rule covers every directory of source code in the repository, including the LGPL-2 runtime and library. Nothing in this design may depend on how Melbourne implements something, only on what its documents say and on what its compiler produces when we run it. The code mmc generates from our own programs is output, not source, and may be read.
 
@@ -86,7 +87,7 @@ Our compiler and runtime are written without reading Melbourne Mercury's source 
 
 ## Reuse from LLVM and Flang
 
-LLVM and Flang are licensed, like this project, under Apache 2.0 with the LLVM exception, so their code may be used and, unlike Melbourne Mercury's, read freely (Provenance). This section records what is reused and how, so that it stays traceable.
+LLVM and Flang are licensed, like this project, under Apache 2.0 with the LLVM exception, so their code may be used and, unlike Melbourne Mercury's, read freely (Clean-room rules). This section records what is reused and how, so that it stays traceable.
 
 **Depend on, don't copy.** Upstream libraries we link anyway, which get fixes for free:
 
@@ -110,8 +111,10 @@ LLVM and Flang are licensed, like this project, under Apache 2.0 with the LLVM e
 | `flang/include/flang/Common/visit.h` | `common::visit`, which compiles faster than `std::visit` | Copied |
 | `flang/include/flang/Common/idioms.h` | Boilerplate for parse-tree classes | Copied |
 | `flang/include/flang/Common/enum-class.h` | `ENUM_CLASS`, enums that know their names; needed by `idioms.h` | Copied |
-| `flang/include/flang/Parser/char-block.h` | Source ranges over the cooked stream | Planned |
-| `flang/include/flang/Parser/provenance.h` | The cooked-source provenance map behind `SourceLocation` (Front end, Prescanner) | Planned |
+| `flang/include/flang/Common/interval.h`, `flang/include/flang/Common/reference.h` | Half-open intervals, for provenance ranges; a non-null, assignable reference | Copied |
+| `flang/include/flang/Parser/char-block.h`, `flang/lib/Parser/char-block.cpp` | Ranges of characters within a source file | Copied |
+| `flang/include/flang/Parser/source.h`, `flang/lib/Parser/source.cpp` | `SourceFile`: a file's bytes, line starts and line number directives. Changed to keep the bytes exactly as read | Adapted |
+| `flang/include/flang/Parser/provenance.h`, `flang/lib/Parser/provenance.cpp` | Provenances and `AllSources`, which maps them to files, lines and columns (Front end, Source manager). Reduced to source files and compiler insertions; the cooked-source maps are left out | Adapted |
 | `flang/include/flang/Parser/message.h` | Diagnostics that carry provenance | Planned |
 | `flang/include/flang/Parser/parse-tree-visitor.h` | The generic `walk` over parse-tree types | Planned |
 | `flang/include/flang/Parser/openmp-utils.h` and `flang/lib/Parser/openmp-utils.cpp`: the `descriptor` namespace, `addr_if` and `WithSource` only, about 70 lines | Version-aware queries over LLVM's OpenMP descriptors: the clauses allowed on a directive, as its own clauses plus those of its clause sets; the modifiers allowed on a clause; and the OpenMP versions in which a clause is allowed on a directive. They give directive checking messages such as "allowed only from OpenMP 5.0". `WithSource` pairs a value with its source range | Planned |
@@ -123,7 +126,7 @@ LLVM and Flang are licensed, like this project, under Apache 2.0 with the LLVM e
 | Upstream file | Why not copied |
 | --- | --- |
 | `flang/include/flang/Parser/characters.h` and `flang/lib/Parser/characters.cpp` | Mostly Fortran: case folding, Fortran token characters, Latin-1. The escapes differ from Mercury's, which need `\a`, hex and octal escapes closed by a backslash, `\u` and `\U` escapes up to `\U0010FFFF`, and deletion of a backslash before a newline. UTF-8 comes from LLVM Support instead. We keep the shape: constexpr predicates that do not depend on `<cctype>`, and a decoder returning a code point and the bytes consumed. |
-| `flang/lib/Parser/prescan.h` | Fixed form and `INCLUDE` handling are Fortran's; our prescanner handles `%$omp` lines and `#line` |
+| `flang/lib/Parser/prescan.h` | Fixed form, `INCLUDE` and preprocessing are Fortran's. Merkurius has no prescanner: Mercury's directives depend on token context, so the lexer handles them (Front end, Source manager) |
 | `flang/lib/Parser/basic-parsers.h` | Its combinators read characters and tokens; ours match term shapes (Front end, Converter), though they compose the same way |
 | `flang/lib/Parser/unparse.cpp` | Fortran's printing rules; our unparser has exact, canonical and fully parenthesized modes |
 | `flang/include/flang/Parser/openmp-utils.h`, everything except the `descriptor` helpers | It works on Fortran's OpenMP parse-tree nodes: object designators, common blocks, iteration through `BLOCK` and `DO` constructs to find a loop nest, `allocate`, and combiner expressions. Our directive nodes are much smaller, and the associated goal is found by the converter |
@@ -146,7 +149,7 @@ This is an engineering position, not legal advice.
 
 Measurements made on 2026-10-26 and 2026-10-27 set four expectations. Deterministic Mercury already runs at C speed; allocation is the main gap, at 3.5× C on naive reverse; an OpenMP pragma on generated code ran 2× faster on 2 cores; and in a C model, open terms cost about 1.2× in the code that uses them and nothing elsewhere. Nothing was measured beyond 2 cores, and nothing yet on our own compiler.
 
-**Environment:** a 2-vCPU cloud VM (Intel Xeon at 2.80 GHz, Linux x86-64). gcc 13.3.0 at `-O2`. Melbourne Mercury 22.01.9 built with configure and make from the source distribution, which is not otherwise used (Provenance), with only the `hlc.gc` library grade, at default optimization. SWI-Prolog 9.0.4 run with `-O`, and CPython 3.13.17 without its JIT. Times are wall-clock, including process start.
+**Environment:** a 2-vCPU cloud VM (Intel Xeon at 2.80 GHz, Linux x86-64). gcc 13.3.0 at `-O2`. Melbourne Mercury 22.01.9 built with configure and make from the source distribution, which is not otherwise used (Clean-room rules), with only the `hlc.gc` library grade, at default optimization. SWI-Prolog 9.0.4 run with `-O`, and CPython 3.13.17 without its JIT. Times are wall-clock, including process start.
 
 ### E1. Sequential speed against C, SWI-Prolog and Python
 
@@ -247,40 +250,43 @@ Semantic analysis writes each module's interface file, which the front end reads
 
 ## Front end
 
-The front end turns source text into the program's AST, which has two parts: a parse tree that records the program exactly as written, and a semantic form that desugars each clause into a few goal kinds. Its structure follows Flang's front end more than Clang's. A prescanner normalizes the source; the parse tree's types mirror the grammar one to one and are immutable once built; a generic walker traverses them; and an unparser prints them back as source. Semantic results attach to the semantic form, which points back into the parse tree, much as Flang keeps symbols and typed expressions beside its parse tree. There is no lowering IR between the AST and MLIR (Semantic analysis). All behaviour follows the 22.01 reference manual.
+The front end turns source text into the program's AST, which has two parts: a parse tree that records the program exactly as written, and a semantic form that desugars each clause into a few goal kinds. Its structure follows Flang's front end more than Clang's. Source files are read unchanged; the parse tree's types mirror the grammar one to one and are immutable once built; a generic walker traverses them; and an unparser prints them back as source. Semantic results attach to the semantic form, which points back into the parse tree, much as Flang keeps symbols and typed expressions beside its parse tree. There is no lowering IR between the AST and MLIR (Semantic analysis). All behaviour follows the 22.01 reference manual.
 
-Flang is licensed, like this project, under Apache 2.0 with the LLVM exception, so its design, and its code with attribution, may be reused. The clean-room rule covers Melbourne Mercury only (Provenance).
+Flang is licensed, like this project, under Apache 2.0 with the LLVM exception, so its design, and its code with attribution, may be reused. The clean-room rule covers Melbourne Mercury only (Clean-room rules).
 
 | Stage | Input | Output |
 | --- | --- | --- |
-| Prescanner | Source files | A cooked character stream with directive lines marked, `%$omp&` continuations joined and `#line` directives applied, plus a provenance map back to the original files |
-| Lexer | Cooked stream | Tokens, with comments kept as trivia and one `directive` token per OpenMP directive |
+| Source manager | Source files | Each file's bytes, unchanged, with a provenance for every byte and for the end of the file |
+| Lexer | One file's bytes | Tokens, with comments kept as trivia, one `directive` token per OpenMP directive, and line number directives recorded |
 | Term reader | The tokens of one item | One term tree per item, in a per-item arena |
 | Converter | One term | Parse-tree nodes, built by combinators over term shapes |
 | Desugaring and quantification | Parse-tree clauses | The semantic form of each clause |
 | Module loader | `import_module` and `use_module` | Imported declarations, as parse-tree declaration nodes |
 
-### Prescanner
+### Source manager
 
-- **Cooked source.** As in Flang, the prescanner reads each file and produces a cooked character stream. A provenance table maps every cooked offset back to a file, line and column. A `SourceLocation` is a 32-bit offset into the cooked stream, and diagnostics and MLIR locations (`FileLineColLoc`) go through the provenance table to report the original source. The prescanner applies `#line` directives itself; the converter records `pragma source_file` in the same table.
-- **The OpenMP sentinel.** When OpenMP is enabled (`-fopenmp`), a line whose first non-blank text is `%$omp` followed by whitespace is a directive line, and following lines beginning `%$omp&` continue it. The prescanner marks the directive text so that the lexer tokenizes it instead of skipping it as a comment. Without `-fopenmp`, these lines stay comments.
-- **Reserved:** lines beginning `%$` and a space, for conditional compilation like Fortran's `!$` lines, meaning code compiled only when OpenMP is enabled. They are not in the first version.
+- **Files are read unchanged.** Each file's bytes are kept exactly as read: carriage returns stay, since Mercury treats them as whitespace, and no final newline is added. A UTF-8 byte order mark is recognized and kept out of the text the lexer reads. Printing the text back therefore gives the file, byte for byte.
+- **Provenance,** as in Flang's `AllSources`. Every byte of every source file, and every piece of text the compiler inserts, has a provenance: an offset into an unmaterialized concatenation of them all. Each file also has one provenance for its end, so that an error at the end of a file, even an empty one, has a location. A `CharBlock` points into a file's text, and `AllSources` maps between the two. Diagnostics and MLIR locations (`FileLineColLoc`) go through it to report the file, line and column. Line number directives and `pragma source_file` are recorded per file, from the line they apply to.
+- **No prescanner.** Flang rewrites its input into a cooked stream first, because Fortran's directive lines, continuation lines and `#` lines can be found line by line. Mercury's cannot. Strings may contain raw newlines ("String literals may also contain embedded newlines", reference manual, Tokens), so a line inside a string can begin with `%$omp`; the same holds inside `/* … */` comments and quoted names. Line number directives "may occur anywhere a token may occur". And `0'"` is a character code, not the start of a string. Finding directives therefore needs most of the lexer, so the lexer finds them (below), and nothing rewrites the text.
 
 ### Lexer
 
-- **Implementation.** Hand-written, working on the cooked stream with one character of lookahead. A token records its kind, location, length and flags.
+- **Which manual.** The lexical rules are the 22.01 reference manual's (Tokens). Where 22.01 says nothing, the current manual's Syntax chapter fills the gap, because it describes what 22.01 already accepts: comments (2.4), graphic names and `;` as a name (2.7), the backquote token (2.9), and "letters" and "digits" meaning Basic Latin ones (2.2). Its changes to the language are not adopted (Standard library, compatibility and testing, "Language version").
+- **Implementation.** Hand-written, working on one source file's bytes with one character of lookahead. A token records its kind, the trivia before it and its spelling, as character ranges in the file; values are computed from the spelling by the term reader.
 - **Token kinds** are those of the reference manual: names (alphanumeric, graphic such as `-->`, and quoted), variables, integers (with base prefixes, `0'c` character codes, underscores and size suffixes such as `7i8` and `42u32`), floats, strings with escapes, the backquote, `open`, `open_ct`, `close`, list and curly brackets, `|`, `,`, `end`, `eof`, and implementation-defined literals such as `$file`, `$line` and `$pred`.
-- **Whitespace decides two tokens.** A `(` with no whitespace before it is `open_ct`, which makes `f(X)` a compound term, while `- (X)` is the prefix operator `-` applied to a parenthesized term. A `.` followed by whitespace, a comment or end of file is the `end` token; any other `.` is the module-qualification operator.
-- **Comments,** `%` to end of line and `/* … */`, are not tokens. Each token records its exact spelling and the whitespace and comments before it, and the `eof` token holds whatever follows the last token. Printing every token's trivia and spelling in order reproduces the file byte for byte (Unparser and round-trip tests). Tokens refer to the raw source, so this holds even where the prescanner joined `%$omp&` continuation lines.
-- **Directives.** A marked directive becomes one `directive` token holding its own sub-tokens, lexed with the normal rules.
+- **Whitespace decides two tokens.** A `(` with no whitespace before it is `open_ct`, which makes `f(X)` a compound term, while `- (X)` is the prefix operator `-` applied to a parenthesized term. A `.` followed by whitespace, a comment or end of file is the `end` token; any other `.` is the module-qualification operator. A graphic name stops before `/*`, so `+/* c */` is `+` and a comment.
+- **Comments,** `%` to end of line and `/* … */`, are not tokens. A block comment ends at the first `*/`, so block comments do not nest. Each token records its exact spelling and the whitespace and comments before it, and the `eof` token holds whatever follows the last token. Printing every token's trivia and spelling in order reproduces the file byte for byte (Unparser and round-trip tests). This holds for directives too, because their continuation lines are joined only in the directive token's sub-tokens, never in the text.
+- **The OpenMP sentinel.** When OpenMP is enabled (`-fopenmp`), a `%` comment that is the first non-blank text of its line, and that begins `%$omp` followed by whitespace, is a directive. Each following line whose first non-blank text is `%$omp&` continues it. The directive becomes one `directive` token holding its own sub-tokens, lexed with the normal rules. Without `-fopenmp`, these lines stay comments. A `%$omp` inside a string, quoted name or block comment is never seen, because the lexer is already inside that token.
+- **Line number directives.** `#` followed by a positive integer and a newline, wherever a token may occur, sets the number of the next line (reference manual, Tokens). The lexer records it in the source file's line table and keeps the directive as trivia, so round trips still reproduce it. A carriage return before the newline is accepted, so files with CRLF line endings work.
+- **Reserved:** lines beginning `%$` and a space, for conditional compilation like Fortran's `!$` lines, meaning code compiled only when OpenMP is enabled. They are not in the first version.
 
 ### Term reader
 
 - **Output.** The reader reads one item, from its first token to the `end` token, into a term tree. Term nodes are variables, integers, floats, strings, names, compound terms (a functor name, possibly module-qualified, with arguments), list and tuple terms, higher-order applications (`Term(Args)`, read as `''(Term, Args…)` as the manual specifies), and directive-annotated terms. They live in an arena that is reset after each item is converted.
 - **Variables** are numbered per item through a table from names to numbers. Each `_` is a fresh variable, and singleton warnings follow the manual's rules for names beginning with `_`.
-- **Precedence climbing, hand-written.** `parseTerm(maxPriority)` reads a primary term, then extends it with infix and postfix operators whose priority is at most `maxPriority`. An `x` argument must have a strictly lower priority than its operator, and a `y` argument a lower or equal one. Arguments of compound terms and list elements are read at priority 999, below `,` at 1000. Flang writes Fortran's expression levels as a chain of combinators, one per level; Mercury's table has many more levels, so a table-driven reader is simpler and faster here.
-- **Prefix operators.** A name that is a prefix operator is applied as one when the next token can begin a term; otherwise it is an ordinary name, so `-` alone is a name and `- X` is an operator term. The `fxy` operators, such as `some`, `trace`, `try` and `require_complete_switch`, take two arguments, as in `some [X] Goal`. A name immediately followed by `open_ct` is always a compound term, operator or not. Backquoted names are infix operators at priority 120.
-- **The operator table** is data compiled into the front end: the 22.01 table by default, with the later table, which inverts some priorities, selectable by a flag.
+- **Precedence climbing, hand-written.** `parseTerm(minPriority)` reads a primary term, then extends it with infix and postfix operators whose priority is at least `minPriority`. An `x` argument must have a strictly higher priority than its operator, and a `y` argument a higher or equal one. Arguments of compound terms and list elements are read at priority 501, above `,` at 500. Flang writes Fortran's expression levels as a chain of combinators, one per level; Mercury's table has many more levels, so a table-driven reader is simpler and faster here.
+- **Prefix operators.** A name that is a prefix operator is applied as one when the next token can begin a term; otherwise it is an ordinary name, so `-` alone is a name and `- X` is an operator term. The `fxy` operators, such as `some`, `trace`, `try` and `require_complete_switch`, take two arguments, as in `some [X] Goal`. A name immediately followed by `open_ct` is always a compound term, operator or not. Backquoted names are infix operators at priority 1380.
+- **The operator table** is data compiled into the front end. Its operators are 22.01's, numbered as in the current manual, where a higher priority binds more tightly. The current numbering is 1500 minus 22.01's, so the two describe the same parses; the current one is used because it is what Mercury programmers now read.
 - **Recovery.** On a syntax error the reader reports the token it expected and skips to the next `end` token, so one bad item does not hide errors in later ones. A language server uses the same recovery.
 
 ### Converter: combinators over terms
@@ -313,7 +319,7 @@ constexpr auto ifThenElse =
 
 ### Unparser and round-trip tests
 
-The unparser is the first component to build, together with the prescanner, lexer, term reader and converter it tests. Its round-trip tests then guard every later change to them. It has three modes:
+The unparser is the first component to build, together with the source manager, lexer, term reader and converter it tests. Its round-trip tests then guard every later change to them. It has three modes:
 
 - **Exact.** Prints the parse tree using the tokens it recorded, so every spelling, parenthesis, comment and space comes from the tree and the output equals the input, byte for byte. Because it walks the tree instead of copying source ranges, any token or comment that the converter loses or misplaces shows up as a difference.
 - **Canonical.** Prints the same tree in a standard layout: four-space indentation, one goal per line, if-then-else and disjunction laid out as in the reference manual, spaces around infix operators, line breaking by a Wadler-style pretty-printer, and at most one blank line between items. Comments are kept, attached to the node they precede or, on the same line, follow, with their text unchanged. Literal spellings such as `0x1F` and quoting are kept as well. This mode is the formatter.
@@ -328,7 +334,7 @@ Tests, run on every file of every corpus:
 5. **Against mmc.** Tests 1 to 4 compare our parser with itself, so a parser that is consistently wrong about an operator's priority would pass them all. mmc's `--convert-to-mercury` option prints mmc's own parse of a module with every operator term parenthesized, as in `(!: Acc) = ((!. Acc) + (X * X))` for the running example. Our parse of the file must equal our parse of that output: the parentheses make it unambiguous, so any difference is a priority or associativity error in our term reader. mmc's printer drops comments and splits a combined `pred`-and-mode declaration into two, so declarations are compared after the same split.
 6. **Fuzzing.** Random term trees are printed, parsed and compared. Mutated source files must never crash the front end, and recovery must resume at the next item.
 
-**Corpora:** the reference manual's examples, our own test programs, and generated programs. Melbourne's library and test sources are not used, because nobody may read them to diagnose a failure (Provenance).
+**Corpora:** the reference manual's examples, our own test programs, and generated programs. Melbourne's library and test sources are not used, because nobody may read them to diagnose a failure (Clean-room rules).
 
 ### Semantic form
 
@@ -364,7 +370,7 @@ Desugaring also numbers the goals and unifications of each semantic form densely
 - **Parsing.** A small recursive descent parser reads the directive token's sub-tokens into an `OmpDirective` parse-tree node, with one child per clause, each with its own source range.
 - **Attachment.** The term reader attaches a directive token to the next term that begins after it. The converter accepts the annotation only where that term is a goal. There it builds an `OmpGoal`, which holds the directive and its associated goal, as Clang's `OMPExecutableDirective` holds its associated statement; desugaring turns it into a directive `Scope`. Anywhere else, such as before a clause head or inside a data-term, the directive draws a warning and is ignored.
 - **Checking** is part of semantic analysis: the associated goal must be a loop the compiler can form, and the clauses must make sense for it.
-- **Without `-fopenmp`** the prescanner leaves directive lines as comments, so the program's meaning is that of the sequential program, which is also what mmc compiles.
+- **Without `-fopenmp`** the lexer leaves directive lines as comments, so the program's meaning is that of the sequential program, which is also what mmc compiles.
 
 ### Modules and interface files
 
@@ -392,9 +398,9 @@ add_square(A, I, !Acc) :-
     !:Acc = !.Acc + X * X.
 ```
 
-**1. Prescanner.** Every line passes through unchanged except the directive. With `-fopenmp`, line 4 is marked as a directive whose text is `parallel do reduction(+)`; without it, the line stays a comment. The provenance table maps each cooked offset back to its file, line and column.
+**1. Source manager.** The file is read unchanged and given one provenance per byte, plus one for its end. `AllSources` maps each of them back to the file, line and column.
 
-**2. Lexer.** The `add_square` clause becomes these tokens, one source line per row, and the directive becomes one token holding its own. The `.` after `array` is followed by a name, so it is the qualification operator; the last `.` is followed by a newline, so it is the `end` token.
+**2. Lexer.** The `add_square` clause becomes these tokens, one source line per row. With `-fopenmp`, the comment on line 4 is a directive, and becomes one token holding its own, with the text `parallel do reduction(+)`; without it, the line stays a comment. The `.` after `array` is followed by a name, so it is the qualification operator; the last `.` is followed by a newline, so it is the `end` token.
 
 ```text
 name add_square · open_ct · variable A · comma · variable I · comma · name ! · variable Acc · close · name :-
@@ -404,7 +410,7 @@ name !: · variable Acc · name = · name !. · variable Acc · name + · variab
 directive [ name parallel · name do · name reduction · open_ct · name + · close ]
 ```
 
-**3. Term reader.** Precedence climbing gives one term per item: `:-` (1200) is outermost, then `,` (1000), `=` (700), `+` (500), `*` (400), and the state-variable prefixes `!`, `!.` and `!:` (40). Variables are numbered in order of appearance, and the directive annotates the term that follows it.
+**3. Term reader.** Precedence climbing gives one term per item: `:-` (300) is outermost, then `,` (500), `=` (800), `+` (1000), `*` (1100), and the state-variable prefixes `!`, `!.` and `!:` (1460). Variables are numbered in order of appearance, and the directive annotates the term that follows it.
 
 ```text
 ':-'( add_square(A, I, '!'(Acc)),
@@ -869,7 +875,7 @@ Flang's driver cannot be reused as it stands. It is Clang's driver library, `cla
 | `-fsyntax-only` | Parse and run semantic analysis only |
 | `-O0` to `-O3`, `-Os` | Choose the MLIR and LLVM pass pipelines |
 | `-g`, `-gline-tables-only` | Debug information (Debugging) |
-| `-fopenmp`, `-fopenmp-version=` | Read `%$omp` directives (Front end, Prescanner) |
+| `-fopenmp`, `-fopenmp-version=` | Read `%$omp` directives (Front end, Lexer) |
 | `--offload-arch=` | Compile target regions for a device (Linking and offloading, below) |
 | `--target=`, `-march=`, `-mcpu=` | Target triple and CPU |
 | `-I` *dir*, `-module-dir` *dir* | Where interface files are searched for, and where they are written; Flang uses the same two options for `.mod` files |
@@ -902,18 +908,18 @@ Melbourne compiles a whole program in one grade, and modules link only if all we
 
 - **`CompilerInvocation`** turns the `-fc1` command line into option structures. Code generation options are listed in a `.def` file, as in Flang's `CodeGenOptions.def`.
 - **`CompilerInstance`** owns the source files and provenance table, the diagnostics, the MLIR context and the output files.
-- **Actions** are classes layered by how far they run, as Flang's are (`PrescanAction`, `PrescanAndParseAction`, `PrescanAndSemaAction`, `CodeGenAction`), chosen by an `ActionKind` in `ExecuteCompilerInvocation`.
+- **Actions** are classes layered by how far they run, as Flang's are (`PrescanAction`, `PrescanAndParseAction`, `PrescanAndSemaAction`, `CodeGenAction`); ours start from reading the source, since there is no prescan, chosen by an `ActionKind` in `ExecuteCompilerInvocation`.
 - **Diagnostics** go through our own engine (Semantic analysis, Diagnostics) with Flang's `message.h`. Flang's frontend uses Clang's `DiagnosticsEngine`, which would mean linking Clang's Basic library, so that part is not imitated.
 - **Options** for the driver and `-fc1` are in one TableGen file, each marked for the driver, for `-fc1` or for both, as Clang marks its options for the driver and `-cc1`.
 
 | Runs through | Actions |
 | --- | --- |
-| Prescanner | `-fdebug-dump-provenance` |
+| Source manager | `-E` (the source as the lexer reads it, which is the file unchanged), `-fdebug-dump-provenance` |
 | Parser | `-fdebug-unparse-no-sema`, `-fdebug-dump-parse-tree-no-sema` |
 | Semantic analysis | `-fsyntax-only`, `-fdebug-unparse`, `-fdebug-dump-parse-tree`, `-fdebug-dump-semantic-form`, `-emit-interface` |
 | Code generation | `-emit-merk`, `-emit-mrt`, `-emit-llvm`, `-emit-llvm-bc`, `-S`, `-emit-obj` |
 
-The unparser's exact, canonical and fully parenthesized modes (Front end, Unparser and round-trip tests) are chosen with `-funparse-mode=`. The `-fc1` layer with the prescanner and parser actions comes first, in M1, because the round-trip tests run through it; the build mode and linking follow with code generation.
+The unparser's exact, canonical and fully parenthesized modes (Front end, Unparser and round-trip tests) are chosen with `-funparse-mode=`. The `-fc1` layer with the source and parser actions comes first, in M1, because the round-trip tests run through it; the build mode and linking follow with code generation.
 
 ### Linking and offloading
 
@@ -1205,12 +1211,17 @@ The language target is the Mercury 22.01 reference manual. The standard library 
 **Language version**
 
 - Version 1 implements 22.01 semantics.
-- Development snapshots since 22.01 change some things: submodule visibility rules, inverted operator priorities in `ops`, and new `<<u` and `>>u` tokens. These are tracked as a separate list and adopted deliberately.
+- Development snapshots since 22.01 change some things. These are tracked as a separate list and adopted deliberately. The lexical ones, from the current manual's Syntax chapter:
+  - **Inverted operator priorities.** A renumbering only (new = 1500 − old), so it is adopted (Front end, Term reader).
+  - **The `\e` escape,** for ESC (U+001B), in strings and quoted names. Not adopted: it is an error, so that our test programs still compile with mmc 22.01.9.
+  - **Underscores before an exponent,** as in `1.5_e10`. Not adopted, for the same reason.
+  - **`<<u` and `>>u`,** unsigned shifts. Not adopted: under 22.01, `A <<u` is `A << u`, so the change is not purely additive, and the current manual does not say how `<<uint` splits.
+  - Submodule visibility rules also changed; they are not lexical.
 
 **Standard library**
 
-- The whole library is reimplemented from the library reference manual, so the project controls its behaviour, performance and licence. Melbourne's library, LGPL-2 with a linking exception, is neither read nor shipped (Provenance).
-- Runtime-coupled modules are reimplemented clean-room from the library reference manual: `builtin`, `int`, `float`, `char`, `string`, `array`, `io`, `exception`, `time`, `benchmarking`, and processes in place of `thread`. Their behaviour is tied to a runtime that is new here, and their sources are not read (Provenance).
+- The whole library is reimplemented from the library reference manual, so the project controls its behaviour, performance and licence. Melbourne's library, LGPL-2 with a linking exception, is neither read nor shipped (Clean-room rules).
+- Runtime-coupled modules are reimplemented clean-room from the library reference manual: `builtin`, `int`, `float`, `char`, `string`, `array`, `io`, `exception`, `time`, `benchmarking`, and processes in place of `thread`. Their behaviour is tied to a runtime that is new here, and their sources are not read (Clean-room rules).
 - Pure-Mercury modules (`list`, `map`, `set`, `cord` and others) are reimplemented the same way. Where the manual leaves behaviour unstated, such as which exceptions are thrown, exact output formats, unstated orderings and performance, differential tests against mmc decide.
 
 **Compatibility promise**
@@ -1237,7 +1248,7 @@ M3 and M4 both build only on M2, so their order can be swapped if processes matt
 
 ## Open questions and risks
 
-Nine decisions remain open. The three that most constrain the runtime are the heap cell layout, the nondeterminism strategy and the stack model, so they come first. The five ticked at the end were decided on 2026-10-27 and 2026-10-28.
+Nine decisions remain open. The three that most constrain the runtime are the heap cell layout, the nondeterminism strategy and the stack model, so they come first. The seven ticked at the end were decided between 2026-10-27 and 2026-10-29.
 
 **Open questions**
 
@@ -1255,6 +1266,8 @@ Nine decisions remain open. The three that most constrain the runtime are the he
 - [x] Links and monitors: required, and delivered with processes in M4.
 - [x] Open-term bindings: WAM-style reference chains (Runtime system, "Support for open terms").
 - [x] Parallel annotation syntax: the comment sentinel `%$omp`, attached to the next goal (Front end, "OpenMP directives").
+- [x] Prescanner: none. Source files are read unchanged, and the lexer recognizes `%$omp` directives and line number directives, which depend on token context (Front end, "Source manager").
+- [x] Lexical rules: 22.01's, with the current manual filling its gaps; of the later changes only the operator renumbering is adopted (Front end, Lexer; Standard library, compatibility and testing).
 
 **Risks**
 
@@ -1268,8 +1281,9 @@ Nine decisions remain open. The three that most constrain the runtime are the he
 
 ## Sources
 
-- [Mercury repository](https://github.com/Mercury-Language/mercury) and the [22.01.9 source distribution](https://github.com/Mercury-Language/mercury-srcdist), used only for the documents and metadata listed under Provenance: `LIMITATIONS.md`, the reference manual, the user's guide, `NEWS.md`, `LICENSE` and commit metadata
+- [Mercury repository](https://github.com/Mercury-Language/mercury) and the [22.01.9 source distribution](https://github.com/Mercury-Language/mercury-srcdist), used only for the documents and metadata listed under Clean-room rules: `LIMITATIONS.md`, the reference manual, the user's guide, `NEWS.md`, `LICENSE` and commit metadata
 - [The Mercury Language Reference Manual, release 22.01](https://www.mercurylang.org/information/doc-release/mercury_ref/index.html) ([PDF](https://mercurylang.org/information/doc-release/reference_manual.pdf)): the language specification this compiler implements
+- [The Mercury Language Reference Manual, current version: Syntax](https://www.mercurylang.org/information/doc-latest/mercury_reference_manual/Syntax.html): the comment, name and punctuation rules that the 22.01 manual leaves unstated, and the lexical changes since 22.01.
 - [The Mercury User's Guide, release 22.01](https://mercurylang.org/information/doc-release/mercury_user_guide/) ([PDF](https://mercurylang.org/information/doc-release/user_guide.pdf)): compiler options, grades, the debugger and the tools
 - [Flang driver design](https://github.com/llvm/llvm-project/blob/main/flang/docs/FlangDriver.md): `flang` and `flang -fc1`, built on Clang's driver library
 - [Mercury User's Guide: grade modifiers for parallelism](https://mercurylang.org/information/doc-latest/mercury_user_guide/Grade-modifiers-for-parallelism.html)
