@@ -795,8 +795,7 @@ std::optional<Goal> GoalRule::Convert(
     if (!arguments) {
       return std::nullopt;
     }
-    const SymName *braces{state.arena.Make<SymName>(
-        t.tokens(), llvm::ArrayRef<llvm::StringRef>{}, "{}")};
+    const SymName *braces{MakeBracketSymName(t, "{}", state)};
     return make(state.arena.Make<Call>(t.tokens(), braces, *arguments));
   }
   if (!llvm::isa<NameTerm>(t) && !llvm::isa<CompoundTerm>(t)) {
@@ -1221,9 +1220,7 @@ std::optional<Clause> ClauseRule::Convert(
     withArguments(Apply(symName, *backquote->op(), state),
         llvm::ArrayRef<const Term *>{operands});
   } else if (const auto *tuple{llvm::dyn_cast<TupleTerm>(&h)}) {
-    withArguments(state.arena.Make<SymName>(
-                      h.tokens(), llvm::ArrayRef<llvm::StringRef>{}, "{}"),
-        tuple->elements());
+    withArguments(MakeBracketSymName(h, "{}", state), tuple->elements());
   } else if (llvm::isa<NameTerm>(h) || llvm::isa<CompoundTerm>(h)) {
     converted = appliedName(modedTerm).Convert(h, state);
   } else {

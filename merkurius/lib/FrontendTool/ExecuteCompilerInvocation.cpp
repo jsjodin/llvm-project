@@ -30,6 +30,10 @@ std::unique_ptr<FrontendAction> createFrontendAction(CompilerInstance &ci) {
     return std::make_unique<DebugDumpTermsAction>();
   case ActionKind::DebugDumpParseTreeNoSema:
     return std::make_unique<DebugDumpParseTreeNoSemaAction>();
+  case ActionKind::DebugUnparseExact:
+    return std::make_unique<DebugUnparseExactAction>(false);
+  case ActionKind::DebugUnparseExactMinimalLayout:
+    return std::make_unique<DebugUnparseExactAction>(true);
   }
   llvm_unreachable("unknown ActionKind");
 }

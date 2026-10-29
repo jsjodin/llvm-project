@@ -5,6 +5,7 @@ add_merkurius_unittest(MerkuriusParserTests
   ProvenanceTest.cpp
   TermReaderTest.cpp
   TermTest.cpp
+  UnparseTest.cpp
   )
 
 target_link_libraries(MerkuriusParserTests

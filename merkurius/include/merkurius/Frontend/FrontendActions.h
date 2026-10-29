@@ -84,6 +84,18 @@ class DebugDumpParseTreeNoSemaAction : public FrontendAction {
   bool executeAction() override;
 };
 
+// Converts the source file and prints its parse tree back as source, from
+// the tokens the tree recorded.
+class DebugUnparseExactAction : public FrontendAction {
+public:
+  explicit DebugUnparseExactAction(bool minimalLayout)
+      : minimalLayout_{minimalLayout} {}
+
+private:
+  bool executeAction() override;
+  bool minimalLayout_;
+};
+
 } // namespace merkurius::frontend
 
 #endif // MERKURIUS_FRONTEND_FRONTENDACTIONS_H_

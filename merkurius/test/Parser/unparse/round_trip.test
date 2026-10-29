@@ -1,0 +1,13 @@
+# The unparser's round-trip tests 2 and 4 (design document, "Unparser and
+# round-trip tests") on the Mercury files in the tests that convert without
+# errors: unparsing exactly gives back the file and reports nothing, and the
+# minimal layout has the same parse tree. Files with errors are checked by
+# the fuzz target instead (../fuzz_corpus.test).
+#
+# RUN: %round-trip %S/../convert/clauses.m %S/../convert/declarations.m \
+# RUN:   %S/../convert/definitions.m %S/../convert/directives.m \
+# RUN:   %S/../convert/pragmas.m %S/../convert/typeclasses.m \
+# RUN:   %S/../../Lexer/tokens.m %S/../../Lexer/directives.m \
+# RUN:   %S/../../Lexer/line_directives.m %S/../../Driver/Inputs/sumsq.m \
+# RUN:   %S/../Inputs/fuzz/byte_order_mark.m %S/exact.m \
+# RUN:   %S/../../../utils/term-oracle/term_oracle.m
