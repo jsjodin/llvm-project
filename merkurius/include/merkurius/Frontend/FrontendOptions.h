@@ -26,6 +26,9 @@ enum class ActionKind {
   // -fdebug-unparse-tokens: print every token's trivia and spelling, which
   // gives back the source file byte for byte.
   DebugUnparseTokens,
+  // -fdebug-dump-terms: print each item's term in canonical notation, one
+  // per line, or "error" for an item with a diagnostic.
+  DebugDumpTerms,
 };
 
 struct FrontendOptions {

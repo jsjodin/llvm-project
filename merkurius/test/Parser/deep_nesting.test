@@ -1,0 +1,20 @@
+# The reader accepts terms that nest up to 10000 levels deep, which needs
+# the large stack merkc -fc1 runs on, and reports an item that nests more
+# deeply, then reads the next one.
+#
+# RUN: %python -c "print('X = ' + '(' * 9990 + 'a' + ')' * 9990 + '.')" > %t.ok.m
+# RUN: %python -c "print('p :- ' + ', '.join(['q'] * 9990) + '.')" >> %t.ok.m
+# RUN: merkc -fc1 -fdebug-dump-terms %t.ok.m | FileCheck --check-prefix=OK %s
+# OK: '='(X, a)
+# OK-NEXT: ':-'(p, ','(q, ','(q,
+#
+# RUN: %python -c "print('X = ' + 'f(' * 20000 + 'a' + ')' * 20000 + '.')" > %t.deep.m
+# RUN: %python -c "print('p :- ' + ', '.join(['q'] * 100000) + '.')" >> %t.deep.m
+# RUN: echo "ok." >> %t.deep.m
+# RUN: not merkc -fc1 -fdebug-dump-terms %t.deep.m > %t.out 2> %t.err
+# RUN: FileCheck --check-prefix=DEEP %s < %t.out
+# RUN: FileCheck --check-prefix=MESSAGES %s < %t.err
+# DEEP: error
+# DEEP-NEXT: error
+# DEEP-NEXT: ok
+# MESSAGES-COUNT-2: error: the term nests more than 10000 levels deep

@@ -1,0 +1,6 @@
+# The other Mercury files in the tests, and the oracle itself, read the same
+# by merkc and by Mercury's term parser.
+#
+# REQUIRES: mmc
+# RUN: %compare-terms %S/../../Lexer/tokens.m %S/../../Lexer/directives.m \
+# RUN:   %S/../../Lexer/line_directives.m %S/../../../utils/term-oracle/term_oracle.m

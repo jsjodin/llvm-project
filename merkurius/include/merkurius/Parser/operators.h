@@ -32,11 +32,15 @@ enum class Specifier {
 // these, so a primary term is a valid argument of any operator.
 inline constexpr int lowestPriority{0};
 inline constexpr int primaryPriority{1500};
-// An item is read at the priority of ':-' and '-->'.
+// An item is read at the priority of ':-' and '-->'. So are arguments of
+// compound terms and elements of lists and tuples, but there ',' separates
+// them instead of being an operator, as in p(int::in, X), where '::' (325)
+// binds less tightly than ',' (500).
 inline constexpr int itemPriority{300};
-// Arguments of compound terms and elements of lists and tuples are read
-// above the priority of ',' (500), so that a comma separates them.
-inline constexpr int argumentPriority{501};
+// The priority of ',' as an operator, and just above it, the priority at
+// which a %$omp directive's goal is read, so that it is one conjunct.
+inline constexpr int commaPriority{500};
+inline constexpr int conjunctPriority{commaPriority + 1};
 // `name` and `Variable` used as infix operators.
 inline constexpr int backquotePriority{1380};
 inline constexpr Specifier backquoteSpecifier{Specifier::YFX};

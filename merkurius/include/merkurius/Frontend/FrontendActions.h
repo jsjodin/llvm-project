@@ -74,6 +74,11 @@ class DebugUnparseTokensAction : public LexAction {
       llvm::raw_ostream &, const parser::TokenSequence &) override;
 };
 
+// Reads the items of the source file and prints their terms.
+class DebugDumpTermsAction : public FrontendAction {
+  bool executeAction() override;
+};
+
 } // namespace merkurius::frontend
 
 #endif // MERKURIUS_FRONTEND_FRONTENDACTIONS_H_

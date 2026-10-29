@@ -1,0 +1,9 @@
+# Random items from a grammar of Mercury's surface syntax read the same in
+# merkc and in Mercury's term parser. The seeds are fixed, so the items are
+# too; to search further, run generate-random-terms.py with other seeds.
+#
+# REQUIRES: mmc
+# RUN: %python %S/../../../utils/term-oracle/generate-random-terms.py --seed 1 --count 5000 > %t.1.m
+# RUN: %python %S/../../../utils/term-oracle/generate-random-terms.py --seed 2 --count 5000 > %t.2.m
+# RUN: %python %S/../../../utils/term-oracle/generate-random-terms.py --seed 3 --count 5000 > %t.3.m
+# RUN: %compare-terms %t.1.m %t.2.m %t.3.m

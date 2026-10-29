@@ -210,6 +210,10 @@ public:
   Message &set_severity(Severity);
   std::string ToString() const;
   std::optional<ProvenanceRange> GetProvenanceRange(const AllSources &) const;
+  // The location, when it is still a CharBlock.
+  const CharBlock *GetCharBlock() const {
+    return std::get_if<CharBlock>(&location_);
+  }
   void Emit(llvm::raw_ostream &, const AllSources &,
       bool echoSourceLine = true) const;
 

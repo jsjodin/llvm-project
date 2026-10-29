@@ -1,0 +1,6 @@
+# Every pair of builtin operators, in every way they can combine, reads the
+# same in merkc and in Mercury's term parser: about 16000 items.
+#
+# REQUIRES: mmc
+# RUN: %python %S/../../../utils/term-oracle/generate-operator-cases.py > %t.m
+# RUN: %compare-terms %t.m
