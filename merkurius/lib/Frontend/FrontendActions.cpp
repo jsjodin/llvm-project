@@ -9,6 +9,7 @@
 #include "merkurius/Frontend/FrontendActions.h"
 #include "merkurius/Driver/Options.h"
 #include "merkurius/Frontend/CompilerInstance.h"
+#include "merkurius/Parser/convert.h"
 #include "merkurius/Parser/lexer.h"
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/provenance.h"
@@ -108,7 +109,7 @@ bool DebugDumpTermsAction::executeAction() {
   parser::TermArena arena;
   parser::TermReader reader{tokens, arena, messages};
   std::size_t readerMessages{messages.messages().size()};
-  while (std::optional<parser::Item> item{reader.ReadItem()}) {
+  while (std::optional<parser::ItemTerm> item{reader.ReadItem()}) {
     const parser::Token &first{tokens.tokens[item->tokens.first]};
     const parser::Token &last{tokens.tokens[item->tokens.last]};
     bool lexerError{llvm::any_of(lexerErrors, [&](const char *at) {
@@ -126,6 +127,24 @@ bool DebugDumpTermsAction::executeAction() {
   }
   os->flush();
   messages.Emit(llvm::errs(), ci.getAllSources());
+  return !messages.AnyFatalError();
+}
+
+bool DebugDumpParseTreeNoSemaAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  parser::LexerOptions options;
+  options.openMP = ci.getLangOpts().openMP;
+  parser::Messages messages;
+  parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
+  parser::ParseTreeArena arena;
+  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages)};
+  messages.Emit(llvm::errs(), ci.getAllSources());
+  llvm::raw_ostream *os{ci.createDefaultOutputFile()};
+  if (!os) {
+    return false;
+  }
+  parser::DumpParseTree(*os, tree);
+  os->flush();
   return !messages.AnyFatalError();
 }
 

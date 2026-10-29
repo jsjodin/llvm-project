@@ -16,17 +16,15 @@
 // records its first and last token. Nodes are allocated in a TermArena,
 // which is reset after each item, and are never destroyed individually.
 
+#include "merkurius/Common/arena.h"
 #include "merkurius/Parser/char-block.h"
 #include "merkurius/Parser/token.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/Support/Allocator.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
-#include <algorithm>
 #include <cstdint>
-#include <new>
 #include <type_traits>
 
 namespace merkurius::parser {
@@ -276,41 +274,19 @@ private:
 
 // The arena that holds the terms of one item, and the strings and argument
 // arrays they refer to.
-class TermArena {
+class TermArena : public common::Arena {
 public:
   template <typename T, typename... A> const T *Make(A &&...args) {
     static_assert(std::is_base_of_v<Term, T>);
-    static_assert(std::is_trivially_destructible_v<T>);
-    return new (allocator_.Allocate<T>()) T(std::forward<A>(args)...);
+    return Arena::Make<T>(std::forward<A>(args)...);
   }
-  llvm::StringRef Save(llvm::StringRef s) {
-    if (s.empty()) {
-      return {};
-    }
-    char *p{allocator_.Allocate<char>(s.size())};
-    std::copy(s.begin(), s.end(), p);
-    return {p, s.size()};
-  }
+  using Arena::Save;
   llvm::ArrayRef<const Term *> Save(llvm::ArrayRef<const Term *> terms) {
     return SaveArray(terms);
   }
   llvm::ArrayRef<std::uint64_t> Save(llvm::ArrayRef<std::uint64_t> words) {
     return SaveArray(words);
   }
-  // Frees every term made since the last reset.
-  void Reset() { allocator_.Reset(); }
-
-private:
-  template <typename T> llvm::ArrayRef<T> SaveArray(llvm::ArrayRef<T> array) {
-    if (array.empty()) {
-      return {};
-    }
-    T *p{allocator_.Allocate<T>(array.size())};
-    std::copy(array.begin(), array.end(), p);
-    return {p, array.size()};
-  }
-
-  llvm::BumpPtrAllocator allocator_;
 };
 
 // The characters from a term's first token to its last.

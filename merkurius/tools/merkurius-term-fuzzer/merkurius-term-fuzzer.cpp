@@ -68,7 +68,7 @@ std::vector<std::string> ReadCanonical(
   TermReader reader{tokens, arena, messages, maxDepth};
   std::vector<std::string> items;
   std::size_t count{messages.messages().size()};
-  while (std::optional<Item> item{reader.ReadItem()}) {
+  while (std::optional<ItemTerm> item{reader.ReadItem()}) {
     std::string canonical;
     if (item->term && !lexerErrors && messages.messages().size() == count) {
       llvm::raw_string_ostream os{canonical};

@@ -54,6 +54,8 @@ def fdebug_unparse_tokens : Flag<["-"], "fdebug-unparse-tokens">,
   HelpText<"Print the source file from its tokens and their trivia">;
 def fdebug_dump_terms : Flag<["-"], "fdebug-dump-terms">,
   HelpText<"Print each item's term in canonical notation">;
+def fdebug_dump_parse_tree_no_sema : Flag<["-"], "fdebug-dump-parse-tree-no-sema">,
+  HelpText<"Print the parse tree, before semantic analysis">;
 
 } // let Visibility = [FC1Option]
 

@@ -1,4 +1,5 @@
 add_merkurius_unittest(MerkuriusParserTests
+  ConvertTest.cpp
   LexerTest.cpp
   OperatorsTest.cpp
   ProvenanceTest.cpp
