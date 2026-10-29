@@ -10,3 +10,4 @@ function(add_merkurius_unittest test_dirname)
 endfunction()
 
 add_subdirectory(Common)
+add_subdirectory(Parser)

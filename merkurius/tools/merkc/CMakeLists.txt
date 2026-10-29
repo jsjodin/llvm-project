@@ -16,4 +16,5 @@ target_link_libraries(merkc
   MerkuriusDriver
   MerkuriusFrontend
   MerkuriusFrontendTool
+  MerkuriusParser
   )

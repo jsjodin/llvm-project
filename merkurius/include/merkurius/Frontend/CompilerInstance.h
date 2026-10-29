@@ -10,19 +10,21 @@
 #define MERKURIUS_FRONTEND_COMPILERINSTANCE_H_
 
 #include "merkurius/Frontend/CompilerInvocation.h"
+#include "merkurius/Parser/provenance.h"
 #include "llvm/Support/raw_ostream.h"
 #include <memory>
 
 namespace merkurius::frontend {
 
-// Owns what one -fc1 run needs: its invocation and its output. The source
-// files and provenance table, the diagnostics and the MLIR context will join
-// as the stages that use them arrive.
+// Owns what one -fc1 run needs: its invocation, the source files and their
+// provenances, and its output. The diagnostics and the MLIR context will
+// join as the stages that use them arrive.
 class CompilerInstance {
 public:
   CompilerInvocation &getInvocation() { return invocation_; }
   FrontendOptions &getFrontendOpts() { return invocation_.getFrontendOpts(); }
   LangOptions &getLangOpts() { return invocation_.getLangOpts(); }
+  parser::AllSources &getAllSources() { return allSources_; }
 
   // Opens the output named by -o, or standard output when there is none.
   // Returns null after reporting an error.
@@ -30,6 +32,7 @@ public:
 
 private:
   CompilerInvocation invocation_;
+  parser::AllSources allSources_;
   std::unique_ptr<llvm::raw_fd_ostream> output_;
 };
 

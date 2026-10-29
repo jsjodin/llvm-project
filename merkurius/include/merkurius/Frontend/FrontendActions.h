@@ -6,18 +6,21 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Frontend actions, layered by how far they run, as Flang's are. Only the
-// first exists so far; PrescanAction, PrescanAndParseAction and the rest are
-// added with the stages they run.
+// Frontend actions, layered by how far they run, as Flang's are. Each opens
+// its input through the CompilerInstance's AllSources; parsing and analysis
+// actions are added with the stages they run.
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef MERKURIUS_FRONTEND_FRONTENDACTIONS_H_
 #define MERKURIUS_FRONTEND_FRONTENDACTIONS_H_
 
+#include "merkurius/Parser/token.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/Support/MemoryBuffer.h"
-#include <memory>
+
+namespace merkurius::parser {
+class SourceFile;
+} // namespace merkurius::parser
 
 namespace merkurius::frontend {
 
@@ -35,19 +38,40 @@ protected:
   virtual bool executeAction() = 0;
 
   CompilerInstance &getInstance() { return *instance_; }
-  llvm::StringRef getInputName() const { return inputName_; }
-  const llvm::MemoryBuffer &getInputBuffer() const { return *inputBuffer_; }
+  parser::SourceFile &getSourceFile() { return *sourceFile_; }
 
 private:
   CompilerInstance *instance_{nullptr};
-  llvm::StringRef inputName_;
-  std::unique_ptr<llvm::MemoryBuffer> inputBuffer_;
+  parser::SourceFile *sourceFile_{nullptr};
 };
 
-// -E. Prints the input unchanged; it will print the prescanner's cooked
-// stream once there is a prescanner.
+// -E. Prints the source as the lexer reads it, which is the input unchanged.
 class PrintPreprocessedInputAction : public FrontendAction {
   bool executeAction() override;
+};
+
+// -fdebug-dump-provenance.
+class DebugDumpProvenanceAction : public FrontendAction {
+  bool executeAction() override;
+};
+
+// Actions that run the lexer. Its errors are reported, and the action still
+// runs on the tokens, but then fails.
+class LexAction : public FrontendAction {
+protected:
+  bool executeAction() final;
+  virtual void executeLexAction(
+      llvm::raw_ostream &, const parser::TokenSequence &) = 0;
+};
+
+class DebugDumpTokensAction : public LexAction {
+  void executeLexAction(
+      llvm::raw_ostream &, const parser::TokenSequence &) override;
+};
+
+class DebugUnparseTokensAction : public LexAction {
+  void executeLexAction(
+      llvm::raw_ostream &, const parser::TokenSequence &) override;
 };
 
 } // namespace merkurius::frontend

@@ -20,6 +20,12 @@ std::unique_ptr<FrontendAction> createFrontendAction(CompilerInstance &ci) {
   switch (ci.getFrontendOpts().programAction) {
   case ActionKind::PrintPreprocessedInput:
     return std::make_unique<PrintPreprocessedInputAction>();
+  case ActionKind::DebugDumpProvenance:
+    return std::make_unique<DebugDumpProvenanceAction>();
+  case ActionKind::DebugDumpTokens:
+    return std::make_unique<DebugDumpTokensAction>();
+  case ActionKind::DebugUnparseTokens:
+    return std::make_unique<DebugUnparseTokensAction>();
   }
   llvm_unreachable("unknown ActionKind");
 }
