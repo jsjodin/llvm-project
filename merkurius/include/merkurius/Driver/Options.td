@@ -63,6 +63,13 @@ def fdebug_unparse_exact_minimal_layout
     : Flag<["-"], "fdebug-unparse-exact-minimal-layout">,
   HelpText<"Print the parse tree as -fdebug-unparse-exact does, without "
            "comments and with minimal layout">;
+def fdebug_unparse_no_sema : Flag<["-"], "fdebug-unparse-no-sema">,
+  HelpText<"Print the parse tree as source in the canonical layout, before "
+           "semantic analysis">;
+def fdebug_unparse_parenthesized_no_sema
+    : Flag<["-"], "fdebug-unparse-parenthesized-no-sema">,
+  HelpText<"Print the parse tree as -fdebug-unparse-no-sema does, with every "
+           "operator term in parentheses">;
 
 } // let Visibility = [FC1Option]
 

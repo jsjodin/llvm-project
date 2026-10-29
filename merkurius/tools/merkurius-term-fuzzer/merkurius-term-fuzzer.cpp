@@ -10,9 +10,10 @@
 // unparser. For any input it checks that none of them crashes, with and
 // without OpenMP directives; that the tokens, and the parse tree, unparse to
 // the input byte for byte; that the exact unparser finds every token
-// accounted for; that an input which converts without errors has the same
-// parse tree in the minimal layout; and that each item's canonical form
-// reads back as the same canonical form.
+// accounted for; that an input which converts without errors has a
+// canonical layout that is its own canonical layout, and the same parse tree
+// in that layout and with every operator term parenthesized; and that each
+// item's canonical term reads back as the same canonical term.
 //
 // Built normally, it is a program that runs the target on each file named
 // on its command line, to replay a corpus. Built with -fsanitize=fuzzer
@@ -86,11 +87,15 @@ std::vector<std::string> ReadCanonical(
   return items;
 }
 
-// The parse tree's dump, and its exact unparsing in `layout`, which fails
-// the input if the unparser reports a problem. `ok` is set if the input
-// converted without errors.
-std::string ConvertAndUnparse(llvm::StringRef text, UnparseLayout layout,
-    std::string &unparsed, bool &ok) {
+// A conversion of the input: its parse tree's dump and its unparsings.
+struct Unparsed {
+  bool ok; // converted without errors
+  std::string tree, exact, canonical, parenthesized;
+};
+
+// Converts and unparses `text`, and fails the input if the exact unparser
+// reports a problem.
+Unparsed ConvertAndUnparse(llvm::StringRef text) {
   AllSources all;
   SourceFile *file{
       all.AddBuffer("fuzz.m", llvm::MemoryBuffer::getMemBufferCopy(text))};
@@ -98,18 +103,22 @@ std::string ConvertAndUnparse(llvm::StringRef text, UnparseLayout layout,
   TokenSequence tokens{Lex(*file, LexerOptions{}, messages)};
   ParseTreeArena arena;
   const ParseTree &tree{ConvertFile(tokens, arena, messages)};
-  ok = !messages.AnyFatalError();
+  Unparsed result;
+  result.ok = !messages.AnyFatalError();
   Messages problems;
-  llvm::raw_string_ostream unparsedStream{unparsed};
-  UnparseExact(unparsedStream, tree, tokens, layout, ok, problems);
+  llvm::raw_string_ostream exact{result.exact};
+  UnparseExact(exact, tree, tokens, UnparseLayout::Exact, result.ok, problems);
   if (!problems.messages().empty()) {
     Fail("the parse tree does not account for its tokens", text,
         problems.messages().front().ToString());
   }
-  std::string dump;
-  llvm::raw_string_ostream dumpStream{dump};
-  DumpParseTree(dumpStream, tree);
-  return dump;
+  llvm::raw_string_ostream dump{result.tree};
+  DumpParseTree(dump, tree);
+  llvm::raw_string_ostream canonical{result.canonical};
+  UnparseCanonical(canonical, tree, tokens);
+  llvm::raw_string_ostream parenthesized{result.parenthesized};
+  UnparseCanonical(parenthesized, tree, tokens, true);
+  return result;
 }
 
 } // namespace
@@ -118,20 +127,24 @@ extern "C" int LLVMFuzzerTestOneInput(
     const std::uint8_t *data, std::size_t size) {
   llvm::StringRef input{reinterpret_cast<const char *>(data), size};
   {
-    std::string exact;
-    bool ok;
-    std::string tree{ConvertAndUnparse(input, UnparseLayout::Exact, exact, ok)};
-    if (exact != input) {
-      Fail("the parse tree does not unparse to the input", input, exact);
+    Unparsed first{ConvertAndUnparse(input)};
+    if (first.exact != input) {
+      Fail("the parse tree does not unparse to the input", input, first.exact);
     }
-    if (ok) {
-      std::string minimal;
-      ConvertAndUnparse(input, UnparseLayout::Minimal, minimal, ok);
-      std::string unused;
-      std::string again{
-          ConvertAndUnparse(minimal, UnparseLayout::Exact, unused, ok)};
-      if (!ok || again != tree) {
-        Fail("the minimal layout has a different parse tree", input, minimal);
+    if (first.ok) {
+      Unparsed canonical{ConvertAndUnparse(first.canonical)};
+      if (!canonical.ok || canonical.tree != first.tree) {
+        Fail("the canonical layout has a different parse tree", input,
+            first.canonical);
+      }
+      if (canonical.canonical != first.canonical) {
+        Fail("the canonical layout is not a fixed point", input,
+            first.canonical + "\nbecame\n" + canonical.canonical);
+      }
+      Unparsed parenthesized{ConvertAndUnparse(first.parenthesized)};
+      if (!parenthesized.ok || parenthesized.tree != first.tree) {
+        Fail("the parenthesized form has a different parse tree", input,
+            first.parenthesized);
       }
     }
   }

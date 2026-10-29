@@ -6,11 +6,12 @@ round-trip tests").
 2. Exact round trip: `merkc -fc1 -fdebug-unparse-exact` gives back the
    file, byte for byte, and reports nothing: no node of the parse tree
    misplaces a token, and every variable and literal is held by a node.
-4. Meaning preserved: the file and its unparsed form C1 have the same parse
+3. Canonical fixed point: the canonical form C1 of the file
+   (-fdebug-unparse-no-sema) is its own canonical form.
+4. Meaning preserved: the file, C1, and the file with every operator term
+   parenthesized (-fdebug-unparse-parenthesized-no-sema) have the same parse
    tree, as printed by -fdebug-dump-parse-tree-no-sema, which shows no
-   locations or trivia. Until the unparser has its canonical layout, C1 is
-   the minimal layout: the file without comments or line number directives,
-   with each token's layout reduced to one space or newline.
+   locations or trivia.
 
 The script exits with status 1 and reports every file that fails a test.
 """
@@ -25,6 +26,19 @@ def merkc(merkc_path, action, path=None, text=None):
     """Runs merkc -fc1 with `action` on a file, or on `text` from stdin."""
     args = [merkc_path, "-fc1", action, path if path else "-"]
     return subprocess.run(args, input=text, capture_output=True)
+
+
+def diff(a, b, a_name, b_name):
+    """The start of a unified diff of two outputs."""
+    lines = difflib.unified_diff(
+        a.decode(errors="replace").splitlines(),
+        b.decode(errors="replace").splitlines(),
+        a_name,
+        b_name,
+        lineterm="",
+        n=2,
+    )
+    return "\n".join(list(lines)[:40])
 
 
 def check(merkc_path, path):
@@ -42,31 +56,32 @@ def check(merkc_path, path):
         problems.append("the exact unparser did not give back the file")
 
     tree = merkc(merkc_path, "-fdebug-dump-parse-tree-no-sema", path)
-    c1 = merkc(merkc_path, "-fdebug-unparse-exact-minimal-layout", path)
+    c1 = merkc(merkc_path, "-fdebug-unparse-no-sema", path)
     if c1.returncode != 0:
         problems.append(
-            "the minimal layout failed:\n" + c1.stderr.decode(errors="replace")
+            "the canonical unparser failed:\n" + c1.stderr.decode(errors="replace")
         )
         return problems
-    again = merkc(merkc_path, "-fdebug-dump-parse-tree-no-sema", text=c1.stdout)
-    if again.returncode != 0 or again.stderr:
+    c2 = merkc(merkc_path, "-fdebug-unparse-no-sema", text=c1.stdout)
+    if c2.stdout != c1.stdout:
         problems.append(
-            "the minimal layout does not convert:\n"
-            + again.stderr.decode(errors="replace")
+            "the canonical form is not a fixed point:\n"
+            + diff(c1.stdout, c2.stdout, "canonical", "canonical twice")
         )
-    elif again.stdout != tree.stdout:
-        diff = difflib.unified_diff(
-            tree.stdout.decode(errors="replace").splitlines(),
-            again.stdout.decode(errors="replace").splitlines(),
-            "file",
-            "minimal layout",
-            lineterm="",
-            n=2,
-        )
-        problems.append(
-            "the minimal layout has a different parse tree:\n"
-            + "\n".join(list(diff)[:40])
-        )
+    parenthesized = merkc(merkc_path, "-fdebug-unparse-parenthesized-no-sema", path)
+    for name, text in (("canonical form", c1.stdout),
+                       ("parenthesized form", parenthesized.stdout)):
+        again = merkc(merkc_path, "-fdebug-dump-parse-tree-no-sema", text=text)
+        if again.returncode != 0 or again.stderr:
+            problems.append(
+                "the %s does not convert:\n%s"
+                % (name, again.stderr.decode(errors="replace"))
+            )
+        elif again.stdout != tree.stdout:
+            problems.append(
+                "the %s has a different parse tree:\n%s"
+                % (name, diff(tree.stdout, again.stdout, "file", name))
+            )
     return problems
 
 

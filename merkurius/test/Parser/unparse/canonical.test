@@ -1,0 +1,14 @@
+# The canonical layout of a carelessly laid out module (Inputs/messy.m),
+# which is its own canonical layout. Both modules compile with mmc.
+#
+# RUN: merkc -fc1 -fdebug-unparse-no-sema %S/Inputs/messy.m \
+# RUN:   | diff %S/Inputs/messy.canonical.m -
+# RUN: merkc -fc1 -fdebug-unparse-no-sema %S/Inputs/messy.canonical.m \
+# RUN:   | diff %S/Inputs/messy.canonical.m -
+#
+# With every operator term in parentheses:
+# RUN: merkc -fc1 -fdebug-unparse-parenthesized-no-sema %S/Inputs/messy.m \
+# RUN:   | FileCheck %s
+# CHECK:      {{^}}area(circle(R)) = ((3.14159 * R) * R).{{$}}
+# CHECK:      {{^}}    ((Xs = [_, _ | _]),{{$}}
+# CHECK-NEXT: {{^}}    (Class = string.format("%d elements", [i(list.length(Xs))])))

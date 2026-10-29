@@ -14,6 +14,7 @@ add_merkurius_library(MerkuriusParser
   term.cpp
   token.cpp
   unparse.cpp
+  unparse-canonical.cpp
 
   LINK_LIBS
   MerkuriusCommon
