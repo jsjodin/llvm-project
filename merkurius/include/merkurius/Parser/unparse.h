@@ -40,5 +40,14 @@ enum class UnparseLayout {
 void UnparseExact(llvm::raw_ostream &, const ParseTree &,
     const TokenSequence &, UnparseLayout, bool complete, Messages &);
 
+// Prints the tree in the canonical layout: the tokens it recorded, with
+// their spellings and comments, laid out from the tree's structure, with
+// lines broken to fit in 79 columns where they can be. Items left out for
+// an error are printed as written. With `parenthesize`, every data-term,
+// goal, type, inst and mode written as an operator term is put in
+// parentheses.
+void UnparseCanonical(llvm::raw_ostream &, const ParseTree &,
+    const TokenSequence &, bool parenthesize = false);
+
 } // namespace merkurius::parser
 #endif // MERKURIUS_PARSER_UNPARSE_H_

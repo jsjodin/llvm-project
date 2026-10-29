@@ -38,6 +38,11 @@ enum class ActionKind {
   // line number directives, and with each token's trivia reduced to one
   // newline or space.
   DebugUnparseExactMinimalLayout,
+  // -fdebug-unparse-no-sema: print the parse tree in the canonical layout.
+  DebugUnparseNoSema,
+  // -fdebug-unparse-parenthesized-no-sema: the same, with every operator
+  // term in parentheses.
+  DebugUnparseParenthesizedNoSema,
 };
 
 struct FrontendOptions {

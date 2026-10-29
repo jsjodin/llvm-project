@@ -96,6 +96,18 @@ private:
   bool minimalLayout_;
 };
 
+// Converts the source file and prints its parse tree in the canonical
+// layout, or with every operator term in parentheses.
+class DebugUnparseNoSemaAction : public FrontendAction {
+public:
+  explicit DebugUnparseNoSemaAction(bool parenthesize)
+      : parenthesize_{parenthesize} {}
+
+private:
+  bool executeAction() override;
+  bool parenthesize_;
+};
+
 } // namespace merkurius::frontend
 
 #endif // MERKURIUS_FRONTEND_FRONTENDACTIONS_H_
