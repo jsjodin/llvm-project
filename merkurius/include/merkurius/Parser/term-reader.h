@@ -28,7 +28,8 @@ namespace merkurius::parser {
 class Messages;
 struct OperatorDefinition;
 
-struct Item {
+// An item as the reader reads it, before conversion.
+struct ItemTerm {
   const Term *term; // null after a syntax error
   TokenRange tokens; // from the item's first token to its end token
   unsigned variables; // the number of distinct variables in the item
@@ -48,7 +49,7 @@ public:
       unsigned maxDepth = defaultMaxDepth);
 
   // Reads the next item, or returns nullopt at the end of the file.
-  std::optional<Item> ReadItem();
+  std::optional<ItemTerm> ReadItem();
 
 private:
   struct Parsed {

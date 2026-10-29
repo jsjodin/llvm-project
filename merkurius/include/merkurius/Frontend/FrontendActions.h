@@ -79,6 +79,11 @@ class DebugDumpTermsAction : public FrontendAction {
   bool executeAction() override;
 };
 
+// Converts the source file and prints its parse tree.
+class DebugDumpParseTreeNoSemaAction : public FrontendAction {
+  bool executeAction() override;
+};
+
 } // namespace merkurius::frontend
 
 #endif // MERKURIUS_FRONTEND_FRONTENDACTIONS_H_
