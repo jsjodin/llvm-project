@@ -1260,19 +1260,184 @@ public:
 };
 
 //===----------------------------------------------------------------------===//
+// Type classes
+//===----------------------------------------------------------------------===//
+
+// The variables of one side of a functional dependency: A, or A, B.
+static constexpr auto dependencyVars{
+    commaListOf(expect("a type variable", variable))};
+
+static constexpr auto functionalDependency{construct<FunctionalDependency>(
+    functor("->", dependencyVars, dependencyVars))};
+
+static constexpr auto typeclassConstraints{commaListOf(expect(
+    "a superclass constraint or a functional dependency such as '(A -> B)'",
+    anyOf<TypeclassConstraint>(functionalDependency, classConstraint)))};
+
+// A method is a pred, func or mode declaration without ':-'.
+static constexpr auto classMethod{expect("a pred, func or mode declaration",
+    anyOf<ClassMethod>(PredDeclRule{}, ModeDeclRule{}))};
+
+static constexpr auto methodList{
+    expect("a list of methods", listOf(classMethod))};
+
+// The parts of a typeclass or instance declaration: Head <= Constraints
+// where [Methods], where the constraints and the methods are optional.
+struct ClassParts {
+  const Term *head;
+  const Term *constraints{nullptr};
+  const Term *methods{nullptr};
+};
+
+static ClassParts SplitClass(const Term &term) {
+  ClassParts parts{&StripParentheses(term)};
+  if (auto where{SplitWhere(*parts.head)}) {
+    parts.head = &StripParentheses(*where->first);
+    parts.methods = where->second;
+  }
+  if (const CompoundTerm * constrained{AsCompound(*parts.head, "<=", 2)}) {
+    parts.head = constrained->arguments()[0];
+    parts.constraints = constrained->arguments()[1];
+  }
+  return parts;
+}
+
+class TypeclassDeclRule {
+public:
+  using resultType = const TypeclassDecl *;
+  bool Matches(const Term &t) const { return AsCompound(t, "typeclass", 1); }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    ClassParts parts{SplitClass(*llvm::cast<CompoundTerm>(t).arguments()[0])};
+    bool ok{true};
+    auto head{Apply(expect("a type class name and its parameters",
+                        distinctParameters(appliedName(
+                            expect("a type class parameter", variable)))),
+        *parts.head, state)};
+    ok &= head.has_value();
+    llvm::ArrayRef<TypeclassConstraint> constraints;
+    llvm::ArrayRef<ClassMethod> methods;
+    ok &= ConvertOptional(
+        typeclassConstraints, parts.constraints, constraints, state);
+    ok &= ConvertOptional(methodList, parts.methods, methods, state);
+    if (!ok) {
+      return std::nullopt;
+    }
+    auto [name, parameters]{*head};
+    if (parameters.empty()) {
+      state.messages.Say(GetSource(*parts.head, state.tokens),
+          "a type class must have at least one parameter"_err_en_US);
+      return std::nullopt;
+    }
+    // As in mmc, a functional dependency relates the class's parameters.
+    for (const TypeclassConstraint &constraint : constraints) {
+      if (const auto *dependency{
+              std::get_if<const FunctionalDependency *>(&constraint)}) {
+        for (auto vars : {(*dependency)->domain, (*dependency)->range}) {
+          for (llvm::StringRef var : vars) {
+            if (!llvm::is_contained(parameters, var)) {
+              state.messages.Say(GetSource(*parts.constraints, state.tokens),
+                  "the variable %s in a functional dependency is not a "
+                  "parameter of the type class"_err_en_US,
+                  var.str());
+              ok = false;
+            }
+          }
+        }
+      }
+    }
+    if (!ok) {
+      return std::nullopt;
+    }
+    return state.arena.Make<TypeclassDecl>(t.tokens(), name, parameters,
+        constraints, parts.methods == nullptr, methods);
+  }
+  void Expected(llvm::raw_ostream &os) const {
+    os << "a typeclass declaration";
+  }
+};
+
+// pred(Name/Arity) is Implementation or func(Name/Arity) is Implementation.
+// A method defined by clauses is not converted yet.
+class InstanceMethodRule {
+public:
+  using resultType = const MethodByName *;
+  bool Matches(const Term &) const { return true; }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    const CompoundTerm *is{AsCompound(t, "is", 2)};
+    const CompoundTerm *kind{nullptr};
+    if (is) {
+      kind = AsCompound(*is->arguments()[0], "pred", 1);
+      if (!kind) {
+        kind = AsCompound(*is->arguments()[0], "func", 1);
+      }
+    }
+    if (!kind) {
+      state.messages.Say(GetSource(t, state.tokens),
+          "an instance method defined by clauses"_todo_en_US);
+      return std::nullopt;
+    }
+    auto method{Apply(nameAndArity, *kind->arguments()[0], state)};
+    auto implementation{Apply(
+        expect("a predicate or function name", symName), *is->arguments()[1],
+        state)};
+    if (!method || !implementation) {
+      return std::nullopt;
+    }
+    return state.arena.Make<MethodByName>(t.tokens(),
+        FunctorName(*kind) == "func" ? PredOrFunc::Function
+                                     : PredOrFunc::Predicate,
+        *method, *implementation);
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "an instance method"; }
+};
+
+class InstanceDeclRule {
+public:
+  using resultType = const InstanceDecl *;
+  bool Matches(const Term &t) const { return AsCompound(t, "instance", 1); }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    ClassParts parts{SplitClass(*llvm::cast<CompoundTerm>(t).arguments()[0])};
+    bool ok{true};
+    auto head{Apply(expect("a type class name and its types",
+                        appliedName(type)),
+        *parts.head, state)};
+    ok &= head.has_value();
+    llvm::ArrayRef<const ClassConstraint *> constraints;
+    llvm::ArrayRef<const MethodByName *> methods;
+    ok &= ConvertOptional(commaListOf(classConstraint), parts.constraints,
+        constraints, state);
+    ok &= ConvertOptional(
+        expect("a list of methods", listOf(InstanceMethodRule{})),
+        parts.methods, methods, state);
+    if (!ok) {
+      return std::nullopt;
+    }
+    auto [name, types]{*head};
+    return state.arena.Make<InstanceDecl>(t.tokens(), name, types,
+        constraints, parts.methods == nullptr, methods);
+  }
+  void Expected(llvm::raw_ostream &os) const {
+    os << "an instance declaration";
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Items (reference manual, "Items")
 //===----------------------------------------------------------------------===//
 
 static constexpr auto declaration{anyOf<Item>(moduleDecl, endModuleDecl,
     sectionDecl, importDecl, PredDeclRule{}, ModeDeclRule{}, TypeDefnRule{},
-    InstDefnRule{}, ModeDefnRule{})};
+    InstDefnRule{}, ModeDefnRule{}, TypeclassDeclRule{}, InstanceDeclRule{})};
 
 // Whether `name` is a declaration of the reference manual's list
 // ("Declarations") that is not converted yet.
 static bool IsDeclarationToDo(llvm::StringRef name) {
   return llvm::StringSwitch<bool>(name)
       .Case("solver", true)
-      .Cases({"typeclass", "instance", "pragma", "promise"}, true)
+      .Cases({"pragma", "promise"}, true)
       .Cases({"initialise", "initialize", "finalise", "finalize"}, true)
       .Case("mutable", true)
       .Default(false);
