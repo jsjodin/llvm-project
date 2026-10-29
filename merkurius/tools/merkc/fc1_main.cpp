@@ -13,13 +13,26 @@
 #include "merkurius/Frontend/CompilerInstance.h"
 #include "merkurius/Frontend/CompilerInvocation.h"
 #include "merkurius/FrontendTool/Utils.h"
+#include "llvm/Support/thread.h"
+#include <optional>
 
 using namespace merkurius::frontend;
 
+// The term reader and the passes over terms recurse once per level of
+// nesting, up to the reader's limit of 10000 levels at about 600 bytes a
+// level, so the compiler runs on a thread with a stack large enough for
+// that, whatever the main thread's stack is.
+static constexpr unsigned compilerStackSize{64 << 20};
+
 int fc1_main(llvm::ArrayRef<const char *> argv) {
-  CompilerInstance ci;
-  if (!CompilerInvocation::createFromArgs(ci.getInvocation(), argv)) {
-    return 1;
-  }
-  return executeCompilerInvocation(ci) ? 0 : 1;
+  int result{1};
+  llvm::thread compiler{
+      std::optional<unsigned>{compilerStackSize}, [&]() {
+        CompilerInstance ci;
+        if (CompilerInvocation::createFromArgs(ci.getInvocation(), argv)) {
+          result = executeCompilerInvocation(ci) ? 0 : 1;
+        }
+      }};
+  compiler.join();
+  return result;
 }

@@ -18,6 +18,7 @@
 
 #include "merkurius/Parser/char-block.h"
 #include "merkurius/Parser/token.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Allocator.h"
@@ -84,20 +85,28 @@ private:
 // The size suffix of an integer literal: i8 ... u64, or none.
 enum class IntegerSize { Default, Bits8, Bits16, Bits32, Bits64 };
 
+// An integer of any size. As in mmc, the reader does not check that a
+// literal fits its type; the converter reports one that does not.
 class IntegerTerm : public Term {
 public:
-  IntegerTerm(TokenRange tokens, std::uint64_t magnitude, bool negative,
-      bool isUnsigned, IntegerSize size)
-      : Term{Kind::Integer, tokens}, magnitude_{magnitude}, negative_{negative},
+  // `words` is the magnitude, least significant word first, in the arena.
+  IntegerTerm(TokenRange tokens, llvm::ArrayRef<std::uint64_t> words,
+      bool negative, bool isUnsigned, IntegerSize size)
+      : Term{Kind::Integer, tokens}, words_{words}, negative_{negative},
         isUnsigned_{isUnsigned}, size_{size} {}
-  std::uint64_t magnitude() const { return magnitude_; }
+  llvm::APInt magnitude() const {
+    return llvm::APInt(64 * static_cast<unsigned>(words_.size()), words_);
+  }
   bool negative() const { return negative_; }
   bool isUnsigned() const { return isUnsigned_; }
   IntegerSize size() const { return size_; }
+  // Whether the value fits its type; int and uint are 64 bits wide on every
+  // supported target.
+  bool InRange() const;
   static bool classof(const Term *t) { return t->kind() == Kind::Integer; }
 
 private:
-  std::uint64_t magnitude_;
+  llvm::ArrayRef<std::uint64_t> words_;
   bool negative_;
   bool isUnsigned_;
   IntegerSize size_;
@@ -283,17 +292,24 @@ public:
     return {p, s.size()};
   }
   llvm::ArrayRef<const Term *> Save(llvm::ArrayRef<const Term *> terms) {
-    if (terms.empty()) {
-      return {};
-    }
-    const Term **p{allocator_.Allocate<const Term *>(terms.size())};
-    std::copy(terms.begin(), terms.end(), p);
-    return {p, terms.size()};
+    return SaveArray(terms);
+  }
+  llvm::ArrayRef<std::uint64_t> Save(llvm::ArrayRef<std::uint64_t> words) {
+    return SaveArray(words);
   }
   // Frees every term made since the last reset.
   void Reset() { allocator_.Reset(); }
 
 private:
+  template <typename T> llvm::ArrayRef<T> SaveArray(llvm::ArrayRef<T> array) {
+    if (array.empty()) {
+      return {};
+    }
+    T *p{allocator_.Allocate<T>(array.size())};
+    std::copy(array.begin(), array.end(), p);
+    return {p, array.size()};
+  }
+
   llvm::BumpPtrAllocator allocator_;
 };
 
@@ -303,7 +319,8 @@ CharBlock GetSource(const Term &, const TokenSequence &);
 // Prints a term's meaning in canonical notation: every compound term as
 // functor(Args), lists as '[|]'(H, T) and [], tuples as {}(Args), higher-order
 // terms as ''(Closure, Args), and parentheses removed. Names are quoted when
-// they are not alphanumeric. A directive prints as '%$omp'(Term), without its
+// they are not alphanumeric. A float too large for a double is infinity,
+// as in mmc, and prints as 1.0e+309, a literal that reads back as it. A directive prints as '%$omp'(Term), without its
 // text. Two terms mean the same if they print the same.
 void PrintCanonical(llvm::raw_ostream &, const Term &);
 

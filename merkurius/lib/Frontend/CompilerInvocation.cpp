@@ -20,7 +20,8 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
   // As in Flang, the last action option wins.
   if (const llvm::opt::Arg *arg =
           args.getLastArg(OPT_E, OPT_fdebug_dump_provenance,
-              OPT_fdebug_dump_tokens, OPT_fdebug_unparse_tokens)) {
+              OPT_fdebug_dump_tokens, OPT_fdebug_unparse_tokens,
+              OPT_fdebug_dump_terms)) {
     switch (arg->getOption().getID()) {
     case OPT_E:
       opts.programAction = ActionKind::PrintPreprocessedInput;
@@ -33,6 +34,9 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
       break;
     case OPT_fdebug_unparse_tokens:
       opts.programAction = ActionKind::DebugUnparseTokens;
+      break;
+    case OPT_fdebug_dump_terms:
+      opts.programAction = ActionKind::DebugDumpTerms;
       break;
     }
   }

@@ -3,10 +3,19 @@
 A Mercury compiler and runtime on MLIR and LLVM. The design is in
 [docs/MercuryMLIRCompilerandRuntimeDesign.md](docs/MercuryMLIRCompilerandRuntimeDesign.md).
 
-So far there is the driver, `merkc`, and its frontend, `merkc -fc1`, which reads
-source files through Flang's provenance machinery. Its actions are `-E`, which
-prints the source as the lexer will read it (the file unchanged), and
-`-fdebug-dump-provenance`.
+So far there is the driver, `merkc`, and its frontend, `merkc -fc1`, which
+reads source files through Flang's provenance machinery, lexes them, and reads
+their items as terms. Its actions are:
+
+| Action | Prints |
+| --- | --- |
+| `-E` | The source as the lexer reads it, which is the file unchanged |
+| `-fdebug-dump-provenance` | The provenance table of the source files |
+| `-fdebug-dump-tokens` | The tokens, one per line |
+| `-fdebug-unparse-tokens` | Every token's trivia and spelling, which is the file byte for byte |
+| `-fdebug-dump-terms` | Each item's term in canonical notation, or `error` |
+
+`-fopenmp` makes `%$omp` directives tokens instead of comments.
 
 ## Building
 
@@ -47,12 +56,30 @@ cmake -G Ninja -S llvm -B ../build \
 ninja -C ../build check-merkurius
 ```
 
+## Testing
+
+`merkurius/build_merk.sh run_tests`, or `ninja check-merkurius` in a build
+directory, runs the lit and unit tests. The tests that compare the term reader
+with Mercury's own need `mmc` (Mercury 22.01), found through the `MMC`
+environment variable or the `PATH`; without it, lit reports them as
+unsupported:
+
+```sh
+MMC=$HOME/mercury-22.01.9/bin/mmc merkurius/build_merk.sh run_tests
+```
+
+`utils/fuzz/run-term-fuzzer.sh [SECONDS] [JOBS]` fuzzes the lexer and term
+reader with libFuzzer, using the clang of the build tree.
+
 ## Layout
 
 | Directory | Contents |
 | --- | --- |
-| `include/merkurius`, `lib` | Libraries: `Common` and `Parser` (source files and provenance, both adapted from Flang), `Driver` (options), `Frontend`, `FrontendTool` |
+| `include/merkurius`, `lib` | Libraries: `Common` and `Parser` (source files, provenance and diagnostics, adapted from Flang; the lexer, operator table and term reader), `Driver` (options), `Frontend`, `FrontendTool` |
 | `tools/merkc` | The driver and the `-fc1` entry point |
+| `tools/merkurius-term-fuzzer` | A fuzz target for the lexer and term reader |
+| `utils/term-oracle` | The term oracle, which reads terms with Mercury's own parser, and the scripts that compare it with merkc and generate test items |
+| `utils/fuzz` | The script and dictionary for fuzzing |
 | `test` | lit tests; `test/Unit` runs the unit tests |
 | `unittests` | googletest unit tests |
 

@@ -83,6 +83,23 @@ Lexed Lex(AllSources &all, llvm::StringRef text, bool openMP = false) {
 
 using Strings = std::vector<std::string>;
 
+TEST(LexerTest, FractionWithoutDigit) {
+  // As in mmc, "42._" is a malformed float, not 42 . _.
+  AllSources all;
+  Lexed lexed{Lex(all, "X = 42._5 .\n")};
+  EXPECT_EQ(
+      lexed.MessageTexts(), (Strings{"a fraction must begin with a digit"}));
+}
+
+TEST(LexerTest, ByteOrderMark) {
+  // The mark is the first token's trivia, so the file unparses with it.
+  AllSources all;
+  Lexed lexed{Lex(all, "\xef\xbb\xbfp.\n")};
+  const Token &first{lexed.tokens.tokens.front()};
+  EXPECT_EQ(first.trivia, "\xef\xbb\xbf");
+  EXPECT_EQ(first.spelling, "p");
+}
+
 TEST(LexerTest, Clause) {
   AllSources all;
   Lexed lexed{Lex(all, "p(X) :- X = [a, \"s\" | T], q.\n")};

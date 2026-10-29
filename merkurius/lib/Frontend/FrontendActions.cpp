@@ -13,7 +13,10 @@
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/provenance.h"
 #include "merkurius/Parser/source.h"
+#include "merkurius/Parser/term-reader.h"
+#include "llvm/ADT/STLExtras.h"
 #include <string>
+#include <vector>
 
 namespace merkurius::frontend {
 
@@ -83,6 +86,47 @@ void DebugDumpTokensAction::executeLexAction(
 void DebugUnparseTokensAction::executeLexAction(
     llvm::raw_ostream &os, const parser::TokenSequence &tokens) {
   parser::UnparseTokens(os, tokens);
+}
+
+bool DebugDumpTermsAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  parser::LexerOptions options;
+  options.openMP = ci.getLangOpts().openMP;
+  parser::Messages messages;
+  parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
+  // The lexer's messages, by location, to find the items they fall in.
+  std::vector<const char *> lexerErrors;
+  for (const parser::Message &message : messages.messages()) {
+    if (const parser::CharBlock * at{message.GetCharBlock()}) {
+      lexerErrors.push_back(at->begin());
+    }
+  }
+  llvm::raw_ostream *os{ci.createDefaultOutputFile()};
+  if (!os) {
+    return false;
+  }
+  parser::TermArena arena;
+  parser::TermReader reader{tokens, arena, messages};
+  std::size_t readerMessages{messages.messages().size()};
+  while (std::optional<parser::Item> item{reader.ReadItem()}) {
+    const parser::Token &first{tokens.tokens[item->tokens.first]};
+    const parser::Token &last{tokens.tokens[item->tokens.last]};
+    bool lexerError{llvm::any_of(lexerErrors, [&](const char *at) {
+      return at >= first.spelling.begin() && at <= last.spelling.end();
+    })};
+    bool readerError{messages.messages().size() != readerMessages};
+    readerMessages = messages.messages().size();
+    if (item->term && !lexerError && !readerError) {
+      parser::PrintCanonical(*os, *item->term);
+    } else {
+      *os << "error";
+    }
+    *os << '\n';
+    arena.Reset();
+  }
+  os->flush();
+  messages.Emit(llvm::errs(), ci.getAllSources());
+  return !messages.AnyFatalError();
 }
 
 } // namespace merkurius::frontend

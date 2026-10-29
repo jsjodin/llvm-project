@@ -7,7 +7,7 @@ configure_lit_site_cfg(
   ${CMAKE_CURRENT_SOURCE_DIR}/lit.cfg.py
   )
 
-set(MERKURIUS_TEST_DEPENDS merkc)
+set(MERKURIUS_TEST_DEPENDS merkc merkurius-term-fuzzer)
 if(NOT MERKURIUS_STANDALONE_BUILD)
   list(APPEND MERKURIUS_TEST_DEPENDS FileCheck count not)
 endif()
