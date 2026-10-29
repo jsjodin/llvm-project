@@ -30,7 +30,7 @@ We will build a clean-room Mercury compiler on MLIR and LLVM, adding OpenMP-styl
 | Parser | Recursive descent in two layers: a term reader with precedence climbing, then a converter per context | The manual defines items and goals as terms over a fixed operator table |
 | Front-end representation | Flang-style parse tree plus a small desugared semantic form; per-procedure tables for mode results | No separate IR; modes need the source structure and have no SSA form before analysis |
 | Parallel annotations | `%$omp` comment sentinel, attached to the next goal | The same source compiles with mmc; mirrors Fortran's `!$omp` |
-| IR | `merc` dialect, lowered through upstream dialects to LLVM | Reuse `scf`, `omp` and LLVM back ends |
+| IR | `merk` dialect, lowered through upstream dialects to LLVM | Reuse `scf`, `omp` and LLVM back ends |
 | Parallel loops | User promises independence; no dependence analysis | Same contract as OpenMP and Mercury's `promise_*` |
 | Processes | Erlang model with mailboxes typed by message type | Protocols checked at compile time |
 | Send | Non-blocking, deep copy into the receiver | Keeps heaps independent |
@@ -96,8 +96,8 @@ LLVM and Flang are licensed, like this project, under Apache 2.0 with the LLVM e
 | LLVM Support: `Unicode.h` (`columnWidthUTF8`, `isPrintable`) | Caret positions in diagnostics on lines with multi-byte characters |
 | LLVM Support: `BumpPtrAllocator` | The `ASTContext` arena and the term reader's per-item arena |
 | `llvm/Frontend/OpenMP`: `OMP.td`, the generated `llvm::omp::isAllowedClauseForDirective`, and `OMPDescriptors.h` | OpenMP directive and clause kinds shared with Clang and Flang; which clauses and modifiers each directive and clause allows, by OpenMP version. This replaces Flang's own clause checks |
-| MLIR OpenMP dialect: `OpenMPClauseOperands.h` | Clause operand structures used to build `omp.parallel` and `omp.wsloop` when `merc.par_loop` is lowered |
-| MLIR and its upstream dialects, LLVM code generation | Everything below `merc` (MLIR dialects; Lowering and code generation) |
+| MLIR OpenMP dialect: `OpenMPClauseOperands.h` | Clause operand structures used to build `omp.parallel` and `omp.wsloop` when `merk.par_loop` is lowered |
+| MLIR and its upstream dialects, LLVM code generation | Everything below `merk` (MLIR dialects; Lowering and code generation) |
 | LLVM Option: `OptTable`, with options written in TableGen | The driver and `-fc1` command lines (Driver) |
 | LLVM TargetParser, Target and Passes: `Triple`, host detection, `TargetMachine`, `PassBuilder` | Targets and CPUs, and the `-O` pipelines |
 | `clang`, `clang-linker-wrapper` and `llvm-offload-binary`, run as programs, not linked | Linking, and packaging and linking device code for offloading (Driver, Linking and offloading) |
@@ -106,9 +106,10 @@ LLVM and Flang are licensed, like this project, under Apache 2.0 with the LLVM e
 
 | Upstream file (llvm-project) | Gives us | Status |
 | --- | --- | --- |
-| `flang/include/flang/Common/indirection.h` | An owning pointer for recursive variant types in the parse tree | Planned |
-| `flang/include/flang/Common/visit.h` | `common::visit`, which compiles faster than `std::visit` | Planned |
-| `flang/include/flang/Common/idioms.h` | Boilerplate for parse-tree classes | Planned |
+| `flang/include/flang/Common/indirection.h` | An owning pointer for recursive variant types in the parse tree | Copied |
+| `flang/include/flang/Common/visit.h` | `common::visit`, which compiles faster than `std::visit` | Copied |
+| `flang/include/flang/Common/idioms.h` | Boilerplate for parse-tree classes | Copied |
+| `flang/include/flang/Common/enum-class.h` | `ENUM_CLASS`, enums that know their names; needed by `idioms.h` | Copied |
 | `flang/include/flang/Parser/char-block.h` | Source ranges over the cooked stream | Planned |
 | `flang/include/flang/Parser/provenance.h` | The cooked-source provenance map behind `SourceLocation` (Front end, Prescanner) | Planned |
 | `flang/include/flang/Parser/message.h` | Diagnostics that carry provenance | Planned |
@@ -127,7 +128,7 @@ LLVM and Flang are licensed, like this project, under Apache 2.0 with the LLVM e
 | `flang/lib/Parser/unparse.cpp` | Fortran's printing rules; our unparser has exact, canonical and fully parenthesized modes |
 | `flang/include/flang/Parser/openmp-utils.h`, everything except the `descriptor` helpers | It works on Fortran's OpenMP parse-tree nodes: object designators, common blocks, iteration through `BLOCK` and `DO` constructs to find a loop nest, `allocate`, and combiner expressions. Our directive nodes are much smaller, and the associated goal is found by the converter |
 | `flang/include/flang/Semantics/openmp-utils.h` | Semantic checks tied to Fortran symbols and scopes; clause validity comes from `OMP.td` instead |
-| `flang/lib/Lower/OpenMP/Utils.h` | Lowering helpers tied to Fortran's parse tree, symbols and FIR; how it organizes clause processing is still a useful model for lowering `merc.par_loop` |
+| `flang/lib/Lower/OpenMP/Utils.h` | Lowering helpers tied to Fortran's parse tree, symbols and FIR; how it organizes clause processing is still a useful model for lowering `merk.par_loop` |
 | `flang/tools/flang-driver/driver.cpp` and `fc1_main.cpp` | Built on Clang's driver library in its Flang mode, which a project outside llvm-project cannot extend. We keep the shape: one binary that hands off to `-fc1` |
 | `flang/include/flang/Frontend/` and `flang/lib/FrontendTool/` | Tied to Fortran's options and actions, and uses Clang's `DiagnosticsEngine`. We keep `CompilerInvocation`, `CompilerInstance`, the layered `FrontendAction` classes and the `.def` option lists (Driver) |
 | `clang/lib/Driver/ToolChains/Flang.cpp` (`Flang::addOffloadOptions`) | Part of Clang's driver library; it is the recipe for the offload job sequence |
@@ -477,11 +478,11 @@ Clause add_square (as written)
 
 - **Types.** `A` has type `array(int)`, and every other variable `int`. In `sum_squares`, `#2` resolves to a closure of `add_square/4` with one argument supplied, and `#5` to `int.fold_up`.
 - **Modes.** In `add_square`'s only mode, `#2` needs `V_1`, which `#3` produces, so the `ProcInfo` order is `#1, #3, #2`. `#3` and `#2` are calls of the functions `int.*` and `int.+`, and the procedure is `det`.
-- **MLIR.** `#1` becomes `merc.call` with a type-info operand for `int`, `#3` becomes `arith.muli`, `#2` becomes `arith.addi`, and `Acc_1` is the procedure's result. In `sum_squares`, `#2` becomes `merc.closure`, and the directive scope becomes `merc.par_loop` with `reduction(+)`.
+- **MLIR.** `#1` becomes `merk.call` with a type-info operand for `int`, `#3` becomes `arith.muli`, `#2` becomes `arith.addi`, and `Acc_1` is the procedure's result. In `sum_squares`, `#2` becomes `merk.closure`, and the directive scope becomes `merk.par_loop` with `reduction(+)`.
 
 ## Semantic analysis
 
-Semantic analysis decides what the program means: what each name refers to, every type, which way each unification runs, which procedures exist, and the determinism of every goal. It runs on the AST, resolving names in the parse tree and analysing the semantic form, and ends where MLIR generation begins. ClangIR is the model for that boundary, with `merc` in the role of CIR; Flang is the model for keeping results beside the parse tree instead of rewriting it. Mode and determinism analysis belong here rather than in an MLIR dialect, for three reasons:
+Semantic analysis decides what the program means: what each name refers to, every type, which way each unification runs, which procedures exist, and the determinism of every goal. It runs on the AST, resolving names in the parse tree and analysing the semantic form, and ends where MLIR generation begins. ClangIR is the model for that boundary, with `merk` in the role of CIR; Flang is the model for keeping results beside the parse tree instead of rewriting it. Mode and determinism analysis belong here rather than in an MLIR dialect, for three reasons:
 
 - **No SSA before modes.** Before mode analysis, a unification has no direction, so values cannot be in SSA form. A dialect for this stage would hold variables as memory slots, like `alloca` before mem2reg, and would amount to the AST in another syntax.
 - **Diagnostics.** Mode errors are Mercury's hardest diagnostics to explain, and they are best reported against the source structure.
@@ -494,10 +495,10 @@ Semantic analysis never changes the structure of the parse tree or of the semant
 | Written to | What | Written by | Used by MLIR generation for |
 | --- | --- | --- | --- |
 | Names in the parse tree | The declaration each name resolves to | Name resolution | Nothing; it serves diagnostics and tooling, such as go-to-definition |
-| `Unify` and `Call` nodes of the semantic form | The constructor, function or predicate chosen by overload resolution | Type checking | The constructor of `merc.construct`, `merc.deconstruct` and `merc.switch` arms; the callee of `merc.call` |
+| `Unify` and `Call` nodes of the semantic form | The constructor, function or predicate chosen by overload resolution | Type checking | The constructor of `merk.construct`, `merk.deconstruct` and `merk.switch` arms; the callee of `merk.call` |
 | Variables of the semantic form | Their types | Type checking | The MLIR type of each value |
 | Goals of the semantic form | Purity | Purity checking | An `impure` attribute on calls, so optimizations neither move nor delete them |
-| `PredDecl` | Inferred types, modes and determinism, and the list of the predicate's procedures | Type, mode and determinism inference | One `merc.proc` per procedure |
+| `PredDecl` | Inferred types, modes and determinism, and the list of the predicate's procedures | Type, mode and determinism inference | One `merk.proc` per procedure |
 | New implicit declarations | Each type's unify and compare procedures, field selection and update functions, and the predicates behind `:- mutable` and `:- process` | Type checking and desugaring | Emitted like user predicates |
 | `ProcInfo`, one per procedure | Conjunction order, unification kinds, the procedure chosen for each call, implied-mode tests, the variables each branching goal binds, switches, determinism, commits, type-info sources, and which arguments are consumed (`di`) | Mode, switch, determinism, uniqueness and polymorphism analysis | Operation order, operation kinds, branch results and attributes |
 
@@ -536,37 +537,37 @@ Mode analysis runs per procedure, starting from the instmap that the argument mo
 - **Analysis continues after errors.** A procedure with errors is excluded from MLIR generation, but other procedures and other SCCs are still checked, so one run reports as many problems as possible.
 - **Warnings** follow the same passes: singleton variables, unused imports, suspected occurs-check failures, unifications that cannot succeed, and misplaced `%$omp` directives.
 
-### Mapping to `merc`
+### Mapping to `merk`
 
 The output of semantic analysis is the annotated AST, one `ProcInfo` per procedure, and the module's interface file; there is no other intermediate form. MLIR generation reads them directly, one procedure at a time, as ClangIR's code generator reads Clang's AST:
 
 - **Values.** Once modes are known, each variable is produced exactly once on each path. So a map from variables to SSA values, updated at each producer and read at each consumer, is all MLIR generation needs, and the output is in SSA form from the start.
 - **Locations.** Each operation carries the location of the parse-tree node behind its semantic node, and variable names are recorded as `NameLoc`s for debug information.
-- **Types.** `int`, `float`, `char` and the sized integers become builtin MLIR types such as `i64` and `f64`. Other types become `!merc.term<…>`, closures `!merc.closure<…>`, and type infos `!merc.typeinfo`.
+- **Types.** `int`, `float`, `char` and the sized integers become builtin MLIR types such as `i64` and `f64`. Other types become `!merk.term<…>`, closures `!merk.closure<…>`, and type infos `!merk.typeinfo`.
 
-| Semantic form, as the `ProcInfo` classifies it | `merc` output |
+| Semantic form, as the `ProcInfo` classifies it | `merk` output |
 | --- | --- |
-| Procedure | `merc.proc` with a determinism attribute. Type-info and dictionary parameters come first, then the inputs as block arguments; outputs are results |
+| Procedure | `merk.proc` with a determinism attribute. Type-info and dictionary parameters come first, then the inputs as block arguments; outputs are results |
 | Conjunction | The conjuncts' operations, in the `ProcInfo`'s order |
-| Construction `X = f(A, B)` | `merc.construct` |
-| Deconstruction that cannot fail | `merc.deconstruct` |
-| Deconstruction that can fail | A one-arm `merc.switch` whose default fails |
+| Construction `X = f(A, B)` | `merk.construct` |
+| Deconstruction that cannot fail | `merk.deconstruct` |
+| Deconstruction that can fail | A one-arm `merk.switch` whose default fails |
 | Assignment `X = Y` | No operation: `X` maps to `Y`'s value |
 | Test of two integers, floats, characters or enum constants | An `arith` comparison |
-| Test of two other values | `merc.unify_test`, which calls the type's unify procedure |
-| Call | `merc.call` to the chosen procedure, with type-info operands first and consumed operands marked |
+| Test of two other values | `merk.unify_test`, which calls the type's unify procedure |
+| Call | `merk.call` to the chosen procedure, with type-info operands first and consumed operands marked |
 | Unification with a function application, `X = f(Y1, …)` where `f` resolves to a function | A call of the function's chosen procedure, as for a call; builtin arithmetic such as `int.+` becomes the matching `arith` operation |
-| Implied-mode test after a call | `merc.unify_test` of the call's fresh result against the original value |
-| Closure construction, including a partial application such as `add_square(A)`; higher-order call | `merc.closure`; `merc.call_closure` |
-| Switch | `merc.switch`, one region per arm |
-| If-then-else, negation, disjunction | `merc.ite`, `merc.not`, `merc.disj` |
-| Commit | `merc.commit` around the committed goal |
-| Parallel conjunction | `merc.par_conj` |
-| OpenMP directive scope | `merc.par_loop`, with the clauses as attributes of `llvm::omp` kinds |
-| `try`, `throw` | `merc.try`, `merc.throw` |
+| Implied-mode test after a call | `merk.unify_test` of the call's fresh result against the original value |
+| Closure construction, including a partial application such as `add_square(A)`; higher-order call | `merk.closure`; `merk.call_closure` |
+| Switch | `merk.switch`, one region per arm |
+| If-then-else, negation, disjunction | `merk.ite`, `merk.not`, `merk.disj` |
+| Commit | `merk.commit` around the committed goal |
+| Parallel conjunction | `merk.par_conj` |
+| OpenMP directive scope | `merk.par_loop`, with the clauses as attributes of `llvm::omp` kinds |
+| `try`, `throw` | `merk.try`, `merk.throw` |
 | Quantification, `promise_*` and `require_*` scopes | No operation; they only affect checking |
 | `trace` scope | Its goal, if its compile-time condition holds; otherwise nothing |
-| Unification of open values | `merc.open_unify` and the other open-term operations |
+| Unification of open values | `merk.open_unify` and the other open-term operations |
 
 - **Branch results.** A switch, if-then-else or disjunction produces the variables its arms bind: those the `ProcInfo` records as going from free to bound across it. They become the operation's results, and each arm yields them in the same order, as `scf.if` does. This is why mode analysis keeps instantiation states at branch points.
 - **Polymorphism.** Type-info and dictionary operands are materialized where the `ProcInfo` says they come from: a parameter, a field of a deconstructed existential, a superclass of another dictionary, or a constant type-info value.
@@ -739,58 +740,58 @@ main(!IO) :-
 
 ## MLIR dialects
 
-Two new dialects carry Mercury semantics until upstream dialects can take over: `merc` for terms and control, and `mrt` for runtime operations. MLIR has no standard dialect for algebraic data types, determinism or backtracking, so these are ours; everything below them is upstream.
+Two new dialects carry Mercury semantics until upstream dialects can take over: `merk` for terms and control, and `mrt` for runtime operations. MLIR has no standard dialect for algebraic data types, determinism or backtracking, so these are ours; everything below them is upstream.
 
 | Level | Dialects | What it represents |
 | --- | --- | --- |
-| Mercury | `merc` | Procedures with determinism, terms by constructor, switches, disjunction, commits, closures, `type_info` values, parallel loops |
+| Mercury | `merk` | Procedures with determinism, terms by constructor, switches, disjunction, commits, closures, `type_info` values, parallel loops |
 | Runtime | `mrt`, plus `cf`, `scf`, `arith`, `math` | Concrete layout: tagged words, allocation, fields, safepoints, send/receive, exceptions |
 | Parallel | `scf.parallel`, `omp` | Formed loops, reductions, OpenMP regions |
 | Target | `llvm` | LLVM IR with GC statepoints |
 
-**`merc` types** are Mercury types, not layouts: `!merc.term<"list.list(int)">`, `!merc.closure<…>`, `!merc.typeinfo`, and builtin `i64`, `f64`, `i8` for Mercury's primitive types. Layout is chosen when lowering to `mrt`, so representation work never changes the dialect.
+**`merk` types** are Mercury types, not layouts: `!merk.term<"list.list(int)">`, `!merk.closure<…>`, `!merk.typeinfo`, and builtin `i64`, `f64`, `i8` for Mercury's primitive types. Layout is chosen when lowering to `mrt`, so representation work never changes the dialect.
 
-**`merc` operations**
+**`merk` operations**
 
 | Operation | Meaning |
 | --- | --- |
-| `merc.proc` | A procedure: one mode of a predicate or function, with a determinism attribute |
-| `merc.construct` | Build a term from a named constructor and its arguments |
-| `merc.deconstruct` | Take apart a term whose constructor is known, binding the constructor's arguments |
-| `merc.switch` | Branch on a term's constructor; each case binds the constructor's arguments |
-| `merc.unify_test` | Compare two ground terms (calls the type's unify procedure when not primitive) |
-| `merc.call`, `merc.call_closure`, `merc.closure` | First-order calls, higher-order calls, closure construction |
-| `merc.ite`, `merc.not`, `merc.disj` | If-then-else, negation, disjunction |
-| `merc.succeed`, `merc.fail`, `merc.commit` | Produce a solution, fail, prune remaining solutions |
-| `merc.throw`, `merc.try` | Exceptions |
-| `merc.par_conj`, `merc.par_loop` | Parallel conjunction; a loop formed from a `%$omp` annotation |
+| `merk.proc` | A procedure: one mode of a predicate or function, with a determinism attribute |
+| `merk.construct` | Build a term from a named constructor and its arguments |
+| `merk.deconstruct` | Take apart a term whose constructor is known, binding the constructor's arguments |
+| `merk.switch` | Branch on a term's constructor; each case binds the constructor's arguments |
+| `merk.unify_test` | Compare two ground terms (calls the type's unify procedure when not primitive) |
+| `merk.call`, `merk.call_closure`, `merk.closure` | First-order calls, higher-order calls, closure construction |
+| `merk.ite`, `merk.not`, `merk.disj` | If-then-else, negation, disjunction |
+| `merk.succeed`, `merk.fail`, `merk.commit` | Produce a solution, fail, prune remaining solutions |
+| `merk.throw`, `merk.try` | Exceptions |
+| `merk.par_conj`, `merk.par_loop` | Parallel conjunction; a loop formed from a `%$omp` annotation |
 
 A deterministic procedure, in proposed assembly syntax:
 
 ```mlir
-merc.proc @double_all(%xs: !merc.term<"list.list(int)">)
-    -> !merc.term<"list.list(int)"> attributes {determinism = #merc.det} {
-  merc.switch %xs {
+merk.proc @double_all(%xs: !merk.term<"list.list(int)">)
+    -> !merk.term<"list.list(int)"> attributes {determinism = #merk.det} {
+  merk.switch %xs {
     case @"list.[]" {
-      %nil = merc.construct @"list.[]" () : !merc.term<"list.list(int)">
-      merc.succeed %nil
+      %nil = merk.construct @"list.[]" () : !merk.term<"list.list(int)">
+      merk.succeed %nil
     }
-    case @"list.[|]" (%h: i64, %t: !merc.term<"list.list(int)">) {
+    case @"list.[|]" (%h: i64, %t: !merk.term<"list.list(int)">) {
       %two = arith.constant 2 : i64
       %h2  = arith.muli %two, %h : i64
-      %t2  = merc.call @double_all(%t) : !merc.term<"list.list(int)">
-      %c   = merc.construct @"list.[|]" (%h2, %t2) : !merc.term<"list.list(int)">
-      merc.succeed %c
+      %t2  = merk.call @double_all(%t) : !merk.term<"list.list(int)">
+      %c   = merk.construct @"list.[|]" (%h2, %t2) : !merk.term<"list.list(int)">
+      merk.succeed %c
     }
   }
 }
 ```
 
-In a `nondet` procedure, a call to another `nondet` procedure has generator semantics. The operations after it run once per solution, and `merc.fail` resumes the most recent choice. Verifiers enforce the determinism rules, so a `det` procedure may not contain an unpruned `nondet` call.
+In a `nondet` procedure, a call to another `nondet` procedure has generator semantics. The operations after it run once per solution, and `merk.fail` resumes the most recent choice. Verifiers enforce the determinism rules, so a `det` procedure may not contain an unpruned `nondet` call.
 
 **`mrt` operations:** `mrt.alloc` (bump allocation in the process nursery), `mrt.tag` and `mrt.untag`, `mrt.field_load` and `mrt.field_store`, `mrt.safepoint`, `mrt.yield_check`, `mrt.spawn`, `mrt.send`, `mrt.receive` (a suspension point), `mrt.throw`, `mrt.landing`, and `mrt.rtti` (address of a static type descriptor).
 
-**Open terms** need no new `merc` type, because `open(T)` is an ordinary Mercury type. They add `merc.open_unify` (full unification, `semidet`), `merc.to_open` and `merc.from_open` to `merc`, and `mrt.new_var`, `mrt.deref`, `mrt.bind` (which trails when a trail is live), `mrt.trail_mark` and `mrt.trail_undo` to `mrt`. Only procedures with `any` variables contain them.
+**Open terms** need no new `merk` type, because `open(T)` is an ordinary Mercury type. They add `merk.open_unify` (full unification, `semidet`), `merk.to_open` and `merk.from_open` to `merk`, and `mrt.new_var`, `mrt.deref`, `mrt.bind` (which trails when a trail is live), `mrt.trail_mark` and `mrt.trail_undo` to `mrt`. Only procedures with `any` variables contain them.
 
 ## Lowering and code generation
 
@@ -840,7 +841,7 @@ Mercury's `throw` and `catch` use LLVM's zero-cost exception handling: `invoke` 
 
 ### 6. Parallel loops
 
-A formed `merc.par_loop` is rewritten into a canonical counted loop: induction variable, inclusive bound, step 1. That loop becomes `scf.parallel` with `scf.reduce` for reductions, and the existing conversion produces `omp.parallel` and `omp.wsloop`. Outlining and the libomp calls come from MLIR's OpenMP-to-LLVM translation. In version 1, a parallel body may not allocate; the compiler checks this after inlining.
+A formed `merk.par_loop` is rewritten into a canonical counted loop: induction variable, inclusive bound, step 1. That loop becomes `scf.parallel` with `scf.reduce` for reductions, and the existing conversion produces `omp.parallel` and `omp.wsloop`. Outlining and the libomp calls come from MLIR's OpenMP-to-LLVM translation. In version 1, a parallel body may not allocate; the compiler checks this after inlining.
 
 This is the transformation that experiment E2 applied by hand to mmc's generated C, where it ran 2× faster on 2 cores with a bit-identical result.
 
@@ -856,7 +857,7 @@ The LLVM dialect is translated to LLVM IR, optimized by LLVM, and compiled by th
 
 ## Driver
 
-The compiler is one program with two layers, as Clang and Flang are. The driver reads the command line, works out the jobs and runs them. The frontend, `-fc1`, compiles one module and is what the driver runs for each module. The command line follows Clang and GCC (`-c`, `-o`, `-O2`, `-g`, `-fopenmp`), so the compiler fits Make, Ninja and CMake and behaves like the C, C++ and Fortran compilers next to it; Mercury-specific options follow the same `-f`, `-W` and `-m` conventions. `mercc` and `libmercrt` are working names for the binary and the runtime library.
+The compiler is one program with two layers, as Clang and Flang are. The driver reads the command line, works out the jobs and runs them. The frontend, `-fc1`, compiles one module and is what the driver runs for each module. The command line follows Clang and GCC (`-c`, `-o`, `-O2`, `-g`, `-fopenmp`), so the compiler fits Make, Ninja and CMake and behaves like the C, C++ and Fortran compilers next to it; Mercury-specific options follow the same `-f`, `-W` and `-m` conventions. `merkc` and `libmerkrt` are working names for the binary and the runtime library.
 
 Flang's driver cannot be reused as it stands. It is Clang's driver library, `clangDriver`, running in a Flang mode: the Fortran jobs are built in `clang/lib/Driver/ToolChains/Flang.cpp` and the options live in Clang's `Options.td` and `FlangOptions.td`, and a project outside llvm-project cannot add a mode to that library. We write a small driver on LLVM's Option library, imitate Flang's frontend layer, and run Clang's own tools for linking and offloading (Reuse from LLVM and Flang).
 
@@ -880,9 +881,9 @@ Flang's driver cannot be reused as it stands. It is Clang's driver library, `cla
 
 There are three ways in:
 
-- **`mercc -c foo.m`** compiles one module. It reads the interface files of the modules `foo` imports, which must already exist, and writes `foo.o` and `foo`'s interface file. This is the mode for Make, Ninja and CMake; `-MD` tells them which importers to rebuild when an interface changes.
-- **`mercc -o prog main.m`**, without `-c`, builds a program, like `mmc --make`. Starting from the modules named, the driver finds the modules they import, compiles what changed and links (Build mode, below).
-- **`mercc -o prog a.o b.o`** only links.
+- **`merkc -c foo.m`** compiles one module. It reads the interface files of the modules `foo` imports, which must already exist, and writes `foo.o` and `foo`'s interface file. This is the mode for Make, Ninja and CMake; `-MD` tells them which importers to rebuild when an interface changes.
+- **`merkc -o prog main.m`**, without `-c`, builds a program, like `mmc --make`. Starting from the modules named, the driver finds the modules they import, compiles what changed and links (Build mode, below).
+- **`merkc -o prog a.o b.o`** only links.
 
 ### Build mode
 
@@ -910,7 +911,7 @@ Melbourne compiles a whole program in one grade, and modules link only if all we
 | Prescanner | `-fdebug-dump-provenance` |
 | Parser | `-fdebug-unparse-no-sema`, `-fdebug-dump-parse-tree-no-sema` |
 | Semantic analysis | `-fsyntax-only`, `-fdebug-unparse`, `-fdebug-dump-parse-tree`, `-fdebug-dump-semantic-form`, `-emit-interface` |
-| Code generation | `-emit-merc`, `-emit-mrt`, `-emit-llvm`, `-emit-llvm-bc`, `-S`, `-emit-obj` |
+| Code generation | `-emit-merk`, `-emit-mrt`, `-emit-llvm`, `-emit-llvm-bc`, `-S`, `-emit-obj` |
 
 The unparser's exact, canonical and fully parenthesized modes (Front end, Unparser and round-trip tests) are chosen with `-funparse-mode=`. The `-fc1` layer with the prescanner and parser actions comes first, in M1, because the round-trip tests run through it; the build mode and linking follow with code generation.
 
@@ -929,10 +930,10 @@ The unparser's exact, canonical and fully parenthesized modes (Front end, Unpars
 The running example (Front end) built as a program. This is the intended output, not output from a working compiler; `<install>` is the installation directory.
 
 ```text
-$ mercc -### -fopenmp -O2 -o sumsq sumsq.m
- "mercc" "-fc1" "-triple" "x86_64-unknown-linux-gnu" "-emit-obj" "-O2" "-fopenmp"
+$ merkc -### -fopenmp -O2 -o sumsq sumsq.m
+ "merkc" "-fc1" "-triple" "x86_64-unknown-linux-gnu" "-emit-obj" "-O2" "-fopenmp"
    "-I" "<install>/lib/mercury" "-module-dir" "." "-o" "/tmp/sumsq-3f9a1c.o" "sumsq.m"
- "clang" "-fopenmp" "-o" "sumsq" "/tmp/sumsq-3f9a1c.o" "-L<install>/lib" "-lmercrt"
+ "clang" "-fopenmp" "-o" "sumsq" "/tmp/sumsq-3f9a1c.o" "-L<install>/lib" "-lmerkrt"
 ```
 
 - `sumsq` imports only standard library modules, so there is one compile job; their interface files come from `<install>/lib/mercury`.
@@ -957,7 +958,7 @@ Programs carry standard DWARF debug information, so gdb, lldb, IDE debuggers, `p
 
 ### Three tiers
 
-1. **Line tables (M1).** Every `merc` operation already carries the location of its parse-tree node (Semantic analysis, Mapping to `merc`). Lowering keeps locations through rewrites, using fused locations when it merges operations, and gives each procedure a subprogram. MLIR's `ensure-debug-info-scope-on-llvm-func` pass creates minimal subprograms for exactly this. This gives breakpoints by Mercury file and line, stepping, Mercury backtraces, and source lines in `perf` profiles and sanitizer reports.
+1. **Line tables (M1).** Every `merk` operation already carries the location of its parse-tree node (Semantic analysis, Mapping to `merk`). Lowering keeps locations through rewrites, using fused locations when it merges operations, and gives each procedure a subprogram. MLIR's `ensure-debug-info-scope-on-llvm-func` pass creates minimal subprograms for exactly this. This gives breakpoints by Mercury file and line, stepping, Mercury backtraces, and source lines in `perf` profiles and sanitizer reports.
 2. **Variables (M2).** MLIR generation ties each SSA value to its Mercury variable through debug-value records, using the `NameLoc`s it records. Primitive types are described directly.
 3. **Terms and processes (M4).** A term is a tagged word whose low bits select the constructor. DWARF has no ready way to describe that, since its tagged unions select on a field's value, and MLIR's debug attributes do not cover them anyway. So, as Go and Rust do, we ship debugger scripts: LLDB data formatters and GDB pretty-printers that call a runtime routine to print a term from its type descriptor, the same descriptors `io.write` uses. A polymorphic variable's script finds its type info in the hidden type-info variable beside it. A second extension lists processes and unwinds the stacks of suspended ones, which no OS thread holds; Go's `runtime-gdb.py` does the same for goroutines.
 
@@ -1184,17 +1185,17 @@ Most general-purpose optimization comes from LLVM. The Mercury-specific work tha
 | --- | --- | --- | --- |
 | Guaranteed tail calls | LLVM | `musttail` with `tailcc`; Mercury expresses loops as recursion, so this is correctness, not speed | Required |
 | Standard pipeline: inlining, CSE, constant propagation, LICM, vectorization | MLIR canonicalization, LLVM | Comes from upstream | Required |
-| Last-call-modulo-constructors | `merc` to `mrt` | Destination passing turns list-building recursion into loops; on by default | High |
-| Higher-order specialization | `merc` | Closures become direct calls. In mmc this turned `fold_up` into a local loop calling the body directly | High |
-| Type specialization | `merc` | Removes `type_info` passing and boxing; automatic, plus the `type_spec` pragma | High |
+| Last-call-modulo-constructors | `merk` to `mrt` | Destination passing turns list-building recursion into loops; on by default | High |
+| Higher-order specialization | `merk` | Closures become direct calls. In mmc this turned `fold_up` into a local loop calling the body directly | High |
+| Type specialization | `merk` | Removes `type_info` passing and boxing; automatic, plus the `type_spec` pragma | High |
 | Intermodule inlining and specialization | Interface files | Bodies of small exported procedures travel in the optimization section | High |
-| Parallel loop formation | `merc` | From `%$omp` on `fold_up`, array iterators and counted recursion | High |
-| Switch optimization | `merc`, `cf` | Jump tables, lookup tables, string switches | Medium |
-| Escape analysis | `merc` | Cells that never leave a procedure go on the stack, saving nursery traffic | Medium |
-| Accumulator introduction | `merc` | Uses associativity `promise` declarations, as mmc has since 1999 | Medium |
-| Deforestation, unused-argument and dead-procedure elimination | `merc` | Classic Mercury passes | Later |
-| Structure reuse (compile-time GC) | `merc` | Reuse dead cells in place, after Mazur's analysis; off by default in mmc | Later |
-| Move instead of copy on send | `merc`, runtime | Messages passed in a `di` mode skip the deep copy | Later |
+| Parallel loop formation | `merk` | From `%$omp` on `fold_up`, array iterators and counted recursion | High |
+| Switch optimization | `merk`, `cf` | Jump tables, lookup tables, string switches | Medium |
+| Escape analysis | `merk` | Cells that never leave a procedure go on the stack, saving nursery traffic | Medium |
+| Accumulator introduction | `merk` | Uses associativity `promise` declarations, as mmc has since 1999 | Medium |
+| Deforestation, unused-argument and dead-procedure elimination | `merk` | Classic Mercury passes | Later |
+| Structure reuse (compile-time GC) | `merk` | Reuse dead cells in place, after Mazur's analysis; off by default in mmc | Later |
+| Move instead of copy on send | `merk`, runtime | Messages passed in a `di` mode skip the deep copy | Later |
 | Remembered scan position in selective receive | Runtime | Avoids rescanning old messages when waiting for one reply | Later |
 
 ## Standard library, compatibility and testing

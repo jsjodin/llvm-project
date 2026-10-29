@@ -1,0 +1,13 @@
+Until the prescanner exists, -E prints its input unchanged, with or without
+-fopenmp, through the driver or straight through -fc1.
+
+RUN: merkc -E %S/Inputs/sumsq.m -o %t && diff %S/Inputs/sumsq.m %t
+RUN: merkc -E -fopenmp %S/Inputs/sumsq.m -o %t.omp && diff %S/Inputs/sumsq.m %t.omp
+RUN: merkc -fc1 -E %S/Inputs/sumsq.m -o %t.fc1 && diff %S/Inputs/sumsq.m %t.fc1
+RUN: merkc -E - < %S/Inputs/sumsq.m | diff %S/Inputs/sumsq.m -
+
+RUN: merkc -E %S/Inputs/sumsq.m | FileCheck %s
+CHECK:      :- module sumsq.
+CHECK:      sum_squares(A, N, Sum) :-
+CHECK-NEXT:     %$omp parallel do reduction(+)
+CHECK-NEXT:     int.fold_up(add_square(A), 0, N, 0, Sum).

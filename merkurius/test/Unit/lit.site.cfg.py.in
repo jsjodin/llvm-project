@@ -1,0 +1,8 @@
+@LIT_SITE_CFG_IN_HEADER@
+
+config.llvm_tools_dir = lit_config.substitute("@LLVM_TOOLS_DIR@")
+config.llvm_build_mode = lit_config.substitute("@LLVM_BUILD_MODE@")
+config.merkurius_obj_root = "@MERKURIUS_BINARY_DIR@"
+
+# Let the main config do the real work.
+lit_config.load_config(config, "@MERKURIUS_SOURCE_DIR@/test/Unit/lit.cfg.py")
