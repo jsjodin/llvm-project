@@ -1,6 +1,7 @@
 add_merkurius_library(MerkuriusParser
   char-block.cpp
   lexer.cpp
+  message.cpp
   provenance.cpp
   source.cpp
   token.cpp

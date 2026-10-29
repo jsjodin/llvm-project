@@ -17,6 +17,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "merkurius/Parser/lexer.h"
+#include "merkurius/Parser/message.h"
 #include "merkurius/Parser/source.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
@@ -52,7 +53,7 @@ public:
   // file: it sees one line of the directive, and finds neither directives
   // nor line number directives in it.
   Lexer(const char *begin, const char *end, const char *fileBegin,
-      SourceFile *file, bool openMP, std::vector<LexerMessage> &messages)
+      SourceFile *file, bool openMP, Messages &messages)
       : at_{begin}, end_{end}, fileBegin_{fileBegin}, file_{file},
         openMP_{openMP}, messages_{messages} {}
 
@@ -73,8 +74,10 @@ private:
     }
     return p;
   }
-  void Say(const char *begin, const char *end, std::string text) {
-    messages_.push_back({CharBlock{begin, end}, std::move(text)});
+  template <typename... A>
+  void Say(const char *begin, const char *end, const MessageFixedText &text,
+      A &&...args) {
+    messages_.Say(CharBlock{begin, end}, text, std::forward<A>(args)...);
   }
   void SkipCharacter() {
     unsigned n{llvm::getNumBytesForUTF8(static_cast<llvm::UTF8>(*at_))};
@@ -100,7 +103,7 @@ private:
   const char *const fileBegin_;
   SourceFile *const file_;
   const bool openMP_;
-  std::vector<LexerMessage> &messages_;
+  Messages &messages_;
 };
 
 void Lexer::LexFile(TokenSequence &result) {
@@ -143,7 +146,7 @@ bool Lexer::SkipTrivia() {
       std::size_t close{rest.find("*/")};
       if (close == llvm::StringRef::npos) {
         at_ = end_;
-        Say(start, start + 2, "unterminated comment");
+        Say(start, start + 2, "unterminated comment"_err_en_US);
       } else {
         at_ += 2 + close + 2;
       }
@@ -194,7 +197,7 @@ bool Lexer::SkipLineNumberDirective() {
   at_ = newline + 1;
   unsigned long long line;
   if (digits.getAsInteger(10, line) || line == 0 || line > INT_MAX) {
-    Say(start, p, "line number must be a positive integer");
+    Say(start, p, "line number must be a positive integer"_err_en_US);
     return true;
   }
   // A directive that ends the file has no line to number.
@@ -268,7 +271,7 @@ TokenKind Lexer::LexToken(bool precededByWhitespace) {
   }
   at_ = start;
   SkipCharacter();
-  Say(start, at_, "unexpected character");
+  Say(start, at_, "unexpected character"_err_en_US);
   return TokenKind::Error;
 }
 
@@ -348,13 +351,14 @@ void Lexer::SkipIntegerSuffix(const char *start, bool trailingUnderscore) {
       at_ = p;
       if (!(size.empty() || size == "8" || size == "16" || size == "32" ||
               size == "64")) {
-        Say(suffix, at_, "invalid integer suffix");
+        Say(suffix, at_, "invalid integer suffix"_err_en_US);
       }
       return;
     }
   }
   if (trailingUnderscore) {
-    Say(start, at_, "an integer literal may not end with an underscore");
+    Say(start, at_,
+        "an integer literal may not end with an underscore"_err_en_US);
   }
 }
 
@@ -365,7 +369,7 @@ TokenKind Lexer::LexNumber() {
     if (next == '\'') { // a character code: 0' and any one character
       at_ += 2;
       if (AtEnd()) {
-        Say(start, at_, "missing character after 0'");
+        Say(start, at_, "missing character after 0'"_err_en_US);
       } else {
         SkipCharacter();
       }
@@ -381,16 +385,16 @@ TokenKind Lexer::LexNumber() {
         ++at_;
       }
       if (AtEnd() || !isDigit(*at_)) {
-        Say(start, at_,
-            "missing digits after '" + std::string(start, 2) + "'");
+        Say(start, at_, "missing digits after '%s'"_err_en_US,
+            std::string(start, 2));
         return TokenKind::Integer;
       }
       bool trailingUnderscore{SkipDigits(isDigit)};
       if (!AtEnd() && IsDigit(*at_)) { // e.g. 0b102
         const char *digit{at_};
         SkipDigits(IsDigit);
-        Say(digit, at_, "invalid digit in a literal with prefix '" +
-                std::string(start, 2) + "'");
+        Say(digit, at_, "invalid digit in a literal with prefix '%s'"_err_en_US,
+            std::string(start, 2));
         return TokenKind::Integer;
       }
       SkipIntegerSuffix(start, trailingUnderscore);
@@ -414,11 +418,12 @@ TokenKind Lexer::LexNumber() {
   auto sayUnderscore{[&](char next) {
     if (next == 'e' || next == 'E') {
       Say(start, at_,
-          "an underscore may come before an exponent only after a fraction");
+          "an underscore may come before an exponent only after a fraction"_err_en_US);
     } else if (next == '.') {
-      Say(start, at_, "an underscore may not come before '.'");
+      Say(start, at_, "an underscore may not come before '.'"_err_en_US);
     } else {
-      Say(start, at_, "a float literal may not end with an underscore");
+      Say(start, at_,
+          "a float literal may not end with an underscore"_err_en_US);
     }
   }};
   if (trailingUnderscore) {
@@ -456,14 +461,14 @@ void Lexer::SkipQuoted(char quote) {
     }
   }
   Say(start, start + 1,
-      quote == '"' ? "unterminated string" : "unterminated quoted name");
+      quote == '"' ? "unterminated string"_err_en_US
+                   : "unterminated quoted name"_err_en_US);
 }
 
 void Lexer::SkipHexDigits(const char *escape, int count) {
   for (int j{0}; j < count; ++j, ++at_) {
     if (AtEnd() || !IsHexDigit(*at_)) {
-      Say(escape, at_,
-          "expected " + std::to_string(count) + " hexadecimal digits");
+      Say(escape, at_, "expected %d hexadecimal digits"_err_en_US, count);
       return;
     }
   }
@@ -497,7 +502,7 @@ void Lexer::SkipEscape() {
     break;
   case 'e':
     ++at_;
-    Say(escape, at_, "'\\e' is not an escape in Mercury 22.01");
+    Say(escape, at_, "'\\e' is not an escape in Mercury 22.01"_err_en_US);
     return;
   case 'u':
   case 'U': {
@@ -509,7 +514,7 @@ void Lexer::SkipEscape() {
     if (at_ - digits == count &&
         !llvm::StringRef(digits, count).getAsInteger(16, code) &&
         code > 0x10FFFF) {
-      Say(escape, at_, "a Unicode escape may not exceed \\U0010FFFF");
+      Say(escape, at_, "a Unicode escape may not exceed \\U0010FFFF"_err_en_US);
     }
     return;
   }
@@ -524,24 +529,23 @@ void Lexer::SkipEscape() {
       ++at_;
     }
     if (at_ == digits) {
-      Say(escape, at_, "expected hexadecimal digits after '\\x'");
+      Say(escape, at_, "expected hexadecimal digits after '\\x'"_err_en_US);
     } else if (Peek() != '\\') {
-      Say(escape, at_,
-          std::string{"missing '\\' to end the "} +
-              (hex ? "hexadecimal" : "octal") + " escape");
+      Say(escape, at_, "missing '\\' to end the %s escape"_err_en_US,
+          hex ? "hexadecimal" : "octal");
     } else {
       ++at_;
     }
     return;
   }
   SkipCharacter();
-  Say(escape, at_, "invalid escape sequence");
+  Say(escape, at_, "invalid escape sequence"_err_en_US);
 }
 
 } // namespace
 
-TokenSequence Lex(SourceFile &file, const LexerOptions &options,
-    std::vector<LexerMessage> &messages) {
+TokenSequence Lex(
+    SourceFile &file, const LexerOptions &options, Messages &messages) {
   TokenSequence result;
   llvm::StringRef text{file.content()};
   Lexer lexer{
