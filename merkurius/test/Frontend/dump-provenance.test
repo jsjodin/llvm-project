@@ -1,0 +1,23 @@
+-fdebug-dump-provenance lists each source file with its range of provenances:
+one per byte, and one more for the end of the file.
+
+RUN: merkc -fc1 -fdebug-dump-provenance %S/../Driver/Inputs/sumsq.m | FileCheck %s
+CHECK:      AllSources range_ [1..[[END:[0-9]+]]]
+CHECK-NEXT:    [1..1] (1 bytes) -> compiler '?'(0x3f)
+CHECK-NEXT:    [2..[[END]]] ([[SIZE:[0-9]+]] bytes) -> file {{.*}}sumsq.m
+CHECK-NEXT: SourceFile '{{.*}}sumsq.m': {{[0-9]+}} bytes, 19 lines
+CHECK-NEXT:   origin_[1] -> '{{.*}}sumsq.m' 1
+
+An empty file has one line and a provenance for its end.
+RUN: printf '' > %t.empty.m
+RUN: merkc -fc1 -fdebug-dump-provenance %t.empty.m | FileCheck %s --check-prefix=EMPTY
+EMPTY: [2..2] (1 bytes) -> file
+EMPTY: SourceFile '{{.*}}.empty.m': 0 bytes, 1 line
+
+RUN: printf '\357\273\277:- module m.\r\n' > %t.bom.m
+RUN: merkc -fc1 -fdebug-dump-provenance %t.bom.m | FileCheck %s --check-prefix=BOM
+BOM: SourceFile '{{.*}}.bom.m': 14 bytes, 1 line, byte order mark
+
+The last action option wins.
+RUN: merkc -fc1 -E -fdebug-dump-provenance %t.empty.m | FileCheck %s --check-prefix=EMPTY
+RUN: merkc -fc1 -fdebug-dump-provenance -E %t.bom.m | cmp - %t.bom.m

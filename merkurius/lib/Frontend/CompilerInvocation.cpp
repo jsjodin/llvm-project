@@ -17,8 +17,24 @@ namespace merkurius::frontend {
 static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
   opts.showHelp = args.hasArg(OPT_help);
   opts.showVersion = args.hasArg(OPT_version);
-  if (args.hasArg(OPT_E)) {
-    opts.programAction = ActionKind::PrintPreprocessedInput;
+  // As in Flang, the last action option wins.
+  if (const llvm::opt::Arg *arg =
+          args.getLastArg(OPT_E, OPT_fdebug_dump_provenance,
+              OPT_fdebug_dump_tokens, OPT_fdebug_unparse_tokens)) {
+    switch (arg->getOption().getID()) {
+    case OPT_E:
+      opts.programAction = ActionKind::PrintPreprocessedInput;
+      break;
+    case OPT_fdebug_dump_provenance:
+      opts.programAction = ActionKind::DebugDumpProvenance;
+      break;
+    case OPT_fdebug_dump_tokens:
+      opts.programAction = ActionKind::DebugDumpTokens;
+      break;
+    case OPT_fdebug_unparse_tokens:
+      opts.programAction = ActionKind::DebugUnparseTokens;
+      break;
+    }
   }
   opts.outputFile = args.getLastArgValue(OPT_o).str();
   opts.inputs = args.getAllArgValues(OPT_INPUT);

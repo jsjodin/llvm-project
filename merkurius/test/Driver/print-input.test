@@ -11,3 +11,8 @@ CHECK:      :- module sumsq.
 CHECK:      sum_squares(A, N, Sum) :-
 CHECK-NEXT:     %$omp parallel do reduction(+)
 CHECK-NEXT:     int.fold_up(add_square(A), 0, N, 0, Sum).
+
+Line endings and a byte order mark are kept exactly, and no final newline is
+added.
+RUN: printf '\357\273\277:- module m.\r\n:- interface.' > %t.crlf.m
+RUN: merkc -E %t.crlf.m -o %t.crlf.out && cmp %t.crlf.m %t.crlf.out

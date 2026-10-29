@@ -3,8 +3,10 @@
 A Mercury compiler and runtime on MLIR and LLVM. The design is in
 [docs/MercuryMLIRCompilerandRuntimeDesign.md](docs/MercuryMLIRCompilerandRuntimeDesign.md).
 
-So far there is the driver, `merkc`, and its frontend, `merkc -fc1`. The only
-action is `-E`, which prints its input unchanged until the prescanner exists.
+So far there is the driver, `merkc`, and its frontend, `merkc -fc1`, which reads
+source files through Flang's provenance machinery. Its actions are `-E`, which
+prints the source as the lexer will read it (the file unchanged), and
+`-fdebug-dump-provenance`.
 
 ## Building
 
@@ -49,7 +51,7 @@ ninja -C ../build check-merkurius
 
 | Directory | Contents |
 | --- | --- |
-| `include/merkurius`, `lib` | Libraries: `Common` (adapted from Flang), `Driver` (options), `Frontend`, `FrontendTool` |
+| `include/merkurius`, `lib` | Libraries: `Common` and `Parser` (source files and provenance, both adapted from Flang), `Driver` (options), `Frontend`, `FrontendTool` |
 | `tools/merkc` | The driver and the `-fc1` entry point |
 | `test` | lit tests; `test/Unit` runs the unit tests |
 | `unittests` | googletest unit tests |
