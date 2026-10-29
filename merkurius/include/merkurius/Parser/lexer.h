@@ -15,28 +15,21 @@
 // Literal values are not computed here; the term reader computes them from
 // the spellings, which the lexer has checked.
 
-#include "merkurius/Parser/char-block.h"
 #include "merkurius/Parser/token.h"
-#include <string>
-#include <vector>
 
 namespace merkurius::parser {
 
+class Messages;
 class SourceFile;
 
 struct LexerOptions {
   bool openMP{false}; // recognize %$omp directives
 };
 
-struct LexerMessage {
-  CharBlock at; // within the source file's text
-  std::string text;
-};
-
-// Lexes a whole file. Errors are appended to `messages`; the tokens still
-// cover the whole file, so the round trip holds even for erroneous input.
-TokenSequence Lex(SourceFile &, const LexerOptions &,
-    std::vector<LexerMessage> &messages);
+// Lexes a whole file. Errors are added to `messages`, located by CharBlocks
+// within the file's text; the tokens still cover the whole file, so the round
+// trip holds even for erroneous input.
+TokenSequence Lex(SourceFile &, const LexerOptions &, Messages &messages);
 
 } // namespace merkurius::parser
 #endif // MERKURIUS_PARSER_LEXER_H_
