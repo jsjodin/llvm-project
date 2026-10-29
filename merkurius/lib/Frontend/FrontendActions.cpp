@@ -15,6 +15,7 @@
 #include "merkurius/Parser/provenance.h"
 #include "merkurius/Parser/source.h"
 #include "merkurius/Parser/term-reader.h"
+#include "merkurius/Parser/unparse.h"
 #include "llvm/ADT/STLExtras.h"
 #include <string>
 #include <vector>
@@ -145,6 +146,29 @@ bool DebugDumpParseTreeNoSemaAction::executeAction() {
   }
   parser::DumpParseTree(*os, tree);
   os->flush();
+  return !messages.AnyFatalError();
+}
+
+bool DebugUnparseExactAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  parser::LexerOptions options;
+  options.openMP = ci.getLangOpts().openMP;
+  parser::Messages messages;
+  parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
+  parser::ParseTreeArena arena;
+  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages)};
+  llvm::raw_ostream *os{ci.createDefaultOutputFile()};
+  if (!os) {
+    return false;
+  }
+  // An item left out for an error leaves tokens that no node accounts for.
+  bool complete{!messages.AnyFatalError()};
+  parser::UnparseExact(*os, tree, tokens,
+      minimalLayout_ ? parser::UnparseLayout::Minimal
+                     : parser::UnparseLayout::Exact,
+      complete, messages);
+  os->flush();
+  messages.Emit(llvm::errs(), ci.getAllSources());
   return !messages.AnyFatalError();
 }
 

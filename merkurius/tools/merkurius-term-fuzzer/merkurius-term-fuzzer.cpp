@@ -6,10 +6,13 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// A fuzz target for the lexer, the term reader and the converter. For any
-// input it checks that none of them crashes, with and without OpenMP
-// directives, that the tokens unparse to the input byte for byte, and that
-// each item's canonical form reads back as the same canonical form.
+// A fuzz target for the lexer, the term reader, the converter and the
+// unparser. For any input it checks that none of them crashes, with and
+// without OpenMP directives; that the tokens, and the parse tree, unparse to
+// the input byte for byte; that the exact unparser finds every token
+// accounted for; that an input which converts without errors has the same
+// parse tree in the minimal layout; and that each item's canonical form
+// reads back as the same canonical form.
 //
 // Built normally, it is a program that runs the target on each file named
 // on its command line, to replay a corpus. Built with -fsanitize=fuzzer
@@ -24,6 +27,7 @@
 #include "merkurius/Parser/source.h"
 #include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/term.h"
+#include "merkurius/Parser/unparse.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
@@ -82,19 +86,54 @@ std::vector<std::string> ReadCanonical(
   return items;
 }
 
+// The parse tree's dump, and its exact unparsing in `layout`, which fails
+// the input if the unparser reports a problem. `ok` is set if the input
+// converted without errors.
+std::string ConvertAndUnparse(llvm::StringRef text, UnparseLayout layout,
+    std::string &unparsed, bool &ok) {
+  AllSources all;
+  SourceFile *file{
+      all.AddBuffer("fuzz.m", llvm::MemoryBuffer::getMemBufferCopy(text))};
+  Messages messages;
+  TokenSequence tokens{Lex(*file, LexerOptions{}, messages)};
+  ParseTreeArena arena;
+  const ParseTree &tree{ConvertFile(tokens, arena, messages)};
+  ok = !messages.AnyFatalError();
+  Messages problems;
+  llvm::raw_string_ostream unparsedStream{unparsed};
+  UnparseExact(unparsedStream, tree, tokens, layout, ok, problems);
+  if (!problems.messages().empty()) {
+    Fail("the parse tree does not account for its tokens", text,
+        problems.messages().front().ToString());
+  }
+  std::string dump;
+  llvm::raw_string_ostream dumpStream{dump};
+  DumpParseTree(dumpStream, tree);
+  return dump;
+}
+
 } // namespace
 
 extern "C" int LLVMFuzzerTestOneInput(
     const std::uint8_t *data, std::size_t size) {
   llvm::StringRef input{reinterpret_cast<const char *>(data), size};
   {
-    AllSources all;
-    SourceFile *file{all.AddBuffer(
-        "fuzz.m", llvm::MemoryBuffer::getMemBufferCopy(input))};
-    Messages messages;
-    TokenSequence tokens{Lex(*file, LexerOptions{}, messages)};
-    ParseTreeArena arena;
-    DumpParseTree(llvm::nulls(), ConvertFile(tokens, arena, messages));
+    std::string exact;
+    bool ok;
+    std::string tree{ConvertAndUnparse(input, UnparseLayout::Exact, exact, ok)};
+    if (exact != input) {
+      Fail("the parse tree does not unparse to the input", input, exact);
+    }
+    if (ok) {
+      std::string minimal;
+      ConvertAndUnparse(input, UnparseLayout::Minimal, minimal, ok);
+      std::string unused;
+      std::string again{
+          ConvertAndUnparse(minimal, UnparseLayout::Exact, unused, ok)};
+      if (!ok || again != tree) {
+        Fail("the minimal layout has a different parse tree", input, minimal);
+      }
+    }
   }
   for (bool openMP : {false, true}) {
     for (const std::string &canonical : ReadCanonical(input, openMP, true)) {

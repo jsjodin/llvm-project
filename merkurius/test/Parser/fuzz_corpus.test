@@ -1,7 +1,8 @@
 # The fuzz target's checks hold on every Mercury file in the tests, and on
-# the inputs in Inputs/fuzz, which once failed them: the tokens unparse to
-# the input, and canonical forms read back as themselves. It aborts if one
-# does not.
+# the inputs in Inputs/fuzz, which once failed them: the tokens and the
+# parse tree unparse to the input, the parse tree accounts for every token,
+# the minimal layout has the same parse tree, and canonical forms read back
+# as themselves. It aborts if one does not.
 #
 # RUN: merkurius-term-fuzzer %S/Inputs/fuzz/*
 # RUN: merkurius-term-fuzzer %S/oracle/compounds.m %S/oracle/declarations.m \
@@ -9,3 +10,7 @@
 # RUN:   %S/../Lexer/tokens.m %S/../Lexer/directives.m \
 # RUN:   %S/../Lexer/line_directives.m %S/../Lexer/errors.m \
 # RUN:   %S/../../utils/term-oracle/term_oracle.m
+# RUN: merkurius-term-fuzzer %S/convert/clauses.m %S/convert/declarations.m \
+# RUN:   %S/convert/definitions.m %S/convert/directives.m \
+# RUN:   %S/convert/module-system.m %S/convert/pragmas.m \
+# RUN:   %S/convert/typeclasses.m %S/../Driver/Inputs/sumsq.m

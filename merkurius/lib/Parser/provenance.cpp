@@ -280,9 +280,11 @@ std::optional<ProvenanceRange> AllSources::GetProvenanceRange(
   if (block.end() > content.end()) {
     return std::nullopt;
   }
+  // An empty block, such as the eof token's spelling, is a position: one
+  // provenance, which at the end of a file is the file's end provenance.
   return ProvenanceRange{origin.covers.start() +
           static_cast<std::size_t>(block.begin() - content.begin()),
-      block.size()};
+      std::max<std::size_t>(block.size(), 1)};
 }
 
 std::optional<CharBlock> AllSources::GetCharBlock(ProvenanceRange range) const {

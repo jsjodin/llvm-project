@@ -10,7 +10,8 @@ converter handles the module system's declarations, predicate, function and
 mode declarations, type, inst and mode definitions, type class and
 instance declarations, pragmas, `initialise`, `finalise` and `mutable`
 declarations, promises, solver types, and clauses, with their goals, DCG
-goals and data-terms. Its actions are:
+goals and data-terms; and the unparser prints the parse tree back as
+source. Its actions are:
 
 | Action | Prints |
 | --- | --- |
@@ -20,6 +21,8 @@ goals and data-terms. Its actions are:
 | `-fdebug-unparse-tokens` | Every token's trivia and spelling, which is the file byte for byte |
 | `-fdebug-dump-terms` | Each item's term in canonical notation, or `error` |
 | `-fdebug-dump-parse-tree-no-sema` | The parse tree, one node or field per line; text with line breaks, such as foreign code, is quoted with `\n` escapes |
+| `-fdebug-unparse-exact` | The parse tree as source, from the tokens it recorded, which is the file byte for byte; a token the tree does not account for is reported as an internal error |
+| `-fdebug-unparse-exact-minimal-layout` | The same, without comments and line number directives, and with each token's layout reduced to one space or newline |
 
 `-fopenmp` makes `%$omp` directives tokens instead of comments.
 

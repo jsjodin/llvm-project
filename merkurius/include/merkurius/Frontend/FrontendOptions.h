@@ -30,6 +30,14 @@ enum class ActionKind {
   // per line, or "error" for an item with a diagnostic.
   DebugDumpTerms,
   DebugDumpParseTreeNoSema,
+  // -fdebug-unparse-exact: print the parse tree from the tokens it recorded,
+  // which gives back the source file byte for byte, and report any token
+  // the tree does not account for.
+  DebugUnparseExact,
+  // -fdebug-unparse-exact-minimal-layout: the same, without comments and
+  // line number directives, and with each token's trivia reduced to one
+  // newline or space.
+  DebugUnparseExactMinimalLayout,
 };
 
 struct FrontendOptions {
