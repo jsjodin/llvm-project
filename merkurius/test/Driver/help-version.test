@@ -1,0 +1,18 @@
+RUN: merkc --help | FileCheck %s --check-prefix=DRIVER
+DRIVER:      OVERVIEW: Merkurius compiler
+DRIVER:      USAGE: merkc [options] file...
+DRIVER:      -###
+DRIVER:      -E
+DRIVER:      -fopenmp
+
+RUN: merkc -fc1 -help | FileCheck %s --check-prefix=FC1
+FC1:         OVERVIEW: Merkurius frontend
+FC1-NOT:     -###
+FC1:         -E
+FC1-NOT:     -###
+
+RUN: merkc --version | FileCheck %s --check-prefix=VERSION
+VERSION:     merkc version {{[0-9]+\.[0-9]+\.[0-9]+}}
+VERSION:     InstalledDir:
+
+RUN: merkc -v 2>&1 | FileCheck %s --check-prefix=VERSION
