@@ -62,6 +62,12 @@ private:
       } else {
         Line(name, "none");
       }
+    } else if constexpr (IsOptional<T>::value) {
+      if (value) {
+        Field(name, *value);
+      } else {
+        Line(name, "none");
+      }
     } else if constexpr (IsVariant<T>::value) {
       std::visit(
           [&](const auto &alternative) { Field(name, alternative); }, value);
@@ -77,6 +83,8 @@ private:
       Line(name, EnumToString(value));
     } else if constexpr (std::is_same_v<T, llvm::StringRef>) {
       Line(name, value);
+    } else if constexpr (std::is_same_v<T, bool>) {
+      Line(name, value ? "true" : "false");
     } else {
       Indent();
       o_ << name << ": " << value << '\n';
