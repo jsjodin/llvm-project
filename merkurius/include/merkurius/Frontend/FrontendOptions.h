@@ -29,6 +29,7 @@ enum class ActionKind {
   // -fdebug-dump-terms: print each item's term in canonical notation, one
   // per line, or "error" for an item with a diagnostic.
   DebugDumpTerms,
+  DebugDumpParseTreeNoSema,
 };
 
 struct FrontendOptions {

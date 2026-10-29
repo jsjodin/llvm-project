@@ -37,7 +37,7 @@ ReadResult Read(llvm::StringRef text, bool openMP = false) {
   TermArena arena;
   TermReader reader{tokens, arena, messages};
   ReadResult result;
-  while (std::optional<Item> item{reader.ReadItem()}) {
+  while (std::optional<ItemTerm> item{reader.ReadItem()}) {
     if (item->term) {
       std::string out;
       llvm::raw_string_ostream os{out};
@@ -315,7 +315,7 @@ TEST(TermReaderTest, DepthLimit) {
   // it: "a :- b, c" and "x = f(y)" need three.
   TermReader reader{tokens, arena, messages, /*maxDepth=*/3};
   std::vector<bool> read;
-  while (std::optional<Item> item{reader.ReadItem()}) {
+  while (std::optional<ItemTerm> item{reader.ReadItem()}) {
     read.push_back(item->term != nullptr);
   }
   EXPECT_EQ(read, (std::vector<bool>{true, false, true, false, true}));

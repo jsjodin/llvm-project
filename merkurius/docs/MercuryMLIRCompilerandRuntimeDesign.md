@@ -301,7 +301,10 @@ The converter is a small parser-combinator library in the spirit of Flang's, who
 
 - `functor("then", A, B)` matches a compound term with that functor and arity, and applies `A` and `B` to its arguments.
 - `name`, `variable`, `literal`, `listOf(P)` and `anyOf(P1, P2, …)` match the obvious shapes.
-- `construct<T>(…)` builds a parse-tree node of type `T` from the results, and `sourced(P)` records the term's source range on it.
+- `construct<T>(…)` builds a parse-tree node of type `T` from the results and records the term's first and last token on it.
+- `withValue(v, P)` records which alternative matched, as in `withValue(Section::Interface, functor("interface"))`, and `expect("a module name", P)` names a rule in error messages.
+- `commaListOf(P)` reads the operands of `,` terms, as in `:- import_module io, list`; as in mmc, both operands may be lists, so `(a, b), c` has three elements.
+- **Commitment, not backtracking** (`include/merkurius/Parser/term-combinators.h`). Each rule has a test on the term's shape, its top functor and arity, and a conversion that runs only on a term that passes it. Once a rule applies, every error below it is reported there, so a message always comes from the rule that applies and nothing is converted twice. Parentheses do not change a term's meaning, so every rule sees the term inside them.
 
 A rule then reads like the manual's definition. In this example, `if C then T else E` is the term `else(if(then(C, T)), E)`:
 
@@ -311,15 +314,17 @@ constexpr auto ifThenElse =
         functor("else", functor("if", functor("then", goal, goal)), goal)));
 ```
 
-- **One rule set per category:** items, goals, data-terms, types, insts and modes, each following its chapter of the manual. `anyOf` dispatches on a term's top functor through a table, so choosing an alternative takes constant time.
-- **Errors.** A term that matches nothing is reported with the forms expected in its context, such as "expected a goal; found a lambda expression".
+- **One rule set per category:** items, goals, data-terms, types, insts and modes, each following its chapter of the manual (`lib/Parser/convert.cpp`). `anyOf` tries its alternatives' shape tests in order, which is enough for the module system's few; when the goal and declaration rules make it a measured cost, it will dispatch on a term's top functor through a table, so choosing an alternative takes constant time.
+- **Names** are `SymName` nodes: a name and its module qualifiers, from `'.'(Qualifier, Name)` or from `__` within a name (reference manual, "The module system"), so `a.b__c` is `a.b.c`. A name that begins or ends with `__` is not split.
+- **Errors.** A term that matches nothing is reported with the forms expected in its context and the start of its source, as in "expected a module name, but found '"string"'". An item with an error is left out of the tree, and conversion continues with the next item. Declarations and clauses the converter does not handle yet are reported as not yet implemented.
+- **Items** convert one at a time: the reader's terms for an item live in an arena that is reset once it is converted, and the strings the parse tree keeps are copied into the parse tree's own arena. An item with a lexical error is not converted.
 - **Kept small.** Rules are `constexpr` objects built from a few templates. Heavy template parsers are known for slow builds and high compiler memory, so the library stays minimal and nodes are allocated in an arena rather than moved around as values.
 
 ### Parse tree
 
 - **Types mirror the grammar.** There is one C++ type per construct of the reference manual: each declaration kind, each goal form (`IfThenElse`, `Disjunction`, `SomeGoal`, `TraceGoal`, …), each data-term form (`FunctorTerm`, `FieldAccess`, `Lambda`, `StateVarRef`, …), and the type, inst and mode languages. A category with alternatives is a `std::variant` of its forms, so `std::visit` over it is checked for exhaustiveness, much as a `det` switch is.
 - **Immutable.** Nodes are created once by the converter in the `ASTContext` arena and never change. The only fields filled later are annotation slots on names, as Flang's `parser::Name` carries a symbol pointer.
-- **Generic walker.** `walk(node, visitor)` visits every node, so a pass handles only the node types it cares about.
+- **Generic walker.** `Walk(node, visitor)` visits every node, calling the visitor's `Pre` and `Post` for the node types it has them for, so a pass handles only the node types it cares about. Each node lists its fields once, in a `ForEachField` member, and the walker and the dump are written over that, so a new node type needs nothing else.
 - **Unparser.** It prints a parse tree back as Mercury source, either exactly as written or in a canonical layout (Unparser and round-trip tests). Every node records its first and last token, literals keep their spelling beside their value, and parentheses, list notation and operator notation are recorded as written, so nothing needed to print the source back is lost.
 - **Debug dumps.** Options print the parse tree and the semantic form, as Flang's do.
 
@@ -1009,7 +1014,7 @@ Melbourne compiles a whole program in one grade, and modules link only if all we
 | Source manager | `-E` (the source as the lexer reads it, which is the file unchanged), `-fdebug-dump-provenance` |
 | Lexer | `-fdebug-dump-tokens`, `-fdebug-unparse-tokens` (every token's trivia and spelling, which is the file byte for byte) |
 | Term reader | `-fdebug-dump-terms` (each item's term in canonical notation, or `error`) |
-| Parser | `-fdebug-unparse-no-sema`, `-fdebug-dump-parse-tree-no-sema` |
+| Parser | `-fdebug-unparse-no-sema`, `-fdebug-dump-parse-tree-no-sema` (implemented: the parse tree, one node or field per line) |
 | Semantic analysis | `-fsyntax-only`, `-fdebug-unparse`, `-fdebug-dump-parse-tree`, `-fdebug-dump-semantic-form`, `-emit-interface` |
 | Code generation | `-emit-merk`, `-emit-mrt`, `-emit-llvm`, `-emit-llvm-bc`, `-S`, `-emit-obj` |
 

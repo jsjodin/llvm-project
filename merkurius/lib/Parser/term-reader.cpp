@@ -236,7 +236,7 @@ void TermReader::SkipItem() {
   }
 }
 
-std::optional<Item> TermReader::ReadItem() {
+std::optional<ItemTerm> TermReader::ReadItem() {
   if (PeekKind() == TokenKind::Eof) {
     return std::nullopt;
   }
@@ -253,7 +253,7 @@ std::optional<Item> TermReader::ReadItem() {
     SayUnexpected("an operator or '.'");
     SkipItem();
   }
-  return Item{failed_ ? nullptr : parsed.term, Range(first), variables_};
+  return ItemTerm{failed_ ? nullptr : parsed.term, Range(first), variables_};
 }
 
 // Reads a term whose priority is at least minPriority, by precedence

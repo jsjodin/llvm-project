@@ -4,8 +4,9 @@ A Mercury compiler and runtime on MLIR and LLVM. The design is in
 [docs/MercuryMLIRCompilerandRuntimeDesign.md](docs/MercuryMLIRCompilerandRuntimeDesign.md).
 
 So far there is the driver, `merkc`, and its frontend, `merkc -fc1`, which
-reads source files through Flang's provenance machinery, lexes them, and reads
-their items as terms. Its actions are:
+reads source files through Flang's provenance machinery, lexes them, reads
+their items as terms, and converts the terms to a parse tree; so far the
+converter handles the module system's declarations. Its actions are:
 
 | Action | Prints |
 | --- | --- |
@@ -14,6 +15,7 @@ their items as terms. Its actions are:
 | `-fdebug-dump-tokens` | The tokens, one per line |
 | `-fdebug-unparse-tokens` | Every token's trivia and spelling, which is the file byte for byte |
 | `-fdebug-dump-terms` | Each item's term in canonical notation, or `error` |
+| `-fdebug-dump-parse-tree-no-sema` | The parse tree, one node or field per line |
 
 `-fopenmp` makes `%$omp` directives tokens instead of comments.
 
@@ -75,7 +77,7 @@ reader with libFuzzer, using the clang of the build tree.
 
 | Directory | Contents |
 | --- | --- |
-| `include/merkurius`, `lib` | Libraries: `Common` and `Parser` (source files, provenance and diagnostics, adapted from Flang; the lexer, operator table and term reader), `Driver` (options), `Frontend`, `FrontendTool` |
+| `include/merkurius`, `lib` | Libraries: `Common` and `Parser` (source files, provenance and diagnostics, adapted from Flang; the lexer, operator table, term reader, converter and parse tree), `Driver` (options), `Frontend`, `FrontendTool` |
 | `tools/merkc` | The driver and the `-fc1` entry point |
 | `tools/merkurius-term-fuzzer` | A fuzz target for the lexer and term reader |
 | `utils/term-oracle` | The term oracle, which reads terms with Mercury's own parser, and the scripts that compare it with merkc and generate test items |
