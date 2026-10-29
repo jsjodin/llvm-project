@@ -1,0 +1,35 @@
+RUN: not merkc 2>&1 | FileCheck %s --check-prefix=NO-INPUT
+RUN: not merkc -E 2>&1 | FileCheck %s --check-prefix=NO-INPUT
+RUN: not merkc -fc1 -E 2>&1 | FileCheck %s --check-prefix=NO-INPUT
+NO-INPUT: merkc: error: no input files
+
+RUN: not merkc -E -fopenmpp %S/Inputs/sumsq.m 2>&1 | FileCheck %s --check-prefix=NEAREST
+NEAREST: merkc: error: unknown argument '-fopenmpp'; did you mean '-fopenmp'?
+
+RUN: not merkc -E -zzz-not-an-option %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=UNKNOWN
+UNKNOWN: merkc: error: unknown argument: '-zzz-not-an-option'
+
+-### is for the driver only.
+RUN: not merkc -fc1 -### -E %S/Inputs/sumsq.m 2>&1 | FileCheck %s --check-prefix=FC1-HASH
+FC1-HASH: merkc: error: unknown argument: '-###'
+
+RUN: not merkc -E %S/Inputs/sumsq.m -o 2>&1 | FileCheck %s --check-prefix=MISSING
+MISSING: merkc: error: argument to '-o' is missing (expected 1 value)
+
+RUN: not merkc %S/Inputs/sumsq.m 2>&1 | FileCheck %s --check-prefix=NO-ACTION
+NO-ACTION: merkc: error: only -E is implemented so far
+
+RUN: not merkc -E -o %t %S/Inputs/sumsq.m %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=MULTI-O
+MULTI-O: merkc: error: cannot specify -o when generating multiple output files
+
+RUN: not merkc -E %s 2>&1 | FileCheck %s --check-prefix=NOT-MERCURY
+NOT-MERCURY: merkc: error: '{{.*}}errors.test' is not a Mercury source file (.m)
+
+RUN: not merkc -E %t.does-not-exist.m 2>&1 | FileCheck %s --check-prefix=NO-FILE
+NO-FILE: merkc: error: cannot open input file '{{.*}}does-not-exist.m':
+
+RUN: not merkc -fc1 -E -fopenmp-version=five %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=BAD-VERSION
+BAD-VERSION: merkc: error: invalid value 'five' in '-fopenmp-version=five'

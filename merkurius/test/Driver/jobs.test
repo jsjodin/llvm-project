@@ -1,0 +1,23 @@
+The driver runs one -fc1 job per input, passing on the options -fc1 needs.
+
+RUN: merkc -### -E %S/Inputs/sumsq.m 2>&1 | FileCheck %s
+CHECK:      merkc version
+CHECK-NEXT: InstalledDir:
+CHECK-NEXT: "{{[^"]*}}merkc{{(\.exe)?}}" "-fc1" "-E" "{{[^"]*}}sumsq.m"{{$}}
+
+RUN: merkc -### -E -fopenmp -fopenmp-version=51 -o out.m %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=OMP
+OMP: "-fc1" "-E" "-fopenmp" "-fopenmp-version=51" "-o" "out.m" "{{[^"]*}}sumsq.m"{{$}}
+
+Two inputs give two jobs.
+RUN: merkc -### -E %S/Inputs/sumsq.m %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=TWO
+TWO-COUNT-2: "-fc1" "-E" "{{[^"]*}}sumsq.m"
+
+-### prints the jobs without running them; -v prints them and runs them.
+RUN: rm -f %t.out
+RUN: merkc -### -E %S/Inputs/sumsq.m -o %t.out 2>&1
+RUN: not ls %t.out
+RUN: merkc -v -E %S/Inputs/sumsq.m -o %t.out 2>&1 | FileCheck %s --check-prefix=VERBOSE
+RUN: diff %S/Inputs/sumsq.m %t.out
+VERBOSE: "-fc1" "-E" "-o" "{{[^"]*}}.out" "{{[^"]*}}sumsq.m"
