@@ -6,11 +6,13 @@
 
 :- module tokens.
 :- interface.
-:- import_module float, int, list, string.
+:- import_module float, int, list, string, uint8.
 
 :- func items = list(int).
 :- func text = list(string).
 :- func ratio = float.
+:- func byte = uint8.
+:- func big = float.
 :- func 'quoted name' = int.
 :- func larger(int, int) = int.
 
@@ -19,11 +21,11 @@
 % CHECK: [[@LINE+3]]:1 name items
 % CHECK-NEXT: [[@LINE+2]]:7 name =
 % CHECK-NEXT: [[@LINE+1]]:9 open_list [
-items = [0, 1_000, 0b1010, 0o17, 0xff_u8, 0'a, 0' ].
+items = [0, 1_000, 0b1010, 0o17, 0xff, 0'a, 0' ].
 % CHECK: integer 1_000
 % CHECK: integer 0b1010
 % CHECK: integer 0o17
-% CHECK: integer 0xff_u8
+% CHECK: integer 0xff
 % CHECK: integer 0'a
 % CHECK-NEXT: comma ,
 % CHECK-NEXT: integer 0'{{ }}
@@ -40,6 +42,13 @@ inued"].
 
 ratio = 1.5e-3.
 % CHECK: float 1.5e-3
+
+byte = 0xff_u8.
+% CHECK: integer 0xff_u8
+
+% mmc 22.01.9 accepts an underscore between a fraction and its exponent.
+big = 1.5_e10.
+% CHECK: float 1.5_e10
 
 'quoted name' = 1.
 % CHECK: [[@LINE-1]]:1 name 'quoted name'
