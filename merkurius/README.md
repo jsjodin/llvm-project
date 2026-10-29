@@ -23,6 +23,8 @@ source. Its actions are:
 | `-fdebug-dump-parse-tree-no-sema` | The parse tree, one node or field per line; text with line breaks, such as foreign code, is quoted with `\n` escapes |
 | `-fdebug-unparse-exact` | The parse tree as source, from the tokens it recorded, which is the file byte for byte; a token the tree does not account for is reported as an internal error |
 | `-fdebug-unparse-exact-minimal-layout` | The same, without comments and line number directives, and with each token's layout reduced to one space or newline |
+| `-fdebug-unparse-no-sema` | The parse tree as source in the canonical layout, with the spellings and comments of the file; items with errors as written |
+| `-fdebug-unparse-parenthesized-no-sema` | The same, with every data-term, goal, type, inst and mode written as an operator term in parentheses |
 
 `-fopenmp` makes `%$omp` directives tokens instead of comments.
 

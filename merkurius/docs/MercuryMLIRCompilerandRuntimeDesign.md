@@ -376,7 +376,7 @@ constexpr auto ifThenElse =
 
 ### Unparser and round-trip tests
 
-The unparser is the first component to build, together with the source manager, lexer, term reader and converter it tests. Its round-trip tests then guard every later change to them. It has three modes:
+The unparser is the first component to build, together with the source manager, lexer, term reader and converter it tests. Its round-trip tests then guard every later change to them. It has these modes:
 
 - **Exact** (`-fdebug-unparse-exact`, `lib/Parser/unparse.cpp`). Prints the parse tree using the tokens it recorded, so every spelling, parenthesis, comment and space comes from the tree and the output equals the input, byte for byte. It is one generic walker over `ForEachField`: each node prints the tokens of its range, passing its children's subranges to them and printing the tokens between them itself. Every token is printed whatever the tree, so the output alone would prove nothing. What the walker checks is where the value is. It reports, as internal errors:
   - a node whose tokens are not within its parent's;
@@ -384,19 +384,40 @@ The unparser is the first component to build, together with the source manager, 
   - a variable or literal token that a node prints itself, but that none of its fields holds. A variable needs a string field equal to its name. A literal needs a number or string field, or, for a string such as `"C"`, an enum field such as a `ForeignLanguage`. Names and punctuation are a node's own syntax and are not checked.
 
   The last check catches a converter that drops part of a goal or an argument, if the dropped part has a variable or a literal. The tokens between items are checked only when no item was left out for an error. The first checks found that every `SymName` held the whole term it was read from, arguments included. A name's tokens are now its qualifiers and its functor's token, or the opening bracket of `{}` and `[|]`. For a qualified infix operator, as in `m.(X + Y)`, they are the qualifiers alone.
-- **Minimal layout** (`-fdebug-unparse-exact-minimal-layout`). The exact mode without comments or line number directives, and with each token's layout reduced to one newline if it had one, one space if it had other layout, and nothing if it had none. It stands in for the canonical mode in test 4 until that mode exists.
-- **Canonical.** Prints the same tree in a standard layout: four-space indentation, one goal per line, if-then-else and disjunction laid out as in the reference manual, spaces around infix operators, line breaking by a Wadler-style pretty-printer, and at most one blank line between items. Comments are kept, attached to the node they precede or, on the same line, follow, with their text unchanged. Literal spellings such as `0x1F` and quoting are kept as well. This mode is the formatter.
-- **Fully parenthesized.** Canonical layout with every operator term in parentheses, used for the mmc comparison below.
+- **Minimal layout** (`-fdebug-unparse-exact-minimal-layout`). The exact mode without comments or line number directives, and with each token's layout reduced to one newline if it had one, one space if it had other layout, and nothing if it had none. It stood in for the canonical mode in test 4 before that mode existed, and remains a debugging aid.
+- **Canonical** (`-fdebug-unparse-no-sema`, `lib/Parser/unparse-canonical.cpp`). Prints the same tree in a standard layout. This mode is the formatter. The tree does not record literal spellings, quoting or parentheses, so the printer takes each token's spelling from the tokens the tree recorded, and decides only the layout between tokens, from the tree:
+  - four-space indentation, and one goal per line in a clause body, a disjunct or the branch of an if-then-else;
+  - if-then-else, `else if` chains, `C -> T ; E` and disjunctions laid out as in the reference manual, and constructors aligned under `--->`;
+  - a goal in parentheses on lines of its own when it is the goal of a scope, such as `trace` or `promise_pure`;
+  - spaces around infix operators, except `::` and the `/` of `Name/Arity`;
+  - line breaking by a Wadler-style pretty-printer, within 79 columns where possible: a bracketed list that does not fit puts each element on a line of its own;
+  - at most one blank line between items, and none within an item.
+
+  The layout cannot change how the text lexes:
+  - nothing goes between a term and an open_ct, or after a `.` name;
+  - an open keeps the layout before it;
+  - two tokens whose spellings would run together, such as two graphic names, are kept apart;
+  - within a name, variable or literal, such as `io.write`, `!.X` or `-1`, and after a graphic prefix operator, the layout is the source's.
+
+  Comments keep their text, and stay attached to their token. A comment on the same line as the token before it stays at the end of that line; a comment on a line of its own precedes its token, at its indentation. Line number directives are dropped. An item that was left out for an error is printed as written.
+- **Fully parenthesized** (`-fdebug-unparse-parenthesized-no-sema`). The canonical layout with every data-term, goal, type, inst and mode that is written as an operator term in parentheses. It shows how the reader grouped each operator, and test 4 checks it too.
 
 Tests, run on every file of every corpus:
 
 1. **Lexer round trip.** Printing every token's trivia and spelling gives back the file, byte for byte.
-2. **Exact round trip.** Parsing a file and unparsing it exactly gives back the file, byte for byte, and the unparser reports nothing. `utils/round-trip/round-trip.py` runs this test and test 4 on the test files that convert without errors (`test/Parser/unparse/round_trip.test`). The fuzz target runs both tests on every input, and on the files with errors (`test/Parser/fuzz_corpus.test`).
+2. **Exact round trip.** Parsing a file and unparsing it exactly gives back the file, byte for byte, and the unparser reports nothing. `utils/round-trip/round-trip.py` runs this test and tests 3 and 4 on the test files that convert without errors (`test/Parser/unparse/round_trip.test`). The fuzz target runs them on every input that converts without errors, and this test on the rest too (`test/Parser/fuzz_corpus.test`). `test/Parser/unparse/canonical.test` checks the canonical layout of a module laid out carelessly against the expected one.
 3. **Canonical fixed point.** Parse the file and unparse it canonically, giving C1; parse C1 and unparse it canonically, giving C2. C1 and C2 must be identical.
-4. **Meaning preserved.** The parse trees of the file and of C1 must be equal once locations and trivia are removed. Test 3 alone would pass a printer that consistently dropped something; this test catches it. The trees are compared through `-fdebug-dump-parse-tree-no-sema`, which prints neither. Until the canonical mode exists, C1 is the minimal layout. That checks that comments, line number directives and the amount of layout do not change a file's meaning.
+4. **Meaning preserved.** The parse trees of the file, of C1 and of its fully parenthesized form must be equal once locations and trivia are removed. Test 3 alone would pass a printer that consistently dropped something; this test catches it. The trees are compared through `-fdebug-dump-parse-tree-no-sema`, which prints neither. Writing the tests found that the converter read `t ---> a ; b where ...` as one constructor named `;`, because `where` binds less tightly than `;`.
 5. **Against mmc's term parser.** A term oracle (`utils/term-oracle/term_oracle.m`) reads items with the Mercury library's term parser, through its documented interface, and prints them in our canonical notation; `compare-terms.py` requires it to agree with `merkc -fc1 -fdebug-dump-terms`, item by item. The lit tests under `test/Parser/oracle` run it on hand-written cases, on every pair of builtin operators (about 16000 items), and on random items from a grammar of the surface syntax, when mmc is found (`MMC`, or the `PATH`). Every rule above marked "as in mmc" came from a difference it found. Such a difference is a fact about mmc, settled by running it, never by reading its source.
-6. **Against mmc's printer.** Tests 1 to 4 compare our parser with itself, so a parser that is consistently wrong about an operator's priority would pass them all. mmc's `--convert-to-mercury` option prints mmc's own parse of a module with every operator term parenthesized, as in `(!: Acc) = ((!. Acc) + (X * X))` for the running example. Our parse of the file must equal our parse of that output: the parentheses make it unambiguous, so any difference is a priority or associativity error in our term reader. mmc's printer drops comments and splits a combined `pred`-and-mode declaration into two, so declarations are compared after the same split.
-7. **Fuzzing.** `tools/merkurius-term-fuzzer` checks, for any input, that the lexer, reader and converter do not crash, that the tokens unparse to the input, that tests 2 and 4 hold, and that each item's canonical form reads back as itself; `utils/fuzz/run-term-fuzzer.sh` runs it under libFuzzer with the address and undefined behavior sanitizers. Inputs that once failed go in `test/Parser/Inputs/fuzz`, and a lit test replays them and every Mercury file in the tests.
+6. **Against mmc's printer: not run.** Tests 1 to 4 compare our parser with itself, so a parser that is consistently wrong about an operator's priority would pass them all. The plan was to compare our parse of a file with our parse of mmc's `--convert-to-mercury` output, which parenthesizes every operator term. That output is too far from a reprint of the source to compare:
+   - it expands DCG rules;
+   - it renames `_` to `V_1`;
+   - it module-qualifies field names;
+   - it splits declarations and imports;
+   - it even prints invalid syntax for some trace goals.
+
+   Test 5 already catches what test 6 was for: it compares our reader with Mercury's own term parser, item by item, on every pair of builtin operators among other cases.
+7. **Fuzzing.** `tools/merkurius-term-fuzzer` checks, for any input, that the lexer, reader and converter do not crash, that the tokens unparse to the input, that tests 2 to 4 hold, and that each item's canonical term reads back as itself; `utils/fuzz/run-term-fuzzer.sh` runs it under libFuzzer with the address and undefined behavior sanitizers. Inputs that once failed go in `test/Parser/Inputs/fuzz`, and a lit test replays them and every Mercury file in the tests.
 
 **Corpora:** the reference manual's examples, our own test programs, and generated programs. Melbourne's library and test sources are not used, because nobody may read them to diagnose a failure (Clean-room rules).
 
@@ -1066,7 +1087,7 @@ Melbourne compiles a whole program in one grade, and modules link only if all we
 | Source manager | `-E` (the source as the lexer reads it, which is the file unchanged), `-fdebug-dump-provenance` |
 | Lexer | `-fdebug-dump-tokens`, `-fdebug-unparse-tokens` (every token's trivia and spelling, which is the file byte for byte) |
 | Term reader | `-fdebug-dump-terms` (each item's term in canonical notation, or `error`) |
-| Parser | `-fdebug-unparse-no-sema`, `-fdebug-dump-parse-tree-no-sema` (implemented: the parse tree, one node or field per line), `-fdebug-unparse-exact` and `-fdebug-unparse-exact-minimal-layout` (implemented: Unparser and round-trip tests) |
+| Parser | `-fdebug-dump-parse-tree-no-sema` (implemented: the parse tree, one node or field per line), `-fdebug-unparse-no-sema`, `-fdebug-unparse-parenthesized-no-sema`, `-fdebug-unparse-exact` and `-fdebug-unparse-exact-minimal-layout` (implemented: Unparser and round-trip tests) |
 | Semantic analysis | `-fsyntax-only`, `-fdebug-unparse`, `-fdebug-dump-parse-tree`, `-fdebug-dump-semantic-form`, `-emit-interface` |
 | Code generation | `-emit-merk`, `-emit-mrt`, `-emit-llvm`, `-emit-llvm-bc`, `-S`, `-emit-obj` |
 

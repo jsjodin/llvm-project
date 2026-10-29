@@ -355,6 +355,15 @@ TEST(ConvertTest, DeclarationErrors) {
 }
 
 TEST(ConvertTest, TypeDefinitions) {
+  // where applies to all the constructors, not only the last.
+  EXPECT_EQ(Items(":- type t ---> a ; b where equality is eq.\n"),
+      "DuTypeDefn\n| name: SymName t\n| parameters:\n| supertype: none\n"
+      "| constructors:\n| | Constructor\n| | | existentialVars:\n"
+      "| | | name: SymName a\n| | | arguments:\n| | | constraints:\n"
+      "| | Constructor\n| | | existentialVars:\n| | | name: SymName b\n"
+      "| | | arguments:\n| | | constraints:\n| attributes: TypeAttributes\n"
+      "| | equality: SymName eq\n| | comparison: none\n| | directArgs:\n"
+      "| | abstractNoncanonical: false\n");
   EXPECT_EQ(Compact(":- type fruit ---> apple ; orange.\n"),
       "DuTypeDefn\n| name: SymName fruit\n| constructors:\n"
       "| | Constructor\n| | | name: SymName apple\n"

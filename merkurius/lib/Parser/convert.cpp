@@ -969,15 +969,18 @@ private:
     }
     auto head{Apply(typeHead, *subtype, state)};
     ok &= head.has_value();
-    DuBody body;
-    SplitDuBody(bodyTerm, body);
+    // where binds less tightly than ';', so it applies to all the
+    // constructors: where((a ; b), Attributes).
+    const Term *constructorsTerm{&bodyTerm};
     const TypeAttributes *attributes{nullptr};
-    if (auto where{SplitWhere(*body.constructors.back())}) {
-      body.constructors.back() = where->first;
+    if (auto where{SplitWhere(StripParentheses(bodyTerm))}) {
+      constructorsTerm = where->first;
       auto converted{Apply(typeAttributes, *where->second, state)};
       ok &= converted.has_value();
       attributes = converted.value_or(nullptr);
     }
+    DuBody body;
+    SplitDuBody(*constructorsTerm, body);
     auto constructors{detail::ConvertElements(ConstructorRule{},
         llvm::ArrayRef<const Term *>{body.constructors}, state)};
     if (!ok || !constructors) {

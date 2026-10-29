@@ -73,6 +73,77 @@ TEST(UnparseTest, MinimalLayout) {
   EXPECT_EQ(result.messages, std::vector<std::string>{});
 }
 
+// Converts `text` and prints it in the canonical layout.
+std::string Canonical(llvm::StringRef text, bool parenthesize = false) {
+  AllSources all;
+  SourceFile *file{
+      all.AddBuffer("test.m", llvm::MemoryBuffer::getMemBufferCopy(text))};
+  Messages messages;
+  TokenSequence tokens{Lex(*file, LexerOptions{}, messages)};
+  ParseTreeArena arena;
+  const ParseTree &tree{ConvertFile(tokens, arena, messages)};
+  std::string result;
+  llvm::raw_string_ostream os{result};
+  UnparseCanonical(os, tree, tokens, parenthesize);
+  return result;
+}
+
+TEST(UnparseTest, CanonicalGoals) {
+  EXPECT_EQ(Canonical("p(X):-q(X),r(X)."), "p(X) :-\n    q(X),\n    r(X).\n");
+  EXPECT_EQ(Canonical("p(X) :- (if q(X) then r else s), ( t ; u )."),
+      "p(X) :-\n"
+      "    ( if q(X) then\n        r\n    else\n        s\n    ),\n"
+      "    (\n        t\n    ;\n        u\n    ).\n");
+  // else if and ; C -> continue their chains.
+  EXPECT_EQ(Canonical("p :- (if a then b else if c then d else e)."),
+      "p :-\n    ( if a then\n        b\n    else if c then\n        d\n"
+      "    else\n        e\n    ).\n");
+  EXPECT_EQ(Canonical("p :- (a -> b ; c -> d ; e)."),
+      "p :-\n    ( a ->\n        b\n    ; c ->\n        d\n    ;\n        e\n"
+      "    ).\n");
+  // A scope's goal in parentheses is a block; a condition stays inline.
+  EXPECT_EQ(Canonical("p :- promise_pure (a, b), not (c, d)."),
+      "p :-\n    promise_pure (\n        a,\n        b\n    ),\n"
+      "    not (c, d).\n");
+  EXPECT_EQ(Canonical("p --> {q}, [a]."),
+      "p -->\n    { q },\n    [a].\n");
+}
+
+TEST(UnparseTest, CanonicalTokens) {
+  // Spellings and quoting are kept; layout is the canonical one.
+  EXPECT_EQ(Canonical("x(0x1F,0'a,'A b',\"s\")."),
+      "x(0x1F, 0'a, 'A b', \"s\").\n");
+  EXPECT_EQ(Canonical(":- pred  p( int :: in , io.state::di )is det."),
+      ":- pred p(int::in, io.state::di) is det.\n");
+  // An open stays apart from what precedes it, and an open_ct does not.
+  EXPECT_EQ(Canonical("x(- (1), -1, - 1, f(a), X ^ f)."),
+      "x(- (1), -1, - 1, f(a), X ^ f).\n");
+  EXPECT_EQ(Canonical(":- type t ---> a ; b(int) where equality is eq."),
+      ":- type t\n    --->    a\n    ;       b(int)\n    where equality is eq.\n");
+  // A long argument list breaks after its commas.
+  EXPECT_EQ(Canonical("p :- q(aaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbbb, "
+                      "cccccccccccccccccccccc, ddddddddddd)."),
+      "p :-\n    q(\n        aaaaaaaaaaaaaaaaaaaa,\n        bbbbbbbbbbbbbbbbbbbbbbbbb,\n"
+      "        cccccccccccccccccccccc,\n        ddddddddddd).\n");
+}
+
+TEST(UnparseTest, CanonicalComments) {
+  EXPECT_EQ(Canonical("% Head.\n\n\n:- module m. % trailing\n"
+                      "p :- % after the neck\n  q, /* inline */ r.\n"
+                      "% at the end\n"),
+      "% Head.\n\n:- module m. % trailing\np :- % after the neck\n"
+      "    q, /* inline */\n    r.\n% at the end\n");
+  EXPECT_EQ(Canonical("p :-\n    % before q\n    q,\n\n    r."),
+      "p :-\n    % before q\n    q,\n    r.\n");
+  // An item with an error is printed as written.
+  EXPECT_EQ(Canonical("p :-   q(.\nr:-s."), "p :-   q(.\nr :-\n    s.\n");
+}
+
+TEST(UnparseTest, Parenthesized) {
+  EXPECT_EQ(Canonical("p(X) :- X = 1 + 2 * 3, \\+ q(-X).", true),
+      "p(X) :-\n    ((X = (1 + (2 * 3))),\n    (\\+ q((-X)))).\n");
+}
+
 // An item left out for an error leaves tokens that no node holds; they are
 // not reported when the tree is known to be incomplete.
 TEST(UnparseTest, Incomplete) {

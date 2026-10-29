@@ -172,4 +172,22 @@ bool DebugUnparseExactAction::executeAction() {
   return !messages.AnyFatalError();
 }
 
+bool DebugUnparseNoSemaAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  parser::LexerOptions options;
+  options.openMP = ci.getLangOpts().openMP;
+  parser::Messages messages;
+  parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
+  parser::ParseTreeArena arena;
+  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages)};
+  messages.Emit(llvm::errs(), ci.getAllSources());
+  llvm::raw_ostream *os{ci.createDefaultOutputFile()};
+  if (!os) {
+    return false;
+  }
+  parser::UnparseCanonical(*os, tree, tokens, parenthesize_);
+  os->flush();
+  return !messages.AnyFatalError();
+}
+
 } // namespace merkurius::frontend
