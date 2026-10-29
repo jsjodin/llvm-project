@@ -106,8 +106,8 @@ TEST(ConvertTest, Errors) {
   EXPECT_EQ(Messages_(":- module(a, b).\n"),
       std::vector<std::string>{
           "expected a declaration, but found 'module(a, b)'"});
-  EXPECT_EQ(Messages_(":- type t ---> t.\n"),
-      std::vector<std::string>{"the ':- type' declaration"});
+  EXPECT_EQ(Messages_(":- initialise p.\n"),
+      std::vector<std::string>{"the ':- initialise' declaration"});
   EXPECT_EQ(Messages_("p :- q.\n"),
       std::vector<std::string>{"clauses"});
   // Long terms and terms over several lines are shortened.
@@ -337,9 +337,8 @@ TEST(ConvertTest, DeclarationErrors) {
   EXPECT_EQ(Messages_(":- pred p1(1::in, \"int\")."),
       (V{"expected a type, but found '1'",
           "expected a type, but found '\"int\"'"}));
-  EXPECT_EQ(Messages_(":- mode p(free >> bound(1 ; 2))."),
-      (V{"expected a function symbol, but found '1'",
-          "expected a function symbol, but found '2'"}));
+  EXPECT_EQ(Messages_(":- mode p(free >> bound(X ; f(Y)))."),
+      V{"expected a function symbol, but found 'X'"});
   EXPECT_EQ(Messages_(":- all [T, 1] pred p(T)."),
       V{"expected a variable, but found '1'"});
   EXPECT_EQ(Messages_(":- all T pred p(T)."),
@@ -354,6 +353,128 @@ TEST(ConvertTest, DeclarationErrors) {
   EXPECT_EQ(Messages_(":- some [T] (pred p1(T::out) => c(T)) is det."),
       V{"expected a declaration, but found 'some [T] (pred p1(T::out) => "
         "c(T)) is de...'"});
+}
+
+TEST(ConvertTest, TypeDefinitions) {
+  EXPECT_EQ(Compact(":- type fruit ---> apple ; orange.\n"),
+      "DuTypeDefn\n| name: SymName fruit\n| constructors:\n"
+      "| | Constructor\n| | | name: SymName apple\n"
+      "| | Constructor\n| | | name: SymName orange\n");
+  EXPECT_EQ(Compact(":- type e ---> e(name :: string, int).\n"),
+      "DuTypeDefn\n| name: SymName e\n| constructors:\n"
+      "| | Constructor\n| | | name: SymName e\n| | | arguments:\n"
+      "| | | | ConstructorArg\n| | | | | field: SymName name\n"
+      "| | | | | type: NamedType\n| | | | | | name: SymName string\n"
+      "| | | | ConstructorArg\n"
+      "| | | | | type: NamedType\n| | | | | | name: SymName int\n");
+  // Lists, operators and quoting in braces (reference manual,
+  // "Discriminated unions").
+  std::string list{Compact(":- type list(T) ---> [] ; [T | list(T)].\n")};
+  EXPECT_NE(list.find("| parameters:\n| | T\n"), std::string::npos) << list;
+  EXPECT_NE(list.find("name: SymName []\n"), std::string::npos) << list;
+  EXPECT_NE(list.find("name: SymName [|]\n"), std::string::npos) << list;
+  EXPECT_NE(Compact(":- type pair(A, B) ---> A - B.\n").find("SymName -\n"),
+      std::string::npos);
+  std::string tricky{Compact(":- type tricky ---> { int ; int } ; { { int } }.\n")};
+  EXPECT_NE(tricky.find("| | | name: SymName ;\n"), std::string::npos) << tricky;
+  EXPECT_NE(tricky.find("| | | name: SymName {}\n"), std::string::npos) << tricky;
+  EXPECT_EQ(Compact(":- type t ---> (a ; b) ; c.\n"),
+      Compact(":- type t ---> a ; b ; c.\n"));
+  // where binds more tightly than ';', so it is on the last constructor.
+  std::string set{Compact(":- type set(T) ---> a ; set(list(T)) where "
+                          "equality is eq, comparison is cmp.\n")};
+  EXPECT_NE(set.find("| attributes: TypeAttributes\n"
+                     "| | equality: SymName eq\n"
+                     "| | comparison: SymName cmp\n"),
+      std::string::npos)
+      << set;
+  EXPECT_NE(
+      Compact(":- type t ---> f(int) where direct_arg is [f/1, g/0].\n")
+          .find("| | directArgs:\n| | | NameAndArity f/1\n"
+                "| | | NameAndArity g/0\n"),
+      std::string::npos);
+  // Existential constructors (reference manual, "Existentially typed data
+  // types").
+  std::string bar{Compact(":- type bar ---> some [T1, T2] f4(T1, T2) => "
+                          "(s(T1), s(T2)) ; some [T] (s(T) => s(T)).\n")};
+  EXPECT_NE(bar.find("| | Constructor\n| | | existentialVars:\n| | | | T1\n"
+                     "| | | | T2\n| | | name: SymName f4\n"),
+      std::string::npos)
+      << bar;
+  EXPECT_NE(bar.find("| | Constructor\n| | | existentialVars:\n| | | | T\n"
+                     "| | | name: SymName s\n"),
+      std::string::npos)
+      << bar;
+  EXPECT_EQ(Compact(":- type citrus =< fruit ---> lemon.\n"),
+      "DuTypeDefn\n| name: SymName citrus\n| supertype: NamedType\n"
+      "| | name: SymName fruit\n| constructors:\n| | Constructor\n"
+      "| | | name: SymName lemon\n");
+  EXPECT_EQ(Compact(":- type money == int.\n"),
+      "EquivalenceTypeDefn\n| name: SymName money\n| type: NamedType\n"
+      "| | name: SymName int\n");
+  EXPECT_EQ(Compact(":- type t2(T1, T2).\n"),
+      "AbstractTypeDecl\n| name: SymName t2\n| parameters:\n| | T1\n| | T2\n");
+  EXPECT_EQ(Compact(":- type t where type_is_abstract_noncanonical.\n"),
+      "AbstractTypeDecl\n| name: SymName t\n| attributes: TypeAttributes\n"
+      "| | abstractNoncanonical: true\n");
+}
+
+TEST(ConvertTest, InstAndModeDefinitions) {
+  EXPECT_EQ(Compact(":- inst listskel == bound([] ; [free | listskel]).\n"),
+      Compact(":- inst listskel ---> [] ; [free | listskel].\n"));
+  EXPECT_EQ(Compact(":- inst maybeskel(I) for maybe/1 ---> no ; yes(I).\n"),
+      "InstDefn\n| name: SymName maybeskel\n| parameters:\n| | I\n"
+      "| forType: NameAndArity maybe/1\n| inst: BoundInst\n"
+      "| | unique: false\n| | functors:\n| | | BoundFunctor\n"
+      "| | | | name: SymName no\n| | | BoundFunctor\n"
+      "| | | | name: SymName yes\n| | | | arguments:\n| | | | | InstVar\n"
+      "| | | | | | name: I\n");
+  EXPECT_EQ(Compact(":- inst digit ---> 0 ; 0'1 ; \"two\" ; 3.0.\n"),
+      "InstDefn\n| name: SymName digit\n| inst: BoundInst\n"
+      "| | unique: false\n| | functors:\n"
+      "| | | BoundFunctor\n| | | | name: Literal 0\n"
+      "| | | BoundFunctor\n| | | | name: Literal 49\n"
+      "| | | BoundFunctor\n| | | | name: Literal \"two\"\n"
+      "| | | BoundFunctor\n| | | | name: Literal 3.0\n");
+  EXPECT_EQ(Compact(":- mode in(I) == I >> I.\n"),
+      "ModeDefn\n| name: SymName in\n| parameters:\n| | I\n"
+      "| mode: MappingMode\n| | initial: InstVar\n| | | name: I\n"
+      "| | final: InstVar\n| | | name: I\n");
+  EXPECT_EQ(Compact(":- mode (+) == in.\n"),
+      "ModeDefn\n| name: SymName +\n| mode: NamedMode\n| | name: SymName in\n");
+}
+
+TEST(ConvertTest, DefinitionErrors) {
+  using V = std::vector<std::string>;
+  EXPECT_EQ(Messages_(":- type t(int) ---> a."),
+      V{"expected a type parameter, but found 'int'"});
+  EXPECT_EQ(Messages_(":- type t(T, T) ---> a."),
+      V{"the parameter T appears more than once"});
+  EXPECT_EQ(Messages_(":- inst i(I, I) == I."),
+      V{"the parameter I appears more than once"});
+  EXPECT_EQ(Messages_(":- type t ---> 1 ; \"s\" ; X."),
+      (V{"expected a constructor, but found '1'",
+          "expected a constructor, but found '\"s\"'",
+          "expected a constructor, but found 'X'"}));
+  EXPECT_EQ(Messages_(":- type t ---> f(X :: int)."),
+      V{"expected a field name, but found 'X'"});
+  EXPECT_EQ(Messages_(":- type t ---> a where equality is e, equality is e."),
+      V{"the type attribute 'equality' is given more than once"});
+  EXPECT_EQ(Messages_(":- type t ---> a where foo."),
+      V{"expected 'equality is', 'comparison is', 'direct_arg is' or "
+        "'type_is_abstract_noncanonical', but found 'foo'"});
+  EXPECT_EQ(Messages_(":- type t ---> f(int) where direct_arg is [f/x]."),
+      V{"expected an arity, but found 'x'"});
+  EXPECT_EQ(Messages_(":- type t == int where equality is e."),
+      V{"an equivalence type cannot have 'where' attributes"});
+  EXPECT_EQ(Messages_(":- inst i ---> 256u8 ; -129i8."),
+      (V{"the integer '256u8' is too large for its type",
+          "the integer '-129i8' is too large for its type"}));
+  EXPECT_EQ(Messages_(":- inst i(int) == ground."),
+      V{"expected an inst parameter, but found 'int'"});
+  EXPECT_EQ(Messages_(":- mode m == X."), V{"expected a mode, but found 'X'"});
+  EXPECT_EQ(Messages_(":- solver type st."),
+      V{"the ':- solver' declaration"});
 }
 
 // The combinators on their own, with the expected forms they describe.

@@ -6,8 +6,8 @@ A Mercury compiler and runtime on MLIR and LLVM. The design is in
 So far there is the driver, `merkc`, and its frontend, `merkc -fc1`, which
 reads source files through Flang's provenance machinery, lexes them, reads
 their items as terms, and converts the terms to a parse tree; so far the
-converter handles the module system's declarations and predicate, function
-and mode declarations, with the type, inst and mode languages. Its actions are:
+converter handles the module system's declarations, predicate, function and
+mode declarations, and type, inst and mode definitions. Its actions are:
 
 | Action | Prints |
 | --- | --- |
