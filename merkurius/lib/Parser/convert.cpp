@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "merkurius/Parser/convert.h"
+#include "convert-rules.h"
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/term-combinators.h"
 #include "merkurius/Parser/term-reader.h"
@@ -45,7 +46,7 @@ std::size_t Arity(const Term &t) {
 }
 
 // The first line of a term's source, shortened to fit in a message.
-static std::string Excerpt(const Term &t, const TokenSequence &tokens) {
+std::string Excerpt(const Term &t, const TokenSequence &tokens) {
   constexpr std::size_t maxLength{40};
   llvm::StringRef source{GetSource(t, tokens)};
   llvm::StringRef line{source.take_until([](char c) { return c == '\n'; })};
@@ -162,81 +163,6 @@ static constexpr auto importDecl{construct<ImportDecl>(anyOf(
 //===----------------------------------------------------------------------===//
 // Types, insts and modes
 //===----------------------------------------------------------------------===//
-
-// The categories that contain themselves are classes, declared here and
-// defined after the rules that refer to them.
-struct TypeRule {
-  using resultType = Type;
-  bool Matches(const Term &) const { return true; }
-  std::optional<Type> Convert(const Term &, ConvertState &) const;
-  void Expected(llvm::raw_ostream &os) const { os << "a type"; }
-};
-struct InstRule {
-  using resultType = Inst;
-  bool Matches(const Term &) const { return true; }
-  std::optional<Inst> Convert(const Term &, ConvertState &) const;
-  void Expected(llvm::raw_ostream &os) const { os << "an inst"; }
-};
-struct ModeRule {
-  using resultType = Mode;
-  bool Matches(const Term &) const { return true; }
-  std::optional<Mode> Convert(const Term &, ConvertState &) const;
-  void Expected(llvm::raw_ostream &os) const { os << "a mode"; }
-};
-// Type, or Type::Mode.
-struct TypeAndModeRule {
-  using resultType = const TypeAndMode *;
-  bool Matches(const Term &) const { return true; }
-  std::optional<resultType> Convert(const Term &, ConvertState &) const;
-  void Expected(llvm::raw_ostream &os) const { os << "a type"; }
-};
-
-static constexpr TypeRule type;
-static constexpr InstRule inst;
-static constexpr ModeRule mode;
-static constexpr TypeAndModeRule typeAndMode;
-
-// The compound term `t` with this functor and arity, if it is one.
-static const CompoundTerm *AsCompound(
-    const Term &t, llvm::StringRef name, std::size_t arity) {
-  const auto *compound{llvm::dyn_cast<CompoundTerm>(&StripParentheses(t))};
-  return compound && FunctorName(*compound) == name &&
-          Arity(*compound) == arity
-      ? compound
-      : nullptr;
-}
-
-// The determinism categories (reference manual, "Determinism categories").
-class DeterminismRule {
-public:
-  using resultType = Determinism;
-  bool Matches(const Term &t) const { return Lookup(t).has_value(); }
-  std::optional<Determinism> Convert(const Term &t, ConvertState &) const {
-    return Lookup(t);
-  }
-  void Expected(llvm::raw_ostream &os) const {
-    os << "a determinism category";
-  }
-
-private:
-  static std::optional<Determinism> Lookup(const Term &t) {
-    if (!llvm::isa<NameTerm>(t)) {
-      return std::nullopt;
-    }
-    return llvm::StringSwitch<std::optional<Determinism>>(FunctorName(t))
-        .Case("det", Determinism::Det)
-        .Case("semidet", Determinism::Semidet)
-        .Case("multi", Determinism::Multi)
-        .Case("nondet", Determinism::Nondet)
-        .Case("failure", Determinism::Failure)
-        .Case("erroneous", Determinism::Erroneous)
-        .Case("cc_multi", Determinism::CcMulti)
-        .Case("cc_nondet", Determinism::CcNondet)
-        .Default(std::nullopt);
-  }
-};
-
-static constexpr DeterminismRule determinism;
 
 // The parts of a higher-order type or inst: pred(Args), (pred), func(Args)
 // = Result or (func) = Result, with `prefix` "" or "any_".
@@ -388,17 +314,8 @@ private:
   }
 };
 
-// An integer, float or string. An integer must fit its type (reference
-// manual, "Builtin types"); the reader reads one of any size, as mmc does.
-class LiteralRule {
-public:
-  using resultType = const Literal *;
-  bool Matches(const Term &t) const {
-    return llvm::isa<IntegerTerm>(t) || llvm::isa<FloatTerm>(t) ||
-        llvm::isa<StringTerm>(t);
-  }
-  std::optional<resultType> Convert(
-      const Term &t, ConvertState &state) const {
+std::optional<const Literal *> LiteralRule::Convert(
+    const Term &t, ConvertState &state) const {
     LiteralKind kind{LiteralKind::String};
     if (const auto *integer{llvm::dyn_cast<IntegerTerm>(&t)}) {
       if (!integer->InRange()) {
@@ -415,11 +332,7 @@ public:
     llvm::raw_string_ostream os{text};
     PrintCanonical(os, t);
     return state.arena.Make<Literal>(t.tokens(), kind, state.arena.Save(text));
-  }
-  void Expected(llvm::raw_ostream &os) const { os << "a literal"; }
-};
-
-static constexpr LiteralRule literal;
+}
 
 // A function symbol of a bound inst: f(I1, I2), a, [] or [I | J], or a
 // literal, which mmc accepts in an inst definition.
@@ -566,9 +479,6 @@ static constexpr auto instConstraint{expect("an inst constraint such as 'I =< gr
 static constexpr auto universalConstraints{commaListOf(expect("a constraint",
     anyOf<Constraint>(instConstraint, classConstraint)))};
 
-static constexpr auto quantifiedVars{
-    expect("a list of variables", listOf(variable))};
-
 // The layers around pred(...), func(...) or mode(...), outermost first, as
 // mmc accepts them: all [Vs], some [Vs], <= Constraints, => Constraints, and
 // impure or semipure (reference manual, "Syntax for explicit type
@@ -642,22 +552,6 @@ struct DeclarationBody {
   const Term *determinism{nullptr};
 };
 
-// The operands of name(X, Y), written as an operator term or as X `name` Y.
-static std::optional<std::pair<const Term *, const Term *>> BinaryOperands(
-    const Term &term, llvm::StringRef name) {
-  const Term &t{StripParentheses(term)};
-  if (const CompoundTerm * c{AsCompound(t, name, 2)}) {
-    return std::pair{c->arguments()[0], c->arguments()[1]};
-  }
-  if (const auto *backquote{llvm::dyn_cast<BackquoteTerm>(&t)}) {
-    const Term &op{StripParentheses(*backquote->op())};
-    if (llvm::isa<NameTerm>(op) && FunctorName(op) == name) {
-      return std::pair{backquote->left(), backquote->right()};
-    }
-  }
-  return std::nullopt;
-}
-
 static DeclarationBody SplitBody(const Term &body, bool isFunction) {
   DeclarationBody parts{&body};
   auto peel{[&](llvm::StringRef name, const Term *&into) {
@@ -675,21 +569,6 @@ static DeclarationBody SplitBody(const Term &body, bool isFunction) {
     peel("=", parts.result);
   }
   return parts;
-}
-
-// Converts the optional part `term` with `rule` into `into`, or returns
-// false after an error.
-template <typename R, typename T>
-static bool ConvertOptional(
-    const R &rule, const Term *term, T &into, ConvertState &state) {
-  if (!term) {
-    return true;
-  }
-  if (auto result{Apply(rule, *term, state)}) {
-    into = *result;
-    return true;
-  }
-  return false;
 }
 
 static constexpr auto predicateHead{
@@ -1357,11 +1236,11 @@ public:
   }
 };
 
-// pred(Name/Arity) is Implementation or func(Name/Arity) is Implementation.
-// A method defined by clauses is not converted yet.
+// pred(Name/Arity) is Implementation or func(Name/Arity) is Implementation,
+// or a clause.
 class InstanceMethodRule {
 public:
-  using resultType = const MethodByName *;
+  using resultType = InstanceMethod;
   bool Matches(const Term &) const { return true; }
   std::optional<resultType> Convert(
       const Term &t, ConvertState &state) const {
@@ -1374,8 +1253,10 @@ public:
       }
     }
     if (!kind) {
-      state.messages.Say(GetSource(t, state.tokens),
-          "an instance method defined by clauses"_todo_en_US);
+      if (std::optional<Clause> converted{clause.Convert(t, state)}) {
+        return std::visit(
+            [](auto *node) -> InstanceMethod { return node; }, *converted);
+      }
       return std::nullopt;
     }
     auto method{Apply(nameAndArity, *kind->arguments()[0], state)};
@@ -1406,7 +1287,7 @@ public:
         *parts.head, state)};
     ok &= head.has_value();
     llvm::ArrayRef<const ClassConstraint *> constraints;
-    llvm::ArrayRef<const MethodByName *> methods;
+    llvm::ArrayRef<InstanceMethod> methods;
     ok &= ConvertOptional(commaListOf(classConstraint), parts.constraints,
         constraints, state);
     ok &= ConvertOptional(
@@ -1445,10 +1326,15 @@ static bool IsDeclarationToDo(llvm::StringRef name) {
 
 std::optional<Item> ConvertItem(const Term &term, ConvertState &state) {
   const Term &t{StripParentheses(term)};
+  if (const auto *directive{llvm::dyn_cast<DirectiveTerm>(&t)}) {
+    return ConvertItem(IgnoreDirective(*directive, state), state);
+  }
   if (!(llvm::isa<CompoundTerm>(t) && FunctorName(t) == ":-" &&
           Arity(t) == 1)) {
     // A rule, a DCG rule or a fact.
-    state.messages.Say(GetSource(t, state.tokens), "clauses"_todo_en_US);
+    if (std::optional<Clause> converted{clause.Convert(t, state)}) {
+      return std::visit([](auto *node) -> Item { return node; }, *converted);
+    }
     return std::nullopt;
   }
   const Term &decl{
