@@ -35,9 +35,10 @@ We will build a clean-room Mercury compiler on MLIR and LLVM, adding OpenMP-styl
 | Parallel loops | User promises independence; no dependence analysis | Same contract as OpenMP and Mercury's `promise_*` |
 | Processes | Erlang model with mailboxes typed by message type | Protocols checked at compile time |
 | Send | Non-blocking, deep copy into the receiver | Keeps heaps independent |
-| Receive | Blocking, selective by `semidet` selector, timeout returns `maybe` | Erlang semantics with static types |
+| Receive | Blocking and selective, over one mailbox or several joined by a selector; the oldest matching message wins, across mailboxes; timeout returns `maybe` | Erlang semantics with static types; priority by Erlang's two-step receive |
+| Kinds of message | One protocol type per mailbox, a discriminated union; more mailboxes for types the process does not own (replies, `down` messages, other modules' protocols) | Constructors cost nothing; a selector maps each mailbox's type into one result type |
 | Unknown messages | Impossible by typing; `det` loops must cover every constructor | No catch-all `_ -> true` needed |
-| Request/reply | Fresh reply mailbox per request | Late replies go to a dead mailbox and are dropped |
+| Request/reply | Fresh reply mailbox per request, and a monitor on the server for the call | Late replies go to a dead mailbox and are dropped; a dead server ends the wait at once |
 | Generic dispatch | Existential envelopes; `sendable(M)` required where a mailbox is created | Type-safe forwarding without knowing payload types |
 | Process failure | Links and monitors, delivered with processes | Supervision depends on them |
 | Heaps | One heap per process, precise moving GC | No global pauses; whole heap freed on exit |
@@ -585,7 +586,7 @@ Four extensions are added: processes with typed mailboxes, parallel loop annotat
 
 ### Processes and mailboxes
 
-The API is a library module. This interface passes Melbourne Mercury 22.01.9's type, mode and determinism checks, with a client that uses it:
+The API is a library module. This interface, with stub bodies, passes Melbourne Mercury 22.01.9's type, mode and determinism checks, together with a client that uses every part of it: a counter server with a selector over two mailboxes, the two-step priority receive, `request` and `send_request`.
 
 ```mercury
 :- type mailbox(M).                         % accepts messages of type M
@@ -594,18 +595,103 @@ The API is a library module. This interface passes Melbourne Mercury 22.01.9's t
 :- pred spawn(pred(mailbox(M), io, io)::in(pred(in, di, uo) is det),
     mailbox(M)::out, io::di, io::uo) is det.
 :- pred new_mailbox(mailbox(M)::out, io::di, io::uo) is det.
+:- pred close_mailbox(mailbox(M)::in, io::di, io::uo) is det.
 :- pred send(mailbox(M)::in, M::in, io::di, io::uo) is det.
+
+    % Waiting on one or more mailboxes.
+:- type selector(R).
+:- func new_selector = selector(R).
+:- func selecting(mailbox(M), func(M) = R, selector(R)) = selector(R).
+:- func selecting_matching(mailbox(M)::in,
+    pred(M, R)::in(pred(in, out) is semidet), selector(R)::in)
+    = (selector(R)::out) is det.
+:- pred select(selector(R)::in, timeout::in, maybe(R)::out,
+    io::di, io::uo) is det.
+
+    % One mailbox.
 :- pred receive(mailbox(M)::in, pred(M, R)::in(pred(in, out) is semidet),
     timeout::in, maybe(R)::out, io::di, io::uo) is det.
+:- pred any(M::in, M::out) is semidet.      % the selector that takes anything
+
+    % Monitors.
+:- type monitor_ref.
+:- type down_reason.
+:- type down_info ---> down_info(monitor_ref, down_reason).
+:- pred monitor(mailbox(T)::in, mailbox(M)::in, (func(down_info) = M)::in,
+    monitor_ref::out, io::di, io::uo) is det.
+:- pred demonitor(monitor_ref::in, io::di, io::uo) is det.
+:- func reason(down_info) = down_reason.
+
+    % Request and reply.
+:- type reply(Rep) ---> reply(Rep) ; timeout ; down(down_reason).
+:- pred send_request(mailbox(Req)::in, (func(mailbox(Rep)) = Req)::in,
+    mailbox(Rep)::out, io::di, io::uo) is det.
 :- pred request(mailbox(Req)::in, (func(mailbox(Rep)) = Req)::in,
-    timeout::in, maybe(Rep)::out, io::di, io::uo) is det.
+    timeout::in, reply(Rep)::out, io::di, io::uo) is det.
 ```
 
 - **Send** never blocks. It deep-copies the message for the receiver and returns.
-- **Receive** blocks until a message matches or the timeout expires, and returns `yes(R)` or `no`. It takes the oldest message for which the `semidet` selector succeeds; the rest stay queued in order. Erlang's `receive {reply, Ref, S} -> …` becomes the selector `(pred(M::in, S::out) is semidet :- M = reply(Ref, S))`.
-- **Request** creates a fresh reply mailbox, sends the request and waits for the reply. A reply that arrives after the timeout goes to a mailbox nobody holds, and is dropped.
+- **Receive** blocks until a message matches or the timeout expires, and returns `yes(R)` or `no`. It takes the oldest message for which the `semidet` selector succeeds; the rest stay queued in order. Erlang's `receive {reply, Ref, S} -> …` becomes the selector `(pred(M::in, S::out) is semidet :- M = reply(Ref, S))`. `receive` is `select` over a one-mailbox selector.
+- **Order is Erlang's.** Erlang's `receive` takes the first message in the queue that matches any clause; the order of the clauses only decides which clause handles a message that matches several (Erlang reference manual, Expressions, "Receive"; checked with OTP 24). Typed mailboxes never hold an unknown message, so a mailbox is a plain FIFO, and a selector keeps this rule across all its mailboxes: it takes the matching message that arrived first.
 - **Exhaustiveness:** a receive loop declared `det` must handle every message constructor. Removing one case is a compile error: "the switch on Msg does not cover \`stop'/0".
 - **No backtracking over messages:** send and receive thread the unique `io` state, so they cannot appear in nondeterministic code.
+- **`any` is `det`** in fact, and mmc warns that its `semidet` declaration could be tighter. It is declared `semidet` only to fit the selector's mode; a `det` `receive_any` would avoid the warning.
+
+**Kinds of message.** The kinds of message a process handles are the constructors of one discriminated union, its protocol, as Erlang's tagged tuples are:
+
+```mercury
+:- type counter_msg
+    --->    increment(int)
+    ;       get(mailbox(int))
+    ;       stop.
+```
+
+A constructor costs a tag in the pointer bits, as Erlang's atom tag costs a word in a tuple. A process cannot add constructors to a type it does not own, so it uses more mailboxes for three kinds of message: replies to its requests, `down` messages from monitors, and messages in another module's protocol. A selector waits on them together and maps each mailbox's type into one result type, as Gleam's `Selector` does:
+
+```mercury
+:- type server_event
+    --->    message(counter_msg)
+    ;       worker_down(down_reason).
+
+    Sel = selecting(Self, (func(M) = message(M)),
+        selecting(Downs, (func(D) = worker_down(reason(D))), new_selector)),
+    select(Sel, infinity, MaybeEvent, !IO)
+```
+
+The mapping happens in the receiver, so senders know nothing of it. Separate mailboxes also limit what each sender may say: a client that holds only `Self` can send `counter_msg` and nothing else. A selector is a value, so a loop can build it once; the compiler can build constant selectors statically.
+
+**Priority** is Erlang's two-step receive: look for a high-priority message with `after(0)`, then wait for whichever message is oldest.
+
+```mercury
+    receive(Downs, any, after(0), MaybeDown, !IO),
+    (
+        MaybeDown = yes(D),
+        MaybeEvent = yes(worker_down(reason(D)))
+    ;
+        MaybeDown = no,
+        select(Sel, infinity, MaybeEvent, !IO)
+    )
+```
+
+A selector option for strict priority between its cases can be added later if programs need it. Strict priority can starve the lower cases, which is why it is not the default.
+
+**Request and reply.** `request(Counter, (func(R) = get(R)), after(1000), Reply, !IO)` asks the counter for its value:
+
+1. It monitors the server, delivering any `down` message to a private mailbox. A server that is already dead delivers one at once.
+2. It creates a fresh `mailbox(Rep)`, here `mailbox(int)`, builds the request by applying the function to it, here `get(ReplyTo)`, and sends it. These two steps are `send_request`.
+3. It selects over the reply mailbox and the `down` mailbox, with the timeout.
+4. It removes the monitor and closes both mailboxes, then returns `reply(N)`, `timeout` or `down(Reason)`.
+
+The server answers with an ordinary `send(ReplyTo, N, !IO)`. A fresh mailbox per request has four effects:
+
+- **Each request has its own reply type.** A process can call servers that reply with different types without adding them to its own protocol.
+- **No scanning.** The caller waits on a short queue of its own, and its other messages stay queued, untouched, until `request` returns.
+- **No stale replies.** A reply after the timeout, or a second reply, goes to a closed mailbox and is dropped, so it can never surprise a later receive.
+- **A dead server is noticed at once,** through the monitor, rather than after the timeout.
+
+Erlang's `gen_server:call` works the same way: it creates a monitor that is also an alias, a temporary address for the caller, sends the request with it, and selectively receives the reply that carries it. The alias is deactivated afterwards, so late replies are dropped; Erlang added aliases in OTP 24 for exactly this. A fresh reply mailbox is a typed alias.
+
+While a process waits in `request`, it handles no other messages, so two servers that call each other synchronously wait until one times out, as with `gen_server`. `send_request` avoids this: it returns the reply mailbox, which the caller adds to its own selector, and the caller closes that mailbox with `close_mailbox` when it is done with it (Distribution and wire format, "Remote calls").
 
 A `:- process` declaration removes the boilerplate. It expands like `:- mutable` does today:
 
@@ -619,7 +705,7 @@ A `:- process` declaration removes the boilerplate. It expands like `:- mutable`
 
 A module defines process kinds; it is not itself a process. Exporting the mailbox as an abstract type and keeping the message constructors private forces other modules through the module's API predicates, as Erlang's gen\_server does by convention.
 
-Failure handling follows Erlang. An uncaught exception ends the process with that exception as its exit reason. Links and monitors deliver a typed `down` message to a mailbox the watcher names. Both are required and ship with processes in M4; their semantics are in Runtime system, "Exceptions, links and monitors".
+Failure handling follows Erlang. An uncaught exception ends the process with that exception as its exit reason. A monitor delivers a `down_info` message to a mailbox the watcher names, through a function into that mailbox's message type, so a process with one protocol needs no second mailbox for it. Links deliver exit messages the same way. Both are required and ship with processes in M4; their semantics are in Runtime system, "Exceptions, links and monitors".
 
 ### Parallel loop annotations
 
@@ -795,7 +881,7 @@ merk.proc @double_all(%xs: !merk.term<"list.list(int)">)
 
 In a `nondet` procedure, a call to another `nondet` procedure has generator semantics. The operations after it run once per solution, and `merk.fail` resumes the most recent choice. Verifiers enforce the determinism rules, so a `det` procedure may not contain an unpruned `nondet` call.
 
-**`mrt` operations:** `mrt.alloc` (bump allocation in the process nursery), `mrt.tag` and `mrt.untag`, `mrt.field_load` and `mrt.field_store`, `mrt.safepoint`, `mrt.yield_check`, `mrt.spawn`, `mrt.send`, `mrt.receive` (a suspension point), `mrt.throw`, `mrt.landing`, and `mrt.rtti` (address of a static type descriptor).
+**`mrt` operations:** `mrt.alloc` (bump allocation in the process nursery), `mrt.tag` and `mrt.untag`, `mrt.field_load` and `mrt.field_store`, `mrt.safepoint`, `mrt.yield_check`, `mrt.spawn`, `mrt.send`, `mrt.receive` (a suspension point, over the mailboxes of a selector), `mrt.throw`, `mrt.landing`, and `mrt.rtti` (address of a static type descriptor).
 
 **Open terms** need no new `merk` type, because `open(T)` is an ordinary Mercury type. They add `merk.open_unify` (full unification, `semidet`), `merk.to_open` and `merk.from_open` to `merk`, and `mrt.new_var`, `mrt.deref`, `mrt.bind` (which trails when a trail is live), `mrt.trail_mark` and `mrt.trail_undo` to `mrt`. Only procedures with `any` variables contain them.
 
@@ -1025,8 +1111,11 @@ The runtime gives each process its own stack, heap and mailboxes, schedules proc
 
 - **Mailbox handle:** process identifier, mailbox index and generation number. Handles are values, never pointers into another heap.
 - **Send:** find the receiver, deep-copy the message into a fresh heap fragment, and push the fragment onto the mailbox's lock-free multi-producer queue. Wake the receiver if it is waiting. The receiver's heap is never locked.
-- **Receive:** scan the queue in arrival order and run the selector on each message where it lies. The matched fragment joins the receiver's heap and is merged at its next GC. Unmatched messages keep their order.
-- **Dead mailboxes:** a send to a handle whose generation no longer matches, or whose process has exited, is dropped. This is what discards late replies.
+- **Arrival order:** each message is stamped, as it is queued, with the receiving process's arrival count, taken with one atomic increment by the sender. The stamps order messages across all of a process's mailboxes.
+- **Receive and select:** in each mailbox of the selector, find the oldest message its case accepts: the head of the queue for `selecting`, or the first message for which the selector succeeds, scanning in arrival order, for `selecting_matching`. Take the candidate with the lowest stamp. The matched fragment joins the receiver's heap and is merged at its next GC. Unmatched messages keep their order. A process waiting in `select` is woken by a send to any of its mailboxes.
+- **Mailbox lifetime:** a mailbox lives until `close_mailbox` or the owner's exit. Closing it drops its queued messages and makes its handle dead.
+- **Dead mailboxes:** a send to a handle whose generation no longer matches, or whose process has exited, is dropped. This is what discards late replies. Generations make handles of closed mailboxes dead forever, even when the mailbox's slot is reused.
+- **Cheap mailboxes:** every `request` creates one, so creating and closing a mailbox must cost about as much as a small allocation: a slot in the owner's mailbox table and a new generation number.
 - **Observability:** a process can read its own queue lengths, since non-blocking send gives a slow consumer no backpressure.
 - **Later:** remember a scan position for repeated selective receives on the same reply, as BEAM does.
 
@@ -1057,7 +1146,8 @@ Static type descriptors describe each type's constructors, names, arguments and 
 
 - `throw` and `catch` work within a process.
 - An uncaught exception ends the process, with the exception as its exit reason.
-- A link is two-way: the death of one process delivers an exit message to the other. A monitor is one-way and delivers a `down` message. Both go to a mailbox the watcher chose, with a fixed message type.
+- A link is two-way: the death of one process delivers an exit message to the other. A monitor is one-way and delivers a `down_info` message. Both go to a mailbox the watcher chose, through a function into that mailbox's message type (Language extensions, "Processes and mailboxes").
+- Monitoring a process that has already exited delivers a `down_info` message at once, so `request` cannot miss a server's death.
 - Supervisors are library code built on monitors.
 
 ### Input and output
@@ -1145,8 +1235,8 @@ A dispatcher never looks inside an existential payload; it can only forward it (
 
 Remote procedure calls need no new mechanism. They are request and reply over `send` and `receive`, exactly as between local processes, and they work across nodes because mailbox handles do.
 
-- **Blocking:** `request` sends the request with a fresh reply mailbox and waits for the reply, with `no` as the result if the timeout passes first.
-- **Non-blocking:** `send_request` does only the first half and returns the reply mailbox. The caller carries on, then collects the reply later with `receive`: with `after(0)` to poll, or with a real timeout when it needs the answer. This is the same pattern as Erlang's `erpc:send_request`.
+- **Blocking:** `request` monitors the server, sends the request with a fresh reply mailbox and waits for the reply, returning `reply(R)`, `timeout` or `down(Reason)`.
+- **Non-blocking:** `send_request` does only the first half and returns the reply mailbox. The caller carries on, then collects the reply later with `receive`, with `after(0)` to poll or with a real timeout when it needs the answer, or adds the reply mailbox to the selector of its main loop. This is the same pattern as Erlang's `erpc:send_request`.
 
 ```mercury
 :- pred send_request(mailbox(Req)::in, (func(mailbox(Rep)) = Req)::in,
@@ -1157,15 +1247,28 @@ send_request(Server, MakeRequest, ReplyTo, !IO) :-
     send(Server, MakeRequest(ReplyTo), !IO).
 
 request(Server, MakeRequest, Timeout, Reply, !IO) :-
+    new_mailbox(Downs, !IO),
+    monitor(Server, Downs, (func(D) = D), Ref, !IO),
     send_request(Server, MakeRequest, ReplyTo, !IO),
-    receive(ReplyTo, any, Timeout, Reply, !IO).
+    Sel = selecting(ReplyTo, (func(R) = reply(R)),
+        selecting(Downs, (func(D) = down(reason(D))), new_selector)),
+    select(Sel, Timeout, MaybeReply, !IO),
+    demonitor(Ref, !IO),
+    close_mailbox(ReplyTo, !IO),
+    close_mailbox(Downs, !IO),
+    (
+        MaybeReply = yes(Reply)
+    ;
+        MaybeReply = no,
+        Reply = timeout
+    ).
 ```
 
 - **Replies cannot mix.** Each call has its own reply mailbox, so replies to different calls stay apart, and a reply that arrives after a timeout lands in a mailbox nobody reads.
-- **Failure.** A monitor on the server turns a lost node into a `down` message. Waiting for a reply and a `down` message at the same time needs a selector over several mailboxes, which is an open question; until then, the timeout bounds the wait.
+- **Failure.** The monitor on the server turns a lost node, or a server that dies, into a `down` message, and `request` waits for the reply and the `down` message together, so it returns as soon as either arrives.
 - **Later, if wanted:** a `future(T)` library that wraps the reply mailbox and resolves it on first read; syntactic sugar as a front-end rewrite into these calls; and promise pipelining, as in E and Cap'n Proto, which would need support in the wire format. None of these is needed for remote calls to work.
 
-Both predicates pass mmc's type, mode and determinism checks against the actor API sketch (`rpc.m`).
+Both predicates pass mmc 22.01.9's type, mode and determinism checks against the API in Language extensions, "Processes and mailboxes".
 
 ### Security
 
@@ -1248,14 +1351,13 @@ M3 and M4 both build only on M2, so their order can be swapped if processes matt
 
 ## Open questions and risks
 
-Nine decisions remain open. The three that most constrain the runtime are the heap cell layout, the nondeterminism strategy and the stack model, so they come first. The seven ticked at the end were decided between 2026-10-27 and 2026-10-29.
+Eight decisions remain open. The three that most constrain the runtime are the heap cell layout, the nondeterminism strategy and the stack model, so they come first. The eight ticked at the end were decided between 2026-10-27 and 2026-10-29.
 
 **Open questions**
 
 - [ ] Heap cells: header word per cell (option B) or headerless tracing with type descriptors (option A).
 - [ ] Nondeterminism: continuation passing with stop flags, or an explicit choice-point stack.
 - [ ] Process stacks: grow by copying, or segmented.
-- [ ] Selectors that wait on several mailboxes at once, like Gleam's `Selector`.
 - [ ] When to adopt language changes made after 22.01.
 - [ ] Contact with the Mercury team, as a courtesy and for questions the documents leave open. Their `LICENSE` file offers alternative arrangements if the licences do not suit.
 - [ ] Sharing in local message copies: keep shared ground subterms, which needs a visited map, or expand them as Erlang does. Variable identity is always kept.
@@ -1268,6 +1370,7 @@ Nine decisions remain open. The three that most constrain the runtime are the he
 - [x] Parallel annotation syntax: the comment sentinel `%$omp`, attached to the next goal (Front end, "OpenMP directives").
 - [x] Prescanner: none. Source files are read unchanged, and the lexer recognizes `%$omp` directives and line number directives, which depend on token context (Front end, "Source manager").
 - [x] Lexical rules: 22.01's, with the current manual filling its gaps; where mmc 22.01.9 disagrees with its manual, mmc is followed; of the later changes only the operator renumbering is adopted (Front end, Lexer; Standard library, compatibility and testing).
+- [x] Receiving from several mailboxes: selectors, as in Gleam, taking the oldest matching message across mailboxes, as Erlang's receive does; priority by Erlang's two-step receive (Language extensions, "Processes and mailboxes").
 
 **Risks**
 
@@ -1295,6 +1398,7 @@ Nine decisions remain open. The three that most constrain the runtime are the he
 - [Johansson, Sagonas and Wilhelmsson: Heap architectures for concurrent languages using message passing](https://dspace.lib.ntua.gr/xmlui/handle/123456789/34514?show=full)
 - [Clebsch et al.: Orca, GC and type system co-design for actor languages](https://2017.splashcon.org/details/splash-2017-OOPSLA/30/Orca-GC-and-Type-System-Co-Design-for-Actor-Languages)
 - [Gleam `gleam/erlang/process`: Subject, receive, Selector](https://gleam-erlang.hexdocs.pm/gleam/erlang/process.html)
+- [Erlang reference manual: Expressions, "Receive"](https://www.erlang.org/doc/system/expressions.html): which message a `receive` takes, its cost, and priority messages.
 - [GNU GPL v2 FAQ: output of GPL programs](https://www.gnu.org/licenses/old-licenses/gpl-2.0-faq)
 - [Erlang external term format](https://www.erlang.org/doc/apps/erts/erl_ext_dist.md)
 - [Erlang efficiency guide: Processes](https://docs.w3cub.com/erlang~26/doc/efficiency_guide/processes) (loss of sharing)
