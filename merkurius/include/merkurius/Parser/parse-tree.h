@@ -548,13 +548,88 @@ struct ModeDefn {
 };
 
 //===----------------------------------------------------------------------===//
+// Type classes (reference manual, "Type classes")
+//===----------------------------------------------------------------------===//
+
+// A functional dependency, (A, B -> C) (reference manual, "Functional
+// dependencies").
+struct FunctionalDependency {
+  static constexpr llvm::StringLiteral kindName{"FunctionalDependency"};
+  TokenRange tokens;
+  llvm::ArrayRef<llvm::StringRef> domain;
+  llvm::ArrayRef<llvm::StringRef> range;
+  template <typename F> void ForEachField(F &&f) const {
+    f("domain", domain);
+    f("range", range);
+  }
+};
+
+using TypeclassConstraint =
+    std::variant<const ClassConstraint *, const FunctionalDependency *>;
+
+using ClassMethod = std::variant<const PredDecl *, const ModeDecl *>;
+
+// :- typeclass c(T) <= Superclasses where [Methods]. Without "where [...]"
+// it is abstract.
+struct TypeclassDecl {
+  static constexpr llvm::StringLiteral kindName{"TypeclassDecl"};
+  TokenRange tokens;
+  const SymName *name;
+  llvm::ArrayRef<llvm::StringRef> parameters;
+  llvm::ArrayRef<TypeclassConstraint> constraints;
+  bool abstract;
+  llvm::ArrayRef<ClassMethod> methods;
+  template <typename F> void ForEachField(F &&f) const {
+    f("name", name);
+    f("parameters", parameters);
+    f("constraints", constraints);
+    f("abstract", abstract);
+    f("methods", methods);
+  }
+};
+
+// pred(Method/Arity) is Implementation, in an instance declaration.
+struct MethodByName {
+  static constexpr llvm::StringLiteral kindName{"MethodByName"};
+  TokenRange tokens;
+  PredOrFunc kind;
+  const NameAndArity *method;
+  const SymName *implementation;
+  template <typename F> void ForEachField(F &&f) const {
+    f("kind", kind);
+    f("method", method);
+    f("implementation", implementation);
+  }
+};
+
+// :- instance c(Types) <= Constraints where [Methods]. Without "where
+// [...]" it is abstract.
+struct InstanceDecl {
+  static constexpr llvm::StringLiteral kindName{"InstanceDecl"};
+  TokenRange tokens;
+  const SymName *name;
+  llvm::ArrayRef<Type> types;
+  llvm::ArrayRef<const ClassConstraint *> constraints;
+  bool abstract;
+  llvm::ArrayRef<const MethodByName *> methods;
+  template <typename F> void ForEachField(F &&f) const {
+    f("name", name);
+    f("types", types);
+    f("constraints", constraints);
+    f("abstract", abstract);
+    f("methods", methods);
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Items (reference manual, "Items")
 //===----------------------------------------------------------------------===//
 
 using Item = std::variant<const ModuleDecl *, const EndModuleDecl *,
     const SectionDecl *, const ImportDecl *, const PredDecl *,
     const ModeDecl *, const DuTypeDefn *, const EquivalenceTypeDefn *,
-    const AbstractTypeDecl *, const InstDefn *, const ModeDefn *>;
+    const AbstractTypeDecl *, const InstDefn *, const ModeDefn *,
+    const TypeclassDecl *, const InstanceDecl *>;
 
 // The items of a file that converted without errors, in order.
 struct ParseTree {

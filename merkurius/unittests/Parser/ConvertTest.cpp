@@ -477,6 +477,99 @@ TEST(ConvertTest, DefinitionErrors) {
       V{"the ':- solver' declaration"});
 }
 
+TEST(ConvertTest, Typeclasses) {
+  EXPECT_EQ(Compact(":- typeclass point(T) where [pred coords(T, float), "
+                    "mode coords(in, out) is det, func f(T) = T].\n"),
+      "TypeclassDecl\n| name: SymName point\n| parameters:\n| | T\n"
+      "| abstract: false\n| methods:\n"
+      "| | PredDecl\n| | | kind: Predicate\n| | | purity: Pure\n"
+      "| | | name: SymName coords\n| | | arguments:\n"
+      "| | | | TypeAndMode\n| | | | | type: TypeVar T\n"
+      "| | | | TypeAndMode\n| | | | | type: NamedType\n"
+      "| | | | | | name: SymName float\n"
+      "| | ModeDecl\n| | | kind: Predicate\n| | | name: SymName coords\n"
+      "| | | arguments:\n| | | | NamedMode\n| | | | | name: SymName in\n"
+      "| | | | NamedMode\n| | | | | name: SymName out\n"
+      "| | | determinism: Det\n"
+      "| | PredDecl\n| | | kind: Function\n| | | purity: Pure\n"
+      "| | | name: SymName f\n| | | arguments:\n| | | | TypeAndMode\n"
+      "| | | | | type: TypeVar T\n| | | result: TypeAndMode\n"
+      "| | | | type: TypeVar T\n");
+  EXPECT_EQ(Compact(":- typeclass a(T1, T2).\n"),
+      "TypeclassDecl\n| name: SymName a\n| parameters:\n| | T1\n| | T2\n"
+      "| abstract: true\n");
+  EXPECT_EQ(Compact(":- typeclass foo(T) where [].\n"),
+      "TypeclassDecl\n| name: SymName foo\n| parameters:\n| | T\n"
+      "| abstract: false\n");
+  // Superclasses and functional dependencies (reference manual,
+  // "Functional dependencies").
+  EXPECT_EQ(Compact(":- typeclass bar(A, B, C) <= ((A, B -> C), (C -> A), "
+                    "ring(A)) where [].\n"),
+      "TypeclassDecl\n| name: SymName bar\n| parameters:\n| | A\n| | B\n"
+      "| | C\n| constraints:\n"
+      "| | FunctionalDependency\n| | | domain:\n| | | | A\n| | | | B\n"
+      "| | | range:\n| | | | C\n"
+      "| | FunctionalDependency\n| | | domain:\n| | | | C\n"
+      "| | | range:\n| | | | A\n"
+      "| | ClassConstraint\n| | | name: SymName ring\n| | | arguments:\n"
+      "| | | | TypeVar A\n"
+      "| abstract: false\n");
+}
+
+TEST(ConvertTest, Instances) {
+  EXPECT_EQ(Compact(":- instance portrayable(list(T)) <= portrayable(T) "
+                    "where [pred(portray/3) is portray_list, "
+                    "func(f/1) is io.f].\n"),
+      "InstanceDecl\n| name: SymName portrayable\n| types:\n"
+      "| | NamedType\n| | | name: SymName list\n| | | arguments:\n"
+      "| | | | TypeVar T\n"
+      "| constraints:\n| | ClassConstraint\n"
+      "| | | name: SymName portrayable\n| | | arguments:\n"
+      "| | | | TypeVar T\n"
+      "| abstract: false\n| methods:\n"
+      "| | MethodByName\n| | | kind: Predicate\n"
+      "| | | method: NameAndArity portray/3\n"
+      "| | | implementation: SymName portray_list\n"
+      "| | MethodByName\n| | | kind: Function\n"
+      "| | | method: NameAndArity f/1\n"
+      "| | | implementation: SymName io.f\n");
+  EXPECT_EQ(Compact(":- instance hashable(int).\n"),
+      "InstanceDecl\n| name: SymName hashable\n| types:\n| | NamedType\n"
+      "| | | name: SymName int\n| abstract: true\n");
+  // A method named by an operator (reference manual, "Instance
+  // declarations").
+  EXPECT_NE(Compact(":- instance foo(int) where [func(method1/2) is (+)].\n")
+                .find("implementation: SymName +\n"),
+      std::string::npos);
+}
+
+TEST(ConvertTest, TypeclassErrors) {
+  using V = std::vector<std::string>;
+  EXPECT_EQ(Messages_(":- typeclass c where []."),
+      V{"a type class must have at least one parameter"});
+  EXPECT_EQ(Messages_(":- typeclass c(T, T) where []."),
+      V{"the parameter T appears more than once"});
+  EXPECT_EQ(Messages_(":- typeclass c(int) where []."),
+      V{"expected a type class parameter, but found 'int'"});
+  EXPECT_EQ(Messages_(":- typeclass c(T) where [type t ---> t]."),
+      V{"expected a pred, func or mode declaration, but found 'type t ---> "
+        "t'"});
+  EXPECT_EQ(Messages_(":- typeclass c(T) where [pred p(T) | X]."),
+      V{"expected a list of methods, but found '[pred p(T) | X]'"});
+  EXPECT_EQ(Messages_(":- typeclass c(T) <= (A -> T) where []."),
+      V{"the variable A in a functional dependency is not a parameter of "
+        "the type class"});
+  EXPECT_EQ(Messages_(":- typeclass c(T) <= (T -> 1) where []."),
+      V{"expected a type variable, but found '1'"});
+  EXPECT_EQ(Messages_(":- instance c(int) where [pred(p) is q]."),
+      V{"expected a name/arity, but found 'p'"});
+  EXPECT_EQ(Messages_(":- instance c(int) where [pred(p/1) is X]."),
+      V{"expected a predicate or function name, but found 'X'"});
+  EXPECT_EQ(Messages_(":- instance c(int) where [p(1), (q :- true)]."),
+      (V{"an instance method defined by clauses",
+          "an instance method defined by clauses"}));
+}
+
 // The combinators on their own, with the expected forms they describe.
 TEST(ConvertTest, Combinators) {
   constexpr auto ab{anyOf(functor("a"), functor("b"))};
