@@ -10,6 +10,7 @@
 #include "merkurius/Driver/Options.h"
 #include "merkurius/Frontend/CompilerInstance.h"
 #include "merkurius/Parser/lexer.h"
+#include "merkurius/Parser/message.h"
 #include "merkurius/Parser/provenance.h"
 #include "merkurius/Parser/source.h"
 #include <string>
@@ -62,22 +63,16 @@ bool LexAction::executeAction() {
   CompilerInstance &ci{getInstance()};
   parser::LexerOptions options;
   options.openMP = ci.getLangOpts().openMP;
-  std::vector<parser::LexerMessage> messages;
-  parser::TokenSequence tokens{
-      parser::Lex(getSourceFile(), options, messages)};
-  const parser::AllSources &allSources{ci.getAllSources()};
-  for (const parser::LexerMessage &message : messages) {
-    allSources.EmitMessage(llvm::errs(),
-        allSources.GetProvenanceRange(message.at), message.text, "error: ",
-        llvm::raw_ostream::RED, /*echoSourceLine=*/true);
-  }
+  parser::Messages messages;
+  parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
+  messages.Emit(llvm::errs(), ci.getAllSources());
   llvm::raw_ostream *os{ci.createDefaultOutputFile()};
   if (!os) {
     return false;
   }
   executeLexAction(*os, tokens);
   os->flush();
-  return messages.empty();
+  return !messages.AnyFatalError();
 }
 
 void DebugDumpTokensAction::executeLexAction(
