@@ -37,9 +37,15 @@ protected:
   const VariableTerm *Var(llvm::StringRef name, unsigned number = 0) {
     return arena.Make<VariableTerm>(at, arena.Save(name), number);
   }
+  const IntegerTerm *Integer(
+      std::uint64_t value, bool negative, bool isUnsigned, IntegerSize size) {
+    const std::uint64_t words[]{value};
+    return arena.Make<IntegerTerm>(at,
+        arena.Save(llvm::ArrayRef<std::uint64_t>(words)), negative, isUnsigned,
+        size);
+  }
   const IntegerTerm *Int(std::uint64_t value, bool negative = false) {
-    return arena.Make<IntegerTerm>(
-        at, value, negative, false, IntegerSize::Default);
+    return Integer(value, negative, false, IntegerSize::Default);
   }
   const Term *Infix(llvm::StringRef op, const Term *x, const Term *y) {
     const Term *arguments[]{x, y};
@@ -71,15 +77,9 @@ TEST_F(TermTest, Atoms) {
 TEST_F(TermTest, Literals) {
   EXPECT_EQ(Canonical(Int(42)), "42");
   EXPECT_EQ(Canonical(Int(5, /*negative=*/true)), "-5");
-  EXPECT_EQ(Canonical(arena.Make<IntegerTerm>(
-                at, 255, false, true, IntegerSize::Bits8)),
-      "255u8");
-  EXPECT_EQ(Canonical(arena.Make<IntegerTerm>(
-                at, 3, false, true, IntegerSize::Default)),
-      "3u");
-  EXPECT_EQ(Canonical(arena.Make<IntegerTerm>(
-                at, 7, false, false, IntegerSize::Bits64)),
-      "7i64");
+  EXPECT_EQ(Canonical(Integer(255, false, true, IntegerSize::Bits8)), "255u8");
+  EXPECT_EQ(Canonical(Integer(3, false, true, IntegerSize::Default)), "3u");
+  EXPECT_EQ(Canonical(Integer(7, false, false, IntegerSize::Bits64)), "7i64");
   EXPECT_EQ(Canonical(arena.Make<FloatTerm>(at, 1.5)), "1.5");
   EXPECT_EQ(Canonical(arena.Make<FloatTerm>(at, 3.0)), "3.0");
   EXPECT_EQ(Canonical(arena.Make<FloatTerm>(at, 0.1)), "0.1");
@@ -87,6 +87,45 @@ TEST_F(TermTest, Literals) {
   EXPECT_EQ(Canonical(arena.Make<FloatTerm>(at, 1e100)), "1.0e+100");
   EXPECT_EQ(Canonical(arena.Make<StringTerm>(at, arena.Save("a\"b\\c\nd"))),
       "\"a\\\"b\\\\c\\nd\"");
+}
+
+TEST_F(TermTest, BigIntegers) {
+  // 2^64, which the reader accepts for the converter to reject.
+  const std::uint64_t words[]{0, 1};
+  EXPECT_EQ(Canonical(arena.Make<IntegerTerm>(at,
+                arena.Save(llvm::ArrayRef<std::uint64_t>(words)), false, true,
+                IntegerSize::Default)),
+      "18446744073709551616u");
+  EXPECT_EQ(Canonical(arena.Make<FloatTerm>(at, HUGE_VAL)), "1.0e+309");
+  EXPECT_EQ(Canonical(arena.Make<FloatTerm>(at, -HUGE_VAL)), "-1.0e+309");
+}
+
+TEST_F(TermTest, InRange) {
+  auto inRange{[&](std::uint64_t value, bool negative, bool isUnsigned,
+                   IntegerSize size) {
+    return Integer(value, negative, isUnsigned, size)->InRange();
+  }};
+  using IS = IntegerSize;
+  EXPECT_TRUE(inRange(127, false, false, IS::Bits8));
+  EXPECT_FALSE(inRange(128, false, false, IS::Bits8));
+  EXPECT_TRUE(inRange(128, true, false, IS::Bits8));
+  EXPECT_FALSE(inRange(129, true, false, IS::Bits8));
+  EXPECT_TRUE(inRange(255, false, true, IS::Bits8));
+  EXPECT_FALSE(inRange(256, false, true, IS::Bits8));
+  EXPECT_TRUE(inRange(32767, false, false, IS::Bits16));
+  EXPECT_FALSE(inRange(65536, false, true, IS::Bits16));
+  EXPECT_FALSE(inRange(2147483648, false, false, IS::Bits32));
+  EXPECT_TRUE(inRange(4294967295, false, true, IS::Bits32));
+  EXPECT_TRUE(inRange(9223372036854775807u, false, false, IS::Default));
+  EXPECT_FALSE(inRange(9223372036854775808u, false, false, IS::Default));
+  EXPECT_TRUE(inRange(9223372036854775808u, true, false, IS::Default));
+  EXPECT_TRUE(inRange(18446744073709551615u, false, true, IS::Bits64));
+  const std::uint64_t big[]{0, 1};
+  EXPECT_FALSE(
+      arena
+          .Make<IntegerTerm>(at, arena.Save(llvm::ArrayRef<std::uint64_t>(big)),
+              false, true, IS::Default)
+          ->InRange());
 }
 
 TEST_F(TermTest, CompoundTerms) {

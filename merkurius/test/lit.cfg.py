@@ -22,5 +22,27 @@ llvm_config.with_system_environment(["HOME", "TMP", "TEMP"])
 llvm_config.use_default_substitutions()
 
 tool_dirs = [config.merkurius_tools_dir, config.llvm_tools_dir]
-llvm_config.add_tool_substitutions(["merkc"], tool_dirs)
+llvm_config.add_tool_substitutions(["merkc", "merkurius-term-fuzzer"], tool_dirs)
 llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
+
+# Tests that compare our term reader with Mercury's need mmc, from $MMC or
+# the PATH; without it they are unsupported.
+import shutil
+
+mmc = os.environ.get("MMC") or shutil.which("mmc")
+if mmc and os.path.exists(mmc):
+    config.available_features.add("mmc")
+    config.substitutions.append(
+        (
+            "%compare-terms",
+            "%s %s --merkc %s --mmc %s --oracle-dir %s"
+            % (
+                config.python_executable,
+                os.path.join(config.merkurius_src_root, "utils", "term-oracle",
+                             "compare-terms.py"),
+                os.path.join(config.merkurius_tools_dir, "merkc"),
+                os.path.abspath(mmc),
+                os.path.join(config.merkurius_obj_root, "term-oracle"),
+            ),
+        )
+    )

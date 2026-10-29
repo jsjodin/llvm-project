@@ -52,6 +52,8 @@ def fdebug_dump_tokens : Flag<["-"], "fdebug-dump-tokens">,
   HelpText<"Dump the tokens of the source file">;
 def fdebug_unparse_tokens : Flag<["-"], "fdebug-unparse-tokens">,
   HelpText<"Print the source file from its tokens and their trivia">;
+def fdebug_dump_terms : Flag<["-"], "fdebug-dump-terms">,
+  HelpText<"Print each item's term in canonical notation">;
 
 } // let Visibility = [FC1Option]
 

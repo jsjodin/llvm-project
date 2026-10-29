@@ -7,14 +7,30 @@
 //===----------------------------------------------------------------------===//
 
 #include "merkurius/Parser/term.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Format.h"
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 
 namespace merkurius::parser {
+
+bool IntegerTerm::InRange() const {
+  unsigned bits{size_ == IntegerSize::Bits8 ? 8u
+          : size_ == IntegerSize::Bits16    ? 16u
+          : size_ == IntegerSize::Bits32    ? 32u
+                                            : 64u};
+  llvm::APInt value{magnitude()};
+  unsigned active{value.getActiveBits()};
+  if (isUnsigned_) {
+    return active <= bits && (!negative_ || value.isZero());
+  }
+  // The most negative value is -2^(bits-1).
+  return active < bits || (negative_ && active == bits && value.isPowerOf2());
+}
 
 CharBlock GetSource(const Term &term, const TokenSequence &tokens) {
   const Token &first{tokens.tokens.at(term.tokens().first)};
@@ -212,7 +228,9 @@ private:
     if (term.negative()) {
       o_ << '-';
     }
-    o_ << term.magnitude();
+    llvm::SmallString<32> digits;
+    term.magnitude().toStringUnsigned(digits, 10);
+    o_ << digits;
     if (term.isUnsigned() || term.size() != IntegerSize::Default) {
       o_ << (term.isUnsigned() ? 'u' : 'i');
       switch (term.size()) {
@@ -237,6 +255,11 @@ private:
   // The shortest form that reads back as the same double, always with a
   // fraction or an exponent, so that it reads back as a float.
   void PrintFloat(double value) {
+    if (std::isinf(value)) {
+      // There is no literal for infinity; this is one that reads as it.
+      o_ << (value < 0 ? "-1.0e+309" : "1.0e+309");
+      return;
+    }
     char buffer[32];
     for (int precision{1}; precision <= 17; ++precision) {
       std::snprintf(buffer, sizeof buffer, "%.*g", precision, value);

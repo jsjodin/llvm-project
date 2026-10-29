@@ -26,6 +26,8 @@ std::unique_ptr<FrontendAction> createFrontendAction(CompilerInstance &ci) {
     return std::make_unique<DebugDumpTokensAction>();
   case ActionKind::DebugUnparseTokens:
     return std::make_unique<DebugUnparseTokensAction>();
+  case ActionKind::DebugDumpTerms:
+    return std::make_unique<DebugDumpTermsAction>();
   }
   llvm_unreachable("unknown ActionKind");
 }

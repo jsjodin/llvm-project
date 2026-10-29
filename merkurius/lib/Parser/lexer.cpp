@@ -57,7 +57,9 @@ public:
       : at_{begin}, end_{end}, fileBegin_{fileBegin}, file_{file},
         openMP_{openMP}, messages_{messages} {}
 
-  void LexFile(TokenSequence &);
+  // `leadingTrivia` is where the first token's trivia begins: before any
+  // byte order mark, which then unparses with the rest of the file.
+  void LexFile(TokenSequence &, const char *leadingTrivia);
 
 private:
   bool AtEnd() const { return at_ == end_; }
@@ -106,8 +108,8 @@ private:
   Messages &messages_;
 };
 
-void Lexer::LexFile(TokenSequence &result) {
-  const char *previousEnd{at_};
+void Lexer::LexFile(TokenSequence &result, const char *leadingTrivia) {
+  const char *previousEnd{leadingTrivia};
   while (true) {
     bool directive{SkipTrivia()};
     Token token;
@@ -402,6 +404,14 @@ TokenKind Lexer::LexNumber() {
     }
   }
   bool trailingUnderscore{SkipDigits(IsDigit)};
+  // As in mmc, "._" after digits is a malformed fraction, not the name '.'
+  // and a variable.
+  if (Peek() == '.' && Peek(1) == '_') {
+    ++at_;
+    SkipDigits(IsDigit);
+    Say(start, at_, "a fraction must begin with a digit"_err_en_US);
+    return TokenKind::Float;
+  }
   // A float has a fraction, an exponent, or both.
   bool fraction{Peek() == '.' && IsDigit(Peek(1))};
   auto atExponent{[&]() {
@@ -550,7 +560,10 @@ TokenSequence Lex(
   llvm::StringRef text{file.content()};
   Lexer lexer{
       text.begin(), text.end(), text.begin(), &file, options.openMP, messages};
-  lexer.LexFile(result);
+  // The byte order mark, if any, is in the same buffer just before the
+  // content.
+  std::size_t bom{file.hasByteOrderMark() ? 3u : 0u};
+  lexer.LexFile(result, text.begin() - bom);
   return result;
 }
 

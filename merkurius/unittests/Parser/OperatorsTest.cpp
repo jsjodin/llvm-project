@@ -73,7 +73,8 @@ TEST(OperatorsTest, Constants) {
   // The named priorities agree with the table.
   EXPECT_EQ(itemPriority, FindOperator(":-")->infix->priority);
   EXPECT_EQ(itemPriority, FindOperator("-->")->infix->priority);
-  EXPECT_EQ(argumentPriority, FindOperator(",")->infix->priority + 1);
+  EXPECT_EQ(commaPriority, FindOperator(",")->infix->priority);
+  EXPECT_EQ(conjunctPriority, commaPriority + 1);
   EXPECT_EQ(backquotePriority, 1500 - 120); // 22.01: `op` is yfx 120
   EXPECT_LT(lowestPriority, itemPriority);
   EXPECT_GT(primaryPriority, FindOperator(".")->infix->priority);

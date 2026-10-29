@@ -2,6 +2,7 @@ add_merkurius_unittest(MerkuriusParserTests
   LexerTest.cpp
   OperatorsTest.cpp
   ProvenanceTest.cpp
+  TermReaderTest.cpp
   TermTest.cpp
   )
 
