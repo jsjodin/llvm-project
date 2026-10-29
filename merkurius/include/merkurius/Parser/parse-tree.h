@@ -1318,6 +1318,359 @@ struct DcgRule {
 using Clause = std::variant<const FactOrRule *, const DcgRule *>;
 
 //===----------------------------------------------------------------------===//
+// Pragmas (reference manual, "Pragmas", "Foreign language interface" and
+// "Implementation-dependent extensions")
+//===----------------------------------------------------------------------===//
+
+// p/1, pred(p/1) or func(f/1): the predicates or functions with a name and
+// arity, or only those of one kind.
+struct PredNameArity {
+  static constexpr llvm::StringLiteral kindName{"PredNameArity"};
+  TokenRange tokens;
+  std::optional<PredOrFunc> kind; // none for Name/Arity
+  const NameAndArity *nameArity;
+  template <typename F> void ForEachField(F &&f) const {
+    f("kind", kind);
+    f("nameArity", nameArity);
+  }
+};
+
+// p(in, out), or f(in) = out: one mode of a predicate or function.
+struct ProcSpec {
+  static constexpr llvm::StringLiteral kindName{"ProcSpec"};
+  TokenRange tokens;
+  PredOrFunc kind;
+  const SymName *name;
+  llvm::ArrayRef<Mode> modes;
+  std::optional<Mode> result; // for a function
+  template <typename F> void ForEachField(F &&f) const {
+    f("kind", kind);
+    f("name", name);
+    f("modes", modes);
+    f("result", result);
+  }
+};
+
+using PredSpec = std::variant<const PredNameArity *, const ProcSpec *>;
+
+ENUM_CLASS(PredPragmaKind, Inline, NoInline, ConsiderUsed,
+    NoDeterminismWarning, PromisePure, PromiseSemipure,
+    PromiseEquivalentClauses, Terminates, DoesNotTerminate, CheckTermination)
+
+// :- pragma inline(p/1), and the other pragmas whose one argument names
+// predicates or functions.
+struct PredPragma {
+  static constexpr llvm::StringLiteral kindName{"PredPragma"};
+  TokenRange tokens;
+  PredPragmaKind kind;
+  const PredNameArity *pred;
+  template <typename F> void ForEachField(F &&f) const {
+    f("kind", kind);
+    f("pred", pred);
+  }
+};
+
+// :- pragma obsolete(p/1, [q/1]), or obsolete_proc(p(in), [q/1]), whose
+// pred is a ProcSpec.
+struct ObsoletePragma {
+  static constexpr llvm::StringLiteral kindName{"ObsoletePragma"};
+  TokenRange tokens;
+  PredSpec pred;
+  llvm::ArrayRef<const NameAndArity *> replacements;
+  template <typename F> void ForEachField(F &&f) const {
+    f("pred", pred);
+    f("replacements", replacements);
+  }
+};
+
+// T = Type, in a type_spec pragma.
+struct TypeSubstitution {
+  static constexpr llvm::StringLiteral kindName{"TypeSubstitution"};
+  TokenRange tokens;
+  llvm::StringRef var;
+  Type type;
+  template <typename F> void ForEachField(F &&f) const {
+    f("var", var);
+    f("type", type);
+  }
+};
+
+// :- pragma type_spec(p/2, (T = int, U = list(T))).
+struct TypeSpecPragma {
+  static constexpr llvm::StringLiteral kindName{"TypeSpecPragma"};
+  TokenRange tokens;
+  PredSpec pred;
+  llvm::ArrayRef<const TypeSubstitution *> substitution;
+  template <typename F> void ForEachField(F &&f) const {
+    f("pred", pred);
+    f("substitution", substitution);
+  }
+};
+
+ENUM_CLASS(TablingMethod, Memo, LoopCheck, MinimalModel)
+ENUM_CLASS(TabledArg, Value, Addr, PromiseImplied, Output)
+ENUM_CLASS(HiddenArg, Value, Addr)
+
+// The attributes of a tabling pragma, each given at most once. size_limit
+// and the hidden argument of specified are mmc's, which it accepts.
+struct TablingAttributes {
+  static constexpr llvm::StringLiteral kindName{"TablingAttributes"};
+  TokenRange tokens;
+  bool allowReset;
+  bool statistics;
+  bool disableWarningIfIgnored;
+  bool fastLoose;
+  std::optional<llvm::ArrayRef<TabledArg>> specified;
+  std::optional<HiddenArg> hiddenArg;
+  std::optional<unsigned> sizeLimit;
+  template <typename F> void ForEachField(F &&f) const {
+    f("allowReset", allowReset);
+    f("statistics", statistics);
+    f("disableWarningIfIgnored", disableWarningIfIgnored);
+    f("fastLoose", fastLoose);
+    f("specified", specified);
+    f("hiddenArg", hiddenArg);
+    f("sizeLimit", sizeLimit);
+  }
+};
+
+// :- pragma memo(p/2, [Attributes]), loop_check(...) or minimal_model(...).
+struct TablingPragma {
+  static constexpr llvm::StringLiteral kindName{"TablingPragma"};
+  TokenRange tokens;
+  TablingMethod method;
+  PredSpec pred;
+  const TablingAttributes *attributes; // null if there is no list
+  template <typename F> void ForEachField(F &&f) const {
+    f("method", method);
+    f("pred", pred);
+    f("attributes", attributes);
+  }
+};
+
+// :- pragma fact_table(p/2, "FileName").
+struct FactTablePragma {
+  static constexpr llvm::StringLiteral kindName{"FactTablePragma"};
+  TokenRange tokens;
+  const PredNameArity *pred;
+  llvm::StringRef fileName;
+  template <typename F> void ForEachField(F &&f) const {
+    f("pred", pred);
+    f("fileName", fileName);
+  }
+};
+
+ENUM_CLASS(Feature, Concurrency, SinglePrecFloat, DoublePrecFloat, Memo,
+    ParallelConj, Trailing, StrictSequential, ConservativeGc)
+
+// :- pragma require_feature_set([Features]).
+struct RequireFeatureSetPragma {
+  static constexpr llvm::StringLiteral kindName{"RequireFeatureSetPragma"};
+  TokenRange tokens;
+  llvm::ArrayRef<Feature> features;
+  template <typename F> void ForEachField(F &&f) const {
+    f("features", features);
+  }
+};
+
+// :- pragma source_file("Name").
+struct SourceFilePragma {
+  static constexpr llvm::StringLiteral kindName{"SourceFilePragma"};
+  TokenRange tokens;
+  llvm::StringRef name;
+  template <typename F> void ForEachField(F &&f) const { f("name", name); }
+};
+
+// The foreign languages, which mmc names "C", "C#" and "Java", or c,
+// csharp and java.
+ENUM_CLASS(ForeignLanguage, C, CSharp, Java)
+
+// The code of a foreign_decl or foreign_code pragma, or include_file("Path").
+struct ForeignCode {
+  static constexpr llvm::StringLiteral kindName{"ForeignCode"};
+  TokenRange tokens;
+  bool includeFile; // text is the path
+  llvm::StringRef text;
+  template <typename F> void ForEachField(F &&f) const {
+    f("includeFile", includeFile);
+    f("text", text);
+  }
+};
+
+// :- pragma foreign_decl("Lang", local, Code); exported unless local.
+struct ForeignDeclPragma {
+  static constexpr llvm::StringLiteral kindName{"ForeignDeclPragma"};
+  TokenRange tokens;
+  ForeignLanguage language;
+  bool local;
+  const ForeignCode *code;
+  template <typename F> void ForEachField(F &&f) const {
+    f("language", language);
+    f("local", local);
+    f("code", code);
+  }
+};
+
+// :- pragma foreign_code("Lang", Code).
+struct ForeignCodePragma {
+  static constexpr llvm::StringLiteral kindName{"ForeignCodePragma"};
+  TokenRange tokens;
+  ForeignLanguage language;
+  const ForeignCode *code;
+  template <typename F> void ForEachField(F &&f) const {
+    f("language", language);
+    f("code", code);
+  }
+};
+
+// Var::Mode, an argument of a foreign_proc.
+struct ForeignProcArg {
+  static constexpr llvm::StringLiteral kindName{"ForeignProcArg"};
+  TokenRange tokens;
+  const Variable *var;
+  Mode mode;
+  template <typename F> void ForEachField(F &&f) const {
+    f("var", var);
+    f("mode", mode);
+  }
+};
+
+// The attributes of a foreign_proc (reference manual, "Foreign code
+// attributes").
+ENUM_CLASS(ForeignProcAttribute, MayCallMercury, WillNotCallMercury,
+    PromisePure, PromiseSemipure, ThreadSafe, NotThreadSafe, MaybeThreadSafe,
+    TabledForIo, Terminates, DoesNotTerminate, WillNotThrowException,
+    MayModifyTrail, WillNotModifyTrail, MayCallMmTabled, WillNotCallMmTabled,
+    AffectsLiveness, DoesNotAffectLiveness, MayDuplicate, MayNotDuplicate,
+    MayExportBody, MayNotExportBody)
+
+// :- pragma foreign_proc("Lang", p(X::in, Y::out), [Attributes], "Code"),
+// or with f(X::in) = (Y::out).
+struct ForeignProcPragma {
+  static constexpr llvm::StringLiteral kindName{"ForeignProcPragma"};
+  TokenRange tokens;
+  ForeignLanguage language;
+  PredOrFunc kind;
+  const SymName *name;
+  llvm::ArrayRef<const ForeignProcArg *> arguments;
+  const ForeignProcArg *result; // for a function
+  llvm::ArrayRef<ForeignProcAttribute> attributes;
+  const ForeignCode *code;
+  template <typename F> void ForEachField(F &&f) const {
+    f("language", language);
+    f("kind", kind);
+    f("name", name);
+    f("arguments", arguments);
+    f("result", result);
+    f("attributes", attributes);
+    f("code", code);
+  }
+};
+
+ENUM_CLASS(ForeignTypeAssertion, CanPassAsMercuryType, WordAlignedPointer,
+    Stable)
+
+// :- pragma foreign_type("Lang", t(T), "Descriptor", [Assertions]) where
+// equality is Eq, comparison is Cmp.
+struct ForeignTypePragma {
+  static constexpr llvm::StringLiteral kindName{"ForeignTypePragma"};
+  TokenRange tokens;
+  ForeignLanguage language;
+  const SymName *name;
+  llvm::ArrayRef<llvm::StringRef> parameters;
+  llvm::StringRef descriptor;
+  llvm::ArrayRef<ForeignTypeAssertion> assertions;
+  const TypeAttributes *attributes; // null if there is no where
+  template <typename F> void ForEachField(F &&f) const {
+    f("language", language);
+    f("name", name);
+    f("parameters", parameters);
+    f("descriptor", descriptor);
+    f("assertions", assertions);
+    f("attributes", attributes);
+  }
+};
+
+// Constructor - "Value", in foreign_enum and foreign_export_enum.
+struct ForeignEnumValue {
+  static constexpr llvm::StringLiteral kindName{"ForeignEnumValue"};
+  TokenRange tokens;
+  const SymName *constructor;
+  llvm::StringRef value;
+  template <typename F> void ForEachField(F &&f) const {
+    f("constructor", constructor);
+    f("value", value);
+  }
+};
+
+// :- pragma foreign_enum("Lang", t/0, [a - "A", b - "B"]).
+struct ForeignEnumPragma {
+  static constexpr llvm::StringLiteral kindName{"ForeignEnumPragma"};
+  TokenRange tokens;
+  ForeignLanguage language;
+  const NameAndArity *type;
+  llvm::ArrayRef<const ForeignEnumValue *> values;
+  template <typename F> void ForEachField(F &&f) const {
+    f("language", language);
+    f("type", type);
+    f("values", values);
+  }
+};
+
+// :- pragma foreign_export_enum("Lang", t/0, [prefix("P"), uppercase],
+// [a - "A"]), where the lists are optional.
+struct ForeignExportEnumPragma {
+  static constexpr llvm::StringLiteral kindName{"ForeignExportEnumPragma"};
+  TokenRange tokens;
+  ForeignLanguage language;
+  const NameAndArity *type;
+  std::optional<llvm::StringRef> prefix;
+  bool uppercase;
+  llvm::ArrayRef<const ForeignEnumValue *> overrides;
+  template <typename F> void ForEachField(F &&f) const {
+    f("language", language);
+    f("type", type);
+    f("prefix", prefix);
+    f("uppercase", uppercase);
+    f("overrides", overrides);
+  }
+};
+
+// :- pragma foreign_export("Lang", p(in, out), "ForeignName").
+struct ForeignExportPragma {
+  static constexpr llvm::StringLiteral kindName{"ForeignExportPragma"};
+  TokenRange tokens;
+  ForeignLanguage language;
+  const ProcSpec *proc;
+  llvm::StringRef foreignName;
+  template <typename F> void ForEachField(F &&f) const {
+    f("language", language);
+    f("proc", proc);
+    f("foreignName", foreignName);
+  }
+};
+
+// :- pragma foreign_import_module("Lang", Module).
+struct ForeignImportModulePragma {
+  static constexpr llvm::StringLiteral kindName{"ForeignImportModulePragma"};
+  TokenRange tokens;
+  ForeignLanguage language;
+  const SymName *module;
+  template <typename F> void ForEachField(F &&f) const {
+    f("language", language);
+    f("module", module);
+  }
+};
+
+using Pragma = std::variant<const PredPragma *, const ObsoletePragma *,
+    const TypeSpecPragma *, const TablingPragma *, const FactTablePragma *,
+    const RequireFeatureSetPragma *, const SourceFilePragma *,
+    const ForeignDeclPragma *, const ForeignCodePragma *,
+    const ForeignProcPragma *, const ForeignTypePragma *,
+    const ForeignEnumPragma *, const ForeignExportEnumPragma *,
+    const ForeignExportPragma *, const ForeignImportModulePragma *>;
+
+//===----------------------------------------------------------------------===//
 // Type classes (reference manual, "Type classes")
 //===----------------------------------------------------------------------===//
 
@@ -1404,7 +1757,13 @@ using Item = std::variant<const ModuleDecl *, const EndModuleDecl *,
     const ModeDecl *, const DuTypeDefn *, const EquivalenceTypeDefn *,
     const AbstractTypeDecl *, const InstDefn *, const ModeDefn *,
     const TypeclassDecl *, const InstanceDecl *, const FactOrRule *,
-    const DcgRule *>;
+    const DcgRule *, const PredPragma *, const ObsoletePragma *,
+    const TypeSpecPragma *, const TablingPragma *, const FactTablePragma *,
+    const RequireFeatureSetPragma *, const SourceFilePragma *,
+    const ForeignDeclPragma *, const ForeignCodePragma *,
+    const ForeignProcPragma *, const ForeignTypePragma *,
+    const ForeignEnumPragma *, const ForeignExportEnumPragma *,
+    const ForeignExportPragma *, const ForeignImportModulePragma *>;
 
 // The items of a file that converted without errors, in order.
 struct ParseTree {
