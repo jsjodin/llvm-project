@@ -1,0 +1,160 @@
+% Clauses and the goals and data-terms in them, as the converter reads
+% them, in a module that mmc compiles. DCG rules, state variables and
+% field access stay as written.
+%
+% RUN: merkc -fc1 -fdebug-dump-parse-tree-no-sema %s | FileCheck %s
+
+:- module clauses.
+:- interface.
+:- import_module io.
+
+:- pred main(io::di, io::uo) is det.
+
+:- implementation.
+:- import_module char, int, list, string.
+
+:- type point ---> point(x :: int, y :: int).
+
+main(!IO) :-
+    io.write_string("hello\n", !IO),
+    count([1, 2, 3], N),
+    ( if N > 2 then
+        io.write_int(N, !IO)
+    else
+        true
+    ),
+    P = point(1, 2),
+    Q = P ^ x := 3,
+    io.write_int(Q ^ x + Q ^ y, !IO),
+    Add = (func(A) = A + N),
+    io.write_int(Add(1), !IO),
+    trace [compile_time(flag("debug")), io(!TIO)] (
+        io.write_string("traced\n", !TIO)
+    ).
+% CHECK:      | | FactOrRule
+% CHECK-NEXT: | | | kind: Predicate
+% CHECK-NEXT: | | | name: SymName main
+% CHECK:      | | | | | Call
+% CHECK:      | | | | | Call
+% CHECK:      | | | | | IfThenElse
+% CHECK:      | | | | | | condition: Call
+% CHECK:      | | | | | | then: Call
+% CHECK:      | | | | | | else: BuiltinGoal
+% CHECK:      | | | | | Unification
+% CHECK:      | | | | | | right: FunctorData
+% CHECK:      | | | | | Unification
+% CHECK:      | | | | | | right: FieldUpdate
+% CHECK:      | | | | | Call
+% CHECK:      | | | | | Unification
+% CHECK:      | | | | | | right: Lambda
+% CHECK:      | | | | | Call
+% CHECK:      | | | | | TraceGoal
+% CHECK:      | | | | | | | | condition: TraceCondition
+% CHECK:      | | | | | | | | condition: none
+
+:- pred count(list(T)::in, int::out) is det.
+
+count([], 0).
+% CHECK:      | | FactOrRule
+% CHECK-NEXT: | | | kind: Predicate
+% CHECK-NEXT: | | | name: SymName count
+% CHECK-NEXT: | | | arguments:
+% CHECK-NEXT: | | | | ModedTerm
+% CHECK-NEXT: | | | | | term: ListData
+% CHECK-NEXT: | | | | | | elements:
+% CHECK-NEXT: | | | | | | tail: none
+% CHECK-NEXT: | | | | | mode: none
+% CHECK-NEXT: | | | | ModedTerm
+% CHECK-NEXT: | | | | | term: Literal 0
+% CHECK-NEXT: | | | | | mode: none
+% CHECK-NEXT: | | | result: none
+% CHECK-NEXT: | | | body: none
+count([_ | Xs], N + 1) :-
+    count(Xs, N).
+% CHECK:      | | FactOrRule
+% CHECK-NEXT: | | | kind: Predicate
+% CHECK-NEXT: | | | name: SymName count
+% CHECK-NEXT: | | | arguments:
+% CHECK-NEXT: | | | | ModedTerm
+% CHECK-NEXT: | | | | | term: ListData
+% CHECK-NEXT: | | | | | | elements:
+% CHECK-NEXT: | | | | | | | Variable _
+% CHECK-NEXT: | | | | | | tail: Variable Xs
+% CHECK-NEXT: | | | | | mode: none
+% CHECK-NEXT: | | | | ModedTerm
+% CHECK-NEXT: | | | | | term: FunctorData
+% CHECK-NEXT: | | | | | | name: SymName +
+% CHECK-NEXT: | | | | | | arguments:
+% CHECK-NEXT: | | | | | | | Variable N
+% CHECK-NEXT: | | | | | | | Literal 1
+% CHECK-NEXT: | | | | | mode: none
+% CHECK-NEXT: | | | result: none
+% CHECK-NEXT: | | | body: Call
+% CHECK-NEXT: | | | | name: SymName count
+% CHECK-NEXT: | | | | arguments:
+% CHECK-NEXT: | | | | | Variable Xs
+% CHECK-NEXT: | | | | | Variable N
+
+:- func double(int) = int.
+
+double(X) = Y :-
+    Y = X * 2.
+% CHECK:      | | FactOrRule
+% CHECK-NEXT: | | | kind: Function
+% CHECK-NEXT: | | | name: SymName double
+% CHECK-NEXT: | | | arguments:
+% CHECK-NEXT: | | | | ModedTerm
+% CHECK-NEXT: | | | | | term: Variable X
+% CHECK-NEXT: | | | | | mode: none
+% CHECK-NEXT: | | | result: ModedTerm
+% CHECK-NEXT: | | | | term: Variable Y
+% CHECK-NEXT: | | | | mode: none
+% CHECK-NEXT: | | | body: Unification
+% CHECK-NEXT: | | | | left: Variable Y
+% CHECK-NEXT: | | | | right: FunctorData
+% CHECK-NEXT: | | | | | name: SymName *
+% CHECK-NEXT: | | | | | arguments:
+% CHECK-NEXT: | | | | | | Variable X
+% CHECK-NEXT: | | | | | | Literal 2
+
+:- pred digits(list(char)::out, list(char)::in, list(char)::out) is multi.
+
+digits([D | Ds]) -->
+    [D],
+    { char.is_digit(D) },
+    digits(Ds).
+% CHECK:      | | DcgRule
+% CHECK-NEXT: | | | name: SymName digits
+% CHECK-NEXT: | | | arguments:
+% CHECK-NEXT: | | | | ModedTerm
+% CHECK-NEXT: | | | | | term: ListData
+% CHECK-NEXT: | | | | | | elements:
+% CHECK-NEXT: | | | | | | | Variable D
+% CHECK-NEXT: | | | | | | tail: Variable Ds
+% CHECK-NEXT: | | | | | mode: none
+% CHECK-NEXT: | | | body: DcgConjunction
+% CHECK-NEXT: | | | | parallel: false
+% CHECK-NEXT: | | | | goals:
+% CHECK-NEXT: | | | | | DcgTerminals
+% CHECK-NEXT: | | | | | | terms:
+% CHECK-NEXT: | | | | | | | Variable D
+% CHECK-NEXT: | | | | | DcgBraces
+% CHECK-NEXT: | | | | | | goal: Call
+% CHECK-NEXT: | | | | | | | name: SymName char.is_digit
+% CHECK-NEXT: | | | | | | | arguments:
+% CHECK-NEXT: | | | | | | | | Variable D
+% CHECK-NEXT: | | | | | DcgCall
+% CHECK-NEXT: | | | | | | name: SymName digits
+% CHECK-NEXT: | | | | | | arguments:
+% CHECK-NEXT: | | | | | | | Variable Ds
+digits([]) --> [].
+% CHECK:      | | DcgRule
+% CHECK-NEXT: | | | name: SymName digits
+% CHECK-NEXT: | | | arguments:
+% CHECK-NEXT: | | | | ModedTerm
+% CHECK-NEXT: | | | | | term: ListData
+% CHECK-NEXT: | | | | | | elements:
+% CHECK-NEXT: | | | | | | tail: none
+% CHECK-NEXT: | | | | | mode: none
+% CHECK-NEXT: | | | body: DcgTerminals
+% CHECK-NEXT: | | | | terms:

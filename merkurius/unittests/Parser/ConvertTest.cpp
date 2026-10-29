@@ -27,12 +27,12 @@ struct ConvertResult {
   std::vector<std::string> messages;
 };
 
-ConvertResult Convert(llvm::StringRef text) {
+ConvertResult Convert(llvm::StringRef text, bool openMP = false) {
   AllSources all;
   SourceFile *file{
       all.AddBuffer("test.m", llvm::MemoryBuffer::getMemBufferCopy(text))};
   Messages messages;
-  TokenSequence tokens{Lex(*file, LexerOptions{}, messages)};
+  TokenSequence tokens{Lex(*file, LexerOptions{openMP}, messages)};
   ParseTreeArena arena;
   const ParseTree &tree{ConvertFile(tokens, arena, messages)};
   ConvertResult result;
@@ -108,8 +108,6 @@ TEST(ConvertTest, Errors) {
           "expected a declaration, but found 'module(a, b)'"});
   EXPECT_EQ(Messages_(":- initialise p.\n"),
       std::vector<std::string>{"the ':- initialise' declaration"});
-  EXPECT_EQ(Messages_("p :- q.\n"),
-      std::vector<std::string>{"clauses"});
   // Long terms and terms over several lines are shortened.
   EXPECT_EQ(Messages_(":- foo(aaaaaaaaaa, bbbbbbbbbb, cccccccccc, dddddddddd).\n"
                       ":- bar(a,\n  b).\n"),
@@ -536,6 +534,18 @@ TEST(ConvertTest, Instances) {
   EXPECT_EQ(Compact(":- instance hashable(int).\n"),
       "InstanceDecl\n| name: SymName hashable\n| types:\n| | NamedType\n"
       "| | | name: SymName int\n| abstract: true\n");
+  // Methods defined by clauses.
+  EXPECT_EQ(Compact(":- instance c(int) where [p(1), (f(X) = X), "
+                    "(q --> [])].\n"),
+      "InstanceDecl\n| name: SymName c\n| types:\n| | NamedType\n"
+      "| | | name: SymName int\n| abstract: false\n| methods:\n"
+      "| | FactOrRule\n| | | kind: Predicate\n| | | name: SymName p\n"
+      "| | | arguments:\n| | | | ModedTerm\n| | | | | term: Literal 1\n"
+      "| | FactOrRule\n| | | kind: Function\n| | | name: SymName f\n"
+      "| | | arguments:\n| | | | ModedTerm\n| | | | | term: Variable X\n"
+      "| | | result: ModedTerm\n| | | | term: Variable X\n"
+      "| | DcgRule\n| | | name: SymName q\n"
+      "| | | body: DcgTerminals\n");
   // A method named by an operator (reference manual, "Instance
   // declarations").
   EXPECT_NE(Compact(":- instance foo(int) where [func(method1/2) is (+)].\n")
@@ -565,9 +575,336 @@ TEST(ConvertTest, TypeclassErrors) {
       V{"expected a name/arity, but found 'p'"});
   EXPECT_EQ(Messages_(":- instance c(int) where [pred(p/1) is X]."),
       V{"expected a predicate or function name, but found 'X'"});
-  EXPECT_EQ(Messages_(":- instance c(int) where [p(1), (q :- true)]."),
-      (V{"an instance method defined by clauses",
-          "an instance method defined by clauses"}));
+  EXPECT_EQ(Messages_(":- instance c(int) where [pred(p/1) is q, X]."),
+      V{"expected a clause head, but found 'X'"});
+}
+
+// The kind of the first line in Compact(text) that begins with `field`, at
+// any depth: "body: Conjunction" gives "Conjunction", and "left: Variable
+// X" gives "Variable".
+std::string KindOf(llvm::StringRef text, llvm::StringRef field) {
+  std::string compact{Compact(text)};
+  llvm::SmallVector<llvm::StringRef, 32> lines;
+  llvm::StringRef{compact}.split(lines, '\n', -1, false);
+  for (llvm::StringRef line : lines) {
+    line = line.ltrim("| ");
+    if (line.consume_front(field) && line.consume_front(": ")) {
+      return line.split(' ').first.str();
+    }
+  }
+  return "";
+}
+
+// The kind of a clause's body goal.
+std::string GoalKind(llvm::StringRef goal) {
+  return KindOf(("p :- " + goal + ".\n").str(), "body");
+}
+
+// The kind of the data-term on the right of X = Term.
+std::string DataKind(llvm::StringRef term) {
+  return KindOf(("p :- X = (" + term + ").\n").str(), "right");
+}
+
+TEST(ConvertTest, Clauses) {
+  EXPECT_EQ(Compact("p(a, X).\n"),
+      "FactOrRule\n| kind: Predicate\n| name: SymName p\n| arguments:\n"
+      "| | ModedTerm\n| | | term: FunctorData\n| | | | name: SymName a\n"
+      "| | ModedTerm\n| | | term: Variable X\n");
+  EXPECT_EQ(Compact("main(!IO) :- io.write_string(\"x\", !IO).\n"),
+      "FactOrRule\n| kind: Predicate\n| name: SymName main\n| arguments:\n"
+      "| | ModedTerm\n| | | term: StateVar !IO\n"
+      "| body: Call\n| | name: SymName io.write_string\n| | arguments:\n"
+      "| | | Literal \"x\"\n| | | StateVar !IO\n");
+  EXPECT_EQ(Compact("f(X) = X.\n"),
+      "FactOrRule\n| kind: Function\n| name: SymName f\n| arguments:\n"
+      "| | ModedTerm\n| | | term: Variable X\n"
+      "| result: ModedTerm\n| | term: Variable X\n");
+  // Different clauses for different modes.
+  EXPECT_EQ(Compact("f(X::in) = (Y::out) :- Y = X.\n"),
+      "FactOrRule\n| kind: Function\n| name: SymName f\n| arguments:\n"
+      "| | ModedTerm\n| | | term: Variable X\n"
+      "| | | mode: NamedMode\n| | | | name: SymName in\n"
+      "| result: ModedTerm\n| | term: Variable Y\n"
+      "| | mode: NamedMode\n| | | name: SymName out\n"
+      "| body: Unification\n| | left: Variable Y\n| | right: Variable X\n");
+  EXPECT_EQ(Compact("p --> [a], q.\n"),
+      "DcgRule\n| name: SymName p\n| body: DcgConjunction\n"
+      "| | parallel: false\n| | goals:\n"
+      "| | | DcgTerminals\n| | | | terms:\n"
+      "| | | | | FunctorData\n| | | | | | name: SymName a\n"
+      "| | | DcgCall\n| | | | name: SymName q\n");
+  // A DCG rule's head is not a function head.
+  EXPECT_NE(Compact("x = y --> [].\n").find("name: SymName =\n"),
+      std::string::npos);
+  // As in mmc, X `p` Y and tuples are heads too.
+  EXPECT_NE(Compact("X `q` Y :- true.\n").find("name: SymName q\n"),
+      std::string::npos);
+  EXPECT_NE(Compact("{X} :- true.\n").find("name: SymName {}\n"),
+      std::string::npos);
+}
+
+TEST(ConvertTest, Goals) {
+  EXPECT_EQ(GoalKind("true"), "BuiltinGoal");
+  EXPECT_EQ(GoalKind("fail"), "BuiltinGoal");
+  EXPECT_EQ(GoalKind("a, b"), "Conjunction");
+  EXPECT_EQ(GoalKind("a & b"), "Conjunction");
+  EXPECT_EQ(GoalKind("a ; b"), "Disjunction");
+  EXPECT_EQ(GoalKind("not a"), "Negation");
+  EXPECT_EQ(GoalKind("\\+ a"), "Negation");
+  EXPECT_EQ(GoalKind("a => b"), "Implication");
+  EXPECT_EQ(GoalKind("a <= b"), "Implication");
+  EXPECT_EQ(GoalKind("a <=> b"), "Implication");
+  EXPECT_EQ(GoalKind("if a then b else c"), "IfThenElse");
+  EXPECT_EQ(GoalKind("a -> b ; c"), "IfThenElse");
+  EXPECT_EQ(GoalKind("X = Y"), "Unification");
+  EXPECT_EQ(GoalKind("X \\= Y"), "Inequality");
+  EXPECT_EQ(GoalKind("call(P, X)"), "Call");
+  EXPECT_EQ(GoalKind("X `member` L"), "Call");
+  EXPECT_EQ(GoalKind("{a, b}"), "Call");
+  EXPECT_EQ(GoalKind("P"), "HigherOrderCall");
+  EXPECT_EQ(GoalKind("P(X)"), "HigherOrderCall");
+  EXPECT_EQ(GoalKind("X `P` Y"), "HigherOrderCall");
+  EXPECT_EQ(GoalKind("some [X, !S] q(X)"), "QuantifiedGoal");
+  EXPECT_EQ(GoalKind("all [X] q(X)"), "QuantifiedGoal");
+  EXPECT_EQ(GoalKind("impure q"), "PurityGoal");
+  EXPECT_EQ(GoalKind("semipure q"), "PurityGoal");
+  EXPECT_EQ(GoalKind("promise_pure q"), "PromisePurity");
+  EXPECT_EQ(GoalKind("promise_equivalent_solutions [X] q(X)"),
+      "PromiseSolutions");
+  EXPECT_EQ(GoalKind("promise_equivalent_solution_sets [X] q(X)"),
+      "PromiseSolutions");
+  EXPECT_EQ(GoalKind("arbitrary [X] q(X)"), "PromiseSolutions");
+  EXPECT_EQ(GoalKind("require_det q"), "RequireDeterminism");
+  EXPECT_EQ(GoalKind("require_complete_switch [X] q"), "RequireSwitch");
+  EXPECT_EQ(GoalKind("require_switch_arms_semidet [X] q"), "RequireSwitch");
+  EXPECT_EQ(GoalKind("disable_warnings [singleton_vars] q"),
+      "DisableWarnings");
+  EXPECT_EQ(GoalKind("trace [io(!IO)] q"), "TraceGoal");
+  EXPECT_EQ(GoalKind("try [] q then r"), "TryGoal");
+  EXPECT_EQ(GoalKind("event e(X)"), "EventGoal");
+  // try(Params, Goal) alone is a call, as in mmc.
+  EXPECT_EQ(GoalKind("try [] q"), "Call");
+  // Conjunctions flatten through parentheses, and C -> T ; E within a
+  // disjunction is an if-then-else.
+  EXPECT_EQ(Compact("p :- (a, b), c.\n").find("Conjunction"),
+      Compact("p :- (a, b), c.\n").rfind("Conjunction"));
+  EXPECT_EQ(Compact("p :- a ; (b -> c ; d).\n"),
+      "FactOrRule\n| kind: Predicate\n| name: SymName p\n"
+      "| body: Disjunction\n| | goals:\n"
+      "| | | Call\n| | | | name: SymName a\n"
+      "| | | IfThenElse\n| | | | form: Arrow\n"
+      "| | | | condition: Call\n| | | | | name: SymName b\n"
+      "| | | | then: Call\n| | | | | name: SymName c\n"
+      "| | | | else: Call\n| | | | | name: SymName d\n");
+  EXPECT_EQ(Compact("p :- trace [compile_time(flag(\"x\") or grade(debug)), "
+                    "run_time(env(\"V\")), io(!IO), state(lvl, !L)] q.\n"),
+      "FactOrRule\n| kind: Predicate\n| name: SymName p\n"
+      "| body: TraceGoal\n| | params:\n"
+      "| | | TraceParam\n| | | | kind: CompileTime\n"
+      "| | | | condition: TraceCondition\n| | | | | kind: Or\n"
+      "| | | | | operands:\n"
+      "| | | | | | TraceCondition\n| | | | | | | kind: Primitive\n"
+      "| | | | | | | primitive: FunctorData\n"
+      "| | | | | | | | name: SymName flag\n| | | | | | | | arguments:\n"
+      "| | | | | | | | | Literal \"x\"\n"
+      "| | | | | | TraceCondition\n| | | | | | | kind: Primitive\n"
+      "| | | | | | | primitive: FunctorData\n"
+      "| | | | | | | | name: SymName grade\n| | | | | | | | arguments:\n"
+      "| | | | | | | | | FunctorData\n"
+      "| | | | | | | | | | name: SymName debug\n"
+      "| | | TraceParam\n| | | | kind: RunTime\n"
+      "| | | | condition: TraceCondition\n| | | | | kind: Primitive\n"
+      "| | | | | primitive: FunctorData\n| | | | | | name: SymName env\n"
+      "| | | | | | arguments:\n| | | | | | | Literal \"V\"\n"
+      "| | | TraceParam\n| | | | kind: Io\n| | | | var: StateVar !IO\n"
+      "| | | TraceParam\n| | | | kind: State\n"
+      "| | | | mutableName: SymName lvl\n| | | | var: StateVar !L\n"
+      "| | goal: Call\n| | | name: SymName q\n");
+  EXPECT_EQ(Compact("p :- try [io(!IO)] q then r else s "
+                    "catch e -> t catch f -> u catch_any E -> v.\n"),
+      "FactOrRule\n| kind: Predicate\n| name: SymName p\n"
+      "| body: TryGoal\n| | io:\n| | | StateVar !IO\n"
+      "| | goal: Call\n| | | name: SymName q\n"
+      "| | then: Call\n| | | name: SymName r\n"
+      "| | else: Call\n| | | name: SymName s\n"
+      "| | catches:\n"
+      "| | | CatchClause\n| | | | pattern: FunctorData\n"
+      "| | | | | name: SymName e\n"
+      "| | | | goal: Call\n| | | | | name: SymName t\n"
+      "| | | CatchClause\n| | | | pattern: FunctorData\n"
+      "| | | | | name: SymName f\n"
+      "| | | | goal: Call\n| | | | | name: SymName u\n"
+      "| | catchAny: CatchClause\n| | | pattern: Variable E\n"
+      "| | | goal: Call\n| | | | name: SymName v\n");
+  EXPECT_EQ(KindOf("p :- require_switch_arms_cc_multi [X] q.\n",
+                "armDeterminism"),
+      "CcMulti");
+}
+
+TEST(ConvertTest, DataTerms) {
+  EXPECT_EQ(DataKind("Y"), "Variable");
+  EXPECT_EQ(DataKind("!.S"), "StateVar");
+  EXPECT_EQ(DataKind("1"), "Literal");
+  EXPECT_EQ(DataKind("$line"), "ImplementationLiteral");
+  EXPECT_EQ(DataKind("f(Y)"), "FunctorData");
+  EXPECT_EQ(DataKind("Y + 1"), "FunctorData");
+  EXPECT_EQ(DataKind("apply(F, 1)"), "FunctorData");
+  EXPECT_EQ(DataKind("Y `f` Z"), "FunctorData");
+  EXPECT_EQ(DataKind("[1, 2 | T]"), "ListData");
+  EXPECT_EQ(DataKind("{1, 2}"), "TupleData");
+  EXPECT_EQ(DataKind("F(1)"), "ApplyData");
+  EXPECT_EQ(DataKind("Y `F` Z"), "ApplyData");
+  EXPECT_EQ(DataKind("if a then 1 else 2"), "ConditionalData");
+  EXPECT_EQ(DataKind("a -> 1 ; 2"), "ConditionalData");
+  EXPECT_EQ(DataKind("A @ f(_)"), "UnifyData");
+  EXPECT_EQ(DataKind("T ^ f ^ g(1)"), "FieldSelection");
+  EXPECT_EQ(DataKind("T ^ f := 3"), "FieldUpdate");
+  EXPECT_EQ(DataKind("Y : int"), "TypeQualified");
+  EXPECT_EQ(DataKind("Y `with_type` int"), "TypeQualified");
+  EXPECT_EQ(DataKind("coerce(Y)"), "Coerce");
+  EXPECT_EQ(DataKind("pred(A::in) is det :- true"), "Lambda");
+  EXPECT_EQ(DataKind("func(A) = A + 1"), "Lambda");
+  // pred(...) and func(...) alone are ordinary functors.
+  EXPECT_EQ(DataKind("pred(A)"), "FunctorData");
+  EXPECT_EQ(Compact("p :- X = T ^ f ^ g(1) := 3.\n"),
+      "FactOrRule\n| kind: Predicate\n| name: SymName p\n"
+      "| body: Unification\n| | left: Variable X\n"
+      "| | right: FieldUpdate\n| | | term: Variable T\n| | | fields:\n"
+      "| | | | FieldSpec\n| | | | | name: SymName f\n"
+      "| | | | FieldSpec\n| | | | | name: SymName g\n"
+      "| | | | | arguments:\n| | | | | | Literal 1\n"
+      "| | | value: Literal 3\n");
+  EXPECT_EQ(Compact("p :- X = (impure pred(!.S::in, !:S::out) is det --> "
+                    "[a]).\n"),
+      "FactOrRule\n| kind: Predicate\n| name: SymName p\n"
+      "| body: Unification\n| | left: Variable X\n"
+      "| | right: Lambda\n| | | purity: Impure\n| | | kind: Predicate\n"
+      "| | | arguments:\n"
+      "| | | | ModedTerm\n| | | | | term: StateVar !.S\n"
+      "| | | | | mode: NamedMode\n| | | | | | name: SymName in\n"
+      "| | | | ModedTerm\n| | | | | term: StateVar !:S\n"
+      "| | | | | mode: NamedMode\n| | | | | | name: SymName out\n"
+      "| | | determinism: Det\n"
+      "| | | dcgBody: DcgTerminals\n| | | | terms:\n"
+      "| | | | | FunctorData\n| | | | | | name: SymName a\n");
+  EXPECT_EQ(Compact("p :- X = (func(A) = B is det :- B = A).\n"),
+      "FactOrRule\n| kind: Predicate\n| name: SymName p\n"
+      "| body: Unification\n| | left: Variable X\n"
+      "| | right: Lambda\n| | | purity: Pure\n| | | kind: Function\n"
+      "| | | arguments:\n| | | | ModedTerm\n| | | | | term: Variable A\n"
+      "| | | result: ModedTerm\n| | | | term: Variable B\n"
+      "| | | determinism: Det\n"
+      "| | | body: Unification\n| | | | left: Variable B\n"
+      "| | | | right: Variable A\n");
+}
+
+TEST(ConvertTest, DcgGoals) {
+  auto dcgKind{[](llvm::StringRef goal) {
+    return KindOf(("p --> " + goal + ".\n").str(), "body");
+  }};
+  EXPECT_EQ(dcgKind("a, b"), "DcgConjunction");
+  EXPECT_EQ(dcgKind("a & b"), "DcgConjunction");
+  EXPECT_EQ(dcgKind("a ; b"), "DcgDisjunction");
+  EXPECT_EQ(dcgKind("if a then b else c"), "DcgIfThenElse");
+  EXPECT_EQ(dcgKind("a -> b ; c"), "DcgIfThenElse");
+  EXPECT_EQ(dcgKind("not a"), "DcgNegation");
+  EXPECT_EQ(dcgKind("some [X] q(X)"), "DcgQuantified");
+  EXPECT_EQ(dcgKind("{ q }"), "DcgBraces");
+  EXPECT_EQ(dcgKind("[a, b]"), "DcgTerminals");
+  EXPECT_EQ(dcgKind("[]"), "DcgTerminals");
+  EXPECT_EQ(dcgKind("=(X)"), "DcgUnify");
+  EXPECT_EQ(dcgKind(":=(X)"), "DcgUnify");
+  EXPECT_EQ(dcgKind("X =^ f ^ g"), "DcgFieldSelection");
+  EXPECT_EQ(dcgKind("^ f := X"), "DcgFieldUpdate");
+  EXPECT_EQ(dcgKind("q(X)"), "DcgCall");
+  EXPECT_EQ(dcgKind("a => b"), "DcgCall");
+  EXPECT_EQ(dcgKind("P"), "DcgHigherOrderCall");
+  EXPECT_EQ(dcgKind("P(X)"), "DcgHigherOrderCall");
+  // { G1, G2 } holds the conjunction of its goals.
+  EXPECT_EQ(Compact("p --> { a, b }.\n"),
+      "DcgRule\n| name: SymName p\n| body: DcgBraces\n"
+      "| | goal: Conjunction\n| | | parallel: false\n| | | goals:\n"
+      "| | | | Call\n| | | | | name: SymName a\n"
+      "| | | | Call\n| | | | | name: SymName b\n");
+}
+
+TEST(ConvertTest, ClauseErrors) {
+  using V = std::vector<std::string>;
+  EXPECT_EQ(Messages_("X :- true.\n"),
+      V{"expected a clause head, but found 'X'"});
+  EXPECT_EQ(Messages_("1.\n"), V{"expected a clause head, but found '1'"});
+  EXPECT_EQ(Messages_("p :- 1.\n"), V{"expected a goal, but found '1'"});
+  EXPECT_EQ(Messages_("p :- (a -> b).\n"),
+      V{"an if-then-else must have an else part"});
+  EXPECT_EQ(Messages_("p :- (if a then b).\n"),
+      V{"an if-then-else must have an else part"});
+  EXPECT_EQ(Messages_("p :- X = (a -> 1).\n"),
+      V{"an if-then-else must have an else part"});
+  EXPECT_EQ(Messages_("p(X::in, Y).\n"),
+      V{"either every argument or none must have a mode"});
+  EXPECT_EQ(Messages_("f(X::in) = Y.\n"),
+      V{"either every argument and the result or none must have a mode"});
+  EXPECT_EQ(Messages_("p :- some X q.\n"),
+      V{"expected a list of variables, but found 'X'"});
+  EXPECT_EQ(Messages_("p :- some [f(X)] q.\n"),
+      V{"expected a variable or a state variable, but found 'f(X)'"});
+  EXPECT_EQ(Messages_("p :- q(!f).\n"),
+      V{"expected a state variable's name, but found 'f'"});
+  EXPECT_EQ(Messages_("p :- require_complete_switch [X, Y] q.\n"),
+      V{"expected a list of one variable, but found '[X, Y]'"});
+  EXPECT_EQ(Messages_("p :- disable_warnings [a(1)] q.\n"),
+      V{"expected a warning name, but found 'a(1)'"});
+  EXPECT_EQ(Messages_("p :- trace [foo] q.\n"),
+      V{"expected a trace parameter: compile_time(...), run_time(...), "
+        "io(!IO) or state(Mutable, !S), but found 'foo'"});
+  EXPECT_EQ(Messages_("p :- trace [io(IO)] q.\n"),
+      V{"expected a state variable !X, but found 'IO'"});
+  EXPECT_EQ(Messages_("p :- try [foo] q then r.\n"),
+      V{"expected a try parameter io(!S), but found 'foo'"});
+  EXPECT_EQ(Messages_("p :- try [] q catch e -> r.\n"),
+      V{"a try goal must have a then part: 'try Params Goal then Goal', "
+        "then optionally 'else Goal', 'catch Pattern -> Goal' and "
+        "'catch_any Var -> Goal'"});
+  EXPECT_EQ(Messages_("p :- try [] q then r catch e.\n"),
+      V{"expected 'Pattern -> Goal', but found 'e'"});
+  EXPECT_EQ(Messages_("p :- event X.\n"),
+      V{"expected a predicate call, but found 'X'"});
+  EXPECT_EQ(Messages_("p :- atomic([], q).\n"), V{"atomic goals"});
+  EXPECT_EQ(Messages_("p :- X = (pred(A) :- true).\n"),
+      V{"a lambda expression's head must be 'pred(Args) is Det' or "
+        "'func(Args) = Result', with an optional 'is Det'"});
+  EXPECT_EQ(Messages_("p :- X = (pred(A) is foo).\n"),
+      V{"expected a determinism category, but found 'foo'"});
+  EXPECT_EQ(Messages_("p(X) :- X := 1.\n"),
+      V{"'X := 1' is a DCG goal, which may appear only in a DCG rule"});
+  EXPECT_EQ(Messages_("p(X) :- =(X).\n"),
+      V{"'=(X)' is a DCG goal, which may appear only in a DCG rule"});
+  EXPECT_EQ(Messages_("p --> X = Y.\n"),
+      V{"expected a DCG goal such as '=(Term)' or 'Term =^ Field', but "
+        "found 'X = Y'"});
+  EXPECT_EQ(Messages_("p --> {}.\n"),
+      V{"expected a DCG goal, but found '{}'"});
+  EXPECT_EQ(Messages_("p --> [a | T].\n"),
+      V{"expected a list without a tail, but found '[a | T]'"});
+}
+
+// A %$omp directive applies to a goal, and is ignored anywhere else.
+TEST(ConvertTest, Directives) {
+  using V = std::vector<std::string>;
+  auto messages{[](llvm::StringRef text) {
+    return Convert(text, /*openMP=*/true).messages;
+  }};
+  EXPECT_EQ(messages("p :-\n  %$omp parallel do\n  q.\n"),
+      V{"OpenMP directives"});
+  ConvertResult ignored{Convert("%$omp parallel do\np(X) :- X = (\n"
+                                "  %$omp parallel do\n  1).\n",
+      /*openMP=*/true)};
+  EXPECT_EQ(ignored.messages,
+      (V{"an OpenMP directive applies only to a goal; it is ignored",
+          "an OpenMP directive applies only to a goal; it is ignored"}));
+  EXPECT_NE(ignored.tree.find("FactOrRule"), std::string::npos);
+  // Without -fopenmp a directive is a comment.
+  EXPECT_EQ(Messages_("p :-\n  %$omp parallel do\n  q.\n"), V{});
 }
 
 // The combinators on their own, with the expected forms they describe.

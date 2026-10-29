@@ -1,6 +1,7 @@
 add_merkurius_library(MerkuriusParser
   char-block.cpp
   convert.cpp
+  convert-goals.cpp
   lexer.cpp
   message.cpp
   operators.cpp
