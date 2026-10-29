@@ -388,7 +388,41 @@ private:
   }
 };
 
-// A function symbol of a bound inst: f(I1, I2), a, [] or [I | J].
+// An integer, float or string. An integer must fit its type (reference
+// manual, "Builtin types"); the reader reads one of any size, as mmc does.
+class LiteralRule {
+public:
+  using resultType = const Literal *;
+  bool Matches(const Term &t) const {
+    return llvm::isa<IntegerTerm>(t) || llvm::isa<FloatTerm>(t) ||
+        llvm::isa<StringTerm>(t);
+  }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    LiteralKind kind{LiteralKind::String};
+    if (const auto *integer{llvm::dyn_cast<IntegerTerm>(&t)}) {
+      if (!integer->InRange()) {
+        state.messages.Say(GetSource(t, state.tokens),
+            "the integer '%s' is too large for its type"_err_en_US,
+            Excerpt(t, state.tokens));
+        return std::nullopt;
+      }
+      kind = LiteralKind::Integer;
+    } else if (llvm::isa<FloatTerm>(t)) {
+      kind = LiteralKind::Float;
+    }
+    std::string text;
+    llvm::raw_string_ostream os{text};
+    PrintCanonical(os, t);
+    return state.arena.Make<Literal>(t.tokens(), kind, state.arena.Save(text));
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "a literal"; }
+};
+
+static constexpr LiteralRule literal;
+
+// A function symbol of a bound inst: f(I1, I2), a, [] or [I | J], or a
+// literal, which mmc accepts in an inst definition.
 class BoundFunctorRule {
 public:
   using resultType = const BoundFunctor *;
@@ -397,7 +431,7 @@ public:
       return list->elements().empty() ||
           (list->elements().size() == 1 && list->tail());
     }
-    return functor_.Matches(t);
+    return literal.Matches(t) || functor_.Matches(t);
   }
   std::optional<resultType> Convert(
       const Term &t, ConvertState &state) const {
@@ -413,6 +447,13 @@ public:
       if (auto arguments{detail::ConvertElements(
               inst, llvm::ArrayRef<const Term *>{parts}, state)}) {
         return state.arena.Make<BoundFunctor>(t.tokens(), symName, *arguments);
+      }
+      return std::nullopt;
+    }
+    if (literal.Matches(t)) {
+      if (auto value{literal.Convert(t, state)}) {
+        return state.arena.Make<BoundFunctor>(
+            t.tokens(), *value, llvm::ArrayRef<Inst>{});
       }
       return std::nullopt;
     }
@@ -770,17 +811,467 @@ public:
 };
 
 //===----------------------------------------------------------------------===//
+// Type, inst and mode definitions
+//===----------------------------------------------------------------------===//
+
+// Name/Arity, with a small nonnegative integer arity.
+class NameAndArityRule {
+public:
+  using resultType = const NameAndArity *;
+  bool Matches(const Term &t) const { return AsCompound(t, "/", 2); }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    llvm::ArrayRef<const Term *> parts{llvm::cast<CompoundTerm>(t).arguments()};
+    std::optional<const SymName *> name{Apply(symName, *parts[0], state)};
+    const Term &arity{StripParentheses(*parts[1])};
+    const auto *integer{llvm::dyn_cast<IntegerTerm>(&arity)};
+    if (!integer || integer->negative() ||
+        integer->size() != IntegerSize::Default ||
+        integer->magnitude().getActiveBits() > 16) {
+      SayExpected(state, arity, "an arity");
+      return std::nullopt;
+    }
+    if (!name) {
+      return std::nullopt;
+    }
+    return state.arena.Make<NameAndArity>(t.tokens(), *name,
+        static_cast<unsigned>(integer->magnitude().getZExtValue()));
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "a name/arity"; }
+};
+
+static constexpr NameAndArityRule nameAndArity;
+
+// The name being defined and its parameters, which are variables: t(T1, T2).
+static constexpr auto typeHeadRule{
+    appliedName(expect("a type parameter", variable))};
+static constexpr auto instHeadRule{
+    appliedName(expect("an inst parameter", variable))};
+
+// A head whose parameters are distinct.
+template <typename R> class DefinitionHeadRule {
+public:
+  using resultType = typename R::resultType;
+  constexpr explicit DefinitionHeadRule(R rule) : rule_{rule} {}
+  bool Matches(const Term &t) const { return rule_.Matches(t); }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    std::optional<resultType> head{rule_.Convert(t, state)};
+    if (!head) {
+      return std::nullopt;
+    }
+    llvm::ArrayRef<llvm::StringRef> parameters{std::get<1>(*head)};
+    for (std::size_t j{0}; j < parameters.size(); ++j) {
+      if (llvm::is_contained(parameters.take_front(j), parameters[j])) {
+        state.messages.Say(GetSource(t, state.tokens),
+            "the parameter %s appears more than once"_err_en_US,
+            parameters[j].str());
+        return std::nullopt;
+      }
+    }
+    return head;
+  }
+  void Expected(llvm::raw_ostream &os) const { rule_.Expected(os); }
+
+private:
+  R rule_;
+};
+
+template <typename R>
+constexpr DefinitionHeadRule<R> distinctParameters(R rule) {
+  return DefinitionHeadRule<R>{rule};
+}
+
+static constexpr auto typeHead{distinctParameters(typeHeadRule)};
+static constexpr auto instHead{distinctParameters(instHeadRule)};
+
+// The attributes after where, each given at most once.
+class TypeAttributesRule {
+public:
+  using resultType = const TypeAttributes *;
+  bool Matches(const Term &) const { return true; }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    const SymName *equality{nullptr}, *comparison{nullptr};
+    std::optional<llvm::ArrayRef<const NameAndArity *>> directArgs;
+    bool abstractNoncanonical{false};
+    bool ok{true};
+    llvm::SmallVector<const Term *, 4> attributes;
+    Flatten(t, attributes);
+    for (const Term *attribute : attributes) {
+      llvm::StringRef kind;
+      const Term *value{nullptr};
+      if (const CompoundTerm * is{AsCompound(*attribute, "is", 2)}) {
+        kind = FunctorName(StripParentheses(*is->arguments()[0]));
+        value = is->arguments()[1];
+      } else if (llvm::isa<NameTerm>(*attribute)) {
+        kind = FunctorName(*attribute);
+      }
+      bool duplicate{false};
+      if (value && (kind == "equality" || kind == "comparison")) {
+        const SymName *&into{kind == "equality" ? equality : comparison};
+        duplicate = into != nullptr;
+        auto name{Apply(expect("a predicate name", symName), *value, state)};
+        ok &= name.has_value();
+        into = name.value_or(into);
+      } else if (value && kind == "direct_arg") {
+        duplicate = directArgs.has_value();
+        directArgs = Apply(listOf(nameAndArity), *value, state);
+        ok &= directArgs.has_value();
+      } else if (!value && kind == "type_is_abstract_noncanonical") {
+        duplicate = abstractNoncanonical;
+        abstractNoncanonical = true;
+      } else {
+        SayExpected(state, *attribute,
+            "'equality is', 'comparison is', 'direct_arg is' or "
+            "'type_is_abstract_noncanonical'");
+        ok = false;
+      }
+      if (duplicate) {
+        state.messages.Say(GetSource(*attribute, state.tokens),
+            "the type attribute '%s' is given more than once"_err_en_US,
+            kind.str());
+        ok = false;
+      }
+    }
+    if (!ok) {
+      return std::nullopt;
+    }
+    return state.arena.Make<TypeAttributes>(t.tokens(), equality, comparison,
+        directArgs.value_or(llvm::ArrayRef<const NameAndArity *>{}),
+        abstractNoncanonical);
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "type attributes"; }
+
+private:
+  // The operands of ',' terms, looking through parentheses.
+  static void Flatten(
+      const Term &term, llvm::SmallVectorImpl<const Term *> &into) {
+    const Term &t{StripParentheses(term)};
+    if (const CompoundTerm * comma{AsCompound(t, ",", 2)}) {
+      Flatten(*comma->arguments()[0], into);
+      Flatten(*comma->arguments()[1], into);
+    } else {
+      into.push_back(&t);
+    }
+  }
+};
+
+static constexpr TypeAttributesRule typeAttributes;
+
+// A constructor's argument: Type, or Field :: Type.
+class ConstructorArgRule {
+public:
+  using resultType = const ConstructorArg *;
+  bool Matches(const Term &) const { return true; }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    const Term *typeTerm{&t};
+    const SymName *field{nullptr};
+    bool ok{true};
+    if (const CompoundTerm * colons{AsCompound(t, "::", 2)}) {
+      auto name{Apply(
+          expect("a field name", symName), *colons->arguments()[0], state)};
+      ok = name.has_value();
+      field = name.value_or(nullptr);
+      typeTerm = colons->arguments()[1];
+    }
+    std::optional<Type> ty{Apply(type, *typeTerm, state)};
+    if (!ok || !ty) {
+      return std::nullopt;
+    }
+    return state.arena.Make<ConstructorArg>(t.tokens(), field, *ty);
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "a type"; }
+};
+
+static constexpr ConstructorArgRule constructorArg;
+
+// A constructor: f(Args), a name, [] or [H | T], or a tuple, which is the
+// constructor '{}'; some [Vs] and => Constraints may surround it. In braces,
+// a term is the constructor it is, not split at ';' (reference manual,
+// "Discriminated unions").
+class ConstructorRule {
+public:
+  using resultType = const Constructor *;
+  bool Matches(const Term &) const { return true; }
+  std::optional<resultType> Convert(
+      const Term &term, ConvertState &state) const {
+    const Term *t{&StripParentheses(term)};
+    bool ok{true};
+    llvm::ArrayRef<llvm::StringRef> existentialVars;
+    if (const CompoundTerm * some{AsCompound(*t, "some", 2)}) {
+      ok &= ConvertOptional(quantifiedVars, some->arguments()[0],
+          existentialVars, state);
+      t = &StripParentheses(*some->arguments()[1]);
+    }
+    llvm::ArrayRef<const ClassConstraint *> constraints;
+    if (const CompoundTerm * arrow{AsCompound(*t, "=>", 2)}) {
+      ok &= ConvertOptional(commaListOf(classConstraint),
+          arrow->arguments()[1], constraints, state);
+      t = &StripParentheses(*arrow->arguments()[0]);
+    }
+    // { Ctor } quotes a constructor.
+    if (const auto *tuple{llvm::dyn_cast<TupleTerm>(t)};
+        tuple && tuple->elements().size() == 1) {
+      t = &StripParentheses(*tuple->elements()[0]);
+    }
+    const SymName *name{nullptr};
+    llvm::ArrayRef<const Term *> argumentTerms;
+    const Term *cons[2]; // the head and tail of [H | T]
+    auto builtinName{[&](llvm::StringRef text) {
+      return state.arena.Make<SymName>(
+          t->tokens(), llvm::ArrayRef<llvm::StringRef>{}, text);
+    }};
+    if (const auto *tuple{llvm::dyn_cast<TupleTerm>(t)}) {
+      name = builtinName("{}");
+      argumentTerms = tuple->elements();
+    } else if (const auto *list{llvm::dyn_cast<ListTerm>(t)};
+        list && list->elements().empty() && !list->tail()) {
+      name = builtinName("[]");
+    } else if (list && list->elements().size() == 1 && list->tail()) {
+      name = builtinName("[|]");
+      cons[0] = list->elements()[0];
+      cons[1] = list->tail();
+      argumentTerms = cons;
+    } else if (llvm::isa<NameTerm>(*t) || llvm::isa<CompoundTerm>(*t)) {
+      llvm::SmallVector<const Term *, 4> parts;
+      QualifiedParts(*t, parts);
+      const Term &last{*parts.back()};
+      if (llvm::isa<NameTerm>(last) || llvm::isa<CompoundTerm>(last)) {
+        name = MakeSymName(
+            *t, llvm::ArrayRef(parts).drop_back(), FunctorName(last), state);
+        ok &= name != nullptr;
+        if (const auto *compound{llvm::dyn_cast<CompoundTerm>(&last)}) {
+          argumentTerms = compound->arguments();
+        }
+      } else {
+        SayExpected(state, last, "a constructor");
+        ok = false;
+      }
+    } else {
+      SayExpected(state, *t, "a constructor");
+      ok = false;
+    }
+    std::optional<llvm::ArrayRef<const ConstructorArg *>> arguments{
+        detail::ConvertElements(constructorArg, argumentTerms, state)};
+    if (!ok || !arguments) {
+      return std::nullopt;
+    }
+    return state.arena.Make<Constructor>(StripParentheses(term).tokens(),
+        existentialVars, name, *arguments, constraints);
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "a constructor"; }
+};
+
+// The body of a discriminated union: constructors separated by ';', where
+// the last may be followed by "where Attributes", since where binds more
+// tightly than ';'.
+struct DuBody {
+  llvm::SmallVector<const Term *, 8> constructors;
+  const Term *attributes{nullptr};
+};
+
+static void SplitDuBody(const Term &term, DuBody &body) {
+  const Term &t{StripParentheses(term)};
+  if (const CompoundTerm * semicolon{AsCompound(t, ";", 2)}) {
+    SplitDuBody(*semicolon->arguments()[0], body);
+    SplitDuBody(*semicolon->arguments()[1], body);
+  } else {
+    body.constructors.push_back(&t);
+  }
+}
+
+static std::optional<std::pair<const Term *, const Term *>> SplitWhere(
+    const Term &t) {
+  if (const CompoundTerm * where{AsCompound(t, "where", 2)}) {
+    return std::pair{where->arguments()[0], where->arguments()[1]};
+  }
+  return std::nullopt;
+}
+
+class TypeDefnRule {
+public:
+  using resultType = Item;
+  bool Matches(const Term &t) const {
+    return AsCompound(t, "type", 1) != nullptr;
+  }
+  std::optional<Item> Convert(const Term &t, ConvertState &state) const {
+    const Term &body{StripParentheses(*llvm::cast<CompoundTerm>(t).arguments()[0])};
+    if (const CompoundTerm * arrow{AsCompound(body, "--->", 2)}) {
+      return ConvertDu(t, *arrow->arguments()[0], *arrow->arguments()[1], state);
+    }
+    if (const CompoundTerm * equals{AsCompound(body, "==", 2)}) {
+      auto head{Apply(typeHead, *equals->arguments()[0], state)};
+      std::optional<Type> ty{Apply(type, *equals->arguments()[1], state)};
+      if (!head || !ty) {
+        return std::nullopt;
+      }
+      auto [name, parameters]{*head};
+      return state.arena.Make<EquivalenceTypeDefn>(
+          t.tokens(), name, parameters, *ty);
+    }
+    const Term *headTerm{&body};
+    const TypeAttributes *attributes{nullptr};
+    if (auto where{SplitWhere(body)}) {
+      headTerm = where->first;
+      if (AsCompound(*headTerm, "==", 2)) {
+        state.messages.Say(GetSource(t, state.tokens),
+            "an equivalence type cannot have 'where' attributes"_err_en_US);
+        return std::nullopt;
+      }
+      auto converted{Apply(typeAttributes, *where->second, state)};
+      if (!converted) {
+        return std::nullopt;
+      }
+      attributes = *converted;
+    }
+    auto head{Apply(expect("a type", typeHead), *headTerm, state)};
+    if (!head) {
+      return std::nullopt;
+    }
+    auto [name, parameters]{*head};
+    return state.arena.Make<AbstractTypeDecl>(
+        t.tokens(), name, parameters, attributes);
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "a type definition"; }
+
+private:
+  static std::optional<Item> ConvertDu(const Term &t, const Term &headTerm,
+      const Term &bodyTerm, ConvertState &state) {
+    bool ok{true};
+    const Term *subtype{&headTerm};
+    std::optional<Type> supertype;
+    if (const CompoundTerm * below{AsCompound(headTerm, "=<", 2)}) {
+      subtype = below->arguments()[0];
+      supertype = Apply(type, *below->arguments()[1], state);
+      ok &= supertype.has_value();
+    }
+    auto head{Apply(typeHead, *subtype, state)};
+    ok &= head.has_value();
+    DuBody body;
+    SplitDuBody(bodyTerm, body);
+    const TypeAttributes *attributes{nullptr};
+    if (auto where{SplitWhere(*body.constructors.back())}) {
+      body.constructors.back() = where->first;
+      auto converted{Apply(typeAttributes, *where->second, state)};
+      ok &= converted.has_value();
+      attributes = converted.value_or(nullptr);
+    }
+    auto constructors{detail::ConvertElements(ConstructorRule{},
+        llvm::ArrayRef<const Term *>{body.constructors}, state)};
+    if (!ok || !constructors) {
+      return std::nullopt;
+    }
+    auto [name, parameters]{*head};
+    return state.arena.Make<DuTypeDefn>(
+        t.tokens(), name, parameters, supertype, *constructors, attributes);
+  }
+};
+
+// :- inst Head == Inst. and :- inst Head ---> Functors., where Head may be
+// followed by "for Name/Arity".
+class InstDefnRule {
+public:
+  using resultType = const InstDefn *;
+  bool Matches(const Term &t) const {
+    const CompoundTerm *decl{AsCompound(t, "inst", 1)};
+    return decl &&
+        (AsCompound(*decl->arguments()[0], "==", 2) ||
+            AsCompound(*decl->arguments()[0], "--->", 2));
+  }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    const auto &body{llvm::cast<CompoundTerm>(
+        StripParentheses(*llvm::cast<CompoundTerm>(t).arguments()[0]))};
+    const Term *headTerm{body.arguments()[0]};
+    bool ok{true};
+    const NameAndArity *forType{nullptr};
+    if (const CompoundTerm * forTerm{AsCompound(*headTerm, "for", 2)}) {
+      headTerm = forTerm->arguments()[0];
+      ok &= ConvertOptional(nameAndArity, forTerm->arguments()[1], forType,
+          state);
+    }
+    auto head{Apply(instHead, *headTerm, state)};
+    ok &= head.has_value();
+    std::optional<Inst> definition;
+    if (FunctorName(body) == "==") {
+      definition = Apply(inst, *body.arguments()[1], state);
+    } else {
+      definition = ConvertFunctors(*body.arguments()[1], state);
+    }
+    if (!ok || !definition) {
+      return std::nullopt;
+    }
+    auto [name, parameters]{*head};
+    return state.arena.Make<InstDefn>(
+        t.tokens(), name, parameters, forType, *definition);
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "an inst definition"; }
+
+private:
+  // Functors ---> F1 ; F2 means bound(F1 ; F2).
+  static std::optional<Inst> ConvertFunctors(
+      const Term &t, ConvertState &state) {
+    llvm::SmallVector<const BoundFunctor *, 8> functors;
+    bool ok{true};
+    auto collect{[&](const Term &term, auto &self) -> void {
+      if (const CompoundTerm * semicolon{AsCompound(term, ";", 2)}) {
+        for (const Term *side : semicolon->arguments()) {
+          self(*side, self);
+        }
+      } else if (auto functor{Apply(BoundFunctorRule{}, term, state)}) {
+        functors.push_back(*functor);
+      } else {
+        ok = false;
+      }
+    }};
+    collect(t, collect);
+    if (!ok) {
+      return std::nullopt;
+    }
+    return state.arena.Make<BoundInst>(StripParentheses(t).tokens(), false,
+        state.arena.SaveArray(llvm::ArrayRef<const BoundFunctor *>{functors}));
+  }
+};
+
+// :- mode Head == Mode.
+class ModeDefnRule {
+public:
+  using resultType = const ModeDefn *;
+  bool Matches(const Term &t) const {
+    const CompoundTerm *decl{AsCompound(t, "mode", 1)};
+    return decl && AsCompound(*decl->arguments()[0], "==", 2);
+  }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    const CompoundTerm &body{*AsCompound(
+        *llvm::cast<CompoundTerm>(t).arguments()[0], "==", 2)};
+    auto head{Apply(instHead, *body.arguments()[0], state)};
+    std::optional<Mode> definition{Apply(mode, *body.arguments()[1], state)};
+    if (!head || !definition) {
+      return std::nullopt;
+    }
+    auto [name, parameters]{*head};
+    return state.arena.Make<ModeDefn>(
+        t.tokens(), name, parameters, *definition);
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "a mode definition"; }
+};
+
+//===----------------------------------------------------------------------===//
 // Items (reference manual, "Items")
 //===----------------------------------------------------------------------===//
 
 static constexpr auto declaration{anyOf<Item>(moduleDecl, endModuleDecl,
-    sectionDecl, importDecl, PredDeclRule{}, ModeDeclRule{})};
+    sectionDecl, importDecl, PredDeclRule{}, ModeDeclRule{}, TypeDefnRule{},
+    InstDefnRule{}, ModeDefnRule{})};
 
 // Whether `name` is a declaration of the reference manual's list
 // ("Declarations") that is not converted yet.
 static bool IsDeclarationToDo(llvm::StringRef name) {
   return llvm::StringSwitch<bool>(name)
-      .Cases({"type", "solver", "pred", "func", "inst", "mode"}, true)
+      .Case("solver", true)
       .Cases({"typeclass", "instance", "pragma", "promise"}, true)
       .Cases({"initialise", "initialize", "finalise", "finalize"}, true)
       .Case("mutable", true)

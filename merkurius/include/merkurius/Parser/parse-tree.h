@@ -179,12 +179,29 @@ struct InstVar {
   }
 };
 
+ENUM_CLASS(LiteralKind, Integer, Float, String)
+
+// A number or a string. Its value is kept in canonical notation
+// (PrintCanonical), as in 255, -1i8 or "a\nb"; a character code such as
+// 0'a is the integer it stands for.
+struct Literal {
+  static constexpr llvm::StringLiteral kindName{"Literal"};
+  TokenRange tokens;
+  LiteralKind kind;
+  llvm::StringRef text;
+  template <typename F> void ForEachField(F &&f) const {
+    f("kind", kind);
+    f("text", text);
+  }
+  void PrintInline(llvm::raw_ostream &o) const { o << text; }
+};
+
 // A function symbol of a bound inst, with the insts of its arguments: f(I1,
-// I2), [] or [I | J].
+// I2), [] or [I | J]; or a literal, which has no arguments.
 struct BoundFunctor {
   static constexpr llvm::StringLiteral kindName{"BoundFunctor"};
   TokenRange tokens;
-  const SymName *name;
+  std::variant<const SymName *, const Literal *> name;
   llvm::ArrayRef<Inst> arguments;
   template <typename F> void ForEachField(F &&f) const {
     f("name", name);
@@ -386,12 +403,158 @@ struct ModeDecl {
 };
 
 //===----------------------------------------------------------------------===//
+// Type, inst and mode definitions (reference manual, "User-defined types"
+// and "Insts, modes, and mode definitions")
+//===----------------------------------------------------------------------===//
+
+// Name/Arity, as in direct_arg is [f/1] or for list/1.
+struct NameAndArity {
+  static constexpr llvm::StringLiteral kindName{"NameAndArity"};
+  TokenRange tokens;
+  const SymName *name;
+  unsigned arity;
+  template <typename F> void ForEachField(F &&f) const {
+    f("name", name);
+    f("arity", arity);
+  }
+  void PrintInline(llvm::raw_ostream &o) const {
+    name->PrintInline(o);
+    o << '/' << arity;
+  }
+};
+
+// A constructor's argument, with a field name if it is labelled:
+// age :: int.
+struct ConstructorArg {
+  static constexpr llvm::StringLiteral kindName{"ConstructorArg"};
+  TokenRange tokens;
+  const SymName *field; // null if there is no label
+  Type type;
+  template <typename F> void ForEachField(F &&f) const {
+    f("field", field);
+    f("type", type);
+  }
+};
+
+// f(T1, T2), possibly existentially typed: some [T] (f(T) => c(T)).
+struct Constructor {
+  static constexpr llvm::StringLiteral kindName{"Constructor"};
+  TokenRange tokens;
+  llvm::ArrayRef<llvm::StringRef> existentialVars;
+  const SymName *name;
+  llvm::ArrayRef<const ConstructorArg *> arguments;
+  llvm::ArrayRef<const ClassConstraint *> constraints; // =>
+  template <typename F> void ForEachField(F &&f) const {
+    f("existentialVars", existentialVars);
+    f("name", name);
+    f("arguments", arguments);
+    f("constraints", constraints);
+  }
+};
+
+// where equality is P, comparison is Q, direct_arg is [f/1], or where
+// type_is_abstract_noncanonical (reference manual, "User-defined equality
+// and comparison").
+struct TypeAttributes {
+  static constexpr llvm::StringLiteral kindName{"TypeAttributes"};
+  TokenRange tokens;
+  const SymName *equality; // null if none is given
+  const SymName *comparison;
+  llvm::ArrayRef<const NameAndArity *> directArgs;
+  bool abstractNoncanonical;
+  template <typename F> void ForEachField(F &&f) const {
+    f("equality", equality);
+    f("comparison", comparison);
+    f("directArgs", directArgs);
+    f("abstractNoncanonical", abstractNoncanonical);
+  }
+};
+
+// :- type t(T) ---> Constructors., or a subtype, :- type s =< t ---> ...
+struct DuTypeDefn {
+  static constexpr llvm::StringLiteral kindName{"DuTypeDefn"};
+  TokenRange tokens;
+  const SymName *name;
+  llvm::ArrayRef<llvm::StringRef> parameters;
+  std::optional<Type> supertype;
+  llvm::ArrayRef<const Constructor *> constructors;
+  const TypeAttributes *attributes; // null if there is no where
+  template <typename F> void ForEachField(F &&f) const {
+    f("name", name);
+    f("parameters", parameters);
+    f("supertype", supertype);
+    f("constructors", constructors);
+    f("attributes", attributes);
+  }
+};
+
+// :- type t(T) == Type.
+struct EquivalenceTypeDefn {
+  static constexpr llvm::StringLiteral kindName{"EquivalenceTypeDefn"};
+  TokenRange tokens;
+  const SymName *name;
+  llvm::ArrayRef<llvm::StringRef> parameters;
+  Type type;
+  template <typename F> void ForEachField(F &&f) const {
+    f("name", name);
+    f("parameters", parameters);
+    f("type", type);
+  }
+};
+
+// :- type t(T)., whose definition is elsewhere.
+struct AbstractTypeDecl {
+  static constexpr llvm::StringLiteral kindName{"AbstractTypeDecl"};
+  TokenRange tokens;
+  const SymName *name;
+  llvm::ArrayRef<llvm::StringRef> parameters;
+  const TypeAttributes *attributes; // null if there is no where
+  template <typename F> void ForEachField(F &&f) const {
+    f("name", name);
+    f("parameters", parameters);
+    f("attributes", attributes);
+  }
+};
+
+// :- inst i(I) == Inst., or :- inst i ---> Functors., which is bound(...);
+// either may say which type constructor it is for.
+struct InstDefn {
+  static constexpr llvm::StringLiteral kindName{"InstDefn"};
+  TokenRange tokens;
+  const SymName *name;
+  llvm::ArrayRef<llvm::StringRef> parameters;
+  const NameAndArity *forType; // null if there is no for
+  Inst inst;
+  template <typename F> void ForEachField(F &&f) const {
+    f("name", name);
+    f("parameters", parameters);
+    f("forType", forType);
+    f("inst", inst);
+  }
+};
+
+// :- mode m(I) == Mode.
+struct ModeDefn {
+  static constexpr llvm::StringLiteral kindName{"ModeDefn"};
+  TokenRange tokens;
+  const SymName *name;
+  llvm::ArrayRef<llvm::StringRef> parameters;
+  Mode mode;
+  template <typename F> void ForEachField(F &&f) const {
+    f("name", name);
+    f("parameters", parameters);
+    f("mode", mode);
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Items (reference manual, "Items")
 //===----------------------------------------------------------------------===//
 
 using Item = std::variant<const ModuleDecl *, const EndModuleDecl *,
     const SectionDecl *, const ImportDecl *, const PredDecl *,
-    const ModeDecl *>;
+    const ModeDecl *, const DuTypeDefn *, const EquivalenceTypeDefn *,
+    const AbstractTypeDecl *, const InstDefn *, const ModeDefn *>;
 
 // The items of a file that converted without errors, in order.
 struct ParseTree {
