@@ -3,6 +3,7 @@ add_merkurius_library(MerkuriusParser
   convert.cpp
   convert-goals.cpp
   convert-pragmas.cpp
+  convert-directives.cpp
   lexer.cpp
   message.cpp
   operators.cpp
