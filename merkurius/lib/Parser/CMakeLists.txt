@@ -5,6 +5,7 @@ add_merkurius_library(MerkuriusParser
   operators.cpp
   provenance.cpp
   source.cpp
+  term.cpp
   token.cpp
 
   LINK_LIBS
