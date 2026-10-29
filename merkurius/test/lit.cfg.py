@@ -25,6 +25,20 @@ tool_dirs = [config.merkurius_tools_dir, config.llvm_tools_dir]
 llvm_config.add_tool_substitutions(["merkc", "merkurius-term-fuzzer"], tool_dirs)
 llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
 
+# The unparser's round-trip tests 2 and 4.
+config.substitutions.append(
+    (
+        "%round-trip",
+        "%s %s --merkc %s"
+        % (
+            config.python_executable,
+            os.path.join(config.merkurius_src_root, "utils", "round-trip",
+                         "round-trip.py"),
+            os.path.join(config.merkurius_tools_dir, "merkc"),
+        ),
+    )
+)
+
 # Tests that compare our term reader with Mercury's need mmc, from $MMC or
 # the PATH; without it they are unsupported.
 import shutil

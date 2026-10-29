@@ -13,6 +13,7 @@ add_merkurius_library(MerkuriusParser
   term-reader.cpp
   term.cpp
   token.cpp
+  unparse.cpp
 
   LINK_LIBS
   MerkuriusCommon

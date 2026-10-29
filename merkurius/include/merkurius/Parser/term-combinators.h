@@ -423,12 +423,18 @@ template <typename P> constexpr TupleOfRule<P> tupleOf(P rule) {
 // c(X), looking through parentheses; an unqualified term is one part.
 void QualifiedParts(const Term &, llvm::SmallVectorImpl<const Term *> &);
 
-// The SymName of `name` qualified by `qualifiers`; '__' in any of them is a
-// qualifier too. Reports an error and returns null if a qualifier is not a
-// name.
+// The SymName of `part`'s functor, qualified by `qualifiers`; '__' in any
+// of them is a qualifier too. Its tokens run from the first qualifier to the
+// functor's token, so a name's arguments are not among them. Reports an
+// error and returns null if a qualifier is not a name.
 const SymName *MakeSymName(const Term &whole,
-    llvm::ArrayRef<const Term *> qualifiers, llvm::StringRef name,
+    llvm::ArrayRef<const Term *> qualifiers, const Term &part,
     ConvertState &);
+// The SymName of a name written with brackets: {} for a tuple, [|] for a
+// list cell or [] for the empty list. Its tokens are the opening bracket,
+// or both brackets of [].
+const SymName *MakeBracketSymName(
+    const Term &bracketed, llvm::StringRef name, ConvertState &);
 
 // A name, possibly module-qualified with '.' or '__', such as io.write,
 // io__write or 'io'.write.
@@ -462,8 +468,8 @@ public:
       SayExpected(state, part, "a name");
       return std::nullopt;
     }
-    const SymName *name{MakeSymName(
-        t, llvm::ArrayRef(parts).drop_back(), FunctorName(part), state)};
+    const SymName *name{
+        MakeSymName(t, llvm::ArrayRef(parts).drop_back(), part, state)};
     std::optional<llvm::ArrayRef<typename P::resultType>> arguments{
         llvm::ArrayRef<typename P::resultType>{}};
     if (const auto *compound{llvm::dyn_cast<CompoundTerm>(&part)}) {

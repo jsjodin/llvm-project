@@ -92,8 +92,9 @@ static void SplitUnderscores(
 }
 
 const SymName *MakeSymName(const Term &whole,
-    llvm::ArrayRef<const Term *> qualifiers, llvm::StringRef name,
+    llvm::ArrayRef<const Term *> qualifiers, const Term &part,
     ConvertState &state) {
+  llvm::StringRef name{FunctorName(part)};
   llvm::SmallVector<llvm::StringRef, 4> parts;
   bool ok{true};
   for (const Term *qualifier : qualifiers) {
@@ -112,8 +113,31 @@ const SymName *MakeSymName(const Term &whole,
     part = state.arena.Save(part);
   }
   llvm::ArrayRef<llvm::StringRef> all{parts};
-  return state.arena.Make<SymName>(StripParentheses(whole).tokens(),
-      state.arena.SaveArray(all.drop_back()), all.back());
+  const auto *compound{llvm::dyn_cast<CompoundTerm>(&part)};
+  TokenRange tokens{compound ? compound->functor()->tokens() : part.tokens()};
+  if (!qualifiers.empty()) {
+    std::uint32_t first{StripParentheses(whole).tokens().first};
+    if (tokens.first == part.tokens().first) {
+      tokens.first = first;
+    } else {
+      // An infix or postfix operator, as in m.(X + Y): its token follows an
+      // argument, so the name's tokens are the qualifiers, and its parent
+      // holds the operator's.
+      tokens = TokenRange{first, part.tokens().first - 1};
+    }
+  }
+  return state.arena.Make<SymName>(
+      tokens, state.arena.SaveArray(all.drop_back()), all.back());
+}
+
+const SymName *MakeBracketSymName(
+    const Term &bracketed, llvm::StringRef name, ConvertState &state) {
+  TokenRange tokens{bracketed.tokens()};
+  if (name != "[]") {
+    tokens.last = tokens.first;
+  }
+  return state.arena.Make<SymName>(
+      tokens, llvm::ArrayRef<llvm::StringRef>{}, name);
 }
 
 bool SymNameRule::Matches(const Term &t) const {
@@ -129,8 +153,8 @@ std::optional<const SymName *> SymNameRule::Convert(
     SayExpected(state, part, "a name");
     return std::nullopt;
   }
-  if (const SymName *name{MakeSymName(
-          t, llvm::ArrayRef(parts).drop_back(), FunctorName(part), state)}) {
+  if (const SymName *name{
+          MakeSymName(t, llvm::ArrayRef(parts).drop_back(), part, state)}) {
     return name;
   }
   return std::nullopt;
@@ -350,8 +374,7 @@ public:
       const Term &t, ConvertState &state) const {
     if (const auto *list{llvm::dyn_cast<ListTerm>(&t)}) {
       llvm::StringRef name{list->elements().empty() ? "[]" : "[|]"};
-      const SymName *symName{state.arena.Make<SymName>(
-          t.tokens(), llvm::ArrayRef<llvm::StringRef>{}, name)};
+      const SymName *symName{MakeBracketSymName(t, name, state)};
       if (list->elements().empty()) {
         return state.arena.Make<BoundFunctor>(
             t.tokens(), symName, llvm::ArrayRef<Inst>{});
@@ -819,8 +842,7 @@ public:
     llvm::ArrayRef<const Term *> argumentTerms;
     const Term *cons[2]; // the head and tail of [H | T]
     auto builtinName{[&](llvm::StringRef text) {
-      return state.arena.Make<SymName>(
-          t->tokens(), llvm::ArrayRef<llvm::StringRef>{}, text);
+      return MakeBracketSymName(*t, text, state);
     }};
     if (const auto *tuple{llvm::dyn_cast<TupleTerm>(t)}) {
       name = builtinName("{}");
@@ -838,8 +860,7 @@ public:
       QualifiedParts(*t, parts);
       const Term &last{*parts.back()};
       if (llvm::isa<NameTerm>(last) || llvm::isa<CompoundTerm>(last)) {
-        name = MakeSymName(
-            *t, llvm::ArrayRef(parts).drop_back(), FunctorName(last), state);
+        name = MakeSymName(*t, llvm::ArrayRef(parts).drop_back(), last, state);
         ok &= name != nullptr;
         if (const auto *compound{llvm::dyn_cast<CompoundTerm>(&last)}) {
           argumentTerms = compound->arguments();
