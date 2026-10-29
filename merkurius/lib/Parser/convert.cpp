@@ -931,7 +931,7 @@ public:
     }
     auto [name, parameters]{*head};
     return state.arena.Make<AbstractTypeDecl>(
-        t.tokens(), name, parameters, attributes);
+        t.tokens(), name, parameters, attributes, false);
   }
   void Expected(llvm::raw_ostream &os) const { os << "a type definition"; }
 
@@ -1232,18 +1232,8 @@ public:
 static constexpr auto declaration{anyOf<Item>(moduleDecl, endModuleDecl,
     sectionDecl, importDecl, PredDeclRule{}, ModeDeclRule{}, TypeDefnRule{},
     InstDefnRule{}, ModeDefnRule{}, TypeclassDeclRule{}, InstanceDeclRule{},
-    pragma)};
-
-// Whether `name` is a declaration of the reference manual's list
-// ("Declarations") that is not converted yet.
-static bool IsDeclarationToDo(llvm::StringRef name) {
-  return llvm::StringSwitch<bool>(name)
-      .Case("solver", true)
-      .Case("promise", true)
-      .Cases({"initialise", "initialize", "finalise", "finalize"}, true)
-      .Case("mutable", true)
-      .Default(false);
-}
+    pragma, InitialiseRule{}, MutableRule{}, PromiseRule{},
+    PromiseDisjunctionRule{}, SolverTypeRule{})};
 
 std::optional<Item> ConvertItem(const Term &term, ConvertState &state) {
   const Term &t{StripParentheses(term)};
@@ -1262,11 +1252,6 @@ std::optional<Item> ConvertItem(const Term &term, ConvertState &state) {
       StripParentheses(*llvm::cast<CompoundTerm>(t).arguments()[0])};
   if (declaration.Matches(decl)) {
     return declaration.Convert(decl, state);
-  }
-  if (IsDeclarationToDo(FunctorName(decl))) {
-    state.messages.Say(GetSource(decl, state.tokens),
-        "the ':- %s' declaration"_todo_en_US, FunctorName(decl).str());
-    return std::nullopt;
   }
   SayExpected(state, decl, "a declaration");
   return std::nullopt;

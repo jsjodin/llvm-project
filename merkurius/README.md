@@ -8,8 +8,9 @@ reads source files through Flang's provenance machinery, lexes them, reads
 their items as terms, and converts the terms to a parse tree; so far the
 converter handles the module system's declarations, predicate, function and
 mode declarations, type, inst and mode definitions, type class and
-instance declarations, pragmas, and clauses, with their goals, DCG goals
-and data-terms. Its actions are:
+instance declarations, pragmas, `initialise`, `finalise` and `mutable`
+declarations, promises, solver types, and clauses, with their goals, DCG
+goals and data-terms. Its actions are:
 
 | Action | Prints |
 | --- | --- |

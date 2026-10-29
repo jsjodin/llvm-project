@@ -38,6 +38,7 @@
 % CHECK-NEXT: | | | parameters:
 % CHECK-NEXT: | | | | T
 % CHECK-NEXT: | | | attributes: none
+% CHECK-NEXT: | | | solver: false
 
 :- type assoc_list(KeyType, ValueType)
         == list(pair(KeyType, ValueType)).

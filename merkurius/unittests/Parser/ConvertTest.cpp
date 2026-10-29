@@ -106,8 +106,9 @@ TEST(ConvertTest, Errors) {
   EXPECT_EQ(Messages_(":- module(a, b).\n"),
       std::vector<std::string>{
           "expected a declaration, but found 'module(a, b)'"});
-  EXPECT_EQ(Messages_(":- initialise p.\n"),
-      std::vector<std::string>{"the ':- initialise' declaration"});
+  EXPECT_EQ(Messages_(":- pragma mode_check_clauses(p/1).\n"),
+      std::vector<std::string>{
+          "the ':- pragma mode_check_clauses' declaration"});
   // Long terms and terms over several lines are shortened.
   EXPECT_EQ(Messages_(":- foo(aaaaaaaaaa, bbbbbbbbbb, cccccccccc, dddddddddd).\n"
                       ":- bar(a,\n  b).\n"),
@@ -411,10 +412,11 @@ TEST(ConvertTest, TypeDefinitions) {
       "EquivalenceTypeDefn\n| name: SymName money\n| type: NamedType\n"
       "| | name: SymName int\n");
   EXPECT_EQ(Compact(":- type t2(T1, T2).\n"),
-      "AbstractTypeDecl\n| name: SymName t2\n| parameters:\n| | T1\n| | T2\n");
+      "AbstractTypeDecl\n| name: SymName t2\n| parameters:\n| | T1\n| | T2\n"
+      "| solver: false\n");
   EXPECT_EQ(Compact(":- type t where type_is_abstract_noncanonical.\n"),
       "AbstractTypeDecl\n| name: SymName t\n| attributes: TypeAttributes\n"
-      "| | abstractNoncanonical: true\n");
+      "| | abstractNoncanonical: true\n| solver: false\n");
 }
 
 TEST(ConvertTest, InstAndModeDefinitions) {
@@ -471,8 +473,6 @@ TEST(ConvertTest, DefinitionErrors) {
   EXPECT_EQ(Messages_(":- inst i(int) == ground."),
       V{"expected an inst parameter, but found 'int'"});
   EXPECT_EQ(Messages_(":- mode m == X."), V{"expected a mode, but found 'X'"});
-  EXPECT_EQ(Messages_(":- solver type st."),
-      V{"the ':- solver' declaration"});
 }
 
 TEST(ConvertTest, Typeclasses) {
@@ -703,19 +703,13 @@ TEST(ConvertTest, Goals) {
       "| | | TraceParam\n| | | | kind: CompileTime\n"
       "| | | | condition: TraceCondition\n| | | | | kind: Or\n"
       "| | | | | operands:\n"
-      "| | | | | | TraceCondition\n| | | | | | | kind: Primitive\n"
-      "| | | | | | | primitive: FunctorData\n"
-      "| | | | | | | | name: SymName flag\n| | | | | | | | arguments:\n"
-      "| | | | | | | | | Literal \"x\"\n"
-      "| | | | | | TraceCondition\n| | | | | | | kind: Primitive\n"
-      "| | | | | | | primitive: FunctorData\n"
-      "| | | | | | | | name: SymName grade\n| | | | | | | | arguments:\n"
-      "| | | | | | | | | FunctorData\n"
-      "| | | | | | | | | | name: SymName debug\n"
+      "| | | | | | TraceCondition\n| | | | | | | kind: Flag\n"
+      "| | | | | | | value: x\n"
+      "| | | | | | TraceCondition\n| | | | | | | kind: Grade\n"
+      "| | | | | | | value: debug\n"
       "| | | TraceParam\n| | | | kind: RunTime\n"
-      "| | | | condition: TraceCondition\n| | | | | kind: Primitive\n"
-      "| | | | | primitive: FunctorData\n| | | | | | name: SymName env\n"
-      "| | | | | | arguments:\n| | | | | | | Literal \"V\"\n"
+      "| | | | condition: TraceCondition\n| | | | | kind: Env\n"
+      "| | | | | value: V\n"
       "| | | TraceParam\n| | | | kind: Io\n| | | | var: StateVar !IO\n"
       "| | | TraceParam\n| | | | kind: State\n"
       "| | | | mutableName: SymName lvl\n| | | | var: StateVar !L\n"
@@ -857,6 +851,26 @@ TEST(ConvertTest, ClauseErrors) {
   EXPECT_EQ(Messages_("p :- trace [foo] q.\n"),
       V{"expected a trace parameter: compile_time(...), run_time(...), "
         "io(!IO) or state(Mutable, !S), but found 'foo'"});
+  EXPECT_EQ(Messages_("p :- trace [compile_time(env(\"V\"))] q.\n"),
+      V{"expected a compile_time condition: flag(\"Name\"), "
+        "tracelevel(Level) or grade(Test), with and, or and not, but found "
+        "'env(\"V\")'"});
+  EXPECT_EQ(Messages_("p :- trace [run_time(flag(\"x\") and env(\"V\"))] q.\n"),
+      V{"expected a run_time condition: env(\"Name\"), with and, or and not, "
+        "but found 'flag(\"x\")'"});
+  EXPECT_EQ(Messages_("p :- trace [compile_time(flag(x))] q.\n"),
+      V{"expected a string, but found 'x'"});
+  EXPECT_EQ(Messages_("p :- trace [compile_time(tracelevel(foo))] q.\n"),
+      V{"expected 'shallow' or 'deep', but found 'foo'"});
+  EXPECT_EQ(Messages_("p :- trace [compile_time(grade(foo))] q.\n"),
+      V{"expected a grade test: 'debug', 'ssdebug', 'prof', 'profdeep', "
+        "'par', 'trail', 'rbmm', 'llds', 'mlds', 'c', 'csharp' or 'java', "
+        "but found 'foo'"});
+  EXPECT_EQ(Messages_("p :- trace [io(!A), io(!B)] q.\n"),
+      V{"the trace parameter 'io' is given more than once"});
+  EXPECT_EQ(Messages_("p :- trace [compile_time(tracelevel(deep) and "
+                      "(not grade(c))), state(a, !A), state(b, !B)] q.\n"),
+      V{});
   EXPECT_EQ(Messages_("p :- trace [io(IO)] q.\n"),
       V{"expected a state variable !X, but found 'IO'"});
   EXPECT_EQ(Messages_("p :- try [foo] q then r.\n"),
@@ -886,6 +900,130 @@ TEST(ConvertTest, ClauseErrors) {
       V{"expected a DCG goal, but found '{}'"});
   EXPECT_EQ(Messages_("p --> [a | T].\n"),
       V{"expected a list without a tail, but found '[a | T]'"});
+}
+
+TEST(ConvertTest, ModuleDirectives) {
+  EXPECT_EQ(Compact(":- initialise init/2.\n:- finalize fin/0.\n"),
+      "InitialiseDecl\n| kind: Initialise\n| pred: NameAndArity init/2\n"
+      "InitialiseDecl\n| kind: Finalise\n| pred: NameAndArity fin/0\n");
+  EXPECT_EQ(Compact(":- mutable(counter, int, 0, ground, [untrailed, "
+                    "attach_to_io_state, foreign_name(\"C\", \"ctr\")]).\n"),
+      "MutableDecl\n| name: counter\n| type: NamedType\n"
+      "| | name: SymName int\n| initial: Literal 0\n"
+      "| inst: BuiltinInst\n| | kind: Ground\n| trailed: false\n"
+      "| attachToIoState: true\n| constant: false\n| threadLocal: false\n"
+      "| foreignNames:\n| | MutableForeignName\n| | | language: C\n"
+      "| | | name: ctr\n");
+  // The attribute list may be left out, and the initial value is any
+  // data-term.
+  EXPECT_EQ(Compact(":- mutable(m, list(int), [1 + 2], ground).\n"),
+      "MutableDecl\n| name: m\n| type: NamedType\n| | name: SymName list\n"
+      "| | arguments:\n| | | NamedType\n| | | | name: SymName int\n"
+      "| initial: ListData\n| | elements:\n| | | FunctorData\n"
+      "| | | | name: SymName +\n| | | | arguments:\n| | | | | Literal 1\n"
+      "| | | | | Literal 2\n| inst: BuiltinInst\n| | kind: Ground\n"
+      "| attachToIoState: false\n| constant: false\n| threadLocal: false\n");
+}
+
+TEST(ConvertTest, Promises) {
+  EXPECT_EQ(Compact(":- promise all [X] (p(X) => q(X)).\n"),
+      "PromiseDecl\n| goal: QuantifiedGoal\n| | quantifier: All\n"
+      "| | vars:\n| | | Variable X\n| | goal: Implication\n"
+      "| | | kind: Implies\n| | | left: Call\n| | | | name: SymName p\n"
+      "| | | | arguments:\n| | | | | Variable X\n| | | right: Call\n"
+      "| | | | name: SymName q\n| | | | arguments:\n| | | | | Variable X\n");
+  EXPECT_EQ(Compact(":- all [X] promise_exclusive_exhaustive "
+                    "(X = a ; X = b).\n"),
+      "PromiseDisjunctionDecl\n| kind: ExclusiveExhaustive\n| vars:\n"
+      "| | X\n| disjunction: Disjunction\n| | goals:\n"
+      "| | | Unification\n| | | | left: Variable X\n"
+      "| | | | right: FunctorData\n| | | | | name: SymName a\n"
+      "| | | Unification\n| | | | left: Variable X\n"
+      "| | | | right: FunctorData\n| | | | | name: SymName b\n");
+}
+
+TEST(ConvertTest, SolverTypes) {
+  EXPECT_EQ(Compact(":- solver type st(T).\n"),
+      "AbstractTypeDecl\n| name: SymName st\n| parameters:\n| | T\n"
+      "| solver: true\n");
+  EXPECT_EQ(Compact(":- solver type st where representation is int, "
+                    "ground is ground, any is ground, constraint_store is "
+                    "mutable(cs, int, 0, ground, [untrailed]), equality is "
+                    "eq, comparison is cmp.\n"),
+      "SolverTypeDefn\n| name: SymName st\n"
+      "| representation: NamedType\n| | name: SymName int\n"
+      "| ground: BuiltinInst\n| | kind: Ground\n| any: BuiltinInst\n"
+      "| | kind: Ground\n"
+      "| constraintStore:\n| | MutableDecl\n| | | name: cs\n"
+      "| | | type: NamedType\n| | | | name: SymName int\n"
+      "| | | initial: Literal 0\n| | | inst: BuiltinInst\n| | | | kind: Ground\n"
+      "| | | trailed: false\n| | | attachToIoState: false\n"
+      "| | | constant: false\n| | | threadLocal: false\n"
+      "| equality: SymName eq\n| comparison: SymName cmp\n");
+  // As in mmc, only the representation is required.
+  EXPECT_EQ(Compact(":- solver type st where representation is int, "
+                    "constraint_store is [mutable(a, int, 0, ground), "
+                    "mutable(b, int, 0, ground)].\n")
+                .find("constraintStore:\n| | MutableDecl\n| | | name: a\n"),
+      Compact(":- solver type st where representation is int, "
+              "constraint_store is [mutable(a, int, 0, ground), "
+              "mutable(b, int, 0, ground)].\n")
+          .find("constraintStore:"));
+  EXPECT_NE(Compact(":- solver type st where representation is int.\n")
+                .find("SolverTypeDefn"),
+      std::string::npos);
+}
+
+TEST(ConvertTest, DirectiveErrors) {
+  using V = std::vector<std::string>;
+  EXPECT_EQ(Messages_(":- initialise i.\n"),
+      V{"expected 'Name/Arity', but found 'i'"});
+  EXPECT_EQ(Messages_(":- initialize pred(i/2).\n"),
+      V{"expected 'Name/Arity', but found 'pred(i/2)'"});
+  EXPECT_EQ(Messages_(":- mutable(m, int, 0).\n"),
+      V{"a ':- mutable' declaration must have four or five arguments"});
+  EXPECT_EQ(Messages_(":- mutable(\"m\", int, 0, ground).\n"),
+      V{"expected a mutable name, but found '\"m\"'"});
+  EXPECT_EQ(Messages_(":- mutable(m, int, 0, ground, [foo]).\n"),
+      V{"expected a mutable attribute: 'trailed', 'untrailed', "
+        "'attach_to_io_state', 'constant', 'thread_local' or "
+        "'foreign_name(Lang, Name)', but found 'foo'"});
+  EXPECT_EQ(Messages_(":- mutable(m, int, 0, ground, [untrailed, "
+                      "untrailed]).\n"),
+      V{"the attribute 'untrailed' is given more than once"});
+  EXPECT_EQ(Messages_(":- mutable(m, int, 0, ground, [trailed, untrailed]).\n"),
+      V{"the attributes 'trailed' and 'untrailed' conflict"});
+  EXPECT_EQ(Messages_(":- mutable(m, int, 0, ground, [constant, "
+                      "attach_to_io_state]).\n"),
+      V{"the attributes 'constant' and 'attach_to_io_state' conflict"});
+  EXPECT_EQ(Messages_(":- mutable(m, int, 0, ground, [thread_local, "
+                      "constant]).\n"),
+      V{"the attributes 'thread_local' and 'constant' conflict"});
+  EXPECT_EQ(Messages_(":- mutable(m, int, 0, ground, [foreign_name(\"C\", "
+                      "\"a\"), foreign_name(c, \"b\")]).\n"),
+      V{"the mutable already has a foreign name for this language"});
+  EXPECT_EQ(Messages_(":- promise_exhaustive (a ; b).\n"),
+      V{"a ':- promise_exhaustive' declaration must have the form ':- all "
+        "[Vars] promise_exhaustive Disjunction'"});
+  EXPECT_EQ(Messages_(":- all [X] promise_exclusive X = 1.\n"),
+      V{"the goal of a ':- promise_exclusive' declaration must be a "
+        "disjunction"});
+  EXPECT_EQ(Messages_(":- solver st.\n"),
+      V{"':- solver' must be followed by a type declaration"});
+  EXPECT_EQ(Messages_(":- solver type st == int.\n"),
+      V{"a solver type cannot be an equivalence type"});
+  EXPECT_EQ(Messages_(":- solver type st ---> st.\n"),
+      V{"a solver type cannot have data constructors"});
+  EXPECT_EQ(Messages_(":- solver type st where constraint_store is [].\n"),
+      V{"a solver type definition must have a 'representation' attribute"});
+  EXPECT_EQ(Messages_(":- solver type st where constraint_store is [], "
+                      "representation is int.\n"),
+      V{"expected a solver type attribute, in the order 'representation "
+        "is', 'ground is', 'any is', 'constraint_store is', 'equality is', "
+        "'comparison is', but found 'representation is int'"});
+  EXPECT_EQ(Messages_(":- solver type st where representation is int, "
+                      "constraint_store is [foo].\n"),
+      V{"expected a mutable declaration, but found 'foo'"});
 }
 
 // The kind of node a pragma converts to.

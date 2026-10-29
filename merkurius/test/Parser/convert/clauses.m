@@ -50,6 +50,9 @@ main(!IO) :-
 % CHECK:      | | | | | Call
 % CHECK:      | | | | | TraceGoal
 % CHECK:      | | | | | | | | condition: TraceCondition
+% CHECK-NEXT: | | | | | | | | | kind: Flag
+% CHECK-NEXT: | | | | | | | | | operands:
+% CHECK-NEXT: | | | | | | | | | value: debug
 % CHECK:      | | | | | | | | condition: none
 
 :- pred count(list(T)::in, int::out) is det.
