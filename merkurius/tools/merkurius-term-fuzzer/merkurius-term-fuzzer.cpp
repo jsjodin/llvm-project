@@ -6,10 +6,10 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// A fuzz target for the lexer and the term reader. For any input it checks
-// that neither crashes, with and without OpenMP directives, that the tokens
-// unparse to the input byte for byte, and that each item's canonical form
-// reads back as the same canonical form.
+// A fuzz target for the lexer, the term reader and the converter. For any
+// input it checks that none of them crashes, with and without OpenMP
+// directives, that the tokens unparse to the input byte for byte, and that
+// each item's canonical form reads back as the same canonical form.
 //
 // Built normally, it is a program that runs the target on each file named
 // on its command line, to replay a corpus. Built with -fsanitize=fuzzer
@@ -17,6 +17,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "merkurius/Parser/convert.h"
 #include "merkurius/Parser/lexer.h"
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/provenance.h"
@@ -86,6 +87,15 @@ std::vector<std::string> ReadCanonical(
 extern "C" int LLVMFuzzerTestOneInput(
     const std::uint8_t *data, std::size_t size) {
   llvm::StringRef input{reinterpret_cast<const char *>(data), size};
+  {
+    AllSources all;
+    SourceFile *file{all.AddBuffer(
+        "fuzz.m", llvm::MemoryBuffer::getMemBufferCopy(input))};
+    Messages messages;
+    TokenSequence tokens{Lex(*file, LexerOptions{}, messages)};
+    ParseTreeArena arena;
+    DumpParseTree(llvm::nulls(), ConvertFile(tokens, arena, messages));
+  }
   for (bool openMP : {false, true}) {
     for (const std::string &canonical : ReadCanonical(input, openMP, true)) {
       if (canonical.empty()) {
