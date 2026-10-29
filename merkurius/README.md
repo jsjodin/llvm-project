@@ -6,7 +6,8 @@ A Mercury compiler and runtime on MLIR and LLVM. The design is in
 So far there is the driver, `merkc`, and its frontend, `merkc -fc1`, which
 reads source files through Flang's provenance machinery, lexes them, reads
 their items as terms, and converts the terms to a parse tree; so far the
-converter handles the module system's declarations. Its actions are:
+converter handles the module system's declarations and predicate, function
+and mode declarations, with the type, inst and mode languages. Its actions are:
 
 | Action | Prints |
 | --- | --- |
@@ -79,7 +80,7 @@ reader with libFuzzer, using the clang of the build tree.
 | --- | --- |
 | `include/merkurius`, `lib` | Libraries: `Common` and `Parser` (source files, provenance and diagnostics, adapted from Flang; the lexer, operator table, term reader, converter and parse tree), `Driver` (options), `Frontend`, `FrontendTool` |
 | `tools/merkc` | The driver and the `-fc1` entry point |
-| `tools/merkurius-term-fuzzer` | A fuzz target for the lexer and term reader |
+| `tools/merkurius-term-fuzzer` | A fuzz target for the lexer, term reader and converter |
 | `utils/term-oracle` | The term oracle, which reads terms with Mercury's own parser, and the scripts that compare it with merkc and generate test items |
 | `utils/fuzz` | The script and dictionary for fuzzing |
 | `test` | lit tests; `test/Unit` runs the unit tests |

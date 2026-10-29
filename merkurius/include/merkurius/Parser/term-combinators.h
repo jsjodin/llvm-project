@@ -335,6 +335,101 @@ template <typename P> constexpr CommaListRule<P> commaListOf(P rule) {
   return CommaListRule<P>{rule};
 }
 
+// A variable's name: X.
+class VariableRule {
+public:
+  using resultType = llvm::StringRef;
+  bool Matches(const Term &t) const { return llvm::isa<VariableTerm>(t); }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    return state.arena.Save(llvm::cast<VariableTerm>(t).name());
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "a variable"; }
+};
+
+inline constexpr VariableRule variable;
+
+namespace detail {
+template <typename P, typename Elements>
+std::optional<llvm::ArrayRef<typename P::resultType>> ConvertElements(
+    const P &rule, Elements elements, ConvertState &state) {
+  llvm::SmallVector<typename P::resultType, 8> results;
+  bool ok{true};
+  for (const Term *element : elements) {
+    if (auto result{Apply(rule, *element, state)}) {
+      results.push_back(std::move(*result));
+    } else {
+      ok = false;
+    }
+  }
+  if (!ok) {
+    return std::nullopt;
+  }
+  return state.arena.SaveArray(
+      llvm::ArrayRef<typename P::resultType>{results});
+}
+} // namespace detail
+
+// listOf(P) converts the elements of a list with no tail, [A, B], with P.
+template <typename P> class ListOfRule {
+public:
+  using resultType = llvm::ArrayRef<typename P::resultType>;
+  constexpr explicit ListOfRule(P rule) : rule_{rule} {}
+  bool Matches(const Term &t) const {
+    const auto *list{llvm::dyn_cast<ListTerm>(&t)};
+    return list && !list->tail();
+  }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    return detail::ConvertElements(
+        rule_, llvm::cast<ListTerm>(t).elements(), state);
+  }
+  void Expected(llvm::raw_ostream &os) const {
+    os << "a list of ";
+    rule_.Expected(os);
+  }
+
+private:
+  P rule_;
+};
+
+template <typename P> constexpr ListOfRule<P> listOf(P rule) {
+  return ListOfRule<P>{rule};
+}
+
+// tupleOf(P) converts the elements of {A, B} with P.
+template <typename P> class TupleOfRule {
+public:
+  using resultType = llvm::ArrayRef<typename P::resultType>;
+  constexpr explicit TupleOfRule(P rule) : rule_{rule} {}
+  bool Matches(const Term &t) const { return llvm::isa<TupleTerm>(t); }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    return detail::ConvertElements(
+        rule_, llvm::cast<TupleTerm>(t).elements(), state);
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "a tuple"; }
+
+private:
+  P rule_;
+};
+
+template <typename P> constexpr TupleOfRule<P> tupleOf(P rule) {
+  return TupleOfRule<P>{rule};
+}
+
+// A module-qualified term is '.'(Qualifier, Last), so a.b.c(X) is
+// '.'('.'(a, b), c(X)). QualifiedParts gives its parts in order, a, b and
+// c(X), looking through parentheses; an unqualified term is one part.
+void QualifiedParts(const Term &, llvm::SmallVectorImpl<const Term *> &);
+
+// The SymName of `name` qualified by `qualifiers`; '__' in any of them is a
+// qualifier too. Reports an error and returns null if a qualifier is not a
+// name.
+const SymName *MakeSymName(const Term &whole,
+    llvm::ArrayRef<const Term *> qualifiers, llvm::StringRef name,
+    ConvertState &);
+
 // A name, possibly module-qualified with '.' or '__', such as io.write,
 // io__write or 'io'.write.
 class SymNameRule {
@@ -346,6 +441,48 @@ public:
 };
 
 inline constexpr SymNameRule symName;
+
+// appliedName(P) converts a possibly qualified name and its arguments,
+// such as list.list(int), into its SymName and the arguments converted
+// with P; a name alone has no arguments.
+template <typename P> class AppliedNameRule {
+public:
+  using resultType = std::tuple<const SymName *,
+      llvm::ArrayRef<typename P::resultType>>;
+  constexpr explicit AppliedNameRule(P rule) : rule_{rule} {}
+  bool Matches(const Term &t) const {
+    return llvm::isa<NameTerm>(t) || llvm::isa<CompoundTerm>(t);
+  }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    llvm::SmallVector<const Term *, 4> parts;
+    QualifiedParts(t, parts);
+    const Term &part{*parts.back()};
+    if (!Matches(part)) {
+      SayExpected(state, part, "a name");
+      return std::nullopt;
+    }
+    const SymName *name{MakeSymName(
+        t, llvm::ArrayRef(parts).drop_back(), FunctorName(part), state)};
+    std::optional<llvm::ArrayRef<typename P::resultType>> arguments{
+        llvm::ArrayRef<typename P::resultType>{}};
+    if (const auto *compound{llvm::dyn_cast<CompoundTerm>(&part)}) {
+      arguments = detail::ConvertElements(rule_, compound->arguments(), state);
+    }
+    if (!name || !arguments) {
+      return std::nullopt;
+    }
+    return resultType{name, *arguments};
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "a name"; }
+
+private:
+  P rule_;
+};
+
+template <typename P> constexpr AppliedNameRule<P> appliedName(P rule) {
+  return AppliedNameRule<P>{rule};
+}
 
 } // namespace merkurius::parser
 #endif // MERKURIUS_PARSER_TERM_COMBINATORS_H_
