@@ -9,12 +9,15 @@
 #ifndef MERKURIUS_LIB_PARSER_CONVERT_RULES_H_
 #define MERKURIUS_LIB_PARSER_CONVERT_RULES_H_
 
-// The converter's rules that its two files share: convert.cpp, for
-// declarations, and convert-goals.cpp, for clauses, goals and data-terms.
+// The converter's rules that its files share: convert.cpp, for
+// declarations, convert-goals.cpp, for clauses, goals and data-terms, and
+// convert-pragmas.cpp, for pragmas.
 
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/parse-tree.h"
 #include "merkurius/Parser/term-combinators.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSwitch.h"
 #include <optional>
 #include <string>
@@ -164,6 +167,91 @@ inline constexpr auto quantifiedVars{
     expect("a list of variables", listOf(variable))};
 
 
+// Name/Arity, with a small nonnegative integer arity.
+class NameAndArityRule {
+public:
+  using resultType = const NameAndArity *;
+  bool Matches(const Term &t) const { return AsCompound(t, "/", 2); }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    llvm::ArrayRef<const Term *> parts{llvm::cast<CompoundTerm>(t).arguments()};
+    std::optional<const SymName *> name{Apply(symName, *parts[0], state)};
+    const Term &arity{StripParentheses(*parts[1])};
+    const auto *integer{llvm::dyn_cast<IntegerTerm>(&arity)};
+    if (!integer || integer->negative() ||
+        integer->size() != IntegerSize::Default ||
+        integer->magnitude().getActiveBits() > 16) {
+      SayExpected(state, arity, "an arity");
+      return std::nullopt;
+    }
+    if (!name) {
+      return std::nullopt;
+    }
+    return state.arena.Make<NameAndArity>(t.tokens(), *name,
+        static_cast<unsigned>(integer->magnitude().getZExtValue()));
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "a name/arity"; }
+};
+
+inline constexpr NameAndArityRule nameAndArity;
+
+// The name being defined and its parameters, which are variables: t(T1, T2).
+inline constexpr auto typeHeadRule{
+    appliedName(expect("a type parameter", variable))};
+inline constexpr auto instHeadRule{
+    appliedName(expect("an inst parameter", variable))};
+
+// A head whose parameters are distinct.
+template <typename R> class DefinitionHeadRule {
+public:
+  using resultType = typename R::resultType;
+  constexpr explicit DefinitionHeadRule(R rule) : rule_{rule} {}
+  bool Matches(const Term &t) const { return rule_.Matches(t); }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    std::optional<resultType> head{rule_.Convert(t, state)};
+    if (!head) {
+      return std::nullopt;
+    }
+    llvm::ArrayRef<llvm::StringRef> parameters{std::get<1>(*head)};
+    for (std::size_t j{0}; j < parameters.size(); ++j) {
+      if (llvm::is_contained(parameters.take_front(j), parameters[j])) {
+        state.messages.Say(GetSource(t, state.tokens),
+            "the parameter %s appears more than once"_err_en_US,
+            parameters[j].str());
+        return std::nullopt;
+      }
+    }
+    return head;
+  }
+  void Expected(llvm::raw_ostream &os) const { rule_.Expected(os); }
+
+private:
+  R rule_;
+};
+
+template <typename R>
+constexpr DefinitionHeadRule<R> distinctParameters(R rule) {
+  return DefinitionHeadRule<R>{rule};
+}
+
+inline constexpr auto typeHead{distinctParameters(typeHeadRule)};
+inline constexpr auto instHead{distinctParameters(instHeadRule)};
+
+// The attributes after where, each given at most once.
+class TypeAttributesRule {
+public:
+  using resultType = const TypeAttributes *;
+  bool Matches(const Term &) const { return true; }
+  std::optional<resultType> Convert(const Term &, ConvertState &) const;
+  void Expected(llvm::raw_ostream &os) const { os << "type attributes"; }
+
+private:
+  static void Flatten(const Term &, llvm::SmallVectorImpl<const Term *> &);
+};
+
+inline constexpr TypeAttributesRule typeAttributes;
+
 // A clause: a fact, a rule or a DCG rule, of a predicate or a function
 // (reference manual, "Facts", "Rules" and "DCG-rules").
 class ClauseRule {
@@ -175,6 +263,17 @@ public:
 };
 
 inline constexpr ClauseRule clause;
+
+// :- pragma Name(Arguments), without the ':-'.
+class PragmaRule {
+public:
+  using resultType = Item;
+  bool Matches(const Term &t) const { return AsCompound(t, "pragma", 1); }
+  std::optional<Item> Convert(const Term &, ConvertState &) const;
+  void Expected(llvm::raw_ostream &os) const { os << "a pragma"; }
+};
+
+inline constexpr PragmaRule pragma;
 
 } // namespace merkurius::parser
 #endif // MERKURIUS_LIB_PARSER_CONVERT_RULES_H_

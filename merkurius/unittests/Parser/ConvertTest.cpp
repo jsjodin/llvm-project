@@ -888,6 +888,148 @@ TEST(ConvertTest, ClauseErrors) {
       V{"expected a list without a tail, but found '[a | T]'"});
 }
 
+// The kind of node a pragma converts to.
+std::string PragmaKind(llvm::StringRef pragma) {
+  std::string items{Items((":- pragma " + pragma + ".\n").str())};
+  return items.substr(0, items.find('\n'));
+}
+
+TEST(ConvertTest, Pragmas) {
+  EXPECT_EQ(PragmaKind("inline(p/1)"), "PredPragma");
+  EXPECT_EQ(PragmaKind("no_inline(pred(p/1))"), "PredPragma");
+  EXPECT_EQ(PragmaKind("consider_used(func(f/1))"), "PredPragma");
+  EXPECT_EQ(PragmaKind("promise_equivalent_clauses(p/1)"), "PredPragma");
+  EXPECT_EQ(PragmaKind("check_termination(p/1)"), "PredPragma");
+  EXPECT_EQ(PragmaKind("obsolete(p/1, [q/1])"), "ObsoletePragma");
+  EXPECT_EQ(PragmaKind("obsolete_proc(p)"), "ObsoletePragma");
+  EXPECT_EQ(PragmaKind("type_spec(p/1, T = int)"), "TypeSpecPragma");
+  EXPECT_EQ(PragmaKind("memo(p/1)"), "TablingPragma");
+  EXPECT_EQ(PragmaKind("loop_check(p(in, out))"), "TablingPragma");
+  EXPECT_EQ(PragmaKind("minimal_model(p/1, [allow_reset])"), "TablingPragma");
+  EXPECT_EQ(PragmaKind("fact_table(p/2, \"f\")"), "FactTablePragma");
+  EXPECT_EQ(PragmaKind("require_feature_set([memo])"),
+      "RequireFeatureSetPragma");
+  EXPECT_EQ(PragmaKind("source_file(\"x.m\")"), "SourceFilePragma");
+  EXPECT_EQ(PragmaKind("foreign_decl(\"C\", \"int x;\")"), "ForeignDeclPragma");
+  EXPECT_EQ(PragmaKind("foreign_code(java, include_file(\"x\"))"),
+      "ForeignCodePragma");
+  EXPECT_EQ(PragmaKind("foreign_proc(\"C#\", p, [], \"\")"),
+      "ForeignProcPragma");
+  EXPECT_EQ(PragmaKind("foreign_type(\"C\", t, \"long\")"),
+      "ForeignTypePragma");
+  EXPECT_EQ(PragmaKind("foreign_enum(\"C\", t/0, [a - \"1\"])"),
+      "ForeignEnumPragma");
+  EXPECT_EQ(PragmaKind("foreign_export_enum(\"C\", t/0)"),
+      "ForeignExportEnumPragma");
+  EXPECT_EQ(PragmaKind("foreign_export(\"C\", p(in), \"p\")"),
+      "ForeignExportPragma");
+  EXPECT_EQ(PragmaKind("foreign_import_module(\"C\", m)"),
+      "ForeignImportModulePragma");
+  EXPECT_EQ(Compact(":- pragma foreign_proc(\"C\", f(X::in) = (Y::out), "
+                    "[promise_pure, will_not_call_mercury], \"Y = X;\").\n"),
+      "ForeignProcPragma\n| language: C\n| kind: Function\n| name: SymName f\n"
+      "| arguments:\n| | ForeignProcArg\n| | | var: Variable X\n"
+      "| | | mode: NamedMode\n| | | | name: SymName in\n"
+      "| result: ForeignProcArg\n| | var: Variable Y\n"
+      "| | mode: NamedMode\n| | | name: SymName out\n"
+      "| attributes:\n| | PromisePure\n| | WillNotCallMercury\n"
+      "| code: ForeignCode\n| | includeFile: false\n| | text: Y = X;\n");
+  EXPECT_EQ(Compact(":- pragma memo(f(in) = out, [allow_reset, "
+                    "specified([value, output], hidden_arg_addr), "
+                    "size_limit(10)]).\n"),
+      "TablingPragma\n| method: Memo\n| pred: ProcSpec\n| | kind: Function\n"
+      "| | name: SymName f\n| | modes:\n| | | NamedMode\n"
+      "| | | | name: SymName in\n| | result: NamedMode\n"
+      "| | | name: SymName out\n| attributes: TablingAttributes\n"
+      "| | allowReset: true\n| | statistics: false\n"
+      "| | disableWarningIfIgnored: false\n| | fastLoose: false\n"
+      "| | specified:\n| | | Value\n| | | Output\n| | hiddenArg: Addr\n"
+      "| | sizeLimit: 10\n");
+  EXPECT_EQ(Compact(":- pragma foreign_type(java, t(T), \"Object\", "
+                    "[stable]) where equality is eq.\n"),
+      "ForeignTypePragma\n| language: Java\n| name: SymName t\n"
+      "| parameters:\n| | T\n| descriptor: Object\n| assertions:\n"
+      "| | Stable\n| attributes: TypeAttributes\n"
+      "| | equality: SymName eq\n| | abstractNoncanonical: false\n");
+  EXPECT_EQ(Compact(":- pragma foreign_export_enum(\"C\", t/0, "
+                    "[prefix(\"T_\"), uppercase], [a - \"A\"]).\n"),
+      "ForeignExportEnumPragma\n| language: C\n| type: NameAndArity t/0\n"
+      "| prefix: T_\n| uppercase: true\n| overrides:\n"
+      "| | ForeignEnumValue\n| | | constructor: SymName a\n"
+      "| | | value: A\n");
+  EXPECT_EQ(Compact(":- pragma type_spec(p(in, in), (T = int, U = T)).\n"),
+      "TypeSpecPragma\n| pred: ProcSpec\n| | kind: Predicate\n"
+      "| | name: SymName p\n| | modes:\n| | | NamedMode\n"
+      "| | | | name: SymName in\n| | | NamedMode\n| | | | name: SymName in\n"
+      "| substitution:\n| | TypeSubstitution\n| | | var: T\n"
+      "| | | type: NamedType\n| | | | name: SymName int\n"
+      "| | TypeSubstitution\n| | | var: U\n| | | type: TypeVar T\n");
+  // Foreign code over several lines is escaped in the dump.
+  EXPECT_NE(Compact(":- pragma foreign_code(\"C\", \"a\nb\").\n")
+                .find("text: \"a\\nb\"\n"),
+      std::string::npos);
+}
+
+TEST(ConvertTest, PragmaErrors) {
+  using V = std::vector<std::string>;
+  auto messages{[](llvm::StringRef pragma) {
+    return Messages_((":- pragma " + pragma + ".\n").str());
+  }};
+  EXPECT_EQ(messages("foo(x)"), V{"'foo' is not a recognized pragma"});
+  EXPECT_EQ(messages("require_tail_recursion(p/0)"),
+      V{"the ':- pragma require_tail_recursion' declaration"});
+  EXPECT_EQ(messages("inline(p/0, f/1)"),
+      V{"a ':- pragma inline' declaration must have one argument"});
+  EXPECT_EQ(messages("foreign_proc(\"C\", p, \"\")"),
+      V{"a ':- pragma foreign_proc' declaration must have four arguments"});
+  EXPECT_EQ(messages("foreign_export_enum(\"C\")"),
+      V{"a ':- pragma foreign_export_enum' declaration must have two to "
+        "four arguments"});
+  EXPECT_EQ(messages("inline(p(in))"),
+      V{"expected 'Name/Arity', 'pred(Name/Arity)' or 'func(Name/Arity)', "
+        "but found 'p(in)'"});
+  EXPECT_EQ(messages("obsolete(p/0, [pred(f/1)])"),
+      V{"expected a name/arity, but found 'pred(f/1)'"});
+  EXPECT_EQ(messages("type_spec(p/0, int = T)"),
+      V{"expected a type substitution 'T = Type', but found 'int = T'"});
+  EXPECT_EQ(messages("memo(f/1, [statistics, statistics])"),
+      V{"the attribute 'statistics' is given more than once"});
+  EXPECT_EQ(messages("minimal_model(p/0, [disable_warning_if_ignored])"),
+      V{"'disable_warning_if_ignored' is allowed only in a memo pragma"});
+  EXPECT_EQ(messages("memo(f/1, [specified([value], foo)])"),
+      V{"expected 'hidden_arg_value' or 'hidden_arg_addr', but found 'foo'"});
+  EXPECT_EQ(messages("source_file(x)"),
+      V{"expected a file name string, but found 'x'"});
+  EXPECT_EQ(messages("foreign_proc(\"Fortran\", p, [], \"\")"),
+      V{"expected a foreign language: \"C\", \"C#\" or \"Java\", but found "
+        "'\"Fortran\"'"});
+  EXPECT_EQ(messages("foreign_proc(\"C\", p, [foo], \"\")"),
+      V{"expected a foreign_proc attribute, but found 'foo'"});
+  EXPECT_EQ(messages("foreign_proc(\"C\", p, [will_not_call_mercury, "
+                     "may_call_mercury], \"\")"),
+      V{"the attributes 'will_not_call_mercury' and 'may_call_mercury' "
+        "conflict"});
+  EXPECT_EQ(messages("foreign_proc(\"C\", f(X::in) = Y, [], \"\")"),
+      V{"expected 'Var::Mode', but found 'Y'"});
+  EXPECT_EQ(messages("foreign_proc(\"C\", f(X::in) = (X::out), [], \"\")"),
+      V{"the variable X appears more than once"});
+  EXPECT_EQ(messages("foreign_decl(\"C\", foo, \"\")"),
+      V{"expected 'local' or 'exported', but found 'foo'"});
+  EXPECT_EQ(messages("foreign_export(\"C\", p, \"\")"),
+      V{"expected the foreign name, a non-empty string, but found '\"\"'"});
+  EXPECT_EQ(messages("foreign_enum(\"C\", t, [a - \"1\"])"),
+      V{"expected a type name/arity, but found 't'"});
+  EXPECT_EQ(messages("foreign_enum(\"C\", t/0, [a - 1])"),
+      V{"expected 'Constructor - \"Value\"', but found 'a - 1'"});
+  EXPECT_EQ(messages("foreign_export_enum(\"C\", t/0, [prefix(\"a\"), "
+                     "prefix(\"b\")])"),
+      V{"the attribute 'prefix' is given more than once"});
+  EXPECT_EQ(messages("foreign_type(\"C\", t(T, T), \"long\")"),
+      V{"the parameter T appears more than once"});
+  EXPECT_EQ(messages("inline(p/0) where equality is eq"),
+      V{"only a foreign_type pragma may have 'where' attributes"});
+}
+
 // A %$omp directive applies to a goal, and is ignored anywhere else.
 TEST(ConvertTest, Directives) {
   using V = std::vector<std::string>;

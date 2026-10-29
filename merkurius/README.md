@@ -8,8 +8,8 @@ reads source files through Flang's provenance machinery, lexes them, reads
 their items as terms, and converts the terms to a parse tree; so far the
 converter handles the module system's declarations, predicate, function and
 mode declarations, type, inst and mode definitions, type class and
-instance declarations, and clauses, with their goals, DCG goals and
-data-terms. Its actions are:
+instance declarations, pragmas, and clauses, with their goals, DCG goals
+and data-terms. Its actions are:
 
 | Action | Prints |
 | --- | --- |
@@ -18,7 +18,7 @@ data-terms. Its actions are:
 | `-fdebug-dump-tokens` | The tokens, one per line |
 | `-fdebug-unparse-tokens` | Every token's trivia and spelling, which is the file byte for byte |
 | `-fdebug-dump-terms` | Each item's term in canonical notation, or `error` |
-| `-fdebug-dump-parse-tree-no-sema` | The parse tree, one node or field per line |
+| `-fdebug-dump-parse-tree-no-sema` | The parse tree, one node or field per line; text with line breaks, such as foreign code, is quoted with `\n` escapes |
 
 `-fopenmp` makes `%$omp` directives tokens instead of comments.
 

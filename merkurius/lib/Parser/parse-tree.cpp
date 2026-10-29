@@ -7,6 +7,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "merkurius/Parser/parse-tree.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringExtras.h"
+#include <string>
 
 namespace merkurius::parser {
 
@@ -82,7 +85,31 @@ private:
     } else if constexpr (std::is_enum_v<T>) {
       Line(name, EnumToString(value));
     } else if constexpr (std::is_same_v<T, llvm::StringRef>) {
-      Line(name, value);
+      // Text with line breaks, such as foreign code, is quoted and escaped
+      // so that it stays on one line.
+      if (llvm::any_of(value, [](char ch) {
+            return static_cast<unsigned char>(ch) < ' ';
+          })) {
+        std::string escaped{"\""};
+        for (char ch : value) {
+          if (ch == '\n') {
+            escaped += "\\n";
+          } else if (ch == '\t') {
+            escaped += "\\t";
+          } else if (ch == '"' || ch == '\\') {
+            escaped += '\\';
+            escaped += ch;
+          } else if (static_cast<unsigned char>(ch) < ' ') {
+            escaped += "\\x" + llvm::utohexstr(ch) + "\\";
+          } else {
+            escaped += ch;
+          }
+        }
+        escaped += '"';
+        Line(name, escaped);
+      } else {
+        Line(name, value);
+      }
     } else if constexpr (std::is_same_v<T, bool>) {
       Line(name, value ? "true" : "false");
     } else {

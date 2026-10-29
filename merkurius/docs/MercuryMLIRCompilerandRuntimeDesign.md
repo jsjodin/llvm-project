@@ -314,7 +314,7 @@ constexpr auto ifThenElse =
         functor("else", functor("if", functor("then", goal, goal)), goal)));
 ```
 
-- **One rule set per category:** items, goals, DCG goals, data-terms, types, insts and modes, each following its chapter of the manual. Declarations are in `lib/Parser/convert.cpp`; clauses, goals and data-terms are in `lib/Parser/convert-goals.cpp`; the rules both use are in `lib/Parser/convert-rules.h`. `anyOf` tries its alternatives' shape tests in order, which is enough for the declarations. Nearly every goal and special data-term is known by its top functor and arity, and any other term is a call or a functor term. So each of these categories is one function that tests the functor in turn. If profiling shows that this costs too much, the function can dispatch through a table.
+- **One rule set per category:** items, goals, DCG goals, data-terms, types, insts and modes, each following its chapter of the manual. Declarations are in `lib/Parser/convert.cpp`, clauses, goals and data-terms in `lib/Parser/convert-goals.cpp`, and pragmas in `lib/Parser/convert-pragmas.cpp`. The rules they share are in `lib/Parser/convert-rules.h`. `anyOf` tries its alternatives' shape tests in order, which is enough for the declarations. Nearly every goal and special data-term is known by its top functor and arity, and any other term is a call or a functor term. So each of these categories is one function that tests the functor in turn. If profiling shows that this costs too much, the function can dispatch through a table.
 - **Recursive categories,** types, insts and modes, are small classes declared before the rules that use them and defined after, because a `constexpr` rule cannot contain itself. `appliedName(P)` reads a possibly qualified name with its arguments, so `list.list(int)`, which is the term `'.'(list, list(int))`, is the name `list.list` applied to `int`.
 - **Predicate, function and mode declarations** are read through their layers, outermost first: `all [Vs]`, `some [Vs]`, `<= Constraints`, `=> Constraints`, `impure` or `semipure`, then `pred`, `func` or `mode`, then `is Det`, `` `with_inst` ``, `` `with_type` `` (or `: Type`), and for a function `= Result`. mmc accepts the layers in this order only. `=>` binds less tightly than `<=`, which is why the manual's example of both is parenthesized. `<= c(T) is det` makes `c(T) is det` the constraint, as it does in mmc. The converter reports a declaration where some but not all of the arguments have modes, as mmc does. In a mode position a name is a mode, so `int::bound(a ; b)` is the mode `bound` applied to an inst, which mmc too reports as an undefined inst `;`/2.
 - **Type, inst and mode definitions.** A discriminated union's constructors are the operands of its `;` terms, and `where` binds more tightly than `;`, so its attributes are taken from the last constructor. A constructor in braces is taken as written, so `{ int ; int }` is the constructor `;`/2 (reference manual, "Discriminated unions"). `Inst ---> Functors` is read as `bound(Functors)`. As in mmc, the function symbols of a bound inst may be numbers and strings, and the parameters of a definition must be distinct variables. Integer literals are checked against their type here, where they become `Literal` nodes, since the reader accepts one of any size.
@@ -333,8 +333,27 @@ constexpr auto ifThenElse =
   - **Data-terms.** The special data-terms are their own nodes: conditional expressions, `@`, field selection and update, lambdas, `: Type`, `` `with_type` `` and `coerce`.
   - **DCG goals.** `{ G1, G2 }`, which the reader reads as a tuple, holds the conjunction of the goals. `&` is a DCG parallel conjunction, which mmc accepts.
   - **Not yet implemented:** `atomic` goals, and the `OmpGoal` of a goal with a `%$omp` directive. A directive anywhere else already draws the warning described under OpenMP directives and is ignored.
+- **Pragmas.** The pragma's name decides the forms of its arguments.
+  - **Node kinds:**
+    - one node kind per family;
+    - `PredPragma` for the ten whose one argument names predicates or functions (`inline`, `promise_pure`, `terminates`, and so on);
+    - `TablingPragma` for `memo`, `loop_check` and `minimal_model`;
+    - one node each for the foreign language interface's pragmas.
+  - **How predicates are named:** `p/1`, `pred(p/1)` or `func(f/1)`. A mode is named `p(in, out)` or `f(in) = out`; `type_spec`, the tabling pragmas, `obsolete_proc` and `foreign_export` take this form.
+  - **Foreign code** is kept as uninterpreted text with its source range, or as an `include_file` path. The language is a `ForeignLanguage`: `"C"`, `"C#"` or `"Java"`, or the names `c`, `csharp` and `java`.
+  - **Errors** follow the ones mmc reports while reading a pragma:
+    - an unknown pragma name;
+    - the wrong number of arguments;
+    - attributes that are not in the manual's lists;
+    - conflicting `foreign_proc` attributes, such as `may_call_mercury` with `will_not_call_mercury` (repeating one attribute is allowed, as in mmc);
+    - a tabling or `foreign_export_enum` attribute given twice;
+    - `disable_warning_if_ignored` outside `memo`;
+    - `foreign_proc` arguments that are not `Var::Mode`, or a variable that appears more than once;
+    - `where` on anything but `foreign_type`.
+  - **mmc's undocumented forms.** The `size_limit` tabling attribute and the hidden-argument form of `specified` are accepted.
+  - **Not yet implemented:** `require_tail_recursion`, `mode_check_clauses` and `oisu`. mmc accepts these, but the reference manual does not describe them.
 - **Names** are `SymName` nodes: a name and its module qualifiers, from `'.'(Qualifier, Name)` or from `__` within a name (reference manual, "The module system"), so `a.b__c` is `a.b.c`. A name that begins or ends with `__` is not split.
-- **Errors.** A term that matches nothing is reported with the forms expected in its context and the start of its source, as in "expected a module name, but found '"string"'". An item with an error is left out of the tree, and conversion continues with the next item. Declarations the converter does not handle yet (pragmas, promises, `initialise`, `finalise`, `mutable` and solver types) are reported as not yet implemented.
+- **Errors.** A term that matches nothing is reported with the forms expected in its context and the start of its source, as in "expected a module name, but found '"string"'". An item with an error is left out of the tree, and conversion continues with the next item. Declarations the converter does not handle yet (promises, `initialise`, `finalise`, `mutable` and solver types) are reported as not yet implemented.
 - **Items** convert one at a time: the reader's terms for an item live in an arena that is reset once it is converted, and the strings the parse tree keeps are copied into the parse tree's own arena. An item with a lexical error is not converted.
 - **Kept small.** Rules are `constexpr` objects built from a few templates. Heavy template parsers are known for slow builds and high compiler memory, so the library stays minimal and nodes are allocated in an arena rather than moved around as values.
 

@@ -693,150 +693,70 @@ public:
 // Type, inst and mode definitions
 //===----------------------------------------------------------------------===//
 
-// Name/Arity, with a small nonnegative integer arity.
-class NameAndArityRule {
-public:
-  using resultType = const NameAndArity *;
-  bool Matches(const Term &t) const { return AsCompound(t, "/", 2); }
-  std::optional<resultType> Convert(
-      const Term &t, ConvertState &state) const {
-    llvm::ArrayRef<const Term *> parts{llvm::cast<CompoundTerm>(t).arguments()};
-    std::optional<const SymName *> name{Apply(symName, *parts[0], state)};
-    const Term &arity{StripParentheses(*parts[1])};
-    const auto *integer{llvm::dyn_cast<IntegerTerm>(&arity)};
-    if (!integer || integer->negative() ||
-        integer->size() != IntegerSize::Default ||
-        integer->magnitude().getActiveBits() > 16) {
-      SayExpected(state, arity, "an arity");
-      return std::nullopt;
-    }
-    if (!name) {
-      return std::nullopt;
-    }
-    return state.arena.Make<NameAndArity>(t.tokens(), *name,
-        static_cast<unsigned>(integer->magnitude().getZExtValue()));
+// The operands of ',' terms, looking through parentheses.
+void TypeAttributesRule::Flatten(
+    const Term &term, llvm::SmallVectorImpl<const Term *> &into) {
+  const Term &t{StripParentheses(term)};
+  if (const CompoundTerm * comma{AsCompound(t, ",", 2)}) {
+    Flatten(*comma->arguments()[0], into);
+    Flatten(*comma->arguments()[1], into);
+  } else {
+    into.push_back(&t);
   }
-  void Expected(llvm::raw_ostream &os) const { os << "a name/arity"; }
-};
-
-static constexpr NameAndArityRule nameAndArity;
-
-// The name being defined and its parameters, which are variables: t(T1, T2).
-static constexpr auto typeHeadRule{
-    appliedName(expect("a type parameter", variable))};
-static constexpr auto instHeadRule{
-    appliedName(expect("an inst parameter", variable))};
-
-// A head whose parameters are distinct.
-template <typename R> class DefinitionHeadRule {
-public:
-  using resultType = typename R::resultType;
-  constexpr explicit DefinitionHeadRule(R rule) : rule_{rule} {}
-  bool Matches(const Term &t) const { return rule_.Matches(t); }
-  std::optional<resultType> Convert(
-      const Term &t, ConvertState &state) const {
-    std::optional<resultType> head{rule_.Convert(t, state)};
-    if (!head) {
-      return std::nullopt;
-    }
-    llvm::ArrayRef<llvm::StringRef> parameters{std::get<1>(*head)};
-    for (std::size_t j{0}; j < parameters.size(); ++j) {
-      if (llvm::is_contained(parameters.take_front(j), parameters[j])) {
-        state.messages.Say(GetSource(t, state.tokens),
-            "the parameter %s appears more than once"_err_en_US,
-            parameters[j].str());
-        return std::nullopt;
-      }
-    }
-    return head;
-  }
-  void Expected(llvm::raw_ostream &os) const { rule_.Expected(os); }
-
-private:
-  R rule_;
-};
-
-template <typename R>
-constexpr DefinitionHeadRule<R> distinctParameters(R rule) {
-  return DefinitionHeadRule<R>{rule};
 }
 
-static constexpr auto typeHead{distinctParameters(typeHeadRule)};
-static constexpr auto instHead{distinctParameters(instHeadRule)};
-
-// The attributes after where, each given at most once.
-class TypeAttributesRule {
-public:
-  using resultType = const TypeAttributes *;
-  bool Matches(const Term &) const { return true; }
-  std::optional<resultType> Convert(
-      const Term &t, ConvertState &state) const {
-    const SymName *equality{nullptr}, *comparison{nullptr};
-    std::optional<llvm::ArrayRef<const NameAndArity *>> directArgs;
-    bool abstractNoncanonical{false};
-    bool ok{true};
-    llvm::SmallVector<const Term *, 4> attributes;
-    Flatten(t, attributes);
-    for (const Term *attribute : attributes) {
-      llvm::StringRef kind;
-      const Term *value{nullptr};
-      if (const CompoundTerm * is{AsCompound(*attribute, "is", 2)}) {
-        kind = FunctorName(StripParentheses(*is->arguments()[0]));
-        value = is->arguments()[1];
-      } else if (llvm::isa<NameTerm>(*attribute)) {
-        kind = FunctorName(*attribute);
-      }
-      bool duplicate{false};
-      if (value && (kind == "equality" || kind == "comparison")) {
-        const SymName *&into{kind == "equality" ? equality : comparison};
-        duplicate = into != nullptr;
-        auto name{Apply(expect("a predicate name", symName), *value, state)};
-        ok &= name.has_value();
-        into = name.value_or(into);
-      } else if (value && kind == "direct_arg") {
-        duplicate = directArgs.has_value();
-        directArgs = Apply(listOf(nameAndArity), *value, state);
-        ok &= directArgs.has_value();
-      } else if (!value && kind == "type_is_abstract_noncanonical") {
-        duplicate = abstractNoncanonical;
-        abstractNoncanonical = true;
-      } else {
-        SayExpected(state, *attribute,
-            "'equality is', 'comparison is', 'direct_arg is' or "
-            "'type_is_abstract_noncanonical'");
-        ok = false;
-      }
-      if (duplicate) {
-        state.messages.Say(GetSource(*attribute, state.tokens),
-            "the type attribute '%s' is given more than once"_err_en_US,
-            kind.str());
-        ok = false;
-      }
+std::optional<const TypeAttributes *> TypeAttributesRule::Convert(
+    const Term &t, ConvertState &state) const {
+  const SymName *equality{nullptr}, *comparison{nullptr};
+  std::optional<llvm::ArrayRef<const NameAndArity *>> directArgs;
+  bool abstractNoncanonical{false};
+  bool ok{true};
+  llvm::SmallVector<const Term *, 4> attributes;
+  Flatten(t, attributes);
+  for (const Term *attribute : attributes) {
+    llvm::StringRef kind;
+    const Term *value{nullptr};
+    if (const CompoundTerm * is{AsCompound(*attribute, "is", 2)}) {
+      kind = FunctorName(StripParentheses(*is->arguments()[0]));
+      value = is->arguments()[1];
+    } else if (llvm::isa<NameTerm>(*attribute)) {
+      kind = FunctorName(*attribute);
     }
-    if (!ok) {
-      return std::nullopt;
-    }
-    return state.arena.Make<TypeAttributes>(t.tokens(), equality, comparison,
-        directArgs.value_or(llvm::ArrayRef<const NameAndArity *>{}),
-        abstractNoncanonical);
-  }
-  void Expected(llvm::raw_ostream &os) const { os << "type attributes"; }
-
-private:
-  // The operands of ',' terms, looking through parentheses.
-  static void Flatten(
-      const Term &term, llvm::SmallVectorImpl<const Term *> &into) {
-    const Term &t{StripParentheses(term)};
-    if (const CompoundTerm * comma{AsCompound(t, ",", 2)}) {
-      Flatten(*comma->arguments()[0], into);
-      Flatten(*comma->arguments()[1], into);
+    bool duplicate{false};
+    if (value && (kind == "equality" || kind == "comparison")) {
+      const SymName *&into{kind == "equality" ? equality : comparison};
+      duplicate = into != nullptr;
+      auto name{Apply(expect("a predicate name", symName), *value, state)};
+      ok &= name.has_value();
+      into = name.value_or(into);
+    } else if (value && kind == "direct_arg") {
+      duplicate = directArgs.has_value();
+      directArgs = Apply(listOf(nameAndArity), *value, state);
+      ok &= directArgs.has_value();
+    } else if (!value && kind == "type_is_abstract_noncanonical") {
+      duplicate = abstractNoncanonical;
+      abstractNoncanonical = true;
     } else {
-      into.push_back(&t);
+      SayExpected(state, *attribute,
+          "'equality is', 'comparison is', 'direct_arg is' or "
+          "'type_is_abstract_noncanonical'");
+      ok = false;
+    }
+    if (duplicate) {
+      state.messages.Say(GetSource(*attribute, state.tokens),
+          "the type attribute '%s' is given more than once"_err_en_US,
+          kind.str());
+      ok = false;
     }
   }
-};
+  if (!ok) {
+    return std::nullopt;
+  }
+  return state.arena.Make<TypeAttributes>(t.tokens(), equality, comparison,
+      directArgs.value_or(llvm::ArrayRef<const NameAndArity *>{}),
+      abstractNoncanonical);
+}
 
-static constexpr TypeAttributesRule typeAttributes;
 
 // A constructor's argument: Type, or Field :: Type.
 class ConstructorArgRule {
@@ -1311,14 +1231,15 @@ public:
 
 static constexpr auto declaration{anyOf<Item>(moduleDecl, endModuleDecl,
     sectionDecl, importDecl, PredDeclRule{}, ModeDeclRule{}, TypeDefnRule{},
-    InstDefnRule{}, ModeDefnRule{}, TypeclassDeclRule{}, InstanceDeclRule{})};
+    InstDefnRule{}, ModeDefnRule{}, TypeclassDeclRule{}, InstanceDeclRule{},
+    pragma)};
 
 // Whether `name` is a declaration of the reference manual's list
 // ("Declarations") that is not converted yet.
 static bool IsDeclarationToDo(llvm::StringRef name) {
   return llvm::StringSwitch<bool>(name)
       .Case("solver", true)
-      .Cases({"pragma", "promise"}, true)
+      .Case("promise", true)
       .Cases({"initialise", "initialize", "finalise", "finalize"}, true)
       .Case("mutable", true)
       .Default(false);
