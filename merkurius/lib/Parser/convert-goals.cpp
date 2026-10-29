@@ -21,18 +21,6 @@ namespace merkurius::parser {
 
 namespace {
 
-struct DataTermRule {
-  using resultType = DataTerm;
-  bool Matches(const Term &) const { return true; }
-  std::optional<DataTerm> Convert(const Term &, ConvertState &) const;
-  void Expected(llvm::raw_ostream &os) const { os << "a data-term"; }
-};
-struct GoalRule {
-  using resultType = Goal;
-  bool Matches(const Term &) const { return true; }
-  std::optional<Goal> Convert(const Term &, ConvertState &) const;
-  void Expected(llvm::raw_ostream &os) const { os << "a goal"; }
-};
 struct DcgGoalRule {
   using resultType = DcgGoal;
   bool Matches(const Term &) const { return true; }
@@ -47,8 +35,6 @@ struct ModedTermRule {
   void Expected(llvm::raw_ostream &os) const { os << "a data-term"; }
 };
 
-constexpr DataTermRule dataTerm;
-constexpr GoalRule goal;
 constexpr DcgGoalRule dcgGoal;
 constexpr ModedTermRule modedTerm;
 
@@ -484,44 +470,86 @@ std::optional<const ModedTerm *> ModedTermRule::Convert(
 namespace {
 
 // A trace goal's compile_time or run_time condition: and, or and not over
-// primitive conditions such as flag("f") or grade(debug).
+// primitive conditions (reference manual, "Trace goals"). At compile time
+// these are flag("Name"), tracelevel(shallow) or tracelevel(deep), and
+// grade(Test); at run time, env("Name").
 struct TraceConditionRule {
   using resultType = const TraceCondition *;
+  bool runTime;
   bool Matches(const Term &) const { return true; }
   std::optional<resultType> Convert(
       const Term &t, ConvertState &state) const {
-    TraceConditionKind kind{TraceConditionKind::Primitive};
-    llvm::ArrayRef<const Term *> operands;
-    if (const CompoundTerm * c{AsCompound(t, "and", 2)}) {
+    auto make{[&](TraceConditionKind kind,
+                  llvm::ArrayRef<const TraceCondition *> operands,
+                  std::optional<llvm::StringRef> value)
+        -> std::optional<resultType> {
+      return state.arena.Make<TraceCondition>(
+          t.tokens(), kind, operands, value);
+    }};
+    std::optional<TraceConditionKind> kind;
+    if (AsCompound(t, "and", 2)) {
       kind = TraceConditionKind::And;
-      operands = c->arguments();
-    } else if (const CompoundTerm * c{AsCompound(t, "or", 2)}) {
+    } else if (AsCompound(t, "or", 2)) {
       kind = TraceConditionKind::Or;
-      operands = c->arguments();
-    } else if (const CompoundTerm * c{AsCompound(t, "not", 1)}) {
+    } else if (AsCompound(t, "not", 1)) {
       kind = TraceConditionKind::Not;
-      operands = c->arguments();
     }
-    if (kind != TraceConditionKind::Primitive) {
-      if (auto converted{detail::ConvertElements(*this, operands, state)}) {
-        return state.arena.Make<TraceCondition>(
-            t.tokens(), kind, *converted, nullptr);
+    if (kind) {
+      if (auto converted{detail::ConvertElements(
+              *this, llvm::cast<CompoundTerm>(t).arguments(), state)}) {
+        return make(*kind, *converted, std::nullopt);
       }
       return std::nullopt;
     }
-    if (!llvm::isa<NameTerm>(t) && !llvm::isa<CompoundTerm>(t)) {
-      SayExpected(state, t, "a trace condition");
+    const auto *c{llvm::dyn_cast<CompoundTerm>(&t)};
+    const Term *argument{c && Arity(*c) == 1 ? &Operand(*c) : nullptr};
+    llvm::StringRef name{c ? FunctorName(*c) : ""};
+    if (runTime ? name != "env"
+                : !llvm::is_contained({"flag", "tracelevel", "grade"}, name)) {
+      SayExpected(state, t, detail::ExpectedText(*this));
       return std::nullopt;
     }
-    std::optional<DataTerm> primitive{dataTerm.Convert(t, state)};
-    if (!primitive) {
+    if (!argument) {
+      SayExpected(state, t, detail::ExpectedText(*this));
       return std::nullopt;
     }
-    return state.arena.Make<TraceCondition>(t.tokens(), kind,
-        llvm::ArrayRef<const TraceCondition *>{},
-        std::get<const FunctorData *>(*primitive));
+    const Term &a{StripParentheses(*argument)};
+    if (name == "flag" || name == "env") {
+      // mmc: "compile_time parameter `flag' takes a string as argument".
+      if (auto text{Apply(expect("a string", stringLiteral), a, state)}) {
+        return make(name == "flag" ? TraceConditionKind::Flag
+                                   : TraceConditionKind::Env,
+            {}, *text);
+      }
+      return std::nullopt;
+    }
+    llvm::StringRef value{llvm::isa<NameTerm>(a) ? FunctorName(a) : ""};
+    if (name == "tracelevel") {
+      if (value != "shallow" && value != "deep") {
+        SayExpected(state, a, "'shallow' or 'deep'");
+        return std::nullopt;
+      }
+      return make(TraceConditionKind::TraceLevel, {}, value);
+    }
+    // The manual's grade tests, and rbmm, which mmc also accepts.
+    if (!llvm::is_contained({"debug", "ssdebug", "prof", "profdeep", "par",
+                                "trail", "rbmm", "llds", "mlds", "c",
+                                "csharp", "java"},
+            value)) {
+      SayExpected(state, a,
+          "a grade test: 'debug', 'ssdebug', 'prof', 'profdeep', 'par', "
+          "'trail', 'rbmm', 'llds', 'mlds', 'c', 'csharp' or 'java'");
+      return std::nullopt;
+    }
+    return make(TraceConditionKind::Grade, {}, value);
   }
-  void Expected(llvm::raw_ostream &os) const { os << "a trace condition"; }
+  void Expected(llvm::raw_ostream &os) const {
+    os << (runTime ? "a run_time condition: env(\"Name\"), with and, or "
+                     "and not"
+                   : "a compile_time condition: flag(\"Name\"), "
+                     "tracelevel(Level) or grade(Test), with and, or and "
+                     "not");
+  }
 };
 
 struct TraceParamRule {
@@ -535,8 +563,9 @@ struct TraceParamRule {
       kind = TraceParamKind::RunTime;
     }
     if (condition) {
-      if (auto converted{
-              Apply(TraceConditionRule{}, Operand(*condition), state)}) {
+      if (auto converted{Apply(
+              TraceConditionRule{kind == TraceParamKind::RunTime},
+              Operand(*condition), state)}) {
         return state.arena.Make<TraceParam>(
             t.tokens(), kind, *converted, nullptr);
       }
@@ -920,6 +949,21 @@ std::optional<Goal> GoalRule::Convert(
       auto traced{Apply(goal, Operand(*c, 1), state)};
       if (!params || !traced) {
         return std::nullopt;
+      }
+      // mmc: "duplicate compile_time trace parameter"; state may repeat,
+      // once for each mutable.
+      for (std::size_t j{0}; j < params->size(); ++j) {
+        TraceParamKind kind{(*params)[j]->kind};
+        if (kind != TraceParamKind::State &&
+            llvm::any_of(params->take_front(j),
+                [&](const TraceParam *p) { return p->kind == kind; })) {
+          state.messages.Say(GetSource(Operand(*c, 0), state.tokens),
+              "the trace parameter '%s' is given more than once"_err_en_US,
+              kind == TraceParamKind::CompileTime ? "compile_time"
+                  : kind == TraceParamKind::RunTime ? "run_time"
+                                                    : "io");
+          return std::nullopt;
+        }
       }
       return make(state.arena.Make<TraceGoal>(t.tokens(), *params, *traced));
     }

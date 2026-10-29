@@ -73,50 +73,6 @@ private:
   llvm::StringLiteral expected_;
 };
 
-// A string literal's characters.
-struct StringRule {
-  using resultType = llvm::StringRef;
-  bool Matches(const Term &t) const { return llvm::isa<StringTerm>(t); }
-  std::optional<llvm::StringRef> Convert(
-      const Term &t, ConvertState &state) const {
-    return state.arena.Save(llvm::cast<StringTerm>(t).value());
-  }
-  void Expected(llvm::raw_ostream &os) const { os << "a string"; }
-};
-
-constexpr StringRule stringLiteral;
-
-// "C", "C#" or "Java", or c, csharp or java (mmc: "The valid languages are
-// c, C, csharp, C#, java and Java").
-struct LanguageRule {
-  using resultType = ForeignLanguage;
-  bool Matches(const Term &t) const { return Lookup(t).has_value(); }
-  std::optional<ForeignLanguage> Convert(const Term &t, ConvertState &) const {
-    return Lookup(t);
-  }
-  void Expected(llvm::raw_ostream &os) const {
-    os << "a foreign language: \"C\", \"C#\" or \"Java\"";
-  }
-
-private:
-  static std::optional<ForeignLanguage> Lookup(const Term &t) {
-    llvm::StringRef name;
-    if (const auto *s{llvm::dyn_cast<StringTerm>(&t)}) {
-      name = s->value();
-    } else if (llvm::isa<NameTerm>(t)) {
-      name = FunctorName(t);
-    } else {
-      return std::nullopt;
-    }
-    return llvm::StringSwitch<std::optional<ForeignLanguage>>(name)
-        .Cases({"c", "C"}, ForeignLanguage::C)
-        .Cases({"csharp", "C#"}, ForeignLanguage::CSharp)
-        .Cases({"java", "Java"}, ForeignLanguage::Java)
-        .Default(std::nullopt);
-  }
-};
-
-constexpr LanguageRule language;
 
 // p/1, pred(p/1) or func(f/1).
 struct PredNameArityRule {

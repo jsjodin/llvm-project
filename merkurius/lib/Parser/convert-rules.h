@@ -10,8 +10,9 @@
 #define MERKURIUS_LIB_PARSER_CONVERT_RULES_H_
 
 // The converter's rules that its files share: convert.cpp, for
-// declarations, convert-goals.cpp, for clauses, goals and data-terms, and
-// convert-pragmas.cpp, for pragmas.
+// declarations, convert-goals.cpp, for clauses, goals and data-terms,
+// convert-pragmas.cpp, for pragmas, and convert-directives.cpp, for
+// initialise, finalise, mutable, promises and solver types.
 
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/parse-tree.h"
@@ -252,6 +253,68 @@ private:
 
 inline constexpr TypeAttributesRule typeAttributes;
 
+// Data-terms and goals, defined in convert-goals.cpp.
+struct DataTermRule {
+  using resultType = DataTerm;
+  bool Matches(const Term &) const { return true; }
+  std::optional<DataTerm> Convert(const Term &, ConvertState &) const;
+  void Expected(llvm::raw_ostream &os) const { os << "a data-term"; }
+};
+struct GoalRule {
+  using resultType = Goal;
+  bool Matches(const Term &) const { return true; }
+  std::optional<Goal> Convert(const Term &, ConvertState &) const;
+  void Expected(llvm::raw_ostream &os) const { os << "a goal"; }
+};
+
+inline constexpr DataTermRule dataTerm;
+inline constexpr GoalRule goal;
+
+// A string literal's characters.
+struct StringRule {
+  using resultType = llvm::StringRef;
+  bool Matches(const Term &t) const { return llvm::isa<StringTerm>(t); }
+  std::optional<llvm::StringRef> Convert(
+      const Term &t, ConvertState &state) const {
+    return state.arena.Save(llvm::cast<StringTerm>(t).value());
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "a string"; }
+};
+
+inline constexpr StringRule stringLiteral;
+
+// "C", "C#" or "Java", or c, csharp or java (mmc: "The valid languages are
+// c, C, csharp, C#, java and Java").
+struct LanguageRule {
+  using resultType = ForeignLanguage;
+  bool Matches(const Term &t) const { return Lookup(t).has_value(); }
+  std::optional<ForeignLanguage> Convert(const Term &t, ConvertState &) const {
+    return Lookup(t);
+  }
+  void Expected(llvm::raw_ostream &os) const {
+    os << "a foreign language: \"C\", \"C#\" or \"Java\"";
+  }
+
+private:
+  static std::optional<ForeignLanguage> Lookup(const Term &t) {
+    llvm::StringRef name;
+    if (const auto *s{llvm::dyn_cast<StringTerm>(&t)}) {
+      name = s->value();
+    } else if (llvm::isa<NameTerm>(t)) {
+      name = FunctorName(t);
+    } else {
+      return std::nullopt;
+    }
+    return llvm::StringSwitch<std::optional<ForeignLanguage>>(name)
+        .Cases({"c", "C"}, ForeignLanguage::C)
+        .Cases({"csharp", "C#"}, ForeignLanguage::CSharp)
+        .Cases({"java", "Java"}, ForeignLanguage::Java)
+        .Default(std::nullopt);
+  }
+};
+
+inline constexpr LanguageRule language;
+
 // A clause: a fact, a rule or a DCG rule, of a predicate or a function
 // (reference manual, "Facts", "Rules" and "DCG-rules").
 class ClauseRule {
@@ -274,6 +337,64 @@ public:
 };
 
 inline constexpr PragmaRule pragma;
+
+// The declarations of convert-directives.cpp, without the ':-'.
+
+// mutable(Name, Type, Initial, Inst, [Attributes]).
+struct MutableRule {
+  using resultType = const MutableDecl *;
+  bool Matches(const Term &t) const {
+    return llvm::isa<CompoundTerm>(t) && FunctorName(t) == "mutable";
+  }
+  std::optional<resultType> Convert(const Term &, ConvertState &) const;
+  void Expected(llvm::raw_ostream &os) const { os << "a mutable declaration"; }
+};
+
+// initialise p/2 and finalise p/2, with their spellings initialize and
+// finalize.
+struct InitialiseRule {
+  using resultType = Item;
+  bool Matches(const Term &t) const {
+    return llvm::isa<CompoundTerm>(t) && Arity(t) == 1 &&
+        llvm::is_contained(
+            {"initialise", "initialize", "finalise", "finalize"},
+            FunctorName(t));
+  }
+  std::optional<Item> Convert(const Term &, ConvertState &) const;
+  void Expected(llvm::raw_ostream &os) const {
+    os << "an initialise or finalise declaration";
+  }
+};
+
+// promise Goal.
+struct PromiseRule {
+  using resultType = Item;
+  bool Matches(const Term &t) const { return AsCompound(t, "promise", 1); }
+  std::optional<Item> Convert(const Term &, ConvertState &) const;
+  void Expected(llvm::raw_ostream &os) const { os << "a promise"; }
+};
+
+// all [Vars] promise_exclusive Disjunction, and promise_exhaustive and
+// promise_exclusive_exhaustive.
+struct PromiseDisjunctionRule {
+  using resultType = Item;
+  bool Matches(const Term &) const;
+  std::optional<Item> Convert(const Term &, ConvertState &) const;
+  void Expected(llvm::raw_ostream &os) const {
+    os << "a promise about a disjunction";
+  }
+
+private:
+  static std::optional<PromiseDisjunctionKind> Kind(const Term &);
+};
+
+// solver type t, or solver type t where Attributes.
+struct SolverTypeRule {
+  using resultType = Item;
+  bool Matches(const Term &t) const { return AsCompound(t, "solver", 1); }
+  std::optional<Item> Convert(const Term &, ConvertState &) const;
+  void Expected(llvm::raw_ostream &os) const { os << "a solver type"; }
+};
 
 } // namespace merkurius::parser
 #endif // MERKURIUS_LIB_PARSER_CONVERT_RULES_H_

@@ -352,8 +352,17 @@ constexpr auto ifThenElse =
     - `where` on anything but `foreign_type`.
   - **mmc's undocumented forms.** The `size_limit` tabling attribute and the hidden-argument form of `specified` are accepted.
   - **Not yet implemented:** `require_tail_recursion`, `mode_check_clauses` and `oisu`. mmc accepts these, but the reference manual does not describe them.
+- **Module directives, promises and solver types.**
+  - `initialise` and `finalise`, also spelled `initialize` and `finalize`, name a predicate as `Name/Arity` only. As in mmc, `pred(p/2)` is an error.
+  - **`mutable`** takes four or five arguments: the name, the type, the initial value as a data-term, the inst, and an optional list of attributes. As in mmc, these are errors:
+    - an unknown attribute or a repeated one;
+    - two foreign names for the same language;
+    - the conflicting pairs `trailed` and `untrailed`, `constant` and `attach_to_io_state`, `constant` and `trailed`, `thread_local` and `trailed`, and `thread_local` and `constant` (the last one is from the manual).
+  - **Promises.** `promise Goal` is a `PromiseDecl`. `all [Vars] promise_exclusive Disjunction` is a `PromiseDisjunctionDecl`, and so are the same forms with `promise_exhaustive` and `promise_exclusive_exhaustive`. The quantifier must be `all`, and the goal must be a disjunction.
+  - **Solver types.** `solver type t` is an `AbstractTypeDecl` with `solver` set. `solver type t where ...` is a `SolverTypeDefn`, whose attributes must come in the manual's order. As in mmc, only `representation` is required, although the manual also requires `constraint_store`. A constraint store is one `mutable` or a list of them. Constructors and `==` are errors.
+- **Trace conditions** are typed. At compile time a condition is `flag("Name")`, `tracelevel(shallow)` or `tracelevel(deep)`, or `grade(Test)`; at run time it is `env("Name")`. Either kind may be combined with `and`, `or` and `not`. The grade tests are the manual's, plus `rbmm`, which mmc also accepts. As in mmc, `compile_time`, `run_time` and `io` may each be given only once.
 - **Names** are `SymName` nodes: a name and its module qualifiers, from `'.'(Qualifier, Name)` or from `__` within a name (reference manual, "The module system"), so `a.b__c` is `a.b.c`. A name that begins or ends with `__` is not split.
-- **Errors.** A term that matches nothing is reported with the forms expected in its context and the start of its source, as in "expected a module name, but found '"string"'". An item with an error is left out of the tree, and conversion continues with the next item. Declarations the converter does not handle yet (promises, `initialise`, `finalise`, `mutable` and solver types) are reported as not yet implemented.
+- **Errors.** A term that matches nothing is reported with the forms expected in its context and the start of its source, as in "expected a module name, but found '"string"'". An item with an error is left out of the tree, and conversion continues with the next item. Forms the converter does not handle yet, namely `atomic` goals, OpenMP directives and three pragmas, are reported as not yet implemented.
 - **Items** convert one at a time: the reader's terms for an item live in an arena that is reset once it is converted, and the strings the parse tree keeps are copied into the parse tree's own arena. An item with a lexical error is not converted.
 - **Kept small.** Rules are `constexpr` objects built from a few templates. Heavy template parsers are known for slow builds and high compiler memory, so the library stays minimal and nodes are allocated in an arena rather than moved around as values.
 

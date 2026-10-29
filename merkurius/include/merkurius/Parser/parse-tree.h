@@ -509,10 +509,12 @@ struct AbstractTypeDecl {
   const SymName *name;
   llvm::ArrayRef<llvm::StringRef> parameters;
   const TypeAttributes *attributes; // null if there is no where
+  bool solver; // :- solver type t.
   template <typename F> void ForEachField(F &&f) const {
     f("name", name);
     f("parameters", parameters);
     f("attributes", attributes);
+    f("solver", solver);
   }
 };
 
@@ -1055,20 +1057,22 @@ struct DisableWarnings {
   }
 };
 
-ENUM_CLASS(TraceConditionKind, And, Or, Not, Primitive)
+ENUM_CLASS(TraceConditionKind, And, Or, Not, Flag, TraceLevel, Grade, Env)
 
 // A condition of a compile_time or run_time trace parameter: flag("f"),
-// grade(debug), tracelevel(deep) or env("V"), combined with and, or and not.
+// tracelevel(deep), grade(debug) or env("V"), combined with and, or and not.
 struct TraceCondition {
   static constexpr llvm::StringLiteral kindName{"TraceCondition"};
   TokenRange tokens;
   TraceConditionKind kind;
-  llvm::ArrayRef<const TraceCondition *> operands;
-  const FunctorData *primitive; // for a primitive condition
+  llvm::ArrayRef<const TraceCondition *> operands; // for and, or and not
+  // The flag's or environment variable's name, the trace level, or the
+  // grade test; none for and, or and not.
+  std::optional<llvm::StringRef> value;
   template <typename F> void ForEachField(F &&f) const {
     f("kind", kind);
     f("operands", operands);
-    f("primitive", primitive);
+    f("value", value);
   }
 };
 
@@ -1317,6 +1321,121 @@ struct DcgRule {
 
 using Clause = std::variant<const FactOrRule *, const DcgRule *>;
 
+// The foreign languages, which mmc names "C", "C#" and "Java", or c,
+// csharp and java.
+ENUM_CLASS(ForeignLanguage, C, CSharp, Java)
+
+//===----------------------------------------------------------------------===//
+// Module directives, promises and solver types (reference manual, "Module
+// initialisation", "Module finalisation", "Module-local mutable variables"
+// and "Solver types")
+//===----------------------------------------------------------------------===//
+
+ENUM_CLASS(InitialiseKind, Initialise, Finalise)
+
+// :- initialise p/2., or :- finalise p/2. (or initialize, finalize).
+struct InitialiseDecl {
+  static constexpr llvm::StringLiteral kindName{"InitialiseDecl"};
+  TokenRange tokens;
+  InitialiseKind kind;
+  const NameAndArity *pred;
+  template <typename F> void ForEachField(F &&f) const {
+    f("kind", kind);
+    f("pred", pred);
+  }
+};
+
+// foreign_name(Lang, "Name"), an attribute of a mutable.
+struct MutableForeignName {
+  static constexpr llvm::StringLiteral kindName{"MutableForeignName"};
+  TokenRange tokens;
+  ForeignLanguage language;
+  llvm::StringRef name;
+  template <typename F> void ForEachField(F &&f) const {
+    f("language", language);
+    f("name", name);
+  }
+};
+
+// :- mutable(Name, Type, Initial, Inst, [Attributes]); the attribute list
+// may be left out.
+struct MutableDecl {
+  static constexpr llvm::StringLiteral kindName{"MutableDecl"};
+  TokenRange tokens;
+  llvm::StringRef name;
+  Type type;
+  DataTerm initial;
+  Inst inst;
+  std::optional<bool> trailed; // none unless trailed or untrailed is given
+  bool attachToIoState;
+  bool constant;
+  bool threadLocal;
+  llvm::ArrayRef<const MutableForeignName *> foreignNames;
+  template <typename F> void ForEachField(F &&f) const {
+    f("name", name);
+    f("type", type);
+    f("initial", initial);
+    f("inst", inst);
+    f("trailed", trailed);
+    f("attachToIoState", attachToIoState);
+    f("constant", constant);
+    f("threadLocal", threadLocal);
+    f("foreignNames", foreignNames);
+  }
+};
+
+// :- promise Goal.
+struct PromiseDecl {
+  static constexpr llvm::StringLiteral kindName{"PromiseDecl"};
+  TokenRange tokens;
+  Goal goal;
+  template <typename F> void ForEachField(F &&f) const { f("goal", goal); }
+};
+
+ENUM_CLASS(PromiseDisjunctionKind, Exclusive, Exhaustive, ExclusiveExhaustive)
+
+// :- all [Vars] promise_exclusive Disjunction, or promise_exhaustive or
+// promise_exclusive_exhaustive. mmc accepts these, which the reference
+// manual does not describe, only with all and a disjunction.
+struct PromiseDisjunctionDecl {
+  static constexpr llvm::StringLiteral kindName{"PromiseDisjunctionDecl"};
+  TokenRange tokens;
+  PromiseDisjunctionKind kind;
+  llvm::ArrayRef<llvm::StringRef> vars;
+  const Disjunction *disjunction;
+  template <typename F> void ForEachField(F &&f) const {
+    f("kind", kind);
+    f("vars", vars);
+    f("disjunction", disjunction);
+  }
+};
+
+// :- solver type t(T) where representation is R, ground is G, any is A,
+// constraint_store is Mutables, equality is Eq, comparison is Cmp, with
+// the attributes in this order and all but representation optional.
+struct SolverTypeDefn {
+  static constexpr llvm::StringLiteral kindName{"SolverTypeDefn"};
+  TokenRange tokens;
+  const SymName *name;
+  llvm::ArrayRef<llvm::StringRef> parameters;
+  Type representation;
+  std::optional<Inst> ground;
+  std::optional<Inst> any;
+  llvm::ArrayRef<const MutableDecl *> constraintStore;
+  const SymName *equality; // null if none is given
+  const SymName *comparison;
+  template <typename F> void ForEachField(F &&f) const {
+    f("name", name);
+    f("parameters", parameters);
+    f("representation", representation);
+    f("ground", ground);
+    f("any", any);
+    f("constraintStore", constraintStore);
+    f("equality", equality);
+    f("comparison", comparison);
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // Pragmas (reference manual, "Pragmas", "Foreign language interface" and
 // "Implementation-dependent extensions")
@@ -1480,10 +1599,6 @@ struct SourceFilePragma {
   llvm::StringRef name;
   template <typename F> void ForEachField(F &&f) const { f("name", name); }
 };
-
-// The foreign languages, which mmc names "C", "C#" and "Java", or c,
-// csharp and java.
-ENUM_CLASS(ForeignLanguage, C, CSharp, Java)
 
 // The code of a foreign_decl or foreign_code pragma, or include_file("Path").
 struct ForeignCode {
@@ -1763,7 +1878,9 @@ using Item = std::variant<const ModuleDecl *, const EndModuleDecl *,
     const ForeignDeclPragma *, const ForeignCodePragma *,
     const ForeignProcPragma *, const ForeignTypePragma *,
     const ForeignEnumPragma *, const ForeignExportEnumPragma *,
-    const ForeignExportPragma *, const ForeignImportModulePragma *>;
+    const ForeignExportPragma *, const ForeignImportModulePragma *,
+    const InitialiseDecl *, const MutableDecl *, const PromiseDecl *,
+    const PromiseDisjunctionDecl *, const SolverTypeDefn *>;
 
 // The items of a file that converted without errors, in order.
 struct ParseTree {
