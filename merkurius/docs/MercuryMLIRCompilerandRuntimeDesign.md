@@ -26,6 +26,7 @@ We will build a clean-room Mercury compiler on MLIR and LLVM, adding OpenMP-styl
 | --- | --- | --- |
 | Front end | New, clean-room implementation | Licence freedom (Provenance); MLIR-native data structures |
 | Implementation language | C++ for the compiler and runtime | Direct use of MLIR, the LLVM data structures and TableGen |
+| Command line | Clang/GCC style: `-c`, `-o`, `-O2`, `-g`, `-fopenmp` | Fits Make, Ninja and CMake, and the habits of C, C++ and Fortran users (Driver) |
 | Parser | Recursive descent in two layers: a term reader with precedence climbing, then a converter per context | The manual defines items and goals as terms over a fixed operator table |
 | Front-end representation | Flang-style parse tree plus a small desugared semantic form; per-procedure tables for mode results | No separate IR; modes need the source structure and have no SSA form before analysis |
 | Parallel annotations | `%$omp` comment sentinel, attached to the next goal | The same source compiles with mmc; mirrors Fortran's `!$omp` |
@@ -82,6 +83,63 @@ Our compiler and runtime are written without reading Melbourne Mercury's source 
 
 - History statistics come from `git log --no-renames --format=…` or `--name-only`, on a clone made with `--filter=blob:none` and no checkout. Options that need file contents, such as `--stat`, `--numstat`, `-p` and rename detection, make git fetch the files, and are not used.
 - Contributors record whether they have read Melbourne's compiler, runtime or standard library source code. Anyone who has does not write compiler, runtime or standard library code for this project without counsel's agreement.
+
+## Reuse from LLVM and Flang
+
+LLVM and Flang are licensed, like this project, under Apache 2.0 with the LLVM exception, so their code may be used and, unlike Melbourne Mercury's, read freely (Provenance). This section records what is reused and how, so that it stays traceable.
+
+**Depend on, don't copy.** Upstream libraries we link anyway, which get fixes for free:
+
+| Library | Used for |
+| --- | --- |
+| LLVM Support: `ConvertUTF.h` (`convertUTF8Sequence`, `ConvertCodePointToUTF8`, `isLegalUTF8String`, `getNumBytesForUTF8`) | UTF-8 decoding, validation and encoding in strings, quoted names, character literals and comments |
+| LLVM Support: `Unicode.h` (`columnWidthUTF8`, `isPrintable`) | Caret positions in diagnostics on lines with multi-byte characters |
+| LLVM Support: `BumpPtrAllocator` | The `ASTContext` arena and the term reader's per-item arena |
+| `llvm/Frontend/OpenMP`: `OMP.td`, the generated `llvm::omp::isAllowedClauseForDirective`, and `OMPDescriptors.h` | OpenMP directive and clause kinds shared with Clang and Flang; which clauses and modifiers each directive and clause allows, by OpenMP version. This replaces Flang's own clause checks |
+| MLIR OpenMP dialect: `OpenMPClauseOperands.h` | Clause operand structures used to build `omp.parallel` and `omp.wsloop` when `merc.par_loop` is lowered |
+| MLIR and its upstream dialects, LLVM code generation | Everything below `merc` (MLIR dialects; Lowering and code generation) |
+| LLVM Option: `OptTable`, with options written in TableGen | The driver and `-fc1` command lines (Driver) |
+| LLVM TargetParser, Target and Passes: `Triple`, host detection, `TargetMachine`, `PassBuilder` | Targets and CPUs, and the `-O` pipelines |
+| `clang`, `clang-linker-wrapper` and `llvm-offload-binary`, run as programs, not linked | Linking, and packaging and linking device code for offloading (Driver, Linking and offloading) |
+
+**Copy and adapt.** Language-neutral Flang infrastructure that is not available as a library:
+
+| Upstream file (llvm-project) | Gives us | Status |
+| --- | --- | --- |
+| `flang/include/flang/Common/indirection.h` | An owning pointer for recursive variant types in the parse tree | Planned |
+| `flang/include/flang/Common/visit.h` | `common::visit`, which compiles faster than `std::visit` | Planned |
+| `flang/include/flang/Common/idioms.h` | Boilerplate for parse-tree classes | Planned |
+| `flang/include/flang/Parser/char-block.h` | Source ranges over the cooked stream | Planned |
+| `flang/include/flang/Parser/provenance.h` | The cooked-source provenance map behind `SourceLocation` (Front end, Prescanner) | Planned |
+| `flang/include/flang/Parser/message.h` | Diagnostics that carry provenance | Planned |
+| `flang/include/flang/Parser/parse-tree-visitor.h` | The generic `walk` over parse-tree types | Planned |
+| `flang/include/flang/Parser/openmp-utils.h` and `flang/lib/Parser/openmp-utils.cpp`: the `descriptor` namespace, `addr_if` and `WithSource` only, about 70 lines | Version-aware queries over LLVM's OpenMP descriptors: the clauses allowed on a directive, as its own clauses plus those of its clause sets; the modifiers allowed on a clause; and the OpenMP versions in which a clause is allowed on a directive. They give directive checking messages such as "allowed only from OpenMP 5.0". `WithSource` pairs a value with its source range | Planned |
+| `flang/include/flang/Support/OpenMP-utils.h` and `flang/lib/Support/OpenMP-utils.cpp` | `EntryBlockArgs` and `genEntryBlock`, which create the entry block of an `omp` operation's region with block arguments for clause-defined values such as reductions and private copies. About 100 lines, depending only on MLIR and LLVM ADT, so it is language-neutral | Planned |
+| `flang/include/flang/Utils/OpenMP.h` (`createMapInfoOp` only) | Building `omp.map.info` for `map` clauses. Its other helpers depend on Flang's FIR dialect | Deferred, until device offloading |
+
+**Imitate the design, write our own.** Their structure carries over, but their content is Fortran:
+
+| Upstream file | Why not copied |
+| --- | --- |
+| `flang/include/flang/Parser/characters.h` and `flang/lib/Parser/characters.cpp` | Mostly Fortran: case folding, Fortran token characters, Latin-1. The escapes differ from Mercury's, which need `\a`, hex and octal escapes closed by a backslash, `\u` and `\U` escapes up to `\U0010FFFF`, and deletion of a backslash before a newline. UTF-8 comes from LLVM Support instead. We keep the shape: constexpr predicates that do not depend on `<cctype>`, and a decoder returning a code point and the bytes consumed. |
+| `flang/lib/Parser/prescan.h` | Fixed form and `INCLUDE` handling are Fortran's; our prescanner handles `%$omp` lines and `#line` |
+| `flang/lib/Parser/basic-parsers.h` | Its combinators read characters and tokens; ours match term shapes (Front end, Converter), though they compose the same way |
+| `flang/lib/Parser/unparse.cpp` | Fortran's printing rules; our unparser has exact, canonical and fully parenthesized modes |
+| `flang/include/flang/Parser/openmp-utils.h`, everything except the `descriptor` helpers | It works on Fortran's OpenMP parse-tree nodes: object designators, common blocks, iteration through `BLOCK` and `DO` constructs to find a loop nest, `allocate`, and combiner expressions. Our directive nodes are much smaller, and the associated goal is found by the converter |
+| `flang/include/flang/Semantics/openmp-utils.h` | Semantic checks tied to Fortran symbols and scopes; clause validity comes from `OMP.td` instead |
+| `flang/lib/Lower/OpenMP/Utils.h` | Lowering helpers tied to Fortran's parse tree, symbols and FIR; how it organizes clause processing is still a useful model for lowering `merc.par_loop` |
+| `flang/tools/flang-driver/driver.cpp` and `fc1_main.cpp` | Built on Clang's driver library in its Flang mode, which a project outside llvm-project cannot extend. We keep the shape: one binary that hands off to `-fc1` |
+| `flang/include/flang/Frontend/` and `flang/lib/FrontendTool/` | Tied to Fortran's options and actions, and uses Clang's `DiagnosticsEngine`. We keep `CompilerInvocation`, `CompilerInstance`, the layered `FrontendAction` classes and the `.def` option lists (Driver) |
+| `clang/lib/Driver/ToolChains/Flang.cpp` (`Flang::addOffloadOptions`) | Part of Clang's driver library; it is the recipe for the offload job sequence |
+
+**Rules for copied code**
+
+- Keep the LLVM licence header in every copied file.
+- Add a line naming the original path and the llvm-project commit it came from, and stating that the file was modified. Apache 2.0 requires modified files to say so.
+- List every copied file with its upstream commit and local path in `THIRD_PARTY.md`, and move its status here from Planned to Copied, then Adapted, so upstream fixes can be diffed in later.
+- Prefer depending on an LLVM library to copying from it.
+
+This is an engineering position, not legal advice.
 
 ## Experiments
 
@@ -313,7 +371,7 @@ Desugaring also numbers the goals and unifications of each semantic form densely
 - **Our own interface-file format,** not Melbourne's `.int`/`.opt`. It serializes the exported declarations' parse-tree nodes, with the signatures semantic analysis inferred or checked: types and their representation, insts, modes, predicate and function signatures with modes and determinism, type classes and instances. The module loader reads them back into the same parse-tree types, so imported and local declarations look alike to semantic analysis.
 - **Type fingerprints.** Each exported type gets a fingerprint of its definition, stored in the interface file. The same fingerprints identify types in the distribution handshake (Distribution and wire format).
 - **Optimization section.** An optional section carries the semantic forms of selected bodies, for intermodule inlining and specialization, and analysis results.
-- **Build driver.** It computes module dependencies from imports and rebuilds only what changed, like `mmc --make`.
+- **Build driver.** It computes module dependencies from imports and rebuilds only what changed, like `mmc --make` (Driver, Build mode).
 
 ### Running example
 
@@ -796,6 +854,153 @@ This is the transformation that experiment E2 applied by hand to mmc's generated
 
 The LLVM dialect is translated to LLVM IR, optimized by LLVM, and compiled by the normal LLVM back ends. The result is linked with the runtime library into one executable.
 
+## Driver
+
+The compiler is one program with two layers, as Clang and Flang are. The driver reads the command line, works out the jobs and runs them. The frontend, `-fc1`, compiles one module and is what the driver runs for each module. The command line follows Clang and GCC (`-c`, `-o`, `-O2`, `-g`, `-fopenmp`), so the compiler fits Make, Ninja and CMake and behaves like the C, C++ and Fortran compilers next to it; Mercury-specific options follow the same `-f`, `-W` and `-m` conventions. `mercc` and `libmercrt` are working names for the binary and the runtime library.
+
+Flang's driver cannot be reused as it stands. It is Clang's driver library, `clangDriver`, running in a Flang mode: the Fortran jobs are built in `clang/lib/Driver/ToolChains/Flang.cpp` and the options live in Clang's `Options.td` and `FlangOptions.td`, and a project outside llvm-project cannot add a mode to that library. We write a small driver on LLVM's Option library, imitate Flang's frontend layer, and run Clang's own tools for linking and offloading (Reuse from LLVM and Flang).
+
+### Command line
+
+| Option | Meaning |
+| --- | --- |
+| `-c`, `-S`, `-o` *file* | Stop after the object file or the assembly; name the output |
+| `-fsyntax-only` | Parse and run semantic analysis only |
+| `-O0` to `-O3`, `-Os` | Choose the MLIR and LLVM pass pipelines |
+| `-g`, `-gline-tables-only` | Debug information (Debugging) |
+| `-fopenmp`, `-fopenmp-version=` | Read `%$omp` directives (Front end, Prescanner) |
+| `--offload-arch=` | Compile target regions for a device (Linking and offloading, below) |
+| `--target=`, `-march=`, `-mcpu=` | Target triple and CPU |
+| `-I` *dir*, `-module-dir` *dir* | Where interface files are searched for, and where they are written; Flang uses the same two options for `.mod` files |
+| `-W`*name*, `-Wno-`*name*, `-Werror=`*name* | Per-message control, by the identifiers in Semantic analysis, Diagnostics |
+| `-L`, `-l`, `-fuse-ld=`, `-static` | Passed to the link step |
+| `-MD`, `-MF` *file* | Write a Make-style dependency file listing the interface files read |
+| `-mllvm`, `-mmlir` | Pass options to LLVM and MLIR |
+| `-v`, `-###`, `-save-temps`, `-ftime-report` | Show the jobs as they run, print them without running, keep intermediate files, time each stage |
+
+There are three ways in:
+
+- **`mercc -c foo.m`** compiles one module. It reads the interface files of the modules `foo` imports, which must already exist, and writes `foo.o` and `foo`'s interface file. This is the mode for Make, Ninja and CMake; `-MD` tells them which importers to rebuild when an interface changes.
+- **`mercc -o prog main.m`**, without `-c`, builds a program, like `mmc --make`. Starting from the modules named, the driver finds the modules they import, compiles what changed and links (Build mode, below).
+- **`mercc -o prog a.o b.o`** only links.
+
+### Build mode
+
+- **Module graph from headers.** The driver reads only each module's `:- module`, `:- include_module`, `:- import_module` and `:- use_module` items, with the term reader (Front end), and finds source files by module name in the directory of the first source and the `-I` directories.
+- **Interfaces before code.** Interface files are written in stages before any module is compiled, as the user's guide describes for mmc: a short interface for every module first, from its interface section alone, then the full interfaces, which need only the short interfaces of the modules imported. The reference manual does not forbid modules that import each other, and staging handles them without an order. After that, each compile needs only interface files, so all compiles can run in parallel (`-j`).
+- **Rebuild only what changed.** An interface file is rewritten only when its contents change, as mmc does (user's guide), so editing the body of a predicate recompiles that module and relinks.
+- **The standard library** ships compiled, with its interface files in the installation directory, which the driver adds to the search path.
+
+### No grades
+
+Melbourne compiles a whole program in one grade, and modules link only if all were compiled in the same grade (user's guide; Language extensions, Open terms). This design has no grades. The cost rule keeps each feature's cost in the code that uses it, so no option changes data representation or the calling convention, and modules compiled with different options link together: `-fopenmp` on one module leaves the others unchanged. Each interface file records the target triple and the compiler version, and the driver rejects a mismatch.
+
+### Frontend (`-fc1`)
+
+`-fc1` runs one action on one module. Its structure follows Flang's `Frontend` and `FrontendTool` libraries:
+
+- **`CompilerInvocation`** turns the `-fc1` command line into option structures. Code generation options are listed in a `.def` file, as in Flang's `CodeGenOptions.def`.
+- **`CompilerInstance`** owns the source files and provenance table, the diagnostics, the MLIR context and the output files.
+- **Actions** are classes layered by how far they run, as Flang's are (`PrescanAction`, `PrescanAndParseAction`, `PrescanAndSemaAction`, `CodeGenAction`), chosen by an `ActionKind` in `ExecuteCompilerInvocation`.
+- **Diagnostics** go through our own engine (Semantic analysis, Diagnostics) with Flang's `message.h`. Flang's frontend uses Clang's `DiagnosticsEngine`, which would mean linking Clang's Basic library, so that part is not imitated.
+- **Options** for the driver and `-fc1` are in one TableGen file, each marked for the driver, for `-fc1` or for both, as Clang marks its options for the driver and `-cc1`.
+
+| Runs through | Actions |
+| --- | --- |
+| Prescanner | `-fdebug-dump-provenance` |
+| Parser | `-fdebug-unparse-no-sema`, `-fdebug-dump-parse-tree-no-sema` |
+| Semantic analysis | `-fsyntax-only`, `-fdebug-unparse`, `-fdebug-dump-parse-tree`, `-fdebug-dump-semantic-form`, `-emit-interface` |
+| Code generation | `-emit-merc`, `-emit-mrt`, `-emit-llvm`, `-emit-llvm-bc`, `-S`, `-emit-obj` |
+
+The unparser's exact, canonical and fully parenthesized modes (Front end, Unparser and round-trip tests) are chosen with `-funparse-mode=`. The `-fc1` layer with the prescanner and parser actions comes first, in M1, because the round-trip tests run through it; the build mode and linking follow with code generation.
+
+### Linking and offloading
+
+- **Linking** goes through `clang` as the link driver. It is given the objects, the runtime library, `-fopenmp` when any module used it (so Clang links its OpenMP runtime), and the user's `-L`, `-l` and `-fuse-ld=` options. Clang supplies the C start-up files, the C library and the sanitizer runtimes, as `cc` does for rustc and GHC.
+- **Offloading**, when device offloading arrives (deferred, like `createMapInfoOp`), follows the job sequence Flang builds in `Flang::addOffloadOptions`:
+  1. host `-fc1` to LLVM IR;
+  2. one device `-fc1` per `--offload-arch`, with `-fopenmp-is-target-device` and `-fopenmp-host-ir-file-path` naming the host IR;
+  3. `llvm-offload-binary` packages the device images;
+  4. host `-fc1` to an object, with `-fembed-offload-object=` naming the package;
+  5. `clang-linker-wrapper` links the device code, adds the code that registers it with the offload runtime, and runs the host link.
+
+### Example
+
+The running example (Front end) built as a program. This is the intended output, not output from a working compiler; `<install>` is the installation directory.
+
+```text
+$ mercc -### -fopenmp -O2 -o sumsq sumsq.m
+ "mercc" "-fc1" "-triple" "x86_64-unknown-linux-gnu" "-emit-obj" "-O2" "-fopenmp"
+   "-I" "<install>/lib/mercury" "-module-dir" "." "-o" "/tmp/sumsq-3f9a1c.o" "sumsq.m"
+ "clang" "-fopenmp" "-o" "sumsq" "/tmp/sumsq-3f9a1c.o" "-L<install>/lib" "-lmercrt"
+```
+
+- `sumsq` imports only standard library modules, so there is one compile job; their interface files come from `<install>/lib/mercury`.
+- The job writes `sumsq`'s interface file into `.`, though nothing imports it.
+- Without `-fopenmp`, both jobs lose the flag, the `%$omp` line stays a comment, and the program links without the OpenMP runtime.
+
+## Debugging
+
+Programs carry standard DWARF debug information, so gdb, lldb, IDE debuggers, `perf` and sanitizers work on them. Melbourne's own debugger and deep profiler are non-goals; the standard tools take their place. The links to the source survive because locations come straight from the parse tree and MLIR carries them through every stage, whereas Melbourne's high-level C grades pass through C. MLIR's LLVM dialect has the DWARF attributes needed: compile units, subprograms, local variables and composite types. Flang's `AddDebugInfo` pass, which attaches them to FIR, is the model.
+
+### What maps to what
+
+| Mercury | DWARF |
+| --- | --- |
+| Module | Compile unit and source file |
+| Procedure, one per mode of a predicate | Subprogram named like `add_square/4 (in, in, in, out)`, with a mangled linkage name |
+| Goal | Line-table rows at the location of the parse-tree node it came from |
+| Variable | Local variable under its source name. The numbered versions that desugaring makes of a state variable, such as `Acc_0` and `Acc_1` for `!Acc`, are one variable, `Acc`, with a different value at different points |
+| `int`, `float`, `char` and the sized integers | Base types |
+| Any other type | A word described as an opaque value named by its Mercury type, and printed by a debugger script |
+| A suspended process's stack | Unwound by a debugger extension; DWARF alone cannot find it |
+
+### Three tiers
+
+1. **Line tables (M1).** Every `merc` operation already carries the location of its parse-tree node (Semantic analysis, Mapping to `merc`). Lowering keeps locations through rewrites, using fused locations when it merges operations, and gives each procedure a subprogram. MLIR's `ensure-debug-info-scope-on-llvm-func` pass creates minimal subprograms for exactly this. This gives breakpoints by Mercury file and line, stepping, Mercury backtraces, and source lines in `perf` profiles and sanitizer reports.
+2. **Variables (M2).** MLIR generation ties each SSA value to its Mercury variable through debug-value records, using the `NameLoc`s it records. Primitive types are described directly.
+3. **Terms and processes (M4).** A term is a tagged word whose low bits select the constructor. DWARF has no ready way to describe that, since its tagged unions select on a field's value, and MLIR's debug attributes do not cover them anyway. So, as Go and Rust do, we ship debugger scripts: LLDB data formatters and GDB pretty-printers that call a runtime routine to print a term from its type descriptor, the same descriptors `io.write` uses. A polymorphic variable's script finds its type info in the hidden type-info variable beside it. A second extension lists processes and unwinds the stacks of suspended ones, which no OS thread holds; Go's `runtime-gdb.py` does the same for goroutines.
+
+### Example
+
+The running example (Front end) compiled without `-fopenmp`, with a breakpoint in `add_square`. This is the intended session, not output from a working compiler; line numbers are those of the fragment.
+
+```text
+(lldb) breakpoint set --file sumsq.m --line 10
+Breakpoint 1: where = sumsq`add_square/4 (in, in, in, out) at sumsq.m:10
+(lldb) run
+   9   add_square(A, I, !Acc) :-
+-> 10      array.unsafe_lookup(A, I, X),
+   11      !:Acc = !.Acc + X * X.
+(lldb) frame variable
+(array(int)) A = array([1, 2, 3, 4])
+(int) I = 0
+(int) Acc = 0
+(lldb) thread backtrace
+  * frame #0: add_square/4 (in, in, in, out) at sumsq.m:10
+    frame #1: int.fold_up/5 (in(pred(in, in, out) is det), in, in, in, out)
+    frame #2: sum_squares/3 (in, in, out) at sumsq.m:5
+    frame #3: main/2 (di, uo)
+(lldb) next
+-> 11      !:Acc = !.Acc + X * X.
+(lldb) frame variable X Acc
+(int) X = 1
+(int) Acc = 0
+```
+
+- **`A` prints as a Mercury value** through the term formatter, while `I`, `X` and `Acc` are base types.
+- **`Acc` is one variable.** At line 10 it is `Acc_0`; after line 11 it would be `Acc_1`, the procedure's result.
+- **Execution order.** Line 11 holds two goals, `#3` (`V_1 = X * X`) and `#2` (`Acc_1 = Acc_0 + V_1`), run in the order the `ProcInfo` gives. `V_1` is a compiler-made variable and is not shown.
+- **With `-fopenmp`,** the calls of `add_square` run on OpenMP worker threads, and their backtraces end in the outlined parallel region of `sum_squares`, as in C and Fortran.
+
+### Mercury-specific behaviour
+
+- **Stepping follows execution order.** Mode analysis reorders conjunctions, so stepping can jump between lines even without optimization, much as in optimized C. The order is part of the program's meaning, so it cannot be turned off; the line table makes the jumps explainable.
+- **Nondeterminism.** Continuation passing (Lowering, Nondeterminism) puts continuation frames in backtraces. A debugger command that lists live choice points is a later addition.
+- **Tail calls.** Loops written as tail recursion leave no frames, as loops in C leave none.
+- **The moving collector.** The statepoint rewrite must keep variable locations right for the pointers it relocates. This is a risk to test early, with GC torture mode switched on.
+- **Optimized code** degrades as in any LLVM compiler: variables may show as optimized out, and inlined procedures appear as inlined frames.
+
 ## Runtime system
 
 The runtime gives each process its own stack, heap and mailboxes, schedules processes M:N over one worker thread per core, and never stops every process at once. It is written in C++, like the compiler, and linked into every executable.
@@ -1063,6 +1268,9 @@ Nine decisions remain open. The three that most constrain the runtime are the he
 ## Sources
 
 - [Mercury repository](https://github.com/Mercury-Language/mercury) and the [22.01.9 source distribution](https://github.com/Mercury-Language/mercury-srcdist), used only for the documents and metadata listed under Provenance: `LIMITATIONS.md`, the reference manual, the user's guide, `NEWS.md`, `LICENSE` and commit metadata
+- [The Mercury Language Reference Manual, release 22.01](https://www.mercurylang.org/information/doc-release/mercury_ref/index.html) ([PDF](https://mercurylang.org/information/doc-release/reference_manual.pdf)): the language specification this compiler implements
+- [The Mercury User's Guide, release 22.01](https://mercurylang.org/information/doc-release/mercury_user_guide/) ([PDF](https://mercurylang.org/information/doc-release/user_guide.pdf)): compiler options, grades, the debugger and the tools
+- [Flang driver design](https://github.com/llvm/llvm-project/blob/main/flang/docs/FlangDriver.md): `flang` and `flang -fc1`, built on Clang's driver library
 - [Mercury User's Guide: grade modifiers for parallelism](https://mercurylang.org/information/doc-latest/mercury_user_guide/Grade-modifiers-for-parallelism.html)
 - [Mercury benchmarks page](https://mercurylang.org/about/benchmarks.html)
 - [Bone, Somogyi and Schachte: Controlling loops in parallel Mercury code](https://paul.bone.id.au/pub/pbone-2012-loop-control)
