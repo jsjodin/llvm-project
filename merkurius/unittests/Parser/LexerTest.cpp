@@ -105,43 +105,45 @@ TEST(LexerTest, OpenAndOpenCt) {
 
 TEST(LexerTest, EndAndQualification) {
   AllSources all;
-  EXPECT_EQ(Lex(all, "a.b. c.%x\nd./*y*/e.").Tokens(),
+  // As in mmc, "./*" is a graphic name, not an end token and a comment.
+  EXPECT_EQ(Lex(all, "a.b. c.%x\nd. /*y*/e./*z*/").Tokens(),
       (Strings{"name a", "name .", "name b", "end .", "name c", "end .",
-          "name d", "end .", "name e", "end ."}));
+          "name d", "end .", "name e", "name ./*", "name z", "name */"}));
 }
 
 TEST(LexerTest, GraphicNames) {
   AllSources all;
+  // As in mmc, a graphic name continues through "/*".
   EXPECT_EQ(Lex(all, "X =.. Y, A<<u, B+/*c*/C, ; ! \\+ -->").Tokens(),
       (Strings{"variable X", "name =..", "variable Y", "comma ,",
           "variable A", "name <<", "name u", "comma ,", "variable B",
-          "name +", "variable C", "comma ,", "name ;", "name !", "name \\+",
-          "name -->"}));
+          "name +/*", "name c", "name */", "variable C", "comma ,", "name ;",
+          "name !", "name \\+", "name -->"}));
 }
 
 TEST(LexerTest, Numbers) {
   AllSources all;
   Lexed lexed{Lex(all,
       "0 1_000 0b1010 0o_17 0xff_u8 7i8 42u32 3u 0'a 0'' 0' 0'\xc3\xa5 "
-      "1.5 1e10 1.5E-3 1_0.2_5 1.e5")};
+      "1.5 1e10 1.5E-3 1_0.2_5 1.5_e10 1e1_0 1.e5")};
   EXPECT_EQ(lexed.Tokens(),
       (Strings{"integer 0", "integer 1_000", "integer 0b1010",
           "integer 0o_17", "integer 0xff_u8", "integer 7i8", "integer 42u32",
           "integer 3u", "integer 0'a", "integer 0''", "integer 0' ",
           "integer 0'\xc3\xa5", "float 1.5", "float 1e10", "float 1.5E-3",
-          "float 1_0.2_5", "integer 1", "name .", "name e5"}));
+          "float 1_0.2_5", "float 1.5_e10", "float 1e1_0", "integer 1", "name .", "name e5"}));
   EXPECT_TRUE(lexed.messages.empty());
 }
 
 TEST(LexerTest, NumberErrors) {
   AllSources all;
-  Lexed lexed{Lex(all, "1_ 0x 0b102 7i7 1.5_e10 1_.5")};
+  Lexed lexed{Lex(all, "1_ 0x 0b102 7i7 2_e3 1_.5")};
   EXPECT_EQ(lexed.Messages(),
       (Strings{"an integer literal may not end with an underscore",
           "missing digits after '0x'",
           "invalid digit in a literal with prefix '0b'",
           "invalid integer suffix",
-          "an underscore before an exponent is not allowed in Mercury 22.01",
+          "an underscore may come before an exponent only after a fraction",
           "an underscore may not come before '.'"}));
 }
 

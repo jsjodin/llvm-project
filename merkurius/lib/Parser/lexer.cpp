@@ -8,9 +8,11 @@
 //
 // The rules are those of the Mercury 22.01 reference manual, section 2.4,
 // "Tokens". Where it says nothing, the current manual's Syntax chapter
-// fills the gap: comments, graphic names, ';' and the backquote. Its
-// changes since 22.01 (the '\e' escape, underscores before an exponent,
-// '<<u' and '>>u') are not adopted.
+// fills the gap: comments, graphic names, ';' and the backquote. Where the
+// manual and mmc 22.01.9 differ, mmc is followed, so that programs compile
+// with both: a graphic name runs through "/*", and an underscore may come
+// between a fraction and its exponent. The current manual's other changes
+// since 22.01 (the '\e' escape, '<<u' and '>>u') are not adopted.
 //
 //===----------------------------------------------------------------------===//
 
@@ -230,12 +232,13 @@ TokenKind Lexer::LexToken(bool precededByWhitespace) {
     return ch == '"' ? TokenKind::String : TokenKind::Name;
   }
   if (IsGraphic(ch) && ch != '#') {
-    // A graphic name stops before "/*", which begins a comment.
-    while (!AtEnd() && IsGraphic(*at_) && !LookingAt("/*")) {
+    // As in mmc, a graphic name continues through "/*", so "+/*" is one
+    // name and "./*" is not an end token.
+    while (!AtEnd() && IsGraphic(*at_)) {
       ++at_;
     }
     if (at_ == start + 1 && ch == '.' &&
-        (AtEnd() || IsWhitespace(*at_) || *at_ == '%' || LookingAt("/*"))) {
+        (AtEnd() || IsWhitespace(*at_) || *at_ == '%')) {
       return TokenKind::End;
     }
     return TokenKind::Name;
@@ -406,10 +409,12 @@ TokenKind Lexer::LexNumber() {
     SkipIntegerSuffix(start, trailingUnderscore);
     return TokenKind::Integer;
   }
+  // An underscore may come between a fraction and its exponent, as mmc
+  // 22.01.9 accepts, but not between the integer part and an exponent.
   auto sayUnderscore{[&](char next) {
     if (next == 'e' || next == 'E') {
       Say(start, at_,
-          "an underscore before an exponent is not allowed in Mercury 22.01");
+          "an underscore may come before an exponent only after a fraction");
     } else if (next == '.') {
       Say(start, at_, "an underscore may not come before '.'");
     } else {
@@ -421,7 +426,7 @@ TokenKind Lexer::LexNumber() {
   }
   if (fraction) {
     ++at_;
-    if (SkipDigits(IsDigit)) {
+    if (SkipDigits(IsDigit) && !atExponent()) {
       sayUnderscore(Peek());
     }
   }
