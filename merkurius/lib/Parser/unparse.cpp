@@ -191,18 +191,19 @@ private:
       return take(equal) || take(any);
     case TokenKind::String:
     case TokenKind::ImplementationDefinedLiteral:
-      // Prefer a string that cannot be a variable's name, which a variable
-      // later in the node may need.
+      // Prefer a string that cannot be a variable's name, and then an enum,
+      // such as the language "C" of a pragma, to a string that can: a
+      // variable later in the node may need it.
       if (take(equal) || take([&](llvm::StringRef s) {
             return s.empty() || !(s[0] == '_' || (s[0] >= 'A' && s[0] <= 'Z'));
-          }) || take(any)) {
+          })) {
         return true;
       }
       if (token.kind == TokenKind::String && fields.enums > 0) {
         --fields.enums;
         return true;
       }
-      return false;
+      return take(any);
     default:
       return true;
     }

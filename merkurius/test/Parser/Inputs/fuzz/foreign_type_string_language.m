@@ -1,0 +1,1 @@
+:-pragma foreign_type("C",t(T),"L").

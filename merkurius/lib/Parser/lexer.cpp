@@ -32,7 +32,9 @@ bool IsWhitespace(char ch) {
   return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\v' || ch == '\f' ||
       ch == '\r';
 }
-bool IsBlank(char ch) { return ch == ' ' || ch == '\t'; }
+// Whitespace within a line, before a %$omp sentinel: a form feed counts,
+// as it does between tokens.
+bool IsBlank(char ch) { return IsWhitespace(ch) && ch != '\n'; }
 bool IsDigit(char ch) { return ch >= '0' && ch <= '9'; }
 bool IsBinaryDigit(char ch) { return ch == '0' || ch == '1'; }
 bool IsOctalDigit(char ch) { return ch >= '0' && ch <= '7'; }

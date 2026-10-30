@@ -284,7 +284,9 @@ void ClauseDesugarer::Merge(const StateMap &start,
     llvm::ArrayRef<StateMap> ends, llvm::MutableArrayRef<Goals> arms,
     TokenRange range) {
   state_ = start;
-  for (auto &[name, current] : state_) {
+  for (auto &entry : state_) {
+    llvm::StringRef name{entry.first};
+    std::optional<VarId> &current{entry.second};
     std::optional<VarId> first{ends.front().lookup(name)};
     if (llvm::all_of(ends.drop_front(),
             [&](const StateMap &end) { return end.lookup(name) == first; })) {
