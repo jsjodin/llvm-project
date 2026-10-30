@@ -26,8 +26,9 @@
 #include "merkurius/Common/idioms.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
-#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include <optional>
 #include <vector>
 
@@ -93,6 +94,7 @@ private:
     llvm::StringRef name;
     bool wasInScope;
     std::optional<VarId> was;
+    bool wasReadOnly;
   };
 
   VarId ProgramVar(const parser::Variable &);
@@ -173,6 +175,9 @@ private:
   void DcgHead(TokenRange);
   const ClauseForm *Finish(TokenRange, parser::PredOrFunc,
       const parser::SymName *, Goals &goals);
+  // Fills the head's slots for the state variables' last versions.
+  void FillLasts(Goals &goals);
+  const Lambda *DesugarLambda(const parser::Lambda &);
   Goal Conjoin(TokenRange, const Goals &);
   Goal Negate(TokenRange range, Goal goal) {
     return Make<Not>(range, Number(), goal);
@@ -204,6 +209,9 @@ private:
   };
   llvm::SmallVector<VarId, 4> head_;
   llvm::SmallVector<Last, 2> lasts_;
+  // The state variables of the scopes outside a lambda expression, which
+  // may only be read as !.X in it.
+  llvm::StringSet<> readOnly_;
   unsigned goals_{0};
   bool ok_{true};
 };
@@ -236,6 +244,14 @@ VarId ClauseDesugarer::StateRef(const parser::StateVar &var, bool next) {
     Error(var.tokens,
         "state variable %s%s is not visible in this context"_err_en_US,
         next ? "!:" : "!.", var.name);
+    return Fresh(var.tokens);
+  }
+  if (next && readOnly_.contains(var.name)) {
+    // mmc: "cannot use !:S here due to the surrounding lambda expression".
+    Error(var.tokens,
+        "!:%s cannot be used in a lambda expression, which may only read "
+        "the state variables outside it, as !.%s"_err_en_US,
+        var.name, var.name);
     return Fresh(var.tokens);
   }
   if (next) {
@@ -276,7 +292,7 @@ ClauseDesugarer::Shadowed ClauseDesugarer::Shadow(
     llvm::StringRef name, std::optional<VarId> version) {
   auto it{state_.find(name)};
   Shadowed shadowed{name, it != state_.end(),
-      it != state_.end() ? it->second : std::nullopt};
+      it != state_.end() ? it->second : std::nullopt, readOnly_.erase(name)};
   state_[name] = version;
   return shadowed;
 }
@@ -287,6 +303,9 @@ void ClauseDesugarer::Restore(llvm::ArrayRef<Shadowed> shadowed) {
       state_[s.name] = s.was;
     } else {
       state_.erase(s.name);
+    }
+    if (s.wasReadOnly) {
+      readOnly_.insert(s.name);
     }
   }
 }
@@ -448,8 +467,25 @@ void ClauseDesugarer::UnifyWith(VarId left, const parser::DataTerm &term,
                 StateRef(*var, var->kind == parser::StateVarKind::Next),
                 Functor{}, llvm::ArrayRef<VarId>{}));
           },
-          [&](const parser::ConditionalData *x) {
-            Todo(x->tokens, "conditional expressions");
+          [&](const parser::ConditionalData *conditional) {
+            // As in mmc, X = (if C then T else E) is if C then X = T else
+            // X = E, with the state variables threaded as in that goal.
+            auto next{std::move(next_)};
+            next_.clear();
+            StateMap start{state_};
+            Goal condition{DesugarGoal(conditional->condition)};
+            Goals arms[2];
+            StateMap ends[2];
+            UnifyWith(left, conditional->then, range, arms[0]);
+            ends[0] = state_;
+            state_ = start;
+            UnifyWith(left, conditional->otherwise, range, arms[1]);
+            ends[1] = state_;
+            Merge(start, ends, arms, conditional->tokens);
+            next_ = std::move(next);
+            out.push_back(Make<IfThenElse>(conditional->tokens, Number(),
+                condition, Conjoin(conditional->tokens, arms[0]),
+                Conjoin(conditional->tokens, arms[1])));
           },
           [&](const parser::FieldSelection *selection) {
             Select(left, &selection->term, VarId{0}, selection->fields, range,
@@ -459,8 +495,10 @@ void ClauseDesugarer::UnifyWith(VarId left, const parser::DataTerm &term,
             Update(left, &update->term, VarId{0}, update->fields,
                 update->value, range, out);
           },
-          [&](const parser::Lambda *x) {
-            Todo(x->tokens, "lambda expressions");
+          [&](const parser::Lambda *lambda) {
+            Functor functor{FunctorKind::Lambda, nullptr, nullptr, nullptr,
+                DesugarLambda(*lambda)};
+            AddUnify(out, at, range, left, functor, {});
           },
       },
       term);
@@ -1053,6 +1091,15 @@ void ClauseDesugarer::DcgHead(TokenRange range) {
 
 const ClauseForm *ClauseDesugarer::Finish(TokenRange range,
     parser::PredOrFunc kind, const parser::SymName *name, Goals &goals) {
+  FillLasts(goals);
+  Goal body{Conjoin(range, goals)};
+  return Make<ClauseForm>(range, kind, name,
+      Save(llvm::ArrayRef<VarId>{head_}), body,
+      Save(llvm::ArrayRef<VarInfo>{vars_}),
+      Save(llvm::ArrayRef<TypeQualification>{typeQualifications_}), goals_);
+}
+
+void ClauseDesugarer::FillLasts(Goals &goals) {
   // A state variable's last version is the head's !:X, unless it is
   // already in the head, as when the body does not update it.
   for (const Last &last : lasts_) {
@@ -1068,11 +1115,94 @@ const ClauseForm *ClauseDesugarer::Finish(TokenRange range,
           *version, Functor{}, llvm::ArrayRef<VarId>{}));
     }
   }
-  Goal body{Conjoin(range, goals)};
-  return Make<ClauseForm>(range, kind, name,
-      Save(llvm::ArrayRef<VarId>{head_}), body,
-      Save(llvm::ArrayRef<VarInfo>{vars_}),
-      Save(llvm::ArrayRef<TypeQualification>{typeQualifications_}), goals_);
+}
+
+// A lambda expression is desugared like a clause, with a head of its own.
+// The variables of its arguments are local to it, and so are the state
+// variables its head names; the other state variables in scope may only be
+// read in it.
+const Lambda *ClauseDesugarer::DesugarLambda(const parser::Lambda &lambda) {
+  // The variables of the arguments, as new variables while in the lambda.
+  struct Collector {
+    llvm::SmallVector<unsigned, 4> numbers;
+    void Post(const parser::Variable &var) { numbers.push_back(var.number); }
+  } collector;
+  for (const parser::ModedTerm *argument : lambda.arguments) {
+    parser::Walk(argument->term, collector);
+  }
+  llvm::SmallVector<std::pair<unsigned, std::optional<VarId>>, 4> outer;
+  for (unsigned number : collector.numbers) {
+    auto it{numbers_.find(number)};
+    if (it != numbers_.end()) {
+      outer.emplace_back(number, it->second);
+      numbers_.erase(it);
+    } else {
+      outer.emplace_back(number, std::nullopt);
+    }
+  }
+  StateMap state{state_};
+  auto next{std::move(next_)};
+  next_.clear();
+  auto head{std::move(head_)};
+  head_.clear();
+  auto lasts{std::move(lasts_)};
+  lasts_.clear();
+  llvm::StringSet<> readOnly{readOnly_};
+  for (const auto &entry : state_) {
+    readOnly_.insert(entry.first);
+  }
+  // The head's !.X and !:X name new state variables; !X cannot be an
+  // argument, since a lambda has no syntax for the modes of its two parts.
+  for (const parser::ModedTerm *argument : lambda.arguments) {
+    if (const auto *var{std::get_if<const parser::StateVar *>(&argument->term)}) {
+      if ((*var)->kind == parser::StateVarKind::Both) {
+        // mmc: "!S cannot be a lambda argument".
+        Error((*var)->tokens,
+            "!%s cannot be an argument of a lambda expression; you probably "
+            "meant !.%s or !:%s"_err_en_US,
+            (*var)->name, (*var)->name, (*var)->name);
+      }
+      state_[(*var)->name] = std::nullopt;
+      readOnly_.erase((*var)->name);
+    }
+  }
+  llvm::SmallVector<const parser::ModedTerm *, 4> arguments{
+      lambda.arguments.begin(), lambda.arguments.end()};
+  if (lambda.result) {
+    arguments.push_back(lambda.result);
+  }
+  Goals goals;
+  Head(arguments, lambda.result, goals);
+  llvm::SmallVector<std::optional<parser::Mode>, 4> modes;
+  for (const parser::ModedTerm *argument : arguments) {
+    modes.push_back(argument->mode);
+  }
+  if (lambda.dcgBody) {
+    state_.erase(dcg);
+    DcgHead(lambda.tokens);
+    llvm::append_range(modes, lambda.dcgModes);
+    DesugarInto(*lambda.dcgBody, goals);
+  } else if (lambda.body) {
+    DesugarInto(*lambda.body, goals);
+  }
+  FillLasts(goals);
+  const Lambda *result{Make<Lambda>(lambda.tokens, lambda.kind,
+      lambda.purity, Save(llvm::ArrayRef<VarId>{head_}),
+      Save(llvm::ArrayRef<std::optional<parser::Mode>>{modes}),
+      lambda.determinism, Conjoin(lambda.tokens, goals))};
+  for (const auto &[number, var] : outer) {
+    if (var) {
+      numbers_[number] = *var;
+    } else {
+      numbers_.erase(number);
+    }
+  }
+  state_ = std::move(state);
+  next_ = std::move(next);
+  head_ = std::move(head);
+  lasts_ = std::move(lasts);
+  readOnly_ = std::move(readOnly);
+  return result;
 }
 
 std::optional<const ClauseForm *> ClauseDesugarer::Desugar(

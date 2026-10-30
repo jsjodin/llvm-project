@@ -435,12 +435,79 @@ TEST(DesugarTest, FieldAccess) {
       "| | Unify #1 dcg!1 = 'g :='(dcg!0, X)\n");
 }
 
+TEST(DesugarTest, Lambdas) {
+  // A lambda is the functor of a unification, with its body under it. Its
+  // arguments' variables are its own: X$2 is not the clause's X.
+  EXPECT_EQ(Form("p(X, F) :- F = (pred(X::in, Y::out) is det :- Y = X), q(X).\n"),
+      "Predicate p(X, F)\n"
+      "| Conj #3\n"
+      "| | Unify #1 F = pred(X$2::in, Y::out) is det\n"
+      "| | | Unify #0 Y = X$2\n"
+      "| | Call #2 q(X)\n");
+  // A function's result is its last argument; arguments that are not
+  // variables are unified at the start of the body, as in a clause head.
+  EXPECT_EQ(Form("p(F) :- F = (func([H | _]) = H).\n"),
+      "Predicate p(F)\n"
+      "| Unify #1 F = func($1) = (H)\n"
+      "| | Unify #0 $1 = [H | _$3]\n");
+  // The state variables outside may be read; those that the head names
+  // are the lambda's own.
+  EXPECT_EQ(Form("p(!S, F) :- F = (pred(!.S::in, !:S::out) is det :- "
+                 "q(!.S, !S)).\n"),
+      "Predicate p(S!0, S!3, F)\n"
+      "| Conj #3\n"
+      "| | Unify #1 F = pred(S!1::in, S!2::out) is det\n"
+      "| | | Call #0 q(S!1, S!1, S!2)\n"
+      "| | Unify #2 S!3 = S!0\n");
+  // A DCG lambda's last two arguments are its implicit ones.
+  EXPECT_EQ(Form("p(F) :- F = (pred(in, out) is semidet --> [x]).\n"),
+      "Predicate p(F)\n"
+      "| Unify #3 F = pred(dcg!0::in, dcg!1::out) is semidet\n"
+      "| | Conj #2\n"
+      "| | | Unify #1 dcg!0 = [$3 | dcg!1]\n"
+      "| | | Unify #0 $3 = x\n");
+  auto messages{[](llvm::StringRef text) { return DesugarText(text).messages; }};
+  EXPECT_EQ(messages("p(!S, F) :- F = (pred(X::out) is det :- q(X, !S)).\n"),
+      V{"!:S cannot be used in a lambda expression, which may only read the "
+        "state variables outside it, as !.S"});
+  EXPECT_EQ(messages("p(F) :- F = (pred(!S) is det :- q(!S)).\n"),
+      V{"!S cannot be an argument of a lambda expression; you probably "
+        "meant !.S or !:S"});
+  // some [!S] makes a state variable of the lambda's own.
+  EXPECT_EQ(messages("p(!S, F) :- F = (pred(Y::out) is det :- "
+                     "some [!S] (!:S = 1, Y = !.S)).\n"),
+      V{});
+}
+
+TEST(DesugarTest, ConditionalExpressions) {
+  // As in mmc, X = (if C then T else E) is the goal if C then X = T else
+  // X = E, and the state variables are threaded as in it.
+  EXPECT_EQ(Form("p(!S) :- Y = (if q(!S) then 10 else 20), !:S = !.S + Y.\n"),
+      "Predicate p(S!0, S!3)\n"
+      "| Conj #9\n"
+      "| | IfThenElse #7\n"
+      "| | | Call #0 q(S!0, S!1)\n"
+      "| | | Conj #6\n"
+      "| | | | Unify #1 Y = 10\n"
+      "| | | | Unify #3 S!2 = S!1\n"
+      "| | | Conj #5\n"
+      "| | | | Unify #2 Y = 20\n"
+      "| | | | Unify #4 S!2 = S!0\n"
+      "| | Unify #8 S!3 = '+'(S!2, Y)\n");
+  // Within a term, the expression is a variable that the if-then-else
+  // binds.
+  EXPECT_EQ(Form("p(X) :- X = f(if q then a else b).\n"),
+      "Predicate p(X)\n"
+      "| Conj #5\n"
+      "| | Unify #4 X = f($1)\n"
+      "| | IfThenElse #3\n"
+      "| | | Call #0 q\n"
+      "| | | Unify #1 $1 = a\n"
+      "| | | Unify #2 $1 = b\n");
+}
+
 TEST(DesugarTest, NotYetImplemented) {
   auto messages{[](llvm::StringRef text) { return DesugarText(text).messages; }};
-  EXPECT_EQ(messages("p :- X = (func(A) = A).\n"),
-      V{"desugaring lambda expressions"});
-  EXPECT_EQ(messages("p :- X = (if q then 1 else 2).\n"),
-      V{"desugaring conditional expressions"});
   EXPECT_EQ(messages("p :- try [] q then r.\n"),
       V{"desugaring try goals"});
   EXPECT_EQ(messages("p :- atomic [outer(!IO), inner(!S)] q.\n"),
@@ -448,7 +515,7 @@ TEST(DesugarTest, NotYetImplemented) {
   EXPECT_EQ(messages("p(!S) :- promise_equivalent_solutions [!:S] q(!S).\n"),
       V{"desugaring state variables in a scope's list of variables"});
   // A clause with an error is left out; the others are kept.
-  DesugarResult result{DesugarText("p :- X = (func(A) = A).\nq.\n")};
+  DesugarResult result{DesugarText("p :- try [] q then r.\nq.\n")};
   EXPECT_EQ(result.form, "Predicate q\n| Conj #0\n");
 }
 

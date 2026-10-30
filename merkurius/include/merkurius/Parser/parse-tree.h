@@ -814,10 +814,14 @@ struct Lambda {
   std::optional<Determinism> determinism;
   std::optional<Goal> body; // none for no body or a DCG body
   std::optional<DcgGoal> dcgBody;
+  // With a DCG body, the last two arguments are the modes of its implicit
+  // arguments, pred(X::in, in, out) is det --> G.
+  llvm::ArrayRef<Mode> dcgModes;
   template <typename F> void ForEachField(F &&f) const {
     f("purity", purity);
     f("kind", kind);
     f("arguments", arguments);
+    f("dcgModes", dcgModes);
     f("result", result);
     f("determinism", determinism);
     f("body", body);
