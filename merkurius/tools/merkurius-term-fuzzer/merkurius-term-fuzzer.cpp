@@ -29,6 +29,7 @@
 #include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/term.h"
 #include "merkurius/Parser/unparse.h"
+#include "merkurius/Semantics/check-types.h"
 #include "merkurius/Semantics/desugar.h"
 #include "merkurius/Semantics/module-loader.h"
 #include "merkurius/Semantics/resolve-names.h"
@@ -134,7 +135,11 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, bool openMP) {
   // module's own names resolve.
   merkurius::semantics::ModuleLoader loader{all, "", messages};
   loader.LoadImports(tree, tokens, "/nonexistent");
-  merkurius::semantics::ResolveNames(tree, tokens, semanticForm, loader, messages);
+  std::unique_ptr<merkurius::semantics::NameResolution> resolution{
+      merkurius::semantics::ResolveNames(
+          tree, tokens, semanticForm, loader, messages)};
+  // And type checking.
+  merkurius::semantics::CheckTypes(semanticForm, *resolution, tokens, messages);
   return result;
 }
 

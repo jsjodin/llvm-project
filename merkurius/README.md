@@ -28,6 +28,7 @@ and desugaring turns clauses into their semantic form. Its actions are:
 | `-fdebug-dump-semantic-form` | Each clause's semantic form after desugaring and quantification, one goal per line; desugaring does not yet handle `mutable` declarations |
 | `-fdebug-dump-nonlocals` | The semantic form, with each goal's nonlocal variables after `~` |
 | `-fdebug-dump-imports` | The modules the file imports, and each module loaded, with its interface's imports and number of items |
+| `-fdebug-dump-types` | Each clause's declared signature, the types of its variables, and the declaration chosen for each overloaded name; type errors are reported. Type classes, existential types, `coerce` and undeclared predicates' types are not checked yet |
 | `-fdebug-dump-resolved-names` | The module's symbols, and each name in it with its use, arity and the declarations it may refer to; undefined names are reported |
 
 Imported modules are read from their sources, `name.m`, found in the

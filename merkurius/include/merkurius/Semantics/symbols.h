@@ -17,6 +17,7 @@
 #include "merkurius/Common/enum-class.h"
 #include "merkurius/Parser/char-block.h"
 #include "merkurius/Parser/parse-tree.h"
+#include "merkurius/Parser/token.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Allocator.h"
@@ -55,6 +56,8 @@ struct Symbol {
   bool exported; // declared in the interface section
   // A constructor's or field's type, a method's type class.
   const Symbol *owner{nullptr};
+  // The tokens of the module's source, which the declaration indexes.
+  const parser::TokenSequence *tokens{nullptr};
 };
 
 // Prints a symbol as the kind and the qualified name and arity: pred
@@ -64,12 +67,15 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &, const Symbol &);
 // The symbols one module declares, by name.
 class ModuleSymbols {
 public:
-  explicit ModuleSymbols(llvm::StringRef name) : name_{name.str()} {}
+  explicit ModuleSymbols(
+      llvm::StringRef name, const parser::TokenSequence *tokens = nullptr)
+      : name_{name.str()}, tokens_{tokens} {}
   ModuleSymbols(const ModuleSymbols &) = delete;
 
   llvm::StringRef name() const { return name_; }
   // A new symbol, or the one already declared with its kind, name and
-  // arity, which becomes exported if this declaration is.
+  // arity, which becomes exported if this declaration is; a type's
+  // definition replaces its abstract declaration as its declaration.
   const Symbol &Add(SymbolKind, llvm::StringRef name, unsigned arity,
       Declaration, parser::CharBlock source, bool exported,
       const Symbol *owner = nullptr);
@@ -80,6 +86,7 @@ public:
 
 private:
   std::string name_;
+  const parser::TokenSequence *tokens_;
   llvm::BumpPtrAllocator allocator_;
   llvm::StringSaver names_{allocator_};
   std::vector<std::unique_ptr<Symbol>> owned_;

@@ -53,6 +53,9 @@ enum class ActionKind {
   // -fdebug-dump-resolved-names: resolve the names and list the module's
   // symbols and each name's candidates.
   DebugDumpResolvedNames,
+  // -fdebug-dump-types: type check, and list each clause's variable types
+  // and chosen declarations.
+  DebugDumpTypes,
 };
 
 struct FrontendOptions {
