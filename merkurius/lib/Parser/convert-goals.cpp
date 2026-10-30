@@ -851,6 +851,20 @@ std::optional<Goal> GoalRule::Convert(
   }
   llvm::StringRef name{FunctorName(t)};
   std::size_t arity{Arity(t)};
+  // !S ^ Fields := Value, which updates a state variable.
+  if (const CompoundTerm * update{AsCompound(t, ":=", 2)}) {
+    const CompoundTerm *caret{AsCompound(Operand(*update, 0), "^", 2)};
+    if (caret && AsCompound(StripParentheses(Operand(*caret, 0)), "!", 1)) {
+      auto var{dataTerm.Convert(StripParentheses(Operand(*caret, 0)), state)};
+      auto fields{ConvertFields(Operand(*caret, 1), state)};
+      auto value{Apply(dataTerm, Operand(*update, 1), state)};
+      if (!var || !fields || !value) {
+        return std::nullopt;
+      }
+      return make(state.arena.Make<StateVarFieldUpdate>(
+          t.tokens(), *var, *fields, *value));
+    }
+  }
   // The DCG goals =(T), :=(T), T =^ F and ^ F := T, which mmc rejects
   // outside DCG rules.
   if ((arity == 1 && (name == "=" || name == ":=")) ||

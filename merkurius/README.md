@@ -25,7 +25,7 @@ and desugaring turns clauses into their semantic form. Its actions are:
 | `-fdebug-unparse-exact-minimal-layout` | The same, without comments and line number directives, and with each token's layout reduced to one space or newline |
 | `-fdebug-unparse-no-sema` | The parse tree as source in the canonical layout, with the spellings and comments of the file; items with errors as written |
 | `-fdebug-unparse-parenthesized-no-sema` | The same, with every data-term, goal, type, inst and mode written as an operator term in parentheses |
-| `-fdebug-dump-semantic-form` | Each clause's semantic form after desugaring, one goal per line; desugaring does not yet handle state variables, DCG rules, field access, lambdas, conditional expressions, or `try` and `atomic` goals |
+| `-fdebug-dump-semantic-form` | Each clause's semantic form after desugaring, one goal per line; desugaring does not yet handle DCG rules, field access, lambdas, conditional expressions, or `try` and `atomic` goals |
 
 `-fopenmp` makes `%$omp` directives tokens instead of comments, and the
 converter reads each one, with the goal after it, into an `OmpGoal`.
