@@ -10,8 +10,8 @@ converter handles the module system's declarations, predicate, function and
 mode declarations, type, inst and mode definitions, type class and
 instance declarations, pragmas, `initialise`, `finalise` and `mutable`
 declarations, promises, solver types, and clauses, with their goals, DCG
-goals and data-terms; and the unparser prints the parse tree back as
-source. Its actions are:
+goals and data-terms; the unparser prints the parse tree back as source;
+and desugaring turns clauses into their semantic form. Its actions are:
 
 | Action | Prints |
 | --- | --- |
@@ -25,6 +25,7 @@ source. Its actions are:
 | `-fdebug-unparse-exact-minimal-layout` | The same, without comments and line number directives, and with each token's layout reduced to one space or newline |
 | `-fdebug-unparse-no-sema` | The parse tree as source in the canonical layout, with the spellings and comments of the file; items with errors as written |
 | `-fdebug-unparse-parenthesized-no-sema` | The same, with every data-term, goal, type, inst and mode written as an operator term in parentheses |
+| `-fdebug-dump-semantic-form` | Each clause's semantic form after desugaring, one goal per line; desugaring does not yet handle state variables, DCG rules, field access, lambdas, conditional expressions, or `try` and `atomic` goals |
 
 `-fopenmp` makes `%$omp` directives tokens instead of comments, and the
 converter reads each one, with the goal after it, into an `OmpGoal`.

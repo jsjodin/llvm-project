@@ -9,6 +9,7 @@ add_merkurius_library(MerkuriusFrontend
   LINK_LIBS
   MerkuriusDriver
   MerkuriusParser
+  MerkuriusSemantics
 
   LINK_COMPONENTS
   Option
