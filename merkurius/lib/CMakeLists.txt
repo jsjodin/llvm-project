@@ -1,5 +1,6 @@
 add_subdirectory(Common)
 add_subdirectory(Driver)
 add_subdirectory(Parser)
+add_subdirectory(Semantics)
 add_subdirectory(Frontend)
 add_subdirectory(FrontendTool)

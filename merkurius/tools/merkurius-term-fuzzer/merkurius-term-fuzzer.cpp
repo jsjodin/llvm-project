@@ -6,9 +6,9 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// A fuzz target for the lexer, the term reader, the converter and the
-// unparser. For any input, with and without OpenMP directives, it checks
-// that none of them crashes; that the tokens, and the parse tree, unparse to
+// A fuzz target for the lexer, the term reader, the converter, the
+// unparser and desugaring. For any input, with and without OpenMP
+// directives, it checks that none of them crashes; that the tokens, and the parse tree, unparse to
 // the input byte for byte; that the exact unparser finds every token
 // accounted for; that an input which converts without errors has a
 // canonical layout that is its own canonical layout, and the same parse tree
@@ -29,6 +29,7 @@
 #include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/term.h"
 #include "merkurius/Parser/unparse.h"
+#include "merkurius/Semantics/desugar.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
@@ -120,6 +121,12 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, bool openMP) {
   UnparseCanonical(canonical, tree, tokens);
   llvm::raw_string_ostream parenthesized{result.parenthesized};
   UnparseCanonical(parenthesized, tree, tokens, true);
+  // Desugaring must not crash on whatever converted.
+  merkurius::semantics::SemanticArena semanticArena;
+  std::string form;
+  llvm::raw_string_ostream formStream{form};
+  merkurius::semantics::DumpSemanticForm(formStream,
+      merkurius::semantics::Desugar(tree, tokens, semanticArena, messages));
   return result;
 }
 

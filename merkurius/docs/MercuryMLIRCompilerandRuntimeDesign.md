@@ -418,7 +418,7 @@ Tests, run on every file of every corpus:
    - it even prints invalid syntax for some trace goals.
 
    Test 5 already catches what test 6 was for: it compares our reader with Mercury's own term parser, item by item, on every pair of builtin operators among other cases.
-7. **Fuzzing.** `tools/merkurius-term-fuzzer` checks, for any input, that the lexer, reader and converter do not crash, that the tokens unparse to the input, that tests 2 to 4 hold, with and without `-fopenmp`, and that each item's canonical term reads back as itself; `utils/fuzz/run-term-fuzzer.sh` runs it under libFuzzer with the address and undefined behavior sanitizers. Inputs that once failed go in `test/Parser/Inputs/fuzz`, and a lit test replays them and every Mercury file in the tests.
+7. **Fuzzing.** `tools/merkurius-term-fuzzer` checks, for any input, that the lexer, reader, converter and desugaring do not crash, that the tokens unparse to the input, that tests 2 to 4 hold, with and without `-fopenmp`, and that each item's canonical term reads back as itself; `utils/fuzz/run-term-fuzzer.sh` runs it under libFuzzer with the address and undefined behavior sanitizers. Inputs that once failed go in `test/Parser/Inputs/fuzz`, and a lit test replays them and every Mercury file in the tests.
 
 **Corpora:** the reference manual's examples, our own test programs, and generated programs. Melbourne's library and test sources are not used, because nobody may read them to diagnose a failure (Clean-room rules).
 
@@ -448,6 +448,17 @@ Desugaring builds the semantic form in this order:
 7. Quantification computes each goal's nonlocal variables by the manual's implicit quantification rules, and renames apart variables that are local to different branches.
 
 Desugaring also numbers the goals and unifications of each semantic form densely, once. Semantic analysis indexes its per-procedure tables by these numbers.
+
+**Implementation** (`lib/Semantics`, `semantic-form.h` and `desugar.cpp`). Each clause is desugared on its own, in one pass over its parse tree:
+
+- **Variables** are numbered densely per clause in a table of `VarInfo`s: program variables by name, each `_` as an anonymous variable of its own, and the fresh variables desugaring makes. Goals refer to variables by number.
+- **Heads.** An argument that is a variable not already in the head stays as it is. Any other argument, or a repeated variable, becomes a fresh head variable, unified with the argument at the start of the body. A function's result is the last head variable.
+- **Data-terms** are flattened into unifications with at most one functor. A functor is a name, which type checking resolves to a constructor or a function, `[|]`, `[]`, a tuple, a literal, an implementation-defined literal such as `$line`, or `coerce`. Nested functors become chains through fresh variables, listed outermost first, as written. `X @ Y` unifies both sides with one variable, and `Term : Type` records a type qualification against the variable that holds `Term`.
+- **Higher-order calls.** `P(X)`, unqualified `call(P, X)`, `Y = F(X)` and unqualified `Y = apply(F, X)` are `HOCall`s; a function's result is its last argument.
+- **Goals.** `true` is the empty conjunction and `fail` the empty disjunction. A sequential conjunction absorbs the conjunctions inside it; a parallel one keeps its conjuncts. Following the manual's state variable rules, `G1 => G2` is `not (G1, not G2)`, `G1 <= G2` is `G2 => G1`, `G1 <=> G2` is both, and `all Vs G` is `not some Vs not G`; `X \= Y` is `not X = Y`. `event p(...)` is a call marked as an event.
+- **Scopes** keep their parse-tree goal, which holds their parameters, such as a trace goal's conditions or an OpenMP directive.
+- **Back pointers.** Each node records the tokens of the parse-tree node it came from, which is what diagnostics need; scopes also point to their parse-tree goal.
+- **Not yet desugared:** state variables, DCG rules, field access, lambdas, conditional expressions, `try` and `atomic` goals, `mutable` and `process` declarations, and quantification. Each is reported as not yet implemented, once per clause, and the clause is left out.
 
 ### OpenMP directives
 
@@ -1168,7 +1179,8 @@ Melbourne compiles a whole program in one grade, and modules link only if all we
 | Lexer | `-fdebug-dump-tokens`, `-fdebug-unparse-tokens` (every token's trivia and spelling, which is the file byte for byte) |
 | Term reader | `-fdebug-dump-terms` (each item's term in canonical notation, or `error`) |
 | Parser | `-fdebug-dump-parse-tree-no-sema` (implemented: the parse tree, one node or field per line), `-fdebug-unparse-no-sema`, `-fdebug-unparse-parenthesized-no-sema`, `-fdebug-unparse-exact` and `-fdebug-unparse-exact-minimal-layout` (implemented: Unparser and round-trip tests) |
-| Semantic analysis | `-fsyntax-only`, `-fdebug-unparse`, `-fdebug-dump-parse-tree`, `-fdebug-dump-semantic-form`, `-emit-interface` |
+| Desugaring | `-fdebug-dump-semantic-form` (implemented: each clause's semantic form, one goal per line; Front end, "Semantic form") |
+| Semantic analysis | `-fsyntax-only`, `-fdebug-unparse`, `-fdebug-dump-parse-tree`, `-emit-interface` |
 | Code generation | `-emit-merk`, `-emit-mrt`, `-emit-llvm`, `-emit-llvm-bc`, `-S`, `-emit-obj` |
 
 The unparser's exact, canonical and fully parenthesized modes (Front end, Unparser and round-trip tests) are chosen with `-funparse-mode=`. The `-fc1` layer with the source and parser actions comes first, in M1, because the round-trip tests run through it; the build mode and linking follow with code generation.

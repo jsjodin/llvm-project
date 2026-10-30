@@ -12,4 +12,5 @@ target_link_libraries(merkurius-term-fuzzer
   PRIVATE
   MerkuriusCommon
   MerkuriusParser
+  MerkuriusSemantics
   )
