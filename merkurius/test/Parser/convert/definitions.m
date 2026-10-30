@@ -91,3 +91,39 @@
 % CHECK-NEXT: | | | | | kind: Free
 % CHECK-NEXT: | | | | final: NamedInst
 % CHECK-NEXT: | | | | | name: SymName request
+
+% As in mmc, an inst may be named [], and a bound inst's [I] is [I | []],
+% whose tail is that inst, as in the library's exception module.
+:- inst [] for list/1
+    --->    [].
+:- inst nil_or_singleton for list/1
+    --->    []
+    ;       [ground].
+% CHECK:      | | InstDefn
+% CHECK-NEXT: | | | name: SymName []
+% CHECK-NEXT: | | | parameters:
+% CHECK-NEXT: | | | forType: NameAndArity list/1
+% CHECK-NEXT: | | | inst: BoundInst
+% CHECK-NEXT: | | | | unique: false
+% CHECK-NEXT: | | | | functors:
+% CHECK-NEXT: | | | | | BoundFunctor
+% CHECK-NEXT: | | | | | | name: SymName []
+% CHECK-NEXT: | | | | | | arguments:
+% CHECK-NEXT: | | InstDefn
+% CHECK-NEXT: | | | name: SymName nil_or_singleton
+% CHECK-NEXT: | | | parameters:
+% CHECK-NEXT: | | | forType: NameAndArity list/1
+% CHECK-NEXT: | | | inst: BoundInst
+% CHECK-NEXT: | | | | unique: false
+% CHECK-NEXT: | | | | functors:
+% CHECK-NEXT: | | | | | BoundFunctor
+% CHECK-NEXT: | | | | | | name: SymName []
+% CHECK-NEXT: | | | | | | arguments:
+% CHECK-NEXT: | | | | | BoundFunctor
+% CHECK-NEXT: | | | | | | name: SymName [|]
+% CHECK-NEXT: | | | | | | arguments:
+% CHECK-NEXT: | | | | | | | BuiltinInst
+% CHECK-NEXT: | | | | | | | | kind: Ground
+% CHECK-NEXT: | | | | | | | NamedInst
+% CHECK-NEXT: | | | | | | | | name: SymName []
+% CHECK-NEXT: | | | | | | | | arguments:

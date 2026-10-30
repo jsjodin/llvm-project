@@ -13,6 +13,8 @@
 #include "merkurius/Frontend/CompilerInstance.h"
 #include "merkurius/Frontend/CompilerInvocation.h"
 #include "merkurius/FrontendTool/Utils.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/thread.h"
 #include <optional>
 
@@ -30,6 +32,17 @@ int fc1_main(llvm::ArrayRef<const char *> argv) {
       std::optional<unsigned>{compilerStackSize}, [&]() {
         CompilerInstance ci;
         if (CompilerInvocation::createFromArgs(ci.getInvocation(), argv)) {
+          // The standard library is in lib/merkurius beside bin/merkc, in
+          // the build directory and the installation alike.
+          std::string &library{ci.getFrontendOpts().libraryDirectory};
+          if (library.empty()) {
+            llvm::SmallString<128> path{llvm::sys::fs::getMainExecutable(
+                "merkc", reinterpret_cast<void *>(&fc1_main))};
+            llvm::sys::path::remove_filename(path); // merkc
+            llvm::sys::path::remove_filename(path); // bin
+            llvm::sys::path::append(path, "lib", "merkurius");
+            library = path.str().str();
+          }
           result = executeCompilerInvocation(ci) ? 0 : 1;
         }
       }};

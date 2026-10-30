@@ -17,7 +17,9 @@
 #include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/unparse.h"
 #include "merkurius/Semantics/desugar.h"
+#include "merkurius/Semantics/module-loader.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/Path.h"
 #include <string>
 #include <vector>
 
@@ -208,6 +210,55 @@ bool DebugDumpSemanticFormAction::executeAction() {
     return false;
   }
   semantics::DumpSemanticForm(*os, form, ci.getFrontendOpts().dumpNonlocals);
+  os->flush();
+  return !messages.AnyFatalError();
+}
+
+bool DebugDumpImportsAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  for (const std::string &dir : ci.getFrontendOpts().searchDirectories) {
+    ci.getAllSources().AppendSearchPathDirectory(dir);
+  }
+  parser::LexerOptions options;
+  options.openMP = ci.getLangOpts().openMP;
+  parser::Messages messages;
+  parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
+  parser::ParseTreeArena arena;
+  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages)};
+  semantics::ModuleLoader loader{ci.getAllSources(),
+      ci.getFrontendOpts().libraryDirectory, messages};
+  llvm::StringRef directory{
+      llvm::sys::path::parent_path(getSourceFile().path())};
+  semantics::ModuleLoader::Imports imports{
+      loader.LoadImports(tree, tokens, directory.empty() ? "." : directory)};
+  messages.Emit(llvm::errs(), ci.getAllSources());
+  llvm::raw_ostream *os{ci.createDefaultOutputFile()};
+  if (!os) {
+    return false;
+  }
+  auto names{[&](llvm::StringRef label,
+                 const std::vector<const semantics::ModuleInterface *> &list) {
+    if (!list.empty()) {
+      *os << ' ' << label;
+      for (const semantics::ModuleInterface *module : list) {
+        *os << ' ' << module->name;
+      }
+    }
+  }};
+  *os << "imports:";
+  names("import_module", imports.imports);
+  names("use_module", imports.uses);
+  *os << '\n';
+  // Each module by its file's name, not its path, which depends on where
+  // the library is.
+  for (const semantics::ModuleInterface *module : loader.modules()) {
+    *os << module->name << " ("
+        << llvm::sys::path::filename(module->file->path()) << ", "
+        << module->items.size() << " items):";
+    names("import_module", module->imports);
+    names("use_module", module->uses);
+    *os << '\n';
+  }
   os->flush();
   return !messages.AnyFatalError();
 }

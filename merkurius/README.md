@@ -27,6 +27,13 @@ and desugaring turns clauses into their semantic form. Its actions are:
 | `-fdebug-unparse-parenthesized-no-sema` | The same, with every data-term, goal, type, inst and mode written as an operator term in parentheses |
 | `-fdebug-dump-semantic-form` | Each clause's semantic form after desugaring and quantification, one goal per line; desugaring does not yet handle `mutable` declarations |
 | `-fdebug-dump-nonlocals` | The semantic form, with each goal's nonlocal variables after `~` |
+| `-fdebug-dump-imports` | The modules the file imports, and each module loaded, with its interface's imports and number of items |
+
+Imported modules are read from their sources, `name.m`, found in the
+importing module's directory, then the `-I` directories, then the library
+directory, `lib/merkurius` beside `bin/merkc` unless `-library-dir` names
+another. The library there is declaration-only stubs for now
+(`library/README.md`).
 
 `-fopenmp` makes `%$omp` directives tokens instead of comments, and the
 converter reads each one, with the goal after it, into an `OmpGoal`.

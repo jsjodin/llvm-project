@@ -11,6 +11,9 @@ add_merkurius_tool(merkc
   MerkuriusDriverOptions
   )
 
+# merkc finds the standard library in the build directory.
+add_dependencies(merkc merkurius-library)
+
 target_link_libraries(merkc
   PRIVATE
   MerkuriusDriver

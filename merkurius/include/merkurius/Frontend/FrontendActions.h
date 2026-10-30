@@ -114,6 +114,12 @@ class DebugDumpSemanticFormAction : public FrontendAction {
   bool executeAction() override;
 };
 
+// Loads the modules the source file imports, and lists each module loaded
+// with the modules its interface imports and its number of items.
+class DebugDumpImportsAction : public FrontendAction {
+  bool executeAction() override;
+};
+
 } // namespace merkurius::frontend
 
 #endif // MERKURIUS_FRONTEND_FRONTENDACTIONS_H_
