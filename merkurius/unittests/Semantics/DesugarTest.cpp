@@ -165,8 +165,8 @@ TEST(DesugarTest, Goals) {
       "| Conj #9\n"
       "| | IfThenElse #3\n"
       "| | | Call #0 q\n"
-      "| | | Conj #1\n"
-      "| | | Disj #2\n"
+      "| | | Conj #2\n"
+      "| | | Disj #1\n"
       "| | ParConj #8\n"
       "| | | Call #4 a\n"
       "| | | Conj #7\n"
@@ -243,10 +243,105 @@ TEST(DesugarTest, Numbering) {
   }
 }
 
+TEST(DesugarTest, StateVariables) {
+  // The reference manual's examples ("State variables"): !X in a call is
+  // !.X, !:X, and each update makes a new version.
+  EXPECT_EQ(Form("main(!IO) :- write(1, !IO), X = 2, write(X, !IO).\n"),
+      "Predicate main(IO!0, IO!2)\n"
+      "| Conj #4\n"
+      "| | Unify #0 $1 = 1\n"
+      "| | Call #1 write($1, IO!0, IO!1)\n"
+      "| | Unify #2 X = 2\n"
+      "| | Call #3 write(X, IO!1, IO!2)\n");
+  // A body that does not update !X ends by unifying its last version with
+  // the first, and the head's !.X and !:X are its first and last.
+  EXPECT_EQ(Form("foldl2(_, [], !A, !B).\n"),
+      "Predicate foldl2(_$2, $3, A!0, A!1, B!0, B!1)\n"
+      "| Conj #3\n"
+      "| | Unify #0 $3 = []\n"
+      "| | Unify #1 A!1 = A!0\n"
+      "| | Unify #2 B!1 = B!0\n");
+  EXPECT_EQ(Form("p(!.S, !:S) :- q(!S), r(!.S).\n"),
+      "Predicate p(S!0, S!1)\n"
+      "| Conj #2\n"
+      "| | Call #0 q(S!0, S!1)\n"
+      "| | Call #1 r(S!1)\n");
+  // !:X twice in one call is one version; !.X there is the one before.
+  EXPECT_EQ(Form("p(!S) :- q(!.S, !:S, !:S), !:S = f(!.S).\n"),
+      "Predicate p(S!0, S!2)\n"
+      "| Conj #2\n"
+      "| | Call #0 q(S!0, S!1, S!1)\n"
+      "| | Unify #1 S!2 = f(S!1)\n");
+  // Branches that leave !X at different versions end at a new one.
+  EXPECT_EQ(Form("p(!S) :- ( q(!S) ; r ).\n"),
+      "Predicate p(S!0, S!2)\n"
+      "| Disj #6\n"
+      "| | Conj #4\n"
+      "| | | Call #0 q(S!0, S!1)\n"
+      "| | | Unify #2 S!2 = S!1\n"
+      "| | Conj #5\n"
+      "| | | Call #1 r\n"
+      "| | | Unify #3 S!2 = S!0\n");
+  // The condition's update is seen in the then part, not the else part.
+  EXPECT_EQ(Form("p(!S) :- ( if c(!S) then t(!S) else true ).\n"),
+      "Predicate p(S!0, S!3)\n"
+      "| IfThenElse #5\n"
+      "| | Call #0 c(S!0, S!1)\n"
+      "| | Conj #4\n"
+      "| | | Call #1 t(S!1, S!2)\n"
+      "| | | Unify #2 S!3 = S!2\n"
+      "| | Unify #3 S!3 = S!0\n");
+  // A negated goal's updates are not seen after it.
+  EXPECT_EQ(Form("p(!S) :- not q(!S), r(!S).\n"),
+      "Predicate p(S!0, S!2)\n"
+      "| Conj #3\n"
+      "| | Not #1\n"
+      "| | | Call #0 q(S!0, S!1)\n"
+      "| | Call #2 r(S!0, S!2)\n");
+  // some [!X] makes a new state variable, with no version at first, which
+  // hides one of the same name.
+  EXPECT_EQ(Form("p(!S) :- some [!S] (i(!:S), q(!S)), r(!S).\n"),
+      "Predicate p(S!0, S!3)\n"
+      "| Conj #5\n"
+      "| | Scope #3 Some\n"
+      "| | | Conj #2\n"
+      "| | | | Call #0 i(S!1)\n"
+      "| | | | Call #1 q(S!1, S!2)\n"
+      "| | Call #4 r(S!0, S!3)\n");
+  // io(!IO) in a trace goal is a new state variable inside it, whose first
+  // and last versions are the scope's variables.
+  EXPECT_EQ(Form("p :- trace [io(!IO)] w(!IO).\n"),
+      "Predicate p\n"
+      "| Scope #1 Trace [IO!0, IO!1]\n"
+      "| | Call #0 w(IO!0, IO!1)\n");
+}
+
+TEST(DesugarTest, StateVariableErrors) {
+  auto messages{[](llvm::StringRef text) { return DesugarText(text).messages; }};
+  EXPECT_EQ(messages("p :- q(!S).\n"),
+      (V{"state variable !.S is not visible in this context",
+          "state variable !:S is not visible in this context"}));
+  EXPECT_EQ(messages("p(!S) :- !S = 1.\n"),
+      V{"!S cannot be a side of a unification; you probably meant !.S or "
+        "!:S"});
+  EXPECT_EQ(messages("p(!S) :- q(f(!S)).\n"),
+      V{"!S may be only an argument of a call or a clause head, since it "
+        "stands for two arguments, !.S and !:S"});
+  EXPECT_EQ(messages("f = !S.\n"),
+      V{"!S cannot be a function's result, since it stands for two "
+        "arguments, !.S and !:S"});
+  EXPECT_EQ(messages("p(!S) :- some [!.T] q(!S).\n"),
+      V{"only a variable or a state variable !X may be quantified by some"});
+  EXPECT_EQ(messages("p :- all [!T] q.\n"),
+      V{"only a variable may be quantified by all"});
+  // As in mmc, reading a state variable before it has a value is only a
+  // warning.
+  EXPECT_EQ(messages("p(!:S) :- q(!.S).\n"),
+      V{"reference to uninitialized state variable !.S"});
+}
+
 TEST(DesugarTest, NotYetImplemented) {
   auto messages{[](llvm::StringRef text) { return DesugarText(text).messages; }};
-  EXPECT_EQ(messages("p(!S) :- q(!S).\n"),
-      V{"desugaring state variables"});
   EXPECT_EQ(messages("p --> [a].\n"),
       V{"desugaring DCG rules"});
   EXPECT_EQ(messages("p :- X = (func(A) = A).\n"),
@@ -261,10 +356,12 @@ TEST(DesugarTest, NotYetImplemented) {
       V{"desugaring try goals"});
   EXPECT_EQ(messages("p :- atomic [outer(!IO), inner(!S)] q.\n"),
       V{"desugaring atomic goals"});
-  EXPECT_EQ(messages("p :- trace [io(!IO)] q.\n"),
-      V{"desugaring state variables"});
+  EXPECT_EQ(messages("p(!S) :- !S ^ f := 1.\n"),
+      V{"desugaring field update"});
+  EXPECT_EQ(messages("p(!S) :- promise_equivalent_solutions [!:S] q(!S).\n"),
+      V{"desugaring state variables in a scope's list of variables"});
   // A clause with an error is left out; the others are kept.
-  DesugarResult result{DesugarText("p(!S).\nq.\n")};
+  DesugarResult result{DesugarText("p --> [].\nq.\n")};
   EXPECT_EQ(result.form, "Predicate q\n| Conj #0\n");
 }
 

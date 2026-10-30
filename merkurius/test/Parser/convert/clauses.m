@@ -55,6 +55,26 @@ main(!IO) :-
 % CHECK-NEXT: | | | | | | | | | value: debug
 % CHECK:      | | | | | | | | condition: none
 
+% A goal that updates a field of a state variable.
+:- pred move(point::in, point::out) is det.
+
+move(!P) :-
+    !P ^ x := 0,
+    !P ^ y := !.P ^ x + 1.
+% CHECK:      | | FactOrRule
+% CHECK-NEXT: | | | kind: Predicate
+% CHECK-NEXT: | | | name: SymName move
+% CHECK:      | | | | | StateVarFieldUpdate
+% CHECK-NEXT: | | | | | | var: StateVar !P
+% CHECK-NEXT: | | | | | | fields:
+% CHECK-NEXT: | | | | | | | FieldSpec
+% CHECK-NEXT: | | | | | | | | name: SymName x
+% CHECK-NEXT: | | | | | | | | arguments:
+% CHECK-NEXT: | | | | | | value: Literal 0
+% CHECK:      | | | | | StateVarFieldUpdate
+% CHECK-NEXT: | | | | | | var: StateVar !P
+% CHECK:      | | | | | | value: FunctorData
+
 % An atomic goal, a transaction whose alternatives are taken in turn.
 :- pred choose(int::out, io::di, io::uo) is cc_multi.
 
