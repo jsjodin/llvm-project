@@ -59,8 +59,11 @@ struct Unify;
 struct Call;
 struct HOCall;
 struct Scope;
+struct Try;
+struct Atomic;
 using Goal = std::variant<const Conj *, const Disj *, const IfThenElse *,
-    const Not *, const Unify *, const Call *, const HOCall *, const Scope *>;
+    const Not *, const Unify *, const Call *, const HOCall *, const Scope *,
+    const Try *, const Atomic *>;
 
 // G1, G2, ... or G1 & G2 & ...; true is the empty conjunction.
 struct Conj {
@@ -173,6 +176,51 @@ struct Scope {
   ParseGoal origin;
   llvm::ArrayRef<VarId> vars;
   Goal goal;
+};
+
+// catch Pattern -> Goal, or catch_any Var -> Goal, whose pattern is
+// empty: the exception is unified with `exception`, by `pattern`, which
+// chooses this branch if it succeeds.
+struct Catch {
+  TokenRange tokens;
+  VarId exception;
+  Goal pattern;
+  Goal goal;
+};
+
+// try [io(!S), ...] Goal then Then else Else catch ... (reference manual,
+// "Exception handling"). `io` holds the versions of each io(!S)'s state
+// variable before and after Goal, in pairs. Goal's updates of the other
+// state variables are seen in Then only, as in an if-then-else.
+struct Try {
+  TokenRange tokens;
+  unsigned number;
+  llvm::ArrayRef<VarId> io;
+  Goal goal;
+  Goal then;
+  std::optional<Goal> otherwise;
+  llvm::ArrayRef<Catch> catches;
+  std::optional<Catch> catchAny;
+};
+
+// One alternative of an atomic goal, with the first and last versions of
+// its inner state, which is its own.
+struct AtomicAlternative {
+  VarId innerInitial;
+  VarId innerFinal;
+  Goal goal;
+};
+
+// atomic [outer(...), inner(...), vars(...)] G1 or_else G2 ..., a
+// transaction of mmc's software transactional memory. The outer state's
+// versions are those before and after the goal; it is not visible inside.
+struct Atomic {
+  TokenRange tokens;
+  unsigned number;
+  VarId outerInitial;
+  VarId outerFinal;
+  llvm::ArrayRef<VarId> vars;
+  llvm::ArrayRef<AtomicAlternative> alternatives;
 };
 
 // Term : Type or Term `with_type` Type, recorded against the variable that

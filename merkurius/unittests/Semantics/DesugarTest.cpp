@@ -506,16 +506,72 @@ TEST(DesugarTest, ConditionalExpressions) {
       "| | | Unify #2 $1 = b\n");
 }
 
-TEST(DesugarTest, NotYetImplemented) {
+TEST(DesugarTest, Try) {
+  // The goal's updates are seen in the then part only; a catch sees the
+  // version before the goal, as in mmc.
+  EXPECT_EQ(Form("p(!S) :- ( try [] q(!S) then r(!S) catch 42 -> true ).\n"),
+      "Predicate p(S!0, S!3)\n"
+      "| Try #6\n"
+      "| | Call #0 q(S!0, S!1)\n"
+      "| | then\n"
+      "| | | Conj #5\n"
+      "| | | | Call #1 r(S!1, S!2)\n"
+      "| | | | Unify #3 S!3 = S!2\n"
+      "| | catch $3\n"
+      "| | | match\n"
+      "| | | | Unify #2 $3 = 42\n"
+      "| | | Unify #4 S!3 = S!0\n");
+  // An io(!IO) parameter's state continues from the version after the
+  // goal in every branch.
+  EXPECT_EQ(Form("p(!IO) :- ( try [io(!IO)] q(!IO) then true "
+                 "catch_any E -> r(E, !IO) ).\n"),
+      "Predicate p(IO!0, IO!3)\n"
+      "| Try #6 io [IO!0, IO!1]\n"
+      "| | Call #0 q(IO!0, IO!1)\n"
+      "| | then\n"
+      "| | | Unify #3 IO!3 = IO!1\n"
+      "| | catch_any E\n"
+      "| | | Conj #5\n"
+      "| | | | Call #2 r(E, IO!1, IO!2)\n"
+      "| | | | Unify #4 IO!3 = IO!2\n");
+}
+
+TEST(DesugarTest, Atomic) {
+  // The outer state is hidden inside; each alternative has inner state of
+  // its own, whose last version is its first if it does not change.
+  EXPECT_EQ(Form("p(V, Y, !IO) :- atomic [outer(!IO), inner(!S), vars([Y])] "
+                 "( read(V, Y, !S) or_else Y = 0 ).\n"),
+      "Predicate p(V, Y, IO!0, IO!1)\n"
+      "| Atomic #4 outer [IO!0, IO!1] vars [Y]\n"
+      "| | inner [S!0, S!1]\n"
+      "| | | Call #0 read(V, Y, S!0, S!1)\n"
+      "| | or_else inner [S!2, S!3]\n"
+      "| | | Conj #3\n"
+      "| | | | Unify #1 Y = 0\n"
+      "| | | | Unify #2 S!3 = S!2\n");
   auto messages{[](llvm::StringRef text) { return DesugarText(text).messages; }};
-  EXPECT_EQ(messages("p :- try [] q then r.\n"),
-      V{"desugaring try goals"});
-  EXPECT_EQ(messages("p :- atomic [outer(!IO), inner(!S)] q.\n"),
-      V{"desugaring atomic goals"});
-  EXPECT_EQ(messages("p(!S) :- promise_equivalent_solutions [!:S] q(!S).\n"),
-      V{"desugaring state variables in a scope's list of variables"});
-  // A clause with an error is left out; the others are kept.
-  DesugarResult result{DesugarText("p :- try [] q then r.\nq.\n")};
+  EXPECT_EQ(messages("p(!IO) :- atomic [outer(!IO), inner(!S)] q(!IO).\n"),
+      (V{"state variable !.IO is not visible in this context",
+          "state variable !:IO is not visible in this context"}));
+}
+
+TEST(DesugarTest, ScopeLists) {
+  // As in mmc, !.S in the list is the version before the goal, !:S the one
+  // after it, and !S both.
+  auto vars{[](llvm::StringRef list) {
+    std::string form{Form("p(!S) :- promise_equivalent_solutions " +
+        list.str() + " q(!S).\n")};
+    std::size_t at{form.find("PromiseSolutions")};
+    return form.substr(at, form.find('\n', at) - at);
+  }};
+  EXPECT_EQ(vars("[!.S]"), "PromiseSolutions [S!0]");
+  EXPECT_EQ(vars("[!:S]"), "PromiseSolutions [S!1]");
+  EXPECT_EQ(vars("[X, !S]"), "PromiseSolutions [X, S!0, S!1]");
+}
+
+TEST(DesugarTest, NotYetImplemented) {
+  DesugarResult result{DesugarText(":- mutable(c, int, 0, ground, []).\nq.\n")};
+  EXPECT_EQ(result.messages, V{"desugaring mutable declarations"});
   EXPECT_EQ(result.form, "Predicate q\n| Conj #0\n");
 }
 

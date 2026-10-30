@@ -135,6 +135,16 @@ private:
     }
     os_ << kind << " #" << number;
   }
+  // A line that names a part of the goal above it.
+  void Label(llvm::StringRef label, int depth, bool newline = true) {
+    for (int j{0}; j < depth; ++j) {
+      os_ << "| ";
+    }
+    os_ << label;
+    if (newline) {
+      os_ << '\n';
+    }
+  }
   void Goal(const semantics::Goal &goal, int depth) {
     std::visit(
         common::visitors{
@@ -198,6 +208,65 @@ private:
               Var(call->closure);
               Arguments(arguments);
               os_ << '\n';
+            },
+            [&](const Try *t) {
+              Start("Try", t->number, depth);
+              if (!t->io.empty()) {
+                os_ << " io [";
+                Vars(t->io);
+                os_ << ']';
+              }
+              os_ << '\n';
+              Goal(t->goal, depth + 1);
+              Label("then", depth + 1);
+              Goal(t->then, depth + 2);
+              if (t->otherwise) {
+                Label("else", depth + 1);
+                Goal(*t->otherwise, depth + 2);
+              }
+              auto branch{[&](const Catch &c, llvm::StringRef kind) {
+                Label(kind, depth + 1, false);
+                os_ << ' ';
+                Var(c.exception);
+                os_ << '\n';
+                const auto *pattern{std::get_if<const Conj *>(&c.pattern)};
+                if (!pattern || !(*pattern)->goals.empty()) {
+                  Label("match", depth + 2);
+                  Goal(c.pattern, depth + 3);
+                }
+                Goal(c.goal, depth + 2);
+              }};
+              for (const Catch &c : t->catches) {
+                branch(c, "catch");
+              }
+              if (t->catchAny) {
+                branch(*t->catchAny, "catch_any");
+              }
+            },
+            [&](const Atomic *atomic) {
+              Start("Atomic", atomic->number, depth);
+              os_ << " outer [";
+              Var(atomic->outerInitial);
+              os_ << ", ";
+              Var(atomic->outerFinal);
+              os_ << ']';
+              if (!atomic->vars.empty()) {
+                os_ << " vars [";
+                Vars(atomic->vars);
+                os_ << ']';
+              }
+              os_ << '\n';
+              bool first{true};
+              for (const AtomicAlternative &alternative : atomic->alternatives) {
+                Label(first ? "inner" : "or_else inner", depth + 1, false);
+                first = false;
+                os_ << " [";
+                Var(alternative.innerInitial);
+                os_ << ", ";
+                Var(alternative.innerFinal);
+                os_ << "]\n";
+                Goal(alternative.goal, depth + 2);
+              }
             },
             [&](const Scope *scope) {
               Start("Scope", scope->number, depth);

@@ -647,7 +647,8 @@ struct AtomicParamRule {
       }
     }
     if (const CompoundTerm * c{AsCompound(t, "vars", 1)}) {
-      if (auto vars{Apply(quantifiedVars, Operand(*c), state)}) {
+      if (auto vars{Apply(expect("a list of variables", listOf(PlainVarRule{})),
+              Operand(*c), state)}) {
         return state.arena.Make<AtomicParam>(t.tokens(),
             AtomicParamKind::Vars, std::nullopt, std::nullopt, *vars);
       }
