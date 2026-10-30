@@ -1205,17 +1205,32 @@ struct OmpReductionClause {
 ENUM_CLASS(OmpMapModifier, Always, Close, Present)
 ENUM_CLASS(OmpMapType, Alloc, Delete, From, Release, Storage, To, Tofrom)
 
-// map([Modifiers,] [Type :] Vars).
+// What a map clause maps: a variable, or a section of an array,
+// A(Lo .. Hi), with inclusive bounds, which keeps the array's indices.
+struct OmpMapObject {
+  static constexpr llvm::StringLiteral kindName{"OmpMapObject"};
+  TokenRange tokens;
+  const Variable *variable;
+  std::optional<DataTerm> lower; // both bounds, or neither
+  std::optional<DataTerm> upper;
+  template <typename F> void ForEachField(F &&f) const {
+    f("variable", variable);
+    f("lower", lower);
+    f("upper", upper);
+  }
+};
+
+// map([Modifiers,] [Type :] Objects).
 struct OmpMapClause {
   static constexpr llvm::StringLiteral kindName{"OmpMapClause"};
   TokenRange tokens;
   llvm::ArrayRef<OmpMapModifier> modifiers;
   std::optional<OmpMapType> type;
-  llvm::ArrayRef<const Variable *> variables;
+  llvm::ArrayRef<const OmpMapObject *> objects;
   template <typename F> void ForEachField(F &&f) const {
     f("modifiers", modifiers);
     f("type", type);
-    f("variables", variables);
+    f("objects", objects);
   }
 };
 

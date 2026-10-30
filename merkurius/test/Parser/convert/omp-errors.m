@@ -23,6 +23,7 @@
 :- pred leading_comma is det.
 :- pred index_variable(int::in) is det.
 :- pred map_modifier(int::in) is det.
+:- pred map_object(int::in) is det.
 :- pred unclosed is det.
 :- pred empty is det.
 :- pred reduction_list(int::in) is det.
@@ -81,6 +82,11 @@ map_modifier(_X) :-
     %$omp target map(sideways: _X)
     true.
 % CHECK: omp-errors.m:[[@LINE-2]]:22: error: expected a map modifier: always, close or present, but found 'sideways'
+
+map_object(_X) :-
+    %$omp target map(to: f(_X))
+    true.
+% CHECK: omp-errors.m:[[@LINE-2]]:26: error: expected a variable or an array section, Variable(Lo .. Hi), but found 'f(_X)'
 
 unclosed :-
     %$omp do schedule(static
