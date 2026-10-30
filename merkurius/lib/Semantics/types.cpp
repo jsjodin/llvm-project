@@ -8,7 +8,11 @@
 
 #include "merkurius/Semantics/types.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include <algorithm>
+#include <functional>
 
 namespace merkurius::semantics {
 
@@ -51,39 +55,76 @@ const Type *TypeContext::HigherOrder(parser::PredOrFunc kind,
       TypeKind::HigherOrder, 0, nullptr, arguments, kind, purity, result});
 }
 
+// Types share their parts, and can be exponentially larger as trees than
+// as the graphs they are, so the walks below visit each part once.
 const Type *TypeContext::Substitute(
     const Type *type, llvm::function_ref<const Type *(unsigned)> replace) {
-  if (type->kind == TypeKind::Variable) {
-    return replace(type->var);
-  }
-  llvm::SmallVector<const Type *, 4> arguments;
-  bool changed{false};
-  for (const Type *argument : type->arguments) {
-    arguments.push_back(Substitute(argument, replace));
-    changed |= arguments.back() != argument;
-  }
-  const Type *result{type->result ? Substitute(type->result, replace) : nullptr};
-  changed |= result != type->result;
-  if (!changed) {
-    return type;
-  }
-  Type copy{*type};
-  copy.arguments = arguments;
-  copy.result = result;
-  return Intern(copy);
+  llvm::DenseMap<const Type *, const Type *> done;
+  std::function<const Type *(const Type *)> walk{[&](const Type *t) {
+    if (t->kind == TypeKind::Variable) {
+      return replace(t->var);
+    }
+    if (auto it{done.find(t)}; it != done.end()) {
+      return it->second;
+    }
+    llvm::SmallVector<const Type *, 4> arguments;
+    bool changed{false};
+    for (const Type *argument : t->arguments) {
+      arguments.push_back(walk(argument));
+      changed |= arguments.back() != argument;
+    }
+    const Type *result{t->result ? walk(t->result) : nullptr};
+    changed |= result != t->result;
+    const Type *substituted{t};
+    if (changed) {
+      Type copy{*t};
+      copy.arguments = arguments;
+      copy.result = result;
+      substituted = Intern(copy);
+    }
+    done[t] = substituted;
+    return substituted;
+  }};
+  return walk(type);
 }
 
 void ForEachVariable(const Type &type, llvm::function_ref<void(unsigned)> f) {
-  if (type.kind == TypeKind::Variable) {
-    f(type.var);
-    return;
-  }
-  for (const Type *argument : type.arguments) {
-    ForEachVariable(*argument, f);
-  }
-  if (type.result) {
-    ForEachVariable(*type.result, f);
-  }
+  llvm::DenseSet<const Type *> seen;
+  std::function<void(const Type &)> walk{[&](const Type &t) {
+    if (!seen.insert(&t).second) {
+      return;
+    }
+    if (t.kind == TypeKind::Variable) {
+      f(t.var);
+      return;
+    }
+    for (const Type *argument : t.arguments) {
+      walk(*argument);
+    }
+    if (t.result) {
+      walk(*t.result);
+    }
+  }};
+  walk(type);
+}
+
+std::size_t TreeSize(const Type &type, std::size_t limit) {
+  llvm::DenseMap<const Type *, std::size_t> sizes;
+  std::function<std::size_t(const Type &)> size{[&](const Type &t) {
+    if (auto it{sizes.find(&t)}; it != sizes.end()) {
+      return it->second;
+    }
+    std::size_t n{1};
+    for (const Type *argument : t.arguments) {
+      n = std::min(limit, n + size(*argument));
+    }
+    if (t.result) {
+      n = std::min(limit, n + size(*t.result));
+    }
+    sizes[&t] = n;
+    return n;
+  }};
+  return size(type);
 }
 
 void PrintType(llvm::raw_ostream &os, const Type &type,
@@ -104,7 +145,13 @@ void PrintType(llvm::raw_ostream &os, const Type &type,
     if (!type.constructor->module.empty()) {
       os << type.constructor->module << '.';
     }
-    os << type.constructor->name;
+    // The primitive character type, as mmc names it: `char` is a type
+    // only where the module char is imported (see the register).
+    if (type.constructor->module.empty() && type.constructor->name == "char") {
+      os << "character";
+    } else {
+      os << type.constructor->name;
+    }
     if (!type.arguments.empty()) {
       os << '(';
       list(type.arguments);
@@ -144,6 +191,11 @@ void PrintType(llvm::raw_ostream &os, const Type &type,
 
 std::string TypeToString(
     const Type &type, llvm::function_ref<std::string(unsigned)> name) {
+  // A type too large to read is cut short.
+  constexpr std::size_t maxSize{200};
+  if (TreeSize(type, maxSize + 1) > maxSize) {
+    return "<a type with more than " + std::to_string(maxSize) + " parts>";
+  }
   std::string text;
   llvm::raw_string_ostream os{text};
   PrintType(os, type, name);

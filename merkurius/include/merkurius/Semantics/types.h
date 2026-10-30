@@ -62,12 +62,18 @@ private:
   std::map<std::vector<std::uintptr_t>, const Type *> interned_;
 };
 
-// Calls `f` on each variable of the type, in order, with repeats.
+// Calls `f` once on each variable of the type, in the order they occur.
 void ForEachVariable(const Type &, llvm::function_ref<void(unsigned)> f);
 
+// The number of nodes the type has as a tree, which can be exponential in
+// the number it has, since types share their parts; at most `limit`.
+std::size_t TreeSize(const Type &, std::size_t limit);
+
 // Prints a type as Mercury writes it, module-qualified, as mmc's messages
-// do: list.list(int), {int, string}, pred(int), (func(int) = int). A
-// variable is printed by `name`, or as T<number> without one.
+// do: list.list(int), {int, string}, pred(int), (func(int) = int), and
+// the primitive char as character. A
+// variable is printed by `name`, or as T<number> without one. TypeToString
+// gives a placeholder for a type too large to read.
 void PrintType(llvm::raw_ostream &, const Type &,
     llvm::function_ref<std::string(unsigned)> name = nullptr);
 std::string TypeToString(

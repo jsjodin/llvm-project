@@ -81,6 +81,17 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
   opts.outputFile = args.getLastArgValue(OPT_o).str();
   opts.searchDirectories = args.getAllArgValues(OPT_I);
   opts.libraryDirectory = args.getLastArgValue(OPT_library_dir).str();
+  opts.inferTypes = !args.hasArg(OPT_fno_infer_types);
+  if (const llvm::opt::Arg *arg =
+          args.getLastArg(OPT_ftype_inference_iteration_limit_EQ)) {
+    llvm::StringRef value{arg->getValue()};
+    if (value.getAsInteger(10, opts.typeInferenceIterationLimit) ||
+        opts.typeInferenceIterationLimit == 0) {
+      reportError(
+          "invalid value '" + value + "' in '" + arg->getAsString(args) + "'");
+      return false;
+    }
+  }
   opts.inputs = args.getAllArgValues(OPT_INPUT);
   if (opts.inputs.empty() && !opts.showHelp && !opts.showVersion) {
     reportError("no input files");

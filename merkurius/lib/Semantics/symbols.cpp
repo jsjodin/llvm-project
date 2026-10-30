@@ -16,7 +16,11 @@ const Symbol &ModuleSymbols::Add(SymbolKind kind, llvm::StringRef name,
     bool exported, const Symbol *owner) {
   std::vector<const Symbol *> &same{byName_[name]};
   for (const Symbol *symbol : same) {
-    if (symbol->kind == kind && symbol->arity == arity) {
+    // Constructors and fields of different types are different symbols:
+    // types of one module may share constructors (reference manual,
+    // "Discriminated unions").
+    if (symbol->kind == kind && symbol->arity == arity &&
+        symbol->owner == owner) {
       // A type's abstract declaration in the interface and its definition
       // in the implementation are one symbol.
       // The symbol's declaration is the definition.

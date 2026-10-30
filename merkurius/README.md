@@ -28,7 +28,7 @@ and desugaring turns clauses into their semantic form. Its actions are:
 | `-fdebug-dump-semantic-form` | Each clause's semantic form after desugaring and quantification, one goal per line; desugaring does not yet handle `mutable` declarations |
 | `-fdebug-dump-nonlocals` | The semantic form, with each goal's nonlocal variables after `~` |
 | `-fdebug-dump-imports` | The modules the file imports, and each module loaded, with its interface's imports and number of items |
-| `-fdebug-dump-types` | Each clause's declared signature, the types of its variables, and the declaration chosen for each overloaded name; type errors are reported. Type classes, existential types, `coerce` and undeclared predicates' types are not checked yet |
+| `-fdebug-dump-types` | Each clause's declared signature, the types of its variables, and the declaration chosen for each overloaded name; type errors are reported. The types of undeclared predicates and functions are inferred; `-fno-infer-types` reports them as errors too, and `-ftype-inference-iteration-limit=N` bounds the passes (default 60). Type classes, existential types and `coerce` are not checked yet |
 | `-fdebug-dump-resolved-names` | The module's symbols, and each name in it with its use, arity and the declarations it may refer to; undefined names are reported |
 
 Imported modules are read from their sources, `name.m`, found in the
@@ -83,9 +83,9 @@ ninja -C ../build check-merkurius
 
 `merkurius/build_merk.sh run_tests`, or `ninja check-merkurius` in a build
 directory, runs the lit and unit tests. The tests that compare the term reader
-with Mercury's own need `mmc` (Mercury 22.01), found through the `MMC`
-environment variable or the `PATH`; without it, lit reports them as
-unsupported:
+and the type checker with Mercury's own need `mmc` (Mercury 22.01), found
+through the `MMC` environment variable or the `PATH`; without it, lit reports
+them as unsupported:
 
 ```sh
 MMC=$HOME/mercury-22.01.9/bin/mmc merkurius/build_merk.sh run_tests
@@ -104,6 +104,7 @@ tree, for 180 seconds in 32 processes by default. The design document's
 | `tools/merkc` | The driver and the `-fc1` entry point |
 | `tools/merkurius-term-fuzzer` | A fuzz target for the lexer, term reader and converter |
 | `utils/term-oracle` | The term oracle, which reads terms with Mercury's own parser, and the scripts that compare it with merkc and generate test items |
+| `utils/type-oracle` | The scripts that compare merkc's type checking and inference with mmc's, settling differences by mmc's checking of declared types, and generate random modules to compare them on |
 | `utils/fuzz` | The script and dictionary for fuzzing |
 | `test` | lit tests; `test/Unit` runs the unit tests |
 | `unittests` | googletest unit tests |
