@@ -108,6 +108,12 @@ private:
   bool parenthesize_;
 };
 
+// Converts the source file, desugars its clauses and prints their semantic
+// form.
+class DebugDumpSemanticFormAction : public FrontendAction {
+  bool executeAction() override;
+};
+
 } // namespace merkurius::frontend
 
 #endif // MERKURIUS_FRONTEND_FRONTENDACTIONS_H_

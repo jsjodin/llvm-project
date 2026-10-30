@@ -43,6 +43,9 @@ enum class ActionKind {
   // -fdebug-unparse-parenthesized-no-sema: the same, with every operator
   // term in parentheses.
   DebugUnparseParenthesizedNoSema,
+  // -fdebug-dump-semantic-form: desugar the clauses and print their
+  // semantic form.
+  DebugDumpSemanticForm,
 };
 
 struct FrontendOptions {

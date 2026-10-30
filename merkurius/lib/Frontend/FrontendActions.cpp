@@ -16,6 +16,7 @@
 #include "merkurius/Parser/source.h"
 #include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/unparse.h"
+#include "merkurius/Semantics/desugar.h"
 #include "llvm/ADT/STLExtras.h"
 #include <string>
 #include <vector>
@@ -186,6 +187,27 @@ bool DebugUnparseNoSemaAction::executeAction() {
     return false;
   }
   parser::UnparseCanonical(*os, tree, tokens, parenthesize_);
+  os->flush();
+  return !messages.AnyFatalError();
+}
+
+bool DebugDumpSemanticFormAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  parser::LexerOptions options;
+  options.openMP = ci.getLangOpts().openMP;
+  parser::Messages messages;
+  parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
+  parser::ParseTreeArena arena;
+  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages)};
+  semantics::SemanticArena semanticArena;
+  const semantics::SemanticForm &form{
+      semantics::Desugar(tree, tokens, semanticArena, messages)};
+  messages.Emit(llvm::errs(), ci.getAllSources());
+  llvm::raw_ostream *os{ci.createDefaultOutputFile()};
+  if (!os) {
+    return false;
+  }
+  semantics::DumpSemanticForm(*os, form);
   os->flush();
   return !messages.AnyFatalError();
 }
