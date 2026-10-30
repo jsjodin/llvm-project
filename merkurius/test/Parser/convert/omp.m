@@ -14,6 +14,8 @@
 :- pred sum_squares(array(int)::in, int::in, int::out) is det.
 :- pred scale(int::in, array(int)::array_di, array(int)::array_uo) is det.
 :- pred count_up(int::in, int::in, int::in, int::out) is det.
+:- pred count_up_in(array(int)::in, int::in, int::in, int::in, int::out)
+    is det.
 
 :- implementation.
 
@@ -95,12 +97,17 @@ scale_element(K, I, !A) :-
     array.unsafe_set(I, K * X, !A).
 
 % A self-recursive counted loop, with the Merkurius clauses index and
-% upper, and the combined directive that a target region would use.
+% upper, and the combined directive that a target region would use, which
+% maps a section of an array.
 count_up(I, N, !Acc) :-
+    count_up_in(array.make_empty_array, I, N, !Acc).
+
+count_up_in(A, I, N, !Acc) :-
     ( if I =< N then
         %$omp target teams distribute parallel do simd index(I) upper(N)
-        %$omp&    map(always, to: N) map(tofrom: Acc0) reduction(task, max: Acc0)
-        count_up(I + 1, N, !Acc),
+        %$omp&    map(always, to: N) map(tofrom: Acc0, A(I .. N - 1))
+        %$omp&    reduction(task, max: Acc0)
+        count_up_in(A, I + 1, N, !Acc),
         Acc0 = !.Acc,
         !:Acc = int.max(Acc0, I)
     else
@@ -119,20 +126,35 @@ count_up(I, N, !Acc) :-
 % CHECK-NEXT: | | | | | | | | | | modifiers:
 % CHECK-NEXT: | | | | | | | | | | | Always
 % CHECK-NEXT: | | | | | | | | | | type: To
-% CHECK-NEXT: | | | | | | | | | | variables:
-% CHECK-NEXT: | | | | | | | | | | | Variable N
+% CHECK-NEXT: | | | | | | | | | | objects:
+% CHECK-NEXT: | | | | | | | | | | | OmpMapObject
+% CHECK-NEXT: | | | | | | | | | | | | variable: Variable N
+% CHECK-NEXT: | | | | | | | | | | | | lower: none
+% CHECK-NEXT: | | | | | | | | | | | | upper: none
 % CHECK-NEXT: | | | | | | | | | OmpMapClause
 % CHECK-NEXT: | | | | | | | | | | modifiers:
 % CHECK-NEXT: | | | | | | | | | | type: Tofrom
-% CHECK-NEXT: | | | | | | | | | | variables:
-% CHECK-NEXT: | | | | | | | | | | | Variable Acc0
+% CHECK-NEXT: | | | | | | | | | | objects:
+% CHECK-NEXT: | | | | | | | | | | | OmpMapObject
+% CHECK-NEXT: | | | | | | | | | | | | variable: Variable Acc0
+% CHECK-NEXT: | | | | | | | | | | | | lower: none
+% CHECK-NEXT: | | | | | | | | | | | | upper: none
+% An array section, with inclusive bounds.
+% CHECK-NEXT: | | | | | | | | | | | OmpMapObject
+% CHECK-NEXT: | | | | | | | | | | | | variable: Variable A
+% CHECK-NEXT: | | | | | | | | | | | | lower: Variable I
+% CHECK-NEXT: | | | | | | | | | | | | upper: FunctorData
+% CHECK-NEXT: | | | | | | | | | | | | | name: SymName -
+% CHECK-NEXT: | | | | | | | | | | | | | arguments:
+% CHECK-NEXT: | | | | | | | | | | | | | | Variable N
+% CHECK-NEXT: | | | | | | | | | | | | | | Literal 1
 % CHECK-NEXT: | | | | | | | | | OmpReductionClause
 % CHECK-NEXT: | | | | | | | | | | modifier: Task
 % CHECK-NEXT: | | | | | | | | | | op: SymName max
 % CHECK-NEXT: | | | | | | | | | | variables:
 % CHECK-NEXT: | | | | | | | | | | | Variable Acc0
 % CHECK-NEXT: | | | | | | | goal: Call
-% CHECK-NEXT: | | | | | | | | name: SymName count_up
+% CHECK-NEXT: | | | | | | | | name: SymName count_up_in
 
 % A directive with arguments, before the goal of an else branch.
 :- pred locked(int::in, int::out) is det.

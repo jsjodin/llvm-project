@@ -452,10 +452,10 @@ Desugaring also numbers the goals and unifications of each semantic form densely
 ### OpenMP directives
 
 - **Definitions from LLVM.** Directive and clause kinds, and which clauses each directive allows, come from `llvm/Frontend/OpenMP/OMP.td`, which Clang and Flang share. Our directives therefore use the same `llvm::omp` kinds that the `omp` dialect's lowering already understands.
-- **Syntax.** `%$omp` is followed by a directive in its Fortran spelling, such as `parallel do`, and then its clauses, which may be separated by commas, as in Fortran. Each continuation line begins `%$omp&`. A directive's last name may take arguments, as `critical(Name)` does. A clause is a name, perhaps applied to arguments, as in `nowait`, `private(X, Y)` or `schedule(dynamic, Chunk)`. Arguments are Mercury terms, read by the term reader, so `:` separates modifiers from a list as in Fortran: `map(always, to: A)`. As in mmc, an operator before an infix operator must be in parentheses, so a reduction with a list is written `reduction((+) : X)`. Over a fold, the accumulator is the reduction's variable, so `reduction(+)` is the usual form. Two clauses of our own, `index(I)` and `upper(N)`, name the induction variable and the inclusive bound of a self-recursive counted loop (Language extensions). The directive covers the goal that follows it.
+- **Syntax.** `%$omp` is followed by a directive in its Fortran spelling, such as `parallel do`, and then its clauses, which may be separated by commas, as in Fortran. Each continuation line begins `%$omp&`. A directive's last name may take arguments, as `critical(Name)` does. A clause is a name, perhaps applied to arguments, as in `nowait`, `private(X, Y)` or `schedule(dynamic, Chunk)`. Arguments are Mercury terms, read by the term reader, so `:` separates modifiers from a list as in Fortran: `map(always, to: A)`. A map clause may map a section of an array, `A(Lo .. Hi)`, with Mercury's inclusive range operator (Language extensions, "Target regions"). As in mmc, an operator before an infix operator must be in parentheses, so a reduction with a list is written `reduction((+) : X)`. Over a fold, the accumulator is the reduction's variable, so `reduction(+)` is the usual form. Two clauses of our own, `index(I)` and `upper(N)`, name the induction variable and the inclusive bound of a self-recursive counted loop (Language extensions). The directive covers the goal that follows it.
 - **Fortran's spellings.** The directive is the longest run of names that OMP.td knows, as in Flang. A directive that OMP.td has only for C, such as `parallel for`, is an error that names the Fortran form, `parallel do`.
 - **Attachment.** The term reader attaches a directive token to the term after it, read as one conjunct. The converter accepts the annotation only where that term is a goal. There it builds an `OmpGoal`, which holds the directive and its goal, as Clang's `OMPExecutableDirective` holds its associated statement; desugaring turns it into a directive `Scope`. Anywhere else, such as before a clause head, inside a data-term or in a DCG body, the directive draws a warning and is ignored.
-- **Parse tree.** `convert-omp.cpp` reads the directive token's own tokens into an `OmpDirective` node, which holds the directive's kind, its arguments and its clauses. Flang has a parse-tree class for each clause, generated from OMP.td, whose fields are Fortran's expressions and object lists. We follow it for the clauses that later passes use: `schedule`, `reduction` and `map` have nodes of their own, with their modifiers, kinds and map types as enums. Every other clause of OMP.td is an `OmpGenericClause`, with its kind, its modifiers and its arguments as data-terms, for semantic analysis to interpret. A clause gets a node of its own when a pass needs one.
+- **Parse tree.** `convert-omp.cpp` reads the directive token's own tokens into an `OmpDirective` node, which holds the directive's kind, its arguments and its clauses. Flang has a parse-tree class for each clause, generated from OMP.td, whose fields are Fortran's expressions and object lists. We follow it for the clauses that later passes use: `schedule`, `reduction` and `map` have nodes of their own, with their modifiers, kinds and map types as enums, and a map clause's objects are `OmpMapObject`s, each a variable with the bounds of its section, if it has one. Every other clause of OMP.td is an `OmpGenericClause`, with its kind, its modifiers and its arguments as data-terms, for semantic analysis to interpret. A clause gets a node of its own when a pass needs one.
   - **Tokens.** A directive's nodes index the directive's own tokens, not the file's. The exact unparser prints a directive by unparsing its node over those tokens, so test 2 checks directives as it checks the rest of the file. The canonical unparser prints a directive as written, on a line of its own at the indentation of its goal, with its continuation lines at the same indentation.
   - **Variables.** A directive's variables are numbered as the item's, so `index(I)` names the same variable as the `I` of its goal.
 - **Checking** is part of semantic analysis: the clauses must be allowed on the directive in the OpenMP version in use (`isAllowedClauseForDirective`), the associated goal must be a loop the compiler can form, and the clauses must make sense for it.
@@ -833,6 +833,50 @@ Failure handling follows Erlang. An uncaught exception ends the process with tha
 - **The promise:** iterations are independent, and writes to a threaded array touch disjoint elements. A reduction's operator is associative. Floating-point reductions may then vary with the schedule.
 - **Checked by the compiler:** the body is `det`, pure, and threads no `io`. A violation is an error, not a silent sequential fallback.
 - **Exceptions:** each iteration catches its own exception; one is rethrown after the join.
+
+### Target regions
+
+A target directive, such as `%$omp target teams distribute parallel do`, runs its goal on a device. A GPU is only useful on flat data, so only flat values cross into a target region. Our representation (Lowering and code generation, "Type representation") says which values are flat.
+
+- **Scalars:** `int`, `uint` and the sized integers, `float`, `char`, and enums, which are small integers with no cell. A type with one functor of one argument, such as `meters ---> meters(float)`, is represented as its argument, so it is a scalar too.
+- **Arrays of scalars:** `array(int)`, `array(float)` and the like are a size and unboxed elements, the contiguous buffer that `omp.map.info` maps. The elements are mapped and the size is passed as a scalar.
+- **Tuples, by value:** a tuple is a cell, so `{X, Y}` is unpacked into its scalar fields at the region's boundary. An array of tuples is an array of pointers to cells and is not mapped; packing it into a flat layout can come later.
+
+Lists, strings and other terms are not mapped. The region's goal may not allocate either (Lowering and code generation, "Parallel loops"), so none appear inside it.
+
+**Map types from modes.** The variables that cross the boundary are the goal's nonlocal variables, which quantification computes, so they need not be listed. Each one's mode gives its map type:
+
+| Mode | Map |
+| --- | --- |
+| An `in` array | `to` |
+| An array threaded through the goal, `di` to `uo` | `tofrom`, updated in place, as in experiment E2 |
+| An `in` scalar or tuple | `firstprivate` |
+| An `out` scalar | `from`, or the variable of a reduction |
+| An `out` array | Not allowed: the device would have to allocate it. The caller makes the array and threads it through the goal |
+
+A `map` clause is therefore needed only to override the inferred map type or to map part of an array.
+
+**Array sections.** `map(to: A(Lo .. Hi))` maps elements `Lo` to `Hi` of `A`, inclusive. Both parts are standard term syntax, a higher-order application and the builtin operator `..`, so it reads with no change to the parser, and `..` keeps the meaning it has in the `list` module, where `1 .. 3` is `[1, 2, 3]`. The reading as a section is ours: Mercury has no array sections, and to mmc the term is only part of a comment. A section with no map type takes the type the mode gives. Sections let work be split over several devices:
+
+```mercury
+    %$omp parallel do index(D) upper(NumDevices - 1)
+    for_each_device(D, ...)
+
+for_each_device(D, ...) :-
+    Lo = D * Chunk,
+    Hi = int.min(Lo + Chunk - 1, N - 1),
+    %$omp target device(D) map(to: A(Lo .. Hi)) map(tofrom: B(Lo .. Hi))
+    %$omp&    teams distribute parallel do index(I) upper(Hi)
+    loop(Lo, Hi, A, !B)
+```
+
+- **Indices are unchanged.** As in OpenMP, a section keeps the array's indices on the device, so the goal still uses `I`, with no offset. Only elements `Lo` to `Hi` are transferred, and for `from` and `tofrom` only those are copied back.
+- **Overlap:** sections mapped `to` may overlap, as the halos of a stencil do. Sections that are written must be disjoint between regions that run at the same time. This is the promise a parallel loop already makes, that writes to a threaded array touch disjoint elements; uniqueness is not violated, because the array is still threaded once.
+- **Bounds** are checked when the region starts, `0 =< Lo` and `Hi < size(A)`. A section out of bounds is a run-time error that names the array, not a silent write past its end on the device.
+
+**Checked by the compiler,** after type and mode checking: every variable that crosses the boundary has a monomorphic type that can be mapped, or the error names it and its type, as in "`Xs` has type `list(float)`, which cannot be mapped to a device". The goal must also satisfy the rules for a parallel loop: `det`, pure, no `io`, and no allocation.
+
+**Open question:** `array2d`, which is flat too, with sections of rows or blocks.
 
 ### Sendability
 
@@ -1493,6 +1537,7 @@ Eight decisions remain open. The three that most constrain the runtime are the h
 - [x] Prescanner: none. Source files are read unchanged, and the lexer recognizes `%$omp` directives and line number directives, which depend on token context (Front end, "Source manager").
 - [x] Lexical rules: 22.01's, with the current manual filling its gaps; where mmc 22.01.9 disagrees with its manual, mmc is followed; of the later changes only the operator renumbering is adopted (Front end, Lexer; Standard library, compatibility and testing).
 - [x] Receiving from several mailboxes: selectors, as in Gleam, taking the oldest matching message across mailboxes, as Erlang's receive does; priority by Erlang's two-step receive (Language extensions, "Processes and mailboxes").
+- [x] Target regions: only scalars, arrays of scalars and tuples, by value, cross into one; map types follow from modes; array sections, `A(Lo .. Hi)`, are inclusive and keep the array's indices (Language extensions, "Target regions").
 - [x] Receive syntax: a `receive` goal whose arms each `select` a message by mailbox and pattern, as sugar over the selector API, behind `-freceive-goal` (Language extensions, "Processes and mailboxes").
 
 **Risks**

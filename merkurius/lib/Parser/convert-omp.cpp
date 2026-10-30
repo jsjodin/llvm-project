@@ -162,6 +162,49 @@ public:
 
 inline constexpr VariableNodeRule variableNode;
 
+// A variable, or a section of an array: A(Lo .. Hi).
+class MapObjectRule {
+public:
+  using resultType = const OmpMapObject *;
+  bool Matches(const Term &t) const {
+    return llvm::isa<VariableTerm>(t) || Section(t);
+  }
+  std::optional<const OmpMapObject *> Convert(
+      const Term &t, ConvertState &state) const {
+    if (llvm::isa<VariableTerm>(t)) {
+      return state.arena.Make<OmpMapObject>(t.tokens(),
+          *variableNode.Convert(t, state), std::nullopt, std::nullopt);
+    }
+    const auto &apply{llvm::cast<ApplyTerm>(t)};
+    const auto &range{*Section(t)};
+    std::optional<DataTerm> lower{
+        Apply(dataTerm, *range.arguments()[0], state)};
+    std::optional<DataTerm> upper{
+        Apply(dataTerm, *range.arguments()[1], state)};
+    if (!lower || !upper) {
+      return std::nullopt;
+    }
+    return state.arena.Make<OmpMapObject>(t.tokens(),
+        *variableNode.Convert(*apply.closure(), state), lower, upper);
+  }
+  void Expected(llvm::raw_ostream &os) const {
+    os << "a variable or an array section, Variable(Lo .. Hi)";
+  }
+
+private:
+  // The range Lo .. Hi of a section.
+  static const CompoundTerm *Section(const Term &t) {
+    const auto *apply{llvm::dyn_cast<ApplyTerm>(&t)};
+    if (!apply || !llvm::isa<VariableTerm>(apply->closure()) ||
+        apply->arguments().size() != 1) {
+      return nullptr;
+    }
+    return AsCompound(*apply->arguments()[0], "..", 2);
+  }
+};
+
+inline constexpr MapObjectRule mapObject;
+
 class DirectiveConverter {
 public:
   DirectiveConverter(std::uint32_t directive, ConvertState &outer)
@@ -431,17 +474,17 @@ std::optional<OmpClause> DirectiveConverter::Clause(std::uint32_t &at) {
       modifierTerms = modifierTerms.drop_back();
     }
     auto modifiers{Elements(mapModifier, modifierTerms)};
-    auto variables{Elements(variableNode, split.rest)};
+    auto objects{Elements(mapObject, split.rest)};
     if (split.rest.empty()) {
       state_.messages.Say(
-          source, "expected map([Modifiers,] [Type :] Variables)"_err_en_US);
+          source, "expected map([Modifiers,] [Type :] Objects)"_err_en_US);
       ok = false;
     }
-    if (!ok || !modifiers || !variables) {
+    if (!ok || !modifiers || !objects) {
       return std::nullopt;
     }
     return make(state_.arena.Make<OmpMapClause>(
-        tokens, *modifiers, type, *variables));
+        tokens, *modifiers, type, *objects));
   }
   default: {
     auto modifiers{Elements(dataTerm, split.modifiers)};
