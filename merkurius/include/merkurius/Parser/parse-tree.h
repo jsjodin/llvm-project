@@ -1141,7 +1141,7 @@ struct AtomicParam {
   AtomicParamKind kind;
   std::optional<DataTerm> initial; // !S, or S0; for outer and inner
   std::optional<DataTerm> final; // S, when initial is S0
-  llvm::ArrayRef<llvm::StringRef> vars; // for vars
+  llvm::ArrayRef<DataTerm> vars; // the variables of vars([Vars])
   template <typename F> void ForEachField(F &&f) const {
     f("kind", kind);
     f("initial", initial);

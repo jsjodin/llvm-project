@@ -104,7 +104,7 @@ choose(X, !IO) :-
 % CHECK-NEXT: | | | | | | initial: none
 % CHECK-NEXT: | | | | | | final: none
 % CHECK-NEXT: | | | | | | vars:
-% CHECK-NEXT: | | | | | | | X
+% CHECK-NEXT: | | | | | | | Variable X
 % The or_else alternatives flatten through parentheses.
 % CHECK-NEXT: | | | | goals:
 % CHECK-NEXT: | | | | | Unification
