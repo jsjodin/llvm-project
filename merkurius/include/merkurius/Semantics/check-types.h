@@ -65,6 +65,10 @@ private:
   friend class TypeChecker;
   common::Arena arena_;
   TypeContext types_;
+  // The type of an undefined name, which matches every type, so that it
+  // draws no more errors. Signatures and clause types may contain it.
+  Symbol error_{SymbolKind::Type, "", "<error>", 0, std::monostate{}, {},
+      false};
   llvm::DenseMap<const Symbol *, std::optional<Signature>> signatures_;
   std::vector<ClauseTypes> clauses_;
 };

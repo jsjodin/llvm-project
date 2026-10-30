@@ -233,10 +233,7 @@ private:
   const parser::TokenSequence *tokensNow_{&tokens_};
   parser::Messages *messages_; // a scratch list while inferring
   const TypeCheckOptions &options_;
-  // The type of an undefined name, which matches every type, so that it
-  // draws no more errors.
-  Symbol error_{SymbolKind::Type, "", "<error>", 0, std::monostate{}, {},
-      false};
+  Symbol &error_{result_.error_};
   llvm::DenseMap<const Symbol *, const Type *> equivalences_;
   llvm::DenseSet<const Symbol *> expanding_;
 
@@ -411,12 +408,8 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
       if (type->kind == TypeKind::HigherOrder && type->predOrFunc == (*decl)->kind) {
         arguments.append(type->arguments.begin(), type->arguments.end());
         result = type->result;
-      } else if (!IsError(type)) {
-        messages_->Say(Source((*decl)->tokens),
-            "the type of %s is not a %s type"_err_en_US,
-            (*decl)->name->name.str(),
-            (*decl)->kind == parser::PredOrFunc::Function ? "func" : "pred");
       }
+      // Otherwise name resolution reported it.
     }
     if ((*decl)->result) {
       result = Convert((*decl)->result->type, names);
@@ -1427,6 +1420,23 @@ void TypeChecker::Infer(const Undeclared &undeclared) {
 }
 
 void TypeChecker::Run(const SemanticForm &form) {
+  // The module's own declarations, whose errors inference would otherwise
+  // report to its scratch list, when it is first to use them.
+  for (const Symbol *symbol : resolution_.module().symbols()) {
+    if (std::holds_alternative<const parser::EquivalenceTypeDefn *>(
+            symbol->declaration)) {
+      llvm::SmallVector<const Type *, 4> parameters;
+      for (unsigned i{0}; i < symbol->arity; ++i) {
+        parameters.push_back(types_.Variable(i));
+      }
+      Expand(*symbol, parameters, symbol->source);
+    } else if (!std::holds_alternative<std::monostate>(symbol->declaration) &&
+        symbol->kind != SymbolKind::Type && symbol->kind != SymbolKind::Inst &&
+        symbol->kind != SymbolKind::Mode &&
+        symbol->kind != SymbolKind::Typeclass) {
+      SignatureOf(*symbol);
+    }
+  }
   // The clauses of each predicate or function without a declaration.
   Undeclared undeclared;
   for (const ClauseForm *clause : form.clauses) {
