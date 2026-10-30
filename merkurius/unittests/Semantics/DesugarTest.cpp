@@ -53,7 +53,7 @@ void Numbers(const Goal &goal, std::set<unsigned> &numbers) {
       goal);
 }
 
-DesugarResult DesugarText(llvm::StringRef text) {
+DesugarResult DesugarText(llvm::StringRef text, bool nonlocals = false) {
   parser::AllSources all;
   parser::SourceFile *file{
       all.AddBuffer("test.m", llvm::MemoryBuffer::getMemBufferCopy(text))};
@@ -66,7 +66,7 @@ DesugarResult DesugarText(llvm::StringRef text) {
   const SemanticForm &form{Desugar(tree, tokens, semanticArena, messages)};
   DesugarResult result;
   llvm::raw_string_ostream os{result.form};
-  DumpSemanticForm(os, form);
+  DumpSemanticForm(os, form, nonlocals);
   for (const parser::Message &message : messages.messages()) {
     result.messages.push_back(message.ToString());
   }
@@ -77,8 +77,8 @@ DesugarResult DesugarText(llvm::StringRef text) {
   return result;
 }
 
-std::string Form(llvm::StringRef text) {
-  DesugarResult result{DesugarText(text)};
+std::string Form(llvm::StringRef text, bool nonlocals = false) {
+  DesugarResult result{DesugarText(text, nonlocals)};
   EXPECT_EQ(result.messages, std::vector<std::string>{}) << text.str();
   return result.form;
 }
@@ -437,13 +437,17 @@ TEST(DesugarTest, FieldAccess) {
 
 TEST(DesugarTest, Lambdas) {
   // A lambda is the functor of a unification, with its body under it. Its
-  // arguments' variables are its own: X$2 is not the clause's X.
-  EXPECT_EQ(Form("p(X, F) :- F = (pred(X::in, Y::out) is det :- Y = X), q(X).\n"),
+  // arguments' variables are its own: X$2 is not the clause's X, which mmc
+  // warns about.
+  DesugarResult shadowed{DesugarText(
+      "p(X, F) :- F = (pred(X::in, Y::out) is det :- Y = X), q(X).\n")};
+  EXPECT_EQ(shadowed.form,
       "Predicate p(X, F)\n"
       "| Conj #3\n"
       "| | Unify #1 F = pred(X$2::in, Y::out) is det\n"
       "| | | Unify #0 Y = X$2\n"
       "| | Call #2 q(X)\n");
+  EXPECT_EQ(shadowed.messages, V{"variable X has overlapping scopes"});
   // A function's result is its last argument; arguments that are not
   // variables are unified at the start of the body, as in a clause head.
   EXPECT_EQ(Form("p(F) :- F = (func([H | _]) = H).\n"),
@@ -567,6 +571,79 @@ TEST(DesugarTest, ScopeLists) {
   EXPECT_EQ(vars("[!.S]"), "PromiseSolutions [S!0]");
   EXPECT_EQ(vars("[!:S]"), "PromiseSolutions [S!1]");
   EXPECT_EQ(vars("[X, !S]"), "PromiseSolutions [X, S!0, S!1]");
+}
+
+TEST(DesugarTest, Quantification) {
+  // A variable local to each of two disjuncts is two variables; a
+  // variable shared with a conjunct is one. A variable is a nonlocal of a
+  // goal only if it also occurs outside it.
+  EXPECT_EQ(Form("p(N) :- ( X = N ; q(X) ).\n", true),
+      "Predicate p(N)\n"
+      "| Disj #2 ~ [N]\n"
+      "| | Unify #0 X = N ~ [N]\n"
+      "| | Call #1 q(X$2) ~ []\n");
+  EXPECT_EQ(Form("p(N) :- ( X = N ; q(X) ), r(X).\n", true),
+      "Predicate p(N)\n"
+      "| Conj #4 ~ [N]\n"
+      "| | Disj #2 ~ [N, X]\n"
+      "| | | Unify #0 X = N ~ [N, X]\n"
+      "| | | Call #1 q(X) ~ [X]\n"
+      "| | Call #3 r(X) ~ [X]\n");
+  // The condition and the then part share their variables, apart from the
+  // else part's.
+  EXPECT_EQ(Form("p :- ( if q(X) then r(X) else s(X) ).\n", true),
+      "Predicate p\n"
+      "| IfThenElse #3 ~ []\n"
+      "| | Call #0 q(X) ~ [X]\n"
+      "| | Call #1 r(X) ~ [X]\n"
+      "| | Call #2 s(X$1) ~ []\n");
+  // A negation's local variables are its own, but two negations are not
+  // parallel, so they share theirs.
+  EXPECT_EQ(Form("p :- \\+ (q(X), r(X)).\n", true),
+      "Predicate p\n"
+      "| Not #3 ~ []\n"
+      "| | Conj #2 ~ []\n"
+      "| | | Call #0 q(X) ~ [X]\n"
+      "| | | Call #1 r(X) ~ [X]\n");
+  EXPECT_EQ(Form("p :- \\+ q(X), \\+ r(X).\n", true),
+      "Predicate p\n"
+      "| Conj #4 ~ []\n"
+      "| | Not #1 ~ [X]\n"
+      "| | | Call #0 q(X) ~ [X]\n"
+      "| | Not #3 ~ [X]\n"
+      "| | | Call #2 r(X) ~ [X]\n");
+  // Two lambda expressions are parallel, but a variable outside both is
+  // captured by each, and is a nonlocal of the goals beside them.
+  EXPECT_EQ(Form("p(P, Q) :- P = (pred(A::out) is det :- A = X), "
+                 "Q = (pred(B::out) is det :- B = X).\n",
+                true),
+      "Predicate p(P, Q)\n"
+      "| Conj #4 ~ [P, Q]\n"
+      "| | Unify #1 P = pred(A::out) is det ~ [P]\n"
+      "| | | Unify #0 A = X ~ [A]\n"
+      "| | Unify #3 Q = pred(B::out) is det ~ [Q]\n"
+      "| | | Unify #2 B = X$5 ~ [B]\n");
+  EXPECT_EQ(Form("p(P, X) :- P = (pred(A::out) is det :- A = X).\n", true),
+      "Predicate p(P, X)\n"
+      "| Unify #1 P = pred(A::out) is det ~ [P, X]\n"
+      "| | Unify #0 A = X ~ [X, A]\n");
+  // some quantifies a new variable; at the top of a condition, over the
+  // condition and the then part.
+  DesugarResult some{DesugarText(
+      "p(X) :- X = 1, some [X] q(X), ( if some [Y] r(Y) then s(Y) else t(Y) ).\n",
+      true)};
+  EXPECT_EQ(some.form,
+      "Predicate p(X)\n"
+      "| Conj #8 ~ [X]\n"
+      "| | Unify #0 X = 1 ~ [X]\n"
+      "| | Scope #2 Some [X$2] ~ []\n"
+      "| | | Call #1 q(X$2) ~ []\n"
+      "| | IfThenElse #7 ~ []\n"
+      "| | | Scope #4 Some [Y] ~ [Y]\n"
+      "| | | | Call #3 r(Y) ~ [Y]\n"
+      "| | | Call #5 s(Y) ~ [Y]\n"
+      "| | | Call #6 t(Y$3) ~ []\n");
+  EXPECT_EQ(some.messages, V{"variable X has overlapping scopes"});
 }
 
 TEST(DesugarTest, NotYetImplemented) {

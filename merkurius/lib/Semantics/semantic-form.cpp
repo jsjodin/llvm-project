@@ -39,8 +39,8 @@ void PrintName(llvm::raw_ostream &os, const parser::SymName &name) {
 
 class Dumper {
 public:
-  Dumper(llvm::raw_ostream &os, const ClauseForm &clause)
-      : os_{os}, clause_{clause} {}
+  Dumper(llvm::raw_ostream &os, const ClauseForm &clause, bool nonlocals)
+      : os_{os}, clause_{clause}, nonlocals_{nonlocals} {}
 
   void Clause() {
     os_ << EnumToString(clause_.kind) << ' ';
@@ -87,6 +87,12 @@ private:
       break;
     case VarKind::State:
       os_ << info.name << '!' << info.version;
+      if (llvm::any_of(clause_.vars.take_front(id), [&](const VarInfo &v) {
+            return v.kind == VarKind::State && v.name == info.name &&
+                v.version == info.version;
+          })) {
+        os_ << '$' << id;
+      }
       break;
     }
   }
@@ -134,6 +140,16 @@ private:
       os_ << "| ";
     }
     os_ << kind << " #" << number;
+    number_ = number;
+  }
+  // Ends the line of the goal that Start began.
+  void EndLine() {
+    if (nonlocals_ && number_ < clause_.nonlocals.size()) {
+      os_ << " ~ [";
+      Vars(clause_.nonlocals[number_]);
+      os_ << ']';
+    }
+    os_ << '\n';
   }
   // A line that names a part of the goal above it.
   void Label(llvm::StringRef label, int depth, bool newline = true) {
@@ -150,28 +166,28 @@ private:
         common::visitors{
             [&](const Conj *conj) {
               Start(conj->parallel ? "ParConj" : "Conj", conj->number, depth);
-              os_ << '\n';
+              EndLine();
               for (const semantics::Goal &g : conj->goals) {
                 Goal(g, depth + 1);
               }
             },
             [&](const Disj *disj) {
               Start("Disj", disj->number, depth);
-              os_ << '\n';
+              EndLine();
               for (const semantics::Goal &g : disj->goals) {
                 Goal(g, depth + 1);
               }
             },
             [&](const IfThenElse *ite) {
               Start("IfThenElse", ite->number, depth);
-              os_ << '\n';
+              EndLine();
               Goal(ite->condition, depth + 1);
               Goal(ite->then, depth + 1);
               Goal(ite->otherwise, depth + 1);
             },
             [&](const Not *negation) {
               Start("Not", negation->number, depth);
-              os_ << '\n';
+              EndLine();
               Goal(negation->goal, depth + 1);
             },
             [&](const Unify *unify) {
@@ -184,7 +200,7 @@ private:
               } else {
                 Functor(unify->functor, unify->arguments);
               }
-              os_ << '\n';
+              EndLine();
               if (unify->functor.kind == FunctorKind::Lambda && !unify->isVar) {
                 Goal(unify->functor.lambda->body, depth + 1);
               }
@@ -194,7 +210,7 @@ private:
               os_ << ' ';
               PrintName(os_, *call->name);
               Arguments(call->arguments);
-              os_ << '\n';
+              EndLine();
             },
             [&](const HOCall *call) {
               Start("HOCall", call->number, depth);
@@ -207,7 +223,7 @@ private:
               }
               Var(call->closure);
               Arguments(arguments);
-              os_ << '\n';
+              EndLine();
             },
             [&](const Try *t) {
               Start("Try", t->number, depth);
@@ -216,7 +232,7 @@ private:
                 Vars(t->io);
                 os_ << ']';
               }
-              os_ << '\n';
+              EndLine();
               Goal(t->goal, depth + 1);
               Label("then", depth + 1);
               Goal(t->then, depth + 2);
@@ -255,7 +271,7 @@ private:
                 Vars(atomic->vars);
                 os_ << ']';
               }
-              os_ << '\n';
+              EndLine();
               bool first{true};
               for (const AtomicAlternative &alternative : atomic->alternatives) {
                 Label(first ? "inner" : "or_else inner", depth + 1, false);
@@ -276,7 +292,7 @@ private:
                 Vars(scope->vars);
                 os_ << ']';
               }
-              os_ << '\n';
+              EndLine();
               Goal(scope->goal, depth + 1);
             },
         },
@@ -373,13 +389,16 @@ private:
 
   llvm::raw_ostream &os_;
   const ClauseForm &clause_;
+  bool nonlocals_;
+  unsigned number_{0};
 };
 
 } // namespace
 
-void DumpSemanticForm(llvm::raw_ostream &os, const SemanticForm &form) {
+void DumpSemanticForm(
+    llvm::raw_ostream &os, const SemanticForm &form, bool nonlocals) {
   for (const ClauseForm *clause : form.clauses) {
-    Dumper{os, *clause}.Clause();
+    Dumper{os, *clause, nonlocals}.Clause();
   }
 }
 
