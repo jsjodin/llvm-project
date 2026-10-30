@@ -358,15 +358,33 @@ std::optional<const Literal *> LiteralRule::Convert(
     return state.arena.Make<Literal>(t.tokens(), kind, state.arena.Save(text));
 }
 
-// A function symbol of a bound inst: f(I1, I2), a, [] or [I | J], or a
-// literal, which mmc accepts in an inst definition.
+// [] as an inst: the inst named [], which mmc lets a program define, as
+// the library's exception module does.
+class NilInstRule {
+public:
+  using resultType = const NamedInst *;
+  bool Matches(const Term &t) const {
+    const auto *list{llvm::dyn_cast<ListTerm>(&t)};
+    return list && list->elements().empty() && !list->tail();
+  }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    return state.arena.Make<NamedInst>(t.tokens(),
+        MakeBracketSymName(t, "[]", state), llvm::ArrayRef<Inst>{});
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "[]"; }
+};
+
+// A function symbol of a bound inst: f(I1, I2), a, [], [I | J] or [I], or
+// a literal, which mmc accepts in an inst definition. As in mmc, the list
+// syntax is that of terms: [I] is [I | []], whose tail is the inst named
+// [], and a longer list's tail would be an inst named '[|]'.
 class BoundFunctorRule {
 public:
   using resultType = const BoundFunctor *;
   bool Matches(const Term &t) const {
     if (const auto *list{llvm::dyn_cast<ListTerm>(&t)}) {
-      return list->elements().empty() ||
-          (list->elements().size() == 1 && list->tail());
+      return list->elements().size() <= 1;
     }
     return literal.Matches(t) || functor_.Matches(t);
   }
@@ -379,12 +397,23 @@ public:
         return state.arena.Make<BoundFunctor>(
             t.tokens(), symName, llvm::ArrayRef<Inst>{});
       }
-      const Term *parts[]{list->elements()[0], list->tail()};
-      if (auto arguments{detail::ConvertElements(
-              inst, llvm::ArrayRef<const Term *>{parts}, state)}) {
-        return state.arena.Make<BoundFunctor>(t.tokens(), symName, *arguments);
+      std::optional<Inst> head{Apply(inst, *list->elements()[0], state)};
+      std::optional<Inst> tail;
+      if (list->tail()) {
+        tail = Apply(inst, *list->tail(), state);
+      } else {
+        TokenRange close{t.tokens().last, t.tokens().last};
+        tail = state.arena.Make<NamedInst>(close,
+            state.arena.Make<SymName>(
+                close, llvm::ArrayRef<llvm::StringRef>{}, "[]"),
+            llvm::ArrayRef<Inst>{});
       }
-      return std::nullopt;
+      if (!head || !tail) {
+        return std::nullopt;
+      }
+      Inst arguments[]{*head, *tail};
+      return state.arena.Make<BoundFunctor>(t.tokens(), symName,
+          state.arena.SaveArray(llvm::ArrayRef<Inst>{arguments}));
     }
     if (literal.Matches(t)) {
       if (auto value{literal.Convert(t, state)}) {
@@ -469,7 +498,7 @@ public:
 static constexpr auto instAlternatives{expect("an inst",
     anyOf<Inst>(construct<InstVar>(variable),
         construct<InstVar>(functor("=<", variable, inst)), BuiltinInstRule{},
-        BoundInstRule{}, HigherOrderInstRule{},
+        BoundInstRule{}, HigherOrderInstRule{}, NilInstRule{},
         construct<NamedInst>(appliedName(inst))))};
 
 std::optional<Inst> InstRule::Convert(
@@ -1021,7 +1050,15 @@ public:
       ok &= ConvertOptional(nameAndArity, forTerm->arguments()[1], forType,
           state);
     }
-    auto head{Apply(instHead, *headTerm, state)};
+    // mmc accepts [] as the name of an inst.
+    std::optional<std::tuple<const SymName *, llvm::ArrayRef<llvm::StringRef>>>
+        head;
+    if (NilInstRule{}.Matches(*headTerm)) {
+      head.emplace(MakeBracketSymName(*headTerm, "[]", state),
+          llvm::ArrayRef<llvm::StringRef>{});
+    } else {
+      head = Apply(instHead, *headTerm, state);
+    }
     ok &= head.has_value();
     std::optional<Inst> definition;
     if (FunctorName(body) == "==") {

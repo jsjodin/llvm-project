@@ -37,6 +37,8 @@ def fopenmp : Flag<["-"], "fopenmp">,
 def fopenmp_version_EQ : Joined<["-"], "fopenmp-version=">,
   MetaVarName<"<version>">,
   HelpText<"OpenMP version to accept, such as 52 for OpenMP 5.2">;
+def I : JoinedOrSeparate<["-"], "I">, MetaVarName<"<dir>">,
+  HelpText<"Add <dir> to the directories searched for imported modules">;
 
 } // let Visibility = [DefaultVis, FC1Option]
 
@@ -45,6 +47,13 @@ def fopenmp_version_EQ : Joined<["-"], "fopenmp-version=">,
 //===----------------------------------------------------------------------===//
 
 let Visibility = [FC1Option] in {
+
+def library_dir : Separate<["-"], "library-dir">, MetaVarName<"<dir>">,
+  HelpText<"The directory of the standard library's modules; by default "
+           "lib/merkurius beside the directory of merkc">;
+def fdebug_dump_imports : Flag<["-"], "fdebug-dump-imports">,
+  HelpText<"Load the modules the source file imports and list each one's "
+           "interface">;
 
 def fdebug_dump_provenance : Flag<["-"], "fdebug-dump-provenance">,
   HelpText<"Dump the provenance table of the source files">;

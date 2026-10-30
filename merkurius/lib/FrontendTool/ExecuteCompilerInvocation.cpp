@@ -40,6 +40,8 @@ std::unique_ptr<FrontendAction> createFrontendAction(CompilerInstance &ci) {
     return std::make_unique<DebugUnparseNoSemaAction>(true);
   case ActionKind::DebugDumpSemanticForm:
     return std::make_unique<DebugDumpSemanticFormAction>();
+  case ActionKind::DebugDumpImports:
+    return std::make_unique<DebugDumpImportsAction>();
   }
   llvm_unreachable("unknown ActionKind");
 }

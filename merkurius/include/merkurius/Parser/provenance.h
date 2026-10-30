@@ -85,6 +85,7 @@ public:
 
   void ClearSearchPath();
   void AppendSearchPathDirectory(std::string); // new last directory
+  const std::list<std::string> &searchPath() const { return searchPath_; }
 
   // Each of these reads a source file and gives it a range of provenances:
   // one per byte of content(), and one more for its end, so that the end of
