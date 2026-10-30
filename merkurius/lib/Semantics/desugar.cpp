@@ -78,13 +78,6 @@ private:
     ok_ = false;
   }
   // Reports the first form in the clause that is not desugared yet.
-  void Todo(TokenRange range, const char *what) {
-    if (ok_) {
-      messages_.Say(Source(range), "desugaring %s"_todo_en_US, what);
-      ok_ = false;
-    }
-  }
-
   // The state variables in scope, in the order they came into scope, each
   // with its current version, which it lacks until it is first given one.
   using StateMap = llvm::MapVector<llvm::StringRef, std::optional<VarId>>;
@@ -178,12 +171,14 @@ private:
   // Fills the head's slots for the state variables' last versions.
   void FillLasts(Goals &goals);
   const Lambda *DesugarLambda(const parser::Lambda &);
+  void DesugarTry(const parser::TryGoal &, Goals &out);
+  void DesugarAtomic(const parser::AtomicGoal &, Goals &out);
   Goal Conjoin(TokenRange, const Goals &);
   Goal Negate(TokenRange range, Goal goal) {
     return Make<Not>(range, Number(), goal);
   }
-  std::optional<llvm::ArrayRef<VarId>> ScopeVars(
-      llvm::ArrayRef<parser::DataTerm>);
+  Goal ListScope(TokenRange, ScopeKind, const parser::Goal &origin,
+      llvm::ArrayRef<parser::DataTerm> vars, const parser::Goal &goal);
   Goal MakeScope(TokenRange range, ScopeKind kind, const ParseGoal &origin,
       llvm::ArrayRef<VarId> vars, const parser::Goal &goal) {
     Goal inner{DesugarGoal(goal)};
@@ -604,19 +599,36 @@ Goal ClauseDesugarer::Conjoin(TokenRange range, const Goals &goals) {
   return Make<Conj>(range, Number(), false, Save(llvm::ArrayRef<Goal>{goals}));
 }
 
-std::optional<llvm::ArrayRef<VarId>> ClauseDesugarer::ScopeVars(
-    llvm::ArrayRef<parser::DataTerm> terms) {
-  llvm::SmallVector<VarId, 4> vars;
+// As in mmc, !.S in the list is the version before the goal, !:S the one
+// after it, and !S both.
+Goal ClauseDesugarer::ListScope(TokenRange range, ScopeKind kind,
+    const parser::Goal &origin, llvm::ArrayRef<parser::DataTerm> terms,
+    const parser::Goal &goal) {
+  llvm::SmallVector<std::optional<VarId>, 4> before;
   for (const parser::DataTerm &term : terms) {
-    if (const auto *var{std::get_if<const parser::Variable *>(&term)}) {
-      vars.push_back(ProgramVar(**var));
-    } else {
-      Todo(std::visit([](const auto *x) { return x->tokens; }, term),
-          "state variables in a scope's list of variables");
-      return std::nullopt;
+    const auto *state{std::get_if<const parser::StateVar *>(&term)};
+    before.push_back(state && (*state)->kind != parser::StateVarKind::Next
+            ? std::optional<VarId>{StateRef(**state, false)}
+            : std::nullopt);
+  }
+  Goal inner{DesugarGoal(goal)};
+  llvm::SmallVector<VarId, 4> vars;
+  for (std::size_t j{0}; j < terms.size(); ++j) {
+    const auto *state{std::get_if<const parser::StateVar *>(&terms[j])};
+    if (!state) {
+      vars.push_back(*SimpleVar(terms[j]));
+      continue;
+    }
+    if (before[j]) {
+      vars.push_back(*before[j]);
+    }
+    if ((*state)->kind != parser::StateVarKind::Current) {
+      std::optional<VarId> after{state_.lookup((*state)->name)};
+      vars.push_back(after ? *after : StateRef(**state, false));
     }
   }
-  return Save(llvm::ArrayRef<VarId>{vars});
+  return Make<Scope>(
+      range, Number(), kind, origin, Save(llvm::ArrayRef<VarId>{vars}), inner);
 }
 
 void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
@@ -783,20 +795,16 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
                 x->tokens, ScopeKind::PromisePurity, goal, {}, x->goal));
           },
           [&](const parser::PromiseSolutions *x) {
-            if (auto vars{ScopeVars(x->vars)}) {
-              out.push_back(MakeScope(
-                  x->tokens, ScopeKind::PromiseSolutions, goal, *vars, x->goal));
-            }
+            out.push_back(ListScope(
+                x->tokens, ScopeKind::PromiseSolutions, goal, x->vars, x->goal));
           },
           [&](const parser::RequireDeterminism *x) {
             out.push_back(MakeScope(
                 x->tokens, ScopeKind::RequireDeterminism, goal, {}, x->goal));
           },
           [&](const parser::RequireSwitch *x) {
-            if (auto vars{ScopeVars(llvm::ArrayRef<parser::DataTerm>{x->var})}) {
-              out.push_back(MakeScope(
-                  x->tokens, ScopeKind::RequireSwitch, goal, *vars, x->goal));
-            }
+            out.push_back(ListScope(x->tokens, ScopeKind::RequireSwitch, goal,
+                llvm::ArrayRef<parser::DataTerm>{x->var}, x->goal));
           },
           [&](const parser::DisableWarnings *x) {
             out.push_back(MakeScope(
@@ -826,9 +834,9 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
             out.push_back(Make<Scope>(x->tokens, Number(), ScopeKind::Trace,
                 goal, Save(llvm::ArrayRef<VarId>{vars}), inner));
           },
-          [&](const parser::TryGoal *x) { Todo(x->tokens, "try goals"); },
-          [&](const parser::AtomicGoal *x) {
-            Todo(x->tokens, "atomic goals");
+          [&](const parser::TryGoal *t) { DesugarTry(*t, out); },
+          [&](const parser::AtomicGoal *atomic) {
+            DesugarAtomic(*atomic, out);
           },
           [&](const parser::EventGoal *x) {
             llvm::ArrayRef<VarId> arguments{
@@ -1117,6 +1125,177 @@ void ClauseDesugarer::FillLasts(Goals &goals) {
   }
 }
 
+// The goal's updates of state variables are seen in the then part only, as
+// in an if-then-else: as in mmc, a catch branch sees the versions before
+// the goal. An io(!S) parameter's state is the exception: it is threaded
+// through the goal, which cannot undo it, so every branch continues from
+// the version after the goal.
+void ClauseDesugarer::DesugarTry(const parser::TryGoal &t, Goals &out) {
+  llvm::SmallVector<std::pair<llvm::StringRef, VarId>, 2> io;
+  for (const parser::DataTerm &term : t.io) {
+    const auto &var{*std::get<const parser::StateVar *>(term)};
+    io.emplace_back(var.name, StateRef(var, false));
+  }
+  StateMap start{state_};
+  Goal goal{DesugarGoal(t.goal)};
+  StateMap afterGoal{state_};
+  llvm::SmallVector<VarId, 4> ioVersions;
+  for (auto &[name, before] : io) {
+    // Not in scope, which StateRef reported, the state stays as it was.
+    std::optional<VarId> after{afterGoal.lookup(name)};
+    ioVersions.push_back(before);
+    ioVersions.push_back(after ? *after : before);
+  }
+  // The state that the else part and the catch branches start from.
+  StateMap failed{start};
+  for (auto &[name, before] : io) {
+    failed[name] = afterGoal.lookup(name);
+  }
+  llvm::SmallVector<Goals, 4> arms;
+  llvm::SmallVector<StateMap, 4> ends;
+  arms.emplace_back();
+  ends.push_back(Branch(t.then, afterGoal, arms.back()));
+  if (t.otherwise) {
+    arms.emplace_back();
+    ends.push_back(Branch(*t.otherwise, failed, arms.back()));
+  }
+  // A catch's pattern is unified with the exception, a variable of its own.
+  llvm::SmallVector<std::pair<VarId, Goal>, 4> patterns;
+  auto catchBranch{[&](const parser::CatchClause &c) {
+    state_ = failed;
+    Goals pattern;
+    std::optional<VarId> var{SimpleVar(c.pattern)};
+    VarId exception{var ? *var : Fresh(c.tokens)};
+    if (!var) {
+      UnifyWith(exception, c.pattern, c.tokens, pattern);
+      FinishAtomic();
+    }
+    patterns.emplace_back(exception, Conjoin(c.tokens, pattern));
+    arms.emplace_back();
+    DesugarInto(c.goal, arms.back());
+    ends.push_back(state_);
+  }};
+  for (const parser::CatchClause *c : t.catches) {
+    catchBranch(*c);
+  }
+  if (t.catchAny) {
+    catchBranch(*t.catchAny);
+  }
+  Merge(start, ends, arms, t.tokens);
+  std::size_t arm{0};
+  Goal then{Conjoin(GoalTokens(t.then), arms[arm++])};
+  std::optional<Goal> otherwise;
+  if (t.otherwise) {
+    otherwise = Conjoin(GoalTokens(*t.otherwise), arms[arm++]);
+  }
+  llvm::SmallVector<Catch, 4> catches;
+  std::optional<Catch> catchAny;
+  std::size_t j{0};
+  for (const parser::CatchClause *c : t.catches) {
+    catches.push_back(Catch{c->tokens, patterns[j].first, patterns[j].second,
+        Conjoin(GoalTokens(c->goal), arms[arm++])});
+    ++j;
+  }
+  if (t.catchAny) {
+    catchAny = Catch{t.catchAny->tokens, patterns[j].first,
+        patterns[j].second, Conjoin(GoalTokens(t.catchAny->goal), arms[arm])};
+  }
+  out.push_back(Make<Try>(t.tokens, Number(),
+      Save(llvm::ArrayRef<VarId>{ioVersions}), goal, then, otherwise,
+      Save(llvm::ArrayRef<Catch>{catches}), catchAny));
+}
+
+// The outer state is read before the goal and made new after it, and, as
+// in mmc, it is not visible inside. Each alternative has inner state of
+// its own: !S names a new state variable in it, and S0, S the same two
+// variables in each.
+void ClauseDesugarer::DesugarAtomic(
+    const parser::AtomicGoal &atomic, Goals &out) {
+  const parser::AtomicParam *outer{nullptr}, *inner{nullptr};
+  llvm::SmallVector<VarId, 4> vars;
+  for (const parser::AtomicParam *param : atomic.params) {
+    switch (param->kind) {
+    case parser::AtomicParamKind::Outer:
+      outer = param;
+      break;
+    case parser::AtomicParamKind::Inner:
+      inner = param;
+      break;
+    case parser::AtomicParamKind::Vars:
+      for (const parser::DataTerm &var : param->vars) {
+        vars.push_back(*SimpleVar(var));
+      }
+      break;
+    }
+  }
+  // The converter requires both outer and inner.
+  auto stateVar{[](const parser::AtomicParam &param) {
+    const auto *var{std::get_if<const parser::StateVar *>(&*param.initial)};
+    return var ? *var : nullptr;
+  }};
+  const parser::StateVar *outerState{stateVar(*outer)};
+  VarId outerInitial{outerState ? StateRef(*outerState, false)
+                                : *SimpleVar(*outer->initial)};
+  VarId outerFinal{outerState ? NewVersion(outerState->name, outer->tokens)
+                              : *SimpleVar(*outer->final)};
+  llvm::SmallVector<Shadowed, 1> hidden;
+  if (outerState) {
+    auto it{state_.find(outerState->name)};
+    if (it != state_.end()) {
+      hidden.push_back(Shadowed{outerState->name, true, it->second,
+          readOnly_.erase(outerState->name)});
+      state_.erase(it);
+    }
+  }
+  const parser::StateVar *innerState{stateVar(*inner)};
+  StateMap start{state_};
+  llvm::SmallVector<Goals, 2> arms(atomic.goals.size());
+  llvm::SmallVector<StateMap, 2> ends;
+  llvm::SmallVector<std::pair<VarId, VarId>, 2> innerVersions;
+  for (std::size_t j{0}; j < atomic.goals.size(); ++j) {
+    const parser::Goal &alternative{atomic.goals[j]};
+    state_ = start;
+    Goals &goals{arms[j]};
+    VarId innerInitial, innerFinal;
+    if (innerState) {
+      Shadowed shadowed{
+          Shadow(innerState->name, NewVersion(innerState->name, inner->tokens))};
+      innerInitial = *state_.lookup(innerState->name);
+      DesugarInto(alternative, goals);
+      std::optional<VarId> last{state_.lookup(innerState->name)};
+      if (last && *last != innerInitial) {
+        innerFinal = *last;
+      } else {
+        innerFinal = NewVersion(innerState->name, inner->tokens);
+        goals.push_back(Make<Unify>(inner->tokens, Number(), innerFinal, true,
+            innerInitial, Functor{}, llvm::ArrayRef<VarId>{}));
+      }
+      Restore(shadowed);
+    } else {
+      innerInitial = *SimpleVar(*inner->initial);
+      innerFinal = *SimpleVar(*inner->final);
+      DesugarInto(alternative, goals);
+    }
+    innerVersions.emplace_back(innerInitial, innerFinal);
+    ends.push_back(state_);
+  }
+  // The other state variables are threaded as through a disjunction.
+  Merge(start, ends, arms, atomic.tokens);
+  llvm::SmallVector<AtomicAlternative, 2> alternatives;
+  for (std::size_t j{0}; j < arms.size(); ++j) {
+    alternatives.push_back(AtomicAlternative{innerVersions[j].first,
+        innerVersions[j].second,
+        Conjoin(GoalTokens(atomic.goals[j]), arms[j])});
+  }
+  Restore(hidden);
+  if (outerState) {
+    state_[outerState->name] = outerFinal;
+  }
+  out.push_back(Make<Atomic>(atomic.tokens, Number(), outerInitial,
+      outerFinal, Save(llvm::ArrayRef<VarId>{vars}),
+      Save(llvm::ArrayRef<AtomicAlternative>{alternatives})));
+}
+
 // A lambda expression is desugared like a clause, with a head of its own.
 // The variables of its arguments are local to it, and so are the state
 // variables its head names; the other state variables in scope may only be
@@ -1254,6 +1433,13 @@ const SemanticForm &Desugar(const parser::ParseTree &tree,
       if (auto clause{desugarer.Desugar(**rule)}) {
         clauses.push_back(*clause);
       }
+    } else if (const auto *decl{std::get_if<const parser::MutableDecl *>(&item)}) {
+      // A mutable declaration defines access predicates (reference manual,
+      // "Module-local mutable variables"), which are still to come.
+      messages.Say(parser::CharBlock{tokens.tokens[(*decl)->tokens.first]
+                                         .spelling.begin(),
+                       tokens.tokens[(*decl)->tokens.last].spelling.end()},
+          "desugaring %s"_todo_en_US, "mutable declarations");
     }
   }
   return *arena.Make<SemanticForm>(
