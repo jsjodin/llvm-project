@@ -263,6 +263,18 @@ TEST(LexerTest, Directive) {
   EXPECT_TRUE(lexed.messages.empty());
 }
 
+TEST(LexerTest, DirectiveAfterFormFeed) {
+  // Any whitespace but a newline may come before a sentinel, as the
+  // canonical layout, which drops the form feed, would otherwise make a
+  // comment into a directive.
+  AllSources all;
+  Lexed lexed{Lex(all, "p :-\n\f %$omp parallel\n\f %$omp& do\n    q.\n",
+      /*openMP=*/true)};
+  EXPECT_EQ(lexed.Tokens(),
+      (Strings{"name p", "name :-", "directive %$omp parallel\n\f %$omp& do",
+          "name q", "end ."}));
+}
+
 TEST(LexerTest, NotDirectives) {
   AllSources all;
   // Not first on its line, not followed by whitespace, a stray continuation,
