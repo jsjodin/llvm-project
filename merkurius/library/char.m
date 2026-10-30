@@ -63,7 +63,9 @@
 :- pred base_int_to_digit(int::in, int::in, char::out) is semidet.
 :- func det_base_int_to_digit(int, int) = char.
 :- pred to_utf8(char::in, list(int)::out) is semidet.
+:- pred to_utf8_uint8(char::in, list(uint8)::out) is semidet.
 :- pred to_utf16(char::in, list(int)::out) is semidet.
+:- pred to_utf16_uint16(char::in, list(uint16)::out) is semidet.
 :- pred is_surrogate(char::in) is semidet.
 :- pred is_leading_surrogate(char::in) is semidet.
 :- pred is_trailing_surrogate(char::in) is semidet.

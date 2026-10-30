@@ -61,6 +61,13 @@ public:
   Imports LoadImports(const parser::ParseTree &tree,
       const parser::TokenSequence &tokens, llvm::StringRef directory);
 
+  // The interface of the module named `name` if it has been loaded; null
+  // if it has not, or could not be.
+  const ModuleInterface *Find(llvm::StringRef name) const {
+    auto it{loaded_.find(name)};
+    return it == loaded_.end() ? nullptr : it->second;
+  }
+
   // Every module loaded, in the order loading began.
   llvm::ArrayRef<const ModuleInterface *> modules() const { return order_; }
 

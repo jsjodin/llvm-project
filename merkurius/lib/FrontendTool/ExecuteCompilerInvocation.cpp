@@ -42,6 +42,8 @@ std::unique_ptr<FrontendAction> createFrontendAction(CompilerInstance &ci) {
     return std::make_unique<DebugDumpSemanticFormAction>();
   case ActionKind::DebugDumpImports:
     return std::make_unique<DebugDumpImportsAction>();
+  case ActionKind::DebugDumpResolvedNames:
+    return std::make_unique<DebugDumpResolvedNamesAction>();
   }
   llvm_unreachable("unknown ActionKind");
 }
