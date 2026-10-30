@@ -73,8 +73,8 @@ public:
   ModuleSymbols(const ModuleSymbols &) = delete;
 
   llvm::StringRef name() const { return name_; }
-  // A new symbol, or the one already declared with its kind, name and
-  // arity, which becomes exported if this declaration is; a type's
+  // A new symbol, or the one already declared with its kind, name, arity
+  // and owner, which becomes exported if this declaration is; a type's
   // definition replaces its abstract declaration as its declaration.
   const Symbol &Add(SymbolKind, llvm::StringRef name, unsigned arity,
       Declaration, parser::CharBlock source, bool exported,

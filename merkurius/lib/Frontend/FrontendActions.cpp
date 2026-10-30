@@ -359,8 +359,12 @@ bool DebugDumpTypesAction::executeAction() {
   CompilerInstance &ci{getInstance()};
   Resolved r;
   Resolve(ci, getSourceFile(), r);
+  semantics::TypeCheckOptions options;
+  options.inferTypes = ci.getFrontendOpts().inferTypes;
+  options.inferenceIterationLimit =
+      ci.getFrontendOpts().typeInferenceIterationLimit;
   std::unique_ptr<semantics::TypeChecking> checking{semantics::CheckTypes(
-      *r.form, *r.resolution, r.tokens, r.messages)};
+      *r.form, *r.resolution, r.tokens, r.messages, options)};
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   llvm::raw_ostream *os{ci.createDefaultOutputFile()};
   if (!os) {
@@ -376,9 +380,8 @@ bool DebugDumpTypesAction::executeAction() {
     if (const semantics::Signature *sig{clause.definition
                 ? checking->SignatureOf(*clause.definition)
                 : nullptr}) {
-      *os << ": " << semantics::SignatureToString(*clause.definition, *sig);
-    } else {
-      *os << " (undeclared)";
+      *os << (clause.inferred ? ": inferred " : ": ")
+          << semantics::SignatureToString(*clause.definition, *sig);
     }
     *os << '\n';
     for (semantics::VarId var{0}; var < form.vars.size(); ++var) {

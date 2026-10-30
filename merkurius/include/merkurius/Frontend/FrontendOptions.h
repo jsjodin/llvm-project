@@ -69,6 +69,8 @@ struct FrontendOptions {
   std::vector<std::string> searchDirectories; // -I
   // -library-dir, or lib/merkurius beside the executable's directory.
   std::string libraryDirectory;
+  bool inferTypes{true}; // -fno-infer-types turns it off
+  unsigned typeInferenceIterationLimit{60}; // -ftype-inference-iteration-limit=
 };
 
 struct LangOptions {

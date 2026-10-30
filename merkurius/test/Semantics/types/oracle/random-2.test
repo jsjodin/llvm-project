@@ -1,0 +1,11 @@
+# Random modules, whose predicates and functions have random types and
+# clauses that fit them, some declared and some inferred, a few with a
+# mutation that makes them ill-typed: merkc's type checking and inference
+# agree with mmc's (see utils/type-oracle/compare-types.py). The seed is
+# fixed, so the modules are too; to search further, run
+# generate-random-programs.py with other seeds.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../../utils/type-oracle/generate-random-programs.py --seed 2 --count 60 %t
+# RUN: %compare-types --allow-errors %t/*.m

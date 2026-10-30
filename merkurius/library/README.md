@@ -16,7 +16,7 @@ so the declarations are kept as the manual gives them.
 What the stubs leave out:
 
 - Declarations that need modules not stubbed yet, such as `array`,
-  `pretty_printer`, `enum`, `stream` and the sized integer types.
+  `pretty_printer`, `enum` and `stream`.
 - In `list`, `io` and `string`, all but the commonly used predicates and
   functions.
 - The `stm_builtin` module, which mmc provides for atomic goals and which
