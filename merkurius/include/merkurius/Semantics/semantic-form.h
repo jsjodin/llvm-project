@@ -142,11 +142,14 @@ struct HOCall {
 ENUM_CLASS(ScopeKind, Some, PromisePurity, PromiseSolutions,
     RequireDeterminism, RequireSwitch, DisableWarnings, Trace, Purity, Omp)
 
+// The goal or DCG goal that a node came from.
+using ParseGoal = std::variant<parser::Goal, parser::DcgGoal>;
+
 struct Scope {
   TokenRange tokens;
   unsigned number;
   ScopeKind kind;
-  parser::Goal origin;
+  ParseGoal origin;
   llvm::ArrayRef<VarId> vars;
   Goal goal;
 };
@@ -160,7 +163,8 @@ struct TypeQualification {
 };
 
 // A clause, as Head :- Body with distinct variables as the head's
-// arguments; a function's result is the last of them.
+// arguments; a function's result is the last of them, and a DCG rule's two
+// implicit arguments are the last two.
 struct ClauseForm {
   TokenRange tokens;
   parser::PredOrFunc kind;

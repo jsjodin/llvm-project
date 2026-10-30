@@ -340,10 +340,70 @@ TEST(DesugarTest, StateVariableErrors) {
       V{"reference to uninitialized state variable !.S"});
 }
 
+TEST(DesugarTest, DcgRules) {
+  // The manual's DCG-transform ("DCG-goals"): the implicit arguments are
+  // the versions of a hidden state variable, printed as dcg!N.
+  EXPECT_EQ(Form("digits([D | Ds]) --> [D], { is_digit(D) }, digits(Ds).\n"),
+      "Predicate digits($0, dcg!0, dcg!2)\n"
+      "| Conj #4\n"
+      "| | Unify #0 $0 = [D | Ds]\n"
+      "| | Unify #1 dcg!0 = [D | dcg!1]\n"
+      "| | Call #2 is_digit(D)\n"
+      "| | Call #3 digits(Ds, dcg!1, dcg!2)\n");
+  // [] is V_out = V_in.
+  EXPECT_EQ(Form("p --> [].\n"),
+      "Predicate p(dcg!0, dcg!1)\n| Unify #0 dcg!1 = dcg!0\n");
+  // Disjuncts end at one version; a negation leaves V_in unchanged.
+  EXPECT_EQ(Form("p --> ( [a] ; [] ), not [b], q.\n"),
+      "Predicate p(dcg!0, dcg!4)\n"
+      "| Conj #11\n"
+      "| | Disj #5\n"
+      "| | | Conj #4\n"
+      "| | | | Unify #1 dcg!0 = [$2 | dcg!1]\n"
+      "| | | | Unify #0 $2 = a\n"
+      "| | | | Unify #2 dcg!2 = dcg!1\n"
+      "| | | Unify #3 dcg!2 = dcg!0\n"
+      "| | Not #9\n"
+      "| | | Conj #8\n"
+      "| | | | Unify #7 dcg!2 = [$5 | dcg!3]\n"
+      "| | | | Unify #6 $5 = b\n"
+      "| | Call #10 q(dcg!2, dcg!4)\n");
+  // The condition's input match is seen in the then part only.
+  EXPECT_EQ(Form("p(X) --> ( if [X] then [] else { X = 0 } ).\n"),
+      "Predicate p(X, dcg!0, dcg!2)\n"
+      "| IfThenElse #5\n"
+      "| | Unify #0 dcg!0 = [X | dcg!1]\n"
+      "| | Unify #2 dcg!2 = dcg!1\n"
+      "| | Conj #4\n"
+      "| | | Unify #1 X = 0\n"
+      "| | | Unify #3 dcg!2 = dcg!0\n");
+  // =(T) is T = V_in, and :=(T) is V_out = T.
+  EXPECT_EQ(Form("p --> =(S), :=(S).\n"),
+      "Predicate p(dcg!0, dcg!1)\n"
+      "| Conj #2\n"
+      "| | Unify #0 dcg!0 = S\n"
+      "| | Unify #1 dcg!1 = S\n");
+  // A variable as a DCG goal is call(Var); state variables are threaded
+  // too.
+  EXPECT_EQ(Form("p(P, !A) --> P, call(P, !A), P(1).\n"),
+      "Predicate p(P, A!0, A!1, dcg!0, dcg!3)\n"
+      "| Conj #4\n"
+      "| | HOCall #0 P(dcg!0, dcg!1)\n"
+      "| | HOCall #1 P(A!0, A!1, dcg!1, dcg!2)\n"
+      "| | Unify #2 $6 = 1\n"
+      "| | HOCall #3 P($6, dcg!2, dcg!3)\n");
+  EXPECT_EQ(Form("p --> some [X] q(X).\n"),
+      "Predicate p(dcg!0, dcg!1)\n"
+      "| Scope #1 Some [X]\n"
+      "| | Call #0 q(X, dcg!0, dcg!1)\n");
+}
+
 TEST(DesugarTest, NotYetImplemented) {
   auto messages{[](llvm::StringRef text) { return DesugarText(text).messages; }};
-  EXPECT_EQ(messages("p --> [a].\n"),
-      V{"desugaring DCG rules"});
+  EXPECT_EQ(messages("p --> ^ f := 1.\n"),
+      V{"desugaring field update"});
+  EXPECT_EQ(messages("p --> X =^ f, { q(X) }.\n"),
+      V{"desugaring field selection"});
   EXPECT_EQ(messages("p :- X = (func(A) = A).\n"),
       V{"desugaring lambda expressions"});
   EXPECT_EQ(messages("p :- X = Y ^ f.\n"),
@@ -361,7 +421,7 @@ TEST(DesugarTest, NotYetImplemented) {
   EXPECT_EQ(messages("p(!S) :- promise_equivalent_solutions [!:S] q(!S).\n"),
       V{"desugaring state variables in a scope's list of variables"});
   // A clause with an error is left out; the others are kept.
-  DesugarResult result{DesugarText("p --> [].\nq.\n")};
+  DesugarResult result{DesugarText("p :- X = Y ^ f.\nq.\n")};
   EXPECT_EQ(result.form, "Predicate q\n| Conj #0\n");
 }
 

@@ -5,20 +5,17 @@
 
 :- module not_yet.
 :- interface.
-:- import_module char, io, list.
+:- import_module io, list.
 
 :- pred main(io::di, io::uo) is det.
-:- pred digits(list(char)::out, list(char)::in, list(char)::out) is multi.
+:- func add_one(list(int)) = list(int).
 
 :- implementation.
+:- import_module int.
 
 main(!IO) :-
     io.write_string("hello\n", !IO).
 
-digits([D | Ds]) -->
-    [D],
-    { char.is_digit(D) },
-    digits(Ds).
-% CHECK: not-yet.m:[[@LINE-4]]:1: error: not yet implemented: desugaring DCG rules
-digits([]) --> [].
-% CHECK: not-yet.m:[[@LINE-1]]:1: error: not yet implemented: desugaring DCG rules
+add_one(Xs) = Ys :-
+    Ys = list.map(func(X) = X + 1, Xs).
+% CHECK: not-yet.m:[[@LINE-1]]:19: error: not yet implemented: desugaring lambda expressions

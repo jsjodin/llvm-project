@@ -8,9 +8,34 @@
 
 #include "merkurius/Semantics/semantic-form.h"
 #include "merkurius/Common/idioms.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringExtras.h"
 
 namespace merkurius::semantics {
 namespace {
+
+// A name as Mercury writes it: quoted unless it is a plain identifier, so
+// the character '0' and the integer 0 differ.
+void PrintName(llvm::raw_ostream &os, const parser::SymName &name) {
+  for (llvm::StringRef qualifier : name.qualifiers) {
+    os << qualifier << '.';
+  }
+  llvm::StringRef text{name.name};
+  bool plain{!text.empty() && llvm::isLower(text.front()) &&
+      llvm::all_of(text, [](char c) { return llvm::isAlnum(c) || c == '_'; })};
+  if (plain) {
+    os << text;
+    return;
+  }
+  os << '\'';
+  for (char c : text) {
+    if (c == '\'' || c == '\\') {
+      os << '\\';
+    }
+    os << c;
+  }
+  os << '\'';
+}
 
 class Dumper {
 public:
@@ -19,7 +44,7 @@ public:
 
   void Clause() {
     os_ << EnumToString(clause_.kind) << ' ';
-    clause_.name->PrintInline(os_);
+    PrintName(os_, *clause_.name);
     llvm::ArrayRef<VarId> arguments{clause_.head};
     if (clause_.kind == parser::PredOrFunc::Function) {
       arguments = arguments.drop_back();
@@ -147,7 +172,7 @@ private:
             [&](const Call *call) {
               Start(call->event ? "Event" : "Call", call->number, depth);
               os_ << ' ';
-              call->name->PrintInline(os_);
+              PrintName(os_, *call->name);
               Arguments(call->arguments);
               os_ << '\n';
             },
@@ -182,7 +207,7 @@ private:
       llvm::ArrayRef<VarId> arguments) {
     switch (functor.kind) {
     case FunctorKind::Name:
-      functor.name->PrintInline(os_);
+      PrintName(os_, *functor.name);
       Arguments(arguments);
       break;
     case FunctorKind::Cons:

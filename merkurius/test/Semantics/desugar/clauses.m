@@ -31,13 +31,13 @@ len([_ | Xs], N) :-
 % CHECK-NEXT: | Conj #4
 % CHECK-NEXT: | | Unify #0 $0 = [_$1 | Xs]
 % CHECK-NEXT: | | Call #1 len(Xs, N0)
-% CHECK-NEXT: | | Unify #3 N = +(N0, $5)
+% CHECK-NEXT: | | Unify #3 N = '+'(N0, $5)
 % CHECK-NEXT: | | Unify #2 $5 = 1
 
 double(X) = X * 2.
 % CHECK-NEXT: Function double(X) = $1
 % CHECK-NEXT: | Conj #2
-% CHECK-NEXT: | | Unify #1 $1 = *(X, $2)
+% CHECK-NEXT: | | Unify #1 $1 = '*'(X, $2)
 % CHECK-NEXT: | | Unify #0 $2 = 2
 
 all_positive(Xs) :-
@@ -54,7 +54,7 @@ all_positive(Xs) :-
 % CHECK-NEXT: | | | | | | | Not #4
 % CHECK-NEXT: | | | | | | | | Conj #3
 % CHECK-NEXT: | | | | | | | | | Unify #1 $2 = 0
-% CHECK-NEXT: | | | | | | | | | Call #2 >(X, $2)
+% CHECK-NEXT: | | | | | | | | | Call #2 '>'(X, $2)
 % CHECK-NEXT: | | Not #11
 % CHECK-NEXT: | | | Unify #10 Xs = []
 
