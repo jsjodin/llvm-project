@@ -652,6 +652,37 @@ TEST(ConvertTest, Clauses) {
       std::string::npos);
 }
 
+TEST(ConvertTest, FieldAccessHeads) {
+  // T ^ f(A) = V defines f(A, T) = V, and (T ^ f(A) := V) = R defines
+  // 'f :='(A, T, V) = R (reference manual, "User-supplied field access
+  // function declarations").
+  EXPECT_EQ(Compact("M ^ elem(K) = V.\n"),
+      "FactOrRule\n| kind: Function\n| name: SymName elem\n| arguments:\n"
+      "| | ModedTerm\n| | | term: Variable K\n"
+      "| | ModedTerm\n| | | term: Variable M\n"
+      "| result: ModedTerm\n| | term: Variable V\n");
+  EXPECT_EQ(Compact("(M ^ m.elem(K) := V) = R.\n"),
+      "FactOrRule\n| kind: Function\n| name: SymName m.elem :=\n"
+      "| arguments:\n"
+      "| | ModedTerm\n| | | term: Variable K\n"
+      "| | ModedTerm\n| | | term: Variable M\n"
+      "| | ModedTerm\n| | | term: Variable V\n"
+      "| result: ModedTerm\n| | term: Variable R\n");
+  auto name{[](llvm::StringRef text) {
+    std::string items{Items(text)};
+    std::size_t at{items.find("| name: ")};
+    return items.substr(at, items.find('\n', at) - at);
+  }};
+  EXPECT_EQ(name(":- func t ^ f = int.\n"), "| name: SymName f");
+  EXPECT_EQ(name(":- func (t ^ f := int) = t.\n"), "| name: SymName f :=");
+  EXPECT_EQ(name(":- mode in ^ f(in) = out is semidet.\n"),
+      "| name: SymName f");
+  // As in mmc, a field must be a name or a compound term, so this is '^'/2;
+  // a predicate's head is never field access.
+  EXPECT_EQ(name("X ^ Y = Z.\n"), "| name: SymName ^");
+  EXPECT_EQ(name("X ^ y.\n"), "| name: SymName ^");
+}
+
 TEST(ConvertTest, Goals) {
   EXPECT_EQ(GoalKind("true"), "BuiltinGoal");
   EXPECT_EQ(GoalKind("fail"), "BuiltinGoal");

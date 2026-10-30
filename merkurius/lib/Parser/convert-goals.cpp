@@ -1326,7 +1326,8 @@ std::optional<Clause> ClauseRule::Convert(
   } else if (const auto *tuple{llvm::dyn_cast<TupleTerm>(&h)}) {
     withArguments(MakeBracketSymName(h, "{}", state), tuple->elements());
   } else if (llvm::isa<NameTerm>(h) || llvm::isa<CompoundTerm>(h)) {
-    converted = appliedName(modedTerm).Convert(h, state);
+    converted = result ? functionHead(modedTerm).Convert(h, state)
+                       : appliedName(modedTerm).Convert(h, state);
   } else {
     SayExpected(state, h, "a clause head");
     return std::nullopt;
