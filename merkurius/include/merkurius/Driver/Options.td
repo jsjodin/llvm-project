@@ -51,6 +51,12 @@ let Visibility = [FC1Option] in {
 def library_dir : Separate<["-"], "library-dir">, MetaVarName<"<dir>">,
   HelpText<"The directory of the standard library's modules; by default "
            "lib/merkurius beside the directory of merkc">;
+def fno_infer_types : Flag<["-"], "fno-infer-types">,
+  HelpText<"Report each predicate or function without a type declaration, "
+           "as mmc does without --infer-types; its type is still inferred">;
+def ftype_inference_iteration_limit_EQ :
+  Joined<["-"], "ftype-inference-iteration-limit=">, MetaVarName<"<n>">,
+  HelpText<"Perform at most <n> passes of type inference (default: 60)">;
 def fdebug_dump_types : Flag<["-"], "fdebug-dump-types">,
   HelpText<"Type check the source file and list each clause's variable "
            "types and the declaration chosen for each name">;

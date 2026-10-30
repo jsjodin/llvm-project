@@ -24,6 +24,8 @@
 
 #include "merkurius/Semantics/check-types.h"
 #include "merkurius/Common/idioms.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
@@ -110,15 +112,18 @@ struct Assignment {
 };
 
 constexpr std::size_t maxAssignments{1000};
+// The largest inferred argument type, as a tree.
+constexpr std::size_t maxInferredSize{1000};
 
 } // namespace
 
 class TypeChecker {
 public:
   TypeChecker(TypeChecking &result, const NameResolution &resolution,
-      const parser::TokenSequence &tokens, parser::Messages &messages)
+      const parser::TokenSequence &tokens, parser::Messages &messages,
+      const TypeCheckOptions &options)
       : result_{result}, types_{result.types_}, resolution_{resolution},
-        tokens_{tokens}, messages_{messages} {}
+        tokens_{tokens}, messages_{&messages}, options_{options} {}
 
   void Run(const SemanticForm &);
 
@@ -135,15 +140,38 @@ private:
     return type->kind == TypeKind::Named && type->constructor == &error_;
   }
 
-  // Clauses.
-  void CheckClause(const ClauseForm &);
+  // Clauses. A clause is checked against its predicate's or function's
+  // signature, declared or inferred, unless it is being inferred, when its
+  // head's types are what it gives them.
+  const Symbol *Definition(const ClauseForm &) const;
+  ClauseTypes CheckClause(const ClauseForm &, bool inferring);
   void CheckGoal(const Goal &);
   void CheckUnify(const Unify &);
   void CheckFunctor(const Unify &, const parser::SymName &);
   void CheckCall(const Call &);
   void CheckHOCall(const HOCall &);
-  void Finish(const ClauseForm &, const Symbol *definition,
+  ClauseTypes Finish(const ClauseForm &, const Symbol *definition,
       const Signature *signature);
+
+  // Type inference for predicates and functions without declarations.
+  using Undeclared =
+      llvm::MapVector<const Symbol *, std::vector<const ClauseForm *>>;
+  void Infer(const Undeclared &);
+  // The signature that one pass of inference gives `symbol`'s clauses.
+  // A pass's signature for a predicate or function, and whether its
+  // clauses fit more than one, none of them more general than the others.
+  struct Inferred {
+    Signature signature;
+    bool ambiguous;
+  };
+  Inferred InferPass(const Symbol &, llvm::ArrayRef<const ClauseForm *>);
+  const Type *Generalization(const Type *, const Type *,
+      std::map<std::pair<const Type *, const Type *>, unsigned> &);
+  Signature General(const Symbol &, unsigned arity);
+  Signature Generalize(
+      const Symbol &, const Assignment &, llvm::ArrayRef<const Type *>);
+  void ForEachReference(
+      const Goal &, llvm::function_ref<void(const Symbol &)>) const;
 
   // Extends every assignment by each of `options`, as a goal does: each
   // option changes an assignment's copy, and returns whether it is valid.
@@ -162,6 +190,8 @@ private:
   const Type *Walk(const Assignment &, const Type *) const;
   const Type *Resolve(const Assignment &, const Type *);
   bool UnifyTypes(Assignment &, const Type *, const Type *);
+  bool UnifyParts(Assignment &, const Type *, const Type *);
+  llvm::DenseSet<std::pair<const Type *, const Type *>> *unified_{nullptr};
   bool Occurs(const Assignment &, unsigned var, const Type *) const;
   llvm::SmallVector<const Type *, 4> Instantiate(Assignment &, const Signature &);
   // Applies a signature of `symbol` to the arguments of a functor or call
@@ -201,7 +231,8 @@ private:
   const NameResolution &resolution_;
   const parser::TokenSequence &tokens_;
   const parser::TokenSequence *tokensNow_{&tokens_};
-  parser::Messages &messages_;
+  parser::Messages *messages_; // a scratch list while inferring
+  const TypeCheckOptions &options_;
   // The type of an undefined name, which matches every type, so that it
   // draws no more errors.
   Symbol error_{SymbolKind::Type, "", "<error>", 0, std::monostate{}, {},
@@ -216,6 +247,10 @@ private:
   std::vector<Assignment> assignments_;
   std::vector<const parser::SymName *> names_; // by goal number
   bool tooMany_{false};
+  // The clause has a type error, or a name that is undefined; an ambiguity
+  // or unresolved polymorphism may then be only its consequence, and is
+  // not reported.
+  bool failed_{false};
 };
 
 //===----------------------------------------------------------------------===//
@@ -249,7 +284,7 @@ const Type *TypeChecker::Convert(
             if (std::optional<unsigned> number{names.Get(var->name)}) {
               return types_.Variable(*number);
             }
-            messages_.Say(Source(var->tokens),
+            messages_->Say(Source(var->tokens),
                 "type variable %s is not a parameter of the type"_err_en_US,
                 var->name.str());
             return types_.Named(error_, {});
@@ -278,7 +313,7 @@ const Type *TypeChecker::Convert(
                   found,
                   [&](const Type *t) { list += "`" + TypeToString(*t) + "'"; },
                   [&] { list += ", "; });
-              messages_.Say(Source(named->name->tokens),
+              messages_->Say(Source(named->name->tokens),
                   "the type name %s is ambiguous: it may be %s"_err_en_US,
                   named->name->name.str(), list);
             }
@@ -337,7 +372,7 @@ const Type *TypeChecker::Expand(const Symbol &symbol,
     it->second = body;
   } else if (!it->second) {
     // Expanding it reached it again.
-    messages_.Say(where, "the equivalence type %s/%u is circular"_err_en_US,
+    messages_->Say(where, "the equivalence type %s/%u is circular"_err_en_US,
         symbol.name.str(), symbol.arity);
     return types_.Named(error_, {});
   }
@@ -377,7 +412,7 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
         arguments.append(type->arguments.begin(), type->arguments.end());
         result = type->result;
       } else if (!IsError(type)) {
-        messages_.Say(Source((*decl)->tokens),
+        messages_->Say(Source((*decl)->tokens),
             "the type of %s is not a %s type"_err_en_US,
             (*decl)->name->name.str(),
             (*decl)->kind == parser::PredOrFunc::Function ? "func" : "pred");
@@ -450,28 +485,58 @@ const Type *TypeChecker::Walk(const Assignment &a, const Type *type) const {
 
 // The type with its bound variables replaced, throughout.
 const Type *TypeChecker::Resolve(const Assignment &a, const Type *type) {
-  return types_.Substitute(type, [&](unsigned var) {
-    const Type *variable{types_.Variable(var)};
-    const Type *bound{Walk(a, variable)};
-    return bound == variable ? variable : Resolve(a, bound);
-  });
+  // Each variable's binding is resolved once.
+  llvm::DenseMap<unsigned, const Type *> resolved;
+  std::function<const Type *(const Type *)> resolve{[&](const Type *t) {
+    return types_.Substitute(t, [&](unsigned var) {
+      if (auto it{resolved.find(var)}; it != resolved.end()) {
+        return it->second;
+      }
+      const Type *variable{types_.Variable(var)};
+      const Type *bound{Walk(a, variable)};
+      const Type *result{bound == variable ? variable : resolve(bound)};
+      resolved[var] = result;
+      return result;
+    });
+  }};
+  return resolve(type);
 }
 
 bool TypeChecker::Occurs(
     const Assignment &a, unsigned var, const Type *type) const {
-  type = Walk(a, type);
-  if (type->kind == TypeKind::Variable) {
-    return type->var == var;
-  }
-  return llvm::any_of(type->arguments,
-             [&](const Type *t) { return Occurs(a, var, t); }) ||
-      (type->result && Occurs(a, var, type->result));
+  // Each shared part once (see types.cpp).
+  llvm::DenseSet<const Type *> seen;
+  std::function<bool(const Type *)> occurs{[&](const Type *t) {
+    t = Walk(a, t);
+    if (t->kind == TypeKind::Variable) {
+      return t->var == var;
+    }
+    if (!seen.insert(t).second) {
+      return false;
+    }
+    return llvm::any_of(t->arguments, occurs) ||
+        (t->result && occurs(t->result));
+  }};
+  return occurs(type);
 }
 
 bool TypeChecker::UnifyTypes(Assignment &a, const Type *x, const Type *y) {
+  // A pair of shared parts is unified once (see types.cpp).
+  llvm::DenseSet<std::pair<const Type *, const Type *>> unified;
+  unified_ = &unified;
+  bool result{UnifyParts(a, x, y)};
+  unified_ = nullptr;
+  return result;
+}
+
+bool TypeChecker::UnifyParts(Assignment &a, const Type *x, const Type *y) {
   x = Walk(a, x);
   y = Walk(a, y);
   if (x == y || IsError(x) || IsError(y)) {
+    return true;
+  }
+  if (x->kind != TypeKind::Variable && y->kind != TypeKind::Variable &&
+      !unified_->insert({x, y}).second) {
     return true;
   }
   for (auto [var, other] : {std::pair{x, y}, std::pair{y, x}}) {
@@ -490,11 +555,11 @@ bool TypeChecker::UnifyTypes(Assignment &a, const Type *x, const Type *y) {
     return false; // two rigid variables among them
   }
   for (auto [left, right] : llvm::zip(x->arguments, y->arguments)) {
-    if (!UnifyTypes(a, left, right)) {
+    if (!UnifyParts(a, left, right)) {
       return false;
     }
   }
-  return !x->result || UnifyTypes(a, x->result, y->result);
+  return !x->result || UnifyParts(a, x->result, y->result);
 }
 
 llvm::SmallVector<const Type *, 4> TypeChecker::Instantiate(
@@ -552,12 +617,13 @@ void TypeChecker::Extend(llvm::ArrayRef<Option> options,
     }
   }
   if (extended.empty()) {
+    failed_ = true;
     report(assignments_.front());
     return;
   }
   if (extended.size() > maxAssignments) {
     if (!tooMany_) {
-      messages_.Say(Source(clause_->tokens),
+      messages_->Say(Source(clause_->tokens),
           "overloading is too ambiguous here: there are more than %zu possible type assignments; add type qualifications"_err_en_US,
           maxAssignments);
       tooMany_ = true;
@@ -606,7 +672,7 @@ void TypeChecker::CheckUnify(const Unify &unify) {
           return UnifyTypes(a, VarType(unify.left), VarType(unify.var));
         },
         [&](const Assignment &a) {
-          messages_.Say(Source(unify.tokens),
+          messages_->Say(Source(unify.tokens),
               "type error in unification of %s and %s: %s has type %s, but %s has type %s"_err_en_US,
               Describe(unify.left), Describe(unify.var), Describe(unify.left),
               TypeText(a, VarType(unify.left)), Describe(unify.var),
@@ -656,7 +722,7 @@ void TypeChecker::CheckUnify(const Unify &unify) {
     type = Primitive(functor.implementation->name == "line" ? "int" : "string");
     break;
   case FunctorKind::Coerce:
-    messages_.Say(Source(unify.tokens),
+    messages_->Say(Source(unify.tokens),
         "type checking %s"_todo_en_US, "coerce expressions");
     return;
   case FunctorKind::Lambda: {
@@ -678,12 +744,12 @@ void TypeChecker::CheckUnify(const Unify &unify) {
       [&](const Assignment &a) {
         std::string term{Source(unify.tokens).ToString()};
         if (IsNamed(unify.left)) {
-          messages_.Say(Source(unify.tokens),
+          messages_->Say(Source(unify.tokens),
               "type error in unification of %s and `%s': %s has type %s, but `%s' has type %s"_err_en_US,
               Describe(unify.left), term, Describe(unify.left),
               TypeText(a, VarType(unify.left)), term, TypeText(a, type));
         } else {
-          messages_.Say(Source(unify.tokens),
+          messages_->Say(Source(unify.tokens),
               "type error: `%s' has type %s, but must have type %s here"_err_en_US,
               term, TypeText(a, type), TypeText(a, VarType(unify.left)));
         }
@@ -711,6 +777,7 @@ void TypeChecker::CheckFunctor(const Unify &unify, const parser::SymName &name) 
     });
   }
   if (options.empty()) {
+    failed_ = true;
     return; // undefined, and reported
   }
   Extend(options, [&](const Assignment &a) {
@@ -723,11 +790,11 @@ void TypeChecker::CheckFunctor(const Unify &unify, const parser::SymName &name) 
     std::string symbol{name.name.str() + "/" +
         std::to_string(unify.arguments.size())};
     parser::Message &message{IsNamed(unify.left)
-            ? messages_.Say(Source(unify.tokens),
+            ? messages_->Say(Source(unify.tokens),
                   "type error in unification of %s and `%s': %s has type %s, which no declaration of %s fits"_err_en_US,
                   Describe(unify.left), term, Describe(unify.left),
                   TypeText(a, VarType(unify.left)), symbol)
-            : messages_.Say(Source(unify.tokens),
+            : messages_->Say(Source(unify.tokens),
                   "type error: `%s' must have type %s here, which no declaration of %s fits"_err_en_US,
                   term, TypeText(a, VarType(unify.left)), symbol)};
     if (!types.empty()) {
@@ -752,7 +819,8 @@ void TypeChecker::CheckCall(const Call &call) {
     });
   }
   if (options.empty()) {
-    return;
+    failed_ = true;
+    return; // undefined, and reported
   }
   Extend(options, [&](const Assignment &a) {
     names_[call.number] = nullptr;
@@ -760,7 +828,7 @@ void TypeChecker::CheckCall(const Call &call) {
     for (VarId argument : call.arguments) {
       types += (types.empty() ? "" : ", ") + TypeText(a, VarType(argument));
     }
-    parser::Message &message{messages_.Say(Source(call.tokens),
+    parser::Message &message{messages_->Say(Source(call.tokens),
         "type error in call to %s/%zu: its arguments have types %s"_err_en_US,
         call.name->name.str(), call.arguments.size(), types)};
     AttachCandidates(message, *call.name);
@@ -790,7 +858,7 @@ void TypeChecker::CheckHOCall(const HOCall &call) {
         return UnifyTypes(a, VarType(call.closure), expected(a));
       },
       [&](const Assignment &a) {
-        messages_.Say(Source(call.tokens),
+        messages_->Say(Source(call.tokens),
             "type error in higher-order call: %s has type %s, but the call needs %s"_err_en_US,
             Describe(call.closure), TypeText(a, VarType(call.closure)),
             TypeText(a, expected(a)));
@@ -823,7 +891,7 @@ void TypeChecker::CheckGoal(const Goal &goal) {
                 Constrain(
                     [&](Assignment &a) { return UnifyTypes(a, VarType(var), io); },
                     [&](const Assignment &a) {
-                      messages_.Say(Source(t->tokens),
+                      messages_->Say(Source(t->tokens),
                           "type error: %s has type %s, but io(...) needs io.state"_err_en_US,
                           Describe(var), TypeText(a, VarType(var)));
                     });
@@ -844,7 +912,7 @@ void TypeChecker::CheckGoal(const Goal &goal) {
                 Constrain(
                     [&](Assignment &a) { return UnifyTypes(a, VarType(var), univ); },
                     [&](const Assignment &a) {
-                      messages_.Say(Source(t->catchAny->tokens),
+                      messages_->Say(Source(t->catchAny->tokens),
                           "type error: %s has type %s, but catch_any needs univ.univ"_err_en_US,
                           Describe(var), TypeText(a, VarType(var)));
                     });
@@ -862,20 +930,26 @@ void TypeChecker::CheckGoal(const Goal &goal) {
       goal);
 }
 
-void TypeChecker::CheckClause(const ClauseForm &clause) {
-  clause_ = &clause;
-  tooMany_ = false;
-  // What the clause defines, and its declared types, if any.
-  const Symbol *definition{nullptr};
+const Symbol *TypeChecker::Definition(const ClauseForm &clause) const {
   SymbolKind kind{clause.kind == parser::PredOrFunc::Function
           ? SymbolKind::Function
           : SymbolKind::Predicate};
   for (const Symbol *candidate : clause.name->candidates) {
     if (candidate->kind == kind) {
-      definition = candidate;
+      return candidate;
     }
   }
-  const Signature *sig{definition ? SignatureOf(*definition) : nullptr};
+  return nullptr;
+}
+
+ClauseTypes TypeChecker::CheckClause(const ClauseForm &clause, bool inferring) {
+  clause_ = &clause;
+  tooMany_ = false;
+  failed_ = false;
+  // What the clause defines, and its types, if any.
+  const Symbol *definition{Definition(clause)};
+  const Signature *sig{
+      definition && !inferring ? SignatureOf(*definition) : nullptr};
   rigid_ = sig ? sig->typeVars : 0;
   rigidNames_ = sig ? sig->varNames : llvm::ArrayRef<llvm::StringRef>{};
   // The type qualifications' variables: the declaration's names are its
@@ -911,17 +985,17 @@ void TypeChecker::CheckClause(const ClauseForm &clause) {
     const Type *type{qualifications[j]};
     Constrain([&](Assignment &a) { return UnifyTypes(a, VarType(q.var), type); },
         [&](const Assignment &a) {
-          messages_.Say(Source(q.tokens),
+          messages_->Say(Source(q.tokens),
               "type error: %s has type %s, but it is qualified as %s"_err_en_US,
               Describe(q.var), TypeText(a, VarType(q.var)), TypeText(a, type));
         });
   }
   CheckGoal(clause.body);
-  Finish(clause, definition, sig);
+  return Finish(clause, definition, sig);
 }
 
-void TypeChecker::Finish(const ClauseForm &clause, const Symbol *definition,
-    const Signature *sig) {
+ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
+    const Symbol *definition, const Signature *sig) {
   // Assignments that chose different declarations for a name are an
   // ambiguity; those that chose the same have the same types, since each
   // goal's unifications give its most general unifier.
@@ -934,12 +1008,12 @@ void TypeChecker::Finish(const ClauseForm &clause, const Symbol *definition,
         choices.push_back(a.symbols[goal]);
       }
     }
-    if (choices.size() < 2 || !names_[goal]) {
+    if (choices.size() < 2 || !names_[goal] || failed_) {
       continue;
     }
     if (!ambiguity) {
       // mmc: "ambiguous overloading causes type ambiguity".
-      ambiguity = &messages_.Say(Source(clause.tokens),
+      ambiguity = &messages_->Say(Source(clause.tokens),
           "ambiguous overloading causes type ambiguity"_err_en_US);
     }
     std::string list;
@@ -957,8 +1031,10 @@ void TypeChecker::Finish(const ClauseForm &clause, const Symbol *definition,
     ambiguity->Attach(Source(names_[goal]->tokens), "%s may be %s"_because_en_US,
         Source(names_[goal]->tokens).ToString(), list);
   }
-  ClauseTypes types{&clause, definition, sig != nullptr, rigidNames_, {}, {},
-      {}};
+  bool inferred{sig && definition &&
+      std::holds_alternative<std::monostate>(definition->declaration)};
+  ClauseTypes types{&clause, definition, sig && !inferred, inferred,
+      rigidNames_, {}, {}, {}};
   std::vector<const Type *> vars;
   std::string unbound;
   for (VarId var{0}; var < clause.vars.size(); ++var) {
@@ -966,15 +1042,21 @@ void TypeChecker::Finish(const ClauseForm &clause, const Symbol *definition,
     vars.push_back(type);
     bool free{false};
     ForEachVariable(*type, [&](unsigned v) { free |= v >= rigid_; });
-    if (free && sig && clause.vars[var].kind == VarKind::Program &&
-        !ambiguity) {
-      unbound += "\n  " + clause.vars[var].name.str() + ": " +
-          TypeText(chosen, type);
+    // Every variable, as mmc lists them: a term's, such as that of [] in
+    // length([]), by the term.
+    const VarInfo &info{clause.vars[var]};
+    if (free && sig && !ambiguity && !failed_) {
+      std::string name{info.kind == VarKind::Program ? info.name.str()
+              : info.kind == VarKind::State          ? "!" + info.name.str()
+                                                     : Describe(var)};
+      if (name != "`'") {
+        unbound += "\n  " + name + ": " + TypeText(chosen, type);
+      }
     }
   }
   if (!unbound.empty()) {
     // mmc: "warning: unresolved polymorphism".
-    messages_.Say(Source(clause.tokens),
+    messages_->Say(Source(clause.tokens),
         "unresolved polymorphism: the type variables of these types are not determined, and will be bound to void:%s"_warn_en_US,
         unbound);
   }
@@ -983,20 +1065,399 @@ void TypeChecker::Finish(const ClauseForm &clause, const Symbol *definition,
       result_.arena_.SaveArray(llvm::ArrayRef<const Symbol *>{chosen.symbols});
   types.names =
       result_.arena_.SaveArray(llvm::ArrayRef<const parser::SymName *>{names_});
-  result_.clauses_.push_back(types);
+  return types;
+}
+
+//===----------------------------------------------------------------------===//
+// Type inference
+//===----------------------------------------------------------------------===//
+
+// Calls `f` on each predicate or function a goal may refer to.
+void TypeChecker::ForEachReference(
+    const Goal &goal, llvm::function_ref<void(const Symbol &)> f) const {
+  auto each{[&](llvm::ArrayRef<Goal> goals) {
+    for (const Goal &g : goals) {
+      ForEachReference(g, f);
+    }
+  }};
+  auto names{[&](const parser::SymName *name) {
+    if (name) {
+      for (const Symbol *symbol : name->candidates) {
+        f(*symbol);
+      }
+    }
+  }};
+  common::visit(
+      common::visitors{
+          [&](const Conj *conj) { each(conj->goals); },
+          [&](const Disj *disj) { each(disj->goals); },
+          [&](const IfThenElse *ite) {
+            ForEachReference(ite->condition, f);
+            ForEachReference(ite->then, f);
+            ForEachReference(ite->otherwise, f);
+          },
+          [&](const Not *negation) { ForEachReference(negation->goal, f); },
+          [&](const Unify *unify) {
+            if (!unify->isVar) {
+              names(resolution_.FunctorName(*unify));
+              if (unify->functor.lambda) {
+                ForEachReference(unify->functor.lambda->body, f);
+              }
+            }
+          },
+          [&](const Call *call) {
+            if (!call->event) {
+              names(call->name);
+            }
+          },
+          [&](const HOCall *) {},
+          [&](const Scope *scope) { ForEachReference(scope->goal, f); },
+          [&](const Try *t) {
+            ForEachReference(t->goal, f);
+            ForEachReference(t->then, f);
+            if (t->otherwise) {
+              ForEachReference(*t->otherwise, f);
+            }
+            for (const Catch &c : t->catches) {
+              ForEachReference(c.pattern, f);
+              ForEachReference(c.goal, f);
+            }
+            if (t->catchAny) {
+              ForEachReference(t->catchAny->goal, f);
+            }
+          },
+          [&](const Atomic *atomic) {
+            for (const AtomicAlternative &alternative : atomic->alternatives) {
+              ForEachReference(alternative.goal, f);
+            }
+          },
+      },
+      goal);
+}
+
+// The most general signature: a type variable for each argument.
+Signature TypeChecker::General(const Symbol &symbol, unsigned arity) {
+  llvm::SmallVector<const Type *, 4> arguments;
+  for (unsigned j{0}; j < arity; ++j) {
+    arguments.push_back(types_.Variable(j));
+  }
+  Assignment none;
+  none.bindings.resize(arity);
+  return Generalize(symbol, none, arguments);
+}
+
+// A signature of the types, whose variables are numbered from 0 in the
+// order they occur, and named T1, T2, ..., as mmc's inferred declarations
+// name them.
+Signature TypeChecker::Generalize(const Symbol &symbol, const Assignment &a,
+    llvm::ArrayRef<const Type *> types) {
+  llvm::DenseMap<unsigned, unsigned> numbers;
+  llvm::SmallVector<const Type *, 4> arguments;
+  for (const Type *type : types) {
+    arguments.push_back(types_.Substitute(Resolve(a, type), [&](unsigned var) {
+      auto [it, inserted]{numbers.try_emplace(var, numbers.size())};
+      return types_.Variable(it->second);
+    }));
+  }
+  std::vector<llvm::StringRef> names;
+  for (unsigned j{0}; j < numbers.size(); ++j) {
+    names.push_back(result_.arena_.Save("T" + std::to_string(j + 1)));
+  }
+  return Signature{symbol.kind == SymbolKind::Function
+          ? parser::PredOrFunc::Function
+          : parser::PredOrFunc::Predicate,
+      parser::Purity::Pure, static_cast<unsigned>(numbers.size()),
+      result_.arena_.SaveArray(llvm::ArrayRef<llvm::StringRef>{names}),
+      result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments})};
+}
+
+// The least general type of which both are instances: where they differ, a
+// variable for each pair of differing parts.
+const Type *TypeChecker::Generalization(const Type *x, const Type *y,
+    std::map<std::pair<const Type *, const Type *>, unsigned> &pairs) {
+  bool ground{true};
+  ForEachVariable(*x, [&](unsigned) { ground = false; });
+  if (x == y && ground) {
+    return x;
+  }
+  if (x->kind == TypeKind::Variable || x->kind != y->kind ||
+      x->constructor != y->constructor || x->predOrFunc != y->predOrFunc ||
+      x->purity != y->purity || x->arguments.size() != y->arguments.size() ||
+      !x->result != !y->result) {
+    auto [it, inserted]{pairs.try_emplace({x, y}, pairs.size())};
+    return types_.Variable(it->second);
+  }
+  Type copy{*x};
+  llvm::SmallVector<const Type *, 4> arguments;
+  for (auto [a, b] : llvm::zip(x->arguments, y->arguments)) {
+    arguments.push_back(Generalization(a, b, pairs));
+  }
+  const Type *result{x->result ? Generalization(x->result, y->result, pairs)
+                               : nullptr};
+  switch (x->kind) {
+  case TypeKind::Named:
+    return types_.Named(*x->constructor, arguments);
+  case TypeKind::Tuple:
+    return types_.Tuple(arguments);
+  default:
+    return types_.HigherOrder(x->predOrFunc, x->purity, arguments, result);
+  }
+}
+
+TypeChecker::Inferred TypeChecker::InferPass(
+    const Symbol &symbol, llvm::ArrayRef<const ClauseForm *> clauses) {
+  // A clause's assignments may give its head more than one typing, by
+  // choosing different declarations for a name. Each combination of one
+  // typing of each clause, renamed apart and unified, is a candidate; a
+  // clause none of whose typings fits is left out, and its type error is
+  // reported when it is checked by the signature.
+  struct Candidate {
+    Assignment combined;
+    std::vector<const Type *> head;
+  };
+  constexpr std::size_t maxCandidates{64};
+  std::vector<Candidate> candidates;
+  for (const ClauseForm *clause : clauses) {
+    CheckClause(*clause, true);
+    // The clause's head typings, each with its variables numbered from 0
+    // in the order they occur, so that equal ones are the same.
+    std::vector<std::vector<const Type *>> typings;
+    unsigned count{0};
+    for (const Assignment &a : assignments_) {
+      llvm::DenseMap<unsigned, unsigned> numbers;
+      std::vector<const Type *> typing;
+      for (VarId var : clause->head) {
+        typing.push_back(types_.Substitute(
+            Resolve(a, VarType(var)), [&](unsigned v) {
+              auto [it, inserted]{numbers.try_emplace(v, numbers.size())};
+              return types_.Variable(it->second);
+            }));
+      }
+      count = std::max(count, static_cast<unsigned>(numbers.size()));
+      if (!llvm::is_contained(typings, typing)) {
+        typings.push_back(std::move(typing));
+      }
+    }
+    rigid_ = 0;
+    if (typings.empty()) {
+      continue;
+    }
+    if (candidates.empty()) {
+      for (std::vector<const Type *> &typing : typings) {
+        Assignment combined;
+        combined.bindings.resize(count);
+        candidates.push_back({std::move(combined), std::move(typing)});
+      }
+      continue;
+    }
+    std::vector<Candidate> next;
+    for (const Candidate &candidate : candidates) {
+      for (const std::vector<const Type *> &typing : typings) {
+        if (next.size() == maxCandidates) {
+          break;
+        }
+        Candidate trial{candidate};
+        unsigned offset(trial.combined.bindings.size());
+        trial.combined.bindings.resize(offset + count);
+        bool fits{trial.head.size() == typing.size()};
+        for (std::size_t j{0}; fits && j < typing.size(); ++j) {
+          const Type *renamed{types_.Substitute(typing[j],
+              [&](unsigned v) { return types_.Variable(offset + v); })};
+          fits = UnifyTypes(trial.combined, trial.head[j], renamed);
+        }
+        if (fits) {
+          next.push_back(std::move(trial));
+        }
+      }
+    }
+    if (!next.empty()) {
+      candidates = std::move(next);
+    }
+  }
+  if (candidates.empty()) {
+    return {General(symbol, clauses.front()->head.size()), false};
+  }
+  // The candidates' signatures, without repeats. More than one is an
+  // ambiguity, even if one is an instance of another: the clauses then have
+  // more than one type assignment (reference manual, "Predicate and
+  // function type declarations"), as mmc reports too.
+  std::vector<Signature> most;
+  for (const Candidate &candidate : candidates) {
+    Signature signature{
+        Generalize(symbol, candidate.combined, candidate.head)};
+    if (!llvm::any_of(most, [&](const Signature &s) {
+          return s.arguments == signature.arguments;
+        })) {
+      most.push_back(signature);
+    }
+  }
+  if (most.size() == 1) {
+    return {most.front(), false};
+  }
+  // Ambiguous: the passes go on with a type of which each is an instance.
+  std::vector<const Type *> merged(
+      most.front().arguments.begin(), most.front().arguments.end());
+  for (std::size_t k{1}; k < most.size(); ++k) {
+    std::map<std::pair<const Type *, const Type *>, unsigned> pairs;
+    for (std::size_t j{0}; j < merged.size(); ++j) {
+      merged[j] = Generalization(merged[j], most[k].arguments[j], pairs);
+    }
+  }
+  unsigned vars{0};
+  for (const Type *type : merged) {
+    ForEachVariable(*type, [&](unsigned v) { vars = std::max(vars, v + 1); });
+  }
+  Assignment none;
+  none.bindings.resize(vars);
+  return {Generalize(symbol, none, merged), true};
+}
+
+void TypeChecker::Infer(const Undeclared &undeclared) {
+  // The strongly connected components of the undeclared predicates' and
+  // functions' call graph, callees first, by Tarjan's algorithm.
+  llvm::DenseMap<const Symbol *, unsigned> index, low;
+  llvm::DenseSet<const Symbol *> onStack;
+  std::vector<const Symbol *> stack;
+  std::vector<std::vector<const Symbol *>> components;
+  std::function<void(const Symbol &)> visit{[&](const Symbol &symbol) {
+    unsigned number(index.size());
+    index[&symbol] = low[&symbol] = number;
+    stack.push_back(&symbol);
+    onStack.insert(&symbol);
+    for (const ClauseForm *clause : undeclared.find(&symbol)->second) {
+      ForEachReference(clause->body, [&](const Symbol &callee) {
+        if (!undeclared.count(&callee)) {
+          return;
+        }
+        if (!index.count(&callee)) {
+          visit(callee);
+          low[&symbol] = std::min(low[&symbol], low[&callee]);
+        } else if (onStack.count(&callee)) {
+          low[&symbol] = std::min(low[&symbol], index[&callee]);
+        }
+      });
+    }
+    if (low[&symbol] == index[&symbol]) {
+      std::vector<const Symbol *> &component{components.emplace_back()};
+      const Symbol *member;
+      do {
+        member = stack.back();
+        stack.pop_back();
+        onStack.erase(member);
+        component.push_back(member);
+      } while (member != &symbol);
+    }
+  }};
+  for (const auto &[symbol, clauses] : undeclared) {
+    if (!index.count(symbol)) {
+      visit(*symbol);
+    }
+  }
+  // Each component's signatures start most general, and each pass checks
+  // its clauses by the signatures of the last, until none changes (mmc's
+  // --type-inference-iteration-limit bounds the passes too). The passes'
+  // messages are dropped: the clauses are checked again, by the final
+  // signatures, and report their errors then.
+  for (const std::vector<const Symbol *> &component : components) {
+    for (const Symbol *symbol : component) {
+      const ClauseForm &first{*undeclared.find(symbol)->second.front()};
+      unsigned arity(first.head.size());
+      result_.signatures_[symbol] = General(*symbol, arity);
+    }
+    parser::Messages *saved{messages_};
+    bool changed{true}, grows{false};
+    unsigned pass{0};
+    llvm::SmallVector<const Symbol *, 4> ambiguous;
+    for (; changed && !grows && pass < options_.inferenceIterationLimit;
+         ++pass) {
+      changed = false;
+      ambiguous.clear();
+      for (const Symbol *symbol : component) {
+        parser::Messages scratch;
+        messages_ = &scratch;
+        Inferred inferred{InferPass(*symbol, undeclared.find(symbol)->second)};
+        messages_ = saved;
+        const Signature &next{inferred.signature};
+        if (inferred.ambiguous) {
+          ambiguous.push_back(symbol);
+        }
+        const Signature &last{*result_.signatures_[symbol]};
+        if (next.typeVars != last.typeVars ||
+            next.arguments != last.arguments) {
+          result_.signatures_[symbol] = next;
+          changed = true;
+          // A type that keeps growing will not settle; this stops it before
+          // it is too large to check.
+          for (const Type *type : next.arguments) {
+            if (TreeSize(*type, maxInferredSize + 1) > maxInferredSize) {
+              grows = true;
+            }
+          }
+        }
+      }
+    }
+    if (changed) {
+      // mmc: "Type inference iteration limit exceeded". The component is
+      // then left without signatures, as if not inferred, so that its last
+      // guess draws no more errors.
+      const Symbol &symbol{*component.front()};
+      parser::CharBlock at{
+          Source(undeclared.find(&symbol)->second.front()->tokens)};
+      if (grows) {
+        messages_->Say(at,
+            "type inference did not reach a fixpoint for %s/%u: its type grows in every pass; declare its type"_err_en_US,
+            symbol.name.str(), symbol.arity);
+      } else {
+        messages_->Say(at,
+            "type inference did not reach a fixpoint for %s/%u in %u passes; declare its type"_err_en_US,
+            symbol.name.str(), symbol.arity, options_.inferenceIterationLimit);
+      }
+      for (const Symbol *member : component) {
+        result_.signatures_[member] = std::nullopt;
+      }
+    } else {
+      // Clauses that fit more than one signature, none more general than
+      // the others, are checked without one, and report their ambiguity
+      // then, as a declared one's would.
+      for (const Symbol *symbol : ambiguous) {
+        result_.signatures_[symbol] = std::nullopt;
+      }
+    }
+  }
 }
 
 void TypeChecker::Run(const SemanticForm &form) {
+  // The clauses of each predicate or function without a declaration.
+  Undeclared undeclared;
   for (const ClauseForm *clause : form.clauses) {
-    CheckClause(*clause);
+    const Symbol *definition{Definition(*clause)};
+    if (definition &&
+        std::holds_alternative<std::monostate>(definition->declaration)) {
+      undeclared[definition].push_back(clause);
+    }
+  }
+  if (!options_.inferTypes) {
+    // mmc: "clause for predicate `p'/1 without corresponding `:- pred'
+    // declaration".
+    for (const auto &[symbol, clauses] : undeclared) {
+      bool function{symbol->kind == SymbolKind::Function};
+      messages_->Say(Source(clauses.front()->tokens),
+          "clause for %s %s/%u without corresponding `:- %s' declaration"_err_en_US,
+          function ? "function" : "predicate", symbol->name.str(),
+          symbol->arity, function ? "func" : "pred");
+    }
+  }
+  Infer(undeclared);
+  for (const ClauseForm *clause : form.clauses) {
+    result_.clauses_.push_back(CheckClause(*clause, false));
   }
 }
 
 std::unique_ptr<TypeChecking> CheckTypes(const SemanticForm &form,
     const NameResolution &resolution, const parser::TokenSequence &tokens,
-    parser::Messages &messages) {
+    parser::Messages &messages, const TypeCheckOptions &options) {
   auto result{std::make_unique<TypeChecking>()};
-  TypeChecker{*result, resolution, tokens, messages}.Run(form);
+  TypeChecker{*result, resolution, tokens, messages, options}.Run(form);
   return result;
 }
 
