@@ -67,6 +67,11 @@ struct TokenSequence {
   std::vector<Token> directiveTokens;
 };
 
+// The tokens of the directive at `directive`, which ends with an eof token,
+// as a sequence of their own. A directive's parse-tree nodes index these.
+TokenSequence GetDirectiveTokens(
+    const TokenSequence &, std::uint32_t directive);
+
 // Prints each token's position, kind and spelling, one per line, with a
 // directive's tokens indented below it.
 void DumpTokens(

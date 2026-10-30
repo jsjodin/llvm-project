@@ -78,6 +78,8 @@ private:
     llvm::SmallVector<llvm::StringRef, 4> strings;
     unsigned numbers{0};
     unsigned enums{0};
+    // A %$omp directive, whose nodes index its own tokens.
+    const OmpDirective *directive{nullptr};
   };
 
   template <typename N> void Unparse(const void *node) {
@@ -85,7 +87,9 @@ private:
   }
 
   template <typename T> void Gather(const T &value, Fields &fields) {
-    if constexpr (IsNode<T>::value) {
+    if constexpr (std::is_same_v<T, OmpDirective>) {
+      fields.directive = &value;
+    } else if constexpr (IsNode<T>::value) {
       fields.children.push_back(
           {value.tokens, T::kindName, &value, &ExactUnparser::Unparse<T>});
     } else if constexpr (std::is_pointer_v<T>) {
@@ -117,6 +121,10 @@ private:
     for (std::uint32_t j{from}; j < to; ++j) {
       const Token &token{tokens_.tokens[j]};
       Trivia(token.trivia);
+      if (token.kind == TokenKind::Directive && fields.directive) {
+        Directive(j, *fields.directive);
+        continue;
+      }
       o_ << token.spelling;
       if (check && !Holds(token, fields)) {
         messages_.Say(token.spelling,
@@ -125,6 +133,22 @@ private:
             token.spelling.str(), kind.str());
       }
     }
+  }
+
+  // Prints the directive token at `j` by unparsing its node over the
+  // directive's own tokens, which checks them as the file's are checked.
+  // The minimal layout prints it as written: its sentinels are trivia.
+  void Directive(std::uint32_t j, const OmpDirective &directive) {
+    TokenSequence tokens{GetDirectiveTokens(tokens_, j)};
+    std::string text;
+    llvm::raw_string_ostream os{text};
+    ExactUnparser nested{os, tokens, UnparseLayout::Exact, true, messages_};
+    nested.Node(directive);
+    nested.Gap(directive.tokens.last + 1, tokens.tokens.size() - 1,
+        nested.unheld_, true, OmpDirective::kindName);
+    os << tokens.tokens.back().trivia;
+    o_ << (layout_ == UnparseLayout::Exact ? llvm::StringRef{text}
+                                           : llvm::StringRef{tokens_.tokens[j].spelling});
   }
 
   void Trivia(llvm::StringRef trivia) {
@@ -197,6 +221,7 @@ private:
   UnparseLayout layout_;
   bool complete_;
   Messages &messages_;
+  Fields unheld_; // for tokens that no node holds
 };
 
 } // namespace

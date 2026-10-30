@@ -11,8 +11,9 @@
 
 // The converter's rules that its files share: convert.cpp, for
 // declarations, convert-goals.cpp, for clauses, goals and data-terms,
-// convert-pragmas.cpp, for pragmas, and convert-directives.cpp, for
-// initialise, finalise, mutable, promises and solver types.
+// convert-pragmas.cpp, for pragmas, convert-directives.cpp, for
+// initialise, finalise, mutable, promises and solver types, and
+// convert-omp.cpp, for %$omp directives.
 
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/parse-tree.h"
@@ -38,6 +39,9 @@ inline const Term &IgnoreDirective(
       "an OpenMP directive applies only to a goal; it is ignored"_warn_en_US);
   return *directive.annotated();
 }
+
+// A goal with a %$omp directive, defined in convert-omp.cpp.
+std::optional<Goal> ConvertOmpGoal(const DirectiveTerm &, ConvertState &);
 
 // The compound term `t` with this functor and arity, if it is one.
 inline const CompoundTerm *AsCompound(

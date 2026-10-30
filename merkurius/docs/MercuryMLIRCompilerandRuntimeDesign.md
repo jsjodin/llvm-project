@@ -35,7 +35,7 @@ We will build a clean-room Mercury compiler on MLIR and LLVM, adding OpenMP-styl
 | Parallel loops | User promises independence; no dependence analysis | Same contract as OpenMP and Mercury's `promise_*` |
 | Processes | Erlang model with mailboxes typed by message type | Protocols checked at compile time |
 | Send | Non-blocking, deep copy into the receiver | Keeps heaps independent |
-| Receive | Blocking and selective, over one mailbox or several joined by a selector; the oldest matching message wins, across mailboxes; timeout returns `maybe` | Erlang semantics with static types; priority by Erlang's two-step receive |
+| Receive | Blocking and selective, over one mailbox or several joined by a selector; the oldest matching message wins, across mailboxes; timeout returns `maybe`; a `receive` goal, with one `select` arm per message pattern, as sugar | Erlang semantics with static types; priority by Erlang's two-step receive |
 | Kinds of message | One protocol type per mailbox, a discriminated union; more mailboxes for types the process does not own (replies, `down` messages, other modules' protocols) | Constructors cost nothing; a selector maps each mailbox's type into one result type |
 | Unknown messages | Impossible by typing; `det` loops must cover every constructor | No catch-all `_ -> true` needed |
 | Request/reply | Fresh reply mailbox per request, and a monitor on the server for the call | Late replies go to a dead mailbox and are dropped; a dead server ends the wait at once |
@@ -332,7 +332,8 @@ constexpr auto ifThenElse =
   - **Left to semantic analysis.** mmc reports a goal construct used as a data-term, such as `X = (a, b)`, during type checking, so here it stays a `FunctorData`.
   - **Data-terms.** The special data-terms are their own nodes: conditional expressions, `@`, field selection and update, lambdas, `: Type`, `` `with_type` `` and `coerce`.
   - **DCG goals.** `{ G1, G2 }`, which the reader reads as a tuple, holds the conjunction of the goals. `&` is a DCG parallel conjunction, which mmc accepts.
-  - **Not yet implemented:** `atomic` goals, and the `OmpGoal` of a goal with a `%$omp` directive. A directive anywhere else already draws the warning described under OpenMP directives and is ignored.
+  - **OpenMP.** A goal with a `%$omp` directive is an `OmpGoal` (OpenMP directives). A directive anywhere else draws a warning and is ignored.
+  - **Not yet implemented:** `atomic` goals.
 - **Pragmas.** The pragma's name decides the forms of its arguments.
   - **Node kinds:**
     - one node kind per family;
@@ -417,7 +418,7 @@ Tests, run on every file of every corpus:
    - it even prints invalid syntax for some trace goals.
 
    Test 5 already catches what test 6 was for: it compares our reader with Mercury's own term parser, item by item, on every pair of builtin operators among other cases.
-7. **Fuzzing.** `tools/merkurius-term-fuzzer` checks, for any input, that the lexer, reader and converter do not crash, that the tokens unparse to the input, that tests 2 to 4 hold, and that each item's canonical term reads back as itself; `utils/fuzz/run-term-fuzzer.sh` runs it under libFuzzer with the address and undefined behavior sanitizers. Inputs that once failed go in `test/Parser/Inputs/fuzz`, and a lit test replays them and every Mercury file in the tests.
+7. **Fuzzing.** `tools/merkurius-term-fuzzer` checks, for any input, that the lexer, reader and converter do not crash, that the tokens unparse to the input, that tests 2 to 4 hold, with and without `-fopenmp`, and that each item's canonical term reads back as itself; `utils/fuzz/run-term-fuzzer.sh` runs it under libFuzzer with the address and undefined behavior sanitizers. Inputs that once failed go in `test/Parser/Inputs/fuzz`, and a lit test replays them and every Mercury file in the tests.
 
 **Corpora:** the reference manual's examples, our own test programs, and generated programs. Melbourne's library and test sources are not used, because nobody may read them to diagnose a failure (Clean-room rules).
 
@@ -451,10 +452,13 @@ Desugaring also numbers the goals and unifications of each semantic form densely
 ### OpenMP directives
 
 - **Definitions from LLVM.** Directive and clause kinds, and which clauses each directive allows, come from `llvm/Frontend/OpenMP/OMP.td`, which Clang and Flang share. Our directives therefore use the same `llvm::omp` kinds that the `omp` dialect's lowering already understands.
-- **Syntax.** `%$omp parallel do` followed by clauses: `schedule(static)` or `schedule(dynamic, Chunk)`; `reduction(Op)`, with `Op` a binary function the programmer promises is associative, such as `+` or `max`; and, for self-recursive counted loops, `index(I)` and `upper(N)` naming the induction variable and its bound (Language extensions). The directive covers the goal that follows it.
-- **Parsing.** A small recursive descent parser reads the directive token's sub-tokens into an `OmpDirective` parse-tree node, with one child per clause, each with its own source range.
-- **Attachment.** The term reader attaches a directive token to the next term that begins after it. The converter accepts the annotation only where that term is a goal. There it builds an `OmpGoal`, which holds the directive and its associated goal, as Clang's `OMPExecutableDirective` holds its associated statement; desugaring turns it into a directive `Scope`. Anywhere else, such as before a clause head or inside a data-term, the directive draws a warning and is ignored.
-- **Checking** is part of semantic analysis: the associated goal must be a loop the compiler can form, and the clauses must make sense for it.
+- **Syntax.** `%$omp` is followed by a directive in its Fortran spelling, such as `parallel do`, and then its clauses, which may be separated by commas, as in Fortran. Each continuation line begins `%$omp&`. A directive's last name may take arguments, as `critical(Name)` does. A clause is a name, perhaps applied to arguments, as in `nowait`, `private(X, Y)` or `schedule(dynamic, Chunk)`. Arguments are Mercury terms, read by the term reader, so `:` separates modifiers from a list as in Fortran: `map(always, to: A)`. As in mmc, an operator before an infix operator must be in parentheses, so a reduction with a list is written `reduction((+) : X)`. Over a fold, the accumulator is the reduction's variable, so `reduction(+)` is the usual form. Two clauses of our own, `index(I)` and `upper(N)`, name the induction variable and the inclusive bound of a self-recursive counted loop (Language extensions). The directive covers the goal that follows it.
+- **Fortran's spellings.** The directive is the longest run of names that OMP.td knows, as in Flang. A directive that OMP.td has only for C, such as `parallel for`, is an error that names the Fortran form, `parallel do`.
+- **Attachment.** The term reader attaches a directive token to the term after it, read as one conjunct. The converter accepts the annotation only where that term is a goal. There it builds an `OmpGoal`, which holds the directive and its goal, as Clang's `OMPExecutableDirective` holds its associated statement; desugaring turns it into a directive `Scope`. Anywhere else, such as before a clause head, inside a data-term or in a DCG body, the directive draws a warning and is ignored.
+- **Parse tree.** `convert-omp.cpp` reads the directive token's own tokens into an `OmpDirective` node, which holds the directive's kind, its arguments and its clauses. Flang has a parse-tree class for each clause, generated from OMP.td, whose fields are Fortran's expressions and object lists. We follow it for the clauses that later passes use: `schedule`, `reduction` and `map` have nodes of their own, with their modifiers, kinds and map types as enums. Every other clause of OMP.td is an `OmpGenericClause`, with its kind, its modifiers and its arguments as data-terms, for semantic analysis to interpret. A clause gets a node of its own when a pass needs one.
+  - **Tokens.** A directive's nodes index the directive's own tokens, not the file's. The exact unparser prints a directive by unparsing its node over those tokens, so test 2 checks directives as it checks the rest of the file. The canonical unparser prints a directive as written, on a line of its own at the indentation of its goal, with its continuation lines at the same indentation.
+  - **Variables.** A directive's variables are numbered as the item's, so `index(I)` names the same variable as the `I` of its goal.
+- **Checking** is part of semantic analysis: the clauses must be allowed on the directive in the OpenMP version in use (`isAllowedClauseForDirective`), the associated goal must be a loop the compiler can form, and the clauses must make sense for it.
 - **Without `-fopenmp`** the lexer leaves directive lines as comments, so the program's meaning is that of the sequential program, which is also what mmc compiles.
 
 ### Modules and interface files
@@ -520,17 +524,17 @@ Clause add_square(A, I, !Acc)
 
 Clause sum_squares(A, N, Sum)
 └─ body  OmpGoal
-         ├─ OmpDirective parallel do [Reduction +]
+         ├─ OmpDirective parallel do [OmpReductionClause +]
          └─ CallGoal int.fold_up [FunctorTerm add_square [VarTerm A], Literal 0,
                                   VarTerm N, Literal 0, VarTerm Sum]
 ```
 
-**Round trip.** Unparsing this parse tree exactly gives back the source above, including the `%$omp` line and the blank lines. The fragment already follows the canonical layout, so canonical mode should print the same text. mmc's `--convert-to-mercury` prints `add_square` as follows, and parsing that must give the same tree, which checks the priorities of `=`, `+`, `*` and the state-variable prefixes:
+**Round trip.** Unparsing this parse tree exactly gives back the source above, including the `%$omp` line and the blank lines. The fragment already follows the canonical layout, so canonical mode prints the same text. The fully parenthesized form prints `add_square` as follows, and parsing that gives the same tree:
 
 ```mercury
-add_square(A, I, (! Acc)) :-
-	array.unsafe_lookup(A, I, X),
-	(!: Acc) = ((!. Acc) + (X * X)).
+add_square(A, I, (!Acc)) :-
+    (array.unsafe_lookup(A, I, X),
+    ((!:Acc) = ((!.Acc) + (X * X)))).
 ```
 
 **5. Desugaring: semantic form.** State variables become numbered variables (desugaring step 1). The nested arithmetic becomes one-functor unifications through a fresh variable, and constants become unifications too (steps 3 and 6). Quantification then records each goal's nonlocal variables (step 7). Nodes are numbered for `ProcInfo`, and each points back to the parse-tree node it came from.
@@ -670,7 +674,7 @@ Four extensions are added: processes with typed mailboxes, parallel loop annotat
 
 ### Processes and mailboxes
 
-The API is a library module. This interface, with stub bodies, passes Melbourne Mercury 22.01.9's type, mode and determinism checks, together with a client that uses every part of it: a counter server with a selector over two mailboxes, the two-step priority receive, `request` and `send_request`.
+The API is a library module. This interface, with stub bodies, passes Melbourne Mercury 22.01.9's type, mode and determinism checks, together with a client that uses every part of it: a counter server with a selector over two mailboxes, the two-step priority receive, `request` and `send_request`. The `receive` goal (below) is sugar over it.
 
 ```mercury
 :- type mailbox(M).                         % accepts messages of type M
@@ -689,7 +693,7 @@ The API is a library module. This interface, with stub bodies, passes Melbourne 
 :- func selecting_matching(mailbox(M)::in,
     pred(M, R)::in(pred(in, out) is semidet), selector(R)::in)
     = (selector(R)::out) is det.
-:- pred select(selector(R)::in, timeout::in, maybe(R)::out,
+:- pred receive(selector(R)::in, timeout::in, maybe(R)::out,
     io::di, io::uo) is det.
 
     % One mailbox.
@@ -715,7 +719,7 @@ The API is a library module. This interface, with stub bodies, passes Melbourne 
 ```
 
 - **Send** never blocks. It deep-copies the message for the receiver and returns.
-- **Receive** blocks until a message matches or the timeout expires, and returns `yes(R)` or `no`. It takes the oldest message for which the `semidet` selector succeeds; the rest stay queued in order. Erlang's `receive {reply, Ref, S} -> …` becomes the selector `(pred(M::in, S::out) is semidet :- M = reply(Ref, S))`. `receive` is `select` over a one-mailbox selector.
+- **Receive** blocks until a message matches or the timeout expires, and returns `yes(R)` or `no`. It takes the oldest message for which the `semidet` selector succeeds; the rest stay queued in order. Erlang's `receive {reply, Ref, S} -> …` becomes the selector `(pred(M::in, S::out) is semidet :- M = reply(Ref, S))`. `receive/6`, on one mailbox, is `receive/5` over a one-mailbox selector.
 - **Order is Erlang's.** Erlang's `receive` takes the first message in the queue that matches any clause; the order of the clauses only decides which clause handles a message that matches several (Erlang reference manual, Expressions, "Receive"; checked with OTP 24). Typed mailboxes never hold an unknown message, so a mailbox is a plain FIFO, and a selector keeps this rule across all its mailboxes: it takes the matching message that arrived first.
 - **Exhaustiveness:** a receive loop declared `det` must handle every message constructor. Removing one case is a compile error: "the switch on Msg does not cover \`stop'/0".
 - **No backtracking over messages:** send and receive thread the unique `io` state, so they cannot appear in nondeterministic code.
@@ -739,7 +743,7 @@ A constructor costs a tag in the pointer bits, as Erlang's atom tag costs a word
 
     Sel = selecting(Self, (func(M) = message(M)),
         selecting(Downs, (func(D) = worker_down(reason(D))), new_selector)),
-    select(Sel, infinity, MaybeEvent, !IO)
+    receive(Sel, infinity, MaybeEvent, !IO)
 ```
 
 The mapping happens in the receiver, so senders know nothing of it. Separate mailboxes also limit what each sender may say: a client that holds only `Self` can send `counter_msg` and nothing else. A selector is a value, so a loop can build it once; the compiler can build constant selectors statically.
@@ -753,17 +757,48 @@ The mapping happens in the receiver, so senders know nothing of it. Separate mai
         MaybeEvent = yes(worker_down(reason(D)))
     ;
         MaybeDown = no,
-        select(Sel, infinity, MaybeEvent, !IO)
+        receive(Sel, infinity, MaybeEvent, !IO)
     )
 ```
 
 A selector option for strict priority between its cases can be added later if programs need it. Strict priority can starve the lower cases, which is why it is not the default.
 
+**The `receive` goal.** Building a selector, a result type to map every mailbox into, and a switch on `yes(message(...))` is boilerplate. The `receive` goal writes the same loop directly. The goal receives one message; each arm selects the messages it wants, by mailbox and pattern:
+
+```mercury
+loop(Count, Self, Downs, !IO) :-
+    receive [timeout(after(5000)), io(!IO)] (
+        select(Self, increment(N)) ->
+            loop(Count + N, Self, Downs, !IO)
+    ;   select(Self, get(ReplyTo)) ->
+            send(ReplyTo, Count, !IO),
+            loop(Count, Self, Downs, !IO)
+    ;   select(Self, stop) ->
+            true
+    ;   select(Downs, _) ->
+            io.write_string("worker died\n", !IO),
+            loop(Count, Self, Downs, !IO)
+    ;   timeout ->
+            io.write_string("idle\n", !IO),
+            loop(Count, Self, Downs, !IO)
+    ).
+```
+
+- **Syntax.** `receive Params Arms`, shaped like `trace` and `try`. The parameters are `timeout(T)`, with a `timeout` from the library, and `io(!IO)`, the state variable that the wait and the arms thread. Each arm is `select(Mailbox, Pattern) -> Goal`, or `timeout -> Goal`, and the arms are joined by `;`. `select` is not an operator, so the arms are ordinary terms; the term reader needs only `receive` as a binary prefix operator, with `trace`'s priority. `receive(...)` written as a call, with no layout before the parenthesis, stays an ordinary call, so the library predicates keep their name.
+- **The option.** The operator departs from mmc's operator table, so it exists only with `-freceive-goal`. Without it, a file reads exactly as mmc reads it, and test 5 (Unparser and round-trip tests) stays exact, as `-fopenmp` keeps plain files plain.
+- **Conversion.** The converter reads the arms into a `ReceiveGoal` node with one child per arm, instead of an if-then-else chain. An arm that is neither form, or a `timeout` arm without a `timeout` parameter or the other way round, is an error. With neither, the timeout is `infinity`.
+- **Meaning.** The goal is the selector code above:
+  - Arms for different mailboxes may be written in any order, mixed freely. The compiler groups them by mailbox, keeping the order of each mailbox's arms, which is the only order that matters: a message is in one mailbox, so only that mailbox's arms compete for it. Each mailbox becomes one `selecting_matching` case, whose `semidet` predicate tries that mailbox's patterns in order and returns the arm and the pattern's variables, as a constructor of a hidden result type. A mailbox whose first arm takes anything, as `select(Downs, _)` does, becomes a `selecting` case, which never scans.
+  - `receive/5` takes the oldest message, across the mailboxes, that some arm selects. A message that several arms select goes to the first of them, as in Erlang's clauses.
+  - A switch on the result runs the arm's goal, with the pattern's variables bound. The goal is `det` if every arm's goal is.
+- **Selective arms.** The arms need not cover a mailbox's type. A message that no arm selects stays queued for a later `receive`, as in Erlang. Since that can leave messages piling up, a mailbox whose arms leave a constructor out draws the warning `unselected-message`, unless some other `receive` in the same predicate selects it. `-Wno-unselected-message` turns it off.
+- **Priority** is still the two-step receive: a `receive` with `timeout(after(0))` and only the urgent arms, whose `timeout` arm is the ordinary `receive`.
+
 **Request and reply.** `request(Counter, (func(R) = get(R)), after(1000), Reply, !IO)` asks the counter for its value:
 
 1. It monitors the server, delivering any `down` message to a private mailbox. A server that is already dead delivers one at once.
 2. It creates a fresh `mailbox(Rep)`, here `mailbox(int)`, builds the request by applying the function to it, here `get(ReplyTo)`, and sends it. These two steps are `send_request`.
-3. It selects over the reply mailbox and the `down` mailbox, with the timeout.
+3. It receives from the reply mailbox and the `down` mailbox, with the timeout.
 4. It removes the monitor and closes both mailboxes, then returns `reply(N)`, `timeout` or `down(Reason)`.
 
 The server answers with an ordinary `send(ReplyTo, N, !IO)`. A fresh mailbox per request has four effects:
@@ -1046,6 +1081,7 @@ Flang's driver cannot be reused as it stands. It is Clang's driver library, `cla
 | `-O0` to `-O3`, `-Os` | Choose the MLIR and LLVM pass pipelines |
 | `-g`, `-gline-tables-only` | Debug information (Debugging) |
 | `-fopenmp`, `-fopenmp-version=` | Read `%$omp` directives (Front end, Lexer) |
+| `-freceive-goal` | Read `receive` goals (Language extensions, "Processes and mailboxes") |
 | `--offload-arch=` | Compile target regions for a device (Linking and offloading, below) |
 | `--target=`, `-march=`, `-mcpu=` | Target triple and CPU |
 | `-I` *dir*, `-module-dir` *dir* | Where interface files are searched for, and where they are written; Flang uses the same two options for `.mod` files |
@@ -1198,7 +1234,7 @@ The runtime gives each process its own stack, heap and mailboxes, schedules proc
 - **Mailbox handle:** process identifier, mailbox index and generation number. Handles are values, never pointers into another heap.
 - **Send:** find the receiver, deep-copy the message into a fresh heap fragment, and push the fragment onto the mailbox's lock-free multi-producer queue. Wake the receiver if it is waiting. The receiver's heap is never locked.
 - **Arrival order:** each message is stamped, as it is queued, with the receiving process's arrival count, taken with one atomic increment by the sender. The stamps order messages across all of a process's mailboxes.
-- **Receive and select:** in each mailbox of the selector, find the oldest message its case accepts: the head of the queue for `selecting`, or the first message for which the selector succeeds, scanning in arrival order, for `selecting_matching`. Take the candidate with the lowest stamp. The matched fragment joins the receiver's heap and is merged at its next GC. Unmatched messages keep their order. A process waiting in `select` is woken by a send to any of its mailboxes.
+- **Receive:** in each mailbox of the selector, find the oldest message its case accepts: the head of the queue for `selecting`, or the first message for which the selector succeeds, scanning in arrival order, for `selecting_matching`. Take the candidate with the lowest stamp. The matched fragment joins the receiver's heap and is merged at its next GC. Unmatched messages keep their order. A process waiting in `receive` is woken by a send to any of its mailboxes.
 - **Mailbox lifetime:** a mailbox lives until `close_mailbox` or the owner's exit. Closing it drops its queued messages and makes its handle dead.
 - **Dead mailboxes:** a send to a handle whose generation no longer matches, or whose process has exited, is dropped. This is what discards late replies. Generations make handles of closed mailboxes dead forever, even when the mailbox's slot is reused.
 - **Cheap mailboxes:** every `request` creates one, so creating and closing a mailbox must cost about as much as a small allocation: a slot in the owner's mailbox table and a new generation number.
@@ -1338,7 +1374,7 @@ request(Server, MakeRequest, Timeout, Reply, !IO) :-
     send_request(Server, MakeRequest, ReplyTo, !IO),
     Sel = selecting(ReplyTo, (func(R) = reply(R)),
         selecting(Downs, (func(D) = down(reason(D))), new_selector)),
-    select(Sel, Timeout, MaybeReply, !IO),
+    receive(Sel, Timeout, MaybeReply, !IO),
     demonitor(Ref, !IO),
     close_mailbox(ReplyTo, !IO),
     close_mailbox(Downs, !IO),
@@ -1457,6 +1493,7 @@ Eight decisions remain open. The three that most constrain the runtime are the h
 - [x] Prescanner: none. Source files are read unchanged, and the lexer recognizes `%$omp` directives and line number directives, which depend on token context (Front end, "Source manager").
 - [x] Lexical rules: 22.01's, with the current manual filling its gaps; where mmc 22.01.9 disagrees with its manual, mmc is followed; of the later changes only the operator renumbering is adopted (Front end, Lexer; Standard library, compatibility and testing).
 - [x] Receiving from several mailboxes: selectors, as in Gleam, taking the oldest matching message across mailboxes, as Erlang's receive does; priority by Erlang's two-step receive (Language extensions, "Processes and mailboxes").
+- [x] Receive syntax: a `receive` goal whose arms each `select` a message by mailbox and pattern, as sugar over the selector API, behind `-freceive-goal` (Language extensions, "Processes and mailboxes").
 
 **Risks**
 

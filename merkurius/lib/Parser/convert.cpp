@@ -1302,6 +1302,8 @@ const ParseTree &ConvertFile(
       return at >= first.spelling.begin() && at <= last.spelling.end();
     })};
     if (item->term && !lexerError) {
+      state.item = item->term;
+      state.variables = item->variables;
       if (std::optional<Item> converted{ConvertItem(*item->term, state)}) {
         items.push_back(*converted);
       }

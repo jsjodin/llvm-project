@@ -1183,8 +1183,23 @@ TEST(ConvertTest, Directives) {
   auto messages{[](llvm::StringRef text) {
     return Convert(text, /*openMP=*/true).messages;
   }};
-  EXPECT_EQ(messages("p :-\n  %$omp parallel do\n  q.\n"),
-      V{"OpenMP directives"});
+  ConvertResult converted{
+      Convert("p :-\n  %$omp parallel do\n  q.\n", /*openMP=*/true)};
+  EXPECT_EQ(converted.messages, V{});
+  EXPECT_NE(converted.tree.find("body: OmpGoal\n"
+                                "| | | | directive: OmpDirective\n"
+                                "| | | | | id: parallel do\n"),
+      std::string::npos)
+      << converted.tree;
+  EXPECT_EQ(messages("p :-\n  %$omp parallel do schedule(static),\n"
+                     "  %$omp&  nowait collapse(2)\n  q.\n"),
+      V{});
+  EXPECT_EQ(messages("p :-\n  %$omp parallel for\n  q.\n"),
+      V{"'parallel for' is C's form of the OpenMP directive; Mercury uses "
+        "Fortran's, 'parallel do'"});
+  EXPECT_EQ(messages("p :-\n  %$omp do lastprivate\n  q.\n"), V{});
+  EXPECT_EQ(messages("p :-\n  %$omp do upper(1, 2)\n  q.\n"),
+      V{"expected upper(Bound)"});
   ConvertResult ignored{Convert("%$omp parallel do\np(X) :- X = (\n"
                                 "  %$omp parallel do\n  1).\n",
       /*openMP=*/true)};
@@ -1194,6 +1209,32 @@ TEST(ConvertTest, Directives) {
   EXPECT_NE(ignored.tree.find("FactOrRule"), std::string::npos);
   // Without -fopenmp a directive is a comment.
   EXPECT_EQ(Messages_("p :-\n  %$omp parallel do\n  q.\n"), V{});
+}
+
+// A directive's variables are numbered as the item's: I and N as in the
+// goal, and Z, which only the directive has, after them.
+TEST(ConvertTest, DirectiveVariables) {
+  AllSources all;
+  SourceFile *file{all.AddBuffer("test.m",
+      llvm::MemoryBuffer::getMemBufferCopy(
+          "p(A, N) :-\n  %$omp do index(I) upper(N) private(Z, A)\n"
+          "  q(I, N).\n"))};
+  Messages messages;
+  TokenSequence tokens{Lex(*file, LexerOptions{true}, messages)};
+  ParseTreeArena arena;
+  const ParseTree &tree{ConvertFile(tokens, arena, messages)};
+  EXPECT_TRUE(messages.messages().empty());
+  struct Visitor {
+    std::vector<std::string> variables;
+    void Post(const Variable &variable) {
+      variables.push_back(
+          variable.name.str() + "=" + std::to_string(variable.number));
+    }
+  } visitor;
+  Walk(tree, visitor);
+  EXPECT_EQ(visitor.variables,
+      (std::vector<std::string>{
+          "A=0", "N=1", "I=2", "N=1", "Z=3", "A=0", "I=2", "N=1"}));
 }
 
 // The combinators on their own, with the expected forms they describe.

@@ -13,6 +13,8 @@ round-trip tests").
    tree, as printed by -fdebug-dump-parse-tree-no-sema, which shows no
    locations or trivia.
 
+With --openmp, %$omp directives are read as directives, not comments.
+
 The script exits with status 1 and reports every file that fails a test.
 """
 
@@ -22,9 +24,12 @@ import subprocess
 import sys
 
 
+OPTIONS = []
+
+
 def merkc(merkc_path, action, path=None, text=None):
     """Runs merkc -fc1 with `action` on a file, or on `text` from stdin."""
-    args = [merkc_path, "-fc1", action, path if path else "-"]
+    args = [merkc_path, "-fc1"] + OPTIONS + [action, path if path else "-"]
     return subprocess.run(args, input=text, capture_output=True)
 
 
@@ -88,8 +93,11 @@ def check(merkc_path, path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--merkc", required=True)
+    parser.add_argument("--openmp", action="store_true")
     parser.add_argument("files", nargs="+")
     args = parser.parse_args()
+    if args.openmp:
+        OPTIONS.append("-fopenmp")
     failed = False
     for path in args.files:
         for problem in check(args.merkc, path):
