@@ -11,7 +11,7 @@
 :- pred main(io::di, io::uo) is det.
 
 :- implementation.
-:- import_module char, int, list, string.
+:- import_module char, int, list, stm_builtin, string.
 
 :- type point ---> point(x :: int, y :: int).
 
@@ -54,6 +54,48 @@ main(!IO) :-
 % CHECK-NEXT: | | | | | | | | | operands:
 % CHECK-NEXT: | | | | | | | | | value: debug
 % CHECK:      | | | | | | | | condition: none
+
+% An atomic goal, a transaction whose alternatives are taken in turn.
+:- pred choose(int::out, io::di, io::uo) is cc_multi.
+
+choose(X, !IO) :-
+    atomic [outer(!IO), inner(!STM), vars([X])] (
+        X = 1
+    or_else
+        ( X = 2 or_else X = 3 )
+    ).
+% CHECK:      | | FactOrRule
+% CHECK-NEXT: | | | kind: Predicate
+% CHECK-NEXT: | | | name: SymName choose
+% CHECK:      | | | body: AtomicGoal
+% CHECK-NEXT: | | | | params:
+% CHECK-NEXT: | | | | | AtomicParam
+% CHECK-NEXT: | | | | | | kind: Outer
+% CHECK-NEXT: | | | | | | initial: StateVar !IO
+% CHECK-NEXT: | | | | | | final: none
+% CHECK-NEXT: | | | | | | vars:
+% CHECK-NEXT: | | | | | AtomicParam
+% CHECK-NEXT: | | | | | | kind: Inner
+% CHECK-NEXT: | | | | | | initial: StateVar !STM
+% CHECK-NEXT: | | | | | | final: none
+% CHECK-NEXT: | | | | | | vars:
+% CHECK-NEXT: | | | | | AtomicParam
+% CHECK-NEXT: | | | | | | kind: Vars
+% CHECK-NEXT: | | | | | | initial: none
+% CHECK-NEXT: | | | | | | final: none
+% CHECK-NEXT: | | | | | | vars:
+% CHECK-NEXT: | | | | | | | X
+% The or_else alternatives flatten through parentheses.
+% CHECK-NEXT: | | | | goals:
+% CHECK-NEXT: | | | | | Unification
+% CHECK-NEXT: | | | | | | left: Variable X
+% CHECK-NEXT: | | | | | | right: Literal 1
+% CHECK-NEXT: | | | | | Unification
+% CHECK-NEXT: | | | | | | left: Variable X
+% CHECK-NEXT: | | | | | | right: Literal 2
+% CHECK-NEXT: | | | | | Unification
+% CHECK-NEXT: | | | | | | left: Variable X
+% CHECK-NEXT: | | | | | | right: Literal 3
 
 :- pred count(list(T)::in, int::out) is det.
 
