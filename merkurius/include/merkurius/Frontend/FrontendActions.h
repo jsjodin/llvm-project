@@ -126,6 +126,12 @@ class DebugDumpResolvedNamesAction : public FrontendAction {
   bool executeAction() override;
 };
 
+// Type checks the source file, and lists, for each clause, the types of
+// its variables and the declaration chosen for each overloaded name.
+class DebugDumpTypesAction : public FrontendAction {
+  bool executeAction() override;
+};
+
 } // namespace merkurius::frontend
 
 #endif // MERKURIUS_FRONTEND_FRONTENDACTIONS_H_

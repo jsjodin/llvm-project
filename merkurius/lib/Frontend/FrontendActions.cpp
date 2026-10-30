@@ -16,6 +16,7 @@
 #include "merkurius/Parser/source.h"
 #include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/unparse.h"
+#include "merkurius/Semantics/check-types.h"
 #include "merkurius/Semantics/desugar.h"
 #include "merkurius/Semantics/module-loader.h"
 #include "merkurius/Semantics/resolve-names.h"
@@ -264,45 +265,69 @@ bool DebugDumpImportsAction::executeAction() {
   return !messages.AnyFatalError();
 }
 
-bool DebugDumpResolvedNamesAction::executeAction() {
-  CompilerInstance &ci{getInstance()};
+namespace {
+// The front end up to name resolution, for the actions that need it.
+struct Resolved {
+  parser::Messages messages;
+  parser::TokenSequence tokens;
+  parser::ParseTreeArena arena;
+  const parser::ParseTree *tree{nullptr};
+  semantics::SemanticArena semanticArena;
+  const semantics::SemanticForm *form{nullptr};
+  std::unique_ptr<semantics::ModuleLoader> loader;
+  std::unique_ptr<semantics::NameResolution> resolution;
+};
+
+void Resolve(CompilerInstance &ci, parser::SourceFile &file,
+    Resolved &r) {
   for (const std::string &dir : ci.getFrontendOpts().searchDirectories) {
     ci.getAllSources().AppendSearchPathDirectory(dir);
   }
   parser::LexerOptions options;
   options.openMP = ci.getLangOpts().openMP;
-  parser::Messages messages;
-  parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
-  parser::ParseTreeArena arena;
-  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages)};
-  semantics::SemanticArena semanticArena;
-  const semantics::SemanticForm &form{
-      semantics::Desugar(tree, tokens, semanticArena, messages)};
-  semantics::ModuleLoader loader{ci.getAllSources(),
-      ci.getFrontendOpts().libraryDirectory, messages};
-  llvm::StringRef directory{
-      llvm::sys::path::parent_path(getSourceFile().path())};
-  loader.LoadImports(tree, tokens, directory.empty() ? "." : directory);
-  std::unique_ptr<semantics::NameResolution> resolution{
-      semantics::ResolveNames(tree, tokens, form, loader, messages)};
-  messages.Emit(llvm::errs(), ci.getAllSources());
+  r.tokens = parser::Lex(file, options, r.messages);
+  r.tree = &parser::ConvertFile(r.tokens, r.arena, r.messages);
+  r.form = &semantics::Desugar(*r.tree, r.tokens, r.semanticArena, r.messages);
+  r.loader = std::make_unique<semantics::ModuleLoader>(ci.getAllSources(),
+      ci.getFrontendOpts().libraryDirectory, r.messages);
+  llvm::StringRef directory{llvm::sys::path::parent_path(file.path())};
+  r.loader->LoadImports(
+      *r.tree, r.tokens, directory.empty() ? "." : directory);
+  r.resolution = semantics::ResolveNames(
+      *r.tree, r.tokens, *r.form, *r.loader, r.messages);
+}
+
+// A position in the source as line:column.
+std::string Position(const parser::AllSources &sources, parser::CharBlock at) {
+  if (auto range{sources.GetProvenanceRange(at)}) {
+    if (auto pos{sources.GetSourcePosition(range->start())}) {
+      return std::to_string(pos->line) + ':' + std::to_string(pos->column);
+    }
+  }
+  return "";
+}
+
+parser::CharBlock Source(
+    const parser::TokenSequence &tokens, parser::TokenRange range) {
+  return {tokens.tokens[range.first].spelling.begin(),
+      tokens.tokens[range.last].spelling.end()};
+}
+} // namespace
+
+bool DebugDumpResolvedNamesAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  Resolved r;
+  Resolve(ci, getSourceFile(), r);
+  r.messages.Emit(llvm::errs(), ci.getAllSources());
   llvm::raw_ostream *os{ci.createDefaultOutputFile()};
   if (!os) {
     return false;
   }
   const parser::AllSources &sources{ci.getAllSources()};
-  auto position{[&](parser::CharBlock where) {
-    std::string result;
-    if (auto range{sources.GetProvenanceRange(where)}) {
-      if (auto pos{sources.GetSourcePosition(range->start())}) {
-        result = std::to_string(pos->line) + ':' + std::to_string(pos->column);
-      }
-    }
-    return result;
-  }};
-  *os << "symbols of " << resolution->module().name() << ":\n";
-  for (const semantics::Symbol *symbol : resolution->module().symbols()) {
-    *os << "  " << position(symbol->source) << ' ' << *symbol
+  const semantics::NameResolution &resolution{*r.resolution};
+  *os << "symbols of " << resolution.module().name() << ":\n";
+  for (const semantics::Symbol *symbol : resolution.module().symbols()) {
+    *os << "  " << Position(sources, symbol->source) << ' ' << *symbol
         << (symbol->exported ? " exported" : "");
     if (symbol->owner) {
       *os << " of " << *symbol->owner;
@@ -310,20 +335,15 @@ bool DebugDumpResolvedNamesAction::executeAction() {
     *os << '\n';
   }
   *os << "names:\n";
-  for (const semantics::ResolvedName &name : resolution->names()) {
-    const auto &tokenRange{name.name->tokens};
-    *os << "  "
-        << position({tokens.tokens[tokenRange.first].spelling.begin(),
-               tokens.tokens[tokenRange.last].spelling.end()})
-        << ' '
-        << llvm::StringRef{tokens.tokens[tokenRange.first].spelling.begin(),
-               static_cast<std::size_t>(
-                   tokens.tokens[tokenRange.last].spelling.end() -
-                   tokens.tokens[tokenRange.first].spelling.begin())}
-        << ' ' << semantics::EnumToString(name.use) << '/' << name.arity
-        << " ->";
+  for (const semantics::ResolvedName &name : resolution.names()) {
+    parser::CharBlock text{Source(r.tokens, name.name->tokens)};
+    *os << "  " << Position(sources, text) << ' ' << text.ToString() << ' '
+        << semantics::EnumToString(name.use) << '/' << name.arity << " ->";
     if (name.candidates.empty()) {
-      *os << " undefined";
+      *os << (name.use == semantics::NameUse::DataTerm &&
+                     semantics::IsCharConstant(*name.name, name.arity)
+                 ? " char constant"
+                 : " undefined");
     }
     llvm::interleave(
         name.candidates, *os,
@@ -332,7 +352,62 @@ bool DebugDumpResolvedNamesAction::executeAction() {
     *os << '\n';
   }
   os->flush();
-  return !messages.AnyFatalError();
+  return !r.messages.AnyFatalError();
+}
+
+bool DebugDumpTypesAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  Resolved r;
+  Resolve(ci, getSourceFile(), r);
+  std::unique_ptr<semantics::TypeChecking> checking{semantics::CheckTypes(
+      *r.form, *r.resolution, r.tokens, r.messages)};
+  r.messages.Emit(llvm::errs(), ci.getAllSources());
+  llvm::raw_ostream *os{ci.createDefaultOutputFile()};
+  if (!os) {
+    return false;
+  }
+  const parser::AllSources &sources{ci.getAllSources()};
+  for (const semantics::ClauseTypes &clause : checking->clauses()) {
+    const semantics::ClauseForm &form{*clause.clause};
+    *os << "clause at " << Position(sources, Source(r.tokens, form.tokens));
+    if (clause.definition) {
+      *os << " of " << *clause.definition;
+    }
+    if (const semantics::Signature *sig{clause.definition
+                ? checking->SignatureOf(*clause.definition)
+                : nullptr}) {
+      *os << ": " << semantics::SignatureToString(*clause.definition, *sig);
+    } else {
+      *os << " (undeclared)";
+    }
+    *os << '\n';
+    for (semantics::VarId var{0}; var < form.vars.size(); ++var) {
+      const semantics::VarInfo &info{form.vars[var]};
+      if (info.kind == semantics::VarKind::Program) {
+        *os << "  " << info.name;
+      } else if (info.kind == semantics::VarKind::State) {
+        *os << "  " << info.name << '!' << info.version;
+      } else {
+        continue;
+      }
+      *os << ": " << checking->Print(clause, *clause.vars[var]) << '\n';
+    }
+    for (unsigned goal{0}; goal < form.goals; ++goal) {
+      if (const parser::SymName *name{clause.names[goal]}) {
+        parser::CharBlock text{Source(r.tokens, name->tokens)};
+        *os << "  " << Position(sources, text) << ' ' << text.ToString()
+            << " -> ";
+        if (const semantics::Symbol *symbol{clause.symbols[goal]}) {
+          *os << *symbol;
+        } else {
+          *os << "char constant";
+        }
+        *os << '\n';
+      }
+    }
+  }
+  os->flush();
+  return !r.messages.AnyFatalError();
 }
 
 } // namespace merkurius::frontend

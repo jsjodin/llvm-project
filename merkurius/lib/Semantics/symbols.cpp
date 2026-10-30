@@ -19,14 +19,19 @@ const Symbol &ModuleSymbols::Add(SymbolKind kind, llvm::StringRef name,
     if (symbol->kind == kind && symbol->arity == arity) {
       // A type's abstract declaration in the interface and its definition
       // in the implementation are one symbol.
+      // The symbol's declaration is the definition.
       auto &existing{const_cast<Symbol &>(*symbol)};
       existing.exported |= exported;
+      if (std::holds_alternative<const parser::AbstractTypeDecl *>(
+              existing.declaration)) {
+        existing.declaration = declaration;
+      }
       return existing;
     }
   }
   auto &symbol{*owned_.emplace_back(std::make_unique<Symbol>(Symbol{kind,
-      name_, names_.save(name), arity, declaration, source, exported,
-      owner}))};
+      name_, names_.save(name), arity, declaration, source, exported, owner,
+      tokens_}))};
   same.push_back(&symbol);
   order_.push_back(&symbol);
   return symbol;

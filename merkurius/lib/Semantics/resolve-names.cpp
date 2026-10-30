@@ -37,6 +37,23 @@ using namespace parser::literals;
 NameResolution::NameResolution() = default;
 NameResolution::~NameResolution() = default;
 
+const ModuleSymbols *NameResolution::Module(llvm::StringRef name) const {
+  for (const auto &[module, symbols] : imported_) {
+    if (symbols->name() == name) {
+      return symbols.get();
+    }
+  }
+  return nullptr;
+}
+
+const parser::SymName *NameResolution::FunctorName(const Unify &unify) const {
+  if (unify.functor.kind == FunctorKind::Name) {
+    return unify.functor.name;
+  }
+  auto it{functors_.find(&unify)};
+  return it == functors_.end() ? nullptr : it->second;
+}
+
 namespace {
 
 // The primitive types (reference manual, "Primitive types"); mmc also
@@ -103,6 +120,19 @@ private:
   // Collects a module's symbols from its items.
   void Declare(ModuleSymbols &, const parser::Item &, bool exported,
       const parser::TokenSequence &);
+  // Declares the predicates and functions whose arity their `with_type`
+  // gives, in the module's scope.
+  void DeclareWithTypes(ModuleSymbols &, const Visibility &);
+  std::optional<unsigned> WithTypeArity(
+      const parser::Type &, const Visibility &, int depth);
+  struct Pending {
+    ModuleSymbols *symbols;
+    const parser::PredDecl *decl;
+    bool exported;
+    const Symbol *owner;
+    const parser::TokenSequence *tokens;
+  };
+  std::vector<Pending> pending_;
   // The scope of an imported module's interface.
   Visibility InterfaceScope(const ModuleInterface &);
   ModuleSymbols &Symbols(const ModuleInterface &);
@@ -154,6 +184,12 @@ void Resolver::Declare(ModuleSymbols &symbols, const parser::Item &item,
         source(name), exported);
   }};
   auto predicate{[&](const parser::PredDecl &decl, const Symbol *owner) {
+    if (decl.withType) {
+      // Its arity depends on its type's, which is known once the module's
+      // types are.
+      pending_.push_back({&symbols, &decl, exported, owner, &tokens});
+      return;
+    }
     symbols.Add(decl.kind == parser::PredOrFunc::Function
             ? SymbolKind::Function
             : SymbolKind::Predicate,
@@ -217,14 +253,77 @@ void Resolver::Declare(ModuleSymbols &symbols, const parser::Item &item,
 }
 
 ModuleSymbols &Resolver::Symbols(const ModuleInterface &module) {
-  std::unique_ptr<ModuleSymbols> &symbols{result_.imported_[&module]};
-  if (!symbols) {
-    symbols = std::make_unique<ModuleSymbols>(module.name);
-    for (const parser::Item &item : module.items) {
-      Declare(*symbols, item, true, *module.tokens);
-    }
+  if (auto it{result_.imported_.find(&module)};
+      it != result_.imported_.end()) {
+    return *it->second;
   }
-  return *symbols;
+  auto owned{std::make_unique<ModuleSymbols>(module.name, module.tokens)};
+  ModuleSymbols &symbols{*owned};
+  result_.imported_[&module] = std::move(owned);
+  for (const parser::Item &item : module.items) {
+    Declare(symbols, item, true, *module.tokens);
+  }
+  DeclareWithTypes(symbols, InterfaceScope(module));
+  return symbols;
+}
+
+void Resolver::DeclareWithTypes(
+    ModuleSymbols &symbols, const Visibility &scope) {
+  std::vector<Pending> rest;
+  for (const Pending &p : pending_) {
+    if (p.symbols != &symbols) {
+      rest.push_back(p);
+      continue;
+    }
+    const parser::PredDecl &decl{*p.decl};
+    unsigned arity(decl.arguments.size());
+    std::optional<unsigned> added{WithTypeArity(*decl.withType, scope, 0)};
+    if (!added) {
+      messages_.Say(parser::CharBlock{
+                        p.tokens->tokens[decl.tokens.first].spelling.begin(),
+                        p.tokens->tokens[decl.tokens.last].spelling.end()},
+          "the type of %s must be a %s type"_err_en_US, decl.name->name.str(),
+          decl.kind == parser::PredOrFunc::Function ? "func" : "pred");
+    }
+    symbols.Add(decl.kind == parser::PredOrFunc::Function
+            ? SymbolKind::Function
+            : SymbolKind::Predicate,
+        decl.name->name, arity + added.value_or(0), &decl,
+        parser::CharBlock{
+            p.tokens->tokens[decl.name->tokens.first].spelling.begin(),
+            p.tokens->tokens[decl.name->tokens.last].spelling.end()},
+        p.exported, p.owner);
+  }
+  pending_ = std::move(rest);
+}
+
+// The number of arguments of the higher-order type `type` is, through
+// equivalences, or nothing if it is not one.
+std::optional<unsigned> Resolver::WithTypeArity(
+    const parser::Type &type, const Visibility &scope, int depth) {
+  if (const auto *higher{std::get_if<const parser::HigherOrderType *>(&type)}) {
+    return (*higher)->arguments.size();
+  }
+  const auto *named{std::get_if<const parser::NamedType *>(&type)};
+  if (!named || depth > 50) {
+    return std::nullopt;
+  }
+  for (const Symbol *symbol : Lookup(*(*named)->name, NameUse::Type,
+           (*named)->arguments.size(), scope)) {
+    const auto *defn{
+        std::get_if<const parser::EquivalenceTypeDefn *>(&symbol->declaration)};
+    if (!defn) {
+      continue;
+    }
+    // The equivalence's names are in its own module's scope.
+    for (const ModuleInterface *module : loader_.modules()) {
+      if (module->name == symbol->module) {
+        return WithTypeArity((*defn)->type, InterfaceScope(*module), depth + 1);
+      }
+    }
+    return WithTypeArity((*defn)->type, scope, depth + 1);
+  }
+  return std::nullopt;
 }
 
 Visibility Resolver::InterfaceScope(const ModuleInterface &module) {
@@ -311,7 +410,7 @@ llvm::SmallVector<const Symbol *, 4> Resolver::Lookup(
 void Resolver::Resolve(const parser::SymName &name, NameUse use,
     unsigned arity, const Visibility &scope, const Visibility *outer) {
   llvm::SmallVector<const Symbol *, 4> found{Lookup(name, use, arity, scope)};
-  if (found.empty()) {
+  if (found.empty() && !(use == NameUse::DataTerm && IsCharConstant(name, arity))) {
     Undefined(name, use, arity, scope, outer);
   }
   llvm::ArrayRef<const Symbol *> candidates{
@@ -320,6 +419,14 @@ void Resolver::Resolve(const parser::SymName &name, NameUse use,
   if (local_) {
     result_.names_.push_back(ResolvedName{&name, use, arity, candidates});
   }
+}
+
+bool IsCharConstant(const parser::SymName &name, unsigned arity) {
+  // One code point: one byte that does not continue a UTF-8 sequence.
+  return arity == 0 && name.qualifiers.empty() && !name.name.empty() &&
+      llvm::count_if(name.name, [](char c) {
+        return (static_cast<unsigned char>(c) & 0xc0) != 0x80;
+      }) == 1;
 }
 
 void Resolver::Undefined(const parser::SymName &name, NameUse use,
@@ -337,6 +444,11 @@ void Resolver::Undefined(const parser::SymName &name, NameUse use,
         elsewhere ? "the module %s has not been imported in the interface section"_because_en_US
                   : "the module %s has not been imported"_because_en_US,
         qualifier);
+    return;
+  }
+  if (qualifier.empty() && (name.name == "[|]" || name.name == "[]")) {
+    message.Attach(Source(name),
+        "the module list has not been imported"_because_en_US);
     return;
   }
   if (qualifier.empty()) {
@@ -476,6 +588,15 @@ void Resolver::ResolveGoal(const Goal &goal, const Visibility &scope) {
             if (unify->functor.kind == FunctorKind::Name) {
               Resolve(*unify->functor.name, NameUse::DataTerm,
                   unify->arguments.size(), scope);
+            } else if (unify->functor.kind == FunctorKind::Cons ||
+                unify->functor.kind == FunctorKind::Nil) {
+              // List syntax names the list module's constructors, which
+              // must be visible (mmc: "undefined symbol `[|]'/2").
+              bool cons{unify->functor.kind == FunctorKind::Cons};
+              const parser::SymName &name{*result_.arena_.Make<parser::SymName>(
+                  parser::SymName{unify->tokens, {}, cons ? "[|]" : "[]"})};
+              result_.functors_[unify] = &name;
+              Resolve(name, NameUse::DataTerm, cons ? 2 : 0, scope);
             } else if (const Lambda * lambda{unify->functor.lambda}) {
               for (const std::optional<parser::Mode> &mode : lambda->modes) {
                 if (mode) {
@@ -531,7 +652,7 @@ void Resolver::Run(const parser::ParseTree &tree,
       break;
     }
   }
-  result_.module_ = std::make_unique<ModuleSymbols>(name);
+  result_.module_ = std::make_unique<ModuleSymbols>(name, &tokens);
   ModuleSymbols &own{*result_.module_};
   own_ = &own;
   Visibility interface{{&own, false, true}}, implementation{{&own, false, false}};
@@ -573,6 +694,7 @@ void Resolver::Run(const parser::ParseTree &tree,
       add(interface, visible);
     }
   }
+  DeclareWithTypes(own, implementation);
   // A clause for a predicate or function without a declaration declares
   // it, local to the module, since types are inferred for it.
   for (const ClauseForm *clause : form.clauses) {

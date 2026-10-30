@@ -47,9 +47,17 @@ public:
   ~NameResolution();
   // The module's own symbols.
   const ModuleSymbols &module() const { return *module_; }
+  // The primitive types, which belong to no module.
+  const ModuleSymbols &primitive() const { return *primitive_; }
+  // The symbols of a module imported, directly or not; null if it was not
+  // loaded.
+  const ModuleSymbols *Module(llvm::StringRef name) const;
   // The module's names, in the order they were resolved: its declarations'
   // and then its clauses'.
   llvm::ArrayRef<ResolvedName> names() const { return names_; }
+  // The name of a unification's functor: as written, or, for list syntax,
+  // '[|]' or '[]'; null for any other functor.
+  const parser::SymName *FunctorName(const Unify &) const;
 
 private:
   friend class Resolver;
@@ -59,7 +67,12 @@ private:
   llvm::DenseMap<const ModuleInterface *, std::unique_ptr<ModuleSymbols>>
       imported_;
   std::vector<ResolvedName> names_;
+  llvm::DenseMap<const Unify *, const parser::SymName *> functors_;
 };
+
+// A name that is a character constant, such as a or 'é' (reference
+// manual, "Character type"; mmc accepts p(a) for p(char)).
+bool IsCharConstant(const parser::SymName &, unsigned arity);
 
 // Resolves the names of a module, whose clauses are desugared into `form`,
 // and of the interfaces `loader` has loaded for it, with LoadImports. Undefined names are

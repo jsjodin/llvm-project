@@ -727,14 +727,27 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
                 return;
               }
             }
+            // X = f(...) has the tokens of f(...), as a subterm's does, and
+            // X = Y those of the goal.
+            auto range{[&](const parser::DataTerm &term) {
+              return std::holds_alternative<const parser::Variable *>(term) ||
+                      std::holds_alternative<const parser::StateVar *>(term)
+                  ? unification->tokens
+                                     : std::visit([](const auto *x) {
+                                         return x->tokens;
+                                       }, term);
+            }};
             if (std::optional<VarId> left{SimpleVar(unification->left)}) {
-              UnifyWith(*left, unification->right, unification->tokens, out);
+              UnifyWith(*left, unification->right, range(unification->right),
+                  out);
             } else if (std::optional<VarId> right{
                            SimpleVar(unification->right)}) {
-              UnifyWith(*right, unification->left, unification->tokens, out);
+              UnifyWith(*right, unification->left, range(unification->left),
+                  out);
             } else {
               VarId both{Flatten(unification->left, out)};
-              UnifyWith(both, unification->right, unification->tokens, out);
+              UnifyWith(both, unification->right, range(unification->right),
+                  out);
             }
             FinishAtomic();
           },

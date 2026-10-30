@@ -1,10 +1,12 @@
 add_merkurius_library(MerkuriusSemantics
+  check-types.cpp
   desugar.cpp
   module-loader.cpp
   quantify.cpp
   resolve-names.cpp
   semantic-form.cpp
   symbols.cpp
+  types.cpp
 
   LINK_LIBS
   MerkuriusCommon

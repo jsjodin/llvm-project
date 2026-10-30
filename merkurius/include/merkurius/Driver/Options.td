@@ -51,6 +51,9 @@ let Visibility = [FC1Option] in {
 def library_dir : Separate<["-"], "library-dir">, MetaVarName<"<dir>">,
   HelpText<"The directory of the standard library's modules; by default "
            "lib/merkurius beside the directory of merkc">;
+def fdebug_dump_types : Flag<["-"], "fdebug-dump-types">,
+  HelpText<"Type check the source file and list each clause's variable "
+           "types and the declaration chosen for each name">;
 def fdebug_dump_resolved_names : Flag<["-"], "fdebug-dump-resolved-names">,
   HelpText<"Resolve the names of the source file and list the module's "
            "symbols and what each name resolves to">;
