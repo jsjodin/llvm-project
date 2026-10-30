@@ -243,6 +243,9 @@ struct ClauseForm {
   llvm::ArrayRef<VarInfo> vars;
   llvm::ArrayRef<TypeQualification> typeQualifications;
   unsigned goals; // the number of goals
+  // Each goal's nonlocal variables, by its number, in order; quantification
+  // computes them.
+  llvm::ArrayRef<llvm::ArrayRef<VarId>> nonlocals{};
 };
 
 // The clauses of a file that desugared without errors, in order.
@@ -254,9 +257,12 @@ struct SemanticForm {
 // variables print as their names, anonymous ones as _$N and fresh ones as
 // $N, where N is the variable's number, and version V of state variable S
 // as S!V. A program variable with the name of an earlier one, which a
-// lambda's argument may have, prints as Name$N. A lambda's body is printed
-// under the unification whose functor it is.
-void DumpSemanticForm(llvm::raw_ostream &, const SemanticForm &);
+// lambda's argument or a variable that quantification renamed apart may
+// have, prints as Name$N. A lambda's body is printed under the unification
+// whose functor it is. With `nonlocals`, each goal's line ends with its
+// nonlocal variables.
+void DumpSemanticForm(
+    llvm::raw_ostream &, const SemanticForm &, bool nonlocals = false);
 
 } // namespace merkurius::semantics
 #endif // MERKURIUS_SEMANTICS_SEMANTIC_FORM_H_

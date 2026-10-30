@@ -1,5 +1,6 @@
 add_merkurius_library(MerkuriusSemantics
   desugar.cpp
+  quantify.cpp
   semantic-form.cpp
 
   LINK_LIBS

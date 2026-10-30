@@ -58,6 +58,9 @@ def fdebug_dump_parse_tree_no_sema : Flag<["-"], "fdebug-dump-parse-tree-no-sema
   HelpText<"Print the parse tree, before semantic analysis">;
 def fdebug_dump_semantic_form : Flag<["-"], "fdebug-dump-semantic-form">,
   HelpText<"Print the semantic form of each clause, after desugaring">;
+def fdebug_dump_nonlocals : Flag<["-"], "fdebug-dump-nonlocals">,
+  HelpText<"Print the semantic form as -fdebug-dump-semantic-form does, "
+           "with each goal's nonlocal variables">;
 def fdebug_unparse_exact : Flag<["-"], "fdebug-unparse-exact">,
   HelpText<"Print the parse tree as the source it was read from, checking "
            "that the tree accounts for every token">;

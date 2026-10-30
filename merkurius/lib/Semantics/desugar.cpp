@@ -23,6 +23,7 @@
 // manual's DCG-transform ("DCG-goals").
 
 #include "merkurius/Semantics/desugar.h"
+#include "merkurius/Semantics/quantify.h"
 #include "merkurius/Common/idioms.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
@@ -1426,12 +1427,12 @@ const SemanticForm &Desugar(const parser::ParseTree &tree,
     if (const auto *rule{std::get_if<const parser::FactOrRule *>(&item)}) {
       ClauseDesugarer desugarer{tokens, arena, messages};
       if (auto clause{desugarer.Desugar(**rule)}) {
-        clauses.push_back(*clause);
+        clauses.push_back(&Quantify(**clause, tokens, arena, messages));
       }
     } else if (const auto *rule{std::get_if<const parser::DcgRule *>(&item)}) {
       ClauseDesugarer desugarer{tokens, arena, messages};
       if (auto clause{desugarer.Desugar(**rule)}) {
-        clauses.push_back(*clause);
+        clauses.push_back(&Quantify(**clause, tokens, arena, messages));
       }
     } else if (const auto *decl{std::get_if<const parser::MutableDecl *>(&item)}) {
       // A mutable declaration defines access predicates (reference manual,

@@ -207,7 +207,7 @@ bool DebugDumpSemanticFormAction::executeAction() {
   if (!os) {
     return false;
   }
-  semantics::DumpSemanticForm(*os, form);
+  semantics::DumpSemanticForm(*os, form, ci.getFrontendOpts().dumpNonlocals);
   os->flush();
   return !messages.AnyFatalError();
 }
