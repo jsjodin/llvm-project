@@ -14,7 +14,6 @@
 
 main(!IO) :-
     io.write_string("hello\n", !IO).
-% CHECK: not-yet.m:[[@LINE-2]]:6: error: not yet implemented: desugaring state variables
 
 digits([D | Ds]) -->
     [D],

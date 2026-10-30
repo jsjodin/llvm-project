@@ -667,6 +667,7 @@ TEST(ConvertTest, Goals) {
   EXPECT_EQ(GoalKind("a -> b ; c"), "IfThenElse");
   EXPECT_EQ(GoalKind("X = Y"), "Unification");
   EXPECT_EQ(GoalKind("X \\= Y"), "Inequality");
+  EXPECT_EQ(GoalKind("!S ^ f ^ g := 1"), "StateVarFieldUpdate");
   EXPECT_EQ(GoalKind("call(P, X)"), "Call");
   EXPECT_EQ(GoalKind("X `member` L"), "Call");
   EXPECT_EQ(GoalKind("{a, b}"), "Call");
@@ -928,6 +929,9 @@ TEST(ConvertTest, ClauseErrors) {
       V{"expected a determinism category, but found 'foo'"});
   EXPECT_EQ(Messages_("p(X) :- X := 1.\n"),
       V{"'X := 1' is a DCG goal, which may appear only in a DCG rule"});
+  // Only a state variable's field may be updated by a goal.
+  EXPECT_EQ(Messages_("p(X) :- X ^ f := 1.\n"),
+      V{"'X ^ f := 1' is a DCG goal, which may appear only in a DCG rule"});
   EXPECT_EQ(Messages_("p(X) :- =(X).\n"),
       V{"'=(X)' is a DCG goal, which may appear only in a DCG rule"});
   EXPECT_EQ(Messages_("p --> X = Y.\n"),

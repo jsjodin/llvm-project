@@ -37,14 +37,17 @@ using parser::TokenRange;
 // A variable of a clause, an index into its ClauseForm's variables.
 using VarId = std::uint32_t;
 
-ENUM_CLASS(VarKind, Program, Anonymous, Fresh)
+ENUM_CLASS(VarKind, Program, Anonymous, Fresh, State)
 
 // A program variable has the name it was written with, and each _ is an
-// anonymous variable of its own; desugaring makes the fresh ones.
+// anonymous variable of its own; desugaring makes the fresh ones, and one
+// variable for each version of a state variable, numbered from 0 within the
+// clause.
 struct VarInfo {
   VarKind kind;
-  llvm::StringRef name; // for a program variable
+  llvm::StringRef name; // for a program variable or a state variable
   TokenRange tokens; // where it first appears
+  unsigned version{0}; // for a state variable
 };
 
 struct Conj;
@@ -133,7 +136,9 @@ struct HOCall {
 
 // A goal under a quantifier, a promise, a requirement, a purity
 // annotation, a trace goal or an OpenMP directive. The parse-tree goal
-// holds the scope's parameters; vars are the variables it names.
+// holds the scope's parameters; vars are the variables it names, which for
+// a trace goal are the first and last versions of the state variable of
+// each io(!S) and state(M, !S) parameter.
 ENUM_CLASS(ScopeKind, Some, PromisePurity, PromiseSolutions,
     RequireDeterminism, RequireSwitch, DisableWarnings, Trace, Purity, Omp)
 
@@ -174,7 +179,8 @@ struct SemanticForm {
 
 // Prints the semantic form, one goal per line, indented by depth. Program
 // variables print as their names, anonymous ones as _$N and fresh ones as
-// $N, where N is the variable's number.
+// $N, where N is the variable's number, and version V of state variable S
+// as S!V.
 void DumpSemanticForm(llvm::raw_ostream &, const SemanticForm &);
 
 } // namespace merkurius::semantics

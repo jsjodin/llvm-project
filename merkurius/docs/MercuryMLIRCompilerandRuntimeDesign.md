@@ -323,7 +323,7 @@ constexpr auto ifThenElse =
   - **Calls.** Any other non-variable goal is a call, including `` X `p` Y `` and a tuple, which calls `'{}'`. `try [] G` without `then` calls `try/2`.
   - **Errors.**
     - `->` without `;`, and `if ... then` without `else`.
-    - The DCG-only forms `=(T)`, `:=(T)`, `T =^ F` and `^ F := T` in an ordinary goal.
+    - The DCG-only forms `=(T)`, `:=(T)`, `T =^ F` and `^ F := T` in an ordinary goal, and `T ^ F := V` unless `T` is a state variable `!S`, which makes it a goal that updates the state variable's field (reference manual, "State variables").
     - `X = Y` and `X := Y` in a DCG body.
     - A `try` goal without `then`.
     - Trace and try parameters that are not of their documented forms, with a state variable for `io(!S)`.
@@ -420,6 +420,11 @@ Tests, run on every file of every corpus:
    Test 5 already catches what test 6 was for: it compares our reader with Mercury's own term parser, item by item, on every pair of builtin operators among other cases.
 7. **Fuzzing.** `tools/merkurius-term-fuzzer` checks, for any input, that the lexer, reader, converter and desugaring do not crash, that the tokens unparse to the input, that tests 2 to 4 hold, with and without `-fopenmp`, and that each item's canonical term reads back as itself; `utils/fuzz/run-term-fuzzer.sh` runs it under libFuzzer with the address and undefined behavior sanitizers. Inputs that once failed go in `test/Parser/Inputs/fuzz`, and a lit test replays them and every Mercury file in the tests.
 
+   **Running the fuzzer.** `utils/fuzz/run-term-fuzzer.sh SECONDS JOBS` builds the target with the build tree's clang and fuzzes on `JOBS` processes; each piece of work is fuzzed for 3 minutes on 16 jobs before it is reported (`run-term-fuzzer.sh 180 16`).
+   - **Where:** the fuzzer, corpus, logs and crash files are in `build-merk/fuzz/term`. The corpus keeps growing between runs, and each run first copies every `.m` file in `test/` and `utils/` into it.
+   - **Reading the results:** each process writes `fuzz-N.log`. The sum of their `Done` lines is the number of inputs run. A failing check prints a line starting `merkurius-term-fuzzer:`, and the input that failed is saved in `artifacts/`, which should stay empty.
+   - **Checking the run is fresh:** the logs must be newer than the build. A build that fails leaves the previous run's logs in place, so a run that silently did not start can look like a clean one.
+
 **Corpora:** the reference manual's examples, our own test programs, and generated programs. Melbourne's library and test sources are not used, because nobody may read them to diagnose a failure (Clean-room rules).
 
 ### Semantic form
@@ -457,8 +462,13 @@ Desugaring also numbers the goals and unifications of each semantic form densely
 - **Higher-order calls.** `P(X)`, unqualified `call(P, X)`, `Y = F(X)` and unqualified `Y = apply(F, X)` are `HOCall`s; a function's result is its last argument.
 - **Goals.** `true` is the empty conjunction and `fail` the empty disjunction. A sequential conjunction absorbs the conjunctions inside it; a parallel one keeps its conjuncts. Following the manual's state variable rules, `G1 => G2` is `not (G1, not G2)`, `G1 <= G2` is `G2 => G1`, `G1 <=> G2` is both, and `all Vs G` is `not some Vs not G`; `X \= Y` is `not X = Y`. `event p(...)` is a call marked as an event.
 - **Scopes** keep their parse-tree goal, which holds their parameters, such as a trace goal's conditions or an OpenMP directive.
+- **State variables** are threaded through the clause as it is desugared. This gives the result of the manual's `transform_goal` and `transform_clause` without their chains of `X1 = X2`. Each state variable in scope has a current version, numbered from 0 within the clause and printed as `S!0`, `S!1`, ….
+  - **Calls.** In a call's arguments `!X` is `!.X, !:X`. An atomic goal that names `!:X` makes the next version, which is current after it; its `!.X` is the version before.
+  - **Branches.** The arms of a disjunction or if-then-else that leave a state variable at different versions each end by unifying theirs with a new one. An if-then-else's condition updates are seen in its then part only, and a negation's updates are not seen after it.
+  - **Scopes.** The head's `!X`, `!.X` and `!:X` bring it into scope for the clause. Its first version is the head's `!.X`, and its last becomes the head's `!:X`, with a unification only when the body leaves it at a version already in the head. `some [!X]` and a trace goal's `io(!X)` and `state(M, !X)` bring a new one into scope inside the goal, hiding any of the same name; for a trace goal, its first and last versions are the scope's variables.
+  - **Errors,** as mmc reports them: a state variable not in scope, `!X` as a side of a unification, `!X` anywhere but a call's or head's argument (mmc reads `f(!X)` as the functor `!` applied to `X`), `!X` as a function's result, and `!.X` or `!:X` among a quantifier's variables. Reading `!.X` before `X` has a value is a warning, as in mmc.
 - **Back pointers.** Each node records the tokens of the parse-tree node it came from, which is what diagnostics need; scopes also point to their parse-tree goal.
-- **Not yet desugared:** state variables, DCG rules, field access, lambdas, conditional expressions, `try` and `atomic` goals, `mutable` and `process` declarations, and quantification. Each is reported as not yet implemented, once per clause, and the clause is left out.
+- **Not yet desugared:** DCG rules, field access, including a state variable's field update, lambdas, conditional expressions, `try` and `atomic` goals, state variables in the variable lists of promises and `require_*` scopes, `mutable` and `process` declarations, and quantification. Each is reported as not yet implemented, once per clause, and the clause is left out.
 
 ### OpenMP directives
 

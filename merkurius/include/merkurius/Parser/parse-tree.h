@@ -584,6 +584,7 @@ struct Implication;
 struct IfThenElse;
 struct Unification;
 struct Inequality;
+struct StateVarFieldUpdate;
 struct Call;
 struct HigherOrderCall;
 struct QuantifiedGoal;
@@ -601,7 +602,8 @@ struct OmpGoal;
 using Goal = std::variant<const Conjunction *, const Disjunction *,
     const BuiltinGoal *, const Negation *, const Implication *,
     const IfThenElse *, const Unification *, const Inequality *,
-    const Call *, const HigherOrderCall *, const QuantifiedGoal *,
+    const StateVarFieldUpdate *, const Call *, const HigherOrderCall *,
+    const QuantifiedGoal *,
     const PurityGoal *, const PromisePurity *, const PromiseSolutions *,
     const RequireDeterminism *, const RequireSwitch *,
     const DisableWarnings *, const TraceGoal *, const TryGoal *,
@@ -936,6 +938,20 @@ struct Inequality {
   template <typename F> void ForEachField(F &&f) const {
     f("left", left);
     f("right", right);
+  }
+};
+
+// !S ^ Field1 ^ Field2 := Value (reference manual, "State variables").
+struct StateVarFieldUpdate {
+  static constexpr llvm::StringLiteral kindName{"StateVarFieldUpdate"};
+  TokenRange tokens;
+  DataTerm var; // the StateVar !S
+  llvm::ArrayRef<const FieldSpec *> fields;
+  DataTerm value;
+  template <typename F> void ForEachField(F &&f) const {
+    f("var", var);
+    f("fields", fields);
+    f("value", value);
   }
 };
 

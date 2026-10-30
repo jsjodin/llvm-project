@@ -53,6 +53,9 @@ private:
     case VarKind::Fresh:
       os_ << '$' << id;
       break;
+    case VarKind::State:
+      os_ << info.name << '!' << info.version;
+      break;
     }
   }
   void Vars(llvm::ArrayRef<VarId> vars) {
