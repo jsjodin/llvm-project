@@ -93,6 +93,16 @@ struct StateVarRule {
   void Expected(llvm::raw_ostream &os) const { os << "a state variable !X"; }
 };
 
+// X, a plain variable.
+struct PlainVarRule {
+  using resultType = DataTerm;
+  bool Matches(const Term &t) const { return llvm::isa<VariableTerm>(t); }
+  std::optional<DataTerm> Convert(const Term &t, ConvertState &state) const {
+    return dataTerm.Convert(t, state);
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "a variable"; }
+};
+
 constexpr auto quantifiedGoalVars{expect(
     "a list of variables", listOf(QuantifiedVarRule{}))};
 
@@ -597,6 +607,46 @@ struct TraceParamRule {
   }
 };
 
+struct AtomicParamRule {
+  using resultType = const AtomicParam *;
+  bool Matches(const Term &) const { return true; }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    for (auto [label, kind] :
+        {std::pair{"outer", AtomicParamKind::Outer},
+            std::pair{"inner", AtomicParamKind::Inner}}) {
+      if (const CompoundTerm * c{AsCompound(t, label, 1)}) {
+        if (auto var{Apply(StateVarRule{}, Operand(*c), state)}) {
+          return state.arena.Make<AtomicParam>(t.tokens(), kind, *var);
+        }
+        return std::nullopt;
+      }
+      if (const CompoundTerm * c{AsCompound(t, label, 2)}) {
+        auto initial{Apply(PlainVarRule{}, Operand(*c, 0), state)};
+        auto final{Apply(PlainVarRule{}, Operand(*c, 1), state)};
+        if (!initial || !final) {
+          return std::nullopt;
+        }
+        return state.arena.Make<AtomicParam>(
+            t.tokens(), kind, *initial, *final);
+      }
+    }
+    if (const CompoundTerm * c{AsCompound(t, "vars", 1)}) {
+      if (auto vars{Apply(quantifiedVars, Operand(*c), state)}) {
+        return state.arena.Make<AtomicParam>(t.tokens(),
+            AtomicParamKind::Vars, std::nullopt, std::nullopt, *vars);
+      }
+      return std::nullopt;
+    }
+    SayExpected(state, t, detail::ExpectedText(*this));
+    return std::nullopt;
+  }
+  void Expected(llvm::raw_ostream &os) const {
+    os << "an atomic parameter: outer(!S), inner(!S), outer(S0, S), "
+          "inner(S0, S) or vars([Vars])";
+  }
+};
+
 // io(!S), the one kind of try parameter.
 struct TryParamRule {
   using resultType = DataTerm;
@@ -964,9 +1014,52 @@ std::optional<Goal> GoalRule::Convert(
       return make(state.arena.Make<TraceGoal>(t.tokens(), *params, *traced));
     }
     if (name == "atomic") {
-      state.messages.Say(
-          GetSource(t, state.tokens), "atomic goals"_todo_en_US);
-      return std::nullopt;
+      auto params{Apply(expect("a list of atomic parameters",
+                            listOf(AtomicParamRule{})),
+          Operand(*c, 0), state)};
+      // G1 or_else G2 ..., which nest either way.
+      llvm::SmallVector<Goal, 2> goals;
+      bool ok{params.has_value()};
+      auto alternatives{[&](const Term &a, auto &self) -> void {
+        const Term &bare{StripParentheses(a)};
+        if (const CompoundTerm * orElse{AsCompound(bare, "or_else", 2)}) {
+          self(Operand(*orElse, 0), self);
+          self(Operand(*orElse, 1), self);
+        } else if (auto alternative{Apply(goal, a, state)}) {
+          goals.push_back(*alternative);
+        } else {
+          ok = false;
+        }
+      }};
+      alternatives(Operand(*c, 1), alternatives);
+      if (!ok) {
+        return std::nullopt;
+      }
+      // mmc: "duplicate outer atomic parameter", and "Atomic goal is
+      // missing a specification of the inner STM state".
+      static constexpr const char *labels[]{"outer", "inner", "vars"};
+      bool given[3]{};
+      for (const AtomicParam *param : *params) {
+        auto j{static_cast<std::size_t>(param->kind)};
+        if (given[j]) {
+          state.messages.Say(GetSource(Operand(*c, 0), state.tokens),
+              "the atomic parameter '%s' is given more than once"_err_en_US,
+              labels[j]);
+          return std::nullopt;
+        }
+        given[j] = true;
+      }
+      if (!given[0] || !given[1]) {
+        state.messages.Say(GetSource(Operand(*c, 0), state.tokens),
+            "an atomic goal needs the parameters outer(...) and inner(...), "
+            "but %s missing"_err_en_US,
+            !given[0] && !given[1] ? "both are"
+                : !given[0]        ? "outer(...) is"
+                                   : "inner(...) is");
+        return std::nullopt;
+      }
+      return make(state.arena.Make<AtomicGoal>(t.tokens(), *params,
+          state.arena.SaveArray(llvm::ArrayRef<Goal>{goals})));
     }
   }
   if (std::optional<TryParts> tryParts{MatchTry(t)}) {

@@ -763,6 +763,9 @@ bool CanonicalUnparser::IsBlockChild(const N &n, const Child &c) const {
                            RequireDeterminism, RequireSwitch, DisableWarnings,
                            TraceGoal, CatchClause>) {
     return c.node == Pointer(n.goal);
+  } else if constexpr (std::is_same_v<N, AtomicGoal>) {
+    return llvm::any_of(
+        n.goals, [&](const Goal &g) { return c.node == Pointer(g); });
   } else if constexpr (std::is_same_v<N, TryGoal>) {
     return c.node == Pointer(n.goal) || c.node == Pointer(n.then) ||
         c.node == Pointer(n.otherwise);
