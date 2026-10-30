@@ -44,7 +44,8 @@ enum class ActionKind {
   // term in parentheses.
   DebugUnparseParenthesizedNoSema,
   // -fdebug-dump-semantic-form: desugar the clauses and print their
-  // semantic form.
+  // semantic form; -fdebug-dump-nonlocals also prints each goal's nonlocal
+  // variables.
   DebugDumpSemanticForm,
 };
 
@@ -55,6 +56,7 @@ struct FrontendOptions {
   std::string outputFile;
   bool showHelp{false};
   bool showVersion{false};
+  bool dumpNonlocals{false}; // -fdebug-dump-nonlocals
 };
 
 struct LangOptions {
