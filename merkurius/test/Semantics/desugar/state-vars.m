@@ -80,6 +80,6 @@ compute_out(In, Out) :-
 % CHECK-NEXT: | Scope #5 Some
 % CHECK-NEXT: | | Conj #4
 % CHECK-NEXT: | | | Unify #0 State!0 = In
-% CHECK-NEXT: | | | Unify #2 State!1 = +(State!0, $4)
+% CHECK-NEXT: | | | Unify #2 State!1 = '+'(State!0, $4)
 % CHECK-NEXT: | | | Unify #1 $4 = 1
 % CHECK-NEXT: | | | Unify #3 Out = State!1
