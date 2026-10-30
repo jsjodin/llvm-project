@@ -595,6 +595,7 @@ struct RequireSwitch;
 struct DisableWarnings;
 struct TraceGoal;
 struct TryGoal;
+struct AtomicGoal;
 struct EventGoal;
 struct OmpGoal;
 using Goal = std::variant<const Conjunction *, const Disjunction *,
@@ -604,7 +605,7 @@ using Goal = std::variant<const Conjunction *, const Disjunction *,
     const PurityGoal *, const PromisePurity *, const PromiseSolutions *,
     const RequireDeterminism *, const RequireSwitch *,
     const DisableWarnings *, const TraceGoal *, const TryGoal *,
-    const EventGoal *, const OmpGoal *>;
+    const AtomicGoal *, const EventGoal *, const OmpGoal *>;
 
 struct DcgConjunction;
 struct DcgDisjunction;
@@ -1106,6 +1107,40 @@ struct TraceGoal {
   template <typename F> void ForEachField(F &&f) const {
     f("params", params);
     f("goal", goal);
+  }
+};
+
+ENUM_CLASS(AtomicParamKind, Outer, Inner, Vars)
+
+// outer(!S) or outer(S0, S), inner(!S) or inner(S0, S), or vars([Vars]).
+// The reference manual does not describe atomic goals; these are the forms
+// mmc 22.01.9 accepts.
+struct AtomicParam {
+  static constexpr llvm::StringLiteral kindName{"AtomicParam"};
+  TokenRange tokens;
+  AtomicParamKind kind;
+  std::optional<DataTerm> initial; // !S, or S0; for outer and inner
+  std::optional<DataTerm> final; // S, when initial is S0
+  llvm::ArrayRef<llvm::StringRef> vars; // for vars
+  template <typename F> void ForEachField(F &&f) const {
+    f("kind", kind);
+    f("initial", initial);
+    f("final", final);
+    f("vars", vars);
+  }
+};
+
+// atomic [Params] G, a transaction on the STM state. G may be a chain of
+// alternatives, G1 or_else G2 ..., which are taken in turn when one
+// retries; or_else is only an operator of goals here.
+struct AtomicGoal {
+  static constexpr llvm::StringLiteral kindName{"AtomicGoal"};
+  TokenRange tokens;
+  llvm::ArrayRef<const AtomicParam *> params;
+  llvm::ArrayRef<Goal> goals; // the alternatives
+  template <typename F> void ForEachField(F &&f) const {
+    f("params", params);
+    f("goals", goals);
   }
 };
 

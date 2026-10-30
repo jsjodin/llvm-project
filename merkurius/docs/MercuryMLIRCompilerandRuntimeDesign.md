@@ -333,7 +333,7 @@ constexpr auto ifThenElse =
   - **Data-terms.** The special data-terms are their own nodes: conditional expressions, `@`, field selection and update, lambdas, `: Type`, `` `with_type` `` and `coerce`.
   - **DCG goals.** `{ G1, G2 }`, which the reader reads as a tuple, holds the conjunction of the goals. `&` is a DCG parallel conjunction, which mmc accepts.
   - **OpenMP.** A goal with a `%$omp` directive is an `OmpGoal` (OpenMP directives). A directive anywhere else draws a warning and is ignored.
-  - **Not yet implemented:** `atomic` goals.
+  - **Atomic goals.** The reference manual lists `atomic` only as an operator, so `atomic [Params] G` follows what mmc 22.01.9 accepts: `outer` and `inner` are required, each `!S` or a pair `S0, S`, with an optional `vars([Vars])`, and none may be repeated. `G1 or_else G2` is an operator of goals only at the top of the goal, where the alternatives become a list; elsewhere it is a call, as in mmc.
 - **Pragmas.** The pragma's name decides the forms of its arguments.
   - **Node kinds:**
     - one node kind per family;
@@ -363,7 +363,7 @@ constexpr auto ifThenElse =
   - **Solver types.** `solver type t` is an `AbstractTypeDecl` with `solver` set. `solver type t where ...` is a `SolverTypeDefn`, whose attributes must come in the manual's order. As in mmc, only `representation` is required, although the manual also requires `constraint_store`. A constraint store is one `mutable` or a list of them. Constructors and `==` are errors.
 - **Trace conditions** are typed. At compile time a condition is `flag("Name")`, `tracelevel(shallow)` or `tracelevel(deep)`, or `grade(Test)`; at run time it is `env("Name")`. Either kind may be combined with `and`, `or` and `not`. The grade tests are the manual's, plus `rbmm`, which mmc also accepts. As in mmc, `compile_time`, `run_time` and `io` may each be given only once.
 - **Names** are `SymName` nodes: a name and its module qualifiers, from `'.'(Qualifier, Name)` or from `__` within a name (reference manual, "The module system"), so `a.b__c` is `a.b.c`. A name that begins or ends with `__` is not split.
-- **Errors.** A term that matches nothing is reported with the forms expected in its context and the start of its source, as in "expected a module name, but found '"string"'". An item with an error is left out of the tree, and conversion continues with the next item. Forms the converter does not handle yet, namely `atomic` goals, OpenMP directives and three pragmas, are reported as not yet implemented.
+- **Errors.** A term that matches nothing is reported with the forms expected in its context and the start of its source, as in "expected a module name, but found '"string"'". An item with an error is left out of the tree, and conversion continues with the next item. Forms the converter does not handle yet, namely three pragmas, are reported as not yet implemented.
 - **Items** convert one at a time: the reader's terms for an item live in an arena that is reset once it is converted, and the strings the parse tree keeps are copied into the parse tree's own arena. An item with a lexical error is not converted.
 - **Kept small.** Rules are `constexpr` objects built from a few templates. Heavy template parsers are known for slow builds and high compiler memory, so the library stays minimal and nodes are allocated in an arena rather than moved around as values.
 
@@ -433,7 +433,7 @@ The semantic form is the desugared body of each clause, built from a small set o
 | `IfThenElse`, `Not` | If-then-else, negation |
 | `Unify` | `X = Y`, or `X = f(Y1, …, Yn)` with exactly one functor, including a closure built from a lambda |
 | `Call`, `HOCall` | Call to a named predicate, call of a closure |
-| `Scope` | One goal wrapped in a quantifier, `promise_*`, `require_*`, `trace`, `try` or an OpenMP directive |
+| `Scope` | One goal wrapped in a quantifier, `promise_*`, `require_*`, `trace`, `try`, `atomic` or an OpenMP directive; a `try` goal's parts and an `atomic` goal's `or_else` alternatives are goals of the scope |
 
 Each node points back to the parse-tree node it came from, and diagnostics use that pointer, so an error found in the semantic form is reported at the construct the programmer wrote. Together, the parse tree and the semantic form are the AST.
 

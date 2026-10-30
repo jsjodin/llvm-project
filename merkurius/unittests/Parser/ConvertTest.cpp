@@ -690,6 +690,9 @@ TEST(ConvertTest, Goals) {
       "DisableWarnings");
   EXPECT_EQ(GoalKind("trace [io(!IO)] q"), "TraceGoal");
   EXPECT_EQ(GoalKind("try [] q then r"), "TryGoal");
+  EXPECT_EQ(GoalKind("atomic [outer(!IO), inner(!S)] q"), "AtomicGoal");
+  // or_else is an operator of goals only at the top of an atomic goal.
+  EXPECT_EQ(GoalKind("q or_else r"), "Call");
   EXPECT_EQ(GoalKind("event e(X)"), "EventGoal");
   // try(Params, Goal) alone is a call, as in mmc.
   EXPECT_EQ(GoalKind("try [] q"), "Call");
@@ -892,7 +895,32 @@ TEST(ConvertTest, ClauseErrors) {
       V{"expected 'Pattern -> Goal', but found 'e'"});
   EXPECT_EQ(Messages_("p :- event X.\n"),
       V{"expected a predicate call, but found 'X'"});
-  EXPECT_EQ(Messages_("p :- atomic([], q).\n"), V{"atomic goals"});
+  EXPECT_EQ(Messages_("p :- atomic [inner(S0, S), outer(!IO), vars([X])] "
+                      "(q or_else (r or_else s)).\n"),
+      V{});
+  EXPECT_EQ(Messages_("p :- atomic [outer(!IO)] q.\n"),
+      V{"an atomic goal needs the parameters outer(...) and inner(...), "
+        "but inner(...) is missing"});
+  EXPECT_EQ(Messages_("p :- atomic [inner(!S)] q.\n"),
+      V{"an atomic goal needs the parameters outer(...) and inner(...), "
+        "but outer(...) is missing"});
+  EXPECT_EQ(Messages_("p :- atomic [] q.\n"),
+      V{"an atomic goal needs the parameters outer(...) and inner(...), "
+        "but both are missing"});
+  EXPECT_EQ(Messages_("p :- atomic [outer(!IO), inner(!S), outer(!T)] q.\n"),
+      V{"the atomic parameter 'outer' is given more than once"});
+  EXPECT_EQ(Messages_("p :- atomic [outer(!IO), inner(!S), frob] q.\n"),
+      V{"expected an atomic parameter: outer(!S), inner(!S), outer(S0, S), "
+        "inner(S0, S) or vars([Vars]), but found 'frob'"});
+  EXPECT_EQ(Messages_("p :- atomic [outer(!IO), inner(f(X))] q.\n"),
+      V{"expected a state variable !X, but found 'f(X)'"});
+  EXPECT_EQ(Messages_("p :- atomic [outer(!IO), inner(S0, f(S))] q.\n"),
+      V{"expected a variable, but found 'f(S)'"});
+  EXPECT_EQ(Messages_("p :- atomic [outer(!IO), inner(!S), vars(X)] q.\n"),
+      V{"expected a list of variables, but found 'X'"});
+  EXPECT_EQ(Messages_("p :- atomic([], q).\n"),
+      V{"an atomic goal needs the parameters outer(...) and inner(...), "
+        "but both are missing"});
   EXPECT_EQ(Messages_("p :- X = (pred(A) :- true).\n"),
       V{"a lambda expression's head must be 'pred(Args) is Det' or "
         "'func(Args) = Result', with an optional 'is Det'"});
