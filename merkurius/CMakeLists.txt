@@ -112,6 +112,7 @@ set_target_properties(merkurius-headers PROPERTIES FOLDER "Merkurius/Misc")
 add_subdirectory(include)
 add_subdirectory(lib)
 add_subdirectory(tools)
+add_subdirectory(library)
 
 if(MERKURIUS_INCLUDE_TESTS)
   if(MERKURIUS_GTEST_AVAIL)

@@ -26,7 +26,8 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
               OPT_fdebug_unparse_exact_minimal_layout,
               OPT_fdebug_unparse_no_sema,
               OPT_fdebug_unparse_parenthesized_no_sema,
-              OPT_fdebug_dump_semantic_form, OPT_fdebug_dump_nonlocals)) {
+              OPT_fdebug_dump_semantic_form, OPT_fdebug_dump_nonlocals,
+              OPT_fdebug_dump_imports)) {
     switch (arg->getOption().getID()) {
     case OPT_E:
       opts.programAction = ActionKind::PrintPreprocessedInput;
@@ -61,6 +62,9 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
     case OPT_fdebug_dump_semantic_form:
       opts.programAction = ActionKind::DebugDumpSemanticForm;
       break;
+    case OPT_fdebug_dump_imports:
+      opts.programAction = ActionKind::DebugDumpImports;
+      break;
     case OPT_fdebug_dump_nonlocals:
       opts.programAction = ActionKind::DebugDumpSemanticForm;
       opts.dumpNonlocals = true;
@@ -68,6 +72,8 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
     }
   }
   opts.outputFile = args.getLastArgValue(OPT_o).str();
+  opts.searchDirectories = args.getAllArgValues(OPT_I);
+  opts.libraryDirectory = args.getLastArgValue(OPT_library_dir).str();
   opts.inputs = args.getAllArgValues(OPT_INPUT);
   if (opts.inputs.empty() && !opts.showHelp && !opts.showVersion) {
     reportError("no input files");

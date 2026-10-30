@@ -47,6 +47,9 @@ enum class ActionKind {
   // semantic form; -fdebug-dump-nonlocals also prints each goal's nonlocal
   // variables.
   DebugDumpSemanticForm,
+  // -fdebug-dump-imports: load the imported modules and list their
+  // interfaces.
+  DebugDumpImports,
 };
 
 struct FrontendOptions {
@@ -57,6 +60,9 @@ struct FrontendOptions {
   bool showHelp{false};
   bool showVersion{false};
   bool dumpNonlocals{false}; // -fdebug-dump-nonlocals
+  std::vector<std::string> searchDirectories; // -I
+  // -library-dir, or lib/merkurius beside the executable's directory.
+  std::string libraryDirectory;
 };
 
 struct LangOptions {
