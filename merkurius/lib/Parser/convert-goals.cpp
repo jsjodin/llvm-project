@@ -269,8 +269,23 @@ std::optional<DataTerm> ConvertLambda(
         "'func(Args) = Result', with an optional 'is Det'"_err_en_US);
     return std::nullopt;
   }
-  auto arguments{detail::ConvertElements(modedTerm, parts.arguments, state)};
-  bool ok{arguments.has_value()};
+  llvm::ArrayRef<const Term *> terms{parts.arguments};
+  std::optional<llvm::ArrayRef<Mode>> dcgModes{llvm::ArrayRef<Mode>{}};
+  if (parts.dcg) {
+    if (terms.size() < 2) {
+      // mmc: "the head of a lambda expression that is defined by a DCG
+      // clause must have at least [two] arguments".
+      state.messages.Say(GetSource(t, state.tokens),
+          "a DCG lambda expression's head must end with the modes of its "
+          "two DCG arguments, as in 'pred(in, out) is det --> G'"_err_en_US);
+      return std::nullopt;
+    }
+    dcgModes = detail::ConvertElements(
+        expect("the mode of a DCG argument", mode), terms.take_back(2), state);
+    terms = terms.drop_back(2);
+  }
+  auto arguments{detail::ConvertElements(modedTerm, terms, state)};
+  bool ok{arguments.has_value() && dcgModes.has_value()};
   const ModedTerm *result{nullptr};
   ok &= ConvertOptional(modedTerm, parts.result, result, state);
   std::optional<Determinism> det;
@@ -286,7 +301,7 @@ std::optional<DataTerm> ConvertLambda(
     return std::nullopt;
   }
   return state.arena.Make<Lambda>(t.tokens(), parts.purity, parts.kind,
-      *arguments, result, det, body, dcgBody);
+      *arguments, result, det, body, dcgBody, *dcgModes);
 }
 
 } // namespace

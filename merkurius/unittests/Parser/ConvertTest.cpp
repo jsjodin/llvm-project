@@ -812,16 +812,14 @@ TEST(ConvertTest, DataTerms) {
       "| | | | FieldSpec\n| | | | | name: SymName g\n"
       "| | | | | arguments:\n| | | | | | Literal 1\n"
       "| | | value: Literal 3\n");
-  EXPECT_EQ(Compact("p :- X = (impure pred(!.S::in, !:S::out) is det --> "
-                    "[a]).\n"),
+  // A DCG lambda's last two arguments are the modes of its implicit ones.
+  EXPECT_EQ(Compact("p :- X = (impure pred(in, out) is det --> [a]).\n"),
       "FactOrRule\n| kind: Predicate\n| name: SymName p\n"
       "| body: Unification\n| | left: Variable X\n"
       "| | right: Lambda\n| | | purity: Impure\n| | | kind: Predicate\n"
-      "| | | arguments:\n"
-      "| | | | ModedTerm\n| | | | | term: StateVar !.S\n"
-      "| | | | | mode: NamedMode\n| | | | | | name: SymName in\n"
-      "| | | | ModedTerm\n| | | | | term: StateVar !:S\n"
-      "| | | | | mode: NamedMode\n| | | | | | name: SymName out\n"
+      "| | | dcgModes:\n"
+      "| | | | NamedMode\n| | | | | name: SymName in\n"
+      "| | | | NamedMode\n| | | | | name: SymName out\n"
       "| | | determinism: Det\n"
       "| | | dcgBody: DcgTerminals\n| | | | terms:\n"
       "| | | | | FunctorData\n| | | | | | name: SymName a\n");
@@ -834,6 +832,24 @@ TEST(ConvertTest, DataTerms) {
       "| | | determinism: Det\n"
       "| | | body: Unification\n| | | | left: Variable B\n"
       "| | | | right: Variable A\n");
+}
+
+TEST(ConvertTest, DcgLambdas) {
+  // The last two arguments of a DCG lambda are modes (reference manual,
+  // "Lambda expressions").
+  std::string items{Items("p(F) :- F = (pred(X::in, in, out) is det --> [X]).\n")};
+  EXPECT_NE(items.find("| | | dcgModes:\n"
+                       "| | | | NamedMode\n"
+                       "| | | | | name: SymName in\n"
+                       "| | | | | arguments:\n"
+                       "| | | | NamedMode\n"
+                       "| | | | | name: SymName out\n"),
+      std::string::npos)
+      << items;
+  EXPECT_EQ(Messages_("p(F) :- F = (pred(in) is det --> [x]).\n"),
+      (std::vector<std::string>{
+          "a DCG lambda expression's head must end with the modes of its "
+          "two DCG arguments, as in 'pred(in, out) is det --> G'"}));
 }
 
 TEST(ConvertTest, DcgGoals) {
