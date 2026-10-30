@@ -51,6 +51,13 @@ public:
   // Reads the next item, or returns nullopt at the end of the file.
   std::optional<ItemTerm> ReadItem();
 
+  // For a %$omp directive's tokens: reads the name at `at` applied to
+  // arguments, as in schedule(dynamic, 4), and moves `at` past it. Returns
+  // null after a syntax error. Its variables are numbered as in `numbers`,
+  // the numbers of the item's variables, and from `count` on for others.
+  const Term *ReadApplication(std::uint32_t &at,
+      const llvm::StringMap<unsigned> &numbers, unsigned count);
+
 private:
   struct Parsed {
     const Term *term; // null after a syntax error

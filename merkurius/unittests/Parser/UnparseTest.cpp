@@ -74,12 +74,13 @@ TEST(UnparseTest, MinimalLayout) {
 }
 
 // Converts `text` and prints it in the canonical layout.
-std::string Canonical(llvm::StringRef text, bool parenthesize = false) {
+std::string Canonical(
+    llvm::StringRef text, bool parenthesize = false, bool openMP = false) {
   AllSources all;
   SourceFile *file{
       all.AddBuffer("test.m", llvm::MemoryBuffer::getMemBufferCopy(text))};
   Messages messages;
-  TokenSequence tokens{Lex(*file, LexerOptions{}, messages)};
+  TokenSequence tokens{Lex(*file, LexerOptions{openMP}, messages)};
   ParseTreeArena arena;
   const ParseTree &tree{ConvertFile(tokens, arena, messages)};
   std::string result;
@@ -137,6 +138,19 @@ TEST(UnparseTest, CanonicalComments) {
       "p :-\n    % before q\n    q,\n    r.\n");
   // An item with an error is printed as written.
   EXPECT_EQ(Canonical("p :-   q(.\nr:-s."), "p :-   q(.\nr :-\n    s.\n");
+}
+
+// A directive is a line of its own, printed as written, before its goal.
+TEST(UnparseTest, CanonicalDirectives) {
+  EXPECT_EQ(Canonical("p:-\n%$omp parallel do  reduction(+)\nq,r.", false,
+                true),
+      "p :-\n    %$omp parallel do  reduction(+)\n    q,\n    r.\n");
+  EXPECT_EQ(Canonical("p:-q,\n  %$omp critical\n  %$omp&  hint(1)\nr.",
+                false, true),
+      "p :-\n    q,\n    %$omp critical\n    %$omp&  hint(1)\n    r.\n");
+  // The parenthesized form leaves the directive outside the parentheses.
+  EXPECT_EQ(Canonical("p:-\n%$omp do\nX = Y + 1.", true, true),
+      "p :-\n    %$omp do\n    (X = (Y + 1)).\n");
 }
 
 TEST(UnparseTest, Parenthesized) {

@@ -4,6 +4,7 @@ add_merkurius_library(MerkuriusParser
   convert-goals.cpp
   convert-pragmas.cpp
   convert-directives.cpp
+  convert-omp.cpp
   lexer.cpp
   message.cpp
   operators.cpp
@@ -19,6 +20,10 @@ add_merkurius_library(MerkuriusParser
   LINK_LIBS
   MerkuriusCommon
 
+  DEPENDS
+  omp_gen
+
   LINK_COMPONENTS
+  FrontendOpenMP
   Support
   )

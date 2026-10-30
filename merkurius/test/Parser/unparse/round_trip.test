@@ -12,4 +12,9 @@
 # RUN:   %S/../../Lexer/line_directives.m %S/../../Driver/Inputs/sumsq.m \
 # RUN:   %S/../Inputs/fuzz/byte_order_mark.m %S/exact.m \
 # RUN:   %S/Inputs/messy.m %S/Inputs/messy.canonical.m \
-# RUN:   %S/../../../utils/term-oracle/term_oracle.m
+# RUN:   %S/../convert/omp.m %S/../../../utils/term-oracle/term_oracle.m
+#
+# With -fopenmp, on the files with %$omp directives, which are then part of
+# the parse tree:
+# RUN: %round-trip --openmp %S/../convert/omp.m %S/../../Lexer/directives.m \
+# RUN:   %S/../../Driver/Inputs/sumsq.m

@@ -256,6 +256,19 @@ std::optional<ItemTerm> TermReader::ReadItem() {
   return ItemTerm{failed_ ? nullptr : parsed.term, Range(first), variables_};
 }
 
+const Term *TermReader::ReadApplication(std::uint32_t &at,
+    const llvm::StringMap<unsigned> &numbers, unsigned count) {
+  at_ = at;
+  failed_ = false;
+  commaIsOperator_ = true;
+  argumentStart_ = at_;
+  variableNumbers_ = numbers;
+  variables_ = count;
+  Parsed parsed{ParseName(primaryPriority)};
+  at = at_;
+  return failed_ ? nullptr : parsed.term;
+}
+
 // Reads a term whose priority is at least minPriority, by precedence
 // climbing: a primary term, then each infix operator that binds less
 // tightly than what came before but no less than minPriority.

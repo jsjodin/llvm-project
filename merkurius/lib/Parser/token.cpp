@@ -106,6 +106,14 @@ void DumpTokens(llvm::raw_ostream &o, const TokenSequence &tokens,
   }
 }
 
+TokenSequence GetDirectiveTokens(
+    const TokenSequence &tokens, std::uint32_t directive) {
+  const Token &token{tokens.tokens.at(directive)};
+  auto first{tokens.directiveTokens.begin() + token.firstDirectiveToken};
+  return TokenSequence{
+      std::vector<Token>(first, first + token.directiveTokens), {}};
+}
+
 void UnparseTokens(llvm::raw_ostream &o, const TokenSequence &tokens) {
   for (const Token &token : tokens.tokens) {
     o << token.trivia << token.spelling;

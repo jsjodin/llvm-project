@@ -481,7 +481,10 @@ private:
   template <typename T>
   void Gather(const T &value, llvm::SmallVectorImpl<Child> &children,
       bool viaVariant) {
-    if constexpr (IsNode<T>::value) {
+    if constexpr (std::is_same_v<T, OmpDirective>) {
+      // Its nodes index the directive's own tokens; the directive token is
+      // printed as written.
+    } else if constexpr (IsNode<T>::value) {
       children.push_back({value.tokens, T::kindName, &value,
           &CanonicalUnparser::UnparseNode<T>, viaVariant});
     } else if constexpr (std::is_pointer_v<T>) {
@@ -598,6 +601,12 @@ void CanonicalUnparser::Place(TokenKind kind, llvm::StringRef spelling,
       need = Need::Space;
     }
 
+    // A directive is a line of its own.
+    if (kind == TokenKind::Directive || last_.kind == TokenKind::Directive) {
+      need = Need::Any;
+      glue = Break::HardLine;
+    }
+
     Break requested{Break::None};
     unsigned spaces{1};
     std::size_t chosen{glue_};
@@ -640,7 +649,19 @@ void CanonicalUnparser::Place(TokenKind kind, llvm::StringRef spelling,
     separator.leading = comments.leading;
   }
   pending_.clear();
-  doc_.Text(spelling);
+  if (kind == TokenKind::Directive) {
+    // Its continuation lines at its own indentation.
+    llvm::SmallVector<llvm::StringRef, 2> lines;
+    spelling.split(lines, '\n');
+    for (std::size_t j{0}; j < lines.size(); ++j) {
+      if (j > 0) {
+        doc_.Separator(Break::HardLine);
+      }
+      doc_.Text(lines[j].trim(" \t\r"));
+    }
+  } else {
+    doc_.Text(spelling);
+  }
   last_ = Last{true, kind, spelling,
       !synthetic && (flags & keepAdjacencyAfter) != 0,
       (flags & (tight | tightAfter)) != 0};
@@ -795,7 +816,7 @@ template <typename N>
 bool CanonicalUnparser::IsOperatorTerm(
     const N &n, llvm::ArrayRef<Child> children) const {
   std::uint32_t first{n.tokens.first}, last{n.tokens.last};
-  if (first >= last) {
+  if (first >= last || tokens_[first].kind == TokenKind::Directive) {
     return false;
   }
   std::uint32_t head{first};

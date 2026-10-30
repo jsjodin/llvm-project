@@ -25,7 +25,7 @@ tool_dirs = [config.merkurius_tools_dir, config.llvm_tools_dir]
 llvm_config.add_tool_substitutions(["merkc", "merkurius-term-fuzzer"], tool_dirs)
 llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
 
-# The unparser's round-trip tests 2 and 4.
+# The unparser's round-trip tests 2, 3 and 4.
 config.substitutions.append(
     (
         "%round-trip",

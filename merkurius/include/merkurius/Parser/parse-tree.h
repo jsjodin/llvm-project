@@ -24,6 +24,7 @@
 #include "merkurius/Parser/term.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Frontend/OpenMP/OMP.h"
 #include "llvm/Support/raw_ostream.h"
 #include <optional>
 #include <type_traits>
@@ -595,6 +596,7 @@ struct DisableWarnings;
 struct TraceGoal;
 struct TryGoal;
 struct EventGoal;
+struct OmpGoal;
 using Goal = std::variant<const Conjunction *, const Disjunction *,
     const BuiltinGoal *, const Negation *, const Implication *,
     const IfThenElse *, const Unification *, const Inequality *,
@@ -602,7 +604,7 @@ using Goal = std::variant<const Conjunction *, const Disjunction *,
     const PurityGoal *, const PromisePurity *, const PromiseSolutions *,
     const RequireDeterminism *, const RequireSwitch *,
     const DisableWarnings *, const TraceGoal *, const TryGoal *,
-    const EventGoal *>;
+    const EventGoal *, const OmpGoal *>;
 
 struct DcgConjunction;
 struct DcgDisjunction;
@@ -1147,6 +1149,142 @@ struct EventGoal {
   TokenRange tokens;
   const Call *call;
   template <typename F> void ForEachField(F &&f) const { f("call", call); }
+};
+
+//===----------------------------------------------------------------------===//
+// OpenMP directives (design document, "OpenMP directives")
+//
+// A directive's nodes index the directive's own tokens (GetDirectiveTokens),
+// not the file's: an OmpDirective's tokens run from its name to the end of
+// its last clause. The directive kinds and the clause kinds are OMP.td's.
+//===----------------------------------------------------------------------===//
+
+// The names the dump prints for OMP.td's kinds, as for the enums above.
+inline std::string_view EnumToString(llvm::omp::Directive directive) {
+  return llvm::omp::getOpenMPDirectiveName(directive);
+}
+inline std::string_view EnumToString(llvm::omp::Clause clause) {
+  return llvm::omp::getOpenMPClauseName(clause);
+}
+
+ENUM_CLASS(OmpScheduleModifier, Monotonic, Nonmonotonic, Simd)
+ENUM_CLASS(OmpScheduleKind, Static, Dynamic, Guided, Auto, Runtime)
+
+// schedule([Modifiers :] Kind [, Chunk]).
+struct OmpScheduleClause {
+  static constexpr llvm::StringLiteral kindName{"OmpScheduleClause"};
+  TokenRange tokens;
+  llvm::ArrayRef<OmpScheduleModifier> modifiers;
+  OmpScheduleKind kind;
+  std::optional<DataTerm> chunk;
+  template <typename F> void ForEachField(F &&f) const {
+    f("modifiers", modifiers);
+    f("kind", kind);
+    f("chunk", chunk);
+  }
+};
+
+ENUM_CLASS(OmpReductionModifier, Default, Inscan, Task)
+
+// reduction([Modifier,] Op [: Vars]), where Op is a function the programmer
+// promises is associative, such as + or max. Over a fold, the accumulator
+// is the reduction's variable, so Vars is usually left out.
+struct OmpReductionClause {
+  static constexpr llvm::StringLiteral kindName{"OmpReductionClause"};
+  TokenRange tokens;
+  std::optional<OmpReductionModifier> modifier;
+  const SymName *op;
+  llvm::ArrayRef<const Variable *> variables;
+  template <typename F> void ForEachField(F &&f) const {
+    f("modifier", modifier);
+    f("op", op);
+    f("variables", variables);
+  }
+};
+
+ENUM_CLASS(OmpMapModifier, Always, Close, Present)
+ENUM_CLASS(OmpMapType, Alloc, Delete, From, Release, Storage, To, Tofrom)
+
+// map([Modifiers,] [Type :] Vars).
+struct OmpMapClause {
+  static constexpr llvm::StringLiteral kindName{"OmpMapClause"};
+  TokenRange tokens;
+  llvm::ArrayRef<OmpMapModifier> modifiers;
+  std::optional<OmpMapType> type;
+  llvm::ArrayRef<const Variable *> variables;
+  template <typename F> void ForEachField(F &&f) const {
+    f("modifiers", modifiers);
+    f("type", type);
+    f("variables", variables);
+  }
+};
+
+// index(I), a Merkurius clause: the induction variable of a self-recursive
+// counted loop.
+struct OmpIndexClause {
+  static constexpr llvm::StringLiteral kindName{"OmpIndexClause"};
+  TokenRange tokens;
+  const Variable *variable;
+  template <typename F> void ForEachField(F &&f) const {
+    f("variable", variable);
+  }
+};
+
+// upper(N), a Merkurius clause: the inclusive bound of the loop's index.
+struct OmpUpperClause {
+  static constexpr llvm::StringLiteral kindName{"OmpUpperClause"};
+  TokenRange tokens;
+  DataTerm bound;
+  template <typename F> void ForEachField(F &&f) const { f("bound", bound); }
+};
+
+// Any other clause of OMP.td, such as nowait, private(X, Y) or
+// num_threads(N): its arguments, and the modifiers before a ':' in them, as
+// data-terms for semantic analysis to interpret.
+struct OmpGenericClause {
+  static constexpr llvm::StringLiteral kindName{"OmpGenericClause"};
+  TokenRange tokens;
+  llvm::omp::Clause id;
+  llvm::ArrayRef<DataTerm> modifiers;
+  llvm::ArrayRef<DataTerm> arguments;
+  template <typename F> void ForEachField(F &&f) const {
+    f("id", id);
+    f("modifiers", modifiers);
+    f("arguments", arguments);
+  }
+};
+
+using OmpClause = std::variant<const OmpScheduleClause *,
+    const OmpReductionClause *, const OmpMapClause *, const OmpIndexClause *,
+    const OmpUpperClause *, const OmpGenericClause *>;
+
+// The text after %$omp: a directive of OMP.td in its Fortran spelling, such
+// as parallel do, with its arguments, as in critical(Name), and its
+// clauses, which may be separated by commas.
+struct OmpDirective {
+  static constexpr llvm::StringLiteral kindName{"OmpDirective"};
+  TokenRange tokens; // in the directive's own tokens
+  llvm::omp::Directive id;
+  llvm::ArrayRef<DataTerm> arguments;
+  llvm::ArrayRef<OmpClause> clauses;
+  template <typename F> void ForEachField(F &&f) const {
+    f("id", id);
+    f("arguments", arguments);
+    f("clauses", clauses);
+  }
+};
+
+// A %$omp directive and the goal it applies to, as Clang's
+// OMPExecutableDirective holds its associated statement.
+struct OmpGoal {
+  static constexpr llvm::StringLiteral kindName{"OmpGoal"};
+  TokenRange tokens; // from the directive token to the goal's end
+  const OmpDirective *directive;
+  Goal goal;
+  template <typename F> void ForEachField(F &&f) const {
+    f("directive", directive);
+    f("goal", goal);
+  }
 };
 
 //===----------------------------------------------------------------------===//
