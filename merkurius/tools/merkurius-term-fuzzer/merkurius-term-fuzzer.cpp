@@ -30,6 +30,8 @@
 #include "merkurius/Parser/term.h"
 #include "merkurius/Parser/unparse.h"
 #include "merkurius/Semantics/desugar.h"
+#include "merkurius/Semantics/module-loader.h"
+#include "merkurius/Semantics/resolve-names.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
@@ -125,8 +127,14 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, bool openMP) {
   merkurius::semantics::SemanticArena semanticArena;
   std::string form;
   llvm::raw_string_ostream formStream{form};
-  merkurius::semantics::DumpSemanticForm(formStream,
-      merkurius::semantics::Desugar(tree, tokens, semanticArena, messages));
+  const merkurius::semantics::SemanticForm &semanticForm{
+      merkurius::semantics::Desugar(tree, tokens, semanticArena, messages)};
+  merkurius::semantics::DumpSemanticForm(formStream, semanticForm);
+  // So must name resolution. No imported module can be found, so only the
+  // module's own names resolve.
+  merkurius::semantics::ModuleLoader loader{all, "", messages};
+  loader.LoadImports(tree, tokens, "/nonexistent");
+  merkurius::semantics::ResolveNames(tree, tokens, semanticForm, loader, messages);
   return result;
 }
 

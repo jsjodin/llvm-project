@@ -120,6 +120,12 @@ class DebugDumpImportsAction : public FrontendAction {
   bool executeAction() override;
 };
 
+// Resolves the names of the source file, and lists the module's symbols
+// and, for each name in it, the symbols it may refer to.
+class DebugDumpResolvedNamesAction : public FrontendAction {
+  bool executeAction() override;
+};
+
 } // namespace merkurius::frontend
 
 #endif // MERKURIUS_FRONTEND_FRONTENDACTIONS_H_

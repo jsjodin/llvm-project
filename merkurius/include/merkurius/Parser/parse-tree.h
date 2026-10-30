@@ -30,6 +30,10 @@
 #include <type_traits>
 #include <variant>
 
+namespace merkurius::semantics {
+struct Symbol;
+} // namespace merkurius::semantics
+
 namespace merkurius::parser {
 
 using ParseTreeArena = common::Arena;
@@ -40,6 +44,9 @@ struct SymName {
   TokenRange tokens;
   llvm::ArrayRef<llvm::StringRef> qualifiers; // the outermost module first
   llvm::StringRef name;
+  // The declarations name resolution finds for the name, one or more where
+  // it is overloaded; the only field filled in after conversion.
+  mutable llvm::ArrayRef<const semantics::Symbol *> candidates{};
   template <typename F> void ForEachField(F &&f) const {
     f("qualifiers", qualifiers);
     f("name", name);
