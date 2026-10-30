@@ -26,7 +26,7 @@ mkdir -p "$WORK/corpus" "$WORK/artifacts"
   -I "$BUILD_DIR/include" \
   "$MERKURIUS_DIR/tools/merkurius-term-fuzzer/merkurius-term-fuzzer.cpp" \
   "$MERKURIUS_DIR"/lib/Parser/*.cpp "$MERKURIUS_DIR"/lib/Common/*.cpp \
-  -L "$BUILD_DIR/lib" -Wl,-rpath,"$BUILD_DIR/lib" -lLLVMSupport \
+  -L "$BUILD_DIR/lib" -Wl,-rpath,"$BUILD_DIR/lib" -lLLVMFrontendOpenMP -lLLVMSupport \
   -lpthread -o "$WORK/merkurius-term-fuzzer"
 
 find "$MERKURIUS_DIR/test" "$MERKURIUS_DIR/utils" -name '*.m' \

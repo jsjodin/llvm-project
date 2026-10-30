@@ -26,7 +26,8 @@ source. Its actions are:
 | `-fdebug-unparse-no-sema` | The parse tree as source in the canonical layout, with the spellings and comments of the file; items with errors as written |
 | `-fdebug-unparse-parenthesized-no-sema` | The same, with every data-term, goal, type, inst and mode written as an operator term in parentheses |
 
-`-fopenmp` makes `%$omp` directives tokens instead of comments.
+`-fopenmp` makes `%$omp` directives tokens instead of comments, and the
+converter reads each one, with the goal after it, into an `OmpGoal`.
 
 ## Building
 

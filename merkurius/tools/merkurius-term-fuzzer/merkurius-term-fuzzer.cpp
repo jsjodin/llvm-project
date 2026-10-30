@@ -7,8 +7,8 @@
 //===----------------------------------------------------------------------===//
 //
 // A fuzz target for the lexer, the term reader, the converter and the
-// unparser. For any input it checks that none of them crashes, with and
-// without OpenMP directives; that the tokens, and the parse tree, unparse to
+// unparser. For any input, with and without OpenMP directives, it checks
+// that none of them crashes; that the tokens, and the parse tree, unparse to
 // the input byte for byte; that the exact unparser finds every token
 // accounted for; that an input which converts without errors has a
 // canonical layout that is its own canonical layout, and the same parse tree
@@ -95,12 +95,14 @@ struct Unparsed {
 
 // Converts and unparses `text`, and fails the input if the exact unparser
 // reports a problem.
-Unparsed ConvertAndUnparse(llvm::StringRef text) {
+Unparsed ConvertAndUnparse(llvm::StringRef text, bool openMP) {
   AllSources all;
   SourceFile *file{
       all.AddBuffer("fuzz.m", llvm::MemoryBuffer::getMemBufferCopy(text))};
   Messages messages;
-  TokenSequence tokens{Lex(*file, LexerOptions{}, messages)};
+  LexerOptions options;
+  options.openMP = openMP;
+  TokenSequence tokens{Lex(*file, options, messages)};
   ParseTreeArena arena;
   const ParseTree &tree{ConvertFile(tokens, arena, messages)};
   Unparsed result;
@@ -126,13 +128,13 @@ Unparsed ConvertAndUnparse(llvm::StringRef text) {
 extern "C" int LLVMFuzzerTestOneInput(
     const std::uint8_t *data, std::size_t size) {
   llvm::StringRef input{reinterpret_cast<const char *>(data), size};
-  {
-    Unparsed first{ConvertAndUnparse(input)};
+  for (bool openMP : {false, true}) {
+    Unparsed first{ConvertAndUnparse(input, openMP)};
     if (first.exact != input) {
       Fail("the parse tree does not unparse to the input", input, first.exact);
     }
     if (first.ok) {
-      Unparsed canonical{ConvertAndUnparse(first.canonical)};
+      Unparsed canonical{ConvertAndUnparse(first.canonical, openMP)};
       if (!canonical.ok || canonical.tree != first.tree) {
         Fail("the canonical layout has a different parse tree", input,
             first.canonical);
@@ -141,7 +143,8 @@ extern "C" int LLVMFuzzerTestOneInput(
         Fail("the canonical layout is not a fixed point", input,
             first.canonical + "\nbecame\n" + canonical.canonical);
       }
-      Unparsed parenthesized{ConvertAndUnparse(first.parenthesized)};
+      Unparsed parenthesized{
+          ConvertAndUnparse(first.parenthesized, openMP)};
       if (!parenthesized.ok || parenthesized.tree != first.tree) {
         Fail("the parenthesized form has a different parse tree", input,
             first.parenthesized);

@@ -745,11 +745,8 @@ std::optional<Goal> GoalRule::Convert(
     auto right{Apply(rule, Operand(c, 1), state)};
     return std::pair{left, right};
   }};
-  if (llvm::isa<DirectiveTerm>(t)) {
-    // An OmpGoal, with the directive and the goal it applies to.
-    state.messages.Say(
-        GetSource(t, state.tokens), "OpenMP directives"_todo_en_US);
-    return std::nullopt;
+  if (const auto *directive{llvm::dyn_cast<DirectiveTerm>(&t)}) {
+    return ConvertOmpGoal(*directive, state);
   }
   // Higher-order calls: P, and P(X, Y).
   if (llvm::isa<VariableTerm>(t)) {

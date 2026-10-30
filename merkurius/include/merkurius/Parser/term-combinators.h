@@ -48,6 +48,10 @@ struct ConvertState {
   const TokenSequence &tokens;
   ParseTreeArena &arena;
   Messages &messages;
+  // The item being converted, whose variables a %$omp directive's share,
+  // and their number.
+  const Term *item{nullptr};
+  unsigned variables{0};
 };
 
 // The term inside any parentheses.
