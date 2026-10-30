@@ -122,6 +122,17 @@ private:
       llvm::ArrayRef<parser::DataTerm>, Goals &out);
   // The variable that a data-term is, if it is a variable or !.X or !:X.
   std::optional<VarId> SimpleVar(const parser::DataTerm &);
+  // Term ^ F1 ^ ... ^ Fn as Fn(..., F1(..., Term)), and Term ^ Fields :=
+  // Value as calls to 'F :=' (reference manual, "Record syntax"). The term
+  // is `term` or, if that is null, `termVar`.
+  void Select(VarId left, const parser::DataTerm *term, VarId termVar,
+      llvm::ArrayRef<const parser::FieldSpec *> fields, TokenRange,
+      Goals &out);
+  void Update(VarId left, const parser::DataTerm *term, VarId termVar,
+      llvm::ArrayRef<const parser::FieldSpec *> fields,
+      const parser::DataTerm &value, TokenRange, Goals &out);
+  // 'F :=', with the qualifiers of F.
+  const parser::SymName *UpdateName(const parser::FieldSpec &);
   // A variable that holds the term, after the goals added to `out`.
   VarId Flatten(const parser::DataTerm &, Goals &out);
   llvm::ArrayRef<VarId> FlattenAll(
@@ -440,17 +451,78 @@ void ClauseDesugarer::UnifyWith(VarId left, const parser::DataTerm &term,
           [&](const parser::ConditionalData *x) {
             Todo(x->tokens, "conditional expressions");
           },
-          [&](const parser::FieldSelection *x) {
-            Todo(x->tokens, "field selection");
+          [&](const parser::FieldSelection *selection) {
+            Select(left, &selection->term, VarId{0}, selection->fields, range,
+                out);
           },
-          [&](const parser::FieldUpdate *x) {
-            Todo(x->tokens, "field update");
+          [&](const parser::FieldUpdate *update) {
+            Update(left, &update->term, VarId{0}, update->fields,
+                update->value, range, out);
           },
           [&](const parser::Lambda *x) {
             Todo(x->tokens, "lambda expressions");
           },
       },
       term);
+}
+
+void ClauseDesugarer::Select(VarId left, const parser::DataTerm *term,
+    VarId termVar, llvm::ArrayRef<const parser::FieldSpec *> fields,
+    TokenRange range, Goals &out) {
+  std::size_t at{out.size()};
+  const parser::FieldSpec &last{*fields.back()};
+  VarId inner;
+  if (fields.size() > 1) {
+    inner = Fresh(range);
+    Select(inner, term, termVar, fields.drop_back(), range, out);
+  } else {
+    inner = term ? Flatten(*term, out) : termVar;
+  }
+  llvm::SmallVector<VarId, 4> arguments{FlattenAll(last.arguments, out)};
+  arguments.push_back(inner);
+  AddUnify(out, at, range, left,
+      Functor{FunctorKind::Name, last.name, nullptr, nullptr},
+      Save(llvm::ArrayRef<VarId>{arguments}));
+}
+
+// Term ^ F := Value is 'F :='(Term, Value); with more fields,
+// Term0 ^ F ^ Rest := Value is
+//   Old = F(Term0), New = (Old ^ Rest := Value), Term = 'F :='(Term0, New).
+void ClauseDesugarer::Update(VarId left, const parser::DataTerm *term,
+    VarId termVar, llvm::ArrayRef<const parser::FieldSpec *> fields,
+    const parser::DataTerm &value, TokenRange range, Goals &out) {
+  std::size_t at{out.size()};
+  const parser::FieldSpec &first{*fields.front()};
+  VarId whole{term ? Flatten(*term, out) : termVar};
+  llvm::SmallVector<VarId, 4> arguments{FlattenAll(first.arguments, out)};
+  const parser::SymName *update{UpdateName(first)};
+  if (fields.size() == 1) {
+    arguments.push_back(whole);
+    arguments.push_back(Flatten(value, out));
+    AddUnify(out, at, range, left,
+        Functor{FunctorKind::Name, update, nullptr, nullptr},
+        Save(llvm::ArrayRef<VarId>{arguments}));
+    return;
+  }
+  llvm::SmallVector<VarId, 4> selectArguments{arguments};
+  selectArguments.push_back(whole);
+  VarId old{Fresh(range)};
+  AddUnify(out, out.size(), range, old,
+      Functor{FunctorKind::Name, first.name, nullptr, nullptr},
+      Save(llvm::ArrayRef<VarId>{selectArguments}));
+  VarId updated{Fresh(range)};
+  Update(updated, nullptr, old, fields.drop_front(), value, range, out);
+  arguments.push_back(whole);
+  arguments.push_back(updated);
+  AddUnify(out, out.size(), range, left,
+      Functor{FunctorKind::Name, update, nullptr, nullptr},
+      Save(llvm::ArrayRef<VarId>{arguments}));
+}
+
+const parser::SymName *ClauseDesugarer::UpdateName(
+    const parser::FieldSpec &field) {
+  return Make<parser::SymName>(field.name->tokens, field.name->qualifiers,
+      arena_.Save((field.name->name + " :=").str()));
 }
 
 // [E1, E2 | T] is '[|]'(E1, V), V = '[|]'(E2, T); without a tail, the last
@@ -626,8 +698,14 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
             out.push_back(Negate(
                 inequality->tokens, Conjoin(inequality->tokens, unify)));
           },
-          [&](const parser::StateVarFieldUpdate *x) {
-            Todo(x->tokens, "field update");
+          [&](const parser::StateVarFieldUpdate *update) {
+            // !S ^ Fields := Value is !:S = !.S ^ Fields := Value.
+            const auto &var{*std::get<const parser::StateVar *>(update->var)};
+            VarId current{StateRef(var, false)};
+            VarId next{StateRef(var, true)};
+            Update(next, nullptr, current, update->fields, update->value,
+                update->tokens, out);
+            FinishAtomic();
           },
           [&](const parser::Call *call) {
             if (call->name->qualifiers.empty() && call->name->name == "call" &&
@@ -845,11 +923,25 @@ void ClauseDesugarer::DesugarInto(const parser::DcgGoal &goal, Goals &out) {
             FinishAtomic();
             state_[dcg] = var;
           },
-          [&](const parser::DcgFieldSelection *x) {
-            Todo(x->tokens, "field selection");
+          [&](const parser::DcgFieldSelection *selection) {
+            // Term =^ Fields is Term = V_in ^ Fields, V_out = V_in.
+            std::optional<VarId> var{SimpleVar(selection->term)};
+            VarId left{var ? *var : Fresh(selection->tokens)};
+            Select(left, nullptr, DcgCurrent(), selection->fields,
+                selection->tokens, out);
+            if (!var) {
+              UnifyWith(left, selection->term, selection->tokens, out);
+            }
+            FinishAtomic();
           },
-          [&](const parser::DcgFieldUpdate *x) {
-            Todo(x->tokens, "field update");
+          [&](const parser::DcgFieldUpdate *update) {
+            // ^ Fields := Term is V_out = V_in ^ Fields := Term.
+            VarId current{DcgCurrent()};
+            VarId next{NewVersion(dcg, update->tokens)};
+            Update(next, nullptr, current, update->fields, update->value,
+                update->tokens, out);
+            FinishAtomic();
+            state_[dcg] = next;
           },
           [&](const parser::DcgCall *call) {
             // p(A1, ..., An) is p(A1, ..., An, V_in, V_out); call(P, ...)
