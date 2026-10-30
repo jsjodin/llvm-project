@@ -81,8 +81,10 @@ unsupported:
 MMC=$HOME/mercury-22.01.9/bin/mmc merkurius/build_merk.sh run_tests
 ```
 
-`utils/fuzz/run-term-fuzzer.sh [SECONDS] [JOBS]` fuzzes the lexer and term
-reader with libFuzzer, using the clang of the build tree.
+`utils/fuzz/run-term-fuzzer.sh [SECONDS] [JOBS]` fuzzes the lexer, term
+reader, converter and desugaring with libFuzzer, using the clang of the build
+tree, for 180 seconds in 32 processes by default. The design document's
+"Running the fuzzer" says how to read the results.
 
 ## Layout
 
