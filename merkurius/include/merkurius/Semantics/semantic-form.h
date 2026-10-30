@@ -27,6 +27,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
+#include <optional>
 #include <variant>
 
 namespace merkurius::semantics {
@@ -93,15 +94,19 @@ struct Not {
 
 // The function symbol of a unification: a name, which semantic analysis
 // resolves to a constructor or a function, the list constructors, a tuple,
-// a literal, an implementation-defined literal such as $line, or coerce.
+// a literal, an implementation-defined literal such as $line, coerce, or a
+// lambda expression.
 ENUM_CLASS(FunctorKind, Name, Cons, Nil, Tuple, Literal,
-    ImplementationLiteral, Coerce)
+    ImplementationLiteral, Coerce, Lambda)
+
+struct Lambda;
 
 struct Functor {
   FunctorKind kind;
   const parser::SymName *name; // for Name
   const parser::Literal *literal; // for Literal
   const parser::ImplementationLiteral *implementation;
+  const Lambda *lambda{nullptr}; // for Lambda
 };
 
 // X = Y, or X = f(Y1, ..., Yn).
@@ -113,6 +118,22 @@ struct Unify {
   VarId var; // Y
   Functor functor; // f
   llvm::ArrayRef<VarId> arguments; // Y1, ..., Yn
+};
+
+// pred(X1::M1, ...) is Det :- Body, or func(...) = (Y::M) is Det :- Body,
+// the functor of X = Lambda. Its head's arguments are distinct variables,
+// local to it, like a clause's: a function's result is the last of them,
+// and a DCG lambda's two implicit arguments the last two. Each argument
+// has the mode it was written with, if any. The variables of the body that
+// are not arguments may be shared with the enclosing clause.
+struct Lambda {
+  TokenRange tokens;
+  parser::PredOrFunc kind;
+  parser::Purity purity;
+  llvm::ArrayRef<VarId> arguments;
+  llvm::ArrayRef<std::optional<parser::Mode>> modes;
+  std::optional<parser::Determinism> determinism;
+  Goal body;
 };
 
 // p(X1, ..., Xn); event p(...) is a call too.
@@ -184,7 +205,9 @@ struct SemanticForm {
 // Prints the semantic form, one goal per line, indented by depth. Program
 // variables print as their names, anonymous ones as _$N and fresh ones as
 // $N, where N is the variable's number, and version V of state variable S
-// as S!V.
+// as S!V. A program variable with the name of an earlier one, which a
+// lambda's argument may have, prints as Name$N. A lambda's body is printed
+// under the unification whose functor it is.
 void DumpSemanticForm(llvm::raw_ostream &, const SemanticForm &);
 
 } // namespace merkurius::semantics

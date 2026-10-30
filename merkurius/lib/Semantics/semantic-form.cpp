@@ -70,7 +70,14 @@ private:
     const VarInfo &info{clause_.vars[id]};
     switch (info.kind) {
     case VarKind::Program:
+      // A lambda's argument may have the name of a variable outside it;
+      // the later of the two prints with its number.
       os_ << info.name;
+      if (llvm::any_of(clause_.vars.take_front(id), [&](const VarInfo &v) {
+            return v.kind == VarKind::Program && v.name == info.name;
+          })) {
+        os_ << '$' << id;
+      }
       break;
     case VarKind::Anonymous:
       os_ << "_$" << id;
@@ -168,6 +175,9 @@ private:
                 Functor(unify->functor, unify->arguments);
               }
               os_ << '\n';
+              if (unify->functor.kind == FunctorKind::Lambda && !unify->isVar) {
+                Goal(unify->functor.lambda->body, depth + 1);
+              }
             },
             [&](const Call *call) {
               Start(call->event ? "Event" : "Call", call->number, depth);
@@ -235,7 +245,61 @@ private:
       os_ << "coerce";
       Arguments(arguments);
       break;
+    case FunctorKind::Lambda:
+      Lambda(*functor.lambda);
+      break;
     }
+  }
+  // pred(X::in, Y::out) is det, with the body on the lines after.
+  void Lambda(const semantics::Lambda &lambda) {
+    if (lambda.purity != parser::Purity::Pure) {
+      os_ << llvm::StringRef{EnumToString(lambda.purity)}.lower() << ' ';
+    }
+    bool function{lambda.kind == parser::PredOrFunc::Function};
+    os_ << (function ? "func" : "pred");
+    std::size_t count{lambda.arguments.size() - (function ? 1 : 0)};
+    auto argument{[&](std::size_t j) {
+      Var(lambda.arguments[j]);
+      if (lambda.modes[j]) {
+        os_ << "::";
+        Mode(*lambda.modes[j]);
+      }
+    }};
+    if (count > 0) {
+      os_ << '(';
+      for (std::size_t j{0}; j < count; ++j) {
+        if (j > 0) {
+          os_ << ", ";
+        }
+        argument(j);
+      }
+      os_ << ')';
+    }
+    if (function) {
+      os_ << " = (";
+      argument(count);
+      os_ << ')';
+    }
+    if (lambda.determinism) {
+      os_ << " is "
+          << llvm::StringRef{EnumToString(*lambda.determinism)}.lower();
+    }
+  }
+  // A named mode by its name, and any other by its kind.
+  void Mode(const parser::Mode &mode) {
+    std::visit(
+        common::visitors{
+            [&](const parser::NamedMode *named) {
+              PrintName(os_, *named->name);
+              if (!named->arguments.empty()) {
+                os_ << "(...)";
+              }
+            },
+            [&](const auto *other) {
+              os_ << std::remove_pointer_t<decltype(other)>::kindName;
+            },
+        },
+        mode);
   }
 
   llvm::raw_ostream &os_;

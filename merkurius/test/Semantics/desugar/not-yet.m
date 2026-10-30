@@ -5,17 +5,20 @@
 
 :- module not_yet.
 :- interface.
-:- import_module io, list.
+:- import_module io.
 
 :- pred main(io::di, io::uo) is det.
-:- func add_one(list(int)) = list(int).
+:- pred safe_write(int::in, io::di, io::uo) is cc_multi.
 
 :- implementation.
-:- import_module int.
+:- import_module exception.
 
 main(!IO) :-
     io.write_string("hello\n", !IO).
 
-add_one(Xs) = Ys :-
-    Ys = list.map(func(X) = X + 1, Xs).
-% CHECK: not-yet.m:[[@LINE-1]]:19: error: not yet implemented: desugaring lambda expressions
+safe_write(X, !IO) :-
+    ( try [io(!IO)] io.write_int(X, !IO)
+    then true
+    catch_any _ -> io.write_string("failed\n", !IO)
+    ).
+% CHECK: not-yet.m:[[@LINE-4]]:7: error: not yet implemented: desugaring try goals
