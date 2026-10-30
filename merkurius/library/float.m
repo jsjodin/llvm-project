@@ -18,6 +18,14 @@
 :- pred (float::in) >= (float::in) is semidet.
 :- pred (float::in) > (float::in) is semidet.
 :- func float(int) = float.
+:- func from_int8(int8) = float.
+:- func from_int16(int16) = float.
+:- func cast_from_int32(int32) = float.
+:- func cast_from_int64(int64) = float.
+:- func from_uint8(uint8) =  float.
+:- func from_uint16(uint16) = float.
+:- func cast_from_uint32(uint32) = float.
+:- func cast_from_uint64(uint64) = float.
 :- func ceiling_to_int(float) = int.
 :- func floor_to_int(float) = int.
 :- func round_to_int(float) = int.

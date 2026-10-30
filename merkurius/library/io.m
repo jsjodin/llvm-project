@@ -22,6 +22,12 @@
 :- type res(T)
     --->    ok(T)
     ;       error(io.error).
+:- type maybe_partial_res(T)
+    --->    ok(T)
+    ;       error(T, io.error).
+:- inst maybe_partial_res(T) for maybe_partial_res/1
+    --->    ok(T)
+    ;       error(T, ground).
 :- type result
     --->    ok
     ;       eof

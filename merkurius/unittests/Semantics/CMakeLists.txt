@@ -1,5 +1,6 @@
 add_merkurius_unittest(MerkuriusSemanticsTests
   DesugarTest.cpp
+  SymbolsTest.cpp
   )
 
 target_link_libraries(MerkuriusSemanticsTests

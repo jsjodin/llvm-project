@@ -18,6 +18,7 @@
 #include "merkurius/Parser/unparse.h"
 #include "merkurius/Semantics/desugar.h"
 #include "merkurius/Semantics/module-loader.h"
+#include "merkurius/Semantics/resolve-names.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Path.h"
 #include <string>
@@ -257,6 +258,77 @@ bool DebugDumpImportsAction::executeAction() {
         << module->items.size() << " items):";
     names("import_module", module->imports);
     names("use_module", module->uses);
+    *os << '\n';
+  }
+  os->flush();
+  return !messages.AnyFatalError();
+}
+
+bool DebugDumpResolvedNamesAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  for (const std::string &dir : ci.getFrontendOpts().searchDirectories) {
+    ci.getAllSources().AppendSearchPathDirectory(dir);
+  }
+  parser::LexerOptions options;
+  options.openMP = ci.getLangOpts().openMP;
+  parser::Messages messages;
+  parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
+  parser::ParseTreeArena arena;
+  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages)};
+  semantics::SemanticArena semanticArena;
+  const semantics::SemanticForm &form{
+      semantics::Desugar(tree, tokens, semanticArena, messages)};
+  semantics::ModuleLoader loader{ci.getAllSources(),
+      ci.getFrontendOpts().libraryDirectory, messages};
+  llvm::StringRef directory{
+      llvm::sys::path::parent_path(getSourceFile().path())};
+  loader.LoadImports(tree, tokens, directory.empty() ? "." : directory);
+  std::unique_ptr<semantics::NameResolution> resolution{
+      semantics::ResolveNames(tree, tokens, form, loader, messages)};
+  messages.Emit(llvm::errs(), ci.getAllSources());
+  llvm::raw_ostream *os{ci.createDefaultOutputFile()};
+  if (!os) {
+    return false;
+  }
+  const parser::AllSources &sources{ci.getAllSources()};
+  auto position{[&](parser::CharBlock where) {
+    std::string result;
+    if (auto range{sources.GetProvenanceRange(where)}) {
+      if (auto pos{sources.GetSourcePosition(range->start())}) {
+        result = std::to_string(pos->line) + ':' + std::to_string(pos->column);
+      }
+    }
+    return result;
+  }};
+  *os << "symbols of " << resolution->module().name() << ":\n";
+  for (const semantics::Symbol *symbol : resolution->module().symbols()) {
+    *os << "  " << position(symbol->source) << ' ' << *symbol
+        << (symbol->exported ? " exported" : "");
+    if (symbol->owner) {
+      *os << " of " << *symbol->owner;
+    }
+    *os << '\n';
+  }
+  *os << "names:\n";
+  for (const semantics::ResolvedName &name : resolution->names()) {
+    const auto &tokenRange{name.name->tokens};
+    *os << "  "
+        << position({tokens.tokens[tokenRange.first].spelling.begin(),
+               tokens.tokens[tokenRange.last].spelling.end()})
+        << ' '
+        << llvm::StringRef{tokens.tokens[tokenRange.first].spelling.begin(),
+               static_cast<std::size_t>(
+                   tokens.tokens[tokenRange.last].spelling.end() -
+                   tokens.tokens[tokenRange.first].spelling.begin())}
+        << ' ' << semantics::EnumToString(name.use) << '/' << name.arity
+        << " ->";
+    if (name.candidates.empty()) {
+      *os << " undefined";
+    }
+    llvm::interleave(
+        name.candidates, *os,
+        [&](const semantics::Symbol *symbol) { *os << ' ' << *symbol; },
+        ",");
     *os << '\n';
   }
   os->flush();

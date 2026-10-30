@@ -109,5 +109,19 @@
 :- pred float_to_string(float::in, string::uo) is det.
 :- func from_float(float::in) = (string::uo) is det.
 :- func string(T) = string.
+:- type poly_type
+    --->    f(float)
+    ;       i(int)
+    ;       i8(int8)
+    ;       i16(int16)
+    ;       i32(int32)
+    ;       i64(int64)
+    ;       u(uint)
+    ;       u8(uint8)
+    ;       u16(uint16)
+    ;       u32(uint32)
+    ;       u64(uint64)
+    ;       s(string)
+    ;       c(char).
 :- func format(string, list(poly_type)) = string.
 :- pred format(string::in, list(poly_type)::in, string::out) is det.

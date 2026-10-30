@@ -50,6 +50,9 @@ enum class ActionKind {
   // -fdebug-dump-imports: load the imported modules and list their
   // interfaces.
   DebugDumpImports,
+  // -fdebug-dump-resolved-names: resolve the names and list the module's
+  // symbols and each name's candidates.
+  DebugDumpResolvedNames,
 };
 
 struct FrontendOptions {

@@ -5,6 +5,7 @@
 
 :- module bool.
 :- interface.
+:- import_module list.
 
 :- type bool
     --->    no

@@ -7,6 +7,7 @@
 :- interface.
 :- import_module io.
 :- import_module list.
+:- import_module maybe.
 :- import_module univ.
 
 :- type software_error
