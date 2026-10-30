@@ -398,30 +398,57 @@ TEST(DesugarTest, DcgRules) {
       "| | Call #0 q(X, dcg!0, dcg!1)\n");
 }
 
+TEST(DesugarTest, FieldAccess) {
+  // The manual's transformation ("Record syntax"): Term ^ f(A) is
+  // f(A, Term), and Term ^ f := V is 'f :='(Term, V).
+  EXPECT_EQ(Form("p(X, Y) :- Y = X ^ f(1) ^ g.\n"),
+      "Predicate p(X, Y)\n"
+      "| Conj #3\n"
+      "| | Unify #2 Y = g($2)\n"
+      "| | Unify #1 $2 = f($3, X)\n"
+      "| | Unify #0 $3 = 1\n");
+  EXPECT_EQ(Form("p(X, Y) :- Y = (X ^ f := 1).\n"),
+      "Predicate p(X, Y)\n"
+      "| Conj #2\n"
+      "| | Unify #1 Y = 'f :='(X, $2)\n"
+      "| | Unify #0 $2 = 1\n");
+  // With more fields, the old value of the first is updated in turn; the
+  // update function keeps the field's module qualifiers.
+  EXPECT_EQ(Form("p(X, Y, V) :- Y = (X ^ f(A) ^ m.g := V).\n"),
+      "Predicate p(X, Y, V)\n"
+      "| Conj #3\n"
+      "| | Unify #0 $4 = f(A, X)\n"
+      "| | Unify #1 $5 = m.'g :='($4, V)\n"
+      "| | Unify #2 Y = 'f :='(A, X, $5)\n");
+  // !S ^ f := V is !:S = !.S ^ f := V.
+  EXPECT_EQ(Form("p(!S) :- !S ^ f := !.S ^ g.\n"),
+      "Predicate p(S!0, S!1)\n"
+      "| Conj #2\n"
+      "| | Unify #1 S!1 = 'f :='(S!0, $2)\n"
+      "| | Unify #0 $2 = g(S!0)\n");
+  // The DCG forms: X =^ f leaves the DCG argument as it is, and ^ f := X
+  // updates it.
+  EXPECT_EQ(Form("p --> X =^ f, ^ g := X.\n"),
+      "Predicate p(dcg!0, dcg!1)\n"
+      "| Conj #2\n"
+      "| | Unify #0 X = f(dcg!0)\n"
+      "| | Unify #1 dcg!1 = 'g :='(dcg!0, X)\n");
+}
+
 TEST(DesugarTest, NotYetImplemented) {
   auto messages{[](llvm::StringRef text) { return DesugarText(text).messages; }};
-  EXPECT_EQ(messages("p --> ^ f := 1.\n"),
-      V{"desugaring field update"});
-  EXPECT_EQ(messages("p --> X =^ f, { q(X) }.\n"),
-      V{"desugaring field selection"});
   EXPECT_EQ(messages("p :- X = (func(A) = A).\n"),
       V{"desugaring lambda expressions"});
-  EXPECT_EQ(messages("p :- X = Y ^ f.\n"),
-      V{"desugaring field selection"});
-  EXPECT_EQ(messages("p :- X = (Y ^ f := 1).\n"),
-      V{"desugaring field update"});
   EXPECT_EQ(messages("p :- X = (if q then 1 else 2).\n"),
       V{"desugaring conditional expressions"});
   EXPECT_EQ(messages("p :- try [] q then r.\n"),
       V{"desugaring try goals"});
   EXPECT_EQ(messages("p :- atomic [outer(!IO), inner(!S)] q.\n"),
       V{"desugaring atomic goals"});
-  EXPECT_EQ(messages("p(!S) :- !S ^ f := 1.\n"),
-      V{"desugaring field update"});
   EXPECT_EQ(messages("p(!S) :- promise_equivalent_solutions [!:S] q(!S).\n"),
       V{"desugaring state variables in a scope's list of variables"});
   // A clause with an error is left out; the others are kept.
-  DesugarResult result{DesugarText("p :- X = Y ^ f.\nq.\n")};
+  DesugarResult result{DesugarText("p :- X = (func(A) = A).\nq.\n")};
   EXPECT_EQ(result.form, "Predicate q\n| Conj #0\n");
 }
 

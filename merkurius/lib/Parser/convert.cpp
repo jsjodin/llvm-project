@@ -598,6 +598,10 @@ static constexpr auto predicateHead{
     expect("a predicate or function name", appliedName(typeAndMode))};
 static constexpr auto modeHead{
     expect("a predicate or function name", appliedName(mode))};
+static constexpr auto functionDeclHead{
+    expect("a function name", functionHead(typeAndMode))};
+static constexpr auto functionModeHead{
+    expect("a function name", functionHead(mode))};
 
 class PredDeclRule {
 public:
@@ -619,7 +623,8 @@ public:
         existentialVars, state);
     std::optional<std::tuple<const SymName *,
         llvm::ArrayRef<const TypeAndMode *>>>
-        head{Apply(predicateHead, *body.head, state)};
+        head{isFunction ? Apply(functionDeclHead, *body.head, state)
+                        : Apply(predicateHead, *body.head, state)};
     ok &= head.has_value();
     const TypeAndMode *result{nullptr};
     if (isFunction && !body.result) {
@@ -685,7 +690,8 @@ public:
     DeclarationBody body{SplitBody(*layers.body, isFunction)};
     bool ok{true};
     std::optional<std::tuple<const SymName *, llvm::ArrayRef<Mode>>> head{
-        Apply(modeHead, *body.head, state)};
+        isFunction ? Apply(functionModeHead, *body.head, state)
+                   : Apply(modeHead, *body.head, state)};
     ok &= head.has_value();
     std::optional<Mode> result;
     std::optional<Inst> withInst;

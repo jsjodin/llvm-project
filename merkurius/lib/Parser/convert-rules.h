@@ -200,6 +200,68 @@ public:
 
 inline constexpr NameAndArityRule nameAndArity;
 
+// A function's head: a name and its arguments converted with P or, at the
+// top level of a function declaration, mode declaration or clause, field
+// access syntax (reference manual, "User-supplied field access function
+// declarations"). T ^ F(A1, ...) is F(A1, ..., T), and (T ^ F(A1, ...) :=
+// V) is 'F :='(A1, ..., T, V). As in mmc, the field must be a name or a
+// compound term, so a clause X ^ Y = Z defines '^'/2.
+template <typename P> class FunctionHeadRule {
+public:
+  using resultType = typename AppliedNameRule<P>::resultType;
+  constexpr explicit FunctionHeadRule(P rule) : rule_{rule} {}
+  bool Matches(const Term &t) const { return appliedName(rule_).Matches(t); }
+  std::optional<resultType> Convert(
+      const Term &term, ConvertState &state) const {
+    const Term &t{StripParentheses(term)};
+    const CompoundTerm *update{AsCompound(t, ":=", 2)};
+    const CompoundTerm *select{
+        AsCompound(update ? *update->arguments()[0] : t, "^", 2)};
+    llvm::SmallVector<const Term *, 4> parts;
+    if (select) {
+      QualifiedParts(StripParentheses(*select->arguments()[1]), parts);
+    }
+    if (!select ||
+        !(llvm::isa<NameTerm>(*parts.back()) ||
+            llvm::isa<CompoundTerm>(*parts.back()))) {
+      return appliedName(rule_).Convert(term, state);
+    }
+    const Term &field{StripParentheses(*select->arguments()[1])};
+    const Term &part{*parts.back()};
+    const SymName *name{
+        MakeSymName(field, llvm::ArrayRef(parts).drop_back(), part, state)};
+    if (!name) {
+      return std::nullopt;
+    }
+    if (update) {
+      name = state.arena.Make<SymName>(name->tokens, name->qualifiers,
+          state.arena.Save((name->name + " :=").str()));
+    }
+    llvm::SmallVector<const Term *, 4> terms;
+    if (const auto *compound{llvm::dyn_cast<CompoundTerm>(&part)}) {
+      llvm::append_range(terms, compound->arguments());
+    }
+    terms.push_back(select->arguments()[0]);
+    if (update) {
+      terms.push_back(update->arguments()[1]);
+    }
+    auto arguments{detail::ConvertElements(
+        rule_, llvm::ArrayRef<const Term *>{terms}, state)};
+    if (!arguments) {
+      return std::nullopt;
+    }
+    return resultType{name, *arguments};
+  }
+  void Expected(llvm::raw_ostream &os) const { os << "a name"; }
+
+private:
+  P rule_;
+};
+
+template <typename P> constexpr FunctionHeadRule<P> functionHead(P rule) {
+  return FunctionHeadRule<P>{rule};
+}
+
 // The name being defined and its parameters, which are variables: t(T1, T2).
 inline constexpr auto typeHeadRule{
     appliedName(expect("a type parameter", variable))};
