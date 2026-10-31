@@ -21,8 +21,11 @@
 // results, and keeps negations and conditions from binding what is used
 // outside them (Overton, "Precise and Expressive Mode Systems for Typed
 // Logic Programming Languages", 2003, chapter 3). A predicate's clauses
-// are branches of a disjunction too. Only the first mode error of a
-// procedure is reported, as by mmc.
+// are branches of a disjunction too. A lambda expression's body is
+// checked as a clause is, and a higher-order term, and a call of one, by
+// its higher-order inst (reference manual, "Higher-order insts and
+// modes"). Only the first mode error of a procedure is reported, as by
+// mmc.
 
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/parse-tree.h"
@@ -68,7 +71,9 @@ struct GoalModes {
   UnifyKind unify{UnifyKind::Test};
   // For an assignment, the variable assigned.
   VarId assigned{0};
-  // For a call or a function application: the procedure called.
+  // For a call or a function application: the procedure called; for a
+  // higher-order term made from a predicate's or function's name, its
+  // procedure.
   const Procedure *callee{nullptr};
   // Whether the call outputs to a fresh variable an argument that is
   // already bound, and tests the two (an implied mode).
@@ -90,8 +95,8 @@ struct ClauseModes {
 // Why a procedure's clauses were not checked: they use what mode analysis
 // does not check yet, or their predicate has errors of other kinds.
 ENUM_CLASS(Unchecked, None, TypeErrors, ModeSpecificClauses,
-    ParallelConjunction, HigherOrder, Lambda, Coerce, Scope, Try, Atomic,
-    InstParameters, InferredModes)
+    ParallelConjunction, FieldClosure, Coerce, Scope, Try, Atomic,
+    InstParameters, InferredModes, InferredDeterminism)
 
 class ModeChecking {
 public:

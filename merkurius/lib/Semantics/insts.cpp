@@ -710,8 +710,12 @@ bool InstOps::MatchesNow(const Inst *a, const Inst *b, const Type *type) {
     if (a->kind == InstKind::Any) {
       return b->kind == InstKind::Any;
     }
+    if (a->kind == InstKind::HigherOrder) {
+      return a->predOrFunc == parser::PredOrFunc::Predicate ||
+          IsDefaultFunction(a);
+    }
     if (a->kind != InstKind::Bound) {
-      return true; // ground, or higher-order
+      return true; // ground
     }
     const Inst *with{b->kind == InstKind::Any ? insts_.Any(b->uniqueness)
                                               : insts_.Ground(b->uniqueness)};
@@ -742,12 +746,34 @@ bool InstOps::MatchesNow(const Inst *a, const Inst *b, const Type *type) {
     return true;
   }
   case InstKind::HigherOrder:
+    if (a->kind == InstKind::Ground) {
+      return IsDefaultFunction(b);
+    }
     return a->kind == InstKind::HigherOrder &&
         a->predOrFunc == b->predOrFunc && a->any == b->any &&
         a->modes == b->modes && a->determinism == b->determinism;
   default:
     return false;
   }
+}
+
+const Inst *InstOps::DefaultFunction(std::size_t arity) {
+  std::vector<ArgMode> modes(
+      arity, ArgMode{insts_.Ground(), insts_.Ground()});
+  modes.push_back(ArgMode{insts_.Free(), insts_.Ground()});
+  return insts_.HigherOrder(parser::PredOrFunc::Function, false, modes,
+      parser::Determinism::Det);
+}
+
+bool InstOps::IsDefaultFunction(const Inst *inst) {
+  if (inst->kind != InstKind::HigherOrder ||
+      inst->predOrFunc != parser::PredOrFunc::Function || inst->any ||
+      inst->modes.empty()) {
+    return false;
+  }
+  const Inst *standard{DefaultFunction(inst->modes.size() - 1)};
+  return inst->modes == standard->modes &&
+      inst->determinism == standard->determinism;
 }
 
 bool InstOps::Instantiated(const Inst *a, const Inst *b, const Type *type) {
