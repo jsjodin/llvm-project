@@ -13,11 +13,14 @@
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
 
 namespace merkurius::semantics {
+
+using namespace parser::literals;
 
 namespace {
 
@@ -27,6 +30,33 @@ std::vector<const Body *> Conjuncts(const Body *goal) {
     return goal->goals;
   }
   return {goal};
+}
+
+// Whether a value of the type with the inst may have a functor that is not
+// one of `functors`, or the type has no known set of constructors; with no
+// inst, it may.
+bool AllowsOthers(InstOps &ops, const Type *type, const Inst *inst,
+    llvm::ArrayRef<InstFunctor> functors) {
+  if (!inst) {
+    return true;
+  }
+  const std::vector<ConstructorTypes> *constructors{ops.ConstructorsOf(type)};
+  if (!constructors) {
+    // A value of a type without constructors, such as int, bound to some
+    // only, as by a test before.
+    const Inst *plain{ops.Plain(inst)};
+    return plain->kind != InstKind::Bound ||
+        llvm::any_of(plain->functors, [&](const BoundAlternative &b) {
+          return !llvm::is_contained(functors, b.functor);
+        });
+  }
+  for (const ConstructorTypes &c : *constructors) {
+    if (!llvm::is_contained(functors, c.functor) &&
+        ops.Arguments(inst, c.functor, type)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 } // namespace
@@ -314,6 +344,9 @@ private:
     }
     out.unify = UnifyKind::Deconstruct;
     std::vector<std::pair<BodyVar, const Inst *>> before{Before(unify.number)};
+    auto x{llvm::find_if(before, [&](const auto &b) { return b.first == out.left; })};
+    out.canFail = AllowsOthers(ops_, TypeOf(out.left),
+        x == before.end() ? nullptr : x->second, {out.functor});
     Body conj{BodyKind::Conj, tokens, &modes};
     std::vector<Body> tests;
     for (BodyVar &argument : out.arguments) {
@@ -371,6 +404,7 @@ public:
       }
       std::map<BodyVar, InstFunctor> known;
       body_.body = Prune(body_.body, known);
+      body_.rechecked = true;
       std::set<BodyVar> live{body_.head.begin(), body_.head.end()};
       if (const Body *kept{Simplify(body_.body, live)}) {
         body_.body = kept;
@@ -626,8 +660,9 @@ private:
     for (auto &[functor, goals] : cases) {
       functors.push_back(functor);
       if (goals.size() == 1 && merged_.count(goals.front())) {
+        const Body *merged{goals.front()};
         auto it{llvm::find_if(out.cases,
-            [&](const SwitchCase &c) { return c.goal == goals.front(); })};
+            [&](const SwitchCase &c) { return c.goal == merged; })};
         if (it != out.cases.end()) {
           it->others.push_back(functor);
           continue;
@@ -637,9 +672,16 @@ private:
         continue;
       }
       Cased cased{*this, var, functor};
+      // A case's disjunction is where its first disjunct in the source
+      // is, as in mmc's messages.
+      TokenRange range{std::numeric_limits<std::uint32_t>::max(), 0};
+      for (const Body *g : goals) {
+        range.first = std::min(range.first, g->tokens.first);
+        range.last = std::max(range.last, g->tokens.last);
+      }
       out.cases.push_back({functor,
           goals.size() == 1 ? Detect(goals.front())
-                            : Disjunction(tokens, goals, entry)});
+                            : Disjunction(range, goals, entry)});
     }
     for (SwitchCase &c : out.cases) {
       if (merged_.count(c.goal)) {
@@ -685,24 +727,13 @@ private:
   // constructors.
   bool CanFail(BodyVar var, const std::vector<InstFunctor> &functors,
       const Entry &entry) {
-    const Type *type{body_.vars[var].type};
     const Inst *inst{nullptr};
     for (const auto &[v, i] : entry) {
       if (v == var) {
         inst = i;
       }
     }
-    const std::vector<ConstructorTypes> *constructors{ops_.ConstructorsOf(type)};
-    if (!constructors || !inst) {
-      return true;
-    }
-    for (const ConstructorTypes &c : *constructors) {
-      if (!llvm::is_contained(functors, c.functor) &&
-          ops_.Arguments(inst, c.functor, type)) {
-        return true;
-      }
-    }
-    return false;
+    return AllowsOthers(ops_, body_.vars[var].type, inst, functors);
   }
 
   // By name and arity, integers by value.
@@ -948,6 +979,7 @@ private:
       Body pulled{*first};
       pulled.left = var;
       pulled.switchTest = false;
+      pulled.canFail = CanFail(var, {first->functor}, disj->entry);
       pulled.arguments.clear();
       Entry entry{disj->entry};
       for (std::size_t i{0}; i < first->arguments.size(); ++i) {
@@ -1334,10 +1366,692 @@ private:
   std::set<BodyVar> switching_;
 };
 
+// The two components of a determinism (reference manual, "Determinism
+// categories"): whether it can fail before its first solution, and how
+// many solutions it can have at most.
+enum class Solutions { Zero, One, Many };
+
+struct Components {
+  bool canFail;
+  Solutions most;
+};
+
+Components ComponentsOf(parser::Determinism determinism) {
+  switch (determinism) {
+  case parser::Determinism::Det:
+    return {false, Solutions::One};
+  case parser::Determinism::Semidet:
+    return {true, Solutions::One};
+  case parser::Determinism::Multi:
+  case parser::Determinism::CcMulti:
+    return {false, Solutions::Many};
+  case parser::Determinism::Nondet:
+  case parser::Determinism::CcNondet:
+    return {true, Solutions::Many};
+  case parser::Determinism::Failure:
+    return {true, Solutions::Zero};
+  case parser::Determinism::Erroneous:
+    return {false, Solutions::Zero};
+  }
+  return {true, Solutions::Many};
+}
+
+parser::Determinism DeterminismOf(Components c) {
+  switch (c.most) {
+  case Solutions::Zero:
+    return c.canFail ? parser::Determinism::Failure : parser::Determinism::Erroneous;
+  case Solutions::One:
+    return c.canFail ? parser::Determinism::Semidet : parser::Determinism::Det;
+  case Solutions::Many:
+    return c.canFail ? parser::Determinism::Nondet : parser::Determinism::Multi;
+  }
+  return parser::Determinism::Nondet;
+}
+
+bool IsCommittedChoice(parser::Determinism determinism) {
+  return determinism == parser::Determinism::CcMulti ||
+      determinism == parser::Determinism::CcNondet;
+}
+
+// Whether `a` is at least as tight as `b` in the lattice of determinisms.
+bool Within(Components a, Components b) {
+  return (!a.canFail || b.canFail) && a.most <= b.most;
+}
+
+// (A, B) can fail if A can, or if A can succeed and B can fail; it has no
+// solutions if either has none, and more than one if either has more and
+// neither has none (reference manual, "Determinism checking and
+// inference"). det is its identity.
+Components Conjunction(Components a, Components b) {
+  Solutions most{a.most == Solutions::Zero || b.most == Solutions::Zero
+          ? Solutions::Zero
+          : a.most == Solutions::Many || b.most == Solutions::Many
+          ? Solutions::Many
+          : Solutions::One};
+  return {a.canFail || (a.most != Solutions::Zero && b.canFail), most};
+}
+
+// (A ; B) can fail if both can; it has more than one solution if either
+// has, or both have one. failure is its identity.
+Components Disjunction(Components a, Components b) {
+  Solutions most{a.most == Solutions::Zero ? b.most
+          : b.most == Solutions::Zero      ? a.most
+                                           : Solutions::Many};
+  return {a.canFail && b.canFail, most};
+}
+
+// At most one arm of a switch runs: it can fail if any arm can, and has as
+// many solutions as the arm with most (Henderson, Somogyi and Conway,
+// section 5.1). erroneous is its identity.
+Components Switch(Components a, Components b) {
+  return {a.canFail || b.canFail, std::max(a.most, b.most)};
+}
+
+// Infers the determinism of each goal of a procedure's body, from its
+// parts' (reference manual, "Determinism checking and inference";
+// Henderson, Somogyi and Conway, section 5.1), checks it against the
+// declared determinism, and if it is not as tight finds the goals that
+// make the difference (ibid., section 5.3).
+class DeterminismAnalyser {
+public:
+  DeterminismAnalyser(ProcedureBody &body, TypeChecking &types, InstOps &ops,
+      const parser::TokenSequence &tokens, parser::Messages &messages)
+      : body_{body}, types_{types}, ops_{ops}, tokens_{tokens},
+        messages_{messages} {}
+
+  void Run() {
+    std::set<BodyVar> bound;
+    for (std::size_t i{0}; i < body_.head.size(); ++i) {
+      if (!ops_.IsFree(body_.procedure->modes[i].initial)) {
+        bound.insert(body_.head[i]);
+      }
+    }
+    Components d{Infer(body_.body, bound,
+        std::set<BodyVar>{body_.head.begin(), body_.head.end()})
+                     .d};
+    if (body_.unchecked != DeterminismUnchecked::None) {
+      body_.goals.clear();
+      return;
+    }
+    body_.determinism = DeterminismOf(d);
+    Check();
+  }
+
+private:
+  struct Inferred {
+    Components d;
+    bool impure{false};
+  };
+  // A goal that makes a determinism not as tight as declared, and why.
+  struct Cause {
+    TokenRange tokens;
+    std::string text;
+  };
+
+  void Unchecked(DeterminismUnchecked why) {
+    if (body_.unchecked == DeterminismUnchecked::None) {
+      body_.unchecked = why;
+    }
+  }
+
+  // The occurrences of each variable in a goal, each goal counted once
+  // though a merged case's goal is in several cases.
+  void Count(const Body *goal, std::map<BodyVar, unsigned> &counts,
+      std::set<const Body *> &visited) {
+    if (!visited.insert(goal).second) {
+      return;
+    }
+    auto add{[&](BodyVar var) { ++counts[var]; }};
+    switch (goal->kind) {
+    case BodyKind::Unify:
+      add(goal->left);
+      if (goal->isVar) {
+        add(goal->var);
+      }
+      llvm::for_each(goal->arguments, add);
+      if (goal->lambda) {
+        llvm::for_each(goal->lambdaHead, add);
+        Count(goal->lambda, counts, visited);
+      }
+      return;
+    case BodyKind::Call:
+      llvm::for_each(goal->arguments, add);
+      return;
+    case BodyKind::HOCall:
+      add(goal->closure);
+      llvm::for_each(goal->arguments, add);
+      return;
+    case BodyKind::Switch:
+      add(goal->switchVar);
+      for (const SwitchCase &c : goal->cases) {
+        Count(c.goal, counts, visited);
+      }
+      return;
+    default:
+      for (const Body *g : goal->goals) {
+        Count(g, counts, visited);
+      }
+    }
+  }
+
+  // The variables of a goal.
+  const std::set<BodyVar> &Vars(const Body *goal) {
+    auto [it, inserted]{vars_.try_emplace(goal)};
+    if (inserted) {
+      std::map<BodyVar, unsigned> counts;
+      std::set<const Body *> visited;
+      Count(goal, counts, visited);
+      for (const auto &entry : counts) {
+        it->second.insert(entry.first);
+      }
+    }
+    return it->second;
+  }
+
+  // Whether a goal binds a variable that is used outside it, which makes
+  // its solutions different (reference manual, "Interfacing
+  // nondeterministic code with the real world"). `outside` has the
+  // variables used outside the goal, as mmc's quantification finds them
+  // after switch detection: in a branch, those of its parent; in a
+  // conjunct, those and the other conjuncts'.
+  bool HasOutputs(const Body *goal, const std::set<BodyVar> &before,
+      const std::set<BodyVar> &outside) {
+    return llvm::any_of(Vars(goal), [&](BodyVar var) {
+      return !before.count(var) && outside.count(var);
+    });
+  }
+
+  Components Callee(const Procedure &callee) {
+    if (!callee.determinism) {
+      Unchecked(DeterminismUnchecked::InferredCallee);
+      return {true, Solutions::Many};
+    }
+    if (IsCommittedChoice(*callee.determinism)) {
+      Unchecked(DeterminismUnchecked::CommittedChoice);
+    }
+    return ComponentsOf(*callee.determinism);
+  }
+
+  bool Impure(const Symbol &symbol) const {
+    const Signature *sig{types_.SignatureOf(symbol)};
+    return sig && sig->purity == parser::Purity::Impure;
+  }
+
+  // The determinism of a goal; the variables it binds are added to
+  // `bound`. A goal that can succeed more than once but binds no variable
+  // used outside it, and is not impure, succeeds at most once, as its
+  // solutions are the same to the rest (ibid.). As in mmc for a
+  // disjunction, this goes for the innermost such goal; mmc infers a
+  // conjunct other than a disjunction in a context where only its first
+  // solution is wanted, so the disjunctions inside it keep more than one
+  // solution, but this changes no procedure's determinism (see the design
+  // document's known differences).
+  Inferred Infer(const Body *goal, std::set<BodyVar> &bound,
+      const std::set<BodyVar> &outside) {
+    std::set<BodyVar> before{bound};
+    Inferred r{InferGoal(goal, bound, outside)};
+    if (r.d.most == Solutions::Many && !r.impure &&
+        !HasOutputs(goal, before, outside)) {
+      r.d.most = Solutions::One;
+      pruned_.insert(goal);
+    }
+    body_.goals[goal] = DeterminismOf(r.d);
+    return r;
+  }
+
+  // A goal's determinism as the goals around it see it.
+  Components Seen(const Body *goal) const {
+    auto it{body_.goals.find(goal)};
+    if (it == body_.goals.end()) {
+      return {false, Solutions::One};
+    }
+    return ComponentsOf(it->second);
+  }
+
+  Inferred InferGoal(const Body *goal, std::set<BodyVar> &bound,
+      const std::set<BodyVar> &outside) {
+    const Components det{false, Solutions::One};
+    switch (goal->kind) {
+    case BodyKind::Unify:
+      return Unification(goal, bound);
+    case BodyKind::Call:
+      bound.insert(goal->arguments.begin(), goal->arguments.end());
+      return {Callee(*goal->modes->callee), Impure(*goal->modes->callee->symbol)};
+    case BodyKind::HOCall: {
+      bound.insert(goal->arguments.begin(), goal->arguments.end());
+      if (IsCommittedChoice(goal->modes->determinism)) {
+        Unchecked(DeterminismUnchecked::CommittedChoice);
+      }
+      return {ComponentsOf(goal->modes->determinism),
+          goal->hoCall->purity == parser::Purity::Impure};
+    }
+    case BodyKind::Conj: {
+      Inferred r{det};
+      // The number of conjuncts that each variable is in.
+      std::map<BodyVar, unsigned> in;
+      for (const Body *g : goal->goals) {
+        for (BodyVar var : Vars(g)) {
+          ++in[var];
+        }
+      }
+      for (const Body *g : goal->goals) {
+        std::set<BodyVar> used{outside};
+        for (BodyVar var : Vars(g)) {
+          if (in[var] > 1) {
+            used.insert(var);
+          }
+        }
+        Inferred i{Infer(g, bound, used)};
+        r.d = Conjunction(r.d, i.d);
+        r.impure |= i.impure;
+      }
+      return r;
+    }
+    case BodyKind::Disj: {
+      Inferred r{{true, Solutions::Zero}};
+      std::set<BodyVar> after{bound};
+      Known known{*this};
+      for (const Body *g : goal->goals) {
+        std::set<BodyVar> inner{bound};
+        known.Reset();
+        Inferred i{Infer(g, inner, outside)};
+        r.d = Disjunction(r.d, i.d);
+        r.impure |= i.impure;
+        after.insert(inner.begin(), inner.end());
+      }
+      bound = std::move(after);
+      return r;
+    }
+    case BodyKind::Switch: {
+      Inferred r{{false, Solutions::Zero}};
+      std::set<BodyVar> after{bound};
+      Known known{*this};
+      for (const SwitchCase &c : goal->cases) {
+        std::set<BodyVar> inner{bound};
+        known.Reset();
+        if (body_.rechecked && c.others.empty()) {
+          known_[goal->switchVar] = c.functor;
+        }
+        Inferred i{Infer(c.goal, inner, outside)};
+        r.d = Switch(r.d, i.d);
+        r.impure |= i.impure;
+        after.insert(inner.begin(), inner.end());
+      }
+      if (goal->canFail) {
+        r.d.canFail = true;
+      }
+      bound = std::move(after);
+      return r;
+    }
+    case BodyKind::IfThenElse: {
+      std::set<BodyVar> then{bound};
+      std::set<BodyVar> condition{outside}, thenOutside{outside};
+      condition.insert(Vars(goal->goals[1]).begin(), Vars(goal->goals[1]).end());
+      thenOutside.insert(Vars(goal->goals[0]).begin(), Vars(goal->goals[0]).end());
+      Known known{*this};
+      Inferred c{Infer(goal->goals[0], then, condition)};
+      Inferred t{Infer(goal->goals[1], then, thenOutside)};
+      std::set<BodyVar> otherwise{bound};
+      known.Reset();
+      Inferred e{Infer(goal->goals[2], otherwise, outside)};
+      bool impure{c.impure || t.impure || e.impure};
+      bound.insert(then.begin(), then.end());
+      // If the condition cannot fail, the else part is not run.
+      if (!c.d.canFail) {
+        return {Conjunction(c.d, t.d), impure};
+      }
+      Components both{Conjunction(c.d, t.d)};
+      return {{t.d.canFail || e.d.canFail, std::max(both.most, e.d.most)},
+          impure};
+    }
+    case BodyKind::Not: {
+      std::set<BodyVar> inner{bound};
+      Known known{*this};
+      Inferred i{Infer(goal->goals.front(), inner, outside)};
+      switch (DeterminismOf(i.d)) {
+      case parser::Determinism::Erroneous:
+        return {{false, Solutions::Zero}, i.impure};
+      case parser::Determinism::Failure:
+        return {det, i.impure};
+      case parser::Determinism::Det:
+      case parser::Determinism::Multi:
+        return {{true, Solutions::Zero}, i.impure};
+      default:
+        return {{true, Solutions::One}, i.impure};
+      }
+    }
+    case BodyKind::Scope:
+      if (goal->scope == ScopeKind::RequireDeterminism ||
+          goal->scope == ScopeKind::RequireSwitch ||
+          goal->scope == ScopeKind::PromiseSolutions) {
+        Unchecked(DeterminismUnchecked::Requirement);
+      }
+      return Infer(goal->goals.front(), bound, outside);
+    }
+    return {det};
+  }
+
+  Inferred Unification(const Body *goal, std::set<BodyVar> &bound) {
+    const Components det{false, Solutions::One};
+    bound.insert(goal->left);
+    if (goal->isVar) {
+      bound.insert(goal->var);
+    }
+    bound.insert(goal->arguments.begin(), goal->arguments.end());
+    if (goal->lambda) {
+      Lambda(goal, bound);
+      return {det};
+    }
+    switch (goal->unify) {
+    case UnifyKind::Call:
+      return {Callee(*goal->modes->callee), Impure(*goal->modes->callee->symbol)};
+    case UnifyKind::Test:
+      return {{true, Solutions::One}};
+    case UnifyKind::Deconstruct: {
+      // In a case of a switch on its variable, as in mmc, which knows its
+      // functor there, or after a deconstruction of it with the same
+      // functor. One with another functor is fail already where mmc knows
+      // that it cannot succeed (SwitchDetector::Prune); elsewhere it goes
+      // by the inst, as in mmc.
+      auto it{known_.find(goal->left)};
+      bool known{goal->switchTest ||
+          (it != known_.end() && it->second == goal->functor)};
+      if (body_.rechecked) {
+        known_[goal->left] = goal->functor;
+      }
+      return {{!known && goal->canFail, Solutions::One}};
+    }
+    case UnifyKind::Assign: {
+      auto it{known_.find(goal->var)};
+      if (it != known_.end()) {
+        known_[goal->left] = it->second;
+      } else {
+        known_.erase(goal->left);
+      }
+      return {det};
+    }
+    default:
+      return {det};
+    }
+  }
+
+  // While it lives, the functors known before a branching goal, which
+  // each branch starts from and which are known after it. As in mmc, if
+  // it checks the modes again after common subexpression elimination
+  // (ProcedureBody::rechecked), a case gives the functor of its switch's
+  // variable, a deconstruction before, in the same conjunction or around
+  // it, its variable's, and an assignment passes one on; a construction
+  // does not. Otherwise only the insts that mode analysis found count.
+  class Known {
+  public:
+    explicit Known(DeterminismAnalyser &analyser)
+        : analyser_{analyser}, saved_{analyser.known_} {}
+    ~Known() { Reset(); }
+    void Reset() { analyser_.known_ = saved_; }
+
+  private:
+    DeterminismAnalyser &analyser_;
+    std::map<BodyVar, InstFunctor> saved_;
+  };
+
+  // A lambda expression's body, which runs when the closure is called,
+  // with the arguments that its modes make inputs bound.
+  void Lambda(const Body *goal, const std::set<BodyVar> &bound) {
+    std::set<BodyVar> inner{bound};
+    Known known{*this};
+    llvm::ArrayRef<ArgMode> modes{goal->modes->lambda};
+    for (std::size_t i{0}; i < goal->lambdaHead.size(); ++i) {
+      if (i < modes.size() && !ops_.IsFree(modes[i].initial)) {
+        inner.insert(goal->lambdaHead[i]);
+      }
+    }
+    Components d{Infer(goal->lambda, inner,
+        std::set<BodyVar>{goal->lambdaHead.begin(), goal->lambdaHead.end()})
+                     .d};
+    if (IsCommittedChoice(goal->modes->determinism)) {
+      Unchecked(DeterminismUnchecked::CommittedChoice);
+    }
+    lambdas_.push_back({goal, d});
+  }
+
+  std::string Name(BodyVar var) const { return body_.vars[var].name; }
+
+  parser::CharBlock Where(TokenRange tokens) const {
+    return tokens_.tokens[tokens.first].spelling;
+  }
+
+  static std::string FunctorText(const InstFunctor &f) {
+    std::string text{f.name.str()};
+    if (!f.literal) {
+      text += '/' + std::to_string(f.arity);
+    }
+    return text;
+  }
+
+  // What a call, or a higher-order call, does beyond what is allowed:
+  // with no solutions allowed, as in an erroneous procedure, any is too
+  // many.
+  static std::string Beyond(bool fails, bool many, Solutions most) {
+    std::string succeeds{most == Solutions::Zero ? "can succeed"
+                                                 : "can succeed more than once"};
+    return fails && many ? "can fail and " + succeeds
+        : fails          ? std::string{"can fail"}
+                         : succeeds;
+  }
+
+  // The goals in `goal` that make it fail, or succeed more than `most`
+  // times, beyond what is allowed (Henderson, Somogyi and Conway, section
+  // 5.3).
+  void Diagnose(const Body *goal, bool canFail, Solutions most,
+      const std::string &context, std::vector<Cause> &causes) {
+    if (!body_.goals.count(goal)) {
+      return;
+    }
+    Components d{Seen(goal)};
+    bool fails{d.canFail && !canFail};
+    bool many{d.most > most};
+    if (!fails && !many) {
+      return;
+    }
+    // Inside a goal whose solutions are the same to the rest, more than
+    // one is allowed.
+    Solutions inner{pruned_.count(goal) ? Solutions::Many : most};
+    auto cause{[&](std::string text) {
+      causes.push_back({goal->tokens, context + text});
+    }};
+    switch (goal->kind) {
+    case BodyKind::Unify:
+      if (goal->lambda) {
+        return;
+      }
+      if (goal->unify == UnifyKind::Call) {
+        cause("the call to " + ProcedureToString(*goal->modes->callee) + ' ' +
+            Beyond(fails, many, most));
+      } else if (goal->isVar) {
+        cause("the unification of " + Name(goal->left) + " and " +
+            Name(goal->var) + ' ' + Beyond(fails, many, most));
+      } else {
+        cause("the unification of " + Name(goal->left) + " and " +
+            FunctorText(goal->functor) + ' ' + Beyond(fails, many, most));
+      }
+      return;
+    case BodyKind::Call:
+      cause("the call to " + ProcedureToString(*goal->modes->callee) + ' ' +
+          Beyond(fails, many, most));
+      return;
+    case BodyKind::HOCall:
+      cause(std::string{"the higher-order call "} + Beyond(fails, many, most));
+      return;
+    case BodyKind::Conj:
+      for (const Body *g : goal->goals) {
+        Diagnose(g, canFail, inner, context, causes);
+      }
+      return;
+    case BodyKind::Disj: {
+      std::size_t solutions{0};
+      for (const Body *g : goal->goals) {
+        if (Seen(g).most != Solutions::Zero) {
+          ++solutions;
+        }
+      }
+      if (many && solutions > 1) {
+        cause("the disjunction has more than one disjunct with solutions");
+      }
+      // A disjunct's failure counts only if the disjunction can fail.
+      for (const Body *g : goal->goals) {
+        Diagnose(g, canFail || !d.canFail, inner, context, causes);
+      }
+      return;
+    }
+    case BodyKind::Switch: {
+      if (fails && goal->canFail) {
+        std::vector<std::string> missing;
+        const Type *type{body_.vars[goal->switchVar].type};
+        if (const std::vector<ConstructorTypes> *constructors{
+                ops_.ConstructorsOf(type)}) {
+          for (const ConstructorTypes &c : *constructors) {
+            if (llvm::none_of(goal->cases,
+                    [&](const SwitchCase &s) { return s.Has(c.functor); })) {
+              missing.push_back(FunctorText(c.functor));
+            }
+          }
+        }
+        cause("the switch on " + Name(goal->switchVar) +
+            (missing.empty() ? std::string{" can fail"}
+                             : " does not cover " + llvm::join(missing, ", ")));
+      }
+      for (const SwitchCase &c : goal->cases) {
+        std::string functors{FunctorText(c.functor)};
+        for (const InstFunctor &other : c.others) {
+          functors += " or " + FunctorText(other);
+        }
+        Diagnose(c.goal, canFail, inner,
+            context + "in the case " + functors + " of the switch on " +
+                Name(goal->switchVar) + ": ",
+            causes);
+      }
+      return;
+    }
+    case BodyKind::IfThenElse: {
+      bool condition{Seen(goal->goals[0]).canFail};
+      Diagnose(goal->goals[0], canFail || condition, inner, context, causes);
+      Diagnose(goal->goals[1], canFail, inner, context, causes);
+      if (condition) {
+        Diagnose(goal->goals[2], canFail, inner, context, causes);
+      }
+      return;
+    }
+    case BodyKind::Not:
+      if (fails) {
+        cause("the negated goal can succeed");
+      }
+      return;
+    case BodyKind::Scope:
+      Diagnose(goal->goals.front(), canFail, inner, context, causes);
+      return;
+    }
+  }
+
+  // Where the procedure's determinism is declared, and its name in
+  // messages.
+  parser::CharBlock Declaration() const {
+    const Procedure &procedure{*body_.procedure};
+    return procedure.source.empty() ? procedure.symbol->source : procedure.source;
+  }
+
+  std::string Text() const {
+    if (body_.method) {
+      return "the method " + ProcedureToString(*body_.procedure) +
+          " of instance " + body_.method->method->instanceText;
+    }
+    return ProcedureToString(*body_.procedure);
+  }
+
+  void Report(parser::Message &message, const Body *goal,
+      parser::Determinism declared) {
+    std::vector<Cause> causes;
+    Components d{ComponentsOf(declared)};
+    Diagnose(goal, d.canFail, d.most, "", causes);
+    for (const Cause &c : causes) {
+      message.Attach(Where(c.tokens), "%s"_because_en_US, c.text);
+    }
+  }
+
+  // Compares the inferred determinisms with the declared ones, of the
+  // procedure and of its lambda expressions.
+  void Check() {
+    for (const auto &[goal, d] : lambdas_) {
+      parser::Determinism declared{goal->modes->determinism};
+      if (!Within(d, ComponentsOf(declared))) {
+        // mmc: "Determinism error in lambda expression. Declared `det',
+        // inferred `semidet''."
+        auto &message{messages_.Say(Where(goal->tokens),
+            "the lambda expression is declared %s, but its determinism is inferred to be %s"_err_en_US,
+            DeterminismName(declared), DeterminismName(DeterminismOf(d)))};
+        Report(message, goal->lambda, declared);
+      }
+    }
+    std::optional<parser::Determinism> declared{body_.procedure->determinism};
+    if (!declared) {
+      return;
+    }
+    if (body_.procedure->source.empty() &&
+        body_.procedure->symbol->kind == SymbolKind::Function &&
+        ComponentsOf(*declared).most == Solutions::Many) {
+      // mmc: "Error: invalid determinism for `f'(in) = out: the primary
+      // mode of a function cannot be `multi'." It does not check the
+      // body then. Only for this mode, though the manual rules out more
+      // than one solution for any mode whose arguments are all input (see
+      // the register).
+      messages_.Say(Declaration(),
+          "invalid determinism for %s: the primary mode of a function cannot be %s"_err_en_US,
+          Text(), DeterminismName(*declared));
+      return;
+    }
+    if (IsCommittedChoice(*declared)) {
+      body_.unchecked = DeterminismUnchecked::CommittedChoice;
+      body_.determinism.reset();
+      body_.goals.clear();
+      return;
+    }
+    Components inferred{ComponentsOf(*body_.determinism)};
+    if (!Within(inferred, ComponentsOf(*declared))) {
+      // mmc: "error: determinism declaration not satisfied. Declared
+      // `det', inferred `semidet'. The reason for the difference is the
+      // following."
+      auto &message{messages_.Say(Declaration(),
+          "the determinism declaration of %s is not satisfied: it is declared %s, but inferred %s"_err_en_US,
+          Text(), DeterminismName(*declared), DeterminismName(*body_.determinism))};
+      Report(message, body_.body, *declared);
+    } else if (*body_.determinism != *declared &&
+        !body_.procedure->source.empty()) {
+      // mmc: "warning: determinism declaration could be tighter."
+      messages_.Say(Declaration(),
+          "the determinism declaration of %s could be tighter: it is declared %s, but inferred %s"_warn_en_US,
+          Text(), DeterminismName(*declared), DeterminismName(*body_.determinism));
+    }
+  }
+
+  ProcedureBody &body_;
+  TypeChecking &types_;
+  InstOps &ops_;
+  const parser::TokenSequence &tokens_;
+  parser::Messages &messages_;
+  std::map<const Body *, std::set<BodyVar>> vars_;
+  // The functors that variables are known to have (see Known).
+  std::map<BodyVar, InstFunctor> known_;
+  // The goals that succeed at most once because they have no outputs.
+  std::set<const Body *> pruned_;
+  std::vector<std::pair<const Body *, Components>> lambdas_;
+};
+
 std::unique_ptr<DeterminismChecking> CheckDeterminism(
-    const parser::TokenSequence &, TypeChecking &, ModeChecking &modes,
-    parser::Messages &) {
+    const parser::TokenSequence &tokens, TypeChecking &types,
+    ModeChecking &modes, parser::Messages &messages) {
   auto result{std::make_unique<DeterminismChecking>()};
+  // As mmc, which stops after mode analysis if it finds errors, so that
+  // its determinism errors do not follow from them.
+  bool analyse{!messages.AnyFatalError()};
   auto add{[&](const Procedure &procedure, const MethodModes *method,
                llvm::ArrayRef<ClauseModes> clauses) {
     if (clauses.empty()) {
@@ -1348,6 +2062,9 @@ std::unique_ptr<DeterminismChecking> CheckDeterminism(
     body.method = method;
     BodyBuilder{*result, body, modes.ops()}.Build(procedure, clauses);
     SwitchDetector{*result, body, modes.ops()}.Run();
+    if (analyse) {
+      DeterminismAnalyser{body, types, modes.ops(), tokens, messages}.Run();
+    }
     if (!method) {
       result->byProcedure_[&procedure] = &body;
     }
@@ -1385,6 +2102,13 @@ void DumpProcedureBody(llvm::raw_ostream &os, const ProcedureBody &body,
     }
     return text;
   }};
+  // A goal's determinism, if it was inferred.
+  auto tag{[&](const Body *goal) {
+    auto it{body.goals.find(goal)};
+    return it == body.goals.end()
+        ? std::string{}
+        : std::string{" ["} + DeterminismName(it->second) + ']';
+  }};
   std::function<void(const Body *, unsigned)> dump{[&](const Body *goal,
                                                       unsigned depth) {
     std::string indent(2 * depth + 4, ' ');
@@ -1392,14 +2116,15 @@ void DumpProcedureBody(llvm::raw_ostream &os, const ProcedureBody &body,
     switch (goal->kind) {
     case BodyKind::Conj:
       if (goal->goals.empty()) {
-        os << indent << at << " true\n";
+        os << indent << at << " true" << tag(goal) << '\n';
       }
       for (const Body *g : goal->goals) {
         dump(g, depth);
       }
       return;
     case BodyKind::Disj:
-      os << indent << at << (goal->goals.empty() ? " fail\n" : " disjunction\n");
+      os << indent << at << (goal->goals.empty() ? " fail" : " disjunction")
+         << tag(goal) << '\n';
       for (const Body *g : goal->goals) {
         os << indent << "  branch\n";
         dump(g, depth + 2);
@@ -1407,7 +2132,8 @@ void DumpProcedureBody(llvm::raw_ostream &os, const ProcedureBody &body,
       return;
     case BodyKind::Switch:
       os << indent << at << " switch on " << name(goal->switchVar)
-         << (goal->canFail ? ", can fail\n" : ", cannot fail\n");
+         << (goal->canFail ? ", can fail" : ", cannot fail") << tag(goal)
+         << '\n';
       for (const SwitchCase &c : goal->cases) {
         os << indent << "  case " << functor(c.functor);
         for (const InstFunctor &other : c.others) {
@@ -1418,7 +2144,7 @@ void DumpProcedureBody(llvm::raw_ostream &os, const ProcedureBody &body,
       }
       return;
     case BodyKind::IfThenElse:
-      os << indent << at << " if-then-else\n";
+      os << indent << at << " if-then-else" << tag(goal) << '\n';
       for (std::size_t i{0}; i < 3; ++i) {
         os << indent << "  " << (i == 0 ? "if" : i == 1 ? "then" : "else")
            << '\n';
@@ -1426,19 +2152,20 @@ void DumpProcedureBody(llvm::raw_ostream &os, const ProcedureBody &body,
       }
       return;
     case BodyKind::Not:
-      os << indent << at << " not\n";
+      os << indent << at << " not" << tag(goal) << '\n';
       dump(goal->goals.front(), depth + 1);
       return;
     case BodyKind::Scope:
       os << indent << at << ' '
-         << llvm::StringRef{EnumToString(goal->scope)}.lower() << '\n';
+         << llvm::StringRef{EnumToString(goal->scope)}.lower() << tag(goal)
+         << '\n';
       dump(goal->goals.front(), depth + 1);
       return;
     case BodyKind::Call:
       os << indent << at << " call " << *goal->modes->callee->symbol << " mode "
          << goal->modes->callee->number << (goal->modes->implied ? " implied" : "")
          << ": " << goal->call->name->name << '(' << names(goal->arguments)
-         << ")\n";
+         << ')' << tag(goal) << '\n';
       return;
     case BodyKind::HOCall: {
       llvm::ArrayRef<BodyVar> arguments{goal->arguments};
@@ -1447,7 +2174,8 @@ void DumpProcedureBody(llvm::raw_ostream &os, const ProcedureBody &body,
         os << name(arguments.back()) << " = ";
         arguments = arguments.drop_back();
       }
-      os << name(goal->closure) << '(' << names(arguments) << ")\n";
+      os << name(goal->closure) << '(' << names(arguments) << ')' << tag(goal)
+         << '\n';
       return;
     }
     case BodyKind::Unify:
@@ -1483,7 +2211,7 @@ void DumpProcedureBody(llvm::raw_ostream &os, const ProcedureBody &body,
           os << ", switched on";
         }
       }
-      os << '\n';
+      os << tag(goal) << '\n';
       if (goal->lambda) {
         dump(goal->lambda, depth + 1);
       }

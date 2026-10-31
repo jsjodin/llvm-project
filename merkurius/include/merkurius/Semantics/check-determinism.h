@@ -23,7 +23,11 @@
 // analysis in the Mercury compiler", 1996, section 3), and common
 // subexpression elimination moves a deconstruction that every branch
 // makes out of the disjunction, so that the variables it binds may be
-// switched on (ibid., section 4).
+// switched on (ibid., section 4). The determinism of each goal is then
+// inferred from its parts' (reference manual, "Determinism checking and
+// inference"; ibid., section 5.1), and a procedure's declared determinism
+// checked against its body's, with the goals that make the difference
+// (ibid., section 5.3).
 
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/token.h"
@@ -104,10 +108,18 @@ struct Body {
   std::vector<std::pair<BodyVar, const Inst *>> entry;
   // For a switch: its variable, whether it can fail because its cases
   // leave out functors the variable may have, and its cases, by functor.
+  // For a deconstruction, whether the variable's inst before it allows
+  // another functor, or its type has no known set of constructors.
   BodyVar switchVar{0};
   bool canFail{false};
   std::vector<SwitchCase> cases;
 };
+
+// Why a procedure's determinism is not inferred yet: it calls one whose
+// determinism is to be inferred, it uses committed choice, or it has a
+// scope that requires or promises a determinism.
+ENUM_CLASS(DeterminismUnchecked, None, InferredCallee, CommittedChoice,
+    Requirement)
 
 // A procedure's body, or an instance method's in one of its modes.
 struct ProcedureBody {
@@ -116,6 +128,16 @@ struct ProcedureBody {
   std::vector<BodyVarInfo> vars;
   std::vector<BodyVar> head;
   const Body *body{nullptr};
+  // Whether common subexpression elimination changed the body, after
+  // which mmc checks its modes again, and so knows the functor of a
+  // switch's variable in each case, and of a variable after a
+  // deconstruction or an assignment from one known.
+  bool rechecked{false};
+  // The determinism inferred for the body, and for each of its goals; none
+  // if `unchecked`.
+  std::optional<parser::Determinism> determinism;
+  llvm::DenseMap<const Body *, parser::Determinism> goals;
+  DeterminismUnchecked unchecked{DeterminismUnchecked::None};
 };
 
 class DeterminismChecking {
@@ -131,6 +153,7 @@ public:
 private:
   friend class BodyBuilder;
   friend class SwitchDetector;
+  friend class DeterminismAnalyser;
   friend std::unique_ptr<DeterminismChecking> CheckDeterminism(
       const parser::TokenSequence &, TypeChecking &, ModeChecking &,
       parser::Messages &);
@@ -139,8 +162,8 @@ private:
   llvm::DenseMap<const Procedure *, const ProcedureBody *> byProcedure_;
 };
 
-// Prints a procedure's body, each goal with its position, as determinism
-// analysis sees it.
+// Prints a procedure's body, each goal with its position and its
+// determinism, as determinism analysis sees it.
 void DumpProcedureBody(llvm::raw_ostream &, const ProcedureBody &,
     const parser::TokenSequence &,
     llvm::function_ref<std::string(parser::CharBlock)> position);

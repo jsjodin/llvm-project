@@ -1,0 +1,11 @@
+# Random modules whose predicates and lambda expressions are declared with
+# random determinisms, and whose goals call predicates of each
+# determinism, some without outputs (generate-switch-programs.py
+# --determinism). merkc must infer the determinisms of the procedures and
+# their goals that mmc does, and report its determinism errors at the same
+# lines.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-switch-programs.py --determinism --seed 12 --count 40 %t
+# RUN: %compare-switches --determinism %t/*.m

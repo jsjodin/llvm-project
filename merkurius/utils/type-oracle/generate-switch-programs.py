@@ -13,7 +13,12 @@ disjunctions are in if-then-elses, negations and lambda expressions, and
 some inputs have bound insts. The modules are mode-correct, and declared
 nondet, so that mmc checks them up to determinism analysis.
 
-Usage: generate-switch-programs.py [--seed N] [--count N] DIR
+With --determinism, for compare-switches.py --determinism, the goals also
+call predicates of each determinism, some with no outputs, and each
+predicate and lambda expression is declared with a determinism chosen at
+random, so that some declarations are not satisfied.
+
+Usage: generate-switch-programs.py [--seed N] [--count N] [--determinism] DIR
 """
 
 import argparse
@@ -33,6 +38,25 @@ PRELUDE = """\
 """
 
 INPUTS = [("X", "t"), ("W", "t"), ("L", "list(int)"), ("U", "u"), ("N", "int")]
+
+# Predicates of each determinism, for --determinism.
+HELPERS = """\
+:- pred sd(int::in, int::out) is semidet.
+sd(X, X) :- X > 0.
+:- pred md(int::in, int::out) is multi.
+md(X, Y) :- ( Y = X ; Y = X + 1 ).
+:- pred nd(int::in, int::out) is nondet.
+nd(X, Y) :- X > 0, ( Y = X ; Y = 1 ).
+:- pred fl(int::in, int::out) is failure.
+fl(_, _) :- fail.
+:- pred er(int::in, int::out) is erroneous.
+er(_, _) :- error("er").
+
+"""
+CALLS = ["q", "q", "sd", "md", "nd", "fl", "er"]
+DETERMINISMS = ["det", "det", "semidet", "semidet", "multi", "nondet", "nondet",
+                "failure", "erroneous"]
+determinism = False
 
 
 class Gen:
@@ -109,8 +133,13 @@ class Gen:
                 ctx.append((m, "int"))
             elif k < 0.75:
                 m = self.fresh("M")
-                goals.append("q(%s, %s)" % (self.int_value(ctx), m))
-                ctx.append((m, "int"))
+                callee = r.choice(CALLS) if determinism else "q"
+                if determinism and r.random() < 0.2:
+                    # No outputs.
+                    goals.append("%s(%s, _)" % (callee, self.int_value(ctx)))
+                else:
+                    goals.append("%s(%s, %s)" % (callee, self.int_value(ctx), m))
+                    ctx.append((m, "int"))
             elif k < 0.85:
                 goals.append("%s > 0" % self.int_value(ctx))
             else:
@@ -185,8 +214,9 @@ class Gen:
             return "not (%s, %s = 2), %s" % (self.disjunction(ctx, c, target), c,
                                            self.disjunction(ctx, out, target))
         p, y = self.fresh("P"), self.fresh("Y")
-        return "%s = (pred(%s::out) is nondet :- %s), %s(%s)" % (
-            p, y, self.disjunction(ctx, y, target), p, out)
+        detism = r.choice(DETERMINISMS) if determinism else "nondet"
+        return "%s = (pred(%s::out) is %s :- %s), %s(%s)" % (
+            p, y, detism, self.disjunction(ctx, y, target), p, out)
 
 
 def head_pattern(gen, var, typ, ctx):
@@ -208,7 +238,8 @@ def predicate(gen, n):
         else:
             insts.append("%s::in" % t)
     name = "p%d" % n
-    decl = ":- pred %s(%s, int::out) is nondet.\n" % (name, ", ".join(insts))
+    detism = r.choice(DETERMINISMS) if determinism else "nondet"
+    decl = ":- pred %s(%s, int::out) is %s.\n" % (name, ", ".join(insts), detism)
     clauses = []
     if r.random() < 0.3:
         # Clauses whose heads are patterns.
@@ -245,8 +276,9 @@ def module(rng, name):
         decls.append(d)
         defs.append("\n".join(c) + "\n")
     return (PRELUDE.format(name=name) + "".join(decls) +
-            "\n:- implementation.\n:- import_module int.\n\n"
-            ":- pred q(int::in, int::out) is det.\nq(X, X).\n\n" + "\n".join(defs))
+            "\n:- implementation.\n:- import_module int%s.\n\n" % (", require" if determinism else "") +
+            ":- pred q(int::in, int::out) is det.\nq(X, X).\n" +
+            (HELPERS if determinism else "\n") + "\n".join(defs))
 
 
 def main():
@@ -254,8 +286,11 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--count", type=int, default=20)
+    parser.add_argument("--determinism", action="store_true")
     parser.add_argument("dir")
     args = parser.parse_args()
+    global determinism
+    determinism = args.determinism
     os.makedirs(args.dir, exist_ok=True)
     for i in range(args.count):
         rng = random.Random(args.seed * 100003 + i)
