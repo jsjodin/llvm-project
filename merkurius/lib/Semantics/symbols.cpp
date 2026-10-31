@@ -23,7 +23,7 @@ const Symbol &ModuleSymbols::Add(SymbolKind kind, llvm::StringRef name,
         symbol->owner == owner) {
       // A type's or type class's abstract declaration in the interface
       // and its definition in the implementation are one symbol.
-      // The symbol's declaration is the definition.
+      // The symbol's declaration, and its source, are the definition's.
       auto &existing{const_cast<Symbol &>(*symbol)};
       existing.exported |= exported;
       const auto *typeclass{
@@ -32,6 +32,7 @@ const Symbol &ModuleSymbols::Add(SymbolKind kind, llvm::StringRef name,
               existing.declaration) ||
           (typeclass && (*typeclass)->abstract)) {
         existing.declaration = declaration;
+        existing.source = source;
       }
       return existing;
     }
