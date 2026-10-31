@@ -2,6 +2,12 @@
 # Builds the parser and desugaring fuzz target with libFuzzer and the
 # address and undefined behavior sanitizers, using the clang of the build
 # tree, then fuzzes for SECONDS (default 180) in JOBS processes (default 32).
+# SECONDS is the time spent fuzzing, after libFuzzer has run every input
+# of the corpus once, which takes minutes for a large corpus: libFuzzer's
+# own -max_total_time counts from its start, so the fuzzer runs without
+# it and is stopped SECONDS after its first job reports. It runs in its own
+# process group, which is sent SIGTERM, since in fork mode it ignores
+# SIGINT and its jobs outlive it.
 #
 # The sources compile in parallel through a generated ninja file, and only
 # those that changed since the last run are recompiled. The fuzzer runs in
@@ -60,7 +66,32 @@ find "$MERKURIUS_DIR/test" "$MERKURIUS_DIR/utils" -name '*.m' \
   -exec cp {} "$WORK/corpus/" \;
 
 cd "$WORK"
-./merkurius-term-fuzzer corpus -artifact_prefix=artifacts/ \
-  -max_total_time="$SECONDS_TO_RUN" -fork="$JOBS" \
-  -max_len=4096 -dict="$MERKURIUS_DIR/utils/fuzz/mercury.dict" 2>&1 |
-  tee fuzz.log
+setsid ./merkurius-term-fuzzer corpus -artifact_prefix=artifacts/ -fork="$JOBS" \
+  -max_len=4096 -dict="$MERKURIUS_DIR/utils/fuzz/mercury.dict" \
+  > fuzz.log 2>&1 &
+FUZZER=$!
+tail -n +1 -f --pid="$FUZZER" fuzz.log &
+
+# The corpus is loaded when the first job reports, as "#N: ... job: 1".
+until grep -qE '^#[0-9]+: .* job: ' fuzz.log || ! kill -0 "$FUZZER" 2>/dev/null; do
+  sleep 1
+done
+START=$SECONDS
+while kill -0 "$FUZZER" 2>/dev/null && ((SECONDS - START < SECONDS_TO_RUN)); do
+  sleep 1
+done
+STOPPED=false
+if kill -0 "$FUZZER" 2>/dev/null; then
+  STOPPED=true
+  kill -TERM -- "-$FUZZER"
+fi
+STATUS=0
+wait "$FUZZER" || STATUS=$?
+# Stopped by SIGTERM, libFuzzer exits with 72 ("run interrupted").
+if $STOPPED && ((STATUS == 72)); then
+  STATUS=0
+fi
+sleep 1
+echo "INFO: fuzzed for $((SECONDS - START)) seconds after loading the corpus;" \
+  "exit status $STATUS" | tee -a fuzz.log
+exit "$STATUS"
