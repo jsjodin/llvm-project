@@ -41,6 +41,23 @@ struct ResolvedName {
   llvm::ArrayRef<const Symbol *> candidates; // empty if it is undefined
 };
 
+// A typeclass declaration of the module's own: the abstract one in the
+// interface and the definition in the implementation are one symbol.
+struct TypeclassItem {
+  const parser::TypeclassDecl *decl;
+  const Symbol *symbol;
+  bool exported; // in the interface section
+};
+
+// An instance declaration, of the module or of an interface it loaded.
+// Its type class is its name's candidate.
+struct InstanceItem {
+  const parser::InstanceDecl *decl;
+  const parser::TokenSequence *tokens; // of the module that declares it
+  bool local; // the module's own
+  bool exported; // in an interface section
+};
+
 class NameResolution {
 public:
   NameResolution();
@@ -55,6 +72,11 @@ public:
   // The module's names, in the order they were resolved: its declarations'
   // and then its clauses'.
   llvm::ArrayRef<ResolvedName> names() const { return names_; }
+  // The module's own typeclass declarations, in order.
+  llvm::ArrayRef<TypeclassItem> typeclasses() const { return typeclasses_; }
+  // The instance declarations of the interfaces loaded, and then the
+  // module's own, in order.
+  llvm::ArrayRef<InstanceItem> instances() const { return instances_; }
   // The name of a unification's functor: as written, or, for list syntax,
   // '[|]' or '[]'; null for any other functor.
   const parser::SymName *FunctorName(const Unify &) const;
@@ -67,6 +89,8 @@ private:
   llvm::DenseMap<const ModuleInterface *, std::unique_ptr<ModuleSymbols>>
       imported_;
   std::vector<ResolvedName> names_;
+  std::vector<TypeclassItem> typeclasses_;
+  std::vector<InstanceItem> instances_;
   llvm::DenseMap<const Unify *, const parser::SymName *> functors_;
 };
 

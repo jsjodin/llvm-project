@@ -21,13 +21,16 @@ const Symbol &ModuleSymbols::Add(SymbolKind kind, llvm::StringRef name,
     // "Discriminated unions").
     if (symbol->kind == kind && symbol->arity == arity &&
         symbol->owner == owner) {
-      // A type's abstract declaration in the interface and its definition
-      // in the implementation are one symbol.
+      // A type's or type class's abstract declaration in the interface
+      // and its definition in the implementation are one symbol.
       // The symbol's declaration is the definition.
       auto &existing{const_cast<Symbol &>(*symbol)};
       existing.exported |= exported;
+      const auto *typeclass{
+          std::get_if<const parser::TypeclassDecl *>(&existing.declaration)};
       if (std::holds_alternative<const parser::AbstractTypeDecl *>(
-              existing.declaration)) {
+              existing.declaration) ||
+          (typeclass && (*typeclass)->abstract)) {
         existing.declaration = declaration;
       }
       return existing;
