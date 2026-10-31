@@ -101,6 +101,7 @@ double(X) = X * 2.
 % CHECK: call func int.'*'/2 mode 0: HeadVar__2 = *(X, V_{{[0-9]+}})
 
 later(X) :-
-    ( X = 1 ; X = 2 ).
+    P = (pred(Y::out) is det :- Y = 1),
+    P(X).
 % CHECK-LABEL: pred conjunctions.later/1 mode 0: later(out) is multi
-% CHECK-NEXT: not checked: Disjunction
+% CHECK-NEXT: not checked: Lambda

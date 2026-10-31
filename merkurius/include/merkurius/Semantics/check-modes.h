@@ -16,9 +16,13 @@
 // them that mmc reports. Then it checks each procedure's clauses: it
 // schedules each conjunction, delaying a goal that would give a mode error
 // until the goals after it bind what it needs, classifies each unification
-// and chooses a procedure for each call (Overton, "Precise and Expressive
-// Mode Systems for Typed Logic Programming Languages", 2003, chapter 3).
-// Only the first mode error of a procedure is reported, as by mmc.
+// and chooses a procedure for each call, checks the branches of
+// disjunctions and if-then-elses from the same insts and merges their
+// results, and keeps negations and conditions from binding what is used
+// outside them (Overton, "Precise and Expressive Mode Systems for Typed
+// Logic Programming Languages", 2003, chapter 3). A predicate's clauses
+// are branches of a disjunction too. Only the first mode error of a
+// procedure is reported, as by mmc.
 
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/parse-tree.h"
@@ -85,9 +89,9 @@ struct ClauseModes {
 
 // Why a procedure's clauses were not checked: they use what mode analysis
 // does not check yet, or their predicate has errors of other kinds.
-ENUM_CLASS(Unchecked, None, TypeErrors, ModeSpecificClauses, Disjunction,
-    IfThenElse, Negation, ParallelConjunction, HigherOrder, Lambda, Coerce,
-    Scope, Try, Atomic, InstParameters, InferredModes)
+ENUM_CLASS(Unchecked, None, TypeErrors, ModeSpecificClauses,
+    ParallelConjunction, HigherOrder, Lambda, Coerce, Scope, Try, Atomic,
+    InstParameters, InferredModes)
 
 class ModeChecking {
 public:
@@ -129,6 +133,12 @@ private:
   llvm::DenseMap<const Procedure *, std::vector<ClauseModes>> clauses_;
   llvm::DenseMap<const Procedure *, Unchecked> unchecked_;
   llvm::DenseSet<const Procedure *> errors_;
+  // The clauses of predicates with several, as checked: with head
+  // unifications, as mmc checks them.
+  std::deque<ClauseForm> forms_;
+  std::deque<ClauseTypes> clauseTypes_;
+  std::deque<Unify> unifies_;
+  std::deque<Conj> conjs_;
 };
 
 // Prints a checked clause's goals in execution order, each with its
