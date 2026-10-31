@@ -1,0 +1,9 @@
+# Random modules as in random-classes-1.test, with a type class with a
+# functional dependency too, measure(A, B) <= (A -> B), whose method's
+# results only improvement determines (generate-random-programs.py
+# --dependencies). merkc's improvement agrees with mmc's.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../../utils/type-oracle/generate-random-programs.py --dependencies --seed 3 --count 60 %t
+# RUN: %compare-types --allow-errors %t/*.m
