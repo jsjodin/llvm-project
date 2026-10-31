@@ -16,6 +16,7 @@
 #include "merkurius/Parser/source.h"
 #include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/unparse.h"
+#include "merkurius/Semantics/check-purity.h"
 #include "merkurius/Semantics/check-types.h"
 #include "merkurius/Semantics/desugar.h"
 #include "merkurius/Semantics/module-loader.h"
@@ -377,6 +378,8 @@ bool DebugDumpTypesAction::executeAction() {
       ci.getFrontendOpts().typeInferenceIterationLimit;
   std::unique_ptr<semantics::TypeChecking> checking{semantics::CheckTypes(
       *r.form, *r.resolution, r.tokens, r.messages, options)};
+  semantics::CheckPurity(
+      *r.tree, r.tokens, *r.form, *r.resolution, *checking, r.messages);
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   llvm::raw_ostream *os{ci.createDefaultOutputFile()};
   if (!os) {

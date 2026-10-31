@@ -316,9 +316,11 @@ def run_mmc(mmc, path, module, all_messages=False):
         if "Uncaught Mercury exception" in output:
             raise MmcCrash(output.strip().splitlines()[-1])
     if all_messages:
-        # Every message but warnings and inferred declarations.
+        # Every message but warnings and inferred declarations; a warning
+        # may follow its context, as in "In predicate `p'/1: warning: ...".
         return {line for line, text in messages if line and
-                not text.startswith(("Warning", "Inferred :- "))}
+                not text.startswith(("Warning", "Inferred :- ")) and
+                not re.match(r"In .*?:\s+warning:", text)}
     errors, warnings, signatures = set(), set(), {}
     # "In clause for ...:" introduces the message after it.
     i = 0
