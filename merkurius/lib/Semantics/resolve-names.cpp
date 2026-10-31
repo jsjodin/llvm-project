@@ -916,6 +916,7 @@ void Resolver::Run(const parser::ParseTree &tree,
   }
   // The imported interfaces' names, each in its own scope.
   for (const ModuleInterface *module : loader_.modules()) {
+    result_.interfaces_.push_back(module);
     Visibility scope{InterfaceScope(*module)};
     own_ = &Symbols(*module);
     for (const parser::Item &item : module->items) {

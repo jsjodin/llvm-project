@@ -41,7 +41,7 @@
 :- mode r(in) is det.
 % CHECK: [[@LINE-1]]:9: error: this mode declaration for pred declarations.r/1 is in the implementation section, but its pred declaration is in the interface
 
-p(_).
+p(0).
 dup(_).
 comb(1).
 f(X) = X.

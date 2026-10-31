@@ -57,21 +57,21 @@ w(_, X, X).
 z.
 
 % CHECK: 16:9 inst procedures.abc/0 == bound(a ; b ; c)
-% CHECK-NEXT: 17:9 inst procedures.ilist/1 == list.list_skel(I)
-% CHECK-NEXT: 18:9 inst procedures.rec/0 == bound(cons(ground, procedures.rec) ; nil)
-% CHECK-NEXT: 41:9 inst procedures.ho/0 == (pred(in, out) is det)
-% CHECK-NEXT: 23:10 pred procedures.m/2 mode 0: m(in, out) is det
-% CHECK-NEXT: 24:10 pred procedures.m/2 mode 1: m(out, in) is det
-% CHECK-NEXT: (default) func procedures.fm/1 mode 0: fm(in) = out is det
-% CHECK-NEXT: 26:10 pred procedures.n/1 mode 0: n(in) is semidet
-% CHECK-NEXT: 29:9 pred procedures.p/2 mode 0: p(in(procedures.abc), out) is det
-% CHECK-NEXT: 31:9 pred procedures.q/2 mode 0: q(in, out) is det
-% CHECK-NEXT: 32:9 pred procedures.q/2 mode 1: q(out, in) is det
-% CHECK-NEXT: (default) func procedures.f/1 mode 0: f(in) = out is det
-% CHECK-NEXT: 35:9 func procedures.g/1 mode 0: g(in) = out is semidet
-% CHECK-NEXT: 36:9 pred procedures.h/2 mode 0: h(in(procedures.ilist(ground)), out(list.list_skel(free))) is det
-% CHECK-NEXT: 37:9 pred procedures.r/1 mode 0: r(in(procedures.rec)) is det
-% CHECK-NEXT: 38:9 pred procedures.u/2 mode 0: u(di, uo) is det
-% CHECK-NEXT: 39:9 pred procedures.poly/2 mode 0: poly(in(I), out(I)) is det, I =< ground
-% CHECK-NEXT: 43:9 pred procedures.z/0 mode 0: z is det
-% CHECK-NEXT: 42:9 pred procedures.w/3 mode 0: w(in, in, out) is det
+% CHECK: 17:9 inst procedures.ilist/1 == list.list_skel(I)
+% CHECK: 18:9 inst procedures.rec/0 == bound(cons(ground, procedures.rec) ; nil)
+% CHECK: 41:9 inst procedures.ho/0 == (pred(in, out) is det)
+% CHECK: 23:10 pred procedures.m/2 mode 0: m(in, out) is det
+% CHECK: 24:10 pred procedures.m/2 mode 1: m(out, in) is det
+% CHECK: (default) func procedures.fm/1 mode 0: fm(in) = out is det
+% CHECK: 26:10 pred procedures.n/1 mode 0: n(in) is semidet
+% CHECK: 29:9 pred procedures.p/2 mode 0: p(in(procedures.abc), out) is det
+% CHECK: 31:9 pred procedures.q/2 mode 0: q(in, out) is det
+% CHECK: 32:9 pred procedures.q/2 mode 1: q(out, in) is det
+% CHECK: (default) func procedures.f/1 mode 0: f(in) = out is det
+% CHECK: 35:9 func procedures.g/1 mode 0: g(in) = out is semidet
+% CHECK: 36:9 pred procedures.h/2 mode 0: h(in(procedures.ilist(ground)), out(list.list_skel(free))) is det
+% CHECK: 37:9 pred procedures.r/1 mode 0: r(in(procedures.rec)) is det
+% CHECK: 38:9 pred procedures.u/2 mode 0: u(di, uo) is det
+% CHECK: 39:9 pred procedures.poly/2 mode 0: poly(in(I), out(I)) is det, I =< ground
+% CHECK: 43:9 pred procedures.z/0 mode 0: z is det
+% CHECK: 42:9 pred procedures.w/3 mode 0: w(in, in, out) is det
