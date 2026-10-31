@@ -74,6 +74,11 @@ public:
   llvm::ArrayRef<ResolvedName> names() const { return names_; }
   // The module's own typeclass declarations, in order.
   llvm::ArrayRef<TypeclassItem> typeclasses() const { return typeclasses_; }
+  // The interfaces loaded, in the order loaded, with their names
+  // resolved.
+  llvm::ArrayRef<const ModuleInterface *> interfaces() const {
+    return interfaces_;
+  }
   // The instance declarations of the interfaces loaded, and then the
   // module's own, in order.
   llvm::ArrayRef<InstanceItem> instances() const { return instances_; }
@@ -89,6 +94,7 @@ private:
   llvm::DenseMap<const ModuleInterface *, std::unique_ptr<ModuleSymbols>>
       imported_;
   std::vector<ResolvedName> names_;
+  std::vector<const ModuleInterface *> interfaces_;
   std::vector<TypeclassItem> typeclasses_;
   std::vector<InstanceItem> instances_;
   llvm::DenseMap<const Unify *, const parser::SymName *> functors_;

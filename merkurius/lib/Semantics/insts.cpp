@@ -10,6 +10,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include <algorithm>
 #include <deque>
 #include <functional>
@@ -383,10 +384,8 @@ public:
       llvm::interleave(
           inst.functors, os_,
           [&](const BoundAlternative &alternative) {
-            if (!alternative.functor.module.empty()) {
-              os_ << alternative.functor.module << '.';
-            }
-            os_ << alternative.functor.name;
+            // Unqualified, as in mmc.
+            Name(alternative.functor);
             if (!alternative.arguments.empty()) {
               os_ << '(';
               List(alternative.arguments);
@@ -465,6 +464,19 @@ public:
   }
 
 private:
+  // A name that is not a word is quoted, as in mmc: '[|]', but [] and
+  // {} are not, nor literals.
+  void Name(const InstFunctor &functor) {
+    llvm::StringRef name{functor.name};
+    bool word{!name.empty() && llvm::isLower(name.front()) &&
+        llvm::all_of(name, [](char c) { return llvm::isAlnum(c) || c == '_'; })};
+    if (functor.literal || word || name == "[]" || name == "{}") {
+      os_ << name;
+    } else {
+      os_ << '\'' << name << '\'';
+    }
+  }
+
   void List(llvm::ArrayRef<const Inst *> insts) {
     llvm::interleave(
         insts, os_, [&](const Inst *i) { Print(*i); }, ", ");
@@ -587,6 +599,32 @@ bool InstOps::IsFree(const Inst *inst) {
 bool InstOps::IsNotReached(const Inst *inst) {
   const Inst *resolved{Resolve(inst)};
   return resolved->kind == InstKind::Bound && resolved->functors.empty();
+}
+
+std::optional<std::vector<const Inst *>> InstOps::Arguments(
+    const Inst *inst, const InstFunctor &functor, const Type *type) {
+  const Inst *resolved{Resolve(inst)};
+  switch (resolved->kind) {
+  case InstKind::Free:
+  case InstKind::Any:
+  case InstKind::Ground:
+    return std::vector<const Inst *>(functor.arity,
+        resolved->kind == InstKind::Free ? resolved
+            : resolved->kind == InstKind::Any
+            ? insts_.Any(resolved->uniqueness)
+            : insts_.Ground(resolved->uniqueness));
+  case InstKind::Bound:
+    if (const BoundAlternative *alternative{
+            Find(resolved->functors, functor)}) {
+      return alternative->arguments.vec();
+    }
+    return std::nullopt;
+  case InstKind::Parameter:
+    return std::vector<const Inst *>(functor.arity,
+        resolved->constraint ? resolved->constraint : insts_.Ground());
+  default:
+    return std::vector<const Inst *>(functor.arity, insts_.Ground());
+  }
 }
 
 bool InstOps::IsGround(const Inst *inst, const Type *type) {

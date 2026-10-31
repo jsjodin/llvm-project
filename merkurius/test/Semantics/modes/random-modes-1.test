@@ -1,0 +1,10 @@
+# Random modules whose predicates have random argument types and modes,
+# and clauses that are mode-correct for their first mode, shuffled so
+# that mode analysis has to schedule them; some clauses are mutated into
+# mode errors (generate-mode-programs.py). merkc must report mode errors
+# on the lines mmc does.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-mode-programs.py --seed 1 --count 40 %t
+# RUN: %compare-types --modes --error-lines %t/*.m
