@@ -11,8 +11,11 @@
 
 // Types (reference manual, "Types"), interned, so that equal types are the
 // same pointer (design document, "What semantic analysis writes"): a type
-// variable, a type constructor applied to arguments, a tuple, or a
-// higher-order type. Equivalence types are expanded before a type is
+// variable, a type constructor applied to arguments, a tuple, a
+// higher-order type, or the type that a call to an existentially typed
+// predicate or function gives one of its existentially quantified type
+// variables, which the caller treats as an opaque type (reference manual,
+// "Semantics of type quantifiers"). Equivalence types are expanded before a type is
 // made, so a Named type's constructor is never an equivalence.
 
 #include "merkurius/Common/arena.h"
@@ -29,7 +32,7 @@
 
 namespace merkurius::semantics {
 
-ENUM_CLASS(TypeKind, Variable, Named, Tuple, HigherOrder)
+ENUM_CLASS(TypeKind, Variable, Named, Tuple, HigherOrder, Existential)
 
 struct Type {
   TypeKind kind;
@@ -41,6 +44,9 @@ struct Type {
   parser::PredOrFunc predOrFunc; // for a HigherOrder type
   parser::Purity purity; // for a HigherOrder type
   const Type *result; // for a higher-order function type
+  // For an Existential type, its callee's name for the variable; its number
+  // is `var`.
+  llvm::StringRef name{};
 };
 
 class TypeContext {
@@ -50,10 +56,14 @@ public:
   const Type *Tuple(llvm::ArrayRef<const Type *> elements);
   const Type *HigherOrder(parser::PredOrFunc, parser::Purity,
       llvm::ArrayRef<const Type *> arguments, const Type *result);
+  const Type *Existential(unsigned number, llvm::StringRef name);
 
   // The type with each variable replaced by `replace`'s type for it.
   const Type *Substitute(
       const Type *, llvm::function_ref<const Type *(unsigned)> replace);
+  // The type with each Existential type replaced by `replace`'s type for it.
+  const Type *SubstituteExistentials(
+      const Type *, llvm::function_ref<const Type *(const Type *)> replace);
 
 private:
   const Type *Intern(const Type &);
@@ -64,6 +74,8 @@ private:
 
 // Calls `f` once on each variable of the type, in the order they occur.
 void ForEachVariable(const Type &, llvm::function_ref<void(unsigned)> f);
+void ForEachExistential(
+    const Type &, llvm::function_ref<void(const Type &)> f);
 
 // The number of nodes the type has as a tree, which can be exponential in
 // the number it has, since types share their parts; at most `limit`.
@@ -89,7 +101,9 @@ struct ClassConstraint {
 };
 
 // A method's signature has its type class's parameters as its first type
-// variables, and its type class's constraint first.
+// variables, and its type class's constraint first. The existentially
+// quantified type variables are the last `existentials` (reference manual,
+// "Existential types"), and `existentialConstraints` constrain only them.
 struct Signature {
   parser::PredOrFunc kind;
   parser::Purity purity;
@@ -97,6 +111,8 @@ struct Signature {
   llvm::ArrayRef<llvm::StringRef> varNames; // as declared, by number
   llvm::ArrayRef<const Type *> arguments;
   llvm::ArrayRef<ClassConstraint> constraints{}; // <=
+  unsigned existentials{0};
+  llvm::ArrayRef<ClassConstraint> existentialConstraints{}; // =>
 };
 
 } // namespace merkurius::semantics

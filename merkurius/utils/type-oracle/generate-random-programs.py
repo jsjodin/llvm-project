@@ -19,6 +19,10 @@ type variables among them, and calls and closures bind a predicate's type
 variables to types that satisfy its constraints. With --dependencies too,
 there is a type class measure(A, B) <= (A -> B), whose method's result
 only improvement by its instances determines, as in measure(1) ++ "".
+With --existentials too, there are existentially typed functions, whose
+results only their own existential constraints and polymorphic callees
+accept, as in show(opaque(1)) or list.length([opaque(1)]), and rarely
+two calls' types in one list, which is a type error.
 
 The modules are a function of the seed: python3 generate-random-programs.py
 --seed 1 --count 20 DIR writes DIR/random_1_0.m ... DIR/random_1_19.m.
@@ -49,6 +53,12 @@ CLASS_LINES = [
     ":- instance conv(int, string) where [ conv(X) = string.int_to_string(X) ].",
     ":- instance conv(string, int) where [ conv(X) = string.length(X) ].",
 ]
+EXISTENTIAL_LINES = [
+    ":- some [T] func opaque(int) = T => show(T).",
+    "opaque(X) = X.",
+    ":- some [T] func opaque_list(string) = list(T) => show(T).",
+    "opaque_list(S) = [S, S].",
+]
 DEPENDENCY_LINES = [
     ":- typeclass measure(A, B) <= (A -> B) where [ func measure(A) = B ].",
     ":- instance measure(int, string) where [ measure(X) = string.int_to_string(X) ].",
@@ -59,15 +69,17 @@ CLASS_ARGUMENTS = [("int",), ("string",), ("list", ("int",)), ("maybe", ("string
 
 
 class Module:
-    def __init__(self, rng, name, mutate, classes=False, dependencies=False):
+    def __init__(self, rng, name, mutate, classes=False, dependencies=False,
+                 existentials=False):
         self.rng = rng
         self.name = name
         self.preds = []
         self.literals = 0
         self.mutate_at = None
         self.mutate = mutate
-        self.classes = classes or dependencies
+        self.classes = classes or dependencies or existentials
         self.dependencies = dependencies
+        self.existentials = existentials
 
     def satisfies(self, t, cls, needs):
         """Whether the instances, and `needs`, the classes that a
@@ -209,6 +221,12 @@ class Module:
             options += [lambda: "string.length(%s)" % self.term(clause, ("string",), depth - 1)]
             if self.classes:
                 options += [lambda: "conv(%s)" % self.class_argument(clause, ("string",), depth - 1)]
+            if self.existentials:
+                options += [lambda: "list.length([opaque(%s)])" % self.term(clause, t, depth - 1),
+                            lambda: "list.length(opaque_list(%s))" % self.term(clause, ("string",), depth - 1)]
+                if rng.random() < 0.1:
+                    options += [lambda: "list.length([opaque(%s), opaque(%s)])" % (
+                        self.term(clause, t, depth - 1), self.term(clause, t, depth - 1))]
         elif k == "string":
             options += [lambda: '"%s"' % rng.choice("abc"), lambda: "(%s ++ %s)" % (self.term(clause, t, depth - 1), self.term(clause, t, depth - 1))]
             if self.classes:
@@ -223,6 +241,9 @@ class Module:
                 options += [lambda: "conv(%s)" % self.class_argument(clause, ("int",), depth - 1)]
             if self.dependencies:
                 options += [lambda: "measure(%s)" % self.class_argument(clause, ("int",), depth - 1)]
+            if self.existentials:
+                options += [lambda: "show(opaque(%s))" % self.term(clause, ("int",), depth - 1),
+                            lambda: "show(list.det_head(opaque_list(%s)))" % self.term(clause, t, depth - 1)]
         elif k == "char":
             options += [lambda: "'%s'" % rng.choice("xyz")]
         elif k == "float":
@@ -426,6 +447,8 @@ class Module:
             lines += CLASS_LINES
         if self.dependencies:
             lines += DEPENDENCY_LINES
+        if self.existentials:
+            lines += EXISTENTIAL_LINES
         lines.append("main(0).")
         for pred in self.preds:
             if pred["declared"]:
@@ -447,6 +470,8 @@ def main():
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--count", type=int, default=20)
     parser.add_argument("--classes", action="store_true", help="with type classes")
+    parser.add_argument("--existentials", action="store_true",
+                        help="with type classes and existentially typed functions")
     parser.add_argument("--dependencies", action="store_true",
                         help="with type classes and a functional dependency")
     parser.add_argument("directory")
@@ -456,7 +481,8 @@ def main():
         rng = random.Random("%d/%d" % (args.seed, i))
         name = "random_%d_%d" % (args.seed, i)
         module = Module(rng, name, mutate=rng.random() < 0.25, classes=args.classes,
-                        dependencies=args.dependencies)
+                        dependencies=args.dependencies,
+                        existentials=args.existentials)
         with open(os.path.join(args.directory, name + ".m"), "w") as f:
             f.write(module.text())
 

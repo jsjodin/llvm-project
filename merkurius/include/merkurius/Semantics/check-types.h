@@ -37,6 +37,9 @@ struct ConstraintProof {
   const ClassConstraint *assumed; // the declaration's, if by it
   const InstanceItem *instance; // otherwise
   llvm::ArrayRef<ConstraintProof> premises; // the instance's constraints
+  // If `assumed` is the existential constraint of a goal's callee, that
+  // goal (reference manual, "Existential class constraints").
+  std::optional<unsigned> goal{};
 };
 
 // A constraint of the callee of a goal, as the clause instantiates it.
@@ -76,7 +79,9 @@ struct ClauseTypes {
   llvm::ArrayRef<const Symbol *> symbols;
   llvm::ArrayRef<const parser::SymName *> names;
   // The constraints of the goals' callees, in the order of the goals, and
-  // how each is satisfied; none if the clause has a type error.
+  // how each is satisfied; none if the clause has a type error. The goal
+  // number clause->goals stands for the declaration's existential
+  // constraints, which the clause satisfies.
   llvm::ArrayRef<GoalConstraint> constraints{};
   // For a clause of an instance's method, which `definition` is.
   const MethodDefinition *method{nullptr};

@@ -21,7 +21,8 @@ const Type *TypeContext::Intern(const Type &type) {
       type.var, reinterpret_cast<std::uintptr_t>(type.constructor),
       static_cast<std::uintptr_t>(type.predOrFunc),
       static_cast<std::uintptr_t>(type.purity),
-      reinterpret_cast<std::uintptr_t>(type.result)};
+      reinterpret_cast<std::uintptr_t>(type.result),
+      reinterpret_cast<std::uintptr_t>(type.name.data()), type.name.size()};
   for (const Type *argument : type.arguments) {
     key.push_back(reinterpret_cast<std::uintptr_t>(argument));
   }
@@ -55,6 +56,11 @@ const Type *TypeContext::HigherOrder(parser::PredOrFunc kind,
       TypeKind::HigherOrder, 0, nullptr, arguments, kind, purity, result});
 }
 
+const Type *TypeContext::Existential(unsigned number, llvm::StringRef name) {
+  return Intern(Type{
+      TypeKind::Existential, number, nullptr, {}, {}, {}, nullptr, name});
+}
+
 // Types share their parts, and can be exponentially larger as trees than
 // as the graphs they are, so the walks below visit each part once.
 const Type *TypeContext::Substitute(
@@ -86,6 +92,58 @@ const Type *TypeContext::Substitute(
     return substituted;
   }};
   return walk(type);
+}
+
+const Type *TypeContext::SubstituteExistentials(
+    const Type *type, llvm::function_ref<const Type *(const Type *)> replace) {
+  llvm::DenseMap<const Type *, const Type *> done;
+  std::function<const Type *(const Type *)> walk{[&](const Type *t) {
+    if (t->kind == TypeKind::Existential) {
+      return replace(t);
+    }
+    if (auto it{done.find(t)}; it != done.end()) {
+      return it->second;
+    }
+    llvm::SmallVector<const Type *, 4> arguments;
+    bool changed{false};
+    for (const Type *argument : t->arguments) {
+      arguments.push_back(walk(argument));
+      changed |= arguments.back() != argument;
+    }
+    const Type *result{t->result ? walk(t->result) : nullptr};
+    changed |= result != t->result;
+    const Type *substituted{t};
+    if (changed) {
+      Type copy{*t};
+      copy.arguments = arguments;
+      copy.result = result;
+      substituted = Intern(copy);
+    }
+    done[t] = substituted;
+    return substituted;
+  }};
+  return walk(type);
+}
+
+void ForEachExistential(
+    const Type &type, llvm::function_ref<void(const Type &)> f) {
+  llvm::DenseSet<const Type *> seen;
+  std::function<void(const Type &)> walk{[&](const Type &t) {
+    if (!seen.insert(&t).second) {
+      return;
+    }
+    if (t.kind == TypeKind::Existential) {
+      f(t);
+      return;
+    }
+    for (const Type *argument : t.arguments) {
+      walk(*argument);
+    }
+    if (t.result) {
+      walk(*t.result);
+    }
+  }};
+  walk(type);
 }
 
 void ForEachVariable(const Type &type, llvm::function_ref<void(unsigned)> f) {
@@ -162,6 +220,10 @@ void PrintType(llvm::raw_ostream &os, const Type &type,
     os << '{';
     list(type.arguments);
     os << '}';
+    return;
+  case TypeKind::Existential:
+    // As mmc prints one.
+    os << "(some [" << type.name << "] " << type.name << ')';
     return;
   case TypeKind::HigherOrder: {
     bool function{type.predOrFunc == parser::PredOrFunc::Function};

@@ -57,7 +57,7 @@ import tempfile
 def tokenize(text):
     tokens = []
     for match in re.finditer(
-        r"\s*('(?:[^'\\]|\\.)*'(?:\.\w+)*|[A-Za-z_][\w.]*(?:\.'(?:[^'\\]|\\.)*')?|<=|[(){},=])",
+        r"\s*('(?:[^'\\]|\\.)*'(?:\.\w+)*|[A-Za-z_][\w.]*(?:\.'(?:[^'\\]|\\.)*')?|<=|=>|[(){},=])",
         text,
     ):
         tokens.append(match.group(1))
@@ -160,11 +160,41 @@ def canonical(t, names):
     return text
 
 
+def split_quantifier(text):
+    """The existentially quantified variables of a signature, `some [T]
+    pred p(T)`, and the signature without them, as merkc and mmc write it:
+    `some [T] (pred p(T) => (c(T)))` or `some [T] (pred p(T, U) => (c(T)))
+    <= (d(U))`."""
+    text = text.strip().rstrip(".")
+    match = re.match(r"some\s*\[([^\]]*)\]\s*", text)
+    if not match:
+        return [], text
+    existential = [v.strip() for v in match.group(1).split(",")]
+    text = text[match.end():]
+    if text.startswith("("):
+        depth, quoted = 0, False
+        for i, c in enumerate(text):
+            if quoted:
+                quoted = c != "'" or text[i - 1] == "\\"
+            elif c == "'":
+                quoted = True
+            elif c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    text = text[1:i] + text[i + 1:]
+                    break
+    return existential, text
+
+
 def parse_signature(text):
     """`pred name(T1, T2)` or `func name(T1) = T2`, either perhaps with
-    constraints, `<= (c(T1), d(T2))`, as (key, canonical text), the key
-    being (kind, unqualified name, arity). The constraints are sorted."""
-    match = re.match(r"(pred|func)\s+(.*)$", text.strip().rstrip("."))
+    constraints, `<= (c(T1), d(T2))`, and existentially quantified, `some
+    [T] pred name(T) => (c(T))`, as (key, canonical text), the key being
+    (kind, unqualified name, arity). The constraints are sorted."""
+    existential, text = split_quantifier(text)
+    match = re.match(r"(pred|func)\s+(.*)$", text)
     kind, rest = match.group(1), match.group(2)
     name_match = re.match(r"((?:'(?:[^'\\]|\\.)*'|[\w]+)(?:\.(?:'(?:[^'\\]|\\.)*'|\w+))*)", rest)
     full = name_match.group(1)
@@ -179,12 +209,19 @@ def parse_signature(text):
     if kind == "func":
         parser.take("=")
         text += " = " + canonical(parser.eq(), names)
+    if parser.peek() == "=>":
+        parser.take("=>")
+        constraints = parser.args() if parser.peek() == "(" else [parser.eq()]
+        text += " => (%s)" % ", ".join(sorted(canonical(c, names) for c in constraints))
     if parser.peek() == "<=":
         parser.take("<=")
         constraints = parser.args() if parser.peek() == "(" else [parser.eq()]
         text += " <= (%s)" % ", ".join(sorted(canonical(c, names) for c in constraints))
     if parser.peek() is not None:
         raise ValueError("trailing tokens in %r" % rest)
+    if existential:
+        # mmc may name two existential variables alike; they are then one.
+        text = "some [%s] %s" % (", ".join(sorted({canonical(("var", v), names) for v in existential})), text)
     return (kind, name, len(arguments)), text
 
 
@@ -425,7 +462,9 @@ def typed_version(text):
     """The module with merkc's choices written in, from the last dump: each
     variable of a clause qualified with its type, and each overloaded
     name that is an identifier qualified with its module. Variables whose
-    types are not determined, and DCG clauses, are left alone."""
+    types are not determined, or have the types that calls give existential
+    variables, or those of the clause's own existential variables, and DCG
+    clauses, are left alone."""
     offsets = [0]
     for line in text.splitlines(keepends=True):
         offsets.append(offsets[-1] + len(line))
@@ -434,7 +473,7 @@ def typed_version(text):
         return offsets[line - 1] + column - 1
 
     edits = []
-    clause, types = None, {}
+    clause, types, existential = None, {}, []
 
     def finish():
         if clause is None:
@@ -445,7 +484,8 @@ def typed_version(text):
         goals = [
             "%s = (%s : %s)" % (v, v, t)
             for v, t in types.items()
-            if t is not None and "T_" not in t and "<" not in t
+            if t is not None and "T_" not in t and "<" not in t and "some [" not in t
+            and not any(re.search(r"\b%s\b" % re.escape(e), t) for e in existential)
         ]
         if not goals:
             return
@@ -460,6 +500,8 @@ def typed_version(text):
         if match:
             finish()
             clause, types = offset(int(match.group(1)), int(match.group(2))), {}
+            quantifier = re.search(r": (?:inferred )?some \[([^\]]*)\]", raw)
+            existential = [v.strip() for v in quantifier.group(1).split(",")] if quantifier else []
             if " in instance " in raw:
                 # A clause in an instance's brackets: only its names are
                 # qualified.
@@ -522,7 +564,7 @@ def check_consistent(text, merkc, declarations):
 
 def check_typed_by_merkc(text, merkc, signatures):
     """The consistency check, and merkc's check of its typed version."""
-    declared_keys = set(re.findall(r"^:- (pred|func) (\w+)", text, re.M))
+    declared_keys = set(re.findall(r"^:- (?:some \[[^\]]*\] \(?)?(pred|func) (\w+)", text, re.M))
     declarations = [raw for key, (line, _, raw) in signatures.items() if (key[0], key[1]) not in declared_keys]
     typed = typed_version(text)
     differences = check_consistent(text, merkc, declarations)
@@ -536,7 +578,7 @@ def check_declared(path, text, merkc, mmc, signatures):
     """merkc's inferred signatures, declared, and its other choices written
     in, must pass both checkers."""
     typed = typed_version(text)
-    declared_keys = set(re.findall(r"^:- (pred|func) (\w+)", text, re.M))
+    declared_keys = set(re.findall(r"^:- (?:some \[[^\]]*\] \(?)?(pred|func) (\w+)", text, re.M))
     declarations = [raw for key, (line, _, raw) in signatures.items() if (key[0], key[1]) not in declared_keys]
     if not declarations:
         return []
@@ -584,7 +626,7 @@ def more_general(general, specific):
 
 def signature_tree(raw):
     """A signature's argument types, with a function's result, as a tuple."""
-    rest = re.sub(r"^(pred|func)\s+(?:'(?:[^'\\]|\\.)*'|[\w.]+)", "", raw.strip())
+    rest = re.sub(r"^(pred|func)\s+(?:'(?:[^'\\]|\\.)*'|[\w.]+)", "", split_quantifier(raw)[1])
     parser = Parser(rest)
     arguments = parser.args() if parser.peek() == "(" else []
     if parser.peek() == "=":
@@ -597,7 +639,16 @@ def adjudicate(path, text, merkc, mmc, key, signatures, mmc_signatures):
     """Settles a difference in inferred signatures by mmc's checking of
     declared types: true if mmc rejects its own inference, declared, and
     merkc's is at least as general as one mmc accepts."""
-    declared_keys = set(re.findall(r"^:- (pred|func) (\w+)", text, re.M))
+    existential = split_quantifier(mmc_signatures[key][2])[0]
+    if len(set(existential)) < len(existential):
+        # mmc may print two existential variables with one name, and crashes
+        # on that declared (see the register).
+        print(
+            "%s: note: mmc names two existential variables of %s %s/%d alike, in %s; merkc infers %s"
+            % (path, key[0], key[1], key[2], mmc_signatures[key][2], signatures[key][1])
+        )
+        return True
+    declared_keys = set(re.findall(r"^:- (?:some \[[^\]]*\] \(?)?(pred|func) (\w+)", text, re.M))
     theirs = [raw for k, (_, _, raw) in mmc_signatures.items() if (k[0], k[1]) not in declared_keys]
     errors = check_variant(with_declarations(text, theirs), module_of(text), merkc, mmc, ("mmc",))["mmc"]
     if not errors:
@@ -618,7 +669,7 @@ def owner_of(line, starts, declarations=None):
     is, which is that of the next clause."""
     if declarations is not None:
         lines = declarations.splitlines()
-        if 0 < line <= len(lines) and re.match(r":- (pred|func) ", lines[line - 1]):
+        if 0 < line <= len(lines) and re.match(r":- (?:some \[[^\]]*\] \(?)?(pred|func) ", lines[line - 1]):
             start = min((start for start in starts if start[0] > line), default=None)
             return None if start is None else (start[1], start[2])
     start = max((start for start in starts if start[0] <= line), default=None)

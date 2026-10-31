@@ -1,0 +1,9 @@
+# Random modules as in random-classes-1.test, with existentially typed
+# functions too, whose results only their existential constraints and
+# polymorphic callees accept, and rarely two calls' types in one list,
+# which is a type error (generate-random-programs.py --existentials).
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../../utils/type-oracle/generate-random-programs.py --existentials --seed 3 --count 60 %t
+# RUN: %compare-types --allow-errors %t/*.m
