@@ -172,7 +172,7 @@ private:
       const parser::ModedTerm *result, Goals &goals);
   void DcgHead(TokenRange);
   const ClauseForm *Finish(TokenRange, parser::PredOrFunc,
-      const parser::SymName *, Goals &goals);
+      const parser::SymName *, Goals &goals, bool modeSpecific = false);
   // Fills the head's slots for the state variables' last versions.
   void FillLasts(Goals &goals);
   const Lambda *DesugarLambda(const parser::Lambda &);
@@ -1132,13 +1132,15 @@ void ClauseDesugarer::DcgHead(TokenRange range) {
 }
 
 const ClauseForm *ClauseDesugarer::Finish(TokenRange range,
-    parser::PredOrFunc kind, const parser::SymName *name, Goals &goals) {
+    parser::PredOrFunc kind, const parser::SymName *name, Goals &goals,
+    bool modeSpecific) {
   FillLasts(goals);
   Goal body{Conjoin(range, goals)};
   return Make<ClauseForm>(range, kind, name,
       Save(llvm::ArrayRef<VarId>{head_}), body,
       Save(llvm::ArrayRef<VarInfo>{vars_}),
-      Save(llvm::ArrayRef<TypeQualification>{typeQualifications_}), goals_);
+      Save(llvm::ArrayRef<TypeQualification>{typeQualifications_}), goals_,
+      llvm::ArrayRef<llvm::ArrayRef<VarId>>{}, modeSpecific);
 }
 
 void ClauseDesugarer::FillLasts(Goals &goals) {
@@ -1437,7 +1439,9 @@ std::optional<const ClauseForm *> ClauseDesugarer::Desugar(
   if (!ok_) {
     return std::nullopt;
   }
-  return Finish(clause.tokens, clause.kind, clause.name, goals);
+  bool modeSpecific{llvm::any_of(arguments,
+      [](const parser::ModedTerm *argument) { return argument->mode; })};
+  return Finish(clause.tokens, clause.kind, clause.name, goals, modeSpecific);
 }
 
 // Head --> Body is Head(V_in, V_out) :- Body, with V_in and V_out the

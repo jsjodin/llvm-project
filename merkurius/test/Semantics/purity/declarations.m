@@ -38,7 +38,7 @@ impure_function = X :- impure X = ifn(1).
 % CHECK: [[@LINE-1]]:9: error: pred declarations.pure_but_impure/0 is impure, so it must be declared `impure' or promised pure
 pure_but_impure :- impure ip(1).
 :- semipure pred semipure_but_impure is det.
-% CHECK: [[@LINE-1]]:18: error: pred declarations.semipure_but_impure/0 is impure, so it must be declared `impure' or promised pure
+% CHECK: [[@LINE-1]]:18: error: pred declarations.semipure_but_impure/0 is impure, so it must be declared `impure' or promised semipure
 semipure_but_impure :- impure ip(1).
 :- pred pure_but_semipure(int::out) is det.
 % CHECK: [[@LINE-1]]:9: error: pred declarations.pure_but_semipure/1 is semipure, so it must be declared `semipure' or promised pure
