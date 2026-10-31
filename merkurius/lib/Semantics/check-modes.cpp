@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <map>
 #include <set>
 #include <string>
 
@@ -152,6 +153,7 @@ private:
     std::vector<const Inst *> constraints{}; // explicit ones, or null
     std::vector<const Inst *> made{};
     llvm::StringRef inconsistent{};
+    unsigned id{0}; // a declaration's, numbered from 1
   };
 
   bool Own(const Symbol &symbol) const {
@@ -217,6 +219,8 @@ private:
   // The mode definitions being expanded, outermost first.
   std::vector<const Symbol *> expanding_;
   llvm::DenseSet<const Symbol *> cyclic_;
+  // The declarations' inst variable scopes so far.
+  unsigned scopes_{0};
 };
 
 //===----------------------------------------------------------------------===//
@@ -271,7 +275,7 @@ const Inst *ModeChecker::Parameter(llvm::StringRef name, InstScope &scope) {
     // Unconstrained means compatible with ground.
     const Inst *constraint{scope.constraints[number]};
     scope.made.push_back(insts_.Parameter(
-        number, name, constraint ? constraint : insts_.Ground()));
+        number, name, constraint ? constraint : insts_.Ground(), scope.id));
   }
   return scope.made[number];
 }
@@ -494,12 +498,14 @@ ArgMode ModeChecker::Convert(const parser::Mode &mode, InstScope &scope) {
 std::optional<std::vector<ArgMode>> ModeChecker::LambdaModes(
     const Lambda &lambda) {
   InstScope scope;
+  scope.id = ++scopes_;
   for (const std::optional<parser::Mode> &mode : lambda.modes) {
     if (mode) {
       Collect(*mode, scope);
     }
   }
-  if (!scope.names.empty()) {
+  // Its inst variables are its own parameters, as a declaration's are.
+  if (!scope.inconsistent.empty()) {
     return std::nullopt;
   }
   bool function{lambda.kind == parser::PredOrFunc::Function};
@@ -671,6 +677,7 @@ ModeChecker::Declared ModeChecker::ConvertDeclaration(
     llvm::ArrayRef<const parser::InstConstraint *> constraints,
     parser::CharBlock where) {
   InstScope scope;
+  scope.id = ++scopes_;
   for (const parser::InstConstraint *constraint : constraints) {
     InstScope inner;
     const Inst *inst{Convert(constraint->inst, inner)};
@@ -955,9 +962,22 @@ void ModeChecker::BuildProcedures(
     }
     std::vector<Procedure> procedures;
     std::vector<parser::CharBlock> sources;
+    // As in mmc, modes are the same if they are with each inst variable
+    // replaced by its constraint, so in(I) is in.
+    auto erased{[&](llvm::ArrayRef<ArgMode> modes) {
+      auto constraint{[&](const Inst &parameter) {
+        return parameter.constraint ? parameter.constraint : &parameter;
+      }};
+      std::vector<ArgMode> result;
+      for (const ArgMode &mode : modes) {
+        result.push_back({insts_.Substitute(mode.initial, constraint),
+            insts_.Substitute(mode.final, constraint)});
+      }
+      return result;
+    }};
     auto add{[&](Declared declared, parser::CharBlock where) {
       for (std::size_t i{0}; i < procedures.size(); ++i) {
-        if (procedures[i].modes == llvm::ArrayRef<ArgMode>{declared.modes}) {
+        if (erased(procedures[i].modes) == erased(declared.modes)) {
           // mmc: "In mode declarations for predicate `p'/1: error:
           // duplicate mode declaration. Here is the conflicting mode
           // declaration."
@@ -1265,6 +1285,9 @@ private:
   // to a fresh variable, which is then unified with it (an implied mode,
   // Overton 3.3.2). The argument may have free parts, of variables not
   // used again, which the unification binds, as in mmc.
+  // A callee's modes with the inst parameters bound by the arguments.
+  std::vector<ArgMode> Instantiate(llvm::ArrayRef<ArgMode>,
+      llvm::ArrayRef<VarId> arguments, const InstMap &);
   std::optional<std::size_t> Misfit(llvm::ArrayRef<ArgMode>,
       llvm::ArrayRef<VarId>, const InstMap &, bool implied);
   // The error for the first argument that does not fit its mode, which
@@ -1279,8 +1302,10 @@ private:
   // as the default function inst.
   std::string Expected(const Inst *expected, const Inst *actual);
   // That argument i, `name`, has the wrong final inst.
-  std::string FinalError(std::size_t i, const std::string &name,
-      const Inst *final, const Inst *expected, const Type *);
+  // `subject` is "argument 1, X," or "argument 1 of the higher-order
+  // term".
+  std::string FinalError(const std::string &subject, const Inst *final,
+      const Inst *expected, const Type *);
   // Whether an argument of this mode is used after the call or clause.
   bool LiveAfter(const ArgMode &) const;
   llvm::ArrayRef<const Procedure *> ProceduresFor(const Symbol &);
@@ -1347,10 +1372,6 @@ void ProcedureChecker::Run() {
     if (llvm::any_of(
             own, [](const ClauseTypes *c) { return c->clause->modeSpecific; })) {
       unchecked(Unchecked::ModeSpecificClauses);
-      continue;
-    }
-    if (!procedure.parameters.empty()) {
-      unchecked(Unchecked::InstParameters);
       continue;
     }
     std::vector<ClauseModes> checked;
@@ -1557,26 +1578,33 @@ ProcedureChecker::Result ProcedureChecker::CheckFinal(
     }
     return {Outcome::Error, last_,
         "in the clause for " + ProcedureToString(*procedure_) + ": " +
-            FinalError(i,
-                clauses ? "HeadVar__" + std::to_string(i + 1) : Name(var),
+            FinalError("argument " + std::to_string(i + 1) + ", " +
+                    (clauses ? "HeadVar__" + std::to_string(i + 1) : Name(var)) +
+                    ",",
                 final[i], expected, type)};
   }
   return Ok();
 }
 
-std::string ProcedureChecker::FinalError(std::size_t i,
-    const std::string &name, const Inst *final, const Inst *expected,
-    const Type *type) {
+std::string ProcedureChecker::FinalError(const std::string &subject,
+    const Inst *final, const Inst *expected, const Type *type) {
   // mmc: "argument 1 did not get sufficiently instantiated", "became too
   // instantiated", or "had the wrong instantiatedness", with "Final
   // instantiatedness of `X' was `free', expected final instantiatedness
   // was `ground'".
+  // An expected inst with inst variables counts as one with free parts,
+  // as in mmc.
+  bool parameters{false};
+  insts_.Substitute(expected, [&](const Inst &parameter) {
+    parameters = true;
+    return &parameter;
+  });
   const char *how{ops_.HasFree(final, type) ? "did not get sufficiently instantiated"
-          : ops_.HasFree(expected, type)   ? "became too instantiated"
-                                           : "had the wrong inst"};
-  return "mode error: argument " + std::to_string(i + 1) + ", " + name + ", " +
-      how + ": its final inst is " + InstText(final) + ", but " +
-      Expected(expected, final) + " is expected";
+          : ops_.HasFree(expected, type) || parameters
+          ? "became too instantiated"
+          : "had the wrong inst"};
+  return "mode error: " + subject + " " + how + ": its final inst is " +
+      InstText(final) + ", but " + Expected(expected, final) + " is expected";
 }
 
 std::string ProcedureChecker::Expected(
@@ -2331,10 +2359,6 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
     // reported.
     return Unsupported(Unchecked::InferredModes);
   }
-  if (llvm::any_of(procedures,
-          [](const Procedure *p) { return !p->parameters.empty(); })) {
-    return Unsupported(Unchecked::InstParameters);
-  }
   auto moreSpecific{[&](const Procedure &p, const Procedure &q) {
     for (std::size_t i{0}; i < arguments.size(); ++i) {
       if (!ops_.Matches(p.modes[i].initial, q.modes[i].initial,
@@ -2344,12 +2368,18 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
     }
     return true;
   }};
+  // Each procedure's modes with its inst parameters bound by the
+  // arguments (Overton, figure 4.3).
+  std::map<const Procedure *, std::vector<ArgMode>> instantiated;
+  for (const Procedure *procedure : procedures) {
+    instantiated[procedure] = Instantiate(procedure->modes, arguments, map);
+  }
   std::vector<const Procedure *> candidates;
   bool implied{false};
   for (bool allowImplied : {false, true}) {
     for (const Procedure *procedure : procedures) {
       if (procedure->modes.size() == arguments.size() &&
-          !Misfit(procedure->modes, arguments, map, allowImplied)) {
+          !Misfit(instantiated[procedure], arguments, map, allowImplied)) {
         candidates.push_back(procedure);
       }
     }
@@ -2376,7 +2406,8 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
       // mmc: "in argument 1 of call to predicate `m.w'/2: mode error:
       // variable `Y' has instantiatedness `free', expected instantiatedness
       // was `ground'".
-      return ArgumentError(goal, procedures.front()->modes, arguments, map,
+      return ArgumentError(goal, instantiated[procedures.front()], arguments,
+          map,
           [&](std::size_t i) {
             bool result{function && i + 1 == arguments.size()};
             return (result ? std::string{"the result"}
@@ -2409,10 +2440,21 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
             " have insts " + insts + ", which match none of its modes",
         std::move(waits));
   }
-  Pass(chosen->modes, arguments, map);
+  Pass(instantiated[chosen], arguments, map);
   modes.callee = chosen;
   modes.implied = implied;
   return Ok();
+}
+
+std::vector<ArgMode> ProcedureChecker::Instantiate(llvm::ArrayRef<ArgMode> modes,
+    llvm::ArrayRef<VarId> arguments, const InstMap &map) {
+  std::vector<const Inst *> actual;
+  std::vector<const Type *> types;
+  for (VarId var : arguments) {
+    actual.push_back(map[var]);
+    types.push_back(TypeOf(var));
+  }
+  return ops_.Instantiate(modes, actual, types, procedure_->parameters);
 }
 
 std::optional<std::size_t> ProcedureChecker::Misfit(
@@ -2538,7 +2580,8 @@ ProcedureChecker::Result ProcedureChecker::CheckLambda(
       if (!ops_.Matches(inner[var], (*modes)[i].final, TypeOf(var))) {
         // mmc names the argument LambdaHeadVar__1.
         r = Error(goal,
-            FinalError(i, "LambdaHeadVar__" + std::to_string(i + 1),
+            FinalError("argument " + std::to_string(i + 1) +
+                    ", LambdaHeadVar__" + std::to_string(i + 1) + ",",
                 inner[var], (*modes)[i].final, TypeOf(var)));
         break;
       }
@@ -2579,10 +2622,6 @@ ProcedureChecker::Result ProcedureChecker::CheckClosure(
   llvm::ArrayRef<const Procedure *> procedures{ProceduresFor(symbol)};
   if (procedures.empty()) {
     return Unsupported(Unchecked::InferredModes);
-  }
-  if (llvm::any_of(procedures,
-          [](const Procedure *p) { return !p->parameters.empty(); })) {
-    return Unsupported(Unchecked::InstParameters);
   }
   bool function{symbol.kind == SymbolKind::Function};
   std::string what{std::string{function ? "func " : "pred "} +
@@ -2635,7 +2674,44 @@ ProcedureChecker::Result ProcedureChecker::CheckClosure(
   if (!chosen->determinism) {
     return Unsupported(Unchecked::InferredDeterminism);
   }
-  llvm::ArrayRef<ArgMode> modes{chosen->modes};
+  // mmc makes the term a lambda expression that calls the procedure, with
+  // the remaining arguments in the procedure's own modes, so they are
+  // passed from their initial insts, and must get their final insts,
+  // with the inst parameters that the curried arguments bound.
+  std::vector<const Inst *> actual;
+  std::vector<const Type *> types;
+  for (std::size_t i{0}; i < chosen->modes.size(); ++i) {
+    actual.push_back(
+        i < arguments.size() ? map[arguments[i]] : chosen->modes[i].initial);
+    types.push_back(i < arguments.size() ? TypeOf(arguments[i]) : nullptr);
+  }
+  std::vector<ArgMode> modes{ops_.Instantiate(chosen->modes, actual, types)};
+  for (std::size_t i{arguments.size()}; i < modes.size(); ++i) {
+    const ArgMode &own{chosen->modes[i]};
+    const Inst *final{ops_.IsFree(own.initial)
+            ? modes[i].final
+            : ops_.Unify(own.initial, modes[i].final, nullptr)};
+    std::string subject{"argument " + std::to_string(i - arguments.size() + 1) +
+        " of the higher-order term"};
+    Result r{Ok()};
+    if (!ops_.Matches(own.initial, modes[i].initial, nullptr)) {
+      // mmc reports this at the call in the lambda expression.
+      r = Error(goal,
+          "mode error in argument " + std::to_string(i + 1) +
+              " of the call to " + what + ": " + subject + " has inst " +
+              InstText(own.initial) + ", but " +
+              Expected(modes[i].initial, own.initial) + " is expected");
+    } else if (!final || !ops_.Matches(final, own.final, nullptr)) {
+      r = Error(goal,
+          FinalError(subject, final ? final : modes[i].final, own.final,
+              nullptr));
+    }
+    if (r.outcome == Outcome::Error) {
+      r.waits.clear();
+      r.never = true;
+      return r;
+    }
+  }
   bool implied{false};
   if (Misfit(modes, arguments, map, false)) {
     if (Misfit(modes, arguments, map, true)) {
@@ -2662,7 +2738,7 @@ ProcedureChecker::Result ProcedureChecker::CheckClosure(
   }
   map[x] = insts_.HigherOrder(
       function ? parser::PredOrFunc::Function : parser::PredOrFunc::Predicate,
-      false, modes.drop_front(arguments.size()), *chosen->determinism,
+      false, chosen->modes.drop_front(arguments.size()), *chosen->determinism,
       Uniqueness::Unique);
   GoalModes &g{goals_[unify.number]};
   g.unify = UnifyKind::Construct;
@@ -2681,11 +2757,7 @@ ProcedureChecker::Result ProcedureChecker::CheckHigherOrderCall(
   bool function{call.kind == parser::PredOrFunc::Function};
   std::size_t arity{call.arguments.size() - (function ? 1 : 0)};
   const char *kind{function ? "function" : "predicate"};
-  const Inst *inst{map[call.closure]};
-  for (unsigned steps{0}; inst->kind == InstKind::Defined && steps < 100;
-       ++steps) {
-    inst = insts_.Expand(inst);
-  }
+  const Inst *inst{ops_.Plain(map[call.closure])};
   if (function && inst->kind == InstKind::Ground) {
     inst = ops_.DefaultFunction(arity);
   }
@@ -2703,7 +2775,23 @@ ProcedureChecker::Result ProcedureChecker::CheckHigherOrderCall(
             std::to_string(arity) + " is expected",
         {call.closure});
   }
-  llvm::ArrayRef<ArgMode> modes{inst->modes};
+  // mmc takes an inst variable of the term's inst to be the procedure's
+  // own of the same number, if it has one, whatever its name, so that it
+  // is not bound by the arguments (see the design document's register).
+  std::vector<ArgMode> own;
+  auto identify{[&](const Inst &parameter) {
+    for (const Inst *mine : procedure_->parameters) {
+      if (mine->number == parameter.number) {
+        return mine;
+      }
+    }
+    return &parameter;
+  }};
+  for (const ArgMode &mode : inst->modes) {
+    own.push_back({insts_.Substitute(mode.initial, identify),
+        insts_.Substitute(mode.final, identify)});
+  }
+  std::vector<ArgMode> modes{Instantiate(own, call.arguments, map)};
   bool implied{false};
   if (Misfit(modes, call.arguments, map, false)) {
     if (Misfit(modes, call.arguments, map, true)) {

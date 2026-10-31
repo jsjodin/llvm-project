@@ -7,14 +7,19 @@ if-then-elses that bind the same variables in each branch, negated
 tests, and higher-order terms, lambda expressions or an earlier
 predicate's name with its first arguments, with a call of each,
 generated in an order in which each goal's inputs are bound and then
-shuffled, so that mode analysis has to schedule them. A predicate has
-one to three clauses. Every predicate and lambda expression is declared
+shuffled, so that mode analysis has to schedule them. An argument of a
+predicate's first mode may be in(I), with an inst variable, and an
+output of the same type out(I), which the clause binds to such an input,
+directly or through pid(T::in(I), T::out(I)). A predicate has one to
+three clauses. Every predicate and lambda expression is declared
 `nondet`, so that determinism analysis, which mmc runs with mode
 analysis, reports nothing. A few clauses get a mutation that may make
 them mode-incorrect: an output left unbound, two free variables unified,
 a variable bound in one branch only, one bound only in a negation, a
-lambda expression's nonlocal or output left unbound, or a higher-order
-call's input left unbound. compare-types.py
+lambda expression's nonlocal or output left unbound, a higher-order
+call's input left unbound, an out(I) output bound to a value without
+the inst variable, in some branches or all, or a higher-order term of
+pid with its input curried, which mmc rejects. compare-types.py
 --modes --error-lines then checks that merkc and mmc report mode errors
 on the same lines. The constructors of t have names of two letters, since
 a one-letter constant could also be a character.
@@ -53,6 +58,16 @@ class Compound:
                 "\n    else\n        " + body(otherwise) + "\n    )")
 
 
+def mode_name(mode):
+    """A generated mode as written: inI is in(I), outI out(I)."""
+    return {"inI": "in(I)", "outI": "out(I)"}.get(mode, mode)
+
+
+def plain(mode):
+    """A generated mode without its inst variable."""
+    return mode[:-1] if mode.endswith("I") else mode
+
+
 class Clause:
     def __init__(self, rng, preds, index):
         self.rng = rng
@@ -62,6 +77,8 @@ class Clause:
         self.bound = set()
         self.goals = []
         self.count = 0
+        # Bound at the top level to a value with the inst variable I.
+        self.carriers = set()
 
     def fresh(self, type_):
         self.count += 1
@@ -129,7 +146,7 @@ class Clause:
         args = []
         outputs = []
         for type_, mode in zip(types, modes):
-            if mode == "in":
+            if plain(mode) == "in":
                 args.append(self.make_bound(type_))
             else:
                 var = self.fresh(type_)
@@ -187,7 +204,7 @@ class Clause:
         """A call of a higher-order term with these arguments."""
         args = []
         for type_, mode in zip(types, modes):
-            if mode == "in":
+            if plain(mode) == "in":
                 args.append(self.make_bound(type_))
             else:
                 var = self.fresh(type_)
@@ -209,6 +226,9 @@ class Clause:
             name, types, modes_list = rng.choice(callees)
             modes = modes_list[0]
             k = rng.randint(0, len(types))
+            # Currying an in(I) argument is a mode error in mmc.
+            while "inI" in modes[:k]:
+                k -= 1
             # Arguments of either mode: an output is an implied mode.
             curried = [self.make_bound(t) for t in types[:k]]
             term = name + ("(%s)" % ", ".join(curried) if curried else "")
@@ -236,6 +256,19 @@ class Clause:
         self.goals.append("%s = (pred(%s) is nondet :- %s)" % (closure, ", ".join(head), body))
         self.call_of(closure, types, modes)
 
+    def carry(self, type_):
+        """A variable with the inst variable I, of the type, bound at the
+        top level: one there is, or pid's output for one."""
+        options = sorted(v for v in self.carriers if self.vars[v] == type_)
+        source = self.rng.choice(options)
+        if self.rng.random() < 0.5:
+            return source
+        var = self.fresh(type_)
+        self.goals.append("pid(%s, %s)" % (source, var))
+        self.bound.add(var)
+        self.carriers.add(var)
+        return var
+
     def generate(self, types, modes):
         rng = self.rng
         head = []
@@ -243,8 +276,10 @@ class Clause:
             var = "H%d" % (i + 1)
             self.vars[var] = type_
             head.append(var)
-            if mode == "in":
+            if plain(mode) == "in":
                 self.bound.add(var)
+            if mode == "inI":
+                self.carriers.add(var)
         for _ in range(rng.randint(0, 4)):
             r = rng.random()
             if r < 0.3:
@@ -257,14 +292,26 @@ class Clause:
                 self.closure()
             else:
                 self.make_bound(rng.choice(TYPES))
+        mutation = None
         for var, mode in zip(head, modes):
             if mode == "out":
                 value = self.make_bound(self.vars[var])
                 self.goals.append("%s = %s" % (var, value))
-        mutation = None
-        if rng.random() < 0.3 and self.goals:
+            elif mode == "outI":
+                if mutation or rng.random() > 0.1:
+                    self.goals.append("%s = %s" % (var, self.carry(self.vars[var])))
+                elif rng.random() < 0.5:
+                    self.goals.append("%s = %s" % (var, self.make_bound(self.vars[var])))
+                    mutation = "an out(I) output bound without I"
+                else:
+                    carrier = self.carry(self.vars[var])
+                    other = self.branch([var])
+                    self.goals.append(Compound("disj", [["%s = %s" % (var, carrier)], other], [var]))
+                    mutation = "an out(I) output bound without I in a branch"
+        if not mutation and rng.random() < 0.3 and self.goals:
             kind = rng.choice(["drop", "free", "branch", "negation",
-                               "nonlocal", "lambda output", "closure input"])
+                               "nonlocal", "lambda output", "closure input",
+                               "curried"])
             outputs = [g for g in self.goals if isinstance(g, str) and g.startswith("H")]
             compounds = [g for g in self.goals if isinstance(g, Compound)]
             if kind == "drop" and outputs:
@@ -295,6 +342,12 @@ class Clause:
                 self.goals.append("%s(%s)" % (p, y))
                 self.goals.append("use(%s)" % y)
                 mutation = "a lambda expression's output left unbound"
+            elif kind == "curried":
+                p, y = self.fresh("closure"), self.fresh("int")
+                self.goals.append("%s = pid(%s)" % (p, self.make_bound("int")))
+                self.goals.append("%s(%s)" % (p, y))
+                self.goals.append("use(%s)" % y)
+                mutation = "a higher-order term of pid with its input curried"
             elif kind == "closure input":
                 p, x = self.fresh("closure"), self.fresh("int")
                 self.goals.append("%s = (pred(%s::in) is nondet :- %s = %d)" % (p, x, x, rng.randint(0, 9)))
@@ -323,6 +376,8 @@ def module(rng, name):
         ":- implementation.",
         ":- import_module int.",
         "use(_).",
+        ":- pred pid(T::in(I), T::out(I)) is det.",
+        "pid(X, X).",
     ]
     preds = []
     for i in range(rng.randint(2, 6)):
@@ -331,13 +386,24 @@ def module(rng, name):
         modes_list = []
         for _ in range(rng.choice([1, 1, 2])):
             modes = [rng.choice(["in", "out"]) for _ in range(arity)]
-            if modes not in modes_list:
+            if modes not in [[plain(m) for m in ms] for ms in modes_list]:
                 modes_list.append(modes)
+        # The first mode's inputs may have the inst variable I, and an
+        # output of the type of one that has it then too.
+        first = modes_list[0]
+        for j, mode in enumerate(first):
+            if mode == "in" and rng.random() < 0.3:
+                first[j] = "inI"
+        carried = [types[j] for j, mode in enumerate(first) if mode == "inI"]
+        for j, mode in enumerate(first):
+            if mode == "out" and carried and rng.random() < 0.6:
+                types[j] = rng.choice(carried)
+                first[j] = "outI"
         preds.append(("p%d" % i, types, modes_list))
     for index, (pname, types, modes_list) in enumerate(preds):
         lines.append(":- pred %s(%s)." % (pname, ", ".join(types)))
         for modes in modes_list:
-            lines.append(":- mode %s(%s) is nondet." % (pname, ", ".join(modes)))
+            lines.append(":- mode %s(%s) is nondet." % (pname, ", ".join(mode_name(m) for m in modes)))
         # Clauses generated for the first mode: with more modes they are
         # usually wrong for the others, which mode analysis must find too.
         for _ in range(rng.choice([1, 1, 2, 3])):

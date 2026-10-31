@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -44,8 +45,13 @@ ENUM_CLASS(Uniqueness, Unique, MostlyUnique, Shared, MostlyClobbered, Clobbered)
 
 // A Bound inst with no functors is not_reached. A Defined inst is a named
 // inst applied to arguments, or, without a symbol, one an operation made
-// for a recursive result.
-ENUM_CLASS(InstKind, Free, Any, Ground, Bound, HigherOrder, Parameter, Defined)
+// for a recursive result. A Parameter is an inst variable of a mode
+// declaration, ω =< ι; a Constrained inst is a variable's inst that is
+// known to be compatible with every inst that each of a set of them
+// stands for (Overton, section 4.2.3, constrained_inst(Ω, ι)). A Parameter
+// is the Constrained inst of itself and its constraint.
+ENUM_CLASS(InstKind, Free, Any, Ground, Bound, HigherOrder, Parameter,
+    Constrained, Defined)
 
 struct Inst;
 
@@ -89,12 +95,16 @@ struct Inst {
   llvm::ArrayRef<ArgMode> modes{};
   parser::Determinism determinism{parser::Determinism::Det};
   // For a Parameter, its number and name, and the inst it must be
-  // compatible with, if constrained; for a Defined inst without a symbol,
-  // its number.
+  // compatible with, if constrained; for a Constrained inst, ι; for a
+  // Defined inst without a symbol, its number.
   unsigned number{0};
   llvm::StringRef name{};
   const Inst *constraint{nullptr};
-  // For a Defined inst: the inst definition and its arguments.
+  // For a Parameter of a declaration, which one, so that those of a callee
+  // are not a caller's.
+  unsigned scope{0};
+  // For a Defined inst: the inst definition and its arguments; for a
+  // Constrained inst, Ω, the Parameters, sorted by name.
   const Symbol *symbol{nullptr};
   llvm::ArrayRef<const Inst *> arguments{};
 };
@@ -110,8 +120,12 @@ public:
   const Inst *HigherOrder(parser::PredOrFunc, bool any,
       llvm::ArrayRef<ArgMode> modes, parser::Determinism,
       Uniqueness = Uniqueness::Shared);
-  const Inst *Parameter(
-      unsigned number, llvm::StringRef name, const Inst *constraint);
+  const Inst *Parameter(unsigned number, llvm::StringRef name,
+      const Inst *constraint, unsigned scope = 0);
+  // constrained_inst(Ω, ι): ι itself if Ω is empty, and the Parameter if
+  // it is one with ι for its constraint.
+  const Inst *Constrained(
+      llvm::ArrayRef<const Inst *> parameters, const Inst *inner);
   const Inst *Defined(const Symbol &, llvm::ArrayRef<const Inst *> arguments);
   // An inst whose body is given later, by Define.
   const Inst *Generated();
@@ -198,6 +212,21 @@ public:
   const Inst *DefaultFunction(std::size_t arity);
   bool IsDefaultFunction(const Inst *);
 
+  // The insts each Parameter of `modes` stands for, from the insts of the
+  // arguments passed to them (Overton, section 4.2.4), and `modes` with
+  // them in place: each is bound where it first occurs in an argument's
+  // initial inst, to the greatest lower bound of the argument's inst there
+  // and its constraint, if the former matches the latter, merged with
+  // its other occurrences in that argument, as in mmc, unless the
+  // argument's inst there is an inst variable narrowed by a unification. A
+  // Parameter not bound stays, as do the caller's own, `fixed`.
+  std::vector<ArgMode> Instantiate(llvm::ArrayRef<ArgMode> modes,
+      llvm::ArrayRef<const Inst *> actual, llvm::ArrayRef<const Type *> types,
+      llvm::ArrayRef<const Inst *> fixed = {});
+  // An inst without its inst variables, and expanded: a Parameter's
+  // constraint, a Constrained inst's ι.
+  const Inst *Plain(const Inst *);
+
   // Whether an inst is ground, or contains free.
   bool IsGround(const Inst *, const Type *type);
   bool HasFree(const Inst *, const Type *type);
@@ -217,9 +246,18 @@ private:
   // ground(u) or any(u) as the Bound inst over every constructor of
   // `type`; null if it has no known set.
   const Inst *AsBound(const Inst *, const Type *);
-  // Defined insts expanded, and Parameters by their constraints, as `a` in
-  // an operation; Parameters stay where they must match exactly.
+  // Defined insts expanded.
   const Inst *Resolve(const Inst *);
+  // An inst as constrained_inst(Ω, ι), with Ω empty if it has no inst
+  // variables.
+  std::pair<std::vector<const Inst *>, const Inst *> Split(const Inst *);
+  // ι ⊑̃ ι′: ι is a sub-inst of ι′, which it matches with the same
+  // uniqueness (definition 4.2.1).
+  bool SubInst(const Inst *a, const Inst *b, const Type *type);
+  void Bind(const Inst *actual, const Inst *initial, const Type *type,
+      llvm::ArrayRef<const Inst *> fixed,
+      std::map<const Inst *, const Inst *> &bound,
+      std::set<std::pair<const Inst *, const Inst *>> &seen);
   bool MatchesNow(const Inst *a, const Inst *b, const Type *type);
   bool InstantiatedNow(const Inst *a, const Inst *b, const Type *type);
   const Inst *MergeNow(const Inst *a, const Inst *b, const Type *type);
