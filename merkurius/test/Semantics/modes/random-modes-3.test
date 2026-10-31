@@ -1,0 +1,9 @@
+# Random modules as in random-modes-1.test, with some predicates of one
+# mode left without declarations, whose modes are inferred from their
+# calls (generate-mode-programs.py --undeclared). merkc must report mode
+# errors on the lines mmc does, and infer and reject the same modes.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-mode-programs.py --seed 73 --count 40 --undeclared 0.3 %t
+# RUN: %compare-types --modes --error-lines %t/*.m

@@ -958,7 +958,21 @@ void ModeChecker::BuildProcedures(
     }
     const auto *decl{std::get_if<const parser::PredDecl *>(&symbol->declaration)};
     if (!decl) {
-      continue; // its modes are inferred from its calls
+      if (!own_) {
+      } else if (symbol->kind == SymbolKind::Function) {
+        // A function without a declaration has the default mode, as in
+        // mmc, where only a predicate's modes are inferred.
+        std::vector<ArgMode> modes(symbol->arity,
+            ArgMode{insts_.Ground(), insts_.Ground()});
+        modes.push_back(ArgMode{insts_.Free(), insts_.Ground()});
+        result_.procedures_.push_back(Procedure{symbol, 0,
+            result_.arena_.SaveArray(llvm::ArrayRef<ArgMode>{modes}),
+            parser::Determinism::Det, {}});
+      } else {
+        // Its modes are inferred from its calls (Overton, 3.4.2).
+        result_.inferable_.insert(symbol);
+      }
+      continue;
     }
     std::vector<Procedure> procedures;
     std::vector<parser::CharBlock> sources;
@@ -1091,6 +1105,10 @@ void ModeChecker::BuildProcedures(
         // mmc: "no mode declaration for predicate `p'/1".
         messages_.Say(symbol->source, "%s has no mode declaration"_err_en_US,
             Text(*symbol));
+      } else {
+        // With -finfer-modes, as mmc's --infer-modes, its modes are
+        // inferred from its calls, as an undeclared predicate's are.
+        result_.inferable_.insert(symbol);
       }
     }
     if (own_) {
@@ -1198,10 +1216,11 @@ class ProcedureChecker {
 public:
   ProcedureChecker(ModeChecking &result, ModeChecker &declarations,
       const NameResolution &resolution, TypeChecking &types, InstOps &ops,
-      const parser::TokenSequence &tokens, parser::Messages &messages)
+      const parser::TokenSequence &tokens, parser::Messages &messages,
+      const ModeCheckOptions &options)
       : result_{result}, declarations_{declarations}, insts_{result.insts_},
         resolution_{resolution}, types_{types}, ops_{ops}, tokens_{tokens},
-        messages_{messages} {}
+        out_{messages}, options_{options} {}
 
   void Run();
 
@@ -1223,6 +1242,8 @@ private:
     // For an error, that no variable can make the goal run, as for a
     // lambda expression with a mode error in it; then `waits` is empty.
     bool never{false};
+    // Whether the error is in a lambda expression.
+    bool lambda{false};
   };
   static Result Ok() { return {}; }
   static Result Unsupported(Unchecked why) {
@@ -1248,6 +1269,16 @@ private:
   std::string InstText(const Inst *inst) const { return InstToString(*inst); }
 
   Result CheckClause(const ClauseTypes &, const Procedure &, ClauseModes &);
+  void RunPass();
+  std::vector<ArgMode> InferredModes(
+      llvm::ArrayRef<VarId> arguments, const InstMap &, const Live &);
+  const Procedure *Infer(const Symbol &, llvm::ArrayRef<ArgMode>);
+  std::string RejectedText(const Procedure &);
+  Result RejectedCall(const Goal &, const Symbol &callee,
+      const Procedure &rejected, llvm::ArrayRef<VarId> arguments,
+      const InstMap &);
+  std::pair<Result, std::vector<ClauseModes>> CheckOwn(const Procedure &);
+  void Record(const Procedure &, std::pair<Result, std::vector<ClauseModes>>);
   Result CheckProcedure(const Procedure &,
       llvm::ArrayRef<const ClauseTypes *>, std::vector<ClauseModes> &checked);
   std::string InClause() const;
@@ -1336,7 +1367,29 @@ private:
   TypeChecking &types_;
   InstOps &ops_;
   const parser::TokenSequence &tokens_;
-  parser::Messages &messages_;
+  parser::Messages &out_;
+  const ModeCheckOptions &options_;
+  // The messages of the module's procedures, kept for the last pass of
+  // mode inference.
+  parser::Messages pending_;
+  parser::Messages &messages_{pending_};
+
+  // The clauses of each predicate and function, and of each instance
+  // method.
+  llvm::DenseMap<const Symbol *, std::vector<const ClauseTypes *>> byPredicate_;
+  std::vector<const MethodDefinition *> methodOrder_;
+  llvm::DenseMap<const MethodDefinition *, std::vector<const ClauseTypes *>>
+      byMethod_;
+  // Mode inference: whether a pass made a procedure or changed an
+  // inferred one, how each inferred procedure's check ended in the pass
+  // before, and the final insts of the one being checked.
+  bool changed_{false};
+  llvm::DenseMap<const Procedure *, Outcome> outcomes_;
+  std::vector<const Inst *> inferredFinal_;
+  // The error of each rejected inferred procedure, reported with that of a
+  // call that no other mode can run.
+  llvm::DenseMap<const Procedure *, std::pair<parser::CharBlock, std::string>>
+      rejections_;
 
   // The clause being checked, and for which procedure.
   const ClauseTypes *clause_{nullptr};
@@ -1368,50 +1421,63 @@ private:
 };
 
 void ProcedureChecker::Run() {
-  // The clauses of each predicate and function, and of each instance
-  // method.
-  llvm::DenseMap<const Symbol *, std::vector<const ClauseTypes *>> clauses;
-  std::vector<const MethodDefinition *> methods;
-  llvm::DenseMap<const MethodDefinition *, std::vector<const ClauseTypes *>>
-      methodClauses;
   for (const ClauseTypes &clause : types_.clauses()) {
     if (clause.method) {
-      auto &own{methodClauses[clause.method]};
+      auto &own{byMethod_[clause.method]};
       if (own.empty()) {
-        methods.push_back(clause.method);
+        methodOrder_.push_back(clause.method);
       }
       own.push_back(&clause);
     } else if (clause.definition) {
-      clauses[clause.definition].push_back(&clause);
+      byPredicate_[clause.definition].push_back(&clause);
     }
   }
+  // Mode inference (Overton, 3.4.2): a call of a predicate without a
+  // `:- pred` declaration makes a procedure for it, whose final insts are
+  // not_reached until its clauses are checked. The module is checked again
+  // until no pass makes a procedure or changes one's final insts, or, as
+  // in mmc, one finds a mode error in a procedure not inferred, and the
+  // messages are those of the last pass.
+  for (unsigned pass{1};; ++pass) {
+    pending_.clear();
+    result_.unchecked_.clear();
+    result_.errors_.clear();
+    result_.clauses_.clear();
+    result_.methods_.clear();
+    changed_ = false;
+    RunPass();
+    if (!changed_ ||
+        llvm::any_of(result_.errors_,
+            [](const Procedure *p) { return !p->inferred; }) ||
+        llvm::any_of(result_.methods_,
+            [](const MethodModes &method) { return method.error; })) {
+      break;
+    }
+    if (pass >= options_.inferenceIterationLimit) {
+      // mmc: "mode analysis iteration limit exceeded".
+      const Procedure &first{result_.inferred_.front()};
+      out_.Say(first.source,
+          "mode inference did not reach a fixpoint in %u passes"_err_en_US,
+          pass);
+      break;
+    }
+  }
+  out_.Annex(std::move(pending_));
+}
+
+void ProcedureChecker::RunPass() {
   for (const Procedure &procedure : result_.procedures_) {
-    auto found{clauses.find(procedure.symbol)};
-    llvm::ArrayRef<const ClauseTypes *> own;
-    if (found != clauses.end()) {
-      own = found->second;
-    }
-    std::vector<ClauseModes> checked;
-    Result r{CheckProcedure(procedure, own, checked)};
-    if (r.outcome == Outcome::Unsupported) {
-      result_.unchecked_[&procedure] = r.why;
-      result_.clauses_.erase(&procedure);
-    } else if (r.outcome == Outcome::Error) {
-      result_.errors_.insert(&procedure);
-      result_.clauses_.erase(&procedure);
-    } else {
-      result_.clauses_[&procedure] = std::move(checked);
-    }
+    Record(procedure, CheckOwn(procedure));
   }
   // An instance's method clauses are checked in each of the method's
   // modes, as mmc does, with the instance's types.
-  for (const MethodDefinition *method : methods) {
+  for (const MethodDefinition *method : methodOrder_) {
     method_ = method;
     for (const Procedure *procedure : result_.ProceduresOf(*method->method)) {
       MethodModes &modes{result_.methods_.emplace_back()};
       modes.method = method;
       modes.procedure = procedure;
-      Result r{CheckProcedure(*procedure, methodClauses[method], modes.clauses)};
+      Result r{CheckProcedure(*procedure, byMethod_[method], modes.clauses)};
       if (r.outcome == Outcome::Unsupported) {
         modes.unchecked = r.why;
       }
@@ -1422,6 +1488,63 @@ void ProcedureChecker::Run() {
     }
   }
   method_ = nullptr;
+  // The inferred procedures, those that this pass makes included.
+  for (std::size_t i{0}; i < result_.inferred_.size(); ++i) {
+    Procedure &procedure{result_.inferred_[i]};
+    inferredFinal_.clear();
+    std::pair<Result, std::vector<ClauseModes>> checked{CheckOwn(procedure)};
+    Outcome outcome{checked.first.outcome};
+    if (outcome == Outcome::Ok && !inferredFinal_.empty()) {
+      // Each argument that the call did not clobber gets its final inst
+      // from the clauses, normalised.
+      std::vector<ArgMode> modes{procedure.modes.begin(), procedure.modes.end()};
+      for (std::size_t j{0}; j < modes.size(); ++j) {
+        if (LiveAfter(modes[j])) {
+          modes[j].final = inferredFinal_[j];
+        }
+      }
+      if (!llvm::equal(modes, procedure.modes, [](const ArgMode &a, const ArgMode &b) {
+            return a.initial == b.initial && a.final == b.final;
+          })) {
+        procedure.modes = result_.arena_.SaveArray(llvm::ArrayRef<ArgMode>{modes});
+        changed_ = true;
+      }
+    }
+    if (outcome != Outcome::Error) {
+      rejections_.erase(&procedure);
+    }
+    auto [it, inserted]{outcomes_.try_emplace(&procedure, outcome)};
+    if (!inserted && it->second != outcome) {
+      it->second = outcome;
+      changed_ = true;
+    }
+    Record(procedure, std::move(checked));
+  }
+}
+
+// A procedure's own clauses, checked.
+std::pair<ProcedureChecker::Result, std::vector<ClauseModes>>
+ProcedureChecker::CheckOwn(const Procedure &procedure) {
+  auto found{byPredicate_.find(procedure.symbol)};
+  llvm::ArrayRef<const ClauseTypes *> own;
+  if (found != byPredicate_.end()) {
+    own = found->second;
+  }
+  std::vector<ClauseModes> checked;
+  Result r{CheckProcedure(procedure, own, checked)};
+  return {std::move(r), std::move(checked)};
+}
+
+void ProcedureChecker::Record(const Procedure &procedure,
+    std::pair<Result, std::vector<ClauseModes>> checked) {
+  const Result &r{checked.first};
+  if (r.outcome == Outcome::Unsupported) {
+    result_.unchecked_[&procedure] = r.why;
+  } else if (r.outcome == Outcome::Error) {
+    result_.errors_.insert(&procedure);
+  } else {
+    result_.clauses_[&procedure] = std::move(checked.second);
+  }
 }
 
 // A procedure's clauses, checked: its first mode error is reported, as in
@@ -1438,7 +1561,8 @@ ProcedureChecker::Result ProcedureChecker::CheckProcedure(
     return Unsupported(Unchecked::ModeSpecificClauses);
   }
   Result r{Ok()};
-  for (const ClauseTypes *original : own) {
+  for (std::size_t n{0}; n < own.size(); ++n) {
+    const ClauseTypes *original{own[n]};
     const ClauseTypes *clause{
         own.size() > 1 ? &WithHeadUnifications(*original) : original};
     ClauseModes modes{clause, &procedure, {}, {}};
@@ -1450,6 +1574,16 @@ ProcedureChecker::Result ProcedureChecker::CheckProcedure(
       }
     }
     if (r.outcome != Outcome::Ok) {
+      // The other clauses are still checked, as in mmc, for the modes
+      // that their calls infer, but not reported.
+      if (r.outcome == Outcome::Error && !result_.inferable_.empty()) {
+        for (const ClauseTypes *other : own.drop_front(n + 1)) {
+          ClauseModes ignored{nullptr, &procedure, {}, {}};
+          CheckClause(own.size() > 1 ? WithHeadUnifications(*other) : *other,
+              procedure, ignored);
+        }
+        warnings_.clear();
+      }
       break;
     }
     checked.push_back(modes);
@@ -1457,7 +1591,17 @@ ProcedureChecker::Result ProcedureChecker::CheckProcedure(
   if (r.outcome == Outcome::Ok && !checked.empty()) {
     r = CheckClauses(checked);
   }
-  if (r.outcome == Outcome::Error) {
+  if (r.outcome == Outcome::Error && procedure.inferred) {
+    // mmc rejects the mode (REJECTED :- mode p(out(...)), with
+    // --verbose-error-messages), and reports its error, at the
+    // predicate's first clause, or one in a lambda expression at it, only
+    // for a call that no other mode can run.
+    llvm::StringRef error{r.text};
+    error.consume_front(InClause() + ": ");
+    rejections_[&procedure] = {r.lambda ? r.where : Start(own.front()->clause->tokens),
+        "in the clause for the inferred mode " + RejectedText(procedure) +
+            ": " + error.str()};
+  } else if (r.outcome == Outcome::Error) {
     // Only the first mode error of a procedure, as in mmc.
     auto &message{messages_.Say(r.where, "%s"_err_en_US, r.text)};
     for (const auto &[where, text] : r.notes) {
@@ -1465,6 +1609,25 @@ ProcedureChecker::Result ProcedureChecker::CheckProcedure(
     }
   }
   return r;
+}
+
+// A rejected inferred mode as mmc writes it, with its final insts as
+// `...`: p((ground >> ...), out(...)).
+std::string ProcedureChecker::RejectedText(const Procedure &procedure) {
+  std::string text{procedure.symbol->name.str()};
+  if (!procedure.modes.empty()) {
+    text += '(';
+    llvm::interleave(
+        procedure.modes,
+        [&](const ArgMode &mode) {
+          text += ops_.IsFree(mode.initial)
+              ? std::string{"out(...)"}
+              : "(" + InstText(mode.initial) + " >> ...)";
+        },
+        [&] { text += ", "; });
+    text += ')';
+  }
+  return text;
 }
 
 // "in the clause for p(in, out)", or for an instance's method.
@@ -1643,6 +1806,15 @@ ProcedureChecker::Result ProcedureChecker::CheckClauses(
 // procedure's modes.
 ProcedureChecker::Result ProcedureChecker::CheckFinal(
     llvm::ArrayRef<const Inst *> final, bool clauses) {
+  if (procedure_->inferred) {
+    // An inferred procedure's final insts are those of its clauses,
+    // normalised.
+    inferredFinal_.clear();
+    for (std::size_t i{0}; i < form_->head.size() && i < final.size(); ++i) {
+      inferredFinal_.push_back(ops_.Normalise(final[i], TypeOf(form_->head[i])));
+    }
+    return Ok();
+  }
   for (std::size_t i{0}; i < form_->head.size(); ++i) {
     VarId var{form_->head[i]};
     if (i >= procedure_->modes.size()) {
@@ -2518,10 +2690,15 @@ llvm::ArrayRef<const Procedure *> ProcedureChecker::ProceduresFor(
 ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
     const Symbol &callee, llvm::ArrayRef<VarId> arguments, bool function,
     InstMap &map, GoalModes &modes, const Live &live) {
+  bool inferable{result_.inferable_.count(&callee) > 0};
+  if (inferable &&
+      llvm::any_of(arguments, [&](VarId var) { return ops_.IsNotReached(map[var]); })) {
+    // Unreachable: no procedure is made for it.
+    return Ok();
+  }
   llvm::ArrayRef<const Procedure *> procedures{ProceduresFor(callee)};
-  if (procedures.empty()) {
-    // Its modes are to be inferred, or its missing mode declaration was
-    // reported.
+  if (procedures.empty() && !inferable) {
+    // Its missing mode declaration was reported.
     return Unsupported(Unchecked::InferredModes);
   }
   auto moreSpecific{[&](const Procedure &p, const Procedure &q) {
@@ -2543,8 +2720,15 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
   bool implied{false};
   for (bool allowImplied : {false, true}) {
     for (const Procedure *procedure : procedures) {
+      // An inferred mode that would clobber a variable used after is not
+      // that of the call, which gets one of its own, as in mmc.
+      // Nor is a rejected one.
       if (procedure->modes.size() == arguments.size() &&
-          !Misfit(instantiated[procedure], arguments, map, allowImplied)) {
+          !Misfit(instantiated[procedure], arguments, map, allowImplied) &&
+          !(inferable &&
+              (Clobbers(goal, instantiated[procedure], arguments, live,
+                   [](std::size_t) { return std::string{}; }) ||
+                  rejections_.count(procedure)))) {
         candidates.push_back(procedure);
       }
     }
@@ -2560,6 +2744,33 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
         })) {
       chosen = p;
       break;
+    }
+  }
+  if (inferable && !chosen) {
+    // A call whose insts, normalised, are those of a rejected mode is a
+    // call of it, as in mmc.
+    std::vector<ArgMode> inferred{InferredModes(arguments, map, live)};
+    if (auto rejected{llvm::find_if(procedures,
+            [&](const Procedure *p) {
+              return rejections_.count(p) &&
+                  llvm::equal(p->modes, inferred,
+                      [](const ArgMode &a, const ArgMode &b) {
+                        return InstToString(*a.initial) ==
+                            InstToString(*b.initial);
+                      });
+            })};
+        rejected != procedures.end()) {
+      return RejectedCall(goal, callee, **rejected, arguments, map);
+    }
+    chosen = Infer(callee, inferred);
+    instantiated[chosen] = chosen->modes.vec();
+    implied = false;
+  }
+  if (inferable) {
+    auto outcome{outcomes_.find(chosen)};
+    if (outcome != outcomes_.end() && outcome->second == Outcome::Unsupported) {
+      // Its clauses use what mode analysis does not check yet.
+      return Unsupported(Unchecked::InferredModes);
     }
   }
   std::string what{std::string{function ? "func " : "pred "} +
@@ -2616,9 +2827,83 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
     return *error;
   }
   Pass(instantiated[chosen], arguments, map);
+  if (chosen->inferred && !outcomes_.count(chosen)) {
+    // The goals after a call of an inferred procedure not checked yet are
+    // not reached in this pass, as in mmc, even with final insts known,
+    // as for di.
+    for (VarId var : arguments) {
+      map[var] = insts_.NotReached();
+    }
+  }
   modes.callee = chosen;
   modes.implied = implied;
   return Ok();
+}
+
+// A new procedure for a call of a predicate whose modes are inferred
+// (Overton, 3.4.2): its initial insts are the arguments', normalised, and
+// its final insts not_reached until its clauses are checked, but for a
+// unique argument not used after, which it clobbers, as mmc does, so di.
+std::vector<ArgMode> ProcedureChecker::InferredModes(
+    llvm::ArrayRef<VarId> arguments, const InstMap &map, const Live &live) {
+  std::vector<ArgMode> modes;
+  for (VarId var : arguments) {
+    const Inst *initial{ops_.Normalise(map[var], TypeOf(var))};
+    const Inst *final{insts_.NotReached()};
+    if (!live[var] && initial->kind == InstKind::Ground) {
+      if (initial->uniqueness == Uniqueness::Unique) {
+        final = insts_.Ground(Uniqueness::Clobbered);
+      } else if (initial->uniqueness == Uniqueness::MostlyUnique) {
+        final = insts_.Ground(Uniqueness::MostlyClobbered);
+      }
+    }
+    modes.push_back({initial, final});
+  }
+  return modes;
+}
+
+const Procedure *ProcedureChecker::Infer(
+    const Symbol &callee, llvm::ArrayRef<ArgMode> modes) {
+  std::vector<const Procedure *> &list{result_.bySymbol_[&callee]};
+  Procedure &procedure{result_.inferred_.emplace_back(Procedure{&callee,
+      static_cast<unsigned>(list.size()),
+      result_.arena_.SaveArray(modes), std::nullopt, callee.source})};
+  procedure.inferred = true;
+  list.push_back(&procedure);
+  changed_ = true;
+  return &procedure;
+}
+
+// A call whose inferred mode was rejected waits for other insts, as in
+// mmc with --infer-modes; if none come: "in call to predicate `m.p'/1:
+// mode error: argument `Y' has the following inst: free which does not
+// match any of the valid modes for the callee, because of the following
+// error", with the procedure's error after it.
+ProcedureChecker::Result ProcedureChecker::RejectedCall(const Goal &goal,
+    const Symbol &callee, const Procedure &rejected,
+    llvm::ArrayRef<VarId> arguments, const InstMap &map) {
+  std::string names, insts;
+  std::vector<VarId> waits;
+  for (std::size_t i{0}; i < arguments.size(); ++i) {
+    VarId var{arguments[i]};
+    if (ops_.IsFree(map[var]) || ops_.HasFree(map[var], TypeOf(var))) {
+      waits.push_back(var);
+    }
+    names += (i ? ", " : "") + Name(var);
+    insts += (i ? ", " : "") + InstText(map[var]);
+  }
+  bool one{arguments.size() == 1};
+  Result r{Error(goal,
+      "mode error in the call to pred " + callee.module.str() + '.' +
+          callee.name.str() + '/' + std::to_string(callee.arity) +
+          (one ? ": the argument " : ": the arguments ") + names +
+          (one ? " has inst " : " have insts ") + insts +
+          (one ? ", which matches" : ", which match") +
+          " none of its valid modes, because its inferred mode " +
+          RejectedText(rejected) + " has a mode error",
+      std::move(waits))};
+  r.notes.push_back(rejections_.find(&rejected)->second);
+  return r;
 }
 
 // mmc: "in argument 2 of call to predicate `io.write_int'/3: unique-mode
@@ -2920,6 +3205,7 @@ ProcedureChecker::Result ProcedureChecker::CheckLambda(
     // Nothing can make it run, as in mmc ("waiting on { }").
     r.waits.clear();
     r.never = true;
+    r.lambda = true;
   }
   if (r.outcome != Outcome::Ok) {
     return r;
@@ -3270,8 +3556,8 @@ std::unique_ptr<ModeChecking> CheckModes(const parser::ParseTree &tree,
   declarations.Run(tree);
   ConstructorTable constructors{resolution, types};
   InstOps ops{result->insts(), constructors};
-  ProcedureChecker{
-      *result, declarations, resolution, types, ops, tokens, messages}
+  ProcedureChecker{*result, declarations, resolution, types, ops, tokens,
+      messages, options}
       .Run();
   return result;
 }

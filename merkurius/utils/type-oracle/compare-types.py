@@ -29,9 +29,10 @@ with status 1 and reports each difference:
   each variable of a clause qualified with its type (`X = (X : T)`), and
   each overloaded name qualified with the module of its chosen symbol.
 
-With --modes, merkc also checks modes (-fdebug-dump-modes) and mmc
-infers types but not modes, for modules of mode errors; it makes sense
-only with --error-lines. With
+With --modes, merkc also checks modes (-fdebug-dump-modes), and both
+infer the modes of predicates without mode declarations (-finfer-modes,
+--infer-modes), whose inferred and rejected modes must be the same; it
+makes sense only with --error-lines. With
 --error-lines, for modules of declaration errors, only the lines
 with errors and notes are compared: those of a message's other places,
 such as "the earlier instance is here", are lines too. With --include
@@ -306,21 +307,41 @@ def run_mmc(mmc, path, module, all_messages=False):
         env = dict(os.environ)
         env["PATH"] = os.path.dirname(mmc) + os.pathsep + env.get("PATH", "")
         make_interfaces(mmc, tmp, env)
-        result = subprocess.run(
-            # Mode inference is off by default, in mmc and in merkc.
-            [mmc, "--errorcheck-only",
-             "--infer-types" if action == "-fdebug-dump-modes" else "--infer-all",
-             module + ".m"],
-            cwd=tmp,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
+        def run(*flags):
+            # With --modes, mmc infers the modes of predicates without mode
+            # declarations, as merkc does with -finfer-modes: without
+            # --infer-modes, mmc infers those without a `:- pred`
+            # declaration too, but does not check a caller's goals after a
+            # call that makes a new mode, and may fail without a message
+            # (see the register).
+            return subprocess.run(
+                [mmc, "--errorcheck-only"] + list(flags) +
+                (["--infer-types", "--infer-modes"] if action == "-fdebug-dump-modes"
+                 else ["--infer-all"]) + [module + ".m"],
+                cwd=tmp,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+        result = run()
         output = result.stdout + result.stderr
         messages = mmc_messages(output, module + ".m")
         source = open(copy).read().splitlines()
         if "Uncaught Mercury exception" in output:
             raise MmcCrash(output.strip().splitlines()[-1])
+        # mmc reports a rejected inferred mode, REJECTED :- mode
+        # p(out(...)), only with --verbose-error-messages, which adds
+        # lines to other errors, so those are from a second run.
+        global mmc_inferred_modes, mmc_mode_limit
+        mmc_inferred_modes = inferred_modes_of_mmc(messages)
+        mmc_mode_limit = "Mode analysis iteration limit exceeded" in output
+        if action == "-fdebug-dump-modes" and "Inferred :- " in output:
+            second = run("--verbose-error-messages")
+            if "Uncaught Mercury exception" in second.stdout + second.stderr:
+                mmc_inferred_modes = None
+            else:
+                verbose = mmc_messages(second.stdout + second.stderr, module + ".m")
+                mmc_inferred_modes = inferred_modes_of_mmc(verbose)
     if all_messages:
         # Every message but warnings and inferred declarations; a warning
         # may follow its context, as in "In predicate `p'/1: warning: ...".
@@ -378,6 +399,7 @@ action = "-fdebug-dump-types"
 def run_merkc(merkc, path, all_messages=False):
     result = subprocess.run(
         [merkc, "-fc1", action, os.path.basename(path)] +
+        (["-finfer-modes"] if action == "-fdebug-dump-modes" else []) +
         (["-I", include] if include else []),
         cwd=os.path.dirname(os.path.abspath(path)),
         capture_output=True,
@@ -392,6 +414,10 @@ def run_merkc(merkc, path, all_messages=False):
     undetermined = set()  # lines with a constraint that nothing determines
     name = re.escape(os.path.basename(path))
     if all_messages:
+        global merkc_mode_limit
+        merkc_mode_limit = {int(m.group(1)) for m in re.finditer(
+            "^" + name + r":(\d+):\d+: error: mode inference did not reach a fixpoint",
+            result.stderr, re.M)}
         return {int(m.group(1)) for m in re.finditer(
             "^" + name + r":(\d+):\d+: (?:error|because):", result.stderr, re.M)}
     for raw in (result.stdout + result.stderr).splitlines():
@@ -734,6 +760,63 @@ def settle(text, mmc, owner, errors, signatures, starts, dump, own=False):
     return owner in owners
 
 
+# Inferred modes.
+
+
+def mode_key(text):
+    """A mode as compared: without spaces or module qualifiers, as in
+    `list.'[|]'`."""
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"\b[a-z]\w*\.(?=['\[a-z(])", "", text)
+    # mmc writes free >> free as in(free), and names an inst variable
+    # V_N.
+    text = re.sub(r"\(\w+=<", "(I=<", text)
+    return re.sub(r"\bunused\b", "in(free)", text)
+
+
+def inferred_modes_of_mmc(messages):
+    """mmc's "Inferred :- mode p(in, uo)." and "REJECTED :- mode
+    p(out(...))." as a set of (p, mode key, rejected)."""
+    modes = set()
+    for _, text in messages:
+        match = re.match(r"(Inferred|REJECTED) :- mode (.*?)(?: is \w+)?\.$", text)
+        if match:
+            raw = match.group(2)
+            name = re.match(r"[^(]*", raw).group(0)
+            modes.add((name, mode_key(raw), match.group(1) == "REJECTED"))
+    return modes
+
+
+def inferred_modes_of_merkc(dump):
+    """merkc's inferred procedures in its dump: "pred m.p/2 inferred mode
+    0: p(in, uo)", with "  mode error" after a rejected one, whose final
+    insts not reached are mmc's `...`."""
+    modes = set()
+    lines = dump.splitlines()
+    for i, line in enumerate(lines):
+        match = re.match(r"\S+ (?:pred|func) \S+ inferred mode \d+: (.*)$", line)
+        if match:
+            raw = match.group(1)
+            rejected = i + 1 < len(lines) and lines[i + 1] == "  mode error"
+            if rejected:
+                raw = raw.replace("out(not_reached)", "out(...)").replace(" >> not_reached)", " >> ...)")
+            name = re.match(r"[^(]*", raw).group(0)
+            modes.add((name, mode_key(raw), rejected))
+    return modes
+
+
+def compare_inferred_modes():
+    ours, theirs = inferred_modes_of_merkc(last_dump), mmc_inferred_modes
+    differences = []
+    def show(modes):
+        return ", ".join(sorted(("rejected " if r else "") + k for _, k, r in modes))
+    if ours - theirs:
+        differences.append("merkc infers modes that mmc does not: %s" % show(ours - theirs))
+    if theirs - ours:
+        differences.append("mmc infers modes that merkc does not: %s" % show(theirs - ours))
+    return differences
+
+
 def compare_error_lines(path, merkc, mmc):
     text = open(path).read()
     module = re.search(r"^:- module ([\w.]+)\.", text, re.M).group(1)
@@ -741,10 +824,21 @@ def compare_error_lines(path, merkc, mmc):
     ours = run_merkc(merkc, path, True) - exempt
     theirs = run_mmc(mmc, path, module, True) - exempt
     differences = []
+    limit = action == "-fdebug-dump-modes" and mmc_mode_limit and merkc_mode_limit
+    if limit:
+        # Both reach the iteration limit of mode inference, which mmc
+        # reports without a line, and their modes are then those of
+        # different passes.
+        print("%s: note: mode inference reaches its iteration limit in both" % path)
+        ours -= merkc_mode_limit
     if ours - theirs:
         differences.append("merkc reports errors that mmc does not, at lines %s" % sorted(ours - theirs))
     if theirs - ours:
         differences.append("mmc reports errors that merkc does not, at lines %s" % sorted(theirs - ours))
+    if action == "-fdebug-dump-modes" and mmc_inferred_modes is None:
+        print("%s: note: mmc crashes with --infer-modes, and its inferred modes are not compared" % path)
+    elif action == "-fdebug-dump-modes" and not limit:
+        differences += compare_inferred_modes()
     return differences
 
 
