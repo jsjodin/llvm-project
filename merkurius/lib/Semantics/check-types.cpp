@@ -225,6 +225,28 @@ private:
       const parser::TypeclassDecl &, bool report);
   void CheckTypeclasses();
   void CheckInstances();
+
+  // Subtypes (reference manual, "Subtypes"). The supertype of a subtype,
+  // with its equivalences expanded, on the subtype's parameters, which are
+  // its type variables 0 to n-1; null for another type, or a subtype whose
+  // supertype is not a discriminated union type.
+  const Type *SupertypeOf(const Symbol &);
+  llvm::DenseMap<const Symbol *, const Type *> supertypes_;
+  // The variables of a supertype's constructor's types from `first` are
+  // its existential variables, which map one to one to those of the
+  // subtype's from `subFirst`.
+  struct ExistentialMap {
+    unsigned first, subFirst;
+    llvm::DenseMap<unsigned, unsigned> forward, backward;
+  };
+  // Whether s =< t, by the subtype definitions; and whether s = t.
+  bool IsSubtype(const Type *s, const Type *t, ExistentialMap * = nullptr,
+      unsigned depth = 0);
+  bool SameType(const Type *s, const Type *t, ExistentialMap *);
+  const Symbol *ConstructorOf(
+      const Symbol &type, llvm::StringRef name, unsigned arity);
+  // The rules for discriminated union types' constructors, and subtypes'.
+  void CheckTypeDefinitions();
   void CheckMethods(const parser::InstanceDecl &, const Symbol &typeclass,
       const std::string &head);
   // The instance's definitions of its type class's methods, with their
@@ -1747,6 +1769,291 @@ void TypeChecker::CheckInstances() {
               definition->text)};
       message.Attach(
           Source(decl.name->tokens), "the abstract declaration is here"_because_en_US);
+    }
+  }
+}
+
+const Type *TypeChecker::SupertypeOf(const Symbol &symbol) {
+  if (auto it{supertypes_.find(&symbol)}; it != supertypes_.end()) {
+    return it->second;
+  }
+  supertypes_[&symbol] = nullptr;
+  const auto *defn{
+      std::get_if<const parser::DuTypeDefn *>(&symbol.declaration)};
+  if (!defn || !(*defn)->supertype) {
+    return nullptr;
+  }
+  InTokensOf in{*this, symbol};
+  TypeVarNames names;
+  for (llvm::StringRef parameter : (*defn)->parameters) {
+    names.Add(parameter);
+  }
+  names.closed = true;
+  const Type *super{Convert(*(*defn)->supertype, names)};
+  if (HasError(super)) {
+    return nullptr; // reported
+  }
+  if (super->kind != TypeKind::Named ||
+      !std::holds_alternative<const parser::DuTypeDefn *>(
+          super->constructor->declaration)) {
+    // mmc: "`int'/0, the declared super type of `bad5'/0, is not a
+    // discriminated union type".
+    messages_->Say(Source((*defn)->tokens),
+        "the supertype %s of %s/%u is not a discriminated union type whose definition is visible"_err_en_US,
+        TypeToString(*super, [&](unsigned var) {
+          return names.names[var].str();
+        }),
+        symbol.name.str(), symbol.arity);
+    return nullptr;
+  }
+  supertypes_[&symbol] = super;
+  return super;
+}
+
+bool TypeChecker::IsSubtype(
+    const Type *s, const Type *t, ExistentialMap *map, unsigned depth) {
+  if (s == t) {
+    return true;
+  }
+  if (depth > 64 || s->kind != TypeKind::Named || t->kind != TypeKind::Named) {
+    // Higher-order types and others are subtypes only of themselves.
+    return SameType(s, t, map);
+  }
+  if (s->constructor == t->constructor) {
+    // The same type constructor: argument by argument, for a
+    // discriminated union type.
+    bool du{std::holds_alternative<const parser::DuTypeDefn *>(
+        s->constructor->declaration)};
+    for (auto [x, y] : llvm::zip(s->arguments, t->arguments)) {
+      if (!(du ? IsSubtype(x, y, map, depth + 1) : SameType(x, y, map))) {
+        return false;
+      }
+    }
+    return true;
+  }
+  // s's supertype, with its arguments, must be a subtype of t.
+  const Type *super{SupertypeOf(*s->constructor)};
+  if (!super) {
+    return false;
+  }
+  return IsSubtype(types_.Substitute(super,
+                       [&](unsigned var) {
+                         return var < s->arguments.size()
+                             ? s->arguments[var]
+                             : types_.Named(error_, {});
+                       }),
+      t, map, depth + 1);
+}
+
+bool TypeChecker::SameType(const Type *s, const Type *t, ExistentialMap *map) {
+  if (map && t->kind == TypeKind::Variable && t->var >= map->first) {
+    if (s->kind != TypeKind::Variable || s->var < map->subFirst) {
+      return false;
+    }
+    auto forward{map->forward.try_emplace(t->var, s->var).first};
+    auto backward{map->backward.try_emplace(s->var, t->var).first};
+    return forward->second == s->var && backward->second == t->var;
+  }
+  if (s == t || IsError(s) || IsError(t)) {
+    return true;
+  }
+  if (s->kind != t->kind || s->kind == TypeKind::Variable ||
+      s->kind == TypeKind::Existential || s->constructor != t->constructor ||
+      s->predOrFunc != t->predOrFunc || s->purity != t->purity ||
+      s->arguments.size() != t->arguments.size() ||
+      (s->result == nullptr) != (t->result == nullptr)) {
+    return false;
+  }
+  for (auto [x, y] : llvm::zip(s->arguments, t->arguments)) {
+    if (!SameType(x, y, map)) {
+      return false;
+    }
+  }
+  return !s->result || SameType(s->result, t->result, map);
+}
+
+const Symbol *TypeChecker::ConstructorOf(
+    const Symbol &type, llvm::StringRef name, unsigned arity) {
+  const ModuleSymbols *symbols{type.module == resolution_.module().name()
+          ? &resolution_.module()
+          : resolution_.Module(type.module)};
+  if (!symbols) {
+    return nullptr;
+  }
+  for (const Symbol *symbol : symbols->Lookup(name)) {
+    if (symbol->kind == SymbolKind::Constructor && symbol->owner == &type &&
+        symbol->arity == arity) {
+      return symbol;
+    }
+  }
+  return nullptr;
+}
+
+void TypeChecker::CheckTypeDefinitions() {
+  for (const Symbol *symbol : resolution_.module().symbols()) {
+    const auto *defn{
+        std::get_if<const parser::DuTypeDefn *>(&symbol->declaration)};
+    if (symbol->kind != SymbolKind::Type || !defn) {
+      continue;
+    }
+    InTokensOf in{*this, *symbol};
+    // mmc: "constructor `m.lemon/0' for type `m.c7/0' multiply defined".
+    llvm::StringSet<> seen;
+    for (const parser::Constructor *constructor : (*defn)->constructors) {
+      std::string key{constructor->name->name.str() + "/" +
+          std::to_string(constructor->arguments.size())};
+      if (!seen.insert(key).second) {
+        messages_->Say(Source(constructor->tokens),
+            "constructor %s is defined twice in type %s/%u"_err_en_US, key,
+            symbol->name.str(), symbol->arity);
+      }
+    }
+    if (!(*defn)->supertype) {
+      continue;
+    }
+    const Type *super{SupertypeOf(*symbol)};
+    if (!super) {
+      continue;
+    }
+    // The chain of supertypes ends at a base type, which is not a subtype.
+    llvm::SmallVector<const Symbol *, 4> chain{symbol};
+    bool circular{false};
+    for (const Type *t{super}; t;) {
+      const Symbol *next{t->constructor};
+      if (next == symbol) {
+        circular = true;
+        break;
+      }
+      if (llvm::is_contained(chain, next)) {
+        break; // a circularity reported for its own types
+      }
+      chain.push_back(next);
+      t = SupertypeOf(*next);
+    }
+    if (circular) {
+      // mmc: "circularity in subtype definition chain".
+      parser::Message &message{messages_->Say(Source((*defn)->tokens),
+          "the chain of supertypes of %s/%u is circular"_err_en_US,
+          symbol->name.str(), symbol->arity)};
+      for (const Symbol *link : llvm::ArrayRef(chain).drop_front()) {
+        message.Attach(link->source, "it goes through %s.%s/%u"_because_en_US,
+            link->module.str(), link->name.str(), link->arity);
+      }
+      continue;
+    }
+    if ((*defn)->attributes &&
+        ((*defn)->attributes->equality || (*defn)->attributes->comparison)) {
+      // mmc: "the subtype `c6'/0 is not allowed to have its own
+      // user-defined equality or comparison".
+      messages_->Say(Source((*defn)->tokens),
+          "the subtype %s/%u cannot have its own equality or comparison; it has its base type's"_err_en_US,
+          symbol->name.str(), symbol->arity);
+    }
+    const Symbol &superSymbol{*super->constructor};
+    std::string superText{TypeToString(*super, [&](unsigned var) {
+      return var < (*defn)->parameters.size()
+          ? (*defn)->parameters[var].str()
+          : "T" + std::to_string(var);
+    })};
+    const auto *superDefn{
+        std::get<const parser::DuTypeDefn *>(superSymbol.declaration)};
+    unsigned parameters((*defn)->parameters.size());
+    long last{-1};
+    bool ordered{true};
+    for (const parser::Constructor *constructor : (*defn)->constructors) {
+      llvm::StringRef name{constructor->name->name};
+      unsigned arity(constructor->arguments.size());
+      // A subtype's constructors are among its supertype's.
+      const Symbol *superConstructor{ConstructorOf(superSymbol, name, arity)};
+      const Symbol *own{ConstructorOf(*symbol, name, arity)};
+      if (!superConstructor) {
+        // mmc: "`banana'/0 is not a constructor of the supertype
+        // `fruit'/0".
+        messages_->Say(Source(constructor->tokens),
+            "%s/%u is not a constructor of the supertype %s"_err_en_US,
+            name.str(), arity, superText);
+        continue;
+      }
+      for (std::size_t j{0}; j < superDefn->constructors.size(); ++j) {
+        const parser::Constructor *c{superDefn->constructors[j]};
+        if (c->name->name == name && c->arguments.size() == arity) {
+          ordered &= static_cast<long>(j) > last;
+          last = j;
+        }
+      }
+      const Signature *ownSig{own ? SignatureOf(*own) : nullptr};
+      const Signature *superSig{SignatureOf(*superConstructor)};
+      if (!ownSig || !superSig) {
+        continue;
+      }
+      // Each argument's type is a subtype of the supertype's, whose
+      // parameters are the supertype's arguments, and whose existential
+      // variables correspond one to one to the subtype's.
+      unsigned superParameters{superSig->typeVars - superSig->existentials};
+      ExistentialMap map{ownSig->typeVars, parameters, {}, {}};
+      auto instantiate{[&](unsigned var) {
+        return var < superParameters
+            ? (var < super->arguments.size() ? super->arguments[var]
+                                             : types_.Named(error_, {}))
+            : types_.Variable(map.first + var - superParameters);
+      }};
+      auto ownName{[&](unsigned var) {
+        return var < ownSig->varNames.size() && !ownSig->varNames[var].empty()
+            ? ownSig->varNames[var].str()
+            : "T" + std::to_string(var);
+      }};
+      auto superName{[&](unsigned var) {
+        unsigned original{var - map.first + superParameters};
+        return var >= map.first && original < superSig->varNames.size()
+            ? superSig->varNames[original].str()
+            : ownName(var);
+      }};
+      for (unsigned j{0}; j < arity; ++j) {
+        const Type *t{types_.Substitute(superSig->arguments[j], instantiate)};
+        if (!IsSubtype(ownSig->arguments[j], t, &map)) {
+          // mmc: "the first argument of `basket' has a type, `int', which
+          // is not a subtype of the corresponding argument type
+          // `m.fruit' in the supertype".
+          messages_->Say(Source(constructor->tokens),
+              "argument %u of %s/%u has type %s, which is not a subtype of %s, its type in the supertype"_err_en_US,
+              j + 1, name.str(), arity,
+              TypeToString(*ownSig->arguments[j], ownName),
+              TypeToString(*t, superName));
+        }
+      }
+      // The same existential variables and constraints.
+      bool same{ownSig->existentials == superSig->existentials &&
+          map.forward.size() == superSig->existentials &&
+          ownSig->existentialConstraints.size() ==
+              superSig->existentialConstraints.size()};
+      for (const ClassConstraint &c : superSig->existentialConstraints) {
+        if (!same) {
+          break;
+        }
+        ClassConstraint mapped{SubstituteIn(c, [&](unsigned var) {
+          const Type *t{instantiate(var)};
+          if (t->kind == TypeKind::Variable && t->var >= map.first) {
+            auto it{map.forward.find(t->var)};
+            return it == map.forward.end() ? types_.Named(error_, {})
+                                           : types_.Variable(it->second);
+          }
+          return t;
+        })};
+        same &= llvm::any_of(ownSig->existentialConstraints,
+            [&](const ClassConstraint &x) { return Same(x, mapped); });
+      }
+      if (!same && (ownSig->existentials > 0 || superSig->existentials > 0)) {
+        messages_->Say(Source(constructor->tokens),
+            "%s/%u must have the existentially quantified type variables and constraints of the supertype's constructor, one to one"_err_en_US,
+            name.str(), arity);
+      }
+    }
+    if (!ordered) {
+      // mmc: "`c4'/0 declares some constructors in a different order to
+      // its supertype `fruit'/0".
+      messages_->Say(Source((*defn)->tokens),
+          "the constructors of %s/%u are in a different order from those of its supertype %s"_warn_en_US,
+          symbol->name.str(), symbol->arity, superText);
     }
   }
 }
@@ -3340,6 +3647,7 @@ void TypeChecker::Infer(const Undeclared &undeclared) {
 void TypeChecker::Run(const SemanticForm &form) {
   CheckTypeclasses();
   CheckInstances();
+  CheckTypeDefinitions();
   // The module's own declarations, whose errors inference would otherwise
   // report to its scratch list, when it is first to use them.
   for (const Symbol *symbol : resolution_.module().symbols()) {
