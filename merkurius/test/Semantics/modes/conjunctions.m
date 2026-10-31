@@ -25,7 +25,7 @@
 :- pred unique(list(int)::uo) is det.
 :- pred pass(T::di, T::uo) is det.
 :- func double(int) = int.
-:- pred later(int::out) is multi.
+:- pred later(int::out) is det.
 
 :- implementation.
 :- import_module int.
@@ -101,7 +101,7 @@ double(X) = X * 2.
 % CHECK: call func int.'*'/2 mode 0: HeadVar__2 = *(X, V_{{[0-9]+}})
 
 later(X) :-
-    P = (pred(Y::out) is det :- Y = 1),
-    P(X).
-% CHECK-LABEL: pred conjunctions.later/1 mode 0: later(out) is multi
-% CHECK-NEXT: not checked: Lambda
+    trace [compile_time(flag("later"))] true,
+    X = 1.
+% CHECK-LABEL: pred conjunctions.later/1 mode 0: later(out) is det
+% CHECK-NEXT: not checked: Scope

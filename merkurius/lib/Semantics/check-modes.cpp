@@ -12,7 +12,10 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
+#include <algorithm>
 #include <functional>
+#include <limits>
+#include <set>
 #include <string>
 
 namespace merkurius::semantics {
@@ -129,6 +132,11 @@ public:
         constructors_{resolution, types} {}
 
   void Run(const parser::ParseTree &);
+  // A lambda expression's argument modes, a function's result last: an
+  // argument without one is in, and a function's result out (reference
+  // manual, "Creating higher-order terms"). None if they have inst
+  // variables.
+  std::optional<std::vector<ArgMode>> LambdaModes(const Lambda &);
 
 private:
   // The inst variables of a definition or a declaration as they are
@@ -481,6 +489,31 @@ ArgMode ModeChecker::Convert(const parser::Mode &mode, InstScope &scope) {
           },
       },
       mode);
+}
+
+std::optional<std::vector<ArgMode>> ModeChecker::LambdaModes(
+    const Lambda &lambda) {
+  InstScope scope;
+  for (const std::optional<parser::Mode> &mode : lambda.modes) {
+    if (mode) {
+      Collect(*mode, scope);
+    }
+  }
+  if (!scope.names.empty()) {
+    return std::nullopt;
+  }
+  bool function{lambda.kind == parser::PredOrFunc::Function};
+  std::vector<ArgMode> modes;
+  for (std::size_t i{0}; i < lambda.arguments.size(); ++i) {
+    if (i < lambda.modes.size() && lambda.modes[i]) {
+      modes.push_back(Convert(*lambda.modes[i], scope));
+    } else if (function && i + 1 == lambda.arguments.size()) {
+      modes.push_back(ArgMode{insts_.Free(), insts_.Ground()});
+    } else {
+      modes.push_back(ArgMode{insts_.Ground(), insts_.Ground()});
+    }
+  }
+  return modes;
 }
 
 void ModeChecker::DefineInst(const Symbol &symbol) {
@@ -1143,11 +1176,12 @@ unsigned NumberOf(const Goal &goal) {
 
 class ProcedureChecker {
 public:
-  ProcedureChecker(ModeChecking &result, const NameResolution &resolution,
-      TypeChecking &types, InstOps &ops, const parser::TokenSequence &tokens,
-      parser::Messages &messages)
-      : result_{result}, insts_{result.insts_}, resolution_{resolution},
-        types_{types}, ops_{ops}, tokens_{tokens}, messages_{messages} {}
+  ProcedureChecker(ModeChecking &result, ModeChecker &declarations,
+      const NameResolution &resolution, TypeChecking &types, InstOps &ops,
+      const parser::TokenSequence &tokens, parser::Messages &messages)
+      : result_{result}, declarations_{declarations}, insts_{result.insts_},
+        resolution_{resolution}, types_{types}, ops_{ops}, tokens_{tokens},
+        messages_{messages} {}
 
   void Run();
 
@@ -1166,6 +1200,9 @@ private:
     // goal to run; all of the goal's if none.
     std::vector<VarId> waits{};
     std::vector<std::pair<parser::CharBlock, std::string>> notes{};
+    // For an error, that no variable can make the goal run, as for a
+    // lambda expression with a mode error in it; then `waits` is empty.
+    bool never{false};
   };
   static Result Ok() { return {}; }
   static Result Unsupported(Unchecked why) {
@@ -1194,6 +1231,7 @@ private:
   Result CheckClauses(llvm::ArrayRef<ClauseModes>);
   const ClauseTypes &WithHeadUnifications(const ClauseTypes &);
   Result Check(const Goal &, InstMap &, const Live &);
+  Result CheckLocked(const Goal &, InstMap &, const Live &);
   Result CheckGoal(const Goal &, InstMap &, const Live &);
   Result Disjunction(const Goal &, const Disj &, InstMap &, const Live &);
   Result IfThenElseGoal(
@@ -1214,11 +1252,43 @@ private:
   Result CheckVarUnify(const Unify &, const Goal &, InstMap &, const Live &);
   Result CheckCall(const Goal &, const Symbol &, llvm::ArrayRef<VarId>,
       bool function, InstMap &, GoalModes &);
+  Result CheckLambda(const Unify &, const Goal &, InstMap &, const Live &);
+  Result CheckClosure(const Unify &, const Goal &, const Symbol &, InstMap &);
+  Result CheckHigherOrderCall(const Goal &, const HOCall &, InstMap &);
+  Result HigherOrderUnification(
+      const Goal &, VarId, const std::string &other);
+  // That the first of `waits`, which are not ground, is the nonlocal of a
+  // lambda expression or an argument of a higher-order term.
+  Result NonlocalError(const Goal &, const InstMap &, std::vector<VarId> waits);
+  // The first argument that does not fit its mode's initial inst, if any.
+  // With `implied`, a bound argument fits an output too: the call outputs
+  // to a fresh variable, which is then unified with it (an implied mode,
+  // Overton 3.3.2). The argument may have free parts, of variables not
+  // used again, which the unification binds, as in mmc.
+  std::optional<std::size_t> Misfit(llvm::ArrayRef<ArgMode>,
+      llvm::ArrayRef<VarId>, const InstMap &, bool implied);
+  // The error for the first argument that does not fit its mode, which
+  // waits for it and for the first that does not fit an implied mode, as
+  // in mmc; `where` names argument i.
+  Result ArgumentError(const Goal &, llvm::ArrayRef<ArgMode>,
+      llvm::ArrayRef<VarId>, const InstMap &,
+      llvm::function_ref<std::string(std::size_t)> where);
+  // The arguments' insts after a call in these modes.
+  void Pass(llvm::ArrayRef<ArgMode>, llvm::ArrayRef<VarId>, InstMap &);
+  // An expected inst as mmc prints it: ground for a higher-order function
+  // as the default function inst.
+  std::string Expected(const Inst *expected, const Inst *actual);
+  // That argument i, `name`, has the wrong final inst.
+  std::string FinalError(std::size_t i, const std::string &name,
+      const Inst *final, const Inst *expected, const Type *);
+  // Whether an argument of this mode is used after the call or clause.
+  bool LiveAfter(const ArgMode &) const;
   llvm::ArrayRef<const Procedure *> ProceduresFor(const Symbol &);
   Result CheckFinal(llvm::ArrayRef<const Inst *> final, bool clauses);
   static void Flatten(const Goal &, std::vector<Goal> &);
 
   ModeChecking &result_;
+  ModeChecker &declarations_;
   InstContext &insts_;
   const NameResolution &resolution_;
   TypeChecking &types_;
@@ -1236,6 +1306,8 @@ private:
   parser::CharBlock last_{};
   // By variable, how often a construction put it in a term while free.
   std::vector<unsigned> touched_;
+  // How often a goal checked left its insts not reached.
+  unsigned unreachables_{0};
   // By variable, whether it is a nonlocal of a negation or of an
   // if-then-else whose condition is being checked, which may not bind it.
   enum class Lock { None, Negation, Condition };
@@ -1405,7 +1477,11 @@ const ClauseTypes &ProcedureChecker::WithHeadUnifications(
 // A head variable is used after the clause, unless its final inst is
 // clobbered, as for di (Overton, 3.2.3).
 bool ProcedureChecker::HeadLive(const Procedure &procedure, std::size_t i) const {
-  const Inst *final{procedure.modes[i].final};
+  return LiveAfter(procedure.modes[i]);
+}
+
+bool ProcedureChecker::LiveAfter(const ArgMode &mode) const {
+  const Inst *final{mode.final};
   while (final->kind == InstKind::Defined) {
     final = insts_.Expand(final);
   }
@@ -1479,21 +1555,39 @@ ProcedureChecker::Result ProcedureChecker::CheckFinal(
     if (ops_.Matches(final[i], expected, type)) {
       continue;
     }
-    // mmc: "argument 1 did not get sufficiently instantiated", "became
-    // too instantiated", or "had the wrong instantiatedness", with
-    // "Final instantiatedness of `X' was `free', expected final
-    // instantiatedness was `ground'".
-    const char *how{ops_.HasFree(final[i], type) ? "did not get sufficiently instantiated"
-            : ops_.HasFree(expected, type)      ? "became too instantiated"
-                                                : "had the wrong inst"};
     return {Outcome::Error, last_,
-        "in the clause for " + ProcedureToString(*procedure_) +
-            ": mode error: argument " + std::to_string(i + 1) + ", " +
-            (clauses ? "HeadVar__" + std::to_string(i + 1) : Name(var)) +
-            ", " + how + ": its final inst is " + InstText(final[i]) +
-            ", but " + InstText(expected) + " is expected"};
+        "in the clause for " + ProcedureToString(*procedure_) + ": " +
+            FinalError(i,
+                clauses ? "HeadVar__" + std::to_string(i + 1) : Name(var),
+                final[i], expected, type)};
   }
   return Ok();
+}
+
+std::string ProcedureChecker::FinalError(std::size_t i,
+    const std::string &name, const Inst *final, const Inst *expected,
+    const Type *type) {
+  // mmc: "argument 1 did not get sufficiently instantiated", "became too
+  // instantiated", or "had the wrong instantiatedness", with "Final
+  // instantiatedness of `X' was `free', expected final instantiatedness
+  // was `ground'".
+  const char *how{ops_.HasFree(final, type) ? "did not get sufficiently instantiated"
+          : ops_.HasFree(expected, type)   ? "became too instantiated"
+                                           : "had the wrong inst"};
+  return "mode error: argument " + std::to_string(i + 1) + ", " + name + ", " +
+      how + ": its final inst is " + InstText(final) + ", but " +
+      Expected(expected, final) + " is expected";
+}
+
+std::string ProcedureChecker::Expected(
+    const Inst *expected, const Inst *actual) {
+  if (expected->kind == InstKind::Ground &&
+      actual->kind == InstKind::HigherOrder &&
+      actual->predOrFunc == parser::PredOrFunc::Function &&
+      !actual->modes.empty()) {
+    return InstText(ops_.DefaultFunction(actual->modes.size() - 1));
+  }
+  return InstText(expected);
 }
 
 void ProcedureChecker::Flatten(const Goal &goal, std::vector<Goal> &out) {
@@ -1511,6 +1605,17 @@ void ProcedureChecker::Flatten(const Goal &goal, std::vector<Goal> &out) {
 // is free is a scope error, which waits for the variable to be bound
 // outside.
 ProcedureChecker::Result ProcedureChecker::Check(
+    const Goal &goal, InstMap &map, const Live &live) {
+  Result r{CheckLocked(goal, map, live)};
+  if (r.outcome == Outcome::Ok &&
+      llvm::any_of(
+          map, [&](const Inst *inst) { return ops_.IsNotReached(inst); })) {
+    ++unreachables_;
+  }
+  return r;
+}
+
+ProcedureChecker::Result ProcedureChecker::CheckLocked(
     const Goal &goal, InstMap &map, const Live &live) {
   if ((!std::holds_alternative<const Unify *>(goal) &&
           !std::holds_alternative<const Call *>(goal)) ||
@@ -1578,7 +1683,7 @@ ProcedureChecker::Result ProcedureChecker::CheckGoal(
             const Symbol *callee{clause_->symbols[call->number]};
             if (!callee || callee->kind != SymbolKind::Predicate ||
                 callee->arity != call->arguments.size()) {
-              return Unsupported(Unchecked::HigherOrder);
+              return Unsupported(Unchecked::TypeErrors);
             }
             Result r{CheckCall(goal, *callee, call->arguments, false, map,
                 goals_[call->number])};
@@ -1588,7 +1693,9 @@ ProcedureChecker::Result ProcedureChecker::CheckGoal(
             }
             return r;
           },
-          [&](const HOCall *) { return Unsupported(Unchecked::HigherOrder); },
+          [&](const HOCall *call) {
+            return CheckHigherOrderCall(goal, *call, map);
+          },
           [&](const Scope *scope) -> Result {
             switch (scope->kind) {
             case ScopeKind::Trace:
@@ -1705,7 +1812,10 @@ ProcedureChecker::Result ProcedureChecker::Merge(const Goal &goal,
       if (live[var] || llvm::none_of(insts, [&](const Inst *inst) {
             return ops_.IsFree(inst);
           })) {
-        return Mismatch(what, Name(var), insts, branches, type);
+        // It waits for that variable, as in mmc.
+        Result r{Mismatch(what, Name(var), insts, branches, type)};
+        r.waits = {var};
+        return r;
       }
       merged = maps.front()[var];
     }
@@ -1732,12 +1842,15 @@ ProcedureChecker::Result ProcedureChecker::Mismatch(const char *what,
           ": mode mismatch in the " + what + ": " + name +
           (ground ? " is ground in some branches but not others"
                   : " has insts in its branches that do not merge")};
-  // Of three or more branches, counting those not reached, those where it
-  // is ground go without a note if it is free in all the others, as in
-  // mmc. A branch not reached never has one.
-  bool brief{insts.size() >= 3 && llvm::all_of(insts, [&](const Inst *inst) {
-    return ops_.IsGround(inst, type) || ops_.IsFree(inst);
-  })};
+  // Of three or more branches, counting those not reached, where it is
+  // ground in all but one, and free in that one, only that one has a note,
+  // as in mmc ("ground in 2 out of 3 branches"). A branch not reached
+  // never has one.
+  bool brief{insts.size() >= 3 &&
+      llvm::count_if(insts, [&](const Inst *inst) {
+        return !ops_.IsGround(inst, type);
+      }) == 1 &&
+      llvm::any_of(insts, [&](const Inst *inst) { return ops_.IsFree(inst); })};
   for (std::size_t i{0}; i < insts.size(); ++i) {
     if (!ops_.IsNotReached(insts[i]) &&
         (!brief || !ops_.IsGround(insts[i], type))) {
@@ -1765,10 +1878,16 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
   std::vector<Waiting> waiting;
   std::deque<Goal> agenda; // those woken, to run next
   std::size_t next{0}; // the next goal in source order
+  // The goals, by number, that wait for no variable and that a goal with
+  // insts not reached woke; they are not retried at the end, as in mmc.
+  std::set<unsigned> kept;
   // The insts of the variables a goal waits for, and how often each was
   // put in a term free; mmc wakes a goal only when these change.
   auto snapshot{[&](const Goal &goal, const Result &error) {
     std::vector<const Inst *> insts;
+    if (error.never) {
+      return insts;
+    }
     llvm::ArrayRef<VarId> vars{error.waits};
     if (vars.empty()) {
       vars = form_->nonlocals[NumberOf(goal)];
@@ -1804,11 +1923,13 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
     parser::CharBlock last{last_};
     std::size_t warnings{warnings_.size()};
     std::vector<unsigned> touched{touched_};
+    unsigned unreachables{unreachables_};
     Result r{Check(goal, trial, after)};
     if (r.outcome != Outcome::Ok) {
       last_ = last;
       warnings_.resize(warnings);
       touched_ = std::move(touched);
+      unreachables_ = unreachables;
       return r;
     }
     map = std::move(trial);
@@ -1835,6 +1956,31 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
     waiting = std::move(still);
     agenda.insert(agenda.begin(), woken.begin(), woken.end());
   }};
+  // After a goal in which some insts were not reached, as in a branch,
+  // condition or negation that cannot succeed, every waiting goal is woken,
+  // as if each of its variables had changed, as in mmc: in the order of
+  // the first variable each waits for, those that wait for none last.
+  auto wakeAll{[&] {
+    auto first{[&](const Waiting &w) {
+      llvm::ArrayRef<VarId> vars{w.error.waits};
+      if (vars.empty() && !w.error.never) {
+        vars = form_->nonlocals[NumberOf(w.goal)];
+      }
+      return vars.empty() ? std::numeric_limits<VarId>::max()
+                          : *std::min_element(vars.begin(), vars.end());
+    }};
+    std::stable_sort(waiting.begin(), waiting.end(),
+        [&](const Waiting &a, const Waiting &b) { return first(a) < first(b); });
+    std::vector<Goal> woken;
+    for (const Waiting &w : waiting) {
+      woken.push_back(w.goal);
+      if (w.error.never) {
+        kept.insert(NumberOf(w.goal));
+      }
+    }
+    waiting.clear();
+    agenda.insert(agenda.begin(), woken.begin(), woken.end());
+  }};
   // When no goal is left to run, the waiting goals are all retried once,
   // since goals that ran may have left their variables unused, as in mmc.
   bool progress{false};
@@ -1847,14 +1993,20 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
       goal = goals[next++];
     } else if (progress && !waiting.empty()) {
       progress = false;
+      std::vector<Waiting> still;
       for (Waiting &w : waiting) {
-        agenda.push_back(w.goal);
+        if (kept.count(NumberOf(w.goal))) {
+          still.push_back(std::move(w));
+        } else {
+          agenda.push_back(w.goal);
+        }
       }
-      waiting.clear();
+      waiting = std::move(still);
       continue;
     } else {
       break;
     }
+    unsigned unreachables{unreachables_};
     Result r{run(goal)};
     if (r.outcome == Outcome::Unsupported) {
       return r;
@@ -1871,7 +2023,11 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
       waiting.clear();
       break;
     }
-    wake();
+    if (unreachables_ != unreachables) {
+      wakeAll();
+    } else {
+      wake();
+    }
   }
   if (!waiting.empty()) {
     // A head unification waits until the goals do, but its error is
@@ -1886,6 +2042,9 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
     std::vector<VarId> waits;
     for (const Waiting &w : waiting) {
       llvm::ArrayRef<VarId> vars{w.error.waits};
+      if (w.error.never) {
+        continue;
+      }
       if (vars.empty()) {
         vars = form_->nonlocals[NumberOf(w.goal)];
       }
@@ -1896,6 +2055,7 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
       }
     }
     r.waits = std::move(waits);
+    r.never = llvm::all_of(waiting, [](const Waiting &w) { return w.error.never; });
     return r;
   }
   goals_[NumberOf(conj)].order =
@@ -1949,6 +2109,9 @@ ProcedureChecker::Result ProcedureChecker::CheckVarUnify(
     modes.assigned = to;
     return Ok();
   }
+  if (type && type->kind == TypeKind::HigherOrder) {
+    return HigherOrderUnification(goal, x, Name(y));
+  }
   const Inst *unified{ops_.Unify(a, b, type)};
   if (!unified || (ops_.HasFree(a, type) && ops_.HasFree(b, type))) {
     return Error(goal,
@@ -1988,7 +2151,7 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
   const Symbol *symbol{clause_->symbols[unify.number]};
   switch (unify.functor.kind) {
   case FunctorKind::Lambda:
-    return Unsupported(Unchecked::Lambda);
+    return CheckLambda(unify, goal, map, live);
   case FunctorKind::Coerce:
     return Unsupported(Unchecked::Coerce);
   case FunctorKind::Literal:
@@ -2008,11 +2171,17 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
       functor.name = unify.functor.name->name;
       break;
     }
+    if ((symbol->kind == SymbolKind::Function &&
+            unify.arguments.size() < symbol->arity) ||
+        (symbol->kind == SymbolKind::Predicate &&
+            unify.arguments.size() <= symbol->arity)) {
+      return CheckClosure(unify, goal, *symbol, map);
+    }
     if (symbol->kind == SymbolKind::Function ||
         symbol->kind == SymbolKind::Field ||
         symbol->kind == SymbolKind::FieldUpdate) {
       if (symbol->arity != unify.arguments.size()) {
-        return Unsupported(Unchecked::HigherOrder);
+        return Unsupported(Unchecked::FieldClosure);
       }
       std::vector<VarId> arguments{
           unify.arguments.begin(), unify.arguments.end()};
@@ -2026,7 +2195,7 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
     }
     if (symbol->kind != SymbolKind::Constructor ||
         symbol->arity != unify.arguments.size()) {
-      return Unsupported(Unchecked::HigherOrder);
+      return Unsupported(Unchecked::TypeErrors);
     }
     functor.module = symbol->module;
     functor.name = symbol->name;
@@ -2166,26 +2335,6 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
           [](const Procedure *p) { return !p->parameters.empty(); })) {
     return Unsupported(Unchecked::InstParameters);
   }
-  // With `implied`, a bound argument fits an output too: the call outputs
-  // to a fresh variable, which is then unified with it (an implied mode,
-  // Overton 3.3.2). The argument may have free parts, of variables not
-  // used again, which the unification binds, as in mmc. The first
-  // argument that does not fit, if any.
-  auto misfit{[&](const Procedure &procedure,
-                  bool implied) -> std::optional<std::size_t> {
-    for (std::size_t i{0}; i < arguments.size(); ++i) {
-      VarId var{arguments[i]};
-      const ArgMode &mode{procedure.modes[i]};
-      if (ops_.Matches(map[var], mode.initial, TypeOf(var))) {
-        continue;
-      }
-      if (!implied || !ops_.IsFree(mode.initial) || ops_.IsFree(map[var]) ||
-          !ops_.Unify(map[var], mode.final, TypeOf(var))) {
-        return i;
-      }
-    }
-    return std::nullopt;
-  }};
   auto moreSpecific{[&](const Procedure &p, const Procedure &q) {
     for (std::size_t i{0}; i < arguments.size(); ++i) {
       if (!ops_.Matches(p.modes[i].initial, q.modes[i].initial,
@@ -2200,7 +2349,7 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
   for (bool allowImplied : {false, true}) {
     for (const Procedure *procedure : procedures) {
       if (procedure->modes.size() == arguments.size() &&
-          !misfit(*procedure, allowImplied)) {
+          !Misfit(procedure->modes, arguments, map, allowImplied)) {
         candidates.push_back(procedure);
       }
     }
@@ -2227,27 +2376,13 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
       // mmc: "in argument 1 of call to predicate `m.w'/2: mode error:
       // variable `Y' has instantiatedness `free', expected instantiatedness
       // was `ground'".
-      const Procedure &only{*procedures.front()};
-      // The call waits for the first argument that does not fit, with or
-      // without an implied mode, as in mmc.
-      std::vector<VarId> waits{arguments[*misfit(only, false)]};
-      if (VarId var{arguments[*misfit(only, true)]}; var != waits.front()) {
-        waits.push_back(var);
-      }
-      for (std::size_t i{0}; i < arguments.size(); ++i) {
-        VarId var{arguments[i]};
-        if (!ops_.Matches(map[var], only.modes[i].initial, TypeOf(var))) {
-          bool result{function && i + 1 == arguments.size()};
-          return Error(goal,
-              "mode error in " +
-                  (result ? std::string{"the result"}
-                          : "argument " + std::to_string(i + 1)) +
-                  " of the call to " + what + ": " + Name(var) +
-                  " has inst " + InstText(map[var]) + ", but " +
-                  InstText(only.modes[i].initial) + " is expected",
-              std::move(waits));
-        }
-      }
+      return ArgumentError(goal, procedures.front()->modes, arguments, map,
+          [&](std::size_t i) {
+            bool result{function && i + 1 == arguments.size()};
+            return (result ? std::string{"the result"}
+                           : "argument " + std::to_string(i + 1)) +
+                " of the call to " + what;
+          });
     }
     // mmc: "in call to function `int.+'/2: mode error: arguments `Y, V_4'
     // and the return value `X' have the following insts: free, unique(1),
@@ -2274,9 +2409,54 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
             " have insts " + insts + ", which match none of its modes",
         std::move(waits));
   }
+  Pass(chosen->modes, arguments, map);
+  modes.callee = chosen;
+  modes.implied = implied;
+  return Ok();
+}
+
+std::optional<std::size_t> ProcedureChecker::Misfit(
+    llvm::ArrayRef<ArgMode> modes, llvm::ArrayRef<VarId> arguments,
+    const InstMap &map, bool implied) {
   for (std::size_t i{0}; i < arguments.size(); ++i) {
     VarId var{arguments[i]};
-    const ArgMode &mode{chosen->modes[i]};
+    const ArgMode &mode{modes[i]};
+    if (ops_.Matches(map[var], mode.initial, TypeOf(var))) {
+      continue;
+    }
+    if (!implied || !ops_.IsFree(mode.initial) || ops_.IsFree(map[var]) ||
+        !ops_.Unify(map[var], mode.final, TypeOf(var))) {
+      return i;
+    }
+  }
+  return std::nullopt;
+}
+
+ProcedureChecker::Result ProcedureChecker::ArgumentError(const Goal &goal,
+    llvm::ArrayRef<ArgMode> modes, llvm::ArrayRef<VarId> arguments,
+    const InstMap &map, llvm::function_ref<std::string(std::size_t)> where) {
+  // mmc: "in argument 1 of call to predicate `m.w'/2: mode error: variable
+  // `Y' has instantiatedness `free', expected instantiatedness was
+  // `ground'".
+  std::size_t i{*Misfit(modes, arguments, map, false)};
+  VarId var{arguments[i]};
+  std::vector<VarId> waits{var};
+  if (std::optional<std::size_t> j{Misfit(modes, arguments, map, true)};
+      j && arguments[*j] != var) {
+    waits.push_back(arguments[*j]);
+  }
+  return Error(goal,
+      "mode error in " + where(i) + ": " + Name(var) + " has inst " +
+          InstText(map[var]) + ", but " + Expected(modes[i].initial, map[var]) +
+          " is expected",
+      std::move(waits));
+}
+
+void ProcedureChecker::Pass(llvm::ArrayRef<ArgMode> modes,
+    llvm::ArrayRef<VarId> arguments, InstMap &map) {
+  for (std::size_t i{0}; i < arguments.size(); ++i) {
+    VarId var{arguments[i]};
+    const ArgMode &mode{modes[i]};
     if (ops_.IsFree(mode.initial) && ops_.IsFree(map[var])) {
       map[var] = mode.final;
     } else if (const Inst *unified{
@@ -2286,10 +2466,269 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
       map[var] = mode.final;
     }
   }
-  modes.callee = chosen;
-  modes.implied = implied;
+}
+
+// mmc: "In unification of `F' with `G': mode error: attempt at
+// higher-order unification. Cannot unify two terms of type `((func int) =
+// int)'." (reference manual, "Builtin higher-order insts and modes").
+ProcedureChecker::Result ProcedureChecker::HigherOrderUnification(
+    const Goal &goal, VarId x, const std::string &other) {
+  return Error(goal,
+      "mode error in the unification of " + Name(x) + " and " + other +
+          ": attempt at higher-order unification: two terms of type " +
+          TypeToString(*TypeOf(x)) + " cannot be unified",
+      {x});
+}
+
+// mmc: "mode error: variable `Z' has instantiatedness `free', expected
+// instantiatedness for non-local variables of lambda goals is `ground'."
+ProcedureChecker::Result ProcedureChecker::NonlocalError(
+    const Goal &goal, const InstMap &map, std::vector<VarId> waits) {
+  VarId var{waits.front()};
+  return Error(goal,
+      "mode error: " + Name(var) + " has inst " + InstText(map[var]) +
+          ", but the nonlocal variables of a lambda expression must be ground",
+      std::move(waits));
+}
+
+// A lambda expression's nonlocals must be ground, and it waits for them
+// to be. Its body is then checked as a clause is, from its arguments'
+// initial insts and the nonlocals' insts, and its arguments' final insts
+// must match their modes, or the lambda expression has a mode error, at
+// the goal in it or at the lambda expression, as in mmc. The term gets the
+// higher-order inst of the lambda's modes, and the nonlocals are shared
+// with it.
+ProcedureChecker::Result ProcedureChecker::CheckLambda(
+    const Unify &unify, const Goal &goal, InstMap &map, const Live &live) {
+  const Lambda &lambda{*unify.functor.lambda};
+  VarId x{unify.left};
+  if (!ops_.IsFree(map[x])) {
+    return HigherOrderUnification(goal, x, "a lambda expression");
+  }
+  std::optional<std::vector<ArgMode>> modes{
+      declarations_.LambdaModes(lambda)};
+  if (!modes) {
+    return Unsupported(Unchecked::InstParameters);
+  }
+  std::vector<VarId> nonlocals, waits;
+  for (VarId var : form_->nonlocals[unify.number]) {
+    if (var != x) {
+      nonlocals.push_back(var);
+      if (!ops_.IsGround(map[var], TypeOf(var))) {
+        waits.push_back(var);
+      }
+    }
+  }
+  if (!waits.empty()) {
+    return NonlocalError(goal, map, std::move(waits));
+  }
+  InstMap inner{map};
+  Live inside(live.size(), false);
+  for (VarId var : nonlocals) {
+    inside[var] = true;
+  }
+  for (std::size_t i{0}; i < lambda.arguments.size(); ++i) {
+    inner[lambda.arguments[i]] = (*modes)[i].initial;
+    inside[lambda.arguments[i]] = LiveAfter((*modes)[i]);
+  }
+  Result r{Check(lambda.body, inner, inside)};
+  if (r.outcome == Outcome::Ok) {
+    for (std::size_t i{0}; i < lambda.arguments.size(); ++i) {
+      VarId var{lambda.arguments[i]};
+      if (!ops_.Matches(inner[var], (*modes)[i].final, TypeOf(var))) {
+        // mmc names the argument LambdaHeadVar__1.
+        r = Error(goal,
+            FinalError(i, "LambdaHeadVar__" + std::to_string(i + 1),
+                inner[var], (*modes)[i].final, TypeOf(var)));
+        break;
+      }
+    }
+  }
+  if (r.outcome == Outcome::Error) {
+    // Nothing can make it run, as in mmc ("waiting on { }").
+    r.waits.clear();
+    r.never = true;
+  }
+  if (r.outcome != Outcome::Ok) {
+    return r;
+  }
+  for (VarId var : nonlocals) {
+    map[var] = insts_.Share(map[var]);
+  }
+  map[x] = insts_.HigherOrder(lambda.kind, false, *modes,
+      lambda.determinism.value_or(parser::Determinism::Det),
+      Uniqueness::Unique);
+  goals_[unify.number].unify = UnifyKind::Construct;
+  last_ = Start(unify.tokens);
   return Ok();
 }
+
+// A higher-order term made from a predicate's or function's name and its
+// first arguments, of one of its procedures (reference manual, "Creating
+// higher-order terms"): of a predicate or function with several, the one
+// that the insts of the arguments of higher-order types match, as in mmc.
+// The arguments are then passed as a call's are, must be ground, and are
+// shared with the term.
+ProcedureChecker::Result ProcedureChecker::CheckClosure(
+    const Unify &unify, const Goal &goal, const Symbol &symbol, InstMap &map) {
+  VarId x{unify.left};
+  llvm::ArrayRef<VarId> arguments{unify.arguments};
+  if (!ops_.IsFree(map[x])) {
+    return HigherOrderUnification(goal, x, "a higher-order term");
+  }
+  llvm::ArrayRef<const Procedure *> procedures{ProceduresFor(symbol)};
+  if (procedures.empty()) {
+    return Unsupported(Unchecked::InferredModes);
+  }
+  if (llvm::any_of(procedures,
+          [](const Procedure *p) { return !p->parameters.empty(); })) {
+    return Unsupported(Unchecked::InstParameters);
+  }
+  bool function{symbol.kind == SymbolKind::Function};
+  std::string what{std::string{function ? "func " : "pred "} +
+      symbol.module.str() + '.' + symbol.name.str() + '/' +
+      std::to_string(symbol.arity)};
+  const Procedure *chosen{procedures.front()};
+  if (procedures.size() > 1) {
+    std::vector<VarId> higher;
+    for (VarId var : arguments) {
+      if (TypeOf(var) && TypeOf(var)->kind == TypeKind::HigherOrder) {
+        higher.push_back(var);
+      }
+    }
+    std::vector<const Procedure *> candidates;
+    for (const Procedure *p : procedures) {
+      bool fits{true};
+      for (std::size_t i{0}; i < arguments.size(); ++i) {
+        VarId var{arguments[i]};
+        if (llvm::is_contained(higher, var) &&
+            !ops_.Matches(map[var], p->modes[i].initial, TypeOf(var))) {
+          fits = false;
+        }
+      }
+      if (fits) {
+        candidates.push_back(p);
+      }
+    }
+    if (candidates.size() != 1) {
+      // mmc: "mode error in unification of `P' and higher-order term
+      // based on multi-moded predicate `m.app'/2. The modes of the
+      // argument variables match more than one of the called predicate's
+      // modes." With none, "The mode of the argument variable does not
+      // match any of the called predicate's modes", or "The modes of the
+      // argument variables do not".
+      return Error(goal,
+          "mode error in the unification of " + Name(x) +
+              " and a higher-order term based on the multi-moded " + what +
+              ": " +
+              (!candidates.empty() ? "the modes of the argument variables "
+                                     "match more than one of its modes"
+                      : arguments.size() == 1
+                      ? "the mode of the argument variable does not match "
+                        "any of its modes"
+                      : "the modes of the argument variables do not match "
+                        "any of its modes"),
+          std::move(higher));
+    }
+    chosen = candidates.front();
+  }
+  if (!chosen->determinism) {
+    return Unsupported(Unchecked::InferredDeterminism);
+  }
+  llvm::ArrayRef<ArgMode> modes{chosen->modes};
+  bool implied{false};
+  if (Misfit(modes, arguments, map, false)) {
+    if (Misfit(modes, arguments, map, true)) {
+      return ArgumentError(goal, modes, arguments, map, [&](std::size_t i) {
+        return "argument " + std::to_string(i + 1) + " of the call to " + what;
+      });
+    }
+    implied = true;
+  }
+  // The arguments are then the nonlocals of a lambda expression, and must
+  // be ground, as in mmc.
+  std::vector<VarId> waits;
+  for (VarId var : arguments) {
+    if (!ops_.IsGround(map[var], TypeOf(var))) {
+      waits.push_back(var);
+    }
+  }
+  if (!waits.empty()) {
+    return NonlocalError(goal, map, std::move(waits));
+  }
+  Pass(modes, arguments, map);
+  for (VarId var : arguments) {
+    map[var] = insts_.Share(map[var]);
+  }
+  map[x] = insts_.HigherOrder(
+      function ? parser::PredOrFunc::Function : parser::PredOrFunc::Predicate,
+      false, modes.drop_front(arguments.size()), *chosen->determinism,
+      Uniqueness::Unique);
+  GoalModes &g{goals_[unify.number]};
+  g.unify = UnifyKind::Construct;
+  g.callee = chosen;
+  g.implied = implied;
+  last_ = Start(unify.tokens);
+  return Ok();
+}
+
+// A call of a higher-order term, in the modes of its higher-order inst, or
+// for a function without one, of the default inst (reference manual,
+// "Calling higher-order terms" and "Default insts for functions"). Its
+// arguments are passed as a call's are.
+ProcedureChecker::Result ProcedureChecker::CheckHigherOrderCall(
+    const Goal &goal, const HOCall &call, InstMap &map) {
+  bool function{call.kind == parser::PredOrFunc::Function};
+  std::size_t arity{call.arguments.size() - (function ? 1 : 0)};
+  const char *kind{function ? "function" : "predicate"};
+  const Inst *inst{map[call.closure]};
+  for (unsigned steps{0}; inst->kind == InstKind::Defined && steps < 100;
+       ++steps) {
+    inst = insts_.Expand(inst);
+  }
+  if (function && inst->kind == InstKind::Ground) {
+    inst = ops_.DefaultFunction(arity);
+  }
+  if (inst->kind != InstKind::HigherOrder || inst->predOrFunc != call.kind ||
+      inst->modes.size() != call.arguments.size()) {
+    // mmc: "in argument 1 (i.e. the predicate term) of higher-order
+    // predicate call: mode error: variable `P' has instantiatedness
+    // `ground', expecting higher-order pred inst of arity 1."
+    return Error(goal,
+        std::string{"mode error in argument 1 (the "} + kind +
+            " term) of the higher-order " + kind +
+            " call: " + Name(call.closure) + " has inst " +
+            InstText(map[call.closure]) + ", but a higher-order " +
+            (function ? "func" : "pred") + " inst of arity " +
+            std::to_string(arity) + " is expected",
+        {call.closure});
+  }
+  llvm::ArrayRef<ArgMode> modes{inst->modes};
+  bool implied{false};
+  if (Misfit(modes, call.arguments, map, false)) {
+    if (Misfit(modes, call.arguments, map, true)) {
+      // mmc: "in argument 2 (i.e. argument 1 of the called predicate) of
+      // higher-order predicate call".
+      return ArgumentError(
+          goal, modes, call.arguments, map, [&](std::size_t i) {
+            bool result{function && i + 1 == call.arguments.size()};
+            return "argument " + std::to_string(i + 2) + " (" +
+                (result ? std::string{"the result of the called function"}
+                        : "argument " + std::to_string(i + 1) +
+                            " of the called " + kind) +
+                ") of the higher-order " + kind + " call";
+          });
+    }
+    implied = true;
+  }
+  Pass(modes, call.arguments, map);
+  GoalModes &g{goals_[call.number]};
+  g.unify = UnifyKind::Call;
+  g.implied = implied;
+  last_ = Start(call.tokens);
+  return Ok();
+}
+
 
 void DumpClauseModes(llvm::raw_ostream &os, const ClauseModes &modes,
     const parser::TokenSequence &tokens,
@@ -2349,8 +2788,29 @@ void DumpClauseModes(llvm::raw_ostream &os, const ClauseModes &modes,
                 os << llvm::StringRef{EnumToString(g.unify)}.lower() << ' '
                    << VarName(form, unify->left) << " = "
                    << TermText(form, *unify);
+                if (g.callee) {
+                  os << ", closure of " << *g.callee->symbol << " mode "
+                     << g.callee->number << (g.implied ? " implied" : "");
+                }
               }
               os << '\n';
+              if (const Lambda * lambda{unify->functor.lambda}) {
+                dump(lambda->body, depth + 1);
+              }
+            },
+            [&](const HOCall *call) {
+              os << indent << "    " << at(call->tokens) << " higher-order call"
+                 << (g.implied ? " implied" : "") << ": ";
+              llvm::ArrayRef<VarId> arguments{call->arguments};
+              if (call->kind == parser::PredOrFunc::Function) {
+                os << VarName(form, arguments.back()) << " = ";
+                arguments = arguments.drop_back();
+              }
+              os << VarName(form, call->closure) << '(';
+              llvm::interleave(
+                  arguments, os, [&](VarId var) { os << VarName(form, var); },
+                  ", ");
+              os << ")\n";
             },
             [&](const Call *call) {
               os << indent << "    " << at(call->tokens) << " call "
@@ -2381,10 +2841,14 @@ std::unique_ptr<ModeChecking> CheckModes(const parser::ParseTree &tree,
     const NameResolution &resolution, TypeChecking &types,
     parser::Messages &messages, const ModeCheckOptions &options) {
   auto result{std::make_unique<ModeChecking>()};
-  ModeChecker{*result, resolution, types, tokens, messages, options}.Run(tree);
+  ModeChecker declarations{
+      *result, resolution, types, tokens, messages, options};
+  declarations.Run(tree);
   ConstructorTable constructors{resolution, types};
   InstOps ops{result->insts(), constructors};
-  ProcedureChecker{*result, resolution, types, ops, tokens, messages}.Run();
+  ProcedureChecker{
+      *result, declarations, resolution, types, ops, tokens, messages}
+      .Run();
   return result;
 }
 

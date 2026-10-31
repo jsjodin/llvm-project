@@ -3,14 +3,18 @@
 
 Each module has predicates with random argument types and modes, and
 clauses whose goals are unifications, calls, disjunctions and
-if-then-elses that bind the same variables in each branch, and negated
-tests, generated in an order in which each goal's inputs are bound and
-then shuffled, so that mode analysis has to schedule them. A predicate
-has one to three clauses. Every predicate is declared `nondet`, so
-that determinism analysis, which mmc runs with mode analysis, reports
-nothing. A few clauses get a mutation that may make them mode-incorrect:
-an output left unbound, two free variables unified, a variable bound in
-one branch only, or one bound only in a negation. compare-types.py
+if-then-elses that bind the same variables in each branch, negated
+tests, and higher-order terms, lambda expressions or an earlier
+predicate's name with its first arguments, with a call of each,
+generated in an order in which each goal's inputs are bound and then
+shuffled, so that mode analysis has to schedule them. A predicate has
+one to three clauses. Every predicate and lambda expression is declared
+`nondet`, so that determinism analysis, which mmc runs with mode
+analysis, reports nothing. A few clauses get a mutation that may make
+them mode-incorrect: an output left unbound, two free variables unified,
+a variable bound in one branch only, one bound only in a negation, a
+lambda expression's nonlocal or output left unbound, or a higher-order
+call's input left unbound. compare-types.py
 --modes --error-lines then checks that merkc and mmc report mode errors
 on the same lines. The constructors of t have names of two letters, since
 a one-letter constant could also be a character.
@@ -179,6 +183,59 @@ class Clause:
             self.goals.append(Compound(kind, branches, targets, condition))
         self.bound.update(targets)
 
+    def call_of(self, closure, types, modes):
+        """A call of a higher-order term with these arguments."""
+        args = []
+        for type_, mode in zip(types, modes):
+            if mode == "in":
+                args.append(self.make_bound(type_))
+            else:
+                var = self.fresh(type_)
+                args.append(var)
+                self.bound.add(var)
+        if args:
+            self.goals.append("%s(%s)" % (closure, ", ".join(args)))
+        else:
+            self.goals.append("call(%s)" % closure)
+
+    def closure(self):
+        """A higher-order term and a call of it: a lambda expression, whose
+        body may use bound variables as nonlocals, or an earlier
+        predicate of one mode with its first arguments."""
+        rng = self.rng
+        callees = [c for c in self.preds[:self.index] if len(c[2]) == 1]
+        closure = self.fresh("closure")
+        if callees and rng.random() < 0.5:
+            name, types, modes_list = rng.choice(callees)
+            modes = modes_list[0]
+            k = rng.randint(0, len(types))
+            # Arguments of either mode: an output is an implied mode.
+            curried = [self.make_bound(t) for t in types[:k]]
+            term = name + ("(%s)" % ", ".join(curried) if curried else "")
+            self.goals.append("%s = %s" % (closure, term))
+            self.call_of(closure, types[k:], modes[k:])
+            return
+        type_ = rng.choice(TYPES)
+        saved_goals, saved_bound = self.goals, set(self.bound)
+        self.goals = []
+        head, types, modes = [], [], []
+        if rng.random() < 0.5:
+            x = self.fresh("int")
+            self.bound.add(x)
+            head.append(x + "::in")
+            types.append("int")
+            modes.append("in")
+        y = self.fresh(type_)
+        head.append(y + "::out")
+        types.append(type_)
+        modes.append("out")
+        self.goals.append("%s = %s" % (y, self.make_bound(type_)))
+        rng.shuffle(self.goals)
+        body = ", ".join(self.goals)
+        self.goals, self.bound = saved_goals, saved_bound
+        self.goals.append("%s = (pred(%s) is nondet :- %s)" % (closure, ", ".join(head), body))
+        self.call_of(closure, types, modes)
+
     def generate(self, types, modes):
         rng = self.rng
         head = []
@@ -192,10 +249,12 @@ class Clause:
             r = rng.random()
             if r < 0.3:
                 self.call()
-            elif r < 0.5:
+            elif r < 0.45:
                 self.deconstruct()
-            elif r < 0.75:
+            elif r < 0.65:
                 self.compound()
+            elif r < 0.8:
+                self.closure()
             else:
                 self.make_bound(rng.choice(TYPES))
         for var, mode in zip(head, modes):
@@ -204,7 +263,8 @@ class Clause:
                 self.goals.append("%s = %s" % (var, value))
         mutation = None
         if rng.random() < 0.3 and self.goals:
-            kind = rng.choice(["drop", "free", "branch", "negation"])
+            kind = rng.choice(["drop", "free", "branch", "negation",
+                               "nonlocal", "lambda output", "closure input"])
             outputs = [g for g in self.goals if isinstance(g, str) and g.startswith("H")]
             compounds = [g for g in self.goals if isinstance(g, Compound)]
             if kind == "drop" and outputs:
@@ -222,6 +282,24 @@ class Clause:
                 self.goals.append("not (%s = %d)" % (x, rng.randint(0, 9)))
                 self.goals.append("use(%s)" % x)
                 mutation = "a variable bound only in a negation"
+            elif kind == "nonlocal":
+                p, x, y = self.fresh("closure"), self.fresh("int"), self.fresh("int")
+                self.goals.append("%s = (pred(%s::out) is nondet :- %s = %s)" % (p, x, x, y))
+                self.goals.append("%s(%s)" % (p, self.fresh("int")))
+                self.goals.append("use(%s)" % y)
+                mutation = "a lambda expression's nonlocal left unbound"
+            elif kind == "lambda output":
+                # The output's use gives it a type.
+                p, x, y = self.fresh("closure"), self.fresh("int"), self.fresh("int")
+                self.goals.append("%s = (pred(_%s::out) is nondet :- true)" % (p, x))
+                self.goals.append("%s(%s)" % (p, y))
+                self.goals.append("use(%s)" % y)
+                mutation = "a lambda expression's output left unbound"
+            elif kind == "closure input":
+                p, x = self.fresh("closure"), self.fresh("int")
+                self.goals.append("%s = (pred(%s::in) is nondet :- %s = %d)" % (p, x, x, rng.randint(0, 9)))
+                self.goals.append("%s(%s)" % (p, self.fresh("int")))
+                mutation = "a higher-order call's input left unbound"
             else:
                 x, y = self.fresh("int"), self.fresh("int")
                 self.goals.append("%s = %s" % (x, y))

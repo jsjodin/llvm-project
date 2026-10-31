@@ -176,7 +176,10 @@ public:
   InstOps(InstContext &insts, InstTypes &types) : insts_{insts}, types_{types} {}
 
   // a ⊑ b: a matches b, so a value with inst a may be passed where b is
-  // expected (definition 3.2.15).
+  // expected (definition 3.2.15). A function without a higher-order inst
+  // is taken to have the default one, so a higher-order function inst
+  // matches ground only if it is the default (reference manual, "Default
+  // insts for functions").
   bool Matches(const Inst *a, const Inst *b, const Type *type);
   // a ≼ b: a is at least as instantiated as b, so a variable may go from
   // b to a on forward execution (definition 3.2.14).
@@ -189,6 +192,11 @@ public:
   // liveness and clobbering conditions, which are the caller's); null if
   // there is none, as for two higher-order values.
   const Inst *Unify(const Inst *a, const Inst *b, const Type *type);
+
+  // The default inst of a function of `arity` arguments, func(in, ...,
+  // in) = out is det.
+  const Inst *DefaultFunction(std::size_t arity);
+  bool IsDefaultFunction(const Inst *);
 
   // Whether an inst is ground, or contains free.
   bool IsGround(const Inst *, const Type *type);
