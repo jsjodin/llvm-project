@@ -209,6 +209,30 @@ private:
       methodDefinitions_;
   llvm::DenseMap<const Symbol *, llvm::ArrayRef<ClassConstraint>>
       superclasses_;
+  // Functional dependencies (reference manual, "Functional
+  // dependencies"), by the positions of the type class's parameters, each
+  // side sorted.
+  struct Dependency {
+    llvm::SmallVector<unsigned, 2> domain, range;
+    bool operator<(const Dependency &that) const {
+      return std::tie(domain, range) < std::tie(that.domain, that.range);
+    }
+    bool operator==(const Dependency &that) const {
+      return domain == that.domain && range == that.range;
+    }
+  };
+  std::vector<Dependency> DependenciesOf(const parser::TypeclassDecl &);
+  llvm::ArrayRef<Dependency> Dependencies(const Symbol &typeclass);
+  std::string DependencyText(const Symbol &typeclass, const Dependency &);
+  llvm::DenseMap<const Symbol *, std::vector<Dependency>> dependencies_;
+  // Adds to `vars` the type variables that the constraints' functional
+  // dependencies, and those of their superclasses, determine from them.
+  void Close(llvm::DenseSet<unsigned> &vars,
+      llvm::ArrayRef<ClassConstraint> constraints);
+  // Improvement (reference manual, "Functional dependencies"): unifies
+  // the ranges of the assignment's constraints whose domains are those of
+  // another constraint, assumed or wanted, or match an instance's.
+  void Improve(Assignment &);
   // The instances that constraints may use: the loaded interfaces' and
   // the module's, without its errors and its abstract declarations.
   struct Instance {
@@ -559,11 +583,14 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
     }
     // Each variable of a constraint must be determined by the argument
     // types (reference manual, "Type class constraints on predicates and
-    // functions"); a method's, its type class's parameters too.
+    // functions"); a method's, its type class's parameters too, unless
+    // functional dependencies determine it from them.
     llvm::DenseSet<unsigned> determined;
     for (const Type *argument : arguments) {
       ForEachVariable(*argument, [&](unsigned var) { determined.insert(var); });
     }
+    // and those that functional dependencies determine from them.
+    Close(determined, constraints);
     llvm::DenseSet<unsigned> reported;
     bool function{(*decl)->kind == parser::PredOrFunc::Function};
     for (const ClassConstraint &constraint : constraints) {
@@ -867,6 +894,118 @@ std::optional<ClassConstraint> TypeChecker::ConvertConstraint(
       result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments})};
 }
 
+std::vector<TypeChecker::Dependency> TypeChecker::DependenciesOf(
+    const parser::TypeclassDecl &decl) {
+  std::vector<Dependency> dependencies;
+  auto positions{[&](llvm::ArrayRef<llvm::StringRef> vars) {
+    llvm::SmallVector<unsigned, 2> result;
+    for (llvm::StringRef var : vars) {
+      // The parser checks that each is a parameter.
+      auto it{llvm::find(decl.parameters, var)};
+      if (it != decl.parameters.end()) {
+        result.push_back(it - decl.parameters.begin());
+      }
+    }
+    llvm::sort(result);
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+  }};
+  for (const parser::TypeclassConstraint &item : decl.constraints) {
+    if (const auto *dependency{
+            std::get_if<const parser::FunctionalDependency *>(&item)}) {
+      dependencies.push_back(Dependency{
+          positions((*dependency)->domain), positions((*dependency)->range)});
+    }
+  }
+  llvm::sort(dependencies);
+  dependencies.erase(std::unique(dependencies.begin(), dependencies.end()),
+      dependencies.end());
+  return dependencies;
+}
+
+llvm::ArrayRef<TypeChecker::Dependency> TypeChecker::Dependencies(
+    const Symbol &typeclass) {
+  auto [it, inserted]{dependencies_.try_emplace(&typeclass)};
+  if (inserted) {
+    if (const auto *decl{std::get_if<const parser::TypeclassDecl *>(
+            &typeclass.declaration)}) {
+      it->second = DependenciesOf(**decl);
+    }
+  }
+  return it->second;
+}
+
+std::string TypeChecker::DependencyText(
+    const Symbol &typeclass, const Dependency &dependency) {
+  const auto *decl{
+      std::get_if<const parser::TypeclassDecl *>(&typeclass.declaration)};
+  auto side{[&](llvm::ArrayRef<unsigned> positions) {
+    std::string text;
+    for (unsigned position : positions) {
+      if (!text.empty()) {
+        text += ", ";
+      }
+      text += decl && position < (*decl)->parameters.size()
+          ? (*decl)->parameters[position].str()
+          : "T" + std::to_string(position);
+    }
+    return text;
+  }};
+  return "(" + side(dependency.domain) + " -> " + side(dependency.range) + ")";
+}
+
+void TypeChecker::Close(llvm::DenseSet<unsigned> &vars,
+    llvm::ArrayRef<ClassConstraint> constraints) {
+  // The induced dependencies: of each constraint, and of its superclass
+  // constraints on its arguments, recursively.
+  std::vector<std::pair<llvm::DenseSet<unsigned>, llvm::DenseSet<unsigned>>>
+      induced;
+  std::function<void(const ClassConstraint &, unsigned)> induce{
+      [&](const ClassConstraint &constraint, unsigned depth) {
+        auto varsAt{[&](llvm::ArrayRef<unsigned> positions) {
+          llvm::DenseSet<unsigned> result;
+          for (unsigned position : positions) {
+            if (position < constraint.arguments.size()) {
+              ForEachVariable(*constraint.arguments[position],
+                  [&](unsigned var) { result.insert(var); });
+            }
+          }
+          return result;
+        }};
+        for (const Dependency &dependency :
+            Dependencies(*constraint.typeclass)) {
+          induced.emplace_back(
+              varsAt(dependency.domain), varsAt(dependency.range));
+        }
+        if (depth > 64) {
+          return; // a superclass cycle, which is reported
+        }
+        for (const ClassConstraint &super :
+            Superclasses(*constraint.typeclass)) {
+          induce(SubstituteIn(super,
+                     [&](unsigned var) {
+                       return var < constraint.arguments.size()
+                           ? constraint.arguments[var]
+                           : types_.Named(error_, {});
+                     }),
+              depth + 1);
+        }
+      }};
+  for (const ClassConstraint &constraint : constraints) {
+    induce(constraint, 0);
+  }
+  for (bool changed{true}; changed;) {
+    changed = false;
+    for (const auto &[domain, range] : induced) {
+      if (llvm::all_of(domain, [&](unsigned var) { return vars.contains(var); })) {
+        for (unsigned var : range) {
+          changed |= vars.insert(var).second;
+        }
+      }
+    }
+  }
+}
+
 llvm::SmallVector<ClassConstraint, 2> TypeChecker::SuperclassesOf(
     const parser::TypeclassDecl &decl, bool report) {
   llvm::SmallVector<ClassConstraint, 2> supers;
@@ -966,6 +1105,15 @@ void TypeChecker::CheckTypeclasses() {
           AsSet(Superclasses(*symbol))) {
         parser::Message &message{messages_->Say(where(*definition->decl),
             "the superclass constraints of typeclass %s/%u differ from those of its abstract declaration"_err_en_US,
+            symbol->name.str(), symbol->arity)};
+        message.Attach(where(*abstract->decl),
+            "the abstract declaration is here"_because_en_US);
+      }
+      // mmc: "The functional dependencies do not match."
+      if (llvm::ArrayRef<Dependency>{DependenciesOf(*abstract->decl)} !=
+          Dependencies(*symbol)) {
+        parser::Message &message{messages_->Say(where(*definition->decl),
+            "the functional dependencies of typeclass %s/%u differ from those of its abstract declaration"_err_en_US,
             symbol->name.str(), symbol->arity)};
         message.Attach(where(*abstract->decl),
             "the abstract declaration is here"_because_en_US);
@@ -1145,6 +1293,94 @@ void TypeChecker::CheckInstances() {
           "the earlier instance is %s"_because_en_US, it->second->text);
     }
   }
+  // Functional dependencies: in each of the module's instances, the range's
+  // type variables are determined by the domain's, with the instance's
+  // constraints; and two instances whose domains unify have the same
+  // range, with the unifier (reference manual, "Functional dependencies").
+  unsigned savedRigid{rigid_};
+  rigid_ = 0;
+  auto countVars{[](llvm::ArrayRef<const Type *> types) {
+    unsigned count{0};
+    for (const Type *type : types) {
+      ForEachVariable(
+          *type, [&](unsigned var) { count = std::max(count, var + 1); });
+    }
+    return count;
+  }};
+  for (std::size_t j{0}; j < heads.size(); ++j) {
+    const Head &head{heads[j]};
+    if (!head.item->local || !head.valid || head.item->decl->abstract) {
+      continue;
+    }
+    InTokensOf in{*this, head.item->tokens};
+    auto varName{[&](unsigned var) {
+      return var < head.names.size() ? head.names[var].str()
+                                     : "T" + std::to_string(var);
+    }};
+    for (const Dependency &dependency : Dependencies(*head.typeclass)) {
+      llvm::DenseSet<unsigned> determined;
+      for (unsigned position : dependency.domain) {
+        ForEachVariable(*head.types[position],
+            [&](unsigned var) { determined.insert(var); });
+      }
+      Close(determined, head.constraints);
+      llvm::DenseSet<unsigned> reported;
+      for (unsigned position : dependency.range) {
+        ForEachVariable(*head.types[position], [&](unsigned var) {
+          if (!determined.contains(var) && reported.insert(var).second) {
+            // mmc: "functional dependency not satisfied: type variable `T'
+            // occurs in the range of the functional dependency, but is not
+            // determined by the domain."
+            messages_->Say(Source(head.item->decl->name->tokens),
+                "in instance %s, type variable %s is in the range of the functional dependency %s, but its domain does not determine it"_err_en_US,
+                head.text, varName(var),
+                DependencyText(*head.typeclass, dependency));
+          }
+        });
+      }
+    }
+    for (std::size_t k{0}; k < j; ++k) {
+      const Head &other{heads[k]};
+      if (!other.valid || other.typeclass != head.typeclass ||
+          (other.item->local && other.item->decl->abstract) ||
+          other.key == head.key) {
+        continue; // an overlap is reported as one
+      }
+      unsigned otherVars{countVars(other.types)};
+      unsigned headVars{countVars(head.types)};
+      auto renamed{[&](const Type *type) {
+        return types_.Substitute(
+            type, [&](unsigned var) { return types_.Variable(otherVars + var); });
+      }};
+      for (const Dependency &dependency : Dependencies(*head.typeclass)) {
+        Assignment a;
+        a.bindings.resize(otherVars + headVars);
+        bool unify{llvm::all_of(dependency.domain, [&](unsigned position) {
+          return UnifyTypes(
+              a, other.types[position], renamed(head.types[position]));
+        })};
+        if (!unify ||
+            llvm::all_of(dependency.range, [&](unsigned position) {
+              return Resolve(a, other.types[position]) ==
+                  Resolve(a, renamed(head.types[position]));
+            })) {
+          continue;
+        }
+        // mmc: "Inconsistent instance declaration for typeclass `m.baz'/2
+        // with functional dependency `(A -> B)'."
+        parser::Message &message{messages_->Say(
+            Source(head.item->decl->name->tokens),
+            "instance %s is inconsistent with an earlier instance by the functional dependency %s of typeclass %s/%u"_err_en_US,
+            head.text, DependencyText(*head.typeclass, dependency),
+            head.typeclass->name.str(), head.typeclass->arity)};
+        InTokensOf otherIn{*this, other.item->tokens};
+        message.Attach(Source(other.item->decl->name->tokens),
+            "the earlier instance is %s"_because_en_US, other.text);
+        break;
+      }
+    }
+  }
+  rigid_ = savedRigid;
   for (const Head &head : heads) {
     if (head.valid && !(head.item->local && head.item->decl->abstract)) {
       instances_.push_back({head.item, head.typeclass,
@@ -1507,6 +1743,126 @@ bool TypeChecker::Refuted(const ClassConstraint &wanted) {
     return refuted;
   }
   return false; // perhaps assumed, or satisfied once its types are known
+}
+
+void TypeChecker::Improve(Assignment &a) {
+  // The bound variables among the first n, which a fresh variable does
+  // not count among.
+  auto bound{[](const Assignment &x, std::size_t n) {
+    return llvm::count_if(llvm::ArrayRef<const Type *>{x.bindings}.take_front(n),
+        [](const Type *t) { return t; });
+  }};
+  auto resolve{[&](const ClassConstraint &c) {
+    return SubstituteIn(c, [&](unsigned var) { return Resolve(a, types_.Variable(var)); });
+  }};
+  // The wanted constraints, and those that the instances that improve
+  // them need, which improve others in turn.
+  std::vector<ClassConstraint> wanted;
+  for (const auto &[goal, constraint] : a.wanted) {
+    wanted.push_back(constraint);
+  }
+  // Unifies the types in a copy, which replaces the assignment if it
+  // binds more of the assignment's variables. A unification that fails is left for the
+  // constraint's check to report, as mmc does.
+  auto attempt{[&](llvm::function_ref<bool(Assignment &)> unify) {
+    Assignment copy{a};
+    std::size_t n{a.bindings.size()};
+    if (unify(copy) && bound(copy, n) > bound(a, n)) {
+      a = std::move(copy);
+      return true;
+    }
+    return false;
+  }};
+  constexpr unsigned maxRounds{64}, maxWanted{256};
+  for (unsigned round{0}; round < maxRounds; ++round) {
+    bool changed{false};
+    for (std::size_t i{0}; i < wanted.size(); ++i) {
+      ClassConstraint c{resolve(wanted[i])};
+      llvm::ArrayRef<Dependency> dependencies{Dependencies(*c.typeclass)};
+      if (dependencies.empty() ||
+          llvm::any_of(c.arguments, [&](const Type *t) { return HasError(t); })) {
+        continue;
+      }
+      // Another constraint of the class with the same domain, assumed or
+      // wanted earlier.
+      auto sameDomain{[&](const ClassConstraint &other, const Dependency &d) {
+        return other.typeclass == c.typeclass &&
+            llvm::all_of(d.domain, [&](unsigned position) {
+              return other.arguments[position] == c.arguments[position];
+            });
+      }};
+      auto unifyRanges{[&](const ClassConstraint &other, const Dependency &d) {
+        return attempt([&](Assignment &copy) {
+          return llvm::all_of(d.range, [&](unsigned position) {
+            return UnifyTypes(
+                copy, c.arguments[position], other.arguments[position]);
+          });
+        });
+      }};
+      for (const Dependency &d : dependencies) {
+        for (const auto &[assumed, origin] : assumed_) {
+          if (sameDomain(assumed, d)) {
+            changed |= unifyRanges(assumed, d);
+          }
+        }
+        for (std::size_t k{0}; k < i; ++k) {
+          ClassConstraint other{resolve(wanted[k])};
+          if (sameDomain(other, d)) {
+            changed |= unifyRanges(other, d);
+          }
+        }
+        // An instance whose domain matches: its range, with its other
+        // variables fresh, and its constraints are wanted too.
+        for (const Instance &instance : instances_) {
+          llvm::SmallVector<const Type *, 4> bindings;
+          if (instance.typeclass != c.typeclass ||
+              !llvm::all_of(d.domain, [&](unsigned position) {
+                return Match(instance.types[position], c.arguments[position],
+                    bindings);
+              })) {
+            continue;
+          }
+          std::vector<ClassConstraint> premises;
+          bool improved{attempt([&](Assignment &copy) {
+            llvm::DenseMap<unsigned, const Type *> fresh;
+            auto substitute{[&](unsigned var) {
+              if (var < bindings.size() && bindings[var]) {
+                return bindings[var];
+              }
+              auto [it, inserted]{fresh.try_emplace(var, nullptr)};
+              if (inserted) {
+                it->second = types_.Variable(copy.bindings.size());
+                copy.bindings.push_back(nullptr);
+              }
+              return it->second;
+            }};
+            for (unsigned position : d.range) {
+              if (!UnifyTypes(copy, c.arguments[position],
+                      types_.Substitute(instance.types[position], substitute))) {
+                return false;
+              }
+            }
+            for (const ClassConstraint &premise : instance.constraints) {
+              premises.push_back(SubstituteIn(premise, substitute));
+            }
+            return true;
+          })};
+          if (improved) {
+            changed = true;
+            for (const ClassConstraint &premise : premises) {
+              if (wanted.size() < maxWanted) {
+                wanted.push_back(premise);
+              }
+            }
+          }
+          break; // instances agree on the range, by the dependency
+        }
+      }
+    }
+    if (!changed) {
+      break;
+    }
+  }
 }
 
 bool TypeChecker::Refuted(const Assignment &a) {
@@ -1879,6 +2235,9 @@ ClauseTypes TypeChecker::CheckClause(const ClauseForm &clause, bool inferring,
         });
   }
   CheckGoal(clause.body);
+  for (Assignment &a : assignments_) {
+    Improve(a);
+  }
   ClauseTypes types{Finish(clause, definition, sig)};
   types.method = method;
   return types;
