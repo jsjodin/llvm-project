@@ -1,4 +1,5 @@
 add_merkurius_library(MerkuriusSemantics
+  check-purity.cpp
   check-types.cpp
   desugar.cpp
   module-loader.cpp
