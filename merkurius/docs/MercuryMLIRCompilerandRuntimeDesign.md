@@ -792,7 +792,9 @@ Purity checking (`check-purity.cpp`) runs after type checking, by the callees it
 - **Lambda expressions.** A lambda expression's body is at most as impure as its annotation, and an annotation less pure than the body is fine, as in mmc. The body does not count towards its clause's purity, and its goals are not under the annotation of the goal the lambda expression is in.
 - **Instance methods** are at least as pure as their declarations in the type class, whether defined by clauses or by name; the call that a definition by name stands for has the method's declared purity, so it is reported unannotated only when the method is declared purer.
 - **Type errors.** A predicate or function with a type error in a clause is not checked, as mmc checks purity only after type checking succeeds.
-- **Not yet:** clauses for one mode, `foreign_proc` attributes, and, with mode analysis, goals with `any` nonlocals in negated contexts.
+- **Clauses for one mode** (reference manual, "Different clauses for different modes"). A predicate or function with more than one mode, and a clause whose head arguments have modes, is impure unless it is promised pure or `promise_equivalent_clauses`; the latter does not promise the clauses' own goals pure. With one mode, mode annotations change nothing, as in mmc. Desugaring records the clause's `modeSpecific`.
+- **`foreign_proc`** (reference manual, "Foreign code attributes"). A `foreign_proc` is impure unless its `promise_pure` or `promise_semipure` attribute says otherwise, and its purity must be the declared one, as in mmc, which reports both the predicate and the `foreign_proc`; a pragma promise stands for the attribute. Only `foreign_proc`s for C count, as merkc's foreign code is C.
+- **Not yet:** goals with `any` nonlocals in negated contexts, which go with mode analysis.
 
 ### Mode analysis
 
