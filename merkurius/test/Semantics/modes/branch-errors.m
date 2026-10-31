@@ -3,11 +3,12 @@
 % Logic Programming Languages", 2003, chapter 3): a variable free in some
 % branches and bound in others, or partly so, which mmc reports at the
 % goal run last, with a note at each branch, but with three or more
-% branches only at those where it is not ground, if it is free in all of
-% them; an error inside a branch; a negation or a condition that binds a
-% variable used outside it; and clauses, which are the branches of a
+% branches only at the one where it is not ground, if it is free there;
+% an error inside a branch; a negation or a condition that binds a
+% variable used outside it; clauses, which are the branches of a
 % disjunction, whose head unifications are reported only if no other goal
-% waits.
+% waits; and a negation that cannot succeed, which wakes every waiting
+% goal, in the order of their variables.
 %
 % RUN: not merkc -fc1 -fdebug-dump-modes %s 2>&1 >/dev/null | FileCheck --implicit-check-not=error: --implicit-check-not=because: --implicit-check-not=warning: %s
 % RUN: %if mmc %{ %compare-types --modes --error-lines %s %}
@@ -28,11 +29,15 @@
 :- pred final(int::in, int::out, int::out) is multi.
 :- pred head_waits(int::out) is multi.
 :- pred unused_partial(list(int)::in) is multi.
+:- pred one_of_three(int::out) is multi.
+:- pred sorted is semidet.
 
 :- implementation.
 
 :- pred use(int::in) is det.
 use(_).
+:- pred q(int::(free >> free)) is det.
+q(_).
 
 one_branch(X) :-
     (
@@ -126,3 +131,24 @@ unused_partial(L) :-
 % CHECK: [[@LINE-4]]:9: because: in this branch, V has inst bound('[|]'(free, free))
 % CHECK: [[@LINE-3]]:9: because: in this branch, V has inst bound('[|]'(ground, ground))
     ).
+one_of_three(X) :-
+    (
+        X = 1
+    ;
+        true
+    ;
+        true
+% CHECK: [[@LINE-1]]:9: error: in the clause for one_of_three(out): mode mismatch in the disjunction: X is ground in some branches but not others
+% CHECK: [[@LINE-6]]:13: because: in this branch, X has inst unique(1)
+% CHECK: [[@LINE-5]]:9: because: in this branch, X has inst free
+% CHECK: [[@LINE-4]]:9: because: in this branch, X has inst free
+    ).
+sorted :-
+    q(A),
+    use(B),
+    use(A),
+% CHECK: [[@LINE-1]]:5: error: in the clause for sorted: mode error in argument 1 of the call to pred branch_errors.use/1: A has inst free, but ground is expected
+    V = 3,
+    not (V = 4),
+% CHECK: [[@LINE-1]]:14: warning: the unification of V and 4 cannot succeed: V has inst unique(3)
+    use(B).
