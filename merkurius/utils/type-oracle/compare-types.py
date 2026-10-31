@@ -350,7 +350,7 @@ def run_merkc(merkc, path, all_messages=False):
             elif "unresolved polymorphism" in text:
                 warnings.add(line)
             continue
-        match = re.match(r"clause at (\d+):\d+ of (?:pred|func) (.*)/(\d+)(?:: (inferred )?(.*))?$", raw)
+        match = re.match(r"clause at (\d+):\d+ of (?:pred|func) (.*?)/(\d+)(?: in instance [^:]*)?(?:: (inferred )?(.*))?$", raw)
         if match:
             line = int(match.group(1))
             clause_starts.append((line, match.group(2).split(".")[-1], int(match.group(3))))
@@ -460,6 +460,10 @@ def typed_version(text):
         if match:
             finish()
             clause, types = offset(int(match.group(1)), int(match.group(2))), {}
+            if " in instance " in raw:
+                # A clause in an instance's brackets: only its names are
+                # qualified.
+                clause = None
             continue
         match = re.match(r"  ([A-Z]\w*): (.*)$", raw)
         if match:

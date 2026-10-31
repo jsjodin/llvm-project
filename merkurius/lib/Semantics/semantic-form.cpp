@@ -400,6 +400,12 @@ void DumpSemanticForm(
   for (const ClauseForm *clause : form.clauses) {
     Dumper{os, *clause, nonlocals}.Clause();
   }
+  for (const MethodClause &method : form.methods) {
+    os << "method of instance ";
+    PrintName(os, *method.instance->name);
+    os << ":\n";
+    Dumper{os, *method.clause, nonlocals}.Clause();
+  }
 }
 
 } // namespace merkurius::semantics

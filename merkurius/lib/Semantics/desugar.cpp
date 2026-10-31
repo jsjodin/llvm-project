@@ -61,6 +61,10 @@ public:
 
   std::optional<const ClauseForm *> Desugar(const parser::FactOrRule &);
   std::optional<const ClauseForm *> Desugar(const parser::DcgRule &);
+  // pred(m/N) is p as the clause m(X1, ..., XN) :- p(X1, ..., XN), and
+  // func(m/N) is f as m(X1, ..., XN) = Y :- Y = f(X1, ..., XN), as mmc
+  // checks them: f is a data-term.
+  const ClauseForm *Desugar(const parser::MethodByName &);
 
 private:
   template <typename T, typename... A> const T *Make(A &&...args) {
@@ -1430,13 +1434,60 @@ std::optional<const ClauseForm *> ClauseDesugarer::Desugar(
   return Finish(rule.tokens, parser::PredOrFunc::Predicate, rule.name, goals);
 }
 
+const ClauseForm *ClauseDesugarer::Desugar(const parser::MethodByName &method) {
+  bool function{method.kind == parser::PredOrFunc::Function};
+  for (unsigned j{0}; j < method.method->arity + (function ? 1 : 0); ++j) {
+    head_.push_back(Fresh(method.tokens));
+  }
+  Goals goals;
+  llvm::ArrayRef<VarId> head{Save(llvm::ArrayRef<VarId>{head_})};
+  // The goal is the implementation's name, which its messages show.
+  TokenRange name{method.implementation->tokens};
+  if (function) {
+    goals.push_back(Make<Unify>(name, Number(), head.back(), false,
+        VarId{0},
+        Functor{FunctorKind::Name, method.implementation, nullptr, nullptr},
+        head.drop_back()));
+  } else {
+    goals.push_back(
+        Make<Call>(name, Number(), method.implementation, head, false));
+  }
+  return Finish(method.tokens, method.kind, method.method->name, goals);
+}
+
 } // namespace
 
 const SemanticForm &Desugar(const parser::ParseTree &tree,
     const parser::TokenSequence &tokens, SemanticArena &arena,
     parser::Messages &messages) {
   llvm::SmallVector<const ClauseForm *, 16> clauses;
+  llvm::SmallVector<MethodClause, 16> methods;
   for (const parser::Item &item : tree.items) {
+    if (const auto *decl{std::get_if<const parser::InstanceDecl *>(&item)}) {
+      for (const parser::InstanceMethod &method : (*decl)->methods) {
+        ClauseDesugarer desugarer{tokens, arena, messages};
+        std::optional<const ClauseForm *> clause;
+        const parser::MethodByName *byName{nullptr};
+        common::visit(
+            common::visitors{
+                [&](const parser::MethodByName *m) {
+                  byName = m;
+                  clause = desugarer.Desugar(*m);
+                },
+                [&](const parser::FactOrRule *rule) {
+                  clause = desugarer.Desugar(*rule);
+                },
+                [&](const parser::DcgRule *rule) {
+                  clause = desugarer.Desugar(*rule);
+                },
+            },
+            method);
+        if (clause) {
+          methods.push_back(MethodClause{
+              *decl, &Quantify(**clause, tokens, arena, messages), byName});
+        }
+      }
+    }
     if (const auto *rule{std::get_if<const parser::FactOrRule *>(&item)}) {
       ClauseDesugarer desugarer{tokens, arena, messages};
       if (auto clause{desugarer.Desugar(**rule)}) {
@@ -1457,7 +1508,8 @@ const SemanticForm &Desugar(const parser::ParseTree &tree,
     }
   }
   return *arena.Make<SemanticForm>(
-      arena.SaveArray(llvm::ArrayRef<const ClauseForm *>{clauses}));
+      arena.SaveArray(llvm::ArrayRef<const ClauseForm *>{clauses}),
+      arena.SaveArray(llvm::ArrayRef<MethodClause>{methods}));
 }
 
 } // namespace merkurius::semantics
