@@ -123,6 +123,14 @@ private:
   // Declares the predicates and functions whose arity their `with_type`
   // gives, in the module's scope.
   void DeclareWithTypes(ModuleSymbols &, const Visibility &);
+  // Whether a declaration of the module's own repeats one of its earlier
+  // ones, which it reports, as mmc does: a predicate or function declared
+  // twice, a method among them, and a type, inst or mode defined twice. A
+  // type's abstract declaration, or a foreign type, goes with its
+  // definition.
+  bool Duplicate(const ModuleSymbols &, SymbolKind, llvm::StringRef name,
+      unsigned arity, Declaration, parser::CharBlock source,
+      const Symbol *owner = nullptr);
   std::optional<unsigned> WithTypeArity(
       const parser::Type &, const Visibility &, int depth);
   struct Pending {
@@ -181,8 +189,12 @@ void Resolver::Declare(ModuleSymbols &symbols, const parser::Item &item,
         tokens.tokens[name.tokens.last].spelling.end()};
   }};
   auto type{[&](const parser::SymName &name, std::size_t arity,
-                Declaration declaration) -> const Symbol & {
-    return symbols.Add(SymbolKind::Type, name.name, arity, declaration,
+                Declaration declaration) -> const Symbol * {
+    if (Duplicate(symbols, SymbolKind::Type, name.name, arity, declaration,
+            source(name))) {
+      return nullptr; // its constructors are not the type's
+    }
+    return &symbols.Add(SymbolKind::Type, name.name, arity, declaration,
         source(name), exported);
   }};
   auto predicate{[&](const parser::PredDecl &decl, const Symbol *owner) {
@@ -190,6 +202,13 @@ void Resolver::Declare(ModuleSymbols &symbols, const parser::Item &item,
       // Its arity depends on its type's, which is known once the module's
       // types are.
       pending_.push_back({&symbols, &decl, exported, owner, &tokens});
+      return;
+    }
+    SymbolKind kind{decl.kind == parser::PredOrFunc::Function
+            ? SymbolKind::Function
+            : SymbolKind::Predicate};
+    if (Duplicate(symbols, kind, decl.name->name, decl.arguments.size(),
+            &decl, source(*decl.name), owner)) {
       return;
     }
     symbols.Add(decl.kind == parser::PredOrFunc::Function
@@ -201,8 +220,12 @@ void Resolver::Declare(ModuleSymbols &symbols, const parser::Item &item,
   std::visit(
       common::visitors{
           [&](const parser::DuTypeDefn *defn) {
-            const Symbol &owner{
+            const Symbol *owned{
                 type(*defn->name, defn->parameters.size(), defn)};
+            if (!owned) {
+              return;
+            }
+            const Symbol &owner{*owned};
             for (const parser::Constructor *constructor : defn->constructors) {
               symbols.Add(SymbolKind::Constructor, constructor->name->name,
                   constructor->arguments.size(), constructor,
@@ -231,12 +254,20 @@ void Resolver::Declare(ModuleSymbols &symbols, const parser::Item &item,
           },
           [&](const parser::PredDecl *decl) { predicate(*decl, nullptr); },
           [&](const parser::InstDefn *defn) {
-            symbols.Add(SymbolKind::Inst, defn->name->name,
-                defn->parameters.size(), defn, source(*defn->name), exported);
+            if (!Duplicate(symbols, SymbolKind::Inst, defn->name->name,
+                    defn->parameters.size(), defn, source(*defn->name))) {
+              symbols.Add(SymbolKind::Inst, defn->name->name,
+                  defn->parameters.size(), defn, source(*defn->name),
+                  exported);
+            }
           },
           [&](const parser::ModeDefn *defn) {
-            symbols.Add(SymbolKind::Mode, defn->name->name,
-                defn->parameters.size(), defn, source(*defn->name), exported);
+            if (!Duplicate(symbols, SymbolKind::Mode, defn->name->name,
+                    defn->parameters.size(), defn, source(*defn->name))) {
+              symbols.Add(SymbolKind::Mode, defn->name->name,
+                  defn->parameters.size(), defn, source(*defn->name),
+                  exported);
+            }
           },
           [&](const parser::TypeclassDecl *decl) {
             const Symbol &owner{symbols.Add(SymbolKind::Typeclass,
@@ -252,6 +283,93 @@ void Resolver::Declare(ModuleSymbols &symbols, const parser::Item &item,
           [](const auto *) {},
       },
       item);
+}
+
+bool Resolver::Duplicate(const ModuleSymbols &symbols, SymbolKind kind,
+    llvm::StringRef name, unsigned arity, Declaration declaration,
+    parser::CharBlock source, const Symbol *owner) {
+  if (&symbols != own_) {
+    return false; // an imported module's are its own business
+  }
+  auto definition{[](const Declaration &d) {
+    return std::holds_alternative<const parser::DuTypeDefn *>(d) ||
+        std::holds_alternative<const parser::EquivalenceTypeDefn *>(d);
+  }};
+  for (const Symbol *symbol : symbols.Lookup(name)) {
+    if (symbol->kind != kind || symbol->arity != arity) {
+      continue;
+    }
+    std::string text;
+    llvm::raw_string_ostream os{text};
+    os << *symbol;
+    // The later in the source is the duplicate: a declaration with
+    // `with_type` is declared after the others.
+    parser::CharBlock first{symbol->source}, second{source};
+    if (second.begin() < first.begin()) {
+      std::swap(first, second);
+    }
+    switch (kind) {
+    case SymbolKind::Predicate:
+    case SymbolKind::Function:
+      if (!std::holds_alternative<const parser::PredDecl *>(
+              symbol->declaration)) {
+        continue;
+      }
+      if (owner && symbol->owner == owner) {
+        return true; // a type class defined twice, which is reported
+      }
+      // mmc: "pred `m.p'/1 multiply defined".
+      messages_
+          .Say(second, "%s is declared more than once"_err_en_US, os.str())
+          .Attach(first, "it is first declared here"_because_en_US);
+      return true;
+    case SymbolKind::Type:
+      if (definition(declaration) && definition(symbol->declaration)) {
+        bool equivalence{std::holds_alternative<
+            const parser::EquivalenceTypeDefn *>(declaration)};
+        if (equivalence !=
+            std::holds_alternative<const parser::EquivalenceTypeDefn *>(
+                symbol->declaration)) {
+          // mmc: "this definition of `t'/0 is incompatible with the
+          // equivalence type definition", at the other.
+          parser::CharBlock union_{equivalence ? symbol->source : source};
+          parser::CharBlock other{equivalence ? source : symbol->source};
+          messages_
+              .Say(union_,
+                  "%s is defined both as a discriminated union type and as an equivalence type"_err_en_US,
+                  os.str())
+              .Attach(other, "the equivalence is defined here"_because_en_US);
+        } else {
+          // mmc: "duplicate discriminated union type definition".
+          messages_
+              .Say(second, "%s is defined more than once"_err_en_US, os.str())
+              .Attach(first, "it is first defined here"_because_en_US);
+        }
+        return true;
+      }
+      if (std::holds_alternative<const parser::AbstractTypeDecl *>(
+              declaration) &&
+          std::holds_alternative<const parser::AbstractTypeDecl *>(
+              symbol->declaration)) {
+        // mmc: "duplicate abstract type declaration".
+        messages_
+            .Say(second, "%s is declared abstractly more than once"_warn_en_US,
+                os.str())
+            .Attach(first, "it is first declared here"_because_en_US);
+        return true;
+      }
+      return false;
+    case SymbolKind::Inst:
+    case SymbolKind::Mode:
+      // mmc: "duplicate inst definition", "duplicate mode definition".
+      messages_.Say(second, "%s is defined more than once"_err_en_US, os.str())
+          .Attach(first, "it is first defined here"_because_en_US);
+      return true;
+    default:
+      return false;
+    }
+  }
+  return false;
 }
 
 ModuleSymbols &Resolver::Symbols(const ModuleInterface &module) {
@@ -287,14 +405,18 @@ void Resolver::DeclareWithTypes(
           "the type of %s must be a %s type"_err_en_US, decl.name->name.str(),
           decl.kind == parser::PredOrFunc::Function ? "func" : "pred");
     }
-    symbols.Add(decl.kind == parser::PredOrFunc::Function
+    SymbolKind kind{decl.kind == parser::PredOrFunc::Function
             ? SymbolKind::Function
-            : SymbolKind::Predicate,
-        decl.name->name, arity + added.value_or(0), &decl,
-        parser::CharBlock{
-            p.tokens->tokens[decl.name->tokens.first].spelling.begin(),
-            p.tokens->tokens[decl.name->tokens.last].spelling.end()},
-        p.exported, p.owner);
+            : SymbolKind::Predicate};
+    parser::CharBlock source{
+        p.tokens->tokens[decl.name->tokens.first].spelling.begin(),
+        p.tokens->tokens[decl.name->tokens.last].spelling.end()};
+    if (Duplicate(symbols, kind, decl.name->name, arity + added.value_or(0),
+            &decl, source, p.owner)) {
+      continue;
+    }
+    symbols.Add(kind, decl.name->name, arity + added.value_or(0), &decl,
+        source, p.exported, p.owner);
   }
   pending_ = std::move(rest);
 }
