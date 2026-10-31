@@ -817,7 +817,7 @@ TEST(ConvertTest, DataTerms) {
       "FactOrRule\n| kind: Predicate\n| name: SymName p\n"
       "| body: Unification\n| | left: Variable X\n"
       "| | right: Lambda\n| | | purity: Impure\n| | | kind: Predicate\n"
-      "| | | dcgModes:\n"
+      "| | | any: false\n| | | dcgModes:\n"
       "| | | | NamedMode\n| | | | | name: SymName in\n"
       "| | | | NamedMode\n| | | | | name: SymName out\n"
       "| | | determinism: Det\n"
@@ -827,11 +827,20 @@ TEST(ConvertTest, DataTerms) {
       "FactOrRule\n| kind: Predicate\n| name: SymName p\n"
       "| body: Unification\n| | left: Variable X\n"
       "| | right: Lambda\n| | | purity: Pure\n| | | kind: Function\n"
+      "| | | any: false\n"
       "| | | arguments:\n| | | | ModedTerm\n| | | | | term: Variable A\n"
       "| | | result: ModedTerm\n| | | | term: Variable B\n"
       "| | | determinism: Det\n"
       "| | | body: Unification\n| | | | left: Variable B\n"
       "| | | | right: Variable A\n");
+  // any_pred and any_func lambdas, for solver types (reference manual,
+  // "Solver types and negated contexts").
+  EXPECT_NE(Compact("p :- X = (any_pred(A::ia) is semidet :- q(A)).\n")
+                .find("| | | kind: Predicate\n| | | any: true\n"),
+      std::string::npos);
+  EXPECT_NE(Compact("p :- X = (any_func(A) = B :- B = A).\n")
+                .find("| | | kind: Function\n| | | any: true\n"),
+      std::string::npos);
 }
 
 TEST(ConvertTest, DcgLambdas) {

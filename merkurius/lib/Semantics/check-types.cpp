@@ -232,7 +232,6 @@ private:
   // its type variables 0 to n-1; null for another type, or a subtype whose
   // supertype is not a discriminated union type.
   const Type *SupertypeOf(const Symbol &);
-  llvm::DenseMap<const Symbol *, const Type *> supertypes_;
   // The variables of a supertype's constructor's types from `first` are
   // its existential variables, which map one to one to those of the
   // subtype's from `subFirst`.
@@ -1794,10 +1793,10 @@ void TypeChecker::CheckInstances() {
 }
 
 const Type *TypeChecker::SupertypeOf(const Symbol &symbol) {
-  if (auto it{supertypes_.find(&symbol)}; it != supertypes_.end()) {
+  if (auto it{result_.supertypes_.find(&symbol)}; it != result_.supertypes_.end()) {
     return it->second;
   }
-  supertypes_[&symbol] = nullptr;
+  result_.supertypes_[&symbol] = nullptr;
   const auto *defn{
       std::get_if<const parser::DuTypeDefn *>(&symbol.declaration)};
   if (!defn || !(*defn)->supertype) {
@@ -1826,7 +1825,7 @@ const Type *TypeChecker::SupertypeOf(const Symbol &symbol) {
         symbol.name.str(), symbol.arity);
     return nullptr;
   }
-  supertypes_[&symbol] = super;
+  result_.supertypes_[&symbol] = super;
   return super;
 }
 

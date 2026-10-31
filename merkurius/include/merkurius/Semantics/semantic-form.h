@@ -132,6 +132,7 @@ struct Unify {
 struct Lambda {
   TokenRange tokens;
   parser::PredOrFunc kind;
+  bool any; // any_pred or any_func
   parser::Purity purity;
   llvm::ArrayRef<VarId> arguments;
   llvm::ArrayRef<std::optional<parser::Mode>> modes;

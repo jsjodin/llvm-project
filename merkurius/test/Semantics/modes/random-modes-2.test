@@ -1,6 +1,4 @@
-# As random-modes-1.test, with another seed. One of its modules unifies a
-# partial term with a bound one, where mmc reports an error in its own
-# unification procedure (GitHub issue 74), which the comparison ignores.
+# As random-modes-1.test, with another seed.
 #
 # REQUIRES: mmc
 # RUN: rm -rf %t && mkdir %t

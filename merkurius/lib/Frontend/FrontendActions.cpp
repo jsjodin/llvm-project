@@ -549,6 +549,25 @@ bool DebugDumpModesAction::executeAction() {
           [&](parser::CharBlock at) { return Position(sources, at); });
     }
   }
+  // Instance methods: method m.c(T) pred m.p/1 mode 0, and their clauses.
+  for (const semantics::MethodModes &method : modes->methods()) {
+    *os << "method " << method.method->instanceText << ' '
+        << *method.procedure->symbol << " mode " << method.procedure->number
+        << '\n';
+    if (method.error) {
+      *os << "  mode error\n";
+    } else if (method.unchecked != semantics::Unchecked::None) {
+      *os << "  not checked: " << semantics::EnumToString(method.unchecked)
+          << '\n';
+    }
+    for (const semantics::ClauseModes &clause : method.clauses) {
+      *os << "  clause at "
+          << Position(sources, Source(r.tokens, clause.clause->clause->tokens))
+          << '\n';
+      semantics::DumpClauseModes(*os, clause, r.tokens,
+          [&](parser::CharBlock at) { return Position(sources, at); });
+    }
+  }
   os->flush();
   return !r.messages.AnyFatalError();
 }

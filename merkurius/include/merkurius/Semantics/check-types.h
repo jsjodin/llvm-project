@@ -105,6 +105,13 @@ public:
     auto it{signatures_.find(&symbol)};
     return it == signatures_.end() || !it->second ? nullptr : &*it->second;
   }
+  // The supertype of a subtype, its type variables the subtype's
+  // parameters; null for a base type, or one the type checker did not
+  // need.
+  const Type *SupertypeOf(const Symbol &symbol) const {
+    auto it{supertypes_.find(&symbol)};
+    return it == supertypes_.end() ? nullptr : it->second;
+  }
   // Prints a type of the clause, its type variables by their names.
   std::string Print(const ClauseTypes &, const Type &) const;
   std::string Print(const ClauseTypes &, const ClassConstraint &) const;
@@ -118,6 +125,7 @@ private:
   Symbol error_{SymbolKind::Type, "", "<error>", 0, std::monostate{}, {},
       false};
   llvm::DenseMap<const Symbol *, std::optional<Signature>> signatures_;
+  llvm::DenseMap<const Symbol *, const Type *> supertypes_;
   std::vector<ClauseTypes> clauses_;
   std::deque<MethodDefinition> methods_;
 };

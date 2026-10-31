@@ -182,6 +182,17 @@ public:
       const Type *type, std::vector<ConstructorTypes> &) = 0;
 };
 
+// Where coerce cannot convert a term: the functors and argument numbers
+// from the term down to the subterm, the subterm's types and inst, and
+// the functor of it that its new type lacks, if that is why.
+struct CoerceFailure {
+  std::vector<std::pair<InstFunctor, unsigned>> path;
+  const Type *from{nullptr};
+  const Type *to{nullptr};
+  const Inst *inst{nullptr};
+  std::optional<InstFunctor> functor;
+};
+
 // The operations of mode analysis on the insts of variables of one type
 // each. Recursive insts are compared coinductively, and a recursive result
 // is a Defined inst without a symbol.
@@ -227,9 +238,17 @@ public:
   // constraint, a Constrained inst's ι.
   const Inst *Plain(const Inst *);
 
-  // Whether an inst is ground, or contains free.
+  // The inst of coerce(X), of type `to`, for X of type `from` with inst
+  // `inst` (reference manual, "Type conversions"), or null, with where
+  // it fails in `failure`. `subtype` is the type checker's relation.
+  const Inst *Coerce(const Inst *inst, const Type *from, const Type *to,
+      llvm::function_ref<bool(const Type *, const Type *)> subtype,
+      CoerceFailure &failure);
+
+  // Whether an inst is ground, or contains free, or any.
   bool IsGround(const Inst *, const Type *type);
   bool HasFree(const Inst *, const Type *type);
+  bool HasAny(const Inst *, const Type *type);
   bool IsFree(const Inst *);
   bool IsNotReached(const Inst *);
   // The insts of a functor's arguments in a value with inst `inst`; none
@@ -238,6 +257,8 @@ public:
       const Inst *, const InstFunctor &, const Type *type);
 
 private:
+  // Whether an inst has a part of the given kind.
+  bool Contains(const Inst *, const Type *, InstKind);
   // A type's constructors, cached; null if it has no known set.
   const std::vector<ConstructorTypes> *ConstructorsOf(const Type *);
   // The types of a functor's arguments for `type`, or null types if it is
