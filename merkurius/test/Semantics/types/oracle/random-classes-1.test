@@ -1,0 +1,10 @@
+# Random modules as in random-1.test, with type classes: show, loud <=
+# show and conv(A, B), with instances, constraints on the hidden
+# signatures, declared or inferred, and method calls on types that satisfy
+# them (generate-random-programs.py --classes). merkc's constraint checking
+# and inference agree with mmc's.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../../utils/type-oracle/generate-random-programs.py --classes --seed 1 --count 60 %t
+# RUN: %compare-types --allow-errors %t/*.m

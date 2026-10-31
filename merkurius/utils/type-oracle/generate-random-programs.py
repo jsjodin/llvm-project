@@ -11,6 +11,13 @@ their hidden signatures, and the others' types are inferred, which may be
 more general. A module may have one mutation, an integer replaced by a
 string, which makes it ill-typed, or not.
 
+With --classes, each module also has type classes, show, loud <= show and
+conv(A, B), with instances, and each hidden signature constrains some of
+its type variables by show or loud, as the declared ones declare. Terms
+call the methods on types that satisfy them, the predicate's constrained
+type variables among them, and calls and closures bind a predicate's type
+variables to types that satisfy its constraints.
+
 The modules are a function of the seed: python3 generate-random-programs.py
 --seed 1 --count 20 DIR writes DIR/random_1_0.m ... DIR/random_1_19.m.
 """
@@ -26,14 +33,56 @@ import random
 GROUND = [("int",), ("string",), ("char",), ("float",), ("colour",)]
 
 
+# The instances: those of show and loud for each type, and conv's.
+CLASS_LINES = [
+    ":- typeclass show(T) where [ func show(T) = string ].",
+    ":- typeclass loud(T) <= show(T) where [ func loud(T) = string ].",
+    ":- typeclass conv(A, B) where [ func conv(A) = B ].",
+    ":- instance show(int) where [ show(X) = string.int_to_string(X) ].",
+    ":- instance show(string) where [ show(X) = X ].",
+    ":- instance show(list(T)) <= show(T) where [ show(_) = \"[...]\" ].",
+    ":- instance show(maybe(T)) <= show(T) where [ show(_) = \"maybe\" ].",
+    ":- instance loud(int) where [ loud(X) = show(X) ++ \"!\" ].",
+    ":- instance loud(list(T)) <= loud(T) where [ loud(_) = \"[...]!\" ].",
+    ":- instance conv(int, string) where [ conv(X) = string.int_to_string(X) ].",
+    ":- instance conv(string, int) where [ conv(X) = string.length(X) ].",
+]
+CLASS_ARGUMENTS = [("int",), ("string",), ("list", ("int",)), ("maybe", ("string",)),
+                   ("list", ("list", ("int",))), ("maybe", ("list", ("int",)))]
+
+
 class Module:
-    def __init__(self, rng, name, mutate):
+    def __init__(self, rng, name, mutate, classes=False):
         self.rng = rng
         self.name = name
         self.preds = []
         self.literals = 0
         self.mutate_at = None
         self.mutate = mutate
+        self.classes = classes
+
+    def satisfies(self, t, cls, needs):
+        """Whether the instances, and `needs`, the classes that a
+        predicate's type variables are constrained by, give cls(t)."""
+        k = t[0]
+        if k == "var":
+            have = needs.get(t[1], set())
+            return cls in have or (cls == "show" and "loud" in have)
+        if k == "int":
+            return True
+        if k == "string":
+            return cls == "show"
+        if k == "list":
+            return self.satisfies(t[1], cls, needs)
+        if k == "maybe":
+            return cls == "show" and self.satisfies(t[1], cls, needs)
+        return False
+
+    def binds_needs(self, pred, binding, needs):
+        """Whether the binding of pred's type variables satisfies its
+        constraints, in a clause whose type variables have `needs`."""
+        return all(v not in binding or self.satisfies(binding[v], cls, needs)
+                   for v, classes in pred["needs"].items() for cls in classes)
 
     # Types.
 
@@ -113,10 +162,12 @@ class Module:
 
     def instantiate(self, pred, binding, env):
         """The predicate's signature with each variable not yet bound bound
-        to a random type."""
+        to a random type, one that satisfies its constraints."""
         for v in pred["vars"]:
             if v not in binding:
-                binding[v] = self.rng.choice(GROUND + [("list", ("int",))])
+                choices = [t for t in GROUND + [("list", ("int",))]
+                           if all(self.satisfies(t, cls, {}) for cls in pred["needs"].get(v, ()))]
+                binding[v] = self.rng.choice(choices)
         return [self.substitute(a, binding) for a in pred["args"]]
 
     # Terms of a type, in a clause whose variables have the types in env.
@@ -148,8 +199,20 @@ class Module:
             options += [self.literal_int, lambda: "(%s + %s)" % (self.term(clause, t, depth - 1), self.term(clause, t, depth - 1))]
             options += [lambda: "list.length(%s)" % self.term(clause, ("list", rng.choice(GROUND)), depth - 1)]
             options += [lambda: "string.length(%s)" % self.term(clause, ("string",), depth - 1)]
+            if self.classes:
+                options += [lambda: "conv(%s)" % self.class_argument(clause, ("string",), depth - 1)]
         elif k == "string":
             options += [lambda: '"%s"' % rng.choice("abc"), lambda: "(%s ++ %s)" % (self.term(clause, t, depth - 1), self.term(clause, t, depth - 1))]
+            if self.classes:
+                for cls in ("show", "loud"):
+                    arguments = [a for a in CLASS_ARGUMENTS if self.satisfies(a, cls, {})]
+                    # The clause's constrained type variables, with a
+                    # variable of the type to apply the method to.
+                    arguments += [vt for vt in set(env.values())
+                                  if vt[0] == "var" and self.satisfies(vt, cls, clause["needs"])]
+                    options += [lambda cls=cls, arguments=arguments: "%s(%s)" % (
+                        cls, self.class_argument(clause, rng.choice(arguments), depth - 1))]
+                options += [lambda: "conv(%s)" % self.class_argument(clause, ("int",), depth - 1)]
         elif k == "char":
             options += [lambda: "'%s'" % rng.choice("xyz")]
         elif k == "float":
@@ -179,13 +242,15 @@ class Module:
         # and closures of its predicates and functions.
         for pred in self.preds:
             binding = {}
-            if pred["kind"] == "func" and self.match(pred["result"], t, binding):
+            if pred["kind"] == "func" and self.match(pred["result"], t, binding) and \
+                    self.binds_needs(pred, binding, clause["needs"]):
                 options.append(lambda pred=pred, binding=binding: self.call_text(clause, pred, dict(binding), depth))
             if k in ("func", "pred") and pred["kind"] == k:
                 arity = len(pred["args"]) - (1 if k == "func" else 0)
                 binding = {}
                 closure = ("func", tuple(pred["args"][:-1]), pred["args"][-1]) if k == "func" else ("pred", tuple(pred["args"]))
-                if arity == len(t[1]) and self.match(closure, t, binding):
+                if arity == len(t[1]) and self.match(closure, t, binding) and \
+                        self.binds_needs(pred, binding, clause["needs"]):
                     options.append(lambda pred=pred: pred["name"])
         if depth <= 0:
             # A leaf, or terms of the type's parts, which are smaller.
@@ -202,6 +267,14 @@ class Module:
                 return rng.choice(options)()
             return options[0]()
         return rng.choice(options)()
+
+    def class_argument(self, clause, t, depth):
+        """A method's argument: a term of a ground type is qualified with
+        it, since a term such as [] has more types, and the constraint would
+        be on one that nothing determines."""
+        if t[0] == "var":
+            return self.term(clause, t, depth)
+        return "(%s : %s)" % (self.term(clause, t, depth), self.type_text(t))
 
     def call_text(self, clause, pred, binding, depth):
         types = self.instantiate(pred, binding, clause["env"])
@@ -290,7 +363,15 @@ class Module:
 
             for a in args:
                 collect(a)
+            needs = {}
+            for v in sorted(used):
+                roll = rng.random() if self.classes else 1
+                if roll < 0.3:
+                    needs[v] = {"show"}
+                elif roll < 0.45:
+                    needs[v] = {"loud"}
             self.preds.append({
+                "needs": needs,
                 "name": "%s%d" % (kind[0], i),
                 "kind": kind,
                 "vars": sorted(used),
@@ -301,7 +382,7 @@ class Module:
 
     def clause_text(self, pred):
         rng = self.rng
-        clause = {"env": {}, "count": 0}
+        clause = {"env": {}, "count": 0, "needs": pred["needs"]}
         heads = []
         for j, t in enumerate(pred["args"]):
             name = "H%d" % (j + 1)
@@ -328,15 +409,20 @@ class Module:
             ":- import_module float, int, list, maybe, pair, string.",
             ":- type colour ---> red ; green ; blue.",
             ":- type tree(T) ---> leaf ; node(tree(T), T, tree(T)).",
-            "main(0).",
         ]
+        if self.classes:
+            lines += CLASS_LINES
+        lines.append("main(0).")
         for pred in self.preds:
             if pred["declared"]:
                 args = [self.type_text(a) for a in pred["args"]]
+                constraints = ["%s(%s)" % (cls, v) for v, classes in sorted(pred["needs"].items())
+                               for cls in sorted(classes)]
+                where = " <= (%s)" % ", ".join(constraints) if constraints else ""
                 if pred["kind"] == "func":
-                    lines.append(":- func %s%s = %s." % (pred["name"], "(%s)" % ", ".join(args[:-1]) if args[:-1] else "", args[-1]))
+                    lines.append(":- func %s%s = %s%s." % (pred["name"], "(%s)" % ", ".join(args[:-1]) if args[:-1] else "", args[-1], where))
                 else:
-                    lines.append(":- pred %s(%s)." % (pred["name"], ", ".join(args)))
+                    lines.append(":- pred %s(%s)%s." % (pred["name"], ", ".join(args), where))
             for _ in range(self.rng.randint(1, 2)):
                 lines.append(self.clause_text(pred))
         return "\n".join(lines) + "\n"
@@ -346,13 +432,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--count", type=int, default=20)
+    parser.add_argument("--classes", action="store_true", help="with type classes")
     parser.add_argument("directory")
     args = parser.parse_args()
     os.makedirs(args.directory, exist_ok=True)
     for i in range(args.count):
         rng = random.Random("%d/%d" % (args.seed, i))
         name = "random_%d_%d" % (args.seed, i)
-        module = Module(rng, name, mutate=rng.random() < 0.25)
+        module = Module(rng, name, mutate=rng.random() < 0.25, classes=args.classes)
         with open(os.path.join(args.directory, name + ".m"), "w") as f:
             f.write(module.text())
 
