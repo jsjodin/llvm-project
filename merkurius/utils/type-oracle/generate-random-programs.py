@@ -27,6 +27,11 @@ two calls' types in one list, which is a type error. With
 constructor, built with 'new shown'(...) and taken apart by a function,
 and rarely built without new, which is a type error.
 
+With --coerce, there is a subtype citrus =< fruit, and terms coerce
+citrus values and lists to fruit ones, and rarely coerce a constructor
+that both types have, which is ambiguous, or an int, which is not a
+discriminated union type.
+
 The modules are a function of the seed: python3 generate-random-programs.py
 --seed 1 --count 20 DIR writes DIR/random_1_0.m ... DIR/random_1_19.m.
 """
@@ -69,6 +74,20 @@ CONSTRUCTOR_LINES = [
     ":- func shown_length(shown) = int.",
     "shown_length(S) = string.length(shown_text(S)).",
 ]
+COERCE_LINES = [
+    ":- type fruit ---> apple ; lemon ; orange.",
+    ":- type citrus =< fruit ---> lemon ; orange.",
+    ":- func citrus_of(int) = citrus.",
+    "citrus_of(N) = (if N > 0 then lemon else orange).",
+    ":- func citrus_list(int) = list(citrus).",
+    "citrus_list(N) = [citrus_of(N)].",
+    ":- func fruit_name(fruit) = string.",
+    "fruit_name(apple) = \"apple\".",
+    "fruit_name(lemon) = \"lemon\".",
+    "fruit_name(orange) = \"orange\".",
+    ":- func fruit_count(list(fruit)) = int.",
+    "fruit_count(L) = list.length(L).",
+]
 DEPENDENCY_LINES = [
     ":- typeclass measure(A, B) <= (A -> B) where [ func measure(A) = B ].",
     ":- instance measure(int, string) where [ measure(X) = string.int_to_string(X) ].",
@@ -80,7 +99,7 @@ CLASS_ARGUMENTS = [("int",), ("string",), ("list", ("int",)), ("maybe", ("string
 
 class Module:
     def __init__(self, rng, name, mutate, classes=False, dependencies=False,
-                 existentials=False, constructors=False):
+                 existentials=False, constructors=False, coerce=False):
         self.rng = rng
         self.name = name
         self.preds = []
@@ -91,6 +110,7 @@ class Module:
         self.dependencies = dependencies
         self.existentials = existentials or constructors
         self.constructors = constructors
+        self.coerce = coerce
 
     def satisfies(self, t, cls, needs):
         """Whether the instances, and `needs`, the classes that a
@@ -234,6 +254,8 @@ class Module:
                 options += [lambda: "conv(%s)" % self.class_argument(clause, ("string",), depth - 1)]
             if self.constructors:
                 options += [lambda: "shown_length('new shown'(%s))" % self.term(clause, ("string",), depth - 1)]
+            if self.coerce:
+                options += [lambda: "fruit_count(coerce(citrus_list(%s)))" % self.term(clause, t, depth - 1)]
             if self.existentials:
                 options += [lambda: "list.length([opaque(%s)])" % self.term(clause, t, depth - 1),
                             lambda: "list.length(opaque_list(%s))" % self.term(clause, ("string",), depth - 1)]
@@ -254,6 +276,12 @@ class Module:
                 options += [lambda: "conv(%s)" % self.class_argument(clause, ("int",), depth - 1)]
             if self.dependencies:
                 options += [lambda: "measure(%s)" % self.class_argument(clause, ("int",), depth - 1)]
+            if self.coerce:
+                options += [lambda: "fruit_name(coerce(citrus_of(%s)))" % self.term(clause, ("int",), depth - 1)]
+                if rng.random() < 0.05:
+                    options += [lambda: "fruit_name(coerce(lemon))"]
+                if rng.random() < 0.05:
+                    options += [lambda: "fruit_name(coerce(%s))" % self.term(clause, ("int",), depth - 1)]
             if self.constructors:
                 arguments = [a for a in CLASS_ARGUMENTS if self.satisfies(a, "show", {})]
                 options += [lambda: "shown_text('new shown'(%s))" % self.class_argument(
@@ -470,6 +498,8 @@ class Module:
             lines += EXISTENTIAL_LINES
         if self.constructors:
             lines += CONSTRUCTOR_LINES
+        if self.coerce:
+            lines += COERCE_LINES
         lines.append("main(0).")
         for pred in self.preds:
             if pred["declared"]:
@@ -495,6 +525,8 @@ def main():
                         help="with --existentials and an existentially typed constructor")
     parser.add_argument("--existentials", action="store_true",
                         help="with type classes and existentially typed functions")
+    parser.add_argument("--coerce", action="store_true",
+                        help="with a subtype, and coerce expressions")
     parser.add_argument("--dependencies", action="store_true",
                         help="with type classes and a functional dependency")
     parser.add_argument("directory")
@@ -506,7 +538,8 @@ def main():
         module = Module(rng, name, mutate=rng.random() < 0.25, classes=args.classes,
                         dependencies=args.dependencies,
                         existentials=args.existentials,
-                        constructors=args.existential_constructors)
+                        constructors=args.existential_constructors,
+                        coerce=args.coerce)
         with open(os.path.join(args.directory, name + ".m"), "w") as f:
             f.write(module.text())
 
