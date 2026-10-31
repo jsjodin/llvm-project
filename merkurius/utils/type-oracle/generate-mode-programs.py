@@ -10,16 +10,21 @@ generated in an order in which each goal's inputs are bound and then
 shuffled, so that mode analysis has to schedule them. An argument of a
 predicate's first mode may be in(I), with an inst variable, and an
 output of the same type out(I), which the clause binds to such an input,
-directly or through pid(T::in(I), T::out(I)). A predicate has one to
-three clauses. Every predicate and lambda expression is declared
+directly or through pid(T::in(I), T::out(I)). A value of u may come
+from coerce of one of its subtype su, and a new list may be passed to
+dl(list(int)::di), which clobbers it, in a scope of its own, so that no
+choice point comes between them: the list would be live on backtracking
+into it, an error of mmc's unique-mode pass, pass 6 here. A predicate
+has one to three clauses. Every predicate and lambda expression is declared
 `nondet`, so that determinism analysis, which mmc runs with mode
 analysis, reports nothing. A few clauses get a mutation that may make
 them mode-incorrect: an output left unbound, two free variables unified,
 a variable bound in one branch only, one bound only in a negation, a
 lambda expression's nonlocal or output left unbound, a higher-order
 call's input left unbound, an out(I) output bound to a value without
-the inst variable, in some branches or all, or a higher-order term of
-pid with its input curried, which mmc rejects. compare-types.py
+the inst variable, in some branches or all, a higher-order term of pid
+with its input curried, which mmc rejects, a list clobbered by dl and
+used after, or a ground u coerced to su. compare-types.py
 --modes --error-lines then checks that merkc and mmc report mode errors
 on the same lines. The constructors of t have names of two letters, since
 a one-letter constant could also be a character.
@@ -290,6 +295,18 @@ class Clause:
                 self.compound()
             elif r < 0.8:
                 self.closure()
+            elif r < 0.85:
+                # A new list, unique, clobbered by dl, and not used after.
+                x = self.fresh("list(int)")
+                self.goals.append("some [%s] (%s = [%d], dl(%s))" % (x, x, rng.randint(0, 9), x))
+            elif r < 0.9:
+                # A value of su, coerced to u and used. It is shared:
+                # mmc's coerce of a unique one in a nondet clause is a
+                # mostly_unique error, which is for pass 6.
+                sub, value = self.fresh("su"), self.fresh("u")
+                self.goals.append("mksu(%s)" % sub)
+                self.goals.append("%s = (coerce(%s) : u)" % (value, sub))
+                self.goals.append("useu(%s)" % value)
             else:
                 self.make_bound(rng.choice(TYPES))
         mutation = None
@@ -311,7 +328,7 @@ class Clause:
         if not mutation and rng.random() < 0.3 and self.goals:
             kind = rng.choice(["drop", "free", "branch", "negation",
                                "nonlocal", "lambda output", "closure input",
-                               "curried"])
+                               "curried", "clobbered", "coerce"])
             outputs = [g for g in self.goals if isinstance(g, str) and g.startswith("H")]
             compounds = [g for g in self.goals if isinstance(g, Compound)]
             if kind == "drop" and outputs:
@@ -348,6 +365,18 @@ class Clause:
                 self.goals.append("%s(%s)" % (p, y))
                 self.goals.append("use(%s)" % y)
                 mutation = "a higher-order term of pid with its input curried"
+            elif kind == "clobbered":
+                x = self.fresh("list(int)")
+                self.goals.append("%s = [%d]" % (x, rng.randint(0, 9)))
+                self.goals.append("dl(%s)" % x)
+                self.goals.append("usel(%s)" % x)
+                mutation = "a list clobbered and used after"
+            elif kind == "coerce":
+                value, sub = self.fresh("u"), self.fresh("su")
+                self.goals.append("mku(%s)" % value)
+                self.goals.append("%s = (coerce(%s) : su)" % (sub, value))
+                self.goals.append("usesu(%s)" % sub)
+                mutation = "a ground u coerced to su"
             elif kind == "closure input":
                 p, x = self.fresh("closure"), self.fresh("int")
                 self.goals.append("%s = (pred(%s::in) is nondet :- %s = %d)" % (p, x, x, rng.randint(0, 9)))
@@ -372,10 +401,24 @@ def module(rng, name):
         ":- interface.",
         ":- import_module list.",
         ":- type t ---> ta ; tb(int) ; tc(int, t).",
+        ":- type u ---> ua ; ub(int) ; uc.",
+        ":- type su =< u ---> ua ; ub(int).",
         ":- pred use(int::in) is det.",
         ":- implementation.",
         ":- import_module int.",
         "use(_).",
+        ":- pred dl(list(int)::di) is det.",
+        "dl(_).",
+        ":- pred usel(list(int)::in) is det.",
+        "usel(_).",
+        ":- pred useu(u::in) is det.",
+        "useu(_).",
+        ":- pred usesu(su::in) is det.",
+        "usesu(_).",
+        ":- pred mksu(su::out) is det.",
+        "mksu(ua).",
+        ":- pred mku(u::out) is det.",
+        "mku(uc).",
         ":- pred pid(T::in(I), T::out(I)) is det.",
         "pid(X, X).",
     ]

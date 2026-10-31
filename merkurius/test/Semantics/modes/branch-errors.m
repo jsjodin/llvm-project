@@ -7,8 +7,9 @@
 % an error inside a branch; a negation or a condition that binds a
 % variable used outside it; clauses, which are the branches of a
 % disjunction, whose head unifications are reported only if no other goal
-% waits; and a negation that cannot succeed, which wakes every waiting
-% goal, in the order of their variables.
+% waits; a negation that cannot succeed, which wakes every waiting goal,
+% in the order of their variables; and several variables with no merge,
+% each of which mmc reports, as are several arguments of clauses.
 %
 % RUN: not merkc -fc1 -fdebug-dump-modes %s 2>&1 >/dev/null | FileCheck --implicit-check-not=error: --implicit-check-not=because: --implicit-check-not=warning: %s
 % RUN: %if mmc %{ %compare-types --modes --error-lines %s %}
@@ -31,6 +32,8 @@
 :- pred unused_partial(list(int)::in) is multi.
 :- pred one_of_three(int::out) is multi.
 :- pred sorted is semidet.
+:- pred two_vars(int::out, int::out) is multi.
+:- pred two_args(int::out, int::out) is multi.
 
 :- implementation.
 
@@ -128,7 +131,7 @@ unused_partial(L) :-
     else
         V = L
 % CHECK: [[@LINE-1]]:9: error: in the clause for unused_partial(in): mode mismatch in the if-then-else: V is ground in some branches but not others
-% CHECK: [[@LINE-4]]:9: because: in this branch, V has inst bound('[|]'(free, free))
+% CHECK: [[@LINE-4]]:9: because: in this branch, V has inst unique('[|]'(free, free))
 % CHECK: [[@LINE-3]]:9: because: in this branch, V has inst bound('[|]'(ground, ground))
     ).
 one_of_three(X) :-
@@ -152,3 +155,26 @@ sorted :-
     not (V = 4),
 % CHECK: [[@LINE-1]]:14: warning: the unification of V and 4 cannot succeed: V has inst unique(3)
     use(B).
+
+two_vars(X, Y) :-
+    (
+        X = 1,
+        Y = 1
+    ;
+        true
+% CHECK: [[@LINE-1]]:9: error: in the clause for two_vars(out, out): mode mismatch in the disjunction: X is ground in some branches but not others
+% CHECK: [[@LINE-5]]:9: because: in this branch, X has inst unique(1)
+% CHECK: [[@LINE-3]]:9: because: in this branch, X has inst free
+% CHECK: [[@LINE-4]]:9: because: and Y is ground in some branches but not others
+% CHECK: [[@LINE-8]]:9: because: in this branch, Y has inst unique(1)
+% CHECK: [[@LINE-6]]:9: because: in this branch, Y has inst free
+    ).
+
+two_args(1, 1).
+two_args(_, _).
+% CHECK: [[@LINE-1]]:13: error: in the clause for two_args(out, out): mode mismatch in the disjunction: HeadVar__1 is ground in some branches but not others
+% CHECK: [[@LINE-3]]:1: because: in this branch, HeadVar__1 has inst unique(1)
+% CHECK: [[@LINE-3]]:1: because: in this branch, HeadVar__1 has inst free
+% CHECK: [[@LINE-4]]:13: because: and HeadVar__2 is ground in some branches but not others
+% CHECK: [[@LINE-6]]:1: because: in this branch, HeadVar__2 has inst unique(1)
+% CHECK: [[@LINE-6]]:1: because: in this branch, HeadVar__2 has inst free

@@ -200,6 +200,7 @@ void SayMissingElse(const Term &t, ConvertState &state) {
 struct LambdaParts {
   Purity purity{Purity::Pure};
   PredOrFunc kind{PredOrFunc::Predicate};
+  bool any{false}; // any_pred or any_func
   llvm::ArrayRef<const Term *> arguments;
   const Term *result{nullptr};
   const Term *determinism{nullptr};
@@ -242,6 +243,9 @@ std::optional<LambdaParts> MatchLambda(const Term &term) {
     t = &StripParentheses(Operand(*equals, 0));
   }
   llvm::StringRef name{FunctorName(*t)};
+  if (name.consume_front("any_")) {
+    parts.any = true;
+  }
   if (name == "func") {
     parts.kind = PredOrFunc::Function;
   } else if (name != "pred") {
@@ -301,7 +305,7 @@ std::optional<DataTerm> ConvertLambda(
     return std::nullopt;
   }
   return state.arena.Make<Lambda>(t.tokens(), parts.purity, parts.kind,
-      *arguments, result, det, body, dcgBody, *dcgModes);
+      parts.any, *arguments, result, det, body, dcgBody, *dcgModes);
 }
 
 } // namespace

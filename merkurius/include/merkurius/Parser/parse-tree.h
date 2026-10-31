@@ -810,12 +810,14 @@ struct ModedTerm {
 };
 
 // pred(X::in, Y::out) is det :- Goal, the --> form with a DCG goal, and
-// func(X) = Y :- Goal; semipure or impure.
+// func(X) = Y :- Goal; semipure or impure. any_pred and any_func make a
+// closure of inst any, whose nonlocals may be any.
 struct Lambda {
   static constexpr llvm::StringLiteral kindName{"Lambda"};
   TokenRange tokens;
   Purity purity;
   PredOrFunc kind;
+  bool any;
   llvm::ArrayRef<const ModedTerm *> arguments;
   const ModedTerm *result; // for a function
   std::optional<Determinism> determinism;
@@ -827,6 +829,7 @@ struct Lambda {
   template <typename F> void ForEachField(F &&f) const {
     f("purity", purity);
     f("kind", kind);
+    f("any", any);
     f("arguments", arguments);
     f("dcgModes", dcgModes);
     f("result", result);

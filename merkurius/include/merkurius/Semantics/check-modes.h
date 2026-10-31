@@ -97,8 +97,17 @@ struct ClauseModes {
 // Why a procedure's clauses were not checked: they use what mode analysis
 // does not check yet, or their predicate has errors of other kinds.
 ENUM_CLASS(Unchecked, None, TypeErrors, ModeSpecificClauses,
-    ParallelConjunction, FieldClosure, Coerce, Scope, Try, Atomic,
+    ParallelConjunction, FieldClosure, Scope, Try, Atomic,
     InstParameters, InferredModes, InferredDeterminism)
+
+// An instance method's clauses, as checked in one of the method's modes.
+struct MethodModes {
+  const MethodDefinition *method{nullptr};
+  const Procedure *procedure{nullptr};
+  bool error{false};
+  Unchecked unchecked{Unchecked::None};
+  std::vector<ClauseModes> clauses;
+};
 
 class ModeChecking {
 public:
@@ -126,6 +135,8 @@ public:
   bool HasError(const Procedure &procedure) const {
     return errors_.count(&procedure);
   }
+  // The module's instance methods, by instance and method, in each mode.
+  const std::deque<MethodModes> &methods() const { return methods_; }
 
 private:
   friend class ModeChecker;
@@ -140,6 +151,7 @@ private:
   llvm::DenseMap<const Procedure *, std::vector<ClauseModes>> clauses_;
   llvm::DenseMap<const Procedure *, Unchecked> unchecked_;
   llvm::DenseSet<const Procedure *> errors_;
+  std::deque<MethodModes> methods_;
   // The clauses of predicates with several, as checked: with head
   // unifications, as mmc checks them.
   std::deque<ClauseForm> forms_;
