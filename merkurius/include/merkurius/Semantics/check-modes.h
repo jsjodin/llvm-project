@@ -60,6 +60,8 @@ struct Procedure {
   // The inst parameters of the declaration, by number (reference manual,
   // "Constrained polymorphic modes").
   llvm::ArrayRef<const Inst *> parameters{};
+  // Whether its modes were inferred from a call (Overton, 3.4.2).
+  bool inferred{false};
 };
 
 // What a unification does, by the insts of its sides: X = f(...) with X
@@ -135,6 +137,10 @@ public:
   bool HasError(const Procedure &procedure) const {
     return errors_.count(&procedure);
   }
+  // The procedures inferred for calls of predicates without a `:- pred`
+  // declaration, in the order they were made, with those rejected for a
+  // mode error.
+  const std::deque<Procedure> &inferred() const { return inferred_; }
   // The module's instance methods, by instance and method, in each mode.
   const std::deque<MethodModes> &methods() const { return methods_; }
 
@@ -152,6 +158,10 @@ private:
   llvm::DenseMap<const Procedure *, Unchecked> unchecked_;
   llvm::DenseSet<const Procedure *> errors_;
   std::deque<MethodModes> methods_;
+  // The predicates without a `:- pred` declaration, whose modes are
+  // inferred from their calls, and the procedures inferred for them.
+  llvm::DenseSet<const Symbol *> inferable_;
+  std::deque<Procedure> inferred_;
   // The clauses of predicates with several, as checked: with head
   // unifications, as mmc checks them.
   std::deque<ClauseForm> forms_;

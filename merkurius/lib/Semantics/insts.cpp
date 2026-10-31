@@ -898,6 +898,32 @@ const Inst *InstOps::Coerce(const Inst *inst, const Type *from,
   return walk(inst, from, to);
 }
 
+const Inst *InstOps::Normalise(const Inst *inst, const Type *type) {
+  if (IsNotReached(inst) || !IsGround(inst, type) ||
+      Resolve(inst)->kind == InstKind::Constrained ||
+      Resolve(inst)->kind == InstKind::Parameter) {
+    return inst;
+  }
+  Uniqueness u{Uniqueness::Unique};
+  llvm::DenseSet<const Inst *> seen;
+  std::function<void(const Inst *)> walk{[&](const Inst *i) {
+    if (!seen.insert(i).second) {
+      return;
+    }
+    i = Resolve(Plain(i));
+    if (i->kind != InstKind::Free) {
+      u = std::max(u, i->uniqueness);
+    }
+    for (const BoundAlternative &alternative : i->functors) {
+      for (const Inst *argument : alternative.arguments) {
+        walk(argument);
+      }
+    }
+  }};
+  walk(inst);
+  return insts_.Ground(u);
+}
+
 bool InstOps::HasFree(const Inst *inst, const Type *type) {
   return Contains(inst, type, InstKind::Free);
 }

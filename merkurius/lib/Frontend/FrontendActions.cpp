@@ -507,13 +507,24 @@ bool DebugDumpModesAction::executeAction() {
     }
     *os << '\n';
   }
-  for (const semantics::Procedure &procedure : modes->procedures()) {
+  // The declared procedures, and then those inferred from calls:
+  // pred m.p/2 inferred mode 0: p(in, uo).
+  auto dump{[&](const semantics::Procedure &procedure) {
     *os << (procedure.source.empty() ? std::string{"(default)"}
                                      : Position(sources, procedure.source))
-        << ' ' << *procedure.symbol << " mode " << procedure.number << ": "
-        << procedure.symbol->name;
+        << ' ' << *procedure.symbol
+        << (procedure.inferred ? " inferred mode " : " mode ")
+        << procedure.number << ": " << procedure.symbol->name;
     bool function{procedure.symbol->kind == semantics::SymbolKind::Function};
     llvm::ArrayRef<semantics::ArgMode> arguments{procedure.modes};
+    // A rejected inferred mode's final insts are not known, as in mmc.
+    std::vector<semantics::ArgMode> rejected;
+    if (procedure.inferred && modes->HasError(procedure)) {
+      for (const semantics::ArgMode &mode : procedure.modes) {
+        rejected.push_back({mode.initial, modes->insts().NotReached()});
+      }
+      arguments = rejected;
+    }
     if (function && !arguments.empty()) {
       arguments = arguments.drop_back();
     }
@@ -548,6 +559,21 @@ bool DebugDumpModesAction::executeAction() {
       semantics::DumpClauseModes(*os, clause, r.tokens,
           [&](parser::CharBlock at) { return Position(sources, at); });
     }
+  }};
+  for (const semantics::Procedure &procedure : modes->procedures()) {
+    dump(procedure);
+  }
+  // By predicate, as in the source, and then in the order made.
+  std::vector<const semantics::Procedure *> inferred;
+  for (const semantics::Procedure &procedure : modes->inferred()) {
+    inferred.push_back(&procedure);
+  }
+  std::stable_sort(inferred.begin(), inferred.end(),
+      [](const semantics::Procedure *a, const semantics::Procedure *b) {
+        return a->symbol->source.begin() < b->symbol->source.begin();
+      });
+  for (const semantics::Procedure *procedure : inferred) {
+    dump(*procedure);
   }
   // Instance methods: method m.c(T) pred m.p/1 mode 0, and their clauses.
   for (const semantics::MethodModes &method : modes->methods()) {
