@@ -540,6 +540,19 @@ bool DebugDumpModesAction::executeAction() {
       semantics::PrintInst(*os, *parameter->constraint);
     }
     *os << '\n';
+    if (modes->HasError(procedure)) {
+      *os << "  mode error\n";
+    } else if (semantics::Unchecked why{modes->UncheckedReason(procedure)};
+               why != semantics::Unchecked::None) {
+      *os << "  not checked: " << semantics::EnumToString(why) << '\n';
+    }
+    for (const semantics::ClauseModes &clause : modes->ClausesOf(procedure)) {
+      *os << "  clause at "
+          << Position(sources, Source(r.tokens, clause.clause->clause->tokens))
+          << '\n';
+      semantics::DumpClauseModes(*os, clause, r.tokens,
+          [&](parser::CharBlock at) { return Position(sources, at); });
+    }
   }
   os->flush();
   return !r.messages.AnyFatalError();

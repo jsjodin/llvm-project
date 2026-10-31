@@ -324,8 +324,12 @@ def run_mmc(mmc, path, module, all_messages=False):
     if all_messages:
         # Every message but warnings and inferred declarations; a warning
         # may follow its context, as in "In predicate `p'/1: warning: ...".
+        # mmc's mode errors in its own unification procedures, for a
+        # partially instantiated term unified with a bound one, are an mmc
+        # bug (GitHub issue 74, see the register).
         return {line for line, text in messages if line and
                 not text.startswith(("Warning", "Inferred :- ")) and
+                not text.startswith("In clause for `'__Unify__'") and
                 not re.match(r"In .*?:\s+warning:", text)}
     errors, warnings, signatures = set(), set(), {}
     # "In clause for ...:" introduces the message after it.

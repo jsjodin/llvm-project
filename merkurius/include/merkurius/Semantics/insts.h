@@ -195,6 +195,10 @@ public:
   bool HasFree(const Inst *, const Type *type);
   bool IsFree(const Inst *);
   bool IsNotReached(const Inst *);
+  // The insts of a functor's arguments in a value with inst `inst`; none
+  // if the value cannot have that functor.
+  std::optional<std::vector<const Inst *>> Arguments(
+      const Inst *, const InstFunctor &, const Type *type);
 
 private:
   // A type's constructors, cached; null if it has no known set.
