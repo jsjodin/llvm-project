@@ -28,7 +28,8 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
               OPT_fdebug_unparse_parenthesized_no_sema,
               OPT_fdebug_dump_semantic_form, OPT_fdebug_dump_nonlocals,
               OPT_fdebug_dump_imports, OPT_fdebug_dump_resolved_names,
-              OPT_fdebug_dump_types, OPT_fdebug_dump_modes)) {
+              OPT_fdebug_dump_types, OPT_fdebug_dump_modes,
+              OPT_fdebug_dump_determinism)) {
     switch (arg->getOption().getID()) {
     case OPT_E:
       opts.programAction = ActionKind::PrintPreprocessedInput;
@@ -68,6 +69,9 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
       break;
     case OPT_fdebug_dump_modes:
       opts.programAction = ActionKind::DebugDumpModes;
+      break;
+    case OPT_fdebug_dump_determinism:
+      opts.programAction = ActionKind::DebugDumpDeterminism;
       break;
     case OPT_fdebug_dump_resolved_names:
       opts.programAction = ActionKind::DebugDumpResolvedNames;

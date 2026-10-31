@@ -261,12 +261,12 @@ public:
   // if the value cannot have that functor.
   std::optional<std::vector<const Inst *>> Arguments(
       const Inst *, const InstFunctor &, const Type *type);
+  // A type's constructors, cached; null if it has no known set.
+  const std::vector<ConstructorTypes> *ConstructorsOf(const Type *);
 
 private:
   // Whether an inst has a part of the given kind.
   bool Contains(const Inst *, const Type *, InstKind);
-  // A type's constructors, cached; null if it has no known set.
-  const std::vector<ConstructorTypes> *ConstructorsOf(const Type *);
   // The types of a functor's arguments for `type`, or null types if it is
   // not one of the type's.
   std::vector<const Type *> ArgumentTypes(const InstFunctor &, const Type *);

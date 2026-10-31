@@ -1,4 +1,5 @@
 add_merkurius_library(MerkuriusSemantics
+  check-determinism.cpp
   check-modes.cpp
   check-purity.cpp
   check-types.cpp

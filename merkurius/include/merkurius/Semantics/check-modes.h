@@ -85,6 +85,19 @@ struct GoalModes {
   // For a conjunction: its goals in execution order, those of the
   // conjunctions in it among them.
   llvm::ArrayRef<Goal> order{};
+  // For a construction, deconstruction or test of X = f(...): f.
+  InstFunctor functor{};
+  // Whether it is a head unification of a predicate with several clauses,
+  // HeadVar__N = X, which mmc's form does not have.
+  bool head{false};
+  // Whether it is a construction or an assignment of a variable that is
+  // not used after it, which mmc deletes; whether it is a unification that
+  // cannot succeed, which mmc replaces with fail.
+  bool dead{false};
+  bool fails{false};
+  // The insts of the goal's nonlocal variables before it ran, in the
+  // order of the clause's nonlocals for it; empty for a goal not run.
+  llvm::ArrayRef<const Inst *> before{};
 };
 
 // A clause, as checked for one procedure.
@@ -116,6 +129,8 @@ public:
   ModeChecking();
   ~ModeChecking();
   InstContext &insts() { return insts_; }
+  // The operations on insts, with the module's types' constructors.
+  InstOps &ops() { return *ops_; }
   // The procedures of the module's predicates and functions, in the order
   // of their symbols.
   llvm::ArrayRef<Procedure> procedures() const { return procedures_; }
@@ -149,6 +164,8 @@ private:
   friend class ProcedureChecker;
   common::Arena arena_;
   InstContext insts_;
+  std::unique_ptr<InstTypes> constructors_;
+  std::unique_ptr<InstOps> ops_;
   std::vector<Procedure> procedures_;
   llvm::DenseMap<const Symbol *, std::vector<const Procedure *>> bySymbol_;
   std::vector<const Symbol *> instDefinitions_;
