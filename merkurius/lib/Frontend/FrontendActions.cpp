@@ -16,6 +16,7 @@
 #include "merkurius/Parser/source.h"
 #include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/unparse.h"
+#include "merkurius/Semantics/check-modes.h"
 #include "merkurius/Semantics/check-purity.h"
 #include "merkurius/Semantics/check-types.h"
 #include "merkurius/Semantics/desugar.h"
@@ -469,6 +470,76 @@ bool DebugDumpTypesAction::executeAction() {
           << ": ";
       proof(c.proof, 0);
     }
+  }
+  os->flush();
+  return !r.messages.AnyFatalError();
+}
+
+bool DebugDumpModesAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  const FrontendOptions &frontend{ci.getFrontendOpts()};
+  Resolved r;
+  Resolve(ci, getSourceFile(), r);
+  semantics::TypeCheckOptions typeOptions;
+  typeOptions.inferTypes = frontend.inferTypes;
+  typeOptions.inferenceIterationLimit = frontend.typeInferenceIterationLimit;
+  std::unique_ptr<semantics::TypeChecking> types{semantics::CheckTypes(
+      *r.form, *r.resolution, r.tokens, r.messages, typeOptions)};
+  semantics::CheckPurity(
+      *r.tree, r.tokens, *r.form, *r.resolution, *types, r.messages);
+  semantics::ModeCheckOptions options;
+  options.inferModes = frontend.inferModes;
+  options.inferenceIterationLimit = frontend.modeInferenceIterationLimit;
+  std::unique_ptr<semantics::ModeChecking> modes{semantics::CheckModes(*r.tree,
+      r.tokens, *r.form, *r.resolution, *types, r.messages, options)};
+  r.messages.Emit(llvm::errs(), ci.getAllSources());
+  llvm::raw_ostream *os{ci.createDefaultOutputFile()};
+  if (!os) {
+    return false;
+  }
+  const parser::AllSources &sources{ci.getAllSources()};
+  for (const semantics::Symbol *symbol : modes->instDefinitions()) {
+    *os << Position(sources, symbol->source) << ' ' << *symbol << " == ";
+    if (const semantics::Inst *body{modes->insts().Body(*symbol)}) {
+      semantics::PrintInst(*os, *body);
+    } else {
+      *os << "(none)";
+    }
+    *os << '\n';
+  }
+  for (const semantics::Procedure &procedure : modes->procedures()) {
+    *os << (procedure.source.empty() ? std::string{"(default)"}
+                                     : Position(sources, procedure.source))
+        << ' ' << *procedure.symbol << " mode " << procedure.number << ": "
+        << procedure.symbol->name;
+    bool function{procedure.symbol->kind == semantics::SymbolKind::Function};
+    llvm::ArrayRef<semantics::ArgMode> arguments{procedure.modes};
+    if (function && !arguments.empty()) {
+      arguments = arguments.drop_back();
+    }
+    if (!arguments.empty()) {
+      *os << '(';
+      llvm::interleave(
+          arguments, *os,
+          [&](const semantics::ArgMode &mode) {
+            semantics::PrintArgMode(*os, mode);
+          },
+          ", ");
+      *os << ')';
+    }
+    if (function && !procedure.modes.empty()) {
+      *os << " = ";
+      semantics::PrintArgMode(*os, procedure.modes.back());
+    }
+    if (procedure.determinism) {
+      *os << " is " << semantics::DeterminismName(*procedure.determinism);
+    }
+    // The constraints of its inst parameters.
+    for (const semantics::Inst *parameter : procedure.parameters) {
+      *os << ", " << parameter->name << " =< ";
+      semantics::PrintInst(*os, *parameter->constraint);
+    }
+    *os << '\n';
   }
   os->flush();
   return !r.messages.AnyFatalError();

@@ -46,6 +46,8 @@ std::unique_ptr<FrontendAction> createFrontendAction(CompilerInstance &ci) {
     return std::make_unique<DebugDumpResolvedNamesAction>();
   case ActionKind::DebugDumpTypes:
     return std::make_unique<DebugDumpTypesAction>();
+  case ActionKind::DebugDumpModes:
+    return std::make_unique<DebugDumpModesAction>();
   }
   llvm_unreachable("unknown ActionKind");
 }

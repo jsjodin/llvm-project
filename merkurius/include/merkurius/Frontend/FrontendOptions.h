@@ -56,6 +56,9 @@ enum class ActionKind {
   // -fdebug-dump-types: type check, and list each clause's variable types
   // and chosen declarations.
   DebugDumpTypes,
+  // -fdebug-dump-modes: type, purity and mode check, and list each
+  // predicate's and function's procedures.
+  DebugDumpModes,
 };
 
 struct FrontendOptions {
@@ -71,6 +74,8 @@ struct FrontendOptions {
   std::string libraryDirectory;
   bool inferTypes{true}; // -fno-infer-types turns it off
   unsigned typeInferenceIterationLimit{60}; // -ftype-inference-iteration-limit=
+  bool inferModes{false}; // -finfer-modes
+  unsigned modeInferenceIterationLimit{30}; // -fmode-inference-iteration-limit=
 };
 
 struct LangOptions {
