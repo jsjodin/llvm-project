@@ -8,6 +8,7 @@
 
 #include "merkurius/Semantics/check-purity.h"
 #include "merkurius/Common/idioms.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
@@ -52,7 +53,7 @@ public:
       : tokens_{tokens}, resolution_{resolution}, types_{types},
         messages_{messages} {}
 
-  void Run(const parser::ParseTree &);
+  void Run(const parser::ParseTree &, const SemanticForm &);
 
 private:
   // The purity of a goal, the least of its parts': a call's and a
@@ -87,23 +88,50 @@ private:
   // Inside a compound goal annotated in error, the annotation, which the
   // goals in it are taken to have.
   std::optional<Purity> assumed_;
-  // The purity of each predicate's or function's clauses, and its first.
+  // The purity of each predicate's or function's clauses, and its first;
+  // and those of each instance's method definitions.
   struct Clauses {
     Purity purity{Purity::Pure};
     const ClauseForm *first{nullptr};
   };
   llvm::MapVector<const Symbol *, Clauses> clauses_;
+  llvm::MapVector<const MethodDefinition *, Clauses> methods_;
 };
 
-void PurityChecker::Run(const parser::ParseTree &tree) {
+void PurityChecker::Run(
+    const parser::ParseTree &tree, const SemanticForm &form) {
+  // The clauses that methods defined by name stand for: their calls have
+  // the method's declared purity, as in mmc.
+  llvm::DenseSet<const ClauseForm *> byName;
+  for (const MethodClause &method : form.methods) {
+    if (method.byName) {
+      byName.insert(method.clause);
+    }
+  }
+  // A predicate or function with a type error in a clause is not checked,
+  // as mmc does not check purity after type errors.
+  llvm::DenseSet<const void *> mistyped;
   for (const ClauseTypes &clause : types_.clauses()) {
-    // Instance methods' purity is checked with higher-order purity.
-    if (!clause.definition || clause.method) {
+    if (clause.typeError) {
+      mistyped.insert(clause.method ? static_cast<const void *>(clause.method)
+                                    : clause.definition);
+    }
+  }
+  for (const ClauseTypes &clause : types_.clauses()) {
+    if (!clause.definition ||
+        mistyped.count(clause.method ? static_cast<const void *>(clause.method)
+                                     : clause.definition)) {
       continue;
     }
     clause_ = &clause;
+    std::optional<Purity> saved{assumed_};
+    if (clause.method && byName.count(clause.clause)) {
+      assumed_ = Declared(clause.method->method);
+    }
     Purity purity{Check(clause.clause->body)};
-    Clauses &of{clauses_[clause.definition]};
+    assumed_ = saved;
+    Clauses &of{clause.method ? methods_[clause.method]
+                              : clauses_[clause.definition]};
     of.purity = Least(of.purity, purity);
     if (!of.first) {
       of.first = clause.clause;
@@ -123,8 +151,12 @@ const Symbol *PurityChecker::Function(const Unify &unify) const {
       unify.number >= clause_->symbols.size()) {
     return nullptr;
   }
+  // With fewer arguments, it makes a closure.
   const Symbol *symbol{clause_->symbols[unify.number]};
-  return symbol && symbol->kind == SymbolKind::Function ? symbol : nullptr;
+  return symbol && symbol->kind == SymbolKind::Function &&
+          unify.arguments.size() == symbol->arity
+      ? symbol
+      : nullptr;
 }
 
 Purity PurityChecker::Check(const Goal &goal) {
@@ -151,8 +183,10 @@ Purity PurityChecker::Check(const Goal &goal) {
           [&](const Not *x) { return Check(x->goal); },
           [&](const Unify *x) { return CheckUnify(*x); },
           [&](const Call *x) { return CheckCall(*x); },
-          // Higher-order calls' purity is checked with higher-order purity.
-          [&](const HOCall *) { return Purity::Pure; },
+          // Its annotation, or impure_apply or semipure_apply, gives its
+          // purity, which type checking made the closure's; mmc needs no
+          // annotation for impure_apply.
+          [&](const HOCall *x) { return x->purity; },
           [&](const Scope *x) { return CheckScope(*x); },
           [&](const Try *x) {
             Purity purity{Least(Check(x->goal), Check(x->then))};
@@ -180,9 +214,20 @@ Purity PurityChecker::Check(const Goal &goal) {
 
 Purity PurityChecker::CheckUnify(const Unify &unify) {
   if (unify.functor.kind == FunctorKind::Lambda) {
-    // Its body's purity is the lambda's own, which higher-order purity
-    // checks against the lambda's annotation.
-    (void)Check(unify.functor.lambda->body);
+    // Its body is at most as impure as its annotation (reference manual,
+    // "Purity annotations on lambda expressions"); making it is pure.
+    const Lambda &lambda{*unify.functor.lambda};
+    std::optional<Purity> saved{assumed_};
+    assumed_.reset();
+    Purity body{Check(lambda.body)};
+    assumed_ = saved;
+    if (body > lambda.purity) {
+      // mmc: "closure body is impure, but closure was not declared
+      // impure".
+      messages_.Say(Source(lambda.tokens),
+          "the body of this lambda expression is %s, so it must be annotated `%s'"_err_en_US,
+          Name(body), Name(body));
+    }
     return Purity::Pure;
   }
   const Symbol *function{Function(unify)};
@@ -278,8 +323,9 @@ Purity PurityChecker::CheckAnnotated(const Scope &scope, Purity annotation) {
           : nullptr;
       top = Declared(callee);
       purity = Least(purity, *top);
-    } else if (std::holds_alternative<const HOCall *>(part)) {
-      higherOrder = true; // with higher-order purity
+    } else if (const auto *call{std::get_if<const HOCall *>(&part)}) {
+      higherOrder = true; // type checking checked its annotation
+      purity = Least(purity, (*call)->purity);
     } else if (const auto *unify{std::get_if<const Unify *>(&part)}) {
       applies |= !(*unify)->isVar;
       const Symbol *function{Function(**unify)};
@@ -371,6 +417,19 @@ void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
           arities.empty() ? "" : "; its arity is " + arities);
     }
   }
+  // An instance's method is at least as pure as its declaration (reference
+  // manual, "Declaring impure functions and predicates").
+  for (const auto &[method, of] : methods_) {
+    Purity declared{Declared(method->method)};
+    if (of.purity > declared) {
+      // mmc: "In type class method implementation: purity error:
+      // predicate is impure".
+      messages_.Say(Source(of.first->tokens),
+          "the implementation of %s in instance %s is %s, but the method is declared %s"_err_en_US,
+          Text(*method->method), method->instanceText, Name(of.purity),
+          Name(declared));
+    }
+  }
   for (const auto &[symbol, of] : clauses_) {
     const auto *decl{std::get_if<const parser::PredDecl *>(&symbol->declaration)};
     Purity declared{decl ? (*decl)->purity : Purity::Pure};
@@ -407,10 +466,10 @@ void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
 } // namespace
 
 void CheckPurity(const parser::ParseTree &tree,
-    const parser::TokenSequence &tokens, const SemanticForm &,
+    const parser::TokenSequence &tokens, const SemanticForm &form,
     const NameResolution &resolution, const TypeChecking &types,
     parser::Messages &messages) {
-  PurityChecker{tokens, resolution, types, messages}.Run(tree);
+  PurityChecker{tokens, resolution, types, messages}.Run(tree, form);
 }
 
 } // namespace merkurius::semantics

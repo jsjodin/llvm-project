@@ -214,6 +214,11 @@ private:
             },
             [&](const HOCall *call) {
               Start("HOCall", call->number, depth);
+              if (call->purity != parser::Purity::Pure) {
+                os_ << ' '
+                    << (call->purity == parser::Purity::Impure ? "impure"
+                                                               : "semipure");
+              }
               os_ << ' ';
               llvm::ArrayRef<VarId> arguments{call->arguments};
               if (call->kind == parser::PredOrFunc::Function) {

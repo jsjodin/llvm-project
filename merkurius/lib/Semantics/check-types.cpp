@@ -2923,12 +2923,9 @@ void TypeChecker::CheckHOCall(const HOCall &call) {
     if (function && !types.empty()) {
       result = types.pop_back_val();
     }
-    // The call's purity is checked by purity checking, not here.
-    const Type *closure{Walk(a, VarType(call.closure))};
-    parser::Purity purity{closure->kind == TypeKind::HigherOrder
-            ? closure->purity
-            : parser::Purity::Pure};
-    return types_.HigherOrder(call.kind, purity, types, result);
+    // The closure's purity is the call's, as in mmc: P(X) needs a pure
+    // closure, and impure P(X) an impure one.
+    return types_.HigherOrder(call.kind, call.purity, types, result);
   }};
   Constrain(
       [&](Assignment &a) {
@@ -3230,6 +3227,7 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
   }
   types.constraints =
       result_.arena_.SaveArray(llvm::ArrayRef<GoalConstraint>{proofs});
+  types.typeError = failed_ || ambiguity;
   bool coerceFailed{false};
   if (sig && !ambiguity && !failed_) {
     for (const Unify *unify : coerces_) {
@@ -3241,6 +3239,7 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
                 TypeText(chosen, VarType(unify->left)))
             .Attach(Source(unify->tokens), "%s"_because_en_US, *reason);
         coerceFailed = true;
+        types.typeError = true;
       }
     }
   }

@@ -150,12 +150,17 @@ struct Call {
 
 // P(X1, ..., Xn) or call(P, X1, ..., Xn), and, for a function, Y = F(X1,
 // ..., Xn) or Y = apply(F, X1, ..., Xn), whose result is the last argument.
+// Its purity is the closure's: a predicate call's is its annotation's, and
+// a function call's is impure for impure_apply and semipure for
+// semipure_apply (reference manual, "Purity annotations on higher-order
+// calls").
 struct HOCall {
   TokenRange tokens;
   unsigned number;
   parser::PredOrFunc kind;
   VarId closure;
   llvm::ArrayRef<VarId> arguments;
+  parser::Purity purity{parser::Purity::Pure};
 };
 
 // A goal under a quantifier, a promise, a requirement, a purity

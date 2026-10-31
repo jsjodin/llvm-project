@@ -85,6 +85,8 @@ struct ClauseTypes {
   llvm::ArrayRef<GoalConstraint> constraints{};
   // For a clause of an instance's method, which `definition` is.
   const MethodDefinition *method{nullptr};
+  // Whether the clause has a type error, or is ambiguous.
+  bool typeError{false};
 };
 
 class TypeChecking {
