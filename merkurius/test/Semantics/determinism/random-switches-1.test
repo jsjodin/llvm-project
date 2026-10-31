@@ -1,0 +1,11 @@
+# Random modules whose predicates have bodies that are disjunctions, and
+# clauses whose heads are patterns, testing their inputs against functors
+# through aliases, after other goals, in `some` scopes and in nested
+# disjunctions, in if-then-elses, negations and lambda expressions
+# (generate-switch-programs.py). merkc must find the switches and
+# disjunctions that mmc does, after common subexpression elimination.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-switch-programs.py --seed 1 --count 40 %t
+# RUN: %compare-switches %t/*.m
