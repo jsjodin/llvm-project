@@ -2,12 +2,15 @@
 """Generate random Mercury modules for comparing mode analysis with mmc's.
 
 Each module has predicates with random argument types and modes, and
-clauses whose goals are unifications and calls, generated in an order in
-which each goal's inputs are bound and then shuffled, so that mode
-analysis has to schedule them. Every predicate is declared `nondet`, so
+clauses whose goals are unifications, calls, disjunctions and
+if-then-elses that bind the same variables in each branch, and negated
+tests, generated in an order in which each goal's inputs are bound and
+then shuffled, so that mode analysis has to schedule them. A predicate
+has one to three clauses. Every predicate is declared `nondet`, so
 that determinism analysis, which mmc runs with mode analysis, reports
 nothing. A few clauses get a mutation that may make them mode-incorrect:
-an output left unbound, or two free variables unified. compare-types.py
+an output left unbound, two free variables unified, a variable bound in
+one branch only, or one bound only in a negation. compare-types.py
 --modes --error-lines then checks that merkc and mmc report mode errors
 on the same lines. The constructors of t have names of two letters, since
 a one-letter constant could also be a character.
@@ -23,6 +26,27 @@ import random
 TYPES = ["int", "t", "list(int)"]
 # The constructors of t, with their argument types.
 CONSTRUCTORS = [("ta", []), ("tb", ["int"]), ("tc", ["int", "t"])]
+
+
+class Compound:
+    """A disjunction or an if-then-else: its branches' goals, with the
+    condition's goal first for an if-then-else, and the variables each
+    branch binds."""
+
+    def __init__(self, kind, branches, targets, condition=None):
+        self.kind = kind
+        self.branches = branches
+        self.targets = targets
+        self.condition = condition
+
+    def render(self):
+        def body(goals):
+            return ",\n        ".join(goals) if goals else "true"
+        if self.kind == "disj":
+            return "(\n        " + "\n    ;\n        ".join(body(b) for b in self.branches) + "\n    )"
+        then, otherwise = self.branches
+        return ("( if " + self.condition + " then\n        " + body(then) +
+                "\n    else\n        " + body(otherwise) + "\n    )")
 
 
 class Clause:
@@ -110,6 +134,51 @@ class Clause:
         self.goals.append("%s(%s)" % (name, ", ".join(args)))
         self.bound.update(outputs)
 
+    def branch(self, targets):
+        """Goals that bind each target, in a list of their own; what else
+        they bind is local to them."""
+        saved_goals, saved_bound = self.goals, set(self.bound)
+        self.goals = []
+        for var in targets:
+            value = self.make_bound(self.vars[var])
+            self.goals.append("%s = %s" % (var, value))
+        self.rng.shuffle(self.goals)
+        goals = self.goals
+        self.goals, self.bound = saved_goals, saved_bound
+        return goals
+
+    def test(self):
+        """A test of a bound variable, or None."""
+        rng = self.rng
+        options = sorted(self.bound)
+        if not options:
+            return None
+        var = rng.choice(options)
+        type_ = self.vars[var]
+        if type_ == "int":
+            return "%s = %d" % (var, rng.randint(0, 9))
+        if type_ == "list(int)":
+            return "%s = []" % var
+        return "%s = %s" % (var, rng.choice(["ta", "tb(%d)" % rng.randint(0, 9)]))
+
+    def compound(self):
+        rng = self.rng
+        kind = rng.choice(["disj", "ite", "not"])
+        if kind == "not":
+            test = self.test()
+            if test:
+                self.goals.append("not (%s)" % test)
+            return
+        targets = [self.fresh(rng.choice(TYPES)) for _ in range(rng.randint(1, 2))]
+        if kind == "disj":
+            branches = [self.branch(targets) for _ in range(rng.randint(2, 3))]
+            self.goals.append(Compound(kind, branches, targets))
+        else:
+            condition = self.test() or "true"
+            branches = [self.branch(targets), self.branch(targets)]
+            self.goals.append(Compound(kind, branches, targets, condition))
+        self.bound.update(targets)
+
     def generate(self, types, modes):
         rng = self.rng
         head = []
@@ -121,10 +190,12 @@ class Clause:
                 self.bound.add(var)
         for _ in range(rng.randint(0, 4)):
             r = rng.random()
-            if r < 0.4:
+            if r < 0.3:
                 self.call()
-            elif r < 0.7:
+            elif r < 0.5:
                 self.deconstruct()
+            elif r < 0.75:
+                self.compound()
             else:
                 self.make_bound(rng.choice(TYPES))
         for var, mode in zip(head, modes):
@@ -132,13 +203,25 @@ class Clause:
                 value = self.make_bound(self.vars[var])
                 self.goals.append("%s = %s" % (var, value))
         mutation = None
-        if rng.random() < 0.25 and self.goals:
-            kind = rng.choice(["drop", "free"])
-            outputs = [g for g in self.goals if g.startswith("H")]
+        if rng.random() < 0.3 and self.goals:
+            kind = rng.choice(["drop", "free", "branch", "negation"])
+            outputs = [g for g in self.goals if isinstance(g, str) and g.startswith("H")]
+            compounds = [g for g in self.goals if isinstance(g, Compound)]
             if kind == "drop" and outputs:
                 # Only an output's binding, which leaves no type ambiguous.
                 self.goals.remove(rng.choice(outputs))
                 mutation = "an output left unbound"
+            elif kind == "branch" and compounds:
+                compound = rng.choice(compounds)
+                goals = rng.choice(compound.branches)
+                target = rng.choice(compound.targets)
+                goals[:] = [g for g in goals if not g.startswith(target + " = ")]
+                mutation = "a variable bound in one branch only"
+            elif kind == "negation":
+                x = self.fresh("int")
+                self.goals.append("not (%s = %d)" % (x, rng.randint(0, 9)))
+                self.goals.append("use(%s)" % x)
+                mutation = "a variable bound only in a negation"
             else:
                 x, y = self.fresh("int"), self.fresh("int")
                 self.goals.append("%s = %s" % (x, y))
@@ -146,7 +229,8 @@ class Clause:
                 self.goals.append("%s(%s)" % ("use", y))
                 mutation = "two free variables unified"
         rng.shuffle(self.goals)
-        body = ",\n    ".join(self.goals) if self.goals else "true"
+        goals = [g.render() if isinstance(g, Compound) else g for g in self.goals]
+        body = ",\n    ".join(goals) if goals else "true"
         return head, body, mutation
 
 
@@ -176,13 +260,14 @@ def module(rng, name):
         lines.append(":- pred %s(%s)." % (pname, ", ".join(types)))
         for modes in modes_list:
             lines.append(":- mode %s(%s) is nondet." % (pname, ", ".join(modes)))
-        # One clause, generated for the first mode: with more modes it is
+        # Clauses generated for the first mode: with more modes they are
         # usually wrong for the others, which mode analysis must find too.
-        clause = Clause(rng, preds, index)
-        head, body, mutation = clause.generate(types, modes_list[0])
-        if mutation:
-            lines.append("% mutation: " + mutation)
-        lines.append("%s(%s) :-\n    %s." % (pname, ", ".join(head), body))
+        for _ in range(rng.choice([1, 1, 2, 3])):
+            clause = Clause(rng, preds, index)
+            head, body, mutation = clause.generate(types, modes_list[0])
+            if mutation:
+                lines.append("% mutation: " + mutation)
+            lines.append("%s(%s) :-\n    %s." % (pname, ", ".join(head), body))
     return "\n".join(lines) + "\n"
 
 

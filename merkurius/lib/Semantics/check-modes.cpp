@@ -1165,6 +1165,7 @@ private:
     // For an error, the variables whose insts would have to change for the
     // goal to run; all of the goal's if none.
     std::vector<VarId> waits{};
+    std::vector<std::pair<parser::CharBlock, std::string>> notes{};
   };
   static Result Ok() { return {}; }
   static Result Unsupported(Unchecked why) {
@@ -1190,7 +1191,23 @@ private:
   std::string InstText(const Inst *inst) const { return InstToString(*inst); }
 
   Result CheckClause(const ClauseTypes &, const Procedure &, ClauseModes &);
+  Result CheckClauses(llvm::ArrayRef<ClauseModes>);
+  const ClauseTypes &WithHeadUnifications(const ClauseTypes &);
   Result Check(const Goal &, InstMap &, const Live &);
+  Result CheckGoal(const Goal &, InstMap &, const Live &);
+  Result Disjunction(const Goal &, const Disj &, InstMap &, const Live &);
+  Result IfThenElseGoal(
+      const Goal &, const IfThenElse &, InstMap &, const Live &);
+  Result Negation(const Not &, InstMap &, const Live &);
+  Result Merge(const Goal &, const char *what, llvm::ArrayRef<InstMap>,
+      llvm::ArrayRef<parser::CharBlock> branches, InstMap &, const Live &);
+  Result Mismatch(const char *what, const std::string &name,
+      llvm::ArrayRef<const Inst *>, llvm::ArrayRef<parser::CharBlock> branches,
+      const Type *);
+  bool HeadLive(const Procedure &, std::size_t i) const;
+  // Where a clause's head ends, at its `:-`, where mmc puts the clause as a
+  // branch of the predicate's disjunction.
+  parser::CharBlock HeadEnd(const ClauseForm &) const;
   Result Conjunction(const Goal &conj, llvm::ArrayRef<Goal>, InstMap &,
       const Live &);
   Result CheckUnify(const Unify &, const Goal &, InstMap &, const Live &);
@@ -1198,7 +1215,7 @@ private:
   Result CheckCall(const Goal &, const Symbol &, llvm::ArrayRef<VarId>,
       bool function, InstMap &, GoalModes &);
   llvm::ArrayRef<const Procedure *> ProceduresFor(const Symbol &);
-  Result CheckFinal(const InstMap &, ClauseModes &);
+  Result CheckFinal(llvm::ArrayRef<const Inst *> final, bool clauses);
   static void Flatten(const Goal &, std::vector<Goal> &);
 
   ModeChecking &result_;
@@ -1219,6 +1236,12 @@ private:
   parser::CharBlock last_{};
   // By variable, how often a construction put it in a term while free.
   std::vector<unsigned> touched_;
+  // By variable, whether it is a nonlocal of a negation or of an
+  // if-then-else whose condition is being checked, which may not bind it.
+  enum class Lock { None, Negation, Condition };
+  std::vector<Lock> locks_;
+  // The head unifications of WithHeadUnifications.
+  llvm::DenseSet<const Unify *> heads_;
   // Warnings of the goals run, reported once the clause is checked.
   std::vector<std::pair<parser::CharBlock, std::string>> warnings_;
   // The procedures of fields, made when first called.
@@ -1258,28 +1281,39 @@ void ProcedureChecker::Run() {
       unchecked(Unchecked::InstParameters);
       continue;
     }
-    std::vector<ClauseModes> &checked{result_.clauses_[&procedure]};
-    for (const ClauseTypes *clause : own) {
+    std::vector<ClauseModes> checked;
+    Result r{Ok()};
+    for (const ClauseTypes *original : own) {
+      const ClauseTypes *clause{
+          own.size() > 1 ? &WithHeadUnifications(*original) : original};
       ClauseModes modes{clause, &procedure, {}, {}};
       warnings_.clear();
-      Result r{CheckClause(*clause, procedure, modes)};
+      r = CheckClause(*clause, procedure, modes);
       if (r.outcome != Outcome::Unsupported) {
         for (const auto &[where, text] : warnings_) {
           messages_.Say(where, "%s"_warn_en_US, text);
         }
       }
-      if (r.outcome == Outcome::Unsupported) {
-        unchecked(r.why);
-        break;
-      }
-      if (r.outcome == Outcome::Error) {
-        // Only the first mode error of a procedure, as in mmc.
-        messages_.Say(r.where, "%s"_err_en_US, r.text);
-        result_.errors_.insert(&procedure);
-        result_.clauses_.erase(&procedure);
+      if (r.outcome != Outcome::Ok) {
         break;
       }
       checked.push_back(modes);
+    }
+    if (r.outcome == Outcome::Ok && !checked.empty()) {
+      r = CheckClauses(checked);
+    }
+    if (r.outcome == Outcome::Unsupported) {
+      unchecked(r.why);
+    } else if (r.outcome == Outcome::Error) {
+      // Only the first mode error of a procedure, as in mmc.
+      auto &message{messages_.Say(r.where, "%s"_err_en_US, r.text)};
+      for (const auto &[where, text] : r.notes) {
+        message.Attach(where, "%s"_because_en_US, text);
+      }
+      result_.errors_.insert(&procedure);
+      result_.clauses_.erase(&procedure);
+    } else {
+      result_.clauses_[&procedure] = std::move(checked);
     }
   }
 }
@@ -1291,66 +1325,174 @@ ProcedureChecker::Result ProcedureChecker::CheckClause(
   procedure_ = &procedure;
   goals_.assign(form_->goals, GoalModes{});
   touched_.assign(form_->vars.size(), 0);
+  locks_.assign(form_->vars.size(), Lock::None);
   last_ = Start(form_->tokens);
   InstMap map(form_->vars.size(), insts_.Free());
   Live live(form_->vars.size(), false);
   for (std::size_t i{0}; i < form_->head.size() && i < procedure.modes.size();
        ++i) {
     map[form_->head[i]] = procedure.modes[i].initial;
-    // A head variable is used after the clause, unless its final inst is
-    // clobbered, as for di (Overton, 3.2.3).
-    const Inst *final{procedure.modes[i].final};
-    while (final->kind == InstKind::Defined) {
-      final = insts_.Expand(final);
-    }
-    live[form_->head[i]] = !(
-        (final->kind == InstKind::Ground || final->kind == InstKind::Any) &&
-        (final->uniqueness == Uniqueness::Clobbered ||
-            final->uniqueness == Uniqueness::MostlyClobbered));
+    live[form_->head[i]] = HeadLive(procedure, i);
   }
   Result r{Check(form_->body, map, live)};
   if (r.outcome != Outcome::Ok) {
     return r;
   }
-  r = CheckFinal(map, out);
-  if (r.outcome != Outcome::Ok) {
-    return r;
+  std::vector<const Inst *> final;
+  for (VarId var : form_->head) {
+    final.push_back(map[var]);
   }
+  out.final = result_.arena_.SaveArray(llvm::ArrayRef<const Inst *>{final});
   out.goals = result_.arena_.SaveArray(llvm::ArrayRef<GoalModes>{goals_});
   return Ok();
+}
+
+// A clause of a predicate with several, as mmc checks it: with new head
+// variables, HeadVar__N, and a body that unifies each with the clause's
+// argument, at the argument, and then runs the clause's body. The clause's
+// arguments are then free at first, and used only until unified.
+const ClauseTypes &ProcedureChecker::WithHeadUnifications(
+    const ClauseTypes &clause) {
+  common::Arena &arena{result_.arena_};
+  const ClauseForm &form{*clause.clause};
+  std::vector<VarInfo> vars{form.vars.begin(), form.vars.end()};
+  std::vector<const Type *> types{clause.vars.begin(), clause.vars.end()};
+  std::vector<llvm::ArrayRef<VarId>> nonlocals{
+      form.nonlocals.begin(), form.nonlocals.end()};
+  std::vector<VarId> head;
+  std::vector<Goal> goals;
+  for (VarId argument : form.head) {
+    VarId var{static_cast<VarId>(vars.size())};
+    TokenRange tokens{form.vars[argument].tokens};
+    vars.push_back({VarKind::Fresh, {}, tokens});
+    types.push_back(clause.vars[argument]);
+    head.push_back(var);
+    const Unify &unify{result_.unifies_.emplace_back(
+        Unify{tokens, static_cast<unsigned>(nonlocals.size()), var, true,
+            argument, Functor{}, {}})};
+    heads_.insert(&unify);
+    VarId both[]{var, argument};
+    nonlocals.push_back(arena.SaveArray(llvm::ArrayRef<VarId>{both}));
+    goals.push_back(&unify);
+  }
+  goals.push_back(form.body);
+  const Conj &body{result_.conjs_.emplace_back(
+      Conj{form.tokens, static_cast<unsigned>(nonlocals.size()), false,
+          arena.SaveArray(llvm::ArrayRef<Goal>{goals})})};
+  nonlocals.push_back(arena.SaveArray(llvm::ArrayRef<VarId>{head}));
+  ClauseForm &copy{result_.forms_.emplace_back(form)};
+  copy.head = arena.SaveArray(llvm::ArrayRef<VarId>{head});
+  copy.body = &body;
+  copy.vars = arena.SaveArray(llvm::ArrayRef<VarInfo>{vars});
+  copy.goals = nonlocals.size();
+  copy.nonlocals = arena.SaveArray(
+      llvm::ArrayRef<llvm::ArrayRef<VarId>>{nonlocals});
+  std::vector<const Symbol *> symbols{
+      clause.symbols.begin(), clause.symbols.end()};
+  symbols.resize(copy.goals, nullptr);
+  std::vector<const parser::SymName *> names{
+      clause.names.begin(), clause.names.end()};
+  names.resize(copy.goals, nullptr);
+  ClauseTypes &typed{result_.clauseTypes_.emplace_back(clause)};
+  typed.clause = &copy;
+  typed.vars = arena.SaveArray(llvm::ArrayRef<const Type *>{types});
+  typed.symbols = arena.SaveArray(llvm::ArrayRef<const Symbol *>{symbols});
+  typed.names =
+      arena.SaveArray(llvm::ArrayRef<const parser::SymName *>{names});
+  return typed;
+}
+
+// A head variable is used after the clause, unless its final inst is
+// clobbered, as for di (Overton, 3.2.3).
+bool ProcedureChecker::HeadLive(const Procedure &procedure, std::size_t i) const {
+  const Inst *final{procedure.modes[i].final};
+  while (final->kind == InstKind::Defined) {
+    final = insts_.Expand(final);
+  }
+  return !((final->kind == InstKind::Ground || final->kind == InstKind::Any) &&
+      (final->uniqueness == Uniqueness::Clobbered ||
+          final->uniqueness == Uniqueness::MostlyClobbered));
+}
+
+parser::CharBlock ProcedureChecker::HeadEnd(const ClauseForm &form) const {
+  int depth{0};
+  for (std::size_t i{form.tokens.first}; i <= form.tokens.last; ++i) {
+    std::string spelling{tokens_.tokens[i].spelling.ToString()};
+    if (spelling == "(" || spelling == "[" || spelling == "{") {
+      ++depth;
+    } else if (spelling == ")" || spelling == "]" || spelling == "}") {
+      --depth;
+    } else if (depth == 0 && (spelling == ":-" || spelling == "-->")) {
+      return tokens_.tokens[i].spelling;
+    }
+  }
+  return Start(form.tokens);
+}
+
+// A predicate's clauses are the branches of a disjunction, as in mmc: the
+// head's insts at the end of each are merged, and must match the final
+// insts of the procedure's modes. The clauses were checked in order, so
+// the clause, and the goal run last, are the last clause's.
+ProcedureChecker::Result ProcedureChecker::CheckClauses(
+    llvm::ArrayRef<ClauseModes> clauses) {
+  if (clauses.size() == 1) {
+    return CheckFinal(clauses.front().final, false);
+  }
+  std::vector<const Inst *> merged;
+  for (std::size_t i{0}; i < form_->head.size(); ++i) {
+    const Type *type{TypeOf(form_->head[i])};
+    const Inst *inst{insts_.NotReached()};
+    for (const ClauseModes &clause : clauses) {
+      inst = inst ? ops_.Merge(inst, clause.final[i], type) : nullptr;
+    }
+    if (!inst) {
+      std::vector<const Inst *> insts;
+      std::vector<parser::CharBlock> branches;
+      for (const ClauseModes &clause : clauses) {
+        insts.push_back(clause.final[i]);
+        branches.push_back(HeadEnd(*clause.clause->clause));
+      }
+      if ((i < procedure_->modes.size() && HeadLive(*procedure_, i)) ||
+          llvm::none_of(
+              insts, [&](const Inst *inst) { return ops_.IsFree(inst); })) {
+        return Mismatch("disjunction", "HeadVar__" + std::to_string(i + 1),
+            insts, branches, type);
+      }
+      inst = clauses.back().final[i];
+    }
+    merged.push_back(inst);
+  }
+  return CheckFinal(merged, true);
 }
 
 // The head's insts at the end must match the final insts of the
 // procedure's modes.
 ProcedureChecker::Result ProcedureChecker::CheckFinal(
-    const InstMap &map, ClauseModes &out) {
-  std::vector<const Inst *> final;
+    llvm::ArrayRef<const Inst *> final, bool clauses) {
   for (std::size_t i{0}; i < form_->head.size(); ++i) {
     VarId var{form_->head[i]};
-    final.push_back(map[var]);
     if (i >= procedure_->modes.size()) {
       continue;
     }
     const Inst *expected{procedure_->modes[i].final};
     const Type *type{TypeOf(var)};
-    if (ops_.Matches(map[var], expected, type)) {
+    if (ops_.Matches(final[i], expected, type)) {
       continue;
     }
     // mmc: "argument 1 did not get sufficiently instantiated", "became
     // too instantiated", or "had the wrong instantiatedness", with
     // "Final instantiatedness of `X' was `free', expected final
     // instantiatedness was `ground'".
-    const char *how{ops_.HasFree(map[var], type) ? "did not get sufficiently instantiated"
+    const char *how{ops_.HasFree(final[i], type) ? "did not get sufficiently instantiated"
             : ops_.HasFree(expected, type)      ? "became too instantiated"
                                                 : "had the wrong inst"};
     return {Outcome::Error, last_,
         "in the clause for " + ProcedureToString(*procedure_) +
             ": mode error: argument " + std::to_string(i + 1) + ", " +
-            Name(var) + ", " + how + ": its final inst is " +
-            InstText(map[var]) + ", but " + InstText(expected) +
-            " is expected"};
+            (clauses ? "HeadVar__" + std::to_string(i + 1) : Name(var)) +
+            ", " + how + ": its final inst is " + InstText(final[i]) +
+            ", but " + InstText(expected) + " is expected"};
   }
-  out.final = result_.arena_.SaveArray(llvm::ArrayRef<const Inst *>{final});
   return Ok();
 }
 
@@ -1365,7 +1507,51 @@ void ProcedureChecker::Flatten(const Goal &goal, std::vector<Goal> &out) {
   }
 }
 
+// Checks a goal; a unification or call that binds a locked variable that
+// is free is a scope error, which waits for the variable to be bound
+// outside.
 ProcedureChecker::Result ProcedureChecker::Check(
+    const Goal &goal, InstMap &map, const Live &live) {
+  if ((!std::holds_alternative<const Unify *>(goal) &&
+          !std::holds_alternative<const Call *>(goal)) ||
+      llvm::all_of(locks_, [](Lock lock) { return lock == Lock::None; })) {
+    return CheckGoal(goal, map, live);
+  }
+  llvm::ArrayRef<VarId> vars{form_->nonlocals[NumberOf(goal)]};
+  std::vector<const Inst *> before;
+  for (VarId var : vars) {
+    before.push_back(map[var]);
+  }
+  Result r{CheckGoal(goal, map, live)};
+  if (r.outcome != Outcome::Ok) {
+    return r;
+  }
+  for (std::size_t i{0}; i < vars.size(); ++i) {
+    VarId var{vars[i]};
+    // Only a free variable, as in mmc: a goal may bind the free parts of
+    // a partially instantiated one.
+    if (locks_[var] == Lock::None || !ops_.IsFree(before[i]) ||
+        ops_.IsFree(map[var]) || ops_.IsNotReached(map[var])) {
+      continue;
+    }
+    // mmc: "scope error: attempt to bind a non-local variable inside a
+    // negation. Variable `X' has instantiatedness `free', expected
+    // instantiatedness was `unique(1)'."
+    return Error(goal,
+        "scope error: " + Name(var) + " is bound inside " +
+            (locks_[var] == Lock::Negation
+                    ? std::string{"a negation, but is not local to it"}
+                    : std::string{"the condition of an if-then-else, but "
+                                  "occurs outside the condition and the then "
+                                  "part"}) +
+            ": it has inst " + InstText(before[i]) + ", and would get " +
+            InstText(map[var]),
+        {var});
+  }
+  return r;
+}
+
+ProcedureChecker::Result ProcedureChecker::CheckGoal(
     const Goal &goal, InstMap &map, const Live &live) {
   return common::visit(
       common::visitors{
@@ -1373,15 +1559,20 @@ ProcedureChecker::Result ProcedureChecker::Check(
             if (conj->parallel) {
               return Unsupported(Unchecked::ParallelConjunction);
             }
+            // true counts as a goal run, as in mmc, except as the body of
+            // a clause, and in a conjunction, which drops it.
+            if (conj->goals.empty() && goal != form_->body) {
+              last_ = Start(conj->tokens);
+            }
             std::vector<Goal> goals;
             Flatten(goal, goals);
             return Conjunction(goal, goals, map, live);
           },
-          [&](const Disj *) { return Unsupported(Unchecked::Disjunction); },
-          [&](const IfThenElse *) {
-            return Unsupported(Unchecked::IfThenElse);
+          [&](const Disj *disj) { return Disjunction(goal, *disj, map, live); },
+          [&](const IfThenElse *ite) {
+            return IfThenElseGoal(goal, *ite, map, live);
           },
-          [&](const Not *) { return Unsupported(Unchecked::Negation); },
+          [&](const Not *negation) { return Negation(*negation, map, live); },
           [&](const Unify *unify) { return CheckUnify(*unify, goal, map, live); },
           [&](const Call *call) -> Result {
             const Symbol *callee{clause_->symbols[call->number]};
@@ -1412,6 +1603,149 @@ ProcedureChecker::Result ProcedureChecker::Check(
           [&](const Atomic *) { return Unsupported(Unchecked::Atomic); },
       },
       goal);
+}
+
+// Each branch of a disjunction starts from the insts before it, and their
+// results are merged (Overton, 3.1.4). fail, the empty disjunction, is not
+// reached after.
+ProcedureChecker::Result ProcedureChecker::Disjunction(
+    const Goal &goal, const Disj &disj, InstMap &map, const Live &live) {
+  if (disj.goals.empty()) {
+    last_ = Start(disj.tokens);
+    map.assign(map.size(), insts_.NotReached());
+    return Ok();
+  }
+  std::vector<InstMap> maps;
+  std::vector<parser::CharBlock> branches;
+  for (const Goal &branch : disj.goals) {
+    InstMap inner{map};
+    Result r{Check(branch, inner, live)};
+    if (r.outcome != Outcome::Ok) {
+      return r;
+    }
+    maps.push_back(std::move(inner));
+    branches.push_back(Start(TokensOf(branch)));
+  }
+  return Merge(goal, "disjunction", maps, branches, map, live);
+}
+
+// The condition may bind only what is local to it and the then part, which
+// starts from its insts; the else part starts from the insts before the
+// if-then-else, and the two are merged.
+ProcedureChecker::Result ProcedureChecker::IfThenElseGoal(
+    const Goal &goal, const IfThenElse &ite, InstMap &map, const Live &live) {
+  std::vector<Lock> locks{locks_};
+  for (VarId var : form_->nonlocals[ite.number]) {
+    if (locks_[var] == Lock::None) {
+      locks_[var] = Lock::Condition;
+    }
+  }
+  Live after{live};
+  for (VarId var : form_->nonlocals[NumberOf(ite.then)]) {
+    after[var] = true;
+  }
+  InstMap then{map};
+  Result r{Check(ite.condition, then, after)};
+  locks_ = std::move(locks);
+  if (r.outcome != Outcome::Ok) {
+    return r;
+  }
+  r = Check(ite.then, then, live);
+  if (r.outcome != Outcome::Ok) {
+    return r;
+  }
+  InstMap otherwise{map};
+  r = Check(ite.otherwise, otherwise, live);
+  if (r.outcome != Outcome::Ok) {
+    return r;
+  }
+  return Merge(goal, "if-then-else", {then, otherwise},
+      {Start(TokensOf(ite.then)), Start(TokensOf(ite.otherwise))}, map, live);
+}
+
+// A negation may bind only what is local to it, and binds nothing after.
+ProcedureChecker::Result ProcedureChecker::Negation(
+    const Not &negation, InstMap &map, const Live &live) {
+  std::vector<Lock> locks{locks_};
+  for (VarId var : form_->nonlocals[negation.number]) {
+    if (locks_[var] == Lock::None) {
+      locks_[var] = Lock::Negation;
+    }
+  }
+  InstMap inner{map};
+  Result r{Check(negation.goal, inner, live)};
+  locks_ = std::move(locks);
+  return r;
+}
+
+// The branches' insts of the goal's nonlocals merged into `map`. A
+// variable whose insts have no merge, because it is free in some branches
+// and bound in others, or a part of it is, is an error, reported at the
+// goal run last, with a note at each branch reached, as in mmc; but not a
+// variable that is free in some branch and not used after.
+ProcedureChecker::Result ProcedureChecker::Merge(const Goal &goal,
+    const char *what, llvm::ArrayRef<InstMap> maps,
+    llvm::ArrayRef<parser::CharBlock> branches, InstMap &map,
+    const Live &live) {
+  auto reached{[&](const InstMap &m) {
+    return llvm::none_of(
+        m, [&](const Inst *inst) { return ops_.IsNotReached(inst); });
+  }};
+  for (VarId var : form_->nonlocals[NumberOf(goal)]) {
+    const Type *type{TypeOf(var)};
+    const Inst *merged{insts_.NotReached()};
+    for (const InstMap &m : maps) {
+      merged = merged ? ops_.Merge(merged, m[var], type) : nullptr;
+    }
+    if (!merged) {
+      std::vector<const Inst *> insts;
+      for (const InstMap &m : maps) {
+        insts.push_back(m[var]);
+      }
+      if (live[var] || llvm::none_of(insts, [&](const Inst *inst) {
+            return ops_.IsFree(inst);
+          })) {
+        return Mismatch(what, Name(var), insts, branches, type);
+      }
+      merged = maps.front()[var];
+    }
+    map[var] = merged;
+  }
+  if (llvm::none_of(maps, reached)) {
+    map.assign(map.size(), insts_.NotReached());
+  }
+  return Ok();
+}
+
+// mmc: "mode mismatch in disjunction. The variable `X' is ground in some
+// branches but not others. In this branch, `X' is ground. In this branch,
+// `X' is free." With three or more branches, where it is free in those
+// where it is not ground: "The variable `X' is ground in 2 out of 3
+// branches. In this branch, `X' is free."
+ProcedureChecker::Result ProcedureChecker::Mismatch(const char *what,
+    const std::string &name, llvm::ArrayRef<const Inst *> insts,
+    llvm::ArrayRef<parser::CharBlock> branches, const Type *type) {
+  bool ground{llvm::any_of(
+      insts, [&](const Inst *inst) { return ops_.IsGround(inst, type); })};
+  Result r{Outcome::Error, last_,
+      "in the clause for " + ProcedureToString(*procedure_) +
+          ": mode mismatch in the " + what + ": " + name +
+          (ground ? " is ground in some branches but not others"
+                  : " has insts in its branches that do not merge")};
+  // Of three or more branches, counting those not reached, those where it
+  // is ground go without a note if it is free in all the others, as in
+  // mmc. A branch not reached never has one.
+  bool brief{insts.size() >= 3 && llvm::all_of(insts, [&](const Inst *inst) {
+    return ops_.IsGround(inst, type) || ops_.IsFree(inst);
+  })};
+  for (std::size_t i{0}; i < insts.size(); ++i) {
+    if (!ops_.IsNotReached(insts[i]) &&
+        (!brief || !ops_.IsGround(insts[i], type))) {
+      r.notes.emplace_back(branches[i],
+          "in this branch, " + name + " has inst " + InstText(insts[i]));
+    }
+  }
+  return r;
 }
 
 // The goals of a conjunction run in source order, except that one that
@@ -1501,6 +1835,9 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
     waiting = std::move(still);
     agenda.insert(agenda.begin(), woken.begin(), woken.end());
   }};
+  // When no goal is left to run, the waiting goals are all retried once,
+  // since goals that ran may have left their variables unused, as in mmc.
+  bool progress{false};
   while (true) {
     Goal goal;
     if (!agenda.empty()) {
@@ -1508,6 +1845,13 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
       agenda.pop_front();
     } else if (next < goals.size()) {
       goal = goals[next++];
+    } else if (progress && !waiting.empty()) {
+      progress = false;
+      for (Waiting &w : waiting) {
+        agenda.push_back(w.goal);
+      }
+      waiting.clear();
+      continue;
     } else {
       break;
     }
@@ -1520,10 +1864,39 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
       waiting.push_back({goal, std::move(insts), std::move(r)});
       continue;
     }
+    progress = true;
+    // After a goal that cannot succeed, the others are not checked, and
+    // the goal is the last run, as in mmc.
+    if (!map.empty() && ops_.IsNotReached(map.front())) {
+      waiting.clear();
+      break;
+    }
     wake();
   }
   if (!waiting.empty()) {
-    return waiting.front().error;
+    // A head unification waits until the goals do, but its error is
+    // reported only if no other goal waits, as in mmc.
+    auto first{llvm::find_if(waiting, [&](const Waiting &w) {
+      const auto *unify{std::get_if<const Unify *>(&w.goal)};
+      return !unify || !heads_.count(*unify);
+    })};
+    Result r{(first != waiting.end() ? *first : waiting.front()).error};
+    // The conjunction, as a goal of another, waits for what any of its
+    // goals waits for.
+    std::vector<VarId> waits;
+    for (const Waiting &w : waiting) {
+      llvm::ArrayRef<VarId> vars{w.error.waits};
+      if (vars.empty()) {
+        vars = form_->nonlocals[NumberOf(w.goal)];
+      }
+      for (VarId var : vars) {
+        if (!llvm::is_contained(waits, var)) {
+          waits.push_back(var);
+        }
+      }
+    }
+    r.waits = std::move(waits);
+    return r;
   }
   goals_[NumberOf(conj)].order =
       result_.arena_.SaveArray(llvm::ArrayRef<Goal>{order});
@@ -1925,18 +2298,41 @@ void DumpClauseModes(llvm::raw_ostream &os, const ClauseModes &modes,
   auto at{[&](parser::TokenRange range) {
     return position(tokens.tokens[range.first].spelling);
   }};
-  std::function<void(const Goal &)> dump{[&](const Goal &goal) {
+  std::function<void(const Goal &, unsigned)> dump{[&](const Goal &goal,
+                                                      unsigned depth) {
     const GoalModes &g{modes.goals[NumberOf(goal)]};
+    std::string indent(2 * depth, ' ');
+    auto part{[&](const char *name, const Goal &inner) {
+      os << indent << "      " << name << '\n';
+      dump(inner, depth + 2);
+    }};
     common::visit(
         common::visitors{
             [&](const Conj *) {
               for (const Goal &inner : g.order) {
-                dump(inner);
+                dump(inner, depth);
               }
             },
-            [&](const Scope *scope) { dump(scope->goal); },
+            [&](const Disj *disj) {
+              os << indent << "    " << at(disj->tokens)
+                 << (disj->goals.empty() ? " fail\n" : " disjunction\n");
+              for (const Goal &branch : disj->goals) {
+                part("branch", branch);
+              }
+            },
+            [&](const IfThenElse *ite) {
+              os << indent << "    " << at(ite->tokens) << " if-then-else\n";
+              part("if", ite->condition);
+              part("then", ite->then);
+              part("else", ite->otherwise);
+            },
+            [&](const Not *negation) {
+              os << indent << "    " << at(negation->tokens) << " not\n";
+              dump(negation->goal, depth + 1);
+            },
+            [&](const Scope *scope) { dump(scope->goal, depth); },
             [&](const Unify *unify) {
-              os << "    " << at(unify->tokens) << ' ';
+              os << indent << "    " << at(unify->tokens) << ' ';
               switch (g.unify) {
               case UnifyKind::Assign:
                 os << "assign " << VarName(form, g.assigned) << " := "
@@ -1957,7 +2353,8 @@ void DumpClauseModes(llvm::raw_ostream &os, const ClauseModes &modes,
               os << '\n';
             },
             [&](const Call *call) {
-              os << "    " << at(call->tokens) << " call " << *g.callee->symbol
+              os << indent << "    " << at(call->tokens) << " call "
+                 << *g.callee->symbol
                  << " mode " << g.callee->number
                  << (g.implied ? " implied" : "") << ": " << call->name->name
                  << '(';
@@ -1966,11 +2363,11 @@ void DumpClauseModes(llvm::raw_ostream &os, const ClauseModes &modes,
                   [&](VarId var) { os << VarName(form, var); }, ", ");
               os << ")\n";
             },
-            [&](const auto *) { os << "    (not checked)\n"; },
+            [&](const auto *) { os << indent << "    (not checked)\n"; },
         },
         goal);
   }};
-  dump(form.body);
+  dump(form.body, 0);
   os << "    final:";
   for (std::size_t i{0}; i < form.head.size() && i < modes.final.size(); ++i) {
     os << ' ' << VarName(form, form.head[i]) << ' '
