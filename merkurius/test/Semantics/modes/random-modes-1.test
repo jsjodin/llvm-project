@@ -1,8 +1,8 @@
 # Random modules whose predicates have random argument types and modes,
 # and one to three clauses that are mode-correct for their first mode,
-# with unifications, calls, disjunctions, if-then-elses, negations, and
-# higher-order terms and calls, shuffled so that mode analysis has to
-# schedule them; some clauses are
+# with unifications, calls, disjunctions, if-then-elses, negations,
+# higher-order terms and calls, and modes with an inst variable, shuffled
+# so that mode analysis has to schedule them; some clauses are
 # mutated into mode errors (generate-mode-programs.py). merkc must report
 # mode errors on the lines mmc does.
 #

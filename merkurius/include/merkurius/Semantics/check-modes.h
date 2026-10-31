@@ -24,8 +24,10 @@
 // are branches of a disjunction too. A lambda expression's body is
 // checked as a clause is, and a higher-order term, and a call of one, by
 // its higher-order inst (reference manual, "Higher-order insts and
-// modes"). Only the first mode error of a procedure is reported, as by
-// mmc.
+// modes"). A call binds the callee's inst parameters to the insts of its
+// arguments (reference manual, "Constrained polymorphic modes"; Overton,
+// section 4.2). Only the first mode error of a procedure is reported, as
+// by mmc.
 
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/parse-tree.h"

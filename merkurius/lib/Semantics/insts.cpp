@@ -62,7 +62,7 @@ const Inst *InstContext::Intern(const Inst &inst) {
   }
   std::vector<std::uintptr_t> key{word(copy.kind), word(copy.uniqueness),
       word(copy.predOrFunc), word(copy.any), word(copy.determinism),
-      copy.number, pointer(copy.name.data()), pointer(copy.constraint),
+      copy.number, copy.scope, pointer(copy.name.data()), pointer(copy.constraint),
       pointer(copy.symbol), functors.size()};
   for (const BoundAlternative &alternative : functors) {
     key.push_back(pointer(alternative.functor.module.data()));
@@ -143,12 +143,33 @@ const Inst *InstContext::HigherOrder(parser::PredOrFunc kind, bool any,
   return Intern(inst);
 }
 
-const Inst *InstContext::Parameter(
-    unsigned number, llvm::StringRef name, const Inst *constraint) {
+const Inst *InstContext::Parameter(unsigned number, llvm::StringRef name,
+    const Inst *constraint, unsigned scope) {
   Inst inst{InstKind::Parameter};
   inst.number = number;
+  inst.scope = scope;
   inst.name = name;
   inst.constraint = constraint;
+  return Intern(inst);
+}
+
+const Inst *InstContext::Constrained(
+    llvm::ArrayRef<const Inst *> parameters, const Inst *inner) {
+  if (parameters.empty()) {
+    return inner;
+  }
+  if (parameters.size() == 1 && parameters.front()->constraint == inner) {
+    return parameters.front();
+  }
+  std::vector<const Inst *> sorted{parameters.vec()};
+  llvm::sort(sorted, [](const Inst *x, const Inst *y) {
+    return std::make_tuple(x->name, x->scope, x->number) <
+        std::make_tuple(y->name, y->scope, y->number);
+  });
+  sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+  Inst inst{InstKind::Constrained};
+  inst.constraint = inner;
+  inst.arguments = sorted;
   return Intern(inst);
 }
 
@@ -197,6 +218,9 @@ const Inst *InstContext::Substitute(const Inst *inst,
     if (i->kind == InstKind::Parameter) {
       return replace(*i);
     }
+    if (i->kind == InstKind::Constrained) {
+      return Constrained(i->arguments, walk(i->constraint));
+    }
     // A generated inst's body may refer to itself; it has no parameters
     // of its own to replace.
     if (i->kind == InstKind::Defined && !i->symbol) {
@@ -241,6 +265,9 @@ const Inst *InstContext::Share(const Inst *inst, Uniqueness u) {
     if (i->kind == InstKind::Free || i->kind == InstKind::Parameter ||
         (i->kind == InstKind::Defined && !i->symbol)) {
       return i;
+    }
+    if (i->kind == InstKind::Constrained) {
+      return Constrained(i->arguments, walk(i->constraint));
     }
     if (auto it{done.find(i)}; it != done.end()) {
       return it->second;
@@ -419,11 +446,30 @@ public:
       return;
     }
     case InstKind::Parameter:
+      // mmc: (I =< ground), for an inst variable of a mode declaration.
+      if (inst.constraint) {
+        os_ << '(';
+      }
       if (inst.name.empty()) {
         os_ << 'I' << inst.number;
       } else {
         os_ << inst.name;
       }
+      if (inst.constraint) {
+        os_ << " =< ";
+        Print(*inst.constraint);
+        os_ << ')';
+      }
+      return;
+    case InstKind::Constrained:
+      // mmc: (I, J =< bound(a)).
+      os_ << '(';
+      llvm::interleave(
+          inst.arguments, os_,
+          [&](const Inst *parameter) { os_ << parameter->name; }, ", ");
+      os_ << " =< ";
+      Print(*inst.constraint);
+      os_ << ')';
       return;
     case InstKind::Defined:
       if (!inst.symbol) {
@@ -453,6 +499,12 @@ public:
     } else if (mode.initial->kind == InstKind::Free) {
       os_ << "out(";
       Print(*mode.final);
+      os_ << ')';
+    } else if (mode.final->kind == InstKind::Ground &&
+        mode.final->uniqueness == Uniqueness::Clobbered) {
+      // di(I) is I >> clobbered.
+      os_ << "di(";
+      Print(*mode.initial);
       os_ << ')';
     } else {
       os_ << '(';
@@ -592,18 +644,132 @@ const Inst *InstOps::Resolve(const Inst *inst) {
   return inst;
 }
 
+std::vector<ArgMode> InstOps::Instantiate(llvm::ArrayRef<ArgMode> modes,
+    llvm::ArrayRef<const Inst *> actual, llvm::ArrayRef<const Type *> types,
+    llvm::ArrayRef<const Inst *> fixed) {
+  std::map<const Inst *, const Inst *> bound;
+  for (std::size_t i{0}; i < modes.size() && i < actual.size(); ++i) {
+    std::map<const Inst *, const Inst *> here;
+    std::set<std::pair<const Inst *, const Inst *>> seen;
+    Bind(actual[i], modes[i].initial, types[i], fixed, here, seen);
+    for (const auto &[parameter, inst] : here) {
+      bound.emplace(parameter, inst); // an earlier argument's stays
+    }
+  }
+  if (bound.empty()) {
+    return modes.vec();
+  }
+  auto replace{[&](const Inst &parameter) {
+    auto it{bound.find(&parameter)};
+    return it == bound.end() ? &parameter : it->second;
+  }};
+  std::vector<ArgMode> result;
+  for (const ArgMode &mode : modes) {
+    result.push_back({insts_.Substitute(mode.initial, replace),
+        insts_.Substitute(mode.final, replace)});
+  }
+  return result;
+}
+
+void InstOps::Bind(const Inst *actual, const Inst *initial, const Type *type,
+    llvm::ArrayRef<const Inst *> fixed,
+    std::map<const Inst *, const Inst *> &bound,
+    std::set<std::pair<const Inst *, const Inst *>> &seen) {
+  if (!seen.insert({actual, initial}).second) {
+    return;
+  }
+  if (initial->kind == InstKind::Parameter) {
+    // Nor is one bound to an inst variable that a unification narrowed,
+    // as (I =< bound(a)), which then does not match it, as in mmc (see the
+    // design document's register).
+    if (llvm::is_contained(fixed, initial) ||
+        Resolve(actual)->kind == InstKind::Constrained) {
+      return;
+    }
+    const Inst *constraint{
+        initial->constraint ? initial->constraint : insts_.Ground()};
+    if (!Matches(actual, constraint, type)) {
+      return;
+    }
+    if (const Inst *inst{Unify(actual, constraint, type)}) {
+      auto [it, added] {bound.emplace(initial, inst)};
+      if (!added) {
+        if (const Inst *merged{Merge(it->second, inst, type)}) {
+          it->second = merged;
+        }
+      }
+    }
+    return;
+  }
+  const Inst *a{Plain(actual)};
+  const Inst *b{Resolve(initial)};
+  if (b->kind == InstKind::Bound) {
+    if (a->kind == InstKind::Bound) {
+      for (const BoundAlternative &alternative : a->functors) {
+        if (const BoundAlternative *other{Find(b->functors, alternative.functor)}) {
+          std::vector<const Type *> argumentTypes{
+              ArgumentTypes(alternative.functor, type)};
+          for (std::size_t i{0}; i < alternative.arguments.size(); ++i) {
+            Bind(alternative.arguments[i], other->arguments[i],
+                argumentTypes[i], fixed, bound, seen);
+          }
+        }
+      }
+    } else if (a->kind == InstKind::Ground || a->kind == InstKind::Any) {
+      // Each argument of a ground term is ground.
+      for (const BoundAlternative &alternative : b->functors) {
+        std::vector<const Type *> argumentTypes{
+            ArgumentTypes(alternative.functor, type)};
+        for (std::size_t i{0}; i < alternative.arguments.size(); ++i) {
+          Bind(a, alternative.arguments[i], argumentTypes[i], fixed, bound, seen);
+        }
+      }
+    }
+  } else if (b->kind == InstKind::HigherOrder &&
+      a->kind == InstKind::HigherOrder && a->modes.size() == b->modes.size()) {
+    for (std::size_t i{0}; i < a->modes.size(); ++i) {
+      Bind(a->modes[i].initial, b->modes[i].initial, nullptr, fixed, bound, seen);
+      Bind(a->modes[i].final, b->modes[i].final, nullptr, fixed, bound, seen);
+    }
+  }
+}
+
+const Inst *InstOps::Plain(const Inst *inst) {
+  inst = Resolve(inst);
+  if (inst->kind == InstKind::Parameter || inst->kind == InstKind::Constrained) {
+    inst = Resolve(inst->constraint ? inst->constraint : insts_.Ground());
+  }
+  return inst;
+}
+
+std::pair<std::vector<const Inst *>, const Inst *> InstOps::Split(
+    const Inst *inst) {
+  switch (inst->kind) {
+  case InstKind::Parameter:
+    return {{inst}, inst->constraint ? inst->constraint : insts_.Ground()};
+  case InstKind::Constrained:
+    return {inst->arguments.vec(), inst->constraint};
+  default:
+    return {{}, inst};
+  }
+}
+
+bool InstOps::SubInst(const Inst *a, const Inst *b, const Type *type) {
+  return Matches(a, b, type) && Instantiated(a, b, type);
+}
+
 bool InstOps::IsFree(const Inst *inst) {
   return Resolve(inst)->kind == InstKind::Free;
 }
 
 bool InstOps::IsNotReached(const Inst *inst) {
-  const Inst *resolved{Resolve(inst)};
+  const Inst *resolved{Plain(inst)};
   return resolved->kind == InstKind::Bound && resolved->functors.empty();
 }
 
 std::optional<std::vector<const Inst *>> InstOps::Arguments(
     const Inst *inst, const InstFunctor &functor, const Type *type) {
-  const Inst *resolved{Resolve(inst)};
+  const Inst *resolved{Plain(inst)};
   switch (resolved->kind) {
   case InstKind::Free:
   case InstKind::Any:
@@ -619,9 +785,6 @@ std::optional<std::vector<const Inst *>> InstOps::Arguments(
       return alternative->arguments.vec();
     }
     return std::nullopt;
-  case InstKind::Parameter:
-    return std::vector<const Inst *>(functor.arity,
-        resolved->constraint ? resolved->constraint : insts_.Ground());
   default:
     return std::vector<const Inst *>(functor.arity, insts_.Ground());
   }
@@ -638,7 +801,7 @@ bool InstOps::HasFree(const Inst *inst, const Type *type) {
         if (!seen.insert({i, t}).second) {
           return false;
         }
-        i = Resolve(i);
+        i = Plain(i);
         if (i->kind == InstKind::Free) {
           return true;
         }
@@ -678,16 +841,17 @@ bool InstOps::MatchesNow(const Inst *a, const Inst *b, const Type *type) {
   if (a == b) {
     return true;
   }
-  if (a->kind == InstKind::Parameter) {
-    // A parameter stands for some inst compatible with its constraint.
-    return b->kind != InstKind::Parameter &&
-        Matches(a->constraint ? a->constraint : insts_.Ground(), b, type);
-  }
-  if (b->kind == InstKind::Parameter) {
-    return false;
-  }
   if (a->kind == InstKind::Bound && a->functors.empty()) {
     return true; // not_reached matches every inst
+  }
+  if (a->kind == InstKind::Parameter || a->kind == InstKind::Constrained ||
+      b->kind == InstKind::Parameter || b->kind == InstKind::Constrained) {
+    // To match an inst with inst variables, an inst must be known to be
+    // compatible with what each of them stands for (definition 4.2.3).
+    auto [as, ai] {Split(a)};
+    auto [bs, bi] {Split(b)};
+    return llvm::all_of(bs, [&](const Inst *p) { return llvm::is_contained(as, p); }) &&
+        Matches(ai, bi, type);
   }
   if (b->kind == InstKind::Free || a->kind == InstKind::Free) {
     return a->kind == b->kind;
@@ -803,12 +967,17 @@ bool InstOps::InstantiatedNow(const Inst *a, const Inst *b, const Type *type) {
   if (a->kind == InstKind::Bound && a->functors.empty()) {
     return true;
   }
-  if (a->kind == InstKind::Parameter) {
-    return b->kind != InstKind::Parameter &&
-        Instantiated(a->constraint ? a->constraint : insts_.Ground(), b, type);
-  }
-  if (b->kind == InstKind::Parameter) {
-    return false;
+  if (a->kind == InstKind::Parameter || a->kind == InstKind::Constrained ||
+      b->kind == InstKind::Parameter || b->kind == InstKind::Constrained) {
+    // A variable keeps the inst variables it gets only while its inst
+    // stays a sub-inst of the one it had (definition 4.2.2).
+    auto [as, ai] {Split(a)};
+    auto [bs, bi] {Split(b)};
+    if (!Instantiated(ai, bi, type)) {
+      return false;
+    }
+    auto in{[&](const Inst *p) { return llvm::is_contained(as, p); }};
+    return SubInst(ai, bi, type) ? llvm::all_of(bs, in) : llvm::none_of(bs, in);
   }
   // A variable never becomes more unique on forward execution.
   if (!AtLeastAsUnique(b->uniqueness, a->uniqueness)) {
@@ -908,13 +1077,22 @@ const Inst *InstOps::MergeNow(const Inst *a, const Inst *b, const Type *type) {
   if (b->kind == InstKind::Bound && b->functors.empty()) {
     return a;
   }
-  if (a->kind == InstKind::Parameter || b->kind == InstKind::Parameter) {
-    auto widen{[&](const Inst *x) {
-      return x->kind != InstKind::Parameter ? x
-          : x->constraint                   ? x->constraint
-                                            : insts_.Ground();
-    }};
-    return Merge(widen(a), widen(b), type);
+  if (a->kind == InstKind::Parameter || a->kind == InstKind::Constrained ||
+      b->kind == InstKind::Parameter || b->kind == InstKind::Constrained) {
+    // The inst variables of both (section 4.2.3).
+    auto [as, ai] {Split(a)};
+    auto [bs, bi] {Split(b)};
+    const Inst *merged{Merge(ai, bi, type)};
+    if (!merged) {
+      return nullptr;
+    }
+    std::vector<const Inst *> both;
+    for (const Inst *p : as) {
+      if (llvm::is_contained(bs, p)) {
+        both.push_back(p);
+      }
+    }
+    return insts_.Constrained(both, merged);
   }
   if (a->kind == InstKind::Free || b->kind == InstKind::Free) {
     return nullptr;
@@ -1011,10 +1189,24 @@ const Inst *InstOps::UnifyNow(const Inst *a, const Inst *b, const Type *type) {
       (b->kind == InstKind::Bound && b->functors.empty())) {
     return insts_.NotReached();
   }
-  // A parameter is only known to be compatible with its constraint, so
-  // only a free variable takes it on here.
-  if (a->kind == InstKind::Parameter || b->kind == InstKind::Parameter) {
-    return nullptr;
+  if (a->kind == InstKind::Parameter || a->kind == InstKind::Constrained ||
+      b->kind == InstKind::Parameter || b->kind == InstKind::Constrained) {
+    // The inst variables of each side whose inst the result is a sub-inst
+    // of (section 4.2.3).
+    auto [as, ai] {Split(a)};
+    auto [bs, bi] {Split(b)};
+    const Inst *unified{Unify(ai, bi, type)};
+    if (!unified) {
+      return nullptr;
+    }
+    std::vector<const Inst *> kept;
+    if (SubInst(unified, ai, type)) {
+      kept = as;
+    }
+    if (SubInst(unified, bi, type)) {
+      kept.insert(kept.end(), bs.begin(), bs.end());
+    }
+    return insts_.Constrained(kept, unified);
   }
   Uniqueness u{Least(a->uniqueness, b->uniqueness)};
   if (a->kind == InstKind::HigherOrder || b->kind == InstKind::HigherOrder) {

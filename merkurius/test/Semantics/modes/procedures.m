@@ -72,6 +72,6 @@ z.
 % CHECK: 36:9 pred procedures.h/2 mode 0: h(in(procedures.ilist(ground)), out(list.list_skel(free))) is det
 % CHECK: 37:9 pred procedures.r/1 mode 0: r(in(procedures.rec)) is det
 % CHECK: 38:9 pred procedures.u/2 mode 0: u(di, uo) is det
-% CHECK: 39:9 pred procedures.poly/2 mode 0: poly(in(I), out(I)) is det, I =< ground
+% CHECK: 39:9 pred procedures.poly/2 mode 0: poly(in((I =< ground)), out((I =< ground))) is det
 % CHECK: 43:9 pred procedures.z/0 mode 0: z is det
 % CHECK: 42:9 pred procedures.w/3 mode 0: w(in, in, out) is det
