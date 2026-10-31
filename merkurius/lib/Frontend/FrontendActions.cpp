@@ -435,6 +435,13 @@ bool DebugDumpTypesAction::executeAction() {
             *os << " by the instance at "
                 << (p.instance->local ? Position(sources, at)
                                       : FilePosition(sources, at));
+          } else if (p.goal) {
+            const parser::SymName *name{clause.names[*p.goal]};
+            *os << " by the existential constraint of "
+                << (name ? Source(r.tokens, name->tokens).ToString() : "?")
+                << " at "
+                << (name ? Position(sources, Source(r.tokens, name->tokens))
+                         : std::string{"?"});
           } else if (p.assumed) {
             *os << " by the declaration's "
                 << checking->Print(clause, *p.assumed);
@@ -445,6 +452,11 @@ bool DebugDumpTypesAction::executeAction() {
           }
         }};
     for (const semantics::GoalConstraint &c : clause.constraints) {
+      if (c.goal >= form.goals) {
+        *os << "  existential constraint of the declaration: ";
+        proof(c.proof, 0);
+        continue;
+      }
       const parser::SymName *name{clause.names[c.goal]};
       *os << "  constraint of "
           << (name ? Source(r.tokens, name->tokens).ToString() : "?")
