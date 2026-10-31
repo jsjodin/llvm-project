@@ -279,11 +279,15 @@ const Inst *ModeChecker::Parameter(llvm::StringRef name, InstScope &scope) {
     scope.names.push_back(name);
     scope.constraints.push_back(nullptr);
   }
-  if (number >= scope.made.size()) {
+  // The variables collected before it may not be converted yet, as `A`
+  // in `mode ok(in(A), out(I)) <= I =< ground`, whose constraints name
+  // `I` first.
+  while (number >= scope.made.size()) {
+    std::size_t next{scope.made.size()};
     // Unconstrained means compatible with ground.
-    const Inst *constraint{scope.constraints[number]};
-    scope.made.push_back(insts_.Parameter(
-        number, name, constraint ? constraint : insts_.Ground(), scope.id));
+    const Inst *constraint{scope.constraints[next]};
+    scope.made.push_back(insts_.Parameter(next, scope.names[next],
+        constraint ? constraint : insts_.Ground(), scope.id));
   }
   return scope.made[number];
 }
