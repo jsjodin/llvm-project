@@ -27,6 +27,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
@@ -247,6 +248,25 @@ private:
       const Symbol &type, llvm::StringRef name, unsigned arity);
   // The rules for discriminated union types' constructors, and subtypes'.
   void CheckTypeDefinitions();
+
+  // Type conversions (reference manual, "Type conversions"). The base type
+  // of a discriminated union type, with its arguments: the type itself, or
+  // the last of its chain of supertypes; null for another type, and the
+  // error type for a subtype whose supertype is in error.
+  const Type *BaseOf(const Type *);
+  // For each parameter of a base type, a type of its definition in which
+  // the parameter occurs where a coerce must keep it the same; null where
+  // it does not.
+  llvm::ArrayRef<const Type *> InvariantIn(const Symbol &base);
+  void MarkInvariant(const Type *, const Type *context, const Symbol &base,
+      std::vector<const Type *> &);
+  llvm::DenseMap<const Symbol *, std::vector<const Type *>> invariants_;
+  // Why the coerce of the unification cannot convert its argument's type
+  // to its result's in the assignment; none if it can, or if either is in
+  // error. The types must be known: coerce determines neither.
+  std::optional<std::string> CoerceError(const Assignment &, const Unify &);
+  // The clause's coerces, checked once its types are known.
+  std::vector<const Unify *> coerces_;
   void CheckMethods(const parser::InstanceDecl &, const Symbol &typeclass,
       const std::string &head);
   // The instance's definitions of its type class's methods, with their
@@ -2058,6 +2078,141 @@ void TypeChecker::CheckTypeDefinitions() {
   }
 }
 
+const Type *TypeChecker::BaseOf(const Type *type) {
+  llvm::SmallPtrSet<const Symbol *, 4> seen;
+  while (type->kind == TypeKind::Named &&
+      std::holds_alternative<const parser::DuTypeDefn *>(
+          type->constructor->declaration)) {
+    if (!std::get<const parser::DuTypeDefn *>(type->constructor->declaration)
+             ->supertype) {
+      return type;
+    }
+    const Type *super{SupertypeOf(*type->constructor)};
+    if (!super || !seen.insert(type->constructor).second) {
+      return types_.Named(error_, {}); // reported
+    }
+    llvm::ArrayRef<const Type *> arguments{type->arguments};
+    type = types_.Substitute(super, [&](unsigned var) {
+      return var < arguments.size() ? arguments[var] : types_.Named(error_, {});
+    });
+  }
+  return nullptr;
+}
+
+llvm::ArrayRef<const Type *> TypeChecker::InvariantIn(const Symbol &base) {
+  if (auto it{invariants_.find(&base)}; it != invariants_.end()) {
+    return it->second;
+  }
+  std::vector<const Type *> invariant(base.arity, nullptr);
+  const auto *defn{std::get<const parser::DuTypeDefn *>(base.declaration)};
+  for (const parser::Constructor *constructor : defn->constructors) {
+    const Symbol *symbol{ConstructorOf(
+        base, constructor->name->name, constructor->arguments.size())};
+    if (const Signature * sig{symbol ? SignatureOf(*symbol) : nullptr}) {
+      for (const Type *argument : sig->arguments) {
+        MarkInvariant(argument, nullptr, base, invariant);
+      }
+    }
+  }
+  return invariants_[&base] = std::move(invariant);
+}
+
+void TypeChecker::MarkInvariant(const Type *type, const Type *context,
+    const Symbol &base, std::vector<const Type *> &invariant) {
+  switch (type->kind) {
+  case TypeKind::Variable:
+    if (context && type->var < invariant.size() && !invariant[type->var]) {
+      invariant[type->var] = context;
+    }
+    return;
+  case TypeKind::Tuple:
+    // A tuple is not among the manual's places, nor mmc's.
+    for (const Type *element : type->arguments) {
+      MarkInvariant(element, context, base, invariant);
+    }
+    return;
+  case TypeKind::Named:
+    if (type->constructor == &base &&
+        llvm::all_of(llvm::enumerate(type->arguments), [&](auto argument) {
+          return argument.value() == types_.Variable(argument.index());
+        })) {
+      return; // base(B1, ..., Bn), recursively
+    }
+    [[fallthrough]];
+  case TypeKind::HigherOrder:
+    // In another discriminated union type, a higher-order type, an
+    // abstract or foreign type: the same in both.
+    for (const Type *argument : type->arguments) {
+      MarkInvariant(argument, context ? context : type, base, invariant);
+    }
+    if (type->result) {
+      MarkInvariant(type->result, context ? context : type, base, invariant);
+    }
+    return;
+  case TypeKind::Existential:
+    return;
+  }
+}
+
+std::optional<std::string> TypeChecker::CoerceError(
+    const Assignment &a, const Unify &unify) {
+  const Type *from{Resolve(a, VarType(unify.arguments[0]))};
+  const Type *to{Resolve(a, VarType(unify.left))};
+  if (HasError(from) || HasError(to)) {
+    return std::nullopt;
+  }
+  for (const Type *type : {from, to}) {
+    bool free{false};
+    ForEachVariable(*type, [&](unsigned var) { free |= var >= rigid_; });
+    if (free) {
+      return "nothing determines the type of its " +
+          std::string{type == from ? "argument" : "result"} +
+          ", and coerce does not";
+    }
+  }
+  const Type *fromBase{BaseOf(from)};
+  const Type *toBase{BaseOf(to)};
+  for (auto [type, base] : {std::pair{from, fromBase}, {to, toBase}}) {
+    if (!base) {
+      return TypeText(a, type) +
+          " is not a discriminated union type whose definition is visible";
+    }
+    if (IsError(base)) {
+      return std::nullopt;
+    }
+  }
+  if (fromBase->constructor != toBase->constructor) {
+    return "their base types, " + TypeText(a, fromBase) + " and " +
+        TypeText(a, toBase) + ", differ";
+  }
+  const Symbol &base{*fromBase->constructor};
+  llvm::ArrayRef<const Type *> invariant{InvariantIn(base)};
+  const auto *defn{std::get<const parser::DuTypeDefn *>(base.declaration)};
+  auto parameter{[&](unsigned var) {
+    return var < defn->parameters.size() ? defn->parameters[var].str()
+                                         : "T" + std::to_string(var);
+  }};
+  for (unsigned j{0}; j < fromBase->arguments.size(); ++j) {
+    const Type *s{fromBase->arguments[j]};
+    const Type *t{toBase->arguments[j]};
+    if (s == t) {
+      continue;
+    }
+    std::string where{"the parameter " + parameter(j) + " of " +
+        base.module.str() + "." + base.name.str() + "/" +
+        std::to_string(base.arity) + ", " + TypeText(a, s) + " in one and " +
+        TypeText(a, t) + " in the other,"};
+    if (j < invariant.size() && invariant[j]) {
+      return where + " must be the same type in both, since it occurs in " +
+          TypeToString(*invariant[j], parameter) + " in its definition";
+    }
+    if (!IsSubtype(s, t) && !IsSubtype(t, s)) {
+      return where + " and neither is a subtype of the other";
+    }
+  }
+  return std::nullopt;
+}
+
 void TypeChecker::DefineMethods(const parser::InstanceDecl &decl,
     const Symbol &typeclass, llvm::ArrayRef<const Type *> types,
     llvm::ArrayRef<ClassConstraint> constraints,
@@ -2600,8 +2755,7 @@ void TypeChecker::CheckUnify(const Unify &unify) {
     type = Primitive(functor.implementation->name == "line" ? "int" : "string");
     break;
   case FunctorKind::Coerce:
-    messages_->Say(Source(unify.tokens),
-        "type checking %s"_todo_en_US, "coerce expressions");
+    coerces_.push_back(&unify);
     return;
   case FunctorKind::Lambda: {
     const Lambda &lambda{*functor.lambda};
@@ -2879,6 +3033,7 @@ ClauseTypes TypeChecker::CheckClause(const ClauseForm &clause, bool inferring,
   rigid_ = sig ? sig->typeVars - sig->existentials : 0;
   callExistentials_.clear();
   callGiven_.clear();
+  coerces_.clear();
   rigidNames_ = sig ? sig->varNames : llvm::ArrayRef<llvm::StringRef>{};
   assumed_ = sig ? Assume(sig->constraints) : Assumed{};
   // The type qualifications' variables: the declaration's names are its
@@ -2936,6 +3091,21 @@ ClauseTypes TypeChecker::CheckClause(const ClauseForm &clause, bool inferring,
   for (Assignment &a : assignments_) {
     Improve(a);
   }
+  if (!coerces_.empty() && assignments_.size() > 1) {
+    // Assignments whose coerces cannot convert are dropped, if others are
+    // left, as mmc does: so in X = k, Y = coerce(X), with Y's type aa, X
+    // is aa's k and not another type's.
+    std::vector<Assignment> valid;
+    for (const Assignment &a : assignments_) {
+      if (llvm::none_of(coerces_,
+              [&](const Unify *unify) { return CoerceError(a, *unify); })) {
+        valid.push_back(a);
+      }
+    }
+    if (!valid.empty()) {
+      assignments_ = std::move(valid);
+    }
+  }
   ClauseTypes types{Finish(clause, definition, sig)};
   types.method = method;
   if (sig && !inferring && sig->existentials > 0 && !failed_ &&
@@ -2983,6 +3153,15 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
         [&](const Symbol *s) {
           if (s) {
             os << *s;
+            // A subtype's constructors have its supertype's names.
+            if (s->owner && s->kind == SymbolKind::Constructor &&
+                llvm::any_of(choices, [&](const Symbol *other) {
+                  return other && other != s && other->kind == s->kind &&
+                      other->module == s->module && other->name == s->name &&
+                      other->arity == s->arity;
+                })) {
+              os << " of " << *s->owner;
+            }
           } else {
             os << "a char";
           }
@@ -3051,6 +3230,20 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
   }
   types.constraints =
       result_.arena_.SaveArray(llvm::ArrayRef<GoalConstraint>{proofs});
+  bool coerceFailed{false};
+  if (sig && !ambiguity && !failed_) {
+    for (const Unify *unify : coerces_) {
+      if (std::optional<std::string> reason{CoerceError(chosen, *unify)}) {
+        // mmc: "cannot coerce from `m.fruit' to `m.veg'".
+        messages_
+            ->Say(Source(unify->tokens), "cannot coerce from %s to %s"_err_en_US,
+                TypeText(chosen, VarType(unify->arguments[0])),
+                TypeText(chosen, VarType(unify->left)))
+            .Attach(Source(unify->tokens), "%s"_because_en_US, *reason);
+        coerceFailed = true;
+      }
+    }
+  }
   std::vector<const Type *> vars;
   std::string unbound;
   for (VarId var{0}; var < clause.vars.size(); ++var) {
@@ -3070,7 +3263,7 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
       }
     }
   }
-  if (!unbound.empty()) {
+  if (!unbound.empty() && !coerceFailed) {
     // mmc: "warning: unresolved polymorphism".
     messages_->Say(Source(clause.tokens),
         "unresolved polymorphism: the type variables of these types are not determined, and will be bound to void:%s"_warn_en_US,

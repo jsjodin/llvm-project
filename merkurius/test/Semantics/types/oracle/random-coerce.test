@@ -1,0 +1,9 @@
+# Random modules as in random-1.test, with a subtype citrus =< fruit
+# and terms that coerce citrus values and lists to fruit ones, and rarely
+# a coerce that is ambiguous or of an int, which are type errors
+# (generate-random-programs.py --coerce).
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../../utils/type-oracle/generate-random-programs.py --coerce --seed 3 --count 60 %t
+# RUN: %compare-types --allow-errors %t/*.m

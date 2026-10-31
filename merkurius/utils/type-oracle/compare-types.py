@@ -255,7 +255,9 @@ TYPE_ERROR = re.compile(
     # predicate's name may contain.
     r"instance declaration|typeclass constraint|type class constraint|superclass constraint|"
     r"cyclic superclass|class parameters|constraints on class declarations|for typeclass|"
-    r"typeclass `|instance type|instance constraints",
+    r"typeclass `|instance type|instance constraints|"
+    # And for type conversions.
+    r"cannot coerce",
     re.IGNORECASE,
 )
 
