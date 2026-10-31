@@ -197,6 +197,9 @@ private:
   llvm::DenseMap<unsigned, VarId> numbers_; // the parse tree's numbering
   std::vector<TypeQualification> typeQualifications_;
   StateMap state_;
+  // The annotation of the goal being desugared, which a higher-order
+  // predicate call in it has.
+  parser::Purity annotation_{parser::Purity::Pure};
   // The !:X versions that the atomic goal being desugared names.
   llvm::SmallVector<std::pair<llvm::StringRef, VarId>, 2> next_;
   llvm::StringMap<unsigned> versions_; // each state variable's next version
@@ -410,8 +413,13 @@ void ClauseDesugarer::UnifyWith(VarId left, const parser::DataTerm &term,
           },
           [&](const parser::FunctorData *data) {
             // apply(F, X1, ..., Xn) is a higher-order function call, as
-            // call(P, ...) is a higher-order predicate call.
-            if (data->name->qualifiers.empty() && data->name->name == "apply" &&
+            // call(P, ...) is a higher-order predicate call, and
+            // impure_apply and semipure_apply apply impure and semipure
+            // functions.
+            llvm::StringRef name{data->name->name};
+            if (data->name->qualifiers.empty() &&
+                (name == "apply" || name == "impure_apply" ||
+                    name == "semipure_apply") &&
                 !data->arguments.empty()) {
               VarId closure{Flatten(data->arguments.front(), out)};
               llvm::SmallVector<VarId, 4> arguments{
@@ -419,7 +427,10 @@ void ClauseDesugarer::UnifyWith(VarId left, const parser::DataTerm &term,
               arguments.push_back(left);
               out.push_back(Make<HOCall>(range, Number(),
                   parser::PredOrFunc::Function, closure,
-                  Save(llvm::ArrayRef<VarId>{arguments})));
+                  Save(llvm::ArrayRef<VarId>{arguments}),
+                  name == "impure_apply"         ? parser::Purity::Impure
+                      : name == "semipure_apply" ? parser::Purity::Semipure
+                                                 : parser::Purity::Pure));
               return;
             }
             llvm::ArrayRef<VarId> arguments{FlattenAll(data->arguments, out)};
@@ -782,7 +793,8 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
               llvm::ArrayRef<VarId> arguments{
                   CallArguments(call->arguments.drop_front(), out)};
               out.push_back(Make<HOCall>(call->tokens, Number(),
-                  parser::PredOrFunc::Predicate, closure, arguments));
+                  parser::PredOrFunc::Predicate, closure, arguments,
+                  annotation_));
               FinishAtomic();
               return;
             }
@@ -797,7 +809,8 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
             llvm::ArrayRef<VarId> arguments{
                 CallArguments(call->arguments, out)};
             out.push_back(Make<HOCall>(call->tokens, Number(),
-                parser::PredOrFunc::Predicate, closure, arguments));
+                parser::PredOrFunc::Predicate, closure, arguments,
+                annotation_));
             FinishAtomic();
           },
           [&](const parser::QuantifiedGoal *quantified) {
@@ -805,8 +818,11 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
                 quantified->vars, quantified->goal, out);
           },
           [&](const parser::PurityGoal *x) {
+            parser::Purity saved{annotation_};
+            annotation_ = x->purity;
             out.push_back(
                 MakeScope(x->tokens, ScopeKind::Purity, goal, {}, x->goal));
+            annotation_ = saved;
           },
           [&](const parser::PromisePurity *x) {
             out.push_back(MakeScope(
@@ -1369,6 +1385,9 @@ const Lambda *ClauseDesugarer::DesugarLambda(const parser::Lambda &lambda) {
     arguments.push_back(lambda.result);
   }
   Goals goals;
+  // The body is not under the goal's annotation.
+  parser::Purity savedAnnotation{annotation_};
+  annotation_ = parser::Purity::Pure;
   Head(arguments, lambda.result, goals);
   llvm::SmallVector<std::optional<parser::Mode>, 4> modes;
   for (const parser::ModedTerm *argument : arguments) {
@@ -1383,6 +1402,7 @@ const Lambda *ClauseDesugarer::DesugarLambda(const parser::Lambda &lambda) {
     DesugarInto(*lambda.body, goals);
   }
   FillLasts(goals);
+  annotation_ = savedAnnotation;
   const Lambda *result{Make<Lambda>(lambda.tokens, lambda.kind,
       lambda.purity, Save(llvm::ArrayRef<VarId>{head_}),
       Save(llvm::ArrayRef<std::optional<parser::Mode>>{modes}),

@@ -616,7 +616,8 @@ Goal Quantifier::Rebuild(const Goal &goal, const Set &outside) {
           [&](const HOCall *call) -> Goal {
             Qualifications(call->tokens);
             return Make<HOCall>(call->tokens, call->number, call->kind,
-                MapVar(call->closure), SaveMapped(call->arguments));
+                MapVar(call->closure), SaveMapped(call->arguments),
+                call->purity);
           },
           [&](const Scope *scope) -> Goal {
             if (scope->kind != ScopeKind::Some) {
