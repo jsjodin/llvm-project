@@ -30,6 +30,8 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
+#include <functional>
+#include <set>
 
 namespace merkurius::semantics {
 
@@ -44,6 +46,16 @@ std::string TypeChecking::Print(
     return var < clause.typeVarNames.size() ? clause.typeVarNames[var].str()
                                             : "T_" + std::to_string(var);
   });
+}
+
+void PrintConstraint(llvm::raw_ostream &os, const ClassConstraint &constraint,
+    llvm::function_ref<std::string(unsigned)> name) {
+  os << constraint.typeclass->module << '.' << constraint.typeclass->name
+     << '(';
+  llvm::interleave(
+      constraint.arguments, os, [&](const Type *t) { PrintType(os, *t, name); },
+      ", ");
+  os << ')';
 }
 
 std::string SignatureToString(const Symbol &symbol, const Signature &sig) {
@@ -73,6 +85,16 @@ std::string SignatureToString(const Symbol &symbol, const Signature &sig) {
   if (function) {
     os << " = ";
     PrintType(os, *sig.arguments.back(), name);
+  }
+  if (!sig.constraints.empty()) {
+    os << " <= (";
+    llvm::interleave(
+        sig.constraints, os,
+        [&](const ClassConstraint &c) {
+          PrintConstraint(os, c, name);
+        },
+        ", ");
+    os << ')';
   }
   return text;
 }
@@ -139,6 +161,22 @@ private:
   bool IsError(const Type *type) const {
     return type->kind == TypeKind::Named && type->constructor == &error_;
   }
+
+  // Type classes and instances (reference manual, "Type classes"). A
+  // constraint whose type class is undefined or ambiguous is left out.
+  std::optional<ClassConstraint> ConvertConstraint(
+      const parser::ClassConstraint &, TypeVarNames &);
+  // A type class's superclass constraints, on its parameters, which are
+  // its type variables 0 to n-1; reported on if they break the rules.
+  llvm::ArrayRef<ClassConstraint> Superclasses(const Symbol &);
+  llvm::SmallVector<ClassConstraint, 2> SuperclassesOf(
+      const parser::TypeclassDecl &, bool report);
+  void CheckTypeclasses();
+  void CheckInstances();
+  void CheckMethods(const parser::InstanceDecl &, const Symbol &typeclass,
+      const std::string &head);
+  llvm::DenseMap<const Symbol *, llvm::ArrayRef<ClassConstraint>>
+      superclasses_;
 
   // Clauses. A clause is checked against its predicate's or function's
   // signature, declared or inferred, unless it is being inferred, when its
@@ -208,9 +246,11 @@ private:
   // Uses a declaration's tokens while it is in scope.
   struct InTokensOf {
     InTokensOf(TypeChecker &checker, const Symbol &symbol)
+        : InTokensOf{checker, symbol.tokens} {}
+    InTokensOf(TypeChecker &checker, const parser::TokenSequence *tokens)
         : checker{checker}, saved{checker.tokensNow_} {
-      if (symbol.tokens) {
-        checker.tokensNow_ = symbol.tokens;
+      if (tokens) {
+        checker.tokensNow_ = tokens;
       }
     }
     ~InTokensOf() { checker.tokensNow_ = saved; }
@@ -391,13 +431,30 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
   InTokensOf in{*this, symbol};
   TypeVarNames names;
   llvm::SmallVector<const Type *, 8> arguments;
+  llvm::SmallVector<ClassConstraint, 2> constraints;
   auto make{[&](parser::PredOrFunc kind, parser::Purity purity) {
     return Signature{kind, purity, names.next,
         result_.arena_.SaveArray(llvm::ArrayRef<llvm::StringRef>{names.names}),
-        result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments})};
+        result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments}),
+        result_.arena_.SaveArray(
+            llvm::ArrayRef<ClassConstraint>{constraints})};
   }};
   if (const auto *decl{
           std::get_if<const parser::PredDecl *>(&symbol.declaration)}) {
+    const auto *typeclass{symbol.owner
+            ? std::get_if<const parser::TypeclassDecl *>(
+                  &symbol.owner->declaration)
+            : nullptr};
+    if (typeclass) {
+      llvm::SmallVector<const Type *, 4> parameters;
+      for (llvm::StringRef parameter : (*typeclass)->parameters) {
+        names.Add(parameter);
+        parameters.push_back(types_.Variable(names.next - 1));
+      }
+      constraints.push_back({symbol.owner,
+          result_.arena_.SaveArray(
+              llvm::ArrayRef<const Type *>{parameters})});
+    }
     for (const parser::TypeAndMode *argument : (*decl)->arguments) {
       arguments.push_back(Convert(argument->type, names));
     }
@@ -416,6 +473,38 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
     }
     if ((*decl)->kind == parser::PredOrFunc::Function) {
       arguments.push_back(result ? result : types_.Named(error_, {}));
+    }
+    for (const parser::Constraint &constraint :
+        (*decl)->universalConstraints) {
+      if (const auto *c{
+              std::get_if<const parser::ClassConstraint *>(&constraint)}) {
+        if (std::optional<ClassConstraint> converted{
+                ConvertConstraint(**c, names)}) {
+          constraints.push_back(*converted);
+        }
+      }
+    }
+    // Each variable of a constraint must be determined by the argument
+    // types (reference manual, "Type class constraints on predicates and
+    // functions"); a method's, its type class's parameters too.
+    llvm::DenseSet<unsigned> determined;
+    for (const Type *argument : arguments) {
+      ForEachVariable(*argument, [&](unsigned var) { determined.insert(var); });
+    }
+    llvm::DenseSet<unsigned> reported;
+    bool function{(*decl)->kind == parser::PredOrFunc::Function};
+    for (const ClassConstraint &constraint : constraints) {
+      for (const Type *argument : constraint.arguments) {
+        ForEachVariable(*argument, [&](unsigned var) {
+          if (!determined.contains(var) && reported.insert(var).second) {
+            messages_->Say(Source((*decl)->tokens),
+                "type variable %s occurs in the constraints of %s %s/%u, but not in its %s"_err_en_US,
+                names.names[var].str(), function ? "function" : "predicate",
+                symbol.name.str(), symbol.arity,
+                function ? "argument or result types" : "argument types");
+          }
+        });
+      }
     }
     return make((*decl)->kind, (*decl)->purity);
   }
@@ -624,6 +713,451 @@ void TypeChecker::Extend(llvm::ArrayRef<Option> options,
     extended.resize(maxAssignments);
   }
   assignments_ = std::move(extended);
+}
+
+//===----------------------------------------------------------------------===//
+// Type classes and instances
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+// Whether a constraint's argument is a type variable or a ground type, as
+// those of a type class's or an instance's constraints must be.
+bool VariableOrGround(const Type &type) {
+  if (type.kind == TypeKind::Variable) {
+    return true;
+  }
+  bool ground{true};
+  ForEachVariable(type, [&](unsigned) { ground = false; });
+  return ground;
+}
+
+// Constraints as a set, to compare those of two declarations whose type
+// variables are numbered alike.
+using ConstraintSet =
+    std::set<std::pair<const Symbol *, std::vector<const Type *>>>;
+ConstraintSet AsSet(llvm::ArrayRef<ClassConstraint> constraints) {
+  ConstraintSet set;
+  for (const ClassConstraint &c : constraints) {
+    set.emplace(c.typeclass,
+        std::vector<const Type *>{c.arguments.begin(), c.arguments.end()});
+  }
+  return set;
+}
+
+std::string KindName(SymbolKind kind) {
+  return kind == SymbolKind::Function ? "function" : "predicate";
+}
+
+} // namespace
+
+std::optional<ClassConstraint> TypeChecker::ConvertConstraint(
+    const parser::ClassConstraint &constraint, TypeVarNames &names) {
+  llvm::SmallVector<const Type *, 4> arguments;
+  for (const parser::Type &argument : constraint.arguments) {
+    arguments.push_back(Convert(argument, names));
+  }
+  if (constraint.name->candidates.size() != 1) {
+    return std::nullopt; // reported by name resolution
+  }
+  return ClassConstraint{constraint.name->candidates.front(),
+      result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments})};
+}
+
+llvm::SmallVector<ClassConstraint, 2> TypeChecker::SuperclassesOf(
+    const parser::TypeclassDecl &decl, bool report) {
+  llvm::SmallVector<ClassConstraint, 2> supers;
+  for (const parser::TypeclassConstraint &item : decl.constraints) {
+    const auto *constraint{
+        std::get_if<const parser::ClassConstraint *>(&item)};
+    if (!constraint) {
+      continue; // a functional dependency
+    }
+    TypeVarNames names;
+    for (llvm::StringRef parameter : decl.parameters) {
+      names.Add(parameter);
+    }
+    std::optional<ClassConstraint> converted{
+        ConvertConstraint(**constraint, names)};
+    if (!converted) {
+      continue;
+    }
+    bool valid{true};
+    for (unsigned var{unsigned(decl.parameters.size())}; var < names.next;
+         ++var) {
+      if (report) {
+        messages_->Say(Source((*constraint)->tokens),
+            "type variable %s in the superclass constraint is not a parameter of the type class"_err_en_US,
+            names.names[var].str());
+      }
+      valid = false;
+    }
+    if (!llvm::all_of(converted->arguments,
+            [](const Type *t) { return VariableOrGround(*t); })) {
+      if (report) {
+        messages_->Say(Source((*constraint)->tokens),
+            "a superclass constraint may only constrain type variables and ground types"_err_en_US);
+      }
+      valid = false;
+    }
+    if (valid) {
+      supers.push_back(*converted);
+    }
+  }
+  return supers;
+}
+
+llvm::ArrayRef<ClassConstraint> TypeChecker::Superclasses(
+    const Symbol &typeclass) {
+  if (auto it{superclasses_.find(&typeclass)}; it != superclasses_.end()) {
+    return it->second;
+  }
+  llvm::SmallVector<ClassConstraint, 2> supers;
+  if (const auto *decl{
+          std::get_if<const parser::TypeclassDecl *>(&typeclass.declaration)}) {
+    InTokensOf in{*this, typeclass};
+    supers = SuperclassesOf(**decl, true);
+  }
+  llvm::ArrayRef<ClassConstraint> saved{
+      result_.arena_.SaveArray(llvm::ArrayRef<ClassConstraint>{supers})};
+  superclasses_[&typeclass] = saved;
+  return saved;
+}
+
+// The rules of the reference manual's "Typeclass declarations", "Abstract
+// typeclass declarations" and "Type class constraints on type class
+// declarations"; the parser checks that the parameters are distinct
+// variables.
+void TypeChecker::CheckTypeclasses() {
+  llvm::MapVector<const Symbol *, llvm::SmallVector<const TypeclassItem *, 2>>
+      bySymbol;
+  for (const TypeclassItem &item : resolution_.typeclasses()) {
+    bySymbol[item.symbol].push_back(&item);
+  }
+  auto where{[&](const parser::TypeclassDecl &decl) {
+    return Source(decl.name->tokens);
+  }};
+  for (const auto &[symbol, items] : bySymbol) {
+    (void)Superclasses(*symbol); // for its errors
+    const TypeclassItem *definition{nullptr}, *abstract{nullptr};
+    for (const TypeclassItem *item : items) {
+      if (item->decl->abstract) {
+        abstract = abstract ? abstract : item;
+      } else if (definition) {
+        parser::Message &message{messages_->Say(where(*item->decl),
+            "typeclass %s/%u is defined more than once"_err_en_US,
+            symbol->name.str(), symbol->arity)};
+        message.Attach(where(*definition->decl),
+            "it is first defined here"_because_en_US);
+      } else {
+        definition = item;
+      }
+    }
+    if (abstract && !definition) {
+      messages_->Say(where(*abstract->decl),
+          "the abstract typeclass %s/%u has no definition"_err_en_US,
+          symbol->name.str(), symbol->arity);
+    } else if (abstract) {
+      // The parameters are numbered by position in both.
+      if (AsSet(SuperclassesOf(*abstract->decl, false)) !=
+          AsSet(Superclasses(*symbol))) {
+        parser::Message &message{messages_->Say(where(*definition->decl),
+            "the superclass constraints of typeclass %s/%u differ from those of its abstract declaration"_err_en_US,
+            symbol->name.str(), symbol->arity)};
+        message.Attach(where(*abstract->decl),
+            "the abstract declaration is here"_because_en_US);
+      }
+    }
+  }
+  // The superclass relation must be acyclic: each cycle is reported once,
+  // at the first of its type classes that the module declares.
+  llvm::DenseSet<const Symbol *> inReportedCycle;
+  for (const auto &[symbol, items] : bySymbol) {
+    if (inReportedCycle.contains(symbol)) {
+      continue;
+    }
+    std::vector<const Symbol *> path{symbol};
+    llvm::DenseSet<const Symbol *> visited;
+    std::function<bool(const Symbol &)> reaches{[&](const Symbol &from) {
+      for (const ClassConstraint &super : Superclasses(from)) {
+        if (super.typeclass == symbol) {
+          return true;
+        }
+        if (visited.insert(super.typeclass).second) {
+          path.push_back(super.typeclass);
+          if (reaches(*super.typeclass)) {
+            return true;
+          }
+          path.pop_back();
+        }
+      }
+      return false;
+    }};
+    if (!reaches(*symbol)) {
+      continue;
+    }
+    std::string cycle;
+    for (const Symbol *s : path) {
+      inReportedCycle.insert(s);
+      cycle += s->module.str() + "." + s->name.str() + "/" +
+          std::to_string(s->arity) + " <= ";
+    }
+    cycle += symbol->module.str() + "." + symbol->name.str() + "/" +
+        std::to_string(symbol->arity);
+    const TypeclassItem &first{*items.front()};
+    messages_->Say(where(*first.decl),
+        "the superclass relation is cyclic: %s"_err_en_US, cycle);
+  }
+}
+
+// The rules of the reference manual's "Instance declarations", "Abstract
+// instance declarations" and "Type class constraints on instance
+// declarations". Whether the instance's superclass constraints are
+// satisfied is checked with the constraints of clauses.
+void TypeChecker::CheckInstances() {
+  // An instance's type class and its types' constructors, by position: a
+  // tuple's arity stands for its constructor. Since each type's arguments
+  // are variables, two instances overlap if their keys are equal.
+  using Key = std::vector<std::uintptr_t>;
+  struct Head {
+    const InstanceItem *item;
+    const Symbol *typeclass;
+    llvm::SmallVector<const Type *, 4> types;
+    llvm::SmallVector<ClassConstraint, 2> constraints;
+    std::string text;
+    Key key;
+    bool valid;
+  };
+  std::vector<Head> heads;
+  for (const InstanceItem &item : resolution_.instances()) {
+    const parser::InstanceDecl &decl{*item.decl};
+    if (decl.name->candidates.size() != 1) {
+      continue; // reported by name resolution
+    }
+    InTokensOf in{*this, item.tokens};
+    Head head{&item, decl.name->candidates.front(), {}, {}, {}, {}, true};
+    TypeVarNames names;
+    for (const parser::Type &type : decl.types) {
+      head.types.push_back(Convert(type, names));
+    }
+    auto name{[&](unsigned var) {
+      return var < names.names.size() ? names.names[var].str()
+                                      : "T" + std::to_string(var);
+    }};
+    {
+      llvm::raw_string_ostream os{head.text};
+      os << head.typeclass->module << '.' << head.typeclass->name << '(';
+      llvm::interleave(
+          head.types, os, [&](const Type *t) { PrintType(os, *t, name); },
+          ", ");
+      os << ')';
+    }
+    head.key.push_back(reinterpret_cast<std::uintptr_t>(head.typeclass));
+    unsigned headVars{names.next};
+    unsigned position{0};
+    for (const Type *type : head.types) {
+      ++position;
+      if (IsError(type)) {
+        head.valid = false;
+        continue;
+      }
+      if (type->kind == TypeKind::Variable ||
+          type->kind == TypeKind::HigherOrder) {
+        if (item.local) {
+          messages_->Say(Source(decl.name->tokens),
+              "in instance %s, type %u, `%s', is a %s; it must be a type constructor applied to type variables"_err_en_US,
+              head.text, position, TypeToString(*type, name),
+              type->kind == TypeKind::Variable ? "type variable"
+                                               : "higher-order type");
+        }
+        head.valid = false;
+        continue;
+      }
+      head.key.push_back(type->kind == TypeKind::Tuple
+              ? type->arguments.size()
+              : reinterpret_cast<std::uintptr_t>(type->constructor));
+      for (unsigned i{0}; i < type->arguments.size(); ++i) {
+        if (type->arguments[i]->kind != TypeKind::Variable) {
+          if (item.local) {
+            messages_->Say(Source(decl.name->tokens),
+                "in instance %s, argument %u of type %u, `%s', is not a type variable"_err_en_US,
+                head.text, i + 1, position,
+                TypeToString(*type->arguments[i], name));
+          }
+          head.valid = false;
+          break;
+        }
+      }
+    }
+    for (const parser::ClassConstraint *constraint : decl.constraints) {
+      unsigned before{names.next};
+      std::optional<ClassConstraint> converted{
+          ConvertConstraint(*constraint, names)};
+      if (item.local) {
+        for (unsigned var{std::max(before, headVars)}; var < names.next;
+             ++var) {
+          messages_->Say(Source(constraint->tokens),
+              "type variable %s in the constraints of instance %s does not occur in its types"_err_en_US,
+              names.names[var].str(), head.text);
+        }
+        if (converted &&
+            !llvm::all_of(converted->arguments,
+                [](const Type *t) { return VariableOrGround(*t); })) {
+          messages_->Say(Source(constraint->tokens),
+              "an instance's constraint may only constrain type variables and ground types"_err_en_US);
+        }
+      }
+      if (converted) {
+        head.constraints.push_back(*converted);
+      }
+    }
+    if (item.local && !decl.abstract && item.exported) {
+      messages_->Say(Source(decl.name->tokens),
+          "the instance %s is not abstract, so it may not be in the interface section"_err_en_US,
+          head.text);
+    }
+    heads.push_back(std::move(head));
+  }
+  // Overlapping instances: the module's against the loaded interfaces'
+  // and its own earlier ones.
+  std::map<Key, const Head *> seen;
+  for (const Head &head : heads) {
+    if (!head.valid || (head.item->local && head.item->decl->abstract)) {
+      continue;
+    }
+    auto [it, inserted]{seen.try_emplace(head.key, &head)};
+    if (!inserted && head.item->local) {
+      InTokensOf in{*this, head.item->tokens};
+      parser::Message &message{messages_->Say(
+          Source(head.item->decl->name->tokens),
+          "instance %s overlaps an earlier instance of typeclass %s/%u"_err_en_US,
+          head.text, head.typeclass->name.str(), head.typeclass->arity)};
+      InTokensOf other{*this, it->second->item->tokens};
+      message.Attach(Source(it->second->item->decl->name->tokens),
+          "the earlier instance is %s"_because_en_US, it->second->text);
+    }
+  }
+  for (const Head &head : heads) {
+    if (!head.item->local || !head.valid) {
+      continue;
+    }
+    const parser::InstanceDecl &decl{*head.item->decl};
+    if (!decl.abstract) {
+      CheckMethods(decl, *head.typeclass, head.text);
+      continue;
+    }
+    // An abstract instance needs a definition with the same types and
+    // constraints, up to renaming: variables are numbered in the order
+    // they occur, so the types and constraints compare as they are.
+    const Head *definition{nullptr};
+    for (const Head &other : heads) {
+      if (other.item->local && !other.item->decl->abstract &&
+          other.typeclass == head.typeclass && other.types == head.types) {
+        definition = &other;
+        break;
+      }
+    }
+    if (!definition) {
+      messages_->Say(Source(decl.name->tokens),
+          "the abstract instance %s has no definition in the implementation section"_err_en_US,
+          head.text);
+      continue;
+    }
+    if (AsSet(head.constraints) != AsSet(definition->constraints)) {
+      parser::Message &message{
+          messages_->Say(Source(definition->item->decl->name->tokens),
+              "the constraints of instance %s differ from those of its abstract declaration"_err_en_US,
+              definition->text)};
+      message.Attach(
+          Source(decl.name->tokens), "the abstract declaration is here"_because_en_US);
+    }
+  }
+}
+
+// Each method must be defined once, by clauses or by naming a predicate
+// or function, and each definition must be of a method.
+void TypeChecker::CheckMethods(const parser::InstanceDecl &decl,
+    const Symbol &typeclass, const std::string &head) {
+  const auto *classDecl{
+      std::get_if<const parser::TypeclassDecl *>(&typeclass.declaration)};
+  if (!classDecl || (*classDecl)->abstract) {
+    messages_->Say(Source(decl.name->tokens),
+        "the methods of typeclass %s/%u are not visible here, where its declaration is abstract"_err_en_US,
+        typeclass.name.str(), typeclass.arity);
+    return;
+  }
+  const ModuleSymbols *symbols{typeclass.module == resolution_.module().name()
+          ? &resolution_.module()
+          : resolution_.Module(typeclass.module)};
+  std::vector<const Symbol *> methods;
+  if (symbols) {
+    for (const Symbol *symbol : symbols->symbols()) {
+      if (symbol->owner == &typeclass) {
+        methods.push_back(symbol);
+      }
+    }
+  }
+  // The first definition of each method, and whether it names one.
+  llvm::DenseMap<const Symbol *, std::pair<TokenRange, bool>> defined;
+  for (const parser::InstanceMethod &method : decl.methods) {
+    SymbolKind kind{SymbolKind::Predicate};
+    llvm::StringRef name;
+    unsigned arity{0};
+    TokenRange tokens;
+    bool byName{false};
+    common::visit(
+        common::visitors{
+            [&](const parser::MethodByName *m) {
+              kind = m->kind == parser::PredOrFunc::Function
+                  ? SymbolKind::Function
+                  : SymbolKind::Predicate;
+              name = m->method->name->name;
+              arity = m->method->arity;
+              tokens = m->tokens;
+              byName = true;
+            },
+            [&](const parser::FactOrRule *clause) {
+              kind = clause->kind == parser::PredOrFunc::Function
+                  ? SymbolKind::Function
+                  : SymbolKind::Predicate;
+              name = clause->name->name;
+              arity = clause->arguments.size();
+              tokens = clause->name->tokens;
+            },
+            [&](const parser::DcgRule *rule) {
+              name = rule->name->name;
+              arity = rule->arguments.size() + 2;
+              tokens = rule->name->tokens;
+            },
+        },
+        method);
+    auto found{llvm::find_if(methods, [&](const Symbol *m) {
+      return m->kind == kind && m->name == name && m->arity == arity;
+    })};
+    if (found == methods.end()) {
+      messages_->Say(Source(tokens),
+          "the typeclass %s/%u has no %s method %s/%u"_err_en_US,
+          typeclass.name.str(), typeclass.arity, KindName(kind), name.str(),
+          arity);
+      continue;
+    }
+    auto [it, inserted]{defined.try_emplace(*found, tokens, byName)};
+    // Several clauses are one definition.
+    if (!inserted && (byName || it->second.second)) {
+      parser::Message &message{messages_->Say(Source(tokens),
+          "instance %s has more than one implementation of the %s method %s/%u"_err_en_US,
+          head, KindName(kind), name.str(), arity)};
+      message.Attach(Source(it->second.first),
+          "the first is here"_because_en_US);
+    }
+  }
+  for (const Symbol *method : methods) {
+    if (!defined.contains(method)) {
+      messages_->Say(Source(decl.name->tokens),
+          "instance %s has no implementation of the %s method %s/%u"_err_en_US,
+          head, KindName(method->kind), method->name.str(), method->arity);
+    }
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -1180,7 +1714,6 @@ const Type *TypeChecker::Generalization(const Type *x, const Type *y,
     auto [it, inserted]{pairs.try_emplace({x, y}, pairs.size())};
     return types_.Variable(it->second);
   }
-  Type copy{*x};
   llvm::SmallVector<const Type *, 4> arguments;
   for (auto [a, b] : llvm::zip(x->arguments, y->arguments)) {
     arguments.push_back(Generalization(a, b, pairs));
@@ -1420,6 +1953,8 @@ void TypeChecker::Infer(const Undeclared &undeclared) {
 }
 
 void TypeChecker::Run(const SemanticForm &form) {
+  CheckTypeclasses();
+  CheckInstances();
   // The module's own declarations, whose errors inference would otherwise
   // report to its scratch list, when it is first to use them.
   for (const Symbol *symbol : resolution_.module().symbols()) {

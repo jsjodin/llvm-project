@@ -29,6 +29,12 @@ with status 1 and reports each difference:
   each variable of a clause qualified with its type (`X = (X : T)`), and
   each overloaded name qualified with the module of its chosen symbol.
 
+With --error-lines, for modules of declaration errors, only the lines
+with errors and notes are compared: those of a message's other places,
+such as "the earlier instance is here", are lines too. With --include
+DIR, the modules in DIR can be imported: merkc gets -I DIR, and mmc their
+interfaces.
+
 A line with the comment `mmc-differs` is left out: errors on it, and the
 signature of a predicate or function with a clause starting on it. A test
 of what merkc does there belongs elsewhere.
@@ -51,7 +57,7 @@ import tempfile
 def tokenize(text):
     tokens = []
     for match in re.finditer(
-        r"\s*('(?:[^'\\]|\\.)*'(?:\.\w+)*|[A-Za-z_][\w.]*(?:\.'(?:[^'\\]|\\.)*')?|[(){},=])",
+        r"\s*('(?:[^'\\]|\\.)*'(?:\.\w+)*|[A-Za-z_][\w.]*(?:\.'(?:[^'\\]|\\.)*')?|<=|[(){},=])",
         text,
     ):
         tokens.append(match.group(1))
@@ -155,8 +161,9 @@ def canonical(t, names):
 
 
 def parse_signature(text):
-    """`pred name(T1, T2)` or `func name(T1) = T2` as (key, canonical text),
-    the key being (kind, unqualified name, arity)."""
+    """`pred name(T1, T2)` or `func name(T1) = T2`, either perhaps with
+    constraints, `<= (c(T1), d(T2))`, as (key, canonical text), the key
+    being (kind, unqualified name, arity). The constraints are sorted."""
     match = re.match(r"(pred|func)\s+(.*)$", text.strip().rstrip("."))
     kind, rest = match.group(1), match.group(2)
     name_match = re.match(r"((?:'(?:[^'\\]|\\.)*'|[\w]+)(?:\.(?:'(?:[^'\\]|\\.)*'|\w+))*)", rest)
@@ -172,6 +179,10 @@ def parse_signature(text):
     if kind == "func":
         parser.take("=")
         text += " = " + canonical(parser.eq(), names)
+    if parser.peek() == "<=":
+        parser.take("<=")
+        constraints = parser.args() if parser.peek() == "(" else [parser.eq()]
+        text += " <= (%s)" % ", ".join(sorted(canonical(c, names) for c in constraints))
     if parser.peek() is not None:
         raise ValueError("trailing tokens in %r" % rest)
     return (kind, name, len(arguments)), text
@@ -202,7 +213,8 @@ def mmc_messages(output, filename):
 
 TYPE_ERROR = re.compile(
     r"type error|ambiguous overloading|undefined (symbol|predicate|function|type)|"
-    r"type inference iteration limit|without corresponding|wrong number of arguments|syntax error",
+    r"type inference iteration limit|without corresponding|wrong number of arguments|syntax error|"
+    r"instance declaration|type ?class|superclass|instance type|instance constraints",
     re.IGNORECASE,
 )
 
@@ -211,12 +223,29 @@ class MmcCrash(Exception):
     pass
 
 
-def run_mmc(mmc, path, module):
+# The directory of modules to import, from --include.
+include = None
+
+
+def make_interfaces(mmc, tmp, env):
+    """Copies the modules of `include` to tmp, with their interfaces."""
+    if not include:
+        return
+    names = sorted(f for f in os.listdir(include) if f.endswith(".m"))
+    for name in names:
+        shutil.copyfile(os.path.join(include, name), os.path.join(tmp, name))
+    for flag in ("--make-short-interface", "--make-interface"):
+        for name in names:
+            subprocess.run([mmc, flag, name], cwd=tmp, env=env, capture_output=True)
+
+
+def run_mmc(mmc, path, module, all_messages=False):
     with tempfile.TemporaryDirectory() as tmp:
         copy = os.path.join(tmp, module + ".m")
         shutil.copyfile(path, copy)
         env = dict(os.environ)
         env["PATH"] = os.path.dirname(mmc) + os.pathsep + env.get("PATH", "")
+        make_interfaces(mmc, tmp, env)
         result = subprocess.run(
             [mmc, "--errorcheck-only", "--infer-all", module + ".m"],
             cwd=tmp,
@@ -228,6 +257,10 @@ def run_mmc(mmc, path, module):
         messages = mmc_messages(output, module + ".m")
         if "Uncaught Mercury exception" in output:
             raise MmcCrash(output.strip().splitlines()[-1])
+    if all_messages:
+        # Every message but warnings and inferred declarations.
+        return {line for line, text in messages if line and
+                not text.startswith(("Warning", "Inferred :- "))}
     errors, warnings, signatures = set(), set(), {}
     # "In clause for ...:" introduces the message after it.
     i = 0
@@ -257,9 +290,10 @@ def run_mmc(mmc, path, module):
 # merkc's output.
 
 
-def run_merkc(merkc, path):
+def run_merkc(merkc, path, all_messages=False):
     result = subprocess.run(
-        [merkc, "-fc1", "-fdebug-dump-types", os.path.basename(path)],
+        [merkc, "-fc1", "-fdebug-dump-types", os.path.basename(path)] +
+        (["-I", include] if include else []),
         cwd=os.path.dirname(os.path.abspath(path)),
         capture_output=True,
         text=True,
@@ -271,6 +305,9 @@ def run_merkc(merkc, path):
     clause_starts = []
     errors, warnings, signatures, clause_lines = set(), set(), {}, {}
     name = re.escape(os.path.basename(path))
+    if all_messages:
+        return {int(m.group(1)) for m in re.finditer(
+            "^" + name + r":(\d+):\d+: (?:error|because):", result.stderr, re.M)}
     for raw in (result.stdout + result.stderr).splitlines():
         match = re.match(name + r":(\d+):\d+: (error|warning): (.*)$", raw)
         if match:
@@ -581,6 +618,20 @@ def settle(text, mmc, owner, errors, signatures, starts, dump, own=False):
     return owner in owners
 
 
+def compare_error_lines(path, merkc, mmc):
+    text = open(path).read()
+    module = re.search(r"^:- module ([\w.]+)\.", text, re.M).group(1)
+    exempt = {i + 1 for i, line in enumerate(text.splitlines()) if "mmc-differs" in line}
+    ours = run_merkc(merkc, path, True) - exempt
+    theirs = run_mmc(mmc, path, module, True) - exempt
+    differences = []
+    if ours - theirs:
+        differences.append("merkc reports errors that mmc does not, at lines %s" % sorted(ours - theirs))
+    if theirs - ours:
+        differences.append("mmc reports errors that merkc does not, at lines %s" % sorted(theirs - ours))
+    return differences
+
+
 def compare(path, merkc, mmc, allow_errors=False):
     text = open(path).read()
     module = re.search(r"^:- module ([\w.]+)\.", text, re.M).group(1)
@@ -678,11 +729,20 @@ def main():
     parser.add_argument("--mmc", required=True)
     parser.add_argument("--allow-errors", action="store_true",
                         help="the modules have type errors on purpose")
+    parser.add_argument("--error-lines", action="store_true",
+                        help="compare only the lines of errors and notes")
+    parser.add_argument("--include", help="a directory of modules to import")
     parser.add_argument("files", nargs="+")
     args = parser.parse_args()
+    global include
+    include = os.path.abspath(args.include) if args.include else None
     failed = False
     for path in args.files:
-        for difference in compare(path, args.merkc, args.mmc, args.allow_errors):
+        if args.error_lines:
+            differences = compare_error_lines(path, args.merkc, args.mmc)
+        else:
+            differences = compare(path, args.merkc, args.mmc, args.allow_errors)
+        for difference in differences:
             print("%s: %s" % (path, difference))
             failed = True
     sys.exit(1 if failed else 0)

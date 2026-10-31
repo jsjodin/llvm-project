@@ -720,6 +720,9 @@ void Resolver::Run(const parser::ParseTree &tree,
     own_ = &Symbols(*module);
     for (const parser::Item &item : module->items) {
       ResolveItem(item, scope, nullptr, false, *module->tokens);
+      if (const auto *decl{std::get_if<const parser::InstanceDecl *>(&item)}) {
+        result_.instances_.push_back({*decl, module->tokens, false, true});
+      }
     }
   }
   // The module's own names.
@@ -731,6 +734,17 @@ void Resolver::Run(const parser::ParseTree &tree,
     } else {
       ResolveItem(item, inInterface ? interface : implementation,
           inInterface ? &implementation : nullptr, true, tokens);
+      if (const auto *decl{std::get_if<const parser::InstanceDecl *>(&item)}) {
+        result_.instances_.push_back({*decl, &tokens, true, inInterface});
+      } else if (const auto *decl{
+                     std::get_if<const parser::TypeclassDecl *>(&item)}) {
+        for (const Symbol *symbol : own.Lookup((*decl)->name->name)) {
+          if (symbol->kind == SymbolKind::Typeclass &&
+              symbol->arity == (*decl)->parameters.size()) {
+            result_.typeclasses_.push_back({*decl, symbol, inInterface});
+          }
+        }
+      }
     }
   }
   tokens_ = &tokens;
