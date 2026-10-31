@@ -346,7 +346,7 @@ private:
       os_ << llvm::StringRef{EnumToString(lambda.purity)}.lower() << ' ';
     }
     bool function{lambda.kind == parser::PredOrFunc::Function};
-    os_ << (function ? "func" : "pred");
+    os_ << (lambda.any ? "any_" : "") << (function ? "func" : "pred");
     std::size_t count{lambda.arguments.size() - (function ? 1 : 0)};
     auto argument{[&](std::size_t j) {
       Var(lambda.arguments[j]);

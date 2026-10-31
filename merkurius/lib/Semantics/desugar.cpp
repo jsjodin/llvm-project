@@ -1406,7 +1406,7 @@ const Lambda *ClauseDesugarer::DesugarLambda(const parser::Lambda &lambda) {
   FillLasts(goals);
   annotation_ = savedAnnotation;
   const Lambda *result{Make<Lambda>(lambda.tokens, lambda.kind,
-      lambda.purity, Save(llvm::ArrayRef<VarId>{head_}),
+      lambda.any, lambda.purity, Save(llvm::ArrayRef<VarId>{head_}),
       Save(llvm::ArrayRef<std::optional<parser::Mode>>{modes}),
       lambda.determinism, Conjoin(lambda.tokens, goals))};
   for (const auto &[number, var] : outer) {
