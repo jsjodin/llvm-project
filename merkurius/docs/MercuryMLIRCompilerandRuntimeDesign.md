@@ -800,8 +800,8 @@ Purity checking (`check-purity.cpp`) runs after type checking, by the callees it
 
 Mode analysis runs per procedure, starting from the instmap that the argument modes give.
 
-- **Scheduling.** A conjunction's conjuncts are tried in source order. One that cannot run yet, because a variable it needs is not bound enough, is delayed and retried after each conjunct that does run. The result is the conjunction's execution order. If delayed conjuncts remain and none can run, that is a mode error, and the message names each waiting goal and the variable it waits for.
-- **Unifications** are classified by the insts of their two sides: construction when the left side is free, deconstruction when it is bound and the right side has free arguments, assignment, a test when both are bound, or a call to the type's unify procedure for tests on structured values. Unifying two free variables that both stay live is an error, except at open types (Language extensions).
+- **Scheduling.** A conjunction's conjuncts are tried in source order. One that cannot run yet, because a variable it needs is not bound enough, is delayed and retried after each conjunct that does run. The result is the conjunction's execution order. If delayed conjuncts remain and none can run, that is a mode error, and the message names each waiting goal and the variable it waits for, unless a waiting goal needs a free variable of an open type: that variable becomes a fresh unbound variable and scheduling continues (Language extensions, "Open terms").
+- **Unifications** are classified by the insts of their two sides: construction when the left side is free, deconstruction when it is bound and the right side has free arguments, assignment, a test when both are bound, or a call to the type's unify procedure for tests on structured values. Unifying two free variables that both stay live is an error, except at open types (Language extensions). At open types, a unification of an `any` value with a functor is a `get_structure`, and one of two `any` values is a full unification.
 - **Calls** choose a procedure of the callee whose initial insts the arguments match. If an argument is bound where the chosen mode outputs it, the call writes to a fresh variable and an implicit test against the original follows; this is an implied mode. A local predicate without mode declarations gets its modes inferred from its calls when mode inference is enabled, as with mmc's `--infer-modes`, iterating within the SCC. A function without mode declarations gets the default mode the manual defines: all arguments `in`, result `out`.
 - **Branches.** Each arm of a disjunction, if-then-else or switch is analysed from the same starting instmap, and the results are merged at the join; a nonlocal bound in one arm but not another is an error. Negations and if-then-else conditions may not bind nonlocals, except for open terms inside a promise scope, as the manual's rule for solver types requires.
 - **Higher-order code.** Closure insts carry the closure's modes and determinism, so a higher-order call is checked like a first-order one.
@@ -1118,11 +1118,12 @@ Mercury never unifies two unbound variables that both stay live, so no term can 
 
 The most common reason Prolog code uses difference lists, building a list in order, needs none of this. Tail-as-input clauses, DCGs, cords and last-call-modulo-constructors already do it in ground code (E4), and they are the faster choice: building through holes costs 2.3× the ground version (E5). Open terms are for the rest: incremental construction where the order is not known in advance, and algorithms built on unification, such as type inference.
 
-**Types.** For any type `T`, `open(T)` has the same constructors as `T`, but any argument at any depth may be an unbound variable; an argument of type `U` has type `open(U)` inside it. Values of an open type have inst `any`, Mercury's existing inst for values that may be partly unbound, and are passed with the existing modes `ia` (`any >> any`) and `oa` (`free >> any`). A free variable of an open type becomes a fresh unbound variable when it first reaches an `any` position; the compiler inserts the code that creates it. In constructor arguments, a ground `U` is accepted where `open(U)` is expected; elsewhere conversion is explicit.
+**Types.** For any type `T`, `open(T)` has the same constructors as `T`, but any argument at any depth may be an unbound variable; an argument of type `U` has type `open(U)` inside it. Values of an open type have inst `any`, Mercury's existing inst for values that may be partly unbound, and are passed with the existing modes `ia` (`any >> any`) and `oa` (`free >> any`). A free variable of an open type becomes a fresh unbound variable only when mode analysis cannot schedule its conjunction otherwise; the compiler then inserts the code that creates it (Checking rules). In constructor arguments, a ground `U` is accepted where `open(U)` is expected; elsewhere conversion is explicit.
 
 **Operations.**
 
 - `X = Y` on open values is full unification. It may bind variables on either side, including one variable to another, and fails on a constructor clash, so it is `semidet`. Construction into a variable that is still `free` stays `det`.
+- `X = f(Y1, ..., Yn)` with `X` an `any` value is the WAM's `get_structure`. If `X` is an unbound variable, it is bound to a new cell, and the arguments that are still free become fresh variables (write mode). If `X` is bound to `f`, the free arguments are assigned its fields, and the others are unified with them (read mode). It is `det` when the type has one functor and every argument is free, and `semidet` otherwise. Only the arguments that are not free need full unification.
 - `to_open(X)` turns a ground `T` into an `open(T)`. It is free when the two types share a layout (Lowering) and copies otherwise.
 - `from_open(open(T)::ia, T::out) is semidet` fails if any variable is still unbound or the term is cyclic. It returns the term itself when the walk meets no variable cell, bound or unbound, and otherwise copies it into `T`'s layout.
 - Plain `=` omits the occurs check, as Prolog does; `unify_oc` performs it. `from_open` rejects the cyclic terms that can result, so ground code never sees one.
@@ -1130,8 +1131,9 @@ The most common reason Prolog code uses difference lists, building a list in ord
 
 **Checking rules.**
 
+- **Fresh variables are a last resort.** Mode analysis schedules a conjunction as usual, delaying goals whose inputs are not bound enough. Only when no goal can run does it create a fresh variable for a free open variable that a delayed goal needs, and then it continues. Ground parts of a clause therefore keep the ordinary order: a hole that a later goal fills with `[]` is constructed as `[]`, without a variable cell or a binding. `free` does not match `any`, as in mmc (Overton 2003, 3.2.2), so a merge never turns a variable that is free in one branch into `any`.
 - **Negated contexts.** A negation or if-then-else condition that may bind a nonlocal `any` variable needs a `promise_pure` scope, the rule Mercury already applies to solver types. `\+ X = 1` with `X` unbound is the case Prolog answers wrongly.
-- **Determinism.** Binding an existing variable is `semidet`, because the compiler cannot know it is still unbound. An inst for "known unbound" would make first bindings `det`; that is a later refinement.
+- **Determinism.** Binding an existing variable is `semidet`, because the compiler cannot know it is still unbound. An inst for "known unbound" would make first bindings `det`; that is a later refinement. Without alias tracking the compiler cannot prove such an inst, since a hole is shared with the term around it, so it would be a promise in the mode declaration that the caller's code relies on, not a checked fact.
 - **Sendability.** Open values are sendable, with the semantics of Prolog's `copy_term`. The receiver gets one fresh variable for each distinct unbound variable in the message, so sharing among variables is preserved. Bound variables arrive as their values, and later bindings on either side stay on that side.
 - **Parallel loops.** A loop body may not bind an open variable that is nonlocal to the body. The trail belongs to the process, and two threads binding one variable would race.
 - **Uniqueness.** Open values are never `unique`, and structure reuse skips them, because the trail may still refer to their cells.
@@ -1165,6 +1167,64 @@ main(!IO) :-
 ```
 
 `make_open` stays `det`. Its first clause unifies two free variables, which creates one fresh variable and makes the other refer to it, and the mode checker schedules the recursive call before the construction, as it does today. `close` is `semidet` because `Hole` might already be bound. Outside these predicates, `list(int)` keeps its ordinary unboxed layout.
+
+**Example: appending difference lists.** The Prolog idiom `app(A-B, B-C, A-C)`, with a predicate that closes the result into an ordinary list, and a caller in ordinary Mercury:
+
+```mercury
+:- type dlist == open(pair(list(int), list(int))).   % Front - Hole
+
+:- pred append_dl(dlist::ia, dlist::ia, dlist::oa) is semidet.
+append_dl(A - B, B - C, A - C).
+
+    % Close the hole with [] and return an ordinary list.
+:- pred dl_to_list(dlist::ia, list(int)::out) is semidet.
+dl_to_list(F - [], L) :-
+    from_open(F, L).
+
+:- pred test(list(int)::out) is semidet.
+test(L) :-
+    D1 = [1, 2 | H1] - H1,
+    D2 = [3 | H2] - H2,
+    append_dl(D1, D2, D),
+    dl_to_list(D, L).
+
+:- pred first(int::out) is semidet.
+first(X) :-
+    test(L),
+    L = [X | _].
+```
+
+`open(pair(...))` makes the pair open as well as the lists, so `A`, `B` and `C` are `open(list(int))`. Below, `<=` is a construction, `=>` a deconstruction, `?=` a `get_structure`, `~=` a full unification and `:=` an assignment, after the notation of Overton (2003, 3.3.1).
+
+`append_dl` desugars to `V1 = A - B, V2 = B - C, V3 = A - C`. For the procedure `(ia, ia, oa)`, `V1` and `V2` start as `any` and `V3` and the locals as `free`.
+
+| Goal | Kind | Determinism | Afterwards |
+| --- | --- | --- | --- |
+| `V1 = A - B` | `V1 ?= A - B`; `pair` has one functor and both arguments are free | `det` | `A`, `B`: `any` |
+| `V2 = B - C` | `V2 ?= B' - C, B ~= B'`; `B` is no longer free | `semidet` | `C`: `any` |
+| `V3 = A - C` | `V3 <= A - C` | `det` | `V3`: `bound(any - any)` |
+
+No goal waits, because an `any` input is always bound enough, so the source order stands. `bound(any - any)` matches `any`, so the final insts satisfy the modes, and the procedure is `semidet`, as declared. Used correctly it cannot fail, because the hole `B` is unbound, but proving that needs the "known unbound" inst (Checking rules).
+
+`dl_to_list` desugars to `V1 = F - H, H = [], from_open(F, L)`. `V1 ?= F - H` is `det`. `H` is then `any`, so `H ?= []` binds the hole or tests it, which is `semidet`, since `list` has two functors. `from_open(F, L)` is `semidet`: it still fails if an element, of type `open(int)`, is unbound. Its declared mode `(ia, out)` makes `L` `ground` and its type makes it an ordinary `list(int)`, so the open part ends there without a special rule.
+
+In `test`, every goal waits at first. The constructions need `H1` or `H2`, the call needs `D1` and `D2`, and `dl_to_list(D, L)` needs `D`, because `free` does not match `ia`. With nothing able to run, mode analysis creates fresh variables:
+
+```mercury
+test(L) :-
+    H1 := new_var, V1 <= [2 | H1], V2 <= [1 | V1], D1 <= V2 - H1,
+    H2 := new_var, V3 <= [3 | H2], D2 <= V3 - H2,
+    append_dl(D1, D2, D),           % semidet; D: any
+    dl_to_list(D, L).               % semidet; L: ground
+```
+
+`H1` is in two cells, `V1` and `D1`, which plain Mercury forbids. Here it is a variable cell by then, and both cells refer to it. All the open variables are local to `test`.
+
+In `first`, `L` is `ground` and has type `list(int)`, so `L = [X | _]` is the ordinary deconstruction `L => [X | _]`: a tag test and a field load. There is no dereferencing, no write mode and no trail, and the elements are unboxed again. `first` compiles exactly as it would in a module that never mentions `open`.
+
+At run time, `append_dl` binds `_1` to `[3 | _2]` in constant time and returns `[1, 2, 3 | _2] - _2`. `dl_to_list` binds `_2` to `[]`, and `from_open` meets the two variable cells, so it copies the list into the ordinary layout: `L = [1, 2, 3]` and `X = 1`.
+
+mmc 22.01.9, with `dlist == pair(list(int), list(int))` and modes `in, in, out`, accepts `append_dl`, but only as a test of ground pairs. It rejects building the difference list, at `D1 = [1, 2 | H1] - H1`: "mode error in unification of `D1' and `pair.(V_8 - H1)'. Variable `D1' has instantiatedness `free', term `pair.(V_8 - H1)' has instantiatedness `named inst pair.'-'(free, free)'". That is where the open version creates its fresh variables.
 
 **Why option 1.** Three representations were considered for telling a variable from a value inside an open term. The first test was what each costs code that never uses open terms, and the second what it costs code that does, measured in a C model of the generated code (E5).
 
