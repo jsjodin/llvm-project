@@ -16,6 +16,7 @@
 #include "merkurius/Parser/source.h"
 #include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/unparse.h"
+#include "merkurius/Semantics/check-determinism.h"
 #include "merkurius/Semantics/check-modes.h"
 #include "merkurius/Semantics/check-purity.h"
 #include "merkurius/Semantics/check-types.h"
@@ -475,6 +476,47 @@ bool DebugDumpTypesAction::executeAction() {
   return !r.messages.AnyFatalError();
 }
 
+// A procedure as -fdebug-dump-modes lists it: pred m.p/2 mode 0: p(in,
+// out) is det, with a rejected inferred mode's final insts not_reached.
+static void PrintProcedure(llvm::raw_ostream &os,
+    const semantics::Procedure &procedure, semantics::ModeChecking &modes,
+    const parser::AllSources &sources) {
+  os << (procedure.source.empty() ? std::string{"(default)"}
+                                  : Position(sources, procedure.source))
+     << ' ' << *procedure.symbol
+     << (procedure.inferred ? " inferred mode " : " mode ") << procedure.number
+     << ": " << procedure.symbol->name;
+  bool function{procedure.symbol->kind == semantics::SymbolKind::Function};
+  llvm::ArrayRef<semantics::ArgMode> arguments{procedure.modes};
+  // A rejected inferred mode's final insts are not known, as in mmc.
+  std::vector<semantics::ArgMode> rejected;
+  if (procedure.inferred && modes.HasError(procedure)) {
+    for (const semantics::ArgMode &mode : procedure.modes) {
+      rejected.push_back({mode.initial, modes.insts().NotReached()});
+    }
+    arguments = rejected;
+  }
+  if (function && !arguments.empty()) {
+    arguments = arguments.drop_back();
+  }
+  if (!arguments.empty()) {
+    os << '(';
+    llvm::interleave(
+        arguments, os,
+        [&](const semantics::ArgMode &mode) { semantics::PrintArgMode(os, mode); },
+        ", ");
+    os << ')';
+  }
+  if (function && !procedure.modes.empty()) {
+    os << " = ";
+    semantics::PrintArgMode(os, procedure.modes.back());
+  }
+  if (procedure.determinism) {
+    os << " is " << semantics::DeterminismName(*procedure.determinism);
+  }
+  os << '\n';
+}
+
 bool DebugDumpModesAction::executeAction() {
   CompilerInstance &ci{getInstance()};
   const FrontendOptions &frontend{ci.getFrontendOpts()};
@@ -510,42 +552,7 @@ bool DebugDumpModesAction::executeAction() {
   // The declared procedures, and then those inferred from calls:
   // pred m.p/2 inferred mode 0: p(in, uo).
   auto dump{[&](const semantics::Procedure &procedure) {
-    *os << (procedure.source.empty() ? std::string{"(default)"}
-                                     : Position(sources, procedure.source))
-        << ' ' << *procedure.symbol
-        << (procedure.inferred ? " inferred mode " : " mode ")
-        << procedure.number << ": " << procedure.symbol->name;
-    bool function{procedure.symbol->kind == semantics::SymbolKind::Function};
-    llvm::ArrayRef<semantics::ArgMode> arguments{procedure.modes};
-    // A rejected inferred mode's final insts are not known, as in mmc.
-    std::vector<semantics::ArgMode> rejected;
-    if (procedure.inferred && modes->HasError(procedure)) {
-      for (const semantics::ArgMode &mode : procedure.modes) {
-        rejected.push_back({mode.initial, modes->insts().NotReached()});
-      }
-      arguments = rejected;
-    }
-    if (function && !arguments.empty()) {
-      arguments = arguments.drop_back();
-    }
-    if (!arguments.empty()) {
-      *os << '(';
-      llvm::interleave(
-          arguments, *os,
-          [&](const semantics::ArgMode &mode) {
-            semantics::PrintArgMode(*os, mode);
-          },
-          ", ");
-      *os << ')';
-    }
-    if (function && !procedure.modes.empty()) {
-      *os << " = ";
-      semantics::PrintArgMode(*os, procedure.modes.back());
-    }
-    if (procedure.determinism) {
-      *os << " is " << semantics::DeterminismName(*procedure.determinism);
-    }
-    *os << '\n';
+    PrintProcedure(*os, procedure, *modes, sources);
     if (modes->HasError(procedure)) {
       *os << "  mode error\n";
     } else if (semantics::Unchecked why{modes->UncheckedReason(procedure)};
@@ -593,6 +600,49 @@ bool DebugDumpModesAction::executeAction() {
       semantics::DumpClauseModes(*os, clause, r.tokens,
           [&](parser::CharBlock at) { return Position(sources, at); });
     }
+  }
+  os->flush();
+  return !r.messages.AnyFatalError();
+}
+
+bool DebugDumpDeterminismAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  const FrontendOptions &frontend{ci.getFrontendOpts()};
+  Resolved r;
+  Resolve(ci, getSourceFile(), r);
+  semantics::TypeCheckOptions typeOptions;
+  typeOptions.inferTypes = frontend.inferTypes;
+  typeOptions.inferenceIterationLimit = frontend.typeInferenceIterationLimit;
+  std::unique_ptr<semantics::TypeChecking> types{semantics::CheckTypes(
+      *r.form, *r.resolution, r.tokens, r.messages, typeOptions)};
+  semantics::CheckPurity(
+      *r.tree, r.tokens, *r.form, *r.resolution, *types, r.messages);
+  semantics::ModeCheckOptions options;
+  options.inferModes = frontend.inferModes;
+  options.inferenceIterationLimit = frontend.modeInferenceIterationLimit;
+  std::unique_ptr<semantics::ModeChecking> modes{semantics::CheckModes(*r.tree,
+      r.tokens, *r.form, *r.resolution, *types, r.messages, options)};
+  std::unique_ptr<semantics::DeterminismChecking> determinism{
+      semantics::CheckDeterminism(r.tokens, *types, *modes, r.messages)};
+  r.messages.Emit(llvm::errs(), ci.getAllSources());
+  llvm::raw_ostream *os{ci.createDefaultOutputFile()};
+  if (!os) {
+    return false;
+  }
+  const parser::AllSources &sources{ci.getAllSources()};
+  // Each procedure whose modes were checked, as -fdebug-dump-modes lists
+  // it, and its body; instance methods' as method m.c(T) pred m.p/1 mode
+  // 0.
+  for (const semantics::ProcedureBody &body : determinism->bodies()) {
+    if (body.method) {
+      *os << "method " << body.method->method->instanceText << ' '
+          << *body.procedure->symbol << " mode " << body.procedure->number
+          << '\n';
+    } else {
+      PrintProcedure(*os, *body.procedure, *modes, sources);
+    }
+    semantics::DumpProcedureBody(*os, body, r.tokens,
+        [&](parser::CharBlock at) { return Position(sources, at); });
   }
   os->flush();
   return !r.messages.AnyFatalError();

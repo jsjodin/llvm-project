@@ -138,6 +138,12 @@ class DebugDumpModesAction : public FrontendAction {
   bool executeAction() override;
 };
 
+// Type, purity and mode checks the source file, and lists each checked
+// procedure's body as determinism analysis sees it, with its switches.
+class DebugDumpDeterminismAction : public FrontendAction {
+  bool executeAction() override;
+};
+
 } // namespace merkurius::frontend
 
 #endif // MERKURIUS_FRONTEND_FRONTENDACTIONS_H_

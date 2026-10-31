@@ -74,3 +74,17 @@ if mmc and os.path.exists(mmc):
             ),
         )
     )
+    # Switch detection compared with mmc's (utils/type-oracle).
+    config.substitutions.append(
+        (
+            "%compare-switches",
+            "%s %s --merkc %s --mmc %s"
+            % (
+                config.python_executable,
+                os.path.join(config.merkurius_src_root, "utils", "type-oracle",
+                             "compare-switches.py"),
+                os.path.join(config.merkurius_tools_dir, "merkc"),
+                os.path.abspath(mmc),
+            ),
+        )
+    )

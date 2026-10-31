@@ -29,6 +29,7 @@
 #include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/term.h"
 #include "merkurius/Parser/unparse.h"
+#include "merkurius/Semantics/check-determinism.h"
 #include "merkurius/Semantics/check-modes.h"
 #include "merkurius/Semantics/check-purity.h"
 #include "merkurius/Semantics/check-types.h"
@@ -140,14 +141,17 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, bool openMP) {
   std::unique_ptr<merkurius::semantics::NameResolution> resolution{
       merkurius::semantics::ResolveNames(
           tree, tokens, semanticForm, loader, messages)};
-  // And type checking, purity checking and mode checking.
+  // And type checking, purity checking, mode checking and determinism
+  // analysis.
   std::unique_ptr<merkurius::semantics::TypeChecking> checking{
       merkurius::semantics::CheckTypes(
           semanticForm, *resolution, tokens, messages)};
   merkurius::semantics::CheckPurity(
       tree, tokens, semanticForm, *resolution, *checking, messages);
-  merkurius::semantics::CheckModes(
-      tree, tokens, semanticForm, *resolution, *checking, messages);
+  std::unique_ptr<merkurius::semantics::ModeChecking> modes{
+      merkurius::semantics::CheckModes(
+          tree, tokens, semanticForm, *resolution, *checking, messages)};
+  merkurius::semantics::CheckDeterminism(tokens, *checking, *modes, messages);
   return result;
 }
 

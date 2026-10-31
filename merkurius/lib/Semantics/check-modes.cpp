@@ -872,6 +872,8 @@ void ModeChecker::CheckForTypes(const Symbol &symbol,
 }
 
 void ModeChecker::Run(const parser::ParseTree &tree) {
+  result_.constructors_ = std::make_unique<ConstructorTable>(resolution_, types_);
+  result_.ops_ = std::make_unique<InstOps>(insts_, *result_.constructors_);
   const ModuleSymbols &own{resolution_.module()};
   for (const Symbol *symbol : own.symbols()) {
     if (symbol->kind == SymbolKind::Inst) {
@@ -1396,6 +1398,8 @@ private:
   const ClauseForm *form_{nullptr};
   const Procedure *procedure_{nullptr};
   std::vector<GoalModes> goals_;
+  // By goal number, the insts of its nonlocals before it last ran.
+  std::vector<std::vector<const Inst *>> befores_;
   // The goal run last, where an error in the final insts is reported, as
   // in mmc.
   parser::CharBlock last_{};
@@ -1646,6 +1650,7 @@ ProcedureChecker::Result ProcedureChecker::CheckClause(
   form_ = clause.clause;
   procedure_ = &procedure;
   goals_.assign(form_->goals, GoalModes{});
+  befores_.assign(form_->goals, {});
   touched_.assign(form_->vars.size(), 0);
   locks_.assign(form_->vars.size(), Lock::None);
   last_ = Start(form_->tokens);
@@ -1665,6 +1670,10 @@ ProcedureChecker::Result ProcedureChecker::CheckClause(
     final.push_back(map[var]);
   }
   out.final = result_.arena_.SaveArray(llvm::ArrayRef<const Inst *>{final});
+  for (std::size_t i{0}; i < goals_.size(); ++i) {
+    goals_[i].before =
+        result_.arena_.SaveArray(llvm::ArrayRef<const Inst *>{befores_[i]});
+  }
   out.goals = result_.arena_.SaveArray(llvm::ArrayRef<GoalModes>{goals_});
   return Ok();
 }
@@ -1939,6 +1948,13 @@ ProcedureChecker::Result ProcedureChecker::CheckLocked(
 
 ProcedureChecker::Result ProcedureChecker::CheckGoal(
     const Goal &goal, InstMap &map, const Live &live) {
+  // The insts before the goal, for determinism analysis; the run that
+  // succeeds is the last.
+  std::vector<const Inst *> &before{befores_[NumberOf(goal)]};
+  before.clear();
+  for (VarId var : form_->nonlocals[NumberOf(goal)]) {
+    before.push_back(map[var]);
+  }
   return common::visit(
       common::visitors{
           [&](const Conj *conj) -> Result {
@@ -2415,6 +2431,7 @@ ProcedureChecker::Result ProcedureChecker::CheckVarUnify(
   const Type *type{TypeOf(x)};
   const Inst *a{map[x]}, *b{map[y]};
   GoalModes &modes{goals_[unify.number]};
+  modes.head = heads_.count(&unify);
   bool xFree{ops_.IsFree(a)}, yFree{ops_.IsFree(b)};
   if (xFree && yFree) {
     // Two free variables may be aliased only if one is not used again.
@@ -2428,6 +2445,7 @@ ProcedureChecker::Result ProcedureChecker::CheckVarUnify(
     }
     modes.unify = UnifyKind::Assign;
     modes.assigned = live[x] ? x : y;
+    modes.dead = true;
     // That wakes the goals that wait for either, which may now find it
     // not used again, as in mmc.
     ++touched_[x];
@@ -2453,6 +2471,7 @@ ProcedureChecker::Result ProcedureChecker::CheckVarUnify(
     map[from] = value;
     modes.unify = UnifyKind::Assign;
     modes.assigned = to;
+    modes.dead = !live[to];
     return Ok();
   }
   if (type && type->kind == TypeKind::HigherOrder) {
@@ -2469,6 +2488,7 @@ ProcedureChecker::Result ProcedureChecker::CheckVarUnify(
   if (ops_.IsNotReached(unified) && !ops_.IsNotReached(a) &&
       !ops_.IsNotReached(b)) {
     // mmc: "warning: unification of `X' and `Y' cannot succeed".
+    modes.fails = true;
     warnings_.emplace_back(Source(unify.tokens),
         "the unification of " + Name(x) + " and " + Name(y) +
             " cannot succeed: " + Name(x) + " has inst " + InstText(a) +
@@ -2501,7 +2521,9 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
   const Symbol *symbol{clause_->symbols[unify.number]};
   switch (unify.functor.kind) {
   case FunctorKind::Lambda:
-    return CheckLambda(unify, goal, map, live);
+    r = CheckLambda(unify, goal, map, live);
+    modes.dead = !live[x];
+    return r;
   case FunctorKind::Coerce:
     return CheckCoerce(unify, goal, map, live);
   case FunctorKind::Literal:
@@ -2525,7 +2547,9 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
             unify.arguments.size() < symbol->arity) ||
         (symbol->kind == SymbolKind::Predicate &&
             unify.arguments.size() <= symbol->arity)) {
-      return CheckClosure(unify, goal, *symbol, map);
+      r = CheckClosure(unify, goal, *symbol, map);
+      modes.dead = !live[x];
+      return r;
     }
     if (symbol->kind == SymbolKind::Function ||
         symbol->kind == SymbolKind::Field ||
@@ -2594,6 +2618,8 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
     }
     map[x] = term;
     modes.unify = UnifyKind::Construct;
+    modes.functor = functor;
+    modes.dead = !live[x];
     last_ = Start(unify.tokens);
     return Ok();
   }
@@ -2631,6 +2657,7 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
   if (ops_.IsNotReached(unified) && !ops_.IsNotReached(a)) {
     // mmc: "warning: unification of `V3' and m.c cannot succeed. `V3' has
     // instantiatedness `unique(a)'."
+    modes.fails = true;
     warnings_.emplace_back(Source(unify.tokens),
         "the unification of " + Name(x) + " and " + TermText(*form_, unify) +
             " cannot succeed: " + Name(x) + " has inst " + InstText(a));
@@ -2654,6 +2681,7 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
   }
   map[x] = unified;
   modes.unify = test ? UnifyKind::Test : UnifyKind::Deconstruct;
+  modes.functor = functor;
   last_ = Start(unify.tokens);
   return Ok();
 }
@@ -3554,10 +3582,8 @@ std::unique_ptr<ModeChecking> CheckModes(const parser::ParseTree &tree,
   ModeChecker declarations{
       *result, resolution, types, tokens, messages, options};
   declarations.Run(tree);
-  ConstructorTable constructors{resolution, types};
-  InstOps ops{result->insts(), constructors};
-  ProcedureChecker{*result, declarations, resolution, types, ops, tokens,
-      messages, options}
+  ProcedureChecker{*result, declarations, resolution, types, result->ops(),
+      tokens, messages, options}
       .Run();
   return result;
 }
