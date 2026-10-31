@@ -534,11 +534,6 @@ bool DebugDumpModesAction::executeAction() {
     if (procedure.determinism) {
       *os << " is " << semantics::DeterminismName(*procedure.determinism);
     }
-    // The constraints of its inst parameters.
-    for (const semantics::Inst *parameter : procedure.parameters) {
-      *os << ", " << parameter->name << " =< ";
-      semantics::PrintInst(*os, *parameter->constraint);
-    }
     *os << '\n';
     if (modes->HasError(procedure)) {
       *os << "  mode error\n";
