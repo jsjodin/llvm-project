@@ -639,7 +639,14 @@ bool DebugDumpDeterminismAction::executeAction() {
           << *body.procedure->symbol << " mode " << body.procedure->number
           << '\n';
     } else {
-      PrintProcedure(*os, *body.procedure, *modes, sources);
+      std::string header;
+      llvm::raw_string_ostream line{header};
+      PrintProcedure(line, *body.procedure, *modes, sources);
+      *os << llvm::StringRef{header}.rtrim('\n');
+      if (body.determinism) {
+        *os << ", inferred " << semantics::DeterminismName(*body.determinism);
+      }
+      *os << '\n';
     }
     semantics::DumpProcedureBody(*os, body, r.tokens,
         [&](parser::CharBlock at) { return Position(sources, at); });

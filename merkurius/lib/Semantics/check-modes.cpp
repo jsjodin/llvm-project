@@ -57,6 +57,14 @@ std::string Text(const Symbol &symbol) {
   return text;
 }
 
+// A procedure that is erroneous or failure never returns a solution, so
+// nothing after a call of it is reached, as mode analysis knows (reference
+// manual, "Replacing compile-time checking with run-time checking").
+bool NoSolutions(parser::Determinism determinism) {
+  return determinism == parser::Determinism::Erroneous ||
+      determinism == parser::Determinism::Failure;
+}
+
 const char *Keyword(parser::PredOrFunc kind) {
   return kind == parser::PredOrFunc::Function ? "func" : "pred";
 }
@@ -1090,13 +1098,17 @@ void ModeChecker::BuildProcedures(
     }
     if (procedures.empty() && !combined && !modeDecls.count(symbol)) {
       if (symbol->kind == SymbolKind::Function) {
-        // The default mode: every argument in, the result out, det.
+        // The default mode: every argument in, the result out, det unless
+        // the declaration gives a determinism (reference manual,
+        // "Determinism categories").
         std::vector<ArgMode> modes(symbol->arity,
             ArgMode{insts_.Ground(), insts_.Ground()});
         modes.push_back(ArgMode{insts_.Free(), insts_.Ground()});
+        parser::Determinism determinism{
+            pred.determinism.value_or(parser::Determinism::Det)};
         procedures.push_back(Procedure{symbol, 0,
             result_.arena_.SaveArray(llvm::ArrayRef<ArgMode>{modes}),
-            parser::Determinism::Det, {}});
+            determinism, {}});
       } else if (!own_) {
       } else if (symbol->exported) {
         // mmc: "no mode declaration for exported predicate `m.p'/1", even
@@ -2863,6 +2875,9 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
       map[var] = insts_.NotReached();
     }
   }
+  if (chosen->determinism && NoSolutions(*chosen->determinism)) {
+    map.assign(map.size(), insts_.NotReached());
+  }
   modes.callee = chosen;
   modes.implied = implied;
   return Ok();
@@ -3244,7 +3259,10 @@ ProcedureChecker::Result ProcedureChecker::CheckLambda(
   map[x] = insts_.HigherOrder(lambda.kind, lambda.any, *modes,
       lambda.determinism.value_or(parser::Determinism::Det),
       Uniqueness::Unique);
-  goals_[unify.number].unify = UnifyKind::Construct;
+  GoalModes &g{goals_[unify.number]};
+  g.unify = UnifyKind::Construct;
+  g.determinism = lambda.determinism.value_or(parser::Determinism::Det);
+  g.lambda = result_.arena_.SaveArray(llvm::ArrayRef<ArgMode>{*modes});
   last_ = Start(unify.tokens);
   return Ok();
 }
@@ -3460,9 +3478,13 @@ ProcedureChecker::Result ProcedureChecker::CheckHigherOrderCall(
     return *error;
   }
   Pass(modes, call.arguments, map);
+  if (NoSolutions(inst->determinism)) {
+    map.assign(map.size(), insts_.NotReached());
+  }
   GoalModes &g{goals_[call.number]};
   g.unify = UnifyKind::Call;
   g.implied = implied;
+  g.determinism = inst->determinism;
   last_ = Start(call.tokens);
   return Ok();
 }
