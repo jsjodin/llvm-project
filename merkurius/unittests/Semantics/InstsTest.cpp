@@ -158,6 +158,27 @@ TEST(InstsTest, Orders) {
   EXPECT_FALSE(ops.HasFree(f.Skel(ground), f.list));
 }
 
+// normalise (Overton, definition 3.4.1): a ground inst becomes ground of
+// the least unique uniqueness of its parts; another is kept.
+TEST(InstsTest, Normalise) {
+  Fixture f;
+  InstOps &ops{f.ops};
+  const Inst *free{f.insts.Free()}, *ground{f.insts.Ground()},
+      *unique{f.insts.Ground(Uniqueness::Unique)};
+  const Inst *uniqueA{f.insts.Bound(Uniqueness::Unique, {{f.Functor("a"), {}}})};
+  EXPECT_EQ(ops.Normalise(uniqueA, f.abc), unique);
+  EXPECT_EQ(ops.Normalise(f.Constants({"a", "b"}), f.abc), ground);
+  EXPECT_EQ(ops.Normalise(unique, f.abc), unique);
+  EXPECT_EQ(ops.Normalise(free, f.abc), free);
+  EXPECT_EQ(ops.Normalise(f.insts.NotReached(), f.abc), f.insts.NotReached());
+  const Inst *arguments[]{ground, f.insts.Bound(Uniqueness::Unique, {{f.Functor("nil"), {}}})};
+  const Inst *mixed{f.insts.Bound(
+      Uniqueness::Unique, {{f.Functor("cons", 2), arguments}})};
+  EXPECT_EQ(ops.Normalise(mixed, f.list), ground);
+  const Inst *partial{f.Cons(f.Constants({"a"}), free)};
+  EXPECT_EQ(ops.Normalise(partial, f.list), partial);
+}
+
 TEST(InstsTest, Merge) {
   Fixture f;
   InstOps &ops{f.ops};

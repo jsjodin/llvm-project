@@ -245,6 +245,12 @@ public:
       llvm::function_ref<bool(const Type *, const Type *)> subtype,
       CoerceFailure &failure);
 
+  // normalise(ι) (Overton, definition 3.4.1): a ground inst is ground of
+  // the least unique uniqueness of its parts; another is kept, since mmc
+  // does not normalise the arguments of a bound inst that is not ground,
+  // nor an inst variable's.
+  const Inst *Normalise(const Inst *, const Type *type);
+
   // Whether an inst is ground, or contains free, or any.
   bool IsGround(const Inst *, const Type *type);
   bool HasFree(const Inst *, const Type *type);
