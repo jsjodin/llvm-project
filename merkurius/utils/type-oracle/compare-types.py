@@ -29,7 +29,10 @@ with status 1 and reports each difference:
   each variable of a clause qualified with its type (`X = (X : T)`), and
   each overloaded name qualified with the module of its chosen symbol.
 
-With --error-lines, for modules of declaration errors, only the lines
+With --modes, merkc also checks modes (-fdebug-dump-modes) and mmc
+infers types but not modes, for modules of mode errors; it makes sense
+only with --error-lines. With
+--error-lines, for modules of declaration errors, only the lines
 with errors and notes are compared: those of a message's other places,
 such as "the earlier instance is here", are lines too. With --include
 DIR, the modules in DIR can be imported: merkc gets -I DIR, and mmc their
@@ -304,7 +307,10 @@ def run_mmc(mmc, path, module, all_messages=False):
         env["PATH"] = os.path.dirname(mmc) + os.pathsep + env.get("PATH", "")
         make_interfaces(mmc, tmp, env)
         result = subprocess.run(
-            [mmc, "--errorcheck-only", "--infer-all", module + ".m"],
+            # Mode inference is off by default, in mmc and in merkc.
+            [mmc, "--errorcheck-only",
+             "--infer-types" if action == "-fdebug-dump-modes" else "--infer-all",
+             module + ".m"],
             cwd=tmp,
             env=env,
             capture_output=True,
@@ -361,9 +367,12 @@ def run_mmc(mmc, path, module, all_messages=False):
 # merkc's output.
 
 
+action = "-fdebug-dump-types"
+
+
 def run_merkc(merkc, path, all_messages=False):
     result = subprocess.run(
-        [merkc, "-fc1", "-fdebug-dump-types", os.path.basename(path)] +
+        [merkc, "-fc1", action, os.path.basename(path)] +
         (["-I", include] if include else []),
         cwd=os.path.dirname(os.path.abspath(path)),
         capture_output=True,
@@ -842,9 +851,12 @@ def main():
     parser.add_argument("--error-lines", action="store_true",
                         help="compare only the lines of errors and notes")
     parser.add_argument("--include", help="a directory of modules to import")
+    parser.add_argument("--modes", action="store_true",
+                        help="merkc checks modes too")
     parser.add_argument("files", nargs="+")
     args = parser.parse_args()
-    global include
+    global include, action
+    action = "-fdebug-dump-modes" if args.modes else "-fdebug-dump-types"
     include = os.path.abspath(args.include) if args.include else None
     failed = False
     for path in args.files:

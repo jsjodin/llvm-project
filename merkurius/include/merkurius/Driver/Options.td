@@ -60,6 +60,15 @@ def ftype_inference_iteration_limit_EQ :
 def fdebug_dump_types : Flag<["-"], "fdebug-dump-types">,
   HelpText<"Type check the source file and list each clause's variable "
            "types and the declaration chosen for each name">;
+def finfer_modes : Flag<["-"], "finfer-modes">,
+  HelpText<"Infer the modes of predicates without mode declarations, as "
+           "mmc's --infer-modes does, rather than report each">;
+def fmode_inference_iteration_limit_EQ :
+  Joined<["-"], "fmode-inference-iteration-limit=">, MetaVarName<"<n>">,
+  HelpText<"Perform at most <n> passes of mode inference (default: 30)">;
+def fdebug_dump_modes : Flag<["-"], "fdebug-dump-modes">,
+  HelpText<"Type, purity and mode check the source file and list each "
+           "predicate's and function's procedures">;
 def fdebug_dump_resolved_names : Flag<["-"], "fdebug-dump-resolved-names">,
   HelpText<"Resolve the names of the source file and list the module's "
            "symbols and what each name resolves to">;

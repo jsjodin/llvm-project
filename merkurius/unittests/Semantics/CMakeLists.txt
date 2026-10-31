@@ -1,5 +1,6 @@
 add_merkurius_unittest(MerkuriusSemanticsTests
   DesugarTest.cpp
+  InstsTest.cpp
   SymbolsTest.cpp
   TypesTest.cpp
   )

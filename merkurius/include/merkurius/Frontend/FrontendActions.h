@@ -132,6 +132,12 @@ class DebugDumpTypesAction : public FrontendAction {
   bool executeAction() override;
 };
 
+// Type, purity and mode checks the source file, and lists each predicate's
+// and function's procedures, with their argument modes and determinisms.
+class DebugDumpModesAction : public FrontendAction {
+  bool executeAction() override;
+};
+
 } // namespace merkurius::frontend
 
 #endif // MERKURIUS_FRONTEND_FRONTENDACTIONS_H_
