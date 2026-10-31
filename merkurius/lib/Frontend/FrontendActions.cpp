@@ -389,9 +389,12 @@ bool DebugDumpTypesAction::executeAction() {
     if (clause.definition) {
       *os << " of " << *clause.definition;
     }
-    if (const semantics::Signature *sig{clause.definition
-                ? checking->SignatureOf(*clause.definition)
-                : nullptr}) {
+    if (clause.method) {
+      *os << " in instance " << clause.method->instanceText;
+    }
+    if (const semantics::Signature *sig{clause.method ? &clause.method->signature
+                : clause.definition ? checking->SignatureOf(*clause.definition)
+                                    : nullptr}) {
       *os << (clause.inferred ? ": inferred " : ": ")
           << semantics::SignatureToString(*clause.definition, *sig);
     }

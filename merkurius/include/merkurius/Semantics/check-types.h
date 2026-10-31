@@ -20,6 +20,7 @@
 #include "merkurius/Semantics/semantic-form.h"
 #include "merkurius/Semantics/types.h"
 #include "llvm/ADT/DenseMap.h"
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
@@ -44,6 +45,19 @@ struct GoalConstraint {
   ConstraintProof proof;
 };
 
+// An instance's definition of one of its type class's methods: an
+// auxiliary predicate or function, whose clauses are the instance's for the
+// method, or the one that a definition by name stands for. Its signature
+// is the method's with the instance's types in place of the class's
+// parameters, which are numbered first, as the instance's variables, and
+// its constraints are the instance's and the method's others.
+struct MethodDefinition {
+  const parser::InstanceDecl *instance;
+  const Symbol *method;
+  Signature signature;
+  std::string instanceText; // m.c(list.list(T))
+};
+
 // A clause's type assignment. The type variables of its predicate's or
 // function's declaration are numbered from 0, in their declared order;
 // any other variable left in a type is one that nothing determined.
@@ -64,6 +78,8 @@ struct ClauseTypes {
   // The constraints of the goals' callees, in the order of the goals, and
   // how each is satisfied; none if the clause has a type error.
   llvm::ArrayRef<GoalConstraint> constraints{};
+  // For a clause of an instance's method, which `definition` is.
+  const MethodDefinition *method{nullptr};
 };
 
 class TypeChecking {
@@ -71,7 +87,11 @@ public:
   TypeChecking();
   ~TypeChecking();
   TypeContext &types() { return types_; }
+  // The clauses' types, and then those of the instances' method clauses.
   llvm::ArrayRef<ClauseTypes> clauses() const { return clauses_; }
+  // The module's instances' method definitions, by instance and in the
+  // type class's order.
+  const std::deque<MethodDefinition> &methods() const { return methods_; }
   // The signature of a predicate, function, constructor or field: for a
   // predicate or function without a declaration, its inferred one.
   const Signature *SignatureOf(const Symbol &symbol) const {
@@ -92,6 +112,7 @@ private:
       false};
   llvm::DenseMap<const Symbol *, std::optional<Signature>> signatures_;
   std::vector<ClauseTypes> clauses_;
+  std::deque<MethodDefinition> methods_;
 };
 
 // Prints a symbol with its signature: func int.'+'(int, int) = int, or

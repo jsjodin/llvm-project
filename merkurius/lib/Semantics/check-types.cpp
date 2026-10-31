@@ -198,6 +198,15 @@ private:
   void CheckInstances();
   void CheckMethods(const parser::InstanceDecl &, const Symbol &typeclass,
       const std::string &head);
+  // The instance's definitions of its type class's methods, with their
+  // signatures on its types.
+  void DefineMethods(const parser::InstanceDecl &, const Symbol &typeclass,
+      llvm::ArrayRef<const Type *> types,
+      llvm::ArrayRef<ClassConstraint> constraints,
+      llvm::ArrayRef<llvm::StringRef> names, const std::string &text);
+  llvm::DenseMap<std::pair<const parser::InstanceDecl *, const Symbol *>,
+      const MethodDefinition *>
+      methodDefinitions_;
   llvm::DenseMap<const Symbol *, llvm::ArrayRef<ClassConstraint>>
       superclasses_;
   // The instances that constraints may use: the loaded interfaces' and
@@ -236,7 +245,10 @@ private:
   // signature, declared or inferred, unless it is being inferred, when its
   // head's types are what it gives them.
   const Symbol *Definition(const ClauseForm &) const;
-  ClauseTypes CheckClause(const ClauseForm &, bool inferring);
+  // A clause of an instance's method is checked by its definition's
+  // signature.
+  ClauseTypes CheckClause(const ClauseForm &, bool inferring,
+      const MethodDefinition *method = nullptr);
   void CheckGoal(const Goal &);
   void CheckUnify(const Unify &);
   void CheckFunctor(const Unify &, const parser::SymName &);
@@ -1148,6 +1160,8 @@ void TypeChecker::CheckInstances() {
     const parser::InstanceDecl &decl{*head.item->decl};
     if (!decl.abstract) {
       CheckMethods(decl, *head.typeclass, head.text);
+      DefineMethods(decl, *head.typeclass, head.types, head.constraints,
+          head.names, head.text);
       // Its type class's superclass constraints, on its types, must follow
       // from its constraints and the instances (thesis, section 3.1.4).
       Assumed assumed{Assume(head.constraints)};
@@ -1194,6 +1208,66 @@ void TypeChecker::CheckInstances() {
       message.Attach(
           Source(decl.name->tokens), "the abstract declaration is here"_because_en_US);
     }
+  }
+}
+
+void TypeChecker::DefineMethods(const parser::InstanceDecl &decl,
+    const Symbol &typeclass, llvm::ArrayRef<const Type *> types,
+    llvm::ArrayRef<ClassConstraint> constraints,
+    llvm::ArrayRef<llvm::StringRef> names, const std::string &text) {
+  const ModuleSymbols *symbols{typeclass.module == resolution_.module().name()
+          ? &resolution_.module()
+          : resolution_.Module(typeclass.module)};
+  if (!symbols) {
+    return;
+  }
+  // The instance's variables are numbered from 0, and the method's own
+  // after them.
+  unsigned instanceVars(names.size());
+  for (const Type *type : types) {
+    ForEachVariable(*type, [&](unsigned var) {
+      instanceVars = std::max(instanceVars, var + 1);
+    });
+  }
+  for (const Symbol *method : symbols->symbols()) {
+    if (method->owner != &typeclass) {
+      continue;
+    }
+    const Signature *sig{SignatureOf(*method)};
+    if (!sig || sig->constraints.empty()) {
+      continue;
+    }
+    unsigned parameters(types.size());
+    auto substitute{[&](unsigned var) {
+      return var < parameters ? types[var]
+                              : types_.Variable(instanceVars + var - parameters);
+    }};
+    llvm::SmallVector<const Type *, 4> arguments;
+    for (const Type *argument : sig->arguments) {
+      arguments.push_back(types_.Substitute(argument, substitute));
+    }
+    // The method's first constraint is its type class's, which the
+    // instance itself gives.
+    llvm::SmallVector<ClassConstraint, 4> all{
+        constraints.begin(), constraints.end()};
+    for (const ClassConstraint &constraint : sig->constraints.drop_front()) {
+      all.push_back(SubstituteIn(constraint, substitute));
+    }
+    llvm::SmallVector<llvm::StringRef, 4> varNames{names.begin(), names.end()};
+    varNames.resize(instanceVars);
+    for (unsigned var{parameters}; var < sig->typeVars; ++var) {
+      varNames.push_back(
+          var < sig->varNames.size() ? sig->varNames[var] : llvm::StringRef{});
+    }
+    MethodDefinition &definition{result_.methods_.emplace_back(MethodDefinition{
+        &decl, method,
+        Signature{sig->kind, sig->purity,
+            instanceVars + sig->typeVars - parameters,
+            result_.arena_.SaveArray(llvm::ArrayRef<llvm::StringRef>{varNames}),
+            result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments}),
+            result_.arena_.SaveArray(llvm::ArrayRef<ClassConstraint>{all})},
+        text})};
+    methodDefinitions_[{&decl, method}] = &definition;
   }
 }
 
@@ -1753,14 +1827,16 @@ const Symbol *TypeChecker::Definition(const ClauseForm &clause) const {
   return nullptr;
 }
 
-ClauseTypes TypeChecker::CheckClause(const ClauseForm &clause, bool inferring) {
+ClauseTypes TypeChecker::CheckClause(const ClauseForm &clause, bool inferring,
+    const MethodDefinition *method) {
   clause_ = &clause;
   tooMany_ = false;
   failed_ = false;
   // What the clause defines, and its types, if any.
   const Symbol *definition{Definition(clause)};
-  const Signature *sig{
-      definition && !inferring ? SignatureOf(*definition) : nullptr};
+  const Signature *sig{method ? &method->signature
+          : definition && !inferring ? SignatureOf(*definition)
+                                     : nullptr};
   rigid_ = sig ? sig->typeVars : 0;
   rigidNames_ = sig ? sig->varNames : llvm::ArrayRef<llvm::StringRef>{};
   assumed_ = sig ? Assume(sig->constraints) : Assumed{};
@@ -1803,7 +1879,9 @@ ClauseTypes TypeChecker::CheckClause(const ClauseForm &clause, bool inferring) {
         });
   }
   CheckGoal(clause.body);
-  return Finish(clause, definition, sig);
+  ClauseTypes types{Finish(clause, definition, sig)};
+  types.method = method;
+  return types;
 }
 
 ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
@@ -2467,6 +2545,16 @@ void TypeChecker::Run(const SemanticForm &form) {
   Infer(undeclared);
   for (const ClauseForm *clause : form.clauses) {
     result_.clauses_.push_back(CheckClause(*clause, false));
+  }
+  // The instances' method clauses, of the methods their type classes have,
+  // in instances without errors.
+  for (const MethodClause &method : form.methods) {
+    const Symbol *definition{Definition(*method.clause)};
+    auto it{methodDefinitions_.find({method.instance, definition})};
+    if (definition && it != methodDefinitions_.end()) {
+      result_.clauses_.push_back(
+          CheckClause(*method.clause, false, it->second));
+    }
   }
 }
 

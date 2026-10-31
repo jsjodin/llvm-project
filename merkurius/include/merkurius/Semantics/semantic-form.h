@@ -248,9 +248,19 @@ struct ClauseForm {
   llvm::ArrayRef<llvm::ArrayRef<VarId>> nonlocals{};
 };
 
-// The clauses of a file that desugared without errors, in order.
+// A clause of an instance's method, or the clause that a method
+// definition by name stands for.
+struct MethodClause {
+  const parser::InstanceDecl *instance;
+  const ClauseForm *clause;
+  const parser::MethodByName *byName; // null for a clause
+};
+
+// The clauses of a file that desugared without errors, in order, and
+// those of its instances' methods.
 struct SemanticForm {
   llvm::ArrayRef<const ClauseForm *> clauses;
+  llvm::ArrayRef<MethodClause> methods{};
 };
 
 // Prints the semantic form, one goal per line, indented by depth. Program
