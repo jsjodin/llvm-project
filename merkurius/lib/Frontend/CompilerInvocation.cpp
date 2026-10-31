@@ -28,7 +28,7 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
               OPT_fdebug_unparse_parenthesized_no_sema,
               OPT_fdebug_dump_semantic_form, OPT_fdebug_dump_nonlocals,
               OPT_fdebug_dump_imports, OPT_fdebug_dump_resolved_names,
-              OPT_fdebug_dump_types)) {
+              OPT_fdebug_dump_types, OPT_fdebug_dump_modes)) {
     switch (arg->getOption().getID()) {
     case OPT_E:
       opts.programAction = ActionKind::PrintPreprocessedInput;
@@ -66,6 +66,9 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
     case OPT_fdebug_dump_types:
       opts.programAction = ActionKind::DebugDumpTypes;
       break;
+    case OPT_fdebug_dump_modes:
+      opts.programAction = ActionKind::DebugDumpModes;
+      break;
     case OPT_fdebug_dump_resolved_names:
       opts.programAction = ActionKind::DebugDumpResolvedNames;
       break;
@@ -87,6 +90,17 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
     llvm::StringRef value{arg->getValue()};
     if (value.getAsInteger(10, opts.typeInferenceIterationLimit) ||
         opts.typeInferenceIterationLimit == 0) {
+      reportError(
+          "invalid value '" + value + "' in '" + arg->getAsString(args) + "'");
+      return false;
+    }
+  }
+  opts.inferModes = args.hasArg(OPT_finfer_modes);
+  if (const llvm::opt::Arg *arg =
+          args.getLastArg(OPT_fmode_inference_iteration_limit_EQ)) {
+    llvm::StringRef value{arg->getValue()};
+    if (value.getAsInteger(10, opts.modeInferenceIterationLimit) ||
+        opts.modeInferenceIterationLimit == 0) {
       reportError(
           "invalid value '" + value + "' in '" + arg->getAsString(args) + "'");
       return false;

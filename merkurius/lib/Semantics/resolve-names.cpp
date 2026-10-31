@@ -179,6 +179,7 @@ private:
   parser::Messages &messages_;
   const parser::TokenSequence *tokens_{nullptr}; // of the names resolved
   bool local_{false}; // resolving the module's own names
+  bool reportUndefined_{true}; // false for a mode declaration's name
   const ModuleSymbols *own_{nullptr}; // the module whose names these are
 };
 
@@ -554,7 +555,8 @@ void Resolver::Resolve(const parser::SymName &name, NameUse use,
       }
     }
   }
-  if (found.empty() && !(use == NameUse::DataTerm && IsCharConstant(name, arity))) {
+  if (found.empty() && reportUndefined_ &&
+      !(use == NameUse::DataTerm && IsCharConstant(name, arity))) {
     if (plain && plain->owner) {
       // mmc: "undefined symbol `new plain'/1. Invalid use of `new' on a
       // constructor of type `m.plain'/0 which is not existentially typed."
@@ -682,10 +684,13 @@ void Resolver::ResolveItem(const parser::Item &item, const Visibility &scope,
       common::visitors{
           [&](const parser::ModeDecl *decl) {
             // A mode declaration is for a predicate or function of the
-            // module's own.
+            // module's own; mode checking reports one without a
+            // declaration, as mmc does.
             Visibility own{{own_, false, false}};
+            reportUndefined_ = false;
             Resolve(*decl->name, NameUse::Definition, decl->arguments.size(),
                 own);
+            reportUndefined_ = true;
             ResolveBelow(*decl, scope, outer);
           },
           [&](const parser::InstDefn *defn) {
