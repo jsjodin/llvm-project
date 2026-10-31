@@ -73,8 +73,12 @@ private:
   std::vector<ClauseTypes> clauses_;
 };
 
-// Prints a symbol with its signature: func int.'+'(int, int) = int.
+// Prints a symbol with its signature: func int.'+'(int, int) = int, or
+// pred m.p(T) <= (m.c(T)).
 std::string SignatureToString(const Symbol &, const Signature &);
+// Prints a constraint, module-qualified: m.c(list.list(T)).
+void PrintConstraint(llvm::raw_ostream &, const ClassConstraint &,
+    llvm::function_ref<std::string(unsigned)> name = nullptr);
 
 struct TypeCheckOptions {
   // Infer the types of predicates and functions without declarations,

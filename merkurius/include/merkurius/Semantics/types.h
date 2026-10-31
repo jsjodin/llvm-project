@@ -82,12 +82,21 @@ std::string TypeToString(
 // The types of a predicate, a function or a function symbol: a function's
 // result is its last argument, and a constructor, field selector or field
 // update is a function. Its type variables are numbered from 0.
+// A type class constraint, c(T1, T2).
+struct ClassConstraint {
+  const Symbol *typeclass;
+  llvm::ArrayRef<const Type *> arguments;
+};
+
+// A method's signature has its type class's parameters as its first type
+// variables, and its type class's constraint first.
 struct Signature {
   parser::PredOrFunc kind;
   parser::Purity purity;
   unsigned typeVars;
   llvm::ArrayRef<llvm::StringRef> varNames; // as declared, by number
   llvm::ArrayRef<const Type *> arguments;
+  llvm::ArrayRef<ClassConstraint> constraints{}; // <=
 };
 
 } // namespace merkurius::semantics
