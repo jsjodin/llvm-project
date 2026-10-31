@@ -432,6 +432,19 @@ private:
   // the definition or the MethodDefinition: all its clauses give the same
   // (reference manual, "Semantics of type quantifiers").
   llvm::DenseMap<const void *, std::vector<const Type *>> existentialTypes_;
+  // The field updates that cannot be made, with the existential variable
+  // that the field shares with another.
+  struct NotUpdatable {
+    llvm::StringRef var;
+    parser::CharBlock field; // its definition
+  };
+  llvm::DenseMap<const Symbol *, NotUpdatable> notUpdatable_;
+  // The signature of 'new f', a construction with an existentially typed
+  // constructor f: the caller chooses the existential variables, and must
+  // satisfy their constraints (reference manual, "Existentially typed
+  // data types").
+  const Signature &NewSignature(const Symbol &, const Signature &);
+  std::map<const Symbol *, Signature> newSignatures_;
   llvm::ArrayRef<llvm::StringRef> rigidNames_;
   std::vector<Assignment> assignments_;
   std::vector<const parser::SymName *> names_; // by goal number
@@ -758,34 +771,160 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
       names.Add(parameter);
       parameters.push_back(types_.Variable(names.next - 1));
     }
-    // Existential type variables are not yet told apart (design document).
+    // The existentially quantified variables are numbered last
+    // (reference manual, "Existentially typed data types"). The
+    // definition's rules are checked with the constructor's own symbol.
+    bool report{symbol.kind == SymbolKind::Constructor};
+    auto constructorName{[&] {
+      return symbol.name.str() + "/" +
+          std::to_string((*constructor)->arguments.size());
+    }};
     for (llvm::StringRef var : (*constructor)->existentialVars) {
+      if (names.numbers.count(var)) {
+        // mmc: "type variable `T' has overlapping scopes".
+        if (report) {
+          messages_->Say(Source((*constructor)->tokens),
+              "type variable %s of constructor %s is a parameter of its type, and cannot be existentially quantified too"_err_en_US,
+              var.str(), constructorName());
+        }
+        continue;
+      }
       names.Add(var);
     }
+    unsigned universal(parameters.size());
     names.closed = true;
-    const Type *owner{types_.Named(*symbol.owner, parameters)};
-    if (symbol.kind == SymbolKind::Constructor) {
-      for (const parser::ConstructorArg *argument : (*constructor)->arguments) {
-        arguments.push_back(Convert(argument->type, names));
+    llvm::SmallVector<const Type *, 4> fields;
+    for (const parser::ConstructorArg *argument : (*constructor)->arguments) {
+      fields.push_back(Convert(argument->type, names));
+    }
+    llvm::SmallVector<ClassConstraint, 2> existentialConstraints;
+    for (const parser::ClassConstraint *c : (*constructor)->constraints) {
+      if (std::optional<ClassConstraint> converted{
+              ConvertConstraint(*c, names)}) {
+        existentialConstraints.push_back(*converted);
       }
+    }
+    if (report) {
+      llvm::DenseSet<unsigned> inArguments, inConstraints, reported;
+      for (const Type *field : fields) {
+        ForEachVariable(*field, [&](unsigned var) { inArguments.insert(var); });
+      }
+      llvm::DenseSet<unsigned> determined{inArguments};
+      Close(determined, existentialConstraints);
+      for (const ClassConstraint &constraint : existentialConstraints) {
+        for (const Type *argument : constraint.arguments) {
+          ForEachVariable(*argument, [&](unsigned var) {
+            inConstraints.insert(var);
+            if (!reported.insert(var).second) {
+              return;
+            }
+            if (var < universal) {
+              // mmc: "the type variable `U' occurs in a class constraint
+              // without being explicitly existentially quantified".
+              messages_->Say(Source((*constructor)->tokens),
+                  "type variable %s is in a constraint of constructor %s, but is not existentially quantified"_err_en_US,
+                  names.names[var].str(), constructorName());
+            } else if (!determined.contains(var)) {
+              // mmc: "type variable `T2' occurs in the constraints, but is
+              // not determined by the constructor's argument types".
+              messages_->Say(Source((*constructor)->tokens),
+                  "type variable %s occurs in the constraints of constructor %s, but its argument types do not determine it"_err_en_US,
+                  names.names[var].str(), constructorName());
+            }
+          });
+        }
+      }
+      for (unsigned var{universal}; var < names.next; ++var) {
+        if (!inArguments.contains(var) && !inConstraints.contains(var)) {
+          // mmc: "the existentially quantified type variable `T' does not
+          // occur either in the arguments or in the constraints".
+          messages_->Say(Source((*constructor)->tokens),
+              "existentially quantified type variable %s of constructor %s occurs neither in its arguments nor in its constraints"_err_en_US,
+              names.names[var].str(), constructorName());
+        }
+      }
+    }
+    // A constraint on a type parameter is reported, and left out.
+    llvm::erase_if(existentialConstraints, [&](const ClassConstraint &c) {
+      bool parameter{false};
+      for (const Type *argument : c.arguments) {
+        ForEachVariable(
+            *argument, [&](unsigned var) { parameter |= var < universal; });
+      }
+      return parameter;
+    });
+    const Type *owner{types_.Named(*symbol.owner, parameters)};
+    // A constructor, as a deconstruction, and a field's selection give the
+    // existential variables, as an existentially typed function does; the
+    // construction 'new f' is the universal version (see NewSignature).
+    unsigned existentials{names.next - universal};
+    if (symbol.kind == SymbolKind::Constructor) {
+      arguments.append(fields.begin(), fields.end());
       arguments.push_back(owner);
     } else {
       // f/1 is (T) = F, and 'f :='/2 is (T, F) = T.
       llvm::StringRef field{symbol.name};
       field.consume_back(" :=");
       const Type *type{types_.Named(error_, {})};
-      for (const parser::ConstructorArg *argument : (*constructor)->arguments) {
+      for (auto [argument, converted] :
+          llvm::zip((*constructor)->arguments, fields)) {
         if (argument->field && argument->field->name == field) {
-          type = Convert(argument->type, names);
+          type = converted;
         }
       }
       arguments.push_back(owner);
       arguments.push_back(type);
       if (symbol.kind == SymbolKind::FieldUpdate) {
         arguments.push_back(owner);
+        // An update constructs: it chooses the field's existential
+        // variables, whose constraints it must satisfy, and keeps the
+        // others, which another field must not share (mmc: "Field `a'
+        // cannot be updated because the existentially quantified type
+        // variable `T' occurs in the types of field `a' and some other
+        // field").
+        llvm::DenseSet<unsigned> own;
+        ForEachVariable(*type, [&](unsigned var) {
+          if (var >= universal) {
+            own.insert(var);
+          }
+        });
+        for (auto [argument, converted] :
+            llvm::zip((*constructor)->arguments, fields)) {
+          if (argument->field && argument->field->name == field) {
+            continue;
+          }
+          ForEachVariable(*converted, [&](unsigned var) {
+            if (own.contains(var)) {
+              const parser::ConstructorArg *updated{nullptr};
+              for (const parser::ConstructorArg *a : (*constructor)->arguments) {
+                if (a->field && a->field->name == field) {
+                  updated = a;
+                }
+              }
+              notUpdatable_[&symbol] = {names.names[var],
+                  Source(updated ? updated->tokens : (*constructor)->tokens)};
+            }
+          });
+        }
+        for (const ClassConstraint &c : existentialConstraints) {
+          bool mentions{false};
+          for (const Type *argument : c.arguments) {
+            ForEachVariable(*argument,
+                [&](unsigned var) { mentions |= own.contains(var); });
+          }
+          if (mentions) {
+            constraints.push_back(c);
+          }
+        }
+        existentialConstraints.clear();
+        existentials = 0;
       }
     }
-    return make(parser::PredOrFunc::Function, parser::Purity::Pure);
+    Signature sig{make(parser::PredOrFunc::Function, parser::Purity::Pure)};
+    sig.existentials = existentials;
+    sig.existentialConstraints = result_.arena_.SaveArray(
+        llvm::ArrayRef<ClassConstraint>{existentialConstraints});
+    return sig;
   }
   return std::nullopt;
 }
@@ -2191,14 +2330,34 @@ void TypeChecker::CheckUnify(const Unify &unify) {
   }
 }
 
+const Signature &TypeChecker::NewSignature(
+    const Symbol &symbol, const Signature &sig) {
+  auto [it, inserted]{newSignatures_.try_emplace(&symbol, sig)};
+  if (inserted) {
+    it->second.existentials = 0;
+    it->second.constraints = sig.existentialConstraints;
+    it->second.existentialConstraints = {};
+  }
+  return it->second;
+}
+
 void TypeChecker::CheckFunctor(const Unify &unify, const parser::SymName &name) {
   names_[unify.number] = &name;
   goal_ = unify.number;
+  // Name resolution found existentially typed constructors for 'new f'.
+  bool constructing{name.name.starts_with("new ")};
   std::vector<Option> options;
   for (const Symbol *candidate : name.candidates) {
-    options.push_back([&, candidate](Assignment &a) {
+    options.push_back([&, candidate, constructing](Assignment &a) {
       a.symbols[unify.number] = candidate;
       const Signature *sig{SignatureOf(*candidate)};
+      if (sig && constructing &&
+          candidate->kind == SymbolKind::Constructor) {
+        sig = &NewSignature(*candidate, *sig);
+      }
+      if (notUpdatable_.count(candidate)) {
+        return false;
+      }
       // An undeclared predicate or function: its types are inferred later.
       return !sig ||
           Apply(a, *candidate, *sig, unify.arguments, VarType(unify.left));
@@ -2236,6 +2395,19 @@ void TypeChecker::CheckFunctor(const Unify &unify, const parser::SymName &name) 
     }
     AttachCandidates(message, name);
     for (const Symbol *candidate : name.candidates) {
+      if (auto it{notUpdatable_.find(candidate)}; it != notUpdatable_.end()) {
+        llvm::StringRef field{candidate->name};
+        field.consume_back(" :=");
+        message.Attach(Source(name.tokens),
+            "field %s cannot be updated, since its existentially quantified type variable %s occurs in another field's type too"_because_en_US,
+            field.str(), it->second.var.str());
+        message.Attach(it->second.field, "the field is defined here"_because_en_US);
+      }
+    }
+    for (const Symbol *candidate : name.candidates) {
+      if (constructing) {
+        break; // 'new f' is the universal version
+      }
       const Signature *sig{SignatureOf(*candidate)};
       bool function{candidate->kind != SymbolKind::Predicate};
       if (sig && sig->existentials > 0 &&
