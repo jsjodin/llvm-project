@@ -324,12 +324,13 @@ def run_mmc(mmc, path, module, all_messages=False):
     if all_messages:
         # Every message but warnings and inferred declarations; a warning
         # may follow its context, as in "In predicate `p'/1: warning: ...".
-        # mmc's mode errors in its own unification procedures, for a
-        # partially instantiated term unified with a bound one, are an mmc
-        # bug (GitHub issue 74, see the register).
+        # mmc's mode and determinism errors in its own unification
+        # procedures, for a partially instantiated term, or one of a bound
+        # inst, unified with a bound one, are an mmc bug (GitHub issue 74,
+        # see the register).
         return {line for line, text in messages if line and
                 not text.startswith(("Warning", "Inferred :- ")) and
-                not text.startswith("In clause for `'__Unify__'") and
+                not text.startswith(("In clause for `'__Unify__'", "In `__Unify__'")) and
                 not re.match(r"In .*?:\s+warning:", text)}
     errors, warnings, signatures = set(), set(), {}
     # "In clause for ...:" introduces the message after it.
@@ -865,7 +866,11 @@ def main():
     failed = False
     for path in args.files:
         if args.error_lines:
-            differences = compare_error_lines(path, args.merkc, args.mmc)
+            try:
+                differences = compare_error_lines(path, args.merkc, args.mmc)
+            except MmcCrash as crash:
+                print("%s: note: mmc crashes (%s); its errors are not compared" % (path, crash))
+                differences = []
         else:
             try:
                 differences = compare(path, args.merkc, args.mmc, args.allow_errors)

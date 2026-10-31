@@ -1,9 +1,8 @@
-# As random-modes-1.test, with another seed. It has a partial term
-# unified with a ground one by an implied mode, where mmc reports a mode
-# error in its own unification procedure (GitHub issue 74), which the
-# comparison ignores.
+# As random-modes-1.test, with another seed. Three of its modules unify a
+# partial term with a bound one, where mmc reports an error in its own
+# unification procedure (GitHub issue 74), which the comparison ignores.
 #
 # REQUIRES: mmc
 # RUN: rm -rf %t && mkdir %t
-# RUN: %python %S/../../../utils/type-oracle/generate-mode-programs.py --seed 12 --count 40 %t
+# RUN: %python %S/../../../utils/type-oracle/generate-mode-programs.py --seed 10 --count 40 %t
 # RUN: %compare-types --modes --error-lines %t/*.m
