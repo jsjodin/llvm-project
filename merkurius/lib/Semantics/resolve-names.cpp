@@ -141,6 +141,8 @@ private:
   void ResolveItem(const parser::Item &, const Visibility &, const Visibility *outer,
       bool local, const parser::TokenSequence &);
   void ResolveClause(const ClauseForm &, const Visibility &);
+  // A method clause's name is its type class's method, if it has one.
+  void ResolveMethodClause(const MethodClause &, const Visibility &);
   void ResolveGoal(const Goal &, const Visibility &);
   // Resolves the type, inst, mode and class names below `x`.
   template <typename T>
@@ -565,6 +567,45 @@ void Resolver::ResolveClause(const ClauseForm &clause, const Visibility &scope) 
   ResolveGoal(clause.body, scope);
 }
 
+void Resolver::ResolveMethodClause(
+    const MethodClause &method, const Visibility &scope) {
+  const ClauseForm &clause{*method.clause};
+  unsigned arity(clause.head.size());
+  SymbolKind kind{SymbolKind::Predicate};
+  if (clause.kind == parser::PredOrFunc::Function) {
+    --arity;
+    kind = SymbolKind::Function;
+  }
+  // Type checking reports a method that the type class does not have.
+  llvm::SmallVector<const Symbol *, 1> found;
+  for (const Symbol *typeclass : method.instance->name->candidates) {
+    const ModuleSymbols *symbols{typeclass->module == own_->name()
+            ? own_
+            : result_.Module(typeclass->module)};
+    if (!symbols) {
+      continue;
+    }
+    for (const Symbol *symbol : symbols->Lookup(clause.name->name)) {
+      if (symbol->owner == typeclass && symbol->kind == kind &&
+          symbol->arity == arity) {
+        found.push_back(symbol);
+      }
+    }
+  }
+  llvm::ArrayRef<const Symbol *> candidates{
+      result_.arena_.SaveArray(llvm::ArrayRef<const Symbol *>{found})};
+  clause.name->candidates = candidates;
+  result_.names_.push_back(
+      ResolvedName{clause.name, NameUse::Definition, arity, candidates});
+  if (found.empty()) {
+    return; // not checked, so neither are its names
+  }
+  for (const TypeQualification &qualification : clause.typeQualifications) {
+    ResolveBelow(qualification.type, scope);
+  }
+  ResolveGoal(clause.body, scope);
+}
+
 void Resolver::ResolveGoal(const Goal &goal, const Visibility &scope) {
   auto each{[&](llvm::ArrayRef<Goal> goals) {
     for (const Goal &g : goals) {
@@ -751,6 +792,9 @@ void Resolver::Run(const parser::ParseTree &tree,
   local_ = true;
   for (const ClauseForm *clause : form.clauses) {
     ResolveClause(*clause, implementation);
+  }
+  for (const MethodClause &method : form.methods) {
+    ResolveMethodClause(method, implementation);
   }
 }
 
