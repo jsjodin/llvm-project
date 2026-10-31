@@ -243,6 +243,20 @@ def make_interfaces(mmc, tmp, env):
             subprocess.run([mmc, flag, name], cwd=tmp, env=env, capture_output=True)
 
 
+def clause_after_declaration(source, line, body):
+    """The line of the first clause after the declaration at this line, of
+    the predicate or function the message is in, or the line itself if it
+    is not a declaration's."""
+    match = re.match(r"In (?:predicate|function) `([^']+)'/\d+:", body)
+    if not match or not 0 < line <= len(source) or not re.match(r":- (?:pred|func) ", source[line - 1]):
+        return line
+    name = re.escape(match.group(1))
+    for n in range(line, len(source)):
+        if re.match(name + r"\b", source[n]):
+            return n + 1
+    return line
+
+
 def run_mmc(mmc, path, module, all_messages=False):
     with tempfile.TemporaryDirectory() as tmp:
         copy = os.path.join(tmp, module + ".m")
@@ -259,6 +273,7 @@ def run_mmc(mmc, path, module, all_messages=False):
         )
         output = result.stdout + result.stderr
         messages = mmc_messages(output, module + ".m")
+        source = open(copy).read().splitlines()
         if "Uncaught Mercury exception" in output:
             raise MmcCrash(output.strip().splitlines()[-1])
     if all_messages:
@@ -285,7 +300,18 @@ def run_mmc(mmc, path, module, all_messages=False):
             key, signature = parse_signature(raw)
             signatures[key] = (line, signature, raw)
         elif TYPE_ERROR.search(body):
-            errors.add(line)
+            # A constraint's error may be at the declaration, with the goals
+            # it is due to in messages after it, which is where merkc
+            # reports it.
+            goals = []
+            if body.endswith(("The constraint is due to:", "The constraints are due to:")):
+                while i < len(messages) and messages[i][1] in ("a goal here, and", "a goal here."):
+                    goals.append(messages[i][0])
+                    i += 1
+            if goals:
+                errors.update(goals)
+            else:
+                errors.add(clause_after_declaration(source, line, body))
         elif "unresolved polymorphism" in body:
             warnings.add(line)
     return errors, warnings, signatures
@@ -308,6 +334,7 @@ def run_merkc(merkc, path, all_messages=False):
     last_dump = result.stdout
     clause_starts = []
     errors, warnings, signatures, clause_lines = set(), set(), {}, {}
+    undetermined = set()  # lines with a constraint that nothing determines
     name = re.escape(os.path.basename(path))
     if all_messages:
         return {int(m.group(1)) for m in re.finditer(
@@ -316,7 +343,9 @@ def run_merkc(merkc, path, all_messages=False):
         match = re.match(name + r":(\d+):\d+: (error|warning): (.*)$", raw)
         if match:
             line, severity, text = int(match.group(1)), match.group(2), match.group(3)
-            if severity == "error":
+            if severity == "error" and "nothing determines its type" in text:
+                undetermined.add(line)
+            elif severity == "error":
                 errors.add(line)
             elif "unresolved polymorphism" in text:
                 warnings.add(line)
@@ -329,6 +358,10 @@ def run_merkc(merkc, path, all_messages=False):
                 key, signature = parse_signature(match.group(5))
                 signatures[key] = (line, signature, match.group(5))
                 clause_lines.setdefault(key, set()).add(line)
+    # mmc reports a constraint that nothing determines only in a module
+    # without other type errors (see the register).
+    if not errors:
+        errors = undetermined
     return errors, warnings, signatures, clause_lines
 
 
@@ -690,6 +723,14 @@ def compare(path, merkc, mmc, allow_errors=False):
                 if settle(text, mmc, owner, errors - exempt, signatures, starts, dump, own=True) is False:
                     print("%s: note: mmc reports a type error in %s that its first pass of inference sees, and none with its type declared" % (path, name))
                     continue
+            if verdict is False and ours and owner in {(k[1], k[2]) for k in signatures}:
+                # An error of mmc's first pass of inference, in a caller or
+                # in a recursive call, may hide one that mmc reports only in
+                # a module without other type errors, as merkc's undetermined
+                # constraints; with its type declared too, mmc reports it.
+                if settle(text, mmc, owner, errors - exempt, signatures, starts, dump, own=True):
+                    print("%s: note: an error of mmc's first pass of inference hides the one merkc reports in %s, which mmc reports with its type declared too" % (path, name))
+                    continue
             if verdict is None:
                 differences.append(
                     "%s: with merkc's other inferred signatures declared, mmc reports type errors where merkc does not" % name
@@ -745,7 +786,13 @@ def main():
         if args.error_lines:
             differences = compare_error_lines(path, args.merkc, args.mmc)
         else:
-            differences = compare(path, args.merkc, args.mmc, args.allow_errors)
+            try:
+                differences = compare(path, args.merkc, args.mmc, args.allow_errors)
+            except MmcCrash as crash:
+                # On a variant with signatures declared: the first run's
+                # crash is handled in compare.
+                print("%s: note: mmc crashes on a variant of the module (%s); its verdicts are not compared" % (path, crash))
+                differences = []
         for difference in differences:
             print("%s: %s" % (path, difference))
             failed = True

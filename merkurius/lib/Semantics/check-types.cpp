@@ -220,6 +220,11 @@ private:
   std::variant<ConstraintProof, ClassConstraint> Entail(
       const ClassConstraint &wanted, const Assumed &);
   llvm::SmallVector<ClassConstraint, 4> entailing_; // to stop at a cycle
+  // Whether `wanted` reduces, by the instances, to a ground constraint
+  // that neither an instance nor the clause's declaration gives.
+  bool Refuted(const ClassConstraint &wanted);
+  bool Refuted(const Assignment &);
+  Assumed assumed_; // the clause's declaration's
   ClassConstraint SubstituteIn(
       const ClassConstraint &, llvm::function_ref<const Type *(unsigned)>);
   bool Match(const Type *pattern, const Type *type,
@@ -255,8 +260,14 @@ private:
   const Type *Generalization(const Type *, const Type *,
       std::map<std::pair<const Type *, const Type *>, unsigned> &);
   Signature General(const Symbol &, unsigned arity);
-  Signature Generalize(
-      const Symbol &, const Assignment &, llvm::ArrayRef<const Type *>);
+  Signature Generalize(const Symbol &, const Assignment &,
+      llvm::ArrayRef<const Type *>, llvm::ArrayRef<ClassConstraint> = {});
+  // The constraints that an assignment's goals need, reduced by the
+  // instances, that a signature must assume: those on the head's type
+  // variables, which `numbers` renumbers.
+  std::vector<ClassConstraint> Residual(const Assignment &,
+      llvm::DenseMap<unsigned, unsigned> &numbers);
+  bool Reduce(const ClassConstraint &, std::vector<ClassConstraint> &);
   void ForEachReference(
       const Goal &, llvm::function_ref<void(const Symbol &)>) const;
 
@@ -753,6 +764,30 @@ void TypeChecker::Extend(llvm::ArrayRef<Option> options,
         extended.push_back(std::move(copy));
       }
     }
+  }
+  // Assignments whose constraints cannot be satisfied are dropped, if
+  // others are left, as mmc does: so show(2.0 + 1.0), with an instance
+  // only for show(int), takes int's +. If none is left, the clause
+  // reports the constraint.
+  if (extended.size() > 1) {
+    std::vector<Assignment> satisfiable;
+    for (Assignment &a : extended) {
+      if (!Refuted(a)) {
+        satisfiable.push_back(std::move(a));
+      }
+    }
+    if (satisfiable.empty()) {
+      // Moved from: check them again.
+      for (const Assignment &a : assignments_) {
+        for (const Option &option : options) {
+          Assignment copy{a};
+          if (option(copy)) {
+            satisfiable.push_back(std::move(copy));
+          }
+        }
+      }
+    }
+    extended = std::move(satisfiable);
   }
   if (extended.empty()) {
     failed_ = true;
@@ -1363,6 +1398,50 @@ std::variant<ConstraintProof, ClassConstraint> TypeChecker::Entail(
   return wanted;
 }
 
+bool TypeChecker::Refuted(const ClassConstraint &wanted) {
+  bool ground{true};
+  for (const Type *argument : wanted.arguments) {
+    ForEachVariable(*argument, [&](unsigned) { ground = false; });
+    if (HasError(argument)) {
+      return false;
+    }
+  }
+  if (ground) {
+    return std::holds_alternative<ClassConstraint>(Entail(wanted, assumed_));
+  }
+  if (llvm::any_of(entailing_,
+          [&](const ClassConstraint &c) { return Same(c, wanted); })) {
+    return false;
+  }
+  for (const Instance &instance : instances_) {
+    llvm::SmallVector<const Type *, 4> bindings;
+    if (instance.typeclass != wanted.typeclass ||
+        !llvm::all_of(llvm::zip(instance.types, wanted.arguments),
+            [&](auto pair) {
+              return Match(std::get<0>(pair), std::get<1>(pair), bindings);
+            })) {
+      continue;
+    }
+    entailing_.push_back(wanted);
+    bool refuted{llvm::any_of(instance.constraints, [&](const ClassConstraint &c) {
+      return Refuted(SubstituteIn(c, [&](unsigned var) {
+        return var < bindings.size() && bindings[var] ? bindings[var]
+                                                      : types_.Named(error_, {});
+      }));
+    })};
+    entailing_.pop_back();
+    return refuted;
+  }
+  return false; // perhaps assumed, or satisfied once its types are known
+}
+
+bool TypeChecker::Refuted(const Assignment &a) {
+  return llvm::any_of(a.wanted, [&](const auto &wanted) {
+    return Refuted(SubstituteIn(wanted.second,
+        [&](unsigned var) { return Resolve(a, types_.Variable(var)); }));
+  });
+}
+
 //===----------------------------------------------------------------------===//
 // Clauses
 //===----------------------------------------------------------------------===//
@@ -1684,6 +1763,7 @@ ClauseTypes TypeChecker::CheckClause(const ClauseForm &clause, bool inferring) {
       definition && !inferring ? SignatureOf(*definition) : nullptr};
   rigid_ = sig ? sig->typeVars : 0;
   rigidNames_ = sig ? sig->varNames : llvm::ArrayRef<llvm::StringRef>{};
+  assumed_ = sig ? Assume(sig->constraints) : Assumed{};
   // The type qualifications' variables: the declaration's names are its
   // rigid variables, and the others are the clause's own.
   TypeVarNames names;
@@ -1772,7 +1852,7 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
   // unsatisfied one is reported once in a clause.
   std::vector<GoalConstraint> proofs;
   if (sig && !ambiguity && !failed_) {
-    Assumed assumed{Assume(sig->constraints)};
+    const Assumed &assumed{assumed_};
     llvm::SmallVector<ClassConstraint, 2> reported;
     auto name{[&](unsigned var) {
       return var < rigid_ ? rigidNames_[var].str() : "T_" + std::to_string(var);
@@ -1781,13 +1861,8 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
       ClassConstraint wanted{SubstituteIn(instantiated, [&](unsigned var) {
         return Resolve(chosen, types_.Variable(var));
       })};
-      bool error{false}, variable{false};
-      for (const Type *argument : wanted.arguments) {
-        ForEachVariable(*argument, [&](unsigned) { variable = true; });
-        error |= HasError(argument);
-      }
-      // An inferred signature's constraints are not inferred yet.
-      if (error || (inferred && variable)) {
+      if (llvm::any_of(wanted.arguments,
+              [&](const Type *t) { return HasError(t); })) {
         continue;
       }
       std::variant<ConstraintProof, ClassConstraint> entailed{
@@ -1942,7 +2017,8 @@ Signature TypeChecker::General(const Symbol &symbol, unsigned arity) {
 // order they occur, and named T1, T2, ..., as mmc's inferred declarations
 // name them.
 Signature TypeChecker::Generalize(const Symbol &symbol, const Assignment &a,
-    llvm::ArrayRef<const Type *> types) {
+    llvm::ArrayRef<const Type *> types,
+    llvm::ArrayRef<ClassConstraint> constraints) {
   llvm::DenseMap<unsigned, unsigned> numbers;
   llvm::SmallVector<const Type *, 4> arguments;
   for (const Type *type : types) {
@@ -1950,6 +2026,31 @@ Signature TypeChecker::Generalize(const Symbol &symbol, const Assignment &a,
       auto [it, inserted]{numbers.try_emplace(var, numbers.size())};
       return types_.Variable(it->second);
     }));
+  }
+  // The constraints, on the arguments' variables, without repeats. The
+  // clauses' unified types may make them reducible, or ground.
+  std::vector<ClassConstraint> reduced;
+  for (const ClassConstraint &constraint : constraints) {
+    Reduce(SubstituteIn(constraint,
+               [&](unsigned var) { return Resolve(a, types_.Variable(var)); }),
+        reduced);
+  }
+  std::vector<ClassConstraint> generalized;
+  for (ClassConstraint renamed : reduced) {
+    bool determined{true};
+    for (const Type *argument : renamed.arguments) {
+      ForEachVariable(*argument,
+          [&](unsigned var) { determined &= numbers.count(var) > 0; });
+    }
+    if (!determined) {
+      continue;
+    }
+    renamed = SubstituteIn(renamed,
+        [&](unsigned var) { return types_.Variable(numbers[var]); });
+    if (llvm::none_of(generalized,
+            [&](const ClassConstraint &c) { return Same(c, renamed); })) {
+      generalized.push_back(renamed);
+    }
   }
   std::vector<llvm::StringRef> names;
   for (unsigned j{0}; j < numbers.size(); ++j) {
@@ -1960,7 +2061,78 @@ Signature TypeChecker::Generalize(const Symbol &symbol, const Assignment &a,
           : parser::PredOrFunc::Predicate,
       parser::Purity::Pure, static_cast<unsigned>(numbers.size()),
       result_.arena_.SaveArray(llvm::ArrayRef<llvm::StringRef>{names}),
-      result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments})};
+      result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments}),
+      result_.arena_.SaveArray(llvm::ArrayRef<ClassConstraint>{generalized})};
+}
+
+bool TypeChecker::Reduce(
+    const ClassConstraint &wanted, std::vector<ClassConstraint> &residual) {
+  if (llvm::any_of(entailing_,
+          [&](const ClassConstraint &c) { return Same(c, wanted); })) {
+    return false;
+  }
+  for (const Instance &instance : instances_) {
+    llvm::SmallVector<const Type *, 4> bindings;
+    if (instance.typeclass != wanted.typeclass ||
+        !llvm::all_of(llvm::zip(instance.types, wanted.arguments),
+            [&](auto pair) {
+              return Match(std::get<0>(pair), std::get<1>(pair), bindings);
+            })) {
+      continue;
+    }
+    entailing_.push_back(wanted);
+    bool reduced{true};
+    for (const ClassConstraint &constraint : instance.constraints) {
+      reduced &= Reduce(SubstituteIn(constraint,
+                            [&](unsigned var) {
+                              return var < bindings.size() && bindings[var]
+                                  ? bindings[var]
+                                  : types_.Named(error_, {});
+                            }),
+          residual);
+    }
+    entailing_.pop_back();
+    return reduced;
+  }
+  // No instance: one with a variable is assumed, and a ground one fails.
+  bool variable{false};
+  for (const Type *argument : wanted.arguments) {
+    ForEachVariable(*argument, [&](unsigned) { variable = true; });
+  }
+  if (variable &&
+      llvm::none_of(residual,
+          [&](const ClassConstraint &c) { return Same(c, wanted); })) {
+    residual.push_back(wanted);
+  }
+  return variable;
+}
+
+std::vector<ClassConstraint> TypeChecker::Residual(
+    const Assignment &a, llvm::DenseMap<unsigned, unsigned> &numbers) {
+  std::vector<ClassConstraint> residual;
+  for (const auto &[goal, instantiated] : a.wanted) {
+    ClassConstraint wanted{SubstituteIn(instantiated,
+        [&](unsigned var) { return Resolve(a, types_.Variable(var)); })};
+    if (llvm::none_of(wanted.arguments,
+            [&](const Type *t) { return HasError(t); })) {
+      Reduce(wanted, residual); // a ground one fails when checked
+    }
+  }
+  // Those whose variables are all the head's, renumbered as it is; the
+  // others are reported when the clause is checked by its signature.
+  std::vector<ClassConstraint> result;
+  for (const ClassConstraint &constraint : residual) {
+    bool determined{true};
+    for (const Type *argument : constraint.arguments) {
+      ForEachVariable(*argument,
+          [&](unsigned var) { determined &= numbers.count(var) > 0; });
+    }
+    if (determined) {
+      result.push_back(SubstituteIn(constraint,
+          [&](unsigned var) { return types_.Variable(numbers[var]); }));
+    }
+  }
+  return result;
 }
 
 // The least general type of which both are instances: where they differ, a
@@ -2005,6 +2177,21 @@ TypeChecker::Inferred TypeChecker::InferPass(
   struct Candidate {
     Assignment combined;
     std::vector<const Type *> head;
+    std::vector<ClassConstraint> constraints; // in combined's variables
+  };
+  // A clause's typing: its head's types and the constraints its goals
+  // need on them.
+  struct Typing {
+    std::vector<const Type *> head;
+    std::vector<ClassConstraint> constraints;
+    bool operator==(const Typing &that) const {
+      return head == that.head &&
+          constraints.size() == that.constraints.size() &&
+          llvm::all_of(llvm::zip(constraints, that.constraints),
+              [](auto pair) {
+                return Same(std::get<0>(pair), std::get<1>(pair));
+              });
+    }
   };
   constexpr std::size_t maxCandidates{64};
   std::vector<Candidate> candidates;
@@ -2012,18 +2199,19 @@ TypeChecker::Inferred TypeChecker::InferPass(
     CheckClause(*clause, true);
     // The clause's head typings, each with its variables numbered from 0
     // in the order they occur, so that equal ones are the same.
-    std::vector<std::vector<const Type *>> typings;
+    std::vector<Typing> typings;
     unsigned count{0};
     for (const Assignment &a : assignments_) {
       llvm::DenseMap<unsigned, unsigned> numbers;
-      std::vector<const Type *> typing;
+      Typing typing;
       for (VarId var : clause->head) {
-        typing.push_back(types_.Substitute(
+        typing.head.push_back(types_.Substitute(
             Resolve(a, VarType(var)), [&](unsigned v) {
               auto [it, inserted]{numbers.try_emplace(v, numbers.size())};
               return types_.Variable(it->second);
             }));
       }
+      typing.constraints = Residual(a, numbers);
       count = std::max(count, static_cast<unsigned>(numbers.size()));
       if (!llvm::is_contained(typings, typing)) {
         typings.push_back(std::move(typing));
@@ -2034,32 +2222,49 @@ TypeChecker::Inferred TypeChecker::InferPass(
       continue;
     }
     if (candidates.empty()) {
-      for (std::vector<const Type *> &typing : typings) {
+      for (Typing &typing : typings) {
         Assignment combined;
         combined.bindings.resize(count);
-        candidates.push_back({std::move(combined), std::move(typing)});
+        candidates.push_back({std::move(combined), std::move(typing.head),
+            std::move(typing.constraints)});
       }
       continue;
     }
-    std::vector<Candidate> next;
+    std::vector<Candidate> next, refuted;
     for (const Candidate &candidate : candidates) {
-      for (const std::vector<const Type *> &typing : typings) {
+      for (const Typing &typing : typings) {
         if (next.size() == maxCandidates) {
           break;
         }
         Candidate trial{candidate};
         unsigned offset(trial.combined.bindings.size());
         trial.combined.bindings.resize(offset + count);
-        bool fits{trial.head.size() == typing.size()};
-        for (std::size_t j{0}; fits && j < typing.size(); ++j) {
-          const Type *renamed{types_.Substitute(typing[j],
-              [&](unsigned v) { return types_.Variable(offset + v); })};
+        auto rename{[&](unsigned v) { return types_.Variable(offset + v); }};
+        bool fits{trial.head.size() == typing.head.size()};
+        for (std::size_t j{0}; fits && j < typing.head.size(); ++j) {
+          const Type *renamed{types_.Substitute(typing.head[j], rename)};
           fits = UnifyTypes(trial.combined, trial.head[j], renamed);
         }
-        if (fits) {
+        for (const ClassConstraint &constraint : typing.constraints) {
+          trial.constraints.push_back(SubstituteIn(constraint, rename));
+        }
+        // As in a clause, a combination whose constraints cannot be
+        // satisfied is dropped if others are left: one clause's constraint
+        // may decide another's overloading.
+        if (fits &&
+            llvm::any_of(trial.constraints, [&](const ClassConstraint &c) {
+              return Refuted(SubstituteIn(c, [&](unsigned var) {
+                return Resolve(trial.combined, types_.Variable(var));
+              }));
+            })) {
+          refuted.push_back(std::move(trial));
+        } else if (fits) {
           next.push_back(std::move(trial));
         }
       }
+    }
+    if (next.empty()) {
+      next = std::move(refuted);
     }
     if (!next.empty()) {
       candidates = std::move(next);
@@ -2074,10 +2279,11 @@ TypeChecker::Inferred TypeChecker::InferPass(
   // function type declarations"), as mmc reports too.
   std::vector<Signature> most;
   for (const Candidate &candidate : candidates) {
-    Signature signature{
-        Generalize(symbol, candidate.combined, candidate.head)};
+    Signature signature{Generalize(
+        symbol, candidate.combined, candidate.head, candidate.constraints)};
     if (!llvm::any_of(most, [&](const Signature &s) {
-          return s.arguments == signature.arguments;
+          return s.arguments == signature.arguments &&
+              AsSet(s.constraints) == AsSet(signature.constraints);
         })) {
       most.push_back(signature);
     }
@@ -2174,7 +2380,8 @@ void TypeChecker::Infer(const Undeclared &undeclared) {
         }
         const Signature &last{*result_.signatures_[symbol]};
         if (next.typeVars != last.typeVars ||
-            next.arguments != last.arguments) {
+            next.arguments != last.arguments ||
+            AsSet(next.constraints) != AsSet(last.constraints)) {
           result_.signatures_[symbol] = next;
           changed = true;
           // A type that keeps growing will not settle; this stops it before
