@@ -93,6 +93,7 @@ private:
   struct Clauses {
     Purity purity{Purity::Pure};
     const ClauseForm *first{nullptr};
+    bool modeSpecific{false}; // a clause is for one mode
   };
   llvm::MapVector<const Symbol *, Clauses> clauses_;
   llvm::MapVector<const MethodDefinition *, Clauses> methods_;
@@ -136,6 +137,7 @@ void PurityChecker::Run(
     if (!of.first) {
       of.first = clause.clause;
     }
+    of.modeSpecific |= clause.clause->modeSpecific;
   }
   clause_ = nullptr;
   CheckPredicates(tree);
@@ -373,6 +375,79 @@ Purity PurityChecker::CheckAnnotated(const Scope &scope, Purity annotation) {
 
 void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
   const ModuleSymbols &own{resolution_.module()};
+  auto lookup{[&](parser::PredOrFunc kind, llvm::StringRef name,
+                  unsigned arity) -> const Symbol * {
+    for (const Symbol *symbol : own.Lookup(name)) {
+      if (symbol->kind ==
+              (kind == parser::PredOrFunc::Function ? SymbolKind::Function
+                                                    : SymbolKind::Predicate) &&
+          symbol->arity == arity) {
+        return symbol;
+      }
+    }
+    return nullptr;
+  }};
+  // The number of modes of each predicate or function; those promised to
+  // have equivalent clauses; and the purity of each foreign_proc for C,
+  // the language merkc's foreign code is in, by its attributes (reference
+  // manual, "Foreign code attributes").
+  llvm::DenseMap<const Symbol *, unsigned> modes;
+  llvm::DenseSet<const Symbol *> equivalent;
+  struct Foreign {
+    const parser::ForeignProcPragma *pragma;
+    Purity purity;
+  };
+  llvm::MapVector<const Symbol *, llvm::SmallVector<Foreign, 1>> foreign;
+  for (const parser::Item &item : tree.items) {
+    if (const auto *decl{std::get_if<const parser::PredDecl *>(&item)}) {
+      bool moded{(*decl)->arguments.empty() && (*decl)->determinism};
+      for (const parser::TypeAndMode *argument : (*decl)->arguments) {
+        moded |= argument->mode.has_value();
+      }
+      if (const Symbol *symbol{moded
+                  ? lookup((*decl)->kind, (*decl)->name->name,
+                        (*decl)->arguments.size())
+                  : nullptr}) {
+        ++modes[symbol];
+      }
+    } else if (const auto *mode{std::get_if<const parser::ModeDecl *>(&item)}) {
+      if (const Symbol *symbol{lookup((*mode)->kind, (*mode)->name->name,
+              (*mode)->arguments.size())}) {
+        ++modes[symbol];
+      }
+    } else if (const auto *pragma{
+                   std::get_if<const parser::PredPragma *>(&item)}) {
+      if ((*pragma)->kind == parser::PredPragmaKind::PromiseEquivalentClauses) {
+        for (const Symbol *symbol :
+            own.Lookup((*pragma)->pred->nameArity->name->name)) {
+          if (symbol->arity == (*pragma)->pred->nameArity->arity) {
+            equivalent.insert(symbol);
+          }
+        }
+      }
+    } else if (const auto *proc{
+                   std::get_if<const parser::ForeignProcPragma *>(&item)}) {
+      if ((*proc)->language != parser::ForeignLanguage::C) {
+        continue;
+      }
+      if (const Symbol *symbol{lookup((*proc)->kind, (*proc)->name->name,
+              (*proc)->arguments.size())}) {
+        // Impure unless promised otherwise.
+        Purity purity{Purity::Impure};
+        for (parser::ForeignProcAttribute attribute : (*proc)->attributes) {
+          if (attribute == parser::ForeignProcAttribute::PromisePure) {
+            purity = Purity::Pure;
+          } else if (attribute ==
+              parser::ForeignProcAttribute::PromiseSemipure) {
+            purity = Purity::Semipure;
+          }
+        }
+        foreign[symbol].push_back({*proc, purity});
+        Clauses &of{clauses_[symbol]};
+        of.purity = Least(of.purity, purity);
+      }
+    }
+  }
   // The promises of the pragmas, by predicate or function.
   llvm::DenseMap<const Symbol *, Purity> promised;
   for (const parser::Item &item : tree.items) {
@@ -430,11 +505,23 @@ void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
           Name(declared));
     }
   }
-  for (const auto &[symbol, of] : clauses_) {
+  for (const auto &[symbol, clauses] : clauses_) {
     const auto *decl{std::get_if<const parser::PredDecl *>(&symbol->declaration)};
+    if (!decl && !clauses.first) {
+      continue; // foreign code only, for an undeclared predicate
+    }
     Purity declared{decl ? (*decl)->purity : Purity::Pure};
-    parser::CharBlock where{decl ? symbol->source : Source(of.first->tokens)};
+    parser::CharBlock where{
+        decl ? symbol->source : Source(clauses.first->tokens)};
     std::string text{Text(*symbol)};
+    // Clauses for different modes may mean different things, so they are
+    // impure unless promised equivalent (reference manual, "Different
+    // clauses for different modes").
+    Clauses of{clauses};
+    if (of.modeSpecific && modes.lookup(symbol) > 1 &&
+        !equivalent.count(symbol)) {
+      of.purity = Purity::Impure;
+    }
     if (auto it{promised.find(symbol)}; it != promised.end()) {
       Purity promise{it->second};
       if (declared != promise) {
@@ -449,13 +536,25 @@ void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
       }
       continue;
     }
+    // A foreign_proc's purity is the declared one.
+    bool mismatched{false};
+    for (const Foreign &code : foreign.lookup(symbol)) {
+      if (code.purity != declared) {
+        // mmc: "foreign clause for predicate `f1'/1 has purity impure but
+        // that predicate has been declared pure".
+        messages_.Say(Source(code.pragma->tokens),
+            "this foreign_proc for %s is %s, but %s is declared %s"_err_en_US,
+            text, Name(code.purity), text, Name(declared));
+        mismatched = true;
+      }
+    }
     if (of.purity > declared) {
       // mmc: "purity error: predicate is impure. It must be declared
       // `impure' or promised pure".
       messages_.Say(where,
-          "%s is %s, so it must be declared `%s' or promised pure"_err_en_US,
-          text, Name(of.purity), Name(of.purity));
-    } else if (of.purity < declared) {
+          "%s is %s, so it must be declared `%s' or promised %s"_err_en_US,
+          text, Name(of.purity), Name(of.purity), Name(declared));
+    } else if (of.purity < declared && !mismatched) {
       // mmc: "warning: declared impure but actually pure".
       messages_.Say(where, "%s is declared %s, but it is %s"_warn_en_US, text,
           Name(declared), Name(of.purity));

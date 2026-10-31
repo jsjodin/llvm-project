@@ -251,6 +251,9 @@ struct ClauseForm {
   // Each goal's nonlocal variables, by its number, in order; quantification
   // computes them.
   llvm::ArrayRef<llvm::ArrayRef<VarId>> nonlocals{};
+  // Whether its head's arguments have modes, so that it is for one mode
+  // (reference manual, "Different clauses for different modes").
+  bool modeSpecific{false};
 };
 
 // A clause of an instance's method, or the clause that a method
