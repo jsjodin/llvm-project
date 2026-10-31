@@ -214,7 +214,11 @@ def mmc_messages(output, filename):
 TYPE_ERROR = re.compile(
     r"type error|ambiguous overloading|undefined (symbol|predicate|function|type)|"
     r"type inference iteration limit|without corresponding|wrong number of arguments|syntax error|"
-    r"instance declaration|type ?class|superclass|instance type|instance constraints",
+    # mmc's phrases for type classes and instances, not words that a
+    # predicate's name may contain.
+    r"instance declaration|typeclass constraint|type class constraint|superclass constraint|"
+    r"cyclic superclass|class parameters|constraints on class declarations|for typeclass|"
+    r"typeclass `|instance type|instance constraints",
     re.IGNORECASE,
 )
 

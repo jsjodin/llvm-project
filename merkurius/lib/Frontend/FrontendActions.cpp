@@ -22,6 +22,7 @@
 #include "merkurius/Semantics/resolve-names.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Path.h"
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -307,6 +308,17 @@ std::string Position(const parser::AllSources &sources, parser::CharBlock at) {
   return "";
 }
 
+// The same, after the file's name, for a position in another module.
+std::string FilePosition(const parser::AllSources &sources, parser::CharBlock at) {
+  if (auto range{sources.GetProvenanceRange(at)}) {
+    if (auto pos{sources.GetSourcePosition(range->start())}) {
+      return llvm::sys::path::filename(*pos->path).str() + ':' +
+          std::to_string(pos->line) + ':' + std::to_string(pos->column);
+    }
+  }
+  return "";
+}
+
 parser::CharBlock Source(
     const parser::TokenSequence &tokens, parser::TokenRange range) {
   return {tokens.tokens[range.first].spelling.begin(),
@@ -407,6 +419,37 @@ bool DebugDumpTypesAction::executeAction() {
         }
         *os << '\n';
       }
+    }
+    // Each constraint of a goal, with how it is satisfied, and below it
+    // those of the instance that satisfies it.
+    std::function<void(const semantics::ConstraintProof &, unsigned)> proof{
+        [&](const semantics::ConstraintProof &p, unsigned depth) {
+          *os << std::string(depth, ' ') << checking->Print(clause, p.constraint);
+          if (p.instance) {
+            const parser::TokenSequence &tokens{*p.instance->tokens};
+            parser::CharBlock at{
+                Source(tokens, p.instance->decl->name->tokens)};
+            *os << " by the instance at "
+                << (p.instance->local ? Position(sources, at)
+                                      : FilePosition(sources, at));
+          } else if (p.assumed) {
+            *os << " by the declaration's "
+                << checking->Print(clause, *p.assumed);
+          }
+          *os << '\n';
+          for (const semantics::ConstraintProof &premise : p.premises) {
+            proof(premise, depth + 2);
+          }
+        }};
+    for (const semantics::GoalConstraint &c : clause.constraints) {
+      const parser::SymName *name{clause.names[c.goal]};
+      *os << "  constraint of "
+          << (name ? Source(r.tokens, name->tokens).ToString() : "?")
+          << " at "
+          << (name ? Position(sources, Source(r.tokens, name->tokens))
+                   : std::string{"?"})
+          << ": ";
+      proof(c.proof, 0);
     }
   }
   os->flush();

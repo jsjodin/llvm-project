@@ -27,6 +27,23 @@
 
 namespace merkurius::semantics {
 
+// How a type class constraint is satisfied (thesis, section 3.1.4): by
+// one of the constraints the clause's declaration assumes, directly or as
+// a superclass of it, or by an instance, whose own constraints are then
+// satisfied in turn.
+struct ConstraintProof {
+  ClassConstraint constraint;
+  const ClassConstraint *assumed; // the declaration's, if by it
+  const InstanceItem *instance; // otherwise
+  llvm::ArrayRef<ConstraintProof> premises; // the instance's constraints
+};
+
+// A constraint of the callee of a goal, as the clause instantiates it.
+struct GoalConstraint {
+  unsigned goal;
+  ConstraintProof proof;
+};
+
 // A clause's type assignment. The type variables of its predicate's or
 // function's declaration are numbered from 0, in their declared order;
 // any other variable left in a type is one that nothing determined.
@@ -44,6 +61,9 @@ struct ClauseTypes {
   // neither.
   llvm::ArrayRef<const Symbol *> symbols;
   llvm::ArrayRef<const parser::SymName *> names;
+  // The constraints of the goals' callees, in the order of the goals, and
+  // how each is satisfied; none if the clause has a type error.
+  llvm::ArrayRef<GoalConstraint> constraints{};
 };
 
 class TypeChecking {
@@ -60,6 +80,7 @@ public:
   }
   // Prints a type of the clause, its type variables by their names.
   std::string Print(const ClauseTypes &, const Type &) const;
+  std::string Print(const ClauseTypes &, const ClassConstraint &) const;
 
 private:
   friend class TypeChecker;

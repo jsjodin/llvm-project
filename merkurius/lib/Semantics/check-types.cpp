@@ -48,6 +48,17 @@ std::string TypeChecking::Print(
   });
 }
 
+std::string TypeChecking::Print(
+    const ClauseTypes &clause, const ClassConstraint &constraint) const {
+  std::string text;
+  llvm::raw_string_ostream os{text};
+  PrintConstraint(os, constraint, [&](unsigned var) {
+    return var < clause.typeVarNames.size() ? clause.typeVarNames[var].str()
+                                            : "T_" + std::to_string(var);
+  });
+  return text;
+}
+
 void PrintConstraint(llvm::raw_ostream &os, const ClassConstraint &constraint,
     llvm::function_ref<std::string(unsigned)> name) {
   os << constraint.typeclass->module << '.' << constraint.typeclass->name
@@ -131,7 +142,14 @@ struct TypeVarNames {
 struct Assignment {
   std::vector<const Type *> bindings; // by type variable; null if unbound
   std::vector<const Symbol *> symbols; // by goal number
+  // The constraints of the goals' callees, instantiated, by goal number.
+  std::vector<std::pair<unsigned, ClassConstraint>> wanted;
 };
+
+bool Same(const ClassConstraint &x, const ClassConstraint &y) {
+  // Types are interned.
+  return x.typeclass == y.typeclass && x.arguments == y.arguments;
+}
 
 constexpr std::size_t maxAssignments{1000};
 // The largest inferred argument type, as a tree.
@@ -161,6 +179,11 @@ private:
   bool IsError(const Type *type) const {
     return type->kind == TypeKind::Named && type->constructor == &error_;
   }
+  bool HasError(const Type *type) const {
+    return IsError(type) ||
+        llvm::any_of(type->arguments, [&](const Type *t) { return HasError(t); }) ||
+        (type->result && HasError(type->result));
+  }
 
   // Type classes and instances (reference manual, "Type classes"). A
   // constraint whose type class is undefined or ambiguous is left out.
@@ -177,6 +200,32 @@ private:
       const std::string &head);
   llvm::DenseMap<const Symbol *, llvm::ArrayRef<ClassConstraint>>
       superclasses_;
+  // The instances that constraints may use: the loaded interfaces' and
+  // the module's, without its errors and its abstract declarations.
+  struct Instance {
+    const InstanceItem *item;
+    const Symbol *typeclass;
+    llvm::ArrayRef<const Type *> types;
+    llvm::ArrayRef<ClassConstraint> constraints;
+  };
+  std::vector<Instance> instances_;
+
+  // Constraint satisfaction. The constraints assumed, those of a
+  // declaration or an instance, with their superclasses, each with the
+  // assumed one it comes from.
+  using Assumed =
+      std::vector<std::pair<ClassConstraint, const ClassConstraint *>>;
+  Assumed Assume(llvm::ArrayRef<ClassConstraint>);
+  // A proof of `wanted`, or the constraint it reduces to that has none.
+  std::variant<ConstraintProof, ClassConstraint> Entail(
+      const ClassConstraint &wanted, const Assumed &);
+  llvm::SmallVector<ClassConstraint, 4> entailing_; // to stop at a cycle
+  ClassConstraint SubstituteIn(
+      const ClassConstraint &, llvm::function_ref<const Type *(unsigned)>);
+  bool Match(const Type *pattern, const Type *type,
+      llvm::SmallVectorImpl<const Type *> &bindings) const;
+  std::string ConstraintText(const ClassConstraint &,
+      llvm::function_ref<std::string(unsigned)> name);
 
   // Clauses. A clause is checked against its predicate's or function's
   // signature, declared or inferred, unless it is being inferred, when its
@@ -283,6 +332,7 @@ private:
   llvm::ArrayRef<llvm::StringRef> rigidNames_;
   std::vector<Assignment> assignments_;
   std::vector<const parser::SymName *> names_; // by goal number
+  unsigned goal_{0}; // the goal whose options are tried
   bool tooMany_{false};
   // The clause has a type error, or a name that is undefined; an ambiguity
   // or unresolved polymorphism may then be only its consequence, and is
@@ -659,7 +709,13 @@ llvm::SmallVector<const Type *, 4> TypeChecker::Instantiate(
 bool TypeChecker::Apply(Assignment &a, const Symbol &symbol,
     const Signature &sig, llvm::ArrayRef<VarId> arguments,
     const Type *value) {
+  unsigned offset(a.bindings.size());
   llvm::SmallVector<const Type *, 4> types{Instantiate(a, sig)};
+  for (const ClassConstraint &constraint : sig.constraints) {
+    a.wanted.emplace_back(goal_, SubstituteIn(constraint, [&](unsigned var) {
+      return types_.Variable(offset + var);
+    }));
+  }
   bool function{sig.kind == parser::PredOrFunc::Function};
   std::size_t arity{types.size() - (function ? 1 : 0)};
   if (arguments.size() > arity) {
@@ -927,6 +983,7 @@ void TypeChecker::CheckInstances() {
     std::string text;
     Key key;
     bool valid;
+    std::vector<llvm::StringRef> names; // of its type variables
   };
   std::vector<Head> heads;
   for (const InstanceItem &item : resolution_.instances()) {
@@ -935,7 +992,7 @@ void TypeChecker::CheckInstances() {
       continue; // reported by name resolution
     }
     InTokensOf in{*this, item.tokens};
-    Head head{&item, decl.name->candidates.front(), {}, {}, {}, {}, true};
+    Head head{&item, decl.name->candidates.front(), {}, {}, {}, {}, true, {}};
     TypeVarNames names;
     for (const parser::Type &type : decl.types) {
       head.types.push_back(Convert(type, names));
@@ -1007,10 +1064,14 @@ void TypeChecker::CheckInstances() {
               "an instance's constraint may only constrain type variables and ground types"_err_en_US);
         }
       }
+      if (names.next > headVars) {
+        head.valid = false; // a variable not in the types
+      }
       if (converted) {
         head.constraints.push_back(*converted);
       }
     }
+    head.names = names.names;
     if (item.local && !decl.abstract && item.exported) {
       messages_->Say(Source(decl.name->tokens),
           "the instance %s is not abstract, so it may not be in the interface section"_err_en_US,
@@ -1038,12 +1099,39 @@ void TypeChecker::CheckInstances() {
     }
   }
   for (const Head &head : heads) {
+    if (head.valid && !(head.item->local && head.item->decl->abstract)) {
+      instances_.push_back({head.item, head.typeclass,
+          result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{head.types}),
+          result_.arena_.SaveArray(
+              llvm::ArrayRef<ClassConstraint>{head.constraints})});
+    }
+  }
+  for (const Head &head : heads) {
     if (!head.item->local || !head.valid) {
       continue;
     }
     const parser::InstanceDecl &decl{*head.item->decl};
     if (!decl.abstract) {
       CheckMethods(decl, *head.typeclass, head.text);
+      // Its type class's superclass constraints, on its types, must follow
+      // from its constraints and the instances (thesis, section 3.1.4).
+      Assumed assumed{Assume(head.constraints)};
+      for (const ClassConstraint &super : Superclasses(*head.typeclass)) {
+        ClassConstraint wanted{SubstituteIn(super, [&](unsigned var) {
+          return var < head.types.size() ? head.types[var]
+                                         : types_.Named(error_, {});
+        })};
+        if (std::holds_alternative<ClassConstraint>(Entail(wanted, assumed))) {
+          messages_->Say(Source(decl.name->tokens),
+              "the superclass constraint %s of instance %s is not satisfied"_err_en_US,
+              ConstraintText(wanted,
+                  [&](unsigned var) {
+                    return var < head.names.size() ? head.names[var].str()
+                                                   : "T" + std::to_string(var);
+                  }),
+              head.text);
+        }
+      }
       continue;
     }
     // An abstract instance needs a definition with the same types and
@@ -1158,6 +1246,121 @@ void TypeChecker::CheckMethods(const parser::InstanceDecl &decl,
           head, KindName(method->kind), method->name.str(), method->arity);
     }
   }
+}
+
+ClassConstraint TypeChecker::SubstituteIn(const ClassConstraint &constraint,
+    llvm::function_ref<const Type *(unsigned)> replace) {
+  llvm::SmallVector<const Type *, 4> arguments;
+  for (const Type *argument : constraint.arguments) {
+    arguments.push_back(types_.Substitute(argument, replace));
+  }
+  return {constraint.typeclass,
+      result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments})};
+}
+
+std::string TypeChecker::ConstraintText(const ClassConstraint &constraint,
+    llvm::function_ref<std::string(unsigned)> name) {
+  std::string text;
+  llvm::raw_string_ostream os{text};
+  os << '`';
+  PrintConstraint(os, constraint, name);
+  os << '\'';
+  return text;
+}
+
+TypeChecker::Assumed TypeChecker::Assume(
+    llvm::ArrayRef<ClassConstraint> constraints) {
+  Assumed assumed;
+  for (const ClassConstraint &constraint : constraints) {
+    assumed.emplace_back(constraint, &constraint);
+  }
+  // A constraint assumes its type class's superclasses, on its arguments.
+  for (std::size_t i{0}; i < assumed.size(); ++i) {
+    auto [constraint, origin]{assumed[i]};
+    for (const ClassConstraint &super : Superclasses(*constraint.typeclass)) {
+      ClassConstraint implied{SubstituteIn(super, [&](unsigned var) {
+        return var < constraint.arguments.size() ? constraint.arguments[var]
+                                                 : types_.Named(error_, {});
+      })};
+      if (llvm::none_of(assumed,
+              [&](const auto &a) { return Same(a.first, implied); })) {
+        assumed.emplace_back(implied, origin);
+      }
+    }
+  }
+  return assumed;
+}
+
+// Whether `type` is an instance of `pattern`, an instance's type, whose
+// variables `bindings` binds.
+bool TypeChecker::Match(const Type *pattern, const Type *type,
+    llvm::SmallVectorImpl<const Type *> &bindings) const {
+  if (pattern->kind == TypeKind::Variable) {
+    if (bindings.size() <= pattern->var) {
+      bindings.resize(pattern->var + 1, nullptr);
+    }
+    const Type *&bound{bindings[pattern->var]};
+    if (!bound) {
+      bound = type;
+    }
+    return bound == type;
+  }
+  if (type->kind != pattern->kind || type->constructor != pattern->constructor ||
+      type->arguments.size() != pattern->arguments.size() ||
+      (type->result == nullptr) != (pattern->result == nullptr)) {
+    return false;
+  }
+  for (auto [p, t] : llvm::zip(pattern->arguments, type->arguments)) {
+    if (!Match(p, t, bindings)) {
+      return false;
+    }
+  }
+  return !pattern->result || Match(pattern->result, type->result, bindings);
+}
+
+std::variant<ConstraintProof, ClassConstraint> TypeChecker::Entail(
+    const ClassConstraint &wanted, const Assumed &assumed) {
+  for (const auto &[constraint, origin] : assumed) {
+    if (Same(constraint, wanted)) {
+      return ConstraintProof{wanted, origin, nullptr, {}};
+    }
+  }
+  if (llvm::any_of(entailing_,
+          [&](const ClassConstraint &c) { return Same(c, wanted); })) {
+    return wanted; // it needs itself
+  }
+  // Instances do not overlap, so at most one matches.
+  for (const Instance &instance : instances_) {
+    llvm::SmallVector<const Type *, 4> bindings;
+    if (instance.typeclass != wanted.typeclass ||
+        !llvm::all_of(llvm::zip(instance.types, wanted.arguments),
+            [&](auto pair) {
+              return Match(std::get<0>(pair), std::get<1>(pair), bindings);
+            })) {
+      continue;
+    }
+    entailing_.push_back(wanted);
+    std::vector<ConstraintProof> premises;
+    for (const ClassConstraint &constraint : instance.constraints) {
+      std::variant<ConstraintProof, ClassConstraint> premise{
+          Entail(SubstituteIn(constraint,
+                     [&](unsigned var) {
+                       return var < bindings.size() && bindings[var]
+                           ? bindings[var]
+                           : types_.Named(error_, {});
+                     }),
+              assumed)};
+      if (auto *failed{std::get_if<ClassConstraint>(&premise)}) {
+        entailing_.pop_back();
+        return *failed;
+      }
+      premises.push_back(std::get<ConstraintProof>(premise));
+    }
+    entailing_.pop_back();
+    return ConstraintProof{wanted, nullptr, instance.item,
+        result_.arena_.SaveArray(llvm::ArrayRef<ConstraintProof>{premises})};
+  }
+  return wanted;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1288,6 +1491,7 @@ void TypeChecker::CheckUnify(const Unify &unify) {
 
 void TypeChecker::CheckFunctor(const Unify &unify, const parser::SymName &name) {
   names_[unify.number] = &name;
+  goal_ = unify.number;
   std::vector<Option> options;
   for (const Symbol *candidate : name.candidates) {
     options.push_back([&, candidate](Assignment &a) {
@@ -1337,6 +1541,7 @@ void TypeChecker::CheckCall(const Call &call) {
     return;
   }
   names_[call.number] = call.name;
+  goal_ = call.number;
   std::vector<Option> options;
   for (const Symbol *candidate : call.name->candidates) {
     options.push_back([&, candidate](Assignment &a) {
@@ -1562,6 +1767,66 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
       std::holds_alternative<std::monostate>(definition->declaration)};
   ClauseTypes types{&clause, definition, sig && !inferred, inferred,
       rigidNames_, {}, {}, {}};
+  // The goals' constraints, once the types are known: each is satisfied
+  // by the declaration's or by instances (thesis, section 3.1.4). An
+  // unsatisfied one is reported once in a clause.
+  std::vector<GoalConstraint> proofs;
+  if (sig && !ambiguity && !failed_) {
+    Assumed assumed{Assume(sig->constraints)};
+    llvm::SmallVector<ClassConstraint, 2> reported;
+    auto name{[&](unsigned var) {
+      return var < rigid_ ? rigidNames_[var].str() : "T_" + std::to_string(var);
+    }};
+    for (const auto &[goal, instantiated] : chosen.wanted) {
+      ClassConstraint wanted{SubstituteIn(instantiated, [&](unsigned var) {
+        return Resolve(chosen, types_.Variable(var));
+      })};
+      bool error{false}, variable{false};
+      for (const Type *argument : wanted.arguments) {
+        ForEachVariable(*argument, [&](unsigned) { variable = true; });
+        error |= HasError(argument);
+      }
+      // An inferred signature's constraints are not inferred yet.
+      if (error || (inferred && variable)) {
+        continue;
+      }
+      std::variant<ConstraintProof, ClassConstraint> entailed{
+          Entail(wanted, assumed)};
+      if (auto *proof{std::get_if<ConstraintProof>(&entailed)}) {
+        proofs.push_back({goal, *proof});
+        continue;
+      }
+      const ClassConstraint &unsatisfied{std::get<ClassConstraint>(entailed)};
+      if (llvm::any_of(reported,
+              [&](const ClassConstraint &c) { return Same(c, unsatisfied); })) {
+        continue;
+      }
+      reported.push_back(unsatisfied);
+      bool undetermined{false};
+      for (const Type *argument : unsatisfied.arguments) {
+        ForEachVariable(
+            *argument, [&](unsigned var) { undetermined |= var >= rigid_; });
+      }
+      parser::CharBlock where{
+          names_[goal] ? Source(names_[goal]->tokens) : Source(clause.tokens)};
+      // mmc: "unsatisfiable typeclass constraint" and "unsatisfied
+      // typeclass constraint".
+      parser::Message &message{undetermined
+              ? messages_->Say(where,
+                    "unsatisfied type class constraint %s: nothing determines its type"_err_en_US,
+                    ConstraintText(unsatisfied, name))
+              : messages_->Say(where,
+                    "unsatisfiable type class constraint %s"_err_en_US,
+                    ConstraintText(unsatisfied, name))};
+      if (!Same(unsatisfied, wanted)) {
+        message.Attach(where,
+            "an instance for %s needs it"_because_en_US,
+            ConstraintText(wanted, name));
+      }
+    }
+  }
+  types.constraints =
+      result_.arena_.SaveArray(llvm::ArrayRef<GoalConstraint>{proofs});
   std::vector<const Type *> vars;
   std::string unbound;
   for (VarId var{0}; var < clause.vars.size(); ++var) {
