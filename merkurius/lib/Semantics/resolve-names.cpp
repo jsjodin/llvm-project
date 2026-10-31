@@ -412,8 +412,40 @@ llvm::SmallVector<const Symbol *, 4> Resolver::Lookup(
 void Resolver::Resolve(const parser::SymName &name, NameUse use,
     unsigned arity, const Visibility &scope, const Visibility *outer) {
   llvm::SmallVector<const Symbol *, 4> found{Lookup(name, use, arity, scope)};
+  // 'new f'(...) constructs with an existentially typed constructor f/n
+  // (reference manual, "Existentially typed data types"), which may be
+  // qualified, as m.'new f'.
+  const Symbol *plain{nullptr};
+  if (found.empty() && use == NameUse::DataTerm && name.name.starts_with("new ")) {
+    parser::SymName constructor{name};
+    constructor.name = name.name.drop_front(4);
+    for (const Symbol *symbol : Lookup(constructor, use, arity, scope)) {
+      if (symbol->kind != SymbolKind::Constructor) {
+        continue;
+      }
+      const auto *decl{
+          std::get_if<const parser::Constructor *>(&symbol->declaration)};
+      if (decl && !(*decl)->existentialVars.empty()) {
+        found.push_back(symbol);
+      } else {
+        plain = symbol;
+      }
+    }
+  }
   if (found.empty() && !(use == NameUse::DataTerm && IsCharConstant(name, arity))) {
-    Undefined(name, use, arity, scope, outer);
+    if (plain && plain->owner) {
+      // mmc: "undefined symbol `new plain'/1. Invalid use of `new' on a
+      // constructor of type `m.plain'/0 which is not existentially typed."
+      messages_
+          .Say(Source(name), "undefined %s %s/%u"_err_en_US, Describe(use),
+              FullName(name), arity)
+          .Attach(Source(name),
+              "`new' is only for existentially typed constructors, and %s/%u of type %s.%s/%u is not one"_because_en_US,
+              plain->name.str(), arity, plain->owner->module.str(),
+              plain->owner->name.str(), plain->owner->arity);
+    } else {
+      Undefined(name, use, arity, scope, outer);
+    }
   }
   llvm::ArrayRef<const Symbol *> candidates{
       result_.arena_.SaveArray(llvm::ArrayRef<const Symbol *>{found})};

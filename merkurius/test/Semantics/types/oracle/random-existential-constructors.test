@@ -1,0 +1,9 @@
+# Random modules as in random-existentials.test, with an existentially
+# typed constructor too, built with 'new shown'(...) and taken apart by a
+# function, and rarely built without new, which is a type error
+# (generate-random-programs.py --existential-constructors).
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../../utils/type-oracle/generate-random-programs.py --existential-constructors --seed 3 --count 60 %t
+# RUN: %compare-types --allow-errors %t/*.m

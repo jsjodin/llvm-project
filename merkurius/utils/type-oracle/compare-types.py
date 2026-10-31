@@ -464,7 +464,12 @@ def typed_version(text):
     name that is an identifier qualified with its module. Variables whose
     types are not determined, or have the types that calls give existential
     variables, or those of the clause's own existential variables, and DCG
-    clauses, are left alone."""
+    clauses, are left alone. So are variables of the module's types with
+    existential constraints on a constructor: mmc's unification of two
+    values of such a type, such as `B = (B : box)`, fails its determinism
+    check, or crashes it (see the register)."""
+    constrained = set(re.findall(
+        r"^:- type\s+(\w+)[^.]*?--->[^.]*?\bsome\s*\[[^.]*?=>", text, re.M | re.S))
     offsets = [0]
     for line in text.splitlines(keepends=True):
         offsets.append(offsets[-1] + len(line))
@@ -486,6 +491,7 @@ def typed_version(text):
             for v, t in types.items()
             if t is not None and "T_" not in t and "<" not in t and "some [" not in t
             and not any(re.search(r"\b%s\b" % re.escape(e), t) for e in existential)
+            and not any(re.search(r"\.%s\b" % re.escape(c), t) for c in constrained)
         ]
         if not goals:
             return
