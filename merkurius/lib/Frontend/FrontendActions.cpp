@@ -233,7 +233,8 @@ bool DebugDumpImportsAction::executeAction() {
   parser::ParseTreeArena arena;
   const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages)};
   semantics::ModuleLoader loader{ci.getAllSources(),
-      ci.getFrontendOpts().libraryDirectory, messages};
+      ci.getFrontendOpts().libraryDirectory, messages,
+      !ci.getFrontendOpts().mmcUniqueness};
   llvm::StringRef directory{
       llvm::sys::path::parent_path(getSourceFile().path())};
   semantics::ModuleLoader::Imports imports{
@@ -294,7 +295,8 @@ void Resolve(CompilerInstance &ci, parser::SourceFile &file,
   r.tree = &parser::ConvertFile(r.tokens, r.arena, r.messages);
   r.form = &semantics::Desugar(*r.tree, r.tokens, r.semanticArena, r.messages);
   r.loader = std::make_unique<semantics::ModuleLoader>(ci.getAllSources(),
-      ci.getFrontendOpts().libraryDirectory, r.messages);
+      ci.getFrontendOpts().libraryDirectory, r.messages,
+      !ci.getFrontendOpts().mmcUniqueness);
   llvm::StringRef directory{llvm::sys::path::parent_path(file.path())};
   r.loader->LoadImports(
       *r.tree, r.tokens, directory.empty() ? "." : directory);

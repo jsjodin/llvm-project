@@ -14,7 +14,20 @@ foreach(source ${library_sources})
     COMMENT "Copying the library module ${name}")
   list(APPEND library_outputs ${library_dir}/${name})
 endforeach()
+# The sound array stub, which merkc loads before array.m unless
+# -fmmc-uniqueness is given.
+set(sound_array ${library_dir}/sound/array.m)
+add_custom_command(OUTPUT ${sound_array}
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${library_dir}/sound
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/make-sound-array.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/array.m ${sound_array}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/array.m
+    ${CMAKE_CURRENT_SOURCE_DIR}/make-sound-array.py
+  COMMENT "Making the sound array stub")
+list(APPEND library_outputs ${sound_array})
 add_custom_target(merkurius-library ALL DEPENDS ${library_outputs})
 set_target_properties(merkurius-library PROPERTIES FOLDER "Merkurius")
 install(FILES ${library_sources} DESTINATION lib/merkurius
+  COMPONENT merkc)
+install(FILES ${sound_array} DESTINATION lib/merkurius/sound
   COMPONENT merkc)
