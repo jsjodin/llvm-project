@@ -12,7 +12,8 @@
 # it and is stopped SECONDS after its first job reports. Each runs in its
 # own process group, which is sent SIGTERM, since in fork mode it ignores
 # SIGINT and its jobs outlive it, and then SIGKILL for a job it started as
-# it stopped. Stopped so, a fuzzer may exit with 72 ("run interrupted") or
+# it stopped. Each reports how long it fuzzed and how many inputs it ran.
+# Stopped so, a fuzzer may exit with 72 ("run interrupted") or
 # 1, if a job ended as it stopped; the run fails if a fuzzer ended before
 # it was stopped with a failure status, or wrote a crash, leak, timeout or
 # out-of-memory artifact.
@@ -165,10 +166,14 @@ for dir in artifacts artifacts-large; do
     STATUS=1
   fi
 done
+# The inputs run after the corpus was loaded, from the last status line,
+# "#N: ... job: ...", whose count starts there.
 for name in "${NAMES[@]}"; do
+  RUNS=$(grep -E '^#[0-9]+: .* job: ' "${LOG[$name]}" | tail -n 1 |
+    sed -E 's/^#([0-9]+):.*/\1/')
   echo "INFO: the $name fuzzer fuzzed for" \
     "$((STOP[$name] - ${START[$name]:-${STOP[$name]}})) seconds" \
-    "after loading its corpus" | tee -a fuzz.log
+    "after loading its corpus, and ran ${RUNS:-0} inputs" | tee -a fuzz.log
 done
 echo "INFO: exit status $STATUS" | tee -a fuzz.log
 exit "$STATUS"
