@@ -1843,7 +1843,7 @@ The language target is the Mercury 22.01 reference manual. The standard library 
 
 - **Differential testing:** compile each test program with mmc 22.01.9 and with our compiler, and require identical output. Melbourne's test suite is run as an external oracle, not copied into our repository.
 - **Pass tests:** unit tests per pass, and FileCheck tests for every dialect and lowering.
-- **Diagnostics tests:** expected type, mode and determinism errors, such as the missing-constructor error in Language extensions.
+- **Diagnostics tests:** expected type, mode and determinism errors, such as the missing-constructor error in Language extensions. To do: a test whose expected errors are `ERR-DAG` lines, checked with `--implicit-check-not=error:`, misses an extra error that falls between two of them, as FileCheck checks the implicit pattern only outside the `DAG` group's matches. Such tests should also check the number of errors, for example with a RUN line that counts them (`grep -c error: %t.err`, compared with the number of `ERR-DAG` lines). Pass 6 found two that passed this way, `uniqueness/backtracking.m` and `scopes.m`; an audit of the error counts then found no others.
 - **Runtime stress:** a GC torture mode that collects at every safepoint, and randomized scheduling.
 - **Benchmarks:** the four baseline programs (fib, naive reverse, 12-queens, float loop) already exist in C, Mercury, SWI-Prolog and Python. Add the classic Prolog suite (deriv, tak, crypt, poly), parallel-loop scaling runs, and process benchmarks: ring, ping-pong, spawn rate, receive latency.
 
