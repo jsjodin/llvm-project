@@ -1,29 +1,38 @@
 #!/usr/bin/env bash
 # Builds the parser and desugaring fuzz target with libFuzzer and the
 # address and undefined behavior sanitizers, using the clang of the build
-# tree, then fuzzes for SECONDS (default 180) in JOBS processes (default 32).
+# tree, then fuzzes for SECONDS (default 300) in JOBS processes (default 40).
+# A fifth of the jobs fuzz large inputs, up to 64 KB, which reach what grows
+# with the size of a module; the others fuzz inputs up to 4 KB, which run
+# many times faster. The two are separate fuzzers that run at once.
+#
 # SECONDS is the time spent fuzzing, after libFuzzer has run every input
 # of the corpus once, which takes minutes for a large corpus: libFuzzer's
-# own -max_total_time counts from its start, so the fuzzer runs without
-# it and is stopped SECONDS after its first job reports. It runs in its own
-# process group, which is sent SIGTERM, since in fork mode it ignores
+# own -max_total_time counts from its start, so each fuzzer runs without
+# it and is stopped SECONDS after its first job reports. Each runs in its
+# own process group, which is sent SIGTERM, since in fork mode it ignores
 # SIGINT and its jobs outlive it, and then SIGKILL for a job it started as
-# it stopped. Stopped so, the fuzzer may exit with 72 ("run interrupted")
-# or 1, if a job ended as it stopped; the run fails only if it wrote a
-# crash, leak, timeout or out-of-memory artifact.
+# it stopped. Stopped so, a fuzzer may exit with 72 ("run interrupted") or
+# 1, if a job ended as it stopped; the run fails if a fuzzer ended before
+# it was stopped with a failure status, or wrote a crash, leak, timeout or
+# out-of-memory artifact.
 #
 # The sources compile in parallel through a generated ninja file, and only
-# those that changed since the last run are recompiled. The fuzzer runs in
-# libFuzzer's fork mode, which keeps the corpus small: it adds an input to
+# those that changed since the last run are recompiled. The fuzzers run in
+# libFuzzer's fork mode, which keeps a corpus small: it adds an input to
 # the corpus only when the input covers something new.
 #
-# The corpus, crashes, the log and the fuzzer itself live in
-# $BUILD_DIR/fuzz/term. The corpus is seeded with the Mercury files in the
-# tests. Inputs that crash are written there as artifacts/crash-*; add them
-# to test/Parser/Inputs/fuzz once fixed. Those that take more than 10
-# seconds are written as artifacts/slow-unit-* and listed at the end, but
-# do not fail the run: the instrumented fuzzer is tens of times slower than
-# merkc, so time them with merkc. The log is fuzz.log.
+# The corpora, crashes, the logs and the fuzzer itself live in
+# $BUILD_DIR/fuzz/term: corpus, artifacts and fuzz.log for the small
+# inputs, and corpus-large, artifacts-large and fuzz-large.log for the
+# large ones. The large inputs have a corpus of their own, so that they do
+# not slow the loading of the small one; it starts as a copy of the small
+# one. Both are seeded with the Mercury files in the tests. Inputs that
+# crash are written as crash-* in the artifacts directories; add them to
+# test/Parser/Inputs/fuzz once fixed. Those that take more than 10 seconds
+# are written as slow-unit-* and listed at the end, but do not fail the
+# run: the instrumented fuzzer is tens of times slower than merkc, so time
+# them with merkc.
 #
 # Usage: utils/fuzz/run-term-fuzzer.sh [SECONDS] [JOBS]
 
@@ -32,10 +41,12 @@ set -euo pipefail
 MERKURIUS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LLVM_PROJECT_DIR="$(dirname "$MERKURIUS_DIR")"
 BUILD_DIR="${BUILD_DIR:-$(dirname "$LLVM_PROJECT_DIR")/build-merk}"
-SECONDS_TO_RUN="${1:-180}"
-JOBS="${2:-32}"
+SECONDS_TO_RUN="${1:-300}"
+JOBS="${2:-40}"
+LARGE_JOBS=$((JOBS / 5))
+SMALL_JOBS=$((JOBS - LARGE_JOBS))
 WORK="$BUILD_DIR/fuzz/term"
-mkdir -p "$WORK/corpus" "$WORK/artifacts"
+mkdir -p "$WORK/corpus" "$WORK/artifacts" "$WORK/artifacts-large"
 
 SOURCES=("$MERKURIUS_DIR/tools/merkurius-term-fuzzer/merkurius-term-fuzzer.cpp"
   "$MERKURIUS_DIR"/lib/Parser/*.cpp "$MERKURIUS_DIR"/lib/Semantics/*.cpp
@@ -68,45 +79,91 @@ NINJA
 } > "$WORK/build.ninja"
 ninja -C "$WORK" merkurius-term-fuzzer
 
+if [[ ! -d "$WORK/corpus-large" ]]; then
+  cp -r "$WORK/corpus" "$WORK/corpus-large"
+fi
 find "$MERKURIUS_DIR/test" "$MERKURIUS_DIR/utils" -name '*.m' \
-  -exec cp {} "$WORK/corpus/" \;
+  -exec cp {} "$WORK/corpus/" \; -exec cp {} "$WORK/corpus-large/" \;
 
 cd "$WORK"
-setsid ./merkurius-term-fuzzer corpus -artifact_prefix=artifacts/ -fork="$JOBS" \
-  -max_len=4096 -dict="$MERKURIUS_DIR/utils/fuzz/mercury.dict" \
-  > fuzz.log 2>&1 &
-FUZZER=$!
-tail -n +1 -f --pid="$FUZZER" fuzz.log &
+# The fuzzers, by name: their process groups, their logs, the times they
+# started fuzzing, once their corpora were loaded, and the times they
+# were stopped.
+NAMES=(small)
+declare -A PID LOG START STOP
+run() {
+  local name=$1 jobs=$2 corpus=$3 artifacts=$4 log=$5
+  shift 5
+  setsid ./merkurius-term-fuzzer "$corpus" -artifact_prefix="$artifacts/" \
+    -fork="$jobs" -dict="$MERKURIUS_DIR/utils/fuzz/mercury.dict" "$@" \
+    > "$log" 2>&1 &
+  PID[$name]=$!
+  LOG[$name]=$log
+}
+run small "$SMALL_JOBS" corpus artifacts fuzz.log -max_len=4096
+: > fuzz-large.log
+if ((LARGE_JOBS > 0)); then
+  NAMES+=(large)
+  # Without -len_control=0, libFuzzer would grow its inputs from small
+  # ones only slowly.
+  run large "$LARGE_JOBS" corpus-large artifacts-large fuzz-large.log \
+    -max_len=65536 -len_control=0
+fi
+tail -n +1 -f fuzz.log fuzz-large.log &
+TAIL=$!
 
-# The corpus is loaded when the first job reports, as "#N: ... job: 1".
-until grep -qE '^#[0-9]+: .* job: ' fuzz.log || ! kill -0 "$FUZZER" 2>/dev/null; do
+running() { kill -0 "${PID[$1]}" 2>/dev/null; }
+# A corpus is loaded when the first job reports, as "#N: ... job: 1".
+while true; do
+  ANY=false
+  for name in "${NAMES[@]}"; do
+    running "$name" || continue
+    ANY=true
+    if [[ -z "${START[$name]:-}" ]]; then
+      if grep -qE '^#[0-9]+: .* job: ' "${LOG[$name]}"; then
+        START[$name]=$SECONDS
+      fi
+    elif [[ -z "${STOP[$name]:-}" ]] &&
+        ((SECONDS - START[$name] >= SECONDS_TO_RUN)); then
+      STOP[$name]=$SECONDS
+      kill -TERM -- "-${PID[$name]}"
+    fi
+  done
+  $ANY || break
   sleep 1
 done
-START=$SECONDS
-while kill -0 "$FUZZER" 2>/dev/null && ((SECONDS - START < SECONDS_TO_RUN)); do
-  sleep 1
-done
-STOPPED=false
-if kill -0 "$FUZZER" 2>/dev/null; then
-  STOPPED=true
-  kill -TERM -- "-$FUZZER"
-fi
 STATUS=0
-wait "$FUZZER" || STATUS=$?
+for name in "${NAMES[@]}"; do
+  FUZZER_STATUS=0
+  wait "${PID[$name]}" || FUZZER_STATUS=$?
+  kill -KILL -- "-${PID[$name]}" 2>/dev/null || true
+  if [[ -z "${STOP[$name]:-}" ]]; then
+    STOP[$name]=$SECONDS
+    echo "INFO: the $name fuzzer ended before it was stopped," \
+      "with exit status $FUZZER_STATUS" | tee -a fuzz.log
+    if ((FUZZER_STATUS != 0)); then
+      STATUS=1
+    fi
+  fi
+done
 sleep 1
-kill -KILL -- "-$FUZZER" 2>/dev/null || true
-if $STOPPED; then
-  STATUS=0
-fi
-SLOW=$(ls artifacts | grep '^slow-unit-' || true)
-if [[ -n "$SLOW" ]]; then
-  echo "INFO: slow inputs:" $SLOW | tee -a fuzz.log
-fi
-FAILED=$(ls artifacts | grep -E '^(crash|leak|timeout|oom)-' || true)
-if [[ -n "$FAILED" ]]; then
-  echo "INFO: artifacts written:" $FAILED | tee -a fuzz.log
-  STATUS=1
-fi
-echo "INFO: fuzzed for $((SECONDS - START)) seconds after loading the corpus;" \
-  "exit status $STATUS" | tee -a fuzz.log
+kill "$TAIL" 2>/dev/null || true
+
+for dir in artifacts artifacts-large; do
+  SLOW=$(ls "$dir" | grep '^slow-unit-' || true)
+  if [[ -n "$SLOW" ]]; then
+    echo "INFO: slow inputs in $dir:" $SLOW | tee -a fuzz.log
+  fi
+  FAILED=$(ls "$dir" | grep -E '^(crash|leak|timeout|oom)-' || true)
+  if [[ -n "$FAILED" ]]; then
+    echo "INFO: artifacts written in $dir:" $FAILED | tee -a fuzz.log
+    STATUS=1
+  fi
+done
+for name in "${NAMES[@]}"; do
+  echo "INFO: the $name fuzzer fuzzed for" \
+    "$((STOP[$name] - ${START[$name]:-${STOP[$name]}})) seconds" \
+    "after loading its corpus" | tee -a fuzz.log
+done
+echo "INFO: exit status $STATUS" | tee -a fuzz.log
 exit "$STATUS"
