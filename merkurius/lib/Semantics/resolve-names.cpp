@@ -24,6 +24,7 @@
 // types. A module imported with use_module is visible only qualified.
 
 #include "merkurius/Semantics/resolve-names.h"
+#include "merkurius/Semantics/insts.h"
 #include "merkurius/Common/idioms.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -659,6 +660,19 @@ void Resolver::ResolveBelow(const T &x, const Visibility &scope, const Visibilit
     void Post(const parser::NamedType &type) {
       resolver.Resolve(
           *type.name, NameUse::Type, type.arguments.size(), scope, outer);
+    }
+    bool Pre(const parser::NamedInst &inst) {
+      // mmc: "the builtin inst `ground' should only be used with arity
+      // zero", and nothing about its arguments.
+      if (auto arities{WrongBuiltinInstArity(*inst.name, inst.arguments.size())}) {
+        if (resolver.reportUndefined_) {
+          resolver.messages_.Say(resolver.Source(*inst.name),
+              "the builtin inst %s should only be used with arity %s"_err_en_US,
+              inst.name->name.str(), arities->str());
+        }
+        return false;
+      }
+      return true;
     }
     void Post(const parser::NamedInst &inst) {
       resolver.Resolve(
