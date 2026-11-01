@@ -9,9 +9,9 @@
 % negations and scopes; and a goal with more than one solution but no
 % outputs, but not an impure one, has at most one, the innermost such
 % goal. A declaration that is looser than the inferred determinism has a
-% warning. A procedure that calls one without a declared determinism is
-% checked by a later step; committed choice is in committed.m, determinism
-% casts in casts.m and requirements in requires.m.
+% warning. Inference of undeclared determinisms is in inference.m,
+% committed choice in committed.m, determinism casts in casts.m and
+% requirements in requires.m.
 %
 % RUN: merkc -fc1 -fdebug-dump-determinism %s 2>%t.err | FileCheck %s
 % RUN: FileCheck --check-prefix=WARN --implicit-check-not=warning: --implicit-check-not=error: %s < %t.err
@@ -154,6 +154,7 @@ default(X) = X.
 % WARN-DAG: warning: the determinism declaration of explicit(in) = out could be tighter: it is declared multi, but inferred det
 explicit(X) = X.
 
-% Determinism inference is a later step.
-% CHECK-LABEL: inferred_callee(out) is det{{$}}
+% A call by its callee's inferred determinism.
+% CHECK-LABEL: inferred_callee(out) is det, inferred det
+% CHECK: call pred goals.undeclared/1 mode 0: undeclared(Y) [det]
 inferred_callee(Y) :- undeclared(Y).

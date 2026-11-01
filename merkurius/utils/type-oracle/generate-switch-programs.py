@@ -27,10 +27,15 @@ arbitrary scopes are outside them. With --requires too, some disjunctions
 are in require_<det>, require_complete_switch and require_switch_arms_<det>
 scopes, on the variable they test or now and then another, and some calls
 in require_<det> scopes, each with a determinism chosen at random, so that
-some requirements are not met.
+some requirements are not met. With --inferred too, some predicates are
+declared without a determinism, in the implementation section, and the
+goals also call predicates so declared, whose bodies call the others and
+each other, recursively or not, so that their determinisms are inferred as
+a fixpoint.
 
 Usage: generate-switch-programs.py [--seed N] [--count N] [--determinism
-                                   [--committed] [--casts] [--requires]] DIR
+                                   [--committed] [--casts] [--requires]
+                                   [--inferred]] DIR
 """
 
 import argparse
@@ -81,12 +86,26 @@ COMMITTED_DETERMINISMS = ["cc_multi", "cc_multi", "cc_nondet"]
 determinism = False
 casts = False
 requires = False
+inferred = False
+committed = False
+# The bodies of the predicates declared without a determinism, for
+# --inferred, with C and D for callees.
+INFERRED_BODIES = [
+    "C(X, Y)",
+    "C(X, Z), D(Z, Y)",
+    "( X > 0, C(X - 1, Y) ; Y = X )",
+    "( if X = 0 then Y = 0 else C(X - 1, Z), D(Z, Y) )",
+    "( C(X, Y) ; D(X, Y) )",
+    "( if C(X, Z) then D(Z, Y) else Y = X )",
+    "X > 2, C(X, Y)",
+]
 
 
 class Gen:
-    def __init__(self, rng):
+    def __init__(self, rng, calls=None):
         self.rng = rng
         self.count = 0
+        self.calls = calls or CALLS
 
     def fresh(self, base="V"):
         self.count += 1
@@ -157,7 +176,7 @@ class Gen:
                 ctx.append((m, "int"))
             elif k < 0.75:
                 m = self.fresh("M")
-                callee = r.choice(CALLS) if determinism else "q"
+                callee = r.choice(self.calls) if determinism else "q"
                 if determinism and r.random() < 0.2:
                     # No outputs.
                     goals.append("%s(%s, _)" % (callee, self.int_value(ctx)))
@@ -289,7 +308,9 @@ def predicate(gen, n):
             insts.append("%s::in" % t)
     name = "p%d" % n
     detism = r.choice(DETERMINISMS) if determinism else "nondet"
-    decl = ":- pred %s(%s, int::out) is %s.\n" % (name, ", ".join(insts), detism)
+    undeclared = inferred and r.random() < 0.3
+    decl = ":- pred %s(%s, int::out)%s.\n" % (
+        name, ", ".join(insts), "" if undeclared else " is " + detism)
     clauses = []
     if r.random() < 0.3:
         # Clauses whose heads are patterns.
@@ -315,21 +336,35 @@ def predicate(gen, n):
         ctx = list(inputs)
         clauses.append("%s(%s, R) :- %s." %
                        (name, ", ".join(v for v, _ in inputs), gen.body(ctx, "R")))
-    return decl, clauses
+    return decl, clauses, undeclared
 
 
 def module(rng, name):
-    gen = Gen(rng)
-    decls, defs = [], []
+    # For --inferred, predicates declared without a determinism that the
+    # goals call, and whose bodies call the others and each other.
+    inferred_preds = []
+    if inferred:
+        names = ["w%d" % i for i in range(rng.randint(1, 3))]
+        for w in names:
+            body = rng.choice(INFERRED_BODIES)
+            body = body.replace("C", rng.choice(CALLS + names)).replace(
+                "D", rng.choice(CALLS + names))
+            inferred_preds.append(":- pred %s(int::in, int::out).\n%s(X, Y) :- %s.\n" %
+                                  (w, w, body))
+        gen = Gen(rng, CALLS + names * 2)
+    else:
+        gen = Gen(rng)
+    decls, local, defs = [], [], []
     for n in range(rng.randint(2, 5)):
-        d, c = predicate(gen, n)
-        decls.append(d)
+        d, c, undeclared = predicate(gen, n)
+        (local if undeclared else decls).append(d)
         defs.append("\n".join(c) + "\n")
     return (PRELUDE.format(name=name) + "".join(decls) +
             "\n:- implementation.\n:- import_module int%s.\n\n" % (", require" if determinism else "") +
             ":- pred q(int::in, int::out) is det.\nq(X, X).\n" +
             (HELPERS if determinism else "\n") +
-            (COMMITTED_HELPERS if CALLS[-1] == "cn" else "") + "\n".join(defs))
+            (COMMITTED_HELPERS if committed else "") + "".join(inferred_preds) +
+            "".join(local) + "\n".join(defs))
 
 
 def main():
@@ -341,12 +376,15 @@ def main():
     parser.add_argument("--committed", action="store_true")
     parser.add_argument("--casts", action="store_true")
     parser.add_argument("--requires", action="store_true")
+    parser.add_argument("--inferred", action="store_true")
     parser.add_argument("dir")
     args = parser.parse_args()
-    global determinism, casts, requires
+    global determinism, casts, requires, inferred, committed
     determinism = args.determinism
     casts = args.casts
     requires = args.requires
+    inferred = args.inferred
+    committed = args.committed
     if args.committed:
         CALLS.extend(COMMITTED_CALLS)
         DETERMINISMS.extend(COMMITTED_DETERMINISMS)

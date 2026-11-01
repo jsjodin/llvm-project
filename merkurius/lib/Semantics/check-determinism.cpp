@@ -61,6 +61,8 @@ bool AllowsOthers(InstOps &ops, const Type *type, const Inst *inst,
 
 } // namespace
 
+bool Reached(const Body *goal);
+
 // Turns the clauses of a procedure, as mode analysis checked them, into
 // its body in mmc's form.
 class BodyBuilder {
@@ -220,10 +222,29 @@ private:
               auto first{[](const semantics::Goal &g) {
                 return std::visit([](const auto *g) { return g->tokens.first; }, g);
               }};
+              // The variables of the goals left out, which mmc's
+              // quantification still finds until it runs again, as for a
+              // unification replaced with fail.
+              std::vector<BodyVar> dropped;
+              const ClauseForm &form{*clause_->clause->clause};
+              auto drop{[&](const semantics::Goal &g) {
+                for (VarId var : form.nonlocals[number(g)]) {
+                  dropped.push_back(map_[var]);
+                }
+              }};
+              for (const semantics::Goal &inner :
+                  std::get<const Conj *>(goal)->goals) {
+                if (!llvm::any_of(modes.order, [&](const semantics::Goal &g) {
+                      return number(g) == number(inner);
+                    })) {
+                  drop(inner);
+                }
+              }
               for (const semantics::Goal &inner : modes.order) {
                 if (failing && number(inner) > number(*failing) &&
                     !(clause_->goals[number(inner)].head &&
                         first(inner) < first(*failing))) {
+                  drop(inner);
                   continue;
                 }
                 const Body *goal{Goal(inner)};
@@ -233,6 +254,11 @@ private:
                 for (const Body *g : Conjuncts(goal)) {
                   conj.goals.push_back(g);
                 }
+              }
+              if (!dropped.empty() && !conj.goals.empty()) {
+                Body last{*conj.goals.back()};
+                llvm::append_range(last.failed, dropped);
+                conj.goals.back() = New(std::move(last));
               }
               if (conj.goals.size() == 1) {
                 return conj.goals.front();
@@ -262,8 +288,14 @@ private:
             },
             [&](const IfThenElse *ite) {
               Body out{BodyKind::IfThenElse, tokens, &modes};
-              out.goals = {Whole(ite->condition), Whole(ite->then),
-                  Whole(ite->otherwise)};
+              // Mode analysis does not run the then part after a condition
+              // whose end it does not reach, which mmc leaves out.
+              const Body *condition{Whole(ite->condition)};
+              const Body *then{Whole(ite->then)};
+              if (!Reached(condition)) {
+                then = New(Body{BodyKind::Conj, then->tokens});
+              }
+              out.goals = {condition, then, Whole(ite->otherwise)};
               return New(std::move(out));
             },
             [&](const Not *negation) {
@@ -1512,6 +1544,39 @@ Components Switch(Components a, Components b) {
   return {a.canFail || b.canFail, std::max(a.most, b.most)};
 }
 
+// Whether mode analysis reaches the end of a goal, as in mmc: not after a
+// unification that cannot succeed, which is fail, or a call to a
+// procedure declared to have no solutions, since mode analysis comes
+// before inference; a negation always succeeds.
+bool Reached(const Body *goal) {
+  switch (goal->kind) {
+  case BodyKind::Unify:
+    return goal->unify != UnifyKind::Call ||
+        !goal->modes->callee->determinism ||
+        ComponentsOf(*goal->modes->callee->determinism).most != Solutions::Zero;
+  case BodyKind::Call:
+    return !goal->modes->callee->determinism ||
+        ComponentsOf(*goal->modes->callee->determinism).most != Solutions::Zero;
+  case BodyKind::HOCall:
+    return ComponentsOf(goal->modes->determinism).most != Solutions::Zero;
+  case BodyKind::Conj:
+    return llvm::all_of(goal->goals, [&](const Body *g) { return Reached(g); });
+  case BodyKind::Disj:
+    return llvm::any_of(goal->goals, [&](const Body *g) { return Reached(g); });
+  case BodyKind::Switch:
+    return llvm::any_of(
+        goal->cases, [&](const SwitchCase &c) { return Reached(c.goal); });
+  case BodyKind::IfThenElse:
+    return (Reached(goal->goals[0]) && Reached(goal->goals[1])) ||
+        Reached(goal->goals[2]);
+  case BodyKind::Not:
+    return true;
+  case BodyKind::Scope:
+    return Reached(goal->goals.front());
+  }
+  return true;
+}
+
 // Infers the determinism of each goal of a procedure's body, from its
 // parts' (reference manual, "Determinism checking and inference";
 // Henderson, Somogyi and Conway, section 5.1), checks it against the
@@ -1519,10 +1584,11 @@ Components Switch(Components a, Components b) {
 // make the difference (ibid., section 5.3).
 class DeterminismAnalyser {
 public:
-  DeterminismAnalyser(ProcedureBody &body, TypeChecking &types, InstOps &ops,
-      const parser::TokenSequence &tokens, parser::Messages &messages)
-      : body_{body}, types_{types}, ops_{ops}, tokens_{tokens},
-        messages_{messages} {}
+  DeterminismAnalyser(const DeterminismChecking &checking, ProcedureBody &body,
+      TypeChecking &types, InstOps &ops, const parser::TokenSequence &tokens,
+      parser::Messages &messages)
+      : checking_{checking}, body_{body}, types_{types}, ops_{ops},
+        tokens_{tokens}, messages_{messages} {}
 
   void Run() {
     std::set<BodyVar> bound;
@@ -1568,12 +1634,6 @@ private:
     bool first;
     std::vector<const Body *> failing;
   };
-
-  void Unchecked(DeterminismUnchecked why) {
-    if (body_.unchecked == DeterminismUnchecked::None) {
-      body_.unchecked = why;
-    }
-  }
 
   // The occurrences of each variable in a goal, each goal counted once
   // though a merged case's goal is in several cases.
@@ -1642,12 +1702,21 @@ private:
     });
   }
 
+  // A callee's determinism, declared or inferred; none for one whose modes
+  // were not checked.
+  std::optional<parser::Determinism> Of(const Procedure &callee) const {
+    return checking_.DeterminismOf(callee);
+  }
+
   Components Callee(const Procedure &callee) {
-    if (!callee.determinism) {
-      Unchecked(DeterminismUnchecked::InferredCallee);
+    std::optional<parser::Determinism> determinism{Of(callee)};
+    if (!determinism) {
+      if (body_.unchecked == DeterminismUnchecked::None) {
+        body_.unchecked = DeterminismUnchecked::UncheckedCallee;
+      }
       return {true, Solutions::Many};
     }
-    return ComponentsOf(*callee.determinism);
+    return ComponentsOf(*determinism);
   }
 
   bool Impure(const Symbol &symbol) const {
@@ -1803,6 +1872,11 @@ private:
       // If the condition cannot fail, the else part is not run.
       if (!c.d.canFail) {
         return {Conjunction(c.d, t.d), impure};
+      }
+      // If it has no solutions, the then part is not run either, and the
+      // if-then-else is its else part, as in mmc.
+      if (c.d.most == Solutions::Zero) {
+        return {e.d, impure};
       }
       Components both{Conjunction(c.d, t.d)};
       return {{t.d.canFail || e.d.canFail, std::max(both.most, e.d.most)},
@@ -2010,38 +2084,6 @@ private:
     return r;
   }
 
-  // Whether mode analysis reaches the end of a goal, as in mmc: not after a
-  // unification that cannot succeed, which is fail, or a call to a
-  // procedure with no solutions; a negation always succeeds.
-  bool Reached(const Body *goal) const {
-    switch (goal->kind) {
-    case BodyKind::Unify:
-      return goal->unify != UnifyKind::Call ||
-          !goal->modes->callee->determinism ||
-          ComponentsOf(*goal->modes->callee->determinism).most != Solutions::Zero;
-    case BodyKind::Call:
-      return !goal->modes->callee->determinism ||
-          ComponentsOf(*goal->modes->callee->determinism).most != Solutions::Zero;
-    case BodyKind::HOCall:
-      return ComponentsOf(goal->modes->determinism).most != Solutions::Zero;
-    case BodyKind::Conj:
-      return llvm::all_of(goal->goals, [&](const Body *g) { return Reached(g); });
-    case BodyKind::Disj:
-      return llvm::any_of(goal->goals, [&](const Body *g) { return Reached(g); });
-    case BodyKind::Switch:
-      return llvm::any_of(
-          goal->cases, [&](const SwitchCase &c) { return Reached(c.goal); });
-    case BodyKind::IfThenElse:
-      return (Reached(goal->goals[0]) && Reached(goal->goals[1])) ||
-          Reached(goal->goals[2]);
-    case BodyKind::Not:
-      return true;
-    case BodyKind::Scope:
-      return Reached(goal->goals.front());
-    }
-    return true;
-  }
-
   // Variables in their order, once each.
   static std::vector<BodyVar> Sorted(std::vector<BodyVar> vars) {
     llvm::sort(vars);
@@ -2129,7 +2171,11 @@ private:
     }};
     switch (goal->kind) {
     case BodyKind::Unify:
-      if (goal->lambda) {
+      // A test of a case's own constant is true in mmc, in the case of a
+      // switch, though not in an arm that a require_switch_arms_<det>
+      // scope checks.
+      if (goal->lambda ||
+          (goal->switchTest && goal->arguments.empty() && !context.empty())) {
         return;
       }
       if (goal->unify == UnifyKind::Call) {
@@ -2192,6 +2238,11 @@ private:
     }
     case BodyKind::IfThenElse: {
       bool condition{Seen(goal->goals[0]).canFail};
+      if (condition && Seen(goal->goals[0]).most == Solutions::Zero) {
+        // Only the else part is run.
+        Diagnose(goal->goals[2], canFail, inner, context, causes);
+        return;
+      }
       Diagnose(goal->goals[0], canFail || condition, inner, context, causes);
       Diagnose(goal->goals[1], canFail, inner, context, causes);
       if (condition) {
@@ -2398,7 +2449,7 @@ private:
     std::optional<parser::Determinism> own;
     if (goal->kind == BodyKind::Call ||
         (goal->kind == BodyKind::Unify && goal->unify == UnifyKind::Call)) {
-      own = goal->modes->callee->determinism;
+      own = Of(*goal->modes->callee);
     } else if (goal->kind == BodyKind::HOCall) {
       own = goal->modes->determinism;
     }
@@ -2433,12 +2484,12 @@ private:
         Contexts(goal->lambda, {IsCommittedChoice(declared), {}});
       } else if (goal->unify == UnifyKind::Call) {
         const Procedure &callee{*goal->modes->callee};
-        committed(*callee.determinism, "the call to " + ProcedureToString(callee));
+        committed(*Of(callee), "the call to " + ProcedureToString(callee));
       }
       return false;
     case BodyKind::Call: {
       const Procedure &callee{*goal->modes->callee};
-      committed(*callee.determinism, "the call to " + ProcedureToString(callee));
+      committed(*Of(callee), "the call to " + ProcedureToString(callee));
       return false;
     }
     case BodyKind::HOCall:
@@ -2452,6 +2503,11 @@ private:
         if (Seen(g).canFail) {
           inner.first = false;
           inner.failing.push_back(g);
+        } else if (!Reached(g)) {
+          // Nothing after an erroneous goal asks for another solution, as
+          // mmc has it, where mode analysis finds it is: by declared
+          // determinisms, not inferred ones.
+          inner = {true, {}};
         }
       }
       return loose;
@@ -2568,6 +2624,7 @@ private:
     }
   }
 
+  const DeterminismChecking &checking_;
   ProcedureBody &body_;
   TypeChecking &types_;
   InstOps &ops_;
@@ -2604,6 +2661,14 @@ std::unique_ptr<DeterminismChecking> CheckDeterminism(
   // As mmc, which stops after mode analysis if it finds errors, so that
   // its determinism errors do not follow from them.
   bool analyse{!messages.AnyFatalError()};
+  auto analyseBody{[&](ProcedureBody &body, parser::Messages &messages) {
+    body.goals.clear();
+    body.determinism.reset();
+    body.unchecked = DeterminismUnchecked::None;
+    DeterminismAnalyser{
+        *result, body, types, modes.ops(), tokens, messages}
+        .Run();
+  }};
   auto add{[&](const Procedure &procedure, const MethodModes *method,
                llvm::ArrayRef<ClauseModes> clauses) {
     // A procedure whose modes are not all known, as one declared with an
@@ -2617,9 +2682,6 @@ std::unique_ptr<DeterminismChecking> CheckDeterminism(
     body.method = method;
     BodyBuilder{*result, body, modes.ops()}.Build(procedure, clauses);
     SwitchDetector{*result, body, modes.ops()}.Run();
-    if (analyse) {
-      DeterminismAnalyser{body, types, modes.ops(), tokens, messages}.Run();
-    }
     if (!method) {
       result->byProcedure_[&procedure] = &body;
     }
@@ -2632,6 +2694,49 @@ std::unique_ptr<DeterminismChecking> CheckDeterminism(
   }
   for (const MethodModes &method : modes.methods()) {
     add(*method.procedure, &method, method.clauses);
+  }
+  if (!analyse) {
+    return result;
+  }
+  // The determinisms of the procedures declared without one are the least
+  // fixpoint of inference, starting from erroneous, as in mmc, where the
+  // manual says det (see the register). Each step is joined with the last,
+  // so that the fixpoint is reached in at most three steps per procedure.
+  // A procedure that calls one with none, and so has none, takes its
+  // callers' away in turn.
+  std::vector<ProcedureBody *> undeclared;
+  for (ProcedureBody &body : result->bodies_) {
+    if (!body.method && !body.procedure->determinism) {
+      undeclared.push_back(&body);
+      result->inferred_[body.procedure] = parser::Determinism::Erroneous;
+    }
+  }
+  for (bool changed{!undeclared.empty()}; changed;) {
+    changed = false;
+    for (ProcedureBody *body : undeclared) {
+      if (!result->inferred_.count(body->procedure)) {
+        continue;
+      }
+      parser::Messages ignored;
+      analyseBody(*body, ignored);
+      if (!body->determinism) {
+        result->inferred_.erase(body->procedure);
+        changed = true;
+        continue;
+      }
+      parser::Determinism &inferred{result->inferred_[body->procedure]};
+      Components old{ComponentsOf(inferred)};
+      Components now{ComponentsOf(*body->determinism)};
+      parser::Determinism joined{DeterminismOf(
+          {old.canFail || now.canFail, std::max(old.most, now.most)})};
+      if (joined != inferred) {
+        inferred = joined;
+        changed = true;
+      }
+    }
+  }
+  for (ProcedureBody &body : result->bodies_) {
+    analyseBody(body, messages);
   }
   return result;
 }

@@ -3336,7 +3336,12 @@ ProcedureChecker::Result ProcedureChecker::CheckClosure(
     chosen = candidates.front();
   }
   if (!chosen->determinism) {
-    return Unsupported(Unchecked::InferredDeterminism);
+    // mmc: "Error: the predicate `m.p' has no declared determinism, so a
+    // curried call to it may not be used as a lambda expression."
+    return Error(goal,
+        "the " + what +
+            " has no declared determinism, so a curried call to it may not "
+            "be used as a lambda expression");
   }
   // mmc makes the term a lambda expression that calls the procedure, with
   // the remaining arguments in the procedure's own modes, so they are
