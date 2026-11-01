@@ -19,10 +19,14 @@ predicate and lambda expression is declared with a determinism chosen at
 random, so that some declarations are not satisfied. With --committed too,
 the predicates called and the determinisms declared include committed
 choice ones, so that some committed choice calls are in contexts that
-require all solutions.
+require all solutions. With --casts too, some disjunctions are in
+promise_equivalent_solutions scopes, which list the variable they bind,
+or now and then none or one more; some calls are in arbitrary scopes, and
+some bodies in promise_equivalent_solution_sets scopes, so that some
+arbitrary scopes are outside them.
 
 Usage: generate-switch-programs.py [--seed N] [--count N] [--determinism
-                                   [--committed]] DIR
+                                   [--committed] [--casts]] DIR
 """
 
 import argparse
@@ -71,6 +75,7 @@ cn(X, Y) :- X > 0, ( Y = X ; Y = 1 ).
 COMMITTED_CALLS = ["cm", "cm", "cn"]
 COMMITTED_DETERMINISMS = ["cc_multi", "cc_multi", "cc_nondet"]
 determinism = False
+casts = False
 
 
 class Gen:
@@ -152,7 +157,10 @@ class Gen:
                     # No outputs.
                     goals.append("%s(%s, _)" % (callee, self.int_value(ctx)))
                 else:
-                    goals.append("%s(%s, %s)" % (callee, self.int_value(ctx), m))
+                    call = "%s(%s, %s)" % (callee, self.int_value(ctx), m)
+                    if casts and r.random() < 0.15:
+                        call = "arbitrary [%s] %s" % (m, call)
+                    goals.append(call)
                     ctx.append((m, "int"))
             elif k < 0.85:
                 goals.append("%s > 0" % self.int_value(ctx))
@@ -208,10 +216,21 @@ class Gen:
     def disjunction(self, ctx, out, target, depth=0):
         r = self.rng
         n = r.choice([2, 3, 3, 4, 5])
-        return "( " + " ; ".join(self.disjunct(ctx, out, depth, target)
+        disj = "( " + " ; ".join(self.disjunct(ctx, out, depth, target)
                                  for _ in range(n)) + " )"
+        if casts and r.random() < 0.2:
+            k = r.random()
+            listed = [] if k < 0.1 else [out, r.choice(ctx)[0]] if k < 0.2 else [out]
+            disj = "promise_equivalent_solutions [%s] %s" % (", ".join(listed), disj)
+        return disj
 
     def body(self, ctx, out):
+        goal = self.body_goal(ctx, out)
+        if casts and self.rng.random() < 0.3:
+            return "promise_equivalent_solution_sets [%s] (%s)" % (out, goal)
+        return goal
+
+    def body_goal(self, ctx, out):
         r = self.rng
         others = [c for c in ctx if c[1] != "int"]
         target = r.choice(others if others and r.random() < 0.85 else ctx)
@@ -303,10 +322,12 @@ def main():
     parser.add_argument("--count", type=int, default=20)
     parser.add_argument("--determinism", action="store_true")
     parser.add_argument("--committed", action="store_true")
+    parser.add_argument("--casts", action="store_true")
     parser.add_argument("dir")
     args = parser.parse_args()
-    global determinism
+    global determinism, casts
     determinism = args.determinism
+    casts = args.casts
     if args.committed:
         CALLS.extend(COMMITTED_CALLS)
         DETERMINISMS.extend(COMMITTED_DETERMINISMS)
