@@ -384,11 +384,21 @@ const char *StandardMode(const ArgMode &mode) {
   return nullptr;
 }
 
+// An inst shares its parts, so as a tree it can be exponentially larger
+// than it is; one too large to read is cut short after `maxParts` parts,
+// as a type is (TypeToString).
 class InstPrinter {
 public:
   explicit InstPrinter(llvm::raw_ostream &os) : os_{os} {}
 
   void Print(const Inst &inst) {
+    constexpr std::size_t maxParts{1000};
+    if (++parts_ > maxParts) {
+      if (parts_ == maxParts + 1) {
+        os_ << "...";
+      }
+      return;
+    }
     switch (inst.kind) {
     case InstKind::Free:
       os_ << "free";
@@ -535,6 +545,7 @@ private:
   }
 
   llvm::raw_ostream &os_;
+  std::size_t parts_{0};
 };
 } // namespace
 
