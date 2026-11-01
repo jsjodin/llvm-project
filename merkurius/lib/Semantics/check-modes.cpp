@@ -3276,10 +3276,13 @@ ProcedureChecker::Result ProcedureChecker::CheckLambda(
         "purity error: the lambda expression is ground, but these nonlocals "
         "have insts that contain any: " + names);
   }
+  // Inside, a nonlocal is shared, as the closure may be called more than
+  // once, and not live, as in mmc, so that clobbering one is the error of
+  // its inst, not of its liveness.
   InstMap inner{map};
   Live inside(live.size(), false);
   for (VarId var : nonlocals) {
-    inside[var] = true;
+    inner[var] = insts_.Share(map[var]);
   }
   for (std::size_t i{0}; i < lambda.arguments.size(); ++i) {
     inner[lambda.arguments[i]] = (*modes)[i].initial;
