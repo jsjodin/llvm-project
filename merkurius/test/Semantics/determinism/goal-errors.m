@@ -8,7 +8,7 @@
 % if-then-else and its two parts, a negation that can succeed, the goals
 % of a scope, and with no solutions declared, any goal that can succeed; a
 % lambda expression whose body is not as declared; and a function whose
-% primary mode is declared with more than one solution.
+% primary mode is inferred to have more than one solution.
 %
 % RUN: not merkc -fc1 -fdebug-dump-determinism %s 2>&1 >/dev/null | FileCheck --implicit-check-not=error: --implicit-check-not=because: %s
 % RUN: %if mmc %{ %compare-switches --determinism %s %}
