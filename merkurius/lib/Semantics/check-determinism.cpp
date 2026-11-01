@@ -2206,7 +2206,10 @@ std::unique_ptr<DeterminismChecking> CheckDeterminism(
   bool analyse{!messages.AnyFatalError()};
   auto add{[&](const Procedure &procedure, const MethodModes *method,
                llvm::ArrayRef<ClauseModes> clauses) {
-    if (clauses.empty()) {
+    // A procedure whose modes are not all known, as one declared with an
+    // undefined inst in `with_inst`, has an error already.
+    if (clauses.empty() ||
+        procedure.modes.size() != clauses.front().clause->clause->head.size()) {
       return;
     }
     ProcedureBody &body{result->bodies_.emplace_back()};
