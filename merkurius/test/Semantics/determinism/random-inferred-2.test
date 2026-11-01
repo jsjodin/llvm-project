@@ -1,0 +1,13 @@
+# Random modules in which some predicates are declared without a
+# determinism, among them ones whose bodies call the others and each other,
+# recursively or not, with committed choice calls, determinism casts and
+# requirements (generate-switch-programs.py --determinism --committed
+# --casts --requires --inferred). merkc must infer the determinisms of the
+# procedures and their goals that mmc does, and report its errors, those
+# for committed choice calls in their bodies among them, at the same
+# lines.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-switch-programs.py --determinism --committed --casts --requires --inferred --seed 17 --count 40 %t
+# RUN: %compare-switches --determinism %t/*.m
