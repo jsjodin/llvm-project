@@ -253,7 +253,7 @@ TEST(ConvertTest, InstsAndModes) {
       "| | | initial: BuiltinInst\n"
       "| | | | kind: Free\n"
       "| | | final: BoundInst\n"
-      "| | | | unique: false\n"
+      "| | | | uniqueness: Shared\n"
       "| | | | functors:\n"
       "| | | | | BoundFunctor\n"
       "| | | | | | name: SymName a\n"
@@ -434,13 +434,13 @@ TEST(ConvertTest, InstAndModeDefinitions) {
   EXPECT_EQ(Compact(":- inst maybeskel(I) for maybe/1 ---> no ; yes(I).\n"),
       "InstDefn\n| name: SymName maybeskel\n| parameters:\n| | I\n"
       "| forType: NameAndArity maybe/1\n| inst: BoundInst\n"
-      "| | unique: false\n| | functors:\n| | | BoundFunctor\n"
+      "| | uniqueness: Shared\n| | functors:\n| | | BoundFunctor\n"
       "| | | | name: SymName no\n| | | BoundFunctor\n"
       "| | | | name: SymName yes\n| | | | arguments:\n| | | | | InstVar\n"
       "| | | | | | name: I\n");
   EXPECT_EQ(Compact(":- inst digit ---> 0 ; 0'1 ; \"two\" ; 3.0.\n"),
       "InstDefn\n| name: SymName digit\n| inst: BoundInst\n"
-      "| | unique: false\n| | functors:\n"
+      "| | uniqueness: Shared\n| | functors:\n"
       "| | | BoundFunctor\n| | | | name: Literal 0\n"
       "| | | BoundFunctor\n| | | | name: Literal 49\n"
       "| | | BoundFunctor\n| | | | name: Literal \"two\"\n"

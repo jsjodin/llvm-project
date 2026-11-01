@@ -162,6 +162,7 @@ private:
     std::vector<const Inst *> made{};
     llvm::StringRef inconsistent{};
     unsigned id{0}; // a declaration's, numbered from 1
+    bool wrongArity{false}; // a builtin inst with arguments it does not take
   };
 
   bool Own(const Symbol &symbol) const {
@@ -423,8 +424,12 @@ const Inst *ModeChecker::Convert(const parser::Inst &inst, InstScope &scope) {
                   functor.name)};
               alternatives.push_back({f, arguments[i]});
             }
-            return insts_.Bound(
-                bound->unique ? Uniqueness::Unique : Uniqueness::Shared,
+            using U = parser::BoundUniqueness;
+            return insts_.Bound(bound->uniqueness == U::Unique
+                    ? Uniqueness::Unique
+                    : bound->uniqueness == U::MostlyUnique
+                    ? Uniqueness::MostlyUnique
+                    : Uniqueness::Shared,
                 alternatives);
           },
           [&](const parser::HigherOrderInst *higher) {
@@ -439,6 +444,11 @@ const Inst *ModeChecker::Convert(const parser::Inst &inst, InstScope &scope) {
                 higher->kind, higher->any, modes, higher->determinism);
           },
           [&](const parser::NamedInst *named) -> const Inst * {
+            if (WrongBuiltinInstArity(*named->name, named->arguments.size())) {
+              // Name resolution has reported it.
+              scope.wrongArity = true;
+              return insts_.Ground();
+            }
             std::vector<const Inst *> arguments;
             for (const parser::Inst &argument : named->arguments) {
               arguments.push_back(Convert(argument, scope));
@@ -563,6 +573,10 @@ void ModeChecker::DefineInst(const Symbol &symbol) {
     }
     bad_.insert(&symbol);
   }
+  if (scope.wrongArity) {
+    // mmc then has the inst undefined.
+    bad_.insert(&symbol);
+  }
   insts_.SetBody(symbol, body);
   own_ = saved;
   instState_[&symbol] = State::Done;
@@ -623,6 +637,9 @@ std::optional<ArgMode> ModeChecker::DefineMode(const Symbol &symbol) {
           "inst parameter %s is not a parameter of the mode %s/%u"_err_en_US,
           scope.freeParameter.str(), symbol.name.str(), symbol.arity);
     }
+    bad_.insert(&symbol);
+  }
+  if (scope.wrongArity) {
     bad_.insert(&symbol);
   }
   own_ = saved;

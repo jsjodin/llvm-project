@@ -261,6 +261,29 @@ const Inst *InstContext::Substitute(const Inst *inst,
 
 const Inst *InstContext::Share(const Inst *inst, Uniqueness u) {
   llvm::DenseMap<const Inst *, const Inst *> done;
+  // The generated insts that stand for named insts being shared, which
+  // their bodies refer to if they are recursive.
+  llvm::DenseSet<const Inst *> pending, used;
+  // Whether sharing changes an inst, looking into named insts' bodies.
+  llvm::DenseSet<const Inst *> seen;
+  std::function<bool(const Inst *)> changes{[&](const Inst *i) {
+    if (!seen.insert(i).second || i->kind == InstKind::Free ||
+        i->kind == InstKind::Parameter) {
+      return false;
+    }
+    if (i->kind == InstKind::Constrained) {
+      return changes(i->constraint);
+    }
+    if (i->kind == InstKind::Defined) {
+      return changes(Expand(i));
+    }
+    if (Least(i->uniqueness, u) != i->uniqueness) {
+      return true;
+    }
+    return llvm::any_of(i->functors, [&](const BoundAlternative &alternative) {
+      return llvm::any_of(alternative.arguments, changes);
+    });
+  }};
   std::function<const Inst *(const Inst *)> walk{[&](const Inst *i) {
     if (i->kind == InstKind::Free || i->kind == InstKind::Parameter ||
         (i->kind == InstKind::Defined && !i->symbol)) {
@@ -270,7 +293,33 @@ const Inst *InstContext::Share(const Inst *inst, Uniqueness u) {
       return Constrained(i->arguments, walk(i->constraint));
     }
     if (auto it{done.find(i)}; it != done.end()) {
+      if (pending.count(it->second)) {
+        used.insert(it->second);
+      }
       return it->second;
+    }
+    if (i->kind == InstKind::Defined) {
+      // A named inst is shared as its body is, as in mmc, where
+      // unique(...) in it is shared as well; one that sharing does not
+      // change keeps its name.
+      seen.clear();
+      if (!changes(i)) {
+        done[i] = i;
+        return i;
+      }
+      const Inst *generated{Generated()};
+      done[i] = generated;
+      pending.insert(generated);
+      const Inst *shared{walk(Expand(i))};
+      pending.erase(generated);
+      if (!used.count(generated)) {
+        done[i] = shared;
+        return shared;
+      }
+      // Unfolded once, so that it reads as the named inst does.
+      Define(generated, shared);
+      done[i] = shared;
+      return shared;
     }
     Inst copy{*i};
     copy.uniqueness = Least(i->uniqueness, u);
@@ -286,12 +335,6 @@ const Inst *InstContext::Share(const Inst *inst, Uniqueness u) {
       functors.push_back({i->functors[j].functor, arguments[j]});
     }
     copy.functors = functors;
-    // A named inst's arguments are shared; its body is as it is defined.
-    std::vector<const Inst *> instArguments;
-    for (const Inst *argument : i->arguments) {
-      instArguments.push_back(walk(argument));
-    }
-    copy.arguments = instArguments;
     const Inst *result{Intern(copy)};
     done[i] = result;
     return result;
@@ -1433,6 +1476,29 @@ const Inst *InstOps::UnifyNow(const Inst *a, const Inst *b, const Type *type) {
     }
   }
   return finish();
+}
+
+std::optional<llvm::StringRef> WrongBuiltinInstArity(
+    const parser::SymName &name, unsigned arity) {
+  if (!name.qualifiers.empty()) {
+    return std::nullopt;
+  }
+  if (llvm::is_contained({"bound", "bound_unique"}, name.name)) {
+    return arity == 1 ? std::nullopt : std::optional<llvm::StringRef>{"one"};
+  }
+  if (llvm::is_contained({"unique", "mostly_unique"}, name.name)) {
+    return arity <= 1 ? std::nullopt
+                      : std::optional<llvm::StringRef>{"zero or one"};
+  }
+  if (arity > 0 &&
+      llvm::is_contained({"free", "ground", "clobbered", "mostly_clobbered",
+                             "any", "unique_any", "mostly_unique_any",
+                             "clobbered_any", "mostly_clobbered_any",
+                             "not_reached"},
+          name.name)) {
+    return "zero";
+  }
+  return std::nullopt;
 }
 
 } // namespace merkurius::semantics

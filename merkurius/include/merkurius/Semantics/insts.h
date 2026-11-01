@@ -304,5 +304,11 @@ private:
       constructors_;
 };
 
+// If `name` is a builtin inst used with a number of arguments it does
+// not take, as `ground(a)` or `unique(a, b)`, the numbers it takes, as
+// mmc words them ("zero", "zero or one", "one").
+std::optional<llvm::StringRef> WrongBuiltinInstArity(
+    const parser::SymName &name, unsigned arity);
+
 } // namespace merkurius::semantics
 #endif // MERKURIUS_SEMANTICS_INSTS_H_

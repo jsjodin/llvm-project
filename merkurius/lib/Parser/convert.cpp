@@ -430,12 +430,15 @@ private:
   static constexpr auto functor_{construct<BoundFunctor>(appliedName(inst))};
 };
 
-// bound(F1 ; F2 ; ...) and bound_unique(...).
+// bound(F1 ; F2 ; ...), and unique(...), bound_unique(...) and
+// mostly_unique(...) (reference manual, "Destructive update"; mmc also has
+// mostly_unique(...)).
 class BoundInstRule {
 public:
   using resultType = const BoundInst *;
   bool Matches(const Term &t) const {
-    return AsCompound(t, "bound", 1) || AsCompound(t, "bound_unique", 1);
+    return AsCompound(t, "bound", 1) || AsCompound(t, "bound_unique", 1) ||
+        AsCompound(t, "unique", 1) || AsCompound(t, "mostly_unique", 1);
   }
   std::optional<resultType> Convert(
       const Term &t, ConvertState &state) const {
@@ -456,8 +459,11 @@ public:
     if (!ok) {
       return std::nullopt;
     }
+    llvm::StringRef name{FunctorName(t)};
     return state.arena.Make<BoundInst>(t.tokens(),
-        FunctorName(t) == "bound_unique",
+        name == "bound"           ? BoundUniqueness::Shared
+            : name == "mostly_unique" ? BoundUniqueness::MostlyUnique
+                                      : BoundUniqueness::Unique,
         state.arena.SaveArray(llvm::ArrayRef<const BoundFunctor *>{functors}));
   }
   void Expected(llvm::raw_ostream &os) const { os << "a bound inst"; }
@@ -1096,7 +1102,8 @@ private:
     if (!ok) {
       return std::nullopt;
     }
-    return state.arena.Make<BoundInst>(StripParentheses(t).tokens(), false,
+    return state.arena.Make<BoundInst>(StripParentheses(t).tokens(),
+        BoundUniqueness::Shared,
         state.arena.SaveArray(llvm::ArrayRef<const BoundFunctor *>{functors}));
   }
 };
