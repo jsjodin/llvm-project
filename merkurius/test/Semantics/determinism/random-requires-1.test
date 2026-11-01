@@ -1,0 +1,12 @@
+# Random modules with require_<det>, require_complete_switch and
+# require_switch_arms_<det> scopes of random determinisms around their
+# disjunctions and calls, on the variables the disjunctions test or now
+# and then others (generate-switch-programs.py --determinism --requires). merkc must infer
+# the determinisms of the procedures and their goals that mmc does, and
+# report its errors, those for the requirements among them, at the same
+# lines.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-switch-programs.py --determinism --requires --seed 1 --count 40 %t
+# RUN: %compare-switches --determinism %t/*.m

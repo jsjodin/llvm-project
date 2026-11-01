@@ -262,7 +262,9 @@ DETERMINISM_ERROR = re.compile(
     r"error: (the determinism declaration of|the lambda expression is declared|invalid determinism"
     r"|.* is in a context that requires all solutions"
     r"|the (promise_equivalent_solutions|promise_equivalent_solution_sets|arbitrary) goal"
-    r"|this (arbitrary|promise_equivalent_solution_sets) scope)")
+    r"|this (arbitrary|promise_equivalent_solution_sets) scope"
+    r"|the goal in this scope is required|the goal inside the require_"
+    r"|the switch on .* is required to be complete|the arms of the switch on)")
 
 
 def mmc_error_lines(output, name):

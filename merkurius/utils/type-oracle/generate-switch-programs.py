@@ -23,10 +23,14 @@ require all solutions. With --casts too, some disjunctions are in
 promise_equivalent_solutions scopes, which list the variable they bind,
 or now and then none or one more; some calls are in arbitrary scopes, and
 some bodies in promise_equivalent_solution_sets scopes, so that some
-arbitrary scopes are outside them.
+arbitrary scopes are outside them. With --requires too, some disjunctions
+are in require_<det>, require_complete_switch and require_switch_arms_<det>
+scopes, on the variable they test or now and then another, and some calls
+in require_<det> scopes, each with a determinism chosen at random, so that
+some requirements are not met.
 
 Usage: generate-switch-programs.py [--seed N] [--count N] [--determinism
-                                   [--committed] [--casts]] DIR
+                                   [--committed] [--casts] [--requires]] DIR
 """
 
 import argparse
@@ -76,6 +80,7 @@ COMMITTED_CALLS = ["cm", "cm", "cn"]
 COMMITTED_DETERMINISMS = ["cc_multi", "cc_multi", "cc_nondet"]
 determinism = False
 casts = False
+requires = False
 
 
 class Gen:
@@ -160,6 +165,8 @@ class Gen:
                     call = "%s(%s, %s)" % (callee, self.int_value(ctx), m)
                     if casts and r.random() < 0.15:
                         call = "arbitrary [%s] %s" % (m, call)
+                    if requires and r.random() < 0.1:
+                        call = "require_%s (%s)" % (r.choice(DETERMINISMS), call)
                     goals.append(call)
                     ctx.append((m, "int"))
             elif k < 0.85:
@@ -222,6 +229,16 @@ class Gen:
             k = r.random()
             listed = [] if k < 0.1 else [out, r.choice(ctx)[0]] if k < 0.2 else [out]
             disj = "promise_equivalent_solutions [%s] %s" % (", ".join(listed), disj)
+        if requires:
+            k = r.random()
+            var = target[0] if r.random() < 0.85 else r.choice(ctx)[0]
+            if k < 0.1:
+                disj = "require_%s (%s)" % (r.choice(DETERMINISMS), disj)
+            elif k < 0.2:
+                disj = "require_complete_switch [%s] (%s)" % (var, disj)
+            elif k < 0.3:
+                disj = "require_switch_arms_%s [%s] (%s)" % (
+                    r.choice(DETERMINISMS), var, disj)
         return disj
 
     def body(self, ctx, out):
@@ -323,11 +340,13 @@ def main():
     parser.add_argument("--determinism", action="store_true")
     parser.add_argument("--committed", action="store_true")
     parser.add_argument("--casts", action="store_true")
+    parser.add_argument("--requires", action="store_true")
     parser.add_argument("dir")
     args = parser.parse_args()
-    global determinism, casts
+    global determinism, casts, requires
     determinism = args.determinism
     casts = args.casts
+    requires = args.requires
     if args.committed:
         CALLS.extend(COMMITTED_CALLS)
         DETERMINISMS.extend(COMMITTED_DETERMINISMS)

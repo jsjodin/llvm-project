@@ -282,6 +282,17 @@ private:
                   out.promised.push_back(map_[var]);
                 }
                 out.entry = Before(number);
+              } else if (scope->kind == ScopeKind::RequireDeterminism) {
+                const parser::Goal &origin{std::get<parser::Goal>(scope->origin)};
+                out.required = std::get<const parser::RequireDeterminism *>(
+                    origin)->determinism;
+              } else if (scope->kind == ScopeKind::RequireSwitch) {
+                const parser::Goal &origin{std::get<parser::Goal>(scope->origin)};
+                out.required = std::get<const parser::RequireSwitch *>(origin)
+                                   ->armDeterminism;
+                if (!scope->vars.empty()) {
+                  out.switchOn = map_[scope->vars.front()];
+                }
               }
               out.goals = {Whole(scope->goal)};
               return New(std::move(out));
@@ -1533,6 +1544,7 @@ public:
     std::optional<parser::Determinism> declared{body_.procedure->determinism};
     bool committed{declared && IsCommittedChoice(*declared)};
     Contexts(body_.body, {committed, {}});
+    Requirements(body_.body);
     for (auto &[goal, determinism] : body_.goals) {
       determinism = DeterminismOf(ComponentsOf(determinism), first_.count(goal));
     }
@@ -1815,10 +1827,6 @@ private:
     case BodyKind::Scope:
       if (goal->promise) {
         return Cast(goal, bound, outside);
-      }
-      if (goal->scope == ScopeKind::RequireDeterminism ||
-          goal->scope == ScopeKind::RequireSwitch) {
-        Unchecked(DeterminismUnchecked::Requirement);
       }
       return Infer(goal->goals.front(), bound, outside);
     }
@@ -2165,17 +2173,7 @@ private:
     }
     case BodyKind::Switch: {
       if (fails && goal->canFail) {
-        std::vector<std::string> missing;
-        const Type *type{body_.vars[goal->switchVar].type};
-        if (const std::vector<ConstructorTypes> *constructors{
-                ops_.ConstructorsOf(type)}) {
-          for (const ConstructorTypes &c : *constructors) {
-            if (llvm::none_of(goal->cases,
-                    [&](const SwitchCase &s) { return s.Has(c.functor); })) {
-              missing.push_back(FunctorText(c.functor));
-            }
-          }
-        }
+        std::vector<std::string> missing{Missing(goal)};
         cause("the switch on " + Name(goal->switchVar) +
             (missing.empty() ? std::string{" can fail"}
                              : " does not cover " + llvm::join(missing, ", ")));
@@ -2245,6 +2243,132 @@ private:
     Diagnose(goal, d.canFail, d.most, "", causes);
     for (const Cause &c : causes) {
       message.Attach(Where(c.tokens), "%s"_because_en_US, c.text);
+    }
+  }
+
+  // The functors of its variable's type that a switch has no case for.
+  std::vector<std::string> Missing(const Body *goal) {
+    std::vector<std::string> missing;
+    const Type *type{body_.vars[goal->switchVar].type};
+    if (const std::vector<ConstructorTypes> *constructors{
+            ops_.ConstructorsOf(type)}) {
+      for (const ConstructorTypes &c : *constructors) {
+        if (llvm::none_of(goal->cases,
+                [&](const SwitchCase &s) { return s.Has(c.functor); })) {
+          missing.push_back(FunctorText(c.functor));
+        }
+      }
+    }
+    return missing;
+  }
+
+  // Checks the require_<det>, require_complete_switch and
+  // require_switch_arms_<det> scopes (reference manual, "Goals"), each
+  // once though switch detection copies it, as mmc does.
+  void Requirements(const Body *goal) {
+    switch (goal->kind) {
+    case BodyKind::Unify:
+      if (goal->lambda) {
+        Requirements(goal->lambda);
+      }
+      return;
+    case BodyKind::Switch:
+      for (const SwitchCase &c : goal->cases) {
+        Requirements(c.goal);
+      }
+      return;
+    case BodyKind::Scope:
+      if ((goal->required || goal->switchOn) &&
+          required_.insert(goal->tokens.first).second) {
+        Require(goal);
+      }
+      [[fallthrough]];
+    default:
+      for (const Body *g : goal->goals) {
+        Requirements(g);
+      }
+    }
+  }
+
+  void Require(const Body *goal) {
+    // A goal with more than one solution is committed choice where only
+    // its first solution is wanted, as in mmc.
+    bool first{requiredFirst_[goal]};
+    const Body *inner{goal->goals.front()};
+    if (goal->scope == ScopeKind::RequireDeterminism) {
+      parser::Determinism actual{DeterminismOf(Seen(inner), first)};
+      // mmc: "Error: the required determinism of the goal in this scope is
+      // `det', but its actual determinism is `semidet'."
+      if (actual != *goal->required) {
+        auto &message{messages_.Say(Where(goal->tokens),
+            "the goal in this scope is required to be %s, but its determinism is %s"_err_en_US,
+            DeterminismName(*goal->required), DeterminismName(actual))};
+        Report(message, inner, *goal->required);
+      }
+      return;
+    }
+    if (!goal->switchOn) {
+      return;
+    }
+    while (inner->kind == BodyKind::Conj && inner->goals.size() == 1) {
+      inner = inner->goals.front();
+    }
+    std::string var{Name(*goal->switchOn)};
+    // mmc checks the arms of a require_switch_arms_<det> scope's switch on
+    // another variable as if it were on this one (see the register).
+    if (inner->kind != BodyKind::Switch ||
+        (inner->switchVar != *goal->switchOn && !goal->required)) {
+      // mmc: "Error: the goal inside the require_complete_switch [X] scope
+      // is not a switch on `X'."
+      messages_.Say(Where(goal->tokens),
+          "the goal inside the %s [%s] scope is not a switch on %s"_err_en_US,
+          goal->required ? std::string{"require_switch_arms_"} +
+                  DeterminismName(*goal->required)
+                         : std::string{"require_complete_switch"},
+          var, var);
+      return;
+    }
+    if (!goal->required) {
+      // mmc: "Error: the switch on `X' is required to be complete, but it
+      // does not cover `c'/1."
+      if (inner->canFail) {
+        std::vector<std::string> missing{Missing(inner)};
+        if (missing.empty()) {
+          messages_.Say(Where(goal->tokens),
+              "the switch on %s is required to be complete, but it is not"_err_en_US,
+              var);
+        } else {
+          messages_.Say(Where(goal->tokens),
+              "the switch on %s is required to be complete, but it does not cover %s"_err_en_US,
+              var, llvm::join(missing, ", "));
+        }
+      }
+      return;
+    }
+    // An arm is acceptable if its determinism makes the promises the
+    // required one does; one with more than one solution is committed
+    // choice only where only its first solution is wanted.
+    Components required{ComponentsOf(*goal->required)};
+    var = Name(inner->switchVar);
+    for (const SwitchCase &c : inner->cases) {
+      Components d{Seen(c.goal)};
+      if (Within(d, required) &&
+          !(d.most == Solutions::Many && IsCommittedChoice(*goal->required) &&
+              !first)) {
+        continue;
+      }
+      std::string functors{FunctorText(c.functor)};
+      for (const InstFunctor &other : c.others) {
+        functors += " and " + FunctorText(other);
+      }
+      // mmc: "Error: the arms of the switch on X are required have a
+      // determinism that is acceptable in a `det' context, but the actual
+      // determinism of the arm for r1.b/0 is `semidet'." At the arm.
+      auto &message{messages_.Say(Where(c.goal->tokens),
+          "the arms of the switch on %s are required to have a determinism acceptable in a %s context, but the arm for %s is %s"_err_en_US,
+          var, DeterminismName(*goal->required), functors,
+          DeterminismName(DeterminismOf(d, first)))};
+      Report(message, c.goal, *goal->required);
     }
   }
 
@@ -2360,6 +2484,10 @@ private:
         Contexts(goal->goals.front(), {true, {}});
         return false;
       }
+      if (goal->scope == ScopeKind::RequireDeterminism ||
+          goal->scope == ScopeKind::RequireSwitch) {
+        requiredFirst_[goal] = context.first;
+      }
       return Contexts(goal->goals.front(), context);
     default: {
       bool loose{false};
@@ -2455,6 +2583,10 @@ private:
   // The promise_equivalent_solution_sets scopes that the goal is in, and
   // the determinism casts checked, by their first token.
   std::vector<const Body *> sets_;
+  // The require_* scopes checked, by their first tokens, and whether only
+  // the first solution of each is wanted.
+  std::set<unsigned> required_;
+  std::map<const Body *, bool> requiredFirst_;
   // The variables of the unifications replaced with fail in the
   // conjunctions around a goal, before mmc quantifies the body again.
   std::set<BodyVar> failed_;
@@ -2588,6 +2720,17 @@ void DumpProcedureBody(llvm::raw_ostream &os, const ProcedureBody &body,
                       ? "promise_equivalent_solution_sets"
                       : "arbitrary")
            << " [" << names(goal->promised) << ']';
+      } else if (goal->scope == ScopeKind::RequireDeterminism) {
+        os << "require_" << DeterminismName(*goal->required);
+      } else if (goal->scope == ScopeKind::RequireSwitch) {
+        if (goal->required) {
+          os << "require_switch_arms_" << DeterminismName(*goal->required);
+        } else {
+          os << "require_complete_switch";
+        }
+        if (goal->switchOn) {
+          os << " [" << name(*goal->switchOn) << ']';
+        }
       } else {
         os << llvm::StringRef{EnumToString(goal->scope)}.lower();
       }
