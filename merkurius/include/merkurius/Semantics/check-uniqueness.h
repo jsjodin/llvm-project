@@ -29,16 +29,18 @@
 //   later branch may run after one has used it; where only its first
 //   solution is wanted, or it has at most one, in a branch that can fail
 //   and uses it;
-// - in the condition of an if-then-else, if the else part uses it too;
+// - in the condition of an if-then-else, if the else part uses it too
+//   and the condition clobbers it or what it makes from it, but no
+//   longer once the condition has succeeded;
+// - after an if-then-else, if it was bound before it and is used after
+//   it, as for each of its parts;
 // - in a negated goal, if it is used after the negation.
 //
 // A promise_equivalent_solutions or arbitrary scope, and a goal with no
 // outputs, commits to its first solution, so that what follows it is not
-// run again on backtracking into it. As in mmc, what is used after an
-// if-then-else is not taken as used after its parts. A value made from
+// run again on backtracking into it. A value made from
 // one that is mostly_unique, by an assignment or a construction, or taken
-// from one, by a deconstruction, is mostly_unique too, but for one the
-// condition of an if-then-else made so, as in mmc. A lambda expression's
+// from one, by a deconstruction, is mostly_unique too. A lambda expression's
 // body is checked where it is, as a procedure of its own, a closure as a
 // lambda expression whose body calls its procedure, and a higher-order
 // call's arguments against its term's modes. Goals whose end mode
@@ -53,8 +55,10 @@
 
 namespace merkurius::semantics {
 
+// With `mmc`, as mmc does, which misses some values an if-then-else needs
+// (see the design document's register).
 void CheckUniqueness(const parser::TokenSequence &, ModeChecking &,
-    const DeterminismChecking &, parser::Messages &);
+    const DeterminismChecking &, parser::Messages &, bool mmc = false);
 
 } // namespace merkurius::semantics
 #endif // MERKURIUS_SEMANTICS_CHECK_UNIQUENESS_H_

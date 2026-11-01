@@ -79,6 +79,7 @@ struct FrontendOptions {
   unsigned typeInferenceIterationLimit{60}; // -ftype-inference-iteration-limit=
   bool inferModes{false}; // -finfer-modes
   unsigned modeInferenceIterationLimit{30}; // -fmode-inference-iteration-limit=
+  bool mmcUniqueness{false}; // -fmmc-uniqueness
 };
 
 struct LangOptions {
