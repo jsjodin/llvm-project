@@ -545,6 +545,13 @@ void CanonicalUnparser::Emit(std::uint32_t j, unsigned flags) {
   Comments comments;
   if (!itemStart_) {
     comments = ParseTrivia(token.trivia, false, false);
+    // A comment line beginning "%$omp&" that is not right after a
+    // directive is only a comment; right after one it would continue it.
+    if (last_.valid && last_.kind == TokenKind::Directive &&
+        !comments.leading.empty() &&
+        comments.leading.front().starts_with("%$omp&")) {
+      comments.leading.insert(comments.leading.begin(), llvm::StringRef{});
+    }
   }
   Place(token.kind, token.spelling, false, token.trivia.empty(), flags,
       std::move(comments));

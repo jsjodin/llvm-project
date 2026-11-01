@@ -151,6 +151,10 @@ TEST(UnparseTest, CanonicalDirectives) {
   // The parenthesized form leaves the directive outside the parentheses.
   EXPECT_EQ(Canonical("p:-\n%$omp do\nX = Y + 1.", true, true),
       "p :-\n    %$omp do\n    (X = (Y + 1)).\n");
+  // A "%$omp&" line after a blank line is a comment, which stays apart
+  // from the directive, so as not to continue it.
+  EXPECT_EQ(Canonical("p:-\n%$omp parallel do\n\n%$omp&)\nq.", false, true),
+      "p :-\n    %$omp parallel do\n\n    %$omp&)\n    q.\n");
 }
 
 TEST(UnparseTest, Parenthesized) {
