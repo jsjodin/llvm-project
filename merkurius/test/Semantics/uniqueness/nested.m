@@ -3,7 +3,8 @@
 % a goal that can succeed more than once, a term rebuilt or destroyed
 % after one, terms two deep, a unique list, disjunctions, a lambda
 % expression's nonlocal field, commits, and the if-then-else rules, which
-% by default find a field that mmc's (-fmmc-uniqueness) miss.
+% by default find a field that mmc's (-fmmc-uniqueness) miss. By default,
+% too, a field whose shared parts are numbers is unique (copied.m).
 %
 % RUN: not merkc -fc1 -fdebug-dump-determinism %s 2>%t.err >/dev/null
 % RUN: FileCheck --check-prefix=ERR --implicit-check-not=error: %s < %t.err
@@ -97,16 +98,14 @@ unnamed_term_destroyed(P0, P, X) :- m(X), pdi(P0, P).
 % ERR-DAG: nested.m:[[@LINE-1]]:43: error: in the clause for unnamed_term_destroyed((unique(p(unique, unique)) >> builtin.dead), uo, out): mode error in argument 1 of the call to pred nested.pdi/2: P0 has inst mostly_unique(p(mostly_unique, mostly_unique)), but unique is expected
 % MMC-DAG: nested.m:[[@LINE-2]]:43: error: in the clause for unnamed_term_destroyed((unique(p(unique, unique)) >> builtin.dead), uo, out): mode error in argument 1 of the call to pred nested.pdi/2: P0 has inst mostly_unique(p(mostly_unique, mostly_unique)), but unique is expected
 bound_field_mdi(P0, A, X) :- P0 = p(A0, _), m(X), upd(X, A0, A).
-% ERR-DAG: nested.m:[[@LINE-1]]:51: error: in the clause for bound_field_mdi((nested.upn >> builtin.dead), muo, out): mode error in argument 2 of the call to pred nested.upd/3: A0 has inst unique(t(ground)), but mostly_unique is expected
-% MMC-DAG: nested.m:[[@LINE-2]]:51: error: in the clause for bound_field_mdi((nested.upn >> builtin.dead), muo, out): mode error in argument 2 of the call to pred nested.upd/3: A0 has inst unique(t(ground)), but mostly_unique is expected
+% MMC-DAG: nested.m:[[@LINE-1]]:51: error: in the clause for bound_field_mdi((nested.upn >> builtin.dead), muo, out): mode error in argument 2 of the call to pred nested.upd/3: A0 has inst unique(t(ground)), but mostly_unique is expected
 bound_field_muo(P0, A, X) :- P0 = p(A, _), m(X).
-% ERR-DAG: nested.m:[[@LINE-1]]:44: error: in the clause for bound_field_muo((nested.upn >> builtin.dead), muo, out): mode error: argument 2, A, had the wrong inst: its final inst is unique(t(ground)), but mostly_unique is expected
-% MMC-DAG: nested.m:[[@LINE-2]]:44: error: in the clause for bound_field_muo((nested.upn >> builtin.dead), muo, out): mode error: argument 2, A, had the wrong inst: its final inst is unique(t(ground)), but mostly_unique is expected
+% MMC-DAG: nested.m:[[@LINE-1]]:44: error: in the clause for bound_field_muo((nested.upn >> builtin.dead), muo, out): mode error: argument 2, A, had the wrong inst: its final inst is unique(t(ground)), but mostly_unique is expected
 inner_field(Q0, A, X) :- Q0 = pp(P0, _), m(X), P0 = p(A0, _), updu(X, A0, A).
 % ERR-DAG: nested.m:[[@LINE-1]]:63: error: in the clause for inner_field((nested.upp >> builtin.dead), uo, out): mode error in argument 2 of the call to pred nested.updu/3: A0 has inst mostly_unique, but unique is expected
 % MMC-DAG: nested.m:[[@LINE-2]]:63: error: in the clause for inner_field((nested.upp >> builtin.dead), uo, out): mode error in argument 2 of the call to pred nested.updu/3: A0 has inst mostly_unique, but unique is expected
 inner_pair_rebuilt(Q0, Q, X) :- Q0 = pp(p(A, B), N), m(X), Q = pp(p(A, B), N + X).
-% ERR-DAG: nested.m:[[@LINE-1]]:64: error: in the clause for inner_pair_rebuilt((nested.upp >> builtin.dead), out(nested.upp), out): mode error: argument 2, Q, had the wrong inst: its final inst is unique(pp(unique(p(mostly_unique, mostly_unique)), unique)), but nested.upp is expected
+% ERR-DAG: nested.m:[[@LINE-1]]:64: error: in the clause for inner_pair_rebuilt((nested.upp >> builtin.dead), out(nested.upp), out): mode error: argument 2, Q, did not get sufficiently instantiated: its final inst is unique(pp(unique(p(mostly_unique, mostly_unique)), unique)), but nested.upp is expected
 % MMC-DAG: nested.m:[[@LINE-2]]:64: error: in the clause for inner_pair_rebuilt((nested.upp >> builtin.dead), out(nested.upp), out): mode error: argument 2, Q, had the wrong inst: its final inst is unique(pp(unique(p(mostly_unique, mostly_unique)), unique)), but nested.upp is expected
 list_head(L0, L, X) :- ( L0 = [], L = [], X = 0 ; L0 = [H0 | T], m(X), updu(X, H0, H), L = [H | T] ).
 % ERR-DAG: nested.m:[[@LINE-1]]:72: error: in the clause for list_head((nested.ul >> builtin.dead), out(nested.ul), out): mode error in argument 2 of the call to pred nested.updu/3: H0 has inst mostly_unique, but unique is expected
@@ -119,7 +118,7 @@ field_in_lambda(P0, A, X) :- P0 = p(A0, _), m(X), F = (pred(R::uo) is det :- upd
 % MMC-DAG: nested.m:[[@LINE-2]]:78: error: in the clause for field_in_lambda((nested.up >> builtin.dead), uo, out): mode error in argument 2 of the call to pred nested.updu/3: A0 has inst ground, but unique is expected
 promised_solutions(P0, A) :- promise_equivalent_solutions [X] ( m(X) ), P0 = p(A0, _), updu(X, A0, A).
 condition_rebuilds(P0, P) :- ( if P0 = p(A0, B), updu(1, A0, A), A = t(3) then P = p(A, B) else P = P0 ).
-% ERR-DAG: nested.m:[[@LINE-1]]:97: error: in the clause for condition_rebuilds((nested.up >> builtin.dead), out(nested.up)): mode error: argument 2, P, did not get sufficiently instantiated: its final inst is unique(p(unique(t(ground)), unique)), but nested.up is expected
+% ERR-DAG: nested.m:[[@LINE-1]]:50: error: in the clause for condition_rebuilds((nested.up >> builtin.dead), out(nested.up)): mode error in argument 2 of the call to pred nested.updu/3: A0 has inst mostly_unique, but unique is expected
 % MMC-DAG: nested.m:[[@LINE-2]]:97: error: in the clause for condition_rebuilds((nested.up >> builtin.dead), out(nested.up)): mode error: argument 2, P, did not get sufficiently instantiated: its final inst is unique(p(unique(t(ground)), unique)), but nested.up is expected
 after_if_then_else(P0, A) :- ( if m(X), X > 1 then Y = X else Y = 0 ), P0 = p(A0, _), updu(Y, A0, A).
 % ERR-DAG: nested.m:[[@LINE-1]]:87: error: in the clause for after_if_then_else((nested.up >> builtin.dead), uo): mode error in argument 2 of the call to pred nested.updu/3: A0 has inst mostly_unique, but unique is expected

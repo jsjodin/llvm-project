@@ -5,8 +5,11 @@
 % one; a method with two modes, of which the named predicate has only
 % one; a clause that clobbers a variable used after; and one whose uo
 % output is shared.
+% These are mmc's uniqueness rules (-fmmc-uniqueness); by default, a
+% value that is copied, such as a number, is unique wherever it is
+% (../uniqueness/copied.m).
 %
-% RUN: not merkc -fc1 -fdebug-dump-modes %s 2>&1 >/dev/null | FileCheck --implicit-check-not=error: --implicit-check-not=because: %s
+% RUN: not merkc -fc1 -fdebug-dump-modes -fmmc-uniqueness %s 2>&1 >/dev/null | FileCheck --implicit-check-not=error: --implicit-check-not=because: %s
 % RUN: %if mmc %{ %compare-types --modes --error-lines %s %}
 
 :- module method_errors.

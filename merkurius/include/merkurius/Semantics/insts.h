@@ -206,6 +206,13 @@ public:
   // matches ground only if it is the default (reference manual, "Default
   // insts for functions").
   bool Matches(const Inst *a, const Inst *b, const Type *type);
+  // Whether a value of a type whose values are copied, not referred to,
+  // matches a unique inst whatever its own uniqueness, unless clobbered;
+  // mmc's matching (-fmmc-uniqueness) compares them as any other.
+  void SetCopiesUnique(bool copies) { copiesUnique_ = copies; }
+  // Whether the values of `type` are copied, not referred to: a number or
+  // a character, or a type whose constructors are all constants.
+  bool Copied(const Type *type);
   // a ≼ b: a is at least as instantiated as b, so a variable may go from
   // b to a on forward execution (definition 3.2.14).
   bool Instantiated(const Inst *a, const Inst *b, const Type *type);
@@ -300,6 +307,7 @@ private:
   std::map<Key, const Inst *> merged_, unified_;
   InstContext &insts_;
   InstTypes &types_;
+  bool copiesUnique_{false};
   llvm::DenseMap<const Type *, std::optional<std::vector<ConstructorTypes>>>
       constructors_;
 };

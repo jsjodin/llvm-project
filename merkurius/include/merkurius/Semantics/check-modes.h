@@ -209,7 +209,8 @@ struct ModeCheckOptions {
   // --mode-inference-iteration-limit).
   unsigned inferenceIterationLimit{30};
   // Keep a unique argument of a construction unique though the term is
-  // used again too, as mmc does (-fmmc-uniqueness).
+  // used again too, and compare the uniqueness of values that are copied,
+  // such as numbers, as of any other, as mmc does (-fmmc-uniqueness).
   bool mmcUniqueness{false};
 };
 

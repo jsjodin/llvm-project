@@ -5,8 +5,11 @@
 % phase"). A term with two copies of one argument has both shared, and a
 % call's error comes before that of a head unification waiting for its
 % output.
+% These are mmc's uniqueness rules (-fmmc-uniqueness); by default, a
+% value that is copied, such as a number, is unique wherever it is
+% (../uniqueness/copied.m).
 %
-% RUN: not merkc -fc1 -fdebug-dump-modes %s 2>%t.err >/dev/null
+% RUN: not merkc -fc1 -fdebug-dump-modes -fmmc-uniqueness %s 2>%t.err >/dev/null
 % RUN: FileCheck --implicit-check-not=error: %s < %t.err
 % RUN: %if mmc %{ %compare-types --modes --error-lines %s %}
 

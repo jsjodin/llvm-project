@@ -1048,7 +1048,12 @@ bool InstOps::MatchesNow(const Inst *a, const Inst *b, const Type *type) {
   if (b->kind == InstKind::Free || a->kind == InstKind::Free) {
     return a->kind == b->kind;
   }
-  if (!AtLeastAsUnique(a->uniqueness, b->uniqueness)) {
+  // A copy has no other references, so a shared one is as unique.
+  bool copy{copiesUnique_ &&
+      (a->uniqueness == Uniqueness::Shared ||
+          a->uniqueness == Uniqueness::MostlyUnique) &&
+      Copied(type)};
+  if (!copy && !AtLeastAsUnique(a->uniqueness, b->uniqueness)) {
     return false;
   }
   auto arguments{[&](const BoundAlternative &alternative, const Inst *with) {
@@ -1111,6 +1116,23 @@ bool InstOps::MatchesNow(const Inst *a, const Inst *b, const Type *type) {
   default:
     return false;
   }
+}
+
+bool InstOps::Copied(const Type *type) {
+  if (!type || type->kind != TypeKind::Named) {
+    return false;
+  }
+  const Symbol &symbol{*type->constructor};
+  if (symbol.module.empty()) {
+    static constexpr llvm::StringRef copied[]{"int", "int8", "int16",
+        "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64",
+        "float", "char", "character"};
+    return llvm::is_contained(copied, symbol.name);
+  }
+  std::vector<ConstructorTypes> constructors;
+  return types_.Constructors(type, constructors) &&
+      llvm::all_of(constructors,
+          [](const ConstructorTypes &c) { return c.arguments.empty(); });
 }
 
 const Inst *InstOps::DefaultFunction(std::size_t arity) {
