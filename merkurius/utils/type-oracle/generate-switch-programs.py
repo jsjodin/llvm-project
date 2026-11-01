@@ -16,9 +16,13 @@ nondet, so that mmc checks them up to determinism analysis.
 With --determinism, for compare-switches.py --determinism, the goals also
 call predicates of each determinism, some with no outputs, and each
 predicate and lambda expression is declared with a determinism chosen at
-random, so that some declarations are not satisfied.
+random, so that some declarations are not satisfied. With --committed too,
+the predicates called and the determinisms declared include committed
+choice ones, so that some committed choice calls are in contexts that
+require all solutions.
 
-Usage: generate-switch-programs.py [--seed N] [--count N] [--determinism] DIR
+Usage: generate-switch-programs.py [--seed N] [--count N] [--determinism
+                                   [--committed]] DIR
 """
 
 import argparse
@@ -56,6 +60,16 @@ er(_, _) :- error("er").
 CALLS = ["q", "q", "sd", "md", "nd", "fl", "er"]
 DETERMINISMS = ["det", "det", "semidet", "semidet", "multi", "nondet", "nondet",
                 "failure", "erroneous"]
+# Committed choice ones, for --committed.
+COMMITTED_HELPERS = """\
+:- pred cm(int::in, int::out) is cc_multi.
+cm(X, Y) :- ( Y = X ; Y = X + 1 ).
+:- pred cn(int::in, int::out) is cc_nondet.
+cn(X, Y) :- X > 0, ( Y = X ; Y = 1 ).
+
+"""
+COMMITTED_CALLS = ["cm", "cm", "cn"]
+COMMITTED_DETERMINISMS = ["cc_multi", "cc_multi", "cc_nondet"]
 determinism = False
 
 
@@ -278,7 +292,8 @@ def module(rng, name):
     return (PRELUDE.format(name=name) + "".join(decls) +
             "\n:- implementation.\n:- import_module int%s.\n\n" % (", require" if determinism else "") +
             ":- pred q(int::in, int::out) is det.\nq(X, X).\n" +
-            (HELPERS if determinism else "\n") + "\n".join(defs))
+            (HELPERS if determinism else "\n") +
+            (COMMITTED_HELPERS if CALLS[-1] == "cn" else "") + "\n".join(defs))
 
 
 def main():
@@ -287,10 +302,14 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--count", type=int, default=20)
     parser.add_argument("--determinism", action="store_true")
+    parser.add_argument("--committed", action="store_true")
     parser.add_argument("dir")
     args = parser.parse_args()
     global determinism
     determinism = args.determinism
+    if args.committed:
+        CALLS.extend(COMMITTED_CALLS)
+        DETERMINISMS.extend(COMMITTED_DETERMINISMS)
     os.makedirs(args.dir, exist_ok=True)
     for i in range(args.count):
         rng = random.Random(args.seed * 100003 + i)

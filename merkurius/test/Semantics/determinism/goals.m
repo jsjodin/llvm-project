@@ -10,7 +10,8 @@
 % outputs, but not an impure one, has at most one, the innermost such
 % goal. A declaration that is looser than the inferred determinism has a
 % warning. A procedure that calls one without a declared determinism, or
-% a committed choice one, is checked by later steps.
+% has a scope that requires or promises a determinism, is checked by later
+% steps; committed choice is in committed.m.
 %
 % RUN: merkc -fc1 -fdebug-dump-determinism %s 2>%t.err | FileCheck %s
 % RUN: FileCheck --check-prefix=WARN --implicit-check-not=warning: --implicit-check-not=error: %s < %t.err
@@ -46,7 +47,6 @@
 :- func explicit(int) = int.
 :- mode explicit(in) = out is multi.
 :- pred inferred_callee(int::out) is det.
-:- pred committed(int::out) is cc_multi.
 :- pred require(int::in, int::out) is semidet.
 
 :- implementation.
@@ -155,12 +155,9 @@ default(X) = X.
 % WARN-DAG: warning: the determinism declaration of explicit(in) = out could be tighter: it is declared multi, but inferred det
 explicit(X) = X.
 
-% Determinism inference and committed choice are later steps.
+% Determinism inference and requirements are later steps.
 % CHECK-LABEL: inferred_callee(out) is det{{$}}
 inferred_callee(Y) :- undeclared(Y).
-
-% CHECK-LABEL: committed(out) is cc_multi{{$}}
-committed(Y) :- m(Y).
 
 % CHECK-LABEL: require(in, out) is semidet{{$}}
 require(X, Y) :- require_det ( Y = X ).

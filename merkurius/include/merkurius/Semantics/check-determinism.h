@@ -27,7 +27,9 @@
 // inferred from its parts' (reference manual, "Determinism checking and
 // inference"; ibid., section 5.1), and a procedure's declared determinism
 // checked against its body's, with the goals that make the difference
-// (ibid., section 5.3).
+// (ibid., section 5.3). A committed choice call must be where only its
+// first solution is wanted (reference manual, "Committed choice
+// nondeterminism").
 
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/token.h"
@@ -116,10 +118,9 @@ struct Body {
 };
 
 // Why a procedure's determinism is not inferred yet: it calls one whose
-// determinism is to be inferred, it uses committed choice, or it has a
-// scope that requires or promises a determinism.
-ENUM_CLASS(DeterminismUnchecked, None, InferredCallee, CommittedChoice,
-    Requirement)
+// determinism is to be inferred, or it has a scope that requires or
+// promises a determinism.
+ENUM_CLASS(DeterminismUnchecked, None, InferredCallee, Requirement)
 
 // A procedure's body, or an instance method's in one of its modes.
 struct ProcedureBody {

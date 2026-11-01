@@ -1413,6 +1413,16 @@ bool IsCommittedChoice(parser::Determinism determinism) {
       determinism == parser::Determinism::CcNondet;
 }
 
+// A goal's determinism, which in a context where only its first solution
+// is wanted is the committed choice one if it has more than one.
+parser::Determinism DeterminismOf(Components c, bool committed) {
+  if (committed && c.most == Solutions::Many) {
+    return c.canFail ? parser::Determinism::CcNondet
+                     : parser::Determinism::CcMulti;
+  }
+  return DeterminismOf(c);
+}
+
 // Whether `a` is at least as tight as `b` in the lattice of determinisms.
 bool Within(Components a, Components b) {
   return (!a.canFail || b.canFail) && a.most <= b.most;
@@ -1473,7 +1483,16 @@ public:
       body_.goals.clear();
       return;
     }
-    body_.determinism = DeterminismOf(d);
+    // The body of a committed choice procedure is in a context where only
+    // its first solution is wanted (reference manual, "Committed choice
+    // nondeterminism").
+    std::optional<parser::Determinism> declared{body_.procedure->determinism};
+    bool committed{declared && IsCommittedChoice(*declared)};
+    Contexts(body_.body, {committed, {}});
+    for (auto &[goal, determinism] : body_.goals) {
+      determinism = DeterminismOf(ComponentsOf(determinism), first_.count(goal));
+    }
+    body_.determinism = DeterminismOf(d, committed);
     Check();
   }
 
@@ -1486,6 +1505,12 @@ private:
   struct Cause {
     TokenRange tokens;
     std::string text;
+  };
+  // Whether only the first solution of a goal is wanted, and if not
+  // because goals after it can fail, those goals.
+  struct Context {
+    bool first;
+    std::vector<const Body *> failing;
   };
 
   void Unchecked(DeterminismUnchecked why) {
@@ -1566,9 +1591,6 @@ private:
       Unchecked(DeterminismUnchecked::InferredCallee);
       return {true, Solutions::Many};
     }
-    if (IsCommittedChoice(*callee.determinism)) {
-      Unchecked(DeterminismUnchecked::CommittedChoice);
-    }
     return ComponentsOf(*callee.determinism);
   }
 
@@ -1590,10 +1612,12 @@ private:
       const std::set<BodyVar> &outside) {
     std::set<BodyVar> before{bound};
     Inferred r{InferGoal(goal, bound, outside)};
-    if (r.d.most == Solutions::Many && !r.impure &&
-        !HasOutputs(goal, before, outside)) {
-      r.d.most = Solutions::One;
-      pruned_.insert(goal);
+    if (!r.impure && !HasOutputs(goal, before, outside)) {
+      unseen_.insert(goal);
+      if (r.d.most == Solutions::Many) {
+        r.d.most = Solutions::One;
+        pruned_.insert(goal);
+      }
     }
     body_.goals[goal] = DeterminismOf(r.d);
     return r;
@@ -1619,9 +1643,6 @@ private:
       return {Callee(*goal->modes->callee), Impure(*goal->modes->callee->symbol)};
     case BodyKind::HOCall: {
       bound.insert(goal->arguments.begin(), goal->arguments.end());
-      if (IsCommittedChoice(goal->modes->determinism)) {
-        Unchecked(DeterminismUnchecked::CommittedChoice);
-      }
       return {ComponentsOf(goal->modes->determinism),
           goal->hoCall->purity == parser::Purity::Impure};
     }
@@ -1808,9 +1829,6 @@ private:
     Components d{Infer(goal->lambda, inner,
         std::set<BodyVar>{goal->lambdaHead.begin(), goal->lambdaHead.end()})
                      .d};
-    if (IsCommittedChoice(goal->modes->determinism)) {
-      Unchecked(DeterminismUnchecked::CommittedChoice);
-    }
     lambdas_.push_back({goal, d});
   }
 
@@ -1977,6 +1995,142 @@ private:
     }
   }
 
+  // Finds the goals where only the first solution is wanted (reference
+  // manual, "Committed choice nondeterminism"): the body of a committed
+  // choice procedure or lambda expression, a goal with no outputs, as a
+  // negated one, the last conjunct of a conjunction where it is wanted,
+  // and those before conjuncts that cannot fail, the then and else parts
+  // of an if-then-else where it is wanted, and its condition if the then
+  // part cannot fail, and the parts of the other goals where it is. A
+  // committed choice call elsewhere is an error, with the goals after it
+  // that can fail, as in mmc.
+  // As in mmc, a call is committed choice if its callee is and only its
+  // first solution is wanted, and a compound goal with more than one
+  // solution if it is and so is each part with more than one as its
+  // parent sees it, which it is where only its first solution is wanted,
+  // as mmc commits to it there. Returns whether the goal has more than
+  // one solution as its parent sees it.
+  bool Contexts(const Body *goal, Context context) {
+    if (unseen_.count(goal)) {
+      context = {true, {}};
+    }
+    bool loose{ContextsIn(goal, context)};
+    if (Seen(goal).most != Solutions::Many) {
+      return false;
+    }
+    std::optional<parser::Determinism> own;
+    if (goal->kind == BodyKind::Call ||
+        (goal->kind == BodyKind::Unify && goal->unify == UnifyKind::Call)) {
+      own = goal->modes->callee->determinism;
+    } else if (goal->kind == BodyKind::HOCall) {
+      own = goal->modes->determinism;
+    }
+    if (context.first && (own ? IsCommittedChoice(*own) : !loose)) {
+      first_.insert(goal);
+    }
+    return !context.first;
+  }
+
+  bool ContextsIn(const Body *goal, const Context &context) {
+    auto committed{[&](parser::Determinism determinism, std::string what) {
+      if (context.first || !IsCommittedChoice(determinism)) {
+        return;
+      }
+      // mmc: "Error: call to predicate `p'/1 with determinism `cc_multi'
+      // occurs in a context which requires all solutions."
+      auto &message{messages_.Say(Where(goal->tokens),
+          "%s with determinism %s is in a context that requires all solutions"_err_en_US,
+          what, DeterminismName(determinism))};
+      std::vector<Cause> causes;
+      for (const Body *g : context.failing) {
+        Diagnose(g, false, Solutions::Many, "", causes);
+      }
+      for (const Cause &c : causes) {
+        message.Attach(Where(c.tokens), "%s"_because_en_US, c.text);
+      }
+    }};
+    switch (goal->kind) {
+    case BodyKind::Unify:
+      if (goal->lambda) {
+        parser::Determinism declared{goal->modes->determinism};
+        Contexts(goal->lambda, {IsCommittedChoice(declared), {}});
+      } else if (goal->unify == UnifyKind::Call) {
+        const Procedure &callee{*goal->modes->callee};
+        committed(*callee.determinism, "the call to " + ProcedureToString(callee));
+      }
+      return false;
+    case BodyKind::Call: {
+      const Procedure &callee{*goal->modes->callee};
+      committed(*callee.determinism, "the call to " + ProcedureToString(callee));
+      return false;
+    }
+    case BodyKind::HOCall:
+      committed(goal->modes->determinism, "the higher-order call");
+      return false;
+    case BodyKind::Conj: {
+      bool loose{false};
+      Context inner{context};
+      for (const Body *g : llvm::reverse(goal->goals)) {
+        loose |= Contexts(g, inner);
+        if (Seen(g).canFail) {
+          inner.first = false;
+          inner.failing.push_back(g);
+        }
+      }
+      return loose;
+    }
+    case BodyKind::Switch: {
+      bool loose{false};
+      for (const SwitchCase &c : goal->cases) {
+        loose |= Contexts(c.goal, context);
+      }
+      return loose;
+    }
+    case BodyKind::IfThenElse: {
+      Context condition{context};
+      if (Seen(goal->goals[1]).canFail) {
+        condition.first = false;
+        condition.failing.push_back(goal->goals[1]);
+      }
+      bool loose{Contexts(goal->goals[0], condition)};
+      loose |= Contexts(goal->goals[1], context);
+      loose |= Contexts(goal->goals[2], context);
+      return loose;
+    }
+    case BodyKind::Not:
+      Contexts(goal->goals.front(), {true, {}});
+      return false;
+    default: {
+      bool loose{false};
+      for (const Body *g : goal->goals) {
+        loose |= Contexts(g, context);
+      }
+      return loose;
+    }
+    }
+  }
+
+  // Whether the procedure is a function's mode whose arguments are all in
+  // and whose result is out.
+  bool PrimaryFunctionMode() {
+    const Procedure &procedure{*body_.procedure};
+    if (procedure.symbol->kind != SymbolKind::Function ||
+        procedure.modes.size() != body_.head.size()) {
+      return false;
+    }
+    for (std::size_t i{0}; i < procedure.modes.size(); ++i) {
+      const ArgMode &mode{procedure.modes[i]};
+      const Type *type{body_.vars[body_.head[i]].type};
+      bool result{i + 1 == procedure.modes.size()};
+      if ((result ? !ops_.IsFree(mode.initial)
+                  : !ops_.IsGround(mode.initial, type)) ||
+          !ops_.IsGround(mode.final, type)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   // Compares the inferred determinisms with the declared ones, of the
   // procedure and of its lambda expressions.
   void Check() {
@@ -1987,7 +2141,8 @@ private:
         // inferred `semidet''."
         auto &message{messages_.Say(Where(goal->tokens),
             "the lambda expression is declared %s, but its determinism is inferred to be %s"_err_en_US,
-            DeterminismName(declared), DeterminismName(DeterminismOf(d)))};
+            DeterminismName(declared),
+            DeterminismName(DeterminismOf(d, IsCommittedChoice(declared))))};
         Report(message, goal->lambda, declared);
       }
     }
@@ -1995,24 +2150,16 @@ private:
     if (!declared) {
       return;
     }
-    if (body_.procedure->source.empty() &&
-        body_.procedure->symbol->kind == SymbolKind::Function &&
-        ComponentsOf(*declared).most == Solutions::Many) {
+    if (PrimaryFunctionMode() &&
+        ComponentsOf(*body_.determinism).most == Solutions::Many) {
       // mmc: "Error: invalid determinism for `f'(in) = out: the primary
-      // mode of a function cannot be `multi'." It does not check the
-      // body then. Only for this mode, though the manual rules out more
-      // than one solution for any mode whose arguments are all input (see
-      // the register).
+      // mode of a function cannot be `multi'." By the inferred
+      // determinism, then as for other procedures. Only for this mode,
+      // though the manual rules out more than one solution for any mode
+      // whose arguments are all input (see the register).
       messages_.Say(Declaration(),
           "invalid determinism for %s: the primary mode of a function cannot be %s"_err_en_US,
-          Text(), DeterminismName(*declared));
-      return;
-    }
-    if (IsCommittedChoice(*declared)) {
-      body_.unchecked = DeterminismUnchecked::CommittedChoice;
-      body_.determinism.reset();
-      body_.goals.clear();
-      return;
+          Text(), DeterminismName(*body_.determinism));
     }
     Components inferred{ComponentsOf(*body_.determinism)};
     if (!Within(inferred, ComponentsOf(*declared))) {
@@ -2040,8 +2187,13 @@ private:
   std::map<const Body *, std::set<BodyVar>> vars_;
   // The functors that variables are known to have (see Known).
   std::map<BodyVar, InstFunctor> known_;
-  // The goals that succeed at most once because they have no outputs.
+  // The goals that have no outputs, and those of them that succeed at most
+  // once because of that.
+  std::set<const Body *> unseen_;
   std::set<const Body *> pruned_;
+  // The goals with more than one solution where only the first is wanted,
+  // which are committed choice.
+  std::set<const Body *> first_;
   std::vector<std::pair<const Body *, Components>> lambdas_;
 };
 
