@@ -118,8 +118,9 @@ struct Body {
   // For a determinism cast, its kind and the variables it lists.
   std::optional<parser::PromiseSolutionsKind> promise;
   std::vector<BodyVar> promised;
-  // For a disjunction, a switch and a determinism cast: the insts before
-  // it of the variables bound outside it that it uses.
+  // For a disjunction, a switch, a determinism cast, a call and a
+  // function application: the insts before it of the variables bound
+  // outside it that it uses.
   std::vector<std::pair<BodyVar, const Inst *>> entry;
   // For a switch: its variable, whether it can fail because its cases
   // leave out functors the variable may have, and its cases, by functor.
@@ -184,7 +185,7 @@ private:
   friend class DeterminismAnalyser;
   friend std::unique_ptr<DeterminismChecking> CheckDeterminism(
       const parser::TokenSequence &, TypeChecking &, ModeChecking &,
-      parser::Messages &);
+      parser::Messages &, bool);
   std::deque<Body> nodes_;
   std::deque<ProcedureBody> bodies_;
   llvm::DenseMap<const Procedure *, const ProcedureBody *> byProcedure_;
@@ -192,15 +193,21 @@ private:
   std::map<const Procedure *, parser::Determinism> inferred_;
 };
 
+// Whether mode analysis reaches the end of a goal, as in mmc.
+bool Reached(const Body *goal);
+
 // Prints a procedure's body, each goal with its position and its
 // determinism, as determinism analysis sees it.
 void DumpProcedureBody(llvm::raw_ostream &, const ProcedureBody &,
     const parser::TokenSequence &,
     llvm::function_ref<std::string(parser::CharBlock)> position);
 
+// The bodies are analysed only with `analyse`: not after errors found
+// before mode analysis, after which mmc stops. After mode errors, those of
+// the other procedures are, as in mmc.
 std::unique_ptr<DeterminismChecking> CheckDeterminism(
     const parser::TokenSequence &, TypeChecking &, ModeChecking &,
-    parser::Messages &);
+    parser::Messages &, bool analyse = true);
 
 } // namespace merkurius::semantics
 #endif // MERKURIUS_SEMANTICS_CHECK_DETERMINISM_H_
