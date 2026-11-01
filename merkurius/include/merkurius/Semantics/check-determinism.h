@@ -110,6 +110,11 @@ struct Body {
   // until it quantifies the body again (ProcedureBody::requantified,
   // ProcedureBody::rechecked).
   std::vector<BodyVar> failed;
+  // For a require_<det> scope, the determinism its goal must have; for a
+  // require_switch_arms_<det> scope, the one its arms must be acceptable
+  // in; for it and a require_complete_switch scope, the switch's variable.
+  std::optional<parser::Determinism> required;
+  std::optional<BodyVar> switchOn;
   // For a determinism cast, its kind and the variables it lists.
   std::optional<parser::PromiseSolutionsKind> promise;
   std::vector<BodyVar> promised;
@@ -128,7 +133,7 @@ struct Body {
 // Why a procedure's determinism is not inferred yet: it calls one whose
 // determinism is to be inferred, or it has a scope that requires or
 // promises a determinism.
-ENUM_CLASS(DeterminismUnchecked, None, InferredCallee, Requirement)
+ENUM_CLASS(DeterminismUnchecked, None, InferredCallee)
 
 // A procedure's body, or an instance method's in one of its modes.
 struct ProcedureBody {
