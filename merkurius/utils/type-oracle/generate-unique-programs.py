@@ -28,13 +28,17 @@ update it write or keep it, and a construction of a new value is an
 assignment, so that a predicate with a determinism other than det,
 cc_multi or erroneous has I/O state arguments of an invalid determinism.
 
+With --ui, the helper that reads the value takes it as `ui`, so that it
+must be unique there, and not shared after.
+
 Usage: generate-unique-programs.py [--seed N] [--count N] [--scopes] [--io]
-                                   DIR
+                                   [--ui] DIR
 """
 
 import argparse
 import os
 import random
+import re
 
 PRELUDE = """\
 :- module {name}.
@@ -287,7 +291,7 @@ def predicate(rng, preds, n, scopes, io):
     return decl, clause, det is not None
 
 
-def module(rng, name, scopes, io=False):
+def module(rng, name, scopes, io=False, ui=False):
     count = rng.randint(4, 8)
     preds = [("p%d" % i, rng.choice(MODES)) for i in range(count)]
     exported, local, clauses = [], [], []
@@ -296,6 +300,9 @@ def module(rng, name, scopes, io=False):
         (exported if declared else local).append(decl)
         clauses.append(clause)
     helpers = IO_HELPERS if io else HELPERS
+    if ui:
+        helpers = re.sub(r":- pred peek\(t::in, int::out\) is det\.\npeek\(.*\)\.\n",
+                         ":- pred peek(t::ui, int::out) is det.\npeek(_, 1).\n", helpers)
     scope_helpers = IO_SCOPE_HELPERS if io else SCOPE_HELPERS
     return ((IO_PRELUDE if io else PRELUDE).format(name=name) +
             "\n".join(exported) + "\n\n" +
@@ -311,6 +318,7 @@ def main():
     parser.add_argument("--count", type=int, default=20)
     parser.add_argument("--scopes", action="store_true")
     parser.add_argument("--io", action="store_true")
+    parser.add_argument("--ui", action="store_true")
     parser.add_argument("dir")
     args = parser.parse_args()
     os.makedirs(args.dir, exist_ok=True)
@@ -318,7 +326,7 @@ def main():
         rng = random.Random("%d-%d" % (args.seed, i))
         name = "u%d_%d" % (args.seed, i)
         with open(os.path.join(args.dir, name + ".m"), "w") as f:
-            f.write(module(rng, name, args.scopes, args.io))
+            f.write(module(rng, name, args.scopes, args.io, args.ui))
 
 
 if __name__ == "__main__":

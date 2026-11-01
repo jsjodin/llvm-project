@@ -8,7 +8,7 @@
 % reach are left out; goals after one that fails only by inference are
 % not.
 %
-% RUN: not merkc -fc1 -fdebug-dump-determinism %s 2>%t.err >/dev/null
+% RUN: not merkc -fc1 -fdebug-dump-determinism -fmmc-uniqueness %s 2>%t.err >/dev/null
 % RUN: FileCheck --check-prefix=ERR --implicit-check-not=error: %s < %t.err
 % RUN: %if mmc %{ %compare-switches --determinism %s %}
 

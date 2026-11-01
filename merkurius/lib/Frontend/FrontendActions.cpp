@@ -627,7 +627,8 @@ bool DebugDumpDeterminismAction::executeAction() {
   std::unique_ptr<semantics::DeterminismChecking> determinism{
       semantics::CheckDeterminism(
           r.tokens, *types, *modes, r.messages, !earlier)};
-  semantics::CheckUniqueness(r.tokens, *modes, *determinism, r.messages);
+  semantics::CheckUniqueness(
+      r.tokens, *modes, *determinism, r.messages, frontend.mmcUniqueness);
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   llvm::raw_ostream *os{ci.createDefaultOutputFile()};
   if (!os) {

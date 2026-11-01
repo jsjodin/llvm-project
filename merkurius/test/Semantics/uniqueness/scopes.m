@@ -10,7 +10,7 @@
 % what is used after it is not taken as needed on backtracking into it,
 % as in mmc (see the design document's register).
 %
-% RUN: not merkc -fc1 -fdebug-dump-determinism %s 2>%t.err >/dev/null
+% RUN: not merkc -fc1 -fdebug-dump-determinism -fmmc-uniqueness %s 2>%t.err >/dev/null
 % RUN: FileCheck --check-prefix=ERR --implicit-check-not=error: %s < %t.err
 % RUN: %if mmc %{ %compare-switches --determinism %s %}
 
