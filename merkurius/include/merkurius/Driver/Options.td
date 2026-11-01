@@ -63,6 +63,9 @@ def fdebug_dump_types : Flag<["-"], "fdebug-dump-types">,
 def finfer_modes : Flag<["-"], "finfer-modes">,
   HelpText<"Infer the modes of predicates without mode declarations, as "
            "mmc's --infer-modes does, rather than report each">;
+def fmmc_uniqueness : Flag<["-"], "fmmc-uniqueness">,
+  HelpText<"Find the unique values needed on backtracking as mmc does, "
+           "which misses some that an if-then-else needs">;
 def fmode_inference_iteration_limit_EQ :
   Joined<["-"], "fmode-inference-iteration-limit=">, MetaVarName<"<n>">,
   HelpText<"Perform at most <n> passes of mode inference (default: 30)">;

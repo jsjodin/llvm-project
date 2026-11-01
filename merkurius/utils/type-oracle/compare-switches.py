@@ -350,7 +350,9 @@ def main():
             else:
                 with open(dump) as f:
                     theirs = mmc_procedures(f.read())
-        merkc = subprocess.run([args.merkc, "-fc1", "-fdebug-dump-determinism", path],
+        # mmc's rules for the unique values needed on backtracking.
+        merkc = subprocess.run([args.merkc, "-fc1", "-fdebug-dump-determinism",
+                                "-fmmc-uniqueness", path],
                                capture_output=True, text=True)
         others = [l for l in merkc.stderr.splitlines()
                   if " error: " in l and not DETERMINISM_ERROR.search(l)

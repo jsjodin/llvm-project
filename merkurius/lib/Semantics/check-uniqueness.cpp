@@ -8,6 +8,7 @@
 
 #include "merkurius/Semantics/check-uniqueness.h"
 #include "llvm/ADT/STLExtras.h"
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -24,9 +25,9 @@ using Vars = std::set<BodyVar>;
 class UniquenessChecker {
 public:
   UniquenessChecker(const parser::TokenSequence &tokens, ModeChecking &modes,
-      const ProcedureBody &body)
+      const ProcedureBody &body, bool mmc)
       : tokens_{tokens}, modes_{modes}, insts_{modes.insts()},
-        ops_{modes.ops()}, body_{body} {}
+        ops_{modes.ops()}, body_{body}, mmc_{mmc} {}
 
   // The first error in the body, if any: where, and its text.
   std::optional<std::pair<parser::CharBlock, std::string>> Check();
@@ -53,14 +54,17 @@ private:
     for (BodyVar var : vars) {
       if (bound.count(var)) {
         mostly_.insert(var);
-        conditional_.erase(var);
       }
     }
   }
   // Whether a variable is mostly_unique, as what is made from it is.
-  bool Shares(BodyVar var) const {
-    return mostly_.count(var) && !conditional_.count(var);
-  }
+  bool Shares(BodyVar var) const { return mostly_.count(var); }
+  // Whether a goal clobbers one of `vars`, passing it where its final
+  // inst is clobbered or mostly_clobbered.
+  bool Clobbers(const Body *goal, const Vars &vars);
+  // `var`, and the variables that the unifications of `goal` make from it
+  // or it from, whatever their order.
+  Vars MadeFrom(const Body *goal, BodyVar var);
   // Checks a goal, after which the variables of `live` are used; with
   // `failsAfter`, a goal after it in the committed choice context it is
   // in, if any, can fail.
@@ -79,22 +83,26 @@ private:
   // of a lambda expression are named as in mmc.
   void CheckFinal(llvm::ArrayRef<BodyVar> head, llvm::ArrayRef<ArgMode> modes,
       llvm::ArrayRef<const Inst *> finals, bool lambda);
-  // Whether `inst`, made mostly_unique, matches `expected`, as in mmc.
-  bool Matches(const Inst *inst, const Inst *expected, const Type *);
+  // Whether `inst`, made mostly_unique, matches `expected`, as in mmc;
+  // `var` is the variable whose inst it is, if any.
+  bool Matches(const Inst *inst, const Inst *expected, const Type *,
+      std::optional<BodyVar> var = std::nullopt);
 
   const parser::TokenSequence &tokens_;
   ModeChecking &modes_;
   InstContext &insts_;
   InstOps &ops_;
   const ProcedureBody &body_;
+  // Whether to miss what mmc misses.
+  bool mmc_;
   std::map<const Body *, Vars> uses_;
   // The variables bound, and those that are mostly_unique, at the point
   // being checked; whether only its first solution is wanted.
   Vars bound_, mostly_;
-  // Those mostly_unique only because the else part of an if-then-else
-  // uses them, which mmc does not pass on to what is made from them.
-  Vars conditional_;
   bool committed_{false};
+  // The variables that were arguments of calls, whose insts mmc has
+  // found ground then.
+  Vars called_;
   std::optional<std::pair<parser::CharBlock, std::string>> error_;
   // The goal run last, where an error in the final insts is reported, as
   // in mmc.
@@ -258,33 +266,20 @@ void UniquenessChecker::Walk(
     }
     // The insts after it are those of its branches merged: a variable is
     // mostly_unique after it if it is so after any.
-    Vars mostly{mostly_}, bound{bound_}, conditional{conditional_},
-        mergedMostly, mergedBound, shared;
+    Vars mostly{mostly_}, bound{bound_}, mergedMostly, mergedBound;
     for (const Body *branch : branches) {
       mostly_ = mostly;
       bound_ = bound;
-      conditional_ = conditional;
       if (byBranch && CanFail(branch)) {
         Mark(Uses(branch), before);
       }
       Walk(branch, live, failsAfter);
       mergedMostly.insert(mostly_.begin(), mostly_.end());
       mergedBound.insert(bound_.begin(), bound_.end());
-      for (BodyVar var : mostly_) {
-        if (Shares(var)) {
-          shared.insert(var);
-        }
-      }
     }
     if (!branches.empty()) {
       mostly_ = std::move(mergedMostly);
       bound_ = std::move(mergedBound);
-      conditional_.clear();
-      for (BodyVar var : mostly_) {
-        if (!shared.count(var)) {
-          conditional_.insert(var);
-        }
-      }
     }
     break;
   }
@@ -297,37 +292,45 @@ void UniquenessChecker::Walk(
       Walk(otherwise, live, failsAfter);
       return;
     }
-    Vars mostly{mostly_}, conditional{conditional_};
-    // The condition's variables that the else part uses are needed if
-    // the condition fails after using them.
+    Vars mostly{mostly_}, bound{bound_};
+    // A value bound before that the else part uses is needed while the
+    // condition runs, if the condition clobbers it, or what it makes from
+    // it, by an assignment, a construction or a deconstruction; mmc looks
+    // only for the variable itself (see the design document's register).
+    // Once the condition has succeeded, the else part is not run, so it
+    // is no longer needed; mmc has it so in the then part too.
     const Vars &inElse{Uses(otherwise)};
-    Vars both;
     for (BodyVar var : Uses(condition)) {
-      if (inElse.count(var)) {
-        both.insert(var);
+      if (inElse.count(var) && before.count(var) &&
+          Clobbers(condition, mmc_ ? Vars{var} : MadeFrom(condition, var))) {
+        mostly_.insert(var);
       }
     }
-    for (BodyVar var : both) {
-      if (before.count(var) && mostly_.insert(var).second) {
-        conditional_.insert(var);
-      }
+    // What is used after the if-then-else is used after its parts, as
+    // backtracking into one runs it again; mmc takes as used after the
+    // condition only what the then part uses, and after the then and else
+    // parts nothing (see the design document's register).
+    Vars afterCondition{mmc_ ? Vars{} : live}, afterParts{afterCondition};
+    const Vars &inThen{Uses(then)};
+    afterCondition.insert(inThen.begin(), inThen.end());
+    Walk(condition, afterCondition, failsAfter || CanFail(then));
+    if (!mmc_ && !error_ && mostly_ != mostly) {
+      // Again, without them, for what the then part starts from.
+      mostly_ = mostly;
+      bound_ = std::move(bound);
+      Walk(condition, afterCondition, failsAfter || CanFail(then));
     }
-    // mmc takes as used after the condition only what the then part uses,
-    // and as used after the then and else parts nothing, and so marks
-    // nothing used after the if-then-else, though backtracking into it
-    // may run that again (see the design document's register).
-    Walk(condition, Uses(then), failsAfter || CanFail(then));
-    Walk(then, {}, failsAfter);
-    Vars thenMostly{std::move(mostly_)}, thenBound{std::move(bound_)},
-        thenConditional{std::move(conditional_)};
+    Walk(then, afterParts, failsAfter);
+    Vars thenMostly{std::move(mostly_)}, thenBound{std::move(bound_)};
     mostly_ = std::move(mostly);
     bound_ = before;
-    conditional_ = std::move(conditional);
-    Walk(otherwise, {}, failsAfter);
+    Walk(otherwise, afterParts, failsAfter);
     mostly_.insert(thenMostly.begin(), thenMostly.end());
     bound_.insert(thenBound.begin(), thenBound.end());
-    conditional_.insert(thenConditional.begin(), thenConditional.end());
-    return;
+    if (mmc_) {
+      return;
+    }
+    break;
   }
   case BodyKind::Not: {
     // The negated goal binds nothing outside it, the variables used after
@@ -337,14 +340,13 @@ void UniquenessChecker::Walk(
     if (!Reached(goal->goals.front())) {
       break;
     }
-    Vars mostly{mostly_}, conditional{conditional_};
+    Vars mostly{mostly_};
     bool committed{committed_};
     Mark(live, before);
     committed_ = true;
     Walk(goal->goals.front(), live, false);
     committed_ = committed;
     mostly_ = std::move(mostly);
-    conditional_ = std::move(conditional);
     bound_ = std::move(before);
     break;
   }
@@ -394,7 +396,7 @@ void UniquenessChecker::Lambda(const Body *goal) {
     return;
   }
   llvm::ArrayRef<ArgMode> modes{goal->modes->lambda};
-  Vars bound{bound_}, mostly{mostly_}, conditional{conditional_}, live;
+  Vars bound{bound_}, mostly{mostly_}, live;
   bool committed{committed_};
   parser::CharBlock last{last_};
   for (std::size_t i{0}; i < goal->lambdaHead.size() && i < modes.size();
@@ -420,7 +422,6 @@ void UniquenessChecker::Lambda(const Body *goal) {
   }
   bound_ = std::move(bound);
   mostly_ = std::move(mostly);
-  conditional_ = std::move(conditional);
   committed_ = committed;
   last_ = last;
 }
@@ -461,6 +462,75 @@ void UniquenessChecker::Closure(const Body *goal) {
             ": its final inst is " + InstToString(*inst) + ", but " +
             InstToString(*final) + " is expected"};
   }
+}
+
+bool UniquenessChecker::Clobbers(const Body *goal, const Vars &vars) {
+  auto clobbers{[&](llvm::ArrayRef<ArgMode> modes,
+                    llvm::ArrayRef<BodyVar> arguments) {
+    for (std::size_t i{0}; i < modes.size() && i < arguments.size(); ++i) {
+      if (vars.count(arguments[i]) && Clobbers(modes[i].final)) {
+        return true;
+      }
+    }
+    return false;
+  }};
+  if (goal->modes && goal->kind == BodyKind::HOCall &&
+      clobbers(goal->modes->lambda, goal->arguments)) {
+    return true;
+  }
+  if (goal->modes && goal->modes->callee && !goal->lambda &&
+      (goal->kind == BodyKind::Call ||
+          (goal->kind == BodyKind::Unify &&
+              goal->unify == UnifyKind::Call))) {
+    std::vector<BodyVar> arguments{goal->arguments};
+    if (goal->kind == BodyKind::Unify) {
+      arguments.push_back(goal->left);
+    }
+    if (clobbers(goal->modes->callee->modes, arguments)) {
+      return true;
+    }
+  }
+  for (const SwitchCase &c : goal->cases) {
+    if (Clobbers(c.goal, vars)) {
+      return true;
+    }
+  }
+  return llvm::any_of(
+      goal->goals, [&](const Body *g) { return Clobbers(g, vars); });
+}
+
+Vars UniquenessChecker::MadeFrom(const Body *goal, BodyVar var) {
+  // The unifications' variables, joined until nothing changes.
+  std::vector<std::vector<BodyVar>> links;
+  std::function<void(const Body *)> collect{[&](const Body *g) {
+    if (g->kind == BodyKind::Unify && !g->lambda &&
+        (g->unify == UnifyKind::Assign || g->unify == UnifyKind::Construct ||
+            g->unify == UnifyKind::Deconstruct)) {
+      std::vector<BodyVar> link{g->arguments};
+      link.push_back(g->left);
+      if (g->isVar) {
+        link.push_back(g->var);
+      }
+      links.push_back(std::move(link));
+    }
+    for (const SwitchCase &c : g->cases) {
+      collect(c.goal);
+    }
+    llvm::for_each(g->goals, collect);
+  }};
+  collect(goal);
+  Vars family{var};
+  for (bool changed{true}; changed;) {
+    changed = false;
+    for (const std::vector<BodyVar> &link : links) {
+      if (llvm::any_of(link, [&](BodyVar v) { return family.count(v); })) {
+        for (BodyVar v : link) {
+          changed |= family.insert(v).second;
+        }
+      }
+    }
+  }
+  return family;
 }
 
 void UniquenessChecker::Leaf(const Body *goal) {
@@ -525,15 +595,20 @@ void UniquenessChecker::Leaf(const Body *goal) {
       break;
     }
   }
+  if (goal->kind == BodyKind::Call || goal->kind == BodyKind::HOCall ||
+      (goal->kind == BodyKind::Unify && goal->unify == UnifyKind::Call)) {
+    called_.insert(uses.begin(), uses.end());
+  }
   // A goal binds those of its variables that were free.
   bound_.insert(uses.begin(), uses.end());
 }
 
-bool UniquenessChecker::Matches(
-    const Inst *inst, const Inst *expected, const Type *type) {
+bool UniquenessChecker::Matches(const Inst *inst, const Inst *expected,
+    const Type *type, std::optional<BodyVar> var) {
   // mmc does not match a mostly_unique bound inst with a part bound too,
-  // as mostly_unique(t(mostly_unique(3))), to ground, though one with a
-  // constant or a ground part it does (see the design document's
+  // as mostly_unique(t(mostly_unique(3))), to mostly_unique, though one
+  // with a constant or a ground part it does, and one of a variable that
+  // was an argument of a call before (see the design document's
   // register).
   while (expected->kind == InstKind::Defined) {
     expected = insts_.Expand(expected);
@@ -541,6 +616,8 @@ bool UniquenessChecker::Matches(
   if (inst->kind == InstKind::Bound &&
       inst->uniqueness == Uniqueness::MostlyUnique &&
       expected->kind == InstKind::Ground &&
+      expected->uniqueness == Uniqueness::MostlyUnique &&
+      !(var && called_.count(*var)) &&
       llvm::any_of(inst->functors, [](const BoundAlternative &alternative) {
         return llvm::any_of(alternative.arguments, [](const Inst *argument) {
           return argument->kind == InstKind::Bound;
@@ -562,7 +639,7 @@ void UniquenessChecker::CheckArgument(const Body *goal, const ArgMode &mode,
     return;
   }
   const Inst *inst{insts_.Share(it->second, Uniqueness::MostlyUnique)};
-  if (inst == it->second || Matches(inst, mode.initial, TypeOf(var))) {
+  if (inst == it->second || Matches(inst, mode.initial, TypeOf(var), var)) {
     return;
   }
   // mmc: "in argument 2 of call to predicate `m.p'/3: mode error: variable
@@ -595,7 +672,7 @@ void UniquenessChecker::CheckFinal(llvm::ArrayRef<BodyVar> head,
     const Inst *final{finals[i]};
     const Inst *inst{insts_.Share(final, Uniqueness::MostlyUnique)};
     const Inst *expected{modes[i].final};
-    if (inst == final || Matches(inst, expected, TypeOf(var))) {
+    if (inst == final || Matches(inst, expected, TypeOf(var), var)) {
       continue;
     }
     // mmc: "argument 2 did not get sufficiently instantiated. Final
@@ -653,14 +730,15 @@ UniquenessChecker::Check() {
 } // namespace
 
 void CheckUniqueness(const parser::TokenSequence &tokens, ModeChecking &modes,
-    const DeterminismChecking &determinism, parser::Messages &messages) {
+    const DeterminismChecking &determinism, parser::Messages &messages,
+    bool mmc) {
   for (const ProcedureBody &body : determinism.bodies()) {
     // Only bodies whose determinisms were inferred, so that it is known
     // where backtracking can happen.
     if (!body.body || !body.determinism) {
       continue;
     }
-    UniquenessChecker checker{tokens, modes, body};
+    UniquenessChecker checker{tokens, modes, body, mmc};
     if (auto error{checker.Check()}) {
       messages.Say(error->first, "%s"_err_en_US, error->second);
     }
