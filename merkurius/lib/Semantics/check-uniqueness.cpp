@@ -22,6 +22,42 @@ namespace {
 
 using Vars = std::set<BodyVar>;
 
+// The parts of a value that are mostly_unique: all of it, or those of the
+// arguments of its functor, by position, that are, so that a term made
+// from a mostly_unique value and a unique one is mostly_unique only in
+// the first's part, as in mmc.
+struct Parts {
+  bool whole{false};
+  std::map<std::size_t, Parts> arguments;
+
+  bool Empty() const { return !whole && arguments.empty(); }
+  void Merge(const Parts &that) {
+    if (whole) {
+      return;
+    }
+    if (that.whole) {
+      whole = true;
+      arguments.clear();
+      return;
+    }
+    for (const auto &[i, argument] : that.arguments) {
+      arguments[i].Merge(argument);
+    }
+  }
+  bool operator==(const Parts &that) const {
+    return whole == that.whole && arguments == that.arguments;
+  }
+};
+
+// The variables with mostly_unique parts.
+using Marks = std::map<BodyVar, Parts>;
+
+void Merge(Marks &marks, const Marks &more) {
+  for (const auto &[var, mark] : more) {
+    marks[var].Merge(mark);
+  }
+}
+
 class UniquenessChecker {
 public:
   UniquenessChecker(const parser::TokenSequence &tokens, ModeChecking &modes,
@@ -53,12 +89,18 @@ private:
   void Mark(const Vars &vars, const Vars &bound) {
     for (BodyVar var : vars) {
       if (bound.count(var)) {
-        mostly_.insert(var);
+        MarkWhole(var);
       }
     }
   }
-  // Whether a variable is mostly_unique, as what is made from it is.
-  bool Shares(BodyVar var) const { return mostly_.count(var); }
+  void MarkWhole(BodyVar var) { mostly_[var] = Parts{true, {}}; }
+  // The parts of a variable's value that are mostly_unique, if any.
+  const Parts *MarkOf(BodyVar var) const {
+    auto it{mostly_.find(var)};
+    return it == mostly_.end() || it->second.Empty() ? nullptr : &it->second;
+  }
+  // `inst` with the parts of `mark` made mostly_unique.
+  const Inst *Apply(const Inst *inst, const Parts &mark);
   // Whether a goal clobbers one of `vars`, passing it where its final
   // inst is clobbered or mostly_clobbered.
   bool Clobbers(const Body *goal, const Vars &vars);
@@ -98,7 +140,8 @@ private:
   std::map<const Body *, Vars> uses_;
   // The variables bound, and those that are mostly_unique, at the point
   // being checked; whether only its first solution is wanted.
-  Vars bound_, mostly_;
+  Vars bound_;
+  Marks mostly_;
   bool committed_{false};
   // The variables that were arguments of calls, whose insts mmc has
   // found ground then.
@@ -266,7 +309,8 @@ void UniquenessChecker::Walk(
     }
     // The insts after it are those of its branches merged: a variable is
     // mostly_unique after it if it is so after any.
-    Vars mostly{mostly_}, bound{bound_}, mergedMostly, mergedBound;
+    Marks mostly{mostly_}, mergedMostly;
+    Vars bound{bound_}, mergedBound;
     for (const Body *branch : branches) {
       mostly_ = mostly;
       bound_ = bound;
@@ -274,7 +318,7 @@ void UniquenessChecker::Walk(
         Mark(Uses(branch), before);
       }
       Walk(branch, live, failsAfter);
-      mergedMostly.insert(mostly_.begin(), mostly_.end());
+      Merge(mergedMostly, mostly_);
       mergedBound.insert(bound_.begin(), bound_.end());
     }
     if (!branches.empty()) {
@@ -292,7 +336,8 @@ void UniquenessChecker::Walk(
       Walk(otherwise, live, failsAfter);
       return;
     }
-    Vars mostly{mostly_}, bound{bound_};
+    Marks mostly{mostly_};
+    Vars bound{bound_};
     // A value bound before that the else part uses is needed while the
     // condition runs, if the condition clobbers it, or what it makes from
     // it, by an assignment, a construction or a deconstruction; mmc looks
@@ -303,7 +348,7 @@ void UniquenessChecker::Walk(
     for (BodyVar var : Uses(condition)) {
       if (inElse.count(var) && before.count(var) &&
           Clobbers(condition, mmc_ ? Vars{var} : MadeFrom(condition, var))) {
-        mostly_.insert(var);
+        MarkWhole(var);
       }
     }
     // What is used after the if-then-else is used after its parts, as
@@ -321,11 +366,12 @@ void UniquenessChecker::Walk(
       Walk(condition, afterCondition, failsAfter || CanFail(then));
     }
     Walk(then, afterParts, failsAfter);
-    Vars thenMostly{std::move(mostly_)}, thenBound{std::move(bound_)};
+    Marks thenMostly{std::move(mostly_)};
+    Vars thenBound{std::move(bound_)};
     mostly_ = std::move(mostly);
     bound_ = before;
     Walk(otherwise, afterParts, failsAfter);
-    mostly_.insert(thenMostly.begin(), thenMostly.end());
+    Merge(mostly_, thenMostly);
     bound_.insert(thenBound.begin(), thenBound.end());
     if (mmc_) {
       return;
@@ -340,7 +386,7 @@ void UniquenessChecker::Walk(
     if (!Reached(goal->goals.front())) {
       break;
     }
-    Vars mostly{mostly_};
+    Marks mostly{mostly_};
     bool committed{committed_};
     Mark(live, before);
     committed_ = true;
@@ -377,8 +423,9 @@ void UniquenessChecker::Walk(
     // solution.
     if ((goal->kind == BodyKind::Call || goal->kind == BodyKind::HOCall) &&
         CanBacktrackInto(goal, failsAfter)) {
-      const Vars &uses{Uses(goal)};
-      mostly_.insert(uses.begin(), uses.end());
+      for (BodyVar var : Uses(goal)) {
+        MarkWhole(var);
+      }
     }
     break;
   }
@@ -396,7 +443,8 @@ void UniquenessChecker::Lambda(const Body *goal) {
     return;
   }
   llvm::ArrayRef<ArgMode> modes{goal->modes->lambda};
-  Vars bound{bound_}, mostly{mostly_}, live;
+  Vars bound{bound_}, live;
+  Marks mostly{mostly_};
   bool committed{committed_};
   parser::CharBlock last{last_};
   for (std::size_t i{0}; i < goal->lambdaHead.size() && i < modes.size();
@@ -575,20 +623,37 @@ void UniquenessChecker::Leaf(const Body *goal) {
     }
   } else if (goal->kind == BodyKind::Unify) {
     switch (goal->unify) {
+    // What is made from a mostly_unique value, or taken from one, is
+    // mostly_unique where it is.
     case UnifyKind::Assign:
-      if (Shares(goal->var)) {
-        mostly_.insert(goal->left);
+      if (const Parts *mark{MarkOf(goal->var)}) {
+        Parts copy{*mark};
+        mostly_[goal->left].Merge(copy);
       }
       break;
-    case UnifyKind::Construct:
-      if (llvm::any_of(goal->arguments,
-              [&](BodyVar var) { return Shares(var); })) {
-        mostly_.insert(goal->left);
+    case UnifyKind::Construct: {
+      Parts term;
+      for (std::size_t i{0}; i < goal->arguments.size(); ++i) {
+        if (const Parts *mark{MarkOf(goal->arguments[i])}) {
+          term.arguments[i] = *mark;
+        }
+      }
+      if (!term.Empty()) {
+        mostly_[goal->left].Merge(term);
       }
       break;
+    }
     case UnifyKind::Deconstruct:
-      if (Shares(goal->left)) {
-        mostly_.insert(goal->arguments.begin(), goal->arguments.end());
+      if (const Parts *mark{MarkOf(goal->left)}) {
+        Parts term{*mark};
+        for (std::size_t i{0}; i < goal->arguments.size(); ++i) {
+          if (term.whole) {
+            MarkWhole(goal->arguments[i]);
+          } else if (auto it{term.arguments.find(i)};
+                     it != term.arguments.end()) {
+            mostly_[goal->arguments[i]].Merge(it->second);
+          }
+        }
       }
       break;
     default:
@@ -628,9 +693,41 @@ bool UniquenessChecker::Matches(const Inst *inst, const Inst *expected,
   return ops_.Matches(inst, expected, type);
 }
 
+const Inst *UniquenessChecker::Apply(const Inst *inst, const Parts &mark) {
+  if (mark.whole) {
+    return insts_.Share(inst, Uniqueness::MostlyUnique);
+  }
+  const Inst *body{inst};
+  while (body->kind == InstKind::Defined) {
+    body = insts_.Expand(body);
+  }
+  if (body->kind != InstKind::Bound) {
+    // Parts of a value whose inst has none: all of it.
+    return insts_.Share(inst, Uniqueness::MostlyUnique);
+  }
+  std::vector<BoundAlternative> alternatives;
+  std::vector<std::vector<const Inst *>> arguments;
+  for (const BoundAlternative &alternative : body->functors) {
+    arguments.emplace_back(
+        alternative.arguments.begin(), alternative.arguments.end());
+    for (const auto &[i, part] : mark.arguments) {
+      if (i < arguments.back().size()) {
+        arguments.back()[i] = Apply(arguments.back()[i], part);
+      }
+    }
+  }
+  bool changed{false};
+  for (std::size_t j{0}; j < body->functors.size(); ++j) {
+    changed |= !llvm::equal(arguments[j], body->functors[j].arguments);
+    alternatives.push_back({body->functors[j].functor, arguments[j]});
+  }
+  return changed ? insts_.Bound(body->uniqueness, alternatives) : inst;
+}
+
 void UniquenessChecker::CheckArgument(const Body *goal, const ArgMode &mode,
     BodyVar var, const std::string &where) {
-  if (!mostly_.count(var)) {
+  const Parts *mark{MarkOf(var)};
+  if (!mark) {
     return;
   }
   auto it{llvm::find_if(
@@ -638,7 +735,7 @@ void UniquenessChecker::CheckArgument(const Body *goal, const ArgMode &mode,
   if (it == goal->entry.end() || !it->second) {
     return;
   }
-  const Inst *inst{insts_.Share(it->second, Uniqueness::MostlyUnique)};
+  const Inst *inst{Apply(it->second, *mark)};
   if (inst == it->second || Matches(inst, mode.initial, TypeOf(var), var)) {
     return;
   }
@@ -666,11 +763,12 @@ void UniquenessChecker::CheckFinal(llvm::ArrayRef<BodyVar> head,
   for (std::size_t i{0};
        i < head.size() && i < modes.size() && i < finals.size(); ++i) {
     BodyVar var{head[i]};
-    if (!mostly_.count(var)) {
+    const Parts *mark{MarkOf(var)};
+    if (!mark) {
       continue;
     }
     const Inst *final{finals[i]};
-    const Inst *inst{insts_.Share(final, Uniqueness::MostlyUnique)};
+    const Inst *inst{Apply(final, *mark)};
     const Inst *expected{modes[i].final};
     if (inst == final || Matches(inst, expected, TypeOf(var), var)) {
       continue;

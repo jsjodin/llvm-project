@@ -1,0 +1,9 @@
+# Random modules like those of random-nested-1.test, whose goals may also
+# be those of random-scopes-1.test (generate-unique-programs.py --nested
+# --scopes). merkc must report the unique values needed on backtracking in
+# the fields, and its other errors, at the same lines as mmc.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-unique-programs.py --nested --scopes --seed 403 --count 40 %t
+# RUN: %compare-switches --determinism %t/*.m

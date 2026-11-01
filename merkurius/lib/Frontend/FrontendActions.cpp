@@ -533,6 +533,7 @@ bool DebugDumpModesAction::executeAction() {
   semantics::ModeCheckOptions options;
   options.inferModes = frontend.inferModes;
   options.inferenceIterationLimit = frontend.modeInferenceIterationLimit;
+  options.mmcUniqueness = frontend.mmcUniqueness;
   std::unique_ptr<semantics::ModeChecking> modes{semantics::CheckModes(*r.tree,
       r.tokens, *r.form, *r.resolution, *types, r.messages, options)};
   r.messages.Emit(llvm::errs(), ci.getAllSources());
@@ -621,6 +622,7 @@ bool DebugDumpDeterminismAction::executeAction() {
   semantics::ModeCheckOptions options;
   options.inferModes = frontend.inferModes;
   options.inferenceIterationLimit = frontend.modeInferenceIterationLimit;
+  options.mmcUniqueness = frontend.mmcUniqueness;
   bool earlier{r.messages.AnyFatalError()};
   std::unique_ptr<semantics::ModeChecking> modes{semantics::CheckModes(*r.tree,
       r.tokens, *r.form, *r.resolution, *types, r.messages, options)};
