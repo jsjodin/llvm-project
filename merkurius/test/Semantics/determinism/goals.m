@@ -9,9 +9,9 @@
 % negations and scopes; and a goal with more than one solution but no
 % outputs, but not an impure one, has at most one, the innermost such
 % goal. A declaration that is looser than the inferred determinism has a
-% warning. A procedure that calls one without a declared determinism, or
-% has a scope that requires or promises a determinism, is checked by later
-% steps; committed choice is in committed.m.
+% warning. A procedure that calls one without a declared determinism is
+% checked by a later step; committed choice is in committed.m, determinism
+% casts in casts.m and requirements in requires.m.
 %
 % RUN: merkc -fc1 -fdebug-dump-determinism %s 2>%t.err | FileCheck %s
 % RUN: FileCheck --check-prefix=WARN --implicit-check-not=warning: --implicit-check-not=error: %s < %t.err
@@ -47,7 +47,6 @@
 :- func explicit(int) = int.
 :- mode explicit(in) = out is multi.
 :- pred inferred_callee(int::out) is det.
-:- pred require(int::in, int::out) is semidet.
 
 :- implementation.
 :- import_module int, require.
@@ -155,9 +154,6 @@ default(X) = X.
 % WARN-DAG: warning: the determinism declaration of explicit(in) = out could be tighter: it is declared multi, but inferred det
 explicit(X) = X.
 
-% Determinism inference and requirements are later steps.
+% Determinism inference is a later step.
 % CHECK-LABEL: inferred_callee(out) is det{{$}}
 inferred_callee(Y) :- undeclared(Y).
-
-% CHECK-LABEL: require(in, out) is semidet{{$}}
-require(X, Y) :- require_det ( Y = X ).
