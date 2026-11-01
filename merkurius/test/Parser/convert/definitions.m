@@ -104,7 +104,7 @@
 % CHECK-NEXT: | | | parameters:
 % CHECK-NEXT: | | | forType: NameAndArity list/1
 % CHECK-NEXT: | | | inst: BoundInst
-% CHECK-NEXT: | | | | unique: false
+% CHECK-NEXT: | | | | uniqueness: Shared
 % CHECK-NEXT: | | | | functors:
 % CHECK-NEXT: | | | | | BoundFunctor
 % CHECK-NEXT: | | | | | | name: SymName []
@@ -114,7 +114,7 @@
 % CHECK-NEXT: | | | parameters:
 % CHECK-NEXT: | | | forType: NameAndArity list/1
 % CHECK-NEXT: | | | inst: BoundInst
-% CHECK-NEXT: | | | | unique: false
+% CHECK-NEXT: | | | | uniqueness: Shared
 % CHECK-NEXT: | | | | functors:
 % CHECK-NEXT: | | | | | BoundFunctor
 % CHECK-NEXT: | | | | | | name: SymName []

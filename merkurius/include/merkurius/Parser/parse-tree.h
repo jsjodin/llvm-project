@@ -218,13 +218,17 @@ struct BoundFunctor {
 };
 
 // bound(F1 ; F2 ; ...) or bound_unique(...).
+// The uniqueness of a bound inst's top level: bound(...), unique(...) or
+// bound_unique(...), and mostly_unique(...).
+ENUM_CLASS(BoundUniqueness, Shared, Unique, MostlyUnique)
+
 struct BoundInst {
   static constexpr llvm::StringLiteral kindName{"BoundInst"};
   TokenRange tokens;
-  bool unique;
+  BoundUniqueness uniqueness;
   llvm::ArrayRef<const BoundFunctor *> functors;
   template <typename F> void ForEachField(F &&f) const {
-    f("unique", unique);
+    f("uniqueness", uniqueness);
     f("functors", functors);
   }
 };
