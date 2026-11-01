@@ -1,0 +1,11 @@
+# Random modules like those of random-unique-2.test, whose goals may also
+# be lambda expressions of each determinism, closures, arbitrary scopes in
+# promise_equivalent_solution_sets scopes, require_<det> scopes and `all`
+# goals (generate-unique-programs.py --scopes). merkc must report the
+# unique values needed on backtracking, and its other errors, at the same
+# lines as mmc.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-unique-programs.py --scopes --seed 103 --count 40 %t
+# RUN: %compare-switches --determinism %t/*.m

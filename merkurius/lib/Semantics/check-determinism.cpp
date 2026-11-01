@@ -1669,6 +1669,7 @@ public:
       determinism = DeterminismOf(ComponentsOf(determinism), first_.count(goal));
     }
     body_.determinism = DeterminismOf(d, committed);
+    body_.unseen = unseen_;
     Check();
   }
 

@@ -32,12 +32,19 @@
 // - in the condition of an if-then-else, if the else part uses it too;
 // - in a negated goal, if it is used after the negation.
 //
-// A value made from one that is mostly_unique, by an assignment or a
-// construction, or taken from one, by a deconstruction, is mostly_unique
-// too, but for one the condition of an if-then-else made so, as in mmc.
-// Goals whose end mode analysis does not reach are left out. Only
-// procedures whose modes and determinisms were checked are, and only the
-// first error of each is reported, as in mmc's first phase.
+// A promise_equivalent_solutions or arbitrary scope, and a goal with no
+// outputs, commits to its first solution, so that what follows it is not
+// run again on backtracking into it. As in mmc, what is used after an
+// if-then-else is not taken as used after its parts. A value made from
+// one that is mostly_unique, by an assignment or a construction, or taken
+// from one, by a deconstruction, is mostly_unique too, but for one the
+// condition of an if-then-else made so, as in mmc. A lambda expression's
+// body is checked where it is, as a procedure of its own, a closure as a
+// lambda expression whose body calls its procedure, and a higher-order
+// call's arguments against its term's modes. Goals whose end mode
+// analysis does not reach are left out. Only procedures whose modes and
+// determinisms were checked are, and only the first error of each is
+// reported, as in mmc's first phase.
 
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/token.h"

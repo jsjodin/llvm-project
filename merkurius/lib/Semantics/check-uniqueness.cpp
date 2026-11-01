@@ -65,12 +65,20 @@ private:
   // `failsAfter`, a goal after it in the committed choice context it is
   // in, if any, can fail.
   void Walk(const Body *, const Vars &live, bool failsAfter);
+  void Lambda(const Body *);
+  void Closure(const Body *);
   void Leaf(const Body *);
   // That argument i of a call, `var`, is mostly_unique where its mode
   // wants it unique.
   void CheckArgument(const Body *, const ArgMode &, BodyVar var,
       const std::string &where);
-  void CheckFinal();
+  // Whether a final inst clobbers the value, so that it is not used after.
+  bool Clobbers(const Inst *final) const;
+  // That the head variables `head`, with the final insts `finals`, made
+  // mostly_unique where they are, match their modes' final insts; those
+  // of a lambda expression are named as in mmc.
+  void CheckFinal(llvm::ArrayRef<BodyVar> head, llvm::ArrayRef<ArgMode> modes,
+      llvm::ArrayRef<const Inst *> finals, bool lambda);
   // Whether `inst`, made mostly_unique, matches `expected`, as in mmc.
   bool Matches(const Inst *inst, const Inst *expected, const Type *);
 
@@ -190,6 +198,15 @@ void UniquenessChecker::Walk(
   if (error_) {
     return;
   }
+  if (!committed_ && goal->kind != BodyKind::Not && body_.unseen.count(goal)) {
+    // Only the first solution of a goal with no outputs is wanted, as mmc
+    // infers it so, whatever its determinism, and backtracking into its
+    // parts does not run what follows it again, as for a determinism cast.
+    committed_ = true;
+    Walk(goal, {}, false);
+    committed_ = false;
+    return;
+  }
   Vars before{bound_};
   switch (goal->kind) {
   case BodyKind::Conj: {
@@ -278,7 +295,7 @@ void UniquenessChecker::Walk(
     if (!Reached(condition)) {
       // mmc's mode analysis makes it its else part.
       Walk(otherwise, live, failsAfter);
-      break;
+      return;
     }
     Vars mostly{mostly_}, conditional{conditional_};
     // The condition's variables that the else part uses are needed if
@@ -295,21 +312,22 @@ void UniquenessChecker::Walk(
         conditional_.insert(var);
       }
     }
-    Vars afterCondition{live};
-    const Vars &inThen{Uses(then)};
-    afterCondition.insert(inThen.begin(), inThen.end());
-    Walk(condition, afterCondition, failsAfter || CanFail(then));
-    Walk(then, live, failsAfter);
+    // mmc takes as used after the condition only what the then part uses,
+    // and as used after the then and else parts nothing, and so marks
+    // nothing used after the if-then-else, though backtracking into it
+    // may run that again (see the design document's register).
+    Walk(condition, Uses(then), failsAfter || CanFail(then));
+    Walk(then, {}, failsAfter);
     Vars thenMostly{std::move(mostly_)}, thenBound{std::move(bound_)},
         thenConditional{std::move(conditional_)};
     mostly_ = std::move(mostly);
     bound_ = before;
     conditional_ = std::move(conditional);
-    Walk(otherwise, live, failsAfter);
+    Walk(otherwise, {}, failsAfter);
     mostly_.insert(thenMostly.begin(), thenMostly.end());
     bound_.insert(thenBound.begin(), thenBound.end());
     conditional_.insert(thenConditional.begin(), thenConditional.end());
-    break;
+    return;
   }
   case BodyKind::Not: {
     // The negated goal binds nothing outside it, the variables used after
@@ -331,17 +349,27 @@ void UniquenessChecker::Walk(
     break;
   }
   case BodyKind::Scope:
-    if (goal->promise) {
-      // Only its first solution is wanted.
+    if (goal->promise &&
+        *goal->promise !=
+            parser::PromiseSolutionsKind::EquivalentSolutionSets) {
+      // Only its first solution is wanted, and backtracking into its goal
+      // does not run what follows it again.
       bool committed{committed_};
       committed_ = true;
-      Walk(goal->goals.front(), live, false);
+      Walk(goal->goals.front(), {}, false);
       committed_ = committed;
     } else {
       Walk(goal->goals.front(), live, failsAfter);
     }
     break;
   default:
+    if (goal->lambda) {
+      Lambda(goal);
+    } else if (goal->kind == BodyKind::Unify &&
+        goal->unify == UnifyKind::Construct && goal->modes &&
+        goal->modes->callee) {
+      Closure(goal);
+    }
     Leaf(goal);
     // A call's outputs may be needed by the callee itself to find its next
     // solution.
@@ -354,6 +382,84 @@ void UniquenessChecker::Walk(
   }
   if (CanBacktrackInto(goal, failsAfter)) {
     Mark(live, before);
+  }
+}
+
+// A lambda expression's body, which mmc checks where the closure is made,
+// as a procedure of its own: its head variables are bound as their modes
+// have them, those its modes do not clobber are used after it, and a
+// committed choice one wants only its first solution.
+void UniquenessChecker::Lambda(const Body *goal) {
+  if (!goal->modes) {
+    return;
+  }
+  llvm::ArrayRef<ArgMode> modes{goal->modes->lambda};
+  Vars bound{bound_}, mostly{mostly_}, conditional{conditional_}, live;
+  bool committed{committed_};
+  parser::CharBlock last{last_};
+  for (std::size_t i{0}; i < goal->lambdaHead.size() && i < modes.size();
+       ++i) {
+    if (!ops_.IsFree(modes[i].initial)) {
+      bound_.insert(goal->lambdaHead[i]);
+    }
+    if (!Clobbers(modes[i].final)) {
+      live.insert(goal->lambdaHead[i]);
+    }
+  }
+  parser::Determinism d{goal->modes->determinism};
+  committed_ = d == parser::Determinism::CcMulti ||
+      d == parser::Determinism::CcNondet;
+  Walk(goal->lambda, live, false);
+  if (!error_) {
+    // Mode analysis has checked that its final insts match its modes'.
+    std::vector<const Inst *> finals;
+    for (const ArgMode &mode : modes) {
+      finals.push_back(mode.final);
+    }
+    CheckFinal(goal->lambdaHead, modes, finals, true);
+  }
+  bound_ = std::move(bound);
+  mostly_ = std::move(mostly);
+  conditional_ = std::move(conditional);
+  committed_ = committed;
+  last_ = last;
+}
+
+// A closure made from a predicate's or function's name, which mmc makes
+// a lambda expression whose body calls it: if the callee can succeed more
+// than once, its outputs are needed on backtracking into the call, and so
+// are mostly_unique at the end.
+void UniquenessChecker::Closure(const Body *goal) {
+  const Procedure &callee{*goal->modes->callee};
+  if (callee.determinism != parser::Determinism::Multi &&
+      callee.determinism != parser::Determinism::Nondet) {
+    return;
+  }
+  const Type *type{TypeOf(goal->left)};
+  std::size_t curried{goal->arguments.size()};
+  for (std::size_t i{curried}; i < callee.modes.size() && !error_; ++i) {
+    const Inst *final{callee.modes[i].final};
+    const Inst *inst{insts_.Share(final, Uniqueness::MostlyUnique)};
+    std::size_t k{i - curried};
+    const Type *argument{nullptr};
+    if (type->kind == TypeKind::HigherOrder) {
+      argument =
+          k < type->arguments.size() ? type->arguments[k] : type->result;
+    }
+    if (inst == final || !argument || Matches(inst, final, argument)) {
+      continue;
+    }
+    // mmc: "argument 2 did not get sufficiently instantiated. Final
+    // instantiatedness of `V_9' was `mostly_unique', expected final
+    // instantiatedness was `unique'", of its lambda expression.
+    const char *how{ops_.Matches(final, inst, argument)
+            ? "did not get sufficiently instantiated"
+            : "had the wrong inst"};
+    error_ = {Source(goal->tokens),
+        InClause() + ": mode error: argument " + std::to_string(k + 1) +
+            " of the closure of " + ProcedureToString(callee) + " " + how +
+            ": its final inst is " + InstToString(*inst) + ", but " +
+            InstToString(*final) + " is expected"};
   }
 }
 
@@ -381,6 +487,21 @@ void UniquenessChecker::Leaf(const Body *goal) {
                     : "argument " + std::to_string(i + 1)) +
                 " of the call to " + what);
       }
+    }
+  } else if (goal->kind == BodyKind::HOCall && goal->modes) {
+    llvm::ArrayRef<ArgMode> modes{goal->modes->lambda};
+    bool function{goal->hoCall->kind == parser::PredOrFunc::Function};
+    const char *kind{function ? "function" : "predicate"};
+    for (std::size_t i{0}; i < goal->arguments.size() && i < modes.size() &&
+         !error_;
+         ++i) {
+      bool result{function && i + 1 == goal->arguments.size()};
+      CheckArgument(goal, modes[i], goal->arguments[i],
+          "argument " + std::to_string(i + 2) + " (" +
+              (result ? std::string{"the result of the called function"}
+                      : "argument " + std::to_string(i + 1) +
+                          " of the called " + kind) +
+              ") of the higher-order " + kind + " call");
     }
   } else if (goal->kind == BodyKind::Unify) {
     switch (goal->unify) {
@@ -453,28 +574,27 @@ void UniquenessChecker::CheckArgument(const Body *goal, const ArgMode &mode,
           InstToString(*mode.initial) + " is expected"};
 }
 
-void UniquenessChecker::CheckFinal() {
-  const Procedure &procedure{*body_.procedure};
-  // An inferred procedure's final insts are those its clauses give.
-  if (procedure.inferred) {
-    return;
+bool UniquenessChecker::Clobbers(const Inst *final) const {
+  while (final->kind == InstKind::Defined) {
+    final = insts_.Expand(final);
   }
-  llvm::ArrayRef<ClauseModes> clauses{body_.method
-          ? llvm::ArrayRef<ClauseModes>{body_.method->clauses}
-          : modes_.ClausesOf(procedure)};
-  if (clauses.empty()) {
-    return;
-  }
-  for (std::size_t i{0}; i < body_.head.size() && i < procedure.modes.size() &&
-       i < clauses.front().final.size();
-       ++i) {
-    BodyVar var{body_.head[i]};
+  return (final->kind == InstKind::Ground || final->kind == InstKind::Any) &&
+      (final->uniqueness == Uniqueness::Clobbered ||
+          final->uniqueness == Uniqueness::MostlyClobbered);
+}
+
+void UniquenessChecker::CheckFinal(llvm::ArrayRef<BodyVar> head,
+    llvm::ArrayRef<ArgMode> modes, llvm::ArrayRef<const Inst *> finals,
+    bool lambda) {
+  for (std::size_t i{0};
+       i < head.size() && i < modes.size() && i < finals.size(); ++i) {
+    BodyVar var{head[i]};
     if (!mostly_.count(var)) {
       continue;
     }
-    const Inst *final{clauses.front().final[i]};
+    const Inst *final{finals[i]};
     const Inst *inst{insts_.Share(final, Uniqueness::MostlyUnique)};
-    const Inst *expected{procedure.modes[i].final};
+    const Inst *expected{modes[i].final};
     if (inst == final || Matches(inst, expected, TypeOf(var))) {
       continue;
     }
@@ -484,9 +604,11 @@ void UniquenessChecker::CheckFinal() {
     const char *how{ops_.Matches(expected, inst, TypeOf(var))
             ? "did not get sufficiently instantiated"
             : "had the wrong inst"};
+    std::string name{lambda ? "LambdaHeadVar__" + std::to_string(i + 1)
+                            : Name(var)};
     error_ = {last_,
         InClause() + ": mode error: argument " + std::to_string(i + 1) +
-            ", " + Name(var) + ", " + how + ": its final inst is " +
+            ", " + name + ", " + how + ": its final inst is " +
             InstToString(*inst) + ", but " + InstToString(*expected) +
             " is expected"};
     return;
@@ -507,13 +629,7 @@ UniquenessChecker::Check() {
   Vars live;
   for (std::size_t i{0}; i < body_.head.size() && i < procedure.modes.size();
        ++i) {
-    const Inst *final{procedure.modes[i].final};
-    while (final->kind == InstKind::Defined) {
-      final = insts_.Expand(final);
-    }
-    if (!((final->kind == InstKind::Ground || final->kind == InstKind::Any) &&
-            (final->uniqueness == Uniqueness::Clobbered ||
-                final->uniqueness == Uniqueness::MostlyClobbered))) {
+    if (!Clobbers(procedure.modes[i].final)) {
       live.insert(body_.head[i]);
     }
   }
@@ -524,8 +640,12 @@ UniquenessChecker::Check() {
       (*d == parser::Determinism::CcMulti ||
           *d == parser::Determinism::CcNondet);
   Walk(body_.body, live, false);
-  if (!error_) {
-    CheckFinal();
+  // An inferred procedure's final insts are those its clauses give.
+  llvm::ArrayRef<ClauseModes> clauses{body_.method
+          ? llvm::ArrayRef<ClauseModes>{body_.method->clauses}
+          : modes_.ClausesOf(procedure)};
+  if (!error_ && !procedure.inferred && !clauses.empty()) {
+    CheckFinal(body_.head, procedure.modes, clauses.front().final, false);
   }
   return error_;
 }

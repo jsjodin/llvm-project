@@ -3504,6 +3504,7 @@ ProcedureChecker::Result ProcedureChecker::CheckHigherOrderCall(
   g.unify = UnifyKind::Call;
   g.implied = implied;
   g.determinism = inst->determinism;
+  g.lambda = result_.arena_.SaveArray(llvm::ArrayRef<ArgMode>{modes});
   last_ = Start(call.tokens);
   return Ok();
 }
