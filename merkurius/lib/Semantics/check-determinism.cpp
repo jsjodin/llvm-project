@@ -26,7 +26,9 @@ namespace {
 
 // The goals of a conjunction, or the goal itself.
 std::vector<const Body *> Conjuncts(const Body *goal) {
-  if (goal->kind == BodyKind::Conj) {
+  // A true that keeps the variables of the goals it replaces is one.
+  if (goal->kind == BodyKind::Conj &&
+      !(goal->goals.empty() && !goal->failed.empty())) {
     return goal->goals;
   }
   return {goal};
@@ -59,9 +61,15 @@ bool AllowsOthers(InstOps &ops, const Type *type, const Inst *inst,
   return false;
 }
 
-} // namespace
+// Whether a goal is true, or a conjunction of trues.
+bool IsTrue(const semantics::Goal &goal) {
+  const auto *conj{std::get_if<const Conj *>(&goal)};
+  return conj && !(*conj)->parallel &&
+      llvm::all_of((*conj)->goals,
+          [](const semantics::Goal &g) { return IsTrue(g); });
+}
 
-bool Reached(const Body *goal);
+} // namespace
 
 // Turns the clauses of a procedure, as mode analysis checked them, into
 // its body in mmc's form.
@@ -182,12 +190,36 @@ private:
     return before;
   }
 
+  // Whether mode analysis deleted the goal, a construction of a variable
+  // not used after it, whose variables mmc's quantification still finds,
+  // as for a unification replaced with fail, since mmc quantifies the body
+  // again only after deleting an assignment.
+  bool DeadConstruction(const semantics::Goal &goal) const {
+    const auto *unify{std::get_if<const Unify *>(&goal)};
+    if (!unify || dropped_.count(*unify)) {
+      return false;
+    }
+    const GoalModes &modes{clause_->goals[(*unify)->number]};
+    return modes.dead && modes.unify != UnifyKind::Assign;
+  }
+
   // A goal, or true if it is left out.
   const Body *Whole(const semantics::Goal &goal) {
     if (const Body *out{Goal(goal)}) {
       return out;
     }
     TokenRange tokens{std::visit([](const auto *g) { return g->tokens; }, goal)};
+    // A construction mmc deletes is true, with its variables, which mmc's
+    // quantification still finds, since it does not quantify the body
+    // again after it.
+    if (DeadConstruction(goal)) {
+      Body out{BodyKind::Conj, tokens};
+      unsigned number{(*std::get_if<const Unify *>(&goal))->number};
+      for (VarId var : clause_->clause->clause->nonlocals[number]) {
+        out.failed.push_back(map_[var]);
+      }
+      return New(std::move(out));
+    }
     return New(Body{BodyKind::Conj, tokens});
   }
 
@@ -249,6 +281,9 @@ private:
                 }
                 const Body *goal{Goal(inner)};
                 if (!goal) {
+                  if (DeadConstruction(inner)) {
+                    drop(inner);
+                  }
                   continue;
                 }
                 for (const Body *g : Conjuncts(goal)) {
@@ -259,6 +294,8 @@ private:
                 Body last{*conj.goals.back()};
                 llvm::append_range(last.failed, dropped);
                 conj.goals.back() = New(std::move(last));
+              } else if (!dropped.empty()) {
+                conj.failed = std::move(dropped);
               }
               if (conj.goals.size() == 1) {
                 return conj.goals.front();
@@ -299,6 +336,11 @@ private:
               return New(std::move(out));
             },
             [&](const Not *negation) {
+              // mmc takes the negation of true, or of a conjunction of
+              // trues, as fail.
+              if (IsTrue(negation->goal)) {
+                return New(Body{BodyKind::Disj, tokens, &modes});
+              }
               Body out{BodyKind::Not, tokens, &modes};
               out.goals = {Whole(negation->goal)};
               return New(std::move(out));
@@ -361,6 +403,7 @@ private:
               for (VarId var : call->arguments) {
                 out.arguments.push_back(map_[var]);
               }
+              out.entry = Before(number);
               return New(std::move(out));
             },
             [&](const HOCall *call) {
@@ -370,6 +413,7 @@ private:
               for (VarId var : call->arguments) {
                 out.arguments.push_back(map_[var]);
               }
+              out.entry = Before(number);
               return New(std::move(out));
             },
             [&](const auto *) -> const Body * { return nullptr; },
@@ -395,6 +439,9 @@ private:
     out.functor = modes.functor;
     for (VarId var : unify.arguments) {
       out.arguments.push_back(map_[var]);
+    }
+    if (modes.unify == UnifyKind::Call) {
+      out.entry = Before(unify.number);
     }
     if (const Lambda *lambda{unify.functor.lambda}) {
       out.lambda = Whole(lambda->body);
@@ -508,6 +555,13 @@ private:
     return New(std::move(conj));
   }
 
+  // A conjunction with its goals rebuilt; a true, which may keep the
+  // variables of the goals it replaces, as it is.
+  const Body *Rebuilt(
+      const Body *goal, const std::vector<const Body *> &goals) {
+    return goal->goals.empty() ? goal : Conj(goal->tokens, goals);
+  }
+
   // A copy of a compound goal with other goals.
   const Body *With(const Body *goal, std::vector<const Body *> goals) {
     Body copy{*goal};
@@ -549,7 +603,7 @@ private:
         goals.push_back(Detect(g));
       }
       if (goal->kind == BodyKind::Conj) {
-        return Conj(goal->tokens, goals);
+        return Rebuilt(goal, goals);
       }
       return With(goal, std::move(goals));
     }
@@ -994,7 +1048,7 @@ private:
         goals.push_back(Eliminate(g));
       }
       if (goal->kind == BodyKind::Conj) {
-        return Conj(goal->tokens, goals);
+        return Rebuilt(goal, goals);
       }
       return With(goal, std::move(goals));
     }
@@ -1153,7 +1207,7 @@ private:
     if (goals.empty()) {
       return New(Body{BodyKind::Conj, goal->tokens});
     }
-    return Conj(goal->tokens, goals);
+    return Rebuilt(goal, goals);
   }
 
   // As mmc's mode analysis again after common subexpression elimination,
@@ -1643,6 +1697,13 @@ private:
       return;
     }
     auto add{[&](BodyVar var) { ++counts[var]; }};
+    // Those of the goals deleted or replaced with fail, until mmc
+    // quantifies the body again.
+    if (!body_.rechecked && !body_.requantified) {
+      for (BodyVar var : Sorted(goal->failed)) {
+        add(var);
+      }
+    }
     switch (goal->kind) {
     case BodyKind::Unify:
       add(goal->left);
@@ -1787,9 +1848,6 @@ private:
       if (!body_.rechecked && !body_.requantified) {
         for (const Body *g : goal->goals) {
           failed_.insert(g->failed.begin(), g->failed.end());
-          for (BodyVar var : Sorted(g->failed)) {
-            ++in[var];
-          }
         }
       }
       // mmc's mode analysis deletes a construction or an assignment of a
@@ -2164,8 +2222,12 @@ private:
       return;
     }
     // Inside a goal whose solutions are the same to the rest, more than
-    // one is allowed.
-    Solutions inner{pruned_.count(goal) ? Solutions::Many : most};
+    // one is allowed, and so inside one that has no more than allowed, as
+    // after a goal that cannot succeed, as in mmc; but where none is
+    // allowed, the goals that can succeed are still why.
+    Solutions inner{pruned_.count(goal) || (!many && most != Solutions::Zero)
+            ? Solutions::Many
+            : most};
     auto cause{[&](std::string text) {
       causes.push_back({goal->tokens, context + text});
     }};
@@ -2197,8 +2259,13 @@ private:
       cause(std::string{"the higher-order call "} + Beyond(fails, many, most));
       return;
     case BodyKind::Conj:
+      // Not the goals after one whose end mode analysis does not reach, as
+      // in mmc.
       for (const Body *g : goal->goals) {
         Diagnose(g, canFail, inner, context, causes);
+        if (!Reached(g)) {
+          break;
+        }
       }
       return;
     case BodyKind::Disj: {
@@ -2459,6 +2526,41 @@ private:
     return !context.first;
   }
 
+  // The goals in a goal that can fail, as mmc records them, which are the
+  // reasons a committed choice call before it is in a context that
+  // requires all solutions: a goal that can fail, or else those in the
+  // branches of a disjunction, a switch or an if-then-else, though not in
+  // its condition, or in a scope, even when it cannot fail.
+  void Failing(const Body *goal, std::vector<const Body *> &out) {
+    if (!body_.goals.count(goal)) {
+      return;
+    }
+    if (Seen(goal).canFail) {
+      out.push_back(goal);
+      return;
+    }
+    switch (goal->kind) {
+    case BodyKind::Conj:
+    case BodyKind::Disj:
+    case BodyKind::Scope:
+      for (const Body *g : goal->goals) {
+        Failing(g, out);
+      }
+      return;
+    case BodyKind::Switch:
+      for (const SwitchCase &c : goal->cases) {
+        Failing(c.goal, out);
+      }
+      return;
+    case BodyKind::IfThenElse:
+      Failing(goal->goals[1], out);
+      Failing(goal->goals[2], out);
+      return;
+    default:
+      return;
+    }
+  }
+
   bool ContextsIn(const Body *goal, const Context &context) {
     auto committed{[&](parser::Determinism determinism, std::string what) {
       if (context.first || !IsCommittedChoice(determinism)) {
@@ -2500,9 +2602,9 @@ private:
       Context inner{context};
       for (const Body *g : llvm::reverse(goal->goals)) {
         loose |= Contexts(g, inner);
+        Failing(g, inner.failing);
         if (Seen(g).canFail) {
           inner.first = false;
-          inner.failing.push_back(g);
         } else if (!Reached(g)) {
           // Nothing after an erroneous goal asks for another solution, as
           // mmc has it, where mode analysis finds it is: by declared
@@ -2521,9 +2623,9 @@ private:
     }
     case BodyKind::IfThenElse: {
       Context condition{context};
+      Failing(goal->goals[1], condition.failing);
       if (Seen(goal->goals[1]).canFail) {
         condition.first = false;
-        condition.failing.push_back(goal->goals[1]);
       }
       bool loose{Contexts(goal->goals[0], condition)};
       loose |= Contexts(goal->goals[1], context);
@@ -2656,11 +2758,8 @@ private:
 
 std::unique_ptr<DeterminismChecking> CheckDeterminism(
     const parser::TokenSequence &tokens, TypeChecking &types,
-    ModeChecking &modes, parser::Messages &messages) {
+    ModeChecking &modes, parser::Messages &messages, bool analyse) {
   auto result{std::make_unique<DeterminismChecking>()};
-  // As mmc, which stops after mode analysis if it finds errors, so that
-  // its determinism errors do not follow from them.
-  bool analyse{!messages.AnyFatalError()};
   auto analyseBody{[&](ProcedureBody &body, parser::Messages &messages) {
     body.goals.clear();
     body.determinism.reset();
@@ -2703,7 +2802,18 @@ std::unique_ptr<DeterminismChecking> CheckDeterminism(
   // manual says det (see the register). Each step is joined with the last,
   // so that the fixpoint is reached in at most three steps per procedure.
   // A procedure that calls one with none, and so has none, takes its
-  // callers' away in turn.
+  // callers' away in turn. One with a mode error is not analysed, and so
+  // stays erroneous, as in mmc.
+  for (const Procedure &procedure : modes.procedures()) {
+    if (!procedure.determinism && modes.HasError(procedure)) {
+      result->inferred_[&procedure] = parser::Determinism::Erroneous;
+    }
+  }
+  for (const Procedure &procedure : modes.inferred()) {
+    if (!procedure.determinism && modes.HasError(procedure)) {
+      result->inferred_[&procedure] = parser::Determinism::Erroneous;
+    }
+  }
   std::vector<ProcedureBody *> undeclared;
   for (ProcedureBody &body : result->bodies_) {
     if (!body.method && !body.procedure->determinism) {

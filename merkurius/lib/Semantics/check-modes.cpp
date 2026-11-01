@@ -2110,13 +2110,24 @@ ProcedureChecker::Result ProcedureChecker::Negation(const Goal &goal,
       locks_[var] = Lock::Negation;
     }
   }
+  // Nothing after it is run if the negated goal succeeds, so nothing is
+  // used after that goal but by its own goals, as in mmc, which takes it
+  // as `if G then fail else true`; the values used after the negation are
+  // needed on backtracking, which uniqueness checking sees to.
   InstMap inner{map};
-  Result r{Check(negation.goal, inner, live)};
+  Result r{Check(negation.goal, inner, Live(live.size(), false))};
   locks_ = std::move(locks);
   if (r.outcome == Outcome::Ok) {
     if (std::optional<Result> error{AnyInNegatedContext(goal,
             form_->nonlocals[negation.number], map, "negation", "body")}) {
       return *error;
+    }
+    // mmc takes the negation of true, or of a conjunction of trues, as
+    // fail, and so nothing after it is reached.
+    std::vector<Goal> goals;
+    Flatten(negation.goal, goals);
+    if (goals.empty()) {
+      map.assign(map.size(), insts_.NotReached());
     }
   }
   return r;

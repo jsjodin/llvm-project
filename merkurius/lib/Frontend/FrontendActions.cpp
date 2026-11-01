@@ -17,6 +17,7 @@
 #include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/unparse.h"
 #include "merkurius/Semantics/check-determinism.h"
+#include "merkurius/Semantics/check-uniqueness.h"
 #include "merkurius/Semantics/check-modes.h"
 #include "merkurius/Semantics/check-purity.h"
 #include "merkurius/Semantics/check-types.h"
@@ -620,10 +621,13 @@ bool DebugDumpDeterminismAction::executeAction() {
   semantics::ModeCheckOptions options;
   options.inferModes = frontend.inferModes;
   options.inferenceIterationLimit = frontend.modeInferenceIterationLimit;
+  bool earlier{r.messages.AnyFatalError()};
   std::unique_ptr<semantics::ModeChecking> modes{semantics::CheckModes(*r.tree,
       r.tokens, *r.form, *r.resolution, *types, r.messages, options)};
   std::unique_ptr<semantics::DeterminismChecking> determinism{
-      semantics::CheckDeterminism(r.tokens, *types, *modes, r.messages)};
+      semantics::CheckDeterminism(
+          r.tokens, *types, *modes, r.messages, !earlier)};
+  semantics::CheckUniqueness(r.tokens, *modes, *determinism, r.messages);
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   llvm::raw_ostream *os{ci.createDefaultOutputFile()};
   if (!os) {

@@ -1,0 +1,13 @@
+# Random modules whose predicates thread a unique value through updates
+# that clobber it or keep it for backtracking, constructions, assignments
+# and calls of each other, between goals that can succeed more than once
+# or fail: calls of each determinism, disjunctions, if-then-elses,
+# negations and promise_equivalent_solutions scopes, with random modes and
+# determinisms, some inferred (generate-unique-programs.py). merkc must
+# infer the determinisms that mmc does, and report the unique values
+# needed on backtracking, and its other errors, at the same lines.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-unique-programs.py --seed 6 --count 40 %t
+# RUN: %compare-switches --determinism %t/*.m
