@@ -130,12 +130,12 @@ struct Body {
   std::vector<SwitchCase> cases;
 };
 
-// Why a procedure's determinism is not inferred yet: it calls one whose
-// determinism is to be inferred, or it has a scope that requires or
-// promises a determinism.
-ENUM_CLASS(DeterminismUnchecked, None, InferredCallee)
-
 // A procedure's body, or an instance method's in one of its modes.
+// Why a procedure's determinism is not inferred: it calls one that has no
+// declared determinism and whose modes were not checked, so that none can
+// be inferred for it either.
+ENUM_CLASS(DeterminismUnchecked, None, UncheckedCallee)
+
 struct ProcedureBody {
   const Procedure *procedure{nullptr};
   const MethodModes *method{nullptr};
@@ -152,7 +152,7 @@ struct ProcedureBody {
   // it replaced with fail.
   bool requantified{false};
   // The determinism inferred for the body, and for each of its goals; none
-  // if `unchecked`.
+  // if mode analysis found errors, or if `unchecked`.
   std::optional<parser::Determinism> determinism;
   llvm::DenseMap<const Body *, parser::Determinism> goals;
   DeterminismUnchecked unchecked{DeterminismUnchecked::None};
@@ -167,6 +167,16 @@ public:
   const ProcedureBody *BodyOf(const Procedure &procedure) const {
     return byProcedure_.lookup(&procedure);
   }
+  // A procedure's declared determinism, or else the one inferred for it.
+  std::optional<parser::Determinism> DeterminismOf(
+      const Procedure &procedure) const {
+    if (procedure.determinism) {
+      return procedure.determinism;
+    }
+    auto it{inferred_.find(&procedure)};
+    return it == inferred_.end() ? std::nullopt
+                                 : std::make_optional(it->second);
+  }
 
 private:
   friend class BodyBuilder;
@@ -178,6 +188,8 @@ private:
   std::deque<Body> nodes_;
   std::deque<ProcedureBody> bodies_;
   llvm::DenseMap<const Procedure *, const ProcedureBody *> byProcedure_;
+  // The determinisms inferred for the procedures declared without one.
+  std::map<const Procedure *, parser::Determinism> inferred_;
 };
 
 // Prints a procedure's body, each goal with its position and its

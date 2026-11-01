@@ -117,7 +117,7 @@ struct ClauseModes {
 // does not check yet, or their predicate has errors of other kinds.
 ENUM_CLASS(Unchecked, None, TypeErrors, ModeSpecificClauses,
     ParallelConjunction, FieldClosure, Scope, Try, Atomic,
-    InstParameters, InferredModes, InferredDeterminism)
+    InstParameters, InferredModes)
 
 // An instance method's clauses, as checked in one of the method's modes.
 struct MethodModes {
