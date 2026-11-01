@@ -42,9 +42,11 @@ struct ModuleInterface {
 class ModuleLoader {
 public:
   // Messages about the imported files go to `messages`; the library's
-  // directory is searched after the search path of `sources`.
+  // directory is searched after the search path of `sources`, and with
+  // `sound`, its sound/ directory before it, which has the sound stubs of
+  // modules whose manual's declarations work around mmc's unique modes.
   ModuleLoader(parser::AllSources &sources, std::string libraryDirectory,
-      parser::Messages &messages);
+      parser::Messages &messages, bool sound = false);
   ~ModuleLoader();
 
   // The interface of the module named `name`, loaded once, with the
@@ -79,6 +81,7 @@ private:
   parser::AllSources &sources_;
   std::string libraryDirectory_;
   parser::Messages &messages_;
+  bool sound_;
   std::vector<std::unique_ptr<File>> files_;
   llvm::StringMap<ModuleInterface *> loaded_;
   std::vector<const ModuleInterface *> order_;

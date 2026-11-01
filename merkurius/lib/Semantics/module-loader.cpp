@@ -50,9 +50,9 @@ std::string Directory(const parser::SourceFile &file) {
 } // namespace
 
 ModuleLoader::ModuleLoader(parser::AllSources &sources,
-    std::string libraryDirectory, parser::Messages &messages)
+    std::string libraryDirectory, parser::Messages &messages, bool sound)
     : sources_{sources}, libraryDirectory_{std::move(libraryDirectory)},
-      messages_{messages} {}
+      messages_{messages}, sound_{sound} {}
 
 ModuleLoader::~ModuleLoader() = default;
 
@@ -68,6 +68,11 @@ const ModuleInterface *ModuleLoader::Load(
     path.push_back(dir);
   }
   if (!libraryDirectory_.empty()) {
+    if (sound_) {
+      llvm::SmallString<256> sound{libraryDirectory_};
+      llvm::sys::path::append(sound, "sound");
+      path.push_back(std::string{sound});
+    }
     path.push_back(libraryDirectory_);
   }
   std::string fileName{name.str() + ".m"};

@@ -15,8 +15,8 @@ so the declarations are kept as the manual gives them.
 
 What the stubs leave out:
 
-- Declarations that need modules not stubbed yet, such as `array`,
-  `pretty_printer`, `enum` and `stream`.
+- Declarations that need modules not stubbed yet, such as
+  `pretty_printer`, `random`, `enum` and `stream`.
 - In `list`, `io` and `string`, all but the commonly used predicates and
   functions.
 - The `stm_builtin` module, which mmc provides for atomic goals and which
@@ -24,3 +24,16 @@ What the stubs leave out:
 
 The build copies the modules to `lib/merkurius` beside `bin/merkc`, where
 merkc looks for them; `-library-dir` names another directory.
+
+## Sound stubs
+
+The manual's `array` module works around mmc's missing unique-input
+modes: its unique array insts are `ground`, as its own comments say, so
+mmc checks no array's uniqueness, and the predicates that read an array
+take it `in`. `make-sound-array.py` makes a sound stub from `array.m`, in
+`lib/merkurius/sound`, with the insts the manual's comments give
+(`uniq_array(I) == unique`), and with each mode that takes arrays `in`
+preceded by copies that take them `array_ui`, so that reading a unique
+array keeps it unique. merkc searches `sound` before the library's own
+directory unless `-fmmc-uniqueness` is given. Edit `array.m`, never the
+generated stub.
