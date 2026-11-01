@@ -905,8 +905,12 @@ private:
         return pulled;
       }
       Body copy{*goal};
+      bool added{switching_.insert(goal->switchVar).second};
       for (SwitchCase &c : copy.cases) {
         c.goal = Eliminate(c.goal);
+      }
+      if (added) {
+        switching_.erase(goal->switchVar);
       }
       return New(std::move(copy));
     }
@@ -979,7 +983,9 @@ private:
       Body pulled{*first};
       pulled.left = var;
       pulled.switchTest = false;
-      pulled.canFail = CanFail(var, {first->functor}, disj->entry);
+      // In a case of a switch on the variable, it cannot fail.
+      pulled.canFail = !switching_.count(var) &&
+          CanFail(var, {first->functor}, disj->entry);
       pulled.arguments.clear();
       Entry entry{disj->entry};
       for (std::size_t i{0}; i < first->arguments.size(); ++i) {
@@ -1017,7 +1023,7 @@ private:
   // The first deconstruction of a variable in `aliases`, or of one unified
   // with them, in a disjunct's goals after only unifications and goals in
   // `some` scopes, as Scan finds it.
-  static const Body *FirstTest(
+  const Body *FirstTest(
       const std::vector<const Body *> &goals, std::set<BodyVar> aliases) {
     for (const Body *goal : goals) {
       if (goal->kind == BodyKind::Scope && goal->scope == ScopeKind::Some) {
@@ -1031,8 +1037,10 @@ private:
         return nullptr;
       }
       // A test of a switch's variable in its case against a constant is
-      // true in mmc.
-      if (goal->switchTest && goal->arguments.empty()) {
+      // true in mmc; one through a variable unified with it is kept, and
+      // can be moved out.
+      if (goal->switchTest && goal->arguments.empty() &&
+          switching_.count(goal->left)) {
         continue;
       }
       if (goal->isVar) {
@@ -1234,10 +1242,13 @@ private:
       Uses(goal, live);
       return goal;
     case BodyKind::Conj: {
+      // A conjunction in it, as a disjunction left with one branch, is
+      // part of it, as in mmc.
       std::vector<const Body *> goals;
       for (const Body *g : llvm::reverse(goal->goals)) {
         if (const Body *kept{Simplify(g, live)}) {
-          goals.insert(goals.begin(), kept);
+          std::vector<const Body *> parts{Conjuncts(kept)};
+          goals.insert(goals.begin(), parts.begin(), parts.end());
         }
       }
       if (goals.size() == 1) {
@@ -1362,7 +1373,7 @@ private:
   std::map<BodyVar, InstFunctor> cased_;
   // The goals after a disjunction of tests, from Tests.
   std::set<const Body *> merged_;
-  // The variables of the switches that Simplify is in.
+  // The variables of the switches that Simplify or Eliminate is in.
   std::set<BodyVar> switching_;
 };
 
