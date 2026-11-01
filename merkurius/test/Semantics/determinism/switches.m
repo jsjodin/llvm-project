@@ -39,6 +39,8 @@
 :- pred fail_clause(t::in, t::in(ab), int::out) is nondet.
 :- pred scope_alias(list(int)::in, int::out) is nondet.
 :- pred deleted is det.
+:- pred alias_common(int::in, int::out) is semidet.
+:- pred one_left(t::in, t::in, int::out) is semidet.
 
 :- implementation.
 :- import_module int.
@@ -257,3 +259,30 @@ deleted :- _X = 2.
 
 % CHECK-LABEL: pred switches.deleted/0 mode 0:
 % CHECK-NEXT:  {{[0-9]+}}:{{[0-9]+}} true
+
+% In the case 0 of the switch on X, the two disjuncts test X through
+% Z and V, which mmc keeps, and moves out of the disjunction as a test of
+% X. With X known then, X = 2 cannot succeed, and the disjunct is fail and
+% deleted.
+alias_common(X, Y) :- ( Z = X, Z = 0, Y = 1 ; V = X, V = 0, X = 2, Y = 2 ;
+  X = 3, Y = 3 ).
+
+% CHECK-LABEL: pred switches.alias_common/2 mode 0:
+% CHECK-NEXT:  switch on X, can fail [semidet]
+% CHECK-NEXT:    case 0
+% CHECK-NEXT:      deconstruct X = 0 [det]
+% CHECK-NEXT:      construct Y = 1 [det]
+% CHECK-NEXT:    case 3
+% CHECK-NEXT:      construct Y = 3 [det]
+
+% After the deconstruction of HeadVar__1 is moved out, the branch that
+% cannot succeed is deleted, and the disjunction left with one branch is
+% part of the first clause's conjunction, which tests HeadVar__2 then.
+one_left(c(0), W, Y) :- ( W = d(_, _), Y = 0 ; M = 2, M = 1, Y = M ).
+one_left(c(_), c(K), K).
+
+% CHECK-LABEL: pred switches.one_left/3 mode 0:
+% CHECK-NEXT:  deconstruct HeadVar__1 = switches.c/1
+% CHECK-NEXT:  switch on HeadVar__2, can fail [semidet]
+% CHECK-NEXT:    case switches.c/1
+% CHECK:         case switches.d/2
