@@ -7,7 +7,10 @@
 # own -max_total_time counts from its start, so the fuzzer runs without
 # it and is stopped SECONDS after its first job reports. It runs in its own
 # process group, which is sent SIGTERM, since in fork mode it ignores
-# SIGINT and its jobs outlive it.
+# SIGINT and its jobs outlive it, and then SIGKILL for a job it started as
+# it stopped. Stopped so, the fuzzer may exit with 72 ("run interrupted")
+# or 1, if a job ended as it stopped; the run fails only if it wrote a
+# crash, leak, timeout or out-of-memory artifact.
 #
 # The sources compile in parallel through a generated ninja file, and only
 # those that changed since the last run are recompiled. The fuzzer runs in
@@ -17,7 +20,10 @@
 # The corpus, crashes, the log and the fuzzer itself live in
 # $BUILD_DIR/fuzz/term. The corpus is seeded with the Mercury files in the
 # tests. Inputs that crash are written there as artifacts/crash-*; add them
-# to test/Parser/Inputs/fuzz once fixed. The log is fuzz.log.
+# to test/Parser/Inputs/fuzz once fixed. Those that take more than 10
+# seconds are written as artifacts/slow-unit-* and listed at the end, but
+# do not fail the run: the instrumented fuzzer is tens of times slower than
+# merkc, so time them with merkc. The log is fuzz.log.
 #
 # Usage: utils/fuzz/run-term-fuzzer.sh [SECONDS] [JOBS]
 
@@ -87,11 +93,20 @@ if kill -0 "$FUZZER" 2>/dev/null; then
 fi
 STATUS=0
 wait "$FUZZER" || STATUS=$?
-# Stopped by SIGTERM, libFuzzer exits with 72 ("run interrupted").
-if $STOPPED && ((STATUS == 72)); then
+sleep 1
+kill -KILL -- "-$FUZZER" 2>/dev/null || true
+if $STOPPED; then
   STATUS=0
 fi
-sleep 1
+SLOW=$(ls artifacts | grep '^slow-unit-' || true)
+if [[ -n "$SLOW" ]]; then
+  echo "INFO: slow inputs:" $SLOW | tee -a fuzz.log
+fi
+FAILED=$(ls artifacts | grep -E '^(crash|leak|timeout|oom)-' || true)
+if [[ -n "$FAILED" ]]; then
+  echo "INFO: artifacts written:" $FAILED | tee -a fuzz.log
+  STATUS=1
+fi
 echo "INFO: fuzzed for $((SECONDS - START)) seconds after loading the corpus;" \
   "exit status $STATUS" | tee -a fuzz.log
 exit "$STATUS"
