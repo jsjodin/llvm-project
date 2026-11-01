@@ -2014,7 +2014,6 @@ ProcedureChecker::Result ProcedureChecker::CheckGoal(
           [&](const Scope *scope) -> Result {
             switch (scope->kind) {
             case ScopeKind::Trace:
-            case ScopeKind::PromiseSolutions:
               return Unsupported(Unchecked::Scope);
             case ScopeKind::PromisePurity: {
               ++promised_;

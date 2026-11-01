@@ -105,8 +105,16 @@ struct Body {
   // then part and else part; the goal of a negation or a scope.
   std::vector<const Body *> goals;
   ScopeKind scope{ScopeKind::Some};
-  // For a disjunction, and a switch: the insts before it of the variables
-  // bound outside it that it uses.
+  // For a fail that replaces a unification that cannot succeed, the
+  // unification's variables, which mmc's quantification still finds in it
+  // until it quantifies the body again (ProcedureBody::requantified,
+  // ProcedureBody::rechecked).
+  std::vector<BodyVar> failed;
+  // For a determinism cast, its kind and the variables it lists.
+  std::optional<parser::PromiseSolutionsKind> promise;
+  std::vector<BodyVar> promised;
+  // For a disjunction, a switch and a determinism cast: the insts before
+  // it of the variables bound outside it that it uses.
   std::vector<std::pair<BodyVar, const Inst *>> entry;
   // For a switch: its variable, whether it can fail because its cases
   // leave out functors the variable may have, and its cases, by functor.
@@ -134,6 +142,10 @@ struct ProcedureBody {
   // switch's variable in each case, and of a variable after a
   // deconstruction or an assignment from one known.
   bool rechecked{false};
+  // Whether mode analysis deleted an assignment, after which mmc
+  // quantifies the body again, without the variables of the unifications
+  // it replaced with fail.
+  bool requantified{false};
   // The determinism inferred for the body, and for each of its goals; none
   // if `unchecked`.
   std::optional<parser::Determinism> determinism;

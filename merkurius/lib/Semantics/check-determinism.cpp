@@ -274,6 +274,15 @@ private:
             [&](const Scope *scope) {
               Body out{BodyKind::Scope, tokens, &modes};
               out.scope = scope->kind;
+              if (scope->kind == ScopeKind::PromiseSolutions) {
+                const parser::Goal &origin{std::get<parser::Goal>(scope->origin)};
+                out.promise = std::get<const parser::PromiseSolutions *>(
+                    origin)->kind;
+                for (VarId var : scope->vars) {
+                  out.promised.push_back(map_[var]);
+                }
+                out.entry = Before(number);
+              }
               out.goals = {Whole(scope->goal)};
               return New(std::move(out));
             },
@@ -281,11 +290,25 @@ private:
               // As in mmc, which deletes a construction or assignment of a
               // variable not used after it, and replaces a unification
               // that cannot succeed with fail.
-              if (dropped_.count(unify) || modes.dead) {
+              if (dropped_.count(unify)) {
+                return nullptr;
+              }
+              if (modes.dead) {
+                if (modes.unify == UnifyKind::Assign) {
+                  out_.requantified = true;
+                }
                 return nullptr;
               }
               if (modes.fails) {
-                return New(Body{BodyKind::Disj, tokens, &modes});
+                Body out{BodyKind::Disj, tokens, &modes};
+                out.failed.push_back(map_[unify->left]);
+                if (unify->isVar) {
+                  out.failed.push_back(map_[unify->var]);
+                }
+                for (VarId var : unify->arguments) {
+                  out.failed.push_back(map_[var]);
+                }
+                return New(std::move(out));
               }
               return Unification(*unify, modes, tokens);
             },
@@ -748,7 +771,7 @@ private:
 
   // Looks for a test of `var`, or of a variable unified with it, against a
   // functor, in a disjunct's goals, preceded only by unifications, and
-  // goals in `some` scopes, as in mmc. A disjunction may come before it if
+  // goals in scopes, as in mmc. A disjunction may come before it if
   // each of its branches, followed by the goals after it, has such a test;
   // the disjunct is then split, one for each test, with those goals in
   // each (reference manual, "Switches"). None if a goal of another kind
@@ -756,7 +779,7 @@ private:
   // be unified with `var` in `aliases`.
   std::optional<Found> Scan(std::vector<const Body *> goals, BodyVar var,
       std::set<BodyVar> aliases, bool split, std::set<BodyVar> *out = nullptr) {
-    // The aliases not made in a `some` scope, which are the only ones a
+    // The aliases not made in a scope, which are the only ones a
     // disjunction is split on in mmc.
     std::set<BodyVar> unscoped{aliases};
     for (std::size_t i{0}; i < goals.size(); ++i) {
@@ -795,9 +818,7 @@ private:
         }
         return std::nullopt;
       case BodyKind::Scope: {
-        if (goal->scope != ScopeKind::Some) {
-          return std::nullopt;
-        }
+        // mmc looks into every scope, as a promise or a trace goal.
         std::set<BodyVar> inner;
         std::optional<Found> found{
             Scan(Conjuncts(goal->goals.front()), var, aliases, false, &inner)};
@@ -1022,19 +1043,25 @@ private:
 
   // The first deconstruction of a variable in `aliases`, or of one unified
   // with them, in a disjunct's goals after only unifications and goals in
-  // `some` scopes, as Scan finds it.
-  const Body *FirstTest(
-      const std::vector<const Body *> &goals, std::set<BodyVar> aliases) {
+  // scopes, as Scan finds it; `stopped` is set if a goal of another kind
+  // comes first.
+  const Body *FirstTest(const std::vector<const Body *> &goals,
+      std::set<BodyVar> aliases, bool *stopped = nullptr) {
     for (const Body *goal : goals) {
-      if (goal->kind == BodyKind::Scope && goal->scope == ScopeKind::Some) {
-        if (const Body *test{FirstTest(Conjuncts(goal->goals.front()), aliases)}) {
+      if (goal->kind == BodyKind::Scope) {
+        bool inner{false};
+        if (const Body *test{
+                FirstTest(Conjuncts(goal->goals.front()), aliases, &inner)}) {
           return test;
+        }
+        if (inner) {
+          return Stop(stopped);
         }
         // The aliases it makes are local to it but still aliases.
         continue;
       }
       if (goal->kind != BodyKind::Unify || goal->unify == UnifyKind::Call) {
-        return nullptr;
+        return Stop(stopped);
       }
       // A test of a switch's variable in its case against a constant is
       // true in mmc; one through a variable unified with it is kept, and
@@ -1052,6 +1079,12 @@ private:
           aliases.count(goal->left)) {
         return goal;
       }
+    }
+    return nullptr;
+  }
+  static const Body *Stop(bool *stopped) {
+    if (stopped) {
+      *stopped = true;
     }
     return nullptr;
   }
@@ -1666,6 +1699,32 @@ private:
           ++in[var];
         }
       }
+      // The variables of the unifications replaced with fail are still
+      // used, in the other conjuncts and outside a determinism cast in
+      // them, until mmc quantifies the body again.
+      std::set<BodyVar> failed{failed_};
+      if (!body_.rechecked && !body_.requantified) {
+        for (const Body *g : goal->goals) {
+          failed_.insert(g->failed.begin(), g->failed.end());
+          for (BodyVar var : Sorted(g->failed)) {
+            ++in[var];
+          }
+        }
+      }
+      // mmc's mode analysis deletes a construction or an assignment of a
+      // variable that is not used after it, so the variables it uses are
+      // not used there.
+      for (const Body *g : goal->goals) {
+        if (g->kind == BodyKind::Unify &&
+            (g->unify == UnifyKind::Construct || g->unify == UnifyKind::Assign) &&
+            in[g->left] == 1 && !outside.count(g->left)) {
+          for (BodyVar var : Vars(g)) {
+            if (var != g->left) {
+              --in[var];
+            }
+          }
+        }
+      }
       for (const Body *g : goal->goals) {
         std::set<BodyVar> used{outside};
         for (BodyVar var : Vars(g)) {
@@ -1677,6 +1736,7 @@ private:
         r.d = Conjunction(r.d, i.d);
         r.impure |= i.impure;
       }
+      failed_ = std::move(failed);
       return r;
     }
     case BodyKind::Disj: {
@@ -1753,9 +1813,11 @@ private:
       }
     }
     case BodyKind::Scope:
+      if (goal->promise) {
+        return Cast(goal, bound, outside);
+      }
       if (goal->scope == ScopeKind::RequireDeterminism ||
-          goal->scope == ScopeKind::RequireSwitch ||
-          goal->scope == ScopeKind::PromiseSolutions) {
+          goal->scope == ScopeKind::RequireSwitch) {
         Unchecked(DeterminismUnchecked::Requirement);
       }
       return Infer(goal->goals.front(), bound, outside);
@@ -1826,12 +1888,180 @@ private:
     std::map<BodyVar, InstFunctor> saved_;
   };
 
+  // A determinism cast (reference manual, "Goals"): promise_equivalent_
+  // solutions and arbitrary succeed at most once where their goal can
+  // succeed more than once; promise_equivalent_solution_sets is as its
+  // goal, and the arbitrary scopes in it are the casts. Each lists the
+  // variables its goal binds, those with free parts before it that are
+  // used outside it, as mmc's quantification finds them after mode
+  // analysis, none if its end is not reached; mmc reports those not listed, then those
+  // listed but not bound, in the order of the variables. An arbitrary
+  // scope must be in a promise_equivalent_solution_sets scope, outside
+  // lambda expressions, without its variables, and that scope must not
+  // be in another; mmc casts it all the same.
+  Inferred Cast(const Body *goal, std::set<BodyVar> &bound,
+      const std::set<BodyVar> &outside) {
+    using Kind = parser::PromiseSolutionsKind;
+    Kind kind{*goal->promise};
+    const Body *outer{sets_.empty() ? nullptr : sets_.back()};
+    // A scope copied by switch detection is checked once.
+    bool check{checked_.insert(goal->tokens.first).second};
+    if (check && kind == Kind::Arbitrary) {
+      if (!outer) {
+        // mmc: "Error: this `arbitrary' scope is not nested inside a
+        // `promise_equivalent_solution_sets' scope."
+        messages_.Say(Where(goal->tokens),
+            "this arbitrary scope is not nested inside a promise_equivalent_solution_sets scope"_err_en_US);
+      } else {
+        std::vector<BodyVar> both;
+        for (BodyVar var : Sorted(goal->promised)) {
+          if (llvm::is_contained(outer->promised, var)) {
+            both.push_back(var);
+          }
+        }
+        if (!both.empty()) {
+          // mmc: "Error: this `arbitrary' scope and the
+          // `promise_equivalent_solution_sets' scope it is nested inside
+          // overlap on the variable X. This is the outer
+          // `promise_equivalent_solution_sets' scope."
+          messages_
+              .Say(Where(goal->tokens),
+                  "this arbitrary scope and the promise_equivalent_solution_sets scope it is nested inside overlap on %s"_err_en_US,
+                  both.size() == 1 ? "the variable " + Name(both.front())
+                                   : "the following variables: " + Names(both))
+              .Attach(Where(outer->tokens),
+                  "this is the outer promise_equivalent_solution_sets scope"_en_US);
+        }
+      }
+    }
+    if (check && kind == Kind::EquivalentSolutionSets && outer) {
+      // mmc: "Error: `promise_equivalent_solution_sets' scope is nested
+      // inside another. This is the outer
+      // `promise_equivalent_solution_sets' scope."
+      messages_
+          .Say(Where(goal->tokens),
+              "this promise_equivalent_solution_sets scope is nested inside another"_err_en_US)
+          .Attach(Where(outer->tokens),
+              "this is the outer promise_equivalent_solution_sets scope"_en_US);
+    }
+    if (kind == Kind::EquivalentSolutionSets) {
+      sets_.push_back(goal);
+    }
+    Inferred r{Infer(goal->goals.front(), bound, outside)};
+    if (kind == Kind::EquivalentSolutionSets) {
+      sets_.pop_back();
+    }
+    if (check) {
+      std::vector<BodyVar> binds;
+      if (Reached(goal->goals.front())) {
+        for (const auto &[var, inst] : goal->entry) {
+          if (inst && !ops_.IsGround(inst, body_.vars[var].type) &&
+              (outside.count(var) || failed_.count(var))) {
+            binds.push_back(var);
+          }
+        }
+      }
+      std::vector<BodyVar> unlisted;
+      for (BodyVar var : Sorted(binds)) {
+        if (!llvm::is_contained(goal->promised, var)) {
+          unlisted.push_back(var);
+        }
+      }
+      std::vector<BodyVar> extra;
+      for (BodyVar var : Sorted(goal->promised)) {
+        if (!llvm::is_contained(binds, var)) {
+          extra.push_back(var);
+        }
+      }
+      std::string what{kind == Kind::EquivalentSolutions
+              ? "promise_equivalent_solutions"
+              : kind == Kind::EquivalentSolutionSets
+              ? "promise_equivalent_solution_sets"
+              : "arbitrary"};
+      if (!unlisted.empty()) {
+        // mmc: "Error: the `promise_equivalent_solutions' goal binds a
+        // variable that is not listed: Y."
+        messages_.Say(Where(goal->tokens),
+            "the %s goal binds %s: %s"_err_en_US, what,
+            unlisted.size() == 1 ? "a variable that is not listed"
+                                 : "some variables that are not listed",
+            Names(unlisted));
+      }
+      if (!extra.empty()) {
+        // mmc: "Error: the `promise_equivalent_solutions' goal lists an
+        // extra variable: X."
+        messages_.Say(Where(goal->tokens), "the %s goal lists %s: %s"_err_en_US,
+            what,
+            extra.size() == 1 ? "an extra variable" : "some extra variables",
+            Names(extra));
+      }
+    }
+    if (kind != Kind::EquivalentSolutionSets && r.d.most == Solutions::Many) {
+      r.d.most = Solutions::One;
+    }
+    return r;
+  }
+
+  // Whether mode analysis reaches the end of a goal, as in mmc: not after a
+  // unification that cannot succeed, which is fail, or a call to a
+  // procedure with no solutions; a negation always succeeds.
+  bool Reached(const Body *goal) const {
+    switch (goal->kind) {
+    case BodyKind::Unify:
+      return goal->unify != UnifyKind::Call ||
+          !goal->modes->callee->determinism ||
+          ComponentsOf(*goal->modes->callee->determinism).most != Solutions::Zero;
+    case BodyKind::Call:
+      return !goal->modes->callee->determinism ||
+          ComponentsOf(*goal->modes->callee->determinism).most != Solutions::Zero;
+    case BodyKind::HOCall:
+      return ComponentsOf(goal->modes->determinism).most != Solutions::Zero;
+    case BodyKind::Conj:
+      return llvm::all_of(goal->goals, [&](const Body *g) { return Reached(g); });
+    case BodyKind::Disj:
+      return llvm::any_of(goal->goals, [&](const Body *g) { return Reached(g); });
+    case BodyKind::Switch:
+      return llvm::any_of(
+          goal->cases, [&](const SwitchCase &c) { return Reached(c.goal); });
+    case BodyKind::IfThenElse:
+      return (Reached(goal->goals[0]) && Reached(goal->goals[1])) ||
+          Reached(goal->goals[2]);
+    case BodyKind::Not:
+      return true;
+    case BodyKind::Scope:
+      return Reached(goal->goals.front());
+    }
+    return true;
+  }
+
+  // Variables in their order, once each.
+  static std::vector<BodyVar> Sorted(std::vector<BodyVar> vars) {
+    llvm::sort(vars);
+    vars.erase(std::unique(vars.begin(), vars.end()), vars.end());
+    return vars;
+  }
+
+  // X, Y and Z.
+  std::string Names(const std::vector<BodyVar> &vars) const {
+    std::string text;
+    for (std::size_t i{0}; i < vars.size(); ++i) {
+      if (i > 0) {
+        text += i + 1 == vars.size() ? " and " : ", ";
+      }
+      text += Name(vars[i]);
+    }
+    return text;
+  }
+
   // A lambda expression's body, which runs when the closure is called,
   // with the arguments that its modes make inputs bound.
   void Lambda(const Body *goal, const std::set<BodyVar> &bound) {
     std::set<BodyVar> inner{bound};
     Known known{*this};
     llvm::ArrayRef<ArgMode> modes{goal->modes->lambda};
+    // It is not in the promise_equivalent_solution_sets scopes around it.
+    std::vector<const Body *> sets;
+    std::swap(sets, sets_);
     for (std::size_t i{0}; i < goal->lambdaHead.size(); ++i) {
       if (i < modes.size() && !ops_.IsFree(modes[i].initial)) {
         inner.insert(goal->lambdaHead[i]);
@@ -1840,6 +2070,7 @@ private:
     Components d{Infer(goal->lambda, inner,
         std::set<BodyVar>{goal->lambdaHead.begin(), goal->lambdaHead.end()})
                      .d};
+    std::swap(sets, sets_);
     lambdas_.push_back({goal, d});
   }
 
@@ -1974,8 +2205,19 @@ private:
       if (fails) {
         cause("the negated goal can succeed");
       }
+      // Where no solution is allowed, as mmc puts it.
+      if (many) {
+        cause("the negated goal can fail");
+      }
       return;
     case BodyKind::Scope:
+      // Inside a determinism cast whose goal can succeed more than once,
+      // as in mmc, only what makes it fail.
+      if (goal->promise &&
+          *goal->promise != parser::PromiseSolutionsKind::EquivalentSolutionSets &&
+          Seen(goal->goals.front()).most == Solutions::Many) {
+        inner = Solutions::Many;
+      }
       Diagnose(goal->goals.front(), canFail, inner, context, causes);
       return;
     }
@@ -2111,6 +2353,14 @@ private:
     case BodyKind::Not:
       Contexts(goal->goals.front(), {true, {}});
       return false;
+    case BodyKind::Scope:
+      // Only the first solution of a determinism cast's goal is wanted.
+      if (goal->promise &&
+          *goal->promise != parser::PromiseSolutionsKind::EquivalentSolutionSets) {
+        Contexts(goal->goals.front(), {true, {}});
+        return false;
+      }
+      return Contexts(goal->goals.front(), context);
     default: {
       bool loose{false};
       for (const Body *g : goal->goals) {
@@ -2202,6 +2452,13 @@ private:
   // once because of that.
   std::set<const Body *> unseen_;
   std::set<const Body *> pruned_;
+  // The promise_equivalent_solution_sets scopes that the goal is in, and
+  // the determinism casts checked, by their first token.
+  std::vector<const Body *> sets_;
+  // The variables of the unifications replaced with fail in the
+  // conjunctions around a goal, before mmc quantifies the body again.
+  std::set<BodyVar> failed_;
+  std::set<unsigned> checked_;
   // The goals with more than one solution where only the first is wanted,
   // which are committed choice.
   std::set<const Body *> first_;
@@ -2322,9 +2579,19 @@ void DumpProcedureBody(llvm::raw_ostream &os, const ProcedureBody &body,
       dump(goal->goals.front(), depth + 1);
       return;
     case BodyKind::Scope:
-      os << indent << at << ' '
-         << llvm::StringRef{EnumToString(goal->scope)}.lower() << tag(goal)
-         << '\n';
+      os << indent << at << ' ';
+      if (goal->promise) {
+        using Kind = parser::PromiseSolutionsKind;
+        os << (*goal->promise == Kind::EquivalentSolutions
+                      ? "promise_equivalent_solutions"
+                      : *goal->promise == Kind::EquivalentSolutionSets
+                      ? "promise_equivalent_solution_sets"
+                      : "arbitrary")
+           << " [" << names(goal->promised) << ']';
+      } else {
+        os << llvm::StringRef{EnumToString(goal->scope)}.lower();
+      }
+      os << tag(goal) << '\n';
       dump(goal->goals.front(), depth + 1);
       return;
     case BodyKind::Call:

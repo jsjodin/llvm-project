@@ -260,7 +260,9 @@ def merkc_body(lines, inferred=None):
 # merkc's determinism errors, which mmc reports after switch detection.
 DETERMINISM_ERROR = re.compile(
     r"error: (the determinism declaration of|the lambda expression is declared|invalid determinism"
-    r"|.* is in a context that requires all solutions)")
+    r"|.* is in a context that requires all solutions"
+    r"|the (promise_equivalent_solutions|promise_equivalent_solution_sets|arbitrary) goal"
+    r"|this (arbitrary|promise_equivalent_solution_sets) scope)")
 
 
 def mmc_error_lines(output, name):
@@ -289,8 +291,11 @@ def mmc_error_lines(output, name):
 
 
 def merkc_error_lines(stderr, name):
+    """The lines of merkc's errors and of their notes: the reasons, and the
+    outer scope of a determinism cast."""
     return {int(m.group(1)) for m in re.finditer(
-        r"^(?:.*/)?" + re.escape(name) + r":(\d+):\d+: (?:error|because):", stderr, re.M)}
+        r"^(?:.*/)?" + re.escape(name) + r":(\d+):\d+: (?:error:|because:|this is the outer)",
+        stderr, re.M)}
 
 
 def show(labels):
