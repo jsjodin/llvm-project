@@ -1449,6 +1449,9 @@ private:
   unsigned promised_{0};
   // The head unifications of WithHeadUnifications.
   llvm::DenseSet<const Unify *> heads_;
+  // A single clause's unifications of the fresh variables that stand for
+  // its head's arguments with them, at the start of its body.
+  llvm::DenseSet<const Unify *> headTerms_;
   // Warnings of the goals run, reported once the clause is checked.
   std::vector<std::pair<parser::CharBlock, std::string>> warnings_;
   // The instance method whose clauses are being checked, if any.
@@ -1602,6 +1605,21 @@ ProcedureChecker::Result ProcedureChecker::CheckProcedure(
     const ClauseTypes *original{own[n]};
     const ClauseTypes *clause{
         own.size() > 1 ? &WithHeadUnifications(*original) : original};
+    if (own.size() == 1) {
+      const ClauseForm &form{*clause->clause};
+      auto mark{[&](const Goal &goal) {
+        const auto *unify{std::get_if<const Unify *>(&goal)};
+        if (unify && llvm::is_contained(form.head, (*unify)->left) &&
+            form.vars[(*unify)->left].kind == VarKind::Fresh) {
+          headTerms_.insert(*unify);
+        }
+      }};
+      if (const auto *conj{std::get_if<const Conj *>(&form.body)}) {
+        llvm::for_each((*conj)->goals, mark);
+      } else {
+        mark(form.body);
+      }
+    }
     ClauseModes modes{clause, &procedure, {}, {}};
     warnings_.clear();
     r = CheckClause(*clause, procedure, modes);
@@ -2436,10 +2454,11 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
   }
   if (!waiting.empty()) {
     // A head unification waits until the goals do, but its error is
-    // reported only if no other goal waits, as in mmc.
+    // reported only if no other goal waits, as in mmc, a single clause's
+    // too.
     auto first{llvm::find_if(waiting, [&](const Waiting &w) {
       const auto *unify{std::get_if<const Unify *>(&w.goal)};
-      return !unify || !heads_.count(*unify);
+      return !unify || (!heads_.count(*unify) && !headTerms_.count(*unify));
     })};
     Result r{(first != waiting.end() ? *first : waiting.front()).error};
     // The conjunction, as a goal of another, waits for what any of its
@@ -2630,7 +2649,8 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
     // would be aliased to the new term's, which mode analysis does not
     // follow, so it waits, unless the term is not used again, as in mmc.
     // The term's copy of an argument used again is shared; the argument
-    // keeps its own inst, as in mmc.
+    // keeps its own inst, as in mmc. So are the copies of an argument
+    // that the term has more than one of, as in mmc.
     std::vector<const Inst *> shared;
     std::vector<VarId> waits;
     for (std::size_t i{0}; i < unify.arguments.size(); ++i) {
@@ -2638,7 +2658,9 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
       if (ops_.HasFree(arguments[i], TypeOf(var)) && live[var] && live[x]) {
         waits.push_back(var);
       }
-      shared.push_back(live[var] ? insts_.Share(arguments[i]) : arguments[i]);
+      bool repeated{llvm::count(unify.arguments, var) > 1};
+      shared.push_back(live[var] || repeated ? insts_.Share(arguments[i])
+                                             : arguments[i]);
     }
     const Inst *term{insts_.Bound(Uniqueness::Unique, {{functor, shared}})};
     if (!waits.empty()) {
