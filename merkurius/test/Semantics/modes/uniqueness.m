@@ -7,9 +7,11 @@
 % and one that only one of them uses, which stays unique; an assignment
 % of a value used after, which shares it; a construction, whose argument
 % keeps its inst, while the term's copy of it is shared if the argument
-% is used after; and a value that a call clobbers, unused after.
+% is used after; and a value that a call clobbers, unused after. These
+% are mmc's rules (-fmmc-uniqueness): by default, an argument used after
+% is shared too if the term is (../uniqueness/aliased.m).
 %
-% RUN: merkc -fc1 -fdebug-dump-modes %s | FileCheck %s
+% RUN: merkc -fc1 -fdebug-dump-modes -fmmc-uniqueness %s | FileCheck %s
 % RUN: %if mmc %{ %compare-types --modes --error-lines %s %}
 
 :- module uniqueness.

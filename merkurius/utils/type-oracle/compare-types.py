@@ -399,7 +399,9 @@ action = "-fdebug-dump-types"
 def run_merkc(merkc, path, all_messages=False):
     result = subprocess.run(
         [merkc, "-fc1", action, os.path.basename(path)] +
-        (["-finfer-modes"] if action == "-fdebug-dump-modes" else []) +
+        # mmc's rules for a unique value put in a term.
+        (["-finfer-modes", "-fmmc-uniqueness"]
+         if action == "-fdebug-dump-modes" else []) +
         (["-I", include] if include else []),
         cwd=os.path.dirname(os.path.abspath(path)),
         capture_output=True,
