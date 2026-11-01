@@ -5,8 +5,11 @@
 % in an argument; an argument that nothing binds; a result bound to a
 % value the conversion cannot give, a warning, as in mmc; and a unique
 % argument used after, which the conversion shares, as in mmc.
+% These are mmc's uniqueness rules (-fmmc-uniqueness); by default, a
+% value that is copied, such as a number, is unique wherever it is
+% (../uniqueness/copied.m).
 %
-% RUN: not merkc -fc1 -fdebug-dump-modes %s 2>&1 >/dev/null | FileCheck --implicit-check-not=error: --implicit-check-not=because: --implicit-check-not=warning: %s
+% RUN: not merkc -fc1 -fdebug-dump-modes -fmmc-uniqueness %s 2>&1 >/dev/null | FileCheck --implicit-check-not=error: --implicit-check-not=because: --implicit-check-not=warning: %s
 % RUN: %if mmc %{ %compare-types --modes --error-lines %s %}
 
 :- module coerce_errors.

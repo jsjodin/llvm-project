@@ -903,6 +903,7 @@ void ModeChecker::CheckForTypes(const Symbol &symbol,
 void ModeChecker::Run(const parser::ParseTree &tree) {
   result_.constructors_ = std::make_unique<ConstructorTable>(resolution_, types_);
   result_.ops_ = std::make_unique<InstOps>(insts_, *result_.constructors_);
+  result_.ops_->SetCopiesUnique(!options_.mmcUniqueness);
   const ModuleSymbols &own{resolution_.module()};
   for (const Symbol *symbol : own.symbols()) {
     if (symbol->kind == SymbolKind::Inst) {
