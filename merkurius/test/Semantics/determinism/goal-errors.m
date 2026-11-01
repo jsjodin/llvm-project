@@ -56,6 +56,8 @@
 % No reason is given for a procedure that cannot succeed.
 % CHECK-DAG: goal-errors.m:[[@LINE+1]]:9: error: the determinism declaration of failing(out) is not satisfied: it is declared det, but inferred failure
 :- pred failing(int::out) is det.
+% CHECK-DAG: goal-errors.m:[[@LINE+1]]:9: error: the determinism declaration of negation_succeeds(in) is not satisfied: it is declared failure, but inferred semidet
+:- pred negation_succeeds(int::in) is failure.
 :- pred lambda(pred(int)::out(pred(out) is det)) is det.
 % CHECK-DAG: goal-errors.m:[[@LINE+1]]:9: error: invalid determinism for primary(in) = out: the primary mode of a function cannot be multi
 :- func primary(int) = int is multi.
@@ -149,6 +151,9 @@ some_scope(L) :- some [X] ( list.member(X, L), X > 3 ).
 no_solutions(X, Y) :- Y = X, X > 0.
 
 failing(_) :- fail.
+
+% CHECK-DAG: goal-errors.m:[[@LINE+1]]:25: because: the negated goal can fail
+negation_succeeds(X) :- not X > 0.
 
 % CHECK-DAG: goal-errors.m:[[@LINE+2]]:19: error: the lambda expression is declared det, but its determinism is inferred to be semidet
 % CHECK-DAG: goal-errors.m:[[@LINE+1]]:42: because: the call to sd(in, out) can fail

@@ -1,0 +1,12 @@
+# Random modules whose goals are in determinism casts, now and then with
+# variables left out of the list or extra ones in it, whose calls are in
+# arbitrary scopes, inside or outside promise_equivalent_solution_sets
+# scopes, and whose predicates are declared with random determinisms
+# (generate-switch-programs.py --determinism --casts). merkc must infer the determinisms
+# of the procedures and their goals that mmc does, and report its errors,
+# those for the casts among them, at the same lines.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-switch-programs.py --determinism --casts --seed 45 --count 40 %t
+# RUN: %compare-switches --determinism %t/*.m
