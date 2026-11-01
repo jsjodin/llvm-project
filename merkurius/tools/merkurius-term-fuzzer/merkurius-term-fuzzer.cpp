@@ -30,6 +30,7 @@
 #include "merkurius/Parser/term.h"
 #include "merkurius/Parser/unparse.h"
 #include "merkurius/Semantics/check-determinism.h"
+#include "merkurius/Semantics/check-uniqueness.h"
 #include "merkurius/Semantics/check-modes.h"
 #include "merkurius/Semantics/check-purity.h"
 #include "merkurius/Semantics/check-types.h"
@@ -141,17 +142,21 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, bool openMP) {
   std::unique_ptr<merkurius::semantics::NameResolution> resolution{
       merkurius::semantics::ResolveNames(
           tree, tokens, semanticForm, loader, messages)};
-  // And type checking, purity checking, mode checking and determinism
-  // analysis.
+  // And type checking, purity checking, mode checking, determinism
+  // analysis and uniqueness checking.
   std::unique_ptr<merkurius::semantics::TypeChecking> checking{
       merkurius::semantics::CheckTypes(
           semanticForm, *resolution, tokens, messages)};
   merkurius::semantics::CheckPurity(
       tree, tokens, semanticForm, *resolution, *checking, messages);
+  bool earlier{messages.AnyFatalError()};
   std::unique_ptr<merkurius::semantics::ModeChecking> modes{
       merkurius::semantics::CheckModes(
           tree, tokens, semanticForm, *resolution, *checking, messages)};
-  merkurius::semantics::CheckDeterminism(tokens, *checking, *modes, messages);
+  std::unique_ptr<merkurius::semantics::DeterminismChecking> determinism{
+      merkurius::semantics::CheckDeterminism(
+          tokens, *checking, *modes, messages, !earlier)};
+  merkurius::semantics::CheckUniqueness(tokens, *modes, *determinism, messages);
   return result;
 }
 

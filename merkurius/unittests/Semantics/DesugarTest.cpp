@@ -207,6 +207,21 @@ TEST(DesugarTest, Negations) {
       "| | | | Call #0 q(X)\n");
   EXPECT_EQ(Form("p :- X \\= f(Y).\n"),
       "Predicate p\n| Not #1\n| | Unify #0 X = f(Y)\n");
+  // As in mmc, the negation of a negation is its goal, and the negation of
+  // a conjunction of negations the disjunction of their goals.
+  EXPECT_EQ(Form("p :- \\+ \\+ q.\n"), "Predicate p\n| Call #0 q\n");
+  EXPECT_EQ(Form("p :- \\+ (\\+ q, X \\= 1).\n"),
+      "Predicate p\n"
+      "| Disj #5\n"
+      "| | Call #0 q\n"
+      "| | Unify #2 X = 1\n");
+  EXPECT_EQ(Form("p :- \\+ (\\+ q, r).\n"),
+      "Predicate p\n"
+      "| Not #4\n"
+      "| | Conj #3\n"
+      "| | | Not #1\n"
+      "| | | | Call #0 q\n"
+      "| | | Call #2 r\n");
 }
 
 TEST(DesugarTest, Scopes) {
@@ -231,14 +246,16 @@ TEST(DesugarTest, Scopes) {
 }
 
 TEST(DesugarTest, Numbering) {
-  // Goal numbers are dense and distinct within each clause.
+  // Goal numbers are distinct within each clause, and dense but for the
+  // negations that the negation of negations drops, as here the inner one
+  // of not (s(X) => t(h(X))).
   DesugarResult result{DesugarText("p(X, f(X)) :- ( q(g(X)) ; r(X, [1, 2]) ), "
                            "not (s(X) => t(h(X))), all [Y] u(Y, k(1)).\n"
                            "q(a).\n")};
   EXPECT_EQ(result.messages, V{});
   ASSERT_EQ(result.numbers.size(), 2u);
   for (std::size_t j{0}; j < result.numbers.size(); ++j) {
-    EXPECT_EQ(result.numbers[j].size(), result.goals[j]);
+    EXPECT_EQ(result.numbers[j].size() + (j == 0 ? 1 : 0), result.goals[j]);
     EXPECT_EQ(*result.numbers[j].rbegin() + 1, result.goals[j]);
   }
 }

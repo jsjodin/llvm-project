@@ -40,23 +40,23 @@ double(X) = X * 2.
 % CHECK-NEXT: | | Unify #1 $1 = '*'(X, $2)
 % CHECK-NEXT: | | Unify #0 $2 = 2
 
+% The negation of the implication's negation is the goal inside, as in
+% mmc, and the inner negation's number is left unused.
 all_positive(Xs) :-
     all [X] (list.member(X, Xs) => X > 0),
     Xs \= [].
 % CHECK-NEXT: Predicate all_positive(Xs)
-% CHECK-NEXT: | Conj #12
-% CHECK-NEXT: | | Not #9
-% CHECK-NEXT: | | | Scope #8 Some [X]
-% CHECK-NEXT: | | | | Not #7
-% CHECK-NEXT: | | | | | Not #6
-% CHECK-NEXT: | | | | | | Conj #5
-% CHECK-NEXT: | | | | | | | Call #0 list.member(X, Xs)
-% CHECK-NEXT: | | | | | | | Not #4
-% CHECK-NEXT: | | | | | | | | Conj #3
-% CHECK-NEXT: | | | | | | | | | Unify #1 $2 = 0
-% CHECK-NEXT: | | | | | | | | | Call #2 '>'(X, $2)
-% CHECK-NEXT: | | Not #11
-% CHECK-NEXT: | | | Unify #10 Xs = []
+% CHECK-NEXT: | Conj #11
+% CHECK-NEXT: | | Not #8
+% CHECK-NEXT: | | | Scope #7 Some [X]
+% CHECK-NEXT: | | | | Conj #5
+% CHECK-NEXT: | | | | | Call #0 list.member(X, Xs)
+% CHECK-NEXT: | | | | | Not #4
+% CHECK-NEXT: | | | | | | Conj #3
+% CHECK-NEXT: | | | | | | | Unify #1 $2 = 0
+% CHECK-NEXT: | | | | | | | Call #2 '>'(X, $2)
+% CHECK-NEXT: | | Not #10
+% CHECK-NEXT: | | | Unify #9 Xs = []
 
 pick(X, Y, Z) :-
     ( Z = X

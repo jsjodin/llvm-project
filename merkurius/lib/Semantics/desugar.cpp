@@ -179,7 +179,33 @@ private:
   void DesugarTry(const parser::TryGoal &, Goals &out);
   void DesugarAtomic(const parser::AtomicGoal &, Goals &out);
   Goal Conjoin(TokenRange, const Goals &);
+  // As mmc has it, the negation of a conjunction of negations is the
+  // disjunction of their goals, and the negation of a negation its goal,
+  // which may then bind variables used outside (see the register).
   Goal Negate(TokenRange range, Goal goal) {
+    std::vector<Goal> conjuncts{goal};
+    for (std::size_t i{0}; i < conjuncts.size();) {
+      const auto *conj{std::get_if<const Conj *>(&conjuncts[i])};
+      if (conj && !(*conj)->parallel) {
+        llvm::ArrayRef<Goal> inner{(*conj)->goals};
+        conjuncts.erase(conjuncts.begin() + i);
+        conjuncts.insert(conjuncts.begin() + i, inner.begin(), inner.end());
+      } else {
+        ++i;
+      }
+    }
+    if (!conjuncts.empty() && llvm::all_of(conjuncts, [](const Goal &g) {
+          return std::holds_alternative<const Not *>(g);
+        })) {
+      Goals disjuncts;
+      for (const Goal &g : conjuncts) {
+        disjuncts.push_back(std::get<const Not *>(g)->goal);
+      }
+      if (disjuncts.size() == 1) {
+        return disjuncts.front();
+      }
+      return Make<Disj>(range, Number(), Save(llvm::ArrayRef<Goal>{disjuncts}));
+    }
     return Make<Not>(range, Number(), goal);
   }
   Goal ListScope(TokenRange, ScopeKind, const parser::Goal &origin,

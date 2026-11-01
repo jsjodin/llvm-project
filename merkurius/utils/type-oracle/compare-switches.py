@@ -16,11 +16,16 @@ With --determinism, the dump is mmc's after determinism analysis
 (`--dump-hlds 50 --dump-hlds-options d`), and each switch, disjunction,
 if-then-else and negation has its determinism too, as has each procedure,
 which is the one inferred for it; and the lines of mmc's error messages,
-but not its warnings, must be those of merkc's errors and their notes. A
-procedure that merkc does not infer a determinism for is not compared.
+but not its warnings, must be those of merkc's errors and their notes,
+mode errors among them, since mmc analyses the determinism of the
+procedures without them, and then checks unique modes again, where
+backtracking can happen. A procedure that merkc does not infer a
+determinism for is not compared.
 
-A module with errors that stop mmc before its dump, such as mode errors,
-is reported, unless --allow-errors is given, and then skipped. The script
+A module with errors that stop mmc before its dump, such as type errors,
+is reported, unless --allow-errors is given, and then skipped. Without
+--determinism, so is one for which merkc reports other errors than
+determinism errors. The script
 exits with status 1 if any procedure differs.
 """
 
@@ -342,7 +347,8 @@ def main():
         merkc = subprocess.run([args.merkc, "-fc1", "-fdebug-dump-determinism", path],
                                capture_output=True, text=True)
         others = [l for l in merkc.stderr.splitlines()
-                  if " error: " in l and not DETERMINISM_ERROR.search(l)]
+                  if " error: " in l and not DETERMINISM_ERROR.search(l)
+                  and not determinism]
         if others:
             print("%s: merkc reports errors that do not stop mmc:\n%s" % (path, merkc.stderr))
             failed = True
