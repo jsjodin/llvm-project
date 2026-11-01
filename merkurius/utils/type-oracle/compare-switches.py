@@ -98,10 +98,7 @@ def mmc_body(lines, i):
             detism = m.group(1)
             i += 1
             continue
-        # mmc marks a goal in a context where only its first solution is
-        # wanted, as in a negation, with a committed choice determinism,
-        # which says nothing more about the goal.
-        tag = (" [%s]" % re.sub(r"^cc_", "", detism)) if determinism and detism else ""
+        tag = (" [%s]" % detism) if determinism and detism else ""
         m = re.search(r"% (can_fail|cannot_fail) switch on `(.*)'", st)
         if st.startswith("("):
             node = {"kind": "conj", "label": None, "parts": [[]], "cases": [], "tag": tag}
@@ -262,7 +259,8 @@ def merkc_body(lines, inferred=None):
 
 # merkc's determinism errors, which mmc reports after switch detection.
 DETERMINISM_ERROR = re.compile(
-    r"error: (the determinism declaration of|the lambda expression is declared|invalid determinism)")
+    r"error: (the determinism declaration of|the lambda expression is declared|invalid determinism"
+    r"|.* is in a context that requires all solutions)")
 
 
 def mmc_error_lines(output, name):
