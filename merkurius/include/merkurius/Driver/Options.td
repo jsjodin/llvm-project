@@ -65,8 +65,9 @@ def finfer_modes : Flag<["-"], "finfer-modes">,
            "mmc's --infer-modes does, rather than report each">;
 def fmmc_uniqueness : Flag<["-"], "fmmc-uniqueness">,
   HelpText<"Find the unique values needed on backtracking as mmc does, "
-           "which misses some that an if-then-else needs, and keep a unique "
-           "value put in a term unique while both are used, as mmc does">;
+           "which misses some that an if-then-else needs, keep a unique "
+           "value put in a term unique while both are used, and compare the "
+           "uniqueness of copied values, such as numbers, as mmc does">;
 def fmode_inference_iteration_limit_EQ :
   Joined<["-"], "fmode-inference-iteration-limit=">, MetaVarName<"<n>">,
   HelpText<"Perform at most <n> passes of mode inference (default: 30)">;
