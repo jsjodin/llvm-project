@@ -13,6 +13,7 @@
 // a parse tree item, following the rules of the reference manual.
 
 #include "merkurius/Parser/parse-tree.h"
+#include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/token.h"
 #include <optional>
 
@@ -27,9 +28,9 @@ std::optional<Item> ConvertItem(const Term &, ConvertState &);
 
 // Reads and converts every item of a file. An item with an error is
 // reported and left out, so the tree is complete only if no error was
-// reported.
-const ParseTree &ConvertFile(
-    const TokenSequence &, ParseTreeArena &, Messages &);
+// reported. Its terms may nest `maxDepth` levels deep (TermReader).
+const ParseTree &ConvertFile(const TokenSequence &, ParseTreeArena &,
+    Messages &, unsigned maxDepth = TermReader::defaultMaxDepth);
 
 } // namespace merkurius::parser
 #endif // MERKURIUS_PARSER_CONVERT_H_
