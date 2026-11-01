@@ -87,10 +87,10 @@ find "$MERKURIUS_DIR/test" "$MERKURIUS_DIR/utils" -name '*.m' \
 
 cd "$WORK"
 # The fuzzers, by name: their process groups, their logs, the times they
-# started fuzzing, once their corpora were loaded, and the times they
-# were stopped.
+# started fuzzing, once their corpora were loaded, the times they were
+# stopped, and the times they ended.
 NAMES=(small)
-declare -A PID LOG START STOP
+declare -A PID LOG START STOP END
 run() {
   local name=$1 jobs=$2 corpus=$3 artifacts=$4 log=$5
   shift 5
@@ -117,7 +117,13 @@ running() { kill -0 "${PID[$1]}" 2>/dev/null; }
 while true; do
   ANY=false
   for name in "${NAMES[@]}"; do
-    running "$name" || continue
+    [[ -z "${END[$name]:-}" ]] || continue
+    if ! running "$name"; then
+      END[$name]=$SECONDS
+      # Any job it started as it ended.
+      kill -KILL -- "-${PID[$name]}" 2>/dev/null || true
+      continue
+    fi
     ANY=true
     if [[ -z "${START[$name]:-}" ]]; then
       if grep -qE '^#[0-9]+: .* job: ' "${LOG[$name]}"; then
@@ -132,13 +138,14 @@ while true; do
   $ANY || break
   sleep 1
 done
+sleep 1
+kill "$TAIL" 2>/dev/null || true
 STATUS=0
 for name in "${NAMES[@]}"; do
   FUZZER_STATUS=0
   wait "${PID[$name]}" || FUZZER_STATUS=$?
-  kill -KILL -- "-${PID[$name]}" 2>/dev/null || true
   if [[ -z "${STOP[$name]:-}" ]]; then
-    STOP[$name]=$SECONDS
+    STOP[$name]=${END[$name]}
     echo "INFO: the $name fuzzer ended before it was stopped," \
       "with exit status $FUZZER_STATUS" | tee -a fuzz.log
     if ((FUZZER_STATUS != 0)); then
@@ -146,8 +153,6 @@ for name in "${NAMES[@]}"; do
     fi
   fi
 done
-sleep 1
-kill "$TAIL" 2>/dev/null || true
 
 for dir in artifacts artifacts-large; do
   SLOW=$(ls "$dir" | grep '^slow-unit-' || true)
