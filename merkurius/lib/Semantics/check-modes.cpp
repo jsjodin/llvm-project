@@ -1436,7 +1436,8 @@ private:
   // The goal run last, where an error in the final insts is reported, as
   // in mmc.
   parser::CharBlock last_{};
-  // By variable, how often a construction put it in a term while free.
+  // By variable, how often a construction put it in a term, or an
+  // assignment aliased it.
   std::vector<unsigned> touched_;
   // How often a goal checked left its insts not reached.
   unsigned unreachables_{0};
@@ -2648,9 +2649,12 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
     // A construction. An argument with free parts that is used again
     // would be aliased to the new term's, which mode analysis does not
     // follow, so it waits, unless the term is not used again, as in mmc.
-    // The term's copy of an argument used again is shared; the argument
-    // keeps its own inst, as in mmc. So are the copies of an argument
-    // that the term has more than one of, as in mmc.
+    // The term's copy of an argument used again is shared, and so are the
+    // copies of an argument that the term has more than one of, as in mmc.
+    // If the term is used again too, the argument is then shared as well,
+    // since the two are one value; mmc keeps the argument's inst
+    // (-fmmc-uniqueness), so that a destructive update of it changes the
+    // term.
     std::vector<const Inst *> shared;
     std::vector<VarId> waits;
     for (std::size_t i{0}; i < unify.arguments.size(); ++i) {
@@ -2677,13 +2681,18 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
           std::move(waits));
     }
     for (std::size_t i{0}; i < unify.arguments.size(); ++i) {
-      // An argument with free parts is now part of the term, which wakes
-      // the goals that wait for it, as in mmc.
-      if (ops_.HasFree(shared[i], TypeOf(unify.arguments[i]))) {
-        ++touched_[unify.arguments[i]];
-      }
+      // An argument is now part of the term, which wakes the goals that
+      // wait for it, though its inst is the same, as in mmc.
+      ++touched_[unify.arguments[i]];
     }
     map[x] = term;
+    if (!options_.mmcUniqueness && live[x]) {
+      for (VarId var : unify.arguments) {
+        if (live[var]) {
+          map[var] = insts_.Share(map[var]);
+        }
+      }
+    }
     modes.unify = UnifyKind::Construct;
     modes.functor = functor;
     modes.dead = !live[x];

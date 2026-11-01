@@ -31,8 +31,15 @@ cc_multi or erroneous has I/O state arguments of an invalid determinism.
 With --ui, the helper that reads the value takes it as `ui`, so that it
 must be unique there, and not shared after.
 
+With --nested, a goal may also put the value in a unique pair, with a new
+value, and take it out again after up to two goals on the pair: helpers
+that update its first field, keeping it for backtracking or not, swap its
+fields, a deconstruction and a rebuild, or goals that can succeed more
+than once or fail. No pair is passed to an `in` argument, which mmc gets
+wrong for a named unique inst (see the design document's register).
+
 Usage: generate-unique-programs.py [--seed N] [--count N] [--scopes] [--io]
-                                   [--ui] DIR
+                                   [--ui] [--nested] DIR
 """
 
 import argparse
@@ -113,6 +120,24 @@ mmu(T, T).
 mmu(t(X), t(X + 1)).
 """
 
+NESTED_PRELUDE = """\
+:- type p ---> p(t, t).
+:- inst up == unique(p(unique, unique)).
+:- inst mup == mostly_unique(p(mostly_unique, mostly_unique)).
+
+"""
+
+NESTED_HELPERS = """\
+:- pred pupd(int::in, p::(up >> dead), p::(free >> up)) is det.
+pupd(Y, p(A0, B), p(A, B)) :- updu(Y, A0, A).
+:- pred mpupd(int::in, p::(mup >> mostly_dead), p::(free >> mup)) is det.
+mpupd(Y, p(A0, B), p(A, B)) :- upd(Y, A0, A).
+:- pred pswap(p::(up >> dead), p::(free >> up)) is det.
+pswap(p(A, B), p(B, A)).
+:- pred pfst(p::(up >> dead), t::uo) is det.
+pfst(p(A, _), A).
+"""
+
 LAMBDA_DETERMINISMS = ["det", "semidet", "multi", "nondet", "cc_multi",
                        "cc_nondet"]
 
@@ -123,10 +148,12 @@ DETERMINISMS = ["det", "det", "semidet", "multi", "multi", "nondet",
 
 
 class Gen:
-    def __init__(self, rng, preds, depth=3, scopes=False, io=False):
+    def __init__(self, rng, preds, depth=3, scopes=False, io=False,
+                 nested=False):
         self.rng = rng
         self.scopes = scopes
         self.io = io
+        self.nested = nested
         self.preds = preds
         self.depth = depth
         self.count = 0
@@ -161,6 +188,8 @@ class Gen:
 
     def step(self, cur, depth):
         """A goal from the value `cur`, and the value after it."""
+        if self.nested and self.rng.random() < 0.25:
+            return self.paired(cur)
         r = self.rng.random()
         nxt = self.fresh("T")
         if r < 0.25:
@@ -211,6 +240,37 @@ class Gen:
         inner = self.branch(cur, nxt, depth - 1)
         self.ints = ints
         return "promise_equivalent_solutions [%s] ( %s )" % (nxt, inner), nxt
+
+    def paired(self, cur):
+        """Goals that put `cur` in a pair and take a value out of it."""
+        nxt = self.fresh("T")
+        pair = self.fresh("P")
+        self.dead.append(cur)
+        goals = ["%s = p(%s, t(%s))" % (pair, self.value(cur), self.number())]
+        for _ in range(self.rng.randint(0, 2)):
+            r = self.rng.random()
+            if r < 0.6:
+                after = self.fresh("P")
+                if r < 0.25:
+                    goals.append("pupd(%s, %s, %s)" % (self.number(), pair, after))
+                elif r < 0.4:
+                    goals.append("mpupd(%s, %s, %s)" % (self.number(), pair, after))
+                elif r < 0.5:
+                    goals.append("pswap(%s, %s)" % (pair, after))
+                else:
+                    a, b = self.fresh("A"), self.fresh("B")
+                    goals.append("%s = p(%s, %s), %s = p(%s, %s)" % (
+                        pair, a, b, after, b, a))
+                pair = after
+            elif r < 0.85:
+                goals.append(self.choice())
+            else:
+                goals.append(self.test())
+        if self.rng.random() < 0.5:
+            goals.append("pfst(%s, %s)" % (pair, nxt))
+        else:
+            goals.append("%s = p(%s, _)" % (pair, nxt))
+        return ", ".join(goals), nxt
 
     def scoped(self, cur, nxt, depth):
         """A goal from `cur` to `nxt` of those --scopes adds."""
@@ -276,10 +336,10 @@ class Gen:
         return text
 
 
-def predicate(rng, preds, n, scopes, io):
+def predicate(rng, preds, n, scopes, io, nested=False):
     name, (mi, mo) = preds[n]
     det = rng.choice(DETERMINISMS)
-    gen = Gen(rng, preds, scopes=scopes, io=io)
+    gen = Gen(rng, preds, scopes=scopes, io=io, nested=nested)
     goals = []
     cur = "T0"
     for _ in range(rng.randint(2, 6)):
@@ -291,12 +351,12 @@ def predicate(rng, preds, n, scopes, io):
     return decl, clause, det is not None
 
 
-def module(rng, name, scopes, io=False, ui=False):
+def module(rng, name, scopes, io=False, ui=False, nested=False):
     count = rng.randint(4, 8)
     preds = [("p%d" % i, rng.choice(MODES)) for i in range(count)]
     exported, local, clauses = [], [], []
     for n in range(count):
-        decl, clause, declared = predicate(rng, preds, n, scopes, io)
+        decl, clause, declared = predicate(rng, preds, n, scopes, io, nested)
         (exported if declared else local).append(decl)
         clauses.append(clause)
     helpers = IO_HELPERS if io else HELPERS
@@ -305,9 +365,11 @@ def module(rng, name, scopes, io=False, ui=False):
                          ":- pred peek(t::ui, int::out) is det.\npeek(_, 1).\n", helpers)
     scope_helpers = IO_SCOPE_HELPERS if io else SCOPE_HELPERS
     return ((IO_PRELUDE if io else PRELUDE).format(name=name) +
+            (NESTED_PRELUDE if nested else "") +
             "\n".join(exported) + "\n\n" +
             ":- implementation.\n:- import_module int.\n\n" + helpers +
-            (scope_helpers if scopes else "") + "\n" +
+            (scope_helpers if scopes else "") +
+            (NESTED_HELPERS if nested else "") + "\n" +
             "\n".join(local) + "\n\n" + "\n\n".join(clauses) + "\n")
 
 
@@ -319,6 +381,7 @@ def main():
     parser.add_argument("--scopes", action="store_true")
     parser.add_argument("--io", action="store_true")
     parser.add_argument("--ui", action="store_true")
+    parser.add_argument("--nested", action="store_true")
     parser.add_argument("dir")
     args = parser.parse_args()
     os.makedirs(args.dir, exist_ok=True)
@@ -326,7 +389,8 @@ def main():
         rng = random.Random("%d-%d" % (args.seed, i))
         name = "u%d_%d" % (args.seed, i)
         with open(os.path.join(args.dir, name + ".m"), "w") as f:
-            f.write(module(rng, name, args.scopes, args.io, args.ui))
+            f.write(module(rng, name, args.scopes, args.io, args.ui,
+                           args.nested))
 
 
 if __name__ == "__main__":

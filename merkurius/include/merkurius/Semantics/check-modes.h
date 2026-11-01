@@ -208,6 +208,9 @@ struct ModeCheckOptions {
   // At most this many passes of mode inference (mmc's
   // --mode-inference-iteration-limit).
   unsigned inferenceIterationLimit{30};
+  // Keep a unique argument of a construction unique though the term is
+  // used again too, as mmc does (-fmmc-uniqueness).
+  bool mmcUniqueness{false};
 };
 
 std::unique_ptr<ModeChecking> CheckModes(const parser::ParseTree &,

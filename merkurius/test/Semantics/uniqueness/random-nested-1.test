@@ -1,0 +1,12 @@
+# Random modules like those of random-unique-1.test, whose goals may also
+# put the value in a unique pair and take it out again, after helpers that
+# update the pair's first field, keeping it for backtracking or not, swap
+# its fields, a rebuild, or goals that can succeed more than once or fail
+# (generate-unique-programs.py --nested). merkc must report the unique
+# values needed on backtracking in the fields, and its other errors, at
+# the same lines as mmc.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-unique-programs.py --nested --seed 401 --count 40 %t
+# RUN: %compare-switches --determinism %t/*.m
