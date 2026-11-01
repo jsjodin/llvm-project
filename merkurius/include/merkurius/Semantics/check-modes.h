@@ -98,8 +98,9 @@ struct GoalModes {
   // The insts of the goal's nonlocal variables before it ran, in the
   // order of the clause's nonlocals for it; empty for a goal not run.
   llvm::ArrayRef<const Inst *> before{};
-  // For a higher-order call, the determinism of its term's inst; for a
-  // lambda expression, its own, and its arguments' modes.
+  // For a higher-order call, the determinism of its term's inst, and the
+  // modes of its arguments, after its closure; for a lambda expression,
+  // its own, and its arguments' modes.
   parser::Determinism determinism{parser::Determinism::Det};
   llvm::ArrayRef<ArgMode> lambda{};
 };

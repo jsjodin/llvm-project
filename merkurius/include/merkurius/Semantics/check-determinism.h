@@ -41,6 +41,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include <deque>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -156,6 +157,9 @@ struct ProcedureBody {
   // if mode analysis found errors, or if `unchecked`.
   std::optional<parser::Determinism> determinism;
   llvm::DenseMap<const Body *, parser::Determinism> goals;
+  // The goals with no outputs and not impure, whose solutions are all the
+  // same to the goals around them, so that only the first is wanted.
+  std::set<const Body *> unseen;
   DeterminismUnchecked unchecked{DeterminismUnchecked::None};
 };
 
