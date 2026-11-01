@@ -1324,8 +1324,8 @@ std::optional<Item> ConvertItem(const Term &term, ConvertState &state) {
   return std::nullopt;
 }
 
-const ParseTree &ConvertFile(
-    const TokenSequence &tokens, ParseTreeArena &arena, Messages &messages) {
+const ParseTree &ConvertFile(const TokenSequence &tokens,
+    ParseTreeArena &arena, Messages &messages, unsigned maxDepth) {
   // An item with a lexical error is not converted: the reader may have
   // read a term from it, but not the one that was meant.
   std::vector<const char *> lexerErrors;
@@ -1335,8 +1335,9 @@ const ParseTree &ConvertFile(
     }
   }
   TermArena terms;
-  TermReader reader{tokens, terms, messages};
+  TermReader reader{tokens, terms, messages, maxDepth};
   ConvertState state{tokens, arena, messages};
+  state.maxDepth = maxDepth;
   std::vector<Item> items;
   while (std::optional<ItemTerm> item{reader.ReadItem()}) {
     const Token &first{tokens.tokens[item->tokens.first]};

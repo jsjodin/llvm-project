@@ -111,7 +111,7 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, bool openMP) {
   options.openMP = openMP;
   TokenSequence tokens{Lex(*file, options, messages)};
   ParseTreeArena arena;
-  const ParseTree &tree{ConvertFile(tokens, arena, messages)};
+  const ParseTree &tree{ConvertFile(tokens, arena, messages, maxDepth)};
   Unparsed result;
   result.ok = !messages.AnyFatalError();
   Messages problems;

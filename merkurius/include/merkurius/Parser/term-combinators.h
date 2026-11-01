@@ -32,6 +32,7 @@
 
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/parse-tree.h"
+#include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/term.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
@@ -52,6 +53,8 @@ struct ConvertState {
   // and their number.
   const Term *item{nullptr};
   unsigned variables{0};
+  // How deeply the terms of a directive may nest (TermReader).
+  unsigned maxDepth{TermReader::defaultMaxDepth};
 };
 
 // The term inside any parentheses.

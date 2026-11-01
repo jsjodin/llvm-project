@@ -211,7 +211,7 @@ public:
       : outer_{outer}, directive_{directive},
         tokens_{GetDirectiveTokens(outer.tokens, directive)},
         state_{tokens_, outer.arena, outer.messages},
-        reader_{tokens_, terms_, outer.messages} {
+        reader_{tokens_, terms_, outer.messages, outer.maxDepth} {
     if (outer.item) {
       NumberVariables(*outer.item, numbers_);
     }
