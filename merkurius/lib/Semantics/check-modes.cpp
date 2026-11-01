@@ -2491,8 +2491,10 @@ ProcedureChecker::Result ProcedureChecker::CheckVarUnify(
               Name(y) + " has inst " + InstText(b),
           {x, y});
     }
-    // Both stay; a value used by both is shared.
-    const Inst *value{live[from] ? insts_.Share(map[from]) : map[from]};
+    // Both stay; a value used by both is shared, as one assigned to a
+    // variable not used again is not, since mmc deletes the assignment.
+    const Inst *value{
+        live[from] && live[to] ? insts_.Share(map[from]) : map[from]};
     map[to] = value;
     map[from] = value;
     modes.unify = UnifyKind::Assign;

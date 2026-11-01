@@ -66,6 +66,12 @@ def mmc_procedures(dump):
             pred = (kind, m.group(2), int(m.group(3)))
             i += 1
             continue
+        if line.startswith("  % pred id "):
+            # Another kind, as a class method predicate, which is not
+            # compared, and whose body is not the last one's.
+            pred = None
+            i += 1
+            continue
         m = re.match(r"  % mode number (\d+) ", line)
         if m:
             mode = int(m.group(1))
