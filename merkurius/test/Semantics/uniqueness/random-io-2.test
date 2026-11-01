@@ -1,0 +1,10 @@
+# Random modules like those of random-scopes-1.test, whose value is the
+# I/O state (generate-unique-programs.py --io --scopes), so that predicates of
+# determinisms other than det, cc_multi and erroneous have I/O state
+# arguments of an invalid determinism. merkc must report those, and its
+# other errors, at the same lines as mmc.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-unique-programs.py --io --scopes --seed 202 --count 40 %t
+# RUN: %compare-switches --determinism %t/*.m

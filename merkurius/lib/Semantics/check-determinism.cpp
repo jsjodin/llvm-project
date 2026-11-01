@@ -2340,9 +2340,31 @@ private:
     }
   }
 
+  // Whether the procedure has I/O state arguments, as mmc has it: exactly
+  // two of type io.state, one bound at the start and one free.
+  bool HasIOState() const {
+    const Procedure &procedure{*body_.procedure};
+    int in{0}, out{0};
+    for (std::size_t i{0}; i < body_.head.size() && i < procedure.modes.size();
+         ++i) {
+      const Type *type{body_.vars[body_.head[i]].type};
+      if (type && type->kind == TypeKind::Named && type->arguments.empty() &&
+          type->constructor->module == "io" &&
+          type->constructor->name == "state") {
+        ++(ops_.IsFree(procedure.modes[i].initial) ? out : in);
+      }
+    }
+    return in == 1 && out == 1;
+  }
+
   // Where the procedure's determinism is declared, and its name in
   // messages.
+  // mmc reports an instance method's at its definition in the instance,
+  // since its procedure is one made for it there.
   parser::CharBlock Declaration() const {
+    if (body_.method && !body_.method->clauses.empty()) {
+      return Where(body_.method->clauses.front().clause->clause->tokens);
+    }
     const Procedure &procedure{*body_.procedure};
     return procedure.source.empty() ? procedure.symbol->source : procedure.source;
   }
@@ -2695,6 +2717,16 @@ private:
       }
     }
     std::optional<parser::Determinism> declared{body_.procedure->determinism};
+    parser::Determinism d{declared ? *declared : *body_.determinism};
+    if (HasIOState() && d != parser::Determinism::Det &&
+        d != parser::Determinism::CcMulti &&
+        d != parser::Determinism::Erroneous) {
+      // mmc: "error: invalid determinism for a predicate with I/O state
+      // arguments." By the declared determinism, or the inferred one.
+      messages_.Say(Declaration(),
+          "invalid determinism for %s: a procedure with I/O state arguments must be det, cc_multi or erroneous, but it is %s"_err_en_US,
+          Text(), DeterminismName(d));
+    }
     if (!declared) {
       return;
     }

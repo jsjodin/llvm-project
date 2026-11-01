@@ -23,7 +23,13 @@ the value, of a random determinism, called at once, a closure of a
 helper, an arbitrary scope inside a promise_equivalent_solution_sets
 scope, a require_<det> scope, or an `all` goal.
 
-Usage: generate-unique-programs.py [--seed N] [--count N] [--scopes] DIR
+With --io, the value is the I/O state: t is io.state, the helpers that
+update it write or keep it, and a construction of a new value is an
+assignment, so that a predicate with a determinism other than det,
+cc_multi or erroneous has I/O state arguments of an invalid determinism.
+
+Usage: generate-unique-programs.py [--seed N] [--count N] [--scopes] [--io]
+                                   DIR
 """
 
 import argparse
@@ -57,6 +63,43 @@ upd(Y, t(X), t(X + Y)).
 peek(t(X), X).
 """
 
+IO_PRELUDE = """\
+:- module {name}.
+:- interface.
+:- import_module io.
+
+:- type t == io.state.
+
+"""
+
+IO_HELPERS = """\
+:- pred m(int::out) is multi.
+m(1).
+m(2).
+:- pred nd(int::in, int::out) is nondet.
+nd(X, Y) :- X > 0, ( Y = X ; Y = 1 ).
+:- pred cm(int::out) is cc_multi.
+cm(1).
+cm(2).
+:- pred sd(int::in) is semidet.
+sd(X) :- X > 0.
+:- pred updu(int::in, t::di, t::uo) is det.
+updu(Y, !IO) :- io.write_int(Y, !IO).
+:- pred upd(int::in, t::mdi, t::muo) is det.
+upd(_, IO, IO).
+:- pred peek(t::in, int::out) is det.
+peek(_, 1).
+"""
+
+IO_SCOPE_HELPERS = """\
+:- pred mu(t::di, t::uo) is multi.
+mu(IO, IO).
+mu(IO0, IO) :- io.write_int(1, IO0, IO).
+:- pred mmu(t::mdi, t::muo) is multi.
+mmu(IO, IO).
+mmu(IO, IO).
+"""
+
 SCOPE_HELPERS = """\
 :- pred mu(t::di, t::uo) is multi.
 mu(T, T).
@@ -76,9 +119,10 @@ DETERMINISMS = ["det", "det", "semidet", "multi", "multi", "nondet",
 
 
 class Gen:
-    def __init__(self, rng, preds, depth=3, scopes=False):
+    def __init__(self, rng, preds, depth=3, scopes=False, io=False):
         self.rng = rng
         self.scopes = scopes
+        self.io = io
         self.preds = preds
         self.depth = depth
         self.count = 0
@@ -122,6 +166,8 @@ class Gen:
             self.dead.append(cur)
             return "upd(%s, %s, %s)" % (self.number(), self.value(cur), nxt), nxt
         if r < 0.38:
+            if self.io:
+                return "%s = %s" % (nxt, cur), nxt
             return "%s = t(%s)" % (nxt, self.number()), nxt
         if r < 0.42:
             return "%s = %s" % (nxt, cur), nxt
@@ -226,10 +272,10 @@ class Gen:
         return text
 
 
-def predicate(rng, preds, n, scopes):
+def predicate(rng, preds, n, scopes, io):
     name, (mi, mo) = preds[n]
     det = rng.choice(DETERMINISMS)
-    gen = Gen(rng, preds, scopes=scopes)
+    gen = Gen(rng, preds, scopes=scopes, io=io)
     goals = []
     cur = "T0"
     for _ in range(rng.randint(2, 6)):
@@ -241,17 +287,20 @@ def predicate(rng, preds, n, scopes):
     return decl, clause, det is not None
 
 
-def module(rng, name, scopes):
+def module(rng, name, scopes, io=False):
     count = rng.randint(4, 8)
     preds = [("p%d" % i, rng.choice(MODES)) for i in range(count)]
     exported, local, clauses = [], [], []
     for n in range(count):
-        decl, clause, declared = predicate(rng, preds, n, scopes)
+        decl, clause, declared = predicate(rng, preds, n, scopes, io)
         (exported if declared else local).append(decl)
         clauses.append(clause)
-    return (PRELUDE.format(name=name) + "\n".join(exported) + "\n\n" +
-            ":- implementation.\n:- import_module int.\n\n" + HELPERS +
-            (SCOPE_HELPERS if scopes else "") + "\n" +
+    helpers = IO_HELPERS if io else HELPERS
+    scope_helpers = IO_SCOPE_HELPERS if io else SCOPE_HELPERS
+    return ((IO_PRELUDE if io else PRELUDE).format(name=name) +
+            "\n".join(exported) + "\n\n" +
+            ":- implementation.\n:- import_module int.\n\n" + helpers +
+            (scope_helpers if scopes else "") + "\n" +
             "\n".join(local) + "\n\n" + "\n\n".join(clauses) + "\n")
 
 
@@ -261,6 +310,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--count", type=int, default=20)
     parser.add_argument("--scopes", action="store_true")
+    parser.add_argument("--io", action="store_true")
     parser.add_argument("dir")
     args = parser.parse_args()
     os.makedirs(args.dir, exist_ok=True)
@@ -268,7 +318,7 @@ def main():
         rng = random.Random("%d-%d" % (args.seed, i))
         name = "u%d_%d" % (args.seed, i)
         with open(os.path.join(args.dir, name + ".m"), "w") as f:
-            f.write(module(rng, name, args.scopes))
+            f.write(module(rng, name, args.scopes, args.io))
 
 
 if __name__ == "__main__":

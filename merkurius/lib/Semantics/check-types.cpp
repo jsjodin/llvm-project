@@ -2327,7 +2327,15 @@ void TypeChecker::CheckMethods(const parser::InstanceDecl &decl,
                   ? SymbolKind::Function
                   : SymbolKind::Predicate;
               name = clause->name->name;
-              arity = clause->arguments.size();
+              // A head argument !X is two, !.X and !:X.
+              for (const parser::ModedTerm *argument : clause->arguments) {
+                const auto *state{
+                    std::get_if<const parser::StateVar *>(&argument->term)};
+                arity += state &&
+                        (*state)->kind == parser::StateVarKind::Both
+                    ? 2
+                    : 1;
+              }
               tokens = clause->name->tokens;
             },
             [&](const parser::DcgRule *rule) {
