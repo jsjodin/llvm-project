@@ -24,6 +24,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace merkurius::semantics {
@@ -143,7 +144,9 @@ private:
   // draws no more errors. Signatures and clause types may contain it.
   Symbol error_{SymbolKind::Type, "", "<error>", 0, std::monostate{}, {},
       false};
-  llvm::DenseMap<const Symbol *, std::optional<Signature>> signatures_;
+  // Made as they are needed, while clauses are checked, so the map is one
+  // whose entries do not move: SignatureOf's pointers must stay valid.
+  std::unordered_map<const Symbol *, std::optional<Signature>> signatures_;
   llvm::DenseMap<const Symbol *, const Type *> supertypes_;
   std::vector<ClauseTypes> clauses_;
   std::deque<MethodDefinition> methods_;
