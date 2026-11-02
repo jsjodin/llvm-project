@@ -203,13 +203,7 @@ void PrintType(llvm::raw_ostream &os, const Type &type,
     if (!type.constructor->module.empty()) {
       os << type.constructor->module << '.';
     }
-    // The primitive character type, as mmc names it: `char` is a type
-    // only where the module char is imported (see the register).
-    if (type.constructor->module.empty() && type.constructor->name == "char") {
-      os << "character";
-    } else {
-      os << type.constructor->name;
-    }
+    os << type.constructor->name;
     if (!type.arguments.empty()) {
       os << '(';
       list(type.arguments);

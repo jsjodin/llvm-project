@@ -57,10 +57,12 @@ const parser::SymName *NameResolution::FunctorName(const Unify &unify) const {
 
 namespace {
 
-// The primitive types (reference manual, "Primitive types"); mmc also
-// accepts character, the name the library's char module defines char as.
+// The primitive types (reference manual, "Primitive types"). The
+// character type is `character`, as in mmc; `char` is the library's char
+// module's name for it, a type only where that module is imported (see
+// the design document's register).
 constexpr const char *primitiveTypes[]{"int", "int8", "int16", "int32",
-    "int64", "uint", "uint8", "uint16", "uint32", "uint64", "float", "char",
+    "int64", "uint", "uint8", "uint16", "uint32", "uint64", "float",
     "character", "string"};
 
 std::string FullName(const parser::SymName &name) {

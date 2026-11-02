@@ -1144,7 +1144,7 @@ bool InstOps::Copied(const Type *type) {
   if (symbol.module.empty()) {
     static constexpr llvm::StringRef copied[]{"int", "int8", "int16",
         "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64",
-        "float", "char", "character"};
+        "float", "character"};
     return llvm::is_contained(copied, symbol.name);
   }
   std::vector<ConstructorTypes> constructors;

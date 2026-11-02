@@ -1,12 +1,16 @@
 % Undefined names, with notes like mmc's: a module not imported, a name of
 % a module imported only with use_module written unqualified, and a name
-% that exists with another arity.
+% that exists with another arity. The character type is `character`;
+% `char` is a type only where the module char is imported, as in mmc.
 %
 % RUN: not merkc -fc1 -fdebug-dump-resolved-names %s 2>&1 | FileCheck %s
 
 :- module undefined.
 :- interface.
 :- pred p(int::in) is det.
+:- pred c(char::in) is det.
+% CHECK: undefined.m:[[@LINE-1]]:11: error: undefined type char/0
+:- pred d(character::in) is det.
 :- implementation.
 :- import_module list.
 :- use_module string.
@@ -27,3 +31,5 @@ p(N) :-
     length([X, Y, Z, W], 2, 3).
 % CHECK: undefined.m:[[@LINE-1]]:5: error: undefined predicate length/3
 % CHECK: because: there is pred list.length/2
+c(_).
+d(_).
