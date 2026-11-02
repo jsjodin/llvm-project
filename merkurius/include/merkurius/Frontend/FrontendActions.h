@@ -15,6 +15,7 @@
 #ifndef MERKURIUS_FRONTEND_FRONTENDACTIONS_H_
 #define MERKURIUS_FRONTEND_FRONTENDACTIONS_H_
 
+#include "merkurius/Frontend/FrontendOptions.h"
 #include "merkurius/Parser/token.h"
 #include "llvm/ADT/StringRef.h"
 
@@ -25,6 +26,18 @@ class SourceFile;
 namespace merkurius::frontend {
 
 class CompilerInstance;
+
+} // namespace merkurius::frontend
+
+namespace mlir {
+class ModuleOp;
+} // namespace mlir
+
+namespace merkurius::codegen {
+class TargetInfo;
+} // namespace merkurius::codegen
+
+namespace merkurius::frontend {
 
 class FrontendAction {
 public:
@@ -148,6 +161,20 @@ class DebugDumpDeterminismAction : public FrontendAction {
 // where each checked procedure's type_infos come from.
 class DebugDumpPolymorphismAction : public FrontendAction {
   bool executeAction() override;
+};
+
+// Checks the source file as DebugDumpPolymorphismAction does, generates its
+// procedures' merk operations, and lowers them as far as the action's kind
+// says: -emit-merk, -emit-mlir, -emit-llvm, -S or -emit-obj.
+class CodeGenAction : public FrontendAction {
+public:
+  explicit CodeGenAction(ActionKind kind) : kind_{kind} {}
+
+private:
+  bool executeAction() override;
+  // Lowers the merk module as far as the action's kind says, and writes it.
+  bool Lower(mlir::ModuleOp, const codegen::TargetInfo &);
+  ActionKind kind_;
 };
 
 } // namespace merkurius::frontend

@@ -31,6 +31,10 @@ def E : Flag<["-"], "E">,
   HelpText<"Print the source as the lexer reads it">;
 def o : JoinedOrSeparate<["-"], "o">, MetaVarName<"<file>">,
   HelpText<"Write output to <file>">;
+def S : Flag<["-"], "S">,
+  HelpText<"Compile to the target's assembly">;
+def O : Joined<["-"], "O">, MetaVarName<"<level>">,
+  HelpText<"Optimization level, 0 to 3">;
 
 def fopenmp : Flag<["-"], "fopenmp">,
   HelpText<"Read %$omp directives">;
@@ -117,11 +121,32 @@ def fdebug_unparse_parenthesized_no_sema
   HelpText<"Print the parse tree as -fdebug-unparse-no-sema does, with every "
            "operator term in parentheses">;
 
+def triple : Separate<["-"], "triple">, MetaVarName<"<triple>">,
+  HelpText<"Compile for the target <triple>; by default the host">;
+def target_cpu : Separate<["-"], "target-cpu">, MetaVarName<"<cpu>">,
+  HelpText<"Compile for the CPU <cpu>">;
+def target_feature : Separate<["-"], "target-feature">,
+  MetaVarName<"<feature>">,
+  HelpText<"Turn a target feature on (+name) or off (-name)">;
+def emit_merk : Flag<["-"], "emit-merk">,
+  HelpText<"Write the module in the merk dialect">;
+def emit_mlir : Flag<["-"], "emit-mlir">,
+  HelpText<"Write the module lowered to MLIR's LLVM dialect">;
+def emit_llvm : Flag<["-"], "emit-llvm">,
+  HelpText<"Write the module's LLVM IR">;
+def emit_obj : Flag<["-"], "emit-obj">,
+  HelpText<"Write the module's object file">;
+
 } // let Visibility = [FC1Option]
 
 //===----------------------------------------------------------------------===//
 // Driver only
 //===----------------------------------------------------------------------===//
+
+def c : Flag<["-"], "c">,
+  HelpText<"Compile each module to an object file, without linking">;
+def target_EQ : Joined<["--"], "target=">, MetaVarName<"<triple>">,
+  HelpText<"Compile and link for the target <triple>">;
 
 def _HASH_HASH_HASH : Flag<["-"], "###">,
   HelpText<"Print the jobs to run, without running them">;
