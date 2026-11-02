@@ -15,12 +15,6 @@ namespace merkurius::semantics {
 
 namespace {
 
-bool HasExistentials(const Type &type) {
-  bool found{false};
-  ForEachExistential(type, [&](const Type &) { found = true; });
-  return found;
-}
-
 // Binds the type variables of `pattern`, a callee's argument type, to the
 // parts of `actual`, the type of the argument it is passed.
 void Match(const Type *pattern, const Type *actual,
@@ -149,8 +143,9 @@ public:
     if (!signature) {
       return;
     }
-    if (signature->existentials != 0 ||
-        !signature->existentialConstraints.empty()) {
+    bool existential{signature->existentials != 0 ||
+        !signature->existentialConstraints.empty()};
+    if (body.method && existential) {
       out_.unchecked = PolymorphismUnchecked::Existential;
       return;
     }
@@ -158,8 +153,10 @@ public:
     out_.names = signature->varNames;
     constraints_ = signature->constraints;
     out_.sources.assign(out_.parameters, nullptr);
-    std::vector<bool> constrained{
-        Constrained(out_.parameters, signature->constraints)};
+    unsigned universal{signature->typeVars - signature->existentials};
+    std::vector<bool> constrained{Constrained(out_.parameters, signature->constraints)};
+    std::vector<bool> existentiallyConstrained{
+        Constrained(out_.parameters, signature->existentialConstraints)};
     dictionaries_.assign(constraints_.size(), nullptr);
     auto hide{[&](unsigned firstVar, unsigned endVar, std::size_t first,
                   std::size_t end) {
@@ -186,46 +183,37 @@ public:
       hide(instanceVars, out_.parameters, instanceConstraints,
           constraints_.size());
     } else {
-      hide(0, out_.parameters, 0, constraints_.size());
+      // The type_infos the procedure gives for its existentially
+      // quantified type variables follow those it is given, and the
+      // typeclass_infos for its existential constraints follow the others.
+      hide(0, universal, 0, 0);
+      for (unsigned var{universal}; var < out_.parameters; ++var) {
+        if (!existentiallyConstrained[var]) {
+          out_.hidden.push_back({&result_.nodes_.emplace_back(TypeInfo{
+                                     TypeInfoKind::Parameter,
+                                     types_.types().Variable(var), var}),
+              nullptr, true});
+        }
+      }
+      hide(0, 0, 0, constraints_.size());
+      for (std::size_t j{0}; j < signature->existentialConstraints.size(); ++j) {
+        Dictionary dictionary{DictionaryKind::Parameter,
+            signature->existentialConstraints[j]};
+        dictionary.parameter = static_cast<unsigned>(constraints_.size() + j);
+        out_.hidden.push_back(
+            {nullptr, &result_.dictionaries_.emplace_back(std::move(dictionary)),
+                true});
+      }
     }
     // A constrained type variable's type_info is in the typeclass_info of
     // the first constraint that has it, as in mmc, at the place of the
     // type that has it; if the type is not the variable, the variable's is
     // an argument of the type's. mmc takes the type's as the variable's
     // (see the register).
-    for (unsigned var{0}; var < out_.parameters; ++var) {
-      if (!constrained[var]) {
-        continue;
-      }
-      for (std::size_t i{0}; i < constraints_.size() && !out_.sources[var];
-           ++i) {
-        const ClassConstraint &constraint{constraints_[i]};
-        unsigned supers{static_cast<unsigned>(
-            types_.SuperclassesOf(*constraint.typeclass).size())};
-        for (std::size_t j{0}; j < constraint.arguments.size(); ++j) {
-          const Type *type{constraint.arguments[j]};
-          if (!Contains(*type, var)) {
-            continue;
-          }
-          TypeInfo in{TypeInfoKind::Dictionary, type};
-          in.dictionary = dictionaries_[i];
-          in.index = supers + static_cast<unsigned>(j) + 1;
-          const TypeInfo *info{&result_.nodes_.emplace_back(std::move(in))};
-          while (type->kind != TypeKind::Variable) {
-            std::vector<const Type *> parts{Parts(*type)};
-            std::size_t k{0};
-            while (!Contains(*parts[k], var)) {
-              ++k;
-            }
-            type = parts[k];
-            TypeInfo argument{TypeInfoKind::Argument, type};
-            argument.arguments = {info};
-            argument.index = static_cast<unsigned>(k) + 1;
-            info = &result_.nodes_.emplace_back(std::move(argument));
-          }
-          out_.sources[var] = info;
-          break;
-        }
+    for (unsigned var{0}; var < universal; ++var) {
+      if (constrained[var]) {
+        out_.sources[var] = InConstraints(var, constraints_, dictionaries_,
+            [](const Type *type) { return type; });
       }
     }
     // The goals of the procedure's clauses, by their modes, with the
@@ -242,34 +230,189 @@ public:
     if (body.body) {
       Walk(body.body);
     }
+    if (existential) {
+      Results(*signature, clauses);
+    }
     if (out_.unchecked != PolymorphismUnchecked::None) {
       out_.goals.clear();
+      out_.results.clear();
     }
   }
 
 private:
+  // What each clause of an existentially typed procedure gives: the
+  // type_infos of the types it gives its existentially quantified type
+  // variables, which all its clauses give the same, and the typeclass_infos
+  // for its existential constraints as the type checker proved them, at the
+  // goal number after its goals.
+  void Results(const Signature &signature, llvm::ArrayRef<ClauseModes> clauses) {
+    const ProcedureBody &body{*out_.body};
+    std::vector<const Type *> binding(signature.typeVars, nullptr);
+    for (std::size_t i{0};
+         i < body.head.size() && i < signature.arguments.size(); ++i) {
+      Match(signature.arguments[i], TypeOf(body.head[i]), binding);
+    }
+    unsigned universal{signature.typeVars - signature.existentials};
+    std::vector<bool> constrained{
+        Constrained(signature.typeVars, signature.existentialConstraints)};
+    for (unsigned var{universal}; var < signature.typeVars; ++var) {
+      if (binding[var] && binding[var]->kind == TypeKind::Variable &&
+          binding[var]->var >= kExistentialVar) {
+        out_.givenAs[binding[var]->var] = var;
+      }
+    }
+    for (const ClauseModes &clause : clauses) {
+      PassedInfos given;
+      for (unsigned var{universal}; var < signature.typeVars; ++var) {
+        if (!constrained[var]) {
+          given.typeInfos.push_back(binding[var]
+                  ? Of(binding[var])
+                  : &result_.nodes_.emplace_back(TypeInfo{TypeInfoKind::Void}));
+        }
+      }
+      std::vector<const ConstraintProof *> proofs;
+      for (const GoalConstraint &constraint : clause.clause->constraints) {
+        if (constraint.goal == clause.clause->clause->goals) {
+          proofs.push_back(&constraint.proof);
+        }
+      }
+      if (proofs.size() != signature.existentialConstraints.size()) {
+        Unchecked(PolymorphismUnchecked::Constraints);
+        return;
+      }
+      for (const ConstraintProof *proof : proofs) {
+        const Dictionary *dictionary{Prove(*proof)};
+        if (!dictionary) {
+          return;
+        }
+        given.dictionaries.push_back(dictionary);
+      }
+      out_.results.push_back(std::move(given));
+    }
+  }
+
+  // The type_info of type variable `var`, in the typeclass_info, of
+  // `dictionaries`, of the first of `constraints` that has it, at the place
+  // of the type that has it; if the type is not the variable, the
+  // variable's is an argument of the type's. `instantiate` gives the
+  // constraints' types as the goal has them.
+  const TypeInfo *InConstraints(unsigned var,
+      llvm::ArrayRef<ClassConstraint> constraints,
+      llvm::ArrayRef<const Dictionary *> dictionaries,
+      llvm::function_ref<const Type *(const Type *)> instantiate) {
+    for (std::size_t i{0}; i < constraints.size(); ++i) {
+      const ClassConstraint &constraint{constraints[i]};
+      unsigned supers{static_cast<unsigned>(
+          types_.SuperclassesOf(*constraint.typeclass).size())};
+      for (std::size_t j{0}; j < constraint.arguments.size(); ++j) {
+        const Type *type{constraint.arguments[j]};
+        if (!Contains(*type, var)) {
+          continue;
+        }
+        TypeInfo in{TypeInfoKind::Dictionary, instantiate(type)};
+        in.dictionary = dictionaries[i];
+        in.index = supers + static_cast<unsigned>(j) + 1;
+        const TypeInfo *info{&result_.nodes_.emplace_back(std::move(in))};
+        while (type->kind != TypeKind::Variable) {
+          std::vector<const Type *> parts{Parts(*type)};
+          std::size_t k{0};
+          while (!Contains(*parts[k], var)) {
+            ++k;
+          }
+          type = parts[k];
+          TypeInfo argument{TypeInfoKind::Argument, instantiate(type)};
+          argument.arguments = {info};
+          argument.index = static_cast<unsigned>(k) + 1;
+          info = &result_.nodes_.emplace_back(std::move(argument));
+        }
+        return info;
+      }
+    }
+    return nullptr;
+  }
+
+  // A type with the types that goals give for their callees' existentially
+  // quantified type variables as variables, from kExistentialVar on, each
+  // as the one an assignment made it.
+  const Type *Normalize(const Type *type) {
+    return types_.types().SubstituteExistentials(type, [&](const Type *t) {
+      unsigned number{t->var};
+      for (auto it{same_.find(number)}; it != same_.end();
+           it = same_.find(number)) {
+        number = it->second;
+      }
+      return types_.types().Variable(kExistentialVar + number);
+    });
+  }
+
+  // An assignment X = Y of values whose types differ in the types goals
+  // gave them, as common subexpression elimination makes when it moves
+  // the same deconstruction out of the arms of a switch: in each arm, the
+  // arm's own types are those of the deconstruction it moved, whose
+  // type_infos and typeclass_infos the arm then uses, as mmc's do.
+  void Join(const Type *x, const Type *y) {
+    if (x->kind == TypeKind::Variable && y->kind == TypeKind::Variable &&
+        x->var >= kExistentialVar && y->var >= kExistentialVar) {
+      if (x->var != y->var) {
+        same_[x->var - kExistentialVar] = y->var - kExistentialVar;
+      }
+      return;
+    }
+    if (x->kind != y->kind || x->arguments.size() != y->arguments.size() ||
+        !x->result != !y->result) {
+      return;
+    }
+    for (std::size_t i{0}; i < x->arguments.size(); ++i) {
+      Join(x->arguments[i], y->arguments[i]);
+    }
+    if (x->result) {
+      Join(x->result, y->result);
+    }
+  }
+  ClassConstraint Normalize(const ClassConstraint &constraint) {
+    std::vector<const Type *> &types{result_.typeLists_.emplace_back()};
+    for (const Type *type : constraint.arguments) {
+      types.push_back(Normalize(type));
+    }
+    return ClassConstraint{constraint.typeclass, types};
+  }
+
   void Unchecked(PolymorphismUnchecked why) {
     if (out_.unchecked == PolymorphismUnchecked::None) {
       out_.unchecked = why;
     }
   }
 
-  const Type *TypeOf(BodyVar var) const { return out_.body->vars[var].type; }
+  const Type *TypeOf(BodyVar var) {
+    return Normalize(out_.body->vars[var].type);
+  }
 
+  // Whether a type has the procedure's type variables, or types that goals
+  // give.
   bool HasParameters(const Type &type) const {
     bool found{false};
-    ForEachVariable(type, [&](unsigned var) { found |= var < out_.parameters; });
+    ForEachVariable(type, [&](unsigned var) {
+      found |= var < out_.parameters || var >= kExistentialVar;
+    });
     return found;
   }
 
   // A type's type_info: the procedure's own for one of its type variables,
-  // void for another, a constant for a type without the procedure's type
-  // variables, as void is one, and otherwise a cell of its arguments'
-  // type_infos.
+  // the one that a goal gave for a type it gave, void for another, a
+  // constant for a type without the procedure's type variables, as void
+  // is one, and otherwise a cell of its arguments' type_infos.
   const TypeInfo *Of(const Type *type) {
+    type = Normalize(type);
     if (type->kind == TypeKind::Variable && type->var < out_.parameters &&
         out_.sources[type->var]) {
       return out_.sources[type->var];
+    }
+    if (type->kind == TypeKind::Variable && type->var >= kExistentialVar) {
+      auto given{existentials_.find(type->var)};
+      if (given != existentials_.end()) {
+        return given->second;
+      }
+      Unchecked(PolymorphismUnchecked::Existential);
     }
     auto it{made_.find(type)};
     if (it != made_.end()) {
@@ -292,17 +435,30 @@ private:
   // The typeclass_info for a constraint the type checker proved, or null if
   // the proof uses what is not analysed yet.
   const Dictionary *Prove(const ConstraintProof &proof) {
+    ClassConstraint constraint{Normalize(proof.constraint)};
+    if (proof.assumed && proof.goal) {
+      // By an existential constraint of a goal's callee or of the
+      // constructor it takes apart: by the typeclass_info the goal gave.
+      ClassConstraint assumed{Normalize(*proof.assumed)};
+      for (const Dictionary *given : given_) {
+        if (Same(given->constraint, assumed)) {
+          if (const Dictionary *found{Derive(given, constraint)}) {
+            return found;
+          }
+        }
+      }
+      Unchecked(PolymorphismUnchecked::Existential);
+      return nullptr;
+    }
     if (proof.assumed) {
-      if (proof.goal ||
-          proof.assumed < constraints_.data() ||
+      if (proof.assumed < constraints_.data() ||
           proof.assumed >= constraints_.data() + constraints_.size()) {
-        // An existential constraint, of a callee or of a constructor.
         Unchecked(PolymorphismUnchecked::Existential);
         return nullptr;
       }
       const Dictionary *found{
           Derive(dictionaries_[proof.assumed - constraints_.data()],
-              proof.constraint)};
+              constraint)};
       if (!found) {
         Unchecked(PolymorphismUnchecked::Constraints);
       }
@@ -312,8 +468,8 @@ private:
       Unchecked(PolymorphismUnchecked::Constraints);
       return nullptr;
     }
-    Dictionary dictionary{DictionaryKind::Constant, proof.constraint};
-    if (llvm::any_of(proof.constraint.arguments,
+    Dictionary dictionary{DictionaryKind::Constant, constraint};
+    if (llvm::any_of(constraint.arguments,
             [&](const Type *type) { return HasParameters(*type); })) {
       dictionary.kind = DictionaryKind::Instance;
       dictionary.instance = proof.head;
@@ -338,7 +494,7 @@ private:
       if (!Superclasses(dictionary)) {
         return nullptr;
       }
-      for (const Type *type : proof.constraint.arguments) {
+      for (const Type *type : constraint.arguments) {
         dictionary.types.push_back(Of(type));
       }
     }
@@ -382,6 +538,7 @@ private:
   // first, or by the instance that matches it.
   const Dictionary *Entail(const ClassConstraint &wanted) {
     std::vector<const Dictionary *> queue{dictionaries_.begin(), dictionaries_.end()};
+    queue.insert(queue.end(), given_.begin(), given_.end());
     for (std::size_t next{0}; next < queue.size() && queue.size() < 256;
          ++next) {
       const Dictionary *at{queue[next]};
@@ -482,48 +639,72 @@ private:
   }
 
   // The type_infos and typeclass_infos a goal passes to its callee, whose
-  // arguments are `arguments`.
-  void Pass(const Body *goal, const Procedure &callee,
-      llvm::ArrayRef<BodyVar> arguments) {
-    const Signature *signature{types_.SignatureOf(*callee.symbol)};
-    if (!signature) {
+  // arguments are `arguments`, and those it gives back: a call's, or a
+  // construction's or deconstruction's with an existentially typed
+  // constructor, which has only its existentially quantified type variables
+  // and constraints, given by a construction and given back by a
+  // deconstruction.
+  void Pass(const Body *goal, const Symbol &callee, const Signature &signature,
+      llvm::ArrayRef<BodyVar> arguments, bool constructor = false,
+      bool construction = false) {
+    if (signature.typeVars == 0 && signature.constraints.empty()) {
       return;
     }
-    if (signature->existentials != 0 ||
-        !signature->existentialConstraints.empty()) {
-      Unchecked(PolymorphismUnchecked::Existential);
-      return;
-    }
-    if (signature->typeVars == 0 && signature->constraints.empty()) {
-      return;
-    }
-    std::vector<const Type *> binding(signature->typeVars, nullptr);
+    unsigned universal{signature.typeVars - signature.existentials};
+    std::vector<const Type *> binding(signature.typeVars, nullptr);
     for (std::size_t i{0};
-         i < arguments.size() && i < signature->arguments.size(); ++i) {
-      Match(signature->arguments[i], TypeOf(arguments[i]), binding);
+         i < arguments.size() && i < signature.arguments.size(); ++i) {
+      Match(signature.arguments[i], TypeOf(arguments[i]), binding);
     }
     std::vector<bool> constrained{
-        Constrained(signature->typeVars, signature->constraints)};
+        Constrained(signature.typeVars, signature.constraints)};
+    std::vector<bool> existentiallyConstrained{
+        Constrained(signature.typeVars, signature.existentialConstraints)};
     PassedInfos passed;
-    for (std::size_t var{0}; var < binding.size(); ++var) {
-      if (constrained[var]) {
+    passed.constructor = constructor ? &callee : nullptr;
+    auto pass{[&](unsigned var) {
+      const Type *type{binding[var]};
+      passed.typeInfos.push_back(type ? Of(type)
+                                      : &result_.nodes_.emplace_back(
+                                            TypeInfo{TypeInfoKind::Void}));
+    }};
+    for (unsigned var{constructor ? universal : 0}; var < universal; ++var) {
+      if (!constrained[var]) {
+        pass(var);
+      }
+    }
+    // The types the goal gets for the existentially quantified type
+    // variables, each its own.
+    std::vector<unsigned> outputs;
+    for (unsigned var{universal}; var < signature.typeVars; ++var) {
+      if (construction) {
+        if (!existentiallyConstrained[var]) {
+          pass(var);
+        }
         continue;
       }
       const Type *type{binding[var]};
-      if (!type) {
-        passed.typeInfos.push_back(
-            &result_.nodes_.emplace_back(TypeInfo{TypeInfoKind::Void}));
-        continue;
-      }
-      if (semantics::HasExistentials(*type)) {
+      if (!type || type->kind != TypeKind::Variable ||
+          type->var < kExistentialVar) {
         Unchecked(PolymorphismUnchecked::Existential);
         return;
       }
-      passed.typeInfos.push_back(Of(type));
+      outputs.push_back(var);
+      if (!existentiallyConstrained[var]) {
+        TypeInfo info{TypeInfoKind::Output, type};
+        info.goal = goal;
+        info.callee = &callee;
+        const TypeInfo *made{&result_.nodes_.emplace_back(std::move(info))};
+        existentials_[type->var] = made;
+        passed.typeInfos.push_back(made);
+      }
     }
-    if (!signature->constraints.empty()) {
-      // The type checker's proofs of the callee's constraints, at the
-      // goal's number in its clause.
+    // The type checker's proofs of the callee's constraints, at the goal's
+    // number in its clause: a construction's are its constructor's
+    // existential constraints.
+    llvm::ArrayRef<ClassConstraint> wanted{
+        construction ? signature.existentialConstraints : signature.constraints};
+    if (!wanted.empty()) {
       std::vector<const ConstraintProof *> proofs;
       auto number{numbers_.find(goal->modes)};
       if (number != numbers_.end()) {
@@ -534,15 +715,11 @@ private:
           }
         }
       }
-      if (proofs.size() != signature->constraints.size()) {
+      if (proofs.size() != wanted.size()) {
         Unchecked(PolymorphismUnchecked::Constraints);
         return;
       }
       for (const ConstraintProof *proof : proofs) {
-        if (ConstraintHasExistentials(proof->constraint)) {
-          Unchecked(PolymorphismUnchecked::Existential);
-          return;
-        }
         const Dictionary *dictionary{Prove(*proof)};
         if (!dictionary) {
           return;
@@ -550,19 +727,58 @@ private:
         passed.dictionaries.push_back(dictionary);
       }
     }
-    out_.goals[goal] = std::move(passed);
+    if (!construction) {
+      auto instantiate{[&](const Type *type) {
+        return types_.types().Substitute(type, [&](unsigned var) {
+          return var < binding.size() && binding[var]
+              ? binding[var]
+              : types_.types().Variable(var);
+        });
+      }};
+      std::vector<const Dictionary *> given;
+      for (const ClassConstraint &constraint : signature.existentialConstraints) {
+        Dictionary dictionary{DictionaryKind::Output,
+            Instantiate(constraint, binding)};
+        dictionary.goal = goal;
+        dictionary.callee = &callee;
+        given.push_back(
+            &result_.dictionaries_.emplace_back(std::move(dictionary)));
+        given_.push_back(given.back());
+        passed.dictionaries.push_back(given.back());
+      }
+      for (unsigned var : outputs) {
+        if (existentiallyConstrained[var]) {
+          existentials_[binding[var]->var] = InConstraints(
+              var, signature.existentialConstraints, given, instantiate);
+        }
+      }
+    }
+    if (!passed.typeInfos.empty() || !passed.dictionaries.empty()) {
+      out_.goals[goal] = std::move(passed);
+    }
   }
 
-  bool ConstraintHasExistentials(const ClassConstraint &constraint) const {
-    return llvm::any_of(constraint.arguments,
-        [](const Type *type) { return semantics::HasExistentials(*type); });
+  // The constructor of a unification's functor, as the type checker chose
+  // it.
+  const Symbol *ConstructorOf(const Body *goal) const {
+    auto number{numbers_.find(goal->modes)};
+    if (number == numbers_.end() ||
+        number->second.second >= number->second.first->symbols.size()) {
+      return nullptr;
+    }
+    const Symbol *symbol{
+        number->second.first->symbols[number->second.second]};
+    return symbol && symbol->kind == SymbolKind::Constructor ? symbol : nullptr;
   }
 
   void Walk(const Body *goal) {
     switch (goal->kind) {
     case BodyKind::Call:
       if (goal->modes && goal->modes->callee) {
-        Pass(goal, *goal->modes->callee, goal->arguments);
+        if (const Signature *signature{
+                types_.SignatureOf(*goal->modes->callee->symbol)}) {
+          Pass(goal, *goal->modes->callee->symbol, *signature, goal->arguments);
+        }
       }
       break;
     case BodyKind::Unify:
@@ -575,7 +791,10 @@ private:
         // A function application, whose result is its last argument.
         std::vector<BodyVar> arguments{goal->arguments};
         arguments.push_back(goal->left);
-        Pass(goal, *goal->modes->callee, arguments);
+        if (const Signature *signature{
+                types_.SignatureOf(*goal->modes->callee->symbol)}) {
+          Pass(goal, *goal->modes->callee->symbol, *signature, arguments);
+        }
         break;
       }
       if (goal->modes && goal->modes->callee) {
@@ -588,13 +807,37 @@ private:
         }
         break;
       }
-      if (goal->isVar && goal->unify == UnifyKind::Test) {
-        const Type *type{TypeOf(goal->left)};
-        if (semantics::HasExistentials(*type)) {
-          Unchecked(PolymorphismUnchecked::Existential);
-        } else if (HasParameters(*type)) {
-          out_.goals[goal] = {{Of(type)}, {}};
+      if (goal->isVar) {
+        if (goal->unify == UnifyKind::Assign) {
+          Join(TypeOf(goal->left), TypeOf(goal->var));
         }
+        if (goal->unify == UnifyKind::Test) {
+          const Type *type{TypeOf(goal->left)};
+          if (HasParameters(*type)) {
+            out_.goals[goal] = {{Of(type)}, {}};
+          }
+        }
+        break;
+      }
+      // A construction or deconstruction with an existentially typed
+      // constructor; mmc deletes a construction whose result is not used.
+      if (const Symbol *constructor{ConstructorOf(goal)}) {
+        const Signature *signature{types_.SignatureOf(*constructor)};
+        if (!signature ||
+            (signature->existentials == 0 &&
+                signature->existentialConstraints.empty()) ||
+            (goal->modes && goal->modes->dead)) {
+          break;
+        }
+        if (goal->unify != UnifyKind::Construct &&
+            goal->unify != UnifyKind::Deconstruct) {
+          Unchecked(PolymorphismUnchecked::Existential);
+          break;
+        }
+        std::vector<BodyVar> arguments{goal->arguments};
+        arguments.push_back(goal->left);
+        Pass(goal, *constructor, *signature, arguments, true,
+            goal->unify == UnifyKind::Construct);
       }
       break;
     case BodyKind::Switch:
@@ -617,6 +860,13 @@ private:
   llvm::ArrayRef<ClassConstraint> constraints_;
   std::vector<const Dictionary *> dictionaries_; // by constraint
   std::map<const Type *, const TypeInfo *> made_;
+  // The type_infos that goals gave, by the variable of the type they gave,
+  // and the typeclass_infos, in the order of the goals.
+  llvm::DenseMap<unsigned, const TypeInfo *> existentials_;
+  std::vector<const Dictionary *> given_;
+  // The types that goals gave which assignments made the same as others,
+  // by their numbers.
+  llvm::DenseMap<unsigned, unsigned> same_;
   unsigned depth_{0};
   llvm::DenseMap<const GoalModes *, std::pair<const ClauseTypes *, unsigned>>
       numbers_;
@@ -645,7 +895,29 @@ void DumpProcedurePolymorphism(llvm::raw_ostream &os,
     if (var < procedure.parameters && var < procedure.names.size()) {
       return procedure.names[var].str();
     }
+    if (auto it{procedure.givenAs.find(var)}; it != procedure.givenAs.end() &&
+        it->second < procedure.names.size()) {
+      return procedure.names[it->second].str();
+    }
+    if (var >= kExistentialVar) {
+      return "E" + std::to_string(var - kExistentialVar);
+    }
     return "void";
+  }};
+  // The goal whose type_infos and typeclass_infos are printed: those it
+  // gives are its outputs, and those an earlier goal gave the outputs of
+  // that goal's callee.
+  const Body *current{nullptr};
+  auto output{[&](const Body *goal, const Symbol &callee) {
+    if (goal == current) {
+      os << " (output)";
+      return;
+    }
+    os << " (output of ";
+    if (!callee.module.empty()) {
+      os << callee.module << '.';
+    }
+    os << callee.name << ')';
   }};
   auto constraint{[&](const ClassConstraint &c) {
     PrintConstraint(os, c, name);
@@ -677,6 +949,9 @@ void DumpProcedurePolymorphism(llvm::raw_ostream &os,
       os << " (argument " << info->index << " of ";
       print(info->arguments.front());
       os << ')';
+      break;
+    case TypeInfoKind::Output:
+      output(info->goal, *info->callee);
       break;
     case TypeInfoKind::Void:
       break;
@@ -712,6 +987,9 @@ void DumpProcedurePolymorphism(llvm::raw_ostream &os,
           os << ')';
           break;
         }
+        case DictionaryKind::Output:
+          output(dictionary->goal, *dictionary->callee);
+          break;
         }
       }};
   if (!procedure.hidden.empty()) {
@@ -722,6 +1000,9 @@ void DumpProcedurePolymorphism(llvm::raw_ostream &os,
         os << name(info->parameter);
       } else {
         constraint(procedure.hidden[i].dictionary->constraint);
+      }
+      if (procedure.hidden[i].output) {
+        os << " (output)";
       }
     }
     os << '\n';
@@ -752,32 +1033,53 @@ void DumpProcedurePolymorphism(llvm::raw_ostream &os,
     }
     os << '\n';
   }
+  auto passed{[&](const PassedInfos &infos) {
+    bool first{true};
+    for (const TypeInfo *info : infos.typeInfos) {
+      os << (first ? "" : ", ");
+      first = false;
+      print(info);
+    }
+    for (const Dictionary *dictionary : infos.dictionaries) {
+      os << (first ? "" : ", ");
+      first = false;
+      printDictionary(dictionary);
+    }
+    os << '\n';
+  }};
   const ProcedureBody &body{*procedure.body};
   std::function<void(const Body *)> dump{[&](const Body *goal) {
     auto it{procedure.goals.find(goal)};
     if (it != procedure.goals.end()) {
+      current = goal;
       os << "    " << position(tokens.tokens[goal->tokens.first].spelling);
       if (goal->kind == BodyKind::Call || goal->unify == UnifyKind::Call) {
         os << ' '
            << (goal->kind == BodyKind::Call ? "call " : "application ")
            << *goal->modes->callee->symbol;
+      } else if (!goal->isVar) {
+        // A construction, 'new f'(...), or a deconstruction, with an
+        // existentially typed constructor.
+        bool construction{goal->unify == UnifyKind::Construct};
+        os << (construction ? " construct " : " deconstruct ");
+        if (const Symbol *constructor{it->second.constructor}) {
+          if (!constructor->module.empty()) {
+            os << constructor->module << '.';
+          }
+          if (construction) {
+            os << "'new " << constructor->name << "'";
+          } else {
+            os << constructor->name;
+          }
+          os << '/' << constructor->arity;
+        }
       } else {
         os << " unify " << body.vars[goal->left].name << " = "
            << body.vars[goal->var].name;
       }
       os << ": ";
-      bool first{true};
-      for (const TypeInfo *info : it->second.typeInfos) {
-        os << (first ? "" : ", ");
-        first = false;
-        print(info);
-      }
-      for (const Dictionary *dictionary : it->second.dictionaries) {
-        os << (first ? "" : ", ");
-        first = false;
-        printDictionary(dictionary);
-      }
-      os << '\n';
+      passed(it->second);
+      current = nullptr;
     }
     if (goal->kind == BodyKind::Unify && goal->lambda) {
       dump(goal->lambda);
@@ -793,6 +1095,10 @@ void DumpProcedurePolymorphism(llvm::raw_ostream &os,
   }};
   if (body.body) {
     dump(body.body);
+  }
+  for (const PassedInfos &results : procedure.results) {
+    os << "  results: ";
+    passed(results);
   }
 }
 
