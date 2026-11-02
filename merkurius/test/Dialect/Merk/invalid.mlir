@@ -8,6 +8,8 @@
 // RUN: not merkc -fc1 -emit-merk %t/entry.mlir 2>&1 | FileCheck %s --check-prefix=ENTRY
 // RUN: not merkc -fc1 -emit-merk %t/entry-arguments.mlir 2>&1 | FileCheck %s --check-prefix=ENTRY-ARGUMENTS
 // RUN: not merkc -fc1 -emit-merk %t/determinism.mlir 2>&1 | FileCheck %s --check-prefix=DETERMINISM
+// RUN: not merkc -fc1 -emit-merk %t/constant.mlir 2>&1 | FileCheck %s --check-prefix=CONSTANT
+// RUN: not merkc -fc1 -emit-llvm %t/foreign.mlir 2>&1 | FileCheck %s --check-prefix=FOREIGN
 
 //--- outputs.mlir
 // OUTPUTS: outputs.mlir:[[@LINE+3]]:5: error: 'merk.succeed' op has 0 outputs, but its procedure has 1
@@ -65,4 +67,20 @@ module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   merk.proc @p() attributes {determinism = #merk.determinism<sometimes>} {
     merk.succeed
   }
+}
+
+//--- constant.mlir
+// CONSTANT: constant.mlir:[[@LINE+3]]:10: error: 'merk.constant' op is not an integer, float or string constant
+module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
+  merk.proc @p() attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.constant "text" : i64
+    merk.succeed
+  }
+}
+
+//--- foreign.mlir
+// Without #line directives, clang's errors are in the temporary C file.
+// FOREIGN: merk-foreign-{{.*}}.c:1:1: error: unknown type name 'not_a_type'
+// FOREIGN: merkc: error: clang could not compile the module's foreign code
+module attributes {merk.foreign_code = "not_a_type f(void);\0A", llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 }

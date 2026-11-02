@@ -24,6 +24,8 @@ add_merkurius_library(MerkuriusCodeGen
   AllTargetsDescs
   AllTargetsInfos
   Core
+  IRReader
+  Linker
   MC
   Passes
   Support

@@ -8,9 +8,14 @@
 
 #include "merkurius/CodeGen/MLIRGen.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
+#include "merkurius/Parser/parse-tree.h"
+#include "merkurius/Parser/term-reader.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Verifier.h"
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
 #include <optional>
@@ -52,6 +57,105 @@ std::string MangledName(const Procedure &procedure) {
   return result;
 }
 
+// The C function of a procedure's foreign_proc: merk_foreign_, then its
+// symbol with `_` doubled, `.` as `_D` and `$` as `_S`.
+static std::string ForeignName(const Procedure &procedure) {
+  std::string result{"merk_foreign_"};
+  for (char c : MangledName(procedure)) {
+    result += c == '_' ? "__" : c == '.' ? "_D" : c == '$' ? "_S"
+                                                            : std::string(1, c);
+  }
+  return result;
+}
+
+// The only code point a UTF-8 string has.
+static std::optional<llvm::UTF32> OnlyCodePoint(llvm::StringRef text) {
+  if (text.empty()) {
+    return std::nullopt;
+  }
+  const auto *source{reinterpret_cast<const llvm::UTF8 *>(text.data())};
+  llvm::UTF32 codePoint;
+  if (llvm::convertUTF8Sequence(&source, source + text.size(), &codePoint,
+          llvm::strictConversion) != llvm::conversionOK ||
+      source != reinterpret_cast<const llvm::UTF8 *>(text.end())) {
+    return std::nullopt;
+  }
+  return codePoint;
+}
+
+// The value of an integer literal (reference manual, "Integer literals"):
+// decimal, 0b, 0o or 0x digits with `_` between them, or 0' and a
+// character, and a suffix for the sized types.
+static std::optional<llvm::APInt> IntegerValue(
+    llvm::StringRef text, unsigned bits) {
+  bool negative{text.consume_front("-")};
+  llvm::APInt value;
+  if (text.consume_front("0'")) {
+    std::optional<llvm::UTF32> codePoint{
+        OnlyCodePoint(parser::UnquoteSpelling(("'" + text + "'").str()))};
+    if (!codePoint) {
+      return std::nullopt;
+    }
+    value = llvm::APInt{bits, *codePoint};
+  } else {
+    unsigned radix{10};
+    if (text.consume_front("0b")) {
+      radix = 2;
+    } else if (text.consume_front("0o")) {
+      radix = 8;
+    } else if (text.consume_front("0x")) {
+      radix = 16;
+    }
+    // No digit is i or u.
+    text = text.take_until([](char c) { return c == 'i' || c == 'u'; });
+    std::string digits{text};
+    llvm::erase(digits, '_');
+    if (llvm::StringRef{digits}.getAsInteger(radix, value)) {
+      return std::nullopt;
+    }
+    value = value.zextOrTrunc(bits);
+  }
+  if (negative) {
+    value.negate();
+  }
+  return value;
+}
+
+// The C type of a Mercury type's values (reference manual, "C data passing
+// conventions"), for the primitive types code generation passes.
+static std::string CType(const semantics::Type &type) {
+  llvm::StringRef name{type.constructor->name};
+  if (name == "int") {
+    return "MR_Integer";
+  }
+  if (name == "uint") {
+    return "MR_Unsigned";
+  }
+  if (name == "float") {
+    return "MR_Float";
+  }
+  if (name == "character") {
+    return "MR_Char";
+  }
+  if (name == "string") {
+    return "MR_String";
+  }
+  return (name + "_t").str(); // intN and uintN
+}
+
+// The start of the C file of a module's foreign code: the C types of the
+// manual's "C data passing conventions".
+static constexpr llvm::StringLiteral kForeignPrelude{R"(/* Foreign code, written by merkc. */
+#include <stdint.h>
+typedef intptr_t MR_Integer;
+typedef uintptr_t MR_Unsigned;
+typedef double MR_Float;
+typedef int32_t MR_Char;
+typedef char *MR_String;
+typedef const char *MR_ConstString;
+typedef uintptr_t MR_Word;
+)"};
+
 namespace {
 
 // A Mercury type as code generation represents it: an MLIR type, or none
@@ -64,13 +168,15 @@ struct Represented {
 class MerkGenerator {
 public:
   MerkGenerator(mlir::MLIRContext &context, llvm::StringRef module,
-      const parser::TokenSequence &tokens, const parser::AllSources &sources,
+      const parser::ParseTree &tree, const parser::TokenSequence &tokens,
+      const parser::AllSources &sources, const semantics::TypeChecking &types,
       semantics::ModeChecking &modes,
       const semantics::DeterminismChecking &determinism,
       const semantics::PolymorphismAnalysis &polymorphism,
       const TargetInfo &target, parser::Messages &messages)
       : context_{context}, builder_{&context}, moduleName_{module},
-        tokens_{tokens}, sources_{sources}, modes_{modes},
+        tree_{tree}, tokens_{tokens}, sources_{sources}, types_{types},
+        modes_{modes},
         determinism_{determinism}, target_{target}, messages_{messages} {
     for (const semantics::ProcedurePolymorphism &procedure :
         polymorphism.procedures()) {
@@ -109,7 +215,15 @@ private:
   merk::ProcOp ProcFor(const Procedure &, llvm::ArrayRef<const semantics::Type *>,
       parser::CharBlock at);
   void GenerateBody(const ProcedureBody &);
+  // A procedure's body from its foreign_proc: a call of the C function
+  // around the foreign_proc's code, which is added to foreignCode_.
+  void GenerateForeign(const Procedure &, const parser::ForeignProcPragma &);
   void Goal(const Body &, const ProcedureBody &);
+  // X = c, for a literal or a character c; null after reporting a constant
+  // not handled.
+  mlir::Value Constant(const Body &, const ProcedureBody &);
+  // A #line directive for the C compiler, for a range of the source.
+  std::string LineDirective(parser::TokenRange);
   void Call(const Body &, const Procedure &, llvm::ArrayRef<BodyVar> arguments,
       const ProcedureBody &);
   // A variable's value; null for one of a type with no values.
@@ -118,8 +232,10 @@ private:
   mlir::MLIRContext &context_;
   mlir::OpBuilder builder_;
   llvm::StringRef moduleName_;
+  const parser::ParseTree &tree_;
   const parser::TokenSequence &tokens_;
   const parser::AllSources &sources_;
+  const semantics::TypeChecking &types_;
   semantics::ModeChecking &modes_;
   const semantics::DeterminismChecking &determinism_;
   const TargetInfo &target_;
@@ -128,6 +244,8 @@ private:
       polymorphism_;
   mlir::ModuleOp module_;
   llvm::DenseMap<const Procedure *, merk::ProcOp> procs_;
+  // The C functions of the module's foreign_procs.
+  std::string foreignCode_;
   // For the body being generated: each variable's value, and whether a
   // construct was not handled.
   llvm::DenseMap<BodyVar, mlir::Value> values_;
@@ -168,6 +286,9 @@ std::optional<Represented> MerkGenerator::Represent(
     }
     if (name == "character") {
       return Represented{builder_.getIntegerType(32)};
+    }
+    if (name == "string") {
+      return Represented{merk::StringType::get(&context_)};
     }
     return std::nullopt;
   }
@@ -290,6 +411,13 @@ void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
       }
       return;
     }
+    if (goal.unify == UnifyKind::Construct && !goal.isVar &&
+        goal.arguments.empty() && goal.source) {
+      if (mlir::Value value{Constant(goal, body)}) {
+        values_[goal.left] = value;
+      }
+      return;
+    }
     if (goal.unify == UnifyKind::Call && goal.modes && goal.modes->callee) {
       llvm::SmallVector<BodyVar> arguments(
           goal.arguments.begin(), goal.arguments.end());
@@ -304,6 +432,146 @@ void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
         "goals of kind " + std::string{semantics::EnumToString(goal.kind)});
     return;
   }
+}
+
+mlir::Value MerkGenerator::Constant(const Body &goal, const ProcedureBody &body) {
+  const semantics::Type *type{body.vars[goal.left].type};
+  std::optional<Represented> represented{Represent(type)};
+  if (!represented || represented->dummy) {
+    NotYet(Where(goal.tokens),
+        "values of type " + semantics::TypeToString(*type));
+    return nullptr;
+  }
+  mlir::Type mlirType{represented->type};
+  const semantics::Functor &functor{goal.source->functor};
+  mlir::TypedAttr value;
+  if (functor.kind == semantics::FunctorKind::Literal) {
+    llvm::StringRef text{functor.literal->text};
+    switch (functor.literal->kind) {
+    case parser::LiteralKind::Integer:
+      if (auto integer{mlir::dyn_cast<mlir::IntegerType>(mlirType)}) {
+        if (std::optional<llvm::APInt> v{
+                IntegerValue(text, integer.getWidth())}) {
+          value = builder_.getIntegerAttr(integer, *v);
+        }
+      }
+      break;
+    case parser::LiteralKind::Float:
+      if (auto f{mlir::dyn_cast<mlir::FloatType>(mlirType)}) {
+        std::string digits{text};
+        llvm::erase(digits, '_');
+        llvm::APFloat v{f.getFloatSemantics()};
+        if (auto status{v.convertFromString(
+                digits, llvm::APFloat::rmNearestTiesToEven)}) {
+          value = builder_.getFloatAttr(f, v);
+        } else {
+          llvm::consumeError(status.takeError());
+        }
+      }
+      break;
+    case parser::LiteralKind::String:
+      if (mlir::isa<merk::StringType>(mlirType)) {
+        value = mlir::StringAttr::get(parser::UnquoteSpelling(text), mlirType);
+      }
+      break;
+    }
+  } else if (functor.kind == semantics::FunctorKind::Name &&
+      mlirType.isInteger(32) && type->constructor->name == "character") {
+    // A character constant is its code point.
+    if (std::optional<llvm::UTF32> codePoint{
+            OnlyCodePoint(functor.name->name)}) {
+      value = builder_.getI32IntegerAttr(*codePoint);
+    }
+  }
+  if (!value) {
+    NotYet(Where(goal.tokens), "this unification");
+    return nullptr;
+  }
+  return merk::ConstantOp::create(
+      builder_, Location(goal.tokens), value.getType(), value);
+}
+
+std::string MerkGenerator::LineDirective(parser::TokenRange range) {
+  parser::CharBlock at{Where(range)};
+  if (auto provenance{sources_.GetProvenanceRange(at)}) {
+    if (auto pos{sources_.GetSourcePosition(provenance->start())}) {
+      std::string path{*pos->path};
+      std::string escaped;
+      for (char c : path) {
+        if (c == '"' || c == '\\') {
+          escaped += '\\';
+        }
+        escaped += c;
+      }
+      return "#line " + std::to_string(pos->line) + " \"" + escaped + "\"\n";
+    }
+  }
+  return "";
+}
+
+void MerkGenerator::GenerateForeign(
+    const Procedure &procedure, const parser::ForeignProcPragma &pragma) {
+  parser::CharBlock at{procedure.symbol->source};
+  failed_ = false;
+  const semantics::Signature *signature{
+      types_.SignatureOf(*procedure.symbol)};
+  if (!signature) {
+    return;
+  }
+  merk::ProcOp proc{ProcFor(procedure, signature->arguments, at)};
+  if (!proc) {
+    return;
+  }
+  if (procedure.symbol->exported) {
+    proc.setPublic();
+  }
+  // The foreign_proc's variables: its arguments', then a function's
+  // result.
+  llvm::SmallVector<const parser::ForeignProcArg *> arguments(
+      pragma.arguments.begin(), pragma.arguments.end());
+  if (pragma.result) {
+    arguments.push_back(pragma.result);
+  }
+  // The C function takes the inputs, and returns the only output or else
+  // stores the outputs through pointers after the inputs. A variable of a
+  // type with no values, such as io.state, is an MR_Word set to 0.
+  std::string name{ForeignName(procedure)};
+  std::string parameters, locals, stores;
+  llvm::SmallVector<std::pair<std::string, std::string>> outputs;
+  for (auto [argument, type, mode] :
+      llvm::zip(arguments, signature->arguments, procedure.modes)) {
+    std::string var{argument->var->name};
+    if (Represent(type)->dummy) {
+      locals += "  MR_Word " + var + " = 0;\n  (void)" + var + ";\n";
+    } else if (IsOutput(mode)) {
+      outputs.emplace_back(CType(*type), var);
+      locals += "  " + CType(*type) + " " + var + ";\n";
+    } else {
+      parameters += (parameters.empty() ? "" : ", ") + CType(*type) + " " + var;
+    }
+  }
+  std::string result{"void"};
+  if (outputs.size() == 1) {
+    result = outputs.front().first;
+    stores = "  return " + outputs.front().second + ";\n";
+  } else {
+    for (auto &[ctype, var] : outputs) {
+      parameters += (parameters.empty() ? "" : ", ") + ctype + " *merk_out_" + var;
+      stores += "  *merk_out_" + var + " = " + var + ";\n";
+    }
+  }
+  foreignCode_ += "\n" + result + " " + name + "(" +
+      (parameters.empty() ? "void" : parameters) + ") {\n" + locals + "  {\n" +
+      LineDirective(pragma.code->tokens) + pragma.code->text.str() +
+      "\n  }\n" + stores + "}\n";
+
+  mlir::Block *entry{proc.addEntryBlock()};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToStart(entry);
+  mlir::Location loc{Location(Where(pragma.tokens))};
+  auto call{merk::ForeignCallOp::create(builder_, loc,
+      proc.getFunctionType().getResults(), name, entry->getArguments())};
+  merk::SucceedOp::create(builder_, loc, call.getResults());
 }
 
 void MerkGenerator::GenerateBody(const ProcedureBody &body) {
@@ -367,10 +635,44 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
       mlir::ModuleOp::create(builder_.getUnknownLoc(), moduleName_)};
   module_ = *owned;
   target_.Record(module_);
+  // A procedure with a foreign_proc for C runs its C code instead of its
+  // clauses.
+  for (const Procedure &procedure : modes_.procedures()) {
+    if (const parser::ForeignProcPragma *pragma{
+            modes_.ForeignProcOf(procedure)}) {
+      GenerateForeign(procedure, *pragma);
+    }
+  }
   for (const ProcedureBody &body : determinism_.bodies()) {
-    if (body.procedure->symbol->module == moduleName_ || body.method) {
+    if ((body.procedure->symbol->module == moduleName_ || body.method) &&
+        (body.method || !modes_.ForeignProcOf(*body.procedure))) {
       GenerateBody(body);
     }
+  }
+  if (!foreignCode_.empty()) {
+    // The module's own foreign_decl and foreign_code for C come first.
+    std::string code{kForeignPrelude};
+    for (const parser::Item &item : tree_.items) {
+      const parser::ForeignCode *foreign{nullptr};
+      if (const auto *decl{std::get_if<const parser::ForeignDeclPragma *>(&item)};
+          decl && (*decl)->language == parser::ForeignLanguage::C) {
+        foreign = (*decl)->code;
+      } else if (const auto *c{
+                     std::get_if<const parser::ForeignCodePragma *>(&item)};
+          c && (*c)->language == parser::ForeignLanguage::C) {
+        foreign = (*c)->code;
+      }
+      if (!foreign) {
+        continue;
+      }
+      if (foreign->includeFile) {
+        code += "#include \"" + foreign->text.str() + "\"\n";
+      } else {
+        code += LineDirective(foreign->tokens) + foreign->text.str() + "\n";
+      }
+    }
+    code += foreignCode_;
+    module_->setAttr(kForeignCodeAttrName, builder_.getStringAttr(code));
   }
   // The program's entry: the main module's main(di, uo).
   for (const ProcedureBody &body : determinism_.bodies()) {
@@ -391,12 +693,14 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
 } // namespace
 
 mlir::OwningOpRef<mlir::ModuleOp> GenerateMerk(mlir::MLIRContext &context,
-    llvm::StringRef module, const parser::TokenSequence &tokens,
-    const parser::AllSources &sources, semantics::ModeChecking &modes,
+    llvm::StringRef module, const parser::ParseTree &tree,
+    const parser::TokenSequence &tokens, const parser::AllSources &sources,
+    const semantics::TypeChecking &types, semantics::ModeChecking &modes,
     const semantics::DeterminismChecking &determinism,
     const semantics::PolymorphismAnalysis &polymorphism,
     const TargetInfo &target, parser::Messages &messages) {
-  return MerkGenerator{context, module, tokens, sources, modes, determinism,
+  return MerkGenerator{context, module, tree, tokens, sources, types, modes,
+      determinism,
       polymorphism, target, messages}
       .Generate();
 }

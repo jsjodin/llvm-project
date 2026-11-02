@@ -15,6 +15,7 @@
 #define MERKURIUS_DIALECT_MERK_IR_MERKOPS_TD
 
 include "merkurius/Dialect/Merk/IR/MerkDialect.td"
+include "mlir/IR/BuiltinAttributeInterfaces.td"
 include "mlir/IR/SymbolInterfaces.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/FunctionInterfaces.td"
@@ -32,7 +33,7 @@ def Merk_ProcOp : Merk_Op<"proc", [
     module.
 
     ```mlir
-    merk.proc @hello.main_2_0() attributes {determinism = #merk<determinism det>} {
+    merk.proc @hello.main_2_0() attributes {determinism = #merk.determinism<det>} {
       merk.succeed
     }
     ```
@@ -89,6 +90,43 @@ def Merk_CallOp : Merk_Op<"call", [
 
     ```mlir
     %y = merk.call @m.double_2_0(%x) : (i64) -> i64
+    ```
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$callee, Variadic<AnyType>:$inputs);
+  let results = (outs Variadic<AnyType>:$outputs);
+  let assemblyFormat = [{
+    $callee `(` $inputs `)` attr-dict `:` functional-type($inputs, $outputs)
+  }];
+}
+
+def Merk_ConstantOp : Merk_Op<"constant", [
+    Pure, AllTypesMatch<["value", "result"]>
+  ]> {
+  let summary = "a constant of a primitive type";
+  let description = [{
+    An integer, float, character or string constant: a literal, or a
+    character's code point.
+
+    ```mlir
+    %n = merk.constant 42 : i64
+    %s = merk.constant "Hello\0A" : !merk.string
+    ```
+  }];
+  let arguments = (ins TypedAttrInterface:$value);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "attr-dict $value";
+  let hasVerifier = 1;
+}
+
+def Merk_ForeignCallOp : Merk_Op<"foreign_call"> {
+  let summary = "a call of a C function";
+  let description = [{
+    Calls a function of the module's foreign code (the module's
+    `merk.foreign_code` attribute), with C's calling convention: the
+    function of a procedure's `pragma foreign_proc`.
+
+    ```mlir
+    %y = merk.foreign_call @merk_foreign_m__double_2_0(%x) : (i64) -> i64
     ```
   }];
   let arguments = (ins FlatSymbolRefAttr:$callee, Variadic<AnyType>:$inputs);

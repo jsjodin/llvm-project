@@ -968,7 +968,7 @@ The output of semantic analysis is the annotated AST, one `ProcInfo` per procedu
 - **Values.** Once modes are known, each variable is produced exactly once on each path. So a map from variables to SSA values, updated at each producer and read at each consumer, is all MLIR generation needs, and the output is in SSA form from the start.
 - **Locations.** Each operation carries the location of the parse-tree node behind its semantic node, and variable names are recorded as `NameLoc`s for debug information.
 - **Types.** `int`, `float`, `char` and the sized integers become builtin MLIR types such as `i64` and `f64`. Other types become `!merk.term<…>`, closures `!merk.closure<…>`, and type infos `!merk.typeinfo`. `io.state` has no values to pass, so its arguments are left out.
-- **Done so far:** the procedures and goals listed in Lowering and code generation, "What is lowered so far".
+- **Done so far:** the procedures, goals and constants listed in Lowering and code generation, "What is lowered so far". A string is `!merk.string`.
 
 | Semantic form, as the `ProcInfo` classifies it | `merk` output |
 | --- | --- |
@@ -1421,7 +1421,7 @@ Two new dialects carry Mercury semantics until upstream dialects can take over: 
 | `merk.par_conj`, `merk.par_loop` | Parallel conjunction; a loop formed from a `%$omp` annotation |
 | `merk.entry` | Names the program's main procedure, which the runtime calls through `merk_main` |
 
-Defined so far (`Dialect/Merk/IR`): `merk.proc`, `merk.call`, `merk.succeed` and `merk.entry`, with the attributes `#merk.determinism<det>` and `#merk.address_spaces<…>` (Lowering and code generation, "Target information").
+Defined so far (`Dialect/Merk/IR`): `merk.proc`, `merk.call`, `merk.succeed`, `merk.entry`, `merk.constant` and `merk.foreign_call`, with the type `!merk.string` and the attributes `#merk.determinism<det>` and `#merk.address_spaces<…>` (Lowering and code generation, "Target information" and "What is lowered so far").
 
 A deterministic procedure, in proposed assembly syntax:
 
@@ -1464,11 +1464,13 @@ Code generation knows the target through `TargetInfo` (`CodeGen/TargetInfo.h`), 
 
 ### What is lowered so far
 
-Code generation (`CodeGen/MLIRGen.cpp`) makes `merk` for procedures that are `det` or `cc_multi`, have no hidden arguments, and whose values are of primitive numeric types or `io.state`, whose bodies are conjunctions, assignments, calls and function applications. A value of type `io.state` is not passed, so `main(!IO)` takes no arguments. Anything else is reported as not yet implemented, at the first such construct of a procedure. Until terms have layouts, `merk` is lowered to MLIR's LLVM dialect directly (`CodeGen/Lowering.cpp`), as ClangIR's DirectToLLVM lowers CIR; `mrt` comes between them with layouts. Then MLIR translates it to LLVM IR, LLVM's pipeline for `-O0` to `-O3` optimizes it, and the `TargetMachine` writes assembly or an object file.
+Code generation (`CodeGen/MLIRGen.cpp`) makes `merk` for procedures that are `det` or `cc_multi`, have no hidden arguments, and whose values are of primitive types or `io.state`, whose bodies are conjunctions, assignments, constants, calls and function applications, or that have a `foreign_proc` for C. A value of type `io.state` is not passed, so `main(!IO)` takes no arguments. Anything else is reported as not yet implemented, at the first such construct of a procedure. Until terms have layouts, `merk` is lowered to MLIR's LLVM dialect directly (`CodeGen/Lowering.cpp`), as ClangIR's DirectToLLVM lowers CIR; `mrt` comes between them with layouts. Then MLIR translates it to LLVM IR, LLVM's pipeline for `-O0` to `-O3` optimizes it, and the `TargetMachine` writes assembly or an object file.
 
 - **Symbols.** A procedure's symbol is its module, then its name, its arity, with an `f` before it for a function, and its mode number, joined by `_`: `hello.main_2_0`, `list.length_f1_0`. Other characters than letters, digits and `_` in a name become `$` and two hex digits, so `int.+` is `int.$2b_f2_0`. A procedure defined and not exported has internal linkage.
 - **Entry.** `merk.entry` names the main module's `main/2`; it becomes `merk_main`, a C function that calls it, which the runtime's `main` calls (Runtime system).
-- **Tests.** `test/CodeGen` checks the `merk`, the LLVM dialect and the LLVM IR of Mercury modules in one file each, and `Driver/compile.test` builds and runs a program. `test/Dialect/Merk` checks the dialect alone: that `.mlir` modules print as they parse and lower for the target they record (`ops.mlir`), and its verifiers' errors, at file:line:column (`invalid.mlir`).
+- **Constants.** An integer literal, in any base, with `_` and a size suffix, or `0'c`, is a `merk.constant` of its type's width; a float is an `f64`; a character is its code point, an `i32`; a string is a `!merk.string`, with its escapes replaced, and becomes a private constant global of its bytes and a NUL, one for each distinct string in a module. In C a string is `MR_String`, a `char *`, as the reference manual's "C data passing conventions" has it.
+- **Foreign code.** A procedure with a `foreign_proc` for C runs its C code instead of its clauses. Mode analysis gives each `foreign_proc` the procedure whose modes its arguments have, and reports one with no such procedure, or two for one procedure, as mmc does. Code generation puts the code in a C function, `merk_foreign_` and the procedure's symbol with `_` doubled, `.` as `_D` and `$` as `_S`, which the procedure calls with `merk.foreign_call`: the function takes the inputs as parameters, as the manual's C types, and returns the only output, or stores several through pointers after the inputs; a variable of a type with no values, such as `io.state`, is an `MR_Word` set to 0. The module records its C code in its `merk.foreign_code` attribute: the C types `MR_Integer`, `MR_Unsigned`, `MR_Float`, `MR_Char`, `MR_String` and `MR_Word`, the module's own `foreign_decl` and `foreign_code` for C, and the functions, with `#line` directives, so that clang reports errors at their lines in the Mercury source. When the module is translated to LLVM IR, `-fc1` writes the code to a temporary file, has `clang`, beside `merkc` or else on the `PATH`, compile it to bitcode for the module's target and optimization level, links it into the module and makes the functions internal, so LLVM's inliner can put the C code into its procedure. A module without foreign code does not need clang. Not yet: a `foreign_decl` in the interface, which importing modules should see; `SUCCESS_INDICATOR`, for `semidet` code; and foreign types.
+- **Tests.** `test/CodeGen` checks the `merk`, the LLVM dialect and the LLVM IR of Mercury modules in one file each, and runs the programs that print, checking their output (`hello.m`, `foreign-proc.m`, and `io-output.m`, whose output is mmc's); `Driver/compile.test` builds and runs a program. `test/Dialect/Merk` checks the dialect alone: that `.mlir` modules print as they parse and lower for the target they record (`ops.mlir`), and its verifiers' errors, at file:line:column (`invalid.mlir`).
 
 ### 1. Type representation
 
@@ -1595,7 +1597,7 @@ The unparser's exact, canonical and fully parenthesized modes (Front end, Unpars
 
 ### Linking and offloading
 
-- **Linking** goes through `clang` as the link driver. It is given the objects, the runtime library, `-fopenmp` when any module used it (so Clang links its OpenMP runtime), and the user's `-L`, `-l` and `-fuse-ld=` options. Clang supplies the C start-up files, the C library and the sanitizer runtimes, as `cc` does for rustc and GHC. Implemented so far: without `-E`, `-S` or `-c`, the driver compiles each module to a temporary object file and runs `clang`, beside `merkc` or else on the `PATH`, with the objects, `--target=` if given, and `-L` for the `lib` directory beside `bin`, where `libmerkrt.a` is, and `-lmerkrt`; object files on the command line are linked too.
+- **Linking** goes through `clang` as the link driver. It is given the objects, the runtime library, `-fopenmp` when any module used it (so Clang links its OpenMP runtime), and the user's `-L`, `-l` and `-fuse-ld=` options. Clang supplies the C start-up files, the C library and the sanitizer runtimes, as `cc` does for rustc and GHC. Implemented so far: without `-E`, `-S` or `-c`, the driver compiles each module to a temporary object file and runs `clang`, beside `merkc` or else on the `PATH`, with the objects, `--target=` if given, and `-L` for the `lib` directory beside `bin`, where `libmerkstd.a` and `libmerkrt.a` are, `-lmerkstd`, `-lmerkrt` and `-lm`, since the library's foreign code may call C's maths library; object files on the command line are linked too. `libmerkstd` is the standard library's modules that have an implementation so far, `io`'s output predicates, compiled by `merkc` for the host when merkc is built; so a program for another target links only if it calls none of them.
 - **Offloading**, when device offloading arrives (deferred, like `createMapInfoOp`), follows the job sequence Flang builds in `Flang::addOffloadOptions`:
   1. host `-fc1` to LLVM IR;
   2. one device `-fc1` per `--offload-arch`, with `-fopenmp-is-target-device` and `-fopenmp-host-ir-file-path` naming the host IR;
@@ -1682,7 +1684,7 @@ Breakpoint 1: where = sumsq`add_square/4 (in, in, in, out) at sumsq.m:10
 
 ## Runtime system
 
-The runtime gives each process its own stack, heap and mailboxes, schedules processes M:N over one worker thread per core, and never stops every process at once. It is written in C++, like the compiler, and linked into every executable. So far `libmerkrt` (`runtime/`) is only the program's C `main`, which calls `merk_main` and returns exit status 0.
+The runtime gives each process its own stack, heap and mailboxes, schedules processes M:N over one worker thread per core, and never stops every process at once. It is written in C++, like the compiler, and linked into every executable. So far `libmerkrt` (`runtime/`) is only the program's C `main`, which calls `merk_main` and returns exit status 0; output goes through C's stdio, which is flushed when the program exits.
 
 ### Processes and scheduler
 

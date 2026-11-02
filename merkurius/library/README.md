@@ -3,8 +3,17 @@
 These are declaration-only stubs of standard library modules, so that the
 front end can load the interfaces a program imports and resolve their
 names before the library is written (design document, "Standard library,
-compatibility and testing"). Each file has an interface section and no
-implementation.
+compatibility and testing"). Each file has an interface section; most
+have no implementation yet.
+
+`io.m` implements its output predicates on the standard output,
+`write_string`, `write_int`, `write_char`, `write_float` and `nl`, with
+`foreign_proc`s for C. The build compiles the modules that have an
+implementation into `libmerkstd.a` (the list is in `CMakeLists.txt`),
+which the driver links into every program. `write_float` writes as mmc
+does, with the fewest significant digits, from 15 to 17, that read back
+as the same float, and `.0` if that has no fraction or exponent; the
+behaviour was found by running mmc's programs, not from its library.
 
 The declarations are those of the Mercury 22.01 library reference manual,
 which the clean-room rules allow as the source of the library's

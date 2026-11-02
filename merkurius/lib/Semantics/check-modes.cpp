@@ -200,6 +200,7 @@ private:
   const Symbol *ModeDeclTarget(const parser::ModeDecl &,
       const Symbol *typeclass, const ModuleSymbols &);
   void BuildProcedures(llvm::ArrayRef<parser::Item>, const ModuleSymbols &);
+  void MatchForeignProcs(const parser::ParseTree &);
   void CheckForTypes(
       const Symbol &, llvm::ArrayRef<ArgMode>, parser::CharBlock where);
 
@@ -941,6 +942,67 @@ void ModeChecker::Run(const parser::ParseTree &tree) {
   BuildProcedures(tree.items, own);
   for (const Procedure &procedure : result_.procedures_) {
     result_.bySymbol_[procedure.symbol].push_back(&procedure);
+  }
+  MatchForeignProcs(tree);
+}
+
+// Each foreign_proc for C is of the procedure whose modes its arguments'
+// are (reference manual, "pragma foreign_proc"); C is the language merkc's
+// foreign code is in.
+void ModeChecker::MatchForeignProcs(const parser::ParseTree &tree) {
+  const ModuleSymbols &own{resolution_.module()};
+  for (const parser::Item &item : tree.items) {
+    const auto *pragma{std::get_if<const parser::ForeignProcPragma *>(&item)};
+    if (!pragma || (*pragma)->language != parser::ForeignLanguage::C) {
+      continue;
+    }
+    const parser::ForeignProcPragma &proc{**pragma};
+    SymbolKind kind{proc.kind == parser::PredOrFunc::Function
+            ? SymbolKind::Function
+            : SymbolKind::Predicate};
+    const Symbol *symbol{nullptr};
+    for (const Symbol *s : own.Lookup(proc.name->name)) {
+      if (s->kind == kind && s->arity == proc.arguments.size()) {
+        symbol = s;
+      }
+    }
+    if (!symbol) {
+      continue; // reported by purity checking
+    }
+    llvm::SmallVector<parser::Mode> modes;
+    for (const parser::ForeignProcArg *argument : proc.arguments) {
+      modes.push_back(argument->mode);
+    }
+    std::optional<parser::Mode> resultMode;
+    if (proc.result) {
+      resultMode = proc.result->mode;
+    }
+    Declared declared{ConvertDeclaration(modes, resultMode, std::nullopt,
+        std::nullopt, {}, Source(proc.name->tokens))};
+    const Procedure *found{nullptr};
+    for (const Procedure *procedure : result_.bySymbol_.lookup(symbol)) {
+      if (llvm::ArrayRef<ArgMode>{declared.modes} == procedure->modes) {
+        found = procedure;
+      }
+    }
+    if (!found) {
+      // mmc: "`:- pragma foreign_proc' declaration for undeclared mode of
+      // predicate `p'/2."
+      messages_.Say(Source(proc.tokens),
+          "this foreign_proc is for a mode %s does not have"_err_en_US,
+          Text(*symbol));
+      continue;
+    }
+    auto [it, inserted]{result_.foreignProcs_.try_emplace(found, &proc)};
+    if (!inserted) {
+      // mmc: "duplicate `:- pragma foreign_proc' declaration for this mode
+      // of predicate `p'/2 in C."
+      messages_.Say(Source(proc.tokens),
+              "%s has two foreign_procs for C in this mode"_err_en_US,
+              Text(*symbol))
+          .Attach(Source(it->second->tokens),
+              "the other foreign_proc is here"_because_en_US);
+    }
   }
 }
 

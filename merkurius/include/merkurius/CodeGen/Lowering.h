@@ -40,6 +40,12 @@ llvm::LogicalResult LowerToLLVMDialect(mlir::ModuleOp, const TargetInfo &);
 std::unique_ptr<llvm::Module> TranslateToLLVMIR(
     mlir::ModuleOp, llvm::LLVMContext &, const TargetInfo &);
 
+// Compiles the module's foreign code (its merk.foreign_code attribute), if
+// it has any, with clang, and links it into its LLVM IR; false after
+// setting `error` if it cannot.
+bool LinkForeignCode(llvm::Module &, mlir::ModuleOp, const TargetInfo &,
+    llvm::StringRef clang, std::string &error);
+
 // Runs LLVM's pipeline for the target's optimization level, -O0 to -O3.
 void OptimizeLLVMIR(llvm::Module &, const TargetInfo &);
 

@@ -10,6 +10,7 @@
 #include "merkurius/CodeGen/Lowering.h"
 #include "merkurius/CodeGen/MLIRGen.h"
 #include "merkurius/Driver/Options.h"
+#include "llvm/Support/FileSystem.h"
 #include "merkurius/Frontend/CompilerInstance.h"
 #include "merkurius/Parser/convert.h"
 #include "merkurius/Parser/lexer.h"
@@ -782,8 +783,8 @@ bool CodeGenAction::executeAction() {
     return false;
   }
   module = codegen::GenerateMerk(context, r.resolution->module().name(),
-      r.tokens, ci.getAllSources(), *a.modes, *a.determinism, *polymorphism,
-      *target, r.messages);
+      *r.tree, r.tokens, ci.getAllSources(), *a.types, *a.modes,
+      *a.determinism, *polymorphism, *target, r.messages);
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   if (r.messages.AnyFatalError()) {
     return false;
@@ -828,6 +829,13 @@ bool CodeGenAction::Lower(
       codegen::TranslateToLLVMIR(module, llvmContext, target)};
   if (!llvmModule) {
     options::reportError("cannot translate the module to LLVM IR");
+    return false;
+  }
+  if (!codegen::LinkForeignCode(*llvmModule, module, target,
+          options::findClang(llvm::sys::fs::getMainExecutable(
+              "merkc", reinterpret_cast<void *>(&options::findClang))),
+          error)) {
+    options::reportError(error);
     return false;
   }
   codegen::OptimizeLLVMIR(*llvmModule, target);

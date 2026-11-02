@@ -7,6 +7,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "merkurius/Driver/Options.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/Program.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -64,6 +67,18 @@ std::optional<InputArgList> parseArgs(
     return std::nullopt;
   }
   return parsed;
+}
+
+std::string findClang(llvm::StringRef executable) {
+  llvm::SmallString<128> beside{llvm::sys::path::parent_path(executable)};
+  llvm::sys::path::append(beside, "clang");
+  if (llvm::sys::fs::can_execute(beside)) {
+    return beside.str().str();
+  }
+  if (llvm::ErrorOr<std::string> found{llvm::sys::findProgramByName("clang")}) {
+    return *found;
+  }
+  return "";
 }
 
 } // namespace merkurius::options

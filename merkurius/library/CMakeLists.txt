@@ -31,3 +31,32 @@ install(FILES ${library_sources} DESTINATION lib/merkurius
   COMPONENT merkc)
 install(FILES ${sound_array} DESTINATION lib/merkurius/sound
   COMPONENT merkc)
+
+# libmerkstd: the modules that have an implementation so far, compiled by
+# merkc for the host, as the driver links them into every program. Their
+# foreign_procs are compiled by clang, so it is built first when it is part
+# of the build.
+set(compiled_modules io)
+set(compiled_objects)
+foreach(module ${compiled_modules})
+  set(object ${CMAKE_CURRENT_BINARY_DIR}/${module}.o)
+  set(depends merkc ${library_outputs})
+  if(TARGET clang)
+    list(APPEND depends clang)
+  endif()
+  add_custom_command(OUTPUT ${object}
+    COMMAND merkc -c -O2 ${library_dir}/${module}.m -o ${object}
+    DEPENDS ${depends}
+    COMMENT "Compiling the library module ${module}.m")
+  list(APPEND compiled_objects ${object})
+endforeach()
+set_source_files_properties(${compiled_objects} PROPERTIES
+  EXTERNAL_OBJECT TRUE GENERATED TRUE)
+add_library(merkstd STATIC ${compiled_objects})
+set_target_properties(merkstd PROPERTIES
+  LINKER_LANGUAGE C
+  ARCHIVE_OUTPUT_DIRECTORY ${LLVM_LIBRARY_OUTPUT_INTDIR}
+  FOLDER "Merkurius/Library")
+install(TARGETS merkstd
+  ARCHIVE DESTINATION lib${LLVM_LIBDIR_SUFFIX}
+  COMPONENT merkc)

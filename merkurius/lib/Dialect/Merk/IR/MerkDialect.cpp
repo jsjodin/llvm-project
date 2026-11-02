@@ -21,7 +21,14 @@ using namespace merkurius::merk;
 #define GET_ATTRDEF_CLASSES
 #include "merkurius/Dialect/Merk/IR/MerkAttrs.cpp.inc"
 
+#define GET_TYPEDEF_CLASSES
+#include "merkurius/Dialect/Merk/IR/MerkTypes.cpp.inc"
+
 void MerkDialect::initialize() {
+  addTypes<
+#define GET_TYPEDEF_LIST
+#include "merkurius/Dialect/Merk/IR/MerkTypes.cpp.inc"
+      >();
   addAttributes<
 #define GET_ATTRDEF_LIST
 #include "merkurius/Dialect/Merk/IR/MerkAttrs.cpp.inc"
@@ -85,6 +92,23 @@ llvm::LogicalResult SucceedOp::verify() {
       return emitOpError("output of type ")
           << output.getType() << " does not match the procedure's " << type;
     }
+  }
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
+// ConstantOp
+//===----------------------------------------------------------------------===//
+
+llvm::LogicalResult ConstantOp::verify() {
+  mlir::Type type{getType()};
+  if (mlir::isa<StringType>(type) ? !mlir::isa<mlir::StringAttr>(getValue())
+          : mlir::isa<mlir::IntegerType>(type)
+          ? !mlir::isa<mlir::IntegerAttr>(getValue())
+          : mlir::isa<mlir::FloatType>(type)
+          ? !mlir::isa<mlir::FloatAttr>(getValue())
+          : true) {
+    return emitOpError("is not an integer, float or string constant");
   }
   return mlir::success();
 }
