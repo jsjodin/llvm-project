@@ -7,13 +7,25 @@ compatibility and testing"). Each file has an interface section; most
 have no implementation yet.
 
 `io.m` implements its output predicates on the standard output,
-`write_string`, `write_int`, `write_char`, `write_float` and `nl`, with
-`foreign_proc`s for C. The build compiles the modules that have an
-implementation into `libmerkstd.a` (the list is in `CMakeLists.txt`),
-which the driver links into every program. `write_float` writes as mmc
+`write_string`, `write_int`, `write_uint`, the sized integers' writes,
+`write_char`, `write_float` and `nl`, with `foreign_proc`s for C, and
+the narrower integers' writes in Mercury. `float.m` implements its
+functions but `hash`, and `math.m` all of its
+functions but `solve_quadratic`, with C's math library. The arithmetic
+and comparisons of `int`, `uint`, the sized integers and `float` are
+built into code generation, so those modules need no implementation for
+them. The build compiles the modules that have an implementation into
+`libmerkstd.a` (the list is in `CMakeLists.txt`), which the driver links
+into every program. An exception the library throws, such as math's
+`domain_error`, is reported by the runtime's `merk_uncaught_exception`
+until exceptions can be caught. `write_float` writes as mmc
 does, with the fewest significant digits, from 15 to 17, that read back
 as the same float, and `.0` if that has no fraction or exponent; the
-behaviour was found by running mmc's programs, not from its library.
+behaviour was found by running mmc's programs, not from its library. So
+were the float functions' rounding and edge cases: `round(X)` is
+`floor(X + 0.5)`, `max` and `min` are those of `>=` and `=<`, `pow`
+multiplies by squaring, a float out of `int`'s range converts to
+`min_int`, and math's checks throw `domain_error("math.Name")`.
 
 The declarations are those of the Mercury 22.01 library reference manual,
 which the clean-room rules allow as the source of the library's

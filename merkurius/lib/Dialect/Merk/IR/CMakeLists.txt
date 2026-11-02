@@ -5,6 +5,7 @@ add_merkurius_library(MerkuriusMerkDialect
   MerkOpsIncGen
 
   LINK_LIBS
+  MLIRArithDialect
   MLIRFunctionInterfaces
   MLIRIR
   MLIRSideEffectInterfaces

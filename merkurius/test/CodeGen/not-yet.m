@@ -8,7 +8,7 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module list.
+:- import_module int, list.
 
 main(!IO) :-
     X = [1, 2],
@@ -19,15 +19,20 @@ main(!IO) :-
 % CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for values of type list.list(int)
 p(_).
 
-:- pred q(int::in, int::out) is semidet.
-% CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for semidet procedures
-q(X, X).
+:- pred q(int::in) is semidet.
+q(X) :-
+    ( X > 0 ; X < -5 ).
+% CHECK: not-yet.m:[[@LINE-1]]:7: error: not yet implemented: code generation for disjunctions
 
 :- pred r(T::in, T::out) is det.
 % CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for polymorphic procedures
 r(X, X).
 
-:- pred u(int::in, int::out) is det.
-u(X, Y) :-
-    ( if X = 0 then Y = 1 else Y = 2 ).
-% CHECK: not-yet.m:[[@LINE-1]]:7: error: not yet implemented: code generation for goals of kind IfThenElse
+:- func w(int) = int.
+w(X) = pow(X, 3).
+% CHECK: not-yet.m:[[@LINE-1]]:8: error: not yet implemented: code generation for calls of int.pow/2
+
+:- pred u(int::out) is multi.
+% CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for multi procedures
+u(1).
+u(2).

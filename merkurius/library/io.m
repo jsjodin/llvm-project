@@ -63,6 +63,24 @@
     is det.
 :- pred write_int(int::in, io::di, io::uo) is det.
 :- pred write_int(io.text_output_stream::in, int::in, io::di, io::uo) is det.
+:- pred write_uint(uint::in, io::di, io::uo) is det.
+:- pred write_uint(io.text_output_stream::in, uint::in, io::di, io::uo) is det.
+:- pred write_int8(int8::in, io::di, io::uo) is det.
+:- pred write_int8(io.text_output_stream::in, int8::in, io::di, io::uo) is det.
+:- pred write_int16(int16::in, io::di, io::uo) is det.
+:- pred write_int16(io.text_output_stream::in, int16::in, io::di, io::uo) is det.
+:- pred write_int32(int32::in, io::di, io::uo) is det.
+:- pred write_int32(io.text_output_stream::in, int32::in, io::di, io::uo) is det.
+:- pred write_int64(int64::in, io::di, io::uo) is det.
+:- pred write_int64(io.text_output_stream::in, int64::in, io::di, io::uo) is det.
+:- pred write_uint8(uint8::in, io::di, io::uo) is det.
+:- pred write_uint8(io.text_output_stream::in, uint8::in, io::di, io::uo) is det.
+:- pred write_uint16(uint16::in, io::di, io::uo) is det.
+:- pred write_uint16(io.text_output_stream::in, uint16::in, io::di, io::uo) is det.
+:- pred write_uint32(uint32::in, io::di, io::uo) is det.
+:- pred write_uint32(io.text_output_stream::in, uint32::in, io::di, io::uo) is det.
+:- pred write_uint64(uint64::in, io::di, io::uo) is det.
+:- pred write_uint64(io.text_output_stream::in, uint64::in, io::di, io::uo) is det.
 :- pred write_float(float::in, io::di, io::uo) is det.
 :- pred write_float(io.text_output_stream::in, float::in, io::di, io::uo)
     is det.
@@ -118,6 +136,14 @@
 
 :- implementation.
 
+:- import_module int16.
+:- import_module int32.
+:- import_module int64.
+:- import_module int8.
+:- import_module uint16.
+:- import_module uint32.
+:- import_module uint8.
+
 % The predicates implemented so far write to the standard output with C's
 % stdio, which the runtime flushes when the program exits.
 
@@ -149,6 +175,30 @@
 "
     printf(\"%\" PRIdPTR, N);
 ").
+
+:- pragma foreign_proc("C",
+    write_uint(N::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    printf(\"%\" PRIuPTR, N);
+").
+
+:- pragma foreign_proc("C",
+    write_uint64(N::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    printf(\"%\" PRIu64, N);
+").
+
+% The narrower integers are written as ints, and int64 as an int, which has
+% its width on the targets so far.
+write_int8(N, !IO) :- write_int(int8.to_int(N), !IO).
+write_int16(N, !IO) :- write_int(int16.to_int(N), !IO).
+write_int32(N, !IO) :- write_int(int32.to_int(N), !IO).
+write_int64(N, !IO) :- write_int(int64.cast_to_int(N), !IO).
+write_uint8(N, !IO) :- write_int(uint8.to_int(N), !IO).
+write_uint16(N, !IO) :- write_int(uint16.to_int(N), !IO).
+write_uint32(N, !IO) :- write_uint(uint32.cast_to_uint(N), !IO).
 
 % A character is written in UTF-8.
 :- pragma foreign_proc("C",

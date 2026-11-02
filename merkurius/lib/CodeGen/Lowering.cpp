@@ -9,13 +9,19 @@
 #include "merkurius/CodeGen/Lowering.h"
 #include "merkurius/CodeGen/MLIRGen.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/DLTI/DLTI.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
+#include "mlir/Transforms/DialectConversion.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Linker/Linker.h"
 #include "llvm/Passes/PassBuilder.h"
@@ -30,6 +36,17 @@ namespace merkurius::codegen {
 
 namespace {
 
+// The runtime's function that reports an uncaught exception and exits.
+constexpr llvm::StringLiteral kThrowSymbol{"merk_uncaught_exception"};
+
+// Whether a procedure of this determinism returns a success flag (design
+// document, "Calling convention").
+bool CanFail(merk::Determinism determinism) {
+  return determinism == merk::Determinism::Semidet ||
+      determinism == merk::Determinism::Failure ||
+      determinism == merk::Determinism::CcNondet;
+}
+
 // A merk type's LLVM type: a string is a pointer to its bytes.
 mlir::Type Convert(mlir::Type type) {
   if (mlir::isa<merk::StringType>(type)) {
@@ -43,15 +60,22 @@ llvm::SmallVector<mlir::Type> Convert(mlir::TypeRange types) {
 }
 
 // A procedure's outputs as one LLVM value: none, the output, or a struct of
-// them (design document, "Calling convention").
-mlir::Type ResultType(mlir::MLIRContext *context, mlir::TypeRange outputs) {
-  if (outputs.empty()) {
+// them, after the success flag of one that can fail (design document,
+// "Calling convention").
+mlir::Type ResultType(
+    mlir::MLIRContext *context, mlir::TypeRange outputs, bool canFail = false) {
+  llvm::SmallVector<mlir::Type> types;
+  if (canFail) {
+    types.push_back(mlir::IntegerType::get(context, 1));
+  }
+  types.append(Convert(outputs));
+  if (types.empty()) {
     return mlir::LLVM::LLVMVoidType::get(context);
   }
-  if (outputs.size() == 1) {
-    return Convert(outputs.front());
+  if (types.size() == 1) {
+    return types.front();
   }
-  return mlir::LLVM::LLVMStructType::getLiteral(context, Convert(outputs));
+  return mlir::LLVM::LLVMStructType::getLiteral(context, types);
 }
 
 class Lowerer {
@@ -62,23 +86,49 @@ public:
 private:
   void LowerProc(merk::ProcOp);
   void LowerSucceed(merk::SucceedOp);
-  void LowerCall(merk::CallOp);
   void LowerConstant(merk::ConstantOp);
   void LowerForeignCall(merk::ForeignCallOp);
   void LowerEntry(merk::EntryOp);
+  // Makes the if-then-elses, switches, negations, tests and calls that can
+  // fail of a procedure branches between blocks.
+  void Flatten(mlir::LLVM::LLVMFuncOp);
+  // Flattens a block, whose goals that fail go to `fail`.
+  void Flatten(mlir::Block *, mlir::Block *fail);
+  mlir::Block *SplitAfter(mlir::Operation *);
+  mlir::Block *Inline(mlir::Region &, mlir::Block *before);
+  void Exit(mlir::Block *, mlir::Block *after);
+  mlir::Block *After(mlir::Operation *);
+  mlir::Block *Continue(mlir::Block *after);
+  // Lowers a call; for a callee that can fail, returns its success flag.
+  // A call in tail position returns, and sets `tail`.
+  mlir::Value Call(merk::CallOp, bool *tail = nullptr);
+  // A procedure's result: its success flag, if it has one, and outputs.
+  mlir::Value Result(mlir::Location, mlir::Type, std::optional<bool> flag,
+      mlir::ValueRange outputs);
+  mlir::LLVM::GlobalOp StringGlobal(llvm::StringRef, mlir::Location);
+  mlir::LLVM::LLVMFuncOp ThrowFunc();
+  bool CanFail(llvm::StringRef proc) const { return canFail_.contains(proc); }
 
   mlir::ModuleOp module_;
   mlir::IRRewriter rewriter_;
   llvm::StringMap<mlir::LLVM::LLVMFuncOp> funcs_;
   // The global of each string constant's bytes.
   llvm::StringMap<mlir::LLVM::GlobalOp> strings_;
+  // The procedures that can fail.
+  llvm::StringSet<> canFail_;
+  mlir::LLVM::LLVMFuncOp throw_;
 };
 
 void Lowerer::LowerProc(merk::ProcOp proc) {
   mlir::MLIRContext *context{proc.getContext()};
   mlir::FunctionType type{proc.getFunctionType()};
+  bool canFail{codegen::CanFail(proc.getDeterminism())};
+  if (canFail) {
+    canFail_.insert(proc.getSymName());
+  }
   auto funcType{mlir::LLVM::LLVMFunctionType::get(
-      ResultType(context, type.getResults()), Convert(type.getInputs()))};
+      ResultType(context, type.getResults(), canFail),
+      Convert(type.getInputs()))};
   // A procedure defined here and not exported is local to the module; one
   // declared is defined in another.
   mlir::LLVM::Linkage linkage{!proc.isExternal() && proc.isPrivate()
@@ -101,38 +151,17 @@ void Lowerer::LowerProc(merk::ProcOp proc) {
 
 void Lowerer::LowerSucceed(merk::SucceedOp succeed) {
   rewriter_.setInsertionPoint(succeed);
+  auto func{succeed->getParentOfType<mlir::LLVM::LLVMFuncOp>()};
+  bool canFail{CanFail(func.getSymName())};
   mlir::ValueRange outputs{succeed.getOutputs()};
-  if (outputs.size() <= 1) {
+  if (!canFail && outputs.empty()) {
     rewriter_.replaceOpWithNewOp<mlir::LLVM::ReturnOp>(succeed, outputs);
     return;
   }
-  mlir::Location loc{succeed.getLoc()};
-  mlir::Type type{ResultType(succeed.getContext(), outputs.getTypes())};
-  mlir::Value result{mlir::LLVM::UndefOp::create(rewriter_, loc, type)};
-  for (auto [i, output] : llvm::enumerate(outputs)) {
-    result = mlir::LLVM::InsertValueOp::create(rewriter_, loc, result, output,
-        llvm::ArrayRef<int64_t>{static_cast<int64_t>(i)});
-  }
+  mlir::Value result{Result(succeed.getLoc(),
+      func.getFunctionType().getReturnType(),
+      canFail ? std::optional<bool>{true} : std::nullopt, outputs)};
   rewriter_.replaceOpWithNewOp<mlir::LLVM::ReturnOp>(succeed, result);
-}
-
-void Lowerer::LowerCall(merk::CallOp call) {
-  rewriter_.setInsertionPoint(call);
-  mlir::LLVM::LLVMFuncOp func{funcs_.lookup(call.getCallee())};
-  auto llvmCall{mlir::LLVM::CallOp::create(
-      rewriter_, call.getLoc(), func, call.getInputs())};
-  llvmCall.setCConv(mlir::LLVM::CConv::Tail);
-  if (call.getNumResults() <= 1) {
-    rewriter_.replaceOp(call, llvmCall.getResults());
-    return;
-  }
-  llvm::SmallVector<mlir::Value> outputs;
-  for (unsigned i = 0; i < call.getNumResults(); ++i) {
-    outputs.push_back(mlir::LLVM::ExtractValueOp::create(rewriter_,
-        call.getLoc(), llvmCall.getResult(),
-        llvm::ArrayRef<int64_t>{static_cast<int64_t>(i)}));
-  }
-  rewriter_.replaceOp(call, outputs);
 }
 
 void Lowerer::LowerConstant(merk::ConstantOp constant) {
@@ -144,21 +173,7 @@ void Lowerer::LowerConstant(merk::ConstantOp constant) {
         constant, constant.getType(), constant.getValue());
     return;
   }
-  // A string is a constant global of its bytes and a NUL.
-  mlir::LLVM::GlobalOp &global{strings_[string.getValue()]};
-  if (!global) {
-    mlir::OpBuilder::InsertionGuard guard{rewriter_};
-    rewriter_.setInsertionPointToStart(module_.getBody());
-    std::string bytes{string.getValue()};
-    bytes.push_back('\0');
-    auto type{mlir::LLVM::LLVMArrayType::get(
-        rewriter_.getI8Type(), bytes.size())};
-    global = mlir::LLVM::GlobalOp::create(rewriter_, loc, type,
-        /*isConstant=*/true, mlir::LLVM::Linkage::Private,
-        "merk.str." + std::to_string(strings_.size() - 1),
-        rewriter_.getStringAttr(bytes));
-    global.setUnnamedAddr(mlir::LLVM::UnnamedAddr::Global);
-  }
+  mlir::LLVM::GlobalOp global{StringGlobal(string.getValue(), loc)};
   rewriter_.setInsertionPoint(constant);
   rewriter_.replaceOpWithNewOp<mlir::LLVM::AddressOfOp>(constant, global);
 }
@@ -169,7 +184,13 @@ void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
   mlir::MLIRContext *context{call.getContext()};
   mlir::Location loc{call.getLoc()};
   llvm::SmallVector<mlir::Type> outputs{Convert(call.getOutputs().getTypes())};
-  bool byPointer{outputs.size() > 1};
+  // The success flag of one that can fail is C's int, which it returns.
+  bool canFail{call.getCanFail()};
+  if (canFail) {
+    outputs.erase(outputs.begin());
+  }
+  bool byPointer{canFail ? !outputs.empty() : outputs.size() > 1};
+  mlir::Type flagType{rewriter_.getI32Type()};
   auto pointer{mlir::LLVM::LLVMPointerType::get(context)};
   mlir::LLVM::LLVMFuncOp &func{funcs_[call.getCallee()]};
   if (!func) {
@@ -177,9 +198,9 @@ void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
     if (byPointer) {
       inputs.append(outputs.size(), pointer);
     }
-    mlir::Type result{outputs.size() == 1
-            ? outputs.front()
-            : mlir::LLVM::LLVMVoidType::get(context)};
+    mlir::Type result{canFail   ? flagType
+            : outputs.size() == 1 ? outputs.front()
+                                  : mlir::LLVM::LLVMVoidType::get(context)};
     mlir::OpBuilder::InsertionGuard guard{rewriter_};
     rewriter_.setInsertionPointToEnd(module_.getBody());
     func = mlir::LLVM::LLVMFuncOp::create(rewriter_, loc, call.getCallee(),
@@ -201,11 +222,16 @@ void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
   }
   rewriter_.setInsertionPoint(call);
   auto llvmCall{mlir::LLVM::CallOp::create(rewriter_, loc, func, arguments)};
-  if (!byPointer) {
+  llvm::SmallVector<mlir::Value> values;
+  if (canFail) {
+    values.push_back(mlir::LLVM::ICmpOp::create(rewriter_, loc,
+        mlir::LLVM::ICmpPredicate::ne, llvmCall.getResult(),
+        mlir::LLVM::ConstantOp::create(rewriter_, loc, flagType,
+            rewriter_.getI32IntegerAttr(0))));
+  } else if (!byPointer) {
     rewriter_.replaceOp(call, llvmCall.getResults());
     return;
   }
-  llvm::SmallVector<mlir::Value> values;
   for (auto [slot, type] : llvm::zip(slots, outputs)) {
     values.push_back(mlir::LLVM::LoadOp::create(rewriter_, loc, type, slot));
   }
@@ -213,6 +239,312 @@ void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
 }
 
 // merk_main, a C function that calls the main procedure.
+mlir::LLVM::GlobalOp Lowerer::StringGlobal(llvm::StringRef value, mlir::Location loc) {
+  // A string is a constant global of its bytes and a NUL.
+  mlir::LLVM::GlobalOp &global{strings_[value]};
+  if (!global) {
+    mlir::OpBuilder::InsertionGuard guard{rewriter_};
+    rewriter_.setInsertionPointToStart(module_.getBody());
+    std::string bytes{value};
+    bytes.push_back('\0');
+    auto type{mlir::LLVM::LLVMArrayType::get(
+        rewriter_.getI8Type(), bytes.size())};
+    global = mlir::LLVM::GlobalOp::create(rewriter_, loc, type,
+        /*isConstant=*/true, mlir::LLVM::Linkage::Private,
+        "merk.str." + std::to_string(strings_.size() - 1),
+        rewriter_.getStringAttr(bytes));
+    global.setUnnamedAddr(mlir::LLVM::UnnamedAddr::Global);
+  }
+  return global;
+}
+
+mlir::Value Lowerer::Result(mlir::Location loc, mlir::Type type,
+    std::optional<bool> flag, mlir::ValueRange outputs) {
+  if (!flag && outputs.size() == 1) {
+    return outputs.front();
+  }
+  if (flag && outputs.empty()) {
+    return mlir::LLVM::ConstantOp::create(rewriter_, loc,
+        rewriter_.getI1Type(), rewriter_.getBoolAttr(*flag));
+  }
+  mlir::Value result{mlir::LLVM::UndefOp::create(rewriter_, loc, type)};
+  int64_t i{0};
+  if (flag) {
+    mlir::Value value{mlir::LLVM::ConstantOp::create(rewriter_, loc,
+        rewriter_.getI1Type(), rewriter_.getBoolAttr(*flag))};
+    result = mlir::LLVM::InsertValueOp::create(
+        rewriter_, loc, result, value, llvm::ArrayRef<int64_t>{i++});
+  }
+  for (mlir::Value output : outputs) {
+    result = mlir::LLVM::InsertValueOp::create(
+        rewriter_, loc, result, output, llvm::ArrayRef<int64_t>{i++});
+  }
+  return result;
+}
+
+mlir::Value Lowerer::Call(merk::CallOp call, bool *tail) {
+  mlir::Location loc{call.getLoc()};
+  rewriter_.setInsertionPoint(call);
+  mlir::LLVM::LLVMFuncOp func{funcs_.lookup(call.getCallee())};
+  auto llvmCall{
+      mlir::LLVM::CallOp::create(rewriter_, loc, func, call.getInputs())};
+  llvmCall.setCConv(mlir::LLVM::CConv::Tail);
+  mlir::Value result{
+      llvmCall.getNumResults() ? llvmCall.getResult() : mlir::Value{}};
+  // A call in tail position, whose solution is the procedure's, is a
+  // tail call (design document, "Calling convention").
+  auto succeed{mlir::dyn_cast_or_null<merk::SucceedOp>(call->getNextNode())};
+  auto caller{call->getParentOfType<mlir::LLVM::LLVMFuncOp>()};
+  if (succeed && llvm::equal(succeed.getOutputs(), call.getResults()) &&
+      CanFail(caller.getSymName()) == CanFail(call.getCallee())) {
+    llvmCall.setTailCallKind(mlir::LLVM::TailCallKind::MustTail);
+    rewriter_.setInsertionPoint(succeed);
+    rewriter_.replaceOpWithNewOp<mlir::LLVM::ReturnOp>(
+        succeed, result ? mlir::ValueRange{result} : mlir::ValueRange{});
+    // The call's results have no uses but the return's.
+    rewriter_.eraseOp(call);
+    if (tail) {
+      *tail = true;
+    }
+    return nullptr;
+  }
+  bool canFail{CanFail(call.getCallee())};
+  std::size_t outputs{call.getNumResults()};
+  llvm::SmallVector<mlir::Value> values;
+  if (!canFail && outputs <= 1) {
+    values.append(llvmCall->result_begin(), llvmCall->result_end());
+  } else {
+    for (unsigned i = 0; i < outputs; ++i) {
+      values.push_back(mlir::LLVM::ExtractValueOp::create(rewriter_, loc,
+          result, llvm::ArrayRef<int64_t>{static_cast<int64_t>(i + canFail)}));
+    }
+  }
+  rewriter_.replaceOp(call, values);
+  if (!canFail) {
+    return nullptr;
+  }
+  return outputs ? mlir::Value{mlir::LLVM::ExtractValueOp::create(
+                       rewriter_, loc, result, llvm::ArrayRef<int64_t>{0})}
+                 : result;
+}
+
+// Splits the block after `op`, and returns the block of the operations
+// after it.
+mlir::Block *Lowerer::SplitAfter(mlir::Operation *op) {
+  return rewriter_.splitBlock(op->getBlock(), std::next(op->getIterator()));
+}
+
+// Inlines a region of a structured operation's one block before `before`.
+mlir::Block *Lowerer::Inline(mlir::Region &region, mlir::Block *before) {
+  mlir::Block *block{&region.front()};
+  rewriter_.inlineRegionBefore(region, *before->getParent(), before->getIterator());
+  for (mlir::BlockArgument argument : block->getArguments()) {
+    argument.setType(Convert(argument.getType()));
+  }
+  return block;
+}
+
+// Ends a branch, whose block ends with a yield, by going to `after` with
+// the yielded values, or by succeeding there if all `after` does is
+// succeed, so that a call before is in tail position.
+void Lowerer::Exit(mlir::Block *block, mlir::Block *after) {
+  auto yield{mlir::dyn_cast<merk::YieldOp>(block->back())};
+  if (!yield) {
+    return; // it fails, or succeeds
+  }
+  rewriter_.setInsertionPoint(yield);
+  if (auto succeed{mlir::dyn_cast<merk::SucceedOp>(after->front())}) {
+    mlir::IRMapping mapping;
+    mapping.map(after->getArguments(), yield.getValues());
+    rewriter_.clone(*succeed, mapping);
+  } else {
+    mlir::LLVM::BrOp::create(rewriter_, yield.getLoc(), yield.getValues(), after);
+  }
+  rewriter_.eraseOp(yield);
+}
+
+// The block after a structured operation, whose results become its
+// arguments.
+mlir::Block *Lowerer::After(mlir::Operation *op) {
+  mlir::Block *after{SplitAfter(op)};
+  for (mlir::Value result : op->getResults()) {
+    result.replaceAllUsesWith(
+        after->addArgument(Convert(result.getType()), op->getLoc()));
+  }
+  return after;
+}
+
+// Erases the block after a structured operation if every branch has
+// succeeded or failed on its own, and returns the block to go on with.
+mlir::Block *Lowerer::Continue(mlir::Block *after) {
+  if (after->hasNoPredecessors()) {
+    rewriter_.eraseBlock(after);
+    return nullptr;
+  }
+  return after;
+}
+
+void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
+  for (mlir::Block *current{block}; current;) {
+    mlir::Block *next{nullptr};
+    for (mlir::Operation &op : llvm::make_early_inc_range(*current)) {
+      mlir::Location loc{op.getLoc()};
+      if (auto guard{mlir::dyn_cast<merk::GuardOp>(op)}) {
+        next = SplitAfter(guard);
+        rewriter_.setInsertionPoint(guard);
+        rewriter_.replaceOpWithNewOp<mlir::LLVM::CondBrOp>(
+            guard, guard.getCondition(), next, fail);
+        break;
+      }
+      if (mlir::isa<merk::FailOp>(op)) {
+        rewriter_.setInsertionPoint(&op);
+        rewriter_.replaceOpWithNewOp<mlir::LLVM::BrOp>(&op, fail);
+        break;
+      }
+      if (auto throwIf{mlir::dyn_cast<merk::ThrowIfOp>(op)}) {
+        next = SplitAfter(throwIf);
+        mlir::Block *raise{rewriter_.createBlock(next)};
+        mlir::Value exception{mlir::LLVM::AddressOfOp::create(rewriter_, loc,
+            StringGlobal(throwIf.getException(), loc))};
+        mlir::LLVM::CallOp::create(
+            rewriter_, loc, ThrowFunc(), mlir::ValueRange{exception});
+        mlir::LLVM::UnreachableOp::create(rewriter_, loc);
+        rewriter_.setInsertionPoint(throwIf);
+        rewriter_.replaceOpWithNewOp<mlir::LLVM::CondBrOp>(
+            throwIf, throwIf.getCondition(), raise, next);
+        break;
+      }
+      if (auto call{mlir::dyn_cast<merk::CallOp>(op)}) {
+        bool tail{false};
+        if (mlir::Value succeeded{Call(call, &tail)}) {
+          // The callee can fail: go on if it succeeded.
+          next = SplitAfter(succeeded.getDefiningOp());
+          rewriter_.setInsertionPointToEnd(current);
+          mlir::LLVM::CondBrOp::create(rewriter_, loc, succeeded, next, fail);
+          break;
+        }
+        if (tail) {
+          break; // it returns
+        }
+        continue;
+      }
+      if (auto ite{mlir::dyn_cast<merk::IteOp>(op)}) {
+        mlir::Block *after{After(ite)};
+        mlir::Block *condition{Inline(ite.getCondition(), after)};
+        mlir::Block *then{Inline(ite.getThenRegion(), after)};
+        mlir::Block *otherwise{Inline(ite.getElseRegion(), after)};
+        rewriter_.setInsertionPoint(ite);
+        mlir::LLVM::BrOp::create(rewriter_, loc, condition);
+        rewriter_.eraseOp(ite);
+        if (auto yield{mlir::dyn_cast<merk::YieldOp>(condition->back())}) {
+          rewriter_.setInsertionPoint(yield);
+          rewriter_.replaceOpWithNewOp<mlir::LLVM::BrOp>(
+              yield, yield.getValues(), then);
+        }
+        Exit(then, after);
+        Exit(otherwise, after);
+        Flatten(condition, otherwise);
+        Flatten(then, fail);
+        Flatten(otherwise, fail);
+        next = Continue(after);
+        break;
+      }
+      if (auto switchOp{mlir::dyn_cast<merk::SwitchOp>(op)}) {
+        mlir::Block *after{After(switchOp)};
+        llvm::SmallVector<mlir::Block *> blocks;
+        for (mlir::Region &region : switchOp.getCaseRegions()) {
+          blocks.push_back(Inline(region, after));
+        }
+        mlir::Block *otherwise{fail};
+        if (!switchOp.getCanFail()) {
+          otherwise = rewriter_.createBlock(after);
+          mlir::LLVM::UnreachableOp::create(rewriter_, loc);
+        }
+        llvm::SmallVector<llvm::APInt> values;
+        llvm::SmallVector<mlir::Block *> destinations;
+        for (auto [c, block] : llvm::zip(switchOp.getCases(), blocks)) {
+          for (mlir::Attribute constant : mlir::cast<mlir::ArrayAttr>(c)) {
+            values.push_back(mlir::cast<mlir::IntegerAttr>(constant).getValue());
+            destinations.push_back(block);
+          }
+        }
+        rewriter_.setInsertionPoint(switchOp);
+        llvm::SmallVector<mlir::ValueRange> operands(values.size());
+        mlir::LLVM::SwitchOp::create(rewriter_, loc, switchOp.getValue(),
+            otherwise, mlir::ValueRange{}, values, destinations, operands);
+        rewriter_.eraseOp(switchOp);
+        for (mlir::Block *block : blocks) {
+          Exit(block, after);
+        }
+        for (mlir::Block *block : blocks) {
+          Flatten(block, fail);
+        }
+        next = Continue(after);
+        break;
+      }
+      if (auto notOp{mlir::dyn_cast<merk::NotOp>(op)}) {
+        mlir::Block *after{After(notOp)};
+        mlir::Block *goal{Inline(notOp.getGoal(), after)};
+        rewriter_.setInsertionPoint(notOp);
+        rewriter_.replaceOpWithNewOp<mlir::LLVM::BrOp>(notOp, goal);
+        // If the goal succeeds, the negation fails; if it fails, the
+        // negation succeeds.
+        if (auto yield{mlir::dyn_cast<merk::YieldOp>(goal->back())}) {
+          rewriter_.setInsertionPoint(yield);
+          rewriter_.replaceOpWithNewOp<mlir::LLVM::BrOp>(yield, fail);
+        }
+        Flatten(goal, after);
+        next = Continue(after);
+        break;
+      }
+    }
+    current = next;
+  }
+}
+
+void Lowerer::Flatten(mlir::LLVM::LLVMFuncOp func) {
+  if (func.isExternal()) {
+    return;
+  }
+  // Where a goal that fails goes at the top: a semidet procedure returns
+  // false; a det one cannot fail.
+  mlir::Location loc{func.getLoc()};
+  mlir::Block *fail{rewriter_.createBlock(&func.getBody(), func.getBody().end())};
+  if (CanFail(func.getSymName())) {
+    mlir::Type type{func.getFunctionType().getReturnType()};
+    llvm::SmallVector<mlir::Value> outputs;
+    if (auto structType{mlir::dyn_cast<mlir::LLVM::LLVMStructType>(type)}) {
+      for (mlir::Type output : structType.getBody().drop_front()) {
+        outputs.push_back(mlir::LLVM::UndefOp::create(rewriter_, loc, output));
+      }
+    }
+    mlir::LLVM::ReturnOp::create(
+        rewriter_, loc, Result(loc, type, false, outputs));
+  } else {
+    mlir::LLVM::UnreachableOp::create(rewriter_, loc);
+  }
+  Flatten(&func.getBody().front(), fail);
+  if (fail->hasNoPredecessors()) {
+    rewriter_.eraseBlock(fail);
+  }
+}
+
+mlir::LLVM::LLVMFuncOp Lowerer::ThrowFunc() {
+  if (!throw_) {
+    mlir::OpBuilder::InsertionGuard guard{rewriter_};
+    rewriter_.setInsertionPointToEnd(module_.getBody());
+    mlir::MLIRContext *context{module_.getContext()};
+    throw_ = mlir::LLVM::LLVMFuncOp::create(rewriter_, module_.getLoc(),
+        kThrowSymbol,
+        mlir::LLVM::LLVMFunctionType::get(mlir::LLVM::LLVMVoidType::get(context),
+            {mlir::LLVM::LLVMPointerType::get(context)}));
+    throw_.setNoUnwind(true);
+    throw_->setAttr("passthrough",
+        rewriter_.getArrayAttr({rewriter_.getStringAttr("noreturn")}));
+  }
+  return throw_;
+}
+
 void Lowerer::LowerEntry(merk::EntryOp entry) {
   mlir::MLIRContext *context{entry.getContext()};
   mlir::Location loc{entry.getLoc()};
@@ -234,6 +566,9 @@ llvm::LogicalResult Lowerer::Lower() {
   for (auto proc : llvm::make_early_inc_range(module_.getOps<merk::ProcOp>())) {
     LowerProc(proc);
   }
+  for (auto func : llvm::to_vector(module_.getOps<mlir::LLVM::LLVMFuncOp>())) {
+    Flatten(func);
+  }
   llvm::SmallVector<mlir::Operation *> ops;
   module_.walk([&](mlir::Operation *op) {
     if (mlir::isa<merk::SucceedOp, merk::CallOp, merk::ConstantOp,
@@ -249,11 +584,22 @@ llvm::LogicalResult Lowerer::Lower() {
     } else if (auto foreign{mlir::dyn_cast<merk::ForeignCallOp>(op)}) {
       LowerForeignCall(foreign);
     } else {
-      LowerCall(mlir::cast<merk::CallOp>(op));
+      Call(mlir::cast<merk::CallOp>(op));
     }
   }
   for (auto entry : llvm::make_early_inc_range(module_.getOps<merk::EntryOp>())) {
     LowerEntry(entry);
+  }
+  // Arithmetic, which is the arith dialect's.
+  mlir::LLVMTypeConverter converter{module_.getContext()};
+  mlir::RewritePatternSet patterns{module_.getContext()};
+  mlir::arith::populateArithToLLVMConversionPatterns(converter, patterns);
+  mlir::ConversionTarget target{*module_.getContext()};
+  target.addIllegalDialect<mlir::arith::ArithDialect>();
+  target.markUnknownOpDynamicallyLegal([](mlir::Operation *) { return true; });
+  if (mlir::failed(mlir::applyPartialConversion(
+          module_.getOperation(), target, std::move(patterns)))) {
+    return llvm::failure();
   }
   // Every operation left must be the LLVM dialect's.
   mlir::WalkResult result{module_.walk([](mlir::Operation *op) {

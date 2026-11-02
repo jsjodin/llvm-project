@@ -25,9 +25,10 @@ def Merk_Dialect : Dialect {
     The merk dialect carries Mercury's semantics: procedures with their
     determinism, calls, terms by constructor, switches and the other
     goals. Its types are Mercury types, not layouts; layout is chosen when
-    it is lowered.
+    it is lowered. Arithmetic on primitive values is the arith dialect's.
   }];
   let cppNamespace = "::merkurius::merk";
+  let dependentDialects = ["::mlir::arith::ArithDialect"];
   let useDefaultAttributePrinterParser = 1;
   let useDefaultTypePrinterParser = 1;
 }

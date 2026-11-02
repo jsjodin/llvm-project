@@ -1,7 +1,8 @@
 % The smallest programs: main/2 with nothing to do, and one that calls a
 % procedure of its own. A value of type io.state is not passed, so the
 % procedures take no arguments; merk.entry names main(di, uo), which the
-% runtime calls through merk_main.
+% runtime calls through merk_main. main's call of step is its last goal, so
+% it is a tail call.
 %
 % RUN: merkc -fc1 -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MERK
 % RUN: merkc -fc1 -emit-mlir -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MLIR
@@ -17,7 +18,7 @@
 % MERK: merk.entry @main.main_2_0
 
 % MLIR: llvm.func tailcc @main.main_2_0() {
-% MLIR-NEXT: llvm.call tailcc @main.step_2_0() : () -> ()
+% MLIR-NEXT: llvm.call tailcc musttail @main.step_2_0() : () -> ()
 % MLIR-NEXT: llvm.return
 % MLIR: llvm.func internal tailcc @main.step_2_0() {
 % MLIR: llvm.func @merk_main() {
@@ -25,6 +26,8 @@
 
 % LLVM: target triple = "x86_64-unknown-linux-gnu"
 % LLVM: define tailcc void @main.main_2_0() {
+% LLVM-NEXT: musttail call tailcc void @main.step_2_0()
+% LLVM-NEXT: ret void
 % LLVM: define internal tailcc void @main.step_2_0() {
 % LLVM: define void @merk_main() {
 
