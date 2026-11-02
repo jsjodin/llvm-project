@@ -1,0 +1,12 @@
+# Random modules whose polymorphic predicates and functions call each
+# other and library predicates at types that bind the callees' type
+# variables to the callers' own, to types without variables and to types
+# built from both, and test and compare values of type variables
+# (generate-polymorphic-programs.py). merkc must give each procedure the
+# hidden type_info arguments that mmc does, and each call the type_infos
+# for the same types.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-polymorphic-programs.py --seed 1 --count 40 %t
+# RUN: %compare-polymorphism %t/*.m

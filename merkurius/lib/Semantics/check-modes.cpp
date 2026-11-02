@@ -2889,6 +2889,21 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
       break;
     }
   }
+  // A mode that would clobber an argument used after it does not match,
+  // if another does, as in mmc: append(["a"], L1, L2), with L1 used
+  // after, is append(in, in, out), not append(di, di, uo).
+  if (candidates.size() > 1) {
+    std::vector<const Procedure *> keeping;
+    for (const Procedure *p : candidates) {
+      if (!Clobbers(goal, instantiated[p], arguments, live,
+              [](std::size_t) { return std::string{}; })) {
+        keeping.push_back(p);
+      }
+    }
+    if (!keeping.empty()) {
+      candidates = std::move(keeping);
+    }
+  }
   const Procedure *chosen{nullptr};
   for (const Procedure *p : candidates) {
     if (llvm::none_of(candidates, [&](const Procedure *q) {

@@ -144,6 +144,12 @@ class DebugDumpDeterminismAction : public FrontendAction {
   bool executeAction() override;
 };
 
+// Checks the source file as DebugDumpDeterminismAction does, and lists
+// where each checked procedure's type_infos come from.
+class DebugDumpPolymorphismAction : public FrontendAction {
+  bool executeAction() override;
+};
+
 } // namespace merkurius::frontend
 
 #endif // MERKURIUS_FRONTEND_FRONTENDACTIONS_H_
