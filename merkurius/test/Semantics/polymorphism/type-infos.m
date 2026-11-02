@@ -22,16 +22,16 @@
 :- type e(T) == pair(T, T).
 :- pred two(T::in, U::in, pair(U, T)::out) is det.
 % CHECK-LABEL: pred type_infos.two/3 mode 0:
-% CHECK-NEXT: type_info arguments: T, U
+% CHECK-NEXT: hidden arguments: T, U
 :- pred rev(U::in, T::in, pair(U, T)::out) is det.
 % CHECK-LABEL: pred type_infos.rev/3 mode 0:
-% CHECK-NEXT: type_info arguments: U, T
+% CHECK-NEXT: hidden arguments: U, T
 :- func f(T, U) = pair(T, U).
 % CHECK-LABEL: func type_infos.f/2 mode 0:
-% CHECK-NEXT: type_info arguments: T, U
+% CHECK-NEXT: hidden arguments: T, U
 :- pred eqv(e(T)::in, e(T)::out) is det.
 % CHECK-LABEL: pred type_infos.eqv/2 mode 0:
-% CHECK-NEXT: type_info arguments: T
+% CHECK-NEXT: hidden arguments: T
 :- pred calls(int::out) is det.
 % CHECK-LABEL: pred type_infos.calls/1 mode 0:
 % CHECK-NEXT: call pred type_infos.two/3: int (constant), string (constant)
@@ -44,7 +44,7 @@
 % CHECK-NEXT: application func list.length/1: list.list(int) (constant)
 :- pred poly(T::in, list(pair(T, int))::out) is det.
 % CHECK-LABEL: pred type_infos.poly/2 mode 0:
-% CHECK-NEXT: type_info arguments: T
+% CHECK-NEXT: hidden arguments: T
 % CHECK-NEXT: call pred type_infos.two/3: T (argument), list.list(T) (cell)
 % CHECK-NEXT: call pred type_infos.unused/2: pair.pair(T, T) (cell)
 % CHECK-NEXT: call pred builtin.compare/3: list.list(T) (cell)
@@ -54,19 +54,19 @@
 % CHECK-NEXT: call pred type_infos.unused/2: list.list(void) (constant)
 :- pred tests(T::in, list(T)::in, int::out) is det.
 % CHECK-LABEL: pred type_infos.tests/3 mode 0:
-% CHECK-NEXT: type_info arguments: T
+% CHECK-NEXT: hidden arguments: T
 % CHECK-NEXT: unify X = Y: T (argument)
 % CHECK-NEXT: unify L = M: list.list(T) (cell)
 % CHECK-NEXT: unify Y = X: T (argument)
 % CHECK-NEXT: unify M = L: list.list(T) (cell)
 :- pred fields(box(T)::in, T::in, box(T)::out) is det.
 % CHECK-LABEL: pred type_infos.fields/3 mode 0:
-% CHECK-NEXT: type_info arguments: T
+% CHECK-NEXT: hidden arguments: T
 % CHECK-NEXT: application field type_infos.contents/1: T (argument)
 % CHECK-NEXT: application field update type_infos.'contents :='/2: T (argument)
 :- pred lambda(T::in, list(T)::out) is det.
 % CHECK-LABEL: pred type_infos.lambda/2 mode 0:
-% CHECK-NEXT: type_info arguments: T
+% CHECK-NEXT: hidden arguments: T
 % CHECK-NEXT: call pred type_infos.unused/2: T (argument)
 :- pred closure(int::out) is det.
 % CHECK-LABEL: pred type_infos.closure/1 mode 0:
@@ -76,11 +76,11 @@
 % CHECK-NEXT: call pred type_infos.q/3: int (constant), string (constant)
 % CHECK-NEXT: application func list.length/1: pair.pair(int, string) (constant)
 % CHECK-LABEL: pred type_infos.unused/2 mode 0:
-% CHECK-NEXT: type_info arguments: T
+% CHECK-NEXT: hidden arguments: T
 % CHECK-LABEL: pred type_infos.ret/1 mode 0:
-% CHECK-NEXT: type_info arguments: T
+% CHECK-NEXT: hidden arguments: T
 % CHECK-LABEL: pred type_infos.q/3 inferred mode 0:
-% CHECK-NEXT: type_info arguments: T1, T2
+% CHECK-NEXT: hidden arguments: T1, T2
 :- implementation.
 :- pred unused(T::in, int::out) is det.
 unused(_, 1).

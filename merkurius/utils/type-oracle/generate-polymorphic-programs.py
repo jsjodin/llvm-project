@@ -15,7 +15,16 @@ in an if-then-else, and some predicates have a clause for each of a list
 input's functors. The modules are mode- and determinism-correct, so that
 mmc checks them to the end.
 
-Usage: generate-polymorphic-programs.py [--seed N] [--count N] DIR
+With --classes, a module also has type classes, some with superclasses,
+and now and then one with two parameters, each with a method; instances of
+them for int, string, lists, maybes and pairs, those of the type
+constructors with constraints on their type variables or not, whose
+methods call the method, or a superclass's, on their parts; and class
+constraints on the predicates' and functions' type variables. Bodies then
+also call methods, and the predicates and functions with constraints, at
+types whose constraints the caller's constraints or the instances satisfy.
+
+Usage: generate-polymorphic-programs.py [--classes] [--seed N] [--count N] DIR
 """
 
 import argparse
@@ -87,9 +96,43 @@ def random_type(rng, own, depth):
 
 
 class Callee:
-    def __init__(self, name, func, inputs, output, own):
+    def __init__(self, name, func, inputs, output, own, constraints=()):
         self.name, self.func, self.inputs, self.output, self.own = \
             name, func, inputs, output, own
+        # (class, [type]) on its own type variables.
+        self.constraints = list(constraints)
+
+
+class Classes:
+    """A module's type classes and instances."""
+
+    def __init__(self):
+        # By name: its arity, superclasses and instances, each as its
+        # types, patterns over its own type variables, and its
+        # constraints, (class, [type variable]).
+        self.arity = {}
+        self.supers = {}
+        self.instances = {}
+
+    def closure(self, assumed):
+        out = list(assumed)
+        for cls, args in out:
+            for sup in self.supers.get(cls, []):
+                if (sup, args) not in out:
+                    out.append((sup, args))
+        return out
+
+    def entails(self, cls, args, assumed, depth=0):
+        if (cls, list(args)) in [(c, list(a)) for c, a in self.closure(assumed)]:
+            return True
+        if depth > 4:
+            return False
+        for types, constraints in self.instances.get(cls, []):
+            binding = {}
+            if all(match(t, a, binding) for t, a in zip(types, args)):
+                return all(self.entails(c, [binding[v] for v in vs], assumed, depth + 1)
+                           for c, vs in constraints)
+        return False
 
 
 LIBRARY = [
@@ -102,8 +145,9 @@ LIBRARY = [
 
 
 class Body:
-    def __init__(self, rng, callees, own, env):
+    def __init__(self, rng, callees, own, env, classes=None, assumed=()):
         self.rng, self.callees, self.own = rng, callees, own
+        self.classes, self.assumed = classes, list(assumed)
         self.env = list(env)
         self.goals = []
         self.count = 0
@@ -137,14 +181,17 @@ class Body:
             return str(rng.randint(0, 9))
         if kind == "string":
             return '"%s"' % rng.choice("abc")
+        # With type classes, a constant's type is given, so that a constraint
+        # on it is determined.
+        empty = "([] : %s)" % text(ty) if self.classes else "[]"
         if kind == "list":
             if depth <= 0 or rng.random() < 0.4:
-                return "[]"
+                return empty
             head = self.value(ty[1], depth - 1)
-            return "[%s]" % head if head else "[]"
+            return "[%s]" % head if head else empty
         if kind == "maybe":
             inner = self.value(ty[1], depth - 1) if depth > 0 and rng.random() < 0.6 else None
-            return "yes(%s)" % inner if inner else "no"
+            return "yes(%s)" % inner if inner else "(no : %s)" % text(ty) if self.classes else "no"
         first = self.value(ty[1], depth - 1)
         second = self.value(ty[2], depth - 1)
         if first is None or second is None:
@@ -161,9 +208,20 @@ class Body:
             binding = {}
             if not unused and not match(callee.output, ty, binding):
                 continue
-            for var in callee.own:
-                if var not in binding and not (unused and var in callee.void):
-                    binding[var] = self.instance(depth)
+            if self.classes and callee.void and not unused:
+                # An output type variable that no input has is determined
+                # only where the output is used, which may not determine it.
+                continue
+            fixed = dict(binding)
+            for _ in range(8 if callee.constraints else 1):
+                binding = dict(fixed)
+                for var in callee.own:
+                    if var not in binding and not (unused and var in callee.void):
+                        binding[var] = self.instance(depth)
+                if self.satisfied(callee, binding):
+                    break
+            else:
+                continue
             if unused and any(v not in binding for v in callee.own):
                 # The output's type variable is left to void.
                 arguments = []
@@ -191,6 +249,16 @@ class Body:
                 return out
         return None
 
+    def satisfied(self, callee, binding):
+        """Whether the caller satisfies the callee's constraints there."""
+        for cls, args in callee.constraints:
+            if any(v not in binding for v in variables_of(args)):
+                return False
+            if not self.classes.entails(cls, [substitute(a, binding) for a in args],
+                                        self.assumed):
+                return False
+        return True
+
     def goal(self, callee, arguments, out):
         if callee.func:
             self.goals.append("%s = %s(%s)" % (out, callee.name, ", ".join(arguments)))
@@ -198,7 +266,108 @@ class Body:
             self.goals.append("%s(%s)" % (callee.name, ", ".join(arguments + [out])))
 
 
-def module(rng, name):
+def variables_of(types):
+    out = []
+    for t in types:
+        variables(t, out)
+    return out
+
+
+def constraint_text(cls, args):
+    return "%s(%s)" % (cls, ", ".join(text(a) for a in args))
+
+
+INSTANCE_TYPES = {
+    "int": ([("int",)], []), "string": ([("string",)], []),
+    "list": ([("list", ("var", "T"))], ["T"]), "maybe": ([("maybe", ("var", "T"))], ["T"]),
+    "pair": ([("pair", ("var", "A"), ("var", "B"))], ["A", "B"]),
+}
+
+
+def make_classes(rng):
+    """The type classes, their instances and their methods' callees, and
+    the declarations."""
+    classes = Classes()
+    lines, methods = [], []
+    count = rng.randint(1, 3)
+    kinds = {}
+    for k in range(count):
+        cls = "c%d" % k
+        supers = [s for s in ("c%d" % j for j in range(k)) if rng.random() < 0.5]
+        classes.arity[cls] = 1
+        classes.supers[cls] = []
+        # Its superclasses', transitively.
+        for sup in supers:
+            for s in [sup] + classes.supers[sup]:
+                if s not in classes.supers[cls]:
+                    classes.supers[cls].append(s)
+        allowed = list(INSTANCE_TYPES)
+        for sup in supers:
+            allowed = [t for t in allowed if t in kinds[sup]]
+        kinds[cls] = [t for t in allowed if rng.random() < 0.7] or allowed[:1]
+        lines.append(":- typeclass %s(T)%s where [ pred m%d(T::in, int::out) is det ]." %
+                     (cls, " <= (%s)" % ", ".join("%s(T)" % s for s in supers) if supers else "",
+                      k))
+        methods.append(Callee("m%d" % k, False, [("var", "A")], ("int",), ["A"],
+                              [(cls, [("var", "A")])]))
+        classes.instances[cls] = []
+        for kind in kinds[cls]:
+            types, tvars = INSTANCE_TYPES[kind]
+            # The constraints a superclass's instance has must follow.
+            needed = set()
+            for sup in classes.supers[cls]:
+                for itypes, iconstraints in classes.instances[sup]:
+                    if itypes == types:
+                        needed |= {v for _, vs in iconstraints for v in vs}
+            constrained = [v for v in tvars if v in needed or rng.random() < 0.6]
+            constraints = [(cls, [v]) for v in constrained]
+            classes.instances[cls].append((types, constraints))
+            lines.append(":- instance %s(%s)%s where [ %s ]." % (
+                cls, text(types[0]),
+                " <= (%s)" % ", ".join("%s(%s)" % (c, v) for c, (v,) in constraints)
+                if constraints else "",
+                method_clause(rng, k, kind, constrained, classes.supers[cls])))
+    if "c0" in classes.arity and rng.random() < 0.4:
+        # A type class with two parameters.
+        classes.arity["d"] = 2
+        classes.supers["d"] = []
+        lines.append(":- typeclass d(A, B) where [ pred dm(A::in, B::in, int::out) is det ].")
+        methods.append(Callee("dm", False, [("var", "A"), ("var", "B")], ("int",), ["A", "B"],
+                              [("d", [("var", "A"), ("var", "B")])]))
+        classes.instances["d"] = [([("int",), ("string",)], [])]
+        lines.append(":- instance d(int, string) where [ (dm(X, _, X)) ].")
+        if "maybe" in kinds["c0"]:
+            classes.instances["d"].append(
+                ([("list", ("var", "A")), ("maybe", ("var", "B"))], [("c0", ["B"])]))
+            lines.append(":- instance d(list(A), maybe(B)) <= c0(B) where [ (dm(_, M, N) :- "
+                         "( if M = yes(X) then m0(X, N) else N = 0 )) ].")
+    return classes, lines, methods
+
+
+def method_clause(rng, k, kind, constrained, supers):
+    """An instance's clause for method m<k>, on its type <kind>."""
+    call = "m%d" % k
+    if supers and rng.random() < 0.4:
+        # A superclass's method on the same value, or on a part.
+        call = "m%s" % rng.choice(supers)[1:]
+    if kind == "int":
+        return "(m%d(X, N) :- %s)" % (k, "N = X" if call == "m%d" % k else "%s(X, N)" % call)
+    if kind == "string":
+        return "(m%d(_, 2))" % k if call == "m%d" % k else "(m%d(X, N) :- %s(X, N))" % (k, call)
+    if not constrained:
+        return "(m%d(_, 0))" % k
+    if kind == "list":
+        return "(m%d(L, N) :- ( if L = [H | _] then %s(H, N) else N = 0 ))" % (k, call)
+    if kind == "maybe":
+        return "(m%d(M, N) :- ( if M = yes(X) then %s(X, N) else N = 1 ))" % (k, call)
+    part = "A" if "A" in constrained else "B"
+    return "(m%d(A - B, N) :- %s(%s, N), _ = %s)" % (
+        k, call, part, "B" if part == "A" else "A")
+
+
+def module(rng, name, with_classes=False):
+    classes, class_lines, methods = (make_classes(rng) if with_classes
+                                     else (None, [], []))
     preds = []
     for i in range(rng.randint(3, 6)):
         own = VARS[:rng.randint(0, 2)]
@@ -216,26 +385,36 @@ def module(rng, name):
             output = random_type(rng, own, 1)
         callee = Callee(("f%d" if func else "p%d") % i, func, inputs, output, own + void)
         callee.void = void
+        if classes:
+            for v in own:
+                if rng.random() < 0.45:
+                    cls = rng.choice([c for c in classes.arity if classes.arity[c] == 1])
+                    callee.constraints.append((cls, [("var", v)]))
+            if "d" in classes.arity and len(own) == 2 and rng.random() < 0.2:
+                callee.constraints.append(("d", [("var", "T"), ("var", "U")]))
         preds.append(callee)
-    for callee in LIBRARY:
+    for callee in LIBRARY + methods:
         callee.void = []
-    callees = preds + LIBRARY
+    callees = preds + LIBRARY + methods
     lines = [":- module %s." % name, ":- interface.",
              # Not int, whose `-` would make X - Y ambiguous.
              ":- import_module list, pair, maybe.", ":- implementation."]
+    lines.extend(class_lines)
     for callee in preds:
         args = ", ".join(text(t) + "::in" for t in callee.inputs)
+        where = (" <= (%s)" % ", ".join(constraint_text(c, a) for c, a in callee.constraints)
+                 if callee.constraints else "")
         if callee.func:
-            lines.append(":- func %s(%s) = (%s::out) is det." %
-                         (callee.name, args, text(callee.output)))
+            lines.append(":- func %s(%s) = (%s::out) is det%s." %
+                         (callee.name, args, text(callee.output), where))
         else:
-            lines.append(":- pred %s(%s, %s::out) is det." %
-                         (callee.name, args, text(callee.output)))
-        lines.extend(clauses(rng, callee, callees))
+            lines.append(":- pred %s(%s, %s::out) is det%s." %
+                         (callee.name, args, text(callee.output), where))
+        lines.extend(clauses(rng, callee, callees, classes))
     return "\n".join(lines) + "\n"
 
 
-def clauses(rng, callee, callees):
+def clauses(rng, callee, callees, classes=None):
     names = ["A%d" % (i + 1) for i in range(len(callee.inputs))]
     own = [v for v in callee.own if v not in callee.void]
     lists = [i for i, t in enumerate(callee.inputs) if t[0] == "list"]
@@ -248,14 +427,14 @@ def clauses(rng, callee, callees):
             heads = list(names)
             heads[i] = pattern
             env = env + [(n, t) for j, (n, t) in enumerate(zip(names, callee.inputs)) if j != i]
-            out.append(clause(rng, callee, callees, own, heads, env))
+            out.append(clause(rng, callee, callees, own, heads, env, classes))
         return out
     env = list(zip(names, callee.inputs))
-    return [clause(rng, callee, callees, own, names, env)]
+    return [clause(rng, callee, callees, own, names, env, classes)]
 
 
-def clause(rng, callee, callees, own, heads, env):
-    body = Body(rng, callees, own, env)
+def clause(rng, callee, callees, own, heads, env, classes=None):
+    body = Body(rng, callees, own, env, classes, callee.constraints)
     for _ in range(rng.randint(0, 2)):
         body.call(None, 1, unused=True)
     ty = substitute(callee.output, {v: ("var", v) for v in callee.own})
@@ -290,6 +469,8 @@ def clause(rng, callee, callees, own, heads, env):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--classes", action="store_true",
+                        help="add type classes, instances and constraints")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--count", type=int, default=20)
     parser.add_argument("dir")
@@ -299,7 +480,7 @@ def main():
         rng = random.Random(args.seed * 100003 + i)
         name = "polymorphism_%d_%d" % (args.seed, i)
         with open(os.path.join(args.dir, name + ".m"), "w") as f:
-            f.write(module(rng, name))
+            f.write(module(rng, name, args.classes))
 
 
 if __name__ == "__main__":
