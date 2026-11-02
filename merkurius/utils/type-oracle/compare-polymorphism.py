@@ -13,9 +13,15 @@ hidden arguments in both, the same type_infos in typeclass_infos, and its
 calls that pass them must pass the same, in the order of its body, each
 described by its type or constraint and where it comes from: a hidden
 argument, a constant, a cell, a place in a typeclass_info, a superclass of
-another, or an instance's cell with the typeclass_infos of its
-constraints. The variables, and where in the body mmc makes them, are not
-compared; nor are the procedures merkc does not analyse yet.
+another, an instance's cell with the typeclass_infos of its
+constraints, or the output of a goal, a call of an existentially typed
+predicate or function or a deconstruction with an existentially typed
+constructor. An existentially typed procedure's clauses must also give the
+same type_infos and typeclass_infos for its existentially quantified type
+variables and constraints, its hidden outputs; mmc gives them after a
+switch of its clauses once, and merkc for each clause, the same. The
+variables, and where in the body mmc makes them, are not compared; nor are
+the procedures merkc does not analyse yet.
 
 With --infer, mmc infers the types and modes of predicates declared
 without them (--infer-all), and merkc their modes (-finfer-modes).
@@ -38,19 +44,31 @@ def canonical(procedure):
     """A procedure with its type variables named by their places, P1, P2,
     ..., among its hidden type_info arguments and then its type_infos in
     typeclass_infos, since mmc and merkc name those of an inferred
-    signature or an instance method differently."""
-    hidden, found, calls = procedure
-    order = [h for h in hidden if re.match(r"^[A-Z]\w*$", h)]
+    signature or an instance method differently, and the types that goals
+    give, Q1, Q2, ..., in the order of the calls and results that have
+    them. Its results are the different ones, in order."""
+    hidden, found, calls, results = procedure
+    order = [h.split(" ", 1)[0] for h in hidden
+             if re.match(r"^[A-Z]\w*( \(output\))?$", h)]
     order += [f.split(" ", 1)[0] for f in found]
+    # Then those only in its existential constraints.
+    order += [v for h in hidden for v in re.findall(r"\b[A-Z]\w*\b", h)]
     names = {}
     for name in order:
         names.setdefault(name, "P%d" % (len(names) + 1))
+    given = {}
+    for text in [t for _, types in calls for t in types] + results:
+        for var in re.findall(r"\b[A-Z]\w*\b", text):
+            if var not in names:
+                given.setdefault(var, "Q%d" % (len(given) + 1))
+    names.update(given)
 
     def rename(text):
         return re.sub(r"\b[A-Z]\w*\b", lambda m: names.get(m.group(0), m.group(0)), text)
 
     return ([rename(h) for h in hidden], [rename(f) for f in found],
-            [(callee, [rename(t) for t in types]) for callee, types in calls])
+            [(callee, [rename(t) for t in types]) for callee, types in calls],
+            sorted(set(rename(r) for r in results)))
 
 
 def split_arguments(text):
@@ -78,7 +96,7 @@ CALL = re.compile(r"^\s*(?:\S+ = )?([a-z][\w.]*(?:\.'[^']*')?)\((.*)\)\.?$")
 MAKERS = ("type_info_cell_constructor", "typeclass_info_cell_constructor",
           "type_ctor_info", "type_info_const", "typeclass_info_const",
           "base_typeclass_info", "private_builtin.type_info_from_typeclass_info",
-          "private_builtin.superclass_from_typeclass_info")
+          "private_builtin.superclass_from_typeclass_info", "exists_cast")
 
 
 def instance_key(text):
@@ -162,11 +180,14 @@ def mmc_procedure(lines):
         if m:
             constants[m.group(1)] = int(m.group(2))
     hidden_vars = []
+    modes = []
     calls = []
     head = True
     for line in lines:
         if line.startswith(":- mode "):
             head = True
+            m = re.match(r":- mode [\w.']+\((.*?)\)(?: = \w+)? is ", line)
+            modes = split_arguments(m.group(1)) if m else []
             continue
         if head and not line.startswith("%") and line.strip():
             head = False
@@ -188,19 +209,68 @@ def mmc_procedure(lines):
             passed.append(argument)
         if passed:
             calls.append((m.group(1), passed))
+    # The hidden arguments the procedure gives, for its existentially
+    # quantified type variables and existential constraints.
+    outputs = [v for k, v in enumerate(hidden_vars) if k < len(modes) and modes[k] == "out"]
+    inputs = [v for v in hidden_vars if v not in outputs]
+    # The line where each variable is first seen, after the head.
+    first_seen = {}
+    for k, line in enumerate(lines):
+        if line.lstrip().startswith("%") or line.startswith(":- mode "):
+            continue
+        for var in re.findall(r"\b[A-Z]\w*\b", line):
+            first_seen.setdefault(var, k)
+    # The assignments of variables to others, and what the procedure gives
+    # back: exists_cast(X, Output), or Output = X.
+    aliases = {}
+    given = []
+    for k, line in enumerate(lines):
+        m = re.match(r"\s*(\w+) = (\w+)$", line) or \
+            re.match(r"\s*exists_cast\((\w+), (\w+)\)$", line)
+        if not m or line.lstrip().startswith("%"):
+            continue
+        target, source = (m.group(1), m.group(2)) if "exists_cast" not in line \
+            else (m.group(2), m.group(1))
+        if target in outputs:
+            given.append((target, source))
+        elif "exists_cast" not in line:
+            if first_seen.get(target, k) < first_seen.get(source, k):
+                # A unification, written either way round: the variable
+                # seen first is the one made first, as the one a
+                # deconstruction that common subexpression elimination
+                # moved out of a switch gives to each arm's.
+                target, source = source, target
+            aliases[target] = source
+    # The call that gives each variable that nothing else makes: its
+    # callee's output, for an existentially quantified type variable or an
+    # existential constraint.
+    producers = {}
+    for k, (callee, passed) in enumerate(calls):
+        for var in passed:
+            if var not in inputs and var not in aliases and var not in made \
+                    and var not in producers:
+                producers[var] = (k, callee)
 
-    def describe(var):
+    def describe(var, call=None):
         what = described.get(var, "?")
-        if var in hidden_vars:
+        if var in inputs:
             return "%s (argument)" % what
+        if var in aliases:
+            return describe(aliases[var], call)
+        if var in producers:
+            k, callee = producers[var]
+            return "%s (output)" % what if k == call else "%s (output of %s)" % (what, callee)
         maker, arguments = made.get(var, (None, []))
         if maker in ("type_info_const", "type_ctor_info", "typeclass_info_const"):
             return "%s (constant)" % what
         if maker == "type_info_cell_constructor":
             return "%s (cell)" % what
         if maker == "type_info_from_typeclass_info":
+            dictionary = arguments[0]
+            while dictionary not in described and dictionary in aliases:
+                dictionary = aliases[dictionary]
             return "%s (type_info %d of %s)" % (
-                what, constants.get(arguments[1], 0), described.get(arguments[0], "?"))
+                what, constants.get(arguments[1], 0), described.get(dictionary, "?"))
         if maker == "superclass_from_typeclass_info":
             return "%s (superclass %d of %s)" % (
                 what, constants.get(arguments[1], 0), describe(arguments[0]))
@@ -209,13 +279,29 @@ def mmc_procedure(lines):
             return "%s (instance%s)" % (what, " with " + ", ".join(premises) if premises else "")
         return "%s (?)" % what
 
-    hidden = [described[v] for v in hidden_vars]
+    hidden = [described[v] + (" (output)" if v in outputs else "") for v in hidden_vars]
     order = {v: k for k, v in enumerate(hidden_vars)}
+    found = [f for f in found if f[1] in inputs]
     found.sort(key=lambda f: (order.get(f[1], len(order)), f[2]))
     found_text = ["%s (type_info %d of %s)" % (var, n, described.get(d, "?"))
                   for var, d, n in found]
-    return hidden, found_text, [(callee, [describe(v) for v in passed])
-                                for callee, passed in calls]
+    # What each switch arm or clause gives, in the order of the outputs.
+    results, chunk = [], {}
+    for target, source in given:
+        if target in chunk:
+            results.append(chunk)
+            chunk = {}
+        chunk[target] = describe(source)
+    if chunk:
+        results.append(chunk)
+    # An output that a goal gives directly, for a type it gives.
+    direct = {v: "%s (output of %s)" % (described.get(v, "?"), producers[v][1])
+              for v in outputs if v in producers}
+    if direct:
+        results = [dict(c, **direct) for c in results] or [direct]
+    results = [", ".join(c[v] for v in outputs if v in c) for c in results]
+    return hidden, found_text, [(callee, [describe(v, k) for v in passed])
+                                for k, (callee, passed) in enumerate(calls)], results
 
 
 def merkc_procedures(dump):
@@ -225,12 +311,12 @@ def merkc_procedures(dump):
         m = re.match(r"^\S.* (pred|func) (\S+)/(\d+) (?:inferred )?mode (\d+): ", line)
         if m:
             key = (m.group(1), "%s/%s" % (m.group(2), m.group(3)), int(m.group(4)))
-            procedures[key] = ([], [], [])
+            procedures[key] = ([], [], [], [])
             continue
         m = re.match(r"^method (.*) (?:pred|func) (\S+) mode (\d+)$", line)
         if m:
             key = ("method", instance_key(m.group(1)), m.group(2), int(m.group(3)))
-            procedures[key] = ([], [], [])
+            procedures[key] = ([], [], [], [])
             continue
         if line.startswith("(default)") and " mode " not in line:
             key = None
@@ -250,19 +336,26 @@ def merkc_procedures(dump):
         if m:
             procedures[key][1].extend(split_arguments(m.group(1)))
             continue
-        m = re.match(r"^    \S+ (call|application) (?:pred|func) (\S+)/\d+: (.*)$", line)
+        m = re.match(r"^  results: (.*)$", line)
         if m:
-            procedures[key][2].append((m.group(2), split_arguments(m.group(3))))
+            procedures[key][3].append(m.group(1))
+            continue
+        m = re.match(r"^    \S+ (?:call|application|construct|deconstruct) "
+                     r"(?:(?:pred|func) )?(\S+|\S+'[^']*')/\d+: (.*)$", line)
+        if m:
+            procedures[key][2].append((m.group(1), split_arguments(m.group(2))))
     return procedures
 
 
 def show(procedure):
-    hidden, found, calls = procedure
+    hidden, found, calls, results = procedure
     out = ["    hidden: %s" % ", ".join(hidden)]
     if found:
         out.append("    in typeclass_infos: %s" % ", ".join(found))
     for callee, types in calls:
         out.append("    %s: %s" % (callee, ", ".join(types)))
+    for result in results:
+        out.append("    results: %s" % result)
     return "\n".join(out)
 
 

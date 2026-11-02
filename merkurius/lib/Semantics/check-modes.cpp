@@ -1790,6 +1790,17 @@ const ClauseTypes &ProcedureChecker::WithHeadUnifications(
   typed.symbols = arena.SaveArray(llvm::ArrayRef<const Symbol *>{symbols});
   typed.names =
       arena.SaveArray(llvm::ArrayRef<const parser::SymName *>{names});
+  // The proofs of the declaration's existential constraints stand at the
+  // goal number after the goals, which the head unifications now have.
+  std::vector<GoalConstraint> constraints{
+      clause.constraints.begin(), clause.constraints.end()};
+  for (GoalConstraint &constraint : constraints) {
+    if (constraint.goal == form.goals) {
+      constraint.goal = copy.goals;
+    }
+  }
+  typed.constraints =
+      arena.SaveArray(llvm::ArrayRef<GoalConstraint>{constraints});
   return typed;
 }
 

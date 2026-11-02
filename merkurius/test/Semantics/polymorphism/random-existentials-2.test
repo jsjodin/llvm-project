@@ -1,0 +1,15 @@
+# Random modules with existentially typed predicates and functions, some
+# with existential constraints, and existentially typed constructors,
+# whose callers use what they get as they use their own type variables'
+# values, pass it to constrained callees, give it back as their own
+# existentially typed outputs, and construct with 'new'
+# (generate-polymorphic-programs.py --existentials). merkc must give each
+# procedure the hidden arguments mmc does, outputs among them, make each
+# clause give the same type_infos and typeclass_infos for its existential
+# types, and pass and get the same at each call, construction and
+# deconstruction.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-polymorphic-programs.py --existentials --seed 27 --count 40 %t
+# RUN: %compare-polymorphism %t/*.m

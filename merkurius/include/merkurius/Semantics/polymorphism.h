@@ -30,7 +30,13 @@
 // typeclass_info, a superclass's taken out of one, a constant for a
 // constraint without type variables, and one built from the instance's
 // with the typeclass_infos of the instance's own constraints for another.
-// The body is not rewritten: code generation makes them.
+// An existentially typed predicate or function gives its caller, after
+// those, a type_info for each of its existentially quantified type
+// variables that its existential constraints do not have, and then a
+// typeclass_info for each existential constraint, which its clauses make
+// as for a call; a construction with an existentially typed constructor
+// passes them as a call does, and a deconstruction gets them. The body is
+// not rewritten: code generation makes them.
 
 #include "merkurius/Common/enum-class.h"
 #include "merkurius/Parser/token.h"
@@ -49,7 +55,7 @@
 namespace merkurius::semantics {
 
 ENUM_CLASS(TypeInfoKind, Parameter, Constant, Cell, Void, Dictionary,
-    Argument)
+    Argument, Output)
 
 struct Dictionary;
 
@@ -57,8 +63,12 @@ struct Dictionary;
 // of its type variables, a constant for a type without type variables, a
 // cell built from the type's constructor and its arguments' type_infos,
 // the constant for void, the type of a type variable nothing determines,
-// the type_info in a hidden typeclass_info at a place, or an argument of
-// another type_info.
+// the type_info in a hidden typeclass_info at a place, an argument of
+// another type_info, or one that a goal gives, for a type its callee or
+// the constructor it takes apart has existentially quantified. The types
+// that goals give are printed as type variables, from kExistentialVar on.
+inline constexpr unsigned kExistentialVar{1u << 30};
+
 struct TypeInfo {
   TypeInfoKind kind;
   const Type *type{nullptr}; // the type described; null for void
@@ -70,9 +80,11 @@ struct TypeInfo {
   // For a Dictionary, its place in it, from 1, after the type class's
   // superclasses, as mmc numbers them; for an Argument, which, from 1.
   unsigned index{0};
+  const Body *goal{nullptr}; // for an Output, the goal that gives it
+  const Symbol *callee{nullptr}; // and its callee or constructor
 };
 
-ENUM_CLASS(DictionaryKind, Parameter, Constant, Superclass, Instance)
+ENUM_CLASS(DictionaryKind, Parameter, Constant, Superclass, Instance, Output)
 
 // Where a typeclass_info comes from: the procedure's hidden argument for one
 // of its constraints, a constant for a constraint without type variables,
@@ -80,7 +92,8 @@ ENUM_CLASS(DictionaryKind, Parameter, Constant, Superclass, Instance)
 // with the type_infos of the instance's type variables that its
 // constraints do not have, the typeclass_infos of its constraints, those of
 // its type class's superclasses on its types, and the type_infos of the
-// constraint's types.
+// constraint's types; or one that a goal gives, for an existential
+// constraint of its callee or of the constructor it takes apart.
 struct Dictionary {
   DictionaryKind kind;
   ClassConstraint constraint;
@@ -94,27 +107,35 @@ struct Dictionary {
   std::vector<const Dictionary *> premises{};
   std::vector<const Dictionary *> supers{};
   std::vector<const TypeInfo *> types{};
+  const Body *goal{nullptr}; // for an Output, the goal that gives it
+  const Symbol *callee{nullptr}; // and its callee or constructor
 };
 
-// A hidden argument: a type_info or a typeclass_info.
+// A hidden argument: a type_info or a typeclass_info, which the
+// procedure is given, or gives for an existentially quantified type
+// variable or an existential constraint.
 struct HiddenArgument {
   const TypeInfo *typeInfo{nullptr};
   const Dictionary *dictionary{nullptr};
+  bool output{false};
 };
 
 // What a goal passes: type_infos for its callee's type variables that its
 // constraints do not have, in order, and typeclass_infos for its
-// constraints; a test of two variables of a type with type variables, the
-// type's type_info.
+// constraints, those for its existentially quantified ones and its
+// existential constraints being the ones it gives; a test of two variables
+// of a type with type variables, the type's type_info. What a clause of an
+// existentially typed procedure gives for its own.
 struct PassedInfos {
   std::vector<const TypeInfo *> typeInfos;
   std::vector<const Dictionary *> dictionaries;
+  const Symbol *constructor{nullptr}; // a construction's or deconstruction's
 };
 
-// Why a procedure is not analysed yet: it, or one it calls, has
-// existentially quantified types or constraints; a call's constraints were
-// not proved; or it makes a closure of a polymorphic predicate or
-// function.
+// Why a procedure is not analysed yet: it is an instance method with
+// existentially quantified types, or it uses a type that a goal it does not
+// analyse gives; a call's constraints were not proved; or it makes a
+// closure of a polymorphic predicate or function.
 ENUM_CLASS(PolymorphismUnchecked, None, Constraints, Existential, Closure)
 
 struct ProcedurePolymorphism {
@@ -127,6 +148,12 @@ struct ProcedurePolymorphism {
   // By type variable, its type_info.
   std::vector<const TypeInfo *> sources;
   llvm::DenseMap<const Body *, PassedInfos> goals;
+  // For an existentially typed procedure, what each clause gives.
+  std::vector<PassedInfos> results;
+  // The types that goals give which the clauses give for the procedure's
+  // own existentially quantified type variables, by their variables: they
+  // are printed by those names.
+  llvm::DenseMap<unsigned, unsigned> givenAs;
   PolymorphismUnchecked unchecked{PolymorphismUnchecked::None};
 };
 
