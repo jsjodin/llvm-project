@@ -589,10 +589,6 @@ const Type *TypeChecker::Convert(
 // expanded.
 const Type *TypeChecker::Expand(const Symbol &symbol,
     llvm::ArrayRef<const Type *> arguments, parser::CharBlock where) {
-  // mmc's character is char (see the design document's register).
-  if (symbol.module.empty() && symbol.name == "character") {
-    return Primitive("char");
-  }
   const auto *defn{
       std::get_if<const parser::EquivalenceTypeDefn *>(&symbol.declaration)};
   if (!defn) {
@@ -2833,7 +2829,7 @@ void TypeChecker::CheckFunctor(const Unify &unify, const parser::SymName &name) 
   }
   if (IsCharConstant(name, unify.arguments.size())) {
     options.push_back([&](Assignment &a) {
-      return UnifyTypes(a, VarType(unify.left), Primitive("char"));
+      return UnifyTypes(a, VarType(unify.left), Primitive("character"));
     });
   }
   if (options.empty()) {

@@ -1443,7 +1443,7 @@ private:
   // By variable, how often a construction put it in a term, or an
   // assignment aliased it.
   std::vector<unsigned> touched_;
-  // How often each variable was assigned to another, which wakes only the
+  // How often a goal that used each variable ran, which wakes only the
   // goals that would clobber it.
   std::vector<unsigned> freed_;
   // How often a goal checked left its insts not reached.
@@ -2454,6 +2454,11 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
       continue;
     }
     progress = true;
+    // A goal that would clobber a variable this one used may now find it
+    // not used again, as in mmc, even if its inst is the same.
+    for (VarId var : form_->nonlocals[NumberOf(goal)]) {
+      ++freed_[var];
+    }
     // After a goal that cannot succeed, the others are not checked, and
     // the goal is the last run, as in mmc.
     if (!map.empty() && ops_.IsNotReached(map.front())) {
@@ -2550,9 +2555,6 @@ ProcedureChecker::Result ProcedureChecker::CheckVarUnify(
     modes.unify = UnifyKind::Assign;
     modes.assigned = to;
     modes.dead = !live[to];
-    // That wakes the goals that would clobber the value, which may now
-    // find it not used again, as in mmc, even if its inst is the same.
-    ++freed_[from];
     return Ok();
   }
   if (type && type->kind == TypeKind::HigherOrder) {
@@ -2765,13 +2767,43 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
     }
     map[var] = parts ? (*parts)[i] : insts_.NotReached();
   }
-  if (sharing) {
-    if (const Inst *shared{ops_.Unify(unified,
-            insts_.Bound(Uniqueness::Unique, {{functor, *parts}}), type)}) {
-      unified = shared;
+  // An argument bound where X's is too is tested against a fresh variable
+  // for X's, as in mmc, so X learns only the functor there, not the
+  // argument's inst: after `M = 1, S = c(M)`, S is still `c(ground)`.
+  const Inst *learned{unified};
+  if (parts && before && !ops_.IsNotReached(unified)) {
+    std::vector<const Inst *> known{arguments};
+    bool fresh{false};
+    for (std::size_t i{0}; i < known.size() && i < before->size(); ++i) {
+      if (!ops_.IsFree(known[i]) && !ops_.IsFree((*before)[i])) {
+        known[i] = insts_.Free();
+        fresh = true;
+      }
+    }
+    if (fresh) {
+      if (const Inst *narrowed{ops_.Unify(
+              a, insts_.Bound(Uniqueness::Unique, {{functor, known}}), type)}) {
+        learned = narrowed;
+      }
     }
   }
-  map[x] = unified;
+  if (sharing) {
+    std::optional<std::vector<const Inst *>> own{
+        ops_.Arguments(learned, functor, type)};
+    for (std::size_t i{0}; own && i < own->size(); ++i) {
+      if (live[x] && live[unify.arguments[i]]) {
+        (*own)[i] = insts_.Share((*own)[i]);
+      }
+    }
+    if (const Inst *shared{own ? ops_.Unify(learned,
+                                     insts_.Bound(Uniqueness::Unique,
+                                         {{functor, *own}}),
+                                     type)
+                               : nullptr}) {
+      learned = shared;
+    }
+  }
+  map[x] = learned;
   modes.unify = test ? UnifyKind::Test : UnifyKind::Deconstruct;
   modes.functor = functor;
   last_ = Start(unify.tokens);

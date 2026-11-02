@@ -887,6 +887,10 @@ private:
     // The aliases not made in a scope, which are the only ones a
     // disjunction is split on in mmc.
     std::set<BodyVar> unscoped{aliases};
+    // Whether a test of a case's own variable against a constant came
+    // before, which is `true` in mmc, so that a disjunction after it is
+    // not split; one through a variable unified with it is kept.
+    bool truth{false};
     for (std::size_t i{0}; i < goals.size(); ++i) {
       const Body *goal{goals[i]};
       auto rebuild{[&](const Body *replacement) {
@@ -911,6 +915,7 @@ private:
         // A test of a switch's variable in its case against a constant is
         // true in mmc.
         if (goal->switchTest && goal->arguments.empty()) {
+          truth |= cased_.count(goal->left) != 0;
           continue;
         }
         if (goal->unify == UnifyKind::Deconstruct && aliases.count(goal->left)) {
@@ -941,7 +946,7 @@ private:
         return out;
       }
       case BodyKind::Disj: {
-        if (!split || goal->goals.empty()) {
+        if (!split || truth || goal->goals.empty()) {
           return std::nullopt;
         }
         if (i == 0) {
@@ -2660,10 +2665,13 @@ private:
       Contexts(goal->goals.front(), {true, {}});
       return false;
     case BodyKind::Scope:
-      // Only the first solution of a determinism cast's goal is wanted.
+      // Only the first solution of a determinism cast's goal is wanted, but
+      // the goals after it that can fail are still why a committed choice
+      // call in it needs all, if something in it asks for them, as in mmc,
+      // unlike a negation's.
       if (goal->promise &&
           *goal->promise != parser::PromiseSolutionsKind::EquivalentSolutionSets) {
-        Contexts(goal->goals.front(), {true, {}});
+        Contexts(goal->goals.front(), {true, context.failing});
         return false;
       }
       if (goal->scope == ScopeKind::RequireDeterminism ||
