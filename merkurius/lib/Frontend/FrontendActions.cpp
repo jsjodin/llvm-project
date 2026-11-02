@@ -695,7 +695,7 @@ bool DebugDumpPolymorphismAction::executeAction() {
   Resolve(ci, getSourceFile(), r);
   Analysed a{Analyse(ci, r)};
   std::unique_ptr<semantics::PolymorphismAnalysis> polymorphism{
-      semantics::AnalysePolymorphism(*a.types, *a.determinism)};
+      semantics::AnalysePolymorphism(*a.types, *a.modes, *a.determinism)};
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   llvm::raw_ostream *os{ci.createDefaultOutputFile()};
   if (!os) {

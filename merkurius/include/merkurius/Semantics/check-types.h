@@ -28,6 +28,15 @@
 
 namespace merkurius::semantics {
 
+// An instance declaration's head: its type class, its types, whose type
+// variables are the instance's, numbered from 0, and its constraints.
+struct InstanceHead {
+  const InstanceItem *item;
+  const Symbol *typeclass;
+  llvm::ArrayRef<const Type *> types;
+  llvm::ArrayRef<ClassConstraint> constraints;
+};
+
 // How a type class constraint is satisfied (thesis, section 3.1.4): by
 // one of the constraints the clause's declaration assumes, directly or as
 // a superclass of it, or by an instance, whose own constraints are then
@@ -40,6 +49,9 @@ struct ConstraintProof {
   // If `assumed` is the existential constraint of a goal's callee, that
   // goal (reference manual, "Existential class constraints").
   std::optional<unsigned> goal{};
+  // By an instance: its head, and its type variables as bound.
+  const InstanceHead *head{nullptr};
+  llvm::ArrayRef<const Type *> bindings{};
 };
 
 // A constraint of the callee of a goal, as the clause instantiates it.
@@ -105,6 +117,13 @@ public:
     auto it{signatures_.find(&symbol)};
     return it == signatures_.end() || !it->second ? nullptr : &*it->second;
   }
+  // The instances of the module and of the interfaces it loaded.
+  const std::deque<InstanceHead> &instances() const { return instances_; }
+  // A type class's superclass constraints, on its parameters, if the type
+  // checker needed them.
+  llvm::ArrayRef<ClassConstraint> SuperclassesOf(const Symbol &typeclass) const {
+    return superclasses_.lookup(&typeclass);
+  }
   // The supertype of a subtype, its type variables the subtype's
   // parameters; null for a base type, or one the type checker did not
   // need.
@@ -128,6 +147,9 @@ private:
   llvm::DenseMap<const Symbol *, const Type *> supertypes_;
   std::vector<ClauseTypes> clauses_;
   std::deque<MethodDefinition> methods_;
+  std::deque<InstanceHead> instances_;
+  llvm::DenseMap<const Symbol *, llvm::ArrayRef<ClassConstraint>>
+      superclasses_;
 };
 
 // Prints a symbol with its signature: func int.'+'(int, int) = int, or
