@@ -8,6 +8,7 @@
 
 #include "merkurius/Frontend/CompilerInvocation.h"
 #include "merkurius/Driver/Options.h"
+#include "llvm/ADT/StringExtras.h"
 
 using namespace merkurius::options;
 using llvm::opt::InputArgList;
@@ -29,7 +30,9 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
               OPT_fdebug_dump_semantic_form, OPT_fdebug_dump_nonlocals,
               OPT_fdebug_dump_imports, OPT_fdebug_dump_resolved_names,
               OPT_fdebug_dump_types, OPT_fdebug_dump_modes,
-              OPT_fdebug_dump_determinism, OPT_fdebug_dump_polymorphism)) {
+              OPT_fdebug_dump_determinism, OPT_fdebug_dump_polymorphism,
+              OPT_emit_merk, OPT_emit_mlir, OPT_emit_llvm, OPT_S,
+              OPT_emit_obj)) {
     switch (arg->getOption().getID()) {
     case OPT_E:
       opts.programAction = ActionKind::PrintPreprocessedInput;
@@ -75,6 +78,21 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
       break;
     case OPT_fdebug_dump_polymorphism:
       opts.programAction = ActionKind::DebugDumpPolymorphism;
+      break;
+    case OPT_emit_merk:
+      opts.programAction = ActionKind::EmitMerk;
+      break;
+    case OPT_emit_mlir:
+      opts.programAction = ActionKind::EmitMLIR;
+      break;
+    case OPT_emit_llvm:
+      opts.programAction = ActionKind::EmitLLVM;
+      break;
+    case OPT_S:
+      opts.programAction = ActionKind::EmitAssembly;
+      break;
+    case OPT_emit_obj:
+      opts.programAction = ActionKind::EmitObj;
       break;
     case OPT_fdebug_dump_resolved_names:
       opts.programAction = ActionKind::DebugDumpResolvedNames;
@@ -135,6 +153,24 @@ static bool parseLangArgs(LangOptions &opts, const InputArgList &args) {
   return true;
 }
 
+static bool parseCodeGenArgs(CodeGenOptions &opts, const InputArgList &args) {
+  opts.triple = args.getLastArgValue(OPT_triple).str();
+  opts.cpu = args.getLastArgValue(OPT_target_cpu).str();
+  opts.features = llvm::join(args.getAllArgValues(OPT_target_feature), ",");
+  if (const llvm::opt::Arg *arg = args.getLastArg(OPT_O)) {
+    llvm::StringRef value{arg->getValue()};
+    if (value.empty()) {
+      opts.optimizationLevel = 1; // -O, as in Clang
+    } else if (value.getAsInteger(10, opts.optimizationLevel) ||
+        opts.optimizationLevel > 3) {
+      reportError(
+          "invalid value '" + value + "' in '" + arg->getAsString(args) + "'");
+      return false;
+    }
+  }
+  return true;
+}
+
 bool CompilerInvocation::createFromArgs(
     CompilerInvocation &res, llvm::ArrayRef<const char *> args) {
   std::optional<InputArgList> parsed{parseArgs(args, FC1Option)};
@@ -143,6 +179,7 @@ bool CompilerInvocation::createFromArgs(
   }
   bool ok{parseFrontendArgs(res.getFrontendOpts(), *parsed)};
   ok &= parseLangArgs(res.getLangOpts(), *parsed);
+  ok &= parseCodeGenArgs(res.getCodeGenOpts(), *parsed);
   return ok;
 }
 

@@ -138,6 +138,9 @@ LLVM and Flang are licensed, like this project, under Apache 2.0 with the LLVM e
 | `flang/tools/flang-driver/driver.cpp` and `fc1_main.cpp` | Built on Clang's driver library in its Flang mode, which a project outside llvm-project cannot extend. We keep the shape: one binary that hands off to `-fc1` |
 | `flang/include/flang/Frontend/` and `flang/lib/FrontendTool/` | Tied to Fortran's options and actions, and uses Clang's `DiagnosticsEngine`. We keep `CompilerInvocation`, `CompilerInstance`, the layered `FrontendAction` classes and the `.def` option lists (Driver) |
 | `clang/lib/Driver/ToolChains/Flang.cpp` (`Flang::addOffloadOptions`) | Part of Clang's driver library; it is the recipe for the offload job sequence |
+| ClangIR's target records: `cir.triple` and the DLTI spec on the module (`clang/lib/CIR/CodeGen/CIRGenModule.cpp`, `CIRDataLayoutSpec.cpp`), read back by `createLowerModule` (`clang/lib/CIR/Dialect/Transforms/TargetLowering/LowerModule.cpp`) | It rebuilds Clang's `TargetInfo`, from Clang's Basic library, which we do not link. We keep the shape: a module records its target, so that it lowers alone (Lowering and code generation, "Target information") |
+| Flang's `CompilerInstance::setUpTargetMachine` and `fir::support::setMLIRDataLayout` | Tied to Flang's options and FIR. We make the `TargetMachine` and the DLTI spec the same way |
+| The Toy tutorial's `toy.func` (`mlir/examples/toy`) | A tutorial; `merk.proc` is defined the same way, with `FunctionOpInterface` and its parser and printer |
 
 **Rules for copied code**
 
@@ -854,7 +857,7 @@ Its chapter 3, with the typing rules of figures 3.3 to 3.10, is the reference fo
   - **Undetermined types.** A coerce whose argument's or result's type nothing else determines is an error, as in mmc, which infers nothing through it. A rigid type variable is not a discriminated union type.
   - **Overloading.** Assignments with an invalid coerce are dropped at the end of the clause if others are left, as mmc does, so in `X = k, Y = coerce(X)` the result's type chooses `k`. Otherwise each invalid coerce is reported with the reason, and an ambiguity hides them.
   - **Modes.** A coerce to a subtype, or between sibling subtypes, is type-correct; whether the argument's inst allows it is for mode analysis.
-- **Not yet:** the states of `atomic` goals, since `stm_builtin` is not stubbed; and the modes, determinism and purity of instance methods, which mode analysis will check.
+- **Not yet:** the states of `atomic` goals, since `stm_builtin` is not stubbed. Instance methods' purity, modes and determinism are checked by purity checking, mode analysis and determinism analysis.
 
 ### Purity checking
 
@@ -964,7 +967,8 @@ The output of semantic analysis is the annotated AST, one `ProcInfo` per procedu
 
 - **Values.** Once modes are known, each variable is produced exactly once on each path. So a map from variables to SSA values, updated at each producer and read at each consumer, is all MLIR generation needs, and the output is in SSA form from the start.
 - **Locations.** Each operation carries the location of the parse-tree node behind its semantic node, and variable names are recorded as `NameLoc`s for debug information.
-- **Types.** `int`, `float`, `char` and the sized integers become builtin MLIR types such as `i64` and `f64`. Other types become `!merk.term<…>`, closures `!merk.closure<…>`, and type infos `!merk.typeinfo`.
+- **Types.** `int`, `float`, `char` and the sized integers become builtin MLIR types such as `i64` and `f64`. Other types become `!merk.term<…>`, closures `!merk.closure<…>`, and type infos `!merk.typeinfo`. `io.state` has no values to pass, so its arguments are left out.
+- **Done so far:** the procedures and goals listed in Lowering and code generation, "What is lowered so far".
 
 | Semantic form, as the `ProcInfo` classifies it | `merk` output |
 | --- | --- |
@@ -1415,6 +1419,9 @@ Two new dialects carry Mercury semantics until upstream dialects can take over: 
 | `merk.succeed`, `merk.fail`, `merk.commit` | Produce a solution, fail, prune remaining solutions |
 | `merk.throw`, `merk.try` | Exceptions |
 | `merk.par_conj`, `merk.par_loop` | Parallel conjunction; a loop formed from a `%$omp` annotation |
+| `merk.entry` | Names the program's main procedure, which the runtime calls through `merk_main` |
+
+Defined so far (`Dialect/Merk/IR`): `merk.proc`, `merk.call`, `merk.succeed` and `merk.entry`, with the attributes `#merk.determinism<det>` and `#merk.address_spaces<…>` (Lowering and code generation, "Target information").
 
 A deterministic procedure, in proposed assembly syntax:
 
@@ -1445,7 +1452,22 @@ In a `nondet` procedure, a call to another `nondet` procedure has generator sema
 
 ## Lowering and code generation
 
-Lowering fixes the data layout first, then turns each determinism category into plain control flow, then hands LLVM IR and GC metadata to LLVM. The steps below run in this order.
+Lowering fixes the data layout first, then turns each determinism category into plain control flow, then hands LLVM IR and GC metadata to LLVM. The numbered steps below run in this order.
+
+### Target information
+
+Code generation knows the target through `TargetInfo` (`CodeGen/TargetInfo.h`), made from the triple, CPU and features with LLVM's `TargetMachine`, as Flang's frontend makes it. It gives the LLVM data layout; the address spaces it names for allocas, globals and code; each address space's pointer size and alignment; the word, which `int`, `uint` and `float` fill, a generic pointer wide; and the free tag bits of a cell pointer, 3 for 8-byte words.
+
+- **Address spaces of Mercury code.** Besides the data layout's, `TargetInfo` names the target's numbers for the generic address space, which every pointer converts to, and for global, workgroup-shared, constant and per-thread private memory, as target regions will need: all 0 on a CPU; 0, 1, 3, 4 and 5 for AMDGPU and NVPTX; 4, 1, 3, 2 and 0 for SPIR-V, OpenCL's. ClangIR so far records only the default address space.
+- **Recorded on the module.** As in ClangIR, the module records its target, so that a module read back from its text lowers as it would have when written, with no command line: `llvm.target_triple`, `llvm.data_layout` and its DLTI form `dlti.dl_spec`, `merk.target_cpu`, `merk.target_features`, `merk.optimization_level` and `merk.address_spaces`. `-fc1` reads a `.mlir` file written by `-emit-merk` or `-emit-mlir` back, and lowers it for the target it records; a module that records none is an error.
+- **Not Clang's `TargetInfo`.** ClangIR rebuilds Clang's `TargetInfo` from the module's triple, for C's type sizes and ABI. Mercury needs few of those facts, and calls into C, such as libc's and libm's, pass only words, floats and pointers. `foreign_proc("C")` and `foreign_type` will need C's `long`, `size_t` and struct ABI exactly as Clang has them; `TargetInfo` can then be built on Clang's without changing what the module records.
+
+### What is lowered so far
+
+Code generation (`CodeGen/MLIRGen.cpp`) makes `merk` for procedures that are `det` or `cc_multi`, have no hidden arguments, and whose values are of primitive numeric types or `io.state`, whose bodies are conjunctions, assignments, calls and function applications. A value of type `io.state` is not passed, so `main(!IO)` takes no arguments. Anything else is reported as not yet implemented, at the first such construct of a procedure. Until terms have layouts, `merk` is lowered to MLIR's LLVM dialect directly (`CodeGen/Lowering.cpp`), as ClangIR's DirectToLLVM lowers CIR; `mrt` comes between them with layouts. Then MLIR translates it to LLVM IR, LLVM's pipeline for `-O0` to `-O3` optimizes it, and the `TargetMachine` writes assembly or an object file.
+
+- **Symbols.** A procedure's symbol is its module, then its name, its arity, with an `f` before it for a function, and its mode number, joined by `_`: `hello.main_2_0`, `list.length_f1_0`. Other characters than letters, digits and `_` in a name become `$` and two hex digits, so `int.+` is `int.$2b_f2_0`. A procedure defined and not exported has internal linkage.
+- **Entry.** `merk.entry` names the main module's `main/2`; it becomes `merk_main`, a C function that calls it, which the runtime's `main` calls (Runtime system).
 
 ### 1. Type representation
 
@@ -1566,13 +1588,13 @@ Melbourne compiles a whole program in one grade, and modules link only if all we
 | Desugaring | `-fdebug-dump-semantic-form` (implemented: each clause's semantic form, one goal per line; Front end, "Semantic form") |
 | Name resolution, type, purity and mode checking | `-fdebug-dump-resolved-names`, `-fdebug-dump-types` (implemented: through purity checking) and `-fdebug-dump-modes` (implemented: through mode checking, with each inst definition and procedure) |
 | Semantic analysis | `-fsyntax-only`, `-fdebug-unparse`, `-fdebug-dump-parse-tree`, `-emit-interface` |
-| Code generation | `-emit-merk`, `-emit-mrt`, `-emit-llvm`, `-emit-llvm-bc`, `-S`, `-emit-obj` |
+| Code generation | `-emit-merk`, `-emit-mlir` (lowered to MLIR's LLVM dialect), `-emit-llvm`, `-S` and `-emit-obj` (implemented: Lowering and code generation, "What is lowered so far"; `-fc1` also reads a `.mlir` file they wrote), `-emit-mrt`, `-emit-llvm-bc` |
 
 The unparser's exact, canonical and fully parenthesized modes (Front end, Unparser and round-trip tests) are chosen with `-funparse-mode=`. The `-fc1` layer with the source and parser actions comes first, in M1, because the round-trip tests run through it; the build mode and linking follow with code generation.
 
 ### Linking and offloading
 
-- **Linking** goes through `clang` as the link driver. It is given the objects, the runtime library, `-fopenmp` when any module used it (so Clang links its OpenMP runtime), and the user's `-L`, `-l` and `-fuse-ld=` options. Clang supplies the C start-up files, the C library and the sanitizer runtimes, as `cc` does for rustc and GHC.
+- **Linking** goes through `clang` as the link driver. It is given the objects, the runtime library, `-fopenmp` when any module used it (so Clang links its OpenMP runtime), and the user's `-L`, `-l` and `-fuse-ld=` options. Clang supplies the C start-up files, the C library and the sanitizer runtimes, as `cc` does for rustc and GHC. Implemented so far: without `-E`, `-S` or `-c`, the driver compiles each module to a temporary object file and runs `clang`, beside `merkc` or else on the `PATH`, with the objects, `--target=` if given, and `-L` for the `lib` directory beside `bin`, where `libmerkrt.a` is, and `-lmerkrt`; object files on the command line are linked too.
 - **Offloading**, when device offloading arrives (deferred, like `createMapInfoOp`), follows the job sequence Flang builds in `Flang::addOffloadOptions`:
   1. host `-fc1` to LLVM IR;
   2. one device `-fc1` per `--offload-arch`, with `-fopenmp-is-target-device` and `-fopenmp-host-ir-file-path` naming the host IR;
@@ -1659,7 +1681,7 @@ Breakpoint 1: where = sumsq`add_square/4 (in, in, in, out) at sumsq.m:10
 
 ## Runtime system
 
-The runtime gives each process its own stack, heap and mailboxes, schedules processes M:N over one worker thread per core, and never stops every process at once. It is written in C++, like the compiler, and linked into every executable.
+The runtime gives each process its own stack, heap and mailboxes, schedules processes M:N over one worker thread per core, and never stops every process at once. It is written in C++, like the compiler, and linked into every executable. So far `libmerkrt` (`runtime/`) is only the program's C `main`, which calls `merk_main` and returns exit status 0.
 
 ### Processes and scheduler
 

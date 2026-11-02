@@ -14,6 +14,7 @@
 #include "merkurius/Frontend/CompilerInvocation.h"
 #include "merkurius/FrontendTool/Utils.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/thread.h"
 #include <optional>
@@ -28,6 +29,11 @@ static constexpr unsigned compilerStackSize{64 << 20};
 
 int fc1_main(llvm::ArrayRef<const char *> argv) {
   int result{1};
+  // Every target LLVM was built with, as in Flang's fc1_main.
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
+  llvm::InitializeAllAsmPrinters();
+  llvm::InitializeAllAsmParsers();
   llvm::thread compiler{
       std::optional<unsigned>{compilerStackSize}, [&]() {
         CompilerInstance ci;
