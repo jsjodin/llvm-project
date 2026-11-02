@@ -1468,6 +1468,7 @@ Code generation (`CodeGen/MLIRGen.cpp`) makes `merk` for procedures that are `de
 
 - **Symbols.** A procedure's symbol is its module, then its name, its arity, with an `f` before it for a function, and its mode number, joined by `_`: `hello.main_2_0`, `list.length_f1_0`. Other characters than letters, digits and `_` in a name become `$` and two hex digits, so `int.+` is `int.$2b_f2_0`. A procedure defined and not exported has internal linkage.
 - **Entry.** `merk.entry` names the main module's `main/2`; it becomes `merk_main`, a C function that calls it, which the runtime's `main` calls (Runtime system).
+- **Tests.** `test/CodeGen` checks the `merk`, the LLVM dialect and the LLVM IR of Mercury modules in one file each, and `Driver/compile.test` builds and runs a program. `test/Dialect/Merk` checks the dialect alone: that `.mlir` modules print as they parse and lower for the target they record (`ops.mlir`), and its verifiers' errors, at file:line:column (`invalid.mlir`).
 
 ### 1. Type representation
 
