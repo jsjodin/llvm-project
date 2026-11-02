@@ -1280,6 +1280,9 @@ private:
     bool never{false};
     // Whether the error is in a lambda expression.
     bool lambda{false};
+    // Whether the goal would clobber a variable used after it, so that it
+    // waits for the variable to be used no more.
+    bool clobbers{false};
   };
   static Result Ok() { return {}; }
   static Result Unsupported(Unchecked why) {
@@ -1440,6 +1443,9 @@ private:
   // By variable, how often a construction put it in a term, or an
   // assignment aliased it.
   std::vector<unsigned> touched_;
+  // How often each variable was assigned to another, which wakes only the
+  // goals that would clobber it.
+  std::vector<unsigned> freed_;
   // How often a goal checked left its insts not reached.
   unsigned unreachables_{0};
   // By variable, whether it is a nonlocal of a negation or of an
@@ -1705,6 +1711,7 @@ ProcedureChecker::Result ProcedureChecker::CheckClause(
   goals_.assign(form_->goals, GoalModes{});
   befores_.assign(form_->goals, {});
   touched_.assign(form_->vars.size(), 0);
+  freed_.assign(form_->vars.size(), 0);
   locks_.assign(form_->vars.size(), Lock::None);
   last_ = Start(form_->tokens);
   InstMap map(form_->vars.size(), insts_.Free());
@@ -2321,6 +2328,10 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
       insts.push_back(map[var]);
       insts.push_back(reinterpret_cast<const Inst *>(
           static_cast<std::uintptr_t>(touched_[var])));
+      if (error.clobbers) {
+        insts.push_back(reinterpret_cast<const Inst *>(
+            static_cast<std::uintptr_t>(freed_[var])));
+      }
     }
     return insts;
   }};
@@ -2347,13 +2358,14 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
     InstMap trial{map};
     parser::CharBlock last{last_};
     std::size_t warnings{warnings_.size()};
-    std::vector<unsigned> touched{touched_};
+    std::vector<unsigned> touched{touched_}, freed{freed_};
     unsigned unreachables{unreachables_};
     Result r{Check(goal, trial, after)};
     if (r.outcome != Outcome::Ok) {
       last_ = last;
       warnings_.resize(warnings);
       touched_ = std::move(touched);
+      freed_ = std::move(freed);
       unreachables_ = unreachables;
       return r;
     }
@@ -2538,6 +2550,9 @@ ProcedureChecker::Result ProcedureChecker::CheckVarUnify(
     modes.unify = UnifyKind::Assign;
     modes.assigned = to;
     modes.dead = !live[to];
+    // That wakes the goals that would clobber the value, which may now
+    // find it not used again, as in mmc, even if its inst is the same.
+    ++freed_[from];
     return Ok();
   }
   if (type && type->kind == TypeKind::HigherOrder) {
@@ -3024,11 +3039,13 @@ std::optional<ProcedureChecker::Result> ProcedureChecker::Clobbers(
   for (std::size_t i{0}; i < arguments.size() && i < modes.size(); ++i) {
     VarId var{arguments[i]};
     if (live[var] && !LiveAfter(modes[i])) {
-      return Error(goal,
+      Result r{Error(goal,
           "unique-mode error in " + where(i) +
               ": the called procedure would clobber its argument, but " +
               Name(var) + " is still live",
-          {var});
+          {var})};
+      r.clobbers = true;
+      return r;
     }
   }
   return std::nullopt;
