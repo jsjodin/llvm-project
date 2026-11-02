@@ -24,7 +24,19 @@ constraints on the predicates' and functions' type variables. Bodies then
 also call methods, and the predicates and functions with constraints, at
 types whose constraints the caller's constraints or the instances satisfy.
 
-Usage: generate-polymorphic-programs.py [--classes] [--seed N] [--count N] DIR
+With --existentials, which implies --classes, a module also has
+existentially typed predicates and functions, whose output's type, E or a
+list of E, the clause chooses, sometimes with an existential constraint on
+it, and existentially typed constructors, some with a constraint; bodies
+call the former and take apart inputs made with the latter, and use what
+they get as they use their own type variables' values, pass it on as their
+own existentially typed output, and construct the latter with 'new'. An
+existentially typed predicate has one clause, since mmc rejects one with
+several that has an existential constraint (see the design document's mmc
+bugs).
+
+Usage: generate-polymorphic-programs.py [--classes] [--existentials]
+    [--seed N] [--count N] DIR
 """
 
 import argparse
@@ -38,6 +50,9 @@ def text(ty):
     kind = ty[0]
     if kind == "var":
         return ty[1]
+    if kind == "xt":
+        return "x%d" % ty[1]
+    assert kind != "ex", "a type that a goal gives has no name"
     if kind in ("int", "string"):
         return kind
     if kind == "list":
@@ -54,7 +69,7 @@ def variables(ty, out=None):
     if ty[0] == "var":
         if ty[1] not in out:
             out.append(ty[1])
-    else:
+    elif ty[0] not in ("xt", "ex"):
         for part in ty[1:]:
             variables(part, out)
     return out
@@ -63,7 +78,7 @@ def variables(ty, out=None):
 def substitute(ty, binding):
     if ty[0] == "var":
         return binding[ty[1]]
-    if ty[0] in ("int", "string"):
+    if ty[0] in ("int", "string", "xt", "ex"):
         return ty
     return (ty[0],) + tuple(substitute(p, binding) for p in ty[1:])
 
@@ -75,24 +90,35 @@ def match(pattern, ty, binding):
             return binding[pattern[1]] == ty
         binding[pattern[1]] = ty
         return True
+    if pattern[0] in ("xt", "ex"):
+        return pattern == ty
     if pattern[0] != ty[0] or len(pattern) != len(ty):
         return False
     return all(match(p, t, binding) for p, t in zip(pattern[1:], ty[1:]))
 
 
-def random_type(rng, own, depth):
-    """A type made of the variables `own` and the others."""
-    choices = ["int", "string"] + ["var"] * (2 * len(own))
+def has_given(ty):
+    """Whether a type has a type that a goal gave, which has no name."""
+    return ty[0] == "ex" or any(has_given(p) for p in ty[1:] if isinstance(p, tuple))
+
+
+def random_type(rng, own, depth, xtypes=0):
+    """A type made of the variables `own` and the others, and of the
+    module's `xtypes` existentially typed types."""
+    choices = ["int", "string"] + ["var"] * (2 * len(own)) + ["xt"] * min(xtypes, 1)
     if depth > 0:
         choices += ["list", "list", "pair", "tuple", "maybe"]
     kind = rng.choice(choices)
     if kind == "var":
         return ("var", rng.choice(own))
+    if kind == "xt":
+        return ("xt", rng.randrange(xtypes))
     if kind in ("int", "string"):
         return (kind,)
     if kind in ("list", "maybe"):
-        return (kind, random_type(rng, own, depth - 1))
-    return (kind, random_type(rng, own, depth - 1), random_type(rng, own, depth - 1))
+        return (kind, random_type(rng, own, depth - 1, xtypes))
+    return (kind, random_type(rng, own, depth - 1, xtypes),
+            random_type(rng, own, depth - 1, xtypes))
 
 
 class Callee:
@@ -101,6 +127,10 @@ class Callee:
             name, func, inputs, output, own
         # (class, [type]) on its own type variables.
         self.constraints = list(constraints)
+        # For an existentially typed one, its existentially quantified
+        # type variable, E, and the classes of its constraints on it.
+        self.existential = None
+        self.given = []
 
 
 class Classes:
@@ -145,9 +175,10 @@ LIBRARY = [
 
 
 class Body:
-    def __init__(self, rng, callees, own, env, classes=None, assumed=()):
+    def __init__(self, rng, callees, own, env, classes=None, assumed=(), xtypes=()):
         self.rng, self.callees, self.own = rng, callees, own
         self.classes, self.assumed = classes, list(assumed)
+        self.xtypes = xtypes
         self.env = list(env)
         self.goals = []
         self.count = 0
@@ -156,11 +187,89 @@ class Body:
         self.count += 1
         return "V%d" % self.count
 
+    def given_types(self):
+        """The types that goals of the body gave, which it has values of."""
+        out = []
+        for _, t in self.env:
+            if t[0] == "ex" and t not in out:
+                out.append(t)
+        return out
+
     def instance(self, depth):
         """A type to bind a callee's type variable to."""
+        given = self.given_types()
+        if given and self.rng.random() < 0.4:
+            ty = self.rng.choice(given)
+            return ("list", ty) if self.rng.random() < 0.3 else ty
         if self.own:
             return random_type(self.rng, self.own, min(depth, 1))
         return self.rng.choice([("int",), ("string",), ("list", ("int",))])
+
+    def give(self, constraints):
+        """A type that a goal gives, with the constraints on it, which
+        the body may assume."""
+        self.count += 1
+        ty = ("ex", self.count)
+        self.assumed += [(cls, [ty]) for cls in constraints]
+        return ty
+
+    def existential(self, depth):
+        """A call of an existentially typed predicate or function, or a
+        deconstruction of an input made with an existentially typed
+        constructor, whose output is a value of a type the goal gives."""
+        rng = self.rng
+        inputs = [(n, t) for n, t in self.env if t[0] == "xt" and n[0] == "A"]
+        if inputs and rng.random() < 0.5:
+            name, ty = rng.choice(inputs)
+            fields, constraints = self.xtypes[ty[1]]
+            given = self.give(constraints)
+            out = [self.fresh() for _ in fields]
+            self.goals.append("%s = x%d(%s)" % (name, ty[1], ", ".join(out)))
+            for var, field in zip(out, fields):
+                self.env.append((var, substitute(field, {"E": given})))
+            return out[0]
+        callees = [c for c in self.callees if c.existential]
+        rng.shuffle(callees)
+        for callee in callees:
+            binding = {}
+            for _ in range(8 if callee.constraints else 1):
+                binding = {v: self.instance(depth) for v in callee.own}
+                if self.satisfied(callee, binding):
+                    break
+            else:
+                continue
+            arguments = []
+            for t in callee.inputs:
+                a = self.value(substitute(t, binding), depth)
+                if a is None:
+                    break
+                arguments.append(a)
+            else:
+                binding["E"] = self.give(callee.given)
+                out = self.fresh()
+                self.goal(callee, arguments, out)
+                self.env.append((out, substitute(callee.output, binding)))
+                return out
+        return None
+
+    def construct(self, ty, depth):
+        """A construction with an existentially typed constructor, its
+        existentially quantified type variable bound to a type that
+        satisfies its constraint."""
+        fields, constraints = self.xtypes[ty[1]]
+        for _ in range(6):
+            bound = self.instance(depth)
+            if all(self.classes.entails(cls, [bound], self.assumed) for cls in constraints):
+                break
+        else:
+            return None
+        arguments = []
+        for field in fields:
+            a = self.value(substitute(field, {"E": bound}), depth - 1)
+            if a is None:
+                return None
+            arguments.append(a)
+        return "'new x%d'(%s)" % (ty[1], ", ".join(arguments))
 
     def value(self, ty, depth):
         """A variable or term of type `ty`, with the goals that make it."""
@@ -173,17 +282,20 @@ class Body:
             if made:
                 return made
         kind = ty[0]
-        if kind == "var":
+        if kind in ("var", "ex"):
             if known:
                 return rng.choice(known)
             return self.call(ty, depth - 1) if depth > 0 else None
+        if kind == "xt":
+            return self.construct(ty, depth) if depth > 0 else None
         if kind == "int":
             return str(rng.randint(0, 9))
         if kind == "string":
             return '"%s"' % rng.choice("abc")
         # With type classes, a constant's type is given, so that a constraint
         # on it is determined.
-        empty = "([] : %s)" % text(ty) if self.classes else "[]"
+        # A type that a goal gave has no name to give.
+        empty = None if has_given(ty) else "([] : %s)" % text(ty) if self.classes else "[]"
         if kind == "list":
             if depth <= 0 or rng.random() < 0.4:
                 return empty
@@ -191,7 +303,11 @@ class Body:
             return "[%s]" % head if head else empty
         if kind == "maybe":
             inner = self.value(ty[1], depth - 1) if depth > 0 and rng.random() < 0.6 else None
-            return "yes(%s)" % inner if inner else "(no : %s)" % text(ty) if self.classes else "no"
+            if inner:
+                return "yes(%s)" % inner
+            if has_given(ty):
+                return None
+            return "(no : %s)" % text(ty) if self.classes else "no"
         first = self.value(ty[1], depth - 1)
         second = self.value(ty[2], depth - 1)
         if first is None or second is None:
@@ -206,6 +322,9 @@ class Body:
         rng.shuffle(callees)
         for callee in callees:
             binding = {}
+            if callee.existential:
+                # Its output's type is its own: Body.existential calls it.
+                continue
             if not unused and not match(callee.output, ty, binding):
                 continue
             if self.classes and callee.void and not unused:
@@ -365,24 +484,61 @@ def method_clause(rng, k, kind, constrained, supers):
         k, call, part, "B" if part == "A" else "A")
 
 
-def module(rng, name, with_classes=False):
+GROUND = [("int",), ("string",), ("list", ("int",)), ("maybe", ("string",)),
+          ("pair", ("int",), ("string",)), ("list", ("string",))]
+
+
+def ground_instance(classes, cls):
+    """A type without type variables that satisfies a constraint, if one of
+    a few does."""
+    return next((t for t in GROUND if classes.entails(cls, [t], [])), None)
+
+
+def module(rng, name, with_classes=False, existentials=False):
+    with_classes = with_classes or existentials
     classes, class_lines, methods = (make_classes(rng) if with_classes
                                      else (None, [], []))
+    unary = [c for c in classes.arity if classes.arity[c] == 1] if classes else []
+    # The existentially typed types x0, ..., each with one constructor, of
+    # fields of E, and the classes of its constraints on E.
+    xtypes = []
+    if existentials:
+        for k in range(rng.randint(1, 2)):
+            fields = rng.choice([[("var", "E")], [("var", "E"), ("list", ("var", "E"))],
+                                 [("int",), ("var", "E")]])
+            constraints = [rng.choice(unary)] if rng.random() < 0.5 else []
+            xtypes.append((fields, constraints))
+            class_lines.append(":- type x%d ---> some [E] x%d(%s)%s." % (
+                k, k, ", ".join(text(f) for f in fields),
+                " => %s(E)" % constraints[0] if constraints else ""))
     preds = []
     for i in range(rng.randint(3, 6)):
         own = VARS[:rng.randint(0, 2)]
         func = rng.random() < 0.3
-        inputs = [random_type(rng, own, 1) for _ in range(rng.randint(1, 3))]
+        inputs = [random_type(rng, own, 1, len(xtypes)) for _ in range(rng.randint(1, 3))]
         # An input of each type variable itself, since a body takes no term
         # apart, so that it can always make a value of each.
         inputs += [("var", v) for v in own if ("var", v) not in inputs]
         void = []
+        if existentials and rng.random() < 0.4:
+            # An existentially typed output.
+            output = rng.choice([("var", "E"), ("var", "E"), ("list", ("var", "E"))])
+            callee = Callee(("f%d" if func else "p%d") % i, func, inputs, output, own)
+            callee.void = []
+            callee.existential = "E"
+            if rng.random() < 0.5:
+                cls = rng.choice(unary)
+                callee.given = [cls] if ground_instance(classes, cls) else []
+            if rng.random() < 0.45 and own:
+                callee.constraints.append((rng.choice(unary), [("var", rng.choice(own))]))
+            preds.append(callee)
+            continue
         if own and rng.random() < 0.15:
             # An output type variable that no input has.
             void = ["W"]
             output = (rng.choice(["list", "maybe"]), ("var", "W"))
         else:
-            output = random_type(rng, own, 1)
+            output = random_type(rng, own, 1, len(xtypes))
         callee = Callee(("f%d" if func else "p%d") % i, func, inputs, output, own + void)
         callee.void = void
         if classes:
@@ -405,20 +561,28 @@ def module(rng, name, with_classes=False):
         where = (" <= (%s)" % ", ".join(constraint_text(c, a) for c, a in callee.constraints)
                  if callee.constraints else "")
         if callee.func:
-            lines.append(":- func %s(%s) = (%s::out) is det%s." %
-                         (callee.name, args, text(callee.output), where))
+            decl = "func %s(%s) = (%s::out) is det" % (callee.name, args, text(callee.output))
         else:
-            lines.append(":- pred %s(%s, %s::out) is det%s." %
-                         (callee.name, args, text(callee.output), where))
-        lines.extend(clauses(rng, callee, callees, classes))
+            decl = "pred %s(%s, %s::out) is det" % (callee.name, args, text(callee.output))
+        if callee.existential:
+            if callee.given:
+                decl = "(%s => %s(E))" % (decl, callee.given[0])
+            quantifiers = "some [E] "
+            if callee.constraints:
+                quantifiers = "all [%s] some [E] " % ", ".join(callee.own)
+                decl = "(%s%s)" % (decl, where)
+            lines.append(":- %s%s." % (quantifiers, decl))
+        else:
+            lines.append(":- %s%s." % (decl, where))
+        lines.extend(clauses(rng, callee, callees, classes, xtypes))
     return "\n".join(lines) + "\n"
 
 
-def clauses(rng, callee, callees, classes=None):
+def clauses(rng, callee, callees, classes=None, xtypes=()):
     names = ["A%d" % (i + 1) for i in range(len(callee.inputs))]
     own = [v for v in callee.own if v not in callee.void]
     lists = [i for i, t in enumerate(callee.inputs) if t[0] == "list"]
-    if lists and rng.random() < 0.3:
+    if lists and rng.random() < 0.3 and not callee.existential:
         # A clause for each of a list input's functors.
         i = rng.choice(lists)
         element = callee.inputs[i][1]
@@ -427,17 +591,35 @@ def clauses(rng, callee, callees, classes=None):
             heads = list(names)
             heads[i] = pattern
             env = env + [(n, t) for j, (n, t) in enumerate(zip(names, callee.inputs)) if j != i]
-            out.append(clause(rng, callee, callees, own, heads, env, classes))
+            out.append(clause(rng, callee, callees, own, heads, env, classes, xtypes))
         return out
     env = list(zip(names, callee.inputs))
-    return [clause(rng, callee, callees, own, names, env, classes)]
+    return [clause(rng, callee, callees, own, names, env, classes, xtypes)]
 
 
-def clause(rng, callee, callees, own, heads, env, classes=None):
-    body = Body(rng, callees, own, env, classes, callee.constraints)
+def clause(rng, callee, callees, own, heads, env, classes=None, xtypes=()):
+    body = Body(rng, callees, own, env, classes, callee.constraints, xtypes)
+    if xtypes or any(c.existential for c in callees):
+        for _ in range(rng.randint(0, 2)):
+            body.existential(1)
     for _ in range(rng.randint(0, 2)):
         body.call(None, 1, unused=True)
-    ty = substitute(callee.output, {v: ("var", v) for v in callee.own})
+    binding = {v: ("var", v) for v in callee.own}
+    if callee.existential:
+        # The type the clause gives its existentially quantified type
+        # variable, which satisfies its existential constraint.
+        candidates = body.given_types() * 2 + [("var", v) for v in own] + \
+            [("int",), ("string",), ("list", ("int",))]
+        rng.shuffle(candidates)
+        for bound in candidates:
+            if all(classes.entails(cls, [bound], body.assumed) for cls in callee.given):
+                break
+        else:
+            bound = None
+        if bound is None:
+            bound = ground_instance(classes, callee.given[0])
+        binding["E"] = bound
+    ty = substitute(callee.output, binding)
     result = None
     for _ in range(5):
         result = body.value(ty, 2)
@@ -445,7 +627,7 @@ def clause(rng, callee, callees, own, heads, env, classes=None):
             break
     if result is None:
         result = "[]" if ty[0] == "list" else "no"
-    tested = [n for n, t in body.env if t[0] == "var"]
+    tested = [n for n, t in body.env if t[0] in ("var", "ex")]
     if tested and rng.random() < 0.35:
         a, b = rng.choice(tested), rng.choice(tested)
         ta = dict(body.env)[a]
@@ -471,6 +653,9 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--classes", action="store_true",
                         help="add type classes, instances and constraints")
+    parser.add_argument("--existentials", action="store_true",
+                        help="add existentially typed predicates, functions and "
+                        "constructors (implies --classes)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--count", type=int, default=20)
     parser.add_argument("dir")
@@ -480,7 +665,7 @@ def main():
         rng = random.Random(args.seed * 100003 + i)
         name = "polymorphism_%d_%d" % (args.seed, i)
         with open(os.path.join(args.dir, name + ".m"), "w") as f:
-            f.write(module(rng, name, args.classes))
+            f.write(module(rng, name, args.classes, args.existentials))
 
 
 if __name__ == "__main__":
