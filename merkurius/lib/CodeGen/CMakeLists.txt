@@ -10,13 +10,17 @@ add_merkurius_library(MerkuriusCodeGen
   MerkuriusMerkDialect
   MerkuriusParser
   MerkuriusSemantics
+  MLIRArithDialect
+  MLIRArithToLLVM
   MLIRBuiltinToLLVMIRTranslation
   MLIRDLTIDialect
   MLIRIR
+  MLIRLLVMCommonConversion
   MLIRLLVMDialect
   MLIRLLVMToLLVMIRTranslation
   MLIRTargetLLVMIRExport
   MLIRTargetLLVMIRImport
+  MLIRTransformUtils
 
   LINK_COMPONENTS
   AllTargetsAsmParsers
