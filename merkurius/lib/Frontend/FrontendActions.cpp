@@ -7,6 +7,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "merkurius/Frontend/FrontendActions.h"
+#include "merkurius/CodeGen/Lowering.h"
+#include "merkurius/CodeGen/MLIRGen.h"
 #include "merkurius/Driver/Options.h"
 #include "merkurius/Frontend/CompilerInstance.h"
 #include "merkurius/Parser/convert.h"
@@ -25,6 +27,11 @@
 #include "merkurius/Semantics/module-loader.h"
 #include "merkurius/Semantics/polymorphism.h"
 #include "merkurius/Semantics/resolve-names.h"
+#include "merkurius/Dialect/Merk/IR/MerkDialect.h"
+#include "mlir/Dialect/DLTI/DLTI.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/Verifier.h"
+#include "mlir/Parser/Parser.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Path.h"
 #include <functional>
@@ -712,6 +719,126 @@ bool DebugDumpPolymorphismAction::executeAction() {
   }
   os->flush();
   return !r.messages.AnyFatalError();
+}
+
+// An MLIR module from a .mlir file, in the merk dialect or lowered from it:
+// its target is the one it records, as in a module written by -emit-merk or
+// -emit-mlir, so that it lowers as it would have when written.
+static mlir::OwningOpRef<mlir::ModuleOp> ReadMLIR(mlir::MLIRContext &context,
+    const parser::SourceFile &file,
+    std::unique_ptr<codegen::TargetInfo> &target) {
+  context.loadDialect<merk::MerkDialect, mlir::DLTIDialect,
+      mlir::LLVM::LLVMDialect>();
+  mlir::ParserConfig config{&context};
+  mlir::OwningOpRef<mlir::ModuleOp> module{
+      mlir::parseSourceString<mlir::ModuleOp>(
+          file.content(), config, file.path())};
+  if (!module) {
+    return nullptr;
+  }
+  std::string error;
+  target = codegen::TargetInfo::FromModule(*module, error);
+  if (!target) {
+    options::reportError(file.path() + ": " + error);
+    return nullptr;
+  }
+  return module;
+}
+
+bool CodeGenAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  mlir::MLIRContext context;
+  std::unique_ptr<codegen::TargetInfo> target;
+  mlir::OwningOpRef<mlir::ModuleOp> module;
+  if (llvm::sys::path::extension(getSourceFile().path()) == ".mlir") {
+    module = ReadMLIR(context, getSourceFile(), target);
+    if (!module) {
+      return false;
+    }
+    return Lower(*module, *target);
+  }
+  Resolved r;
+  Resolve(ci, getSourceFile(), r);
+  Analysed a{Analyse(ci, r)};
+  std::unique_ptr<semantics::PolymorphismAnalysis> polymorphism{
+      semantics::AnalysePolymorphism(*a.types, *a.modes, *a.determinism)};
+  if (r.messages.AnyFatalError()) {
+    r.messages.Emit(llvm::errs(), ci.getAllSources());
+    return false;
+  }
+  std::string error;
+  target = codegen::TargetInfo::Create(ci.getCodeGenOpts(), error);
+  if (!target) {
+    r.messages.Emit(llvm::errs(), ci.getAllSources());
+    options::reportError(error);
+    return false;
+  }
+  module = codegen::GenerateMerk(context, r.resolution->module().name(),
+      r.tokens, ci.getAllSources(), *a.modes, *a.determinism, *polymorphism,
+      *target, r.messages);
+  r.messages.Emit(llvm::errs(), ci.getAllSources());
+  if (r.messages.AnyFatalError()) {
+    return false;
+  }
+  if (mlir::failed(mlir::verify(*module))) {
+    options::reportError("the generated merk module does not verify");
+    return false;
+  }
+  return Lower(*module, *target);
+}
+
+bool CodeGenAction::Lower(
+    mlir::ModuleOp module, const codegen::TargetInfo &target) {
+  CompilerInstance &ci{getInstance()};
+  std::string error;
+  // An object file or assembly is written beside the current directory's
+  // other outputs, named after the source, as by Clang's -c and -S.
+  std::string &outputFile{ci.getFrontendOpts().outputFile};
+  if (outputFile.empty() &&
+      (kind_ == ActionKind::EmitObj || kind_ == ActionKind::EmitAssembly)) {
+    llvm::SmallString<128> name{llvm::sys::path::stem(getSourceFile().path())};
+    name += kind_ == ActionKind::EmitObj ? ".o" : ".s";
+    outputFile = name.str().str();
+  }
+  llvm::raw_ostream *os{ci.createDefaultOutputFile()};
+  if (!os) {
+    return false;
+  }
+  if (kind_ == ActionKind::EmitMerk) {
+    module.print(*os);
+    return true;
+  }
+  if (mlir::failed(codegen::LowerToLLVMDialect(module, target))) {
+    return false;
+  }
+  if (kind_ == ActionKind::EmitMLIR) {
+    module.print(*os);
+    return true;
+  }
+  llvm::LLVMContext llvmContext;
+  std::unique_ptr<llvm::Module> llvmModule{
+      codegen::TranslateToLLVMIR(module, llvmContext, target)};
+  if (!llvmModule) {
+    options::reportError("cannot translate the module to LLVM IR");
+    return false;
+  }
+  codegen::OptimizeLLVMIR(*llvmModule, target);
+  if (kind_ == ActionKind::EmitLLVM) {
+    llvmModule->print(*os, nullptr);
+    return true;
+  }
+  llvm::SmallString<0> code;
+  llvm::raw_svector_ostream codeStream{code};
+  if (!codegen::EmitCode(*llvmModule, target,
+          kind_ == ActionKind::EmitObj ? llvm::CodeGenFileType::ObjectFile
+                                       : llvm::CodeGenFileType::AssemblyFile,
+          codeStream, error)) {
+    options::reportError(error);
+    return false;
+  }
+  *os << code;
+  os->flush();
+  return true;
 }
 
 } // namespace merkurius::frontend

@@ -9,6 +9,7 @@
 #ifndef MERKURIUS_FRONTEND_FRONTENDOPTIONS_H_
 #define MERKURIUS_FRONTEND_FRONTENDOPTIONS_H_
 
+#include "merkurius/CodeGen/TargetOptions.h"
 #include <string>
 #include <vector>
 
@@ -66,6 +67,16 @@ enum class ActionKind {
   // -fdebug-dump-determinism, and list each procedure's type_info
   // arguments and those its goals pass.
   DebugDumpPolymorphism,
+  // -emit-merk: generate the module's merk operations and write them.
+  EmitMerk,
+  // -emit-mlir: the same, lowered to MLIR's LLVM dialect.
+  EmitMLIR,
+  // -emit-llvm: the same, translated to LLVM IR and optimized.
+  EmitLLVM,
+  // -S: the target's assembly for it.
+  EmitAssembly,
+  // -emit-obj: its object file.
+  EmitObj,
 };
 
 struct FrontendOptions {
@@ -85,6 +96,9 @@ struct FrontendOptions {
   unsigned modeInferenceIterationLimit{30}; // -fmode-inference-iteration-limit=
   bool mmcUniqueness{false}; // -fmmc-uniqueness
 };
+
+// The options of code generation: the target, and how far to optimize.
+using CodeGenOptions = codegen::TargetOptions;
 
 struct LangOptions {
   // -fopenmp: read %$omp directive lines instead of skipping them as

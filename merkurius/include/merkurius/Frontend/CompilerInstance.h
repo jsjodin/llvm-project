@@ -24,6 +24,7 @@ public:
   CompilerInvocation &getInvocation() { return invocation_; }
   FrontendOptions &getFrontendOpts() { return invocation_.getFrontendOpts(); }
   LangOptions &getLangOpts() { return invocation_.getLangOpts(); }
+  CodeGenOptions &getCodeGenOpts() { return invocation_.getCodeGenOpts(); }
   parser::AllSources &getAllSources() { return allSources_; }
 
   // Opens the output named by -o, or standard output when there is none.

@@ -21,6 +21,8 @@ public:
   const FrontendOptions &getFrontendOpts() const { return frontendOpts_; }
   LangOptions &getLangOpts() { return langOpts_; }
   const LangOptions &getLangOpts() const { return langOpts_; }
+  CodeGenOptions &getCodeGenOpts() { return codeGenOpts_; }
+  const CodeGenOptions &getCodeGenOpts() const { return codeGenOpts_; }
 
   // Fills `res` from the -fc1 arguments `args`, which exclude "-fc1" itself.
   // Reports errors to standard error and returns false if there were any.
@@ -30,6 +32,7 @@ public:
 private:
   FrontendOptions frontendOpts_;
   LangOptions langOpts_;
+  CodeGenOptions codeGenOpts_;
 };
 
 } // namespace merkurius::frontend

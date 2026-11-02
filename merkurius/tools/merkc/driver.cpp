@@ -57,42 +57,121 @@ static bool isMercurySource(llvm::StringRef input) {
   return input == "-" || llvm::sys::path::extension(input) == ".m";
 }
 
-// Builds one -fc1 job per input, or returns false after reporting an error.
+static bool isObjectFile(llvm::StringRef input) {
+  return llvm::sys::path::extension(input) == ".o";
+}
+
+// The options the driver passes on to each -fc1 job.
+static void addFrontendOptions(const InputArgList &args, Job &job) {
+  if (args.hasArg(OPT_fopenmp)) {
+    job.push_back("-fopenmp");
+  }
+  if (const llvm::opt::Arg *arg = args.getLastArg(OPT_fopenmp_version_EQ)) {
+    job.push_back(arg->getAsString(args));
+  }
+  for (const std::string &dir : args.getAllArgValues(OPT_I)) {
+    job.push_back("-I");
+    job.push_back(dir);
+  }
+  if (const llvm::opt::Arg *arg = args.getLastArg(OPT_target_EQ)) {
+    job.push_back("-triple");
+    job.push_back(arg->getValue());
+  }
+  if (const llvm::opt::Arg *arg = args.getLastArg(OPT_O)) {
+    job.push_back(arg->getAsString(args));
+  }
+}
+
+// The program that links: Clang, beside merkc or else on the PATH (design
+// document, "Linking and offloading").
+static std::string findLinker(llvm::StringRef executable) {
+  llvm::SmallString<128> beside{llvm::sys::path::parent_path(executable)};
+  llvm::sys::path::append(beside, "clang");
+  if (llvm::sys::fs::can_execute(beside)) {
+    return beside.str().str();
+  }
+  if (llvm::ErrorOr<std::string> found{llvm::sys::findProgramByName("clang")}) {
+    return *found;
+  }
+  return "clang";
+}
+
+// The jobs for the command line, or false after reporting an error: with
+// -E, -S or -c, one -fc1 job per source; otherwise one per source, writing
+// a temporary object file, and a link of the objects with the runtime
+// library. `temporaries` gets the temporary files' names.
 static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
-    std::vector<Job> &jobs) {
+    std::vector<Job> &jobs, std::vector<std::string> &temporaries) {
   std::vector<std::string> inputs{args.getAllArgValues(OPT_INPUT)};
   if (inputs.empty()) {
     reportError("no input files");
     return false;
   }
-  if (!args.hasArg(OPT_E)) {
-    reportError("only -E is implemented so far");
-    return false;
-  }
+  bool preprocess{args.hasArg(OPT_E)};
+  bool assemble{!preprocess && args.hasArg(OPT_S)};
+  bool compile{!preprocess && !assemble && args.hasArg(OPT_c)};
+  bool link{!preprocess && !assemble && !compile};
   llvm::StringRef output{args.getLastArgValue(OPT_o)};
-  if (!output.empty() && inputs.size() > 1) {
+  unsigned sources{0};
+  for (const std::string &input : inputs) {
+    sources += isMercurySource(input);
+  }
+  if (!output.empty() && !link && sources > 1) {
     reportError("cannot specify -o when generating multiple output files");
     return false;
   }
   bool ok{true};
+  std::vector<std::string> objects;
   for (const std::string &input : inputs) {
+    if (link && isObjectFile(input)) {
+      objects.push_back(input);
+      continue;
+    }
     if (!isMercurySource(input)) {
       reportError("'" + input + "' is not a Mercury source file (.m)");
       ok = false;
       continue;
     }
-    Job job{executable.str(), "-fc1", "-E"};
-    if (args.hasArg(OPT_fopenmp)) {
-      job.push_back("-fopenmp");
+    Job job{executable.str(), "-fc1"};
+    if (preprocess) {
+      job.push_back("-E");
+    } else if (assemble) {
+      job.push_back("-S");
+    } else {
+      job.push_back("-emit-obj");
     }
-    if (const llvm::opt::Arg *arg = args.getLastArg(OPT_fopenmp_version_EQ)) {
-      job.push_back(arg->getAsString(args));
+    addFrontendOptions(args, job);
+    std::string jobOutput{link ? "" : output.str()};
+    if (link) {
+      llvm::SmallString<128> temporary;
+      llvm::sys::fs::getPotentiallyUniqueTempFileName(
+          llvm::sys::path::stem(input), "o", temporary);
+      jobOutput = temporary.str().str();
+      temporaries.push_back(jobOutput);
+      objects.push_back(jobOutput);
     }
-    if (!output.empty()) {
+    if (!jobOutput.empty()) {
       job.push_back("-o");
-      job.push_back(output.str());
+      job.push_back(jobOutput);
     }
     job.push_back(input);
+    jobs.push_back(std::move(job));
+  }
+  if (ok && link) {
+    // The runtime library is in lib beside bin/merkc, in the build
+    // directory and the installation alike.
+    llvm::SmallString<128> libraryDir{llvm::sys::path::parent_path(
+        llvm::sys::path::parent_path(executable))};
+    llvm::sys::path::append(libraryDir, "lib");
+    Job job{findLinker(executable)};
+    if (const llvm::opt::Arg *arg = args.getLastArg(OPT_target_EQ)) {
+      job.push_back(arg->getAsString(args));
+    }
+    job.push_back("-o");
+    job.push_back(output.empty() ? "a.out" : output.str());
+    job.insert(job.end(), objects.begin(), objects.end());
+    job.push_back("-L" + libraryDir.str().str());
+    job.push_back("-lmerkrt");
     jobs.push_back(std::move(job));
   }
   return ok;
@@ -145,16 +224,22 @@ int main(int argc, const char **argv) {
   }
 
   std::vector<Job> jobs;
-  if (!buildJobs(*parsed, executable, jobs)) {
+  std::vector<std::string> temporaries;
+  if (!buildJobs(*parsed, executable, jobs, temporaries)) {
     return 1;
   }
+  int result{0};
   for (const Job &job : jobs) {
     if (printOnly || verbose) {
       printJob(llvm::errs(), job);
     }
     if (!printOnly && runJob(job) != 0) {
-      return 1;
+      result = 1;
+      break;
     }
   }
-  return 0;
+  for (const std::string &temporary : temporaries) {
+    llvm::sys::fs::remove(temporary);
+  }
+  return result;
 }

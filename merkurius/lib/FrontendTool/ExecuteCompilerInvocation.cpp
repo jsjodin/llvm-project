@@ -52,6 +52,12 @@ std::unique_ptr<FrontendAction> createFrontendAction(CompilerInstance &ci) {
     return std::make_unique<DebugDumpDeterminismAction>();
   case ActionKind::DebugDumpPolymorphism:
     return std::make_unique<DebugDumpPolymorphismAction>();
+  case ActionKind::EmitMerk:
+  case ActionKind::EmitMLIR:
+  case ActionKind::EmitLLVM:
+  case ActionKind::EmitAssembly:
+  case ActionKind::EmitObj:
+    return std::make_unique<CodeGenAction>(ci.getFrontendOpts().programAction);
   }
   llvm_unreachable("unknown ActionKind");
 }

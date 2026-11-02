@@ -17,9 +17,6 @@ FC1-HASH: merkc: error: unknown argument: '-###'
 RUN: not merkc -E %S/Inputs/sumsq.m -o 2>&1 | FileCheck %s --check-prefix=MISSING
 MISSING: merkc: error: argument to '-o' is missing (expected 1 value)
 
-RUN: not merkc %S/Inputs/sumsq.m 2>&1 | FileCheck %s --check-prefix=NO-ACTION
-NO-ACTION: merkc: error: only -E is implemented so far
-
 RUN: not merkc -E -o %t %S/Inputs/sumsq.m %S/Inputs/sumsq.m 2>&1 \
 RUN:   | FileCheck %s --check-prefix=MULTI-O
 MULTI-O: merkc: error: cannot specify -o when generating multiple output files
