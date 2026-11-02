@@ -38,8 +38,19 @@ fields, a deconstruction and a rebuild, or goals that can succeed more
 than once or fail. No pair is passed to an `in` argument, which mmc gets
 wrong for a named unique inst (see the design document's register).
 
+With --array, the value is an array, t == array(int), in the array modes
+(`array_di`, `array_uo`, `array_mdi`, `array_muo`, `array_ui` for --ui):
+the helper that clobbers it is array.set, a new value is made by a helper
+that calls array.init, whose type is not then ambiguous with a closure of
+array.init/3, and peek is array.lookup. compare-switches.py runs merkc with -fmmc-uniqueness,
+which loads the library manual's array stub, whose arrays are `ground` as
+in mmc, so that only clobbering is checked; merkc's sound default rejects
+more of these modules (design document, Uniqueness checking, "Arrays").
+A lambda expression's array is taken `array_di`, never `array_mdi`. It
+cannot be given with --io.
+
 Usage: generate-unique-programs.py [--seed N] [--count N] [--scopes] [--io]
-                                   [--ui] [--nested] DIR
+                                   [--ui] [--nested] [--array] DIR
 """
 
 import argparse
@@ -120,6 +131,55 @@ mmu(T, T).
 mmu(t(X), t(X + 1)).
 """
 
+ARRAY_PRELUDE = """\
+:- module {name}.
+:- interface.
+:- import_module array.
+
+:- type t == array(int).
+
+"""
+
+ARRAY_HELPERS = """\
+:- pred m(int::out) is multi.
+m(1).
+m(2).
+:- pred nd(int::in, int::out) is nondet.
+nd(X, Y) :- X > 0, ( Y = X ; Y = 1 ).
+:- pred cm(int::out) is cc_multi.
+cm(1).
+cm(2).
+:- pred sd(int::in) is semidet.
+sd(X) :- X > 0.
+:- pred updu(int::in, t::array_di, t::array_uo) is det.
+updu(Y, A0, A) :- array.set(0, Y, A0, A).
+:- pred upd(int::in, t::array_mdi, t::array_muo) is det.
+upd(_, A, A).
+:- pred peek(t::in, int::out) is det.
+peek(A, array.lookup(A, 0)).
+:- pred new(int::in, t::array_uo) is det.
+new(X, array.init(1, X)).
+"""
+
+ARRAY_SCOPE_HELPERS = """\
+:- pred mu(t::array_di, t::array_uo) is multi.
+mu(A, A).
+mu(A0, A) :- array.set(0, 1, A0, A).
+:- pred mmu(t::array_mdi, t::array_muo) is multi.
+mmu(A, A).
+mmu(A, A).
+"""
+
+ARRAY_NESTED_PRELUDE = """\
+:- type p ---> p(t, t).
+:- inst up == unique(p(uniq_array, uniq_array)).
+:- inst mup == mostly_unique(p(mostly_uniq_array, mostly_uniq_array)).
+
+"""
+
+ARRAY_MODES = {"di": "array_di", "uo": "array_uo", "mdi": "array_mdi",
+               "muo": "array_muo"}
+
 NESTED_PRELUDE = """\
 :- type p ---> p(t, t).
 :- inst up == unique(p(unique, unique)).
@@ -149,11 +209,12 @@ DETERMINISMS = ["det", "det", "semidet", "multi", "multi", "nondet",
 
 class Gen:
     def __init__(self, rng, preds, depth=3, scopes=False, io=False,
-                 nested=False):
+                 nested=False, array=False):
         self.rng = rng
         self.scopes = scopes
         self.io = io
         self.nested = nested
+        self.array = array
         self.preds = preds
         self.depth = depth
         self.count = 0
@@ -168,6 +229,12 @@ class Gen:
         if self.ints and self.rng.random() < 0.6:
             return self.rng.choice(self.ints)
         return str(self.rng.randint(1, 3))
+
+    def new(self):
+        """A new value."""
+        if self.array:
+            return "array.init(1, %s)" % self.number()
+        return "t(%s)" % self.number()
 
     def value(self, cur):
         """The value to update: now and then one already clobbered."""
@@ -201,7 +268,9 @@ class Gen:
         if r < 0.38:
             if self.io:
                 return "%s = %s" % (nxt, cur), nxt
-            return "%s = t(%s)" % (nxt, self.number()), nxt
+            if self.array:
+                return "new(%s, %s)" % (self.number(), nxt), nxt
+            return "%s = %s" % (nxt, self.new()), nxt
         if r < 0.42:
             return "%s = %s" % (nxt, cur), nxt
         if r < 0.45:
@@ -246,7 +315,7 @@ class Gen:
         nxt = self.fresh("T")
         pair = self.fresh("P")
         self.dead.append(cur)
-        goals = ["%s = p(%s, t(%s))" % (pair, self.value(cur), self.number())]
+        goals = ["%s = p(%s, %s)" % (pair, self.value(cur), self.new())]
         for _ in range(self.rng.randint(0, 2)):
             r = self.rng.random()
             if r < 0.6:
@@ -279,6 +348,11 @@ class Gen:
         if r < 0.3:
             a, b, p = self.fresh("A"), self.fresh("B"), self.fresh("P")
             mi, mo = self.rng.choice([("di", "uo"), ("di", "uo"), ("mdi", "muo")])
+            if self.array:
+                # Not array_mdi: mmc accepts a lambda expression that
+                # clobbers its mostly unique argument (see the design
+                # document's register).
+                mi, mo = "array_di", "array_uo"
             det = self.rng.choice(LAMBDA_DETERMINISMS)
             body = self.finish(a, b, depth - 1)
             self.ints = ints
@@ -336,10 +410,12 @@ class Gen:
         return text
 
 
-def predicate(rng, preds, n, scopes, io, nested=False):
+def predicate(rng, preds, n, scopes, io, nested=False, array=False):
     name, (mi, mo) = preds[n]
+    if array:
+        mi, mo = ARRAY_MODES[mi], ARRAY_MODES[mo]
     det = rng.choice(DETERMINISMS)
-    gen = Gen(rng, preds, scopes=scopes, io=io, nested=nested)
+    gen = Gen(rng, preds, scopes=scopes, io=io, nested=nested, array=array)
     goals = []
     cur = "T0"
     for _ in range(rng.randint(2, 6)):
@@ -351,25 +427,34 @@ def predicate(rng, preds, n, scopes, io, nested=False):
     return decl, clause, det is not None
 
 
-def module(rng, name, scopes, io=False, ui=False, nested=False):
+def module(rng, name, scopes, io=False, ui=False, nested=False, array=False):
     count = rng.randint(4, 8)
     preds = [("p%d" % i, rng.choice(MODES)) for i in range(count)]
     exported, local, clauses = [], [], []
     for n in range(count):
-        decl, clause, declared = predicate(rng, preds, n, scopes, io, nested)
+        decl, clause, declared = predicate(rng, preds, n, scopes, io, nested,
+                                           array)
         (exported if declared else local).append(decl)
         clauses.append(clause)
-    helpers = IO_HELPERS if io else HELPERS
-    if ui:
+    helpers = IO_HELPERS if io else ARRAY_HELPERS if array else HELPERS
+    if ui and array:
+        helpers = helpers.replace(":- pred peek(t::in,", ":- pred peek(t::array_ui,")
+    elif ui:
         helpers = re.sub(r":- pred peek\(t::in, int::out\) is det\.\npeek\(.*\)\.\n",
                          ":- pred peek(t::ui, int::out) is det.\npeek(_, 1).\n", helpers)
-    scope_helpers = IO_SCOPE_HELPERS if io else SCOPE_HELPERS
-    return ((IO_PRELUDE if io else PRELUDE).format(name=name) +
-            (NESTED_PRELUDE if nested else "") +
+    scope_helpers = (IO_SCOPE_HELPERS if io else
+                     ARRAY_SCOPE_HELPERS if array else SCOPE_HELPERS)
+    prelude = IO_PRELUDE if io else ARRAY_PRELUDE if array else PRELUDE
+    nested_helpers = NESTED_HELPERS
+    if array:
+        nested_helpers = nested_helpers.replace("t::uo", "t::array_uo")
+    return (prelude.format(name=name) +
+            ((ARRAY_NESTED_PRELUDE if array else NESTED_PRELUDE) if nested
+             else "") +
             "\n".join(exported) + "\n\n" +
             ":- implementation.\n:- import_module int.\n\n" + helpers +
             (scope_helpers if scopes else "") +
-            (NESTED_HELPERS if nested else "") + "\n" +
+            (nested_helpers if nested else "") + "\n" +
             "\n".join(local) + "\n\n" + "\n\n".join(clauses) + "\n")
 
 
@@ -382,15 +467,18 @@ def main():
     parser.add_argument("--io", action="store_true")
     parser.add_argument("--ui", action="store_true")
     parser.add_argument("--nested", action="store_true")
+    parser.add_argument("--array", action="store_true")
     parser.add_argument("dir")
     args = parser.parse_args()
+    if args.array and args.io:
+        parser.error("--array cannot be given with --io")
     os.makedirs(args.dir, exist_ok=True)
     for i in range(args.count):
         rng = random.Random("%d-%d" % (args.seed, i))
         name = "u%d_%d" % (args.seed, i)
         with open(os.path.join(args.dir, name + ".m"), "w") as f:
             f.write(module(rng, name, args.scopes, args.io, args.ui,
-                           args.nested))
+                           args.nested, args.array))
 
 
 if __name__ == "__main__":

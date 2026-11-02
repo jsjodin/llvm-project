@@ -462,10 +462,18 @@ private:
         x == before.end() ? nullptr : x->second, {out.functor});
     Body conj{BodyKind::Conj, tokens, &modes};
     std::vector<Body> tests;
-    for (BodyVar &argument : out.arguments) {
+    // A bound argument is a test, unless X's argument is free, which it
+    // binds, as in mmc.
+    std::optional<std::vector<const Inst *>> fields;
+    if (x != before.end() && x->second) {
+      fields = ops_.Arguments(x->second, out.functor, TypeOf(out.left));
+    }
+    for (std::size_t i{0}; i < out.arguments.size(); ++i) {
+      BodyVar &argument{out.arguments[i]};
       auto it{llvm::find_if(
           before, [&](const auto &b) { return b.first == argument; })};
-      if (it == before.end() || ops_.IsFree(it->second)) {
+      if (it == before.end() || ops_.IsFree(it->second) ||
+          (fields && i < fields->size() && ops_.IsFree((*fields)[i]))) {
         continue;
       }
       BodyVar fresh{NewVar({}, TypeOf(argument))};
@@ -1851,20 +1859,10 @@ private:
           failed_.insert(g->failed.begin(), g->failed.end());
         }
       }
-      // mmc's mode analysis deletes a construction or an assignment of a
-      // variable that is not used after it, so the variables it uses are
-      // not used there.
-      for (const Body *g : goal->goals) {
-        if (g->kind == BodyKind::Unify &&
-            (g->unify == UnifyKind::Construct || g->unify == UnifyKind::Assign) &&
-            in[g->left] == 1 && !outside.count(g->left)) {
-          for (BodyVar var : Vars(g)) {
-            if (var != g->left) {
-              --in[var];
-            }
-          }
-        }
-      }
+      // The constructions and assignments that mmc's mode analysis deletes,
+      // of variables not used after them, are already gone; the variables
+      // of those left are used, even by one that is not used after a goal
+      // deleted later, as in mmc, whose liveness is from before.
       for (const Body *g : goal->goals) {
         std::set<BodyVar> used{outside};
         for (BodyVar var : Vars(g)) {
@@ -2529,8 +2527,11 @@ private:
   // as mmc commits to it there. Returns whether the goal has more than
   // one solution as its parent sees it.
   bool Contexts(const Body *goal, Context context) {
+    // Only the first solution of a goal with no outputs is wanted, but the
+    // goals after it that can fail are still why a committed choice in it
+    // needs all, if something in it asks for them, as in mmc.
     if (unseen_.count(goal)) {
-      context = {true, {}};
+      context.first = true;
     }
     bool loose{ContextsIn(goal, context)};
     if (Seen(goal).most != Solutions::Many) {

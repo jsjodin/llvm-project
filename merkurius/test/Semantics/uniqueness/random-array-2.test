@@ -1,0 +1,8 @@
+# Random modules like those of random-array-1.test, with lambda
+# expressions, closures and the other scopes, and arrays put in unique
+# pairs (generate-unique-programs.py --array --scopes --nested).
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-unique-programs.py --array --scopes --nested --seed 517 --count 40 %t
+# RUN: %compare-switches --determinism %t/*.m
