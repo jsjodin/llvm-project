@@ -27,6 +27,9 @@
 #define GET_ATTRDEF_CLASSES
 #include "merkurius/Dialect/Merk/IR/MerkAttrs.h.inc"
 
+#define GET_TYPEDEF_CLASSES
+#include "merkurius/Dialect/Merk/IR/MerkTypes.h.inc"
+
 #define GET_OP_CLASSES
 #include "merkurius/Dialect/Merk/IR/MerkOps.h.inc"
 

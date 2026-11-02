@@ -29,6 +29,14 @@ def Merk_Dialect : Dialect {
   }];
   let cppNamespace = "::merkurius::merk";
   let useDefaultAttributePrinterParser = 1;
+  let useDefaultTypePrinterParser = 1;
+}
+
+// A Mercury string: in C, MR_String, a pointer to UTF-8 ending in a NUL
+// (reference manual, "C data passing conventions").
+def Merk_StringType : TypeDef<Merk_Dialect, "String"> {
+  let mnemonic = "string";
+  let summary = "a Mercury string";
 }
 
 // A procedure's determinism (reference manual, "Determinism categories").
