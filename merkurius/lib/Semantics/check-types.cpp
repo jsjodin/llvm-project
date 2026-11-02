@@ -277,8 +277,6 @@ private:
   llvm::DenseMap<std::pair<const parser::InstanceDecl *, const Symbol *>,
       const MethodDefinition *>
       methodDefinitions_;
-  llvm::DenseMap<const Symbol *, llvm::ArrayRef<ClassConstraint>>
-      superclasses_;
   // Functional dependencies (reference manual, "Functional
   // dependencies"), by the positions of the type class's parameters, each
   // side sorted.
@@ -305,13 +303,7 @@ private:
   void Improve(Assignment &);
   // The instances that constraints may use: the loaded interfaces' and
   // the module's, without its errors and its abstract declarations.
-  struct Instance {
-    const InstanceItem *item;
-    const Symbol *typeclass;
-    llvm::ArrayRef<const Type *> types;
-    llvm::ArrayRef<ClassConstraint> constraints;
-  };
-  std::vector<Instance> instances_;
+  using Instance = InstanceHead;
 
   // Constraint satisfaction. The constraints assumed, those of a
   // declaration or an instance, with their superclasses, each with the
@@ -1392,7 +1384,8 @@ llvm::SmallVector<ClassConstraint, 2> TypeChecker::SuperclassesOf(
 
 llvm::ArrayRef<ClassConstraint> TypeChecker::Superclasses(
     const Symbol &typeclass) {
-  if (auto it{superclasses_.find(&typeclass)}; it != superclasses_.end()) {
+  if (auto it{result_.superclasses_.find(&typeclass)};
+      it != result_.superclasses_.end()) {
     return it->second;
   }
   llvm::SmallVector<ClassConstraint, 2> supers;
@@ -1403,7 +1396,7 @@ llvm::ArrayRef<ClassConstraint> TypeChecker::Superclasses(
   }
   llvm::ArrayRef<ClassConstraint> saved{
       result_.arena_.SaveArray(llvm::ArrayRef<ClassConstraint>{supers})};
-  superclasses_[&typeclass] = saved;
+  result_.superclasses_[&typeclass] = saved;
   return saved;
 }
 
@@ -1724,7 +1717,7 @@ void TypeChecker::CheckInstances() {
   rigid_ = savedRigid;
   for (const Head &head : heads) {
     if (head.valid && !(head.item->local && head.item->decl->abstract)) {
-      instances_.push_back({head.item, head.typeclass,
+      result_.instances_.push_back({head.item, head.typeclass,
           result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{head.types}),
           result_.arena_.SaveArray(
               llvm::ArrayRef<ClassConstraint>{head.constraints})});
@@ -2469,7 +2462,7 @@ std::variant<ConstraintProof, ClassConstraint> TypeChecker::Entail(
     return wanted; // it needs itself
   }
   // Instances do not overlap, so at most one matches.
-  for (const Instance &instance : instances_) {
+  for (const Instance &instance : result_.instances_) {
     llvm::SmallVector<const Type *, 4> bindings;
     if (instance.typeclass != wanted.typeclass ||
         !llvm::all_of(llvm::zip(instance.types, wanted.arguments),
@@ -2497,7 +2490,9 @@ std::variant<ConstraintProof, ClassConstraint> TypeChecker::Entail(
     }
     entailing_.pop_back();
     return ConstraintProof{wanted, nullptr, instance.item,
-        result_.arena_.SaveArray(llvm::ArrayRef<ConstraintProof>{premises})};
+        result_.arena_.SaveArray(llvm::ArrayRef<ConstraintProof>{premises}),
+        std::nullopt, &instance,
+        result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{bindings})};
   }
   return wanted;
 }
@@ -2518,7 +2513,7 @@ bool TypeChecker::Refuted(
           [&](const ClassConstraint &c) { return Same(c, wanted); })) {
     return false;
   }
-  for (const Instance &instance : instances_) {
+  for (const Instance &instance : result_.instances_) {
     llvm::SmallVector<const Type *, 4> bindings;
     if (instance.typeclass != wanted.typeclass ||
         !llvm::all_of(llvm::zip(instance.types, wanted.arguments),
@@ -2608,7 +2603,7 @@ void TypeChecker::Improve(Assignment &a) {
         }
         // An instance whose domain matches: its range, with its other
         // variables fresh, and its constraints are wanted too.
-        for (const Instance &instance : instances_) {
+        for (const Instance &instance : result_.instances_) {
           llvm::SmallVector<const Type *, 4> bindings;
           if (instance.typeclass != c.typeclass ||
               !llvm::all_of(d.domain, [&](unsigned position) {
@@ -3470,7 +3465,7 @@ bool TypeChecker::Reduce(
           [&](const ClassConstraint &c) { return Same(c, wanted); })) {
     return false;
   }
-  for (const Instance &instance : instances_) {
+  for (const Instance &instance : result_.instances_) {
     llvm::SmallVector<const Type *, 4> bindings;
     if (instance.typeclass != wanted.typeclass ||
         !llvm::all_of(llvm::zip(instance.types, wanted.arguments),

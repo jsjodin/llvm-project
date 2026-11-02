@@ -2760,8 +2760,10 @@ private:
           Text(), DeterminismName(*declared), DeterminismName(*body_.determinism))};
       Report(message, body_.body, *declared);
     } else if (*body_.determinism != *declared &&
-        !body_.procedure->source.empty()) {
-      // mmc: "warning: determinism declaration could be tighter."
+        !body_.procedure->source.empty() && !body_.method) {
+      // mmc: "warning: determinism declaration could be tighter." Not
+      // for an instance's method, whose declaration is its type class's,
+      // as in mmc.
       messages_.Say(Declaration(),
           "the determinism declaration of %s could be tighter: it is declared %s, but inferred %s"_warn_en_US,
           Text(), DeterminismName(*declared), DeterminismName(*body_.determinism));

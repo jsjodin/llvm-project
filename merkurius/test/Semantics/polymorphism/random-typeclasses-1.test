@@ -1,0 +1,15 @@
+# Random modules with type classes, some with superclasses or two
+# parameters, instances for type constructors with and without constraints
+# whose methods call methods on their parts, and predicates and functions
+# with class constraints that call methods and each other at types that the
+# callers' constraints or the instances satisfy
+# (generate-polymorphic-programs.py --classes). merkc must give each
+# procedure, instance methods included, the hidden type_info and
+# typeclass_info arguments that mmc does, find its constrained type
+# variables' type_infos where mmc does, and pass each call the same
+# typeclass_infos, made the same way.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-polymorphic-programs.py --classes --seed 11 --count 40 %t
+# RUN: %compare-polymorphism %t/*.m

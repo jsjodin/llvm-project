@@ -158,3 +158,9 @@ explicit(X) = X.
 % CHECK-LABEL: inferred_callee(out) is det, inferred det
 % CHECK: call pred goals.undeclared/1 mode 0: undeclared(Y) [det]
 inferred_callee(Y) :- undeclared(Y).
+
+% An instance's method whose clauses are tighter than its type class's
+% declaration has no warning: its declaration is not the instance's, as in
+% mmc.
+:- typeclass loose(T) where [ pred loose(T::in) is semidet ].
+:- instance loose(int) where [ loose(_) ].

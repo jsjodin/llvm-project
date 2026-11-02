@@ -158,7 +158,7 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, bool openMP) {
       merkurius::semantics::CheckDeterminism(
           tokens, *checking, *modes, messages, !earlier)};
   merkurius::semantics::CheckUniqueness(tokens, *modes, *determinism, messages);
-  merkurius::semantics::AnalysePolymorphism(*checking, *determinism);
+  merkurius::semantics::AnalysePolymorphism(*checking, *modes, *determinism);
   return result;
 }
 
