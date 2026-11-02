@@ -50,6 +50,8 @@ std::unique_ptr<FrontendAction> createFrontendAction(CompilerInstance &ci) {
     return std::make_unique<DebugDumpModesAction>();
   case ActionKind::DebugDumpDeterminism:
     return std::make_unique<DebugDumpDeterminismAction>();
+  case ActionKind::DebugDumpPolymorphism:
+    return std::make_unique<DebugDumpPolymorphismAction>();
   }
   llvm_unreachable("unknown ActionKind");
 }

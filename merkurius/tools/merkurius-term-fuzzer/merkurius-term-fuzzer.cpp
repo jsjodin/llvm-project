@@ -36,6 +36,7 @@
 #include "merkurius/Semantics/check-types.h"
 #include "merkurius/Semantics/desugar.h"
 #include "merkurius/Semantics/module-loader.h"
+#include "merkurius/Semantics/polymorphism.h"
 #include "merkurius/Semantics/resolve-names.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
@@ -143,7 +144,7 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, bool openMP) {
       merkurius::semantics::ResolveNames(
           tree, tokens, semanticForm, loader, messages)};
   // And type checking, purity checking, mode checking, determinism
-  // analysis and uniqueness checking.
+  // analysis, uniqueness checking and polymorphism analysis.
   std::unique_ptr<merkurius::semantics::TypeChecking> checking{
       merkurius::semantics::CheckTypes(
           semanticForm, *resolution, tokens, messages)};
@@ -157,6 +158,7 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, bool openMP) {
       merkurius::semantics::CheckDeterminism(
           tokens, *checking, *modes, messages, !earlier)};
   merkurius::semantics::CheckUniqueness(tokens, *modes, *determinism, messages);
+  merkurius::semantics::AnalysePolymorphism(*checking, *determinism);
   return result;
 }
 
