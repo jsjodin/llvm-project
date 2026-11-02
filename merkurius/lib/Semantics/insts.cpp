@@ -1110,9 +1110,27 @@ bool InstOps::MatchesNow(const Inst *a, const Inst *b, const Type *type) {
     if (a->kind == InstKind::Ground) {
       return IsDefaultFunction(b);
     }
-    return a->kind == InstKind::HigherOrder &&
-        a->predOrFunc == b->predOrFunc && a->any == b->any &&
-        a->modes == b->modes && a->determinism == b->determinism;
+    if (a->kind != InstKind::HigherOrder || a->predOrFunc != b->predOrFunc ||
+        a->any != b->any || a->determinism != b->determinism ||
+        a->modes.size() != b->modes.size()) {
+      return false;
+    }
+    // As in mmc, a closure may be passed where one is expected whose modes
+    // its own accept: each argument's expected initial inst matches the
+    // closure's, and the closure's final inst matches the expected one, so
+    // that `pred(di(uniq_array), ...)` is `pred(di, ...)`.
+    for (std::size_t i{0}; i < a->modes.size(); ++i) {
+      const Type *argument{nullptr};
+      if (type && type->kind == TypeKind::HigherOrder) {
+        argument =
+            i < type->arguments.size() ? type->arguments[i] : type->result;
+      }
+      if (!Matches(b->modes[i].initial, a->modes[i].initial, argument) ||
+          !Matches(a->modes[i].final, b->modes[i].final, argument)) {
+        return false;
+      }
+    }
+    return true;
   default:
     return false;
   }
