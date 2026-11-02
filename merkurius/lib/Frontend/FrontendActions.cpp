@@ -31,7 +31,9 @@
 #include "mlir/Dialect/DLTI/DLTI.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Verifier.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/Parser/Parser.h"
+#include "llvm/Support/SourceMgr.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Path.h"
 #include <functional>
@@ -729,10 +731,16 @@ static mlir::OwningOpRef<mlir::ModuleOp> ReadMLIR(mlir::MLIRContext &context,
     std::unique_ptr<codegen::TargetInfo> &target) {
   context.loadDialect<merk::MerkDialect, mlir::DLTIDialect,
       mlir::LLVM::LLVMDialect>();
+  // Errors in it are reported at file:line:column, with the line.
+  llvm::SourceMgr sourceMgr;
+  sourceMgr.AddNewSourceBuffer(
+      llvm::MemoryBuffer::getMemBuffer(file.content(), file.path(),
+          /*RequiresNullTerminator=*/false),
+      llvm::SMLoc());
+  mlir::SourceMgrDiagnosticHandler handler{sourceMgr, &context};
   mlir::ParserConfig config{&context};
   mlir::OwningOpRef<mlir::ModuleOp> module{
-      mlir::parseSourceString<mlir::ModuleOp>(
-          file.content(), config, file.path())};
+      mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, config)};
   if (!module) {
     return nullptr;
   }
