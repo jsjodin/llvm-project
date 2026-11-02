@@ -7,6 +7,7 @@ add_merkurius_library(MerkuriusSemantics
   desugar.cpp
   insts.cpp
   module-loader.cpp
+  polymorphism.cpp
   quantify.cpp
   resolve-names.cpp
   semantic-form.cpp

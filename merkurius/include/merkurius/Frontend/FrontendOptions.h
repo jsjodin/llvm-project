@@ -62,6 +62,10 @@ enum class ActionKind {
   // -fdebug-dump-determinism: type, purity and mode check, and list each
   // procedure's body, with its switches.
   DebugDumpDeterminism,
+  // -fdebug-dump-polymorphism: check the source file as for
+  // -fdebug-dump-determinism, and list each procedure's type_info
+  // arguments and those its goals pass.
+  DebugDumpPolymorphism,
 };
 
 struct FrontendOptions {

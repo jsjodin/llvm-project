@@ -23,6 +23,7 @@
 #include "merkurius/Semantics/check-types.h"
 #include "merkurius/Semantics/desugar.h"
 #include "merkurius/Semantics/module-loader.h"
+#include "merkurius/Semantics/polymorphism.h"
 #include "merkurius/Semantics/resolve-names.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Path.h"
@@ -609,11 +610,18 @@ bool DebugDumpModesAction::executeAction() {
   return !r.messages.AnyFatalError();
 }
 
-bool DebugDumpDeterminismAction::executeAction() {
-  CompilerInstance &ci{getInstance()};
+namespace {
+
+// The passes up to uniqueness checking, which work on the bodies that
+// determinism analysis builds.
+struct Analysed {
+  std::unique_ptr<semantics::TypeChecking> types;
+  std::unique_ptr<semantics::ModeChecking> modes;
+  std::unique_ptr<semantics::DeterminismChecking> determinism;
+};
+
+Analysed Analyse(CompilerInstance &ci, Resolved &r) {
   const FrontendOptions &frontend{ci.getFrontendOpts()};
-  Resolved r;
-  Resolve(ci, getSourceFile(), r);
   semantics::TypeCheckOptions typeOptions;
   typeOptions.inferTypes = frontend.inferTypes;
   typeOptions.inferenceIterationLimit = frontend.typeInferenceIterationLimit;
@@ -633,31 +641,73 @@ bool DebugDumpDeterminismAction::executeAction() {
           r.tokens, *types, *modes, r.messages, !earlier)};
   semantics::CheckUniqueness(
       r.tokens, *modes, *determinism, r.messages, frontend.mmcUniqueness);
+  return {std::move(types), std::move(modes), std::move(determinism)};
+}
+
+// Prints a body's procedure as -fdebug-dump-modes lists it, with the
+// determinism inferred for it; an instance method's as method m.c(T)
+// pred m.p/1 mode 0.
+void PrintBodyHeader(llvm::raw_ostream &os,
+    const semantics::ProcedureBody &body, semantics::ModeChecking &modes,
+    const parser::AllSources &sources) {
+  if (body.method) {
+    os << "method " << body.method->method->instanceText << ' '
+       << *body.procedure->symbol << " mode " << body.procedure->number
+       << '\n';
+    return;
+  }
+  std::string header;
+  llvm::raw_string_ostream line{header};
+  PrintProcedure(line, *body.procedure, modes, sources);
+  os << llvm::StringRef{header}.rtrim('\n');
+  if (body.determinism) {
+    os << ", inferred " << semantics::DeterminismName(*body.determinism);
+  }
+  os << '\n';
+}
+
+} // namespace
+
+bool DebugDumpDeterminismAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  Resolved r;
+  Resolve(ci, getSourceFile(), r);
+  Analysed a{Analyse(ci, r)};
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   llvm::raw_ostream *os{ci.createDefaultOutputFile()};
   if (!os) {
     return false;
   }
   const parser::AllSources &sources{ci.getAllSources()};
-  // Each procedure whose modes were checked, as -fdebug-dump-modes lists
-  // it, and its body; instance methods' as method m.c(T) pred m.p/1 mode
-  // 0.
-  for (const semantics::ProcedureBody &body : determinism->bodies()) {
-    if (body.method) {
-      *os << "method " << body.method->method->instanceText << ' '
-          << *body.procedure->symbol << " mode " << body.procedure->number
-          << '\n';
-    } else {
-      std::string header;
-      llvm::raw_string_ostream line{header};
-      PrintProcedure(line, *body.procedure, *modes, sources);
-      *os << llvm::StringRef{header}.rtrim('\n');
-      if (body.determinism) {
-        *os << ", inferred " << semantics::DeterminismName(*body.determinism);
-      }
-      *os << '\n';
-    }
+  // Each procedure whose modes were checked, and its body.
+  for (const semantics::ProcedureBody &body : a.determinism->bodies()) {
+    PrintBodyHeader(*os, body, *a.modes, sources);
     semantics::DumpProcedureBody(*os, body, r.tokens,
+        [&](parser::CharBlock at) { return Position(sources, at); });
+  }
+  os->flush();
+  return !r.messages.AnyFatalError();
+}
+
+bool DebugDumpPolymorphismAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  Resolved r;
+  Resolve(ci, getSourceFile(), r);
+  Analysed a{Analyse(ci, r)};
+  std::unique_ptr<semantics::PolymorphismAnalysis> polymorphism{
+      semantics::AnalysePolymorphism(*a.types, *a.determinism)};
+  r.messages.Emit(llvm::errs(), ci.getAllSources());
+  llvm::raw_ostream *os{ci.createDefaultOutputFile()};
+  if (!os) {
+    return false;
+  }
+  const parser::AllSources &sources{ci.getAllSources()};
+  // Each procedure whose modes were checked, its type_info arguments, and
+  // the type_infos of its goals.
+  for (const semantics::ProcedurePolymorphism &procedure :
+      polymorphism->procedures()) {
+    PrintBodyHeader(*os, *procedure.body, *a.modes, sources);
+    semantics::DumpProcedurePolymorphism(*os, procedure, r.tokens,
         [&](parser::CharBlock at) { return Position(sources, at); });
   }
   os->flush();
