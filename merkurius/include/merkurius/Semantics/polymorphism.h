@@ -134,9 +134,8 @@ struct PassedInfos {
 
 // Why a procedure is not analysed yet: it is an instance method with
 // existentially quantified types, or it uses a type that a goal it does not
-// analyse gives; a call's constraints were not proved; or it makes a
-// closure of a polymorphic predicate or function.
-ENUM_CLASS(PolymorphismUnchecked, None, Constraints, Existential, Closure)
+// analyse gives; or a call's constraints were not proved.
+ENUM_CLASS(PolymorphismUnchecked, None, Constraints, Existential)
 
 struct ProcedurePolymorphism {
   const ProcedureBody *body;

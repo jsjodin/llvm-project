@@ -647,6 +647,17 @@ private:
   void Pass(const Body *goal, const Symbol &callee, const Signature &signature,
       llvm::ArrayRef<BodyVar> arguments, bool constructor = false,
       bool construction = false) {
+    std::vector<const Type *> types;
+    for (BodyVar argument : arguments) {
+      types.push_back(TypeOf(argument));
+    }
+    Pass(goal, callee, signature, types, constructor, construction);
+  }
+
+  // The same, for arguments of types `arguments`.
+  void Pass(const Body *goal, const Symbol &callee, const Signature &signature,
+      llvm::ArrayRef<const Type *> arguments, bool constructor = false,
+      bool construction = false) {
     if (signature.typeVars == 0 && signature.constraints.empty()) {
       return;
     }
@@ -654,7 +665,7 @@ private:
     std::vector<const Type *> binding(signature.typeVars, nullptr);
     for (std::size_t i{0};
          i < arguments.size() && i < signature.arguments.size(); ++i) {
-      Match(signature.arguments[i], TypeOf(arguments[i]), binding);
+      Match(signature.arguments[i], Normalize(arguments[i]), binding);
     }
     std::vector<bool> constrained{
         Constrained(signature.typeVars, signature.constraints)};
@@ -798,12 +809,27 @@ private:
         break;
       }
       if (goal->modes && goal->modes->callee) {
-        // A closure of a predicate's or function's name.
+        // A closure of a predicate's or function's name, which mmc makes
+        // a lambda expression whose body calls it with the curried
+        // arguments and the lambda's: it passes what that call would, its
+        // arguments' types those of the curried arguments and then the
+        // closure type's.
         if (const Signature *signature{
-                types_.SignatureOf(*goal->modes->callee->symbol)};
-            signature &&
-            (signature->typeVars != 0 || !signature->constraints.empty())) {
-          Unchecked(PolymorphismUnchecked::Closure);
+                types_.SignatureOf(*goal->modes->callee->symbol)}) {
+          std::vector<const Type *> types;
+          for (BodyVar argument : goal->arguments) {
+            types.push_back(TypeOf(argument));
+          }
+          const Type *closure{TypeOf(goal->left)};
+          if (closure->kind == TypeKind::HigherOrder) {
+            types.insert(types.end(), closure->arguments.begin(),
+                closure->arguments.end());
+            if (closure->result) {
+              types.push_back(closure->result);
+            }
+          }
+          Pass(goal, *goal->modes->callee->symbol, *signature,
+              llvm::ArrayRef<const Type *>{types});
         }
         break;
       }
@@ -1057,6 +1083,8 @@ void DumpProcedurePolymorphism(llvm::raw_ostream &os,
         os << ' '
            << (goal->kind == BodyKind::Call ? "call " : "application ")
            << *goal->modes->callee->symbol;
+      } else if (goal->modes && goal->modes->callee) {
+        os << " closure " << *goal->modes->callee->symbol;
       } else if (!goal->isVar) {
         // A construction, 'new f'(...), or a deconstruction, with an
         // existentially typed constructor.
