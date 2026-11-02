@@ -10,6 +10,7 @@
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
 #include "merkurius/Parser/parse-tree.h"
 #include "merkurius/Parser/term-reader.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Verifier.h"
 #include "llvm/ADT/APFloat.h"
@@ -154,6 +155,9 @@ typedef int32_t MR_Char;
 typedef char *MR_String;
 typedef const char *MR_ConstString;
 typedef uintptr_t MR_Word;
+typedef int MR_bool;
+#define MR_TRUE 1
+#define MR_FALSE 0
 )"};
 
 namespace {
@@ -226,6 +230,42 @@ private:
   std::string LineDirective(parser::TokenRange);
   void Call(const Body &, const Procedure &, llvm::ArrayRef<BodyVar> arguments,
       const ProcedureBody &);
+  // A call of a predicate or function of int, uint, the sized integer
+  // modules or float that code generation has built in, as arith
+  // operations; false if it is to be called instead.
+  bool Builtin(const Body &, const Procedure &,
+      llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
+  // X = Y, or X = c, with both bound: a test.
+  void Test(const Body &, mlir::Value, mlir::Value);
+  void IfThenElse(const Body &, const ProcedureBody &);
+  void Switch(const Body &, const ProcedureBody &);
+  void Not(const Body &, const ProcedureBody &);
+  // The variables bound in a branch, after `before`, in order.
+  using Values = llvm::DenseMap<BodyVar, mlir::Value>;
+  static std::vector<BodyVar> BoundSince(const Values &now, const Values &before);
+  // A branch of an if-then-else or a switch, as generated: its block, the
+  // values of the variables after it, and whether it fails.
+  struct Branch {
+    mlir::Block *block;
+    Values values;
+    bool fails;
+  };
+  // Ends the branches that succeed with the values of the variables they
+  // all bind, and remakes `op` with those as its results, which are then
+  // the variables' values.
+  void Join(mlir::Operation *op, llvm::ArrayRef<Branch>, const Values &before,
+      mlir::Location);
+  // Whether the block being generated ends, after a goal that cannot
+  // succeed.
+  bool Terminated() {
+    mlir::Block *block{builder_.getInsertionBlock()};
+    return !block->empty() &&
+        block->back().hasTrait<mlir::OpTrait::IsTerminator>();
+  }
+  mlir::Value IntegerConstant(mlir::Type type, std::int64_t value, mlir::Location loc) {
+    return mlir::arith::ConstantOp::create(
+        builder_, loc, builder_.getIntegerAttr(type, value));
+  }
   // A variable's value; null for one of a type with no values.
   mlir::Value ValueOf(BodyVar var) { return values_.lookup(var); }
 
@@ -307,6 +347,12 @@ static std::optional<merk::Determinism> MerkDeterminism(
     return merk::Determinism::Det;
   case parser::Determinism::CcMulti:
     return merk::Determinism::CcMulti;
+  case parser::Determinism::Semidet:
+    return merk::Determinism::Semidet;
+  case parser::Determinism::Failure:
+    return merk::Determinism::Failure;
+  case parser::Determinism::Erroneous:
+    return merk::Determinism::Erroneous;
   default:
     return std::nullopt;
   }
@@ -358,6 +404,9 @@ void MerkGenerator::Call(const Body &goal, const Procedure &callee,
     NotYet(Where(goal.tokens), "calls with hidden arguments");
     return;
   }
+  if (Builtin(goal, callee, arguments, body)) {
+    return;
+  }
   llvm::SmallVector<const semantics::Type *> types;
   for (BodyVar argument : arguments) {
     types.push_back(body.vars[argument].type);
@@ -386,10 +435,26 @@ void MerkGenerator::Call(const Body &goal, const Procedure &callee,
 }
 
 void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
-  if (failed_) {
+  if (failed_ || Terminated()) {
     return;
   }
   switch (goal.kind) {
+  case BodyKind::Disj:
+    if (goal.goals.empty()) {
+      merk::FailOp::create(builder_, Location(goal.tokens));
+      return;
+    }
+    NotYet(Where(goal.tokens), "disjunctions");
+    return;
+  case BodyKind::IfThenElse:
+    IfThenElse(goal, body);
+    return;
+  case BodyKind::Switch:
+    Switch(goal, body);
+    return;
+  case BodyKind::Not:
+    Not(goal, body);
+    return;
   case BodyKind::Conj:
     for (const Body *conjunct : goal.goals) {
       Goal(*conjunct, body);
@@ -402,6 +467,24 @@ void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
     Call(goal, *goal.modes->callee, goal.arguments, body);
     return;
   case BodyKind::Unify:
+    if (goal.switchTest) {
+      return; // the switch's case has tested it
+    }
+    if (goal.isVar && goal.unify == UnifyKind::Test) {
+      // X = X succeeds, even for a NaN, as with mmc.
+      if (goal.left != goal.var) {
+        Test(goal, ValueOf(goal.left), ValueOf(goal.var));
+      }
+      return;
+    }
+    if (!goal.isVar && goal.arguments.empty() && goal.source &&
+        (goal.unify == UnifyKind::Deconstruct ||
+            goal.unify == UnifyKind::Test)) {
+      if (mlir::Value constant{Constant(goal, body)}) {
+        Test(goal, ValueOf(goal.left), constant);
+      }
+      return;
+    }
     if (goal.isVar && goal.unify == UnifyKind::Assign) {
       // X = Y: the variable assigned is the other's value.
       if (values_.count(goal.var)) {
@@ -533,10 +616,19 @@ void MerkGenerator::GenerateForeign(
     arguments.push_back(pragma.result);
   }
   // The C function takes the inputs, and returns the only output or else
-  // stores the outputs through pointers after the inputs. A variable of a
-  // type with no values, such as io.state, is an MR_Word set to 0.
+  // stores the outputs through pointers after the inputs; that of a
+  // procedure that can fail returns SUCCESS_INDICATOR, and stores every
+  // output. A variable of a type with no values, such as io.state, is an
+  // MR_Word set to 0.
+  merk::Determinism determinism{proc.getDeterminism()};
+  bool canFail{determinism == merk::Determinism::Semidet ||
+      determinism == merk::Determinism::Failure ||
+      determinism == merk::Determinism::CcNondet};
   std::string name{ForeignName(procedure)};
   std::string parameters, locals, stores;
+  if (canFail) {
+    locals += "  MR_bool SUCCESS_INDICATOR = MR_TRUE;\n";
+  }
   llvm::SmallVector<std::pair<std::string, std::string>> outputs;
   for (auto [argument, type, mode] :
       llvm::zip(arguments, signature->arguments, procedure.modes)) {
@@ -551,13 +643,17 @@ void MerkGenerator::GenerateForeign(
     }
   }
   std::string result{"void"};
-  if (outputs.size() == 1) {
+  if (outputs.size() == 1 && !canFail) {
     result = outputs.front().first;
     stores = "  return " + outputs.front().second + ";\n";
   } else {
     for (auto &[ctype, var] : outputs) {
       parameters += (parameters.empty() ? "" : ", ") + ctype + " *merk_out_" + var;
       stores += "  *merk_out_" + var + " = " + var + ";\n";
+    }
+    if (canFail) {
+      result = "MR_bool";
+      stores += "  return SUCCESS_INDICATOR;\n";
     }
   }
   foreignCode_ += "\n" + result + " " + name + "(" +
@@ -569,9 +665,573 @@ void MerkGenerator::GenerateForeign(
   mlir::OpBuilder::InsertionGuard guard{builder_};
   builder_.setInsertionPointToStart(entry);
   mlir::Location loc{Location(Where(pragma.tokens))};
-  auto call{merk::ForeignCallOp::create(builder_, loc,
-      proc.getFunctionType().getResults(), name, entry->getArguments())};
-  merk::SucceedOp::create(builder_, loc, call.getResults());
+  llvm::SmallVector<mlir::Type> results;
+  if (canFail) {
+    results.push_back(builder_.getI1Type());
+  }
+  results.append(proc.getFunctionType().getResults().begin(),
+      proc.getFunctionType().getResults().end());
+  auto call{merk::ForeignCallOp::create(builder_, loc, results, name,
+      entry->getArguments(), canFail)};
+  mlir::ValueRange solution{call.getResults()};
+  if (canFail) {
+    merk::GuardOp::create(builder_, loc, solution.front());
+    solution = solution.drop_front();
+  }
+  merk::SucceedOp::create(builder_, loc, solution);
+}
+
+void MerkGenerator::Test(const Body &goal, mlir::Value x, mlir::Value y) {
+  mlir::Location loc{Location(goal.tokens)};
+  mlir::Value equal;
+  if (x && y && mlir::isa<mlir::IntegerType>(x.getType())) {
+    equal = mlir::arith::CmpIOp::create(
+        builder_, loc, mlir::arith::CmpIPredicate::eq, x, y);
+  } else if (x && y && mlir::isa<mlir::FloatType>(x.getType())) {
+    equal = mlir::arith::CmpFOp::create(
+        builder_, loc, mlir::arith::CmpFPredicate::OEQ, x, y);
+  } else {
+    NotYet(Where(goal.tokens), "this unification");
+    return;
+  }
+  merk::GuardOp::create(builder_, loc, equal);
+}
+
+std::vector<BodyVar> MerkGenerator::BoundSince(
+    const Values &now, const Values &before) {
+  std::vector<BodyVar> bound;
+  for (const auto &[var, value] : now) {
+    if (!before.count(var)) {
+      bound.push_back(var);
+    }
+  }
+  llvm::sort(bound);
+  return bound;
+}
+
+void MerkGenerator::Join(mlir::Operation *op, llvm::ArrayRef<Branch> branches,
+    const Values &before, mlir::Location loc) {
+  // The variables that every branch that succeeds binds; those of a branch
+  // only are its own.
+  std::optional<std::vector<BodyVar>> results;
+  for (const Branch &branch : branches) {
+    if (branch.fails) {
+      continue;
+    }
+    std::vector<BodyVar> bound{BoundSince(branch.values, before)};
+    if (!results) {
+      results = std::move(bound);
+    } else {
+      std::vector<BodyVar> both;
+      std::set_intersection(results->begin(), results->end(), bound.begin(),
+          bound.end(), std::back_inserter(both));
+      results = std::move(both);
+    }
+  }
+  if (!results) {
+    results.emplace();
+  }
+  llvm::SmallVector<mlir::Type> types;
+  for (const Branch &branch : branches) {
+    if (branch.fails) {
+      continue;
+    }
+    llvm::SmallVector<mlir::Value> values;
+    for (BodyVar var : *results) {
+      values.push_back(branch.values.lookup(var));
+    }
+    if (types.empty() && !values.empty()) {
+      for (mlir::Value value : values) {
+        types.push_back(value.getType());
+      }
+    }
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.setInsertionPointToEnd(branch.block);
+    merk::YieldOp::create(builder_, loc, values);
+  }
+  // The operation again, with the results.
+  mlir::OperationState state{op->getLoc(), op->getName()};
+  state.addOperands(op->getOperands());
+  state.addAttributes(op->getAttrs());
+  state.addTypes(types);
+  for (mlir::Region &region : op->getRegions()) {
+    state.addRegion()->takeBody(region);
+  }
+  builder_.setInsertionPoint(op);
+  mlir::Operation *joined{builder_.create(state)};
+  op->erase();
+  builder_.setInsertionPointAfter(joined);
+  values_ = before;
+  for (auto [var, result] : llvm::zip_equal(*results, joined->getResults())) {
+    values_[var] = result;
+  }
+  if (llvm::all_of(branches, [](const Branch &b) { return b.fails; })) {
+    // No branch succeeds, so neither does the goal.
+    merk::FailOp::create(builder_, loc);
+  }
+}
+
+void MerkGenerator::IfThenElse(const Body &goal, const ProcedureBody &body) {
+  mlir::Location loc{Location(goal.tokens)};
+  Values before{values_};
+  auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
+  llvm::SmallVector<Branch, 2> branches;
+  {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    // The condition yields what it binds, to the then part.
+    builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
+    Goal(*goal.goals[0], body);
+    std::vector<BodyVar> bound{BoundSince(values_, before)};
+    llvm::SmallVector<mlir::Value> yielded;
+    for (BodyVar var : bound) {
+      yielded.push_back(values_.lookup(var));
+    }
+    merk::YieldOp conditionYield;
+    if (!Terminated()) {
+      conditionYield = merk::YieldOp::create(builder_, loc, yielded);
+    }
+    mlir::Block &then{ite.getThenRegion().emplaceBlock()};
+    values_ = before;
+    for (auto [var, value] : llvm::zip(bound, yielded)) {
+      values_[var] = then.addArgument(value.getType(), loc);
+    }
+    builder_.setInsertionPointToStart(&then);
+    Goal(*goal.goals[1], body);
+    branches.push_back({&then, values_, Terminated()});
+    mlir::Block &otherwise{ite.getElseRegion().emplaceBlock()};
+    values_ = before;
+    builder_.setInsertionPointToStart(&otherwise);
+    Goal(*goal.goals[2], body);
+    branches.push_back({&otherwise, values_, Terminated()});
+    if (failed_) {
+      values_ = before;
+      return;
+    }
+    Join(ite, branches, before, loc);
+    // The condition passes the then part only the values it uses: those
+    // the condition binds for itself are local to it.
+    for (unsigned i = then.getNumArguments(); i-- > 0;) {
+      if (then.getArgument(i).use_empty()) {
+        then.eraseArgument(i);
+        if (conditionYield) {
+          conditionYield.getValuesMutable().erase(i);
+        }
+      }
+    }
+  }
+}
+
+// The constant of a switch's case: an integer literal, or a character's
+// code point.
+static std::optional<llvm::APInt> CaseConstant(const semantics::InstFunctor &functor,
+    const semantics::Type &type, unsigned bits) {
+  if (functor.arity != 0) {
+    return std::nullopt;
+  }
+  if (functor.literal) {
+    return IntegerValue(functor.name, bits);
+  }
+  if (type.kind == semantics::TypeKind::Named &&
+      type.constructor->name == "character") {
+    if (std::optional<llvm::UTF32> codePoint{OnlyCodePoint(functor.name)}) {
+      return llvm::APInt{bits, *codePoint};
+    }
+  }
+  return std::nullopt;
+}
+
+void MerkGenerator::Switch(const Body &goal, const ProcedureBody &body) {
+  mlir::Location loc{Location(goal.tokens)};
+  const semantics::Type *type{body.vars[goal.switchVar].type};
+  mlir::Value value{ValueOf(goal.switchVar)};
+  auto integer{value ? mlir::dyn_cast<mlir::IntegerType>(value.getType())
+                     : mlir::IntegerType{}};
+  if (!integer) {
+    NotYet(Where(goal.tokens),
+        "switches on values of type " + semantics::TypeToString(*type));
+    return;
+  }
+  llvm::SmallVector<mlir::Attribute> cases;
+  for (const semantics::SwitchCase &c : goal.cases) {
+    llvm::SmallVector<mlir::Attribute> constants;
+    std::vector<semantics::InstFunctor> functors{c.functor};
+    functors.insert(functors.end(), c.others.begin(), c.others.end());
+    for (const semantics::InstFunctor &functor : functors) {
+      std::optional<llvm::APInt> v{
+          CaseConstant(functor, *type, integer.getWidth())};
+      if (!v) {
+        NotYet(Where(goal.tokens),
+            "switches on values of type " + semantics::TypeToString(*type));
+        return;
+      }
+      constants.push_back(builder_.getIntegerAttr(integer, *v));
+    }
+    cases.push_back(builder_.getArrayAttr(constants));
+  }
+  Values before{values_};
+  auto op{merk::SwitchOp::create(builder_, loc, mlir::TypeRange{}, value,
+      builder_.getArrayAttr(cases), goal.canFail)};
+  llvm::SmallVector<Branch> branches;
+  {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    for (auto [c, region] : llvm::zip(goal.cases, op.getCaseRegions())) {
+      mlir::Block &block{region.emplaceBlock()};
+      values_ = before;
+      builder_.setInsertionPointToStart(&block);
+      Goal(*c.goal, body);
+      branches.push_back({&block, values_, Terminated()});
+    }
+  }
+  if (failed_) {
+    values_ = before;
+    return;
+  }
+  Join(op, branches, before, loc);
+}
+
+void MerkGenerator::Not(const Body &goal, const ProcedureBody &body) {
+  mlir::Location loc{Location(goal.tokens)};
+  Values before{values_};
+  auto op{merk::NotOp::create(builder_, loc)};
+  {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.setInsertionPointToStart(&op.getGoal().emplaceBlock());
+    Goal(*goal.goals.front(), body);
+    if (!Terminated()) {
+      merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+    }
+  }
+  values_ = before;
+}
+
+// The library's message for an exception, as mmc writes the exception: a
+// domain_error of a name of the operation, as int.'//' or int.(<<).
+static std::string DomainError(llvm::StringRef module, llvm::StringRef what,
+    llvm::StringRef problem) {
+  return ("domain_error(\"" + module + "." + what + ": " + problem + "\")").str();
+}
+
+bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
+  const semantics::Symbol &symbol{*callee.symbol};
+  llvm::StringRef module{symbol.module};
+  bool isFloat{module == "float"};
+  bool isUnsigned{module.starts_with("uint")};
+  bool isInteger{llvm::is_contained(
+      {"int", "uint", "int8", "int16", "int32", "int64", "uint8", "uint16",
+          "uint32", "uint64"},
+      module)};
+  if (!isFloat && !isInteger) {
+    return false;
+  }
+  // What is not built in is called: float's functions are the compiled
+  // library's; the integer modules have no implementation yet.
+  auto other{[&] {
+    if (isFloat) {
+      return false;
+    }
+    NotYet(Where(goal.tokens),
+        ("calls of " + module + "." + symbol.name + "/" +
+            std::to_string(symbol.arity))
+            .str());
+    return true;
+  }};
+  bool function{symbol.kind == semantics::SymbolKind::Function};
+  llvm::SmallVector<mlir::Value> in;
+  for (auto [i, argument, mode] : llvm::enumerate(arguments, callee.modes)) {
+    bool result{function && i + 1 == arguments.size()};
+    if (IsOutput(mode) != result || (!result && !ValueOf(argument))) {
+      return other();
+    }
+    if (!result) {
+      in.push_back(ValueOf(argument));
+    }
+  }
+  mlir::Location loc{Location(goal.tokens)};
+  llvm::StringRef name{symbol.name};
+  namespace arith = mlir::arith;
+  if (!function && isInteger && in.size() == 1 &&
+      (name == "even" || name == "odd")) {
+    mlir::Value low{arith::AndIOp::create(builder_, loc, in[0],
+        IntegerConstant(in[0].getType(), 1, loc))};
+    merk::GuardOp::create(builder_, loc,
+        arith::CmpIOp::create(builder_, loc, arith::CmpIPredicate::eq, low,
+            IntegerConstant(in[0].getType(), name == "odd", loc)));
+    return true;
+  }
+  if (!function) {
+    // The comparisons, which are tests.
+    if (in.size() != 2) {
+      return other();
+    }
+    mlir::Value flag;
+    if (isFloat) {
+      std::optional<arith::CmpFPredicate> predicate{
+          name == "<"    ? arith::CmpFPredicate::OLT
+              : name == ">"  ? arith::CmpFPredicate::OGT
+              : name == "=<" ? arith::CmpFPredicate::OLE
+              : name == ">=" ? arith::CmpFPredicate::OGE
+                             : std::optional<arith::CmpFPredicate>{}};
+      if (!predicate) {
+        return other();
+      }
+      flag = arith::CmpFOp::create(builder_, loc, *predicate, in[0], in[1]);
+    } else {
+      std::optional<arith::CmpIPredicate> predicate{name == "<"
+              ? (isUnsigned ? arith::CmpIPredicate::ult : arith::CmpIPredicate::slt)
+              : name == ">"
+              ? (isUnsigned ? arith::CmpIPredicate::ugt : arith::CmpIPredicate::sgt)
+              : name == "=<"
+              ? (isUnsigned ? arith::CmpIPredicate::ule : arith::CmpIPredicate::sle)
+              : name == ">="
+              ? (isUnsigned ? arith::CmpIPredicate::uge : arith::CmpIPredicate::sge)
+              : std::optional<arith::CmpIPredicate>{}};
+      if (!predicate) {
+        return other();
+      }
+      flag = arith::CmpIOp::create(builder_, loc, *predicate, in[0], in[1]);
+    }
+    merk::GuardOp::create(builder_, loc, flag);
+    return true;
+  }
+  mlir::Value result;
+  BodyVar output{arguments.back()};
+  if (isFloat) {
+    if (in.size() == 2 && name == "+") {
+      result = arith::AddFOp::create(builder_, loc, in[0], in[1]);
+    } else if (in.size() == 2 && name == "-") {
+      result = arith::SubFOp::create(builder_, loc, in[0], in[1]);
+    } else if (in.size() == 2 && name == "*") {
+      result = arith::MulFOp::create(builder_, loc, in[0], in[1]);
+    } else if (in.size() == 2 && name == "/") {
+      mlir::Value zero{arith::ConstantOp::create(
+          builder_, loc, builder_.getFloatAttr(in[1].getType(), 0.0))};
+      mlir::Value isZero{arith::CmpFOp::create(
+          builder_, loc, arith::CmpFPredicate::OEQ, in[1], zero)};
+      merk::ThrowIfOp::create(builder_, loc, isZero,
+          DomainError(module, "\\'/\\'", "division by zero"));
+      result = arith::DivFOp::create(builder_, loc, in[0], in[1]);
+    } else if (in.size() == 2 && name == "unchecked_quotient") {
+      result = arith::DivFOp::create(builder_, loc, in[0], in[1]);
+    } else if (in.size() == 1 && name == "-") {
+      // As mmc's programs negate: 0.0 - X, so that -0.0 is 0.0.
+      mlir::Value zero{arith::ConstantOp::create(
+          builder_, loc, builder_.getFloatAttr(in[0].getType(), 0.0))};
+      result = arith::SubFOp::create(builder_, loc, zero, in[0]);
+    } else if (in.size() == 1 && name == "+") {
+      result = in[0];
+    } else if (in.size() == 1 && name == "float" &&
+        mlir::isa<mlir::IntegerType>(in[0].getType())) {
+      result = arith::SIToFPOp::create(
+          builder_, loc, builder_.getF64Type(), in[0]);
+    } else {
+      return other();
+    }
+    values_[output] = result;
+    return true;
+  }
+  std::optional<Represented> outputType{Represent(body.vars[output].type)};
+  if (in.empty()) {
+    // The constants: the least and greatest values, and the width.
+    auto type{outputType
+            ? mlir::dyn_cast_or_null<mlir::IntegerType>(outputType->type)
+            : mlir::IntegerType{}};
+    if (!type) {
+      return other();
+    }
+    unsigned bits{type.getWidth()};
+    llvm::StringRef bounded{name};
+    llvm::APInt value;
+    if (bounded.consume_front("max_") && bounded == module) {
+      value = isUnsigned ? llvm::APInt::getMaxValue(bits)
+                         : llvm::APInt::getSignedMaxValue(bits);
+    } else if (bounded.consume_front("min_") && bounded == module) {
+      value = isUnsigned ? llvm::APInt::getZero(bits)
+                         : llvm::APInt::getSignedMinValue(bits);
+    } else if (name == ("bits_per_" + module).str()) {
+      value = llvm::APInt{bits, bits};
+    } else {
+      return other();
+    }
+    values_[output] = arith::ConstantOp::create(
+        builder_, loc, builder_.getIntegerAttr(type, value));
+    return true;
+  }
+  auto type{mlir::cast<mlir::IntegerType>(in[0].getType())};
+  unsigned bits{type.getWidth()};
+  if (in.size() == 1 &&
+      (name.starts_with("cast_") || name == "to_int" ||
+          name == "from_int" || name == "to_uint")) {
+    // A conversion between integer types keeps the value's low bits, and
+    // extends it by its sign if its type is signed (library reference,
+    // "int8" and the others).
+    auto to{outputType
+            ? mlir::dyn_cast_or_null<mlir::IntegerType>(outputType->type)
+            : mlir::IntegerType{}};
+    if (!to) {
+      return other();
+    }
+    llvm::StringRef from{module};
+    if (name.starts_with("cast_from_")) {
+      from = name.drop_front(llvm::StringRef{"cast_from_"}.size());
+    } else if (name == "from_int") {
+      from = "int";
+    }
+    if (to.getWidth() < bits) {
+      result = arith::TruncIOp::create(builder_, loc, to, in[0]);
+    } else if (to.getWidth() == bits) {
+      result = in[0];
+    } else if (from.starts_with("uint")) {
+      result = arith::ExtUIOp::create(builder_, loc, to, in[0]);
+    } else {
+      result = arith::ExtSIOp::create(builder_, loc, to, in[0]);
+    }
+    values_[output] = result;
+    return true;
+  }
+  auto constant{[&](std::int64_t v) { return IntegerConstant(type, v, loc); }};
+  auto equal{[&](mlir::Value x, std::int64_t v) {
+    return arith::CmpIOp::create(
+        builder_, loc, arith::CmpIPredicate::eq, x, constant(v));
+  }};
+  auto select{[&](mlir::Value c, mlir::Value t, mlir::Value f) {
+    return arith::SelectOp::create(builder_, loc, c, t, f);
+  }};
+  // A division checks for a zero divisor; one of the least value by -1,
+  // whose quotient overflows, wraps, as mmc's constant folding does.
+  auto divide{[&](llvm::StringRef what, bool floor, bool remainder) {
+    mlir::Value a{in[0]}, b{in[1]};
+    merk::ThrowIfOp::create(builder_, loc, equal(b, 0),
+        DomainError(module, what, "division by zero"));
+    if (isUnsigned) {
+      return remainder ? mlir::Value{arith::RemUIOp::create(builder_, loc, a, b)}
+                       : mlir::Value{arith::DivUIOp::create(builder_, loc, a, b)};
+    }
+    mlir::Value minusOne{equal(b, -1)};
+    mlir::Value divisor{select(minusOne, constant(1), b)};
+    mlir::Value q{arith::DivSIOp::create(builder_, loc, a, divisor)};
+    mlir::Value r{arith::RemSIOp::create(builder_, loc, a, divisor)};
+    q = select(minusOne, arith::SubIOp::create(builder_, loc, constant(0), a), q);
+    r = select(minusOne, constant(0), r);
+    if (floor) {
+      // Toward minus infinity: one less where the remainder is not 0 and
+      // its sign is not the divisor's.
+      mlir::Value nonzero{arith::CmpIOp::create(
+          builder_, loc, arith::CmpIPredicate::ne, r, constant(0))};
+      mlir::Value signs{arith::CmpIOp::create(builder_, loc,
+          arith::CmpIPredicate::slt, arith::XOrIOp::create(builder_, loc, r, b),
+          constant(0))};
+      mlir::Value adjust{arith::AndIOp::create(builder_, loc, nonzero, signs)};
+      q = select(adjust, arith::SubIOp::create(builder_, loc, q, constant(1)), q);
+      r = select(adjust, arith::AddIOp::create(builder_, loc, r, b), r);
+    }
+    return remainder ? r : q;
+  }};
+  // The shift amount is an int; outside 0 to the width it is an error,
+  // unless the shift is unchecked.
+  auto shift{[&](bool left, bool checked, llvm::StringRef what) {
+    mlir::Value amount{in[1]};
+    auto amountType{mlir::cast<mlir::IntegerType>(amount.getType())};
+    if (checked) {
+      mlir::Value out{arith::CmpIOp::create(builder_, loc,
+          arith::CmpIPredicate::uge, amount,
+          IntegerConstant(amountType, bits, loc))};
+      merk::ThrowIfOp::create(builder_, loc, out,
+          DomainError(module, what, "second operand is out of range"));
+    }
+    if (amountType.getWidth() > bits) {
+      amount = arith::TruncIOp::create(builder_, loc, type, amount);
+    } else if (amountType.getWidth() < bits) {
+      amount = arith::ExtUIOp::create(builder_, loc, type, amount);
+    }
+    if (left) {
+      return mlir::Value{arith::ShLIOp::create(builder_, loc, in[0], amount)};
+    }
+    return isUnsigned
+        ? mlir::Value{arith::ShRUIOp::create(builder_, loc, in[0], amount)}
+        : mlir::Value{arith::ShRSIOp::create(builder_, loc, in[0], amount)};
+  }};
+  if (in.size() == 2) {
+    if (name == "+" || name == "plus") {
+      result = arith::AddIOp::create(builder_, loc, in[0], in[1]);
+    } else if (name == "-" || name == "minus") {
+      result = arith::SubIOp::create(builder_, loc, in[0], in[1]);
+    } else if (name == "*" || name == "times") {
+      result = arith::MulIOp::create(builder_, loc, in[0], in[1]);
+    } else if (name == "//" || name == "/") {
+      result = divide("\\'//\\'", false, false);
+    } else if (name == "rem") {
+      result = divide("rem", false, true);
+    } else if (name == "div") {
+      result = divide("\\'//\\'", true, false);
+    } else if (name == "mod") {
+      result = divide("\\'//\\'", true, true);
+    } else if (name == "unchecked_quotient") {
+      result = isUnsigned
+          ? mlir::Value{arith::DivUIOp::create(builder_, loc, in[0], in[1])}
+          : mlir::Value{arith::DivSIOp::create(builder_, loc, in[0], in[1])};
+    } else if (name == "unchecked_rem") {
+      result = isUnsigned
+          ? mlir::Value{arith::RemUIOp::create(builder_, loc, in[0], in[1])}
+          : mlir::Value{arith::RemSIOp::create(builder_, loc, in[0], in[1])};
+    } else if (name == "<<") {
+      result = shift(true, true, "(<<)");
+    } else if (name == ">>") {
+      result = shift(false, true, "(>>)");
+    } else if (name == "unchecked_left_shift") {
+      result = shift(true, false, "");
+    } else if (name == "unchecked_right_shift") {
+      result = shift(false, false, "");
+    } else if (name == "/\\") {
+      result = arith::AndIOp::create(builder_, loc, in[0], in[1]);
+    } else if (name == "\\/") {
+      result = arith::OrIOp::create(builder_, loc, in[0], in[1]);
+    } else if (name == "xor") {
+      result = arith::XOrIOp::create(builder_, loc, in[0], in[1]);
+    } else if (name == "min") {
+      result = isUnsigned
+          ? mlir::Value{arith::MinUIOp::create(builder_, loc, in[0], in[1])}
+          : mlir::Value{arith::MinSIOp::create(builder_, loc, in[0], in[1])};
+    } else if (name == "max") {
+      result = isUnsigned
+          ? mlir::Value{arith::MaxUIOp::create(builder_, loc, in[0], in[1])}
+          : mlir::Value{arith::MaxSIOp::create(builder_, loc, in[0], in[1])};
+    } else {
+      return other();
+    }
+  } else if (in.size() == 1 && (name == "-" || name == "+")) {
+    result = name == "+"
+        ? in[0]
+        : mlir::Value{arith::SubIOp::create(builder_, loc, constant(0), in[0])};
+  } else if (in.size() == 1 && !isUnsigned &&
+      (name == "unchecked_abs" || name == "nabs")) {
+    // nabs is minus the absolute value, which cannot overflow.
+    mlir::Value negative{arith::CmpIOp::create(
+        builder_, loc, arith::CmpIPredicate::slt, in[0], constant(0))};
+    mlir::Value negated{arith::SubIOp::create(builder_, loc, constant(0), in[0])};
+    result = name == "nabs" ? select(negative, in[0], negated)
+                            : select(negative, negated, in[0]);
+  } else if (in.size() == 1 && name == "\\") {
+    result = arith::XOrIOp::create(builder_, loc, in[0], constant(-1));
+  } else if (in.size() == 1 && name == "abs" && !isUnsigned) {
+    // mmc: "int.abs: abs(min_int) would overflow".
+    mlir::Value least{arith::ConstantOp::create(builder_, loc,
+        builder_.getIntegerAttr(type, llvm::APInt::getSignedMinValue(bits)))};
+    mlir::Value overflows{arith::CmpIOp::create(
+        builder_, loc, arith::CmpIPredicate::eq, in[0], least)};
+    merk::ThrowIfOp::create(builder_, loc, overflows,
+        ("Software Error: " + module + ".abs: abs(min_" + module +
+            ") would overflow")
+            .str());
+    mlir::Value negative{arith::CmpIOp::create(
+        builder_, loc, arith::CmpIPredicate::slt, in[0], constant(0))};
+    result = select(negative,
+        arith::SubIOp::create(builder_, loc, constant(0), in[0]), in[0]);
+  } else {
+    return other();
+  }
+  values_[output] = result;
+  return true;
 }
 
 void MerkGenerator::GenerateBody(const ProcedureBody &body) {
@@ -622,6 +1282,9 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body) {
     proc.setPrivate();
     return;
   }
+  if (Terminated()) {
+    return; // it cannot succeed
+  }
   llvm::SmallVector<mlir::Value> results;
   for (BodyVar var : outputs) {
     results.push_back(ValueOf(var));
@@ -630,7 +1293,7 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body) {
 }
 
 mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
-  context_.loadDialect<merk::MerkDialect>();
+  context_.loadDialect<merk::MerkDialect, mlir::arith::ArithDialect>();
   mlir::OwningOpRef<mlir::ModuleOp> owned{
       mlir::ModuleOp::create(builder_.getUnknownLoc(), moduleName_)};
   module_ = *owned;

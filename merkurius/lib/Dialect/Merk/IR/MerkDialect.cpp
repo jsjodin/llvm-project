@@ -81,6 +81,9 @@ void ProcOp::print(mlir::OpAsmPrinter &p) {
 
 llvm::LogicalResult SucceedOp::verify() {
   ProcOp proc{(*this)->getParentOfType<ProcOp>()};
+  if (!proc) {
+    return emitOpError("is not in a procedure");
+  }
   llvm::ArrayRef<mlir::Type> results{proc.getResultTypes()};
   if (getOutputs().size() != results.size()) {
     return emitOpError("has ")
@@ -109,6 +112,32 @@ llvm::LogicalResult ConstantOp::verify() {
           ? !mlir::isa<mlir::FloatAttr>(getValue())
           : true) {
     return emitOpError("is not an integer, float or string constant");
+  }
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
+// SwitchOp
+//===----------------------------------------------------------------------===//
+
+llvm::LogicalResult SwitchOp::verify() {
+  if (getCases().size() != getCaseRegions().size()) {
+    return emitOpError("has ")
+        << getCases().size() << " cases but " << getCaseRegions().size()
+        << " regions";
+  }
+  for (mlir::Attribute c : getCases()) {
+    auto constants{mlir::dyn_cast<mlir::ArrayAttr>(c)};
+    if (!constants || constants.empty()) {
+      return emitOpError("has a case that is not a list of constants");
+    }
+    for (mlir::Attribute constant : constants) {
+      auto integer{mlir::dyn_cast<mlir::IntegerAttr>(constant)};
+      if (!integer || integer.getType() != getValue().getType()) {
+        return emitOpError("has a case constant that is not of type ")
+            << getValue().getType();
+      }
+    }
   }
   return mlir::success();
 }
