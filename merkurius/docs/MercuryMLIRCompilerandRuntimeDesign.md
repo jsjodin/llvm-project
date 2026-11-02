@@ -1209,6 +1209,8 @@ for_each_device(D, ...) :-
 
 **Checked by the compiler,** after type and mode checking: every variable that crosses the boundary has a monomorphic type that can be mapped, or the error names it and its type, as in "`Xs` has type `list(float)`, which cannot be mapped to a device". The goal must also satisfy the rules for a parallel loop: `det`, pure, no `io`, and no allocation.
 
+**No run-time dispatch on the device.** After specialization, a generic `unify` or `compare`, or a closure call whose callee is not known, left in a target region's goal or in a procedure it calls, is an error that names the goal: device code does not depend on run-time type dispatch or function pointers. A polymorphic procedure called at known types is fine, since specialization gives it a clone for them (Optimizations, "What polymorphism costs"). Outside target regions the same goals in a `%$omp` loop are only a remark.
+
 **Open question:** `array2d`, which is flat too, with sections of rows or blocks.
 
 ### Sendability
@@ -1869,7 +1871,7 @@ Most general-purpose optimization comes from LLVM. The Mercury-specific work tha
 | Standard pipeline: inlining, CSE, constant propagation, LICM, vectorization | MLIR canonicalization, LLVM | Comes from upstream | Required |
 | Last-call-modulo-constructors | `merk` to `mrt` | Destination passing turns list-building recursion into loops; on by default | High |
 | Higher-order specialization | `merk` | Closures become direct calls. In mmc this turned `fold_up` into a local loop calling the body directly | High |
-| Type specialization | `merk` | Removes `type_info` passing and boxing; automatic, plus the `type_spec` pragma | High |
+| Type specialization | `merk` | Removes `type_info` passing and boxing; automatic at `-O2`, plus the `type_spec` pragma (below) | High |
 | Intermodule inlining and specialization | Interface files | Bodies of small exported procedures travel in the optimization section | High |
 | Parallel loop formation | `merk` | From `%$omp` on `fold_up`, array iterators and counted recursion | High |
 | Switch optimization | `merk`, `cf` | Jump tables, lookup tables, string switches | Medium |
@@ -1879,6 +1881,31 @@ Most general-purpose optimization comes from LLVM. The Mercury-specific work tha
 | Structure reuse (compile-time GC) | `merk` | Reuse dead cells in place, after Mazur's analysis; off by default in mmc | Later |
 | Move instead of copy on send | `merk`, runtime | Messages passed in a `di` mode skip the deep copy | Later |
 | Remembered scan position in selective receive | Runtime | Avoids rescanning old messages when waiting for one reply | Later |
+
+### What polymorphism costs
+
+The same membership test was written five ways and run with mmc 22.01.9 (`hlc.gc`): a 1,000-element `list(int)` searched 200,000 times for a missing value, best of five runs. A 1,000,000-element list searched 200 times showed the same pattern, 0.41 s against 1.22 s.
+
+| Version | Time |
+| --- | --- |
+| Monomorphic, `int` only | 0.32 s |
+| Polymorphic with `pragma type_spec(T = int)` | 0.32 s, the same code as the `int` version |
+| Type class: a method call through a dictionary | 0.32 s |
+| Higher-order: a closure call for each element | 0.32 s |
+| Polymorphic, `X = Y` on `T` | 1.00 s |
+
+- **Passing a `type_info` is nearly free:** one more argument, in a register.
+- **Indirect calls are cheap in such a loop.** Every call goes to the same target, so branch prediction handles it, and the loop waits on loading the next cell anyway. What they cost is inlining and vectorization, which matter in numeric loops.
+- **The 3× comes from generic operations.** In the polymorphic version `X = Y` is a call to the builtin `unify` with the `type_info`, which inspects it to find how to compare. `compare`, used for every `map` and `set` key, hashing and deep copy work the same way, and so do `send`'s deep copy and the wire format, which walk a message by its type.
+
+Two rules follow.
+
+- **Specialization is automatic.** At its default options mmc did not specialize the polymorphic version; it needed the `type_spec` pragma. At `-O2`, when a call passes a `type_info` or `typeclass_info` known at compile time, merkc clones the callee for that type, within a module and across modules through the optimization section of interface files: C++ templates, with the compiler choosing the instances. Polymorphism analysis already finds these calls, those whose `type_info`s and `typeclass_info`s are all constants and cells of constants (Semantic analysis, "Polymorphism analysis"). A user who cares about speed then writes ordinary polymorphic code, and the pragma stays for a type the compiler cannot see, such as one a caller in another program uses.
+- **Failures are visible.** If a `%$omp` loop still contains a generic `unify`, a generic `compare` or a closure call that specialization did not resolve, merkc emits a remark naming it, as Clang's `-Rpass-missed` does. Inside a target region it is an error (Language extensions, "Target regions").
+
+Some code stays dynamic: existential types, such as the generic dispatchers, `univ`, and data structures that store closures. That is the same as virtual calls and `std::function` in C++, and under the cost rule only code that uses those features pays for them.
+
+**For later:** packed arrays, such as `array(int8)`, or `array(float32)` if that type is added, would make polymorphic code over `array(T)` read the element size from the `type_info`. Specialization removes that cost in hot code too.
 
 ## Standard library, compatibility and testing
 
