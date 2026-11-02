@@ -1,0 +1,12 @@
+# Random modules like those of random-unique-1.test, whose value is an
+# array, updated by array.set, made by array.init and read by
+# array.lookup (generate-unique-programs.py --array). compare-switches.py
+# runs merkc with -fmmc-uniqueness, which loads the manual's array stub,
+# whose arrays are `ground` as in mmc: merkc must report the arrays used
+# after they are clobbered, and its other errors, at the same lines as
+# mmc.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-unique-programs.py --array --seed 501 --count 40 %t
+# RUN: %compare-switches --determinism %t/*.m
