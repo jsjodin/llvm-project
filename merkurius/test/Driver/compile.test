@@ -1,10 +1,11 @@
 Without -E, -S or -c, the driver compiles each module to a temporary object
-file and links the objects with the runtime library, through Clang.
+file and links the objects with the compiled standard library, the runtime
+library and C's maths library, through Clang.
 
 RUN: merkc -### -O2 --target=x86_64-unknown-linux-gnu %S/Inputs/empty-main.m -o prog 2>&1 \
 RUN:   | FileCheck %s --check-prefix=LINK
 LINK: "-fc1" "-emit-obj" "-triple" "x86_64-unknown-linux-gnu" "-O2" "-o" "[[OBJ:[^"]*empty-main-[^"]*\.o]]" "{{[^"]*}}empty-main.m"{{$}}
-LINK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "--target=x86_64-unknown-linux-gnu" "-o" "prog" "[[OBJ]]" "-L{{[^"]*}}lib" "-lmerkrt"{{$}}
+LINK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "--target=x86_64-unknown-linux-gnu" "-o" "prog" "[[OBJ]]" "-L{{[^"]*}}lib" "-lmerkstd" "-lmerkrt" "-lm"{{$}}
 
 -c and -S stop after the object file and the assembly.
 RUN: merkc -### -c %S/Inputs/empty-main.m 2>&1 | FileCheck %s --check-prefix=C
@@ -16,7 +17,7 @@ S: "-fc1" "-S" "-o" "out.s" "{{[^"]*}}empty-main.m"{{$}}
 Object files on the command line are linked.
 RUN: merkc -### a.o b.o 2>&1 | FileCheck %s --check-prefix=OBJECTS
 OBJECTS-NOT: -fc1
-OBJECTS: "-o" "a.out" "a.o" "b.o" "-L{{[^"]*}}lib" "-lmerkrt"
+OBJECTS: "-o" "a.out" "a.o" "b.o" "-L{{[^"]*}}lib" "-lmerkstd" "-lmerkrt" "-lm"
 
 The program runs, and main succeeding is exit status 0.
 RUN: rm -rf %t && mkdir %t && cd %t

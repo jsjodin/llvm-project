@@ -85,15 +85,8 @@ static void addFrontendOptions(const InputArgList &args, Job &job) {
 // The program that links: Clang, beside merkc or else on the PATH (design
 // document, "Linking and offloading").
 static std::string findLinker(llvm::StringRef executable) {
-  llvm::SmallString<128> beside{llvm::sys::path::parent_path(executable)};
-  llvm::sys::path::append(beside, "clang");
-  if (llvm::sys::fs::can_execute(beside)) {
-    return beside.str().str();
-  }
-  if (llvm::ErrorOr<std::string> found{llvm::sys::findProgramByName("clang")}) {
-    return *found;
-  }
-  return "clang";
+  std::string clang{findClang(executable)};
+  return clang.empty() ? "clang" : clang;
 }
 
 // The jobs for the command line, or false after reporting an error: with
@@ -158,8 +151,9 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
     jobs.push_back(std::move(job));
   }
   if (ok && link) {
-    // The runtime library is in lib beside bin/merkc, in the build
-    // directory and the installation alike.
+    // The compiled standard library and the runtime library are in lib
+    // beside bin/merkc, in the build directory and the installation alike;
+    // the standard library's foreign code may call C's maths library.
     llvm::SmallString<128> libraryDir{llvm::sys::path::parent_path(
         llvm::sys::path::parent_path(executable))};
     llvm::sys::path::append(libraryDir, "lib");
@@ -171,7 +165,9 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
     job.push_back(output.empty() ? "a.out" : output.str());
     job.insert(job.end(), objects.begin(), objects.end());
     job.push_back("-L" + libraryDir.str().str());
+    job.push_back("-lmerkstd");
     job.push_back("-lmerkrt");
+    job.push_back("-lm");
     jobs.push_back(std::move(job));
   }
   return ok;

@@ -43,6 +43,10 @@ std::optional<llvm::opt::InputArgList> parseArgs(
 // Reports an error to standard error, prefixed with "merkc: error: ".
 void reportError(const llvm::Twine &message);
 
+// Clang, which links programs and compiles foreign code: the one beside
+// merkc's executable, else the one on the PATH; empty if there is none.
+std::string findClang(llvm::StringRef executable);
+
 } // namespace merkurius::options
 
 #endif // MERKURIUS_DRIVER_OPTIONS_H_

@@ -1,7 +1,7 @@
-% A declaration-only stub of the standard library module io, for name
-% resolution until the library is written. The declarations are those of
-% the library reference manual (22.01), less those that need modules not
-% stubbed yet; see README.md.
+% A stub of the standard library module io, for name resolution until the
+% library is written, with its output predicates implemented. The
+% declarations are those of the library reference manual (22.01), less
+% those that need modules not stubbed yet; see README.md.
 
 :- module io.
 :- interface.
@@ -115,3 +115,86 @@
 :- func make_io_error(string) = io.error.
 :- func error_message(io.error) = string.
 :- pred error_message(io.error::in, string::out) is det.
+
+:- implementation.
+
+% The predicates implemented so far write to the standard output with C's
+% stdio, which the runtime flushes when the program exits.
+
+:- pragma foreign_decl("C", local, "
+#include <stdio.h>
+#include <inttypes.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+").
+
+:- pragma foreign_proc("C",
+    write_string(S::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    fputs(S, stdout);
+").
+
+:- pragma foreign_proc("C",
+    nl(_IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    putc('\\n', stdout);
+").
+
+:- pragma foreign_proc("C",
+    write_int(N::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    printf(\"%\" PRIdPTR, N);
+").
+
+% A character is written in UTF-8.
+:- pragma foreign_proc("C",
+    write_char(C::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    uint32_t c = (uint32_t) C;
+    if (c < 0x80) {
+        putc((int) c, stdout);
+    } else if (c < 0x800) {
+        putc(0xC0 | (c >> 6), stdout);
+        putc(0x80 | (c & 0x3F), stdout);
+    } else if (c < 0x10000) {
+        putc(0xE0 | (c >> 12), stdout);
+        putc(0x80 | ((c >> 6) & 0x3F), stdout);
+        putc(0x80 | (c & 0x3F), stdout);
+    } else {
+        putc(0xF0 | (c >> 18), stdout);
+        putc(0x80 | ((c >> 12) & 0x3F), stdout);
+        putc(0x80 | ((c >> 6) & 0x3F), stdout);
+        putc(0x80 | (c & 0x3F), stdout);
+    }
+").
+
+% As mmc writes a float: with the fewest significant digits, from 15 to 17,
+% that read back as the same float, and with .0 if that has no fraction or
+% exponent.
+:- pragma foreign_proc("C",
+    write_float(F::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    char buffer[64];
+    if (isnan(F)) {
+        strcpy(buffer, \"nan\");
+    } else if (isinf(F)) {
+        strcpy(buffer, F < 0 ? \"-infinity\" : \"infinity\");
+    } else {
+        for (int precision = 15; precision <= 17; ++precision) {
+            snprintf(buffer, sizeof buffer, \"%.*g\", precision, F);
+            if (strtod(buffer, NULL) == F) {
+                break;
+            }
+        }
+        if (strpbrk(buffer, \".e\") == NULL) {
+            strcat(buffer, \".0\");
+        }
+    }
+    fputs(buffer, stdout);
+").

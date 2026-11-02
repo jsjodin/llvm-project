@@ -163,6 +163,12 @@ public:
   const std::deque<Procedure> &inferred() const { return inferred_; }
   // The module's instance methods, by instance and method, in each mode.
   const std::deque<MethodModes> &methods() const { return methods_; }
+  // The foreign_proc for C of one of the module's procedures, if it has
+  // one; code generation then uses it instead of the clauses.
+  const parser::ForeignProcPragma *ForeignProcOf(
+      const Procedure &procedure) const {
+    return foreignProcs_.lookup(&procedure);
+  }
 
 private:
   friend class ModeChecker;
@@ -180,6 +186,8 @@ private:
   llvm::DenseMap<const Procedure *, Unchecked> unchecked_;
   llvm::DenseSet<const Procedure *> errors_;
   std::deque<MethodModes> methods_;
+  llvm::DenseMap<const Procedure *, const parser::ForeignProcPragma *>
+      foreignProcs_;
   // The predicates without a `:- pred` declaration, whose modes are
   // inferred from their calls, and the procedures inferred for them.
   llvm::DenseSet<const Symbol *> inferable_;

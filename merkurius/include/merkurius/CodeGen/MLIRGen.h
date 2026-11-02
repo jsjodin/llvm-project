@@ -34,12 +34,18 @@ namespace merkurius::codegen {
 // `int.+` is `int.$2b_f2_0`.
 std::string MangledName(const semantics::Procedure &);
 
+// The module attribute that holds a module's foreign code: a C file of the
+// module's foreign_decl and foreign_code for C, and a function around the
+// code of each of its foreign_procs for C, which merk.foreign_call calls.
+inline constexpr llvm::StringLiteral kForeignCodeAttrName{"merk.foreign_code"};
+
 // The merk module for `module`'s procedures, with the target recorded on
 // it. A construct that code generation does not handle yet is reported as
 // not yet implemented, and its procedure left out.
 mlir::OwningOpRef<mlir::ModuleOp> GenerateMerk(mlir::MLIRContext &,
-    llvm::StringRef module, const parser::TokenSequence &,
-    const parser::AllSources &, semantics::ModeChecking &,
+    llvm::StringRef module, const parser::ParseTree &,
+    const parser::TokenSequence &, const parser::AllSources &,
+    const semantics::TypeChecking &, semantics::ModeChecking &,
     const semantics::DeterminismChecking &,
     const semantics::PolymorphismAnalysis &, const TargetInfo &,
     parser::Messages &);
