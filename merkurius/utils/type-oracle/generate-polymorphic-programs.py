@@ -35,8 +35,14 @@ existentially typed predicate has one clause, since mmc rejects one with
 several that has an existential constraint (see the design document's mmc
 bugs).
 
+With --closures, which goes with the others, a call is now and then made
+through a closure, with some of its arguments curried, P = p(A), P(B, O),
+or through a lambda expression whose body makes it,
+P = (pred(O::out) is det :- p(A, B, O)), P(O); methods' calls too, but
+not existentially typed callees', whose closures cannot be made.
+
 Usage: generate-polymorphic-programs.py [--classes] [--existentials]
-    [--seed N] [--count N] DIR
+    [--closures] [--seed N] [--count N] DIR
 """
 
 import argparse
@@ -175,8 +181,10 @@ LIBRARY = [
 
 
 class Body:
-    def __init__(self, rng, callees, own, env, classes=None, assumed=(), xtypes=()):
+    def __init__(self, rng, callees, own, env, classes=None, assumed=(), xtypes=(),
+                 closures=False):
         self.rng, self.callees, self.own = rng, callees, own
+        self.closures = closures
         self.classes, self.assumed = classes, list(assumed)
         self.xtypes = xtypes
         self.env = list(env)
@@ -379,6 +387,28 @@ class Body:
         return True
 
     def goal(self, callee, arguments, out):
+        if self.closures and not callee.existential and self.rng.random() < 0.4:
+            closure = "C%s" % self.fresh()[1:]
+            if self.rng.random() < 0.3:
+                # A lambda expression whose body makes the call.
+                result = "L%s" % closure[1:]
+                call = ("%s = %s(%s)" % (result, callee.name, ", ".join(arguments))
+                        if callee.func else
+                        "%s(%s)" % (callee.name, ", ".join(arguments + [result])))
+                self.goals.append("%s = (pred(%s::out) is det :- %s)" % (closure, result, call))
+                self.goals.append("%s(%s)" % (closure, out))
+                return
+            # A closure with the first k arguments curried, fewer than all
+            # of a function's.
+            k = self.rng.randint(0, len(arguments) - (1 if callee.func else 0))
+            curried, rest = arguments[:k], arguments[k:]
+            self.goals.append("%s = %s%s" % (closure, callee.name,
+                                             "(%s)" % ", ".join(curried) if curried else ""))
+            if callee.func:
+                self.goals.append("%s = %s(%s)" % (out, closure, ", ".join(rest)))
+            else:
+                self.goals.append("%s(%s)" % (closure, ", ".join(rest + [out])))
+            return
         if callee.func:
             self.goals.append("%s = %s(%s)" % (out, callee.name, ", ".join(arguments)))
         else:
@@ -494,7 +524,7 @@ def ground_instance(classes, cls):
     return next((t for t in GROUND if classes.entails(cls, [t], [])), None)
 
 
-def module(rng, name, with_classes=False, existentials=False):
+def module(rng, name, with_classes=False, existentials=False, closures=False):
     with_classes = with_classes or existentials
     classes, class_lines, methods = (make_classes(rng) if with_classes
                                      else (None, [], []))
@@ -574,11 +604,11 @@ def module(rng, name, with_classes=False, existentials=False):
             lines.append(":- %s%s." % (quantifiers, decl))
         else:
             lines.append(":- %s%s." % (decl, where))
-        lines.extend(clauses(rng, callee, callees, classes, xtypes))
+        lines.extend(clauses(rng, callee, callees, classes, xtypes, closures))
     return "\n".join(lines) + "\n"
 
 
-def clauses(rng, callee, callees, classes=None, xtypes=()):
+def clauses(rng, callee, callees, classes=None, xtypes=(), closures=False):
     names = ["A%d" % (i + 1) for i in range(len(callee.inputs))]
     own = [v for v in callee.own if v not in callee.void]
     lists = [i for i, t in enumerate(callee.inputs) if t[0] == "list"]
@@ -591,14 +621,15 @@ def clauses(rng, callee, callees, classes=None, xtypes=()):
             heads = list(names)
             heads[i] = pattern
             env = env + [(n, t) for j, (n, t) in enumerate(zip(names, callee.inputs)) if j != i]
-            out.append(clause(rng, callee, callees, own, heads, env, classes, xtypes))
+            out.append(clause(rng, callee, callees, own, heads, env, classes, xtypes,
+                              closures))
         return out
     env = list(zip(names, callee.inputs))
-    return [clause(rng, callee, callees, own, names, env, classes, xtypes)]
+    return [clause(rng, callee, callees, own, names, env, classes, xtypes, closures)]
 
 
-def clause(rng, callee, callees, own, heads, env, classes=None, xtypes=()):
-    body = Body(rng, callees, own, env, classes, callee.constraints, xtypes)
+def clause(rng, callee, callees, own, heads, env, classes=None, xtypes=(), closures=False):
+    body = Body(rng, callees, own, env, classes, callee.constraints, xtypes, closures)
     if xtypes or any(c.existential for c in callees):
         for _ in range(rng.randint(0, 2)):
             body.existential(1)
@@ -656,6 +687,8 @@ def main():
     parser.add_argument("--existentials", action="store_true",
                         help="add existentially typed predicates, functions and "
                         "constructors (implies --classes)")
+    parser.add_argument("--closures", action="store_true",
+                        help="make some calls through closures and lambda expressions")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--count", type=int, default=20)
     parser.add_argument("dir")
@@ -665,7 +698,7 @@ def main():
         rng = random.Random(args.seed * 100003 + i)
         name = "polymorphism_%d_%d" % (args.seed, i)
         with open(os.path.join(args.dir, name + ".m"), "w") as f:
-            f.write(module(rng, name, args.classes, args.existentials))
+            f.write(module(rng, name, args.classes, args.existentials, args.closures))
 
 
 if __name__ == "__main__":
