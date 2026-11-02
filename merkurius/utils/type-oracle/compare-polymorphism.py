@@ -340,7 +340,7 @@ def merkc_procedures(dump):
         if m:
             procedures[key][3].append(m.group(1))
             continue
-        m = re.match(r"^    \S+ (?:call|application|construct|deconstruct) "
+        m = re.match(r"^    \S+ (?:call|application|closure|construct|deconstruct) "
                      r"(?:(?:pred|func) )?(\S+|\S+'[^']*')/\d+: (.*)$", line)
         if m:
             procedures[key][2].append((m.group(1), split_arguments(m.group(2))))

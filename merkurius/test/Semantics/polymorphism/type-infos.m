@@ -69,8 +69,11 @@
 % CHECK-NEXT: hidden arguments: T
 % CHECK-NEXT: call pred type_infos.unused/2: T (argument)
 :- pred closure(int::out) is det.
+% A closure passes what a call in its lambda expression would, as mmc
+% makes it; nothing determines eqv's T.
 % CHECK-LABEL: pred type_infos.closure/1 mode 0:
-% CHECK-NEXT: not analysed: Closure
+% CHECK-NEXT: closure pred type_infos.eqv/2: void (constant)
+% CHECK-NEXT: call pred type_infos.unused/2: pred(pair.pair(void, void), pair.pair(void, void)) (constant)
 :- pred inferred(int::out) is det.
 % CHECK-LABEL: pred type_infos.inferred/1 mode 0:
 % CHECK-NEXT: call pred type_infos.q/3: int (constant), string (constant)

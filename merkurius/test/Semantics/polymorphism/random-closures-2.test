@@ -1,0 +1,10 @@
+# Random modules whose calls are now and then made through closures, with
+# some of their arguments curried, or through lambda expressions whose
+# bodies make them (generate-polymorphic-programs.py --closures --existentials).
+# Each closure must pass the type_infos and typeclass_infos that mmc's
+# lambda expression for it does.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/type-oracle/generate-polymorphic-programs.py --closures --existentials --seed 37 --count 40 %t
+# RUN: %compare-polymorphism %t/*.m
