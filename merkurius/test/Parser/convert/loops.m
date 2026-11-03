@@ -8,10 +8,7 @@
 % RUN: not merkc -fc1 -fdebug-dump-parse-tree-no-sema %s 2>&1 \
 % RUN:   | FileCheck %s --check-prefix=PLAIN
 % PLAIN: loops.m:{{[0-9]+}}:{{[0-9]+}}: error: expected an operator or ')', but found 'do'
-% Desugaring does not take loops yet.
-% RUN: not merkc -fc1 -fdo-loops -fopenmp -fdebug-dump-semantic-form %s 2>&1 \
-% RUN:   | FileCheck %s --check-prefix=DESUGAR
-% DESUGAR: loops.m:{{[0-9]+}}:{{[0-9]+}}: error: loops are not desugared yet
+% Semantics/desugar/loops.m desugars them.
 
 :- module loops.
 :- interface.

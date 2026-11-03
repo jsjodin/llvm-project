@@ -26,6 +26,11 @@
 // outside lambda expressions only; a goal beside the lambda expression then
 // sees the variables it captures as occurrences in it.
 //
+// A loop's body is quantified as a lambda expression's is, with its
+// iterators' and its threaded state variables' variables as the arguments:
+// desugaring has made the variables that occur only in the loop its own,
+// and they are local to it.
+//
 // The variables that some quantifies are new ones, apart from any of the
 // same name outside the scope; at the top of an if-then-else's condition,
 // some quantifies over the condition and the then part (manual, "Goals").
@@ -68,6 +73,19 @@ void Add(Set &set, llvm::ArrayRef<VarId> vars) {
 
 unsigned GoalNumber(const Goal &goal) {
   return std::visit([](const auto *x) { return x->number; }, goal);
+}
+
+// The variables of a loop's iterators and of its threaded state
+// variables, which occur in the loop outside its body.
+llvm::SmallVector<VarId, 8> LoopVars(const Loop &loop) {
+  llvm::SmallVector<VarId, 8> vars;
+  for (const LoopIterator &iterator : loop.iterators) {
+    llvm::append_range(vars, iterator.arguments);
+  }
+  for (const LoopState &state : loop.states) {
+    vars.append({state.before, state.in, state.out, state.after});
+  }
+  return vars;
 }
 
 // The quantifier at the top of an if-then-else's condition, if any.
@@ -322,6 +340,10 @@ void Quantifier::Collect(const Goal &goal) {
               CollectInto(alternative.goal, all, direct);
             }
           },
+          [&](const Loop *loop) {
+            both(LoopVars(*loop));
+            CollectInto(loop->body, all, direct);
+          },
       },
       goal);
   all_[GoalNumber(goal)] = std::move(all);
@@ -475,6 +497,15 @@ void Quantifier::Capture(const Goal &goal, const Set &outside) {
               Add(inner, {alternative.innerInitial, alternative.innerFinal});
               into(alternative.goal, inner);
             }
+          },
+          // The iterators' and the states' variables occur outside the
+          // body, as a lambda expression's arguments do.
+          [&](const Loop *loop) {
+            llvm::SmallVector<VarId, 8> vars{LoopVars(*loop)};
+            leaf(vars);
+            Set out{outside};
+            Add(out, vars);
+            into(loop->body, out);
           },
       },
       goal);
@@ -700,6 +731,28 @@ Goal Quantifier::Rebuild(const Goal &goal, const Set &outside) {
             }
             return Make<Atomic>(atomic->tokens, atomic->number, initial, final,
                 vars, Save(llvm::ArrayRef<AtomicAlternative>{alternatives}));
+          },
+          // The variables that occur only in the loop are local to it.
+          [&](const Loop *loop) -> Goal {
+            Local scope{Begin(all_[loop->number], outside)};
+            llvm::SmallVector<LoopIterator, 2> iterators;
+            for (const LoopIterator &iterator : loop->iterators) {
+              LoopIterator mapped{iterator};
+              mapped.arguments = SaveMapped(iterator.arguments);
+              iterators.push_back(mapped);
+            }
+            llvm::SmallVector<LoopState, 2> states;
+            for (const LoopState &state : loop->states) {
+              states.push_back(LoopState{MapVar(state.before),
+                  MapVar(state.in), MapVar(state.out), MapVar(state.after)});
+            }
+            Set body{outside};
+            Add(body, MapVars(LoopVars(*loop)));
+            Goal newBody{Rebuild(loop->body, body)};
+            End(std::move(scope));
+            return Make<Loop>(loop->tokens, loop->number,
+                Save(llvm::ArrayRef<LoopIterator>{iterators}),
+                Save(llvm::ArrayRef<LoopState>{states}), newBody);
           },
       },
       goal);
