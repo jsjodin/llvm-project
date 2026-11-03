@@ -100,6 +100,47 @@ llvm::LogicalResult SucceedOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// Arrays
+//===----------------------------------------------------------------------===//
+
+// That a value is of an array's element type.
+static llvm::LogicalResult VerifyElement(
+    mlir::Operation *op, mlir::Value array, mlir::Type type, llvm::StringRef what) {
+  mlir::Type element{mlir::cast<ArrayType>(array.getType()).getElement()};
+  if (type != element) {
+    return op->emitOpError() << what << " of type " << type
+                             << " is not of the array's element type " << element;
+  }
+  return mlir::success();
+}
+
+llvm::LogicalResult ArrayNewOp::verify() {
+  if (!getInit()) {
+    return mlir::success();
+  }
+  return VerifyElement(*this, getArray(), getInit().getType(), "init");
+}
+
+llvm::LogicalResult ArrayGetOp::verify() {
+  return VerifyElement(*this, getArray(), getElement().getType(), "result");
+}
+
+llvm::LogicalResult ArraySetOp::verify() {
+  return VerifyElement(*this, getArray(), getElement().getType(), "element");
+}
+
+llvm::LogicalResult ArrayFillOp::verify() {
+  return VerifyElement(*this, getArray(), getElement().getType(), "element");
+}
+
+llvm::LogicalResult ArrayResizeOp::verify() {
+  if (!getInit()) {
+    return mlir::success();
+  }
+  return VerifyElement(*this, getArray(), getInit().getType(), "init");
+}
+
+//===----------------------------------------------------------------------===//
 // ConstantOp
 //===----------------------------------------------------------------------===//
 

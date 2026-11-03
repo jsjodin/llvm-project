@@ -40,6 +40,17 @@ def Merk_StringType : TypeDef<Merk_Dialect, "String"> {
   let summary = "a Mercury string";
 }
 
+// A Mercury array, array(T): a pointer to its size, a word, followed by its
+// elements, a word each, so that one layout serves every element type and
+// the elements are the contiguous buffer an OpenMP map maps (design
+// document, "Type representation").
+def Merk_ArrayType : TypeDef<Merk_Dialect, "Array"> {
+  let mnemonic = "array";
+  let summary = "a Mercury array";
+  let parameters = (ins "mlir::Type":$element);
+  let assemblyFormat = "`<` $element `>`";
+}
+
 // A procedure's determinism (reference manual, "Determinism categories").
 def Merk_Determinism : I32EnumAttr<"Determinism", "a Mercury determinism", [
   I32EnumAttrCase<"Det", 0, "det">,

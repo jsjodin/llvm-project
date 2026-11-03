@@ -238,6 +238,11 @@ private:
   // operations; false if it is to be called instead.
   bool Builtin(const Body &, const Procedure &,
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
+  // A call of a predicate or function of the library's array module, which
+  // code generation has built in as merk's array operations; false if it
+  // is to be called instead.
+  bool ArrayBuiltin(const Body &, const Procedure &,
+      llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   // X = Y, or X = c, with both bound: a test.
   void Test(const Body &, mlir::Value, mlir::Value);
   void IfThenElse(const Body &, const ProcedureBody &);
@@ -344,6 +349,18 @@ std::optional<Represented> MerkGenerator::Represent(
   // "Calling convention").
   if (constructor.module == "io" && name == "state") {
     return Represented{nullptr, /*dummy=*/true};
+  }
+  // An array of elements a word wide at most, each in a word (design
+  // document, "Type representation").
+  if (constructor.module == "array" && name == "array" &&
+      type->arguments.size() == 1) {
+    std::optional<Represented> element{Represent(type->arguments[0])};
+    if (!element || element->dummy ||
+        (!mlir::isa<merk::StringType, merk::ArrayType>(element->type) &&
+            element->type.getIntOrFloatBitWidth() > target_.WordBits())) {
+      return std::nullopt;
+    }
+    return Represented{merk::ArrayType::get(&context_, element->type)};
   }
   return std::nullopt;
 }
@@ -918,6 +935,205 @@ void MerkGenerator::Not(const Body &goal, const ProcedureBody &body) {
 
 // The library's message for an exception, as mmc writes the exception: a
 // domain_error of a name of the operation, as int.'//' or int.(<<).
+// The library's software_error exception for a predicate, as mmc writes it.
+static std::string SoftwareError(llvm::StringRef pred, unsigned arity,
+    llvm::StringRef problem) {
+  return ("Software Error: predicate `array." + pred + "'/" +
+      llvm::Twine(arity) + ": Unexpected: " + problem)
+      .str();
+}
+
+bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
+  const semantics::Symbol &symbol{*callee.symbol};
+  llvm::StringRef name{symbol.name};
+  bool function{symbol.kind == semantics::SymbolKind::Function};
+  // The inputs and the outputs, each in order.
+  llvm::SmallVector<mlir::Value> in;
+  llvm::SmallVector<BodyVar> out;
+  for (auto [argument, mode] : llvm::zip(arguments, callee.modes)) {
+    if (IsOutput(mode)) {
+      out.push_back(argument);
+    } else if (mlir::Value value{ValueOf(argument)}) {
+      in.push_back(value);
+    } else {
+      return false;
+    }
+  }
+  auto other{[&] {
+    NotYet(Where(goal.tokens),
+        ("calls of array." + name + "/" + std::to_string(symbol.arity)).str());
+    return true;
+  }};
+  auto shape{[&](unsigned inputs, unsigned outputs) {
+    return in.size() == inputs && out.size() == outputs;
+  }};
+  mlir::Location loc{Location(goal.tokens)};
+  namespace arith = mlir::arith;
+  auto i64{builder_.getI64Type()};
+  auto constant{[&](std::int64_t value) {
+    return IntegerConstant(i64, value, loc);
+  }};
+  auto size{[&](mlir::Value array) -> mlir::Value {
+    return merk::ArraySizeOp::create(builder_, loc, i64, array);
+  }};
+  auto cmp{[&](arith::CmpIPredicate predicate, mlir::Value a, mlir::Value b) {
+    return arith::CmpIOp::create(builder_, loc, predicate, a, b);
+  }};
+  auto check{[&](mlir::Value array, mlir::Value index, llvm::StringRef what) {
+    merk::CheckIndexOp::create(builder_, loc, array, index, what);
+  }};
+  // As an unsigned comparison, a negative index is out of range too.
+  auto inBounds{[&](mlir::Value array, mlir::Value index) {
+    return cmp(arith::CmpIPredicate::ult, index, size(array));
+  }};
+  auto elementType{[](mlir::Value array) {
+    return mlir::cast<merk::ArrayType>(array.getType()).getElement();
+  }};
+  auto get{[&](mlir::Value array, mlir::Value index) -> mlir::Value {
+    return merk::ArrayGetOp::create(
+        builder_, loc, elementType(array), array, index);
+  }};
+  auto set{[&](mlir::Value array, mlir::Value index, mlir::Value element) {
+    return merk::ArraySetOp::create(
+        builder_, loc, array.getType(), array, index, element)
+        .getResult();
+  }};
+  auto give{[&](auto... results) {
+    mlir::Value values[]{results...};
+    for (auto [var, value] : llvm::zip(out, values)) {
+      values_[var] = value;
+    }
+    return true;
+  }};
+  auto throwIf{[&](mlir::Value flag, std::string exception) {
+    merk::ThrowIfOp::create(builder_, loc, flag, exception);
+  }};
+
+  if (name == "make_empty_array" && shape(0, 1)) {
+    // Its element type is its output's.
+    std::optional<Represented> array{Represent(body.vars[out[0]].type)};
+    if (!array) {
+      return other();
+    }
+    return give(merk::ArrayNewOp::create(
+        builder_, loc, array->type, constant(0), mlir::Value{}));
+  }
+  if (name == "init" && shape(2, 1)) {
+    throwIf(cmp(arith::CmpIPredicate::slt, in[0], constant(0)),
+        SoftwareError("init", 3, "negative size"));
+    return give(merk::ArrayNewOp::create(builder_, loc,
+        merk::ArrayType::get(&context_, in[1].getType()), in[0], in[1]));
+  }
+  if (name == "size" && shape(1, 1)) {
+    return give(size(in[0]));
+  }
+  if (name == "max" && shape(1, 1)) {
+    return give(arith::SubIOp::create(builder_, loc, size(in[0]), constant(1))
+            .getResult());
+  }
+  if (name == "min" && shape(1, 1)) {
+    return give(constant(0));
+  }
+  if (name == "bounds" && shape(1, 2)) {
+    return give(constant(0),
+        arith::SubIOp::create(builder_, loc, size(in[0]), constant(1)));
+  }
+  if (name == "in_bounds" && shape(2, 0)) {
+    merk::GuardOp::create(builder_, loc, inBounds(in[0], in[1]));
+    return true;
+  }
+  if (name == "is_empty" && shape(1, 0)) {
+    merk::GuardOp::create(
+        builder_, loc, cmp(arith::CmpIPredicate::eq, size(in[0]), constant(0)));
+    return true;
+  }
+  // lookup(A, I) and elem(I, A).
+  bool elem{name == "elem" || name == "unsafe_elem"};
+  if ((name == "lookup" || name == "unsafe_lookup" || elem) && shape(2, 1)) {
+    mlir::Value array{in[elem ? 1 : 0]}, index{in[elem ? 0 : 1]};
+    if (!name.starts_with("unsafe")) {
+      check(array, index, "array.lookup");
+    }
+    return give(get(array, index));
+  }
+  if (name == "semidet_lookup" && shape(2, 1)) {
+    merk::GuardOp::create(builder_, loc, inBounds(in[0], in[1]));
+    return give(get(in[0], in[1]));
+  }
+  // set(I, X, !A), set(A, I, X) and 'elem :='(I, A, X); slow_set's copy.
+  bool slow{name == "slow_set" || name == "semidet_slow_set"};
+  bool setElem{name == "elem :=" || name == "unsafe_elem :="};
+  if ((name == "set" || name == "unsafe_set" || name == "semidet_set" || slow ||
+          setElem) &&
+      shape(3, 1)) {
+    mlir::Value array, index, element;
+    if (setElem) {
+      std::tie(index, array, element) = std::tuple{in[0], in[1], in[2]};
+    } else if (function) {
+      std::tie(array, index, element) = std::tuple{in[0], in[1], in[2]};
+    } else {
+      std::tie(index, element, array) = std::tuple{in[0], in[1], in[2]};
+    }
+    if (name.starts_with("semidet")) {
+      merk::GuardOp::create(builder_, loc, inBounds(array, index));
+    } else if (!name.starts_with("unsafe")) {
+      check(array, index, "array.set");
+    }
+    if (slow) {
+      array = merk::ArrayCopyOp::create(builder_, loc, array.getType(), array);
+    }
+    return give(set(array, index, element));
+  }
+  if ((name == "swap" || name == "unsafe_swap") && shape(3, 1)) {
+    mlir::Value i{in[0]}, j{in[1]}, array{in[2]};
+    if (name == "swap") {
+      check(array, i, "first argument of array.swap");
+      check(array, j, "second argument of array.swap");
+    }
+    mlir::Value x{get(array, i)}, y{get(array, j)};
+    return give(set(set(array, i, y), j, x));
+  }
+  if (name == "fill" && shape(2, 1)) {
+    mlir::Value hi{
+        arith::SubIOp::create(builder_, loc, size(in[1]), constant(1))};
+    return give(merk::ArrayFillOp::create(
+        builder_, loc, in[1].getType(), in[1], constant(0), hi, in[0]));
+  }
+  if (name == "fill_range" && shape(4, 1)) {
+    mlir::Value element{in[0]}, lo{in[1]}, hi{in[2]}, array{in[3]};
+    throwIf(cmp(arith::CmpIPredicate::sgt, lo, hi),
+        SoftwareError("fill_range", 5, "empty range"));
+    check(array, lo, "second argument of fill_range");
+    check(array, hi, "third argument of fill_range");
+    return give(merk::ArrayFillOp::create(
+        builder_, loc, array.getType(), array, lo, hi, element));
+  }
+  if (name == "copy" && shape(1, 1)) {
+    return give(merk::ArrayCopyOp::create(builder_, loc, in[0].getType(), in[0]));
+  }
+  // resize(N, X, !A) and resize(A, N, X).
+  if (name == "resize" && shape(3, 1)) {
+    mlir::Value array{in[function ? 0 : 2]}, n{in[function ? 1 : 0]},
+        element{in[function ? 2 : 1]};
+    throwIf(cmp(arith::CmpIPredicate::slt, n, constant(0)),
+        SoftwareError("resize", 4, "cannot resize to a negative size"));
+    return give(merk::ArrayResizeOp::create(
+        builder_, loc, array.getType(), array, n, element));
+  }
+  // shrink(N, !A) and shrink(A, N).
+  if (name == "shrink" && shape(2, 1)) {
+    mlir::Value array{in[function ? 0 : 1]}, n{in[function ? 1 : 0]};
+    throwIf(cmp(arith::CmpIPredicate::sgt, n, size(array)),
+        SoftwareError("shrink", 3, "cannot shrink to a larger size"));
+    throwIf(cmp(arith::CmpIPredicate::slt, n, constant(0)),
+        SoftwareError("shrink", 3, "cannot shrink to a negative size"));
+    return give(merk::ArrayResizeOp::create(
+        builder_, loc, array.getType(), array, n, mlir::Value{}));
+  }
+  return other();
+}
+
 static std::string DomainError(llvm::StringRef module, llvm::StringRef what,
     llvm::StringRef problem) {
   return ("domain_error(\"" + module + "." + what + ": " + problem + "\")").str();
@@ -927,6 +1143,9 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
   const semantics::Symbol &symbol{*callee.symbol};
   llvm::StringRef module{symbol.module};
+  if (module == "array") {
+    return ArrayBuiltin(goal, callee, arguments, body);
+  }
   bool isFloat{module == "float"};
   bool isUnsigned{module.starts_with("uint")};
   bool isInteger{llvm::is_contained(

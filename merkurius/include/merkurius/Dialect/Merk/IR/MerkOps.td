@@ -172,6 +172,107 @@ def Merk_ForeignCallOp : Merk_Op<"foreign_call"> {
   }];
 }
 
+//===----------------------------------------------------------------------===//
+// Arrays, the library module array's predicates, which code generation
+// builds in. Those that update an array do so in place and give the same
+// array, since uniqueness checking has made sure its old version is dead;
+// the others allocate one. None checks its indices: merk.check_index does.
+//===----------------------------------------------------------------------===//
+
+def Merk_ArrayNewOp : Merk_Op<"array_new"> {
+  let summary = "allocate an array of a size, each element the same";
+  let description = [{
+    Without `init`, the elements are undefined: for an empty array.
+  }];
+  let arguments = (ins I64:$size, Optional<AnyType>:$init);
+  let results = (outs Merk_ArrayType:$array);
+  let assemblyFormat = "$size (`,` $init^ `:` type($init))? attr-dict `->` type($array)";
+  let hasVerifier = 1;
+}
+
+def Merk_ArraySizeOp : Merk_Op<"array_size"> {
+  let summary = "the number of an array's elements";
+  let arguments = (ins Merk_ArrayType:$array);
+  let results = (outs I64:$size);
+  let assemblyFormat = "$array attr-dict `:` type($array)";
+}
+
+def Merk_ArrayGetOp : Merk_Op<"array_get"> {
+  let summary = "an array's element";
+  let arguments = (ins Merk_ArrayType:$array, I64:$index);
+  let results = (outs AnyType:$element);
+  let assemblyFormat = "$array `[` $index `]` attr-dict `:` type($array) `->` type($element)";
+  let hasVerifier = 1;
+}
+
+def Merk_ArraySetOp : Merk_Op<"array_set", [
+    AllTypesMatch<["array", "result"]>
+  ]> {
+  let summary = "set an array's element, in place";
+  let arguments = (ins Merk_ArrayType:$array, I64:$index, AnyType:$element);
+  let results = (outs Merk_ArrayType:$result);
+  let assemblyFormat = [{
+    $array `[` $index `]` `,` $element attr-dict `:` type($array) `,` type($element)
+  }];
+  let hasVerifier = 1;
+}
+
+def Merk_ArrayFillOp : Merk_Op<"array_fill", [
+    AllTypesMatch<["array", "result"]>
+  ]> {
+  let summary = "set an array's elements from one index to another, in place";
+  let description = [{
+    Sets the elements from `lo` to `hi`, inclusive, to `element`; none if
+    `lo` is greater than `hi`.
+  }];
+  let arguments = (ins Merk_ArrayType:$array, I64:$lo, I64:$hi, AnyType:$element);
+  let results = (outs Merk_ArrayType:$result);
+  let assemblyFormat = [{
+    $array `[` $lo `,` $hi `]` `,` $element attr-dict `:` type($array) `,` type($element)
+  }];
+  let hasVerifier = 1;
+}
+
+def Merk_ArrayCopyOp : Merk_Op<"array_copy", [
+    AllTypesMatch<["array", "result"]>
+  ]> {
+  let summary = "a new array with an array's elements";
+  let arguments = (ins Merk_ArrayType:$array);
+  let results = (outs Merk_ArrayType:$result);
+  let assemblyFormat = "$array attr-dict `:` type($array)";
+}
+
+def Merk_ArrayResizeOp : Merk_Op<"array_resize", [
+    AllTypesMatch<["array", "result"]>
+  ]> {
+  let summary = "a new array of a size, with an array's elements";
+  let description = [{
+    A new array of `size` elements: as many of the array's as fit, and then
+    `init`; without `init`, `size` is no greater than the array's.
+  }];
+  let arguments = (ins Merk_ArrayType:$array, I64:$size, Optional<AnyType>:$init);
+  let results = (outs Merk_ArrayType:$result);
+  let assemblyFormat = [{
+    $array `,` $size (`,` $init^ `:` type($init))? attr-dict `:` type($array)
+  }];
+  let hasVerifier = 1;
+}
+
+def Merk_CheckIndexOp : Merk_Op<"check_index"> {
+  let summary = "throw index_out_of_bounds unless an index is an array's";
+  let description = [{
+    Throws the library's `index_out_of_bounds` exception unless `index` is
+    from 0 to the array's size less one, with the message mmc's library
+    gives: `what`, then ": index I not in range [0, Max]".
+
+    ```mlir
+    merk.check_index %a[%i], "array.lookup" : !merk.array<i64>
+    ```
+  }];
+  let arguments = (ins Merk_ArrayType:$array, I64:$index, StrAttr:$what);
+  let assemblyFormat = "$array `[` $index `]` `,` $what attr-dict `:` type($array)";
+}
+
 def Merk_YieldOp : Merk_Op<"yield", [
     Pure, ParentOneOf<["IteOp", "SwitchOp", "NotOp"]>, ReturnLike, Terminator
   ]> {
