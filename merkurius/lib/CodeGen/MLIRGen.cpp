@@ -1483,10 +1483,29 @@ mlir::Value MerkGenerator::Slot(mlir::Type type, mlir::Location loc) {
   return slot;
 }
 
-// Only the scalars, integers and floats, can cross into a target region
-// so far.
-static bool Mappable(mlir::Type type) {
+// Only the scalars, integers and floats, and arrays of them can cross into
+// a target region so far.
+static bool Scalar(mlir::Type type) {
   return mlir::isa<mlir::IntegerType, mlir::FloatType>(type);
+}
+
+static bool Mappable(mlir::Type type) {
+  if (auto array{mlir::dyn_cast<merk::ArrayType>(type)}) {
+    return Scalar(array.getElement());
+  }
+  return Scalar(type);
+}
+
+// The array that an array a target region gives was, before the region
+// updated it in place, if the region's own operations show it.
+static mlir::Value UpdatedFrom(mlir::Value array) {
+  while (mlir::Operation *op = array.getDefiningOp()) {
+    if (!mlir::isa<merk::ArraySetOp, merk::ArrayFillOp>(op)) {
+      break;
+    }
+    array = op->getOperand(0);
+  }
+  return array;
 }
 
 void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
@@ -1537,15 +1556,39 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
       outputs.push_back(var);
     }
   }
-  // The variable whose value an input is, if it is one's.
+  // The variable whose value an input is, if it is one's: one of the
+  // goal's, if several have the value, as an array updated in place does.
   auto varOf{[&](mlir::Value input) -> std::optional<BodyVar> {
+    std::optional<BodyVar> found;
     for (const auto &[var, value] : before) {
-      if (value == input) {
+      if (value != input) {
+        continue;
+      }
+      if (llvm::is_contained(goal.nonlocals, var)) {
         return var;
       }
+      found = var;
     }
-    return std::nullopt;
+    return found;
   }};
+  // The device has no runtime to allocate or fill an array.
+  mlir::Operation *allocates{nullptr};
+  region.walk([&](mlir::Operation *op) {
+    if (mlir::isa<merk::ArrayNewOp, merk::ArrayCopyOp, merk::ArrayResizeOp,
+            merk::ArrayFillOp>(op)) {
+      allocates = op;
+      return mlir::WalkResult::interrupt();
+    }
+    return mlir::WalkResult::advance();
+  });
+  if (allocates) {
+    NotYet(at,
+        mlir::isa<merk::ArrayFillOp>(allocates)
+            ? "filling arrays in target regions"
+            : "making arrays in target regions");
+    values_ = before;
+    return;
+  }
   for (mlir::Value input : inputs) {
     if (!Mappable(input.getType())) {
       std::optional<BodyVar> var{varOf(input)};
@@ -1558,14 +1601,48 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
       return;
     }
   }
+  // An array the region gives is one it was given, updated in place, since
+  // the device cannot allocate one: it is mapped back, and after the
+  // region is the given array. When the region's operations do not show
+  // which, as when it calls a procedure that updates it, the region finds
+  // which given array of its type it is, by its pointer, and gives its
+  // number, and its pointer too: when the region runs on the host, a
+  // procedure it calls may have allocated it.
+  llvm::DenseMap<BodyVar, mlir::Value> updated;
+  llvm::DenseMap<BodyVar, llvm::SmallVector<mlir::Value>> candidates;
+  llvm::DenseMap<BodyVar, mlir::Type> arrayTypes;
   for (BodyVar var : outputs) {
-    if (!Mappable(values_.lookup(var).getType())) {
+    mlir::Value value{values_.lookup(var)};
+    if (!Mappable(value.getType())) {
       NotYet(at,
           "values of type " + semantics::TypeToString(*body.vars[var].type) +
               " in target regions");
       values_ = before;
       return;
     }
+    if (mlir::isa<merk::ArrayType>(value.getType())) {
+      mlir::Value from{UpdatedFrom(value)};
+      if (inputs.contains(from)) {
+        updated[var] = from;
+        continue;
+      }
+      arrayTypes[var] = value.getType();
+      llvm::SmallVector<mlir::Value> &same{candidates[var]};
+      for (mlir::Value input : inputs) {
+        if (input.getType() == value.getType()) {
+          same.push_back(input);
+        }
+      }
+    }
+  }
+  llvm::erase_if(outputs, [&](BodyVar var) { return updated.contains(var); });
+  // What is mapped back: what an output is, or may be.
+  llvm::SmallPtrSet<mlir::Value, 4> mappedBack;
+  for (const auto &[var, from] : updated) {
+    mappedBack.insert(from);
+  }
+  for (const auto &[var, same] : candidates) {
+    mappedBack.insert(same.begin(), same.end());
   }
   // As Flang maps a scalar: an input is copied in from its slot, an output
   // is stored in its slot, from which it is read after the region.
@@ -1581,13 +1658,52 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
         /*bounds=*/mlir::ValueRange{}, /*mapperId=*/mlir::FlatSymbolRefAttr{},
         builder_.getStringAttr(name), builder_.getBoolAttr(false));
   }};
+  // An array is mapped as ClangIR maps a pointer's section, p[0:n]: by its
+  // own pointer, with bounds over its size word and its elements, which
+  // only the host needs, to copy them; it is copied back if the region
+  // updates it.
+  auto mapArray{[&](mlir::Value array, bool update, llvm::StringRef name) {
+    auto i64{builder_.getI64Type()};
+    llvm::SmallVector<mlir::Value, 1> bounds;
+    if (!target_.options().openMPIsTargetDevice) {
+      auto constant{[&](std::int64_t value) {
+        return IntegerConstant(i64, value, loc);
+      }};
+      // Words 0 to the size.
+      mlir::Value upper{merk::ArraySizeOp::create(builder_, loc, i64, array)};
+      mlir::Value extent{
+          mlir::arith::AddIOp::create(builder_, loc, upper, constant(1))};
+      bounds.push_back(mlir::omp::MapBoundsOp::create(builder_, loc,
+          builder_.getType<mlir::omp::MapBoundsType>(), constant(0), upper,
+          extent, /*stride=*/constant(1), /*strideInBytes=*/false,
+          /*startIdx=*/constant(0)));
+    }
+    mlir::Value pointer{
+        mlir::UnrealizedConversionCastOp::create(builder_, loc, ptr, array)
+            .getResult(0)};
+    return mlir::omp::MapInfoOp::create(builder_, loc, ptr, pointer,
+        mlir::TypeAttr::get(i64),
+        builder_.getAttr<mlir::omp::ClauseMapFlagsAttr>(update
+                ? mlir::omp::ClauseMapFlags::to | mlir::omp::ClauseMapFlags::from
+                : mlir::omp::ClauseMapFlags::to),
+        builder_.getAttr<mlir::omp::VariableCaptureKindAttr>(
+            mlir::omp::VariableCaptureKind::ByRef),
+        /*varPtrPtr=*/mlir::Value{}, /*varPtrPtrType=*/mlir::TypeAttr{},
+        /*members=*/mlir::ValueRange{}, /*membersIndex=*/mlir::ArrayAttr{},
+        bounds, /*mapperId=*/mlir::FlatSymbolRefAttr{},
+        builder_.getStringAttr(name), builder_.getBoolAttr(false));
+  }};
   llvm::SmallVector<mlir::Value> maps;
   for (mlir::Value input : inputs) {
+    std::optional<BodyVar> var{varOf(input)};
+    llvm::StringRef name{var ? llvm::StringRef{body.vars[*var].name} : ""};
+    if (mlir::isa<merk::ArrayType>(input.getType())) {
+      maps.push_back(mapArray(input, mappedBack.contains(input), name));
+      continue;
+    }
     mlir::Value slot{Slot(input.getType(), loc)};
     mlir::LLVM::StoreOp::create(builder_, loc, input, slot);
     // Named after the variable whose value it is, if it is one's.
-    std::optional<BodyVar> var{varOf(input)};
-    llvm::StringRef name{var ? llvm::StringRef{body.vars[*var].name} : ""};
     maps.push_back(map(slot, input.getType(),
         mlir::omp::ClauseMapFlags::to, mlir::omp::VariableCaptureKind::ByCopy,
         name));
@@ -1595,12 +1711,22 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
   llvm::SmallVector<mlir::Value> outputSlots;
   llvm::SmallVector<mlir::Type> outputTypes;
   for (BodyVar var : outputs) {
-    mlir::Type type{values_.lookup(var).getType()};
+    // An array whose given array the region finds gives its number.
+    mlir::Type type{candidates.contains(var) ? builder_.getI64Type()
+                                             : values_.lookup(var).getType()};
     outputTypes.push_back(type);
     outputSlots.push_back(Slot(type, loc));
     maps.push_back(map(outputSlots.back(), type,
         mlir::omp::ClauseMapFlags::from, mlir::omp::VariableCaptureKind::ByRef,
         body.vars[var].name));
+  }
+  llvm::DenseMap<BodyVar, mlir::Value> pointerSlots;
+  for (BodyVar var : outputs) {
+    if (candidates.contains(var)) {
+      pointerSlots[var] = Slot(ptr, loc);
+      maps.push_back(map(pointerSlots[var], ptr, mlir::omp::ClauseMapFlags::from,
+          mlir::omp::VariableCaptureKind::ByRef, body.vars[var].name));
+    }
   }
   targetOp.getMapVarsMutable().assign(maps);
   // The region reads its inputs from their slots and stores its outputs;
@@ -1608,8 +1734,14 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
   builder_.setInsertionPointToStart(block);
   llvm::DenseMap<mlir::Value, mlir::Value> loaded;
   for (mlir::Value input : inputs) {
-    mlir::Value value{mlir::LLVM::LoadOp::create(
-        builder_, loc, input.getType(), block->addArgument(ptr, loc))};
+    // An array's argument is its pointer on the device.
+    mlir::Value argument{block->addArgument(ptr, loc)};
+    mlir::Value value{mlir::isa<merk::ArrayType>(input.getType())
+            ? mlir::UnrealizedConversionCastOp::create(
+                  builder_, loc, input.getType(), argument)
+                  .getResult(0)
+            : mlir::LLVM::LoadOp::create(builder_, loc, input.getType(), argument)
+                  .getResult()};
     mlir::replaceAllUsesInRegionWith(input, value, targetOp.getRegion());
     loaded[input] = value;
   }
@@ -1617,12 +1749,38 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
   for (size_t i = 0; i < outputs.size(); ++i) {
     outputArgs.push_back(block->addArgument(ptr, loc));
   }
+  llvm::DenseMap<BodyVar, mlir::Value> pointerArgs;
+  for (BodyVar var : outputs) {
+    if (candidates.contains(var)) {
+      pointerArgs[var] = block->addArgument(ptr, loc);
+    }
+  }
   // Where the goal ended: the last block of the region.
   mlir::Block *end{&targetOp.getRegion().back()};
   builder_.setInsertionPointToEnd(end);
   if (!Terminated()) {
     for (auto [var, arg] : llvm::zip(outputs, outputArgs)) {
       mlir::Value value{values_.lookup(var)};
+      if (auto same{candidates.find(var)}; same != candidates.end()) {
+        // The number of the given array whose pointer it is, or -1.
+        auto i64{builder_.getI64Type()};
+        auto pointer{[&](mlir::Value array) {
+          return mlir::UnrealizedConversionCastOp::create(
+              builder_, loc, ptr, array)
+              .getResult(0);
+        }};
+        mlir::LLVM::StoreOp::create(
+            builder_, loc, pointer(value), pointerArgs.lookup(var));
+        mlir::Value number{IntegerConstant(i64, -1, loc)};
+        for (auto [i, input] : llvm::enumerate(same->second)) {
+          mlir::Value is{mlir::LLVM::ICmpOp::create(builder_, loc,
+              mlir::LLVM::ICmpPredicate::eq, pointer(value),
+              pointer(loaded.lookup(input)))};
+          number = mlir::arith::SelectOp::create(builder_, loc, is,
+              IntegerConstant(i64, i, loc), number);
+        }
+        value = number;
+      }
       mlir::LLVM::StoreOp::create(
           builder_, loc, loaded.lookup(value) ? loaded.lookup(value) : value, arg);
     }
@@ -1632,6 +1790,29 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
   values_ = before;
   for (auto [var, type, slot] : llvm::zip(outputs, outputTypes, outputSlots)) {
     values_[var] = mlir::LLVM::LoadOp::create(builder_, loc, type, slot);
+    if (auto same{candidates.find(var)}; same != candidates.end()) {
+      // Chosen among the pointers, which the arrays become.
+      auto pointer{[&](mlir::Value array) {
+        return mlir::UnrealizedConversionCastOp::create(builder_, loc, ptr, array)
+            .getResult(0);
+      }};
+      mlir::Value number{values_[var]};
+      mlir::Value chosen{mlir::LLVM::LoadOp::create(
+          builder_, loc, ptr, pointerSlots.lookup(var))};
+      for (auto [i, input] : llvm::enumerate(same->second)) {
+        mlir::Value is{mlir::arith::CmpIOp::create(builder_, loc,
+            mlir::arith::CmpIPredicate::eq, number,
+            IntegerConstant(type, i, loc))};
+        chosen = mlir::LLVM::SelectOp::create(
+            builder_, loc, is, pointer(input), chosen);
+      }
+      values_[var] = mlir::UnrealizedConversionCastOp::create(
+          builder_, loc, arrayTypes.lookup(var), chosen)
+                         .getResult(0);
+    }
+  }
+  for (auto [var, from] : updated) {
+    values_[var] = from;
   }
 }
 
