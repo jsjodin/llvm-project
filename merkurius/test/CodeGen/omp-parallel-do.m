@@ -5,7 +5,9 @@
 % the loop's body procedure with the counter, the threaded array as it was
 % before the loop and the shared variables; the loop procedure is not
 % called. After the loop the array is the one given, which the iterations
-% updated in place. A negative step is the nest's, with Lo above Hi.
+% updated in place. A negative step is the nest's, with Lo above Hi. The
+% directive is decomposed into its leaves, as Flang decomposes it, and
+% omp.parallel, which is not the innermost, is combined.
 % omp-parallel-do-run.test runs the program with libomp.
 %
 % RUN: merkc -fc1 -fopenmp -fdo-loops -emit-merk %s -o %t.mlir
@@ -58,7 +60,7 @@ saxpy(A, X, !Y) :-
 % MERK-NEXT:        }
 % MERK-NEXT:      }
 % MERK-NEXT:      omp.terminator
-% MERK-NEXT:    }
+% MERK-NEXT:    } {omp.combined}
 % MERK-NEXT:    merk.succeed %arg2 : !merk.array<f64>
 % MERK-NOT:   merk.call @omp_parallel_do.saxpy__loop
 
@@ -81,7 +83,7 @@ down(!A) :-
 % MLIR-NEXT:        }
 % MLIR-NEXT:      }
 % MLIR-NEXT:      omp.terminator
-% MLIR-NEXT:    }
+% MLIR-NEXT:    } {omp.combined}
 % MLIR-NEXT:    llvm.return %arg0 : !llvm.ptr
 
 % Every third element from 0: 0, 3, 6 and 9, which down set already.

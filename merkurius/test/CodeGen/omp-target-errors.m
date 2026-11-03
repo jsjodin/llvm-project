@@ -39,7 +39,7 @@ zero(!A) :-
 next(X, Y) :-
     %$omp target map(tofrom: X)
     Y = X + 1.
-% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: not yet implemented: code generation for clauses of the target directive
+% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: not yet implemented: code generation for the map clause of the target directive
 
 :- pred twice(int::in, int::out) is det.
 twice(X, Y) :-
