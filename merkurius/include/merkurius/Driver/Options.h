@@ -47,6 +47,10 @@ void reportError(const llvm::Twine &message);
 // merkc's executable, else the one on the PATH; empty if there is none.
 std::string findClang(llvm::StringRef executable);
 
+// The LLVM tool `name`, such as llvm-offload-binary: the one beside merkc's
+// executable, else the one on the PATH; empty if there is none.
+std::string findTool(llvm::StringRef executable, llvm::StringRef name);
+
 } // namespace merkurius::options
 
 #endif // MERKURIUS_DRIVER_OPTIONS_H_

@@ -128,12 +128,33 @@ def target_cpu : Separate<["-"], "target-cpu">, MetaVarName<"<cpu>">,
 def target_feature : Separate<["-"], "target-feature">,
   MetaVarName<"<feature>">,
   HelpText<"Turn a target feature on (+name) or off (-name)">;
+def fopenmp_is_target_device : Flag<["-"], "fopenmp-is-target-device">,
+  HelpText<"Compile the module's target regions for an OpenMP device">;
+def fopenmp_host_ir_file_path : Separate<["-"], "fopenmp-host-ir-file-path">,
+  MetaVarName<"<file>">,
+  HelpText<"The host's LLVM IR, whose offload entries the device compile "
+           "matches">;
+def offload_targets_EQ : CommaJoined<["--"], "offload-targets=">,
+  MetaVarName<"<triples>">,
+  HelpText<"The OpenMP device triples the host compile makes offload entries "
+           "for">;
+def fopenmp_targets_EQ : CommaJoined<["-"], "fopenmp-targets=">,
+  Alias<offload_targets_EQ>, MetaVarName<"<triples>">,
+  HelpText<"The same as --offload-targets=">;
+def fembed_offload_object_EQ : Joined<["-"], "fembed-offload-object=">,
+  MetaVarName<"<file>">,
+  HelpText<"Embed the offload binary <file> in the host's object file">;
+def x : Separate<["-"], "x">, MetaVarName<"<language>">,
+  HelpText<"Read the input as <language>: mercury, mlir or ir (LLVM IR); by "
+           "default from its extension">;
 def emit_merk : Flag<["-"], "emit-merk">,
   HelpText<"Write the module in the merk dialect">;
 def emit_mlir : Flag<["-"], "emit-mlir">,
   HelpText<"Write the module lowered to MLIR's LLVM dialect">;
 def emit_llvm : Flag<["-"], "emit-llvm">,
   HelpText<"Write the module's LLVM IR">;
+def emit_llvm_bc : Flag<["-"], "emit-llvm-bc">,
+  HelpText<"Write the module's LLVM bitcode">;
 def emit_obj : Flag<["-"], "emit-obj">,
   HelpText<"Write the module's object file">;
 
@@ -147,6 +168,12 @@ def c : Flag<["-"], "c">,
   HelpText<"Compile each module to an object file, without linking">;
 def target_EQ : Joined<["--"], "target=">, MetaVarName<"<triple>">,
   HelpText<"Compile and link for the target <triple>">;
+def offload_arch_EQ : CommaJoined<["--"], "offload-arch=">,
+  MetaVarName<"<gpus>">,
+  HelpText<"With -fopenmp, compile the target regions for the GPUs <gpus> "
+           "too, such as gfx1030, and link for offloading to them">;
+def L : JoinedOrSeparate<["-"], "L">, MetaVarName<"<dir>">,
+  HelpText<"Search <dir> for libraries when linking">;
 
 def _HASH_HASH_HASH : Flag<["-"], "###">,
   HelpText<"Print the jobs to run, without running them">;

@@ -10,6 +10,8 @@
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
 #include "mlir/Dialect/DLTI/DLTI.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
+#include "mlir/Dialect/OpenMP/Utils/Utils.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Target/LLVMIR/Import.h"
 #include "llvm/MC/TargetRegistry.h"
@@ -23,6 +25,8 @@ static constexpr llvm::StringLiteral kFeatures{"merk.target_features"};
 static constexpr llvm::StringLiteral kOptimizationLevel{
     "merk.optimization_level"};
 static constexpr llvm::StringLiteral kAddressSpaces{"merk.address_spaces"};
+static constexpr llvm::StringLiteral kCodeObjectVersion{
+    "merk.amdgpu_code_object_version"};
 
 // The numbers LLVM's back ends give the address spaces.
 static AddressSpaces AddressSpacesOf(const llvm::Triple &triple) {
@@ -95,6 +99,10 @@ std::unique_ptr<TargetInfo> TargetInfo::FromModule(
   if (auto level{module->getAttrOfType<mlir::IntegerAttr>(kOptimizationLevel)}) {
     options.optimizationLevel = level.getInt();
   }
+  if (auto version{
+          module->getAttrOfType<mlir::IntegerAttr>(kCodeObjectVersion)}) {
+    options.codeObjectVersion = version.getInt();
+  }
   std::optional<std::string> layout;
   if (auto attr{module->getAttrOfType<mlir::StringAttr>(
           mlir::LLVM::LLVMDialect::getDataLayoutAttrName())}) {
@@ -135,6 +143,37 @@ void TargetInfo::Record(mlir::ModuleOp module) const {
       merk::AddressSpacesAttr::get(context, addressSpaces_.generic,
           addressSpaces_.global, addressSpaces_.shared,
           addressSpaces_.constant, addressSpaces_.private_));
+  if (triple_.isAMDGPU()) {
+    module->setAttr(kCodeObjectVersion,
+        builder.getI32IntegerAttr(options_.codeObjectVersion));
+  }
+  // OpenMP's: the omp dialect's offload attributes, as Clang and Flang set
+  // them, which its translation to LLVM IR reads.
+  if (options_.openMP) {
+    context->loadDialect<mlir::omp::OpenMPDialect>();
+    llvm::SmallVector<llvm::Triple> targets;
+    for (const std::string &target : options_.openMPTargets) {
+      targets.emplace_back(target);
+    }
+    mlir::omp::setOffloadModuleInterfaceAttributes(module,
+        mlir::omp::OffloadModuleOpts{/*targetDebugKind=*/0,
+            /*assumeTeamsOversubscription=*/false,
+            /*assumeThreadsOversubscription=*/false,
+            /*assumeNoThreadState=*/false,
+            /*assumeNoNestedParallelism=*/false,
+            options_.openMPIsTargetDevice, triple_.isGPU(),
+            /*forceUSM=*/false, options_.openMPVersion,
+            options_.openMPHostIRFile, targets});
+    mlir::omp::setOpenMPVersionAttribute(module, options_.openMPVersion);
+  }
+}
+
+void TargetInfo::AddModuleFlags(llvm::Module &module) const {
+  if (triple_.isAMDGPU()) {
+    module.addModuleFlag(llvm::Module::Error, "amdhsa_code_object_version",
+        options_.codeObjectVersion);
+    module.setPICLevel(llvm::PICLevel::BigPIC);
+  }
 }
 
 unsigned TargetInfo::TagBits() const {

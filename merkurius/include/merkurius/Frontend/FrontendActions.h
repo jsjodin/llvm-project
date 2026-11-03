@@ -29,6 +29,11 @@ class CompilerInstance;
 
 } // namespace merkurius::frontend
 
+namespace llvm {
+class Module;
+class raw_ostream;
+} // namespace llvm
+
 namespace mlir {
 class ModuleOp;
 } // namespace mlir
@@ -174,6 +179,14 @@ private:
   bool executeAction() override;
   // Lowers the merk module as far as the action's kind says, and writes it.
   bool Lower(mlir::ModuleOp, const codegen::TargetInfo &);
+  // Compiles an LLVM IR input as far as the action's kind says (-x ir).
+  bool LowerLLVMIR();
+  // Embeds the offload objects, optimizes the LLVM module and writes it as
+  // the action's kind says.
+  bool Emit(llvm::Module &, const codegen::TargetInfo &,
+      llvm::raw_ostream &);
+  // The output file, named after the source for -emit-obj and -S.
+  llvm::raw_ostream *Output();
   ActionKind kind_;
 };
 

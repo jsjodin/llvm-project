@@ -20,6 +20,7 @@
 #include "merkurius/CodeGen/TargetOptions.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Triple.h"
 #include <memory>
@@ -83,6 +84,16 @@ public:
   unsigned WordBits() const { return PointerBits(addressSpaces_.generic); }
   // The tag bits a pointer to a cell of words has free: 3 for 8-byte words.
   unsigned TagBits() const;
+
+  // What depends on the kind of target, as in ClangIR's TargetCIRGenInfo
+  // and Clang's emitAMDGPUMetadata:
+  // Whether procedures use LLVM's tailcc, whose musttail calls are
+  // guaranteed. AMDGPU has no tailcc, but makes a musttail call with the C
+  // convention a jump; procedures there use C's.
+  bool HasTailCallConvention() const { return !triple_.isAMDGPU(); }
+  // The target's module flags: on AMDGPU, the code object version, and the
+  // PIC level, which Flang's device compile gives with -pic-level 2.
+  void AddModuleFlags(llvm::Module &) const;
 
 private:
   TargetInfo() = default;

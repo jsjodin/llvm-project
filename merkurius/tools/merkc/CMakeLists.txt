@@ -5,6 +5,7 @@ set(LLVM_LINK_COMPONENTS
   AllTargetsInfos
   Option
   Support
+  TargetParser
   )
 
 add_merkurius_tool(merkc

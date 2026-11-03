@@ -6,6 +6,7 @@ add_merkurius_library(MerkuriusMerkDialect
 
   LINK_LIBS
   MLIRArithDialect
+  MLIRCallInterfaces
   MLIRFunctionInterfaces
   MLIRIR
   MLIRSideEffectInterfaces

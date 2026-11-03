@@ -31,7 +31,7 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
               OPT_fdebug_dump_imports, OPT_fdebug_dump_resolved_names,
               OPT_fdebug_dump_types, OPT_fdebug_dump_modes,
               OPT_fdebug_dump_determinism, OPT_fdebug_dump_polymorphism,
-              OPT_emit_merk, OPT_emit_mlir, OPT_emit_llvm, OPT_S,
+              OPT_emit_merk, OPT_emit_mlir, OPT_emit_llvm, OPT_emit_llvm_bc, OPT_S,
               OPT_emit_obj)) {
     switch (arg->getOption().getID()) {
     case OPT_E:
@@ -88,6 +88,9 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
     case OPT_emit_llvm:
       opts.programAction = ActionKind::EmitLLVM;
       break;
+    case OPT_emit_llvm_bc:
+      opts.programAction = ActionKind::EmitLLVMBitcode;
+      break;
     case OPT_S:
       opts.programAction = ActionKind::EmitAssembly;
       break;
@@ -104,6 +107,19 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
       opts.programAction = ActionKind::DebugDumpSemanticForm;
       opts.dumpNonlocals = true;
       break;
+    }
+  }
+  if (const llvm::opt::Arg *arg = args.getLastArg(OPT_x)) {
+    llvm::StringRef value{arg->getValue()};
+    if (value == "mercury") {
+      opts.inputLanguage = InputLanguage::Mercury;
+    } else if (value == "mlir") {
+      opts.inputLanguage = InputLanguage::MLIR;
+    } else if (value == "ir") {
+      opts.inputLanguage = InputLanguage::LLVMIR;
+    } else {
+      reportError("invalid value '" + value + "' in '-x " + value + "'");
+      return false;
     }
   }
   opts.outputFile = args.getLastArgValue(OPT_o).str();
@@ -157,6 +173,20 @@ static bool parseCodeGenArgs(CodeGenOptions &opts, const InputArgList &args) {
   opts.triple = args.getLastArgValue(OPT_triple).str();
   opts.cpu = args.getLastArgValue(OPT_target_cpu).str();
   opts.features = llvm::join(args.getAllArgValues(OPT_target_feature), ",");
+  opts.openMP = args.hasArg(OPT_fopenmp);
+  if (const llvm::opt::Arg *arg = args.getLastArg(OPT_fopenmp_version_EQ)) {
+    llvm::StringRef{arg->getValue()}.getAsInteger(10, opts.openMPVersion);
+  }
+  opts.openMPIsTargetDevice = args.hasArg(OPT_fopenmp_is_target_device);
+  opts.openMPHostIRFile =
+      args.getLastArgValue(OPT_fopenmp_host_ir_file_path).str();
+  opts.openMPTargets = args.getAllArgValues(OPT_offload_targets_EQ);
+  opts.offloadObjects = args.getAllArgValues(OPT_fembed_offload_object_EQ);
+  if ((opts.openMPIsTargetDevice || !opts.openMPTargets.empty()) &&
+      !opts.openMP) {
+    reportError("OpenMP offloading needs -fopenmp");
+    return false;
+  }
   if (const llvm::opt::Arg *arg = args.getLastArg(OPT_O)) {
     llvm::StringRef value{arg->getValue()};
     if (value.empty()) {

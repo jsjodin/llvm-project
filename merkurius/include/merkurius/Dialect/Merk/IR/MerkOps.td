@@ -17,6 +17,7 @@
 include "merkurius/Dialect/Merk/IR/MerkDialect.td"
 include "mlir/IR/BuiltinAttributeInterfaces.td"
 include "mlir/IR/SymbolInterfaces.td"
+include "mlir/Interfaces/CallInterfaces.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/FunctionInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
@@ -83,21 +84,47 @@ def Merk_SucceedOp : Merk_Op<"succeed", [
 }
 
 def Merk_CallOp : Merk_Op<"call", [
-    DeclareOpInterfaceMethods<SymbolUserOpInterface>
+    CallOpInterface, DeclareOpInterfaceMethods<SymbolUserOpInterface>
   ]> {
   let summary = "a first-order call";
   let description = [{
     Calls a procedure with its inputs; its results are the procedure's
-    outputs.
+    outputs. It is a call to MLIR's passes, such as the omp dialect's,
+    which find the procedures a target region calls.
 
     ```mlir
     %y = merk.call @m.double_2_0(%x) : (i64) -> i64
     ```
   }];
-  let arguments = (ins FlatSymbolRefAttr:$callee, Variadic<AnyType>:$inputs);
+  let arguments = (ins FlatSymbolRefAttr:$callee, Variadic<AnyType>:$inputs,
+    OptionalAttr<DictArrayAttr>:$arg_attrs,
+    OptionalAttr<DictArrayAttr>:$res_attrs);
   let results = (outs Variadic<AnyType>:$outputs);
+  // CallOpInterface's argument and result attributes, which code generation
+  // gives no call yet.
   let assemblyFormat = [{
-    $callee `(` $inputs `)` attr-dict `:` functional-type($inputs, $outputs)
+    $callee `(` $inputs `)` (`arg_attrs` $arg_attrs^)? (`res_attrs` $res_attrs^)?
+    attr-dict `:` functional-type($inputs, $outputs)
+  }];
+  let builders = [OpBuilder<(ins "mlir::TypeRange":$outputs,
+      "llvm::StringRef":$callee, "mlir::ValueRange":$inputs), [{
+    build($_builder, $_state, outputs,
+        mlir::FlatSymbolRefAttr::get($_builder.getContext(), callee), inputs,
+        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr);
+  }]>];
+  let extraClassDeclaration = [{
+    // CallOpInterface's.
+    mlir::CallInterfaceCallable getCallableForCallee() {
+      return getCalleeAttr();
+    }
+    void setCalleeFromCallable(mlir::CallInterfaceCallable callee) {
+      setCalleeAttr(mlir::cast<mlir::FlatSymbolRefAttr>(
+          mlir::cast<mlir::SymbolRefAttr>(callee)));
+    }
+    mlir::Operation::operand_range getArgOperands() { return getInputs(); }
+    mlir::MutableOperandRange getArgOperandsMutable() {
+      return getInputsMutable();
+    }
   }];
 }
 

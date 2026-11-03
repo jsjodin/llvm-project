@@ -14,16 +14,22 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/DLTI/DLTI.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
+#include "mlir/Dialect/OpenMP/Transforms/Passes.h"
+#include "mlir/Dialect/OpenMP/Utils/Utils.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
+#include "mlir/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Linker/Linker.h"
+#include "llvm/Object/OffloadBinary.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FileUtilities.h"
@@ -31,6 +37,7 @@
 #include "llvm/Support/Program.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 
 namespace merkurius::codegen {
 
@@ -80,7 +87,15 @@ mlir::Type ResultType(
 
 class Lowerer {
 public:
-  Lowerer(mlir::ModuleOp module) : module_{module}, rewriter_{module.getContext()} {}
+  Lowerer(mlir::ModuleOp module, const TargetInfo &target)
+      : module_{module}, rewriter_{module.getContext()},
+        cconv_{target.HasTailCallConvention() ? mlir::LLVM::CConv::Tail
+                                              : mlir::LLVM::CConv::C} {
+    auto offload{mlir::dyn_cast<mlir::omp::OffloadModuleInterface>(
+        module.getOperation())};
+    device_ = mlir::omp::isOpenMPModule(module) && offload &&
+        offload.getIsTargetDevice();
+  }
   llvm::LogicalResult Lower();
 
 private:
@@ -94,6 +109,13 @@ private:
   void Flatten(mlir::LLVM::LLVMFuncOp);
   // Flattens a block, whose goals that fail go to `fail`.
   void Flatten(mlir::Block *, mlir::Block *fail);
+  // Flattens the regions of an OpenMP construct, whose goals are det.
+  void FlattenRegions(mlir::Operation *);
+  // OpenMP's passes after lowering, as Flang runs them: procedures called
+  // from a target region become declare target, and a device compile keeps
+  // only those and the target regions.
+  llvm::LogicalResult FilterProcs();
+  llvm::LogicalResult LowerOpenMP();
   mlir::Block *SplitAfter(mlir::Operation *);
   mlir::Block *Inline(mlir::Region &, mlir::Block *before);
   void Exit(mlir::Block *, mlir::Block *after);
@@ -117,6 +139,11 @@ private:
   // The procedures that can fail.
   llvm::StringSet<> canFail_;
   mlir::LLVM::LLVMFuncOp throw_;
+  // Whether this is an OpenMP device compile.
+  bool device_{false};
+  // The procedures' calling convention, the target's (design document,
+  // "Calling convention").
+  mlir::LLVM::CConv cconv_;
 };
 
 void Lowerer::LowerProc(merk::ProcOp proc) {
@@ -137,7 +164,11 @@ void Lowerer::LowerProc(merk::ProcOp proc) {
   rewriter_.setInsertionPoint(proc);
   auto func{mlir::LLVM::LLVMFuncOp::create(rewriter_, proc.getLoc(),
       proc.getSymName(), funcType, linkage, /*dsoLocal=*/false,
-      mlir::LLVM::CConv::Tail)};
+      cconv_)};
+  // What omp-mark-declare-target found, for the passes after lowering.
+  if (mlir::Attribute declare{proc->getDiscardableAttr("omp.declare_target")}) {
+    func->setDiscardableAttr("omp.declare_target", declare);
+  }
   rewriter_.inlineRegionBefore(
       proc.getBody(), func.getBody(), func.getBody().end());
   for (mlir::Block &block : func.getBody()) {
@@ -288,7 +319,7 @@ mlir::Value Lowerer::Call(merk::CallOp call, bool *tail) {
   mlir::LLVM::LLVMFuncOp func{funcs_.lookup(call.getCallee())};
   auto llvmCall{
       mlir::LLVM::CallOp::create(rewriter_, loc, func, call.getInputs())};
-  llvmCall.setCConv(mlir::LLVM::CConv::Tail);
+  llvmCall.setCConv(cconv_);
   mlir::Value result{
       llvmCall.getNumResults() ? llvmCall.getResult() : mlir::Value{}};
   // A call in tail position, whose solution is the procedure's, is a
@@ -404,10 +435,15 @@ void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
       if (auto throwIf{mlir::dyn_cast<merk::ThrowIfOp>(op)}) {
         next = SplitAfter(throwIf);
         mlir::Block *raise{rewriter_.createBlock(next)};
-        mlir::Value exception{mlir::LLVM::AddressOfOp::create(rewriter_, loc,
-            StringGlobal(throwIf.getException(), loc))};
-        mlir::LLVM::CallOp::create(
-            rewriter_, loc, ThrowFunc(), mlir::ValueRange{exception});
+        if (device_) {
+          // A device has no runtime to report it yet: the kernel traps.
+          mlir::LLVM::Trap::create(rewriter_, loc);
+        } else {
+          mlir::Value exception{mlir::LLVM::AddressOfOp::create(rewriter_,
+              loc, StringGlobal(throwIf.getException(), loc))};
+          mlir::LLVM::CallOp::create(
+              rewriter_, loc, ThrowFunc(), mlir::ValueRange{exception});
+        }
         mlir::LLVM::UnreachableOp::create(rewriter_, loc);
         rewriter_.setInsertionPoint(throwIf);
         rewriter_.replaceOpWithNewOp<mlir::LLVM::CondBrOp>(
@@ -426,6 +462,10 @@ void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
         if (tail) {
           break; // it returns
         }
+        continue;
+      }
+      if (mlir::isa<mlir::omp::OpenMPDialect>(op.getDialect())) {
+        FlattenRegions(&op);
         continue;
       }
       if (auto ite{mlir::dyn_cast<merk::IteOp>(op)}) {
@@ -502,6 +542,21 @@ void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
   }
 }
 
+void Lowerer::FlattenRegions(mlir::Operation *op) {
+  for (mlir::Region &region : op->getRegions()) {
+    if (region.empty()) {
+      continue;
+    }
+    mlir::OpBuilder::InsertionGuard guard{rewriter_};
+    mlir::Block *fail{rewriter_.createBlock(&region, region.end())};
+    mlir::LLVM::UnreachableOp::create(rewriter_, op->getLoc());
+    Flatten(&region.front(), fail);
+    if (fail->hasNoPredecessors()) {
+      rewriter_.eraseBlock(fail);
+    }
+  }
+}
+
 void Lowerer::Flatten(mlir::LLVM::LLVMFuncOp func) {
   if (func.isExternal()) {
     return;
@@ -556,13 +611,16 @@ void Lowerer::LowerEntry(merk::EntryOp entry) {
   rewriter_.setInsertionPointToStart(block);
   auto call{mlir::LLVM::CallOp::create(
       rewriter_, loc, funcs_.lookup(entry.getProc()), mlir::ValueRange{})};
-  call.setCConv(mlir::LLVM::CConv::Tail);
+  call.setCConv(cconv_);
   mlir::LLVM::ReturnOp::create(rewriter_, loc, mlir::ValueRange{});
   rewriter_.eraseOp(entry);
 }
 
 llvm::LogicalResult Lowerer::Lower() {
   module_.getContext()->loadDialect<mlir::LLVM::LLVMDialect>();
+  if (mlir::omp::isOpenMPModule(module_) && mlir::failed(FilterProcs())) {
+    return llvm::failure();
+  }
   for (auto proc : llvm::make_early_inc_range(module_.getOps<merk::ProcOp>())) {
     LowerProc(proc);
   }
@@ -601,7 +659,10 @@ llvm::LogicalResult Lowerer::Lower() {
           module_.getOperation(), target, std::move(patterns)))) {
     return llvm::failure();
   }
-  // Every operation left must be the LLVM dialect's.
+  if (mlir::omp::isOpenMPModule(module_) && mlir::failed(LowerOpenMP())) {
+    return llvm::failure();
+  }
+  // Every operation left must be the LLVM dialect's or OpenMP's.
   mlir::WalkResult result{module_.walk([](mlir::Operation *op) {
     if (op->getDialect() &&
         op->getDialect()->getNamespace() == merk::MerkDialect::getDialectNamespace()) {
@@ -613,11 +674,85 @@ llvm::LogicalResult Lowerer::Lower() {
   return llvm::failure(result.wasInterrupted());
 }
 
+// The omp dialect's passes on the merk module, before it is lowered, so
+// that a device compile lowers only what the device runs, as ClangIR emits
+// only that: omp-mark-declare-target marks the procedures the target
+// regions call, through merk.call, and omp-function-filter removes the
+// others on the device, except those that hold target regions.
+llvm::LogicalResult Lowerer::FilterProcs() {
+  mlir::MLIRContext *context{module_.getContext()};
+  merk::ProcOp::attachInterface<
+      mlir::omp::DeclareTargetDefaultModel<merk::ProcOp>>(*context);
+  mlir::PassManager mark{context};
+  mark.addPass(mlir::omp::createMarkDeclareTargetPass());
+  if (mlir::failed(mark.run(module_))) {
+    return llvm::failure();
+  }
+  // A target region in a procedure that a target region calls would run on
+  // the device, as reverse offloading would: the directive belongs to the
+  // caller.
+  for (auto proc : module_.getOps<merk::ProcOp>()) {
+    mlir::omp::DeclareTargetAttr declare{
+        mlir::cast<mlir::omp::DeclareTargetInterface>(proc.getOperation())
+            .getDeclareTarget()};
+    if (!declare ||
+        declare.getDeviceType() == mlir::omp::DeclareTargetDeviceType::host) {
+      continue;
+    }
+    mlir::WalkResult nested{proc.walk([&](mlir::omp::TargetOp target) {
+      mlir::emitError(target.getLoc(),
+          "a target region cannot be in " + proc.getSymName() +
+              ", which a target region calls");
+      return mlir::WalkResult::interrupt();
+    })};
+    if (nested.wasInterrupted()) {
+      return llvm::failure();
+    }
+  }
+  mlir::PassManager filter{context};
+  filter.addPass(mlir::omp::createFunctionFilteringPass());
+  return filter.run(module_);
+}
+
+// The omp dialect's passes after lowering, as ClangIR runs them after its
+// lowering to the LLVM dialect: omp-mark-declare-target again, for what
+// lowering calls, omp-host-op-filter, which leaves only the target regions
+// of the host procedures that hold them on the device, and
+// omp-stack-to-shared.
+llvm::LogicalResult Lowerer::LowerOpenMP() {
+  mlir::PassManager pm{module_.getContext()};
+  pm.addPass(mlir::omp::createMarkDeclareTargetPass());
+  pm.addPass(mlir::omp::createHostOpFilteringPass());
+  pm.nest<mlir::LLVM::LLVMFuncOp>().addPass(
+      mlir::omp::createStackToSharedPass());
+  if (mlir::failed(pm.run(module_))) {
+    return llvm::failure();
+  }
+  if (!device_) {
+    return llvm::success();
+  }
+  // Only this module's procedures are compiled for the device so far: not
+  // other modules', such as the library's, nor foreign code.
+  for (auto func : module_.getOps<mlir::LLVM::LLVMFuncOp>()) {
+    if (!func.isExternal()) {
+      continue;
+    }
+    if (auto uses{mlir::SymbolTable::getSymbolUses(func, module_)};
+        uses && !uses->empty()) {
+      mlir::emitError(uses->begin()->getUser()->getLoc(),
+          "cannot call " + func.getSymName() +
+              " on an OpenMP device yet: it is not compiled for the device");
+      return llvm::failure();
+    }
+  }
+  return llvm::success();
+}
+
 } // namespace
 
 llvm::LogicalResult LowerToLLVMDialect(
-    mlir::ModuleOp module, const TargetInfo &) {
-  return Lowerer{module}.Lower();
+    mlir::ModuleOp module, const TargetInfo &target) {
+  return Lowerer{module, target}.Lower();
 }
 
 std::unique_ptr<llvm::Module> TranslateToLLVMIR(mlir::ModuleOp module,
@@ -625,12 +760,14 @@ std::unique_ptr<llvm::Module> TranslateToLLVMIR(mlir::ModuleOp module,
   mlir::DialectRegistry registry;
   mlir::registerBuiltinDialectTranslation(registry);
   mlir::registerLLVMDialectTranslation(registry);
+  mlir::registerOpenMPDialectTranslation(registry);
   module.getContext()->appendDialectRegistry(registry);
   std::unique_ptr<llvm::Module> llvmModule{mlir::translateModuleToLLVMIR(
       module, context, module.getName().value_or("module"))};
   if (llvmModule) {
     llvmModule->setTargetTriple(target.triple());
     llvmModule->setDataLayout(target.dataLayout());
+    target.AddModuleFlags(*llvmModule);
   }
   return llvmModule;
 }
@@ -638,7 +775,10 @@ std::unique_ptr<llvm::Module> TranslateToLLVMIR(mlir::ModuleOp module,
 bool LinkForeignCode(llvm::Module &module, mlir::ModuleOp mlirModule,
     const TargetInfo &target, llvm::StringRef clang, std::string &error) {
   auto code{mlirModule->getAttrOfType<mlir::StringAttr>(kForeignCodeAttrName)};
-  if (!code) {
+  auto offload{mlir::dyn_cast<mlir::omp::OffloadModuleInterface>(
+      mlirModule.getOperation())};
+  // A device compile calls none of it (LowerOpenMP).
+  if (!code || (offload && offload.getIsTargetDevice())) {
     return true;
   }
   if (clang.empty()) {
@@ -700,6 +840,21 @@ bool LinkForeignCode(llvm::Module &module, mlir::ModuleOp mlirModule,
         function.getName().starts_with("merk_foreign_")) {
       function.setLinkage(llvm::GlobalValue::InternalLinkage);
     }
+  }
+  return true;
+}
+
+bool EmbedOffloadObjects(llvm::Module &module,
+    const std::vector<std::string> &files, std::string &error) {
+  for (const std::string &file : files) {
+    llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> object{
+        llvm::MemoryBuffer::getFileOrSTDIN(file)};
+    if (!object) {
+      error = "could not open '" + file + "' for embedding";
+      return false;
+    }
+    llvm::embedBufferInModule(module, **object, ".llvm.offloading",
+        llvm::Align(llvm::object::OffloadBinary::getAlignment()));
   }
   return true;
 }
