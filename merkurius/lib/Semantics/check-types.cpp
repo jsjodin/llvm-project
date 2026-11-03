@@ -345,6 +345,7 @@ private:
   void CheckFunctor(const Unify &, const parser::SymName &);
   void CheckCall(const Call &);
   void CheckHOCall(const HOCall &);
+  void CheckLoop(const Loop &);
   ClauseTypes Finish(const ClauseForm &, const Symbol *definition,
       const Signature *signature);
 
@@ -2937,6 +2938,106 @@ void TypeChecker::CheckHOCall(const HOCall &call) {
       });
 }
 
+// A loop's iterators and threaded state variables constrain its
+// variables' types as its translation into a recursive predicate would,
+// with the clause's other goals, as a lambda expression's do (design
+// document, "Loops"): a counter and its bounds are ints, a foreach's list
+// is a list of its element's type, a fromto's four arguments have one
+// type, and so do a state variable's versions.
+void TypeChecker::CheckLoop(const Loop &loop) {
+  goal_ = loop.number;
+  for (const LoopIterator &iterator : loop.iterators) {
+    std::string text{Source(iterator.tokens).ToString()};
+    llvm::ArrayRef<VarId> arguments{iterator.arguments};
+    switch (iterator.kind) {
+    case parser::LoopIteratorKind::For:
+    case parser::LoopIteratorKind::Count:
+      for (VarId var : arguments) {
+        const Type *integer{Primitive("int")};
+        Constrain(
+            [&](Assignment &a) { return UnifyTypes(a, VarType(var), integer); },
+            [&](const Assignment &a) {
+              messages_->Say(Source(iterator.tokens),
+                  "type error in %s: %s has type %s, but a counter and its bounds have type int"_err_en_US,
+                  text, Describe(var), TypeText(a, VarType(var)));
+            });
+      }
+      break;
+    case parser::LoopIteratorKind::Foreach: {
+      // As [X | List], of the type of List.
+      const parser::SymName *name{resolution_.ListName(iterator)};
+      VarId element{arguments[0]}, list{arguments[1]};
+      std::vector<Option> options;
+      if (name) {
+        for (const Symbol *candidate : name->candidates) {
+          if (candidate->kind != SymbolKind::Constructor) {
+            continue;
+          }
+          options.push_back([&, candidate](Assignment &a) {
+            const Signature *sig{SignatureOf(*candidate)};
+            VarId cons[]{element, list};
+            return sig && Apply(a, *candidate, *sig, cons, VarType(list));
+          });
+        }
+      }
+      if (options.empty()) {
+        failed_ = true; // undefined, and reported
+        break;
+      }
+      Extend(options, [&](const Assignment &a) {
+        messages_->Say(Source(iterator.tokens),
+            "type error in %s: %s has type %s, but a list of %s's type, %s, is needed"_err_en_US,
+            text, Describe(list), TypeText(a, VarType(list)),
+            Describe(element), TypeText(a, VarType(element)));
+      });
+      break;
+    }
+    case parser::LoopIteratorKind::Fromto:
+      for (std::size_t j : {0, 2, 3}) {
+        VarId var{arguments[j]}, in{arguments[1]};
+        Constrain(
+            [&](Assignment &a) {
+              return UnifyTypes(a, VarType(var), VarType(in));
+            },
+            [&](const Assignment &a) {
+              messages_->Say(Source(iterator.tokens),
+                  "type error in %s: %s has type %s, but %s has type %s, and the four arguments of fromto have one type"_err_en_US,
+                  text, Describe(var), TypeText(a, VarType(var)),
+                  Describe(in), TypeText(a, VarType(in)));
+            });
+      }
+      break;
+    }
+  }
+  // Each iteration starts with the version that the one before it ended
+  // with, and the first with the one before the loop.
+  for (const LoopState &state : loop.states) {
+    struct {
+      VarId earlier, later;
+      parser::MessageFixedText text;
+    } pairs[]{
+        {state.before, state.in,
+            "type error in the loop: %s has type %s before it, but %s in its first iteration"_err_en_US},
+        {state.out, state.in,
+            "type error in the loop: %s has type %s at the end of an iteration, but %s at the start of the next"_err_en_US},
+        {state.out, state.after,
+            "type error in the loop: %s has type %s at the end of its last iteration, but %s after it"_err_en_US},
+    };
+    for (const auto &pair : pairs) {
+      Constrain(
+          [&](Assignment &a) {
+            return UnifyTypes(a, VarType(pair.earlier), VarType(pair.later));
+          },
+          [&](const Assignment &a) {
+            messages_->Say(Source(loop.tokens), pair.text, Describe(state.in),
+                TypeText(a, VarType(pair.earlier)),
+                TypeText(a, VarType(pair.later)));
+          });
+    }
+  }
+  CheckGoal(loop.body);
+}
+
 void TypeChecker::CheckGoal(const Goal &goal) {
   auto each{[&](llvm::ArrayRef<Goal> goals) {
     for (const Goal &g : goals) {
@@ -2998,10 +3099,7 @@ void TypeChecker::CheckGoal(const Goal &goal) {
               CheckGoal(alternative.goal);
             }
           },
-          [&](const Loop *loop) {
-            messages_->Say(Source(loop->tokens),
-                "type checking %s"_todo_en_US, "loops");
-          },
+          [&](const Loop *loop) { CheckLoop(*loop); },
       },
       goal);
 }

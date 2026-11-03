@@ -1605,17 +1605,23 @@ void ClauseDesugarer::DesugarLoop(const parser::LoopGoal &loop, Goals &out) {
   }
   FinishAtomic();
   // An iterator's variable that also occurs around the loop is another
-  // variable, as a lambda expression's argument is. Two iterators that have
-  // a variable in the same place, as a copied fromto has, are one, which is
-  // legal but almost always a mistake; a variable in different places, as
-  // in fromto(L, [X | Xs], Xs, []), fromto(0, _, X, Last), passes a value
-  // between them.
+  // variable, as a lambda expression's argument is. Two fromtos with a
+  // variable in the same place, as a copied fromto has, are one
+  // accumulator, which is legal but almost always a mistake. A variable in
+  // different places, as in fromto(L, [X | Xs], Xs, []), fromto(0, _, X,
+  // Last), passes a value between them, and one in two foreach(X, ...)
+  // makes their lists' elements the same, as a copy does.
+  auto fromto{[&](std::size_t i) {
+    return loop.iterators[i]->kind == parser::LoopIteratorKind::Fromto;
+  }};
   llvm::DenseSet<unsigned> own;
   for (const LoopScopes::Info::Own &o : info.own) {
     if (const auto *first{llvm::find_if(info.own,
             [&](const LoopScopes::Info::Own &other) {
               return other.var->number == o.var->number &&
-                  other.argument == o.argument && other.iterator < o.iterator;
+                  other.argument == o.argument &&
+                  other.iterator < o.iterator && fromto(o.iterator) &&
+                  fromto(other.iterator);
             })};
         first != info.own.end()) {
       messages_.Say(Source(o.var->tokens),
