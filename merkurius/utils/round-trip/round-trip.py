@@ -13,7 +13,8 @@ round-trip tests").
    tree, as printed by -fdebug-dump-parse-tree-no-sema, which shows no
    locations or trivia.
 
-With --openmp, %$omp directives are read as directives, not comments.
+With --openmp, %$omp directives are read as directives, not comments, and
+with --do-loops, ( Iterators do Body ) is read as a loop.
 
 The script exits with status 1 and reports every file that fails a test.
 """
@@ -94,10 +95,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--merkc", required=True)
     parser.add_argument("--openmp", action="store_true")
+    parser.add_argument("--do-loops", action="store_true")
     parser.add_argument("files", nargs="+")
     args = parser.parse_args()
     if args.openmp:
         OPTIONS.append("-fopenmp")
+    if args.do_loops:
+        OPTIONS.append("-fdo-loops")
     failed = False
     for path in args.files:
         for problem in check(args.merkc, path):

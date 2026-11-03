@@ -122,9 +122,9 @@ std::string UnquoteSpelling(llvm::StringRef spelling) {
 }
 
 TermReader::TermReader(const TokenSequence &tokens, TermArena &arena,
-    Messages &messages, unsigned maxDepth)
-    : tokens_{tokens}, arena_{arena}, messages_{messages}, maxDepth_{maxDepth} {
-}
+    Messages &messages, unsigned maxDepth, const ReaderOptions &options)
+    : tokens_{tokens}, arena_{arena}, messages_{messages}, maxDepth_{maxDepth},
+      options_{options} {}
 
 const Token &TermReader::Peek(std::size_t ahead) const {
   std::size_t j{std::min<std::size_t>(at_ + ahead, tokens_.tokens.size() - 1)};
@@ -177,7 +177,13 @@ const OperatorDefinition *TermReader::GetOperator(const Token &token) const {
   if (token.kind != TokenKind::Name) {
     return nullptr;
   }
-  return FindOperator(UnquoteSpelling(token.spelling));
+  std::string name{UnquoteSpelling(token.spelling)};
+  if (options_.doLoops && name == "do") {
+    static const OperatorDefinition loop{
+        "do", std::nullopt, OperatorForm{Specifier::XFX, 400}};
+    return &loop;
+  }
+  return FindOperator(name);
 }
 
 // Whether the token after a prefix operator can begin its operand. A name

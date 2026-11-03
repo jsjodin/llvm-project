@@ -9,6 +9,10 @@ RUN: merkc -### -E -fopenmp -fopenmp-version=51 -o out.m %S/Inputs/sumsq.m 2>&1 
 RUN:   | FileCheck %s --check-prefix=OMP
 OMP: "-fc1" "-E" "-fopenmp" "-fopenmp-version=51" "-o" "out.m" "{{[^"]*}}sumsq.m"{{$}}
 
+RUN: merkc -### -E -fdo-loops %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=LOOPS
+LOOPS: "-fc1" "-E" "-fdo-loops" "{{[^"]*}}sumsq.m"{{$}}
+
 Two inputs give two jobs.
 RUN: merkc -### -E %S/Inputs/sumsq.m %S/Inputs/sumsq.m 2>&1 \
 RUN:   | FileCheck %s --check-prefix=TWO

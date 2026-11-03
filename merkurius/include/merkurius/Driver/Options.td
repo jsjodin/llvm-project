@@ -38,6 +38,8 @@ def O : Joined<["-"], "O">, MetaVarName<"<level>">,
 
 def fopenmp : Flag<["-"], "fopenmp">,
   HelpText<"Read %$omp directives">;
+def fdo_loops : Flag<["-"], "fdo-loops">,
+  HelpText<"Read ( Iterators do Body ) loops, which are not Mercury">;
 def fopenmp_version_EQ : Joined<["-"], "fopenmp-version=">,
   MetaVarName<"<version>">,
   HelpText<"OpenMP version to accept, such as 52 for OpenMP 5.2">;

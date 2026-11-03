@@ -30,7 +30,8 @@ std::optional<Item> ConvertItem(const Term &, ConvertState &);
 // reported and left out, so the tree is complete only if no error was
 // reported. Its terms may nest `maxDepth` levels deep (TermReader).
 const ParseTree &ConvertFile(const TokenSequence &, ParseTreeArena &,
-    Messages &, unsigned maxDepth = TermReader::defaultMaxDepth);
+    Messages &, unsigned maxDepth = TermReader::defaultMaxDepth,
+    const ReaderOptions & = {});
 
 } // namespace merkurius::parser
 #endif // MERKURIUS_PARSER_CONVERT_H_

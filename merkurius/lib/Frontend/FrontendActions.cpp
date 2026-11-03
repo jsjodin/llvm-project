@@ -46,6 +46,12 @@
 
 namespace merkurius::frontend {
 
+static parser::ReaderOptions ReaderOptionsOf(CompilerInstance &ci) {
+  parser::ReaderOptions options;
+  options.doLoops = ci.getLangOpts().doLoops;
+  return options;
+}
+
 bool FrontendAction::run(CompilerInstance &ci, llvm::StringRef input) {
   parser::AllSources &allSources{ci.getAllSources()};
   std::string error;
@@ -132,7 +138,8 @@ bool DebugDumpTermsAction::executeAction() {
     return false;
   }
   parser::TermArena arena;
-  parser::TermReader reader{tokens, arena, messages};
+  parser::TermReader reader{tokens, arena, messages,
+      parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci)};
   std::size_t readerMessages{messages.messages().size()};
   while (std::optional<parser::ItemTerm> item{reader.ReadItem()}) {
     const parser::Token &first{tokens.tokens[item->tokens.first]};
@@ -162,7 +169,8 @@ bool DebugDumpParseTreeNoSemaAction::executeAction() {
   parser::Messages messages;
   parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
   parser::ParseTreeArena arena;
-  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages)};
+  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages,
+      parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci))};
   messages.Emit(llvm::errs(), ci.getAllSources());
   llvm::raw_ostream *os{ci.createDefaultOutputFile()};
   if (!os) {
@@ -180,7 +188,8 @@ bool DebugUnparseExactAction::executeAction() {
   parser::Messages messages;
   parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
   parser::ParseTreeArena arena;
-  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages)};
+  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages,
+      parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci))};
   llvm::raw_ostream *os{ci.createDefaultOutputFile()};
   if (!os) {
     return false;
@@ -203,7 +212,8 @@ bool DebugUnparseNoSemaAction::executeAction() {
   parser::Messages messages;
   parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
   parser::ParseTreeArena arena;
-  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages)};
+  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages,
+      parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci))};
   messages.Emit(llvm::errs(), ci.getAllSources());
   llvm::raw_ostream *os{ci.createDefaultOutputFile()};
   if (!os) {
@@ -221,7 +231,8 @@ bool DebugDumpSemanticFormAction::executeAction() {
   parser::Messages messages;
   parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
   parser::ParseTreeArena arena;
-  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages)};
+  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages,
+      parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci))};
   semantics::SemanticArena semanticArena;
   const semantics::SemanticForm &form{
       semantics::Desugar(tree, tokens, semanticArena, messages)};
@@ -245,7 +256,8 @@ bool DebugDumpImportsAction::executeAction() {
   parser::Messages messages;
   parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
   parser::ParseTreeArena arena;
-  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages)};
+  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages,
+      parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci))};
   semantics::ModuleLoader loader{ci.getAllSources(),
       ci.getFrontendOpts().libraryDirectory, messages,
       !ci.getFrontendOpts().mmcUniqueness};
@@ -306,7 +318,8 @@ void Resolve(CompilerInstance &ci, parser::SourceFile &file,
   parser::LexerOptions options;
   options.openMP = ci.getLangOpts().openMP;
   r.tokens = parser::Lex(file, options, r.messages);
-  r.tree = &parser::ConvertFile(r.tokens, r.arena, r.messages);
+  r.tree = &parser::ConvertFile(r.tokens, r.arena, r.messages,
+      parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci));
   r.form = &semantics::Desugar(*r.tree, r.tokens, r.semanticArena, r.messages);
   r.loader = std::make_unique<semantics::ModuleLoader>(ci.getAllSources(),
       ci.getFrontendOpts().libraryDirectory, r.messages,

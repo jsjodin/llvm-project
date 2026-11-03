@@ -805,6 +805,122 @@ std::optional<DataTerm> ConvertSwitchVar(const Term &t, ConvertState &state) {
   return vars->front();
 }
 
+// The iterators of a loop and their arities (design document, "Loops").
+struct LoopIteratorForm {
+  llvm::StringLiteral name;
+  LoopIteratorKind kind;
+  std::size_t arity;
+};
+constexpr LoopIteratorForm loopIteratorForms[]{
+    {"for", LoopIteratorKind::For, 3},
+    {"for", LoopIteratorKind::For, 4},
+    {"foreach", LoopIteratorKind::Foreach, 2},
+    {"count", LoopIteratorKind::Count, 3},
+    {"fromto", LoopIteratorKind::Fromto, 4},
+};
+
+std::optional<const LoopIterator *> ConvertLoopIterator(
+    const Term &term, ConvertState &state) {
+  const Term &t{StripParentheses(term)};
+  auto say{[&](const Term &at, MessageFixedText text) {
+    state.messages.Say(
+        GetSource(at, state.tokens), text, Excerpt(at, state.tokens));
+    return std::nullopt;
+  }};
+  const auto *c{llvm::dyn_cast<CompoundTerm>(&t)};
+  const LoopIteratorForm *form{nullptr};
+  if (c && c->form() == CompoundForm::Canonical) {
+    for (const LoopIteratorForm &f : loopIteratorForms) {
+      if (FunctorName(*c) == f.name && Arity(*c) == f.arity) {
+        form = &f;
+      }
+    }
+  }
+  if (!form) {
+    llvm::StringRef name{c ? FunctorName(*c) : llvm::StringRef{}};
+    if (name == "param") {
+      return say(t,
+          "'%s': loops have no param iterator; a variable that occurs "
+          "outside a loop's body is shared by its iterations"_err_en_US);
+    }
+    if (name == "foreacharg") {
+      return say(t,
+          "'%s': loops have no foreacharg iterator, since a term's "
+          "arguments may have different types"_err_en_US);
+    }
+    return say(t,
+        "'%s' is not an iterator: expected for(I, Lo, Hi), "
+        "for(I, Lo, Hi, Step), foreach(X, List), count(I, Lo, Hi) or "
+        "fromto(First, In, Out, Last)"_err_en_US);
+  }
+  llvm::ArrayRef<const Term *> operands{c->arguments()};
+  if (form->kind == LoopIteratorKind::For ||
+      form->kind == LoopIteratorKind::Count) {
+    if (!llvm::isa<VariableTerm>(StripParentheses(*operands[0]))) {
+      return say(StripParentheses(*operands[0]),
+          "'%s' is not a variable: the first argument of for and count "
+          "is the loop's counter"_err_en_US);
+    }
+  }
+  if (form->kind == LoopIteratorKind::For && operands.size() == 4) {
+    const Term &step{StripParentheses(*operands[3])};
+    const auto *integer{llvm::dyn_cast<IntegerTerm>(&step)};
+    if (!integer || integer->isUnsigned() ||
+        integer->size() != IntegerSize::Default ||
+        integer->magnitude().isZero()) {
+      return say(step,
+          "'%s' is not a nonzero integer literal: the step of a for "
+          "iterator is one, so that its direction is known"_err_en_US);
+    }
+  }
+  auto arguments{detail::ConvertElements(dataTerm, operands, state)};
+  if (!arguments) {
+    return std::nullopt;
+  }
+  return state.arena.Make<LoopIterator>(t.tokens(), form->kind, *arguments);
+}
+
+// ( Iterators do Body ).
+std::optional<Goal> ConvertLoop(const CompoundTerm &loop, ConvertState &state) {
+  llvm::SmallVector<const Term *, 4> terms;
+  Flatten(Operand(loop, 0), ",", terms);
+  llvm::SmallVector<const LoopIterator *, 4> iterators;
+  bool ok{true};
+  const LoopIterator *firstFor{nullptr};
+  for (const Term *term : terms) {
+    std::optional<const LoopIterator *> iterator{
+        ConvertLoopIterator(*term, state)};
+    if (!iterator) {
+      ok = false;
+      continue;
+    }
+    if ((*iterator)->kind == LoopIteratorKind::For) {
+      if (firstFor) {
+        state.messages.Say(GetSource(*term, state.tokens),
+            "a loop has at most one for iterator; count(I, Lo, Hi) counts "
+            "in lockstep with it"_err_en_US);
+        ok = false;
+      }
+      firstFor = *iterator;
+    }
+    iterators.push_back(*iterator);
+  }
+  std::optional<Goal> body{Apply(goal, Operand(loop, 1), state)};
+  if (!ok || !body) {
+    return std::nullopt;
+  }
+  return state.arena.Make<LoopGoal>(loop.tokens(),
+      state.arena.SaveArray(llvm::ArrayRef<const LoopIterator *>{iterators}),
+      *body);
+}
+
+// Whether the term is ( Iterators do Body ), which the reader makes only
+// with -fdo-loops; do(Iterators, Body) written as a call is a call.
+const CompoundTerm *AsLoop(const Term &t) {
+  const CompoundTerm *c{AsCompound(t, "do", 2)};
+  return c && c->form() == CompoundForm::Infix ? c : nullptr;
+}
+
 } // namespace
 
 std::optional<Goal> GoalRule::Convert(
@@ -817,6 +933,9 @@ std::optional<Goal> GoalRule::Convert(
   }};
   if (const auto *directive{llvm::dyn_cast<DirectiveTerm>(&t)}) {
     return ConvertOmpGoal(*directive, state);
+  }
+  if (const CompoundTerm * loop{AsLoop(t)}) {
+    return ConvertLoop(*loop, state);
   }
   // Higher-order calls: P, and P(X, Y).
   if (llvm::isa<VariableTerm>(t)) {
@@ -1159,6 +1278,12 @@ std::optional<DcgGoal> DcgGoalRule::Convert(
   auto make{[&](auto *node) -> std::optional<DcgGoal> { return node; }};
   if (const auto *directive{llvm::dyn_cast<DirectiveTerm>(&t)}) {
     return Apply(dcgGoal, IgnoreDirective(*directive, state), state);
+  }
+  if (AsLoop(t)) {
+    state.messages.Say(GetSource(t, state.tokens),
+        "a loop is not a DCG goal; write it in braces, { ( ... do ... ) }, "
+        "with the state threaded explicitly"_err_en_US);
+    return std::nullopt;
   }
   if (llvm::isa<VariableTerm>(t)) {
     if (auto closure{dataTerm.Convert(t, state)}) {
