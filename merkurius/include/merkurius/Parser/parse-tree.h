@@ -610,6 +610,7 @@ struct TryGoal;
 struct AtomicGoal;
 struct EventGoal;
 struct OmpGoal;
+struct LoopGoal;
 using Goal = std::variant<const Conjunction *, const Disjunction *,
     const BuiltinGoal *, const Negation *, const Implication *,
     const IfThenElse *, const Unification *, const Inequality *,
@@ -618,7 +619,8 @@ using Goal = std::variant<const Conjunction *, const Disjunction *,
     const PurityGoal *, const PromisePurity *, const PromiseSolutions *,
     const RequireDeterminism *, const RequireSwitch *,
     const DisableWarnings *, const TraceGoal *, const TryGoal *,
-    const AtomicGoal *, const EventGoal *, const OmpGoal *>;
+    const AtomicGoal *, const EventGoal *, const OmpGoal *,
+    const LoopGoal *>;
 
 struct DcgConjunction;
 struct DcgDisjunction;
@@ -1355,6 +1357,38 @@ struct OmpDirective {
     f("id", id);
     f("arguments", arguments);
     f("clauses", clauses);
+  }
+};
+
+// Loops (design document, "Loops"), read with -fdo-loops: Schimpf's
+// logical loops ("Logical Loops", ICLP 2002), adapted to Mercury.
+ENUM_CLASS(LoopIteratorKind, For, Foreach, Count, Fromto)
+
+// for(I, Lo, Hi), for(I, Lo, Hi, Step), foreach(X, List), count(I, Lo, Hi)
+// or fromto(First, In, Out, Last), with its arguments in that order. The
+// variable of a for or count is a variable, and a for's step a nonzero
+// integer literal.
+struct LoopIterator {
+  static constexpr llvm::StringLiteral kindName{"LoopIterator"};
+  TokenRange tokens;
+  LoopIteratorKind kind;
+  llvm::ArrayRef<DataTerm> arguments;
+  template <typename F> void ForEachField(F &&f) const {
+    f("kind", kind);
+    f("arguments", arguments);
+  }
+};
+
+// ( Iterators do Body ), whose iterators advance in lockstep. At most one
+// of them is a for.
+struct LoopGoal {
+  static constexpr llvm::StringLiteral kindName{"LoopGoal"};
+  TokenRange tokens;
+  llvm::ArrayRef<const LoopIterator *> iterators;
+  Goal body;
+  template <typename F> void ForEachField(F &&f) const {
+    f("iterators", iterators);
+    f("body", body);
   }
 };
 

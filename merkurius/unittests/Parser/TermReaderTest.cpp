@@ -26,7 +26,8 @@ struct ReadResult {
   std::vector<unsigned> variables;
 };
 
-ReadResult Read(llvm::StringRef text, bool openMP = false) {
+ReadResult Read(
+    llvm::StringRef text, bool openMP = false, bool doLoops = false) {
   AllSources all;
   SourceFile *file{
       all.AddBuffer("test.m", llvm::MemoryBuffer::getMemBufferCopy(text))};
@@ -35,7 +36,10 @@ ReadResult Read(llvm::StringRef text, bool openMP = false) {
   options.openMP = openMP;
   TokenSequence tokens{Lex(*file, options, messages)};
   TermArena arena;
-  TermReader reader{tokens, arena, messages};
+  ReaderOptions readerOptions;
+  readerOptions.doLoops = doLoops;
+  TermReader reader{
+      tokens, arena, messages, TermReader::defaultMaxDepth, readerOptions};
   ReadResult result;
   while (std::optional<ItemTerm> item{reader.ReadItem()}) {
     if (item->term) {
@@ -283,6 +287,32 @@ TEST(TermReaderTest, Directives) {
   ASSERT_EQ(result.items.size(), 1u);
   // The directive annotates one conjunct.
   EXPECT_EQ(result.items[0], "':-'(p, ','('%$omp'('&'(a, b)), c))");
+}
+
+// With -fdo-loops, do is an infix operator, xfx with ';''s priority
+// (design document, "Loops"); without it, it is an ordinary name.
+TEST(TermReaderTest, DoLoops) {
+  ReadResult loop{Read("p :- ( for(I, 1, N), q(I) do r(I), s ).\n",
+      /*openMP=*/false, /*doLoops=*/true)};
+  EXPECT_TRUE(loop.messages.empty());
+  ASSERT_EQ(loop.items.size(), 1u);
+  EXPECT_EQ(loop.items[0],
+      "':-'(p, do(','(for(I, 1, N), q(I)), ','(r(I), s)))");
+  // A disjunction body needs parentheses: ';' has do's priority.
+  ReadResult disjunction{
+      Read("p :- ( a do b ; c ).\n", /*openMP=*/false, /*doLoops=*/true)};
+  EXPECT_EQ(disjunction.items, std::vector<std::string>{"error"});
+  // do applied as a call, and do in parentheses, are names; a quoted 'do'
+  // is the operator too.
+  ReadResult names{Read("p :- do(a, b), X = (do), (a 'do' b).\n",
+      /*openMP=*/false, /*doLoops=*/true)};
+  EXPECT_TRUE(names.messages.empty());
+  ASSERT_EQ(names.items.size(), 1u);
+  EXPECT_EQ(names.items[0],
+      "':-'(p, ','(do(a, b), ','('='(X, do), do(a, b))))");
+  // Without the option, a loop is a syntax error, as in mmc.
+  EXPECT_EQ(Error("p :- ( a do b ).\n"),
+      "expected an operator or ')', but found 'do'");
 }
 
 TEST(TermReaderTest, Recovery) {

@@ -6,6 +6,13 @@
 # RUN: merkc -fc1 -fdebug-unparse-no-sema %S/Inputs/messy.canonical.m \
 # RUN:   | diff %S/Inputs/messy.canonical.m -
 #
+# Loops, with -fdo-loops (design document, "Loops"): ( Iterators do, with
+# the iterators on the line of the parenthesis and the body below.
+# RUN: merkc -fc1 -fdo-loops -fopenmp -fdebug-unparse-no-sema \
+# RUN:   %S/Inputs/loops-messy.m | diff %S/Inputs/loops.canonical.m -
+# RUN: merkc -fc1 -fdo-loops -fopenmp -fdebug-unparse-no-sema \
+# RUN:   %S/Inputs/loops.canonical.m | diff %S/Inputs/loops.canonical.m -
+#
 # With every operator term in parentheses:
 # RUN: merkc -fc1 -fdebug-unparse-parenthesized-no-sema %S/Inputs/messy.m \
 # RUN:   | FileCheck %s

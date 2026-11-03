@@ -119,6 +119,9 @@ struct LangOptions {
   bool openMP{false};
   // -fopenmp-version=, as in Clang and Flang: 52 for OpenMP 5.2.
   unsigned openMPVersion{52};
+  // -fdo-loops: read `do` as an operator, for loops (design document,
+  // "Loops").
+  bool doLoops{false};
 };
 
 } // namespace merkurius::frontend

@@ -35,6 +35,13 @@ struct ItemTerm {
   unsigned variables; // the number of distinct variables in the item
 };
 
+// What the reader reads besides Mercury's terms.
+struct ReaderOptions {
+  // `do` as an infix operator, xfx with ';''s priority, for loops (design
+  // document, "Loops"). mmc has no such operator.
+  bool doLoops{false};
+};
+
 class TermReader {
 public:
   // The reader recurses once per level of nesting: brackets, arguments and
@@ -46,7 +53,7 @@ public:
   // The terms of each item are made in `arena`, which the caller may reset
   // between items.
   TermReader(const TokenSequence &, TermArena &, Messages &,
-      unsigned maxDepth = defaultMaxDepth);
+      unsigned maxDepth = defaultMaxDepth, const ReaderOptions & = {});
 
   // Reads the next item, or returns nullopt at the end of the file.
   std::optional<ItemTerm> ReadItem();
@@ -99,6 +106,7 @@ private:
   TermArena &arena_;
   Messages &messages_;
   const unsigned maxDepth_;
+  const ReaderOptions options_;
   unsigned depth_{0};
   std::uint32_t at_{0};
   bool failed_{false}; // a syntax error in the current item
