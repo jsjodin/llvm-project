@@ -908,6 +908,9 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
           [&](const parser::OmpGoal *x) {
             out.push_back(MakeScope(x->tokens, ScopeKind::Omp, goal, {}, x->goal));
           },
+          [&](const parser::LoopGoal *x) {
+            Error(x->tokens, "loops are not desugared yet"_err_en_US);
+          },
       },
       goal);
 }

@@ -18,3 +18,7 @@
 # the parse tree:
 # RUN: %round-trip --openmp %S/../convert/omp.m %S/../../Lexer/directives.m \
 # RUN:   %S/../../Driver/Inputs/sumsq.m
+#
+# With -fdo-loops too, on the files with loops:
+# RUN: %round-trip --openmp --do-loops %S/../convert/loops.m \
+# RUN:   %S/Inputs/loops-messy.m %S/Inputs/loops.canonical.m

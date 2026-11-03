@@ -776,6 +776,8 @@ bool CanonicalUnparser::IsBlockChild(const N &n, const Child &c) const {
   } else if constexpr (std::is_same_v<N, TryGoal>) {
     return c.node == Pointer(n.goal) || c.node == Pointer(n.then) ||
         c.node == Pointer(n.otherwise);
+  } else if constexpr (std::is_same_v<N, LoopGoal>) {
+    return c.node == Pointer(n.body);
   } else {
     return false;
   }
@@ -816,6 +818,13 @@ bool CanonicalUnparser::BeforeChild(const N &n, const Child &c) {
     }
   } else if constexpr (isDisjunction<N>) {
     return nest(Break::HardLine);
+  } else if constexpr (std::is_same_v<N, LoopGoal>) {
+    // ( Iterators do
+    //     Body
+    // )
+    if (c.node == Pointer(n.body)) {
+      return nest(Break::HardLine);
+    }
   }
   return false;
 }
@@ -902,8 +911,11 @@ void CanonicalUnparser::Node(const N &n, bool block, bool viaVariant) {
           e + 2 < elements.size() && elements[e + 1].child &&
           !elements[e + 2].child && elements[e + 2].token == match_[j]) {
         const Child &c{*elements[e + 1].child};
+        // A loop is laid out as an if-then-else: ( Iterators do, with its
+        // body on lines of its own.
         bool ite{c.kind == IfThenElse::kindName ||
-            c.kind == DcgIfThenElse::kindName};
+            c.kind == DcgIfThenElse::kindName ||
+            c.kind == LoopGoal::kindName};
         bool disjunction{c.kind == Disjunction::kindName ||
             c.kind == DcgDisjunction::kindName};
         if (c.tokens.first == j + 1 && c.tokens.last + 1 == match_[j] &&
@@ -942,7 +954,8 @@ void CanonicalUnparser::Node(const N &n, bool block, bool viaVariant) {
     }
   }
   doc_.EndGroup();
-  if constexpr (isDisjunction<N> || isIfThenElse<N>) {
+  if constexpr (isDisjunction<N> || isIfThenElse<N> ||
+      std::is_same_v<N, LoopGoal>) {
     if (n.tokens.last + 1 < tokens_.size() &&
         tokens_[n.tokens.last + 1].kind == TokenKind::Close) {
       Request(Break::HardLine);
@@ -990,6 +1003,12 @@ void CanonicalUnparser::Gap(const N &n, llvm::ArrayRef<Element> elements,
     return;
   case TokenKind::Comma:
     Emit(j);
+    // A loop's iterators stay on the line of its parenthesis, whose group
+    // the body below breaks.
+    if constexpr (std::is_same_v<N, LoopGoal>) {
+      Request(Break::Space);
+      return;
+    }
     Request(isConjunction<N> && block ? Break::HardLine : Break::Line);
     return;
   case TokenKind::HtSep:
