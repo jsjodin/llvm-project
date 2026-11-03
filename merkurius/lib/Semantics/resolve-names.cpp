@@ -849,6 +849,7 @@ void Resolver::ResolveGoal(const Goal &goal, const Visibility &scope) {
               ResolveGoal(alternative.goal, scope);
             }
           },
+          [&](const Loop *loop) { ResolveGoal(loop->body, scope); },
       },
       goal);
 }

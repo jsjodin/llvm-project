@@ -2998,6 +2998,10 @@ void TypeChecker::CheckGoal(const Goal &goal) {
               CheckGoal(alternative.goal);
             }
           },
+          [&](const Loop *loop) {
+            messages_->Say(Source(loop->tokens),
+                "type checking %s"_todo_en_US, "loops");
+          },
       },
       goal);
 }
@@ -3337,6 +3341,7 @@ void TypeChecker::ForEachReference(
               ForEachReference(alternative.goal, f);
             }
           },
+          [&](const Loop *loop) { ForEachReference(loop->body, f); },
       },
       goal);
 }

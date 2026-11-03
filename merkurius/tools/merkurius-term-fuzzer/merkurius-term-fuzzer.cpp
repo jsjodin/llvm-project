@@ -7,8 +7,10 @@
 //===----------------------------------------------------------------------===//
 //
 // A fuzz target for the lexer, the term reader, the converter, the
-// unparser and desugaring. For any input, with and without OpenMP
-// directives, it checks that none of them crashes; that the tokens, and the parse tree, unparse to
+// unparser and the semantic passes. For any input, in each configuration
+// (plain Mercury, with OpenMP directives, and with OpenMP directives and
+// -fdo-loops), it checks that none of them crashes; that the tokens, and
+// the parse tree, unparse to
 // the input byte for byte; that the exact unparser finds every token
 // accounted for; that an input which converts without errors has a
 // canonical layout that is its own canonical layout, and the same parse tree
@@ -53,6 +55,13 @@ namespace {
 // frames larger and the fuzzer runs on the main thread.
 constexpr unsigned maxDepth{1000};
 
+// What the lexer and the reader accept beyond Mercury.
+struct Config {
+  bool openMP;
+  bool doLoops;
+};
+constexpr Config configs[]{{false, false}, {true, false}, {true, true}};
+
 void Fail(const char *what, llvm::StringRef input, llvm::StringRef detail) {
   llvm::errs() << "merkurius-term-fuzzer: " << what << "\ninput: " << input
                << "\ndetail: " << detail << '\n';
@@ -62,13 +71,13 @@ void Fail(const char *what, llvm::StringRef input, llvm::StringRef detail) {
 // The canonical form of each item that reads without messages, and an
 // empty string for each other item.
 std::vector<std::string> ReadCanonical(
-    llvm::StringRef text, bool openMP, bool checkUnparse) {
+    llvm::StringRef text, Config config, bool checkUnparse) {
   AllSources all;
   SourceFile *file{all.AddBuffer(
       "fuzz.m", llvm::MemoryBuffer::getMemBufferCopy(text, "fuzz.m"))};
   Messages messages;
   LexerOptions options;
-  options.openMP = openMP;
+  options.openMP = config.openMP;
   TokenSequence tokens{Lex(*file, options, messages)};
   if (checkUnparse) {
     std::string unparsed;
@@ -80,7 +89,8 @@ std::vector<std::string> ReadCanonical(
   }
   bool lexerErrors{messages.AnyFatalError()};
   TermArena arena;
-  TermReader reader{tokens, arena, messages, maxDepth};
+  TermReader reader{
+      tokens, arena, messages, maxDepth, ReaderOptions{config.doLoops}};
   std::vector<std::string> items;
   std::size_t count{messages.messages().size()};
   while (std::optional<ItemTerm> item{reader.ReadItem()}) {
@@ -104,16 +114,17 @@ struct Unparsed {
 
 // Converts and unparses `text`, and fails the input if the exact unparser
 // reports a problem.
-Unparsed ConvertAndUnparse(llvm::StringRef text, bool openMP) {
+Unparsed ConvertAndUnparse(llvm::StringRef text, Config config) {
   AllSources all;
   SourceFile *file{
       all.AddBuffer("fuzz.m", llvm::MemoryBuffer::getMemBufferCopy(text))};
   Messages messages;
   LexerOptions options;
-  options.openMP = openMP;
+  options.openMP = config.openMP;
   TokenSequence tokens{Lex(*file, options, messages)};
   ParseTreeArena arena;
-  const ParseTree &tree{ConvertFile(tokens, arena, messages, maxDepth)};
+  const ParseTree &tree{ConvertFile(
+      tokens, arena, messages, maxDepth, ReaderOptions{config.doLoops})};
   Unparsed result;
   result.ok = !messages.AnyFatalError();
   Messages problems;
@@ -167,13 +178,13 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, bool openMP) {
 extern "C" int LLVMFuzzerTestOneInput(
     const std::uint8_t *data, std::size_t size) {
   llvm::StringRef input{reinterpret_cast<const char *>(data), size};
-  for (bool openMP : {false, true}) {
-    Unparsed first{ConvertAndUnparse(input, openMP)};
+  for (Config config : configs) {
+    Unparsed first{ConvertAndUnparse(input, config)};
     if (first.exact != input) {
       Fail("the parse tree does not unparse to the input", input, first.exact);
     }
     if (first.ok) {
-      Unparsed canonical{ConvertAndUnparse(first.canonical, openMP)};
+      Unparsed canonical{ConvertAndUnparse(first.canonical, config)};
       if (!canonical.ok || canonical.tree != first.tree) {
         Fail("the canonical layout has a different parse tree", input,
             first.canonical);
@@ -183,22 +194,23 @@ extern "C" int LLVMFuzzerTestOneInput(
             first.canonical + "\nbecame\n" + canonical.canonical);
       }
       Unparsed parenthesized{
-          ConvertAndUnparse(first.parenthesized, openMP)};
+          ConvertAndUnparse(first.parenthesized, config)};
       if (!parenthesized.ok || parenthesized.tree != first.tree) {
         Fail("the parenthesized form has a different parse tree", input,
             first.parenthesized);
       }
     }
   }
-  for (bool openMP : {false, true}) {
-    for (const std::string &canonical : ReadCanonical(input, openMP, true)) {
+  for (Config config : configs) {
+    for (const std::string &canonical : ReadCanonical(input, config, true)) {
       if (canonical.empty()) {
         continue;
       }
       // Without directives, a canonical form is one item that prints the
-      // same; '%$omp' is a quoted name there.
+      // same; '%$omp' is a quoted name there. A do loop prints as do(...).
       std::string item{canonical + ".\n"};
-      std::vector<std::string> again{ReadCanonical(item, false, false)};
+      std::vector<std::string> again{
+          ReadCanonical(item, Config{false, config.doLoops}, false)};
       if (again.size() != 1 || again[0] != canonical) {
         Fail("a canonical form does not read back as itself", input,
             canonical + " became " + (again.empty() ? "nothing" : again[0]));

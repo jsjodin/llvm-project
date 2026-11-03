@@ -2145,6 +2145,7 @@ ProcedureChecker::Result ProcedureChecker::CheckGoal(
           },
           [&](const Try *) { return Unsupported(Unchecked::Try); },
           [&](const Atomic *) { return Unsupported(Unchecked::Atomic); },
+          [&](const Loop *) { return Unsupported(Unchecked::Loop); },
       },
       goal);
 }
