@@ -138,6 +138,8 @@ public:
 
 private:
   friend class TypeChecker;
+  // Loop translation adds the clauses and signatures of loops' predicates.
+  friend class LoopTranslator;
   common::Arena arena_;
   TypeContext types_;
   // The type of an undefined name, which matches every type, so that it

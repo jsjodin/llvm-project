@@ -6,13 +6,16 @@
 % have a loop, and is generalized as usual. Inputs/loops-translation.m is
 % the translation of each loop into recursive predicates, written by hand
 % with the types below declared, which loops-translation.test checks with
-% mmc. Mode checking does not take loops yet.
+% mmc. The loops' predicates, which their translation makes, have the
+% types given here, and their modes are inferred.
 %
 % RUN: merkc -fc1 -fdo-loops -fdebug-dump-types %s 2>&1 \
 % RUN:   | FileCheck --implicit-check-not=error: --implicit-check-not=warning: %s
-% RUN: not merkc -fc1 -fdo-loops -fdebug-dump-modes %s 2>&1 \
-% RUN:   | FileCheck --check-prefix=MODES %s
-% MODES: loops.m:34:7: error: not yet implemented: mode checking loops
+% RUN: merkc -fc1 -fdo-loops -fdebug-dump-modes %s 2>&1 \
+% RUN:   | FileCheck --check-prefix=MODES --implicit-check-not=error: %s
+% MODES: 37:7 pred loops.sum_list__loop_37_7/3 inferred mode 0: sum_list__loop_37_7(in, in, out)
+% MODES: 83:7 pred loops.saxpy__loop_83_7/6 inferred mode 0: saxpy__loop_83_7(in, di, di, uo, in, in)
+% MODES: 114:7 pred loops.length_of__loop_114_7/3 inferred mode 0: length_of__loop_114_7(in, di, uo)
 
 :- module loops.
 :- interface.
