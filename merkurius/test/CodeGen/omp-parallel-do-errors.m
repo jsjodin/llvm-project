@@ -2,7 +2,9 @@
 % Under a parallel directive): it is counted by one for; the values it
 % carries from one iteration to the next are arrays updated in place,
 % since reductions are not implemented yet; it threads no io state; and
-% its body is det and pure. Each error leaves its procedure out.
+% its body is det and pure. The directive is decomposed into parallel and
+% do, and each clause is reported for the leaf it applies to, or as not
+% allowed on any. Each error leaves its procedure out.
 %
 % RUN: not merkc -fc1 -fopenmp -fdo-loops -emit-merk %s -o /dev/null 2>&1 \
 % RUN:   | FileCheck --implicit-check-not=error: %s
@@ -19,7 +21,11 @@
 :- pred no_loop(int::in, int::out) is det.
 :- pred fails(int::in) is semidet.
 :- pred impure_body(int::in) is det.
-:- pred clauses(int::in, array(int)::array_di, array(int)::array_uo) is det.
+:- pred schedule(int::in, array(int)::array_di, array(int)::array_uo) is det.
+:- pred threads(int::in, array(int)::array_di, array(int)::array_uo) is det.
+:- pred if_parallel(int::in, array(int)::array_di, array(int)::array_uo) is det.
+:- pred mapped(int::in, array(int)::array_di, array(int)::array_uo) is det.
+:- pred indexed(int::in, array(int)::array_di, array(int)::array_uo) is det.
 :- implementation.
 :- import_module int, list.
 
@@ -78,7 +84,29 @@ impure_body(N) :-
 :- pragma foreign_proc("C", poke(I::in), [will_not_call_mercury],
     "(void) I;").
 
-clauses(N, !A) :-
+schedule(N, !A) :-
     %$omp parallel do schedule(static)
-% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for clauses of the parallel do directive
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for the schedule clause of the do directive
+    ( for(I, 0, N) do !A ^ elem(I) := I ).
+
+threads(N, !A) :-
+    %$omp parallel do num_threads(2)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for the num_threads clause of the parallel directive
+    ( for(I, 0, N) do !A ^ elem(I) := I ).
+
+% A modifier names the leaf.
+if_parallel(N, !A) :-
+    %$omp parallel do if(parallel: N > 3)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for the if clause of the parallel directive
+    ( for(I, 0, N) do !A ^ elem(I) := I ).
+
+mapped(N, !A) :-
+    %$omp parallel do map(to: N)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: the map clause is not allowed on the parallel do directive
+    ( for(I, 0, N) do !A ^ elem(I) := I ).
+
+% Merkurius's own clauses take no part in the decomposition.
+indexed(N, !A) :-
+    %$omp parallel do index(I)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for the index clause
     ( for(I, 0, N) do !A ^ elem(I) := I ).
