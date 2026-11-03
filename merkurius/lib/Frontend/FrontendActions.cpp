@@ -31,10 +31,13 @@
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
 #include "mlir/Dialect/DLTI/DLTI.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Parser/Parser.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/IRReader/IRReader.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Path.h"
 #include <functional>
@@ -731,7 +734,7 @@ static mlir::OwningOpRef<mlir::ModuleOp> ReadMLIR(mlir::MLIRContext &context,
     const parser::SourceFile &file,
     std::unique_ptr<codegen::TargetInfo> &target) {
   context.loadDialect<merk::MerkDialect, mlir::DLTIDialect,
-      mlir::LLVM::LLVMDialect>();
+      mlir::LLVM::LLVMDialect, mlir::omp::OpenMPDialect>();
   // Errors in it are reported at file:line:column, with the line.
   llvm::SourceMgr sourceMgr;
   sourceMgr.AddNewSourceBuffer(
@@ -754,17 +757,65 @@ static mlir::OwningOpRef<mlir::ModuleOp> ReadMLIR(mlir::MLIRContext &context,
   return module;
 }
 
+// Reports MLIR's diagnostics as the front end reports its messages, at
+// file:line:column.
+static mlir::LogicalResult ReportDiagnostic(mlir::Diagnostic &diagnostic) {
+  std::string message;
+  llvm::raw_string_ostream os{message};
+  if (auto loc{mlir::dyn_cast<mlir::FileLineColLoc>(diagnostic.getLocation())}) {
+    os << llvm::sys::path::filename(loc.getFilename().getValue()) << ':'
+       << loc.getLine() << ':' << loc.getColumn() << ": ";
+  }
+  switch (diagnostic.getSeverity()) {
+  case mlir::DiagnosticSeverity::Error:
+    os << "error: ";
+    break;
+  case mlir::DiagnosticSeverity::Warning:
+    os << "warning: ";
+    break;
+  default:
+    os << "note: ";
+    break;
+  }
+  os << diagnostic.str();
+  llvm::errs() << message << '\n';
+  return mlir::success();
+}
+
+// What the action's input is: as -x says, or else as its extension does.
+static InputLanguage Language(
+    InputLanguage language, const parser::SourceFile &file) {
+  if (language != InputLanguage::FromExtension) {
+    return language;
+  }
+  llvm::StringRef extension{llvm::sys::path::extension(file.path())};
+  if (extension == ".mlir") {
+    return InputLanguage::MLIR;
+  }
+  if (extension == ".ll" || extension == ".bc") {
+    return InputLanguage::LLVMIR;
+  }
+  return InputLanguage::Mercury;
+}
+
 bool CodeGenAction::executeAction() {
   CompilerInstance &ci{getInstance()};
   mlir::MLIRContext context;
+  mlir::ScopedDiagnosticHandler diagnostics{&context, ReportDiagnostic};
   std::unique_ptr<codegen::TargetInfo> target;
   mlir::OwningOpRef<mlir::ModuleOp> module;
-  if (llvm::sys::path::extension(getSourceFile().path()) == ".mlir") {
+  switch (Language(ci.getFrontendOpts().inputLanguage, getSourceFile())) {
+  case InputLanguage::MLIR:
     module = ReadMLIR(context, getSourceFile(), target);
     if (!module) {
       return false;
     }
     return Lower(*module, *target);
+  case InputLanguage::LLVMIR:
+    return LowerLLVMIR();
+  case InputLanguage::FromExtension:
+  case InputLanguage::Mercury:
+    break;
   }
   Resolved r;
   Resolve(ci, getSourceFile(), r);
@@ -796,10 +847,8 @@ bool CodeGenAction::executeAction() {
   return Lower(*module, *target);
 }
 
-bool CodeGenAction::Lower(
-    mlir::ModuleOp module, const codegen::TargetInfo &target) {
+llvm::raw_ostream *CodeGenAction::Output() {
   CompilerInstance &ci{getInstance()};
-  std::string error;
   // An object file or assembly is written beside the current directory's
   // other outputs, named after the source, as by Clang's -c and -S.
   std::string &outputFile{ci.getFrontendOpts().outputFile};
@@ -809,7 +858,13 @@ bool CodeGenAction::Lower(
     name += kind_ == ActionKind::EmitObj ? ".o" : ".s";
     outputFile = name.str().str();
   }
-  llvm::raw_ostream *os{ci.createDefaultOutputFile()};
+  return ci.createDefaultOutputFile();
+}
+
+bool CodeGenAction::Lower(
+    mlir::ModuleOp module, const codegen::TargetInfo &target) {
+  std::string error;
+  llvm::raw_ostream *os{Output()};
   if (!os) {
     return false;
   }
@@ -838,22 +893,78 @@ bool CodeGenAction::Lower(
     options::reportError(error);
     return false;
   }
-  codegen::OptimizeLLVMIR(*llvmModule, target);
+  return Emit(*llvmModule, target, *os);
+}
+
+// LLVM IR read back, as Flang's -x ir is: for the host's offload compile,
+// which embeds the device code in the host's IR from its first compile.
+bool CodeGenAction::LowerLLVMIR() {
+  CompilerInstance &ci{getInstance()};
+  if (kind_ != ActionKind::EmitLLVM && kind_ != ActionKind::EmitLLVMBitcode &&
+      kind_ != ActionKind::EmitAssembly && kind_ != ActionKind::EmitObj) {
+    options::reportError("LLVM IR input can only be compiled to LLVM IR, "
+                         "bitcode, assembly or an object file");
+    return false;
+  }
+  std::string error;
+  std::unique_ptr<codegen::TargetInfo> target{
+      codegen::TargetInfo::Create(ci.getCodeGenOpts(), error)};
+  if (!target) {
+    options::reportError(error);
+    return false;
+  }
+  llvm::LLVMContext llvmContext;
+  llvm::SMDiagnostic diagnostic;
+  std::unique_ptr<llvm::Module> llvmModule{
+      llvm::parseIRFile(getSourceFile().path(), diagnostic, llvmContext)};
+  if (!llvmModule) {
+    diagnostic.print("merkc", llvm::errs());
+    return false;
+  }
+  // The target is the compile's, as in Flang, which says when it is not
+  // the module's.
+  const llvm::Triple &triple{target->targetMachine().getTargetTriple()};
+  if (llvmModule->getTargetTriple() != triple) {
+    llvm::errs() << "merkc: warning: overriding the module target triple with "
+                 << triple.str() << '\n';
+  }
+  llvmModule->setTargetTriple(triple);
+  llvmModule->setDataLayout(target->targetMachine().createDataLayout());
+  llvm::raw_ostream *os{Output()};
+  if (!os) {
+    return false;
+  }
+  return Emit(*llvmModule, *target, *os);
+}
+
+bool CodeGenAction::Emit(llvm::Module &llvmModule,
+    const codegen::TargetInfo &target, llvm::raw_ostream &os) {
+  std::string error;
+  if (!codegen::EmbedOffloadObjects(
+          llvmModule, getInstance().getCodeGenOpts().offloadObjects, error)) {
+    options::reportError(error);
+    return false;
+  }
+  codegen::OptimizeLLVMIR(llvmModule, target);
   if (kind_ == ActionKind::EmitLLVM) {
-    llvmModule->print(*os, nullptr);
+    llvmModule.print(os, nullptr);
+    return true;
+  }
+  if (kind_ == ActionKind::EmitLLVMBitcode) {
+    llvm::WriteBitcodeToFile(llvmModule, os);
     return true;
   }
   llvm::SmallString<0> code;
   llvm::raw_svector_ostream codeStream{code};
-  if (!codegen::EmitCode(*llvmModule, target,
+  if (!codegen::EmitCode(llvmModule, target,
           kind_ == ActionKind::EmitObj ? llvm::CodeGenFileType::ObjectFile
                                        : llvm::CodeGenFileType::AssemblyFile,
           codeStream, error)) {
     options::reportError(error);
     return false;
   }
-  *os << code;
-  os->flush();
+  os << code;
+  os.flush();
   return true;
 }
 

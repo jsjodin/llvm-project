@@ -106,6 +106,10 @@ struct Body {
   // then part and else part; the goal of a negation or a scope.
   std::vector<const Body *> goals;
   ScopeKind scope{ScopeKind::Some};
+  // For an Omp scope, the directive on its goal, and the goal's nonlocal
+  // variables.
+  const parser::OmpDirective *directive{nullptr};
+  std::vector<BodyVar> nonlocals;
   // For a fail that replaces a unification that cannot succeed, the
   // unification's variables, which mmc's quantification still finds in it
   // until it quantifies the body again (ProcedureBody::requantified,

@@ -1,0 +1,11 @@
+The program of omp-target.m, compiled by the driver for the machine's GPU
+and run there: OMP_TARGET_OFFLOAD=MANDATORY fails rather than run a region
+on the host, and LIBOMPTARGET_INFO=1 reports each kernel it enters.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
+RUN:   | FileCheck %S/omp-target.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: FileCheck %s < %t.info
+CHECK-COUNT-2: info: Entering OpenMP kernel at {{.*}}omp-target.m:{{[0-9]+}}:5 with {{[0-9]+}} arguments:
+CHECK-NOT: Entering OpenMP kernel

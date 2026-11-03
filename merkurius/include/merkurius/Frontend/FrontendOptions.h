@@ -73,15 +73,28 @@ enum class ActionKind {
   EmitMLIR,
   // -emit-llvm: the same, translated to LLVM IR and optimized.
   EmitLLVM,
+  // -emit-llvm-bc: the same, as bitcode.
+  EmitLLVMBitcode,
   // -S: the target's assembly for it.
   EmitAssembly,
   // -emit-obj: its object file.
   EmitObj,
 };
 
+// What the input is, from -x or else its extension.
+enum class InputLanguage {
+  FromExtension,
+  Mercury,
+  MLIR,
+  // LLVM IR or bitcode, as the host's offload compile reads it back to
+  // embed the device code (-x ir, as in Clang and Flang).
+  LLVMIR,
+};
+
 struct FrontendOptions {
   ActionKind programAction{ActionKind::PrintPreprocessedInput};
   std::vector<std::string> inputs;
+  InputLanguage inputLanguage{InputLanguage::FromExtension}; // -x
   // Empty or "-" means standard output.
   std::string outputFile;
   bool showHelp{false};
