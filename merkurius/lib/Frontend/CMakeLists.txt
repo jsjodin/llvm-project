@@ -16,10 +16,13 @@ add_merkurius_library(MerkuriusFrontend
   MLIRDLTIDialect
   MLIRIR
   MLIRLLVMDialect
+  MLIROpenMPDialect
   MLIRParser
 
   LINK_COMPONENTS
+  BitWriter
   Core
+  IRReader
   Option
   Support
   )

@@ -348,6 +348,14 @@ private:
             [&](const Scope *scope) {
               Body out{BodyKind::Scope, tokens, &modes};
               out.scope = scope->kind;
+              if (scope->kind == ScopeKind::Omp) {
+                out.directive = std::get<const parser::OmpGoal *>(
+                    std::get<parser::Goal>(scope->origin))->directive;
+                for (VarId var :
+                    clause_->clause->clause->nonlocals[scope->number]) {
+                  out.nonlocals.push_back(map_[var]);
+                }
+              }
               if (scope->kind == ScopeKind::PromiseSolutions) {
                 const parser::Goal &origin{std::get<parser::Goal>(scope->origin)};
                 out.promise = std::get<const parser::PromiseSolutions *>(

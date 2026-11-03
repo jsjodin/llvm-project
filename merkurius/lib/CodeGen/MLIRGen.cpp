@@ -11,8 +11,11 @@
 #include "merkurius/Parser/parse-tree.h"
 #include "merkurius/Parser/term-reader.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Verifier.h"
+#include "mlir/Transforms/RegionUtils.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
@@ -240,6 +243,11 @@ private:
   void IfThenElse(const Body &, const ProcedureBody &);
   void Switch(const Body &, const ProcedureBody &);
   void Not(const Body &, const ProcedureBody &);
+  // A goal with an OpenMP directive (design document, "Target regions").
+  void Omp(const Body &, const ProcedureBody &);
+  // A stack slot of the procedure for a value of `type`, as a generic
+  // pointer, which omp.map.info maps.
+  mlir::Value Slot(mlir::Type type, mlir::Location);
   // The variables bound in a branch, after `before`, in order.
   using Values = llvm::DenseMap<BodyVar, mlir::Value>;
   static std::vector<BodyVar> BoundSince(const Values &now, const Values &before);
@@ -461,6 +469,10 @@ void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
     }
     return;
   case BodyKind::Scope:
+    if (goal.directive) {
+      Omp(goal, body);
+      return;
+    }
     Goal(*goal.goals.front(), body);
     return;
   case BodyKind::Call:
@@ -1232,6 +1244,176 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
   }
   values_[output] = result;
   return true;
+}
+
+mlir::Value MerkGenerator::Slot(mlir::Type type, mlir::Location loc) {
+  auto proc{builder_.getInsertionBlock()->getParent()
+                ->getParentOfType<merk::ProcOp>()};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToStart(&proc.getBody().front());
+  unsigned addressSpace{target_.allocaAddressSpace()};
+  mlir::Value one{mlir::LLVM::ConstantOp::create(
+      builder_, loc, builder_.getI64Type(), builder_.getI64IntegerAttr(1))};
+  mlir::Value slot{mlir::LLVM::AllocaOp::create(builder_, loc,
+      mlir::LLVM::LLVMPointerType::get(&context_, addressSpace), type, one)};
+  if (addressSpace != 0) {
+    // On a GPU the stack is an address space of its own.
+    slot = mlir::LLVM::AddrSpaceCastOp::create(
+        builder_, loc, mlir::LLVM::LLVMPointerType::get(&context_), slot);
+  }
+  return slot;
+}
+
+// Only the scalars, integers and floats, can cross into a target region
+// so far.
+static bool Mappable(mlir::Type type) {
+  return mlir::isa<mlir::IntegerType, mlir::FloatType>(type);
+}
+
+void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
+  const parser::OmpDirective &directive{*goal.directive};
+  parser::CharBlock at{Where(goal.tokens)};
+  if (directive.id != llvm::omp::Directive::OMPD_target) {
+    NotYet(at,
+        "the " + std::string{parser::EnumToString(directive.id)} +
+            " directive");
+    return;
+  }
+  if (!directive.clauses.empty()) {
+    NotYet(at, "clauses of the target directive");
+    return;
+  }
+  if (builder_.getInsertionBlock()->getParent()
+          ->getParentOfType<mlir::omp::TargetOp>()) {
+    NotYet(at, "target regions in target regions");
+    return;
+  }
+  mlir::Location loc{Location(goal.tokens)};
+  Values before{values_};
+  // The goal, in a target region whose map entries are added after it:
+  // they are the values it uses from outside and those it binds.
+  // Without host_eval its kernel is generic, not SPMD.
+  mlir::omp::TargetExtOperands operands;
+  operands.kernelType = mlir::omp::TargetExecModeAttr::get(
+      &context_, mlir::omp::TargetExecMode::generic);
+  auto targetOp{mlir::omp::TargetOp::create(builder_, loc, operands)};
+  mlir::Region &region{targetOp.getRegion()};
+  mlir::Block *block{&region.emplaceBlock()};
+  {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.setInsertionPointToStart(block);
+    Goal(*goal.goals.front(), body);
+  }
+  if (failed_) {
+    values_ = before;
+    return;
+  }
+  builder_.setInsertionPoint(targetOp);
+  llvm::SetVector<mlir::Value> inputs;
+  mlir::getUsedValuesDefinedAbove(region, inputs);
+  // What it binds that is used after it: those of its nonlocals it binds.
+  llvm::SmallVector<BodyVar> outputs;
+  for (BodyVar var : BoundSince(values_, before)) {
+    if (values_.lookup(var) && llvm::is_contained(goal.nonlocals, var)) {
+      outputs.push_back(var);
+    }
+  }
+  // The variable whose value an input is, if it is one's.
+  auto varOf{[&](mlir::Value input) -> std::optional<BodyVar> {
+    for (const auto &[var, value] : before) {
+      if (value == input) {
+        return var;
+      }
+    }
+    return std::nullopt;
+  }};
+  for (mlir::Value input : inputs) {
+    if (!Mappable(input.getType())) {
+      std::optional<BodyVar> var{varOf(input)};
+      NotYet(at,
+          var ? "values of type " +
+                  semantics::TypeToString(*body.vars[*var].type) +
+                  " in target regions"
+              : std::string{"values that are not scalars in target regions"});
+      values_ = before;
+      return;
+    }
+  }
+  for (BodyVar var : outputs) {
+    if (!Mappable(values_.lookup(var).getType())) {
+      NotYet(at,
+          "values of type " + semantics::TypeToString(*body.vars[var].type) +
+              " in target regions");
+      values_ = before;
+      return;
+    }
+  }
+  // As Flang maps a scalar: an input is copied in from its slot, an output
+  // is stored in its slot, from which it is read after the region.
+  auto ptr{mlir::LLVM::LLVMPointerType::get(&context_)};
+  auto map{[&](mlir::Value slot, mlir::Type type, mlir::omp::ClauseMapFlags flags,
+               mlir::omp::VariableCaptureKind capture, llvm::StringRef name) {
+    return mlir::omp::MapInfoOp::create(builder_, loc, ptr, slot,
+        mlir::TypeAttr::get(type),
+        builder_.getAttr<mlir::omp::ClauseMapFlagsAttr>(flags),
+        builder_.getAttr<mlir::omp::VariableCaptureKindAttr>(capture),
+        /*varPtrPtr=*/mlir::Value{}, /*varPtrPtrType=*/mlir::TypeAttr{},
+        /*members=*/mlir::ValueRange{}, /*membersIndex=*/mlir::ArrayAttr{},
+        /*bounds=*/mlir::ValueRange{}, /*mapperId=*/mlir::FlatSymbolRefAttr{},
+        builder_.getStringAttr(name), builder_.getBoolAttr(false));
+  }};
+  llvm::SmallVector<mlir::Value> maps;
+  for (mlir::Value input : inputs) {
+    mlir::Value slot{Slot(input.getType(), loc)};
+    mlir::LLVM::StoreOp::create(builder_, loc, input, slot);
+    // Named after the variable whose value it is, if it is one's.
+    std::optional<BodyVar> var{varOf(input)};
+    llvm::StringRef name{var ? llvm::StringRef{body.vars[*var].name} : ""};
+    maps.push_back(map(slot, input.getType(),
+        mlir::omp::ClauseMapFlags::to, mlir::omp::VariableCaptureKind::ByCopy,
+        name));
+  }
+  llvm::SmallVector<mlir::Value> outputSlots;
+  llvm::SmallVector<mlir::Type> outputTypes;
+  for (BodyVar var : outputs) {
+    mlir::Type type{values_.lookup(var).getType()};
+    outputTypes.push_back(type);
+    outputSlots.push_back(Slot(type, loc));
+    maps.push_back(map(outputSlots.back(), type,
+        mlir::omp::ClauseMapFlags::from, mlir::omp::VariableCaptureKind::ByRef,
+        body.vars[var].name));
+  }
+  targetOp.getMapVarsMutable().assign(maps);
+  // The region reads its inputs from their slots and stores its outputs;
+  // an output may be an input's value, as in Y = X.
+  builder_.setInsertionPointToStart(block);
+  llvm::DenseMap<mlir::Value, mlir::Value> loaded;
+  for (mlir::Value input : inputs) {
+    mlir::Value value{mlir::LLVM::LoadOp::create(
+        builder_, loc, input.getType(), block->addArgument(ptr, loc))};
+    mlir::replaceAllUsesInRegionWith(input, value, targetOp.getRegion());
+    loaded[input] = value;
+  }
+  llvm::SmallVector<mlir::Value> outputArgs;
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    outputArgs.push_back(block->addArgument(ptr, loc));
+  }
+  // Where the goal ended: the last block of the region.
+  mlir::Block *end{&targetOp.getRegion().back()};
+  builder_.setInsertionPointToEnd(end);
+  if (!Terminated()) {
+    for (auto [var, arg] : llvm::zip(outputs, outputArgs)) {
+      mlir::Value value{values_.lookup(var)};
+      mlir::LLVM::StoreOp::create(
+          builder_, loc, loaded.lookup(value) ? loaded.lookup(value) : value, arg);
+    }
+    mlir::omp::TerminatorOp::create(builder_, loc);
+  }
+  builder_.setInsertionPointAfter(targetOp);
+  values_ = before;
+  for (auto [var, type, slot] : llvm::zip(outputs, outputTypes, outputSlots)) {
+    values_[var] = mlir::LLVM::LoadOp::create(builder_, loc, type, slot);
+  }
 }
 
 void MerkGenerator::GenerateBody(const ProcedureBody &body) {

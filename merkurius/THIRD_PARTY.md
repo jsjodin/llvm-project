@@ -27,3 +27,11 @@ licensed under Apache 2.0 with the LLVM exception, at upstream commit
 | `lib/Parser/message.cpp` | `flang/lib/Parser/message.cpp` | As for `message.h` |
 | `include/merkurius/Parser/provenance.h` | `flang/include/flang/Parser/provenance.h` | Namespace and include guard renamed; reduced to `Provenance`, `ProvenanceRange` and `AllSources` with source-file and compiler-insertion origins; macro, module and `INCLUDE` origins, `CookedSource`, `AllCookedSources` and the offset maps removed; opening a file gives it its provenances, with one for its end; `CharBlock` lookups added |
 | `lib/Parser/provenance.cpp` | `flang/lib/Parser/provenance.cpp` | As for `provenance.h`; the caret under an echoed source line allows for multi-byte UTF-8 characters |
+
+Code adapted from LLVM's into Merkurius files of its own:
+
+| Local code | Upstream code | Changes |
+| --- | --- | --- |
+| `EmbedOffloadObjects` in `lib/CodeGen/Lowering.cpp` | `CodeGenAction::embedOffloadObjects` in `flang/lib/Frontend/FrontendActions.cpp` (and `clang::EmbedObject` in `clang/lib/CodeGen/BackendUtil.cpp`) | Takes the files and returns the error instead of reporting a diagnostic |
+| `CodeGenAction::LowerLLVMIR` in `lib/Frontend/FrontendActions.cpp` | The LLVM IR input path of `CodeGenAction::executeAction` in `flang/lib/Frontend/FrontendActions.cpp` | Our target info and error reporting; the same warning when the target overrides the module's triple |
+| `merk.call`'s `CallOpInterface` methods in `include/merkurius/Dialect/Merk/IR/MerkOps.td` | `func.call`'s in `mlir/include/mlir/Dialect/Func/IR/FuncOps.td` | Operand names |

@@ -70,12 +70,16 @@ std::optional<InputArgList> parseArgs(
 }
 
 std::string findClang(llvm::StringRef executable) {
+  return findTool(executable, "clang");
+}
+
+std::string findTool(llvm::StringRef executable, llvm::StringRef name) {
   llvm::SmallString<128> beside{llvm::sys::path::parent_path(executable)};
-  llvm::sys::path::append(beside, "clang");
+  llvm::sys::path::append(beside, name);
   if (llvm::sys::fs::can_execute(beside)) {
     return beside.str().str();
   }
-  if (llvm::ErrorOr<std::string> found{llvm::sys::findProgramByName("clang")}) {
+  if (llvm::ErrorOr<std::string> found{llvm::sys::findProgramByName(name)}) {
     return *found;
   }
   return "";

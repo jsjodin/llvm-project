@@ -18,6 +18,11 @@ add_merkurius_library(MerkuriusCodeGen
   MLIRLLVMCommonConversion
   MLIRLLVMDialect
   MLIRLLVMToLLVMIRTranslation
+  MLIROpenMPDialect
+  MLIROpenMPToLLVMIRTranslation
+  MLIROpenMPTransforms
+  MLIROpenMPUtils
+  MLIRPass
   MLIRTargetLLVMIRExport
   MLIRTargetLLVMIRImport
   MLIRTransformUtils
@@ -31,8 +36,10 @@ add_merkurius_library(MerkuriusCodeGen
   IRReader
   Linker
   MC
+  Object
   Passes
   Support
   Target
   TargetParser
+  TransformUtils
   )

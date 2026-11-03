@@ -23,6 +23,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace merkurius::codegen {
 
@@ -48,6 +49,12 @@ bool LinkForeignCode(llvm::Module &, mlir::ModuleOp, const TargetInfo &,
 
 // Runs LLVM's pipeline for the target's optimization level, -O0 to -O3.
 void OptimizeLLVMIR(llvm::Module &, const TargetInfo &);
+
+// Embeds each offload binary in the host module's .llvm.offloading section,
+// for the linker wrapper to extract (-fembed-offload-object=, as in Clang
+// and Flang), or reports false with the error.
+bool EmbedOffloadObjects(llvm::Module &, const std::vector<std::string> &files,
+    std::string &error);
 
 // Writes the module's assembly or object code; false after setting `error`
 // if the target cannot.
