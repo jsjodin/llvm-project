@@ -12,6 +12,7 @@ add_merkurius_library(MerkuriusSemantics
   resolve-names.cpp
   semantic-form.cpp
   symbols.cpp
+  translate-loops.cpp
   types.cpp
 
   LINK_LIBS

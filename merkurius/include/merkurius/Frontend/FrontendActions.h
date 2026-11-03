@@ -150,6 +150,13 @@ class DebugDumpTypesAction : public FrontendAction {
   bool executeAction() override;
 };
 
+// Type and purity checks the source file, translates its loops, and lists
+// each clause with loops as translated, followed by its loops' loop and
+// body predicates, with their signatures and clauses.
+class DebugDumpLoopsAction : public FrontendAction {
+  bool executeAction() override;
+};
+
 // Type, purity and mode checks the source file, and lists each predicate's
 // and function's procedures, with their argument modes and determinisms.
 class DebugDumpModesAction : public FrontendAction {

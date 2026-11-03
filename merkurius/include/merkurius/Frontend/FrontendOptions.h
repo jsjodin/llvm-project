@@ -57,6 +57,9 @@ enum class ActionKind {
   // -fdebug-dump-types: type check, and list each clause's variable types
   // and chosen declarations.
   DebugDumpTypes,
+  // -fdebug-dump-loops: type and purity check, translate the loops, and
+  // list each clause translated and its loops' predicates' clauses.
+  DebugDumpLoops,
   // -fdebug-dump-modes: type, purity and mode check, and list each
   // predicate's and function's procedures.
   DebugDumpModes,
