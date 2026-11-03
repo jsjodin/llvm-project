@@ -2973,6 +2973,20 @@ void TypeChecker::CheckLoop(const Loop &loop) {
           if (candidate->kind != SymbolKind::Constructor) {
             continue;
           }
+          // The translation unifies the list with [] too, and mode
+          // analysis needs the signatures of all of a type's constructors.
+          const ModuleSymbols *symbols{
+              candidate->module == resolution_.module().name()
+                  ? &resolution_.module()
+                  : resolution_.Module(candidate->module)};
+          for (const Symbol *sibling : symbols
+                   ? symbols->symbols()
+                   : llvm::ArrayRef<const Symbol *>{}) {
+            if (sibling->kind == SymbolKind::Constructor &&
+                sibling->owner == candidate->owner) {
+              SignatureOf(*sibling);
+            }
+          }
           options.push_back([&, candidate](Assignment &a) {
             const Signature *sig{SignatureOf(*candidate)};
             VarId cons[]{element, list};

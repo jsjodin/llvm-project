@@ -20,6 +20,7 @@
 #include "merkurius/Semantics/check-determinism.h"
 #include "merkurius/Semantics/check-modes.h"
 #include "merkurius/Semantics/polymorphism.h"
+#include "merkurius/Semantics/translate-loops.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
@@ -47,8 +48,8 @@ mlir::OwningOpRef<mlir::ModuleOp> GenerateMerk(mlir::MLIRContext &,
     const parser::TokenSequence &, const parser::AllSources &,
     const semantics::TypeChecking &, semantics::ModeChecking &,
     const semantics::DeterminismChecking &,
-    const semantics::PolymorphismAnalysis &, const TargetInfo &,
-    parser::Messages &);
+    const semantics::PolymorphismAnalysis &, const semantics::LoopTranslation &,
+    const TargetInfo &, parser::Messages &);
 
 } // namespace merkurius::codegen
 

@@ -22,11 +22,15 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <optional>
 #include <vector>
 
 namespace merkurius::semantics {
 
 class NameResolution;
+struct Symbol;
 class TypeChecking;
 
 // The purity of each loop, its body's, as purity checking finds it.
@@ -37,13 +41,49 @@ using LoopPurities = llvm::DenseMap<const Loop *, parser::Purity>;
 // for the counters of for and count.
 llvm::SmallVector<llvm::StringRef, 1> LoopModules(const SemanticForm &);
 
+// A loop as translated, for code generation, which runs one with an
+// OpenMP directive as an omp loop nest that calls its body predicate.
+struct TranslatedLoop {
+  const Loop *loop;
+  const Symbol *loopPredicate;
+  const Symbol *bodyPredicate;
+  // For a loop with a for: its step, and the goal number in the clause of
+  // the test that its trip count's computation starts with, Big < Small,
+  // whose arguments are its bounds, Hi and Lo, or Lo and Hi for a negative
+  // step. The for's counter is the loop predicate's first argument, and
+  // its trip count its second.
+  std::int64_t step{1};
+  std::optional<unsigned> tripTest;
+  // The values carried from one iteration to the next, those of each
+  // fromto that does not end the loop and each threaded state variable:
+  // the positions in the loop predicate's arguments of In's, or the
+  // version in an iteration, and Last's, or the version after the loop.
+  struct Threaded {
+    unsigned in;
+    unsigned after;
+    const LoopIterator *fromto; // null for a state variable
+  };
+  std::vector<Threaded> threaded;
+};
+
+struct LoopTranslation {
+  // The indices in types.clauses() of each translated clause, followed by
+  // its loops' predicates' clauses, a loop's before those of the loops in
+  // its body.
+  std::vector<std::size_t> clauses;
+  std::deque<TranslatedLoop> loops;
+  // By loop predicate.
+  llvm::DenseMap<const Symbol *, const TranslatedLoop *> byPredicate;
+  const TranslatedLoop *Of(const Symbol &loopPredicate) const {
+    return byPredicate.lookup(&loopPredicate);
+  }
+};
+
 // Translates the loops of each clause that type checking checked without
 // error, and whose loops purity checking checked: the clause's types then
 // hold the translated clause, and the new predicates' clauses follow the
-// others. Returns the indices of those clauses in types.clauses(), each
-// translated clause followed by its loops' predicates' clauses, a loop's
-// before those of the loops in its body.
-std::vector<std::size_t> TranslateLoops(NameResolution &, TypeChecking &,
+// others.
+LoopTranslation TranslateLoops(NameResolution &, TypeChecking &,
     const LoopPurities &, const parser::TokenSequence &, SemanticArena &,
     parser::Messages &);
 

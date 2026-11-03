@@ -288,11 +288,14 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
     if (const llvm::opt::Arg *arg = args.getLastArg(OPT_target_EQ)) {
       job.push_back(arg->getAsString(args));
     }
-    // Offloading links as Clang does with -fopenmp and --offload-arch=: it
-    // runs the linker wrapper, which links the GPUs' code, and adds the
-    // OpenMP runtime libraries.
-    if (!archs.empty()) {
+    // OpenMP links as Clang does with -fopenmp, which adds the OpenMP
+    // runtime library, and with --offload-arch=, which runs the linker
+    // wrapper, which links the GPUs' code, and adds the offloading
+    // libraries.
+    if (args.hasArg(OPT_fopenmp)) {
       job.push_back("-fopenmp");
+    }
+    if (!archs.empty()) {
       std::string offloadArch{"--offload-arch="};
       for (const OffloadArch &arch : archs) {
         offloadArch += (&arch == &archs.front() ? "" : ",") + arch.arch;

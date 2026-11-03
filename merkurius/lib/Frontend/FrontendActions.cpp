@@ -566,7 +566,7 @@ bool DebugDumpLoopsAction::executeAction() {
   semantics::LoopPurities loops;
   semantics::CheckPurity(
       *r.tree, r.tokens, *r.form, *r.resolution, *types, r.messages, &loops);
-  std::vector<std::size_t> translated{semantics::TranslateLoops(
+  semantics::LoopTranslation translation{semantics::TranslateLoops(
       *r.resolution, *types, loops, r.tokens, r.semanticArena, r.messages)};
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   llvm::raw_ostream *os{ci.createDefaultOutputFile()};
@@ -574,7 +574,7 @@ bool DebugDumpLoopsAction::executeAction() {
     return false;
   }
   const parser::AllSources &sources{ci.getAllSources()};
-  for (std::size_t i : translated) {
+  for (std::size_t i : translation.clauses) {
     const semantics::ClauseTypes &clause{types->clauses()[i]};
     *os << Position(sources, Source(r.tokens, clause.clause->tokens)) << ' ';
     if (const semantics::Signature *sig{clause.method
@@ -694,6 +694,7 @@ struct Analysed {
   std::unique_ptr<semantics::TypeChecking> types;
   std::unique_ptr<semantics::ModeChecking> modes;
   std::unique_ptr<semantics::DeterminismChecking> determinism;
+  semantics::LoopTranslation loops;
 };
 
 Analysed Analyse(CompilerInstance &ci, Resolved &r) {
@@ -706,8 +707,8 @@ Analysed Analyse(CompilerInstance &ci, Resolved &r) {
   semantics::LoopPurities loops;
   semantics::CheckPurity(
       *r.tree, r.tokens, *r.form, *r.resolution, *types, r.messages, &loops);
-  semantics::TranslateLoops(
-      *r.resolution, *types, loops, r.tokens, r.semanticArena, r.messages);
+  semantics::LoopTranslation translation{semantics::TranslateLoops(
+      *r.resolution, *types, loops, r.tokens, r.semanticArena, r.messages)};
   semantics::ModeCheckOptions options;
   options.inferModes = frontend.inferModes;
   options.inferenceIterationLimit = frontend.modeInferenceIterationLimit;
@@ -720,7 +721,8 @@ Analysed Analyse(CompilerInstance &ci, Resolved &r) {
           r.tokens, *types, *modes, r.messages, !earlier)};
   semantics::CheckUniqueness(
       r.tokens, *modes, *determinism, r.messages, frontend.mmcUniqueness);
-  return {std::move(types), std::move(modes), std::move(determinism)};
+  return {std::move(types), std::move(modes), std::move(determinism),
+      std::move(translation)};
 }
 
 // Prints a body's procedure as -fdebug-dump-modes lists it, with the
@@ -901,7 +903,7 @@ bool CodeGenAction::executeAction() {
   }
   module = codegen::GenerateMerk(context, r.resolution->module().name(),
       *r.tree, r.tokens, ci.getAllSources(), *a.types, *a.modes,
-      *a.determinism, *polymorphism, *target, r.messages);
+      *a.determinism, *polymorphism, a.loops, *target, r.messages);
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   if (r.messages.AnyFatalError()) {
     return false;
