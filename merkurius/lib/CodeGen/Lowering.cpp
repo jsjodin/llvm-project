@@ -803,6 +803,16 @@ llvm::LogicalResult Lowerer::Lower() {
   for (auto entry : llvm::make_early_inc_range(module_.getOps<merk::EntryOp>())) {
     LowerEntry(entry);
   }
+  // An array is a pointer now: the casts between them that a target
+  // region's map entries make go.
+  module_.walk([&](mlir::UnrealizedConversionCastOp cast) {
+    if (cast->getNumOperands() == 1 && cast->getNumResults() == 1 &&
+        Convert(cast.getOperand(0).getType()) ==
+            Convert(cast.getResult(0).getType())) {
+      cast.getResult(0).replaceAllUsesWith(cast.getOperand(0));
+      rewriter_.eraseOp(cast);
+    }
+  });
   // Arithmetic, which is the arith dialect's.
   mlir::LLVMTypeConverter converter{module_.getContext()};
   mlir::RewritePatternSet patterns{module_.getContext()};

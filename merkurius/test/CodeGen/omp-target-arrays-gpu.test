@@ -1,0 +1,22 @@
+The program of omp-target-arrays.m, compiled by the driver for the
+machine's GPU and run there: each array is copied in, as its size word and
+its elements, and back if the region updates it.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-arrays.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
+RUN:   | FileCheck %S/omp-target-arrays.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: FileCheck %s < %t.info
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-arrays.m:{{[0-9]+}}:5 with 3 arguments:
+CHECK-NEXT: info: tofrom(A0)[88]
+CHECK-NEXT: info: from(A1)[8]
+CHECK-NEXT: info: from(A1)[8]
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-arrays.m:{{[0-9]+}}:5 with 2 arguments:
+CHECK-NEXT: info: to(A1)[88]
+CHECK-NEXT: info: from(S)[8]
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-arrays.m:{{[0-9]+}}:5 with 3 arguments:
+CHECK-NEXT: info: tofrom(F0)[32]
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-arrays.m:{{[0-9]+}}:5 with 1 arguments:
+CHECK-NEXT: info: tofrom(F1)[32]
+CHECK-COUNT-4: info: Entering OpenMP kernel at {{.*}}omp-target-arrays.m:{{[0-9]+}}:5 with {{[0-9]+}} arguments:
+CHECK-NOT: Entering OpenMP kernel
