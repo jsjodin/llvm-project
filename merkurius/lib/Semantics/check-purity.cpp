@@ -210,6 +210,7 @@ Purity PurityChecker::Check(const Goal &goal) {
             }
             return purity;
           },
+          [&](const Loop *x) { return Check(x->body); },
       },
       goal);
 }

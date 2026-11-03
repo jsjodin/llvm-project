@@ -289,6 +289,36 @@ private:
                 Goal(alternative.goal, depth + 2);
               }
             },
+            [&](const Loop *loop) {
+              Start("Loop", loop->number, depth);
+              EndLine();
+              for (const LoopIterator &iterator : loop->iterators) {
+                Label(EnumToString(iterator.kind), depth + 1, false);
+                os_ << ' ';
+                Vars(iterator.arguments);
+                if (iterator.step) {
+                  os_ << " step ";
+                  iterator.step->PrintInline(os_);
+                }
+                if (iterator.ends) {
+                  os_ << " ends";
+                }
+                os_ << '\n';
+              }
+              for (const LoopState &state : loop->states) {
+                Label("state", depth + 1, false);
+                os_ << ' ';
+                Var(state.before);
+                os_ << " -> ";
+                Var(state.in);
+                os_ << " ... ";
+                Var(state.out);
+                os_ << " -> ";
+                Var(state.after);
+                os_ << '\n';
+              }
+              Goal(loop->body, depth + 1);
+            },
             [&](const Scope *scope) {
               Start("Scope", scope->number, depth);
               os_ << ' ' << EnumToString(scope->kind);

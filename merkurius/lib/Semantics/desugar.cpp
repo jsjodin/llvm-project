@@ -21,15 +21,24 @@
 // A DCG rule's two implicit arguments are threaded the same way, as the
 // versions of a hidden state variable, which gives the result of the
 // manual's DCG-transform ("DCG-goals").
+//
+// A loop's variables are scoped before the clause is desugared, from its
+// parse tree (LoopScopes): a variable of a loop that occurs nowhere around
+// it is a new one in it, which is what lets loops one after another use the
+// same names. A state variable that a loop updates is threaded through its
+// iterations with a version for each end of an iteration.
 
 #include "merkurius/Semantics/desugar.h"
 #include "merkurius/Semantics/quantify.h"
 #include "merkurius/Common/idioms.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -52,6 +61,118 @@ constexpr llvm::StringLiteral dcg{"dcg"};
 
 // A slot of the head that a state variable's last version fills.
 constexpr VarId unfilled{~VarId{0}};
+
+// Whether an argument of a loop's iterator is the loop's own: a for's or a
+// count's counter, foreach's element, or fromto's In and Out.
+bool IsOwnArgument(parser::LoopIteratorKind kind, std::size_t j) {
+  return kind == parser::LoopIteratorKind::Fromto ? j == 1 || j == 2 : j == 0;
+}
+
+// The scopes of a clause's loops (semantic-form.h, Loop), from the parse
+// tree, with the variables by the parse tree's numbers. A region is where
+// a variable occurs directly: in the clause or a loop's body or its
+// iterators' own arguments, but not in a loop nested there, except for
+// that loop's arguments around it.
+class LoopScopes {
+public:
+  struct Info {
+    llvm::DenseSet<unsigned> occurring; // in it, nested loops included
+    llvm::DenseSet<unsigned> region;
+    // The variables of its iterators' own arguments, at their first
+    // occurrence in each argument.
+    struct Own {
+      const parser::Variable *var;
+      std::size_t iterator;
+      std::size_t argument;
+    };
+    llvm::SmallVector<Own, 4> own;
+    // The state variables that it updates with !X or !:X, outside lambda
+    // expressions, in order.
+    llvm::SmallVector<llvm::StringRef, 2> updated;
+  };
+
+  template <typename T> static LoopScopes Of(const T &clause) {
+    LoopScopes scopes;
+    parser::Walk(clause, scopes);
+    return scopes;
+  }
+  const Info &operator[](const parser::LoopGoal &loop) const {
+    return *loops_.find(&loop)->second;
+  }
+  const llvm::DenseSet<unsigned> &clause() const { return clause_; }
+
+  bool Pre(const parser::LoopGoal &loop) {
+    for (const parser::LoopIterator *iterator : loop.iterators) {
+      for (auto [j, term] : llvm::enumerate(iterator->arguments)) {
+        if (!IsOwnArgument(iterator->kind, j)) {
+          parser::Walk(term, *this);
+        }
+      }
+    }
+    auto &info{loops_[&loop]};
+    info = std::make_unique<Info>();
+    open_.push_back(Open{info.get(), lambdas_});
+    for (auto [i, iterator] : llvm::enumerate(loop.iterators)) {
+      for (auto [j, term] : llvm::enumerate(iterator->arguments)) {
+        if (IsOwnArgument(iterator->kind, j)) {
+          argument_ = {i, j};
+          parser::Walk(term, *this);
+          argument_.reset();
+        }
+      }
+    }
+    parser::Walk(loop.body, *this);
+    open_.pop_back();
+    return false;
+  }
+  bool Pre(const parser::Lambda &) {
+    ++lambdas_;
+    return true;
+  }
+  void Post(const parser::Lambda &) { --lambdas_; }
+  void Post(const parser::Variable &var) {
+    if (var.name == "_") {
+      return;
+    }
+    (open_.empty() ? clause_ : open_.back().info->region).insert(var.number);
+    for (const Open &open : open_) {
+      open.info->occurring.insert(var.number);
+    }
+    if (argument_) {
+      auto &own{open_.back().info->own};
+      auto [i, j]{*argument_};
+      if (llvm::none_of(own, [&](const Info::Own &o) {
+            return o.var->number == var.number && o.iterator == i &&
+                o.argument == j;
+          })) {
+        own.push_back(Info::Own{&var, i, j});
+      }
+    }
+  }
+  void Post(const parser::StateVar &var) {
+    if (var.kind == parser::StateVarKind::Current) {
+      return;
+    }
+    for (const Open &open : open_) {
+      if (open.lambdas == lambdas_ &&
+          !llvm::is_contained(open.info->updated, var.name)) {
+        open.info->updated.push_back(var.name);
+      }
+    }
+  }
+
+private:
+  struct Open {
+    Info *info;
+    unsigned lambdas; // the lambda expressions around the loop
+  };
+  llvm::DenseSet<unsigned> clause_;
+  llvm::DenseMap<const parser::LoopGoal *, std::unique_ptr<Info>> loops_;
+  llvm::SmallVector<Open, 4> open_;
+  unsigned lambdas_{0};
+  // The iterator and the own argument being walked.
+  std::optional<std::pair<std::size_t, std::size_t>> argument_;
+};
 
 class ClauseDesugarer {
 public:
@@ -77,6 +198,10 @@ private:
   parser::CharBlock Source(TokenRange range) const {
     return {tokens_.tokens[range.first].spelling.begin(),
         tokens_.tokens[range.last].spelling.end()};
+  }
+  llvm::StringRef Text(TokenRange range) const {
+    parser::CharBlock source{Source(range)};
+    return {source.begin(), source.size()};
   }
   template <typename... A> void Error(TokenRange range, A &&...args) {
     messages_.Say(Source(range), std::forward<A>(args)...);
@@ -177,6 +302,12 @@ private:
   void FillLasts(Goals &goals);
   const Lambda *DesugarLambda(const parser::Lambda &);
   void DesugarTry(const parser::TryGoal &, Goals &out);
+  void DesugarLoop(const parser::LoopGoal &, Goals &out);
+  // Starts desugaring a clause whose loops' scopes are `scopes`.
+  void Scopes(LoopScopes &&scopes) {
+    scopes_ = std::move(scopes);
+    visible_ = scopes_.clause();
+  }
   void DesugarAtomic(const parser::AtomicGoal &, Goals &out);
   Goal Conjoin(TokenRange, const Goals &);
   // As mmc has it, the negation of a conjunction of negations is the
@@ -241,6 +372,10 @@ private:
   // The state variables of the scopes outside a lambda expression, which
   // may only be read as !.X in it.
   llvm::StringSet<> readOnly_;
+  LoopScopes scopes_;
+  // The variables of the regions around the loop being desugared, whose
+  // occurrences in it are the same variables.
+  llvm::DenseSet<unsigned> visible_;
   unsigned goals_{0};
   bool ok_{true};
 };
@@ -908,9 +1043,7 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
           [&](const parser::OmpGoal *x) {
             out.push_back(MakeScope(x->tokens, ScopeKind::Omp, goal, {}, x->goal));
           },
-          [&](const parser::LoopGoal *x) {
-            Error(x->tokens, "loops are not desugared yet"_err_en_US);
-          },
+          [&](const parser::LoopGoal *x) { DesugarLoop(*x, out); },
       },
       goal);
 }
@@ -1453,8 +1586,137 @@ const Lambda *ClauseDesugarer::DesugarLambda(const parser::Lambda &lambda) {
   return result;
 }
 
+// The arguments around the loop are flattened before it. In it, its
+// iterators' own variables and the variables that occur in no region
+// around it are new ones, and each state variable that it updates gets a
+// version for the start and the end of an iteration.
+void ClauseDesugarer::DesugarLoop(const parser::LoopGoal &loop, Goals &out) {
+  const LoopScopes::Info &info{scopes_[loop]};
+  llvm::SmallVector<llvm::SmallVector<VarId, 4>, 2> arguments;
+  for (const parser::LoopIterator *iterator : loop.iterators) {
+    auto &vars{arguments.emplace_back()};
+    for (auto [j, term] : llvm::enumerate(iterator->arguments)) {
+      if (iterator->kind == parser::LoopIteratorKind::For && j == 3) {
+        break; // the step, a literal
+      }
+      vars.push_back(
+          IsOwnArgument(iterator->kind, j) ? VarId{0} : Flatten(term, out));
+    }
+  }
+  FinishAtomic();
+  // An iterator's variable that also occurs around the loop is another
+  // variable, as a lambda expression's argument is. Two iterators that have
+  // a variable in the same place, as a copied fromto has, are one, which is
+  // legal but almost always a mistake; a variable in different places, as
+  // in fromto(L, [X | Xs], Xs, []), fromto(0, _, X, Last), passes a value
+  // between them.
+  llvm::DenseSet<unsigned> own;
+  for (const LoopScopes::Info::Own &o : info.own) {
+    if (const auto *first{llvm::find_if(info.own,
+            [&](const LoopScopes::Info::Own &other) {
+              return other.var->number == o.var->number &&
+                  other.argument == o.argument && other.iterator < o.iterator;
+            })};
+        first != info.own.end()) {
+      messages_.Say(Source(o.var->tokens),
+          "the iterators %s and %s share the variable %s, so they must agree "
+          "in every iteration; give each iterator its own variables"_warn_en_US,
+          Text(loop.iterators[first->iterator]->tokens),
+          Text(loop.iterators[o.iterator]->tokens), o.var->name);
+    }
+    if (own.insert(o.var->number).second && visible_.contains(o.var->number)) {
+      messages_.Say(Source(o.var->tokens),
+          "variable %s of the loop's iterators also occurs outside the loop, "
+          "where it is a different variable"_warn_en_US,
+          o.var->name);
+    }
+  }
+  llvm::SmallVector<std::pair<unsigned, std::optional<VarId>>, 8> outer;
+  for (unsigned number : info.occurring) {
+    if (own.contains(number) || !visible_.contains(number)) {
+      auto it{numbers_.find(number)};
+      if (it != numbers_.end()) {
+        outer.emplace_back(number, it->second);
+        numbers_.erase(it);
+      } else {
+        outer.emplace_back(number, std::nullopt);
+      }
+    }
+  }
+  llvm::DenseSet<unsigned> visible{visible_};
+  visible_.insert(info.region.begin(), info.region.end());
+  // The state variables in scope that the body updates are threaded.
+  StateMap start{state_};
+  llvm::SmallVector<llvm::StringRef, 2> names;
+  llvm::SmallVector<LoopState, 2> states;
+  for (llvm::StringRef name : info.updated) {
+    auto it{state_.find(name)};
+    if (it == state_.end() || readOnly_.contains(name)) {
+      continue; // an error in the body
+    }
+    if (!it->second) {
+      messages_.Say(Source(loop.tokens),
+          "reference to uninitialized state variable !.%s"_warn_en_US, name);
+      it->second = NewVersion(name, loop.tokens);
+    }
+    VarId before{*it->second};
+    it->second = NewVersion(name, loop.tokens);
+    names.push_back(name);
+    states.push_back(LoopState{before, *it->second, 0, 0});
+  }
+  Goals body;
+  llvm::SmallVector<LoopIterator, 2> iterators;
+  for (auto [i, iterator] : llvm::enumerate(loop.iterators)) {
+    for (auto [j, term] : llvm::enumerate(iterator->arguments)) {
+      if (j < arguments[i].size() && IsOwnArgument(iterator->kind, j)) {
+        arguments[i][j] = Flatten(term, body);
+      }
+    }
+    FinishAtomic();
+    const parser::Literal *step{nullptr};
+    if (iterator->kind == parser::LoopIteratorKind::For &&
+        iterator->arguments.size() == 4) {
+      step = std::get<const parser::Literal *>(iterator->arguments[3]);
+    }
+    bool ends{false};
+    if (iterator->kind == parser::LoopIteratorKind::Fromto) {
+      struct {
+        bool vars{false};
+        void Post(const parser::Variable &) { vars = true; }
+        void Post(const parser::StateVar &) { vars = true; }
+      } last;
+      parser::Walk(iterator->arguments[3], last);
+      ends = !last.vars;
+    }
+    iterators.push_back(LoopIterator{iterator->tokens, iterator->kind,
+        Save(llvm::ArrayRef<VarId>{arguments[i]}), step, ends});
+  }
+  DesugarInto(loop.body, body);
+  for (std::size_t k{0}; k < names.size(); ++k) {
+    states[k].out = *state_.lookup(names[k]);
+  }
+  state_ = std::move(start);
+  for (std::size_t k{0}; k < names.size(); ++k) {
+    states[k].after = NewVersion(names[k], loop.tokens);
+    state_[names[k]] = states[k].after;
+  }
+  for (const auto &[number, var] : outer) {
+    if (var) {
+      numbers_[number] = *var;
+    } else {
+      numbers_.erase(number);
+    }
+  }
+  visible_ = std::move(visible);
+  out.push_back(Make<Loop>(loop.tokens, Number(),
+      Save(llvm::ArrayRef<LoopIterator>{iterators}),
+      Save(llvm::ArrayRef<LoopState>{states}),
+      Conjoin(GoalTokens(loop.body), body)));
+}
+
 std::optional<const ClauseForm *> ClauseDesugarer::Desugar(
     const parser::FactOrRule &clause) {
+  Scopes(LoopScopes::Of(clause));
   llvm::SmallVector<const parser::ModedTerm *, 4> arguments{
       clause.arguments.begin(), clause.arguments.end()};
   if (clause.result) {
@@ -1477,6 +1739,7 @@ std::optional<const ClauseForm *> ClauseDesugarer::Desugar(
 // first and last versions of the hidden state variable.
 std::optional<const ClauseForm *> ClauseDesugarer::Desugar(
     const parser::DcgRule &rule) {
+  Scopes(LoopScopes::Of(rule));
   Goals goals;
   Head(rule.arguments, nullptr, goals);
   DcgHead(rule.tokens);

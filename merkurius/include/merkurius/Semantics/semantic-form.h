@@ -61,9 +61,10 @@ struct HOCall;
 struct Scope;
 struct Try;
 struct Atomic;
+struct Loop;
 using Goal = std::variant<const Conj *, const Disj *, const IfThenElse *,
     const Not *, const Unify *, const Call *, const HOCall *, const Scope *,
-    const Try *, const Atomic *>;
+    const Try *, const Atomic *, const Loop *>;
 
 // G1, G2, ... or G1 & G2 & ...; true is the empty conjunction.
 struct Conj {
@@ -227,6 +228,44 @@ struct Atomic {
   VarId outerFinal;
   llvm::ArrayRef<VarId> vars;
   llvm::ArrayRef<AtomicAlternative> alternatives;
+};
+
+// An iterator of a loop, with a variable for each argument as written: a
+// for's or a count's counter, Lo and Hi, foreach's element and list, and
+// fromto's First, In, Out and Last. Lo, Hi, the list, First and Last are
+// the goal's around the loop, which goals before the loop bind to the
+// terms written; the others are the loop's own, local to each iteration,
+// and the patterns written for them are unifications at the start of its
+// body.
+struct LoopIterator {
+  TokenRange tokens;
+  parser::LoopIteratorKind kind;
+  llvm::ArrayRef<VarId> arguments;
+  const parser::Literal *step; // a for's, if written; 1 otherwise
+  bool ends; // a fromto whose Last has no variables
+};
+
+// A state variable that a loop's body updates, which is threaded through
+// the iterations: its versions before the loop, at the start and the end
+// of an iteration, and after the loop.
+struct LoopState {
+  VarId before;
+  VarId in;
+  VarId out;
+  VarId after;
+};
+
+// ( Iterators do Body ), with -fdo-loops (design document, "Loops").
+// Desugaring decides its variables' scopes: a variable of the body that
+// occurs around the loop, outside every loop's body, is the goal's, shared
+// by the iterations, and every other one is the loop's own, so that loops
+// one after another have different variables of the same name.
+struct Loop {
+  TokenRange tokens;
+  unsigned number;
+  llvm::ArrayRef<LoopIterator> iterators;
+  llvm::ArrayRef<LoopState> states;
+  Goal body;
 };
 
 // Term : Type or Term `with_type` Type, recorded against the variable that
