@@ -64,6 +64,8 @@ public:
   ~NameResolution();
   // The module's own symbols.
   const ModuleSymbols &module() const { return *module_; }
+  // Loop translation adds the predicates of loops to them.
+  ModuleSymbols &module() { return *module_; }
   // The primitive types, which belong to no module.
   const ModuleSymbols &primitive() const { return *primitive_; }
   // The symbols of a module imported, directly or not; null if it was not

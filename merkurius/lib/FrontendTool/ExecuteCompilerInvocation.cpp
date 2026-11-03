@@ -46,6 +46,8 @@ std::unique_ptr<FrontendAction> createFrontendAction(CompilerInstance &ci) {
     return std::make_unique<DebugDumpResolvedNamesAction>();
   case ActionKind::DebugDumpTypes:
     return std::make_unique<DebugDumpTypesAction>();
+  case ActionKind::DebugDumpLoops:
+    return std::make_unique<DebugDumpLoopsAction>();
   case ActionKind::DebugDumpModes:
     return std::make_unique<DebugDumpModesAction>();
   case ActionKind::DebugDumpDeterminism:

@@ -49,9 +49,9 @@ class PurityChecker {
 public:
   PurityChecker(const parser::TokenSequence &tokens,
       const NameResolution &resolution, const TypeChecking &types,
-      parser::Messages &messages)
+      parser::Messages &messages, LoopPurities *loops)
       : tokens_{tokens}, resolution_{resolution}, types_{types},
-        messages_{messages} {}
+        messages_{messages}, loops_{loops} {}
 
   void Run(const parser::ParseTree &, const SemanticForm &);
 
@@ -84,6 +84,7 @@ private:
   const NameResolution &resolution_;
   const TypeChecking &types_;
   parser::Messages &messages_;
+  LoopPurities *loops_;
   const ClauseTypes *clause_{nullptr};
   // Inside a compound goal annotated in error, the annotation, which the
   // goals in it are taken to have.
@@ -210,7 +211,13 @@ Purity PurityChecker::Check(const Goal &goal) {
             }
             return purity;
           },
-          [&](const Loop *x) { return Check(x->body); },
+          [&](const Loop *x) {
+            Purity purity{Check(x->body)};
+            if (loops_) {
+              (*loops_)[x] = purity;
+            }
+            return purity;
+          },
       },
       goal);
 }
@@ -568,8 +575,8 @@ void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
 void CheckPurity(const parser::ParseTree &tree,
     const parser::TokenSequence &tokens, const SemanticForm &form,
     const NameResolution &resolution, const TypeChecking &types,
-    parser::Messages &messages) {
-  PurityChecker{tokens, resolution, types, messages}.Run(tree, form);
+    parser::Messages &messages, LoopPurities *loops) {
+  PurityChecker{tokens, resolution, types, messages, loops}.Run(tree, form);
 }
 
 } // namespace merkurius::semantics

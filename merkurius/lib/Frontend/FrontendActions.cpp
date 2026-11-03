@@ -28,6 +28,7 @@
 #include "merkurius/Semantics/module-loader.h"
 #include "merkurius/Semantics/polymorphism.h"
 #include "merkurius/Semantics/resolve-names.h"
+#include "merkurius/Semantics/translate-loops.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
 #include "mlir/Dialect/DLTI/DLTI.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -327,6 +328,11 @@ void Resolve(CompilerInstance &ci, parser::SourceFile &file,
   llvm::StringRef directory{llvm::sys::path::parent_path(file.path())};
   r.loader->LoadImports(
       *r.tree, r.tokens, directory.empty() ? "." : directory);
+  // The modules that loops' translations call, which need not be imported.
+  for (llvm::StringRef module : semantics::LoopModules(*r.form)) {
+    r.loader->Load(module, r.tokens.tokens.front().spelling,
+        directory.empty() ? "." : directory);
+  }
   r.resolution = semantics::ResolveNames(
       *r.tree, r.tokens, *r.form, *r.loader, r.messages);
 }
@@ -547,6 +553,47 @@ static void PrintProcedure(llvm::raw_ostream &os,
   os << '\n';
 }
 
+bool DebugDumpLoopsAction::executeAction() {
+  CompilerInstance &ci{getInstance()};
+  const FrontendOptions &frontend{ci.getFrontendOpts()};
+  Resolved r;
+  Resolve(ci, getSourceFile(), r);
+  semantics::TypeCheckOptions typeOptions;
+  typeOptions.inferTypes = frontend.inferTypes;
+  typeOptions.inferenceIterationLimit = frontend.typeInferenceIterationLimit;
+  std::unique_ptr<semantics::TypeChecking> types{semantics::CheckTypes(
+      *r.form, *r.resolution, r.tokens, r.messages, typeOptions)};
+  semantics::LoopPurities loops;
+  semantics::CheckPurity(
+      *r.tree, r.tokens, *r.form, *r.resolution, *types, r.messages, &loops);
+  std::vector<std::size_t> translated{semantics::TranslateLoops(
+      *r.resolution, *types, loops, r.tokens, r.semanticArena, r.messages)};
+  r.messages.Emit(llvm::errs(), ci.getAllSources());
+  llvm::raw_ostream *os{ci.createDefaultOutputFile()};
+  if (!os) {
+    return false;
+  }
+  const parser::AllSources &sources{ci.getAllSources()};
+  for (std::size_t i : translated) {
+    const semantics::ClauseTypes &clause{types->clauses()[i]};
+    *os << Position(sources, Source(r.tokens, clause.clause->tokens)) << ' ';
+    if (const semantics::Signature *sig{clause.method
+                ? &clause.method->signature
+                : types->SignatureOf(*clause.definition)}) {
+      *os << semantics::SignatureToString(*clause.definition, *sig);
+    } else {
+      *os << *clause.definition;
+    }
+    *os << '\n';
+    const semantics::ClauseForm *form{clause.clause};
+    semantics::DumpSemanticForm(*os,
+        semantics::SemanticForm{llvm::ArrayRef<const semantics::ClauseForm *>{form}},
+        true);
+  }
+  os->flush();
+  return !r.messages.AnyFatalError();
+}
+
 bool DebugDumpModesAction::executeAction() {
   CompilerInstance &ci{getInstance()};
   const FrontendOptions &frontend{ci.getFrontendOpts()};
@@ -557,8 +604,11 @@ bool DebugDumpModesAction::executeAction() {
   typeOptions.inferenceIterationLimit = frontend.typeInferenceIterationLimit;
   std::unique_ptr<semantics::TypeChecking> types{semantics::CheckTypes(
       *r.form, *r.resolution, r.tokens, r.messages, typeOptions)};
+  semantics::LoopPurities loops;
   semantics::CheckPurity(
-      *r.tree, r.tokens, *r.form, *r.resolution, *types, r.messages);
+      *r.tree, r.tokens, *r.form, *r.resolution, *types, r.messages, &loops);
+  semantics::TranslateLoops(
+      *r.resolution, *types, loops, r.tokens, r.semanticArena, r.messages);
   semantics::ModeCheckOptions options;
   options.inferModes = frontend.inferModes;
   options.inferenceIterationLimit = frontend.modeInferenceIterationLimit;
@@ -653,8 +703,11 @@ Analysed Analyse(CompilerInstance &ci, Resolved &r) {
   typeOptions.inferenceIterationLimit = frontend.typeInferenceIterationLimit;
   std::unique_ptr<semantics::TypeChecking> types{semantics::CheckTypes(
       *r.form, *r.resolution, r.tokens, r.messages, typeOptions)};
+  semantics::LoopPurities loops;
   semantics::CheckPurity(
-      *r.tree, r.tokens, *r.form, *r.resolution, *types, r.messages);
+      *r.tree, r.tokens, *r.form, *r.resolution, *types, r.messages, &loops);
+  semantics::TranslateLoops(
+      *r.resolution, *types, loops, r.tokens, r.semanticArena, r.messages);
   semantics::ModeCheckOptions options;
   options.inferModes = frontend.inferModes;
   options.inferenceIterationLimit = frontend.modeInferenceIterationLimit;

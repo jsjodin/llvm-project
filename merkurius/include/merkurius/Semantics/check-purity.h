@@ -21,14 +21,16 @@
 #include "merkurius/Semantics/check-types.h"
 #include "merkurius/Semantics/resolve-names.h"
 #include "merkurius/Semantics/semantic-form.h"
+#include "merkurius/Semantics/translate-loops.h"
 
 namespace merkurius::semantics {
 
 // Reports the module's purity errors, by the callees that type checking
-// chose; a goal with a type error is not checked.
+// chose; a goal with a type error is not checked. With `loops`, records
+// the purity of each loop checked, for its translation.
 void CheckPurity(const parser::ParseTree &, const parser::TokenSequence &,
     const SemanticForm &, const NameResolution &, const TypeChecking &,
-    parser::Messages &);
+    parser::Messages &, LoopPurities *loops = nullptr);
 
 } // namespace merkurius::semantics
 

@@ -40,6 +40,7 @@
 #include "merkurius/Semantics/module-loader.h"
 #include "merkurius/Semantics/polymorphism.h"
 #include "merkurius/Semantics/resolve-names.h"
+#include "merkurius/Semantics/translate-loops.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
@@ -159,8 +160,11 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, Config config) {
   std::unique_ptr<merkurius::semantics::TypeChecking> checking{
       merkurius::semantics::CheckTypes(
           semanticForm, *resolution, tokens, messages)};
+  merkurius::semantics::LoopPurities loops;
   merkurius::semantics::CheckPurity(
-      tree, tokens, semanticForm, *resolution, *checking, messages);
+      tree, tokens, semanticForm, *resolution, *checking, messages, &loops);
+  merkurius::semantics::TranslateLoops(
+      *resolution, *checking, loops, tokens, semanticArena, messages);
   bool earlier{messages.AnyFatalError()};
   std::unique_ptr<merkurius::semantics::ModeChecking> modes{
       merkurius::semantics::CheckModes(
