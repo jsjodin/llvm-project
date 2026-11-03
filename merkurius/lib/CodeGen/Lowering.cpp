@@ -54,9 +54,10 @@ bool CanFail(merk::Determinism determinism) {
       determinism == merk::Determinism::CcNondet;
 }
 
-// A merk type's LLVM type: a string is a pointer to its bytes.
+// A merk type's LLVM type: a string is a pointer to its bytes, and an array
+// a pointer to its size and elements.
 mlir::Type Convert(mlir::Type type) {
-  if (mlir::isa<merk::StringType>(type)) {
+  if (mlir::isa<merk::StringType, merk::ArrayType>(type)) {
     return mlir::LLVM::LLVMPointerType::get(type.getContext());
   }
   return type;
@@ -104,6 +105,16 @@ private:
   void LowerConstant(merk::ConstantOp);
   void LowerForeignCall(merk::ForeignCallOp);
   void LowerEntry(merk::EntryOp);
+  void LowerArray(mlir::Operation *);
+  // An array element's word, from its value, and its value, from the word.
+  mlir::Value ToWord(mlir::Value, mlir::Location);
+  mlir::Value FromWord(mlir::Value word, mlir::Type, mlir::Location);
+  // The address of an array's element.
+  mlir::Value ElementAddress(mlir::Value array, mlir::Value index,
+      mlir::Location);
+  // A function of the runtime library, declared once.
+  mlir::LLVM::LLVMFuncOp RuntimeFunc(llvm::StringRef name, mlir::Type result,
+      llvm::ArrayRef<mlir::Type> arguments, bool noreturn = false);
   // Makes the if-then-elses, switches, negations, tests and calls that can
   // fail of a procedure branches between blocks.
   void Flatten(mlir::LLVM::LLVMFuncOp);
@@ -450,6 +461,39 @@ void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
             throwIf, throwIf.getCondition(), raise, next);
         break;
       }
+      if (auto check{mlir::dyn_cast<merk::CheckIndexOp>(op)}) {
+        // As an unsigned comparison, a negative index is out of range too.
+        next = SplitAfter(check);
+        rewriter_.setInsertionPoint(check);
+        // The array's size is its first word; the array may still be
+        // merk's, from an operation not lowered yet.
+        mlir::Value array{check->getOperand(0)}, index{check->getOperand(1)};
+        mlir::Value size{mlir::LLVM::LoadOp::create(
+            rewriter_, loc, rewriter_.getI64Type(), array)};
+        mlir::Value in{mlir::LLVM::ICmpOp::create(
+            rewriter_, loc, mlir::LLVM::ICmpPredicate::ult, index, size)};
+        mlir::Block *raise{rewriter_.createBlock(next)};
+        if (device_) {
+          mlir::LLVM::Trap::create(rewriter_, loc);
+        } else {
+          auto ptr{mlir::LLVM::LLVMPointerType::get(rewriter_.getContext())};
+          auto i64{rewriter_.getI64Type()};
+          mlir::Value what{mlir::LLVM::AddressOfOp::create(
+              rewriter_, loc, StringGlobal(check.getWhat(), loc))};
+          mlir::Value max{mlir::LLVM::SubOp::create(rewriter_, loc, size,
+              mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 1))};
+          mlir::LLVM::CallOp::create(rewriter_, loc,
+              RuntimeFunc("merk_index_out_of_bounds",
+                  mlir::LLVM::LLVMVoidType::get(rewriter_.getContext()),
+                  {ptr, i64, i64}, /*noreturn=*/true),
+              mlir::ValueRange{what, index, max});
+        }
+        mlir::LLVM::UnreachableOp::create(rewriter_, loc);
+        rewriter_.setInsertionPoint(check);
+        rewriter_.replaceOpWithNewOp<mlir::LLVM::CondBrOp>(
+            check, in, next, raise);
+        break;
+      }
       if (auto call{mlir::dyn_cast<merk::CallOp>(op)}) {
         bool tail{false};
         if (mlir::Value succeeded{Call(call, &tail)}) {
@@ -584,6 +628,113 @@ void Lowerer::Flatten(mlir::LLVM::LLVMFuncOp func) {
   }
 }
 
+mlir::LLVM::LLVMFuncOp Lowerer::RuntimeFunc(llvm::StringRef name,
+    mlir::Type result, llvm::ArrayRef<mlir::Type> arguments, bool noreturn) {
+  if (auto func{module_.lookupSymbol<mlir::LLVM::LLVMFuncOp>(name)}) {
+    return func;
+  }
+  mlir::OpBuilder::InsertionGuard guard{rewriter_};
+  rewriter_.setInsertionPointToEnd(module_.getBody());
+  auto func{mlir::LLVM::LLVMFuncOp::create(rewriter_, module_.getLoc(), name,
+      mlir::LLVM::LLVMFunctionType::get(result, arguments))};
+  func.setNoUnwind(true);
+  if (noreturn) {
+    func->setAttr("passthrough",
+        rewriter_.getArrayAttr({rewriter_.getStringAttr("noreturn")}));
+  }
+  return func;
+}
+
+// An element's word: an integer extended, a float's bits, a pointer's
+// address.
+mlir::Value Lowerer::ToWord(mlir::Value value, mlir::Location loc) {
+  auto i64{rewriter_.getI64Type()};
+  // Its type may still be merk's, from an operation not lowered yet.
+  mlir::Type type{Convert(value.getType())};
+  if (type == i64) {
+    return value;
+  }
+  if (mlir::isa<mlir::IntegerType>(type)) {
+    return mlir::LLVM::ZExtOp::create(rewriter_, loc, i64, value);
+  }
+  if (mlir::isa<mlir::LLVM::LLVMPointerType>(type)) {
+    return mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, value);
+  }
+  return mlir::LLVM::BitcastOp::create(rewriter_, loc, i64, value);
+}
+
+mlir::Value Lowerer::FromWord(
+    mlir::Value word, mlir::Type type, mlir::Location loc) {
+  if (type == word.getType()) {
+    return word;
+  }
+  if (mlir::isa<mlir::IntegerType>(type)) {
+    return mlir::LLVM::TruncOp::create(rewriter_, loc, type, word);
+  }
+  if (mlir::isa<mlir::LLVM::LLVMPointerType>(type)) {
+    return mlir::LLVM::IntToPtrOp::create(rewriter_, loc, type, word);
+  }
+  return mlir::LLVM::BitcastOp::create(rewriter_, loc, type, word);
+}
+
+// Element I is the word after I + 1 words, the first being the size.
+mlir::Value Lowerer::ElementAddress(
+    mlir::Value array, mlir::Value index, mlir::Location loc) {
+  auto i64{rewriter_.getI64Type()};
+  mlir::Value offset{mlir::LLVM::AddOp::create(rewriter_, loc, index,
+      mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 1))};
+  return mlir::LLVM::GEPOp::create(rewriter_, loc,
+      mlir::LLVM::LLVMPointerType::get(rewriter_.getContext()), i64, array,
+      mlir::ValueRange{offset});
+}
+
+void Lowerer::LowerArray(mlir::Operation *op) {
+  mlir::Location loc{op->getLoc()};
+  rewriter_.setInsertionPoint(op);
+  auto ptr{mlir::LLVM::LLVMPointerType::get(rewriter_.getContext())};
+  auto i64{rewriter_.getI64Type()};
+  auto call{[&](llvm::StringRef name, mlir::Type result,
+                mlir::ValueRange arguments) {
+    llvm::SmallVector<mlir::Type> types{llvm::map_to_vector(
+        arguments, [](mlir::Value v) { return Convert(v.getType()); })};
+    return mlir::LLVM::CallOp::create(rewriter_, loc,
+        RuntimeFunc(name, result, types), arguments)
+        .getResult();
+  }};
+  // An absent initial element: any word.
+  auto init{[&](unsigned operand) -> mlir::Value {
+    return op->getNumOperands() > operand
+        ? ToWord(op->getOperand(operand), loc)
+        : mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 0);
+  }};
+  // The operands, not the accessors: an array the procedure was passed is
+  // already a pointer.
+  auto operand{[&](unsigned i) { return op->getOperand(i); }};
+  mlir::Value result;
+  if (mlir::isa<merk::ArrayNewOp>(op)) {
+    result = call("merk_array_new", ptr, {operand(0), init(1)});
+  } else if (mlir::isa<merk::ArraySizeOp>(op)) {
+    result = mlir::LLVM::LoadOp::create(rewriter_, loc, i64, operand(0));
+  } else if (mlir::isa<merk::ArrayGetOp>(op)) {
+    mlir::Value word{mlir::LLVM::LoadOp::create(rewriter_, loc, i64,
+        ElementAddress(operand(0), operand(1), loc))};
+    result = FromWord(word, Convert(op->getResult(0).getType()), loc);
+  } else if (mlir::isa<merk::ArraySetOp>(op)) {
+    mlir::LLVM::StoreOp::create(rewriter_, loc, ToWord(operand(2), loc),
+        ElementAddress(operand(0), operand(1), loc));
+    result = operand(0);
+  } else if (mlir::isa<merk::ArrayFillOp>(op)) {
+    result = call("merk_array_fill", ptr,
+        {operand(0), operand(1), operand(2), ToWord(operand(3), loc)});
+  } else if (mlir::isa<merk::ArrayCopyOp>(op)) {
+    result = call("merk_array_copy", ptr, {operand(0)});
+  } else {
+    assert(mlir::isa<merk::ArrayResizeOp>(op));
+    result = call("merk_array_resize", ptr, {operand(0), operand(1), init(2)});
+  }
+  rewriter_.replaceOp(op, result);
+}
+
 mlir::LLVM::LLVMFuncOp Lowerer::ThrowFunc() {
   if (!throw_) {
     mlir::OpBuilder::InsertionGuard guard{rewriter_};
@@ -630,7 +781,9 @@ llvm::LogicalResult Lowerer::Lower() {
   llvm::SmallVector<mlir::Operation *> ops;
   module_.walk([&](mlir::Operation *op) {
     if (mlir::isa<merk::SucceedOp, merk::CallOp, merk::ConstantOp,
-            merk::ForeignCallOp>(op)) {
+            merk::ForeignCallOp, merk::ArrayNewOp, merk::ArraySizeOp,
+            merk::ArrayGetOp, merk::ArraySetOp, merk::ArrayFillOp,
+            merk::ArrayCopyOp, merk::ArrayResizeOp>(op)) {
       ops.push_back(op);
     }
   });
@@ -641,6 +794,8 @@ llvm::LogicalResult Lowerer::Lower() {
       LowerConstant(constant);
     } else if (auto foreign{mlir::dyn_cast<merk::ForeignCallOp>(op)}) {
       LowerForeignCall(foreign);
+    } else if (!mlir::isa<merk::CallOp>(op)) {
+      LowerArray(op);
     } else {
       Call(mlir::cast<merk::CallOp>(op));
     }
