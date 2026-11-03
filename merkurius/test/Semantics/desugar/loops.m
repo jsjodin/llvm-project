@@ -4,14 +4,11 @@
 % that the body updates are threaded through it, and the variables of the
 % body that occur nowhere around the loop are its own, so that loops one
 % after another have different variables of the same name. Each goal's
-% nonlocal variables are after "~". Type checking does not take loops yet.
+% nonlocal variables are after "~". Semantics/types/loops.m types them.
 %
 % RUN: merkc -fc1 -fdo-loops -fdebug-dump-nonlocals %s 2>/dev/null | FileCheck %s
 % RUN: merkc -fc1 -fdo-loops -fdebug-dump-nonlocals %s 2>&1 >/dev/null \
 % RUN:   | FileCheck --check-prefix=WARN --implicit-check-not=warning: %s
-% RUN: not merkc -fc1 -fdo-loops -fdebug-dump-types %s 2>&1 \
-% RUN:   | FileCheck --check-prefix=TYPES %s
-% TYPES: loops.m:40:7: error: not yet implemented: type checking loops
 
 :- module loops.
 :- interface.
@@ -30,6 +27,7 @@
 :- pred lambdas(int::in, list(int)::out) is det.
 :- pred branches(int::in, int::in, int::out) is det.
 :- pred uninitialized(int::out) is det.
+:- pred copy(list(int)::in, list(int)::out) is det.
 
 :- implementation.
 :- import_module float, int.
@@ -197,3 +195,12 @@ branches(N, Limit, !:S) :-
 uninitialized(!:S) :-
     ( for(I, 1, 3) do !:S = I ).
 % WARN: loops.m:[[@LINE-1]]:7: warning: reference to uninitialized state variable !.S
+
+% Two foreach with one element copy a list: no warning, which is for two
+% fromtos only.
+copy(Xs, Ys) :-
+    ( foreach(X, Xs), foreach(X, Ys) do true ).
+% CHECK:      Predicate copy(Xs, Ys)
+% CHECK-NEXT: | Loop #1 ~ [Xs, Ys]
+% CHECK-NEXT: | | Foreach X, Xs
+% CHECK-NEXT: | | Foreach X, Ys

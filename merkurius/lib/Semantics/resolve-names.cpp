@@ -55,6 +55,12 @@ const parser::SymName *NameResolution::FunctorName(const Unify &unify) const {
   return it == functors_.end() ? nullptr : it->second;
 }
 
+const parser::SymName *NameResolution::ListName(
+    const LoopIterator &iterator) const {
+  auto it{lists_.find(&iterator)};
+  return it == lists_.end() ? nullptr : it->second;
+}
+
 namespace {
 
 // The primitive types (reference manual, "Primitive types"). The
@@ -849,7 +855,27 @@ void Resolver::ResolveGoal(const Goal &goal, const Visibility &scope) {
               ResolveGoal(alternative.goal, scope);
             }
           },
-          [&](const Loop *loop) { ResolveGoal(loop->body, scope); },
+          [&](const Loop *loop) {
+            // foreach names the list type, which must be visible, as list
+            // syntax names its constructors.
+            for (const LoopIterator &iterator : loop->iterators) {
+              if (iterator.kind == parser::LoopIteratorKind::Foreach) {
+                const parser::SymName &name{
+                    *result_.arena_.Make<parser::SymName>(
+                        parser::SymName{iterator.tokens, {}, "[|]"})};
+                result_.lists_[&iterator] = &name;
+                reportUndefined_ = false;
+                Resolve(name, NameUse::DataTerm, 2, scope);
+                reportUndefined_ = true;
+                if (name.candidates.empty()) {
+                  messages_.Say(Source(name),
+                      "%s needs the list module, which is not imported"_err_en_US,
+                      Source(name).ToString());
+                }
+              }
+            }
+            ResolveGoal(loop->body, scope);
+          },
       },
       goal);
 }

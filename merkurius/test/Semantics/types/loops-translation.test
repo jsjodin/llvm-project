@@ -1,0 +1,6 @@
+# The translation of loops.m's loops, written by hand with the types that
+# merkc gives their variables declared: mmc must accept it with merkc, and
+# infer the same signatures for the predicates without declarations.
+#
+# REQUIRES: mmc
+# RUN: %compare-types %S/Inputs/loops_translation.m

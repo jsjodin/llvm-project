@@ -146,6 +146,12 @@ public:
   // manual, "Creating higher-order terms"). None if they have inst
   // variables.
   std::optional<std::vector<ArgMode>> LambdaModes(const Lambda &);
+  // Reports a loop, which mode analysis does not take yet, once.
+  void LoopNotYet(const Loop &loop, parser::CharBlock at) {
+    if (loops_.insert(&loop).second) {
+      messages_.Say(at, "mode checking %s"_todo_en_US, "loops");
+    }
+  }
 
 private:
   // The inst variables of a definition or a declaration as they are
@@ -214,6 +220,7 @@ private:
   parser::Messages &messages_;
   const ModeCheckOptions &options_;
   ConstructorTable constructors_;
+  llvm::DenseSet<const Loop *> loops_; // reported as not checked yet
   // Whether the item converted is the module's own, whose errors are
   // reported.
   bool own_{true};
@@ -2145,7 +2152,10 @@ ProcedureChecker::Result ProcedureChecker::CheckGoal(
           },
           [&](const Try *) { return Unsupported(Unchecked::Try); },
           [&](const Atomic *) { return Unsupported(Unchecked::Atomic); },
-          [&](const Loop *) { return Unsupported(Unchecked::Loop); },
+          [&](const Loop *loop) {
+            declarations_.LoopNotYet(*loop, Source(loop->tokens));
+            return Unsupported(Unchecked::Loop);
+          },
       },
       goal);
 }
