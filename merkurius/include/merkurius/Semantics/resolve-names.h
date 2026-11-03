@@ -85,6 +85,9 @@ public:
   // The name of a unification's functor: as written, or, for list syntax,
   // '[|]' or '[]'; null for any other functor.
   const parser::SymName *FunctorName(const Unify &) const;
+  // The list module's '[|]', for a loop's foreach(X, List), whose List is
+  // a list of X's type; null for another iterator.
+  const parser::SymName *ListName(const LoopIterator &) const;
 
 private:
   friend class Resolver;
@@ -98,6 +101,7 @@ private:
   std::vector<TypeclassItem> typeclasses_;
   std::vector<InstanceItem> instances_;
   llvm::DenseMap<const Unify *, const parser::SymName *> functors_;
+  llvm::DenseMap<const LoopIterator *, const parser::SymName *> lists_;
 };
 
 // A name that is a character constant, such as a or 'é' (reference
