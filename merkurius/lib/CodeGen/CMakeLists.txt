@@ -1,5 +1,6 @@
 add_merkurius_library(MerkuriusCodeGen
   Lowering.cpp
+  Decomposer.cpp
   MLIRGen.cpp
   TargetInfo.cpp
 
@@ -33,6 +34,7 @@ add_merkurius_library(MerkuriusCodeGen
   AllTargetsDescs
   AllTargetsInfos
   Core
+  FrontendOpenMP
   IRReader
   Linker
   MC

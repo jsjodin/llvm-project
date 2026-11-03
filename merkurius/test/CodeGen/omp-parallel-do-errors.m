@@ -4,7 +4,9 @@
 % since reductions are not implemented yet; it threads no io state; and
 % its body is det and pure. The directive is decomposed into parallel and
 % do, and each clause is reported for the leaf it applies to, or as not
-% allowed on any. Each error leaves its procedure out.
+% allowed on any. Each error leaves its procedure out. The checks are the
+% same under target teams distribute parallel do, whose leaves are target,
+% teams, distribute, parallel and do.
 %
 % RUN: not merkc -fc1 -fopenmp -fdo-loops -emit-merk %s -o /dev/null 2>&1 \
 % RUN:   | FileCheck --implicit-check-not=error: %s
@@ -26,6 +28,12 @@
 :- pred if_parallel(int::in, array(int)::array_di, array(int)::array_uo) is det.
 :- pred mapped(int::in, array(int)::array_di, array(int)::array_uo) is det.
 :- pred indexed(int::in, array(int)::array_di, array(int)::array_uo) is det.
+:- pred offloaded_io(int::in, io::di, io::uo) is det.
+:- pred offloaded_no_loop(int::in, int::out) is det.
+:- pred teams(int::in, array(int)::array_di, array(int)::array_uo) is det.
+:- pred dist_schedule(int::in, array(int)::array_di, array(int)::array_uo) is det.
+:- pred target_map(int::in, array(int)::array_di, array(int)::array_uo) is det.
+:- pred nested(int::in, array(int)::array_di, array(int)::array_uo) is det.
 :- implementation.
 :- import_module int, list.
 
@@ -110,3 +118,36 @@ indexed(N, !A) :-
     %$omp parallel do index(I)
 % CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for the index clause
     ( for(I, 0, N) do !A ^ elem(I) := I ).
+
+offloaded_io(N, !IO) :-
+    %$omp target teams distribute parallel do
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: a parallel do loop must not thread the io state, since its iterations run in any order
+    ( for(I, 1, N) do io.write_int(I, !IO) ).
+
+offloaded_no_loop(N, M) :-
+    %$omp target teams distribute parallel do
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: the target teams distribute parallel do directive must be before a loop
+    M = N + 1.
+
+teams(N, !A) :-
+    %$omp target teams distribute parallel do num_teams(4)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for the num_teams clause of the teams directive
+    ( for(I, 0, N) do !A ^ elem(I) := I ).
+
+dist_schedule(N, !A) :-
+    %$omp target teams distribute parallel do dist_schedule(static)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for the dist_schedule clause of the distribute directive
+    ( for(I, 0, N) do !A ^ elem(I) := I ).
+
+target_map(N, !A) :-
+    %$omp target teams distribute parallel do map(to: N)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for the map clause of the target directive
+    ( for(I, 0, N) do !A ^ elem(I) := I ).
+
+nested(N, !A) :-
+    %$omp target
+    (
+        %$omp target teams distribute parallel do
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:9: error: not yet implemented: code generation for target regions in target regions
+        ( for(I, 0, N) do !A ^ elem(I) := I )
+    ).
