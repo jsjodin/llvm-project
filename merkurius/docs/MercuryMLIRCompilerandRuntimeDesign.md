@@ -1004,7 +1004,7 @@ The output of semantic analysis is the annotated AST, one `ProcInfo` per procedu
 
 ## Language extensions
 
-Four extensions are added: processes with typed mailboxes, parallel loop annotations, a sendability rule, and open terms. A program that uses none of them is plain Mercury and pays nothing for them.
+Five extensions are added: processes with typed mailboxes, loops, parallel loop annotations, a sendability rule, and open terms. A program that uses none of them is plain Mercury and pays nothing for them.
 
 ### Processes and mailboxes
 
@@ -1167,10 +1167,179 @@ A module defines process kinds; it is not itself a process. Exporting the mailbo
 
 Failure handling follows Erlang. An uncaught exception ends the process with that exception as its exit reason. A monitor delivers a `down_info` message to a mailbox the watcher names, through a function into that mailbox's message type, so a process with one protocol needs no second mailbox for it. Links deliver exit messages the same way. Both are required and ship with processes in M4; their semantics are in Runtime system, "Exceptions, links and monitors".
 
+### Loops
+
+Writing a small recursive predicate for every loop is tedious, and a counted loop that OpenMP can take is easier to see written as a loop than recovered from a recursion. Loops are Schimpf's logical loops from ECLiPSe (J. Schimpf, "Logical Loops", ICLP 2002), adapted to Mercury's types, modes and quantification. Like his, a loop means its translation into a recursive predicate, so it needs no semantics of its own and no declarations: the translation's types come from the clause that holds the loop, and its modes and determinism are inferred. Two other designs were considered. Zhou's `foreach` for B-Prolog (N.-F. Zhou, "Declarative Loops and List Comprehensions for Prolog", 2010) nests its iterators and adds accumulators and list comprehensions, but Mercury's state variables already are accumulators, and its iterators skip elements that do not match their pattern, which a typed language does not want. SAC's with-loops (S.-B. Scholz, "With-Loop-Folding in SAC", 1997) build arrays whose elements are independent by construction, which makes parallel loops safe and fusion possible, but they cover only arrays. Instead, as in C and Fortran, a parallel loop is an ordinary loop under an OpenMP directive, which is the programmer's promise (Parallel loop annotations, below): in general a compiler cannot prove such loops safe, which is why OpenMP exists.
+
+```mercury
+:- pred sum_list(list(int)::in, int::in, int::out) is det.
+sum_list(Xs, !Sum) :-
+    ( foreach(X, Xs) do !:Sum = !.Sum + X ).
+
+:- pred saxpy(float::in, array(float)::in,
+    array(float)::array_di, array(float)::array_uo) is det.
+saxpy(A, X, !Y) :-
+    N = array.size(X),
+    %$omp target teams distribute parallel do
+    ( for(I, 0, N - 1) do
+        !Y ^ unsafe_elem(I) := A * X ^ unsafe_elem(I) + !.Y ^ unsafe_elem(I)
+    ).
+```
+
+- **Syntax.** `( Iterators do Body )`, where `Iterators` is a conjunction of iterators and `Body` is a goal. `do` is an infix operator, `xfx` with `;`'s priority, 400 (1100 in 22.01's numbering), so a body that is a disjunction or an if-then-else is parenthesized. `do(...)` written as a call, with no layout before the parenthesis, and `do` as an operand stay what they are in Mercury.
+- **The option.** mmc has no `do` operator (it reports "Syntax error at token 'do'"), so a program with loops is not a Mercury program, and the operator exists only with `-fdo-loops`. Without it, a file reads exactly as mmc reads it, as with `-freceive-goal`.
+- **Iterators.** All the iterators of a loop advance together, in lockstep; a nest is a loop in a loop's body.
+  - `for(I, Lo, Hi)` and `for(I, Lo, Hi, Step)`: `I` takes the integers from `Lo` to `Hi`, inclusive, `Step` apart. `Step` is a nonzero integer literal, so the direction is known; a negative step counts down to `Hi`. `Lo` and `Hi` are evaluated once, before the loop. A loop has at most one `for`.
+  - `foreach(X, List)`: `X` takes the elements of `List` in order. A `List` bound before the loop is traversed; a free one is built, one element per iteration, which mode analysis decides, as it decides any unification.
+  - `count(I, Lo, Hi)`: `I` counts the iterations from `Lo`, and the last value is unified with `Hi`, so `Hi` may be free. It never ends the loop.
+  - `fromto(First, In, Out, Last)`: Schimpf's most general iterator, an accumulator, `In` in each iteration and `Out` for the next, from `First` to `Last`. When `Last` is a ground term, such as `[]` or `stop`, it ends the loop, as in `fromto(L, [X | Xs], Xs, [])`, which traverses a list; when it has variables, it is the accumulator's final value, as in `fromto(0, S0, S1, Sum)`. Schimpf's loop that ends on a condition, `fromto(continue, _, C, stop)`, is written `fromto(continue, continue, C, stop)`, so that the end and a step are exclusive (Meaning, below).
+  - Schimpf's `foreacharg`, over a term's arguments, is left out, since a term's arguments have different types in Mercury, and so is `param` (Variables, below).
+- **State variables** are the usual accumulators. A state variable of the clause that the body updates, with `!S` or `!:S`, is threaded through the iterations: the first gets the value of `!.S` before the loop, each later one the value the previous one gave, and `!.S` after the loop is the last one's. A body that only reads `!.S` shares it, as any variable from outside. `fromto` is for an accumulator local to a goal, whose final value is an ordinary variable, as in the inner loop of the matrix multiplication below, and for one that ends the loop.
+- **Variables.** A variable of the body is shared by all iterations when it also occurs in the goal around the loop outside every loop's body: in the clause's head, in a goal before or after the loop, or in an outer argument of an iterator, `Lo`, `Hi`, `List`, `First` or `Last`, which belong to the goal around the loop. A shared variable must be bound before the loop; binding it in the body is a mode error that says so. Every other variable of the body is local to each iteration, so loops one after another may use the same names, each for its own. This is Zhou's rule, not Schimpf's, whose variables are local unless named by `param`: his rule keeps a loop's meaning independent of its context for meta-calls, which Mercury has none of, and quantification already finds the shared variables. The iterators' own variables, `I`, `X`, `In` and `Out`, are local to their loop; one that also occurs around it, outside every loop, is a different variable, with a warning, as the head variables of a lambda expression are. A value leaves a loop through an iterator, `foreach`'s built list, `count`'s `Hi` or `fromto`'s `Last`, or through a state variable.
+- **Meaning.** A loop is replaced by a call of a new predicate, local to the module and named after the loop's position, as in Schimpf's Figure 1. Its arguments are each iterator's state, the threaded state variables and the shared variables. Its types are inferred with the clause that holds the loop, as a lambda expression's are, and are not generalized: inferred on its own, the translation of `sum_list`'s loop is ambiguous between `int` and `float`, as mmc reports for it. Its modes and determinism are inferred as for a predicate without declarations, so a loop may have several modes. Mercury has no cut, so where his auxiliary predicate's first clause commits to the end, ours makes the end and a step exclusive:
+  - With a `for`, it is an if-then-else: `( if I > Hi then Ends else Steps, Body, Recurse )`, with `<` for a negative step. `Ends` unifies each list with `[]`, each `fromto`'s accumulator with `Last` and each `count` with `Hi`; `Steps` unifies each list with `[X | T]`, advances the counters and binds the accumulators.
+  - Without one, it is the disjunction `( Ends ; Steps, Body, Recurse )`, which must be a switch on a list bound before the loop or on a `fromto`'s accumulator, by `Last` against `In`'s pattern, as in `fromto(L, [X | Xs], Xs, [])`. A loop whose disjunction is no switch has nothing that ends it, which is an error. This keeps the number of iterations determined, which is what Schimpf's cut was for, without committing to a choice: the loop has the solutions of its translation.
+  - Lists of different lengths in lockstep are a software error that names the loop, as `list.map_corresponding` throws "mismatched list lengths". The other iterators that could end the loop, lists bound before it and `fromto`s with a ground `Last`, are matched by switches whose other arm throws it, both in `Ends`, for one not at its end, and in `Steps`, for one already at it. In ECLiPSe such a loop fails, which would make every loop over two lists `semidet`; here a loop is `det` when its body is.
+- **Sequential code** is the translation: the recursive call is a last call, which LLVM makes into a branch.
+- **Testing against mmc.** Each loop test has its translation beside it, written by hand as plain Mercury, with declarations; merkc's output for the loop must be mmc's for the translation.
+- **Errors** name the loop by its position and the user's variables, never the translation's predicate or its extra arguments. A variable that is unbound because it is local says so: "`Sum` is local to each iteration of the loop at line 12; to give a value out of a loop, use `fromto(First, In, Out, Sum)` or a state variable".
+- **Shared iterator variables draw a warning.** Two iterators of one loop that share an iterator variable, as `fromto(0, S0, S1, Sum), fromto(0, S0, S1, Count)` share `S0` and `S1` when one `fromto` is copied from the other, are one accumulator, so their bodies must agree, and `S1 = S0 + I, S1 = S0 + 1` fails unless `I = 1`. That is legal but almost always a mistake, so the warning names the variable and both iterators. Two accumulators need their own names, as in `fromto(0, S0, S1, Sum), fromto(0, C0, C1, Count)`.
+- **Open questions:**
+  - an iterator over an array's elements, and over a range of a two-dimensional array, with `array2d`'s `A ^ unsafe_elem(I, J)` instead of computing row-major indices by hand;
+  - leaving a loop early: a `while(Goal)` iterator, which ends the loop before an iteration in which `Goal` fails, would replace the `fromto(continue, continue, C, stop)` idiom.
+
+Scalars passed from one loop to the next, with no arrays and no directive. The first loop sums 1 to `N`, and the second counts the `I` whose square is below the sum:
+
+```mercury
+:- pred below_sum(int::in, int::out) is det.
+below_sum(N, Count) :-
+    ( for(I, 1, N), fromto(0, S0, S1, Sum) do
+        S1 = S0 + I
+    ),
+    ( for(I, 1, N), fromto(0, C0, C1, Count) do
+        ( if I * I < Sum then C1 = C0 + 1 else C1 = C0 )
+    ).
+```
+
+Each loop has its own `I`, and `S0`, `S1`, `C0` and `C1` are local to each iteration. `Sum` occurs in the first loop's `fromto`, so it belongs to the clause, and the second loop shares it, as an input. The translation is two predicates, the second taking `Sum` as an argument; written by hand with declarations, mmc accepts them as `det`, and `below_sum(4, C)` gives 3:
+
+```mercury
+below_sum(N, Count) :-
+    loop_1(1, N, 0, Sum),
+    loop_2(1, N, Sum, 0, Count).
+
+loop_1(I, Hi, S0, Sum) :-
+    ( if I > Hi then
+        Sum = S0
+    else
+        S1 = S0 + I,
+        loop_1(I + 1, Hi, S1, Sum)
+    ).
+
+loop_2(I, Hi, Sum, C0, Count) :-
+    ( if I > Hi then
+        Count = C0
+    else
+        ( if I * I < Sum then C1 = C0 + 1 else C1 = C0 ),
+        loop_2(I + 1, Hi, Sum, C1, Count)
+    ).
+```
+
+Under a parallel directive, a loop is compiled as a loop, not as its translation:
+
+- **Form.** The loop's one iterator is a `for`, which gives the induction variable, the bounds and the step of an `omp.loop_nest`, with `inclusive` bounds. Its other values are its state variables and `fromto`s with a variable `Last`. Each of them is named in a `reduction` clause, or is an array, `array_di` to `array_uo`, that every iteration updates in place and which is shared, as an array is in C. Lists, `count` and a `fromto` that ends the loop are sequential by nature, so they are errors. With `collapse(N)`, the body of each of the outer `N - 1` loops is exactly the next loop, and the inner bounds do not use the outer induction variables.
+- **The promise.** The iterations may run in any order and at the same time, each giving back the array it was given, updated in place. If they write the same element, or one reads what another writes, the result is undefined, as in OpenMP. The compiler checks only what it needs to build the loop: the form above, and the rules for every parallel loop, below. The sequential meaning is checked as without the directive: types, modes, determinism and uniqueness.
+- **Reductions.** `reduction((+) : Sum)` names the `fromto` whose `Last` is `Sum`, or the state variable `!Sum` by its name, as a `map` clause does (Target regions, "Array sections"); with one threaded scalar, `reduction(+)` names it. `First`, or the state variable's value before the loop, is the value the partial results are combined with. The promise covers the body too: it combines `In`, or `!.Sum`, with the iteration's own value by the clause's operator. Each operator becomes an `omp.declare_reduction` of its type, as Flang declares them.
+- **Lowering.** The loop becomes a `merk.par_loop`, which lowering makes into `omp.wsloop` over an `omp.loop_nest`, as Flang lowers `!$omp do`. Under `target teams distribute parallel do`, the bounds and the step go to `omp.target` as `host_eval` operands, and the loop nest is wrapped in `omp.teams`, `omp.parallel`, `omp.distribute` and `omp.wsloop`, as Flang wraps a composite construct. This makes the kernel SPMD. A threaded array is mapped `tofrom`, and after the region it is the array given: the iterations updated it in place, so none of the comparisons of a goal that gives an array of its own are needed (Lowering and code generation, "What is lowered so far").
+
+**Examples.** Temporaries in the body: the midpoint rule for π, the usual first OpenMP program.
+
+```mercury
+:- pred pi(int::in, float::out) is det.
+pi(N, Pi) :-
+    Step = 1.0 / float(N),
+    %$omp parallel do reduction((+) : Sum)
+    ( for(I, 0, N - 1), fromto(0.0, S0, S1, Sum) do
+        X = (float(I) + 0.5) * Step,
+        Y = 4.0 / (1.0 + X * X),
+        S1 = S0 + Y
+    ),
+    Pi = Step * Sum.
+```
+
+- **Temporaries.** `X` and `Y` occur only in the body, so they are local to each iteration, what OpenMP calls `private`, with nothing to declare. A `private` clause naming such a variable is redundant and draws a warning; one naming a shared variable is an error, since a Mercury variable has one value. A variable bound in an if-then-else is bound in both branches, as anywhere in Mercury.
+- **Shared.** `Step` occurs before the loop, so it is shared and read by every iteration. Giving a temporary the name of a variable of the clause makes it shared too, and binding it in the body is then the mode error of a shared variable (Variables, above); C avoids this by declaring temporaries in the loop's block.
+- **Order.** Mode analysis schedules the body, as any conjunction, so the steps may be written in any order.
+- **The translation** keeps `X` and `Y` inside the loop's predicate and passes only `Step` to it. Written by hand with declarations, mmc accepts it as `det`, and with `N = 1000000` it gives 3.1415926535897643.
+
+A matrix multiplication, with row-major N×N matrices:
+
+```mercury
+:- pred matmul(int::in, array(float)::in, array(float)::in,
+    array(float)::array_di, array(float)::array_uo) is det.
+matmul(N, A, B, !C) :-
+    %$omp parallel do collapse(2)
+    ( for(I, 0, N - 1) do
+        ( for(J, 0, N - 1) do
+            ( for(K, 0, N - 1), fromto(0.0, S0, S1, Sum) do
+                S1 = S0 + A ^ unsafe_elem(I * N + K) * B ^ unsafe_elem(K * N + J)
+            ),
+            !C ^ unsafe_elem(I * N + J) := Sum
+        )
+    ).
+```
+
+- **`unsafe_elem`.** The `array` module's `unsafe_elem` and `'unsafe_elem :='` are `elem` and `'elem :='` without the bounds check, as an array subscript in C or Fortran is. The parallel examples use them, as OpenMP code usually does: a failed check on a device is a trap, not an exception (Lowering and code generation, "What is lowered so far"), and the bounds are part of what the loop's author promises. Field syntax covers both, so they need no syntax of their own.
+- **The nest.** `collapse(2)` applies because the body of the `I` loop is exactly the `J` loop, whose bounds do not use `I`.
+- **The inner loop** is sequential, inside each `(I, J)` iteration. Its accumulator is a `fromto`, whose `Sum` occurs in the `J` loop's body and is therefore local to each `(I, J)` iteration, so it needs no `reduction` clause.
+- **The array.** `!C` is threaded through both parallel loops, updated in place and shared. That each `(I, J)` iteration writes only element `I * N + J` is the directive's promise; the compiler does not check it.
+- **Without the directive** this is a sequential triple loop, whose translation is three recursive predicates, one for each loop. Written by hand with declarations, mmc accepts them as `det`.
+
+A Jacobi step on a device, over the inner points of an M×N grid:
+
+```mercury
+:- pred jacobi_step(int::in, int::in, array(float)::in,
+    array(float)::array_di, array(float)::array_uo) is det.
+jacobi_step(M, N, A, !B) :-
+    %$omp target teams distribute parallel do collapse(2)
+    %$omp&    map(to: A) map(tofrom: B)
+    ( for(I, 1, M - 2) do
+        ( for(J, 1, N - 2) do
+            !B ^ unsafe_elem(I * N + J) := 0.25 *
+                ( A ^ unsafe_elem((I - 1) * N + J) + A ^ unsafe_elem((I + 1) * N + J)
+                + A ^ unsafe_elem(I * N + J - 1) + A ^ unsafe_elem(I * N + J + 1) )
+        )
+    ).
+```
+
+- **The map clauses** are what the modes give anyway, `to` for the `in` array `A` and `tofrom` for the threaded `!B`, so they may be left out. `B` names the state variable `!B`.
+- **Lowering.** `omp.target` takes the bounds and steps of both loops as `host_eval` operands, and holds `omp.teams`, `omp.parallel`, `omp.distribute` and `omp.wsloop` around one `omp.loop_nest` with two induction variables and `inclusive` bounds.
+
+A reduction, whose result a second loop reads:
+
+```mercury
+:- pred normalize(array(float)::array_di, array(float)::array_uo) is det.
+normalize(!A) :-
+    N = array.size(!.A),
+    %$omp target teams distribute parallel do reduction((+) : Sum)
+    ( for(I, 0, N - 1), fromto(0.0, S0, S1, Sum) do
+        S1 = S0 + !.A ^ unsafe_elem(I)
+    ),
+    %$omp target teams distribute parallel do
+    ( for(I, 0, N - 1) do
+        !A ^ unsafe_elem(I) := !.A ^ unsafe_elem(I) / Sum
+    ).
+```
+
+- **`Sum`** is the first loop's `Last`, so it belongs to the clause: the first loop gives it, combining the partial sums with `0.0`, and the second reads it as a shared `in` scalar, mapped `firstprivate`. `I`, `S0` and `S1` are each loop's own.
+- **`!A`** is only read by the first loop, so it is shared there and mapped `to`; the second threads it, `tofrom`.
+
+**Related work.** Loop syntax for logic programs comes from Schimpf's ECLiPSe loops and Zhou's B-Prolog `foreach`, whose successor, Picat, also compiles loops to tail-recursive predicates and makes variables that occur only in a loop local to each iteration, as ours are; none of them runs loops in parallel. Barklund and Bevemyr's bounded quantification over arrays ("Prolog with arrays and bounded quantifications", LPAR 1993) is the closest earlier parallel construct, run on shared-memory multiprocessors (PLILP 1993) with the abstract machine of Reform Prolog, which runs recursion in parallel (Bevemyr, Lindgren and Millroth). Two other lines have the compiler or the runtime find the parallelism: &-Prolog and Ciao prove independence by abstract interpretation, and Mercury's parallel conjunction `&`, an annotation that, like ours, keeps the sequential meaning, parallelizes recursive loops with Bone, Somogyi and Schachte's loop control ("Controlling Loops in Parallel Mercury Code", DAMP 2012), on CPU threads in Mercury's own runtime. On GPUs, logic programming has so far meant the engine, not the program, as in Martinez-Angeles, Dutra and Santos Costa's Datalog engine ("A Datalog Engine for GPUs", WFLP 2013). The nearest relatives in spirit are single-assignment languages for numerical work: Id's loops name each iteration's new value with `next`, as `fromto` names `Out`; Sisal's `for` loops return reductions and ran in parallel; and SAC's with-loops, above. What is new here is the combination: loops in a typed and moded logic language, with their sequential meaning fully checked, standard OpenMP directives as the parallel promise, maps inferred from modes, and lowering through the `omp` dialect to GPUs.
+
 ### Parallel loop annotations
 
 - **Syntax:** a comment line `%$omp parallel do [schedule(…)] [reduction(Op)]` before a goal, mirroring Fortran's `!$omp`. A stock Mercury compiler ignores it, so the sequential meaning is the specification.
-- **Targets:** calls to `int.fold_up` and `int.fold_down`, and to the array iterators (`array.map`, `array.generate`), are treated as intrinsics. Self-recursive counted loops are also recognized, with `index(I) upper(N)` naming the induction variable and bound.
+- **Targets:** `do` loops controlled by a `for` (Loops, above). Calls to `int.fold_up` and `int.fold_down`, and to the array iterators (`array.map`, `array.generate`), are treated as intrinsics. Self-recursive counted loops are also recognized, with `index(I) upper(N)` naming the induction variable and bound.
 - **The promise:** iterations are independent, and writes to a threaded array touch disjoint elements. A reduction's operator is associative. Floating-point reductions may then vary with the schedule.
 - **Checked by the compiler:** the body is `det`, pure, and threads no `io`. A violation is an error, not a silent sequential fallback.
 - **Exceptions:** each iteration catches its own exception; one is rethrown after the join.
@@ -1541,7 +1710,7 @@ Mercury's `throw` and `catch` use LLVM's zero-cost exception handling: `invoke` 
 
 ### 6. Parallel loops
 
-A formed `merk.par_loop` is rewritten into a canonical counted loop: induction variable, inclusive bound, step 1. That loop becomes `scf.parallel` with `scf.reduce` for reductions, and the existing conversion produces `omp.parallel` and `omp.wsloop`. Outlining and the libomp calls come from MLIR's OpenMP-to-LLVM translation. In version 1, a parallel body may not allocate; the compiler checks this after inlining.
+A formed `merk.par_loop` is rewritten into a canonical counted loop: induction variable, inclusive bound, step. A `do` loop is one already (Language extensions, "Loops"). That loop becomes `omp.wsloop` over an `omp.loop_nest`, with `omp.declare_reduction` for reductions, as Flang lowers `!$omp do`. Outlining and the libomp calls come from MLIR's OpenMP-to-LLVM translation. In version 1, a parallel body may not allocate; the compiler checks this after inlining.
 
 This is the transformation that experiment E2 applied by hand to mmc's generated C, where it ran 2× faster on 2 cores with a bit-identical result.
 
