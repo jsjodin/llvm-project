@@ -14,6 +14,8 @@
 // RUN: not merkc -fc1 -emit-merk %t/switch-case.mlir 2>&1 | FileCheck %s --check-prefix=SWITCH-CASE
 // RUN: not merkc -fc1 -emit-merk %t/switch-constant.mlir 2>&1 | FileCheck %s --check-prefix=SWITCH-CONSTANT
 // RUN: not merkc -fc1 -emit-merk %t/yield.mlir 2>&1 | FileCheck %s --check-prefix=YIELD
+// RUN: not merkc -fc1 -emit-merk %t/array-get.mlir 2>&1 | FileCheck %s --check-prefix=ARRAY-GET
+// RUN: not merkc -fc1 -emit-merk %t/array-set.mlir 2>&1 | FileCheck %s --check-prefix=ARRAY-SET
 
 //--- outputs.mlir
 // OUTPUTS: outputs.mlir:[[@LINE+3]]:5: error: 'merk.succeed' op has 0 outputs, but its procedure has 1
@@ -127,5 +129,23 @@ module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   merk.proc @p() attributes {determinism = #merk.determinism<det>} {
     merk.yield
+  }
+}
+
+//--- array-get.mlir
+// ARRAY-GET: array-get.mlir:[[@LINE+3]]:10: error: 'merk.array_get' op result of type 'f64' is not of the array's element type 'i64'
+module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
+  merk.proc @p(%a: !merk.array<i64>, %i: i64) -> f64 attributes {determinism = #merk.determinism<det>} {
+    %x = merk.array_get %a[%i] : !merk.array<i64> -> f64
+    merk.succeed %x : f64
+  }
+}
+
+//--- array-set.mlir
+// ARRAY-SET: array-set.mlir:[[@LINE+3]]:10: error: 'merk.array_set' op element of type '!merk.string' is not of the array's element type 'i64'
+module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
+  merk.proc @p(%a: !merk.array<i64>, %i: i64, %s: !merk.string) -> !merk.array<i64> attributes {determinism = #merk.determinism<det>} {
+    %b = merk.array_set %a[%i], %s : !merk.array<i64>, !merk.string
+    merk.succeed %b : !merk.array<i64>
   }
 }

@@ -3,6 +3,7 @@
 # directory's lib, where the driver looks for it beside bin/merkc, and
 # installed there too.
 add_library(merkrt STATIC
+  array.cpp
   exception.cpp
   main.cpp
   )
