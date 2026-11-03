@@ -64,13 +64,17 @@ if os.path.exists(amdgpu_arch):
                               timeout=60).stdout.split()
     except (OSError, subprocess.SubprocessError):
         gpus = []
-if gpus and omp_dirs:
-    config.available_features.add("amdgpu-gpu")
-    config.substitutions.append(("%offload-arch", gpus[0]))
+# Programs with host parallel regions need only libomp, the "libomp"
+# feature.
+if omp_dirs:
+    config.available_features.add("libomp")
     config.substitutions.append(
         ("%libomp-flags", " ".join("-L" + d for d in omp_dirs)))
     config.substitutions.append(
         ("%libomp-env", "env LD_LIBRARY_PATH=" + ":".join(omp_dirs)))
+if gpus and omp_dirs:
+    config.available_features.add("amdgpu-gpu")
+    config.substitutions.append(("%offload-arch", gpus[0]))
 
 # The unparser's round-trip tests 2, 3 and 4.
 config.substitutions.append(

@@ -244,7 +244,7 @@ public:
       : resolution_{resolution}, types_{types}, purities_{purities},
         tokens_{tokens}, arena_{arena}, messages_{messages} {}
 
-  std::vector<std::size_t> Run();
+  LoopTranslation Run();
 
 private:
   // A predicate made for a loop: its symbol and its clause, before
@@ -263,8 +263,9 @@ private:
   // The goals that replace a loop: the computation of its trip count, if
   // it has a for, and the call of its loop predicate.
   Goal TranslateLoop(const Loop &);
-  // The number of iterations of a for, into a new variable.
-  void TripCount(const LoopIterator &, VarId trip, std::vector<Goal> &);
+  // The number of iterations of a for, into a new variable; returns the
+  // test it starts with.
+  const Call *TripCount(const LoopIterator &, VarId trip, std::vector<Goal> &);
 
   // The new predicate's symbol, p__kind_Line_Column.
   const Symbol &NewPredicate(llvm::StringRef kind, const Loop &, unsigned arity);
@@ -322,6 +323,7 @@ private:
   std::vector<std::optional<Made>> made_;
   // The purities of the predicates made, by symbol.
   llvm::DenseMap<const Symbol *, parser::Purity> purity_;
+  LoopTranslation result_;
 };
 
 const Symbol *LoopTranslator::IntSymbol(
@@ -514,13 +516,13 @@ bool LoopTranslator::Translatable(const ClauseTypes &clause) {
   return true;
 }
 
-std::vector<std::size_t> LoopTranslator::Run() {
+LoopTranslation LoopTranslator::Run() {
   for (const Symbol *symbol : resolution_.primitive().Lookup("int")) {
     if (symbol->kind == SymbolKind::Type) {
       int_ = types_.types().Named(*symbol, {});
     }
   }
-  std::vector<std::size_t> result;
+  std::vector<std::size_t> &result{result_.clauses};
   std::size_t clauses{types_.clauses_.size()};
   for (std::size_t i{0}; i < clauses; ++i) {
     const ClauseTypes &clause{types_.clauses_[i]};
@@ -534,7 +536,10 @@ std::vector<std::size_t> LoopTranslator::Run() {
       result.push_back(j);
     }
   }
-  return result;
+  for (const TranslatedLoop &loop : result_.loops) {
+    result_.byPredicate[loop.loopPredicate] = &loop;
+  }
+  return std::move(result_);
 }
 
 void LoopTranslator::TranslateClause(std::size_t index) {
@@ -757,7 +762,7 @@ Goal LoopTranslator::Rebuild(const Goal &goal) {
 // for M = 1, Big - Small + 1 wraps only for the whole range of int, whose
 // count, 2^64, is the one it cannot represent; otherwise as
 // Big div M - Small div M, plus one unless Big mod M < Small mod M.
-void LoopTranslator::TripCount(
+const Call *LoopTranslator::TripCount(
     const LoopIterator &iterator, VarId trip, std::vector<Goal> &goals) {
   TokenRange range{iterator.tokens};
   std::int64_t step{StepValue(iterator)};
@@ -788,9 +793,11 @@ void LoopTranslator::TripCount(
         CallOf(range, *IntSymbol(SymbolKind::Predicate, "<", 2), {r1, r2}),
         UnifyVars(range, trip, span), Conjunction(range, plus)));
   }
-  goals.push_back(Make<IfThenElse>(range, NewNumber(),
-      CallOf(range, *IntSymbol(SymbolKind::Predicate, "<", 2), {big, small}),
+  Goal test{
+      CallOf(range, *IntSymbol(SymbolKind::Predicate, "<", 2), {big, small})};
+  goals.push_back(Make<IfThenElse>(range, NewNumber(), test,
       Conjunction(range, none), Conjunction(range, some)));
+  return std::get<const Call *>(test);
 }
 
 Goal LoopTranslator::TranslateLoop(const Loop &loop) {
@@ -922,13 +929,18 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
   }};
   std::vector<Goal> before, ends, steps, advance;
   std::optional<Goal> condition;
+  TranslatedLoop translated{&loop, nullptr, nullptr};
+  auto position{[&](VarId var) {
+    return static_cast<unsigned>(llvm::find(head, var) - head.begin());
+  }};
   for (const LoopIterator &iterator : loop.iterators) {
     TokenRange at{iterator.tokens};
     llvm::ArrayRef<VarId> a{iterator.arguments};
     switch (iterator.kind) {
     case LoopIteratorKind::For: {
       VarId trip{NewVar(int_, at)}, count{NewVar(int_, at)};
-      TripCount(iterator, trip, before);
+      translated.tripTest = TripCount(iterator, trip, before)->number;
+      translated.step = StepValue(iterator);
       VarId step{NewVar(int_, at)};
       advance.push_back(UnifyLiteral(at, step,
           iterator.step ? iterator.step : IntLiteral(at, "1")));
@@ -961,6 +973,7 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
       break;
     }
     case LoopIteratorKind::Fromto: {
+      auto in{static_cast<unsigned>(head.size())};
       argument(a[1], a[0], a[2]);
       const Unify *last{nullptr};
       if (iterator.ends) {
@@ -982,6 +995,7 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
             a[1], false, VarId{0}, last->functor, last->arguments));
       } else {
         through(a[3]);
+        translated.threaded.push_back({in, position(a[3]), &iterator});
         ends.push_back(UnifyVars(at, a[3], a[1]));
       }
       if (const Unify *pattern{patterns.lookup(a[1])}) {
@@ -992,8 +1006,10 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
     }
   }
   for (const LoopState &state : loop.states) {
+    auto in{static_cast<unsigned>(head.size())};
     argument(state.in, state.before, state.out);
     through(state.after);
+    translated.threaded.push_back({in, position(state.after), nullptr});
     ends.push_back(UnifyVars(range, state.after, state.in));
   }
   for (VarId var : bodyHead) {
@@ -1002,6 +1018,9 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
     }
   }
   const Symbol &loopSymbol{NewPredicate("loop", loop, head.size())};
+  translated.loopPredicate = &loopSymbol;
+  translated.bodyPredicate = &bodySymbol;
+  result_.loops.push_back(std::move(translated));
   parser::Purity purity{purities_.lookup(&loop)};
   purity_[&loopSymbol] = purity;
   purity_[&bodySymbol] = purity;
@@ -1055,7 +1074,7 @@ llvm::SmallVector<llvm::StringRef, 1> LoopModules(const SemanticForm &form) {
   return modules;
 }
 
-std::vector<std::size_t> TranslateLoops(NameResolution &resolution,
+LoopTranslation TranslateLoops(NameResolution &resolution,
     TypeChecking &types, const LoopPurities &purities,
     const parser::TokenSequence &tokens, SemanticArena &arena,
     parser::Messages &messages) {

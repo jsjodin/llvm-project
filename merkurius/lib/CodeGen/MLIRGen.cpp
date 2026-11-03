@@ -180,11 +180,12 @@ public:
       semantics::ModeChecking &modes,
       const semantics::DeterminismChecking &determinism,
       const semantics::PolymorphismAnalysis &polymorphism,
-      const TargetInfo &target, parser::Messages &messages)
+      const semantics::LoopTranslation &loops, const TargetInfo &target,
+      parser::Messages &messages)
       : context_{context}, builder_{&context}, moduleName_{module},
         tree_{tree}, tokens_{tokens}, sources_{sources}, types_{types},
-        modes_{modes},
-        determinism_{determinism}, target_{target}, messages_{messages} {
+        modes_{modes}, determinism_{determinism}, loops_{loops},
+        target_{target}, messages_{messages} {
     for (const semantics::ProcedurePolymorphism &procedure :
         polymorphism.procedures()) {
       polymorphism_[procedure.body] = &procedure;
@@ -250,6 +251,17 @@ private:
   void Not(const Body &, const ProcedureBody &);
   // A goal with an OpenMP directive (design document, "Target regions").
   void Omp(const Body &, const ProcedureBody &);
+  // A loop with the parallel do directive, as omp.parallel, omp.wsloop
+  // and omp.loop_nest, whose body calls the loop's body procedure.
+  void ParallelDo(const Body &, const ProcedureBody &);
+  // An error that leaves the procedure out.
+  void Error(parser::CharBlock at, parser::MessageFixedText text,
+      llvm::StringRef argument = {}) {
+    if (!failed_) {
+      messages_.Say(at, text, argument.str());
+    }
+    failed_ = true;
+  }
   // A stack slot of the procedure for a value of `type`, as a generic
   // pointer, which omp.map.info maps.
   mlir::Value Slot(mlir::Type type, mlir::Location);
@@ -291,6 +303,7 @@ private:
   const semantics::TypeChecking &types_;
   semantics::ModeChecking &modes_;
   const semantics::DeterminismChecking &determinism_;
+  const semantics::LoopTranslation &loops_;
   const TargetInfo &target_;
   parser::Messages &messages_;
   llvm::DenseMap<const ProcedureBody *, const semantics::ProcedurePolymorphism *>
@@ -1508,9 +1521,227 @@ static mlir::Value UpdatedFrom(mlir::Value array) {
   return array;
 }
 
+// The goal under the directive is the loop's translation: the goals of its
+// bounds, the computation of its trip count, and the call of its loop
+// predicate (design document, "From a nest to omp.loop_nest"). The bounds'
+// goals are generated as they are; the trip count, and the loop predicate,
+// are not needed: omp.loop_nest runs the iterations from Lo to Hi, by the
+// step, inclusive, and each calls the body procedure with the iteration's
+// counter, the threaded arrays as they were before the loop and the
+// shared variables. By the directive's promise, an array that the body
+// updates in place gives each iteration its own elements, so after the
+// loop it is the array given (design document, "Loops", Under a parallel
+// directive).
+void MerkGenerator::ParallelDo(const Body &goal, const ProcedureBody &body) {
+  using namespace parser::literals;
+  const parser::OmpDirective &directive{*goal.directive};
+  parser::CharBlock at{Where(goal.tokens)};
+  if (!directive.clauses.empty()) {
+    NotYet(at, "clauses of the parallel do directive");
+    return;
+  }
+  if (builder_.getInsertionBlock()->getParent()
+          ->getParentOfType<mlir::omp::TargetOp>()) {
+    NotYet(at, "parallel do in target regions");
+    return;
+  }
+  std::vector<const Body *> goals;
+  std::function<void(const Body &)> collect{[&](const Body &g) {
+    if (g.kind == BodyKind::Conj) {
+      for (const Body *conjunct : g.goals) {
+        collect(*conjunct);
+      }
+    } else {
+      goals.push_back(&g);
+    }
+  }};
+  collect(*goal.goals.front());
+  const Body *call{nullptr};
+  const semantics::TranslatedLoop *loop{nullptr};
+  for (const Body *g : goals) {
+    if (g->kind == BodyKind::Call && g->modes && g->modes->callee) {
+      if (const auto *found{loops_.Of(*g->modes->callee->symbol)}) {
+        call = g;
+        loop = found;
+      }
+    }
+  }
+  if (!loop) {
+    Error(at, "the parallel do directive must be before a loop"_err_en_US);
+    return;
+  }
+  // Its form: a for, and fromtos that do not end it; a loop has at most
+  // one for.
+  bool counted{false};
+  for (const semantics::LoopIterator &iterator : loop->loop->iterators) {
+    llvm::StringRef kind;
+    switch (iterator.kind) {
+    case parser::LoopIteratorKind::For:
+      counted = true;
+      break;
+    case parser::LoopIteratorKind::Foreach:
+      kind = "foreach";
+      break;
+    case parser::LoopIteratorKind::Count:
+      kind = "count";
+      break;
+    case parser::LoopIteratorKind::Fromto:
+      if (iterator.ends) {
+        kind = "a fromto that ends the loop";
+      }
+      break;
+    }
+    if (!kind.empty()) {
+      Error(Where(iterator.tokens),
+          "a parallel do loop is counted by its for, so it cannot have %s"_err_en_US,
+          kind);
+      return;
+    }
+  }
+  if (!counted) {
+    Error(at, "a parallel do loop must have a for iterator"_err_en_US);
+    return;
+  }
+  const Body *trip{nullptr};
+  for (const Body *g : goals) {
+    if (g->kind == BodyKind::IfThenElse &&
+        g->goals.front()->kind == BodyKind::Call &&
+        g->goals.front()->call &&
+        g->goals.front()->call->number == *loop->tripTest) {
+      trip = g;
+    }
+  }
+  const Procedure &loopProcedure{*call->modes->callee};
+  const ProcedureBody *loopBody{determinism_.BodyOf(loopProcedure)};
+  // The loop procedure's call of the body procedure.
+  const Body *bodyCall{nullptr};
+  std::function<void(const Body &)> find{[&](const Body &g) {
+    if (g.kind == BodyKind::Call && g.modes && g.modes->callee &&
+        g.modes->callee->symbol == loop->bodyPredicate) {
+      bodyCall = &g;
+    }
+    for (const Body *inner : g.goals) {
+      find(*inner);
+    }
+  }};
+  if (loopBody && loopBody->body) {
+    find(*loopBody->body);
+  }
+  if (!trip || !bodyCall) {
+    NotYet(at, "parallel do loops whose translation mode analysis changed");
+    return;
+  }
+  // The checks of the parallel loop annotations (design document): the
+  // body is det and pure, and threads only arrays, until reductions.
+  const Procedure &bodyProcedure{*bodyCall->modes->callee};
+  std::optional<parser::Determinism> determinism{
+      determinism_.DeterminismOf(bodyProcedure)};
+  if (determinism != parser::Determinism::Det) {
+    Error(at,
+        "the body of a parallel do loop must be det, but it is %s"_err_en_US,
+        determinism ? semantics::DeterminismName(*determinism) : "unknown");
+    return;
+  }
+  const semantics::Signature *signature{
+      types_.SignatureOf(*loop->bodyPredicate)};
+  if (signature && signature->purity != parser::Purity::Pure) {
+    Error(at, "the body of a parallel do loop must be pure"_err_en_US);
+    return;
+  }
+  for (const semantics::TranslatedLoop::Threaded &value : loop->threaded) {
+    const semantics::Type *type{body.vars[call->arguments[value.in]].type};
+    auto is{[&](llvm::StringRef module, llvm::StringRef name) {
+      return type->kind == semantics::TypeKind::Named &&
+          type->constructor->module == module &&
+          type->constructor->name == name;
+    }};
+    if (is("io", "state")) {
+      Error(at,
+          "a parallel do loop must not thread the io state, since its iterations run in any order"_err_en_US);
+      return;
+    }
+    if (!is("array", "array")) {
+      Error(value.fromto ? Where(value.fromto->tokens) : at,
+          "a parallel do loop can carry %s from one iteration to the next only if it is named in a reduction clause or is an array updated in place"_err_en_US,
+          value.fromto ? "a fromto's value" : "a state variable");
+      return;
+    }
+  }
+  for (const Body *g : goals) {
+    if (g != trip && g != call) {
+      Goal(*g, body);
+    }
+  }
+  if (failed_) {
+    return;
+  }
+  mlir::Location loc{Location(goal.tokens)};
+  BodyVar big{trip->goals.front()->arguments[0]};
+  BodyVar small{trip->goals.front()->arguments[1]};
+  mlir::Value lower{ValueOf(loop->step > 0 ? small : big)};
+  mlir::Value upper{ValueOf(loop->step > 0 ? big : small)};
+  mlir::Type i64{builder_.getI64Type()};
+  mlir::Value step{IntegerConstant(i64, loop->step, loc)};
+
+  llvm::SmallVector<const semantics::Type *> types;
+  for (BodyVar argument : bodyCall->arguments) {
+    types.push_back(loopBody->vars[argument].type);
+  }
+  merk::ProcOp proc{ProcFor(bodyProcedure, types, at)};
+  if (!proc) {
+    return;
+  }
+  auto parallel{mlir::omp::ParallelOp::create(
+      builder_, loc, mlir::omp::ParallelOperands{})};
+  {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.createBlock(&parallel.getRegion());
+    auto wsloop{mlir::omp::WsloopOp::create(
+        builder_, loc, mlir::omp::WsloopOperands{})};
+    mlir::omp::TerminatorOp::create(builder_, loc);
+    builder_.createBlock(&wsloop.getRegion());
+    mlir::omp::LoopNestOperands bounds;
+    bounds.loopLowerBounds.push_back(lower);
+    bounds.loopUpperBounds.push_back(upper);
+    bounds.loopSteps.push_back(step);
+    bounds.loopInclusive = builder_.getUnitAttr();
+    bounds.collapseNumLoops = builder_.getI64IntegerAttr(1);
+    auto nest{mlir::omp::LoopNestOp::create(builder_, loc, bounds)};
+    mlir::Block *iteration{
+        builder_.createBlock(&nest.getRegion(), {}, {i64}, {loc})};
+    // The body procedure's inputs: the counter, and the values the loop
+    // procedure was called with for its other arguments.
+    llvm::SmallVector<mlir::Value> inputs;
+    for (auto [argument, mode] :
+        llvm::zip(bodyCall->arguments, bodyProcedure.modes)) {
+      if (Represent(loopBody->vars[argument].type)->dummy || IsOutput(mode)) {
+        continue;
+      }
+      auto position{llvm::find(loopBody->head, argument)};
+      if (position == loopBody->head.end()) {
+        NotYet(at, "parallel do loops whose body takes a value the loop computes");
+        return;
+      }
+      std::size_t k(position - loopBody->head.begin());
+      inputs.push_back(k == 0 ? iteration->getArgument(0)
+                              : ValueOf(call->arguments[k]));
+    }
+    merk::CallOp::create(builder_, loc, proc.getFunctionType().getResults(),
+        proc.getSymName(), inputs);
+    mlir::omp::YieldOp::create(builder_, loc);
+  }
+  for (const semantics::TranslatedLoop::Threaded &value : loop->threaded) {
+    values_[call->arguments[value.after]] = ValueOf(call->arguments[value.in]);
+  }
+}
+
 void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
   const parser::OmpDirective &directive{*goal.directive};
   parser::CharBlock at{Where(goal.tokens)};
+  if (directive.id == llvm::omp::Directive::OMPD_parallel_do) {
+    ParallelDo(goal, body);
+    return;
+  }
   if (directive.id != llvm::omp::Directive::OMPD_target) {
     NotYet(at,
         "the " + std::string{parser::EnumToString(directive.id)} +
@@ -1943,10 +2174,10 @@ mlir::OwningOpRef<mlir::ModuleOp> GenerateMerk(mlir::MLIRContext &context,
     const semantics::TypeChecking &types, semantics::ModeChecking &modes,
     const semantics::DeterminismChecking &determinism,
     const semantics::PolymorphismAnalysis &polymorphism,
-    const TargetInfo &target, parser::Messages &messages) {
+    const semantics::LoopTranslation &loops, const TargetInfo &target,
+    parser::Messages &messages) {
   return MerkGenerator{context, module, tree, tokens, sources, types, modes,
-      determinism,
-      polymorphism, target, messages}
+      determinism, polymorphism, loops, target, messages}
       .Generate();
 }
 
