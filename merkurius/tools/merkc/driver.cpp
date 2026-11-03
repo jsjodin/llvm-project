@@ -277,6 +277,11 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
         llvm::sys::path::parent_path(executable))};
     llvm::sys::path::append(libraryDir, "lib");
     Job job{findLinker(executable)};
+    // -v shows the link's own jobs too, such as the linker wrapper's for
+    // the GPUs' code, as Flang's -v does.
+    if (args.hasArg(OPT_v)) {
+      job.push_back("-v");
+    }
     if (const llvm::opt::Arg *arg = args.getLastArg(OPT_target_EQ)) {
       job.push_back(arg->getAsString(args));
     }
