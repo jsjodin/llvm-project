@@ -251,9 +251,17 @@ void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
   llvm::SmallVector<mlir::Value> arguments{call.getInputs()};
   llvm::SmallVector<mlir::Value> slots;
   if (byPointer) {
+    // At the start of the function, or of the OpenMP region that holds the
+    // call, which is outlined into a function of its own: each thread
+    // needs its own slots, as Flang and ClangIR place allocas.
     mlir::OpBuilder::InsertionGuard guard{rewriter_};
-    rewriter_.setInsertionPointToStart(
-        &call->getParentOfType<mlir::LLVM::LLVMFuncOp>().getBody().front());
+    mlir::Block *allocas{
+        &call->getParentOfType<mlir::LLVM::LLVMFuncOp>().getBody().front()};
+    if (auto region{
+            call->getParentOfType<mlir::omp::OutlineableOpenMPOpInterface>()}) {
+      allocas = region.getAllocaBlock();
+    }
+    rewriter_.setInsertionPointToStart(allocas);
     mlir::Value one{mlir::LLVM::ConstantOp::create(
         rewriter_, loc, rewriter_.getI64Type(), rewriter_.getI64IntegerAttr(1))};
     for (mlir::Type type : outputs) {

@@ -4,7 +4,7 @@
 % counter from Lo to Hi, inclusive, by the step, and each iteration calls
 % the loop's body procedure with the counter, the threaded array as it was
 % before the loop and the shared variables; the loop procedure is not
-% called. After the loop the array is the one given, which the iterations
+% called. The bounds are computed in omp.parallel, as Flang computes them. After the loop the array is the one given, which the iterations
 % updated in place. A negative step is the nest's, with Lo above Hi. The
 % directive is decomposed into its leaves, as Flang decomposes it, and
 % omp.parallel, which is not the innermost, is combined.
@@ -48,11 +48,11 @@ saxpy(A, X, !Y) :-
         !Y ^ unsafe_elem(I) := A * X ^ unsafe_elem(I) + !.Y ^ unsafe_elem(I)
     ).
 % MERK-LABEL: merk.proc private @omp_parallel_do.saxpy_4_0(%arg0: f64, %arg1: !merk.array<f64>, %arg2: !merk.array<f64>) -> !merk.array<f64>
-% MERK:         %[[SIZE:.*]] = merk.array_size %arg1
-% MERK:         %[[LO:.*]] = merk.constant 0 : i64
-% MERK:         %[[HI:.*]] = arith.subi %[[SIZE]], %{{.*}} : i64
-% MERK:         %[[STEP:.*]] = arith.constant 1 : i64
+% MERK-NEXT:    %[[SIZE:.*]] = merk.array_size %arg1
 % MERK-NEXT:    omp.parallel {
+% MERK-NEXT:      %[[LO:.*]] = merk.constant 0 : i64
+% MERK:           %[[HI:.*]] = arith.subi %[[SIZE]], %{{.*}} : i64
+% MERK:           %[[STEP:.*]] = arith.constant 1 : i64
 % MERK-NEXT:      omp.wsloop {
 % MERK-NEXT:        omp.loop_nest (%[[I:.*]]) : i64 = (%[[LO]]) to (%[[HI]]) inclusive step (%[[STEP]]) {
 % MERK-NEXT:          merk.call @omp_parallel_do.saxpy__body_{{[0-9]+}}_7_5_0(%[[I]], %arg2, %arg0, %arg1)
@@ -76,7 +76,7 @@ down(!A) :-
 % MERK:         omp.loop_nest (%{{.*}}) : i64 = (%[[LO]]) to (%[[HI]]) inclusive step (%[[STEP]]) {
 % MLIR-LABEL: llvm.func internal tailcc @omp_parallel_do.down_2_0(
 % MLIR:         omp.parallel {
-% MLIR-NEXT:      omp.wsloop {
+% MLIR:           omp.wsloop {
 % MLIR-NEXT:        omp.loop_nest (%[[I:.*]]) : i64 = (%{{.*}}) to (%{{.*}}) inclusive step (%{{.*}}) {
 % MLIR-NEXT:          llvm.call tailcc @omp_parallel_do.down__body_{{[0-9]+}}_7_3_0(%[[I]], %arg0)
 % MLIR-NEXT:          omp.yield

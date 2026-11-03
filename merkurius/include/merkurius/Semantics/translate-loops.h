@@ -54,6 +54,8 @@ struct TranslatedLoop {
   // its trip count its second.
   std::int64_t step{1};
   std::optional<unsigned> tripTest;
+  // The for's counter's name, as written.
+  llvm::StringRef counter;
   // The values carried from one iteration to the next, those of each
   // fromto that does not end the loop and each threaded state variable:
   // the positions in the loop predicate's arguments of In's, or the

@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "merkurius/CodeGen/MLIRGen.h"
+#include "Decomposer.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
 #include "merkurius/Parser/parse-tree.h"
 #include "merkurius/Parser/term-reader.h"
@@ -251,9 +252,23 @@ private:
   void Not(const Body &, const ProcedureBody &);
   // A goal with an OpenMP directive (design document, "Target regions").
   void Omp(const Body &, const ProcedureBody &);
-  // A loop with the parallel do directive, as omp.parallel, omp.wsloop
-  // and omp.loop_nest, whose body calls the loop's body procedure.
-  void ParallelDo(const Body &, const ProcedureBody &);
+  // A loop with a loop-associated directive, so far parallel do and target
+  // teams distribute parallel do, as omp.parallel, omp.wsloop and
+  // omp.loop_nest, with omp.target, omp.teams and omp.distribute for the
+  // latter, whose body calls the loop's body procedure.
+  void OmpLoop(const Body &, const ProcedureBody &);
+  // A target region around what `generate` builds, for the goal, which
+  // maps the values it uses and those it binds.
+  void Target(const Body &, const ProcedureBody &,
+      llvm::function_ref<void()> generate, bool combined = false);
+  // The directive's leaves with their clauses; none after reporting a
+  // clause that none of them allows.
+  std::optional<omp::ConstructQueue> Decompose(const parser::OmpDirective &,
+      parser::CharBlock at, std::optional<llvm::StringRef> counter = {});
+  // Reports the leaf's clauses that are not generated yet: all but
+  // shared clauses the decomposition adds, since a variable is shared
+  // already. Whether there were none.
+  bool LeafClauses(const omp::Leaf &, parser::CharBlock at);
   // An error that leaves the procedure out.
   void Error(parser::CharBlock at, parser::MessageFixedText text,
       llvm::StringRef argument = {}) {
@@ -1531,18 +1546,25 @@ static mlir::Value UpdatedFrom(mlir::Value array) {
 // shared variables. By the directive's promise, an array that the body
 // updates in place gives each iteration its own elements, so after the
 // loop it is the array given (design document, "Loops", Under a parallel
-// directive).
-void MerkGenerator::ParallelDo(const Body &goal, const ProcedureBody &body) {
+// directive). The directive is decomposed into its leaves, each with its
+// own clauses, as Flang decomposes it: parallel and do, or target, teams,
+// distribute, parallel and do, where the loop is in a target region whose
+// kernel is generic, since its bounds are computed on the device.
+void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
   using namespace parser::literals;
   const parser::OmpDirective &directive{*goal.directive};
   parser::CharBlock at{Where(goal.tokens)};
-  if (!directive.clauses.empty()) {
-    NotYet(at, "clauses of the parallel do directive");
+  std::string name{parser::EnumToString(directive.id)};
+  bool offloaded{
+      directive.id == llvm::omp::Directive::OMPD_target_teams_distribute_parallel_do};
+  if (directive.id != llvm::omp::Directive::OMPD_parallel_do && !offloaded) {
+    NotYet(at, "the " + name + " directive");
     return;
   }
   if (builder_.getInsertionBlock()->getParent()
           ->getParentOfType<mlir::omp::TargetOp>()) {
-    NotYet(at, "parallel do in target regions");
+    NotYet(at, offloaded ? std::string{"target regions in target regions"}
+                         : name + " in target regions");
     return;
   }
   std::vector<const Body *> goals;
@@ -1567,8 +1589,19 @@ void MerkGenerator::ParallelDo(const Body &goal, const ProcedureBody &body) {
     }
   }
   if (!loop) {
-    Error(at, "the parallel do directive must be before a loop"_err_en_US);
+    Error(at, "the %s directive must be before a loop"_err_en_US, name);
     return;
+  }
+  std::optional<omp::ConstructQueue> queue{Decompose(directive, at,
+      loop->counter.empty() ? std::nullopt
+                            : std::optional<llvm::StringRef>{loop->counter})};
+  if (!queue) {
+    return;
+  }
+  for (const omp::Leaf &leaf : *queue) {
+    if (!LeafClauses(leaf, at)) {
+      return;
+    }
   }
   // Its form: a for, and fromtos that do not end it; a loop has at most
   // one for.
@@ -1667,79 +1700,186 @@ void MerkGenerator::ParallelDo(const Body &goal, const ProcedureBody &body) {
       return;
     }
   }
-  for (const Body *g : goals) {
-    if (g != trip && g != call) {
-      Goal(*g, body);
-    }
-  }
-  if (failed_) {
-    return;
-  }
-  mlir::Location loc{Location(goal.tokens)};
-  BodyVar big{trip->goals.front()->arguments[0]};
-  BodyVar small{trip->goals.front()->arguments[1]};
-  mlir::Value lower{ValueOf(loop->step > 0 ? small : big)};
-  mlir::Value upper{ValueOf(loop->step > 0 ? big : small)};
-  mlir::Type i64{builder_.getI64Type()};
-  mlir::Value step{IntegerConstant(i64, loop->step, loc)};
-
-  llvm::SmallVector<const semantics::Type *> types;
-  for (BodyVar argument : bodyCall->arguments) {
-    types.push_back(loopBody->vars[argument].type);
-  }
-  merk::ProcOp proc{ProcFor(bodyProcedure, types, at)};
-  if (!proc) {
-    return;
-  }
-  auto parallel{mlir::omp::ParallelOp::create(
-      builder_, loc, mlir::omp::ParallelOperands{})};
-  {
+  // The leaves around the loop's wrappers.
+  auto has{[&](llvm::omp::Directive id) {
+    return llvm::any_of(
+        *queue, [&](const omp::Leaf &leaf) { return leaf.id == id; });
+  }};
+  bool teams{has(llvm::omp::Directive::OMPD_teams)};
+  bool distribute{has(llvm::omp::Directive::OMPD_distribute)};
+  // Offloaded, the bounds' goals and the loop are in the target region,
+  // so its kernel is generic.
+  auto generate{[&] {
+    mlir::Location loc{Location(goal.tokens)};
     mlir::OpBuilder::InsertionGuard guard{builder_};
-    builder_.createBlock(&parallel.getRegion());
-    auto wsloop{mlir::omp::WsloopOp::create(
-        builder_, loc, mlir::omp::WsloopOperands{})};
-    mlir::omp::TerminatorOp::create(builder_, loc);
-    builder_.createBlock(&wsloop.getRegion());
-    mlir::omp::LoopNestOperands bounds;
-    bounds.loopLowerBounds.push_back(lower);
-    bounds.loopUpperBounds.push_back(upper);
-    bounds.loopSteps.push_back(step);
-    bounds.loopInclusive = builder_.getUnitAttr();
-    bounds.collapseNumLoops = builder_.getI64IntegerAttr(1);
-    auto nest{mlir::omp::LoopNestOp::create(builder_, loc, bounds)};
-    mlir::Block *iteration{
-        builder_.createBlock(&nest.getRegion(), {}, {i64}, {loc})};
-    // The body procedure's inputs: the counter, and the values the loop
-    // procedure was called with for its other arguments.
-    llvm::SmallVector<mlir::Value> inputs;
-    for (auto [argument, mode] :
-        llvm::zip(bodyCall->arguments, bodyProcedure.modes)) {
-      if (Represent(loopBody->vars[argument].type)->dummy || IsOutput(mode)) {
-        continue;
-      }
-      auto position{llvm::find(loopBody->head, argument)};
-      if (position == loopBody->head.end()) {
-        NotYet(at, "parallel do loops whose body takes a value the loop computes");
-        return;
-      }
-      std::size_t k(position - loopBody->head.begin());
-      inputs.push_back(k == 0 ? iteration->getArgument(0)
-                              : ValueOf(call->arguments[k]));
+    // Teams and parallel end with terminators, added after what is in them,
+    // since a goal is not generated after one.
+    llvm::SmallVector<mlir::Block *, 2> terminated;
+    auto enclose{[&](mlir::Region &region) {
+      terminated.push_back(builder_.createBlock(&region));
+    }};
+    // The leaves, each in the one before, as Flang marks them: a leaf
+    // around the parallel, a combined one; with distribute, the parallel,
+    // distribute and do are the parts of a composite one. The bounds'
+    // goals are in the parallel, as Flang places them: on an AMD GPU, a
+    // generic kernel traps when the parallel in its teams uses a value
+    // computed outside the parallel.
+    if (teams) {
+      auto op{mlir::omp::TeamsOp::create(
+          builder_, loc, mlir::omp::TeamsOperands{})};
+      op.setCombined(true);
+      enclose(op.getRegion());
     }
-    merk::CallOp::create(builder_, loc, proc.getFunctionType().getResults(),
-        proc.getSymName(), inputs);
-    mlir::omp::YieldOp::create(builder_, loc);
+    auto parallel{mlir::omp::ParallelOp::create(
+        builder_, loc, mlir::omp::ParallelOperands{})};
+    if (distribute) {
+      parallel.setComposite(true);
+    } else {
+      parallel.setCombined(true);
+    }
+    enclose(parallel.getRegion());
+    for (const Body *g : goals) {
+      if (g != trip && g != call) {
+        Goal(*g, body);
+      }
+    }
+    if (failed_) {
+      return;
+    }
+    BodyVar big{trip->goals.front()->arguments[0]};
+    BodyVar small{trip->goals.front()->arguments[1]};
+    mlir::Value lower{ValueOf(loop->step > 0 ? small : big)};
+    mlir::Value upper{ValueOf(loop->step > 0 ? big : small)};
+    mlir::Type i64{builder_.getI64Type()};
+    mlir::Value step{IntegerConstant(i64, loop->step, loc)};
+
+    llvm::SmallVector<const semantics::Type *> types;
+    for (BodyVar argument : bodyCall->arguments) {
+      types.push_back(loopBody->vars[argument].type);
+    }
+    merk::ProcOp proc{ProcFor(bodyProcedure, types, at)};
+    if (!proc) {
+      return;
+    }
+    {
+      mlir::OpBuilder::InsertionGuard guard{builder_};
+      if (distribute) {
+        auto op{mlir::omp::DistributeOp::create(
+            builder_, loc, mlir::omp::DistributeOperands{})};
+        op.setComposite(true);
+        builder_.createBlock(&op.getRegion());
+      }
+      auto wsloop{mlir::omp::WsloopOp::create(
+          builder_, loc, mlir::omp::WsloopOperands{})};
+      if (distribute) {
+        wsloop.setComposite(true);
+      }
+      builder_.createBlock(&wsloop.getRegion());
+      mlir::omp::LoopNestOperands bounds;
+      bounds.loopLowerBounds.push_back(lower);
+      bounds.loopUpperBounds.push_back(upper);
+      bounds.loopSteps.push_back(step);
+      bounds.loopInclusive = builder_.getUnitAttr();
+      bounds.collapseNumLoops = builder_.getI64IntegerAttr(1);
+      auto nest{mlir::omp::LoopNestOp::create(builder_, loc, bounds)};
+      mlir::Block *iteration{
+          builder_.createBlock(&nest.getRegion(), {}, {i64}, {loc})};
+      // The body procedure's inputs: the counter, and the values the loop
+      // procedure was called with for its other arguments.
+      llvm::SmallVector<mlir::Value> inputs;
+      for (auto [argument, mode] :
+          llvm::zip(bodyCall->arguments, bodyProcedure.modes)) {
+        if (Represent(loopBody->vars[argument].type)->dummy || IsOutput(mode)) {
+          continue;
+        }
+        auto position{llvm::find(loopBody->head, argument)};
+        if (position == loopBody->head.end()) {
+          NotYet(at, "parallel do loops whose body takes a value the loop computes");
+          return;
+        }
+        std::size_t k(position - loopBody->head.begin());
+        inputs.push_back(k == 0 ? iteration->getArgument(0)
+                                : ValueOf(call->arguments[k]));
+      }
+      merk::CallOp::create(builder_, loc, proc.getFunctionType().getResults(),
+          proc.getSymName(), inputs);
+      mlir::omp::YieldOp::create(builder_, loc);
+    }
+    for (mlir::Block *block : terminated) {
+      builder_.setInsertionPointToEnd(block);
+      mlir::omp::TerminatorOp::create(builder_, loc);
+    }
+    for (const semantics::TranslatedLoop::Threaded &value : loop->threaded) {
+      values_[call->arguments[value.after]] = ValueOf(call->arguments[value.in]);
+    }
+  }};
+  if (offloaded) {
+    Target(goal, body, generate, /*combined=*/true);
+  } else {
+    generate();
   }
-  for (const semantics::TranslatedLoop::Threaded &value : loop->threaded) {
-    values_[call->arguments[value.after]] = ValueOf(call->arguments[value.in]);
+}
+
+std::optional<omp::ConstructQueue> MerkGenerator::Decompose(
+    const parser::OmpDirective &directive, parser::CharBlock at,
+    std::optional<llvm::StringRef> counter) {
+  using namespace parser::literals;
+  // Merkurius's own clauses, which the decomposition leaves out.
+  for (const parser::OmpClause &clause : directive.clauses) {
+    if (std::holds_alternative<const parser::OmpIndexClause *>(clause) ||
+        std::holds_alternative<const parser::OmpUpperClause *>(clause)) {
+      NotYet(at,
+          std::holds_alternative<const parser::OmpIndexClause *>(clause)
+              ? "the index clause"
+              : "the upper clause");
+      return std::nullopt;
+    }
   }
+  omp::Decomposition decomposition{omp::Decompose(
+      target_.options().openMPVersion, directive, counter)};
+  if (decomposition.queue.empty()) {
+    std::string clause{decomposition.misplaced
+            ? llvm::omp::getOpenMPClauseName(
+                  omp::ClauseId(*decomposition.misplaced))
+                  .str()
+            : "a"};
+    Error(at, "%s"_err_en_US,
+        "the " + clause + " clause is not allowed on the " +
+            std::string{parser::EnumToString(directive.id)} + " directive");
+    return std::nullopt;
+  }
+  return std::move(decomposition.queue);
+}
+
+bool MerkGenerator::LeafClauses(const omp::Leaf &leaf, parser::CharBlock at) {
+  std::string directive{parser::EnumToString(leaf.id)};
+  for (const parser::OmpClause *clause : leaf.clauses) {
+    llvm::omp::Clause id{omp::ClauseId(*clause)};
+    NotYet(at,
+        "the " + llvm::omp::getOpenMPClauseName(id).str() + " clause of the " +
+            directive + " directive");
+    return false;
+  }
+  for (llvm::omp::Clause id : leaf.synthesized) {
+    if (id != llvm::omp::OMPC_shared) {
+      NotYet(at,
+          "the " + llvm::omp::getOpenMPClauseName(id).str() +
+              " clause that the " + directive + " directive implies");
+      return false;
+    }
+  }
+  return true;
 }
 
 void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
   const parser::OmpDirective &directive{*goal.directive};
   parser::CharBlock at{Where(goal.tokens)};
-  if (directive.id == llvm::omp::Directive::OMPD_parallel_do) {
-    ParallelDo(goal, body);
+  if (llvm::any_of(llvm::omp::getLeafConstructsOrSelf(directive.id),
+          [](llvm::omp::Directive leaf) {
+            return llvm::omp::getDirectiveAssociation(leaf) ==
+                llvm::omp::Association::LoopNest;
+          })) {
+    OmpLoop(goal, body);
     return;
   }
   if (directive.id != llvm::omp::Directive::OMPD_target) {
@@ -1748,8 +1888,8 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
             " directive");
     return;
   }
-  if (!directive.clauses.empty()) {
-    NotYet(at, "clauses of the target directive");
+  std::optional<omp::ConstructQueue> queue{Decompose(directive, at)};
+  if (!queue || !LeafClauses(queue->front(), at)) {
     return;
   }
   if (builder_.getInsertionBlock()->getParent()
@@ -1757,21 +1897,28 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
     NotYet(at, "target regions in target regions");
     return;
   }
+  Target(goal, body, [&] { Goal(*goal.goals.front(), body); });
+}
+
+void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
+    llvm::function_ref<void()> generate, bool combined) {
+  parser::CharBlock at{Where(goal.tokens)};
   mlir::Location loc{Location(goal.tokens)};
   Values before{values_};
-  // The goal, in a target region whose map entries are added after it:
-  // they are the values it uses from outside and those it binds.
+  // What `generate` builds, in a target region whose map entries are added
+  // after it: they are the values it uses from outside and those it binds.
   // Without host_eval its kernel is generic, not SPMD.
   mlir::omp::TargetExtOperands operands;
   operands.kernelType = mlir::omp::TargetExecModeAttr::get(
       &context_, mlir::omp::TargetExecMode::generic);
   auto targetOp{mlir::omp::TargetOp::create(builder_, loc, operands)};
+  targetOp.setCombined(combined);
   mlir::Region &region{targetOp.getRegion()};
   mlir::Block *block{&region.emplaceBlock()};
   {
     mlir::OpBuilder::InsertionGuard guard{builder_};
     builder_.setInsertionPointToStart(block);
-    Goal(*goal.goals.front(), body);
+    generate();
   }
   if (failed_) {
     values_ = before;
@@ -1961,8 +2108,18 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
   }
   targetOp.getMapVarsMutable().assign(maps);
   // The region reads its inputs from their slots and stores its outputs;
-  // an output may be an input's value, as in Y = X.
-  builder_.setInsertionPointToStart(block);
+  // an output may be an input's value, as in Y = X. A region that is
+  // teams around a parallel region reads them in the parallel, as Flang
+  // does, for the reason OmpLoop computes its bounds there.
+  mlir::Block *reads{block};
+  if (auto teams{mlir::dyn_cast<mlir::omp::TeamsOp>(block->front())};
+      teams && outputs.empty()) {
+    reads = &teams.getRegion().front();
+    if (auto parallel{mlir::dyn_cast<mlir::omp::ParallelOp>(reads->front())}) {
+      reads = &parallel.getRegion().front();
+    }
+  }
+  builder_.setInsertionPointToStart(reads);
   llvm::DenseMap<mlir::Value, mlir::Value> loaded;
   for (mlir::Value input : inputs) {
     // An array's argument is its pointer on the device.

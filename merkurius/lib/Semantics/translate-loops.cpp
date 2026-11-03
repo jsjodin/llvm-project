@@ -941,6 +941,7 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
       VarId trip{NewVar(int_, at)}, count{NewVar(int_, at)};
       translated.tripTest = TripCount(iterator, trip, before)->number;
       translated.step = StepValue(iterator);
+      translated.counter = clause_->clause->vars[a[0]].name;
       VarId step{NewVar(int_, at)};
       advance.push_back(UnifyLiteral(at, step,
           iterator.step ? iterator.step : IntLiteral(at, "1")));
