@@ -66,8 +66,7 @@ listed(N) :-
     %$omp parallel do
     ( for(I, 0, 2), foreach(X, [1, 2, 3]) do X > N + I ).
 % The loop's predicates are generated too, as any others are.
-% CHECK: omp-parallel-do-errors.m:[[@LINE-2]]:7: error: not yet implemented: code generation for values of type list.list(int)
-% CHECK: omp-parallel-do-errors.m:[[@LINE-3]]:21: error: a parallel do loop is counted by its for, so it cannot have foreach
+% CHECK: omp-parallel-do-errors.m:[[@LINE-2]]:21: error: a parallel do loop is counted by its for, so it cannot have foreach
 
 counted(N, M) :-
     %$omp parallel do

@@ -106,6 +106,7 @@ tree, for 180 seconds in 32 processes by default. The design document's
 | `utils/term-oracle` | The term oracle, which reads terms with Mercury's own parser, and the scripts that compare it with merkc and generate test items |
 | `utils/type-oracle` | The scripts that compare merkc's type checking and inference with mmc's, settling differences by mmc's checking of declared types, and generate random modules to compare them on |
 | `utils/fuzz` | The script and dictionary for fuzzing |
+| `experiments` | Models and measurements that design decisions rest on, such as the heap cell layouts ([experiments/README.md](experiments/README.md)) |
 | `benchmarks` | Benchmarks, run by hand: `bandwidth`, memory bandwidth under OpenMP on the host or a GPU ([benchmarks/README.md](benchmarks/README.md)) |
 | `test` | lit tests; `test/Unit` runs the unit tests, and `test/Benchmarks` builds and checks the benchmarks on small inputs |
 | `unittests` | googletest unit tests |

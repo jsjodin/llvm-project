@@ -42,6 +42,7 @@ We will build a clean-room Mercury compiler on MLIR and LLVM, adding OpenMP-styl
 | Generic dispatch | Existential envelopes; `sendable(M)` required where a mailbox is created | Type-safe forwarding without knowing payload types |
 | Process failure | Links and monitors, delivered with processes | Supervision depends on them |
 | Heaps | One heap per process, precise moving GC | No global pauses; whole heap freed on exit |
+| Heap cells | Headerless, traced by type with `type_info`s from the stack maps | A header word costs up to 50% on large data (E7) |
 | Cost rule | Advanced features cost nothing in code that does not use them | Ground, single-process code keeps the speed measured in E1 |
 | Prolog-style variables | Opt-in `open(T)` types with their own layout; raw int, float and char fields boxed there (option 1) | Ground code is untouched; no alias analysis in the mode checker |
 | Open-term bindings | WAM-style reference chains | Simplest: one write and one trail entry per binding |
@@ -153,7 +154,7 @@ This is an engineering position, not legal advice.
 
 ## Experiments
 
-Measurements made on 2026-10-26 and 2026-10-27 set four expectations. Deterministic Mercury already runs at C speed; allocation is the main gap, at 3.5× C on naive reverse; an OpenMP pragma on generated code ran 2× faster on 2 cores; and in a C model, open terms cost about 1.2× in the code that uses them and nothing elsewhere. Nothing was measured beyond 2 cores, and nothing yet on our own compiler.
+Measurements made on 2026-10-26 and 2026-10-27 set four expectations. Deterministic Mercury already runs at C speed; allocation is the main gap, at 3.5× C on naive reverse; an OpenMP pragma on generated code ran 2× faster on 2 cores; and in a C model, open terms cost about 1.2× in the code that uses them and nothing elsewhere. Nothing was measured beyond 2 cores, and nothing yet on our own compiler. E7, a C model of heap cell layouts made on 2026-11-04 on another machine, decided that cells stay headerless.
 
 **Environment:** a 2-vCPU cloud VM (Intel Xeon at 2.80 GHz, Linux x86-64). gcc 13.3.0 at `-O2`. Melbourne Mercury 22.01.9 built with configure and make from the source distribution, which is not otherwise used (Clean-room rules), with only the `hlc.gc` library grade, at default optimization. SWI-Prolog 9.0.4 run with `-O`, and CPython 3.13.17 without its JIT. Times are wall-clock, including process start.
 
@@ -198,7 +199,7 @@ Bytes allocated by the Boehm collector for 1,000,000 `int`s, measured with `GC_g
 
 - Boehm's smallest allocation on 64-bit is 16 bytes, so a one-word cell costs as much as a cons cell.
 - For nrev, a 1 GB initial heap changed nothing (3.33 s against 3.34 s), and the collector's statistics showed almost no live data. The gap to C is the cost of each free-list allocation and sweep, not the number of collections.
-- Consequence: the design bets on bump-pointer nursery allocation. Option B's header word would grow a list cell from 16 to 24 bytes, and must be measured on nrev before it is adopted.
+- Consequence: the design bets on bump-pointer nursery allocation. A header word per cell would grow a list cell from 16 to 24 bytes; E7 measured it, and the cells stay headerless.
 
 ### E4. Code generation and checking observations
 
@@ -234,6 +235,24 @@ No compiler for open terms exists yet, so this experiment models in C the code e
 - Building through a hole costs 2.3× the ground front-to-back build. Each step allocates a variable cell and a box, and the reader dereferences every tail. Trailing every binding added 3%, within the run-to-run spread of about 10%: the variables are the expensive part, not the trail.
 - In this model a list is slower to read when it was built front to back, however it was built (0.975 s against 0.607 s for the same ground list), because the traversal starts at the cells written longest ago, which have left the cache. That is why the last two rows are compared with the front-to-back ground build.
 - The program is a model, not our compiler; the ratios carry over, not the times. Source: `openrepn.c`.
+
+### E7. Heap cell layouts (C model)
+
+Measured on 2026-11-04, on another machine than E1 to E5: an AMD Ryzen Threadripper PRO 5965WX (32 KiB L1d and 512 KiB L2 per core, 32 MiB L3 per 8 cores), one pinned core, the build's clang at `-O2 -march=native`, medians of 5 runs. A C model of three layouts, each with 3-bit primary tags and bump allocation with a limit check, runs nrev at E1's sizes, monomorphic and polymorphic, and builds, sums and copies, as a minor collection would, lists, binary trees and lists of pairs from 1,000 to 16 million elements, so that the working set passes through every cache level. The program, its script and the full results are in `experiments/layout`; the decision is under Runtime system, "Memory management".
+
+| | A: headerless | B: header word | C: pages of one shape |
+| --- | --- | --- | --- |
+| Bytes per list, tree, pair-list element | 16, 24, 32 | 24, 32, 48 | 16, 24, 32 |
+| nrev, ns per cell, monomorphic | 1.95 | 2.17 (+11%) | 2.03 (+4%) |
+| nrev, polymorphic | 1.97 | 2.31 (+17%) | 2.68 (+36%) |
+| Summing, data in the caches | 1.22–1.60 ns per element | 0 to +21% | 0 to +12% |
+| Summing, data beyond L3: list, tree, pair list | 1.25, 5.04, 1.82 | +16%, +50%, +45% | +1%, +4%, −22% |
+| Building beyond L3 | 5.7–11.7 | +25% to +50% | −6% to +8% |
+
+- B costs what its size predicts once the data leaves a cache, and little inside the caches.
+- C keeps A's size, and its segregation can beat A: a list's spine apart from its elements packs 4 cons cells to a cache line. But polymorphic code chooses the shape, and so the bump pointer, at run time, and each heap needs a page for every shape it uses: 32.8 bytes per list element at 1,000 elements.
+- The order of cells after a copy is the copier's, not the layout's: after a breadth-first copy, summing the 16M-node tree took 1.55 ns per node, against 6.09 after a depth-first one.
+- Not modelled: real roots and stack maps, write barriers, our own code generation, and `send`'s copy, which must not overwrite the sender's cells.
 
 ### E6. Expectations for the design
 
@@ -1705,8 +1724,9 @@ Two new dialects carry Mercury semantics until upstream dialects can take over: 
 | `merk.proc` | A procedure: one mode of a predicate or function, with a determinism attribute |
 | `merk.construct` | Build a term from a named constructor and its arguments |
 | `merk.deconstruct` | Take apart a term whose constructor is known, binding the constructor's arguments |
-| `merk.switch` | Branch on a term's constructor; each case binds the constructor's arguments |
-| `merk.unify_test` | Compare two ground terms (calls the type's unify procedure when not primitive) |
+| `merk.switch` | Branch on a term's constructor; a case of one constructor takes the term apart with `merk.deconstruct` |
+| `merk.has_functor` | Test a term's constructor, for `merk.guard` |
+| `merk.type_def` | A type's constructors and their arguments' types, from which lowering chooses its layout |
 | `merk.call`, `merk.call_closure`, `merk.closure` | First-order calls, higher-order calls, closure construction |
 | `merk.ite`, `merk.not`, `merk.disj` | If-then-else, negation, disjunction |
 | `merk.succeed`, `merk.fail`, `merk.commit` | Produce a solution, fail, prune remaining solutions |
@@ -1716,31 +1736,46 @@ Two new dialects carry Mercury semantics until upstream dialects can take over: 
 
 Defined so far (`Dialect/Merk/IR`): `merk.proc`, `merk.call`, `merk.succeed`, `merk.entry`, `merk.constant` and `merk.foreign_call`, with the type `!merk.string` and the attributes `#merk.determinism<det>` and `#merk.address_spaces<…>` (Lowering and code generation, "Target information" and "What is lowered so far"). For branching, `merk.ite`, `merk.switch`, `merk.not`, `merk.fail` and `merk.yield`, and two that the table does not have:
 
-- `merk.guard %flag` continues if a test succeeded and fails if not; a comparison or a unification of two bound primitive values is an `arith` comparison and a guard. It stands in for `merk.unify_test` on primitive values.
+- `merk.guard %flag` continues if a test succeeded and fails if not; a comparison or a unification of two bound primitive values is an `arith` comparison and a guard, and a test of a term's constructor a `merk.has_functor` and a guard.
 - `merk.throw_if %flag, "exception"` throws one of the library's exceptions, such as a division by zero's, until `merk.throw` and terms exist.
+
+For terms (decided 2026-11-04), `!merk.term<"T">`, a value of the type `T` names, which is a type defined by constructors, or a tuple type, written fully qualified with its arguments, as `!merk.term<"list.list(int)">`; `merk.type_def "T" [...]`, one in each module for each such type its procedures use, its own or imported, which lists the type's constructors in their declared order, each a `#merk.constructor<"name"(argument types)>`; and `merk.construct`, `merk.deconstruct`, `merk.has_functor` and `merk.switch`, which name a constructor by `#merk.functor<"name", arity>`, since a type may have two of one name:
+
+```mlir
+merk.type_def "list.list(int)" [#merk.constructor<"[]">, #merk.constructor<"[|]"(i64, !merk.term<"list.list(int)">)>]
+%l = merk.construct #merk.functor<"[|]", 2>(%h, %t : i64, !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
+%is = merk.has_functor #merk.functor<"[]", 0> %l : !merk.term<"list.list(int)">
+%h2, %t2 = merk.deconstruct #merk.functor<"[|]", 2> %l : !merk.term<"list.list(int)"> -> i64, !merk.term<"list.list(int)">
+```
+
+`merk.deconstruct` is not speculatable: another constructor's term has no such arguments. A unification of two terms is a call of the type's unify procedure, `unify.T`, a private `semidet` `merk.proc` that code generation makes the first time a module needs it, in `merk`: it switches on the first term, tests that the second has the same constructor, and compares their arguments, integers and floats by `arith` and terms by their types' unify procedures. These were chosen over three alternatives:
+
+- **Constructors in the type itself**, as parameters of `!merk.term`, would have made each type self-contained, but a recursive type such as `list(int)` names itself among its arguments' types, which an MLIR type can do only as a mutable, identified type, as LLVM's named structs are, and every value's printed type would carry the whole definition. A name and a definition beside the procedures is how LLVM's named structs and CIR's records print too.
+- **A layout in the type**, such as tags or a cell size, would make representation work change the dialect, which the rule above forbids: `merk.type_def` lists only what the program says, and lowering chooses the layout.
+- **A `merk.unify_test` operation**, expanded by lowering, was the first plan. Lowering would then have to build the recursive comparison in the LLVM dialect itself, with its own recursion, branches and tail calls; as a `merk.proc`, the comparison is lowered by the code that lowers every other procedure, and its recursive call on a list's tail is a `musttail` call. The polymorphic unify of chunk 1's step 4 is then the same procedure taking `type_info`s. The cost is a copy of the procedure in each module that needs it, with internal linkage.
+
+Not yet: types with type variables, with user-defined equality, subtypes, existentially typed constructors, and unifications of terms with `string` or array arguments, which are reported as not yet implemented.
 
 For arrays, the type `!merk.array<T>` and the library's `array` predicates as operations, until the library can be compiled with type_infos: `merk.array_new` (a size and an initial element, or none for an empty array), `merk.array_size`, `merk.array_get`, `merk.array_set`, `merk.array_fill` (from one index to another), `merk.array_copy`, `merk.array_resize` (with an element for the new places, or none to shrink) and `merk.check_index %a[%i], "array.lookup"`, which throws `index_out_of_bounds` with mmc's message, as `index_out_of_bounds("array.lookup: index 4 not in range [0, 3]")`. Those that update an array do it in place and give the same array, since uniqueness checking has made sure its old version is dead; the others allocate. None checks an index itself.
 
-The regions of `merk.ite`, `merk.switch` and `merk.not` have one block each. A region that succeeds ends with `merk.yield`: the condition yields what it binds that the then part uses, as the then part's arguments, and the branches yield the operation's results, the variables that every branch that succeeds binds. A branch can instead end with `merk.fail`, or with `merk.succeed` when the operation is the procedure's last goal. Failure goes to the innermost condition's else part or negation, or else out of the procedure, which then can fail. `merk.switch` is so far on a primitive value: its `cases` attribute lists each case's constants, and with `can_fail` a value that no case has fails. Arithmetic is the `arith` dialect's, which `merk` depends on. `merk.foreign_call` with `can_fail` is that of a `semidet` `foreign_proc`, whose first result is `SUCCESS_INDICATOR`.
+The regions of `merk.ite`, `merk.switch` and `merk.not` have one block each. A region that succeeds ends with `merk.yield`: the condition yields what it binds that the then part uses, as the then part's arguments, and the branches yield the operation's results, the variables that every branch that succeeds binds. A branch can instead end with `merk.fail`, or with `merk.succeed` when the operation is the procedure's last goal. Failure goes to the innermost condition's else part or negation, or else out of the procedure, which then can fail. `merk.switch` is on an integer or a term: its `cases` attribute lists each case's integer constants or functors, and with `can_fail` a value that no case has fails. Arithmetic is the `arith` dialect's, which `merk` depends on. `merk.foreign_call` with `can_fail` is that of a `semidet` `foreign_proc`, whose first result is `SUCCESS_INDICATOR`.
 
-A deterministic procedure, in proposed assembly syntax:
+A deterministic procedure, as code generation makes it:
 
 ```mlir
-merk.proc @double_all(%xs: !merk.term<"list.list(int)">)
-    -> !merk.term<"list.list(int)"> attributes {determinism = #merk.det} {
-  merk.switch %xs {
-    case @"list.[]" {
-      %nil = merk.construct @"list.[]" () : !merk.term<"list.list(int)">
-      merk.succeed %nil
-    }
-    case @"list.[|]" (%h: i64, %t: !merk.term<"list.list(int)">) {
-      %two = arith.constant 2 : i64
-      %h2  = arith.muli %two, %h : i64
-      %t2  = merk.call @double_all(%t) : !merk.term<"list.list(int)">
-      %c   = merk.construct @"list.[|]" (%h2, %t2) : !merk.term<"list.list(int)">
-      merk.succeed %c
-    }
+merk.proc private @m.double_all_f1_0(%arg0: !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)"> attributes {determinism = #merk.determinism<det>} {
+  %0 = merk.switch %arg0 : !merk.term<"list.list(int)"> -> !merk.term<"list.list(int)"> cases [[#merk.functor<"[]", 0>], [#merk.functor<"[|]", 2>]] {
+    %1 = merk.construct #merk.functor<"[]", 0> -> !merk.term<"list.list(int)">
+    merk.yield %1 : !merk.term<"list.list(int)">
+  }, {
+    %1:2 = merk.deconstruct #merk.functor<"[|]", 2> %arg0 : !merk.term<"list.list(int)"> -> i64, !merk.term<"list.list(int)">
+    %2 = merk.constant 2 : i64
+    %3 = arith.muli %2, %1#0 : i64
+    %4 = merk.call @m.double_all_f1_0(%1#1) : (!merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
+    %5 = merk.construct #merk.functor<"[|]", 2>(%3, %4 : i64, !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
+    merk.yield %5 : !merk.term<"list.list(int)">
   }
+  merk.succeed %0 : !merk.term<"list.list(int)">
 }
 ```
 
@@ -1764,7 +1799,7 @@ Code generation knows the target through `TargetInfo` (`CodeGen/TargetInfo.h`), 
 
 ### What is lowered so far
 
-Code generation (`CodeGen/MLIRGen.cpp`) makes `merk` for procedures that are `det`, `semidet`, `cc_multi`, `failure` or `erroneous`, have no hidden arguments, and whose values are of primitive types, `io.state` or arrays of values a word wide at most, whose bodies are conjunctions, assignments, constants, tests, calls and function applications, if-then-elses, switches on integers and characters, negations and `fail`, or that have a `foreign_proc` for C. A value of type `io.state` is not passed, so `main(!IO)` takes no arguments. Anything else is reported as not yet implemented, at the first such construct of a procedure. Until terms have layouts, `merk` is lowered to MLIR's LLVM dialect directly (`CodeGen/Lowering.cpp`), as ClangIR's DirectToLLVM lowers CIR; `mrt` comes between them with layouts. Then MLIR translates it to LLVM IR, LLVM's pipeline for `-O0` to `-O3` optimizes it, and the `TargetMachine` writes assembly or an object file.
+Code generation (`CodeGen/MLIRGen.cpp`) makes `merk` for procedures that are `det`, `semidet`, `cc_multi`, `failure` or `erroneous`, have no hidden arguments, and whose values are of primitive types, `io.state`, arrays of values a word wide at most, or types defined by constructors and tuple types without type variables, whose bodies are conjunctions, assignments, constants, tests, constructions and deconstructions of terms, calls and function applications, if-then-elses, switches on integers, characters and constructors, negations and `fail`, or that have a `foreign_proc` for C. A value of type `io.state` is not passed, so `main(!IO)` takes no arguments. Anything else is reported as not yet implemented, at the first such construct of a procedure. Until the `mrt` dialect exists (chunk 1's step 3, `INPROGRESS.md`), `merk` is lowered to MLIR's LLVM dialect directly (`CodeGen/Lowering.cpp`), as ClangIR's DirectToLLVM lowers CIR, with the layouts of terms chosen there. Then MLIR translates it to LLVM IR, LLVM's pipeline for `-O0` to `-O3` optimizes it, and the `TargetMachine` writes assembly or an object file.
 
 - **Symbols.** A procedure's symbol is its module, then its name, its arity, with an `f` before it for a function, and its mode number, joined by `_`: `hello.main_2_0`, `list.length_f1_0`. Other characters than letters, digits and `_` in a name become `$` and two hex digits, so `int.+` is `int.$2b_f2_0`. A procedure defined and not exported has internal linkage.
 - **Entry.** `merk.entry` names the main module's `main/2`; it becomes `merk_main`, a C function that calls it, which the runtime's `main` calls (Runtime system).
@@ -1774,6 +1809,7 @@ Code generation (`CodeGen/MLIRGen.cpp`) makes `merk` for procedures that are `de
 - **Calling convention.** A procedure that can fail, `semidet` or `failure`, returns its success flag, alone as an `i1` or first in a struct with its outputs; one that fails leaves its outputs undefined. A call of one is a test of the flag. A call whose results are the procedure's own, of a procedure that can fail as the caller can or cannot, is `musttail`: with `tailcc`, LLVM requires only that the return types match, so a procedure's last call does not grow the stack, across modules too. A back end returns a result that needs more registers than its convention has in memory itself, through a hidden pointer, and then cannot make a `musttail` call of the procedure (x86-64 aborts with "failed to perform tail call elimination"). So a procedure whose outputs, after its flag, need more registers than the target returns results in (`TargetInfo::Results`: on x86-64 three words and two floats, as `RetCC_X86_64_C` has them; on AArch64 eight of each; on AMDGPU sixteen words, floats among them; elsewhere two of each) returns them in memory itself: it takes a pointer to a struct of its outputs before its inputs, stores them there, and returns only its flag. A tail call passes on the pointer it was given, since the callee's outputs are the caller's; any other call gives a slot of its own, where a foreign call's slots go, and loads the outputs after the call. Whether a procedure does is a matter of its signature and the target alone, so modules agree on it. `CodeGen/results-in-memory.m` checks it on x86-64 and AArch64 and runs loops of ten million tail calls.
 - **Arithmetic.** The functions and comparisons of `int`, `uint`, the sized integer modules and `float` are built into code generation as `arith` operations, which MLIR's `ArithToLLVM` lowers; `float`'s others are called, and the integer modules' others, such as `int.pow`, are not yet implemented. As in mmc's programs: integers wrap; `//`, `rem`, `div`, `mod` and `float./` throw `domain_error("int.'//': division by zero")` and the like for a zero divisor; `<<` and `>>` throw for an amount outside 0 to the width; `abs` of the least integer throws; `div` and `mod` round toward minus infinity; `-X` of a float is `0.0 - X`. The least integer by -1 gives itself and 0, as mmc folds it, though mmc's programs die of SIGFPE (the register, "The quotient of the least integer by -1"). A conversion between integer types keeps the low bits, and extends by the sign of a signed source. `X = X` succeeds even for a NaN, as with mmc; otherwise float equality is IEEE's.
 - **Arrays.** The library's `array` predicates and functions that make, read and update an array, which need no type_info, are built into code generation as `merk`'s array operations: `init`, `make_empty_array`, `size`, `max`, `min`, `bounds`, `in_bounds`, `is_empty`, `lookup`, `elem`, `semidet_lookup`, `set`, `'elem :='`, `semidet_set`, `slow_set`, `semidet_slow_set`, `swap`, `fill`, `fill_range`, `copy`, `resize` and `shrink`, and the `unsafe_` ones, which check nothing; the others, such as `foldl` and `from_list`, are not yet implemented. They check as mmc's library does, with its messages: an index out of range is `index_out_of_bounds("array.set: index 9 not in range [0, 1]")` (`array.lookup` for `elem`, `first argument of array.swap`, `second argument of fill_range`), and a bad size or range is a software error, `Software Error: predicate `array.init'/3: Unexpected: negative size`, `array.fill_range'/5`'s "empty range" when the first index is past the last (checked before either index), `array.resize'/4`'s "cannot resize to a negative size", and `array.shrink'/3`'s "cannot shrink to a larger size" and "cannot shrink to a negative size". An index is checked as an unsigned comparison with the size, so a negative one fails too. An array is a pointer to its size and its elements, a word each (Type representation); `merk.array_get` and `merk.array_set` lower to a load or store after the size word, an element converted to its word (a float's bits, a character extended, a pointer's address), and the others to the runtime's `merk_array_new`, `merk_array_copy`, `merk_array_resize` and `merk_array_fill`, which allocate with `malloc` and never free until there is a collector. `merk.check_index` calls `merk_index_out_of_bounds`, which formats the message and reports it as `merk_uncaught_exception` does; on a device it is `llvm.trap`. A set updates in place, which is safe because merkc's declarations of `array` are sound (the register, "Arrays' uniqueness"); with `-fc1 -fmmc-uniqueness` a program that keeps an old version, `A1 = A0, array.set(0, 5, A0, A)`, sees the update in `A1`, as mmc's do.
+- **Terms.** Lowering first chooses each `merk.type_def`'s layout (Type representation) and erases it, and then lowers the term operations while their operands still have `merk`'s types, which name their layouts: a value is cast to its LLVM type where it is still `merk`'s, and the cast goes once the value is lowered. `merk.construct` of a constant is the constant's word, and of a constructor with arguments a call of the runtime's `merk_alloc`, which `malloc`s each cell and never frees it until `mrt.alloc` replaces it, the secondary tag's store if it has one, a store of each argument in its word, as its own LLVM type, and the cell's address with the tag added by a `getelementptr`. `merk.deconstruct` loads each argument at its word less the tag. `merk.has_functor` compares a constant's word, or the primary tag, and for a shared tag also the secondary tag, which it reads through a `select` of the cell's first word or of `merk_no_secondary_tag`, a static word that is no secondary tag, since a constant has no cell to read: one block, no branch, as a region of `merk` has one block. `merk.switch` on a term switches on the primary tag, and from tag 0 on the constants' words, unless the type has only one, and from the shared tag on the secondary tag; on a type of constants only, on the word, and on a type of one constructor of one argument it branches to its case. A type's layout is chosen alone, from its `merk.type_def`, so modules agree on it.
 - **Exceptions, for now.** Until `merk.throw` and `catch` exist, an exception is not caught: `merk.throw_if` calls the runtime's `merk_uncaught_exception`, which flushes the standard output, writes "Uncaught Mercury exception:" and the exception to the standard error as mmc's programs do, and exits with status 1. The library's C code calls it too.
 - **Library.** `libmerkstd` compiles `io`, `float` and `math`. `float`'s and `math`'s functions are `foreign_proc`s calling C's math library, with mmc's domain checks, as `domain_error("math.sqrt")`, and its rounding: `round(X)` is `floor(X + 0.5)`, `float.pow` multiplies by squaring, and a float out of `int`'s range converts to `min_int`. Later these should be the `math` dialect's operations and LLVM's intrinsics, which LLVM can fold and vectorize, keeping the checks; the `foreign_proc`s are how the library is written until then.
 - **OpenMP target regions.** With `-fopenmp`, a goal after `%$omp target` with no clauses becomes an `omp.target`, a generic kernel, as Flang makes a target region with no loop in it (`target teams distribute parallel do` is SPMD, Language extensions, "Loops", Translation), as Flang and ClangIR lower target regions to the `omp` dialect; the other directives, but `parallel do` and `target teams distribute parallel do` before a loop (Language extensions, "Loops", Translation), are not yet implemented. The goal is generated in the region; the values it uses from outside are mapped `to`, by copy, and the variables it binds that are among its nonlocals are mapped `from`, by reference, each through a stack slot of the procedure (an `llvm.alloca`, in the target's alloca address space and cast to a generic pointer), as Flang maps a scalar: the region loads its inputs and stores its outputs, and the procedure loads the outputs after it. Only integers, floats and arrays of them cross so far (Language extensions, "Target regions"). An array is mapped as ClangIR maps a pointer's section, `p[0:n]`: by its own pointer, as `var_ptr`, with `omp.map.bounds` over its size word and its elements, words 0 to its size, which only the host compile gives, since only the host copies; the region's argument is then its pointer on the device. An array the region only reads is mapped `to`; one it gives, updated in place, `tofrom`, and after the region the variable is the given array, since the device cannot allocate one. When the region's own `merk.array_set` or `merk.array_fill` shows which array it updated, that is all; when it does not, as when the region calls a procedure that updates one, the region compares the array it gives with each given array of its type, by pointer, and gives the number of the one it is, or -1, and the pointer too, each through a slot mapped `from`; the host takes the given array of that number, or else the pointer, which is a new array only when the region ran on the host, where a procedure it calls may allocate one. The given arrays of its type are mapped `tofrom`, then, so a read-only one may be copied back unchanged. Making or filling an array in the region itself is not yet implemented, since the device has no runtime for it, and a procedure the region calls that does is an error at its call in the device compile. Arrays of strings or of arrays do not cross, since their elements are host pointers. `builtin.unrealized_conversion_cast` converts between `!merk.array` and the `!llvm.ptr` that `omp.map.info` takes; lowering removes the casts once arrays are pointers. The `omp` dialect's passes run as ClangIR and Flang run them, the first two on the `merk` module, so that a device compile lowers only what the device runs: `omp-mark-declare-target` marks the procedures the regions call, which it finds through `merk.call`, a `CallOpInterface`, on `merk.proc`, which has the dialect's `DeclareTargetDefaultModel` as `llvm.func` does (a private procedure only regions call is `nohost`, as Flang's are; the host keeps it, for running the region there); `omp-function-filter` removes the others on the device, except those that hold regions. Lowering then flattens the region's goals into blocks of the region, which ends with `omp.terminator`, keeps each procedure's mark on its `llvm.func`, and runs `omp-mark-declare-target` again, for what lowering calls, then `omp-host-op-filter`, which keeps only the regions of the host procedures that hold them, and `omp-stack-to-shared`, which, being the LLVM dialect's, run after lowering, as in ClangIR. The module records the offload attributes (`omp.is_target_device`, `omp.target_triples` and the rest, set with `mlir::omp::setOffloadModuleInterfaceAttributes`), which the `omp` dialect's translation to LLVM IR reads; the host compile, with `--offload-targets=` (or Clang's alias `-fopenmp-targets=`), makes the region an offload entry that it launches with `__tgt_target_kernel`, and without device triples it calls the outlined region directly. The device compile, `-fopenmp-is-target-device` with `-fopenmp-host-ir-file-path`, keeps only the region and the procedures it calls. The directive belongs to the caller: a target region in a procedure that a target region calls would run on the device, as reverse offloading would, so it is an error, found on the `merk` module after `omp-mark-declare-target` has marked what the regions call. On a device:
@@ -1783,7 +1819,7 @@ Code generation (`CodeGen/MLIRGen.cpp`) makes `merk` for procedures that are `de
   - only the module's own procedures are compiled, so a call of another module's, such as the library's, or of foreign code is an error at the call.
 
   `merkc -fopenmp --offload-arch=gfx1030` runs the jobs that compile and link for offloading (Driver, "Linking and offloading"); its programs run their regions on a gfx1030 GPU, with `OMP_TARGET_OFFLOAD=MANDATORY`.
-- **Tests.** `test/CodeGen` checks the `merk`, the LLVM dialect and the LLVM IR of Mercury modules in one file each, and runs the programs that print, checking their output (`hello.m`, `foreign-proc.m`, `foreign-proc-semidet.m`, `count.m`, `factorial.m`, `fib.m`, `switch.m`, and `io-output.m`, `arithmetic.m` and `float-math.m`, whose output is mmc's; `arithmetic-errors.m` checks an uncaught exception's report and exit status; `arrays.m` uses the array predicates, with mmc's output, and `array-errors.m` each of their checks' exceptions, with mmc's messages and exit status; `omp-target.m` checks a target region's host and device compiles, each offload job's output, and runs it on the host; `omp-target-gpu.test` runs it on the machine's GPU, when `amdgpu-arch` finds one and the OpenMP runtime libraries are built; `omp-target-nested.m` checks that a region cannot be in what a region calls, and `omp-target-errors.m`, `omp-target-device-call.m` and `omp-target-array-made.m` what is not implemented yet; `omp-target-arrays.m` checks arrays' maps, host and device, and runs it on the host, with mmc's output, and `omp-target-arrays-gpu.test` on the GPU, checking what each kernel copies); `Driver/compile.test` builds and runs a program, and `Driver/offload.test` checks the offload jobs. `test/Dialect/Merk` checks the dialect alone: that `.mlir` modules print as they parse and lower for the target they record (`ops.mlir`, and `arrays.mlir` for the array operations), and its verifiers' errors, at file:line:column (`invalid.mlir`).
+- **Tests.** `test/CodeGen` checks the `merk`, the LLVM dialect and the LLVM IR of Mercury modules in one file each, and runs the programs that print, checking their output (`hello.m`, `foreign-proc.m`, `foreign-proc-semidet.m`, `count.m`, `factorial.m`, `fib.m`, `switch.m`, and `io-output.m`, `arithmetic.m` and `float-math.m`, whose output is mmc's; `arithmetic-errors.m` checks an uncaught exception's report and exit status; `arrays.m` uses the array predicates, with mmc's output, and `array-errors.m` each of their checks' exceptions, with mmc's messages and exit status; `omp-target.m` checks a target region's host and device compiles, each offload job's output, and runs it on the host; `omp-target-gpu.test` runs it on the machine's GPU, when `amdgpu-arch` finds one and the OpenMP runtime libraries are built; `omp-target-nested.m` checks that a region cannot be in what a region calls, and `omp-target-errors.m`, `omp-target-device-call.m` and `omp-target-array-made.m` what is not implemented yet; `omp-target-arrays.m` checks arrays' maps, host and device, and runs it on the host, with mmc's output, and `omp-target-arrays-gpu.test` on the GPU, checking what each kernel copies); `Driver/compile.test` builds and runs a program, and `Driver/offload.test` checks the offload jobs. `terms.m` uses each layout, switches on constructors, semidet deconstructions and unifications of terms, with mmc's output. `test/Dialect/Merk` checks the dialect alone: that `.mlir` modules print as they parse and lower for the target they record (`ops.mlir`, `arrays.mlir` for the array operations, and `terms.mlir` for the term operations and each layout), and its verifiers' errors, at file:line:column (`invalid.mlir`).
 
 ### 1. Type representation
 
@@ -1801,7 +1837,16 @@ The starting point is the scheme Melbourne Mercury uses, confirmed by inspecting
 | `array(T)` | Pointer to a block of the size, a word, then the elements, one word each |
 | Ground terms known at compile time | Static data, never allocated |
 
-These cells are not self-describing, which matters for the garbage collector. Whether to add a header word to heap cells is the main open representation question (Runtime system section).
+These cells are not self-describing: the collector and a message copy find their layout from their types (Runtime system, "Memory management", where the alternatives and the reasons for rejecting them are).
+
+**As implemented** (2026-11-04, lowering from `merk.type_def`; Lowering, "What is lowered so far"):
+
+- A type of constants only is a word, each constant its number in declaration order. Packing such fields into one word is not done yet.
+- A type of one constructor of one argument is the argument's representation: a `temp ---> temp(celsius)`, `celsius ---> celsius(float)` is a float. A cycle of such types, which has only infinite values, is a pointer.
+- In any other type, a constant is its number among the constants, in declaration order, shifted past the 3-bit tag, so its tag is 0; a constructor with arguments is a pointer to a cell of its arguments, a word each, its tag in the pointer's low bits. The constructors with arguments take the tags in declaration order, from 1 if there are constants and from 0 if not; if they need more tags than are left, the last tag is shared by the rest, whose cells' first words are their secondary tags, 0, 1 and so on. A tuple is a cell of its elements with tag 0.
+- A field is at its word less the tag, so a field's load is one `getelementptr` and one load of the tagged pointer.
+
+Two choices were made against the alternatives. Tag 0 goes to a constructor when the type has no constants, rather than always being kept for constants, so a type of eight constructors with arguments needs no secondary tag. A test of a shared tag reads the secondary tag through a `select` with a static word, rather than branching around the read, since a constant has no cell; it keeps `merk.has_functor` one operation in one block. Ground terms known at compile time are not yet static: a constant is a word, but each construction of a cell allocates.
 
 **Open layouts.** A type used under `open(_)` gets a second layout, used only by open values (Language extensions). One primary tag marks a variable reference, and every field holds a tagged word. `int`, `float` and `char` fields, which hold raw bits in the ordinary layout, are boxed, with static boxes for small values; enum and packed fields are re-encoded as tagged constants. A type that already uses all 8 primary tags moves one more functor under the shared secondary tag. When a type needs none of these changes, as with `tree ---> leaf ; node(tree, tree)` or `list(tree)`, the two layouts coincide and `to_open` is free. The ordinary layout never gives up a tag, so ground code is compiled exactly as before.
 
@@ -1838,7 +1883,7 @@ This is the transformation that experiment E2 applied by hand to mmc's generated
 
 - Calls use LLVM statepoints, so the collector can find and relocate every live heap pointer.
 - Safepoints sit at calls and at allocation slow paths. Preemption forces a slow path by lowering the heap limit, so loops that allocate need nothing more; loops that do not allocate get `mrt.yield_check` on their back edge.
-- If heap cells stay headerless, every stack map also records where each polymorphic root's `type_info` lives.
+- Heap cells are headerless, so every stack map also records where each polymorphic root's `type_info` lives, and the compiler keeps that `type_info` live as long as the root.
 
 ### 8. Native code
 
@@ -2032,18 +2077,18 @@ The runtime gives each process its own stack, heap and mailboxes, schedules proc
 - **Process exit** frees the whole heap at once.
 - **Static data** (ground terms, type descriptors, string literals) is outside every heap and never traced.
 
-**Open decision: how the collector finds pointers.**
+**How the collector finds pointers: by type (decided 2026-11-04).** Heap cells have no header, as in the type representation above. The collector and the message copy know a cell's layout from its type: the type of each root comes from the stack maps, which record where each polymorphic root's `type_info` is, and the type of each field from the type descriptors. Forwarding marks during a copy live in a side bitmap, one bit per heap word, and the to-space is scanned through a work stack of typed fields, since it cannot be scanned linearly.
 
-| Option | Cost | Benefit |
-| --- | --- | --- |
-| A. Headerless cells, traced using type descriptors and stack maps that record `type_info` locations | Complex tracer; more stack-map metadata | Keeps Melbourne's compact layout (a list cell stays 16 bytes) |
-| B. One header word per heap cell (size and pointer layout) | A list cell grows from 16 to 24 bytes | Simple, fast tracer and deep copy |
+Two alternatives were measured in a C model (experiment E7) and rejected:
 
-The recommendation is B for the first runtime, because a correct precise collector matters more than cell size early on. `mrt` hides the choice, so A can replace B later. Allocation already dominates the naive reverse benchmark (3.5× C; experiments E1 and E3), so B's cost must be measured on it.
+- **A header word per cell**, giving its size, which fields are pointers and its constructor, was the first recommendation: a simple Cheney collector and deep copy that need no types, a self-describing heap for debuggers, and room for the secondary tag. It was rejected for its size. It makes a list cell 24 bytes instead of 16, a tree node 32 instead of 24, and a list of pairs 48 instead of 32 per element, and that cost is paid by every program on every traversal once its data leaves a cache: +16% on a large list, +50% on a large tree, +45% on a list of pairs, up to +50% on building, +11% on nrev and +17% on polymorphic nrev, where the header's pointer bits come from a `type_info` at run time. Its advantages are engineering effort, paid once; its cost would be paid on every run.
+- **Pages of cells of one shape** (a big bag of pages), with the shape in the page table, keep the headerless size and need no types to trace, and segregating cells by shape even made a list of pairs 22% faster to sum. They were rejected because polymorphic code knows a cell's shape only at run time, so it must choose among bump pointers there (+36% on polymorphic nrev), and because every heap needs a page for each shape it uses, which with a heap per process is the wrong cost for many small processes.
+
+What the choice costs instead: a `type_info` must be findable for every polymorphic root at every safepoint; the tracer is type-directed, with descriptors for every type; and `send`, which must not overwrite the sender's cells, copies by the message's `type_info`, which it receives as a hidden argument anyway. `mrt` hides the layout, so the decision can be revisited: the nrev gate of chunk 1 measures it again on our own compiler.
 
 ### Type descriptors
 
-Static type descriptors describe each type's constructors, names, arguments and layout. Generic printing (`io.write`), `compare`, `unify` at polymorphic types, `univ` and, under option A, the collector all use them.
+Static type descriptors describe each type's constructors, names, arguments and layout. Generic printing (`io.write`), `compare`, `unify` at polymorphic types, `univ`, the collector and the message copy all use them.
 
 ### Exceptions, links and monitors
 
@@ -2081,7 +2126,7 @@ Open terms need new runtime functionality, listed below. None of it runs, or tak
 - **Unification.** The compiler generates a unify procedure for each open type. The runtime supplies a generic one that walks type descriptors, for polymorphic code, and the occurs-check variant behind `unify_oc`.
 - **Value trail.** Each process gets a trail of (address, old value) pairs, allocated on first use. A binding is trailed only while a choice point or `try` that can bind open terms is live, which costs one compare against a per-process counter. The mode system tells the compiler which those are, because only goals with an `any` variable can bind. Each one saves the trail top; backtracking, and catching an exception as ISO Prolog's `catch/3` does, undo entries down to it; when the last one is gone, the trail is emptied. E5 found an unconditional trail push per binding within noise, so the first runtime skips the WAM's age test and the way it interacts with a moving collector.
 - **Collector.** Trail entries are roots and are updated when cells move. The collector recognises variable cells by their tag and short-circuits references to bound variables whose binding is not on the trail, as WAM collectors collapse reference chains. A copying collector handles cyclic terms through its forwarding pointers.
-- **Type descriptors.** Each type used under `open(_)` gets a descriptor for its open layout. Generic unify, `from_open`, printing and, under option A, the collector use it.
+- **Type descriptors.** Each type used under `open(_)` gets a descriptor for its open layout. Generic unify, `from_open`, printing and the collector use it.
 - **Conversion.** `from_open` walks the term with cycle detection, fails at the first unbound variable, and copies only if it met a variable cell. `to_open` copies when the two layouts differ.
 - **Printing.** `io.write` prints unbound variables as `_1`, `_2` and so on, numbered within one call, and stops on cyclic terms.
 - **Message copying.** The copier follows reference chains and copies bound variables as their values. It creates one fresh variable for each unbound source variable, keeping an old-to-new map during the walk, either a forwarding word in the source cell that it restores afterwards or a small hash table. It marks visited cells, so cyclic terms terminate. Message types that cannot contain `open(_)` keep a copier with no variable checks.
@@ -2292,11 +2337,10 @@ M3 and M4 both build only on M2, so their order can be swapped if processes matt
 
 ## Open questions and risks
 
-Eight decisions remain open. The three that most constrain the runtime are the heap cell layout, the nondeterminism strategy and the stack model, so they come first. The eight ticked at the end were decided between 2026-10-27 and 2026-10-29.
+Seven decisions remain open. The two that most constrain the runtime are the nondeterminism strategy and the stack model, so they come first. The designs being worked out for them, and the plans for the pieces under way, are in `INPROGRESS.md`; each moves here when it is decided and implemented, with the options it rejected and why. The ones ticked at the end were decided between 2026-10-27 and 2026-11-04.
 
 **Open questions**
 
-- [ ] Heap cells: header word per cell (option B) or headerless tracing with type descriptors (option A).
 - [ ] Nondeterminism: continuation passing with stop flags, or an explicit choice-point stack.
 - [ ] Process stacks: grow by copying, or segmented.
 - [ ] When to adopt language changes made after 22.01.
@@ -2304,6 +2348,7 @@ Eight decisions remain open. The three that most constrain the runtime are the h
 - [ ] Sharing in local message copies: keep shared ground subterms, which needs a visited map, or expand them as Erlang does. Variable identity is always kept.
 - [ ] Remote delivery guarantees: ordering per pair of processes, as in Erlang, and at-most-once or stronger delivery.
 - [ ] Trust between nodes: how nodes authenticate each other and how mailbox keys for `sealed(T)` are published.
+- [x] Heap cells: headerless, traced by type, as Melbourne's; a header word and pages of one shape rejected for their measured costs (Runtime system, "Memory management"; experiment E7).
 - [x] Compiler implementation language: C++, for direct use of MLIR, the LLVM data structures and TableGen.
 - [x] Standard library: reimplemented in full from the library reference manual, for full control.
 - [x] Links and monitors: required, and delivered with processes in M4.
@@ -2320,7 +2365,7 @@ Eight decisions remain open. The three that most constrain the runtime are the h
 | Risk | Why it matters | Mitigation |
 | --- | --- | --- |
 | Mode analysis | Definite aliasing is out of scope, because open types cover partly bound data. But full unique modes, which the reference manual says mmc has not fully implemented, the open-term rules and mode inference, which `LIMITATIONS.md` calls "a bit imperfect", have no reference implementation to test against | Implement the 22.01 mode rules first, with differential tests against mmc; build separate test suites for uniqueness and open terms, written from the manual and this design; infer modes only where mmc does without `--infer-modes`, for predicates without a `:- pred` declaration, and compare them with mmc's `--infer-modes`, whose passes are consistent; make mode errors name the waiting goal and variable |
-| Precise GC on LLVM statepoints | Subtle correctness bugs; statepoint overhead | GC torture mode; header-word layout first |
+| Precise GC on LLVM statepoints | Subtle correctness bugs, more so in a type-directed tracer, which depends on every root's `type_info`; statepoint overhead | GC torture mode; a heap verifier that walks the heap by type after each collection |
 | Allocation-heavy code | Naive reverse is already 3.5× C with Boehm (E1) | Nursery bump allocation, last-call-modulo-constructors, escape analysis; measure every milestone |
 | Scope | Many large components | Phased plan in which each milestone is usable on its own |
 | Small upstream community | Three developers wrote about 99% of mmc's commits in the last five years | Work from the manual and papers; rely on differential testing, not on help |

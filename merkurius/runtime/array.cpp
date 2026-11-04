@@ -9,8 +9,11 @@
 // Arrays: a pointer to the array's size, a word, followed by its elements,
 // a word each, whatever their type (design document, "Type
 // representation"). Code generation reads and writes elements itself; these
-// are the operations that allocate, and those over many elements. Arrays
-// are never freed until there is a garbage collector.
+// are the operations that allocate, and those over many elements.
+//
+// Temporary (chunk 1 step 3, docs/INPROGRESS.md): arrays are allocated
+// with malloc and never freed. Step 3 moves them onto mrt.alloc and the
+// heap, as terms' cells, and chunk 3's collector frees them.
 //
 //===----------------------------------------------------------------------===//
 

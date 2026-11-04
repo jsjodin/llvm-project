@@ -51,6 +51,38 @@ def Merk_ArrayType : TypeDef<Merk_Dialect, "Array"> {
   let assemblyFormat = "`<` $element `>`";
 }
 
+// A value of a type defined by constructors, or of a tuple type, named by
+// the type as written fully qualified, with its arguments:
+// !merk.term<"list.list(int)">. The type's constructors are those of the
+// module's merk.type_def of that name; its layout is chosen when it is
+// lowered (design document, "Type representation").
+def Merk_TermType : TypeDef<Merk_Dialect, "Term"> {
+  let mnemonic = "term";
+  let summary = "a value of a type defined by constructors";
+  let parameters = (ins StringRefParameter<"the type">:$name);
+  let assemblyFormat = "`<` $name `>`";
+}
+
+// A constructor of a type, as merk.type_def lists them: its name and the
+// types of its arguments, none for a constant.
+def Merk_ConstructorAttr : AttrDef<Merk_Dialect, "Constructor"> {
+  let mnemonic = "constructor";
+  let summary = "a constructor and its arguments' types";
+  let parameters = (ins StringRefParameter<"its name">:$name,
+      OptionalArrayRefParameter<"mlir::Type">:$fields);
+  let assemblyFormat = "`<` $name (`(` $fields^ `)`)? `>`";
+}
+
+// A constructor named by its name and arity, which together tell it from
+// the type's others.
+def Merk_FunctorAttr : AttrDef<Merk_Dialect, "Functor"> {
+  let mnemonic = "functor";
+  let summary = "a constructor's name and arity";
+  let parameters = (ins StringRefParameter<"its name">:$name,
+      "unsigned":$arity);
+  let assemblyFormat = "`<` $name `,` $arity `>`";
+}
+
 // A procedure's determinism (reference manual, "Determinism categories").
 def Merk_Determinism : I32EnumAttr<"Determinism", "a Mercury determinism", [
   I32EnumAttrCase<"Det", 0, "det">,

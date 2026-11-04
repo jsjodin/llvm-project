@@ -173,6 +173,88 @@ def Merk_ForeignCallOp : Merk_Op<"foreign_call"> {
 }
 
 //===----------------------------------------------------------------------===//
+// Terms of types defined by constructors.
+//===----------------------------------------------------------------------===//
+
+def Merk_TypeDefOp : Merk_Op<"type_def", [HasParent<"mlir::ModuleOp">]> {
+  let summary = "the constructors of a type";
+  let description = [{
+    Lists the constructors of the type that `!merk.term<name>` names, in
+    the order the type's definition declares them, with their arguments'
+    types, for lowering to choose the type's layout from. A module has one
+    for each such type its procedures use, its own or imported.
+
+    ```mlir
+    merk.type_def "list.list(int)" [#merk.constructor<"[]">,
+        #merk.constructor<"[|]"(i64, !merk.term<"list.list(int)">)>]
+    ```
+  }];
+  let arguments = (ins StrAttr:$name,
+      TypedArrayAttrBase<Merk_ConstructorAttr, "constructors">:$constructors);
+  let assemblyFormat = "$name $constructors attr-dict";
+}
+
+def Merk_ConstructOp : Merk_Op<"construct", [Pure]> {
+  let summary = "a term of a constructor and its arguments";
+  let description = [{
+    X = f(Y1, ..., Yn), with X free: the term of the constructor with the
+    arguments, which are the constructor's arguments' types.
+
+    ```mlir
+    %l = merk.construct #merk.functor<"[|]", 2>(%h, %t : i64, !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
+    ```
+  }];
+  let arguments = (ins Merk_FunctorAttr:$functor,
+      Variadic<AnyType>:$arguments);
+  let results = (outs Merk_TermType:$term);
+  let assemblyFormat = [{
+    qualified($functor) (`(` $arguments^ `:` type($arguments) `)`)? attr-dict
+    `->` qualified(type($term))
+  }];
+  let hasVerifier = 1;
+}
+
+def Merk_DeconstructOp : Merk_Op<"deconstruct", [NoMemoryEffect]> {
+  let summary = "the arguments of a term whose constructor is known";
+  let description = [{
+    X = f(Y1, ..., Yn), with X bound and the Yi free, where X is known to
+    be of f: in a switch's case for f, or after merk.has_functor. Its
+    results are the arguments. It is not speculatable, since another
+    constructor's term has no such arguments.
+
+    ```mlir
+    %h, %t = merk.deconstruct #merk.functor<"[|]", 2> %l : !merk.term<"list.list(int)"> -> i64, !merk.term<"list.list(int)">
+    ```
+  }];
+  let arguments = (ins Merk_TermType:$term, Merk_FunctorAttr:$functor);
+  let results = (outs Variadic<AnyType>:$fields);
+  let assemblyFormat = [{
+    qualified($functor) $term attr-dict `:` qualified(type($term))
+    (`->` type($fields)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Merk_HasFunctorOp : Merk_Op<"has_functor", [NoMemoryEffect]> {
+  let summary = "whether a term is of a constructor";
+  let description = [{
+    The test of X = f(...) with X bound, whose result `merk.guard` takes.
+
+    ```mlir
+    %is = merk.has_functor #merk.functor<"[]", 0> %l : !merk.term<"list.list(int)">
+    ```
+  }];
+  let arguments = (ins Merk_TermType:$term, Merk_FunctorAttr:$functor);
+  let results = (outs I1:$result);
+  let assemblyFormat = [{
+    qualified($functor) $term attr-dict `:` qualified(type($term))
+  }];
+  let builders = [OpBuilder<(ins "mlir::Value":$term, "FunctorAttr":$functor), [{
+    build($_builder, $_state, $_builder.getI1Type(), term, functor);
+  }]>];
+}
+
+//===----------------------------------------------------------------------===//
 // Arrays, the library module array's predicates, which code generation
 // builds in. Those that update an array do so in place and give the same
 // array, since uniqueness checking has made sure its old version is dead;
@@ -368,11 +450,13 @@ def Merk_IteOp : Merk_Op<"ite", [RecursiveMemoryEffects]> {
 }
 
 def Merk_SwitchOp : Merk_Op<"switch", [RecursiveMemoryEffects]> {
-  let summary = "branch on a primitive value";
+  let summary = "branch on a primitive value or a term's constructor";
   let description = [{
     Runs the case whose constants include the value, one region for each
-    case, in the order of `cases`. If no case has it, the switch fails if
-    it has `can_fail`, and cannot happen otherwise.
+    case, in the order of `cases`: integer constants for an integer, and
+    functors for a term. If no case has it, the switch fails if it has
+    `can_fail`, and cannot happen otherwise. A case of one functor takes
+    the term apart with merk.deconstruct.
 
     ```mlir
     %r = merk.switch %n : i64 -> i64 cases [[0], [1, 2]] can_fail {
@@ -380,9 +464,14 @@ def Merk_SwitchOp : Merk_Op<"switch", [RecursiveMemoryEffects]> {
     }, {
       merk.yield %b : i64
     }
+    merk.switch %l : !merk.term<"list.list(int)"> cases
+        [[#merk.functor<"[]", 0>], [#merk.functor<"[|]", 2>]] {
+      ...
+    }
     ```
   }];
-  let arguments = (ins AnySignlessInteger:$value, ArrayAttr:$cases,
+  let arguments = (ins AnyTypeOf<[AnySignlessInteger, Merk_TermType]>:$value,
+      ArrayAttr:$cases,
       UnitAttr:$can_fail);
   let results = (outs Variadic<AnyType>:$results);
   let regions = (region VariadicRegion<SizedRegion<1>>:$caseRegions);
