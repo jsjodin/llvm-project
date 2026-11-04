@@ -34,4 +34,6 @@ if [[ -n "$arch" ]]; then
   echo "== OpenMP, GPU ($arch)"
   "$merkc" -O2 -fopenmp -fdo-loops --offload-arch="$arch" "${flags[@]}" "$src" -o "$out/gpu"
   OMP_TARGET_OFFLOAD=MANDATORY "$out/gpu"
+else
+  echo "== OpenMP, GPU: skipped, no offload-arch given"
 fi
