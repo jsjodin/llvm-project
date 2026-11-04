@@ -1,0 +1,18 @@
+The memory bandwidth benchmark of benchmarks/bandwidth, on small arrays,
+so that it keeps building and validating: sequentially, and on the host's
+threads, where OpenMP runs its target regions when there is no device.
+Each run checks the arrays' final values and prints the table only if
+they are right.
+
+RUN: merkc -O2 -fdo-loops %S/../../benchmarks/bandwidth/bandwidth.m -o %t.sequential
+RUN: env BANDWIDTH_ARRAY_SIZE=100003 BANDWIDTH_NUM_TIMES=5 %t.sequential | FileCheck %s
+RUN: merkc -O2 -fopenmp -fdo-loops %libomp-flags %S/../../benchmarks/bandwidth/bandwidth.m -o %t
+RUN: %libomp-env OMP_NUM_THREADS=4 BANDWIDTH_ARRAY_SIZE=100003 BANDWIDTH_NUM_TIMES=5 %t | FileCheck %s
+CHECK: Running kernels 5 times
+CHECK-NOT: Validation failed
+CHECK: Function    MBytes/sec  Min (sec)   Max         Average
+CHECK-NEXT: Copy
+CHECK-NEXT: Mul
+CHECK-NEXT: Add
+CHECK-NEXT: Triad
+CHECK-NEXT: Dot
