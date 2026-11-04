@@ -23,6 +23,7 @@
 % RUN: merkc -fc1 -fopenmp --offload-targets=amdgpu-amd-amdhsa -fembed-offload-object=%t.offload -emit-obj -triple x86_64-unknown-linux-gnu -x ir %t.host.bc -o %t.host.o
 % RUN: llvm-objdump -h %t.host.o | FileCheck %s --check-prefix=SECTION
 % RUN: merkc -fopenmp %libomp-flags %s -o %t && %libomp-env %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc %s -o %t.sequential && %t.sequential | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % REQUIRES: amdgpu-registered-target, libomp
 
 :- module omp_target.
