@@ -1,8 +1,8 @@
 % The checks of a loop under %$omp parallel do (design document, "Loops",
 % Under a parallel directive): it is counted by one for; the values it
-% carries from one iteration to the next are arrays updated in place,
-% since reductions are not implemented yet; it threads no io state; and
-% its body is det and pure. The directive is decomposed into parallel and
+% carries from one iteration to the next are arrays updated in place or
+% named in reduction clauses, by operators of int or float, each once; it
+% threads no io state; and its body is det and pure. The directive is decomposed into parallel and
 % do, and each clause is reported for the leaf it applies to, or as not
 % allowed on any. Each error leaves its procedure out. The checks are the
 % same under target teams distribute parallel do, whose leaves are target,
@@ -34,8 +34,17 @@
 :- pred dist_schedule(int::in, array(int)::array_di, array(int)::array_uo) is det.
 :- pred target_map(int::in, array(int)::array_di, array(int)::array_uo) is det.
 :- pred nested(int::in, array(int)::array_di, array(int)::array_uo) is det.
+:- pred modifier(int::in, int::out) is det.
+:- pred operator(int::in, int::out) is det.
+:- pred unknown(int::in, int::out) is det.
+:- pred several(int::in, int::out, int::out) is det.
+:- pred none(int::in, array(int)::array_di, array(int)::array_uo) is det.
+:- pred twice(int::in, int::out) is det.
+:- pred unsigned(int::in, uint::out) is det.
+:- pred bitwise(int::in, float::out) is det.
+:- pred qualified(int::in, float::out) is det.
 :- implementation.
-:- import_module int, list.
+:- import_module float, int, list, uint.
 
 show(N, !IO) :-
     %$omp parallel do
@@ -151,3 +160,57 @@ nested(N, !A) :-
 % CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:9: error: not yet implemented: code generation for target regions in target regions
         ( for(I, 0, N) do !A ^ elem(I) := I )
     ).
+
+modifier(N, S) :-
+    %$omp parallel do reduction(task, (+) : S)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for reduction modifiers
+    ( for(I, 1, N), fromto(0, S0, S1, S) do S1 = S0 + I ).
+
+% An operator is any function the programmer promises is associative.
+operator(N, S) :-
+    %$omp parallel do reduction(add)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for reductions by operators other than +, *, min, max, /\, \/ and xor
+    ( for(I, 1, N), fromto(0, S0, S1, S) do S1 = add(S0, I) ).
+
+:- func add(int, int) = int.
+add(A, B) = A + B.
+
+unknown(N, S) :-
+    %$omp parallel do reduction((+) : T)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: T is not a value the loop carries from one iteration to the next, a fromto's Last or a state variable
+    ( for(I, 1, N), fromto(0, S0, S1, S) do S1 = S0 + I ).
+
+several(N, S, P) :-
+    %$omp parallel do reduction(+)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: a reduction clause without variables names the one scalar the loop carries from one iteration to the next, but it carries several
+    ( for(I, 1, N), fromto(0, S0, S1, S), fromto(1, P0, P1, P) do
+        S1 = S0 + I,
+        P1 = P0 * I
+    ).
+
+% An array updated in place is not a reduction's.
+none(N, !A) :-
+    %$omp parallel do reduction(+)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: a reduction clause without variables names the one scalar the loop carries from one iteration to the next, but it carries none
+    ( for(I, 0, N) do !A ^ elem(I) := I ).
+
+twice(N, S) :-
+    %$omp parallel do reduction((+) : S) reduction((*) : S)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: S is named in two reduction clauses
+    ( for(I, 1, N), fromto(0, S0, S1, S) do S1 = S0 + I ).
+
+unsigned(N, S) :-
+    %$omp parallel do reduction(+)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for reductions of type uint
+    ( for(I, 1, N), fromto(0u, S0, S1, S) do S1 = S0 + uint.cast_from_int(I) ).
+
+bitwise(N, S) :-
+    %$omp parallel do reduction(xor)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: the reduction operator xor is not defined on floats
+    ( for(I, 1, N), fromto(0.0, S0, S1, S) do S1 = S0 + float(I) ).
+
+% A qualified operator is the type's own.
+qualified(N, S) :-
+    %$omp parallel do reduction(int.max)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: the reduction operator int.max is not defined on floats
+    ( for(I, 1, N), fromto(0.0, S0, S1, S) do S1 = float.max(S0, float(I)) ).

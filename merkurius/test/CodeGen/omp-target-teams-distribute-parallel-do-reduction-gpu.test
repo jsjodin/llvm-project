@@ -1,0 +1,32 @@
+The program of omp-target-teams-distribute-parallel-do-reduction.m,
+compiled by the driver for the machine's GPU and run there: each
+reduction's variable is mapped tofrom, the teams and their threads
+combine their partial results with it, and the program prints what the
+sequential program prints.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/omp-target-teams-distribute-parallel-do-reduction.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=17 %t 2> %t.info \
+RUN:   | FileCheck %S/omp-target-teams-distribute-parallel-do-reduction.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: FileCheck %s < %t.info
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-teams-distribute-parallel-do-reduction.m:{{[0-9]+}}:5 with 3 arguments:
+CHECK-NEXT: info: to(N)[8]
+CHECK-NEXT: info: to(Step)[8]
+CHECK-NEXT: info: tofrom(Sum)[8]
+CHECK: info: Launching kernel {{.*}}pi_2_0{{.*}} in SPMD mode
+In normalize, the first loop reads !A and gives Sum, which the second
+reads as it updates !A.
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-teams-distribute-parallel-do-reduction.m:{{[0-9]+}}:5 with 3 arguments:
+CHECK-NEXT: info: to(N)[8]
+CHECK-NEXT: info: to(STATE_VARIABLE_A_0)[8200]
+CHECK-NEXT: info: tofrom(Sum)[8]
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-teams-distribute-parallel-do-reduction.m:{{[0-9]+}}:5 with 3 arguments:
+CHECK-NEXT: info: to(N)[8]
+CHECK-NEXT: info: tofrom(STATE_VARIABLE_A_0)[8200]
+CHECK-NEXT: info: to(Sum)[8]
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-teams-distribute-parallel-do-reduction.m:{{[0-9]+}}:5 with 3 arguments:
+CHECK-NEXT: info: to(N)[8]
+CHECK-NEXT: info: tofrom(Lo)[8]
+CHECK-NEXT: info: tofrom(Hi)[8]
+CHECK: info: Launching kernel {{.*}}range_3_0{{.*}} in SPMD mode
+CHECK-NOT: Entering OpenMP kernel
