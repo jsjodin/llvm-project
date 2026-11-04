@@ -1,0 +1,6 @@
+set(LLVM_TARGET_DEFINITIONS MrtOps.td)
+mlir_tablegen(MrtOps.h.inc -gen-op-decls)
+mlir_tablegen(MrtOps.cpp.inc -gen-op-defs)
+mlir_tablegen(MrtDialect.h.inc -gen-dialect-decls -dialect=mrt)
+mlir_tablegen(MrtDialect.cpp.inc -gen-dialect-defs -dialect=mrt)
+add_merkurius_tablegen_target(MrtOpsIncGen)

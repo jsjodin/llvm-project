@@ -6,9 +6,11 @@ add_merkurius_library(MerkuriusCodeGen
 
   DEPENDS
   MerkOpsIncGen
+  MrtOpsIncGen
 
   LINK_LIBS
   MerkuriusMerkDialect
+  MerkuriusMrtDialect
   MerkuriusParser
   MerkuriusSemantics
   MLIRArithDialect
