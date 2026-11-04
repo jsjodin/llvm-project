@@ -142,6 +142,21 @@ if mmc and os.path.exists(mmc):
             ),
         )
     )
+    # Programs run and their output compared with mmc's programs'
+    # (utils/codegen-oracle).
+    config.substitutions.append(
+        (
+            "%compare-runs",
+            "%s %s --merkc %s --mmc %s"
+            % (
+                config.python_executable,
+                os.path.join(config.merkurius_src_root, "utils", "codegen-oracle",
+                             "compare-runs.py"),
+                os.path.join(config.merkurius_tools_dir, "merkc"),
+                os.path.abspath(mmc),
+            ),
+        )
+    )
     # Switch detection compared with mmc's (utils/type-oracle).
     config.substitutions.append(
         (
