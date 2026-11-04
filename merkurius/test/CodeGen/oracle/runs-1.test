@@ -1,0 +1,12 @@
+# Random modules of int and float functions, det and semidet predicates,
+# switches on ints, recursion with and without an accumulator, and terms
+# of random types built and folded, which print what they compute (see
+# utils/codegen-oracle/generate-run-programs.py): merkc's programs, at -O0
+# and -O2, and with heap chunks of 64 bytes, print what mmc's print. The
+# seed is fixed, so the modules are too; to search further, run
+# generate-run-programs.py with other seeds.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/codegen-oracle/generate-run-programs.py --seed 1 --count 20 %t
+# RUN: %compare-runs --levels 0 2 --chunk-bytes 64 --jobs 4 %t/*.m

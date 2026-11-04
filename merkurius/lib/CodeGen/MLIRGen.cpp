@@ -274,6 +274,9 @@ private:
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   // X = Y, or X = c, with both bound: a test.
   void Test(const Body &, mlir::Value, mlir::Value);
+  // A call in its procedure's own modes, each output a fresh value.
+  void Called(const Body &, const Procedure &, llvm::ArrayRef<BodyVar>,
+      const ProcedureBody &);
   void IfThenElse(const Body &, const ProcedureBody &);
   void Switch(const Body &, const ProcedureBody &);
   void Not(const Body &, const ProcedureBody &);
@@ -571,6 +574,35 @@ void MerkGenerator::Call(const Body &goal, const Procedure &callee,
     NotYet(Where(goal.tokens), "calls with hidden arguments");
     return;
   }
+  if (goal.modes && goal.modes->implied) {
+    // An implied mode: the call outputs to fresh values the arguments that
+    // are already bound, and each is then tested against its own value.
+    // The value stays for the call to read, as A = A mod B also passes A
+    // as an input; the call reads its inputs before it sets its outputs.
+    llvm::SmallVector<std::pair<BodyVar, mlir::Value>> bound;
+    for (auto [argument, mode] : llvm::zip(arguments, callee.modes)) {
+      if (IsOutput(mode) && ValueOf(argument) &&
+          !Represent(body.vars[argument].type)->dummy &&
+          !llvm::is_contained(llvm::make_first_range(bound), argument)) {
+        bound.push_back({argument, values_.lookup(argument)});
+      }
+    }
+    Called(goal, callee, arguments, body);
+    for (auto [argument, value] : bound) {
+      mlir::Value output{ValueOf(argument)};
+      values_[argument] = value;
+      if (failed_ || Terminated()) {
+        continue;
+      }
+      Test(goal, value, output);
+    }
+    return;
+  }
+  Called(goal, callee, arguments, body);
+}
+
+void MerkGenerator::Called(const Body &goal, const Procedure &callee,
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
   if (Builtin(goal, callee, arguments, body)) {
     return;
   }
@@ -1108,7 +1140,8 @@ void MerkGenerator::IfThenElse(const Body &goal, const ProcedureBody &body) {
       yielded.push_back(values_.lookup(var));
     }
     merk::YieldOp conditionYield;
-    if (!Terminated()) {
+    bool conditionFails{Terminated()};
+    if (!conditionFails) {
       conditionYield = merk::YieldOp::create(builder_, loc, yielded);
     }
     mlir::Block &then{ite.getThenRegion().emplaceBlock()};
@@ -1117,7 +1150,14 @@ void MerkGenerator::IfThenElse(const Body &goal, const ProcedureBody &body) {
       values_[var] = then.addArgument(value.getType(), loc);
     }
     builder_.setInsertionPointToStart(&then);
-    Goal(*goal.goals[1], body);
+    if (conditionFails) {
+      // A condition that cannot succeed, such as a unification mode
+      // analysis replaced with fail: the then part is never reached, so
+      // only the else part binds the variables after the if-then-else.
+      merk::FailOp::create(builder_, loc);
+    } else {
+      Goal(*goal.goals[1], body);
+    }
     branches.push_back({&then, values_, Terminated()});
     mlir::Block &otherwise{ite.getElseRegion().emplaceBlock()};
     values_ = before;
@@ -1480,6 +1520,36 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     return true;
   }};
   bool function{symbol.kind == semantics::SymbolKind::Function};
+  if (function && isInteger && arguments.size() == 3 &&
+      llvm::is_contained({"+", "-", "xor"}, symbol.name) &&
+      !IsOutput(callee.modes[2]) &&
+      IsOutput(callee.modes[0]) != IsOutput(callee.modes[1])) {
+    // The reverse modes, X + Y = R with X or Y the output, which a
+    // unification of two applications such as A + B = C + D can need:
+    // the output is computed from R and the other argument, with
+    // wrapping, as the forward modes.
+    unsigned out{IsOutput(callee.modes[0]) ? 0u : 1u};
+    mlir::Value known{ValueOf(arguments[1 - out])};
+    mlir::Value r{ValueOf(arguments[2])};
+    if (!known || !r) {
+      return other();
+    }
+    mlir::Location loc{Location(goal.tokens)};
+    namespace arith = mlir::arith;
+    llvm::StringRef name{symbol.name};
+    mlir::Value result;
+    if (name == "+") {
+      result = arith::SubIOp::create(builder_, loc, r, known);
+    } else if (name == "xor") {
+      result = arith::XOrIOp::create(builder_, loc, r, known);
+    } else if (out == 0) {
+      result = arith::AddIOp::create(builder_, loc, r, known); // X = R + Y
+    } else {
+      result = arith::SubIOp::create(builder_, loc, known, r); // Y = X - R
+    }
+    values_[arguments[out]] = result;
+    return true;
+  }
   llvm::SmallVector<mlir::Value> in;
   for (auto [i, argument, mode] : llvm::enumerate(arguments, callee.modes)) {
     bool result{function && i + 1 == arguments.size()};

@@ -2,7 +2,8 @@
 % inference"; Henderson, Somogyi and Conway, "Determinism analysis in the
 % Mercury compiler", 1996, section 5.1), as mmc infers it: of calls, by
 % their callees' declarations, of higher-order calls by their insts, and of
-% function applications; of unifications, a deconstruction being det if
+% function applications, a call in an implied mode being able to fail by
+% its test; of unifications, a deconstruction being det if
 % its variable's inst, a switch or a deconstruction before, through an
 % assignment, gives its functor; of conjunctions, disjunctions, switches,
 % if-then-elses, the else part not counting if the condition cannot fail,
@@ -27,6 +28,8 @@
 :- pred calls(int::in, int::out) is nondet.
 :- pred higher_order(pred(int)::in(pred(out) is semidet), int::out) is semidet.
 :- pred apply(int::in, int::out) is semidet.
+:- pred implied_call(int::in, int::in) is semidet.
+:- pred implied_apply(int::in) is semidet.
 :- pred deconstruct(t::in, int::out) is semidet.
 :- pred known(t::in, int::out) is det.
 :- pred aliased(t::in, int::out) is det.
@@ -53,6 +56,8 @@
 
 :- pred sd(int::in, int::out) is semidet.
 sd(X, X) :- X > 0.
+:- pred dd(int::in, int::out) is det.
+dd(X, X + 1).
 :- pred m(int::out) is multi.
 m(1).
 m(2).
@@ -76,6 +81,14 @@ higher_order(P, Y) :- P(Y).
 % CHECK-LABEL: apply(in, out) is semidet, inferred semidet
 % CHECK: call func goals.f/1 mode 0: Y = f(X) [semidet]
 apply(X, Y) :- Y = f(X).
+
+% CHECK-LABEL: implied_call(in, in) is semidet, inferred semidet
+% CHECK: call pred goals.dd/2 mode 0 implied: dd(X, Y) [semidet]
+implied_call(X, Y) :- dd(X, Y).
+
+% CHECK-LABEL: implied_apply(in) is semidet, inferred semidet
+% CHECK: call func int.max/2 mode 0 implied: X = max(X, V_{{[0-9]+}}) [semidet]
+implied_apply(X) :- X = (max(X, 3) : int).
 
 % CHECK-LABEL: deconstruct(in, out) is semidet, inferred semidet
 % CHECK: deconstruct X = goals.c/1(Y) [semidet]
