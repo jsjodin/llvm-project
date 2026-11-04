@@ -20,6 +20,8 @@
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/Format.h"
@@ -221,6 +223,25 @@ private:
   }
 
   std::optional<Represented> Represent(const semantics::Type *);
+  // A type defined by constructors, or a tuple type, as !merk.term, with
+  // the module's merk.type_def of it, made the first time; none for a type
+  // with type variables, user-defined equality, a supertype or
+  // existentially typed constructors, or with arguments not represented.
+  std::optional<Represented> RepresentTerm(const semantics::Type *);
+  // Whether values of a type can be compared yet: integers, floats, and
+  // terms whose constructors' arguments can be, at any depth.
+  bool Comparable(mlir::Type, llvm::StringSet<> &seen);
+  // The semidet procedure that unifies two terms of a type that is
+  // Comparable, made the first time: it switches on the first, and tests
+  // that the second has the same constructor and equal arguments.
+  merk::ProcOp UnifyProc(merk::TermType);
+  // The test that two values of a Comparable type are equal: arith's
+  // comparison of integers or floats, or a call of the terms' unify
+  // procedure.
+  void Equal(mlir::Value, mlir::Value, mlir::Location);
+  // X = f(Y1, ..., Yn) of a term X: a construction, or a deconstruction,
+  // with a test of X's constructor first if it can fail.
+  void TermUnify(const Body &, const ProcedureBody &);
   bool IsOutput(const semantics::ArgMode &mode) {
     return modes_.ops().IsFree(mode.initial) &&
         !modes_.ops().IsFree(mode.final);
@@ -352,6 +373,10 @@ private:
       polymorphism_;
   mlir::ModuleOp module_;
   llvm::DenseMap<const Procedure *, merk::ProcOp> procs_;
+  // The types of the module's merk.type_defs, by name, null for one that
+  // cannot be represented; and their unify procedures.
+  llvm::StringMap<const semantics::Type *> terms_;
+  llvm::StringMap<merk::ProcOp> unifyProcs_;
   // The C functions of the module's foreign_procs.
   std::string foreignCode_;
   // For the body being generated: each variable's value, and whether a
@@ -372,6 +397,9 @@ mlir::Location MerkGenerator::Location(parser::CharBlock at) {
 
 std::optional<Represented> MerkGenerator::Represent(
     const semantics::Type *type) {
+  if (type->kind == semantics::TypeKind::Tuple) {
+    return RepresentTerm(type);
+  }
   if (type->kind != semantics::TypeKind::Named) {
     return std::nullopt;
   }
@@ -411,13 +439,72 @@ std::optional<Represented> MerkGenerator::Represent(
       type->arguments.size() == 1) {
     std::optional<Represented> element{Represent(type->arguments[0])};
     if (!element || element->dummy ||
-        (!mlir::isa<merk::StringType, merk::ArrayType>(element->type) &&
+        (!mlir::isa<merk::StringType, merk::ArrayType, merk::TermType>(
+             element->type) &&
             element->type.getIntOrFloatBitWidth() > target_.WordBits())) {
       return std::nullopt;
     }
     return Represented{merk::ArrayType::get(&context_, element->type)};
   }
-  return std::nullopt;
+  return RepresentTerm(type);
+}
+
+std::optional<Represented> MerkGenerator::RepresentTerm(
+    const semantics::Type *type) {
+  std::string name{semantics::TypeToString(*type)};
+  auto term{merk::TermType::get(&context_, name)};
+  if (auto it{terms_.find(name)}; it != terms_.end()) {
+    return it->second ? std::make_optional(Represented{term}) : std::nullopt;
+  }
+  bool variables{false};
+  semantics::ForEachVariable(*type, [&](unsigned) { variables = true; });
+  const parser::DuTypeDefn *definition{nullptr};
+  if (type->kind == semantics::TypeKind::Named) {
+    if (const auto *du{std::get_if<const parser::DuTypeDefn *>(
+            &type->constructor->declaration)}) {
+      definition = *du;
+    }
+  }
+  const std::vector<semantics::ConstructorTypes> *constructors{
+      modes_.ops().ConstructorsOf(type)};
+  // A type too large to print has no name of its own.
+  if (variables || !constructors || name.front() == '<' ||
+      (definition && (definition->attributes || definition->supertype))) {
+    terms_[name] = nullptr;
+    return std::nullopt;
+  }
+  // Recorded before its constructors' arguments, which may be of it.
+  terms_[name] = type;
+  llvm::SmallVector<mlir::Attribute> attributes;
+  for (const semantics::ConstructorTypes &constructor : *constructors) {
+    llvm::SmallVector<mlir::Type> fields;
+    for (const semantics::Type *argument : constructor.arguments) {
+      // An existentially typed argument has no type here.
+      std::optional<Represented> represented;
+      if (argument) {
+        represented = Represent(argument);
+      }
+      if (!represented || represented->dummy) {
+        terms_[name] = nullptr;
+        return std::nullopt;
+      }
+      fields.push_back(represented->type);
+    }
+    attributes.push_back(merk::ConstructorAttr::get(
+        &context_, constructor.functor.name, fields));
+  }
+  // At the module's start, after those made before it.
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToStart(module_.getBody());
+  for (mlir::Operation &op : *module_.getBody()) {
+    if (!mlir::isa<merk::TypeDefOp>(op)) {
+      break;
+    }
+    builder_.setInsertionPointAfter(&op);
+  }
+  merk::TypeDefOp::create(builder_, builder_.getUnknownLoc(), name,
+      builder_.getArrayAttr(attributes));
+  return Represented{term};
 }
 
 static std::optional<merk::Determinism> MerkDeterminism(
@@ -552,13 +639,26 @@ void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
     return;
   case BodyKind::Unify:
     if (goal.switchTest) {
-      return; // the switch's case has tested it
+      // The switch's case has tested it; a constructor with arguments is
+      // taken apart.
+      if (!goal.isVar && !goal.arguments.empty()) {
+        TermUnify(goal, body);
+      }
+      return;
     }
     if (goal.isVar && goal.unify == UnifyKind::Test) {
       // X = X succeeds, even for a NaN, as with mmc.
       if (goal.left != goal.var) {
         Test(goal, ValueOf(goal.left), ValueOf(goal.var));
       }
+      return;
+    }
+    if (!goal.isVar && goal.unify != UnifyKind::Call &&
+        goal.unify != UnifyKind::Assign &&
+        mlir::isa_and_nonnull<merk::TermType>(
+            Represent(body.vars[goal.left].type).value_or(Represented{})
+                .type)) {
+      TermUnify(goal, body);
       return;
     }
     if (!goal.isVar && goal.arguments.empty() && goal.source &&
@@ -570,11 +670,12 @@ void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
       return;
     }
     if (goal.isVar && goal.unify == UnifyKind::Assign) {
-      // X = Y: the variable assigned is the other's value.
+      // X = Y: the variable assigned is the other's value; one of a type
+      // with no values has none.
       if (values_.count(goal.var)) {
         values_[goal.left] = values_.lookup(goal.var);
-      } else {
-        values_[goal.var] = values_.lookup(goal.left);
+      } else if (mlir::Value value{values_.lookup(goal.left)}) {
+        values_[goal.var] = value;
       }
       return;
     }
@@ -765,20 +866,156 @@ void MerkGenerator::GenerateForeign(
   merk::SucceedOp::create(builder_, loc, solution);
 }
 
-void MerkGenerator::Test(const Body &goal, mlir::Value x, mlir::Value y) {
+void MerkGenerator::TermUnify(const Body &goal, const ProcedureBody &body) {
   mlir::Location loc{Location(goal.tokens)};
-  mlir::Value equal;
-  if (x && y && mlir::isa<mlir::IntegerType>(x.getType())) {
-    equal = mlir::arith::CmpIOp::create(
-        builder_, loc, mlir::arith::CmpIPredicate::eq, x, y);
-  } else if (x && y && mlir::isa<mlir::FloatType>(x.getType())) {
-    equal = mlir::arith::CmpFOp::create(
-        builder_, loc, mlir::arith::CmpFPredicate::OEQ, x, y);
+  auto term{mlir::cast<merk::TermType>(
+      Represent(body.vars[goal.left].type)->type)};
+  auto functor{merk::FunctorAttr::get(&context_, goal.functor.name,
+      static_cast<unsigned>(goal.arguments.size()))};
+  if (goal.unify == UnifyKind::Construct) {
+    llvm::SmallVector<mlir::Value> arguments;
+    for (BodyVar argument : goal.arguments) {
+      mlir::Value value{ValueOf(argument)};
+      if (!value) {
+        // A term with free or dummy arguments.
+        NotYet(Where(goal.tokens), "this unification");
+        return;
+      }
+      arguments.push_back(value);
+    }
+    values_[goal.left] =
+        merk::ConstructOp::create(builder_, loc, term, functor, arguments);
+    return;
+  }
+  mlir::Value value{ValueOf(goal.left)};
+  if (!goal.switchTest &&
+      (goal.canFail || goal.unify == UnifyKind::Test)) {
+    merk::GuardOp::create(builder_, loc,
+        merk::HasFunctorOp::create(builder_, loc, value, functor));
+  }
+  if (goal.arguments.empty()) {
+    return;
+  }
+  // The arguments are new variables: mmc's form tests any that was bound
+  // with a unification after it.
+  llvm::SmallVector<mlir::Type> fields;
+  for (BodyVar argument : goal.arguments) {
+    std::optional<Represented> represented{
+        Represent(body.vars[argument].type)};
+    if (goal.unify == UnifyKind::Test || !represented || represented->dummy ||
+        values_.count(argument)) {
+      NotYet(Where(goal.tokens), "this unification");
+      return;
+    }
+    fields.push_back(represented->type);
+  }
+  auto deconstruct{
+      merk::DeconstructOp::create(builder_, loc, fields, value, functor)};
+  for (auto [argument, field] :
+      llvm::zip(goal.arguments, deconstruct.getFields())) {
+    values_[argument] = field;
+  }
+}
+
+bool MerkGenerator::Comparable(mlir::Type type, llvm::StringSet<> &seen) {
+  if (mlir::isa<mlir::IntegerType, mlir::FloatType>(type)) {
+    return true;
+  }
+  auto term{mlir::dyn_cast<merk::TermType>(type)};
+  if (!term) {
+    return false;
+  }
+  if (!seen.insert(term.getName()).second) {
+    return true;
+  }
+  const semantics::Type *semantic{terms_.lookup(term.getName())};
+  for (const semantics::ConstructorTypes &constructor :
+      *modes_.ops().ConstructorsOf(semantic)) {
+    for (const semantics::Type *argument : constructor.arguments) {
+      if (!Comparable(Represent(argument)->type, seen)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+merk::ProcOp MerkGenerator::UnifyProc(merk::TermType term) {
+  if (merk::ProcOp proc{unifyProcs_.lookup(term.getName())}) {
+    return proc;
+  }
+  mlir::Location loc{builder_.getUnknownLoc()};
+  const semantics::Type *type{terms_.lookup(term.getName())};
+  const std::vector<semantics::ConstructorTypes> &constructors{
+      *modes_.ops().ConstructorsOf(type)};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToEnd(module_.getBody());
+  auto proc{merk::ProcOp::create(builder_, loc,
+      ("unify." + term.getName()).str(),
+      builder_.getFunctionType({term, term}, {}), merk::Determinism::Semidet)};
+  proc.setPrivate();
+  // Recorded first, for the calls of it on its terms' arguments.
+  unifyProcs_[term.getName()] = proc;
+  mlir::Block *entry{proc.addEntryBlock()};
+  builder_.setInsertionPointToStart(entry);
+  mlir::Value x{entry->getArgument(0)}, y{entry->getArgument(1)};
+  llvm::SmallVector<mlir::Attribute> cases;
+  for (const semantics::ConstructorTypes &constructor : constructors) {
+    cases.push_back(builder_.getArrayAttr({merk::FunctorAttr::get(&context_,
+        constructor.functor.name, constructor.functor.arity)}));
+  }
+  auto op{merk::SwitchOp::create(builder_, loc, mlir::TypeRange{}, x,
+      builder_.getArrayAttr(cases), /*canFail=*/false)};
+  for (auto [constructor, region, c] :
+      llvm::zip(constructors, op.getCaseRegions(), cases)) {
+    builder_.setInsertionPointToStart(&region.emplaceBlock());
+    auto functor{mlir::cast<merk::FunctorAttr>(
+        mlir::cast<mlir::ArrayAttr>(c)[0])};
+    merk::GuardOp::create(builder_, loc,
+        merk::HasFunctorOp::create(builder_, loc, y, functor));
+    if (!constructor.arguments.empty()) {
+      llvm::SmallVector<mlir::Type> fields;
+      for (const semantics::Type *argument : constructor.arguments) {
+        fields.push_back(Represent(argument)->type);
+      }
+      auto xs{merk::DeconstructOp::create(builder_, loc, fields, x, functor)};
+      auto ys{merk::DeconstructOp::create(builder_, loc, fields, y, functor)};
+      for (auto [a, b] : llvm::zip(xs.getFields(), ys.getFields())) {
+        Equal(a, b, loc);
+      }
+    }
+    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  }
+  builder_.setInsertionPointAfter(op);
+  merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+  return proc;
+}
+
+void MerkGenerator::Equal(mlir::Value x, mlir::Value y, mlir::Location loc) {
+  mlir::Type type{x.getType()};
+  if (mlir::isa<mlir::IntegerType>(type)) {
+    merk::GuardOp::create(builder_, loc,
+        mlir::arith::CmpIOp::create(
+            builder_, loc, mlir::arith::CmpIPredicate::eq, x, y));
+  } else if (mlir::isa<mlir::FloatType>(type)) {
+    // As mmc's ==, a NaN is equal to nothing.
+    merk::GuardOp::create(builder_, loc,
+        mlir::arith::CmpFOp::create(
+            builder_, loc, mlir::arith::CmpFPredicate::OEQ, x, y));
   } else {
+    merk::CallOp::create(builder_, loc, mlir::TypeRange{},
+        UnifyProc(mlir::cast<merk::TermType>(type)).getSymName(),
+        mlir::ValueRange{x, y});
+  }
+}
+
+void MerkGenerator::Test(const Body &goal, mlir::Value x, mlir::Value y) {
+  llvm::StringSet<> seen;
+  if (!x || !y || !Comparable(x.getType(), seen)) {
     NotYet(Where(goal.tokens), "this unification");
     return;
   }
-  merk::GuardOp::create(builder_, loc, equal);
+  Equal(x, y, Location(goal.tokens));
 }
 
 std::vector<BodyVar> MerkGenerator::BoundSince(
@@ -930,7 +1167,8 @@ void MerkGenerator::Switch(const Body &goal, const ProcedureBody &body) {
   mlir::Value value{ValueOf(goal.switchVar)};
   auto integer{value ? mlir::dyn_cast<mlir::IntegerType>(value.getType())
                      : mlir::IntegerType{}};
-  if (!integer) {
+  bool term{value && mlir::isa<merk::TermType>(value.getType())};
+  if (!integer && !term) {
     NotYet(Where(goal.tokens),
         "switches on values of type " + semantics::TypeToString(*type));
     return;
@@ -941,6 +1179,11 @@ void MerkGenerator::Switch(const Body &goal, const ProcedureBody &body) {
     std::vector<semantics::InstFunctor> functors{c.functor};
     functors.insert(functors.end(), c.others.begin(), c.others.end());
     for (const semantics::InstFunctor &functor : functors) {
+      if (term) {
+        constants.push_back(
+            merk::FunctorAttr::get(&context_, functor.name, functor.arity));
+        continue;
+      }
       std::optional<llvm::APInt> v{
           CaseConstant(functor, *type, integer.getWidth())};
       if (!v) {
@@ -1198,8 +1441,22 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
   const semantics::Symbol &symbol{*callee.symbol};
   llvm::StringRef module{symbol.module};
+  // Temporary (chunk 1 step 6, docs/INPROGRESS.md): the array predicates
+  // are built in until the library's array module can be compiled with
+  // type_infos.
   if (module == "array") {
     return ArrayBuiltin(goal, callee, arguments, body);
+  }
+  // Temporary (chunk 1 step 6, docs/INPROGRESS.md): modules of the library
+  // that are not compiled yet, whose monomorphic predicates on terms would
+  // otherwise be called. Step 6 compiles them, after polymorphism (step 4)
+  // and closures (step 5).
+  if (llvm::is_contained({"bool", "list", "maybe", "pair"}, module)) {
+    NotYet(Where(goal.tokens),
+        ("calls of " + module + "." + symbol.name + "/" +
+            std::to_string(symbol.arity))
+            .str());
+    return true;
   }
   bool isFloat{module == "float"};
   bool isUnsigned{module.starts_with("uint")};

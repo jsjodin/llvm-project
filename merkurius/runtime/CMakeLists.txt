@@ -6,6 +6,7 @@ add_library(merkrt STATIC
   array.cpp
   exception.cpp
   main.cpp
+  term.cpp
   )
 set_target_properties(merkrt PROPERTIES
   ARCHIVE_OUTPUT_DIRECTORY ${LLVM_LIBRARY_OUTPUT_INTDIR}
