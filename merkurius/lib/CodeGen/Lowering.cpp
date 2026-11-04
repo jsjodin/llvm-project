@@ -211,7 +211,13 @@ private:
   void LowerTypeInfo(merk::TypeInfoOp);
   llvm::LogicalResult LowerTypeCtors();
   void LowerTypeInfoWord(merk::TypeInfoWordOp);
+  // Calls the entry at `offset` in the descriptor of `op`'s type_info, its
+  // first operand, on its other two.
+  mlir::Value CallDescriptorEntry(mlir::Operation *op, std::int32_t offset,
+      mlir::Type result);
   llvm::LogicalResult LowerUnifyWord(merk::UnifyWordOp);
+  llvm::LogicalResult LowerCompareWord(merk::CompareWordOp);
+  void LowerStringCompare(merk::StringCompareOp);
   void LowerStringEqual(merk::StringEqualOp);
   void LowerForeignCall(merk::ForeignCallOp);
   void LowerEntry(merk::EntryOp);
@@ -1062,6 +1068,9 @@ llvm::LogicalResult Lowerer::LowerTypeCtors() {
     if (op.getUnify()) {
       insert(mlir::LLVM::AddressOfOp::create(rewriter_, loc, ptr, *op.getUnify()));
     }
+    if (op.getCompare()) {
+      insert(mlir::LLVM::AddressOfOp::create(rewriter_, loc, ptr, *op.getCompare()));
+    }
     mlir::LLVM::ReturnOp::create(rewriter_, loc, init);
     rewriter_.eraseOp(op);
   }
@@ -1087,14 +1096,11 @@ void Lowerer::LowerTypeInfoWord(merk::TypeInfoWordOp op) {
   rewriter_.replaceOpWithNewOp<mlir::LLVM::LoadOp>(op, ptr, address, 8);
 }
 
-llvm::LogicalResult Lowerer::LowerUnifyWord(merk::UnifyWordOp op) {
-  if (device_) {
-    return op.emitOpError(
-        "compares values of a type variable, which cannot be done on an OpenMP device yet");
-  }
-  mlir::Location loc{op.getLoc()};
+mlir::Value Lowerer::CallDescriptorEntry(
+    mlir::Operation *op, std::int32_t offset, mlir::Type result) {
+  mlir::Location loc{op->getLoc()};
   rewriter_.setInsertionPoint(op);
-  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(op->getContext())};
   auto i64{rewriter_.getI64Type()};
   mlir::Value info{op->getOperand(0)};
   // The descriptor: the type_info with tag 0, and a cell's first word with
@@ -1118,18 +1124,47 @@ llvm::LogicalResult Lowerer::LowerUnifyWord(merk::UnifyWordOp op) {
   mlir::LLVM::CondBrOp::create(rewriter_, loc, isDescriptor, join,
       mlir::ValueRange{info}, cell, mlir::ValueRange{});
   rewriter_.setInsertionPointToStart(join);
-  // Past the header's word, the module's and the name's.
   mlir::Value entry{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr,
       mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(),
-          descriptor, llvm::ArrayRef<mlir::LLVM::GEPArg>{24}),
+          descriptor, llvm::ArrayRef<mlir::LLVM::GEPArg>{offset}),
       8)};
-  auto type{mlir::LLVM::LLVMFunctionType::get(
-      rewriter_.getI1Type(), {ptr, i64, i64})};
+  auto type{mlir::LLVM::LLVMFunctionType::get(result, {ptr, i64, i64})};
   auto call{mlir::LLVM::CallOp::create(rewriter_, loc, type,
       mlir::ValueRange{entry, info, op->getOperand(1), op->getOperand(2)})};
   call.setCConv(cconv_);
-  rewriter_.replaceOp(op, call.getResult());
+  return call.getResult();
+}
+
+llvm::LogicalResult Lowerer::LowerUnifyWord(merk::UnifyWordOp op) {
+  if (device_) {
+    return op.emitOpError(
+        "compares values of a type variable, which cannot be done on an OpenMP device yet");
+  }
+  // Past the header's word, the module's and the name's.
+  mlir::Value result{CallDescriptorEntry(op, 24, rewriter_.getI1Type())};
+  rewriter_.replaceOp(op, result);
   return llvm::success();
+}
+
+llvm::LogicalResult Lowerer::LowerCompareWord(merk::CompareWordOp op) {
+  if (device_) {
+    return op.emitOpError(
+        "compares values of a type variable, which cannot be done on an OpenMP device yet");
+  }
+  // Past the unify entry too.
+  mlir::Value result{CallDescriptorEntry(op, 32, Convert(op.getType()))};
+  rewriter_.replaceOp(op, result);
+  return llvm::success();
+}
+
+void Lowerer::LowerStringCompare(merk::StringCompareOp op) {
+  rewriter_.setInsertionPoint(op);
+  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  auto i32{rewriter_.getI32Type()};
+  auto call{mlir::LLVM::CallOp::create(rewriter_, op.getLoc(),
+      RuntimeFunc("strcmp", i32, {ptr, ptr}),
+      mlir::ValueRange{op->getOperand(0), op->getOperand(1)})};
+  rewriter_.replaceOp(op, call.getResult());
 }
 
 void Lowerer::LowerStringEqual(merk::StringEqualOp op) {
@@ -1860,6 +1895,7 @@ llvm::LogicalResult Lowerer::Lower() {
   if (device_) {
     for (auto op : module_.getOps<merk::TypeCtorOp>()) {
       op.removeUnifyAttr();
+      op.removeCompareAttr();
     }
   }
   if (mlir::omp::isOpenMPModule(module_) && mlir::failed(FilterProcs())) {
@@ -1885,7 +1921,8 @@ llvm::LogicalResult Lowerer::Lower() {
   module_.walk([&](mlir::Operation *op) {
     if (mlir::isa<merk::SucceedOp, merk::CallOp, merk::ConstantOp,
             merk::ToWordOp, merk::FromWordOp, merk::TypeInfoOp,
-            merk::TypeInfoWordOp, merk::UnifyWordOp, merk::StringEqualOp,
+            merk::TypeInfoWordOp, merk::UnifyWordOp, merk::CompareWordOp,
+            merk::StringCompareOp, merk::StringEqualOp,
             merk::ForeignCallOp, merk::ArrayNewOp, merk::ArraySizeOp,
             merk::ArrayGetOp, merk::ArraySetOp, merk::ArrayFillOp,
             merk::ArrayCopyOp, merk::ArrayResizeOp>(op)) {
@@ -1909,6 +1946,12 @@ llvm::LogicalResult Lowerer::Lower() {
       if (mlir::failed(LowerUnifyWord(unify))) {
         return llvm::failure();
       }
+    } else if (auto compare{mlir::dyn_cast<merk::CompareWordOp>(op)}) {
+      if (mlir::failed(LowerCompareWord(compare))) {
+        return llvm::failure();
+      }
+    } else if (auto stringCompare{mlir::dyn_cast<merk::StringCompareOp>(op)}) {
+      LowerStringCompare(stringCompare);
     } else if (auto stringEqual{mlir::dyn_cast<merk::StringEqualOp>(op)}) {
       LowerStringEqual(stringEqual);
     } else if (auto foreign{mlir::dyn_cast<merk::ForeignCallOp>(op)}) {
