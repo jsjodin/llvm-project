@@ -903,7 +903,7 @@ bool CodeGenAction::executeAction() {
     return false;
   }
   module = codegen::GenerateMerk(context, r.resolution->module().name(),
-      *r.tree, r.tokens, ci.getAllSources(), *a.types, *a.modes,
+      *r.tree, r.tokens, ci.getAllSources(), *r.resolution, *a.types, *a.modes,
       *a.determinism, *polymorphism, a.loops, *target, r.messages);
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   if (r.messages.AnyFatalError()) {
