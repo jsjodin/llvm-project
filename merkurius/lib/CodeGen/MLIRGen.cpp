@@ -20,6 +20,7 @@
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
@@ -173,6 +174,11 @@ struct Represented {
   bool dummy{false};
 };
 
+// A reduction clause's operator, as Flang's ReductionProcessor identifies
+// the intrinsic ones (flang/lib/Lower/Support/ReductionProcessor.cpp, see
+// THIRD_PARTY.md).
+enum class ReductionOp { Add, Multiply, Max, Min, And, Or, Xor };
+
 class MerkGenerator {
 public:
   MerkGenerator(mlir::MLIRContext &context, llvm::StringRef module,
@@ -257,22 +263,39 @@ private:
   // omp.loop_nest, with omp.target, omp.teams and omp.distribute for the
   // latter, whose body calls the loop's body procedure.
   void OmpLoop(const Body &, const ProcedureBody &);
+  // A slot of the procedure that a target region updates, mapped tofrom
+  // by reference, as Flang maps a reduction's variable: the region uses
+  // its pointer, which becomes the region's argument.
+  struct UpdatedSlot {
+    mlir::Value slot;
+    mlir::Type type;
+    llvm::StringRef name;
+  };
   // A target region around what `generate` builds, for the goal, which
-  // maps the values it uses and those it binds. Its kernel is `mode`
-  // (KernelOf); `hostEval` are the values computed on the host for it,
-  // which `generate` is given as the region's arguments.
+  // maps the values it uses and those it binds, and `updated`. Its kernel
+  // is `mode` (KernelOf); `hostEval` are the values computed on the host
+  // for it, which `generate` is given as the region's arguments.
   void Target(const Body &, const ProcedureBody &,
       llvm::function_ref<void(mlir::ValueRange hostEval)> generate,
       bool combined, mlir::omp::TargetExecMode mode,
-      mlir::ValueRange hostEval = {});
+      mlir::ValueRange hostEval = {}, llvm::ArrayRef<UpdatedSlot> slots = {});
+  // The module's omp.declare_reduction for the operator on `type`, an
+  // integer or a float, by value, made the first time, as Flang's ReductionProcessor makes
+  // and names them.
+  mlir::omp::DeclareReductionOp DeclareReduction(
+      ReductionOp, mlir::Type type, mlir::Location);
   // The directive's leaves with their clauses; none after reporting a
   // clause that none of them allows.
   std::optional<omp::ConstructQueue> Decompose(const parser::OmpDirective &,
       parser::CharBlock at, std::optional<llvm::StringRef> counter = {});
-  // Reports the leaf's clauses that are not generated yet: all but
-  // shared clauses the decomposition adds, since a variable is shared
-  // already. Whether there were none.
-  bool LeafClauses(const omp::Leaf &, parser::CharBlock at);
+  // Reports the leaf's clauses that are not generated yet: all but those
+  // `handled` takes, of the leaf's directive, the clause and whether the
+  // decomposition added it, and shared clauses the decomposition adds,
+  // since a variable is shared already. Whether there were none.
+  bool LeafClauses(const omp::Leaf &, parser::CharBlock at,
+      llvm::function_ref<bool(llvm::omp::Directive, llvm::omp::Clause,
+          bool synthesized)>
+          handled = nullptr);
   // An error that leaves the procedure out.
   void Error(parser::CharBlock at, parser::MessageFixedText text,
       llvm::StringRef argument = {}) {
@@ -1565,6 +1588,20 @@ static Kernel KernelOf(const omp::ConstructQueue &queue) {
   return {};
 }
 
+// The operator of a reduction clause by Mercury's name: +, *, min and
+// max, of ints and floats, and /\, \/ and xor, of ints.
+static std::optional<ReductionOp> ReductionOpOf(llvm::StringRef name) {
+  return llvm::StringSwitch<std::optional<ReductionOp>>(name)
+      .Case("+", ReductionOp::Add)
+      .Case("*", ReductionOp::Multiply)
+      .Case("max", ReductionOp::Max)
+      .Case("min", ReductionOp::Min)
+      .Case("/\\", ReductionOp::And)
+      .Case("\\/", ReductionOp::Or)
+      .Case("xor", ReductionOp::Xor)
+      .Default(std::nullopt);
+}
+
 // The array that an array a target region gives was, before the region
 // updated it in place, if the region's own operations show it.
 static mlir::Value UpdatedFrom(mlir::Value array) {
@@ -1640,8 +1677,19 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
   if (!queue) {
     return;
   }
+  // A reduction is on the leaves the decomposition puts it on, do and
+  // teams, as Flang puts it, and the map of its variable that target
+  // implies is the reduction's.
+  auto handled{[](llvm::omp::Directive leaf, llvm::omp::Clause id,
+                   bool synthesized) {
+    if (synthesized) {
+      return id == llvm::omp::OMPC_map && leaf == llvm::omp::OMPD_target;
+    }
+    return id == llvm::omp::OMPC_reduction &&
+        (leaf == llvm::omp::OMPD_do || leaf == llvm::omp::OMPD_teams);
+  }};
   for (const omp::Leaf &leaf : *queue) {
-    if (!LeafClauses(leaf, at)) {
+    if (!LeafClauses(leaf, at, handled)) {
       return;
     }
   }
@@ -1723,24 +1771,149 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
     Error(at, "the body of a parallel do loop must be pure"_err_en_US);
     return;
   }
-  for (const semantics::TranslatedLoop::Threaded &value : loop->threaded) {
+  auto typeIs{[&](const semantics::TranslatedLoop::Threaded &value,
+                  llvm::StringRef module, llvm::StringRef name) {
     const semantics::Type *type{body.vars[call->arguments[value.in]].type};
-    auto is{[&](llvm::StringRef module, llvm::StringRef name) {
-      return type->kind == semantics::TypeKind::Named &&
-          type->constructor->module == module &&
-          type->constructor->name == name;
-    }};
-    if (is("io", "state")) {
+    return type->kind == semantics::TypeKind::Named &&
+        type->constructor->module == module && type->constructor->name == name;
+  }};
+  // The reductions: each value the loop carries that a reduction clause
+  // names, by its name, or the one scalar it carries, for a clause that
+  // names none (design document, "Loops", Reductions).
+  struct Reduction {
+    const semantics::TranslatedLoop::Threaded *value;
+    ReductionOp op;
+    mlir::Type type;
+    unsigned output{0}; // of the body procedure's results
+    mlir::Value slot{};
+  };
+  llvm::SmallVector<Reduction> reductions;
+  auto reductionOf{[&](const semantics::TranslatedLoop::Threaded &value) {
+    return llvm::find_if(
+        reductions, [&](const Reduction &r) { return r.value == &value; });
+  }};
+  for (const parser::OmpClause &clause : directive.clauses) {
+    const auto *reduction{std::get_if<const parser::OmpReductionClause *>(&clause)};
+    if (!reduction) {
+      continue;
+    }
+    if ((*reduction)->modifier) {
+      NotYet(at, "reduction modifiers");
+      return;
+    }
+    // An operator is any function the programmer promises is associative;
+    // so far, those of int and float that Flang has as intrinsic ones.
+    const parser::SymName &opName{*(*reduction)->op};
+    std::optional<ReductionOp> op{ReductionOpOf(opName.name)};
+    if (!op || opName.qualifiers.size() > 1) {
+      NotYet(at,
+          "reductions by operators other than +, *, min, max, /\\, \\/ and xor");
+      return;
+    }
+    llvm::SmallVector<const semantics::TranslatedLoop::Threaded *> named;
+    if ((*reduction)->variables.empty()) {
+      for (const semantics::TranslatedLoop::Threaded &value : loop->threaded) {
+        if (!typeIs(value, "array", "array")) {
+          named.push_back(&value);
+        }
+      }
+      if (named.size() != 1) {
+        Error(at,
+            "a reduction clause without variables names the one scalar the loop carries from one iteration to the next, but it carries %s"_err_en_US,
+            named.empty() ? "none" : "several");
+        return;
+      }
+    }
+    for (const parser::Variable *variable : (*reduction)->variables) {
+      auto value{llvm::find_if(loop->threaded,
+          [&](const semantics::TranslatedLoop::Threaded &v) {
+            return v.name == variable->name;
+          })};
+      if (value == loop->threaded.end()) {
+        Error(at,
+            "%s is not a value the loop carries from one iteration to the next, a fromto's Last or a state variable"_err_en_US,
+            variable->name);
+        return;
+      }
+      named.push_back(&*value);
+    }
+    for (const semantics::TranslatedLoop::Threaded *value : named) {
+      if (reductionOf(*value) != reductions.end()) {
+        Error(at, "%s is named in two reduction clauses"_err_en_US, value->name);
+        return;
+      }
+      // The primitive int and float.
+      bool real{typeIs(*value, "", "float")};
+      if (!real && !typeIs(*value, "", "int")) {
+        NotYet(at,
+            "reductions of type " +
+                semantics::TypeToString(*body.vars[call->arguments[value->in]].type));
+        return;
+      }
+      if (real && *op != ReductionOp::Add && *op != ReductionOp::Multiply &&
+          *op != ReductionOp::Max && *op != ReductionOp::Min) {
+        Error(at, "the reduction operator %s is not defined on floats"_err_en_US,
+            opName.name);
+        return;
+      }
+      // A qualified operator is the type's own, int.max of an int.
+      if (!opName.qualifiers.empty() &&
+          opName.qualifiers.front() != (real ? "float" : "int")) {
+        Error(at,
+            real ? "the reduction operator %s is not defined on floats"_err_en_US
+                 : "the reduction operator %s is not defined on ints"_err_en_US,
+            (opName.qualifiers.front() + "." + opName.name).str());
+        return;
+      }
+      reductions.push_back({value, *op,
+          Represent(body.vars[call->arguments[value->in]].type)->type});
+    }
+  }
+  for (const semantics::TranslatedLoop::Threaded &value : loop->threaded) {
+    if (typeIs(value, "io", "state")) {
       Error(at,
           "a parallel do loop must not thread the io state, since its iterations run in any order"_err_en_US);
       return;
     }
-    if (!is("array", "array")) {
+    if (reductionOf(value) == reductions.end() &&
+        !typeIs(value, "array", "array")) {
       Error(value.fromto ? Where(value.fromto->tokens) : at,
           "a parallel do loop can carry %s from one iteration to the next only if it is named in a reduction clause or is an array updated in place"_err_en_US,
           value.fromto ? "a fromto's value" : "a state variable");
       return;
     }
+  }
+  // A reduction's next value is the body procedure's output that the loop
+  // procedure passes on, to its own call, as the value's In.
+  const Body *recursion{nullptr};
+  std::function<void(const Body &)> recursive{[&](const Body &g) {
+    if (g.kind == BodyKind::Call && g.modes && g.modes->callee &&
+        g.modes->callee->symbol == loop->loopPredicate) {
+      recursion = &g;
+    }
+    for (const Body *inner : g.goals) {
+      recursive(*inner);
+    }
+  }};
+  recursive(*loopBody->body);
+  for (Reduction &reduction : reductions) {
+    std::optional<unsigned> output;
+    unsigned outputs{0};
+    for (auto [argument, mode] :
+        llvm::zip(bodyCall->arguments, bodyProcedure.modes)) {
+      if (Represent(loopBody->vars[argument].type)->dummy || !IsOutput(mode)) {
+        continue;
+      }
+      if (recursion && argument == recursion->arguments[reduction.value->in]) {
+        output = outputs;
+      }
+      ++outputs;
+    }
+    if (!output) {
+      NotYet(at, "reductions whose next value the loop's body does not give");
+      return;
+    }
+    reduction.output = *output;
   }
   // The leaves around the loop's wrappers.
   auto has{[&](llvm::omp::Directive id) {
@@ -1772,11 +1945,33 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
     // goals are in the parallel, as Flang places them: on an AMD GPU, a
     // generic kernel traps when the parallel in its teams uses a value
     // computed outside the parallel.
+    // A reduction is on teams and on the do, each with its own copy of the
+    // variable, the teams' copy the do's original, as in Flang: by value,
+    // by its slot's pointer, which teams has from the target region, mapped
+    // tofrom.
+    auto reduce{[&](auto &operands, mlir::ValueRange vars) {
+      for (auto [reduction, var] : llvm::zip(reductions, vars)) {
+        operands.reductionVars.push_back(var);
+        operands.reductionByref.push_back(false);
+        operands.reductionSyms.push_back(mlir::SymbolRefAttr::get(
+            DeclareReduction(reduction.op, reduction.type, loc)));
+      }
+    }};
+    llvm::SmallVector<mlir::Value> originals;
+    for (const Reduction &reduction : reductions) {
+      originals.push_back(reduction.slot);
+    }
+    llvm::SmallVector<mlir::Type> pointers(reductions.size(),
+        mlir::LLVM::LLVMPointerType::get(&context_));
+    llvm::SmallVector<mlir::Location> locs(reductions.size(), loc);
     if (teams) {
-      auto op{mlir::omp::TeamsOp::create(
-          builder_, loc, mlir::omp::TeamsOperands{})};
+      mlir::omp::TeamsOperands operands;
+      reduce(operands, originals);
+      auto op{mlir::omp::TeamsOp::create(builder_, loc, operands)};
       op.setCombined(true);
-      enclose(op.getRegion());
+      terminated.push_back(
+          builder_.createBlock(&op.getRegion(), {}, pointers, locs));
+      originals.assign(op.getRegion().args_begin(), op.getRegion().args_end());
     }
     auto parallel{mlir::omp::ParallelOp::create(
         builder_, loc, mlir::omp::ParallelOperands{})};
@@ -1822,12 +2017,14 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
         op.setComposite(true);
         builder_.createBlock(&op.getRegion());
       }
-      auto wsloop{mlir::omp::WsloopOp::create(
-          builder_, loc, mlir::omp::WsloopOperands{})};
+      mlir::omp::WsloopOperands operands;
+      reduce(operands, originals);
+      auto wsloop{mlir::omp::WsloopOp::create(builder_, loc, operands)};
       if (distribute) {
         wsloop.setComposite(true);
       }
-      builder_.createBlock(&wsloop.getRegion());
+      mlir::Block *privates{
+          builder_.createBlock(&wsloop.getRegion(), {}, pointers, locs)};
       mlir::omp::LoopNestOperands bounds;
       bounds.loopLowerBounds.push_back(lower);
       bounds.loopUpperBounds.push_back(upper);
@@ -1851,11 +2048,24 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
           return;
         }
         std::size_t k(position - loopBody->head.begin());
+        // A reduction's In is the do's copy of its variable.
+        const auto *reduction{llvm::find_if(reductions,
+            [&](const Reduction &r) { return r.value->in == k; })};
+        if (reduction != reductions.end()) {
+          inputs.push_back(mlir::LLVM::LoadOp::create(builder_, loc,
+              reduction->type,
+              privates->getArgument(reduction - reductions.begin())));
+          continue;
+        }
         inputs.push_back(k == 0 ? iteration->getArgument(0)
                                 : ValueOf(call->arguments[k]));
       }
-      merk::CallOp::create(builder_, loc, proc.getFunctionType().getResults(),
-          proc.getSymName(), inputs);
+      auto bodyOp{merk::CallOp::create(builder_, loc,
+          proc.getFunctionType().getResults(), proc.getSymName(), inputs)};
+      for (auto [i, reduction] : llvm::enumerate(reductions)) {
+        mlir::LLVM::StoreOp::create(builder_, loc,
+            bodyOp->getResult(reduction.output), privates->getArgument(i));
+      }
       mlir::omp::YieldOp::create(builder_, loc);
     }
     for (mlir::Block *block : terminated) {
@@ -1863,16 +2073,21 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
       mlir::omp::TerminatorOp::create(builder_, loc);
     }
     for (const semantics::TranslatedLoop::Threaded &value : loop->threaded) {
-      values_[call->arguments[value.after]] = ValueOf(call->arguments[value.in]);
+      if (reductionOf(value) == reductions.end()) {
+        values_[call->arguments[value.after]] = ValueOf(call->arguments[value.in]);
+      }
     }
   }};
-  if (!offloaded) {
-    generate({});
-    return;
-  }
-  Kernel kernel{KernelOf(*queue)};
-  llvm::SmallVector<mlir::Value, 3> hostEval;
-  if (kernel.hostEvalBounds && !target_.options().openMPIsTargetDevice) {
+  // Each reduction's variable is a slot of the procedure, holding First, or
+  // the state variable's value before the loop, which the partial results
+  // are combined with; after the loop, Last, or the state variable's value
+  // after it, is what the slot holds.
+  mlir::Location loc{Location(goal.tokens)};
+  Kernel kernel{offloaded ? KernelOf(*queue) : Kernel{}};
+  bool evaluated{kernel.hostEvalBounds && !target_.options().openMPIsTargetDevice};
+  // The loop's goals, before the region too, for First, which is one of
+  // them, and for the host_eval values.
+  if (!reductions.empty() || evaluated) {
     for (const Body *g : goals) {
       if (g != trip && g != call) {
         Goal(*g, body);
@@ -1881,14 +2096,147 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
     if (failed_) {
       return;
     }
+  }
+  llvm::SmallVector<UpdatedSlot> updated;
+  for (Reduction &reduction : reductions) {
+    reduction.slot = Slot(reduction.type, loc);
+    mlir::LLVM::StoreOp::create(builder_, loc,
+        ValueOf(call->arguments[reduction.value->in]), reduction.slot);
+    updated.push_back({reduction.slot, reduction.type, reduction.value->name});
+  }
+  auto results{[&] {
+    for (const Reduction &reduction : reductions) {
+      values_[call->arguments[reduction.value->after]] =
+          mlir::LLVM::LoadOp::create(builder_, loc, reduction.type, reduction.slot);
+    }
+  }};
+  if (!offloaded) {
+    generate({});
+    if (!failed_) {
+      results();
+    }
+    return;
+  }
+  llvm::SmallVector<mlir::Value, 3> hostEval;
+  if (evaluated) {
     BodyVar big{trip->goals.front()->arguments[0]};
     BodyVar small{trip->goals.front()->arguments[1]};
-    mlir::Location loc{Location(goal.tokens)};
     hostEval = {ValueOf(loop->step > 0 ? small : big),
         ValueOf(loop->step > 0 ? big : small),
         IntegerConstant(builder_.getI64Type(), loop->step, loc)};
   }
-  Target(goal, body, generate, /*combined=*/true, kernel.mode, hostEval);
+  Target(goal, body, generate, /*combined=*/true, kernel.mode, hostEval,
+      updated);
+  if (!failed_) {
+    results();
+  }
+}
+
+// Its identity and combiner are Flang's (getReductionInitValue and
+// createScalarCombiner), for by-value integers and floats.
+mlir::omp::DeclareReductionOp MerkGenerator::DeclareReduction(
+    ReductionOp op, mlir::Type type, mlir::Location loc) {
+  bool real{mlir::isa<mlir::FloatType>(type)};
+  llvm::StringRef prefix;
+  switch (op) {
+  case ReductionOp::Add:
+    prefix = "add_reduction";
+    break;
+  case ReductionOp::Multiply:
+    prefix = "multiply_reduction";
+    break;
+  case ReductionOp::Max:
+    prefix = "max";
+    break;
+  case ReductionOp::Min:
+    prefix = "min";
+    break;
+  case ReductionOp::And:
+    prefix = "iand";
+    break;
+  case ReductionOp::Or:
+    prefix = "ior";
+    break;
+  case ReductionOp::Xor:
+    prefix = "ieor";
+    break;
+  }
+  std::string name{(prefix + (real ? "_f" : "_i") +
+      llvm::Twine{type.getIntOrFloatBitWidth()})
+          .str()};
+  if (auto found{module_.lookupSymbol<mlir::omp::DeclareReductionOp>(name)}) {
+    return found;
+  }
+  // At the module's start, after those made before it.
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToStart(module_.getBody());
+  for (mlir::Operation &op : *module_.getBody()) {
+    if (!mlir::isa<mlir::omp::DeclareReductionOp>(op)) {
+      break;
+    }
+    builder_.setInsertionPointAfter(&op);
+  }
+  auto decl{mlir::omp::DeclareReductionOp::create(builder_, loc, name,
+      /*sym_visibility=*/nullptr, type, /*byref_element_type=*/nullptr)};
+  builder_.createBlock(&decl.getInitializerRegion(), {}, {type}, {loc});
+  mlir::Value identity;
+  if (real) {
+    const llvm::fltSemantics &semantics{
+        mlir::cast<mlir::FloatType>(type).getFloatSemantics()};
+    llvm::APFloat value{
+        op == ReductionOp::Max ? llvm::APFloat::getLargest(semantics, true)
+            : op == ReductionOp::Min
+            ? llvm::APFloat::getLargest(semantics, false)
+            : llvm::APFloat{semantics, op == ReductionOp::Multiply ? 1 : 0}};
+    identity = mlir::arith::ConstantOp::create(
+        builder_, loc, type, builder_.getFloatAttr(type, value));
+  } else {
+    unsigned bits{type.getIntOrFloatBitWidth()};
+    llvm::APInt value{op == ReductionOp::Max ? llvm::APInt::getSignedMinValue(bits)
+            : op == ReductionOp::Min        ? llvm::APInt::getSignedMaxValue(bits)
+            : op == ReductionOp::And        ? llvm::APInt::getAllOnes(bits)
+            : op == ReductionOp::Multiply   ? llvm::APInt{bits, 1}
+                                            : llvm::APInt{bits, 0}};
+    identity = mlir::arith::ConstantOp::create(
+        builder_, loc, type, builder_.getIntegerAttr(type, value));
+  }
+  mlir::omp::YieldOp::create(builder_, loc, identity);
+  mlir::Block *combiner{builder_.createBlock(
+      &decl.getReductionRegion(), {}, {type, type}, {loc, loc})};
+  mlir::Value a{combiner->getArgument(0)};
+  mlir::Value b{combiner->getArgument(1)};
+  mlir::Value combined;
+  switch (op) {
+  case ReductionOp::Add:
+    combined = real ? mlir::arith::AddFOp::create(builder_, loc, a, b).getResult()
+                    : mlir::arith::AddIOp::create(builder_, loc, a, b).getResult();
+    break;
+  case ReductionOp::Multiply:
+    combined = real ? mlir::arith::MulFOp::create(builder_, loc, a, b).getResult()
+                    : mlir::arith::MulIOp::create(builder_, loc, a, b).getResult();
+    break;
+  case ReductionOp::Max:
+    combined = real
+        ? mlir::arith::MaxNumFOp::create(builder_, loc, a, b).getResult()
+        : mlir::arith::MaxSIOp::create(builder_, loc, a, b).getResult();
+    break;
+  case ReductionOp::Min:
+    combined = real
+        ? mlir::arith::MinNumFOp::create(builder_, loc, a, b).getResult()
+        : mlir::arith::MinSIOp::create(builder_, loc, a, b).getResult();
+    break;
+  case ReductionOp::And:
+    combined = mlir::arith::AndIOp::create(builder_, loc, a, b);
+    break;
+  case ReductionOp::Or:
+    combined = mlir::arith::OrIOp::create(builder_, loc, a, b);
+    break;
+  case ReductionOp::Xor:
+    combined = mlir::arith::XOrIOp::create(builder_, loc, a, b);
+    break;
+  }
+  mlir::omp::YieldOp::create(builder_, loc, combined);
+  return decl;
 }
 
 std::optional<omp::ConstructQueue> MerkGenerator::Decompose(
@@ -1922,17 +2270,22 @@ std::optional<omp::ConstructQueue> MerkGenerator::Decompose(
   return std::move(decomposition.queue);
 }
 
-bool MerkGenerator::LeafClauses(const omp::Leaf &leaf, parser::CharBlock at) {
+bool MerkGenerator::LeafClauses(const omp::Leaf &leaf, parser::CharBlock at,
+    llvm::function_ref<bool(llvm::omp::Directive, llvm::omp::Clause, bool)>
+        handled) {
   std::string directive{parser::EnumToString(leaf.id)};
   for (const parser::OmpClause *clause : leaf.clauses) {
     llvm::omp::Clause id{omp::ClauseId(*clause)};
+    if (handled && handled(leaf.id, id, false)) {
+      continue;
+    }
     NotYet(at,
         "the " + llvm::omp::getOpenMPClauseName(id).str() + " clause of the " +
             directive + " directive");
     return false;
   }
   for (llvm::omp::Clause id : leaf.synthesized) {
-    if (id != llvm::omp::OMPC_shared) {
+    if (id != llvm::omp::OMPC_shared && !(handled && handled(leaf.id, id, true))) {
       NotYet(at,
           "the " + llvm::omp::getOpenMPClauseName(id).str() +
               " clause that the " + directive + " directive implies");
@@ -1974,7 +2327,8 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
 
 void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
     llvm::function_ref<void(mlir::ValueRange hostEval)> generate,
-    bool combined, mlir::omp::TargetExecMode mode, mlir::ValueRange hostEval) {
+    bool combined, mlir::omp::TargetExecMode mode, mlir::ValueRange hostEval,
+    llvm::ArrayRef<UpdatedSlot> slots) {
   parser::CharBlock at{Where(goal.tokens)};
   mlir::Location loc{Location(goal.tokens)};
   Values before{values_};
@@ -2043,8 +2397,12 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
     values_ = before;
     return;
   }
+  auto updatedSlot{[&](mlir::Value input) {
+    return llvm::find_if(
+        slots, [&](const UpdatedSlot &u) { return u.slot == input; });
+  }};
   for (mlir::Value input : inputs) {
-    if (!Mappable(input.getType())) {
+    if (updatedSlot(input) == slots.end() && !Mappable(input.getType())) {
       std::optional<BodyVar> var{varOf(input)};
       NotYet(at,
           var ? "values of type " +
@@ -2149,6 +2507,12 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   }};
   llvm::SmallVector<mlir::Value> maps;
   for (mlir::Value input : inputs) {
+    if (const UpdatedSlot *u{updatedSlot(input)}; u != slots.end()) {
+      maps.push_back(map(input, u->type,
+          mlir::omp::ClauseMapFlags::to | mlir::omp::ClauseMapFlags::from,
+          mlir::omp::VariableCaptureKind::ByRef, u->name));
+      continue;
+    }
     std::optional<BodyVar> var{varOf(input)};
     llvm::StringRef name{var ? llvm::StringRef{body.vars[*var].name} : ""};
     if (mlir::isa<merk::ArrayType>(input.getType())) {
@@ -2198,14 +2562,16 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   builder_.setInsertionPointToStart(reads);
   llvm::DenseMap<mlir::Value, mlir::Value> loaded;
   for (mlir::Value input : inputs) {
-    // An array's argument is its pointer on the device.
+    // An array's argument is its pointer on the device, and so is an
+    // updated slot's.
     mlir::Value argument{block->addArgument(ptr, loc)};
-    mlir::Value value{mlir::isa<merk::ArrayType>(input.getType())
+    mlir::Value value{updatedSlot(input) != slots.end() ? argument
+            : mlir::isa<merk::ArrayType>(input.getType())
             ? mlir::UnrealizedConversionCastOp::create(
                   builder_, loc, input.getType(), argument)
                   .getResult(0)
-            : mlir::LLVM::LoadOp::create(builder_, loc, input.getType(), argument)
-                  .getResult()};
+            : mlir::Value{mlir::LLVM::LoadOp::create(
+                  builder_, loc, input.getType(), argument)}};
     mlir::replaceAllUsesInRegionWith(input, value, targetOp.getRegion());
     loaded[input] = value;
   }
