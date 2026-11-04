@@ -30,6 +30,7 @@
 #include "merkurius/Semantics/resolve-names.h"
 #include "merkurius/Semantics/translate-loops.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
+#include "merkurius/Dialect/Mrt/IR/MrtDialect.h"
 #include "mlir/Dialect/DLTI/DLTI.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/OpenMP/OpenMPDialect.h"
@@ -801,7 +802,7 @@ bool DebugDumpPolymorphismAction::executeAction() {
 static mlir::OwningOpRef<mlir::ModuleOp> ReadMLIR(mlir::MLIRContext &context,
     const parser::SourceFile &file,
     std::unique_ptr<codegen::TargetInfo> &target) {
-  context.loadDialect<merk::MerkDialect, mlir::DLTIDialect,
+  context.loadDialect<merk::MerkDialect, mrt::MrtDialect, mlir::DLTIDialect,
       mlir::LLVM::LLVMDialect, mlir::omp::OpenMPDialect>();
   // Errors in it are reported at file:line:column, with the line.
   llvm::SourceMgr sourceMgr;

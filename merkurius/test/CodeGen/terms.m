@@ -52,7 +52,8 @@
 % A constant's word is its number shifted past the tag, and a cell is
 % tagged by its constructor's tag.
 % LLVM-LABEL: define internal tailcc ptr @terms.insert_f2_0(i64 %0, ptr %1) {
-% LLVM: %[[CELL:.*]] = call ptr @merk_alloc(i64 24)
+% LLVM: call ptr @merk_alloc_slow(i64 24)
+% LLVM: %[[CELL:.*]] = phi ptr
 % LLVM-NEXT: store ptr null, ptr %[[CELL]], align 8
 % LLVM-NEXT: %[[V:.*]] = getelementptr i8, ptr %[[CELL]], i32 8
 % LLVM-NEXT: store i64 %0, ptr %[[V]], align 8
@@ -68,7 +69,8 @@
 % LLVM-NEXT: %[[X:.*]] = load i64, ptr %0, align 8
 % LLVM-NEXT: %[[YP:.*]] = getelementptr i8, ptr %0, i32 8
 % LLVM-NEXT: %[[Y:.*]] = load i64, ptr %[[YP]], align 8
-% LLVM-NEXT: %[[T:.*]] = call ptr @merk_alloc(i64 16)
+% LLVM: call ptr @merk_alloc_slow(i64 16)
+% LLVM: %[[T:.*]] = phi ptr
 % LLVM-NEXT: store i64 %[[Y]], ptr %[[T]], align 8
 % LLVM: ret ptr %[[T]]
 % One constructor of one argument: the argument.
@@ -109,7 +111,7 @@
 % LLVM-NEXT: %[[SEC:.*]] = load i64, ptr %[[AT]], align 8
 % LLVM-NEXT: %[[IS0:.*]] = icmp eq i64 %[[SEC]], 0
 % LLVM-NEXT: and i1 %[[IS7]], %[[IS0]]
-% LLVM: declare ptr @merk_alloc(i64)
+% LLVM: declare ptr @merk_alloc_slow(i64)
 
 % OUTPUT:100 0
 % OUTPUT-NEXT:1 1

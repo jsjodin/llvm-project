@@ -9,14 +9,12 @@
 // Arrays: a pointer to the array's size, a word, followed by its elements,
 // a word each, whatever their type (design document, "Type
 // representation"). Code generation reads and writes elements itself; these
-// are the operations that allocate, and those over many elements.
-//
-// Temporary (chunk 1 step 3, docs/INPROGRESS.md): arrays are allocated
-// with malloc and never freed. Step 3 moves them onto mrt.alloc and the
-// heap, as terms' cells, and chunk 3's collector frees them.
+// are the operations that allocate, on the heap, as mrt.alloc allocates
+// (heap.h), and those over many elements.
 //
 //===----------------------------------------------------------------------===//
 
+#include "heap.h"
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
@@ -29,13 +27,8 @@ namespace {
 using Word = std::uint64_t;
 
 Word *Allocate(std::int64_t size) {
-  void *array{std::malloc(sizeof(Word) * (1 + size))};
-  if (!array) {
-    std::fflush(stdout);
-    std::fprintf(stderr, "Mercury runtime: out of memory\n");
-    std::exit(1);
-  }
-  Word *words{static_cast<Word *>(array)};
+  Word *words{static_cast<Word *>(
+      merkurius::runtime::Allocate(sizeof(Word) * (1 + size)))};
   words[0] = static_cast<Word>(size);
   return words;
 }

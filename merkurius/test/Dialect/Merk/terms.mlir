@@ -7,6 +7,9 @@
 // shared, with a secondary tag in the cell's first word, by the
 // constructors with arguments that need more tags than are left.
 //
+// A cell is allocated by mrt.alloc, whose lowering ../Mrt/ops.mlir checks;
+// a ground term known at compile time is a static cell instead.
+//
 // RUN: merkc -fc1 -emit-merk %s -o %t.1.mlir
 // RUN: FileCheck %s < %t.1.mlir
 // RUN: merkc -fc1 -emit-merk %t.1.mlir -o %t.2.mlir
@@ -14,6 +17,10 @@
 // RUN: merkc -fc1 -emit-llvm %s | FileCheck %s --check-prefix=LLVM
 
 module @terms attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
+  // The static cells of @terms.static_3_0, below.
+  // LLVM-DAG: @[[ONE:merk.term.[0-9]+]] = private unnamed_addr constant { i64, ptr } { i64 1, ptr null }, align 8
+  // LLVM-DAG: @[[TWO:merk.term.[0-9]+]] = private unnamed_addr constant { i64, ptr } { i64 2, ptr getelementptr inbounds nuw (i8, ptr @[[ONE]], i64 1) }, align 8
+  // LLVM-DAG: @[[H:merk.term.[0-9]+]] = private unnamed_addr constant { i64, i64 } { i64 1, i64 5 }, align 8
   // CHECK: merk.type_def "terms.colour" [#merk.constructor<"red">, #merk.constructor<"green">]
   // CHECK: merk.type_def "terms.wrap" [#merk.constructor<"wrap"(f64)>]
   // CHECK: merk.type_def "list.list(int)" [#merk.constructor<"[]">, #merk.constructor<"[|]"(i64, !merk.term<"list.list(int)">)>]
@@ -28,7 +35,8 @@ module @terms attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   // CHECK-NEXT: %[[L:.*]] = merk.construct #merk.functor<"[|]", 2>(%arg0, %arg1 : i64, !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
   // CHECK-NEXT: merk.succeed %[[L]]
   // LLVM-LABEL: define tailcc ptr @terms.cons_3_0(i64 %0, ptr %1) {
-  // LLVM-NEXT: %[[CELL:.*]] = call ptr @merk_alloc(i64 16)
+  // LLVM: call ptr @merk_alloc_slow(i64 16)
+  // LLVM: %[[CELL:.*]] = phi ptr
   // LLVM-NEXT: store i64 %0, ptr %[[CELL]]
   // LLVM-NEXT: %[[T:.*]] = getelementptr i8, ptr %[[CELL]], i32 8
   // LLVM-NEXT: store ptr %1, ptr %[[T]]
@@ -48,9 +56,9 @@ module @terms attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   // LLVM-NEXT: %[[TAG:.*]] = and i64 %[[W]], 7
   // LLVM-NEXT: %[[IS:.*]] = icmp eq i64 %[[TAG]], 1
   // LLVM-NEXT: br i1 %[[IS]]
-  // LLVM: %[[HP:.*]] = getelementptr i8, ptr %0, i32 -1
-  // LLVM-NEXT: load i64, ptr %[[HP]]
-  // LLVM-NEXT: %[[TP:.*]] = getelementptr i8, ptr %0, i32 7
+  // LLVM: %[[CELL:.*]] = getelementptr i8, ptr %0, i32 -1
+  // LLVM-NEXT: load i64, ptr %[[CELL]]
+  // LLVM-NEXT: %[[TP:.*]] = getelementptr i8, ptr %[[CELL]], i32 8
   // LLVM-NEXT: load ptr, ptr %[[TP]]
   merk.proc @terms.head_2_0(%l: !merk.term<"list.list(int)">) -> i64 attributes {determinism = #merk.determinism<semidet>} {
     %is = merk.has_functor #merk.functor<"[|]", 2> %l : !merk.term<"list.list(int)">
@@ -111,7 +119,8 @@ module @terms attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 
   // A cell of a shared tag starts with its secondary tag.
   // LLVM-LABEL: define tailcc ptr @terms.h_2_0(i64 %0) {
-  // LLVM-NEXT: %[[CELL:.*]] = call ptr @merk_alloc(i64 16)
+  // LLVM: call ptr @merk_alloc_slow(i64 16)
+  // LLVM: %[[CELL:.*]] = phi ptr
   // LLVM-NEXT: store i64 1, ptr %[[CELL]]
   // LLVM-NEXT: %[[X:.*]] = getelementptr i8, ptr %[[CELL]], i32 8
   // LLVM-NEXT: store i64 %0, ptr %[[X]]
@@ -119,5 +128,22 @@ module @terms attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   merk.proc @terms.h_2_0(%x: i64) -> !merk.term<"terms.many"> attributes {determinism = #merk.determinism<det>} {
     %h = merk.construct #merk.functor<"h", 1>(%x : i64) -> !merk.term<"terms.many">
     merk.succeed %h : !merk.term<"terms.many">
+  }
+
+  // A ground term is a static cell, of its fields' words, which the term
+  // points to with its tag; equal contents are one cell, whatever their
+  // types, so the two lists [1] are one (the globals are checked above).
+  // LLVM-LABEL: define tailcc { ptr, ptr, ptr } @terms.static_3_0() {
+  // LLVM-NEXT: ret { ptr, ptr, ptr } { ptr getelementptr inbounds nuw (i8, ptr @[[TWO]], i64 1), ptr getelementptr inbounds nuw (i8, ptr @[[ONE]], i64 1), ptr getelementptr inbounds nuw (i8, ptr @[[H]], i64 7) }
+  merk.proc @terms.static_3_0() -> (!merk.term<"list.list(int)">, !merk.term<"list.list(int)">, !merk.term<"terms.many">) attributes {determinism = #merk.determinism<det>} {
+    %nil = merk.construct #merk.functor<"[]", 0> -> !merk.term<"list.list(int)">
+    %one = merk.constant 1 : i64
+    %two = merk.constant 2 : i64
+    %l1 = merk.construct #merk.functor<"[|]", 2>(%one, %nil : i64, !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
+    %l2 = merk.construct #merk.functor<"[|]", 2>(%two, %l1 : i64, !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
+    %again = merk.construct #merk.functor<"[|]", 2>(%one, %nil : i64, !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
+    %five = merk.constant 5 : i64
+    %h = merk.construct #merk.functor<"h", 1>(%five : i64) -> !merk.term<"terms.many">
+    merk.succeed %l2, %again, %h : !merk.term<"list.list(int)">, !merk.term<"list.list(int)">, !merk.term<"terms.many">
   }
 }

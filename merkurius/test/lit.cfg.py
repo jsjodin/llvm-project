@@ -19,7 +19,10 @@ config.test_exec_root = os.path.join(config.merkurius_obj_root, "test")
 # its lit.site.cfg.py in the build directory.
 config.excludes = ["Inputs", "CMakeLists.txt"]
 
-llvm_config.with_system_environment(["HOME", "TMP", "TEMP"])
+# MERK_HEAP_CHUNK_BYTES makes every program's heap chunks that size
+# (runtime/heap.cpp): MERK_HEAP_CHUNK_BYTES=64 llvm-lit runs every program
+# with nearly every allocation on the slow path.
+llvm_config.with_system_environment(["HOME", "TMP", "TEMP", "MERK_HEAP_CHUNK_BYTES"])
 # The targets LLVM was built for, as in LLVM's tests: x86-registered-target,
 # amdgpu-registered-target and so on.
 for arch in config.targets_to_build.split():

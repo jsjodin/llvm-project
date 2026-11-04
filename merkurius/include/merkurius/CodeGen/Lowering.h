@@ -10,10 +10,8 @@
 #define MERKURIUS_CODEGEN_LOWERING_H_
 
 // Lowering and code generation (design document, "Lowering and code
-// generation"): merk to the LLVM dialect, then LLVM IR, then the target's
-// assembly or object code. Until terms have layouts, merk is lowered to the
-// LLVM dialect directly, as ClangIR's DirectToLLVM lowers CIR; mrt comes
-// between them once it does.
+// generation"): merk to the LLVM dialect, terms through mrt, then LLVM IR,
+// then the target's assembly or object code.
 
 #include "merkurius/CodeGen/TargetInfo.h"
 #include "mlir/IR/BuiltinOps.h"

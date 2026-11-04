@@ -9,6 +9,7 @@
 #include "merkurius/CodeGen/Lowering.h"
 #include "merkurius/CodeGen/MLIRGen.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
+#include "merkurius/Dialect/Mrt/IR/MrtDialect.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -28,6 +29,7 @@
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include <functional>
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Linker/Linker.h"
@@ -97,6 +99,19 @@ struct TermLayout {
 constexpr unsigned kTagBits{3};
 constexpr unsigned kTags{1u << kTagBits};
 
+// A value known at compile time, which a static cell's field can hold
+// (design document, "Type representation", ground terms): an integer or
+// float constant, a string's bytes, a constant's word among cells, or a
+// static cell, tagged. `key` names it, so that equal cells are one.
+struct StaticValue {
+  enum class Kind { Integer, Float, String, Word, Cell } kind;
+  mlir::Type type;
+  mlir::Attribute value;
+  mlir::LLVM::GlobalOp cell;
+  unsigned tag{0};
+  std::string key;
+};
+
 class Lowerer {
 public:
   Lowerer(mlir::ModuleOp module, const TargetInfo &target)
@@ -158,21 +173,25 @@ private:
     auto it{layouts_.find(term.getName())};
     return it == layouts_.end() ? nullptr : &it->second;
   }
-  // Lowers the operations on terms, while their operands still have merk's
-  // types, which give their layouts: switches on terms are recorded with
-  // theirs, for Flatten.
-  //
-  // Temporary (chunk 1 step 3, docs/INPROGRESS.md): terms lower straight to
-  // the LLVM dialect, with cells from the runtime's merk_alloc. Step 3 adds
-  // the mrt dialect between them: merk lowers to mrt.alloc, mrt.tag,
-  // mrt.untag, mrt.field_load and mrt.field_store, which then lower to
-  // LLVM, and the layouts are chosen in that lowering instead.
+  // Lowers the operations on terms to mrt's, while their operands still
+  // have merk's types, which give their layouts: switches on terms are
+  // recorded with theirs, for Flatten, which makes them mrt's too. A
+  // construction of a ground term known at compile time is a static cell.
   llvm::LogicalResult LowerTerms();
-  // The address of a cell's word, from its tagged pointer.
-  mlir::Value WordAddress(mlir::Value term, unsigned tag, unsigned word,
-      mlir::Location);
-  // A term's primary tag, as a word.
-  mlir::Value PrimaryTag(mlir::Value term, mlir::Location);
+  // The static value that `value` is, if it is one.
+  std::optional<StaticValue> StaticOf(mlir::Value value);
+  // A static cell of a functor and its fields, one for each cell's contents,
+  // whatever their types, since a cell is never updated.
+  mlir::LLVM::GlobalOp StaticCell(const TermLayout::Functor &,
+      llvm::ArrayRef<StaticValue> fields, mlir::Location);
+  // A static value in a global's initializer, at the rewriter's insertion
+  // point.
+  mlir::Value Materialize(const StaticValue &, mlir::Location);
+  // Lowers mrt's operations to the LLVM dialect's.
+  void LowerMrt();
+  void LowerAlloc(mrt::AllocOp);
+  // The thread's heap pointer and limit (runtime/heap.h).
+  mlir::LLVM::GlobalOp HeapGlobal();
   // The branches of a switch on a term to the blocks of its functors, in
   // the order of `functors`, or else `otherwise`, at the rewriter's
   // insertion point.
@@ -255,6 +274,11 @@ private:
   // A word that is no secondary tag, which a test of one reads instead of a
   // constant's cell, which it has none.
   mlir::LLVM::GlobalOp noSecondary_;
+  // The static values that LowerTerms has made, and the static cells by
+  // their keys.
+  llvm::DenseMap<mlir::Value, StaticValue> statics_;
+  llvm::StringMap<mlir::LLVM::GlobalOp> staticCells_;
+  mlir::LLVM::GlobalOp heap_;
 };
 
 llvm::LogicalResult Lowerer::Layouts() {
@@ -336,23 +360,126 @@ llvm::LogicalResult Lowerer::Layouts() {
   return llvm::success();
 }
 
-mlir::Value Lowerer::WordAddress(
-    mlir::Value term, unsigned tag, unsigned word, mlir::Location loc) {
-  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
-  std::int32_t offset{static_cast<std::int32_t>(8 * word) -
-      static_cast<std::int32_t>(tag)};
-  if (offset == 0) {
-    return term;
+std::optional<StaticValue> Lowerer::StaticOf(mlir::Value value) {
+  if (auto it{statics_.find(value)}; it != statics_.end()) {
+    return it->second;
   }
-  return mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(),
-      term, llvm::ArrayRef<mlir::LLVM::GEPArg>{offset});
+  auto constant{value.getDefiningOp<merk::ConstantOp>()};
+  if (!constant) {
+    return std::nullopt;
+  }
+  StaticValue result;
+  result.type = Convert(constant.getType());
+  result.value = constant.getValue();
+  if (auto integer{mlir::dyn_cast<mlir::IntegerAttr>(result.value)}) {
+    result.kind = StaticValue::Kind::Integer;
+    result.key = "i" + std::to_string(integer.getType().getIntOrFloatBitWidth()) +
+        ":" + std::to_string(integer.getValue().getSExtValue());
+  } else if (auto real{mlir::dyn_cast<mlir::FloatAttr>(result.value)}) {
+    result.kind = StaticValue::Kind::Float;
+    result.key = "f:" +
+        std::to_string(real.getValue().bitcastToAPInt().getZExtValue());
+  } else {
+    llvm::StringRef string{mlir::cast<mlir::StringAttr>(result.value).getValue()};
+    result.kind = StaticValue::Kind::String;
+    result.key = "s" + std::to_string(string.size()) + ":" + string.str();
+  }
+  return result;
 }
 
-mlir::Value Lowerer::PrimaryTag(mlir::Value term, mlir::Location loc) {
+mlir::Value Lowerer::Materialize(const StaticValue &value, mlir::Location loc) {
+  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  switch (value.kind) {
+  case StaticValue::Kind::Integer:
+  case StaticValue::Kind::Float:
+    return mlir::LLVM::ConstantOp::create(rewriter_, loc, value.type,
+        mlir::cast<mlir::TypedAttr>(value.value));
+  case StaticValue::Kind::String:
+    return mlir::LLVM::AddressOfOp::create(rewriter_, loc,
+        StringGlobal(mlir::cast<mlir::StringAttr>(value.value).getValue(), loc));
+  case StaticValue::Kind::Word: {
+    std::int64_t word{mlir::cast<mlir::IntegerAttr>(value.value).getInt()};
+    if (word == 0) {
+      return mlir::LLVM::ZeroOp::create(rewriter_, loc, ptr);
+    }
+    mlir::Value integer{mlir::LLVM::ConstantOp::create(
+        rewriter_, loc, rewriter_.getI64Type(), word)};
+    return mlir::LLVM::IntToPtrOp::create(rewriter_, loc, ptr, integer);
+  }
+  case StaticValue::Kind::Cell: {
+    mlir::Value address{
+        mlir::LLVM::AddressOfOp::create(rewriter_, loc, value.cell)};
+    if (value.tag == 0) {
+      return address;
+    }
+    return mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(),
+        address,
+        llvm::ArrayRef<mlir::LLVM::GEPArg>{static_cast<std::int32_t>(value.tag)});
+  }
+  }
+  llvm_unreachable("a static value of no kind");
+}
+
+mlir::LLVM::GlobalOp Lowerer::StaticCell(const TermLayout::Functor &functor,
+    llvm::ArrayRef<StaticValue> fields, mlir::Location loc) {
+  std::string key{functor.secondary
+          ? "(" + std::to_string(*functor.secondary) + ";"
+          : std::string{"("}};
+  for (const StaticValue &field : fields) {
+    key += field.key + ",";
+  }
+  key += ")";
+  mlir::LLVM::GlobalOp &cell{staticCells_[key]};
+  if (cell) {
+    return cell;
+  }
+  // A struct of the cell's words: a field narrower than a word is in its
+  // word's low bytes, as a store of it puts it, and padded.
+  mlir::MLIRContext *context{module_.getContext()};
   auto i64{rewriter_.getI64Type()};
-  mlir::Value word{mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, term)};
-  return mlir::LLVM::AndOp::create(rewriter_, loc, word,
-      mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, kTags - 1));
+  llvm::SmallVector<mlir::Type> words;
+  llvm::SmallVector<StaticValue> values;
+  if (functor.secondary) {
+    StaticValue secondary;
+    secondary.kind = StaticValue::Kind::Integer;
+    secondary.type = i64;
+    secondary.value = rewriter_.getI64IntegerAttr(*functor.secondary);
+    values.push_back(secondary);
+  }
+  values.append(fields.begin(), fields.end());
+  llvm::SmallVector<bool> padded;
+  for (const StaticValue &value : values) {
+    auto integer{mlir::dyn_cast<mlir::IntegerType>(value.type)};
+    if (integer && integer.getWidth() < 64) {
+      words.push_back(mlir::LLVM::LLVMStructType::getLiteral(context,
+          {value.type, mlir::LLVM::LLVMArrayType::get(rewriter_.getI8Type(),
+                           (64 - integer.getWidth()) / 8)}));
+      padded.push_back(true);
+    } else {
+      words.push_back(value.type);
+      padded.push_back(false);
+    }
+  }
+  auto cellType{mlir::LLVM::LLVMStructType::getLiteral(context, words)};
+  mlir::OpBuilder::InsertionGuard guard{rewriter_};
+  rewriter_.setInsertionPointToStart(module_.getBody());
+  cell = mlir::LLVM::GlobalOp::create(rewriter_, loc, cellType,
+      /*isConstant=*/true, mlir::LLVM::Linkage::Private,
+      "merk.term." + std::to_string(staticCells_.size() - 1), mlir::Attribute{},
+      /*alignment=*/8);
+  cell.setUnnamedAddr(mlir::LLVM::UnnamedAddr::Global);
+  rewriter_.createBlock(&cell.getInitializerRegion());
+  mlir::Value init{mlir::LLVM::ZeroOp::create(rewriter_, loc, cellType)};
+  for (auto [i, value] : llvm::enumerate(values)) {
+    llvm::SmallVector<std::int64_t> position{static_cast<std::int64_t>(i)};
+    if (padded[i]) {
+      position.push_back(0);
+    }
+    init = mlir::LLVM::InsertValueOp::create(
+        rewriter_, loc, init, Materialize(value, loc), position);
+  }
+  mlir::LLVM::ReturnOp::create(rewriter_, loc, init);
+  return cell;
 }
 
 llvm::LogicalResult Lowerer::LowerTerms() {
@@ -416,34 +543,58 @@ llvm::LogicalResult Lowerer::LowerTerms() {
     unsigned skip{functor->secondary ? 1u : 0u};
     if (auto construct{mlir::dyn_cast<merk::ConstructOp>(op)}) {
       mlir::Value result;
+      std::optional<StaticValue> known;
       if (layout->kind == TermLayout::Kind::Enum) {
         result = constant(functor->value, loc);
+        known = StaticValue{StaticValue::Kind::Integer, i64,
+            rewriter_.getI64IntegerAttr(functor->value), {}, 0,
+            "i64:" + std::to_string(functor->value)};
       } else if (layout->kind == TermLayout::Kind::NoTag) {
-        result = lowered(construct.getArguments().front(), loc);
+        mlir::Value argument{construct.getArguments().front()};
+        result = lowered(argument, loc);
+        known = StaticOf(argument);
       } else if (functor->arity == 0) {
         result = mlir::LLVM::IntToPtrOp::create(
             rewriter_, loc, ptr, constant(functor->value, loc));
+        known = StaticValue{StaticValue::Kind::Word, ptr,
+            rewriter_.getI64IntegerAttr(functor->value), {}, 0,
+            "w:" + std::to_string(functor->value)};
       } else {
-        // Temporary: a call of merk_alloc, until mrt.alloc (LowerTerms).
-        mlir::Value bytes{constant(8 * (functor->arity + skip), loc)};
-        mlir::Value cell{mlir::LLVM::CallOp::create(rewriter_, loc,
-            RuntimeFunc("merk_alloc", ptr, {i64}), mlir::ValueRange{bytes})
-                .getResult()};
-        if (functor->secondary) {
-          mlir::LLVM::StoreOp::create(
-              rewriter_, loc, constant(*functor->secondary, loc), cell);
+        // A ground term known at compile time is a static cell, which is
+        // never allocated (decision D6).
+        llvm::SmallVector<StaticValue> fields;
+        for (auto [argument, field] :
+            llvm::zip(construct.getArguments(), functor->fields)) {
+          std::optional<StaticValue> value{StaticOf(argument)};
+          if (!value || value->type != Convert(field)) {
+            break;
+          }
+          fields.push_back(*value);
         }
-        for (auto [i, argument] : llvm::enumerate(construct.getArguments())) {
-          mlir::LLVM::StoreOp::create(rewriter_, loc, lowered(argument, loc),
-              WordAddress(cell, 0, i + skip, loc));
+        if (fields.size() == functor->arity) {
+          mlir::LLVM::GlobalOp cell{StaticCell(*functor, fields, loc)};
+          result = mlir::LLVM::AddressOfOp::create(rewriter_, loc, cell);
+          known = StaticValue{StaticValue::Kind::Cell, ptr, {}, cell,
+              functor->tag,
+              "@" + cell.getSymName().str() + "+" +
+                  std::to_string(functor->tag)};
+        } else {
+          result = mrt::AllocOp::create(rewriter_, loc, functor->arity + skip);
+          if (functor->secondary) {
+            mrt::FieldStoreOp::create(
+                rewriter_, loc, constant(*functor->secondary, loc), result, 0);
+          }
+          for (auto [i, argument] : llvm::enumerate(construct.getArguments())) {
+            mrt::FieldStoreOp::create(
+                rewriter_, loc, lowered(argument, loc), result, i + skip);
+          }
         }
-        result = cell;
         if (functor->tag != 0) {
-          result = mlir::LLVM::GEPOp::create(rewriter_, loc, ptr,
-              rewriter_.getI8Type(), cell,
-              llvm::ArrayRef<mlir::LLVM::GEPArg>{
-                  static_cast<std::int32_t>(functor->tag)});
+          result = mrt::TagOp::create(rewriter_, loc, result, functor->tag);
         }
+      }
+      if (known) {
+        statics_[result] = *known;
       }
       rewriter_.replaceOp(op, result);
       continue;
@@ -454,9 +605,13 @@ llvm::LogicalResult Lowerer::LowerTerms() {
       if (layout->kind == TermLayout::Kind::NoTag) {
         fields.push_back(term);
       } else {
+        mlir::Value cell{term};
+        if (functor->tag != 0) {
+          cell = mrt::UntagOp::create(rewriter_, loc, term, functor->tag);
+        }
         for (auto [i, field] : llvm::enumerate(functor->fields)) {
-          fields.push_back(mlir::LLVM::LoadOp::create(rewriter_, loc,
-              Convert(field), WordAddress(term, functor->tag, i + skip, loc)));
+          fields.push_back(mrt::FieldLoadOp::create(
+              rewriter_, loc, Convert(field), cell, i + skip));
         }
       }
       rewriter_.replaceOp(op, fields);
@@ -476,7 +631,8 @@ llvm::LogicalResult Lowerer::LowerTerms() {
       has = equal(mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, term),
           constant(functor->value, loc));
     } else {
-      has = equal(PrimaryTag(term, loc), constant(functor->tag, loc));
+      has = equal(mrt::PrimaryTagOp::create(rewriter_, loc, term),
+          constant(functor->tag, loc));
       if (functor->secondary) {
         // A constant has no cell to read a secondary tag from: the test
         // reads a word that is none instead.
@@ -488,16 +644,18 @@ llvm::LogicalResult Lowerer::LowerTerms() {
               "merk_no_secondary_tag", rewriter_.getI64IntegerAttr(-1));
         }
         mlir::Value address{mlir::LLVM::SelectOp::create(rewriter_, loc, has,
-            WordAddress(term, functor->tag, 0, loc),
+            mrt::UntagOp::create(rewriter_, loc, term, functor->tag),
             mlir::LLVM::AddressOfOp::create(rewriter_, loc, noSecondary_))};
         mlir::Value secondary{
-            mlir::LLVM::LoadOp::create(rewriter_, loc, i64, address)};
+            mrt::FieldLoadOp::create(rewriter_, loc, i64, address, 0)};
         has = mlir::LLVM::AndOp::create(rewriter_, loc, has,
             equal(secondary, constant(*functor->secondary, loc)));
       }
     }
     rewriter_.replaceOp(op, has);
   }
+  // The values are the operations', which lowering goes on to replace.
+  statics_.clear();
   return llvm::success();
 }
 
@@ -544,7 +702,7 @@ void Lowerer::Dispatch(mlir::Value term, const TermLayout &layout,
   }
   mlir::Block *here{rewriter_.getInsertionBlock()};
   mlir::Block::iterator point{rewriter_.getInsertionPoint()};
-  mlir::Value tag{PrimaryTag(term, loc)};
+  mlir::Value tag{mrt::PrimaryTagOp::create(rewriter_, loc, term)};
   mlir::Value word{mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, term)};
   point = rewriter_.getInsertionPoint();
   // The constants by their words, and the constructors that share a tag
@@ -561,8 +719,8 @@ void Lowerer::Dispatch(mlir::Value term, const TermLayout &layout,
   }
   if (!secondaries.empty()) {
     mlir::Block *block{rewriter_.createBlock(before)};
-    mlir::Value secondary{mlir::LLVM::LoadOp::create(rewriter_, loc, i64,
-        WordAddress(term, *layout.shared, 0, loc))};
+    mlir::Value secondary{mrt::FieldLoadOp::create(rewriter_, loc, i64,
+        mrt::UntagOp::create(rewriter_, loc, term, *layout.shared), 0)};
     branch(secondary, secondaries);
     primaries.push_back({*layout.shared, block});
   }
@@ -1273,8 +1431,120 @@ void Lowerer::LowerEntry(merk::EntryOp entry) {
   rewriter_.eraseOp(entry);
 }
 
+mlir::LLVM::GlobalOp Lowerer::HeapGlobal() {
+  if (!heap_) {
+    mlir::OpBuilder::InsertionGuard guard{rewriter_};
+    rewriter_.setInsertionPointToStart(module_.getBody());
+    auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+    heap_ = mlir::LLVM::GlobalOp::create(rewriter_, module_.getLoc(),
+        mlir::LLVM::LLVMStructType::getLiteral(module_.getContext(), {ptr, ptr}),
+        /*isConstant=*/false, mlir::LLVM::Linkage::External, "merk_heap",
+        mlir::Attribute{}, /*alignment=*/8, /*addrSpace=*/0,
+        /*dsoLocal=*/false, mlir::LLVM::ThreadLocalMode::GeneralDynamic);
+  }
+  return heap_;
+}
+
+// An allocation bumps the heap's pointer if the cell fits before its limit,
+// and otherwise calls the runtime (runtime/heap.h).
+void Lowerer::LowerAlloc(mrt::AllocOp alloc) {
+  mlir::Location loc{alloc.getLoc()};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  auto i64{rewriter_.getI64Type()};
+  std::int64_t bytes{8 * static_cast<std::int64_t>(alloc.getWords())};
+  mlir::Block *before{alloc->getBlock()};
+  mlir::Block *after{rewriter_.splitBlock(before, alloc->getIterator())};
+  mlir::Value cell{after->addArgument(ptr, loc)};
+  rewriter_.replaceAllUsesWith(alloc.getResult(), cell);
+  rewriter_.eraseOp(alloc);
+  mlir::Block *fast{rewriter_.createBlock(after)};
+  mlir::Block *slow{rewriter_.createBlock(after)};
+  rewriter_.setInsertionPointToEnd(before);
+  auto heapType{HeapGlobal().getType()};
+  mlir::Value heap{mlir::LLVM::ThreadlocalAddressOp::create(rewriter_, loc, ptr,
+      mlir::LLVM::AddressOfOp::create(rewriter_, loc, HeapGlobal()))};
+  mlir::Value next{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr, heap, 8)};
+  mlir::Value end{mlir::LLVM::GEPOp::create(rewriter_, loc, ptr,
+      rewriter_.getI8Type(), next,
+      llvm::ArrayRef<mlir::LLVM::GEPArg>{static_cast<std::int32_t>(bytes)})};
+  mlir::Value limit{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr,
+      mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, heapType, heap,
+          llvm::ArrayRef<mlir::LLVM::GEPArg>{0, 1}),
+      8)};
+  mlir::Value fits{mlir::LLVM::ICmpOp::create(
+      rewriter_, loc, mlir::LLVM::ICmpPredicate::ule, end, limit)};
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, fits, fast, mlir::ValueRange{},
+      slow, mlir::ValueRange{}, std::make_pair(2000u, 1u));
+  rewriter_.setInsertionPointToStart(fast);
+  mlir::LLVM::StoreOp::create(rewriter_, loc, end, heap, 8);
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{next}, after);
+  rewriter_.setInsertionPointToStart(slow);
+  mlir::Value slowCell{mlir::LLVM::CallOp::create(rewriter_, loc,
+      RuntimeFunc("merk_alloc_slow", ptr, {i64}),
+      mlir::ValueRange{mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, bytes)})
+          .getResult()};
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{slowCell}, after);
+}
+
+// A tag is added to a cell's address, and a field is at its word's offset,
+// so that a field of a tagged pointer is one getelementptr from it.
+void Lowerer::LowerMrt() {
+  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  auto i64{rewriter_.getI64Type()};
+  llvm::SmallVector<mlir::Operation *> ops;
+  module_.walk([&](mlir::Operation *op) {
+    if (mlir::isa_and_present<mrt::MrtDialect>(op->getDialect())) {
+      ops.push_back(op);
+    }
+  });
+  auto offset{[&](mlir::Value address, std::int64_t bytes,
+                  mlir::Location loc) -> mlir::Value {
+    if (bytes == 0) {
+      return address;
+    }
+    return mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(),
+        address,
+        llvm::ArrayRef<mlir::LLVM::GEPArg>{static_cast<std::int32_t>(bytes)});
+  }};
+  for (mlir::Operation *op : ops) {
+    mlir::Location loc{op->getLoc()};
+    rewriter_.setInsertionPoint(op);
+    llvm::TypeSwitch<mlir::Operation *>(op)
+        .Case([&](mrt::AllocOp alloc) { LowerAlloc(alloc); })
+        .Case([&](mrt::TagOp tag) {
+          rewriter_.replaceOp(tag,
+              offset(tag.getCell(), static_cast<std::int64_t>(tag.getTag()), loc));
+        })
+        .Case([&](mrt::UntagOp untag) {
+          rewriter_.replaceOp(untag,
+              offset(untag.getTerm(), -static_cast<std::int64_t>(untag.getTag()),
+                  loc));
+        })
+        .Case([&](mrt::PrimaryTagOp tag) {
+          mlir::Value word{mlir::LLVM::PtrToIntOp::create(
+              rewriter_, loc, i64, tag.getTerm())};
+          rewriter_.replaceOpWithNewOp<mlir::LLVM::AndOp>(tag, word,
+              mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, kTags - 1));
+        })
+        .Case([&](mrt::FieldLoadOp load) {
+          rewriter_.replaceOpWithNewOp<mlir::LLVM::LoadOp>(load,
+              load.getValue().getType(),
+              offset(load.getCell(), 8 * static_cast<std::int64_t>(load.getWord()),
+                  loc),
+              8);
+        })
+        .Case([&](mrt::FieldStoreOp store) {
+          mlir::LLVM::StoreOp::create(rewriter_, loc, store.getValue(),
+              offset(store.getCell(),
+                  8 * static_cast<std::int64_t>(store.getWord()), loc),
+              8);
+          rewriter_.eraseOp(store);
+        });
+  }
+}
+
 llvm::LogicalResult Lowerer::Lower() {
-  module_.getContext()->loadDialect<mlir::LLVM::LLVMDialect>();
+  module_.getContext()->loadDialect<mlir::LLVM::LLVMDialect, mrt::MrtDialect>();
   if (mlir::omp::isOpenMPModule(module_) && mlir::failed(FilterProcs())) {
     return llvm::failure();
   }
@@ -1322,6 +1592,7 @@ llvm::LogicalResult Lowerer::Lower() {
       rewriter_.eraseOp(cast);
     }
   });
+  LowerMrt();
   // Arithmetic, which is the arith dialect's.
   mlir::LLVMTypeConverter converter{module_.getContext()};
   mlir::RewritePatternSet patterns{module_.getContext()};
@@ -1338,8 +1609,8 @@ llvm::LogicalResult Lowerer::Lower() {
   }
   // Every operation left must be the LLVM dialect's or OpenMP's.
   mlir::WalkResult result{module_.walk([](mlir::Operation *op) {
-    if (op->getDialect() &&
-        op->getDialect()->getNamespace() == merk::MerkDialect::getDialectNamespace()) {
+    if (mlir::isa_and_present<merk::MerkDialect, mrt::MrtDialect>(
+            op->getDialect())) {
       op->emitOpError("is not lowered yet");
       return mlir::WalkResult::interrupt();
     }
@@ -1414,10 +1685,19 @@ llvm::LogicalResult Lowerer::LowerOpenMP() {
     if (auto uses{mlir::SymbolTable::getSymbolUses(func, module_)};
         uses && !uses->empty()) {
       mlir::emitError(uses->begin()->getUser()->getLoc(),
-          "cannot call " + func.getSymName() +
-              " on an OpenMP device yet: it is not compiled for the device");
+          func.getSymName() == "merk_alloc_slow"
+              ? std::string{"cannot allocate a term on an OpenMP device yet:"
+                            " the device has no heap"}
+              : "cannot call " + func.getSymName() +
+                  " on an OpenMP device yet: it is not compiled for the device");
       return llvm::failure();
     }
+  }
+  // The heap's declaration, which only host code that the filter removed
+  // used.
+  if (heap_ && mlir::SymbolTable::symbolKnownUseEmpty(heap_, module_)) {
+    rewriter_.eraseOp(heap_);
+    heap_ = nullptr;
   }
   return llvm::success();
 }
