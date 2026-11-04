@@ -26,6 +26,7 @@
 #include "mlir/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/RegionUtils.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
@@ -1556,6 +1557,10 @@ llvm::LogicalResult Lowerer::Lower() {
   }
   for (auto func : llvm::to_vector(module_.getOps<mlir::LLVM::LLVMFuncOp>())) {
     Flatten(func);
+    // A branch that cannot be reached, such as the else part of a condition
+    // that cannot fail, is left without predecessors, and the dialect
+    // conversions below skip such blocks.
+    (void)mlir::eraseUnreachableBlocks(rewriter_, func->getRegions());
   }
   llvm::SmallVector<mlir::Operation *> ops;
   module_.walk([&](mlir::Operation *op) {
@@ -1609,8 +1614,8 @@ llvm::LogicalResult Lowerer::Lower() {
   }
   // Every operation left must be the LLVM dialect's or OpenMP's.
   mlir::WalkResult result{module_.walk([](mlir::Operation *op) {
-    if (mlir::isa_and_present<merk::MerkDialect, mrt::MrtDialect>(
-            op->getDialect())) {
+    if (mlir::isa_and_present<merk::MerkDialect, mrt::MrtDialect,
+            mlir::arith::ArithDialect>(op->getDialect())) {
       op->emitOpError("is not lowered yet");
       return mlir::WalkResult::interrupt();
     }
