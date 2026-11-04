@@ -94,7 +94,9 @@ path is written so that only where the pair is read changes. Until then
 the first option's cost is, with a thread's heap where the first option
 has a process's: only `mrt.alloc`'s lowering and `runtime/heap.h` read it.
 
-**D3. `type_info` and type descriptors. Proposed 2026-11-04, for review.**
+**D3. `type_info` and type descriptors. Decided 2026-11-04,** with the tag
+in the `type_info`, strong symbols for descriptors, and generated unify and
+compare; moved into the design document with step 4.
 The layout is ours: the manual's `type_info` and `pseudo_type_info` notions,
 the RTTI paper (Dowd et al., 1999) and E4's observations are the references,
 and Melbourne's representation is not copied (Clean-room rules).
@@ -180,15 +182,11 @@ marked temporary. Nothing compares descriptors by address, so a duplicate
 would be harmless.
 
 *Words.* Polymorphic code requires that every value be one canonical word:
-narrower integers and chars extended by their signedness, a float its bits,
-a dummy value 0. Today a narrow field is written by a narrow store, which
-leaves the word's other bytes unset (`store i8`, on a heap that is not
-zeroed), and a static cell pads it with zeros, which is wrong for a negative
-`int8`. So a field store and a static cell write the canonical word, and a
-load truncates it, which also takes the byte order out of it. This is the
-first commit of step 4. `merk` gets conversions between a value and its word
-at polymorphic calls and fields; only the narrow types and floats generate
-code for them.
+narrower integers and chars zero-extended, a float its bits, a dummy value 0.
+Fields are so already (Type representation). Zero extension needs no
+signedness, and a descriptor says how to compare the bits. `merk` gets
+conversions between a value and its word at polymorphic calls and fields;
+only the narrow types and floats generate code for them.
 
 *Rejected:*
 
@@ -283,7 +281,7 @@ program.
    each cell's contents. The heap pointer and limit are thread-local until
    D2. Left for chunk 3: arrays' element loads and stores as `mrt`
    operations, for the write barrier.
-4. **Polymorphism.** Canonical words for narrow fields first (D3), then
+4. **Polymorphism.** Canonical words for narrow fields first (done), then
    hidden `type_info` arguments, as the calling convention says, static
    type descriptors and `mrt.rtti` (D3),
    polymorphic `unify` and `compare` through the descriptors, and
