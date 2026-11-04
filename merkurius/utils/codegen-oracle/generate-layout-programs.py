@@ -123,6 +123,16 @@ poly_value_of(X) = poly_value(poly_node(poly_leaf, "key", X), X).
 :- pred poly_same(T::in, T::in) is semidet.
 poly_same(X, X).
 
+:- pred print_order(comparison_result::in, io::di, io::uo) is det.
+print_order((=), !IO) :- io.write_string("=", !IO).
+print_order((<), !IO) :- io.write_string("<", !IO).
+print_order((>), !IO) :- io.write_string(">", !IO).
+
+:- pred poly_order(T::in, T::in, io::di, io::uo) is det.
+poly_order(X, Y, !IO) :-
+    compare(R, X, Y),
+    print_order(R, !IO).
+
 :- func poly_nested(T) = T.
 poly_nested(X) = poly_last(poly_last([[X]], [X]), poly_unbox(poly_box(X))).
 """
@@ -388,6 +398,11 @@ class Generator:
                          "else io.write_string(\"ne\", !IO) )" % (s1, d2))
             goals.append("( if poly_same([%s], [%s]) then io.write_string(\"eq\", !IO) "
                          "else io.write_string(\"ne\", !IO) )" % (s1, d2))
+            # Their order, at the known type and by the descriptor.
+            goals.append("compare(%s_order, %s, %s)" % (s1, s1, d2))
+            goals.append("print_order(%s_order, !IO)" % s1)
+            goals.append("poly_order(%s, %s, !IO)" % (s1, d2))
+            goals.append("poly_order([%s], [%s], !IO)" % (s1, d2))
             goals.append("io.nl(!IO)")
         # A test of a constructor that takes it apart.
         _, d = rng.choice(names)

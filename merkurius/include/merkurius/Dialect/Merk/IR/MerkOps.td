@@ -200,19 +200,21 @@ def Merk_TypeCtorOp : Merk_Op<"type_ctor", [HasParent<"mlir::ModuleOp">]> {
     (design document, "Type descriptors"). `kind` names what its values are,
     `term` for a type of constructors, whose layout `term` gives. `linkage`
     is `external` in the module that defines the type, `declaration` in one
-    that imports it, and `internal` or `linkonce`; `unify` is the entry that
-    takes the type_info and two words.
+    that imports it, and `internal` or `linkonce`; `unify` and `compare` are
+    the entries that take the type_info and two words.
 
     ```mlir
-    merk.type_ctor "list.list/1" module "list" name "list" kind "term" linkage "linkonce" arity 1 term !merk.term<"list.list(T0)"> unify @unify_entry.list.list/1
+    merk.type_ctor "list.list/1" module "list" name "list" kind "term" linkage "linkonce" arity 1 term !merk.term<"list.list(T0)"> unify @unify_entry.list.list/1 compare @compare_entry.list.list/1
     ```
   }];
   let arguments = (ins StrAttr:$constructor, StrAttr:$module, StrAttr:$name,
       StrAttr:$kind, StrAttr:$linkage, I64Attr:$arity,
-      OptionalAttr<TypeAttr>:$term, OptionalAttr<FlatSymbolRefAttr>:$unify);
+      OptionalAttr<TypeAttr>:$term, OptionalAttr<FlatSymbolRefAttr>:$unify,
+      OptionalAttr<FlatSymbolRefAttr>:$compare);
   let assemblyFormat = [{
     $constructor `module` $module `name` $name `kind` $kind `linkage` $linkage
-    `arity` $arity (`term` $term^)? (`unify` $unify^)? attr-dict
+    `arity` $arity (`term` $term^)? (`unify` $unify^)?
+    (`compare` $compare^)? attr-dict
   }];
 }
 
@@ -244,6 +246,37 @@ def Merk_UnifyWordOp : Merk_Op<"unify_word"> {
       Merk_WordType:$y);
   let results = (outs I1:$result);
   let assemblyFormat = "$info `,` $x `,` $y attr-dict";
+}
+
+def Merk_CompareWordOp : Merk_Op<"compare_word"> {
+  let summary = "how two words of a type are ordered, by its type_info";
+  let description = [{
+    Calls the compare entry of the type_info's descriptor, and gives its
+    `builtin.comparison_result`.
+
+    ```mlir
+    %r = merk.compare_word %t, %x, %y : !merk.term<"builtin.comparison_result">
+    ```
+  }];
+  let arguments = (ins Merk_TypeInfoType:$info, Merk_WordType:$x,
+      Merk_WordType:$y);
+  let results = (outs Merk_TermType:$result);
+  let assemblyFormat = "$info `,` $x `,` $y attr-dict `:` type($result)";
+}
+
+def Merk_StringCompareOp : Merk_Op<"string_compare"> {
+  let summary = "how two strings are ordered, as C's strcmp";
+  let description = [{
+    Negative if the first is less, zero if they are equal, and positive if
+    it is greater.
+
+    ```mlir
+    %c = merk.string_compare %x, %y
+    ```
+  }];
+  let arguments = (ins Merk_StringType:$x, Merk_StringType:$y);
+  let results = (outs I32:$result);
+  let assemblyFormat = "$x `,` $y attr-dict";
 }
 
 def Merk_StringEqualOp : Merk_Op<"string_equal"> {
