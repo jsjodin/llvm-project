@@ -1791,6 +1791,13 @@ private:
     return checking_.DeterminismOf(callee);
   }
 
+  // A call in an implied mode tests the argument that is already bound
+  // against the callee's output, so it can fail.
+  static Components Implied(Components components, const GoalModes &modes) {
+    components.canFail = components.canFail || modes.implied;
+    return components;
+  }
+
   Components Callee(const Procedure &callee) {
     std::optional<parser::Determinism> determinism{Of(callee)};
     if (!determinism) {
@@ -1848,10 +1855,11 @@ private:
       return Unification(goal, bound);
     case BodyKind::Call:
       bound.insert(goal->arguments.begin(), goal->arguments.end());
-      return {Callee(*goal->modes->callee), Impure(*goal->modes->callee->symbol)};
+      return {Implied(Callee(*goal->modes->callee), *goal->modes),
+          Impure(*goal->modes->callee->symbol)};
     case BodyKind::HOCall: {
       bound.insert(goal->arguments.begin(), goal->arguments.end());
-      return {ComponentsOf(goal->modes->determinism),
+      return {Implied(ComponentsOf(goal->modes->determinism), *goal->modes),
           goal->hoCall->purity == parser::Purity::Impure};
     }
     case BodyKind::Conj: {
@@ -1990,7 +1998,8 @@ private:
     }
     switch (goal->unify) {
     case UnifyKind::Call:
-      return {Callee(*goal->modes->callee), Impure(*goal->modes->callee->symbol)};
+      return {Implied(Callee(*goal->modes->callee), *goal->modes),
+          Impure(*goal->modes->callee->symbol)};
     case UnifyKind::Test:
       return {{true, Solutions::One}};
     case UnifyKind::Deconstruct: {

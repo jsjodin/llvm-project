@@ -44,6 +44,8 @@ def first_difference(expected, actual):
 def compare(path, args):
     """The problems with one program, [] if it agrees, or mmc's first error
     as a string if mmc cannot compile it."""
+    # merkc runs in the temporary directory too.
+    path = os.path.abspath(path)
     module = os.path.splitext(os.path.basename(path))[0]
     with tempfile.TemporaryDirectory(prefix="compare-runs-") as tmp:
         # mmc wants the file named after the module, in its own directory.
