@@ -861,7 +861,6 @@ void Lowerer::LowerConstant(merk::ConstantOp constant) {
 void Lowerer::LowerToWord(merk::ToWordOp op) {
   mlir::Location loc{op.getLoc()};
   rewriter_.setInsertionPoint(op);
-  auto i64{rewriter_.getI64Type()};
   mlir::Value value{op.getValue()};
   mlir::Type type{Convert(value.getType())};
   if (type != value.getType()) {
@@ -869,29 +868,15 @@ void Lowerer::LowerToWord(merk::ToWordOp op) {
         rewriter_, loc, type, value)
                 .getResult(0);
   }
-  if (mlir::isa<mlir::LLVM::LLVMPointerType>(type)) {
-    value = mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, value);
-  } else if (mlir::isa<mlir::FloatType>(type)) {
-    value = mlir::LLVM::BitcastOp::create(rewriter_, loc, i64, value);
-  } else if (type != i64) {
-    value = mlir::LLVM::ZExtOp::create(rewriter_, loc, i64, value);
-  }
-  rewriter_.replaceOp(op, value);
+  rewriter_.replaceOp(op, ToWord(value, loc));
 }
 
 void Lowerer::LowerFromWord(merk::FromWordOp op) {
   mlir::Location loc{op.getLoc()};
   rewriter_.setInsertionPoint(op);
   // Its operand may already be the LLVM type, which getWord cannot return.
-  mlir::Value value{op->getOperand(0)};
   mlir::Type type{Convert(op.getType())};
-  if (mlir::isa<mlir::LLVM::LLVMPointerType>(type)) {
-    value = mlir::LLVM::IntToPtrOp::create(rewriter_, loc, type, value);
-  } else if (mlir::isa<mlir::FloatType>(type)) {
-    value = mlir::LLVM::BitcastOp::create(rewriter_, loc, type, value);
-  } else if (type != rewriter_.getI64Type()) {
-    value = mlir::LLVM::TruncOp::create(rewriter_, loc, type, value);
-  }
+  mlir::Value value{FromWord(op->getOperand(0), type, loc)};
   if (type != op.getType()) {
     value = mlir::UnrealizedConversionCastOp::create(
         rewriter_, loc, op.getType(), value)

@@ -282,9 +282,9 @@ program.
    D2. Left for chunk 3: arrays' element loads and stores as `mrt`
    operations, for the write barrier.
 4. **Polymorphism.** Done: canonical words for narrow fields, hidden
-   `type_info` arguments, and procedures that only pass values of a bare
-   type variable along. Next, in order: terms with type variables, such as
-   `list(T)`, and `array(T)`; static type descriptors and `mrt.rtti` (D3),
+   `type_info` arguments, and polymorphic procedures on terms and arrays
+   that do not compare values of a type variable. Next, in order: static
+   type descriptors and `mrt.rtti` (D3),
    which replace the placeholder symbols `merk.type_ctor.*`; polymorphic
    `unify` and `compare` through the descriptors; polymorphic `foreign_proc`s;
    then typeclass_infos and existential types.
