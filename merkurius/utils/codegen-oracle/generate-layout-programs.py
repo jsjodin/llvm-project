@@ -7,8 +7,8 @@ argument, which are their argument, chained through each other; and types of
 constants and constructors with arguments, whose number is chosen around the
 primary tags' boundaries, 7, 8 and 9 constructors with arguments, with and
 without constants, so that some share the last tag and have secondary tags.
-An argument is an int, a float, a char, which is narrower than a word, an
-earlier type, the type itself, a list or a tuple. For each type the module
+An argument is an int, a float, a char or a sized integer, which are
+narrower than a word, an earlier type, the type itself, a list or a tuple. For each type the module
 prints every constructor (a switch), gives each one a code (a function by
 clauses), and in main builds values both as ground terms, which are static
 cells, and with some of their integers computed at run time, so that they
@@ -29,6 +29,9 @@ import random
 FUNCTOR_COUNTS = [1, 2, 3, 6, 7, 7, 8, 8, 9, 9, 10, 13]
 CONSTANT_COUNTS = [0, 0, 1, 1, 2, 3]
 MAX_DEPTH = 3
+# The sized integers, with their literals' suffixes and ranges.
+SIZED = {"int8": ("i8", -128, 127), "uint8": ("u8", 0, 255),
+         "int16": ("i16", -32768, 32767), "uint32": ("u32", 0, 4000000000)}
 
 
 class Type:
@@ -57,7 +60,7 @@ def contains(field, t):
 
 def type_string(field):
     kind = field[0]
-    if kind in ("int", "float", "char"):
+    if kind in ("int", "float", "char") or kind in SIZED:
         return kind
     if kind == "type":
         return field[1].name
@@ -69,7 +72,7 @@ def type_string(field):
 def key(field):
     """A name for a field type, for the helpers that show it."""
     kind = field[0]
-    if kind in ("int", "float", "char"):
+    if kind in ("int", "float", "char") or kind in SIZED:
         return kind
     if kind == "type":
         return field[1].name
@@ -94,7 +97,7 @@ class Generator:
 
     def field_type(self, t, allow_self, depth=0):
         rng = self.rng
-        choices = ["int", "int", "float", "char"]
+        choices = ["int", "int", "float", "char", "sized"]
         if self.types:
             choices += ["earlier", "earlier"]
         if allow_self:
@@ -104,6 +107,8 @@ class Generator:
         choice = rng.choice(choices)
         if choice in ("int", "float", "char"):
             return (choice,)
+        if choice == "sized":
+            return (rng.choice(sorted(SIZED)),)
         if choice == "earlier":
             return ("type", rng.choice(self.types))
         if choice == "self":
@@ -168,6 +173,8 @@ class Generator:
             return (field, rng.randint(-20, 20) + rng.choice([0.0, 0.25, 0.5, 0.75]))
         if kind == "char":
             return (field, rng.choice("abcdefghijklmnopqrstuvwxyz"))
+        if kind in SIZED:
+            return (field, rng.randint(*SIZED[kind][1:]))
         if kind == "list":
             length = 0 if depth >= MAX_DEPTH else rng.randint(0, 3)
             return (field, [self.value(field[1], depth + 1) for _ in range(length)])
@@ -190,6 +197,11 @@ class Generator:
             return text if payload >= 0 else "(%s)" % text
         if kind == "char":
             return "'%s'" % payload
+        if kind in SIZED:
+            if dynamic and self.rng.random() < 0.5:
+                return "%s.cast_from_int(N + %d)" % (kind, payload)
+            text = "%d%s" % (payload, SIZED[kind][0])
+            return text if payload >= 0 else "(%s)" % text
         if kind == "list":
             return "[%s]" % ", ".join(self.render(v, dynamic) for v in payload)
         if kind == "tuple":
@@ -210,6 +222,8 @@ class Generator:
             return "io.write_float(%s, !IO)" % variable
         if kind == "char":
             return "io.write_char(%s, !IO)" % variable
+        if kind in SIZED:
+            return "io.write_%s(%s, !IO)" % (kind, variable)
         if kind == "type":
             return "show_%s(%s, !IO)" % (field[1].name, variable)
         self.helper(field)
@@ -329,7 +343,7 @@ class Generator:
             ":- import_module io.\n",
             ":- pred main(io::di, io::uo) is det.\n",
             ":- implementation.\n",
-            ":- import_module char, float, int, list.\n\n",
+            ":- import_module char, float, int, int16, int8, list, uint32, uint8.\n\n",
         ]
         for t in self.types:
             parts.append(self.declaration(t) + "\n")

@@ -49,6 +49,21 @@ module @mrt attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
     merk.succeed %l : !llvm.ptr
   }
 
+  // A field narrower than a word is its whole word, zero-extended, whatever
+  // its signedness, so that polymorphic code can pass the word as it is.
+  // LLVM-LABEL: define tailcc i8 @mrt.narrow_1_0(i8 %0) {
+  // LLVM: %[[WORD:.*]] = zext i8 %0 to i64
+  // LLVM-NEXT: store i64 %[[WORD]], ptr %[[N:.*]], align 8
+  // LLVM-NEXT: %[[LOADED:.*]] = load i64, ptr %[[N]], align 8
+  // LLVM-NEXT: %[[BACK:.*]] = trunc i64 %[[LOADED]] to i8
+  // LLVM-NEXT: ret i8 %[[BACK]]
+  merk.proc @mrt.narrow_1_0(%v: i8) -> i8 attributes {determinism = #merk.determinism<det>} {
+    %cell = mrt.alloc 1
+    mrt.field_store %v, %cell[0] : i8
+    %w = mrt.field_load %cell[0] : i8
+    merk.succeed %w : i8
+  }
+
   // CHECK-LABEL: merk.proc @mrt.fields_3_0(%arg0: !llvm.ptr) -> (i64, i64)
   // CHECK-NEXT: %[[TAG:.*]] = mrt.primary_tag %arg0
   // CHECK-NEXT: %[[CELL:.*]] = mrt.untag %arg0, 1

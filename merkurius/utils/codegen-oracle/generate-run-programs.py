@@ -260,6 +260,8 @@ class Generator:
         if kind == "char":
             return "( if %s = '%s' then 7 else 1 )" % (
                 variable, self.rng.choice("abcdefghijklmnopqrstuvwxyz"))
+        if kind in layouts.SIZED:
+            return "(%s.cast_to_int(%s) rem %d)" % (kind, variable, PRIME)
         if kind == "type":
             return "sum_%s(%s)" % (field[1].name, variable)
         key = layouts.key(field)
@@ -389,7 +391,7 @@ class Generator:
             ":- import_module io.\n",
             ":- pred main(io::di, io::uo) is det.\n",
             ":- implementation.\n",
-            ":- import_module char, float, int, list.\n\n",
+            ":- import_module char, float, int, int16, int8, list, uint32, uint8.\n\n",
             ":- func imin(int, int) = int.\nimin(A, B) = min(A, B).\n\n",
             ":- func imax(int, int) = int.\nimax(A, B) = max(A, B).\n\n",
         ]

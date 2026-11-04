@@ -25,7 +25,8 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 // A primary tag: 0 to 7.
 def Mrt_TagAttr : ConfinedAttr<I64Attr, [IntNonNegative, IntMaxValue<7>]>;
 
-// What a field holds: a word or less, in the low bytes of its word.
+// What a field holds: a word or less. A narrower integer is zero-extended
+// to its word, so that polymorphic code can pass the word as it is.
 def Mrt_FieldType : AnyTypeOf<[AnySignlessInteger, F64, LLVM_AnyPointer]>;
 
 def Mrt_AllocOp : Mrt_Op<"alloc"> {
