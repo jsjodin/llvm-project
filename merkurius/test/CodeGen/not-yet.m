@@ -37,8 +37,8 @@ q(X) :-
     ( X > 0 ; X < -5 ).
 % CHECK: not-yet.m:[[@LINE-1]]:7: error: not yet implemented: code generation for disjunctions
 
-:- pred r(T::in, T::out) is det.
-% CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for polymorphic procedures
+:- pred r(list(T)::in, list(T)::out) is det.
+% CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for values of type list.list(T0)
 r(X, X).
 
 :- func w(int) = int.

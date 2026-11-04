@@ -147,6 +147,52 @@ def Merk_ConstantOp : Merk_Op<"constant", [
   let hasVerifier = 1;
 }
 
+def Merk_ToWordOp : Merk_Op<"to_word", [Pure]> {
+  let summary = "a value as the word a type variable holds";
+  let description = [{
+    The value's bits: a narrower integer zero-extended, a float's bits, a
+    pointer's address.
+
+    ```mlir
+    %w = merk.to_word %x : f64
+    ```
+  }];
+  let arguments = (ins AnyType:$value);
+  let results = (outs Merk_WordType:$word);
+  let assemblyFormat = "$value attr-dict `:` type($value)";
+}
+
+def Merk_FromWordOp : Merk_Op<"from_word", [Pure]> {
+  let summary = "the value that a type variable's word holds";
+  let description = [{
+    The inverse of `merk.to_word`, at a type the caller knows.
+
+    ```mlir
+    %x = merk.from_word %w : f64
+    ```
+  }];
+  let arguments = (ins Merk_WordType:$word);
+  let results = (outs AnyType:$value);
+  let assemblyFormat = "$word attr-dict `:` type($value)";
+}
+
+def Merk_TypeInfoOp : Merk_Op<"type_info", [Pure]> {
+  let summary = "the type_info of a type constructor applied to arguments";
+  let description = [{
+    The constructor is named with its arity. A static value if all the
+    arguments are, and otherwise a new cell.
+
+    ```mlir
+    %i = merk.type_info "int/0"
+    %l = merk.type_info "list.list/1"(%t)
+    ```
+  }];
+  let arguments = (ins StrAttr:$constructor,
+      Variadic<Merk_TypeInfoType>:$arguments);
+  let results = (outs Merk_TypeInfoType:$info);
+  let assemblyFormat = "$constructor (`(` $arguments^ `)`)? attr-dict";
+}
+
 def Merk_ForeignCallOp : Merk_Op<"foreign_call"> {
   let summary = "a call of a C function";
   let description = [{

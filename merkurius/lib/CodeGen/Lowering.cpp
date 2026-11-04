@@ -131,8 +131,12 @@ private:
   // A merk type's LLVM type: a string is a pointer to its bytes, an array a
   // pointer to its size and elements, and a term its layout's.
   mlir::Type Convert(mlir::Type type) const {
-    if (mlir::isa<merk::StringType, merk::ArrayType>(type)) {
+    if (mlir::isa<merk::StringType, merk::ArrayType, merk::TypeInfoType>(
+            type)) {
       return mlir::LLVM::LLVMPointerType::get(type.getContext());
+    }
+    if (mlir::isa<merk::WordType>(type)) {
+      return mlir::IntegerType::get(type.getContext(), 64);
     }
     if (auto term{mlir::dyn_cast<merk::TermType>(type)}) {
       auto it{layouts_.find(term.getName())};
@@ -202,6 +206,9 @@ private:
   void LowerProc(merk::ProcOp);
   void LowerSucceed(merk::SucceedOp);
   void LowerConstant(merk::ConstantOp);
+  void LowerToWord(merk::ToWordOp);
+  void LowerFromWord(merk::FromWordOp);
+  void LowerTypeInfo(merk::TypeInfoOp);
   void LowerForeignCall(merk::ForeignCallOp);
   void LowerEntry(merk::EntryOp);
   void LowerArray(mlir::Operation *);
@@ -279,6 +286,13 @@ private:
   // their keys.
   llvm::DenseMap<mlir::Value, StaticValue> statics_;
   llvm::StringMap<mlir::LLVM::GlobalOp> staticCells_;
+  // The type_infos known at compile time, for those made of them.
+  struct StaticTypeInfo {
+    mlir::LLVM::GlobalOp global;
+    std::int64_t tag;
+  };
+  llvm::DenseMap<mlir::Value, StaticTypeInfo> staticTypeInfos_;
+  llvm::StringMap<mlir::LLVM::GlobalOp> typeInfoCells_;
   mlir::LLVM::GlobalOp heap_;
 };
 
@@ -842,6 +856,153 @@ void Lowerer::LowerConstant(merk::ConstantOp constant) {
   mlir::LLVM::GlobalOp global{StringGlobal(string.getValue(), loc)};
   rewriter_.setInsertionPoint(constant);
   rewriter_.replaceOpWithNewOp<mlir::LLVM::AddressOfOp>(constant, global);
+}
+
+void Lowerer::LowerToWord(merk::ToWordOp op) {
+  mlir::Location loc{op.getLoc()};
+  rewriter_.setInsertionPoint(op);
+  auto i64{rewriter_.getI64Type()};
+  mlir::Value value{op.getValue()};
+  mlir::Type type{Convert(value.getType())};
+  if (type != value.getType()) {
+    value = mlir::UnrealizedConversionCastOp::create(
+        rewriter_, loc, type, value)
+                .getResult(0);
+  }
+  if (mlir::isa<mlir::LLVM::LLVMPointerType>(type)) {
+    value = mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, value);
+  } else if (mlir::isa<mlir::FloatType>(type)) {
+    value = mlir::LLVM::BitcastOp::create(rewriter_, loc, i64, value);
+  } else if (type != i64) {
+    value = mlir::LLVM::ZExtOp::create(rewriter_, loc, i64, value);
+  }
+  rewriter_.replaceOp(op, value);
+}
+
+void Lowerer::LowerFromWord(merk::FromWordOp op) {
+  mlir::Location loc{op.getLoc()};
+  rewriter_.setInsertionPoint(op);
+  // Its operand may already be the LLVM type, which getWord cannot return.
+  mlir::Value value{op->getOperand(0)};
+  mlir::Type type{Convert(op.getType())};
+  if (mlir::isa<mlir::LLVM::LLVMPointerType>(type)) {
+    value = mlir::LLVM::IntToPtrOp::create(rewriter_, loc, type, value);
+  } else if (mlir::isa<mlir::FloatType>(type)) {
+    value = mlir::LLVM::BitcastOp::create(rewriter_, loc, type, value);
+  } else if (type != rewriter_.getI64Type()) {
+    value = mlir::LLVM::TruncOp::create(rewriter_, loc, type, value);
+  }
+  if (type != op.getType()) {
+    value = mlir::UnrealizedConversionCastOp::create(
+        rewriter_, loc, op.getType(), value)
+                .getResult(0);
+  }
+  rewriter_.replaceOp(op, value);
+}
+
+void Lowerer::LowerTypeInfo(merk::TypeInfoOp op) {
+  mlir::Location loc{op.getLoc()};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  auto i64{rewriter_.getI64Type()};
+  auto address{[&](const StaticTypeInfo &info) -> mlir::Value {
+    mlir::Value base{mlir::LLVM::AddressOfOp::create(rewriter_, loc, info.global)};
+    if (info.tag == 0) {
+      return base;
+    }
+    return mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(),
+        base, llvm::ArrayRef<mlir::LLVM::GEPArg>{
+                  static_cast<std::int32_t>(info.tag)});
+  }};
+  llvm::StringRef constructor{op.getConstructor()};
+  std::size_t arguments{op.getArguments().size()};
+  // Temporary (chunk 1 step 4, docs/INPROGRESS.md): a word holding the arity,
+  // to give the constructor an address until descriptors replace it. Nothing
+  // reads it yet.
+  std::string symbol{"merk.type_ctor." + constructor.str()};
+  auto descriptor{module_.lookupSymbol<mlir::LLVM::GlobalOp>(symbol)};
+  if (!descriptor) {
+    mlir::OpBuilder::InsertionGuard guard{rewriter_};
+    rewriter_.setInsertionPointToStart(module_.getBody());
+    descriptor = mlir::LLVM::GlobalOp::create(rewriter_, loc, i64,
+        /*isConstant=*/true, mlir::LLVM::Linkage::LinkonceODR, symbol,
+        rewriter_.getI64IntegerAttr(arguments), /*alignment=*/8);
+  }
+  rewriter_.setInsertionPoint(op);
+  if (arguments == 0) {
+    StaticTypeInfo info{descriptor, 0};
+    mlir::Value value{address(info)};
+    // The value that replaces it is what its users look up.
+    staticTypeInfos_[value] = info;
+    rewriter_.replaceOp(op, value);
+    return;
+  }
+  // A tuple's constructor has no one arity: the cell says how many.
+  bool variableArity{constructor.starts_with("{}")};
+  bool isStatic{true};
+  std::string key{symbol};
+  llvm::SmallVector<StaticTypeInfo> known;
+  for (mlir::Value argument : op.getArguments()) {
+    auto it{staticTypeInfos_.find(argument)};
+    if (it == staticTypeInfos_.end()) {
+      isStatic = false;
+      break;
+    }
+    known.push_back(it->second);
+    key += "," + it->second.global.getSymName().str();
+  }
+  if (isStatic) {
+    mlir::LLVM::GlobalOp &cell{typeInfoCells_[key]};
+    if (!cell) {
+      llvm::SmallVector<mlir::Type> words{ptr};
+      if (variableArity) {
+        words.push_back(i64);
+      }
+      words.append(arguments, ptr);
+      auto cellType{mlir::LLVM::LLVMStructType::getLiteral(op.getContext(), words)};
+      mlir::OpBuilder::InsertionGuard guard{rewriter_};
+      rewriter_.setInsertionPointToStart(module_.getBody());
+      cell = mlir::LLVM::GlobalOp::create(rewriter_, loc, cellType,
+          /*isConstant=*/true, mlir::LLVM::Linkage::Private,
+          "merk.type_info." + std::to_string(typeInfoCells_.size() - 1),
+          mlir::Attribute{}, /*alignment=*/8);
+      rewriter_.createBlock(&cell.getInitializerRegion());
+      mlir::Value init{mlir::LLVM::ZeroOp::create(rewriter_, loc, cellType)};
+      std::int64_t position{0};
+      auto insert{[&](mlir::Value value) {
+        init = mlir::LLVM::InsertValueOp::create(rewriter_, loc, init, value,
+            llvm::SmallVector<std::int64_t>{position++});
+      }};
+      insert(address(StaticTypeInfo{descriptor, 0}));
+      if (variableArity) {
+        insert(mlir::LLVM::ConstantOp::create(rewriter_, loc, i64,
+            static_cast<std::int64_t>(arguments)));
+      }
+      for (const StaticTypeInfo &argument : known) {
+        insert(address(argument));
+      }
+      mlir::LLVM::ReturnOp::create(rewriter_, loc, init);
+    }
+    StaticTypeInfo info{cell, 1};
+    mlir::Value value{address(info)};
+    staticTypeInfos_[value] = info;
+    rewriter_.replaceOp(op, value);
+    return;
+  }
+  std::int64_t word{0};
+  mlir::Value new_{mrt::AllocOp::create(rewriter_, loc, ptr,
+      static_cast<std::int64_t>(arguments + (variableArity ? 2 : 1)))};
+  mrt::FieldStoreOp::create(rewriter_, loc,
+      address(StaticTypeInfo{descriptor, 0}), new_, word++);
+  if (variableArity) {
+    mrt::FieldStoreOp::create(rewriter_, loc,
+        mlir::LLVM::ConstantOp::create(rewriter_, loc, i64,
+            static_cast<std::int64_t>(arguments)),
+        new_, word++);
+  }
+  for (mlir::Value argument : op.getArguments()) {
+    mrt::FieldStoreOp::create(rewriter_, loc, argument, new_, word++);
+  }
+  rewriter_.replaceOpWithNewOp<mrt::TagOp>(op, ptr, new_, 1);
 }
 
 // A foreign_proc's C function returns its only output, or else stores its
@@ -1573,6 +1734,7 @@ llvm::LogicalResult Lowerer::Lower() {
   llvm::SmallVector<mlir::Operation *> ops;
   module_.walk([&](mlir::Operation *op) {
     if (mlir::isa<merk::SucceedOp, merk::CallOp, merk::ConstantOp,
+            merk::ToWordOp, merk::FromWordOp, merk::TypeInfoOp,
             merk::ForeignCallOp, merk::ArrayNewOp, merk::ArraySizeOp,
             merk::ArrayGetOp, merk::ArraySetOp, merk::ArrayFillOp,
             merk::ArrayCopyOp, merk::ArrayResizeOp>(op)) {
@@ -1584,6 +1746,12 @@ llvm::LogicalResult Lowerer::Lower() {
       LowerSucceed(succeed);
     } else if (auto constant{mlir::dyn_cast<merk::ConstantOp>(op)}) {
       LowerConstant(constant);
+    } else if (auto toWord{mlir::dyn_cast<merk::ToWordOp>(op)}) {
+      LowerToWord(toWord);
+    } else if (auto fromWord{mlir::dyn_cast<merk::FromWordOp>(op)}) {
+      LowerFromWord(fromWord);
+    } else if (auto typeInfo{mlir::dyn_cast<merk::TypeInfoOp>(op)}) {
+      LowerTypeInfo(typeInfo);
     } else if (auto foreign{mlir::dyn_cast<merk::ForeignCallOp>(op)}) {
       LowerForeignCall(foreign);
     } else if (!mlir::isa<merk::CallOp>(op)) {
