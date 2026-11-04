@@ -1,0 +1,10 @@
+# Benchmarks
+
+Programs that measure what Merkurius's code does, rather than test it.
+Each has a lit test in `test/Benchmarks` that builds it and runs it on a
+small input, so that it keeps working; the benchmarks themselves are run
+by hand.
+
+| Benchmark | What it measures |
+| --- | --- |
+| [`bandwidth`](bandwidth/README.md) | Memory bandwidth of five array kernels under OpenMP, on the host's threads or a GPU, modeled on BabelStream |
