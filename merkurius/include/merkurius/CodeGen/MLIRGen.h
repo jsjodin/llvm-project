@@ -46,8 +46,8 @@ inline constexpr llvm::StringLiteral kForeignCodeAttrName{"merk.foreign_code"};
 mlir::OwningOpRef<mlir::ModuleOp> GenerateMerk(mlir::MLIRContext &,
     llvm::StringRef module, const parser::ParseTree &,
     const parser::TokenSequence &, const parser::AllSources &,
-    const semantics::TypeChecking &, semantics::ModeChecking &,
-    const semantics::DeterminismChecking &,
+    const semantics::NameResolution &, semantics::TypeChecking &,
+    semantics::ModeChecking &, const semantics::DeterminismChecking &,
     const semantics::PolymorphismAnalysis &, const semantics::LoopTranslation &,
     const TargetInfo &, parser::Messages &);
 
