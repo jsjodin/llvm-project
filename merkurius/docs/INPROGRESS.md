@@ -106,8 +106,11 @@ used as a reference (Clean-room rules); the reference manual's
 argument per type variable) are.
 
 **D4. Polymorphic arguments.** On 64-bit targets every value fits a word,
-so a polymorphic argument is a word, a float its bits, with no boxes (E4
-saw mmc box `list(float)` elements in a 16-byte cell). 32-bit targets
+so a polymorphic argument is a word, a float its bits, with no boxes. mmc
+does the same on 64 bits in `hlc.gc`: a `list(float)` built through a
+polymorphic predicate takes the same memory as a `list(int)`, 16 bytes an
+element, and its generated C's `MR_box_float` allocates nothing there
+(measured 2026-11-04). 32-bit targets
 would need boxes for `float`, `int64` and `uint64`; they are not
 supported.
 
