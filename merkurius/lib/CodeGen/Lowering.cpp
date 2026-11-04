@@ -209,6 +209,10 @@ private:
   void LowerToWord(merk::ToWordOp);
   void LowerFromWord(merk::FromWordOp);
   void LowerTypeInfo(merk::TypeInfoOp);
+  llvm::LogicalResult LowerTypeCtors();
+  void LowerTypeInfoWord(merk::TypeInfoWordOp);
+  llvm::LogicalResult LowerUnifyWord(merk::UnifyWordOp);
+  void LowerStringEqual(merk::StringEqualOp);
   void LowerForeignCall(merk::ForeignCallOp);
   void LowerEntry(merk::EntryOp);
   void LowerArray(mlir::Operation *);
@@ -900,18 +904,9 @@ void Lowerer::LowerTypeInfo(merk::TypeInfoOp op) {
   }};
   llvm::StringRef constructor{op.getConstructor()};
   std::size_t arguments{op.getArguments().size()};
-  // Temporary (chunk 1 step 4, docs/INPROGRESS.md): a word holding the arity,
-  // to give the constructor an address until descriptors replace it. Nothing
-  // reads it yet.
   std::string symbol{"merk.type_ctor." + constructor.str()};
   auto descriptor{module_.lookupSymbol<mlir::LLVM::GlobalOp>(symbol)};
-  if (!descriptor) {
-    mlir::OpBuilder::InsertionGuard guard{rewriter_};
-    rewriter_.setInsertionPointToStart(module_.getBody());
-    descriptor = mlir::LLVM::GlobalOp::create(rewriter_, loc, i64,
-        /*isConstant=*/true, mlir::LLVM::Linkage::LinkonceODR, symbol,
-        rewriter_.getI64IntegerAttr(arguments), /*alignment=*/8);
-  }
+  assert(descriptor && "LowerTypeCtors checks that each has its descriptor");
   rewriter_.setInsertionPoint(op);
   if (arguments == 0) {
     StaticTypeInfo info{descriptor, 0};
@@ -988,6 +983,166 @@ void Lowerer::LowerTypeInfo(merk::TypeInfoOp op) {
     mrt::FieldStoreOp::create(rewriter_, loc, argument, new_, word++);
   }
   rewriter_.replaceOpWithNewOp<mrt::TagOp>(op, ptr, new_, 1);
+}
+
+// The descriptors' kinds, as the runtime will read them: a term's is its
+// layout's. Temporary (chunk 1 step 4, docs/INPROGRESS.md): a descriptor has
+// its header only, until a walker needs its functors.
+static std::optional<unsigned> DescriptorKind(llvm::StringRef kind) {
+  static constexpr llvm::StringLiteral kinds[]{"int", "uint", "int8", "int16",
+      "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float", "char",
+      "string", "array", "dummy", "void", "enum", "notag", "cells", "tuple"};
+  for (auto [i, name] : llvm::enumerate(kinds)) {
+    if (kind == name) {
+      return i;
+    }
+  }
+  return std::nullopt;
+}
+
+// Each is { i8 kind, i8 flags, i16 arity, i32 functors, ptr module, ptr name,
+// ptr unify, ptr compare } (design document, "Type descriptors").
+llvm::LogicalResult Lowerer::LowerTypeCtors() {
+  mlir::MLIRContext *context{module_.getContext()};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(context)};
+  auto i8{rewriter_.getI8Type()};
+  auto i16{rewriter_.getI16Type()};
+  auto i32{rewriter_.getI32Type()};
+  auto type{mlir::LLVM::LLVMStructType::getLiteral(
+      context, {i8, i8, i16, i32, ptr, ptr, ptr, ptr})};
+  for (auto op : llvm::make_early_inc_range(module_.getOps<merk::TypeCtorOp>())) {
+    mlir::Location loc{op.getLoc()};
+    std::string symbol{"merk.type_ctor." + op.getConstructor().str()};
+    llvm::StringRef linkage{op.getLinkage()};
+    mlir::OpBuilder::InsertionGuard guard{rewriter_};
+    rewriter_.setInsertionPointToStart(module_.getBody());
+    if (linkage == "declaration") {
+      mlir::LLVM::GlobalOp::create(rewriter_, loc, type, /*isConstant=*/true,
+          mlir::LLVM::Linkage::External, symbol, mlir::Attribute{},
+          /*alignment=*/8);
+      rewriter_.eraseOp(op);
+      continue;
+    }
+    llvm::StringRef kindName{op.getKind()};
+    if (kindName == "term") {
+      const TermLayout *layout{op.getTerm() ? LayoutOf(*op.getTerm()) : nullptr};
+      if (!layout) {
+        return op.emitOpError("has no term with a merk.type_def");
+      }
+      kindName = layout->kind == TermLayout::Kind::Enum ? "enum"
+          : layout->kind == TermLayout::Kind::NoTag     ? "notag"
+                                                        : "cells";
+    }
+    std::optional<unsigned> kind{DescriptorKind(kindName)};
+    if (!kind) {
+      return op.emitOpError("has an unknown kind");
+    }
+    mlir::LLVM::GlobalOp moduleName{StringGlobal(op.getModule(), loc)};
+    mlir::LLVM::GlobalOp name{StringGlobal(op.getName(), loc)};
+    rewriter_.setInsertionPointToStart(module_.getBody());
+    auto global{mlir::LLVM::GlobalOp::create(rewriter_, loc, type,
+        /*isConstant=*/true,
+        linkage == "external"       ? mlir::LLVM::Linkage::External
+            : linkage == "internal" ? mlir::LLVM::Linkage::Internal
+                                    : mlir::LLVM::Linkage::LinkonceODR,
+        symbol, mlir::Attribute{}, /*alignment=*/8)};
+    rewriter_.createBlock(&global.getInitializerRegion());
+    mlir::Value init{mlir::LLVM::ZeroOp::create(rewriter_, loc, type)};
+    std::int64_t position{0};
+    auto insert{[&](mlir::Value value) {
+      init = mlir::LLVM::InsertValueOp::create(rewriter_, loc, init, value,
+          llvm::SmallVector<std::int64_t>{position++});
+    }};
+    insert(mlir::LLVM::ConstantOp::create(rewriter_, loc, i8, *kind));
+    insert(mlir::LLVM::ConstantOp::create(rewriter_, loc, i8, 0));
+    insert(mlir::LLVM::ConstantOp::create(rewriter_, loc, i16, op.getArity()));
+    insert(mlir::LLVM::ConstantOp::create(rewriter_, loc, i32, 0));
+    insert(mlir::LLVM::AddressOfOp::create(rewriter_, loc, moduleName));
+    insert(mlir::LLVM::AddressOfOp::create(rewriter_, loc, name));
+    if (op.getUnify()) {
+      insert(mlir::LLVM::AddressOfOp::create(rewriter_, loc, ptr, *op.getUnify()));
+    }
+    mlir::LLVM::ReturnOp::create(rewriter_, loc, init);
+    rewriter_.eraseOp(op);
+  }
+  llvm::SmallVector<merk::TypeInfoOp> infos;
+  module_.walk([&](merk::TypeInfoOp op) { infos.push_back(op); });
+  for (merk::TypeInfoOp op : infos) {
+    if (!module_.lookupSymbol<mlir::LLVM::GlobalOp>(
+            "merk.type_ctor." + op.getConstructor().str())) {
+      return op.emitOpError("has no merk.type_ctor");
+    }
+  }
+  return llvm::success();
+}
+
+void Lowerer::LowerTypeInfoWord(merk::TypeInfoWordOp op) {
+  mlir::Location loc{op.getLoc()};
+  rewriter_.setInsertionPoint(op);
+  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  mlir::Value address{mlir::LLVM::GEPOp::create(rewriter_, loc, ptr,
+      rewriter_.getI8Type(), op->getOperand(0),
+      llvm::ArrayRef<mlir::LLVM::GEPArg>{
+          static_cast<std::int32_t>(8 * op.getWord() - 1)})};
+  rewriter_.replaceOpWithNewOp<mlir::LLVM::LoadOp>(op, ptr, address, 8);
+}
+
+llvm::LogicalResult Lowerer::LowerUnifyWord(merk::UnifyWordOp op) {
+  if (device_) {
+    return op.emitOpError(
+        "compares values of a type variable, which cannot be done on an OpenMP device yet");
+  }
+  mlir::Location loc{op.getLoc()};
+  rewriter_.setInsertionPoint(op);
+  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  auto i64{rewriter_.getI64Type()};
+  mlir::Value info{op->getOperand(0)};
+  // The descriptor: the type_info with tag 0, and a cell's first word with
+  // tag 1.
+  mlir::Value word{mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, info)};
+  mlir::Value isDescriptor{mlir::LLVM::ICmpOp::create(rewriter_, loc,
+      mlir::LLVM::ICmpPredicate::eq,
+      mlir::LLVM::AndOp::create(rewriter_, loc, word,
+          mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, kTags - 1)),
+      mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 0))};
+  mlir::Block *before{rewriter_.getInsertionBlock()};
+  mlir::Block *join{rewriter_.splitBlock(before, rewriter_.getInsertionPoint())};
+  mlir::Value descriptor{join->addArgument(ptr, loc)};
+  mlir::Block *cell{rewriter_.createBlock(join)};
+  mlir::Value first{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr,
+      mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(), info,
+          llvm::ArrayRef<mlir::LLVM::GEPArg>{-1}),
+      8)};
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{first}, join);
+  rewriter_.setInsertionPointToEnd(before);
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, isDescriptor, join,
+      mlir::ValueRange{info}, cell, mlir::ValueRange{});
+  rewriter_.setInsertionPointToStart(join);
+  // Past the header's word, the module's and the name's.
+  mlir::Value entry{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr,
+      mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(),
+          descriptor, llvm::ArrayRef<mlir::LLVM::GEPArg>{24}),
+      8)};
+  auto type{mlir::LLVM::LLVMFunctionType::get(
+      rewriter_.getI1Type(), {ptr, i64, i64})};
+  auto call{mlir::LLVM::CallOp::create(rewriter_, loc, type,
+      mlir::ValueRange{entry, info, op->getOperand(1), op->getOperand(2)})};
+  call.setCConv(cconv_);
+  rewriter_.replaceOp(op, call.getResult());
+  return llvm::success();
+}
+
+void Lowerer::LowerStringEqual(merk::StringEqualOp op) {
+  mlir::Location loc{op.getLoc()};
+  rewriter_.setInsertionPoint(op);
+  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  auto i32{rewriter_.getI32Type()};
+  auto call{mlir::LLVM::CallOp::create(rewriter_, loc,
+      RuntimeFunc("strcmp", i32, {ptr, ptr}),
+      mlir::ValueRange{op->getOperand(0), op->getOperand(1)})};
+  rewriter_.replaceOpWithNewOp<mlir::LLVM::ICmpOp>(op,
+      mlir::LLVM::ICmpPredicate::eq, call.getResult(),
+      mlir::LLVM::ConstantOp::create(rewriter_, loc, i32, 0));
 }
 
 // A foreign_proc's C function returns its only output, or else stores its
@@ -1700,6 +1855,13 @@ void Lowerer::LowerMrt() {
 
 llvm::LogicalResult Lowerer::Lower() {
   module_.getContext()->loadDialect<mlir::LLVM::LLVMDialect, mrt::MrtDialect>();
+  // On a device nothing calls a descriptor's unify entry, since a generic
+  // unification is an error there, and the procedure is not compiled for it.
+  if (device_) {
+    for (auto op : module_.getOps<merk::TypeCtorOp>()) {
+      op.removeUnifyAttr();
+    }
+  }
   if (mlir::omp::isOpenMPModule(module_) && mlir::failed(FilterProcs())) {
     return llvm::failure();
   }
@@ -1716,10 +1878,14 @@ llvm::LogicalResult Lowerer::Lower() {
     // conversions below skip such blocks.
     (void)mlir::eraseUnreachableBlocks(rewriter_, func->getRegions());
   }
+  if (mlir::failed(LowerTypeCtors())) {
+    return llvm::failure();
+  }
   llvm::SmallVector<mlir::Operation *> ops;
   module_.walk([&](mlir::Operation *op) {
     if (mlir::isa<merk::SucceedOp, merk::CallOp, merk::ConstantOp,
             merk::ToWordOp, merk::FromWordOp, merk::TypeInfoOp,
+            merk::TypeInfoWordOp, merk::UnifyWordOp, merk::StringEqualOp,
             merk::ForeignCallOp, merk::ArrayNewOp, merk::ArraySizeOp,
             merk::ArrayGetOp, merk::ArraySetOp, merk::ArrayFillOp,
             merk::ArrayCopyOp, merk::ArrayResizeOp>(op)) {
@@ -1737,6 +1903,14 @@ llvm::LogicalResult Lowerer::Lower() {
       LowerFromWord(fromWord);
     } else if (auto typeInfo{mlir::dyn_cast<merk::TypeInfoOp>(op)}) {
       LowerTypeInfo(typeInfo);
+    } else if (auto infoWord{mlir::dyn_cast<merk::TypeInfoWordOp>(op)}) {
+      LowerTypeInfoWord(infoWord);
+    } else if (auto unify{mlir::dyn_cast<merk::UnifyWordOp>(op)}) {
+      if (mlir::failed(LowerUnifyWord(unify))) {
+        return llvm::failure();
+      }
+    } else if (auto stringEqual{mlir::dyn_cast<merk::StringEqualOp>(op)}) {
+      LowerStringEqual(stringEqual);
     } else if (auto foreign{mlir::dyn_cast<merk::ForeignCallOp>(op)}) {
       LowerForeignCall(foreign);
     } else if (!mlir::isa<merk::CallOp>(op)) {

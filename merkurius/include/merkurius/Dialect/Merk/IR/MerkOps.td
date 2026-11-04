@@ -193,6 +193,71 @@ def Merk_TypeInfoOp : Merk_Op<"type_info", [Pure]> {
   let assemblyFormat = "$constructor (`(` $arguments^ `)`)? attr-dict";
 }
 
+def Merk_TypeCtorOp : Merk_Op<"type_ctor", [HasParent<"mlir::ModuleOp">]> {
+  let summary = "a type constructor's descriptor";
+  let description = [{
+    The static record every `merk.type_info` of the constructor points to
+    (design document, "Type descriptors"). `kind` names what its values are,
+    `term` for a type of constructors, whose layout `term` gives. `linkage`
+    is `external` in the module that defines the type, `declaration` in one
+    that imports it, and `internal` or `linkonce`; `unify` is the entry that
+    takes the type_info and two words.
+
+    ```mlir
+    merk.type_ctor "list.list/1" module "list" name "list" kind "term" linkage "linkonce" arity 1 term !merk.term<"list.list(T0)"> unify @unify_entry.list.list/1
+    ```
+  }];
+  let arguments = (ins StrAttr:$constructor, StrAttr:$module, StrAttr:$name,
+      StrAttr:$kind, StrAttr:$linkage, I64Attr:$arity,
+      OptionalAttr<TypeAttr>:$term, OptionalAttr<FlatSymbolRefAttr>:$unify);
+  let assemblyFormat = [{
+    $constructor `module` $module `name` $name `kind` $kind `linkage` $linkage
+    `arity` $arity (`term` $term^)? (`unify` $unify^)? attr-dict
+  }];
+}
+
+def Merk_TypeInfoWordOp : Merk_Op<"type_info_word", [Pure]> {
+  let summary = "a type_info from a word of a type_info's cell";
+  let description = [{
+    Word 0 of the cell is the descriptor, so an argument's is from word 1,
+    or word 2 for a tuple's, whose word 1 is the number of arguments.
+
+    ```mlir
+    %t = merk.type_info_word %list, 1
+    ```
+  }];
+  let arguments = (ins Merk_TypeInfoType:$info, I64Attr:$word);
+  let results = (outs Merk_TypeInfoType:$result);
+  let assemblyFormat = "$info `,` $word attr-dict";
+}
+
+def Merk_UnifyWordOp : Merk_Op<"unify_word"> {
+  let summary = "whether two words of a type are equal, by its type_info";
+  let description = [{
+    Calls the unify entry of the type_info's descriptor.
+
+    ```mlir
+    %same = merk.unify_word %t, %x, %y
+    ```
+  }];
+  let arguments = (ins Merk_TypeInfoType:$info, Merk_WordType:$x,
+      Merk_WordType:$y);
+  let results = (outs I1:$result);
+  let assemblyFormat = "$info `,` $x `,` $y attr-dict";
+}
+
+def Merk_StringEqualOp : Merk_Op<"string_equal"> {
+  let summary = "whether two strings are equal";
+  let description = [{
+    ```mlir
+    %same = merk.string_equal %x, %y
+    ```
+  }];
+  let arguments = (ins Merk_StringType:$x, Merk_StringType:$y);
+  let results = (outs I1:$result);
+  let assemblyFormat = "$x `,` $y attr-dict";
+}
+
 def Merk_ForeignCallOp : Merk_Op<"foreign_call"> {
   let summary = "a call of a C function";
   let description = [{

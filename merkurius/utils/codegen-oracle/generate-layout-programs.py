@@ -120,6 +120,9 @@ poly_head_of([]) = poly_head_of([]).
 :- func poly_value_of(T) = T.
 poly_value_of(X) = poly_value(poly_node(poly_leaf, "key", X), X).
 
+:- pred poly_same(T::in, T::in) is semidet.
+poly_same(X, X).
+
 :- func poly_nested(T) = T.
 poly_nested(X) = poly_last(poly_last([[X]], [X]), poly_unbox(poly_box(X))).
 """
@@ -376,8 +379,14 @@ class Generator:
             goals.append("( if %s = %s then io.write_string(\"eq\", !IO) "
                          "else io.write_string(\"ne\", !IO) )" % (s, d))
             goals.append("io.nl(!IO)")
+            # And by the type_info's descriptor.
+            goals.append("( if poly_same(%s, %s) then io.write_string(\"eq\", !IO) "
+                         "else io.write_string(\"ne\", !IO) )" % (s, d))
+            goals.append("io.nl(!IO)")
         for (s1, _), (_, d2) in zip(names, names[1:]):
             goals.append("( if %s = %s then io.write_string(\"eq\", !IO) "
+                         "else io.write_string(\"ne\", !IO) )" % (s1, d2))
+            goals.append("( if poly_same([%s], [%s]) then io.write_string(\"eq\", !IO) "
                          "else io.write_string(\"ne\", !IO) )" % (s1, d2))
             goals.append("io.nl(!IO)")
         # A test of a constructor that takes it apart.

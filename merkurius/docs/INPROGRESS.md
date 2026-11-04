@@ -176,10 +176,12 @@ the runtime, in C++.
 
 *Where descriptors live.* A strong symbol in the module that defines the
 type, since a module importing an abstract type cannot make it. The
-builtin types' are in the runtime. Until step 6 compiles `list`, `maybe` and
-`pair`, their descriptors are `linkonce_odr` in each module using them,
-marked temporary. Nothing compares descriptors by address, so a duplicate
-would be harmless.
+primitive types', arrays' and tuples' are `linkonce_odr` in each module using
+them, not in the runtime as first proposed: their unify entries are `tailcc`
+procedures, which C++ cannot define, and generating them keeps one path for
+all. Until step 6 compiles `list`, `maybe` and `pair`, the same goes for the
+uncompiled library's types, marked temporary. Nothing compares descriptors by
+address, so a duplicate would be harmless.
 
 *Words.* Polymorphic code requires that every value be one canonical word:
 narrower integers and chars zero-extended, a float its bits, a dummy value 0.
@@ -282,12 +284,14 @@ program.
    D2. Left for chunk 3: arrays' element loads and stores as `mrt`
    operations, for the write barrier.
 4. **Polymorphism.** Done: canonical words for narrow fields, hidden
-   `type_info` arguments, and polymorphic procedures on terms and arrays
-   that do not compare values of a type variable. Next, in order: static
-   type descriptors and `mrt.rtti` (D3),
-   which replace the placeholder symbols `merk.type_ctor.*`; polymorphic
-   `unify` and `compare` through the descriptors; polymorphic `foreign_proc`s;
-   then typeclass_infos and existential types.
+   `type_info` arguments, polymorphic procedures on terms and arrays, and
+   descriptors' headers with generic `unify`. Next, in order: `compare`, at
+   known types and through the descriptors; the descriptors' functor tables
+   and field types (D3), with `io.write` as the walker that reads them and
+   mmc as its oracle; polymorphic `foreign_proc`s; then typeclass_infos and
+   existential types. Values of an abstract imported type are still "not yet
+   implemented": a module cannot pass one without its layout, as a notag
+   float travels in a float register.
 5. **Closures.** `merk.closure` and `merk.call_closure` (D7), higher-order
    calls, and the library's higher-order predicates that need them.
 6. **The library on terms.** `list`, `maybe` and `pair` compiled, and the

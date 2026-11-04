@@ -196,14 +196,17 @@ class MerkGenerator {
 public:
   MerkGenerator(mlir::MLIRContext &context, llvm::StringRef module,
       const parser::ParseTree &tree, const parser::TokenSequence &tokens,
-      const parser::AllSources &sources, const semantics::TypeChecking &types,
+      const parser::AllSources &sources,
+      const semantics::NameResolution &resolution,
+      semantics::TypeChecking &types,
       semantics::ModeChecking &modes,
       const semantics::DeterminismChecking &determinism,
       const semantics::PolymorphismAnalysis &polymorphism,
       const semantics::LoopTranslation &loops, const TargetInfo &target,
       parser::Messages &messages)
       : context_{context}, builder_{&context}, moduleName_{module},
-        tree_{tree}, tokens_{tokens}, sources_{sources}, types_{types},
+        tree_{tree}, tokens_{tokens}, sources_{sources},
+        resolution_{resolution}, types_{types},
         modes_{modes}, determinism_{determinism}, loops_{loops},
         target_{target}, messages_{messages} {
     for (const semantics::ProcedurePolymorphism &procedure :
@@ -247,10 +250,23 @@ private:
   // Comparable, made the first time: it switches on the first, and tests
   // that the second has the same constructor and equal arguments.
   merk::ProcOp UnifyProc(merk::TermType);
+  merk::ProcOp UnifyArrayProc();
+  // A type's type variables, in order of first appearance.
+  llvm::SmallVector<unsigned> VariablesOf(const semantics::Type &);
+  // Makes the merk.type_ctor of a type's constructor, with its unify entry,
+  // the first time; false with an error if it cannot have one yet.
+  bool EnsureDescriptor(const semantics::Type &, parser::CharBlock at);
+  bool EnsureVoidDescriptor();
+  void EmitDescriptor(llvm::StringRef constructor, llvm::StringRef module,
+      llvm::StringRef name, llvm::StringRef kind, llvm::StringRef linkage,
+      unsigned arity, mlir::Type term, merk::ProcOp unify);
+  merk::ProcOp UnifyEntry(llvm::StringRef constructor,
+      const semantics::Type *canonical, mlir::Type represented, bool dummy,
+      parser::CharBlock at);
   // The test that two values of a Comparable type are equal: arith's
   // comparison of integers or floats, or a call of the terms' unify
   // procedure.
-  void Equal(mlir::Value, mlir::Value, mlir::Location);
+  void Equal(mlir::Value, mlir::Value, const semantics::Type *, mlir::Location);
   // X = f(Y1, ..., Yn) of a term X: a construction, or a deconstruction,
   // with a test of X's constructor first if it can fail.
   void TermUnify(const Body &, const ProcedureBody &);
@@ -285,7 +301,7 @@ private:
   bool ArrayBuiltin(const Body &, const Procedure &,
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   // X = Y, or X = c, with both bound: a test.
-  void Test(const Body &, mlir::Value, mlir::Value);
+  void Test(const Body &, mlir::Value, mlir::Value, const semantics::Type *);
   // A call in its procedure's own modes, each output a fresh value.
   // The number of type_infos a procedure takes, or none with an error if it
   // has what code generation does not handle yet.
@@ -388,7 +404,8 @@ private:
   const parser::ParseTree &tree_;
   const parser::TokenSequence &tokens_;
   const parser::AllSources &sources_;
-  const semantics::TypeChecking &types_;
+  const semantics::NameResolution &resolution_;
+  semantics::TypeChecking &types_;
   semantics::ModeChecking &modes_;
   const semantics::DeterminismChecking &determinism_;
   const semantics::LoopTranslation &loops_;
@@ -407,6 +424,10 @@ private:
   // For the body being generated: each variable's value, and whether a
   // construct was not handled.
   llvm::DenseMap<BodyVar, mlir::Value> values_;
+  merk::ProcOp unifyArray_;
+  llvm::StringSet<> descriptors_;
+  // Where the unification being generated is, for its errors.
+  parser::CharBlock equalAt_;
   // The procedure's hidden type_infos, by type variable.
   llvm::DenseMap<unsigned, mlir::Value> typeInfos_;
   bool failed_{false};
@@ -590,6 +611,13 @@ mlir::Value MerkGenerator::Coerce(
   return value;
 }
 
+// Temporary (chunk 1 step 6, docs/INPROGRESS.md): the library's modules not
+// compiled yet, whose types' descriptors each module using them makes.
+static constexpr llvm::StringLiteral kUncompiledLibrary[]{"array", "bool",
+    "builtin", "char", "exception", "int", "int16", "int32", "int64", "int8",
+    "list", "maybe", "pair", "require", "string", "uint", "uint16", "uint32",
+    "uint64", "uint8", "univ"};
+
 // A type constructor's name in merk.type_info, with its arity.
 static std::optional<std::string> TypeConstructorName(
     const semantics::Type &type) {
@@ -608,11 +636,147 @@ static std::optional<std::string> TypeConstructorName(
   return name + arity;
 }
 
+void MerkGenerator::EmitDescriptor(llvm::StringRef constructor,
+    llvm::StringRef module, llvm::StringRef name, llvm::StringRef kind,
+    llvm::StringRef linkage, unsigned arity, mlir::Type term,
+    merk::ProcOp unify) {
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToEnd(module_.getBody());
+  merk::TypeCtorOp::create(builder_, builder_.getUnknownLoc(), constructor,
+      module, name, kind, linkage, arity,
+      term ? mlir::TypeAttr::get(term) : mlir::TypeAttr{},
+      unify ? mlir::FlatSymbolRefAttr::get(unify.getSymNameAttr())
+            : mlir::FlatSymbolRefAttr{});
+}
+
+bool MerkGenerator::EnsureVoidDescriptor() {
+  if (descriptors_.insert("void/0").second) {
+    // There are no values of it: only a value nothing determines has it, and
+    // nothing can compare those, so its entry is never reached.
+    EmitDescriptor("void/0", "", "void", "void", "linkonce", 0, {},
+        UnifyEntry("void/0", nullptr, {}, /*dummy=*/true, {}));
+  }
+  return true;
+}
+
+// The entry a generic unification calls: the type's arguments' type_infos out
+// of its own, and its values out of their words.
+merk::ProcOp MerkGenerator::UnifyEntry(llvm::StringRef constructor,
+    const semantics::Type *canonical, mlir::Type represented, bool dummy,
+    parser::CharBlock at) {
+  mlir::Location loc{builder_.getUnknownLoc()};
+  auto info{merk::TypeInfoType::get(&context_)};
+  auto word{merk::WordType::get(&context_)};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToEnd(module_.getBody());
+  auto proc{merk::ProcOp::create(builder_, loc,
+      ("unify_entry." + constructor).str(),
+      builder_.getFunctionType({info, word, word}, {}),
+      merk::Determinism::Semidet)};
+  proc.setPrivate();
+  mlir::Block *entry{proc.addEntryBlock()};
+  builder_.setInsertionPointToStart(entry);
+  if (!dummy) {
+    auto saved{std::move(typeInfos_)};
+    parser::CharBlock savedAt{equalAt_};
+    typeInfos_.clear();
+    equalAt_ = at;
+    // A tuple's cell has the number of its arguments in word 1.
+    unsigned first{canonical->kind == semantics::TypeKind::Tuple ? 2u : 1u};
+    for (auto [i, argument] : llvm::enumerate(canonical->arguments)) {
+      typeInfos_[argument->var] = merk::TypeInfoWordOp::create(builder_, loc,
+          info, entry->getArgument(0), first + i);
+    }
+    Equal(Coerce(entry->getArgument(1), represented, loc),
+        Coerce(entry->getArgument(2), represented, loc), canonical, loc);
+    typeInfos_ = std::move(saved);
+    equalAt_ = savedAt;
+  }
+  merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+  return proc;
+}
+
+bool MerkGenerator::EnsureDescriptor(
+    const semantics::Type &type, parser::CharBlock at) {
+  std::optional<std::string> constructor{TypeConstructorName(type)};
+  if (!constructor) {
+    return false;
+  }
+  if (descriptors_.contains(*constructor)) {
+    return true;
+  }
+  // Its most general instance, which its one unify entry works on.
+  semantics::TypeContext &context{types_.types()};
+  llvm::SmallVector<const semantics::Type *> variables;
+  for (unsigned i{0}; i < type.arguments.size(); ++i) {
+    variables.push_back(context.Variable(i));
+  }
+  const semantics::Type *canonical{type.kind == semantics::TypeKind::Tuple
+          ? context.Tuple(variables)
+          : context.Named(*type.constructor, variables)};
+  std::string module, name{"{}"};
+  std::string kind{"term"}, linkage{"linkonce"};
+  if (type.kind == semantics::TypeKind::Tuple) {
+    kind = "tuple";
+  } else {
+    module = type.constructor->module;
+    name = type.constructor->name;
+    if (module.empty()) {
+      kind = name == "character" ? "char" : name;
+    } else if (module == "array" && name == "array") {
+      kind = "array";
+    } else if (module == moduleName_) {
+      linkage = type.constructor->exported ? "external" : "internal";
+    } else if (!llvm::is_contained(kUncompiledLibrary, llvm::StringRef{module})) {
+      // The module that defines it has it; this one may not even see its
+      // constructors.
+      descriptors_.insert(*constructor);
+      EmitDescriptor(*constructor, module, name, kind, "declaration",
+          type.arguments.size(), {}, {});
+      return true;
+    }
+  }
+  std::optional<Represented> represented{Represent(canonical)};
+  if (!represented) {
+    NotYet(at, "type_infos of type " + semantics::TypeToString(type));
+    return false;
+  }
+  if (represented->dummy) {
+    kind = "dummy";
+    linkage = "linkonce";
+  }
+  // Before its entry, whose unification of a recursive type needs it.
+  descriptors_.insert(*constructor);
+  llvm::StringSet<> seen;
+  if (!represented->dummy && !Comparable(represented->type, seen)) {
+    NotYet(at, "type_infos of type " + semantics::TypeToString(type));
+    return false;
+  }
+  merk::ProcOp entry{UnifyEntry(*constructor, canonical, represented->type,
+      represented->dummy, at)};
+  EmitDescriptor(*constructor, module, name, kind, linkage,
+      type.arguments.size(),
+      mlir::isa_and_nonnull<merk::TermType>(represented->type)
+          ? represented->type
+          : mlir::Type{},
+      entry);
+  return true;
+}
+
 mlir::Value MerkGenerator::TypeInfoOfType(
     const semantics::Type *type, mlir::Location loc, parser::CharBlock at) {
+  if (type->kind == semantics::TypeKind::Variable) {
+    mlir::Value info{typeInfos_.lookup(type->var)};
+    if (!info) {
+      NotYet(at, "type_infos of type " + semantics::TypeToString(*type));
+    }
+    return info;
+  }
   std::optional<std::string> constructor{TypeConstructorName(*type)};
-  if (!constructor) {
-    NotYet(at, "type_infos of type " + semantics::TypeToString(*type));
+  if (!constructor || !EnsureDescriptor(*type, at)) {
+    if (!constructor) {
+      NotYet(at, "type_infos of type " + semantics::TypeToString(*type));
+    }
     return nullptr;
   }
   llvm::SmallVector<mlir::Value> arguments;
@@ -636,12 +800,16 @@ mlir::Value MerkGenerator::TypeInfoValue(const semantics::TypeInfo &info,
   case semantics::TypeInfoKind::Constant:
     return TypeInfoOfType(info.type, loc, at);
   case semantics::TypeInfoKind::Void:
+    EnsureVoidDescriptor();
     return merk::TypeInfoOp::create(
         builder_, loc, type, "void/0", mlir::ValueRange{});
   case semantics::TypeInfoKind::Cell: {
     std::optional<std::string> constructor{TypeConstructorName(*info.type)};
     if (!constructor) {
       NotYet(at, "type_infos of type " + semantics::TypeToString(*info.type));
+      return nullptr;
+    }
+    if (!EnsureDescriptor(*info.type, at)) {
       return nullptr;
     }
     llvm::SmallVector<mlir::Value> arguments;
@@ -734,7 +902,7 @@ void MerkGenerator::Call(const Body &goal, const Procedure &callee,
       if (failed_ || Terminated()) {
         continue;
       }
-      Test(goal, value, output);
+      Test(goal, value, output, body.vars[argument].type);
     }
     return;
   }
@@ -875,7 +1043,8 @@ void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
     if (goal.isVar && goal.unify == UnifyKind::Test) {
       // X = X succeeds, even for a NaN, as with mmc.
       if (goal.left != goal.var) {
-        Test(goal, ValueOf(goal.left), ValueOf(goal.var));
+        Test(goal, ValueOf(goal.left), ValueOf(goal.var),
+            body.vars[goal.left].type);
       }
       return;
     }
@@ -891,7 +1060,7 @@ void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
         (goal.unify == UnifyKind::Deconstruct ||
             goal.unify == UnifyKind::Test)) {
       if (mlir::Value constant{Constant(goal, body)}) {
-        Test(goal, ValueOf(goal.left), constant);
+        Test(goal, ValueOf(goal.left), constant, body.vars[goal.left].type);
       }
       return;
     }
@@ -1171,8 +1340,12 @@ void MerkGenerator::TermUnify(const Body &goal, const ProcedureBody &body) {
 }
 
 bool MerkGenerator::Comparable(mlir::Type type, llvm::StringSet<> &seen) {
-  if (mlir::isa<mlir::IntegerType, mlir::FloatType>(type)) {
+  if (mlir::isa<mlir::IntegerType, mlir::FloatType, merk::StringType,
+          merk::WordType>(type)) {
     return true;
+  }
+  if (auto array{mlir::dyn_cast<merk::ArrayType>(type)}) {
+    return Comparable(array.getElement(), seen);
   }
   auto term{mlir::dyn_cast<merk::TermType>(type)};
   if (!term) {
@@ -1203,15 +1376,26 @@ merk::ProcOp MerkGenerator::UnifyProc(merk::TermType term) {
       *modes_.ops().ConstructorsOf(type)};
   mlir::OpBuilder::InsertionGuard guard{builder_};
   builder_.setInsertionPointToEnd(module_.getBody());
+  // It takes a type_info for each type variable of its type, first.
+  llvm::SmallVector<unsigned> variables{VariablesOf(*type)};
+  llvm::SmallVector<mlir::Type> inputs(
+      variables.size(), merk::TypeInfoType::get(&context_));
+  inputs.append({term, term});
   auto proc{merk::ProcOp::create(builder_, loc,
-      ("unify." + term.getName()).str(),
-      builder_.getFunctionType({term, term}, {}), merk::Determinism::Semidet)};
+      ("unify." + term.getName()).str(), builder_.getFunctionType(inputs, {}),
+      merk::Determinism::Semidet)};
   proc.setPrivate();
   // Recorded first, for the calls of it on its terms' arguments.
   unifyProcs_[term.getName()] = proc;
   mlir::Block *entry{proc.addEntryBlock()};
   builder_.setInsertionPointToStart(entry);
-  mlir::Value x{entry->getArgument(0)}, y{entry->getArgument(1)};
+  auto saved{std::move(typeInfos_)};
+  typeInfos_.clear();
+  for (auto [i, var] : llvm::enumerate(variables)) {
+    typeInfos_[var] = entry->getArgument(i);
+  }
+  mlir::Value x{entry->getArgument(variables.size())};
+  mlir::Value y{entry->getArgument(variables.size() + 1)};
   llvm::SmallVector<mlir::Attribute> cases;
   for (const semantics::ConstructorTypes &constructor : constructors) {
     cases.push_back(builder_.getArrayAttr({merk::FunctorAttr::get(&context_,
@@ -1233,20 +1417,126 @@ merk::ProcOp MerkGenerator::UnifyProc(merk::TermType term) {
       }
       auto xs{merk::DeconstructOp::create(builder_, loc, fields, x, functor)};
       auto ys{merk::DeconstructOp::create(builder_, loc, fields, y, functor)};
-      for (auto [a, b] : llvm::zip(xs.getFields(), ys.getFields())) {
-        Equal(a, b, loc);
+      for (auto [a, b, argument] :
+          llvm::zip(xs.getFields(), ys.getFields(), constructor.arguments)) {
+        Equal(a, b, argument, loc);
       }
     }
     merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
   }
   builder_.setInsertionPointAfter(op);
   merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+  typeInfos_ = std::move(saved);
   return proc;
 }
 
-void MerkGenerator::Equal(mlir::Value x, mlir::Value y, mlir::Location loc) {
+llvm::SmallVector<unsigned> MerkGenerator::VariablesOf(
+    const semantics::Type &type) {
+  llvm::SmallVector<unsigned> variables;
+  semantics::ForEachVariable(type, [&](unsigned var) {
+    if (!llvm::is_contained(variables, var)) {
+      variables.push_back(var);
+    }
+  });
+  return variables;
+}
+
+// An array's elements are words whatever its type, so one procedure serves.
+merk::ProcOp MerkGenerator::UnifyArrayProc() {
+  if (unifyArray_) {
+    return unifyArray_;
+  }
+  mlir::Location loc{builder_.getUnknownLoc()};
+  auto info{merk::TypeInfoType::get(&context_)};
+  auto word{merk::WordType::get(&context_)};
+  auto array{merk::ArrayType::get(&context_, word)};
+  auto i64{builder_.getI64Type()};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToEnd(module_.getBody());
+  // From an index to the size: each element's test, then the rest's, as a
+  // tail call.
+  auto from{merk::ProcOp::create(builder_, loc, "unify.array.from",
+      builder_.getFunctionType({info, array, array, i64, i64}, {}),
+      merk::Determinism::Semidet)};
+  from.setPrivate();
+  {
+    mlir::Block *entry{from.addEntryBlock()};
+    builder_.setInsertionPointToStart(entry);
+    mlir::Value i{entry->getArgument(3)}, n{entry->getArgument(4)};
+    auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
+    builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
+    merk::GuardOp::create(builder_, loc,
+        mlir::arith::CmpIOp::create(
+            builder_, loc, mlir::arith::CmpIPredicate::slt, i, n));
+    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+    builder_.setInsertionPointToStart(&ite.getThenRegion().emplaceBlock());
+    auto element{[&](unsigned argument) -> mlir::Value {
+      return merk::ArrayGetOp::create(
+          builder_, loc, word, entry->getArgument(argument), i);
+    }};
+    merk::GuardOp::create(builder_, loc,
+        merk::UnifyWordOp::create(builder_, loc, builder_.getI1Type(),
+            entry->getArgument(0), element(1), element(2)));
+    mlir::Value next{mlir::arith::AddIOp::create(
+        builder_, loc, i, IntegerConstant(i64, 1, loc))};
+    merk::CallOp::create(builder_, loc, mlir::TypeRange{}, from.getSymName(),
+        mlir::ValueRange{entry->getArgument(0), entry->getArgument(1),
+            entry->getArgument(2), next, n});
+    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+    builder_.setInsertionPointToStart(&ite.getElseRegion().emplaceBlock());
+    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+    builder_.setInsertionPointAfter(ite);
+    merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+  }
+  builder_.setInsertionPointToEnd(module_.getBody());
+  unifyArray_ = merk::ProcOp::create(builder_, loc, "unify.array",
+      builder_.getFunctionType({info, array, array}, {}),
+      merk::Determinism::Semidet);
+  unifyArray_.setPrivate();
+  mlir::Block *entry{unifyArray_.addEntryBlock()};
+  builder_.setInsertionPointToStart(entry);
+  mlir::Value size{merk::ArraySizeOp::create(
+      builder_, loc, i64, entry->getArgument(1))};
+  merk::GuardOp::create(builder_, loc,
+      mlir::arith::CmpIOp::create(builder_, loc, mlir::arith::CmpIPredicate::eq,
+          size,
+          merk::ArraySizeOp::create(builder_, loc, i64, entry->getArgument(2))));
+  merk::CallOp::create(builder_, loc, mlir::TypeRange{}, from.getSymName(),
+      mlir::ValueRange{entry->getArgument(0), entry->getArgument(1),
+          entry->getArgument(2), IntegerConstant(i64, 0, loc), size});
+  merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+  return unifyArray_;
+}
+
+void MerkGenerator::Equal(mlir::Value x, mlir::Value y,
+    const semantics::Type *semantic, mlir::Location loc) {
   mlir::Type type{x.getType()};
-  if (mlir::isa<mlir::IntegerType>(type)) {
+  if (mlir::isa<merk::WordType>(type) ||
+      semantic->kind == semantics::TypeKind::Variable) {
+    mlir::Value info{typeInfos_.lookup(semantic->var)};
+    if (!info) {
+      NotYet(equalAt_, "a unification of a type variable without a type_info");
+      return;
+    }
+    merk::GuardOp::create(builder_, loc,
+        merk::UnifyWordOp::create(
+            builder_, loc, builder_.getI1Type(), info, x, y));
+  } else if (mlir::isa<merk::StringType>(type)) {
+    merk::GuardOp::create(builder_, loc,
+        merk::StringEqualOp::create(
+            builder_, loc, builder_.getI1Type(), x, y));
+  } else if (mlir::isa<merk::ArrayType>(type)) {
+    mlir::Value info{
+        TypeInfoOfType(semantic->arguments[0], loc, equalAt_)};
+    if (!info) {
+      failed_ = true;
+      return;
+    }
+    auto words{merk::ArrayType::get(&context_, merk::WordType::get(&context_))};
+    merk::CallOp::create(builder_, loc, mlir::TypeRange{},
+        UnifyArrayProc().getSymName(),
+        mlir::ValueRange{info, Coerce(x, words, loc), Coerce(y, words, loc)});
+  } else if (mlir::isa<mlir::IntegerType>(type)) {
     merk::GuardOp::create(builder_, loc,
         mlir::arith::CmpIOp::create(
             builder_, loc, mlir::arith::CmpIPredicate::eq, x, y));
@@ -1256,19 +1546,30 @@ void MerkGenerator::Equal(mlir::Value x, mlir::Value y, mlir::Location loc) {
         mlir::arith::CmpFOp::create(
             builder_, loc, mlir::arith::CmpFPredicate::OEQ, x, y));
   } else {
+    llvm::SmallVector<mlir::Value> inputs;
+    for (unsigned var : VariablesOf(*semantic)) {
+      mlir::Value info{typeInfos_.lookup(var)};
+      if (!info) {
+        NotYet(equalAt_, "a unification of a type variable without a type_info");
+        return;
+      }
+      inputs.push_back(info);
+    }
+    inputs.append({x, y});
     merk::CallOp::create(builder_, loc, mlir::TypeRange{},
-        UnifyProc(mlir::cast<merk::TermType>(type)).getSymName(),
-        mlir::ValueRange{x, y});
+        UnifyProc(mlir::cast<merk::TermType>(type)).getSymName(), inputs);
   }
 }
 
-void MerkGenerator::Test(const Body &goal, mlir::Value x, mlir::Value y) {
+void MerkGenerator::Test(const Body &goal, mlir::Value x, mlir::Value y,
+    const semantics::Type *type) {
   llvm::StringSet<> seen;
   if (!x || !y || !Comparable(x.getType(), seen)) {
     NotYet(Where(goal.tokens), "this unification");
     return;
   }
-  Equal(x, y, Location(goal.tokens));
+  equalAt_ = Where(goal.tokens);
+  Equal(x, y, type, Location(goal.tokens));
 }
 
 std::vector<BodyVar> MerkGenerator::BoundSince(
@@ -3279,6 +3580,28 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
       GenerateBody(body);
     }
   }
+  // An exported type's descriptor is here, for the modules that import it,
+  // which may not see its constructors. One that cannot be made yet is left
+  // to those that use it, which fail to link.
+  for (const semantics::Symbol *symbol : resolution_.module().symbols()) {
+    if (symbol->kind != semantics::SymbolKind::Type || !symbol->exported ||
+        !std::holds_alternative<const parser::DuTypeDefn *>(
+            symbol->declaration)) {
+      continue;
+    }
+    semantics::TypeContext &context{types_.types()};
+    llvm::SmallVector<const semantics::Type *> variables;
+    for (unsigned i{0}; i < symbol->arity; ++i) {
+      variables.push_back(context.Variable(i));
+    }
+    const semantics::Type *canonical{context.Named(*symbol, variables)};
+    llvm::StringSet<> seen;
+    std::optional<Represented> represented{Represent(canonical)};
+    if (represented && (represented->dummy ||
+                           Comparable(represented->type, seen))) {
+      EnsureDescriptor(*canonical, symbol->source);
+    }
+  }
   if (!foreignCode_.empty()) {
     // The module's own foreign_decl and foreign_code for C come first.
     std::string code{kForeignPrelude};
@@ -3325,12 +3648,13 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
 mlir::OwningOpRef<mlir::ModuleOp> GenerateMerk(mlir::MLIRContext &context,
     llvm::StringRef module, const parser::ParseTree &tree,
     const parser::TokenSequence &tokens, const parser::AllSources &sources,
-    const semantics::TypeChecking &types, semantics::ModeChecking &modes,
+    const semantics::NameResolution &resolution, semantics::TypeChecking &types,
+    semantics::ModeChecking &modes,
     const semantics::DeterminismChecking &determinism,
     const semantics::PolymorphismAnalysis &polymorphism,
     const semantics::LoopTranslation &loops, const TargetInfo &target,
     parser::Messages &messages) {
-  return MerkGenerator{context, module, tree, tokens, sources, types, modes,
+  return MerkGenerator{context, module, tree, tokens, sources, resolution, types, modes,
       determinism, polymorphism, loops, target, messages}
       .Generate();
 }
