@@ -176,6 +176,24 @@ void TargetInfo::AddModuleFlags(llvm::Module &module) const {
   }
 }
 
+// From the back ends' return conventions: RetCC_X86_64_C and
+// RetCC_X86Common (RAX, RDX and RCX; XMM0 and XMM1), RetCC_AArch64_AAPCS
+// (X0 to X7; D0 to D7) and RetCC_AMDGPU_Func (VGPR0 to VGPR31, two to a
+// 64-bit value). Elsewhere, two of each, as RISC-V's a0 and a1 and fa0 and
+// fa1, the fewest of LLVM's targets.
+TargetInfo::ResultRegisters TargetInfo::Results() const {
+  if (triple_.getArch() == llvm::Triple::x86_64) {
+    return {3, 2};
+  }
+  if (triple_.isAArch64()) {
+    return {8, 8};
+  }
+  if (triple_.isAMDGPU()) {
+    return {32 / (WordBits() / 32), 0, /*shared=*/true};
+  }
+  return {2, 2};
+}
+
 unsigned TargetInfo::TagBits() const {
   return llvm::Log2_32(PointerAlignBits(addressSpaces_.generic) / 8);
 }
