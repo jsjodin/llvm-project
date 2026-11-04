@@ -130,9 +130,18 @@ static std::optional<llvm::APInt> IntegerValue(
 }
 
 // The C type of a Mercury type's values (reference manual, "C data passing
-// conventions"), for the primitive types code generation passes.
+// conventions"): a tuple is an MR_Tuple, a type without its own is an MR_Word,
+// and an array is an MR_ArrayPtr, as mmc passes it.
 static std::string CType(const semantics::Type &type) {
+  if (type.kind == semantics::TypeKind::Tuple) {
+    return "MR_Tuple";
+  }
   llvm::StringRef name{type.constructor->name};
+  if (!type.constructor->module.empty()) {
+    return type.constructor->module == "array" && name == "array"
+        ? "MR_ArrayPtr"
+        : "MR_Word";
+  }
   if (name == "int") {
     return "MR_Integer";
   }
@@ -162,6 +171,8 @@ typedef int32_t MR_Char;
 typedef char *MR_String;
 typedef const char *MR_ConstString;
 typedef uintptr_t MR_Word;
+typedef void *MR_Tuple;
+typedef void *MR_ArrayPtr;
 typedef int MR_bool;
 #define MR_TRUE 1
 #define MR_FALSE 0
@@ -1071,20 +1082,37 @@ void MerkGenerator::GenerateForeign(
   mlir::OpBuilder::InsertionGuard guard{builder_};
   builder_.setInsertionPointToStart(entry);
   mlir::Location loc{Location(Where(pragma.tokens))};
+  // A term is an MR_Word or MR_Tuple in C whatever its layout, so it crosses
+  // as its word: a notag type's float would otherwise be in a float register.
+  auto word{merk::WordType::get(&context_)};
+  llvm::SmallVector<mlir::Value> inputs;
+  for (mlir::Value argument : entry->getArguments()) {
+    inputs.push_back(mlir::isa<merk::TermType>(argument.getType())
+            ? mlir::Value{merk::ToWordOp::create(builder_, loc, word, argument)}
+            : argument);
+  }
   llvm::SmallVector<mlir::Type> results;
   if (canFail) {
     results.push_back(builder_.getI1Type());
   }
-  results.append(proc.getFunctionType().getResults().begin(),
-      proc.getFunctionType().getResults().end());
-  auto call{merk::ForeignCallOp::create(builder_, loc, results, name,
-      entry->getArguments(), canFail)};
+  for (mlir::Type type : proc.getFunctionType().getResults()) {
+    results.push_back(mlir::isa<merk::TermType>(type) ? word : type);
+  }
+  auto call{merk::ForeignCallOp::create(
+      builder_, loc, results, name, inputs, canFail)};
   mlir::ValueRange solution{call.getResults()};
   if (canFail) {
     merk::GuardOp::create(builder_, loc, solution.front());
     solution = solution.drop_front();
   }
-  merk::SucceedOp::create(builder_, loc, solution);
+  llvm::SmallVector<mlir::Value> values;
+  for (auto [value, type] :
+      llvm::zip(solution, proc.getFunctionType().getResults())) {
+    values.push_back(mlir::isa<merk::TermType>(type)
+            ? mlir::Value{merk::FromWordOp::create(builder_, loc, type, value)}
+            : value);
+  }
+  merk::SucceedOp::create(builder_, loc, values);
 }
 
 void MerkGenerator::TermUnify(const Body &goal, const ProcedureBody &body) {
