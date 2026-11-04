@@ -53,8 +53,9 @@ messages can be ground terms at first.
 
 ### Where it starts
 
-Code generation handles primitive types, strings, `io.state` and arrays of
-word-sized values. It reports as not yet implemented any other type
+(As of 2026-11-04, before step 1; steps 1 to 3 are done.) Code generation
+handles primitive types, strings, `io.state` and arrays of word-sized
+values. It reports as not yet implemented any other type
 ("values of type ..."), polymorphic procedures and calls with hidden
 arguments, disjunctions, and unifications other than assignments and tests
 of primitive values. The `merk` dialect has no term type and none of
@@ -88,7 +89,10 @@ bumps them, and the scheduler lowers the limit to preempt.
   target, which LLVM supports only partly.
 
 To be decided with chunk 2's context switch in mind; the allocation fast
-path is written so that only where the pair is read changes.
+path is written so that only where the pair is read changes. Until then
+(step 3) the pair is thread-local, `merk_heap` in `runtime/heap.cpp`, which
+the first option's cost is, with a thread's heap where the first option
+has a process's: only `mrt.alloc`'s lowering and `runtime/heap.h` read it.
 
 **D3. `type_info` and type descriptors.** A `type_info` for a type with no
 arguments is the address of its static descriptor (`mrt.rtti`); for an
@@ -115,9 +119,9 @@ start. Packed enum fields later, since they change field access, not the
 dialect.
 
 **D6. Static ground terms and the collector.** A ground term known at
-compile time is a global. The collector must not copy it; with headerless
-cells (D1) it knows by the address: a pointer outside the process's heap
-chunks is static or a received fragment's.
+compile time is a global (done in step 3). The collector must not copy it;
+with headerless cells (D1) it knows by the address: a pointer outside the
+process's heap chunks is static or a received fragment's.
 
 **D7. Closure layout and calls.** A closure is a cell with the code
 pointer, the number of captured arguments and the captured arguments; a
@@ -146,11 +150,15 @@ program.
    ground terms (step 3), unifications of terms with `string` or array
    arguments, and the library's `list`, `maybe` and `pair` predicates
    (step 6).
-3. **The `mrt` dialect.** `mrt.alloc` with a bump pointer and limit check,
-   whose slow path is `merk_alloc_slow` in the runtime, taking chunks that
-   are never freed; `mrt.tag`, `mrt.untag`, `mrt.field_load`,
-   `mrt.field_store`, and D1's headerless cells. `merk` now lowers through `mrt`, and
-   the arrays move onto it. Static ground terms as globals (D6).
+3. **Done:** the `mrt` dialect. `mrt.alloc` with a bump pointer and
+   limit check, whose slow path is `merk_alloc_slow` in the runtime, taking
+   chunks that are never freed; `mrt.tag`, `mrt.untag`,
+   `mrt.primary_tag`, `mrt.field_load`, `mrt.field_store`, and D1's
+   headerless cells. Terms lower through `mrt`, and the runtime's arrays
+   allocate on the same heap. Static ground terms as globals (D6), one for
+   each cell's contents. The heap pointer and limit are thread-local until
+   D2. Left for chunk 3: arrays' element loads and stores as `mrt`
+   operations, for the write barrier.
 4. **Polymorphism.** Hidden `type_info` arguments first, as the calling
    convention says, static type descriptors and `mrt.rtti` (D3),
    polymorphic `unify` and `compare` through the descriptors, and

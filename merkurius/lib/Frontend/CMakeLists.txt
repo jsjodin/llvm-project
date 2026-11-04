@@ -6,10 +6,12 @@ add_merkurius_library(MerkuriusFrontend
   DEPENDS
   MerkuriusDriverOptions
   MerkOpsIncGen
+  MrtOpsIncGen
 
   LINK_LIBS
   MerkuriusCodeGen
   MerkuriusMerkDialect
+  MerkuriusMrtDialect
   MerkuriusDriver
   MerkuriusParser
   MerkuriusSemantics
