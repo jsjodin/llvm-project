@@ -285,8 +285,8 @@ program.
    operations, for the write barrier.
 4. **Polymorphism.** Done: canonical words for narrow fields, hidden
    `type_info` arguments, polymorphic procedures on terms and arrays, and
-   descriptors' headers with generic `unify`. Next, in order: `compare`, at
-   known types and through the descriptors; the descriptors' functor tables
+   descriptors' headers with generic `unify` and `compare`. Next, in order:
+   the descriptors' functor tables
    and field types (D3), with `io.write` as the walker that reads them and
    mmc as its oracle; polymorphic `foreign_proc`s; then typeclass_infos and
    existential types. Values of an abstract imported type are still "not yet
