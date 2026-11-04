@@ -281,11 +281,13 @@ program.
    each cell's contents. The heap pointer and limit are thread-local until
    D2. Left for chunk 3: arrays' element loads and stores as `mrt`
    operations, for the write barrier.
-4. **Polymorphism.** Canonical words for narrow fields first (done), then
-   hidden `type_info` arguments, as the calling convention says, static
-   type descriptors and `mrt.rtti` (D3),
-   polymorphic `unify` and `compare` through the descriptors, and
-   polymorphic procedures.
+4. **Polymorphism.** Done: canonical words for narrow fields, hidden
+   `type_info` arguments, and procedures that only pass values of a bare
+   type variable along. Next, in order: terms with type variables, such as
+   `list(T)`, and `array(T)`; static type descriptors and `mrt.rtti` (D3),
+   which replace the placeholder symbols `merk.type_ctor.*`; polymorphic
+   `unify` and `compare` through the descriptors; polymorphic `foreign_proc`s;
+   then typeclass_infos and existential types.
 5. **Closures.** `merk.closure` and `merk.call_closure` (D7), higher-order
    calls, and the library's higher-order predicates that need them.
 6. **The library on terms.** `list`, `maybe` and `pair` compiled, and the

@@ -63,6 +63,21 @@ def Merk_TermType : TypeDef<Merk_Dialect, "Term"> {
   let assemblyFormat = "`<` $name `>`";
 }
 
+// A value of a type variable: one word that polymorphic code passes without
+// looking inside it (design document, "Type representation").
+def Merk_WordType : TypeDef<Merk_Dialect, "Word"> {
+  let mnemonic = "word";
+  let summary = "a value of a type variable";
+}
+
+// A run-time description of a type, a tagged pointer: tag 0 for a descriptor
+// of a type of arity 0, tag 1 for a cell of a descriptor and its arguments'
+// type_infos (design document, "Type descriptors").
+def Merk_TypeInfoType : TypeDef<Merk_Dialect, "TypeInfo"> {
+  let mnemonic = "type_info";
+  let summary = "a run-time description of a type";
+}
+
 // A constructor of a type, as merk.type_def lists them: its name and the
 // types of its arguments, none for a constant.
 def Merk_ConstructorAttr : AttrDef<Merk_Dialect, "Constructor"> {

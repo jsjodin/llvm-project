@@ -275,6 +275,13 @@ private:
   // X = Y, or X = c, with both bound: a test.
   void Test(const Body &, mlir::Value, mlir::Value);
   // A call in its procedure's own modes, each output a fresh value.
+  // The number of type_infos a procedure takes, or none with an error if it
+  // has what code generation does not handle yet.
+  std::optional<unsigned> HiddenTypeInfos(const Procedure &, parser::CharBlock);
+  mlir::Value TypeInfoOfType(
+      const semantics::Type *, mlir::Location, parser::CharBlock);
+  mlir::Value TypeInfoValue(
+      const semantics::TypeInfo &, mlir::Location, parser::CharBlock);
   void Called(const Body &, const Procedure &, llvm::ArrayRef<BodyVar>,
       const ProcedureBody &);
   void IfThenElse(const Body &, const ProcedureBody &);
@@ -385,6 +392,8 @@ private:
   // For the body being generated: each variable's value, and whether a
   // construct was not handled.
   llvm::DenseMap<BodyVar, mlir::Value> values_;
+  // The procedure's hidden type_infos, by type variable.
+  llvm::DenseMap<unsigned, mlir::Value> typeInfos_;
   bool failed_{false};
 };
 
@@ -400,6 +409,9 @@ mlir::Location MerkGenerator::Location(parser::CharBlock at) {
 
 std::optional<Represented> MerkGenerator::Represent(
     const semantics::Type *type) {
+  if (type->kind == semantics::TypeKind::Variable) {
+    return Represented{merk::WordType::get(&context_)};
+  }
   if (type->kind == semantics::TypeKind::Tuple) {
     return RepresentTerm(type);
   }
@@ -441,7 +453,10 @@ std::optional<Represented> MerkGenerator::Represent(
   if (constructor.module == "array" && name == "array" &&
       type->arguments.size() == 1) {
     std::optional<Represented> element{Represent(type->arguments[0])};
+    // Temporary (chunk 1 step 4, docs/INPROGRESS.md): array(T) waits for
+    // polymorphic terms, since array(int) is passed as array(T) then.
     if (!element || element->dummy ||
+        mlir::isa<merk::WordType>(element->type) ||
         (!mlir::isa<merk::StringType, merk::ArrayType, merk::TermType>(
              element->type) &&
             element->type.getIntOrFloatBitWidth() > target_.WordBits())) {
@@ -528,6 +543,99 @@ static std::optional<merk::Determinism> MerkDeterminism(
   }
 }
 
+std::optional<unsigned> MerkGenerator::HiddenTypeInfos(
+    const Procedure &procedure, parser::CharBlock at) {
+  const semantics::Signature *signature{types_.SignatureOf(*procedure.symbol)};
+  if (!signature) {
+    return 0;
+  }
+  // Temporary (chunk 1 step 4, docs/INPROGRESS.md): typeclass_infos and hidden
+  // outputs come after type_infos.
+  if (!signature->constraints.empty() || signature->existentials != 0 ||
+      !signature->existentialConstraints.empty()) {
+    NotYet(at, "type class constraints and existential types");
+    return std::nullopt;
+  }
+  llvm::SmallDenseSet<unsigned> variables;
+  for (const semantics::Type *argument : signature->arguments) {
+    semantics::ForEachVariable(
+        *argument, [&](unsigned var) { variables.insert(var); });
+  }
+  return variables.size();
+}
+
+// A type constructor's name in merk.type_info, with its arity.
+static std::optional<std::string> TypeConstructorName(
+    const semantics::Type &type) {
+  std::string arity{"/" + std::to_string(type.arguments.size())};
+  if (type.kind == semantics::TypeKind::Tuple) {
+    return "{}" + arity;
+  }
+  if (type.kind != semantics::TypeKind::Named) {
+    return std::nullopt;
+  }
+  const semantics::Symbol &symbol{*type.constructor};
+  std::string name{symbol.name};
+  if (!symbol.module.empty()) {
+    name = std::string{symbol.module} + "." + name;
+  }
+  return name + arity;
+}
+
+mlir::Value MerkGenerator::TypeInfoOfType(
+    const semantics::Type *type, mlir::Location loc, parser::CharBlock at) {
+  std::optional<std::string> constructor{TypeConstructorName(*type)};
+  if (!constructor) {
+    NotYet(at, "type_infos of type " + semantics::TypeToString(*type));
+    return nullptr;
+  }
+  llvm::SmallVector<mlir::Value> arguments;
+  for (const semantics::Type *argument : type->arguments) {
+    mlir::Value info{TypeInfoOfType(argument, loc, at)};
+    if (!info) {
+      return nullptr;
+    }
+    arguments.push_back(info);
+  }
+  return merk::TypeInfoOp::create(builder_, loc,
+      merk::TypeInfoType::get(&context_), *constructor, arguments);
+}
+
+mlir::Value MerkGenerator::TypeInfoValue(const semantics::TypeInfo &info,
+    mlir::Location loc, parser::CharBlock at) {
+  auto type{merk::TypeInfoType::get(&context_)};
+  switch (info.kind) {
+  case semantics::TypeInfoKind::Parameter:
+    return typeInfos_.lookup(info.parameter);
+  case semantics::TypeInfoKind::Constant:
+    return TypeInfoOfType(info.type, loc, at);
+  case semantics::TypeInfoKind::Void:
+    return merk::TypeInfoOp::create(
+        builder_, loc, type, "void/0", mlir::ValueRange{});
+  case semantics::TypeInfoKind::Cell: {
+    std::optional<std::string> constructor{TypeConstructorName(*info.type)};
+    if (!constructor) {
+      NotYet(at, "type_infos of type " + semantics::TypeToString(*info.type));
+      return nullptr;
+    }
+    llvm::SmallVector<mlir::Value> arguments;
+    for (const semantics::TypeInfo *argument : info.arguments) {
+      mlir::Value value{TypeInfoValue(*argument, loc, at)};
+      if (!value) {
+        return nullptr;
+      }
+      arguments.push_back(value);
+    }
+    return merk::TypeInfoOp::create(builder_, loc, type, *constructor, arguments);
+  }
+  default:
+    // Temporary (chunk 1 step 4, docs/INPROGRESS.md): those in typeclass_infos
+    // and those that goals give.
+    NotYet(at, "type_infos from type classes and existential types");
+    return nullptr;
+  }
+}
+
 merk::ProcOp MerkGenerator::ProcFor(const Procedure &procedure,
     llvm::ArrayRef<const semantics::Type *> types, parser::CharBlock at) {
   if (merk::ProcOp proc{procs_.lookup(&procedure)}) {
@@ -547,7 +655,13 @@ merk::ProcOp MerkGenerator::ProcFor(const Procedure &procedure,
             : std::string{"procedures of unknown determinism"});
     return nullptr;
   }
-  llvm::SmallVector<mlir::Type> inputs, outputs;
+  std::optional<unsigned> hidden{HiddenTypeInfos(procedure, at)};
+  if (!hidden) {
+    return nullptr;
+  }
+  llvm::SmallVector<mlir::Type> inputs(
+      *hidden, merk::TypeInfoType::get(&context_));
+  llvm::SmallVector<mlir::Type> outputs;
   for (auto [mode, type] : llvm::zip(procedure.modes, types)) {
     std::optional<Represented> represented{Represent(type)};
     if (!represented) {
@@ -606,30 +720,95 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
   if (Builtin(goal, callee, arguments, body)) {
     return;
   }
-  llvm::SmallVector<const semantics::Type *> types;
-  for (BodyVar argument : arguments) {
-    types.push_back(body.vars[argument].type);
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  std::optional<unsigned> hidden{HiddenTypeInfos(callee, at)};
+  if (!hidden) {
+    failed_ = true;
+    return;
   }
-  merk::ProcOp proc{ProcFor(callee, types, Where(goal.tokens))};
+  // A polymorphic callee takes its declared types, whatever the caller's are.
+  llvm::SmallVector<const semantics::Type *> types;
+  if (*hidden != 0) {
+    llvm::ArrayRef<const semantics::Type *> declared{
+        types_.SignatureOf(*callee.symbol)->arguments};
+    types.append(declared.begin(), declared.end());
+  } else {
+    for (BodyVar argument : arguments) {
+      types.push_back(body.vars[argument].type);
+    }
+  }
+  merk::ProcOp proc{ProcFor(callee, types, at)};
   if (!proc) {
     return;
   }
   llvm::SmallVector<mlir::Value> inputs;
-  llvm::SmallVector<BodyVar> outputs;
-  for (auto [argument, mode] : llvm::zip(arguments, callee.modes)) {
-    if (Represent(body.vars[argument].type)->dummy) {
+  if (*hidden != 0) {
+    const semantics::ProcedurePolymorphism *polymorphism{
+        polymorphism_.lookup(&body)};
+    const semantics::PassedInfos *passed{nullptr};
+    if (polymorphism) {
+      if (auto it{polymorphism->goals.find(&goal)};
+          it != polymorphism->goals.end()) {
+        passed = &it->second;
+      }
+    }
+    if (!passed || passed->typeInfos.size() != *hidden) {
+      NotYet(at, "this call's type_infos");
+      return;
+    }
+    for (const semantics::TypeInfo *info : passed->typeInfos) {
+      mlir::Value value{TypeInfoValue(*info, loc, at)};
+      if (!value) {
+        failed_ = true;
+        return;
+      }
+      inputs.push_back(value);
+    }
+  }
+  // None for a value with no bits at a type variable's place, whose word
+  // comes back unused.
+  llvm::SmallVector<std::optional<BodyVar>> outputs;
+  for (auto [argument, mode, type] : llvm::zip(arguments, callee.modes, types)) {
+    std::optional<Represented> actual{Represent(body.vars[argument].type)};
+    if (!actual) {
+      NotYet(at, "values of type " +
+              semantics::TypeToString(*body.vars[argument].type));
+      return;
+    }
+    bool dummy{actual->dummy};
+    if (Represent(type)->dummy) {
       continue;
     }
     if (IsOutput(mode)) {
-      outputs.push_back(argument);
+      outputs.push_back(dummy ? std::nullopt : std::make_optional(argument));
+    } else if (dummy) {
+      inputs.push_back(merk::ToWordOp::create(builder_, loc,
+          merk::WordType::get(&context_),
+          IntegerConstant(builder_.getI64Type(), 0, loc)));
     } else {
-      inputs.push_back(ValueOf(argument));
+      mlir::Value value{ValueOf(argument)};
+      if (mlir::isa<merk::WordType>(Represent(type)->type) &&
+          !mlir::isa<merk::WordType>(value.getType())) {
+        value = merk::ToWordOp::create(
+            builder_, loc, merk::WordType::get(&context_), value);
+      }
+      inputs.push_back(value);
     }
   }
-  auto call{merk::CallOp::create(builder_, Location(goal.tokens),
+  auto call{merk::CallOp::create(builder_, loc,
       proc.getFunctionType().getResults(), proc.getSymName(), inputs)};
   for (auto [var, result] : llvm::zip(outputs, call.getResults())) {
-    values_[var] = result;
+    if (!var) {
+      continue;
+    }
+    mlir::Value value{result};
+    mlir::Type type{Represent(body.vars[*var].type)->type};
+    if (mlir::isa<merk::WordType>(value.getType()) &&
+        !mlir::isa<merk::WordType>(type)) {
+      value = merk::FromWordOp::create(builder_, loc, type, value);
+    }
+    values_[*var] = value;
   }
 }
 
@@ -816,6 +995,16 @@ void MerkGenerator::GenerateForeign(
   const semantics::Signature *signature{
       types_.SignatureOf(*procedure.symbol)};
   if (!signature) {
+    return;
+  }
+  // Temporary (chunk 1 step 4, docs/INPROGRESS.md): a polymorphic foreign_proc
+  // has its type_infos as C variables, TypeInfo_for_T (reference manual).
+  std::optional<unsigned> hidden{HiddenTypeInfos(procedure, at)};
+  if (!hidden) {
+    return;
+  }
+  if (*hidden != 0) {
+    NotYet(at, "polymorphic foreign_procs");
     return;
   }
   merk::ProcOp proc{ProcFor(procedure, signature->arguments, at)};
@@ -2981,9 +3170,10 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body) {
     NotYet(at, "instance methods");
     return;
   }
-  if (const auto *polymorphism{polymorphism_.lookup(&body)};
-      polymorphism && !polymorphism->hidden.empty()) {
-    NotYet(at, "polymorphic procedures");
+  const auto *polymorphism{polymorphism_.lookup(&body)};
+  if (polymorphism &&
+      polymorphism->unchecked != semantics::PolymorphismUnchecked::None) {
+    NotYet(at, "this procedure's type_infos");
     return;
   }
   llvm::SmallVector<const semantics::Type *> types;
@@ -2998,11 +3188,17 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body) {
     proc.setPublic();
   }
   values_.clear();
+  typeInfos_.clear();
   mlir::Block *entry{proc.addEntryBlock()};
   mlir::OpBuilder::InsertionGuard guard{builder_};
   builder_.setInsertionPointToStart(entry);
   llvm::SmallVector<BodyVar> outputs;
   unsigned input{0};
+  if (polymorphism) {
+    for (const semantics::HiddenArgument &argument : polymorphism->hidden) {
+      typeInfos_[argument.typeInfo->parameter] = entry->getArgument(input++);
+    }
+  }
   for (auto [var, mode] : llvm::zip(body.head, procedure.modes)) {
     if (Represent(body.vars[var].type)->dummy) {
       continue;
