@@ -167,18 +167,47 @@ llvm::LogicalResult SwitchOp::verify() {
         << getCases().size() << " cases but " << getCaseRegions().size()
         << " regions";
   }
+  bool term{mlir::isa<TermType>(getValue().getType())};
   for (mlir::Attribute c : getCases()) {
     auto constants{mlir::dyn_cast<mlir::ArrayAttr>(c)};
     if (!constants || constants.empty()) {
       return emitOpError("has a case that is not a list of constants");
     }
     for (mlir::Attribute constant : constants) {
+      if (term) {
+        if (!mlir::isa<FunctorAttr>(constant)) {
+          return emitOpError("has a case constant that is not a functor");
+        }
+        continue;
+      }
       auto integer{mlir::dyn_cast<mlir::IntegerAttr>(constant)};
       if (!integer || integer.getType() != getValue().getType()) {
         return emitOpError("has a case constant that is not of type ")
             << getValue().getType();
       }
     }
+  }
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
+// ConstructOp and DeconstructOp
+//===----------------------------------------------------------------------===//
+
+llvm::LogicalResult ConstructOp::verify() {
+  if (getArguments().size() != getFunctor().getArity()) {
+    return emitOpError("has ")
+        << getArguments().size() << " arguments for a functor of arity "
+        << getFunctor().getArity();
+  }
+  return mlir::success();
+}
+
+llvm::LogicalResult DeconstructOp::verify() {
+  if (getFields().size() != getFunctor().getArity()) {
+    return emitOpError("has ")
+        << getFields().size() << " results for a functor of arity "
+        << getFunctor().getArity();
   }
   return mlir::success();
 }

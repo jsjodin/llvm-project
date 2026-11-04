@@ -16,6 +16,11 @@
 // RUN: not merkc -fc1 -emit-merk %t/yield.mlir 2>&1 | FileCheck %s --check-prefix=YIELD
 // RUN: not merkc -fc1 -emit-merk %t/array-get.mlir 2>&1 | FileCheck %s --check-prefix=ARRAY-GET
 // RUN: not merkc -fc1 -emit-merk %t/array-set.mlir 2>&1 | FileCheck %s --check-prefix=ARRAY-SET
+// RUN: not merkc -fc1 -emit-merk %t/construct.mlir 2>&1 | FileCheck %s --check-prefix=CONSTRUCT
+// RUN: not merkc -fc1 -emit-merk %t/deconstruct.mlir 2>&1 | FileCheck %s --check-prefix=DECONSTRUCT
+// RUN: not merkc -fc1 -emit-merk %t/switch-functor.mlir 2>&1 | FileCheck %s --check-prefix=SWITCH-FUNCTOR
+// RUN: not merkc -fc1 -emit-llvm %t/type-def.mlir 2>&1 | FileCheck %s --check-prefix=TYPE-DEF
+// RUN: not merkc -fc1 -emit-llvm %t/functor.mlir 2>&1 | FileCheck %s --check-prefix=FUNCTOR
 
 //--- outputs.mlir
 // OUTPUTS: outputs.mlir:[[@LINE+3]]:5: error: 'merk.succeed' op has 0 outputs, but its procedure has 1
@@ -147,5 +152,57 @@ module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   merk.proc @p(%a: !merk.array<i64>, %i: i64, %s: !merk.string) -> !merk.array<i64> attributes {determinism = #merk.determinism<det>} {
     %b = merk.array_set %a[%i], %s : !merk.array<i64>, !merk.string
     merk.succeed %b : !merk.array<i64>
+  }
+}
+
+//--- construct.mlir
+// CONSTRUCT: construct.mlir:[[@LINE+4]]:10: error: 'merk.construct' op has 1 arguments for a functor of arity 2
+module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
+  merk.type_def "t" [#merk.constructor<"f"(i64, i64)>]
+  merk.proc @p(%x: i64) -> !merk.term<"t"> attributes {determinism = #merk.determinism<det>} {
+    %t = merk.construct #merk.functor<"f", 2>(%x : i64) -> !merk.term<"t">
+    merk.succeed %t : !merk.term<"t">
+  }
+}
+
+//--- deconstruct.mlir
+// DECONSTRUCT: deconstruct.mlir:[[@LINE+4]]:10: error: 'merk.deconstruct' op has 1 results for a functor of arity 2
+module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
+  merk.type_def "t" [#merk.constructor<"f"(i64, i64)>]
+  merk.proc @p(%t: !merk.term<"t">) -> i64 attributes {determinism = #merk.determinism<det>} {
+    %x = merk.deconstruct #merk.functor<"f", 2> %t : !merk.term<"t"> -> i64
+    merk.succeed %x : i64
+  }
+}
+
+//--- switch-functor.mlir
+// SWITCH-FUNCTOR: switch-functor.mlir:[[@LINE+4]]:5: error: 'merk.switch' op has a case constant that is not a functor
+module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
+  merk.type_def "t" [#merk.constructor<"f">, #merk.constructor<"g">]
+  merk.proc @p(%t: !merk.term<"t">) attributes {determinism = #merk.determinism<semidet>} {
+    merk.switch %t : !merk.term<"t"> cases [[0]] can_fail {
+      merk.yield
+    }
+    merk.succeed
+  }
+}
+
+//--- type-def.mlir
+// TYPE-DEF: type-def.mlir:[[@LINE+3]]:10: error: 'merk.construct' op is on a type with no merk.type_def
+module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
+  merk.proc @p() -> !merk.term<"t"> attributes {determinism = #merk.determinism<det>} {
+    %t = merk.construct #merk.functor<"f", 0> -> !merk.term<"t">
+    merk.succeed %t : !merk.term<"t">
+  }
+}
+
+//--- functor.mlir
+// FUNCTOR: functor.mlir:[[@LINE+4]]:11: error: 'merk.has_functor' op has a functor its type does not have
+module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
+  merk.type_def "t" [#merk.constructor<"f">, #merk.constructor<"g">]
+  merk.proc @p(%t: !merk.term<"t">) attributes {determinism = #merk.determinism<semidet>} {
+    %is = merk.has_functor #merk.functor<"f", 1> %t : !merk.term<"t">
+    merk.guard %is
+    merk.succeed
   }
 }

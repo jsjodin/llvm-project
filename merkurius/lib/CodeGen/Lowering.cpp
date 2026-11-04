@@ -26,7 +26,9 @@
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
+#include <functional>
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Linker/Linker.h"
 #include "llvm/Object/OffloadBinary.h"
@@ -54,37 +56,46 @@ bool CanFail(merk::Determinism determinism) {
       determinism == merk::Determinism::CcNondet;
 }
 
-// A merk type's LLVM type: a string is a pointer to its bytes, and an array
-// a pointer to its size and elements.
-mlir::Type Convert(mlir::Type type) {
-  if (mlir::isa<merk::StringType, merk::ArrayType>(type)) {
-    return mlir::LLVM::LLVMPointerType::get(type.getContext());
-  }
-  return type;
-}
+// The layout of a type defined by constructors (design document, "Type
+// representation"), chosen from its merk.type_def. Cells are headerless.
+// A type of constants only is a word, each constant its number. A type of
+// one constructor of one argument is the argument. Any other is a word
+// that is a constant, a small integer shifted past the primary tag, or a
+// pointer to a cell of a constructor's arguments, with a 3-bit primary tag
+// for the constructor: tag 0 is the constants' if there are any, and when
+// the constructors with arguments outnumber the tags left, the last tag is
+// shared, and the cell's first word is a secondary tag.
+struct TermLayout {
+  enum class Kind { Enum, NoTag, Cells } kind{Kind::Cells};
+  // Its LLVM type: a word for an Enum, the argument's for a NoTag, and a
+  // pointer for Cells.
+  mlir::Type type;
+  struct Functor {
+    std::string name;
+    unsigned arity;
+    // A constant's word, or a cell's primary tag and secondary tag.
+    std::int64_t value{0};
+    unsigned tag{0};
+    std::optional<std::int64_t> secondary;
+    llvm::SmallVector<mlir::Type> fields;
+  };
+  std::vector<Functor> functors;
+  bool constants{false};
+  // The tag that constructors share, if they do.
+  std::optional<unsigned> shared;
 
-llvm::SmallVector<mlir::Type> Convert(mlir::TypeRange types) {
-  return llvm::map_to_vector(types, [](mlir::Type t) { return Convert(t); });
-}
+  const Functor *Find(merk::FunctorAttr functor) const {
+    for (const Functor &f : functors) {
+      if (f.name == functor.getName() && f.arity == functor.getArity()) {
+        return &f;
+      }
+    }
+    return nullptr;
+  }
+};
 
-// A procedure's outputs as one LLVM value: none, the output, or a struct of
-// them, after the success flag of one that can fail (design document,
-// "Calling convention").
-mlir::Type ResultType(
-    mlir::MLIRContext *context, mlir::TypeRange outputs, bool canFail = false) {
-  llvm::SmallVector<mlir::Type> types;
-  if (canFail) {
-    types.push_back(mlir::IntegerType::get(context, 1));
-  }
-  types.append(Convert(outputs));
-  if (types.empty()) {
-    return mlir::LLVM::LLVMVoidType::get(context);
-  }
-  if (types.size() == 1) {
-    return types.front();
-  }
-  return mlir::LLVM::LLVMStructType::getLiteral(context, types);
-}
+constexpr unsigned kTagBits{3};
+constexpr unsigned kTags{1u << kTagBits};
 
 class Lowerer {
 public:
@@ -101,6 +112,73 @@ public:
   llvm::LogicalResult Lower();
 
 private:
+  // A merk type's LLVM type: a string is a pointer to its bytes, an array a
+  // pointer to its size and elements, and a term its layout's.
+  mlir::Type Convert(mlir::Type type) const {
+    if (mlir::isa<merk::StringType, merk::ArrayType>(type)) {
+      return mlir::LLVM::LLVMPointerType::get(type.getContext());
+    }
+    if (auto term{mlir::dyn_cast<merk::TermType>(type)}) {
+      auto it{layouts_.find(term.getName())};
+      return it == layouts_.end()
+          ? mlir::LLVM::LLVMPointerType::get(type.getContext())
+          : it->second.type;
+    }
+    return type;
+  }
+  llvm::SmallVector<mlir::Type> Convert(mlir::TypeRange types) const {
+    return llvm::map_to_vector(
+        types, [this](mlir::Type t) { return Convert(t); });
+  }
+  // A procedure's outputs as one LLVM value: none, the output, or a struct
+  // of them, after the success flag of one that can fail (design document,
+  // "Calling convention").
+  mlir::Type ResultType(mlir::MLIRContext *context, mlir::TypeRange outputs,
+      bool canFail = false) const {
+    llvm::SmallVector<mlir::Type> types;
+    if (canFail) {
+      types.push_back(mlir::IntegerType::get(context, 1));
+    }
+    types.append(Convert(outputs));
+    if (types.empty()) {
+      return mlir::LLVM::LLVMVoidType::get(context);
+    }
+    if (types.size() == 1) {
+      return types.front();
+    }
+    return mlir::LLVM::LLVMStructType::getLiteral(context, types);
+  }
+  // The layouts of the module's merk.type_defs, which are then erased.
+  llvm::LogicalResult Layouts();
+  const TermLayout *LayoutOf(mlir::Type type) const {
+    auto term{mlir::dyn_cast<merk::TermType>(type)};
+    if (!term) {
+      return nullptr;
+    }
+    auto it{layouts_.find(term.getName())};
+    return it == layouts_.end() ? nullptr : &it->second;
+  }
+  // Lowers the operations on terms, while their operands still have merk's
+  // types, which give their layouts: switches on terms are recorded with
+  // theirs, for Flatten.
+  //
+  // Temporary (chunk 1 step 3, docs/INPROGRESS.md): terms lower straight to
+  // the LLVM dialect, with cells from the runtime's merk_alloc. Step 3 adds
+  // the mrt dialect between them: merk lowers to mrt.alloc, mrt.tag,
+  // mrt.untag, mrt.field_load and mrt.field_store, which then lower to
+  // LLVM, and the layouts are chosen in that lowering instead.
+  llvm::LogicalResult LowerTerms();
+  // The address of a cell's word, from its tagged pointer.
+  mlir::Value WordAddress(mlir::Value term, unsigned tag, unsigned word,
+      mlir::Location);
+  // A term's primary tag, as a word.
+  mlir::Value PrimaryTag(mlir::Value term, mlir::Location);
+  // The branches of a switch on a term to the blocks of its functors, in
+  // the order of `functors`, or else `otherwise`, at the rewriter's
+  // insertion point.
+  void Dispatch(mlir::Value term, const TermLayout &,
+      llvm::ArrayRef<std::pair<const TermLayout::Functor *, mlir::Block *>>,
+      mlir::Block *otherwise, mlir::Block *before, mlir::Location);
   void LowerProc(merk::ProcOp);
   void LowerSucceed(merk::SucceedOp);
   void LowerConstant(merk::ConstantOp);
@@ -172,7 +250,325 @@ private:
   // "Calling convention").
   mlir::LLVM::CConv cconv_;
   TargetInfo::ResultRegisters registers_;
+  llvm::StringMap<TermLayout> layouts_;
+  llvm::DenseMap<mlir::Operation *, const TermLayout *> termSwitches_;
+  // A word that is no secondary tag, which a test of one reads instead of a
+  // constant's cell, which it has none.
+  mlir::LLVM::GlobalOp noSecondary_;
 };
+
+llvm::LogicalResult Lowerer::Layouts() {
+  mlir::MLIRContext *context{module_.getContext()};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(context)};
+  auto word{mlir::IntegerType::get(context, 64)};
+  for (auto def : llvm::make_early_inc_range(module_.getOps<merk::TypeDefOp>())) {
+    TermLayout layout;
+    unsigned constants{0}, cells{0};
+    for (auto constructor :
+        def.getConstructors().getAsRange<merk::ConstructorAttr>()) {
+      (constructor.getFields().empty() ? constants : cells) += 1;
+    }
+    layout.constants = constants != 0;
+    if (cells == 0) {
+      layout.kind = TermLayout::Kind::Enum;
+      layout.type = word;
+    } else if (constants == 0 && cells == 1 &&
+        def.getConstructors().size() == 1 &&
+        mlir::cast<merk::ConstructorAttr>(def.getConstructors()[0])
+                .getFields()
+                .size() == 1) {
+      layout.kind = TermLayout::Kind::NoTag;
+    } else {
+      layout.type = ptr;
+    }
+    // Tag 0 is the constants', if there are any; when the constructors
+    // with arguments need more tags than are left, the last is shared.
+    unsigned first{layout.constants ? 1u : 0u};
+    unsigned available{kTags - first};
+    unsigned constant{0}, cell{0};
+    for (auto constructor :
+        def.getConstructors().getAsRange<merk::ConstructorAttr>()) {
+      TermLayout::Functor functor;
+      functor.name = constructor.getName().str();
+      functor.fields.assign(
+          constructor.getFields().begin(), constructor.getFields().end());
+      functor.arity = functor.fields.size();
+      if (functor.arity == 0) {
+        functor.value = layout.kind == TermLayout::Kind::Enum
+            ? constant
+            : static_cast<std::int64_t>(constant) << kTagBits;
+        ++constant;
+      } else if (cells <= available || cell + 1 < available) {
+        functor.tag = first + cell++;
+      } else {
+        functor.tag = kTags - 1;
+        functor.secondary = cell++ - (available - 1);
+        layout.shared = functor.tag;
+      }
+      layout.functors.push_back(std::move(functor));
+    }
+    layouts_[def.getName()] = std::move(layout);
+    rewriter_.eraseOp(def);
+  }
+  // A type of one constructor of one argument is its argument's type, a
+  // chain of them the last's, and a cycle of them, which has no values but
+  // infinite ones, a pointer.
+  std::function<mlir::Type(llvm::StringRef, llvm::StringSet<> &)> resolve{
+      [&](llvm::StringRef name, llvm::StringSet<> &seen) -> mlir::Type {
+        TermLayout &layout{layouts_.find(name)->second};
+        if (layout.type) {
+          return layout.type;
+        }
+        if (!seen.insert(name).second) {
+          return ptr;
+        }
+        mlir::Type field{layout.functors.front().fields.front()};
+        auto term{mlir::dyn_cast<merk::TermType>(field)};
+        layout.type = term && layouts_.count(term.getName())
+            ? resolve(term.getName(), seen)
+            : Convert(field);
+        return layout.type;
+      }};
+  for (auto &entry : layouts_) {
+    llvm::StringSet<> seen;
+    resolve(entry.getKey(), seen);
+  }
+  return llvm::success();
+}
+
+mlir::Value Lowerer::WordAddress(
+    mlir::Value term, unsigned tag, unsigned word, mlir::Location loc) {
+  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  std::int32_t offset{static_cast<std::int32_t>(8 * word) -
+      static_cast<std::int32_t>(tag)};
+  if (offset == 0) {
+    return term;
+  }
+  return mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(),
+      term, llvm::ArrayRef<mlir::LLVM::GEPArg>{offset});
+}
+
+mlir::Value Lowerer::PrimaryTag(mlir::Value term, mlir::Location loc) {
+  auto i64{rewriter_.getI64Type()};
+  mlir::Value word{mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, term)};
+  return mlir::LLVM::AndOp::create(rewriter_, loc, word,
+      mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, kTags - 1));
+}
+
+llvm::LogicalResult Lowerer::LowerTerms() {
+  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  auto i64{rewriter_.getI64Type()};
+  // A value as its LLVM type, through a cast while it is still merk's,
+  // which goes once it is lowered.
+  auto lowered{[&](mlir::Value value, mlir::Location loc) -> mlir::Value {
+    mlir::Type type{Convert(value.getType())};
+    if (type == value.getType()) {
+      return value;
+    }
+    return mlir::UnrealizedConversionCastOp::create(
+        rewriter_, loc, type, value)
+        .getResult(0);
+  }};
+  auto constant{[&](std::int64_t value, mlir::Location loc) -> mlir::Value {
+    return mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, value);
+  }};
+  // Each with its term's type, which lowering the operation that makes the
+  // term changes.
+  llvm::SmallVector<std::pair<mlir::Operation *, mlir::Type>> ops;
+  module_.walk([&](mlir::Operation *op) {
+    if (mlir::isa<merk::ConstructOp, merk::DeconstructOp, merk::HasFunctorOp,
+            merk::SwitchOp>(op)) {
+      mlir::Type type{mlir::isa<merk::ConstructOp>(op)
+              ? op->getResult(0).getType()
+              : op->getOperand(0).getType()};
+      // Not a switch on an integer.
+      if (mlir::isa<merk::TermType>(type)) {
+        ops.push_back({op, type});
+      }
+    }
+  });
+  for (auto [op, type] : ops) {
+    mlir::Location loc{op->getLoc()};
+    rewriter_.setInsertionPoint(op);
+    const TermLayout *layout{LayoutOf(type)};
+    if (!layout) {
+      return op->emitOpError("is on a type with no merk.type_def");
+    }
+    auto functorOf{[&](mlir::Attribute attribute) {
+      return layout->Find(mlir::cast<merk::FunctorAttr>(attribute));
+    }};
+    if (auto switchOp{mlir::dyn_cast<merk::SwitchOp>(op)}) {
+      for (mlir::Attribute c : switchOp.getCases()) {
+        for (mlir::Attribute functor : mlir::cast<mlir::ArrayAttr>(c)) {
+          if (!functorOf(functor)) {
+            return op->emitOpError("has a functor its type does not have");
+          }
+        }
+      }
+      termSwitches_[op] = layout;
+      continue;
+    }
+    const TermLayout::Functor *functor{
+        functorOf(op->getAttr("functor"))};
+    if (!functor) {
+      return op->emitOpError("has a functor its type does not have");
+    }
+    unsigned skip{functor->secondary ? 1u : 0u};
+    if (auto construct{mlir::dyn_cast<merk::ConstructOp>(op)}) {
+      mlir::Value result;
+      if (layout->kind == TermLayout::Kind::Enum) {
+        result = constant(functor->value, loc);
+      } else if (layout->kind == TermLayout::Kind::NoTag) {
+        result = lowered(construct.getArguments().front(), loc);
+      } else if (functor->arity == 0) {
+        result = mlir::LLVM::IntToPtrOp::create(
+            rewriter_, loc, ptr, constant(functor->value, loc));
+      } else {
+        // Temporary: a call of merk_alloc, until mrt.alloc (LowerTerms).
+        mlir::Value bytes{constant(8 * (functor->arity + skip), loc)};
+        mlir::Value cell{mlir::LLVM::CallOp::create(rewriter_, loc,
+            RuntimeFunc("merk_alloc", ptr, {i64}), mlir::ValueRange{bytes})
+                .getResult()};
+        if (functor->secondary) {
+          mlir::LLVM::StoreOp::create(
+              rewriter_, loc, constant(*functor->secondary, loc), cell);
+        }
+        for (auto [i, argument] : llvm::enumerate(construct.getArguments())) {
+          mlir::LLVM::StoreOp::create(rewriter_, loc, lowered(argument, loc),
+              WordAddress(cell, 0, i + skip, loc));
+        }
+        result = cell;
+        if (functor->tag != 0) {
+          result = mlir::LLVM::GEPOp::create(rewriter_, loc, ptr,
+              rewriter_.getI8Type(), cell,
+              llvm::ArrayRef<mlir::LLVM::GEPArg>{
+                  static_cast<std::int32_t>(functor->tag)});
+        }
+      }
+      rewriter_.replaceOp(op, result);
+      continue;
+    }
+    mlir::Value term{lowered(op->getOperand(0), loc)};
+    if (auto deconstruct{mlir::dyn_cast<merk::DeconstructOp>(op)}) {
+      llvm::SmallVector<mlir::Value> fields;
+      if (layout->kind == TermLayout::Kind::NoTag) {
+        fields.push_back(term);
+      } else {
+        for (auto [i, field] : llvm::enumerate(functor->fields)) {
+          fields.push_back(mlir::LLVM::LoadOp::create(rewriter_, loc,
+              Convert(field), WordAddress(term, functor->tag, i + skip, loc)));
+        }
+      }
+      rewriter_.replaceOp(op, fields);
+      continue;
+    }
+    mlir::Value has;
+    auto equal{[&](mlir::Value a, mlir::Value b) -> mlir::Value {
+      return mlir::LLVM::ICmpOp::create(
+          rewriter_, loc, mlir::LLVM::ICmpPredicate::eq, a, b);
+    }};
+    if (layout->kind == TermLayout::Kind::Enum) {
+      has = equal(term, constant(functor->value, loc));
+    } else if (layout->kind == TermLayout::Kind::NoTag) {
+      has = mlir::LLVM::ConstantOp::create(
+          rewriter_, loc, rewriter_.getI1Type(), 1);
+    } else if (functor->arity == 0) {
+      has = equal(mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, term),
+          constant(functor->value, loc));
+    } else {
+      has = equal(PrimaryTag(term, loc), constant(functor->tag, loc));
+      if (functor->secondary) {
+        // A constant has no cell to read a secondary tag from: the test
+        // reads a word that is none instead.
+        if (!noSecondary_) {
+          mlir::OpBuilder::InsertionGuard guard{rewriter_};
+          rewriter_.setInsertionPointToStart(module_.getBody());
+          noSecondary_ = mlir::LLVM::GlobalOp::create(rewriter_, loc, i64,
+              /*isConstant=*/true, mlir::LLVM::Linkage::Internal,
+              "merk_no_secondary_tag", rewriter_.getI64IntegerAttr(-1));
+        }
+        mlir::Value address{mlir::LLVM::SelectOp::create(rewriter_, loc, has,
+            WordAddress(term, functor->tag, 0, loc),
+            mlir::LLVM::AddressOfOp::create(rewriter_, loc, noSecondary_))};
+        mlir::Value secondary{
+            mlir::LLVM::LoadOp::create(rewriter_, loc, i64, address)};
+        has = mlir::LLVM::AndOp::create(rewriter_, loc, has,
+            equal(secondary, constant(*functor->secondary, loc)));
+      }
+    }
+    rewriter_.replaceOp(op, has);
+  }
+  return llvm::success();
+}
+
+void Lowerer::Dispatch(mlir::Value term, const TermLayout &layout,
+    llvm::ArrayRef<std::pair<const TermLayout::Functor *, mlir::Block *>> cases,
+    mlir::Block *otherwise, mlir::Block *before, mlir::Location loc) {
+  auto i64{rewriter_.getI64Type()};
+  if (term.getType() != layout.type) {
+    term = mlir::UnrealizedConversionCastOp::create(
+        rewriter_, loc, layout.type, term)
+        .getResult(0);
+  }
+  auto branch{[&](mlir::Value value,
+                  llvm::ArrayRef<std::pair<std::int64_t, mlir::Block *>> to) {
+    llvm::SmallVector<llvm::APInt> values;
+    llvm::SmallVector<mlir::Block *> destinations;
+    for (auto [v, block] : to) {
+      values.push_back(llvm::APInt{64, static_cast<std::uint64_t>(v)});
+      destinations.push_back(block);
+    }
+    llvm::SmallVector<mlir::ValueRange> operands(values.size());
+    mlir::LLVM::SwitchOp::create(rewriter_, loc, value, otherwise,
+        mlir::ValueRange{}, values, destinations, operands);
+  }};
+  if (layout.kind == TermLayout::Kind::NoTag) {
+    mlir::LLVM::BrOp::create(
+        rewriter_, loc, cases.empty() ? otherwise : cases.front().second);
+    return;
+  }
+  llvm::SmallVector<std::pair<std::int64_t, mlir::Block *>> constants,
+      secondaries, primaries;
+  for (auto [functor, block] : cases) {
+    if (functor->arity == 0) {
+      constants.push_back({functor->value, block});
+    } else if (functor->secondary) {
+      secondaries.push_back({*functor->secondary, block});
+    } else {
+      primaries.push_back({functor->tag, block});
+    }
+  }
+  if (layout.kind == TermLayout::Kind::Enum) {
+    branch(term, constants);
+    return;
+  }
+  mlir::Block *here{rewriter_.getInsertionBlock()};
+  mlir::Block::iterator point{rewriter_.getInsertionPoint()};
+  mlir::Value tag{PrimaryTag(term, loc)};
+  mlir::Value word{mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, term)};
+  point = rewriter_.getInsertionPoint();
+  // The constants by their words, and the constructors that share a tag
+  // by their secondary tags.
+  unsigned typeConstants{static_cast<unsigned>(llvm::count_if(
+      layout.functors, [](const auto &f) { return f.arity == 0; }))};
+  if (typeConstants == 1 && !constants.empty()) {
+    // Tag 0 is the type's only constant.
+    primaries.push_back({0, constants.front().second});
+  } else if (!constants.empty()) {
+    mlir::Block *block{rewriter_.createBlock(before)};
+    branch(word, constants);
+    primaries.push_back({0, block});
+  }
+  if (!secondaries.empty()) {
+    mlir::Block *block{rewriter_.createBlock(before)};
+    mlir::Value secondary{mlir::LLVM::LoadOp::create(rewriter_, loc, i64,
+        WordAddress(term, *layout.shared, 0, loc))};
+    branch(secondary, secondaries);
+    primaries.push_back({*layout.shared, block});
+  }
+  rewriter_.setInsertionPoint(here, point);
+  branch(tag, primaries);
+}
 
 bool Lowerer::InMemory(mlir::TypeRange outputs, bool canFail) const {
   unsigned integers{canFail}, floats{0};
@@ -633,6 +1029,27 @@ void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
           otherwise = rewriter_.createBlock(after);
           mlir::LLVM::UnreachableOp::create(rewriter_, loc);
         }
+        if (const TermLayout *layout{termSwitches_.lookup(switchOp)}) {
+          llvm::SmallVector<std::pair<const TermLayout::Functor *, mlir::Block *>>
+              cases;
+          for (auto [c, block] : llvm::zip(switchOp.getCases(), blocks)) {
+            for (mlir::Attribute functor : mlir::cast<mlir::ArrayAttr>(c)) {
+              cases.push_back(
+                  {layout->Find(mlir::cast<merk::FunctorAttr>(functor)), block});
+            }
+          }
+          rewriter_.setInsertionPoint(switchOp);
+          Dispatch(switchOp.getValue(), *layout, cases, otherwise, after, loc);
+          rewriter_.eraseOp(switchOp);
+          for (mlir::Block *block : blocks) {
+            Exit(block, after);
+          }
+          for (mlir::Block *block : blocks) {
+            Flatten(block, fail);
+          }
+          next = Continue(after);
+          break;
+        }
         llvm::SmallVector<llvm::APInt> values;
         llvm::SmallVector<mlir::Block *> destinations;
         for (auto [c, block] : llvm::zip(switchOp.getCases(), blocks)) {
@@ -785,7 +1202,7 @@ void Lowerer::LowerArray(mlir::Operation *op) {
   auto call{[&](llvm::StringRef name, mlir::Type result,
                 mlir::ValueRange arguments) {
     llvm::SmallVector<mlir::Type> types{llvm::map_to_vector(
-        arguments, [](mlir::Value v) { return Convert(v.getType()); })};
+        arguments, [this](mlir::Value v) { return Convert(v.getType()); })};
     return mlir::LLVM::CallOp::create(rewriter_, loc,
         RuntimeFunc(name, result, types), arguments)
         .getResult();
@@ -859,6 +1276,9 @@ void Lowerer::LowerEntry(merk::EntryOp entry) {
 llvm::LogicalResult Lowerer::Lower() {
   module_.getContext()->loadDialect<mlir::LLVM::LLVMDialect>();
   if (mlir::omp::isOpenMPModule(module_) && mlir::failed(FilterProcs())) {
+    return llvm::failure();
+  }
+  if (mlir::failed(Layouts()) || mlir::failed(LowerTerms())) {
     return llvm::failure();
   }
   for (auto proc : llvm::make_early_inc_range(module_.getOps<merk::ProcOp>())) {
