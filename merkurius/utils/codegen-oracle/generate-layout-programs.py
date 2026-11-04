@@ -8,7 +8,9 @@ constants and constructors with arguments, whose number is chosen around the
 primary tags' boundaries, 7, 8 and 9 constructors with arguments, with and
 without constants, so that some share the last tag and have secondary tags.
 An argument is an int, a float, a char or a sized integer, which are
-narrower than a word, an earlier type, the type itself, a list or a tuple. For each type the module
+narrower than a word, an earlier type, the type itself, a list or a tuple.
+Each value printed first goes through polymorphic code, where it is a word,
+and must come out as it went in. For each type the module
 prints every constructor (a switch), gives each one a code (a function by
 clauses), and in main builds values both as ground terms, which are static
 cells, and with some of their integers computed at run time, so that they
@@ -79,6 +81,57 @@ def key(field):
     if kind == "list":
         return "list_" + key(field[1])
     return "tup_" + "_".join(key(f) for f in field[1:])
+
+
+# Polymorphic code each value goes through: a bare type variable, a list(T),
+# a notag type, a cell with other fields, and the type_infos these build.
+POLYMORPHIC_CODE = """\
+:- type poly_box(T) ---> poly_box(T).
+:- type poly_tree(K, V) ---> poly_leaf ; poly_node(poly_tree(K, V), K, V).
+
+:- func poly_id(T) = T.
+poly_id(X) = X.
+
+:- func poly_second(A, B) = B.
+poly_second(_, B) = B.
+
+:- func poly_last(list(T), T) = T.
+poly_last([], D) = D.
+poly_last([H | T], _) = poly_last(T, H).
+
+:- func poly_rev(list(T), list(T)) = list(T).
+poly_rev([], A) = A.
+poly_rev([H | T], A) = poly_rev(T, [H | A]).
+
+:- func poly_unbox(poly_box(T)) = T.
+poly_unbox(poly_box(X)) = X.
+
+:- func poly_value(poly_tree(K, V), V) = V.
+poly_value(poly_leaf, D) = D.
+poly_value(poly_node(_, _, V), _) = V.
+
+:- func poly_head(list(T)) = T.
+poly_head(L) = poly_last(L, poly_head_of(L)).
+
+:- func poly_head_of(list(T)) = T.
+poly_head_of([H | _]) = H.
+poly_head_of([]) = poly_head_of([]).
+
+:- func poly_value_of(T) = T.
+poly_value_of(X) = poly_value(poly_node(poly_leaf, "key", X), X).
+
+:- func poly_nested(T) = T.
+poly_nested(X) = poly_last(poly_last([[X]], [X]), poly_unbox(poly_box(X))).
+"""
+POLYMORPHIC_ROUTES = [
+    "poly_id(%s)",
+    "poly_second(1.5, %s)",
+    "poly_head(poly_rev([%s], []))",
+    "poly_value_of(%s)",
+    "poly_unbox(poly_box(%s))",
+    "poly_unbox(poly_id(poly_box(%s)))",
+    "poly_nested(%s)",
+]
 
 
 class Generator:
@@ -288,6 +341,14 @@ class Generator:
 
     # Main.
 
+    def routed(self, variable, goals):
+        """A new variable with the value of variable, by way of polymorphic
+        code, in which it is a word: it must come out as it went in."""
+        route = self.rng.choice(POLYMORPHIC_ROUTES)
+        result = self.var("P")
+        goals.append("%s = %s" % (result, route % variable))
+        return result
+
     def tests(self, t):
         rng = self.rng
         goals = []
@@ -306,9 +367,10 @@ class Generator:
                 dynamic))
             goals.append("%s = %s" % (s, s.lower()))
             goals.append("%s = %s(N)" % (d, d.lower()))
-            goals.append(self.show(("type", t), d))
+            routed = self.routed(d, goals)
+            goals.append(self.show(("type", t), routed))
             goals.append("io.nl(!IO)")
-            goals.append("io.write_int(code_%s(%s), !IO)" % (t.name, d))
+            goals.append("io.write_int(code_%s(%s), !IO)" % (t.name, routed))
             goals.append("io.nl(!IO)")
             # Equal, though one is static and the other allocated.
             goals.append("( if %s = %s then io.write_string(\"eq\", !IO) "
@@ -326,7 +388,7 @@ class Generator:
         then = ["io.write_string(\"is %s\", !IO)" % name]
         for a, f in zip(arguments, fields):
             then.append("io.write_char(' ', !IO)")
-            then.append(self.show(f, a))
+            then.append(self.show(f, self.routed(a, then)))
         goals.append("( if %s = %s then\n        %s\n    else\n        "
                      "io.write_string(\"not %s\", !IO)\n    )" % (
                          d, pattern, ",\n        ".join(then), name))
@@ -359,6 +421,7 @@ class Generator:
             "% from it are allocated.\n"
             ":- pred run(int::in, io::di, io::uo) is det.\n"
             "run(N, !IO) :-\n    " + ",\n    ".join(goals) + ".\n")
+        parts.append(POLYMORPHIC_CODE + "\n")
         parts += [b + "\n" for b in bodies]
         parts += [h + "\n" for h in self.helpers.values()]
         parts += [v + "\n" for v in self.values]

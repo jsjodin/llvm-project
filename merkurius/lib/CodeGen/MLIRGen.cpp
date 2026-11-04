@@ -236,8 +236,9 @@ private:
   std::optional<Represented> Represent(const semantics::Type *);
   // A type defined by constructors, or a tuple type, as !merk.term, with
   // the module's merk.type_def of it, made the first time; none for a type
-  // with type variables, user-defined equality, a supertype or
-  // existentially typed constructors, or with arguments not represented.
+  // with user-defined equality, a supertype or existentially typed
+  // constructors, or with arguments not represented. Each instance of a type
+  // has its own, with one layout among them.
   std::optional<Represented> RepresentTerm(const semantics::Type *);
   // Whether values of a type can be compared yet: integers, floats, and
   // terms whose constructors' arguments can be, at any depth.
@@ -293,6 +294,9 @@ private:
       const semantics::Type *, mlir::Location, parser::CharBlock);
   mlir::Value TypeInfoValue(
       const semantics::TypeInfo &, mlir::Location, parser::CharBlock);
+  // A value at another instance of its type, such as list(int) at list(T):
+  // one word whichever, so they meet at the word.
+  mlir::Value Coerce(mlir::Value, mlir::Type, mlir::Location);
   void Called(const Body &, const Procedure &, llvm::ArrayRef<BodyVar>,
       const ProcedureBody &);
   void IfThenElse(const Body &, const ProcedureBody &);
@@ -464,11 +468,9 @@ std::optional<Represented> MerkGenerator::Represent(
   if (constructor.module == "array" && name == "array" &&
       type->arguments.size() == 1) {
     std::optional<Represented> element{Represent(type->arguments[0])};
-    // Temporary (chunk 1 step 4, docs/INPROGRESS.md): array(T) waits for
-    // polymorphic terms, since array(int) is passed as array(T) then.
     if (!element || element->dummy ||
-        mlir::isa<merk::WordType>(element->type) ||
-        (!mlir::isa<merk::StringType, merk::ArrayType, merk::TermType>(
+        (!mlir::isa<merk::StringType, merk::ArrayType, merk::TermType,
+             merk::WordType>(
              element->type) &&
             element->type.getIntOrFloatBitWidth() > target_.WordBits())) {
       return std::nullopt;
@@ -485,8 +487,6 @@ std::optional<Represented> MerkGenerator::RepresentTerm(
   if (auto it{terms_.find(name)}; it != terms_.end()) {
     return it->second ? std::make_optional(Represented{term}) : std::nullopt;
   }
-  bool variables{false};
-  semantics::ForEachVariable(*type, [&](unsigned) { variables = true; });
   const parser::DuTypeDefn *definition{nullptr};
   if (type->kind == semantics::TypeKind::Named) {
     if (const auto *du{std::get_if<const parser::DuTypeDefn *>(
@@ -497,7 +497,7 @@ std::optional<Represented> MerkGenerator::RepresentTerm(
   const std::vector<semantics::ConstructorTypes> *constructors{
       modes_.ops().ConstructorsOf(type)};
   // A type too large to print has no name of its own.
-  if (variables || !constructors || name.front() == '<' ||
+  if (!constructors || name.front() == '<' ||
       (definition && (definition->attributes || definition->supertype))) {
     terms_[name] = nullptr;
     return std::nullopt;
@@ -573,6 +573,21 @@ std::optional<unsigned> MerkGenerator::HiddenTypeInfos(
         *argument, [&](unsigned var) { variables.insert(var); });
   }
   return variables.size();
+}
+
+mlir::Value MerkGenerator::Coerce(
+    mlir::Value value, mlir::Type type, mlir::Location loc) {
+  if (value.getType() == type) {
+    return value;
+  }
+  auto word{merk::WordType::get(&context_)};
+  if (value.getType() != word) {
+    value = merk::ToWordOp::create(builder_, loc, word, value);
+  }
+  if (type != word) {
+    value = merk::FromWordOp::create(builder_, loc, type, value);
+  }
+  return value;
 }
 
 // A type constructor's name in merk.type_info, with its arity.
@@ -798,13 +813,7 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
           merk::WordType::get(&context_),
           IntegerConstant(builder_.getI64Type(), 0, loc)));
     } else {
-      mlir::Value value{ValueOf(argument)};
-      if (mlir::isa<merk::WordType>(Represent(type)->type) &&
-          !mlir::isa<merk::WordType>(value.getType())) {
-        value = merk::ToWordOp::create(
-            builder_, loc, merk::WordType::get(&context_), value);
-      }
-      inputs.push_back(value);
+      inputs.push_back(Coerce(ValueOf(argument), Represent(type)->type, loc));
     }
   }
   auto call{merk::CallOp::create(builder_, loc,
@@ -813,13 +822,8 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
     if (!var) {
       continue;
     }
-    mlir::Value value{result};
-    mlir::Type type{Represent(body.vars[*var].type)->type};
-    if (mlir::isa<merk::WordType>(value.getType()) &&
-        !mlir::isa<merk::WordType>(type)) {
-      value = merk::FromWordOp::create(builder_, loc, type, value);
-    }
-    values_[*var] = value;
+    values_[*var] =
+        Coerce(result, Represent(body.vars[*var].type)->type, loc);
   }
 }
 

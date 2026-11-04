@@ -37,9 +37,9 @@ q(X) :-
     ( X > 0 ; X < -5 ).
 % CHECK: not-yet.m:[[@LINE-1]]:7: error: not yet implemented: code generation for disjunctions
 
-:- pred r(list(T)::in, list(T)::out) is det.
-% CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for values of type list.list(T0)
+:- pred r(list(T)::in, list(T)::in) is semidet.
 r(X, X).
+% CHECK: not-yet.m:[[@LINE-1]]:6: error: not yet implemented: code generation for this unification
 
 :- func w(int) = int.
 w(X) = pow(X, 3).
