@@ -4006,6 +4006,17 @@ void TypeChecker::Run(const SemanticForm &form) {
           CheckClause(*method.clause, false, it->second));
     }
   }
+  // Later passes ask for all of a type's constructors, including those of an
+  // imported type that no clause uses, such as list's [|] when only [] is.
+  for (const ModuleInterface *interface : resolution_.interfaces()) {
+    if (const ModuleSymbols *symbols{resolution_.Module(interface->name)}) {
+      for (const Symbol *symbol : symbols->symbols()) {
+        if (symbol->kind == SymbolKind::Constructor) {
+          SignatureOf(*symbol);
+        }
+      }
+    }
+  }
 }
 
 std::unique_ptr<TypeChecking> CheckTypes(const SemanticForm &form,
