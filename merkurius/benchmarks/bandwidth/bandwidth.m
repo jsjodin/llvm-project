@@ -285,7 +285,7 @@ stats(From, To, T, !Min, !Max, !Total) :-
     [will_not_call_mercury, promise_pure],
 "
     double mb = 1.0e-6 * 8.0 * (double) N;
-    printf(\"Merkurius memory bandwidth benchmark (OpenMP target)\\n\");
+    printf(\"Merkurius memory bandwidth benchmark\\n\");
     printf(\"Running kernels %ld times\\n\", (long) Times);
     printf(\"Precision: double\\n\");
     printf(\"Array size: %.1f MB (=%.1f GB)\\n\", mb, 1.0e-3 * mb);
