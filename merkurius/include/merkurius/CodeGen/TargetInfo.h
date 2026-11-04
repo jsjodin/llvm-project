@@ -91,6 +91,18 @@ public:
   // guaranteed. AMDGPU has no tailcc, but makes a musttail call with the C
   // convention a jump; procedures there use C's.
   bool HasTailCallConvention() const { return !triple_.isAMDGPU(); }
+  // The registers a procedure's results are returned in, a word or a
+  // float each, by the procedures' convention; with `shared`, floats are
+  // in the integer registers too. A procedure whose results need more
+  // returns them in memory (design document, "Calling convention"), since
+  // a back end that returns them in memory itself cannot make a musttail
+  // call of it.
+  struct ResultRegisters {
+    unsigned integers;
+    unsigned floats;
+    bool shared{false};
+  };
+  ResultRegisters Results() const;
   // The target's module flags: on AMDGPU, the code object version, and the
   // PIC level, which Flang's device compile gives with -pic-level 2.
   void AddModuleFlags(llvm::Module &) const;

@@ -91,7 +91,8 @@ public:
   Lowerer(mlir::ModuleOp module, const TargetInfo &target)
       : module_{module}, rewriter_{module.getContext()},
         cconv_{target.HasTailCallConvention() ? mlir::LLVM::CConv::Tail
-                                              : mlir::LLVM::CConv::C} {
+                                              : mlir::LLVM::CConv::C},
+        registers_{target.Results()} {
     auto offload{mlir::dyn_cast<mlir::omp::OffloadModuleInterface>(
         module.getOperation())};
     device_ = mlir::omp::isOpenMPModule(module) && offload &&
@@ -141,21 +142,76 @@ private:
   mlir::LLVM::GlobalOp StringGlobal(llvm::StringRef, mlir::Location);
   mlir::LLVM::LLVMFuncOp ThrowFunc();
   bool CanFail(llvm::StringRef proc) const { return canFail_.contains(proc); }
+  // Whether a procedure's outputs, after its success flag if it can fail,
+  // need more registers than the target returns results in, so that it
+  // returns them in memory, through a pointer before its inputs.
+  bool InMemory(mlir::TypeRange outputs, bool canFail) const;
+  bool InMemory(llvm::StringRef proc) const { return inMemory_.contains(proc); }
+  // The struct of a procedure's outputs in memory, and the address of one.
+  mlir::LLVM::LLVMStructType OutputsType(mlir::TypeRange outputs);
+  mlir::Value OutputAddress(mlir::Value outputs, mlir::LLVM::LLVMStructType,
+      unsigned i, mlir::Location);
+  // An alloca at the start of the function, or of the OpenMP region that
+  // holds `op`, which is outlined into a function of its own: each thread
+  // needs its own, as Flang and ClangIR place allocas.
+  mlir::Value Alloca(mlir::Operation *op, mlir::Type, mlir::Location);
 
   mlir::ModuleOp module_;
   mlir::IRRewriter rewriter_;
   llvm::StringMap<mlir::LLVM::LLVMFuncOp> funcs_;
   // The global of each string constant's bytes.
   llvm::StringMap<mlir::LLVM::GlobalOp> strings_;
-  // The procedures that can fail.
+  // The procedures that can fail, and those that return their outputs in
+  // memory.
   llvm::StringSet<> canFail_;
+  llvm::StringSet<> inMemory_;
   mlir::LLVM::LLVMFuncOp throw_;
   // Whether this is an OpenMP device compile.
   bool device_{false};
   // The procedures' calling convention, the target's (design document,
   // "Calling convention").
   mlir::LLVM::CConv cconv_;
+  TargetInfo::ResultRegisters registers_;
 };
+
+bool Lowerer::InMemory(mlir::TypeRange outputs, bool canFail) const {
+  unsigned integers{canFail}, floats{0};
+  for (mlir::Type type : Convert(outputs)) {
+    if (mlir::isa<mlir::FloatType>(type) && !registers_.shared) {
+      ++floats;
+    } else {
+      ++integers;
+    }
+  }
+  return integers > registers_.integers || floats > registers_.floats;
+}
+
+mlir::LLVM::LLVMStructType Lowerer::OutputsType(mlir::TypeRange outputs) {
+  return mlir::LLVM::LLVMStructType::getLiteral(
+      module_.getContext(), Convert(outputs));
+}
+
+mlir::Value Lowerer::OutputAddress(mlir::Value outputs,
+    mlir::LLVM::LLVMStructType type, unsigned i, mlir::Location loc) {
+  return mlir::LLVM::GEPOp::create(rewriter_, loc,
+      mlir::LLVM::LLVMPointerType::get(module_.getContext()), type, outputs,
+      llvm::ArrayRef<mlir::LLVM::GEPArg>{0, static_cast<int32_t>(i)});
+}
+
+mlir::Value Lowerer::Alloca(
+    mlir::Operation *op, mlir::Type type, mlir::Location loc) {
+  mlir::OpBuilder::InsertionGuard guard{rewriter_};
+  mlir::Block *allocas{
+      &op->getParentOfType<mlir::LLVM::LLVMFuncOp>().getBody().front()};
+  if (auto region{op->getParentOfType<mlir::omp::OutlineableOpenMPOpInterface>()}) {
+    allocas = region.getAllocaBlock();
+  }
+  rewriter_.setInsertionPointToStart(allocas);
+  mlir::Value one{mlir::LLVM::ConstantOp::create(
+      rewriter_, loc, rewriter_.getI64Type(), rewriter_.getI64IntegerAttr(1))};
+  return mlir::LLVM::AllocaOp::create(rewriter_, loc,
+      mlir::LLVM::LLVMPointerType::get(module_.getContext()), type, one);
+}
 
 void Lowerer::LowerProc(merk::ProcOp proc) {
   mlir::MLIRContext *context{proc.getContext()};
@@ -164,9 +220,17 @@ void Lowerer::LowerProc(merk::ProcOp proc) {
   if (canFail) {
     canFail_.insert(proc.getSymName());
   }
+  bool inMemory{InMemory(type.getResults(), canFail)};
+  llvm::SmallVector<mlir::Type> inputs{Convert(type.getInputs())};
+  auto pointer{mlir::LLVM::LLVMPointerType::get(context)};
+  if (inMemory) {
+    inMemory_.insert(proc.getSymName());
+    inputs.insert(inputs.begin(), pointer);
+  }
   auto funcType{mlir::LLVM::LLVMFunctionType::get(
-      ResultType(context, type.getResults(), canFail),
-      Convert(type.getInputs()))};
+      inMemory ? ResultType(context, {}, canFail)
+               : ResultType(context, type.getResults(), canFail),
+      inputs)};
   // A procedure defined here and not exported is local to the module; one
   // declared is defined in another.
   mlir::LLVM::Linkage linkage{!proc.isExternal() && proc.isPrivate()
@@ -187,6 +251,9 @@ void Lowerer::LowerProc(merk::ProcOp proc) {
       argument.setType(Convert(argument.getType()));
     }
   }
+  if (inMemory && !func.isExternal()) {
+    func.getBody().front().insertArgument(0u, pointer, proc.getLoc());
+  }
   funcs_[proc.getSymName()] = func;
   rewriter_.eraseOp(proc);
 }
@@ -196,6 +263,15 @@ void Lowerer::LowerSucceed(merk::SucceedOp succeed) {
   auto func{succeed->getParentOfType<mlir::LLVM::LLVMFuncOp>()};
   bool canFail{CanFail(func.getSymName())};
   mlir::ValueRange outputs{succeed.getOutputs()};
+  if (InMemory(func.getSymName())) {
+    mlir::Location loc{succeed.getLoc()};
+    auto type{OutputsType(outputs.getTypes())};
+    for (auto [i, output] : llvm::enumerate(outputs)) {
+      mlir::LLVM::StoreOp::create(rewriter_, loc, output,
+          OutputAddress(func.getArgument(0), type, i, loc));
+    }
+    outputs = {};
+  }
   if (!canFail && outputs.empty()) {
     rewriter_.replaceOpWithNewOp<mlir::LLVM::ReturnOp>(succeed, outputs);
     return;
@@ -251,22 +327,8 @@ void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
   llvm::SmallVector<mlir::Value> arguments{call.getInputs()};
   llvm::SmallVector<mlir::Value> slots;
   if (byPointer) {
-    // At the start of the function, or of the OpenMP region that holds the
-    // call, which is outlined into a function of its own: each thread
-    // needs its own slots, as Flang and ClangIR place allocas.
-    mlir::OpBuilder::InsertionGuard guard{rewriter_};
-    mlir::Block *allocas{
-        &call->getParentOfType<mlir::LLVM::LLVMFuncOp>().getBody().front()};
-    if (auto region{
-            call->getParentOfType<mlir::omp::OutlineableOpenMPOpInterface>()}) {
-      allocas = region.getAllocaBlock();
-    }
-    rewriter_.setInsertionPointToStart(allocas);
-    mlir::Value one{mlir::LLVM::ConstantOp::create(
-        rewriter_, loc, rewriter_.getI64Type(), rewriter_.getI64IntegerAttr(1))};
     for (mlir::Type type : outputs) {
-      slots.push_back(
-          mlir::LLVM::AllocaOp::create(rewriter_, loc, pointer, type, one));
+      slots.push_back(Alloca(call, type, loc));
     }
     arguments.append(slots);
   }
@@ -336,17 +398,28 @@ mlir::Value Lowerer::Call(merk::CallOp call, bool *tail) {
   mlir::Location loc{call.getLoc()};
   rewriter_.setInsertionPoint(call);
   mlir::LLVM::LLVMFuncOp func{funcs_.lookup(call.getCallee())};
-  auto llvmCall{
-      mlir::LLVM::CallOp::create(rewriter_, loc, func, call.getInputs())};
-  llvmCall.setCConv(cconv_);
-  mlir::Value result{
-      llvmCall.getNumResults() ? llvmCall.getResult() : mlir::Value{}};
   // A call in tail position, whose solution is the procedure's, is a
   // tail call (design document, "Calling convention").
   auto succeed{mlir::dyn_cast_or_null<merk::SucceedOp>(call->getNextNode())};
   auto caller{call->getParentOfType<mlir::LLVM::LLVMFuncOp>()};
-  if (succeed && llvm::equal(succeed.getOutputs(), call.getResults()) &&
-      CanFail(caller.getSymName()) == CanFail(call.getCallee())) {
+  bool isTail{succeed && llvm::equal(succeed.getOutputs(), call.getResults()) &&
+      CanFail(caller.getSymName()) == CanFail(call.getCallee())};
+  // A callee's outputs in memory are where the caller's go, for a tail
+  // call, whose caller has the same outputs, and otherwise in a slot.
+  llvm::SmallVector<mlir::Value> arguments{call.getInputs()};
+  mlir::Value outputs;
+  bool inMemory{InMemory(call.getCallee())};
+  auto outputsType{OutputsType(call.getResultTypes())};
+  if (inMemory) {
+    outputs = isTail ? caller.getArgument(0)
+                     : Alloca(call, outputsType, loc);
+    arguments.insert(arguments.begin(), outputs);
+  }
+  auto llvmCall{mlir::LLVM::CallOp::create(rewriter_, loc, func, arguments)};
+  llvmCall.setCConv(cconv_);
+  mlir::Value result{
+      llvmCall.getNumResults() ? llvmCall.getResult() : mlir::Value{}};
+  if (isTail) {
     llvmCall.setTailCallKind(mlir::LLVM::TailCallKind::MustTail);
     rewriter_.setInsertionPoint(succeed);
     rewriter_.replaceOpWithNewOp<mlir::LLVM::ReturnOp>(
@@ -359,12 +432,20 @@ mlir::Value Lowerer::Call(merk::CallOp call, bool *tail) {
     return nullptr;
   }
   bool canFail{CanFail(call.getCallee())};
-  std::size_t outputs{call.getNumResults()};
   llvm::SmallVector<mlir::Value> values;
-  if (!canFail && outputs <= 1) {
+  if (inMemory) {
+    for (auto [i, type] : llvm::enumerate(outputsType.getBody())) {
+      values.push_back(mlir::LLVM::LoadOp::create(rewriter_, loc, type,
+          OutputAddress(outputs, outputsType, i, loc)));
+    }
+    rewriter_.replaceOp(call, values);
+    return canFail ? result : nullptr;
+  }
+  std::size_t count{call.getNumResults()};
+  if (!canFail && count <= 1) {
     values.append(llvmCall->result_begin(), llvmCall->result_end());
   } else {
-    for (unsigned i = 0; i < outputs; ++i) {
+    for (unsigned i = 0; i < count; ++i) {
       values.push_back(mlir::LLVM::ExtractValueOp::create(rewriter_, loc,
           result, llvm::ArrayRef<int64_t>{static_cast<int64_t>(i + canFail)}));
     }
@@ -373,7 +454,7 @@ mlir::Value Lowerer::Call(merk::CallOp call, bool *tail) {
   if (!canFail) {
     return nullptr;
   }
-  return outputs ? mlir::Value{mlir::LLVM::ExtractValueOp::create(
+  return count ? mlir::Value{mlir::LLVM::ExtractValueOp::create(
                        rewriter_, loc, result, llvm::ArrayRef<int64_t>{0})}
                  : result;
 }
