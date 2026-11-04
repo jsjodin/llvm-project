@@ -519,6 +519,10 @@ class TailRecursionEliminator {
 
   Constant *AccumulatorInitialValue = nullptr;
 
+  // Whether a return of the function follows a musttail call, which must
+  // stay next to it.
+  bool HasMustTailReturn = false;
+
   TailRecursionEliminator(const ScalarOptions &Opts, Function &F,
                           const TargetTransformInfo *TTI, AliasAnalysis *AA,
                           OptimizationRemarkEmitter *ORE, DomTreeUpdater &DTU,
@@ -535,6 +539,8 @@ class TailRecursionEliminator {
              "If a BFI was provided, the function should have an entry "
              "basic block with a non-zero frequency.");
     }
+    HasMustTailReturn = llvm::any_of(
+        F, [](BasicBlock &BB) { return BB.getTerminatingMustTailCall(); });
   }
 
   Constant *findBaseCaseRetConstant(Instruction *AccRecInstr);
@@ -883,6 +889,14 @@ bool TailRecursionEliminator::eliminateCall(CallInst *CI) {
     // return value if any.
     AccumulatorInitialValue = AccInitVal;
   }
+
+  // An accumulator, or a return value other than the call's, rewrites every
+  // other return of the function (cleanupAndFinalize), which would put
+  // instructions between a musttail call and its return.
+  if (HasMustTailReturn &&
+      (AccRecInstr ||
+       (!F.getReturnType()->isVoidTy() && Ret->getReturnValue() != CI)))
+    return false;
 
   BasicBlock *BB = Ret->getParent();
 
