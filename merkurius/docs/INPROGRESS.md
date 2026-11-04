@@ -94,16 +94,137 @@ path is written so that only where the pair is read changes. Until then
 the first option's cost is, with a thread's heap where the first option
 has a process's: only `mrt.alloc`'s lowering and `runtime/heap.h` read it.
 
-**D3. `type_info` and type descriptors.** A `type_info` for a type with no
-arguments is the address of its static descriptor (`mrt.rtti`); for an
-applied type, such as `list(int)`, a cell of the descriptor and the
-arguments' `type_info`s, static when the type is known at compile time.
-The descriptor gives each constructor's name, arity, argument types and
-layout, for `unify` and `compare` at polymorphic types, `io.write`, `univ`,
-the collector and the message copy (D1). Melbourne's representation is not
-used as a reference (Clean-room rules); the reference manual's
-`type_info` and `pseudo_type_info` notions and E4's observations (one hidden
-argument per type variable) are.
+**D3. `type_info` and type descriptors. Proposed 2026-11-04, for review.**
+The layout is ours: the manual's `type_info` and `pseudo_type_info` notions,
+the RTTI paper (Dowd et al., 1999) and E4's observations are the references,
+and Melbourne's representation is not copied (Clean-room rules).
+
+*A descriptor* is static data, one for each type constructor, not for each
+applied type, since a term's layout does not depend on its type arguments:
+
+```c
+struct MerkTypeCtor {
+  uint8_t kind;           // below
+  uint8_t flags;          // PointerFree, OpenSame, VariableArity
+  uint16_t arity;         // type parameters
+  uint32_t functorCount;
+  const char *module, *name;
+  MerkUnify unify;        // i1 (type_info, word, word)
+  MerkCompare compare;    // i64 (type_info, word, word)
+  const MerkFunctor *functors;   // in declaration order, compare's order
+  uint16_t byTag[8];      // Cells: a primary tag's functor, or the shared mark
+  const uint16_t *constants;     // Cells: a constant's number to its functor
+  const uint16_t *shared;        // Cells: a secondary tag to its functor
+};
+
+struct MerkFunctor {
+  const char *name;
+  uint32_t arity;         // fields, without a secondary tag's word
+  uint8_t tag;
+  int32_t secondary;      // -1 if none
+  int64_t constant;       // a constant's word
+  const MerkFieldType *fields;
+};
+```
+
+The kinds are the integers with their width and sign, `Float`, `Char`,
+`String`, `Array`, `Dummy`, `Enum`, `NoTag`, `Cells`, `Tuple`, `Closure`
+(D7), `TypeInfo` and `TypeclassInfo`, and later `Open` and `Closed`. A new
+kind changes no existing descriptor. `PointerFree` means a value holds no
+heap pointer if its type arguments hold none, so the tracer can skip it.
+
+*A `type_info`* is one word, a pointer with a tag in its low bits:
+
+| Tag | Points to | Example |
+| --- | --- | --- |
+| 0 | A descriptor, for a type of arity 0 | `int` |
+| 1 | A cell: the descriptor, then its arguments' `type_info`s | `list(int)` |
+
+A tuple's or closure's constructor (`VariableArity`) has the number of
+arguments after the descriptor. A `type_info` with no type variables is a
+static cell, one for each type in a module; `list(T)` in polymorphic code
+is an allocated cell. Two `type_info`s of one type can have different
+addresses, so `univ` and the like compare them by structure.
+
+*A field's type* (`MerkFieldType`) is a word of the same form, with two more
+tags: 2 for a type parameter of the term's type, its number in the high
+bits, and 3, reserved, for an existential variable. So `[|]`'s fields are
+`var 1` and the static cell `[list, var 1]`. A walker cannot allocate, least
+of all the collector, so it does not make a `type_info` for each field: it
+carries the field's type and a pointer to the frame that gives its
+variables' `type_info`s.
+
+*Finding a value's functor:* `Enum`, by the word; `NoTag`, no functor, the
+same word at the argument's type; `Cells`, `byTag[word & 7]`, then with the
+shared mark the secondary tag in the cell's first word, and with tag 0 and
+constants in the type `constants[word >> 3]`. A cell's size is its functor's
+arity, plus one for a secondary tag. That is all the collector and the
+message copy need of the cell: they read no header.
+
+*Unify and compare* in polymorphic code are `merk_unify(ti, x, y)`: load the
+descriptor, whichever the tag, and tail call `unify` with the same
+arguments. Lowering generates that entry for each type, which loads the
+`type_info`s of the type's arguments and tail calls `unify.T`; `unify.T` for
+`list(T)` takes `T`'s `type_info` and calls `merk_unify` on the heads. A
+unification at a known type keeps calling the monomorphic `unify.T`
+directly, as today, so monomorphic code does not change. `compare` follows
+the same pattern. A type with user-defined equality has its predicate there.
+The collector, the message copy, `from_open` and printing are walkers in
+the runtime, in C++.
+
+*Where descriptors live.* A strong symbol in the module that defines the
+type, since a module importing an abstract type cannot make it. The
+builtin types' are in the runtime. Until step 6 compiles `list`, `maybe` and
+`pair`, their descriptors are `linkonce_odr` in each module using them,
+marked temporary. Nothing compares descriptors by address, so a duplicate
+would be harmless.
+
+*Words.* Polymorphic code requires that every value be one canonical word:
+narrower integers and chars extended by their signedness, a float its bits,
+a dummy value 0. Today a narrow field is written by a narrow store, which
+leaves the word's other bytes unset (`store i8`, on a heap that is not
+zeroed), and a static cell pads it with zeros, which is wrong for a negative
+`int8`. So a field store and a static cell write the canonical word, and a
+load truncates it, which also takes the byte order out of it. This is the
+first commit of step 4. `merk` gets conversions between a value and its word
+at polymorphic calls and fields; only the narrow types and floats generate
+code for them.
+
+*Rejected:*
+
+- **A descriptor that doubles as a `type_info`, told by its first word,**
+  as the RTTI paper describes: testing needs a load, and mispredicts on a
+  type mix, where the tag is known from the pointer. The paper itself
+  has a switch to turn this off. Not measured; the choice is confined to
+  `merk_unify` and the walkers, so it can be revisited at step 7's gate.
+- **A descriptor per applied type,** which would hold each field's concrete
+  type: polymorphic code would need to make them at run time, and they would
+  be needed for every type used in a program.
+- **Unify and compare as walkers only,** without generated procedures: less
+  code, but slower on the path E4 measured at 3×, with no way to specialize
+  or inline them, and user-defined equality has to call out anyway.
+- **A generated trace procedure per type** in place of tables: possibly a
+  faster collector, but more code per type, and the copy, printing and
+  `from_open` need the tables anyway. It can be added beside them later.
+
+*What open types need from this* (see "Open types", below):
+
+- **One variable tag for every type.** `deref` and `bind` must not need a
+  `type_info`, so tag 7 is the variable tag in every open layout. A type
+  needing tag 7 in its ordinary layout moves one more functor under the
+  shared tag in its open layout.
+- **Whether the two layouts coincide is known only at run time** for
+  `list(T)`: `T = tree` shares its layout, and `T = int` does not. `OpenSame`
+  says a type's layouts coincide if its arguments' do, so that polymorphic
+  `to_open` can decide from the `type_info`. Answering no for a type whose
+  layouts do coincide only makes `to_open` copy.
+- **An open layout is a fixed function of the ordinary descriptor,** so
+  that the runtime can derive it for a type whose module never mentions
+  `open`, which polymorphic code can receive. The design document's "each
+  type used under `open(_)` gets a descriptor" cannot see such a type, and
+  generating one for every type would charge programs that do not use open
+  types, against the cost rule. Walkers therefore take a layout, ordinary or
+  open, beside the descriptor.
 
 **D4. Polymorphic arguments.** On 64-bit targets every value fits a word,
 so a polymorphic argument is a word, a float its bits, with no boxes. mmc
@@ -162,8 +283,9 @@ program.
    each cell's contents. The heap pointer and limit are thread-local until
    D2. Left for chunk 3: arrays' element loads and stores as `mrt`
    operations, for the write barrier.
-4. **Polymorphism.** Hidden `type_info` arguments first, as the calling
-   convention says, static type descriptors and `mrt.rtti` (D3),
+4. **Polymorphism.** Canonical words for narrow fields first (D3), then
+   hidden `type_info` arguments, as the calling convention says, static
+   type descriptors and `mrt.rtti` (D3),
    polymorphic `unify` and `compare` through the descriptors, and
    polymorphic procedures.
 5. **Closures.** `merk.closure` and `merk.call_closure` (D7), higher-order
@@ -178,3 +300,48 @@ program.
 Not in chunk 1: disjunctions and nondeterminism (an open question of its
 own), type classes, existential types, `io.write` (it needs D3's
 descriptors but can come after), and the collector.
+
+## Open types: `closed(T)`
+
+Decided 2026-11-04: `closed(T)` comes with open types, not after them. It
+lets a type say which parts are open, where `open(T)` alone is deep: every
+argument at every depth becomes open, so filling a hole with a large ground
+value means `to_open` on all of it, a copy if it has raw fields, and
+`from_open` copying it back.
+
+```mercury
+:- type bundle ---> bundle(closed(big), closed(big), closed(big)).
+
+    % open(bundle): a field may be unbound, but once bound holds a ground big.
+Hole = closed(Chunk)    % one small box holding the pointer; Chunk is not touched
+```
+
+`closed(T)` is a library type, `:- type closed(T) ---> closed(T).`, so
+outside `open(_)` it is a notag type: `T`'s word, at no cost. Under `open(_)`:
+
+| Where | What changes |
+| --- | --- |
+| Type checker | `closed(T)`'s argument under `open(_)` stays `T` |
+| Mode analysis | That argument is `ground`, under inst `any` |
+| Open layout | A one-word box of `T`'s word, with no descent into `T` |
+| Descriptors | The constructor's kind is `Closed`; no other field is needed |
+| `to_open`, `from_open` | Add or remove the box; the value is shared |
+| Unification | Both bound: `T`'s ordinary unify; the occurs check stops there |
+| Collector, message copy, printing | The walker changes to the ordinary layout there |
+
+Ground code, the heap and the trail do not change. A bound hole is a write
+into an older cell, so it needs the remembered set, as every `bind` does.
+
+- **`closed(open(U))`** cannot be ruled out in polymorphic code. The mode rule
+  covers it, since a value with unbound variables is not `ground`, and the
+  walker follows the `type_info`, back to the open layout.
+- **A unique value put in `closed(T)` becomes shared,** so it can no longer be
+  updated in place.
+- **A message still copies the value:** `closed(T)` saves the copies inside a
+  process. A hole cannot be filled from another process either, since open
+  values are sent as `copy_term` does, so the process holding the hole binds it.
+- **Not for building in order.** `foo(bundle(X, Y, Z)) :- recv(X), recv(Y),
+  recv(Z).` needs neither: mode analysis constructs the bundle after the
+  receives (checked with merkc and mmc), and values arriving in any order
+  fit an ordinary term of `maybe`s. `closed(T)` is for a term that something
+  must hold while it is still incomplete.
