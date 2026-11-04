@@ -996,7 +996,8 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
             a[1], false, VarId{0}, last->functor, last->arguments));
       } else {
         through(a[3]);
-        translated.threaded.push_back({in, position(a[3]), &iterator});
+        translated.threaded.push_back({in, position(a[3]), &iterator,
+            clause_->clause->vars[a[3]].name});
         ends.push_back(UnifyVars(at, a[3], a[1]));
       }
       if (const Unify *pattern{patterns.lookup(a[1])}) {
@@ -1010,7 +1011,8 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
     auto in{static_cast<unsigned>(head.size())};
     argument(state.in, state.before, state.out);
     through(state.after);
-    translated.threaded.push_back({in, position(state.after), nullptr});
+    translated.threaded.push_back({in, position(state.after), nullptr,
+        clause_->clause->vars[state.after].name});
     ends.push_back(UnifyVars(range, state.after, state.in));
   }
   for (VarId var : bodyHead) {

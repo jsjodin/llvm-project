@@ -59,11 +59,14 @@ struct TranslatedLoop {
   // The values carried from one iteration to the next, those of each
   // fromto that does not end the loop and each threaded state variable:
   // the positions in the loop predicate's arguments of In's, or the
-  // version in an iteration, and Last's, or the version after the loop.
+  // version in an iteration, and Last's, or the version after the loop,
+  // and the name a reduction clause names it by, Last's or the state
+  // variable's, as written.
   struct Threaded {
     unsigned in;
     unsigned after;
     const LoopIterator *fromto; // null for a state variable
+    llvm::StringRef name;
   };
   std::vector<Threaded> threaded;
 };
