@@ -258,9 +258,13 @@ private:
   // latter, whose body calls the loop's body procedure.
   void OmpLoop(const Body &, const ProcedureBody &);
   // A target region around what `generate` builds, for the goal, which
-  // maps the values it uses and those it binds.
+  // maps the values it uses and those it binds. Its kernel is `mode`
+  // (KernelOf); `hostEval` are the values computed on the host for it,
+  // which `generate` is given as the region's arguments.
   void Target(const Body &, const ProcedureBody &,
-      llvm::function_ref<void()> generate, bool combined = false);
+      llvm::function_ref<void(mlir::ValueRange hostEval)> generate,
+      bool combined, mlir::omp::TargetExecMode mode,
+      mlir::ValueRange hostEval = {});
   // The directive's leaves with their clauses; none after reporting a
   // clause that none of them allows.
   std::optional<omp::ConstructQueue> Decompose(const parser::OmpDirective &,
@@ -1524,6 +1528,43 @@ static bool Mappable(mlir::Type type) {
   return Scalar(type);
 }
 
+// The kernel of a target region with the leaves `queue`, target first, and
+// whether the host computes its loop's bounds and step, as host_eval
+// values, by Flang's patterns (KernelTypeVisitor and HostEvalVisitor in
+// flang/lib/Lower/OpenMP/OpenMP.cpp): after target, teams distribute
+// parallel do and parallel do are SPMD, with the bounds on the host;
+// teams distribute is generic, with the bounds on the host too, from which
+// the host computes the number of teams; anything else is generic. The
+// simd and loop forms of Flang's patterns are not implemented yet, and
+// neither is a target region whose goal is a single directive, which
+// would continue the pattern as a combined directive does.
+struct Kernel {
+  mlir::omp::TargetExecMode mode{mlir::omp::TargetExecMode::generic};
+  bool hostEvalBounds{false};
+};
+static Kernel KernelOf(const omp::ConstructQueue &queue) {
+  using llvm::omp::Directive;
+  llvm::SmallVector<Directive> leaves;
+  for (const omp::Leaf &leaf : queue) {
+    leaves.push_back(leaf.id);
+  }
+  auto is{[&](std::initializer_list<Directive> pattern) {
+    return llvm::equal(leaves, pattern);
+  }};
+  if (is({Directive::OMPD_target, Directive::OMPD_teams,
+          Directive::OMPD_distribute, Directive::OMPD_parallel,
+          Directive::OMPD_do}) ||
+      is({Directive::OMPD_target, Directive::OMPD_parallel,
+          Directive::OMPD_do})) {
+    return {mlir::omp::TargetExecMode::spmd, true};
+  }
+  if (is({Directive::OMPD_target, Directive::OMPD_teams,
+          Directive::OMPD_distribute})) {
+    return {mlir::omp::TargetExecMode::generic, true};
+  }
+  return {};
+}
+
 // The array that an array a target region gives was, before the region
 // updated it in place, if the region's own operations show it.
 static mlir::Value UpdatedFrom(mlir::Value array) {
@@ -1549,7 +1590,8 @@ static mlir::Value UpdatedFrom(mlir::Value array) {
 // directive). The directive is decomposed into its leaves, each with its
 // own clauses, as Flang decomposes it: parallel and do, or target, teams,
 // distribute, parallel and do, where the loop is in a target region whose
-// kernel is generic, since its bounds are computed on the device.
+// kernel is SPMD, given its bounds and step by the host as host_eval
+// values.
 void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
   using namespace parser::literals;
   const parser::OmpDirective &directive{*goal.directive};
@@ -1707,9 +1749,15 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
   }};
   bool teams{has(llvm::omp::Directive::OMPD_teams)};
   bool distribute{has(llvm::omp::Directive::OMPD_distribute)};
-  // Offloaded, the bounds' goals and the loop are in the target region,
-  // so its kernel is generic.
-  auto generate{[&] {
+  // Offloaded, the kernel is as Flang makes it (KernelOf): for target teams
+  // distribute parallel do, SPMD, and the host computes the bounds and the
+  // step before the target region and gives them to it as host_eval
+  // values, from which it computes the trip count and so the number of
+  // teams and threads, and the nest runs over them. The bounds'
+  // goals are in the region too, on both sides, so that the host and the
+  // device map the same values; the device's nest runs over those, as
+  // Flang's does, since the device has no host_eval.
+  auto generate{[&](mlir::ValueRange hostEval) {
     mlir::Location loc{Location(goal.tokens)};
     mlir::OpBuilder::InsertionGuard guard{builder_};
     // Teams and parallel end with terminators, added after what is in them,
@@ -1752,6 +1800,11 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
     mlir::Value upper{ValueOf(loop->step > 0 ? big : small)};
     mlir::Type i64{builder_.getI64Type()};
     mlir::Value step{IntegerConstant(i64, loop->step, loc)};
+    if (!hostEval.empty()) {
+      lower = hostEval[0];
+      upper = hostEval[1];
+      step = hostEval[2];
+    }
 
     llvm::SmallVector<const semantics::Type *> types;
     for (BodyVar argument : bodyCall->arguments) {
@@ -1813,11 +1866,29 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
       values_[call->arguments[value.after]] = ValueOf(call->arguments[value.in]);
     }
   }};
-  if (offloaded) {
-    Target(goal, body, generate, /*combined=*/true);
-  } else {
-    generate();
+  if (!offloaded) {
+    generate({});
+    return;
   }
+  Kernel kernel{KernelOf(*queue)};
+  llvm::SmallVector<mlir::Value, 3> hostEval;
+  if (kernel.hostEvalBounds && !target_.options().openMPIsTargetDevice) {
+    for (const Body *g : goals) {
+      if (g != trip && g != call) {
+        Goal(*g, body);
+      }
+    }
+    if (failed_) {
+      return;
+    }
+    BodyVar big{trip->goals.front()->arguments[0]};
+    BodyVar small{trip->goals.front()->arguments[1]};
+    mlir::Location loc{Location(goal.tokens)};
+    hostEval = {ValueOf(loop->step > 0 ? small : big),
+        ValueOf(loop->step > 0 ? big : small),
+        IntegerConstant(builder_.getI64Type(), loop->step, loc)};
+  }
+  Target(goal, body, generate, /*combined=*/true, kernel.mode, hostEval);
 }
 
 std::optional<omp::ConstructQueue> MerkGenerator::Decompose(
@@ -1897,28 +1968,33 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
     NotYet(at, "target regions in target regions");
     return;
   }
-  Target(goal, body, [&] { Goal(*goal.goals.front(), body); });
+  Target(goal, body, [&](mlir::ValueRange) { Goal(*goal.goals.front(), body); },
+      /*combined=*/false, KernelOf(*queue).mode);
 }
 
 void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
-    llvm::function_ref<void()> generate, bool combined) {
+    llvm::function_ref<void(mlir::ValueRange hostEval)> generate,
+    bool combined, mlir::omp::TargetExecMode mode, mlir::ValueRange hostEval) {
   parser::CharBlock at{Where(goal.tokens)};
   mlir::Location loc{Location(goal.tokens)};
   Values before{values_};
   // What `generate` builds, in a target region whose map entries are added
   // after it: they are the values it uses from outside and those it binds.
-  // Without host_eval its kernel is generic, not SPMD.
+  // The host_eval arguments come before the map entries' arguments.
   mlir::omp::TargetExtOperands operands;
-  operands.kernelType = mlir::omp::TargetExecModeAttr::get(
-      &context_, mlir::omp::TargetExecMode::generic);
+  operands.kernelType = mlir::omp::TargetExecModeAttr::get(&context_, mode);
+  operands.hostEvalVars.append(hostEval.begin(), hostEval.end());
   auto targetOp{mlir::omp::TargetOp::create(builder_, loc, operands)};
   targetOp.setCombined(combined);
   mlir::Region &region{targetOp.getRegion()};
   mlir::Block *block{&region.emplaceBlock()};
+  for (mlir::Value value : hostEval) {
+    block->addArgument(value.getType(), loc);
+  }
   {
     mlir::OpBuilder::InsertionGuard guard{builder_};
     builder_.setInsertionPointToStart(block);
-    generate();
+    generate(block->getArguments());
   }
   if (failed_) {
     values_ = before;

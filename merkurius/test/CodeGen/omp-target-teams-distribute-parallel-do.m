@@ -4,15 +4,19 @@
 % distribute parallel do: target and teams are combined, and parallel,
 % distribute and do, the parts of the composite distribute parallel do,
 % are composite. The region maps the arrays and the values the loop uses,
-% as any target region does. Without host_eval its kernel is generic, and
-% the bounds are computed in omp.parallel, where the region reads the
-% values it is given, as Flang places them.
+% as any target region does. The kernel is SPMD: the host computes the
+% bounds and the step before the region and gives them to it as host_eval
+% values, which the nest runs over. The bounds are computed in omp.parallel
+% too, where the region reads the values it is given, as Flang places
+% them, so that the device, which has no host_eval, maps the same values
+% and its nest runs over those.
 % omp-target-teams-distribute-parallel-do-gpu.test runs the program on the
 % GPU; here it runs on the host, and as the sequential program.
 %
 % RUN: merkc -fc1 -fopenmp -fdo-loops -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MERK
 % RUN: merkc -fc1 -fopenmp -fdo-loops -emit-mlir -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MLIR
 % RUN: merkc -fc1 -fopenmp -fdo-loops --offload-targets=amdgpu-amd-amdhsa -emit-llvm-bc -triple x86_64-unknown-linux-gnu %s -o %t.host.bc
+% RUN: merkc -fc1 -fopenmp -fdo-loops -fopenmp-is-target-device -fopenmp-host-ir-file-path %t.host.bc -triple amdgpu10.30-amd-amdhsa -emit-merk %s | FileCheck %s --check-prefix=DEVICE-MERK
 % RUN: merkc -fc1 -fopenmp -fdo-loops -fopenmp-is-target-device -fopenmp-host-ir-file-path %t.host.bc -triple amdgpu10.30-amd-amdhsa -emit-llvm %s -o - | FileCheck %s --check-prefix=DEVICE
 % RUN: merkc -fopenmp -fdo-loops %libomp-flags %s -o %t && %libomp-env OMP_NUM_THREADS=4 %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -fdo-loops %s -o %t.sequential && %t.sequential | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
@@ -62,20 +66,23 @@ saxpy(A, X, !Y) :-
     ( for(I, 0, N - 1) do
         !Y ^ elem(I) := A * X ^ elem(I) + !.Y ^ elem(I)
     ).
+% The host computes the bounds and the step from N, and maps N too.
 % MERK-LABEL: merk.proc private @omp_target_teams_distribute_parallel_do.saxpy_4_0(
+% MERK:         %[[SIZE:.*]] = merk.array_size %arg1
+% MERK-NEXT:    %[[HLO:.*]] = merk.constant 0 : i64
+% MERK:         %[[HHI:.*]] = arith.subi %[[SIZE]], %{{.*}} : i64
+% MERK-NEXT:    %[[HSTEP:.*]] = arith.constant 1 : i64
 % MERK:         omp.map.info var_ptr(%{{.*}} : !llvm.ptr, i64) map_clauses(to) capture(ByCopy) name("N")
 % MERK:         omp.map.info var_ptr(%{{.*}} : !llvm.ptr, i64) map_clauses(tofrom) capture(ByRef) bounds(%{{.*}}) name("STATE_VARIABLE_Y_0")
 % MERK:         omp.map.info var_ptr(%{{.*}} : !llvm.ptr, f64) map_clauses(to) capture(ByCopy) name("A")
 % MERK:         omp.map.info var_ptr(%{{.*}} : !llvm.ptr, i64) map_clauses(to) capture(ByRef) bounds(%{{.*}}) name("X")
-% MERK:         omp.target kernel_type(generic) map_entries(%{{.*}} -> %[[N:.*]], %{{.*}} -> %[[Y:.*]], %{{.*}} -> %[[A:.*]], %{{.*}} -> %[[X:.*]] : !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) {
+% MERK:         omp.target kernel_type(spmd) host_eval(%[[HLO]] -> %[[LO:.*]], %[[HHI]] -> %[[HI:.*]], %[[HSTEP]] -> %[[STEP:.*]] : i64, i64, i64) map_entries(%{{.*}} -> %[[N:.*]], %{{.*}} -> %[[Y:.*]], %{{.*}} -> %[[A:.*]], %{{.*}} -> %[[X:.*]] : !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) {
 % MERK-NEXT:      omp.teams {
 % MERK-NEXT:        omp.parallel {
 % MERK:               %[[NV:.*]] = llvm.load %[[N]] : !llvm.ptr -> i64
 % MERK:               %[[AV:.*]] = llvm.load %[[A]] : !llvm.ptr -> f64
-% MERK:               %[[LO:.*]] = merk.constant 0 : i64
-% MERK:               %[[HI:.*]] = arith.subi %[[NV]], %{{.*}} : i64
-% MERK:               %[[STEP:.*]] = arith.constant 1 : i64
-% MERK-NEXT:          omp.distribute {
+% MERK:               arith.subi %[[NV]], %{{.*}} : i64
+% MERK:               omp.distribute {
 % MERK-NEXT:            omp.wsloop {
 % MERK-NEXT:              omp.loop_nest (%[[I:.*]]) : i64 = (%[[LO]]) to (%[[HI]]) inclusive step (%[[STEP]]) {
 % MERK-NEXT:                merk.call @omp_target_teams_distribute_parallel_do.saxpy__body_{{[0-9]+}}_7_5_0(%[[I]], %{{.*}}, %[[AV]], %{{.*}})
@@ -90,8 +97,16 @@ saxpy(A, X, !Y) :-
 % MERK-NEXT:      omp.terminator
 % MERK-NEXT:    } {omp.combined}
 % MERK-NOT:   merk.call @omp_target_teams_distribute_parallel_do.saxpy__loop
+% The device has no host_eval: its nest runs over the bounds it computes.
+% DEVICE-MERK-LABEL: merk.proc private @omp_target_teams_distribute_parallel_do.saxpy_4_0(
+% DEVICE-MERK:         omp.target kernel_type(spmd) map_entries(%{{[0-9]+}} -> %[[N:[a-z0-9]+]], {{.*}}) {
+% DEVICE-MERK:             %[[NV:.*]] = llvm.load %[[N]] : !llvm.ptr -> i64
+% DEVICE-MERK:             %[[LO:.*]] = merk.constant 0 : i64
+% DEVICE-MERK:             %[[HI:.*]] = arith.subi %[[NV]], %{{.*}} : i64
+% DEVICE-MERK:             %[[STEP:.*]] = arith.constant 1 : i64
+% DEVICE-MERK:                 omp.loop_nest (%{{.*}}) : i64 = (%[[LO]]) to (%[[HI]]) inclusive step (%[[STEP]]) {
 % MLIR-LABEL: llvm.func internal tailcc @omp_target_teams_distribute_parallel_do.saxpy_4_0(
-% MLIR:         omp.target kernel_type(generic)
+% MLIR:         omp.target kernel_type(spmd) host_eval(
 % MLIR:                     omp.loop_nest
 % MLIR-NEXT:                  llvm.call tailcc @omp_target_teams_distribute_parallel_do.saxpy__body_{{[0-9]+}}_7_5_0(
 % The body procedure is on the device, called from the loop's body.
@@ -106,9 +121,10 @@ down(!A) :-
     %$omp target teams distribute parallel do
     ( for(I, 9, 5, -1) do !A ^ elem(I) := I ).
 % MERK-LABEL: merk.proc private @omp_target_teams_distribute_parallel_do.down_2_0(
-% MERK:         %[[LO:.*]] = merk.constant 9 : i64
-% MERK-NEXT:    %[[HI:.*]] = merk.constant 5 : i64
-% MERK-NEXT:    %[[STEP:.*]] = arith.constant -1 : i64
+% MERK-NEXT:    %[[HLO:.*]] = merk.constant 9 : i64
+% MERK-NEXT:    %[[HHI:.*]] = merk.constant 5 : i64
+% MERK-NEXT:    %[[HSTEP:.*]] = arith.constant -1 : i64
+% MERK:         omp.target kernel_type(spmd) host_eval(%[[HLO]] -> %[[LO:.*]], %[[HHI]] -> %[[HI:.*]], %[[HSTEP]] -> %[[STEP:.*]] : i64, i64, i64)
 % MERK:         omp.loop_nest (%{{.*}}) : i64 = (%[[LO]]) to (%[[HI]]) inclusive step (%[[STEP]]) {
 
 % Every third element from 0: 0, 3, 6 and 9, which down set already.
