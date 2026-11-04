@@ -434,8 +434,8 @@ mlir::LLVM::GlobalOp Lowerer::StaticCell(const TermLayout::Functor &functor,
   if (cell) {
     return cell;
   }
-  // A struct of the cell's words: a field narrower than a word is in its
-  // word's low bytes, as a store of it puts it, and padded.
+  // A struct of the cell's words: a field narrower than a word is its
+  // whole word, zero-extended, as a store of it writes it.
   mlir::MLIRContext *context{module_.getContext()};
   auto i64{rewriter_.getI64Type()};
   llvm::SmallVector<mlir::Type> words;
@@ -448,18 +448,14 @@ mlir::LLVM::GlobalOp Lowerer::StaticCell(const TermLayout::Functor &functor,
     values.push_back(secondary);
   }
   values.append(fields.begin(), fields.end());
-  llvm::SmallVector<bool> padded;
-  for (const StaticValue &value : values) {
+  for (StaticValue &value : values) {
     auto integer{mlir::dyn_cast<mlir::IntegerType>(value.type)};
     if (integer && integer.getWidth() < 64) {
-      words.push_back(mlir::LLVM::LLVMStructType::getLiteral(context,
-          {value.type, mlir::LLVM::LLVMArrayType::get(rewriter_.getI8Type(),
-                           (64 - integer.getWidth()) / 8)}));
-      padded.push_back(true);
-    } else {
-      words.push_back(value.type);
-      padded.push_back(false);
+      value.value = rewriter_.getIntegerAttr(i64,
+          mlir::cast<mlir::IntegerAttr>(value.value).getValue().zext(64));
+      value.type = i64;
     }
+    words.push_back(value.type);
   }
   auto cellType{mlir::LLVM::LLVMStructType::getLiteral(context, words)};
   mlir::OpBuilder::InsertionGuard guard{rewriter_};
@@ -472,12 +468,9 @@ mlir::LLVM::GlobalOp Lowerer::StaticCell(const TermLayout::Functor &functor,
   rewriter_.createBlock(&cell.getInitializerRegion());
   mlir::Value init{mlir::LLVM::ZeroOp::create(rewriter_, loc, cellType)};
   for (auto [i, value] : llvm::enumerate(values)) {
-    llvm::SmallVector<std::int64_t> position{static_cast<std::int64_t>(i)};
-    if (padded[i]) {
-      position.push_back(0);
-    }
-    init = mlir::LLVM::InsertValueOp::create(
-        rewriter_, loc, init, Materialize(value, loc), position);
+    init = mlir::LLVM::InsertValueOp::create(rewriter_, loc, init,
+        Materialize(value, loc),
+        llvm::SmallVector<std::int64_t>{static_cast<std::int64_t>(i)});
   }
   mlir::LLVM::ReturnOp::create(rewriter_, loc, init);
   return cell;
@@ -1507,6 +1500,10 @@ void Lowerer::LowerMrt() {
         address,
         llvm::ArrayRef<mlir::LLVM::GEPArg>{static_cast<std::int32_t>(bytes)});
   }};
+  auto narrow{[](mlir::Type type) {
+    auto integer{mlir::dyn_cast<mlir::IntegerType>(type)};
+    return integer && integer.getWidth() < 64;
+  }};
   for (mlir::Operation *op : ops) {
     mlir::Location loc{op->getLoc()};
     rewriter_.setInsertionPoint(op);
@@ -1528,14 +1525,25 @@ void Lowerer::LowerMrt() {
               mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, kTags - 1));
         })
         .Case([&](mrt::FieldLoadOp load) {
-          rewriter_.replaceOpWithNewOp<mlir::LLVM::LoadOp>(load,
-              load.getValue().getType(),
-              offset(load.getCell(), 8 * static_cast<std::int64_t>(load.getWord()),
-                  loc),
-              8);
+          // A narrow field is its whole word (Type representation, "Words").
+          mlir::Type type{load.getValue().getType()};
+          mlir::Value address{offset(load.getCell(),
+              8 * static_cast<std::int64_t>(load.getWord()), loc)};
+          if (narrow(type)) {
+            mlir::Value word{
+                mlir::LLVM::LoadOp::create(rewriter_, loc, i64, address, 8)};
+            rewriter_.replaceOpWithNewOp<mlir::LLVM::TruncOp>(load, type, word);
+          } else {
+            rewriter_.replaceOpWithNewOp<mlir::LLVM::LoadOp>(
+                load, type, address, 8);
+          }
         })
         .Case([&](mrt::FieldStoreOp store) {
-          mlir::LLVM::StoreOp::create(rewriter_, loc, store.getValue(),
+          mlir::Value value{store.getValue()};
+          if (narrow(value.getType())) {
+            value = mlir::LLVM::ZExtOp::create(rewriter_, loc, i64, value);
+          }
+          mlir::LLVM::StoreOp::create(rewriter_, loc, value,
               offset(store.getCell(),
                   8 * static_cast<std::int64_t>(store.getWord()), loc),
               8);
