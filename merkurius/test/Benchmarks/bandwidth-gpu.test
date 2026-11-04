@@ -1,0 +1,19 @@
+The memory bandwidth benchmark on the machine's GPU, on small arrays: each
+kernel is an SPMD kernel, and the arrays' final values are right.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/bandwidth/bandwidth.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=16 BANDWIDTH_ARRAY_SIZE=100003 BANDWIDTH_NUM_TIMES=5 %t 2> %t.info | FileCheck %s
+RUN: FileCheck %s --check-prefix=INFO < %t.info
+CHECK: Running kernels 5 times
+CHECK-NOT: Validation failed
+CHECK: Function    MBytes/sec  Min (sec)   Max         Average
+CHECK-NEXT: Copy
+CHECK-NEXT: Mul
+CHECK-NEXT: Add
+CHECK-NEXT: Triad
+CHECK-NEXT: Dot
+INFO: Launching kernel {{.*}}bandwidth.init_{{.*}} in SPMD mode
+INFO: Launching kernel {{.*}}bandwidth.copy_{{.*}} in SPMD mode
+INFO: Launching kernel {{.*}}bandwidth.dot_{{.*}} in SPMD mode
+INFO-NOT: Generic
