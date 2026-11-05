@@ -205,8 +205,26 @@ private:
       parser::CharBlock where);
   const Symbol *ModeDeclTarget(const parser::ModeDecl &,
       const Symbol *typeclass, const ModuleSymbols &);
+  ArgMode SubstituteInMode(
+      const ArgMode &, llvm::function_ref<const Inst *(const Inst &)> replace);
+  std::vector<ArgMode> ErasedModes(llvm::ArrayRef<ArgMode>);
+  // Adds a declared mode of a predicate or function, unless it has it already.
+  void AddDeclared(const Symbol &, Declared, parser::CharBlock where,
+      std::vector<Procedure> &procedures,
+      std::vector<parser::CharBlock> &sources);
   void BuildProcedures(llvm::ArrayRef<parser::Item>, const ModuleSymbols &);
   void MatchForeignProcs(const parser::ParseTree &);
+  // What CheckInstForType keeps for one argument of a declaration.
+  struct InstTypeWalk {
+    const Symbol &symbol;
+    unsigned argument; // from 1
+    parser::CharBlock where;
+    llvm::DenseSet<std::pair<const Inst *, const Type *>> seen{};
+    // The named inst whose expansion is being walked, if any.
+    const Symbol *expanding{nullptr};
+  };
+  // Whether a mismatch was found and reported, in the inst or within it.
+  bool CheckInstForType(const Inst *, const Type *, InstTypeWalk &);
   void CheckForTypes(
       const Symbol &, llvm::ArrayRef<ArgMode>, parser::CharBlock where);
 
@@ -508,13 +526,11 @@ ArgMode ModeChecker::Convert(const parser::Mode &mode, InstScope &scope) {
               }
               return error;
             }
-            auto replace{[&](const Inst &parameter) {
+            return SubstituteInMode(*body, [&](const Inst &parameter) {
               return parameter.number < arguments.size()
                   ? arguments[parameter.number]
                   : &parameter;
-            }};
-            return ArgMode{insts_.Substitute(body->initial, replace),
-                insts_.Substitute(body->final, replace)};
+            });
           },
           [&](const parser::HigherOrderInst *higher) {
             // A higher-order inst used as a mode means in(Inst).
@@ -824,6 +840,67 @@ const Symbol *ModeChecker::ModeDeclTarget(const parser::ModeDecl &decl,
   return nullptr;
 }
 
+bool ModeChecker::CheckInstForType(
+    const Inst *inst, const Type *type, InstTypeWalk &walk) {
+  if (!type || type->kind != TypeKind::Named ||
+      type->constructor->name == "<error>" ||
+      !walk.seen.insert({inst, type}).second) {
+    return false;
+  }
+  if (inst->kind == InstKind::Defined && inst->symbol) {
+    const Symbol *forType{forTypes_.lookup(inst->symbol)};
+    if (forType && forType != type->constructor) {
+      // mmc: "the user defined inst `iy'/0 is declared to be
+      // applicable only to values of type `list.list'/1, but here
+      // it is applied to values of type `int'/0", after "in the
+      // expansion of the user-defined inst `wrapped'/0" if within
+      // one.
+      std::string within;
+      if (walk.expanding) {
+        within = ", within the inst " + walk.expanding->module.str() + '.' +
+            walk.expanding->name.str() + '/' +
+            std::to_string(walk.expanding->arity) + ',';
+      }
+      messages_.Say(walk.where,
+          "the inst %s.%s/%u is for values of type %s.%s/%u, but in argument %u of %s%s it is applied to values of type %s"_err_en_US,
+          inst->symbol->module.str(), inst->symbol->name.str(),
+          inst->symbol->arity, forType->module.str(), forType->name.str(),
+          forType->arity, walk.argument, Text(walk.symbol), within,
+          TypeToString(*type));
+      return true;
+    }
+    const Symbol *saved{walk.expanding};
+    if (!walk.expanding) {
+      walk.expanding = inst->symbol;
+    }
+    bool found{CheckInstForType(insts_.Expand(inst), type, walk)};
+    walk.expanding = saved;
+    return found;
+  }
+  if (inst->kind != InstKind::Bound) {
+    return false;
+  }
+  std::vector<ConstructorTypes> constructors;
+  if (!constructors_.Constructors(type, constructors)) {
+    return false;
+  }
+  for (const BoundAlternative &alternative : inst->functors) {
+    for (const ConstructorTypes &constructor : constructors) {
+      if (constructor.functor.name != alternative.functor.name ||
+          constructor.functor.arity != alternative.functor.arity) {
+        continue;
+      }
+      for (std::size_t j{0}; j < alternative.arguments.size(); ++j) {
+        if (CheckInstForType(
+                alternative.arguments[j], constructor.arguments[j], walk)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 // An inst that is declared for one type constructor must be applied to
 // values of that type (reference manual, "Insts, modes, and mode
 // definitions"). mmc checks each argument's inst, and the insts within it
@@ -837,71 +914,9 @@ void ModeChecker::CheckForTypes(const Symbol &symbol,
   }
   llvm::ArrayRef<const Type *> arguments{signature->arguments};
   for (std::size_t i{0}; i < modes.size() && i < arguments.size(); ++i) {
-    llvm::DenseSet<std::pair<const Inst *, const Type *>> seen;
-    // The named inst whose expansion is being walked, if any.
-    const Symbol *expanding{nullptr};
-    std::function<bool(const Inst *, const Type *)> walk{
-        [&](const Inst *inst, const Type *type) {
-          if (!type || type->kind != TypeKind::Named ||
-              type->constructor->name == "<error>" ||
-              !seen.insert({inst, type}).second) {
-            return false;
-          }
-          if (inst->kind == InstKind::Defined && inst->symbol) {
-            const Symbol *forType{forTypes_.lookup(inst->symbol)};
-            if (forType && forType != type->constructor) {
-              // mmc: "the user defined inst `iy'/0 is declared to be
-              // applicable only to values of type `list.list'/1, but here
-              // it is applied to values of type `int'/0", after "in the
-              // expansion of the user-defined inst `wrapped'/0" if within
-              // one.
-              std::string within;
-              if (expanding) {
-                within = ", within the inst " + expanding->module.str() + '.' +
-                    expanding->name.str() + '/' +
-                    std::to_string(expanding->arity) + ',';
-              }
-              messages_.Say(where,
-                  "the inst %s.%s/%u is for values of type %s.%s/%u, but in argument %u of %s%s it is applied to values of type %s"_err_en_US,
-                  inst->symbol->module.str(), inst->symbol->name.str(),
-                  inst->symbol->arity, forType->module.str(),
-                  forType->name.str(), forType->arity,
-                  static_cast<unsigned>(i + 1), Text(symbol), within,
-                  TypeToString(*type));
-              return true;
-            }
-            const Symbol *saved{expanding};
-            if (!expanding) {
-              expanding = inst->symbol;
-            }
-            bool found{walk(insts_.Expand(inst), type)};
-            expanding = saved;
-            return found;
-          }
-          if (inst->kind != InstKind::Bound) {
-            return false;
-          }
-          std::vector<ConstructorTypes> constructors;
-          if (!constructors_.Constructors(type, constructors)) {
-            return false;
-          }
-          for (const BoundAlternative &alternative : inst->functors) {
-            for (const ConstructorTypes &constructor : constructors) {
-              if (constructor.functor.name != alternative.functor.name ||
-                  constructor.functor.arity != alternative.functor.arity) {
-                continue;
-              }
-              for (std::size_t j{0}; j < alternative.arguments.size(); ++j) {
-                if (walk(alternative.arguments[j], constructor.arguments[j])) {
-                  return true;
-                }
-              }
-            }
-          }
-          return false;
-        }};
+    InstTypeWalk walk{symbol, static_cast<unsigned>(i + 1), where};
     for (const Inst *inst : {modes[i].initial, modes[i].final}) {
-      if (walk(inst, arguments[i])) {
+      if (CheckInstForType(inst, arguments[i], walk)) {
         break;
       }
     }
@@ -1013,6 +1028,54 @@ void ModeChecker::MatchForeignProcs(const parser::ParseTree &tree) {
   }
 }
 
+ArgMode ModeChecker::SubstituteInMode(const ArgMode &mode,
+    llvm::function_ref<const Inst *(const Inst &)> replace) {
+  return ArgMode{insts_.Substitute(mode.initial, replace),
+      insts_.Substitute(mode.final, replace)};
+}
+
+// As in mmc, modes are the same if they are with each inst variable replaced by
+// its constraint, so in(I) is in.
+std::vector<ArgMode> ModeChecker::ErasedModes(llvm::ArrayRef<ArgMode> modes) {
+  std::vector<ArgMode> result;
+  for (const ArgMode &mode : modes) {
+    result.push_back(SubstituteInMode(mode, [](const Inst &parameter) {
+      return parameter.constraint ? parameter.constraint : &parameter;
+    }));
+  }
+  return result;
+}
+
+void ModeChecker::AddDeclared(const Symbol &symbol, Declared declared,
+    parser::CharBlock where, std::vector<Procedure> &procedures,
+    std::vector<parser::CharBlock> &sources) {
+  for (std::size_t i{0}; i < procedures.size(); ++i) {
+    if (ErasedModes(procedures[i].modes) == ErasedModes(declared.modes)) {
+      // mmc: "In mode declarations for predicate `p'/1: error:
+      // duplicate mode declaration. Here is the conflicting mode
+      // declaration."
+      if (own_) {
+        messages_
+            .Say(sources[i], "%s has the same mode declared twice"_err_en_US,
+                Text(symbol))
+            .Attach(where,
+                "the other declaration of the mode is here"_because_en_US);
+      }
+      return;
+    }
+  }
+  if (own_) {
+    CheckForTypes(symbol, declared.modes, where);
+  }
+  procedures.push_back(
+      Procedure{&symbol, static_cast<unsigned>(procedures.size()),
+          result_.arena_.SaveArray(llvm::ArrayRef<ArgMode>{declared.modes}),
+          declared.determinism, where,
+          result_.arena_.SaveArray(
+              llvm::ArrayRef<const Inst *>{declared.parameters})});
+  sources.push_back(where);
+}
+
 void ModeChecker::BuildProcedures(
     llvm::ArrayRef<parser::Item> items, const ModuleSymbols &symbols) {
   // The mode declarations of each predicate and function, with the
@@ -1023,16 +1086,13 @@ void ModeChecker::BuildProcedures(
   };
   llvm::DenseMap<const Symbol *, std::vector<ModeItem>> modeDecls;
   bool interface{true};
-  auto addMode{[&](const parser::ModeDecl &decl, const Symbol *typeclass) {
-    if (const Symbol *target{ModeDeclTarget(decl, typeclass, symbols)}) {
-      modeDecls[target].push_back({&decl, interface});
-    }
-  }};
   for (const parser::Item &item : items) {
     if (const auto *section{std::get_if<const parser::SectionDecl *>(&item)}) {
       interface = (*section)->section == parser::Section::Interface;
     } else if (const auto *decl{std::get_if<const parser::ModeDecl *>(&item)}) {
-      addMode(**decl, nullptr);
+      if (const Symbol * target{ModeDeclTarget(**decl, nullptr, symbols)}) {
+        modeDecls[target].push_back({*decl, interface});
+      }
     } else if (const auto *typeclass{
                    std::get_if<const parser::TypeclassDecl *>(&item)}) {
       const Symbol *symbol{nullptr};
@@ -1044,8 +1104,10 @@ void ModeChecker::BuildProcedures(
       }
       for (const parser::ClassMethod &method : (*typeclass)->methods) {
         if (const auto *decl{std::get_if<const parser::ModeDecl *>(&method)}) {
-          if (symbol) {
-            addMode(**decl, symbol);
+          if (const Symbol *
+              target{
+                  symbol ? ModeDeclTarget(**decl, symbol, symbols) : nullptr}) {
+            modeDecls[target].push_back({*decl, interface});
           }
         }
       }
@@ -1077,45 +1139,6 @@ void ModeChecker::BuildProcedures(
     }
     std::vector<Procedure> procedures;
     std::vector<parser::CharBlock> sources;
-    // As in mmc, modes are the same if they are with each inst variable
-    // replaced by its constraint, so in(I) is in.
-    auto erased{[&](llvm::ArrayRef<ArgMode> modes) {
-      auto constraint{[&](const Inst &parameter) {
-        return parameter.constraint ? parameter.constraint : &parameter;
-      }};
-      std::vector<ArgMode> result;
-      for (const ArgMode &mode : modes) {
-        result.push_back({insts_.Substitute(mode.initial, constraint),
-            insts_.Substitute(mode.final, constraint)});
-      }
-      return result;
-    }};
-    auto add{[&](Declared declared, parser::CharBlock where) {
-      for (std::size_t i{0}; i < procedures.size(); ++i) {
-        if (erased(procedures[i].modes) == erased(declared.modes)) {
-          // mmc: "In mode declarations for predicate `p'/1: error:
-          // duplicate mode declaration. Here is the conflicting mode
-          // declaration."
-          if (own_) {
-            messages_
-                .Say(sources[i], "%s has the same mode declared twice"_err_en_US,
-                    Text(*symbol))
-                .Attach(where, "the other declaration of the mode is here"_because_en_US);
-          }
-          return;
-        }
-      }
-      if (own_) {
-        CheckForTypes(*symbol, declared.modes, where);
-      }
-      procedures.push_back(Procedure{symbol,
-          static_cast<unsigned>(procedures.size()),
-          result_.arena_.SaveArray(llvm::ArrayRef<ArgMode>{declared.modes}),
-          declared.determinism, where,
-          result_.arena_.SaveArray(
-              llvm::ArrayRef<const Inst *>{declared.parameters})});
-      sources.push_back(where);
-    }};
     const parser::PredDecl &pred{**decl};
     bool combined{(pred.result ? pred.result->mode.has_value() : false) ||
         llvm::any_of(pred.arguments,
@@ -1149,7 +1172,8 @@ void ModeChecker::BuildProcedures(
             "the exported %s has no determinism declaration"_err_en_US,
             Text(*symbol));
       }
-      add(std::move(declared), symbol->source);
+      AddDeclared(
+          *symbol, std::move(declared), symbol->source, procedures, sources);
     }
     for (const ModeItem &item : modeDecls.lookup(symbol)) {
       const parser::ModeDecl &mode{*item.decl};
@@ -1185,7 +1209,7 @@ void ModeChecker::BuildProcedures(
             "the exported %s has no determinism declaration in this mode declaration"_err_en_US,
             Text(*symbol));
       }
-      add(std::move(declared), where);
+      AddDeclared(*symbol, std::move(declared), where, procedures, sources);
     }
     if (procedures.empty() && !combined && !modeDecls.count(symbol)) {
       if (symbol->kind == SymbolKind::Function) {
