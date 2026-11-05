@@ -25,7 +25,7 @@
     ;       a7(int) ; a8(int) ; a9(string, many).
 
 % MERK-DAG: merk.type_ctor "list.list/1" {{.*}} functors {{.*}}"list.list/1", 0
-% MERK-DAG: merk.write_word %arg0, %arg1 flags 0
+% MERK-DAG: merk.call @io.write_3_0
 
 :- pred w(T::in, io::di, io::uo) is det.
 w(X, !IO) :-

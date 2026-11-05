@@ -133,6 +133,9 @@ static std::optional<llvm::APInt> IntegerValue(
 // conventions"): a tuple is an MR_Tuple, a type without its own is an MR_Word,
 // and an array is an MR_ArrayPtr, as mmc passes it.
 static std::string CType(const semantics::Type &type) {
+  if (type.kind == semantics::TypeKind::Variable) {
+    return "MR_Word";
+  }
   if (type.kind == semantics::TypeKind::Tuple) {
     return "MR_Tuple";
   }
@@ -176,6 +179,20 @@ typedef void *MR_ArrayPtr;
 typedef int MR_bool;
 #define MR_TRUE 1
 #define MR_FALSE 0
+static inline MR_Float MR_word_to_float(MR_Word word) {
+  MR_Float number;
+  __builtin_memcpy(&number, &word, sizeof number);
+  return number;
+}
+static inline MR_Word MR_float_to_word(MR_Float number) {
+  MR_Word word;
+  __builtin_memcpy(&word, &number, sizeof word);
+  return word;
+}
+#define MR_word_to_int64(word) ((int64_t)(word))
+#define MR_word_to_uint64(word) ((uint64_t)(word))
+#define MR_int64_to_word(value) ((MR_Word)(value))
+#define MR_uint64_to_word(value) ((MR_Word)(value))
 )"};
 
 namespace {
@@ -272,8 +289,6 @@ private:
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   // A call of io's write or print, or their _line forms, to the standard
   // output.
-  bool WriteBuiltin(const Body &, const Procedure &,
-      llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   // A type's type variables, in order of first appearance.
   llvm::SmallVector<unsigned> VariablesOf(const semantics::Type &);
   // Makes the merk.type_ctor of a type's constructor, with its unify entry,
@@ -1294,14 +1309,8 @@ void MerkGenerator::GenerateForeign(
   if (!signature) {
     return;
   }
-  // Temporary (chunk 1 step 4, docs/INPROGRESS.md): a polymorphic foreign_proc
-  // has its type_infos as C variables, TypeInfo_for_T (reference manual).
   std::optional<unsigned> hidden{HiddenTypeInfos(procedure, at)};
   if (!hidden) {
-    return;
-  }
-  if (*hidden != 0) {
-    NotYet(at, "polymorphic foreign_procs");
     return;
   }
   merk::ProcOp proc{ProcFor(procedure, signature->arguments, at)};
@@ -1322,7 +1331,9 @@ void MerkGenerator::GenerateForeign(
   // stores the outputs through pointers after the inputs; that of a
   // procedure that can fail returns SUCCESS_INDICATOR, and stores every
   // output. A variable of a type with no values, such as io.state, is an
-  // MR_Word set to 0.
+  // MR_Word set to 0. A type variable's value is an MR_Word, and its
+  // type_info is one too, the parameter TypeInfo_for_T, first, as in mmc:
+  // the manual does not describe them.
   merk::Determinism determinism{proc.getDeterminism()};
   bool canFail{determinism == merk::Determinism::Semidet ||
       determinism == merk::Determinism::Failure ||
@@ -1331,6 +1342,10 @@ void MerkGenerator::GenerateForeign(
   std::string parameters, locals, stores;
   if (canFail) {
     locals += "  MR_bool SUCCESS_INDICATOR = MR_TRUE;\n";
+  }
+  for (unsigned var{0}; var < *hidden; ++var) {
+    parameters += (parameters.empty() ? "" : ", ");
+    parameters += "MR_Word TypeInfo_for_" + signature->varNames[var].str();
   }
   llvm::SmallVector<std::pair<std::string, std::string>> outputs;
   for (auto [argument, type, mode] :
@@ -1370,10 +1385,12 @@ void MerkGenerator::GenerateForeign(
   mlir::Location loc{Location(Where(pragma.tokens))};
   // A term is an MR_Word or MR_Tuple in C whatever its layout, so it crosses
   // as its word: a notag type's float would otherwise be in a float register.
+  // So does a type_info.
   auto word{merk::WordType::get(&context_)};
   llvm::SmallVector<mlir::Value> inputs;
   for (mlir::Value argument : entry->getArguments()) {
-    inputs.push_back(mlir::isa<merk::TermType>(argument.getType())
+    inputs.push_back(
+        mlir::isa<merk::TermType, merk::TypeInfoType>(argument.getType())
             ? mlir::Value{merk::ToWordOp::create(builder_, loc, word, argument)}
             : argument);
   }
@@ -2115,50 +2132,6 @@ bool MerkGenerator::CompareBuiltin(const Body &goal, const Procedure &callee,
   return true;
 }
 
-bool MerkGenerator::WriteBuiltin(const Body &goal, const Procedure &callee,
-    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
-  llvm::StringRef name{callee.symbol->name};
-  if (arguments.size() != 3 ||
-      !llvm::is_contained({"write", "print", "write_line", "print_line"}, name)) {
-    return false;
-  }
-  parser::CharBlock at{Where(goal.tokens)};
-  mlir::Location loc{Location(goal.tokens)};
-  std::optional<Represented> represented{Represent(body.vars[arguments[0]].type)};
-  if (!represented) {
-    NotYet(at, "values of type " +
-            semantics::TypeToString(*body.vars[arguments[0]].type));
-    return true;
-  }
-  const semantics::ProcedurePolymorphism *polymorphism{
-      polymorphism_.lookup(&body)};
-  const semantics::PassedInfos *passed{nullptr};
-  if (polymorphism) {
-    if (auto it{polymorphism->goals.find(&goal)};
-        it != polymorphism->goals.end()) {
-      passed = &it->second;
-    }
-  }
-  if (!passed || passed->typeInfos.size() != 1) {
-    NotYet(at, "this call's type_infos");
-    return true;
-  }
-  mlir::Value info{TypeInfoValue(*passed->typeInfos[0], loc, at)};
-  if (!info) {
-    failed_ = true;
-    return true;
-  }
-  auto word{merk::WordType::get(&context_)};
-  mlir::Value value{represented->dummy
-          ? mlir::Value{merk::ToWordOp::create(builder_, loc, word,
-                IntegerConstant(builder_.getI64Type(), 0, loc))}
-          : Coerce(ValueOf(arguments[0]), word, loc)};
-  std::int64_t flags{(name.starts_with("print") ? 1 : 0) |
-      (name.ends_with("_line") ? 2 : 0)};
-  merk::WriteWordOp::create(builder_, loc, info, value, flags);
-  return true;
-}
-
 void MerkGenerator::Test(const Body &goal, mlir::Value x, mlir::Value y,
     const semantics::Type *type) {
   llvm::StringSet<> seen;
@@ -2601,11 +2574,6 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
   const semantics::Symbol &symbol{*callee.symbol};
   llvm::StringRef module{symbol.module};
-  // Temporary (chunk 1 step 4, docs/INPROGRESS.md): built in until foreign_procs
-  // can be polymorphic, when io.m can declare these on runtime/write.cpp.
-  if (module == "io" && WriteBuiltin(goal, callee, arguments, body)) {
-    return true;
-  }
   if (module == "builtin" ||
       (module == "array" && symbol.name == "array_compare")) {
     return CompareBuiltin(goal, callee, arguments, body);

@@ -291,10 +291,9 @@ program.
 4. **Polymorphism.** Done: canonical words for narrow fields, hidden
    `type_info` arguments, polymorphic procedures on terms and arrays, and
    descriptors with their functor tables, generic `unify` and `compare`, and
-   `io.write` and `io.print` as the first walker. Next, in order: polymorphic
-   `foreign_proc`s, after which `io.m` can declare those on
-   `runtime/write.cpp` instead of their being built in; then typeclass_infos
-   and existential types. Types with polymorphic recursion, whose instances
+   `io.write` and `io.print` as the first walker, declared in `io.m` as
+   polymorphic `foreign_proc`s. Next, in order: typeclass_infos, then
+   existential types. Types with polymorphic recursion, whose instances
    have no end, such as `grow(T) ---> stop(T) ; more(T, grow(list(T)))`, are
    "not yet implemented" too.
    Values of an abstract imported type are still "not yet

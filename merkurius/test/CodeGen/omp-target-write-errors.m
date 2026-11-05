@@ -1,5 +1,5 @@
-% The walker is in the host's runtime, so writing a value by its type_info is an
-% error on a device, at the write.
+% io.write is a foreign_proc on the walker in the host's runtime, so it cannot be
+% called on a device, as any procedure that is not compiled for the device.
 %
 % RUN: not merkc -fc1 -fopenmp -fopenmp-is-target-device -fdo-loops -triple amdgcn-amd-amdhsa -emit-llvm %s -o /dev/null 2>&1 | FileCheck %s
 % REQUIRES: amdgpu-registered-target
@@ -13,4 +13,4 @@
 main(!IO) :-
     %$omp target
     io.write(1, !IO).
-% CHECK: error: 'merk.write_word' op writes a value by its type_info, which cannot be done on an OpenMP device yet
+% CHECK: error: cannot call io.write_3_0 on an OpenMP device yet: it is not compiled for the device
