@@ -28,11 +28,11 @@ below, it needs no rework when the collector arrives.
    allocation into chunks, the scheduler and mailboxes, `send` copying into
    a fragment as the design has it, and preemption by lowering the heap
    limit, with `mrt.yield_check` in loops that do not allocate. Each process
-   has a large `mmap`ed stack with a guard page instead of a growable,
-   copied one, which needs stack maps.
+   has a stack of a fixed size given at spawn, with the limit check on entry
+   to procedures on cycles (Runtime system, "Processes and scheduler").
 3. **Garbage collection.** Statepoints and stack maps, minor and major
-   collection, the remembered set for destructive updates, received
-   fragments as roots, and growable stacks.
+   collection, the remembered set for destructive updates, and received
+   fragments as roots.
 
 **Invariants that keep chunk 2 from being redone in chunk 3:**
 
@@ -87,6 +87,11 @@ bumps them, and the scheduler lowers the limit to preempt.
   foreign code that calls back needs it.
 - A pinned register: fastest, but it needs a calling convention per
   target, which LLVM supports only partly.
+
+OpenMP favours the first: a team thread's thread-local is null until its
+first allocation attaches it to the region's process (Runtime system,
+"OpenMP cooperation"), where a hidden argument would have to pass through
+outlined functions and a pinned register be set on each team thread.
 
 To be decided with chunk 2's context switch in mind; the allocation fast
 path is written so that only where the pair is read changes. Until then
