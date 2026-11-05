@@ -131,68 +131,97 @@ bool HasLoop(const Goal &goal) {
   return found;
 }
 
+void AddVar(llvm::BitVector &set, VarId var) {
+  if (var >= set.size()) {
+    set.resize(var + 1);
+  }
+  set.set(var);
+}
+
+void AddVars(llvm::BitVector &set, llvm::ArrayRef<VarId> vars) {
+  for (VarId var : vars) {
+    AddVar(set, var);
+  }
+}
+
 // The variables that occur in a goal, in its lambda expressions too.
 void Occurring(const Goal &goal, llvm::BitVector &set) {
-  auto add{[&](VarId var) {
-    if (var >= set.size()) {
-      set.resize(var + 1);
-    }
-    set.set(var);
-  }};
-  auto addAll{[&](llvm::ArrayRef<VarId> vars) {
-    for (VarId var : vars) {
-      add(var);
-    }
-  }};
   ForEachGoal(goal, [&](const Goal &g) {
     common::visit(
         common::visitors{
             [&](const Unify *x) {
-              add(x->left);
+              AddVar(set, x->left);
               if (x->isVar) {
-                add(x->var);
+                AddVar(set, x->var);
               }
-              addAll(x->arguments);
+              AddVars(set, x->arguments);
               if (x->functor.lambda) {
-                addAll(x->functor.lambda->arguments);
+                AddVars(set, x->functor.lambda->arguments);
               }
             },
-            [&](const Call *x) { addAll(x->arguments); },
+            [&](const Call *x) { AddVars(set, x->arguments); },
             [&](const HOCall *x) {
-              add(x->closure);
-              addAll(x->arguments);
+              AddVar(set, x->closure);
+              AddVars(set, x->arguments);
             },
-            [&](const Scope *x) { addAll(x->vars); },
+            [&](const Scope *x) { AddVars(set, x->vars); },
             [&](const Try *x) {
-              addAll(x->io);
+              AddVars(set, x->io);
               for (const Catch &c : x->catches) {
-                add(c.exception);
+                AddVar(set, c.exception);
               }
               if (x->catchAny) {
-                add(x->catchAny->exception);
+                AddVar(set, x->catchAny->exception);
               }
             },
             [&](const Atomic *x) {
-              add(x->outerInitial);
-              add(x->outerFinal);
-              addAll(x->vars);
+              AddVar(set, x->outerInitial);
+              AddVar(set, x->outerFinal);
+              AddVars(set, x->vars);
               for (const AtomicAlternative &a : x->alternatives) {
-                add(a.innerInitial);
-                add(a.innerFinal);
+                AddVar(set, a.innerInitial);
+                AddVar(set, a.innerFinal);
               }
             },
             [&](const Loop *x) {
               for (const LoopIterator &iterator : x->iterators) {
-                addAll(iterator.arguments);
+                AddVars(set, iterator.arguments);
               }
               for (const LoopState &state : x->states) {
-                addAll({state.before, state.in, state.out, state.after});
+                AddVars(set, {state.before, state.in, state.out, state.after});
               }
             },
             [&](const auto *) {},
         },
         g);
   });
+}
+
+// Raises `typeVars` above the number of each type variable in the type.
+void CountTypeVars(const Type &type, unsigned &typeVars) {
+  if (type.kind == TypeKind::Variable) {
+    typeVars = std::max(typeVars, type.var + 1);
+  }
+  for (const Type *argument : type.arguments) {
+    CountTypeVars(*argument, typeVars);
+  }
+  if (type.result) {
+    CountTypeVars(*type.result, typeVars);
+  }
+}
+
+// Whether a clause has a loop with a for or count iterator.
+bool HasCounter(const ClauseForm &clause) {
+  bool counters{false};
+  ForEachGoal(clause.body, [&](const Goal &goal) {
+    if (const auto *loop{std::get_if<const Loop *>(&goal)}) {
+      for (const LoopIterator &iterator : (*loop)->iterators) {
+        counters |= iterator.kind == LoopIteratorKind::For ||
+            iterator.kind == LoopIteratorKind::Count;
+      }
+    }
+  });
+  return counters;
 }
 
 bool Has(const llvm::BitVector &set, VarId var) {
@@ -274,6 +303,10 @@ private:
   void TranslateClause(std::size_t index);
   // The goal with its loops translated: the same goal if it has none.
   Goal Rebuild(const Goal &);
+  // Adds the goals rebuilt to `out`; whether any changed.
+  bool RebuildAll(llvm::ArrayRef<Goal>, std::vector<Goal> &out);
+  // The catch rebuilt; `changed` is set if it changed.
+  Catch RebuildCatch(const Catch &, bool &changed);
   // The goals that replace a loop: the computation of its trip count, if
   // it has a for, and the call of its loop predicate.
   Goal TranslateLoop(const Loop &);
@@ -675,19 +708,8 @@ void LoopTranslator::TranslateClause(std::size_t index) {
       arguments.push_back(varTypes[var]);
     }
     unsigned typeVars(outer.typeVarNames.size());
-    std::function<void(const Type &)> count{[&](const Type &type) {
-      if (type.kind == TypeKind::Variable) {
-        typeVars = std::max(typeVars, type.var + 1);
-      }
-      for (const Type *argument : type.arguments) {
-        count(*argument);
-      }
-      if (type.result) {
-        count(*type.result);
-      }
-    }};
     for (const Type *type : arguments) {
-      count(*type);
+      CountTypeVars(*type, typeVars);
     }
     // The same array, so that the proofs of the goals in the loop's body, which
     // name its elements, hold in the loop's predicates.
@@ -702,20 +724,28 @@ void LoopTranslator::TranslateClause(std::size_t index) {
   }
 }
 
+bool LoopTranslator::RebuildAll(
+    llvm::ArrayRef<Goal> goals, std::vector<Goal> &out) {
+  bool changed{false};
+  for (const Goal &g : goals) {
+    out.push_back(Rebuild(g));
+    changed |= out.back() != g;
+  }
+  return changed;
+}
+
+Catch LoopTranslator::RebuildCatch(const Catch &c, bool &changed) {
+  Catch result{c.tokens, c.exception, Rebuild(c.pattern), Rebuild(c.goal)};
+  changed |= result.pattern != c.pattern || result.goal != c.goal;
+  return result;
+}
+
 Goal LoopTranslator::Rebuild(const Goal &goal) {
-  auto rebuilt{[&](llvm::ArrayRef<Goal> goals, std::vector<Goal> &out) {
-    bool changed{false};
-    for (const Goal &g : goals) {
-      out.push_back(Rebuild(g));
-      changed |= out.back() != g;
-    }
-    return changed;
-  }};
   return common::visit(
       common::visitors{
           [&](const Conj *x) -> Goal {
             std::vector<Goal> goals;
-            if (!rebuilt(x->goals, goals)) {
+            if (!RebuildAll(x->goals, goals)) {
               return x;
             }
             return Make<Conj>(x->tokens, x->number, x->parallel,
@@ -723,7 +753,7 @@ Goal LoopTranslator::Rebuild(const Goal &goal) {
           },
           [&](const Disj *x) -> Goal {
             std::vector<Goal> goals;
-            if (!rebuilt(x->goals, goals)) {
+            if (!RebuildAll(x->goals, goals)) {
               return x;
             }
             return Make<Disj>(
@@ -780,19 +810,13 @@ Goal LoopTranslator::Rebuild(const Goal &goal) {
               otherwise = Rebuild(*x->otherwise);
               changed |= *otherwise != *x->otherwise;
             }
-            auto branch{[&](const Catch &c) {
-              Catch result{c.tokens, c.exception, Rebuild(c.pattern),
-                  Rebuild(c.goal)};
-              changed |= result.pattern != c.pattern || result.goal != c.goal;
-              return result;
-            }};
             std::vector<Catch> catches;
             for (const Catch &c : x->catches) {
-              catches.push_back(branch(c));
+              catches.push_back(RebuildCatch(c, changed));
             }
             std::optional<Catch> catchAny;
             if (x->catchAny) {
-              catchAny = branch(*x->catchAny);
+              catchAny = RebuildCatch(*x->catchAny, changed);
             }
             if (!changed) {
               return x;
@@ -1119,21 +1143,11 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
 
 llvm::SmallVector<llvm::StringRef, 1> LoopModules(const SemanticForm &form) {
   bool counters{false};
-  auto look{[&](const ClauseForm &clause) {
-    ForEachGoal(clause.body, [&](const Goal &goal) {
-      if (const auto *loop{std::get_if<const Loop *>(&goal)}) {
-        for (const LoopIterator &iterator : (*loop)->iterators) {
-          counters |= iterator.kind == LoopIteratorKind::For ||
-              iterator.kind == LoopIteratorKind::Count;
-        }
-      }
-    });
-  }};
   for (const ClauseForm *clause : form.clauses) {
-    look(*clause);
+    counters |= HasCounter(*clause);
   }
   for (const MethodClause &method : form.methods) {
-    look(*method.clause);
+    counters |= HasCounter(*method.clause);
   }
   llvm::SmallVector<llvm::StringRef, 1> modules;
   if (counters) {
