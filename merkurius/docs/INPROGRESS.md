@@ -51,7 +51,8 @@ a constant, ahead of a size it does not depend on.
 | `Semantics/translate-loops.cpp` | 13 | Done, in 3 stages: the small ones and `Rebuild`, `TranslateClause`, then `TranslateLoop` |
 | `Semantics/check-determinism.cpp` | 22 | Done, in 3 stages: `BodyBuilder` and `SwitchDetector`, `DeterminismAnalyser` and `CheckDeterminism`, then `DumpProcedureBody` |
 | `Semantics/check-modes.cpp` | 20 | Done, in 3 stages: `ModeChecker`, `ProcedureChecker`, then the dump |
-| The other 29 files in `lib/` and `runtime/` | about 165 | Not started; the largest are `check-types.cpp` (37) and `insts.cpp` (19) |
+| `Semantics/check-types.cpp` | 37 | Stage 1 of 4 done: to `CheckInstances`. Next: `CheckTypeDefinitions` and what is near it, the improvement of constraints, the goals and inference |
+| The other 28 files in `lib/` and `runtime/` | about 128 | Not started; the largest is `insts.cpp` (19) |
 
 The unit tests' few are left unless they turn out to get in the way.
 

@@ -70,14 +70,15 @@ void PrintConstraint(llvm::raw_ostream &os, const ClassConstraint &constraint,
   os << ')';
 }
 
+static std::string SignatureVarName(const Signature &sig, unsigned var) {
+  return var < sig.varNames.size() && !sig.varNames[var].empty()
+      ? sig.varNames[var].str()
+      : "T" + std::to_string(var);
+}
+
 std::string SignatureToString(const Symbol &symbol, const Signature &sig) {
   std::string text;
   llvm::raw_string_ostream os{text};
-  auto name{[&](unsigned var) {
-    return var < sig.varNames.size() && !sig.varNames[var].empty()
-        ? sig.varNames[var].str()
-        : "T" + std::to_string(var);
-  }};
   // With both kinds of constraint, as the reference manual writes them:
   // some [T] (pred p(T, U) => (c(T))) <= (d(U)).
   bool both{!sig.existentialConstraints.empty() && !sig.constraints.empty()};
@@ -85,7 +86,8 @@ std::string SignatureToString(const Symbol &symbol, const Signature &sig) {
     os << "some [";
     for (unsigned var{sig.typeVars - sig.existentials}; var < sig.typeVars;
          ++var) {
-      os << (var + sig.existentials == sig.typeVars ? "" : ", ") << name(var);
+      os << (var + sig.existentials == sig.typeVars ? "" : ", ")
+         << SignatureVarName(sig, var);
     }
     os << "] ";
   }
@@ -105,18 +107,28 @@ std::string SignatureToString(const Symbol &symbol, const Signature &sig) {
   if (!arguments.empty()) {
     os << '(';
     llvm::interleave(
-        arguments, os, [&](const Type *t) { PrintType(os, *t, name); }, ", ");
+        arguments, os,
+        [&](const Type *t) {
+          PrintType(
+              os, *t, [&](unsigned v) { return SignatureVarName(sig, v); });
+        },
+        ", ");
     os << ')';
   }
   if (function) {
     os << " = ";
-    PrintType(os, *sig.arguments.back(), name);
+    PrintType(os, *sig.arguments.back(),
+        [&](unsigned v) { return SignatureVarName(sig, v); });
   }
   if (!sig.existentialConstraints.empty()) {
     os << " => (";
     llvm::interleave(
         sig.existentialConstraints, os,
-        [&](const ClassConstraint &c) { PrintConstraint(os, c, name); }, ", ");
+        [&](const ClassConstraint &c) {
+          PrintConstraint(
+              os, c, [&](unsigned v) { return SignatureVarName(sig, v); });
+        },
+        ", ");
     os << ')';
   }
   if (both) {
@@ -127,7 +139,8 @@ std::string SignatureToString(const Symbol &symbol, const Signature &sig) {
     llvm::interleave(
         sig.constraints, os,
         [&](const ClassConstraint &c) {
-          PrintConstraint(os, c, name);
+          PrintConstraint(
+              os, c, [&](unsigned v) { return SignatureVarName(sig, v); });
         },
         ", ");
     os << ')';
@@ -144,6 +157,11 @@ struct TypeVarNames {
   std::vector<llvm::StringRef> names; // by number, for those named
   unsigned next{0};
   bool closed{false};
+
+  // How an error names a variable: its name, or T and its number.
+  std::string NameOf(unsigned var) const {
+    return var < names.size() ? names[var].str() : "T" + std::to_string(var);
+  }
 
   std::optional<unsigned> Get(llvm::StringRef name) {
     if (auto it{numbers.find(name)}; it != numbers.end()) {
@@ -204,6 +222,9 @@ private:
       parser::CharBlock where);
   const Signature *SignatureOf(const Symbol &);
   std::optional<Signature> MakeSignature(const Symbol &);
+  Signature SavedSignature(parser::PredOrFunc, parser::Purity,
+      const TypeVarNames &, llvm::ArrayRef<const Type *> arguments,
+      llvm::ArrayRef<ClassConstraint> constraints);
   const Type *Primitive(llvm::StringRef name);
   const Type *Library(llvm::StringRef module, llvm::StringRef name);
   bool IsError(const Type *type) const {
@@ -225,6 +246,9 @@ private:
   llvm::SmallVector<ClassConstraint, 2> SuperclassesOf(
       const parser::TypeclassDecl &, bool report);
   void CheckTypeclasses();
+  bool ReachesClass(const Symbol &from, const Symbol *target,
+      std::vector<const Symbol *> &path,
+      llvm::DenseSet<const Symbol *> &visited);
   void CheckInstances();
 
   // Subtypes (reference manual, "Subtypes"). The supertype of a subtype,
@@ -293,6 +317,11 @@ private:
   llvm::ArrayRef<Dependency> Dependencies(const Symbol &typeclass);
   std::string DependencyText(const Symbol &typeclass, const Dependency &);
   llvm::DenseMap<const Symbol *, std::vector<Dependency>> dependencies_;
+  // What a constraint's functional dependencies say, each as the variables
+  // that determine others.
+  using InducedDependencies = std::vector<
+      std::pair<llvm::DenseSet<unsigned>, llvm::DenseSet<unsigned>>>;
+  void Induce(const ClassConstraint &, unsigned depth, InducedDependencies &);
   // Adds to `vars` the type variables that the constraints' functional
   // dependencies, and those of their superclasses, determine from them.
   void Close(llvm::DenseSet<unsigned> &vars,
@@ -393,10 +422,14 @@ private:
   const Type *VarType(VarId var) { return types_.Variable(base_ + var); }
   const Type *Walk(const Assignment &, const Type *) const;
   const Type *Resolve(const Assignment &, const Type *);
+  const Type *ResolveOnce(const Assignment &, const Type *,
+      llvm::DenseMap<unsigned, const Type *> &resolved);
   bool UnifyTypes(Assignment &, const Type *, const Type *);
   bool UnifyParts(Assignment &, const Type *, const Type *);
   llvm::DenseSet<std::pair<const Type *, const Type *>> *unified_{nullptr};
   bool Occurs(const Assignment &, unsigned var, const Type *) const;
+  bool OccursIn(const Assignment &, unsigned var, const Type *,
+      llvm::DenseSet<const Type *> &seen) const;
   llvm::SmallVector<const Type *, 4> Instantiate(Assignment &, const Signature &);
   // Applies a signature of `symbol` to the arguments of a functor or call
   // whose value, if it is a functor, has type `value`.
@@ -623,18 +656,21 @@ const Signature *TypeChecker::SignatureOf(const Symbol &symbol) {
   return it->second ? &*it->second : nullptr;
 }
 
+Signature TypeChecker::SavedSignature(parser::PredOrFunc kind,
+    parser::Purity purity, const TypeVarNames &names,
+    llvm::ArrayRef<const Type *> arguments,
+    llvm::ArrayRef<ClassConstraint> constraints) {
+  return Signature{kind, purity, names.next,
+      result_.arena_.SaveArray(llvm::ArrayRef<llvm::StringRef>{names.names}),
+      result_.arena_.SaveArray(arguments),
+      result_.arena_.SaveArray(constraints)};
+}
+
 std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
   InTokensOf in{*this, symbol};
   TypeVarNames names;
   llvm::SmallVector<const Type *, 8> arguments;
   llvm::SmallVector<ClassConstraint, 2> constraints;
-  auto make{[&](parser::PredOrFunc kind, parser::Purity purity) {
-    return Signature{kind, purity, names.next,
-        result_.arena_.SaveArray(llvm::ArrayRef<llvm::StringRef>{names.names}),
-        result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments}),
-        result_.arena_.SaveArray(
-            llvm::ArrayRef<ClassConstraint>{constraints})};
-  }};
   if (const auto *decl{
           std::get_if<const parser::PredDecl *>(&symbol.declaration)}) {
     const auto *typeclass{symbol.owner
@@ -765,15 +801,17 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
           }
         }
       }
-      auto renumber{[&](unsigned var) { return types_.Variable(order[var]); }};
       for (const Type *&argument : arguments) {
-        argument = types_.Substitute(argument, renumber);
+        argument = types_.Substitute(argument,
+            [&](unsigned var) { return types_.Variable(order[var]); });
       }
       for (ClassConstraint &constraint : constraints) {
-        constraint = SubstituteIn(constraint, renumber);
+        constraint = SubstituteIn(constraint,
+            [&](unsigned var) { return types_.Variable(order[var]); });
       }
       for (ClassConstraint &constraint : existentialConstraints) {
-        constraint = SubstituteIn(constraint, renumber);
+        constraint = SubstituteIn(constraint,
+            [&](unsigned var) { return types_.Variable(order[var]); });
       }
       std::vector<llvm::StringRef> renamed(names.next);
       for (unsigned var{0}; var < names.next && var < names.names.size();
@@ -782,7 +820,8 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
       }
       names.names = std::move(renamed);
     }
-    Signature sig{make((*decl)->kind, (*decl)->purity)};
+    Signature sig{SavedSignature(
+        (*decl)->kind, (*decl)->purity, names, arguments, constraints)};
     sig.existentials = existential.size();
     sig.existentialConstraints = result_.arena_.SaveArray(
         llvm::ArrayRef<ClassConstraint>{existentialConstraints});
@@ -805,17 +844,15 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
     // (reference manual, "Existentially typed data types"). The
     // definition's rules are checked with the constructor's own symbol.
     bool report{symbol.kind == SymbolKind::Constructor};
-    auto constructorName{[&] {
-      return symbol.name.str() + "/" +
-          std::to_string((*constructor)->arguments.size());
-    }};
+    std::string constructorName{symbol.name.str() + "/" +
+        std::to_string((*constructor)->arguments.size())};
     for (llvm::StringRef var : (*constructor)->existentialVars) {
       if (names.numbers.count(var)) {
         // mmc: "type variable `T' has overlapping scopes".
         if (report) {
           messages_->Say(Source((*constructor)->tokens),
               "type variable %s of constructor %s is a parameter of its type, and cannot be existentially quantified too"_err_en_US,
-              var.str(), constructorName());
+              var.str(), constructorName);
         }
         continue;
       }
@@ -853,13 +890,13 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
               // without being explicitly existentially quantified".
               messages_->Say(Source((*constructor)->tokens),
                   "type variable %s is in a constraint of constructor %s, but is not existentially quantified"_err_en_US,
-                  names.names[var].str(), constructorName());
+                  names.names[var].str(), constructorName);
             } else if (!determined.contains(var)) {
               // mmc: "type variable `T2' occurs in the constraints, but is
               // not determined by the constructor's argument types".
               messages_->Say(Source((*constructor)->tokens),
                   "type variable %s occurs in the constraints of constructor %s, but its argument types do not determine it"_err_en_US,
-                  names.names[var].str(), constructorName());
+                  names.names[var].str(), constructorName);
             }
           });
         }
@@ -870,7 +907,7 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
           // occur either in the arguments or in the constraints".
           messages_->Say(Source((*constructor)->tokens),
               "existentially quantified type variable %s of constructor %s occurs neither in its arguments nor in its constraints"_err_en_US,
-              names.names[var].str(), constructorName());
+              names.names[var].str(), constructorName);
         }
       }
     }
@@ -950,7 +987,8 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
         existentials = 0;
       }
     }
-    Signature sig{make(parser::PredOrFunc::Function, parser::Purity::Pure)};
+    Signature sig{SavedSignature(parser::PredOrFunc::Function,
+        parser::Purity::Pure, names, arguments, constraints)};
     sig.existentials = existentials;
     sig.existentialConstraints = result_.arena_.SaveArray(
         llvm::ArrayRef<ClassConstraint>{existentialConstraints});
@@ -971,41 +1009,49 @@ const Type *TypeChecker::Walk(const Assignment &a, const Type *type) const {
   return type;
 }
 
+const Type *TypeChecker::ResolveOnce(const Assignment &a, const Type *type,
+    llvm::DenseMap<unsigned, const Type *> &resolved) {
+  return types_.Substitute(type, [&](unsigned var) {
+    if (auto it{resolved.find(var)}; it != resolved.end()) {
+      return it->second;
+    }
+    const Type *variable{types_.Variable(var)};
+    const Type *bound{Walk(a, variable)};
+    const Type *result{
+        bound == variable ? variable : ResolveOnce(a, bound, resolved)};
+    resolved[var] = result;
+    return result;
+  });
+}
+
 // The type with its bound variables replaced, throughout.
 const Type *TypeChecker::Resolve(const Assignment &a, const Type *type) {
   // Each variable's binding is resolved once.
   llvm::DenseMap<unsigned, const Type *> resolved;
-  std::function<const Type *(const Type *)> resolve{[&](const Type *t) {
-    return types_.Substitute(t, [&](unsigned var) {
-      if (auto it{resolved.find(var)}; it != resolved.end()) {
-        return it->second;
-      }
-      const Type *variable{types_.Variable(var)};
-      const Type *bound{Walk(a, variable)};
-      const Type *result{bound == variable ? variable : resolve(bound)};
-      resolved[var] = result;
-      return result;
-    });
-  }};
-  return resolve(type);
+  return ResolveOnce(a, type, resolved);
+}
+
+bool TypeChecker::OccursIn(const Assignment &a, unsigned var, const Type *type,
+    llvm::DenseSet<const Type *> &seen) const {
+  const Type *t{Walk(a, type)};
+  if (t->kind == TypeKind::Variable) {
+    return t->var == var;
+  }
+  if (!seen.insert(t).second) {
+    return false;
+  }
+  return llvm::any_of(t->arguments,
+             [&](const Type *argument) {
+               return OccursIn(a, var, argument, seen);
+             }) ||
+      (t->result && OccursIn(a, var, t->result, seen));
 }
 
 bool TypeChecker::Occurs(
     const Assignment &a, unsigned var, const Type *type) const {
   // Each shared part once (see types.cpp).
   llvm::DenseSet<const Type *> seen;
-  std::function<bool(const Type *)> occurs{[&](const Type *t) {
-    t = Walk(a, t);
-    if (t->kind == TypeKind::Variable) {
-      return t->var == var;
-    }
-    if (!seen.insert(t).second) {
-      return false;
-    }
-    return llvm::any_of(t->arguments, occurs) ||
-        (t->result && occurs(t->result));
-  }};
-  return occurs(type);
+  return OccursIn(a, var, type, seen);
 }
 
 bool TypeChecker::UnifyTypes(Assignment &a, const Type *x, const Type *y) {
@@ -1228,27 +1274,30 @@ std::optional<ClassConstraint> TypeChecker::ConvertConstraint(
       result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments})};
 }
 
+static llvm::SmallVector<unsigned, 2> ParameterPositions(
+    const parser::TypeclassDecl &decl, llvm::ArrayRef<llvm::StringRef> vars) {
+  llvm::SmallVector<unsigned, 2> result;
+  for (llvm::StringRef var : vars) {
+    // The parser checks that each is a parameter.
+    auto it{llvm::find(decl.parameters, var)};
+    if (it != decl.parameters.end()) {
+      result.push_back(it - decl.parameters.begin());
+    }
+  }
+  llvm::sort(result);
+  result.erase(std::unique(result.begin(), result.end()), result.end());
+  return result;
+}
+
 std::vector<TypeChecker::Dependency> TypeChecker::DependenciesOf(
     const parser::TypeclassDecl &decl) {
   std::vector<Dependency> dependencies;
-  auto positions{[&](llvm::ArrayRef<llvm::StringRef> vars) {
-    llvm::SmallVector<unsigned, 2> result;
-    for (llvm::StringRef var : vars) {
-      // The parser checks that each is a parameter.
-      auto it{llvm::find(decl.parameters, var)};
-      if (it != decl.parameters.end()) {
-        result.push_back(it - decl.parameters.begin());
-      }
-    }
-    llvm::sort(result);
-    result.erase(std::unique(result.begin(), result.end()), result.end());
-    return result;
-  }};
   for (const parser::TypeclassConstraint &item : decl.constraints) {
     if (const auto *dependency{
             std::get_if<const parser::FunctionalDependency *>(&item)}) {
-      dependencies.push_back(Dependency{
-          positions((*dependency)->domain), positions((*dependency)->range)});
+      dependencies.push_back(
+          Dependency{ParameterPositions(decl, (*dependency)->domain),
+              ParameterPositions(decl, (*dependency)->range)});
     }
   }
   llvm::sort(dependencies);
@@ -1269,64 +1318,69 @@ llvm::ArrayRef<TypeChecker::Dependency> TypeChecker::Dependencies(
   return it->second;
 }
 
+static std::string DependencySide(
+    const parser::TypeclassDecl *decl, llvm::ArrayRef<unsigned> positions) {
+  std::string text;
+  for (unsigned position : positions) {
+    if (!text.empty()) {
+      text += ", ";
+    }
+    text += decl && position < decl->parameters.size()
+        ? decl->parameters[position].str()
+        : "T" + std::to_string(position);
+  }
+  return text;
+}
+
 std::string TypeChecker::DependencyText(
     const Symbol &typeclass, const Dependency &dependency) {
-  const auto *decl{
+  const auto *held{
       std::get_if<const parser::TypeclassDecl *>(&typeclass.declaration)};
-  auto side{[&](llvm::ArrayRef<unsigned> positions) {
-    std::string text;
-    for (unsigned position : positions) {
-      if (!text.empty()) {
-        text += ", ";
-      }
-      text += decl && position < (*decl)->parameters.size()
-          ? (*decl)->parameters[position].str()
-          : "T" + std::to_string(position);
+  const parser::TypeclassDecl *decl{held ? *held : nullptr};
+  return "(" + DependencySide(decl, dependency.domain) + " -> " +
+      DependencySide(decl, dependency.range) + ")";
+}
+
+// The variables of a constraint's arguments at the positions.
+static llvm::DenseSet<unsigned> VarsAt(
+    const ClassConstraint &constraint, llvm::ArrayRef<unsigned> positions) {
+  llvm::DenseSet<unsigned> result;
+  for (unsigned position : positions) {
+    if (position < constraint.arguments.size()) {
+      ForEachVariable(*constraint.arguments[position],
+          [&](unsigned var) { result.insert(var); });
     }
-    return text;
-  }};
-  return "(" + side(dependency.domain) + " -> " + side(dependency.range) + ")";
+  }
+  return result;
+}
+
+void TypeChecker::Induce(const ClassConstraint &constraint, unsigned depth,
+    InducedDependencies &induced) {
+  for (const Dependency &dependency : Dependencies(*constraint.typeclass)) {
+    induced.emplace_back(VarsAt(constraint, dependency.domain),
+        VarsAt(constraint, dependency.range));
+  }
+  if (depth > 64) {
+    return; // a superclass cycle, which is reported
+  }
+  for (const ClassConstraint &super : Superclasses(*constraint.typeclass)) {
+    Induce(SubstituteIn(super,
+               [&](unsigned var) {
+                 return var < constraint.arguments.size()
+                     ? constraint.arguments[var]
+                     : types_.Named(error_, {});
+               }),
+        depth + 1, induced);
+  }
 }
 
 void TypeChecker::Close(llvm::DenseSet<unsigned> &vars,
     llvm::ArrayRef<ClassConstraint> constraints) {
   // The induced dependencies: of each constraint, and of its superclass
   // constraints on its arguments, recursively.
-  std::vector<std::pair<llvm::DenseSet<unsigned>, llvm::DenseSet<unsigned>>>
-      induced;
-  std::function<void(const ClassConstraint &, unsigned)> induce{
-      [&](const ClassConstraint &constraint, unsigned depth) {
-        auto varsAt{[&](llvm::ArrayRef<unsigned> positions) {
-          llvm::DenseSet<unsigned> result;
-          for (unsigned position : positions) {
-            if (position < constraint.arguments.size()) {
-              ForEachVariable(*constraint.arguments[position],
-                  [&](unsigned var) { result.insert(var); });
-            }
-          }
-          return result;
-        }};
-        for (const Dependency &dependency :
-            Dependencies(*constraint.typeclass)) {
-          induced.emplace_back(
-              varsAt(dependency.domain), varsAt(dependency.range));
-        }
-        if (depth > 64) {
-          return; // a superclass cycle, which is reported
-        }
-        for (const ClassConstraint &super :
-            Superclasses(*constraint.typeclass)) {
-          induce(SubstituteIn(super,
-                     [&](unsigned var) {
-                       return var < constraint.arguments.size()
-                           ? constraint.arguments[var]
-                           : types_.Named(error_, {});
-                     }),
-              depth + 1);
-        }
-      }};
+  InducedDependencies induced;
   for (const ClassConstraint &constraint : constraints) {
-    induce(constraint, 0);
+    Induce(constraint, 0, induced);
   }
   for (bool changed{true}; changed;) {
     changed = false;
@@ -1405,15 +1459,32 @@ llvm::ArrayRef<ClassConstraint> TypeChecker::Superclasses(
 // typeclass declarations" and "Type class constraints on type class
 // declarations"; the parser checks that the parameters are distinct
 // variables.
+// Whether a superclass of `from`, directly or not, is `target`, with the way
+// there added to `path`.
+bool TypeChecker::ReachesClass(const Symbol &from, const Symbol *target,
+    std::vector<const Symbol *> &path,
+    llvm::DenseSet<const Symbol *> &visited) {
+  for (const ClassConstraint &super : Superclasses(from)) {
+    if (super.typeclass == target) {
+      return true;
+    }
+    if (visited.insert(super.typeclass).second) {
+      path.push_back(super.typeclass);
+      if (ReachesClass(*super.typeclass, target, path, visited)) {
+        return true;
+      }
+      path.pop_back();
+    }
+  }
+  return false;
+}
+
 void TypeChecker::CheckTypeclasses() {
   llvm::MapVector<const Symbol *, llvm::SmallVector<const TypeclassItem *, 2>>
       bySymbol;
   for (const TypeclassItem &item : resolution_.typeclasses()) {
     bySymbol[item.symbol].push_back(&item);
   }
-  auto where{[&](const parser::TypeclassDecl &decl) {
-    return Source(decl.name->tokens);
-  }};
   for (const auto &[symbol, items] : bySymbol) {
     (void)Superclasses(*symbol); // for its errors
     const TypeclassItem *definition{nullptr}, *abstract{nullptr};
@@ -1421,36 +1492,39 @@ void TypeChecker::CheckTypeclasses() {
       if (item->decl->abstract) {
         abstract = abstract ? abstract : item;
       } else if (definition) {
-        parser::Message &message{messages_->Say(where(*item->decl),
-            "typeclass %s/%u is defined more than once"_err_en_US,
-            symbol->name.str(), symbol->arity)};
-        message.Attach(where(*definition->decl),
+        parser::Message &message{
+            messages_->Say(Source(item->decl->name->tokens),
+                "typeclass %s/%u is defined more than once"_err_en_US,
+                symbol->name.str(), symbol->arity)};
+        message.Attach(Source(definition->decl->name->tokens),
             "it is first defined here"_because_en_US);
       } else {
         definition = item;
       }
     }
     if (abstract && !definition) {
-      messages_->Say(where(*abstract->decl),
+      messages_->Say(Source(abstract->decl->name->tokens),
           "the abstract typeclass %s/%u has no definition"_err_en_US,
           symbol->name.str(), symbol->arity);
     } else if (abstract) {
       // The parameters are numbered by position in both.
       if (AsSet(SuperclassesOf(*abstract->decl, false)) !=
           AsSet(Superclasses(*symbol))) {
-        parser::Message &message{messages_->Say(where(*definition->decl),
+        parser::Message &message{messages_->Say(
+            Source(definition->decl->name->tokens),
             "the superclass constraints of typeclass %s/%u differ from those of its abstract declaration"_err_en_US,
             symbol->name.str(), symbol->arity)};
-        message.Attach(where(*abstract->decl),
+        message.Attach(Source(abstract->decl->name->tokens),
             "the abstract declaration is here"_because_en_US);
       }
       // mmc: "The functional dependencies do not match."
       if (llvm::ArrayRef<Dependency>{DependenciesOf(*abstract->decl)} !=
           Dependencies(*symbol)) {
-        parser::Message &message{messages_->Say(where(*definition->decl),
+        parser::Message &message{messages_->Say(
+            Source(definition->decl->name->tokens),
             "the functional dependencies of typeclass %s/%u differ from those of its abstract declaration"_err_en_US,
             symbol->name.str(), symbol->arity)};
-        message.Attach(where(*abstract->decl),
+        message.Attach(Source(abstract->decl->name->tokens),
             "the abstract declaration is here"_because_en_US);
       }
     }
@@ -1464,22 +1538,7 @@ void TypeChecker::CheckTypeclasses() {
     }
     std::vector<const Symbol *> path{symbol};
     llvm::DenseSet<const Symbol *> visited;
-    std::function<bool(const Symbol &)> reaches{[&](const Symbol &from) {
-      for (const ClassConstraint &super : Superclasses(from)) {
-        if (super.typeclass == symbol) {
-          return true;
-        }
-        if (visited.insert(super.typeclass).second) {
-          path.push_back(super.typeclass);
-          if (reaches(*super.typeclass)) {
-            return true;
-          }
-          path.pop_back();
-        }
-      }
-      return false;
-    }};
-    if (!reaches(*symbol)) {
+    if (!ReachesClass(*symbol, symbol, path, visited)) {
       continue;
     }
     std::string cycle;
@@ -1491,7 +1550,7 @@ void TypeChecker::CheckTypeclasses() {
     cycle += symbol->module.str() + "." + symbol->name.str() + "/" +
         std::to_string(symbol->arity);
     const TypeclassItem &first{*items.front()};
-    messages_->Say(where(*first.decl),
+    messages_->Say(Source(first.decl->name->tokens),
         "the superclass relation is cyclic: %s"_err_en_US, cycle);
   }
 }
@@ -1527,15 +1586,14 @@ void TypeChecker::CheckInstances() {
     for (const parser::Type &type : decl.types) {
       head.types.push_back(Convert(type, names));
     }
-    auto name{[&](unsigned var) {
-      return var < names.names.size() ? names.names[var].str()
-                                      : "T" + std::to_string(var);
-    }};
     {
       llvm::raw_string_ostream os{head.text};
       os << head.typeclass->module << '.' << head.typeclass->name << '(';
       llvm::interleave(
-          head.types, os, [&](const Type *t) { PrintType(os, *t, name); },
+          head.types, os,
+          [&](const Type *t) {
+            PrintType(os, *t, [&](unsigned var) { return names.NameOf(var); });
+          },
           ", ");
       os << ')';
     }
@@ -1553,7 +1611,9 @@ void TypeChecker::CheckInstances() {
         if (item.local) {
           messages_->Say(Source(decl.name->tokens),
               "in instance %s, type %u, `%s', is a %s; it must be a type constructor applied to type variables"_err_en_US,
-              head.text, position, TypeToString(*type, name),
+              head.text, position,
+              TypeToString(
+                  *type, [&](unsigned var) { return names.NameOf(var); }),
               type->kind == TypeKind::Variable ? "type variable"
                                                : "higher-order type");
         }
@@ -1569,7 +1629,8 @@ void TypeChecker::CheckInstances() {
             messages_->Say(Source(decl.name->tokens),
                 "in instance %s, argument %u of type %u, `%s', is not a type variable"_err_en_US,
                 head.text, i + 1, position,
-                TypeToString(*type->arguments[i], name));
+                TypeToString(*type->arguments[i],
+                    [&](unsigned var) { return names.NameOf(var); }));
           }
           head.valid = false;
           break;
