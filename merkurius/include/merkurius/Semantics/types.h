@@ -23,6 +23,7 @@
 #include "merkurius/Parser/parse-tree.h"
 #include "merkurius/Semantics/symbols.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
@@ -67,6 +68,13 @@ public:
 
 private:
   const Type *Intern(const Type &);
+  // Substitute and SubstituteExistentials, given the parts already done.
+  const Type *Substitute(const Type *,
+      llvm::function_ref<const Type *(unsigned)> replace,
+      llvm::DenseMap<const Type *, const Type *> &done);
+  const Type *SubstituteExistentials(const Type *,
+      llvm::function_ref<const Type *(const Type *)> replace,
+      llvm::DenseMap<const Type *, const Type *> &done);
 
   common::Arena arena_;
   std::map<std::vector<std::uintptr_t>, const Type *> interned_;
