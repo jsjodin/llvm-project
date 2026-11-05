@@ -36,7 +36,9 @@ stages. New code does not add them.
 
 **The check for each stage.** The tests, and the same `merk` and LLVM IR before
 and after for every program of `test/CodeGen`, with and without OpenMP, since
-this changes no generated code. The one exception so far: a braced list is
+this changes no generated code. For a checker, also the errors and the debug
+dump of every program of `test/CodeGen` and `test/Semantics`, which the IR does
+not show. The one exception so far: a braced list is
 evaluated in order and function arguments need not be, so `array.bounds` moved
 a constant, ahead of a size it does not depend on.
 
@@ -48,7 +50,8 @@ a constant, ahead of a size it does not depend on.
 | `CodeGen/Lowering.cpp` | 21 | Done, in 3 stages: `LowerTerms` and `Dispatch`, the type_info and type_ctor_info lowerings and `Layouts`, then `LowerArray`, `LowerMrt` and `Lower` |
 | `Semantics/translate-loops.cpp` | 13 | Done, in 3 stages: the small ones and `Rebuild`, `TranslateClause`, then `TranslateLoop` |
 | `Semantics/check-determinism.cpp` | 22 | Done, in 3 stages: `BodyBuilder` and `SwitchDetector`, `DeterminismAnalyser` and `CheckDeterminism`, then `DumpProcedureBody` |
-| The other 30 files in `lib/` and `runtime/` | about 185 | Not started; the largest are `check-types.cpp` (37) and `check-modes.cpp` (20) |
+| `Semantics/check-modes.cpp` | 20 | Stage 1 of 3 done: `ModeChecker`. Next: `ProcedureChecker`, then the dump |
+| The other 29 files in `lib/` and `runtime/` | about 165 | Not started; the largest are `check-types.cpp` (37) and `insts.cpp` (19) |
 
 The unit tests' few are left unless they turn out to get in the way.
 
