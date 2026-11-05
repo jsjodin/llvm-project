@@ -293,8 +293,9 @@ program.
    descriptors with their functor tables, generic `unify` and `compare`, and
    `io.write` and `io.print` as the first walker, declared in `io.m` as
    polymorphic `foreign_proc`s, and typeclass_infos, with direct calls of
-   known instances (design document, Lowering, "Type classes"). Next:
-   existential types. Cloning a polymorphic procedure for a known dictionary
+   known instances (design document, Lowering, "Type classes"), and
+   existentially typed predicates and functions. Next: existentially typed
+   constructors. Cloning a polymorphic procedure for a known dictionary
    (Optimizations, "What polymorphism costs") and `pragma inline` are in no
    step yet. Types with polymorphic recursion, whose instances
    have no end, such as `grow(T) ---> stop(T) ; more(T, grow(list(T)))`, are
