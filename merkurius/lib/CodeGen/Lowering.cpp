@@ -217,7 +217,6 @@ private:
       mlir::Type result);
   llvm::LogicalResult LowerUnifyWord(merk::UnifyWordOp);
   llvm::LogicalResult LowerCompareWord(merk::CompareWordOp);
-  llvm::LogicalResult LowerWriteWord(merk::WriteWordOp);
   void LowerStringCompare(merk::StringCompareOp);
   void LowerStringEqual(merk::StringEqualOp);
   void LowerForeignCall(merk::ForeignCallOp);
@@ -1344,24 +1343,6 @@ llvm::LogicalResult Lowerer::LowerCompareWord(merk::CompareWordOp op) {
   return llvm::success();
 }
 
-llvm::LogicalResult Lowerer::LowerWriteWord(merk::WriteWordOp op) {
-  if (device_) {
-    return op.emitOpError(
-        "writes a value by its type_info, which cannot be done on an OpenMP device yet");
-  }
-  mlir::Location loc{op.getLoc()};
-  rewriter_.setInsertionPoint(op);
-  auto i64{rewriter_.getI64Type()};
-  mlir::LLVM::CallOp::create(rewriter_, loc,
-      RuntimeFunc("merk_write",
-          mlir::LLVM::LLVMVoidType::get(op.getContext()),
-          {mlir::LLVM::LLVMPointerType::get(op.getContext()), i64, i64}),
-      mlir::ValueRange{op->getOperand(0), op->getOperand(1),
-          mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, op.getFlags())});
-  rewriter_.eraseOp(op);
-  return llvm::success();
-}
-
 void Lowerer::LowerStringCompare(merk::StringCompareOp op) {
   rewriter_.setInsertionPoint(op);
   auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
@@ -2128,7 +2109,6 @@ llvm::LogicalResult Lowerer::Lower() {
     if (mlir::isa<merk::SucceedOp, merk::CallOp, merk::ConstantOp,
             merk::ToWordOp, merk::FromWordOp, merk::TypeInfoOp,
             merk::TypeInfoWordOp, merk::UnifyWordOp, merk::CompareWordOp,
-            merk::WriteWordOp,
             merk::StringCompareOp, merk::StringEqualOp,
             merk::ForeignCallOp, merk::ArrayNewOp, merk::ArraySizeOp,
             merk::ArrayGetOp, merk::ArraySetOp, merk::ArrayFillOp,
@@ -2155,10 +2135,6 @@ llvm::LogicalResult Lowerer::Lower() {
       }
     } else if (auto compare{mlir::dyn_cast<merk::CompareWordOp>(op)}) {
       if (mlir::failed(LowerCompareWord(compare))) {
-        return llvm::failure();
-      }
-    } else if (auto write{mlir::dyn_cast<merk::WriteWordOp>(op)}) {
-      if (mlir::failed(LowerWriteWord(write))) {
         return llvm::failure();
       }
     } else if (auto stringCompare{mlir::dyn_cast<merk::StringCompareOp>(op)}) {

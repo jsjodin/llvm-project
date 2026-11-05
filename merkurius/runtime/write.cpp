@@ -539,7 +539,7 @@ void WriteValue(Word value, Word type, const Environment *environment, int conte
   WriteTyped(value, resolved, context);
 }
 
-// merk_write's flags, those of merk.write_word.
+// merk_write's flags, as io.m passes them.
 constexpr Word kPrint{1};
 constexpr Word kLine{2};
 

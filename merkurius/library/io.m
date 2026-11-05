@@ -154,6 +154,7 @@
 #include <string.h>
 #include <math.h>
 extern void merk_write_float(double);
+extern void merk_write(MR_Word, MR_Word, MR_Word);
 ").
 
 :- pragma foreign_proc("C",
@@ -232,4 +233,32 @@ write_uint32(N, !IO) :- write_uint(uint32.cast_to_uint(N), !IO).
     [will_not_call_mercury, promise_pure, thread_safe],
 "
     merk_write_float(F);
+").
+
+% A value by its type_info, in runtime/write.cpp. Its third argument's bits
+% are 1 for print, which writes a whole string or character raw, and 2 for a
+% newline.
+:- pragma foreign_proc("C",
+    write(X::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    merk_write(TypeInfo_for_T, X, 0);
+").
+:- pragma foreign_proc("C",
+    print(X::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    merk_write(TypeInfo_for_T, X, 1);
+").
+:- pragma foreign_proc("C",
+    write_line(X::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    merk_write(TypeInfo_for_T, X, 2);
+").
+:- pragma foreign_proc("C",
+    print_line(X::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    merk_write(TypeInfo_for_T, X, 3);
 ").
