@@ -7,6 +7,42 @@ and why the alternatives were rejected, with the measurements that decided
 it, above all for how values are represented and how the collector works.
 This file then keeps only what is still open.
 
+## Refactoring: local functions
+
+A function's body should read without the implementations of helpers in the
+middle of it, and a helper should say what it uses. Named local lambdas do
+neither: what they capture is state they import, much as a global is, which
+also keeps them from being used anywhere else. So they become real functions,
+one file at a time and in stages within a file, with the tests run between
+stages. New code does not add them.
+
+**The rules**
+
+- **A static function** if it needs no generator or checker state, and a member
+  function if it does. Names have Flang's leading capital, not the lambda's
+  lowercase.
+- **What it uses is a parameter.** `failed_` and the like stay members, since
+  they are the class's own state already.
+- **A lambda stays as an argument** to a higher-order function, such as
+  `llvm::all_of`, written at the call. One that is named only to be passed on
+  is written at the call too, or is a function if it is long.
+- **A short wrapper is not kept** if the call it wraps reads as well: a lambda
+  for `IntegerConstant(i64, value, loc)` is replaced by that call.
+- **No other changes** in the same stage: no behaviour, and no cleanups.
+
+**The check for each stage.** The tests, and the same `merk` and LLVM IR before
+and after for every program of `test/CodeGen`, with and without OpenMP, since
+this changes no generated code.
+
+**Progress**
+
+| File | Named lambdas | State |
+| --- | --- | --- |
+| `CodeGen/MLIRGen.cpp` | 46 | Stage 1 of 5 done: the small standalone ones. Next: the array builtins, the arithmetic builtins, `OmpLoop`, `Target` |
+| The other 33 files in `lib/` and `runtime/` | about 226 | Not started; the largest are `check-types.cpp` (36), `check-determinism.cpp` (22), `Lowering.cpp` (19) and `check-modes.cpp` (19) |
+
+The unit tests' few are left unless they turn out to get in the way.
+
 ## The order of the next pieces
 
 Three chunks remain before processes and memory management are done: terms
