@@ -282,9 +282,17 @@ private:
   // generated, as the builtins' callers ask.
   bool GiveOutputs(
       llvm::ArrayRef<BodyVar> out, std::initializer_list<mlir::Value> values);
-  // Reports a call of the array library not compiled yet. Returns true: the
-  // goal has been dealt with.
-  bool ArrayNotYet(const Body &, const semantics::Symbol &);
+  // Reports a call of a library module not compiled yet. Returns true: the goal
+  // has been dealt with.
+  bool LibraryCallNotYet(const Body &, const semantics::Symbol &);
+  // Whether a call of an integer or float module that is not built in has been
+  // dealt with, which it has only if it was reported.
+  bool NotBuiltIn(const Body &, const semantics::Symbol &);
+  mlir::Value IntegerDivide(mlir::Value a, mlir::Value b, llvm::StringRef module,
+      llvm::StringRef what, bool floor, bool remainder, mlir::Location);
+  mlir::Value IntegerShift(mlir::Value value, mlir::Value amount,
+      llvm::StringRef module, llvm::StringRef what, bool left, bool checked,
+      mlir::Location);
   // Comparison in the standard ordering (reference manual, "The standard
   // ordering"), as unification: compare.T for a term type, made the first
   // time, one procedure for arrays, and the value of a comparison, null after
@@ -2225,14 +2233,6 @@ bool MerkGenerator::GiveOutputs(
   return true;
 }
 
-bool MerkGenerator::ArrayNotYet(
-    const Body &goal, const semantics::Symbol &symbol) {
-  NotYet(Where(goal.tokens),
-      ("calls of array." + symbol.name + "/" + std::to_string(symbol.arity))
-          .str());
-  return true;
-}
-
 // Whether a call has that many inputs and outputs.
 static bool HasShape(llvm::ArrayRef<mlir::Value> in, llvm::ArrayRef<BodyVar> out,
     unsigned inputs, unsigned outputs) {
@@ -3105,7 +3105,7 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
     // Its element type is its output's.
     std::optional<Represented> array{Represent(body.vars[out[0]].type)};
     if (!array) {
-      return ArrayNotYet(goal, symbol);
+      return LibraryCallNotYet(goal, symbol);
     }
     return GiveOutputs(out,
         {merk::ArrayNewOp::create(builder_, loc, array->type,
@@ -3248,12 +3248,100 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
         {merk::ArrayResizeOp::create(
             builder_, loc, array.getType(), array, n, mlir::Value{})});
   }
-  return ArrayNotYet(goal, symbol);
+  return LibraryCallNotYet(goal, symbol);
 }
 
 static std::string DomainError(llvm::StringRef module, llvm::StringRef what,
     llvm::StringRef problem) {
   return ("domain_error(\"" + module + "." + what + ": " + problem + "\")").str();
+}
+
+// What is not built in is called: float's functions are the compiled library's;
+// the integer modules have no implementation yet.
+bool MerkGenerator::NotBuiltIn(
+    const Body &goal, const semantics::Symbol &symbol) {
+  return symbol.module != "float" && LibraryCallNotYet(goal, symbol);
+}
+
+bool MerkGenerator::LibraryCallNotYet(
+    const Body &goal, const semantics::Symbol &symbol) {
+  NotYet(Where(goal.tokens),
+      ("calls of " + symbol.module + "." + symbol.name + "/" +
+          std::to_string(symbol.arity))
+          .str());
+  return true;
+}
+
+// A division checks for a zero divisor; one of the least value by -1, whose
+// quotient overflows, wraps, as mmc's constant folding does.
+mlir::Value MerkGenerator::IntegerDivide(mlir::Value a, mlir::Value b,
+    llvm::StringRef module, llvm::StringRef what, bool floor, bool remainder,
+    mlir::Location loc) {
+  namespace arith = mlir::arith;
+  mlir::Type type{a.getType()};
+  merk::ThrowIfOp::create(builder_, loc,
+      CompareInts(
+          arith::CmpIPredicate::eq, b, IntegerConstant(type, 0, loc), loc),
+      DomainError(module, what, "division by zero"));
+  if (module.starts_with("uint")) {
+    return remainder ? mlir::Value{arith::RemUIOp::create(builder_, loc, a, b)}
+                     : mlir::Value{arith::DivUIOp::create(builder_, loc, a, b)};
+  }
+  mlir::Value minusOne{CompareInts(
+      arith::CmpIPredicate::eq, b, IntegerConstant(type, -1, loc), loc)};
+  mlir::Value divisor{arith::SelectOp::create(
+      builder_, loc, minusOne, IntegerConstant(type, 1, loc), b)};
+  mlir::Value q{arith::DivSIOp::create(builder_, loc, a, divisor)};
+  mlir::Value r{arith::RemSIOp::create(builder_, loc, a, divisor)};
+  q = arith::SelectOp::create(builder_, loc, minusOne,
+      arith::SubIOp::create(builder_, loc, IntegerConstant(type, 0, loc), a), q);
+  r = arith::SelectOp::create(
+      builder_, loc, minusOne, IntegerConstant(type, 0, loc), r);
+  if (floor) {
+    // Toward minus infinity: one less where the remainder is not 0 and its
+    // sign is not the divisor's.
+    mlir::Value nonzero{arith::CmpIOp::create(builder_, loc,
+        arith::CmpIPredicate::ne, r, IntegerConstant(type, 0, loc))};
+    mlir::Value signs{arith::CmpIOp::create(builder_, loc,
+        arith::CmpIPredicate::slt, arith::XOrIOp::create(builder_, loc, r, b),
+        IntegerConstant(type, 0, loc))};
+    mlir::Value adjust{arith::AndIOp::create(builder_, loc, nonzero, signs)};
+    q = arith::SelectOp::create(builder_, loc, adjust,
+        arith::SubIOp::create(builder_, loc, q, IntegerConstant(type, 1, loc)),
+        q);
+    r = arith::SelectOp::create(
+        builder_, loc, adjust, arith::AddIOp::create(builder_, loc, r, b), r);
+  }
+  return remainder ? r : q;
+}
+
+// The shift amount is an int; outside 0 to the width it is an error, unless the
+// shift is unchecked.
+mlir::Value MerkGenerator::IntegerShift(mlir::Value value, mlir::Value amount,
+    llvm::StringRef module, llvm::StringRef what, bool left, bool checked,
+    mlir::Location loc) {
+  namespace arith = mlir::arith;
+  auto type{mlir::cast<mlir::IntegerType>(value.getType())};
+  unsigned bits{type.getWidth()};
+  auto amountType{mlir::cast<mlir::IntegerType>(amount.getType())};
+  if (checked) {
+    mlir::Value out{arith::CmpIOp::create(builder_, loc,
+        arith::CmpIPredicate::uge, amount,
+        IntegerConstant(amountType, bits, loc))};
+    merk::ThrowIfOp::create(builder_, loc, out,
+        DomainError(module, what, "second operand is out of range"));
+  }
+  if (amountType.getWidth() > bits) {
+    amount = arith::TruncIOp::create(builder_, loc, type, amount);
+  } else if (amountType.getWidth() < bits) {
+    amount = arith::ExtUIOp::create(builder_, loc, type, amount);
+  }
+  if (left) {
+    return arith::ShLIOp::create(builder_, loc, value, amount);
+  }
+  return module.starts_with("uint")
+      ? mlir::Value{arith::ShRUIOp::create(builder_, loc, value, amount)}
+      : mlir::Value{arith::ShRSIOp::create(builder_, loc, value, amount)};
 }
 
 bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
@@ -3275,33 +3363,17 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
   // otherwise be called. Step 6 compiles them, after polymorphism (step 4)
   // and closures (step 5).
   if (llvm::is_contained({"bool", "list", "maybe", "pair"}, module)) {
-    NotYet(Where(goal.tokens),
-        ("calls of " + module + "." + symbol.name + "/" +
-            std::to_string(symbol.arity))
-            .str());
-    return true;
+    return LibraryCallNotYet(goal, symbol);
   }
   bool isFloat{module == "float"};
   bool isUnsigned{module.starts_with("uint")};
-  bool isInteger{llvm::is_contained(
-      {"int", "uint", "int8", "int16", "int32", "int64", "uint8", "uint16",
-          "uint32", "uint64"},
-      module)};
+  bool isInteger{
+      llvm::is_contained({"int", "uint", "int8", "int16", "int32", "int64",
+                             "uint8", "uint16", "uint32", "uint64"},
+          module)};
   if (!isFloat && !isInteger) {
     return false;
   }
-  // What is not built in is called: float's functions are the compiled
-  // library's; the integer modules have no implementation yet.
-  auto other{[&] {
-    if (isFloat) {
-      return false;
-    }
-    NotYet(Where(goal.tokens),
-        ("calls of " + module + "." + symbol.name + "/" +
-            std::to_string(symbol.arity))
-            .str());
-    return true;
-  }};
   bool function{symbol.kind == semantics::SymbolKind::Function};
   if (function && isInteger && arguments.size() == 3 &&
       llvm::is_contained({"+", "-", "xor"}, symbol.name) &&
@@ -3315,7 +3387,7 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     mlir::Value known{ValueOf(arguments[1 - out])};
     mlir::Value r{ValueOf(arguments[2])};
     if (!known || !r) {
-      return other();
+      return NotBuiltIn(goal, symbol);
     }
     mlir::Location loc{Location(goal.tokens)};
     namespace arith = mlir::arith;
@@ -3337,7 +3409,7 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
   for (auto [i, argument, mode] : llvm::enumerate(arguments, callee.modes)) {
     bool result{function && i + 1 == arguments.size()};
     if (IsOutput(mode) != result || (!result && !ValueOf(argument))) {
-      return other();
+      return NotBuiltIn(goal, symbol);
     }
     if (!result) {
       in.push_back(ValueOf(argument));
@@ -3348,8 +3420,8 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
   namespace arith = mlir::arith;
   if (!function && isInteger && in.size() == 1 &&
       (name == "even" || name == "odd")) {
-    mlir::Value low{arith::AndIOp::create(builder_, loc, in[0],
-        IntegerConstant(in[0].getType(), 1, loc))};
+    mlir::Value low{arith::AndIOp::create(
+        builder_, loc, in[0], IntegerConstant(in[0].getType(), 1, loc))};
     merk::GuardOp::create(builder_, loc,
         arith::CmpIOp::create(builder_, loc, arith::CmpIPredicate::eq, low,
             IntegerConstant(in[0].getType(), name == "odd", loc)));
@@ -3358,32 +3430,33 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
   if (!function) {
     // The comparisons, which are tests.
     if (in.size() != 2) {
-      return other();
+      return NotBuiltIn(goal, symbol);
     }
     mlir::Value flag;
     if (isFloat) {
-      std::optional<arith::CmpFPredicate> predicate{
-          name == "<"    ? arith::CmpFPredicate::OLT
+      std::optional<arith::CmpFPredicate> predicate{name == "<"
+              ? arith::CmpFPredicate::OLT
               : name == ">"  ? arith::CmpFPredicate::OGT
               : name == "=<" ? arith::CmpFPredicate::OLE
               : name == ">=" ? arith::CmpFPredicate::OGE
                              : std::optional<arith::CmpFPredicate>{}};
       if (!predicate) {
-        return other();
+        return NotBuiltIn(goal, symbol);
       }
       flag = arith::CmpFOp::create(builder_, loc, *predicate, in[0], in[1]);
     } else {
       std::optional<arith::CmpIPredicate> predicate{name == "<"
-              ? (isUnsigned ? arith::CmpIPredicate::ult : arith::CmpIPredicate::slt)
-              : name == ">"
-              ? (isUnsigned ? arith::CmpIPredicate::ugt : arith::CmpIPredicate::sgt)
-              : name == "=<"
-              ? (isUnsigned ? arith::CmpIPredicate::ule : arith::CmpIPredicate::sle)
-              : name == ">="
-              ? (isUnsigned ? arith::CmpIPredicate::uge : arith::CmpIPredicate::sge)
-              : std::optional<arith::CmpIPredicate>{}};
+              ? (isUnsigned ? arith::CmpIPredicate::ult
+                            : arith::CmpIPredicate::slt)
+              : name == ">"  ? (isUnsigned ? arith::CmpIPredicate::ugt
+                                           : arith::CmpIPredicate::sgt)
+              : name == "=<" ? (isUnsigned ? arith::CmpIPredicate::ule
+                                           : arith::CmpIPredicate::sle)
+              : name == ">=" ? (isUnsigned ? arith::CmpIPredicate::uge
+                                           : arith::CmpIPredicate::sge)
+                             : std::optional<arith::CmpIPredicate>{}};
       if (!predicate) {
-        return other();
+        return NotBuiltIn(goal, symbol);
       }
       flag = arith::CmpIOp::create(builder_, loc, *predicate, in[0], in[1]);
     }
@@ -3418,10 +3491,10 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
       result = in[0];
     } else if (in.size() == 1 && name == "float" &&
         mlir::isa<mlir::IntegerType>(in[0].getType())) {
-      result = arith::SIToFPOp::create(
-          builder_, loc, builder_.getF64Type(), in[0]);
+      result =
+          arith::SIToFPOp::create(builder_, loc, builder_.getF64Type(), in[0]);
     } else {
-      return other();
+      return NotBuiltIn(goal, symbol);
     }
     values_[output] = result;
     return true;
@@ -3433,7 +3506,7 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
             ? mlir::dyn_cast_or_null<mlir::IntegerType>(outputType->type)
             : mlir::IntegerType{}};
     if (!type) {
-      return other();
+      return NotBuiltIn(goal, symbol);
     }
     unsigned bits{type.getWidth()};
     llvm::StringRef bounded{name};
@@ -3447,7 +3520,7 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     } else if (name == ("bits_per_" + module).str()) {
       value = llvm::APInt{bits, bits};
     } else {
-      return other();
+      return NotBuiltIn(goal, symbol);
     }
     values_[output] = arith::ConstantOp::create(
         builder_, loc, builder_.getIntegerAttr(type, value));
@@ -3456,8 +3529,8 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
   auto type{mlir::cast<mlir::IntegerType>(in[0].getType())};
   unsigned bits{type.getWidth()};
   if (in.size() == 1 &&
-      (name.starts_with("cast_") || name == "to_int" ||
-          name == "from_int" || name == "to_uint")) {
+      (name.starts_with("cast_") || name == "to_int" || name == "from_int" ||
+          name == "to_uint")) {
     // A conversion between integer types keeps the value's low bits, and
     // extends it by its sign if its type is signed (library reference,
     // "int8" and the others).
@@ -3465,7 +3538,7 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
             ? mlir::dyn_cast_or_null<mlir::IntegerType>(outputType->type)
             : mlir::IntegerType{}};
     if (!to) {
-      return other();
+      return NotBuiltIn(goal, symbol);
     }
     llvm::StringRef from{module};
     if (name.starts_with("cast_from_")) {
@@ -3485,68 +3558,6 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     values_[output] = result;
     return true;
   }
-  auto constant{[&](std::int64_t v) { return IntegerConstant(type, v, loc); }};
-  auto equal{[&](mlir::Value x, std::int64_t v) {
-    return arith::CmpIOp::create(
-        builder_, loc, arith::CmpIPredicate::eq, x, constant(v));
-  }};
-  auto select{[&](mlir::Value c, mlir::Value t, mlir::Value f) {
-    return arith::SelectOp::create(builder_, loc, c, t, f);
-  }};
-  // A division checks for a zero divisor; one of the least value by -1,
-  // whose quotient overflows, wraps, as mmc's constant folding does.
-  auto divide{[&](llvm::StringRef what, bool floor, bool remainder) {
-    mlir::Value a{in[0]}, b{in[1]};
-    merk::ThrowIfOp::create(builder_, loc, equal(b, 0),
-        DomainError(module, what, "division by zero"));
-    if (isUnsigned) {
-      return remainder ? mlir::Value{arith::RemUIOp::create(builder_, loc, a, b)}
-                       : mlir::Value{arith::DivUIOp::create(builder_, loc, a, b)};
-    }
-    mlir::Value minusOne{equal(b, -1)};
-    mlir::Value divisor{select(minusOne, constant(1), b)};
-    mlir::Value q{arith::DivSIOp::create(builder_, loc, a, divisor)};
-    mlir::Value r{arith::RemSIOp::create(builder_, loc, a, divisor)};
-    q = select(minusOne, arith::SubIOp::create(builder_, loc, constant(0), a), q);
-    r = select(minusOne, constant(0), r);
-    if (floor) {
-      // Toward minus infinity: one less where the remainder is not 0 and
-      // its sign is not the divisor's.
-      mlir::Value nonzero{arith::CmpIOp::create(
-          builder_, loc, arith::CmpIPredicate::ne, r, constant(0))};
-      mlir::Value signs{arith::CmpIOp::create(builder_, loc,
-          arith::CmpIPredicate::slt, arith::XOrIOp::create(builder_, loc, r, b),
-          constant(0))};
-      mlir::Value adjust{arith::AndIOp::create(builder_, loc, nonzero, signs)};
-      q = select(adjust, arith::SubIOp::create(builder_, loc, q, constant(1)), q);
-      r = select(adjust, arith::AddIOp::create(builder_, loc, r, b), r);
-    }
-    return remainder ? r : q;
-  }};
-  // The shift amount is an int; outside 0 to the width it is an error,
-  // unless the shift is unchecked.
-  auto shift{[&](bool left, bool checked, llvm::StringRef what) {
-    mlir::Value amount{in[1]};
-    auto amountType{mlir::cast<mlir::IntegerType>(amount.getType())};
-    if (checked) {
-      mlir::Value out{arith::CmpIOp::create(builder_, loc,
-          arith::CmpIPredicate::uge, amount,
-          IntegerConstant(amountType, bits, loc))};
-      merk::ThrowIfOp::create(builder_, loc, out,
-          DomainError(module, what, "second operand is out of range"));
-    }
-    if (amountType.getWidth() > bits) {
-      amount = arith::TruncIOp::create(builder_, loc, type, amount);
-    } else if (amountType.getWidth() < bits) {
-      amount = arith::ExtUIOp::create(builder_, loc, type, amount);
-    }
-    if (left) {
-      return mlir::Value{arith::ShLIOp::create(builder_, loc, in[0], amount)};
-    }
-    return isUnsigned
-        ? mlir::Value{arith::ShRUIOp::create(builder_, loc, in[0], amount)}
-        : mlir::Value{arith::ShRSIOp::create(builder_, loc, in[0], amount)};
-  }};
   if (in.size() == 2) {
     if (name == "+" || name == "plus") {
       result = arith::AddIOp::create(builder_, loc, in[0], in[1]);
@@ -3555,13 +3566,17 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     } else if (name == "*" || name == "times") {
       result = arith::MulIOp::create(builder_, loc, in[0], in[1]);
     } else if (name == "//" || name == "/") {
-      result = divide("\\'//\\'", false, false);
+      result = IntegerDivide(in[0], in[1], module, "\\'//\\'",
+          /*floor=*/false, /*remainder=*/false, loc);
     } else if (name == "rem") {
-      result = divide("rem", false, true);
+      result = IntegerDivide(in[0], in[1], module, "rem",
+          /*floor=*/false, /*remainder=*/true, loc);
     } else if (name == "div") {
-      result = divide("\\'//\\'", true, false);
+      result = IntegerDivide(in[0], in[1], module, "\\'//\\'",
+          /*floor=*/true, /*remainder=*/false, loc);
     } else if (name == "mod") {
-      result = divide("\\'//\\'", true, true);
+      result = IntegerDivide(in[0], in[1], module, "\\'//\\'",
+          /*floor=*/true, /*remainder=*/true, loc);
     } else if (name == "unchecked_quotient") {
       result = isUnsigned
           ? mlir::Value{arith::DivUIOp::create(builder_, loc, in[0], in[1])}
@@ -3571,13 +3586,17 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
           ? mlir::Value{arith::RemUIOp::create(builder_, loc, in[0], in[1])}
           : mlir::Value{arith::RemSIOp::create(builder_, loc, in[0], in[1])};
     } else if (name == "<<") {
-      result = shift(true, true, "(<<)");
+      result = IntegerShift(in[0], in[1], module, "(<<)", /*left=*/true,
+          /*checked=*/true, loc);
     } else if (name == ">>") {
-      result = shift(false, true, "(>>)");
+      result = IntegerShift(in[0], in[1], module, "(>>)", /*left=*/false,
+          /*checked=*/true, loc);
     } else if (name == "unchecked_left_shift") {
-      result = shift(true, false, "");
+      result = IntegerShift(in[0], in[1], module, "", /*left=*/true,
+          /*checked=*/false, loc);
     } else if (name == "unchecked_right_shift") {
-      result = shift(false, false, "");
+      result = IntegerShift(in[0], in[1], module, "", /*left=*/false,
+          /*checked=*/false, loc);
     } else if (name == "/\\") {
       result = arith::AndIOp::create(builder_, loc, in[0], in[1]);
     } else if (name == "\\/") {
@@ -3593,22 +3612,25 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
           ? mlir::Value{arith::MaxUIOp::create(builder_, loc, in[0], in[1])}
           : mlir::Value{arith::MaxSIOp::create(builder_, loc, in[0], in[1])};
     } else {
-      return other();
+      return NotBuiltIn(goal, symbol);
     }
   } else if (in.size() == 1 && (name == "-" || name == "+")) {
-    result = name == "+"
-        ? in[0]
-        : mlir::Value{arith::SubIOp::create(builder_, loc, constant(0), in[0])};
+    result = name == "+" ? in[0]
+                         : mlir::Value{arith::SubIOp::create(builder_, loc,
+                               IntegerConstant(type, 0, loc), in[0])};
   } else if (in.size() == 1 && !isUnsigned &&
       (name == "unchecked_abs" || name == "nabs")) {
     // nabs is minus the absolute value, which cannot overflow.
-    mlir::Value negative{arith::CmpIOp::create(
-        builder_, loc, arith::CmpIPredicate::slt, in[0], constant(0))};
-    mlir::Value negated{arith::SubIOp::create(builder_, loc, constant(0), in[0])};
-    result = name == "nabs" ? select(negative, in[0], negated)
-                            : select(negative, negated, in[0]);
+    mlir::Value negative{arith::CmpIOp::create(builder_, loc,
+        arith::CmpIPredicate::slt, in[0], IntegerConstant(type, 0, loc))};
+    mlir::Value negated{arith::SubIOp::create(
+        builder_, loc, IntegerConstant(type, 0, loc), in[0])};
+    result = name == "nabs"
+        ? arith::SelectOp::create(builder_, loc, negative, in[0], negated)
+        : arith::SelectOp::create(builder_, loc, negative, negated, in[0]);
   } else if (in.size() == 1 && name == "\\") {
-    result = arith::XOrIOp::create(builder_, loc, in[0], constant(-1));
+    result = arith::XOrIOp::create(
+        builder_, loc, in[0], IntegerConstant(type, -1, loc));
   } else if (in.size() == 1 && name == "abs" && !isUnsigned) {
     // mmc: "int.abs: abs(min_int) would overflow".
     mlir::Value least{arith::ConstantOp::create(builder_, loc,
@@ -3619,12 +3641,14 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
         ("Software Error: " + module + ".abs: abs(min_" + module +
             ") would overflow")
             .str());
-    mlir::Value negative{arith::CmpIOp::create(
-        builder_, loc, arith::CmpIPredicate::slt, in[0], constant(0))};
-    result = select(negative,
-        arith::SubIOp::create(builder_, loc, constant(0), in[0]), in[0]);
+    mlir::Value negative{arith::CmpIOp::create(builder_, loc,
+        arith::CmpIPredicate::slt, in[0], IntegerConstant(type, 0, loc))};
+    result = arith::SelectOp::create(builder_, loc, negative,
+        arith::SubIOp::create(
+            builder_, loc, IntegerConstant(type, 0, loc), in[0]),
+        in[0]);
   } else {
-    return other();
+    return NotBuiltIn(goal, symbol);
   }
   values_[output] = result;
   return true;
