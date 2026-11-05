@@ -12,7 +12,6 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include <algorithm>
-#include <functional>
 
 namespace merkurius::semantics {
 
@@ -63,134 +62,158 @@ const Type *TypeContext::Existential(unsigned number, llvm::StringRef name) {
 
 // Types share their parts, and can be exponentially larger as trees than
 // as the graphs they are, so the walks below visit each part once.
+const Type *TypeContext::Substitute(const Type *t,
+    llvm::function_ref<const Type *(unsigned)> replace,
+    llvm::DenseMap<const Type *, const Type *> &done) {
+  if (t->kind == TypeKind::Variable) {
+    return replace(t->var);
+  }
+  if (auto it{done.find(t)}; it != done.end()) {
+    return it->second;
+  }
+  llvm::SmallVector<const Type *, 4> arguments;
+  bool changed{false};
+  for (const Type *argument : t->arguments) {
+    arguments.push_back(Substitute(argument, replace, done));
+    changed |= arguments.back() != argument;
+  }
+  const Type *result{
+      t->result ? Substitute(t->result, replace, done) : nullptr};
+  changed |= result != t->result;
+  const Type *substituted{t};
+  if (changed) {
+    Type copy{*t};
+    copy.arguments = arguments;
+    copy.result = result;
+    substituted = Intern(copy);
+  }
+  done[t] = substituted;
+  return substituted;
+}
+
 const Type *TypeContext::Substitute(
     const Type *type, llvm::function_ref<const Type *(unsigned)> replace) {
   llvm::DenseMap<const Type *, const Type *> done;
-  std::function<const Type *(const Type *)> walk{[&](const Type *t) {
-    if (t->kind == TypeKind::Variable) {
-      return replace(t->var);
-    }
-    if (auto it{done.find(t)}; it != done.end()) {
-      return it->second;
-    }
-    llvm::SmallVector<const Type *, 4> arguments;
-    bool changed{false};
-    for (const Type *argument : t->arguments) {
-      arguments.push_back(walk(argument));
-      changed |= arguments.back() != argument;
-    }
-    const Type *result{t->result ? walk(t->result) : nullptr};
-    changed |= result != t->result;
-    const Type *substituted{t};
-    if (changed) {
-      Type copy{*t};
-      copy.arguments = arguments;
-      copy.result = result;
-      substituted = Intern(copy);
-    }
-    done[t] = substituted;
-    return substituted;
-  }};
-  return walk(type);
+  return Substitute(type, replace, done);
+}
+
+const Type *TypeContext::SubstituteExistentials(const Type *t,
+    llvm::function_ref<const Type *(const Type *)> replace,
+    llvm::DenseMap<const Type *, const Type *> &done) {
+  if (t->kind == TypeKind::Existential) {
+    return replace(t);
+  }
+  if (auto it{done.find(t)}; it != done.end()) {
+    return it->second;
+  }
+  llvm::SmallVector<const Type *, 4> arguments;
+  bool changed{false};
+  for (const Type *argument : t->arguments) {
+    arguments.push_back(SubstituteExistentials(argument, replace, done));
+    changed |= arguments.back() != argument;
+  }
+  const Type *result{
+      t->result ? SubstituteExistentials(t->result, replace, done) : nullptr};
+  changed |= result != t->result;
+  const Type *substituted{t};
+  if (changed) {
+    Type copy{*t};
+    copy.arguments = arguments;
+    copy.result = result;
+    substituted = Intern(copy);
+  }
+  done[t] = substituted;
+  return substituted;
 }
 
 const Type *TypeContext::SubstituteExistentials(
     const Type *type, llvm::function_ref<const Type *(const Type *)> replace) {
   llvm::DenseMap<const Type *, const Type *> done;
-  std::function<const Type *(const Type *)> walk{[&](const Type *t) {
-    if (t->kind == TypeKind::Existential) {
-      return replace(t);
-    }
-    if (auto it{done.find(t)}; it != done.end()) {
-      return it->second;
-    }
-    llvm::SmallVector<const Type *, 4> arguments;
-    bool changed{false};
-    for (const Type *argument : t->arguments) {
-      arguments.push_back(walk(argument));
-      changed |= arguments.back() != argument;
-    }
-    const Type *result{t->result ? walk(t->result) : nullptr};
-    changed |= result != t->result;
-    const Type *substituted{t};
-    if (changed) {
-      Type copy{*t};
-      copy.arguments = arguments;
-      copy.result = result;
-      substituted = Intern(copy);
-    }
-    done[t] = substituted;
-    return substituted;
-  }};
-  return walk(type);
+  return SubstituteExistentials(type, replace, done);
 }
+
+namespace {
+void ForEachExistential(const Type &t, llvm::function_ref<void(const Type &)> f,
+    llvm::DenseSet<const Type *> &seen) {
+  if (!seen.insert(&t).second) {
+    return;
+  }
+  if (t.kind == TypeKind::Existential) {
+    f(t);
+    return;
+  }
+  for (const Type *argument : t.arguments) {
+    ForEachExistential(*argument, f, seen);
+  }
+  if (t.result) {
+    ForEachExistential(*t.result, f, seen);
+  }
+}
+} // namespace
 
 void ForEachExistential(
     const Type &type, llvm::function_ref<void(const Type &)> f) {
   llvm::DenseSet<const Type *> seen;
-  std::function<void(const Type &)> walk{[&](const Type &t) {
-    if (!seen.insert(&t).second) {
-      return;
-    }
-    if (t.kind == TypeKind::Existential) {
-      f(t);
-      return;
-    }
-    for (const Type *argument : t.arguments) {
-      walk(*argument);
-    }
-    if (t.result) {
-      walk(*t.result);
-    }
-  }};
-  walk(type);
+  ForEachExistential(type, f, seen);
 }
+
+namespace {
+void ForEachVariable(const Type &t, llvm::function_ref<void(unsigned)> f,
+    llvm::DenseSet<const Type *> &seen) {
+  if (!seen.insert(&t).second) {
+    return;
+  }
+  if (t.kind == TypeKind::Variable) {
+    f(t.var);
+    return;
+  }
+  for (const Type *argument : t.arguments) {
+    ForEachVariable(*argument, f, seen);
+  }
+  if (t.result) {
+    ForEachVariable(*t.result, f, seen);
+  }
+}
+} // namespace
 
 void ForEachVariable(const Type &type, llvm::function_ref<void(unsigned)> f) {
   llvm::DenseSet<const Type *> seen;
-  std::function<void(const Type &)> walk{[&](const Type &t) {
-    if (!seen.insert(&t).second) {
-      return;
-    }
-    if (t.kind == TypeKind::Variable) {
-      f(t.var);
-      return;
-    }
-    for (const Type *argument : t.arguments) {
-      walk(*argument);
-    }
-    if (t.result) {
-      walk(*t.result);
-    }
-  }};
-  walk(type);
+  ForEachVariable(type, f, seen);
 }
+
+namespace {
+std::size_t TreeSize(const Type &t, std::size_t limit,
+    llvm::DenseMap<const Type *, std::size_t> &sizes) {
+  if (auto it{sizes.find(&t)}; it != sizes.end()) {
+    return it->second;
+  }
+  std::size_t n{1};
+  for (const Type *argument : t.arguments) {
+    n = std::min(limit, n + TreeSize(*argument, limit, sizes));
+  }
+  if (t.result) {
+    n = std::min(limit, n + TreeSize(*t.result, limit, sizes));
+  }
+  sizes[&t] = n;
+  return n;
+}
+} // namespace
 
 std::size_t TreeSize(const Type &type, std::size_t limit) {
   llvm::DenseMap<const Type *, std::size_t> sizes;
-  std::function<std::size_t(const Type &)> size{[&](const Type &t) {
-    if (auto it{sizes.find(&t)}; it != sizes.end()) {
-      return it->second;
-    }
-    std::size_t n{1};
-    for (const Type *argument : t.arguments) {
-      n = std::min(limit, n + size(*argument));
-    }
-    if (t.result) {
-      n = std::min(limit, n + size(*t.result));
-    }
-    sizes[&t] = n;
-    return n;
-  }};
-  return size(type);
+  return TreeSize(type, limit, sizes);
 }
+
+namespace {
+void PrintTypes(llvm::raw_ostream &os, llvm::ArrayRef<const Type *> types,
+    llvm::function_ref<std::string(unsigned)> name) {
+  llvm::interleave(
+      types, os, [&](const Type *t) { PrintType(os, *t, name); }, ", ");
+}
+} // namespace
 
 void PrintType(llvm::raw_ostream &os, const Type &type,
     llvm::function_ref<std::string(unsigned)> name) {
-  auto list{[&](llvm::ArrayRef<const Type *> types) {
-    llvm::interleave(
-        types, os, [&](const Type *t) { PrintType(os, *t, name); }, ", ");
-  }};
   switch (type.kind) {
   case TypeKind::Variable:
     if (name) {
@@ -206,13 +229,13 @@ void PrintType(llvm::raw_ostream &os, const Type &type,
     os << type.constructor->name;
     if (!type.arguments.empty()) {
       os << '(';
-      list(type.arguments);
+      PrintTypes(os, type.arguments, name);
       os << ')';
     }
     return;
   case TypeKind::Tuple:
     os << '{';
-    list(type.arguments);
+    PrintTypes(os, type.arguments, name);
     os << '}';
     return;
   case TypeKind::Existential:
@@ -232,7 +255,7 @@ void PrintType(llvm::raw_ostream &os, const Type &type,
     os << (function ? "func" : "pred");
     if (!type.arguments.empty()) {
       os << '(';
-      list(type.arguments);
+      PrintTypes(os, type.arguments, name);
       os << ')';
     }
     if (function) {
