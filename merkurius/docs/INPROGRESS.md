@@ -51,8 +51,8 @@ a constant, ahead of a size it does not depend on.
 | `Semantics/translate-loops.cpp` | 13 | Done, in 3 stages: the small ones and `Rebuild`, `TranslateClause`, then `TranslateLoop` |
 | `Semantics/check-determinism.cpp` | 22 | Done, in 3 stages: `BodyBuilder` and `SwitchDetector`, `DeterminismAnalyser` and `CheckDeterminism`, then `DumpProcedureBody` |
 | `Semantics/check-modes.cpp` | 20 | Done, in 3 stages: `ModeChecker`, `ProcedureChecker`, then the dump |
-| `Semantics/check-types.cpp` | 37 | Stages 1 to 3 of 4 done: to `CheckHOCall`. Next: the goals and inference |
-| The other 28 files in `lib/` and `runtime/` | about 128 | Not started; the largest is `insts.cpp` (19) |
+| `Semantics/check-types.cpp` | 37 | Done, in 4 stages: to `CheckInstances`, to `DefineMethods`, the improvement of constraints, then the goals and inference |
+| The other 22 files in `lib/` and `runtime/` | 109 | Not started; the largest are `insts.cpp` (19), then `convert-goals.cpp`, `quantify.cpp` and `polymorphism.cpp` (11 each) |
 
 The unit tests' few are left unless they turn out to get in the way.
 
