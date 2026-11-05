@@ -94,6 +94,26 @@ const Scope *ConditionScope(const IfThenElse &ite) {
   return scope && (*scope)->kind == ScopeKind::Some ? *scope : nullptr;
 }
 
+void AddBoth(Set &all, Set &direct, llvm::ArrayRef<VarId> vars) {
+  Add(all, vars);
+  Add(direct, vars);
+}
+
+Set Union(const Set &a, const Set &b) {
+  Set result{a};
+  result |= b;
+  return result;
+}
+
+Set Without(Set set, llvm::ArrayRef<VarId> vars) {
+  for (VarId var : vars) {
+    if (Has(set, var)) {
+      set.reset(var);
+    }
+  }
+  return set;
+}
+
 class Quantifier {
 public:
   Quantifier(const ClauseForm &clause, const parser::TokenSequence &tokens,
@@ -130,11 +150,14 @@ private:
     all |= all_[GoalNumber(goal)];
     direct |= direct_[GoalNumber(goal)];
   }
+  void CollectCatch(const Catch &, Set &all, Set &direct);
   // Pass 2: free_ holds each goal's free variables, those that occur in it
   // outside its lambda expressions' bodies or that the lambda expressions
   // capture. `outside` holds the variables that occur outside the goal and
   // outside lambda expressions.
   void Capture(const Goal &, const Set &outside);
+  void CaptureInto(const Goal &, const Set &outside, Set &free);
+  void CaptureCatch(const Catch &, const Set &outside, Set &free);
   // Pass 3: rebuilds the goal with its variables renamed, and records its
   // nonlocal variables. `outside` holds the variables, renamed, that occur
   // outside it.
@@ -241,12 +264,14 @@ private:
   unsigned locals_{0};
 };
 
+void Quantifier::CollectCatch(const Catch &c, Set &all, Set &direct) {
+  AddBoth(all, direct, c.exception);
+  CollectInto(c.pattern, all, direct);
+  CollectInto(c.goal, all, direct);
+}
+
 void Quantifier::Collect(const Goal &goal) {
   Set all, direct;
-  auto both{[&](llvm::ArrayRef<VarId> vars) {
-    Add(all, vars);
-    Add(direct, vars);
-  }};
   std::visit(
       common::visitors{
           [&](const Conj *conj) {
@@ -282,13 +307,15 @@ void Quantifier::Collect(const Goal &goal) {
             }
             CollectInto(ite->otherwise, all, direct);
           },
-          [&](const Not *negation) { CollectInto(negation->goal, all, direct); },
+          [&](const Not *negation) {
+            CollectInto(negation->goal, all, direct);
+          },
           [&](const Unify *unify) {
-            both(unify->left);
+            AddBoth(all, direct, unify->left);
             if (unify->isVar) {
-              both(unify->var);
+              AddBoth(all, direct, unify->var);
             } else {
-              both(unify->arguments);
+              AddBoth(all, direct, unify->arguments);
             }
             if (const Lambda * lambda{unify->functor.lambda}) {
               Collect(lambda->body);
@@ -296,10 +323,10 @@ void Quantifier::Collect(const Goal &goal) {
               Add(all, lambda->arguments);
             }
           },
-          [&](const Call *call) { both(call->arguments); },
+          [&](const Call *call) { AddBoth(all, direct, call->arguments); },
           [&](const HOCall *call) {
-            both(call->closure);
-            both(call->arguments);
+            AddBoth(all, direct, call->closure);
+            AddBoth(all, direct, call->arguments);
           },
           [&](const Scope *scope) {
             CollectInto(scope->goal, all, direct);
@@ -315,33 +342,29 @@ void Quantifier::Collect(const Goal &goal) {
             }
           },
           [&](const Try *t) {
-            both(t->io);
+            AddBoth(all, direct, t->io);
             CollectInto(t->goal, all, direct);
             CollectInto(t->then, all, direct);
             if (t->otherwise) {
               CollectInto(*t->otherwise, all, direct);
             }
-            auto branch{[&](const Catch &c) {
-              both(c.exception);
-              CollectInto(c.pattern, all, direct);
-              CollectInto(c.goal, all, direct);
-            }};
             for (const Catch &c : t->catches) {
-              branch(c);
+              CollectCatch(c, all, direct);
             }
             if (t->catchAny) {
-              branch(*t->catchAny);
+              CollectCatch(*t->catchAny, all, direct);
             }
           },
           [&](const Atomic *atomic) {
-            both({atomic->outerInitial, atomic->outerFinal});
+            AddBoth(all, direct, {atomic->outerInitial, atomic->outerFinal});
             for (const AtomicAlternative &alternative : atomic->alternatives) {
-              both({alternative.innerInitial, alternative.innerFinal});
+              AddBoth(all, direct,
+                  {alternative.innerInitial, alternative.innerFinal});
               CollectInto(alternative.goal, all, direct);
             }
           },
           [&](const Loop *loop) {
-            both(LoopVars(*loop));
+            AddBoth(all, direct, LoopVars(*loop));
             CollectInto(loop->body, all, direct);
           },
       },
@@ -372,44 +395,41 @@ std::vector<Set> Quantifier::ConjunctOutsides(llvm::ArrayRef<Goal> goals,
   return result;
 }
 
+void Quantifier::CaptureInto(const Goal &goal, const Set &outside, Set &free) {
+  Capture(goal, outside);
+  free |= free_[GoalNumber(goal)];
+}
+
+void Quantifier::CaptureCatch(const Catch &c, const Set &outside, Set &free) {
+  Add(free, c.exception);
+  Set pattern{Union(outside, direct_[GoalNumber(c.goal)])};
+  Add(pattern, c.exception);
+  Set body{Union(outside, direct_[GoalNumber(c.pattern)])};
+  Add(body, c.exception);
+  CaptureInto(c.pattern, pattern, free);
+  CaptureInto(c.goal, body, free);
+}
+
 void Quantifier::Capture(const Goal &goal, const Set &outside) {
   Set free;
-  auto with{[&](const Set &extra) {
-    Set result{outside};
-    result |= extra;
-    return result;
-  }};
-  auto into{[&](const Goal &g, const Set &out) {
-    Capture(g, out);
-    free |= free_[GoalNumber(g)];
-  }};
-  auto without{[&](Set set, llvm::ArrayRef<VarId> vars) {
-    for (VarId var : vars) {
-      if (Has(set, var)) {
-        set.reset(var);
-      }
-    }
-    return set;
-  }};
-  auto leaf{[&](llvm::ArrayRef<VarId> vars) { Add(free, vars); }};
   std::visit(
       common::visitors{
           [&](const Conj *conj) {
             std::vector<Set> outsides{
                 ConjunctOutsides(conj->goals, outside, direct_, false)};
             for (std::size_t j{0}; j < conj->goals.size(); ++j) {
-              into(conj->goals[j], outsides[j]);
+              CaptureInto(conj->goals[j], outsides[j], free);
             }
           },
           [&](const Disj *disj) {
             for (const Goal &g : disj->goals) {
-              into(g, outside);
+              CaptureInto(g, outside, free);
             }
           },
           [&](const IfThenElse *ite) {
             const Scope *scope{ConditionScope(*ite)};
             if (scope) {
-              Set out{without(outside, scope->vars)};
+              Set out{Without(outside, scope->vars)};
               Set conditionOut{out};
               conditionOut |= direct_[GoalNumber(ite->then)];
               Capture(scope->goal, conditionOut);
@@ -419,20 +439,24 @@ void Quantifier::Capture(const Goal &goal, const Set &outside) {
               Capture(ite->then, thenOut);
               Set pair{free_[scope->number]};
               pair |= free_[GoalNumber(ite->then)];
-              free |= without(pair, scope->vars);
+              free |= Without(pair, scope->vars);
             } else {
-              into(ite->condition, with(direct_[GoalNumber(ite->then)]));
-              into(ite->then, with(direct_[GoalNumber(ite->condition)]));
+              CaptureInto(ite->condition,
+                  Union(outside, direct_[GoalNumber(ite->then)]), free);
+              CaptureInto(ite->then,
+                  Union(outside, direct_[GoalNumber(ite->condition)]), free);
             }
-            into(ite->otherwise, outside);
+            CaptureInto(ite->otherwise, outside, free);
           },
-          [&](const Not *negation) { into(negation->goal, outside); },
+          [&](const Not *negation) {
+            CaptureInto(negation->goal, outside, free);
+          },
           [&](const Unify *unify) {
-            leaf(unify->left);
+            Add(free, unify->left);
             if (unify->isVar) {
-              leaf(unify->var);
+              Add(free, unify->var);
             } else {
-              leaf(unify->arguments);
+              Add(free, unify->arguments);
             }
             if (const Lambda * lambda{unify->functor.lambda}) {
               Set captured{all_[GoalNumber(lambda->body)]};
@@ -444,68 +468,56 @@ void Quantifier::Capture(const Goal &goal, const Set &outside) {
               captured_[unify->number] = std::move(captured);
             }
           },
-          [&](const Call *call) { leaf(call->arguments); },
+          [&](const Call *call) { Add(free, call->arguments); },
           [&](const HOCall *call) {
-            leaf(call->closure);
-            leaf(call->arguments);
+            Add(free, call->closure);
+            Add(free, call->arguments);
           },
           [&](const Scope *scope) {
             if (scope->kind == ScopeKind::Some) {
-              Capture(scope->goal, without(outside, scope->vars));
-              free |= without(free_[GoalNumber(scope->goal)], scope->vars);
+              Capture(scope->goal, Without(outside, scope->vars));
+              free |= Without(free_[GoalNumber(scope->goal)], scope->vars);
             } else {
-              into(scope->goal, outside);
+              CaptureInto(scope->goal, outside, free);
             }
           },
           [&](const Try *t) {
-            leaf(t->io);
+            Add(free, t->io);
             Set out{outside};
             Add(out, t->io);
-            auto and_{[&](const Set &extra) {
-              Set s{out};
-              s |= extra;
-              return s;
-            }};
-            into(t->goal, and_(direct_[GoalNumber(t->then)]));
-            into(t->then, and_(direct_[GoalNumber(t->goal)]));
+            CaptureInto(
+                t->goal, Union(out, direct_[GoalNumber(t->then)]), free);
+            CaptureInto(
+                t->then, Union(out, direct_[GoalNumber(t->goal)]), free);
             if (t->otherwise) {
-              into(*t->otherwise, out);
+              CaptureInto(*t->otherwise, out, free);
             }
-            auto branch{[&](const Catch &c) {
-              leaf(c.exception);
-              Set pattern{and_(direct_[GoalNumber(c.goal)])};
-              Add(pattern, c.exception);
-              Set body{and_(direct_[GoalNumber(c.pattern)])};
-              Add(body, c.exception);
-              into(c.pattern, pattern);
-              into(c.goal, body);
-            }};
             for (const Catch &c : t->catches) {
-              branch(c);
+              CaptureCatch(c, out, free);
             }
             if (t->catchAny) {
-              branch(*t->catchAny);
+              CaptureCatch(*t->catchAny, out, free);
             }
           },
           [&](const Atomic *atomic) {
-            leaf({atomic->outerInitial, atomic->outerFinal});
+            Add(free, {atomic->outerInitial, atomic->outerFinal});
             Set out{outside};
             Add(out, {atomic->outerInitial, atomic->outerFinal});
             for (const AtomicAlternative &alternative : atomic->alternatives) {
-              leaf({alternative.innerInitial, alternative.innerFinal});
+              Add(free, {alternative.innerInitial, alternative.innerFinal});
               Set inner{out};
               Add(inner, {alternative.innerInitial, alternative.innerFinal});
-              into(alternative.goal, inner);
+              CaptureInto(alternative.goal, inner, free);
             }
           },
           // The iterators' and the states' variables occur outside the
           // body, as a lambda expression's arguments do.
           [&](const Loop *loop) {
             llvm::SmallVector<VarId, 8> vars{LoopVars(*loop)};
-            leaf(vars);
+            Add(free, vars);
             Set out{outside};
             Add(out, vars);
-            into(loop->body, out);
+            CaptureInto(loop->body, out, free);
           },
       },
       goal);
