@@ -40,47 +40,55 @@ const BoundAlternative *Find(
   }
   return nullptr;
 }
+
+template <typename T> std::uintptr_t Word(T x) {
+  return static_cast<std::uintptr_t>(x);
+}
+
+std::uintptr_t Pointer(const void *p) {
+  return reinterpret_cast<std::uintptr_t>(p);
+}
 } // namespace
 
 //===----------------------------------------------------------------------===//
 // InstContext
 //===----------------------------------------------------------------------===//
 
+llvm::StringRef InstContext::SaveName(llvm::StringRef name) {
+  return name.empty() ? llvm::StringRef{}
+                      : strings_.insert(name).first->getKey();
+}
+
 const Inst *InstContext::Intern(const Inst &inst) {
-  auto text{[&](llvm::StringRef s) {
-    return s.empty() ? llvm::StringRef{} : strings_.insert(s).first->getKey();
-  }};
-  auto word{[](auto x) { return static_cast<std::uintptr_t>(x); }};
-  auto pointer{[](const void *p) { return reinterpret_cast<std::uintptr_t>(p); }};
   Inst copy{inst};
-  copy.name = text(inst.name);
+  copy.name = SaveName(inst.name);
   std::vector<BoundAlternative> functors;
   for (BoundAlternative alternative : inst.functors) {
-    alternative.functor.module = text(alternative.functor.module);
-    alternative.functor.name = text(alternative.functor.name);
+    alternative.functor.module = SaveName(alternative.functor.module);
+    alternative.functor.name = SaveName(alternative.functor.name);
     functors.push_back(alternative);
   }
-  std::vector<std::uintptr_t> key{word(copy.kind), word(copy.uniqueness),
-      word(copy.predOrFunc), word(copy.any), word(copy.determinism),
-      copy.number, copy.scope, pointer(copy.name.data()), pointer(copy.constraint),
-      pointer(copy.symbol), functors.size()};
+  std::vector<std::uintptr_t> key{Word(copy.kind), Word(copy.uniqueness),
+      Word(copy.predOrFunc), Word(copy.any), Word(copy.determinism),
+      copy.number, copy.scope, Pointer(copy.name.data()),
+      Pointer(copy.constraint), Pointer(copy.symbol), functors.size()};
   for (const BoundAlternative &alternative : functors) {
-    key.push_back(pointer(alternative.functor.module.data()));
-    key.push_back(pointer(alternative.functor.name.data()));
+    key.push_back(Pointer(alternative.functor.module.data()));
+    key.push_back(Pointer(alternative.functor.name.data()));
     key.push_back(alternative.functor.arity);
     key.push_back(alternative.functor.literal);
     for (const Inst *argument : alternative.arguments) {
-      key.push_back(pointer(argument));
+      key.push_back(Pointer(argument));
     }
   }
   key.push_back(copy.modes.size());
   for (const ArgMode &mode : copy.modes) {
-    key.push_back(pointer(mode.initial));
-    key.push_back(pointer(mode.final));
+    key.push_back(Pointer(mode.initial));
+    key.push_back(Pointer(mode.final));
   }
   key.push_back(copy.arguments.size());
   for (const Inst *argument : copy.arguments) {
-    key.push_back(pointer(argument));
+    key.push_back(Pointer(argument));
   }
   const Inst *&interned{interned_[key]};
   if (!interned) {
@@ -211,135 +219,150 @@ const Inst *InstContext::Expand(const Inst *inst) {
   });
 }
 
+const Inst *InstContext::SubstituteOnce(const Inst *inst,
+    llvm::function_ref<const Inst *(const Inst &)> replace,
+    llvm::DenseMap<const Inst *, const Inst *> &done) {
+  if (inst->kind == InstKind::Parameter) {
+    return replace(*inst);
+  }
+  if (inst->kind == InstKind::Constrained) {
+    return Constrained(
+        inst->arguments, SubstituteOnce(inst->constraint, replace, done));
+  }
+  // A generated inst's body may refer to itself; it has no parameters
+  // of its own to replace.
+  if (inst->kind == InstKind::Defined && !inst->symbol) {
+    return inst;
+  }
+  if (auto it{done.find(inst)}; it != done.end()) {
+    return it->second;
+  }
+  Inst copy{*inst};
+  std::vector<std::vector<const Inst *>> arguments;
+  std::vector<BoundAlternative> functors;
+  for (const BoundAlternative &alternative : inst->functors) {
+    arguments.emplace_back();
+    for (const Inst *argument : alternative.arguments) {
+      arguments.back().push_back(SubstituteOnce(argument, replace, done));
+    }
+  }
+  for (std::size_t j{0}; j < inst->functors.size(); ++j) {
+    functors.push_back({inst->functors[j].functor, arguments[j]});
+  }
+  copy.functors = functors;
+  std::vector<ArgMode> modes;
+  for (const ArgMode &mode : inst->modes) {
+    modes.push_back({SubstituteOnce(mode.initial, replace, done),
+        SubstituteOnce(mode.final, replace, done)});
+  }
+  copy.modes = modes;
+  std::vector<const Inst *> instArguments;
+  for (const Inst *argument : inst->arguments) {
+    instArguments.push_back(SubstituteOnce(argument, replace, done));
+  }
+  copy.arguments = instArguments;
+  const Inst *result{Intern(copy)};
+  done[inst] = result;
+  return result;
+}
+
 const Inst *InstContext::Substitute(const Inst *inst,
     llvm::function_ref<const Inst *(const Inst &)> replace) {
   llvm::DenseMap<const Inst *, const Inst *> done;
-  std::function<const Inst *(const Inst *)> walk{[&](const Inst *i) {
-    if (i->kind == InstKind::Parameter) {
-      return replace(*i);
-    }
-    if (i->kind == InstKind::Constrained) {
-      return Constrained(i->arguments, walk(i->constraint));
-    }
-    // A generated inst's body may refer to itself; it has no parameters
-    // of its own to replace.
-    if (i->kind == InstKind::Defined && !i->symbol) {
-      return i;
-    }
-    if (auto it{done.find(i)}; it != done.end()) {
-      return it->second;
-    }
-    Inst copy{*i};
-    std::vector<std::vector<const Inst *>> arguments;
-    std::vector<BoundAlternative> functors;
-    for (const BoundAlternative &alternative : i->functors) {
-      arguments.emplace_back();
-      for (const Inst *argument : alternative.arguments) {
-        arguments.back().push_back(walk(argument));
-      }
-    }
-    for (std::size_t j{0}; j < i->functors.size(); ++j) {
-      functors.push_back({i->functors[j].functor, arguments[j]});
-    }
-    copy.functors = functors;
-    std::vector<ArgMode> modes;
-    for (const ArgMode &mode : i->modes) {
-      modes.push_back({walk(mode.initial), walk(mode.final)});
-    }
-    copy.modes = modes;
-    std::vector<const Inst *> instArguments;
-    for (const Inst *argument : i->arguments) {
-      instArguments.push_back(walk(argument));
-    }
-    copy.arguments = instArguments;
-    const Inst *result{Intern(copy)};
-    done[i] = result;
-    return result;
-  }};
-  return walk(inst);
+  return SubstituteOnce(inst, replace, done);
 }
 
-const Inst *InstContext::Share(const Inst *inst, Uniqueness u) {
+struct InstContext::Sharing {
+  Uniqueness uniqueness;
   llvm::DenseMap<const Inst *, const Inst *> done;
   // The generated insts that stand for named insts being shared, which
   // their bodies refer to if they are recursive.
   llvm::DenseSet<const Inst *> pending, used;
-  // Whether sharing changes an inst, looking into named insts' bodies.
+  // What SharingChanges has looked at.
   llvm::DenseSet<const Inst *> seen;
-  std::function<bool(const Inst *)> changes{[&](const Inst *i) {
-    if (!seen.insert(i).second || i->kind == InstKind::Free ||
-        i->kind == InstKind::Parameter) {
-      return false;
-    }
-    if (i->kind == InstKind::Constrained) {
-      return changes(i->constraint);
-    }
-    if (i->kind == InstKind::Defined) {
-      return changes(Expand(i));
-    }
-    if (Least(i->uniqueness, u) != i->uniqueness) {
-      return true;
-    }
-    return llvm::any_of(i->functors, [&](const BoundAlternative &alternative) {
-      return llvm::any_of(alternative.arguments, changes);
+};
+
+// Whether sharing changes an inst, looking into named insts' bodies.
+bool InstContext::SharingChanges(const Inst *inst, Sharing &sharing) {
+  if (!sharing.seen.insert(inst).second || inst->kind == InstKind::Free ||
+      inst->kind == InstKind::Parameter) {
+    return false;
+  }
+  if (inst->kind == InstKind::Constrained) {
+    return SharingChanges(inst->constraint, sharing);
+  }
+  if (inst->kind == InstKind::Defined) {
+    return SharingChanges(Expand(inst), sharing);
+  }
+  if (Least(inst->uniqueness, sharing.uniqueness) != inst->uniqueness) {
+    return true;
+  }
+  return llvm::any_of(inst->functors, [&](const BoundAlternative &alternative) {
+    return llvm::any_of(alternative.arguments, [&](const Inst *argument) {
+      return SharingChanges(argument, sharing);
     });
-  }};
-  std::function<const Inst *(const Inst *)> walk{[&](const Inst *i) {
-    if (i->kind == InstKind::Free || i->kind == InstKind::Parameter ||
-        (i->kind == InstKind::Defined && !i->symbol)) {
-      return i;
+  });
+}
+
+const Inst *InstContext::ShareOnce(const Inst *inst, Sharing &sharing) {
+  if (inst->kind == InstKind::Free || inst->kind == InstKind::Parameter ||
+      (inst->kind == InstKind::Defined && !inst->symbol)) {
+    return inst;
+  }
+  if (inst->kind == InstKind::Constrained) {
+    return Constrained(inst->arguments, ShareOnce(inst->constraint, sharing));
+  }
+  if (auto it{sharing.done.find(inst)}; it != sharing.done.end()) {
+    if (sharing.pending.count(it->second)) {
+      sharing.used.insert(it->second);
     }
-    if (i->kind == InstKind::Constrained) {
-      return Constrained(i->arguments, walk(i->constraint));
+    return it->second;
+  }
+  if (inst->kind == InstKind::Defined) {
+    // A named inst is shared as its body is, as in mmc, where
+    // unique(...) in it is shared as well; one that sharing does not
+    // change keeps its name.
+    sharing.seen.clear();
+    if (!SharingChanges(inst, sharing)) {
+      sharing.done[inst] = inst;
+      return inst;
     }
-    if (auto it{done.find(i)}; it != done.end()) {
-      if (pending.count(it->second)) {
-        used.insert(it->second);
-      }
-      return it->second;
-    }
-    if (i->kind == InstKind::Defined) {
-      // A named inst is shared as its body is, as in mmc, where
-      // unique(...) in it is shared as well; one that sharing does not
-      // change keeps its name.
-      seen.clear();
-      if (!changes(i)) {
-        done[i] = i;
-        return i;
-      }
-      const Inst *generated{Generated()};
-      done[i] = generated;
-      pending.insert(generated);
-      const Inst *shared{walk(Expand(i))};
-      pending.erase(generated);
-      if (!used.count(generated)) {
-        done[i] = shared;
-        return shared;
-      }
-      // Unfolded once, so that it reads as the named inst does.
-      Define(generated, shared);
-      done[i] = shared;
+    const Inst *generated{Generated()};
+    sharing.done[inst] = generated;
+    sharing.pending.insert(generated);
+    const Inst *shared{ShareOnce(Expand(inst), sharing)};
+    sharing.pending.erase(generated);
+    if (!sharing.used.count(generated)) {
+      sharing.done[inst] = shared;
       return shared;
     }
-    Inst copy{*i};
-    copy.uniqueness = Least(i->uniqueness, u);
-    std::vector<std::vector<const Inst *>> arguments;
-    std::vector<BoundAlternative> functors;
-    for (const BoundAlternative &alternative : i->functors) {
-      arguments.emplace_back();
-      for (const Inst *argument : alternative.arguments) {
-        arguments.back().push_back(walk(argument));
-      }
+    // Unfolded once, so that it reads as the named inst does.
+    Define(generated, shared);
+    sharing.done[inst] = shared;
+    return shared;
+  }
+  Inst copy{*inst};
+  copy.uniqueness = Least(inst->uniqueness, sharing.uniqueness);
+  std::vector<std::vector<const Inst *>> arguments;
+  std::vector<BoundAlternative> functors;
+  for (const BoundAlternative &alternative : inst->functors) {
+    arguments.emplace_back();
+    for (const Inst *argument : alternative.arguments) {
+      arguments.back().push_back(ShareOnce(argument, sharing));
     }
-    for (std::size_t j{0}; j < i->functors.size(); ++j) {
-      functors.push_back({i->functors[j].functor, arguments[j]});
-    }
-    copy.functors = functors;
-    const Inst *result{Intern(copy)};
-    done[i] = result;
-    return result;
-  }};
-  return walk(inst);
+  }
+  for (std::size_t j{0}; j < inst->functors.size(); ++j) {
+    functors.push_back({inst->functors[j].functor, arguments[j]});
+  }
+  copy.functors = functors;
+  const Inst *result{Intern(copy)};
+  sharing.done[inst] = result;
+  return result;
+}
+
+const Inst *InstContext::Share(const Inst *inst, Uniqueness u) {
+  Sharing sharing{u, {}, {}, {}, {}};
+  return ShareOnce(inst, sharing);
 }
 
 //===----------------------------------------------------------------------===//
@@ -379,46 +402,49 @@ const char *AnyName(Uniqueness u) {
   return "any";
 }
 
+bool GroundWith(const Inst &inst, Uniqueness u) {
+  return inst.kind == InstKind::Ground && inst.uniqueness == u;
+}
+
+bool SharedAny(const Inst &inst) {
+  return inst.kind == InstKind::Any && inst.uniqueness == Uniqueness::Shared;
+}
+
 // The standard name of a mode, as the library defines it: in, out, di...
 const char *StandardMode(const ArgMode &mode) {
   const Inst &i{*mode.initial}, &f{*mode.final};
-  auto ground{[](const Inst &x, Uniqueness u) {
-    return x.kind == InstKind::Ground && x.uniqueness == u;
-  }};
-  auto any{[](const Inst &x) {
-    return x.kind == InstKind::Any && x.uniqueness == Uniqueness::Shared;
-  }};
   bool free{i.kind == InstKind::Free};
-  if (ground(i, Uniqueness::Shared) && ground(f, Uniqueness::Shared)) {
+  if (GroundWith(i, Uniqueness::Shared) && GroundWith(f, Uniqueness::Shared)) {
     return "in";
   }
-  if (free && ground(f, Uniqueness::Shared)) {
+  if (free && GroundWith(f, Uniqueness::Shared)) {
     return "out";
   }
-  if (free && ground(f, Uniqueness::Unique)) {
+  if (free && GroundWith(f, Uniqueness::Unique)) {
     return "uo";
   }
-  if (ground(i, Uniqueness::Unique) && ground(f, Uniqueness::Unique)) {
+  if (GroundWith(i, Uniqueness::Unique) && GroundWith(f, Uniqueness::Unique)) {
     return "ui";
   }
-  if (ground(i, Uniqueness::Unique) && ground(f, Uniqueness::Clobbered)) {
+  if (GroundWith(i, Uniqueness::Unique) &&
+      GroundWith(f, Uniqueness::Clobbered)) {
     return "di";
   }
-  if (free && ground(f, Uniqueness::MostlyUnique)) {
+  if (free && GroundWith(f, Uniqueness::MostlyUnique)) {
     return "muo";
   }
-  if (ground(i, Uniqueness::MostlyUnique) &&
-      ground(f, Uniqueness::MostlyUnique)) {
+  if (GroundWith(i, Uniqueness::MostlyUnique) &&
+      GroundWith(f, Uniqueness::MostlyUnique)) {
     return "mui";
   }
-  if (ground(i, Uniqueness::MostlyUnique) &&
-      ground(f, Uniqueness::MostlyClobbered)) {
+  if (GroundWith(i, Uniqueness::MostlyUnique) &&
+      GroundWith(f, Uniqueness::MostlyClobbered)) {
     return "mdi";
   }
-  if (any(i) && any(f)) {
+  if (SharedAny(i) && SharedAny(f)) {
     return "ia";
   }
-  if (free && any(f)) {
+  if (free && SharedAny(f)) {
     return "oa";
   }
   if (free && f.kind == InstKind::Free) {
