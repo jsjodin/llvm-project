@@ -430,6 +430,26 @@ private:
   static constexpr auto functor_{construct<BoundFunctor>(appliedName(inst))};
 };
 
+// The function symbols of F1 ; F2 ; ..., in order. Each is converted, and
+// reports its errors, even after one fails; false if any did.
+static bool CollectBoundFunctors(const Term &term, ConvertState &state,
+    llvm::SmallVectorImpl<const BoundFunctor *> &functors) {
+  if (const CompoundTerm * semicolon{AsCompound(term, ";", 2)}) {
+    bool ok{true};
+    for (const Term *side : semicolon->arguments()) {
+      if (!CollectBoundFunctors(*side, state, functors)) {
+        ok = false;
+      }
+    }
+    return ok;
+  }
+  if (auto functor{Apply(BoundFunctorRule{}, term, state)}) {
+    functors.push_back(*functor);
+    return true;
+  }
+  return false;
+}
+
 // bound(F1 ; F2 ; ...), and unique(...), bound_unique(...) and
 // mostly_unique(...) (reference manual, "Destructive update"; mmc also has
 // mostly_unique(...)).
@@ -443,19 +463,8 @@ public:
   std::optional<resultType> Convert(
       const Term &t, ConvertState &state) const {
     llvm::SmallVector<const BoundFunctor *, 8> functors;
-    bool ok{true};
-    auto collect{[&](const Term &term, auto &self) -> void {
-      if (const CompoundTerm * semicolon{AsCompound(term, ";", 2)}) {
-        for (const Term *side : semicolon->arguments()) {
-          self(*side, self);
-        }
-      } else if (auto functor{Apply(BoundFunctorRule{}, term, state)}) {
-        functors.push_back(*functor);
-      } else {
-        ok = false;
-      }
-    }};
-    collect(*llvm::cast<CompoundTerm>(t).arguments()[0], collect);
+    bool ok{CollectBoundFunctors(
+        *llvm::cast<CompoundTerm>(t).arguments()[0], state, functors)};
     if (!ok) {
       return std::nullopt;
     }
@@ -553,17 +562,20 @@ struct DeclarationLayers {
   const Term *body{nullptr}; // the argument of pred, func or mode
 };
 
+// Name(Into, T) becomes T, with Into its first argument.
+static void PeelLayer(const Term *&t, llvm::StringRef name, std::size_t arity,
+    const Term *&into) {
+  if (const CompoundTerm * c{AsCompound(*t, name, arity)}) {
+    into = c->arguments()[0];
+    t = c->arguments()[arity - 1];
+  }
+}
+
 static std::optional<DeclarationLayers> PeelDeclaration(const Term &term) {
   DeclarationLayers layers;
   const Term *t{&term};
-  auto peel{[&](llvm::StringRef name, std::size_t arity, const Term *&into) {
-    if (const CompoundTerm * c{AsCompound(*t, name, arity)}) {
-      into = c->arguments()[0];
-      t = c->arguments()[arity - 1];
-    }
-  }};
-  peel("all", 2, layers.universalVars);
-  peel("some", 2, layers.existentialVars);
+  PeelLayer(t, "all", 2, layers.universalVars);
+  PeelLayer(t, "some", 2, layers.existentialVars);
   if (const CompoundTerm * c{AsCompound(*t, "<=", 2)}) {
     layers.universalConstraints = c->arguments()[1];
     t = c->arguments()[0];
@@ -610,21 +622,25 @@ struct DeclarationBody {
   const Term *determinism{nullptr};
 };
 
+// Head Name Into becomes Head, if the operator is Name.
+static bool PeelOperator(
+    const Term *&head, llvm::StringRef name, const Term *&into) {
+  if (auto operands{BinaryOperands(*head, name)}) {
+    std::tie(head, into) = *operands;
+    return true;
+  }
+  return false;
+}
+
 static DeclarationBody SplitBody(const Term &body, bool isFunction) {
   DeclarationBody parts{&body};
-  auto peel{[&](llvm::StringRef name, const Term *&into) {
-    if (auto operands{BinaryOperands(*parts.head, name)}) {
-      std::tie(parts.head, into) = *operands;
-      return true;
-    }
-    return false;
-  }};
-  peel("is", parts.determinism);
-  peel("with_inst", parts.withInst);
+  PeelOperator(parts.head, "is", parts.determinism);
+  PeelOperator(parts.head, "with_inst", parts.withInst);
   // The : Type form is the older spelling of `with_type`.
-  peel("with_type", parts.withType) || peel(":", parts.withType);
+  PeelOperator(parts.head, "with_type", parts.withType) ||
+      PeelOperator(parts.head, ":", parts.withType);
   if (isFunction) {
-    peel("=", parts.result);
+    PeelOperator(parts.head, "=", parts.result);
   }
   return parts;
 }
@@ -882,17 +898,14 @@ public:
     const SymName *name{nullptr};
     llvm::ArrayRef<const Term *> argumentTerms;
     const Term *cons[2]; // the head and tail of [H | T]
-    auto builtinName{[&](llvm::StringRef text) {
-      return MakeBracketSymName(*t, text, state);
-    }};
     if (const auto *tuple{llvm::dyn_cast<TupleTerm>(t)}) {
-      name = builtinName("{}");
+      name = MakeBracketSymName(*t, "{}", state);
       argumentTerms = tuple->elements();
     } else if (const auto *list{llvm::dyn_cast<ListTerm>(t)};
         list && list->elements().empty() && !list->tail()) {
-      name = builtinName("[]");
+      name = MakeBracketSymName(*t, "[]", state);
     } else if (list && list->elements().size() == 1 && list->tail()) {
-      name = builtinName("[|]");
+      name = MakeBracketSymName(*t, "[|]", state);
       cons[0] = list->elements()[0];
       cons[1] = list->tail();
       argumentTerms = cons;
@@ -1086,19 +1099,7 @@ private:
   static std::optional<Inst> ConvertFunctors(
       const Term &t, ConvertState &state) {
     llvm::SmallVector<const BoundFunctor *, 8> functors;
-    bool ok{true};
-    auto collect{[&](const Term &term, auto &self) -> void {
-      if (const CompoundTerm * semicolon{AsCompound(term, ";", 2)}) {
-        for (const Term *side : semicolon->arguments()) {
-          self(*side, self);
-        }
-      } else if (auto functor{Apply(BoundFunctorRule{}, term, state)}) {
-        functors.push_back(*functor);
-      } else {
-        ok = false;
-      }
-    }};
-    collect(t, collect);
+    bool ok{CollectBoundFunctors(t, state, functors)};
     if (!ok) {
       return std::nullopt;
     }

@@ -59,7 +59,8 @@ a constant, ahead of a size it does not depend on.
 | `Semantics/desugar.cpp` | 8 | Done, in 2 stages: unifications, implications and clause heads, then try, atomic and loop goals |
 | `Semantics/resolve-names.cpp` | 8 | Done, in 2 stages: declaring names, then looking them up and resolving goals |
 | `Semantics/types.cpp` | 6 | Done: the walks over a type, and printing a type's arguments |
-| The other 15 files in `lib/` and `runtime/` | 35 | Not started; the largest is `convert.cpp` (5) |
+| `Parser/convert.cpp` | 5 | Done: a bound inst's functors, a declaration's layers and operators, and a constructor's built-in name |
+| The other 14 files in `lib/` and `runtime/` | 30 | Not started; the largest are `unparse-canonical.cpp` and `convert-pragmas.cpp` (4 each) |
 
 The unit tests' few are left unless they turn out to get in the way.
 
