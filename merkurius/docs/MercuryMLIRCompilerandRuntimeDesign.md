@@ -1543,6 +1543,20 @@ for_each_device(D, ...) :-
 
 **Open question:** `array2d`, which is flat too, with sections of rows or blocks.
 
+
+**Data regions** (implemented for arrays, 2026-11-04). `%$omp target data map(tofrom: A, B)` before a goal keeps arrays on the device for the goal, so that the target regions in it, even in procedures it calls, find them there: their own maps then copy nothing. A map names a variable, or a state variable `!A`, whose version at the goal is mapped. The map types are `tofrom`, the default, `to`, `from` and `alloc`.
+
+- **Lowering.** As Flang lowers `!$omp target data`: `omp.target_data` with the arrays' `omp.map.info` entries around the goal, in the procedure, each array mapped as a target region maps it, with bounds over its size word and elements. What the goal binds and is used after it leaves through a word's slot, since a value in the region does not dominate what follows.
+- **Checked by the compiler.** The goal is `det`, since failing would leave the region without unmapping its arrays. A state variable that the goal updates has a map type that copies it back. The goal may do I/O and allocate on the host, unlike a loop's body.
+- **Checked at run time.** The end of the region copies the device's elements to the array that came in, so a state variable leaving as another array, which `array.copy` or `resize` would give, throws a software error, rather than leaving the program with stale elements. It does so without a device too, where nothing is mapped, so that a program does not work only on the host.
+- **The promise.** The host does not use a mapped array's elements in the goal, which the compiler cannot see through calls. Without a device or OpenMP the elements are simply the host's, as the sequential meaning says. For a plain variable, as `map(tofrom: A0)` for a goal that binds `A`, the compiler does not know which output is which, so the run-time check is the state variable's alone.
+- **Not yet.** Scalars, sections, map modifiers, the `if`, `device` and `use_device_*` clauses, and regions in target regions are "not yet implemented".
+
+Rejected:
+
+- **`target enter data` and `target exit data`** as BabelStream's OpenMP model uses. They have no enclosing goal, so they would have to thread through `io`, could be left unbalanced, and give no place to check that an array stays the same.
+- **The output array taken to be the input one**, with no slots: true of a correct program, but it would hide a replaced array, the one error here that gives wrong answers silently.
+
 ### Sendability
 
 Because every send makes a deep copy, almost every type is sendable, including arrays: the receiver gets its own copy. The exceptions are values whose identity matters: the `io` state, `store` and mutable references, and foreign types without a copy hook. Open terms are sendable with copy semantics (Open terms, below). The compiler infers sendability per type, like Rust's `Send`, and rejects a `send` of anything else. Mailbox handles are sendable; they are identifiers, not pointers. Sending to another node adds one exception, closures, unless both nodes run the same binary (Distribution and wire format).

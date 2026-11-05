@@ -17,3 +17,13 @@ INFO: Launching kernel {{.*}}bandwidth.init_{{.*}} in SPMD mode
 INFO: Launching kernel {{.*}}bandwidth.copy_{{.*}} in SPMD mode
 INFO: Launching kernel {{.*}}bandwidth.dot_{{.*}} in SPMD mode
 INFO-NOT: Generic
+
+The arrays stay on the device for the runs: after the region's copies to it, no
+kernel copies any of them, until the region copies them back.
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=32 BANDWIDTH_ARRAY_SIZE=100003 BANDWIDTH_NUM_TIMES=5 %t 2> %t.copies > /dev/null
+RUN: FileCheck %s --check-prefix=COPIES < %t.copies
+COPIES: Copying data from host to device, {{.*}}Name=A, at {{.*}}bandwidth.m:[[REGION:[0-9]+]]:
+COPIES: Copying data from host to device, {{.*}}Name=B, at {{.*}}bandwidth.m:[[REGION]]:
+COPIES: Copying data from host to device, {{.*}}Name=C, at {{.*}}bandwidth.m:[[REGION]]:
+COPIES-NOT: Size=800032
+COPIES: Copying data from device to host, {{.*}}Size=800032, {{.*}}bandwidth.m:[[REGION]]:

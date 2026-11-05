@@ -27,7 +27,10 @@ an array):
 Each kernel is a do loop under `%$omp target teams distribute parallel do`,
 and Dot has `reduction((+) : Sum)`. The arrays are threaded through the
 kernels as unique arrays, updated in place; a kernel reads the others as
-`array_ui`. The program times each kernel with `clock_gettime`, and leaves
+`array_ui`. The runs are under `%$omp target data map(tofrom: A, B, C)`, so
+the arrays are copied to the device once, before the runs, and back once,
+after them, and each kernel's own map finds them there and copies nothing.
+The program times each kernel with `clock_gettime`, and leaves
 out each kernel's first run, as BabelStream does. Its bandwidth is from its
 fastest run, in MB/s (10^6 bytes).
 
@@ -59,25 +62,25 @@ sets `-L` and `LD_LIBRARY_PATH` for them.
 ## Results
 
 On an AMD Ryzen Threadripper PRO 5965WX (24 cores, 48 threads) and an AMD
-Radeon RX 6950 XT (gfx1030), with the default sizes, on 2026-11-03:
+Radeon RX 6950 XT (gfx1030), with the default sizes, on 2026-11-04, each from
+one run of `run.sh`:
 
 | Kernel | Sequential | OpenMP, host (48 threads) | OpenMP, GPU |
 | --- | --- | --- | --- |
-| Copy | 28,480 MB/s | 101,136 MB/s | 10,458 MB/s |
-| Mul | 28,509 MB/s | 99,230 MB/s | 10,456 MB/s |
-| Add | 31,994 MB/s | 109,234 MB/s | 12,759 MB/s |
-| Triad | 30,957 MB/s | 108,234 MB/s | 12,741 MB/s |
-| Dot | 20,610 MB/s | 140,469 MB/s | 22,999 MB/s |
+| Copy | 27,876 MB/s | 99,676 MB/s | 297,358 MB/s |
+| Mul | 27,728 MB/s | 96,123 MB/s | 264,506 MB/s |
+| Add | 31,355 MB/s | 105,249 MB/s | 309,747 MB/s |
+| Triad | 30,239 MB/s | 106,687 MB/s | 324,757 MB/s |
+| Dot | 20,316 MB/s | 127,659 MB/s | 417,102 MB/s |
 
-**The GPU column measures transfers, not the GPU's memory.** Merkurius has
-no `target data` or `target enter data` yet, so each kernel's target region
-maps the arrays it uses, by their modes: the arrays it reads `to` the
-device, and the one it updates `tofrom`. Copy, for example, moves 268 MB to
-the device and 536 MB to and from it, over PCIe, in each run, which is its
-51 ms. BabelStream's OpenMP model keeps the arrays on the device with
-`target enter data` before the runs, so its numbers are the device's memory
-bandwidth. That needs data regions in Merkurius; until then, the GPU
-build checks that the kernels and the reduction are right on the device.
+Three further GPU runs agree: Copy reached 297,000 to 323,000 MB/s, Mul 265,000
+to 280,000, Add 309,000 to 314,000, Triad 323,000 to 326,000 and Dot 412,000 to
+417,000. The card's memory is rated at 512 GB/s. Over a run, the only copies during the kernels are
+Dot's 8-byte `Sum` and each launch's 32 bytes of arguments.
+
+Before `target data`, each kernel mapped its arrays over PCIe in each run, and
+the same GPU measured 10,458 MB/s for Copy and 22,999 MB/s for Dot, which were
+the transfers' speed and not its memory's.
 
 ## Differences from BabelStream
 

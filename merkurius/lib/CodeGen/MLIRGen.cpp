@@ -392,6 +392,9 @@ private:
       ReductionOp, mlir::Type type, mlir::Location);
   // The directive's leaves with their clauses; none after reporting a
   // clause that none of them allows.
+  mlir::Value MapArray(mlir::Value array, mlir::omp::ClauseMapFlags,
+      llvm::StringRef name, mlir::Location);
+  void TargetData(const Body &, const ProcedureBody &, const omp::Leaf &);
   std::optional<omp::ConstructQueue> Decompose(const parser::OmpDirective &,
       parser::CharBlock at, std::optional<llvm::StringRef> counter = {});
   // Reports the leaf's clauses that are not generated yet: all but those
@@ -3730,6 +3733,16 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
     OmpLoop(goal, body);
     return;
   }
+  if (directive.id == llvm::omp::Directive::OMPD_target_data) {
+    std::optional<omp::ConstructQueue> queue{Decompose(directive, at)};
+    if (queue && LeafClauses(queue->front(), at,
+            [](llvm::omp::Directive, llvm::omp::Clause id, bool) {
+              return id == llvm::omp::OMPC_map;
+            })) {
+      TargetData(goal, body, queue->front());
+    }
+    return;
+  }
   if (directive.id != llvm::omp::Directive::OMPD_target) {
     NotYet(at,
         "the " + std::string{parser::EnumToString(directive.id)} +
@@ -3747,6 +3760,219 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
   }
   Target(goal, body, [&](mlir::ValueRange) { Goal(*goal.goals.front(), body); },
       /*combined=*/false, KernelOf(*queue).mode);
+}
+
+// An array is mapped as ClangIR maps a pointer's section, p[0:n]: by its own
+// pointer, with bounds over its size word and its elements, which only the
+// host needs, to copy them.
+mlir::Value MerkGenerator::MapArray(mlir::Value array,
+    mlir::omp::ClauseMapFlags flags, llvm::StringRef name, mlir::Location loc) {
+  auto ptr{mlir::LLVM::LLVMPointerType::get(&context_)};
+  auto i64{builder_.getI64Type()};
+  llvm::SmallVector<mlir::Value, 1> bounds;
+  if (!target_.options().openMPIsTargetDevice) {
+    auto constant{[&](std::int64_t value) {
+      return IntegerConstant(i64, value, loc);
+    }};
+    // Words 0 to the size.
+    mlir::Value upper{merk::ArraySizeOp::create(builder_, loc, i64, array)};
+    mlir::Value extent{
+        mlir::arith::AddIOp::create(builder_, loc, upper, constant(1))};
+    bounds.push_back(mlir::omp::MapBoundsOp::create(builder_, loc,
+        builder_.getType<mlir::omp::MapBoundsType>(), constant(0), upper,
+        extent, /*stride=*/constant(1), /*strideInBytes=*/false,
+        /*startIdx=*/constant(0)));
+  }
+  mlir::Value pointer{
+      mlir::UnrealizedConversionCastOp::create(builder_, loc, ptr, array)
+          .getResult(0)};
+  return mlir::omp::MapInfoOp::create(builder_, loc, ptr, pointer,
+      mlir::TypeAttr::get(i64),
+      builder_.getAttr<mlir::omp::ClauseMapFlagsAttr>(flags),
+      builder_.getAttr<mlir::omp::VariableCaptureKindAttr>(
+          mlir::omp::VariableCaptureKind::ByRef),
+      /*varPtrPtr=*/mlir::Value{}, /*varPtrPtrType=*/mlir::TypeAttr{},
+      /*members=*/mlir::ValueRange{}, /*membersIndex=*/mlir::ArrayAttr{},
+      bounds, /*mapperId=*/mlir::FlatSymbolRefAttr{},
+      builder_.getStringAttr(name), builder_.getBoolAttr(false));
+}
+
+// A structured data region: the arrays it maps stay on the device for its
+// goal, so that the map of a target region in it finds them there and copies
+// nothing. As Flang lowers !$omp target data, omp.target_data holds the goal,
+// and what the goal binds leaves the region through slots.
+//
+// A map names a variable, or a state variable !A, whose current version is
+// mapped. The directive promises that the host does not use a mapped array's
+// elements in the goal, which the compiler cannot see through calls. It does
+// check at run time that !A leaves as the array that came in: at the end of
+// the region, the device's elements are copied to that one.
+void MerkGenerator::TargetData(const Body &goal, const ProcedureBody &body,
+    const omp::Leaf &leaf) {
+  using namespace parser::literals;
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  if (builder_.getInsertionBlock()->getParent()
+          ->getParentOfType<mlir::omp::TargetOp>()) {
+    NotYet(at, "target data in target regions");
+    return;
+  }
+  // Failing would leave the region without unmapping its arrays.
+  if (auto it{body.goals.find(goal.goals.front())};
+      it != body.goals.end() && it->second != parser::Determinism::Det &&
+      it->second != parser::Determinism::Erroneous) {
+    Error(at,
+        "the goal of a target data directive must be det, but it is %s"_err_en_US,
+        semantics::DeterminismName(it->second));
+    return;
+  }
+  // The variable of a name: X itself, or the version of !X that has a value.
+  auto isVersion{[&](BodyVar var, llvm::StringRef name) {
+    llvm::StringRef text{body.vars[var].name};
+    unsigned version;
+    return text.consume_front("STATE_VARIABLE_") && text.consume_front(name) &&
+        text.consume_front("_") && !text.getAsInteger(10, version);
+  }};
+  struct Mapped {
+    llvm::StringRef name;
+    BodyVar var;
+    bool state;
+    bool copiedBack;
+  };
+  llvm::SmallVector<Mapped> mapped;
+  llvm::SmallVector<mlir::Value> maps;
+  Values before{values_};
+  for (const parser::OmpClause *clause : leaf.clauses) {
+    const auto *map{std::get_if<const parser::OmpMapClause *>(clause)};
+    if (!map) {
+      continue;
+    }
+    if (!(*map)->modifiers.empty()) {
+      NotYet(at, "map modifiers on the target data directive");
+      return;
+    }
+    mlir::omp::ClauseMapFlags flags{
+        mlir::omp::ClauseMapFlags::to | mlir::omp::ClauseMapFlags::from};
+    switch ((*map)->type.value_or(parser::OmpMapType::Tofrom)) {
+    case parser::OmpMapType::Tofrom:
+      break;
+    case parser::OmpMapType::To:
+      flags = mlir::omp::ClauseMapFlags::to;
+      break;
+    case parser::OmpMapType::From:
+      flags = mlir::omp::ClauseMapFlags::from;
+      break;
+    case parser::OmpMapType::Alloc:
+      flags = mlir::omp::ClauseMapFlags::storage;
+      break;
+    default:
+      NotYet(at, "this map type on the target data directive");
+      return;
+    }
+    for (const parser::OmpMapObject *object : (*map)->objects) {
+      if (object->lower) {
+        NotYet(at, "array sections on the target data directive");
+        return;
+      }
+      llvm::StringRef name{object->variable->name};
+      std::optional<BodyVar> found;
+      bool state{false};
+      for (BodyVar var : goal.nonlocals) {
+        if (!before.lookup(var)) {
+          continue;
+        }
+        if (body.vars[var].name == name) {
+          found = var;
+        } else if (isVersion(var, name)) {
+          found = var;
+          state = true;
+        }
+      }
+      if (!found) {
+        Error(at,
+            "%s is not a variable or state variable that the goal of the target data directive uses"_err_en_US,
+            name);
+        return;
+      }
+      if (llvm::any_of(mapped, [&](const Mapped &m) { return m.var == *found; })) {
+        Error(at, "%s is mapped twice"_err_en_US, name);
+        return;
+      }
+      mlir::Value value{before.lookup(*found)};
+      if (!mlir::isa<merk::ArrayType>(value.getType())) {
+        NotYet(at,
+            "mapping values of type " +
+                semantics::TypeToString(*body.vars[*found].type) +
+                " with the target data directive");
+        return;
+      }
+      maps.push_back(MapArray(value, flags, name, loc));
+      mapped.push_back({name, *found, state,
+          mlir::omp::bitEnumContainsAll(flags, mlir::omp::ClauseMapFlags::from)});
+    }
+  }
+  if (maps.empty()) {
+    Error(at, "a target data directive must have a map clause"_err_en_US);
+    return;
+  }
+  mlir::omp::TargetDataOperands operands;
+  operands.mapVars = maps;
+  auto region{mlir::omp::TargetDataOp::create(builder_, loc, operands)};
+  mlir::Block *block{new mlir::Block};
+  region.getRegion().push_back(block);
+  // What the goal binds and is used after it leaves in a word's slot, since
+  // a value in the region does not dominate what follows it.
+  llvm::SmallVector<std::tuple<BodyVar, mlir::Value, mlir::Type>> outputs;
+  {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.setInsertionPointToStart(block);
+    Goal(*goal.goals.front(), body);
+    if (failed_) {
+      values_ = before;
+      return;
+    }
+    for (BodyVar var : BoundSince(values_, before)) {
+      mlir::Value value{values_.lookup(var)};
+      if (value && llvm::is_contained(goal.nonlocals, var)) {
+        mlir::Value slot{Slot(builder_.getI64Type(), loc)};
+        mlir::LLVM::StoreOp::create(builder_, loc,
+            Coerce(value, builder_.getI64Type(), loc), slot);
+        outputs.emplace_back(var, slot, value.getType());
+      }
+    }
+    mlir::omp::TerminatorOp::create(builder_, loc);
+  }
+  values_ = before;
+  for (auto [var, slot, type] : outputs) {
+    values_[var] = Coerce(mlir::LLVM::LoadOp::create(
+                              builder_, loc, builder_.getI64Type(), slot),
+        type, loc);
+  }
+  // A state variable's array must leave as the array that came in, and the
+  // device's updates of it must come back.
+  for (const Mapped &m : mapped) {
+    if (!m.state) {
+      continue;
+    }
+    for (auto &[var, slot, type] : outputs) {
+      if (!isVersion(var, m.name)) {
+        continue;
+      }
+      if (!m.copiedBack) {
+        Error(at,
+            "the goal of the target data directive updates %s, whose map type does not copy it back; use tofrom or from"_err_en_US,
+            m.name);
+        return;
+      }
+      mlir::Value in{Coerce(before.lookup(m.var), builder_.getI64Type(), loc)};
+      mlir::Value out{Coerce(values_.lookup(var), builder_.getI64Type(), loc)};
+      merk::ThrowIfOp::create(builder_, loc,
+          mlir::arith::CmpIOp::create(builder_, loc,
+              mlir::arith::CmpIPredicate::ne, in, out),
+          "Software Error: target data: the array " + m.name.str() +
+              " was replaced in the region, not updated in place");
+    }
+  }
 }
 
 void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
@@ -3894,41 +4120,6 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
         /*bounds=*/mlir::ValueRange{}, /*mapperId=*/mlir::FlatSymbolRefAttr{},
         builder_.getStringAttr(name), builder_.getBoolAttr(false));
   }};
-  // An array is mapped as ClangIR maps a pointer's section, p[0:n]: by its
-  // own pointer, with bounds over its size word and its elements, which
-  // only the host needs, to copy them; it is copied back if the region
-  // updates it.
-  auto mapArray{[&](mlir::Value array, bool update, llvm::StringRef name) {
-    auto i64{builder_.getI64Type()};
-    llvm::SmallVector<mlir::Value, 1> bounds;
-    if (!target_.options().openMPIsTargetDevice) {
-      auto constant{[&](std::int64_t value) {
-        return IntegerConstant(i64, value, loc);
-      }};
-      // Words 0 to the size.
-      mlir::Value upper{merk::ArraySizeOp::create(builder_, loc, i64, array)};
-      mlir::Value extent{
-          mlir::arith::AddIOp::create(builder_, loc, upper, constant(1))};
-      bounds.push_back(mlir::omp::MapBoundsOp::create(builder_, loc,
-          builder_.getType<mlir::omp::MapBoundsType>(), constant(0), upper,
-          extent, /*stride=*/constant(1), /*strideInBytes=*/false,
-          /*startIdx=*/constant(0)));
-    }
-    mlir::Value pointer{
-        mlir::UnrealizedConversionCastOp::create(builder_, loc, ptr, array)
-            .getResult(0)};
-    return mlir::omp::MapInfoOp::create(builder_, loc, ptr, pointer,
-        mlir::TypeAttr::get(i64),
-        builder_.getAttr<mlir::omp::ClauseMapFlagsAttr>(update
-                ? mlir::omp::ClauseMapFlags::to | mlir::omp::ClauseMapFlags::from
-                : mlir::omp::ClauseMapFlags::to),
-        builder_.getAttr<mlir::omp::VariableCaptureKindAttr>(
-            mlir::omp::VariableCaptureKind::ByRef),
-        /*varPtrPtr=*/mlir::Value{}, /*varPtrPtrType=*/mlir::TypeAttr{},
-        /*members=*/mlir::ValueRange{}, /*membersIndex=*/mlir::ArrayAttr{},
-        bounds, /*mapperId=*/mlir::FlatSymbolRefAttr{},
-        builder_.getStringAttr(name), builder_.getBoolAttr(false));
-  }};
   llvm::SmallVector<mlir::Value> maps;
   for (mlir::Value input : inputs) {
     if (const UpdatedSlot *u{updatedSlot(input)}; u != slots.end()) {
@@ -3940,7 +4131,11 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
     std::optional<BodyVar> var{varOf(input)};
     llvm::StringRef name{var ? llvm::StringRef{body.vars[*var].name} : ""};
     if (mlir::isa<merk::ArrayType>(input.getType())) {
-      maps.push_back(mapArray(input, mappedBack.contains(input), name));
+      maps.push_back(MapArray(input,
+          mappedBack.contains(input)
+              ? mlir::omp::ClauseMapFlags::to | mlir::omp::ClauseMapFlags::from
+              : mlir::omp::ClauseMapFlags::to,
+          name, loc));
       continue;
     }
     mlir::Value slot{Slot(input.getType(), loc)};
