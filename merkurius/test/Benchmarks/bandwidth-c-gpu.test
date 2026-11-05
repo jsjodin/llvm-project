@@ -1,0 +1,14 @@
+The C version of the memory bandwidth benchmark, which compare-c.sh runs against
+bandwidth.m, on small arrays: its values are right and it prints its table.
+REQUIRES: amdgpu-gpu
+
+RUN: clang -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/bandwidth/bandwidth.c -lm -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY BANDWIDTH_ARRAY_SIZE=100003 BANDWIDTH_NUM_TIMES=5 %t | FileCheck %s
+CHECK: Running kernels 5 times
+CHECK-NOT: Validation failed
+CHECK: Function    MBytes/sec  Min (sec)   Max         Average
+CHECK-NEXT: Copy
+CHECK-NEXT: Mul
+CHECK-NEXT: Add
+CHECK-NEXT: Triad
+CHECK-NEXT: Dot
