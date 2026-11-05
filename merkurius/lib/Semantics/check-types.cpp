@@ -253,6 +253,7 @@ private:
       std::vector<const Symbol *> &path,
       llvm::DenseSet<const Symbol *> &visited);
   void CheckInstances();
+  void ComputeSuperclasses(const ModuleSymbols &);
   const Type *ShiftVars(const Type *, unsigned by);
 
   // Subtypes (reference manual, "Subtypes"). The supertype of a subtype,
@@ -379,6 +380,7 @@ private:
       llvm::SmallVectorImpl<const Type *> &bindings) const;
   std::string ConstraintText(const ClassConstraint &,
       llvm::function_ref<std::string(unsigned)> name);
+  std::string ClauseVarName(unsigned var) const;
 
   // Clauses. A clause is checked against its predicate's or function's
   // signature, declared or inferred, unless it is being inferred, when its
@@ -389,6 +391,7 @@ private:
   ClauseTypes CheckClause(const ClauseForm &, bool inferring,
       const MethodDefinition *method = nullptr);
   void CheckGoal(const Goal &);
+  void CheckGoals(llvm::ArrayRef<Goal>);
   void CheckUnify(const Unify &);
   void CheckFunctor(const Unify &, const parser::SymName &);
   void CheckCall(const Call &);
@@ -402,6 +405,15 @@ private:
   using Undeclared =
       llvm::MapVector<const Symbol *, std::vector<const ClauseForm *>>;
   void Infer(const Undeclared &);
+  // Tarjan's algorithm's state.
+  struct ComponentSearch {
+    llvm::DenseMap<const Symbol *, unsigned> index, low;
+    llvm::DenseSet<const Symbol *> onStack;
+    std::vector<const Symbol *> stack;
+    std::vector<std::vector<const Symbol *>> components;
+  };
+  void VisitForComponents(
+      const Symbol &, const Undeclared &, ComponentSearch &) const;
   // The signature that one pass of inference gives `symbol`'s clauses.
   // A pass's signature for a predicate or function, and whether its
   // clauses fit more than one, none of them more general than the others.
@@ -413,6 +425,8 @@ private:
   const Type *Generalization(const Type *, const Type *,
       std::map<std::pair<const Type *, const Type *>, unsigned> &);
   Signature General(const Symbol &, unsigned arity);
+  const Type *ReplaceExistential(
+      const Type *, const llvm::DenseMap<const Type *, unsigned> &existentials);
   // `given` are constraints the calls give on existential types.
   Signature Generalize(const Symbol &, const Assignment &,
       llvm::ArrayRef<const Type *>, llvm::ArrayRef<ClassConstraint> = {},
@@ -425,6 +439,8 @@ private:
   bool Reduce(const ClassConstraint &, std::vector<ClassConstraint> &);
   void ForEachReference(
       const Goal &, llvm::function_ref<void(const Symbol &)>) const;
+  void ForEachReferenceInGoals(
+      llvm::ArrayRef<Goal>, llvm::function_ref<void(const Symbol &)>) const;
 
   // Extends every assignment by each of `options`, as a goal does: each
   // option changes an assignment's copy, and returns whether it is valid.
@@ -1475,10 +1491,6 @@ llvm::ArrayRef<ClassConstraint> TypeChecker::Superclasses(
   return saved;
 }
 
-// The rules of the reference manual's "Typeclass declarations", "Abstract
-// typeclass declarations" and "Type class constraints on type class
-// declarations"; the parser checks that the parameters are distinct
-// variables.
 // Whether a superclass of `from`, directly or not, is `target`, with the way
 // there added to `path`.
 bool TypeChecker::ReachesClass(const Symbol &from, const Symbol *target,
@@ -1499,6 +1511,10 @@ bool TypeChecker::ReachesClass(const Symbol &from, const Symbol *target,
   return false;
 }
 
+// The rules of the reference manual's "Typeclass declarations", "Abstract
+// typeclass declarations" and "Type class constraints on type class
+// declarations"; the parser checks that the parameters are distinct
+// variables.
 void TypeChecker::CheckTypeclasses() {
   llvm::MapVector<const Symbol *, llvm::SmallVector<const TypeclassItem *, 2>>
       bySymbol;
@@ -1575,10 +1591,6 @@ void TypeChecker::CheckTypeclasses() {
   }
 }
 
-// The rules of the reference manual's "Instance declarations", "Abstract
-// instance declarations" and "Type class constraints on instance
-// declarations". Whether the instance's superclass constraints are
-// satisfied is checked with the constraints of clauses.
 // One more than the greatest type variable in the types.
 static unsigned CountTypeVars(llvm::ArrayRef<const Type *> types) {
   unsigned count{0};
@@ -1595,6 +1607,10 @@ const Type *TypeChecker::ShiftVars(const Type *type, unsigned by) {
       type, [&](unsigned var) { return types_.Variable(by + var); });
 }
 
+// The rules of the reference manual's "Instance declarations", "Abstract
+// instance declarations" and "Type class constraints on instance
+// declarations". Whether the instance's superclass constraints are
+// satisfied is checked with the constraints of clauses.
 void TypeChecker::CheckInstances() {
   // An instance's type class and its types' constructors, by position: a
   // tuple's arity stands for its constructor. Since each type's arguments
@@ -3196,16 +3212,17 @@ void TypeChecker::CheckLoop(const Loop &loop) {
   CheckGoal(loop.body);
 }
 
+void TypeChecker::CheckGoals(llvm::ArrayRef<Goal> goals) {
+  for (const Goal &goal : goals) {
+    CheckGoal(goal);
+  }
+}
+
 void TypeChecker::CheckGoal(const Goal &goal) {
-  auto each{[&](llvm::ArrayRef<Goal> goals) {
-    for (const Goal &g : goals) {
-      CheckGoal(g);
-    }
-  }};
   common::visit(
       common::visitors{
-          [&](const Conj *conj) { each(conj->goals); },
-          [&](const Disj *disj) { each(disj->goals); },
+          [&](const Conj *conj) { CheckGoals(conj->goals); },
+          [&](const Disj *disj) { CheckGoals(disj->goals); },
           [&](const IfThenElse *ite) {
             CheckGoal(ite->condition);
             CheckGoal(ite->then);
@@ -3379,6 +3396,11 @@ ClauseTypes TypeChecker::CheckClause(const ClauseForm &clause, bool inferring,
   return types;
 }
 
+// How an error names a type variable of the clause being checked.
+std::string TypeChecker::ClauseVarName(unsigned var) const {
+  return var < base_ ? rigidNames_[var].str() : "T_" + std::to_string(var);
+}
+
 ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
     const Symbol *definition, const Signature *sig) {
   // Assignments that chose different declarations for a name are an
@@ -3436,9 +3458,6 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
   if (sig && !ambiguity && !failed_) {
     Assumed assumed{AssumedBy(chosen)};
     llvm::SmallVector<ClassConstraint, 2> reported;
-    auto name{[&](unsigned var) {
-      return var < base_ ? rigidNames_[var].str() : "T_" + std::to_string(var);
-    }};
     for (const auto &[goal, instantiated] : chosen.wanted) {
       ClassConstraint wanted{SubstituteIn(instantiated, [&](unsigned var) {
         return Resolve(chosen, types_.Variable(var));
@@ -3472,14 +3491,16 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
       parser::Message &message{undetermined
               ? messages_->Say(where,
                     "unsatisfied type class constraint %s: nothing determines its type"_err_en_US,
-                    ConstraintText(unsatisfied, name))
+                    ConstraintText(unsatisfied,
+                        [&](unsigned var) { return ClauseVarName(var); }))
               : messages_->Say(where,
                     "unsatisfiable type class constraint %s"_err_en_US,
-                    ConstraintText(unsatisfied, name))};
+                    ConstraintText(unsatisfied,
+                        [&](unsigned var) { return ClauseVarName(var); }))};
       if (!Same(unsatisfied, wanted)) {
-        message.Attach(where,
-            "an instance for %s needs it"_because_en_US,
-            ConstraintText(wanted, name));
+        message.Attach(where, "an instance for %s needs it"_because_en_US,
+            ConstraintText(
+                wanted, [&](unsigned var) { return ClauseVarName(var); }));
       }
     }
   }
@@ -3538,25 +3559,29 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
 // Type inference
 //===----------------------------------------------------------------------===//
 
+void TypeChecker::ForEachReferenceInGoals(llvm::ArrayRef<Goal> goals,
+    llvm::function_ref<void(const Symbol &)> f) const {
+  for (const Goal &goal : goals) {
+    ForEachReference(goal, f);
+  }
+}
+
+static void ForEachCandidate(
+    const parser::SymName *name, llvm::function_ref<void(const Symbol &)> f) {
+  if (name) {
+    for (const Symbol *symbol : name->candidates) {
+      f(*symbol);
+    }
+  }
+}
+
 // Calls `f` on each predicate or function a goal may refer to.
 void TypeChecker::ForEachReference(
     const Goal &goal, llvm::function_ref<void(const Symbol &)> f) const {
-  auto each{[&](llvm::ArrayRef<Goal> goals) {
-    for (const Goal &g : goals) {
-      ForEachReference(g, f);
-    }
-  }};
-  auto names{[&](const parser::SymName *name) {
-    if (name) {
-      for (const Symbol *symbol : name->candidates) {
-        f(*symbol);
-      }
-    }
-  }};
   common::visit(
       common::visitors{
-          [&](const Conj *conj) { each(conj->goals); },
-          [&](const Disj *disj) { each(disj->goals); },
+          [&](const Conj *conj) { ForEachReferenceInGoals(conj->goals, f); },
+          [&](const Disj *disj) { ForEachReferenceInGoals(disj->goals, f); },
           [&](const IfThenElse *ite) {
             ForEachReference(ite->condition, f);
             ForEachReference(ite->then, f);
@@ -3565,7 +3590,7 @@ void TypeChecker::ForEachReference(
           [&](const Not *negation) { ForEachReference(negation->goal, f); },
           [&](const Unify *unify) {
             if (!unify->isVar) {
-              names(resolution_.FunctorName(*unify));
+              ForEachCandidate(resolution_.FunctorName(*unify), f);
               if (unify->functor.lambda) {
                 ForEachReference(unify->functor.lambda->body, f);
               }
@@ -3573,7 +3598,7 @@ void TypeChecker::ForEachReference(
           },
           [&](const Call *call) {
             if (!call->event) {
-              names(call->name);
+              ForEachCandidate(call->name, f);
             }
           },
           [&](const HOCall *) {},
@@ -3613,6 +3638,12 @@ Signature TypeChecker::General(const Symbol &symbol, unsigned arity) {
   return Generalize(symbol, none, arguments);
 }
 
+const Type *TypeChecker::ReplaceExistential(const Type *type,
+    const llvm::DenseMap<const Type *, unsigned> &existentials) {
+  auto it{existentials.find(type)};
+  return it == existentials.end() ? type : types_.Variable(it->second);
+}
+
 // A signature of the types, whose variables are numbered from 0 in the
 // order they occur, and named T1, T2, ..., as mmc's inferred declarations
 // name them. The types that calls give their callees' existential
@@ -3641,12 +3672,9 @@ Signature TypeChecker::Generalize(const Symbol &symbol, const Assignment &a,
       }
     });
   }
-  auto replace{[&](const Type *t) {
-    auto it{existentials.find(t)};
-    return it == existentials.end() ? t : types_.Variable(it->second);
-  }};
   for (const Type *&argument : arguments) {
-    argument = types_.SubstituteExistentials(argument, replace);
+    argument = types_.SubstituteExistentials(argument,
+        [&](const Type *t) { return ReplaceExistential(t, existentials); });
   }
   std::vector<ClassConstraint> existentialConstraints;
   for (const ClassConstraint &constraint : given) {
@@ -3660,7 +3688,8 @@ Signature TypeChecker::Generalize(const Symbol &symbol, const Assignment &a,
     }
     llvm::SmallVector<const Type *, 4> renamed;
     for (const Type *argument : constraint.arguments) {
-      renamed.push_back(types_.SubstituteExistentials(argument, replace));
+      renamed.push_back(types_.SubstituteExistentials(argument,
+          [&](const Type *t) { return ReplaceExistential(t, existentials); }));
     }
     ClassConstraint c{constraint.typeclass,
         result_.arena_.SaveArray(llvm::ArrayRef<const Type *>{renamed})};
@@ -3822,6 +3851,13 @@ const Type *TypeChecker::Generalization(const Type *x, const Type *y,
   }
 }
 
+static bool SameConstraints(const std::vector<ClassConstraint> &x,
+    const std::vector<ClassConstraint> &y) {
+  return x.size() == y.size() && llvm::all_of(llvm::zip(x, y), [](auto pair) {
+    return Same(std::get<0>(pair), std::get<1>(pair));
+  });
+}
+
 TypeChecker::Inferred TypeChecker::InferPass(
     const Symbol &symbol, llvm::ArrayRef<const ClauseForm *> clauses) {
   // A clause's assignments may give its head more than one typing, by
@@ -3842,15 +3878,9 @@ TypeChecker::Inferred TypeChecker::InferPass(
     std::vector<ClassConstraint> constraints;
     std::vector<ClassConstraint> given;
     bool operator==(const Typing &that) const {
-      auto same{[](const std::vector<ClassConstraint> &x,
-                    const std::vector<ClassConstraint> &y) {
-        return x.size() == y.size() &&
-            llvm::all_of(llvm::zip(x, y), [](auto pair) {
-              return Same(std::get<0>(pair), std::get<1>(pair));
-            });
-      }};
-      return head == that.head && same(constraints, that.constraints) &&
-          same(given, that.given);
+      return head == that.head &&
+          SameConstraints(constraints, that.constraints) &&
+          SameConstraints(given, that.given);
     }
   };
   constexpr std::size_t maxCandidates{64};
@@ -3902,14 +3932,14 @@ TypeChecker::Inferred TypeChecker::InferPass(
         Candidate trial{candidate};
         unsigned offset(trial.combined.bindings.size());
         trial.combined.bindings.resize(offset + count);
-        auto rename{[&](unsigned v) { return types_.Variable(offset + v); }};
         bool fits{trial.head.size() == typing.head.size()};
         for (std::size_t j{0}; fits && j < typing.head.size(); ++j) {
-          const Type *renamed{types_.Substitute(typing.head[j], rename)};
+          const Type *renamed{ShiftVars(typing.head[j], offset)};
           fits = UnifyTypes(trial.combined, trial.head[j], renamed);
         }
         for (const ClassConstraint &constraint : typing.constraints) {
-          trial.constraints.push_back(SubstituteIn(constraint, rename));
+          trial.constraints.push_back(SubstituteIn(constraint,
+              [&](unsigned v) { return types_.Variable(offset + v); }));
         }
         trial.given.insert(
             trial.given.end(), typing.given.begin(), typing.given.end());
@@ -3977,45 +4007,46 @@ TypeChecker::Inferred TypeChecker::InferPass(
   return {Generalize(symbol, none, merged), true};
 }
 
+void TypeChecker::VisitForComponents(const Symbol &symbol,
+    const Undeclared &undeclared, ComponentSearch &search) const {
+  unsigned number(search.index.size());
+  search.index[&symbol] = search.low[&symbol] = number;
+  search.stack.push_back(&symbol);
+  search.onStack.insert(&symbol);
+  for (const ClauseForm *clause : undeclared.find(&symbol)->second) {
+    ForEachReference(clause->body, [&](const Symbol &callee) {
+      if (!undeclared.count(&callee)) {
+        return;
+      }
+      if (!search.index.count(&callee)) {
+        VisitForComponents(callee, undeclared, search);
+        search.low[&symbol] =
+            std::min(search.low[&symbol], search.low[&callee]);
+      } else if (search.onStack.count(&callee)) {
+        search.low[&symbol] =
+            std::min(search.low[&symbol], search.index[&callee]);
+      }
+    });
+  }
+  if (search.low[&symbol] == search.index[&symbol]) {
+    std::vector<const Symbol *> &component{search.components.emplace_back()};
+    const Symbol *member;
+    do {
+      member = search.stack.back();
+      search.stack.pop_back();
+      search.onStack.erase(member);
+      component.push_back(member);
+    } while (member != &symbol);
+  }
+}
+
 void TypeChecker::Infer(const Undeclared &undeclared) {
   // The strongly connected components of the undeclared predicates' and
   // functions' call graph, callees first, by Tarjan's algorithm.
-  llvm::DenseMap<const Symbol *, unsigned> index, low;
-  llvm::DenseSet<const Symbol *> onStack;
-  std::vector<const Symbol *> stack;
-  std::vector<std::vector<const Symbol *>> components;
-  std::function<void(const Symbol &)> visit{[&](const Symbol &symbol) {
-    unsigned number(index.size());
-    index[&symbol] = low[&symbol] = number;
-    stack.push_back(&symbol);
-    onStack.insert(&symbol);
-    for (const ClauseForm *clause : undeclared.find(&symbol)->second) {
-      ForEachReference(clause->body, [&](const Symbol &callee) {
-        if (!undeclared.count(&callee)) {
-          return;
-        }
-        if (!index.count(&callee)) {
-          visit(callee);
-          low[&symbol] = std::min(low[&symbol], low[&callee]);
-        } else if (onStack.count(&callee)) {
-          low[&symbol] = std::min(low[&symbol], index[&callee]);
-        }
-      });
-    }
-    if (low[&symbol] == index[&symbol]) {
-      std::vector<const Symbol *> &component{components.emplace_back()};
-      const Symbol *member;
-      do {
-        member = stack.back();
-        stack.pop_back();
-        onStack.erase(member);
-        component.push_back(member);
-      } while (member != &symbol);
-    }
-  }};
+  ComponentSearch search;
   for (const auto &[symbol, clauses] : undeclared) {
-    if (!index.count(symbol)) {
-      visit(*symbol);
+    if (!search.index.count(symbol)) {
+      VisitForComponents(*symbol, undeclared, search);
     }
   }
   // Each component's signatures start most general, and each pass checks
@@ -4023,7 +4054,7 @@ void TypeChecker::Infer(const Undeclared &undeclared) {
   // --type-inference-iteration-limit bounds the passes too). The passes'
   // messages are dropped: the clauses are checked again, by the final
   // signatures, and report their errors then.
-  for (const std::vector<const Symbol *> &component : components) {
+  for (const std::vector<const Symbol *> &component : search.components) {
     for (const Symbol *symbol : component) {
       const ClauseForm &first{*undeclared.find(symbol)->second.front()};
       unsigned arity(first.head.size());
@@ -4091,6 +4122,14 @@ void TypeChecker::Infer(const Undeclared &undeclared) {
       for (const Symbol *symbol : ambiguous) {
         result_.signatures_[symbol] = std::nullopt;
       }
+    }
+  }
+}
+
+void TypeChecker::ComputeSuperclasses(const ModuleSymbols &symbols) {
+  for (const Symbol *symbol : symbols.symbols()) {
+    if (symbol->kind == SymbolKind::Typeclass) {
+      (void)Superclasses(*symbol);
     }
   }
 }
@@ -4163,17 +4202,10 @@ void TypeChecker::Run(const SemanticForm &form) {
   }
   // The places in a typeclass_info depend on how many superclasses its type
   // class has, whether or not a clause needed them.
-  auto superclasses{[&](const ModuleSymbols &symbols) {
-    for (const Symbol *symbol : symbols.symbols()) {
-      if (symbol->kind == SymbolKind::Typeclass) {
-        Superclasses(*symbol);
-      }
-    }
-  }};
-  superclasses(resolution_.module());
+  ComputeSuperclasses(resolution_.module());
   for (const ModuleInterface *interface : resolution_.interfaces()) {
     if (const ModuleSymbols *symbols{resolution_.Module(interface->name)}) {
-      superclasses(*symbols);
+      ComputeSuperclasses(*symbols);
     }
   }
 }
