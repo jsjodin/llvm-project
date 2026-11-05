@@ -55,7 +55,8 @@ a constant, ahead of a size it does not depend on.
 | `Semantics/insts.cpp` | 19 | Done, in 3 stages: `InstContext` and `StandardMode`, then `Instantiate`, `Coerce`, `Normalise` and `Contains`, then the `Now` functions |
 | `Semantics/polymorphism.cpp` | 11 | Done, in 2 stages: `PolymorphismAnalyser`, then the dump, as `PolymorphismDumper` |
 | `Semantics/quantify.cpp` | 11 | Done, in 2 stages: `Collect` and `Capture`, then `Rebuild` |
-| The other 19 files in `lib/` and `runtime/` | 68 | Not started; the largest is `convert-goals.cpp` (11) |
+| `Parser/convert-goals.cpp` | 11 | Stage 1 of 2 done: the fields, lambda expressions, data terms, trace conditions and loop iterators. Next: goals, DCG goals and clauses |
+| The other 18 files in `lib/` and `runtime/` | 57 | Not started; the largest are `resolve-names.cpp` and `desugar.cpp` (8 each) |
 
 The unit tests' few are left unless they turn out to get in the way.
 
