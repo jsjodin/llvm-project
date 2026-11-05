@@ -313,6 +313,15 @@ private:
   bool InstantiatedNow(const Inst *a, const Inst *b, const Type *type);
   const Inst *MergeNow(const Inst *a, const Inst *b, const Type *type);
   const Inst *UnifyNow(const Inst *a, const Inst *b, const Type *type);
+  bool ArgumentsMatch(
+      const BoundAlternative &, const Inst *with, const Type *type);
+  const Inst *GroundIfHigherOrder(const Inst *);
+  bool UnifyAlternative(const BoundAlternative &,
+      llvm::function_ref<const Inst *(std::size_t)> other, const Type *type,
+      std::vector<BoundAlternative> &out,
+      std::vector<std::vector<const Inst *>> &pending);
+  const Inst *FinishBound(Uniqueness, std::vector<BoundAlternative> &,
+      std::vector<std::vector<const Inst *>> &pending);
   const Inst *Bound(Uniqueness, llvm::ArrayRef<BoundAlternative>);
 
   using Key = std::tuple<const Inst *, const Inst *, const Type *>;
