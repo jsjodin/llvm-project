@@ -38,7 +38,7 @@ this changes no generated code.
 
 | File | Named lambdas | State |
 | --- | --- | --- |
-| `CodeGen/MLIRGen.cpp` | 46 | Stage 1 of 5 done: the small standalone ones. Next: the array builtins, the arithmetic builtins, `OmpLoop`, `Target` |
+| `CodeGen/MLIRGen.cpp` | 46 | Stages 1 and 2 of 5 done: the small standalone ones, the array builtins. Next: the arithmetic builtins, `OmpLoop`, `Target` |
 | The other 33 files in `lib/` and `runtime/` | about 226 | Not started; the largest are `check-types.cpp` (36), `check-determinism.cpp` (22), `Lowering.cpp` (19) and `check-modes.cpp` (19) |
 
 The unit tests' few are left unless they turn out to get in the way.
