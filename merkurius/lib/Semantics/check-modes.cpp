@@ -2703,6 +2703,10 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
     break;
   case FunctorKind::Tuple:
     functor.name = "{}";
+    // Or a constructor {}, if that is what the type checker chose.
+    if (symbol) {
+      functor.module = symbol->module;
+    }
     break;
   default:
     if (!symbol) {
