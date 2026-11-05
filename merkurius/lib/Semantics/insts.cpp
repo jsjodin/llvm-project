@@ -13,7 +13,6 @@
 #include "llvm/ADT/StringExtras.h"
 #include <algorithm>
 #include <deque>
-#include <functional>
 
 namespace merkurius::semantics {
 
@@ -1076,6 +1075,18 @@ bool InstOps::Matches(const Inst *a, const Inst *b, const Type *type) {
   return matches;
 }
 
+// Whether each of the alternative's arguments matches `with`.
+bool InstOps::ArgumentsMatch(
+    const BoundAlternative &alternative, const Inst *with, const Type *type) {
+  std::vector<const Type *> types{ArgumentTypes(alternative.functor, type)};
+  for (std::size_t i{0}; i < alternative.arguments.size(); ++i) {
+    if (!Matches(alternative.arguments[i], with, types[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool InstOps::MatchesNow(const Inst *a, const Inst *b, const Type *type) {
   if (a == b) {
     return true;
@@ -1103,15 +1114,6 @@ bool InstOps::MatchesNow(const Inst *a, const Inst *b, const Type *type) {
   if (!copy && !AtLeastAsUnique(a->uniqueness, b->uniqueness)) {
     return false;
   }
-  auto arguments{[&](const BoundAlternative &alternative, const Inst *with) {
-    std::vector<const Type *> types{ArgumentTypes(alternative.functor, type)};
-    for (std::size_t i{0}; i < alternative.arguments.size(); ++i) {
-      if (!Matches(alternative.arguments[i], with, types[i])) {
-        return false;
-      }
-    }
-    return true;
-  }};
   switch (b->kind) {
   case InstKind::Any:
   case InstKind::Ground: {
@@ -1128,7 +1130,7 @@ bool InstOps::MatchesNow(const Inst *a, const Inst *b, const Type *type) {
     const Inst *with{b->kind == InstKind::Any ? insts_.Any(b->uniqueness)
                                               : insts_.Ground(b->uniqueness)};
     return llvm::all_of(a->functors, [&](const BoundAlternative &alternative) {
-      return arguments(alternative, with);
+      return ArgumentsMatch(alternative, with, type);
     });
   }
   case InstKind::Bound: {
@@ -1255,8 +1257,11 @@ bool InstOps::InstantiatedNow(const Inst *a, const Inst *b, const Type *type) {
     if (!Instantiated(ai, bi, type)) {
       return false;
     }
-    auto in{[&](const Inst *p) { return llvm::is_contained(as, p); }};
-    return SubInst(ai, bi, type) ? llvm::all_of(bs, in) : llvm::none_of(bs, in);
+    return SubInst(ai, bi, type)
+        ? llvm::all_of(
+              bs, [&](const Inst *p) { return llvm::is_contained(as, p); })
+        : llvm::none_of(
+              bs, [&](const Inst *p) { return llvm::is_contained(as, p); });
   }
   // A variable never becomes more unique on forward execution.
   if (!AtLeastAsUnique(b->uniqueness, a->uniqueness)) {
@@ -1346,6 +1351,11 @@ const Inst *InstOps::Merge(const Inst *a, const Inst *b, const Type *type) {
   return result;
 }
 
+const Inst *InstOps::GroundIfHigherOrder(const Inst *inst) {
+  return inst->kind == InstKind::HigherOrder ? insts_.Ground(inst->uniqueness)
+                                             : inst;
+}
+
 const Inst *InstOps::MergeNow(const Inst *a, const Inst *b, const Type *type) {
   if (a == b) {
     return a;
@@ -1382,11 +1392,8 @@ const Inst *InstOps::MergeNow(const Inst *a, const Inst *b, const Type *type) {
     return Matches(a, any, type) && Matches(b, any, type) ? any : nullptr;
   }
   // Higher-order insts that differ merge to ground, which both match.
-  auto plain{[&](const Inst *x) {
-    return x->kind == InstKind::HigherOrder ? insts_.Ground(x->uniqueness) : x;
-  }};
   if (a->kind == InstKind::HigherOrder || b->kind == InstKind::HigherOrder) {
-    return Merge(plain(a), plain(b), type);
+    return Merge(GroundIfHigherOrder(a), GroundIfHigherOrder(b), type);
   }
   if (a->kind == InstKind::Ground || b->kind == InstKind::Ground) {
     const Inst *ground{insts_.Ground(u)};
@@ -1454,6 +1461,42 @@ const Inst *InstOps::Unify(const Inst *a, const Inst *b, const Type *type) {
   return result;
 }
 
+// Adds an alternative of a bound inst to `out`, and its arguments to
+// `pending`, with its arguments unified with those of the other side; one with
+// a not_reached argument is dropped. False if an argument does not unify.
+bool InstOps::UnifyAlternative(const BoundAlternative &alternative,
+    llvm::function_ref<const Inst *(std::size_t)> other, const Type *type,
+    std::vector<BoundAlternative> &out,
+    std::vector<std::vector<const Inst *>> &pending) {
+  std::vector<const Type *> types{ArgumentTypes(alternative.functor, type)};
+  std::vector<const Inst *> arguments;
+  for (std::size_t i{0}; i < alternative.arguments.size(); ++i) {
+    const Inst *argument{Unify(alternative.arguments[i], other(i), types[i])};
+    if (!argument) {
+      return false;
+    }
+    if (IsNotReached(argument)) {
+      return true;
+    }
+    arguments.push_back(argument);
+  }
+  pending.push_back(std::move(arguments));
+  out.push_back({alternative.functor, {}});
+  return true;
+}
+
+// The bound inst of the alternatives, each with its arguments in `pending`.
+const Inst *InstOps::FinishBound(Uniqueness u,
+    std::vector<BoundAlternative> &alternatives,
+    std::vector<std::vector<const Inst *>> &pending) {
+  std::deque<std::vector<const Inst *>> storage;
+  for (std::size_t i{0}; i < alternatives.size(); ++i) {
+    storage.push_back(std::move(pending[i]));
+    alternatives[i].arguments = storage.back();
+  }
+  return Bound(u, alternatives);
+}
+
 const Inst *InstOps::UnifyNow(const Inst *a, const Inst *b, const Type *type) {
   if (a == b) {
     return a;
@@ -1503,39 +1546,8 @@ const Inst *InstOps::UnifyNow(const Inst *a, const Inst *b, const Type *type) {
   if (a->kind != InstKind::Bound && b->kind != InstKind::Bound) {
     return insts_.Ground(u); // ground with ground or any
   }
-  // Each alternative of a bound inst, with its arguments unified with
-  // those of the other side; one with a not_reached argument is dropped.
-  auto unifyAlternative{[&](const BoundAlternative &alternative,
-                            llvm::function_ref<const Inst *(std::size_t)> other,
-                            std::vector<BoundAlternative> &out,
-                            std::vector<std::vector<const Inst *>> &storage)
-                            -> bool {
-    std::vector<const Type *> types{ArgumentTypes(alternative.functor, type)};
-    std::vector<const Inst *> arguments;
-    for (std::size_t i{0}; i < alternative.arguments.size(); ++i) {
-      const Inst *argument{Unify(alternative.arguments[i], other(i), types[i])};
-      if (!argument) {
-        return false;
-      }
-      if (IsNotReached(argument)) {
-        return true;
-      }
-      arguments.push_back(argument);
-    }
-    storage.push_back(std::move(arguments));
-    out.push_back({alternative.functor, {}});
-    return true;
-  }};
   std::vector<BoundAlternative> alternatives;
-  std::deque<std::vector<const Inst *>> storage;
   std::vector<std::vector<const Inst *>> pending;
-  auto finish{[&] {
-    for (std::size_t i{0}; i < alternatives.size(); ++i) {
-      storage.push_back(std::move(pending[i]));
-      alternatives[i].arguments = storage.back();
-    }
-    return Bound(u, alternatives);
-  }};
   if (a->kind != InstKind::Bound || b->kind != InstKind::Bound) {
     const Inst *bound{a->kind == InstKind::Bound ? a : b};
     const Inst *other{bound == a ? b : a};
@@ -1543,26 +1555,26 @@ const Inst *InstOps::UnifyNow(const Inst *a, const Inst *b, const Type *type) {
     const Inst *with{other->kind == InstKind::Any ? insts_.Any(u)
                                                   : insts_.Ground(u)};
     for (const BoundAlternative &alternative : bound->functors) {
-      if (!unifyAlternative(
-              alternative, [&](std::size_t) { return with; }, alternatives,
-              pending)) {
+      if (!UnifyAlternative(
+              alternative, [&](std::size_t) { return with; }, type,
+              alternatives, pending)) {
         return nullptr;
       }
     }
-    return finish();
+    return FinishBound(u, alternatives, pending);
   }
   for (const BoundAlternative &alternative : a->functors) {
     const BoundAlternative *other{Find(b->functors, alternative.functor)};
     if (!other) {
       continue;
     }
-    if (!unifyAlternative(
+    if (!UnifyAlternative(
             alternative, [&](std::size_t i) { return other->arguments[i]; },
-            alternatives, pending)) {
+            type, alternatives, pending)) {
       return nullptr;
     }
   }
-  return finish();
+  return FinishBound(u, alternatives, pending);
 }
 
 std::optional<llvm::StringRef> WrongBuiltinInstArity(
