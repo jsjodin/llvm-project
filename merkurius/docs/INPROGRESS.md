@@ -53,7 +53,7 @@ a constant, ahead of a size it does not depend on.
 | `Semantics/check-modes.cpp` | 20 | Done, in 3 stages: `ModeChecker`, `ProcedureChecker`, then the dump |
 | `Semantics/check-types.cpp` | 37 | Done, in 4 stages: to `CheckInstances`, to `DefineMethods`, the improvement of constraints, then the goals and inference |
 | `Semantics/insts.cpp` | 19 | Done, in 3 stages: `InstContext` and `StandardMode`, then `Instantiate`, `Coerce`, `Normalise` and `Contains`, then the `Now` functions |
-| `Semantics/polymorphism.cpp` | 11 | Stage 1 of 2 done: `PolymorphismAnalyser`. Next: the dump |
+| `Semantics/polymorphism.cpp` | 11 | Done, in 2 stages: `PolymorphismAnalyser`, then the dump, as `PolymorphismDumper` |
 | The other 20 files in `lib/` and `runtime/` | 79 | Not started; the largest are `convert-goals.cpp` and `quantify.cpp` (11 each) |
 
 The unit tests' few are left unless they turn out to get in the way.
