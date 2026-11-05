@@ -4413,7 +4413,7 @@ mlir::omp::DeclareReductionOp MerkGenerator::DeclareReduction(
         op == ReductionOp::Max ? llvm::APFloat::getLargest(semantics, true)
             : op == ReductionOp::Min
             ? llvm::APFloat::getLargest(semantics, false)
-            : llvm::APFloat{semantics, op == ReductionOp::Multiply ? 1 : 0}};
+            : llvm::APFloat{semantics, op == ReductionOp::Multiply ? 1u : 0u}};
     identity = mlir::arith::ConstantOp::create(
         builder_, loc, type, builder_.getFloatAttr(type, value));
   } else {
