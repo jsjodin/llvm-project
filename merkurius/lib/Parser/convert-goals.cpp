@@ -109,19 +109,21 @@ struct PlainVarRule {
 constexpr auto quantifiedGoalVars{expect(
     "a list of variables", listOf(QuantifiedVarRule{}))};
 
+void CollectFields(
+    const Term &term, llvm::SmallVectorImpl<const Term *> &fields) {
+  if (const CompoundTerm * caret{AsCompound(term, "^", 2)}) {
+    CollectFields(Operand(*caret, 0), fields);
+    CollectFields(Operand(*caret, 1), fields);
+  } else {
+    fields.push_back(&term);
+  }
+}
+
 // The fields of Term ^ Field1 ^ Field2, which nest on the right.
 std::optional<llvm::ArrayRef<const FieldSpec *>> ConvertFields(
     const Term &term, ConvertState &state) {
   llvm::SmallVector<const Term *, 4> fields;
-  auto collect{[&](const Term &t, auto &self) -> void {
-    if (const CompoundTerm * caret{AsCompound(t, "^", 2)}) {
-      self(Operand(*caret, 0), self);
-      self(Operand(*caret, 1), self);
-    } else {
-      fields.push_back(&t);
-    }
-  }};
-  collect(term, collect);
+  CollectFields(term, fields);
   return detail::ConvertElements(
       fieldSpec, llvm::ArrayRef<const Term *>{fields}, state);
 }
@@ -214,18 +216,20 @@ struct LambdaParts {
   bool malformed{false};
 };
 
+// Records a purity around the term, and moves past it.
+void PeelPurity(const Term *&t, LambdaParts &parts) {
+  if (const auto *c{llvm::dyn_cast<CompoundTerm>(t)}; c && Arity(*c) == 1) {
+    if (std::optional<Purity> purity{PurityNamed(FunctorName(*c))}) {
+      parts.purity = *purity;
+      t = &StripParentheses(Operand(*c));
+    }
+  }
+}
+
 std::optional<LambdaParts> MatchLambda(const Term &term) {
   LambdaParts parts;
   const Term *t{&StripParentheses(term)};
-  auto peelPurity{[&]() {
-    if (const auto *c{llvm::dyn_cast<CompoundTerm>(t)}; c && Arity(*c) == 1) {
-      if (std::optional<Purity> purity{PurityNamed(FunctorName(*c))}) {
-        parts.purity = *purity;
-        t = &StripParentheses(Operand(*c));
-      }
-    }
-  }};
-  peelPurity();
+  PeelPurity(t, parts);
   if (const CompoundTerm * rule{AsCompound(*t, ":-", 2)}) {
     parts.body = &Operand(*rule, 1);
     t = &StripParentheses(Operand(*rule, 0));
@@ -234,7 +238,7 @@ std::optional<LambdaParts> MatchLambda(const Term &term) {
     parts.dcg = true;
     t = &StripParentheses(Operand(*dcg, 0));
   }
-  peelPurity();
+  PeelPurity(t, parts);
   bool layered{parts.body != nullptr};
   if (const CompoundTerm * is{AsCompound(*t, "is", 2)}) {
     layered = true;
@@ -319,52 +323,48 @@ std::optional<DataTerm> ConvertLambda(
 
 std::optional<DataTerm> DataTermRule::Convert(
     const Term &t, ConvertState &state) const {
-  auto make{[&](auto *node) -> std::optional<DataTerm> { return node; }};
-  auto elements{[&](llvm::ArrayRef<const Term *> terms) {
-    return detail::ConvertElements(dataTerm, terms, state);
-  }};
   switch (t.kind()) {
   case Term::Kind::Variable: {
     const auto &var{llvm::cast<VariableTerm>(t)};
-    return make(state.arena.Make<Variable>(
-        t.tokens(), state.arena.Save(var.name()), var.number()));
+    return state.arena.Make<Variable>(
+        t.tokens(), state.arena.Save(var.name()), var.number());
   }
   case Term::Kind::Integer:
   case Term::Kind::Float:
   case Term::Kind::String:
     if (auto value{literal.Convert(t, state)}) {
-      return make(*value);
+      return *value;
     }
     return std::nullopt;
   case Term::Kind::ImplementationDefinedLiteral:
-    return make(state.arena.Make<ImplementationLiteral>(t.tokens(),
+    return state.arena.Make<ImplementationLiteral>(t.tokens(),
         state.arena.Save(
-            llvm::cast<ImplementationDefinedLiteralTerm>(t).name())));
+            llvm::cast<ImplementationDefinedLiteralTerm>(t).name()));
   case Term::Kind::List: {
     const auto &list{llvm::cast<ListTerm>(t)};
-    auto items{elements(list.elements())};
+    auto items{detail::ConvertElements(dataTerm, list.elements(), state)};
     std::optional<DataTerm> tail;
     bool ok{ConvertOptional(dataTerm, list.tail(), tail, state)};
     if (!items || !ok) {
       return std::nullopt;
     }
-    return make(state.arena.Make<ListData>(t.tokens(), *items, tail));
+    return state.arena.Make<ListData>(t.tokens(), *items, tail);
   }
   case Term::Kind::Tuple:
-    if (auto items{elements(llvm::cast<TupleTerm>(t).elements())}) {
-      return make(state.arena.Make<TupleData>(t.tokens(), *items));
+    if (auto items{detail::ConvertElements(
+            dataTerm, llvm::cast<TupleTerm>(t).elements(), state)}) {
+      return state.arena.Make<TupleData>(t.tokens(), *items);
     }
     return std::nullopt;
   case Term::Kind::Apply: {
     const auto &apply{llvm::cast<ApplyTerm>(t)};
     std::optional<DataTerm> function{
         Apply(dataTerm, *apply.closure(), state)};
-    auto arguments{elements(apply.arguments())};
+    auto arguments{detail::ConvertElements(dataTerm, apply.arguments(), state)};
     if (!function || !arguments) {
       return std::nullopt;
     }
-    return make(
-        state.arena.Make<ApplyData>(t.tokens(), *function, *arguments));
+    return state.arena.Make<ApplyData>(t.tokens(), *function, *arguments);
   }
   case Term::Kind::Backquote: {
     // X `with_type` T is a type qualification, X `f` Y is f(X, Y), and
@@ -378,22 +378,22 @@ std::optional<DataTerm> DataTermRule::Convert(
       if (!term || !ty) {
         return std::nullopt;
       }
-      return make(state.arena.Make<TypeQualified>(t.tokens(), *term, *ty));
+      return state.arena.Make<TypeQualified>(t.tokens(), *term, *ty);
     }
-    auto arguments{elements(operands)};
+    auto arguments{detail::ConvertElements(
+        dataTerm, llvm::ArrayRef<const Term *>{operands}, state)};
     if (llvm::isa<VariableTerm>(op)) {
       std::optional<DataTerm> function{dataTerm.Convert(op, state)};
       if (!arguments || !function) {
         return std::nullopt;
       }
-      return make(
-          state.arena.Make<ApplyData>(t.tokens(), *function, *arguments));
+      return state.arena.Make<ApplyData>(t.tokens(), *function, *arguments);
     }
     std::optional<const SymName *> name{symName.Convert(op, state)};
     if (!arguments || !name) {
       return std::nullopt;
     }
-    return make(state.arena.Make<FunctorData>(t.tokens(), *name, *arguments));
+    return state.arena.Make<FunctorData>(t.tokens(), *name, *arguments);
   }
   case Term::Kind::Directive:
     return Apply(
@@ -420,8 +420,8 @@ std::optional<DataTerm> DataTermRule::Convert(
     if (!condition || !then || !otherwise) {
       return std::nullopt;
     }
-    return make(state.arena.Make<ConditionalData>(
-        t.tokens(), ite->form, *condition, *then, *otherwise));
+    return state.arena.Make<ConditionalData>(
+        t.tokens(), ite->form, *condition, *then, *otherwise);
   }
   // In a data-term, X -> Y is a constructor, as in mmc.
   if (IsIfThenWithoutElse(t) && !AsCompound(t, "->", 2)) {
@@ -437,7 +437,7 @@ std::optional<DataTerm> DataTermRule::Convert(
     if (!left || !right) {
       return std::nullopt;
     }
-    return make(state.arena.Make<UnifyData>(t.tokens(), *left, *right));
+    return state.arena.Make<UnifyData>(t.tokens(), *left, *right);
   }
   if (const CompoundTerm * assign{AsCompound(t, ":=", 2)}) {
     if (const CompoundTerm * caret{AsCompound(Operand(*assign), "^", 2)}) {
@@ -448,8 +448,7 @@ std::optional<DataTerm> DataTermRule::Convert(
       if (!term || !fields || !value) {
         return std::nullopt;
       }
-      return make(state.arena.Make<FieldUpdate>(
-          t.tokens(), *term, *fields, *value));
+      return state.arena.Make<FieldUpdate>(t.tokens(), *term, *fields, *value);
     }
   }
   if (const CompoundTerm * caret{AsCompound(t, "^", 2)}) {
@@ -458,7 +457,7 @@ std::optional<DataTerm> DataTermRule::Convert(
     if (!term || !fields) {
       return std::nullopt;
     }
-    return make(state.arena.Make<FieldSelection>(t.tokens(), *term, *fields));
+    return state.arena.Make<FieldSelection>(t.tokens(), *term, *fields);
   }
   if (auto operands{BinaryOperands(t, ":")}) {
     std::optional<DataTerm> term{Apply(dataTerm, *operands->first, state)};
@@ -466,18 +465,18 @@ std::optional<DataTerm> DataTermRule::Convert(
     if (!term || !ty) {
       return std::nullopt;
     }
-    return make(state.arena.Make<TypeQualified>(t.tokens(), *term, *ty));
+    return state.arena.Make<TypeQualified>(t.tokens(), *term, *ty);
   }
   if (const CompoundTerm * c{AsCompound(t, "coerce", 1)}) {
     if (std::optional<DataTerm> term{Apply(dataTerm, Operand(*c), state)}) {
-      return make(state.arena.Make<Coerce>(t.tokens(), *term));
+      return state.arena.Make<Coerce>(t.tokens(), *term);
     }
     return std::nullopt;
   }
   // A functor term: a name, or a compound term such as f(X) or X + Y.
   if (auto converted{appliedName(dataTerm).Convert(t, state)}) {
     auto [name, arguments]{*converted};
-    return make(state.arena.Make<FunctorData>(t.tokens(), name, arguments));
+    return state.arena.Make<FunctorData>(t.tokens(), name, arguments);
   }
   return std::nullopt;
 }
@@ -504,6 +503,12 @@ std::optional<const ModedTerm *> ModedTermRule::Convert(
 
 namespace {
 
+const TraceCondition *MakeTraceCondition(const Term &t, ConvertState &state,
+    TraceConditionKind kind, llvm::ArrayRef<const TraceCondition *> operands,
+    std::optional<llvm::StringRef> value) {
+  return state.arena.Make<TraceCondition>(t.tokens(), kind, operands, value);
+}
+
 // A trace goal's compile_time or run_time condition: and, or and not over
 // primitive conditions (reference manual, "Trace goals"). At compile time
 // these are flag("Name"), tracelevel(shallow) or tracelevel(deep), and
@@ -514,13 +519,6 @@ struct TraceConditionRule {
   bool Matches(const Term &) const { return true; }
   std::optional<resultType> Convert(
       const Term &t, ConvertState &state) const {
-    auto make{[&](TraceConditionKind kind,
-                  llvm::ArrayRef<const TraceCondition *> operands,
-                  std::optional<llvm::StringRef> value)
-        -> std::optional<resultType> {
-      return state.arena.Make<TraceCondition>(
-          t.tokens(), kind, operands, value);
-    }};
     std::optional<TraceConditionKind> kind;
     if (AsCompound(t, "and", 2)) {
       kind = TraceConditionKind::And;
@@ -532,7 +530,7 @@ struct TraceConditionRule {
     if (kind) {
       if (auto converted{detail::ConvertElements(
               *this, llvm::cast<CompoundTerm>(t).arguments(), state)}) {
-        return make(*kind, *converted, std::nullopt);
+        return MakeTraceCondition(t, state, *kind, *converted, std::nullopt);
       }
       return std::nullopt;
     }
@@ -552,8 +550,8 @@ struct TraceConditionRule {
     if (name == "flag" || name == "env") {
       // mmc: "compile_time parameter `flag' takes a string as argument".
       if (auto text{Apply(expect("a string", stringLiteral), a, state)}) {
-        return make(name == "flag" ? TraceConditionKind::Flag
-                                   : TraceConditionKind::Env,
+        return MakeTraceCondition(t, state,
+            name == "flag" ? TraceConditionKind::Flag : TraceConditionKind::Env,
             {}, *text);
       }
       return std::nullopt;
@@ -564,7 +562,8 @@ struct TraceConditionRule {
         SayExpected(state, a, "'shallow' or 'deep'");
         return std::nullopt;
       }
-      return make(TraceConditionKind::TraceLevel, {}, value);
+      return MakeTraceCondition(
+          t, state, TraceConditionKind::TraceLevel, {}, value);
     }
     // The manual's grade tests, and rbmm, which mmc also accepts.
     if (!llvm::is_contained({"debug", "ssdebug", "prof", "profdeep", "par",
@@ -576,7 +575,7 @@ struct TraceConditionRule {
           "'trail', 'rbmm', 'llds', 'mlds', 'c', 'csharp' or 'java'");
       return std::nullopt;
     }
-    return make(TraceConditionKind::Grade, {}, value);
+    return MakeTraceCondition(t, state, TraceConditionKind::Grade, {}, value);
   }
   void Expected(llvm::raw_ostream &os) const {
     os << (runTime ? "a run_time condition: env(\"Name\"), with and, or "
@@ -825,14 +824,18 @@ constexpr LoopIteratorForm loopIteratorForms[]{
     {"fromto", LoopIteratorKind::Fromto, 4},
 };
 
+// Reports `text` with the term's source, and gives what a rule returns on
+// failure.
+std::nullopt_t SayAt(
+    ConvertState &state, const Term &at, MessageFixedText text) {
+  state.messages.Say(
+      GetSource(at, state.tokens), text, Excerpt(at, state.tokens));
+  return std::nullopt;
+}
+
 std::optional<const LoopIterator *> ConvertLoopIterator(
     const Term &term, ConvertState &state) {
   const Term &t{StripParentheses(term)};
-  auto say{[&](const Term &at, MessageFixedText text) {
-    state.messages.Say(
-        GetSource(at, state.tokens), text, Excerpt(at, state.tokens));
-    return std::nullopt;
-  }};
   const auto *c{llvm::dyn_cast<CompoundTerm>(&t)};
   const LoopIteratorForm *form{nullptr};
   if (c && c->form() == CompoundForm::Canonical) {
@@ -845,16 +848,16 @@ std::optional<const LoopIterator *> ConvertLoopIterator(
   if (!form) {
     llvm::StringRef name{c ? FunctorName(*c) : llvm::StringRef{}};
     if (name == "param") {
-      return say(t,
+      return SayAt(state, t,
           "'%s': loops have no param iterator; a variable that occurs "
           "outside a loop's body is shared by its iterations"_err_en_US);
     }
     if (name == "foreacharg") {
-      return say(t,
+      return SayAt(state, t,
           "'%s': loops have no foreacharg iterator, since a term's "
           "arguments may have different types"_err_en_US);
     }
-    return say(t,
+    return SayAt(state, t,
         "'%s' is not an iterator: expected for(I, Lo, Hi), "
         "for(I, Lo, Hi, Step), foreach(X, List), count(I, Lo, Hi) or "
         "fromto(First, In, Out, Last)"_err_en_US);
@@ -863,7 +866,7 @@ std::optional<const LoopIterator *> ConvertLoopIterator(
   if (form->kind == LoopIteratorKind::For ||
       form->kind == LoopIteratorKind::Count) {
     if (!llvm::isa<VariableTerm>(StripParentheses(*operands[0]))) {
-      return say(StripParentheses(*operands[0]),
+      return SayAt(state, StripParentheses(*operands[0]),
           "'%s' is not a variable: the first argument of for and count "
           "is the loop's counter"_err_en_US);
     }
@@ -874,7 +877,7 @@ std::optional<const LoopIterator *> ConvertLoopIterator(
     if (!integer || integer->isUnsigned() ||
         integer->size() != IntegerSize::Default ||
         integer->magnitude().isZero()) {
-      return say(step,
+      return SayAt(state, step,
           "'%s' is not a nonzero integer literal: the step of a for "
           "iterator is one, so that its direction is known"_err_en_US);
     }
