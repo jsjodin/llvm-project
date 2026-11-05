@@ -92,6 +92,12 @@ public:
       InstOps &ops)
       : result_{result}, out_{out}, ops_{ops} {}
 
+  // Adds the body of a procedure or a method to `result`, with its switches
+  // detected.
+  static void AddBody(DeterminismChecking &result, InstOps &ops,
+      const Procedure &procedure, const MethodModes *method,
+      llvm::ArrayRef<ClauseModes> clauses);
+
   void Build(const Procedure &procedure, llvm::ArrayRef<ClauseModes> clauses) {
     std::size_t arity{procedure.modes.size()};
     if (clauses.size() == 1) {
@@ -1732,6 +1738,13 @@ private:
     std::vector<const Body *> failing;
   };
 
+  static void CountAll(
+      llvm::ArrayRef<BodyVar> vars, std::map<BodyVar, unsigned> &counts) {
+    for (BodyVar var : vars) {
+      ++counts[var];
+    }
+  }
+
   // The occurrences of each variable in a goal, each goal counted once
   // though a merged case's goal is in several cases.
   void Count(const Body *goal, std::map<BodyVar, unsigned> &counts,
@@ -1739,35 +1752,34 @@ private:
     if (!visited.insert(goal).second) {
       return;
     }
-    auto add{[&](BodyVar var) { ++counts[var]; }};
     // Those of the goals deleted or replaced with fail, until mmc
     // quantifies the body again.
     if (!body_.rechecked && !body_.requantified) {
       for (BodyVar var : Sorted(goal->failed)) {
-        add(var);
+        ++counts[var];
       }
     }
     switch (goal->kind) {
     case BodyKind::Unify:
-      add(goal->left);
+      ++counts[goal->left];
       if (goal->isVar) {
-        add(goal->var);
+        ++counts[goal->var];
       }
-      llvm::for_each(goal->arguments, add);
+      CountAll(goal->arguments, counts);
       if (goal->lambda) {
-        llvm::for_each(goal->lambdaHead, add);
+        CountAll(goal->lambdaHead, counts);
         Count(goal->lambda, counts, visited);
       }
       return;
     case BodyKind::Call:
-      llvm::for_each(goal->arguments, add);
+      CountAll(goal->arguments, counts);
       return;
     case BodyKind::HOCall:
-      add(goal->closure);
-      llvm::for_each(goal->arguments, add);
+      ++counts[goal->closure];
+      CountAll(goal->arguments, counts);
       return;
     case BodyKind::Switch:
-      add(goal->switchVar);
+      ++counts[goal->switchVar];
       for (const SwitchCase &c : goal->cases) {
         Count(c.goal, counts, visited);
       }
@@ -2249,6 +2261,11 @@ private:
                          : succeeds;
   }
 
+  static void AddCause(std::vector<Cause> &causes, const Body *goal,
+      const std::string &context, const std::string &text) {
+    causes.push_back({goal->tokens, context + text});
+  }
+
   // The goals in `goal` that make it fail, or succeed more than `most`
   // times, beyond what is allowed (Henderson, Somogyi and Conway, section
   // 5.3).
@@ -2270,9 +2287,6 @@ private:
     Solutions inner{pruned_.count(goal) || (!many && most != Solutions::Zero)
             ? Solutions::Many
             : most};
-    auto cause{[&](std::string text) {
-      causes.push_back({goal->tokens, context + text});
-    }};
     switch (goal->kind) {
     case BodyKind::Unify:
       // A test of a case's own constant is true in mmc, in the case of a
@@ -2283,22 +2297,27 @@ private:
         return;
       }
       if (goal->unify == UnifyKind::Call) {
-        cause("the call to " + ProcedureToString(*goal->modes->callee) + ' ' +
-            Beyond(fails, many, most));
+        AddCause(causes, goal, context,
+            "the call to " + ProcedureToString(*goal->modes->callee) + ' ' +
+                Beyond(fails, many, most));
       } else if (goal->isVar) {
-        cause("the unification of " + Name(goal->left) + " and " +
-            Name(goal->var) + ' ' + Beyond(fails, many, most));
+        AddCause(causes, goal, context,
+            "the unification of " + Name(goal->left) + " and " +
+                Name(goal->var) + ' ' + Beyond(fails, many, most));
       } else {
-        cause("the unification of " + Name(goal->left) + " and " +
-            FunctorText(goal->functor) + ' ' + Beyond(fails, many, most));
+        AddCause(causes, goal, context,
+            "the unification of " + Name(goal->left) + " and " +
+                FunctorText(goal->functor) + ' ' + Beyond(fails, many, most));
       }
       return;
     case BodyKind::Call:
-      cause("the call to " + ProcedureToString(*goal->modes->callee) + ' ' +
-          Beyond(fails, many, most));
+      AddCause(causes, goal, context,
+          "the call to " + ProcedureToString(*goal->modes->callee) + ' ' +
+              Beyond(fails, many, most));
       return;
     case BodyKind::HOCall:
-      cause(std::string{"the higher-order call "} + Beyond(fails, many, most));
+      AddCause(causes, goal, context,
+          std::string{"the higher-order call "} + Beyond(fails, many, most));
       return;
     case BodyKind::Conj:
       // Not the goals after one whose end mode analysis does not reach, as
@@ -2318,7 +2337,8 @@ private:
         }
       }
       if (many && solutions > 1) {
-        cause("the disjunction has more than one disjunct with solutions");
+        AddCause(causes, goal, context,
+            "the disjunction has more than one disjunct with solutions");
       }
       // A disjunct's failure counts only if the disjunction can fail.
       for (const Body *g : goal->goals) {
@@ -2329,9 +2349,11 @@ private:
     case BodyKind::Switch: {
       if (fails && goal->canFail) {
         std::vector<std::string> missing{Missing(goal)};
-        cause("the switch on " + Name(goal->switchVar) +
-            (missing.empty() ? std::string{" can fail"}
-                             : " does not cover " + llvm::join(missing, ", ")));
+        AddCause(causes, goal, context,
+            "the switch on " + Name(goal->switchVar) +
+                (missing.empty()
+                        ? std::string{" can fail"}
+                        : " does not cover " + llvm::join(missing, ", ")));
       }
       for (const SwitchCase &c : goal->cases) {
         std::string functors{FunctorText(c.functor)};
@@ -2361,11 +2383,11 @@ private:
     }
     case BodyKind::Not:
       if (fails) {
-        cause("the negated goal can succeed");
+        AddCause(causes, goal, context, "the negated goal can succeed");
       }
       // Where no solution is allowed, as mmc puts it.
       if (many) {
-        cause("the negated goal can fail");
+        AddCause(causes, goal, context, "the negated goal can fail");
       }
       return;
     case BodyKind::Scope:
@@ -2628,24 +2650,27 @@ private:
     }
   }
 
+  // Reports a committed choice goal in a context that wants all solutions.
+  void CheckCommitted(const Body *goal, const Context &context,
+      parser::Determinism determinism, const std::string &what) {
+    if (context.first || !IsCommittedChoice(determinism)) {
+      return;
+    }
+    // mmc: "Error: call to predicate `p'/1 with determinism `cc_multi'
+    // occurs in a context which requires all solutions."
+    auto &message{messages_.Say(Where(goal->tokens),
+        "%s with determinism %s is in a context that requires all solutions"_err_en_US,
+        what, DeterminismName(determinism))};
+    std::vector<Cause> causes;
+    for (const Body *g : context.failing) {
+      Diagnose(g, false, Solutions::Many, "", causes);
+    }
+    for (const Cause &c : causes) {
+      message.Attach(Where(c.tokens), "%s"_because_en_US, c.text);
+    }
+  }
+
   bool ContextsIn(const Body *goal, const Context &context) {
-    auto committed{[&](parser::Determinism determinism, std::string what) {
-      if (context.first || !IsCommittedChoice(determinism)) {
-        return;
-      }
-      // mmc: "Error: call to predicate `p'/1 with determinism `cc_multi'
-      // occurs in a context which requires all solutions."
-      auto &message{messages_.Say(Where(goal->tokens),
-          "%s with determinism %s is in a context that requires all solutions"_err_en_US,
-          what, DeterminismName(determinism))};
-      std::vector<Cause> causes;
-      for (const Body *g : context.failing) {
-        Diagnose(g, false, Solutions::Many, "", causes);
-      }
-      for (const Cause &c : causes) {
-        message.Attach(Where(c.tokens), "%s"_because_en_US, c.text);
-      }
-    }};
     switch (goal->kind) {
     case BodyKind::Unify:
       if (goal->lambda) {
@@ -2653,16 +2678,19 @@ private:
         Contexts(goal->lambda, {IsCommittedChoice(declared), {}});
       } else if (goal->unify == UnifyKind::Call) {
         const Procedure &callee{*goal->modes->callee};
-        committed(*Of(callee), "the call to " + ProcedureToString(callee));
+        CheckCommitted(goal, context, *Of(callee),
+            "the call to " + ProcedureToString(callee));
       }
       return false;
     case BodyKind::Call: {
       const Procedure &callee{*goal->modes->callee};
-      committed(*Of(callee), "the call to " + ProcedureToString(callee));
+      CheckCommitted(goal, context, *Of(callee),
+          "the call to " + ProcedureToString(callee));
       return false;
     }
     case BodyKind::HOCall:
-      committed(goal->modes->determinism, "the higher-order call");
+      CheckCommitted(
+          goal, context, goal->modes->determinism, "the higher-order call");
       return false;
     case BodyKind::Conj: {
       bool loose{false};
@@ -2838,43 +2866,50 @@ private:
   std::vector<std::pair<const Body *, Components>> lambdas_;
 };
 
+void BodyBuilder::AddBody(DeterminismChecking &result, InstOps &ops,
+    const Procedure &procedure, const MethodModes *method,
+    llvm::ArrayRef<ClauseModes> clauses) {
+  // A procedure whose modes are not all known, as one declared with an
+  // undefined inst in `with_inst`, has an error already.
+  if (clauses.empty() ||
+      procedure.modes.size() != clauses.front().clause->clause->head.size()) {
+    return;
+  }
+  ProcedureBody &body{result.bodies_.emplace_back()};
+  body.procedure = &procedure;
+  body.method = method;
+  BodyBuilder{result, body, ops}.Build(procedure, clauses);
+  SwitchDetector{result, body, ops}.Run();
+  if (!method) {
+    result.byProcedure_[&procedure] = &body;
+  }
+}
+
+// Analyses a body afresh, which may have been analysed before.
+static void AnalyseBody(const DeterminismChecking &checking,
+    ProcedureBody &body, TypeChecking &types, InstOps &ops,
+    const parser::TokenSequence &tokens, parser::Messages &messages) {
+  body.goals.clear();
+  body.determinism.reset();
+  body.unchecked = DeterminismUnchecked::None;
+  DeterminismAnalyser{checking, body, types, ops, tokens, messages}.Run();
+}
+
 std::unique_ptr<DeterminismChecking> CheckDeterminism(
     const parser::TokenSequence &tokens, TypeChecking &types,
     ModeChecking &modes, parser::Messages &messages, bool analyse) {
   auto result{std::make_unique<DeterminismChecking>()};
-  auto analyseBody{[&](ProcedureBody &body, parser::Messages &messages) {
-    body.goals.clear();
-    body.determinism.reset();
-    body.unchecked = DeterminismUnchecked::None;
-    DeterminismAnalyser{
-        *result, body, types, modes.ops(), tokens, messages}
-        .Run();
-  }};
-  auto add{[&](const Procedure &procedure, const MethodModes *method,
-               llvm::ArrayRef<ClauseModes> clauses) {
-    // A procedure whose modes are not all known, as one declared with an
-    // undefined inst in `with_inst`, has an error already.
-    if (clauses.empty() ||
-        procedure.modes.size() != clauses.front().clause->clause->head.size()) {
-      return;
-    }
-    ProcedureBody &body{result->bodies_.emplace_back()};
-    body.procedure = &procedure;
-    body.method = method;
-    BodyBuilder{*result, body, modes.ops()}.Build(procedure, clauses);
-    SwitchDetector{*result, body, modes.ops()}.Run();
-    if (!method) {
-      result->byProcedure_[&procedure] = &body;
-    }
-  }};
   for (const Procedure &procedure : modes.procedures()) {
-    add(procedure, nullptr, modes.ClausesOf(procedure));
+    BodyBuilder::AddBody(
+        *result, modes.ops(), procedure, nullptr, modes.ClausesOf(procedure));
   }
   for (const Procedure &procedure : modes.inferred()) {
-    add(procedure, nullptr, modes.ClausesOf(procedure));
+    BodyBuilder::AddBody(
+        *result, modes.ops(), procedure, nullptr, modes.ClausesOf(procedure));
   }
   for (const MethodModes &method : modes.methods()) {
-    add(*method.procedure, &method, method.clauses);
+    BodyBuilder::AddBody(
+        *result, modes.ops(), *method.procedure, &method, method.clauses);
   }
   if (!analyse) {
     return result;
@@ -2910,7 +2945,7 @@ std::unique_ptr<DeterminismChecking> CheckDeterminism(
         continue;
       }
       parser::Messages ignored;
-      analyseBody(*body, ignored);
+      AnalyseBody(*result, *body, types, modes.ops(), tokens, ignored);
       if (!body->determinism) {
         result->inferred_.erase(body->procedure);
         changed = true;
@@ -2928,7 +2963,7 @@ std::unique_ptr<DeterminismChecking> CheckDeterminism(
     }
   }
   for (ProcedureBody &body : result->bodies_) {
-    analyseBody(body, messages);
+    AnalyseBody(*result, body, types, modes.ops(), tokens, messages);
   }
   return result;
 }
