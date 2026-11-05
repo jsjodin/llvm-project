@@ -21,6 +21,7 @@
 // RUN: not merkc -fc1 -emit-merk %t/switch-functor.mlir 2>&1 | FileCheck %s --check-prefix=SWITCH-FUNCTOR
 // RUN: not merkc -fc1 -emit-llvm %t/type-def.mlir 2>&1 | FileCheck %s --check-prefix=TYPE-DEF
 // RUN: not merkc -fc1 -emit-llvm %t/functor.mlir 2>&1 | FileCheck %s --check-prefix=FUNCTOR
+// RUN: not merkc -fc1 -emit-merk %t/instance.mlir 2>&1 | FileCheck %s --check-prefix=INSTANCE
 
 //--- outputs.mlir
 // OUTPUTS: outputs.mlir:[[@LINE+3]]:5: error: 'merk.succeed' op has 0 outputs, but its procedure has 1
@@ -204,5 +205,14 @@ module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
     %is = merk.has_functor #merk.functor<"f", 1> %t : !merk.term<"t">
     merk.guard %is
     merk.succeed
+  }
+}
+
+//--- instance.mlir
+// INSTANCE: instance.mlir:[[@LINE+3]]:10: error: 'merk.typeclass_info' op names @nothing, which is no instance
+module {
+  merk.proc @p() -> !merk.typeclass_info attributes {determinism = #merk.determinism<det>} {
+    %d = merk.typeclass_info @nothing
+    merk.succeed %d : !merk.typeclass_info
   }
 }

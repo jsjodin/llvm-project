@@ -292,8 +292,10 @@ program.
    `type_info` arguments, polymorphic procedures on terms and arrays, and
    descriptors with their functor tables, generic `unify` and `compare`, and
    `io.write` and `io.print` as the first walker, declared in `io.m` as
-   polymorphic `foreign_proc`s. Next, in order: typeclass_infos, then
-   existential types. Types with polymorphic recursion, whose instances
+   polymorphic `foreign_proc`s, and typeclass_infos, with direct calls of
+   known instances (design document, Lowering, "Type classes"). Next:
+   existential types. Cloning a polymorphic procedure for a known dictionary
+   (Optimizations, "What polymorphism costs") is in no step yet. Types with polymorphic recursion, whose instances
    have no end, such as `grow(T) ---> stop(T) ; more(T, grow(list(T)))`, are
    "not yet implemented" too.
    Values of an abstract imported type are still "not yet
@@ -309,8 +311,7 @@ program.
    convention and the `merk` and `mrt` operations updated.
 
 Not in chunk 1: disjunctions and nondeterminism (an open question of its
-own), type classes, existential types, `io.write` (it needs D3's
-descriptors but can come after), and the collector.
+own), and the collector.
 
 ## Open types: `closed(T)`
 

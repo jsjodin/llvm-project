@@ -4030,6 +4030,21 @@ void TypeChecker::Run(const SemanticForm &form) {
       }
     }
   }
+  // The places in a typeclass_info depend on how many superclasses its type
+  // class has, whether or not a clause needed them.
+  auto superclasses{[&](const ModuleSymbols &symbols) {
+    for (const Symbol *symbol : symbols.symbols()) {
+      if (symbol->kind == SymbolKind::Typeclass) {
+        Superclasses(*symbol);
+      }
+    }
+  }};
+  superclasses(resolution_.module());
+  for (const ModuleInterface *interface : resolution_.interfaces()) {
+    if (const ModuleSymbols *symbols{resolution_.Module(interface->name)}) {
+      superclasses(*symbols);
+    }
+  }
 }
 
 std::unique_ptr<TypeChecking> CheckTypes(const SemanticForm &form,

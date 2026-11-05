@@ -230,6 +230,14 @@ llvm::LogicalResult CallOp::verifySymbolUses(
   return mlir::success();
 }
 
+llvm::LogicalResult TypeclassInfoOp::verifySymbolUses(
+    mlir::SymbolTableCollection &symbolTable) {
+  if (!symbolTable.lookupNearestSymbolFrom<InstanceOp>(*this, getInstanceAttr())) {
+    return emitOpError("names ") << getInstanceAttr() << ", which is no instance";
+  }
+  return mlir::success();
+}
+
 llvm::LogicalResult EntryOp::verifySymbolUses(
     mlir::SymbolTableCollection &symbolTable) {
   auto proc{symbolTable.lookupNearestSymbolFrom<ProcOp>(*this, getProcAttr())};

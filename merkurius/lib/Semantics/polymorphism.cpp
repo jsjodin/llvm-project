@@ -468,35 +468,36 @@ private:
       Unchecked(PolymorphismUnchecked::Constraints);
       return nullptr;
     }
-    Dictionary dictionary{DictionaryKind::Constant, constraint};
-    if (llvm::any_of(constraint.arguments,
-            [&](const Type *type) { return HasParameters(*type); })) {
-      dictionary.kind = DictionaryKind::Instance;
-      dictionary.instance = proof.head;
-      std::vector<bool> constrained{Constrained(
-          static_cast<unsigned>(proof.bindings.size()),
-          proof.head->constraints)};
-      for (std::size_t var{0}; var < proof.bindings.size(); ++var) {
-        if (!constrained[var]) {
-          dictionary.typeInfos.push_back(proof.bindings[var]
-                  ? Of(proof.bindings[var])
-                  : &result_.nodes_.emplace_back(
-                        TypeInfo{TypeInfoKind::Void}));
-        }
+    // A constant has the same parts as an instance's cell, all constants.
+    Dictionary dictionary{llvm::any_of(constraint.arguments,
+                              [&](const Type *type) {
+                                return HasParameters(*type);
+                              })
+            ? DictionaryKind::Instance
+            : DictionaryKind::Constant,
+        constraint};
+    dictionary.instance = proof.head;
+    std::vector<bool> constrained{Constrained(
+        static_cast<unsigned>(proof.bindings.size()), proof.head->constraints)};
+    for (std::size_t var{0}; var < proof.bindings.size(); ++var) {
+      if (!constrained[var]) {
+        dictionary.typeInfos.push_back(proof.bindings[var]
+                ? Of(proof.bindings[var])
+                : &result_.nodes_.emplace_back(TypeInfo{TypeInfoKind::Void}));
       }
-      for (const ConstraintProof &premise : proof.premises) {
-        const Dictionary *made{Prove(premise)};
-        if (!made) {
-          return nullptr;
-        }
-        dictionary.premises.push_back(made);
-      }
-      if (!Superclasses(dictionary)) {
+    }
+    for (const ConstraintProof &premise : proof.premises) {
+      const Dictionary *made{Prove(premise)};
+      if (!made) {
         return nullptr;
       }
-      for (const Type *type : constraint.arguments) {
-        dictionary.types.push_back(Of(type));
-      }
+      dictionary.premises.push_back(made);
+    }
+    if (!Superclasses(dictionary)) {
+      return nullptr;
+    }
+    for (const Type *type : constraint.arguments) {
+      dictionary.types.push_back(Of(type));
     }
     return &result_.dictionaries_.emplace_back(std::move(dictionary));
   }
@@ -569,35 +570,37 @@ private:
           })) {
         continue;
       }
-      Dictionary dictionary{DictionaryKind::Constant, wanted};
-      if (llvm::any_of(wanted.arguments,
-              [&](const Type *type) { return HasParameters(*type); })) {
-        dictionary.kind = DictionaryKind::Instance;
-        dictionary.instance = &instance;
-        std::vector<bool> constrained{Constrained(
-            static_cast<unsigned>(binding.size()), instance.constraints)};
-        for (std::size_t var{0}; var < binding.size(); ++var) {
-          if (!constrained[var]) {
-            dictionary.typeInfos.push_back(binding[var]
-                    ? Of(binding[var])
-                    : &result_.nodes_.emplace_back(TypeInfo{TypeInfoKind::Void}));
-          }
+      Dictionary dictionary{llvm::any_of(wanted.arguments,
+                                [&](const Type *type) {
+                                  return HasParameters(*type);
+                                })
+              ? DictionaryKind::Instance
+              : DictionaryKind::Constant,
+          wanted};
+      dictionary.instance = &instance;
+      std::vector<bool> constrained{Constrained(
+          static_cast<unsigned>(binding.size()), instance.constraints)};
+      for (std::size_t var{0}; var < binding.size(); ++var) {
+        if (!constrained[var]) {
+          dictionary.typeInfos.push_back(binding[var]
+                  ? Of(binding[var])
+                  : &result_.nodes_.emplace_back(TypeInfo{TypeInfoKind::Void}));
         }
-        bool ok{true};
-        for (const ClassConstraint &premise : instance.constraints) {
-          const Dictionary *proved{Entail(Instantiate(premise, binding))};
-          if (!proved) {
-            ok = false;
-            break;
-          }
-          dictionary.premises.push_back(proved);
-        }
-        if (!ok || !Superclasses(dictionary)) {
+      }
+      bool ok{true};
+      for (const ClassConstraint &premise : instance.constraints) {
+        const Dictionary *proved{Entail(Instantiate(premise, binding))};
+        if (!proved) {
+          ok = false;
           break;
         }
-        for (const Type *type : wanted.arguments) {
-          dictionary.types.push_back(Of(type));
-        }
+        dictionary.premises.push_back(proved);
+      }
+      if (!ok || !Superclasses(dictionary)) {
+        break;
+      }
+      for (const Type *type : wanted.arguments) {
+        dictionary.types.push_back(Of(type));
       }
       made = &result_.dictionaries_.emplace_back(std::move(dictionary));
       break;

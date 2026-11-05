@@ -345,9 +345,35 @@ private:
   // X = Y, or X = c, with both bound: a test.
   void Test(const Body &, mlir::Value, mlir::Value, const semantics::Type *);
   // A call in its procedure's own modes, each output a fresh value.
-  // The number of type_infos a procedure takes, or none with an error if it
-  // has what code generation does not handle yet.
-  std::optional<unsigned> HiddenTypeInfos(const Procedure &, parser::CharBlock);
+  // The type_infos and then the typeclass_infos a procedure takes, or none
+  // with an error if it has what code generation does not handle yet.
+  std::optional<llvm::SmallVector<mlir::Type>> HiddenInputs(
+      const Procedure &, parser::CharBlock);
+  // A typeclass_info, as polymorphism analysis says it is made.
+  mlir::Value DictionaryValue(
+      const semantics::Dictionary &, mlir::Location, parser::CharBlock);
+  // A type class's methods' procedures, in the order of its instances'
+  // method tables.
+  llvm::SmallVector<const Procedure *> MethodSlots(const semantics::Symbol &);
+  // The symbol of an instance's method table, declaring it if it is new.
+  std::string InstanceSymbol(const semantics::InstanceHead &);
+  // A procedure with no body yet, its inputs `hidden` and then its modes' and
+  // types'; none with an error for a type code generation cannot represent.
+  merk::ProcOp NewProc(llvm::StringRef name, parser::CharBlock at,
+      llvm::ArrayRef<mlir::Type> hidden, llvm::ArrayRef<semantics::ArgMode> modes,
+      llvm::ArrayRef<const semantics::Type *> types, merk::Determinism);
+  // An instance method's procedure, which takes the instance's hidden
+  // arguments and then the method's.
+  merk::ProcOp MethodProc(const ProcedureBody &);
+  // The method tables of the module's instances, and the procedures in them,
+  // which take a typeclass_info and the method's arguments as the type class
+  // declares them, and call the instance's method.
+  void GenerateInstances();
+  // The body of an instance's method in this mode, if this module has it.
+  const ProcedureBody *MethodBody(
+      const semantics::InstanceHead &, const Procedure &);
+  void GenerateDispatch(const semantics::InstanceHead &, const Procedure &,
+      const ProcedureBody &, llvm::StringRef name);
   // `freeIsVoid`: a type variable with no type_info is one that nothing
   // determines, which has the type void.
   mlir::Value TypeInfoOfType(const semantics::Type *, mlir::Location,
@@ -479,6 +505,9 @@ private:
   parser::CharBlock equalAt_;
   // The procedure's hidden type_infos, by type variable.
   llvm::DenseMap<unsigned, mlir::Value> typeInfos_;
+  // Its hidden typeclass_infos, by constraint.
+  llvm::DenseMap<unsigned, mlir::Value> dictionaries_;
+  llvm::DenseMap<const semantics::MethodModes *, merk::ProcOp> methodProcs_;
   bool failed_{false};
 };
 
@@ -624,25 +653,90 @@ static std::optional<merk::Determinism> MerkDeterminism(
   }
 }
 
-std::optional<unsigned> MerkGenerator::HiddenTypeInfos(
+// Which type variables of `count` the constraints have: those have their
+// type_infos in the typeclass_infos.
+static llvm::SmallVector<bool> ConstrainedVariables(
+    unsigned count, llvm::ArrayRef<semantics::ClassConstraint> constraints) {
+  llvm::SmallVector<bool> constrained(count, false);
+  for (const semantics::ClassConstraint &constraint : constraints) {
+    for (const semantics::Type *type : constraint.arguments) {
+      semantics::ForEachVariable(*type, [&](unsigned var) {
+        if (var < count) {
+          constrained[var] = true;
+        }
+      });
+    }
+  }
+  return constrained;
+}
+
+std::optional<llvm::SmallVector<mlir::Type>> MerkGenerator::HiddenInputs(
     const Procedure &procedure, parser::CharBlock at) {
+  llvm::SmallVector<mlir::Type> hidden;
   const semantics::Signature *signature{types_.SignatureOf(*procedure.symbol)};
   if (!signature) {
-    return 0;
+    return hidden;
   }
-  // Temporary (chunk 1 step 4, docs/INPROGRESS.md): typeclass_infos and hidden
-  // outputs come after type_infos.
-  if (!signature->constraints.empty() || signature->existentials != 0 ||
+  // Temporary (chunk 1 step 4, docs/INPROGRESS.md): hidden outputs come with
+  // existential types.
+  if (signature->existentials != 0 ||
       !signature->existentialConstraints.empty()) {
-    NotYet(at, "type class constraints and existential types");
+    NotYet(at, "existential types");
     return std::nullopt;
   }
-  llvm::SmallDenseSet<unsigned> variables;
-  for (const semantics::Type *argument : signature->arguments) {
-    semantics::ForEachVariable(
-        *argument, [&](unsigned var) { variables.insert(var); });
+  // As polymorphism analysis: each of the signature's type variables, whether
+  // or not an argument has it, as a loop's predicate's can have one only its
+  // clause's other goals use.
+  for (bool constrained :
+      ConstrainedVariables(signature->typeVars, signature->constraints)) {
+    if (!constrained) {
+      hidden.push_back(merk::TypeInfoType::get(&context_));
+    }
   }
-  return variables.size();
+  hidden.append(signature->constraints.size(),
+      merk::TypeclassInfoType::get(&context_));
+  return hidden;
+}
+
+llvm::SmallVector<const Procedure *> MerkGenerator::MethodSlots(
+    const semantics::Symbol &typeclass) {
+  llvm::SmallVector<const Procedure *> slots;
+  const semantics::ModuleSymbols *symbols{typeclass.module == moduleName_
+          ? &resolution_.module()
+          : resolution_.Module(typeclass.module)};
+  if (!symbols) {
+    return slots;
+  }
+  for (const semantics::Symbol *symbol : symbols->symbols()) {
+    if (symbol->owner == &typeclass) {
+      llvm::ArrayRef<const Procedure *> procedures{modes_.ProceduresOf(*symbol)};
+      slots.append(procedures.begin(), procedures.end());
+    }
+  }
+  return slots;
+}
+
+std::string MerkGenerator::InstanceSymbol(
+    const semantics::InstanceHead &head) {
+  std::string text;
+  llvm::raw_string_ostream os{text};
+  os << "merk.instance." << head.typeclass->module << '.'
+     << head.typeclass->name << '(';
+  llvm::ListSeparator separator{","};
+  for (const semantics::Type *type : head.types) {
+    os << separator
+       << semantics::TypeToString(*type,
+              [](unsigned var) { return "V" + std::to_string(var); });
+  }
+  os << ')';
+  if (!module_.lookupSymbol<merk::InstanceOp>(text)) {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.setInsertionPointToStart(module_.getBody());
+    merk::InstanceOp::create(builder_, builder_.getUnknownLoc(),
+        builder_.getStringAttr(text), /*sym_visibility=*/mlir::StringAttr{},
+        /*methods=*/mlir::ArrayAttr{});
+  }
+  return text;
 }
 
 mlir::Value MerkGenerator::Coerce(
@@ -953,12 +1047,87 @@ mlir::Value MerkGenerator::TypeInfoValue(const semantics::TypeInfo &info,
     }
     return merk::TypeInfoOp::create(builder_, loc, type, *constructor, arguments);
   }
+  case semantics::TypeInfoKind::Dictionary: {
+    mlir::Value dictionary{DictionaryValue(*info.dictionary, loc, at)};
+    if (!dictionary) {
+      return nullptr;
+    }
+    return merk::TypeclassInfoWordOp::create(builder_, loc, type, dictionary,
+        info.index);
+  }
+  case semantics::TypeInfoKind::Argument: {
+    mlir::Value from{TypeInfoValue(*info.arguments.front(), loc, at)};
+    if (!from) {
+      return nullptr;
+    }
+    const semantics::Type *whole{info.arguments.front()->type};
+    // A tuple's cell has the number of its arguments in word 1.
+    unsigned first{whole && whole->kind == semantics::TypeKind::Tuple ? 2u : 1u};
+    return merk::TypeInfoWordOp::create(
+        builder_, loc, type, from, first + info.index - 1);
+  }
   default:
-    // Temporary (chunk 1 step 4, docs/INPROGRESS.md): those in typeclass_infos
-    // and those that goals give.
-    NotYet(at, "type_infos from type classes and existential types");
+    // Temporary (chunk 1 step 4, docs/INPROGRESS.md): those that goals give.
+    NotYet(at, "type_infos from existential types");
     return nullptr;
   }
+}
+
+mlir::Value MerkGenerator::DictionaryValue(const semantics::Dictionary &dictionary,
+    mlir::Location loc, parser::CharBlock at) {
+  auto type{merk::TypeclassInfoType::get(&context_)};
+  if (builder_.getInsertionBlock()
+          ->getParentOp()
+          ->getParentOfType<mlir::omp::TargetOp>() ||
+      mlir::isa<mlir::omp::TargetOp>(
+          builder_.getInsertionBlock()->getParentOp())) {
+    // Temporary (specialization, design document, "What polymorphism costs"):
+    // a device has no run-time dispatch; specialization will remove these.
+    NotYet(at, "type class constraints in target regions");
+    return nullptr;
+  }
+  switch (dictionary.kind) {
+  case semantics::DictionaryKind::Parameter:
+    return dictionaries_.lookup(dictionary.parameter);
+  case semantics::DictionaryKind::Superclass: {
+    mlir::Value from{DictionaryValue(*dictionary.from, loc, at)};
+    if (!from) {
+      return nullptr;
+    }
+    return merk::TypeclassInfoWordOp::create(
+        builder_, loc, type, from, dictionary.index);
+  }
+  case semantics::DictionaryKind::Constant:
+  case semantics::DictionaryKind::Instance: {
+    if (!dictionary.instance) {
+      NotYet(at, "this typeclass_info");
+      return nullptr;
+    }
+    llvm::SmallVector<mlir::Value> arguments;
+    for (const semantics::Dictionary *super : dictionary.supers) {
+      arguments.push_back(DictionaryValue(*super, loc, at));
+    }
+    for (const semantics::TypeInfo *info : dictionary.types) {
+      arguments.push_back(TypeInfoValue(*info, loc, at));
+    }
+    for (const semantics::TypeInfo *info : dictionary.typeInfos) {
+      arguments.push_back(TypeInfoValue(*info, loc, at));
+    }
+    for (const semantics::Dictionary *premise : dictionary.premises) {
+      arguments.push_back(DictionaryValue(*premise, loc, at));
+    }
+    if (llvm::is_contained(arguments, mlir::Value{})) {
+      return nullptr;
+    }
+    return merk::TypeclassInfoOp::create(builder_, loc, type,
+        InstanceSymbol(*dictionary.instance), arguments);
+  }
+  case semantics::DictionaryKind::Output:
+    // Temporary (chunk 1 step 4, docs/INPROGRESS.md): those that goals give.
+    NotYet(at, "typeclass_infos from existential types");
+    return nullptr;
+  }
+  llvm_unreachable("a dictionary's kind");
 }
 
 merk::ProcOp MerkGenerator::ProcFor(const Procedure &procedure,
@@ -980,14 +1149,26 @@ merk::ProcOp MerkGenerator::ProcFor(const Procedure &procedure,
             : std::string{"procedures of unknown determinism"});
     return nullptr;
   }
-  std::optional<unsigned> hidden{HiddenTypeInfos(procedure, at)};
+  std::optional<llvm::SmallVector<mlir::Type>> hidden{
+      HiddenInputs(procedure, at)};
   if (!hidden) {
     return nullptr;
   }
-  llvm::SmallVector<mlir::Type> inputs(
-      *hidden, merk::TypeInfoType::get(&context_));
+  merk::ProcOp proc{NewProc(MangledName(procedure), at, *hidden, procedure.modes,
+      types, *merkDeterminism)};
+  if (proc) {
+    procs_[&procedure] = proc;
+  }
+  return proc;
+}
+
+merk::ProcOp MerkGenerator::NewProc(llvm::StringRef name, parser::CharBlock at,
+    llvm::ArrayRef<mlir::Type> hidden, llvm::ArrayRef<semantics::ArgMode> modes,
+    llvm::ArrayRef<const semantics::Type *> types,
+    merk::Determinism determinism) {
+  llvm::SmallVector<mlir::Type> inputs{hidden};
   llvm::SmallVector<mlir::Type> outputs;
-  for (auto [mode, type] : llvm::zip(procedure.modes, types)) {
+  for (auto [mode, type] : llvm::zip(modes, types)) {
     std::optional<Represented> represented{Represent(type)};
     if (!represented) {
       NotYet(at, "values of type " + semantics::TypeToString(*type));
@@ -999,12 +1180,188 @@ merk::ProcOp MerkGenerator::ProcFor(const Procedure &procedure,
   }
   mlir::OpBuilder::InsertionGuard guard{builder_};
   builder_.setInsertionPointToEnd(module_.getBody());
-  auto proc{merk::ProcOp::create(builder_, Location(procedure.symbol->source),
-      MangledName(procedure), builder_.getFunctionType(inputs, outputs),
-      *merkDeterminism)};
+  auto proc{merk::ProcOp::create(builder_, Location(at), name,
+      builder_.getFunctionType(inputs, outputs), determinism)};
   proc.setPrivate();
-  procs_[&procedure] = proc;
   return proc;
+}
+
+merk::ProcOp MerkGenerator::MethodProc(const ProcedureBody &body) {
+  if (merk::ProcOp proc{methodProcs_.lookup(body.method)}) {
+    return proc;
+  }
+  const Procedure &procedure{*body.procedure};
+  parser::CharBlock at{procedure.symbol->source};
+  std::optional<parser::Determinism> determinism{
+      determinism_.DeterminismOf(procedure)};
+  std::optional<merk::Determinism> merkDeterminism;
+  if (determinism) {
+    merkDeterminism = MerkDeterminism(*determinism);
+  }
+  if (!merkDeterminism) {
+    NotYet(at, "methods of this determinism");
+    return nullptr;
+  }
+  llvm::SmallVector<mlir::Type> hidden;
+  const auto *polymorphism{polymorphism_.lookup(&body)};
+  if (!polymorphism) {
+    NotYet(at, "this method's type_infos");
+    return nullptr;
+  }
+  for (const semantics::HiddenArgument &argument : polymorphism->hidden) {
+    hidden.push_back(argument.typeInfo
+            ? mlir::Type{merk::TypeInfoType::get(&context_)}
+            : mlir::Type{merk::TypeclassInfoType::get(&context_)});
+  }
+  std::string name{MangledName(procedure) + "$" +
+      body.method->method->instanceText};
+  merk::ProcOp proc{NewProc(name, at, hidden, procedure.modes,
+      body.method->method->signature.arguments, *merkDeterminism)};
+  if (proc) {
+    methodProcs_[body.method] = proc;
+  }
+  return proc;
+}
+
+const ProcedureBody *MerkGenerator::MethodBody(
+    const semantics::InstanceHead &head, const Procedure &procedure) {
+  for (const ProcedureBody &body : determinism_.bodies()) {
+    if (body.method && body.procedure == &procedure &&
+        body.method->method->instance == head.item->decl) {
+      return &body;
+    }
+  }
+  return nullptr;
+}
+
+void MerkGenerator::GenerateInstances() {
+  for (const semantics::InstanceHead &head : types_.instances()) {
+    if (!head.item->local || head.item->decl->abstract) {
+      continue;
+    }
+    std::string symbol{InstanceSymbol(head)};
+    llvm::SmallVector<mlir::Attribute> table;
+    for (const Procedure *procedure : MethodSlots(*head.typeclass)) {
+      const ProcedureBody *found{MethodBody(head, *procedure)};
+      parser::CharBlock at{procedure->symbol->source};
+      if (!found) {
+        NotYet(at, "instances without this method's body");
+        continue;
+      }
+      std::string name{MangledName(*procedure) + "$" +
+          found->method->method->instanceText + "$dispatch"};
+      GenerateDispatch(head, *procedure, *found, name);
+      table.push_back(mlir::FlatSymbolRefAttr::get(&context_, name));
+    }
+    // An instance declared in the interface is for other modules. An abstract
+    // declaration has no head of its own, so any of the type class's counts.
+    bool exported{head.item->exported};
+    for (const semantics::InstanceItem &item : resolution_.instances()) {
+      exported = exported || (item.local && item.exported && item.decl->abstract);
+    }
+    auto op{module_.lookupSymbol<merk::InstanceOp>(symbol)};
+    op.setMethodsAttr(builder_.getArrayAttr(table));
+    op.setVisibility(exported ? mlir::SymbolTable::Visibility::Public
+                              : mlir::SymbolTable::Visibility::Private);
+  }
+}
+
+void MerkGenerator::GenerateDispatch(const semantics::InstanceHead &head,
+    const Procedure &procedure, const ProcedureBody &body,
+    llvm::StringRef name) {
+  parser::CharBlock at{procedure.symbol->source};
+  mlir::Location loc{Location(at)};
+  failed_ = false;
+  merk::ProcOp method{MethodProc(body)};
+  const semantics::Signature *declared{types_.SignatureOf(*procedure.symbol)};
+  if (!method || !declared) {
+    return;
+  }
+  // As the type class declares it: the typeclass_info, then the method's own
+  // hidden arguments, which follow the class's constraint.
+  std::optional<llvm::SmallVector<mlir::Type>> hidden{
+      HiddenInputs(procedure, at)};
+  if (!hidden) {
+    return;
+  }
+  llvm::SmallVector<mlir::Type> own;
+  auto dictionaryType{merk::TypeclassInfoType::get(&context_)};
+  own.push_back(dictionaryType);
+  bool skipped{false};
+  for (mlir::Type type : *hidden) {
+    if (!skipped && type == dictionaryType) {
+      skipped = true; // the class's own, which comes first
+      continue;
+    }
+    own.push_back(type);
+  }
+  merk::ProcOp proc{NewProc(name, at, own, procedure.modes, declared->arguments,
+      method.getDeterminism())};
+  if (!proc) {
+    return;
+  }
+  mlir::Block *entry{proc.addEntryBlock()};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToStart(entry);
+  mlir::Value dictionary{entry->getArgument(0)};
+  // The instance's hidden arguments, from the typeclass_info's cell.
+  unsigned word{1 +
+      static_cast<unsigned>(types_.SuperclassesOf(*head.typeclass).size() +
+          head.types.size())};
+  unsigned instanceVars{0};
+  for (const semantics::Type *type : head.types) {
+    semantics::ForEachVariable(*type,
+        [&](unsigned var) { instanceVars = std::max(instanceVars, var + 1); });
+  }
+  llvm::SmallVector<mlir::Value> inputs;
+  for (bool constrained : ConstrainedVariables(instanceVars, head.constraints)) {
+    if (!constrained) {
+      inputs.push_back(merk::TypeclassInfoWordOp::create(builder_, loc,
+          merk::TypeInfoType::get(&context_), dictionary, word++));
+    }
+  }
+  for (std::size_t i{0}; i < head.constraints.size(); ++i) {
+    inputs.push_back(merk::TypeclassInfoWordOp::create(
+        builder_, loc, dictionaryType, dictionary, word++));
+  }
+  unsigned input{1};
+  for (; input < own.size(); ++input) {
+    inputs.push_back(entry->getArgument(input));
+  }
+  // The arguments: a type variable's word where the instance has a type.
+  llvm::ArrayRef<const semantics::Type *> instance{
+      body.method->method->signature.arguments};
+  llvm::SmallVector<std::pair<bool, mlir::Type>> outputs;
+  for (auto [mode, classType, instanceType] :
+      llvm::zip(procedure.modes, declared->arguments, instance)) {
+    Represented asDeclared{*Represent(classType)};
+    Represented asInstance{*Represent(instanceType)};
+    if (asDeclared.dummy) {
+      continue;
+    }
+    if (IsOutput(mode)) {
+      outputs.push_back({asInstance.dummy, asDeclared.type});
+    } else {
+      mlir::Value value{entry->getArgument(input++)};
+      if (!asInstance.dummy) {
+        inputs.push_back(Coerce(value, asInstance.type, loc));
+      }
+    }
+  }
+  auto call{merk::CallOp::create(builder_, loc,
+      method.getFunctionType().getResults(), method.getSymName(), inputs)};
+  llvm::SmallVector<mlir::Value> results;
+  unsigned result{0};
+  for (auto [dummy, type] : outputs) {
+    if (dummy) {
+      results.push_back(merk::ToWordOp::create(builder_, loc,
+          merk::WordType::get(&context_),
+          IntegerConstant(builder_.getI64Type(), 0, loc)));
+    } else {
+      results.push_back(Coerce(call.getResult(result++), type, loc));
+    }
+  }
+  merk::SucceedOp::create(builder_, loc, results);
 }
 
 void MerkGenerator::Call(const Body &goal, const Procedure &callee,
@@ -1047,14 +1404,52 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
   }
   parser::CharBlock at{Where(goal.tokens)};
   mlir::Location loc{Location(goal.tokens)};
-  std::optional<unsigned> hidden{HiddenTypeInfos(callee, at)};
+  std::optional<llvm::SmallVector<mlir::Type>> hidden{HiddenInputs(callee, at)};
   if (!hidden) {
     failed_ = true;
     return;
   }
+  bool isMethod{callee.symbol->owner &&
+      callee.symbol->owner->kind == semantics::SymbolKind::Typeclass};
+  const semantics::PassedInfos *passed{nullptr};
+  if (!hidden->empty()) {
+    const semantics::ProcedurePolymorphism *polymorphism{
+        polymorphism_.lookup(&body)};
+    if (polymorphism) {
+      if (auto it{polymorphism->goals.find(&goal)};
+          it != polymorphism->goals.end()) {
+        passed = &it->second;
+      }
+    }
+    if (!passed ||
+        passed->typeInfos.size() + passed->dictionaries.size() !=
+            hidden->size()) {
+      NotYet(at, "this call's type_infos");
+      return;
+    }
+  }
+  // A method of an instance known here, whose body this module has, is called
+  // directly: no typeclass_info is made, and the values keep their
+  // representations, as a device needs (design document, "What polymorphism
+  // costs").
+  const semantics::Dictionary *known{nullptr};
+  const ProcedureBody *direct{nullptr};
+  if (isMethod) {
+    const semantics::Dictionary *own{passed->dictionaries.front()};
+    if ((own->kind == semantics::DictionaryKind::Constant ||
+            own->kind == semantics::DictionaryKind::Instance) &&
+        own->instance) {
+      known = own;
+      direct = MethodBody(*own->instance, callee);
+    }
+  }
   // A polymorphic callee takes its declared types, whatever the caller's are.
   llvm::SmallVector<const semantics::Type *> types;
-  if (*hidden != 0) {
+  if (direct) {
+    llvm::ArrayRef<const semantics::Type *> declared{
+        direct->method->method->signature.arguments};
+    types.append(declared.begin(), declared.end());
+  } else if (!hidden->empty()) {
     llvm::ArrayRef<const semantics::Type *> declared{
         types_.SignatureOf(*callee.symbol)->arguments};
     types.append(declared.begin(), declared.end());
@@ -1063,33 +1458,56 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
       types.push_back(body.vars[argument].type);
     }
   }
-  merk::ProcOp proc{ProcFor(callee, types, at)};
-  if (!proc) {
-    return;
-  }
-  llvm::SmallVector<mlir::Value> inputs;
-  if (*hidden != 0) {
-    const semantics::ProcedurePolymorphism *polymorphism{
-        polymorphism_.lookup(&body)};
-    const semantics::PassedInfos *passed{nullptr};
-    if (polymorphism) {
-      if (auto it{polymorphism->goals.find(&goal)};
-          it != polymorphism->goals.end()) {
-        passed = &it->second;
-      }
-    }
-    if (!passed || passed->typeInfos.size() != *hidden) {
-      NotYet(at, "this call's type_infos");
+  merk::ProcOp proc;
+  if (direct) {
+    proc = MethodProc(*direct);
+    if (!proc) {
+      failed_ = true;
       return;
     }
-    for (const semantics::TypeInfo *info : passed->typeInfos) {
-      mlir::Value value{TypeInfoValue(*info, loc, at)};
-      if (!value) {
-        failed_ = true;
-        return;
-      }
-      inputs.push_back(value);
+  } else if (!isMethod) {
+    proc = ProcFor(callee, types, at);
+    if (!proc) {
+      return;
     }
+  }
+  llvm::SmallVector<mlir::Value> inputs;
+  mlir::Value dictionary;
+  auto passInfo{[&](const semantics::TypeInfo &info) {
+    mlir::Value value{TypeInfoValue(info, loc, at)};
+    inputs.push_back(value);
+    failed_ = failed_ || !value;
+  }};
+  auto passDictionary{[&](const semantics::Dictionary &given) {
+    mlir::Value value{DictionaryValue(given, loc, at)};
+    inputs.push_back(value);
+    failed_ = failed_ || !value;
+  }};
+  if (direct) {
+    // The instance's hidden arguments come first.
+    for (const semantics::TypeInfo *info : known->typeInfos) {
+      passInfo(*info);
+    }
+    for (const semantics::Dictionary *premise : known->premises) {
+      passDictionary(*premise);
+    }
+  }
+  if (passed) {
+    for (const semantics::TypeInfo *info : passed->typeInfos) {
+      passInfo(*info);
+    }
+    for (auto [i, given] : llvm::enumerate(passed->dictionaries)) {
+      if (!isMethod || i != 0) {
+        passDictionary(*given);
+      } else if (!direct) {
+        // A method's type class's comes first, and chooses the procedure.
+        dictionary = DictionaryValue(*given, loc, at);
+        failed_ = failed_ || !dictionary;
+      }
+    }
+  }
+  if (failed_) {
+    return;
   }
   // None for a value with no bits at a type variable's place, whose word
   // comes back unused.
@@ -1115,9 +1533,34 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
       inputs.push_back(Coerce(ValueOf(argument), Represent(type)->type, loc));
     }
   }
-  auto call{merk::CallOp::create(builder_, loc,
-      proc.getFunctionType().getResults(), proc.getSymName(), inputs)};
-  for (auto [var, result] : llvm::zip(outputs, call.getResults())) {
+  mlir::Operation *call;
+  if (isMethod && !direct) {
+    std::optional<parser::Determinism> determinism{
+        determinism_.DeterminismOf(callee)};
+    std::optional<merk::Determinism> merkDeterminism;
+    if (determinism) {
+      merkDeterminism = MerkDeterminism(*determinism);
+    }
+    if (!merkDeterminism) {
+      NotYet(at, "methods of this determinism");
+      return;
+    }
+    llvm::SmallVector<const Procedure *> slots{
+        MethodSlots(*callee.symbol->owner)};
+    llvm::SmallVector<mlir::Type> resultTypes;
+    for (auto [mode, type] : llvm::zip(callee.modes, types)) {
+      std::optional<Represented> represented{Represent(type)};
+      if (represented && !represented->dummy && IsOutput(mode)) {
+        resultTypes.push_back(represented->type);
+      }
+    }
+    call = merk::CallMethodOp::create(builder_, loc, resultTypes, dictionary,
+        llvm::find(slots, &callee) - slots.begin(), inputs, *merkDeterminism);
+  } else {
+    call = merk::CallOp::create(builder_, loc,
+        proc.getFunctionType().getResults(), proc.getSymName(), inputs);
+  }
+  for (auto [var, result] : llvm::zip(outputs, call->getResults())) {
     if (!var) {
       continue;
     }
@@ -1312,10 +1755,16 @@ void MerkGenerator::GenerateForeign(
   if (!signature) {
     return;
   }
-  std::optional<unsigned> hidden{HiddenTypeInfos(procedure, at)};
-  if (!hidden) {
+  std::optional<llvm::SmallVector<mlir::Type>> hiddenInputs{
+      HiddenInputs(procedure, at)};
+  if (!hiddenInputs) {
     return;
   }
+  if (!signature->constraints.empty()) {
+    NotYet(at, "foreign_procs with type class constraints");
+    return;
+  }
+  std::optional<unsigned> hidden{static_cast<unsigned>(hiddenInputs->size())};
   merk::ProcOp proc{ProcFor(procedure, signature->arguments, at)};
   if (!proc) {
     return;
@@ -3461,9 +3910,26 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
       auto nest{mlir::omp::LoopNestOp::create(builder_, loc, bounds)};
       mlir::Block *iteration{
           builder_.createBlock(&nest.getRegion(), {}, {i64}, {loc})};
-      // The body procedure's inputs: the counter, and the values the loop
-      // procedure was called with for its other arguments.
+      // The body procedure's inputs: its hidden arguments, which are the
+      // procedure's own, for its type variables and constraints have the same
+      // numbers, the counter, and the values the loop procedure was called
+      // with for its other arguments.
       llvm::SmallVector<mlir::Value> inputs;
+      if (const auto *hidden{polymorphism_.lookup(determinism_.BodyOf(bodyProcedure))};
+          hidden && !hidden->hidden.empty()) {
+        // Temporary (specialization, design document, "What polymorphism
+        // costs"): a target region would have to map them.
+        if (offloaded) {
+          NotYet(at, "target regions in polymorphic procedures");
+          return;
+        }
+        for (const semantics::HiddenArgument &argument : hidden->hidden) {
+          inputs.push_back(argument.typeInfo
+                  ? TypeInfoOfType(argument.typeInfo->type, loc, at,
+                        /*freeIsVoid=*/true)
+                  : dictionaries_.lookup(argument.dictionary->parameter));
+        }
+      }
       for (auto [argument, mode] :
           llvm::zip(bodyCall->arguments, bodyProcedure.modes)) {
         if (Represent(loopBody->vars[argument].type)->dummy || IsOutput(mode)) {
@@ -4269,10 +4735,6 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body) {
   const Procedure &procedure{*body.procedure};
   parser::CharBlock at{procedure.symbol->source};
   failed_ = false;
-  if (body.method) {
-    NotYet(at, "instance methods");
-    return;
-  }
   const auto *polymorphism{polymorphism_.lookup(&body)};
   if (polymorphism &&
       polymorphism->unchecked != semantics::PolymorphismUnchecked::None) {
@@ -4283,15 +4745,16 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body) {
   for (BodyVar var : body.head) {
     types.push_back(body.vars[var].type);
   }
-  merk::ProcOp proc{ProcFor(procedure, types, at)};
+  merk::ProcOp proc{body.method ? MethodProc(body) : ProcFor(procedure, types, at)};
   if (!proc) {
     return;
   }
-  if (procedure.symbol->exported) {
+  if (procedure.symbol->exported && !body.method) {
     proc.setPublic();
   }
   values_.clear();
   typeInfos_.clear();
+  dictionaries_.clear();
   mlir::Block *entry{proc.addEntryBlock()};
   mlir::OpBuilder::InsertionGuard guard{builder_};
   builder_.setInsertionPointToStart(entry);
@@ -4299,7 +4762,23 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body) {
   unsigned input{0};
   if (polymorphism) {
     for (const semantics::HiddenArgument &argument : polymorphism->hidden) {
-      typeInfos_[argument.typeInfo->parameter] = entry->getArgument(input++);
+      if (argument.typeInfo) {
+        typeInfos_[argument.typeInfo->parameter] = entry->getArgument(input++);
+      } else {
+        dictionaries_[argument.dictionary->parameter] =
+            entry->getArgument(input++);
+      }
+    }
+    // A constrained type variable's is in a typeclass_info.
+    for (auto [var, source] : llvm::enumerate(polymorphism->sources)) {
+      if (source && !typeInfos_.lookup(var)) {
+        mlir::Value value{TypeInfoValue(*source, Location(at), at)};
+        if (!value) {
+          failed_ = true;
+          break;
+        }
+        typeInfos_[var] = value;
+      }
     }
   }
   for (auto [var, mode] : llvm::zip(body.head, procedure.modes)) {
@@ -4350,6 +4829,7 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
       GenerateBody(body);
     }
   }
+  GenerateInstances();
   // An exported type's descriptor is here, for the modules that import it,
   // which may not see its constructors. One that cannot be made yet is left
   // to those that use it, which fail to link.

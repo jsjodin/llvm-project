@@ -1,0 +1,8 @@
+A method of a known instance in a target region runs on the GPU, as an SPMD
+kernel, with its float in a register and no typeclass_info.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/omp-typeclass.m -o %t
+RUN: env OMP_NUM_THREADS=4 OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=16 %libomp-env %t 2>&1 | FileCheck %s
+CHECK: Launching kernel {{.*}}omp_typeclass.doubles_{{.*}} in SPMD mode
+CHECK: 6
