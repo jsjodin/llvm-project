@@ -282,20 +282,6 @@ def Merk_StringCompareOp : Merk_Op<"string_compare"> {
   let assemblyFormat = "$x `,` $y attr-dict";
 }
 
-def Merk_WriteWordOp : Merk_Op<"write_word"> {
-  let summary = "writes a word of a type, by its type_info";
-  let description = [{
-    `io.write`, and with `flags` 1 `io.print`, and 2 for their `_line` forms.
-
-    ```mlir
-    merk.write_word %t, %x flags 0
-    ```
-  }];
-  let arguments = (ins Merk_TypeInfoType:$info, Merk_WordType:$value,
-      I64Attr:$flags);
-  let assemblyFormat = "$info `,` $value `flags` $flags attr-dict";
-}
-
 def Merk_StringEqualOp : Merk_Op<"string_equal"> {
   let summary = "whether two strings are equal";
   let description = [{
