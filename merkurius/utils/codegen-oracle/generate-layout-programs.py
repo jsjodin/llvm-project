@@ -123,6 +123,14 @@ poly_value_of(X) = poly_value(poly_node(poly_leaf, "key", X), X).
 :- pred poly_same(T::in, T::in) is semidet.
 poly_same(X, X).
 
+:- pred poly_write(T::in, io::di, io::uo) is det.
+poly_write(X, !IO) :-
+    io.write(X, !IO),
+    io.nl(!IO),
+    io.write([X], !IO),
+    io.write({X, 1}, !IO),
+    io.nl(!IO).
+
 :- pred print_order(comparison_result::in, io::di, io::uo) is det.
 print_order((=), !IO) :- io.write_string("=", !IO).
 print_order((<), !IO) :- io.write_string("<", !IO).
@@ -389,6 +397,8 @@ class Generator:
             goals.append("( if %s = %s then io.write_string(\"eq\", !IO) "
                          "else io.write_string(\"ne\", !IO) )" % (s, d))
             goals.append("io.nl(!IO)")
+            goals.append("poly_write(%s, !IO)" % s)
+            goals.append("io.write_line(%s, !IO)" % d)
             # And by the type_info's descriptor.
             goals.append("( if poly_same(%s, %s) then io.write_string(\"eq\", !IO) "
                          "else io.write_string(\"ne\", !IO) )" % (s, d))

@@ -285,11 +285,14 @@ program.
    operations, for the write barrier.
 4. **Polymorphism.** Done: canonical words for narrow fields, hidden
    `type_info` arguments, polymorphic procedures on terms and arrays, and
-   descriptors' headers with generic `unify` and `compare`. Next, in order:
-   the descriptors' functor tables
-   and field types (D3), with `io.write` as the walker that reads them and
-   mmc as its oracle; polymorphic `foreign_proc`s; then typeclass_infos and
-   existential types. Values of an abstract imported type are still "not yet
+   descriptors with their functor tables, generic `unify` and `compare`, and
+   `io.write` and `io.print` as the first walker. Next, in order: polymorphic
+   `foreign_proc`s, after which `io.m` can declare those on
+   `runtime/write.cpp` instead of their being built in; then typeclass_infos
+   and existential types. Types with polymorphic recursion, whose instances
+   have no end, such as `grow(T) ---> stop(T) ; more(T, grow(list(T)))`, are
+   "not yet implemented" too.
+   Values of an abstract imported type are still "not yet
    implemented": a module cannot pass one without its layout, as a notag
    float travels in a float register.
 5. **Closures.** `merk.closure` and `merk.call_closure` (D7), higher-order

@@ -1,0 +1,36 @@
+[1, 1]
+{1, "s"}
+box(1)
+yes(1)
+node(leaf, 1, leaf)
+two(1, [1], yes({1, 1}))
+nested([[1]])
+array([1])
+["s", "s"]
+{"s", "s"}
+box("s")
+yes("s")
+node(leaf, "s", leaf)
+two("s", [1], yes({"s", 1}))
+nested([["s"]])
+array(["s"])
+[[1.5], [1.5]]
+{[1.5], "s"}
+box([1.5])
+yes([1.5])
+node(leaf, [1.5], leaf)
+two([1.5], [1], yes({[1.5], 1}))
+nested([[[1.5]]])
+array([[1.5]])
+[box(a9("x", c1)), box(a9("x", c1))]
+{box(a9("x", c1)), "s"}
+box(box(a9("x", c1)))
+yes(box(a9("x", c1)))
+node(leaf, box(a9("x", c1)), leaf)
+two(box(a9("x", c1)), [1], yes({box(a9("x", c1)), 1}))
+nested([[box(a9("x", c1))]])
+array([box(a9("x", c1))])
+[c0, c1, a1(1), a6(6), a7(7), a8(8), a9("n", a8(0))]
+none
+[]
+[]

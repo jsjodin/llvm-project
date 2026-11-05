@@ -201,7 +201,10 @@ def Merk_TypeCtorOp : Merk_Op<"type_ctor", [HasParent<"mlir::ModuleOp">]> {
     `term` for a type of constructors, whose layout `term` gives. `linkage`
     is `external` in the module that defines the type, `declaration` in one
     that imports it, and `internal` or `linkonce`; `unify` and `compare` are
-    the entries that take the type_info and two words.
+    the entries that take the type_info and two words. `functors` has each
+    constructor in the order declared, as its name then its fields' types: a
+    field's is a type parameter's number, or an array of a constructor's name
+    and its arguments' types.
 
     ```mlir
     merk.type_ctor "list.list/1" module "list" name "list" kind "term" linkage "linkonce" arity 1 term !merk.term<"list.list(T0)"> unify @unify_entry.list.list/1 compare @compare_entry.list.list/1
@@ -210,11 +213,11 @@ def Merk_TypeCtorOp : Merk_Op<"type_ctor", [HasParent<"mlir::ModuleOp">]> {
   let arguments = (ins StrAttr:$constructor, StrAttr:$module, StrAttr:$name,
       StrAttr:$kind, StrAttr:$linkage, I64Attr:$arity,
       OptionalAttr<TypeAttr>:$term, OptionalAttr<FlatSymbolRefAttr>:$unify,
-      OptionalAttr<FlatSymbolRefAttr>:$compare);
+      OptionalAttr<FlatSymbolRefAttr>:$compare, OptionalAttr<ArrayAttr>:$functors);
   let assemblyFormat = [{
     $constructor `module` $module `name` $name `kind` $kind `linkage` $linkage
     `arity` $arity (`term` $term^)? (`unify` $unify^)?
-    (`compare` $compare^)? attr-dict
+    (`compare` $compare^)? (`functors` $functors^)? attr-dict
   }];
 }
 
@@ -277,6 +280,20 @@ def Merk_StringCompareOp : Merk_Op<"string_compare"> {
   let arguments = (ins Merk_StringType:$x, Merk_StringType:$y);
   let results = (outs I32:$result);
   let assemblyFormat = "$x `,` $y attr-dict";
+}
+
+def Merk_WriteWordOp : Merk_Op<"write_word"> {
+  let summary = "writes a word of a type, by its type_info";
+  let description = [{
+    `io.write`, and with `flags` 1 `io.print`, and 2 for their `_line` forms.
+
+    ```mlir
+    merk.write_word %t, %x flags 0
+    ```
+  }];
+  let arguments = (ins Merk_TypeInfoType:$info, Merk_WordType:$value,
+      I64Attr:$flags);
+  let assemblyFormat = "$info `,` $value `flags` $flags attr-dict";
 }
 
 def Merk_StringEqualOp : Merk_Op<"string_equal"> {

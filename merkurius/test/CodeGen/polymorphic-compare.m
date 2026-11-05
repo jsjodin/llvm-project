@@ -25,7 +25,7 @@
 :- type pt(A, B) ---> pt(A, B) ; none.
 
 % MERK-DAG: merk.type_ctor "int/0" module "" name "int" kind "int" linkage "linkonce" arity 0 unify @"unify_entry.int/0" compare @"compare_entry.int/0"
-% LLVM-DAG: @"merk.type_ctor.int/0" = linkonce_odr constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr } { i8 0, i8 0, i16 0, i32 0, ptr @{{.*}}, ptr @{{.*}}, ptr @"unify_entry.int/0", ptr @"compare_entry.int/0" }
+% LLVM-DAG: @"merk.type_ctor.int/0" = linkonce_odr constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr, ptr, [8 x i16], ptr, ptr } { i8 0, i8 0, i16 0, i32 0, ptr @{{.*}}, ptr @{{.*}}, ptr @"unify_entry.int/0", ptr @"compare_entry.int/0", ptr null, [8 x i16] [i16 -1, i16 -1, i16 -1, i16 -1, i16 -1, i16 -1, i16 -1, i16 -1], ptr null, ptr null }
 
 :- pred p(comparison_result::in, io::di, io::uo) is det.
 p((=), !IO) :- io.write_string("=", !IO).
