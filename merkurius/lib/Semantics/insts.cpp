@@ -724,6 +724,14 @@ const Inst *InstOps::Resolve(const Inst *inst) {
   return inst;
 }
 
+namespace {
+const Inst *ParameterBinding(
+    const Inst &parameter, const std::map<const Inst *, const Inst *> &bound) {
+  auto it{bound.find(&parameter)};
+  return it == bound.end() ? &parameter : it->second;
+}
+} // namespace
+
 std::vector<ArgMode> InstOps::Instantiate(llvm::ArrayRef<ArgMode> modes,
     llvm::ArrayRef<const Inst *> actual, llvm::ArrayRef<const Type *> types,
     llvm::ArrayRef<const Inst *> fixed) {
@@ -739,14 +747,15 @@ std::vector<ArgMode> InstOps::Instantiate(llvm::ArrayRef<ArgMode> modes,
   if (bound.empty()) {
     return modes.vec();
   }
-  auto replace{[&](const Inst &parameter) {
-    auto it{bound.find(&parameter)};
-    return it == bound.end() ? &parameter : it->second;
-  }};
   std::vector<ArgMode> result;
   for (const ArgMode &mode : modes) {
-    result.push_back({insts_.Substitute(mode.initial, replace),
-        insts_.Substitute(mode.final, replace)});
+    result.push_back({insts_.Substitute(mode.initial,
+                          [&](const Inst &parameter) {
+                            return ParameterBinding(parameter, bound);
+                          }),
+        insts_.Substitute(mode.final, [&](const Inst &parameter) {
+          return ParameterBinding(parameter, bound);
+        })});
   }
   return result;
 }
@@ -874,6 +883,105 @@ bool InstOps::IsGround(const Inst *inst, const Type *type) {
   return Instantiated(inst, insts_.Ground(Uniqueness::Unique), type);
 }
 
+namespace {
+const Inst *FailCoerce(
+    const Inst *inst, const Type *x, const Type *y, CoerceFailure &failure) {
+  failure.from = x;
+  failure.to = y;
+  failure.inst = inst;
+  return nullptr;
+}
+} // namespace
+
+// Ground, of a type x, as the bound inst of its constructors for the type y.
+// `types` are those being expanded, each of which stays ground within itself.
+const Inst *InstOps::CoerceGround(const Type *x, const Type *y, Uniqueness u,
+    std::vector<const Type *> &types) {
+  const std::vector<ConstructorTypes> *constructors{ConstructorsOf(x)};
+  if (x == y || !constructors || llvm::is_contained(types, x)) {
+    return insts_.Ground(u);
+  }
+  types.push_back(x);
+  std::vector<std::vector<const Inst *>> arguments;
+  for (const ConstructorTypes &constructor : *constructors) {
+    std::vector<const Type *> ys{ArgumentTypes(constructor.functor, y)};
+    std::vector<const Inst *> &args{arguments.emplace_back()};
+    for (std::size_t j{0}; j < constructor.arguments.size(); ++j) {
+      args.push_back(CoerceGround(constructor.arguments[j], ys[j], u, types));
+    }
+  }
+  types.pop_back();
+  std::vector<BoundAlternative> alternatives;
+  for (std::size_t k{0}; k < constructors->size(); ++k) {
+    alternatives.push_back({(*constructors)[k].functor, arguments[k]});
+  }
+  return Bound(u, alternatives);
+}
+
+const Inst *InstOps::CoerceInst(const Inst *inst, const Type *x, const Type *y,
+    llvm::function_ref<bool(const Type *, const Type *)> subtype,
+    CoerceFailure &failure, std::vector<const Inst *> &ancestors) {
+  if (llvm::is_contained(ancestors, inst)) {
+    return x == y || subtype(x, y) ? inst : FailCoerce(inst, x, y, failure);
+  }
+  const Inst *node{inst};
+  for (const Inst *next{Resolve(Plain(node))}; next != node;
+       next = Resolve(Plain(node))) {
+    node = next;
+  }
+  switch (node->kind) {
+  case InstKind::Bound: {
+    if (node->functors.empty()) {
+      return node; // not reached
+    }
+    ancestors.push_back(inst);
+    std::vector<std::vector<const Inst *>> arguments;
+    for (const BoundAlternative &alternative : node->functors) {
+      const std::vector<ConstructorTypes> *constructors{ConstructorsOf(y)};
+      if (x != y &&
+          (!constructors ||
+              llvm::none_of(*constructors, [&](const ConstructorTypes &c) {
+                return SameFunctor(c.functor, alternative.functor);
+              }))) {
+        failure.functor = alternative.functor;
+        return FailCoerce(node, x, y, failure);
+      }
+      std::vector<const Type *> xs{ArgumentTypes(alternative.functor, x)};
+      std::vector<const Type *> ys{ArgumentTypes(alternative.functor, y)};
+      std::vector<const Inst *> &args{arguments.emplace_back()};
+      for (std::size_t j{0}; j < alternative.arguments.size(); ++j) {
+        failure.path.push_back({alternative.functor, j});
+        const Inst *arg{CoerceInst(alternative.arguments[j], xs[j], ys[j],
+            subtype, failure, ancestors)};
+        if (!arg) {
+          return nullptr;
+        }
+        failure.path.pop_back();
+        args.push_back(arg);
+      }
+    }
+    ancestors.pop_back();
+    std::vector<BoundAlternative> alternatives;
+    for (std::size_t k{0}; k < node->functors.size(); ++k) {
+      alternatives.push_back({node->functors[k].functor, arguments[k]});
+    }
+    return Bound(node->uniqueness, alternatives);
+  }
+  case InstKind::Ground: {
+    if (x == y) {
+      return inst;
+    }
+    std::vector<const Type *> types;
+    return subtype(x, y) ? CoerceGround(x, y, node->uniqueness, types)
+                         : FailCoerce(node, x, y, failure);
+  }
+  case InstKind::Free:
+    return FailCoerce(node, x, y, failure);
+  default:
+    return x == y ? inst : FailCoerce(node, x, y, failure);
+  }
+}
+
 // The manual's traversal of the inst tree of X with its type tree and
 // the result's. A recursive inst node, one that is its own ancestor, needs
 // a type at most the result's. A bound node keeps its functors, which the
@@ -884,98 +992,24 @@ const Inst *InstOps::Coerce(const Inst *inst, const Type *from,
     const Type *to,
     llvm::function_ref<bool(const Type *, const Type *)> subtype,
     CoerceFailure &failure) {
-  auto fail{[&](const Inst *i, const Type *x, const Type *y)
-                -> const Inst * {
-    failure.from = x;
-    failure.to = y;
-    failure.inst = i;
-    return nullptr;
-  }};
-  std::vector<const Type *> types;
-  std::function<const Inst *(const Type *, const Type *, Uniqueness)> fromGround{
-      [&](const Type *x, const Type *y, Uniqueness u) -> const Inst * {
-        const std::vector<ConstructorTypes> *constructors{ConstructorsOf(x)};
-        if (x == y || !constructors || llvm::is_contained(types, x)) {
-          return insts_.Ground(u);
-        }
-        types.push_back(x);
-        std::vector<std::vector<const Inst *>> arguments;
-        for (const ConstructorTypes &constructor : *constructors) {
-          std::vector<const Type *> ys{ArgumentTypes(constructor.functor, y)};
-          std::vector<const Inst *> &args{arguments.emplace_back()};
-          for (std::size_t j{0}; j < constructor.arguments.size(); ++j) {
-            args.push_back(fromGround(constructor.arguments[j], ys[j], u));
-          }
-        }
-        types.pop_back();
-        std::vector<BoundAlternative> alternatives;
-        for (std::size_t k{0}; k < constructors->size(); ++k) {
-          alternatives.push_back({(*constructors)[k].functor, arguments[k]});
-        }
-        return Bound(u, alternatives);
-      }};
   std::vector<const Inst *> ancestors;
-  std::function<const Inst *(const Inst *, const Type *, const Type *)> walk{
-      [&](const Inst *i, const Type *x, const Type *y) -> const Inst * {
-        if (llvm::is_contained(ancestors, i)) {
-          return x == y || subtype(x, y) ? i : fail(i, x, y);
-        }
-        const Inst *node{i};
-        for (const Inst *next{Resolve(Plain(node))}; next != node;
-             next = Resolve(Plain(node))) {
-          node = next;
-        }
-        switch (node->kind) {
-        case InstKind::Bound: {
-          if (node->functors.empty()) {
-            return node; // not reached
-          }
-          ancestors.push_back(i);
-          std::vector<std::vector<const Inst *>> arguments;
-          for (const BoundAlternative &alternative : node->functors) {
-            const std::vector<ConstructorTypes> *constructors{
-                ConstructorsOf(y)};
-            if (x != y &&
-                (!constructors ||
-                    llvm::none_of(*constructors, [&](const ConstructorTypes &c) {
-                      return SameFunctor(c.functor, alternative.functor);
-                    }))) {
-              failure.functor = alternative.functor;
-              return fail(node, x, y);
-            }
-            std::vector<const Type *> xs{ArgumentTypes(alternative.functor, x)};
-            std::vector<const Type *> ys{ArgumentTypes(alternative.functor, y)};
-            std::vector<const Inst *> &args{arguments.emplace_back()};
-            for (std::size_t j{0}; j < alternative.arguments.size(); ++j) {
-              failure.path.push_back({alternative.functor, j});
-              const Inst *arg{walk(alternative.arguments[j], xs[j], ys[j])};
-              if (!arg) {
-                return nullptr;
-              }
-              failure.path.pop_back();
-              args.push_back(arg);
-            }
-          }
-          ancestors.pop_back();
-          std::vector<BoundAlternative> alternatives;
-          for (std::size_t k{0}; k < node->functors.size(); ++k) {
-            alternatives.push_back({node->functors[k].functor, arguments[k]});
-          }
-          return Bound(node->uniqueness, alternatives);
-        }
-        case InstKind::Ground:
-          if (x == y) {
-            return i;
-          }
-          return subtype(x, y) ? fromGround(x, y, node->uniqueness)
-                               : fail(node, x, y);
-        case InstKind::Free:
-          return fail(node, x, y);
-        default:
-          return x == y ? i : fail(node, x, y);
-        }
-      }};
-  return walk(inst, from, to);
+  return CoerceInst(inst, from, to, subtype, failure, ancestors);
+}
+
+void InstOps::JoinUniqueness(
+    const Inst *inst, Uniqueness &u, llvm::DenseSet<const Inst *> &seen) {
+  if (!seen.insert(inst).second) {
+    return;
+  }
+  inst = Resolve(Plain(inst));
+  if (inst->kind != InstKind::Free) {
+    u = std::max(u, inst->uniqueness);
+  }
+  for (const BoundAlternative &alternative : inst->functors) {
+    for (const Inst *argument : alternative.arguments) {
+      JoinUniqueness(argument, u, seen);
+    }
+  }
 }
 
 const Inst *InstOps::Normalise(const Inst *inst, const Type *type) {
@@ -986,21 +1020,7 @@ const Inst *InstOps::Normalise(const Inst *inst, const Type *type) {
   }
   Uniqueness u{Uniqueness::Unique};
   llvm::DenseSet<const Inst *> seen;
-  std::function<void(const Inst *)> walk{[&](const Inst *i) {
-    if (!seen.insert(i).second) {
-      return;
-    }
-    i = Resolve(Plain(i));
-    if (i->kind != InstKind::Free) {
-      u = std::max(u, i->uniqueness);
-    }
-    for (const BoundAlternative &alternative : i->functors) {
-      for (const Inst *argument : alternative.arguments) {
-        walk(argument);
-      }
-    }
-  }};
-  walk(inst);
+  JoinUniqueness(inst, u, seen);
   return insts_.Ground(u);
 }
 
@@ -1012,28 +1032,29 @@ bool InstOps::HasAny(const Inst *inst, const Type *type) {
   return Contains(inst, type, InstKind::Any);
 }
 
+bool InstOps::ContainsOnce(const Inst *inst, const Type *type, InstKind kind,
+    llvm::DenseSet<std::pair<const Inst *, const Type *>> &seen) {
+  if (!seen.insert({inst, type}).second) {
+    return false;
+  }
+  inst = Plain(inst);
+  if (inst->kind == kind) {
+    return true;
+  }
+  for (const BoundAlternative &alternative : inst->functors) {
+    std::vector<const Type *> types{ArgumentTypes(alternative.functor, type)};
+    for (std::size_t j{0}; j < alternative.arguments.size(); ++j) {
+      if (ContainsOnce(alternative.arguments[j], types[j], kind, seen)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool InstOps::Contains(const Inst *inst, const Type *type, InstKind kind) {
   llvm::DenseSet<std::pair<const Inst *, const Type *>> seen;
-  std::function<bool(const Inst *, const Type *)> walk{
-      [&](const Inst *i, const Type *t) {
-        if (!seen.insert({i, t}).second) {
-          return false;
-        }
-        i = Plain(i);
-        if (i->kind == kind) {
-          return true;
-        }
-        for (const BoundAlternative &alternative : i->functors) {
-          std::vector<const Type *> types{ArgumentTypes(alternative.functor, t)};
-          for (std::size_t j{0}; j < alternative.arguments.size(); ++j) {
-            if (walk(alternative.arguments[j], types[j])) {
-              return true;
-            }
-          }
-        }
-        return false;
-      }};
-  return walk(inst, type);
+  return ContainsOnce(inst, type, kind, seen);
 }
 
 bool InstOps::Matches(const Inst *a, const Inst *b, const Type *type) {

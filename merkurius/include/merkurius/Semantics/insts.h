@@ -27,6 +27,7 @@
 #include "merkurius/Semantics/types.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/raw_ostream.h"
@@ -281,6 +282,15 @@ public:
 private:
   // Whether an inst has a part of the given kind.
   bool Contains(const Inst *, const Type *, InstKind);
+  bool ContainsOnce(const Inst *, const Type *, InstKind,
+      llvm::DenseSet<std::pair<const Inst *, const Type *>> &seen);
+  void JoinUniqueness(
+      const Inst *, Uniqueness &, llvm::DenseSet<const Inst *> &seen);
+  const Inst *CoerceGround(const Type *x, const Type *y, Uniqueness,
+      std::vector<const Type *> &types);
+  const Inst *CoerceInst(const Inst *, const Type *x, const Type *y,
+      llvm::function_ref<bool(const Type *, const Type *)> subtype,
+      CoerceFailure &, std::vector<const Inst *> &ancestors);
   // The types of a functor's arguments for `type`, or null types if it is
   // not one of the type's.
   std::vector<const Type *> ArgumentTypes(const InstFunctor &, const Type *);
