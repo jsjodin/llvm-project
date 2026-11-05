@@ -43,23 +43,28 @@ main(!IO) :-
     else if Times < 2 then
         usage(!IO)
     else
-        header(N, Times, !IO),
-        init(N, A0, B0, C0),
-        % Each kernel's time in each run, kernel by kernel.
-        array.init(kernels * Times, 0.0, T0),
-        run(0, Times, N, A0, A, B0, B, C0, C, T0, T, 0.0, Sum, !IO),
-        check(N, Times, A, B, C, Sum, Valid, !IO),
-        ( if Valid = 1 then
-            table_header(!IO),
-            Word = 8.0,
-            Size = float(N) * Word,
-            row("Copy", 0, 2.0 * Size, Times, T, !IO),
-            row("Mul", 1, 2.0 * Size, Times, T, !IO),
-            row("Add", 2, 3.0 * Size, Times, T, !IO),
-            row("Triad", 3, 3.0 * Size, Times, T, !IO),
-            row("Dot", 4, 2.0 * Size, Times, T, !IO)
-        else
-            exit_failure(!IO)
+        some [!A, !B, !C] (
+            header(N, Times, !IO),
+            init(N, !:A, !:B, !:C),
+            % Each kernel's time in each run, kernel by kernel.
+            array.init(kernels * Times, 0.0, T0),
+            % The arrays stay on the device for the runs, so that each
+            % kernel measures its memory and not the copies to it.
+            %$omp target data map(tofrom: A, B, C)
+            run(0, Times, N, !A, !B, !C, T0, T, 0.0, Sum, !IO),
+            check(N, Times, !.A, !.B, !.C, Sum, Valid, !IO),
+            ( if Valid = 1 then
+                table_header(!IO),
+                Word = 8.0,
+                Size = float(N) * Word,
+                row("Copy", 0, 2.0 * Size, Times, T, !IO),
+                row("Mul", 1, 2.0 * Size, Times, T, !IO),
+                row("Add", 2, 3.0 * Size, Times, T, !IO),
+                row("Triad", 3, 3.0 * Size, Times, T, !IO),
+                row("Dot", 4, 2.0 * Size, Times, T, !IO)
+            else
+                exit_failure(!IO)
+            )
         )
     ).
 
