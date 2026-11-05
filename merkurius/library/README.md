@@ -9,7 +9,9 @@ have no implementation yet.
 `io.m` implements its output predicates on the standard output,
 `write_string`, `write_int`, `write_uint`, the sized integers' writes,
 `write_char`, `write_float` and `nl`, with `foreign_proc`s for C, and
-the narrower integers' writes in Mercury. `float.m` implements its
+the narrower integers' writes in Mercury. `write`, `print` and their
+`_line` forms are built into code generation on `runtime/write.cpp` until a
+`foreign_proc` can be polymorphic. `float.m` implements its
 functions but `hash`, and `math.m` all of its
 functions but `solve_quadratic`, with C's math library. The arithmetic
 and comparisons of `int`, `uint`, the sized integers and `float` are

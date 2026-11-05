@@ -1,10 +1,10 @@
 A type_info of a type another module defines refers to that module's
-descriptor, which is external there, and its unify and compare entries work
-here.
+descriptor, which is external there, and its unify and compare entries and
+its functors' table work here.
 
 RUN: rm -rf %t && mkdir %t && cd %t
 RUN: printf ':- module ma.\n:- interface.\n:- type t ---> t(int) ; u.\n:- func f(int) = t.\n:- implementation.\nf(N) = t(N).\n' > ma.m
-RUN: printf ':- module mb.\n:- interface.\n:- import_module io.\n:- pred main(io::di, io::uo) is det.\n:- implementation.\n:- import_module ma.\n:- pred same(T::in, T::in) is semidet.\nsame(X, Y) :- X = Y.\nmain(!IO) :- ( if same(f(1), f(1)) then io.write_string("eq ", !IO) else io.write_string("ne ", !IO) ), ( if same(f(1), f(2)) then io.write_string("eq\\n", !IO) else io.write_string("ne\\n", !IO) ), compare(R, f(1), f(2)), order(R, !IO), compare(R2, f(1), u), order(R2, !IO), io.nl(!IO), by(f(2), f(1), !IO), io.nl(!IO).\n:- pred by(T::in, T::in, io::di, io::uo) is det.\nby(X, Y, !IO) :- compare(R, X, Y), order(R, !IO).\n:- pred order(comparison_result::in, io::di, io::uo) is det.\norder((=), !IO) :- io.write_string("=", !IO).\norder((<), !IO) :- io.write_string("<", !IO).\norder((>), !IO) :- io.write_string(">", !IO).\n' > mb.m
+RUN: printf ':- module mb.\n:- interface.\n:- import_module io.\n:- pred main(io::di, io::uo) is det.\n:- implementation.\n:- import_module list, ma.\n:- pred same(T::in, T::in) is semidet.\nsame(X, Y) :- X = Y.\nmain(!IO) :- ( if same(f(1), f(1)) then io.write_string("eq ", !IO) else io.write_string("ne ", !IO) ), ( if same(f(1), f(2)) then io.write_string("eq\\n", !IO) else io.write_string("ne\\n", !IO) ), compare(R, f(1), f(2)), order(R, !IO), compare(R2, f(1), u), order(R2, !IO), io.nl(!IO), by(f(2), f(1), !IO), io.nl(!IO), io.write([f(3), u], !IO), io.nl(!IO).\n:- pred by(T::in, T::in, io::di, io::uo) is det.\nby(X, Y, !IO) :- compare(R, X, Y), order(R, !IO).\n:- pred order(comparison_result::in, io::di, io::uo) is det.\norder((=), !IO) :- io.write_string("=", !IO).\norder((<), !IO) :- io.write_string("<", !IO).\norder((>), !IO) :- io.write_string(">", !IO).\n' > mb.m
 RUN: merkc -fc1 -emit-llvm ma.m -o - | FileCheck %s --check-prefix=DEFINES
 RUN: merkc -fc1 -emit-llvm mb.m -o - | FileCheck %s --check-prefix=IMPORTS
 RUN: merkc mb.m ma.m -o mb && ./mb | FileCheck %s
@@ -14,3 +14,4 @@ IMPORTS: @"merk.type_ctor.ma.t/0" = external constant
 CHECK: eq ne
 CHECK-NEXT: <<
 CHECK-NEXT: >
+CHECK-NEXT: [t(3), u]

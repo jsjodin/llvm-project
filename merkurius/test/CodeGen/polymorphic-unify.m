@@ -25,11 +25,11 @@
 % MERK-DAG: merk.type_ctor "int/0" module "" name "int" kind "int" linkage "linkonce" arity 0 unify @"unify_entry.int/0"
 % MERK-DAG: merk.type_ctor "list.list/1" module "list" name "list" kind "term" linkage "linkonce" arity 1 term !merk.term<"list.list(T0)"> unify @"unify_entry.list.list/1"
 % MERK-DAG: merk.type_ctor "polymorphic_unify.tree/0" module "polymorphic_unify" name "tree" kind "term" linkage "internal" arity 0 term !merk.term<"polymorphic_unify.tree"> unify @"unify_entry.polymorphic_unify.tree/0"
-% LLVM-DAG: @"merk.type_ctor.int/0" = linkonce_odr constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr } { i8 0, i8 0, i16 0, i32 0, ptr @{{.*}}, ptr @{{.*}}, ptr @"unify_entry.int/0", ptr @"compare_entry.int/0" }
-% LLVM-DAG: @"merk.type_ctor.float/0" = linkonce_odr constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr } { i8 10,
-% LLVM-DAG: @"merk.type_ctor.polymorphic_unify.colour/0" = internal constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr } { i8 16,
-% LLVM-DAG: @"merk.type_ctor.polymorphic_unify.temp/0" = internal constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr } { i8 17,
-% LLVM-DAG: @"merk.type_ctor.polymorphic_unify.tree/0" = internal constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr } { i8 18,
+% LLVM-DAG: @"merk.type_ctor.int/0" = linkonce_odr constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr, ptr, [8 x i16], ptr, ptr } { i8 0, i8 0, i16 0, i32 0, ptr @{{.*}}, ptr @{{.*}}, ptr @"unify_entry.int/0", ptr @"compare_entry.int/0", ptr null, [8 x i16] [i16 -1, i16 -1, i16 -1, i16 -1, i16 -1, i16 -1, i16 -1, i16 -1], ptr null, ptr null }
+% LLVM-DAG: @"merk.type_ctor.float/0" = linkonce_odr constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr, ptr, [8 x i16], ptr, ptr } { i8 10,
+% LLVM-DAG: @"merk.type_ctor.polymorphic_unify.colour/0" = internal constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr, ptr, [8 x i16], ptr, ptr } { i8 16,
+% LLVM-DAG: @"merk.type_ctor.polymorphic_unify.temp/0" = internal constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr, ptr, [8 x i16], ptr, ptr } { i8 17,
+% LLVM-DAG: @"merk.type_ctor.polymorphic_unify.tree/0" = internal constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr, ptr, [8 x i16], ptr, ptr } { i8 18,
 
 % MERK-DAG: merk.proc private @polymorphic_unify.same_2_0(%arg0: !merk.type_info, %arg1: !merk.word, %arg2: !merk.word)
 % MERK-DAG: merk.unify_word %arg0, %arg1, %arg2

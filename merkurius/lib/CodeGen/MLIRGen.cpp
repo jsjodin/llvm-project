@@ -270,6 +270,10 @@ private:
   // A call of builtin's compare, its operators, ordering or unify.
   bool CompareBuiltin(const Body &, const Procedure &,
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
+  // A call of io's write or print, or their _line forms, to the standard
+  // output.
+  bool WriteBuiltin(const Body &, const Procedure &,
+      llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   // A type's type variables, in order of first appearance.
   llvm::SmallVector<unsigned> VariablesOf(const semantics::Type &);
   // Makes the merk.type_ctor of a type's constructor, with its unify entry,
@@ -278,7 +282,11 @@ private:
   bool EnsureVoidDescriptor();
   void EmitDescriptor(llvm::StringRef constructor, llvm::StringRef module,
       llvm::StringRef name, llvm::StringRef kind, llvm::StringRef linkage,
-      unsigned arity, mlir::Type term, merk::ProcOp unify, merk::ProcOp compare);
+      unsigned arity, mlir::Type term, merk::ProcOp unify, merk::ProcOp compare, mlir::ArrayAttr functors);
+  // A descriptor's table of its constructors, for merk.type_ctor, and a field's
+  // type in it; null after an error.
+  mlir::ArrayAttr FunctorsAttr(const semantics::Type *canonical, parser::CharBlock);
+  mlir::Attribute FieldTypeAttr(const semantics::Type &, parser::CharBlock);
   merk::ProcOp DescriptorEntry(bool compare, llvm::StringRef constructor,
       const semantics::Type *canonical, mlir::Type represented, bool dummy,
       parser::CharBlock at);
@@ -325,8 +333,10 @@ private:
   // The number of type_infos a procedure takes, or none with an error if it
   // has what code generation does not handle yet.
   std::optional<unsigned> HiddenTypeInfos(const Procedure &, parser::CharBlock);
-  mlir::Value TypeInfoOfType(
-      const semantics::Type *, mlir::Location, parser::CharBlock);
+  // `freeIsVoid`: a type variable with no type_info is one that nothing
+  // determines, which has the type void.
+  mlir::Value TypeInfoOfType(const semantics::Type *, mlir::Location,
+      parser::CharBlock, bool freeIsVoid = false);
   mlir::Value TypeInfoValue(
       const semantics::TypeInfo &, mlir::Location, parser::CharBlock);
   // A value at another instance of its type, such as list(int) at list(T):
@@ -660,7 +670,7 @@ static std::optional<std::string> TypeConstructorName(
 void MerkGenerator::EmitDescriptor(llvm::StringRef constructor,
     llvm::StringRef module, llvm::StringRef name, llvm::StringRef kind,
     llvm::StringRef linkage, unsigned arity, mlir::Type term,
-    merk::ProcOp unify, merk::ProcOp compare) {
+    merk::ProcOp unify, merk::ProcOp compare, mlir::ArrayAttr functors) {
   mlir::OpBuilder::InsertionGuard guard{builder_};
   builder_.setInsertionPointToEnd(module_.getBody());
   merk::TypeCtorOp::create(builder_, builder_.getUnknownLoc(), constructor,
@@ -669,7 +679,8 @@ void MerkGenerator::EmitDescriptor(llvm::StringRef constructor,
       unify ? mlir::FlatSymbolRefAttr::get(unify.getSymNameAttr())
             : mlir::FlatSymbolRefAttr{},
       compare ? mlir::FlatSymbolRefAttr::get(compare.getSymNameAttr())
-              : mlir::FlatSymbolRefAttr{});
+              : mlir::FlatSymbolRefAttr{},
+      functors);
 }
 
 bool MerkGenerator::EnsureVoidDescriptor() {
@@ -678,7 +689,7 @@ bool MerkGenerator::EnsureVoidDescriptor() {
     // nothing can compare those, so its entry is never reached.
     EmitDescriptor("void/0", "", "void", "void", "linkonce", 0, {},
         DescriptorEntry(false, "void/0", nullptr, {}, /*dummy=*/true, {}),
-        DescriptorEntry(true, "void/0", nullptr, {}, /*dummy=*/true, {}));
+        DescriptorEntry(true, "void/0", nullptr, {}, /*dummy=*/true, {}), {});
   }
   return true;
 }
@@ -768,7 +779,7 @@ bool MerkGenerator::EnsureDescriptor(
       // constructors.
       descriptors_.insert(*constructor);
       EmitDescriptor(*constructor, module, name, kind, "declaration",
-          type.arguments.size(), {}, {}, {});
+          type.arguments.size(), {}, {}, {}, {});
       return true;
     }
   }
@@ -788,6 +799,16 @@ bool MerkGenerator::EnsureDescriptor(
     NotYet(at, "type_infos of type " + semantics::TypeToString(type));
     return false;
   }
+  // A primitive type, or an array, has no constructors.
+  mlir::ArrayAttr functors;
+  if (represented->dummy ||
+      mlir::isa_and_nonnull<merk::TermType>(represented->type)) {
+    functors = FunctorsAttr(canonical, at);
+    if (!functors) {
+      failed_ = true;
+      return false;
+    }
+  }
   merk::ProcOp unify{DescriptorEntry(false, *constructor, canonical,
       represented->type, represented->dummy, at)};
   merk::ProcOp compare{DescriptorEntry(true, *constructor, canonical,
@@ -797,14 +818,68 @@ bool MerkGenerator::EnsureDescriptor(
       mlir::isa_and_nonnull<merk::TermType>(represented->type)
           ? represented->type
           : mlir::Type{},
-      unify, compare);
+      unify, compare, functors);
   return true;
 }
 
-mlir::Value MerkGenerator::TypeInfoOfType(
-    const semantics::Type *type, mlir::Location loc, parser::CharBlock at) {
+// A type parameter by its number, and any other type as an array of its
+// constructor and its arguments, in which their descriptors are ensured.
+mlir::Attribute MerkGenerator::FieldTypeAttr(
+    const semantics::Type &type, parser::CharBlock at) {
+  if (type.kind == semantics::TypeKind::Variable) {
+    return builder_.getI64IntegerAttr(type.var);
+  }
+  std::optional<std::string> constructor{TypeConstructorName(type)};
+  if (!constructor || !EnsureDescriptor(type, at)) {
+    if (!constructor) {
+      NotYet(at, "type_infos of type " + semantics::TypeToString(type));
+    }
+    return nullptr;
+  }
+  llvm::SmallVector<mlir::Attribute> parts{builder_.getStringAttr(*constructor)};
+  for (const semantics::Type *argument : type.arguments) {
+    mlir::Attribute attribute{FieldTypeAttr(*argument, at)};
+    if (!attribute) {
+      return nullptr;
+    }
+    parts.push_back(attribute);
+  }
+  return builder_.getArrayAttr(parts);
+}
+
+mlir::ArrayAttr MerkGenerator::FunctorsAttr(
+    const semantics::Type *canonical, parser::CharBlock at) {
+  const std::vector<semantics::ConstructorTypes> *constructors{
+      modes_.ops().ConstructorsOf(canonical)};
+  if (!constructors) {
+    return nullptr;
+  }
+  llvm::SmallVector<mlir::Attribute> functors;
+  for (const semantics::ConstructorTypes &constructor : *constructors) {
+    llvm::SmallVector<mlir::Attribute> parts{
+        builder_.getStringAttr(constructor.functor.name)};
+    for (const semantics::Type *argument : constructor.arguments) {
+      mlir::Attribute attribute{FieldTypeAttr(*argument, at)};
+      if (!attribute) {
+        return nullptr;
+      }
+      parts.push_back(attribute);
+    }
+    functors.push_back(builder_.getArrayAttr(parts));
+  }
+  return builder_.getArrayAttr(functors);
+}
+
+mlir::Value MerkGenerator::TypeInfoOfType(const semantics::Type *type,
+    mlir::Location loc, parser::CharBlock at, bool freeIsVoid) {
   if (type->kind == semantics::TypeKind::Variable) {
     mlir::Value info{typeInfos_.lookup(type->var)};
+    if (!info && freeIsVoid) {
+      // Nothing determines it, as the elements of [] that nothing else uses.
+      EnsureVoidDescriptor();
+      return merk::TypeInfoOp::create(builder_, loc,
+          merk::TypeInfoType::get(&context_), "void/0", mlir::ValueRange{});
+    }
     if (!info) {
       NotYet(at, "type_infos of type " + semantics::TypeToString(*type));
     }
@@ -819,7 +894,7 @@ mlir::Value MerkGenerator::TypeInfoOfType(
   }
   llvm::SmallVector<mlir::Value> arguments;
   for (const semantics::Type *argument : type->arguments) {
-    mlir::Value info{TypeInfoOfType(argument, loc, at)};
+    mlir::Value info{TypeInfoOfType(argument, loc, at, freeIsVoid)};
     if (!info) {
       return nullptr;
     }
@@ -836,7 +911,7 @@ mlir::Value MerkGenerator::TypeInfoValue(const semantics::TypeInfo &info,
   case semantics::TypeInfoKind::Parameter:
     return typeInfos_.lookup(info.parameter);
   case semantics::TypeInfoKind::Constant:
-    return TypeInfoOfType(info.type, loc, at);
+    return TypeInfoOfType(info.type, loc, at, /*freeIsVoid=*/true);
   case semantics::TypeInfoKind::Void:
     EnsureVoidDescriptor();
     return merk::TypeInfoOp::create(
@@ -2040,6 +2115,50 @@ bool MerkGenerator::CompareBuiltin(const Body &goal, const Procedure &callee,
   return true;
 }
 
+bool MerkGenerator::WriteBuiltin(const Body &goal, const Procedure &callee,
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
+  llvm::StringRef name{callee.symbol->name};
+  if (arguments.size() != 3 ||
+      !llvm::is_contained({"write", "print", "write_line", "print_line"}, name)) {
+    return false;
+  }
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  std::optional<Represented> represented{Represent(body.vars[arguments[0]].type)};
+  if (!represented) {
+    NotYet(at, "values of type " +
+            semantics::TypeToString(*body.vars[arguments[0]].type));
+    return true;
+  }
+  const semantics::ProcedurePolymorphism *polymorphism{
+      polymorphism_.lookup(&body)};
+  const semantics::PassedInfos *passed{nullptr};
+  if (polymorphism) {
+    if (auto it{polymorphism->goals.find(&goal)};
+        it != polymorphism->goals.end()) {
+      passed = &it->second;
+    }
+  }
+  if (!passed || passed->typeInfos.size() != 1) {
+    NotYet(at, "this call's type_infos");
+    return true;
+  }
+  mlir::Value info{TypeInfoValue(*passed->typeInfos[0], loc, at)};
+  if (!info) {
+    failed_ = true;
+    return true;
+  }
+  auto word{merk::WordType::get(&context_)};
+  mlir::Value value{represented->dummy
+          ? mlir::Value{merk::ToWordOp::create(builder_, loc, word,
+                IntegerConstant(builder_.getI64Type(), 0, loc))}
+          : Coerce(ValueOf(arguments[0]), word, loc)};
+  std::int64_t flags{(name.starts_with("print") ? 1 : 0) |
+      (name.ends_with("_line") ? 2 : 0)};
+  merk::WriteWordOp::create(builder_, loc, info, value, flags);
+  return true;
+}
+
 void MerkGenerator::Test(const Body &goal, mlir::Value x, mlir::Value y,
     const semantics::Type *type) {
   llvm::StringSet<> seen;
@@ -2482,6 +2601,11 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
   const semantics::Symbol &symbol{*callee.symbol};
   llvm::StringRef module{symbol.module};
+  // Temporary (chunk 1 step 4, docs/INPROGRESS.md): built in until foreign_procs
+  // can be polymorphic, when io.m can declare these on runtime/write.cpp.
+  if (module == "io" && WriteBuiltin(goal, callee, arguments, body)) {
+    return true;
+  }
   if (module == "builtin" ||
       (module == "array" && symbol.name == "array_compare")) {
     return CompareBuiltin(goal, callee, arguments, body);
