@@ -932,14 +932,33 @@ const CompoundTerm *AsLoop(const Term &t) {
 
 } // namespace
 
+namespace {
+// A term's two operands, each converted by the rule.
+template <typename Rule>
+auto ConvertBoth(const CompoundTerm &c, const Rule &rule, ConvertState &state) {
+  auto left{Apply(rule, Operand(c, 0), state)};
+  auto right{Apply(rule, Operand(c, 1), state)};
+  return std::pair{left, right};
+}
+
+// The goals of G1 or_else G2 ..., which nest either way; `ok` becomes false if
+// one does not convert.
+void CollectAlternatives(const Term &term, llvm::SmallVectorImpl<Goal> &goals,
+    bool &ok, ConvertState &state) {
+  const Term &bare{StripParentheses(term)};
+  if (const CompoundTerm * orElse{AsCompound(bare, "or_else", 2)}) {
+    CollectAlternatives(Operand(*orElse, 0), goals, ok, state);
+    CollectAlternatives(Operand(*orElse, 1), goals, ok, state);
+  } else if (auto alternative{Apply(goal, term, state)}) {
+    goals.push_back(*alternative);
+  } else {
+    ok = false;
+  }
+}
+} // namespace
+
 std::optional<Goal> GoalRule::Convert(
     const Term &t, ConvertState &state) const {
-  auto make{[&](auto *node) -> std::optional<Goal> { return node; }};
-  auto both{[&](const CompoundTerm &c, auto &rule) {
-    auto left{Apply(rule, Operand(c, 0), state)};
-    auto right{Apply(rule, Operand(c, 1), state)};
-    return std::pair{left, right};
-  }};
   if (const auto *directive{llvm::dyn_cast<DirectiveTerm>(&t)}) {
     return ConvertOmpGoal(*directive, state);
   }
@@ -949,8 +968,8 @@ std::optional<Goal> GoalRule::Convert(
   // Higher-order calls: P, and P(X, Y).
   if (llvm::isa<VariableTerm>(t)) {
     if (auto closure{dataTerm.Convert(t, state)}) {
-      return make(state.arena.Make<HigherOrderCall>(
-          t.tokens(), *closure, llvm::ArrayRef<DataTerm>{}));
+      return state.arena.Make<HigherOrderCall>(
+          t.tokens(), *closure, llvm::ArrayRef<DataTerm>{});
     }
     return std::nullopt;
   }
@@ -961,8 +980,7 @@ std::optional<Goal> GoalRule::Convert(
     if (!closure || !arguments) {
       return std::nullopt;
     }
-    return make(
-        state.arena.Make<HigherOrderCall>(t.tokens(), *closure, *arguments));
+    return state.arena.Make<HigherOrderCall>(t.tokens(), *closure, *arguments);
   }
   // X `p` Y is p(X, Y), and X `P` Y, with a variable P, is P(X, Y).
   if (const auto *backquote{llvm::dyn_cast<BackquoteTerm>(&t)}) {
@@ -975,14 +993,14 @@ std::optional<Goal> GoalRule::Convert(
       if (!closure || !arguments) {
         return std::nullopt;
       }
-      return make(state.arena.Make<HigherOrderCall>(
-          t.tokens(), *closure, *arguments));
+      return state.arena.Make<HigherOrderCall>(
+          t.tokens(), *closure, *arguments);
     }
     auto name{symName.Convert(op, state)};
     if (!name || !arguments) {
       return std::nullopt;
     }
-    return make(state.arena.Make<Call>(t.tokens(), *name, *arguments));
+    return state.arena.Make<Call>(t.tokens(), *name, *arguments);
   }
   // {G1, G2} is a call to '{}'/2, as in mmc.
   if (const auto *tuple{llvm::dyn_cast<TupleTerm>(&t)}) {
@@ -991,7 +1009,7 @@ std::optional<Goal> GoalRule::Convert(
       return std::nullopt;
     }
     const SymName *braces{MakeBracketSymName(t, "{}", state)};
-    return make(state.arena.Make<Call>(t.tokens(), braces, *arguments));
+    return state.arena.Make<Call>(t.tokens(), braces, *arguments);
   }
   if (!llvm::isa<NameTerm>(t) && !llvm::isa<CompoundTerm>(t)) {
     SayExpected(state, t, "a goal");
@@ -1009,8 +1027,8 @@ std::optional<Goal> GoalRule::Convert(
       if (!var || !fields || !value) {
         return std::nullopt;
       }
-      return make(state.arena.Make<StateVarFieldUpdate>(
-          t.tokens(), *var, *fields, *value));
+      return state.arena.Make<StateVarFieldUpdate>(
+          t.tokens(), *var, *fields, *value);
     }
   }
   // The DCG goals =(T), :=(T), T =^ F and ^ F := T, which mmc rejects
@@ -1023,8 +1041,8 @@ std::optional<Goal> GoalRule::Convert(
     return std::nullopt;
   }
   if (arity == 0 && (name == "true" || name == "fail")) {
-    return make(state.arena.Make<BuiltinGoal>(t.tokens(),
-        name == "true" ? BuiltinGoalKind::True : BuiltinGoalKind::Fail));
+    return state.arena.Make<BuiltinGoal>(t.tokens(),
+        name == "true" ? BuiltinGoalKind::True : BuiltinGoalKind::Fail);
   }
   const auto *c{llvm::dyn_cast<CompoundTerm>(&t)};
   if (c && arity == 2 && (name == "," || name == "&")) {
@@ -1032,8 +1050,7 @@ std::optional<Goal> GoalRule::Convert(
     Flatten(t, name, conjuncts);
     if (auto goals{detail::ConvertElements(
             goal, llvm::ArrayRef<const Term *>{conjuncts}, state)}) {
-      return make(
-          state.arena.Make<Conjunction>(t.tokens(), name == "&", *goals));
+      return state.arena.Make<Conjunction>(t.tokens(), name == "&", *goals);
     }
     return std::nullopt;
   }
@@ -1044,15 +1061,15 @@ std::optional<Goal> GoalRule::Convert(
     if (!condition || !then || !otherwise) {
       return std::nullopt;
     }
-    return make(state.arena.Make<IfThenElse>(
-        t.tokens(), ite->form, *condition, *then, *otherwise));
+    return state.arena.Make<IfThenElse>(
+        t.tokens(), ite->form, *condition, *then, *otherwise);
   }
   if (c && arity == 2 && name == ";") {
     llvm::SmallVector<const Term *, 8> disjuncts;
     FlattenDisjunction(t, disjuncts);
     if (auto goals{detail::ConvertElements(
             goal, llvm::ArrayRef<const Term *>{disjuncts}, state)}) {
-      return make(state.arena.Make<Disjunction>(t.tokens(), *goals));
+      return state.arena.Make<Disjunction>(t.tokens(), *goals);
     }
     return std::nullopt;
   }
@@ -1062,7 +1079,7 @@ std::optional<Goal> GoalRule::Convert(
   }
   if (c && arity == 1 && (name == "not" || name == "\\+")) {
     if (auto negated{Apply(goal, Operand(*c), state)}) {
-      return make(state.arena.Make<Negation>(t.tokens(), *negated));
+      return state.arena.Make<Negation>(t.tokens(), *negated);
     }
     return std::nullopt;
   }
@@ -1074,22 +1091,22 @@ std::optional<Goal> GoalRule::Convert(
             .Case("<=>", ImplicationKind::Equivalent)
             .Default(std::nullopt)};
     if (implication) {
-      auto [left, right]{both(*c, goal)};
+      auto [left, right]{ConvertBoth(*c, goal, state)};
       if (!left || !right) {
         return std::nullopt;
       }
-      return make(state.arena.Make<Implication>(
-          t.tokens(), *implication, *left, *right));
+      return state.arena.Make<Implication>(
+          t.tokens(), *implication, *left, *right);
     }
     if (name == "=" || name == "\\=") {
-      auto [left, right]{both(*c, dataTerm)};
+      auto [left, right]{ConvertBoth(*c, dataTerm, state)};
       if (!left || !right) {
         return std::nullopt;
       }
       if (name == "=") {
-        return make(state.arena.Make<Unification>(t.tokens(), *left, *right));
+        return state.arena.Make<Unification>(t.tokens(), *left, *right);
       }
-      return make(state.arena.Make<Inequality>(t.tokens(), *left, *right));
+      return state.arena.Make<Inequality>(t.tokens(), *left, *right);
     }
     if (name == "some" || name == "all") {
       auto vars{Apply(quantifiedGoalVars, Operand(*c, 0), state)};
@@ -1097,9 +1114,9 @@ std::optional<Goal> GoalRule::Convert(
       if (!vars || !quantified) {
         return std::nullopt;
       }
-      return make(state.arena.Make<QuantifiedGoal>(t.tokens(),
+      return state.arena.Make<QuantifiedGoal>(t.tokens(),
           name == "some" ? Quantifier::Some : Quantifier::All, *vars,
-          *quantified));
+          *quantified);
     }
     std::optional<PromiseSolutionsKind> promise{
         llvm::StringSwitch<std::optional<PromiseSolutionsKind>>(name)
@@ -1115,8 +1132,8 @@ std::optional<Goal> GoalRule::Convert(
       if (!vars || !promised) {
         return std::nullopt;
       }
-      return make(state.arena.Make<PromiseSolutions>(
-          t.tokens(), *promise, *vars, *promised));
+      return state.arena.Make<PromiseSolutions>(
+          t.tokens(), *promise, *vars, *promised);
     }
     llvm::StringRef arms{name};
     if (name == "require_complete_switch" ||
@@ -1131,8 +1148,8 @@ std::optional<Goal> GoalRule::Convert(
       if (!var || !required) {
         return std::nullopt;
       }
-      return make(state.arena.Make<RequireSwitch>(
-          t.tokens(), armDeterminism, *var, *required));
+      return state.arena.Make<RequireSwitch>(
+          t.tokens(), armDeterminism, *var, *required);
     }
     if (name == "disable_warnings" || name == "disable_warning") {
       auto warnings{Apply(expect("a list of warning names",
@@ -1146,9 +1163,9 @@ std::optional<Goal> GoalRule::Convert(
       for (const SymName *warning : *warnings) {
         names.push_back(warning->name);
       }
-      return make(state.arena.Make<DisableWarnings>(t.tokens(),
+      return state.arena.Make<DisableWarnings>(t.tokens(),
           state.arena.SaveArray(llvm::ArrayRef<llvm::StringRef>{names}),
-          *quiet));
+          *quiet);
     }
     if (name == "trace") {
       auto params{Apply(expect("a list of trace parameters",
@@ -1173,7 +1190,7 @@ std::optional<Goal> GoalRule::Convert(
           return std::nullopt;
         }
       }
-      return make(state.arena.Make<TraceGoal>(t.tokens(), *params, *traced));
+      return state.arena.Make<TraceGoal>(t.tokens(), *params, *traced);
     }
     if (name == "atomic") {
       auto params{Apply(expect("a list of atomic parameters",
@@ -1182,18 +1199,7 @@ std::optional<Goal> GoalRule::Convert(
       // G1 or_else G2 ..., which nest either way.
       llvm::SmallVector<Goal, 2> goals;
       bool ok{params.has_value()};
-      auto alternatives{[&](const Term &a, auto &self) -> void {
-        const Term &bare{StripParentheses(a)};
-        if (const CompoundTerm * orElse{AsCompound(bare, "or_else", 2)}) {
-          self(Operand(*orElse, 0), self);
-          self(Operand(*orElse, 1), self);
-        } else if (auto alternative{Apply(goal, a, state)}) {
-          goals.push_back(*alternative);
-        } else {
-          ok = false;
-        }
-      }};
-      alternatives(Operand(*c, 1), alternatives);
+      CollectAlternatives(Operand(*c, 1), goals, ok, state);
       if (!ok) {
         return std::nullopt;
       }
@@ -1220,8 +1226,8 @@ std::optional<Goal> GoalRule::Convert(
                                    : "inner(...) is");
         return std::nullopt;
       }
-      return make(state.arena.Make<AtomicGoal>(t.tokens(), *params,
-          state.arena.SaveArray(llvm::ArrayRef<Goal>{goals})));
+      return state.arena.Make<AtomicGoal>(t.tokens(), *params,
+          state.arena.SaveArray(llvm::ArrayRef<Goal>{goals}));
     }
   }
   if (std::optional<TryParts> tryParts{MatchTry(t)}) {
@@ -1230,8 +1236,7 @@ std::optional<Goal> GoalRule::Convert(
   if (c && arity == 1) {
     if (std::optional<Purity> purity{PurityNamed(name)}) {
       if (auto impure{Apply(goal, Operand(*c), state)}) {
-        return make(
-            state.arena.Make<PurityGoal>(t.tokens(), *purity, *impure));
+        return state.arena.Make<PurityGoal>(t.tokens(), *purity, *impure);
       }
       return std::nullopt;
     }
@@ -1243,8 +1248,8 @@ std::optional<Goal> GoalRule::Convert(
             .Default(std::nullopt)};
     if (promised) {
       if (auto promising{Apply(goal, Operand(*c), state)}) {
-        return make(state.arena.Make<PromisePurity>(
-            t.tokens(), *promised, *promising));
+        return state.arena.Make<PromisePurity>(
+            t.tokens(), *promised, *promising);
       }
       return std::nullopt;
     }
@@ -1253,8 +1258,8 @@ std::optional<Goal> GoalRule::Convert(
       if (std::optional<Determinism> det{
               DeterminismRule::FromName(required)}) {
         if (auto checked{Apply(goal, Operand(*c), state)}) {
-          return make(state.arena.Make<RequireDeterminism>(
-              t.tokens(), *det, *checked));
+          return state.arena.Make<RequireDeterminism>(
+              t.tokens(), *det, *checked);
         }
         return std::nullopt;
       }
@@ -1263,7 +1268,7 @@ std::optional<Goal> GoalRule::Convert(
       const Term &event{StripParentheses(Operand(*c))};
       if (call.Matches(event)) {
         if (auto converted{call.Convert(event, state)}) {
-          return make(state.arena.Make<EventGoal>(t.tokens(), *converted));
+          return state.arena.Make<EventGoal>(t.tokens(), *converted);
         }
         return std::nullopt;
       }
@@ -1273,7 +1278,7 @@ std::optional<Goal> GoalRule::Convert(
   }
   // Any other goal is a call (reference manual, "Goals").
   if (auto converted{call.Convert(t, state)}) {
-    return make(*converted);
+    return *converted;
   }
   return std::nullopt;
 }
@@ -1284,7 +1289,6 @@ std::optional<Goal> GoalRule::Convert(
 
 std::optional<DcgGoal> DcgGoalRule::Convert(
     const Term &t, ConvertState &state) const {
-  auto make{[&](auto *node) -> std::optional<DcgGoal> { return node; }};
   if (const auto *directive{llvm::dyn_cast<DirectiveTerm>(&t)}) {
     return Apply(dcgGoal, IgnoreDirective(*directive, state), state);
   }
@@ -1296,8 +1300,8 @@ std::optional<DcgGoal> DcgGoalRule::Convert(
   }
   if (llvm::isa<VariableTerm>(t)) {
     if (auto closure{dataTerm.Convert(t, state)}) {
-      return make(state.arena.Make<DcgHigherOrderCall>(
-          t.tokens(), *closure, llvm::ArrayRef<DataTerm>{}));
+      return state.arena.Make<DcgHigherOrderCall>(
+          t.tokens(), *closure, llvm::ArrayRef<DataTerm>{});
     }
     return std::nullopt;
   }
@@ -1308,8 +1312,8 @@ std::optional<DcgGoal> DcgGoalRule::Convert(
     if (!closure || !arguments) {
       return std::nullopt;
     }
-    return make(state.arena.Make<DcgHigherOrderCall>(
-        t.tokens(), *closure, *arguments));
+    return state.arena.Make<DcgHigherOrderCall>(
+        t.tokens(), *closure, *arguments);
   }
   // { Goal }: the reader reads { G1, G2 } as a tuple of two, which here is
   // their conjunction.
@@ -1322,7 +1326,7 @@ std::optional<DcgGoal> DcgGoalRule::Convert(
     Goal braced{goals->size() == 1
             ? goals->front()
             : Goal{state.arena.Make<Conjunction>(t.tokens(), false, *goals)}};
-    return make(state.arena.Make<DcgBraces>(t.tokens(), braced));
+    return state.arena.Make<DcgBraces>(t.tokens(), braced);
   }
   if (const auto *list{llvm::dyn_cast<ListTerm>(&t)}) {
     if (list->tail()) {
@@ -1331,7 +1335,7 @@ std::optional<DcgGoal> DcgGoalRule::Convert(
     }
     if (auto terms{
             detail::ConvertElements(dataTerm, list->elements(), state)}) {
-      return make(state.arena.Make<DcgTerminals>(t.tokens(), *terms));
+      return state.arena.Make<DcgTerminals>(t.tokens(), *terms);
     }
     return std::nullopt;
   }
@@ -1347,8 +1351,7 @@ std::optional<DcgGoal> DcgGoalRule::Convert(
     Flatten(t, name, conjuncts);
     if (auto goals{detail::ConvertElements(
             dcgGoal, llvm::ArrayRef<const Term *>{conjuncts}, state)}) {
-      return make(
-          state.arena.Make<DcgConjunction>(t.tokens(), name == "&", *goals));
+      return state.arena.Make<DcgConjunction>(t.tokens(), name == "&", *goals);
     }
     return std::nullopt;
   }
@@ -1359,15 +1362,15 @@ std::optional<DcgGoal> DcgGoalRule::Convert(
     if (!condition || !then || !otherwise) {
       return std::nullopt;
     }
-    return make(state.arena.Make<DcgIfThenElse>(
-        t.tokens(), ite->form, *condition, *then, *otherwise));
+    return state.arena.Make<DcgIfThenElse>(
+        t.tokens(), ite->form, *condition, *then, *otherwise);
   }
   if (c && arity == 2 && name == ";") {
     llvm::SmallVector<const Term *, 8> disjuncts;
     FlattenDisjunction(t, disjuncts);
     if (auto goals{detail::ConvertElements(
             dcgGoal, llvm::ArrayRef<const Term *>{disjuncts}, state)}) {
-      return make(state.arena.Make<DcgDisjunction>(t.tokens(), *goals));
+      return state.arena.Make<DcgDisjunction>(t.tokens(), *goals);
     }
     return std::nullopt;
   }
@@ -1377,7 +1380,7 @@ std::optional<DcgGoal> DcgGoalRule::Convert(
   }
   if (c && arity == 1 && (name == "not" || name == "\\+")) {
     if (auto negated{Apply(dcgGoal, Operand(*c), state)}) {
-      return make(state.arena.Make<DcgNegation>(t.tokens(), *negated));
+      return state.arena.Make<DcgNegation>(t.tokens(), *negated);
     }
     return std::nullopt;
   }
@@ -1387,13 +1390,13 @@ std::optional<DcgGoal> DcgGoalRule::Convert(
     if (!vars || !quantified) {
       return std::nullopt;
     }
-    return make(state.arena.Make<DcgQuantified>(t.tokens(),
+    return state.arena.Make<DcgQuantified>(t.tokens(),
         name == "some" ? Quantifier::Some : Quantifier::All, *vars,
-        *quantified));
+        *quantified);
   }
   if (c && arity == 1 && (name == "=" || name == ":=")) {
     if (auto term{Apply(dataTerm, Operand(*c), state)}) {
-      return make(state.arena.Make<DcgUnify>(t.tokens(), name == ":=", *term));
+      return state.arena.Make<DcgUnify>(t.tokens(), name == ":=", *term);
     }
     return std::nullopt;
   }
@@ -1403,8 +1406,7 @@ std::optional<DcgGoal> DcgGoalRule::Convert(
     if (!term || !fields) {
       return std::nullopt;
     }
-    return make(
-        state.arena.Make<DcgFieldSelection>(t.tokens(), *term, *fields));
+    return state.arena.Make<DcgFieldSelection>(t.tokens(), *term, *fields);
   }
   if (c && arity == 2 && name == ":=") {
     if (const CompoundTerm * caret{AsCompound(Operand(*c, 0), "^", 1)}) {
@@ -1413,8 +1415,7 @@ std::optional<DcgGoal> DcgGoalRule::Convert(
       if (!fields || !value) {
         return std::nullopt;
       }
-      return make(
-          state.arena.Make<DcgFieldUpdate>(t.tokens(), *fields, *value));
+      return state.arena.Make<DcgFieldUpdate>(t.tokens(), *fields, *value);
     }
   }
   // X = Y and X := Y would be calls to =/4 and :=/4; mmc rejects them.
@@ -1426,7 +1427,7 @@ std::optional<DcgGoal> DcgGoalRule::Convert(
   }
   // Any other DCG goal is a call that gets the DCG arguments appended.
   if (auto converted{dcgCall.Convert(t, state)}) {
-    return make(*converted);
+    return *converted;
   }
   return std::nullopt;
 }
@@ -1434,6 +1435,23 @@ std::optional<DcgGoal> DcgGoalRule::Convert(
 //===----------------------------------------------------------------------===//
 // Clauses
 //===----------------------------------------------------------------------===//
+
+namespace {
+using ClauseHead =
+    std::tuple<const SymName *, llvm::ArrayRef<const ModedTerm *>>;
+
+// A clause head with the name and the argument terms; none if either does not
+// convert.
+std::optional<ClauseHead> ConvertHeadArguments(
+    std::optional<const SymName *> name, llvm::ArrayRef<const Term *> terms,
+    ConvertState &state) {
+  auto arguments{detail::ConvertElements(modedTerm, terms, state)};
+  if (name && arguments) {
+    return ClauseHead{*name, *arguments};
+  }
+  return std::nullopt;
+}
+} // namespace
 
 std::optional<Clause> ClauseRule::Convert(
     const Term &term, ConvertState &state) const {
@@ -1463,22 +1481,15 @@ std::optional<Clause> ClauseRule::Convert(
     headTerm = &StripParentheses(IgnoreDirective(*directive, state));
   }
   const Term &h{*headTerm};
-  std::optional<std::tuple<const SymName *, llvm::ArrayRef<const ModedTerm *>>>
-      converted;
-  auto withArguments{[&](std::optional<const SymName *> name,
-                         llvm::ArrayRef<const Term *> terms) {
-    auto arguments{detail::ConvertElements(modedTerm, terms, state)};
-    if (name && arguments) {
-      converted.emplace(*name, *arguments);
-    }
-  }};
+  std::optional<ClauseHead> converted;
   const auto *backquote{llvm::dyn_cast<BackquoteTerm>(&h)};
   if (backquote && !llvm::isa<VariableTerm>(StripParentheses(*backquote->op()))) {
     const Term *operands[]{backquote->left(), backquote->right()};
-    withArguments(Apply(symName, *backquote->op(), state),
-        llvm::ArrayRef<const Term *>{operands});
+    converted = ConvertHeadArguments(Apply(symName, *backquote->op(), state),
+        llvm::ArrayRef<const Term *>{operands}, state);
   } else if (const auto *tuple{llvm::dyn_cast<TupleTerm>(&h)}) {
-    withArguments(MakeBracketSymName(h, "{}", state), tuple->elements());
+    converted = ConvertHeadArguments(
+        MakeBracketSymName(h, "{}", state), tuple->elements(), state);
   } else if (llvm::isa<NameTerm>(h) || llvm::isa<CompoundTerm>(h)) {
     converted = result ? functionHead(modedTerm).Convert(h, state)
                        : appliedName(modedTerm).Convert(h, state);
