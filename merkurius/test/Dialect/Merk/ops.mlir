@@ -126,6 +126,26 @@ module @ops attributes {merk.foreign_code = "#include <stdio.h>\0Along merk_fore
 
   // CHECK: merk.entry @ops.main_2_0
   merk.entry @ops.main_2_0
+
+  // CHECK: merk.instance @tables methods [@method]
+  merk.instance @tables methods [@method]
+  // CHECK: merk.instance @elsewhere
+  merk.instance @elsewhere
+  merk.proc private @method(%d: !merk.typeclass_info, %x: !merk.word) -> !merk.word
+      attributes {determinism = #merk.determinism<det>} {
+    merk.succeed %x : !merk.word
+  }
+  // CHECK-LABEL: merk.proc @use_classes
+  merk.proc @use_classes(%t: !merk.type_info, %x: !merk.word) -> !merk.word
+      attributes {determinism = #merk.determinism<det>} {
+    // CHECK: merk.typeclass_info @tables(%{{.*}} : !merk.type_info)
+    %d = merk.typeclass_info @tables(%t : !merk.type_info)
+    // CHECK: merk.typeclass_info_word %{{.*}}, 1 : !merk.type_info
+    %i = merk.typeclass_info_word %d, 1 : !merk.type_info
+    // CHECK: merk.call_method %{{.*}}[0] (%{{.*}}) <det> : (!merk.word) -> !merk.word
+    %y = merk.call_method %d[0] (%x) <det> : (!merk.word) -> !merk.word
+    merk.succeed %y : !merk.word
+  }
 }
 
 // Procedures are tailcc; several outputs are returned as a struct.

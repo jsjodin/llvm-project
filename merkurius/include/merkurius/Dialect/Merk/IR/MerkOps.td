@@ -236,6 +236,82 @@ def Merk_TypeInfoWordOp : Merk_Op<"type_info_word", [Pure]> {
   let assemblyFormat = "$info `,` $word attr-dict";
 }
 
+def Merk_InstanceOp : Merk_Op<"instance", [
+    Symbol, SymbolName, SymbolVisibility, HasParent<"mlir::ModuleOp">
+  ]> {
+  let summary = "a type class instance's method table";
+  let description = [{
+    The procedures of its methods, each taking the `typeclass_info` first and
+    then the method's arguments as its declaration in the type class has them.
+    One without `methods` is defined in another module.
+
+    ```mlir
+    merk.instance @"merk.instance.m.show(int)" methods [@m.show_2_0$int]
+    ```
+  }];
+  let arguments = (ins SymbolNameAttr:$sym_name,
+      OptionalAttr<StrAttr>:$sym_visibility,
+      OptionalAttr<SymbolRefArrayAttr>:$methods);
+  let assemblyFormat = [{
+    $sym_name (`visibility` $sym_visibility^)? (`methods` $methods^)? attr-dict
+  }];
+}
+
+def Merk_TypeclassInfoOp : Merk_Op<"typeclass_info", [
+    Pure, DeclareOpInterfaceMethods<SymbolUserOpInterface>
+  ]> {
+  let summary = "the typeclass_info of an instance";
+  let description = [{
+    A static value if all the arguments are, and otherwise a new cell. The
+    arguments are the type class's superclasses' `typeclass_info`s, its
+    types' `type_info`s, and those of the instance's type variables and
+    constraints (Merk_TypeclassInfoType).
+
+    ```mlir
+    %d = merk.typeclass_info @"merk.instance.m.show(int)"(%int : !merk.type_info)
+    ```
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$instance,
+      Variadic<AnyTypeOf<[Merk_TypeInfoType, Merk_TypeclassInfoType]>>:$arguments);
+  let results = (outs Merk_TypeclassInfoType:$info);
+  let assemblyFormat = [{
+    $instance (`(` $arguments^ `:` type($arguments) `)`)? attr-dict
+  }];
+}
+
+def Merk_TypeclassInfoWordOp : Merk_Op<"typeclass_info_word", [Pure]> {
+  let summary = "a type_info or typeclass_info from a word of a typeclass_info";
+  let description = [{
+    Word 0 is the method table, so a superclass's is from word 1.
+
+    ```mlir
+    %t = merk.typeclass_info_word %d, 1 : !merk.type_info
+    ```
+  }];
+  let arguments = (ins Merk_TypeclassInfoType:$info, I64Attr:$word);
+  let results = (outs AnyTypeOf<[Merk_TypeInfoType, Merk_TypeclassInfoType]>:$result);
+  let assemblyFormat = "$info `,` $word attr-dict `:` type($result)";
+}
+
+def Merk_CallMethodOp : Merk_Op<"call_method"> {
+  let summary = "a call of a type class's method through a typeclass_info";
+  let description = [{
+    Calls the procedure in the given place of the instance's method table,
+    with the `typeclass_info` and then the inputs. A specialization pass sees
+    the instance when the `typeclass_info` comes from a `merk.typeclass_info`.
+
+    ```mlir
+    %y = merk.call_method %d[0](%x) #merk.determinism<det> : (!merk.word) -> !merk.word
+    ```
+  }];
+  let arguments = (ins Merk_TypeclassInfoType:$info, I64Attr:$method,
+      Variadic<AnyType>:$inputs, Merk_DeterminismAttr:$determinism);
+  let results = (outs Variadic<AnyType>:$outputs);
+  let assemblyFormat = [{
+    $info `[` $method `]` `(` $inputs `)` $determinism attr-dict `:` functional-type($inputs, $outputs)
+  }];
+}
+
 def Merk_UnifyWordOp : Merk_Op<"unify_word"> {
   let summary = "whether two words of a type are equal, by its type_info";
   let description = [{

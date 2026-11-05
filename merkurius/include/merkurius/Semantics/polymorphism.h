@@ -89,6 +89,7 @@ ENUM_CLASS(DictionaryKind, Parameter, Constant, Superclass, Instance, Output)
 // Where a typeclass_info comes from: the procedure's hidden argument for one
 // of its constraints, a constant for a constraint without type variables,
 // a superclass's taken out of another, or a cell built from an instance's
+// (a constant is one too, all of its parts constants)
 // with the type_infos of the instance's type variables that its
 // constraints do not have, the typeclass_infos of its constraints, those of
 // its type class's superclasses on its types, and the type_infos of the
@@ -102,7 +103,7 @@ struct Dictionary {
   // its type class's superclasses it is, from 1.
   const Dictionary *from{nullptr};
   unsigned index{0};
-  const InstanceHead *instance{nullptr}; // for an Instance
+  const InstanceHead *instance{nullptr}; // for a Constant or an Instance
   std::vector<const TypeInfo *> typeInfos{};
   std::vector<const Dictionary *> premises{};
   std::vector<const Dictionary *> supers{};
