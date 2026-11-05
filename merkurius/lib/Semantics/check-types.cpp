@@ -152,16 +152,19 @@ namespace {
 
 // Type variable names in a declaration or a clause: each new name gets the
 // next number, unless the names are closed.
+// How an error names a variable: its name, or T and its number.
+static std::string NamedVar(
+    llvm::ArrayRef<llvm::StringRef> names, unsigned var) {
+  return var < names.size() ? names[var].str() : "T" + std::to_string(var);
+}
+
 struct TypeVarNames {
   llvm::StringMap<unsigned> numbers;
   std::vector<llvm::StringRef> names; // by number, for those named
   unsigned next{0};
   bool closed{false};
 
-  // How an error names a variable: its name, or T and its number.
-  std::string NameOf(unsigned var) const {
-    return var < names.size() ? names[var].str() : "T" + std::to_string(var);
-  }
+  std::string NameOf(unsigned var) const { return NamedVar(names, var); }
 
   std::optional<unsigned> Get(llvm::StringRef name) {
     if (auto it{numbers.find(name)}; it != numbers.end()) {
@@ -250,6 +253,7 @@ private:
       std::vector<const Symbol *> &path,
       llvm::DenseSet<const Symbol *> &visited);
   void CheckInstances();
+  const Type *ShiftVars(const Type *, unsigned by);
 
   // Subtypes (reference manual, "Subtypes"). The supertype of a subtype,
   // with its equivalences expanded, on the subtype's parameters, which are
@@ -269,6 +273,8 @@ private:
   bool SameType(const Type *s, const Type *t, ExistentialMap *);
   const Symbol *ConstructorOf(
       const Symbol &type, llvm::StringRef name, unsigned arity);
+  const Type *InstantiateSuperVar(unsigned var, unsigned superParameters,
+      const Type &super, unsigned first);
   // The rules for discriminated union types' constructors, and subtypes'.
   void CheckTypeDefinitions();
 
@@ -292,6 +298,8 @@ private:
   std::vector<const Unify *> coerces_;
   void CheckMethods(const parser::InstanceDecl &, const Symbol &typeclass,
       const std::string &head);
+  const Type *MethodVarType(
+      unsigned var, llvm::ArrayRef<const Type *> types, unsigned instanceVars);
   // The instance's definitions of its type class's methods, with their
   // signatures on its types.
   void DefineMethods(const parser::InstanceDecl &, const Symbol &typeclass,
@@ -1559,6 +1567,22 @@ void TypeChecker::CheckTypeclasses() {
 // instance declarations" and "Type class constraints on instance
 // declarations". Whether the instance's superclass constraints are
 // satisfied is checked with the constraints of clauses.
+// One more than the greatest type variable in the types.
+static unsigned CountTypeVars(llvm::ArrayRef<const Type *> types) {
+  unsigned count{0};
+  for (const Type *type : types) {
+    ForEachVariable(
+        *type, [&](unsigned var) { count = std::max(count, var + 1); });
+  }
+  return count;
+}
+
+// The type with `by` added to the number of each of its type variables.
+const Type *TypeChecker::ShiftVars(const Type *type, unsigned by) {
+  return types_.Substitute(
+      type, [&](unsigned var) { return types_.Variable(by + var); });
+}
+
 void TypeChecker::CheckInstances() {
   // An instance's type class and its types' constructors, by position: a
   // tuple's arity stands for its constructor. Since each type's arguments
@@ -1695,24 +1719,12 @@ void TypeChecker::CheckInstances() {
   // range, with the unifier (reference manual, "Functional dependencies").
   unsigned savedRigid{rigid_};
   rigid_ = 0;
-  auto countVars{[](llvm::ArrayRef<const Type *> types) {
-    unsigned count{0};
-    for (const Type *type : types) {
-      ForEachVariable(
-          *type, [&](unsigned var) { count = std::max(count, var + 1); });
-    }
-    return count;
-  }};
   for (std::size_t j{0}; j < heads.size(); ++j) {
     const Head &head{heads[j]};
     if (!head.item->local || !head.valid || head.item->decl->abstract) {
       continue;
     }
     InTokensOf in{*this, head.item->tokens};
-    auto varName{[&](unsigned var) {
-      return var < head.names.size() ? head.names[var].str()
-                                     : "T" + std::to_string(var);
-    }};
     for (const Dependency &dependency : Dependencies(*head.typeclass)) {
       llvm::DenseSet<unsigned> determined;
       for (unsigned position : dependency.domain) {
@@ -1729,7 +1741,7 @@ void TypeChecker::CheckInstances() {
             // determined by the domain."
             messages_->Say(Source(head.item->decl->name->tokens),
                 "in instance %s, type variable %s is in the range of the functional dependency %s, but its domain does not determine it"_err_en_US,
-                head.text, varName(var),
+                head.text, NamedVar(head.names, var),
                 DependencyText(*head.typeclass, dependency));
           }
         });
@@ -1742,23 +1754,18 @@ void TypeChecker::CheckInstances() {
           other.key == head.key) {
         continue; // an overlap is reported as one
       }
-      unsigned otherVars{countVars(other.types)};
-      unsigned headVars{countVars(head.types)};
-      auto renamed{[&](const Type *type) {
-        return types_.Substitute(
-            type, [&](unsigned var) { return types_.Variable(otherVars + var); });
-      }};
+      unsigned otherVars{CountTypeVars(other.types)};
+      unsigned headVars{CountTypeVars(head.types)};
       for (const Dependency &dependency : Dependencies(*head.typeclass)) {
         Assignment a;
         a.bindings.resize(otherVars + headVars);
         bool unify{llvm::all_of(dependency.domain, [&](unsigned position) {
-          return UnifyTypes(
-              a, other.types[position], renamed(head.types[position]));
+          return UnifyTypes(a, other.types[position],
+              ShiftVars(head.types[position], otherVars));
         })};
-        if (!unify ||
-            llvm::all_of(dependency.range, [&](unsigned position) {
+        if (!unify || llvm::all_of(dependency.range, [&](unsigned position) {
               return Resolve(a, other.types[position]) ==
-                  Resolve(a, renamed(head.types[position]));
+                  Resolve(a, ShiftVars(head.types[position], otherVars));
             })) {
           continue;
         }
@@ -1959,6 +1966,27 @@ const Symbol *TypeChecker::ConstructorOf(
   return nullptr;
 }
 
+// A variable of a supertype's constructor, as a type of the subtype: a
+// parameter is the supertype's argument, and an existential variable is
+// numbered from `first`.
+const Type *TypeChecker::InstantiateSuperVar(
+    unsigned var, unsigned superParameters, const Type &super, unsigned first) {
+  return var < superParameters
+      ? (var < super.arguments.size() ? super.arguments[var]
+                                      : types_.Named(error_, {}))
+      : types_.Variable(first + var - superParameters);
+}
+
+// How an error names a variable as InstantiateSuperVar numbers it, or else the
+// subtype's own.
+static std::string SuperVarName(unsigned var, const Signature &own,
+    const Signature &super, unsigned first, unsigned superParameters) {
+  unsigned original{var - first + superParameters};
+  return var >= first && original < super.varNames.size()
+      ? super.varNames[original].str()
+      : SignatureVarName(own, var);
+}
+
 void TypeChecker::CheckTypeDefinitions() {
   for (const Symbol *symbol : resolution_.module().symbols()) {
     const auto *defn{
@@ -2061,25 +2089,12 @@ void TypeChecker::CheckTypeDefinitions() {
       // variables correspond one to one to the subtype's.
       unsigned superParameters{superSig->typeVars - superSig->existentials};
       ExistentialMap map{ownSig->typeVars, parameters, {}, {}};
-      auto instantiate{[&](unsigned var) {
-        return var < superParameters
-            ? (var < super->arguments.size() ? super->arguments[var]
-                                             : types_.Named(error_, {}))
-            : types_.Variable(map.first + var - superParameters);
-      }};
-      auto ownName{[&](unsigned var) {
-        return var < ownSig->varNames.size() && !ownSig->varNames[var].empty()
-            ? ownSig->varNames[var].str()
-            : "T" + std::to_string(var);
-      }};
-      auto superName{[&](unsigned var) {
-        unsigned original{var - map.first + superParameters};
-        return var >= map.first && original < superSig->varNames.size()
-            ? superSig->varNames[original].str()
-            : ownName(var);
-      }};
       for (unsigned j{0}; j < arity; ++j) {
-        const Type *t{types_.Substitute(superSig->arguments[j], instantiate)};
+        const Type *t{
+            types_.Substitute(superSig->arguments[j], [&](unsigned var) {
+              return InstantiateSuperVar(
+                  var, superParameters, *super, map.first);
+            })};
         if (!IsSubtype(ownSig->arguments[j], t, &map)) {
           // mmc: "the first argument of `basket' has a type, `int', which
           // is not a subtype of the corresponding argument type
@@ -2087,8 +2102,12 @@ void TypeChecker::CheckTypeDefinitions() {
           messages_->Say(Source(constructor->tokens),
               "argument %u of %s/%u has type %s, which is not a subtype of %s, its type in the supertype"_err_en_US,
               j + 1, name.str(), arity,
-              TypeToString(*ownSig->arguments[j], ownName),
-              TypeToString(*t, superName));
+              TypeToString(*ownSig->arguments[j],
+                  [&](unsigned var) { return SignatureVarName(*ownSig, var); }),
+              TypeToString(*t, [&](unsigned var) {
+                return SuperVarName(
+                    var, *ownSig, *superSig, map.first, superParameters);
+              }));
         }
       }
       // The same existential variables and constraints.
@@ -2101,7 +2120,8 @@ void TypeChecker::CheckTypeDefinitions() {
           break;
         }
         ClassConstraint mapped{SubstituteIn(c, [&](unsigned var) {
-          const Type *t{instantiate(var)};
+          const Type *t{
+              InstantiateSuperVar(var, superParameters, *super, map.first)};
           if (t->kind == TypeKind::Variable && t->var >= map.first) {
             auto it{map.forward.find(t->var)};
             return it == map.forward.end() ? types_.Named(error_, {})
@@ -2238,29 +2258,36 @@ std::optional<std::string> TypeChecker::CoerceError(
   const Symbol &base{*fromBase->constructor};
   llvm::ArrayRef<const Type *> invariant{InvariantIn(base)};
   const auto *defn{std::get<const parser::DuTypeDefn *>(base.declaration)};
-  auto parameter{[&](unsigned var) {
-    return var < defn->parameters.size() ? defn->parameters[var].str()
-                                         : "T" + std::to_string(var);
-  }};
   for (unsigned j{0}; j < fromBase->arguments.size(); ++j) {
     const Type *s{fromBase->arguments[j]};
     const Type *t{toBase->arguments[j]};
     if (s == t) {
       continue;
     }
-    std::string where{"the parameter " + parameter(j) + " of " +
-        base.module.str() + "." + base.name.str() + "/" +
+    std::string where{"the parameter " + NamedVar(defn->parameters, j) +
+        " of " + base.module.str() + "." + base.name.str() + "/" +
         std::to_string(base.arity) + ", " + TypeText(a, s) + " in one and " +
         TypeText(a, t) + " in the other,"};
     if (j < invariant.size() && invariant[j]) {
       return where + " must be the same type in both, since it occurs in " +
-          TypeToString(*invariant[j], parameter) + " in its definition";
+          TypeToString(*invariant[j],
+              [&](unsigned var) { return NamedVar(defn->parameters, var); }) +
+          " in its definition";
     }
     if (!IsSubtype(s, t) && !IsSubtype(t, s)) {
       return where + " and neither is a subtype of the other";
     }
   }
   return std::nullopt;
+}
+
+// A method's type variable, in an instance: a parameter of the type class is
+// the instance's type, and the method's own is numbered after the instance's.
+const Type *TypeChecker::MethodVarType(
+    unsigned var, llvm::ArrayRef<const Type *> types, unsigned instanceVars) {
+  unsigned parameters(types.size());
+  return var < parameters ? types[var]
+                          : types_.Variable(instanceVars + var - parameters);
 }
 
 void TypeChecker::DefineMethods(const parser::InstanceDecl &decl,
@@ -2290,20 +2317,20 @@ void TypeChecker::DefineMethods(const parser::InstanceDecl &decl,
       continue;
     }
     unsigned parameters(types.size());
-    auto substitute{[&](unsigned var) {
-      return var < parameters ? types[var]
-                              : types_.Variable(instanceVars + var - parameters);
-    }};
     llvm::SmallVector<const Type *, 4> arguments;
     for (const Type *argument : sig->arguments) {
-      arguments.push_back(types_.Substitute(argument, substitute));
+      arguments.push_back(types_.Substitute(argument, [&](unsigned var) {
+        return MethodVarType(var, types, instanceVars);
+      }));
     }
     // The method's first constraint is its type class's, which the
     // instance itself gives.
     llvm::SmallVector<ClassConstraint, 4> all{
         constraints.begin(), constraints.end()};
     for (const ClassConstraint &constraint : sig->constraints.drop_front()) {
-      all.push_back(SubstituteIn(constraint, substitute));
+      all.push_back(SubstituteIn(constraint, [&](unsigned var) {
+        return MethodVarType(var, types, instanceVars);
+      }));
     }
     llvm::SmallVector<llvm::StringRef, 4> varNames{names.begin(), names.end()};
     varNames.resize(instanceVars);
@@ -2322,7 +2349,9 @@ void TypeChecker::DefineMethods(const parser::InstanceDecl &decl,
     // The method's existential variables stay last.
     llvm::SmallVector<ClassConstraint, 2> existential;
     for (const ClassConstraint &constraint : sig->existentialConstraints) {
-      existential.push_back(SubstituteIn(constraint, substitute));
+      existential.push_back(SubstituteIn(constraint, [&](unsigned var) {
+        return MethodVarType(var, types, instanceVars);
+      }));
     }
     definition.signature.existentials = sig->existentials;
     definition.signature.existentialConstraints = result_.arena_.SaveArray(
