@@ -46,7 +46,8 @@ a constant, ahead of a size it does not depend on.
 | --- | --- | --- |
 | `CodeGen/MLIRGen.cpp` | 46 | Done, in 5 stages: the small standalone ones, the array builtins, the arithmetic builtins, `OmpLoop`, `Target` |
 | `CodeGen/Lowering.cpp` | 21 | Done, in 3 stages: `LowerTerms` and `Dispatch`, the type_info and type_ctor_info lowerings and `Layouts`, then `LowerArray`, `LowerMrt` and `Lower` |
-| The other 32 files in `lib/` and `runtime/` | about 207 | Not started; the largest are `check-types.cpp` (37), `check-determinism.cpp` (22) and `check-modes.cpp` (20) |
+| `Semantics/translate-loops.cpp` | 13 | Stage 1 of 3 done: the small ones outside `TranslateLoop` and `TranslateClause`, and `Rebuild`. Next: `TranslateClause`, then `TranslateLoop` |
+| The other 31 files in `lib/` and `runtime/` | about 207 | Not started; the largest are `check-types.cpp` (37), `check-determinism.cpp` (22) and `check-modes.cpp` (20) |
 
 The unit tests' few are left unless they turn out to get in the way.
 
