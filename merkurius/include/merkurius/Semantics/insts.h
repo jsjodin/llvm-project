@@ -147,6 +147,13 @@ public:
 
 private:
   const Inst *Intern(const Inst &);
+  llvm::StringRef SaveName(llvm::StringRef);
+  const Inst *SubstituteOnce(const Inst *,
+      llvm::function_ref<const Inst *(const Inst &)> replace,
+      llvm::DenseMap<const Inst *, const Inst *> &done);
+  struct Sharing;
+  bool SharingChanges(const Inst *, Sharing &);
+  const Inst *ShareOnce(const Inst *, Sharing &);
 
   common::Arena arena_;
   // Names, once each, so that insts with equal names are equal.
