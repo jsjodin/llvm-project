@@ -28,17 +28,23 @@ stages. New code does not add them.
   is written at the call too, or is a function if it is long.
 - **A short wrapper is not kept** if the call it wraps reads as well: a lambda
   for `IntegerConstant(i64, value, loc)` is replaced by that call.
+- **A struct for a long list.** A long lambda that uses many of its function's
+  locals, as `OmpLoop`'s generator did, takes them in a struct the function
+  fills in (`ParallelLoop`), rather than a dozen parameters. Elsewhere, plain
+  parameters.
 - **No other changes** in the same stage: no behaviour, and no cleanups.
 
 **The check for each stage.** The tests, and the same `merk` and LLVM IR before
 and after for every program of `test/CodeGen`, with and without OpenMP, since
-this changes no generated code.
+this changes no generated code. The one exception so far: a braced list is
+evaluated in order and function arguments need not be, so `array.bounds` moved
+a constant, ahead of a size it does not depend on.
 
 **Progress**
 
 | File | Named lambdas | State |
 | --- | --- | --- |
-| `CodeGen/MLIRGen.cpp` | 46 | Stages 1 to 4 of 5 done: the small standalone ones, the array builtins, the arithmetic builtins, `OmpLoop`. Next: `Target` |
+| `CodeGen/MLIRGen.cpp` | 46 | Done, in 5 stages: the small standalone ones, the array builtins, the arithmetic builtins, `OmpLoop`, `Target` |
 | The other 33 files in `lib/` and `runtime/` | about 226 | Not started; the largest are `check-types.cpp` (36), `check-determinism.cpp` (22), `Lowering.cpp` (19) and `check-modes.cpp` (19) |
 
 The unit tests' few are left unless they turn out to get in the way.
