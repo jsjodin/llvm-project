@@ -819,6 +819,17 @@ void Resolver::ResolveGoal(const Goal &goal, const Visibility &scope) {
                   parser::SymName{unify->tokens, {}, cons ? "[|]" : "[]"})};
               result_.functors_[unify] = &name;
               Resolve(name, NameUse::DataTerm, cons ? 2 : 0, scope);
+            } else if (unify->functor.kind == FunctorKind::Tuple) {
+              // A tuple, or a constructor '{}' if one is visible.
+              const parser::SymName &name{*result_.arena_.Make<parser::SymName>(
+                  parser::SymName{unify->tokens, {}, "{}"})};
+              llvm::SmallVector<const Symbol *, 4> found{Lookup(
+                  name, NameUse::DataTerm, unify->arguments.size(), scope)};
+              if (!found.empty()) {
+                name.candidates = result_.arena_.SaveArray(
+                    llvm::ArrayRef<const Symbol *>{found});
+                result_.functors_[unify] = &name;
+              }
             } else if (const Lambda * lambda{unify->functor.lambda}) {
               for (const std::optional<parser::Mode> &mode : lambda->modes) {
                 if (mode) {
