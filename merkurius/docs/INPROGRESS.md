@@ -295,7 +295,8 @@ program.
    polymorphic `foreign_proc`s, and typeclass_infos, with direct calls of
    known instances (design document, Lowering, "Type classes"). Next:
    existential types. Cloning a polymorphic procedure for a known dictionary
-   (Optimizations, "What polymorphism costs") is in no step yet. Types with polymorphic recursion, whose instances
+   (Optimizations, "What polymorphism costs") and `pragma inline` are in no
+   step yet. Types with polymorphic recursion, whose instances
    have no end, such as `grow(T) ---> stop(T) ; more(T, grow(list(T)))`, are
    "not yet implemented" too.
    Values of an abstract imported type are still "not yet
