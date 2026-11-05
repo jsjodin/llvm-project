@@ -901,8 +901,9 @@ TEST(ConvertTest, ClauseErrors) {
       V{"an if-then-else must have an else part"});
   EXPECT_EQ(Messages_("p :- (if a then b).\n"),
       V{"an if-then-else must have an else part"});
-  EXPECT_EQ(Messages_("p :- X = (a -> 1).\n"),
-      V{"an if-then-else must have an else part"});
+  // In a data-term, it is a constructor, as in mmc, which name resolution finds
+  // or does not.
+  EXPECT_EQ(Messages_("p :- X = (a -> 1).\n"), V{});
   EXPECT_EQ(Messages_("p(X::in, Y).\n"),
       V{"either every argument or none must have a mode"});
   EXPECT_EQ(Messages_("f(X::in) = Y.\n"),
@@ -911,8 +912,8 @@ TEST(ConvertTest, ClauseErrors) {
       V{"expected a list of variables, but found 'X'"});
   EXPECT_EQ(Messages_("p :- some [f(X)] q.\n"),
       V{"expected a variable or a state variable, but found 'f(X)'"});
-  EXPECT_EQ(Messages_("p :- q(!f).\n"),
-      V{"expected a state variable's name, but found 'f'"});
+  // So is ! of anything but a variable.
+  EXPECT_EQ(Messages_("p :- q(!f).\n"), V{});
   EXPECT_EQ(Messages_("p :- require_complete_switch [X, Y] q.\n"),
       V{"expected a list of one variable, but found '[X, Y]'"});
   EXPECT_EQ(Messages_("p :- disable_warnings [a(1)] q.\n"),

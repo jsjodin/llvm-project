@@ -2728,6 +2728,10 @@ void TypeChecker::CheckUnify(const Unify &unify) {
     }
     return;
   case FunctorKind::Tuple:
+    if (const parser::SymName * name{resolution_.FunctorName(unify)}) {
+      CheckFunctor(unify, *name);
+      return;
+    }
     type = types_.Tuple(arguments);
     break;
   case FunctorKind::Literal: {
@@ -2826,6 +2830,15 @@ void TypeChecker::CheckFunctor(const Unify &unify, const parser::SymName &name) 
   if (IsCharConstant(name, unify.arguments.size())) {
     options.push_back([&](Assignment &a) {
       return UnifyTypes(a, VarType(unify.left), Primitive("character"));
+    });
+  }
+  if (unify.functor.kind == FunctorKind::Tuple) {
+    options.push_back([&](Assignment &a) {
+      llvm::SmallVector<const Type *, 4> arguments;
+      for (VarId argument : unify.arguments) {
+        arguments.push_back(VarType(argument));
+      }
+      return UnifyTypes(a, VarType(unify.left), types_.Tuple(arguments));
     });
   }
   if (options.empty()) {

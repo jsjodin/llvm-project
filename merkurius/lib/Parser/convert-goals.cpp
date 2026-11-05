@@ -57,23 +57,26 @@ const Term &Operand(const CompoundTerm &c, std::size_t j = 0) {
   return *c.arguments()[j];
 }
 
+// Whether t is !X, !.X or !:X, by `op`, of a variable. Of anything else,
+// these are constructors (DataTermRule) or syntax errors.
+bool IsStateVar(const Term &t, llvm::StringRef op) {
+  const CompoundTerm *c{AsCompound(t, op, 1)};
+  return c && llvm::isa<VariableTerm>(StripParentheses(Operand(*c)));
+}
+
 std::optional<DataTerm> ConvertStateVar(
     const CompoundTerm &c, StateVarKind kind, ConvertState &state) {
-  const Term &name{StripParentheses(Operand(c))};
-  if (const auto *var{llvm::dyn_cast<VariableTerm>(&name)}) {
-    return state.arena.Make<StateVar>(
-        c.tokens(), kind, state.arena.Save(var->name()));
-  }
-  SayExpected(state, name, "a state variable's name");
-  return std::nullopt;
+  const auto &var{llvm::cast<VariableTerm>(StripParentheses(Operand(c)))};
+  return state.arena.Make<StateVar>(
+      c.tokens(), kind, state.arena.Save(var.name()));
 }
 
 // A variable, or a state variable !X, !.X or !:X.
 struct QuantifiedVarRule {
   using resultType = DataTerm;
   bool Matches(const Term &t) const {
-    return llvm::isa<VariableTerm>(t) || AsCompound(t, "!", 1) ||
-        AsCompound(t, "!.", 1) || AsCompound(t, "!:", 1);
+    return llvm::isa<VariableTerm>(t) || IsStateVar(t, "!") ||
+        IsStateVar(t, "!.") || IsStateVar(t, "!:");
   }
   std::optional<DataTerm> Convert(const Term &t, ConvertState &state) const {
     return dataTerm.Convert(t, state);
@@ -86,7 +89,7 @@ struct QuantifiedVarRule {
 // !X, the variable of io(!X) and state(M, !X) in a trace goal.
 struct StateVarRule {
   using resultType = DataTerm;
-  bool Matches(const Term &t) const { return AsCompound(t, "!", 1); }
+  bool Matches(const Term &t) const { return IsStateVar(t, "!"); }
   std::optional<DataTerm> Convert(const Term &t, ConvertState &state) const {
     return dataTerm.Convert(t, state);
   }
@@ -400,13 +403,15 @@ std::optional<DataTerm> DataTermRule::Convert(
   case Term::Kind::Compound:
     break;
   }
-  // The special data-terms (reference manual, "Data-terms").
-  if (const CompoundTerm * c{AsCompound(t, "!", 1)}) {
-    return ConvertStateVar(*c, StateVarKind::Both, state);
-  } else if (const CompoundTerm * c{AsCompound(t, "!.", 1)}) {
-    return ConvertStateVar(*c, StateVarKind::Current, state);
-  } else if (const CompoundTerm * c{AsCompound(t, "!:", 1)}) {
-    return ConvertStateVar(*c, StateVarKind::Next, state);
+  // The special data-terms (reference manual, "Data-terms"). Of anything but
+  // a variable they are constructors, as in mmc.
+  if (IsStateVar(t, "!")) {
+    return ConvertStateVar(*AsCompound(t, "!", 1), StateVarKind::Both, state);
+  } else if (IsStateVar(t, "!.")) {
+    return ConvertStateVar(
+        *AsCompound(t, "!.", 1), StateVarKind::Current, state);
+  } else if (IsStateVar(t, "!:")) {
+    return ConvertStateVar(*AsCompound(t, "!:", 1), StateVarKind::Next, state);
   }
   if (std::optional<IfThenElseParts> ite{MatchIfThenElse(t)}) {
     std::optional<Goal> condition{Apply(goal, *ite->condition, state)};
@@ -418,7 +423,8 @@ std::optional<DataTerm> DataTermRule::Convert(
     return make(state.arena.Make<ConditionalData>(
         t.tokens(), ite->form, *condition, *then, *otherwise));
   }
-  if (IsIfThenWithoutElse(t)) {
+  // In a data-term, X -> Y is a constructor, as in mmc.
+  if (IsIfThenWithoutElse(t) && !AsCompound(t, "->", 2)) {
     SayMissingElse(t, state);
     return std::nullopt;
   }
@@ -993,7 +999,7 @@ std::optional<Goal> GoalRule::Convert(
   // !S ^ Fields := Value, which updates a state variable.
   if (const CompoundTerm * update{AsCompound(t, ":=", 2)}) {
     const CompoundTerm *caret{AsCompound(Operand(*update, 0), "^", 2)};
-    if (caret && AsCompound(StripParentheses(Operand(*caret, 0)), "!", 1)) {
+    if (caret && IsStateVar(StripParentheses(Operand(*caret, 0)), "!")) {
       auto var{dataTerm.Convert(StripParentheses(Operand(*caret, 0)), state)};
       auto fields{ConvertFields(Operand(*caret, 1), state)};
       auto value{Apply(dataTerm, Operand(*update, 1), state)};
