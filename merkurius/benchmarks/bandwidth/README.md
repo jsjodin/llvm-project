@@ -82,6 +82,30 @@ Before `target data`, each kernel mapped its arrays over PCIe in each run, and
 the same GPU measured 10,458 MB/s for Copy and 22,999 MB/s for Dot, which were
 the transfers' speed and not its memory's.
 
+## Compared with C
+
+`bandwidth.c` is the same program in C with OpenMP: the same kernels, maps,
+timing and check, each kernel a plain
+`#pragma omp target teams distribute parallel for`. It has no tuning for either
+compiler. `compare-c.sh [build-dir] [offload-arch] [rounds]` builds it with the
+same build's clang, at `-O2`, and takes turns running it and `bandwidth.m`.
+
+On the same machine, on 2026-11-04, the median of 7 rounds, each a kernel's
+fastest of 100 runs, in MB/s:
+
+| Kernel | Mercury | C |
+| --- | --- | --- |
+| Copy | 311,982 | 531,733 |
+| Mul | 271,219 | 456,067 |
+| Add | 308,900 | 78,069 |
+| Triad | 324,071 | 78,711 |
+| Dot | 413,621 | 515,025 |
+
+C's Add and Triad vary the most, from 70,000 to 141,000 MB/s and from 69,000
+to 97,000 MB/s over the rounds. Both programs launch the same teams and threads,
+in SPMD mode. Clang gives each team repeated chunks of 256 iterations where merkc
+gives each one block, and that is the larger part of the difference.
+
 ## Differences from BabelStream
 
 - One program for every build: BabelStream's OpenMP model chooses between
@@ -97,4 +121,4 @@ the transfers' speed and not its memory's.
 
 `test/Benchmarks/bandwidth.test` builds it and runs it on 100003 elements,
 sequentially and on four host threads; `bandwidth-gpu.test` runs it on the
-GPU.
+GPU, and `bandwidth-c-gpu.test` runs `bandwidth.c` there.
