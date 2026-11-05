@@ -301,6 +301,13 @@ private:
   // reported, or the loops are left for mode checking to report.
   bool Translatable(const ClauseTypes &);
   void TranslateClause(std::size_t index);
+  // The clause quantified, which must keep its `vars` variables.
+  const ClauseForm *QuantifyTranslated(const ClauseForm &, std::size_t vars);
+  // The constraints of a clause made from one with the constraints `outer` and
+  // `outerGoals` goals; `isOuter` if it is that clause itself.
+  llvm::ArrayRef<GoalConstraint> ConstraintsOf(const ClauseForm &, bool isOuter,
+      llvm::ArrayRef<GoalConstraint> outer, unsigned outerGoals,
+      llvm::ArrayRef<const Symbol *> symbols);
   // The goal with its loops translated: the same goal if it has none.
   Goal Rebuild(const Goal &);
   // Adds the goals rebuilt to `out`; whether any changed.
@@ -605,6 +612,62 @@ LoopTranslation LoopTranslator::Run() {
   return std::move(result_);
 }
 
+// Quantification makes no variable, since each new one occurs in one goal of
+// those parallel to each other; its messages were given for the clause.
+const ClauseForm *LoopTranslator::QuantifyTranslated(
+    const ClauseForm &clause, std::size_t vars) {
+  parser::Messages ignored;
+  const ClauseForm &quantified{Quantify(clause, tokens_, arena_, ignored)};
+  CHECK(quantified.vars.size() == vars &&
+      "loop translation made variables that quantification renamed");
+  return &quantified;
+}
+
+// Each constraint goes with the clause that has its goal; the clause's
+// existential constraints, numbered by its number of goals, stay with it.
+llvm::ArrayRef<GoalConstraint> LoopTranslator::ConstraintsOf(
+    const ClauseForm &clause, bool isOuter,
+    llvm::ArrayRef<GoalConstraint> outer, unsigned outerGoals,
+    llvm::ArrayRef<const Symbol *> symbols) {
+  llvm::DenseSet<unsigned> numbers;
+  ForEachGoal(
+      clause.body, [&](const Goal &g) { numbers.insert(GoalNumber(g)); });
+  std::vector<GoalConstraint> constraints;
+  for (GoalConstraint constraint : outer) {
+    if (constraint.goal == outerGoals) {
+      if (isOuter) {
+        constraint.goal = goals_;
+        constraints.push_back(constraint);
+      }
+    } else if (numbers.count(constraint.goal)) {
+      constraints.push_back(constraint);
+    }
+  }
+  // A call of a loop's predicate passes the clause's own constraints.
+  if (!given_.empty()) {
+    llvm::SmallVector<unsigned> calls;
+    for (unsigned number : numbers) {
+      if (number < symbols.size() && symbols[number] &&
+          llvm::any_of(made_, [&](const std::optional<Made> &made) {
+            return made && made->symbol == symbols[number];
+          })) {
+        calls.push_back(number);
+      }
+    }
+    for (unsigned number : calls) {
+      for (const ClassConstraint &constraint : given_) {
+        constraints.push_back(GoalConstraint{
+            number, ConstraintProof{constraint, &constraint, nullptr, {}}});
+      }
+    }
+    std::stable_sort(constraints.begin(), constraints.end(),
+        [&](const GoalConstraint &x, const GoalConstraint &y) {
+          return x.goal < y.goal;
+        });
+  }
+  return types_.arena_.SaveArray(llvm::ArrayRef<GoalConstraint>{constraints});
+}
+
 void LoopTranslator::TranslateClause(std::size_t index) {
   clause_ = &types_.clauses_[index];
   const ClauseForm &form{*clause_->clause};
@@ -635,72 +698,26 @@ void LoopTranslator::TranslateClause(std::size_t index) {
       types_.arena_.SaveArray(llvm::ArrayRef<const Symbol *>{symbols_})};
   llvm::ArrayRef<const parser::SymName *> names{
       types_.arena_.SaveArray(llvm::ArrayRef<const parser::SymName *>{callNames_})};
-  // Quantification makes no variable, since each new one occurs in one
-  // goal of those parallel to each other; its messages were given for the
-  // clause.
-  auto quantify{[&](const ClauseForm &clause) {
-    parser::Messages ignored;
-    const ClauseForm &quantified{Quantify(clause, tokens_, arena_, ignored)};
-    CHECK(quantified.vars.size() == vars.size() &&
-        "loop translation made variables that quantification renamed");
-    return &quantified;
-  }};
-  // Each constraint goes with the clause that has its goal; the clause's
-  // existential constraints, numbered by its number of goals, stay with it.
-  auto constraintsOf{[&](const ClauseForm &clause, bool isOuter) {
-    llvm::DenseSet<unsigned> numbers;
-    ForEachGoal(clause.body, [&](const Goal &g) { numbers.insert(GoalNumber(g)); });
-    std::vector<GoalConstraint> constraints;
-    for (GoalConstraint constraint : outer.constraints) {
-      if (constraint.goal == form.goals) {
-        if (isOuter) {
-          constraint.goal = goals_;
-          constraints.push_back(constraint);
-        }
-      } else if (numbers.count(constraint.goal)) {
-        constraints.push_back(constraint);
-      }
-    }
-    // A call of a loop's predicate passes the clause's own constraints.
-    if (!given_.empty()) {
-      llvm::SmallVector<unsigned> calls;
-      for (unsigned number : numbers) {
-        if (number < symbols.size() && symbols[number] &&
-            llvm::any_of(made_, [&](const std::optional<Made> &made) {
-              return made && made->symbol == symbols[number];
-            })) {
-          calls.push_back(number);
-        }
-      }
-      for (unsigned number : calls) {
-        for (const ClassConstraint &constraint : given_) {
-          constraints.push_back(GoalConstraint{number,
-              ConstraintProof{constraint, &constraint, nullptr, {}}});
-        }
-      }
-      std::stable_sort(constraints.begin(), constraints.end(),
-          [&](const GoalConstraint &x, const GoalConstraint &y) {
-            return x.goal < y.goal;
-          });
-    }
-    return types_.arena_.SaveArray(llvm::ArrayRef<GoalConstraint>{constraints});
-  }};
-
-  const ClauseForm *translated{quantify(*Make<ClauseForm>(form.tokens,
-      form.kind, form.name, form.head, body, vars, form.typeQualifications,
-      goals_, llvm::ArrayRef<llvm::ArrayRef<VarId>>{}, form.modeSpecific))};
+  const ClauseForm *translated{QuantifyTranslated(
+      *Make<ClauseForm>(form.tokens, form.kind, form.name, form.head, body, vars,
+          form.typeQualifications, goals_,
+          llvm::ArrayRef<llvm::ArrayRef<VarId>>{}, form.modeSpecific),
+      vars.size())};
   ClauseTypes &own{types_.clauses_[index]};
   own.clause = translated;
   own.vars = varTypes;
   own.symbols = symbols;
   own.names = names;
-  own.constraints = constraintsOf(*translated, true);
+  own.constraints =
+      ConstraintsOf(*translated, true, outer.constraints, form.goals, symbols);
 
   for (const std::optional<Made> &made : made_) {
-    const ClauseForm &clause{*quantify(*Make<ClauseForm>(made->clause->tokens,
-        made->clause->kind, made->clause->name, made->clause->head,
-        made->clause->body, vars, llvm::ArrayRef<TypeQualification>{},
-        goals_, llvm::ArrayRef<llvm::ArrayRef<VarId>>{}, false))};
+    const ClauseForm &clause{*QuantifyTranslated(
+        *Make<ClauseForm>(made->clause->tokens, made->clause->kind,
+            made->clause->name, made->clause->head, made->clause->body, vars,
+            llvm::ArrayRef<TypeQualification>{}, goals_,
+            llvm::ArrayRef<llvm::ArrayRef<VarId>>{}, false),
+        vars.size())};
     // The signature of the head's types, with the clause's type
     // variables.
     std::vector<const Type *> arguments;
@@ -718,7 +735,8 @@ void LoopTranslator::TranslateClause(std::size_t index) {
         types_.arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments}),
         given_};
     ClauseTypes types{&clause, made->symbol, true, false, outer.typeVarNames,
-        varTypes, symbols, names, constraintsOf(clause, false)};
+        varTypes, symbols, names,
+        ConstraintsOf(clause, false, outer.constraints, form.goals, symbols)};
     types_.clauses_.push_back(types);
     clause_ = &types_.clauses_[index];
   }
