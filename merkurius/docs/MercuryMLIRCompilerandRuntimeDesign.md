@@ -1049,6 +1049,9 @@ The API is a library module. This interface, with stub bodies, passes Melbourne 
 
 :- pred spawn(pred(mailbox(M), io, io)::in(pred(in, di, uo) is det),
     mailbox(M)::out, io::di, io::uo) is det.
+:- pred spawn_with_stack(int::in,           % stack size in bytes
+    pred(mailbox(M), io, io)::in(pred(in, di, uo) is det),
+    mailbox(M)::out, io::di, io::uo) is det.
 :- pred new_mailbox(mailbox(M)::out, io::di, io::uo) is det.
 :- pred close_mailbox(mailbox(M)::in, io::di, io::uo) is det.
 :- pred send(mailbox(M)::in, M::in, io::di, io::uo) is det.
@@ -1897,7 +1900,7 @@ Two choices were made against the alternatives. Tag 0 goes to a constructor when
 
 Nondet procedures use continuation passing, as mmc's high-level C back end does. A nondet procedure takes a success continuation; producing a solution calls it, and failing returns. One change makes this fit our runtime: each continuation returns an `i1` meaning "stop". A commit is a `true` returned up the chain, so there is no `setjmp`/`longjmp`, and every frame stays visible to the stack maps.
 
-The main alternative is an explicit choice-point stack in the process heap, as mmc's low-level back end has. Continuation passing is chosen because processes have their own growable stacks (Runtime system section), so a deep native stack can be suspended and moved.
+The main alternative is an explicit choice-point stack in the process heap, as mmc's low-level back end has. Continuation passing is chosen because each process has its own stack (Runtime system section), so a deep native stack can be suspended. That stack has a fixed size, so a deep search needs a process spawned with enough of it.
 
 ### 5. Exceptions
 
@@ -2079,7 +2082,16 @@ The runtime gives each process its own stack, heap and mailboxes, schedules proc
 ### Processes and scheduler
 
 - **Process record:** identifier, stack, heap, mailboxes, links and monitors, reduction budget, scheduling state.
-- **Stacks:** each process has a small native stack that grows by copying. The precise stack maps that the GC needs also let the runtime relocate pointers into a moved stack. Suspension can therefore happen anywhere: in `receive`, at a preemption check, or at a GC.
+- **Stacks (decided 2026-11-04):** each process has a native stack of a fixed size that never moves, a slot of one large `mmap` with `MAP_NORESERVE`, committed by the kernel a page at a time as it is touched. Its size is given when the process is spawned (Language extensions, "Processes and mailboxes"), with a default of 64 MB, and is rounded up to a size class, each with a free list, so that spawning a process reuses a slot without a system call. Suspension can happen anywhere: in `receive`, at a preemption check, or at a GC. Since a stack never moves, C frames, `alloca`s and `sret` slots on it are safe, and foreign code and libomp run on it directly. A slot that recursed deeply keeps its pages until they are released with `MADV_DONTNEED`.
+- **Stack overflow:** a procedure on a cycle of non-tail calls compares the stack pointer with the process's limit on entry, and overflow ends that process with an error, which its monitors see. A tail call does not grow the stack, so loops and tail recursion have no check. Separate compilation cannot see a cycle through another module or through a closure, so a procedure that makes a non-tail call out of its module or to an unknown procedure is checked as well; a leaf, or a procedure that calls only unchecked procedures of its module, is not. The runtime's walkers (`io.write`, generic `unify` and `compare`, the message copy) check the same limit, since they recurse on a term's depth. The limit lies a margin above the bottom of the slot, which costs only address space until touched, for the frames that are not checked and foreign code. Foreign code that goes past the margin is not caught.
+
+Measured on x86-64 in a C model, 2026-11-04: a stack touched once costs 8.25 KB in a 64 MB slot (a page and 4.25 KB of page tables, which stacks this far apart do not share), 6 KB at 1 MB and 4.1 KB at 64 KB, and about 2 µs for the first touch. A million slots of 64 MB took 61 TB of address space, in one `mmap`. Switching stacks and callee-saved registers took about 6 ns each way. Erlang's process is about 2.7 KB, so we expect about 10 KB with a heap and a record, which is three to four times as much, in exchange for stacks that need no copying. The cost of the overflow check is still to be measured at the nrev gate.
+
+Rejected:
+
+- **Growing a small stack by copying**, as first planned here and as Go does. Relocating a stack needs every pointer into it, and LLVM's stack maps list only GC roots, not the addresses of `alloca`s, `sret` slots and saved frame pointers, and foreign frames have no maps at all. Go can do it because it owns its compiler.
+- **Guard pages** as the way to find an overflow. They cost nothing at run time, but each splits the mapping, and at Linux's default `vm.max_map_count` of 65530 `mprotect` failed at 32,754 processes. Raising the limit needs administrator rights, and users must be able to run these programs without them.
+- **Segmented stacks** (LLVM's `split-stack`), which grow without copying and start smaller. Untried with `musttail`, and a hot call on a segment boundary is slow, the reason Go and Rust left them.
 - **Scheduling:** one worker thread per core, each with a run queue, plus work stealing.
 - **Preemption:** rides on the nursery limit check, as GHC does. To preempt a process, the scheduler lowers its heap limit, so the next allocation takes the slow path and yields there. Code that allocates pays nothing extra. Loops that do not allocate get an `mrt.yield_check` on their back edge, which spends a reduction budget; that check is the only preemption cost left.
 - **Blocking work:** I/O never blocks a worker. File and socket I/O use the operating system's asynchronous interface where possible, and a separate pool of threads otherwise, as Erlang's dirty schedulers do.
@@ -2150,9 +2162,35 @@ Foreign code written for Melbourne Mercury therefore needs review before it runs
 
 ### OpenMP cooperation
 
-- One scheduler owns the cores. An OpenMP region borrows that process's worker plus idle workers, rather than libomp starting its own pool.
-- Version 1: parallel loop bodies may not allocate, so no safepoint occurs inside a region.
-- Version 2: per-thread allocation buffers inside the process heap, and the process's collector stops its region at a barrier before collecting.
+Decided 2026-11-04, for chunk 2; none of it is implemented, and today's parallel loops simply use libomp's pool. Processes run on the scheduler's workers and loop teams on libomp's threads, and the only bridge between them is the process that enters a region. Two facts keep this simple: a parallel body is `det`, pure and threads no `io` (Language extensions, "Parallel loop annotations"), so a team thread never sends, receives, spawns or blocks in the scheduler and need not be a process; and the sequential meaning is the specification, so a team of one is always correct.
+
+**Entering a region:**
+
+1. *The process is pinned* to its OS thread until the join, since libomp ties a team's primary thread to that thread. It is not preempted, and a request to end it waits for the join. Between regions it may move: each OS thread that forks is its own libomp root.
+2. *The worker hands off its scheduling role and run queue*, as Go does on entering a system call, and a spare thread takes them, so processes queued there are not held up by the region. Blocking foreign calls can share this mechanism.
+3. *The team's size is claimed atomically*: 1, plus as many idle workers as a shared count allows, capped by a `num_threads` clause, and passed as `num_threads`. The claim is released at the join. The claimed workers stay parked while libomp's threads use their cores. Two regions at once get smaller teams, and one that claims nothing runs alone on its thread.
+
+A process that wakes while a team holds the cores unparks its worker, and the operating system shares the cores for a while. Latency stays bounded without preempting a team thread. libomp's waiting at barriers suits that badly, so the blocktime is to be short or 0, which makes starting a loop slower.
+
+The region runs on the process's own stack, which never moves (Processes and scheduler). A team thread has a stack of libomp's, which must be large enough for what the body calls, set with `kmp_set_stacksize_s` or `OMP_STACKSIZE`, and has its own stack limit for the overflow check.
+
+**Heap.** Each version of a parallel body's allocation is a step from the one before:
+
+- Version 1: bodies do not allocate, so no safepoint occurs inside a region.
+- Version 2: each team thread allocates from chunks of its own in the process's heap, there is no collection during the region, and the chunks join the heap at the join, followed by a collection if one is due. A team thread starts with a null `merk_heap`, so its first allocation takes the slow path, which attaches it to the region's process. Array stores record their old-to-young pointers in per-thread buffers, merged at the join. This needs no roots from inside the region, where heap values in the structs of shared variables and in reductions' private copies are hidden from stack maps. A long loop that allocates a lot can use a lot of memory.
+- Version 3, only if version 2's memory use proves a real problem: the process's collector stops its region at a barrier, which needs safepoints and root maps through outlined code.
+
+**Target regions.** A `target` region can block for seconds, so it does not hold a worker: it runs on a thread of the blocking pool with the process suspended. Mapped arrays cannot move meanwhile, since only the process itself collects its heap.
+
+**Rules that follow.** `threadprivate` cannot be offered as it stands, since a process can change OS threads between regions. Clauses are per region, rather than set with `omp_set_num_threads`, whose state belongs to the thread. A program with processes and no directives pays for none of this.
+
+**Measured** on the in-tree libomp, in C with `pthread`s standing in for workers, on 48 cores, 2026-11-04. Each concurrent root gets its full team with correct reductions, so libomp needs nothing more for two processes in regions at once. But it does not share the cores: two roots asking for 48 got 48 each, 94 workers in all. `OMP_THREAD_LIMIT` does not cap the total, two roots with a limit of 4 each getting 4, so it cannot be our cap. A root's team threads are kept while the root lives, and are not lent to another root: 4 roots of 8 left 28 idle threads, and a further root of 8 started 7 more. They stay in the pool after a root exits. So the idle threads can reach workers × (team size - 1), 2,256 on 48 cores if every worker thread once ran a full team, which costs memory rather than CPU. Long-lived workers and spare threads keep the roots few and reused. Still to measure, on Merkurius programs: the blocktime's cost to starting a loop, the idle threads' memory, and how far oversubscription hurts.
+
+Rejected:
+
+- **One pool, with a region borrowing the scheduler's workers**, as first planned here. It would avoid oversubscription, but libomp creates its workers itself, with `pthread_create` in `__kmp_create_worker`, and offers no way to supply them, so we would carry a patch to libomp or write our own `__kmpc_*` runtime. `target` regions depend on libomp too. To be revisited only if oversubscription is measured to hurt.
+- **Sizing a team from the idle count alone**, without a claim. Two processes can read the same count and take the same workers.
+- **Running a region on the worker's system stack**, as Go does for foreign calls, proposed while process stacks moved. Stacks no longer move, so it has no use.
 
 ### Support for open terms
 
@@ -2379,7 +2417,7 @@ Seven decisions remain open. The two that most constrain the runtime are the non
 **Open questions**
 
 - [ ] Nondeterminism: continuation passing with stop flags, or an explicit choice-point stack.
-- [ ] Process stacks: grow by copying, or segmented.
+- [x] Process stacks: a fixed size given at spawn, in lazily committed slots, with a limit check on entry to procedures on cycles (Runtime system, "Processes and scheduler").
 - [ ] When to adopt language changes made after 22.01.
 - [ ] Contact with the Mercury team, as a courtesy and for questions the documents leave open. Their `LICENSE` file offers alternative arrangements if the licences do not suit.
 - [ ] Sharing in local message copies: keep shared ground subterms, which needs a visited map, or expand them as Erlang does. Variable identity is always kept.
