@@ -1560,6 +1560,15 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
     call = merk::CallOp::create(builder_, loc,
         proc.getFunctionType().getResults(), proc.getSymName(), inputs);
   }
+  // A call that never succeeds ends the branch it is in, which then need not
+  // bind what the other branches bind.
+  if (std::optional<parser::Determinism> determinism{
+          determinism_.DeterminismOf(callee)};
+      determinism && (*determinism == parser::Determinism::Erroneous ||
+                         *determinism == parser::Determinism::Failure)) {
+    merk::FailOp::create(builder_, loc);
+    return;
+  }
   for (auto [var, result] : llvm::zip(outputs, call->getResults())) {
     if (!var) {
       continue;
