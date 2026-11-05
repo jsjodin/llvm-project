@@ -58,9 +58,19 @@ a constant, ahead of a size it does not depend on.
 | `Parser/convert-goals.cpp` | 11 | Done, in 2 stages: the fields, lambda expressions, data terms, trace conditions and loop iterators, then goals, DCG goals and clauses |
 | `Semantics/desugar.cpp` | 8 | Done, in 2 stages: unifications, implications and clause heads, then try, atomic and loop goals |
 | `Semantics/resolve-names.cpp` | 8 | Done, in 2 stages: declaring names, then looking them up and resolving goals |
-| The other 16 files in `lib/` and `runtime/` | 41 | Not started; the largest are `types.cpp` (6) and `convert.cpp` (5) |
+| `Semantics/types.cpp` | 6 | Done: the walks over a type, and printing a type's arguments |
+| The other 15 files in `lib/` and `runtime/` | 35 | Not started; the largest is `convert.cpp` (5) |
 
 The unit tests' few are left unless they turn out to get in the way.
+
+**Duplicates found.** Once they are functions, helpers that do the same job
+show, which as lambdas they hid. They are left as they are during this
+refactoring, which changes nothing else, and listed here to merge afterwards.
+
+| Functions | File | What they share |
+| --- | --- | --- |
+| `TypeContext::Substitute`, `TypeContext::SubstituteExistentials` | `Semantics/types.cpp` | The rebuilding walk over a type's parts, visiting each once; they differ in the leaf replaced, a variable or an existential type |
+| `ForEachVariable`, `ForEachExistential` | `Semantics/types.cpp` | The walk over a type's parts, visiting each once; they differ in the leaf passed to `f` |
 
 ## The order of the next pieces
 
