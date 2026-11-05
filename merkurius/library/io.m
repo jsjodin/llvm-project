@@ -153,6 +153,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+extern void merk_write_float(double);
 ").
 
 :- pragma foreign_proc("C",
@@ -230,21 +231,5 @@ write_uint32(N, !IO) :- write_uint(uint32.cast_to_uint(N), !IO).
     write_float(F::in, _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
-    char buffer[64];
-    if (isnan(F)) {
-        strcpy(buffer, \"nan\");
-    } else if (isinf(F)) {
-        strcpy(buffer, F < 0 ? \"-infinity\" : \"infinity\");
-    } else {
-        for (int precision = 15; precision <= 17; ++precision) {
-            snprintf(buffer, sizeof buffer, \"%.*g\", precision, F);
-            if (strtod(buffer, NULL) == F) {
-                break;
-            }
-        }
-        if (strpbrk(buffer, \".e\") == NULL) {
-            strcat(buffer, \".0\");
-        }
-    }
-    fputs(buffer, stdout);
+    merk_write_float(F);
 ").
