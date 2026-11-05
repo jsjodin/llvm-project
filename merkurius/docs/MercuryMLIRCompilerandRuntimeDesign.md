@@ -2345,6 +2345,80 @@ request(Server, MakeRequest, Timeout, Reply, !IO) :-
 
 Both predicates pass mmc 22.01.9's type, mode and determinism checks against the API in Language extensions, "Processes and mailboxes".
 
+### GPU processes
+
+A process may run on a GPU and exchange messages with processes on the CPU
+over PCIe, starting with a restricted version (decided 2026-11-05). It comes
+after processes and messaging on the CPU and after OpenMP offload, since it
+builds on both. This is the direction; how it works in detail is still to be
+designed.
+
+**A GPU is a node.** The design already has remote mailboxes and remote spawn
+("Remote mailboxes, sendability and failure" and "Remote spawn"
+above), and a GPU fits them as a node of its own:
+
+- **Handles** carry the node identifier, so a mailbox on the GPU is named by a
+  value like any other, as the invariant "a mailbox handle is a value" allows.
+- **Closures do not cross.** The device image is another binary, so closures
+  are not sent, and a GPU process is spawned by its kind's name from its
+  `:- process` declaration, as on a node running another program. `spawn`'s
+  closure form is not used for the GPU.
+- **Messages are copied** into a flat buffer driven by the `type_info`, as
+  `send` already deep-copies into a fragment. The sendability rule applies,
+  and the GPU adds to what cannot cross: foreign handles, `io`, `store` and
+  mutable references are already excluded, and closures are too.
+- **The protocol is the message type.** `mailbox(M)` says which messages may
+  be sent, and a message's constructor stands for the kind of communication.
+  The order of messages is not checked, as between CPU processes; session
+  types could be considered later.
+
+**The transport is LLVM libc's GPU RPC** (`libc/shared/rpc.h`): a `Client` on
+the device and a `Server` on the host exchange fixed-size buffers through
+ports in pinned host memory, with an opcode header, and the offload plugins
+already run its server (`offload/plugins-nextgen/common/src/RPC.cpp`). It
+builds for amdgpu, so it covers gfx1030. A host thread bridges its server to
+the CPU scheduler's mailboxes. Rejected: a transport of our own, which would
+redo libc's handling of lanes, ports and memory ordering; and one heap shared
+through unified memory, which needs fine-grained coherence that not every
+platform has (PCIe atomics), and breaks the invariant that a message lives in
+a fragment of its own.
+
+**The restricted first version:**
+
+1. `send` and `receive` on the device for flat message types only (no
+   pointers), over libc's RPC, with the host bridge.
+2. Spawning a GPU process by kind name, as a persistent kernel, from the CPU
+   only.
+3. Deep-copied messages through the `type_info`, with sendability checked at
+   compile time.
+
+Not in it: spawning from the GPU, monitors and links, selectors over several
+mailboxes, timeouts other than polling, and garbage collection on the device.
+
+**Questions for the design:**
+
+- **Waiting.** A GPU process cannot block; it polls its mailbox, sleeping
+  between polls (`s_sleep` on AMD), and occupies a compute unit while it lives.
+  The host's server thread must always run, or a host waiting for the kernel
+  and a kernel waiting for the host deadlock.
+- **What a process is on a GPU:** a wavefront or a work-group, not a lane,
+  with one lane using the mailbox for all of them or one port slot per lane as
+  libc's RPC does. Between messages it may run data-parallel loops.
+- **Its heap:** chunks of device memory reserved at launch, bump-allocated.
+  Without a collector on the device, a process is short-lived or resets its
+  heap between messages.
+- **Memory coherence:** fine-grained host memory with system-scope atomics
+  where the platform supports PCIe atomics, and coarse-grained memory with
+  explicit fences and polling otherwise.
+- **Latency:** a round trip over PCIe takes microseconds, so messages should
+  carry work items and results, not fine-grained traffic.
+
+**Later: GPU to GPU.** Two GPU processes on different devices exchange messages
+the same way, as two nodes. The first version relays them through the host;
+direct transfers over peer-to-peer PCIe, or AMD's Infinity Fabric links, need
+mailboxes in device memory that the other device maps, and are designed when
+that is added.
+
 ### Security
 
 Connections between nodes are encrypted and authenticated, as with TLS. For data that must stay secret from relays, a library type `sealed(T)` holds ciphertext tagged with its plaintext type:
