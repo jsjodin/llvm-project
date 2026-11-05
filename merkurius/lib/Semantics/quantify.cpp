@@ -162,6 +162,9 @@ private:
   // nonlocal variables. `outside` holds the variables, renamed, that occur
   // outside it.
   Goal Rebuild(const Goal &, const Set &outside);
+  // Rebuilds a goal to which the variables that occur only in it are local.
+  Goal RebuildLocal(const Goal &, const Set &outside);
+  Catch RebuildCatch(const Catch &, const Set &outside);
 
   // The outside of each conjunct of `goals`, from `table`.
   std::vector<Set> ConjunctOutsides(llvm::ArrayRef<Goal> goals,
@@ -547,19 +550,32 @@ void Quantifier::Claim(
   }
 }
 
+Goal Quantifier::RebuildLocal(const Goal &goal, const Set &outside) {
+  Local scope{Begin(all_[GoalNumber(goal)], outside)};
+  Goal result{Rebuild(goal, outside)};
+  End(std::move(scope));
+  return result;
+}
+
+Catch Quantifier::RebuildCatch(const Catch &c, const Set &outside) {
+  unsigned p{GoalNumber(c.pattern)}, b{GoalNumber(c.goal)};
+  Set occurring{all_[p]};
+  occurring |= all_[b];
+  Add(occurring, c.exception);
+  Local scope{Begin(occurring, outside)};
+  VarId exception{MapVar(c.exception)};
+  Set patternOut{Union(outside, Map(free_[b]))};
+  Add(patternOut, exception);
+  Set bodyOut{Union(outside, Map(free_[p]))};
+  Add(bodyOut, exception);
+  Catch result{c.tokens, exception, Rebuild(c.pattern, patternOut),
+      Rebuild(c.goal, bodyOut)};
+  End(std::move(scope));
+  return result;
+}
+
 Goal Quantifier::Rebuild(const Goal &goal, const Set &outside) {
   Record(goal, outside);
-  auto with{[&](const Set &base, const Set &extra) {
-    Set result{base};
-    result |= Map(extra);
-    return result;
-  }};
-  auto local{[&](const Goal &g, const Set &out) {
-    Local scope{Begin(all_[GoalNumber(g)], out)};
-    Goal result{Rebuild(g, out)};
-    End(std::move(scope));
-    return result;
-  }};
   return std::visit(
       common::visitors{
           [&](const Conj *conj) -> Goal {
@@ -575,7 +591,7 @@ Goal Quantifier::Rebuild(const Goal &goal, const Set &outside) {
           [&](const Disj *disj) -> Goal {
             llvm::SmallVector<Goal, 4> goals;
             for (const Goal &g : disj->goals) {
-              goals.push_back(local(g, outside));
+              goals.push_back(RebuildLocal(g, outside));
             }
             return Make<Disj>(
                 disj->tokens, disj->number, Save(llvm::ArrayRef<Goal>{goals}));
@@ -596,7 +612,7 @@ Goal Quantifier::Rebuild(const Goal &goal, const Set &outside) {
               Add(pair, scope->vars);
             }
             Claim(pair, outside, both.id);
-            Set conditionOutside{with(outside, free_[t])};
+            Set conditionOutside{Union(outside, Map(free_[t]))};
             Goal newCondition{Rebuild(condition, conditionOutside)};
             if (scope) {
               nonlocals_[scope->number] = nonlocals_[c];
@@ -604,15 +620,15 @@ Goal Quantifier::Rebuild(const Goal &goal, const Set &outside) {
                   scope->kind, scope->origin, SaveMapped(scope->vars),
                   newCondition);
             }
-            Goal then{Rebuild(ite->then, with(outside, free_[c]))};
+            Goal then{Rebuild(ite->then, Union(outside, Map(free_[c])))};
             End(std::move(both));
-            Goal otherwise{local(ite->otherwise, outside)};
+            Goal otherwise{RebuildLocal(ite->otherwise, outside)};
             return Make<IfThenElse>(
                 ite->tokens, ite->number, newCondition, then, otherwise);
           },
           [&](const Not *negation) -> Goal {
             return Make<Not>(negation->tokens, negation->number,
-                local(negation->goal, outside));
+                RebuildLocal(negation->goal, outside));
           },
           [&](const Unify *unify) -> Goal {
             Qualifications(unify->tokens);
@@ -688,36 +704,20 @@ Goal Quantifier::Rebuild(const Goal &goal, const Set &outside) {
             Set pair{all_[g]};
             pair |= all_[th];
             Local both{Begin(pair, out)};
-            Goal tried{Rebuild(t->goal, with(out, free_[th]))};
-            Goal then{Rebuild(t->then, with(out, free_[g]))};
+            Goal tried{Rebuild(t->goal, Union(out, Map(free_[th])))};
+            Goal then{Rebuild(t->then, Union(out, Map(free_[g])))};
             End(std::move(both));
             std::optional<Goal> otherwise;
             if (t->otherwise) {
-              otherwise = local(*t->otherwise, out);
+              otherwise = RebuildLocal(*t->otherwise, out);
             }
-            auto branch{[&](const Catch &c) {
-              unsigned p{GoalNumber(c.pattern)}, b{GoalNumber(c.goal)};
-              Set occurring{all_[p]};
-              occurring |= all_[b];
-              Add(occurring, c.exception);
-              Local scope{Begin(occurring, out)};
-              VarId exception{MapVar(c.exception)};
-              Set patternOut{with(out, free_[b])};
-              Add(patternOut, exception);
-              Set bodyOut{with(out, free_[p])};
-              Add(bodyOut, exception);
-              Catch result{c.tokens, exception, Rebuild(c.pattern, patternOut),
-                  Rebuild(c.goal, bodyOut)};
-              End(std::move(scope));
-              return result;
-            }};
             llvm::SmallVector<Catch, 2> catches;
             for (const Catch &c : t->catches) {
-              catches.push_back(branch(c));
+              catches.push_back(RebuildCatch(c, out));
             }
             std::optional<Catch> catchAny;
             if (t->catchAny) {
-              catchAny = branch(*t->catchAny);
+              catchAny = RebuildCatch(*t->catchAny, out);
             }
             return Make<Try>(t->tokens, t->number, io, tried, then, otherwise,
                 Save(llvm::ArrayRef<Catch>{catches}), catchAny);
