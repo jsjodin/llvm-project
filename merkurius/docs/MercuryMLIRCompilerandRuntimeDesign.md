@@ -659,7 +659,7 @@ The mmc 22.01.9 bugs found so far, to report to the Mercury developers once each
 - **Type fingerprints.** Each exported type gets a fingerprint of its definition, stored in the interface file. The same fingerprints identify types in the distribution handshake (Distribution and wire format).
 - **Optimization section.** An optional section carries the semantic forms of selected bodies, for intermodule inlining and specialization, and analysis results.
   - **What it exports.** A procedure's body goes in if the procedure is polymorphic, takes higher-order arguments or is small; otherwise only its signature does. Those are the bodies a caller gains from: without them a caller cannot specialize or devirtualize, and mmc without `--intermodule-optimization` calls `array.unsafe_lookup` out of line for each element. The interface section stays the export list: what the optimization section carries gives the importer's optimizer more to work with, and no new names to the importer's source.
-  - **Two parts, two rebuild rules.** The signature part is the documented contract, and a change to it rebuilds every importer. The optimization section is the compiler's, and a change to a body in it rebuilds only the importers that inlined or specialized that body. The exception is a body exposed with an explicit pragma, which is part of the contract, as a C++ header is. This is designed, and depends on the interface-file format below; nothing reads or writes the section yet.
+  - **Two parts, two rebuild rules.** The signature part is the documented contract, and a change to it rebuilds every importer. The optimization section is the compiler's, and a change to a body in it rebuilds only the importers that inlined or specialized that body. The exception is a body exposed with `pragma inline`, which is part of the contract, as a C++ header is (Optimizations, "`pragma inline`"). This is designed, and depends on the interface-file format below; nothing reads or writes the section yet.
 - **Build driver.** It computes module dependencies from imports and rebuilds only what changed, like `mmc --make` (Driver, Build mode).
 - **Implementation so far.** Until there are interface files, the module loader reads an imported module's interface from its source. Name resolution needs only the declarations, as parse-tree nodes, and the source's interface section has them all; the interface-file format becomes necessary for what is not in the source, such as type representations, fingerprints and the optimization section, and for compiling against a library that ships without its source.
   - **Finding a module.** `name.m` is looked for in the importing module's directory, then the `-I` directories, then the library directory. A file whose `:- module` names another module is an error.
@@ -2365,7 +2365,7 @@ Most general-purpose optimization comes from LLVM. The Mercury-specific work tha
 | Last-call-modulo-constructors | `merk` to `mrt` | Destination passing turns list-building recursion into loops; on by default | High |
 | Higher-order specialization | `merk` | Closures become direct calls. In mmc this turned `fold_up` into a local loop calling the body directly | High |
 | Type specialization | `merk` | Removes `type_info` passing and boxing; automatic at `-O2`, plus the `type_spec` pragma (below) | High |
-| Intermodule inlining and specialization | Interface files | Bodies of small exported procedures travel in the optimization section | High |
+| Intermodule inlining and specialization | Interface files | Bodies of polymorphic, higher-order, small and `pragma inline` procedures travel in the optimization section | High |
 | Parallel loop formation | `merk` | From `%$omp` on `fold_up`, array iterators and counted recursion | High |
 | Switch optimization | `merk`, `cf` | Jump tables, lookup tables, string switches | Medium |
 | Escape analysis | `merk` | Cells that never leave a procedure go on the stack, saving nursery traffic | Medium |
@@ -2405,12 +2405,45 @@ So a method or closure call costs two to three times the monomorphic loop over a
 Two rules follow.
 
 - **Specialization is automatic.** At its default options mmc did not specialize the polymorphic version; it needed the `type_spec` pragma. At `-O2`, when a call passes a `type_info` or `typeclass_info` known at compile time, merkc clones the callee for that type, within a module and across modules through the optimization section of interface files: C++ templates, with the compiler choosing the instances. Polymorphism analysis already finds these calls, those whose `type_info`s and `typeclass_info`s are all constants and cells of constants (Semantic analysis, "Polymorphism analysis"). A user who cares about speed then writes ordinary polymorphic code, and the pragma stays for a type the compiler cannot see, such as one a caller in another program uses.
-- **What exists so far.** Only the simplest case: a method called at an instance known in the caller, whose body is in the same module, is a direct call (Lowering, "Type classes"). A polymorphic callee given a known dictionary is not cloned yet, so a loop in it still dispatches. No chunk's steps schedule the clones, nor the optimization section they need across modules ("Modules and interface files").
+- **What exists so far.** Only the simplest case: a method called at an instance known in the caller, whose body is in the same module, is a direct call (Lowering, "Type classes"). A polymorphic callee given a known dictionary is not cloned yet, so a loop in it still dispatches. No chunk's steps schedule the clones, `pragma inline` (below) or the optimization section they need across modules ("Modules and interface files"); they are one piece of work.
 - **Failures are visible.** If a `%$omp` loop still contains a generic `unify`, a generic `compare` or a closure call that specialization did not resolve, merkc emits a remark naming it, as Clang's `-Rpass-missed` does. Inside a target region it is an error (Language extensions, "Target regions").
 
 Some code stays dynamic: existential types, such as the generic dispatchers, `univ`, and data structures that store closures. That is the same as virtual calls and `std::function` in C++, and under the cost rule only code that uses those features pays for them.
 
 **For later:** packed arrays, such as `array(int8)`, or `array(float32)` if that type is added, would make polymorphic code over `array(T)` read the element size from the `type_info`. Specialization removes that cost in hot code too.
+
+### `pragma inline`
+
+Automatic specialization decides for itself, so a programmer cannot rely on it to remove polymorphism. `pragma inline` is how to ask for that and be told if it did not happen. This is designed; the pragma parses, and nothing acts on it yet.
+
+- **The promise.** At a call whose types are known, a procedure marked `pragma inline` is inlined or cloned for those types, and the call passes no `type_info` or `typeclass_info` for them. Which of the two is the compiler's choice: a recursive procedure cannot be expanded completely, so it is cloned, and the clone calls itself directly.
+- **When it cannot be kept.** A call's types may be unknown even after its caller has been specialized, a type may have polymorphic recursion, whose instances have no end, or a `foreign_proc` may not be duplicated (below). merkc then compiles the ordinary call and gives a remark naming it, as with "Failures are visible" above. Inside a target region it is an error, since a device has no dictionaries (Language extensions, "Target regions"). A polymorphic caller's own call is not reported as long as the caller's clones resolve it; only what is left after specialization is.
+- **At every optimization level.** The promise does not depend on `-O`, so a target region that compiles at `-O2` also compiles at `-O0`, and a program does not change which of its calls dispatch when it is debugged. Automatic specialization of unmarked procedures stays at `-O2`.
+- **Duplication.** The manual tells a `foreign_proc` with labels or static variables to have `pragma no_inline` or `may_not_duplicate`, because inlining would duplicate its C code. merkc therefore never inlines or clones such a procedure, whatever else is marked. `pragma no_inline` on a procedure without foreign code stops inlining but not a clone, since a clone is what removes the dictionary without growing each call site.
+- **Across modules.** A marked exported procedure's body goes in the interface file whatever its size, and is part of its contract, so a change to it rebuilds every importer ("Modules and interface files"). What the body calls becomes a visible symbol for the linker, but not a name in importers' source, as with Swift's `@usableFromInline`; the interface section stays the export list. A marked procedure in the implementation section is inlined within its module.
+- **The form in the interface file.** The type-checked semantic form, with its names resolved. Inlining substitutes the known types into it, which gives the same monomorphic code that re-inferring it would, and it means the same in every importer.
+- **How close to one file.** A marked procedure's body reaches the same specializer in an importer as in its own module, so at a call with known types the expected code is the same as if it were in one file. That holds as far as bodies travel. An unmarked procedure that a marked body calls, if it is not polymorphic, higher-order or small, has only its signature in the interface file, so it stays a real call, where in one file LLVM could inline it. C in a `foreign_proc` is compiled by Clang and stays a call in either case. Link-time optimization is what would close those gaps. None of this has been measured, as nothing is implemented; once it is, the comparison to run is the same program in one module and in two.
+- **The pass.** Inlining and cloning happen in the `merk` specializer, the same pass as automatic specialization, because that is where instances are still visible (MLIR dialects). `pragma inline` makes the pass act on a procedure and report the outcome; it is not a second mechanism. `pragma type_spec` stays for a type no call in the program shows.
+- **Compatibility.** The manual calls `pragma inline` "a hint to the compiler", so doing more than mmc does is within it, and a program means the same under both compilers: only its speed differs. No new syntax is needed, so the same source compiles with mmc.
+
+**Rejected alternatives**
+
+- **A hint, as in mmc.** Nothing tells a programmer that a hot loop still dispatches, which is the problem this solves. The compiler's own inlining of small procedures remains the unmarked case.
+- **Source in the interface file,** so that type inference works on the body in each importer, as Swift does for `@inlinable`. Re-checking repeats work in every importer, and a body's overloads could resolve differently in the importer's scope, so the check has to be made against the defining module's declarations anyway. It would gain only what substituting types into a typed body already gives. Swift needs textual interfaces for binary compatibility across compiler versions, and that does not apply here.
+- **A new keyword or syntax.** Programs would stop compiling with mmc, which our tests compare against, and the pragma already exists with a compatible meaning.
+- **Separate pragmas for inlining and cloning,** as GHC has `INLINE`, `INLINABLE` and `SPECIALIZE`. What the programmer wants is that the polymorphism goes; the choice between the two depends on recursion and size, which the compiler knows.
+- **LLVM's `alwaysinline`.** By then a dictionary is loads and an indirect call, which LLVM would have to recover, and it knows nothing of a recursive procedure's clones. gcc did not devirtualize even a constant closure in the measurement above.
+
+**What other languages do,** from their documentation rather than from measurements here:
+
+| Language | Construct | What crosses the module boundary |
+| --- | --- | --- |
+| Swift | `@inlinable`, `@usableFromInline` | Source text in `.swiftinterface`, or serialized SIL in `.swiftmodule` |
+| GHC Haskell | `INLINE`, `INLINABLE`, `SPECIALIZE` | Typed Core in `.hi` files, which is what this design most resembles |
+| Rust | Generics, `#[inline]` | MIR in crate metadata |
+| C++ | Templates, `inline` | Source, in headers |
+| Kotlin | `inline`, `reified` | Bytecode of the inline function |
+| Mercury (mmc) | `pragma inline`, `pragma type_spec` | `.opt` files, with `--intermodule-optimization` |
 
 ## Standard library, compatibility and testing
 
