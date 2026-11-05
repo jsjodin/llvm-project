@@ -269,6 +269,8 @@ private:
   // that the second has the same constructor and equal arguments.
   merk::ProcOp UnifyProc(merk::TermType);
   merk::ProcOp UnifyArrayProc();
+  // Element `index` of an array of words.
+  mlir::Value ArrayWord(mlir::Value array, mlir::Value index, mlir::Location);
   // Comparison in the standard ordering (reference manual, "The standard
   // ordering"), as unification: compare.T for a term type, made the first
   // time, one procedure for arrays, and the value of a comparison, null after
@@ -284,6 +286,15 @@ private:
   mlir::Value IsComparison(
       mlir::Value result, llvm::StringRef functor, mlir::Location);
   mlir::Value ThreeWay(mlir::Value less, mlir::Value greater, mlir::Location);
+  // The comparison `functor` if `condition` holds, or else what `otherwise`
+  // makes, in the else part.
+  mlir::Value ComparisonIf(mlir::Value condition, llvm::StringRef functor,
+      mlir::Location, llvm::function_ref<mlir::Value()> otherwise);
+  // Succeeds at once with `value`, if `condition` holds.
+  void SucceedIf(mlir::Value condition, mlir::Value value, mlir::Location);
+  // A term's constructor's place among `cases`, the cases of a switch on it.
+  mlir::Value ConstructorIndex(
+      mlir::Value term, mlir::ArrayAttr cases, mlir::Location);
   // A call of builtin's compare, its operators, ordering or unify.
   bool CompareBuiltin(const Body &, const Procedure &,
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
@@ -367,9 +378,19 @@ private:
   // Whether what a clause gives can be made at the end of the body.
   bool CanMake(const semantics::TypeInfo &);
   bool CanMake(const semantics::Dictionary &);
+  template <typename Range> bool CanMakeAll(const Range &nodes) {
+    return llvm::all_of(nodes, [&](const auto *node) { return CanMake(*node); });
+  }
   // The type_info a goal passes for a type that has types goals gave, which
   // has no procedure of its own to test or compare it.
   mlir::Value GivenTypeInfo(const Body &, const semantics::Type *, mlir::Location);
+  // Add a call's hidden input to `inputs`; after an error, failed_ is set.
+  void PassTypeInfo(const semantics::TypeInfo &,
+      llvm::SmallVectorImpl<mlir::Value> &inputs, mlir::Location,
+      parser::CharBlock at);
+  void PassDictionary(const semantics::Dictionary &,
+      llvm::SmallVectorImpl<mlir::Value> &inputs, mlir::Location,
+      parser::CharBlock at);
   // The symbol of an instance's method table, declaring it if it is new.
   std::string InstanceSymbol(const semantics::InstanceHead &);
   // A procedure with no body yet, its inputs `hidden` and then its modes' and
@@ -766,18 +787,14 @@ bool MerkGenerator::CanMake(const semantics::TypeInfo &info) {
 }
 
 bool MerkGenerator::CanMake(const semantics::Dictionary &dictionary) {
-  auto typeInfo{[&](const semantics::TypeInfo *info) { return CanMake(*info); }};
-  auto other{[&](const semantics::Dictionary *d) { return CanMake(*d); }};
   switch (dictionary.kind) {
   case semantics::DictionaryKind::Output:
     return static_cast<bool>(Given(&dictionary));
   case semantics::DictionaryKind::Superclass:
     return CanMake(*dictionary.from);
   default:
-    return llvm::all_of(dictionary.typeInfos, typeInfo) &&
-        llvm::all_of(dictionary.types, typeInfo) &&
-        llvm::all_of(dictionary.premises, other) &&
-        llvm::all_of(dictionary.supers, other);
+    return CanMakeAll(dictionary.typeInfos) && CanMakeAll(dictionary.types) &&
+        CanMakeAll(dictionary.premises) && CanMakeAll(dictionary.supers);
   }
 }
 
@@ -1493,6 +1510,22 @@ void MerkGenerator::Call(const Body &goal, const Procedure &callee,
   Called(goal, callee, arguments, body);
 }
 
+void MerkGenerator::PassTypeInfo(const semantics::TypeInfo &info,
+    llvm::SmallVectorImpl<mlir::Value> &inputs, mlir::Location loc,
+    parser::CharBlock at) {
+  mlir::Value value{TypeInfoValue(info, loc, at)};
+  inputs.push_back(value);
+  failed_ = failed_ || !value;
+}
+
+void MerkGenerator::PassDictionary(const semantics::Dictionary &dictionary,
+    llvm::SmallVectorImpl<mlir::Value> &inputs, mlir::Location loc,
+    parser::CharBlock at) {
+  mlir::Value value{DictionaryValue(dictionary, loc, at)};
+  inputs.push_back(value);
+  failed_ = failed_ || !value;
+}
+
 void MerkGenerator::Called(const Body &goal, const Procedure &callee,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
   if (Builtin(goal, callee, arguments, body)) {
@@ -1575,23 +1608,13 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
   }
   llvm::SmallVector<mlir::Value> inputs;
   mlir::Value dictionary;
-  auto passInfo{[&](const semantics::TypeInfo &info) {
-    mlir::Value value{TypeInfoValue(info, loc, at)};
-    inputs.push_back(value);
-    failed_ = failed_ || !value;
-  }};
-  auto passDictionary{[&](const semantics::Dictionary &given) {
-    mlir::Value value{DictionaryValue(given, loc, at)};
-    inputs.push_back(value);
-    failed_ = failed_ || !value;
-  }};
   if (direct) {
     // The instance's hidden arguments come first.
     for (const semantics::TypeInfo *info : known->typeInfos) {
-      passInfo(*info);
+      PassTypeInfo(*info, inputs, loc, at);
     }
     for (const semantics::Dictionary *premise : known->premises) {
-      passDictionary(*premise);
+      PassDictionary(*premise, inputs, loc, at);
     }
   }
   // What this goal gives, in the order of the callee's first results.
@@ -1601,7 +1624,7 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
       if (info->kind == semantics::TypeInfoKind::Output && info->goal == &goal) {
         gives.push_back(info);
       } else {
-        passInfo(*info);
+        PassTypeInfo(*info, inputs, loc, at);
       }
     }
     for (auto [i, given] : llvm::enumerate(passed->dictionaries)) {
@@ -1609,7 +1632,7 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
           given->goal == &goal) {
         gives.push_back(given);
       } else if (!isMethod || i != 0) {
-        passDictionary(*given);
+        PassDictionary(*given, inputs, loc, at);
       } else if (!direct) {
         // A method's type class's comes first, and chooses the procedure.
         dictionary = DictionaryValue(*given, loc, at);
@@ -2151,6 +2174,12 @@ llvm::SmallVector<unsigned> MerkGenerator::VariablesOf(
   return variables;
 }
 
+mlir::Value MerkGenerator::ArrayWord(
+    mlir::Value array, mlir::Value index, mlir::Location loc) {
+  return merk::ArrayGetOp::create(
+      builder_, loc, merk::WordType::get(&context_), array, index);
+}
+
 // An array's elements are words whatever its type, so one procedure serves.
 merk::ProcOp MerkGenerator::UnifyArrayProc() {
   if (unifyArray_) {
@@ -2180,13 +2209,10 @@ merk::ProcOp MerkGenerator::UnifyArrayProc() {
             builder_, loc, mlir::arith::CmpIPredicate::slt, i, n));
     merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
     builder_.setInsertionPointToStart(&ite.getThenRegion().emplaceBlock());
-    auto element{[&](unsigned argument) -> mlir::Value {
-      return merk::ArrayGetOp::create(
-          builder_, loc, word, entry->getArgument(argument), i);
-    }};
     merk::GuardOp::create(builder_, loc,
         merk::UnifyWordOp::create(builder_, loc, builder_.getI1Type(),
-            entry->getArgument(0), element(1), element(2)));
+            entry->getArgument(0), ArrayWord(entry->getArgument(1), i, loc),
+            ArrayWord(entry->getArgument(2), i, loc)));
     mlir::Value next{mlir::arith::AddIOp::create(
         builder_, loc, i, IntegerConstant(i64, 1, loc))};
     merk::CallOp::create(builder_, loc, mlir::TypeRange{}, from.getSymName(),
@@ -2300,24 +2326,27 @@ mlir::Value MerkGenerator::IsComparison(
 
 mlir::Value MerkGenerator::ThreeWay(
     mlir::Value less, mlir::Value greater, mlir::Location loc) {
-  mlir::Type type{*ComparisonType()};
-  auto choose{[&](mlir::Value condition, llvm::StringRef functor,
-                  llvm::function_ref<mlir::Value()> otherwise) -> mlir::Value {
-    auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{type})};
-    mlir::OpBuilder::InsertionGuard guard{builder_};
-    builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
-    merk::GuardOp::create(builder_, loc, condition);
-    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
-    builder_.setInsertionPointToStart(&ite.getThenRegion().emplaceBlock());
-    merk::YieldOp::create(
-        builder_, loc, mlir::ValueRange{ComparisonValue(functor, loc)});
-    builder_.setInsertionPointToStart(&ite.getElseRegion().emplaceBlock());
-    merk::YieldOp::create(builder_, loc, mlir::ValueRange{otherwise()});
-    return ite.getResult(0);
-  }};
-  return choose(less, "<", [&] {
-    return choose(greater, ">", [&] { return ComparisonValue("=", loc); });
+  return ComparisonIf(less, "<", loc, [&] {
+    return ComparisonIf(
+        greater, ">", loc, [&] { return ComparisonValue("=", loc); });
   });
+}
+
+mlir::Value MerkGenerator::ComparisonIf(mlir::Value condition,
+    llvm::StringRef functor, mlir::Location loc,
+    llvm::function_ref<mlir::Value()> otherwise) {
+  auto ite{merk::IteOp::create(
+      builder_, loc, mlir::TypeRange{*ComparisonType()})};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
+  merk::GuardOp::create(builder_, loc, condition);
+  merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  builder_.setInsertionPointToStart(&ite.getThenRegion().emplaceBlock());
+  merk::YieldOp::create(
+      builder_, loc, mlir::ValueRange{ComparisonValue(functor, loc)});
+  builder_.setInsertionPointToStart(&ite.getElseRegion().emplaceBlock());
+  merk::YieldOp::create(builder_, loc, mlir::ValueRange{otherwise()});
+  return ite.getResult(0);
 }
 
 mlir::Value MerkGenerator::Compare(mlir::Value x, mlir::Value y,
@@ -2397,6 +2426,33 @@ mlir::Value MerkGenerator::Compare(mlir::Value x, mlir::Value y,
       .getResult(0);
 }
 
+void MerkGenerator::SucceedIf(
+    mlir::Value condition, mlir::Value value, mlir::Location loc) {
+  auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
+  merk::GuardOp::create(builder_, loc, condition);
+  merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  builder_.setInsertionPointToStart(&ite.getThenRegion().emplaceBlock());
+  merk::SucceedOp::create(builder_, loc, mlir::ValueRange{value});
+  builder_.setInsertionPointToStart(&ite.getElseRegion().emplaceBlock());
+  merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+}
+
+mlir::Value MerkGenerator::ConstructorIndex(
+    mlir::Value term, mlir::ArrayAttr cases, mlir::Location loc) {
+  mlir::Type i64{builder_.getI64Type()};
+  auto op{merk::SwitchOp::create(builder_, loc, mlir::TypeRange{i64}, term,
+      cases, /*canFail=*/false)};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  for (auto [i, region] : llvm::enumerate(op.getCaseRegions())) {
+    builder_.setInsertionPointToStart(&region.emplaceBlock());
+    merk::YieldOp::create(
+        builder_, loc, mlir::ValueRange{IntegerConstant(i64, i, loc)});
+  }
+  return op.getResult(0);
+}
+
 merk::ProcOp MerkGenerator::CompareProc(merk::TermType term) {
   if (merk::ProcOp proc{compareProcs_.lookup(term.getName())}) {
     return proc;
@@ -2453,39 +2509,18 @@ merk::ProcOp MerkGenerator::CompareProc(merk::TermType term) {
     cases.push_back(builder_.getArrayAttr({merk::FunctorAttr::get(&context_,
         constructor.functor.name, constructor.functor.arity)}));
   }
-  auto succeedIf{[&](mlir::Value condition, mlir::Value value) {
-    auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
-    mlir::OpBuilder::InsertionGuard inner{builder_};
-    builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
-    merk::GuardOp::create(builder_, loc, condition);
-    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
-    builder_.setInsertionPointToStart(&ite.getThenRegion().emplaceBlock());
-    merk::SucceedOp::create(builder_, loc,
-        mlir::ValueRange{value});
-    builder_.setInsertionPointToStart(&ite.getElseRegion().emplaceBlock());
-    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
-  }};
   // Constructors in the order declared, by their position in it, which a
   // switch gives whatever their layout.
   if (constructors.size() > 1) {
-    auto indexOf{[&](mlir::Value value) -> mlir::Value {
-      auto op{merk::SwitchOp::create(builder_, loc, mlir::TypeRange{i64}, value,
-          builder_.getArrayAttr(cases), /*canFail=*/false)};
-      mlir::OpBuilder::InsertionGuard inner{builder_};
-      for (auto [i, region] : llvm::enumerate(op.getCaseRegions())) {
-        builder_.setInsertionPointToStart(&region.emplaceBlock());
-        merk::YieldOp::create(builder_, loc,
-            mlir::ValueRange{IntegerConstant(i64, i, loc)});
-      }
-      return op.getResult(0);
-    }};
-    mlir::Value xIndex{indexOf(x)}, yIndex{indexOf(y)};
-    succeedIf(mlir::arith::CmpIOp::create(builder_, loc,
+    mlir::ArrayAttr casesAttr{builder_.getArrayAttr(cases)};
+    mlir::Value xIndex{ConstructorIndex(x, casesAttr, loc)};
+    mlir::Value yIndex{ConstructorIndex(y, casesAttr, loc)};
+    SucceedIf(mlir::arith::CmpIOp::create(builder_, loc,
                   mlir::arith::CmpIPredicate::slt, xIndex, yIndex),
-        ComparisonValue("<", loc));
-    succeedIf(mlir::arith::CmpIOp::create(builder_, loc,
+        ComparisonValue("<", loc), loc);
+    SucceedIf(mlir::arith::CmpIOp::create(builder_, loc,
                   mlir::arith::CmpIPredicate::sgt, xIndex, yIndex),
-        ComparisonValue(">", loc));
+        ComparisonValue(">", loc), loc);
   }
   bool anyArguments{llvm::any_of(
       constructors, [](const semantics::ConstructorTypes &constructor) {
@@ -2574,12 +2609,9 @@ merk::ProcOp MerkGenerator::CompareArrayProc() {
             builder_, loc, mlir::arith::CmpIPredicate::slt, i, n));
     merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
     builder_.setInsertionPointToStart(&ite.getThenRegion().emplaceBlock());
-    auto element{[&](unsigned argument) -> mlir::Value {
-      return merk::ArrayGetOp::create(
-          builder_, loc, word, entry->getArgument(argument), i);
-    }};
     mlir::Value order{merk::CompareWordOp::create(builder_, loc, result,
-        entry->getArgument(0), element(1), element(2))};
+        entry->getArgument(0), ArrayWord(entry->getArgument(1), i, loc),
+        ArrayWord(entry->getArgument(2), i, loc))};
     auto differs{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
     {
       mlir::OpBuilder::InsertionGuard inner{builder_};
@@ -3604,24 +3636,29 @@ struct Kernel {
   mlir::omp::TargetExecMode mode{mlir::omp::TargetExecMode::generic};
   bool hostEvalBounds{false};
 };
+static bool IsDirectives(llvm::ArrayRef<llvm::omp::Directive> leaves,
+    std::initializer_list<llvm::omp::Directive> pattern) {
+  return llvm::equal(leaves, pattern);
+}
+
 static Kernel KernelOf(const omp::ConstructQueue &queue) {
   using llvm::omp::Directive;
   llvm::SmallVector<Directive> leaves;
   for (const omp::Leaf &leaf : queue) {
     leaves.push_back(leaf.id);
   }
-  auto is{[&](std::initializer_list<Directive> pattern) {
-    return llvm::equal(leaves, pattern);
-  }};
-  if (is({Directive::OMPD_target, Directive::OMPD_teams,
-          Directive::OMPD_distribute, Directive::OMPD_parallel,
-          Directive::OMPD_do}) ||
-      is({Directive::OMPD_target, Directive::OMPD_parallel,
-          Directive::OMPD_do})) {
+  if (IsDirectives(leaves,
+          {Directive::OMPD_target, Directive::OMPD_teams,
+              Directive::OMPD_distribute, Directive::OMPD_parallel,
+              Directive::OMPD_do}) ||
+      IsDirectives(leaves,
+          {Directive::OMPD_target, Directive::OMPD_parallel,
+              Directive::OMPD_do})) {
     return {mlir::omp::TargetExecMode::spmd, true};
   }
-  if (is({Directive::OMPD_target, Directive::OMPD_teams,
-          Directive::OMPD_distribute})) {
+  if (IsDirectives(leaves,
+          {Directive::OMPD_target, Directive::OMPD_teams,
+              Directive::OMPD_distribute})) {
     return {mlir::omp::TargetExecMode::generic, true};
   }
   return {};
@@ -4403,17 +4440,16 @@ mlir::Value MerkGenerator::MapArray(mlir::Value array,
   auto i64{builder_.getI64Type()};
   llvm::SmallVector<mlir::Value, 1> bounds;
   if (!target_.options().openMPIsTargetDevice) {
-    auto constant{[&](std::int64_t value) {
-      return IntegerConstant(i64, value, loc);
-    }};
     // Words 0 to the size.
     mlir::Value upper{merk::ArraySizeOp::create(builder_, loc, i64, array)};
     mlir::Value extent{
-        mlir::arith::AddIOp::create(builder_, loc, upper, constant(1))};
+        mlir::arith::AddIOp::create(
+            builder_, loc, upper, IntegerConstant(i64, 1, loc))};
     bounds.push_back(mlir::omp::MapBoundsOp::create(builder_, loc,
-        builder_.getType<mlir::omp::MapBoundsType>(), constant(0), upper,
-        extent, /*stride=*/constant(1), /*strideInBytes=*/false,
-        /*startIdx=*/constant(0)));
+        builder_.getType<mlir::omp::MapBoundsType>(),
+        IntegerConstant(i64, 0, loc), upper, extent,
+        /*stride=*/IntegerConstant(i64, 1, loc), /*strideInBytes=*/false,
+        /*startIdx=*/IntegerConstant(i64, 0, loc)));
   }
   mlir::Value pointer{
       mlir::UnrealizedConversionCastOp::create(builder_, loc, ptr, array)
@@ -4427,6 +4463,14 @@ mlir::Value MerkGenerator::MapArray(mlir::Value array,
       /*members=*/mlir::ValueRange{}, /*membersIndex=*/mlir::ArrayAttr{},
       bounds, /*mapperId=*/mlir::FlatSymbolRefAttr{},
       builder_.getStringAttr(name), builder_.getBoolAttr(false));
+}
+
+// Whether a variable named `text` is a version of the state variable !`name`,
+// the variable of that name that has a value.
+static bool IsStateVariableVersion(llvm::StringRef text, llvm::StringRef name) {
+  unsigned version;
+  return text.consume_front("STATE_VARIABLE_") && text.consume_front(name) &&
+      text.consume_front("_") && !text.getAsInteger(10, version);
 }
 
 // A structured data region: the arrays it maps stay on the device for its
@@ -4458,13 +4502,6 @@ void MerkGenerator::TargetData(const Body &goal, const ProcedureBody &body,
         semantics::DeterminismName(it->second));
     return;
   }
-  // The variable of a name: X itself, or the version of !X that has a value.
-  auto isVersion{[&](BodyVar var, llvm::StringRef name) {
-    llvm::StringRef text{body.vars[var].name};
-    unsigned version;
-    return text.consume_front("STATE_VARIABLE_") && text.consume_front(name) &&
-        text.consume_front("_") && !text.getAsInteger(10, version);
-  }};
   struct Mapped {
     llvm::StringRef name;
     BodyVar var;
@@ -4515,7 +4552,7 @@ void MerkGenerator::TargetData(const Body &goal, const ProcedureBody &body,
         }
         if (body.vars[var].name == name) {
           found = var;
-        } else if (isVersion(var, name)) {
+        } else if (IsStateVariableVersion(body.vars[var].name, name)) {
           found = var;
           state = true;
         }
@@ -4587,7 +4624,7 @@ void MerkGenerator::TargetData(const Body &goal, const ProcedureBody &body,
       continue;
     }
     for (auto &[var, slot, type] : outputs) {
-      if (!isVersion(var, m.name)) {
+      if (!IsStateVariableVersion(body.vars[var].name, m.name)) {
         continue;
       }
       if (!m.copiedBack) {
