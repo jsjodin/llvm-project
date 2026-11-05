@@ -3786,104 +3786,125 @@ ProcedureChecker::Result ProcedureChecker::CheckHigherOrderCall(
 }
 
 
-void DumpClauseModes(llvm::raw_ostream &os, const ClauseModes &modes,
-    const parser::TokenSequence &tokens,
-    llvm::function_ref<std::string(parser::CharBlock)> position) {
-  const ClauseForm &form{*modes.clause->clause};
-  auto at{[&](parser::TokenRange range) {
-    return position(tokens.tokens[range.first].spelling);
-  }};
-  std::function<void(const Goal &, unsigned)> dump{[&](const Goal &goal,
-                                                      unsigned depth) {
-    const GoalModes &g{modes.goals[NumberOf(goal)]};
+// Writes a clause's goals with their modes, as -fdebug-dump-modes does.
+class ClauseModesDumper {
+public:
+  ClauseModesDumper(llvm::raw_ostream &os, const ClauseModes &modes,
+      const parser::TokenSequence &tokens,
+      llvm::function_ref<std::string(parser::CharBlock)> position)
+      : os_{os}, modes_{modes}, form_{*modes.clause->clause}, tokens_{tokens},
+        position_{position} {}
+
+  void Dump(const Goal &goal, unsigned depth) {
+    const GoalModes &g{modes_.goals[NumberOf(goal)]};
     std::string indent(2 * depth, ' ');
-    auto part{[&](const char *name, const Goal &inner) {
-      os << indent << "      " << name << '\n';
-      dump(inner, depth + 2);
-    }};
     common::visit(
         common::visitors{
             [&](const Conj *) {
               for (const Goal &inner : g.order) {
-                dump(inner, depth);
+                Dump(inner, depth);
               }
             },
             [&](const Disj *disj) {
-              os << indent << "    " << at(disj->tokens)
-                 << (disj->goals.empty() ? " fail\n" : " disjunction\n");
+              os_ << indent << "    " << At(disj->tokens)
+                  << (disj->goals.empty() ? " fail\n" : " disjunction\n");
               for (const Goal &branch : disj->goals) {
-                part("branch", branch);
+                Part("branch", branch, depth);
               }
             },
             [&](const IfThenElse *ite) {
-              os << indent << "    " << at(ite->tokens) << " if-then-else\n";
-              part("if", ite->condition);
-              part("then", ite->then);
-              part("else", ite->otherwise);
+              os_ << indent << "    " << At(ite->tokens) << " if-then-else\n";
+              Part("if", ite->condition, depth);
+              Part("then", ite->then, depth);
+              Part("else", ite->otherwise, depth);
             },
             [&](const Not *negation) {
-              os << indent << "    " << at(negation->tokens) << " not\n";
-              dump(negation->goal, depth + 1);
+              os_ << indent << "    " << At(negation->tokens) << " not\n";
+              Dump(negation->goal, depth + 1);
             },
-            [&](const Scope *scope) { dump(scope->goal, depth); },
+            [&](const Scope *scope) { Dump(scope->goal, depth); },
             [&](const Unify *unify) {
-              os << indent << "    " << at(unify->tokens) << ' ';
+              os_ << indent << "    " << At(unify->tokens) << ' ';
               switch (g.unify) {
               case UnifyKind::Assign:
-                os << "assign " << VarName(form, g.assigned) << " := "
-                   << VarName(form,
-                          g.assigned == unify->left ? unify->var : unify->left);
+                os_ << "assign " << VarName(form_, g.assigned) << " := "
+                    << VarName(form_,
+                           g.assigned == unify->left ? unify->var
+                                                     : unify->left);
                 break;
               case UnifyKind::Call:
-                os << "call " << *g.callee->symbol << " mode "
-                   << g.callee->number << (g.implied ? " implied" : "") << ": "
-                   << VarName(form, unify->left) << " = "
-                   << TermText(form, *unify);
+                os_ << "call " << *g.callee->symbol << " mode "
+                    << g.callee->number << (g.implied ? " implied" : "") << ": "
+                    << VarName(form_, unify->left) << " = "
+                    << TermText(form_, *unify);
                 break;
               default:
-                os << llvm::StringRef{EnumToString(g.unify)}.lower() << ' '
-                   << VarName(form, unify->left) << " = "
-                   << TermText(form, *unify);
+                os_ << llvm::StringRef{EnumToString(g.unify)}.lower() << ' '
+                    << VarName(form_, unify->left) << " = "
+                    << TermText(form_, *unify);
                 if (g.callee) {
-                  os << ", closure of " << *g.callee->symbol << " mode "
-                     << g.callee->number << (g.implied ? " implied" : "");
+                  os_ << ", closure of " << *g.callee->symbol << " mode "
+                      << g.callee->number << (g.implied ? " implied" : "");
                 }
               }
-              os << '\n';
+              os_ << '\n';
               if (const Lambda * lambda{unify->functor.lambda}) {
-                dump(lambda->body, depth + 1);
+                Dump(lambda->body, depth + 1);
               }
             },
             [&](const HOCall *call) {
-              os << indent << "    " << at(call->tokens) << " higher-order call"
-                 << (g.implied ? " implied" : "") << ": ";
+              os_ << indent << "    " << At(call->tokens)
+                  << " higher-order call" << (g.implied ? " implied" : "")
+                  << ": ";
               llvm::ArrayRef<VarId> arguments{call->arguments};
               if (call->kind == parser::PredOrFunc::Function) {
-                os << VarName(form, arguments.back()) << " = ";
+                os_ << VarName(form_, arguments.back()) << " = ";
                 arguments = arguments.drop_back();
               }
-              os << VarName(form, call->closure) << '(';
+              os_ << VarName(form_, call->closure) << '(';
               llvm::interleave(
-                  arguments, os, [&](VarId var) { os << VarName(form, var); },
-                  ", ");
-              os << ")\n";
+                  arguments, os_,
+                  [&](VarId var) { os_ << VarName(form_, var); }, ", ");
+              os_ << ")\n";
             },
             [&](const Call *call) {
-              os << indent << "    " << at(call->tokens) << " call "
-                 << *g.callee->symbol
-                 << " mode " << g.callee->number
-                 << (g.implied ? " implied" : "") << ": " << call->name->name
-                 << '(';
+              os_ << indent << "    " << At(call->tokens) << " call "
+                  << *g.callee->symbol << " mode " << g.callee->number
+                  << (g.implied ? " implied" : "") << ": " << call->name->name
+                  << '(';
               llvm::interleave(
-                  call->arguments, os,
-                  [&](VarId var) { os << VarName(form, var); }, ", ");
-              os << ")\n";
+                  call->arguments, os_,
+                  [&](VarId var) { os_ << VarName(form_, var); }, ", ");
+              os_ << ")\n";
             },
-            [&](const auto *) { os << indent << "    (not checked)\n"; },
+            [&](const auto *) { os_ << indent << "    (not checked)\n"; },
         },
         goal);
-  }};
-  dump(form.body, 0);
+  }
+
+private:
+  std::string At(parser::TokenRange range) const {
+    return position_(tokens_.tokens[range.first].spelling);
+  }
+
+  // A named part of a goal at `depth`, such as a condition.
+  void Part(const char *name, const Goal &inner, unsigned depth) {
+    os_ << std::string(2 * depth, ' ') << "      " << name << '\n';
+    Dump(inner, depth + 2);
+  }
+
+  llvm::raw_ostream &os_;
+  const ClauseModes &modes_;
+  const ClauseForm &form_;
+  const parser::TokenSequence &tokens_;
+  llvm::function_ref<std::string(parser::CharBlock)> position_;
+};
+
+void DumpClauseModes(llvm::raw_ostream &os, const ClauseModes &modes,
+    const parser::TokenSequence &tokens,
+    llvm::function_ref<std::string(parser::CharBlock)> position) {
+  const ClauseForm &form{*modes.clause->clause};
+  ClauseModesDumper{os, modes, tokens, position}.Dump(form.body, 0);
   os << "    final:";
   for (std::size_t i{0}; i < form.head.size() && i < modes.final.size(); ++i) {
     os << ' ' << VarName(form, form.head[i]) << ' '
