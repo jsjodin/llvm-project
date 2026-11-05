@@ -8,7 +8,6 @@
 
 #include "merkurius/Semantics/polymorphism.h"
 #include "llvm/ADT/STLExtras.h"
-#include <functional>
 #include <map>
 
 namespace merkurius::semantics {
@@ -915,225 +914,255 @@ std::unique_ptr<PolymorphismAnalysis> AnalysePolymorphism(TypeChecking &types,
   return result;
 }
 
-void DumpProcedurePolymorphism(llvm::raw_ostream &os,
-    const ProcedurePolymorphism &procedure,
-    const parser::TokenSequence &tokens,
-    llvm::function_ref<std::string(parser::CharBlock)> position) {
-  if (procedure.unchecked != PolymorphismUnchecked::None) {
-    os << "  not analysed: " << EnumToString(procedure.unchecked) << '\n';
-    return;
-  }
-  auto name{[&](unsigned var) -> std::string {
-    if (var < procedure.parameters && var < procedure.names.size()) {
-      return procedure.names[var].str();
+namespace {
+// Prints a procedure's analysis, as -fdebug-dump-polymorphism does.
+class PolymorphismDumper {
+public:
+  PolymorphismDumper(llvm::raw_ostream &os,
+      const ProcedurePolymorphism &procedure,
+      const parser::TokenSequence &tokens,
+      llvm::function_ref<std::string(parser::CharBlock)> position)
+      : os_{os}, procedure_{procedure}, tokens_{tokens}, position_{position} {}
+
+  void Dump() {
+    if (!procedure_.hidden.empty()) {
+      os_ << "  hidden arguments: ";
+      for (std::size_t i{0}; i < procedure_.hidden.size(); ++i) {
+        os_ << (i ? ", " : "");
+        if (const TypeInfo * info{procedure_.hidden[i].typeInfo}) {
+          os_ << VarName(info->parameter);
+        } else {
+          PrintClassConstraint(procedure_.hidden[i].dictionary->constraint);
+        }
+        if (procedure_.hidden[i].output) {
+          os_ << " (output)";
+        }
+      }
+      os_ << '\n';
     }
-    if (auto it{procedure.givenAs.find(var)}; it != procedure.givenAs.end() &&
-        it->second < procedure.names.size()) {
-      return procedure.names[it->second].str();
+    // Where the type_infos of the constrained type variables come from, by
+    // the hidden typeclass_info they are in, and their place in it.
+    std::vector<unsigned> constrained;
+    for (unsigned var{0}; var < procedure_.sources.size(); ++var) {
+      if (procedure_.sources[var] &&
+          procedure_.sources[var]->kind != TypeInfoKind::Parameter) {
+        constrained.push_back(var);
+      }
+    }
+    llvm::stable_sort(
+        constrained, [&](unsigned a, unsigned b) { return Root(a) < Root(b); });
+    if (!constrained.empty()) {
+      os_ << "  type_infos in typeclass_infos: ";
+      for (std::size_t i{0}; i < constrained.size(); ++i) {
+        os_ << (i ? ", " : "");
+        PrintTypeInfo(procedure_.sources[constrained[i]]);
+      }
+      os_ << '\n';
+    }
+    if (procedure_.body->body) {
+      DumpGoal(procedure_.body->body);
+    }
+    for (const PassedInfos &results : procedure_.results) {
+      os_ << "  results: ";
+      PrintPassed(results);
+    }
+  }
+
+private:
+  std::string VarName(unsigned var) const {
+    if (var < procedure_.parameters && var < procedure_.names.size()) {
+      return procedure_.names[var].str();
+    }
+    if (auto it{procedure_.givenAs.find(var)}; it != procedure_.givenAs.end() &&
+        it->second < procedure_.names.size()) {
+      return procedure_.names[it->second].str();
     }
     if (var >= kExistentialVar) {
       return "E" + std::to_string(var - kExistentialVar);
     }
     return "void";
-  }};
-  // The goal whose type_infos and typeclass_infos are printed: those it
-  // gives are its outputs, and those an earlier goal gave the outputs of
-  // that goal's callee.
-  const Body *current{nullptr};
-  auto output{[&](const Body *goal, const Symbol &callee) {
-    if (goal == current) {
-      os << " (output)";
-      return;
-    }
-    os << " (output of ";
-    if (!callee.module.empty()) {
-      os << callee.module << '.';
-    }
-    os << callee.name << ')';
-  }};
-  auto constraint{[&](const ClassConstraint &c) {
-    PrintConstraint(os, c, name);
-  }};
-  // T (argument), int (constant), list.list(T) (cell), void (constant),
-  // T (type_info 1 of m.c(T)), T (argument 1 of list.list(T) (...)).
-  std::function<void(const TypeInfo *)> print{[&](const TypeInfo *info) {
-    if (info->kind == TypeInfoKind::Void) {
-      os << "void (constant)";
-      return;
-    }
-    PrintType(os, *info->type, name);
-    switch (info->kind) {
-    case TypeInfoKind::Parameter:
-      os << " (argument)";
-      break;
-    case TypeInfoKind::Constant:
-      os << " (constant)";
-      break;
-    case TypeInfoKind::Cell:
-      os << " (cell)";
-      break;
-    case TypeInfoKind::Dictionary:
-      os << " (type_info " << info->index << " of ";
-      constraint(info->dictionary->constraint);
-      os << ')';
-      break;
-    case TypeInfoKind::Argument:
-      os << " (argument " << info->index << " of ";
-      print(info->arguments.front());
-      os << ')';
-      break;
-    case TypeInfoKind::Output:
-      output(info->goal, *info->callee);
-      break;
-    case TypeInfoKind::Void:
-      break;
-    }
-  }};
-  // m.c(T) (argument), m.c(int) (constant), m.c(T) (superclass 1 of ...),
-  // m.c(list.list(T)) (instance with m.c(T) (argument)).
-  std::function<void(const Dictionary *)> printDictionary{
-      [&](const Dictionary *dictionary) {
-        constraint(dictionary->constraint);
-        switch (dictionary->kind) {
-        case DictionaryKind::Parameter:
-          os << " (argument)";
-          break;
-        case DictionaryKind::Constant:
-          os << " (constant)";
-          break;
-        case DictionaryKind::Superclass:
-          os << " (superclass " << dictionary->index << " of ";
-          printDictionary(dictionary->from);
-          os << ')';
-          break;
-        case DictionaryKind::Instance: {
-          os << " (instance";
-          bool first{true};
-          for (const auto *list : {&dictionary->premises, &dictionary->supers}) {
-            for (const Dictionary *d : *list) {
-              os << (first ? " with " : ", ");
-              first = false;
-              printDictionary(d);
-            }
-          }
-          os << ')';
-          break;
-        }
-        case DictionaryKind::Output:
-          output(dictionary->goal, *dictionary->callee);
-          break;
-        }
-      }};
-  if (!procedure.hidden.empty()) {
-    os << "  hidden arguments: ";
-    for (std::size_t i{0}; i < procedure.hidden.size(); ++i) {
-      os << (i ? ", " : "");
-      if (const TypeInfo *info{procedure.hidden[i].typeInfo}) {
-        os << name(info->parameter);
-      } else {
-        constraint(procedure.hidden[i].dictionary->constraint);
-      }
-      if (procedure.hidden[i].output) {
-        os << " (output)";
-      }
-    }
-    os << '\n';
   }
-  // Where the type_infos of the constrained type variables come from, by
-  // the hidden typeclass_info they are in, and their place in it.
-  std::vector<unsigned> constrained;
-  for (unsigned var{0}; var < procedure.sources.size(); ++var) {
-    if (procedure.sources[var] &&
-        procedure.sources[var]->kind != TypeInfoKind::Parameter) {
-      constrained.push_back(var);
-    }
-  }
-  auto root{[&](unsigned var) {
-    const TypeInfo *info{procedure.sources[var]};
+
+  // The hidden typeclass_info a constrained variable's type_info is in, and
+  // its place there.
+  std::pair<unsigned, unsigned> Root(unsigned var) const {
+    const TypeInfo *info{procedure_.sources[var]};
     while (info->kind == TypeInfoKind::Argument) {
       info = info->arguments.front();
     }
     return std::make_pair(info->dictionary->parameter, info->index);
-  }};
-  llvm::stable_sort(constrained,
-      [&](unsigned a, unsigned b) { return root(a) < root(b); });
-  if (!constrained.empty()) {
-    os << "  type_infos in typeclass_infos: ";
-    for (std::size_t i{0}; i < constrained.size(); ++i) {
-      os << (i ? ", " : "");
-      print(procedure.sources[constrained[i]]);
-    }
-    os << '\n';
   }
-  auto passed{[&](const PassedInfos &infos) {
+
+  void PrintOutput(const Body *goal, const Symbol &callee) {
+    if (goal == current_) {
+      os_ << " (output)";
+      return;
+    }
+    os_ << " (output of ";
+    if (!callee.module.empty()) {
+      os_ << callee.module << '.';
+    }
+    os_ << callee.name << ')';
+  }
+
+  void PrintClassConstraint(const ClassConstraint &constraint) {
+    PrintConstraint(
+        os_, constraint, [&](unsigned var) { return VarName(var); });
+  }
+
+  // T (argument), int (constant), list.list(T) (cell), void (constant),
+  // T (type_info 1 of m.c(T)), T (argument 1 of list.list(T) (...)).
+  void PrintTypeInfo(const TypeInfo *info) {
+    if (info->kind == TypeInfoKind::Void) {
+      os_ << "void (constant)";
+      return;
+    }
+    PrintType(os_, *info->type, [&](unsigned var) { return VarName(var); });
+    switch (info->kind) {
+    case TypeInfoKind::Parameter:
+      os_ << " (argument)";
+      break;
+    case TypeInfoKind::Constant:
+      os_ << " (constant)";
+      break;
+    case TypeInfoKind::Cell:
+      os_ << " (cell)";
+      break;
+    case TypeInfoKind::Dictionary:
+      os_ << " (type_info " << info->index << " of ";
+      PrintClassConstraint(info->dictionary->constraint);
+      os_ << ')';
+      break;
+    case TypeInfoKind::Argument:
+      os_ << " (argument " << info->index << " of ";
+      PrintTypeInfo(info->arguments.front());
+      os_ << ')';
+      break;
+    case TypeInfoKind::Output:
+      PrintOutput(info->goal, *info->callee);
+      break;
+    case TypeInfoKind::Void:
+      break;
+    }
+  }
+
+  // m.c(T) (argument), m.c(int) (constant), m.c(T) (superclass 1 of ...),
+  // m.c(list.list(T)) (instance with m.c(T) (argument)).
+  void PrintDictionary(const Dictionary *dictionary) {
+    PrintClassConstraint(dictionary->constraint);
+    switch (dictionary->kind) {
+    case DictionaryKind::Parameter:
+      os_ << " (argument)";
+      break;
+    case DictionaryKind::Constant:
+      os_ << " (constant)";
+      break;
+    case DictionaryKind::Superclass:
+      os_ << " (superclass " << dictionary->index << " of ";
+      PrintDictionary(dictionary->from);
+      os_ << ')';
+      break;
+    case DictionaryKind::Instance: {
+      os_ << " (instance";
+      bool first{true};
+      for (const auto *list : {&dictionary->premises, &dictionary->supers}) {
+        for (const Dictionary *d : *list) {
+          os_ << (first ? " with " : ", ");
+          first = false;
+          PrintDictionary(d);
+        }
+      }
+      os_ << ')';
+      break;
+    }
+    case DictionaryKind::Output:
+      PrintOutput(dictionary->goal, *dictionary->callee);
+      break;
+    }
+  }
+
+  void PrintPassed(const PassedInfos &infos) {
     bool first{true};
     for (const TypeInfo *info : infos.typeInfos) {
-      os << (first ? "" : ", ");
+      os_ << (first ? "" : ", ");
       first = false;
-      print(info);
+      PrintTypeInfo(info);
     }
     for (const Dictionary *dictionary : infos.dictionaries) {
-      os << (first ? "" : ", ");
+      os_ << (first ? "" : ", ");
       first = false;
-      printDictionary(dictionary);
+      PrintDictionary(dictionary);
     }
-    os << '\n';
-  }};
-  const ProcedureBody &body{*procedure.body};
-  std::function<void(const Body *)> dump{[&](const Body *goal) {
-    auto it{procedure.goals.find(goal)};
-    if (it != procedure.goals.end()) {
-      current = goal;
-      os << "    " << position(tokens.tokens[goal->tokens.first].spelling);
+    os_ << '\n';
+  }
+
+  void DumpGoal(const Body *goal) {
+    auto it{procedure_.goals.find(goal)};
+    if (it != procedure_.goals.end()) {
+      current_ = goal;
+      os_ << "    " << position_(tokens_.tokens[goal->tokens.first].spelling);
       if (goal->kind == BodyKind::Call || goal->unify == UnifyKind::Call) {
-        os << ' '
-           << (goal->kind == BodyKind::Call ? "call " : "application ")
-           << *goal->modes->callee->symbol;
+        os_ << ' ' << (goal->kind == BodyKind::Call ? "call " : "application ")
+            << *goal->modes->callee->symbol;
       } else if (goal->modes && goal->modes->callee) {
-        os << " closure " << *goal->modes->callee->symbol;
+        os_ << " closure " << *goal->modes->callee->symbol;
       } else if (!goal->isVar) {
         // A construction, 'new f'(...), or a deconstruction, with an
         // existentially typed constructor.
         bool construction{goal->unify == UnifyKind::Construct};
-        os << (construction ? " construct " : " deconstruct ");
+        os_ << (construction ? " construct " : " deconstruct ");
         if (const Symbol *constructor{it->second.constructor}) {
           if (!constructor->module.empty()) {
-            os << constructor->module << '.';
+            os_ << constructor->module << '.';
           }
           if (construction) {
-            os << "'new " << constructor->name << "'";
+            os_ << "'new " << constructor->name << "'";
           } else {
-            os << constructor->name;
+            os_ << constructor->name;
           }
-          os << '/' << constructor->arity;
+          os_ << '/' << constructor->arity;
         }
       } else {
-        os << " unify " << body.vars[goal->left].name << " = "
-           << body.vars[goal->var].name;
+        const ProcedureBody &body{*procedure_.body};
+        os_ << " unify " << body.vars[goal->left].name << " = "
+            << body.vars[goal->var].name;
       }
-      os << ": ";
-      passed(it->second);
-      current = nullptr;
+      os_ << ": ";
+      PrintPassed(it->second);
+      current_ = nullptr;
     }
     if (goal->kind == BodyKind::Unify && goal->lambda) {
-      dump(goal->lambda);
+      DumpGoal(goal->lambda);
     } else if (goal->kind == BodyKind::Switch) {
       for (const SwitchCase &c : goal->cases) {
-        dump(c.goal);
+        DumpGoal(c.goal);
       }
     } else {
       for (const Body *g : goal->goals) {
-        dump(g);
+        DumpGoal(g);
       }
     }
-  }};
-  if (body.body) {
-    dump(body.body);
   }
-  for (const PassedInfos &results : procedure.results) {
-    os << "  results: ";
-    passed(results);
+
+  llvm::raw_ostream &os_;
+  const ProcedurePolymorphism &procedure_;
+  const parser::TokenSequence &tokens_;
+  llvm::function_ref<std::string(parser::CharBlock)> position_;
+  // The goal whose type_infos and typeclass_infos are printed: those it
+  // gives are its outputs, and those an earlier goal gave the outputs of
+  // that goal's callee.
+  const Body *current_{nullptr};
+};
+} // namespace
+
+void DumpProcedurePolymorphism(llvm::raw_ostream &os,
+    const ProcedurePolymorphism &procedure, const parser::TokenSequence &tokens,
+    llvm::function_ref<std::string(parser::CharBlock)> position) {
+  if (procedure.unchecked != PolymorphismUnchecked::None) {
+    os << "  not analysed: " << EnumToString(procedure.unchecked) << '\n';
+    return;
   }
+  PolymorphismDumper{os, procedure, tokens, position}.Dump();
 }
 
 } // namespace merkurius::semantics
