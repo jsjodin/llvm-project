@@ -304,6 +304,11 @@ private:
   // Fills the head's slots for the state variables' last versions.
   void FillLasts(Goals &goals);
   const Lambda *DesugarLambda(const parser::Lambda &);
+  // A catch's pattern is unified with the exception, a variable of its own.
+  void DesugarCatch(const parser::CatchClause &, const StateMap &failed,
+      llvm::SmallVectorImpl<std::pair<VarId, Goal>> &patterns,
+      llvm::SmallVectorImpl<Goals> &arms,
+      llvm::SmallVectorImpl<StateMap> &ends);
   void DesugarTry(const parser::TryGoal &, Goals &out);
   void DesugarLoop(const parser::LoopGoal &, Goals &out);
   // Starts desugaring a clause whose loops' scopes are `scopes`.
@@ -1335,6 +1340,24 @@ void ClauseDesugarer::FillLasts(Goals &goals) {
   }
 }
 
+void ClauseDesugarer::DesugarCatch(const parser::CatchClause &c,
+    const StateMap &failed,
+    llvm::SmallVectorImpl<std::pair<VarId, Goal>> &patterns,
+    llvm::SmallVectorImpl<Goals> &arms, llvm::SmallVectorImpl<StateMap> &ends) {
+  state_ = failed;
+  Goals pattern;
+  std::optional<VarId> var{SimpleVar(c.pattern)};
+  VarId exception{var ? *var : Fresh(c.tokens)};
+  if (!var) {
+    UnifyWith(exception, c.pattern, c.tokens, pattern);
+    FinishAtomic();
+  }
+  patterns.emplace_back(exception, Conjoin(c.tokens, pattern));
+  arms.emplace_back();
+  DesugarInto(c.goal, arms.back());
+  ends.push_back(state_);
+}
+
 // The goal's updates of state variables are seen in the then part only, as
 // in an if-then-else: as in mmc, a catch branch sees the versions before
 // the goal. An io(!S) parameter's state is the exception: it is threaded
@@ -1371,25 +1394,11 @@ void ClauseDesugarer::DesugarTry(const parser::TryGoal &t, Goals &out) {
   }
   // A catch's pattern is unified with the exception, a variable of its own.
   llvm::SmallVector<std::pair<VarId, Goal>, 4> patterns;
-  auto catchBranch{[&](const parser::CatchClause &c) {
-    state_ = failed;
-    Goals pattern;
-    std::optional<VarId> var{SimpleVar(c.pattern)};
-    VarId exception{var ? *var : Fresh(c.tokens)};
-    if (!var) {
-      UnifyWith(exception, c.pattern, c.tokens, pattern);
-      FinishAtomic();
-    }
-    patterns.emplace_back(exception, Conjoin(c.tokens, pattern));
-    arms.emplace_back();
-    DesugarInto(c.goal, arms.back());
-    ends.push_back(state_);
-  }};
   for (const parser::CatchClause *c : t.catches) {
-    catchBranch(*c);
+    DesugarCatch(*c, failed, patterns, arms, ends);
   }
   if (t.catchAny) {
-    catchBranch(*t.catchAny);
+    DesugarCatch(*t.catchAny, failed, patterns, arms, ends);
   }
   Merge(start, ends, arms, t.tokens);
   std::size_t arm{0};
@@ -1413,6 +1422,11 @@ void ClauseDesugarer::DesugarTry(const parser::TryGoal &t, Goals &out) {
   out.push_back(Make<Try>(t.tokens, Number(),
       Save(llvm::ArrayRef<VarId>{ioVersions}), goal, then, otherwise,
       Save(llvm::ArrayRef<Catch>{catches}), catchAny));
+}
+
+const parser::StateVar *AtomicParamState(const parser::AtomicParam &param) {
+  const auto *var{std::get_if<const parser::StateVar *>(&*param.initial)};
+  return var ? *var : nullptr;
 }
 
 // The outer state is read before the goal and made new after it, and, as
@@ -1439,11 +1453,7 @@ void ClauseDesugarer::DesugarAtomic(
     }
   }
   // The converter requires both outer and inner.
-  auto stateVar{[](const parser::AtomicParam &param) {
-    const auto *var{std::get_if<const parser::StateVar *>(&*param.initial)};
-    return var ? *var : nullptr;
-  }};
-  const parser::StateVar *outerState{stateVar(*outer)};
+  const parser::StateVar *outerState{AtomicParamState(*outer)};
   VarId outerInitial{outerState ? StateRef(*outerState, false)
                                 : *SimpleVar(*outer->initial)};
   VarId outerFinal{outerState ? NewVersion(outerState->name, outer->tokens)
@@ -1457,7 +1467,7 @@ void ClauseDesugarer::DesugarAtomic(
       state_.erase(it);
     }
   }
-  const parser::StateVar *innerState{stateVar(*inner)};
+  const parser::StateVar *innerState{AtomicParamState(*inner)};
   StateMap start{state_};
   llvm::SmallVector<Goals, 2> arms(atomic.goals.size());
   llvm::SmallVector<StateMap, 2> ends;
@@ -1598,6 +1608,10 @@ const Lambda *ClauseDesugarer::DesugarLambda(const parser::Lambda &lambda) {
   return result;
 }
 
+bool IsFromto(const parser::LoopGoal &loop, std::size_t iterator) {
+  return loop.iterators[iterator]->kind == parser::LoopIteratorKind::Fromto;
+}
+
 // The arguments around the loop are flattened before it. In it, its
 // iterators' own variables and the variables that occur in no region
 // around it are new ones, and each state variable that it updates gets a
@@ -1623,17 +1637,13 @@ void ClauseDesugarer::DesugarLoop(const parser::LoopGoal &loop, Goals &out) {
   // different places, as in fromto(L, [X | Xs], Xs, []), fromto(0, _, X,
   // Last), passes a value between them, and one in two foreach(X, ...)
   // makes their lists' elements the same, as a copy does.
-  auto fromto{[&](std::size_t i) {
-    return loop.iterators[i]->kind == parser::LoopIteratorKind::Fromto;
-  }};
   llvm::DenseSet<unsigned> own;
   for (const LoopScopes::Info::Own &o : info.own) {
     if (const auto *first{llvm::find_if(info.own,
             [&](const LoopScopes::Info::Own &other) {
               return other.var->number == o.var->number &&
-                  other.argument == o.argument &&
-                  other.iterator < o.iterator && fromto(o.iterator) &&
-                  fromto(other.iterator);
+                  other.argument == o.argument && other.iterator < o.iterator &&
+                  IsFromto(loop, o.iterator) && IsFromto(loop, other.iterator);
             })};
         first != info.own.end()) {
       messages_.Say(Source(o.var->tokens),
