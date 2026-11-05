@@ -165,6 +165,7 @@ private:
   void ResolveClause(const ClauseForm &, const Visibility &);
   // A method clause's name is its type class's method, if it has one.
   void ResolveMethodClause(const MethodClause &, const Visibility &);
+  void ResolveGoals(llvm::ArrayRef<Goal>, const Visibility &);
   void ResolveGoal(const Goal &, const Visibility &);
   // Resolves the type, inst, mode and class names below `x`.
   template <typename T>
@@ -179,6 +180,9 @@ private:
   llvm::SmallVector<const Symbol *, 4> Lookup(const parser::SymName &,
       NameUse, unsigned arity, const Visibility &, bool anyArity = false,
       bool qualifiedOnly = false) const;
+  // Adds the symbols named in one visible module that the use accepts.
+  static void LookupIn(const Visible &, const parser::SymName &, NameUse,
+      unsigned arity, bool anyArity, llvm::SmallVectorImpl<const Symbol *> &);
   static bool Accepts(const Symbol &, NameUse, unsigned arity, bool anyArity);
   void Undefined(const parser::SymName &, NameUse, unsigned arity,
       const Visibility &, const Visibility *outer);
@@ -495,24 +499,29 @@ Visibility Resolver::InterfaceScope(const ModuleInterface &module) {
   return scope;
 }
 
+namespace {
+bool IsKind(
+    const Symbol &symbol, SymbolKind kind, unsigned arity, bool anyArity) {
+  return symbol.kind == kind && (anyArity || symbol.arity == arity);
+}
+} // namespace
+
 bool Resolver::Accepts(
     const Symbol &symbol, NameUse use, unsigned arity, bool anyArity) {
-  auto is{[&](SymbolKind kind) {
-    return symbol.kind == kind && (anyArity || symbol.arity == arity);
-  }};
   switch (use) {
   case NameUse::Type:
-    return is(SymbolKind::Type);
+    return IsKind(symbol, SymbolKind::Type, arity, anyArity);
   case NameUse::Inst:
-    return is(SymbolKind::Inst);
+    return IsKind(symbol, SymbolKind::Inst, arity, anyArity);
   case NameUse::Mode:
-    return is(SymbolKind::Mode);
+    return IsKind(symbol, SymbolKind::Mode, arity, anyArity);
   case NameUse::Typeclass:
-    return is(SymbolKind::Typeclass);
+    return IsKind(symbol, SymbolKind::Typeclass, arity, anyArity);
   case NameUse::Call:
-    return is(SymbolKind::Predicate);
+    return IsKind(symbol, SymbolKind::Predicate, arity, anyArity);
   case NameUse::Definition:
-    return is(SymbolKind::Predicate) || is(SymbolKind::Function);
+    return IsKind(symbol, SymbolKind::Predicate, arity, anyArity) ||
+        IsKind(symbol, SymbolKind::Function, arity, anyArity);
   case NameUse::DataTerm:
     // f(X1, ..., Xn) constructs, calls a function of arity n, selects or
     // updates a field, or makes a closure of a predicate or function with
@@ -537,30 +546,34 @@ bool Resolver::Accepts(
   return false;
 }
 
+void Resolver::LookupIn(const Visible &visible, const parser::SymName &name,
+    NameUse use, unsigned arity, bool anyArity,
+    llvm::SmallVectorImpl<const Symbol *> &found) {
+  for (const Symbol *symbol : visible.symbols->Lookup(name.name)) {
+    if ((!visible.exportedOnly || symbol->exported) &&
+        Accepts(*symbol, use, arity, anyArity)) {
+      found.push_back(symbol);
+    }
+  }
+}
+
 llvm::SmallVector<const Symbol *, 4> Resolver::Lookup(
     const parser::SymName &name, NameUse use, unsigned arity,
     const Visibility &scope, bool anyArity, bool qualifiedOnly) const {
   llvm::SmallVector<const Symbol *, 4> found;
   std::string qualifier{llvm::join(name.qualifiers, ".")};
-  auto search{[&](const Visible &visible) {
-    for (const Symbol *symbol : visible.symbols->Lookup(name.name)) {
-      if ((!visible.exportedOnly || symbol->exported) &&
-          Accepts(*symbol, use, arity, anyArity)) {
-        found.push_back(symbol);
-      }
-    }
-  }};
   for (const Visible &visible : scope) {
     if (!qualifier.empty()) {
       if (Names(visible, qualifier)) {
-        search(visible);
+        LookupIn(visible, name, use, arity, anyArity, found);
       }
     } else if (visible.qualifiedOnly == qualifiedOnly) {
-      search(visible);
+      LookupIn(visible, name, use, arity, anyArity, found);
     }
   }
   if (qualifier.empty() && !qualifiedOnly && use == NameUse::Type) {
-    search(Visible{result_.primitive_.get(), false, false});
+    LookupIn(Visible{result_.primitive_.get(), false, false}, name, use, arity,
+        anyArity, found);
   }
   return found;
 }
@@ -811,16 +824,18 @@ void Resolver::ResolveMethodClause(
   ResolveGoal(clause.body, scope);
 }
 
+void Resolver::ResolveGoals(
+    llvm::ArrayRef<Goal> goals, const Visibility &scope) {
+  for (const Goal &goal : goals) {
+    ResolveGoal(goal, scope);
+  }
+}
+
 void Resolver::ResolveGoal(const Goal &goal, const Visibility &scope) {
-  auto each{[&](llvm::ArrayRef<Goal> goals) {
-    for (const Goal &g : goals) {
-      ResolveGoal(g, scope);
-    }
-  }};
   std::visit(
       common::visitors{
-          [&](const Conj *conj) { each(conj->goals); },
-          [&](const Disj *disj) { each(disj->goals); },
+          [&](const Conj *conj) { ResolveGoals(conj->goals, scope); },
+          [&](const Disj *disj) { ResolveGoals(disj->goals, scope); },
           [&](const IfThenElse *ite) {
             ResolveGoal(ite->condition, scope);
             ResolveGoal(ite->then, scope);
@@ -915,6 +930,18 @@ void Resolver::ResolveGoal(const Goal &goal, const Visibility &scope) {
       goal);
 }
 
+namespace {
+// Adds a module to a scope unless it is already visible there the same way.
+void AddVisible(Visibility &scope, const Visible &visible) {
+  if (llvm::none_of(scope, [&](const Visible &v) {
+        return v.symbols == visible.symbols &&
+            v.qualifiedOnly == visible.qualifiedOnly;
+      })) {
+    scope.push_back(visible);
+  }
+}
+} // namespace
+
 void Resolver::Run(const parser::ParseTree &tree,
     const parser::TokenSequence &tokens, const SemanticForm &form) {
   result_.primitive_ = std::make_unique<ModuleSymbols>("");
@@ -935,14 +962,6 @@ void Resolver::Run(const parser::ParseTree &tree,
   own_ = &own;
   Visibility interface{{&own, false, true}}, implementation{{&own, false, false}};
   bool inInterface{false};
-  auto add{[&](Visibility &scope, const Visible &visible) {
-    if (llvm::none_of(scope, [&](const Visible &v) {
-          return v.symbols == visible.symbols &&
-              v.qualifiedOnly == visible.qualifiedOnly;
-        })) {
-      scope.push_back(visible);
-    }
-  }};
   for (const parser::Item &item : tree.items) {
     if (const auto *section{std::get_if<const parser::SectionDecl *>(&item)}) {
       inInterface = (*section)->section == parser::Section::Interface;
@@ -955,9 +974,9 @@ void Resolver::Run(const parser::ParseTree &tree,
       for (const parser::SymName *module : (*decl)->modules) {
         if (const ModuleInterface * loaded{loader_.Find(FullName(*module))}) {
           Visible visible{&Symbols(*loaded), use, true};
-          add(implementation, visible);
+          AddVisible(implementation, visible);
           if (inInterface) {
-            add(interface, visible);
+            AddVisible(interface, visible);
           }
         }
       }
@@ -968,8 +987,8 @@ void Resolver::Run(const parser::ParseTree &tree,
   if (name != "builtin") {
     if (const ModuleInterface * builtin{loader_.Find("builtin")}) {
       Visible visible{&Symbols(*builtin), false, true};
-      add(implementation, visible);
-      add(interface, visible);
+      AddVisible(implementation, visible);
+      AddVisible(interface, visible);
     }
   }
   DeclareWithTypes(own, implementation);
