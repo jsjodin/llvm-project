@@ -1232,7 +1232,10 @@ struct EventGoal {
 
 // The names the dump prints for OMP.td's kinds, as for the enums above.
 inline std::string_view EnumToString(llvm::omp::Directive directive) {
-  return llvm::omp::getOpenMPDirectiveName(directive);
+  // By a version: a directive with versions' spellings, such as target data,
+  // has none without one.
+  return llvm::omp::getOpenMPDirectiveName(
+      directive, llvm::omp::FallbackVersion);
 }
 inline std::string_view EnumToString(llvm::omp::Clause clause) {
   return llvm::omp::getOpenMPClauseName(clause);
