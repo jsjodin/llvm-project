@@ -210,6 +210,23 @@ void CountTypeVars(const Type &type, unsigned &typeVars) {
   }
 }
 
+// The unification that a goal at the start of a loop's body is, if it gives the
+// pattern of a fromto's In that ends the loop and has none yet.
+const Unify *TakenPattern(const Goal &goal, const llvm::DenseSet<VarId> &ending,
+    const llvm::DenseMap<VarId, const Unify *> &patterns) {
+  const auto *unify{std::get_if<const Unify *>(&goal)};
+  return unify && !(*unify)->isVar && ending.count((*unify)->left) &&
+          !patterns.count((*unify)->left)
+      ? *unify
+      : nullptr;
+}
+
+void AddOwnVar(
+    llvm::DenseSet<VarId> &own, std::vector<VarId> &candidates, VarId var) {
+  own.insert(var);
+  candidates.push_back(var);
+}
+
 // Whether a clause has a loop with a for or count iterator.
 bool HasCounter(const ClauseForm &clause) {
   bool counters{false};
@@ -279,6 +296,25 @@ std::int64_t StepValue(const LoopIterator &iterator) {
 
 } // namespace
 
+// A loop predicate's arguments, with the values the loop starts with and those
+// the next iteration gets.
+struct LoopHead {
+  // A variable passed through is the same in all three.
+  void PassThrough(VarId var) {
+    if (seen.insert(var).second) {
+      vars.push_back(var);
+      initial.push_back(var);
+      next.push_back(var);
+    }
+  }
+  unsigned PositionOf(VarId var) const {
+    return static_cast<unsigned>(llvm::find(vars, var) - vars.begin());
+  }
+
+  std::vector<VarId> vars, initial, next;
+  llvm::DenseSet<VarId> seen;
+};
+
 class LoopTranslator {
 public:
   LoopTranslator(NameResolution &resolution, TypeChecking &types,
@@ -317,6 +353,11 @@ private:
   // The goals that replace a loop: the computation of its trip count, if
   // it has a for, and the call of its loop predicate.
   Goal TranslateLoop(const Loop &);
+  // Adds an argument that starts as `first` and is `then` in the next iteration.
+  // Two iterators that share an own variable give the head two variables, which
+  // `unifications` unifies.
+  void AddLoopArgument(LoopHead &, VarId var, VarId first, VarId then,
+      std::vector<Goal> &unifications, TokenRange);
   // The number of iterations of a for, into a new variable; returns the
   // test it starts with.
   const Call *TripCount(const LoopIterator &, VarId trip, std::vector<Goal> &);
@@ -907,6 +948,18 @@ const Call *LoopTranslator::TripCount(
   return std::get<const Call *>(test);
 }
 
+void LoopTranslator::AddLoopArgument(LoopHead &head, VarId var, VarId first,
+    VarId then, std::vector<Goal> &unifications, TokenRange range) {
+  if (!head.seen.insert(var).second) {
+    VarId copy{NewVar(varTypes_[var], range)};
+    unifications.push_back(UnifyVars(range, copy, var));
+    var = copy;
+  }
+  head.vars.push_back(var);
+  head.initial.push_back(first);
+  head.next.push_back(then);
+}
+
 Goal LoopTranslator::TranslateLoop(const Loop &loop) {
   TokenRange range{loop.tokens};
   // The slot of this loop's predicates, before those of the loops in its
@@ -926,21 +979,16 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
   llvm::DenseMap<VarId, const Unify *> patterns;
   Goal rest{loop.body};
   if (!ending.empty()) {
-    auto pattern{[&](const Goal &g) -> const Unify * {
-      const auto *unify{std::get_if<const Unify *>(&g)};
-      return unify && !(*unify)->isVar && ending.count((*unify)->left) &&
-              !patterns.count((*unify)->left)
-          ? *unify
-          : nullptr;
-    }};
-    if (const Unify *unify{pattern(loop.body)}) {
+    if (const Unify * unify{TakenPattern(loop.body, ending, patterns)}) {
       patterns[unify->left] = unify;
-      rest = Make<Conj>(unify->tokens, NewNumber(), false, llvm::ArrayRef<Goal>{});
+      rest =
+          Make<Conj>(unify->tokens, NewNumber(), false, llvm::ArrayRef<Goal>{});
     } else if (const auto *conj{std::get_if<const Conj *>(&loop.body)};
                conj && !(*conj)->parallel) {
       std::size_t taken{0};
       while (taken < (*conj)->goals.size()) {
-        const Unify *unify{pattern((*conj)->goals[taken])};
+        const Unify *unify{
+            TakenPattern((*conj)->goals[taken], ending, patterns)};
         if (!unify) {
           break;
         }
@@ -970,31 +1018,27 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
   }
   llvm::DenseSet<VarId> own;
   std::vector<VarId> candidates;
-  auto ownVar{[&](VarId var) {
-    own.insert(var);
-    candidates.push_back(var);
-  }};
   for (const LoopIterator &iterator : loop.iterators) {
     switch (iterator.kind) {
     case LoopIteratorKind::For:
     case LoopIteratorKind::Count:
     case LoopIteratorKind::Foreach:
-      ownVar(iterator.arguments[0]);
+      AddOwnVar(own, candidates, iterator.arguments[0]);
       break;
     case LoopIteratorKind::Fromto:
-      ownVar(iterator.arguments[1]);
-      ownVar(iterator.arguments[2]);
-      if (const Unify *unify{patterns.lookup(iterator.arguments[1])}) {
+      AddOwnVar(own, candidates, iterator.arguments[1]);
+      AddOwnVar(own, candidates, iterator.arguments[2]);
+      if (const Unify * unify{patterns.lookup(iterator.arguments[1])}) {
         for (VarId var : unify->arguments) {
-          ownVar(var);
+          AddOwnVar(own, candidates, var);
         }
       }
       break;
     }
   }
   for (const LoopState &state : loop.states) {
-    ownVar(state.in);
-    ownVar(state.out);
+    AddOwnVar(own, candidates, state.in);
+    AddOwnVar(own, candidates, state.out);
   }
   for (VarId var : clause_->clause->nonlocals[GoalNumber(loop.body)]) {
     candidates.push_back(var);
@@ -1009,37 +1053,12 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
   }
   const Symbol &bodySymbol{NewPredicate("body", loop, bodyHead.size())};
 
-  // The loop predicate's arguments, with the values the loop starts with
-  // and those the next iteration gets; a variable passed through is the
-  // same in all three.
-  std::vector<VarId> head, initial, next;
-  llvm::DenseSet<VarId> inHead;
-  auto through{[&](VarId var) {
-    if (inHead.insert(var).second) {
-      head.push_back(var);
-      initial.push_back(var);
-      next.push_back(var);
-    }
-  }};
-  // Two iterators that share an own variable give the head two variables
-  // that are unified.
+  // The loop predicate's arguments.
+  LoopHead head;
   std::vector<Goal> unifications;
-  auto argument{[&](VarId var, VarId first, VarId then) {
-    if (!inHead.insert(var).second) {
-      VarId copy{NewVar(varTypes_[var], range)};
-      unifications.push_back(UnifyVars(range, copy, var));
-      var = copy;
-    }
-    head.push_back(var);
-    initial.push_back(first);
-    next.push_back(then);
-  }};
   std::vector<Goal> before, ends, steps, advance;
   std::optional<Goal> condition;
   TranslatedLoop translated{&loop, nullptr, nullptr};
-  auto position{[&](VarId var) {
-    return static_cast<unsigned>(llvm::find(head, var) - head.begin());
-  }};
   for (const LoopIterator &iterator : loop.iterators) {
     TokenRange at{iterator.tokens};
     llvm::ArrayRef<VarId> a{iterator.arguments};
@@ -1050,21 +1069,21 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
       translated.step = StepValue(iterator);
       translated.counter = clause_->clause->vars[a[0]].name;
       VarId step{NewVar(int_, at)};
-      advance.push_back(UnifyLiteral(at, step,
-          iterator.step ? iterator.step : IntLiteral(at, "1")));
+      advance.push_back(UnifyLiteral(
+          at, step, iterator.step ? iterator.step : IntLiteral(at, "1")));
       VarId nextI{Apply(at, "+", a[0], step, advance)};
       VarId one{Constant(at, "1", advance)};
       VarId nextCount{Apply(at, "-", count, one, advance)};
-      argument(a[0], a[1], nextI);
-      argument(count, trip, nextCount);
+      AddLoopArgument(head, a[0], a[1], nextI, unifications, range);
+      AddLoopArgument(head, count, trip, nextCount, unifications, range);
       condition = UnifyLiteral(at, count, IntLiteral(at, "0"));
       break;
     }
     case LoopIteratorKind::Count: {
       VarId one{Constant(at, "1", advance)};
       VarId nextI{Apply(at, "+", a[0], one, advance)};
-      argument(a[0], a[1], nextI);
-      through(a[2]);
+      AddLoopArgument(head, a[0], a[1], nextI, unifications, range);
+      head.PassThrough(a[2]);
       VarId last{Constant(at, "1", ends)};
       ends.push_back(UnifyFunctor(at, a[2], FunctorKind::Name,
           *IntSymbol(SymbolKind::Function, "-", 2), {a[0], last}));
@@ -1073,7 +1092,7 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
     case LoopIteratorKind::Foreach: {
       const Type *type{varTypes_[a[1]]};
       VarId list{NewVar(type, at)}, tail{NewVar(type, at)};
-      argument(list, a[1], tail);
+      AddLoopArgument(head, list, a[1], tail, unifications, range);
       ends.push_back(UnifyFunctor(
           at, list, FunctorKind::Nil, *ListConstructor("[]", 0), {}));
       steps.push_back(UnifyFunctor(at, list, FunctorKind::Cons,
@@ -1081,8 +1100,8 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
       break;
     }
     case LoopIteratorKind::Fromto: {
-      auto in{static_cast<unsigned>(head.size())};
-      argument(a[1], a[0], a[2]);
+      auto in{static_cast<unsigned>(head.vars.size())};
+      AddLoopArgument(head, a[1], a[0], a[2], unifications, range);
       const Unify *last{nullptr};
       if (iterator.ends) {
         // Last's functor, from the goal before the loop that binds it.
@@ -1096,18 +1115,18 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
       }
       if (last) {
         for (VarId var : last->arguments) {
-          through(var);
+          head.PassThrough(var);
         }
         ends.push_back(Make<Unify>(last->tokens,
-            NewNumber(symbols_[last->number], callNames_[last->number]),
-            a[1], false, VarId{0}, last->functor, last->arguments));
+            NewNumber(symbols_[last->number], callNames_[last->number]), a[1],
+            false, VarId{0}, last->functor, last->arguments));
       } else {
-        through(a[3]);
-        translated.threaded.push_back({in, position(a[3]), &iterator,
+        head.PassThrough(a[3]);
+        translated.threaded.push_back({in, head.PositionOf(a[3]), &iterator,
             clause_->clause->vars[a[3]].name});
         ends.push_back(UnifyVars(at, a[3], a[1]));
       }
-      if (const Unify *pattern{patterns.lookup(a[1])}) {
+      if (const Unify * pattern{patterns.lookup(a[1])}) {
         steps.push_back(pattern);
       }
       break;
@@ -1115,19 +1134,20 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
     }
   }
   for (const LoopState &state : loop.states) {
-    auto in{static_cast<unsigned>(head.size())};
-    argument(state.in, state.before, state.out);
-    through(state.after);
-    translated.threaded.push_back({in, position(state.after), nullptr,
+    auto in{static_cast<unsigned>(head.vars.size())};
+    AddLoopArgument(
+        head, state.in, state.before, state.out, unifications, range);
+    head.PassThrough(state.after);
+    translated.threaded.push_back({in, head.PositionOf(state.after), nullptr,
         clause_->clause->vars[state.after].name});
     ends.push_back(UnifyVars(range, state.after, state.in));
   }
   for (VarId var : bodyHead) {
     if (!own.count(var)) {
-      through(var);
+      head.PassThrough(var);
     }
   }
-  const Symbol &loopSymbol{NewPredicate("loop", loop, head.size())};
+  const Symbol &loopSymbol{NewPredicate("loop", loop, head.vars.size())};
   translated.loopPredicate = &loopSymbol;
   translated.bodyPredicate = &bodySymbol;
   result_.loops.push_back(std::move(translated));
@@ -1137,25 +1157,26 @@ Goal LoopTranslator::TranslateLoop(const Loop &loop) {
 
   steps.push_back(CallOf(range, bodySymbol, bodyHead));
   steps.insert(steps.end(), advance.begin(), advance.end());
-  steps.push_back(CallOf(range, loopSymbol, next));
+  steps.push_back(CallOf(range, loopSymbol, head.next));
   Goal iterate{Conjunction(range, steps)};
   Goal end{Conjunction(range, ends)};
   Goal choice{condition
           ? Goal{Make<IfThenElse>(range, NewNumber(), *condition, end, iterate)}
-          : Goal{Make<Disj>(range, NewNumber(),
-                Save(llvm::ArrayRef<Goal>{end, iterate}))}};
+          : Goal{Make<Disj>(
+                range, NewNumber(), Save(llvm::ArrayRef<Goal>{end, iterate}))}};
   unifications.push_back(choice);
 
   made_[slot] = Made{&loopSymbol,
       Make<ClauseForm>(range, parser::PredOrFunc::Predicate, NameOf(loopSymbol),
-          Save(llvm::ArrayRef<VarId>{head}), Conjunction(range, unifications),
-          llvm::ArrayRef<VarInfo>{}, llvm::ArrayRef<TypeQualification>{}, 0u)};
+          Save(llvm::ArrayRef<VarId>{head.vars}),
+          Conjunction(range, unifications), llvm::ArrayRef<VarInfo>{},
+          llvm::ArrayRef<TypeQualification>{}, 0u)};
   made_[slot + 1] = Made{&bodySymbol,
       Make<ClauseForm>(range, parser::PredOrFunc::Predicate, NameOf(bodySymbol),
           Save(llvm::ArrayRef<VarId>{bodyHead}), body,
           llvm::ArrayRef<VarInfo>{}, llvm::ArrayRef<TypeQualification>{}, 0u)};
 
-  before.push_back(CallOf(range, loopSymbol, initial));
+  before.push_back(CallOf(range, loopSymbol, head.initial));
   return Conjunction(range, before);
 }
 
