@@ -78,6 +78,15 @@ def Merk_TypeInfoType : TypeDef<Merk_Dialect, "TypeInfo"> {
   let summary = "a run-time description of a type";
 }
 
+// A type class's instance at run time, a dictionary: a pointer to a cell of
+// the instance's method table, then its superclasses' typeclass_infos, its
+// types' type_infos, the type_infos of the instance's type variables that its
+// constraints do not have and the typeclass_infos of its constraints.
+def Merk_TypeclassInfoType : TypeDef<Merk_Dialect, "TypeclassInfo"> {
+  let mnemonic = "typeclass_info";
+  let summary = "a type class's instance at run time";
+}
+
 // A constructor of a type, as merk.type_def lists them: its name and the
 // types of its arguments, none for a constant.
 def Merk_ConstructorAttr : AttrDef<Merk_Dialect, "Constructor"> {

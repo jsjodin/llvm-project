@@ -131,8 +131,8 @@ private:
   // A merk type's LLVM type: a string is a pointer to its bytes, an array a
   // pointer to its size and elements, and a term its layout's.
   mlir::Type Convert(mlir::Type type) const {
-    if (mlir::isa<merk::StringType, merk::ArrayType, merk::TypeInfoType>(
-            type)) {
+    if (mlir::isa<merk::StringType, merk::ArrayType, merk::TypeInfoType,
+            merk::TypeclassInfoType>(type)) {
       return mlir::LLVM::LLVMPointerType::get(type.getContext());
     }
     if (mlir::isa<merk::WordType>(type)) {
@@ -209,6 +209,13 @@ private:
   void LowerToWord(merk::ToWordOp);
   void LowerFromWord(merk::FromWordOp);
   void LowerTypeInfo(merk::TypeInfoOp);
+  // The method tables, as constant arrays of the procedures' addresses.
+  void LowerInstances();
+  llvm::LogicalResult LowerTypeclassInfo(merk::TypeclassInfoOp);
+  // A method's call, through its typeclass_info's table.
+  mlir::Value CallMethod(merk::CallMethodOp, bool *tail = nullptr);
+  // The word of a typeclass_info's cell.
+  void LowerTypeclassInfoWord(merk::TypeclassInfoWordOp);
   llvm::LogicalResult LowerTypeCtors();
   void LowerTypeInfoWord(merk::TypeInfoWordOp);
   // Calls the entry at `offset` in the descriptor of `op`'s type_info, its
@@ -251,6 +258,12 @@ private:
   // Lowers a call; for a callee that can fail, returns its success flag.
   // A call in tail position returns, and sets `tail`.
   mlir::Value Call(merk::CallOp, bool *tail = nullptr);
+  // A call, of `func` or else the function `pointer` points to, of type
+  // `funcType`, with the inputs. The results are as Call's.
+  mlir::Value CallCode(mlir::Operation *call, mlir::LLVM::LLVMFuncOp func,
+      mlir::Value pointer, mlir::LLVM::LLVMFunctionType funcType,
+      llvm::SmallVector<mlir::Value> arguments, bool canFail, bool inMemory,
+      bool *tail);
   // A procedure's result: its success flag, if it has one, and outputs.
   mlir::Value Result(mlir::Location, mlir::Type, std::optional<bool> flag,
       mlir::ValueRange outputs);
@@ -991,6 +1004,130 @@ void Lowerer::LowerTypeInfo(merk::TypeInfoOp op) {
   rewriter_.replaceOpWithNewOp<mrt::TagOp>(op, ptr, new_, 1);
 }
 
+void Lowerer::LowerInstances() {
+  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  for (auto op :
+      llvm::make_early_inc_range(module_.getOps<merk::InstanceOp>())) {
+    mlir::Location loc{op.getLoc()};
+    rewriter_.setInsertionPoint(op);
+    std::optional<mlir::ArrayAttr> methods{op.getMethods()};
+    // On a device nothing dispatches, since a method call is an error there,
+    // and the procedures are not compiled for it.
+    if (!methods || device_) {
+      mlir::LLVM::GlobalOp::create(rewriter_, loc,
+          mlir::LLVM::LLVMArrayType::get(ptr, 0), /*isConstant=*/true,
+          mlir::LLVM::Linkage::External, op.getSymName(), mlir::Attribute{},
+          /*alignment=*/8);
+      rewriter_.eraseOp(op);
+      continue;
+    }
+    auto type{mlir::LLVM::LLVMArrayType::get(ptr, methods->size())};
+    auto global{mlir::LLVM::GlobalOp::create(rewriter_, loc, type,
+        /*isConstant=*/true,
+        op.getVisibility() == mlir::SymbolTable::Visibility::Private
+            ? mlir::LLVM::Linkage::Private
+            : mlir::LLVM::Linkage::External,
+        op.getSymName(), mlir::Attribute{}, /*alignment=*/8)};
+    rewriter_.createBlock(&global.getInitializerRegion());
+    mlir::Value init{mlir::LLVM::UndefOp::create(rewriter_, loc, type)};
+    for (auto [i, method] : llvm::enumerate(*methods)) {
+      llvm::StringRef name{mlir::cast<mlir::FlatSymbolRefAttr>(method).getValue()};
+      init = mlir::LLVM::InsertValueOp::create(rewriter_, loc, init,
+          mlir::LLVM::AddressOfOp::create(
+              rewriter_, loc, funcs_.lookup(name)),
+          llvm::SmallVector<std::int64_t>{static_cast<std::int64_t>(i)});
+    }
+    mlir::LLVM::ReturnOp::create(rewriter_, loc, init);
+    rewriter_.setInsertionPoint(global);
+    rewriter_.eraseOp(op);
+  }
+}
+
+llvm::LogicalResult Lowerer::LowerTypeclassInfo(merk::TypeclassInfoOp op) {
+  mlir::Location loc{op.getLoc()};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  auto table{module_.lookupSymbol<mlir::LLVM::GlobalOp>(op.getInstance())};
+  if (!table) {
+    return op.emitOpError("names no method table");
+  }
+  auto address{[&](const StaticTypeInfo &info) -> mlir::Value {
+    mlir::Value base{
+        mlir::LLVM::AddressOfOp::create(rewriter_, loc, info.global)};
+    if (info.tag == 0) {
+      return base;
+    }
+    return mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(),
+        base,
+        llvm::ArrayRef<mlir::LLVM::GEPArg>{static_cast<std::int32_t>(info.tag)});
+  }};
+  rewriter_.setInsertionPoint(op);
+  bool isStatic{true};
+  std::string key{op.getInstance().str()};
+  llvm::SmallVector<StaticTypeInfo> known;
+  for (mlir::Value argument : op.getArguments()) {
+    auto it{staticTypeInfos_.find(argument)};
+    if (it == staticTypeInfos_.end()) {
+      isStatic = false;
+      break;
+    }
+    known.push_back(it->second);
+    key += "," + it->second.global.getSymName().str() + "+" +
+        std::to_string(it->second.tag);
+  }
+  std::size_t arguments{op.getArguments().size()};
+  if (isStatic) {
+    mlir::LLVM::GlobalOp &cell{typeInfoCells_[key]};
+    if (!cell) {
+      llvm::SmallVector<mlir::Type> words(arguments + 1, ptr);
+      auto cellType{
+          mlir::LLVM::LLVMStructType::getLiteral(op.getContext(), words)};
+      mlir::OpBuilder::InsertionGuard guard{rewriter_};
+      rewriter_.setInsertionPointToStart(module_.getBody());
+      cell = mlir::LLVM::GlobalOp::create(rewriter_, loc, cellType,
+          /*isConstant=*/true, mlir::LLVM::Linkage::Private,
+          "merk.typeclass_info." + std::to_string(typeInfoCells_.size() - 1),
+          mlir::Attribute{}, /*alignment=*/8);
+      rewriter_.createBlock(&cell.getInitializerRegion());
+      mlir::Value init{mlir::LLVM::ZeroOp::create(rewriter_, loc, cellType)};
+      std::int64_t position{0};
+      init = mlir::LLVM::InsertValueOp::create(rewriter_, loc, init,
+          mlir::LLVM::AddressOfOp::create(rewriter_, loc, table),
+          llvm::SmallVector<std::int64_t>{position++});
+      for (const StaticTypeInfo &argument : known) {
+        init = mlir::LLVM::InsertValueOp::create(rewriter_, loc, init,
+            address(argument), llvm::SmallVector<std::int64_t>{position++});
+      }
+      mlir::LLVM::ReturnOp::create(rewriter_, loc, init);
+    }
+    StaticTypeInfo info{cell, 0};
+    mlir::Value value{address(info)};
+    staticTypeInfos_[value] = info;
+    rewriter_.replaceOp(op, value);
+    return llvm::success();
+  }
+  std::int64_t word{0};
+  mlir::Value new_{mrt::AllocOp::create(
+      rewriter_, loc, ptr, static_cast<std::int64_t>(arguments + 1))};
+  mrt::FieldStoreOp::create(rewriter_, loc,
+      mlir::LLVM::AddressOfOp::create(rewriter_, loc, table), new_, word++);
+  for (mlir::Value argument : op.getArguments()) {
+    mrt::FieldStoreOp::create(rewriter_, loc, argument, new_, word++);
+  }
+  rewriter_.replaceOp(op, new_);
+  return llvm::success();
+}
+
+void Lowerer::LowerTypeclassInfoWord(merk::TypeclassInfoWordOp op) {
+  mlir::Location loc{op.getLoc()};
+  rewriter_.setInsertionPoint(op);
+  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  mlir::Value address{mlir::LLVM::GEPOp::create(rewriter_, loc, ptr,
+      rewriter_.getI8Type(), op->getOperand(0),
+      llvm::ArrayRef<mlir::LLVM::GEPArg>{
+          static_cast<std::int32_t>(8 * op.getWord())})};
+  rewriter_.replaceOpWithNewOp<mlir::LLVM::LoadOp>(op, ptr, address, 8);
+}
+
 // The descriptors' kinds, as runtime/write.cpp reads them: a term's is its
 // layout's.
 static std::optional<unsigned> DescriptorKind(llvm::StringRef kind) {
@@ -1465,27 +1602,70 @@ mlir::Value Lowerer::Result(mlir::Location loc, mlir::Type type,
 }
 
 mlir::Value Lowerer::Call(merk::CallOp call, bool *tail) {
+  rewriter_.setInsertionPoint(call);
+  llvm::SmallVector<mlir::Value> arguments{call.getInputs()};
+  return CallCode(call, funcs_.lookup(call.getCallee()), nullptr, nullptr,
+      arguments, CanFail(call.getCallee()), InMemory(call.getCallee()), tail);
+}
+
+mlir::Value Lowerer::CallMethod(merk::CallMethodOp call, bool *tail) {
   mlir::Location loc{call.getLoc()};
   rewriter_.setInsertionPoint(call);
-  mlir::LLVM::LLVMFuncOp func{funcs_.lookup(call.getCallee())};
+  mlir::MLIRContext *context{call.getContext()};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(context)};
+  // The table is the cell's first word.
+  mlir::Value info{call->getOperand(0)};
+  mlir::Value table{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr, info, 8)};
+  mlir::Value slot{mlir::LLVM::GEPOp::create(rewriter_, loc, ptr,
+      rewriter_.getI8Type(), table,
+      llvm::ArrayRef<mlir::LLVM::GEPArg>{
+          static_cast<std::int32_t>(8 * call.getMethod())})};
+  mlir::Value code{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr, slot, 8)};
+  bool canFail{codegen::CanFail(call.getDeterminism())};
+  bool inMemory{InMemory(call.getResultTypes(), canFail)};
+  llvm::SmallVector<mlir::Value> arguments{info};
+  arguments.append(call.getInputs().begin(), call.getInputs().end());
+  llvm::SmallVector<mlir::Type> inputs;
+  if (inMemory) {
+    inputs.push_back(ptr);
+  }
+  inputs.push_back(ptr);
+  llvm::SmallVector<mlir::Type> converted{Convert(call.getInputs().getTypes())};
+  inputs.append(converted.begin(), converted.end());
+  auto funcType{mlir::LLVM::LLVMFunctionType::get(
+      inMemory ? ResultType(context, {}, canFail)
+               : ResultType(context, call.getResultTypes(), canFail),
+      inputs)};
+  return CallCode(call, nullptr, code, funcType, arguments, canFail, inMemory, tail);
+}
+
+mlir::Value Lowerer::CallCode(mlir::Operation *call, mlir::LLVM::LLVMFuncOp func,
+    mlir::Value pointer, mlir::LLVM::LLVMFunctionType funcType,
+    llvm::SmallVector<mlir::Value> arguments, bool canFail, bool inMemory,
+    bool *tail) {
+  mlir::Location loc{call->getLoc()};
   // A call in tail position, whose solution is the procedure's, is a
   // tail call (design document, "Calling convention").
   auto succeed{mlir::dyn_cast_or_null<merk::SucceedOp>(call->getNextNode())};
   auto caller{call->getParentOfType<mlir::LLVM::LLVMFuncOp>()};
-  bool isTail{succeed && llvm::equal(succeed.getOutputs(), call.getResults()) &&
-      CanFail(caller.getSymName()) == CanFail(call.getCallee())};
+  bool isTail{succeed && llvm::equal(succeed.getOutputs(), call->getResults()) &&
+      CanFail(caller.getSymName()) == canFail};
   // A callee's outputs in memory are where the caller's go, for a tail
   // call, whose caller has the same outputs, and otherwise in a slot.
-  llvm::SmallVector<mlir::Value> arguments{call.getInputs()};
   mlir::Value outputs;
-  bool inMemory{InMemory(call.getCallee())};
-  auto outputsType{OutputsType(call.getResultTypes())};
+  auto outputsType{OutputsType(call->getResultTypes())};
   if (inMemory) {
     outputs = isTail ? caller.getArgument(0)
                      : Alloca(call, outputsType, loc);
     arguments.insert(arguments.begin(), outputs);
   }
-  auto llvmCall{mlir::LLVM::CallOp::create(rewriter_, loc, func, arguments)};
+  mlir::LLVM::CallOp llvmCall;
+  if (func) {
+    llvmCall = mlir::LLVM::CallOp::create(rewriter_, loc, func, arguments);
+  } else {
+    arguments.insert(arguments.begin(), pointer);
+    llvmCall = mlir::LLVM::CallOp::create(rewriter_, loc, funcType, arguments);
+  }
   llvmCall.setCConv(cconv_);
   mlir::Value result{
       llvmCall.getNumResults() ? llvmCall.getResult() : mlir::Value{}};
@@ -1501,7 +1681,6 @@ mlir::Value Lowerer::Call(merk::CallOp call, bool *tail) {
     }
     return nullptr;
   }
-  bool canFail{CanFail(call.getCallee())};
   llvm::SmallVector<mlir::Value> values;
   if (inMemory) {
     for (auto [i, type] : llvm::enumerate(outputsType.getBody())) {
@@ -1511,7 +1690,7 @@ mlir::Value Lowerer::Call(merk::CallOp call, bool *tail) {
     rewriter_.replaceOp(call, values);
     return canFail ? result : nullptr;
   }
-  std::size_t count{call.getNumResults()};
+  std::size_t count{call->getNumResults()};
   if (!canFail && count <= 1) {
     values.append(llvmCall->result_begin(), llvmCall->result_end());
   } else {
@@ -1657,6 +1836,19 @@ void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
         bool tail{false};
         if (mlir::Value succeeded{Call(call, &tail)}) {
           // The callee can fail: go on if it succeeded.
+          next = SplitAfter(succeeded.getDefiningOp());
+          rewriter_.setInsertionPointToEnd(current);
+          mlir::LLVM::CondBrOp::create(rewriter_, loc, succeeded, next, fail);
+          break;
+        }
+        if (tail) {
+          break; // it returns
+        }
+        continue;
+      }
+      if (auto call{mlir::dyn_cast<merk::CallMethodOp>(op)}) {
+        bool tail{false};
+        if (mlir::Value succeeded{CallMethod(call, &tail)}) {
           next = SplitAfter(succeeded.getDefiningOp());
           rewriter_.setInsertionPointToEnd(current);
           mlir::LLVM::CondBrOp::create(rewriter_, loc, succeeded, next, fail);
@@ -2084,9 +2276,33 @@ llvm::LogicalResult Lowerer::Lower() {
       op.removeCompareAttr();
       op.removeFunctorsAttr();
     }
+    // Nor does anything dispatch on a type class, and a table's symbols would
+    // keep the filter below from removing the host's procedures.
+    for (auto op : module_.getOps<merk::InstanceOp>()) {
+      op.removeMethodsAttr();
+    }
   }
   if (mlir::omp::isOpenMPModule(module_) && mlir::failed(FilterProcs())) {
     return llvm::failure();
+  }
+  // What stays on a device of a procedure that only holds a target region
+  // does not run there; a procedure a target region calls does.
+  if (device_) {
+    bool bad{false};
+    auto check{[&](mlir::Operation *op) {
+      auto proc{op->getParentOfType<merk::ProcOp>()};
+      if (op->getParentOfType<mlir::omp::TargetOp>() ||
+          (proc && proc->getDiscardableAttr("omp.declare_target"))) {
+        op->emitOpError(
+            "dispatches on a type class, which cannot be done on an OpenMP device yet");
+        bad = true;
+      }
+    }};
+    module_.walk([&](merk::CallMethodOp op) { check(op); });
+    module_.walk([&](merk::TypeclassInfoOp op) { check(op); });
+    if (bad) {
+      return llvm::failure();
+    }
   }
   if (mlir::failed(Layouts()) || mlir::failed(LowerTerms())) {
     return llvm::failure();
@@ -2104,11 +2320,13 @@ llvm::LogicalResult Lowerer::Lower() {
   if (mlir::failed(LowerTypeCtors())) {
     return llvm::failure();
   }
+  LowerInstances();
   llvm::SmallVector<mlir::Operation *> ops;
   module_.walk([&](mlir::Operation *op) {
     if (mlir::isa<merk::SucceedOp, merk::CallOp, merk::ConstantOp,
             merk::ToWordOp, merk::FromWordOp, merk::TypeInfoOp,
-            merk::TypeInfoWordOp, merk::UnifyWordOp, merk::CompareWordOp,
+            merk::TypeInfoWordOp, merk::TypeclassInfoOp,
+            merk::TypeclassInfoWordOp, merk::CallMethodOp, merk::UnifyWordOp, merk::CompareWordOp,
             merk::StringCompareOp, merk::StringEqualOp,
             merk::ForeignCallOp, merk::ArrayNewOp, merk::ArraySizeOp,
             merk::ArrayGetOp, merk::ArraySetOp, merk::ArrayFillOp,
@@ -2129,6 +2347,14 @@ llvm::LogicalResult Lowerer::Lower() {
       LowerTypeInfo(typeInfo);
     } else if (auto infoWord{mlir::dyn_cast<merk::TypeInfoWordOp>(op)}) {
       LowerTypeInfoWord(infoWord);
+    } else if (auto dictionary{mlir::dyn_cast<merk::TypeclassInfoOp>(op)}) {
+      if (mlir::failed(LowerTypeclassInfo(dictionary))) {
+        return llvm::failure();
+      }
+    } else if (auto word{mlir::dyn_cast<merk::TypeclassInfoWordOp>(op)}) {
+      LowerTypeclassInfoWord(word);
+    } else if (auto method{mlir::dyn_cast<merk::CallMethodOp>(op)}) {
+      CallMethod(method);
     } else if (auto unify{mlir::dyn_cast<merk::UnifyWordOp>(op)}) {
       if (mlir::failed(LowerUnifyWord(unify))) {
         return llvm::failure();

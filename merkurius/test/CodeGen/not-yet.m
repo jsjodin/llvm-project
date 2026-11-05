@@ -31,10 +31,9 @@ q(X) :-
     ( X > 0 ; X < -5 ).
 % CHECK: not-yet.m:[[@LINE-1]]:7: error: not yet implemented: code generation for disjunctions
 
-:- typeclass tc(T) where [].
-:- pred r(T::in) is det <= tc(T).
-% CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for type class constraints and existential types
-r(_).
+:- some [T] pred r(T::out) is det.
+% CHECK: not-yet.m:[[@LINE-1]]:18: error: not yet implemented: code generation for existential types
+r(1).
 
 :- func w(int) = int.
 w(X) = pow(X, 3).

@@ -201,6 +201,20 @@ bool Has(const llvm::BitVector &set, VarId var) {
 
 // Whether a constraint is satisfied, directly or not, by one that the
 // clause's declaration assumes.
+// Whether what the proof assumes is all of the signature's constraints, and
+// none of a goal's existential ones.
+bool UsesOnlyDeclared(const ConstraintProof &proof, const Signature &signature) {
+  if (proof.assumed &&
+      (proof.goal || proof.assumed < signature.constraints.data() ||
+          proof.assumed >=
+              signature.constraints.data() + signature.constraints.size())) {
+    return false;
+  }
+  return llvm::all_of(proof.premises, [&](const ConstraintProof &premise) {
+    return UsesOnlyDeclared(premise, signature);
+  });
+}
+
 bool UsesAssumed(const ConstraintProof &proof) {
   return proof.assumed ||
       llvm::any_of(proof.premises, [](const ConstraintProof &premise) {
@@ -321,6 +335,10 @@ private:
   // Each loop's predicates, in the order of the result, a loop's before
   // those of the loops in its body.
   std::vector<std::optional<Made>> made_;
+  // The clause's own constraints, if its loops' predicates are given them.
+  llvm::ArrayRef<ClassConstraint> given_;
+  const Signature *SignatureOfClause(const ClauseTypes &);
+  llvm::DenseSet<unsigned> GoalsInLoops(const ClauseTypes &);
   // The purities of the predicates made, by symbol.
   llvm::DenseMap<const Symbol *, parser::Purity> purity_;
   LoopTranslation result_;
@@ -491,8 +509,33 @@ bool LoopTranslator::Translatable(const ClauseTypes &clause) {
   if (!translatable) {
     return false;
   }
-  // The type class constraints of the goals in a loop's body must not need
-  // the clause's own, which the loop's predicates would need to be given.
+  // A loop's predicates are given the clause's own type class constraints if
+  // the goals in its body need them, but not yet an existential type's.
+  const Signature *signature{SignatureOfClause(clause)};
+  llvm::DenseSet<unsigned> inLoops{GoalsInLoops(clause)};
+  for (const GoalConstraint &constraint : clause.constraints) {
+    if (inLoops.count(constraint.goal) &&
+        UsesAssumed(constraint.proof) &&
+        (!signature || !UsesOnlyDeclared(constraint.proof, *signature))) {
+      ForEachGoal(clause.clause->body, [&](const Goal &goal) {
+        if (const auto *loop{std::get_if<const Loop *>(&goal)}) {
+          messages_.Say(Source((*loop)->tokens),
+              "%s"_todo_en_US,
+              "loops whose body needs a type class constraint of an existential type");
+        }
+      });
+      return false;
+    }
+  }
+  return true;
+}
+
+const Signature *LoopTranslator::SignatureOfClause(const ClauseTypes &clause) {
+  return clause.method ? &clause.method->signature
+                       : types_.SignatureOf(*clause.definition);
+}
+
+llvm::DenseSet<unsigned> LoopTranslator::GoalsInLoops(const ClauseTypes &clause) {
   llvm::DenseSet<unsigned> inLoops;
   ForEachGoal(clause.clause->body, [&](const Goal &goal) {
     if (const auto *loop{std::get_if<const Loop *>(&goal)}) {
@@ -500,20 +543,7 @@ bool LoopTranslator::Translatable(const ClauseTypes &clause) {
           [&](const Goal &g) { inLoops.insert(GoalNumber(g)); });
     }
   });
-  for (const GoalConstraint &constraint : clause.constraints) {
-    if (inLoops.count(constraint.goal) && UsesAssumed(constraint.proof)) {
-      ForEachGoal(clause.clause->body, [&](const Goal &goal) {
-        if (const auto *loop{std::get_if<const Loop *>(&goal)}) {
-          messages_.Say(Source((*loop)->tokens),
-              "%s"_todo_en_US,
-              "loops whose body needs a type class constraint of its "
-              "predicate");
-        }
-      });
-      return false;
-    }
-  }
-  return true;
+  return inLoops;
 }
 
 LoopTranslation LoopTranslator::Run() {
@@ -551,6 +581,16 @@ void LoopTranslator::TranslateClause(std::size_t index) {
   callNames_.assign(clause_->names.begin(), clause_->names.end());
   goals_ = form.goals;
   made_.clear();
+  given_ = {};
+  {
+    llvm::DenseSet<unsigned> inLoops{GoalsInLoops(*clause_)};
+    for (const GoalConstraint &constraint : clause_->constraints) {
+      if (inLoops.count(constraint.goal) && UsesAssumed(constraint.proof)) {
+        given_ = SignatureOfClause(*clause_)->constraints;
+        break;
+      }
+    }
+  }
   Goal body{Rebuild(form.body)};
   ClauseTypes outer{*clause_};
 
@@ -587,6 +627,28 @@ void LoopTranslator::TranslateClause(std::size_t index) {
       } else if (numbers.count(constraint.goal)) {
         constraints.push_back(constraint);
       }
+    }
+    // A call of a loop's predicate passes the clause's own constraints.
+    if (!given_.empty()) {
+      llvm::SmallVector<unsigned> calls;
+      for (unsigned number : numbers) {
+        if (number < symbols.size() && symbols[number] &&
+            llvm::any_of(made_, [&](const std::optional<Made> &made) {
+              return made && made->symbol == symbols[number];
+            })) {
+          calls.push_back(number);
+        }
+      }
+      for (unsigned number : calls) {
+        for (const ClassConstraint &constraint : given_) {
+          constraints.push_back(GoalConstraint{number,
+              ConstraintProof{constraint, &constraint, nullptr, {}}});
+        }
+      }
+      std::stable_sort(constraints.begin(), constraints.end(),
+          [&](const GoalConstraint &x, const GoalConstraint &y) {
+            return x.goal < y.goal;
+          });
     }
     return types_.arena_.SaveArray(llvm::ArrayRef<GoalConstraint>{constraints});
   }};
@@ -627,9 +689,12 @@ void LoopTranslator::TranslateClause(std::size_t index) {
     for (const Type *type : arguments) {
       count(*type);
     }
+    // The same array, so that the proofs of the goals in the loop's body, which
+    // name its elements, hold in the loop's predicates.
     types_.signatures_[made->symbol] = Signature{parser::PredOrFunc::Predicate,
         purity_.lookup(made->symbol), typeVars, outer.typeVarNames,
-        types_.arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments})};
+        types_.arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments}),
+        given_};
     ClauseTypes types{&clause, made->symbol, true, false, outer.typeVarNames,
         varTypes, symbols, names, constraintsOf(clause, false)};
     types_.clauses_.push_back(types);

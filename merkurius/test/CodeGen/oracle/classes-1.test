@@ -1,0 +1,12 @@
+# Random modules of type classes, with superclasses, and instances for types of
+# every representation, lists, with a constraint, and boxes, with or without one,
+# whose polymorphic predicates call methods and each other and print what they
+# give (see utils/codegen-oracle/generate-class-programs.py): merkc's programs,
+# at -O0 and -O2, and with heap chunks of 64 bytes, print what mmc's print. The
+# seed is fixed, so the modules are too; to search further, run
+# generate-class-programs.py with other seeds.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/codegen-oracle/generate-class-programs.py --seed 1 --count 15 %t
+# RUN: %compare-runs --levels 0 2 --chunk-bytes 64 --jobs 4 %t/*.m
