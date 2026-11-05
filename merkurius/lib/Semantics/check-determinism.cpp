@@ -2968,17 +2968,160 @@ std::unique_ptr<DeterminismChecking> CheckDeterminism(
   return result;
 }
 
-void DumpProcedureBody(llvm::raw_ostream &os, const ProcedureBody &body,
-    const parser::TokenSequence &tokens,
-    llvm::function_ref<std::string(parser::CharBlock)> position) {
-  auto name{[&](BodyVar var) { return body.vars[var].name; }};
-  auto names{[&](llvm::ArrayRef<BodyVar> vars) {
+// Writes a procedure's body, as -fdebug-dump-determinism does.
+class BodyDumper {
+public:
+  BodyDumper(llvm::raw_ostream &os, const ProcedureBody &body,
+      const parser::TokenSequence &tokens,
+      llvm::function_ref<std::string(parser::CharBlock)> position)
+      : os_{os}, body_{body}, tokens_{tokens}, position_{position} {}
+
+  void Dump(const Body *goal, unsigned depth) {
+    std::string indent(2 * depth + 4, ' ');
+    std::string at{position_(tokens_.tokens[goal->tokens.first].spelling)};
+    switch (goal->kind) {
+    case BodyKind::Conj:
+      if (goal->goals.empty()) {
+        os_ << indent << at << " true" << Tag(goal) << '\n';
+      }
+      for (const Body *g : goal->goals) {
+        Dump(g, depth);
+      }
+      return;
+    case BodyKind::Disj:
+      os_ << indent << at << (goal->goals.empty() ? " fail" : " disjunction")
+          << Tag(goal) << '\n';
+      for (const Body *g : goal->goals) {
+        os_ << indent << "  branch\n";
+        Dump(g, depth + 2);
+      }
+      return;
+    case BodyKind::Switch:
+      os_ << indent << at << " switch on " << Name(goal->switchVar)
+          << (goal->canFail ? ", can fail" : ", cannot fail") << Tag(goal)
+          << '\n';
+      for (const SwitchCase &c : goal->cases) {
+        os_ << indent << "  case " << FunctorName(c.functor);
+        for (const InstFunctor &other : c.others) {
+          os_ << " or " << FunctorName(other);
+        }
+        os_ << '\n';
+        Dump(c.goal, depth + 2);
+      }
+      return;
+    case BodyKind::IfThenElse:
+      os_ << indent << at << " if-then-else" << Tag(goal) << '\n';
+      for (std::size_t i{0}; i < 3; ++i) {
+        os_ << indent << "  "
+            << (i == 0          ? "if"
+                       : i == 1 ? "then"
+                                : "else")
+            << '\n';
+        Dump(goal->goals[i], depth + 2);
+      }
+      return;
+    case BodyKind::Not:
+      os_ << indent << at << " not" << Tag(goal) << '\n';
+      Dump(goal->goals.front(), depth + 1);
+      return;
+    case BodyKind::Scope:
+      os_ << indent << at << ' ';
+      if (goal->promise) {
+        using Kind = parser::PromiseSolutionsKind;
+        os_ << (*goal->promise == Kind::EquivalentSolutions
+                       ? "promise_equivalent_solutions"
+                       : *goal->promise == Kind::EquivalentSolutionSets
+                       ? "promise_equivalent_solution_sets"
+                       : "arbitrary")
+            << " [" << Names(goal->promised) << ']';
+      } else if (goal->scope == ScopeKind::RequireDeterminism) {
+        os_ << "require_" << DeterminismName(*goal->required);
+      } else if (goal->scope == ScopeKind::RequireSwitch) {
+        if (goal->required) {
+          os_ << "require_switch_arms_" << DeterminismName(*goal->required);
+        } else {
+          os_ << "require_complete_switch";
+        }
+        if (goal->switchOn) {
+          os_ << " [" << Name(*goal->switchOn) << ']';
+        }
+      } else {
+        os_ << llvm::StringRef{EnumToString(goal->scope)}.lower();
+      }
+      os_ << Tag(goal) << '\n';
+      Dump(goal->goals.front(), depth + 1);
+      return;
+    case BodyKind::Call:
+      os_ << indent << at << " call " << *goal->modes->callee->symbol
+          << " mode " << goal->modes->callee->number
+          << (goal->modes->implied ? " implied" : "") << ": "
+          << goal->call->name->name << '(' << Names(goal->arguments) << ')'
+          << Tag(goal) << '\n';
+      return;
+    case BodyKind::HOCall: {
+      llvm::ArrayRef<BodyVar> arguments{goal->arguments};
+      os_ << indent << at << " higher-order call: ";
+      if (goal->hoCall->kind == parser::PredOrFunc::Function) {
+        os_ << Name(arguments.back()) << " = ";
+        arguments = arguments.drop_back();
+      }
+      os_ << Name(goal->closure) << '(' << Names(arguments) << ')' << Tag(goal)
+          << '\n';
+      return;
+    }
+    case BodyKind::Unify:
+      os_ << indent << at << ' ';
+      if (goal->isVar) {
+        if (goal->unify == UnifyKind::Assign) {
+          os_ << "assign " << Name(goal->left) << " := " << Name(goal->var);
+        } else {
+          os_ << "test " << Name(goal->left) << " = " << Name(goal->var);
+        }
+      } else if (goal->unify == UnifyKind::Call) {
+        os_ << "call " << *goal->modes->callee->symbol << " mode "
+            << goal->modes->callee->number
+            << (goal->modes->implied ? " implied" : "") << ": "
+            << Name(goal->left) << " = " << goal->source->functor.name->name
+            << '(' << Names(goal->arguments) << ')';
+      } else if (goal->lambda ||
+          goal->source->functor.kind == FunctorKind::Coerce ||
+          goal->modes->callee) {
+        os_ << llvm::StringRef{EnumToString(goal->unify)}.lower() << ' '
+            << Name(goal->left) << " = "
+            << (goal->lambda                 ? "lambda"
+                       : goal->modes->callee ? "closure"
+                                             : "coerce")
+            << '(' << Names(goal->arguments) << ')';
+      } else {
+        os_ << llvm::StringRef{EnumToString(goal->unify)}.lower() << ' '
+            << Name(goal->left) << " = " << FunctorName(goal->functor);
+        if (!goal->arguments.empty()) {
+          os_ << '(' << Names(goal->arguments) << ')';
+        }
+        if (goal->switchTest) {
+          os_ << ", switched on";
+        }
+      }
+      os_ << Tag(goal) << '\n';
+      if (goal->lambda) {
+        Dump(goal->lambda, depth + 1);
+      }
+      return;
+    }
+  }
+
+private:
+  const std::string &Name(BodyVar var) const { return body_.vars[var].name; }
+
+  std::string Names(llvm::ArrayRef<BodyVar> vars) const {
     std::string text;
     llvm::raw_string_ostream s{text};
-    llvm::interleave(vars, s, [&](BodyVar v) { s << name(v); }, ", ");
+    llvm::interleave(
+        vars, s, [&](BodyVar v) { s << Name(v); }, ", ");
     return text;
-  }};
-  auto functor{[](const InstFunctor &f) {
+  }
+
+  static std::string FunctorName(const InstFunctor &f) {
     std::string text;
     if (!f.module.empty()) {
       text = f.module.str() + '.';
@@ -2988,145 +3131,26 @@ void DumpProcedureBody(llvm::raw_ostream &os, const ProcedureBody &body,
       text += '/' + std::to_string(f.arity);
     }
     return text;
-  }};
+  }
+
   // A goal's determinism, if it was inferred.
-  auto tag{[&](const Body *goal) {
-    auto it{body.goals.find(goal)};
-    return it == body.goals.end()
+  std::string Tag(const Body *goal) const {
+    auto it{body_.goals.find(goal)};
+    return it == body_.goals.end()
         ? std::string{}
         : std::string{" ["} + DeterminismName(it->second) + ']';
-  }};
-  std::function<void(const Body *, unsigned)> dump{[&](const Body *goal,
-                                                      unsigned depth) {
-    std::string indent(2 * depth + 4, ' ');
-    std::string at{position(tokens.tokens[goal->tokens.first].spelling)};
-    switch (goal->kind) {
-    case BodyKind::Conj:
-      if (goal->goals.empty()) {
-        os << indent << at << " true" << tag(goal) << '\n';
-      }
-      for (const Body *g : goal->goals) {
-        dump(g, depth);
-      }
-      return;
-    case BodyKind::Disj:
-      os << indent << at << (goal->goals.empty() ? " fail" : " disjunction")
-         << tag(goal) << '\n';
-      for (const Body *g : goal->goals) {
-        os << indent << "  branch\n";
-        dump(g, depth + 2);
-      }
-      return;
-    case BodyKind::Switch:
-      os << indent << at << " switch on " << name(goal->switchVar)
-         << (goal->canFail ? ", can fail" : ", cannot fail") << tag(goal)
-         << '\n';
-      for (const SwitchCase &c : goal->cases) {
-        os << indent << "  case " << functor(c.functor);
-        for (const InstFunctor &other : c.others) {
-          os << " or " << functor(other);
-        }
-        os << '\n';
-        dump(c.goal, depth + 2);
-      }
-      return;
-    case BodyKind::IfThenElse:
-      os << indent << at << " if-then-else" << tag(goal) << '\n';
-      for (std::size_t i{0}; i < 3; ++i) {
-        os << indent << "  " << (i == 0 ? "if" : i == 1 ? "then" : "else")
-           << '\n';
-        dump(goal->goals[i], depth + 2);
-      }
-      return;
-    case BodyKind::Not:
-      os << indent << at << " not" << tag(goal) << '\n';
-      dump(goal->goals.front(), depth + 1);
-      return;
-    case BodyKind::Scope:
-      os << indent << at << ' ';
-      if (goal->promise) {
-        using Kind = parser::PromiseSolutionsKind;
-        os << (*goal->promise == Kind::EquivalentSolutions
-                      ? "promise_equivalent_solutions"
-                      : *goal->promise == Kind::EquivalentSolutionSets
-                      ? "promise_equivalent_solution_sets"
-                      : "arbitrary")
-           << " [" << names(goal->promised) << ']';
-      } else if (goal->scope == ScopeKind::RequireDeterminism) {
-        os << "require_" << DeterminismName(*goal->required);
-      } else if (goal->scope == ScopeKind::RequireSwitch) {
-        if (goal->required) {
-          os << "require_switch_arms_" << DeterminismName(*goal->required);
-        } else {
-          os << "require_complete_switch";
-        }
-        if (goal->switchOn) {
-          os << " [" << name(*goal->switchOn) << ']';
-        }
-      } else {
-        os << llvm::StringRef{EnumToString(goal->scope)}.lower();
-      }
-      os << tag(goal) << '\n';
-      dump(goal->goals.front(), depth + 1);
-      return;
-    case BodyKind::Call:
-      os << indent << at << " call " << *goal->modes->callee->symbol << " mode "
-         << goal->modes->callee->number << (goal->modes->implied ? " implied" : "")
-         << ": " << goal->call->name->name << '(' << names(goal->arguments)
-         << ')' << tag(goal) << '\n';
-      return;
-    case BodyKind::HOCall: {
-      llvm::ArrayRef<BodyVar> arguments{goal->arguments};
-      os << indent << at << " higher-order call: ";
-      if (goal->hoCall->kind == parser::PredOrFunc::Function) {
-        os << name(arguments.back()) << " = ";
-        arguments = arguments.drop_back();
-      }
-      os << name(goal->closure) << '(' << names(arguments) << ')' << tag(goal)
-         << '\n';
-      return;
-    }
-    case BodyKind::Unify:
-      os << indent << at << ' ';
-      if (goal->isVar) {
-        if (goal->unify == UnifyKind::Assign) {
-          os << "assign " << name(goal->left) << " := " << name(goal->var);
-        } else {
-          os << "test " << name(goal->left) << " = " << name(goal->var);
-        }
-      } else if (goal->unify == UnifyKind::Call) {
-        os << "call " << *goal->modes->callee->symbol << " mode "
-           << goal->modes->callee->number
-           << (goal->modes->implied ? " implied" : "") << ": "
-           << name(goal->left) << " = "
-           << goal->source->functor.name->name << '(' << names(goal->arguments)
-           << ')';
-      } else if (goal->lambda || goal->source->functor.kind == FunctorKind::Coerce ||
-          goal->modes->callee) {
-        os << llvm::StringRef{EnumToString(goal->unify)}.lower() << ' '
-           << name(goal->left) << " = "
-           << (goal->lambda ? "lambda"
-                   : goal->modes->callee ? "closure"
-                                         : "coerce")
-           << '(' << names(goal->arguments) << ')';
-      } else {
-        os << llvm::StringRef{EnumToString(goal->unify)}.lower() << ' '
-           << name(goal->left) << " = " << functor(goal->functor);
-        if (!goal->arguments.empty()) {
-          os << '(' << names(goal->arguments) << ')';
-        }
-        if (goal->switchTest) {
-          os << ", switched on";
-        }
-      }
-      os << tag(goal) << '\n';
-      if (goal->lambda) {
-        dump(goal->lambda, depth + 1);
-      }
-      return;
-    }
-  }};
-  dump(body.body, 0);
+  }
+
+  llvm::raw_ostream &os_;
+  const ProcedureBody &body_;
+  const parser::TokenSequence &tokens_;
+  llvm::function_ref<std::string(parser::CharBlock)> position_;
+};
+
+void DumpProcedureBody(llvm::raw_ostream &os, const ProcedureBody &body,
+    const parser::TokenSequence &tokens,
+    llvm::function_ref<std::string(parser::CharBlock)> position) {
+  BodyDumper{os, body, tokens, position}.Dump(body.body, 0);
 }
 
 } // namespace merkurius::semantics
