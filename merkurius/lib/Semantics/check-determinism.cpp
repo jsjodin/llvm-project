@@ -69,6 +69,19 @@ bool IsTrue(const semantics::Goal &goal) {
           [](const semantics::Goal &g) { return IsTrue(g); });
 }
 
+unsigned GoalNumber(const semantics::Goal &goal) {
+  return std::visit([](const auto *g) { return g->number; }, goal);
+}
+
+auto GoalFirstToken(const semantics::Goal &goal) {
+  return std::visit([](const auto *g) { return g->tokens.first; }, goal);
+}
+
+// Whether a goal is fail.
+bool IsFail(const Body *goal) {
+  return goal->kind == BodyKind::Disj && goal->goals.empty();
+}
+
 } // namespace
 
 // Turns the clauses of a procedure, as mode analysis checked them, into
@@ -111,6 +124,13 @@ public:
   }
 
 private:
+  void AddDropped(const ClauseForm &form, const semantics::Goal &goal,
+      std::vector<BodyVar> &dropped) {
+    for (VarId var : form.nonlocals[GoalNumber(goal)]) {
+      dropped.push_back(map_[var]);
+    }
+  }
+
   const Body *New(Body body) { return &result_.nodes_.emplace_back(std::move(body)); }
 
   BodyVar NewVar(std::string name, const Type *type) {
@@ -248,41 +268,30 @@ private:
                   failing = &inner;
                 }
               }
-              auto number{[](const semantics::Goal &g) {
-                return std::visit([](const auto *g) { return g->number; }, g);
-              }};
-              auto first{[](const semantics::Goal &g) {
-                return std::visit([](const auto *g) { return g->tokens.first; }, g);
-              }};
               // The variables of the goals left out, which mmc's
               // quantification still finds until it runs again, as for a
               // unification replaced with fail.
               std::vector<BodyVar> dropped;
               const ClauseForm &form{*clause_->clause->clause};
-              auto drop{[&](const semantics::Goal &g) {
-                for (VarId var : form.nonlocals[number(g)]) {
-                  dropped.push_back(map_[var]);
-                }
-              }};
               for (const semantics::Goal &inner :
                   std::get<const Conj *>(goal)->goals) {
                 if (!llvm::any_of(modes.order, [&](const semantics::Goal &g) {
-                      return number(g) == number(inner);
+                      return GoalNumber(g) == GoalNumber(inner);
                     })) {
-                  drop(inner);
+                  AddDropped(form, inner, dropped);
                 }
               }
               for (const semantics::Goal &inner : modes.order) {
-                if (failing && number(inner) > number(*failing) &&
-                    !(clause_->goals[number(inner)].head &&
-                        first(inner) < first(*failing))) {
-                  drop(inner);
+                if (failing && GoalNumber(inner) > GoalNumber(*failing) &&
+                    !(clause_->goals[GoalNumber(inner)].head &&
+                        GoalFirstToken(inner) < GoalFirstToken(*failing))) {
+                  AddDropped(form, inner, dropped);
                   continue;
                 }
                 const Body *goal{Goal(inner)};
                 if (!goal) {
                   if (DeadConstruction(inner)) {
-                    drop(inner);
+                    AddDropped(form, inner, dropped);
                   }
                   continue;
                 }
@@ -549,6 +558,12 @@ private:
   // The tests a disjunct makes of a variable: one, or one for each branch
   // of a disjunction in it, with the disjunct as each branch makes it.
   using Found = std::vector<std::pair<InstFunctor, const Body *>>;
+  // A switch on a variable, which is partial if it leaves some disjuncts.
+  struct Partial {
+    BodyVar var;
+    std::vector<std::pair<InstFunctor, std::vector<const Body *>>> cases;
+    std::vector<const Body *> left;
+  };
 
   const Body *New(Body body) { return &result_.nodes_.emplace_back(std::move(body)); }
 
@@ -626,6 +641,38 @@ private:
     }
   }
 
+  static void AddCase(
+      Partial &partial, const InstFunctor &functor, const Body *goal) {
+    auto it{llvm::find_if(
+        partial.cases, [&](const auto &c) { return c.first == functor; })};
+    if (it == partial.cases.end()) {
+      partial.cases.push_back({functor, {}});
+      it = std::prev(partial.cases.end());
+    }
+    it->second.push_back(goal);
+  }
+
+  bool PartialCanFail(const Partial &p, const Entry &entry) {
+    std::vector<InstFunctor> functors;
+    for (const auto &c : p.cases) {
+      functors.push_back(c.first);
+    }
+    return CanFail(p.var, functors, entry);
+  }
+
+  // Which full switch is chosen: the greatest, and the first of those.
+  std::pair<bool, bool> FullRank(const Partial &p, const Entry &entry) {
+    return std::make_pair(!PartialCanFail(p, entry),
+        ops_.ConstructorsOf(body_.vars[p.var].type) == nullptr);
+  }
+
+  // Which partial switch is chosen: one that cannot fail first, then the one
+  // with the most functors, then the first, as in mmc.
+  std::pair<bool, std::size_t> PartialRank(
+      const Partial &p, const Entry &entry) {
+    return std::make_pair(!PartialCanFail(p, entry), p.cases.size());
+  }
+
   // A disjunction is a switch on a variable bound before it that each
   // disjunct tests against a functor, with at least two functors: the
   // first that cannot fail, else the first of a type without constructors,
@@ -641,11 +688,6 @@ private:
   // are, for common subexpression elimination.
   const Body *Disjunction(TokenRange tokens,
       const std::vector<const Body *> &disjuncts, const Entry &entry) {
-    struct Partial {
-      BodyVar var;
-      std::vector<std::pair<InstFunctor, std::vector<const Body *>>> cases;
-      std::vector<const Body *> left;
-    };
     // Those that are switches, and those that are partial switches.
     std::vector<Partial> fulls;
     std::vector<Partial> partials;
@@ -660,15 +702,6 @@ private:
     bool single{false};
     for (const auto &[var, inst] : bound) {
       Partial partial{var};
-      auto add{[&](const InstFunctor &functor, const Body *goal) {
-        auto it{llvm::find_if(
-            partial.cases, [&](const auto &c) { return c.first == functor; })};
-        if (it == partial.cases.end()) {
-          partial.cases.push_back({functor, {}});
-          it = std::prev(partial.cases.end());
-        }
-        it->second.push_back(goal);
-      }};
       for (const Body *disjunct : disjuncts) {
         std::optional<Found> found{Scan(Conjuncts(disjunct), var, {var}, false)};
         if (!found || found->empty()) {
@@ -676,7 +709,7 @@ private:
           continue;
         }
         for (auto &[functor, goal] : *found) {
-          add(functor, goal);
+          AddCase(partial, functor, goal);
         }
       }
       // mmc keeps the other disjuncts last first. If each can be split at
@@ -696,7 +729,7 @@ private:
         partial.left.clear();
         for (Found &found : splits) {
           for (auto &[functor, goal] : found) {
-            add(functor, goal);
+            AddCase(partial, functor, goal);
           }
         }
       }
@@ -709,27 +742,16 @@ private:
       }
       (partial.left.empty() ? fulls : partials).push_back(std::move(partial));
     }
-    auto canFail{[&](const Partial &p) {
-      std::vector<InstFunctor> functors;
-      for (const auto &c : p.cases) {
-        functors.push_back(c.first);
-      }
-      return CanFail(p.var, functors, entry);
-    }};
     if (single) {
       llvm::erase_if(fulls, [&](const Partial &p) {
         return ops_.ConstructorsOf(body_.vars[p.var].type) != nullptr &&
-            canFail(p);
+            PartialCanFail(p, entry);
       });
     }
     if (!fulls.empty()) {
-      auto rank{[&](const Partial &p) {
-        return std::make_pair(!canFail(p),
-            ops_.ConstructorsOf(body_.vars[p.var].type) == nullptr);
-      }};
       const Partial *best{&fulls.front()};
       for (const Partial &full : fulls) {
-        if (rank(full) > rank(*best)) {
+        if (FullRank(full, entry) > FullRank(*best, entry)) {
           best = &full;
         }
       }
@@ -746,14 +768,9 @@ private:
       disj.entry = entry;
       return New(std::move(disj));
     }
-    // One that cannot fail first, then the one with the most functors,
-    // then the first, as in mmc.
-    auto rank{[&](const Partial &p) {
-      return std::make_pair(!canFail(p), p.cases.size());
-    }};
     const Partial *best{&partials.front()};
     for (const Partial &partial : partials) {
-      if (rank(partial) > rank(*best)) {
+      if (PartialRank(partial, entry) > PartialRank(*best, entry)) {
         best = &partial;
       }
     }
@@ -882,6 +899,15 @@ private:
     return std::make_tuple(a.name, a.arity) < std::make_tuple(b.name, b.arity);
   }
 
+  // The conjunction of the goals, with the one at `i` replaced.
+  const Body *ReplaceGoal(const std::vector<const Body *> &goals, std::size_t i,
+      const Body *replacement) {
+    std::vector<const Body *> list{goals.begin(), goals.begin() + i};
+    list.push_back(replacement);
+    list.insert(list.end(), goals.begin() + i + 1, goals.end());
+    return Conj(goals[i]->tokens, list);
+  }
+
   // Looks for a test of `var`, or of a variable unified with it, against a
   // functor, in a disjunct's goals, preceded only by unifications, and
   // goals in scopes, as in mmc. A disjunction may come before it if
@@ -901,12 +927,6 @@ private:
     bool truth{false};
     for (std::size_t i{0}; i < goals.size(); ++i) {
       const Body *goal{goals[i]};
-      auto rebuild{[&](const Body *replacement) {
-        std::vector<const Body *> list{goals.begin(), goals.begin() + i};
-        list.push_back(replacement);
-        list.insert(list.end(), goals.begin() + i + 1, goals.end());
-        return Conj(goal->tokens, list);
-      }};
       switch (goal->kind) {
       case BodyKind::Unify:
         if (goal->isVar) {
@@ -929,7 +949,8 @@ private:
         if (goal->unify == UnifyKind::Deconstruct && aliases.count(goal->left)) {
           Body test{*goal};
           test.switchTest = true;
-          return Found{{goal->functor, rebuild(New(std::move(test)))}};
+          return Found{
+              {goal->functor, ReplaceGoal(goals, i, New(std::move(test)))}};
         }
         if (goal->unify != UnifyKind::Call) {
           continue;
@@ -949,7 +970,7 @@ private:
         }
         Found out;
         for (auto &[functor, g] : *found) {
-          out.push_back({functor, rebuild(With(goal, {g}))});
+          out.push_back({functor, ReplaceGoal(goals, i, With(goal, {g}))});
         }
         return out;
       }
@@ -1231,26 +1252,24 @@ private:
     return Rebuilt(goal, goals);
   }
 
+  // A fail that keeps the variables of the goal it replaces as its entry, since
+  // mmc deletes unused goals by the uses before.
+  const Body *FailInsteadOf(const Body *goal) {
+    Body out{BodyKind::Disj, goal->tokens};
+    std::set<BodyVar> uses;
+    Uses(goal, uses);
+    for (BodyVar var : uses) {
+      out.entry.emplace_back(var, nullptr);
+    }
+    return New(std::move(out));
+  }
+
   // As mmc's mode analysis again after common subexpression elimination,
   // which knows the functor of a switch's variable in each case: a
   // deconstruction of a variable known to have another functor is fail,
   // and so is the rest of its conjunction. `known` has the functors of the
   // variables before the goal, and gets those after it.
   const Body *Prune(const Body *goal, std::map<BodyVar, InstFunctor> &known) {
-    // A fail that keeps the variables of the goal it replaces as its
-    // entry, since mmc deletes unused goals by the uses before.
-    auto fail{[&] {
-      Body out{BodyKind::Disj, goal->tokens};
-      std::set<BodyVar> uses;
-      Uses(goal, uses);
-      for (BodyVar var : uses) {
-        out.entry.emplace_back(var, nullptr);
-      }
-      return New(std::move(out));
-    }};
-    auto isFail{[](const Body *g) {
-      return g->kind == BodyKind::Disj && g->goals.empty();
-    }};
     switch (goal->kind) {
     case BodyKind::Unify: {
       const Body *out{goal};
@@ -1267,14 +1286,14 @@ private:
           known[goal->left] = from->second;
         } else if (goal->unify == UnifyKind::Test && from != known.end() &&
             to != known.end() && !(from->second == to->second)) {
-          return fail();
+          return FailInsteadOf(goal);
         }
       } else if (!goal->lambda && (goal->unify == UnifyKind::Deconstruct ||
                                       goal->unify == UnifyKind::Construct)) {
         auto it{known.find(goal->left)};
         if (goal->unify == UnifyKind::Deconstruct && it != known.end() &&
             !(it->second == goal->functor)) {
-          return fail();
+          return FailInsteadOf(goal);
         }
         known[goal->left] = goal->functor;
       }
@@ -1287,7 +1306,7 @@ private:
       std::vector<const Body *> goals;
       for (const Body *g : goal->goals) {
         goals.push_back(Prune(g, known));
-        if (isFail(goals.back())) {
+        if (IsFail(goals.back())) {
           break;
         }
       }
@@ -1358,8 +1377,12 @@ private:
     return out;
   }
 
+  // The goal, or true in place of `old` if it has gone.
+  const Body *OrTrue(const Body *goal, const Body *old) {
+    return goal ? goal : New(Body{BodyKind::Conj, old->tokens});
+  }
+
   const Body *SimplifyGoal(const Body *goal, std::set<BodyVar> &live) {
-    auto use{[&](BodyVar var) { live.insert(var); }};
     switch (goal->kind) {
     case BodyKind::Unify: {
       if ((goal->unify == UnifyKind::Construct ||
@@ -1453,7 +1476,7 @@ private:
       if (added) {
         switching_.erase(goal->switchVar);
       }
-      use(goal->switchVar);
+      live.insert(goal->switchVar);
       return New(std::move(copy));
     }
     case BodyKind::IfThenElse: {
@@ -1465,11 +1488,9 @@ private:
       const Body *c{Simplify(goal->goals[0], then)};
       live.insert(then.begin(), then.end());
       live.insert(otherwise.begin(), otherwise.end());
-      auto orTrue{[&](const Body *g, const Body *old) {
-        return g ? g : New(Body{BodyKind::Conj, old->tokens});
-      }};
-      return With(goal, {orTrue(c, goal->goals[0]), orTrue(t, goal->goals[1]),
-                            orTrue(e, goal->goals[2])});
+      return With(goal,
+          {OrTrue(c, goal->goals[0]), OrTrue(t, goal->goals[1]),
+              OrTrue(e, goal->goals[2])});
     }
     default: {
       // A negation or a scope.
