@@ -69,6 +69,12 @@ const char *Keyword(parser::PredOrFunc kind) {
   return kind == parser::PredOrFunc::Function ? "func" : "pred";
 }
 
+static ArgMode SubstituteInMode(InstContext &insts, const ArgMode &mode,
+    llvm::function_ref<const Inst *(const Inst &)> replace) {
+  return ArgMode{insts.Substitute(mode.initial, replace),
+      insts.Substitute(mode.final, replace)};
+}
+
 // The constructors of a type, from its definition, for the inst
 // operations.
 class ConstructorTable : public InstTypes {
@@ -205,8 +211,6 @@ private:
       parser::CharBlock where);
   const Symbol *ModeDeclTarget(const parser::ModeDecl &,
       const Symbol *typeclass, const ModuleSymbols &);
-  ArgMode SubstituteInMode(
-      const ArgMode &, llvm::function_ref<const Inst *(const Inst &)> replace);
   std::vector<ArgMode> ErasedModes(llvm::ArrayRef<ArgMode>);
   // Adds a declared mode of a predicate or function, unless it has it already.
   void AddDeclared(const Symbol &, Declared, parser::CharBlock where,
@@ -526,7 +530,7 @@ ArgMode ModeChecker::Convert(const parser::Mode &mode, InstScope &scope) {
               }
               return error;
             }
-            return SubstituteInMode(*body, [&](const Inst &parameter) {
+            return SubstituteInMode(insts_, *body, [&](const Inst &parameter) {
               return parameter.number < arguments.size()
                   ? arguments[parameter.number]
                   : &parameter;
@@ -1028,18 +1032,12 @@ void ModeChecker::MatchForeignProcs(const parser::ParseTree &tree) {
   }
 }
 
-ArgMode ModeChecker::SubstituteInMode(const ArgMode &mode,
-    llvm::function_ref<const Inst *(const Inst &)> replace) {
-  return ArgMode{insts_.Substitute(mode.initial, replace),
-      insts_.Substitute(mode.final, replace)};
-}
-
 // As in mmc, modes are the same if they are with each inst variable replaced by
 // its constraint, so in(I) is in.
 std::vector<ArgMode> ModeChecker::ErasedModes(llvm::ArrayRef<ArgMode> modes) {
   std::vector<ArgMode> result;
   for (const ArgMode &mode : modes) {
-    result.push_back(SubstituteInMode(mode, [](const Inst &parameter) {
+    result.push_back(SubstituteInMode(insts_, mode, [](const Inst &parameter) {
       return parameter.constraint ? parameter.constraint : &parameter;
     }));
   }
@@ -1437,8 +1435,46 @@ private:
   // Where a clause's head ends, at its `:-`, where mmc puts the clause as a
   // branch of the predicate's disjunction.
   parser::CharBlock HeadEnd(const ClauseForm &) const;
+  // Records a goal of a single clause's body that unifies a head variable, if
+  // it is one, as a head term.
+  void MarkHeadTerm(const ClauseForm &form, const Goal &goal) {
+    const auto *unify{std::get_if<const Unify *>(&goal)};
+    if (unify && llvm::is_contained(form.head, (*unify)->left) &&
+        form.vars[(*unify)->left].kind == VarKind::Fresh) {
+      headTerms_.insert(*unify);
+    }
+  }
+  bool MoreSpecific(
+      const Procedure &p, const Procedure &q, llvm::ArrayRef<VarId> arguments);
   Result Conjunction(const Goal &conj, llvm::ArrayRef<Goal>, InstMap &,
       const Live &);
+  // A goal of a conjunction that cannot run yet.
+  struct Waiting {
+    Goal goal;
+    std::vector<const Inst *> insts; // of its variables, when it waited
+    Result error;
+  };
+  // Where the running of a conjunction's goals has got to.
+  struct ConjunctionRun {
+    llvm::ArrayRef<Goal> goals;
+    const Live &live;
+    InstMap &map;
+    std::vector<Goal> order{};
+    std::vector<Waiting> waiting{};
+    std::deque<Goal> agenda{}; // those woken, to run next
+    std::size_t next{0}; // the next goal in source order
+    // The goals, by number, that wait for no variable and that a goal with
+    // insts not reached woke; they are not retried at the end, as in mmc.
+    std::set<unsigned> kept{};
+  };
+  std::vector<const Inst *> WaitSnapshot(
+      const Goal &, const Result &error, const InstMap &);
+  // Marks in `after` what `other` uses, unless it is `goal`.
+  void MarkUsedByOther(const Goal &goal, const Goal &other, Live &after);
+  Result RunWaitingGoal(const Goal &, ConjunctionRun &);
+  void WakeChanged(ConjunctionRun &);
+  VarId FirstWaitedVar(const Waiting &);
+  void WakeAll(ConjunctionRun &);
   Result CheckUnify(const Unify &, const Goal &, InstMap &, const Live &);
   Result CheckVarUnify(const Unify &, const Goal &, InstMap &, const Live &);
   Result CheckCall(const Goal &, const Symbol &, llvm::ArrayRef<VarId>,
@@ -1708,17 +1744,12 @@ ProcedureChecker::Result ProcedureChecker::CheckProcedure(
         own.size() > 1 ? &WithHeadUnifications(*original) : original};
     if (own.size() == 1) {
       const ClauseForm &form{*clause->clause};
-      auto mark{[&](const Goal &goal) {
-        const auto *unify{std::get_if<const Unify *>(&goal)};
-        if (unify && llvm::is_contained(form.head, (*unify)->left) &&
-            form.vars[(*unify)->left].kind == VarKind::Fresh) {
-          headTerms_.insert(*unify);
-        }
-      }};
       if (const auto *conj{std::get_if<const Conj *>(&form.body)}) {
-        llvm::for_each((*conj)->goals, mark);
+        for (const Goal &goal : (*conj)->goals) {
+          MarkHeadTerm(form, goal);
+        }
       } else {
-        mark(form.body);
+        MarkHeadTerm(form, form.body);
       }
     }
     ClauseModes modes{clause, &procedure, {}, {}};
@@ -2320,10 +2351,6 @@ ProcedureChecker::Result ProcedureChecker::Merge(const Goal &goal,
     const char *what, llvm::ArrayRef<InstMap> maps,
     llvm::ArrayRef<parser::CharBlock> branches, InstMap &map,
     const Live &live) {
-  auto reached{[&](const InstMap &m) {
-    return llvm::none_of(
-        m, [&](const Inst *inst) { return ops_.IsNotReached(inst); });
-  }};
   std::optional<Result> error;
   for (VarId var : form_->nonlocals[NumberOf(goal)]) {
     const Type *type{TypeOf(var)};
@@ -2357,7 +2384,10 @@ ProcedureChecker::Result ProcedureChecker::Merge(const Goal &goal,
   if (error) {
     return *error;
   }
-  if (llvm::none_of(maps, reached)) {
+  if (llvm::none_of(maps, [&](const InstMap &m) {
+        return llvm::none_of(
+            m, [&](const Inst *inst) { return ops_.IsNotReached(inst); });
+      })) {
     map.assign(map.size(), insts_.NotReached());
   }
   return Ok();
@@ -2401,6 +2431,123 @@ ProcedureChecker::Result ProcedureChecker::Mismatch(const char *what,
   return r;
 }
 
+// The insts of the variables a goal waits for, and how often each was put in a
+// term free; mmc wakes a goal only when these change.
+std::vector<const Inst *> ProcedureChecker::WaitSnapshot(
+    const Goal &goal, const Result &error, const InstMap &map) {
+  std::vector<const Inst *> insts;
+  if (error.never) {
+    return insts;
+  }
+  llvm::ArrayRef<VarId> vars{error.waits};
+  if (vars.empty()) {
+    vars = form_->nonlocals[NumberOf(goal)];
+  }
+  for (VarId var : vars) {
+    insts.push_back(map[var]);
+    insts.push_back(reinterpret_cast<const Inst *>(
+        static_cast<std::uintptr_t>(touched_[var])));
+    if (error.clobbers) {
+      insts.push_back(reinterpret_cast<const Inst *>(
+          static_cast<std::uintptr_t>(freed_[var])));
+    }
+  }
+  return insts;
+}
+
+void ProcedureChecker::MarkUsedByOther(
+    const Goal &goal, const Goal &other, Live &after) {
+  if (NumberOf(other) != NumberOf(goal)) {
+    for (VarId var : form_->nonlocals[NumberOf(other)]) {
+      after[var] = true;
+    }
+  }
+}
+
+// Runs a goal if it can; its error if not.
+ProcedureChecker::Result ProcedureChecker::RunWaitingGoal(
+    const Goal &goal, ConjunctionRun &state) {
+  // What the goals not run yet use is live after this one.
+  Live after{state.live};
+  for (std::size_t i{state.next}; i < state.goals.size(); ++i) {
+    MarkUsedByOther(goal, state.goals[i], after);
+  }
+  for (const Waiting &w : state.waiting) {
+    MarkUsedByOther(goal, w.goal, after);
+  }
+  for (const Goal &w : state.agenda) {
+    MarkUsedByOther(goal, w, after);
+  }
+  InstMap trial{state.map};
+  parser::CharBlock last{last_};
+  std::size_t warnings{warnings_.size()};
+  std::vector<unsigned> touched{touched_}, freed{freed_};
+  unsigned unreachables{unreachables_};
+  Result r{Check(goal, trial, after)};
+  if (r.outcome != Outcome::Ok) {
+    last_ = last;
+    warnings_.resize(warnings);
+    touched_ = std::move(touched);
+    freed_ = std::move(freed);
+    unreachables_ = unreachables;
+    return r;
+  }
+  state.map = std::move(trial);
+  state.order.push_back(goal);
+  // After a goal that cannot succeed, nothing is reached, and every
+  // goal's mode is right (Overton, 3.1.4).
+  if (llvm::any_of(state.map,
+          [&](const Inst *inst) { return ops_.IsNotReached(inst); })) {
+    state.map.assign(state.map.size(), insts_.NotReached());
+  }
+  return r;
+}
+
+// Puts the waiting goals whose variables changed first on the agenda.
+void ProcedureChecker::WakeChanged(ConjunctionRun &state) {
+  std::vector<Waiting> still;
+  std::vector<Goal> woken;
+  for (Waiting &w : state.waiting) {
+    if (WaitSnapshot(w.goal, w.error, state.map) == w.insts) {
+      still.push_back(std::move(w));
+    } else {
+      woken.push_back(w.goal);
+    }
+  }
+  state.waiting = std::move(still);
+  state.agenda.insert(state.agenda.begin(), woken.begin(), woken.end());
+}
+
+// The first variable a goal waits for, or the greatest there is if none.
+VarId ProcedureChecker::FirstWaitedVar(const Waiting &w) {
+  llvm::ArrayRef<VarId> vars{w.error.waits};
+  if (vars.empty() && !w.error.never) {
+    vars = form_->nonlocals[NumberOf(w.goal)];
+  }
+  return vars.empty() ? std::numeric_limits<VarId>::max()
+                      : *std::min_element(vars.begin(), vars.end());
+}
+
+// After a goal in which some insts were not reached, as in a branch, condition
+// or negation that cannot succeed, every waiting goal is woken, as if each of
+// its variables had changed, as in mmc: in the order of the first variable each
+// waits for, those that wait for none last.
+void ProcedureChecker::WakeAll(ConjunctionRun &state) {
+  std::stable_sort(state.waiting.begin(), state.waiting.end(),
+      [&](const Waiting &a, const Waiting &b) {
+        return FirstWaitedVar(a) < FirstWaitedVar(b);
+      });
+  std::vector<Goal> woken;
+  for (const Waiting &w : state.waiting) {
+    woken.push_back(w.goal);
+    if (w.error.never) {
+      state.kept.insert(NumberOf(w.goal));
+    }
+  }
+  state.waiting.clear();
+  state.agenda.insert(state.agenda.begin(), woken.begin(), woken.end());
+}
+
 // The goals of a conjunction run in source order, except that one that
 // would be a mode error waits. When a goal runs, the waiting goals whose
 // variables it changed are woken: they run next, in the order they
@@ -2409,156 +2556,40 @@ ProcedureChecker::Result ProcedureChecker::Mismatch(const char *what,
 // waiting, the error of the first is reported, as in mmc.
 ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
     llvm::ArrayRef<Goal> goals, InstMap &map, const Live &live) {
-  struct Waiting {
-    Goal goal;
-    std::vector<const Inst *> insts; // of its variables, when it waited
-    Result error;
-  };
-  std::vector<Goal> order;
-  std::vector<Waiting> waiting;
-  std::deque<Goal> agenda; // those woken, to run next
-  std::size_t next{0}; // the next goal in source order
-  // The goals, by number, that wait for no variable and that a goal with
-  // insts not reached woke; they are not retried at the end, as in mmc.
-  std::set<unsigned> kept;
-  // The insts of the variables a goal waits for, and how often each was
-  // put in a term free; mmc wakes a goal only when these change.
-  auto snapshot{[&](const Goal &goal, const Result &error) {
-    std::vector<const Inst *> insts;
-    if (error.never) {
-      return insts;
-    }
-    llvm::ArrayRef<VarId> vars{error.waits};
-    if (vars.empty()) {
-      vars = form_->nonlocals[NumberOf(goal)];
-    }
-    for (VarId var : vars) {
-      insts.push_back(map[var]);
-      insts.push_back(reinterpret_cast<const Inst *>(
-          static_cast<std::uintptr_t>(touched_[var])));
-      if (error.clobbers) {
-        insts.push_back(reinterpret_cast<const Inst *>(
-            static_cast<std::uintptr_t>(freed_[var])));
-      }
-    }
-    return insts;
-  }};
-  // Runs a goal if it can; its error if not.
-  auto run{[&](const Goal &goal) -> Result {
-    // What the goals not run yet use is live after this one.
-    Live after{live};
-    auto use{[&](const Goal &other) {
-      if (NumberOf(other) != NumberOf(goal)) {
-        for (VarId var : form_->nonlocals[NumberOf(other)]) {
-          after[var] = true;
-        }
-      }
-    }};
-    for (std::size_t i{next}; i < goals.size(); ++i) {
-      use(goals[i]);
-    }
-    for (const Waiting &w : waiting) {
-      use(w.goal);
-    }
-    for (const Goal &w : agenda) {
-      use(w);
-    }
-    InstMap trial{map};
-    parser::CharBlock last{last_};
-    std::size_t warnings{warnings_.size()};
-    std::vector<unsigned> touched{touched_}, freed{freed_};
-    unsigned unreachables{unreachables_};
-    Result r{Check(goal, trial, after)};
-    if (r.outcome != Outcome::Ok) {
-      last_ = last;
-      warnings_.resize(warnings);
-      touched_ = std::move(touched);
-      freed_ = std::move(freed);
-      unreachables_ = unreachables;
-      return r;
-    }
-    map = std::move(trial);
-    order.push_back(goal);
-    // After a goal that cannot succeed, nothing is reached, and every
-    // goal's mode is right (Overton, 3.1.4).
-    if (llvm::any_of(
-            map, [&](const Inst *inst) { return ops_.IsNotReached(inst); })) {
-      map.assign(map.size(), insts_.NotReached());
-    }
-    return r;
-  }};
-  // Puts the waiting goals whose variables changed first on the agenda.
-  auto wake{[&] {
-    std::vector<Waiting> still;
-    std::vector<Goal> woken;
-    for (Waiting &w : waiting) {
-      if (snapshot(w.goal, w.error) == w.insts) {
-        still.push_back(std::move(w));
-      } else {
-        woken.push_back(w.goal);
-      }
-    }
-    waiting = std::move(still);
-    agenda.insert(agenda.begin(), woken.begin(), woken.end());
-  }};
-  // After a goal in which some insts were not reached, as in a branch,
-  // condition or negation that cannot succeed, every waiting goal is woken,
-  // as if each of its variables had changed, as in mmc: in the order of
-  // the first variable each waits for, those that wait for none last.
-  auto wakeAll{[&] {
-    auto first{[&](const Waiting &w) {
-      llvm::ArrayRef<VarId> vars{w.error.waits};
-      if (vars.empty() && !w.error.never) {
-        vars = form_->nonlocals[NumberOf(w.goal)];
-      }
-      return vars.empty() ? std::numeric_limits<VarId>::max()
-                          : *std::min_element(vars.begin(), vars.end());
-    }};
-    std::stable_sort(waiting.begin(), waiting.end(),
-        [&](const Waiting &a, const Waiting &b) { return first(a) < first(b); });
-    std::vector<Goal> woken;
-    for (const Waiting &w : waiting) {
-      woken.push_back(w.goal);
-      if (w.error.never) {
-        kept.insert(NumberOf(w.goal));
-      }
-    }
-    waiting.clear();
-    agenda.insert(agenda.begin(), woken.begin(), woken.end());
-  }};
+  ConjunctionRun state{goals, live, map};
   // When no goal is left to run, the waiting goals are all retried once,
   // since goals that ran may have left their variables unused, as in mmc.
   bool progress{false};
   while (true) {
     Goal goal;
-    if (!agenda.empty()) {
-      goal = agenda.front();
-      agenda.pop_front();
-    } else if (next < goals.size()) {
-      goal = goals[next++];
-    } else if (progress && !waiting.empty()) {
+    if (!state.agenda.empty()) {
+      goal = state.agenda.front();
+      state.agenda.pop_front();
+    } else if (state.next < goals.size()) {
+      goal = goals[state.next++];
+    } else if (progress && !state.waiting.empty()) {
       progress = false;
       std::vector<Waiting> still;
-      for (Waiting &w : waiting) {
-        if (kept.count(NumberOf(w.goal))) {
+      for (Waiting &w : state.waiting) {
+        if (state.kept.count(NumberOf(w.goal))) {
           still.push_back(std::move(w));
         } else {
-          agenda.push_back(w.goal);
+          state.agenda.push_back(w.goal);
         }
       }
-      waiting = std::move(still);
+      state.waiting = std::move(still);
       continue;
     } else {
       break;
     }
     unsigned unreachables{unreachables_};
-    Result r{run(goal)};
+    Result r{RunWaitingGoal(goal, state)};
     if (r.outcome == Outcome::Unsupported) {
       return r;
     }
     if (r.outcome == Outcome::Error) {
-      std::vector<const Inst *> insts{snapshot(goal, r)};
-      waiting.push_back({goal, std::move(insts), std::move(r)});
+      std::vector<const Inst *> insts{WaitSnapshot(goal, r, map)};
+      state.waiting.push_back({goal, std::move(insts), std::move(r)});
       continue;
     }
     progress = true;
@@ -2570,28 +2601,29 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
     // After a goal that cannot succeed, the others are not checked, and
     // the goal is the last run, as in mmc.
     if (!map.empty() && ops_.IsNotReached(map.front())) {
-      waiting.clear();
+      state.waiting.clear();
       break;
     }
     if (unreachables_ != unreachables) {
-      wakeAll();
+      WakeAll(state);
     } else {
-      wake();
+      WakeChanged(state);
     }
   }
-  if (!waiting.empty()) {
+  if (!state.waiting.empty()) {
     // A head unification waits until the goals do, but its error is
     // reported only if no other goal waits, as in mmc, a single clause's
     // too.
-    auto first{llvm::find_if(waiting, [&](const Waiting &w) {
+    auto first{llvm::find_if(state.waiting, [&](const Waiting &w) {
       const auto *unify{std::get_if<const Unify *>(&w.goal)};
       return !unify || (!heads_.count(*unify) && !headTerms_.count(*unify));
     })};
-    Result r{(first != waiting.end() ? *first : waiting.front()).error};
+    Result r{
+        (first != state.waiting.end() ? *first : state.waiting.front()).error};
     // The conjunction, as a goal of another, waits for what any of its
     // goals waits for.
     std::vector<VarId> waits;
-    for (const Waiting &w : waiting) {
+    for (const Waiting &w : state.waiting) {
       llvm::ArrayRef<VarId> vars{w.error.waits};
       if (w.error.never) {
         continue;
@@ -2606,11 +2638,12 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
       }
     }
     r.waits = std::move(waits);
-    r.never = llvm::all_of(waiting, [](const Waiting &w) { return w.error.never; });
+    r.never = llvm::all_of(
+        state.waiting, [](const Waiting &w) { return w.error.never; });
     return r;
   }
   goals_[NumberOf(conj)].order =
-      result_.arena_.SaveArray(llvm::ArrayRef<Goal>{order});
+      result_.arena_.SaveArray(llvm::ArrayRef<Goal>{state.order});
   return Ok();
 }
 
@@ -2951,6 +2984,28 @@ llvm::ArrayRef<const Procedure *> ProcedureChecker::ProceduresFor(
 // A call runs the procedure of its callee whose initial insts the
 // arguments' insts match; of several, the one whose initial insts match
 // those of the others (Overton, 3.3.3).
+// Whether each argument's initial inst in `p` matches that in `q`.
+bool ProcedureChecker::MoreSpecific(
+    const Procedure &p, const Procedure &q, llvm::ArrayRef<VarId> arguments) {
+  for (std::size_t i{0}; i < arguments.size(); ++i) {
+    if (!ops_.Matches(
+            p.modes[i].initial, q.modes[i].initial, TypeOf(arguments[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// How an error names argument i of a call to `what`, of which there are
+// `count`.
+static std::string CallArgumentText(
+    std::size_t i, bool function, std::size_t count, const std::string &what) {
+  bool result{function && i + 1 == count};
+  return (result ? std::string{"the result"}
+                 : "argument " + std::to_string(i + 1)) +
+      " of the call to " + what;
+}
+
 ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
     const Symbol &callee, llvm::ArrayRef<VarId> arguments, bool function,
     InstMap &map, GoalModes &modes, const Live &live) {
@@ -2965,15 +3020,6 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
     // Its missing mode declaration was reported.
     return Unsupported(Unchecked::InferredModes);
   }
-  auto moreSpecific{[&](const Procedure &p, const Procedure &q) {
-    for (std::size_t i{0}; i < arguments.size(); ++i) {
-      if (!ops_.Matches(p.modes[i].initial, q.modes[i].initial,
-              TypeOf(arguments[i]))) {
-        return false;
-      }
-    }
-    return true;
-  }};
   // Each procedure's modes with its inst parameters bound by the
   // arguments (Overton, figure 4.3).
   std::map<const Procedure *, std::vector<ArgMode>> instantiated;
@@ -3019,7 +3065,8 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
   const Procedure *chosen{nullptr};
   for (const Procedure *p : candidates) {
     if (llvm::none_of(candidates, [&](const Procedure *q) {
-          return q != p && moreSpecific(*q, *p) && !moreSpecific(*p, *q);
+          return q != p && MoreSpecific(*q, *p, arguments) &&
+              !MoreSpecific(*p, *q, arguments);
         })) {
       chosen = p;
       break;
@@ -3055,26 +3102,25 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
   std::string what{std::string{function ? "func " : "pred "} +
       callee.module.str() + '.' + callee.name.str() + '/' +
       std::to_string(callee.arity)};
-  auto where{[&](std::size_t i) {
-    bool result{function && i + 1 == arguments.size()};
-    return (result ? std::string{"the result"}
-                   : "argument " + std::to_string(i + 1)) +
-        " of the call to " + what;
-  }};
   if (!chosen) {
     if (procedures.size() == 1 &&
         procedures.front()->modes.size() == arguments.size()) {
       // An argument used after that the procedure would clobber is the
       // error, before one whose inst does not match, as in mmc.
-      if (std::optional<Result> error{Clobbers(
-              goal, instantiated[procedures.front()], arguments, live, where)}) {
+      if (std::optional<Result> error{Clobbers(goal,
+              instantiated[procedures.front()], arguments, live,
+              [&](std::size_t i) {
+                return CallArgumentText(i, function, arguments.size(), what);
+              })}) {
         return *error;
       }
       // mmc: "in argument 1 of call to predicate `m.w'/2: mode error:
       // variable `Y' has instantiatedness `free', expected instantiatedness
       // was `ground'".
-      return ArgumentError(
-          goal, instantiated[procedures.front()], arguments, map, where);
+      return ArgumentError(goal, instantiated[procedures.front()], arguments,
+          map, [&](std::size_t i) {
+            return CallArgumentText(i, function, arguments.size(), what);
+          });
     }
     // mmc: "in call to function `int.+'/2: mode error: arguments `Y, V_4'
     // and the return value `X' have the following insts: free, unique(1),
@@ -3101,8 +3147,10 @@ ProcedureChecker::Result ProcedureChecker::CheckCall(const Goal &goal,
             " have insts " + insts + ", which match none of its modes",
         std::move(waits));
   }
-  if (std::optional<Result> error{
-          Clobbers(goal, instantiated[chosen], arguments, live, where)}) {
+  if (std::optional<Result> error{Clobbers(
+          goal, instantiated[chosen], arguments, live, [&](std::size_t i) {
+            return CallArgumentText(i, function, arguments.size(), what);
+          })}) {
     return *error;
   }
   Pass(instantiated[chosen], arguments, map);
@@ -3689,17 +3737,15 @@ ProcedureChecker::Result ProcedureChecker::CheckHigherOrderCall(
   // own of the same number, if it has one, whatever its name, so that it
   // is not bound by the arguments (see the design document's register).
   std::vector<ArgMode> own;
-  auto identify{[&](const Inst &parameter) {
-    for (const Inst *mine : procedure_->parameters) {
-      if (mine->number == parameter.number) {
-        return mine;
-      }
-    }
-    return &parameter;
-  }};
   for (const ArgMode &mode : inst->modes) {
-    own.push_back({insts_.Substitute(mode.initial, identify),
-        insts_.Substitute(mode.final, identify)});
+    own.push_back(SubstituteInMode(insts_, mode, [&](const Inst &parameter) {
+      for (const Inst *mine : procedure_->parameters) {
+        if (mine->number == parameter.number) {
+          return mine;
+        }
+      }
+      return &parameter;
+    }));
   }
   std::vector<ArgMode> modes{Instantiate(own, call.arguments, map)};
   bool implied{false};
