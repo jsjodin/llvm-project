@@ -45,7 +45,7 @@ a constant, ahead of a size it does not depend on.
 | File | Named lambdas | State |
 | --- | --- | --- |
 | `CodeGen/MLIRGen.cpp` | 46 | Done, in 5 stages: the small standalone ones, the array builtins, the arithmetic builtins, `OmpLoop`, `Target` |
-| `CodeGen/Lowering.cpp` | 21 | Stages 1 and 2 of 3 done: `LowerTerms` and `Dispatch`, then the type_info and type_ctor_info lowerings and `Layouts`. Next: `LowerArray`, `LowerMrt` and `Lower` |
+| `CodeGen/Lowering.cpp` | 21 | Done, in 3 stages: `LowerTerms` and `Dispatch`, the type_info and type_ctor_info lowerings and `Layouts`, then `LowerArray`, `LowerMrt` and `Lower` |
 | The other 32 files in `lib/` and `runtime/` | about 207 | Not started; the largest are `check-types.cpp` (37), `check-determinism.cpp` (22) and `check-modes.cpp` (20) |
 
 The unit tests' few are left unless they turn out to get in the way.

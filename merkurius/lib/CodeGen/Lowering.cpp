@@ -195,6 +195,9 @@ private:
   // A static value in a global's initializer, at the rewriter's insertion
   // point.
   mlir::Value Materialize(const StaticValue &, mlir::Location);
+  // The address that many bytes from `address`.
+  mlir::Value OffsetBytes(
+      mlir::Value address, std::int64_t bytes, mlir::Location);
   // Lowers mrt's operations to the LLVM dialect's.
   void LowerMrt();
   void LowerAlloc(mrt::AllocOp);
@@ -247,6 +250,10 @@ private:
   void LowerStringEqual(merk::StringEqualOp);
   void LowerForeignCall(merk::ForeignCallOp);
   void LowerEntry(merk::EntryOp);
+  mlir::Value CallRuntime(llvm::StringRef name, mlir::Type result,
+      mlir::ValueRange arguments, mlir::Location);
+  mlir::Value InitialElement(
+      mlir::Operation *, unsigned operand, mlir::Location);
   void LowerArray(mlir::Operation *);
   // An array element's word, from its value, and its value, from the word.
   mlir::Value ToWord(mlir::Value, mlir::Location);
@@ -2134,49 +2141,57 @@ mlir::Value Lowerer::ElementAddress(
       mlir::ValueRange{offset});
 }
 
+mlir::Value Lowerer::CallRuntime(llvm::StringRef name, mlir::Type result,
+    mlir::ValueRange arguments, mlir::Location loc) {
+  llvm::SmallVector<mlir::Type> types{llvm::map_to_vector(
+      arguments, [this](mlir::Value v) { return Convert(v.getType()); })};
+  return mlir::LLVM::CallOp::create(
+      rewriter_, loc, RuntimeFunc(name, result, types), arguments)
+      .getResult();
+}
+
+// An array operation's initial element as a word. An absent one: any word.
+mlir::Value Lowerer::InitialElement(
+    mlir::Operation *op, unsigned operand, mlir::Location loc) {
+  return op->getNumOperands() > operand
+      ? ToWord(op->getOperand(operand), loc)
+      : mlir::LLVM::ConstantOp::create(
+            rewriter_, loc, rewriter_.getI64Type(), 0);
+}
+
 void Lowerer::LowerArray(mlir::Operation *op) {
   mlir::Location loc{op->getLoc()};
   rewriter_.setInsertionPoint(op);
   auto ptr{mlir::LLVM::LLVMPointerType::get(rewriter_.getContext())};
   auto i64{rewriter_.getI64Type()};
-  auto call{[&](llvm::StringRef name, mlir::Type result,
-                mlir::ValueRange arguments) {
-    llvm::SmallVector<mlir::Type> types{llvm::map_to_vector(
-        arguments, [this](mlir::Value v) { return Convert(v.getType()); })};
-    return mlir::LLVM::CallOp::create(rewriter_, loc,
-        RuntimeFunc(name, result, types), arguments)
-        .getResult();
-  }};
-  // An absent initial element: any word.
-  auto init{[&](unsigned operand) -> mlir::Value {
-    return op->getNumOperands() > operand
-        ? ToWord(op->getOperand(operand), loc)
-        : mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 0);
-  }};
   // The operands, not the accessors: an array the procedure was passed is
   // already a pointer.
-  auto operand{[&](unsigned i) { return op->getOperand(i); }};
   mlir::Value result;
   if (mlir::isa<merk::ArrayNewOp>(op)) {
-    result = call("merk_array_new", ptr, {operand(0), init(1)});
+    result = CallRuntime("merk_array_new", ptr,
+        {op->getOperand(0), InitialElement(op, 1, loc)}, loc);
   } else if (mlir::isa<merk::ArraySizeOp>(op)) {
-    result = mlir::LLVM::LoadOp::create(rewriter_, loc, i64, operand(0));
+    result = mlir::LLVM::LoadOp::create(rewriter_, loc, i64, op->getOperand(0));
   } else if (mlir::isa<merk::ArrayGetOp>(op)) {
     mlir::Value word{mlir::LLVM::LoadOp::create(rewriter_, loc, i64,
-        ElementAddress(operand(0), operand(1), loc))};
+        ElementAddress(op->getOperand(0), op->getOperand(1), loc))};
     result = FromWord(word, Convert(op->getResult(0).getType()), loc);
   } else if (mlir::isa<merk::ArraySetOp>(op)) {
-    mlir::LLVM::StoreOp::create(rewriter_, loc, ToWord(operand(2), loc),
-        ElementAddress(operand(0), operand(1), loc));
-    result = operand(0);
+    mlir::LLVM::StoreOp::create(rewriter_, loc, ToWord(op->getOperand(2), loc),
+        ElementAddress(op->getOperand(0), op->getOperand(1), loc));
+    result = op->getOperand(0);
   } else if (mlir::isa<merk::ArrayFillOp>(op)) {
-    result = call("merk_array_fill", ptr,
-        {operand(0), operand(1), operand(2), ToWord(operand(3), loc)});
+    result = CallRuntime("merk_array_fill", ptr,
+        {op->getOperand(0), op->getOperand(1), op->getOperand(2),
+            ToWord(op->getOperand(3), loc)},
+        loc);
   } else if (mlir::isa<merk::ArrayCopyOp>(op)) {
-    result = call("merk_array_copy", ptr, {operand(0)});
+    result = CallRuntime("merk_array_copy", ptr, {op->getOperand(0)}, loc);
   } else {
     assert(mlir::isa<merk::ArrayResizeOp>(op));
-    result = call("merk_array_resize", ptr, {operand(0), operand(1), init(2)});
+    result = CallRuntime("merk_array_resize", ptr,
+        {op->getOperand(0), op->getOperand(1), InitialElement(op, 2, loc)},
+        loc);
   }
   rewriter_.replaceOp(op, result);
 }
@@ -2270,8 +2285,23 @@ void Lowerer::LowerAlloc(mrt::AllocOp alloc) {
 
 // A tag is added to a cell's address, and a field is at its word's offset,
 // so that a field of a tagged pointer is one getelementptr from it.
+mlir::Value Lowerer::OffsetBytes(
+    mlir::Value address, std::int64_t bytes, mlir::Location loc) {
+  if (bytes == 0) {
+    return address;
+  }
+  return mlir::LLVM::GEPOp::create(rewriter_, loc,
+      mlir::LLVM::LLVMPointerType::get(module_.getContext()),
+      rewriter_.getI8Type(), address,
+      llvm::ArrayRef<mlir::LLVM::GEPArg>{static_cast<std::int32_t>(bytes)});
+}
+
+static bool IsNarrowInteger(mlir::Type type) {
+  auto integer{mlir::dyn_cast<mlir::IntegerType>(type)};
+  return integer && integer.getWidth() < 64;
+}
+
 void Lowerer::LowerMrt() {
-  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
   auto i64{rewriter_.getI64Type()};
   llvm::SmallVector<mlir::Operation *> ops;
   module_.walk([&](mlir::Operation *op) {
@@ -2279,19 +2309,6 @@ void Lowerer::LowerMrt() {
       ops.push_back(op);
     }
   });
-  auto offset{[&](mlir::Value address, std::int64_t bytes,
-                  mlir::Location loc) -> mlir::Value {
-    if (bytes == 0) {
-      return address;
-    }
-    return mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(),
-        address,
-        llvm::ArrayRef<mlir::LLVM::GEPArg>{static_cast<std::int32_t>(bytes)});
-  }};
-  auto narrow{[](mlir::Type type) {
-    auto integer{mlir::dyn_cast<mlir::IntegerType>(type)};
-    return integer && integer.getWidth() < 64;
-  }};
   for (mlir::Operation *op : ops) {
     mlir::Location loc{op->getLoc()};
     rewriter_.setInsertionPoint(op);
@@ -2299,12 +2316,13 @@ void Lowerer::LowerMrt() {
         .Case([&](mrt::AllocOp alloc) { LowerAlloc(alloc); })
         .Case([&](mrt::TagOp tag) {
           rewriter_.replaceOp(tag,
-              offset(tag.getCell(), static_cast<std::int64_t>(tag.getTag()), loc));
+              OffsetBytes(
+                  tag.getCell(), static_cast<std::int64_t>(tag.getTag()), loc));
         })
         .Case([&](mrt::UntagOp untag) {
           rewriter_.replaceOp(untag,
-              offset(untag.getTerm(), -static_cast<std::int64_t>(untag.getTag()),
-                  loc));
+              OffsetBytes(untag.getTerm(),
+                  -static_cast<std::int64_t>(untag.getTag()), loc));
         })
         .Case([&](mrt::PrimaryTagOp tag) {
           mlir::Value word{mlir::LLVM::PtrToIntOp::create(
@@ -2315,9 +2333,9 @@ void Lowerer::LowerMrt() {
         .Case([&](mrt::FieldLoadOp load) {
           // A narrow field is its whole word (Type representation, "Words").
           mlir::Type type{load.getValue().getType()};
-          mlir::Value address{offset(load.getCell(),
+          mlir::Value address{OffsetBytes(load.getCell(),
               8 * static_cast<std::int64_t>(load.getWord()), loc)};
-          if (narrow(type)) {
+          if (IsNarrowInteger(type)) {
             mlir::Value word{
                 mlir::LLVM::LoadOp::create(rewriter_, loc, i64, address, 8)};
             rewriter_.replaceOpWithNewOp<mlir::LLVM::TruncOp>(load, type, word);
@@ -2328,16 +2346,29 @@ void Lowerer::LowerMrt() {
         })
         .Case([&](mrt::FieldStoreOp store) {
           mlir::Value value{store.getValue()};
-          if (narrow(value.getType())) {
+          if (IsNarrowInteger(value.getType())) {
             value = mlir::LLVM::ZExtOp::create(rewriter_, loc, i64, value);
           }
           mlir::LLVM::StoreOp::create(rewriter_, loc, value,
-              offset(store.getCell(),
+              OffsetBytes(store.getCell(),
                   8 * static_cast<std::int64_t>(store.getWord()), loc),
               8);
           rewriter_.eraseOp(store);
         });
   }
+}
+
+// Reports an operation that dispatches on a type class if it would run on a
+// device: in a target region or a procedure one calls. Whether it did.
+static bool RejectDispatchOnDevice(mlir::Operation *op) {
+  auto proc{op->getParentOfType<merk::ProcOp>()};
+  if (!op->getParentOfType<mlir::omp::TargetOp>() &&
+      !(proc && proc->getDiscardableAttr("omp.declare_target"))) {
+    return false;
+  }
+  op->emitOpError("dispatches on a type class, which cannot be done on an "
+                  "OpenMP device yet");
+  return true;
 }
 
 llvm::LogicalResult Lowerer::Lower() {
@@ -2363,17 +2394,10 @@ llvm::LogicalResult Lowerer::Lower() {
   // does not run there; a procedure a target region calls does.
   if (device_) {
     bool bad{false};
-    auto check{[&](mlir::Operation *op) {
-      auto proc{op->getParentOfType<merk::ProcOp>()};
-      if (op->getParentOfType<mlir::omp::TargetOp>() ||
-          (proc && proc->getDiscardableAttr("omp.declare_target"))) {
-        op->emitOpError(
-            "dispatches on a type class, which cannot be done on an OpenMP device yet");
-        bad = true;
-      }
-    }};
-    module_.walk([&](merk::CallMethodOp op) { check(op); });
-    module_.walk([&](merk::TypeclassInfoOp op) { check(op); });
+    module_.walk(
+        [&](merk::CallMethodOp op) { bad = RejectDispatchOnDevice(op) || bad; });
+    module_.walk(
+        [&](merk::TypeclassInfoOp op) { bad = RejectDispatchOnDevice(op) || bad; });
     if (bad) {
       return llvm::failure();
     }
