@@ -277,6 +277,8 @@ private:
     DesugarInto(goal, goals);
     return Conjoin(GoalTokens(goal), goals);
   }
+  Goal ImplicationGoal(const parser::Implication &, const parser::Goal &from,
+      const parser::Goal &to);
   // Adds the goal to `out`, as conjuncts when it is a conjunction.
   void DesugarInto(const parser::Goal &, Goals &out);
   void DesugarInto(const parser::DcgGoal &, Goals &out);
@@ -291,6 +293,7 @@ private:
     state_[dcg] = next;
     return next;
   }
+  void AddHead(VarId, TokenRange, Goals &);
   // The head's arguments and, for a DCG rule, its implicit ones; and the
   // clause, once its body is desugared into `goals`.
   void Head(llvm::ArrayRef<const parser::ModedTerm *> arguments,
@@ -554,8 +557,6 @@ void ClauseDesugarer::AddUnify(Goals &out, std::size_t at, TokenRange range,
 void ClauseDesugarer::UnifyWith(VarId left, const parser::DataTerm &term,
     TokenRange range, Goals &out) {
   std::size_t at{out.size()};
-  auto functor{[&](FunctorKind kind) { return Functor{kind, nullptr,
-                                           nullptr, nullptr}; }};
   std::visit(
       common::visitors{
           [&](const parser::Variable *var) {
@@ -604,7 +605,8 @@ void ClauseDesugarer::UnifyWith(VarId left, const parser::DataTerm &term,
           },
           [&](const parser::TupleData *tuple) {
             llvm::ArrayRef<VarId> arguments{FlattenAll(tuple->elements, out)};
-            AddUnify(out, at, range, left, functor(FunctorKind::Tuple),
+            AddUnify(out, at, range, left,
+                Functor{FunctorKind::Tuple, nullptr, nullptr, nullptr},
                 arguments);
           },
           [&](const parser::ApplyData *apply) {
@@ -627,7 +629,8 @@ void ClauseDesugarer::UnifyWith(VarId left, const parser::DataTerm &term,
           },
           [&](const parser::Coerce *coerce) {
             VarId argument{Flatten(coerce->term, out)};
-            AddUnify(out, at, range, left, functor(FunctorKind::Coerce),
+            AddUnify(out, at, range, left,
+                Functor{FunctorKind::Coerce, nullptr, nullptr, nullptr},
                 Save(llvm::ArrayRef<VarId>{argument}));
           },
           [&](const parser::StateVar *var) {
@@ -808,6 +811,24 @@ Goal ClauseDesugarer::ListScope(TokenRange range, ScopeKind kind,
       range, Number(), kind, origin, Save(llvm::ArrayRef<VarId>{vars}), inner);
 }
 
+// G1 => G2 is not (G1, not G2).
+Goal ClauseDesugarer::ImplicationGoal(const parser::Implication &implication,
+    const parser::Goal &from, const parser::Goal &to) {
+  Goals both;
+  DesugarInto(from, both);
+  both.push_back(Negate(implication.tokens, DesugarGoal(to)));
+  return Negate(implication.tokens, Conjoin(implication.tokens, both));
+}
+
+// The tokens of a side of a unification: its own, or those of the goal if it
+// is a variable.
+TokenRange TermRange(const parser::DataTerm &term, TokenRange goal) {
+  return std::holds_alternative<const parser::Variable *>(term) ||
+          std::holds_alternative<const parser::StateVar *>(term)
+      ? goal
+      : std::visit([](const auto *x) { return x->tokens; }, term);
+}
+
 void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
   std::visit(
       common::visitors{
@@ -855,24 +876,21 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
           },
           [&](const parser::Implication *implication) {
             // G1 => G2 is not (G1, not G2), and G1 <=> G2 is both ways.
-            auto implies{[&](const parser::Goal &from, const parser::Goal &to) {
-              Goals both;
-              DesugarInto(from, both);
-              both.push_back(Negate(implication->tokens, DesugarGoal(to)));
-              return Negate(
-                  implication->tokens, Conjoin(implication->tokens, both));
-            }};
             StateMap start{state_};
             switch (implication->kind) {
             case parser::ImplicationKind::Implies:
-              out.push_back(implies(implication->left, implication->right));
+              out.push_back(ImplicationGoal(
+                  *implication, implication->left, implication->right));
               break;
             case parser::ImplicationKind::ImpliedBy:
-              out.push_back(implies(implication->right, implication->left));
+              out.push_back(ImplicationGoal(
+                  *implication, implication->right, implication->left));
               break;
             case parser::ImplicationKind::Equivalent:
-              out.push_back(implies(implication->left, implication->right));
-              out.push_back(implies(implication->right, implication->left));
+              out.push_back(ImplicationGoal(
+                  *implication, implication->left, implication->right));
+              out.push_back(ImplicationGoal(
+                  *implication, implication->right, implication->left));
               break;
             }
             state_ = start;
@@ -905,25 +923,17 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
             }
             // X = f(...) has the tokens of f(...), as a subterm's does, and
             // X = Y those of the goal.
-            auto range{[&](const parser::DataTerm &term) {
-              return std::holds_alternative<const parser::Variable *>(term) ||
-                      std::holds_alternative<const parser::StateVar *>(term)
-                  ? unification->tokens
-                                     : std::visit([](const auto *x) {
-                                         return x->tokens;
-                                       }, term);
-            }};
             if (std::optional<VarId> left{SimpleVar(unification->left)}) {
-              UnifyWith(*left, unification->right, range(unification->right),
-                  out);
+              UnifyWith(*left, unification->right,
+                  TermRange(unification->right, unification->tokens), out);
             } else if (std::optional<VarId> right{
                            SimpleVar(unification->right)}) {
-              UnifyWith(*right, unification->left, range(unification->left),
-                  out);
+              UnifyWith(*right, unification->left,
+                  TermRange(unification->left, unification->tokens), out);
             } else {
               VarId both{Flatten(unification->left, out)};
-              UnifyWith(both, unification->right, range(unification->right),
-                  out);
+              UnifyWith(both, unification->right,
+                  TermRange(unification->right, unification->tokens), out);
             }
             FinishAtomic();
           },
@@ -1224,17 +1234,29 @@ void ClauseDesugarer::DesugarInto(const parser::DcgGoal &goal, Goals &out) {
       goal);
 }
 
+const parser::StateVar *HeadStateVar(const parser::ModedTerm &moded) {
+  const auto *state{std::get_if<const parser::StateVar *>(&moded.term)};
+  return state ? *state : nullptr;
+}
+
+void ClauseDesugarer::AddHead(VarId id, TokenRange range, Goals &goals) {
+  if (!llvm::is_contained(head_, id)) {
+    head_.push_back(id);
+    return;
+  }
+  VarId fresh{Fresh(range)};
+  head_.push_back(fresh);
+  goals.push_back(Make<Unify>(
+      range, Number(), fresh, true, id, Functor{}, llvm::ArrayRef<VarId>{}));
+}
+
 void ClauseDesugarer::Head(llvm::ArrayRef<const parser::ModedTerm *> arguments,
     const parser::ModedTerm *result, Goals &goals) {
   // A state variable that the head names as !X, !.X or !:X is in scope in
   // the whole clause. Its first version is the head's !.X; its last is the
   // head's !:X, which is filled in after the body.
-  auto headState{[](const parser::ModedTerm &moded) {
-    const auto *state{std::get_if<const parser::StateVar *>(&moded.term)};
-    return state ? *state : nullptr;
-  }};
   for (const parser::ModedTerm *moded : arguments) {
-    if (const parser::StateVar * state{headState(*moded)}) {
+    if (const parser::StateVar * state{HeadStateVar(*moded)}) {
       std::optional<VarId> &first{state_[state->name]};
       if (state->kind != parser::StateVarKind::Next && !first) {
         first = NewVersion(state->name, state->tokens);
@@ -1242,7 +1264,7 @@ void ClauseDesugarer::Head(llvm::ArrayRef<const parser::ModedTerm *> arguments,
     }
   }
   if (result) {
-    if (const parser::StateVar * state{headState(*result)};
+    if (const parser::StateVar * state{HeadStateVar(*result)};
         state && state->kind == parser::StateVarKind::Both) {
       // mmc: "!X is not a legal function result".
       Error(state->tokens,
@@ -1254,20 +1276,10 @@ void ClauseDesugarer::Head(llvm::ArrayRef<const parser::ModedTerm *> arguments,
   // A head argument that is a variable not already among the head's stays
   // as it is; any other becomes a fresh variable, unified with the
   // argument at the start of the body.
-  auto addHead{[&](VarId id, TokenRange range) {
-    if (!llvm::is_contained(head_, id)) {
-      head_.push_back(id);
-      return;
-    }
-    VarId fresh{Fresh(range)};
-    head_.push_back(fresh);
-    goals.push_back(Make<Unify>(range, Number(), fresh, true, id, Functor{},
-        llvm::ArrayRef<VarId>{}));
-  }};
   for (const parser::ModedTerm *moded : arguments) {
-    if (const parser::StateVar * state{headState(*moded)}) {
+    if (const parser::StateVar * state{HeadStateVar(*moded)}) {
       if (state->kind != parser::StateVarKind::Next) {
-        addHead(*state_[state->name], moded->tokens);
+        AddHead(*state_[state->name], moded->tokens, goals);
       }
       if (state->kind != parser::StateVarKind::Current) {
         lasts_.push_back(Last{head_.size(), state->name, state->tokens});
@@ -1275,7 +1287,7 @@ void ClauseDesugarer::Head(llvm::ArrayRef<const parser::ModedTerm *> arguments,
       }
     } else if (const auto *var{
                    std::get_if<const parser::Variable *>(&moded->term)}) {
-      addHead(ProgramVar(**var), moded->tokens);
+      AddHead(ProgramVar(**var), moded->tokens, goals);
     } else {
       VarId fresh{Fresh(moded->tokens)};
       head_.push_back(fresh);
