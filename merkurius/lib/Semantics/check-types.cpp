@@ -338,6 +338,17 @@ private:
   // the ranges of the assignment's constraints whose domains are those of
   // another constraint, assumed or wanted, or match an instance's.
   void Improve(Assignment &);
+  ClassConstraint ResolveConstraint(
+      const Assignment &, const ClassConstraint &);
+  bool UnifyRanges(Assignment &, const ClassConstraint &,
+      const ClassConstraint &other, llvm::ArrayRef<unsigned> range);
+  const Type *InstanceVarOrFresh(unsigned var,
+      llvm::ArrayRef<const Type *> bindings,
+      llvm::DenseMap<unsigned, const Type *> &fresh, Assignment &);
+  bool UnifyInstanceRange(Assignment &, const ClassConstraint &,
+      const InstanceHead &, llvm::ArrayRef<unsigned> range,
+      llvm::ArrayRef<const Type *> bindings,
+      std::vector<ClassConstraint> &premises);
   // The instances that constraints may use: the loaded interfaces' and
   // the module's, without its errors and its abstract declarations.
   using Instance = InstanceHead;
@@ -382,6 +393,7 @@ private:
   void CheckFunctor(const Unify &, const parser::SymName &);
   void CheckCall(const Call &);
   void CheckHOCall(const HOCall &);
+  const Type *HOCallType(const HOCall &);
   void CheckLoop(const Loop &);
   ClauseTypes Finish(const ClauseForm &, const Symbol *definition,
       const Signature *signature);
@@ -2626,70 +2638,117 @@ bool TypeChecker::Refuted(
   return false; // perhaps assumed, or satisfied once its types are known
 }
 
+// The bound variables among the first n, which a fresh variable does not count
+// among.
+static std::ptrdiff_t CountBound(const Assignment &a, std::size_t n) {
+  return llvm::count_if(llvm::ArrayRef<const Type *>{a.bindings}.take_front(n),
+      [](const Type *t) { return t; });
+}
+
+// Unifies the types in a copy, which replaces the assignment if it binds more
+// of the assignment's variables. A unification that fails is left for the
+// constraint's check to report, as mmc does.
+static bool AttemptUnify(
+    Assignment &a, llvm::function_ref<bool(Assignment &)> unify) {
+  Assignment copy{a};
+  std::size_t n{a.bindings.size()};
+  if (unify(copy) && CountBound(copy, n) > CountBound(a, n)) {
+    a = std::move(copy);
+    return true;
+  }
+  return false;
+}
+
+// Whether `other` is a constraint of the class of `c` with the same domain.
+static bool SameDomain(const ClassConstraint &c, const ClassConstraint &other,
+    llvm::ArrayRef<unsigned> domain) {
+  return other.typeclass == c.typeclass &&
+      llvm::all_of(domain, [&](unsigned position) {
+        return other.arguments[position] == c.arguments[position];
+      });
+}
+
+ClassConstraint TypeChecker::ResolveConstraint(
+    const Assignment &a, const ClassConstraint &c) {
+  return SubstituteIn(
+      c, [&](unsigned var) { return Resolve(a, types_.Variable(var)); });
+}
+
+bool TypeChecker::UnifyRanges(Assignment &a, const ClassConstraint &c,
+    const ClassConstraint &other, llvm::ArrayRef<unsigned> range) {
+  return AttemptUnify(a, [&](Assignment &copy) {
+    return llvm::all_of(range, [&](unsigned position) {
+      return UnifyTypes(copy, c.arguments[position], other.arguments[position]);
+    });
+  });
+}
+
+// An instance's type variable, in an assignment: what matching the instance
+// bound it to, or else a fresh variable, one for each in `fresh`.
+const Type *TypeChecker::InstanceVarOrFresh(unsigned var,
+    llvm::ArrayRef<const Type *> bindings,
+    llvm::DenseMap<unsigned, const Type *> &fresh, Assignment &a) {
+  if (var < bindings.size() && bindings[var]) {
+    return bindings[var];
+  }
+  auto [it, inserted]{fresh.try_emplace(var, nullptr)};
+  if (inserted) {
+    it->second = types_.Variable(a.bindings.size());
+    a.bindings.push_back(nullptr);
+  }
+  return it->second;
+}
+
+// Unifies a constraint's range with that of an instance whose domain it
+// matched, giving the instance's constraints on the same variables.
+bool TypeChecker::UnifyInstanceRange(Assignment &a, const ClassConstraint &c,
+    const InstanceHead &instance, llvm::ArrayRef<unsigned> range,
+    llvm::ArrayRef<const Type *> bindings,
+    std::vector<ClassConstraint> &premises) {
+  llvm::DenseMap<unsigned, const Type *> fresh;
+  for (unsigned position : range) {
+    if (!UnifyTypes(a, c.arguments[position],
+            types_.Substitute(instance.types[position], [&](unsigned var) {
+              return InstanceVarOrFresh(var, bindings, fresh, a);
+            }))) {
+      return false;
+    }
+  }
+  for (const ClassConstraint &premise : instance.constraints) {
+    premises.push_back(SubstituteIn(premise, [&](unsigned var) {
+      return InstanceVarOrFresh(var, bindings, fresh, a);
+    }));
+  }
+  return true;
+}
+
 void TypeChecker::Improve(Assignment &a) {
-  // The bound variables among the first n, which a fresh variable does
-  // not count among.
-  auto bound{[](const Assignment &x, std::size_t n) {
-    return llvm::count_if(llvm::ArrayRef<const Type *>{x.bindings}.take_front(n),
-        [](const Type *t) { return t; });
-  }};
-  auto resolve{[&](const ClassConstraint &c) {
-    return SubstituteIn(c, [&](unsigned var) { return Resolve(a, types_.Variable(var)); });
-  }};
   // The wanted constraints, and those that the instances that improve
   // them need, which improve others in turn.
   std::vector<ClassConstraint> wanted;
   for (const auto &[goal, constraint] : a.wanted) {
     wanted.push_back(constraint);
   }
-  // Unifies the types in a copy, which replaces the assignment if it
-  // binds more of the assignment's variables. A unification that fails is left for the
-  // constraint's check to report, as mmc does.
-  auto attempt{[&](llvm::function_ref<bool(Assignment &)> unify) {
-    Assignment copy{a};
-    std::size_t n{a.bindings.size()};
-    if (unify(copy) && bound(copy, n) > bound(a, n)) {
-      a = std::move(copy);
-      return true;
-    }
-    return false;
-  }};
   constexpr unsigned maxRounds{64}, maxWanted{256};
   for (unsigned round{0}; round < maxRounds; ++round) {
     bool changed{false};
     for (std::size_t i{0}; i < wanted.size(); ++i) {
-      ClassConstraint c{resolve(wanted[i])};
+      ClassConstraint c{ResolveConstraint(a, wanted[i])};
       llvm::ArrayRef<Dependency> dependencies{Dependencies(*c.typeclass)};
       if (dependencies.empty() ||
           llvm::any_of(c.arguments, [&](const Type *t) { return HasError(t); })) {
         continue;
       }
-      // Another constraint of the class with the same domain, assumed or
-      // wanted earlier.
-      auto sameDomain{[&](const ClassConstraint &other, const Dependency &d) {
-        return other.typeclass == c.typeclass &&
-            llvm::all_of(d.domain, [&](unsigned position) {
-              return other.arguments[position] == c.arguments[position];
-            });
-      }};
-      auto unifyRanges{[&](const ClassConstraint &other, const Dependency &d) {
-        return attempt([&](Assignment &copy) {
-          return llvm::all_of(d.range, [&](unsigned position) {
-            return UnifyTypes(
-                copy, c.arguments[position], other.arguments[position]);
-          });
-        });
-      }};
       for (const Dependency &d : dependencies) {
         for (const auto &[assumed, origin] : AssumedBy(a)) {
-          if (sameDomain(assumed, d)) {
-            changed |= unifyRanges(assumed, d);
+          if (SameDomain(c, assumed, d.domain)) {
+            changed |= UnifyRanges(a, c, assumed, d.range);
           }
         }
         for (std::size_t k{0}; k < i; ++k) {
-          ClassConstraint other{resolve(wanted[k])};
-          if (sameDomain(other, d)) {
-            changed |= unifyRanges(other, d);
+          ClassConstraint other{ResolveConstraint(a, wanted[k])};
+          if (SameDomain(c, other, d.domain)) {
+            changed |= UnifyRanges(a, c, other, d.range);
           }
         }
         // An instance whose domain matches: its range, with its other
@@ -2704,29 +2763,9 @@ void TypeChecker::Improve(Assignment &a) {
             continue;
           }
           std::vector<ClassConstraint> premises;
-          bool improved{attempt([&](Assignment &copy) {
-            llvm::DenseMap<unsigned, const Type *> fresh;
-            auto substitute{[&](unsigned var) {
-              if (var < bindings.size() && bindings[var]) {
-                return bindings[var];
-              }
-              auto [it, inserted]{fresh.try_emplace(var, nullptr)};
-              if (inserted) {
-                it->second = types_.Variable(copy.bindings.size());
-                copy.bindings.push_back(nullptr);
-              }
-              return it->second;
-            }};
-            for (unsigned position : d.range) {
-              if (!UnifyTypes(copy, c.arguments[position],
-                      types_.Substitute(instance.types[position], substitute))) {
-                return false;
-              }
-            }
-            for (const ClassConstraint &premise : instance.constraints) {
-              premises.push_back(SubstituteIn(premise, substitute));
-            }
-            return true;
+          bool improved{AttemptUnify(a, [&](Assignment &copy) {
+            return UnifyInstanceRange(
+                copy, c, instance, d.range, bindings, premises);
           })};
           if (improved) {
             changed = true;
@@ -3014,30 +3053,32 @@ void TypeChecker::CheckCall(const Call &call) {
   });
 }
 
-void TypeChecker::CheckHOCall(const HOCall &call) {
+// The type of a closure that the call's arguments fit.
+const Type *TypeChecker::HOCallType(const HOCall &call) {
   bool function{call.kind == parser::PredOrFunc::Function};
-  auto expected{[&](const Assignment &a) {
-    llvm::SmallVector<const Type *, 4> types;
-    for (VarId argument : call.arguments) {
-      types.push_back(VarType(argument));
-    }
-    const Type *result{nullptr};
-    if (function && !types.empty()) {
-      result = types.pop_back_val();
-    }
-    // The closure's purity is the call's, as in mmc: P(X) needs a pure
-    // closure, and impure P(X) an impure one.
-    return types_.HigherOrder(call.kind, call.purity, types, result);
-  }};
+  llvm::SmallVector<const Type *, 4> types;
+  for (VarId argument : call.arguments) {
+    types.push_back(VarType(argument));
+  }
+  const Type *result{nullptr};
+  if (function && !types.empty()) {
+    result = types.pop_back_val();
+  }
+  // The closure's purity is the call's, as in mmc: P(X) needs a pure
+  // closure, and impure P(X) an impure one.
+  return types_.HigherOrder(call.kind, call.purity, types, result);
+}
+
+void TypeChecker::CheckHOCall(const HOCall &call) {
   Constrain(
       [&](Assignment &a) {
-        return UnifyTypes(a, VarType(call.closure), expected(a));
+        return UnifyTypes(a, VarType(call.closure), HOCallType(call));
       },
       [&](const Assignment &a) {
         messages_->Say(Source(call.tokens),
             "type error in higher-order call: %s has type %s, but the call needs %s"_err_en_US,
             Describe(call.closure), TypeText(a, VarType(call.closure)),
-            TypeText(a, expected(a)));
+            TypeText(a, HOCallType(call)));
       });
 }
 
