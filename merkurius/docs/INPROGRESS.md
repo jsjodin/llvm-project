@@ -57,7 +57,8 @@ a constant, ahead of a size it does not depend on.
 | `Semantics/quantify.cpp` | 11 | Done, in 2 stages: `Collect` and `Capture`, then `Rebuild` |
 | `Parser/convert-goals.cpp` | 11 | Done, in 2 stages: the fields, lambda expressions, data terms, trace conditions and loop iterators, then goals, DCG goals and clauses |
 | `Semantics/desugar.cpp` | 8 | Done, in 2 stages: unifications, implications and clause heads, then try, atomic and loop goals |
-| The other 17 files in `lib/` and `runtime/` | 49 | Not started; the largest is `resolve-names.cpp` (8) |
+| `Semantics/resolve-names.cpp` | 8 | Stage 1 of 2 done: declaring names. Next: looking them up and resolving goals |
+| The other 16 files in `lib/` and `runtime/` | 41 | Not started; the largest are `types.cpp` (6) and `convert.cpp` (5) |
 
 The unit tests' few are left unless they turn out to get in the way.
 

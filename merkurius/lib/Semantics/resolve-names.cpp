@@ -126,6 +126,11 @@ public:
       const SemanticForm &);
 
 private:
+  const Symbol *DeclareType(ModuleSymbols &, const parser::SymName &,
+      std::size_t arity, Declaration, bool exported,
+      const parser::TokenSequence &);
+  void DeclarePredicate(ModuleSymbols &, const parser::PredDecl &,
+      const Symbol *owner, bool exported, const parser::TokenSequence &);
   // Collects a module's symbols from its items.
   void Declare(ModuleSymbols &, const parser::Item &, bool exported,
       const parser::TokenSequence &);
@@ -192,46 +197,61 @@ private:
   const ModuleSymbols *own_{nullptr}; // the module whose names these are
 };
 
+namespace {
+parser::CharBlock NameSource(
+    const parser::TokenSequence &tokens, const parser::SymName &name) {
+  return parser::CharBlock{tokens.tokens[name.tokens.first].spelling.begin(),
+      tokens.tokens[name.tokens.last].spelling.end()};
+}
+
+bool IsTypeDefinition(const Declaration &declaration) {
+  return std::holds_alternative<const parser::DuTypeDefn *>(declaration) ||
+      std::holds_alternative<const parser::EquivalenceTypeDefn *>(declaration);
+}
+} // namespace
+
+// A type, unless it is a duplicate, whose constructors are then not the
+// type's.
+const Symbol *Resolver::DeclareType(ModuleSymbols &symbols,
+    const parser::SymName &name, std::size_t arity, Declaration declaration,
+    bool exported, const parser::TokenSequence &tokens) {
+  if (Duplicate(symbols, SymbolKind::Type, name.name, arity, declaration,
+          NameSource(tokens, name))) {
+    return nullptr; // its constructors are not the type's
+  }
+  return &symbols.Add(SymbolKind::Type, name.name, arity, declaration,
+      NameSource(tokens, name), exported);
+}
+
+void Resolver::DeclarePredicate(ModuleSymbols &symbols,
+    const parser::PredDecl &decl, const Symbol *owner, bool exported,
+    const parser::TokenSequence &tokens) {
+  if (decl.withType) {
+    // Its arity depends on its type's, which is known once the module's
+    // types are.
+    pending_.push_back({&symbols, &decl, exported, owner, &tokens});
+    return;
+  }
+  SymbolKind kind{decl.kind == parser::PredOrFunc::Function
+          ? SymbolKind::Function
+          : SymbolKind::Predicate};
+  if (Duplicate(symbols, kind, decl.name->name, decl.arguments.size(), &decl,
+          NameSource(tokens, *decl.name), owner)) {
+    return;
+  }
+  symbols.Add(decl.kind == parser::PredOrFunc::Function ? SymbolKind::Function
+                                                        : SymbolKind::Predicate,
+      decl.name->name, decl.arguments.size(), &decl,
+      NameSource(tokens, *decl.name), exported, owner);
+}
+
 void Resolver::Declare(ModuleSymbols &symbols, const parser::Item &item,
     bool exported, const parser::TokenSequence &tokens) {
-  auto source{[&](const parser::SymName &name) {
-    return parser::CharBlock{tokens.tokens[name.tokens.first].spelling.begin(),
-        tokens.tokens[name.tokens.last].spelling.end()};
-  }};
-  auto type{[&](const parser::SymName &name, std::size_t arity,
-                Declaration declaration) -> const Symbol * {
-    if (Duplicate(symbols, SymbolKind::Type, name.name, arity, declaration,
-            source(name))) {
-      return nullptr; // its constructors are not the type's
-    }
-    return &symbols.Add(SymbolKind::Type, name.name, arity, declaration,
-        source(name), exported);
-  }};
-  auto predicate{[&](const parser::PredDecl &decl, const Symbol *owner) {
-    if (decl.withType) {
-      // Its arity depends on its type's, which is known once the module's
-      // types are.
-      pending_.push_back({&symbols, &decl, exported, owner, &tokens});
-      return;
-    }
-    SymbolKind kind{decl.kind == parser::PredOrFunc::Function
-            ? SymbolKind::Function
-            : SymbolKind::Predicate};
-    if (Duplicate(symbols, kind, decl.name->name, decl.arguments.size(),
-            &decl, source(*decl.name), owner)) {
-      return;
-    }
-    symbols.Add(decl.kind == parser::PredOrFunc::Function
-            ? SymbolKind::Function
-            : SymbolKind::Predicate,
-        decl.name->name, decl.arguments.size(), &decl, source(*decl.name),
-        exported, owner);
-  }};
   std::visit(
       common::visitors{
           [&](const parser::DuTypeDefn *defn) {
-            const Symbol *owned{
-                type(*defn->name, defn->parameters.size(), defn)};
+            const Symbol *owned{DeclareType(symbols, *defn->name,
+                defn->parameters.size(), defn, exported, tokens)};
             if (!owned) {
               return;
             }
@@ -239,54 +259,61 @@ void Resolver::Declare(ModuleSymbols &symbols, const parser::Item &item,
             for (const parser::Constructor *constructor : defn->constructors) {
               symbols.Add(SymbolKind::Constructor, constructor->name->name,
                   constructor->arguments.size(), constructor,
-                  source(*constructor->name), exported, &owner);
+                  NameSource(tokens, *constructor->name), exported, &owner);
               for (const parser::ConstructorArg *argument :
                   constructor->arguments) {
                 if (argument->field) {
                   symbols.Add(SymbolKind::Field, argument->field->name, 1,
-                      constructor, source(*argument->field), exported,
-                      &owner);
+                      constructor, NameSource(tokens, *argument->field),
+                      exported, &owner);
                   symbols.Add(SymbolKind::FieldUpdate,
                       (argument->field->name + " :=").str(), 2, constructor,
-                      source(*argument->field), exported, &owner);
+                      NameSource(tokens, *argument->field), exported, &owner);
                 }
               }
             }
           },
           [&](const parser::EquivalenceTypeDefn *defn) {
-            type(*defn->name, defn->parameters.size(), defn);
+            DeclareType(symbols, *defn->name, defn->parameters.size(), defn,
+                exported, tokens);
           },
           [&](const parser::AbstractTypeDecl *decl) {
-            type(*decl->name, decl->parameters.size(), decl);
+            DeclareType(symbols, *decl->name, decl->parameters.size(), decl,
+                exported, tokens);
           },
           [&](const parser::ForeignTypePragma *pragma) {
-            type(*pragma->name, pragma->parameters.size(), pragma);
+            DeclareType(symbols, *pragma->name, pragma->parameters.size(),
+                pragma, exported, tokens);
           },
-          [&](const parser::PredDecl *decl) { predicate(*decl, nullptr); },
+          [&](const parser::PredDecl *decl) {
+            DeclarePredicate(symbols, *decl, nullptr, exported, tokens);
+          },
           [&](const parser::InstDefn *defn) {
             if (!Duplicate(symbols, SymbolKind::Inst, defn->name->name,
-                    defn->parameters.size(), defn, source(*defn->name))) {
+                    defn->parameters.size(), defn,
+                    NameSource(tokens, *defn->name))) {
               symbols.Add(SymbolKind::Inst, defn->name->name,
-                  defn->parameters.size(), defn, source(*defn->name),
-                  exported);
+                  defn->parameters.size(), defn,
+                  NameSource(tokens, *defn->name), exported);
             }
           },
           [&](const parser::ModeDefn *defn) {
             if (!Duplicate(symbols, SymbolKind::Mode, defn->name->name,
-                    defn->parameters.size(), defn, source(*defn->name))) {
+                    defn->parameters.size(), defn,
+                    NameSource(tokens, *defn->name))) {
               symbols.Add(SymbolKind::Mode, defn->name->name,
-                  defn->parameters.size(), defn, source(*defn->name),
-                  exported);
+                  defn->parameters.size(), defn,
+                  NameSource(tokens, *defn->name), exported);
             }
           },
           [&](const parser::TypeclassDecl *decl) {
             const Symbol &owner{symbols.Add(SymbolKind::Typeclass,
                 decl->name->name, decl->parameters.size(), decl,
-                source(*decl->name), exported)};
+                NameSource(tokens, *decl->name), exported)};
             for (const parser::ClassMethod &method : decl->methods) {
               if (const auto *pred{
                       std::get_if<const parser::PredDecl *>(&method)}) {
-                predicate(**pred, &owner);
+                DeclarePredicate(symbols, **pred, &owner, exported, tokens);
               }
             }
           },
@@ -301,10 +328,6 @@ bool Resolver::Duplicate(const ModuleSymbols &symbols, SymbolKind kind,
   if (&symbols != own_) {
     return false; // an imported module's are its own business
   }
-  auto definition{[](const Declaration &d) {
-    return std::holds_alternative<const parser::DuTypeDefn *>(d) ||
-        std::holds_alternative<const parser::EquivalenceTypeDefn *>(d);
-  }};
   for (const Symbol *symbol : symbols.Lookup(name)) {
     if (symbol->kind != kind || symbol->arity != arity) {
       continue;
@@ -334,7 +357,8 @@ bool Resolver::Duplicate(const ModuleSymbols &symbols, SymbolKind kind,
           .Attach(first, "it is first declared here"_because_en_US);
       return true;
     case SymbolKind::Type:
-      if (definition(declaration) && definition(symbol->declaration)) {
+      if (IsTypeDefinition(declaration) &&
+          IsTypeDefinition(symbol->declaration)) {
         bool equivalence{std::holds_alternative<
             const parser::EquivalenceTypeDefn *>(declaration)};
         if (equivalence !=
