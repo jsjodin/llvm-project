@@ -2417,6 +2417,81 @@ The language target is the Mercury 22.01 reference manual. The standard library 
 - **Runtime stress:** a GC torture mode that collects at every safepoint, and randomized scheduling.
 - **Benchmarks:** the four baseline programs (fib, naive reverse, 12-queens, float loop) already exist in C, Mercury, SWI-Prolog and Python. Add the classic Prolog suite (deriv, tak, crypt, poly), parallel-loop scaling runs, and process benchmarks: ring, ping-pong, spawn rate, receive latency. The first parallel-loop benchmark is `benchmarks/bandwidth`, BabelStream's five kernels (copy, mul, add, triad and dot) under `target teams distribute parallel do`, built sequentially, for the host's threads and for a GPU; its GPU numbers measure the maps of each kernel's arrays until there are `target data` regions (benchmarks/bandwidth/README.md).
 
+## Target applications
+
+Recorded on 2026-11-05. This is judgement, not a result: the only performance evidence so far is the bandwidth benchmark, whose program is no simpler than its C version (`benchmarks/bandwidth/README.md`). That the code is simpler has still to be shown on a program with real logic in it.
+
+### Where the language could win
+
+The best fit is a program that combines complicated decision logic with large numeric or data-parallel kernels. Such programs are usually C++ plus Python, or a rule engine and GPU code joined together; here they could be one typed program, whose source runs sequentially, on the host's threads or on a GPU.
+
+| Application | Mercury side | GPU or parallel side | Typical today |
+| --- | --- | --- | --- |
+| Combinatorial optimization: scheduling, routing, branch and bound | search, backtracking, constraints | bounds and candidate scoring | C++, or Python around a solver |
+| Chip design tools: synthesis, placement, verification | netlist rewriting, rules | placement and timing calculations | C++ and Tcl or Python |
+| Query engines | plan rewriting and search | column scans and joins | C++, Rust, Scala |
+| Robot planning | task planning | collision checks and trajectory scoring | C++ and Python |
+| Rule-heavy live services: fraud, trading risk, network policy | rules | batch scoring, isolated processes | Java, Erlang or Elixir plus native code |
+| Tensor and HPC compilers | graph rewriting | the host compiler's own heavy analyses | C++, Python, Rust |
+
+What gives it the edge:
+
+- **Modes and determinism.** The compiler checks data flow and how many answers a predicate can produce, where rule-heavy C++ tends to hide bugs.
+- **Unique arrays.** In-place updates with no garbage, and a declared single owner gives the compiler aliasing facts that C needs `restrict` for.
+- **Directives as comments.** The sequential build is a reference for the parallel one, as the OpenMP tests already use it.
+- **Lightweight processes** (designed, not built). Erlang-style isolation for numeric code.
+
+### Compared with today's languages
+
+| Language | Merkurius could do better on | That language stays better on |
+| --- | --- | --- |
+| Python plus C++ | one language, one type system, no boundary between the two | libraries, prototyping, hiring |
+| C++ | symbolic code, memory safety, fewer logic bugs | control, ecosystem, tooling |
+| Prolog | static checking, speed, GPU use | interactive and metaprogramming work |
+| Erlang/Elixir | numeric speed, static types | a proven runtime; hot code loading and distribution |
+| Haskell | predictable in-place updates and performance, built-in search | abstraction, libraries |
+| Rust | backtracking and symbolic code without ownership friction | systems programming, libraries |
+| Julia | compile-time guarantees, predictable compiled code | numeric libraries, interactive work |
+| Fortran | everything around the kernel | array notation, existing numeric code |
+
+It is unlikely to win for operating systems and drivers, GUIs, quick scripts, or purely numeric programs where the kernel is the whole program. C or Fortran are already simple enough there, and the C comparison in the benchmark's README shows Mercury has no automatic speed advantage.
+
+What could stop it:
+
+- **Missing language pieces.** Typeclasses, existential types, processes and parts of the standard library are not there yet.
+- **Unchecked parallel promises.** The OpenMP directives are promises the compiler does not fully check, so "safe" does not yet cover data races in a kernel.
+- **GPU limits.** Kernels work on flat arrays and cannot allocate, so symbolic data has to be converted to arrays before it reaches the GPU. If that is awkward, much of the simplicity is lost.
+- **Adoption.** Modes and determinism are hard to learn, and there are no numeric libraries yet. A niche where the benefit is obvious is more realistic than general use.
+
+### Compiling AI kernels: the state of the field
+
+The user pointed out that knapsack-like problems matter for compiling AI kernels, distributing code and finding communication patterns, and were far from solved 3 to 4 years ago. A quick search on 2026-11-05 found much progress but no complete solution: each sub-problem has practical methods, mostly applied separately. It read mostly search excerpts rather than full papers, most of the numbers are self-reported, and it found no recent head-to-head survey, so this is a starting point and not a literature review.
+
+| Problem | Where it stands | Still open |
+| --- | --- | --- |
+| Distributing a model across devices | Propagation systems such as GSPMD and Shardy are the compiler infrastructure. Alpa uses integer programming to choose each operator's partitioning and minimize communication, and PyTorch/XLA's auto-sharding option uses it. | TOAST (2025) combines static analysis with Monte Carlo tree search and claims to beat industrial methods, which suggests search scale is still a live problem. It is a preprint. |
+| Memory and scheduling inside a kernel | Constraint solvers are in real use: NXP's eIQ Neutron compiler uses constraint programming, and a 2025 backend generator uses a SAT-based solver for memory allocation. TelaMalloc (2022) did this earlier for production accelerators. | Joint scheduling, memory and rematerialization. One 2026 paper shows recomputation produces a knapsack-cover constraint and is strongly NP-hard even in restricted cases. |
+| The solvers themselves | GPUs now help noticeably. NVIDIA's cuOpt runs its search heuristics on the GPU, using the PDLP method for LP relaxations. COPT and HiGHS also use GPU PDLP. | cuOpt still runs branch and bound on the CPU, and its documentation says proving optimality is still under development. |
+| Learned approaches | RL has beaten fixed pass orders such as `-O3`, and AlphaEvolve-style heuristic discovery has appeared (Magellan, 2026, seen by title only). | No good comparison against integer programming was found, so whether they have overtaken it is unknown. |
+
+What this means for Merkurius:
+
+- **Plain knapsack is the wrong demonstration.** A single-constraint knapsack is largely easy in practice, with dynamic programming or a good approximation, even though knapsack constraints appear throughout these problems.
+- **The hard version is the coupled one.** Choosing partitions, schedule and spills together, with memory limits per device and communication costs between them, looks like the part that remains open. That is a reading of the results above, which do not state it outright.
+- **The architecture suits it.** cuOpt's split, with the GPU doing bulk evaluation and the CPU managing the tree, is what Merkurius does naturally: search logic on the host, flat-array kernels on the GPU.
+- **It tests the language too.** Partitioning rules and legality constraints are what Mercury expresses well.
+
+### A possible benchmark
+
+A small tensor-partitioning solver, instead of plain knapsack. Not planned yet; which problem it targets should depend on which of them hurts most in practice.
+
+- **Input.** An operator graph, each device's memory limit and the communication costs.
+- **Choices.** A partitioning for each operator, and which values to recompute instead of keeping in memory.
+- **Search.** Branch and bound in Mercury, scoring batches of candidates on the GPU.
+- **Baselines.** An integer programming solver for solution quality, and a C++ version for code size and speed.
+
+A mature solver could beat a small custom one easily. The claim to test is that domain-specific search is simple to write and quick on large graphs, not that it beats solvers in general.
+
 ## Phased plan
 
 Seven milestones take the project from today's experiments to processes and parallel loops in one program, and then across machines. Each ends with a working compiler and a gate measured against the Experiments baseline.
@@ -2488,4 +2563,18 @@ Seven decisions remain open. The two that most constrain the runtime are the non
 - [Jeffery: Expressive type systems for logic programming languages](https://mercurylang.org/documentation/papers/dgj-thesis-final.ps.gz) (PhD thesis, University of Melbourne, 2002): Mercury's type system, with type classes and existential types (Type checking)
 - [Overton: Precise and expressive mode systems for typed logic programming languages](https://mercurylang.org/documentation/papers/dmo-thesis.ps.gz) (PhD thesis, University of Melbourne, 2003)
 - [Overton, Somogyi and Stuckey: Constraint-based mode analysis of Mercury](https://mercurylang.org/documentation/papers/ppdp02_mode.pdf) (PPDP 2002)
+- Target applications, excerpts from a search on 2026-11-05:
+  [TOAST](https://arxiv.org/abs/2508.15010),
+  [PyTorch/XLA SPMD](https://pytorch.org/blog/pytorch-xla-spmd/) and its [auto-sharding RFC](https://github.com/pytorch/xla/issues/6322),
+  [a technical review of Alpa](https://www.zhongzhuzhou.org/blog/2026-03-26-2026-03-26-Alpa-technical-review-en/) (secondary),
+  [eIQ Neutron](https://arxiv.org/pdf/2509.14388),
+  [generating compiler backends from tensor IR](https://arxiv.org/pdf/2510.09932),
+  [TelaMalloc](https://dl.acm.org/doi/pdf/10.1145/3567955.3567961),
+  [recomputation and knapsack-cover constraints](https://arxiv.org/html/2610.23328v1),
+  [NVIDIA cuOpt](https://docs.nvidia.com/cuopt/user-guide/latest/introduction.html) and its [26.02 release notes](https://docs.nvidia.com/cuopt/user-guide/26.02.00/release-notes.html),
+  [GAMS on cuOpt](https://gams.com/blog/2025/09/gpu-accelerated-optimization-with-gams-and-nvidia-cuopt/),
+  [AutoPhase](https://ar5iv.labs.arxiv.org/html/1901.04615),
+  [CORL](https://arxiv.org/pdf/2008.08951),
+  [target-independent XLA optimization using RL](https://arxiv.org/pdf/2308.14364),
+  [Magellan](https://arxiv.org/pdf/2601.21096).
 - Measurements in this document were made with Melbourne Mercury 22.01.9 (`hlc.gc`), gcc 13.3, SWI-Prolog 9.0.4 and CPython 3.13 on a 2-vCPU cloud VM.
