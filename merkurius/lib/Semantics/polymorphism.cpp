@@ -158,35 +158,17 @@ public:
     std::vector<bool> existentiallyConstrained{
         Constrained(out_.parameters, signature->existentialConstraints)};
     dictionaries_.assign(constraints_.size(), nullptr);
-    auto hide{[&](unsigned firstVar, unsigned endVar, std::size_t first,
-                  std::size_t end) {
-      for (unsigned var{firstVar}; var < endVar; ++var) {
-        if (!constrained[var]) {
-          const TypeInfo *info{&result_.nodes_.emplace_back(TypeInfo{
-              TypeInfoKind::Parameter, types_.types().Variable(var), var})};
-          out_.sources[var] = info;
-          out_.hidden.push_back({info, nullptr});
-        }
-      }
-      for (std::size_t i{first}; i < end; ++i) {
-        Dictionary dictionary{DictionaryKind::Parameter, constraints_[i]};
-        dictionary.parameter = static_cast<unsigned>(i);
-        dictionaries_[i] =
-            &result_.dictionaries_.emplace_back(std::move(dictionary));
-        out_.hidden.push_back({nullptr, dictionaries_[i]});
-      }
-    }};
     if (body.method) {
       instanceVars = std::min(instanceVars, out_.parameters);
       instanceConstraints = std::min(instanceConstraints, constraints_.size());
-      hide(0, instanceVars, 0, instanceConstraints);
-      hide(instanceVars, out_.parameters, instanceConstraints,
-          constraints_.size());
+      Hide(0, instanceVars, 0, instanceConstraints, constrained);
+      Hide(instanceVars, out_.parameters, instanceConstraints,
+          constraints_.size(), constrained);
     } else {
       // The type_infos the procedure gives for its existentially
       // quantified type variables follow those it is given, and the
       // typeclass_infos for its existential constraints follow the others.
-      hide(0, universal, 0, 0);
+      Hide(0, universal, 0, 0, constrained);
       for (unsigned var{universal}; var < out_.parameters; ++var) {
         if (!existentiallyConstrained[var]) {
           out_.hidden.push_back({&result_.nodes_.emplace_back(TypeInfo{
@@ -195,7 +177,7 @@ public:
               nullptr, true});
         }
       }
-      hide(0, 0, 0, constraints_.size());
+      Hide(0, 0, 0, constraints_.size(), constrained);
       for (std::size_t j{0}; j < signature->existentialConstraints.size(); ++j) {
         Dictionary dictionary{DictionaryKind::Parameter,
             signature->existentialConstraints[j]};
@@ -240,6 +222,28 @@ public:
   }
 
 private:
+  // Adds to the procedure's hidden arguments the type_infos of the variables
+  // from firstVar to endVar without constraints, and the typeclass_infos of
+  // the constraints from first to end.
+  void Hide(unsigned firstVar, unsigned endVar, std::size_t first,
+      std::size_t end, const std::vector<bool> &constrained) {
+    for (unsigned var{firstVar}; var < endVar; ++var) {
+      if (!constrained[var]) {
+        const TypeInfo *info{&result_.nodes_.emplace_back(TypeInfo{
+            TypeInfoKind::Parameter, types_.types().Variable(var), var})};
+        out_.sources[var] = info;
+        out_.hidden.push_back({info, nullptr});
+      }
+    }
+    for (std::size_t i{first}; i < end; ++i) {
+      Dictionary dictionary{DictionaryKind::Parameter, constraints_[i]};
+      dictionary.parameter = static_cast<unsigned>(i);
+      dictionaries_[i] =
+          &result_.dictionaries_.emplace_back(std::move(dictionary));
+      out_.hidden.push_back({nullptr, dictionaries_[i]});
+    }
+  }
+
   // What each clause of an existentially typed procedure gives: the
   // type_infos of the types it gives its existentially quantified type
   // variables, which all its clauses give the same, and the typeclass_infos
@@ -641,6 +645,12 @@ private:
     return nullptr;
   }
 
+  void PassType(const Type *type, PassedInfos &passed) {
+    passed.typeInfos.push_back(type
+            ? Of(type)
+            : &result_.nodes_.emplace_back(TypeInfo{TypeInfoKind::Void}));
+  }
+
   // The type_infos and typeclass_infos a goal passes to its callee, whose
   // arguments are `arguments`, and those it gives back: a call's, or a
   // construction's or deconstruction's with an existentially typed
@@ -676,15 +686,9 @@ private:
         Constrained(signature.typeVars, signature.existentialConstraints)};
     PassedInfos passed;
     passed.constructor = constructor ? &callee : nullptr;
-    auto pass{[&](unsigned var) {
-      const Type *type{binding[var]};
-      passed.typeInfos.push_back(type ? Of(type)
-                                      : &result_.nodes_.emplace_back(
-                                            TypeInfo{TypeInfoKind::Void}));
-    }};
     for (unsigned var{constructor ? universal : 0}; var < universal; ++var) {
       if (!constrained[var]) {
-        pass(var);
+        PassType(binding[var], passed);
       }
     }
     // The types the goal gets for the existentially quantified type
@@ -693,7 +697,7 @@ private:
     for (unsigned var{universal}; var < signature.typeVars; ++var) {
       if (construction) {
         if (!existentiallyConstrained[var]) {
-          pass(var);
+          PassType(binding[var], passed);
         }
         continue;
       }
@@ -742,13 +746,6 @@ private:
       }
     }
     if (!construction) {
-      auto instantiate{[&](const Type *type) {
-        return types_.types().Substitute(type, [&](unsigned var) {
-          return var < binding.size() && binding[var]
-              ? binding[var]
-              : types_.types().Variable(var);
-        });
-      }};
       std::vector<const Dictionary *> given;
       for (const ClassConstraint &constraint : signature.existentialConstraints) {
         Dictionary dictionary{DictionaryKind::Output,
@@ -762,8 +759,14 @@ private:
       }
       for (unsigned var : outputs) {
         if (existentiallyConstrained[var]) {
-          existentials_[binding[var]->var] = InConstraints(
-              var, signature.existentialConstraints, given, instantiate);
+          existentials_[binding[var]->var] = InConstraints(var,
+              signature.existentialConstraints, given, [&](const Type *type) {
+                return types_.types().Substitute(type, [&](unsigned v) {
+                  return v < binding.size() && binding[v]
+                      ? binding[v]
+                      : types_.types().Variable(v);
+                });
+              });
         }
       }
     }
