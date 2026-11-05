@@ -127,6 +127,38 @@ private:
   std::vector<Command> commands_;
 };
 
+// Render's output, and where it is on its line. A line is indented as the
+// nest where it began, and written lazily, so that blank lines have no
+// trailing spaces.
+struct LineWriter {
+  // Ends the line; the next is indented by `indent`.
+  void Newline(unsigned indent) {
+    o << '\n';
+    column = 0;
+    lineStart = true;
+    lineIndent = indent;
+  }
+  void Text(llvm::StringRef t) {
+    if (t.empty()) {
+      return;
+    }
+    if (lineStart) {
+      o.indent(lineIndent);
+      column = lineIndent;
+      lineStart = false;
+    }
+    o << t;
+    std::size_t newline{t.rfind('\n')};
+    column = newline == llvm::StringRef::npos ? column + t.size()
+                                              : t.size() - newline - 1;
+  }
+
+  llvm::raw_ostream &o;
+  std::uint64_t column{0};
+  bool lineStart{true};
+  unsigned lineIndent{0};
+};
+
 // A group is printed flat if it fits on the line together with the text
 // after it up to the next place the line may break.
 void Document::Render(llvm::raw_ostream &o, unsigned width) const {
@@ -171,92 +203,68 @@ void Document::Render(llvm::raw_ostream &o, unsigned width) const {
     }
   }
 
-  std::uint64_t column{0};
-  bool lineStart{true};
+  LineWriter out{o};
   std::vector<unsigned> indents{0};
   std::vector<bool> flat{false};
-  // A line is indented as the nest where it began, and written lazily, so
-  // that blank lines have no trailing spaces.
-  unsigned lineIndent{0};
-  auto newline{[&]() {
-    o << '\n';
-    column = 0;
-    lineStart = true;
-    lineIndent = indents.back();
-  }};
-  auto text{[&](llvm::StringRef t) {
-    if (t.empty()) {
-      return;
-    }
-    if (lineStart) {
-      o.indent(lineIndent);
-      column = lineIndent;
-      lineStart = false;
-    }
-    o << t;
-    std::size_t newline{t.rfind('\n')};
-    column = newline == llvm::StringRef::npos ? column + t.size()
-                                              : t.size() - newline - 1;
-  }};
   for (std::size_t j{0}; j < n; ++j) {
     const Command &c{commands_[j]};
     switch (c.kind) {
     case Command::Kind::Text:
-      text(c.text);
+      out.Text(c.text);
       break;
     case Command::Kind::Separator: {
       Break brk{c.brk};
       for (llvm::StringRef comment : c.trailing) {
-        if (!lineStart) {
-          o << ' ';
-          ++column;
+        if (!out.lineStart) {
+          out.o << ' ';
+          ++out.column;
         }
-        text(comment);
+        out.Text(comment);
         if (IsLineComment(comment)) {
           brk = std::max(brk, Break::HardLine);
         }
       }
-      if (!c.leading.empty() && !lineStart) {
+      if (!c.leading.empty() && !out.lineStart) {
         brk = std::max(brk, Break::HardLine);
       }
       switch (brk) {
       case Break::None:
         break;
       case Break::Space:
-        if (!lineStart) {
-          o.indent(c.count);
-          column += c.count;
+        if (!out.lineStart) {
+          out.o.indent(c.count);
+          out.column += c.count;
         }
         break;
       case Break::SoftLine:
       case Break::Line:
         if (!flat.back()) {
-          newline();
+          out.Newline(indents.back());
         } else if (brk == Break::Line) {
-          o << ' ';
-          ++column;
+          out.o << ' ';
+          ++out.column;
         }
         break;
       case Break::HardLine:
-        newline();
+        out.Newline(indents.back());
         break;
       case Break::BlankLine:
-        newline();
-        newline();
+        out.Newline(indents.back());
+        out.Newline(indents.back());
         break;
       }
       for (llvm::StringRef comment : c.leading) {
         if (comment.empty()) {
-          newline();
+          out.Newline(indents.back());
         } else {
-          text(comment);
-          newline();
+          out.Text(comment);
+          out.Newline(indents.back());
         }
       }
       break;
     }
     case Command::Kind::BeginGroup: {
-      std::uint64_t at{lineStart ? lineIndent : column};
+      std::uint64_t at{out.lineStart ? out.lineIndent : out.column};
       std::size_t end{groupEnd[j]};
       std::uint64_t needed{
           at + (before[end] - before[j]) + (end < n ? rest[end + 1] : 0)};
@@ -279,8 +287,8 @@ void Document::Render(llvm::raw_ostream &o, unsigned width) const {
       break;
     }
   }
-  if (!lineStart) {
-    o << '\n';
+  if (!out.lineStart) {
+    out.o << '\n';
   }
 }
 
@@ -303,60 +311,75 @@ bool IsWhitespace(char ch) {
       ch == '\v';
 }
 
+class TriviaParser {
+public:
+  TriviaParser(bool keepBlankLines, bool onNewLine)
+      : keepBlankLines_{keepBlankLines}, onNewLine_{onNewLine},
+        seenNewline_{onNewLine}, newlines_{onNewLine ? 1u : 0u} {}
+  Comments Parse(llvm::StringRef trivia) {
+    std::size_t j{0};
+    while (j < trivia.size()) {
+      char ch{trivia[j]};
+      if (ch == '\n') {
+        ++newlines_;
+        seenNewline_ = true;
+        ++j;
+      } else if (IsWhitespace(ch)) {
+        ++j;
+      } else if (ch == '%') {
+        std::size_t end{trivia.find('\n', j)};
+        end = end == llvm::StringRef::npos ? trivia.size() : end;
+        Comment(trivia.slice(j, end));
+        j = end;
+      } else if (ch == '/' && j + 1 < trivia.size() && trivia[j + 1] == '*') {
+        std::size_t close{trivia.find("*/", j + 2)};
+        std::size_t end{
+            close == llvm::StringRef::npos ? trivia.size() : close + 2};
+        Comment(trivia.slice(j, end));
+        j = end;
+      } else if (ch == '#') {
+        // A line number directive, which ends with its newline.
+        std::size_t end{trivia.find('\n', j)};
+        j = end == llvm::StringRef::npos ? trivia.size() : end;
+      } else {
+        ++j; // a byte order mark
+      }
+    }
+    if (keepBlankLines_ && newlines_ >= 2 &&
+        !(onNewLine_ && comments_.leading.empty())) {
+      comments_.leading.push_back({});
+    }
+    return comments_;
+  }
+
+private:
+  void Comment(llvm::StringRef text) {
+    text = text.rtrim("\r");
+    if (!seenNewline_) {
+      comments_.trailing.push_back(text);
+    } else {
+      if (keepBlankLines_ && newlines_ >= 2 && !(onNewLine_ && first_)) {
+        comments_.leading.push_back({});
+      }
+      comments_.leading.push_back(text);
+      first_ = false;
+    }
+    newlines_ = 0;
+  }
+
+  bool keepBlankLines_;
+  bool onNewLine_;
+  Comments comments_;
+  bool seenNewline_;
+  unsigned newlines_;
+  bool first_{true};
+};
+
 // `onNewLine` treats the trivia as starting on a line of its own, as at the
 // start of the file, where no blank line is kept before the first comment.
 Comments ParseTrivia(
     llvm::StringRef trivia, bool keepBlankLines, bool onNewLine) {
-  Comments comments;
-  bool seenNewline{onNewLine};
-  unsigned newlines{onNewLine ? 1u : 0u};
-  bool first{true};
-  auto comment{[&](llvm::StringRef text) {
-    text = text.rtrim("\r");
-    if (!seenNewline) {
-      comments.trailing.push_back(text);
-    } else {
-      if (keepBlankLines && newlines >= 2 && !(onNewLine && first)) {
-        comments.leading.push_back({});
-      }
-      comments.leading.push_back(text);
-      first = false;
-    }
-    newlines = 0;
-  }};
-  std::size_t j{0};
-  while (j < trivia.size()) {
-    char ch{trivia[j]};
-    if (ch == '\n') {
-      ++newlines;
-      seenNewline = true;
-      ++j;
-    } else if (IsWhitespace(ch)) {
-      ++j;
-    } else if (ch == '%') {
-      std::size_t end{trivia.find('\n', j)};
-      end = end == llvm::StringRef::npos ? trivia.size() : end;
-      comment(trivia.slice(j, end));
-      j = end;
-    } else if (ch == '/' && j + 1 < trivia.size() && trivia[j + 1] == '*') {
-      std::size_t close{trivia.find("*/", j + 2)};
-      std::size_t end{close == llvm::StringRef::npos ? trivia.size()
-                                                     : close + 2};
-      comment(trivia.slice(j, end));
-      j = end;
-    } else if (ch == '#') {
-      // A line number directive, which ends with its newline.
-      std::size_t end{trivia.find('\n', j)};
-      j = end == llvm::StringRef::npos ? trivia.size() : end;
-    } else {
-      ++j; // a byte order mark
-    }
-  }
-  if (keepBlankLines && newlines >= 2 &&
-      !(onNewLine && comments.leading.empty())) {
-    comments.leading.push_back({});
-  }
-  return comments;
+  return TriviaParser{keepBlankLines, onNewLine}.Parse(trivia);
 }
 
 bool IsGraphicChar(char ch) {
@@ -513,6 +536,7 @@ private:
   template <typename N>
   void Gap(const N &, llvm::ArrayRef<Element>, std::size_t e, bool block,
       unsigned &nests, unsigned &brackets, unsigned &backquotes);
+  bool NestChild(Break);
   template <typename N> bool BeforeChild(const N &, const Child &);
   template <typename N> bool IsBlockChild(const N &, const Child &) const;
   template <typename N>
@@ -783,26 +807,29 @@ bool CanonicalUnparser::IsBlockChild(const N &n, const Child &c) const {
   }
 }
 
+// Begins a nest for a child, broken from its parent by `brk`, and returns
+// true.
+bool CanonicalUnparser::NestChild(Break brk) {
+  doc_.BeginNest(4);
+  Request(brk);
+  return true;
+}
+
 // Starts the layout of a child, and returns whether it began a nest for
 // it.
 template <typename N>
 bool CanonicalUnparser::BeforeChild(const N &n, const Child &c) {
-  auto nest{[&](Break brk) {
-    doc_.BeginNest(4);
-    Request(brk);
-    return true;
-  }};
   if constexpr (isOneOf<N, FactOrRule, DcgRule>) {
     if (c.node == Pointer(n.body)) {
-      return nest(Break::HardLine);
+      return NestChild(Break::HardLine);
     }
   } else if constexpr (std::is_same_v<N, Lambda>) {
     if (c.node == Pointer(n.body) || c.node == Pointer(n.dcgBody)) {
-      return nest(Break::Line);
+      return NestChild(Break::Line);
     }
   } else if constexpr (isIfThenElse<N>) {
     if (c.node == Pointer(n.then)) {
-      return nest(Break::HardLine);
+      return NestChild(Break::HardLine);
     }
     if (c.node == Pointer(n.otherwise)) {
       // else if C then ..., and ; C -> ..., continue the chain.
@@ -814,16 +841,16 @@ bool CanonicalUnparser::BeforeChild(const N &n, const Child &c) {
         Request(Break::Space);
         return false;
       }
-      return nest(Break::HardLine);
+      return NestChild(Break::HardLine);
     }
   } else if constexpr (isDisjunction<N>) {
-    return nest(Break::HardLine);
+    return NestChild(Break::HardLine);
   } else if constexpr (std::is_same_v<N, LoopGoal>) {
     // ( Iterators do
     //     Body
     // )
     if (c.node == Pointer(n.body)) {
-      return nest(Break::HardLine);
+      return NestChild(Break::HardLine);
     }
   }
   return false;

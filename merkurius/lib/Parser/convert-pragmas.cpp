@@ -310,19 +310,19 @@ std::optional<const TablingAttributes *> ConvertTablingAttributes(
     const Term &a{StripParentheses(*element)};
     llvm::StringRef name{FunctorName(a)};
     bool duplicate{false};
-    auto flag{[&](bool &into) {
-      duplicate = into;
-      into = true;
-    }};
     if (llvm::isa<NameTerm>(a) && name == "allow_reset") {
-      flag(attributes.allowReset);
+      duplicate = attributes.allowReset;
+      attributes.allowReset = true;
     } else if (llvm::isa<NameTerm>(a) && name == "statistics") {
-      flag(attributes.statistics);
+      duplicate = attributes.statistics;
+      attributes.statistics = true;
     } else if (llvm::isa<NameTerm>(a) && name == "fast_loose") {
-      flag(attributes.fastLoose);
+      duplicate = attributes.fastLoose;
+      attributes.fastLoose = true;
     } else if (llvm::isa<NameTerm>(a) &&
         name == "disable_warning_if_ignored") {
-      flag(attributes.disableWarningIfIgnored);
+      duplicate = attributes.disableWarningIfIgnored;
+      attributes.disableWarningIfIgnored = true;
       // The manual: loop_check and minimal_model change the program's
       // meaning, so they must not be ignored silently.
       if (method != TablingMethod::Memo) {
@@ -452,7 +452,6 @@ bool IsPragmaToDo(llvm::StringRef name) {
 
 std::optional<Item> PragmaRule::Convert(
     const Term &term, ConvertState &state) const {
-  auto make{[&](auto *node) -> std::optional<Item> { return node; }};
   const Term &t{StripParentheses(term)};
   const Term *body{
       &StripParentheses(*llvm::cast<CompoundTerm>(t).arguments()[0])};
@@ -476,85 +475,81 @@ std::optional<Item> PragmaRule::Convert(
         "only a foreign_type pragma may have 'where' attributes"_err_en_US);
     return std::nullopt;
   }
-  auto count{[&](std::size_t min, std::size_t max) {
-    return CheckArgumentCount(*body, name, args.size(), min, max, state);
-  }};
-  auto arg{[&](std::size_t j) -> const Term & { return *args[j]; }};
 
   if (std::optional<PredPragmaKind> kind{
           FromSnakeName<PredPragmaKind, PredPragmaKind_enumSize>(name)}) {
-    if (!count(1, 1)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 1, 1, state)) {
       return std::nullopt;
     }
-    if (auto pred{Apply(predNameArity, arg(0), state)}) {
-      return make(state.arena.Make<PredPragma>(t.tokens(), *kind, *pred));
+    if (auto pred{Apply(predNameArity, *args[0], state)}) {
+      return state.arena.Make<PredPragma>(t.tokens(), *kind, *pred);
     }
     return std::nullopt;
   }
   if (name == "obsolete" || name == "obsolete_proc") {
-    if (!count(1, 2)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 1, 2, state)) {
       return std::nullopt;
     }
     std::optional<PredSpec> pred;
     if (name == "obsolete") {
-      if (auto converted{Apply(predNameArity, arg(0), state)}) {
+      if (auto converted{Apply(predNameArity, *args[0], state)}) {
         pred = *converted;
       }
-    } else if (auto converted{Apply(procSpec, arg(0), state)}) {
+    } else if (auto converted{Apply(procSpec, *args[0], state)}) {
       pred = *converted;
     }
     llvm::ArrayRef<const NameAndArity *> replaced;
     bool ok{args.size() < 2 ||
-        ConvertOptional(replacements, &arg(1), replaced, state)};
+        ConvertOptional(replacements, args[1], replaced, state)};
     if (!pred || !ok) {
       return std::nullopt;
     }
-    return make(state.arena.Make<ObsoletePragma>(t.tokens(), *pred, replaced));
+    return state.arena.Make<ObsoletePragma>(t.tokens(), *pred, replaced);
   }
   if (name == "type_spec") {
-    if (!count(2, 2)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 2, 2, state)) {
       return std::nullopt;
     }
-    auto pred{Apply(predSpec, arg(0), state)};
-    auto substitution{Apply(commaListOf(TypeSubstitutionRule{}), arg(1), state)};
+    auto pred{Apply(predSpec, *args[0], state)};
+    auto substitution{
+        Apply(commaListOf(TypeSubstitutionRule{}), *args[1], state)};
     if (!pred || !substitution) {
       return std::nullopt;
     }
-    return make(
-        state.arena.Make<TypeSpecPragma>(t.tokens(), *pred, *substitution));
+    return state.arena.Make<TypeSpecPragma>(t.tokens(), *pred, *substitution);
   }
   if (std::optional<TablingMethod> method{
           FromSnakeName<TablingMethod, TablingMethod_enumSize>(name)}) {
-    if (!count(1, 2)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 1, 2, state)) {
       return std::nullopt;
     }
-    auto pred{Apply(predSpec, arg(0), state)};
+    auto pred{Apply(predSpec, *args[0], state)};
     const TablingAttributes *attributes{nullptr};
     bool ok{true};
     if (args.size() == 2) {
-      auto converted{ConvertTablingAttributes(arg(1), *method, state)};
+      auto converted{ConvertTablingAttributes(*args[1], *method, state)};
       ok = converted.has_value();
       attributes = converted.value_or(nullptr);
     }
     if (!pred || !ok) {
       return std::nullopt;
     }
-    return make(state.arena.Make<TablingPragma>(
-        t.tokens(), *method, *pred, attributes));
+    return state.arena.Make<TablingPragma>(
+        t.tokens(), *method, *pred, attributes);
   }
   if (name == "fact_table") {
-    if (!count(2, 2)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 2, 2, state)) {
       return std::nullopt;
     }
-    auto pred{Apply(predNameArity, arg(0), state)};
-    auto file{Apply(expect("a file name", stringLiteral), arg(1), state)};
+    auto pred{Apply(predNameArity, *args[0], state)};
+    auto file{Apply(expect("a file name", stringLiteral), *args[1], state)};
     if (!pred || !file) {
       return std::nullopt;
     }
-    return make(state.arena.Make<FactTablePragma>(t.tokens(), *pred, *file));
+    return state.arena.Make<FactTablePragma>(t.tokens(), *pred, *file);
   }
   if (name == "require_feature_set") {
-    if (!count(1, 1)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 1, 1, state)) {
       return std::nullopt;
     }
     constexpr auto features{expect("a list of features",
@@ -562,31 +557,31 @@ std::optional<Item> PragmaRule::Convert(
             "a feature: 'concurrency', 'single_prec_float', "
             "'double_prec_float', 'memo', 'parallel_conj', 'trailing', "
             "'strict_sequential' or 'conservative_gc'"}))};
-    if (auto converted{Apply(features, arg(0), state)}) {
-      return make(
-          state.arena.Make<RequireFeatureSetPragma>(t.tokens(), *converted));
+    if (auto converted{Apply(features, *args[0], state)}) {
+      return state.arena.Make<RequireFeatureSetPragma>(t.tokens(), *converted);
     }
     return std::nullopt;
   }
   if (name == "source_file") {
-    if (!count(1, 1)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 1, 1, state)) {
       return std::nullopt;
     }
-    if (auto file{Apply(expect("a file name string", stringLiteral), arg(0), state)}) {
-      return make(state.arena.Make<SourceFilePragma>(t.tokens(), *file));
+    if (auto file{Apply(
+            expect("a file name string", stringLiteral), *args[0], state)}) {
+      return state.arena.Make<SourceFilePragma>(t.tokens(), *file);
     }
     return std::nullopt;
   }
 
   // The foreign language interface, whose pragmas begin with the language.
   if (name == "foreign_decl") {
-    if (!count(2, 3)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 2, 3, state)) {
       return std::nullopt;
     }
-    auto lang{Apply(language, arg(0), state)};
+    auto lang{Apply(language, *args[0], state)};
     bool local{false}, ok{true};
     if (args.size() == 3) {
-      const Term &visibility{StripParentheses(arg(1))};
+      const Term &visibility{StripParentheses(*args[1])};
       llvm::StringRef v{
           llvm::isa<NameTerm>(visibility) ? FunctorName(visibility) : ""};
       local = v == "local";
@@ -595,30 +590,29 @@ std::optional<Item> PragmaRule::Convert(
         ok = false;
       }
     }
-    auto code{ConvertForeignCode(arg(args.size() - 1), state)};
+    auto code{ConvertForeignCode(*args[args.size() - 1], state)};
     if (!lang || !ok || !code) {
       return std::nullopt;
     }
-    return make(
-        state.arena.Make<ForeignDeclPragma>(t.tokens(), *lang, local, *code));
+    return state.arena.Make<ForeignDeclPragma>(t.tokens(), *lang, local, *code);
   }
   if (name == "foreign_code") {
-    if (!count(2, 2)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 2, 2, state)) {
       return std::nullopt;
     }
-    auto lang{Apply(language, arg(0), state)};
-    auto code{ConvertForeignCode(arg(1), state)};
+    auto lang{Apply(language, *args[0], state)};
+    auto code{ConvertForeignCode(*args[1], state)};
     if (!lang || !code) {
       return std::nullopt;
     }
-    return make(state.arena.Make<ForeignCodePragma>(t.tokens(), *lang, *code));
+    return state.arena.Make<ForeignCodePragma>(t.tokens(), *lang, *code);
   }
   if (name == "foreign_proc") {
-    if (!count(4, 4)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 4, 4, state)) {
       return std::nullopt;
     }
-    auto lang{Apply(language, arg(0), state)};
-    const Term *head{&StripParentheses(arg(1))};
+    auto lang{Apply(language, *args[0], state)};
+    const Term *head{&StripParentheses(*args[1])};
     const Term *resultTerm{nullptr};
     if (const CompoundTerm * equals{AsCompound(*head, "=", 2)}) {
       head = &StripParentheses(*equals->arguments()[0]);
@@ -662,7 +656,7 @@ std::optional<Item> PragmaRule::Convert(
       for (std::size_t j{0}; j < names.size(); ++j) {
         if (names[j] != "_" &&
             llvm::is_contained(llvm::ArrayRef(names).take_front(j), names[j])) {
-          state.messages.Say(GetSource(arg(1), state.tokens),
+          state.messages.Say(GetSource(*args[1], state.tokens),
               "the variable %s appears more than once"_err_en_US,
               names[j].str());
           ok = false;
@@ -670,29 +664,30 @@ std::optional<Item> PragmaRule::Convert(
         }
       }
     }
-    auto attributes{Apply(foreignProcAttributes, arg(2), state)};
-    ok &= attributes && CheckForeignProcAttributes(arg(2), *attributes, state);
-    auto code{Apply(expect("the foreign code, a string", stringLiteral), arg(3),
-        state)};
+    auto attributes{Apply(foreignProcAttributes, *args[2], state)};
+    ok &=
+        attributes && CheckForeignProcAttributes(*args[2], *attributes, state);
+    auto code{Apply(
+        expect("the foreign code, a string", stringLiteral), *args[3], state)};
     if (!lang || !ok || !code) {
       return std::nullopt;
     }
-    return make(state.arena.Make<ForeignProcPragma>(t.tokens(), *lang,
+    return state.arena.Make<ForeignProcPragma>(t.tokens(), *lang,
         result ? PredOrFunc::Function : PredOrFunc::Predicate, procName,
         state.arena.SaveArray(llvm::ArrayRef<const ForeignProcArg *>{procArgs}),
         result, *attributes,
         state.arena.Make<ForeignCode>(
-            StripParentheses(arg(3)).tokens(), false, *code)));
+            StripParentheses(*args[3]).tokens(), false, *code));
   }
   if (name == "foreign_type") {
-    if (!count(3, 4)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 3, 4, state)) {
       return std::nullopt;
     }
-    auto lang{Apply(language, arg(0), state)};
-    auto head{Apply(typeHead, arg(1), state)};
+    auto lang{Apply(language, *args[0], state)};
+    auto head{Apply(typeHead, *args[1], state)};
     auto descriptor{
-        Apply(expect("a foreign type descriptor string", stringLiteral), arg(2),
-            state)};
+        Apply(expect("a foreign type descriptor string", stringLiteral),
+            *args[2], state)};
     llvm::ArrayRef<ForeignTypeAssertion> assertions;
     bool ok{args.size() < 4 ||
         ConvertOptional(expect("a list of assertions",
@@ -700,57 +695,57 @@ std::optional<Item> PragmaRule::Convert(
                                 ForeignTypeAssertion_enumSize>{
                                 "'can_pass_as_mercury_type', "
                                 "'word_aligned_pointer' or 'stable'"})),
-            &arg(3), assertions, state)};
+            args[3], assertions, state)};
     const TypeAttributes *attributes{nullptr};
     ok &= ConvertOptional(typeAttributes, where, attributes, state);
     if (!lang || !head || !descriptor || !ok) {
       return std::nullopt;
     }
     auto [typeName, parameters]{*head};
-    return make(state.arena.Make<ForeignTypePragma>(t.tokens(), *lang,
-        typeName, parameters, *descriptor, assertions, attributes));
+    return state.arena.Make<ForeignTypePragma>(t.tokens(), *lang, typeName,
+        parameters, *descriptor, assertions, attributes);
   }
   if (name == "foreign_enum") {
-    if (!count(3, 3)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 3, 3, state)) {
       return std::nullopt;
     }
-    auto lang{Apply(language, arg(0), state)};
-    auto typeName{Apply(typeNameArity, arg(1), state)};
-    auto values{Apply(enumValues, arg(2), state)};
+    auto lang{Apply(language, *args[0], state)};
+    auto typeName{Apply(typeNameArity, *args[1], state)};
+    auto values{Apply(enumValues, *args[2], state)};
     if (!lang || !typeName || !values) {
       return std::nullopt;
     }
-    return make(state.arena.Make<ForeignEnumPragma>(
-        t.tokens(), *lang, *typeName, *values));
+    return state.arena.Make<ForeignEnumPragma>(
+        t.tokens(), *lang, *typeName, *values);
   }
   if (name == "foreign_export_enum") {
-    if (!count(2, 4)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 2, 4, state)) {
       return std::nullopt;
     }
-    auto lang{Apply(language, arg(0), state)};
-    auto typeName{Apply(typeNameArity, arg(1), state)};
+    auto lang{Apply(language, *args[0], state)};
+    auto typeName{Apply(typeNameArity, *args[1], state)};
     std::optional<llvm::StringRef> prefix;
     bool uppercase{false}, ok{true};
     if (args.size() >= 3) {
-      ok = ConvertExportEnumAttributes(arg(2), prefix, uppercase, state);
+      ok = ConvertExportEnumAttributes(*args[2], prefix, uppercase, state);
     }
     llvm::ArrayRef<const ForeignEnumValue *> overrides;
     if (args.size() == 4) {
-      ok &= ConvertOptional(enumValues, &arg(3), overrides, state);
+      ok &= ConvertOptional(enumValues, args[3], overrides, state);
     }
     if (!lang || !typeName || !ok) {
       return std::nullopt;
     }
-    return make(state.arena.Make<ForeignExportEnumPragma>(
-        t.tokens(), *lang, *typeName, prefix, uppercase, overrides));
+    return state.arena.Make<ForeignExportEnumPragma>(
+        t.tokens(), *lang, *typeName, prefix, uppercase, overrides);
   }
   if (name == "foreign_export") {
-    if (!count(3, 3)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 3, 3, state)) {
       return std::nullopt;
     }
-    auto lang{Apply(language, arg(0), state)};
-    auto proc{Apply(procSpec, arg(1), state)};
-    const Term &nameTerm{StripParentheses(arg(2))};
+    auto lang{Apply(language, *args[0], state)};
+    auto proc{Apply(procSpec, *args[1], state)};
+    const Term &nameTerm{StripParentheses(*args[2])};
     const auto *foreignName{llvm::dyn_cast<StringTerm>(&nameTerm)};
     if (!foreignName || foreignName->value().empty()) {
       // mmc: "expected a non-empty string for the foreign language name".
@@ -759,20 +754,20 @@ std::optional<Item> PragmaRule::Convert(
     if (!lang || !proc || !foreignName || foreignName->value().empty()) {
       return std::nullopt;
     }
-    return make(state.arena.Make<ForeignExportPragma>(t.tokens(), *lang,
-        *proc, state.arena.Save(foreignName->value())));
+    return state.arena.Make<ForeignExportPragma>(
+        t.tokens(), *lang, *proc, state.arena.Save(foreignName->value()));
   }
   if (name == "foreign_import_module") {
-    if (!count(2, 2)) {
+    if (!CheckArgumentCount(*body, name, args.size(), 2, 2, state)) {
       return std::nullopt;
     }
-    auto lang{Apply(language, arg(0), state)};
-    auto module{Apply(expect("a module name", symName), arg(1), state)};
+    auto lang{Apply(language, *args[0], state)};
+    auto module{Apply(expect("a module name", symName), *args[1], state)};
     if (!lang || !module) {
       return std::nullopt;
     }
-    return make(state.arena.Make<ForeignImportModulePragma>(
-        t.tokens(), *lang, *module));
+    return state.arena.Make<ForeignImportModulePragma>(
+        t.tokens(), *lang, *module);
   }
   if (IsPragmaToDo(name)) {
     state.messages.Say(GetSource(t, state.tokens),

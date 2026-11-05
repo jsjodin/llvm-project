@@ -60,7 +60,9 @@ a constant, ahead of a size it does not depend on.
 | `Semantics/resolve-names.cpp` | 8 | Done, in 2 stages: declaring names, then looking them up and resolving goals |
 | `Semantics/types.cpp` | 6 | Done: the walks over a type, and printing a type's arguments |
 | `Parser/convert.cpp` | 5 | Done: a bound inst's functors, a declaration's layers and operators, and a constructor's built-in name |
-| The other 14 files in `lib/` and `runtime/` | 30 | Not started; the largest are `unparse-canonical.cpp` and `convert-pragmas.cpp` (4 each) |
+| `Parser/unparse-canonical.cpp` | 4 | Done, with `convert-pragmas.cpp`: rendering a document (`LineWriter`), parsing trivia (`TriviaParser`) and nesting a child |
+| `Parser/convert-pragmas.cpp` | 4 | Done, with `unparse-canonical.cpp`: four short wrappers, replaced by what they wrapped |
+| The other 12 files in `lib/` and `runtime/` | 22 | Not started. The rest go in groups, with one long run (sweeps, random programs, fuzzer) each: the rest of the parser, then `semantic-form.cpp`, `check-uniqueness.cpp` and `check-purity.cpp`, then `FrontendActions.cpp`, `MerkDialect.cpp` and `runtime/write.cpp` |
 
 The unit tests' few are left unless they turn out to get in the way.
 
