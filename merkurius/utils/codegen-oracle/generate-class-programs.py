@@ -11,7 +11,9 @@ element's type, and for boxes, with or without one. Polymorphic predicates
 call methods, superclasses' methods and each other at the same type and at
 types built from it, compare values and print them, call methods at instances
 known from their own dictionary, and main calls them and methods at types
-without type variables, where the instance is known.
+without type variables, where the instance is known. Existentially typed
+predicates give values of types they choose, with a constraint or without, for
+callers to pass on, build lists of, compare and print.
 
 Nothing here can be chosen by mmc and merkc differently: values are printed
 with io.write, and the programs avoid what merkc does not compile yet (the
@@ -206,7 +208,34 @@ class Generator:
             cls = rng.randrange(n)
             self.poly(i, cls, parents[cls], polys)
             polys.append((i, cls))
+        # Existentially typed predicates and functions: a constraint's types are
+        # type constructors, since mmc mishandles a variable inside a type (the
+        # design document's register).
+        gives = []
+        for g in range(rng.randint(2, 4)):
+            cls = rng.randrange(n)
+            base, values, _, _ = rng.choice(BASES)
+            value = rng.choice(values)
+            self.emit(f":- some [T] pred give{g}(int::in, T::out) is det => c{cls}(T).")
+            self.emit(f"give{g}(_, {value} : {base}).")
+            self.emit(f":- some [T] pred pass{g}(int::in, T::out) is det => c{cls}(T).")
+            self.emit(f"pass{g}(N, X) :- give{g}(N, X).")
+            self.emit(f":- some [T] func free{g}(int) = T.")
+            self.emit(f"free{g}(_) = {value} : {base}.")
+            gives.append((g, cls))
         calls = []
+        for g, cls in gives:
+            for kind in ["give", "pass"]:
+                v = f"{kind.upper()}{g}"
+                calls.append(f"{kind}{g}(1, {v})")
+                calls.append(f"io.write_int(val{cls}({v}), !IO), io.write({v}, !IO), io.nl(!IO)")
+                calls.append(f"bump{cls}(2, {v}, {v}B), io.write({v}B, !IO), io.nl(!IO)")
+                calls.append(f"io.write_int(val{cls}([{v}, {v}B]), !IO), io.nl(!IO)")
+                calls.append(f"compare(O{v}, {v}, {v}B), io.write(O{v}, !IO), io.nl(!IO)")
+                for i, c in polys:
+                    if c == cls and rng.random() < 0.5:
+                        calls.append(f"show{i}(0, {v}, !IO)")
+            calls.append(f"F{g} = free{g}(1), io.write(F{g}, !IO), io.write([F{g}], !IO), io.nl(!IO)")
         for i, cls in polys:
             for base, values, _, _ in BASES:
                 if rng.random() < 0.6:
