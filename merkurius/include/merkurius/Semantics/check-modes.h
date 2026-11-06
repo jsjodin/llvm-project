@@ -116,8 +116,7 @@ struct ClauseModes {
 
 // Why a procedure's clauses were not checked: they use what mode analysis
 // does not check yet, or their predicate has errors of other kinds.
-ENUM_CLASS(Unchecked, None, TypeErrors, ModeSpecificClauses,
-    ParallelConjunction, FieldClosure, Scope, Try, Atomic, Loop,
+ENUM_CLASS(Unchecked, None, TypeErrors, ParallelConjunction, FieldClosure, Scope, Try, Atomic, Loop,
     InstParameters, InferredModes)
 
 // An instance method's clauses, as checked in one of the method's modes.
@@ -198,6 +197,7 @@ private:
   std::deque<ClauseTypes> clauseTypes_;
   std::deque<Unify> unifies_;
   std::deque<Conj> conjs_;
+  std::deque<Disj> disjs_;
 };
 
 // Prints a checked clause's goals in execution order, each with its

@@ -300,7 +300,8 @@ private:
       const parser::ModedTerm *result, Goals &goals);
   void DcgHead(TokenRange);
   const ClauseForm *Finish(TokenRange, parser::PredOrFunc,
-      const parser::SymName *, Goals &goals, bool modeSpecific = false);
+      const parser::SymName *, Goals &goals,
+      llvm::ArrayRef<const parser::Mode *> modes = {});
   // Fills the head's slots for the state variables' last versions.
   void FillLasts(Goals &goals);
   const Lambda *DesugarLambda(const parser::Lambda &);
@@ -1312,14 +1313,14 @@ void ClauseDesugarer::DcgHead(TokenRange range) {
 
 const ClauseForm *ClauseDesugarer::Finish(TokenRange range,
     parser::PredOrFunc kind, const parser::SymName *name, Goals &goals,
-    bool modeSpecific) {
+    llvm::ArrayRef<const parser::Mode *> modes) {
   FillLasts(goals);
   Goal body{Conjoin(range, goals)};
   return Make<ClauseForm>(range, kind, name,
       Save(llvm::ArrayRef<VarId>{head_}), body,
       Save(llvm::ArrayRef<VarInfo>{vars_}),
       Save(llvm::ArrayRef<TypeQualification>{typeQualifications_}), goals_,
-      llvm::ArrayRef<llvm::ArrayRef<VarId>>{}, modeSpecific);
+      llvm::ArrayRef<llvm::ArrayRef<VarId>>{}, modes);
 }
 
 void ClauseDesugarer::FillLasts(Goals &goals) {
@@ -1758,9 +1759,15 @@ std::optional<const ClauseForm *> ClauseDesugarer::Desugar(
   if (!ok_) {
     return std::nullopt;
   }
-  bool modeSpecific{llvm::any_of(arguments,
-      [](const parser::ModedTerm *argument) { return argument->mode; })};
-  return Finish(clause.tokens, clause.kind, clause.name, goals, modeSpecific);
+  // Either every argument has a mode or none has, which parsing checks.
+  llvm::SmallVector<const parser::Mode *, 4> modes;
+  if (!arguments.empty() && arguments.front()->mode) {
+    for (const parser::ModedTerm *argument : arguments) {
+      modes.push_back(&*argument->mode);
+    }
+  }
+  return Finish(clause.tokens, clause.kind, clause.name, goals,
+      Save(llvm::ArrayRef<const parser::Mode *>{modes}));
 }
 
 // Head --> Body is Head(V_in, V_out) :- Body, with V_in and V_out the
@@ -1799,6 +1806,36 @@ const ClauseForm *ClauseDesugarer::Desugar(const parser::MethodByName &method) {
   return Finish(method.tokens, method.kind, method.method->name, goals);
 }
 
+// An instance's clause cannot be for one mode, as in mmc, which reports
+// each argument as a use of an undefined function ::/2. The reference
+// manual ("Instance declarations") says an instance's clauses are like a
+// predicate's, but its rule for clauses for one mode cannot be followed
+// there: such clauses make a predicate impure unless a
+// promise_equivalent_clauses or promise_pure pragma names it, and no
+// pragma can name one instance's method. The error is kept, as it rejects
+// nothing that cannot be written otherwise: `pred(m/N) is p` in the
+// instance, with p's clauses for each mode and the pragma for p (see the
+// register, "Clauses for one mode in an instance").
+void ModesInInstance(const parser::FactOrRule &rule,
+    const parser::TokenSequence &tokens, parser::Messages &messages) {
+  llvm::SmallVector<const parser::ModedTerm *, 4> arguments{
+      rule.arguments.begin(), rule.arguments.end()};
+  if (rule.result) {
+    arguments.push_back(rule.result);
+  }
+  for (const parser::ModedTerm *argument : arguments) {
+    if (argument->mode) {
+      // mmc: "in argument 1 of clause head: error: undefined symbol
+      // `::'/2."
+      messages.Say(parser::CharBlock{
+                       tokens.tokens[argument->tokens.first].spelling.begin(),
+                       tokens.tokens[argument->tokens.last].spelling.end()},
+          "the clauses of an instance's methods cannot have modes"_err_en_US);
+      return;
+    }
+  }
+}
+
 } // namespace
 
 const SemanticForm &Desugar(const parser::ParseTree &tree,
@@ -1820,6 +1857,7 @@ const SemanticForm &Desugar(const parser::ParseTree &tree,
                 },
                 [&](const parser::FactOrRule *rule) {
                   clause = desugarer.Desugar(*rule);
+                  ModesInInstance(*rule, tokens, messages);
                 },
                 [&](const parser::DcgRule *rule) {
                   clause = desugarer.Desugar(*rule);
