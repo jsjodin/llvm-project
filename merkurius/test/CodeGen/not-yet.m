@@ -33,13 +33,6 @@ map_size(_) = [].
 % CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for values of type not_yet.set
 equal(set(X), set(X)).
 
-% A condition with more than one solution, whose then part runs for each
-% of them until it succeeds.
-:- pred q(int::in) is semidet.
-q(X) :-
-    ( if ( Y = 1 ; Y = 2 ), Y > X then Y > 1 else fail ).
-% CHECK: not-yet.m:[[@LINE-1]]:10: error: not yet implemented: code generation for conditions with more than one solution
-
 :- some [T] pred r(T::out) is det.
 % CHECK: not-yet.m:[[@LINE-1]]:18: error: not yet implemented: code generation for foreign_procs with existential types
 :- pragma foreign_proc("C", r(X::out), [will_not_call_mercury, promise_pure], "X = 0;").

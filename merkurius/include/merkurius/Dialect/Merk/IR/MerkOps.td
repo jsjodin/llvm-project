@@ -71,7 +71,7 @@ def Merk_ProcOp : Merk_Op<"proc", [
 
 def Merk_SucceedOp : Merk_Op<"succeed", [
     Pure, ParentOneOf<["ProcOp", "IteOp", "SwitchOp", "DisjOp", "NondetCallOp",
-        "EachOp"]>,
+        "EachOp", "SoftIteOp"]>,
     ReturnLike, Terminator
   ]> {
   let summary = "produce the procedure's solution";
@@ -892,6 +892,43 @@ def Merk_EachOp : Merk_Op<"each", [RecursiveMemoryEffects, Terminator]> {
   let assemblyFormat = "$generator `then` $continuation attr-dict";
   let skipDefaultBuilders = 1;
   let builders = [OpBuilder<(ins), [{
+    $_state.addRegion();
+    $_state.addRegion();
+  }]>];
+}
+
+def Merk_SoftIteOp : Merk_Op<"soft_ite", [RecursiveMemoryEffects, Terminator]> {
+  let summary = "if-then-else whose condition has more than one solution";
+  let description = [{
+    Runs its condition, a goal with more than one solution, and its then
+    part for each solution that the condition gives with `merk.solution`,
+    with its values as the then part's arguments; if the condition gives
+    none, it runs its else part instead. The then part and the else part
+    end as the code around the operation does. Once the condition has given
+    a solution, the else part is not run, even if the then part fails: the
+    if-then-else of a condition with more than one solution, a soft cut.
+
+    ```mlir
+    merk.soft_ite {
+      merk.nondet_call @m.member_2_0(%l : !merk.term<"list.list(int)">) {
+      ^bb0(%x: i64):
+        merk.solution %x : i64
+      }
+    } then {
+    ^bb0(%x: i64):
+      ...
+    } else {
+      ...
+    }
+    ```
+  }];
+  let regions = (region SizedRegion<1>:$condition, SizedRegion<1>:$thenRegion,
+      SizedRegion<1>:$elseRegion);
+  let assemblyFormat =
+      "$condition `then` $thenRegion `else` $elseRegion attr-dict";
+  let skipDefaultBuilders = 1;
+  let builders = [OpBuilder<(ins), [{
+    $_state.addRegion();
     $_state.addRegion();
     $_state.addRegion();
   }]>];
