@@ -19,6 +19,7 @@
 #include <iterator>
 #include <set>
 #include <sstream>
+#include <thread>
 #include <unordered_set>
 
 namespace fuzzer {
@@ -427,6 +428,83 @@ WriteNewControlFile(const std::string &CFPath,
   return FilesToUse.size();
 }
 
+// Executes the inner process on the control file CFPath until it passes, or
+// NumAttempts times. Every inner process should execute at least one input.
+static void RunInnerMerge(const std::vector<std::string> &Args,
+                          const std::string &CFPath, size_t NumAttempts,
+                          bool V, bool IsSetCoverMerge) {
+  Command BaseCmd(Args);
+  BaseCmd.removeFlag("merge");
+  BaseCmd.removeFlag("set_cover_merge");
+  BaseCmd.removeFlag("fork");
+  BaseCmd.removeFlag("collect_data_flow");
+  for (size_t Attempt = 1; Attempt <= NumAttempts; Attempt++) {
+    Fuzzer::MaybeExitGracefully();
+    VPrintf(V, "MERGE-OUTER: attempt %zd\n", Attempt);
+    Command Cmd(BaseCmd);
+    Cmd.addFlag("merge_control_file", CFPath);
+    // If we are going to use the set cover implementation for
+    // minimization add the merge_inner=2 internal flag.
+    Cmd.addFlag("merge_inner", IsSetCoverMerge ? "2" : "1");
+    if (!V) {
+      Cmd.setOutputFile(getDevNull());
+      Cmd.combineOutAndErr();
+    }
+    auto ExitCode = ExecuteCommand(Cmd);
+    if (!ExitCode) {
+      VPrintf(V, "MERGE-OUTER: successful in %zd attempt(s)\n", Attempt);
+      break;
+    }
+  }
+}
+
+// Merkurius (local, not upstream): merges Corpus as CrashResistantMerge
+// merges a new corpus into an empty one, but in NumShards inner processes at
+// once, each over its share of the inputs, with a control file of its own in
+// TempDir. An inner process records for each input only the features that no
+// input before it in that process had, so the shards together record every
+// feature, and one greedy pass over all their inputs then picks the files.
+void ParallelCrashResistantMerge(const std::vector<std::string> &Args,
+                                 const std::vector<SizedFile> &Corpus,
+                                 size_t NumShards, const std::string &TempDir,
+                                 std::vector<std::string> *NewFiles,
+                                 std::set<uint32_t> *NewFeatures,
+                                 std::set<uint32_t> *NewCov) {
+  NumShards = std::min(NumShards, Corpus.size());
+  if (NumShards <= 1) {
+    CrashResistantMerge(Args, {}, Corpus, NewFiles, {}, NewFeatures, {},
+                        NewCov, DirPlusFile(TempDir, "merge.txt"),
+                        /*Verbose=*/false, /*IsSetCoverMerge=*/false);
+    return;
+  }
+  // Corpus is sorted by size, so dealing it out in turn gives each shard
+  // inputs of every size.
+  std::vector<std::vector<SizedFile>> Shards(NumShards);
+  for (size_t I = 0; I < Corpus.size(); I++)
+    Shards[I % NumShards].push_back(Corpus[I]);
+  std::vector<std::string> CFPaths(NumShards);
+  std::vector<std::thread> Threads;
+  for (size_t S = 0; S < NumShards; S++) {
+    CFPaths[S] = DirPlusFile(TempDir, "merge-" + std::to_string(S) + ".txt");
+    size_t NumAttempts = WriteNewControlFile(CFPaths[S], {}, Shards[S], {});
+    Threads.emplace_back(RunInnerMerge, std::cref(Args), std::cref(CFPaths[S]),
+                         NumAttempts, /*V=*/false, /*IsSetCoverMerge=*/false);
+  }
+  for (auto &T : Threads)
+    T.join();
+  Merger All;
+  for (auto &CFPath : CFPaths) {
+    Merger M;
+    std::ifstream IF(CFPath);
+    M.ParseOrExit(IF, /*ParseCoverage=*/true);
+    IF.close();
+    RemoveFile(CFPath);
+    All.Files.insert(All.Files.end(), M.Files.begin(), M.Files.end());
+  }
+  All.NumFilesInFirstCorpus = 0;
+  All.Merge({}, NewFeatures, {}, NewCov, NewFiles);
+}
+
 // Outer process. Does not call the target code and thus should not fail.
 void CrashResistantMerge(const std::vector<std::string> &Args,
                          const std::vector<SizedFile> &OldCorpus,
@@ -488,31 +566,7 @@ void CrashResistantMerge(const std::vector<std::string> &Args,
     NumAttempts = WriteNewControlFile(CFPath, OldCorpus, NewCorpus, KnownFiles);
   }
 
-  // Execute the inner process until it passes.
-  // Every inner process should execute at least one input.
-  Command BaseCmd(Args);
-  BaseCmd.removeFlag("merge");
-  BaseCmd.removeFlag("set_cover_merge");
-  BaseCmd.removeFlag("fork");
-  BaseCmd.removeFlag("collect_data_flow");
-  for (size_t Attempt = 1; Attempt <= NumAttempts; Attempt++) {
-    Fuzzer::MaybeExitGracefully();
-    VPrintf(V, "MERGE-OUTER: attempt %zd\n", Attempt);
-    Command Cmd(BaseCmd);
-    Cmd.addFlag("merge_control_file", CFPath);
-    // If we are going to use the set cover implementation for
-    // minimization add the merge_inner=2 internal flag.
-    Cmd.addFlag("merge_inner", IsSetCoverMerge ? "2" : "1");
-    if (!V) {
-      Cmd.setOutputFile(getDevNull());
-      Cmd.combineOutAndErr();
-    }
-    auto ExitCode = ExecuteCommand(Cmd);
-    if (!ExitCode) {
-      VPrintf(V, "MERGE-OUTER: successful in %zd attempt(s)\n", Attempt);
-      break;
-    }
-  }
+  RunInnerMerge(Args, CFPath, NumAttempts, V, IsSetCoverMerge);
   // Read the control file and do the merge.
   Merger M;
   std::ifstream IF(CFPath);
