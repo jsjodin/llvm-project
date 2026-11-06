@@ -6,7 +6,10 @@
 % that asks for less, `ground >> clobbered` for `di`; one that gives less,
 % `out` for `uo`, or clobbers what is expected to stay ground, is not, nor
 % is one that asks for more, `di` for `in`. A call with several modes
-% takes the first whose closure inst matches.
+% takes the first whose closure inst matches. A function's `ground` is the
+% default function inst, `func(in, ...) = out is det`, matched by the same
+% rule: a function closure whose result is `uo` is accepted for it, and one
+% that takes `di` is not.
 %
 % RUN: not merkc -fc1 -fdebug-dump-modes %s 2>%t.err >/dev/null
 % RUN: FileCheck --implicit-check-not=error: %s < %t.err
@@ -30,6 +33,8 @@
 :- pred gives_more(t::in, t::out) is det.
 :- pred no_mode_fits(t::di, t::uo) is det.
 :- pred no_mode_fits_named(t::di, t::uo) is det.
+:- pred default_unique_result(t::in, t::out) is det.
+:- pred default_asks_more(t::in, t::out) is det.
 :- implementation.
 :- pred app(pred(t, t)::in(pred(di, uo) is det), t::di, t::uo) is det.
 app(P, T0, T) :- P(T0, T).
@@ -46,6 +51,14 @@ app_clobbered(P, T0, T) :- P(T0, _), T = T0.
 :- mode two(in(pred(in, out) is det), in, out) is det.
 :- mode two(in(pred(di, uo) is det), di, uo) is det.
 two(P, T0, T) :- P(T0, T).
+:- func app_default(func(t) = t, t) = t.
+app_default(F, T) = F(T).
+:- func fresh(t) = t.
+:- mode fresh(in) = uo is det.
+fresh(_) = t(1).
+:- func reuse(t) = t.
+:- mode reuse(di) = uo is det.
+reuse(T) = T.
 
 same(T0, T) :- app(pred(A::di, B::uo) is det :- B = A, T0, T).
 named(T0, T) :- app(pred(A::di(ut), B::out(ut)) is det :- B = A, T0, T).
@@ -68,3 +81,6 @@ no_mode_fits(T0, T) :- two(pred(B0::(ground >> clobbered), B::(free >> ground)) 
 % CHECK-DAG: closure-variance.m:[[@LINE-1]]:24: error: in the clause for no_mode_fits(di, uo): mode error in the call to pred closure_variance.two/3: the arguments V_2, T0, T have insts /* unique */ (pred(di(ground), out) is det), unique, free, which match none of its modes
 no_mode_fits_named(T0, T) :- P = (pred(B0::di, B::out) is det :- B = B0), two(P, T0, T).
 % CHECK-DAG: closure-variance.m:[[@LINE-1]]:75: error: in the clause for no_mode_fits_named(di, uo): mode error in the call to pred closure_variance.two/3: the arguments P, T0, T have insts /* unique */ (pred(di, out) is det), unique, free, which match none of its modes
+default_unique_result(T0, T) :- T = app_default(fresh, T0).
+default_asks_more(T0, T) :- T = app_default(reuse, T0).
+% CHECK-DAG: closure-variance.m:[[@LINE-1]]:33: error: in the clause for default_asks_more(in, out): mode error in argument 1 of the call to func closure_variance.app_default/2: V_2 has inst /* unique */ (func(di) = uo is det), but (func(in) = out is det) is expected
