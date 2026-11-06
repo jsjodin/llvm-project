@@ -107,12 +107,12 @@ private:
       os_ << ')';
     }
   }
+  void Types(llvm::ArrayRef<parser::Type> types) {
+    llvm::interleave(
+        types, os_, [&](const parser::Type &t) { Type(t); }, ", ");
+  }
   // A type as written, except that a higher-order type prints as its kind.
   void Type(const parser::Type &type) {
-    auto types{[&](llvm::ArrayRef<parser::Type> types) {
-      llvm::interleave(
-          types, os_, [&](const parser::Type &t) { Type(t); }, ", ");
-    }};
     std::visit(
         common::visitors{
             [&](const parser::TypeVar *var) { var->PrintInline(os_); },
@@ -120,13 +120,13 @@ private:
               named->name->PrintInline(os_);
               if (!named->arguments.empty()) {
                 os_ << '(';
-                types(named->arguments);
+                Types(named->arguments);
                 os_ << ')';
               }
             },
             [&](const parser::TupleType *tuple) {
               os_ << '{';
-              types(tuple->elements);
+              Types(tuple->elements);
               os_ << '}';
             },
             [&](const parser::HigherOrderType *) {
@@ -160,6 +160,19 @@ private:
     if (newline) {
       os_ << '\n';
     }
+  }
+  // A try's catch or catch_any, at the depth of the try.
+  void CatchBranch(const Catch &c, llvm::StringRef kind, int depth) {
+    Label(kind, depth + 1, false);
+    os_ << ' ';
+    Var(c.exception);
+    os_ << '\n';
+    const auto *pattern{std::get_if<const Conj *>(&c.pattern)};
+    if (!pattern || !(*pattern)->goals.empty()) {
+      Label("match", depth + 2);
+      Goal(c.pattern, depth + 3);
+    }
+    Goal(c.goal, depth + 2);
   }
   void Goal(const semantics::Goal &goal, int depth) {
     std::visit(
@@ -245,23 +258,11 @@ private:
                 Label("else", depth + 1);
                 Goal(*t->otherwise, depth + 2);
               }
-              auto branch{[&](const Catch &c, llvm::StringRef kind) {
-                Label(kind, depth + 1, false);
-                os_ << ' ';
-                Var(c.exception);
-                os_ << '\n';
-                const auto *pattern{std::get_if<const Conj *>(&c.pattern)};
-                if (!pattern || !(*pattern)->goals.empty()) {
-                  Label("match", depth + 2);
-                  Goal(c.pattern, depth + 3);
-                }
-                Goal(c.goal, depth + 2);
-              }};
               for (const Catch &c : t->catches) {
-                branch(c, "catch");
+                CatchBranch(c, "catch", depth);
               }
               if (t->catchAny) {
-                branch(*t->catchAny, "catch_any");
+                CatchBranch(*t->catchAny, "catch_any", depth);
               }
             },
             [&](const Atomic *atomic) {
@@ -370,6 +371,14 @@ private:
       break;
     }
   }
+  // A lambda's argument, with its mode if it has one: X::in.
+  void LambdaArgument(const semantics::Lambda &lambda, std::size_t j) {
+    Var(lambda.arguments[j]);
+    if (lambda.modes[j]) {
+      os_ << "::";
+      Mode(*lambda.modes[j]);
+    }
+  }
   // pred(X::in, Y::out) is det, with the body on the lines after.
   void Lambda(const semantics::Lambda &lambda) {
     if (lambda.purity != parser::Purity::Pure) {
@@ -378,26 +387,19 @@ private:
     bool function{lambda.kind == parser::PredOrFunc::Function};
     os_ << (lambda.any ? "any_" : "") << (function ? "func" : "pred");
     std::size_t count{lambda.arguments.size() - (function ? 1 : 0)};
-    auto argument{[&](std::size_t j) {
-      Var(lambda.arguments[j]);
-      if (lambda.modes[j]) {
-        os_ << "::";
-        Mode(*lambda.modes[j]);
-      }
-    }};
     if (count > 0) {
       os_ << '(';
       for (std::size_t j{0}; j < count; ++j) {
         if (j > 0) {
           os_ << ", ";
         }
-        argument(j);
+        LambdaArgument(lambda, j);
       }
       os_ << ')';
     }
     if (function) {
       os_ << " = (";
-      argument(count);
+      LambdaArgument(lambda, count);
       os_ << ')';
     }
     if (lambda.determinism) {
