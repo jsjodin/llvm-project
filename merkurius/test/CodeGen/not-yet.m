@@ -43,3 +43,9 @@ w(X) = pow(X, 3).
 % CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for multi procedures
 u(1).
 u(2).
+
+% An existentially quantified type variable inside an argument's type.
+:- type exbox ---> some [T] exbox(list(T)).
+:- func exlength(exbox) = int.
+% CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for values of type not_yet.exbox
+exlength(exbox(L)) = list.length(L).
