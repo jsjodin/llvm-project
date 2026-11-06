@@ -152,6 +152,31 @@ LLVM and Flang are licensed, like this project, under Apache 2.0 with the LLVM e
 
 This is an engineering position, not legal advice.
 
+## Coding conventions
+
+Code follows Flang's style, formatted by the repository's `.clang-format`, with these rules of our own.
+
+**Functions, not named local lambdas.** A function's body should read without the implementations of helpers in the middle of it, and a helper should say what it uses. A named local lambda does neither: what it captures is state it imports, much as a global is, and it cannot be used anywhere else, which also hides helpers that do the same job.
+
+- **A static function** if it needs no generator or checker state, and a member function if it does. Names have Flang's leading capital.
+- **What it uses is a parameter.** `failed_` and the like stay members, since they are the class's own state already.
+- **A lambda stays as an argument** to a higher-order function, such as `llvm::all_of`, written at the call. One that would be named only to be passed on is written at the call too, or is a function if it is long.
+- **No short wrapper** where the call it wraps reads as well: a lambda for `IntegerConstant(i64, value, loc)` is that call.
+- **A struct for a long list.** A helper that uses many of its caller's locals takes them in a struct the caller fills in, as `ParallelLoop` in MLIRGen, or is a member of a small class that holds them, as `LineWriter` and `TriviaParser` in the canonical unparser, rather than a dozen parameters. Elsewhere, plain parameters.
+- **A recursive walk** that remembers what it has visited is an overload that takes the memo table, called by the public function with an empty one, as `ReplaceLeaves` and `ForEachLeaf` in `types.cpp`.
+
+All of `lib` and `runtime` was converted to these rules (finished 2026-11-06), one file at a time and in stages within a file: 267 named lambdas. One is left, in `Parser/message.cpp`: that file is Flang's, whose `Message::Emit` has the same `emitAttachment` lambda, and it stays close to Flang's so that the two can be compared. The unit tests' few are left unless they get in the way. Once they were functions, two pairs of walks over a type turned out to be the same walk for different leaves, and each pair became one.
+
+**A refactoring changes nothing else.** A change that restructures code changes no behaviour and makes no other cleanups, and it is checked so:
+
+- The tests, and the same `merk` and LLVM IR before and after for every program of `test/CodeGen`, with and without OpenMP.
+- For a checker, also the errors and the debug dumps of every program of `test/CodeGen` and `test/Semantics`, which the IR does not show: the parse tree, the resolved names, the semantic form, the nonlocals, the types, the polymorphism, the modes, the determinism, and the unparsed source.
+- Then the sweeps, generated programs against mmc, and the term fuzzer, for a group of such changes rather than each one.
+
+The only difference the lambda conversion made: a braced list is evaluated in order and function arguments need not be, so `array.bounds` moved a constant ahead of a size it does not depend on.
+
+**Temporary code is marked.** A stand-in that a later step replaces carries a comment `Temporary (chunk N step M, docs/INPROGRESS.md):` saying what replaces it, so that it can be found when that step comes.
+
 ## Experiments
 
 Measurements made on 2026-10-26 and 2026-10-27 set four expectations. Deterministic Mercury already runs at C speed; allocation is the main gap, at 3.5× C on naive reverse; an OpenMP pragma on generated code ran 2× faster on 2 cores; and in a C model, open terms cost about 1.2× in the code that uses them and nothing elsewhere. Nothing was measured beyond 2 cores, and nothing yet on our own compiler. E7, a C model of heap cell layouts made on 2026-11-04 on another machine, decided that cells stay headerless.
