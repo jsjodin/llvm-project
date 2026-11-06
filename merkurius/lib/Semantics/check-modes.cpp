@@ -114,17 +114,20 @@ public:
       if (!signature) {
         return false;
       }
+      // An existentially quantified type variable stays one: a type has no
+      // null parts.
       std::vector<const Type *> arguments;
       for (const Type *argument : signature->arguments.drop_back()) {
         arguments.push_back(types_.types().Substitute(
             argument, [&](unsigned var) -> const Type * {
               return var < type->arguments.size() ? type->arguments[var]
-                                                  : nullptr;
+                                                  : types_.types().Variable(var);
             }));
       }
       out.push_back({{constructor->module, constructor->name,
                          constructor->arity, false},
-          arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments})});
+          arena_.SaveArray(llvm::ArrayRef<const Type *>{arguments}),
+          constructor});
     }
     return true;
   }
