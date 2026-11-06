@@ -24,6 +24,8 @@
 :- pred alias_in_then(t::di, t::muo) is det.
 :- pred else_value_in_then(t::di, t::uo) is det.
 :- pred retried_condition(t::di, t::uo) is nondet.
+:- pred committed_condition(t::di, t::uo) is cc_multi.
+:- pred committed_then_fails(t::di, t::uo) is cc_nondet.
 
 :- implementation.
 :- import_module int.
@@ -53,3 +55,10 @@ else_value_in_then(T0, T) :- ( if peek(T0, X), X > 1 then updu(1, T0, T) else T 
 % ERR-DAG: sound.m:[[@LINE+2]]:40: error: in the clause for retried_condition(di, uo): mode error in argument 1 of the call to pred sound.peek/2: T0 has inst mostly_unique, but unique is expected
 % MMC-DAG: sound.m:[[@LINE+1]]:40: error: in the clause for retried_condition(di, uo): mode error in argument 1 of the call to pred sound.peek/2: T0 has inst mostly_unique, but unique is expected
 retried_condition(T0, T) :- ( if m(X), peek(T0, Y) then updu(Y, T0, T), X > 1 else T = T0 ).
+% Where only the first solution is wanted, nothing after the condition is
+% run again by backtracking into it unless something after it can fail:
+% accepted by both, and rejected by both if the then part can fail.
+committed_condition(T0, T) :- ( if m(X), X > 1 then updu(X, T0, T) else T = T0 ).
+% ERR-DAG: sound.m:[[@LINE+2]]:54: error: in the clause for committed_then_fails(di, uo): mode error in argument 2 of the call to pred sound.updu/3: T0 has inst mostly_unique, but unique is expected
+% MMC-DAG: sound.m:[[@LINE+1]]:54: error: in the clause for committed_then_fails(di, uo): mode error in argument 2 of the call to pred sound.updu/3: T0 has inst mostly_unique, but unique is expected
+committed_then_fails(T0, T) :- ( if m(X), X > 1 then updu(X, T0, T), X > 2 else T = T0 ).
