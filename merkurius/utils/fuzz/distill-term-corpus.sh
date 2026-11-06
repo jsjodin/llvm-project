@@ -5,7 +5,9 @@
 # covers a new feature, and features are many more than edges, so a corpus
 # grows with every run, and so does the time to load it: every input is run
 # once, in one process, before fuzzing starts. A distilled corpus covers
-# the same and loads several times faster.
+# the same with fewer inputs, so it loads faster: the first distillation
+# kept about two thirds of the small corpus and three quarters of the
+# large one.
 #
 # Usage: distill-term-corpus.sh [--force]
 #
