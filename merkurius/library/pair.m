@@ -1,7 +1,5 @@
-% A declaration-only stub of the standard library module pair, for name
-% resolution until the library is written. The declarations are those of
-% the library reference manual (22.01), less those that need modules not
-% stubbed yet; see README.md.
+% The standard library module pair, with the declarations of the library
+% reference manual (22.01).
 
 :- module pair.
 :- interface.
@@ -17,3 +15,11 @@
 :- func snd(pair(X, Y)) = Y.
 :- pred snd(pair(X, Y)::in, Y::out) is det.
 :- func pair(T1, T2) = pair(T1, T2).
+
+:- implementation.
+
+fst(X - _) = X.
+fst(P, fst(P)).
+snd(_ - Y) = Y.
+snd(P, snd(P)).
+pair(X, Y) = X - Y.

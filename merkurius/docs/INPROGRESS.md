@@ -318,7 +318,7 @@ program.
    generation; `io.command_line_arguments`, which needs lists. In five
    commits: (a) `require`, and `-fstub-unimplemented` for the library's
    build; (b) `pair` and `maybe`; (c) `list`; (d) the array predicates;
-   (e) `io.command_line_arguments`. Done: (a).
+   (e) `io.command_line_arguments`. Done: (a), (b).
 
    *Temporary, until code generation makes every procedure of the library*
    (decided 2026-11-06): the library's build passes `-fstub-unimplemented`,
