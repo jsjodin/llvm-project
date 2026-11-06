@@ -287,6 +287,19 @@ llvm::LogicalResult SolutionOp::verify() {
       }
       return mlir::success();
     }
+    if (auto ite{mlir::dyn_cast<SoftIteOp>(parent)}) {
+      if (region != &ite.getCondition()) {
+        continue;
+      }
+      if (ite.getThenRegion().empty()) {
+        return mlir::success();
+      }
+      if (getValues().getTypes() !=
+          ite.getThenRegion().front().getArgumentTypes()) {
+        return emitOpError("does not match the arguments of the then part");
+      }
+      return mlir::success();
+    }
     if (auto commit{mlir::dyn_cast<CommitOp>(parent)}) {
       if (getValues().getTypes() != commit.getResultTypes()) {
         return emitOpError("does not match the results of merk.commit");
@@ -297,7 +310,9 @@ llvm::LogicalResult SolutionOp::verify() {
       break;
     }
   }
-  return emitOpError("is not in the generator of merk.each or merk.commit");
+  return emitOpError(
+      "is not in the generator of merk.each or merk.commit, or the condition "
+      "of merk.soft_ite");
 }
 
 llvm::LogicalResult ContRefOp::verifySymbolUses(

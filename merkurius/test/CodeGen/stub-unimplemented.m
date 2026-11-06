@@ -23,12 +23,12 @@ main(!IO) :-
 
 :- pred q(int::in) is semidet.
 q(X) :-
-    ( if ( Y = 1 ; Y = 2 ), Y > X then Y > 1 else fail ).
+    pow(X, 2) > 3.
 
 % OUTPUT:before
-% ERROR:Not yet implemented: stub_unimplemented.q_1_0: code generation for conditions with more than one solution
+% ERROR:Not yet implemented: stub_unimplemented.q_1_0: code generation for calls of int.pow/2
 
 % MERK: merk.proc private @stub_unimplemented.q_1_0(%arg0: i64) attributes {determinism = #merk.determinism<semidet>} {
-% MERK-NEXT: %[[WHAT:.*]] = merk.constant "stub_unimplemented.q_1_0: code generation for conditions with more than one solution" : !merk.string
+% MERK-NEXT: %[[WHAT:.*]] = merk.constant "stub_unimplemented.q_1_0: code generation for calls of int.pow/2" : !merk.string
 % MERK-NEXT: merk.foreign_call @merk_not_implemented(%[[WHAT]]) : (!merk.string) -> ()
 % MERK-NEXT: merk.fail
