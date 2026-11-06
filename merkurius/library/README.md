@@ -14,6 +14,9 @@ the narrower integers' writes in Mercury. `write`, `print` and their
 `write_list` is in Mercury, calling its closure for each element, on the
 standard output only. `require.m` implements its errors with mmc's
 messages, but `report_lookup_error`, which is not implemented yet.
+`pair.m` and `maybe.m` implement all of theirs in Mercury, but
+`map_maybe`'s multi and nondet modes, which wait for nondeterministic
+code.
 `float.m` implements its
 functions but `hash`, and `math.m` all of its
 functions but `solve_quadratic`, with C's math library. The arithmetic
