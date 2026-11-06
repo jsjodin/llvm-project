@@ -42,7 +42,6 @@
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Path.h"
-#include <functional>
 #include <string>
 #include <vector>
 
@@ -248,6 +247,17 @@ bool DebugDumpSemanticFormAction::executeAction() {
   return !messages.AnyFatalError();
 }
 
+// The modules of a list, after its label, if there are any.
+static void PrintModuleNames(llvm::raw_ostream &os, llvm::StringRef label,
+    const std::vector<const semantics::ModuleInterface *> &list) {
+  if (!list.empty()) {
+    os << ' ' << label;
+    for (const semantics::ModuleInterface *module : list) {
+      os << ' ' << module->name;
+    }
+  }
+}
+
 bool DebugDumpImportsAction::executeAction() {
   CompilerInstance &ci{getInstance()};
   for (const std::string &dir : ci.getFrontendOpts().searchDirectories) {
@@ -272,18 +282,9 @@ bool DebugDumpImportsAction::executeAction() {
   if (!os) {
     return false;
   }
-  auto names{[&](llvm::StringRef label,
-                 const std::vector<const semantics::ModuleInterface *> &list) {
-    if (!list.empty()) {
-      *os << ' ' << label;
-      for (const semantics::ModuleInterface *module : list) {
-        *os << ' ' << module->name;
-      }
-    }
-  }};
   *os << "imports:";
-  names("import_module", imports.imports);
-  names("use_module", imports.uses);
+  PrintModuleNames(*os, "import_module", imports.imports);
+  PrintModuleNames(*os, "use_module", imports.uses);
   *os << '\n';
   // Each module by its file's name, not its path, which depends on where
   // the library is.
@@ -291,8 +292,8 @@ bool DebugDumpImportsAction::executeAction() {
     *os << module->name << " ("
         << llvm::sys::path::filename(module->file->path()) << ", "
         << module->items.size() << " items):";
-    names("import_module", module->imports);
-    names("use_module", module->uses);
+    PrintModuleNames(*os, "import_module", module->imports);
+    PrintModuleNames(*os, "use_module", module->uses);
     *os << '\n';
   }
   os->flush();
@@ -407,6 +408,42 @@ bool DebugDumpResolvedNamesAction::executeAction() {
   return !r.messages.AnyFatalError();
 }
 
+namespace {
+// A constraint of a clause, with how it is satisfied, and below it, indented,
+// those of the instance that satisfies it.
+struct ProofPrinter {
+  void Print(const semantics::ConstraintProof &p, unsigned depth) const {
+    os << std::string(depth, ' ') << checking.Print(clause, p.constraint);
+    if (p.instance) {
+      const parser::TokenSequence &tokens{*p.instance->tokens};
+      parser::CharBlock at{Source(tokens, p.instance->decl->name->tokens)};
+      os << " by the instance at "
+         << (p.instance->local ? Position(sources, at)
+                               : FilePosition(sources, at));
+    } else if (p.goal) {
+      const parser::SymName *name{clause.names[*p.goal]};
+      os << " by the existential constraint of "
+         << (name ? Source(clauseTokens, name->tokens).ToString() : "?")
+         << " at "
+         << (name ? Position(sources, Source(clauseTokens, name->tokens))
+                  : std::string{"?"});
+    } else if (p.assumed) {
+      os << " by the declaration's " << checking.Print(clause, *p.assumed);
+    }
+    os << '\n';
+    for (const semantics::ConstraintProof &premise : p.premises) {
+      Print(premise, depth + 2);
+    }
+  }
+
+  llvm::raw_ostream &os;
+  const semantics::TypeChecking &checking;
+  const semantics::ClauseTypes &clause;
+  const parser::AllSources &sources;
+  const parser::TokenSequence &clauseTokens; // the clause's module's
+};
+} // namespace
+
 bool DebugDumpTypesAction::executeAction() {
   CompilerInstance &ci{getInstance()};
   Resolved r;
@@ -467,36 +504,11 @@ bool DebugDumpTypesAction::executeAction() {
     }
     // Each constraint of a goal, with how it is satisfied, and below it
     // those of the instance that satisfies it.
-    std::function<void(const semantics::ConstraintProof &, unsigned)> proof{
-        [&](const semantics::ConstraintProof &p, unsigned depth) {
-          *os << std::string(depth, ' ') << checking->Print(clause, p.constraint);
-          if (p.instance) {
-            const parser::TokenSequence &tokens{*p.instance->tokens};
-            parser::CharBlock at{
-                Source(tokens, p.instance->decl->name->tokens)};
-            *os << " by the instance at "
-                << (p.instance->local ? Position(sources, at)
-                                      : FilePosition(sources, at));
-          } else if (p.goal) {
-            const parser::SymName *name{clause.names[*p.goal]};
-            *os << " by the existential constraint of "
-                << (name ? Source(r.tokens, name->tokens).ToString() : "?")
-                << " at "
-                << (name ? Position(sources, Source(r.tokens, name->tokens))
-                         : std::string{"?"});
-          } else if (p.assumed) {
-            *os << " by the declaration's "
-                << checking->Print(clause, *p.assumed);
-          }
-          *os << '\n';
-          for (const semantics::ConstraintProof &premise : p.premises) {
-            proof(premise, depth + 2);
-          }
-        }};
+    ProofPrinter proof{*os, *checking, clause, sources, r.tokens};
     for (const semantics::GoalConstraint &c : clause.constraints) {
       if (c.goal >= form.goals) {
         *os << "  existential constraint of the declaration: ";
-        proof(c.proof, 0);
+        proof.Print(c.proof, 0);
         continue;
       }
       const parser::SymName *name{clause.names[c.goal]};
@@ -506,7 +518,7 @@ bool DebugDumpTypesAction::executeAction() {
           << (name ? Position(sources, Source(r.tokens, name->tokens))
                    : std::string{"?"})
           << ": ";
-      proof(c.proof, 0);
+      proof.Print(c.proof, 0);
     }
   }
   os->flush();
@@ -595,6 +607,26 @@ bool DebugDumpLoopsAction::executeAction() {
   return !r.messages.AnyFatalError();
 }
 
+// A procedure's modes, whether they were checked, and each clause's.
+static void DumpProcedureModes(llvm::raw_ostream &os,
+    const semantics::Procedure &procedure, semantics::ModeChecking &modes,
+    const parser::AllSources &sources, const parser::TokenSequence &tokens) {
+  PrintProcedure(os, procedure, modes, sources);
+  if (modes.HasError(procedure)) {
+    os << "  mode error\n";
+  } else if (semantics::Unchecked why{modes.UncheckedReason(procedure)};
+             why != semantics::Unchecked::None) {
+    os << "  not checked: " << semantics::EnumToString(why) << '\n';
+  }
+  for (const semantics::ClauseModes &clause : modes.ClausesOf(procedure)) {
+    os << "  clause at "
+       << Position(sources, Source(tokens, clause.clause->clause->tokens))
+       << '\n';
+    semantics::DumpClauseModes(os, clause, tokens,
+        [&](parser::CharBlock at) { return Position(sources, at); });
+  }
+}
+
 bool DebugDumpModesAction::executeAction() {
   CompilerInstance &ci{getInstance()};
   const FrontendOptions &frontend{ci.getFrontendOpts()};
@@ -633,24 +665,8 @@ bool DebugDumpModesAction::executeAction() {
   }
   // The declared procedures, and then those inferred from calls:
   // pred m.p/2 inferred mode 0: p(in, uo).
-  auto dump{[&](const semantics::Procedure &procedure) {
-    PrintProcedure(*os, procedure, *modes, sources);
-    if (modes->HasError(procedure)) {
-      *os << "  mode error\n";
-    } else if (semantics::Unchecked why{modes->UncheckedReason(procedure)};
-               why != semantics::Unchecked::None) {
-      *os << "  not checked: " << semantics::EnumToString(why) << '\n';
-    }
-    for (const semantics::ClauseModes &clause : modes->ClausesOf(procedure)) {
-      *os << "  clause at "
-          << Position(sources, Source(r.tokens, clause.clause->clause->tokens))
-          << '\n';
-      semantics::DumpClauseModes(*os, clause, r.tokens,
-          [&](parser::CharBlock at) { return Position(sources, at); });
-    }
-  }};
   for (const semantics::Procedure &procedure : modes->procedures()) {
-    dump(procedure);
+    DumpProcedureModes(*os, procedure, *modes, sources, r.tokens);
   }
   // By predicate, as in the source, and then in the order made.
   std::vector<const semantics::Procedure *> inferred;
@@ -662,7 +678,7 @@ bool DebugDumpModesAction::executeAction() {
         return a->symbol->source.begin() < b->symbol->source.begin();
       });
   for (const semantics::Procedure *procedure : inferred) {
-    dump(*procedure);
+    DumpProcedureModes(*os, *procedure, *modes, sources, r.tokens);
   }
   // Instance methods: method m.c(T) pred m.p/1 mode 0, and their clauses.
   for (const semantics::MethodModes &method : modes->methods()) {

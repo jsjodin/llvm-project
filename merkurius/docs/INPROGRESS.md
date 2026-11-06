@@ -65,7 +65,7 @@ a constant, ahead of a size it does not depend on.
 | `Parser/unparse.cpp`, `convert-omp.cpp`, `lexer.cpp`, `convert-directives.cpp`, `operators.cpp` | 10 | Done, together: taking a node's string fields, numbering a list's variables, a clause's argument count, a number's exponent and underscore, an attribute conflict, and adding an operator |
 | `Parser/message.cpp` | 1 | Left as it is: it is Flang's, whose `Message::Emit` has the same `emitAttachment` lambda, and stays close to it so that it can be compared |
 | `Semantics/semantic-form.cpp`, `check-uniqueness.cpp`, `check-purity.cpp` | 6 | Done, together: the dump's type lists, catches and lambda arguments, a call's clobbered arguments and a goal's unification links, and finding a predicate |
-| The other 3 files in `lib/` and `runtime/` | 5 | Not started: `FrontendActions.cpp`, `MerkDialect.cpp` and `runtime/write.cpp`, the last group |
+| `Frontend/FrontendActions.cpp`, `Dialect/Merk/IR/MerkDialect.cpp`, `runtime/write.cpp` | 5 | Done, together: the import, type and mode dumps' helpers (`ProofPrinter` for a constraint's proof), the function type builder written at its call, and writing a term's field |
 
 The unit tests' few are left unless they turn out to get in the way.
 
