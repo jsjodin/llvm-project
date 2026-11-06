@@ -391,9 +391,6 @@ void WriteTerm(Word term, const Type &type, int context) {
   std::string_view name{functor->name};
   unsigned arity{functor->arity};
   const Environment *environment{&type.environment};
-  auto field{[&](unsigned i, int priority) {
-    WriteValue(fields[i], functor->fields[i], environment, priority);
-  }};
   if (arity == 0) {
     if (context < kAnyPriority && FirstOperator(name)) {
       std::putc('(', stdout);
@@ -411,7 +408,7 @@ void WriteTerm(Word term, const Type &type, int context) {
   if (name == "{}") {
     if (arity == 1) {
       Put("{ ");
-      field(0, kAnyPriority);
+      WriteValue(fields[0], functor->fields[0], environment, kAnyPriority);
       Put(" }");
       return;
     }
@@ -420,7 +417,7 @@ void WriteTerm(Word term, const Type &type, int context) {
       if (i != 0) {
         Put(", ");
       }
-      field(i, kArgumentPriority);
+      WriteValue(fields[i], functor->fields[i], environment, kArgumentPriority);
     }
     std::putc('}', stdout);
     return;
@@ -434,15 +431,17 @@ void WriteTerm(Word term, const Type &type, int context) {
     if (arity == 1) {
       Put(name);
       std::putc(' ', stdout);
-      field(0, op->specifier == FY ? priority : priority - 1);
+      WriteValue(fields[0], functor->fields[0], environment,
+          op->specifier == FY ? priority : priority - 1);
     } else if (op->specifier == FXY) {
       Put(name);
       std::putc(' ', stdout);
-      field(0, priority - 1);
+      WriteValue(fields[0], functor->fields[0], environment, priority - 1);
       std::putc(' ', stdout);
-      field(1, priority);
+      WriteValue(fields[1], functor->fields[1], environment, priority);
     } else {
-      field(0, op->specifier == YFX ? priority : priority - 1);
+      WriteValue(fields[0], functor->fields[0], environment,
+          op->specifier == YFX ? priority : priority - 1);
       if (name == ",") {
         Put(", ");
       } else {
@@ -450,7 +449,8 @@ void WriteTerm(Word term, const Type &type, int context) {
         Put(name);
         std::putc(' ', stdout);
       }
-      field(1, op->specifier == XFY ? priority : priority - 1);
+      WriteValue(fields[1], functor->fields[1], environment,
+          op->specifier == XFY ? priority : priority - 1);
     }
     if (parentheses) {
       std::putc(')', stdout);
@@ -463,7 +463,7 @@ void WriteTerm(Word term, const Type &type, int context) {
     if (i != 0) {
       Put(", ");
     }
-    field(i, kArgumentPriority);
+    WriteValue(fields[i], functor->fields[i], environment, kArgumentPriority);
   }
   std::putc(')', stdout);
 }
