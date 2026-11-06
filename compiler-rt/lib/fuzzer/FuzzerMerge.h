@@ -88,6 +88,15 @@ void CrashResistantMerge(const std::vector<std::string> &Args,
                          std::set<uint32_t> *NewCov, const std::string &CFPath,
                          bool Verbose, bool IsSetCoverMerge);
 
+// Merkurius (local, not upstream): CrashResistantMerge of Corpus into an
+// empty corpus, in NumShards inner processes at once.
+void ParallelCrashResistantMerge(const std::vector<std::string> &Args,
+                                 const std::vector<SizedFile> &Corpus,
+                                 size_t NumShards, const std::string &TempDir,
+                                 std::vector<std::string> *NewFiles,
+                                 std::set<uint32_t> *NewFeatures,
+                                 std::set<uint32_t> *NewCov);
+
 }  // namespace fuzzer
 
 #endif  // LLVM_FUZZER_MERGE_H

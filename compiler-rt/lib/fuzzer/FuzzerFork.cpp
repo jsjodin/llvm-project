@@ -360,14 +360,13 @@ void FuzzWithFork(Random &Rand, const FuzzingOptions &Options,
     for (auto &File : SeedFiles)
       Env.Files.push_back(File.File);
   } else {
-    auto CFPath = DirPlusFile(Env.TempDir, "merge.txt");
+    // Merkurius (local, not upstream): the seeds are run in as many
+    // processes as there are jobs, instead of in one.
     std::set<uint32_t> NewFeatures, NewCov;
-    CrashResistantMerge(Env.Args, {}, SeedFiles, &Env.Files, Env.Features,
-                        &NewFeatures, Env.Cov, &NewCov, CFPath,
-                        /*Verbose=*/false, /*IsSetCoverMerge=*/false);
+    ParallelCrashResistantMerge(Env.Args, SeedFiles, NumJobs, Env.TempDir,
+                                &Env.Files, &NewFeatures, &NewCov);
     Env.Features.insert(NewFeatures.begin(), NewFeatures.end());
     Env.Cov.insert(NewCov.begin(), NewCov.end());
-    RemoveFile(CFPath);
   }
 
   if (Env.Group) {
