@@ -741,6 +741,9 @@ private:
   bool inBody_{false};
   // The goal whose first solution merk.commit is being generated for.
   const Body *committing_{nullptr};
+  // The body of the committed choice lambda expression being generated,
+  // whose first solution is the lambda expression's.
+  const Body *committedLambda_{nullptr};
   std::string notYet_;
   // The procedure being generated, whose lambda expressions' procedures are
   // named after it, and their number in the module.
@@ -2656,7 +2659,13 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
       }
       wordOutputs_ = outputs;
       procName_ = proc.getSymName().str();
+      const Body *outerLambda{committedLambda_};
+      committedLambda_ = goal.modes->determinism == parser::Determinism::CcMulti ||
+              goal.modes->determinism == parser::Determinism::CcNondet
+          ? goal.lambda
+          : nullptr;
       Goal(*goal.lambda, body);
+      committedLambda_ = outerLambda;
       if (!failed_ && !Terminated()) {
         llvm::SmallVector<mlir::Value> results{WordResults(outputs, body, loc)};
         if (llvm::is_contained(results, mlir::Value{})) {
@@ -4381,11 +4390,13 @@ bool MerkGenerator::Nondeterministic(const Body &goal, const ProcedureBody &body
 // the branches of a disjunction, an if-then-else or a switch, may have
 // more. The parts of a negation are such goals of their own.
 bool MerkGenerator::NeedsCommit(const Body &goal, const ProcedureBody &body) {
-  // The body of a committed choice procedure, whose first solution is the
-  // procedure's, though the goals in it may want all of a goal's.
-  if (&goal == body.body && body.determinism &&
+  // The body of a committed choice procedure or lambda expression, whose
+  // first solution is the procedure's, though the goals in it may want all
+  // of a goal's.
+  bool committedProc{&goal == body.body && body.determinism &&
       (*body.determinism == parser::Determinism::CcMulti ||
-          *body.determinism == parser::Determinism::CcNondet) &&
+          *body.determinism == parser::Determinism::CcNondet)};
+  if ((committedProc || &goal == committedLambda_) &&
       Nondeterministic(goal, body)) {
     return true;
   }
