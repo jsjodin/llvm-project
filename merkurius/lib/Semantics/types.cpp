@@ -62,11 +62,11 @@ const Type *TypeContext::Existential(unsigned number, llvm::StringRef name) {
 
 // Types share their parts, and can be exponentially larger as trees than
 // as the graphs they are, so the walks below visit each part once.
-const Type *TypeContext::Substitute(const Type *t,
-    llvm::function_ref<const Type *(unsigned)> replace,
+const Type *TypeContext::ReplaceLeaves(const Type *t, TypeKind leaf,
+    llvm::function_ref<const Type *(const Type *)> replace,
     llvm::DenseMap<const Type *, const Type *> &done) {
-  if (t->kind == TypeKind::Variable) {
-    return replace(t->var);
+  if (t->kind == leaf) {
+    return replace(t);
   }
   if (auto it{done.find(t)}; it != done.end()) {
     return it->second;
@@ -74,11 +74,11 @@ const Type *TypeContext::Substitute(const Type *t,
   llvm::SmallVector<const Type *, 4> arguments;
   bool changed{false};
   for (const Type *argument : t->arguments) {
-    arguments.push_back(Substitute(argument, replace, done));
+    arguments.push_back(ReplaceLeaves(argument, leaf, replace, done));
     changed |= arguments.back() != argument;
   }
   const Type *result{
-      t->result ? Substitute(t->result, replace, done) : nullptr};
+      t->result ? ReplaceLeaves(t->result, leaf, replace, done) : nullptr};
   changed |= result != t->result;
   const Type *substituted{t};
   if (changed) {
@@ -94,59 +94,35 @@ const Type *TypeContext::Substitute(const Type *t,
 const Type *TypeContext::Substitute(
     const Type *type, llvm::function_ref<const Type *(unsigned)> replace) {
   llvm::DenseMap<const Type *, const Type *> done;
-  return Substitute(type, replace, done);
-}
-
-const Type *TypeContext::SubstituteExistentials(const Type *t,
-    llvm::function_ref<const Type *(const Type *)> replace,
-    llvm::DenseMap<const Type *, const Type *> &done) {
-  if (t->kind == TypeKind::Existential) {
-    return replace(t);
-  }
-  if (auto it{done.find(t)}; it != done.end()) {
-    return it->second;
-  }
-  llvm::SmallVector<const Type *, 4> arguments;
-  bool changed{false};
-  for (const Type *argument : t->arguments) {
-    arguments.push_back(SubstituteExistentials(argument, replace, done));
-    changed |= arguments.back() != argument;
-  }
-  const Type *result{
-      t->result ? SubstituteExistentials(t->result, replace, done) : nullptr};
-  changed |= result != t->result;
-  const Type *substituted{t};
-  if (changed) {
-    Type copy{*t};
-    copy.arguments = arguments;
-    copy.result = result;
-    substituted = Intern(copy);
-  }
-  done[t] = substituted;
-  return substituted;
+  return ReplaceLeaves(
+      type, TypeKind::Variable,
+      [&](const Type *variable) { return replace(variable->var); }, done);
 }
 
 const Type *TypeContext::SubstituteExistentials(
     const Type *type, llvm::function_ref<const Type *(const Type *)> replace) {
   llvm::DenseMap<const Type *, const Type *> done;
-  return SubstituteExistentials(type, replace, done);
+  return ReplaceLeaves(type, TypeKind::Existential, replace, done);
 }
 
 namespace {
-void ForEachExistential(const Type &t, llvm::function_ref<void(const Type &)> f,
+// Calls `f` once on each part of the type of kind `leaf`, in the order they
+// occur, given the parts already seen, without looking inside them.
+void ForEachLeaf(const Type &t, TypeKind leaf,
+    llvm::function_ref<void(const Type &)> f,
     llvm::DenseSet<const Type *> &seen) {
   if (!seen.insert(&t).second) {
     return;
   }
-  if (t.kind == TypeKind::Existential) {
+  if (t.kind == leaf) {
     f(t);
     return;
   }
   for (const Type *argument : t.arguments) {
-    ForEachExistential(*argument, f, seen);
+    ForEachLeaf(*argument, leaf, f, seen);
   }
   if (t.result) {
-    ForEachExistential(*t.result, f, seen);
+    ForEachLeaf(*t.result, leaf, f, seen);
   }
 }
 } // namespace
@@ -154,31 +130,14 @@ void ForEachExistential(const Type &t, llvm::function_ref<void(const Type &)> f,
 void ForEachExistential(
     const Type &type, llvm::function_ref<void(const Type &)> f) {
   llvm::DenseSet<const Type *> seen;
-  ForEachExistential(type, f, seen);
+  ForEachLeaf(type, TypeKind::Existential, f, seen);
 }
-
-namespace {
-void ForEachVariable(const Type &t, llvm::function_ref<void(unsigned)> f,
-    llvm::DenseSet<const Type *> &seen) {
-  if (!seen.insert(&t).second) {
-    return;
-  }
-  if (t.kind == TypeKind::Variable) {
-    f(t.var);
-    return;
-  }
-  for (const Type *argument : t.arguments) {
-    ForEachVariable(*argument, f, seen);
-  }
-  if (t.result) {
-    ForEachVariable(*t.result, f, seen);
-  }
-}
-} // namespace
 
 void ForEachVariable(const Type &type, llvm::function_ref<void(unsigned)> f) {
   llvm::DenseSet<const Type *> seen;
-  ForEachVariable(type, f, seen);
+  ForEachLeaf(
+      type, TypeKind::Variable, [&](const Type &variable) { f(variable.var); },
+      seen);
 }
 
 namespace {
