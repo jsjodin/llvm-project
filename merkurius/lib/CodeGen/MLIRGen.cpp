@@ -4236,7 +4236,9 @@ void MerkGenerator::Disjunction(const Body &goal, const ProcedureBody &body) {
     NotYet(Where(goal.tokens), "disjunctions of unknown determinism");
     return;
   }
-  if (Nondeterministic(goal, body)) {
+  // One in merk.commit, whose branches have more than one solution, gives
+  // its first: the first branch's first, or else the next branch's.
+  if (Nondeterministic(goal, body) || committing_ == &goal) {
     NondetDisjunction(goal, body);
     return;
   }
@@ -4289,9 +4291,8 @@ bool MerkGenerator::Nondeterministic(const Body &goal, const ProcedureBody &body
 // A goal with no outputs, or in a context where only its first solution is
 // wanted, as a committed choice, has at most one solution as the goals
 // around it see it, though a call in it, or the goals of a conjunction, or
-// the branches of an if-then-else or a switch, may have more. A disjunction
-// with at most one solution tries its branches in turn already, and the
-// parts of a negation are such goals of their own.
+// the branches of a disjunction, an if-then-else or a switch, may have
+// more. The parts of a negation are such goals of their own.
 bool MerkGenerator::NeedsCommit(const Body &goal, const ProcedureBody &body) {
   // The body of a committed choice procedure, whose first solution is the
   // procedure's, though the goals in it may want all of a goal's.
@@ -4316,6 +4317,7 @@ bool MerkGenerator::NeedsCommit(const Body &goal, const ProcedureBody &body) {
         Nondeterministic(*goal.modes->callee);
   case BodyKind::Conj:
   case BodyKind::Scope:
+  case BodyKind::Disj:
     return anyNondet(goal.goals);
   case BodyKind::IfThenElse:
     return anyNondet(llvm::ArrayRef<const Body *>{goal.goals}.drop_front());
