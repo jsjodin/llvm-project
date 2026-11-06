@@ -62,7 +62,9 @@ a constant, ahead of a size it does not depend on.
 | `Parser/convert.cpp` | 5 | Done: a bound inst's functors, a declaration's layers and operators, and a constructor's built-in name |
 | `Parser/unparse-canonical.cpp` | 4 | Done, with `convert-pragmas.cpp`: rendering a document (`LineWriter`), parsing trivia (`TriviaParser`) and nesting a child |
 | `Parser/convert-pragmas.cpp` | 4 | Done, with `unparse-canonical.cpp`: four short wrappers, replaced by what they wrapped |
-| The other 12 files in `lib/` and `runtime/` | 22 | Not started. The rest go in groups, with one long run (sweeps, random programs, fuzzer) each: the rest of the parser, then `semantic-form.cpp`, `check-uniqueness.cpp` and `check-purity.cpp`, then `FrontendActions.cpp`, `MerkDialect.cpp` and `runtime/write.cpp` |
+| `Parser/unparse.cpp`, `convert-omp.cpp`, `lexer.cpp`, `convert-directives.cpp`, `operators.cpp` | 10 | Done, together: taking a node's string fields, numbering a list's variables, a clause's argument count, a number's exponent and underscore, an attribute conflict, and adding an operator |
+| `Parser/message.cpp` | 1 | Left as it is: it is Flang's, whose `Message::Emit` has the same `emitAttachment` lambda, and stays close to it so that it can be compared |
+| The other 6 files in `lib/` and `runtime/` | 11 | Not started. They go in two groups, with one long run (sweeps, random programs, fuzzer) each: `semantic-form.cpp`, `check-uniqueness.cpp` and `check-purity.cpp`, then `FrontendActions.cpp`, `MerkDialect.cpp` and `runtime/write.cpp` |
 
 The unit tests' few are left unless they turn out to get in the way.
 

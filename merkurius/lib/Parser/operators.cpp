@@ -47,18 +47,20 @@ int OperatorForm::RightArgumentPriority() const {
   llvm_unreachable("unknown specifier");
 }
 
+static void AddOperator(llvm::StringMap<OperatorDefinition> &table,
+    llvm::StringRef name, Specifier specifier, int priority) {
+  OperatorDefinition &def{table[name]};
+  def.name = name;
+  OperatorForm form{specifier, priority};
+  std::optional<OperatorForm> &slot{form.IsPrefix() ? def.prefix : def.infix};
+  CHECK(!slot); // at most one prefix and one infix form per name
+  slot = form;
+}
+
 static llvm::StringMap<OperatorDefinition> BuildOperatorTable() {
   llvm::StringMap<OperatorDefinition> table;
-  auto add{[&](llvm::StringRef name, Specifier specifier, int priority) {
-    OperatorDefinition &def{table[name]};
-    def.name = name;
-    OperatorForm form{specifier, priority};
-    std::optional<OperatorForm> &slot{form.IsPrefix() ? def.prefix : def.infix};
-    CHECK(!slot); // at most one prefix and one infix form per name
-    slot = form;
-  }};
 #define MERK_OPERATOR(name, specifier, priority) \
-  add(name, Specifier::specifier, priority);
+  AddOperator(table, name, Specifier::specifier, priority);
 #include "operators.def"
   return table;
 }

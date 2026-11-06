@@ -39,13 +39,6 @@ bool ConvertMutableAttributes(const Term &term, MutableDecl &into,
   bool ok{true};
   // The attributes given, by name, for the conflict checks.
   llvm::SmallVector<llvm::StringRef, 4> given;
-  auto conflict{[&](const Term &a, llvm::StringRef first,
-                    llvm::StringRef second) {
-    state.messages.Say(GetSource(a, state.tokens),
-        "the attributes '%s' and '%s' conflict"_err_en_US, first.str(),
-        second.str());
-    ok = false;
-  }};
   for (const Term *element : list->elements()) {
     const Term &a{StripParentheses(*element)};
     llvm::StringRef name{
@@ -101,7 +94,10 @@ bool ConvertMutableAttributes(const Term &term, MutableDecl &into,
     for (const auto &[x, y] : conflicts) {
       if ((name == x && llvm::is_contained(given, y)) ||
           (name == y && llvm::is_contained(given, x))) {
-        conflict(a, name == x ? y : x, name);
+        state.messages.Say(GetSource(a, state.tokens),
+            "the attributes '%s' and '%s' conflict"_err_en_US,
+            (name == x ? y : x).str(), name.str());
+        ok = false;
       }
     }
     given.push_back(name);

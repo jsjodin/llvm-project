@@ -96,6 +96,8 @@ private:
   TokenKind LexToken(bool precededByWhitespace);
   void LexDirective(Token &, std::vector<Token> &directiveTokens);
   TokenKind LexNumber();
+  bool AtExponent() const;
+  void SayUnderscore(const char *start, char next);
   bool SkipDigits(bool (*isDigit)(char));
   void SkipIntegerSuffix(const char *start, bool trailingUnderscore);
   void SkipQuoted(char quote);
@@ -366,6 +368,27 @@ void Lexer::SkipIntegerSuffix(const char *start, bool trailingUnderscore) {
   }
 }
 
+// Whether an exponent starts here: e or E, an optional sign, and a digit.
+bool Lexer::AtExponent() const {
+  return (Peek() == 'e' || Peek() == 'E') &&
+      (IsDigit(Peek(1)) ||
+          ((Peek(1) == '+' || Peek(1) == '-') && IsDigit(Peek(2))));
+}
+
+// An underscore in the number from `start` comes before `next`. It may come
+// between a fraction and its exponent, as mmc 22.01.9 accepts, but not
+// between the integer part and an exponent.
+void Lexer::SayUnderscore(const char *start, char next) {
+  if (next == 'e' || next == 'E') {
+    Say(start, at_,
+        "an underscore may come before an exponent only after a fraction"_err_en_US);
+  } else if (next == '.') {
+    Say(start, at_, "an underscore may not come before '.'"_err_en_US);
+  } else {
+    Say(start, at_, "a float literal may not end with an underscore"_err_en_US);
+  }
+}
+
 TokenKind Lexer::LexNumber() {
   const char *start{at_};
   if (*at_ == '0') {
@@ -416,41 +439,23 @@ TokenKind Lexer::LexNumber() {
   }
   // A float has a fraction, an exponent, or both.
   bool fraction{Peek() == '.' && IsDigit(Peek(1))};
-  auto atExponent{[&]() {
-    return (Peek() == 'e' || Peek() == 'E') &&
-        (IsDigit(Peek(1)) ||
-            ((Peek(1) == '+' || Peek(1) == '-') && IsDigit(Peek(2))));
-  }};
-  if (!fraction && !atExponent()) {
+  if (!fraction && !AtExponent()) {
     SkipIntegerSuffix(start, trailingUnderscore);
     return TokenKind::Integer;
   }
-  // An underscore may come between a fraction and its exponent, as mmc
-  // 22.01.9 accepts, but not between the integer part and an exponent.
-  auto sayUnderscore{[&](char next) {
-    if (next == 'e' || next == 'E') {
-      Say(start, at_,
-          "an underscore may come before an exponent only after a fraction"_err_en_US);
-    } else if (next == '.') {
-      Say(start, at_, "an underscore may not come before '.'"_err_en_US);
-    } else {
-      Say(start, at_,
-          "a float literal may not end with an underscore"_err_en_US);
-    }
-  }};
   if (trailingUnderscore) {
-    sayUnderscore(*at_);
+    SayUnderscore(start, *at_);
   }
   if (fraction) {
     ++at_;
-    if (SkipDigits(IsDigit) && !atExponent()) {
-      sayUnderscore(Peek());
+    if (SkipDigits(IsDigit) && !AtExponent()) {
+      SayUnderscore(start, Peek());
     }
   }
-  if (atExponent()) {
+  if (AtExponent()) {
     at_ += IsDigit(Peek(1)) ? 1 : 2;
     if (SkipDigits(IsDigit)) {
-      sayUnderscore('\0');
+      SayUnderscore(start, '\0');
     }
   }
   return TokenKind::Float;
