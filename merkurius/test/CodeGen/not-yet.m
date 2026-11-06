@@ -11,13 +11,20 @@
 :- import_module int, list.
 
 main(!IO) :-
-    P = (pred(Y::out) is det :- Y = 1),
+    P = (pred(Y::out) is nondet :- ( Y = 1 ; Y = 2 )),
     p(P).
-% CHECK: not-yet.m:[[@LINE-2]]:10: error: not yet implemented: code generation for values of type pred(int)
+% CHECK: not-yet.m:[[@LINE-2]]:10: error: not yet implemented: code generation for nondet lambda expressions
 
-:- pred p(pred(int)::in(pred(out) is det)) is det.
-% CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for values of type pred(int)
+:- pred p(pred(int)::in(pred(out) is nondet)) is det.
 p(_).
+
+:- typeclass size(T) where [ func size(T) = int ].
+:- instance size(int) where [ size(X) = X ].
+:- func sizes(list(int)) = list(func(int) = int).
+sizes(L) = [size | map_size(L)].
+% CHECK: not-yet.m:[[@LINE-1]]:13: error: not yet implemented: code generation for closures of methods
+:- func map_size(list(int)) = list(func(int) = int).
+map_size(_) = [].
 
 % A type with user-defined equality, whose unifications call its
 % predicate.

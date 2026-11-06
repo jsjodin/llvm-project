@@ -15,6 +15,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "descriptor.h"
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 using namespace merkurius::runtime;
@@ -35,7 +37,7 @@ Parts PartsOf(Word info) {
   }
   const Word *cell{reinterpret_cast<const Word *>(info - 1)};
   const auto *ctor{reinterpret_cast<const TypeCtor *>(cell[0])};
-  if (ctor->kind == Tuple) {
+  if (ctor->kind == Tuple || ctor->kind == Closure) {
     return {ctor, cell + 2, cell[1]};
   }
   return {ctor, cell + 1, ctor->arity};
@@ -76,4 +78,13 @@ int CompareTypes(Word x, Word y) {
 
 extern "C" std::int32_t merk_compare_type_infos(Word x, Word y) {
   return CompareTypes(x, y);
+}
+
+// A unification or comparison of closures, through a type variable, stops the
+// program as mmc's does, which names a function's type pred too.
+extern "C" [[noreturn]] void merk_higher_order_called(std::int32_t compare) {
+  std::fflush(stdout);
+  std::fprintf(stderr, "Mercury runtime: called %s for `pred' type\n",
+      compare ? "compare/3" : "unify/2");
+  std::exit(1);
 }

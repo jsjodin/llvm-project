@@ -312,6 +312,59 @@ def Merk_CallMethodOp : Merk_Op<"call_method"> {
   }];
 }
 
+def Merk_ClosureOp : Merk_Op<"closure", [
+    Pure, DeclareOpInterfaceMethods<SymbolUserOpInterface>
+  ]> {
+  let summary = "a closure of an entry and the values it captures";
+  let description = [{
+    A new cell of the entry's code, the number of captured values, and the
+    captured values. The entry is a procedure taking the closure and then a
+    word for each of the closure's inputs, and giving a word for each of its
+    outputs; it reads the captured values with `merk.closure_word`.
+
+    ```mlir
+    %p = merk.closure @"m.add_3_0$closure1"(%one)
+    ```
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$entry,
+      Variadic<Merk_WordType>:$captured);
+  let results = (outs Merk_ClosureType:$closure);
+  let assemblyFormat = "$entry (`(` $captured^ `)`)? attr-dict";
+}
+
+def Merk_ClosureWordOp : Merk_Op<"closure_word", [Pure]> {
+  let summary = "a value a closure captured";
+  let description = [{
+    The captured value at that place, from 0.
+
+    ```mlir
+    %w = merk.closure_word %p, 0
+    ```
+  }];
+  let arguments = (ins Merk_ClosureType:$closure, I64Attr:$index);
+  let results = (outs Merk_WordType:$word);
+  let assemblyFormat = "$closure `,` $index attr-dict";
+}
+
+def Merk_CallClosureOp : Merk_Op<"call_closure"> {
+  let summary = "a higher-order call";
+  let description = [{
+    Calls the closure's entry with the closure and the inputs, a word for each
+    of the closure's inputs, including one of a type with no values; its
+    results are a word for each output. The determinism is the closure's inst's.
+
+    ```mlir
+    %y = merk.call_closure %p(%x) #merk.determinism<det> : (!merk.word) -> !merk.word
+    ```
+  }];
+  let arguments = (ins Merk_ClosureType:$closure,
+      Variadic<Merk_WordType>:$inputs, Merk_DeterminismAttr:$determinism);
+  let results = (outs Variadic<Merk_WordType>:$outputs);
+  let assemblyFormat = [{
+    $closure `(` $inputs `)` $determinism attr-dict `:` functional-type($inputs, $outputs)
+  }];
+}
+
 def Merk_UnifyWordOp : Merk_Op<"unify_word"> {
   let summary = "whether two words of a type are equal, by its type_info";
   let description = [{
