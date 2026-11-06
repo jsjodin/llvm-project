@@ -75,7 +75,11 @@ struct TermLayout {
   mlir::Type type;
   struct Functor {
     std::string name;
+    // The number of its cell's fields, of which the first `hidden` are an
+    // existentially typed constructor's type_infos and typeclass_infos
+    // (Merk_ConstructorAttr).
     unsigned arity;
+    unsigned hidden{0};
     // A constant's word, or a cell's primary tag and secondary tag.
     std::int64_t value{0};
     unsigned tag{0};
@@ -89,7 +93,8 @@ struct TermLayout {
 
   const Functor *Find(merk::FunctorAttr functor) const {
     for (const Functor &f : functors) {
-      if (f.name == functor.getName() && f.arity == functor.getArity()) {
+      if (f.name == functor.getName() &&
+          f.arity - f.hidden == functor.getArity()) {
         return &f;
       }
     }
@@ -247,6 +252,7 @@ private:
   llvm::LogicalResult LowerUnifyWord(merk::UnifyWordOp);
   llvm::LogicalResult LowerCompareWord(merk::CompareWordOp);
   void LowerStringCompare(merk::StringCompareOp);
+  void LowerCompareTypeInfo(merk::CompareTypeInfoOp);
   void LowerStringEqual(merk::StringEqualOp);
   void LowerForeignCall(merk::ForeignCallOp);
   void LowerEntry(merk::EntryOp);
@@ -385,6 +391,7 @@ llvm::LogicalResult Lowerer::Layouts() {
       functor.fields.assign(
           constructor.getFields().begin(), constructor.getFields().end());
       functor.arity = functor.fields.size();
+      functor.hidden = constructor.getHidden();
       if (functor.arity == 0) {
         functor.value = layout.kind == TermLayout::Kind::Enum
             ? constant
@@ -1193,7 +1200,7 @@ static std::optional<unsigned> DescriptorKind(llvm::StringRef kind) {
 // Each is { i8 kind, i8 flags, i16 arity, i32 functor count, ptr module,
 // ptr name, ptr unify, ptr compare, ptr functors, [8 x i16] byTag,
 // ptr constants, ptr shared }, and a functor { ptr name, i32 arity, i8 tag,
-// i32 secondary, i64 constant, ptr fields } (design document, "Type
+// i8 hidden, i32 secondary, i64 constant, ptr fields } (design document, "Type
 // descriptors", and runtime/write.cpp, which reads them).
 // A private constant global, whose initializer is made by `make`, which is given
 // the zero value and returns the value.
@@ -1228,8 +1235,11 @@ mlir::LLVM::GlobalOp Lowerer::I16Table(
 }
 
 // A field's type, in an initializer: a type parameter's number, tagged, or a
-// descriptor, or a static cell of one and its arguments' types, tagged. `cells`
-// has the cells made so far.
+// descriptor, or a static cell of one and its arguments' types, tagged, or
+// where an existentially typed constructor's cell has the type_info of an
+// existentially quantified type variable: its hidden field, and the word of
+// it if that is a typeclass_info, tagged 3 (runtime/write.cpp). `cells` has
+// the cells made so far.
 mlir::Value Lowerer::FieldTypeValue(mlir::Attribute type,
     llvm::DenseMap<mlir::Attribute, mlir::LLVM::GlobalOp> &cells) {
   auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
@@ -1238,6 +1248,12 @@ mlir::Value Lowerer::FieldTypeValue(mlir::Attribute type,
   if (auto number{mlir::dyn_cast<mlir::IntegerAttr>(type)}) {
     mlir::Value word{mlir::LLVM::ConstantOp::create(
         rewriter_, loc, i64, (number.getInt() << kTagBits) | 2)};
+    return mlir::LLVM::IntToPtrOp::create(rewriter_, loc, ptr, word);
+  }
+  if (auto hidden{mlir::dyn_cast<mlir::DenseI64ArrayAttr>(type)}) {
+    std::int64_t place{hidden[0] | (hidden[1] << 16)};
+    mlir::Value word{mlir::LLVM::ConstantOp::create(
+        rewriter_, loc, i64, (place << kTagBits) | 3)};
     return mlir::LLVM::IntToPtrOp::create(rewriter_, loc, ptr, word);
   }
   auto parts{mlir::cast<mlir::ArrayAttr>(type)};
@@ -1292,7 +1308,7 @@ llvm::LogicalResult Lowerer::LowerTypeCtors() {
           mlir::LLVM::LLVMArrayType::get(i16, kTags), ptr, ptr})};
   auto i64{rewriter_.getI64Type()};
   auto functorType{mlir::LLVM::LLVMStructType::getLiteral(
-      context, {ptr, i32, i8, i32, i64, ptr})};
+      context, {ptr, i32, i8, i8, i32, i64, ptr})};
   llvm::DenseMap<mlir::Attribute, mlir::LLVM::GlobalOp> fieldCells;
   for (auto op :
       llvm::make_early_inc_range(module_.getOps<merk::TypeCtorOp>())) {
@@ -1417,17 +1433,21 @@ llvm::LogicalResult Lowerer::LowerTypeCtors() {
                       functor ? static_cast<std::int32_t>(functor->tag) : 0),
                   loc);
               init = InsertAt(init, {index, 3},
+                  mlir::LLVM::ConstantOp::create(rewriter_, loc, i8,
+                      functor ? static_cast<std::int32_t>(functor->hidden) : 0),
+                  loc);
+              init = InsertAt(init, {index, 4},
                   mlir::LLVM::ConstantOp::create(rewriter_, loc, i32,
                       functor && functor->secondary
                           ? static_cast<std::int32_t>(*functor->secondary)
                           : -1),
                   loc);
-              init = InsertAt(init, {index, 4},
+              init = InsertAt(init, {index, 5},
                   mlir::LLVM::ConstantOp::create(
                       rewriter_, loc, i64, functor ? functor->value : 0),
                   loc);
               if (fields[i]) {
-                init = InsertAt(init, {index, 5},
+                init = InsertAt(init, {index, 6},
                     mlir::LLVM::AddressOfOp::create(rewriter_, loc, fields[i]),
                     loc);
               }
@@ -1567,6 +1587,16 @@ void Lowerer::LowerStringCompare(merk::StringCompareOp op) {
   auto i32{rewriter_.getI32Type()};
   auto call{mlir::LLVM::CallOp::create(rewriter_, op.getLoc(),
       RuntimeFunc("strcmp", i32, {ptr, ptr}),
+      mlir::ValueRange{op->getOperand(0), op->getOperand(1)})};
+  rewriter_.replaceOp(op, call.getResult());
+}
+
+void Lowerer::LowerCompareTypeInfo(merk::CompareTypeInfoOp op) {
+  rewriter_.setInsertionPoint(op);
+  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  auto i32{rewriter_.getI32Type()};
+  auto call{mlir::LLVM::CallOp::create(rewriter_, op.getLoc(),
+      RuntimeFunc("merk_compare_type_infos", i32, {ptr, ptr}),
       mlir::ValueRange{op->getOperand(0), op->getOperand(1)})};
   rewriter_.replaceOp(op, call.getResult());
 }
@@ -2358,16 +2388,16 @@ void Lowerer::LowerMrt() {
   }
 }
 
-// Reports an operation that dispatches on a type class if it would run on a
-// device: in a target region or a procedure one calls. Whether it did.
-static bool RejectDispatchOnDevice(mlir::Operation *op) {
+// Reports an operation that does `what`, which needs the host's runtime, if it
+// would run on a device: in a target region or a procedure one calls. Whether
+// it did.
+static bool RejectOnDevice(mlir::Operation *op, llvm::StringRef what) {
   auto proc{op->getParentOfType<merk::ProcOp>()};
   if (!op->getParentOfType<mlir::omp::TargetOp>() &&
       !(proc && proc->getDiscardableAttr("omp.declare_target"))) {
     return false;
   }
-  op->emitOpError("dispatches on a type class, which cannot be done on an "
-                  "OpenMP device yet");
+  op->emitOpError(what) << ", which cannot be done on an OpenMP device yet";
   return true;
 }
 
@@ -2394,10 +2424,15 @@ llvm::LogicalResult Lowerer::Lower() {
   // does not run there; a procedure a target region calls does.
   if (device_) {
     bool bad{false};
-    module_.walk(
-        [&](merk::CallMethodOp op) { bad = RejectDispatchOnDevice(op) || bad; });
-    module_.walk(
-        [&](merk::TypeclassInfoOp op) { bad = RejectDispatchOnDevice(op) || bad; });
+    module_.walk([&](merk::CallMethodOp op) {
+      bad = RejectOnDevice(op, "dispatches on a type class") || bad;
+    });
+    module_.walk([&](merk::TypeclassInfoOp op) {
+      bad = RejectOnDevice(op, "dispatches on a type class") || bad;
+    });
+    module_.walk([&](merk::CompareTypeInfoOp op) {
+      bad = RejectOnDevice(op, "compares types") || bad;
+    });
     if (bad) {
       return llvm::failure();
     }
@@ -2426,7 +2461,7 @@ llvm::LogicalResult Lowerer::Lower() {
             merk::TypeInfoWordOp, merk::TypeclassInfoOp,
             merk::TypeclassInfoWordOp, merk::CallMethodOp, merk::UnifyWordOp, merk::CompareWordOp,
             merk::StringCompareOp, merk::StringEqualOp,
-            merk::ForeignCallOp, merk::ArrayNewOp, merk::ArraySizeOp,
+            merk::CompareTypeInfoOp, merk::ForeignCallOp, merk::ArrayNewOp, merk::ArraySizeOp,
             merk::ArrayGetOp, merk::ArraySetOp, merk::ArrayFillOp,
             merk::ArrayCopyOp, merk::ArrayResizeOp>(op)) {
       ops.push_back(op);
@@ -2465,6 +2500,8 @@ llvm::LogicalResult Lowerer::Lower() {
       LowerStringCompare(stringCompare);
     } else if (auto stringEqual{mlir::dyn_cast<merk::StringEqualOp>(op)}) {
       LowerStringEqual(stringEqual);
+    } else if (auto types{mlir::dyn_cast<merk::CompareTypeInfoOp>(op)}) {
+      LowerCompareTypeInfo(types);
     } else if (auto foreign{mlir::dyn_cast<merk::ForeignCallOp>(op)}) {
       LowerForeignCall(foreign);
     } else if (!mlir::isa<merk::CallOp>(op)) {

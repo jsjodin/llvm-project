@@ -7,6 +7,7 @@ add_library(merkrt STATIC
   exception.cpp
   heap.cpp
   main.cpp
+  type-info.cpp
   write.cpp
   )
 set_target_properties(merkrt PROPERTIES

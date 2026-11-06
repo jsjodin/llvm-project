@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #include <array>
+#include "descriptor.h"
 #include <cinttypes>
 #include <cmath>
 #include <cstdint>
@@ -27,66 +28,7 @@ extern "C" void merk_write_float(double number);
 
 namespace {
 
-using Word = std::uint64_t;
-
-// The fields' order and types are lib/CodeGen/Lowering.cpp's LowerTypeCtors.
-struct Functor {
-  const char *name;
-  std::uint32_t arity;
-  std::uint8_t tag;
-  std::int32_t secondary;
-  std::int64_t constant;
-  const Word *fields;
-};
-
-struct TypeCtor {
-  std::uint8_t kind;
-  std::uint8_t flags;
-  std::uint16_t arity;
-  std::uint32_t functorCount;
-  const char *module;
-  const char *name;
-  const void *unify;
-  const void *compare;
-  const Functor *functors;
-  std::uint16_t byTag[8];
-  const std::uint16_t *constants;
-  const std::uint16_t *shared;
-};
-
-// The order of Lowering.cpp's DescriptorKind.
-enum Kind : std::uint8_t {
-  Int,
-  Uint,
-  Int8,
-  Int16,
-  Int32,
-  Int64,
-  Uint8,
-  Uint16,
-  Uint32,
-  Uint64,
-  Float,
-  Char,
-  String,
-  Array,
-  Dummy,
-  Void,
-  Enum,
-  NoTag,
-  Cells,
-  Tuple,
-};
-
-// byTag's marks, for a tag whose word is a constant, and for one that
-// constructors share.
-constexpr std::uint16_t kConstantTag{0xffff};
-constexpr std::uint16_t kSharedTag{0xfffe};
-
-constexpr Word kTagMask{7};
-constexpr unsigned kTagBits{3};
-// A field's type: a type_info, or a type parameter of its term's type.
-constexpr Word kVariableTag{2};
+using namespace merkurius::runtime;
 
 enum Specifier { FX, FY, FXY, XFX, XFY, YFX };
 
@@ -271,10 +213,14 @@ void PutChar(std::uint32_t c, bool quoted) {
   std::putc('\'', stdout);
 }
 
-// What a type parameter stands for, in the type whose arguments these are.
+// What a type parameter stands for, in the type whose arguments these are,
+// and, for the fields of an existentially typed constructor's cell, the cell,
+// whose hidden fields have the type_infos of its existentially quantified type
+// variables.
 struct Environment {
   const Word *arguments;
   const Environment *parent;
+  const Word *cell{nullptr};
 };
 
 // A type: its constructor, and its arguments, in the environment they were
@@ -285,9 +231,23 @@ struct Type {
 };
 
 Type Resolve(Word type, const Environment *environment) {
-  while ((type & kTagMask) == kVariableTag) {
-    type = environment->arguments[type >> kTagBits];
-    environment = environment->parent;
+  for (;;) {
+    if ((type & kTagMask) == kVariableTag) {
+      type = environment->arguments[type >> kTagBits];
+      environment = environment->parent;
+      continue;
+    }
+    if ((type & kTagMask) == kHiddenTag) {
+      Word place{type >> kTagBits};
+      type = environment->cell[place & 0xffff];
+      if (Word word{place >> 16}) {
+        type = reinterpret_cast<const Word *>(type)[word];
+      }
+      // A type_info has no type parameters.
+      environment = nullptr;
+      continue;
+    }
+    break;
   }
   if ((type & kTagMask) == 0) {
     return {reinterpret_cast<const TypeCtor *>(type), {nullptr, environment}};
@@ -350,12 +310,16 @@ const Functor *FunctorOf(Word &value, const TypeCtor *ctor, const Word *&fields)
     return &ctor->functors[ctor->constants[value >> kTagBits]];
   }
   const Word *cell{reinterpret_cast<const Word *>(value - tag)};
+  // An existentially typed constructor's arguments are after its hidden
+  // fields.
   if (index == kSharedTag) {
-    fields = cell + 1;
-    return &ctor->functors[ctor->shared[cell[0]]];
+    const Functor *functor{&ctor->functors[ctor->shared[cell[0]]]};
+    fields = cell + 1 + functor->hidden;
+    return functor;
   }
-  fields = cell;
-  return &ctor->functors[index];
+  const Functor *functor{&ctor->functors[index]};
+  fields = cell + functor->hidden;
+  return functor;
 }
 
 void WriteList(const Functor *functor, const Word *fields, const Type &type) {
@@ -390,7 +354,10 @@ void WriteTerm(Word term, const Type &type, int context) {
   const Functor *functor{FunctorOf(term, type.ctor, fields)};
   std::string_view name{functor->name};
   unsigned arity{functor->arity};
-  const Environment *environment{&type.environment};
+  Environment existential{type.environment.arguments,
+      type.environment.parent, fields - functor->hidden};
+  const Environment *environment{
+      functor->hidden != 0 ? &existential : &type.environment};
   if (arity == 0) {
     if (context < kAnyPriority && FirstOperator(name)) {
       std::putc('(', stdout);

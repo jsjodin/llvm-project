@@ -88,13 +88,18 @@ def Merk_TypeclassInfoType : TypeDef<Merk_Dialect, "TypeclassInfo"> {
 }
 
 // A constructor of a type, as merk.type_def lists them: its name and the
-// types of its arguments, none for a constant.
+// types of its cell's fields, none for a constant. An existentially typed
+// constructor's first `hidden` fields are the type_infos of its
+// existentially quantified type variables that its constraints do not
+// have, then the typeclass_infos of its constraints, as mmc's cells have
+// them; its arguments come after.
 def Merk_ConstructorAttr : AttrDef<Merk_Dialect, "Constructor"> {
   let mnemonic = "constructor";
-  let summary = "a constructor and its arguments' types";
+  let summary = "a constructor and its cell's fields' types";
   let parameters = (ins StringRefParameter<"its name">:$name,
-      OptionalArrayRefParameter<"mlir::Type">:$fields);
-  let assemblyFormat = "`<` $name (`(` $fields^ `)`)? `>`";
+      OptionalArrayRefParameter<"mlir::Type">:$fields,
+      DefaultValuedParameter<"unsigned", "0">:$hidden);
+  let assemblyFormat = "`<` $name (`(` $fields^ `)`)? (`hidden` $hidden^)? `>`";
 }
 
 // A constructor named by its name and arity, which together tell it from

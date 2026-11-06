@@ -343,6 +343,25 @@ def Merk_CompareWordOp : Merk_Op<"compare_word"> {
   let assemblyFormat = "$info `,` $x `,` $y attr-dict `:` type($result)";
 }
 
+def Merk_CompareTypeInfoOp : Merk_Op<"compare_type_info"> {
+  let summary = "how two types are ordered, by their type_infos";
+  let description = [{
+    Negative if the first is less, zero if they are the same type, and
+    positive if it is greater, in mmc's order: by the type constructors'
+    modules, names and arities, a primitive type's module being `builtin`
+    and a tuple's name `tuple`, and then by their arguments in order. An
+    existentially typed constructor's argument is compared by its type
+    first.
+
+    ```mlir
+    %c = merk.compare_type_info %t, %u
+    ```
+  }];
+  let arguments = (ins Merk_TypeInfoType:$x, Merk_TypeInfoType:$y);
+  let results = (outs I32:$result);
+  let assemblyFormat = "$x `,` $y attr-dict";
+}
+
 def Merk_StringCompareOp : Merk_Op<"string_compare"> {
   let summary = "how two strings are ordered, as C's strcmp";
   let description = [{
@@ -421,10 +440,13 @@ def Merk_ConstructOp : Merk_Op<"construct", [Pure]> {
   let summary = "a term of a constructor and its arguments";
   let description = [{
     X = f(Y1, ..., Yn), with X free: the term of the constructor with the
-    arguments, which are the constructor's arguments' types.
+    arguments, which are the constructor's arguments' types. An
+    existentially typed constructor's hidden fields' values come first
+    (Merk_ConstructorAttr).
 
     ```mlir
     %l = merk.construct #merk.functor<"[|]", 2>(%h, %t : i64, !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
+    %b = merk.construct #merk.functor<"box", 1>(%d, %x : !merk.typeclass_info, !merk.word) -> !merk.term<"m.box">
     ```
   }];
   let arguments = (ins Merk_FunctorAttr:$functor,
@@ -442,8 +464,9 @@ def Merk_DeconstructOp : Merk_Op<"deconstruct", [NoMemoryEffect]> {
   let description = [{
     X = f(Y1, ..., Yn), with X bound and the Yi free, where X is known to
     be of f: in a switch's case for f, or after merk.has_functor. Its
-    results are the arguments. It is not speculatable, since another
-    constructor's term has no such arguments.
+    results are the arguments, after an existentially typed constructor's
+    hidden fields. It is not speculatable, since another constructor's term
+    has no such arguments.
 
     ```mlir
     %h, %t = merk.deconstruct #merk.functor<"[|]", 2> %l : !merk.term<"list.list(int)"> -> i64, !merk.term<"list.list(int)">
