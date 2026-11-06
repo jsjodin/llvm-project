@@ -1395,7 +1395,14 @@ const Inst *InstOps::MergeNow(const Inst *a, const Inst *b, const Type *type) {
     const Inst *any{insts_.Any(u)};
     return Matches(a, any, type) && Matches(b, any, type) ? any : nullptr;
   }
-  // Higher-order insts that differ merge to ground, which both match.
+  // Higher-order insts that differ only in uniqueness, such as a lambda's
+  // unique one and that of a mode's final inst, merge to that inst; others
+  // merge to ground, which both match.
+  if (a->kind == InstKind::HigherOrder && b->kind == InstKind::HigherOrder &&
+      a->predOrFunc == b->predOrFunc && a->any == b->any &&
+      a->modes == b->modes && a->determinism == b->determinism) {
+    return insts_.HigherOrder(a->predOrFunc, a->any, a->modes, a->determinism, u);
+  }
   if (a->kind == InstKind::HigherOrder || b->kind == InstKind::HigherOrder) {
     return Merge(GroundIfHigherOrder(a), GroundIfHigherOrder(b), type);
   }
