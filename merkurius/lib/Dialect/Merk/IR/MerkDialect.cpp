@@ -191,8 +191,20 @@ llvm::LogicalResult SwitchOp::verify() {
 // ConstructOp and DeconstructOp
 //===----------------------------------------------------------------------===//
 
+// Whether a construction's or deconstruction's values of `types` are its
+// functor's arguments, after any type_infos and typeclass_infos of an
+// existentially typed constructor's hidden fields.
+static bool AreFields(mlir::TypeRange types, FunctorAttr functor) {
+  if (types.size() < functor.getArity()) {
+    return false;
+  }
+  return llvm::all_of(types.drop_back(functor.getArity()), [](mlir::Type type) {
+    return mlir::isa<TypeInfoType, TypeclassInfoType>(type);
+  });
+}
+
 llvm::LogicalResult ConstructOp::verify() {
-  if (getArguments().size() != getFunctor().getArity()) {
+  if (!AreFields(getArguments().getTypes(), getFunctor())) {
     return emitOpError("has ")
         << getArguments().size() << " arguments for a functor of arity "
         << getFunctor().getArity();
@@ -201,7 +213,7 @@ llvm::LogicalResult ConstructOp::verify() {
 }
 
 llvm::LogicalResult DeconstructOp::verify() {
-  if (getFields().size() != getFunctor().getArity()) {
+  if (!AreFields(getFields().getTypes(), getFunctor())) {
     return emitOpError("has ")
         << getFields().size() << " results for a functor of arity "
         << getFunctor().getArity();
