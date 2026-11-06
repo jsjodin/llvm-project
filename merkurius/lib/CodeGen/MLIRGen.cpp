@@ -565,6 +565,10 @@ private:
   void SetFromWord(BodyVar, mlir::Value word, const ProcedureBody &,
       mlir::Location);
   void IfThenElse(const Body &, const ProcedureBody &);
+  void Disjunction(const Body &, const ProcedureBody &);
+  void DisjunctionFrom(const Body &, std::size_t next, const ProcedureBody &);
+  void Ite(semantics::TokenRange, const Body &condition, const Body *thenPart,
+      llvm::function_ref<void()> otherwise, const ProcedureBody &);
   void Switch(const Body &, const ProcedureBody &);
   void Not(const Body &, const ProcedureBody &);
   // A goal with an OpenMP directive (design document, "Target regions").
@@ -868,6 +872,8 @@ static std::optional<merk::Determinism> MerkDeterminism(
     return merk::Determinism::Det;
   case parser::Determinism::CcMulti:
     return merk::Determinism::CcMulti;
+  case parser::Determinism::CcNondet:
+    return merk::Determinism::CcNondet;
   case parser::Determinism::Semidet:
     return merk::Determinism::Semidet;
   case parser::Determinism::Failure:
@@ -2804,7 +2810,7 @@ void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
       merk::FailOp::create(builder_, Location(goal.tokens));
       return;
     }
-    NotYet(Where(goal.tokens), "disjunctions");
+    Disjunction(goal, body);
     return;
   case BodyKind::IfThenElse:
     IfThenElse(goal, body);
@@ -4144,7 +4150,42 @@ void MerkGenerator::Join(mlir::Operation *op, llvm::ArrayRef<Branch> branches,
 }
 
 void MerkGenerator::IfThenElse(const Body &goal, const ProcedureBody &body) {
-  mlir::Location loc{Location(goal.tokens)};
+  Ite(goal.tokens, *goal.goals[0], goal.goals[1],
+      [&] { Goal(*goal.goals[2], body); }, body);
+}
+
+// A disjunction with at most one solution as the goals around it see it,
+// or in a context where only its first solution is wanted: the branches in
+// turn, as if-then-elses, each tried when the one before it fails. One
+// that may have to give its next solution, when a goal after it fails, is
+// nondeterministic.
+void MerkGenerator::Disjunction(const Body &goal, const ProcedureBody &body) {
+  auto determinism{body.goals.find(&goal)};
+  if (determinism == body.goals.end() ||
+      llvm::is_contained({parser::Determinism::Multi,
+                             parser::Determinism::Nondet},
+          determinism->second)) {
+    NotYet(Where(goal.tokens), "nondeterministic disjunctions");
+    return;
+  }
+  DisjunctionFrom(goal, 0, body);
+}
+
+void MerkGenerator::DisjunctionFrom(
+    const Body &goal, std::size_t next, const ProcedureBody &body) {
+  if (next + 1 == goal.goals.size()) {
+    Goal(*goal.goals[next], body);
+    return;
+  }
+  Ite(goal.tokens, *goal.goals[next], nullptr,
+      [&] { DisjunctionFrom(goal, next + 1, body); }, body);
+}
+
+// if condition then `then` (or true) else otherwise.
+void MerkGenerator::Ite(semantics::TokenRange tokens, const Body &condition,
+    const Body *thenPart, llvm::function_ref<void()> otherwise,
+    const ProcedureBody &body) {
+  mlir::Location loc{Location(tokens)};
   Values before{values_};
   auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
   llvm::SmallVector<Branch, 2> branches;
@@ -4152,7 +4193,7 @@ void MerkGenerator::IfThenElse(const Body &goal, const ProcedureBody &body) {
     mlir::OpBuilder::InsertionGuard guard{builder_};
     // The condition yields what it binds, to the then part.
     builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
-    Goal(*goal.goals[0], body);
+    Goal(condition, body);
     std::vector<BodyVar> bound{BoundSince(values_, before)};
     llvm::SmallVector<mlir::Value> yielded;
     for (BodyVar var : bound) {
@@ -4174,15 +4215,15 @@ void MerkGenerator::IfThenElse(const Body &goal, const ProcedureBody &body) {
       // analysis replaced with fail: the then part is never reached, so
       // only the else part binds the variables after the if-then-else.
       merk::FailOp::create(builder_, loc);
-    } else {
-      Goal(*goal.goals[1], body);
+    } else if (thenPart) {
+      Goal(*thenPart, body);
     }
     branches.push_back({&then, values_, Terminated()});
-    mlir::Block &otherwise{ite.getElseRegion().emplaceBlock()};
+    mlir::Block &otherwiseBlock{ite.getElseRegion().emplaceBlock()};
     values_ = before;
-    builder_.setInsertionPointToStart(&otherwise);
-    Goal(*goal.goals[2], body);
-    branches.push_back({&otherwise, values_, Terminated()});
+    builder_.setInsertionPointToStart(&otherwiseBlock);
+    otherwise();
+    branches.push_back({&otherwiseBlock, values_, Terminated()});
     if (failed_) {
       values_ = before;
       return;

@@ -77,7 +77,6 @@ no_for(N) :-
     %$omp parallel do
     ( fromto(N, I0, I1, 0) do I0 > 0, I1 = I0 - 1 ).
 % CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:7: error: a parallel do loop is counted by its for, so it cannot have a fromto that ends the loop
-% CHECK: omp-parallel-do-errors.m:[[@LINE-2]]:7: error: not yet implemented: code generation for disjunctions
 
 no_loop(N, M) :-
     %$omp parallel do

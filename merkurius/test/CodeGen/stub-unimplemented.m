@@ -23,17 +23,17 @@ main(!IO) :-
 
 :- pred q(int::in) is semidet.
 q(X) :-
-    ( X > 0 ; X < -5 ).
+    ( if ( Y = 1 ; Y = 2 ), Y > X then true else fail ).
 
 :- pred u(int::out) is multi.
 u(1).
 u(2).
 
 % OUTPUT:before
-% ERROR:Not yet implemented: stub_unimplemented.q_1_0: code generation for disjunctions
+% ERROR:Not yet implemented: stub_unimplemented.q_1_0: code generation for nondeterministic disjunctions
 
 % MERK: merk.proc private @stub_unimplemented.q_1_0(%arg0: i64) attributes {determinism = #merk.determinism<semidet>} {
-% MERK-NEXT: %[[WHAT:.*]] = merk.constant "stub_unimplemented.q_1_0: code generation for disjunctions" : !merk.string
+% MERK-NEXT: %[[WHAT:.*]] = merk.constant "stub_unimplemented.q_1_0: code generation for nondeterministic disjunctions" : !merk.string
 % MERK-NEXT: merk.foreign_call @merk_not_implemented(%[[WHAT]]) : (!merk.string) -> ()
 % MERK-NEXT: merk.fail
 % MERK-NOT: u_1_0
