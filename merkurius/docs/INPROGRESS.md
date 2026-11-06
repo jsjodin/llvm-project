@@ -319,7 +319,9 @@ program.
    build; (b) `pair` and `maybe`; (c) `list`; (d) the array predicates;
    (e) `io.command_line_arguments`. Done: (a), (b). (c) to (e) wait for
    the code generation that comes before them (below), so that `list` is
-   written plainly, with every mode working, rather than around stubs.
+   written plainly, with every mode working, rather than around stubs;
+   (c) comes once clauses for one mode and nondeterminism work, before
+   the collection of all solutions, which needs it.
 
    *Temporary, until code generation makes every procedure of the library*
    (decided 2026-11-06): the library's build passes `-fstub-unimplemented`,
@@ -360,9 +362,12 @@ later. In this order, each its own commit or commits:
    disjunctions, switches and if-then-elses with more than one solution,
    commits in committed choice procedures and goals with no outputs,
    conditions with more than one solution (soft cuts), and nondet and
-   multi lambda expressions, closures and higher-order calls. Next: the
-   collection of all solutions; then nondet methods and word copies of
-   nondet procedures, which are reported as not yet implemented.
+   multi lambda expressions, closures and higher-order calls. Next, in
+   lock step with the library they need (decided 2026-11-06): clauses for
+   one mode (item 2), then `list` (step 6 (c)), then the collection of all
+   solutions, whose `solutions/2` sorts with `list`; then nondet methods
+   and word copies of nondet procedures, which are reported as not yet
+   implemented.
 
    **Collecting all solutions** (decided 2026-11-06). The library's
    `solutions` module is written in Mercury on one builtin that pure
@@ -381,7 +386,10 @@ later. In this order, each its own commit or commits:
    `unsafe_promise_unique` for accumulators in `di`/`uo` modes.
 2. **What mode analysis does not check yet,** which code generation now
    reports: clauses for one mode, trace goals, and `try` and `atomic`
-   goals.
+   goals. Done: clauses for one mode, taken before the collection of all
+   solutions (decided 2026-11-06), as `list` needs them for modes such as
+   `reverse(out, in)`, and `solutions/2` needs `list`. Next: trace goals,
+   `try` and `atomic` goals, after the rest of item 1.
 3. **Open types,** `open(T)` and `closed(T)` (below): the `any` inst,
    variable cells and the trail. After nondeterminism, as backtracking
    undoes a binding through the trail.
@@ -392,7 +400,8 @@ later. In this order, each its own commit or commits:
    types in methods, closures and `foreign_proc`s, closures of methods,
    and unifications of terms with `string` or array arguments.
 
-Then steps 6 (c) to (e) and 7. `-fstub-unimplemented` goes when the library
+Then steps 6 (d), (e) and 7; (c), `list`, comes within item 1, before the
+collection of all solutions. `-fstub-unimplemented` goes when the library
 needs it no longer.
 
 ## Open types: `closed(T)`

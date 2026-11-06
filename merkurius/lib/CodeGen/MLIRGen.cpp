@@ -6628,8 +6628,6 @@ void MerkGenerator::StubBody(merk::ProcOp proc, parser::CharBlock at) {
 // What mode analysis does not check yet in an unchecked procedure's clauses.
 static llvm::StringRef UncheckedWhat(semantics::Unchecked reason) {
   switch (reason) {
-  case semantics::Unchecked::ModeSpecificClauses:
-    return "clauses for one mode";
   case semantics::Unchecked::ParallelConjunction:
     return "parallel conjunctions";
   case semantics::Unchecked::FieldClosure:

@@ -742,7 +742,7 @@ void LoopTranslator::TranslateClause(std::size_t index) {
   const ClauseForm *translated{QuantifyTranslated(
       *Make<ClauseForm>(form.tokens, form.kind, form.name, form.head, body, vars,
           form.typeQualifications, goals_,
-          llvm::ArrayRef<llvm::ArrayRef<VarId>>{}, form.modeSpecific),
+          llvm::ArrayRef<llvm::ArrayRef<VarId>>{}, form.modes),
       vars.size())};
   ClauseTypes &own{types_.clauses_[index]};
   own.clause = translated;
@@ -757,7 +757,7 @@ void LoopTranslator::TranslateClause(std::size_t index) {
         *Make<ClauseForm>(made->clause->tokens, made->clause->kind,
             made->clause->name, made->clause->head, made->clause->body, vars,
             llvm::ArrayRef<TypeQualification>{}, goals_,
-            llvm::ArrayRef<llvm::ArrayRef<VarId>>{}, false),
+            llvm::ArrayRef<llvm::ArrayRef<VarId>>{}),
         vars.size())};
     // The signature of the head's types, with the clause's type
     // variables.

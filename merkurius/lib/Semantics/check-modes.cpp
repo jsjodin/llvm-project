@@ -155,6 +155,16 @@ public:
   // manual, "Creating higher-order terms"). None if they have inst
   // variables.
   std::optional<std::vector<ArgMode>> LambdaModes(const Lambda &);
+  // Whether a clause is one of a procedure's: it is if it is for every
+  // mode, or for the procedure's; one whose modes are none of its
+  // predicate's is reported, and is for every mode, as in mmc.
+  bool ClauseOf(const ClauseForm &clause, const Procedure &procedure) const {
+    if (!clause.modeSpecific()) {
+      return true;
+    }
+    const Procedure *of{clauseProcedures_.lookup(&clause)};
+    return !of || of == &procedure;
+  }
   // Reports a loop, which mode analysis does not take yet, once.
   void LoopNotYet(const Loop &loop, parser::CharBlock at) {
     if (loops_.insert(&loop).second) {
@@ -221,6 +231,7 @@ private:
       std::vector<parser::CharBlock> &sources);
   void BuildProcedures(llvm::ArrayRef<parser::Item>, const ModuleSymbols &);
   void MatchForeignProcs(const parser::ParseTree &);
+  void MatchClauses();
   // What CheckInstForType keeps for one argument of a declaration.
   struct InstTypeWalk {
     const Symbol &symbol;
@@ -246,6 +257,8 @@ private:
   const ModeCheckOptions &options_;
   ConstructorTable constructors_;
   llvm::DenseSet<const Loop *> loops_; // reported as not checked yet
+  // The procedure of each clause for one mode that has one.
+  llvm::DenseMap<const ClauseForm *, const Procedure *> clauseProcedures_;
   // Whether the item converted is the module's own, whose errors are
   // reported.
   bool own_{true};
@@ -973,6 +986,48 @@ void ModeChecker::Run(const parser::ParseTree &tree) {
     result_.bySymbol_[procedure.symbol].push_back(&procedure);
   }
   MatchForeignProcs(tree);
+  MatchClauses();
+}
+
+// Each clause for one mode is of the procedure whose modes its head's
+// arguments' are (reference manual, "Different clauses for different
+// modes"), as a foreign_proc is.
+void ModeChecker::MatchClauses() {
+  for (const ClauseTypes &clause : types_.clauses()) {
+    const ClauseForm &form{*clause.clause};
+    // An instance's clause for one mode is reported by desugaring, and is
+    // for every mode.
+    if (!form.modeSpecific() || !clause.definition || clause.method) {
+      continue;
+    }
+    llvm::SmallVector<parser::Mode> modes;
+    for (const parser::Mode *mode : form.modes) {
+      modes.push_back(*mode);
+    }
+    std::optional<parser::Mode> resultMode;
+    if (form.kind == parser::PredOrFunc::Function) {
+      resultMode = modes.pop_back_val();
+    }
+    Declared declared{ConvertDeclaration(modes, resultMode, std::nullopt,
+        std::nullopt, {}, Source(form.tokens))};
+    // As a duplicate declaration is.
+    std::vector<ArgMode> erased{ErasedModes(declared.modes)};
+    const Procedure *found{nullptr};
+    for (const Procedure *procedure :
+        result_.bySymbol_.lookup(clause.definition)) {
+      if (ErasedModes(procedure->modes) == erased) {
+        found = procedure;
+      }
+    }
+    if (found) {
+      clauseProcedures_[&form] = found;
+    } else {
+      // mmc: "mode annotation specifies undeclared mode `q(out, out)'."
+      messages_.Say(Source(form.tokens),
+          "this clause is for a mode %s does not have"_err_en_US,
+          Text(*clause.definition));
+    }
+  }
 }
 
 // Each foreign_proc for C is of the procedure whose modes its arguments'
@@ -1417,6 +1472,7 @@ private:
   std::string InClause() const;
   Result CheckClauses(llvm::ArrayRef<ClauseModes>);
   const ClauseTypes &WithHeadUnifications(const ClauseTypes &);
+  const ClauseTypes &Failing(const ClauseTypes &);
   Result Check(const Goal &, InstMap &, const Live &);
   Result CheckLocked(const Goal &, InstMap &, const Live &);
   Result CheckGoal(const Goal &, InstMap &, const Live &);
@@ -1707,8 +1763,19 @@ std::pair<ProcedureChecker::Result, std::vector<ClauseModes>>
 ProcedureChecker::CheckOwn(const Procedure &procedure) {
   auto found{byPredicate_.find(procedure.symbol)};
   llvm::ArrayRef<const ClauseTypes *> own;
+  llvm::SmallVector<const ClauseTypes *> ofProcedure;
   if (found != byPredicate_.end()) {
-    own = found->second;
+    for (const ClauseTypes *clause : found->second) {
+      if (declarations_.ClauseOf(*clause->clause, procedure)) {
+        ofProcedure.push_back(clause);
+      }
+    }
+    // A procedure none of whose predicate's clauses is for its mode fails,
+    // as in mmc, which infers it failure.
+    if (ofProcedure.empty() && !found->second.empty()) {
+      ofProcedure.push_back(&Failing(*found->second.front()));
+    }
+    own = ofProcedure;
   }
   std::vector<ClauseModes> checked;
   Result r{CheckProcedure(procedure, own, checked)};
@@ -1735,10 +1802,6 @@ ProcedureChecker::Result ProcedureChecker::CheckProcedure(
   // mmc checks modes only after the types are right.
   if (llvm::any_of(own, [](const ClauseTypes *c) { return c->typeError; })) {
     return Unsupported(Unchecked::TypeErrors);
-  }
-  if (llvm::any_of(
-          own, [](const ClauseTypes *c) { return c->clause->modeSpecific; })) {
-    return Unsupported(Unchecked::ModeSpecificClauses);
   }
   Result r{Ok()};
   for (std::size_t n{0}; n < own.size(); ++n) {
@@ -1924,6 +1987,46 @@ const ClauseTypes &ProcedureChecker::WithHeadUnifications(
   for (GoalConstraint &constraint : constraints) {
     if (constraint.goal == form.goals) {
       constraint.goal = copy.goals;
+    }
+  }
+  typed.constraints =
+      arena.SaveArray(llvm::ArrayRef<GoalConstraint>{constraints});
+  return typed;
+}
+
+// A clause with the head of `clause` whose body is fail, the empty
+// disjunction.
+const ClauseTypes &ProcedureChecker::Failing(const ClauseTypes &clause) {
+  common::Arena &arena{result_.arena_};
+  const ClauseForm &form{*clause.clause};
+  const Disj &fail{result_.disjs_.emplace_back(
+      Disj{form.tokens, form.goals, llvm::ArrayRef<Goal>{}})};
+  std::vector<llvm::ArrayRef<VarId>> nonlocals{
+      form.nonlocals.begin(), form.nonlocals.end()};
+  nonlocals.push_back({});
+  ClauseForm &copy{result_.forms_.emplace_back(form)};
+  copy.body = &fail;
+  copy.goals = nonlocals.size();
+  copy.nonlocals = arena.SaveArray(
+      llvm::ArrayRef<llvm::ArrayRef<VarId>>{nonlocals});
+  std::vector<const Symbol *> symbols{
+      clause.symbols.begin(), clause.symbols.end()};
+  symbols.resize(copy.goals, nullptr);
+  std::vector<const parser::SymName *> names{
+      clause.names.begin(), clause.names.end()};
+  names.resize(copy.goals, nullptr);
+  ClauseTypes &typed{result_.clauseTypes_.emplace_back(clause)};
+  typed.clause = &copy;
+  typed.symbols = arena.SaveArray(llvm::ArrayRef<const Symbol *>{symbols});
+  typed.names =
+      arena.SaveArray(llvm::ArrayRef<const parser::SymName *>{names});
+  // Only the proofs of the declaration's existential constraints, which
+  // stand at the goal number after the goals, are still the clause's.
+  std::vector<GoalConstraint> constraints;
+  for (const GoalConstraint &constraint : clause.constraints) {
+    if (constraint.goal == form.goals) {
+      constraints.push_back(constraint);
+      constraints.back().goal = copy.goals;
     }
   }
   typed.constraints =
