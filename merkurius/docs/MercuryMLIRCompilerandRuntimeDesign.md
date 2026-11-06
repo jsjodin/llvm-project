@@ -2293,7 +2293,7 @@ A dispatcher never looks inside an existential payload; it can only forward it (
 
 ### Remote mailboxes, sendability and failure
 
-- **Handles.** A mailbox handle carries a node identifier besides the process, mailbox and generation numbers. Within a node, handles cannot be forged. Across nodes they must be unguessable, or anyone who can reach a node could send to it, so remote handles include a random secret. This is stronger than Erlang, where any connected node that knows the shared cookie can do anything.
+- **Handles.** A mailbox handle carries a node identifier and a place within the node, its host or one of its GPUs (GPU processes, below), besides the process, mailbox and generation numbers. Within a node, handles cannot be forged. Across nodes they must be unguessable, or anyone who can reach a node could send to it, so remote handles include a random secret. This is stronger than Erlang, where any connected node that knows the shared cookie can do anything.
 - **Closures** contain code addresses, so they can cross only between nodes running the same binary, which the handshake checks, encoded as procedure references. The compiler cannot tell a local mailbox from a remote one, so sending a closure to a node with a different binary raises an exception at the send.
 - **Failure.** Links and monitors work across nodes. Losing a connection delivers an exit or `down` message with a "node down" reason to everything watching a process on that node. The delivery guarantee is an open question; Erlang promises ordering between each pair of processes, but not delivery.
 
@@ -2356,16 +2356,26 @@ after processes and messaging on the CPU and after OpenMP offload, since it
 builds on both. This is the direction; how it works in detail is still to be
 designed.
 
-**A GPU is a node.** The design already has remote mailboxes and remote spawn
-("Remote mailboxes, sendability and failure" and "Remote spawn"
-above), and a GPU fits them as a node of its own:
+**A GPU is a place of its host's node.** The design already has remote
+mailboxes and remote spawn ("Remote mailboxes, sendability and failure" and
+"Remote spawn" above), and a GPU fits them as a place within a node: the
+node's host is one place and each of its GPUs another. A GPU shares its
+host's connections, handshake and security, and only the node's place table
+names it (decided 2026-11-06). Rejected: a GPU as a node of its own, which
+would give it connections and a handshake of its own though it reaches the
+rest of the world only through its host.
 
-- **Handles** carry the node identifier, so a mailbox on the GPU is named by a
-  value like any other, as the invariant "a mailbox handle is a value" allows.
+- **Handles** carry the node and the place, so a mailbox on the GPU is named
+  by a value like any other, as the invariant "a mailbox handle is a value"
+  allows (Handles, routing and places, below).
 - **Closures do not cross.** The device image is another binary, so closures
   are not sent, and a GPU process is spawned by its kind's name from its
   `:- process` declaration, as on a node running another program. `spawn`'s
-  closure form is not used for the GPU.
+  closure form is not used for the GPU. Later, since the device image is
+  compiled from the same source in the same compile, the procedures compiled
+  for both could share a table of procedure references, so that closures over
+  them cross between the places of one node, though not to a node running
+  another binary; the handle and wire formats should not rule this out.
 - **Messages are copied** into a flat buffer driven by the `type_info`, as
   `send` already deep-copies into a fragment. The sendability rule applies,
   and the GPU adds to what cannot cross: foreign handles, `io`, `store` and
@@ -2417,10 +2427,96 @@ mailboxes, timeouts other than polling, and garbage collection on the device.
   carry work items and results, not fine-grained traffic.
 
 **Later: GPU to GPU.** Two GPU processes on different devices exchange messages
-the same way, as two nodes. The first version relays them through the host;
+the same way, as two places. The first version relays them through the host;
 direct transfers over peer-to-peer PCIe, or AMD's Infinity Fabric links, need
 mailboxes in device memory that the other device maps, and are designed when
-that is added.
+that is added. Routing (below) chooses them where they exist, so programs do
+not change when they are added.
+
+#### Handles, routing and places
+
+A mailbox handle says where the mailbox's queue is, so that `send` can choose
+how to reach it, and a message can travel from a GPU to its host, to another
+node and on to a GPU there, without the program naming the path. Systems that
+let GPUs communicate address a flat rank instead: NVSHMEM and rocSHMEM put and
+get on a symmetric heap from device code, and GPU-aware MPI and NCCL are
+mostly driven from the host. Realm, Legion's runtime, is the closest: its ids
+for processors and memories encode the node and the kind of place, but it
+runs tasks rather than passing messages.
+
+**The handle** is small and fixed in size: the node id, the place, and the
+process, mailbox and generation numbers and the secret (Remote mailboxes,
+sendability and failure). What else is known about a node or a place is in
+tables that nodes exchange when they connect, as they exchange their type
+tables (Types instead of atoms).
+
+- **Node id.** A random 128-bit id chosen at start-up, with an incarnation
+  number, as Erlang's `creation`. Discovery maps it to the node's transports,
+  such as TCP, a Unix socket or later RDMA, so a node that reconnects or
+  changes transport keeps its handles valid. Rejected: an IP address and a
+  process number, since an address is not an identity: machines have several
+  interfaces, NAT and containers rewrite addresses, and process numbers are
+  reused.
+- **Place.** A small number into the node's place table, 0 for the host.
+  Each entry gives the place's kind, host or GPU, its architecture, such as
+  `gfx1030`, its OpenMP device number, and a stable physical identity, the
+  device's UUID or PCI address. Rejected: the OpenMP device number alone,
+  which depends on the process and on `ROCR_VISIBLE_DEVICES` or
+  `CUDA_VISIBLE_DEVICES`, so another node cannot interpret it. The physical
+  identity lets two nodes on one machine see that they share a GPU, or that
+  two GPUs are peers, which is what makes a direct path possible. OpenMP 6.0's
+  `omp_get_uid_from_device` and `omp_get_device_from_uid` may give it portably;
+  whether they do, and whether libomptarget implements them, is to be
+  checked; otherwise it comes from HSA or CUDA through an interop object.
+
+**Routing.** `send` compares the handle's node and place with its own:
+
+- **The same place:** the message is queued locally, as now.
+- **Another place of the same node:** from a device to the host over libc's
+  RPC; from the host to a device by writing into the mailbox's queue in device
+  memory; from a device to another device peer to peer where
+  `hipDeviceCanAccessPeer` allows it, and through the host otherwise.
+  `omp_target_memcpy` between two devices is a portable first version.
+- **Another node:** to the next hop of the node's route table, encoded once at
+  the source. Each hop forwards the bytes without decoding them (Opaque
+  payloads at relays), and only the destination decodes them; a GPU there gets
+  them from its host.
+
+Each node computes its route table at the handshake from the place tables.
+It is the only thing that changes when direct paths, such as GPUDirect RDMA,
+are added, and programs never see it.
+
+#### Send and receive in a target region
+
+A target region whose goal threads `io` may send and receive. It is then, in
+effect, a short-lived process on the device, beside the persistent GPU
+processes above. This comes after the restricted first version, whose limits
+it shares until they are lifted. Handles are flat values, so they are mapped into the region
+`to` as any other value.
+
+- **The launch does not block.** A region that waits for a message from a CPU
+  process of its own node would deadlock if the thread that launched it
+  waited for it and was the one that runs that process. A region that
+  communicates is launched asynchronously, as with `nowait`, and the Mercury
+  process that launched it is suspended until it completes; its thread goes
+  back to the scheduler.
+- **Only the sequential part sends and receives.** `io` threads through the
+  sequential part of the region, its initial thread in a generic kernel, and
+  there `send` and `receive` work as on the CPU. The iterations of a
+  `distribute parallel do` have no `io`, so they cannot. This is wanted: a
+  receive in an iteration depends on forward progress between teams, which
+  GPUs do not guarantee beyond the teams that fit at once, so a team could
+  wait for a message that only a team not yet running would send.
+- **Loops produce messages as values.** An iteration's messages are its
+  results, in an array or a reduction into an outbox, which the sequential
+  part then sends. Messages are batched, as their latency asks (Latency,
+  above), and nothing sends from each lane. Rejected: `send` from each lane,
+  which needs `io` in the iterations and contends for the RPC's ports.
+- **Mailboxes made in a region live as long as it does.** A message that
+  arrives after the region has ended goes to a mailbox nobody reads, as for
+  a closed mailbox; the generation number tells them apart.
+- **A kernel that faults** sends a `down` message to whatever monitors the
+  region's process, with a reason saying that its place failed.
 
 ### Security
 
