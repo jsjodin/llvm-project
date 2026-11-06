@@ -318,7 +318,9 @@ program.
    generation; `io.command_line_arguments`, which needs lists. In five
    commits: (a) `require`, and `-fstub-unimplemented` for the library's
    build; (b) `pair` and `maybe`; (c) `list`; (d) the array predicates;
-   (e) `io.command_line_arguments`. Done: (a), (b).
+   (e) `io.command_line_arguments`. Done: (a), (b). (c) to (e) wait for
+   the code generation that comes before them (below), so that `list` is
+   written plainly, with every mode working, rather than around stubs.
 
    *Temporary, until code generation makes every procedure of the library*
    (decided 2026-11-06): the library's build passes `-fstub-unimplemented`,
@@ -337,8 +339,39 @@ program.
    mmc, and the design document's sections on representation, the calling
    convention and the `merk` and `mrt` operations updated.
 
-Not in chunk 1: disjunctions and nondeterminism (an open question of its
-own), and the collector.
+Not in chunk 1: the collector.
+
+### Before the rest of step 6: code generation's gaps
+
+Decided 2026-11-06: code generation's gaps come before the rest of the
+library and the gate, so that the library is not written around them and
+the design has longer to be tested; working around them, as stubs or
+library code written for what code generation can make, would be undone
+later. In this order, each its own commit or commits:
+
+1. **Disjunctions and nondeterminism,** by continuation passing (design
+   document, Lowering, "Nondeterministic code"): first disjunctions that
+   bind nothing used after them, and those in committed-choice contexts,
+   which become chains of if-then-elses; then nondet and multi procedures
+   and calls, through success continuations that return `i1` "stop"; then
+   commits, where one solution of a nondet goal is wanted, in `cc_multi`
+   calls, conditions, negations and the collection of all solutions; then
+   nondet lambda expressions, closures, methods and word copies.
+2. **What mode analysis does not check yet,** which code generation now
+   reports: clauses for one mode, trace goals, and `try` and `atomic`
+   goals.
+3. **Open types,** `open(T)` and `closed(T)` (below): the `any` inst,
+   variable cells and the trail. After nondeterminism, as backtracking
+   undoes a binding through the trail.
+4. **Exceptions,** `throw` and `catch` with `invoke` and landing pads
+   (design document, Lowering, "Exceptions"), which also undo through the
+   trail.
+5. **Polymorphism's leftovers:** calls with hidden arguments, existential
+   types in methods, closures and `foreign_proc`s, closures of methods,
+   and unifications of terms with `string` or array arguments.
+
+Then steps 6 (c) to (e) and 7. `-fstub-unimplemented` goes when the library
+needs it no longer.
 
 ## Open types: `closed(T)`
 
