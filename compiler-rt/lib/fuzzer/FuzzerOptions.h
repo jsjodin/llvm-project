@@ -49,6 +49,8 @@ struct FuzzingOptions {
   bool OnlyASCII = false;
   bool Entropic = true;
   bool ForkCorpusGroups = false;
+  // Merkurius (local, not upstream): 0 means one per hardware thread.
+  int ForkLoadJobs = 0;
   size_t EntropicFeatureFrequencyThreshold = 0xFF;
   size_t EntropicNumberOfRarestFeatures = 100;
   bool EntropicScalePerExecTime = false;
