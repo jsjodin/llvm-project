@@ -9,12 +9,12 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module array, int, string.
+:- import_module array, int.
 
-:- pred len(string::in, int::out) is det.
-len(S, N) :-
+:- pred same(string::in, string::out) is det.
+same(S, T) :-
     %$omp target
-    N = string.length(S).
+    T = S.
 % CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: not yet implemented: code generation for values of type string in target regions
 
 :- pred first(array(string)::array_ui, string::out) is det.
@@ -48,7 +48,8 @@ twice(X, Y) :-
 % CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: not yet implemented: code generation for the parallel directive
 
 main(!IO) :-
-    len("abc", N),
+    same("abc", _),
+    N = 3,
     first(array.init(1, "a"), _),
     make(1, _),
     zero(array.init(1, 1), _),

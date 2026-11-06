@@ -4579,10 +4579,10 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     return ArrayBuiltin(goal, callee, arguments, body);
   }
   // Temporary (chunk 1 step 6, docs/INPROGRESS.md): modules of the library
-  // that are not compiled yet, whose monomorphic predicates on terms would
-  // otherwise be called. Step 6 compiles them, after polymorphism (step 4)
-  // and closures (step 5).
-  if (llvm::is_contained({"bool", "list"}, module)) {
+  // that are not compiled yet and whose predicates are not built in, which
+  // would otherwise be called and fail to link. Step 6 compiles them.
+  if (llvm::is_contained(
+          {"bool", "char", "exception", "list", "string", "univ"}, module)) {
     return LibraryCallNotYet(goal, symbol);
   }
   bool isFloat{module == "float"};
