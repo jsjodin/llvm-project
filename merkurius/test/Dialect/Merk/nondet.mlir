@@ -57,6 +57,35 @@ module @nd attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
     merk.succeed %first : i64
   }
 
+  // An if-then-else whose condition has more than one solution: the then
+  // part runs for each, and the else part only if there are none.
+  // CHECK-LABEL: merk.proc @nd.big_1_0(%arg0: i64) -> i64 attributes {determinism = #merk.determinism<multi>} {
+  // CHECK-NEXT: merk.soft_ite {
+  // CHECK-NEXT: merk.nondet_call @nd.digit_1_0() {
+  // CHECK: merk.solution %{{.*}} : i64
+  // CHECK: } then {
+  // CHECK-NEXT: ^bb0(%[[X:.*]]: i64):
+  // CHECK-NEXT: merk.succeed %[[X]] : i64
+  // CHECK-NEXT: } else {
+  // CHECK-NEXT: %[[ZERO:.*]] = merk.constant 0 : i64
+  // CHECK-NEXT: merk.succeed %[[ZERO]] : i64
+  merk.proc @nd.big_1_0(%min: i64) -> i64 attributes {determinism = #merk.determinism<multi>} {
+    merk.soft_ite {
+      merk.nondet_call @nd.digit_1_0() {
+      ^bb0(%x: i64):
+        %gt = arith.cmpi sgt, %x, %min : i64
+        merk.guard %gt
+        merk.solution %x : i64
+      }
+    } then {
+    ^bb0(%x: i64):
+      merk.succeed %x : i64
+    } else {
+      %zero = merk.constant 0 : i64
+      merk.succeed %zero : i64
+    }
+  }
+
   // The operations that outlining makes.
   // CHECK-LABEL: merk.proc @nd.give_0_0(%arg0: !merk.cont, %arg1: !merk.env)
   // CHECK-NEXT: %[[ONE:.*]] = merk.constant 1 : i64
@@ -106,6 +135,20 @@ module @nd attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 // LLVM: call tailcc i1 @nd.digit_1_0(ptr @nd.over_1_0.cont.0.cont.0, ptr %{{.*}})
 // LLVM-LABEL: define internal tailcc i1 @nd.over_1_0.cont.0.cont.0(ptr %0, i64 %1)
 // LLVM: icmp sgt i64 %1,
+// The then part of the soft cut sets the slot after the values it uses on
+// entry; the else part runs when the condition has no more solutions, if
+// the slot is not set.
+// LLVM-LABEL: define tailcc i1 @nd.big_1_0(i64 %0, ptr %1, ptr %2)
+// LLVM: %[[THEN:.*]] = alloca { ptr, ptr, i1 }
+// LLVM: %[[FOUND:.*]] = getelementptr { ptr, ptr, i1 }, ptr %[[THEN]], i32 0, i32 2
+// LLVM-NEXT: store i1 false, ptr %[[FOUND]]
+// LLVM: call tailcc i1 @nd.digit_1_0(ptr @nd.big_1_0.cont.1, ptr %{{.*}})
+// LLVM: load i1, ptr
+// LLVM-NEXT: xor i1 %{{.*}}, true
+// LLVM: musttail call tailcc i1 %1(ptr %2, i64 0)
+// LLVM-LABEL: define internal tailcc i1 @nd.big_1_0.cont.0(ptr %0, i64 %1)
+// LLVM-NEXT: %[[SET:.*]] = getelementptr { ptr, ptr, i1 }, ptr %0, i32 0, i32 2
+// LLVM-NEXT: store i1 true, ptr %[[SET]]
 // A call that passes on the continuation it was given is a tail call; one
 // that passes an environment in its own frame is not.
 // LLVM-LABEL: define tailcc i1 @nd.give_0_0(ptr %0, ptr %1)

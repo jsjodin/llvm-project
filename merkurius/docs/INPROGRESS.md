@@ -359,12 +359,11 @@ later. In this order, each its own commit or commits:
    disjunctions with at most one solution or in committed-choice contexts,
    and `cc_nondet` procedures; nondet and multi procedures, their calls,
    disjunctions, switches and if-then-elses with more than one solution,
-   and commits in committed choice procedures and goals with no outputs.
-   Next: conditions with more than one solution, whose then part runs for
-   each until one succeeds, which need a flag of whether the condition
-   succeeded; then the collection of all solutions, nondet lambda
-   expressions, closures, higher-order calls, methods and word copies,
-   which are reported as not yet implemented.
+   commits in committed choice procedures and goals with no outputs, and
+   conditions with more than one solution (soft cuts). Next: the
+   collection of all solutions; then nondet lambda expressions, closures,
+   higher-order calls, methods and word copies, which are reported as not
+   yet implemented.
 2. **What mode analysis does not check yet,** which code generation now
    reports: clauses for one mode, trace goals, and `try` and `atomic`
    goals.

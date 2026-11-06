@@ -26,6 +26,7 @@
 // RUN: not merkc -fc1 -emit-merk %t/nondet-call-type.mlir 2>&1 | FileCheck %s --check-prefix=NONDET-CALL-TYPE
 // RUN: not merkc -fc1 -emit-merk %t/solution.mlir 2>&1 | FileCheck %s --check-prefix=SOLUTION
 // RUN: not merkc -fc1 -emit-merk %t/solution-type.mlir 2>&1 | FileCheck %s --check-prefix=SOLUTION-TYPE
+// RUN: not merkc -fc1 -emit-merk %t/soft-ite-type.mlir 2>&1 | FileCheck %s --check-prefix=SOFT-ITE-TYPE
 
 //--- outputs.mlir
 // OUTPUTS: outputs.mlir:[[@LINE+3]]:5: error: 'merk.succeed' op has 0 outputs, but its procedure has 1
@@ -252,7 +253,7 @@ module {
 }
 
 //--- solution.mlir
-// SOLUTION: solution.mlir:[[@LINE+3]]:5: error: 'merk.solution' op is not in the generator of merk.each or merk.commit
+// SOLUTION: solution.mlir:[[@LINE+3]]:5: error: 'merk.solution' op is not in the generator of merk.each or merk.commit, or the condition of merk.soft_ite
 module {
   merk.proc @p() attributes {determinism = #merk.determinism<det>} {
     merk.solution
@@ -268,5 +269,27 @@ module {
       merk.solution %one : i32
     }
     merk.succeed %r : i64
+  }
+}
+
+//--- soft-ite-type.mlir
+// SOFT-ITE-TYPE: soft-ite-type.mlir:[[@LINE+6]]:9: error: 'merk.solution' op does not match the arguments of the then part
+module {
+  merk.proc @p() -> i64 attributes {determinism = #merk.determinism<multi>} {
+    merk.each {
+      merk.soft_ite {
+        %one = merk.constant 1 : i32
+        merk.solution %one : i32
+      } then {
+      ^bb0(%x: i64):
+        merk.solution %x : i64
+      } else {
+        %two = merk.constant 2 : i64
+        merk.solution %two : i64
+      }
+    } then {
+    ^bb0(%y: i64):
+      merk.succeed %y : i64
+    }
   }
 }

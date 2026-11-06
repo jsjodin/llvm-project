@@ -579,6 +579,9 @@ private:
   void Commit(const Body &, const ProcedureBody &);
   // A disjunction with more than one solution, as merk.disj in merk.each.
   void NondetDisjunction(const Body &, const ProcedureBody &);
+  // An if-then-else whose condition has more than one solution, as
+  // merk.soft_ite in merk.each.
+  void SoftIte(const Body &, const ProcedureBody &);
   // Starts merk.each, for a goal with branches of which one or more has
   // more than one solution, and generates the goal in its generator.
   merk::EachOp BeginEach(mlir::Location);
@@ -4218,8 +4221,7 @@ void MerkGenerator::Join(mlir::Operation *op, llvm::ArrayRef<Branch> branches,
 
 void MerkGenerator::IfThenElse(const Body &goal, const ProcedureBody &body) {
   if (Nondeterministic(*goal.goals[0], body)) {
-    NotYet(Where(goal.goals[0]->tokens),
-        "conditions with more than one solution");
+    SoftIte(goal, body);
     return;
   }
   Ite(goal.tokens, *goal.goals[0], goal.goals[1],
@@ -4266,6 +4268,58 @@ void MerkGenerator::NondetDisjunction(const Body &goal, const ProcedureBody &bod
     return;
   }
   Join(disj, branches, before, loc, each);
+}
+
+// The if-then-else has the then part's solutions for each of the
+// condition's, so it has more than one too, and its then and else parts give
+// theirs to the continuation that they share. In merk.commit, it gives the
+// first of them.
+void MerkGenerator::SoftIte(const Body &goal, const ProcedureBody &body) {
+  mlir::Location loc{Location(goal.tokens)};
+  Values before{values_};
+  merk::EachOp each{BeginEach(loc)};
+  auto ite{merk::SoftIteOp::create(builder_, loc)};
+  llvm::SmallVector<Branch, 2> branches;
+  {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    // Each solution of the condition gives what it binds to the then part,
+    // which PruneSolutions leaves out of if the then part does not use it.
+    builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
+    Goal(*goal.goals[0], body);
+    std::vector<BodyVar> bound;
+    llvm::SmallVector<mlir::Value> given;
+    for (BodyVar var : BoundSince(values_, before)) {
+      if (mlir::Value value{values_.lookup(var)}) {
+        bound.push_back(var);
+        given.push_back(value);
+      }
+    }
+    bool conditionFails{Terminated()};
+    if (!conditionFails) {
+      merk::SolutionOp::create(builder_, loc, given);
+    }
+    mlir::Block &then{ite.getThenRegion().emplaceBlock()};
+    values_ = before;
+    for (auto [var, value] : llvm::zip(bound, given)) {
+      values_[var] = then.addArgument(value.getType(), loc);
+    }
+    builder_.setInsertionPointToStart(&then);
+    if (conditionFails) {
+      merk::FailOp::create(builder_, loc);
+    } else {
+      Goal(*goal.goals[1], body);
+    }
+    branches.push_back({builder_.getInsertionBlock(), values_, Terminated()});
+    values_ = before;
+    builder_.setInsertionPointToStart(&ite.getElseRegion().emplaceBlock());
+    Goal(*goal.goals[2], body);
+    branches.push_back({builder_.getInsertionBlock(), values_, Terminated()});
+  }
+  if (failed_) {
+    values_ = before;
+    return;
+  }
+  Join(ite, branches, before, loc, each);
 }
 
 merk::EachOp MerkGenerator::BeginEach(mlir::Location loc) {
@@ -4320,7 +4374,7 @@ bool MerkGenerator::NeedsCommit(const Body &goal, const ProcedureBody &body) {
   case BodyKind::Disj:
     return anyNondet(goal.goals);
   case BodyKind::IfThenElse:
-    return anyNondet(llvm::ArrayRef<const Body *>{goal.goals}.drop_front());
+    return anyNondet(goal.goals);
   case BodyKind::Switch:
     return llvm::any_of(goal.cases, [&](const semantics::SwitchCase &c) {
       return Nondeterministic(*c.goal, body);

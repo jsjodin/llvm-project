@@ -15,12 +15,15 @@
 // call or merk.each becomes a continuation procedure, whose environment
 // holds the values it uses, in the frame of the code it came from; the
 // generator of merk.commit becomes a procedure that stores its first
-// solution in its environment and stops.
+// solution in its environment and stops; the then part of merk.soft_ite
+// becomes a continuation that records in its environment that the condition
+// has a solution, which the else part is tried after only if it has none.
 //
 //===----------------------------------------------------------------------===//
 
 #include "merkurius/CodeGen/Lowering.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "llvm/ADT/SetVector.h"
@@ -48,6 +51,7 @@ private:
   void Rewrite(mlir::Region &, const Sink *succeed, const Sink *solution);
   void RewriteCall(merk::NondetCallOp, const Sink *succeed, const Sink *solution);
   void RewriteEach(merk::EachOp, const Sink *succeed, const Sink *solution);
+  void RewriteSoftIte(merk::SoftIteOp, const Sink *succeed, const Sink *solution);
   void RewriteCommit(merk::CommitOp);
   void Deliver(mlir::Operation *end, mlir::ValueRange values, const Sink &);
   merk::ProcOp Outline(mlir::Region &, llvm::ArrayRef<mlir::Type> slots,
@@ -66,7 +70,8 @@ private:
 };
 
 // The merk.solution operations that give the solutions of a generator: not
-// those of a merk.commit in it, but those of a merk.each's continuation.
+// those of a merk.commit in it, but those of a merk.each's continuation, and
+// those of a merk.soft_ite's then and else parts rather than its condition.
 void Solutions(mlir::Region &region, llvm::SmallVectorImpl<merk::SolutionOp> &out) {
   for (mlir::Block &block : region) {
     for (mlir::Operation &op : block) {
@@ -74,6 +79,9 @@ void Solutions(mlir::Region &region, llvm::SmallVectorImpl<merk::SolutionOp> &ou
         out.push_back(solution);
       } else if (auto each{mlir::dyn_cast<merk::EachOp>(op)}) {
         Solutions(each.getContinuation(), out);
+      } else if (auto ite{mlir::dyn_cast<merk::SoftIteOp>(op)}) {
+        Solutions(ite.getThenRegion(), out);
+        Solutions(ite.getElseRegion(), out);
       } else if (!mlir::isa<merk::CommitOp>(op)) {
         for (mlir::Region &inner : op.getRegions()) {
           Solutions(inner, out);
@@ -84,9 +92,9 @@ void Solutions(mlir::Region &region, llvm::SmallVectorImpl<merk::SolutionOp> &ou
 }
 
 // Leaves out of a generator's solutions the values that nothing uses: the
-// arguments of merk.each's continuation that it does not use, and the
-// results of merk.commit that nothing uses, which code generation gives for
-// every variable the goal binds.
+// arguments of merk.each's continuation or of merk.soft_ite's then part that
+// it does not use, and the results of merk.commit that nothing uses, which
+// code generation gives for every variable the goal binds.
 void Prune(mlir::Operation *op, mlir::Region &generator,
     llvm::ArrayRef<bool> dead) {
   llvm::SmallVector<merk::SolutionOp> solutions;
@@ -103,19 +111,22 @@ void Prune(mlir::Operation *op, mlir::Region &generator,
 void PruneUnused(mlir::ModuleOp module) {
   llvm::SmallVector<mlir::Operation *> ops;
   module.walk([&](mlir::Operation *op) {
-    if (mlir::isa<merk::EachOp, merk::CommitOp>(op)) {
+    if (mlir::isa<merk::EachOp, merk::SoftIteOp, merk::CommitOp>(op)) {
       ops.push_back(op); // the inner ones first
     }
   });
   mlir::OpBuilder builder{module.getContext()};
   for (mlir::Operation *op : ops) {
-    if (auto each{mlir::dyn_cast<merk::EachOp>(op)}) {
-      mlir::Block &continuation{each.getContinuation().front()};
+    auto each{mlir::dyn_cast<merk::EachOp>(op)};
+    auto ite{mlir::dyn_cast<merk::SoftIteOp>(op)};
+    if (each || ite) {
+      mlir::Block &continuation{
+          each ? each.getContinuation().front() : ite.getThenRegion().front()};
       llvm::SmallVector<bool> dead;
       for (mlir::BlockArgument argument : continuation.getArguments()) {
         dead.push_back(argument.use_empty());
       }
-      Prune(each, each.getGenerator(), dead);
+      Prune(op, each ? each.getGenerator() : ite.getCondition(), dead);
       for (unsigned i = continuation.getNumArguments(); i-- > 0;) {
         if (dead[i]) {
           continuation.eraseArgument(i);
@@ -200,6 +211,8 @@ void Outliner::Rewrite(
         RewriteCall(call, succeed, solution);
       } else if (auto each{mlir::dyn_cast<merk::EachOp>(op)}) {
         RewriteEach(each, succeed, solution);
+      } else if (auto ite{mlir::dyn_cast<merk::SoftIteOp>(op)}) {
+        RewriteSoftIte(ite, succeed, solution);
       } else if (auto commit{mlir::dyn_cast<merk::CommitOp>(op)}) {
         RewriteCommit(commit);
       } else {
@@ -283,6 +296,51 @@ void Outliner::RewriteEach(
   block->getOperations().splice(each->getIterator(),
       each.getGenerator().front().getOperations());
   each.erase();
+}
+
+// The then part becomes a continuation whose environment has a slot after
+// the values it uses, which it sets on entry: that the condition has a
+// solution. The condition runs in the place of merk.soft_ite, giving its
+// solutions to it, as the first branch of a disjunction whose second, run
+// when the condition has no more, is the else part if the slot is not set.
+void Outliner::RewriteSoftIte(
+    merk::SoftIteOp ite, const Sink *succeed, const Sink *solution) {
+  mlir::Location loc{ite.getLoc()};
+  mlir::Type i1{builder_.getI1Type()};
+  Rewrite(ite.getThenRegion(), succeed, solution);
+  llvm::SmallVector<mlir::Value> captures;
+  mlir::ArrayAttr layout;
+  merk::ProcOp proc{Outline(ite.getThenRegion(), {i1}, captures, layout)};
+  mlir::IntegerAttr found{
+      builder_.getI32IntegerAttr(static_cast<int32_t>(captures.size()))};
+  mlir::Block &entry{proc.getBody().front()};
+  builder_.setInsertionPointToStart(&entry);
+  merk::EnvSetOp::create(builder_, loc, entry.getArgument(0), found,
+      mlir::arith::ConstantIntOp::create(builder_, loc, i1, 1), layout);
+  builder_.setInsertionPoint(ite);
+  Sink inner;
+  inner.env = MakeEnv(loc, captures, layout);
+  merk::EnvSetOp::create(builder_, loc, inner.env, found,
+      mlir::arith::ConstantIntOp::create(builder_, loc, i1, 0), layout);
+  inner.cont = merk::ContRefOp::create(builder_, loc,
+      merk::ContType::get(builder_.getContext()), proc.getSymName());
+  Rewrite(ite.getCondition(), succeed, &inner);
+  Rewrite(ite.getElseRegion(), succeed, solution);
+  builder_.setInsertionPoint(ite);
+  auto disj{merk::DisjOp::create(builder_, loc, 2)};
+  mlir::Block &first{disj.getBranches()[0].emplaceBlock()};
+  first.getOperations().splice(
+      first.end(), ite.getCondition().front().getOperations());
+  mlir::Block &second{disj.getBranches()[1].emplaceBlock()};
+  builder_.setInsertionPointToStart(&second);
+  mlir::Value isSet{merk::EnvGetOp::create(builder_, loc, i1, inner.env, found,
+      layout)};
+  merk::GuardOp::create(builder_, loc,
+      mlir::arith::XOrIOp::create(builder_, loc, isSet,
+          mlir::arith::ConstantIntOp::create(builder_, loc, i1, 1)));
+  second.getOperations().splice(
+      second.end(), ite.getElseRegion().front().getOperations());
+  ite.erase();
 }
 
 void Outliner::RewriteCommit(merk::CommitOp commit) {
