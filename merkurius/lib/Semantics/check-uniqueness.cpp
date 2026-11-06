@@ -356,9 +356,17 @@ void UniquenessChecker::Walk(
     // backtracking into one runs it again; mmc takes as used after the
     // condition only what the then part uses, and after the then and else
     // parts nothing (see the design document's register).
+    // Where only the first solution is wanted, though, nothing after the
+    // condition is run again by backtracking into it unless something after
+    // it can fail, as in mmc.
     Vars afterCondition{mmc_ ? Vars{} : live}, afterParts{afterCondition};
-    const Vars &inThen{Uses(then)};
-    afterCondition.insert(inThen.begin(), inThen.end());
+    bool reentered{!committed_ || failsAfter || CanFail(then)};
+    if (reentered) {
+      const Vars &inThen{Uses(then)};
+      afterCondition.insert(inThen.begin(), inThen.end());
+    } else {
+      afterCondition.clear();
+    }
     Walk(condition, afterCondition, failsAfter || CanFail(then));
     if (!mmc_ && !error_ && mostly_ != mostly) {
       // Again, without them, for what the then part starts from.
