@@ -908,6 +908,19 @@ static std::optional<merk::Determinism> MerkDeterminism(
   }
 }
 
+// That of a procedure, lambda expression or closure, which may have more
+// than one solution.
+static std::optional<merk::Determinism> ClosureDeterminism(
+    parser::Determinism determinism) {
+  if (determinism == parser::Determinism::Nondet) {
+    return merk::Determinism::Nondet;
+  }
+  if (determinism == parser::Determinism::Multi) {
+    return merk::Determinism::Multi;
+  }
+  return MerkDeterminism(determinism);
+}
+
 // Which type variables of `count` the constraints have: those have their
 // type_infos in the typeclass_infos.
 static llvm::SmallVector<bool> ConstrainedVariables(
@@ -1691,12 +1704,7 @@ merk::ProcOp MerkGenerator::ProcFor(const Procedure &procedure,
       determinism_.DeterminismOf(procedure)};
   std::optional<merk::Determinism> merkDeterminism;
   if (determinism) {
-    merkDeterminism = MerkDeterminism(*determinism);
-    if (*determinism == parser::Determinism::Nondet) {
-      merkDeterminism = merk::Determinism::Nondet;
-    } else if (*determinism == parser::Determinism::Multi) {
-      merkDeterminism = merk::Determinism::Multi;
-    }
+    merkDeterminism = ClosureDeterminism(*determinism);
   }
   if (!merkDeterminism) {
     NotYet(at,
@@ -2353,15 +2361,29 @@ merk::ProcOp MerkGenerator::ClosureEntry(merk::ProcOp proc, unsigned captured,
       values.push_back(Coerce(value, types[values.size()], loc));
     }
   }
-  auto call{merk::CallOp::create(builder_, loc,
-      proc.getFunctionType().getResults(), proc.getSymName(), values)};
+  // A nondet or multi procedure's solutions are the entry's, in words.
+  mlir::ValueRange given;
+  if (proc.getDeterminism() == merk::Determinism::Nondet ||
+      proc.getDeterminism() == merk::Determinism::Multi) {
+    auto call{merk::NondetCallOp::create(builder_, loc, proc.getSymName(), values)};
+    mlir::Block &continuation{call.getContinuation().emplaceBlock()};
+    for (mlir::Type type : proc.getFunctionType().getResults()) {
+      continuation.addArgument(type, loc);
+    }
+    builder_.setInsertionPointToStart(&continuation);
+    given = continuation.getArguments();
+  } else {
+    given = merk::CallOp::create(builder_, loc,
+        proc.getFunctionType().getResults(), proc.getSymName(), values)
+                  .getResults();
+  }
   llvm::SmallVector<mlir::Value> results;
   unsigned result{0};
   for (const ClosureArgument &argument : arguments) {
     if (argument.output) {
       results.push_back(argument.dummy
               ? ZeroWord(loc)
-              : Coerce(call.getResult(result++), word, loc));
+              : Coerce(given[result++], word, loc));
     }
   }
   merk::SucceedOp::create(builder_, loc, results);
@@ -2518,7 +2540,7 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
   mlir::Location loc{Location(goal.tokens)};
   llvm::ArrayRef<semantics::ArgMode> modes{goal.modes->lambda};
   std::optional<merk::Determinism> determinism{
-      MerkDeterminism(goal.modes->determinism)};
+      ClosureDeterminism(goal.modes->determinism)};
   if (!determinism) {
     NotYet(at,
         std::string{semantics::DeterminismName(goal.modes->determinism)} +
@@ -2761,10 +2783,6 @@ void MerkGenerator::NameClosure(const Body &goal, const ProcedureBody &body) {
     return;
   }
   if (!entry) {
-    if (Nondeterministic(callee)) {
-      NotYet(at, "closures of nondet and multi procedures");
-      return;
-    }
     // A procedure of this module is called through its word copy.
     const ProcedureBody *copyable{CopyableBody(callee)};
     merk::ProcOp proc{copyable ? WordProcFor(*copyable) : ProcFor(callee, types, at)};
@@ -2799,7 +2817,7 @@ void MerkGenerator::HigherOrderCall(const Body &goal, const ProcedureBody &body)
     return;
   }
   std::optional<merk::Determinism> determinism{
-      MerkDeterminism(goal.modes->determinism)};
+      ClosureDeterminism(goal.modes->determinism)};
   if (!determinism) {
     NotYet(at,
         std::string{semantics::DeterminismName(goal.modes->determinism)} +
@@ -2830,15 +2848,30 @@ void MerkGenerator::HigherOrderCall(const Body &goal, const ProcedureBody &body)
               : Coerce(ValueOf(argument), word, loc));
     }
   }
-  auto call{merk::CallClosureOp::create(builder_, loc,
-      llvm::SmallVector<mlir::Type>(outputs.size(), word), closure, inputs,
-      *determinism)};
+  // A nondet or multi closure runs the rest of the code, in its
+  // continuation, for each of its solutions.
+  mlir::ValueRange results;
+  if (*determinism == merk::Determinism::Nondet ||
+      *determinism == merk::Determinism::Multi) {
+    auto call{merk::NondetCallClosureOp::create(builder_, loc, closure, inputs)};
+    mlir::Block &continuation{call.getContinuation().emplaceBlock()};
+    for (std::size_t i{0}; i < outputs.size(); ++i) {
+      continuation.addArgument(word, loc);
+    }
+    builder_.setInsertionPointToStart(&continuation);
+    results = continuation.getArguments();
+  } else {
+    auto call{merk::CallClosureOp::create(builder_, loc,
+        llvm::SmallVector<mlir::Type>(outputs.size(), word), closure, inputs,
+        *determinism)};
+    results = call.getResults();
+  }
   if (goal.modes->determinism == parser::Determinism::Erroneous ||
       goal.modes->determinism == parser::Determinism::Failure) {
     merk::FailOp::create(builder_, loc);
     return;
   }
-  for (auto [var, result] : llvm::zip_equal(outputs, call.getResults())) {
+  for (auto [var, result] : llvm::zip_equal(outputs, results)) {
     SetFromWord(var, result, body, loc);
   }
   for (auto [var, value] : bound) {
@@ -4369,6 +4402,10 @@ bool MerkGenerator::NeedsCommit(const Body &goal, const ProcedureBody &body) {
   case BodyKind::Unify:
     return goal.unify == UnifyKind::Call && goal.modes && goal.modes->callee &&
         Nondeterministic(*goal.modes->callee);
+  case BodyKind::HOCall:
+    return goal.modes &&
+        (goal.modes->determinism == parser::Determinism::Nondet ||
+            goal.modes->determinism == parser::Determinism::Multi);
   case BodyKind::Conj:
   case BodyKind::Scope:
   case BodyKind::Disj:

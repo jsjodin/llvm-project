@@ -309,8 +309,7 @@ program.
    `merk.call_closure` (D7), lambda expressions, closures of named and
    built-in procedures, higher-order calls in constant stack through word
    copies, `pred/N` and `func/N` type_infos, and `io.write_list` (design
-   document, Lowering, "Closures"). Left: nondet lambda expressions,
-   closures of methods, tail calls through imported procedures' closures,
+   document, Lowering, "Closures"). Left: closures of methods, tail calls through imported procedures' closures,
    `io.write_list` to a stream; the library's other higher-order
    predicates, such as `int.fold_up`, come with step 6.
 6. **The library on terms.** `list`, `maybe` and `pair` compiled, and the
@@ -359,11 +358,27 @@ later. In this order, each its own commit or commits:
    disjunctions with at most one solution or in committed-choice contexts,
    and `cc_nondet` procedures; nondet and multi procedures, their calls,
    disjunctions, switches and if-then-elses with more than one solution,
-   commits in committed choice procedures and goals with no outputs, and
-   conditions with more than one solution (soft cuts). Next: the
-   collection of all solutions; then nondet lambda expressions, closures,
-   higher-order calls, methods and word copies, which are reported as not
-   yet implemented.
+   commits in committed choice procedures and goals with no outputs,
+   conditions with more than one solution (soft cuts), and nondet and
+   multi lambda expressions, closures and higher-order calls. Next: the
+   collection of all solutions; then nondet methods and word copies of
+   nondet procedures, which are reported as not yet implemented.
+
+   **Collecting all solutions** (decided 2026-11-06). The library's
+   `solutions` module is written in Mercury on one builtin that pure
+   Mercury cannot express, carrying an accumulator across backtracking:
+   `builtin_aggregate(Generator, Step, Acc0, Acc)`, which code generation
+   makes `merk.aggregate`, whose generator's solutions go to a region that
+   takes each with the accumulator and gives the next. Outlining keeps the
+   accumulator in a slot of an environment in the caller's frame, as a
+   soft cut's flag, which the continuation updates before it asks for the
+   next solution. `solutions/2` sorts with `list.sort_and_remove_dups`,
+   written in Mercury on `compare`. Rejected: `solutions.m` in plain
+   Mercury on a mutable heap cell updated by impure `foreign_proc`s in a
+   failure-driven loop, which needs no compiler construct but allocates
+   a cell for each collection, updates the heap destructively, which the
+   collector's write barrier must then see, and needs
+   `unsafe_promise_unique` for accumulators in `di`/`uo` modes.
 2. **What mode analysis does not check yet,** which code generation now
    reports: clauses for one mode, trace goals, and `try` and `atomic`
    goals.
