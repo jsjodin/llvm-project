@@ -20,8 +20,11 @@
 #
 # The sources compile in parallel through a generated ninja file, and only
 # those that changed since the last run are recompiled. The fuzzers run in
-# libFuzzer's fork mode, which keeps a corpus small: it adds an input to
-# the corpus only when the input covers something new.
+# libFuzzer's fork mode, which adds an input to the corpus only when the
+# input covers a new feature. Features are many more than edges, so a
+# corpus still grows with every run, and so does the time to load it;
+# distill-term-corpus.sh, run before fuzzing, distills a corpus that has
+# doubled since it was last distilled.
 #
 # The corpora, crashes, the logs and the fuzzer itself live in
 # $BUILD_DIR/fuzz/term: corpus, artifacts and fuzz.log for the small
@@ -85,6 +88,9 @@ if [[ ! -d "$WORK/corpus-large" ]]; then
 fi
 find "$MERKURIUS_DIR/test" "$MERKURIUS_DIR/utils" -name '*.m' \
   -exec cp {} "$WORK/corpus/" \; -exec cp {} "$WORK/corpus-large/" \;
+# A corpus that has doubled since it was last distilled is distilled again,
+# so that loading it stays fast.
+BUILD_DIR="$BUILD_DIR" "$MERKURIUS_DIR/utils/fuzz/distill-term-corpus.sh"
 
 cd "$WORK"
 # The fuzzers, by name: their process groups, their logs, the times they
