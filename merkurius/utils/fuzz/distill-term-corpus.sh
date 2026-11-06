@@ -4,10 +4,10 @@
 # -merge=1. A fork mode fuzzer adds an input to its corpus whenever it
 # covers a new feature, and features are many more than edges, so a corpus
 # grows with every run, and so does the time to load it: every input is run
-# once, in one process, before fuzzing starts. A distilled corpus covers
-# the same with fewer inputs, so it loads faster: the first distillation
-# kept about two thirds of the small corpus and three quarters of the
-# large one.
+# once before fuzzing starts, though our libFuzzer runs them in one process
+# per hardware thread. A distilled corpus covers the same with fewer
+# inputs, so it loads faster: the first distillation kept about two thirds
+# of the small corpus and three quarters of the large one.
 #
 # Usage: distill-term-corpus.sh [--force]
 #
