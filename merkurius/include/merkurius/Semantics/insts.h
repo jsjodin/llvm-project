@@ -176,10 +176,14 @@ void PrintArgMode(llvm::raw_ostream &, const ArgMode &);
 std::string ArgModeToString(const ArgMode &);
 
 // The constructors of a type, which the inst operations need to expand
-// ground and any into the functors they stand for.
+// ground and any into the functors they stand for. An existentially typed
+// constructor's existentially quantified type variables are type variables
+// in its arguments' types, numbered as in its signature. `symbol` is the
+// constructor's, or null for a tuple's.
 struct ConstructorTypes {
   InstFunctor functor;
   llvm::ArrayRef<const Type *> arguments;
+  const Symbol *symbol{nullptr};
 };
 class InstTypes {
 public:

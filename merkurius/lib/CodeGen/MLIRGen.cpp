@@ -710,13 +710,20 @@ std::optional<Represented> MerkGenerator::RepresentTerm(
   terms_[name] = type;
   llvm::SmallVector<mlir::Attribute> attributes;
   for (const semantics::ConstructorTypes &constructor : *constructors) {
+    // Temporary (chunk 1 step 4, docs/INPROGRESS.md): an existentially typed
+    // constructor's cell has its type_infos and typeclass_infos, not made yet.
+    if (const semantics::Signature *signature{constructor.symbol
+                ? types_.SignatureOf(*constructor.symbol)
+                : nullptr};
+        signature &&
+        (signature->existentials != 0 ||
+            !signature->existentialConstraints.empty())) {
+      terms_[name] = nullptr;
+      return std::nullopt;
+    }
     llvm::SmallVector<mlir::Type> fields;
     for (const semantics::Type *argument : constructor.arguments) {
-      // An existentially typed argument has no type here.
-      std::optional<Represented> represented;
-      if (argument) {
-        represented = Represent(argument);
-      }
+      std::optional<Represented> represented{Represent(argument)};
       if (!represented || represented->dummy) {
         terms_[name] = nullptr;
         return std::nullopt;
