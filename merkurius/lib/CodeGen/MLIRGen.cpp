@@ -281,10 +281,40 @@ private:
   std::optional<Represented> Represent(const semantics::Type *);
   // A type defined by constructors, or a tuple type, as !merk.term, with
   // the module's merk.type_def of it, made the first time; none for a type
-  // with user-defined equality, a supertype or existentially typed
-  // constructors, or with arguments not represented. Each instance of a type
-  // has its own, with one layout among them.
+  // with user-defined equality or a supertype, or with arguments not
+  // represented. Each instance of a type has its own, with one layout among
+  // them.
   std::optional<Represented> RepresentTerm(const semantics::Type *);
+  // An existentially typed constructor's cell's hidden fields' types
+  // (Merk_ConstructorAttr), and where the type_info of each of its
+  // existentially quantified type variables is, by their order: its hidden
+  // field, and the word of it if that is a typeclass_info, or else 0.
+  struct HiddenFields {
+    llvm::SmallVector<mlir::Type> types;
+    llvm::SmallVector<std::pair<unsigned, unsigned>> places;
+  };
+  // None for another constructor; null if a variable's type_info is only
+  // inside a constraint's argument's, which is not handled yet.
+  std::optional<HiddenFields> HiddenFieldsOf(const semantics::ConstructorTypes &);
+  // A constructor's arguments' types in `type`, an existentially quantified
+  // type variable numbered from ExistentialBase(type) by its order, so that it
+  // is none of the type's.
+  llvm::SmallVector<const semantics::Type *> ArgumentsOf(
+      const semantics::Type *type, const semantics::ConstructorTypes &);
+  // The first such number: kCellExistential, or past the type's variables, as
+  // an argument's type may have its own constructor's.
+  unsigned ExistentialBase(const semantics::Type &);
+  // The types of a constructor's cell's fields in `type`, its hidden fields
+  // first, which are `hidden`; none if one is not represented.
+  std::optional<llvm::SmallVector<mlir::Type>> CellFields(const semantics::Type *,
+      const semantics::ConstructorTypes &, HiddenFields &hidden);
+  // The constructor of `type` with that name and arity.
+  const semantics::ConstructorTypes *ConstructorOf(
+      const semantics::Type *, llvm::StringRef name, unsigned arity);
+  // An existentially quantified type variable's type_info at `place` among a
+  // deconstruction's fields.
+  mlir::Value HiddenTypeInfo(mlir::ValueRange fields,
+      std::pair<unsigned, unsigned> place, mlir::Location);
   // Whether values of a type can be compared yet: integers, floats, strings,
   // words, arrays of those that can be, and terms whose constructors'
   // arguments can be, at any depth.
@@ -359,7 +389,8 @@ private:
   // A descriptor's table of its constructors, for merk.type_ctor, and a field's
   // type in it; null after an error.
   mlir::ArrayAttr FunctorsAttr(const semantics::Type *canonical, parser::CharBlock);
-  mlir::Attribute FieldTypeAttr(const semantics::Type &, parser::CharBlock);
+  mlir::Attribute FieldTypeAttr(const semantics::Type &, parser::CharBlock,
+      const HiddenFields *hidden = nullptr);
   merk::ProcOp DescriptorEntry(bool compare, llvm::StringRef constructor,
       const semantics::Type *canonical, mlir::Type represented, bool dummy,
       parser::CharBlock at);
@@ -710,28 +741,16 @@ std::optional<Represented> MerkGenerator::RepresentTerm(
   terms_[name] = type;
   llvm::SmallVector<mlir::Attribute> attributes;
   for (const semantics::ConstructorTypes &constructor : *constructors) {
-    // Temporary (chunk 1 step 4, docs/INPROGRESS.md): an existentially typed
-    // constructor's cell has its type_infos and typeclass_infos, not made yet.
-    if (const semantics::Signature *signature{constructor.symbol
-                ? types_.SignatureOf(*constructor.symbol)
-                : nullptr};
-        signature &&
-        (signature->existentials != 0 ||
-            !signature->existentialConstraints.empty())) {
+    HiddenFields hidden;
+    std::optional<llvm::SmallVector<mlir::Type>> fields{
+        CellFields(type, constructor, hidden)};
+    if (!fields) {
       terms_[name] = nullptr;
       return std::nullopt;
     }
-    llvm::SmallVector<mlir::Type> fields;
-    for (const semantics::Type *argument : constructor.arguments) {
-      std::optional<Represented> represented{Represent(argument)};
-      if (!represented || represented->dummy) {
-        terms_[name] = nullptr;
-        return std::nullopt;
-      }
-      fields.push_back(represented->type);
-    }
-    attributes.push_back(merk::ConstructorAttr::get(
-        &context_, constructor.functor.name, fields));
+    attributes.push_back(merk::ConstructorAttr::get(&context_,
+        constructor.functor.name, *fields,
+        static_cast<unsigned>(hidden.types.size())));
   }
   // At the module's start, after those made before it.
   mlir::OpBuilder::InsertionGuard guard{builder_};
@@ -831,6 +850,144 @@ llvm::SmallVector<mlir::Type> MerkGenerator::HiddenOutputs(
   hidden.append(signature->existentialConstraints.size(),
       merk::TypeclassInfoType::get(&context_));
   return hidden;
+}
+
+std::optional<MerkGenerator::HiddenFields> MerkGenerator::HiddenFieldsOf(
+    const semantics::ConstructorTypes &constructor) {
+  HiddenFields hidden;
+  const semantics::Signature *signature{constructor.symbol
+          ? types_.SignatureOf(*constructor.symbol)
+          : nullptr};
+  if (!signature || signature->existentials == 0) {
+    return hidden;
+  }
+  // As polymorphism analysis passes them to a construction: the type_infos
+  // of the variables the constraints do not have, then the typeclass_infos.
+  unsigned universal{signature->typeVars - signature->existentials};
+  llvm::ArrayRef<semantics::ClassConstraint> constraints{
+      signature->existentialConstraints};
+  llvm::SmallVector<bool> constrained{
+      ConstrainedVariables(signature->typeVars, constraints)};
+  hidden.places.resize(signature->existentials);
+  for (unsigned var{universal}; var < signature->typeVars; ++var) {
+    if (!constrained[var]) {
+      hidden.places[var - universal] = {
+          static_cast<unsigned>(hidden.types.size()), 0};
+      hidden.types.push_back(merk::TypeInfoType::get(&context_));
+    }
+  }
+  unsigned first{static_cast<unsigned>(hidden.types.size())};
+  hidden.types.append(
+      constraints.size(), merk::TypeclassInfoType::get(&context_));
+  // A constrained variable's type_info is in the typeclass_info of the first
+  // constraint that has it as an argument, after the method table and the
+  // superclasses' typeclass_infos.
+  for (unsigned var{universal}; var < signature->typeVars; ++var) {
+    if (!constrained[var]) {
+      continue;
+    }
+    std::optional<std::pair<unsigned, unsigned>> place;
+    for (auto [i, constraint] : llvm::enumerate(constraints)) {
+      unsigned supers{static_cast<unsigned>(
+          types_.SuperclassesOf(*constraint.typeclass).size())};
+      for (auto [j, argument] : llvm::enumerate(constraint.arguments)) {
+        if (argument->kind == semantics::TypeKind::Variable &&
+            argument->var == var) {
+          place = {first + static_cast<unsigned>(i),
+              supers + static_cast<unsigned>(j) + 1};
+          break;
+        }
+      }
+      if (place) {
+        break;
+      }
+    }
+    if (!place) {
+      return std::nullopt;
+    }
+    hidden.places[var - universal] = *place;
+  }
+  return hidden;
+}
+
+// The least number of an existentially typed constructor's existentially
+// quantified type variables, in ArgumentsOf's types: past a procedure's, and
+// below polymorphism analysis's kExistentialVar on.
+static constexpr unsigned kCellExistential{1u << 29};
+
+unsigned MerkGenerator::ExistentialBase(const semantics::Type &type) {
+  unsigned base{kCellExistential};
+  semantics::ForEachVariable(
+      type, [&](unsigned var) { base = std::max(base, var + 1); });
+  return base;
+}
+
+llvm::SmallVector<const semantics::Type *> MerkGenerator::ArgumentsOf(
+    const semantics::Type *type, const semantics::ConstructorTypes &constructor) {
+  const semantics::Signature *signature{constructor.symbol
+          ? types_.SignatureOf(*constructor.symbol)
+          : nullptr};
+  if (!signature || signature->existentials == 0) {
+    return {constructor.arguments.begin(), constructor.arguments.end()};
+  }
+  unsigned universal{signature->typeVars - signature->existentials};
+  unsigned base{ExistentialBase(*type)};
+  semantics::TypeContext &context{types_.types()};
+  llvm::SmallVector<const semantics::Type *> arguments;
+  for (const semantics::Type *argument : signature->arguments.drop_back()) {
+    arguments.push_back(context.Substitute(argument, [&](unsigned var) {
+      if (var >= universal) {
+        return context.Variable(base + var - universal);
+      }
+      return var < type->arguments.size() ? type->arguments[var]
+                                          : context.Variable(var);
+    }));
+  }
+  return arguments;
+}
+
+std::optional<llvm::SmallVector<mlir::Type>> MerkGenerator::CellFields(
+    const semantics::Type *type, const semantics::ConstructorTypes &constructor,
+    HiddenFields &hidden) {
+  std::optional<HiddenFields> found{HiddenFieldsOf(constructor)};
+  if (!found) {
+    return std::nullopt;
+  }
+  hidden = std::move(*found);
+  llvm::SmallVector<mlir::Type> fields{hidden.types};
+  for (const semantics::Type *argument : ArgumentsOf(type, constructor)) {
+    std::optional<Represented> represented{Represent(argument)};
+    if (!represented || represented->dummy) {
+      return std::nullopt;
+    }
+    fields.push_back(represented->type);
+  }
+  return fields;
+}
+
+const semantics::ConstructorTypes *MerkGenerator::ConstructorOf(
+    const semantics::Type *type, llvm::StringRef name, unsigned arity) {
+  const std::vector<semantics::ConstructorTypes> *constructors{
+      modes_.ops().ConstructorsOf(type)};
+  if (!constructors) {
+    return nullptr;
+  }
+  for (const semantics::ConstructorTypes &constructor : *constructors) {
+    if (constructor.functor.name == name && constructor.functor.arity == arity) {
+      return &constructor;
+    }
+  }
+  return nullptr;
+}
+
+mlir::Value MerkGenerator::HiddenTypeInfo(mlir::ValueRange fields,
+    std::pair<unsigned, unsigned> place, mlir::Location loc) {
+  mlir::Value field{fields[place.first]};
+  if (place.second == 0) {
+    return field;
+  }
+  return merk::TypeclassInfoWordOp::create(builder_, loc,
+      merk::TypeInfoType::get(&context_), field, place.second);
 }
 
 mlir::Value MerkGenerator::Given(const void *node) {
@@ -1104,11 +1261,18 @@ bool MerkGenerator::EnsureDescriptor(
   return true;
 }
 
-// A type parameter by its number, and any other type as an array of its
-// constructor and its arguments, in which their descriptors are ensured.
-mlir::Attribute MerkGenerator::FieldTypeAttr(
-    const semantics::Type &type, parser::CharBlock at) {
+// A type parameter by its number, an existentially quantified type
+// variable by the place of its type_info in `hidden`, and any other type as an
+// array of its constructor and its arguments, in which their descriptors are
+// ensured.
+mlir::Attribute MerkGenerator::FieldTypeAttr(const semantics::Type &type,
+    parser::CharBlock at, const HiddenFields *hidden) {
   if (type.kind == semantics::TypeKind::Variable) {
+    // A canonical type's variables are its parameters, numbered from 0.
+    if (hidden && type.var >= kCellExistential) {
+      auto [field, word]{hidden->places[type.var - kCellExistential]};
+      return builder_.getDenseI64ArrayAttr({field, word});
+    }
     return builder_.getI64IntegerAttr(type.var);
   }
   std::optional<std::string> constructor{TypeConstructorName(type)};
@@ -1120,7 +1284,7 @@ mlir::Attribute MerkGenerator::FieldTypeAttr(
   }
   llvm::SmallVector<mlir::Attribute> parts{builder_.getStringAttr(*constructor)};
   for (const semantics::Type *argument : type.arguments) {
-    mlir::Attribute attribute{FieldTypeAttr(*argument, at)};
+    mlir::Attribute attribute{FieldTypeAttr(*argument, at, hidden)};
     if (!attribute) {
       return nullptr;
     }
@@ -1140,8 +1304,14 @@ mlir::ArrayAttr MerkGenerator::FunctorsAttr(
   for (const semantics::ConstructorTypes &constructor : *constructors) {
     llvm::SmallVector<mlir::Attribute> parts{
         builder_.getStringAttr(constructor.functor.name)};
-    for (const semantics::Type *argument : constructor.arguments) {
-      mlir::Attribute attribute{FieldTypeAttr(*argument, at)};
+    std::optional<HiddenFields> hidden{HiddenFieldsOf(constructor)};
+    if (!hidden) {
+      NotYet(at, "type_infos of type " + semantics::TypeToString(*canonical));
+      return nullptr;
+    }
+    for (const semantics::Type *argument :
+        ArgumentsOf(canonical, constructor)) {
+      mlir::Attribute attribute{FieldTypeAttr(*argument, at, &*hidden)};
       if (!attribute) {
         return nullptr;
       }
@@ -2093,18 +2263,64 @@ void MerkGenerator::GenerateForeign(
 
 void MerkGenerator::TermUnify(const Body &goal, const ProcedureBody &body) {
   mlir::Location loc{Location(goal.tokens)};
-  auto term{mlir::cast<merk::TermType>(
-      Represent(body.vars[goal.left].type)->type)};
-  auto functor{merk::FunctorAttr::get(&context_, goal.functor.name,
-      static_cast<unsigned>(goal.arguments.size()))};
+  parser::CharBlock at{Where(goal.tokens)};
+  const semantics::Type *type{body.vars[goal.left].type};
+  auto term{mlir::cast<merk::TermType>(Represent(type)->type)};
+  unsigned arity{static_cast<unsigned>(goal.arguments.size())};
+  auto functor{merk::FunctorAttr::get(&context_, goal.functor.name, arity)};
+  // An existentially typed constructor's cell has its hidden fields first,
+  // and its arguments' types are its own, which the values' are coerced to.
+  HiddenFields hidden;
+  std::optional<llvm::SmallVector<mlir::Type>> cell;
+  if (const semantics::ConstructorTypes *constructor{
+          ConstructorOf(type, goal.functor.name, arity)}) {
+    cell = CellFields(type, *constructor, hidden);
+    if (!cell) {
+      NotYet(at, "this unification");
+      return;
+    }
+  }
+  // What polymorphism analysis has a construction pass, and a deconstruction
+  // give, by the cell's hidden fields.
+  const semantics::PassedInfos *passed{nullptr};
+  if (!hidden.types.empty() && current_) {
+    if (auto it{current_->goals.find(&goal)}; it != current_->goals.end()) {
+      passed = &it->second;
+    }
+  }
+  if (passed &&
+      passed->typeInfos.size() + passed->dictionaries.size() !=
+          hidden.types.size()) {
+    NotYet(at, "this unification's type_infos");
+    return;
+  }
   if (goal.unify == UnifyKind::Construct) {
     llvm::SmallVector<mlir::Value> arguments;
+    if (!hidden.types.empty()) {
+      if (!passed) {
+        NotYet(at, "this unification's type_infos");
+        return;
+      }
+      for (const semantics::TypeInfo *info : passed->typeInfos) {
+        arguments.push_back(TypeInfoValue(*info, loc, at));
+      }
+      for (const semantics::Dictionary *dictionary : passed->dictionaries) {
+        arguments.push_back(DictionaryValue(*dictionary, loc, at));
+      }
+      if (llvm::is_contained(arguments, mlir::Value{})) {
+        failed_ = true;
+        return;
+      }
+    }
     for (BodyVar argument : goal.arguments) {
       mlir::Value value{ValueOf(argument)};
       if (!value) {
         // A term with free or dummy arguments.
-        NotYet(Where(goal.tokens), "this unification");
+        NotYet(at, "this unification");
         return;
+      }
+      if (!hidden.types.empty()) {
+        value = Coerce(value, (*cell)[arguments.size()], loc);
       }
       arguments.push_back(value);
     }
@@ -2123,22 +2339,39 @@ void MerkGenerator::TermUnify(const Body &goal, const ProcedureBody &body) {
   }
   // The arguments are new variables: mmc's form tests any that was bound
   // with a unification after it.
-  llvm::SmallVector<mlir::Type> fields;
+  llvm::SmallVector<mlir::Type> fields{hidden.types};
   for (BodyVar argument : goal.arguments) {
     std::optional<Represented> represented{
         Represent(body.vars[argument].type)};
     if (goal.unify == UnifyKind::Test || !represented || represented->dummy ||
         values_.count(argument)) {
-      NotYet(Where(goal.tokens), "this unification");
+      NotYet(at, "this unification");
       return;
     }
     fields.push_back(represented->type);
   }
+  if (!hidden.types.empty()) {
+    fields = *cell;
+  }
   auto deconstruct{
       merk::DeconstructOp::create(builder_, loc, fields, value, functor)};
+  mlir::ValueRange results{deconstruct.getFields()};
+  // The type_infos and typeclass_infos it gives, which a deconstruction whose
+  // arguments nothing uses gives none of.
+  if (passed) {
+    unsigned field{0};
+    for (const semantics::TypeInfo *info : passed->typeInfos) {
+      Give(info, results[field++]);
+    }
+    for (const semantics::Dictionary *dictionary : passed->dictionaries) {
+      Give(dictionary, results[field++]);
+    }
+  }
   for (auto [argument, field] :
-      llvm::zip(goal.arguments, deconstruct.getFields())) {
-    values_[argument] = field;
+      llvm::zip(goal.arguments, results.drop_front(hidden.types.size()))) {
+    values_[argument] = hidden.types.empty()
+        ? field
+        : Coerce(field, Represent(body.vars[argument].type)->type, loc);
   }
 }
 
@@ -2214,14 +2447,29 @@ merk::ProcOp MerkGenerator::UnifyProc(merk::TermType term) {
     merk::GuardOp::create(builder_, loc,
         merk::HasFunctorOp::create(builder_, loc, y, functor));
     if (!constructor.arguments.empty()) {
-      llvm::SmallVector<mlir::Type> fields;
-      for (const semantics::Type *argument : constructor.arguments) {
-        fields.push_back(Represent(argument)->type);
-      }
+      HiddenFields hidden;
+      llvm::SmallVector<mlir::Type> fields{
+          *CellFields(type, constructor, hidden)};
       auto xs{merk::DeconstructOp::create(builder_, loc, fields, x, functor)};
       auto ys{merk::DeconstructOp::create(builder_, loc, fields, y, functor)};
+      // As mmc's, terms of an existentially typed constructor are equal only
+      // if their types are the same.
+      for (auto [k, place] : llvm::enumerate(hidden.places)) {
+        mlir::Value a{HiddenTypeInfo(xs.getFields(), place, loc)};
+        mlir::Value b{HiddenTypeInfo(ys.getFields(), place, loc)};
+        merk::GuardOp::create(builder_, loc,
+            mlir::arith::CmpIOp::create(builder_, loc,
+                mlir::arith::CmpIPredicate::eq,
+                merk::CompareTypeInfoOp::create(
+                    builder_, loc, builder_.getI32Type(), a, b),
+                IntegerConstant(builder_.getI32Type(), 0, loc)));
+        typeInfos_[ExistentialBase(*type) + static_cast<unsigned>(k)] = a;
+      }
+      std::size_t first{hidden.types.size()};
       for (auto [a, b, argument] :
-          llvm::zip(xs.getFields(), ys.getFields(), constructor.arguments)) {
+          llvm::zip(xs.getFields().drop_front(first),
+              ys.getFields().drop_front(first),
+              ArgumentsOf(type, constructor))) {
         Equal(a, b, argument, loc);
       }
     }
@@ -2643,16 +2891,42 @@ merk::ProcOp MerkGenerator::CompareProc(merk::TermType term) {
       if (!constructor.arguments.empty()) {
         auto functor{mlir::cast<merk::FunctorAttr>(
             mlir::cast<mlir::ArrayAttr>(attribute)[0])};
-        llvm::SmallVector<mlir::Type> fields;
-        for (const semantics::Type *argument : constructor.arguments) {
-          fields.push_back(Represent(argument)->type);
-        }
+        HiddenFields hidden;
+        llvm::SmallVector<mlir::Type> fields{
+            *CellFields(type, constructor, hidden)};
         auto xs{merk::DeconstructOp::create(builder_, loc, fields, x, functor)};
         auto ys{merk::DeconstructOp::create(builder_, loc, fields, y, functor)};
+        std::size_t first{hidden.types.size()};
+        llvm::SmallVector<bool> compared(hidden.places.size(), false);
+        unsigned base{ExistentialBase(*type)};
         // The first argument is the most significant, and the last one's
         // comparison, as a list's tail, is in tail position.
         for (auto [i, a, b, argument] : llvm::enumerate(
-                 xs.getFields(), ys.getFields(), constructor.arguments)) {
+                 xs.getFields().drop_front(first),
+                 ys.getFields().drop_front(first),
+                 ArgumentsOf(type, constructor))) {
+          // As mmc's, an argument of an existentially typed constructor is
+          // compared by its type first: by the types of the existentially
+          // quantified variables it has, that no argument before it has.
+          for (unsigned var : VariablesOf(*argument)) {
+            if (var < base || compared[var - base]) {
+              continue;
+            }
+            compared[var - base] = true;
+            std::pair<unsigned, unsigned> place{hidden.places[var - base]};
+            mlir::Value p{HiddenTypeInfo(xs.getFields(), place, loc)};
+            mlir::Value q{HiddenTypeInfo(ys.getFields(), place, loc)};
+            mlir::Value types{merk::CompareTypeInfoOp::create(
+                builder_, loc, builder_.getI32Type(), p, q)};
+            mlir::Value zero{IntegerConstant(builder_.getI32Type(), 0, loc)};
+            SucceedIf(mlir::arith::CmpIOp::create(builder_, loc,
+                          mlir::arith::CmpIPredicate::slt, types, zero),
+                ComparisonValue("<", loc), loc);
+            SucceedIf(mlir::arith::CmpIOp::create(builder_, loc,
+                          mlir::arith::CmpIPredicate::sgt, types, zero),
+                ComparisonValue(">", loc), loc);
+            typeInfos_[var] = p;
+          }
           mlir::Value order{Compare(a, b, argument,
               declaredVariable[c][i], loc)};
           if (!order) {

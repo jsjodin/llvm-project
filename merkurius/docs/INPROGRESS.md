@@ -155,7 +155,8 @@ addresses, so `univ` and the like compare them by structure.
 
 *A field's type* (`MerkFieldType`) is a word of the same form, with two more
 tags: 2 for a type parameter of the term's type, its number in the high
-bits, and 3, reserved, for an existential variable. So `[|]`'s fields are
+bits, and 3 for an existential variable, whose `type_info` is in the cell's
+hidden fields (design document, "Type descriptors"). So `[|]`'s fields are
 `var 1` and the static cell `[list, var 1]`. A walker cannot allocate, least
 of all the collector, so it does not make a `type_info` for each field: it
 carries the field's type and a pointer to the frame that gives its
@@ -294,8 +295,11 @@ program.
    `io.write` and `io.print` as the first walker, declared in `io.m` as
    polymorphic `foreign_proc`s, and typeclass_infos, with direct calls of
    known instances (design document, Lowering, "Type classes"), and
-   existentially typed predicates and functions. Next: existentially typed
-   constructors. Cloning a polymorphic procedure for a known dictionary
+   existentially typed predicates and functions, and existentially typed
+   constructors, whose cells have their `type_info`s and `typeclass_info`s
+   first (design document, Lowering, "Existentially typed constructors").
+   A constrained variable whose `type_info` is only inside a constraint's
+   argument's type is "not yet implemented". Cloning a polymorphic procedure for a known dictionary
    (Optimizations, "What polymorphism costs") and `pragma inline` are in no
    step yet. Types with polymorphic recursion, whose instances
    have no end, such as `grow(T) ---> stop(T) ; more(T, grow(list(T)))`, are
