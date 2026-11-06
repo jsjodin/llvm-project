@@ -1382,7 +1382,11 @@ bool MerkGenerator::EnsureDescriptor(
       kind = "array";
     } else if (module == moduleName_) {
       linkage = type.constructor->exported ? "external" : "internal";
-    } else if (!llvm::is_contained(kUncompiledLibrary, llvm::StringRef{module})) {
+      // The state of the world, an abstract type that io does not define, is
+      // a dummy whose linkonce descriptor each module using it makes, as
+      // below.
+    } else if (!llvm::is_contained(kUncompiledLibrary, llvm::StringRef{module}) &&
+        !(module == "io" && name == "state")) {
       // The module that defines it has it; this one may not even see its
       // constructors.
       descriptors_.insert(*constructor);
@@ -1407,9 +1411,12 @@ bool MerkGenerator::EnsureDescriptor(
     NotYet(at, "type_infos of type " + semantics::TypeToString(type));
     return false;
   }
-  // A primitive type, or an array, has no constructors.
+  // A primitive type, or an array, has no constructors, nor has the state
+  // of the world, an abstract dummy.
   mlir::ArrayAttr functors;
-  if (represented->dummy ||
+  if (represented->dummy && !modes_.ops().ConstructorsOf(canonical)) {
+    functors = builder_.getArrayAttr({});
+  } else if (represented->dummy ||
       mlir::isa_and_nonnull<merk::TermType>(represented->type)) {
     functors = FunctorsAttr(canonical, at);
     if (!functors) {
