@@ -2439,8 +2439,9 @@ A mailbox handle says where the mailbox's queue is, so that `send` can choose
 how to reach it, and a message can travel from a GPU to its host, to another
 node and on to a GPU there, without the program naming the path. Systems that
 let GPUs communicate address a flat rank instead: NVSHMEM and rocSHMEM put and
-get on a symmetric heap from device code, and GPU-aware MPI and NCCL are
-mostly driven from the host. Realm, Legion's runtime, is the closest: its ids
+get on a symmetric heap from device code, GPU-aware MPI is driven from the
+host, and NCCL's device API is newer and addresses ranks too (What the
+hardware offers, below). Realm, Legion's runtime, is the closest: its ids
 for processors and memories encode the node and the kind of place, but it
 runs tasks rather than passing messages.
 
@@ -2465,9 +2466,16 @@ tables (Types instead of atoms).
   `CUDA_VISIBLE_DEVICES`, so another node cannot interpret it. The physical
   identity lets two nodes on one machine see that they share a GPU, or that
   two GPUs are peers, which is what makes a direct path possible. OpenMP 6.0's
-  `omp_get_uid_from_device` and `omp_get_device_from_uid` may give it portably;
-  whether they do, and whether libomptarget implements them, is to be
-  checked; otherwise it comes from HSA or CUDA through an interop object.
+  `omp_get_uid_from_device` and `omp_get_device_from_uid` map a device number
+  to a unique id string and back, and libomptarget implements them
+  (`offload/libomptarget/OpenMP/API.cpp`; on the device they return nothing).
+  Its plugins form the id from the vendor's UUID, `cuDeviceGetUuid` or HSA's
+  `HSA_AMD_AGENT_INFO_UUID`, prefixed with the plugin's name. An AMD agent
+  without a UUID reports `GPU-XX`, and the plugin then falls back to the device
+  number, which is not stable; the Radeon RX 6950 XT (gfx1030) of our test
+  machine is one. For such a device the place table uses its PCI address from
+  HSA instead. The host's id is not unique, so the host place is named by the
+  node id alone.
 
 **Routing.** `send` compares the handle's node and place with its own:
 
@@ -2485,6 +2493,72 @@ tables (Types instead of atoms).
 Each node computes its route table at the handshake from the place tables.
 It is the only thing that changes when direct paths, such as GPUDirect RDMA,
 are added, and programs never see it.
+
+**What the hardware offers** (checked 2026-11-06). A GPU runs no network
+stack, so it never speaks IP itself, and connections, addresses and the setup
+of every transport stay with its host. The data, though, often bypasses the
+host's CPU and memory, and on some systems the GPU starts the transfer
+itself. From the most common to the most direct:
+
+1. **The host sends from GPU memory.** With GPUDirect RDMA, or AMD's
+   ROCmRDMA, the NIC reads and writes GPU memory directly over PCIe, but the
+   CPU posts each operation. This is what GPU-aware MPI does, such as Cray
+   MPICH on Slingshot. On Frontier each of a node's four MI250X modules has a
+   Slingshot NIC attached to it. On Aurora the eight NICs of a node hang off
+   PCIe switches at the CPUs, not at its six GPUs, yet data still passes
+   between the GPUs and the NICs without going through CPU memory. On El
+   Capitan each MI300A has a x16 link to its NIC. AMD documents ROCmRDMA for
+   Instinct accelerators, with a large BAR and the IOMMU off or in
+   pass-through; nothing found says that a consumer Radeon supports it.
+2. **The GPU starts the operation.** The host creates the NIC's queues once,
+   in GPU memory or mapped into it, and kernels then post work and ring the
+   NIC's doorbell themselves, with no CPU proxy. NVSHMEM's IBGDA transport does
+   this on InfiniBand, with Mellanox NICs; NVIDIA's guide notes that a GPU
+   thread fills in a work request more slowly than a CPU thread, so each
+   message takes longer, though throughput at scale is better. rocSHMEM's GDA
+   backend does the same on AMD GPUs with Mellanox, Broadcom Thor and Pensando
+   Pollara NICs, and falls back to a host proxy when it cannot; AMD provides
+   it with limited support. NCCL has a device-side API for GPU-initiated
+   networking since 2.28.7, still marked experimental, over GDAKI or a CPU
+   proxy. HPE's stream-triggered operations on Slingshot 11 are a step short of
+   this: the CPU queues operations on the NIC as triggered operations, in
+   advance, and the GPU's stream triggers them, so the CPU is out of the
+   control path when they run. A 2026 implementation for MPI's
+   point-to-point operations over the CXI libfabric provider ran on up to
+   8,192 of Frontier's GPUs. All of these address registered memory at a
+   rank, not a mailbox.
+3. **Loads and stores between GPUs.** Within a node, GPUs joined by NVLink or
+   Infinity Fabric read and write each other's memory directly, as Frontier's
+   and El Capitan's do. NVIDIA's GB200 NVL72 makes one NVLink domain of the 72
+   GPUs of a rack.
+4. **Memory shared by the CPU and the GPU.** The MI300A's CPU and GPU cores
+   share the same HBM, with one virtual address space, though memory from
+   `hipMalloc` is faster for the GPU than memory from `malloc`. On Grace
+   Hopper (GH200) each has its own memory, and either reads the other's over
+   NVLink-C2C, coherently, including memory from `malloc`. There, a message
+   between the host and the device is a write to memory, and the round trip
+   over PCIe and the coherence questions above largely go away.
+
+**Places say what they can do.** Routing needs to know which of these a pair
+of places can use, so each entry of the place table also gives:
+
+- whether the place's memory can be registered with which of the node's NICs
+  (level 1), and whether the GPU can post to their queues itself (level 2);
+- which of the node's other GPUs it can reach by peer loads and stores, and
+  over which link (level 3);
+- whether it shares memory with the host, coherently or not (level 4).
+
+The route table then has five kinds of hop: through the host, which works
+everywhere; a send from GPU memory posted by the host; a send posted by the
+GPU into a mailbox's queue in the remote GPU's registered memory; a peer
+store; and a write to shared memory. In every case the host keeps the
+control path: it makes the connections, registers the memory, creates the
+NIC's queues and does the handshake. A GPU is a place of its host's node even
+on the most direct hardware. The transports under the node id are libfabric,
+as Slingshot's CXI provider, UCX or verbs endpoints, with TCP as the fallback.
+Only the relay through the host can be tested on our machine, whose gfx1030
+is a consumer GPU; the direct paths need Instinct or NVIDIA datacenter GPUs
+with RDMA NICs.
 
 #### Send and receive in a target region
 
