@@ -161,6 +161,24 @@ private:
     }
   }
 
+  // Uses up the first string field that `predicate` accepts, if there is
+  // one.
+  static bool TakeString(
+      Fields &fields, llvm::function_ref<bool(llvm::StringRef)> predicate) {
+    auto it{llvm::find_if(fields.strings, predicate)};
+    if (it == fields.strings.end()) {
+      return false;
+    }
+    fields.strings.erase(it);
+    return true;
+  }
+  static bool TakeEqual(Fields &fields, llvm::StringRef spelling) {
+    return TakeString(fields, [&](llvm::StringRef s) { return s == spelling; });
+  }
+  static bool TakeAny(Fields &fields) {
+    return TakeString(fields, [](llvm::StringRef) { return true; });
+  }
+
   // Whether one of the node's fields holds the token, using up that field:
   // a variable is held by a string field equal to its name, and a literal
   // by a number field or any string field, since fields hold literals'
@@ -168,33 +186,23 @@ private:
   // field, as "C" is by a ForeignLanguage. Names and punctuation are not
   // checked: they are the node's own syntax.
   static bool Holds(const Token &token, Fields &fields) {
-    llvm::StringRef spelling{token.spelling};
-    auto take{[&](auto predicate) {
-      auto it{llvm::find_if(fields.strings, predicate)};
-      if (it == fields.strings.end()) {
-        return false;
-      }
-      fields.strings.erase(it);
-      return true;
-    }};
-    auto equal{[&](llvm::StringRef s) { return s == spelling; }};
-    auto any{[](llvm::StringRef) { return true; }};
     switch (token.kind) {
     case TokenKind::Variable:
-      return take(equal);
+      return TakeEqual(fields, token.spelling);
     case TokenKind::Integer:
     case TokenKind::Float:
       if (fields.numbers > 0) {
         --fields.numbers;
         return true;
       }
-      return take(equal) || take(any);
+      return TakeEqual(fields, token.spelling) || TakeAny(fields);
     case TokenKind::String:
     case TokenKind::ImplementationDefinedLiteral:
       // Prefer a string that cannot be a variable's name, and then an enum,
       // such as the language "C" of a pragma, to a string that can: a
       // variable later in the node may need it.
-      if (take(equal) || take([&](llvm::StringRef s) {
+      if (TakeEqual(fields, token.spelling) ||
+          TakeString(fields, [&](llvm::StringRef s) {
             return s.empty() || !(s[0] == '_' || (s[0] >= 'A' && s[0] <= 'Z'));
           })) {
         return true;
@@ -203,7 +211,7 @@ private:
         --fields.enums;
         return true;
       }
-      return take(any);
+      return TakeAny(fields);
     default:
       return true;
     }

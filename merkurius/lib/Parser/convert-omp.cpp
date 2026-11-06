@@ -24,36 +24,44 @@ namespace merkurius::parser {
 
 namespace {
 
+void NumberVariables(
+    llvm::ArrayRef<const Term *> terms, llvm::StringMap<unsigned> &numbers);
+
 // The numbers of the named variables in a term.
 void NumberVariables(const Term &t, llvm::StringMap<unsigned> &numbers) {
-  auto all{[&](llvm::ArrayRef<const Term *> terms) {
-    for (const Term *term : terms) {
-      if (term) {
-        NumberVariables(*term, numbers);
-      }
-    }
-  }};
   if (const auto *variable{llvm::dyn_cast<VariableTerm>(&t)}) {
     if (!variable->IsAnonymous()) {
       numbers.try_emplace(variable->name(), variable->number());
     }
   } else if (const auto *compound{llvm::dyn_cast<CompoundTerm>(&t)}) {
-    all(compound->arguments());
+    NumberVariables(compound->arguments(), numbers);
   } else if (const auto *backquote{llvm::dyn_cast<BackquoteTerm>(&t)}) {
-    all({backquote->left(), backquote->op(), backquote->right()});
+    NumberVariables(
+        {backquote->left(), backquote->op(), backquote->right()}, numbers);
   } else if (const auto *list{llvm::dyn_cast<ListTerm>(&t)}) {
-    all(list->elements());
-    all({list->tail()});
+    NumberVariables(list->elements(), numbers);
+    NumberVariables({list->tail()}, numbers);
   } else if (const auto *tuple{llvm::dyn_cast<TupleTerm>(&t)}) {
-    all(tuple->elements());
+    NumberVariables(tuple->elements(), numbers);
   } else if (const auto *apply{llvm::dyn_cast<ApplyTerm>(&t)}) {
-    all({apply->closure()});
-    all(apply->arguments());
+    NumberVariables({apply->closure()}, numbers);
+    NumberVariables(apply->arguments(), numbers);
   } else if (const auto *parenthesized{
                  llvm::dyn_cast<ParenthesizedTerm>(&t)}) {
     NumberVariables(*parenthesized->inner(), numbers);
   } else if (const auto *directive{llvm::dyn_cast<DirectiveTerm>(&t)}) {
     NumberVariables(*directive->annotated(), numbers);
+  }
+}
+
+// The numbers of the named variables in the terms, some of which may be
+// null.
+void NumberVariables(
+    llvm::ArrayRef<const Term *> terms, llvm::StringMap<unsigned> &numbers) {
+  for (const Term *term : terms) {
+    if (term) {
+      NumberVariables(*term, numbers);
+    }
   }
 }
 
@@ -229,6 +237,9 @@ private:
   bool ReadApplied(std::uint32_t &at,
       llvm::SmallVectorImpl<const Term *> &arguments);
   std::optional<OmpClause> Clause(std::uint32_t &at);
+  bool CheckArgumentCount(llvm::ArrayRef<const Term *> arguments,
+      std::size_t minimum, std::size_t maximum, CharBlock source,
+      llvm::StringRef usage);
   template <typename R>
   std::optional<llvm::ArrayRef<typename R::resultType>> Elements(
       const R &rule, llvm::ArrayRef<const Term *> terms) {
@@ -356,6 +367,18 @@ const OmpDirective *DirectiveConverter::Convert() {
       state_.arena.SaveArray(llvm::ArrayRef<OmpClause>{clauses}));
 }
 
+// Whether a clause has between `minimum` and `maximum` arguments; if not,
+// says it expected `usage`.
+bool DirectiveConverter::CheckArgumentCount(
+    llvm::ArrayRef<const Term *> arguments, std::size_t minimum,
+    std::size_t maximum, CharBlock source, llvm::StringRef usage) {
+  if (arguments.size() < minimum || arguments.size() > maximum) {
+    state_.messages.Say(source, "expected %s"_err_en_US, usage.str());
+    return false;
+  }
+  return true;
+}
+
 std::optional<OmpClause> DirectiveConverter::Clause(std::uint32_t &at) {
   std::uint32_t first{at};
   const Token &token{At(at)};
@@ -377,17 +400,8 @@ std::optional<OmpClause> DirectiveConverter::Clause(std::uint32_t &at) {
   }
   TokenRange tokens{first, at - 1};
   CharBlock source{token.spelling.begin(), At(at - 1).spelling.end()};
-  auto make{[&](auto *node) -> std::optional<OmpClause> { return node; }};
-  auto count{[&](std::size_t minimum, std::size_t maximum,
-                 llvm::StringRef usage) {
-    if (argumentTerms.size() < minimum || argumentTerms.size() > maximum) {
-      state_.messages.Say(source, "expected %s"_err_en_US, usage.str());
-      return false;
-    }
-    return true;
-  }};
   if (name == "index") {
-    if (!count(1, 1, "index(Variable)")) {
+    if (!CheckArgumentCount(argumentTerms, 1, 1, source, "index(Variable)")) {
       return std::nullopt;
     }
     std::optional<const Variable *> variable{
@@ -395,17 +409,17 @@ std::optional<OmpClause> DirectiveConverter::Clause(std::uint32_t &at) {
     if (!variable) {
       return std::nullopt;
     }
-    return make(state_.arena.Make<OmpIndexClause>(tokens, *variable));
+    return state_.arena.Make<OmpIndexClause>(tokens, *variable);
   }
   if (name == "upper") {
-    if (!count(1, 1, "upper(Bound)")) {
+    if (!CheckArgumentCount(argumentTerms, 1, 1, source, "upper(Bound)")) {
       return std::nullopt;
     }
     std::optional<DataTerm> bound{Apply(dataTerm, *argumentTerms[0], state_)};
     if (!bound) {
       return std::nullopt;
     }
-    return make(state_.arena.Make<OmpUpperClause>(tokens, *bound));
+    return state_.arena.Make<OmpUpperClause>(tokens, *bound);
   }
   llvm::omp::Clause id{llvm::omp::getOpenMPClauseKind(name)};
   if (id == llvm::omp::Clause::OMPC_unknown) {
@@ -433,8 +447,8 @@ std::optional<OmpClause> DirectiveConverter::Clause(std::uint32_t &at) {
     if (!ok) {
       return std::nullopt;
     }
-    return make(state_.arena.Make<OmpScheduleClause>(
-        tokens, *modifiers, *kind, chunk));
+    return state_.arena.Make<OmpScheduleClause>(
+        tokens, *modifiers, *kind, chunk);
   }
   case llvm::omp::Clause::OMPC_reduction: {
     // Without a ':', the arguments are [Modifier,] Op.
@@ -460,8 +474,8 @@ std::optional<OmpClause> DirectiveConverter::Clause(std::uint32_t &at) {
     if (!ok || !op || !variables) {
       return std::nullopt;
     }
-    return make(state_.arena.Make<OmpReductionClause>(
-        tokens, modifier, *op, *variables));
+    return state_.arena.Make<OmpReductionClause>(
+        tokens, modifier, *op, *variables);
   }
   case llvm::omp::Clause::OMPC_map: {
     // map(always, to : X): the last modifier is the map type, if it is
@@ -483,8 +497,7 @@ std::optional<OmpClause> DirectiveConverter::Clause(std::uint32_t &at) {
     if (!ok || !modifiers || !objects) {
       return std::nullopt;
     }
-    return make(state_.arena.Make<OmpMapClause>(
-        tokens, *modifiers, type, *objects));
+    return state_.arena.Make<OmpMapClause>(tokens, *modifiers, type, *objects);
   }
   default: {
     auto modifiers{Elements(dataTerm, split.modifiers)};
@@ -492,8 +505,8 @@ std::optional<OmpClause> DirectiveConverter::Clause(std::uint32_t &at) {
     if (!modifiers || !arguments) {
       return std::nullopt;
     }
-    return make(state_.arena.Make<OmpGenericClause>(
-        tokens, id, *modifiers, *arguments));
+    return state_.arena.Make<OmpGenericClause>(
+        tokens, id, *modifiers, *arguments);
   }
   }
 }

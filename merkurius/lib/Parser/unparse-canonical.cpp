@@ -911,7 +911,7 @@ void CanonicalUnparser::Node(const N &n, bool block, bool viaVariant) {
   doc_.BeginGroup();
   if constexpr (isAtomic<N>) {
     for (std::uint32_t j{n.tokens.first}; j <= n.tokens.last; ++j) {
-      Emit(j, j == n.tokens.first ? 0 : keepAdjacency);
+      Emit(j, j == n.tokens.first ? 0u : unsigned{keepAdjacency});
     }
   } else {
     unsigned nests{0}, brackets{0}, backquotes{0};
