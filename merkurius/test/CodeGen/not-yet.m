@@ -33,10 +33,12 @@ map_size(_) = [].
 % CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for values of type not_yet.set
 equal(set(X), set(X)).
 
+% A disjunction that a goal after it may backtrack into for its next
+% solution.
 :- pred q(int::in) is semidet.
 q(X) :-
-    ( X > 0 ; X < -5 ).
-% CHECK: not-yet.m:[[@LINE-1]]:7: error: not yet implemented: code generation for disjunctions
+    ( if ( Y = 1 ; Y = 2 ), Y > X then true else fail ).
+% CHECK: not-yet.m:[[@LINE-1]]:12: error: not yet implemented: code generation for nondeterministic disjunctions
 
 :- some [T] pred r(T::out) is det.
 % CHECK: not-yet.m:[[@LINE-1]]:18: error: not yet implemented: code generation for foreign_procs with existential types

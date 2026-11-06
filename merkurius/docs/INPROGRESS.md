@@ -356,7 +356,9 @@ later. In this order, each its own commit or commits:
    and calls, through success continuations that return `i1` "stop"; then
    commits, where one solution of a nondet goal is wanted, in `cc_multi`
    calls, conditions, negations and the collection of all solutions; then
-   nondet lambda expressions, closures, methods and word copies.
+   nondet lambda expressions, closures, methods and word copies. Done:
+   disjunctions with at most one solution or in committed-choice contexts,
+   and `cc_nondet` procedures.
 2. **What mode analysis does not check yet,** which code generation now
    reports: clauses for one mode, trace goals, and `try` and `atomic`
    goals.
