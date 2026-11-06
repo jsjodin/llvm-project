@@ -80,6 +80,21 @@ def Merk_ClosureType : TypeDef<Merk_Dialect, "Closure"> {
   let summary = "a higher-order value";
 }
 
+// A continuation of nondeterministic code, after outlining: the procedure
+// that a solution is given to, which returns whether to stop (design
+// document, Lowering, "Nondeterministic code").
+def Merk_ContType : TypeDef<Merk_Dialect, "Cont"> {
+  let mnemonic = "cont";
+  let summary = "a continuation";
+}
+
+// A continuation's environment, after outlining: the values it uses from
+// the code it was outlined from, in the frame that made it.
+def Merk_EnvType : TypeDef<Merk_Dialect, "Env"> {
+  let mnemonic = "env";
+  let summary = "a continuation's environment";
+}
+
 // A run-time description of a type, a tagged pointer: tag 0 for a descriptor
 // of a type of arity 0, tag 1 for a cell of a descriptor and its arguments'
 // type_infos (design document, "Type descriptors").

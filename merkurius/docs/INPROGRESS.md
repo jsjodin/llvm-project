@@ -328,8 +328,7 @@ program.
    nondet mode of `list.member`, gets a body that calls the runtime's
    `merk_not_implemented`, which reports it and exits with status 1, rather
    than failing the module; one without a signature code generation can
-   make, a nondet or multi procedure, is left out. No call of either can be
-   generated yet, so no program reaches one. Rejected: leaving them all out,
+   make is left out, as no call of it can be generated either. Rejected: leaving them all out,
    which a path to one would make a link error rather than a message; and
    removing the nondet and multi modes from the library's interfaces, which
    would make programs that mmc accepts mode errors. Also temporary:
@@ -358,7 +357,14 @@ later. In this order, each its own commit or commits:
    calls, conditions, negations and the collection of all solutions; then
    nondet lambda expressions, closures, methods and word copies. Done:
    disjunctions with at most one solution or in committed-choice contexts,
-   and `cc_nondet` procedures.
+   and `cc_nondet` procedures; nondet and multi procedures, their calls,
+   disjunctions, switches and if-then-elses with more than one solution,
+   and commits in committed choice procedures and goals with no outputs.
+   Next: conditions with more than one solution, whose then part runs for
+   each until one succeeds, which need a flag of whether the condition
+   succeeded; then the collection of all solutions, nondet lambda
+   expressions, closures, higher-order calls, methods and word copies,
+   which are reported as not yet implemented.
 2. **What mode analysis does not check yet,** which code generation now
    reports: clauses for one mode, trace goals, and `try` and `atomic`
    goals.

@@ -239,6 +239,75 @@ llvm::LogicalResult CallOp::verifySymbolUses(
   return mlir::success();
 }
 
+// A nondet call's procedure is nondet or multi, takes its inputs, and gives
+// its outputs to the continuation, which takes them as its arguments.
+llvm::LogicalResult NondetCallOp::verifySymbolUses(
+    mlir::SymbolTableCollection &symbolTable) {
+  auto proc{symbolTable.lookupNearestSymbolFrom<ProcOp>(*this, getCalleeAttr())};
+  if (!proc) {
+    return emitOpError("calls ") << getCalleeAttr() << ", which is no procedure";
+  }
+  if (proc.getDeterminism() != Determinism::Nondet &&
+      proc.getDeterminism() != Determinism::Multi) {
+    return emitOpError("calls ") << getCalleeAttr()
+                                 << ", which is not nondet or multi";
+  }
+  mlir::FunctionType type{proc.getFunctionType()};
+  if (getInputs().getTypes() != type.getInputs() ||
+      getContinuation().front().getArgumentTypes() != type.getResults()) {
+    return emitOpError("does not match the type of ") << getCalleeAttr();
+  }
+  return mlir::success();
+}
+
+llvm::LogicalResult NondetCallOp::verify() {
+  if (getContinuation().empty()) {
+    return emitOpError("has no continuation");
+  }
+  return mlir::success();
+}
+
+// A solution is of the innermost merk.each or merk.commit whose generator
+// it is in, through the continuations of merk.each in it, and has the
+// types of the continuation's arguments or of merk.commit's results.
+llvm::LogicalResult SolutionOp::verify() {
+  for (mlir::Region *region{(*this)->getParentRegion()}; region;
+       region = region->getParentRegion()) {
+    mlir::Operation *parent{region->getParentOp()};
+    if (auto each{mlir::dyn_cast<EachOp>(parent)}) {
+      if (region == &each.getContinuation()) {
+        continue;
+      }
+      if (each.getContinuation().empty()) {
+        return mlir::success();
+      }
+      if (getValues().getTypes() !=
+          each.getContinuation().front().getArgumentTypes()) {
+        return emitOpError("does not match the arguments of the continuation");
+      }
+      return mlir::success();
+    }
+    if (auto commit{mlir::dyn_cast<CommitOp>(parent)}) {
+      if (getValues().getTypes() != commit.getResultTypes()) {
+        return emitOpError("does not match the results of merk.commit");
+      }
+      return mlir::success();
+    }
+    if (mlir::isa<ProcOp>(parent)) {
+      break;
+    }
+  }
+  return emitOpError("is not in the generator of merk.each or merk.commit");
+}
+
+llvm::LogicalResult ContRefOp::verifySymbolUses(
+    mlir::SymbolTableCollection &symbolTable) {
+  if (!symbolTable.lookupNearestSymbolFrom<ProcOp>(*this, getCalleeAttr())) {
+    return emitOpError("names ") << getCalleeAttr() << ", which is no procedure";
+  }
+  return mlir::success();
+}
+
 llvm::LogicalResult TypeclassInfoOp::verifySymbolUses(
     mlir::SymbolTableCollection &symbolTable) {
   if (!symbolTable.lookupNearestSymbolFrom<InstanceOp>(*this, getInstanceAttr())) {

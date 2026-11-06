@@ -29,6 +29,15 @@ namespace merkurius::codegen {
 // runtime's main calls.
 inline constexpr llvm::StringLiteral kEntrySymbol{"merk_main"};
 
+// Leaves out of the solutions of merk.each's and merk.commit's generators
+// the values that nothing after them uses.
+void PruneSolutions(mlir::ModuleOp);
+
+// Rewrites a merk module's nondeterministic code, in regions, as procedures
+// that take continuations (design document, Lowering, "Nondeterministic
+// code"). LowerToLLVMDialect does this first.
+void OutlineNondeterminism(mlir::ModuleOp);
+
 // Lowers a merk module to the LLVM dialect, in place. Procedures use LLVM's
 // tailcc, so that calls in tail position can be musttail (design document,
 // "Calling convention"); merk.entry becomes merk_main.

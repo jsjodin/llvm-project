@@ -8,6 +8,7 @@
 
 #include "merkurius/CodeGen/MLIRGen.h"
 #include "Decomposer.h"
+#include "merkurius/CodeGen/Lowering.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
 #include "merkurius/Parser/parse-tree.h"
 #include "merkurius/Parser/term-reader.h"
@@ -567,8 +568,24 @@ private:
   void IfThenElse(const Body &, const ProcedureBody &);
   void Disjunction(const Body &, const ProcedureBody &);
   void DisjunctionFrom(const Body &, std::size_t next, const ProcedureBody &);
+  // Nondeterministic code (design document, Lowering, "Nondeterministic
+  // code"). Whether a procedure or a goal, as the goals around it see it,
+  // can have more than one solution.
+  bool Nondeterministic(const Procedure &);
+  static bool Nondeterministic(const Body &, const ProcedureBody &);
+  // Whether a goal with at most one solution as the goals around it see it
+  // has parts with more than one, of which it then takes the first.
+  bool NeedsCommit(const Body &, const ProcedureBody &);
+  void Commit(const Body &, const ProcedureBody &);
+  // A disjunction with more than one solution, as merk.disj in merk.each.
+  void NondetDisjunction(const Body &, const ProcedureBody &);
+  // Starts merk.each, for a goal with branches of which one or more has
+  // more than one solution, and generates the goal in its generator.
+  merk::EachOp BeginEach(mlir::Location);
+  // `otherwiseGoal` is the goal that `otherwise` generates, if it is one.
   void Ite(semantics::TokenRange, const Body &condition, const Body *thenPart,
-      llvm::function_ref<void()> otherwise, const ProcedureBody &);
+      llvm::function_ref<void()> otherwise, const ProcedureBody &,
+      const Body *otherwiseGoal = nullptr);
   void Switch(const Body &, const ProcedureBody &);
   void Not(const Body &, const ProcedureBody &);
   // A goal with an OpenMP directive (design document, "Target regions").
@@ -653,9 +670,10 @@ private:
   };
   // Ends the branches that succeed with the values of the variables they
   // all bind, and remakes `op` with those as its results, which are then
-  // the variables' values.
+  // the variables' values. In `each`'s generator, they are the solutions of
+  // the generator instead, and the continuation's arguments the values.
   void Join(mlir::Operation *op, llvm::ArrayRef<Branch>, const Values &before,
-      mlir::Location);
+      mlir::Location, merk::EachOp each = nullptr);
   // Whether the block being generated ends, after a goal that cannot
   // succeed.
   bool Terminated() {
@@ -718,6 +736,8 @@ private:
   // Whether a procedure's body is being generated, and the first construct
   // of it not handled yet, with -fstub-unimplemented.
   bool inBody_{false};
+  // The goal whose first solution merk.commit is being generated for.
+  const Body *committing_{nullptr};
   std::string notYet_;
   // The procedure being generated, whose lambda expressions' procedures are
   // named after it, and their number in the module.
@@ -1669,6 +1689,11 @@ merk::ProcOp MerkGenerator::ProcFor(const Procedure &procedure,
   std::optional<merk::Determinism> merkDeterminism;
   if (determinism) {
     merkDeterminism = MerkDeterminism(*determinism);
+    if (*determinism == parser::Determinism::Nondet) {
+      merkDeterminism = merk::Determinism::Nondet;
+    } else if (*determinism == parser::Determinism::Multi) {
+      merkDeterminism = merk::Determinism::Multi;
+    }
   }
   if (!merkDeterminism) {
     NotYet(at,
@@ -2142,9 +2167,24 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
     }
     call = merk::CallMethodOp::create(builder_, loc, resultTypes, dictionary,
         llvm::find(slots, &callee) - slots.begin(), inputs, *merkDeterminism);
+  } else if (Nondeterministic(callee)) {
+    // The rest of the code is the call's continuation, which takes the
+    // callee's outputs.
+    auto nondet{merk::NondetCallOp::create(
+        builder_, loc, proc.getSymName(), inputs)};
+    mlir::Block &continuation{nondet.getContinuation().emplaceBlock()};
+    for (mlir::Type type : proc.getFunctionType().getResults()) {
+      continuation.addArgument(type, loc);
+    }
+    builder_.setInsertionPointToStart(&continuation);
+    call = nondet;
   } else {
     call = merk::CallOp::create(builder_, loc,
         proc.getFunctionType().getResults(), proc.getSymName(), inputs);
+  }
+  mlir::ValueRange results{call->getResults()};
+  if (auto nondet{mlir::dyn_cast<merk::NondetCallOp>(call)}) {
+    results = nondet.getContinuation().front().getArguments();
   }
   // A call that never succeeds ends the branch it is in, which then need not
   // bind what the other branches bind.
@@ -2156,16 +2196,16 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
     return;
   }
   if (copyable) {
-    for (auto [var, word] : llvm::zip_equal(outputVars, call->getResults())) {
+    for (auto [var, word] : llvm::zip_equal(outputVars, results)) {
       SetFromWord(var, word, body, loc);
     }
     return;
   }
-  for (auto [node, result] : llvm::zip(gives, call->getResults())) {
+  for (auto [node, result] : llvm::zip(gives, results)) {
     Give(node, result);
   }
   for (auto [var, result] :
-      llvm::zip(outputs, call->getResults().drop_front(gives.size()))) {
+      llvm::zip(outputs, results.drop_front(gives.size()))) {
     if (!var) {
       continue;
     }
@@ -2176,7 +2216,8 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
 
 const ProcedureBody *MerkGenerator::CopyableBody(const Procedure &procedure) {
   auto it{bodies_.find(&procedure)};
-  if (it == bodies_.end() || !HiddenOutputs(procedure).empty()) {
+  if (it == bodies_.end() || !HiddenOutputs(procedure).empty() ||
+      Nondeterministic(procedure)) {
     return nullptr;
   }
   return it->second;
@@ -2717,6 +2758,10 @@ void MerkGenerator::NameClosure(const Body &goal, const ProcedureBody &body) {
     return;
   }
   if (!entry) {
+    if (Nondeterministic(callee)) {
+      NotYet(at, "closures of nondet and multi procedures");
+      return;
+    }
     // A procedure of this module is called through its word copy.
     const ProcedureBody *copyable{CopyableBody(callee)};
     merk::ProcOp proc{copyable ? WordProcFor(*copyable) : ProcFor(callee, types, at)};
@@ -2802,6 +2847,10 @@ void MerkGenerator::HigherOrderCall(const Body &goal, const ProcedureBody &body)
 
 void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
   if (failed_ || Terminated()) {
+    return;
+  }
+  if (committing_ != &goal && NeedsCommit(goal, body)) {
+    Commit(goal, body);
     return;
   }
   switch (goal.kind) {
@@ -4070,7 +4119,7 @@ std::vector<BodyVar> MerkGenerator::BoundSince(
 }
 
 void MerkGenerator::Join(mlir::Operation *op, llvm::ArrayRef<Branch> branches,
-    const Values &before, mlir::Location loc) {
+    const Values &before, mlir::Location loc, merk::EachOp each) {
   // The variables that every branch that succeeds binds; those of a branch
   // only are its own.
   std::optional<std::vector<BodyVar>> results;
@@ -4125,7 +4174,25 @@ void MerkGenerator::Join(mlir::Operation *op, llvm::ArrayRef<Branch> branches,
         types.push_back(value.getType());
       }
     }
-    merk::YieldOp::create(builder_, loc, values);
+    if (each) {
+      merk::SolutionOp::create(builder_, loc, values);
+    } else {
+      merk::YieldOp::create(builder_, loc, values);
+    }
+  }
+  if (each) {
+    // Every branch ends, and the rest of the code is the continuation.
+    if (!op->hasTrait<mlir::OpTrait::IsTerminator>()) {
+      builder_.setInsertionPointAfter(op);
+      merk::FailOp::create(builder_, loc);
+    }
+    mlir::Block &continuation{each.getContinuation().emplaceBlock()};
+    values_ = before;
+    for (auto [var, type] : llvm::zip(*results, types)) {
+      values_[var] = continuation.addArgument(type, loc);
+    }
+    builder_.setInsertionPointToStart(&continuation);
+    return;
   }
   // The operation again, with the results.
   mlir::OperationState state{op->getLoc(), op->getName()};
@@ -4150,8 +4217,13 @@ void MerkGenerator::Join(mlir::Operation *op, llvm::ArrayRef<Branch> branches,
 }
 
 void MerkGenerator::IfThenElse(const Body &goal, const ProcedureBody &body) {
+  if (Nondeterministic(*goal.goals[0], body)) {
+    NotYet(Where(goal.goals[0]->tokens),
+        "conditions with more than one solution");
+    return;
+  }
   Ite(goal.tokens, *goal.goals[0], goal.goals[1],
-      [&] { Goal(*goal.goals[2], body); }, body);
+      [&] { Goal(*goal.goals[2], body); }, body, goal.goals[2]);
 }
 
 // A disjunction with at most one solution as the goals around it see it,
@@ -4160,15 +4232,148 @@ void MerkGenerator::IfThenElse(const Body &goal, const ProcedureBody &body) {
 // that may have to give its next solution, when a goal after it fails, is
 // nondeterministic.
 void MerkGenerator::Disjunction(const Body &goal, const ProcedureBody &body) {
-  auto determinism{body.goals.find(&goal)};
-  if (determinism == body.goals.end() ||
-      llvm::is_contained({parser::Determinism::Multi,
-                             parser::Determinism::Nondet},
-          determinism->second)) {
-    NotYet(Where(goal.tokens), "nondeterministic disjunctions");
+  if (!body.goals.count(&goal)) {
+    NotYet(Where(goal.tokens), "disjunctions of unknown determinism");
+    return;
+  }
+  if (Nondeterministic(goal, body)) {
+    NondetDisjunction(goal, body);
     return;
   }
   DisjunctionFrom(goal, 0, body);
+}
+
+void MerkGenerator::NondetDisjunction(const Body &goal, const ProcedureBody &body) {
+  mlir::Location loc{Location(goal.tokens)};
+  Values before{values_};
+  merk::EachOp each{BeginEach(loc)};
+  auto disj{merk::DisjOp::create(
+      builder_, loc, static_cast<unsigned>(goal.goals.size()))};
+  llvm::SmallVector<Branch> branches;
+  {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    for (auto [disjunct, region] : llvm::zip(goal.goals, disj.getBranches())) {
+      values_ = before;
+      builder_.setInsertionPointToStart(&region.emplaceBlock());
+      Goal(*disjunct, body);
+      branches.push_back({builder_.getInsertionBlock(), values_, Terminated()});
+    }
+  }
+  if (failed_) {
+    values_ = before;
+    return;
+  }
+  Join(disj, branches, before, loc, each);
+}
+
+merk::EachOp MerkGenerator::BeginEach(mlir::Location loc) {
+  auto each{merk::EachOp::create(builder_, loc)};
+  builder_.setInsertionPointToStart(&each.getGenerator().emplaceBlock());
+  return each;
+}
+
+bool MerkGenerator::Nondeterministic(const Procedure &procedure) {
+  std::optional<parser::Determinism> determinism{
+      determinism_.DeterminismOf(procedure)};
+  return determinism && (*determinism == parser::Determinism::Nondet ||
+                            *determinism == parser::Determinism::Multi);
+}
+
+bool MerkGenerator::Nondeterministic(const Body &goal, const ProcedureBody &body) {
+  auto it{body.goals.find(&goal)};
+  return it != body.goals.end() &&
+      (it->second == parser::Determinism::Nondet ||
+          it->second == parser::Determinism::Multi);
+}
+
+// A goal with no outputs, or in a context where only its first solution is
+// wanted, as a committed choice, has at most one solution as the goals
+// around it see it, though a call in it, or the goals of a conjunction, or
+// the branches of an if-then-else or a switch, may have more. A disjunction
+// with at most one solution tries its branches in turn already, and the
+// parts of a negation are such goals of their own.
+bool MerkGenerator::NeedsCommit(const Body &goal, const ProcedureBody &body) {
+  // The body of a committed choice procedure, whose first solution is the
+  // procedure's, though the goals in it may want all of a goal's.
+  if (&goal == body.body && body.determinism &&
+      (*body.determinism == parser::Determinism::CcMulti ||
+          *body.determinism == parser::Determinism::CcNondet) &&
+      Nondeterministic(goal, body)) {
+    return true;
+  }
+  if (!body.goals.count(&goal) || Nondeterministic(goal, body)) {
+    return false;
+  }
+  auto anyNondet{[&](auto &&goals) {
+    return llvm::any_of(goals, [&](const Body *g) { return Nondeterministic(*g, body); });
+  }};
+  switch (goal.kind) {
+  case BodyKind::Call:
+    return goal.modes && goal.modes->callee &&
+        Nondeterministic(*goal.modes->callee);
+  case BodyKind::Unify:
+    return goal.unify == UnifyKind::Call && goal.modes && goal.modes->callee &&
+        Nondeterministic(*goal.modes->callee);
+  case BodyKind::Conj:
+  case BodyKind::Scope:
+    return anyNondet(goal.goals);
+  case BodyKind::IfThenElse:
+    return anyNondet(llvm::ArrayRef<const Body *>{goal.goals}.drop_front());
+  case BodyKind::Switch:
+    return llvm::any_of(goal.cases, [&](const semantics::SwitchCase &c) {
+      return Nondeterministic(*c.goal, body);
+    });
+  default:
+    return false;
+  }
+}
+
+// The goal in merk.commit's generator, whose first solution gives the values
+// of the variables it binds.
+void MerkGenerator::Commit(const Body &goal, const ProcedureBody &body) {
+  mlir::Location loc{Location(goal.tokens)};
+  Values before{values_};
+  auto commit{merk::CommitOp::create(builder_, loc, mlir::TypeRange{})};
+  std::vector<BodyVar> bound;
+  llvm::SmallVector<mlir::Type> types;
+  bool solves{false};
+  {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.setInsertionPointToStart(&commit.getGenerator().emplaceBlock());
+    const Body *outer{committing_};
+    committing_ = &goal;
+    Goal(goal, body);
+    committing_ = outer;
+    if (failed_) {
+      values_ = before;
+      return;
+    }
+    if (!Terminated()) {
+      solves = true;
+      llvm::SmallVector<mlir::Value> values;
+      for (BodyVar var : BoundSince(values_, before)) {
+        if (mlir::Value value{values_.lookup(var)}) {
+          bound.push_back(var);
+          values.push_back(value);
+          types.push_back(value.getType());
+        }
+      }
+      merk::SolutionOp::create(builder_, loc, values);
+    }
+  }
+  // The operation again, with the results.
+  builder_.setInsertionPoint(commit);
+  auto joined{merk::CommitOp::create(builder_, loc, types)};
+  joined.getGenerator().takeBody(commit.getGenerator());
+  commit.erase();
+  builder_.setInsertionPointAfter(joined);
+  values_ = before;
+  for (auto [var, result] : llvm::zip_equal(bound, joined.getResults())) {
+    values_[var] = result;
+  }
+  if (!solves) {
+    merk::FailOp::create(builder_, loc);
+  }
 }
 
 void MerkGenerator::DisjunctionFrom(
@@ -4184,9 +4389,14 @@ void MerkGenerator::DisjunctionFrom(
 // if condition then `then` (or true) else otherwise.
 void MerkGenerator::Ite(semantics::TokenRange tokens, const Body &condition,
     const Body *thenPart, llvm::function_ref<void()> otherwise,
-    const ProcedureBody &body) {
+    const ProcedureBody &body, const Body *otherwiseGoal) {
   mlir::Location loc{Location(tokens)};
   Values before{values_};
+  merk::EachOp each;
+  if ((thenPart && Nondeterministic(*thenPart, body)) ||
+      (otherwiseGoal && Nondeterministic(*otherwiseGoal, body))) {
+    each = BeginEach(loc);
+  }
   auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
   llvm::SmallVector<Branch, 2> branches;
   {
@@ -4218,17 +4428,17 @@ void MerkGenerator::Ite(semantics::TokenRange tokens, const Body &condition,
     } else if (thenPart) {
       Goal(*thenPart, body);
     }
-    branches.push_back({&then, values_, Terminated()});
+    branches.push_back({builder_.getInsertionBlock(), values_, Terminated()});
     mlir::Block &otherwiseBlock{ite.getElseRegion().emplaceBlock()};
     values_ = before;
     builder_.setInsertionPointToStart(&otherwiseBlock);
     otherwise();
-    branches.push_back({&otherwiseBlock, values_, Terminated()});
+    branches.push_back({builder_.getInsertionBlock(), values_, Terminated()});
     if (failed_) {
       values_ = before;
       return;
     }
-    Join(ite, branches, before, loc);
+    Join(ite, branches, before, loc, each);
     // The condition passes the then part only the values it uses: those
     // the condition binds for itself are local to it.
     for (unsigned i = then.getNumArguments(); i-- > 0;) {
@@ -4239,6 +4449,9 @@ void MerkGenerator::Ite(semantics::TokenRange tokens, const Body &condition,
         }
       }
     }
+  }
+  if (each) {
+    builder_.setInsertionPointToStart(&each.getContinuation().front());
   }
 }
 
@@ -4296,6 +4509,12 @@ void MerkGenerator::Switch(const Body &goal, const ProcedureBody &body) {
     cases.push_back(builder_.getArrayAttr(constants));
   }
   Values before{values_};
+  merk::EachOp each;
+  if (llvm::any_of(goal.cases, [&](const semantics::SwitchCase &c) {
+        return Nondeterministic(*c.goal, body);
+      })) {
+    each = BeginEach(loc);
+  }
   auto op{merk::SwitchOp::create(builder_, loc, mlir::TypeRange{}, value,
       builder_.getArrayAttr(cases), goal.canFail)};
   llvm::SmallVector<Branch> branches;
@@ -4306,14 +4525,14 @@ void MerkGenerator::Switch(const Body &goal, const ProcedureBody &body) {
       values_ = before;
       builder_.setInsertionPointToStart(&block);
       Goal(*c.goal, body);
-      branches.push_back({&block, values_, Terminated()});
+      branches.push_back({builder_.getInsertionBlock(), values_, Terminated()});
     }
   }
   if (failed_) {
     values_ = before;
     return;
   }
-  Join(op, branches, before, loc);
+  Join(op, branches, before, loc, each);
 }
 
 void MerkGenerator::Not(const Body &goal, const ProcedureBody &body) {
@@ -6629,6 +6848,9 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
       }
     }
   }
+  // A goal's solutions give every variable it binds; only those used after
+  // it stay.
+  PruneSolutions(*owned);
   return owned;
 }
 
