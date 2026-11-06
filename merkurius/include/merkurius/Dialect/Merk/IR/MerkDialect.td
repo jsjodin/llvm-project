@@ -70,6 +70,16 @@ def Merk_WordType : TypeDef<Merk_Dialect, "Word"> {
   let summary = "a value of a type variable";
 }
 
+// A higher-order value: a pointer to a cell of its entry's code, the number
+// of values it captured, and those values, a word each. It has no type
+// arguments: a call passes every argument and result as a word, whatever the
+// closure's type, since the code that calls it may know it only at a type
+// variable (design document, Lowering, "Closures").
+def Merk_ClosureType : TypeDef<Merk_Dialect, "Closure"> {
+  let mnemonic = "closure";
+  let summary = "a higher-order value";
+}
+
 // A run-time description of a type, a tagged pointer: tag 0 for a descriptor
 // of a type of arity 0, tag 1 for a cell of a descriptor and its arguments'
 // type_infos (design document, "Type descriptors").
