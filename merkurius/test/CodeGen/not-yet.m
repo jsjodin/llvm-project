@@ -8,7 +8,7 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module int, list.
+:- import_module char, exception, int, list, string.
 
 main(!IO) :-
     P = (pred(Y::out) is nondet :- ( Y = 1 ; Y = 2 )),
@@ -50,3 +50,18 @@ w(X) = pow(X, 3).
 % CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for multi procedures
 u(1).
 u(2).
+
+% Calls of library modules that are not compiled yet and not built in.
+:- func joined(string) = string.
+joined(S) = S ++ "!".
+% CHECK: not-yet.m:[[@LINE-1]]:13: error: not yet implemented: code generation for calls of string.++/2
+
+:- func upper(char) = char.
+upper(C) = char.to_upper(C).
+% CHECK: not-yet.m:[[@LINE-1]]:12: error: not yet implemented: code generation for calls of char.to_upper/1
+
+:- pred thrown(int::out) is det.
+thrown(X) :-
+    X = 1,
+    throw(X).
+% CHECK: not-yet.m:[[@LINE-1]]:5: error: not yet implemented: code generation for calls of exception.throw/1
