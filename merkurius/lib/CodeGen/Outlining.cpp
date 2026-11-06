@@ -50,6 +50,10 @@ public:
 private:
   void Rewrite(mlir::Region &, const Sink *succeed, const Sink *solution);
   void RewriteCall(merk::NondetCallOp, const Sink *succeed, const Sink *solution);
+  void RewriteClosureCall(
+      merk::NondetCallClosureOp, const Sink *succeed, const Sink *solution);
+  Sink Continuation(mlir::Operation *call, mlir::Region &continuation,
+      const Sink *succeed, const Sink *solution);
   void RewriteEach(merk::EachOp, const Sink *succeed, const Sink *solution);
   void RewriteSoftIte(merk::SoftIteOp, const Sink *succeed, const Sink *solution);
   void RewriteCommit(merk::CommitOp);
@@ -209,6 +213,8 @@ void Outliner::Rewrite(
         Deliver(end, end.getValues(), *solution);
       } else if (auto call{mlir::dyn_cast<merk::NondetCallOp>(op)}) {
         RewriteCall(call, succeed, solution);
+      } else if (auto call{mlir::dyn_cast<merk::NondetCallClosureOp>(op)}) {
+        RewriteClosureCall(call, succeed, solution);
       } else if (auto each{mlir::dyn_cast<merk::EachOp>(op)}) {
         RewriteEach(each, succeed, solution);
       } else if (auto ite{mlir::dyn_cast<merk::SoftIteOp>(op)}) {
@@ -248,27 +254,51 @@ const Sink *Outliner::PassedOn(mlir::Region &continuation, const Sink *succeed,
   return sink;
 }
 
+// The continuation and environment that a call is given for the rest of
+// the code: its caller's, if the rest only gives its arguments as the
+// solution, and otherwise the rest outlined, with an environment of what it
+// uses in the caller's frame.
+Sink Outliner::Continuation(mlir::Operation *call, mlir::Region &continuation,
+    const Sink *succeed, const Sink *solution) {
+  if (const Sink *sink{PassedOn(continuation, succeed, solution)}) {
+    return *sink;
+  }
+  mlir::Location loc{call->getLoc()};
+  Rewrite(continuation, succeed, solution);
+  llvm::SmallVector<mlir::Value> captures;
+  mlir::ArrayAttr layout;
+  merk::ProcOp proc{Outline(continuation, {}, captures, layout)};
+  builder_.setInsertionPoint(call);
+  Sink sink;
+  sink.env = MakeEnv(loc, captures, layout);
+  sink.cont = merk::ContRefOp::create(builder_, loc,
+      merk::ContType::get(builder_.getContext()), proc.getSymName());
+  return sink;
+}
+
 void Outliner::RewriteCall(
     merk::NondetCallOp call, const Sink *succeed, const Sink *solution) {
   mlir::Location loc{call.getLoc()};
-  mlir::Value cont, env;
-  if (const Sink *sink{PassedOn(call.getContinuation(), succeed, solution)}) {
-    cont = sink->cont;
-    env = sink->env;
-  } else {
-    Rewrite(call.getContinuation(), succeed, solution);
-    llvm::SmallVector<mlir::Value> captures;
-    mlir::ArrayAttr layout;
-    merk::ProcOp proc{Outline(call.getContinuation(), {}, captures, layout)};
-    builder_.setInsertionPoint(call);
-    env = MakeEnv(loc, captures, layout);
-    cont = merk::ContRefOp::create(builder_, loc,
-        merk::ContType::get(builder_.getContext()), proc.getSymName());
-  }
+  Sink sink{Continuation(call, call.getContinuation(), succeed, solution)};
   builder_.setInsertionPoint(call);
   llvm::SmallVector<mlir::Value> inputs{call.getInputs()};
-  inputs.append({cont, env});
+  inputs.append({sink.cont, sink.env});
   merk::CallOp::create(builder_, loc, mlir::TypeRange{}, call.getCallee(), inputs);
+  merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+  call.erase();
+}
+
+// A semidet call of the closure's entry, which outlining has rewritten as
+// it does every nondet procedure.
+void Outliner::RewriteClosureCall(merk::NondetCallClosureOp call,
+    const Sink *succeed, const Sink *solution) {
+  mlir::Location loc{call.getLoc()};
+  Sink sink{Continuation(call, call.getContinuation(), succeed, solution)};
+  builder_.setInsertionPoint(call);
+  llvm::SmallVector<mlir::Value> inputs{call.getInputs()};
+  inputs.append({sink.cont, sink.env});
+  merk::CallClosureOp::create(builder_, loc, mlir::TypeRange{},
+      call.getClosure(), inputs, merk::Determinism::Semidet);
   merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
   call.erase();
 }

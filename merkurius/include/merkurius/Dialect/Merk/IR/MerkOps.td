@@ -71,7 +71,7 @@ def Merk_ProcOp : Merk_Op<"proc", [
 
 def Merk_SucceedOp : Merk_Op<"succeed", [
     Pure, ParentOneOf<["ProcOp", "IteOp", "SwitchOp", "DisjOp", "NondetCallOp",
-        "EachOp", "SoftIteOp"]>,
+        "NondetCallClosureOp", "EachOp", "SoftIteOp"]>,
     ReturnLike, Terminator
   ]> {
   let summary = "produce the procedure's solution";
@@ -357,13 +357,17 @@ def Merk_CallClosureOp : Merk_Op<"call_closure"> {
     Calls the closure's entry with the closure and the inputs, a word for each
     of the closure's inputs, including one of a type with no values; its
     results are a word for each output. The determinism is the closure's inst's.
+    A nondet or multi closure is called with `merk.nondet_call_closure`,
+    which outlining rewrites as a semidet call of this operation whose last
+    inputs are a continuation and its environment.
 
     ```mlir
     %y = merk.call_closure %p(%x) #merk.determinism<det> : (!merk.word) -> !merk.word
     ```
   }];
   let arguments = (ins Merk_ClosureType:$closure,
-      Variadic<Merk_WordType>:$inputs, Merk_DeterminismAttr:$determinism);
+      Variadic<AnyTypeOf<[Merk_WordType, Merk_ContType, Merk_EnvType]>>:$inputs,
+      Merk_DeterminismAttr:$determinism);
   let results = (outs Variadic<Merk_WordType>:$outputs);
   let assemblyFormat = [{
     $closure `(` $inputs `)` $determinism attr-dict `:` functional-type($inputs, $outputs)
@@ -858,6 +862,37 @@ def Merk_NondetCallOp : Merk_Op<"nondet_call", [
       "mlir::ValueRange":$inputs), [{
     $_state.addAttribute(getCalleeAttrName($_state.name),
         mlir::FlatSymbolRefAttr::get($_builder.getContext(), callee));
+    $_state.addOperands(inputs);
+    $_state.addRegion();
+  }]>];
+}
+
+def Merk_NondetCallClosureOp : Merk_Op<"nondet_call_closure", [Terminator]> {
+  let summary = "a higher-order call of a nondet or multi closure";
+  let description = [{
+    Calls the closure's entry with the closure and the inputs, a word for each
+    of the closure's inputs, as `merk.call_closure` does, and runs its
+    continuation once for each of its solutions, with a word for each output
+    as the continuation's arguments; after the last, it fails.
+
+    ```mlir
+    merk.nondet_call_closure %p(%x : !merk.word) {
+    ^bb0(%y: !merk.word):
+      ...
+    }
+    ```
+  }];
+  let arguments = (ins Merk_ClosureType:$closure,
+      Variadic<Merk_WordType>:$inputs);
+  let regions = (region SizedRegion<1>:$continuation);
+  let assemblyFormat = [{
+    $closure `(` ($inputs^ `:` type($inputs))? `)` $continuation attr-dict
+  }];
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+  let builders = [OpBuilder<(ins "mlir::Value":$closure,
+      "mlir::ValueRange":$inputs), [{
+    $_state.addOperands(closure);
     $_state.addOperands(inputs);
     $_state.addRegion();
   }]>];
