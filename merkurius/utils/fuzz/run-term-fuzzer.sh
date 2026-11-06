@@ -1,25 +1,31 @@
 #!/usr/bin/env bash
 # Builds the parser and desugaring fuzz target with libFuzzer and the
 # address and undefined behavior sanitizers, using the clang of the build
-# tree, then fuzzes for SECONDS (default 300) in JOBS processes (default 40).
-# A fifth of the jobs fuzz large inputs, up to 64 KB, which reach what grows
-# with the size of a module; the others fuzz inputs up to 4 KB, which run
-# many times faster. The two are separate fuzzers that run at once.
+# tree, then runs two fuzzers, one after the other, each for SECONDS
+# (default 300) in JOBS processes (default 40): first one of inputs up to
+# 4 KB, which run many times faster, then one of large inputs, up to 64 KB,
+# which reach what grows with the size of a module. Run one at a time, each
+# has every core; the large one found three times the features with 40 jobs
+# that it found with 8 while the small one had 32.
 #
 # SECONDS is the time spent fuzzing, after libFuzzer has run every input
-# of the corpus once, which takes minutes for a large corpus: libFuzzer's
-# own -max_total_time counts from its start, so each fuzzer runs without
-# it and is stopped SECONDS after its first job reports. Each runs in its
-# own process group, which is sent SIGTERM, since in fork mode it ignores
-# SIGINT and its jobs outlive it, and then SIGKILL for a job it started as
-# it stopped. Each reports how long it fuzzed and how many inputs it ran.
+# of the corpus once: libFuzzer's own -max_total_time counts from its start,
+# so each fuzzer runs without it and is stopped SECONDS after its first job
+# reports. Our libFuzzer runs the corpus in one process per hardware thread
+# (-fork_load_jobs, a local change), which takes about a minute for each
+# corpus, where upstream's one process took 8 and 23 minutes. Each fuzzer
+# runs in its own process group, which is sent SIGTERM, since in fork mode
+# it ignores SIGINT and its jobs outlive it, and then SIGKILL for a job it
+# started as it stopped. Each reports how long it fuzzed and how many
+# inputs it ran.
 # Stopped so, a fuzzer may exit with 72 ("run interrupted") or
 # 1, if a job ended as it stopped; the run fails if a fuzzer ended before
 # it was stopped with a failure status, or wrote a crash, leak, timeout or
 # out-of-memory artifact.
 #
 # The sources compile in parallel through a generated ninja file, and only
-# those that changed since the last run are recompiled. The fuzzers run in
+# those that changed since the last run are recompiled; libFuzzer's runtime
+# is rebuilt first, if it changed, and the fuzzer relinked. The fuzzers run in
 # libFuzzer's fork mode, which adds an input to the corpus only when the
 # input covers a new feature. Features are many more than edges, so a
 # corpus still grows with every run, and so does the time to load it;
@@ -47,10 +53,16 @@ LLVM_PROJECT_DIR="$(dirname "$MERKURIUS_DIR")"
 BUILD_DIR="${BUILD_DIR:-$(dirname "$LLVM_PROJECT_DIR")/build-merk}"
 SECONDS_TO_RUN="${1:-300}"
 JOBS="${2:-40}"
-LARGE_JOBS=$((JOBS / 5))
-SMALL_JOBS=$((JOBS - LARGE_JOBS))
 WORK="$BUILD_DIR/fuzz/term"
 mkdir -p "$WORK/corpus" "$WORK/artifacts" "$WORK/artifacts-large"
+
+# Our libFuzzer, with its local changes, is built with the runtimes.
+ninja -C "$BUILD_DIR/runtimes/runtimes-bins" compiler-rt/lib/fuzzer/fuzzer
+FUZZER_RUNTIME="$("$BUILD_DIR/bin/clang++" -print-runtime-dir)/libclang_rt.fuzzer.a"
+if [[ ! -f "$FUZZER_RUNTIME" ]]; then
+  echo "error: libFuzzer's runtime is not at $FUZZER_RUNTIME" >&2
+  exit 1
+fi
 
 SOURCES=("$MERKURIUS_DIR/tools/merkurius-term-fuzzer/merkurius-term-fuzzer.cpp"
   "$MERKURIUS_DIR"/lib/Parser/*.cpp "$MERKURIUS_DIR"/lib/Semantics/*.cpp
@@ -79,7 +91,7 @@ NINJA
     OBJECTS+=("$object")
     echo "build $object: cxx $source"
   done
-  echo "build merkurius-term-fuzzer: link ${OBJECTS[*]}"
+  echo "build merkurius-term-fuzzer: link ${OBJECTS[*]} | $FUZZER_RUNTIME"
 } > "$WORK/build.ninja"
 ninja -C "$WORK" merkurius-term-fuzzer
 
@@ -93,73 +105,60 @@ find "$MERKURIUS_DIR/test" "$MERKURIUS_DIR/utils" -name '*.m' \
 BUILD_DIR="$BUILD_DIR" "$MERKURIUS_DIR/utils/fuzz/distill-term-corpus.sh"
 
 cd "$WORK"
-# The fuzzers, by name: their process groups, their logs, the times they
-# started fuzzing, once their corpora were loaded, the times they were
-# stopped, and the times they ended.
-NAMES=(small)
-declare -A PID LOG START STOP END
-run() {
-  local name=$1 jobs=$2 corpus=$3 artifacts=$4 log=$5
-  shift 5
-  setsid ./merkurius-term-fuzzer "$corpus" -artifact_prefix="$artifacts/" \
-    -fork="$jobs" -dict="$MERKURIUS_DIR/utils/fuzz/mercury.dict" "$@" \
-    > "$log" 2>&1 &
-  PID[$name]=$!
-  LOG[$name]=$log
-}
-run small "$SMALL_JOBS" corpus artifacts fuzz.log -max_len=4096
+# The fuzzers, by name: their logs, the times they started fuzzing, once
+# their corpora were loaded, the times they were stopped, and the times
+# they ended.
+NAMES=(small large)
+declare -A LOG START STOP END
+STATUS=0
+: > fuzz.log
 : > fuzz-large.log
-if ((LARGE_JOBS > 0)); then
-  NAMES+=(large)
-  # Without -len_control=0, libFuzzer would grow its inputs from small
-  # ones only slowly.
-  run large "$LARGE_JOBS" corpus-large artifacts-large fuzz-large.log \
-    -max_len=65536 -len_control=0
-fi
 tail -n +1 -f fuzz.log fuzz-large.log &
 TAIL=$!
 
-running() { kill -0 "${PID[$1]}" 2>/dev/null; }
-# A corpus is loaded when the first job reports, as "#N: ... job: 1".
-while true; do
-  ANY=false
-  for name in "${NAMES[@]}"; do
-    [[ -z "${END[$name]:-}" ]] || continue
-    if ! running "$name"; then
-      END[$name]=$SECONDS
-      # Any job it started as it ended.
-      kill -KILL -- "-${PID[$name]}" 2>/dev/null || true
-      continue
-    fi
-    ANY=true
+# Runs one fuzzer, in a process group of its own, until it has fuzzed for
+# SECONDS_TO_RUN after its corpus was loaded, or ends.
+fuzz() {
+  local name=$1 corpus=$2 artifacts=$3 log=$4 pid status=0
+  shift 4
+  LOG[$name]=$log
+  setsid ./merkurius-term-fuzzer "$corpus" -artifact_prefix="$artifacts/" \
+    -fork="$JOBS" -dict="$MERKURIUS_DIR/utils/fuzz/mercury.dict" "$@" \
+    > "$log" 2>&1 &
+  pid=$!
+  # A corpus is loaded when the first job reports, as "#N: ... job: 1".
+  while kill -0 "$pid" 2>/dev/null; do
     if [[ -z "${START[$name]:-}" ]]; then
-      if grep -qE '^#[0-9]+: .* job: ' "${LOG[$name]}"; then
+      if grep -qE '^#[0-9]+: .* job: ' "$log"; then
         START[$name]=$SECONDS
       fi
     elif [[ -z "${STOP[$name]:-}" ]] &&
         ((SECONDS - START[$name] >= SECONDS_TO_RUN)); then
       STOP[$name]=$SECONDS
-      kill -TERM -- "-${PID[$name]}"
+      kill -TERM -- "-$pid"
     fi
+    sleep 1
   done
-  $ANY || break
-  sleep 1
-done
-sleep 1
-kill "$TAIL" 2>/dev/null || true
-STATUS=0
-for name in "${NAMES[@]}"; do
-  FUZZER_STATUS=0
-  wait "${PID[$name]}" || FUZZER_STATUS=$?
+  END[$name]=$SECONDS
+  # Any job it started as it ended.
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  wait "$pid" || status=$?
   if [[ -z "${STOP[$name]:-}" ]]; then
     STOP[$name]=${END[$name]}
     echo "INFO: the $name fuzzer ended before it was stopped," \
-      "with exit status $FUZZER_STATUS" | tee -a fuzz.log
-    if ((FUZZER_STATUS != 0)); then
+      "with exit status $status" | tee -a fuzz.log
+    if ((status != 0)); then
       STATUS=1
     fi
   fi
-done
+}
+fuzz small corpus artifacts fuzz.log -max_len=4096
+# Without -len_control=0, libFuzzer would grow its inputs from small ones
+# only slowly.
+fuzz large corpus-large artifacts-large fuzz-large.log \
+  -max_len=65536 -len_control=0
+sleep 1
+kill "$TAIL" 2>/dev/null || true
 
 for dir in artifacts artifacts-large; do
   SLOW=$(ls "$dir" | grep '^slow-unit-' || true)
