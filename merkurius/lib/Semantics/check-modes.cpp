@@ -2896,6 +2896,19 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
             InstText(term),
         std::move(waits));
   }
+  // An argument bound where X's is too is a test of the two, below, which
+  // for a higher-order type is a unification of higher-order terms, as
+  // in `[F] = [G]`. mmc: "in list element #0: In unification of `G' with
+  // `V_34': mode error: attempt at higher-order unification."
+  for (std::size_t i{0}; before && i < arguments.size(); ++i) {
+    VarId var{unify.arguments[i]};
+    const Type *argumentType{TypeOf(var)};
+    if (argumentType && argumentType->kind == TypeKind::HigherOrder &&
+        !ops_.IsFree(arguments[i]) && !ops_.IsFree((*before)[i])) {
+      return HigherOrderUnification(
+          goal, var, "argument " + std::to_string(i + 1) + " of " + Name(x));
+    }
+  }
   if (ops_.IsNotReached(unified) && !ops_.IsNotReached(a)) {
     // mmc: "warning: unification of `V3' and m.c cannot succeed. `V3' has
     // instantiatedness `unique(a)'."
