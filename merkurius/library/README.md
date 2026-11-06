@@ -12,7 +12,9 @@ have no implementation yet.
 the narrower integers' writes in Mercury. `write`, `print` and their
 `_line` forms are polymorphic `foreign_proc`s on `runtime/write.cpp`;
 `write_list` is in Mercury, calling its closure for each element, on the
-standard output only. `float.m` implements its
+standard output only. `require.m` implements its errors with mmc's
+messages, but `report_lookup_error`, which is not implemented yet.
+`float.m` implements its
 functions but `hash`, and `math.m` all of its
 functions but `solve_quadratic`, with C's math library. The arithmetic
 and comparisons of `int`, `uint`, the sized integers and `float` are

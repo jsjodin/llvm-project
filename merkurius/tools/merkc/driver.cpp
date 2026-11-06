@@ -80,6 +80,9 @@ static void addFrontendOptions(const InputArgList &args, Job &job,
   if (args.hasArg(OPT_fdo_loops)) {
     job.push_back("-fdo-loops");
   }
+  if (args.hasArg(OPT_fstub_unimplemented)) {
+    job.push_back("-fstub-unimplemented");
+  }
   for (const std::string &dir : args.getAllArgValues(OPT_I)) {
     job.push_back("-I");
     job.push_back(dir);
