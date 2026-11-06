@@ -33,12 +33,12 @@ map_size(_) = [].
 % CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for values of type not_yet.set
 equal(set(X), set(X)).
 
-% A disjunction that a goal after it may backtrack into for its next
-% solution.
+% A condition with more than one solution, whose then part runs for each
+% of them until it succeeds.
 :- pred q(int::in) is semidet.
 q(X) :-
-    ( if ( Y = 1 ; Y = 2 ), Y > X then true else fail ).
-% CHECK: not-yet.m:[[@LINE-1]]:12: error: not yet implemented: code generation for nondeterministic disjunctions
+    ( if ( Y = 1 ; Y = 2 ), Y > X then Y > 1 else fail ).
+% CHECK: not-yet.m:[[@LINE-1]]:10: error: not yet implemented: code generation for conditions with more than one solution
 
 :- some [T] pred r(T::out) is det.
 % CHECK: not-yet.m:[[@LINE-1]]:18: error: not yet implemented: code generation for foreign_procs with existential types
@@ -49,9 +49,11 @@ w(X) = pow(X, 3).
 % CHECK: not-yet.m:[[@LINE-1]]:8: error: not yet implemented: code generation for calls of int.pow/2
 
 :- pred u(int::out) is multi.
-% CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for multi procedures
 u(1).
 u(2).
+:- pred closure(pred(int)::out(pred(out) is multi)) is det.
+closure(u).
+% CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for closures of nondet and multi procedures
 
 % Calls of library modules that are not compiled yet and not built in.
 :- func joined(string) = string.

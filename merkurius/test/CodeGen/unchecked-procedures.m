@@ -1,10 +1,8 @@
 % A procedure whose clauses use what mode analysis does not check yet has
 % no body to generate. Code generation reports it, once for all of a
 % predicate's modes, rather than leaving a declaration its callers fail to
-% link against, even when nothing calls it. With -fstub-unimplemented, a
-% procedure with a signature code generation can make is a stub that
-% reports this when it runs, and one without, a nondet procedure, is left
-% out.
+% link against, even when nothing calls it. With -fstub-unimplemented, such
+% a procedure is a stub that reports this when it runs, a nondet one too.
 %
 % RUN: not merkc -fc1 -emit-merk %s 2>&1 | FileCheck %s --implicit-check-not=error:
 % RUN: merkc -fc1 -fstub-unimplemented -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=STUB
@@ -57,4 +55,7 @@ member_of(X::out, L::in) :-
 % STUB-NEXT: merk.foreign_call @merk_not_implemented(%[[WHAT]]) : (!merk.string) -> ()
 % STUB-NEXT: merk.fail
 % STUB: merk.proc @unchecked_procedures.member_of_2_0(
-% STUB-NOT: member_of_2_1
+% STUB: merk.proc @unchecked_procedures.member_of_2_1(%arg0: !merk.term<"list.list(int)">) -> i64 attributes {determinism = #merk.determinism<nondet>} {
+% STUB-NEXT: %[[WHAT:.*]] = merk.constant "unchecked_procedures.member_of_2_1: code generation for procedures with clauses for one mode, which mode analysis does not check yet" : !merk.string
+% STUB-NEXT: merk.foreign_call @merk_not_implemented(%[[WHAT]]) : (!merk.string) -> ()
+% STUB-NEXT: merk.fail

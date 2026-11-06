@@ -70,13 +70,18 @@ def Merk_ProcOp : Merk_Op<"proc", [
 }
 
 def Merk_SucceedOp : Merk_Op<"succeed", [
-    Pure, ParentOneOf<["ProcOp", "IteOp", "SwitchOp"]>, ReturnLike, Terminator
+    Pure, ParentOneOf<["ProcOp", "IteOp", "SwitchOp", "DisjOp", "NondetCallOp",
+        "EachOp"]>,
+    ReturnLike, Terminator
   ]> {
   let summary = "produce the procedure's solution";
   let description = [{
     Ends a procedure's body, or a branch of an if-then-else or switch in
     tail position, with the procedure's outputs, in the order of its
-    results.
+    results. In a nondet or multi procedure it gives one solution, and the
+    procedure goes on to its next when the code that called it asks for
+    one; nondeterministic code is in a disjunction's branch, a nondet
+    call's continuation or the continuation of `merk.each`.
   }];
   let arguments = (ins Variadic<AnyType>:$outputs);
   let assemblyFormat = "attr-dict ($outputs^ `:` type($outputs))?";
@@ -793,6 +798,185 @@ def Merk_SwitchOp : Merk_Op<"switch", [RecursiveMemoryEffects]> {
       $_state.addRegion();
     }
   }]>];
+}
+
+//===----------------------------------------------------------------------===//
+// Nondeterministic code (design document, Lowering, "Nondeterministic code")
+//===----------------------------------------------------------------------===//
+
+def Merk_DisjOp : Merk_Op<"disj", [
+    RecursiveMemoryEffects, NoRegionArguments, Terminator
+  ]> {
+  let summary = "a disjunction with more than one solution";
+  let description = [{
+    Runs its branches in turn: each gives its solutions, and when it fails,
+    or the code that its solutions went to asks for another, the next
+    branch runs; after the last, the disjunction fails. A branch ends as
+    the code around the disjunction does, giving a solution with
+    `merk.succeed` or `merk.solution`, or failing. A disjunction with at
+    most one solution is an if-then-else.
+
+    ```mlir
+    merk.disj {
+      merk.succeed %h : i64
+    }, {
+      merk.nondet_call @m.member_2_1(%t : !merk.term<"list.list(int)">) {
+      ^bb0(%x: i64):
+        merk.succeed %x : i64
+      }
+    }
+    ```
+  }];
+  let regions = (region VariadicRegion<SizedRegion<1>>:$branches);
+  let assemblyFormat = "$branches attr-dict";
+  let skipDefaultBuilders = 1;
+  let builders = [OpBuilder<(ins "unsigned":$count), [{
+    for (unsigned i = 0; i < count; ++i) {
+      $_state.addRegion();
+    }
+  }]>];
+}
+
+def Merk_NondetCallOp : Merk_Op<"nondet_call", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>, Terminator
+  ]> {
+  let summary = "a call of a nondet or multi procedure";
+  let description = [{
+    Calls a nondet or multi procedure, and runs its continuation once for
+    each of its solutions, with the procedure's outputs as the
+    continuation's arguments; after the last, it fails. The continuation is
+    the rest of the code, which ends as the code around the call does.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$callee, Variadic<AnyType>:$inputs);
+  let regions = (region SizedRegion<1>:$continuation);
+  let assemblyFormat = [{
+    $callee `(` ($inputs^ `:` type($inputs))? `)` $continuation attr-dict
+  }];
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+  let builders = [OpBuilder<(ins "llvm::StringRef":$callee,
+      "mlir::ValueRange":$inputs), [{
+    $_state.addAttribute(getCalleeAttrName($_state.name),
+        mlir::FlatSymbolRefAttr::get($_builder.getContext(), callee));
+    $_state.addOperands(inputs);
+    $_state.addRegion();
+  }]>];
+}
+
+def Merk_EachOp : Merk_Op<"each", [RecursiveMemoryEffects, Terminator]> {
+  let summary = "run the rest of the code for each solution of a goal";
+  let description = [{
+    Runs its generator, a goal with more than one solution, and its
+    continuation for each solution that the generator gives with
+    `merk.solution`, with its values as the continuation's arguments; after
+    the last, it fails. It is a branching goal followed by more goals, which
+    its branches share rather than each having a copy.
+
+    ```mlir
+    merk.each {
+      merk.disj {
+        %one = merk.constant 1 : i64
+        merk.solution %one : i64
+      }, {
+        %two = merk.constant 2 : i64
+        merk.solution %two : i64
+      }
+    } then {
+    ^bb0(%x: i64):
+      ...
+    }
+    ```
+  }];
+  let regions = (region SizedRegion<1>:$generator,
+      SizedRegion<1>:$continuation);
+  let assemblyFormat = "$generator `then` $continuation attr-dict";
+  let skipDefaultBuilders = 1;
+  let builders = [OpBuilder<(ins), [{
+    $_state.addRegion();
+    $_state.addRegion();
+  }]>];
+}
+
+def Merk_CommitOp : Merk_Op<"commit", [RecursiveMemoryEffects]> {
+  let summary = "the first solution of a goal";
+  let description = [{
+    Runs its generator, a goal with more than one solution in a context
+    where only its first is wanted, until it gives one with
+    `merk.solution`; its results are that solution's values. It fails if
+    the generator has none.
+  }];
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region SizedRegion<1>:$generator);
+  let assemblyFormat = "(`->` type($results)^)? $generator attr-dict";
+  let skipDefaultBuilders = 1;
+  let builders = [OpBuilder<(ins "mlir::TypeRange":$results), [{
+    $_state.addTypes(results);
+    $_state.addRegion();
+  }]>];
+}
+
+def Merk_SolutionOp : Merk_Op<"solution", [Pure, Terminator]> {
+  let summary = "give a solution of `merk.each`'s or `merk.commit`'s goal";
+  let description = [{
+    Gives a solution of the generator of the innermost `merk.each` or
+    `merk.commit`, with its values.
+  }];
+  let arguments = (ins Variadic<AnyType>:$values);
+  let assemblyFormat = "attr-dict ($values^ `:` type($values))?";
+  let hasVerifier = 1;
+}
+
+// After outlining, which leaves none of the operations above but
+// merk.disj: a nondet or multi procedure is a semidet one that takes a
+// continuation and its environment after its inputs, whose success means
+// that the code its solutions went to asked to stop.
+
+def Merk_ContRefOp : Merk_Op<"cont_ref", [
+    Pure, DeclareOpInterfaceMethods<SymbolUserOpInterface>
+  ]> {
+  let summary = "a continuation procedure";
+  let arguments = (ins FlatSymbolRefAttr:$callee);
+  let results = (outs Merk_ContType:$result);
+  let assemblyFormat = "$callee attr-dict";
+}
+
+def Merk_EnvNewOp : Merk_Op<"env_new"> {
+  let summary = "an environment in this frame";
+  let description = [{
+    An environment of the given values, then of slots of the given types
+    that `merk.env_set` fills, in the frame of the procedure it is in. A
+    call that passes it is not a tail call.
+  }];
+  let arguments = (ins Variadic<AnyType>:$values, TypeArrayAttr:$layout);
+  let results = (outs Merk_EnvType:$result);
+  let assemblyFormat = "`(` ($values^ `:` type($values))? `)` attr-dict `layout` $layout";
+}
+
+def Merk_EnvGetOp : Merk_Op<"env_get"> {
+  let summary = "a value of an environment";
+  let arguments = (ins Merk_EnvType:$env, I32Attr:$index,
+      TypeArrayAttr:$layout);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$env `[` $index `]` attr-dict `:` type($result) `layout` $layout";
+}
+
+def Merk_EnvSetOp : Merk_Op<"env_set"> {
+  let summary = "fill a slot of an environment";
+  let arguments = (ins Merk_EnvType:$env, I32Attr:$index, AnyType:$value,
+      TypeArrayAttr:$layout);
+  let assemblyFormat = "$env `[` $index `]` `,` $value attr-dict `:` type($value) `layout` $layout";
+}
+
+def Merk_CallContOp : Merk_Op<"call_cont"> {
+  let summary = "give a solution to a continuation";
+  let description = [{
+    Calls a continuation with its environment and a solution's values. It
+    succeeds if the continuation asks to stop, and fails otherwise, as a
+    call of a semidet procedure does.
+  }];
+  let arguments = (ins Merk_ContType:$cont, Merk_EnvType:$env,
+      Variadic<AnyType>:$values);
+  let assemblyFormat = "$cont `(` $env (`,` $values^)? `)` attr-dict (`:` type($values)^)?";
 }
 
 def Merk_NotOp : Merk_Op<"not", [RecursiveMemoryEffects, NoRegionArguments]> {

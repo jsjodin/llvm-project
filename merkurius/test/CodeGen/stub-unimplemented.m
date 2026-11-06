@@ -1,9 +1,9 @@
 % With -fstub-unimplemented, which the standard library's build passes, a
 % procedure whose body code generation cannot make yet is not an error: its
 % body reports what is not implemented when it runs, and the program exits
-% with status 1. A procedure without a signature code generation can make,
-% such as a multi one, is left out, as no call of it can be generated
-% either. Temporary (chunk 1 step 6, docs/INPROGRESS.md).
+% with status 1. A procedure without a signature code generation can make
+% is left out, as no call of it can be generated either. Temporary (chunk 1
+% step 6, docs/INPROGRESS.md).
 %
 % RUN: merkc -fc1 -fstub-unimplemented -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MERK
 % RUN: merkc -fstub-unimplemented %s -o %t
@@ -23,17 +23,12 @@ main(!IO) :-
 
 :- pred q(int::in) is semidet.
 q(X) :-
-    ( if ( Y = 1 ; Y = 2 ), Y > X then true else fail ).
-
-:- pred u(int::out) is multi.
-u(1).
-u(2).
+    ( if ( Y = 1 ; Y = 2 ), Y > X then Y > 1 else fail ).
 
 % OUTPUT:before
-% ERROR:Not yet implemented: stub_unimplemented.q_1_0: code generation for nondeterministic disjunctions
+% ERROR:Not yet implemented: stub_unimplemented.q_1_0: code generation for conditions with more than one solution
 
 % MERK: merk.proc private @stub_unimplemented.q_1_0(%arg0: i64) attributes {determinism = #merk.determinism<semidet>} {
-% MERK-NEXT: %[[WHAT:.*]] = merk.constant "stub_unimplemented.q_1_0: code generation for nondeterministic disjunctions" : !merk.string
+% MERK-NEXT: %[[WHAT:.*]] = merk.constant "stub_unimplemented.q_1_0: code generation for conditions with more than one solution" : !merk.string
 % MERK-NEXT: merk.foreign_call @merk_not_implemented(%[[WHAT]]) : (!merk.string) -> ()
 % MERK-NEXT: merk.fail
-% MERK-NOT: u_1_0
