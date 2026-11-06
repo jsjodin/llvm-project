@@ -425,6 +425,7 @@ private:
   // With -fstub-unimplemented, the body of a procedure that code generation
   // cannot make: it reports what is not implemented, and ends the program.
   void StubBody(merk::ProcOp, parser::CharBlock at);
+  void GenerateUnchecked(const Procedure &);
   // A procedure's body from its foreign_proc: a call of the C function
   // around the foreign_proc's code, which is added to foreignCode_.
   void GenerateForeign(const Procedure &, const parser::ForeignProcPragma &);
@@ -6260,6 +6261,70 @@ void MerkGenerator::StubBody(merk::ProcOp proc, parser::CharBlock at) {
   merk::FailOp::create(builder_, loc);
 }
 
+// What mode analysis does not check yet in an unchecked procedure's clauses.
+static llvm::StringRef UncheckedWhat(semantics::Unchecked reason) {
+  switch (reason) {
+  case semantics::Unchecked::ModeSpecificClauses:
+    return "clauses for one mode";
+  case semantics::Unchecked::ParallelConjunction:
+    return "parallel conjunctions";
+  case semantics::Unchecked::FieldClosure:
+    return "closures of functions or fields";
+  case semantics::Unchecked::Scope:
+    return "trace goals";
+  case semantics::Unchecked::Try:
+    return "try goals";
+  case semantics::Unchecked::Atomic:
+    return "atomic goals";
+  case semantics::Unchecked::Loop:
+    return "loops";
+  case semantics::Unchecked::InstParameters:
+    return "lambda expressions with inst parameters";
+  case semantics::Unchecked::InferredModes:
+    return "calls of predicates whose modes are inferred";
+  case semantics::Unchecked::TypeErrors:
+  case semantics::Unchecked::None:
+    break;
+  }
+  return "goals";
+}
+
+// A procedure whose clauses mode analysis did not check has no body to
+// generate: it is reported, or with -fstub-unimplemented is a stub, rather
+// than left for its callers to fail to link.
+void MerkGenerator::GenerateUnchecked(const Procedure &procedure) {
+  parser::CharBlock at{procedure.symbol->source};
+  std::string what{("procedures with " +
+      UncheckedWhat(modes_.UncheckedReason(procedure)) +
+      ", which mode analysis does not check yet")
+                       .str()};
+  if (!stubUnimplemented_) {
+    failed_ = false;
+    NotYet(at, what);
+    return;
+  }
+  const semantics::Signature *signature{types_.SignatureOf(*procedure.symbol)};
+  if (!signature) {
+    return;
+  }
+  llvm::SmallVector<const semantics::Type *> types{
+      signature->arguments.begin(), signature->arguments.end()};
+  // As in a body: a procedure without a signature code generation can make
+  // is left out.
+  failed_ = false;
+  inBody_ = true;
+  llvm::scope_exit leave{[&] { inBody_ = false; }};
+  merk::ProcOp proc{ProcFor(procedure, types, at)};
+  if (!proc || !proc.isExternal()) {
+    return;
+  }
+  if (procedure.symbol->exported) {
+    proc.setPublic();
+  }
+  notYet_ = "code generation for " + what;
+  StubBody(proc, at);
+}
+
 void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
   const Procedure &procedure{*body.procedure};
   parser::CharBlock at{procedure.symbol->source};
@@ -6444,6 +6509,13 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
     if ((body.procedure->symbol->module == moduleName_ || body.method) &&
         (body.method || !modes_.ForeignProcOf(*body.procedure))) {
       GenerateBody(body);
+    }
+  }
+  for (const Procedure &procedure : modes_.procedures()) {
+    if (procedure.symbol->module == moduleName_ &&
+        !modes_.ForeignProcOf(procedure) &&
+        modes_.UncheckedReason(procedure) != semantics::Unchecked::None) {
+      GenerateUnchecked(procedure);
     }
   }
   // The word copies that bodies called, and those that copies call; one of a
