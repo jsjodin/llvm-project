@@ -56,17 +56,14 @@ void ProcOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,
 
 mlir::ParseResult ProcOp::parse(
     mlir::OpAsmParser &parser, mlir::OperationState &result) {
-  auto buildFuncType{[](mlir::Builder &builder,
-                         llvm::ArrayRef<mlir::Type> argTypes,
-                         llvm::ArrayRef<mlir::Type> results,
-                         mlir::function_interface_impl::VariadicFlag,
-                         std::string &) {
-    return builder.getFunctionType(argTypes, results);
-  }};
-  return mlir::function_interface_impl::parseFunctionOp(parser, result,
+  return mlir::function_interface_impl::parseFunctionOp(
+      parser, result,
       /*allowVariadic=*/false, getFunctionTypeAttrName(result.name),
-      buildFuncType, getArgAttrsAttrName(result.name),
-      getResAttrsAttrName(result.name));
+      [](mlir::Builder &builder, llvm::ArrayRef<mlir::Type> argTypes,
+          llvm::ArrayRef<mlir::Type> results,
+          mlir::function_interface_impl::VariadicFlag,
+          std::string &) { return builder.getFunctionType(argTypes, results); },
+      getArgAttrsAttrName(result.name), getResAttrsAttrName(result.name));
 }
 
 void ProcOp::print(mlir::OpAsmPrinter &p) {
