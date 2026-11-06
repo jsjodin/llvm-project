@@ -1,7 +1,6 @@
-% A declaration-only stub of the standard library module maybe, for name
-% resolution until the library is written. The declarations are those of
-% the library reference manual (22.01), less those that need modules not
-% stubbed yet; see README.md.
+% The standard library module maybe, with the declarations of the library
+% reference manual (22.01). The multi and nondet modes of map_maybe are
+% stubs until code generation makes nondeterministic code (README.md).
 
 :- module maybe.
 :- interface.
@@ -194,3 +193,64 @@
 :- func func_to_maybe((func) = T) = maybe(T).
 :- mode func_to_maybe((func) = out is semidet) = out is det.
 :- func maybe_default(T, maybe(T)) = T.
+
+:- implementation.
+
+map_maybe(_, no) = no.
+map_maybe(F, yes(T)) = yes(F(T)).
+
+map_maybe(_, no, no).
+map_maybe(P, yes(T), yes(U)) :-
+    P(T, U).
+
+fold_maybe(_, no, A) = A.
+fold_maybe(F, yes(T), A) = F(T, A).
+
+fold_maybe(_, no, !A).
+fold_maybe(P, yes(T), !A) :-
+    P(T, !A).
+
+fold2_maybe(_, no, !A, !B).
+fold2_maybe(P, yes(T), !A, !B) :-
+    P(T, !A, !B).
+
+fold3_maybe(_, no, !A, !B, !C).
+fold3_maybe(P, yes(T), !A, !B, !C) :-
+    P(T, !A, !B, !C).
+
+fold4_maybe(_, no, !A, !B, !C, !D).
+fold4_maybe(P, yes(T), !A, !B, !C, !D) :-
+    P(T, !A, !B, !C, !D).
+
+fold5_maybe(_, no, !A, !B, !C, !D, !E).
+fold5_maybe(P, yes(T), !A, !B, !C, !D, !E) :-
+    P(T, !A, !B, !C, !D, !E).
+
+map_fold_maybe(_, no, no, !A).
+map_fold_maybe(P, yes(T), yes(U), !A) :-
+    P(T, U, !A).
+
+map_fold2_maybe(_, no, no, !A, !B).
+map_fold2_maybe(P, yes(T), yes(U), !A, !B) :-
+    P(T, U, !A, !B).
+
+map_fold3_maybe(_, no, no, !A, !B, !C).
+map_fold3_maybe(P, yes(T), yes(U), !A, !B, !C) :-
+    P(T, U, !A, !B, !C).
+
+map_fold4_maybe(_, no, no, !A, !B, !C, !D).
+map_fold4_maybe(P, yes(T), yes(U), !A, !B, !C, !D) :-
+    P(T, U, !A, !B, !C, !D).
+
+map_fold5_maybe(_, no, no, !A, !B, !C, !D, !E).
+map_fold5_maybe(P, yes(T), yes(U), !A, !B, !C, !D, !E) :-
+    P(T, U, !A, !B, !C, !D, !E).
+
+maybe_is_yes(yes(X), X).
+
+pred_to_maybe(P) = ( if P(X) then yes(X) else no ).
+
+func_to_maybe(F) = ( if X = apply(F) then yes(X) else no ).
+
+maybe_default(Default, no) = Default.
+maybe_default(_, yes(X)) = X.

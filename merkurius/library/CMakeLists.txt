@@ -36,7 +36,7 @@ install(FILES ${sound_array} DESTINATION lib/merkurius/sound
 # merkc for the host, as the driver links them into every program. Their
 # foreign_procs are compiled by clang, so it is built first when it is part
 # of the build.
-set(compiled_modules io float math require)
+set(compiled_modules io float math require pair maybe)
 set(compiled_objects)
 foreach(module ${compiled_modules})
   set(object ${CMAKE_CURRENT_BINARY_DIR}/${module}.o)
