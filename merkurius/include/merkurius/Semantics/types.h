@@ -68,11 +68,9 @@ public:
 
 private:
   const Type *Intern(const Type &);
-  // Substitute and SubstituteExistentials, given the parts already done.
-  const Type *Substitute(const Type *,
-      llvm::function_ref<const Type *(unsigned)> replace,
-      llvm::DenseMap<const Type *, const Type *> &done);
-  const Type *SubstituteExistentials(const Type *,
+  // The type with each part of kind `leaf` replaced by `replace`'s type for
+  // it, given the parts already done: Substitute and SubstituteExistentials.
+  const Type *ReplaceLeaves(const Type *, TypeKind leaf,
       llvm::function_ref<const Type *(const Type *)> replace,
       llvm::DenseMap<const Type *, const Type *> &done);
 
