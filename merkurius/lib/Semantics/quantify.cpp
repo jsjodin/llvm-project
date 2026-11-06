@@ -785,7 +785,7 @@ const ClauseForm &Quantifier::Run() {
       clause_.head, body, Save(llvm::ArrayRef<VarInfo>{vars_}),
       Save(llvm::ArrayRef<TypeQualification>{qualifications}), clause_.goals,
       Save(llvm::ArrayRef<llvm::ArrayRef<VarId>>{nonlocals_}),
-      clause_.modeSpecific);
+      clause_.modes);
 }
 
 } // namespace

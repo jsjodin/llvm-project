@@ -138,7 +138,7 @@ void PurityChecker::Run(
     if (!of.first) {
       of.first = clause.clause;
     }
-    of.modeSpecific |= clause.clause->modeSpecific;
+    of.modeSpecific |= clause.clause->modeSpecific();
   }
   clause_ = nullptr;
   CheckPredicates(tree);

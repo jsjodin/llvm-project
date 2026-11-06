@@ -779,6 +779,10 @@ void Resolver::ResolveClause(const ClauseForm &clause, const Visibility &scope) 
   }
   Visibility own{{own_, false, false}};
   Resolve(*clause.name, NameUse::Definition, arity, own);
+  // The modes of a clause for one mode.
+  for (const parser::Mode *mode : clause.modes) {
+    ResolveBelow(*mode, scope);
+  }
   for (const TypeQualification &qualification : clause.typeQualifications) {
     ResolveBelow(qualification.type, scope);
   }
