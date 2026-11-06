@@ -360,10 +360,17 @@ void FuzzWithFork(Random &Rand, const FuzzingOptions &Options,
     for (auto &File : SeedFiles)
       Env.Files.push_back(File.File);
   } else {
-    // Merkurius (local, not upstream): the seeds are run in as many
-    // processes as there are jobs, instead of in one.
+    // Merkurius (local, not upstream): the seeds are run in
+    // -fork_load_jobs processes, by default one per hardware thread,
+    // instead of in one. No job runs yet, so they need not share the
+    // machine with them.
+    size_t LoadJobs = Options.ForkLoadJobs > 0
+                          ? static_cast<size_t>(Options.ForkLoadJobs)
+                          : std::max(1u, std::thread::hardware_concurrency());
+    Printf("INFO: -fork=%d: running %zd seed inputs in %zd processes\n",
+           NumJobs, SeedFiles.size(), LoadJobs);
     std::set<uint32_t> NewFeatures, NewCov;
-    ParallelCrashResistantMerge(Env.Args, SeedFiles, NumJobs, Env.TempDir,
+    ParallelCrashResistantMerge(Env.Args, SeedFiles, LoadJobs, Env.TempDir,
                                 &Env.Files, &NewFeatures, &NewCov);
     Env.Features.insert(NewFeatures.begin(), NewFeatures.end());
     Env.Cov.insert(NewCov.begin(), NewCov.end());
