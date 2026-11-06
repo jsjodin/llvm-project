@@ -4,7 +4,10 @@
 % higher-order inst, or with an argument that does not fit; a term of a
 % predicate with several modes whose higher-order arguments match more
 % than one, or none; a closure that does not match the inst expected; a
-% unification of two higher-order terms; a function that does not have
+% unification of two higher-order terms, also as arguments of two terms,
+% where a deconstruction tests a bound argument against a bound field,
+% though not through a variable of the terms' type, which mmc leaves to
+% run time as the reference manual allows ("Higher-order"); a function that does not have
 % the default inst passed for ground; a lambda expression's nonlocal or a
 % curried argument that is not ground; and a lambda expression whose
 % body has a mode error, or whose argument does not get its final inst,
@@ -37,6 +40,9 @@
 :- pred wrong_final(pred(int)::out(pred(out) is det)) is det.
 :- pred from_list(list(pred(int))::in, int::out) is semidet.
 :- pred woken(int::out) is semidet.
+:- pred in_terms(pred(int)::in, pred(int)::in) is semidet.
+:- pred in_head(pred(int)::in, list(pred(int))::in) is semidet.
+:- pred indirect(pred(int)::in, pred(int)::in) is semidet.
 
 :- implementation.
 :- import_module int.
@@ -153,3 +159,13 @@ woken(Y) :-
 % CHECK: [[@LINE-1]]:11: error: in the clause for woken(out): mode error: argument 1, LambdaHeadVar__1, did not get sufficiently instantiated: its final inst is free, but ground is expected
     V1 = 3,
     Y = 1.
+in_terms(P, Q) :-
+    [P] = [Q].
+% CHECK: [[@LINE-1]]:11: error: in the clause for in_terms(in, in): mode error in the unification of Q and argument 1 of V_2: attempt at higher-order unification: two terms of type pred(int) cannot be unified
+in_head(P, L) :-
+    L = [P | _].
+% CHECK: [[@LINE-1]]:9: error: in the clause for in_head(in, in): mode error in the unification of P and argument 1 of L: attempt at higher-order unification: two terms of type pred(int) cannot be unified
+indirect(P, Q) :-
+    X = [P],
+    Y = [Q],
+    X = Y.
