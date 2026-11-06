@@ -2592,6 +2592,57 @@ it shares until they are lifted. Handles are flat values, so they are mapped int
 - **A kernel that faults** sends a `down` message to whatever monitors the
   region's process, with a reason saying that its place failed.
 
+#### Testing on the CPU
+
+With the CPU as the offload target, everything above runs on one machine,
+for tests and for debugging. libomptarget has a host plugin
+(`offload/plugins-nextgen/host`) that runs target regions on the CPU as on a
+device, which Clang and Flang use with
+`-fopenmp-targets=x86_64-unknown-linux-gnu`:
+
+- **Four devices** (`NUM_DEVICES`), and so four places like GPUs on one
+  machine, enough to route between places.
+- **Device memory of its own,** buffers from `malloc`, so maps copy: a map
+  that is missing or wrong gives a wrong result, as on a GPU.
+- **Kernels are host code,** so gdb, rr, ASan and TSan work in device code,
+  where none of them work on a GPU. Mailbox queues, the host bridge and
+  routing are debugged so.
+
+What it takes:
+
+- **The driver.** `addOffloadJobs` in `tools/merkc/driver.cpp` offloads to
+  AMDGPU only; it is to accept the host's triple as an offload target too,
+  and make a device image for it.
+- **A device keeps a GPU's restrictions.** No allocation in a region, no
+  run-time dispatch and only flat values crossing hold in the device compile
+  for any device triple, not only `amdgcn`, so that a test that passes on the
+  CPU does not fail on a GPU.
+- **The same transport.** A CPU place sends over libc's RPC protocol between
+  threads, not through the host's own mailboxes, so that tests run the code
+  that the GPU runs. `rpc.h` is generic over the number of lanes, so a client
+  of one lane on the CPU should work; that is to be checked.
+- **Capabilities can be faked.** A CPU place can be declared in the place
+  table with any of the capabilities above, peer access, NIC registration or
+  memory shared with the host, carried out by plain copies, so that each kind
+  of hop of the route table is tested on one machine, including those our
+  gfx1030 lacks. Several nodes are several processes on the machine. A
+  message from a GPU through two hosts to another GPU then runs on the CPU,
+  under a debugger.
+
+What it cannot show:
+
+- **Forward progress.** CPU threads always progress, so a receive that would
+  deadlock between teams on a GPU completes on the CPU. A test mode runs a
+  region's teams one at a time, so that waiting on a team that is not running
+  hangs instead of passing.
+- **The memory model.** x86 orders memory more strongly than a GPU, so a
+  missing fence in the queues goes unnoticed; TSan finds races but not an
+  order too weak for a GPU. Tests on a GPU are still needed for that.
+- **Asynchronous launch.** The host plugin runs a kernel in the thread that
+  launches it (`launchImpl`), and a `nowait` region runs as a task on libomp's
+  hidden helper threads. That tests that the launching Mercury process is
+  suspended, though not with a GPU's timing.
+
 ### Security
 
 Connections between nodes are encrypted and authenticated, as with TLS. For data that must stay secret from relays, a library type `sealed(T)` holds ciphertext tagged with its plaintext type:
