@@ -22,6 +22,10 @@
 // RUN: not merkc -fc1 -emit-llvm %t/type-def.mlir 2>&1 | FileCheck %s --check-prefix=TYPE-DEF
 // RUN: not merkc -fc1 -emit-llvm %t/functor.mlir 2>&1 | FileCheck %s --check-prefix=FUNCTOR
 // RUN: not merkc -fc1 -emit-merk %t/instance.mlir 2>&1 | FileCheck %s --check-prefix=INSTANCE
+// RUN: not merkc -fc1 -emit-merk %t/nondet-callee.mlir 2>&1 | FileCheck %s --check-prefix=NONDET-CALLEE
+// RUN: not merkc -fc1 -emit-merk %t/nondet-call-type.mlir 2>&1 | FileCheck %s --check-prefix=NONDET-CALL-TYPE
+// RUN: not merkc -fc1 -emit-merk %t/solution.mlir 2>&1 | FileCheck %s --check-prefix=SOLUTION
+// RUN: not merkc -fc1 -emit-merk %t/solution-type.mlir 2>&1 | FileCheck %s --check-prefix=SOLUTION-TYPE
 
 //--- outputs.mlir
 // OUTPUTS: outputs.mlir:[[@LINE+3]]:5: error: 'merk.succeed' op has 0 outputs, but its procedure has 1
@@ -214,5 +218,55 @@ module {
   merk.proc @p() -> !merk.typeclass_info attributes {determinism = #merk.determinism<det>} {
     %d = merk.typeclass_info @nothing
     merk.succeed %d : !merk.typeclass_info
+  }
+}
+
+//--- nondet-callee.mlir
+// NONDET-CALLEE: nondet-callee.mlir:[[@LINE+7]]:5: error: 'merk.nondet_call' op calls @q, which is not nondet or multi
+module {
+  merk.proc @q() -> i64 attributes {determinism = #merk.determinism<det>} {
+    %one = merk.constant 1 : i64
+    merk.succeed %one : i64
+  }
+  merk.proc @p() -> i64 attributes {determinism = #merk.determinism<nondet>} {
+    merk.nondet_call @q() {
+    ^bb0(%x: i64):
+      merk.succeed %x : i64
+    }
+  }
+}
+
+//--- nondet-call-type.mlir
+// NONDET-CALL-TYPE: nondet-call-type.mlir:[[@LINE+6]]:5: error: 'merk.nondet_call' op does not match the type of @q
+module {
+  merk.proc @q() -> i64 attributes {determinism = #merk.determinism<nondet>} {
+    merk.fail
+  }
+  merk.proc @p() -> i64 attributes {determinism = #merk.determinism<nondet>} {
+    merk.nondet_call @q() {
+    ^bb0(%x: i32):
+      %y = arith.extsi %x : i32 to i64
+      merk.succeed %y : i64
+    }
+  }
+}
+
+//--- solution.mlir
+// SOLUTION: solution.mlir:[[@LINE+3]]:5: error: 'merk.solution' op is not in the generator of merk.each or merk.commit
+module {
+  merk.proc @p() attributes {determinism = #merk.determinism<det>} {
+    merk.solution
+  }
+}
+
+//--- solution-type.mlir
+// SOLUTION-TYPE: solution-type.mlir:[[@LINE+5]]:7: error: 'merk.solution' op does not match the results of merk.commit
+module {
+  merk.proc @p() -> i64 attributes {determinism = #merk.determinism<cc_multi>} {
+    %r = merk.commit -> i64 {
+      %one = merk.constant 1 : i32
+      merk.solution %one : i32
+    }
+    merk.succeed %r : i64
   }
 }

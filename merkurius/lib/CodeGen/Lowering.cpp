@@ -144,7 +144,8 @@ private:
   // pointer to its size and elements, and a term its layout's.
   mlir::Type Convert(mlir::Type type) const {
     if (mlir::isa<merk::StringType, merk::ArrayType, merk::TypeInfoType,
-            merk::TypeclassInfoType, merk::ClosureType>(type)) {
+            merk::TypeclassInfoType, merk::ClosureType, merk::ContType,
+            merk::EnvType>(type)) {
       return mlir::LLVM::LLVMPointerType::get(type.getContext());
     }
     if (mlir::isa<merk::WordType>(type)) {
@@ -242,6 +243,14 @@ private:
   void LowerClosure(merk::ClosureOp);
   void LowerClosureWord(merk::ClosureWordOp);
   mlir::Value CallClosure(merk::CallClosureOp, bool *tail = nullptr);
+  // Outlined nondeterministic code's continuations and their environments
+  // (design document, Lowering, "Nondeterministic code").
+  mlir::Value CallCont(merk::CallContOp, bool *tail = nullptr);
+  void LowerContRef(merk::ContRefOp);
+  mlir::LLVM::LLVMStructType EnvType(mlir::ArrayAttr layout);
+  void LowerEnvNew(merk::EnvNewOp);
+  void LowerEnvGet(merk::EnvGetOp);
+  void LowerEnvSet(merk::EnvSetOp);
   // A call of the code at `code`, with `first`, a pointer, and then `rest`.
   mlir::Value CallPointer(mlir::Operation *call, mlir::Value code,
       mlir::Value first, mlir::ValueRange rest, bool canFail, bool *tail);
@@ -346,6 +355,11 @@ private:
   // memory.
   llvm::StringSet<> canFail_;
   llvm::StringSet<> inMemory_;
+  // Where a goal that fails goes, at the operation Flatten is at, and at
+  // the top of its procedure: a call is a tail call only where they are
+  // the same.
+  mlir::Block *fail_{nullptr};
+  mlir::Block *topFail_{nullptr};
   mlir::LLVM::LLVMFuncOp throw_;
   // Whether this is an OpenMP device compile.
   bool device_{false};
@@ -1809,6 +1823,60 @@ mlir::Value Lowerer::CallClosure(merk::CallClosureOp call, bool *tail) {
       codegen::CanFail(call.getDeterminism()), tail);
 }
 
+// A continuation takes its environment, then the solution's values, and
+// returns whether to stop, as a semidet procedure's success. The operands
+// are taken by place, as those that are the procedure's arguments are
+// pointers already.
+mlir::Value Lowerer::CallCont(merk::CallContOp call, bool *tail) {
+  rewriter_.setInsertionPoint(call);
+  return CallPointer(call, call->getOperand(0), call->getOperand(1),
+      call->getOperands().drop_front(2), true, tail);
+}
+
+void Lowerer::LowerContRef(merk::ContRefOp op) {
+  rewriter_.setInsertionPoint(op);
+  mlir::LLVM::LLVMFuncOp func{funcs_.lookup(op.getCallee())};
+  rewriter_.replaceOpWithNewOp<mlir::LLVM::AddressOfOp>(op, func);
+}
+
+// An environment is a struct of its layout in the frame's allocas.
+mlir::LLVM::LLVMStructType Lowerer::EnvType(mlir::ArrayAttr layout) {
+  llvm::SmallVector<mlir::Type> types;
+  for (mlir::Attribute type : layout) {
+    types.push_back(Convert(mlir::cast<mlir::TypeAttr>(type).getValue()));
+  }
+  return mlir::LLVM::LLVMStructType::getLiteral(module_.getContext(), types);
+}
+
+void Lowerer::LowerEnvNew(merk::EnvNewOp op) {
+  mlir::Location loc{op.getLoc()};
+  auto type{EnvType(op.getLayout())};
+  mlir::Value env{Alloca(op, type, loc)};
+  rewriter_.setInsertionPoint(op);
+  for (auto [i, value] : llvm::enumerate(op.getValues())) {
+    mlir::LLVM::StoreOp::create(
+        rewriter_, loc, value, OutputAddress(env, type, i, loc));
+  }
+  rewriter_.replaceOp(op, env);
+}
+
+void Lowerer::LowerEnvGet(merk::EnvGetOp op) {
+  mlir::Location loc{op.getLoc()};
+  rewriter_.setInsertionPoint(op);
+  auto type{EnvType(op.getLayout())};
+  rewriter_.replaceOpWithNewOp<mlir::LLVM::LoadOp>(op,
+      type.getBody()[op.getIndex()],
+      OutputAddress(op->getOperand(0), type, op.getIndex(), loc));
+}
+
+void Lowerer::LowerEnvSet(merk::EnvSetOp op) {
+  mlir::Location loc{op.getLoc()};
+  rewriter_.setInsertionPoint(op);
+  auto type{EnvType(op.getLayout())};
+  rewriter_.replaceOpWithNewOp<mlir::LLVM::StoreOp>(op, op.getValue(),
+      OutputAddress(op->getOperand(0), type, op.getIndex(), loc));
+}
+
 mlir::Value Lowerer::CallPointer(mlir::Operation *call, mlir::Value code,
     mlir::Value first, mlir::ValueRange rest, bool canFail, bool *tail) {
   mlir::MLIRContext *context{call->getContext()};
@@ -1840,7 +1908,15 @@ mlir::Value Lowerer::CallCode(mlir::Operation *call, mlir::LLVM::LLVMFuncOp func
   llvm::SmallVector<mlir::Operation *> between;
   merk::SucceedOp succeed{TailSucceed(call, between)};
   auto caller{call->getParentOfType<mlir::LLVM::LLVMFuncOp>()};
-  bool isTail{succeed && CanFail(caller.getSymName()) == canFail};
+  // Only where failing returns from the procedure: in a disjunction's
+  // branch, it goes to the next branch. A call passing an environment in
+  // the caller's frame needs the frame after the call.
+  bool isTail{succeed && CanFail(caller.getSymName()) == canFail &&
+      fail_ == topFail_ &&
+      llvm::none_of(call->getOperands(), [](mlir::Value operand) {
+        return operand.getDefiningOp<merk::EnvNewOp>() ||
+            operand.getDefiningOp<mlir::LLVM::AllocaOp>();
+      })};
   // A callee's outputs in memory are where the caller's go, for a tail
   // call, whose caller has the same outputs, and otherwise in a slot.
   mlir::Value outputs;
@@ -2013,6 +2089,7 @@ void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
     mlir::Block *next{nullptr};
     for (mlir::Operation &op : llvm::make_early_inc_range(*current)) {
       mlir::Location loc{op.getLoc()};
+      fail_ = fail;
       if (auto guard{mlir::dyn_cast<merk::GuardOp>(op)}) {
         next = SplitAfter(guard);
         rewriter_.setInsertionPoint(guard);
@@ -2102,6 +2179,35 @@ void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
           break; // it returns
         }
         continue;
+      }
+      if (auto call{mlir::dyn_cast<merk::CallContOp>(op)}) {
+        bool tail{false};
+        if (mlir::Value succeeded{CallCont(call, &tail)}) {
+          next = SplitAfter(succeeded.getDefiningOp());
+          rewriter_.setInsertionPointToEnd(current);
+          mlir::LLVM::CondBrOp::create(rewriter_, loc, succeeded, next, fail);
+          break;
+        }
+        if (tail) {
+          break; // it returns
+        }
+        continue;
+      }
+      if (auto disj{mlir::dyn_cast<merk::DisjOp>(op)}) {
+        // Each branch in turn: one that fails goes to the next, and the
+        // last to where the disjunction's failure goes.
+        mlir::Block *anchor{SplitAfter(disj)};
+        llvm::SmallVector<mlir::Block *> branches;
+        for (mlir::Region &region : disj.getBranches()) {
+          branches.push_back(Inline(region, anchor));
+        }
+        rewriter_.setInsertionPoint(disj);
+        rewriter_.replaceOpWithNewOp<mlir::LLVM::BrOp>(disj, branches.front());
+        rewriter_.eraseBlock(anchor);
+        for (auto [i, branch] : llvm::enumerate(branches)) {
+          Flatten(branch, i + 1 < branches.size() ? branches[i + 1] : fail);
+        }
+        break;
       }
       if (auto call{mlir::dyn_cast<merk::CallClosureOp>(op)}) {
         bool tail{false};
@@ -2238,6 +2344,7 @@ void Lowerer::Flatten(mlir::LLVM::LLVMFuncOp func) {
   // false; a det one cannot fail.
   mlir::Location loc{func.getLoc()};
   mlir::Block *fail{rewriter_.createBlock(&func.getBody(), func.getBody().end())};
+  topFail_ = fail;
   if (CanFail(func.getSymName())) {
     mlir::Type type{func.getFunctionType().getReturnType()};
     llvm::SmallVector<mlir::Value> outputs;
@@ -2596,6 +2703,7 @@ llvm::LogicalResult Lowerer::Lower() {
     // conversions below skip such blocks.
     (void)mlir::eraseUnreachableBlocks(rewriter_, func->getRegions());
   }
+  fail_ = topFail_ = nullptr;
   if (mlir::failed(LowerTypeCtors())) {
     return llvm::failure();
   }
@@ -2611,7 +2719,8 @@ llvm::LogicalResult Lowerer::Lower() {
             merk::StringCompareOp, merk::StringEqualOp,
             merk::CompareTypeInfoOp, merk::ForeignCallOp, merk::ArrayNewOp, merk::ArraySizeOp,
             merk::ArrayGetOp, merk::ArraySetOp, merk::ArrayFillOp,
-            merk::ArrayCopyOp, merk::ArrayResizeOp>(op)) {
+            merk::ArrayCopyOp, merk::ArrayResizeOp, merk::ContRefOp,
+            merk::EnvNewOp, merk::EnvGetOp, merk::EnvSetOp>(op)) {
       ops.push_back(op);
     }
   });
@@ -2658,6 +2767,14 @@ llvm::LogicalResult Lowerer::Lower() {
       LowerCompareTypeInfo(types);
     } else if (auto foreign{mlir::dyn_cast<merk::ForeignCallOp>(op)}) {
       LowerForeignCall(foreign);
+    } else if (auto ref{mlir::dyn_cast<merk::ContRefOp>(op)}) {
+      LowerContRef(ref);
+    } else if (auto envNew{mlir::dyn_cast<merk::EnvNewOp>(op)}) {
+      LowerEnvNew(envNew);
+    } else if (auto envGet{mlir::dyn_cast<merk::EnvGetOp>(op)}) {
+      LowerEnvGet(envGet);
+    } else if (auto envSet{mlir::dyn_cast<merk::EnvSetOp>(op)}) {
+      LowerEnvSet(envSet);
     } else if (!mlir::isa<merk::CallOp>(op)) {
       LowerArray(op);
     } else {
@@ -2805,6 +2922,7 @@ llvm::LogicalResult Lowerer::LowerOpenMP() {
 
 llvm::LogicalResult LowerToLLVMDialect(
     mlir::ModuleOp module, const TargetInfo &target) {
+  OutlineNondeterminism(module);
   return Lowerer{module, target}.Lower();
 }
 
