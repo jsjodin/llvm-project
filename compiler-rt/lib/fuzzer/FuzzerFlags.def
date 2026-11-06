@@ -66,6 +66,10 @@ FUZZER_FLAG_INT(fork_corpus_groups, 0, "For fork mode, enable the corpus-group "
   "strategy. The main corpus will be grouped according to size, "
   "and each sub-process will randomly select seeds from different "
   "groups as the sub-corpus.")
+// Merkurius (local, not upstream).
+FUZZER_FLAG_INT(fork_load_jobs, 0, "For fork mode, the number of processes "
+  "that run the corpus once before fuzzing starts; 0 means one per "
+  "hardware thread.")
 FUZZER_FLAG_INT(ignore_timeouts, 1, "Ignore timeouts in fork mode.")
 FUZZER_FLAG_INT(ignore_ooms, 1, "Ignore OOMs in fork mode.")
 FUZZER_FLAG_INT(ignore_crashes, 0, "Ignore crashes in fork mode.")
