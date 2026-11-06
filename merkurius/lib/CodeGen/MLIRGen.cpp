@@ -20,6 +20,7 @@
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -391,6 +392,9 @@ private:
   mlir::ArrayAttr FunctorsAttr(const semantics::Type *canonical, parser::CharBlock);
   mlir::Attribute FieldTypeAttr(const semantics::Type &, parser::CharBlock,
       const HiddenFields *hidden = nullptr);
+  // A higher-order type's entry, which reports a unification or comparison of
+  // closures and stops the program, as mmc's does.
+  merk::ProcOp HigherOrderEntry(bool compare, llvm::StringRef constructor);
   merk::ProcOp DescriptorEntry(bool compare, llvm::StringRef constructor,
       const semantics::Type *canonical, mlir::Type represented, bool dummy,
       parser::CharBlock at);
@@ -409,7 +413,8 @@ private:
   // after reporting the reason if it cannot be.
   merk::ProcOp ProcFor(const Procedure &, llvm::ArrayRef<const semantics::Type *>,
       parser::CharBlock at);
-  void GenerateBody(const ProcedureBody &);
+  // A procedure's body, or its word copy's (WordProcFor).
+  void GenerateBody(const ProcedureBody &, bool words = false);
   // A procedure's body from its foreign_proc: a call of the C function
   // around the foreign_proc's code, which is added to foreignCode_.
   void GenerateForeign(const Procedure &, const parser::ForeignProcPragma &);
@@ -500,6 +505,54 @@ private:
   mlir::Value Coerce(mlir::Value, mlir::Type, mlir::Location);
   void Called(const Body &, const Procedure &, llvm::ArrayRef<BodyVar>,
       const ProcedureBody &);
+  // Closures (design document, Lowering, "Closures"). X = Lambda: the lambda
+  // expression's procedure, which takes the values it captures and then its
+  // inputs and gives a word for each output, and a closure of its entry.
+  void LambdaClosure(const Body &, const ProcedureBody &);
+  // X = p(Y1, ..., Yn): a closure of a procedure with its first n arguments.
+  void NameClosure(const Body &, const ProcedureBody &);
+  // X(Y1, ...), or Z = X(Y1, ...).
+  void HigherOrderCall(const Body &, const ProcedureBody &);
+  // For each of a closure's arguments, after those it captured: whether it is
+  // an output, and whether the procedure its entry calls leaves it out, as
+  // of a type with no values.
+  struct ClosureArgument {
+    bool output;
+    bool dummy;
+  };
+  // The entry of the closures of `proc` that capture its first `captured`
+  // inputs, made the first time: it takes the closure and a word for each
+  // input, calls the procedure with the captured values and those, and gives
+  // a word for each output.
+  merk::ProcOp ClosureEntry(merk::ProcOp proc, unsigned captured,
+      llvm::ArrayRef<ClosureArgument>, parser::CharBlock at);
+  // The entry of a closure of a procedure code generation has built in, with
+  // the closure goal's `captured` values: a body of its own, made the first
+  // time; null if the procedure is not built in.
+  merk::ProcOp BuiltinEntry(const Body &, const Procedure &,
+      llvm::ArrayRef<const semantics::Type *> types, unsigned captured,
+      bool &failed);
+  // A word copy of a procedure: it gives every output as a word, one of a
+  // type with no values as the word 0, so that the procedures that give words,
+  // closures' entries, lambda expressions' procedures and other copies, call
+  // it in tail position as a tail call whatever the outputs' types (design
+  // document, Lowering, "Closures"). Declared the first time, and its body
+  // made after the module's procedures'. The body of a procedure of this
+  // module that can have one: not a foreign_proc, nor existentially typed.
+  merk::ProcOp WordProcFor(const ProcedureBody &);
+  const ProcedureBody *CopyableBody(const Procedure &);
+  // In a body that gives words: the words of its outputs, `outputs`.
+  llvm::SmallVector<mlir::Value> WordResults(
+      llvm::ArrayRef<BodyVar> outputs, const ProcedureBody &, mlir::Location);
+  mlir::Value ZeroWord(mlir::Location loc) {
+    return merk::ToWordOp::create(builder_, loc, merk::WordType::get(&context_),
+        IntegerConstant(builder_.getI64Type(), 0, loc));
+  }
+  // Sets an output's value from the word a call gave: in a body that gives
+  // words, the word of one of a type with no values is kept, so that it can
+  // be the body's own.
+  void SetFromWord(BodyVar, mlir::Value word, const ProcedureBody &,
+      mlir::Location);
   void IfThenElse(const Body &, const ProcedureBody &);
   void Switch(const Body &, const ProcedureBody &);
   void Not(const Body &, const ProcedureBody &);
@@ -643,6 +696,26 @@ private:
   llvm::DenseMap<const void *, BodyVar> givenVars_;
   const semantics::ProcedurePolymorphism *current_{nullptr};
   bool failed_{false};
+  // The procedure being generated, whose lambda expressions' procedures are
+  // named after it, and their number in the module.
+  std::string procName_;
+  unsigned lambdas_{0};
+  // The procedure made for each lambda expression.
+  llvm::DenseMap<const Body *, merk::ProcOp> lambdaProcs_;
+  // In a body that gives words, its outputs, in order, those of a type with
+  // no values among them; their words are values_ of the variables from
+  // kDummyWordVar on.
+  std::optional<llvm::SmallVector<BodyVar>> wordOutputs_;
+  static constexpr BodyVar kDummyWordVar{1u << 29};
+  static bool IsDummyWord(BodyVar var) {
+    return var >= kDummyWordVar && var < kFirstGivenVar;
+  }
+  // The bodies of the module's procedures, the word copies made of them, and
+  // those whose bodies are still to be made.
+  llvm::DenseMap<const Procedure *, const ProcedureBody *> bodies_;
+  llvm::DenseMap<const Procedure *, merk::ProcOp> wordProcs_;
+  std::vector<const ProcedureBody *> pendingCopies_;
+  llvm::StringMap<merk::ProcOp> entries_;
 };
 
 mlir::Location MerkGenerator::Location(parser::CharBlock at) {
@@ -664,6 +737,9 @@ std::optional<Represented> MerkGenerator::Represent(
   }
   if (type->kind == semantics::TypeKind::Tuple) {
     return RepresentTerm(type);
+  }
+  if (type->kind == semantics::TypeKind::HigherOrder) {
+    return Represented{merk::ClosureType::get(&context_)};
   }
   if (type->kind != semantics::TypeKind::Named) {
     return std::nullopt;
@@ -1072,6 +1148,18 @@ mlir::Value MerkGenerator::Coerce(
     return value;
   }
   auto word{merk::WordType::get(&context_)};
+  // A value back from its word is the word's, and a word back to the type of
+  // the value it came from is the value, in the same region.
+  if (mlir::Operation *from{value.getDefiningOp()};
+      from && from->getParentRegion() == builder_.getInsertionBlock()->getParent()) {
+    if (auto fromWord{mlir::dyn_cast<merk::FromWordOp>(from)}; fromWord && type == word) {
+      return fromWord.getWord();
+    }
+    if (auto toWord{mlir::dyn_cast<merk::ToWordOp>(from)};
+        toWord && toWord.getValue().getType() == type) {
+      return toWord.getValue();
+    }
+  }
   if (value.getType() != word) {
     value = merk::ToWordOp::create(builder_, loc, word, value);
   }
@@ -1088,12 +1176,36 @@ static constexpr llvm::StringLiteral kUncompiledLibrary[]{"array", "bool",
     "list", "maybe", "pair", "require", "string", "uint", "uint16", "uint32",
     "uint64", "uint8", "univ"};
 
+// A type's arguments in its type_info: a higher-order type's are its
+// arguments' types and then a function's result's, as polymorphism analysis
+// has them.
+static llvm::SmallVector<const semantics::Type *> TypeParts(
+    const semantics::Type &type) {
+  llvm::SmallVector<const semantics::Type *> parts{
+      type.arguments.begin(), type.arguments.end()};
+  if (type.result) {
+    parts.push_back(type.result);
+  }
+  return parts;
+}
+
+// Whether a type's type_info has the number of its arguments in word 1, as a
+// tuple's and a higher-order type's, whose descriptors are for any number.
+static bool HasVariableArity(const semantics::Type &type) {
+  return type.kind == semantics::TypeKind::Tuple ||
+      type.kind == semantics::TypeKind::HigherOrder;
+}
+
 // A type constructor's name in merk.type_info, with its arity.
 static std::optional<std::string> TypeConstructorName(
     const semantics::Type &type) {
-  std::string arity{"/" + std::to_string(type.arguments.size())};
+  std::string arity{"/" + std::to_string(TypeParts(type).size())};
   if (type.kind == semantics::TypeKind::Tuple) {
     return "{}" + arity;
+  }
+  if (type.kind == semantics::TypeKind::HigherOrder) {
+    return (type.predOrFunc == parser::PredOrFunc::Function ? "func" : "pred") +
+        arity;
   }
   if (type.kind != semantics::TypeKind::Named) {
     return std::nullopt;
@@ -1131,6 +1243,35 @@ bool MerkGenerator::EnsureVoidDescriptor() {
         DescriptorEntry(true, "void/0", nullptr, {}, /*dummy=*/true, {}), {});
   }
   return true;
+}
+
+merk::ProcOp MerkGenerator::HigherOrderEntry(
+    bool compare, llvm::StringRef constructor) {
+  mlir::Location loc{builder_.getUnknownLoc()};
+  auto info{merk::TypeInfoType::get(&context_)};
+  auto word{merk::WordType::get(&context_)};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToEnd(module_.getBody());
+  auto proc{merk::ProcOp::create(builder_, loc,
+      ((compare ? "compare_entry." : "unify_entry.") + constructor).str(),
+      compare ? builder_.getFunctionType(
+                    {info, word, word}, mlir::Type{*ComparisonType()})
+              : builder_.getFunctionType({info, word, word}, {}),
+      compare ? merk::Determinism::Det : merk::Determinism::Semidet)};
+  proc.setPrivate();
+  mlir::Block *entry{proc.addEntryBlock()};
+  builder_.setInsertionPointToStart(entry);
+  // It does not return.
+  merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+      "merk_higher_order_called",
+      mlir::ValueRange{IntegerConstant(builder_.getI32Type(), compare, loc)},
+      /*can_fail=*/false);
+  if (compare) {
+    merk::SucceedOp::create(builder_, loc, ComparisonValue("=", loc));
+  } else {
+    merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+  }
+  return proc;
 }
 
 // The entry a generic unification or comparison calls: the type's arguments'
@@ -1189,6 +1330,16 @@ bool MerkGenerator::EnsureDescriptor(
     return false;
   }
   if (descriptors_.contains(*constructor)) {
+    return true;
+  }
+  if (type.kind == semantics::TypeKind::HigherOrder) {
+    // As mmc, a program that unifies or compares closures stops.
+    descriptors_.insert(*constructor);
+    EmitDescriptor(*constructor, "",
+        type.predOrFunc == parser::PredOrFunc::Function ? "func" : "pred",
+        "closure", "linkonce", TypeParts(type).size(), {},
+        HigherOrderEntry(false, *constructor),
+        HigherOrderEntry(true, *constructor), {});
     return true;
   }
   // Its most general instance, which its one unify entry works on.
@@ -1283,7 +1434,7 @@ mlir::Attribute MerkGenerator::FieldTypeAttr(const semantics::Type &type,
     return nullptr;
   }
   llvm::SmallVector<mlir::Attribute> parts{builder_.getStringAttr(*constructor)};
-  for (const semantics::Type *argument : type.arguments) {
+  for (const semantics::Type *argument : TypeParts(type)) {
     mlir::Attribute attribute{FieldTypeAttr(*argument, at, hidden)};
     if (!attribute) {
       return nullptr;
@@ -1345,7 +1496,7 @@ mlir::Value MerkGenerator::TypeInfoOfType(const semantics::Type *type,
     return nullptr;
   }
   llvm::SmallVector<mlir::Value> arguments;
-  for (const semantics::Type *argument : type->arguments) {
+  for (const semantics::Type *argument : TypeParts(*type)) {
     mlir::Value info{TypeInfoOfType(argument, loc, at, freeIsVoid)};
     if (!info) {
       return nullptr;
@@ -1402,7 +1553,7 @@ mlir::Value MerkGenerator::TypeInfoValue(const semantics::TypeInfo &info,
     }
     const semantics::Type *whole{info.arguments.front()->type};
     // A tuple's cell has the number of its arguments in word 1.
-    unsigned first{whole && whole->kind == semantics::TypeKind::Tuple ? 2u : 1u};
+    unsigned first{whole && HasVariableArity(*whole) ? 2u : 1u};
     return merk::TypeInfoWordOp::create(
         builder_, loc, type, from, first + info.index - 1);
   }
@@ -1833,11 +1984,31 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
       types.push_back(body.vars[argument].type);
     }
   }
+  // In a body that gives words, a call whose outputs are the body's calls the
+  // callee's word copy, which gives them as words too, so that it is a tail
+  // call when it comes last.
+  llvm::SmallVector<BodyVar> outputVars;
+  for (auto [argument, mode] : llvm::zip(arguments, callee.modes)) {
+    if (IsOutput(mode)) {
+      outputVars.push_back(argument);
+    }
+  }
+  const ProcedureBody *copyable{nullptr};
+  if (wordOutputs_ && !isMethod && hiddenOutputs.empty() &&
+      !(goal.modes && goal.modes->implied) &&
+      llvm::equal(outputVars, *wordOutputs_)) {
+    copyable = CopyableBody(callee);
+  }
   merk::ProcOp proc;
   if (direct) {
     proc = MethodProc(*direct);
     if (!proc) {
       failed_ = true;
+      return;
+    }
+  } else if (copyable) {
+    proc = WordProcFor(*copyable);
+    if (!proc) {
       return;
     }
   } else if (!isMethod) {
@@ -1907,6 +2078,16 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
       inputs.push_back(Coerce(ValueOf(argument), Represent(type)->type, loc));
     }
   }
+  if (copyable) {
+    llvm::ArrayRef<mlir::Type> types{proc.getFunctionType().getInputs()};
+    if (types.size() != inputs.size()) {
+      NotYet(at, "this call of a word copy");
+      return;
+    }
+    for (auto [input, type] : llvm::zip(inputs, types)) {
+      input = Coerce(input, type, loc);
+    }
+  }
   mlir::Operation *call;
   if (isMethod && !direct) {
     std::optional<parser::Determinism> determinism{
@@ -1943,6 +2124,12 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
     merk::FailOp::create(builder_, loc);
     return;
   }
+  if (copyable) {
+    for (auto [var, word] : llvm::zip_equal(outputVars, call->getResults())) {
+      SetFromWord(var, word, body, loc);
+    }
+    return;
+  }
   for (auto [node, result] : llvm::zip(gives, call->getResults())) {
     Give(node, result);
   }
@@ -1953,6 +2140,632 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
     }
     values_[*var] =
         Coerce(result, Represent(body.vars[*var].type)->type, loc);
+  }
+}
+
+const ProcedureBody *MerkGenerator::CopyableBody(const Procedure &procedure) {
+  auto it{bodies_.find(&procedure)};
+  if (it == bodies_.end() || !HiddenOutputs(procedure).empty()) {
+    return nullptr;
+  }
+  return it->second;
+}
+
+merk::ProcOp MerkGenerator::WordProcFor(const ProcedureBody &body) {
+  const Procedure &procedure{*body.procedure};
+  if (merk::ProcOp proc{wordProcs_.lookup(&procedure)}) {
+    return proc;
+  }
+  parser::CharBlock at{procedure.symbol->source};
+  std::optional<parser::Determinism> determinism{
+      determinism_.DeterminismOf(procedure)};
+  std::optional<merk::Determinism> merkDeterminism;
+  if (determinism) {
+    merkDeterminism = MerkDeterminism(*determinism);
+  }
+  if (!merkDeterminism) {
+    NotYet(at, "word copies of procedures of this determinism");
+    return nullptr;
+  }
+  std::optional<llvm::SmallVector<mlir::Type>> inputs{
+      HiddenInputs(procedure, at)};
+  if (!inputs) {
+    return nullptr;
+  }
+  unsigned outputs{0};
+  for (auto [var, mode] : llvm::zip(body.head, procedure.modes)) {
+    const semantics::Type *type{body.vars[var].type};
+    std::optional<Represented> represented{Represent(type)};
+    if (!represented) {
+      NotYet(at, "values of type " + semantics::TypeToString(*type));
+      return nullptr;
+    }
+    if (IsOutput(mode)) {
+      ++outputs;
+    } else if (!represented->dummy) {
+      inputs->push_back(represented->type);
+    }
+  }
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToEnd(module_.getBody());
+  auto proc{merk::ProcOp::create(builder_, Location(at),
+      MangledName(procedure) + "$words",
+      builder_.getFunctionType(*inputs,
+          llvm::SmallVector<mlir::Type>(outputs, merk::WordType::get(&context_))),
+      *merkDeterminism)};
+  proc.setPrivate();
+  wordProcs_[&procedure] = proc;
+  pendingCopies_.push_back(&body);
+  return proc;
+}
+
+llvm::SmallVector<mlir::Value> MerkGenerator::WordResults(
+    llvm::ArrayRef<BodyVar> outputs, const ProcedureBody &body,
+    mlir::Location loc) {
+  auto word{merk::WordType::get(&context_)};
+  llvm::SmallVector<mlir::Value> results;
+  for (BodyVar var : outputs) {
+    if (Represent(body.vars[var].type)->dummy) {
+      mlir::Value given{values_.lookup(kDummyWordVar + var)};
+      results.push_back(given ? given : ZeroWord(loc));
+    } else if (mlir::Value value{ValueOf(var)}) {
+      results.push_back(Coerce(value, word, loc));
+    } else {
+      results.push_back(nullptr);
+    }
+  }
+  return results;
+}
+
+void MerkGenerator::SetFromWord(BodyVar var, mlir::Value word,
+    const ProcedureBody &body, mlir::Location loc) {
+  Represented represented{*Represent(body.vars[var].type)};
+  if (!represented.dummy) {
+    values_[var] = Coerce(word, represented.type, loc);
+  } else if (wordOutputs_) {
+    values_[kDummyWordVar + var] = word;
+  }
+}
+
+merk::ProcOp MerkGenerator::ClosureEntry(merk::ProcOp proc, unsigned captured,
+    llvm::ArrayRef<ClosureArgument> arguments, parser::CharBlock at) {
+  std::string name{proc.getSymName().str() + "$closure" + std::to_string(captured)};
+  if (merk::ProcOp entry{entries_.lookup(name)}) {
+    return entry;
+  }
+  mlir::Location loc{Location(at)};
+  auto word{merk::WordType::get(&context_)};
+  llvm::SmallVector<mlir::Type> inputs{merk::ClosureType::get(&context_)};
+  unsigned outputs{0};
+  for (const ClosureArgument &argument : arguments) {
+    if (argument.output) {
+      ++outputs;
+    } else {
+      inputs.push_back(word);
+    }
+  }
+  llvm::ArrayRef<mlir::Type> types{proc.getFunctionType().getInputs()};
+  unsigned passed{captured};
+  for (const ClosureArgument &argument : arguments) {
+    passed += !argument.output && !argument.dummy;
+  }
+  if (passed != types.size()) {
+    NotYet(at, "this closure's arguments");
+    return nullptr;
+  }
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToEnd(module_.getBody());
+  auto entry{merk::ProcOp::create(builder_, loc, name,
+      builder_.getFunctionType(inputs, llvm::SmallVector<mlir::Type>(outputs, word)),
+      proc.getDeterminism())};
+  entry.setPrivate();
+  entries_[name] = entry;
+  mlir::Block *block{entry.addEntryBlock()};
+  builder_.setInsertionPointToStart(block);
+  mlir::Value closure{block->getArgument(0)};
+  llvm::SmallVector<mlir::Value> values;
+  for (unsigned i{0}; i < captured; ++i) {
+    values.push_back(Coerce(
+        merk::ClosureWordOp::create(builder_, loc, word, closure, i), types[i], loc));
+  }
+  unsigned input{1};
+  for (const ClosureArgument &argument : arguments) {
+    if (argument.output) {
+      continue;
+    }
+    mlir::Value value{block->getArgument(input++)};
+    if (!argument.dummy) {
+      values.push_back(Coerce(value, types[values.size()], loc));
+    }
+  }
+  auto call{merk::CallOp::create(builder_, loc,
+      proc.getFunctionType().getResults(), proc.getSymName(), values)};
+  llvm::SmallVector<mlir::Value> results;
+  unsigned result{0};
+  for (const ClosureArgument &argument : arguments) {
+    if (argument.output) {
+      results.push_back(argument.dummy
+              ? ZeroWord(loc)
+              : Coerce(call.getResult(result++), word, loc));
+    }
+  }
+  merk::SucceedOp::create(builder_, loc, results);
+  return entry;
+}
+
+merk::ProcOp MerkGenerator::BuiltinEntry(const Body &goal,
+    const Procedure &callee, llvm::ArrayRef<const semantics::Type *> types,
+    unsigned curried, bool &failed) {
+  // Code generation builds in only the library's procedures.
+  if (callee.symbol->module == moduleName_) {
+    return nullptr;
+  }
+  std::string name{"merk.builtin." + MangledName(callee) + "$closure" +
+      std::to_string(curried)};
+  if (merk::ProcOp entry{entries_.lookup(name)}) {
+    return entry;
+  }
+  std::optional<parser::Determinism> determinism{
+      determinism_.DeterminismOf(callee)};
+  std::optional<merk::Determinism> merkDeterminism;
+  if (determinism) {
+    merkDeterminism = MerkDeterminism(*determinism);
+  }
+  if (!merkDeterminism) {
+    return nullptr;
+  }
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  auto word{merk::WordType::get(&context_)};
+  llvm::SmallVector<mlir::Type> inputs{merk::ClosureType::get(&context_)};
+  unsigned outputs{0};
+  for (auto [i, mode] : llvm::enumerate(callee.modes)) {
+    if (IsOutput(mode)) {
+      ++outputs;
+    } else if (i >= curried) {
+      inputs.push_back(word);
+    }
+  }
+  // A call of it in a body of its own, whose variables are its arguments.
+  ProcedureBody own;
+  own.procedure = &callee;
+  llvm::SmallVector<BodyVar> vars;
+  for (const semantics::Type *type : types) {
+    vars.push_back(static_cast<BodyVar>(own.vars.size()));
+    own.vars.push_back({"", type});
+  }
+  Body call{BodyKind::Call, goal.tokens, nullptr};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToEnd(module_.getBody());
+  auto entry{merk::ProcOp::create(builder_, loc, name,
+      builder_.getFunctionType(inputs, llvm::SmallVector<mlir::Type>(outputs, word)),
+      *merkDeterminism)};
+  entry.setPrivate();
+  mlir::Block *block{entry.addEntryBlock()};
+  builder_.setInsertionPointToStart(block);
+  Values saved;
+  saved.swap(values_);
+  std::optional<llvm::SmallVector<BodyVar>> savedWords{std::move(wordOutputs_)};
+  wordOutputs_.reset();
+  mlir::Value closure{block->getArgument(0)};
+  unsigned captured{0};
+  unsigned input{1};
+  bool represented{true};
+  for (auto [i, mode, type] : llvm::enumerate(callee.modes, types)) {
+    std::optional<Represented> value{Represent(type)};
+    represented = represented && value;
+    if (!represented || IsOutput(mode)) {
+      continue;
+    }
+    mlir::Value word{i < curried
+            ? (value->dummy ? mlir::Value{}
+                            : mlir::Value{merk::ClosureWordOp::create(builder_,
+                                  loc, merk::WordType::get(&context_), closure,
+                                  captured++)})
+            : block->getArgument(input++)};
+    if (!value->dummy) {
+      values_[vars[i]] = Coerce(word, value->type, loc);
+    }
+  }
+  bool handled{represented && Builtin(call, callee, vars, own)};
+  if (handled && !failed_ && !Terminated()) {
+    llvm::SmallVector<mlir::Value> results;
+    for (auto [i, mode, type] : llvm::enumerate(callee.modes, types)) {
+      if (!IsOutput(mode)) {
+        continue;
+      }
+      if (Represent(type)->dummy) {
+        results.push_back(ZeroWord(loc));
+      } else if (mlir::Value value{ValueOf(vars[i])}) {
+        results.push_back(Coerce(value, word, loc));
+      } else {
+        NotYet(at, "this closure's outputs");
+        break;
+      }
+    }
+    if (!failed_) {
+      merk::SucceedOp::create(builder_, loc, results);
+    }
+  }
+  values_.swap(saved);
+  wordOutputs_ = std::move(savedWords);
+  if (!handled || failed_) {
+    failed = failed_;
+    entry.erase();
+    return nullptr;
+  }
+  entries_[name] = entry;
+  return entry;
+}
+
+// The variables a goal names, at any depth: the fields its kind has, since
+// the others are 0, the first variable's number.
+static void CollectVars(const Body &goal, llvm::DenseSet<BodyVar> &vars) {
+  switch (goal.kind) {
+  case BodyKind::Unify:
+    vars.insert(goal.left);
+    if (goal.isVar) {
+      vars.insert(goal.var);
+    }
+    break;
+  case BodyKind::HOCall:
+    vars.insert(goal.closure);
+    break;
+  case BodyKind::Switch:
+    vars.insert(goal.switchVar);
+    break;
+  default:
+    break;
+  }
+  vars.insert(goal.arguments.begin(), goal.arguments.end());
+  vars.insert(goal.lambdaHead.begin(), goal.lambdaHead.end());
+  vars.insert(goal.nonlocals.begin(), goal.nonlocals.end());
+  vars.insert(goal.promised.begin(), goal.promised.end());
+  if (goal.switchOn) {
+    vars.insert(*goal.switchOn);
+  }
+  for (const auto &[var, inst] : goal.entry) {
+    vars.insert(var);
+  }
+  if (goal.lambda) {
+    CollectVars(*goal.lambda, vars);
+  }
+  for (const Body *inner : goal.goals) {
+    CollectVars(*inner, vars);
+  }
+  for (const semantics::SwitchCase &each : goal.cases) {
+    CollectVars(*each.goal, vars);
+  }
+}
+
+void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  llvm::ArrayRef<semantics::ArgMode> modes{goal.modes->lambda};
+  std::optional<merk::Determinism> determinism{
+      MerkDeterminism(goal.modes->determinism)};
+  if (!determinism) {
+    NotYet(at,
+        std::string{semantics::DeterminismName(goal.modes->determinism)} +
+            " lambda expressions");
+    return;
+  }
+  if (modes.size() != goal.lambdaHead.size()) {
+    NotYet(at, "this lambda expression's modes");
+    return;
+  }
+  // What it captures, each in order: the body's type_infos, its
+  // typeclass_infos, what goals gave, and the variables bound before it
+  // that it uses.
+  llvm::DenseSet<BodyVar> used;
+  CollectVars(*goal.lambda, used);
+  llvm::SmallVector<unsigned> infoKeys;
+  for (const auto &[var, value] : typeInfos_) {
+    if (value) {
+      infoKeys.push_back(var);
+    }
+  }
+  llvm::sort(infoKeys);
+  llvm::SmallVector<unsigned> dictionaryKeys;
+  for (const auto &[constraint, value] : dictionaries_) {
+    if (value) {
+      dictionaryKeys.push_back(constraint);
+    }
+  }
+  llvm::sort(dictionaryKeys);
+  llvm::SmallVector<BodyVar> captured;
+  for (const auto &[var, value] : values_) {
+    if (value && !IsDummyWord(var) &&
+        (var >= kFirstGivenVar ||
+            (used.contains(var) && !llvm::is_contained(goal.lambdaHead, var)))) {
+      captured.push_back(var);
+    }
+  }
+  llvm::sort(captured);
+  llvm::SmallVector<mlir::Value> capturedValues;
+  for (unsigned var : infoKeys) {
+    capturedValues.push_back(typeInfos_.lookup(var));
+  }
+  for (unsigned constraint : dictionaryKeys) {
+    capturedValues.push_back(dictionaries_.lookup(constraint));
+  }
+  for (BodyVar var : captured) {
+    capturedValues.push_back(values_.lookup(var));
+  }
+  llvm::SmallVector<mlir::Type> inputs{
+      llvm::map_range(capturedValues, [](mlir::Value v) { return v.getType(); })};
+  llvm::SmallVector<BodyVar> outputs;
+  llvm::SmallVector<ClosureArgument> arguments;
+  for (auto [var, mode] : llvm::zip(goal.lambdaHead, modes)) {
+    const semantics::Type *type{body.vars[var].type};
+    std::optional<Represented> represented{Represent(type)};
+    if (!represented) {
+      NotYet(at, "values of type " + semantics::TypeToString(*type));
+      return;
+    }
+    if (IsOutput(mode)) {
+      outputs.push_back(var);
+      arguments.push_back({true, false});
+    } else {
+      arguments.push_back({false, represented->dummy});
+      if (!represented->dummy) {
+        inputs.push_back(represented->type);
+      }
+    }
+  }
+  auto word{merk::WordType::get(&context_)};
+  // A word copy's body has the same lambda expressions as the procedure's,
+  // which capture values of the same types: one procedure serves both.
+  merk::ProcOp proc{lambdaProcs_.lookup(&goal)};
+  if (!proc ||
+      proc.getFunctionType().getInputs() != llvm::ArrayRef<mlir::Type>{inputs}) {
+    {
+      mlir::OpBuilder::InsertionGuard guard{builder_};
+      builder_.setInsertionPointToEnd(module_.getBody());
+      proc = merk::ProcOp::create(builder_, loc,
+          procName_ + "$lambda" + std::to_string(lambdas_++),
+          builder_.getFunctionType(
+              inputs, llvm::SmallVector<mlir::Type>(outputs.size(), word)),
+          *determinism);
+      proc.setPrivate();
+    }
+    // Its body, with the captured values and its inputs as the procedure's.
+    Values savedValues;
+    savedValues.swap(values_);
+    llvm::DenseMap<unsigned, mlir::Value> savedInfos;
+    savedInfos.swap(typeInfos_);
+    llvm::DenseMap<unsigned, mlir::Value> savedDictionaries;
+    savedDictionaries.swap(dictionaries_);
+    std::optional<llvm::SmallVector<BodyVar>> savedWords{std::move(wordOutputs_)};
+    std::string savedName{procName_};
+    {
+      mlir::OpBuilder::InsertionGuard guard{builder_};
+      mlir::Block *entry{proc.addEntryBlock()};
+      builder_.setInsertionPointToStart(entry);
+      unsigned input{0};
+      for (unsigned var : infoKeys) {
+        typeInfos_[var] = entry->getArgument(input++);
+      }
+      for (unsigned constraint : dictionaryKeys) {
+        dictionaries_[constraint] = entry->getArgument(input++);
+      }
+      for (BodyVar var : captured) {
+        values_[var] = entry->getArgument(input++);
+      }
+      for (auto [var, argument] : llvm::zip(goal.lambdaHead, arguments)) {
+        if (!argument.output && !argument.dummy) {
+          values_[var] = entry->getArgument(input++);
+        }
+      }
+      wordOutputs_ = outputs;
+      procName_ = proc.getSymName().str();
+      Goal(*goal.lambda, body);
+      if (!failed_ && !Terminated()) {
+        llvm::SmallVector<mlir::Value> results{WordResults(outputs, body, loc)};
+        if (llvm::is_contained(results, mlir::Value{})) {
+          NotYet(at, "this lambda expression's outputs");
+        } else {
+          merk::SucceedOp::create(builder_, loc, results);
+        }
+      }
+    }
+    values_.swap(savedValues);
+    typeInfos_.swap(savedInfos);
+    dictionaries_.swap(savedDictionaries);
+    wordOutputs_ = std::move(savedWords);
+    procName_ = savedName;
+    if (failed_) {
+      proc.getBody().dropAllReferences();
+      proc.getBody().getBlocks().clear();
+      return;
+    }
+    lambdaProcs_[&goal] = proc;
+  }
+  merk::ProcOp entry{ClosureEntry(
+      proc, static_cast<unsigned>(capturedValues.size()), arguments, at)};
+  if (!entry) {
+    return;
+  }
+  llvm::SmallVector<mlir::Value> words;
+  for (mlir::Value value : capturedValues) {
+    words.push_back(Coerce(value, word, loc));
+  }
+  values_[goal.left] = merk::ClosureOp::create(builder_, loc,
+      merk::ClosureType::get(&context_),
+      mlir::FlatSymbolRefAttr::get(&context_, entry.getSymName()), words);
+}
+
+void MerkGenerator::NameClosure(const Body &goal, const ProcedureBody &body) {
+  const Procedure &callee{*goal.modes->callee};
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  if (callee.symbol->owner &&
+      callee.symbol->owner->kind == semantics::SymbolKind::Typeclass) {
+    NotYet(at, "closures of methods");
+    return;
+  }
+  // mmc reports such a closure as an error ("Where mmc and the manual
+  // disagree").
+  if (!HiddenOutputs(callee).empty()) {
+    NotYet(at, "closures of existentially typed procedures");
+    return;
+  }
+  std::optional<llvm::SmallVector<mlir::Type>> hidden{HiddenInputs(callee, at)};
+  if (!hidden) {
+    failed_ = true;
+    return;
+  }
+  // A polymorphic callee takes its declared types; a closure's arguments
+  // after the curried ones have its type's.
+  const semantics::Type *closure{body.vars[goal.left].type};
+  std::size_t curried{goal.arguments.size()};
+  llvm::SmallVector<const semantics::Type *> types;
+  if (!hidden->empty()) {
+    llvm::ArrayRef<const semantics::Type *> declared{
+        types_.SignatureOf(*callee.symbol)->arguments};
+    types.append(declared.begin(), declared.end());
+  } else {
+    for (BodyVar argument : goal.arguments) {
+      types.push_back(body.vars[argument].type);
+    }
+    types.append(closure->arguments.begin(), closure->arguments.end());
+    if (closure->result) {
+      types.push_back(closure->result);
+    }
+  }
+  if (types.size() != callee.modes.size()) {
+    NotYet(at, "this closure's arguments");
+    return;
+  }
+  // What it captures: what the call in its body would pass, as polymorphism
+  // analysis says, and the curried arguments.
+  llvm::SmallVector<mlir::Value> captured;
+  if (!hidden->empty()) {
+    const semantics::PassedInfos *passed{nullptr};
+    if (current_) {
+      if (auto it{current_->goals.find(&goal)}; it != current_->goals.end()) {
+        passed = &it->second;
+      }
+    }
+    if (!passed ||
+        passed->typeInfos.size() + passed->dictionaries.size() != hidden->size()) {
+      NotYet(at, "this closure's type_infos");
+      return;
+    }
+    for (const semantics::TypeInfo *info : passed->typeInfos) {
+      PassTypeInfo(*info, captured, loc, at);
+    }
+    for (const semantics::Dictionary *dictionary : passed->dictionaries) {
+      PassDictionary(*dictionary, captured, loc, at);
+    }
+    if (failed_) {
+      return;
+    }
+  }
+  auto word{merk::WordType::get(&context_)};
+  for (auto [argument, type] : llvm::zip(goal.arguments, types)) {
+    std::optional<Represented> declared{Represent(type)};
+    std::optional<Represented> actual{Represent(body.vars[argument].type)};
+    if (!declared || !actual) {
+      NotYet(at, "values of type " + semantics::TypeToString(*type));
+      return;
+    }
+    if (!declared->dummy) {
+      captured.push_back(actual->dummy
+              ? ZeroWord(loc)
+              : Coerce(Coerce(ValueOf(argument), declared->type, loc), word, loc));
+    }
+  }
+  for (mlir::Value &value : captured) {
+    value = Coerce(value, word, loc);
+  }
+  bool failed{false};
+  merk::ProcOp entry{BuiltinEntry(
+      goal, callee, types, static_cast<unsigned>(curried), failed)};
+  if (failed) {
+    return;
+  }
+  if (!entry) {
+    // A procedure of this module is called through its word copy.
+    const ProcedureBody *copyable{CopyableBody(callee)};
+    merk::ProcOp proc{copyable ? WordProcFor(*copyable) : ProcFor(callee, types, at)};
+    if (!proc) {
+      failed_ = true;
+      return;
+    }
+    llvm::SmallVector<ClosureArgument> arguments;
+    for (auto [mode, type] : llvm::drop_begin(
+             llvm::zip(callee.modes, types), static_cast<unsigned>(curried))) {
+      bool dummy{Represent(type)->dummy};
+      bool output{IsOutput(mode)};
+      arguments.push_back({output, dummy && !(output && copyable)});
+    }
+    entry = ClosureEntry(proc, static_cast<unsigned>(captured.size()), arguments, at);
+    if (!entry) {
+      return;
+    }
+  }
+  values_[goal.left] = merk::ClosureOp::create(builder_, loc,
+      merk::ClosureType::get(&context_),
+      mlir::FlatSymbolRefAttr::get(&context_, entry.getSymName()), captured);
+}
+
+void MerkGenerator::HigherOrderCall(const Body &goal, const ProcedureBody &body) {
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  mlir::Value closure{ValueOf(goal.closure)};
+  llvm::ArrayRef<semantics::ArgMode> modes{goal.modes->lambda};
+  if (!closure || modes.size() != goal.arguments.size()) {
+    NotYet(at, "this higher-order call");
+    return;
+  }
+  std::optional<merk::Determinism> determinism{
+      MerkDeterminism(goal.modes->determinism)};
+  if (!determinism) {
+    NotYet(at,
+        std::string{semantics::DeterminismName(goal.modes->determinism)} +
+            " closures");
+    return;
+  }
+  // Every argument is a word, one of a type with no values the word 0.
+  auto word{merk::WordType::get(&context_)};
+  llvm::SmallVector<mlir::Value> inputs;
+  llvm::SmallVector<BodyVar> outputs;
+  llvm::SmallVector<std::pair<BodyVar, mlir::Value>> bound;
+  for (auto [argument, mode] : llvm::zip(goal.arguments, modes)) {
+    const semantics::Type *type{body.vars[argument].type};
+    std::optional<Represented> represented{Represent(type)};
+    if (!represented) {
+      NotYet(at, "values of type " + semantics::TypeToString(*type));
+      return;
+    }
+    if (IsOutput(mode)) {
+      outputs.push_back(argument);
+      // One bound already is tested against the call's.
+      if (mlir::Value value{ValueOf(argument)}; value && !represented->dummy) {
+        bound.push_back({argument, value});
+      }
+    } else {
+      inputs.push_back(represented->dummy
+              ? ZeroWord(loc)
+              : Coerce(ValueOf(argument), word, loc));
+    }
+  }
+  auto call{merk::CallClosureOp::create(builder_, loc,
+      llvm::SmallVector<mlir::Type>(outputs.size(), word), closure, inputs,
+      *determinism)};
+  if (goal.modes->determinism == parser::Determinism::Erroneous ||
+      goal.modes->determinism == parser::Determinism::Failure) {
+    merk::FailOp::create(builder_, loc);
+    return;
+  }
+  for (auto [var, result] : llvm::zip_equal(outputs, call.getResults())) {
+    SetFromWord(var, result, body, loc);
+  }
+  for (auto [var, value] : bound) {
+    mlir::Value output{ValueOf(var)};
+    values_[var] = value;
+    Test(goal, value, output, body.vars[var].type);
   }
 }
 
@@ -1992,6 +2805,9 @@ void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
   case BodyKind::Call:
     Call(goal, *goal.modes->callee, goal.arguments, body);
     return;
+  case BodyKind::HOCall:
+    HigherOrderCall(goal, body);
+    return;
   case BodyKind::Unify:
     if (goal.switchTest) {
       // The switch's case has tested it; a constructor with arguments is
@@ -1999,6 +2815,16 @@ void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
       if (!goal.isVar && !goal.arguments.empty()) {
         TermUnify(goal, body);
       }
+      return;
+    }
+    if (goal.lambda) {
+      LambdaClosure(goal, body);
+      return;
+    }
+    if (!goal.isVar && goal.unify == UnifyKind::Construct && goal.modes &&
+        goal.modes->callee &&
+        body.vars[goal.left].type->kind == semantics::TypeKind::HigherOrder) {
+      NameClosure(goal, body);
       return;
     }
     if (goal.isVar && goal.unify == UnifyKind::Test) {
@@ -2032,6 +2858,12 @@ void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
         values_[goal.left] = values_.lookup(goal.var);
       } else if (mlir::Value value{values_.lookup(goal.left)}) {
         values_[goal.var] = value;
+      } else if (mlir::Value word{values_.lookup(kDummyWordVar + goal.var)}) {
+        // The word of one of a type with no values, in a body that gives
+        // words, goes with it.
+        values_[kDummyWordVar + goal.left] = word;
+      } else if (mlir::Value word{values_.lookup(kDummyWordVar + goal.left)}) {
+        values_[kDummyWordVar + goal.var] = word;
       }
       return;
     }
@@ -2377,7 +3209,7 @@ void MerkGenerator::TermUnify(const Body &goal, const ProcedureBody &body) {
 
 bool MerkGenerator::Comparable(mlir::Type type, llvm::StringSet<> &seen) {
   if (mlir::isa<mlir::IntegerType, mlir::FloatType, merk::StringType,
-          merk::WordType>(type)) {
+          merk::WordType, merk::ClosureType>(type)) {
     return true;
   }
   if (auto array{mlir::dyn_cast<merk::ArrayType>(type)}) {
@@ -2612,6 +3444,18 @@ void MerkGenerator::Equal(mlir::Value x, mlir::Value y,
     merk::GuardOp::create(builder_, loc,
         merk::UnifyWordOp::create(
             builder_, loc, builder_.getI1Type(), info, x, y));
+  } else if (mlir::isa<merk::ClosureType>(type)) {
+    // Through the descriptor of the higher-order type, whose unification
+    // procedure reports the error, as mmc's does.
+    mlir::Value info{TypeInfoOfType(semantic, loc, equalAt_)};
+    if (!info) {
+      failed_ = true;
+      return;
+    }
+    auto word{merk::WordType::get(&context_)};
+    merk::GuardOp::create(builder_, loc,
+        merk::UnifyWordOp::create(builder_, loc, builder_.getI1Type(), info,
+            Coerce(x, word, loc), Coerce(y, word, loc)));
   } else if (mlir::isa<merk::StringType>(type)) {
     merk::GuardOp::create(builder_, loc,
         merk::StringEqualOp::create(
@@ -2717,6 +3561,17 @@ mlir::Value MerkGenerator::Compare(mlir::Value x, mlir::Value y,
       return nullptr;
     }
     return merk::CompareWordOp::create(builder_, loc, result, info, x, y);
+  }
+  if (mlir::isa<merk::ClosureType>(type)) {
+    // As a unification of closures.
+    mlir::Value info{TypeInfoOfType(semantic, loc, equalAt_)};
+    if (!info) {
+      failed_ = true;
+      return nullptr;
+    }
+    auto word{merk::WordType::get(&context_)};
+    return merk::CompareWordOp::create(builder_, loc, result, info,
+        Coerce(x, word, loc), Coerce(y, word, loc));
   }
   if (mlir::isa<merk::StringType>(type)) {
     mlir::Value order{merk::StringCompareOp::create(
@@ -3205,22 +4060,40 @@ void MerkGenerator::Join(mlir::Operation *op, llvm::ArrayRef<Branch> branches,
   if (!results) {
     results.emplace();
   }
+  // The word of a variable of a type with no values that one branch's call
+  // gave, in a body that gives words, leaves with the word 0 of the others,
+  // so that the call stays a tail call.
+  std::vector<BodyVar> words;
+  for (const Branch &branch : branches) {
+    if (branch.fails) {
+      continue;
+    }
+    for (BodyVar var : BoundSince(branch.values, before)) {
+      if (IsDummyWord(var) && !llvm::is_contained(*results, var)) {
+        words.push_back(var);
+      }
+    }
+  }
+  results->insert(results->end(), words.begin(), words.end());
+  llvm::sort(*results);
+  results->erase(std::unique(results->begin(), results->end()), results->end());
   llvm::SmallVector<mlir::Type> types;
   for (const Branch &branch : branches) {
     if (branch.fails) {
       continue;
     }
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.setInsertionPointToEnd(branch.block);
     llvm::SmallVector<mlir::Value> values;
     for (BodyVar var : *results) {
-      values.push_back(branch.values.lookup(var));
+      mlir::Value value{branch.values.lookup(var)};
+      values.push_back(value || !IsDummyWord(var) ? value : ZeroWord(loc));
     }
     if (types.empty() && !values.empty()) {
       for (mlir::Value value : values) {
         types.push_back(value.getType());
       }
     }
-    mlir::OpBuilder::InsertionGuard guard{builder_};
-    builder_.setInsertionPointToEnd(branch.block);
     merk::YieldOp::create(builder_, loc, values);
   }
   // The operation again, with the results.
@@ -5351,7 +6224,7 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   }
 }
 
-void MerkGenerator::GenerateBody(const ProcedureBody &body) {
+void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
   const Procedure &procedure{*body.procedure};
   parser::CharBlock at{procedure.symbol->source};
   failed_ = false;
@@ -5375,11 +6248,13 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body) {
       types.push_back(body.vars[var].type);
     }
   }
-  merk::ProcOp proc{body.method ? MethodProc(body) : ProcFor(procedure, types, at)};
+  merk::ProcOp proc{body.method ? MethodProc(body)
+          : words              ? WordProcFor(body)
+                               : ProcFor(procedure, types, at)};
   if (!proc) {
     return;
   }
-  if (procedure.symbol->exported && !body.method) {
+  if (procedure.symbol->exported && !body.method && !words) {
     proc.setPublic();
   }
   values_.clear();
@@ -5387,6 +6262,8 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body) {
   dictionaries_.clear();
   givenVars_.clear();
   current_ = polymorphism;
+  procName_ = proc.getSymName().str();
+  wordOutputs_.reset();
   mlir::Block *entry{proc.addEntryBlock()};
   mlir::OpBuilder::InsertionGuard guard{builder_};
   builder_.setInsertionPointToStart(entry);
@@ -5416,7 +6293,11 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body) {
       }
     }
   }
+  llvm::SmallVector<BodyVar> wordOutputs;
   for (auto [var, mode, type] : llvm::zip(body.head, procedure.modes, types)) {
+    if (words && IsOutput(mode)) {
+      wordOutputs.push_back(var);
+    }
     if (Represent(type)->dummy) {
       continue;
     }
@@ -5425,6 +6306,9 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body) {
     } else {
       values_[var] = entry->getArgument(input++);
     }
+  }
+  if (words) {
+    wordOutputs_ = wordOutputs;
   }
   Goal(*body.body, body);
   if (failed_) {
@@ -5438,6 +6322,15 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body) {
     return; // it cannot succeed
   }
   llvm::SmallVector<mlir::Value> results;
+  if (words) {
+    results = WordResults(wordOutputs, body, Location(at));
+    if (llvm::is_contained(results, mlir::Value{})) {
+      failed_ = true;
+      return;
+    }
+    merk::SucceedOp::create(builder_, Location(at), results);
+    return;
+  }
   if (hiddenOutputs != 0) {
     // The clauses give the same types, but a clause that cannot succeed here
     // may have had its goals in a branch left behind.
@@ -5499,9 +6392,24 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
     }
   }
   for (const ProcedureBody &body : determinism_.bodies()) {
+    if (!body.method && body.procedure->symbol->module == moduleName_ &&
+        !modes_.ForeignProcOf(*body.procedure)) {
+      bodies_[body.procedure] = &body;
+    }
+  }
+  for (const ProcedureBody &body : determinism_.bodies()) {
     if ((body.procedure->symbol->module == moduleName_ || body.method) &&
         (body.method || !modes_.ForeignProcOf(*body.procedure))) {
       GenerateBody(body);
+    }
+  }
+  // The word copies that bodies called, and those that copies call; one of a
+  // procedure whose body failed has no body either.
+  for (std::size_t i{0}; i < pendingCopies_.size(); ++i) {
+    const ProcedureBody &body{*pendingCopies_[i]};
+    merk::ProcOp typed{procs_.lookup(body.procedure)};
+    if (typed && !typed.isExternal()) {
+      GenerateBody(body, /*words=*/true);
     }
   }
   GenerateInstances();

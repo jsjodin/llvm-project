@@ -254,8 +254,9 @@ Type Resolve(Word type, const Environment *environment) {
   }
   const Word *cell{reinterpret_cast<const Word *>(type - 1)};
   const auto *ctor{reinterpret_cast<const TypeCtor *>(cell[0])};
-  // A tuple's cell has the number of its arguments in word 1.
-  return {ctor, {cell + (ctor->kind == Tuple ? 2 : 1), environment}};
+  // A tuple's or closure's cell has the number of its arguments in word 1.
+  return {ctor,
+      {cell + (ctor->kind == Tuple || ctor->kind == Closure ? 2 : 1), environment}};
 }
 
 // Whether a field's type is the type of the term it is in, as a list's tail
@@ -493,6 +494,10 @@ void WriteTyped(Word value, const Type &type, int context) {
     Put("])");
     return;
   }
+  case Closure:
+    // As mmc writes one.
+    Put(type.ctor->name[0] == 'f' ? "'<<function>>'" : "'<<predicate>>'");
+    return;
   case Void:
     // Nothing has a value of this type.
     std::abort();

@@ -262,3 +262,17 @@ write_uint32(N, !IO) :- write_uint(uint32.cast_to_uint(N), !IO).
 "
     merk_write(TypeInfo_for_T, X, 3);
 ").
+
+% Each element by the writer, with the separator between them; the last
+% element's is the last call.
+write_list([], _, _, !IO).
+write_list([E | Es], Separator, Writer, !IO) :-
+    (
+        Es = [],
+        Writer(E, !IO)
+    ;
+        Es = [_ | _],
+        Writer(E, !IO),
+        write_string(Separator, !IO),
+        write_list(Es, Separator, Writer, !IO)
+    ).

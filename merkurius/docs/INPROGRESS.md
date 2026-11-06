@@ -253,13 +253,11 @@ compile time is a global (done in step 3). The collector must not copy it;
 with headerless cells (D1) it knows by the address: a pointer outside the
 process's heap chunks is static or a received fragment's.
 
-**D7. Closure layout and calls.** A closure is a cell with the code
-pointer, the number of captured arguments and the captured arguments; a
-call passes the closure and the remaining arguments. The question is
-whether a closure call goes through a generic entry, which unpacks the
-cell and calls the procedure, or the closure's code is a wrapper made per
-`merk.closure` site, which is what `spawn`'s `pred(mailbox(M), io, io)`
-needs to be fast.
+**D7. Closure layout and calls.** Decided 2026-11-06 and done in step 5:
+an entry shared by every closure of a procedure with as many captured
+values, a lambda expression as a procedure of its own, and word copies for
+tail calls (design document, Lowering, "Closures", with the rejected
+alternatives).
 
 ### Steps
 
@@ -307,8 +305,14 @@ program.
    Values of an abstract imported type are still "not yet
    implemented": a module cannot pass one without its layout, as a notag
    float travels in a float register.
-5. **Closures.** `merk.closure` and `merk.call_closure` (D7), higher-order
-   calls, and the library's higher-order predicates that need them.
+5. **Done:** closures. `merk.closure`, `merk.closure_word` and
+   `merk.call_closure` (D7), lambda expressions, closures of named and
+   built-in procedures, higher-order calls in constant stack through word
+   copies, `pred/N` and `func/N` type_infos, and `io.write_list` (design
+   document, Lowering, "Closures"). Left: nondet lambda expressions,
+   closures of methods, tail calls through imported procedures' closures,
+   `io.write_list` to a stream; the library's other higher-order
+   predicates, such as `int.fold_up`, come with step 6.
 6. **The library on terms.** `list`, `maybe` and `pair` compiled, and the
    array predicates compiled with `type_info`s instead of built into code
    generation; `io.command_line_arguments`, which needs lists.

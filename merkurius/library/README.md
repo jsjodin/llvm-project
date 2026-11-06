@@ -10,7 +10,9 @@ have no implementation yet.
 `write_string`, `write_int`, `write_uint`, the sized integers' writes,
 `write_char`, `write_float` and `nl`, with `foreign_proc`s for C, and
 the narrower integers' writes in Mercury. `write`, `print` and their
-`_line` forms are polymorphic `foreign_proc`s on `runtime/write.cpp`. `float.m` implements its
+`_line` forms are polymorphic `foreign_proc`s on `runtime/write.cpp`;
+`write_list` is in Mercury, calling its closure for each element, on the
+standard output only. `float.m` implements its
 functions but `hash`, and `math.m` all of its
 functions but `solve_quadratic`, with C's math library. The arithmetic
 and comparisons of `int`, `uint`, the sized integers and `float` are

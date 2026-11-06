@@ -247,6 +247,24 @@ llvm::LogicalResult TypeclassInfoOp::verifySymbolUses(
   return mlir::success();
 }
 
+llvm::LogicalResult ClosureOp::verifySymbolUses(
+    mlir::SymbolTableCollection &symbolTable) {
+  auto proc{symbolTable.lookupNearestSymbolFrom<ProcOp>(*this, getEntryAttr())};
+  if (!proc) {
+    return emitOpError("names ") << getEntryAttr() << ", which is no procedure";
+  }
+  mlir::FunctionType type{proc.getFunctionType()};
+  mlir::Type word{WordType::get(getContext())};
+  if (type.getNumInputs() == 0 ||
+      !mlir::isa<ClosureType>(type.getInput(0)) ||
+      llvm::count(type.getInputs(), word) + 1 != type.getNumInputs() ||
+      llvm::count(type.getResults(), word) != type.getNumResults()) {
+    return emitOpError("names ") << getEntryAttr()
+                                 << ", which does not take a closure and words";
+  }
+  return mlir::success();
+}
+
 llvm::LogicalResult EntryOp::verifySymbolUses(
     mlir::SymbolTableCollection &symbolTable) {
   auto proc{symbolTable.lookupNearestSymbolFrom<ProcOp>(*this, getProcAttr())};

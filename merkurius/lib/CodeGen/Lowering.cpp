@@ -118,6 +118,13 @@ struct StaticValue {
   std::string key;
 };
 
+// Whether a type constructor's type_infos have the number of their arguments
+// in word 1: a tuple's and a higher-order type's.
+static bool VariableArity(llvm::StringRef constructor) {
+  return constructor.starts_with("{}") || constructor.starts_with("pred/") ||
+      constructor.starts_with("func/");
+}
+
 class Lowerer {
 public:
   Lowerer(mlir::ModuleOp module, const TargetInfo &target)
@@ -137,7 +144,7 @@ private:
   // pointer to its size and elements, and a term its layout's.
   mlir::Type Convert(mlir::Type type) const {
     if (mlir::isa<merk::StringType, merk::ArrayType, merk::TypeInfoType,
-            merk::TypeclassInfoType>(type)) {
+            merk::TypeclassInfoType, merk::ClosureType>(type)) {
       return mlir::LLVM::LLVMPointerType::get(type.getContext());
     }
     if (mlir::isa<merk::WordType>(type)) {
@@ -231,6 +238,20 @@ private:
   mlir::Value CallMethod(merk::CallMethodOp, bool *tail = nullptr);
   // The word of a typeclass_info's cell.
   void LowerTypeclassInfoWord(merk::TypeclassInfoWordOp);
+  // A closure's cell, a captured value from it, and a call through it.
+  void LowerClosure(merk::ClosureOp);
+  void LowerClosureWord(merk::ClosureWordOp);
+  mlir::Value CallClosure(merk::CallClosureOp, bool *tail = nullptr);
+  // A call of the code at `code`, with `first`, a pointer, and then `rest`.
+  mlir::Value CallPointer(mlir::Operation *call, mlir::Value code,
+      mlir::Value first, mlir::ValueRange rest, bool canFail, bool *tail);
+  // The procedure's succeed that a call ends, if it is a tail call: only
+  // conversions between values and words come between them, and each output
+  // is the call's result at its place through conversions that give back
+  // its bits, as their LLVM types are the same. `between` gets those
+  // conversions, which go with the call.
+  merk::SucceedOp TailSucceed(mlir::Operation *call,
+      llvm::SmallVectorImpl<mlir::Operation *> &between);
   llvm::LogicalResult LowerTypeCtors();
   mlir::LLVM::GlobalOp RttiTable(mlir::Type, mlir::Location,
       llvm::function_ref<mlir::Value(mlir::Value)> make);
@@ -1000,7 +1021,7 @@ void Lowerer::LowerTypeInfo(merk::TypeInfoOp op) {
     return;
   }
   // A tuple's constructor has no one arity: the cell says how many.
-  bool variableArity{constructor.starts_with("{}")};
+  bool variableArity{VariableArity(constructor)};
   bool isStatic{true};
   std::string key{symbol};
   llvm::SmallVector<StaticTypeInfo> known;
@@ -1183,12 +1204,53 @@ void Lowerer::LowerTypeclassInfoWord(merk::TypeclassInfoWordOp op) {
   rewriter_.replaceOpWithNewOp<mlir::LLVM::LoadOp>(op, ptr, address, 8);
 }
 
+// A closure's cell: its entry's code, the number of values it captured, and
+// those values (design document, Lowering, "Closures").
+void Lowerer::LowerClosure(merk::ClosureOp op) {
+  mlir::Location loc{op.getLoc()};
+  rewriter_.setInsertionPoint(op);
+  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  std::int64_t captured{static_cast<std::int64_t>(op.getCaptured().size())};
+  mlir::Value cell{mrt::AllocOp::create(rewriter_, loc, ptr, captured + 2)};
+  std::int64_t word{0};
+  mrt::FieldStoreOp::create(rewriter_, loc,
+      mlir::LLVM::AddressOfOp::create(
+          rewriter_, loc, funcs_.lookup(op.getEntry())),
+      cell, word++);
+  mrt::FieldStoreOp::create(rewriter_, loc,
+      mlir::LLVM::ConstantOp::create(
+          rewriter_, loc, rewriter_.getI64Type(), captured),
+      cell, word++);
+  for (mlir::Value value : op->getOperands()) {
+    mlir::Type type{Convert(value.getType())};
+    if (type != value.getType()) {
+      value = mlir::UnrealizedConversionCastOp::create(rewriter_, loc, type, value)
+                  .getResult(0);
+    }
+    mrt::FieldStoreOp::create(rewriter_, loc, value, cell, word++);
+  }
+  rewriter_.replaceOp(op, cell);
+}
+
+void Lowerer::LowerClosureWord(merk::ClosureWordOp op) {
+  mlir::Location loc{op.getLoc()};
+  rewriter_.setInsertionPoint(op);
+  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  mlir::Value address{mlir::LLVM::GEPOp::create(rewriter_, loc, ptr,
+      rewriter_.getI8Type(), op->getOperand(0),
+      llvm::ArrayRef<mlir::LLVM::GEPArg>{
+          static_cast<std::int32_t>(8 * (op.getIndex() + 2))})};
+  rewriter_.replaceOpWithNewOp<mlir::LLVM::LoadOp>(
+      op, rewriter_.getI64Type(), address, 8);
+}
+
 // The descriptors' kinds, as runtime/write.cpp reads them: a term's is its
 // layout's.
 static std::optional<unsigned> DescriptorKind(llvm::StringRef kind) {
   static constexpr llvm::StringLiteral kinds[]{"int", "uint", "int8", "int16",
       "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float", "char",
-      "string", "array", "dummy", "void", "enum", "notag", "cells", "tuple"};
+      "string", "array", "dummy", "void", "enum", "notag", "cells", "tuple",
+      "closure"};
   for (auto [i, name] : llvm::enumerate(kinds)) {
     if (kind == name) {
       return i;
@@ -1267,7 +1329,7 @@ mlir::Value Lowerer::FieldTypeValue(mlir::Attribute type,
   mlir::LLVM::GlobalOp cell{cells.lookup(type)};
   if (!cell) {
     std::size_t arguments{parts.size() - 1};
-    bool variableArity{llvm::StringRef{constructor}.starts_with("{}")};
+    bool variableArity{VariableArity(constructor)};
     llvm::SmallVector<mlir::Type> words{ptr};
     if (variableArity) {
       words.push_back(i64);
@@ -1732,20 +1794,38 @@ mlir::Value Lowerer::CallMethod(merk::CallMethodOp call, bool *tail) {
       llvm::ArrayRef<mlir::LLVM::GEPArg>{
           static_cast<std::int32_t>(8 * call.getMethod())})};
   mlir::Value code{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr, slot, 8)};
-  bool canFail{codegen::CanFail(call.getDeterminism())};
-  bool inMemory{InMemory(call.getResultTypes(), canFail)};
-  llvm::SmallVector<mlir::Value> arguments{info};
-  arguments.append(call.getInputs().begin(), call.getInputs().end());
+  return CallPointer(call, code, info, call.getInputs(),
+      codegen::CanFail(call.getDeterminism()), tail);
+}
+
+mlir::Value Lowerer::CallClosure(merk::CallClosureOp call, bool *tail) {
+  mlir::Location loc{call.getLoc()};
+  rewriter_.setInsertionPoint(call);
+  auto ptr{mlir::LLVM::LLVMPointerType::get(call.getContext())};
+  // The entry's code is the cell's first word.
+  mlir::Value closure{call->getOperand(0)};
+  mlir::Value code{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr, closure, 8)};
+  return CallPointer(call, code, closure, call.getInputs(),
+      codegen::CanFail(call.getDeterminism()), tail);
+}
+
+mlir::Value Lowerer::CallPointer(mlir::Operation *call, mlir::Value code,
+    mlir::Value first, mlir::ValueRange rest, bool canFail, bool *tail) {
+  mlir::MLIRContext *context{call->getContext()};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(context)};
+  bool inMemory{InMemory(call->getResultTypes(), canFail)};
+  llvm::SmallVector<mlir::Value> arguments{first};
+  arguments.append(rest.begin(), rest.end());
   llvm::SmallVector<mlir::Type> inputs;
   if (inMemory) {
     inputs.push_back(ptr);
   }
   inputs.push_back(ptr);
-  llvm::SmallVector<mlir::Type> converted{Convert(call.getInputs().getTypes())};
+  llvm::SmallVector<mlir::Type> converted{Convert(rest.getTypes())};
   inputs.append(converted.begin(), converted.end());
   auto funcType{mlir::LLVM::LLVMFunctionType::get(
       inMemory ? ResultType(context, {}, canFail)
-               : ResultType(context, call.getResultTypes(), canFail),
+               : ResultType(context, call->getResultTypes(), canFail),
       inputs)};
   return CallCode(call, nullptr, code, funcType, arguments, canFail, inMemory, tail);
 }
@@ -1757,10 +1837,10 @@ mlir::Value Lowerer::CallCode(mlir::Operation *call, mlir::LLVM::LLVMFuncOp func
   mlir::Location loc{call->getLoc()};
   // A call in tail position, whose solution is the procedure's, is a
   // tail call (design document, "Calling convention").
-  auto succeed{mlir::dyn_cast_or_null<merk::SucceedOp>(call->getNextNode())};
+  llvm::SmallVector<mlir::Operation *> between;
+  merk::SucceedOp succeed{TailSucceed(call, between)};
   auto caller{call->getParentOfType<mlir::LLVM::LLVMFuncOp>()};
-  bool isTail{succeed && llvm::equal(succeed.getOutputs(), call->getResults()) &&
-      CanFail(caller.getSymName()) == canFail};
+  bool isTail{succeed && CanFail(caller.getSymName()) == canFail};
   // A callee's outputs in memory are where the caller's go, for a tail
   // call, whose caller has the same outputs, and otherwise in a slot.
   mlir::Value outputs;
@@ -1785,7 +1865,10 @@ mlir::Value Lowerer::CallCode(mlir::Operation *call, mlir::LLVM::LLVMFuncOp func
     rewriter_.setInsertionPoint(succeed);
     rewriter_.replaceOpWithNewOp<mlir::LLVM::ReturnOp>(
         succeed, result ? mlir::ValueRange{result} : mlir::ValueRange{});
-    // The call's results have no uses but the return's.
+    // The call's results have no uses but the conversions' and the return's.
+    for (mlir::Operation *op : llvm::reverse(between)) {
+      rewriter_.eraseOp(op);
+    }
     rewriter_.eraseOp(call);
     if (tail) {
       *tail = true;
@@ -1819,6 +1902,45 @@ mlir::Value Lowerer::CallCode(mlir::Operation *call, mlir::LLVM::LLVMFuncOp func
                  : result;
 }
 
+merk::SucceedOp Lowerer::TailSucceed(mlir::Operation *call,
+    llvm::SmallVectorImpl<mlir::Operation *> &between) {
+  mlir::Operation *op{call->getNextNode()};
+  while (op && mlir::isa<merk::ToWordOp, merk::FromWordOp>(op)) {
+    between.push_back(op);
+    op = op->getNextNode();
+  }
+  auto succeed{mlir::dyn_cast_or_null<merk::SucceedOp>(op)};
+  if (!succeed || succeed.getOutputs().size() != call->getNumResults()) {
+    return nullptr;
+  }
+  for (auto [output, result] :
+      llvm::zip(succeed.getOutputs(), call->getResults())) {
+    // A word that came from a value of the same bits gives back the value.
+    mlir::Value value{output};
+    while (value != result) {
+      mlir::Operation *from{value.getDefiningOp()};
+      if (!from || !llvm::is_contained(between, from)) {
+        return nullptr;
+      }
+      value = from->getOperand(0);
+    }
+    if (Convert(output.getType()) != Convert(result.getType())) {
+      return nullptr;
+    }
+  }
+  // Nothing else uses what goes with the call.
+  llvm::SmallVector<mlir::Operation *> defining{between.begin(), between.end()};
+  defining.push_back(call);
+  for (mlir::Operation *def : defining) {
+    for (mlir::Operation *user : def->getUsers()) {
+      if (user != succeed && !llvm::is_contained(between, user)) {
+        return nullptr;
+      }
+    }
+  }
+  return succeed;
+}
+
 // Splits the block after `op`, and returns the block of the operations
 // after it.
 mlir::Block *Lowerer::SplitAfter(mlir::Operation *op) {
@@ -1837,17 +1959,28 @@ mlir::Block *Lowerer::Inline(mlir::Region &region, mlir::Block *before) {
 
 // Ends a branch, whose block ends with a yield, by going to `after` with
 // the yielded values, or by succeeding there if all `after` does is
-// succeed, so that a call before is in tail position.
+// succeed, after converting values to words and back, so that a call before
+// is in tail position.
 void Lowerer::Exit(mlir::Block *block, mlir::Block *after) {
   auto yield{mlir::dyn_cast<merk::YieldOp>(block->back())};
   if (!yield) {
     return; // it fails, or succeeds
   }
   rewriter_.setInsertionPoint(yield);
-  if (auto succeed{mlir::dyn_cast<merk::SucceedOp>(after->front())}) {
+  mlir::Operation *last{&after->front()};
+  while (mlir::isa<merk::ToWordOp, merk::FromWordOp, mlir::arith::ConstantOp>(
+      last)) {
+    last = last->getNextNode();
+  }
+  if (mlir::isa<merk::SucceedOp>(last)) {
     mlir::IRMapping mapping;
     mapping.map(after->getArguments(), yield.getValues());
-    rewriter_.clone(*succeed, mapping);
+    for (mlir::Operation &op : *after) {
+      rewriter_.clone(op, mapping);
+      if (&op == last) {
+        break;
+      }
+    }
   } else {
     mlir::LLVM::BrOp::create(rewriter_, yield.getLoc(), yield.getValues(), after);
   }
@@ -1960,6 +2093,19 @@ void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
       if (auto call{mlir::dyn_cast<merk::CallMethodOp>(op)}) {
         bool tail{false};
         if (mlir::Value succeeded{CallMethod(call, &tail)}) {
+          next = SplitAfter(succeeded.getDefiningOp());
+          rewriter_.setInsertionPointToEnd(current);
+          mlir::LLVM::CondBrOp::create(rewriter_, loc, succeeded, next, fail);
+          break;
+        }
+        if (tail) {
+          break; // it returns
+        }
+        continue;
+      }
+      if (auto call{mlir::dyn_cast<merk::CallClosureOp>(op)}) {
+        bool tail{false};
+        if (mlir::Value succeeded{CallClosure(call, &tail)}) {
           next = SplitAfter(succeeded.getDefiningOp());
           rewriter_.setInsertionPointToEnd(current);
           mlir::LLVM::CondBrOp::create(rewriter_, loc, succeeded, next, fail);
@@ -2459,7 +2605,9 @@ llvm::LogicalResult Lowerer::Lower() {
     if (mlir::isa<merk::SucceedOp, merk::CallOp, merk::ConstantOp,
             merk::ToWordOp, merk::FromWordOp, merk::TypeInfoOp,
             merk::TypeInfoWordOp, merk::TypeclassInfoOp,
-            merk::TypeclassInfoWordOp, merk::CallMethodOp, merk::UnifyWordOp, merk::CompareWordOp,
+            merk::TypeclassInfoWordOp, merk::CallMethodOp, merk::ClosureOp,
+            merk::ClosureWordOp, merk::CallClosureOp, merk::UnifyWordOp,
+            merk::CompareWordOp,
             merk::StringCompareOp, merk::StringEqualOp,
             merk::CompareTypeInfoOp, merk::ForeignCallOp, merk::ArrayNewOp, merk::ArraySizeOp,
             merk::ArrayGetOp, merk::ArraySetOp, merk::ArrayFillOp,
@@ -2488,6 +2636,12 @@ llvm::LogicalResult Lowerer::Lower() {
       LowerTypeclassInfoWord(word);
     } else if (auto method{mlir::dyn_cast<merk::CallMethodOp>(op)}) {
       CallMethod(method);
+    } else if (auto closure{mlir::dyn_cast<merk::ClosureOp>(op)}) {
+      LowerClosure(closure);
+    } else if (auto captured{mlir::dyn_cast<merk::ClosureWordOp>(op)}) {
+      LowerClosureWord(captured);
+    } else if (auto call{mlir::dyn_cast<merk::CallClosureOp>(op)}) {
+      CallClosure(call);
     } else if (auto unify{mlir::dyn_cast<merk::UnifyWordOp>(op)}) {
       if (mlir::failed(LowerUnifyWord(unify))) {
         return llvm::failure();
@@ -2582,6 +2736,20 @@ llvm::LogicalResult Lowerer::FilterProcs() {
       return mlir::WalkResult::interrupt();
     })};
     if (nested.wasInterrupted()) {
+      return llvm::failure();
+    }
+  }
+  // A closure's entry runs on the host only, so filtering would remove it and
+  // the closure that names it: a closure on the device is an error first.
+  if (device_) {
+    bool bad{false};
+    module_.walk([&](merk::ClosureOp op) {
+      bad = RejectOnDevice(op, "makes a closure") || bad;
+    });
+    module_.walk([&](merk::CallClosureOp op) {
+      bad = RejectOnDevice(op, "calls a closure") || bad;
+    });
+    if (bad) {
       return llvm::failure();
     }
   }

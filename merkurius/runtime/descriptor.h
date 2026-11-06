@@ -71,6 +71,8 @@ enum Kind : std::uint8_t {
   NoTag,
   Cells,
   Tuple,
+  // A higher-order type's, named pred or func, for any number of arguments.
+  Closure,
 };
 
 // byTag's marks, for a tag whose word is a constant, and for one that
