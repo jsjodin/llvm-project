@@ -920,7 +920,8 @@ bool CodeGenAction::executeAction() {
   }
   module = codegen::GenerateMerk(context, r.resolution->module().name(),
       *r.tree, r.tokens, ci.getAllSources(), *r.resolution, *a.types, *a.modes,
-      *a.determinism, *polymorphism, a.loops, *target, r.messages);
+      *a.determinism, *polymorphism, a.loops, *target, r.messages,
+      ci.getFrontendOpts().stubUnimplemented);
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   if (r.messages.AnyFatalError()) {
     return false;

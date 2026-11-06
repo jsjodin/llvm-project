@@ -315,7 +315,24 @@ program.
    predicates, such as `int.fold_up`, come with step 6.
 6. **The library on terms.** `list`, `maybe` and `pair` compiled, and the
    array predicates compiled with `type_info`s instead of built into code
-   generation; `io.command_line_arguments`, which needs lists.
+   generation; `io.command_line_arguments`, which needs lists. In five
+   commits: (a) `require`, and `-fstub-unimplemented` for the library's
+   build; (b) `pair` and `maybe`; (c) `list`; (d) the array predicates;
+   (e) `io.command_line_arguments`. Done: (a).
+
+   *Temporary, until code generation makes every procedure of the library*
+   (decided 2026-11-06): the library's build passes `-fstub-unimplemented`,
+   with which a procedure whose body code generation cannot make, such as a
+   nondet mode of `list.member`, gets a body that calls the runtime's
+   `merk_not_implemented`, which reports it and exits with status 1, rather
+   than failing the module; one without a signature code generation can
+   make, a nondet or multi procedure, is left out. No call of either can be
+   generated yet, so no program reaches one. Rejected: leaving them all out,
+   which a path to one would make a link error rather than a message; and
+   removing the nondet and multi modes from the library's interfaces, which
+   would make programs that mmc accepts mode errors. Also temporary:
+   `require.report_lookup_error`, whose message needs the key's type name
+   and a writer to the standard error, says it is not implemented.
 7. **The gate.** nrev at E1's sizes on our compiler against E1's C and
    mmc, and the design document's sections on representation, the calling
    convention and the `merk` and `mrt` operations updated.

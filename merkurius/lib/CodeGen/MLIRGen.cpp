@@ -21,6 +21,7 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -246,12 +247,13 @@ public:
       const semantics::DeterminismChecking &determinism,
       const semantics::PolymorphismAnalysis &polymorphism,
       const semantics::LoopTranslation &loops, const TargetInfo &target,
-      parser::Messages &messages)
+      parser::Messages &messages, bool stubUnimplemented)
       : context_{context}, builder_{&context}, moduleName_{module},
         tree_{tree}, tokens_{tokens}, sources_{sources},
         resolution_{resolution}, types_{types},
         modes_{modes}, determinism_{determinism}, loops_{loops},
-        target_{target}, messages_{messages} {
+        target_{target}, messages_{messages},
+        stubUnimplemented_{stubUnimplemented} {
     for (const semantics::ProcedurePolymorphism &procedure :
         polymorphism.procedures()) {
       polymorphism_[procedure.body] = &procedure;
@@ -271,10 +273,15 @@ private:
     return Location(Where(range));
   }
   // Reports the first construct of a procedure that is not handled yet;
-  // the procedure is then left out.
+  // the procedure is then left out, or with -fstub-unimplemented, in a
+  // procedure's body, made a stub that reports it at run time.
   void NotYet(parser::CharBlock at, llvm::StringRef what) {
     if (!failed_) {
-      messages_.Say(at, "code generation for %s"_todo_en_US, what.str());
+      if (stubUnimplemented_ && inBody_) {
+        notYet_ = "code generation for " + what.str();
+      } else {
+        messages_.Say(at, "code generation for %s"_todo_en_US, what.str());
+      }
     }
     failed_ = true;
   }
@@ -415,6 +422,9 @@ private:
       parser::CharBlock at);
   // A procedure's body, or its word copy's (WordProcFor).
   void GenerateBody(const ProcedureBody &, bool words = false);
+  // With -fstub-unimplemented, the body of a procedure that code generation
+  // cannot make: it reports what is not implemented, and ends the program.
+  void StubBody(merk::ProcOp, parser::CharBlock at);
   // A procedure's body from its foreign_proc: a call of the C function
   // around the foreign_proc's code, which is added to foreignCode_.
   void GenerateForeign(const Procedure &, const parser::ForeignProcPragma &);
@@ -696,6 +706,14 @@ private:
   llvm::DenseMap<const void *, BodyVar> givenVars_;
   const semantics::ProcedurePolymorphism *current_{nullptr};
   bool failed_{false};
+  // Temporary (chunk 1 step 6, docs/INPROGRESS.md): -fstub-unimplemented,
+  // for the library's procedures in modes code generation cannot make yet,
+  // such as nondet ones; it goes when code generation makes them all.
+  bool stubUnimplemented_{false};
+  // Whether a procedure's body is being generated, and the first construct
+  // of it not handled yet, with -fstub-unimplemented.
+  bool inBody_{false};
+  std::string notYet_;
   // The procedure being generated, whose lambda expressions' procedures are
   // named after it, and their number in the module.
   std::string procName_;
@@ -6224,10 +6242,25 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   }
 }
 
+void MerkGenerator::StubBody(merk::ProcOp proc, parser::CharBlock at) {
+  mlir::Location loc{Location(at)};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToStart(proc.addEntryBlock());
+  auto string{merk::StringType::get(&context_)};
+  mlir::Value what{merk::ConstantOp::create(builder_, loc, string,
+      mlir::StringAttr::get(proc.getSymName() + ": " + notYet_, string))};
+  merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+      "merk_not_implemented", mlir::ValueRange{what}, /*can_fail=*/false);
+  merk::FailOp::create(builder_, loc);
+}
+
 void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
   const Procedure &procedure{*body.procedure};
   parser::CharBlock at{procedure.symbol->source};
   failed_ = false;
+  inBody_ = true;
+  notYet_.clear();
+  llvm::scope_exit leave{[&] { inBody_ = false; }};
   const auto *polymorphism{polymorphism_.lookup(&body)};
   if (polymorphism &&
       polymorphism->unchecked != semantics::PolymorphismUnchecked::None) {
@@ -6315,6 +6348,10 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
     // Calls already made of it keep its declaration.
     proc.getBody().dropAllReferences();
     proc.getBody().getBlocks().clear();
+    if (!notYet_.empty()) {
+      StubBody(proc, at);
+      return;
+    }
     proc.setPrivate();
     return;
   }
@@ -6486,9 +6523,9 @@ mlir::OwningOpRef<mlir::ModuleOp> GenerateMerk(mlir::MLIRContext &context,
     const semantics::DeterminismChecking &determinism,
     const semantics::PolymorphismAnalysis &polymorphism,
     const semantics::LoopTranslation &loops, const TargetInfo &target,
-    parser::Messages &messages) {
+    parser::Messages &messages, bool stubUnimplemented) {
   return MerkGenerator{context, module, tree, tokens, sources, resolution, types, modes,
-      determinism, polymorphism, loops, target, messages}
+      determinism, polymorphism, loops, target, messages, stubUnimplemented}
       .Generate();
 }
 

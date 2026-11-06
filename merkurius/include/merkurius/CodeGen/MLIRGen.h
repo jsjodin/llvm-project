@@ -42,14 +42,17 @@ inline constexpr llvm::StringLiteral kForeignCodeAttrName{"merk.foreign_code"};
 
 // The merk module for `module`'s procedures, with the target recorded on
 // it. A construct that code generation does not handle yet is reported as
-// not yet implemented, and its procedure left out.
+// not yet implemented, and its procedure left out; with
+// `stubUnimplemented` (-fstub-unimplemented), it is not reported, and the
+// procedure's body reports it at run time instead, if the procedure has a
+// signature code generation can make.
 mlir::OwningOpRef<mlir::ModuleOp> GenerateMerk(mlir::MLIRContext &,
     llvm::StringRef module, const parser::ParseTree &,
     const parser::TokenSequence &, const parser::AllSources &,
     const semantics::NameResolution &, semantics::TypeChecking &,
     semantics::ModeChecking &, const semantics::DeterminismChecking &,
     const semantics::PolymorphismAnalysis &, const semantics::LoopTranslation &,
-    const TargetInfo &, parser::Messages &);
+    const TargetInfo &, parser::Messages &, bool stubUnimplemented = false);
 
 } // namespace merkurius::codegen
 

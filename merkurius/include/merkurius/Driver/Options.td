@@ -40,6 +40,10 @@ def fopenmp : Flag<["-"], "fopenmp">,
   HelpText<"Read %$omp directives">;
 def fdo_loops : Flag<["-"], "fdo-loops">,
   HelpText<"Read ( Iterators do Body ) loops, which are not Mercury">;
+def fstub_unimplemented : Flag<["-"], "fstub-unimplemented">,
+  HelpText<"Give a procedure that code generation cannot make yet a body "
+           "that reports it at run time, rather than report it; for "
+           "building the standard library">;
 def fopenmp_version_EQ : Joined<["-"], "fopenmp-version=">,
   MetaVarName<"<version>">,
   HelpText<"OpenMP version to accept, such as 52 for OpenMP 5.2">;

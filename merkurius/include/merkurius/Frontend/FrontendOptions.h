@@ -111,6 +111,9 @@ struct FrontendOptions {
   bool inferModes{false}; // -finfer-modes
   unsigned modeInferenceIterationLimit{30}; // -fmode-inference-iteration-limit=
   bool mmcUniqueness{false}; // -fmmc-uniqueness
+  // -fstub-unimplemented. Temporary (chunk 1 step 6, docs/INPROGRESS.md):
+  // until code generation makes every procedure of the library.
+  bool stubUnimplemented{false};
 };
 
 // The options of code generation: the target, and how far to optimize.
