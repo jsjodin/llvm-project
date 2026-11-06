@@ -1121,8 +1121,12 @@ bool InstOps::MatchesNow(const Inst *a, const Inst *b, const Type *type) {
       return b->kind == InstKind::Any;
     }
     if (a->kind == InstKind::HigherOrder) {
+      // A function's ground is the default function inst, which a closure
+      // matches as it would the inst written out: `func(in) = uo is det`
+      // matches it, as in mmc.
       return a->predOrFunc == parser::PredOrFunc::Predicate ||
-          IsDefaultFunction(a);
+          (!a->modes.empty() &&
+              MatchesNow(a, DefaultFunction(a->modes.size() - 1), type));
     }
     if (a->kind != InstKind::Bound) {
       return true; // ground
