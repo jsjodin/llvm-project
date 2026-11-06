@@ -381,20 +381,22 @@ Purity PurityChecker::CheckAnnotated(const Scope &scope, Purity annotation) {
   return purity;
 }
 
+// The module's own predicate or function with the name and arity.
+const Symbol *FindPredicate(const ModuleSymbols &own, parser::PredOrFunc kind,
+    llvm::StringRef name, unsigned arity) {
+  for (const Symbol *symbol : own.Lookup(name)) {
+    if (symbol->kind ==
+            (kind == parser::PredOrFunc::Function ? SymbolKind::Function
+                                                  : SymbolKind::Predicate) &&
+        symbol->arity == arity) {
+      return symbol;
+    }
+  }
+  return nullptr;
+}
+
 void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
   const ModuleSymbols &own{resolution_.module()};
-  auto lookup{[&](parser::PredOrFunc kind, llvm::StringRef name,
-                  unsigned arity) -> const Symbol * {
-    for (const Symbol *symbol : own.Lookup(name)) {
-      if (symbol->kind ==
-              (kind == parser::PredOrFunc::Function ? SymbolKind::Function
-                                                    : SymbolKind::Predicate) &&
-          symbol->arity == arity) {
-        return symbol;
-      }
-    }
-    return nullptr;
-  }};
   // The number of modes of each predicate or function; those promised to
   // have equivalent clauses; and the purity of each foreign_proc for C,
   // the language merkc's foreign code is in, by its attributes (reference
@@ -412,14 +414,15 @@ void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
       for (const parser::TypeAndMode *argument : (*decl)->arguments) {
         moded |= argument->mode.has_value();
       }
-      if (const Symbol *symbol{moded
-                  ? lookup((*decl)->kind, (*decl)->name->name,
-                        (*decl)->arguments.size())
-                  : nullptr}) {
+      if (const Symbol *
+          symbol{moded ? FindPredicate(own, (*decl)->kind, (*decl)->name->name,
+                             (*decl)->arguments.size())
+                       : nullptr}) {
         ++modes[symbol];
       }
     } else if (const auto *mode{std::get_if<const parser::ModeDecl *>(&item)}) {
-      if (const Symbol *symbol{lookup((*mode)->kind, (*mode)->name->name,
+      if (const Symbol *
+          symbol{FindPredicate(own, (*mode)->kind, (*mode)->name->name,
               (*mode)->arguments.size())}) {
         ++modes[symbol];
       }
@@ -438,7 +441,8 @@ void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
       if ((*proc)->language != parser::ForeignLanguage::C) {
         continue;
       }
-      if (const Symbol *symbol{lookup((*proc)->kind, (*proc)->name->name,
+      if (const Symbol *
+          symbol{FindPredicate(own, (*proc)->kind, (*proc)->name->name,
               (*proc)->arguments.size())}) {
         // Impure unless promised otherwise.
         Purity purity{Purity::Impure};

@@ -8,7 +8,6 @@
 
 #include "merkurius/Semantics/check-uniqueness.h"
 #include "llvm/ADT/STLExtras.h"
-#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -104,6 +103,8 @@ private:
   // Whether a goal clobbers one of `vars`, passing it where its final
   // inst is clobbered or mostly_clobbered.
   bool Clobbers(const Body *goal, const Vars &vars);
+  bool ClobbersAny(llvm::ArrayRef<ArgMode> modes,
+      llvm::ArrayRef<BodyVar> arguments, const Vars &vars) const;
   // `var`, and the variables that the unifications of `goal` make from it
   // or it from, whatever their order.
   Vars MadeFrom(const Body *goal, BodyVar var);
@@ -512,18 +513,21 @@ void UniquenessChecker::Closure(const Body *goal) {
   }
 }
 
-bool UniquenessChecker::Clobbers(const Body *goal, const Vars &vars) {
-  auto clobbers{[&](llvm::ArrayRef<ArgMode> modes,
-                    llvm::ArrayRef<BodyVar> arguments) {
-    for (std::size_t i{0}; i < modes.size() && i < arguments.size(); ++i) {
-      if (vars.count(arguments[i]) && Clobbers(modes[i].final)) {
-        return true;
-      }
+// Whether a call clobbers one of `vars` among its arguments, whose modes are
+// `modes`.
+bool UniquenessChecker::ClobbersAny(llvm::ArrayRef<ArgMode> modes,
+    llvm::ArrayRef<BodyVar> arguments, const Vars &vars) const {
+  for (std::size_t i{0}; i < modes.size() && i < arguments.size(); ++i) {
+    if (vars.count(arguments[i]) && Clobbers(modes[i].final)) {
+      return true;
     }
-    return false;
-  }};
+  }
+  return false;
+}
+
+bool UniquenessChecker::Clobbers(const Body *goal, const Vars &vars) {
   if (goal->modes && goal->kind == BodyKind::HOCall &&
-      clobbers(goal->modes->lambda, goal->arguments)) {
+      ClobbersAny(goal->modes->lambda, goal->arguments, vars)) {
     return true;
   }
   if (goal->modes && goal->modes->callee && !goal->lambda &&
@@ -534,7 +538,7 @@ bool UniquenessChecker::Clobbers(const Body *goal, const Vars &vars) {
     if (goal->kind == BodyKind::Unify) {
       arguments.push_back(goal->left);
     }
-    if (clobbers(goal->modes->callee->modes, arguments)) {
+    if (ClobbersAny(goal->modes->callee->modes, arguments, vars)) {
       return true;
     }
   }
@@ -547,26 +551,32 @@ bool UniquenessChecker::Clobbers(const Body *goal, const Vars &vars) {
       goal->goals, [&](const Body *g) { return Clobbers(g, vars); });
 }
 
+// The variables of each assignment, construction and deconstruction in a
+// goal, one list for each.
+void CollectLinks(const Body *goal, std::vector<std::vector<BodyVar>> &links) {
+  if (goal->kind == BodyKind::Unify && !goal->lambda &&
+      (goal->unify == UnifyKind::Assign ||
+          goal->unify == UnifyKind::Construct ||
+          goal->unify == UnifyKind::Deconstruct)) {
+    std::vector<BodyVar> link{goal->arguments};
+    link.push_back(goal->left);
+    if (goal->isVar) {
+      link.push_back(goal->var);
+    }
+    links.push_back(std::move(link));
+  }
+  for (const SwitchCase &c : goal->cases) {
+    CollectLinks(c.goal, links);
+  }
+  for (const Body *g : goal->goals) {
+    CollectLinks(g, links);
+  }
+}
+
 Vars UniquenessChecker::MadeFrom(const Body *goal, BodyVar var) {
   // The unifications' variables, joined until nothing changes.
   std::vector<std::vector<BodyVar>> links;
-  std::function<void(const Body *)> collect{[&](const Body *g) {
-    if (g->kind == BodyKind::Unify && !g->lambda &&
-        (g->unify == UnifyKind::Assign || g->unify == UnifyKind::Construct ||
-            g->unify == UnifyKind::Deconstruct)) {
-      std::vector<BodyVar> link{g->arguments};
-      link.push_back(g->left);
-      if (g->isVar) {
-        link.push_back(g->var);
-      }
-      links.push_back(std::move(link));
-    }
-    for (const SwitchCase &c : g->cases) {
-      collect(c.goal);
-    }
-    llvm::for_each(g->goals, collect);
-  }};
-  collect(goal);
+  CollectLinks(goal, links);
   Vars family{var};
   for (bool changed{true}; changed;) {
     changed = false;
