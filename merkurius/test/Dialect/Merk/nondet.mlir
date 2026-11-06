@@ -86,6 +86,19 @@ module @nd attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
     }
   }
 
+  // A higher-order call of a nondet closure, whose continuation only gives
+  // its solution, passes on the caller's continuation.
+  // CHECK-LABEL: merk.proc @nd.call_1_0(%arg0: !merk.closure, %arg1: !merk.word) -> !merk.word attributes {determinism = #merk.determinism<nondet>} {
+  // CHECK-NEXT: merk.nondet_call_closure %arg0(%arg1 : !merk.word) {
+  // CHECK-NEXT: ^bb0(%[[Y:.*]]: !merk.word):
+  // CHECK-NEXT: merk.succeed %[[Y]] : !merk.word
+  merk.proc @nd.call_1_0(%p: !merk.closure, %x: !merk.word) -> !merk.word attributes {determinism = #merk.determinism<nondet>} {
+    merk.nondet_call_closure %p(%x : !merk.word) {
+    ^bb0(%y: !merk.word):
+      merk.succeed %y : !merk.word
+    }
+  }
+
   // The operations that outlining makes.
   // CHECK-LABEL: merk.proc @nd.give_0_0(%arg0: !merk.cont, %arg1: !merk.env)
   // CHECK-NEXT: %[[ONE:.*]] = merk.constant 1 : i64
@@ -149,6 +162,9 @@ module @nd attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 // LLVM-LABEL: define internal tailcc i1 @nd.big_1_0.cont.0(ptr %0, i64 %1)
 // LLVM-NEXT: %[[SET:.*]] = getelementptr { ptr, ptr, i1 }, ptr %0, i32 0, i32 2
 // LLVM-NEXT: store i1 true, ptr %[[SET]]
+// LLVM-LABEL: define tailcc i1 @nd.call_1_0(ptr %0, i64 %1, ptr %2, ptr %3)
+// LLVM-NEXT: %[[CODE:.*]] = load ptr, ptr %0
+// LLVM-NEXT: musttail call tailcc i1 %[[CODE]](ptr %0, i64 %1, ptr %2, ptr %3)
 // A call that passes on the continuation it was given is a tail call; one
 // that passes an environment in its own frame is not.
 // LLVM-LABEL: define tailcc i1 @nd.give_0_0(ptr %0, ptr %1)

@@ -10,13 +10,14 @@
 :- implementation.
 :- import_module char, exception, int, list, string.
 
-main(!IO) :-
-    P = (pred(Y::out) is nondet :- ( Y = 1 ; Y = 2 )),
-    p(P).
-% CHECK: not-yet.m:[[@LINE-2]]:10: error: not yet implemented: code generation for nondet lambda expressions
+main(!IO).
 
-:- pred p(pred(int)::in(pred(out) is nondet)) is det.
-p(_).
+% A method with more than one solution.
+:- typeclass digits(T) where [ pred digit(T::in, int::out) is nondet ].
+:- instance digits(int) where [ digit(_, 1), digit(_, 2) ].
+% CHECK: not-yet.m:[[@LINE-2]]:37: error: not yet implemented: code generation for methods of this determinism
+:- pred some_digit(int::in, int::out) is cc_nondet.
+some_digit(X, D) :- digit(X, D).
 
 :- typeclass size(T) where [ func size(T) = int ].
 :- instance size(int) where [ size(X) = X ].
@@ -40,13 +41,6 @@ equal(set(X), set(X)).
 :- func w(int) = int.
 w(X) = pow(X, 3).
 % CHECK: not-yet.m:[[@LINE-1]]:8: error: not yet implemented: code generation for calls of int.pow/2
-
-:- pred u(int::out) is multi.
-u(1).
-u(2).
-:- pred closure(pred(int)::out(pred(out) is multi)) is det.
-closure(u).
-% CHECK: not-yet.m:[[@LINE-1]]:9: error: not yet implemented: code generation for closures of nondet and multi procedures
 
 % Calls of library modules that are not compiled yet and not built in.
 :- func joined(string) = string.

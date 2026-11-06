@@ -27,6 +27,7 @@
 // RUN: not merkc -fc1 -emit-merk %t/solution.mlir 2>&1 | FileCheck %s --check-prefix=SOLUTION
 // RUN: not merkc -fc1 -emit-merk %t/solution-type.mlir 2>&1 | FileCheck %s --check-prefix=SOLUTION-TYPE
 // RUN: not merkc -fc1 -emit-merk %t/soft-ite-type.mlir 2>&1 | FileCheck %s --check-prefix=SOFT-ITE-TYPE
+// RUN: not merkc -fc1 -emit-merk %t/nondet-call-closure.mlir 2>&1 | FileCheck %s --check-prefix=NONDET-CALL-CLOSURE
 
 //--- outputs.mlir
 // OUTPUTS: outputs.mlir:[[@LINE+3]]:5: error: 'merk.succeed' op has 0 outputs, but its procedure has 1
@@ -290,6 +291,17 @@ module {
     } then {
     ^bb0(%y: i64):
       merk.succeed %y : i64
+    }
+  }
+}
+
+//--- nondet-call-closure.mlir
+// NONDET-CALL-CLOSURE: nondet-call-closure.mlir:[[@LINE+3]]:5: error: 'merk.nondet_call_closure' op has a continuation that does not take words
+module {
+  merk.proc @p(%c: !merk.closure) -> i64 attributes {determinism = #merk.determinism<nondet>} {
+    merk.nondet_call_closure %c() {
+    ^bb0(%x: i64):
+      merk.succeed %x : i64
     }
   }
 }
