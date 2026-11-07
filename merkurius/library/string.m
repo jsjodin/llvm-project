@@ -393,14 +393,17 @@ put_rev_chars([C | Cs], End, !S) :-
 duplicate_char(C, N) = S :-
     duplicate_char(C, N, S).
 
+    % No copies of a character that no string may hold are the empty
+    % string, as in mmc.
 duplicate_char(C, N, S) :-
     Bytes = char_bytes(C),
-    ( if Bytes = 0 then
+    ( if N =< 0 then
+        S = ""
+    else if Bytes = 0 then
         bad_char_list
     else
-        Count = max(N, 0),
-        new_string(Count * Bytes, S0),
-        put_copies(C, Count, 0, S0, S)
+        new_string(N * Bytes, S0),
+        put_copies(C, N, 0, S0, S)
     ).
 
 :- pred put_copies(char::in, int::in, int::in, string::di, string::uo)
@@ -605,7 +608,13 @@ first_char(S::in, C::uo, Rest::uo) :-
 first_char(S::uo, C::in, Rest::in) :-
     Bytes = char_bytes(C),
     ( if Bytes = 0 then
-        bad_char_list
+        ( if char.to_int(C) = 0 then
+            unexpected("predicate `string.first_char_str_out'/3",
+                "null character")
+        else
+            unexpected("predicate `string.first_char_str_out'/3",
+                "surrogate code point")
+        )
     else
         new_string(Bytes + bytes(Rest), S0),
         put_char(C, 0, Next, S0, S1),
