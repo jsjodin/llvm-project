@@ -2,7 +2,9 @@
 % function, in each mode a program can call without collecting solutions,
 % the nondet and multi ones for their first solution. A call in a mode
 % with its own clauses, as reverse(out, in), calls that mode's procedure.
-% The output is mmc's for the same program.
+% The output is mmc's for the same program, but for a range from min_int,
+% which is the manual's: mmc's runs until memory runs out (design document,
+% "Where mmc and the manual disagree").
 %
 % RUN: merkc -fc1 -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MERK
 % RUN: merkc -O0 %s -o %t0 && %t0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
@@ -44,7 +46,21 @@ main(!IO) :-
     sorting(!IO),
     higher_order(!IO),
     folds(!IO),
-    nondet_firsts(!IO).
+    nondet_firsts(!IO),
+    ranges(!IO).
+
+:- pred ranges(io::di, io::uo) is det.
+ranges(!IO) :-
+    show(range(1, 5), !IO),
+    show(range(3, 3), !IO),
+    show(range(5, 1), !IO),
+    show(range(-2, 2), !IO),
+    show(list.length(range(1, 1000000)) : int, !IO),
+    show(range(max_int - 1, max_int), !IO),
+    show(range(min_int, min_int + 1), !IO).
+
+:- func range(int, int) = list(int).
+range(Lo, Hi) = Lo .. Hi.
 
 :- pred basics(io::di, io::uo) is det.
 basics(!IO) :-
@@ -460,3 +476,10 @@ nondet_firsts(!IO) :-
 % OUTPUT-NEXT:5
 % OUTPUT-NEXT:6
 % OUTPUT-NEXT:{[1, 0], 1}
+% OUTPUT-NEXT:[1, 2, 3, 4, 5]
+% OUTPUT-NEXT:[3]
+% OUTPUT-NEXT:[]
+% OUTPUT-NEXT:[-2, -1, 0, 1, 2]
+% OUTPUT-NEXT:1000000
+% OUTPUT-NEXT:[9223372036854775806, 9223372036854775807]
+% OUTPUT-NEXT:[-9223372036854775808, -9223372036854775807]
