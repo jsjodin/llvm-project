@@ -1572,6 +1572,11 @@ private:
   Result CheckVarUnify(const Unify &, const Goal &, InstMap &, const Live &);
   Result CheckCall(const Goal &, const Symbol &, llvm::ArrayRef<VarId>,
       bool function, InstMap &, GoalModes &, const Live &);
+  // The insts after a field access or update, that of the term and those
+  // of the result and the value, as the unifications it stands for give
+  // them, from those before it.
+  void FieldInsts(const Symbol &, llvm::ArrayRef<VarId> arguments,
+      llvm::ArrayRef<const Inst *> before, InstMap &, const Live &);
   // An error if the modes clobber an argument that is used after the
   // call.
   std::optional<Result> Clobbers(const Goal &, llvm::ArrayRef<ArgMode>,
@@ -2987,8 +2992,15 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
       std::vector<VarId> arguments{
           unify.arguments.begin(), unify.arguments.end()};
       arguments.push_back(x);
+      std::vector<const Inst *> before;
+      for (VarId var : arguments) {
+        before.push_back(map[var]);
+      }
       r = CheckCall(goal, *symbol, arguments, true, map, modes, live);
       if (r.outcome == Outcome::Ok) {
+        if (symbol->kind != SymbolKind::Function && !modes.implied) {
+          FieldInsts(*symbol, arguments, before, map, live);
+        }
         modes.unify = UnifyKind::Call;
         last_ = Start(unify.tokens);
       }
@@ -3165,6 +3177,79 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
   modes.functor = functor;
   last_ = Start(unify.tokens);
   return Ok();
+}
+
+// A field access is a deconstruction of the term by the field's constructor
+// and an assignment of the field's argument, and an update a construction
+// from the term's other arguments and the value too (reference manual,
+// "Field access functions"), so they keep uniqueness as those do: the
+// result of an access is the field's part of the term's inst, and of an
+// update a unique term of the term's other parts and the value's inst. A
+// part that the term and the result both have, the term being used after,
+// is shared in both (Overton, definition 3.2.20), and so is the value if it
+// is used after; as for a construction, mmc keeps its inst
+// (-fmmc-uniqueness).
+void ProcedureChecker::FieldInsts(const Symbol &symbol,
+    llvm::ArrayRef<VarId> arguments, llvm::ArrayRef<const Inst *> before,
+    InstMap &map, const Live &live) {
+  const auto *constructor{
+      std::get<const parser::Constructor *>(symbol.declaration)};
+  llvm::StringRef label{symbol.name};
+  bool update{symbol.kind == SymbolKind::FieldUpdate};
+  if (update) {
+    label.consume_back(" :=");
+  }
+  unsigned arity{static_cast<unsigned>(constructor->arguments.size())};
+  unsigned index{0};
+  while (!constructor->arguments[index]->field ||
+      constructor->arguments[index]->field->name != label) {
+    ++index;
+  }
+  InstFunctor functor{symbol.module, constructor->name->name, arity, false};
+  VarId term{arguments.front()}, result{arguments.back()};
+  const Type *type{TypeOf(term)};
+  const Inst *unified{ops_.Unify(before.front(),
+      insts_.Bound(Uniqueness::Unique,
+          {{functor, std::vector<const Inst *>(arity, insts_.Free())}}),
+      type)};
+  std::optional<std::vector<const Inst *>> parts;
+  if (unified) {
+    parts = ops_.Arguments(unified, functor, type);
+  }
+  if (!parts || ops_.IsNotReached(unified)) {
+    return;
+  }
+  // What the term and the result share.
+  std::vector<bool> shared(arity, false);
+  if (live[term]) {
+    if (update) {
+      shared.assign(arity, true);
+      shared[index] = false;
+    } else {
+      shared[index] = live[result];
+    }
+  }
+  std::vector<const Inst *> kept{*parts};
+  for (unsigned i{0}; i < arity; ++i) {
+    if (shared[i]) {
+      kept[i] = insts_.Share(kept[i]);
+    }
+  }
+  if (const Inst *learned{ops_.Unify(unified,
+          insts_.Bound(Uniqueness::Unique, {{functor, kept}}), type)}) {
+    map[term] = learned;
+  }
+  if (!update) {
+    map[result] = kept[index];
+    return;
+  }
+  VarId value{arguments[1]};
+  std::vector<const Inst *> fields{kept};
+  fields[index] = live[value] ? insts_.Share(before[1]) : before[1];
+  map[result] = insts_.Bound(Uniqueness::Unique, {{functor, fields}});
+  map[value] = !options_.mmcUniqueness && live[result] && live[value]
+      ? insts_.Share(before[1])
+      : before[1];
 }
 
 llvm::ArrayRef<const Procedure *> ProcedureChecker::ProceduresFor(
