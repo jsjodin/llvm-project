@@ -22,14 +22,17 @@ running mmc's programs (design document, Code generation, "Library").
 `unsorted_aggregate2` and `do_while` have no clauses, as code generation
 makes their procedures from `merk.aggregate`, and the others are written
 in Mercury on them (design document, Lowering, "Collecting solutions").
-`string.m` implements all of its declarations but `format` and `string/1`,
-every mode, in Mercury over `foreign_proc`s on `runtime/string.cpp`, which
-does the work on bytes. Strings are UTF-8 ending in a NUL and their
+`string.m` implements all of its declarations, every mode, in Mercury over
+`foreign_proc`s on `runtime/string.cpp`, which does the work on bytes. Strings are UTF-8 ending in a NUL and their
 indices count bytes, as in mmc's C grades (library manual, `string`); a
 byte that is not part of a well-formed sequence reads as U+FFFD, and
 `io.write` writes it so. What the manual leaves open, such as the edges of
 `between`, `left` and `index`, what `to_int` and `to_float` accept, and the
-errors' messages, is mmc's, found by running its programs.
+errors' messages, is mmc's, found by running its programs. `format`
+parses its format in Mercury and gives each conversion to C's `snprintf`,
+but for `%s` and `%c`, whose widths and precisions count code points, and
+infinities and NaNs, written as `io.write_float` writes them. `string/1` is
+`runtime/write.cpp`'s writer, writing into a buffer instead of a stream.
 `process.m`, a Merkurius extension with no counterpart in Mercury's
 library, implements the mailboxes of one process, `new_mailbox`,
 `close_mailbox`, `send`, `receive` on one mailbox and `any`, with

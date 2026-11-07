@@ -382,12 +382,6 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
   if (llvm::is_contained({"bool", "char", "exception", "univ"}, module)) {
     return LibraryCallNotYet(goal, symbol);
   }
-  // Temporary (string.format and string.string, docs/INPROGRESS.md): the
-  // string module's functions that it does not implement yet.
-  if (module == "string" &&
-      llvm::is_contained({"format", "string"}, symbol.name)) {
-    return LibraryCallNotYet(goal, symbol);
-  }
   bool isFloat{module == "float"};
   bool isUnsigned{module.starts_with("uint")};
   bool isInteger{

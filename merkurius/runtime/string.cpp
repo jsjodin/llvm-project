@@ -15,6 +15,9 @@
 
 #include "heap.h"
 #include <cerrno>
+#include <climits>
+#include <cmath>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -88,6 +91,65 @@ char *Copy(const char *from, std::size_t bytes) {
 
 bool IsWhitespace(unsigned char byte) {
   return byte == ' ' || (byte >= '\t' && byte <= '\r');
+}
+
+// What snprintf writes, as a new string.
+__attribute__((format(printf, 1, 2))) char *Print(const char *format, ...) {
+  std::va_list arguments;
+  va_start(arguments, format);
+  int bytes{std::vsnprintf(nullptr, 0, format, arguments)};
+  va_end(arguments);
+  if (bytes < 0) {
+    // A width or precision too large for C's int: no string could hold it.
+    std::abort();
+  }
+  char *text{NewString(static_cast<std::size_t>(bytes))};
+  va_start(arguments, format);
+  std::vsnprintf(text, static_cast<std::size_t>(bytes) + 1, format, arguments);
+  va_end(arguments);
+  return text;
+}
+
+// A string.format conversion's C format: its flags, of `-+ 0#`, its width
+// and precision, each -1 when absent, a length modifier and the conversion.
+void ConversionFormat(char *format, const char *flags, std::int64_t width,
+    std::int64_t precision, const char *length, char conversion) {
+  if (width > INT_MAX || precision > INT_MAX) {
+    std::abort();
+  }
+  char *end{format};
+  *end++ = '%';
+  // Each flag once, however often it was written, which C reads the same.
+  for (const char *flag{"-+ 0#"}; *flag; ++flag) {
+    if (std::strchr(flags, *flag)) {
+      *end++ = *flag;
+    }
+  }
+  if (width >= 0) {
+    end += std::sprintf(end, "%d", static_cast<int>(width));
+  }
+  if (precision >= 0) {
+    end += std::sprintf(end, ".%d", static_cast<int>(precision));
+  }
+  for (; *length; ++length) {
+    *end++ = *length;
+  }
+  *end++ = conversion;
+  *end = '\0';
+}
+
+// Text padded with spaces to `width` code points, on the left unless the
+// flags have `-`.
+char *Pad(const char *text, std::size_t bytes, std::size_t count,
+    const char *flags, std::int64_t width) {
+  std::size_t padding{
+      width > static_cast<std::int64_t>(count) ? width - count : 0};
+  char *padded{NewString(bytes + padding)};
+  bool left{std::strchr(flags, '-') != nullptr};
+  char *start{left ? padded : padded + padding};
+  std::memcpy(start, text, bytes);
+  std::memset(left ? padded + bytes : padded, ' ', padding);
+  return padded;
 }
 
 } // namespace
@@ -349,4 +411,60 @@ extern "C" char *merk_string_from_float(double value) {
   char buffer[64];
   merk_format_float(value, buffer);
   return Copy(buffer, std::strlen(buffer));
+}
+
+// string.format's conversions of integers, d, i, o, x, X, u and p, of a value
+// of `bits` bits: sign-extended for d and i, which only the signed types
+// take, and as an unsigned value of its bits for the others, as C's are.
+extern "C" char *merk_format_integer(const char *flags, std::int64_t width,
+    std::int64_t precision, std::int32_t conversion, std::int64_t value,
+    std::int64_t bits) {
+  std::uint64_t mask{bits >= 64 ? ~std::uint64_t{0}
+                                : (std::uint64_t{1} << bits) - 1};
+  std::uint64_t unsignedValue{static_cast<std::uint64_t>(value) & mask};
+  char format[64];
+  char c{static_cast<char>(conversion)};
+  if (c == 'p') {
+    ConversionFormat(format, flags, width, precision, "", c);
+    return Print(format, reinterpret_cast<void *>(unsignedValue));
+  }
+  ConversionFormat(format, flags, width, precision, "ll", c);
+  if (c == 'd' || c == 'i') {
+    return Print(format, static_cast<long long>(value));
+  }
+  return Print(format, static_cast<unsigned long long>(unsignedValue));
+}
+
+// string.format's conversions of floats, f, F, e, E, g and G. An infinity or
+// a NaN is written as io.write_float writes it, in capitals for F, E and G,
+// and only padded with spaces, as mmc does.
+extern "C" char *merk_format_float_conversion(const char *flags,
+    std::int64_t width, std::int64_t precision, std::int32_t conversion,
+    double value) {
+  char c{static_cast<char>(conversion)};
+  if (std::isnan(value) || std::isinf(value)) {
+    bool upper{c == 'F' || c == 'E' || c == 'G'};
+    const char *text{std::isnan(value) ? (upper ? "NAN" : "nan")
+            : value < 0                ? (upper ? "-INFINITY" : "-infinity")
+                                       : (upper ? "INFINITY" : "infinity")};
+    std::size_t bytes{std::strlen(text)};
+    return Pad(text, bytes, bytes, flags, width);
+  }
+  char format[64];
+  ConversionFormat(format, flags, width, precision, "", c);
+  return Print(format, value);
+}
+
+// string.format's s and c: the text's first `precision` code points, or all
+// of them for -1, padded to `width` code points with spaces, as mmc does.
+extern "C" char *merk_format_text(const char *flags, std::int64_t width,
+    std::int64_t precision, const char *text) {
+  std::int64_t bytes{0};
+  std::size_t count{0};
+  while (text[bytes] && (precision < 0 ||
+                            static_cast<std::int64_t>(count) < precision)) {
+    Decode(text, bytes, &bytes);
+    ++count;
+  }
+  return Pad(text, static_cast<std::size_t>(bytes), count, flags, width);
 }
