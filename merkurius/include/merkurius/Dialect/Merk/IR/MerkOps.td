@@ -71,7 +71,7 @@ def Merk_ProcOp : Merk_Op<"proc", [
 
 def Merk_SucceedOp : Merk_Op<"succeed", [
     Pure, ParentOneOf<["ProcOp", "IteOp", "SwitchOp", "DisjOp", "NondetCallOp",
-        "NondetCallClosureOp", "EachOp", "SoftIteOp"]>,
+        "NondetCallClosureOp", "NondetCallMethodOp", "EachOp", "SoftIteOp"]>,
     ReturnLike, Terminator
   ]> {
   let summary = "produce the procedure's solution";
@@ -304,6 +304,9 @@ def Merk_CallMethodOp : Merk_Op<"call_method"> {
     Calls the procedure in the given place of the instance's method table,
     with the `typeclass_info` and then the inputs. A specialization pass sees
     the instance when the `typeclass_info` comes from a `merk.typeclass_info`.
+    A nondet or multi method is called with `merk.nondet_call_method`, which
+    outlining rewrites as a semidet call of this operation whose last inputs
+    are a continuation and its environment.
 
     ```mlir
     %y = merk.call_method %d[0](%x) #merk.determinism<det> : (!merk.word) -> !merk.word
@@ -958,6 +961,40 @@ def Merk_NondetCallClosureOp : Merk_Op<"nondet_call_closure", [Terminator]> {
       "mlir::ValueRange":$inputs), [{
     $_state.addOperands(closure);
     $_state.addOperands(inputs);
+    $_state.addRegion();
+  }]>];
+}
+
+def Merk_NondetCallMethodOp : Merk_Op<"nondet_call_method", [Terminator]> {
+  let summary = "a call of a nondet or multi method through a typeclass_info";
+  let description = [{
+    Calls the procedure in the given place of the instance's method table,
+    with the `typeclass_info` and then the inputs, as `merk.call_method`
+    does, and runs its continuation once for each of its solutions, with the
+    method's outputs as the continuation's arguments; after the last, it
+    fails.
+
+    ```mlir
+    merk.nondet_call_method %d[0](%x : !merk.word) {
+    ^bb0(%y: !merk.word):
+      ...
+    }
+    ```
+  }];
+  let arguments = (ins Merk_TypeclassInfoType:$info, I64Attr:$method,
+      Variadic<AnyType>:$inputs);
+  let regions = (region SizedRegion<1>:$continuation);
+  let assemblyFormat = [{
+    $info `[` $method `]` `(` ($inputs^ `:` type($inputs))? `)` $continuation attr-dict
+  }];
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+  let builders = [OpBuilder<(ins "mlir::Value":$info, "std::int64_t":$method,
+      "mlir::ValueRange":$inputs), [{
+    $_state.addOperands(info);
+    $_state.addOperands(inputs);
+    $_state.addAttribute(getMethodAttrName($_state.name),
+        $_builder.getI64IntegerAttr(method));
     $_state.addRegion();
   }]>];
 }

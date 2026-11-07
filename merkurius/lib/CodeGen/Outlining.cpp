@@ -56,6 +56,8 @@ private:
   void RewriteCall(merk::NondetCallOp, const Sink *succeed, const Sink *solution);
   void RewriteClosureCall(
       merk::NondetCallClosureOp, const Sink *succeed, const Sink *solution);
+  void RewriteMethodCall(
+      merk::NondetCallMethodOp, const Sink *succeed, const Sink *solution);
   Sink Continuation(mlir::Operation *call, mlir::Region &continuation,
       const Sink *succeed, const Sink *solution);
   void RewriteEach(merk::EachOp, const Sink *succeed, const Sink *solution);
@@ -239,6 +241,8 @@ void Outliner::Rewrite(
         RewriteCall(call, succeed, solution);
       } else if (auto call{mlir::dyn_cast<merk::NondetCallClosureOp>(op)}) {
         RewriteClosureCall(call, succeed, solution);
+      } else if (auto call{mlir::dyn_cast<merk::NondetCallMethodOp>(op)}) {
+        RewriteMethodCall(call, succeed, solution);
       } else if (auto each{mlir::dyn_cast<merk::EachOp>(op)}) {
         RewriteEach(each, succeed, solution);
       } else if (auto ite{mlir::dyn_cast<merk::SoftIteOp>(op)}) {
@@ -325,6 +329,21 @@ void Outliner::RewriteClosureCall(merk::NondetCallClosureOp call,
   inputs.append({sink.cont, sink.env});
   merk::CallClosureOp::create(builder_, loc, mlir::TypeRange{},
       call.getClosure(), inputs, merk::Determinism::Semidet);
+  merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+  call.erase();
+}
+
+// A semidet call of the instance's dispatch procedure, which outlining has
+// rewritten as it does every nondet procedure.
+void Outliner::RewriteMethodCall(merk::NondetCallMethodOp call,
+    const Sink *succeed, const Sink *solution) {
+  mlir::Location loc{call.getLoc()};
+  Sink sink{Continuation(call, call.getContinuation(), succeed, solution)};
+  builder_.setInsertionPoint(call);
+  llvm::SmallVector<mlir::Value> inputs{call.getInputs()};
+  inputs.append({sink.cont, sink.env});
+  merk::CallMethodOp::create(builder_, loc, mlir::TypeRange{}, call.getInfo(),
+      call.getMethod(), inputs, merk::Determinism::Semidet);
   merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
   call.erase();
 }

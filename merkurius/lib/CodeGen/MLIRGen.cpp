@@ -554,6 +554,10 @@ private:
   // module that can have one: not a foreign_proc, nor existentially typed.
   merk::ProcOp WordProcFor(const ProcedureBody &);
   const ProcedureBody *CopyableBody(const Procedure &);
+  // In a body that gives words, the conversions of the words that
+  // merk.each's continuations and nondet calls' give, to the outputs' types,
+  // where nothing uses them.
+  static void EraseUnwordedOutputs(mlir::Region &);
   // In a body that gives words: the words of its outputs, `outputs`.
   llvm::SmallVector<mlir::Value> WordResults(
       llvm::ArrayRef<BodyVar> outputs, const ProcedureBody &, mlir::Location);
@@ -1765,7 +1769,7 @@ merk::ProcOp MerkGenerator::MethodProc(const ProcedureBody &body) {
       determinism_.DeterminismOf(procedure)};
   std::optional<merk::Determinism> merkDeterminism;
   if (determinism) {
-    merkDeterminism = MerkDeterminism(*determinism);
+    merkDeterminism = ClosureDeterminism(*determinism);
   }
   if (!merkDeterminism) {
     NotYet(at, "methods of this determinism");
@@ -1923,8 +1927,23 @@ void MerkGenerator::GenerateDispatch(const semantics::InstanceHead &head,
       }
     }
   }
-  auto call{merk::CallOp::create(builder_, loc,
-      method.getFunctionType().getResults(), method.getSymName(), inputs)};
+  // A nondet or multi method's solutions are the dispatch's, as declared.
+  mlir::ValueRange given;
+  if (method.getDeterminism() == merk::Determinism::Nondet ||
+      method.getDeterminism() == merk::Determinism::Multi) {
+    auto call{merk::NondetCallOp::create(
+        builder_, loc, method.getSymName(), inputs)};
+    mlir::Block &continuation{call.getContinuation().emplaceBlock()};
+    for (mlir::Type type : method.getFunctionType().getResults()) {
+      continuation.addArgument(type, loc);
+    }
+    builder_.setInsertionPointToStart(&continuation);
+    given = continuation.getArguments();
+  } else {
+    given = merk::CallOp::create(builder_, loc,
+        method.getFunctionType().getResults(), method.getSymName(), inputs)
+                .getResults();
+  }
   llvm::SmallVector<mlir::Value> results;
   unsigned result{0};
   for (auto [dummy, type] : outputs) {
@@ -1933,7 +1952,7 @@ void MerkGenerator::GenerateDispatch(const semantics::InstanceHead &head,
           merk::WordType::get(&context_),
           IntegerConstant(builder_.getI64Type(), 0, loc)));
     } else {
-      results.push_back(Coerce(call.getResult(result++), type, loc));
+      results.push_back(Coerce(given[result++], type, loc));
     }
   }
   merk::SucceedOp::create(builder_, loc, results);
@@ -2165,7 +2184,7 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
         determinism_.DeterminismOf(callee)};
     std::optional<merk::Determinism> merkDeterminism;
     if (determinism) {
-      merkDeterminism = MerkDeterminism(*determinism);
+      merkDeterminism = ClosureDeterminism(*determinism);
     }
     if (!merkDeterminism) {
       NotYet(at, "methods of this determinism");
@@ -2180,8 +2199,23 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
         resultTypes.push_back(represented->type);
       }
     }
-    call = merk::CallMethodOp::create(builder_, loc, resultTypes, dictionary,
-        llvm::find(slots, &callee) - slots.begin(), inputs, *merkDeterminism);
+    std::int64_t slot{llvm::find(slots, &callee) - slots.begin()};
+    if (*merkDeterminism == merk::Determinism::Nondet ||
+        *merkDeterminism == merk::Determinism::Multi) {
+      // The rest of the code is the call's continuation, as for a nondet
+      // procedure.
+      auto nondet{merk::NondetCallMethodOp::create(
+          builder_, loc, dictionary, slot, inputs)};
+      mlir::Block &continuation{nondet.getContinuation().emplaceBlock()};
+      for (mlir::Type type : resultTypes) {
+        continuation.addArgument(type, loc);
+      }
+      builder_.setInsertionPointToStart(&continuation);
+      call = nondet;
+    } else {
+      call = merk::CallMethodOp::create(builder_, loc, resultTypes, dictionary,
+          slot, inputs, *merkDeterminism);
+    }
   } else if (Nondeterministic(callee)) {
     // The rest of the code is the call's continuation, which takes the
     // callee's outputs.
@@ -2199,6 +2233,8 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
   }
   mlir::ValueRange results{call->getResults()};
   if (auto nondet{mlir::dyn_cast<merk::NondetCallOp>(call)}) {
+    results = nondet.getContinuation().front().getArguments();
+  } else if (auto nondet{mlir::dyn_cast<merk::NondetCallMethodOp>(call)}) {
     results = nondet.getContinuation().front().getArguments();
   }
   // A call that never succeeds ends the branch it is in, which then need not
@@ -2231,8 +2267,7 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
 
 const ProcedureBody *MerkGenerator::CopyableBody(const Procedure &procedure) {
   auto it{bodies_.find(&procedure)};
-  if (it == bodies_.end() || !HiddenOutputs(procedure).empty() ||
-      Nondeterministic(procedure)) {
+  if (it == bodies_.end() || !HiddenOutputs(procedure).empty()) {
     return nullptr;
   }
   return it->second;
@@ -2248,7 +2283,7 @@ merk::ProcOp MerkGenerator::WordProcFor(const ProcedureBody &body) {
       determinism_.DeterminismOf(procedure)};
   std::optional<merk::Determinism> merkDeterminism;
   if (determinism) {
-    merkDeterminism = MerkDeterminism(*determinism);
+    merkDeterminism = ClosureDeterminism(*determinism);
   }
   if (!merkDeterminism) {
     NotYet(at, "word copies of procedures of this determinism");
@@ -2284,6 +2319,21 @@ merk::ProcOp MerkGenerator::WordProcFor(const ProcedureBody &body) {
   wordProcs_[&procedure] = proc;
   pendingCopies_.push_back(&body);
   return proc;
+}
+
+void MerkGenerator::EraseUnwordedOutputs(mlir::Region &region) {
+  llvm::SmallVector<merk::FromWordOp> unused;
+  region.walk([&](merk::FromWordOp op) {
+    auto argument{mlir::dyn_cast<mlir::BlockArgument>(op.getWord())};
+    if (op->use_empty() && argument &&
+        mlir::isa<merk::EachOp, merk::NondetCallOp, merk::NondetCallClosureOp,
+            merk::NondetCallMethodOp>(argument.getOwner()->getParentOp())) {
+      unused.push_back(op);
+    }
+  });
+  for (merk::FromWordOp op : unused) {
+    op->erase();
+  }
 }
 
 llvm::SmallVector<mlir::Value> MerkGenerator::WordResults(
@@ -2673,6 +2723,7 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
           NotYet(at, "this lambda expression's outputs");
         } else {
           merk::SucceedOp::create(builder_, loc, results);
+          EraseUnwordedOutputs(proc.getBody());
         }
       }
     }
@@ -4203,6 +4254,15 @@ void MerkGenerator::Join(mlir::Operation *op, llvm::ArrayRef<Branch> branches,
   results->insert(results->end(), words.begin(), words.end());
   llvm::sort(*results);
   results->erase(std::unique(results->begin(), results->end()), results->end());
+  // In a body that gives words, merk.each's continuation takes the body's
+  // outputs as words, so that a branch whose call gives them as words gives
+  // them on unchanged, and the continuation passes on a solution that it
+  // only gives as the body's (EraseUnwordedOutputs).
+  auto word{merk::WordType::get(&context_)};
+  llvm::SmallVector<bool> asWords;
+  for (BodyVar var : *results) {
+    asWords.push_back(each && wordOutputs_ && llvm::is_contained(*wordOutputs_, var));
+  }
   llvm::SmallVector<mlir::Type> types;
   for (const Branch &branch : branches) {
     if (branch.fails) {
@@ -4221,6 +4281,11 @@ void MerkGenerator::Join(mlir::Operation *op, llvm::ArrayRef<Branch> branches,
       }
     }
     if (each) {
+      for (auto [value, asWord] : llvm::zip(values, asWords)) {
+        if (asWord) {
+          value = Coerce(value, word, loc);
+        }
+      }
       merk::SolutionOp::create(builder_, loc, values);
     } else {
       merk::YieldOp::create(builder_, loc, values);
@@ -4234,10 +4299,12 @@ void MerkGenerator::Join(mlir::Operation *op, llvm::ArrayRef<Branch> branches,
     }
     mlir::Block &continuation{each.getContinuation().emplaceBlock()};
     values_ = before;
-    for (auto [var, type] : llvm::zip(*results, types)) {
-      values_[var] = continuation.addArgument(type, loc);
-    }
     builder_.setInsertionPointToStart(&continuation);
+    for (auto [var, type, asWord] : llvm::zip(*results, types, asWords)) {
+      values_[var] = asWord
+          ? Coerce(continuation.addArgument(word, loc), type, loc)
+          : mlir::Value{continuation.addArgument(type, loc)};
+    }
     return;
   }
   // The operation again, with the results.
@@ -4328,7 +4395,12 @@ void MerkGenerator::SoftIte(const Body &goal, const ProcedureBody &body) {
     // Each solution of the condition gives what it binds to the then part,
     // which PruneSolutions leaves out of if the then part does not use it.
     builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
+    // The condition's solutions are the then part's, so no call in it is a
+    // tail call that a word copy would keep.
+    std::optional<llvm::SmallVector<BodyVar>> words{std::move(wordOutputs_)};
+    wordOutputs_.reset();
     Goal(*goal.goals[0], body);
+    wordOutputs_ = std::move(words);
     std::vector<BodyVar> bound;
     llvm::SmallVector<mlir::Value> given;
     for (BodyVar var : BoundSince(values_, before)) {
@@ -4447,7 +4519,12 @@ void MerkGenerator::Commit(const Body &goal, const ProcedureBody &body) {
     builder_.setInsertionPointToStart(&commit.getGenerator().emplaceBlock());
     const Body *outer{committing_};
     committing_ = &goal;
+    // Its solution is the commit's, not the body's, so no call in it is a
+    // tail call that a word copy would keep.
+    std::optional<llvm::SmallVector<BodyVar>> words{std::move(wordOutputs_)};
+    wordOutputs_.reset();
     Goal(goal, body);
+    wordOutputs_ = std::move(words);
     committing_ = outer;
     if (failed_) {
       values_ = before;
@@ -6889,6 +6966,7 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
       return;
     }
     merk::SucceedOp::create(builder_, Location(at), results);
+    EraseUnwordedOutputs(proc.getBody());
     return;
   }
   if (hiddenOutputs != 0) {

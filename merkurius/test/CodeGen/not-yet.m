@@ -12,13 +12,6 @@
 
 main(!IO).
 
-% A method with more than one solution.
-:- typeclass digits(T) where [ pred digit(T::in, int::out) is nondet ].
-:- instance digits(int) where [ digit(_, 1), digit(_, 2) ].
-% CHECK: not-yet.m:[[@LINE-2]]:37: error: not yet implemented: code generation for methods of this determinism
-:- pred some_digit(int::in, int::out) is cc_nondet.
-some_digit(X, D) :- digit(X, D).
-
 :- typeclass size(T) where [ func size(T) = int ].
 :- instance size(int) where [ size(X) = X ].
 :- func sizes(list(int)) = list(func(int) = int).

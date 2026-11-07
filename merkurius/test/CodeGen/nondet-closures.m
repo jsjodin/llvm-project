@@ -1,9 +1,9 @@
 % Closures of nondet and multi procedures and lambda expressions, and
-% higher-order calls of them: the closure's entry calls the procedure with
-% merk.nondet_call and gives its solutions as words, and a higher-order call
-% is merk.nondet_call_closure, which outlining makes a semidet call of the
-% entry with a continuation. An entry whose procedure gives words passes
-% its continuation on, as a tail call. The output is mmc's for the same
+% higher-order calls of them: the closure's entry calls the procedure's
+% word copy with merk.nondet_call and gives its solutions as words, and a
+% higher-order call is merk.nondet_call_closure, which outlining makes a
+% semidet call of the entry with a continuation. The entry passes its
+% continuation on, as a tail call. The output is mmc's for the same
 % program.
 %
 % RUN: merkc -fc1 -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MERK
@@ -85,16 +85,16 @@ main(!IO) :-
     % A higher-order call directly in a soft cut's condition.
     ( if P1(K), K > 2 then show(K, !IO) else none(!IO) ).
 
-% MERK-LABEL: merk.proc private @nondet_closures.elem_2_0$closure2(%arg0: !merk.closure) -> !merk.word attributes {determinism = #merk.determinism<nondet>} {
-% MERK: merk.nondet_call @nondet_closures.elem_2_0(
+% MERK-LABEL: merk.proc private @nondet_closures.elem_2_0$words$closure2(%arg0: !merk.closure) -> !merk.word attributes {determinism = #merk.determinism<nondet>} {
+% MERK: merk.nondet_call @nondet_closures.elem_2_0$words(
 % MERK-NEXT: ^bb0(%[[X:.*]]: !merk.word):
 % MERK-NEXT: merk.succeed %[[X]] : !merk.word
 % MERK-LABEL: merk.proc private @nondet_closures.main_2_0$lambda1(%arg0: !merk.closure) -> !merk.word attributes {determinism = #merk.determinism<nondet>} {
 % MERK-NEXT: merk.nondet_call_closure %arg0() {
 % MERK-NEXT: ^bb0(%[[Y:.*]]: !merk.word):
 
-% LLVM-LABEL: define internal tailcc i1 @"nondet_closures.elem_2_0$closure2"(ptr %0, ptr %1, ptr %2)
-% LLVM: musttail call tailcc i1 @nondet_closures.elem_2_0(ptr %{{.*}}, ptr %{{.*}}, ptr %1, ptr %2)
+% LLVM-LABEL: define internal tailcc i1 @"nondet_closures.elem_2_0$words$closure2"(ptr %0, ptr %1, ptr %2)
+% LLVM: musttail call tailcc i1 @"nondet_closures.elem_2_0$words"(ptr %{{.*}}, ptr %{{.*}}, ptr %1, ptr %2)
 % LLVM-LABEL: define internal tailcc i1 @"nondet_closures.main_2_0$lambda0$closure1"(ptr %0, ptr %1, ptr %2)
 % LLVM: musttail call tailcc i1 @"nondet_closures.main_2_0$lambda0"(i64 %{{.*}}, ptr %1, ptr %2)
 % LLVM-LABEL: define internal tailcc i1 @"nondet_closures.main_2_0$lambda1"(ptr %0, ptr %1, ptr %2)

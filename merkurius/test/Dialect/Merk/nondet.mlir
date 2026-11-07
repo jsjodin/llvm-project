@@ -99,6 +99,20 @@ module @nd attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
     }
   }
 
+  // A call of a nondet method, whose continuation only gives its solution,
+  // passes on the caller's continuation to the method's procedure in the
+  // instance's table.
+  // CHECK-LABEL: merk.proc @nd.method_1_0(%arg0: !merk.typeclass_info, %arg1: !merk.word) -> !merk.word attributes {determinism = #merk.determinism<nondet>} {
+  // CHECK-NEXT: merk.nondet_call_method %arg0[1] (%arg1 : !merk.word) {
+  // CHECK-NEXT: ^bb0(%[[Y:.*]]: !merk.word):
+  // CHECK-NEXT: merk.succeed %[[Y]] : !merk.word
+  merk.proc @nd.method_1_0(%d: !merk.typeclass_info, %x: !merk.word) -> !merk.word attributes {determinism = #merk.determinism<nondet>} {
+    merk.nondet_call_method %d[1](%x : !merk.word) {
+    ^bb0(%y: !merk.word):
+      merk.succeed %y : !merk.word
+    }
+  }
+
   // The operations that outlining makes.
   // CHECK-LABEL: merk.proc @nd.give_0_0(%arg0: !merk.cont, %arg1: !merk.env)
   // CHECK-NEXT: %[[ONE:.*]] = merk.constant 1 : i64
@@ -167,6 +181,11 @@ module @nd attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 // LLVM-NEXT: musttail call tailcc i1 %[[CODE]](ptr %0, i64 %1, ptr %2, ptr %3)
 // A call that passes on the continuation it was given is a tail call; one
 // that passes an environment in its own frame is not.
+// LLVM-LABEL: define tailcc i1 @nd.method_1_0(ptr %0, i64 %1, ptr %2, ptr %3)
+// LLVM-NEXT: %[[TABLE:.*]] = load ptr, ptr %0
+// LLVM-NEXT: %[[SLOT:.*]] = getelementptr i8, ptr %[[TABLE]], i32 8
+// LLVM-NEXT: %[[METHOD:.*]] = load ptr, ptr %[[SLOT]]
+// LLVM-NEXT: musttail call tailcc i1 %[[METHOD]](ptr %0, i64 %1, ptr %2, ptr %3)
 // LLVM-LABEL: define tailcc i1 @nd.give_0_0(ptr %0, ptr %1)
 // LLVM-NEXT: musttail call tailcc i1 %0(ptr %1, i64 1)
 // LLVM-LABEL: define tailcc { i1, i64 } @nd.first_1_0(i64 %0)
