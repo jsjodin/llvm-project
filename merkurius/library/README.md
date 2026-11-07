@@ -41,8 +41,10 @@ infinities and NaNs, written as `io.write_float` writes them. `string/1` is
 `runtime/write.cpp`'s writer, writing into a buffer instead of a stream.
 `process.m`, a Merkurius extension with no counterpart in Mercury's
 library, implements the mailboxes of one process, `new_mailbox`,
-`close_mailbox`, `send`, `receive` on one mailbox and `any`, and a
-registry of names, `register`, `unregister` and `lookup`, as Erlang's,
+`close_mailbox`, `send`, `receive` on one mailbox and `any`, selectors
+over several mailboxes, `new_selector`, `selecting`, `selecting_matching`
+and `receive` over a selector, which takes the oldest message that a case
+accepts by the runtime's stamps of arrival, and a registry of names, `register`, `unregister` and `lookup`, as Erlang's,
 and connections to other nodes over TCP, `listen` and `connect`, with
 `foreign_proc`s on `runtime/mailbox.cpp` and `runtime/node.cpp` (design
 document, Language extensions, "Processes and mailboxes";
