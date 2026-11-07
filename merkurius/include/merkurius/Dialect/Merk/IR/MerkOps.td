@@ -705,6 +705,17 @@ def Merk_ArrayCopyOp : Merk_Op<"array_copy", [
   let assemblyFormat = "$array attr-dict `:` type($array)";
 }
 
+def Merk_ArrayFromListOp : Merk_Op<"array_from_list"> {
+  let summary = "a new array of a list's elements, in order";
+  let description = [{
+    `list` is a `list.list(T)` and the array's elements are `T`s, each the
+    word the list's cell holds.
+  }];
+  let arguments = (ins Merk_TermType:$list);
+  let results = (outs Merk_ArrayType:$array);
+  let assemblyFormat = "$list attr-dict `:` type($list) `->` type($array)";
+}
+
 def Merk_ArrayResizeOp : Merk_Op<"array_resize", [
     AllTypesMatch<["array", "result"]>
   ]> {
