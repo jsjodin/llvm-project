@@ -594,6 +594,83 @@ static std::optional<llvm::APInt> CaseConstant(const semantics::InstFunctor &fun
   return std::nullopt;
 }
 
+// The constant of a case of a switch on a string or a float, or null for
+// one that is not a literal of the type.
+static mlir::TypedAttr TestedConstant(
+    const semantics::InstFunctor &functor, mlir::Type type) {
+  if (!functor.literal || functor.arity != 0) {
+    return {};
+  }
+  if (mlir::isa<merk::StringType>(type)) {
+    if (!functor.name.starts_with("\"")) {
+      return {};
+    }
+    return mlir::StringAttr::get(parser::UnquoteSpelling(functor.name), type);
+  }
+  auto f{mlir::dyn_cast<mlir::FloatType>(type)};
+  if (!f) {
+    return {};
+  }
+  std::string digits{functor.name};
+  llvm::erase(digits, '_');
+  llvm::APFloat v{f.getFloatSemantics()};
+  auto status{v.convertFromString(digits, llvm::APFloat::rmNearestTiesToEven)};
+  if (!status) {
+    llvm::consumeError(status.takeError());
+    return {};
+  }
+  return mlir::FloatAttr::get(f, v);
+}
+
+mlir::Value MerkGenerator::IsOneOf(mlir::Value value,
+    llvm::ArrayRef<mlir::TypedAttr> constants, mlir::Location loc) {
+  mlir::Value test;
+  for (mlir::TypedAttr attr : constants) {
+    mlir::Value constant{
+        merk::ConstantOp::create(builder_, loc, attr.getType(), attr)};
+    mlir::Value equal;
+    if (mlir::isa<merk::StringType>(value.getType())) {
+      equal = merk::StringEqualOp::create(
+          builder_, loc, builder_.getI1Type(), value, constant);
+    } else {
+      // As ==, so that 0.0 is -0.0's case, and a NaN is in none.
+      equal = mlir::arith::CmpFOp::create(builder_, loc,
+          mlir::arith::CmpFPredicate::OEQ, value, constant);
+    }
+    test = test ? mlir::arith::OrIOp::create(builder_, loc, test, equal)
+                : equal;
+  }
+  return test;
+}
+
+// A string or a float has too many values for a jump table, so its cases
+// are if-then-elses, each testing the value against the case's constants;
+// a value that no case has fails, unless the switch is complete, when the
+// last case is what is left.
+void MerkGenerator::TestCases(const Body &goal, std::size_t next,
+    mlir::Value value,
+    llvm::ArrayRef<llvm::SmallVector<mlir::TypedAttr>> constants,
+    const ProcedureBody &body) {
+  mlir::Location loc{Location(goal.tokens)};
+  if (next == goal.cases.size()) {
+    merk::FailOp::create(builder_, loc);
+    return;
+  }
+  const semantics::SwitchCase &c{goal.cases[next]};
+  if (next + 1 == goal.cases.size() && !goal.canFail) {
+    Goal(*c.goal, body);
+    return;
+  }
+  Ite(
+      goal.tokens,
+      [&] {
+        merk::GuardOp::create(
+            builder_, loc, IsOneOf(value, constants[next], loc));
+      },
+      c.goal,
+      [&] { TestCases(goal, next + 1, value, constants, body); }, body);
+}
+
 void MerkGenerator::Switch(const Body &goal, const ProcedureBody &body) {
   mlir::Location loc{Location(goal.tokens)};
   const semantics::Type *type{body.vars[goal.switchVar].type};
@@ -601,6 +678,26 @@ void MerkGenerator::Switch(const Body &goal, const ProcedureBody &body) {
   auto integer{value ? mlir::dyn_cast<mlir::IntegerType>(value.getType())
                      : mlir::IntegerType{}};
   bool term{value && mlir::isa<merk::TermType>(value.getType())};
+  if (value && mlir::isa<merk::StringType, mlir::FloatType>(value.getType())) {
+    llvm::SmallVector<llvm::SmallVector<mlir::TypedAttr>> constants;
+    for (const semantics::SwitchCase &c : goal.cases) {
+      llvm::SmallVector<mlir::TypedAttr> &own{constants.emplace_back()};
+      std::vector<semantics::InstFunctor> functors{c.functor};
+      functors.insert(functors.end(), c.others.begin(), c.others.end());
+      for (const semantics::InstFunctor &functor : functors) {
+        mlir::TypedAttr constant{TestedConstant(functor, value.getType())};
+        if (!constant) {
+          NotYet(Where(goal.tokens),
+              "switches on values of type " + semantics::TypeToString(*type) +
+                  " with a case that is not a literal");
+          return;
+        }
+        own.push_back(constant);
+      }
+    }
+    TestCases(goal, 0, value, constants, body);
+    return;
+  }
   if (!integer && !term) {
     NotYet(Where(goal.tokens),
         "switches on values of type " + semantics::TypeToString(*type));

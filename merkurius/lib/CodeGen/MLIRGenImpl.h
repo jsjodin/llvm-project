@@ -500,6 +500,14 @@ private:
       const Body *thenPart, llvm::function_ref<void()> otherwise,
       const ProcedureBody &, const Body *otherwiseGoal = nullptr);
   void Switch(const Body &, const ProcedureBody &);
+  // A switch on a string or a float, whose cases are tested in turn: from
+  // the case `next` on, each case's constants as `constants` has them.
+  void TestCases(const Body &, std::size_t next, mlir::Value,
+      llvm::ArrayRef<llvm::SmallVector<mlir::TypedAttr>> constants,
+      const ProcedureBody &);
+  // Whether the value is one of the constants.
+  mlir::Value IsOneOf(
+      mlir::Value, llvm::ArrayRef<mlir::TypedAttr> constants, mlir::Location);
   void Not(const Body &, const ProcedureBody &);
   // A goal with an OpenMP directive (design document, "Target regions").
   void Omp(const Body &, const ProcedureBody &);
