@@ -9,6 +9,12 @@ This file then keeps only what is still open.
 
 ## The order of the next pieces
 
+Decided 2026-11-07: the work heads for messages between processes on GPUs
+of different hosts, and the route to it comes before the rest of chunk 1
+(design document, Distribution and wire format, GPU processes, "The route
+there"). What follows is the order as it stood before; the parts of it on
+that route keep their place in it.
+
 Three chunks remain before processes and memory management are done: terms
 on a heap, then processes and messaging, then garbage collection. The first
 is shared: messaging needs terms (a message is a value of a user type,
