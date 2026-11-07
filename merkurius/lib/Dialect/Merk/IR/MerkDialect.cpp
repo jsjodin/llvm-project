@@ -318,13 +318,58 @@ llvm::LogicalResult SolutionOp::verify() {
       }
       return mlir::success();
     }
+    if (auto aggregate{mlir::dyn_cast<AggregateOp>(parent)}) {
+      if (region != &aggregate.getGenerator()) {
+        continue;
+      }
+      if (aggregate.getStep().empty()) {
+        return mlir::success();
+      }
+      mlir::TypeRange arguments{
+          aggregate.getStep().front().getArgumentTypes()};
+      if (arguments.size() < aggregate.getNumResults() ||
+          getValues().getTypes() !=
+              arguments.drop_back(aggregate.getNumResults())) {
+        return emitOpError("does not match the arguments of the step");
+      }
+      return mlir::success();
+    }
     if (mlir::isa<ProcOp>(parent)) {
       break;
     }
   }
   return emitOpError(
-      "is not in the generator of merk.each or merk.commit, or the condition "
-      "of merk.soft_ite");
+      "is not in the generator of merk.each, merk.commit or merk.aggregate, "
+      "or the condition of merk.soft_ite");
+}
+
+// The step takes a solution's values, then the accumulators, whose types
+// are the operands' and the results', and yields whether to go on and the
+// new accumulators.
+llvm::LogicalResult AggregateOp::verify() {
+  if (getInitial().getTypes() != getResultTypes()) {
+    return emitOpError("results do not match its operands");
+  }
+  if (getStep().empty() || getStep().front().empty()) {
+    return emitOpError("step does not end with merk.yield");
+  }
+  mlir::Block &step{getStep().front()};
+  mlir::TypeRange arguments{step.getArgumentTypes()};
+  if (arguments.size() < getNumResults() ||
+      arguments.take_back(getNumResults()) != getResultTypes()) {
+    return emitOpError("step's last arguments do not match its results");
+  }
+  auto yield{mlir::dyn_cast<YieldOp>(step.back())};
+  if (!yield) {
+    return emitOpError("step does not end with merk.yield");
+  }
+  mlir::TypeRange values{yield.getValues().getTypes()};
+  if (values.empty() || !values.front().isInteger(1) ||
+      values.drop_front() != getResultTypes()) {
+    return emitOpError(
+        "step does not yield an i1 and then values of its results' types");
+  }
+  return mlir::success();
 }
 
 llvm::LogicalResult ContRefOp::verifySymbolUses(

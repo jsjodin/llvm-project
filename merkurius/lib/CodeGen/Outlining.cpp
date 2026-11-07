@@ -18,6 +18,10 @@
 // solution in its environment and stops; the then part of merk.soft_ite
 // becomes a continuation that records in its environment that the condition
 // has a solution, which the else part is tried after only if it has none.
+// The step of merk.aggregate becomes a continuation that keeps the
+// accumulators in its environment, in the frame of the code it came from,
+// and asks to stop when the step says not to go on; its generator becomes a
+// procedure that gives its solutions to it.
 //
 //===----------------------------------------------------------------------===//
 
@@ -57,9 +61,12 @@ private:
   void RewriteEach(merk::EachOp, const Sink *succeed, const Sink *solution);
   void RewriteSoftIte(merk::SoftIteOp, const Sink *succeed, const Sink *solution);
   void RewriteCommit(merk::CommitOp);
+  void RewriteAggregate(merk::AggregateOp);
   void Deliver(mlir::Operation *end, mlir::ValueRange values, const Sink &);
   merk::ProcOp Outline(mlir::Region &, llvm::ArrayRef<mlir::Type> slots,
       llvm::SmallVectorImpl<mlir::Value> &captures, mlir::ArrayAttr &layout);
+  merk::ProcOp OutlineWith(
+      mlir::Region &, mlir::ValueRange captures, mlir::ArrayAttr layout);
   mlir::Value MakeEnv(mlir::Location, mlir::ValueRange captures,
       mlir::ArrayAttr layout);
   const Sink *PassedOn(mlir::Region &continuation, const Sink *succeed,
@@ -74,7 +81,7 @@ private:
 };
 
 // The merk.solution operations that give the solutions of a generator: not
-// those of a merk.commit in it, but those of a merk.each's continuation, and
+// those of a merk.commit or merk.aggregate in it, but those of a merk.each's continuation, and
 // those of a merk.soft_ite's then and else parts rather than its condition.
 void Solutions(mlir::Region &region, llvm::SmallVectorImpl<merk::SolutionOp> &out) {
   for (mlir::Block &block : region) {
@@ -86,7 +93,7 @@ void Solutions(mlir::Region &region, llvm::SmallVectorImpl<merk::SolutionOp> &ou
       } else if (auto ite{mlir::dyn_cast<merk::SoftIteOp>(op)}) {
         Solutions(ite.getThenRegion(), out);
         Solutions(ite.getElseRegion(), out);
-      } else if (!mlir::isa<merk::CommitOp>(op)) {
+      } else if (!mlir::isa<merk::CommitOp, merk::AggregateOp>(op)) {
         for (mlir::Region &inner : op.getRegions()) {
           Solutions(inner, out);
         }
@@ -96,8 +103,9 @@ void Solutions(mlir::Region &region, llvm::SmallVectorImpl<merk::SolutionOp> &ou
 }
 
 // Leaves out of a generator's solutions the values that nothing uses: the
-// arguments of merk.each's continuation or of merk.soft_ite's then part that
-// it does not use, and the results of merk.commit that nothing uses, which
+// arguments of merk.each's continuation, of merk.soft_ite's then part or of
+// merk.aggregate's step, for a solution, that it does not use, and the
+// results of merk.commit that nothing uses, which
 // code generation gives for every variable the goal binds.
 void Prune(mlir::Operation *op, mlir::Region &generator,
     llvm::ArrayRef<bool> dead) {
@@ -115,7 +123,8 @@ void Prune(mlir::Operation *op, mlir::Region &generator,
 void PruneUnused(mlir::ModuleOp module) {
   llvm::SmallVector<mlir::Operation *> ops;
   module.walk([&](mlir::Operation *op) {
-    if (mlir::isa<merk::EachOp, merk::SoftIteOp, merk::CommitOp>(op)) {
+    if (mlir::isa<merk::EachOp, merk::SoftIteOp, merk::CommitOp,
+            merk::AggregateOp>(op)) {
       ops.push_back(op); // the inner ones first
     }
   });
@@ -134,6 +143,21 @@ void PruneUnused(mlir::ModuleOp module) {
       for (unsigned i = continuation.getNumArguments(); i-- > 0;) {
         if (dead[i]) {
           continuation.eraseArgument(i);
+        }
+      }
+      continue;
+    }
+    if (auto aggregate{mlir::dyn_cast<merk::AggregateOp>(op)}) {
+      mlir::Block &step{aggregate.getStep().front()};
+      unsigned given{step.getNumArguments() - aggregate.getNumResults()};
+      llvm::SmallVector<bool> dead;
+      for (unsigned i{0}; i < given; ++i) {
+        dead.push_back(step.getArgument(i).use_empty());
+      }
+      Prune(op, aggregate.getGenerator(), dead);
+      for (unsigned i = given; i-- > 0;) {
+        if (dead[i]) {
+          step.eraseArgument(i);
         }
       }
       continue;
@@ -221,6 +245,8 @@ void Outliner::Rewrite(
         RewriteSoftIte(ite, succeed, solution);
       } else if (auto commit{mlir::dyn_cast<merk::CommitOp>(op)}) {
         RewriteCommit(commit);
+      } else if (auto aggregate{mlir::dyn_cast<merk::AggregateOp>(op)}) {
+        RewriteAggregate(aggregate);
       } else {
         for (mlir::Region &inner : op.getRegions()) {
           Rewrite(inner, succeed, solution);
@@ -400,6 +426,96 @@ void Outliner::RewriteCommit(merk::CommitOp commit) {
   commit.erase();
 }
 
+// The index of an environment's slot.
+static mlir::IntegerAttr Slot(mlir::OpBuilder &builder, std::size_t index) {
+  return builder.getI32IntegerAttr(static_cast<int32_t>(index));
+}
+
+// The generator and the step share an environment: the values either uses
+// from outside it, then a slot for each accumulator. The step becomes a
+// continuation that takes a solution's values, reads the accumulators from
+// their slots, and writes the new ones back; it fails, to have the
+// generator go on, unless the step said not to. The generator becomes a
+// procedure that gives its solutions to it, which fails when it has no more
+// and succeeds when the step stopped it, and is called in the place of
+// merk.aggregate in the condition of an if-then-else, so that either way the
+// code after it reads the accumulators from their slots.
+void Outliner::RewriteAggregate(merk::AggregateOp aggregate) {
+  mlir::MLIRContext *context{module_.getContext()};
+  mlir::Location loc{aggregate.getLoc()};
+  mlir::Type i1{builder_.getI1Type()};
+  Rewrite(aggregate.getStep(), nullptr, nullptr);
+  llvm::SetVector<mlir::Value> used;
+  mlir::getUsedValuesDefinedAbove(aggregate->getRegions(), used);
+  llvm::SmallVector<mlir::Value> captures{used.begin(), used.end()};
+  llvm::SmallVector<mlir::Attribute> types;
+  for (mlir::Value capture : captures) {
+    types.push_back(mlir::TypeAttr::get(capture.getType()));
+  }
+  for (mlir::Type type : aggregate.getResultTypes()) {
+    types.push_back(mlir::TypeAttr::get(type));
+  }
+  mlir::ArrayAttr layout{mlir::ArrayAttr::get(context, types)};
+  // The accumulators' slots follow the captures'.
+  std::size_t base{captures.size()};
+  // The step: its accumulator arguments become reads of their slots.
+  unsigned count{aggregate.getNumResults()};
+  merk::ProcOp step{OutlineWith(aggregate.getStep(), captures, layout)};
+  mlir::Block &entry{step.getBody().front()};
+  mlir::Value env{entry.getArgument(0)};
+  unsigned first{entry.getNumArguments() - count};
+  for (unsigned i{0}; i < count; ++i) {
+    mlir::BlockArgument argument{entry.getArgument(first + i)};
+    argument.replaceAllUsesWith(merk::EnvGetOp::create(
+        builder_, loc, argument.getType(), env, Slot(builder_, base + i), layout));
+  }
+  entry.eraseArguments(first, count);
+  step.setFunctionType(mlir::FunctionType::get(context,
+      entry.getArgumentTypes(), {}));
+  auto yield{mlir::cast<merk::YieldOp>(entry.getTerminator())};
+  builder_.setInsertionPoint(yield);
+  for (auto [i, value] : llvm::enumerate(yield.getValues().drop_front())) {
+    merk::EnvSetOp::create(builder_, loc, env, Slot(builder_, base + i), value, layout);
+  }
+  merk::GuardOp::create(builder_, loc,
+      mlir::arith::XOrIOp::create(builder_, loc, yield.getValues().front(),
+          mlir::arith::ConstantIntOp::create(builder_, loc, i1, 1)));
+  merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+  yield.erase();
+  // The generator, which gives its solutions to the step.
+  merk::ProcOp generator{
+      OutlineWith(aggregate.getGenerator(), captures, layout)};
+  mlir::Block &start{generator.getBody().front()};
+  builder_.setInsertionPointToStart(&start);
+  Sink sink;
+  sink.env = start.getArgument(0);
+  sink.cont = merk::ContRefOp::create(builder_, loc,
+      merk::ContType::get(context), step.getSymName());
+  merk::ProcOp outer{proc_};
+  proc_ = generator;
+  Rewrite(generator.getBody(), nullptr, &sink);
+  proc_ = outer;
+  builder_.setInsertionPoint(aggregate);
+  mlir::Value shared{MakeEnv(loc, captures, layout)};
+  for (auto [i, value] : llvm::enumerate(aggregate.getInitial())) {
+    merk::EnvSetOp::create(builder_, loc, shared, Slot(builder_, base + i), value, layout);
+  }
+  auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
+  for (mlir::Region &region : ite->getRegions()) {
+    builder_.setInsertionPointToStart(&region.emplaceBlock());
+    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  }
+  builder_.setInsertionPointToStart(&ite.getCondition().front());
+  merk::CallOp::create(builder_, loc, mlir::TypeRange{},
+      generator.getSymName(), mlir::ValueRange{shared});
+  builder_.setInsertionPointAfter(ite);
+  for (auto [i, result] : llvm::enumerate(aggregate.getResults())) {
+    result.replaceAllUsesWith(merk::EnvGetOp::create(
+        builder_, loc, result.getType(), shared, Slot(builder_, base + i), layout));
+  }
+  aggregate.erase();
+}
+
 void Outliner::Deliver(
     mlir::Operation *end, mlir::ValueRange values, const Sink &sink) {
   mlir::Location loc{end->getLoc()};
@@ -438,6 +554,16 @@ merk::ProcOp Outliner::Outline(mlir::Region &region,
     types.push_back(mlir::TypeAttr::get(slot));
   }
   layout = mlir::ArrayAttr::get(context, types);
+  return OutlineWith(region, captures, layout);
+}
+
+// A procedure of the region's code, which takes an environment of the
+// layout, whose first slots are the captures, and then the region's
+// arguments.
+merk::ProcOp Outliner::OutlineWith(
+    mlir::Region &region, mlir::ValueRange captures, mlir::ArrayAttr layout) {
+  mlir::MLIRContext *context{module_.getContext()};
+  mlir::Location loc{region.getParentOp()->getLoc()};
   mlir::Type env{merk::EnvType::get(context)};
   llvm::SmallVector<mlir::Type> inputs{env};
   for (mlir::Type type : region.front().getArgumentTypes()) {
