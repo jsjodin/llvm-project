@@ -586,6 +586,34 @@ struct TraceConditionRule {
   }
 };
 
+// timeout(T) or io(!IO), a parameter of a receive goal.
+struct ReceiveParamRule {
+  using resultType = const ReceiveParam *;
+  bool Matches(const Term &) const { return true; }
+  std::optional<resultType> Convert(
+      const Term &t, ConvertState &state) const {
+    if (const CompoundTerm * timeout{AsCompound(t, "timeout", 1)}) {
+      if (auto value{Apply(dataTerm, Operand(*timeout), state)}) {
+        return state.arena.Make<ReceiveParam>(
+            t.tokens(), ReceiveParamKind::Timeout, *value);
+      }
+      return std::nullopt;
+    }
+    if (const CompoundTerm * io{AsCompound(t, "io", 1)}) {
+      if (auto var{Apply(StateVarRule{}, Operand(*io), state)}) {
+        return state.arena.Make<ReceiveParam>(
+            t.tokens(), ReceiveParamKind::Io, *var);
+      }
+      return std::nullopt;
+    }
+    SayExpected(state, t, detail::ExpectedText(*this));
+    return std::nullopt;
+  }
+  void Expected(llvm::raw_ostream &os) const {
+    os << "a receive parameter: timeout(T) or io(!IO)";
+  }
+};
+
 struct TraceParamRule {
   using resultType = const TraceParam *;
   bool Matches(const Term &) const { return true; }
@@ -930,6 +958,103 @@ const CompoundTerm *AsLoop(const Term &t) {
   return c && c->form() == CompoundForm::Infix ? c : nullptr;
 }
 
+// select(Mailbox, Pattern) -> Goal, or timeout -> Goal.
+std::optional<const ReceiveArm *> ConvertReceiveArm(
+    const Term &t, ConvertState &state) {
+  const CompoundTerm *arrow{AsCompound(t, "->", 2)};
+  const Term *head{arrow ? &StripParentheses(Operand(*arrow, 0)) : nullptr};
+  const CompoundTerm *select{head ? AsCompound(*head, "select", 2) : nullptr};
+  const auto *name{head ? llvm::dyn_cast<NameTerm>(head) : nullptr};
+  bool timeout{name && name->value() == "timeout"};
+  if (!select && !timeout) {
+    return SayAt(state, t,
+        "'%s' is not a receive arm: expected select(Mailbox, Pattern) -> "
+        "Goal or timeout -> Goal"_err_en_US);
+  }
+  std::optional<DataTerm> mailbox, pattern;
+  bool ok{true};
+  if (select) {
+    mailbox = Apply(dataTerm, Operand(*select, 0), state);
+    pattern = Apply(dataTerm, Operand(*select, 1), state);
+    ok = mailbox && pattern;
+  }
+  std::optional<Goal> body{Apply(goal, Operand(*arrow, 1), state)};
+  if (!ok || !body) {
+    return std::nullopt;
+  }
+  return state.arena.Make<ReceiveArm>(t.tokens(), mailbox, pattern, *body);
+}
+
+// receive [Params] ( Arms ).
+std::optional<Goal> ConvertReceive(
+    const CompoundTerm &receive, ConvertState &state) {
+  auto params{Apply(
+      expect("a list of receive parameters", listOf(ReceiveParamRule{})),
+      Operand(receive, 0), state)};
+  llvm::SmallVector<const Term *, 4> terms;
+  Flatten(Operand(receive, 1), ";", terms);
+  llvm::SmallVector<const ReceiveArm *, 4> arms;
+  bool ok{params.has_value()};
+  for (const Term *term : terms) {
+    if (auto arm{ConvertReceiveArm(*term, state)}) {
+      arms.push_back(*arm);
+    } else {
+      ok = false;
+    }
+  }
+  if (!ok) {
+    return std::nullopt;
+  }
+  const Term &paramsTerm{Operand(receive, 0)};
+  bool timeout{false}, io{false};
+  for (const ReceiveParam *param : *params) {
+    bool isTimeout{param->kind == ReceiveParamKind::Timeout};
+    bool &seen{isTimeout ? timeout : io};
+    if (seen) {
+      state.messages.Say(GetSource(paramsTerm, state.tokens),
+          "the receive parameter '%s' is given more than once"_err_en_US,
+          isTimeout ? "timeout" : "io");
+      return std::nullopt;
+    }
+    seen = true;
+  }
+  if (!io) {
+    return SayAt(state, paramsTerm,
+        "'%s': a receive goal needs the parameter io(!IO), the state that "
+        "the wait and the arms thread"_err_en_US);
+  }
+  const Term *timeoutArm{nullptr};
+  for (std::size_t j{0}; j < arms.size(); ++j) {
+    if (!arms[j]->mailbox) {
+      if (timeoutArm) {
+        return SayAt(state, *terms[j],
+            "'%s': a receive goal has at most one timeout arm"_err_en_US);
+      }
+      timeoutArm = terms[j];
+    }
+  }
+  if (timeoutArm && !timeout) {
+    return SayAt(state, *timeoutArm,
+        "'%s': a timeout arm needs the parameter timeout(T), which says "
+        "when it runs"_err_en_US);
+  }
+  if (timeout && !timeoutArm) {
+    return SayAt(state, paramsTerm,
+        "'%s': the parameter timeout(T) needs a timeout arm, "
+        "timeout -> Goal, which runs when no message arrives in "
+        "time"_err_en_US);
+  }
+  return state.arena.Make<ReceiveGoal>(receive.tokens(), *params,
+      state.arena.SaveArray(llvm::ArrayRef<const ReceiveArm *>{arms}));
+}
+
+// Whether the term is receive [Params] ( Arms ), which the reader makes
+// only with -freceive-goal; receive(A, B) written as a call is a call.
+const CompoundTerm *AsReceive(const Term &t) {
+  const CompoundTerm *c{AsCompound(t, "receive", 2)};
+  return c && c->form() == CompoundForm::Prefix ? c : nullptr;
+}
+
 } // namespace
 
 namespace {
@@ -964,6 +1089,9 @@ std::optional<Goal> GoalRule::Convert(
   }
   if (const CompoundTerm * loop{AsLoop(t)}) {
     return ConvertLoop(*loop, state);
+  }
+  if (const CompoundTerm * receive{AsReceive(t)}) {
+    return ConvertReceive(*receive, state);
   }
   // Higher-order calls: P, and P(X, Y).
   if (llvm::isa<VariableTerm>(t)) {
