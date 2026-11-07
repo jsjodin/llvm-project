@@ -154,12 +154,18 @@ std::size_t Decode(const unsigned char *s, std::uint32_t &c) {
   return size;
 }
 
+// A byte that is not part of a well-formed sequence is written as U+FFFD, as
+// mmc does, so that what is written is UTF-8.
 void PutEscapedText(const char *text) {
   const auto *s{reinterpret_cast<const unsigned char *>(text)};
   while (*s) {
     std::uint32_t c;
     std::size_t size{Decode(s, c)};
-    PutEscaped(c, reinterpret_cast<const char *>(s), size);
+    if (size == 1 && *s >= 0x80) {
+      Put("\xEF\xBF\xBD");
+    } else {
+      PutEscaped(c, reinterpret_cast<const char *>(s), size);
+    }
     s += size;
   }
 }
@@ -412,16 +418,16 @@ constexpr Word kLine{2};
 } // namespace
 
 // The shortest of 15 to 17 digits that reads back as the same float, and
-// always a sign of being one.
-extern "C" void merk_write_float(double number) {
-  char buffer[64];
+// always a sign of being one, as io.write_float and string.float_to_string
+// give it, in a buffer of 64 bytes.
+extern "C" void merk_format_float(double number, char *buffer) {
   if (std::isnan(number)) {
     std::strcpy(buffer, "nan");
   } else if (std::isinf(number)) {
     std::strcpy(buffer, number < 0 ? "-infinity" : "infinity");
   } else {
     for (int precision{15}; precision <= 17; ++precision) {
-      std::snprintf(buffer, sizeof buffer, "%.*g", precision, number);
+      std::snprintf(buffer, 64, "%.*g", precision, number);
       if (std::strtod(buffer, nullptr) == number) {
         break;
       }
@@ -430,6 +436,11 @@ extern "C" void merk_write_float(double number) {
       std::strcat(buffer, ".0");
     }
   }
+}
+
+extern "C" void merk_write_float(double number) {
+  char buffer[64];
+  merk_format_float(number, buffer);
   std::fputs(buffer, stdout);
 }
 

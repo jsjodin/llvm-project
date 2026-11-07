@@ -412,6 +412,15 @@ later. In this order, each its own commit or commits:
    types in methods, closures and `foreign_proc`s, closures of methods,
    and unifications of terms with `string` or array arguments.
 
+**`string.format` and `string.string`.** The string module is compiled,
+but for these two, whose calls code generation reports as not implemented
+yet. `format` follows mmc's printf-like conversions, found by running its
+programs; `string/1` writes a value as `io.write` does, into a string, so
+it shares the runtime's writer, which is to write into a buffer as well as
+to the standard output. They come next, as their own commit. The `char`
+module is not compiled either, so a test of the errors for NUL and
+surrogate code points waits for `char.det_from_int`.
+
 Then steps 6 (d), (e) and 7; (c), `list`, came within item 1, before the
 collection of all solutions. `-fstub-unimplemented` goes when the library
 needs it no longer.
