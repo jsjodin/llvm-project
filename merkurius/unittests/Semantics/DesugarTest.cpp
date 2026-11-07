@@ -316,8 +316,10 @@ TEST(DesugarTest, StateVariables) {
       "| | | Call #0 q(S!0, S!1)\n"
       "| | Call #2 r(S!0, S!2)\n");
   // some [!X] makes a new state variable, with no version at first, which
-  // hides one of the same name.
-  EXPECT_EQ(Form("p(!S) :- some [!S] (i(!:S), q(!S)), r(!S).\n"),
+  // hides one of the same name, with a warning.
+  DesugarResult hidden{
+      DesugarText("p(!S) :- some [!S] (i(!:S), q(!S)), r(!S).\n")};
+  EXPECT_EQ(hidden.form,
       "Predicate p(S!0, S!3)\n"
       "| Conj #5\n"
       "| | Scope #3 Some\n"
@@ -325,6 +327,8 @@ TEST(DesugarTest, StateVariables) {
       "| | | | Call #0 i(S!1)\n"
       "| | | | Call #1 q(S!1, S!2)\n"
       "| | Call #4 r(S!0, S!3)\n");
+  EXPECT_EQ(hidden.messages,
+      V{"the new state variable !S shadows the one outside"});
   // io(!IO) in a trace goal is a new state variable inside it, whose first
   // and last versions are the scope's variables.
   EXPECT_EQ(Form("p :- trace [io(!IO)] w(!IO).\n"),
@@ -494,10 +498,11 @@ TEST(DesugarTest, Lambdas) {
   EXPECT_EQ(messages("p(F) :- F = (pred(!S) is det :- q(!S)).\n"),
       V{"!S cannot be an argument of a lambda expression; you probably "
         "meant !.S or !:S"});
-  // some [!S] makes a state variable of the lambda's own.
+  // some [!S] makes a state variable of the lambda's own, which hides the
+  // one outside, with a warning.
   EXPECT_EQ(messages("p(!S, F) :- F = (pred(Y::out) is det :- "
                      "some [!S] (!:S = 1, Y = !.S)).\n"),
-      V{});
+      V{"the new state variable !S shadows the one outside"});
 }
 
 TEST(DesugarTest, ConditionalExpressions) {
