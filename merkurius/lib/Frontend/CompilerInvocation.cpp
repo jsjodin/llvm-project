@@ -143,6 +143,7 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
   opts.inferModes = args.hasArg(OPT_finfer_modes);
   opts.mmcUniqueness = args.hasArg(OPT_fmmc_uniqueness);
   opts.stubUnimplemented = args.hasArg(OPT_fstub_unimplemented);
+  opts.traceFlags = args.getAllArgValues(OPT_trace_flag_EQ);
   if (const llvm::opt::Arg *arg =
           args.getLastArg(OPT_fmode_inference_iteration_limit_EQ)) {
     llvm::StringRef value{arg->getValue()};

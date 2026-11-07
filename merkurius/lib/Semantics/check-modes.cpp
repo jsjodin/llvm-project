@@ -1513,6 +1513,7 @@ private:
   Result IfThenElseGoal(
       const Goal &, const IfThenElse &, InstMap &, const Live &);
   Result Negation(const Goal &, const Not &, InstMap &, const Live &);
+  Result Trace(const Goal &, const Scope &, InstMap &, const Live &);
   // The error for a negated context that a nonlocal with an any part
   // appears in, outside a purity promise.
   std::optional<Result> AnyInNegatedContext(const Goal &,
@@ -1671,7 +1672,7 @@ private:
   unsigned unreachables_{0};
   // By variable, whether it is a nonlocal of a negation or of an
   // if-then-else whose condition is being checked, which may not bind it.
-  enum class Lock { None, Negation, Condition };
+  enum class Lock { None, Negation, Condition, Trace };
   std::vector<Lock> locks_;
   // How many promise_pure, promise_semipure or promise_impure scopes the
   // goal being checked is in.
@@ -2264,12 +2265,14 @@ ProcedureChecker::Result ProcedureChecker::CheckLocked(
       continue;
     }
     // mmc: "scope error: attempt to bind a non-local variable inside a
-    // negation. Variable `X' has instantiatedness `free', expected
+    // negation" (or "inside a trace goal"). "Variable `X' has instantiatedness `free', expected
     // instantiatedness was `unique(1)'."
     return Error(goal,
         "scope error: " + Name(var) + " is bound inside " +
             (locks_[var] == Lock::Negation
                     ? std::string{"a negation, but is not local to it"}
+                    : locks_[var] == Lock::Trace
+                    ? std::string{"a trace goal, but is not local to it"}
                     : std::string{"the condition of an if-then-else, but "
                                   "occurs outside the condition and the then "
                                   "part"}) +
@@ -2332,7 +2335,7 @@ ProcedureChecker::Result ProcedureChecker::CheckGoal(
           [&](const Scope *scope) -> Result {
             switch (scope->kind) {
             case ScopeKind::Trace:
-              return Unsupported(Unchecked::Scope);
+              return Trace(goal, *scope, map, live);
             case ScopeKind::PromisePurity: {
               ++promised_;
               Result r{Check(scope->goal, map, live)};
@@ -2451,6 +2454,63 @@ ProcedureChecker::Result ProcedureChecker::Negation(const Goal &goal,
     if (goals.empty()) {
       map.assign(map.size(), insts_.NotReached());
     }
+  }
+  return r;
+}
+
+// A trace goal may not bind its nonlocals, since it may not be compiled in
+// or not run (reference manual, "Trace goals"); it is checked whether or
+// not its compile_time condition holds, as in mmc. The first version of
+// its io(!S) state variable is a unique io state, and it must give back a
+// unique one at the end, which is used after it: mmc gets the io state
+// with io.unsafe_get_io_state and gives it back with
+// io.unsafe_set_io_state, whose argument is di.
+ProcedureChecker::Result ProcedureChecker::Trace(
+    const Goal &goal, const Scope &scope, InstMap &map, const Live &live) {
+  const auto *trace{std::get<const parser::TraceGoal *>(
+      std::get<parser::Goal>(scope.origin))};
+  llvm::SmallVector<std::pair<VarId, VarId>, 2> io;
+  std::size_t next{0};
+  for (const parser::TraceParam *param : trace->params) {
+    if (!param->var) {
+      continue;
+    }
+    if (param->kind == parser::TraceParamKind::State) {
+      // Mutables are still to come (desugaring reports their
+      // declarations).
+      return Unsupported(Unchecked::TraceState);
+    }
+    io.emplace_back(scope.vars[next], scope.vars[next + 1]);
+    next += 2;
+  }
+  std::vector<Lock> locks{locks_};
+  for (VarId var : form_->nonlocals[scope.number]) {
+    if (locks_[var] == Lock::None) {
+      locks_[var] = Lock::Trace;
+    }
+  }
+  Live after{live};
+  for (auto [first, last] : io) {
+    map[first] = insts_.Ground(Uniqueness::Unique);
+    after[last] = true;
+  }
+  Result r{Check(scope.goal, map, after)};
+  locks_ = std::move(locks);
+  if (r.outcome != Outcome::Ok) {
+    return r;
+  }
+  const Inst *unique{insts_.Ground(Uniqueness::Unique)};
+  for (auto [first, last] : io) {
+    const Type *type{TypeOf(last)};
+    if (ops_.IsNotReached(map[last]) || ops_.Matches(map[last], unique, type)) {
+      continue;
+    }
+    // mmc: "in argument 1 of call to predicate `io.unsafe_set_io_state'/1:
+    // mode error: variable `STATE_VARIABLE_IO_5' has instantiatedness
+    // `ground', expected instantiatedness was `unique'."
+    return Error(goal,
+        "mode error: the trace goal must give back a unique io state, but " +
+            Name(last) + " has inst " + InstText(map[last]));
   }
   return r;
 }
