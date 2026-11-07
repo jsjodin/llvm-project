@@ -1,8 +1,9 @@
 % Processes and mailboxes, a Merkurius extension with no counterpart in the
 % Mercury library (design document, Language extensions, "Processes and
 % mailboxes"). So far only the mailboxes of one process: a mailbox is
-% made, sent to and received from, with the one-mailbox receive, and may be
-% registered under a name, which a lookup finds, as in Erlang.
+% made, sent to and received from, and may be registered under a name, which
+% a lookup finds, as in Erlang. A receive waits on one mailbox, or on several
+% joined by a selector, as Gleam's Selector joins them.
 %
 % A handle names the node, by an id chosen at random when the program
 % starts, and the place within it, 0 for the host, and carries a secret
@@ -11,13 +12,13 @@
 %
 % A send copies the message, by its type_info, into a fragment of its own
 % (runtime/mailbox.cpp), so the sender's cells are never shared with the
-% receiver. A receive takes the oldest message its selector accepts and
-% leaves the others queued in order, waiting until the timeout for one to
-% arrive.
+% receiver. A receive takes the oldest message its selector accepts, across
+% all its mailboxes, by the order in which they arrived, as Erlang's receive
+% takes the first message in the queue that any clause matches. It leaves
+% the others queued in order, and waits until the timeout for one to arrive.
 %
 % Temporary (chunk 2, docs/INPROGRESS.md): spawn, close_mailbox's effect on
-% other processes, selectors over several mailboxes, monitors and request
-% and reply come with processes; until then a program is one process, and
+% other processes, monitors and request and reply come with processes; until then a program is one process, and
 % a receive that waits with infinity for a message nobody can send waits
 % forever.
 %
@@ -27,11 +28,8 @@
 % A message to another node is encoded by its type and decoded by the
 % mailbox's (design document, Wire format). A send to a node this one is not
 % connected to, or whose connection is lost, is dropped, as one to a closed
-% mailbox is.
-%
-% Temporary (Remote handles and TCP, step 4, docs/INPROGRESS.md): nodes do
-% not yet prove that they know a shared cookie, so any program that can
-% reach a listening node can connect to it.
+% mailbox is. Two nodes connect only if both know the same cookie, which
+% is never sent (runtime/node.cpp).
 
 :- module process.
 :- interface.
@@ -67,6 +65,31 @@
     % semidet to fit receive's mode.
 :- pred any(M::in, M::out) is semidet.
 
+    % The cases of a receive over several mailboxes, each of which maps the
+    % messages of its mailbox to R.
+:- type selector(R).
+
+    % The selector with no cases, whose receive finds nothing.
+:- func new_selector = selector(R).
+
+    % Adds a case that takes every message of the mailbox, mapped by the
+    % function, so it never scans past its first.
+:- func selecting(mailbox(M), func(M) = R, selector(R)) = selector(R).
+
+    % Adds a case that takes the messages of the mailbox for which the
+    % predicate succeeds, mapped by it.
+:- func selecting_matching(mailbox(M)::in,
+    pred(M, R)::in(pred(in, out) is semidet), selector(R)::in)
+    = (selector(R)::out) is det.
+
+    % The oldest message, across the selector's mailboxes, that one of its
+    % cases accepts, mapped by that case, or no if none arrives before the
+    % timeout. Of cases that accept the same message, the one added first
+    % takes it. It finds nothing at once if every mailbox is closed or
+    % another node's.
+:- pred receive(selector(R)::in, timeout::in, maybe(R)::out,
+    io::di, io::uo) is det.
+
     % The node this program is.
 :- pred this_node(node::out, io::di, io::uo) is det.
 
@@ -99,6 +122,7 @@
     maybe_error(mailbox(M))::out, io::di, io::uo) is det.
 
 :- implementation.
+:- import_module bool.
 :- import_module int.
 :- import_module string.
 
@@ -119,6 +143,13 @@
 :- type node
     --->    node(int, int).
 
+    % A selector's cases, the one added last first. The mailbox's type is
+    % hidden, since each case has its own.
+:- type selector(R)
+    --->    no_cases
+    ;       some [M] taking(mailbox(M), func(M) = R, selector(R))
+    ;       some [M] matching(mailbox(M), func(M) = maybe(R), selector(R)).
+
     % Gives a foreign_proc the type_info of M when no argument of it has
     % type M.
 :- type witness(M)
@@ -137,6 +168,12 @@ extern MR_Integer merk_mailbox_deadline(MR_Integer milliseconds);
 extern MR_Integer merk_mailbox_wait(MR_Integer node_high,
     MR_Integer node_low, MR_Integer place_slot, MR_Integer generation,
     MR_Integer secret, MR_Integer position, MR_Integer deadline);
+extern MR_Integer merk_mailbox_poll(MR_Integer node_high,
+    MR_Integer node_low, MR_Integer place_slot, MR_Integer generation,
+    MR_Integer secret, MR_Integer position);
+extern MR_Integer merk_mailbox_arrivals(void);
+extern MR_Integer merk_mailbox_wait_arrival(MR_Integer seen,
+    MR_Integer deadline);
 extern MR_Word merk_mailbox_message(MR_Integer node_high,
     MR_Integer node_low, MR_Integer place_slot, MR_Integer generation,
     MR_Integer secret, MR_Integer position);
@@ -170,14 +207,7 @@ send(mailbox(High, Low, PlaceSlot, Generation, Secret), Message, !IO) :-
     send_message(High, Low, PlaceSlot, Generation, Secret, Message, !IO).
 
 receive(Mailbox, Selector, Timeout, Result, !IO) :-
-    (
-        Timeout = infinity,
-        Milliseconds = -1
-    ;
-        Timeout = after(Milliseconds0),
-        Milliseconds = max(Milliseconds0, 0)
-    ),
-    deadline(Milliseconds, Deadline, !IO),
+    deadline(milliseconds(Timeout), Deadline, !IO),
     scan(Mailbox, Selector, Deadline, 0, Result, !IO).
 
 :- pragma foreign_proc("C",
@@ -187,6 +217,17 @@ receive(Mailbox, Selector, Timeout, Result, !IO) :-
     N = M;
     SUCCESS_INDICATOR = MR_TRUE;
 ").
+
+new_selector = no_cases.
+
+selecting(Mailbox, Map, Selector) = 'new taking'(Mailbox, Map, Selector).
+
+selecting_matching(Mailbox, Selector, Rest) =
+    'new matching'(Mailbox, try_selector(Selector), Rest).
+
+receive(Selector, Timeout, Result, !IO) :-
+    deadline(milliseconds(Timeout), Deadline, !IO),
+    select(Selector, Deadline, starts(Selector), Result, !IO).
 
 this_node(node(High, Low), !IO) :-
     node_id(High, Low, !IO).
@@ -216,14 +257,8 @@ lookup(Node, Name, Timeout, Result, !IO) :-
         lookup_name(Name, witness : witness(M), Status, PlaceSlot, Generation,
             Secret, !IO)
     else
-        (
-            Timeout = infinity,
-            Milliseconds = -1
-        ;
-            Timeout = after(Milliseconds0),
-            Milliseconds = max(Milliseconds0, 0)
-        ),
-        lookup_remote(High, Low, Name, witness : witness(M), Milliseconds,
+        lookup_remote(High, Low, Name, witness : witness(M),
+            milliseconds(Timeout),
             Status, PlaceSlot, Generation, Secret, !IO)
     ),
     ( if Status = 0 then
@@ -261,6 +296,164 @@ connect(Address, Result, !IO) :-
 :- func quoted(string) = string.
 
 quoted(Name) = "\"" ++ Name ++ "\"".
+
+    % A timeout's milliseconds, -1 for infinity.
+:- func milliseconds(timeout) = int.
+
+milliseconds(infinity) = -1.
+milliseconds(after(Milliseconds)) = max(Milliseconds, 0).
+
+:- func try_selector(pred(M, R)::in(pred(in, out) is semidet), M::in)
+    = (maybe(R)::out) is det.
+
+try_selector(Selector, Message) = Result :-
+    ( if Selector(Message, R) then
+        Result = yes(R)
+    else
+        Result = no
+    ).
+
+    % For each case of a selector, the position in its mailbox from which
+    % it has yet to look, the first case's first.
+:- type starts
+    --->    no_starts
+    ;       start(int, starts).
+
+:- func starts(selector(R)) = starts.
+
+starts(no_cases) = no_starts.
+starts(taking(_, _, Rest)) = start(0, starts(Rest)).
+starts(matching(_, _, Rest)) = start(0, starts(Rest)).
+
+    % What a case finds in its mailbox: the message it takes, mapped, with
+    % the message's stamp, the mailbox and the message's position.
+:- type found(R)
+    --->    nothing
+    ;       found(R, int, int, int, int, int, int, int).
+
+    % The cases' oldest message, which it takes, waiting for the next
+    % message to arrive in any mailbox until the deadline. The count of
+    % arrivals is read before the cases look, so that one arriving while
+    % they look is not missed.
+:- pred select(selector(R)::in, int::in, starts::in, maybe(R)::out,
+    io::di, io::uo) is det.
+
+select(Selector, Deadline, Starts0, Result, !IO) :-
+    arrivals(Seen, !IO),
+    look(Selector, Starts0, Starts, no, Open, nothing, Found, !IO),
+    (
+        Found = found(R, _, High, Low, PlaceSlot, Generation, Secret,
+            Position),
+        remove_message(High, Low, PlaceSlot, Generation, Secret, Position,
+            !IO),
+        Result = yes(R)
+    ;
+        Found = nothing,
+        (
+            Open = no,
+            Result = no
+        ;
+            Open = yes,
+            wait_arrival(Seen, Deadline, Arrived, !IO),
+            ( if Arrived = 0 then
+                Result = no
+            else
+                select(Selector, Deadline, Starts, Result, !IO)
+            )
+        )
+    ).
+
+    % Each case looks in its mailbox from its start, which moves past the
+    % messages it rejects; the oldest message found so far is kept. Open is
+    % yes if some mailbox is open and this node's. The cases are visited the
+    % last added first, so a later case that finds a message with the same
+    % stamp, which is the same message, was added earlier and takes it.
+:- pred look(selector(R)::in, starts::in, starts::out, bool::in, bool::out,
+    found(R)::in, found(R)::out, io::di, io::uo) is det.
+
+look(no_cases, Starts, Starts, !Open, !Found, !IO).
+look(taking(Mailbox, Map, Rest), Starts0, Starts, !Open, !Found, !IO) :-
+    Mailbox = mailbox(High, Low, PlaceSlot, Generation, Secret),
+    split_starts(Starts0, Position, RestStarts0),
+    poll(High, Low, PlaceSlot, Generation, Secret, Position, Stamp, !IO),
+    ( if Stamp > 0 then
+        !:Open = yes,
+        message_at(High, Low, PlaceSlot, Generation, Secret, Position,
+            Message, !IO),
+        keep(found(Map(Message), Stamp, High, Low, PlaceSlot, Generation,
+            Secret, Position), !Found)
+    else if Stamp = 0 then
+        !:Open = yes
+    else
+        true
+    ),
+    look(Rest, RestStarts0, RestStarts, !Open, !Found, !IO),
+    Starts = start(Position, RestStarts).
+look(matching(Mailbox, Try, Rest), Starts0, Starts, !Open, !Found, !IO) :-
+    split_starts(Starts0, Position0, RestStarts0),
+    scan_case(Mailbox, Try, Position0, Position, !Open, !Found, !IO),
+    look(Rest, RestStarts0, RestStarts, !Open, !Found, !IO),
+    Starts = start(Position, RestStarts).
+
+    % From Position0 on, the first message that Try accepts, kept if it is
+    % the oldest so far, with the position where a later look starts: that
+    % message's, or the end of the queue.
+:- pred scan_case(mailbox(M)::in, (func(M) = maybe(R))::in, int::in,
+    int::out, bool::in, bool::out, found(R)::in, found(R)::out,
+    io::di, io::uo) is det.
+
+scan_case(Mailbox, Try, Position0, Position, !Open, !Found, !IO) :-
+    Mailbox = mailbox(High, Low, PlaceSlot, Generation, Secret),
+    poll(High, Low, PlaceSlot, Generation, Secret, Position0, Stamp, !IO),
+    ( if Stamp > 0 then
+        !:Open = yes,
+        message_at(High, Low, PlaceSlot, Generation, Secret, Position0,
+            Message, !IO),
+        Selected = Try(Message),
+        (
+            Selected = yes(R),
+            keep(found(R, Stamp, High, Low, PlaceSlot, Generation, Secret,
+                Position0), !Found),
+            Position = Position0
+        ;
+            Selected = no,
+            scan_case(Mailbox, Try, Position0 + 1, Position, !Open, !Found,
+                !IO)
+        )
+    else
+        ( if Stamp = 0 then
+            !:Open = yes
+        else
+            true
+        ),
+        Position = Position0
+    ).
+
+    % The first start and the rest; starts has one per case.
+:- pred split_starts(starts::in, int::out, starts::out) is det.
+
+split_starts(no_starts, 0, no_starts).
+split_starts(start(Position, Rest), Position, Rest).
+
+    % Keeps the older of two messages found, the new one if they have the
+    % same stamp.
+:- pred keep(found(R)::in, found(R)::in, found(R)::out) is det.
+
+keep(New, Found0, Found) :-
+    (
+        Found0 = nothing,
+        Found = New
+    ;
+        Found0 = found(_, Stamp0, _, _, _, _, _, _),
+        ( if
+            New = found(_, Stamp, _, _, _, _, _, _),
+            Stamp =< Stamp0
+        then
+            Found = New
+        else
+            Found = Found0
+        )
+    ).
 
     % From the message at Position on, the first the selector accepts,
     % waiting for the next to arrive until the deadline. Only the
@@ -351,7 +544,39 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
         Position, Deadline);
 ").
 
-    % The message at Position, which wait_message has found there.
+    % The stamp of the message at Position, positive, or 0 if there is
+    % none there yet, or -1 if the mailbox is closed or another node's.
+:- pred poll(int::in, int::in, int::in, int::in, int::in, int::in,
+    int::out, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    poll(High::in, Low::in, PlaceSlot::in, Generation::in, Secret::in,
+        Position::in, Stamp::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Stamp = merk_mailbox_poll(High, Low, PlaceSlot, Generation, Secret,
+        Position);
+").
+
+    % The number of messages queued and mailboxes closed so far.
+:- pred arrivals(int::out, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    arrivals(Count::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Count = merk_mailbox_arrivals();
+").
+
+    % 1 once a message is queued or a mailbox closed after Seen was read,
+    % 0 if the deadline passes first.
+:- pred wait_arrival(int::in, int::in, int::out, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    wait_arrival(Seen::in, Deadline::in, Arrived::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Arrived = merk_mailbox_wait_arrival(Seen, Deadline);
+").
+
+    % The message at Position, which wait_message or poll has found there.
 :- pred message_at(int::in, int::in, int::in, int::in, int::in, int::in,
     M::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",

@@ -9,7 +9,8 @@
 // The runtime's mailboxes (runtime/mailbox.cpp) under threads, which a
 // Mercury program of one process cannot reach yet: a receive that blocks
 // and is woken by a send or a close from another thread, timeouts, many
-// senders at once, and a selective scan while messages arrive. The
+// senders at once, a selective scan while messages arrive, and a receive
+// over several mailboxes, as a selector waits on them. The
 // messages are ints, whose descriptor the test makes, as code generation
 // would; test/CodeGen/process-*.m test the copy of other types.
 //
@@ -42,6 +43,9 @@ void merk_mailbox_send(HANDLE_PARAMETERS, Word typeInfo, Word value);
 std::int64_t merk_mailbox_deadline(std::int64_t milliseconds);
 std::int64_t merk_mailbox_wait(
     HANDLE_PARAMETERS, std::int64_t position, std::int64_t deadline);
+std::int64_t merk_mailbox_poll(HANDLE_PARAMETERS, std::int64_t position);
+std::int64_t merk_mailbox_arrivals(void);
+std::int64_t merk_mailbox_wait_arrival(std::int64_t seen, std::int64_t deadline);
 Word merk_mailbox_message(HANDLE_PARAMETERS, std::int64_t position);
 void merk_mailbox_remove(HANDLE_PARAMETERS, std::int64_t position);
 std::int64_t merk_mailbox_register(HANDLE_PARAMETERS, const char *name);
@@ -95,6 +99,42 @@ std::optional<Word> Receive(Box box, std::int64_t milliseconds) {
   Word value{merk_mailbox_message(BOX(box), 0)};
   merk_mailbox_remove(BOX(box), 0);
   return value;
+}
+
+// The oldest message of either mailbox, as process.receive takes it over
+// a selector with a `selecting` case for each, waiting up to
+// `milliseconds`, or forever for -1; none if none arrives, or both are
+// closed. `from` is 0 for a, 1 for b.
+std::optional<Word> ReceiveEither(
+    Box a, Box b, std::int64_t milliseconds, int *from = nullptr) {
+  std::int64_t deadline{merk_mailbox_deadline(milliseconds)};
+  for (;;) {
+    std::int64_t seen{merk_mailbox_arrivals()};
+    std::int64_t stampA{merk_mailbox_poll(BOX(a), 0)};
+    std::int64_t stampB{merk_mailbox_poll(BOX(b), 0)};
+    if (stampA > 0 && (stampB <= 0 || stampA < stampB)) {
+      Word value{merk_mailbox_message(BOX(a), 0)};
+      merk_mailbox_remove(BOX(a), 0);
+      if (from) {
+        *from = 0;
+      }
+      return value;
+    }
+    if (stampB > 0) {
+      Word value{merk_mailbox_message(BOX(b), 0)};
+      merk_mailbox_remove(BOX(b), 0);
+      if (from) {
+        *from = 1;
+      }
+      return value;
+    }
+    if (stampA < 0 && stampB < 0) {
+      return std::nullopt;
+    }
+    if (!merk_mailbox_wait_arrival(seen, deadline)) {
+      return std::nullopt;
+    }
+  }
 }
 
 using Clock = std::chrono::steady_clock;
@@ -369,6 +409,97 @@ TEST(MailboxTest, WaitersOnDifferentMailboxes) {
   receiverB.join();
   EXPECT_EQ(sumA, kCount * (kCount + 1) / 2);
   EXPECT_EQ(sumB, kCount * (kCount + 1));
+  Close(a);
+  Close(b);
+}
+
+TEST(MailboxTest, PollGivesStamps) {
+  Box a{NewBox()}, b{NewBox()};
+  EXPECT_EQ(merk_mailbox_poll(BOX(a), 0), 0);
+  Send(a, 1);
+  Send(b, 2);
+  Send(a, 3);
+  std::int64_t first{merk_mailbox_poll(BOX(a), 0)};
+  std::int64_t second{merk_mailbox_poll(BOX(b), 0)};
+  std::int64_t third{merk_mailbox_poll(BOX(a), 1)};
+  EXPECT_GT(first, 0);
+  EXPECT_LT(first, second);
+  EXPECT_LT(second, third);
+  EXPECT_EQ(merk_mailbox_poll(BOX(a), 2), 0);
+  Close(a);
+  EXPECT_EQ(merk_mailbox_poll(BOX(a), 0), -1);
+  EXPECT_EQ(merk_mailbox_poll(BOX(b), 0), second);
+  Close(b);
+}
+
+TEST(MailboxTest, SelectorIsWokenBySendToEither) {
+  Box a{NewBox()}, b{NewBox()};
+  Clock::time_point start{Clock::now()};
+  std::thread sender{SendLater, b, Word{9}, 50};
+  int from{-1};
+  std::optional<Word> got{ReceiveEither(a, b, -1, &from)};
+  sender.join();
+  EXPECT_EQ(got, std::optional<Word>{9});
+  EXPECT_EQ(from, 1);
+  EXPECT_GE(MillisecondsSince(start), 40);
+  Close(a);
+  Close(b);
+}
+
+// A message to a third mailbox wakes the wait, which goes on until its
+// time is up.
+TEST(MailboxTest, SelectorTimeoutWaitsItsTime) {
+  Box a{NewBox()}, b{NewBox()}, c{NewBox()};
+  Clock::time_point start{Clock::now()};
+  std::thread sender{SendLater, c, Word{1}, 20};
+  EXPECT_EQ(ReceiveEither(a, b, 150), std::nullopt);
+  sender.join();
+  long waited{MillisecondsSince(start)};
+  EXPECT_GE(waited, 150);
+  EXPECT_LT(waited, 5000);
+  EXPECT_EQ(Receive(c, 0), std::optional<Word>{1});
+  Close(a);
+  Close(b);
+  Close(c);
+}
+
+// Closing one mailbox wakes the wait, which goes on for the other; closing
+// both ends it.
+TEST(MailboxTest, SelectorEndsWhenBothAreClosed) {
+  Box a{NewBox()}, b{NewBox()};
+  Clock::time_point start{Clock::now()};
+  std::thread closerA{CloseLater, a, 20};
+  std::thread closerB{CloseLater, b, 80};
+  EXPECT_EQ(ReceiveEither(a, b, -1), std::nullopt);
+  closerA.join();
+  closerB.join();
+  EXPECT_GE(MillisecondsSince(start), 70);
+}
+
+// One thread sends 1, 2, 3, ... to the two mailboxes in turn while the
+// receiver takes the oldest of either, so it must see them in order.
+void SendAlternately(Box a, Box b, Word count) {
+  for (Word i{1}; i <= count; ++i) {
+    Send(i % 2 ? a : b, i);
+  }
+}
+
+TEST(MailboxTest, SelectorTakesTheOldestWhileSending) {
+  constexpr Word kCount{20000};
+  Box a{NewBox()}, b{NewBox()};
+  std::thread sender{SendAlternately, a, b, kCount};
+  Word expected{1};
+  Word outOfOrder{0};
+  for (; expected <= kCount; ++expected) {
+    std::optional<Word> got{ReceiveEither(a, b, 10000)};
+    if (!got) {
+      break;
+    }
+    outOfOrder += *got != expected;
+  }
+  sender.join();
+  EXPECT_EQ(expected, kCount + 1);
+  EXPECT_EQ(outOfOrder, Word{0});
   Close(a);
   Close(b);
 }
