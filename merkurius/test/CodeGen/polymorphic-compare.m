@@ -136,7 +136,7 @@ main(!IO) :-
 
     % At known types, where no type_info is needed.
     % MERK-DAG: merk.proc private @compare.polymorphic_compare.t(%arg0: !merk.term<"polymorphic_compare.t">, %arg1: !merk.term<"polymorphic_compare.t">) -> !merk.term<"builtin.comparison_result">
-    % MERK-DAG: merk.proc private @"compare.list.list(T0)"(%arg0: !merk.type_info,
+    % MERK-DAG: merk.proc private @"compare.list.list(int)"(%arg0: !merk.term<"list.list(int)">,
     compare(R1, 1, 2), p(R1, !IO),
     compare(R2, 255u8, 1u8), p(R2, !IO),
     compare(R3, "b", "a"), p(R3, !IO),

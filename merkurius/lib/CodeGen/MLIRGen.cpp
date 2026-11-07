@@ -1237,7 +1237,7 @@ mlir::Value MerkGenerator::Coerce(
 // compiled yet, whose types' descriptors each module using them makes.
 static constexpr llvm::StringLiteral kUncompiledLibrary[]{"array", "bool",
     "builtin", "char", "exception", "int", "int16", "int32", "int64", "int8",
-    "list", "string", "uint", "uint16", "uint32", "uint64", "uint8", "univ"};
+    "string", "uint", "uint16", "uint32", "uint64", "uint8", "univ"};
 
 // A type's arguments in its type_info: a higher-order type's are its
 // arguments' types and then a function's result's, as polymorphism analysis
@@ -4946,7 +4946,7 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
   // that are not compiled yet and whose predicates are not built in, which
   // would otherwise be called and fail to link. Step 6 compiles them.
   if (llvm::is_contained(
-          {"bool", "char", "exception", "list", "string", "univ"}, module)) {
+          {"bool", "char", "exception", "string", "univ"}, module)) {
     return LibraryCallNotYet(goal, symbol);
   }
   bool isFloat{module == "float"};

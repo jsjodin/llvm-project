@@ -25,7 +25,8 @@
 % MERK: %[[R:.*]] = merk.call @polymorphism.id_2_0(%[[INT]], %[[W]])
 % MERK: merk.from_word %[[R]] : i64
 % LLVM-DAG: @"merk.type_ctor.int/0" = linkonce_odr constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr, ptr, [8 x i16], ptr, ptr } { i8 0, i8 0, i16 0, i32 0, ptr @{{.*}}, ptr @{{.*}}, ptr @"unify_entry.int/0", ptr @"compare_entry.int/0", ptr null, [8 x i16] [i16 -1, i16 -1, i16 -1, i16 -1, i16 -1, i16 -1, i16 -1, i16 -1], ptr null, ptr null }
-% LLVM-DAG: @"merk.type_ctor.list.list/1" = linkonce_odr constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr, ptr, [8 x i16], ptr, ptr } { i8 18, i8 0, i16 1,
+% The list module's, which libmerkstd defines.
+% LLVM-DAG: @"merk.type_ctor.list.list/1" = external constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr, ptr, [8 x i16], ptr, ptr }
 
 % MERK-LABEL: merk.proc private @polymorphism.id_2_0(%arg0: !merk.type_info, %arg1: !merk.word) -> !merk.word
 % LLVM-LABEL: define {{.*}}i64 @polymorphism.id_2_0(ptr %0, i64 %1)

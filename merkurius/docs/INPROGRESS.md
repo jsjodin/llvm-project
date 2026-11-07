@@ -317,10 +317,10 @@ program.
    generation; `io.command_line_arguments`, which needs lists. In five
    commits: (a) `require`, and `-fstub-unimplemented` for the library's
    build; (b) `pair` and `maybe`; (c) `list`; (d) the array predicates;
-   (e) `io.command_line_arguments`. Done: (a), (b). (c) to (e) wait for
+   (e) `io.command_line_arguments`. Done: (a), (b), (c). (d) and (e) wait for
    the code generation that comes before them (below), so that `list` is
    written plainly, with every mode working, rather than around stubs;
-   (c) comes once clauses for one mode and nondeterminism work, before
+   (c) came once clauses for one mode and nondeterminism worked, before
    the collection of all solutions, which needs it.
 
    *Temporary, until code generation makes every procedure of the library*
@@ -364,8 +364,8 @@ later. In this order, each its own commit or commits:
    conditions with more than one solution (soft cuts), and nondet and
    multi lambda expressions, closures and higher-order calls. Next, in
    lock step with the library they need (decided 2026-11-06): clauses for
-   one mode (item 2), then `list` (step 6 (c)), then the collection of all
-   solutions, whose `solutions/2` sorts with `list`; then nondet methods
+   one mode (item 2) and `list` (step 6 (c)), both done, then the
+   collection of all solutions, whose `solutions/2` sorts with `list`; then nondet methods
    and word copies of nondet procedures, which are reported as not yet
    implemented.
 
@@ -400,7 +400,7 @@ later. In this order, each its own commit or commits:
    types in methods, closures and `foreign_proc`s, closures of methods,
    and unifications of terms with `string` or array arguments.
 
-Then steps 6 (d), (e) and 7; (c), `list`, comes within item 1, before the
+Then steps 6 (d), (e) and 7; (c), `list`, came within item 1, before the
 collection of all solutions. `-fstub-unimplemented` goes when the library
 needs it no longer.
 
