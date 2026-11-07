@@ -4,10 +4,12 @@
 # installed there too.
 add_library(merkrt STATIC
   array.cpp
+  encode.cpp
   exception.cpp
   heap.cpp
   mailbox.cpp
   main.cpp
+  sha256.cpp
   string.cpp
   trace.cpp
   type-info.cpp
