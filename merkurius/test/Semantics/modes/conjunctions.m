@@ -85,7 +85,9 @@ fields(R0, R, A) :-
 % CHECK-NEXT: clause at [[@LINE-4]]:1
 % CHECK-NEXT: [[@LINE-4]]:{{[0-9]+}} call field conjunctions.a/1 mode 0: A = a(R0)
 % CHECK-NEXT: [[@LINE-4]]:{{[0-9]+}} call field update conjunctions.'b :='/2 mode 0: R = b :=(R0, A)
-% CHECK-NEXT: final: R0 ground, R ground, A ground
+% The insts of the deconstruction and construction they stand for, as
+% for R0 = r(A, B0), R = r(B0, A).
+% CHECK-NEXT: final: R0 bound(r(ground, ground)), R unique(r(ground, ground)), A ground
 
 unique(L) :-
     L = [1, 2].
