@@ -1074,6 +1074,13 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
             out.push_back(MakeScope(x->tokens, ScopeKind::Omp, goal, {}, x->goal));
           },
           [&](const parser::LoopGoal *x) { DesugarLoop(*x, out); },
+          [&](const parser::ReceiveGoal *x) {
+            // Temporary (receive goal step 2, docs/INPROGRESS.md): the
+            // goal becomes a receive over a selector of its arms.
+            messages_.Say(Source(x->tokens), "desugaring %s"_todo_en_US,
+                "receive goals");
+            ok_ = false;
+          },
       },
       goal);
 }

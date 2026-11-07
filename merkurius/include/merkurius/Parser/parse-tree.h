@@ -611,6 +611,7 @@ struct AtomicGoal;
 struct EventGoal;
 struct OmpGoal;
 struct LoopGoal;
+struct ReceiveGoal;
 using Goal = std::variant<const Conjunction *, const Disjunction *,
     const BuiltinGoal *, const Negation *, const Implication *,
     const IfThenElse *, const Unification *, const Inequality *,
@@ -620,7 +621,7 @@ using Goal = std::variant<const Conjunction *, const Disjunction *,
     const RequireDeterminism *, const RequireSwitch *,
     const DisableWarnings *, const TraceGoal *, const TryGoal *,
     const AtomicGoal *, const EventGoal *, const OmpGoal *,
-    const LoopGoal *>;
+    const LoopGoal *, const ReceiveGoal *>;
 
 struct DcgConjunction;
 struct DcgDisjunction;
@@ -1392,6 +1393,51 @@ struct LoopGoal {
   template <typename F> void ForEachField(F &&f) const {
     f("iterators", iterators);
     f("body", body);
+  }
+};
+
+// Receive goals (design document, "Processes and mailboxes"), read with
+// -freceive-goal.
+ENUM_CLASS(ReceiveParamKind, Timeout, Io)
+
+// timeout(T) or io(!IO).
+struct ReceiveParam {
+  static constexpr llvm::StringLiteral kindName{"ReceiveParam"};
+  TokenRange tokens;
+  ReceiveParamKind kind;
+  DataTerm value; // T, or the state variable !IO
+  template <typename F> void ForEachField(F &&f) const {
+    f("kind", kind);
+    f("value", value);
+  }
+};
+
+// select(Mailbox, Pattern) -> Goal, or timeout -> Goal, which has neither a
+// mailbox nor a pattern.
+struct ReceiveArm {
+  static constexpr llvm::StringLiteral kindName{"ReceiveArm"};
+  TokenRange tokens;
+  std::optional<DataTerm> mailbox;
+  std::optional<DataTerm> pattern;
+  Goal goal;
+  template <typename F> void ForEachField(F &&f) const {
+    f("mailbox", mailbox);
+    f("pattern", pattern);
+    f("goal", goal);
+  }
+};
+
+// receive [Params] ( Arm1 ; Arm2 ; ... ). It has an io(!IO) parameter, at
+// most one of each kind, and a timeout(T) parameter exactly when it has a
+// timeout arm, of which it has at most one.
+struct ReceiveGoal {
+  static constexpr llvm::StringLiteral kindName{"ReceiveGoal"};
+  TokenRange tokens;
+  llvm::ArrayRef<const ReceiveParam *> params;
+  llvm::ArrayRef<const ReceiveArm *> arms;
+  template <typename F> void ForEachField(F &&f) const {
+    f("params", params);
+    f("arms", arms);
   }
 };
 

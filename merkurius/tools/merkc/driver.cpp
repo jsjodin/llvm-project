@@ -80,6 +80,9 @@ static void addFrontendOptions(const InputArgList &args, Job &job,
   if (args.hasArg(OPT_fdo_loops)) {
     job.push_back("-fdo-loops");
   }
+  if (args.hasArg(OPT_freceive_goal)) {
+    job.push_back("-freceive-goal");
+  }
   if (args.hasArg(OPT_fstub_unimplemented)) {
     job.push_back("-fstub-unimplemented");
   }

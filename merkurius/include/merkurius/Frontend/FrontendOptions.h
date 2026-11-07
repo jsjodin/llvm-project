@@ -130,6 +130,9 @@ struct LangOptions {
   // -fdo-loops: read `do` as an operator, for loops (design document,
   // "Loops").
   bool doLoops{false};
+  // -freceive-goal: read `receive` as an operator, for receive goals
+  // (design document, "Processes and mailboxes").
+  bool receiveGoal{false};
 };
 
 } // namespace merkurius::frontend

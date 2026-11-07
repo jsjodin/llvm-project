@@ -165,6 +165,7 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
 static bool parseLangArgs(LangOptions &opts, const InputArgList &args) {
   opts.openMP = args.hasArg(OPT_fopenmp);
   opts.doLoops = args.hasArg(OPT_fdo_loops);
+  opts.receiveGoal = args.hasArg(OPT_freceive_goal);
   if (const llvm::opt::Arg *arg = args.getLastArg(OPT_fopenmp_version_EQ)) {
     llvm::StringRef value{arg->getValue()};
     if (value.getAsInteger(10, opts.openMPVersion)) {

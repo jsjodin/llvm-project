@@ -40,6 +40,10 @@ struct ReaderOptions {
   // `do` as an infix operator, xfx with ';''s priority, for loops (design
   // document, "Loops"). mmc has no such operator.
   bool doLoops{false};
+  // `receive` as a binary prefix operator, fxy with trace's priority, for
+  // receive goals (design document, "Processes and mailboxes"). mmc has no
+  // such operator.
+  bool receiveGoal{false};
 };
 
 class TermReader {

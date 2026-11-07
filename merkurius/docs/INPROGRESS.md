@@ -695,6 +695,49 @@ device is the first slice's sender, so the formats are made for it now:
    report. The driver gives each node a temporary `HOME`. Not yet: TLS,
    which the version leaves room for.
 
+## The receive goal
+
+Route step 1, "Then, before the device's side" (design document, "The route
+there"): the `receive` goal of the design document (Processes and
+mailboxes, "The `receive` goal"), as sugar over the selectors of
+`library/process.m`, which are done.
+
+**Steps,** each its own commit:
+
+1. Reading: `-freceive-goal`, which makes `receive` a binary prefix
+   operator with `trace`'s priority; the `ReceiveGoal` node, with its
+   parameters and its arms in order; the errors of conversion; the
+   canonical layout, as a disjunction with each arm's goal below its head;
+   and desugaring reports the goal as not yet implemented. Done:
+   `Parser/convert/receive.m` and `receive-errors.m`, the canonical
+   layout of `Parser/unparse/Inputs/receive-messy.m`, the round-trip tests
+   and `TermReaderTest.ReceiveGoal`; the term fuzzer's third
+   configuration reads receive goals too.
+2. Meaning: desugaring groups the arms by mailbox, keeping each mailbox's
+   arms in order; each mailbox becomes a `selecting_matching` case, whose
+   predicate tries its patterns in order and returns the arm and the
+   pattern's new variables as a constructor of a hidden result type,
+   polymorphic in their types, that desugaring generates; a switch on the
+   result runs the arm's goal. A codegen test runs the design document's
+   counter loop.
+3. The `unselected-message` warning, after type checking, since it needs
+   the mailboxes' types.
+
+Later: guards, `select(Box, Pattern), Guard -> Goal`, a pure `semidet`
+goal run in the selector's predicate after the pattern matches (design
+document, Processes and mailboxes, "The `receive` goal").
+
+**Proposed for step 2,** not yet agreed:
+
+- A pattern's variable that also occurs outside the receive goal is an
+  input, which the pattern tests, as a bound variable in an Erlang
+  pattern is; only the arm's own new variables come back through the
+  result.
+- A receive goal without a timeout arm whose mailboxes are all closed
+  would wait for ever for a message nobody can send; it is a run-time
+  error, "receive: every mailbox is closed", rather than a wait or a
+  failure.
+
 ## Open types: `closed(T)`
 
 Decided 2026-11-04: `closed(T)` comes with open types, not after them. It

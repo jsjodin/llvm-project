@@ -8,8 +8,8 @@
 //
 // A fuzz target for the lexer, the term reader, the converter, the
 // unparser and the semantic passes. For any input, in each configuration
-// (plain Mercury, with OpenMP directives, and with OpenMP directives and
-// -fdo-loops), it checks that none of them crashes; that the tokens, and
+// (plain Mercury, with OpenMP directives, and with OpenMP directives,
+// -fdo-loops and -freceive-goal), it checks that none of them crashes; that the tokens, and
 // the parse tree, unparse to
 // the input byte for byte; that the exact unparser finds every token
 // accounted for; that an input which converts without errors has a
@@ -60,8 +60,10 @@ constexpr unsigned maxDepth{1000};
 struct Config {
   bool openMP;
   bool doLoops;
+  bool receiveGoal;
 };
-constexpr Config configs[]{{false, false}, {true, false}, {true, true}};
+constexpr Config configs[]{
+    {false, false, false}, {true, false, false}, {true, true, true}};
 
 void Fail(const char *what, llvm::StringRef input, llvm::StringRef detail) {
   llvm::errs() << "merkurius-term-fuzzer: " << what << "\ninput: " << input
@@ -91,7 +93,8 @@ std::vector<std::string> ReadCanonical(
   bool lexerErrors{messages.AnyFatalError()};
   TermArena arena;
   TermReader reader{
-      tokens, arena, messages, maxDepth, ReaderOptions{config.doLoops}};
+      tokens, arena, messages, maxDepth,
+      ReaderOptions{config.doLoops, config.receiveGoal}};
   std::vector<std::string> items;
   std::size_t count{messages.messages().size()};
   while (std::optional<ItemTerm> item{reader.ReadItem()}) {
@@ -125,7 +128,8 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, Config config) {
   TokenSequence tokens{Lex(*file, options, messages)};
   ParseTreeArena arena;
   const ParseTree &tree{ConvertFile(
-      tokens, arena, messages, maxDepth, ReaderOptions{config.doLoops})};
+      tokens, arena, messages, maxDepth,
+      ReaderOptions{config.doLoops, config.receiveGoal})};
   Unparsed result;
   result.ok = !messages.AnyFatalError();
   Messages problems;
@@ -214,7 +218,8 @@ extern "C" int LLVMFuzzerTestOneInput(
       // same; '%$omp' is a quoted name there. A do loop prints as do(...).
       std::string item{canonical + ".\n"};
       std::vector<std::string> again{
-          ReadCanonical(item, Config{false, config.doLoops}, false)};
+          ReadCanonical(item,
+              Config{false, config.doLoops, config.receiveGoal}, false)};
       if (again.size() != 1 || again[0] != canonical) {
         Fail("a canonical form does not read back as itself", input,
             canonical + " became " + (again.empty() ? "nothing" : again[0]));
