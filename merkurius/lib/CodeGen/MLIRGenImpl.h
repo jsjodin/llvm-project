@@ -214,9 +214,13 @@ private:
   mlir::Value HiddenTypeInfo(mlir::ValueRange fields,
       std::pair<unsigned, unsigned> place, mlir::Location);
   // Whether values of a type can be compared yet: integers, floats, strings,
-  // words, arrays of those that can be, and terms whose constructors'
-  // arguments can be, at any depth.
+  // words, arrays of those that can be, terms whose constructors' arguments
+  // can be, at any depth, and terms of abstract imported types.
   bool Comparable(mlir::Type, llvm::StringSet<> &seen);
+  // Whether a type is a term of another module's abstract type, whose
+  // constructors this module cannot see, so that its values are unified and
+  // compared through its descriptor, which that module defines.
+  bool IsAbstract(mlir::Type);
   // The semidet procedure that unifies two terms of a type that is
   // Comparable, made the first time: it switches on the first, and tests
   // that the second has the same constructor and equal arguments.
@@ -617,6 +621,9 @@ private:
   // The types of the module's merk.type_defs, by name, null for one that
   // cannot be represented; and their unify procedures.
   llvm::StringMap<const semantics::Type *> terms_;
+  // The module's types that its interface declares abstractly, whose
+  // merk.type_defs say so.
+  llvm::DenseSet<const semantics::Symbol *> abstractTypes_;
   llvm::StringMap<merk::ProcOp> unifyProcs_;
   llvm::StringMap<merk::ProcOp> compareProcs_;
   merk::ProcOp compareArray_;

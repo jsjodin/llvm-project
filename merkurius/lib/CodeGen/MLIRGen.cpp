@@ -254,6 +254,16 @@ std::optional<Represented> MerkGenerator::RepresentTerm(
   }
   const std::vector<semantics::ConstructorTypes> *constructors{
       modes_.ops().ConstructorsOf(type)};
+  // An abstract type of another module, whose constructors this module
+  // cannot see, has no layout here: its values are pointers, which the
+  // module that defines it makes sure they can be (Lowering).
+  if (!constructors && type->kind == semantics::TypeKind::Named &&
+      type->constructor->module != moduleName_ &&
+      std::holds_alternative<const parser::AbstractTypeDecl *>(
+          type->constructor->declaration)) {
+    terms_[name] = type;
+    return Represented{term};
+  }
   // A type too large to print has no name of its own.
   if (!constructors || name.front() == '<' ||
       (definition && (definition->attributes || definition->supertype))) {
@@ -284,8 +294,11 @@ std::optional<Represented> MerkGenerator::RepresentTerm(
     }
     builder_.setInsertionPointAfter(&op);
   }
-  merk::TypeDefOp::create(builder_, builder_.getUnknownLoc(), name,
-      builder_.getArrayAttr(attributes));
+  bool abstract{type->kind == semantics::TypeKind::Named &&
+      abstractTypes_.contains(type->constructor)};
+  merk::TypeDefOp::create(builder_,
+      abstract ? Location(type->constructor->source) : builder_.getUnknownLoc(),
+      name, builder_.getArrayAttr(attributes), abstract);
   return Represented{term};
 }
 
@@ -1282,6 +1295,22 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
       mlir::ModuleOp::create(builder_.getUnknownLoc(), moduleName_)};
   module_ = *owned;
   target_.Record(module_);
+  bool interface{false};
+  for (const parser::Item &item : tree_.items) {
+    if (const auto *section{std::get_if<const parser::SectionDecl *>(&item)}) {
+      interface = (*section)->section == parser::Section::Interface;
+    } else if (const auto *decl{
+                   std::get_if<const parser::AbstractTypeDecl *>(&item)};
+        decl && interface) {
+      for (const semantics::Symbol *symbol :
+          resolution_.module().Lookup((*decl)->name->name)) {
+        if (symbol->kind == semantics::SymbolKind::Type &&
+            symbol->arity == (*decl)->parameters.size()) {
+          abstractTypes_.insert(symbol);
+        }
+      }
+    }
+  }
   // A procedure with a foreign_proc for C runs its C code instead of its
   // clauses.
   for (const Procedure &procedure : modes_.procedures()) {
