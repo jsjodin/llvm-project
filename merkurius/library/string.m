@@ -165,6 +165,15 @@ extern MR_Integer merk_string_to_int(MR_ConstString text, MR_Integer *value);
 extern MR_Integer merk_string_to_float(MR_ConstString text, double *value);
 extern MR_String merk_string_from_int(MR_Integer value);
 extern MR_String merk_string_from_float(MR_Float value);
+extern MR_String merk_string_of(MR_Word type_info, MR_Word value);
+extern MR_String merk_format_integer(MR_ConstString flags, MR_Integer width,
+    MR_Integer precision, MR_Char conversion, int64_t value,
+    MR_Integer bits);
+extern MR_String merk_format_float_conversion(MR_ConstString flags,
+    MR_Integer width, MR_Integer precision, MR_Char conversion,
+    MR_Float value);
+extern MR_String merk_format_text(MR_ConstString flags, MR_Integer width,
+    MR_Integer precision, MR_ConstString text);
 #include <string.h>
 ").
 
@@ -988,3 +997,500 @@ float_to_string(F) = S :-
 ").
 
 from_float(F) = float_to_string(F).
+
+%---------------------------------------------------------------------------%
+% Values as strings.
+
+% What io.write writes, as a string: the runtime's writer, writing into a
+% buffer.
+:- pragma foreign_proc("C",
+    string(X::in) = (S::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    S = merk_string_of(TypeInfo_for_T, X);
+").
+
+%---------------------------------------------------------------------------%
+% format.
+
+% A conversion specifier is a `%', the flags `-+ 0#', a width of digits or
+% `*', a `.' and a precision of digits, `*' or nothing, and its conversion
+% character. Each is formatted by C's snprintf, as in mmc's C grades
+% (library manual, string), but for s and c, whose widths and precisions
+% count code points, and infinities and NaNs, which are written as
+% io.write_float writes them. What the manual leaves open is mmc's, found by
+% running its programs: F is a conversion too, a `%' conversion takes no
+% input but counts as a conversion specifier, an error is the first that a
+% walk from the left finds, and the errors' messages.
+
+format(Format, Args) = S :-
+    format(Format, Args, S).
+
+format(Format, Args, S) :-
+    format_from(Format, 0, 0, bytes(Format), 1, Args, [], Parts),
+    S = append_list(list.reverse(Parts)).
+
+    % The text from Start, where Offset is the next byte to look at and N
+    % the ordinal of the next conversion specifier; Parts is in reverse.
+    % A `%' is never part of another code point's UTF-8, so this looks at
+    % bytes.
+:- pred format_from(string::in, int::in, int::in, int::in, int::in,
+    list(poly_type)::in, list(string)::in, list(string)::out) is det.
+
+format_from(Format, Start, Offset, End, N, Args, !Parts) :-
+    ( if Offset >= End then
+        !:Parts = [bytes_between(Format, Start, End) | !.Parts],
+        no_extra_inputs(N, Args)
+    else if at(Format, Offset, "%") then
+        !:Parts = [bytes_between(Format, Start, Offset) | !.Parts],
+        conversion(Format, Offset + 1, End, N, Args, !Parts)
+    else
+        format_from(Format, Start, Offset + 1, End, N, Args, !Parts)
+    ).
+
+    % The conversion specifier whose `%' is just before Offset.
+:- pred conversion(string::in, int::in, int::in, int::in,
+    list(poly_type)::in, list(string)::in, list(string)::out) is det.
+
+conversion(Format, Offset, End, N, !.Args, !Parts) :-
+    FlagsEnd = skip_flags(Format, Offset, End),
+    Flags0 = bytes_between(Format, Offset, FlagsEnd),
+    width(Format, FlagsEnd, N, WidthEnd, Flags0, Flags, Width, !Args),
+    precision(Format, WidthEnd, End, N, PrecisionEnd, Precision, !Args),
+    ( if PrecisionEnd >= End then
+        missing_specifier(N, !.Args)
+    else
+        decode(Format, PrecisionEnd, C, Next),
+        ( if C = '%' then
+            !:Parts = ["%" | !.Parts],
+            format_from(Format, Next, Next, End, N + 1, !.Args, !Parts)
+        else if is_conversion(C) then
+            (
+                !.Args = [],
+                missing_input(N, C)
+            ;
+                !.Args = [Arg | !:Args],
+                Part = convert(N, C, Flags, Width, Precision, Arg),
+                !:Parts = [Part | !.Parts],
+                format_from(Format, Next, Next, End, N + 1, !.Args, !Parts)
+            )
+        else
+            unknown_conversion(N, C)
+        )
+    ).
+
+:- func skip_flags(string, int, int) = int.
+
+skip_flags(Format, Offset, End) = FlagsEnd :-
+    ( if
+        Offset < End,
+        ( at(Format, Offset, "-")
+        ; at(Format, Offset, "+")
+        ; at(Format, Offset, " ")
+        ; at(Format, Offset, "0")
+        ; at(Format, Offset, "#")
+        )
+    then
+        FlagsEnd = skip_flags(Format, Offset + 1, End)
+    else
+        FlagsEnd = Offset
+    ).
+
+    % The width, -1 if there is none. A negative width from an input is
+    % its magnitude with the flag `-', as in C.
+:- pred width(string::in, int::in, int::in, int::out, string::in,
+    string::out, int::out, list(poly_type)::in, list(poly_type)::out)
+    is det.
+
+width(Format, Offset, N, Next, !Flags, Width, !Args) :-
+    ( if at(Format, Offset, "*") then
+        Next = Offset + 1,
+        star_input(N, "width", Input, !Args),
+        ( if Input < 0 then
+            !:Flags = !.Flags ++ "-",
+            Width = -Input
+        else
+            Width = Input
+        )
+    else
+        digits(Format, Offset, -1, Width, Next)
+    ).
+
+    % The precision, -1 if there is none, and 0 for a `.' alone. A negative
+    % precision from an input is none, as in C. mmc writes a C format with
+    % the negative number in it instead, whose output is not one of C's.
+:- pred precision(string::in, int::in, int::in, int::in, int::out, int::out,
+    list(poly_type)::in, list(poly_type)::out) is det.
+
+precision(Format, Offset, End, N, Next, Precision, !Args) :-
+    ( if Offset < End, at(Format, Offset, ".") then
+        ( if at(Format, Offset + 1, "*") then
+            Next = Offset + 2,
+            star_input(N, "precision", Input, !Args),
+            Precision = ( if Input < 0 then -1 else Input )
+        else
+            digits(Format, Offset + 1, 0, Precision, Next)
+        )
+    else
+        Next = Offset,
+        Precision = -1
+    ).
+
+    % The number that the digits from Offset make, or Value0 if there are
+    % none. The NUL that ends Format is not a digit.
+:- pred digits(string::in, int::in, int::in, int::out, int::out) is det.
+
+digits(Format, Offset, Value0, Value, Next) :-
+    ( if digit_at(Format, Offset, Digit) then
+        digits(Format, Offset + 1, max(Value0, 0) * 10 + Digit, Value, Next)
+    else
+        Value = Value0,
+        Next = Offset
+    ).
+
+:- pred digit_at(string::in, int::in, int::out) is semidet.
+:- pragma foreign_proc("C",
+    digit_at(S::in, Offset::in, Digit::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Digit = S[Offset] - '0';
+    SUCCESS_INDICATOR = S[Offset] >= '0' && S[Offset] <= '9';
+").
+
+    % A width or precision that is an input.
+:- pred star_input(int::in, string::in, int::out, list(poly_type)::in,
+    list(poly_type)::out) is det.
+
+star_input(N, What, Input, !Args) :-
+    (
+        !.Args = [],
+        format_error("The " ++ ordinal(N) ++
+            " conversion specifier says the " ++ What ++
+            " is a runtime input, but there is no next input.")
+    ;
+        !.Args = [Arg | !:Args],
+        ( if Arg = i(I) then
+            Input = I
+        else
+            format_error("The " ++ ordinal(N) ++
+                " conversion specifier says the " ++ What ++
+                " is a runtime input, but the next input is " ++
+                input_kind(Arg) ++ ", not an integer.")
+        )
+    ).
+
+:- pred is_conversion(char::in) is semidet.
+
+is_conversion(C) :-
+    ( C = 'd' ; C = 'i' ; C = 'o' ; C = 'x' ; C = 'X' ; C = 'u' ; C = 'p'
+    ; C = 'c' ; C = 's'
+    ; C = 'f' ; C = 'F' ; C = 'e' ; C = 'E' ; C = 'g' ; C = 'G'
+    ).
+
+:- pred is_signed_conversion(char::in) is semidet.
+
+is_signed_conversion(C) :-
+    ( C = 'd' ; C = 'i' ; is_unsigned_conversion(C) ).
+
+:- pred is_unsigned_conversion(char::in) is semidet.
+
+is_unsigned_conversion(C) :-
+    ( C = 'o' ; C = 'x' ; C = 'X' ; C = 'u' ; C = 'p' ).
+
+:- pred is_float_conversion(char::in) is semidet.
+
+is_float_conversion(C) :-
+    ( C = 'f' ; C = 'F' ; C = 'e' ; C = 'E' ; C = 'g' ; C = 'G' ).
+
+    % An input by its conversion, which is one of is_conversion's.
+:- func convert(int, char, string, int, int, poly_type) = string.
+
+convert(N, C, Flags, Width, Precision, Arg) = Part :-
+    ( if
+        (
+            Arg = i(I),
+            is_signed_conversion(C),
+            Part0 = format_int(Flags, Width, Precision, C, I)
+        ;
+            Arg = i8(I),
+            is_signed_conversion(C),
+            Part0 = format_int8(Flags, Width, Precision, C, I)
+        ;
+            Arg = i16(I),
+            is_signed_conversion(C),
+            Part0 = format_int16(Flags, Width, Precision, C, I)
+        ;
+            Arg = i32(I),
+            is_signed_conversion(C),
+            Part0 = format_int32(Flags, Width, Precision, C, I)
+        ;
+            Arg = i64(I),
+            is_signed_conversion(C),
+            Part0 = format_int64(Flags, Width, Precision, C, I)
+        ;
+            Arg = u(U),
+            is_unsigned_conversion(C),
+            Part0 = format_uint(Flags, Width, Precision, C, U)
+        ;
+            Arg = u8(U),
+            is_unsigned_conversion(C),
+            Part0 = format_uint8(Flags, Width, Precision, C, U)
+        ;
+            Arg = u16(U),
+            is_unsigned_conversion(C),
+            Part0 = format_uint16(Flags, Width, Precision, C, U)
+        ;
+            Arg = u32(U),
+            is_unsigned_conversion(C),
+            Part0 = format_uint32(Flags, Width, Precision, C, U)
+        ;
+            Arg = u64(U),
+            is_unsigned_conversion(C),
+            Part0 = format_uint64(Flags, Width, Precision, C, U)
+        ;
+            Arg = f(F),
+            is_float_conversion(C),
+            Part0 = format_float(Flags, Width, Precision, C, F)
+        ;
+            Arg = s(S),
+            C = 's',
+            Part0 = format_text(Flags, Width, Precision, S)
+        ;
+            Arg = c(Char),
+            C = 'c',
+            % A character has no precision.
+            Part0 = format_text(Flags, Width, -1, char_to_string(Char))
+        )
+    then
+        Part = Part0
+    else
+        format_error("The " ++ ordinal(N) ++
+            " conversion specifier uses the specifier character `" ++
+            char_to_string(C) ++ "', but the corresponding input is " ++
+            input_kind(Arg) ++ ". " ++ applicable(Arg))
+    ).
+
+:- func format_int(string, int, int, char, int) = string.
+:- pragma foreign_proc("C",
+    format_int(Flags::in, Width::in, Precision::in, C::in, I::in) = (S::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    S = merk_format_integer(Flags, Width, Precision, C, I, 64);
+").
+
+:- func format_int8(string, int, int, char, int8) = string.
+:- pragma foreign_proc("C",
+    format_int8(Flags::in, Width::in, Precision::in, C::in, I::in) = (S::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    S = merk_format_integer(Flags, Width, Precision, C, I, 8);
+").
+
+:- func format_int16(string, int, int, char, int16) = string.
+:- pragma foreign_proc("C",
+    format_int16(Flags::in, Width::in, Precision::in, C::in, I::in)
+        = (S::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    S = merk_format_integer(Flags, Width, Precision, C, I, 16);
+").
+
+:- func format_int32(string, int, int, char, int32) = string.
+:- pragma foreign_proc("C",
+    format_int32(Flags::in, Width::in, Precision::in, C::in, I::in)
+        = (S::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    S = merk_format_integer(Flags, Width, Precision, C, I, 32);
+").
+
+:- func format_int64(string, int, int, char, int64) = string.
+:- pragma foreign_proc("C",
+    format_int64(Flags::in, Width::in, Precision::in, C::in, I::in)
+        = (S::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    S = merk_format_integer(Flags, Width, Precision, C, I, 64);
+").
+
+:- func format_uint(string, int, int, char, uint) = string.
+:- pragma foreign_proc("C",
+    format_uint(Flags::in, Width::in, Precision::in, C::in, U::in) = (S::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    S = merk_format_integer(Flags, Width, Precision, C, (int64_t) U, 64);
+").
+
+:- func format_uint8(string, int, int, char, uint8) = string.
+:- pragma foreign_proc("C",
+    format_uint8(Flags::in, Width::in, Precision::in, C::in, U::in)
+        = (S::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    S = merk_format_integer(Flags, Width, Precision, C, U, 8);
+").
+
+:- func format_uint16(string, int, int, char, uint16) = string.
+:- pragma foreign_proc("C",
+    format_uint16(Flags::in, Width::in, Precision::in, C::in, U::in)
+        = (S::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    S = merk_format_integer(Flags, Width, Precision, C, U, 16);
+").
+
+:- func format_uint32(string, int, int, char, uint32) = string.
+:- pragma foreign_proc("C",
+    format_uint32(Flags::in, Width::in, Precision::in, C::in, U::in)
+        = (S::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    S = merk_format_integer(Flags, Width, Precision, C, U, 32);
+").
+
+:- func format_uint64(string, int, int, char, uint64) = string.
+:- pragma foreign_proc("C",
+    format_uint64(Flags::in, Width::in, Precision::in, C::in, U::in)
+        = (S::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    S = merk_format_integer(Flags, Width, Precision, C, (int64_t) U, 64);
+").
+
+:- func format_float(string, int, int, char, float) = string.
+:- pragma foreign_proc("C",
+    format_float(Flags::in, Width::in, Precision::in, C::in, F::in)
+        = (S::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    S = merk_format_float_conversion(Flags, Width, Precision, C, F);
+").
+
+:- func format_text(string, int, int, string) = string.
+:- pragma foreign_proc("C",
+    format_text(Flags::in, Width::in, Precision::in, Text::in) = (S::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    S = merk_format_text(Flags, Width, Precision, Text);
+").
+
+%---------------------------------------------------------------------------%
+% format's errors, with mmc's messages.
+
+:- pred format_error(string::in) is erroneous.
+
+format_error(Message) :-
+    error("string.format: " ++ Message).
+
+:- pred missing_specifier(int::in, list(poly_type)::in) is erroneous.
+
+missing_specifier(N, Args) :-
+    Count = list.length(Args),
+    ( if Count = 0 then
+        Rest = ", along with its input."
+    else if Count = 1 then
+        Rest = "."
+    else
+        Rest = ", and there are " ++ int_to_string(Count - 1) ++
+            " extra inputs."
+    ),
+    format_error("The " ++ ordinal(N) ++ " conversion specifier is missing" ++
+        Rest).
+
+:- pred missing_input(int::in, char::in) is erroneous.
+
+missing_input(N, C) :-
+    format_error("The " ++ ordinal(N) ++
+        " conversion specifier, which uses specifier character `" ++
+        char_to_string(C) ++ "', is missing its input.").
+
+:- pred unknown_conversion(int::in, char::in) is erroneous.
+
+unknown_conversion(N, C) :-
+    format_error("The " ++ ordinal(N) ++
+        " conversion specifier uses the unknown specifier character `" ++
+        char_to_string(C) ++ "'.").
+
+:- pred no_extra_inputs(int::in, list(poly_type)::in) is det.
+
+no_extra_inputs(N, Args) :-
+    Count = list.length(Args),
+    ( if Count = 0 then
+        true
+    else
+        ( if N = 1, Count = 1 then
+            Rest = "an input."
+        else if N = 1 then
+            Rest = int_to_string(Count) ++ " inputs."
+        else if Count = 1 then
+            Rest = "an extra input."
+        else
+            Rest = int_to_string(Count) ++ " extra inputs."
+        ),
+        ( if Count = 1 then
+            Verb = "is "
+        else
+            Verb = "are "
+        ),
+        format_error("There is no " ++ ordinal(N) ++
+            " conversion specifier, but there " ++ Verb ++ Rest)
+    ).
+
+:- func ordinal(int) = string.
+
+ordinal(N) = Ordinal :-
+    ( if N = 1 then Ordinal = "first"
+    else if N = 2 then Ordinal = "second"
+    else if N = 3 then Ordinal = "third"
+    else if N = 4 then Ordinal = "fourth"
+    else if N = 5 then Ordinal = "fifth"
+    else if N = 6 then Ordinal = "sixth"
+    else if N = 7 then Ordinal = "seventh"
+    else if N = 8 then Ordinal = "eighth"
+    else if N = 9 then Ordinal = "ninth"
+    else if N = 10 then Ordinal = "tenth"
+    else Ordinal = int_to_string(N) ++ "th"
+    ).
+
+:- func input_kind(poly_type) = string.
+
+input_kind(f(_)) = "a float".
+input_kind(i(_)) = "an integer".
+input_kind(i8(_)) = "an 8-bit integer".
+input_kind(i16(_)) = "a 16-bit integer".
+input_kind(i32(_)) = "a 32-bit integer".
+input_kind(i64(_)) = "a 64-bit integer".
+input_kind(u(_)) = "an unsigned integer".
+input_kind(u8(_)) = "an 8-bit unsigned integer".
+input_kind(u16(_)) = "a 16-bit unsigned integer".
+input_kind(u32(_)) = "a 32-bit unsigned integer".
+input_kind(u64(_)) = "a 64-bit unsigned integer".
+input_kind(s(_)) = "a string".
+input_kind(c(_)) = "a character".
+
+:- func applicable(poly_type) = string.
+
+applicable(f(_)) =
+    "The specifiers applicable to floats are %f, %e, %E, %g and %G.".
+applicable(i(_)) = signed_applicable("ints").
+applicable(i8(_)) = signed_applicable("int8s").
+applicable(i16(_)) = signed_applicable("int16s").
+applicable(i32(_)) = signed_applicable("int32s").
+applicable(i64(_)) = signed_applicable("int64s").
+applicable(u(_)) = unsigned_applicable("uints").
+applicable(u8(_)) = unsigned_applicable("uint8s").
+applicable(u16(_)) = unsigned_applicable("uint16s").
+applicable(u32(_)) = unsigned_applicable("uint32s").
+applicable(u64(_)) = unsigned_applicable("uint64s").
+applicable(s(_)) = "The only specifier applicable to strings is %s.".
+applicable(c(_)) = "The only specifier applicable to characters is %c.".
+
+:- func signed_applicable(string) = string.
+
+signed_applicable(Types) = "The specifiers applicable to " ++ Types ++
+    " are %d, %i, %o, %x, %X, %u, and %p.".
+
+:- func unsigned_applicable(string) = string.
+
+unsigned_applicable(Types) = "The specifiers applicable to " ++ Types ++
+    " are %o, %x, %X, %u, and %p.".
