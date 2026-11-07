@@ -477,9 +477,19 @@ User's Guide, "Distribution Protocol"):
   tick time, 60 seconds by default as Erlang's `net_ticktime`
   (`MERK_TICK_TIME`), is closed as lost. TCP alone may not notice a peer
   that vanished for hours.
-- **Simultaneous connections,** as Erlang's: when two nodes connect to each
-  other at once, the connection that the node with the greater id started is
-  kept, and the other is closed, so exactly one survives.
+- **Simultaneous connections** end with one, as Erlang's do, but decided
+  differently. Erlang decides during the handshake, by the names the nodes
+  connect by; our ids are learned only in the handshake, and a node that
+  lost its connection must be able to make a new one before the other has
+  noticed. So the node with the greater id decides, after the handshake:
+  the newest connection is current, whoever started it, and it says so
+  with an `up` frame, which the other answers with `ack`; each then stops
+  writing on the connections decided before it, leaving any not decided
+  yet, which the deciding node is about to make current (stopping those
+  lost 2 of 1200 rounds of the test under load to nodes that disagreed on
+  the current connection), and a message on the current one is
+  delivered only once the older ones are read to the end, so the order
+  between two nodes holds across the change (`runtime/node.cpp`).
 - **Frames** have a 4-byte length and a kind, as Erlang's, and the
   payload's encoding is ours (design document, Wire format).
 
@@ -522,14 +532,14 @@ standard library):
   message in its mailbox, as a local send does. A `send` to a remote handle
   encodes in the sending thread and writes the frame under the connection's
   lock, so a full socket holds the sender back.
-- **Handshake.** Magic `MERK`, a version, the node id, then the cookie's
-  challenges and answers. Each side learns the other's id; a connection to
+- **Handshake.** Magic `MERK`, a version, the node id, then, from step 4,
+  the cookie's challenges and answers. Each side learns the other's id; a connection to
   oneself is refused, and of two connections between the same nodes one is
   kept, as above.
 - **Frames.** `message` (the whole destination handle, node id included,
   then the payload), `lookup` (a request number, the name, the type's
-  fingerprint), `found` (the request number, a handle or an error) and
-  `tick`. A message's header has a fixed size, so the device can write it.
+  fingerprint), `found` (the request number, a handle or an error),
+  `tick`, and `up` and `ack` for simultaneous connections. A message's header has a fixed size, so the device can write it.
 - **Routing** has one entry, a destination handle and an encoded payload,
   which a remote `send` calls after encoding, a connection's reader calls
   for each message, and the device's bridge will call for the device's
@@ -662,7 +672,13 @@ device is the first slice's sender, so the formats are made for it now:
    SHA-256, which the fingerprints need, checked against FIPS 180-4's
    examples. Done.
 3. `listen`, `connect`, `lookup` and remote sends, with ticks and
-   simultaneous connections; the loopback tests.
+   simultaneous connections; the loopback tests. Done:
+   `test/CodeGen/process-remote.m`, whose driver runs two nodes over
+   loopback, and stops one with SIGSTOP to see it lost within the tick
+   time, and runs twenty rounds of two nodes connecting to each other at
+   once; `lookup`'s errors besides step 1's are "not connected to the
+   node", "the connection to the node was lost" and "the node did not
+   answer in time".
 4. The cookie: HMAC-SHA-256 in the runtime, checked against RFC 4231's
    test vectors, and the challenges in the handshake, with a test
    of a node with the wrong cookie refused. Until then the handshake's
