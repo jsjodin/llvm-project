@@ -1,7 +1,13 @@
 % Processes and mailboxes, a Merkurius extension with no counterpart in the
 % Mercury library (design document, Language extensions, "Processes and
 % mailboxes"). So far only the mailboxes of one process: a mailbox is
-% made, sent to and received from, with the one-mailbox receive.
+% made, sent to and received from, with the one-mailbox receive, and may be
+% registered under a name, which a lookup finds, as in Erlang.
+%
+% A handle names the node, by an id chosen at random when the program
+% starts, and the place within it, 0 for the host, and carries a secret
+% chosen at random when the mailbox is made, which a message from another
+% node must give (design document, Handles, routing and places).
 %
 % A send copies the message, by its type_info, into a fragment of its own
 % (runtime/mailbox.cpp), so the sender's cells are never shared with the
@@ -11,9 +17,13 @@
 %
 % Temporary (chunk 2, docs/INPROGRESS.md): spawn, close_mailbox's effect on
 % other processes, selectors over several mailboxes, monitors and request
-% and reply come with processes; until then a program is one process, the
-% handle has no node or place, and a receive that waits with infinity for
-% a message nobody can send waits forever.
+% and reply come with processes; until then a program is one process, and
+% a receive that waits with infinity for a message nobody can send waits
+% forever.
+%
+% Temporary (Remote handles and TCP, step 3, docs/INPROGRESS.md): a send
+% to a mailbox of another node is dropped, and lookup finds only this
+% node's names, until connections route them.
 
 :- module process.
 :- interface.
@@ -23,6 +33,9 @@
     % A mailbox that accepts messages of type M.
 :- type mailbox(M).
 
+    % A node, a program that mailboxes are on.
+:- type node.
+
     % How long a receive waits: milliseconds, after(0) to poll.
 :- type timeout
     --->    after(int)
@@ -30,14 +43,15 @@
 
 :- pred new_mailbox(mailbox(M)::out, io::di, io::uo) is det.
 
-    % Drops the queued messages; later sends to the mailbox are dropped,
-    % and a receive from it finds nothing.
+    % Drops the queued messages and the mailbox's name; later sends to the
+    % mailbox are dropped, and a receive from it finds nothing.
 :- pred close_mailbox(mailbox(M)::in, io::di, io::uo) is det.
 
 :- pred send(mailbox(M)::in, M::in, io::di, io::uo) is det.
 
     % The oldest message for which the selector succeeds, mapped by it, or
-    % no if none arrives before the timeout.
+    % no if none arrives before the timeout. A mailbox of another node
+    % finds nothing.
 :- pred receive(mailbox(M)::in, pred(M, R)::in(pred(in, out) is semidet),
     timeout::in, maybe(R)::out, io::di, io::uo) is det.
 
@@ -45,39 +59,93 @@
     % semidet to fit receive's mode.
 :- pred any(M::in, M::out) is semidet.
 
+    % The node this program is.
+:- pred this_node(node::out, io::di, io::uo) is det.
+
+    % The node a mailbox is on.
+:- func node_of(mailbox(M)) = node.
+
+    % Registers a mailbox of this node under a name, which lookup finds, as
+    % Erlang's register/2 does. It is an error if the name is taken, if the
+    % mailbox has a name already, or if it is closed or another node's.
+    % Closing the mailbox removes its name.
+:- pred register(string::in, mailbox(M)::in, maybe_error::out,
+    io::di, io::uo) is det.
+
+    % Removes a name, if it is registered.
+:- pred unregister(string::in, io::di, io::uo) is det.
+
+    % The mailbox registered under a name on a node, if its messages are of
+    % type M; otherwise an error saying that no mailbox has the name, or
+    % that its messages are of another type. The timeout bounds the wait
+    % for another node's answer.
+:- pred lookup(node::in, string::in, timeout::in,
+    maybe_error(mailbox(M))::out, io::di, io::uo) is det.
+
 :- implementation.
 :- import_module int.
+:- import_module string.
 
-    % The mailbox's slot in the runtime's table, and the generation that
-    % slot had when the mailbox was made, which tells a closed mailbox's
-    % handle from that of a later mailbox in the same slot.
+    % The node's id, the place in the top 16 bits of a word whose other
+    % 48 are the slot of the runtime's table, the generation that slot had
+    % when the mailbox was made, which tells a closed mailbox's handle from
+    % that of a later mailbox in the same slot, and the secret.
 :- type mailbox(M)
-    --->    mailbox(int, int).
+    --->    mailbox(
+                node_high   :: int,
+                node_low    :: int,
+                place_slot  :: int,
+                generation  :: int,
+                secret      :: int
+            ).
+
+    % The node's 128-bit id.
+:- type node
+    --->    node(int, int).
+
+    % Gives a foreign_proc the type_info of M when no argument of it has
+    % type M.
+:- type witness(M)
+    --->    witness.
 
 :- pragma foreign_decl("C", local, "
-extern void merk_mailbox_new(MR_Integer *slot, MR_Integer *generation);
-extern void merk_mailbox_close(MR_Integer slot, MR_Integer generation);
-extern void merk_mailbox_send(MR_Integer slot, MR_Integer generation,
+extern void merk_node(MR_Integer *high, MR_Integer *low);
+extern void merk_mailbox_new(MR_Integer *place_slot, MR_Integer *generation,
+    MR_Integer *secret);
+extern void merk_mailbox_close(MR_Integer node_high, MR_Integer node_low,
+    MR_Integer place_slot, MR_Integer generation, MR_Integer secret);
+extern void merk_mailbox_send(MR_Integer node_high, MR_Integer node_low,
+    MR_Integer place_slot, MR_Integer generation, MR_Integer secret,
     MR_Word type_info, MR_Word message);
 extern MR_Integer merk_mailbox_deadline(MR_Integer milliseconds);
-extern MR_Integer merk_mailbox_wait(MR_Integer slot, MR_Integer generation,
-    MR_Integer position, MR_Integer deadline);
-extern MR_Word merk_mailbox_message(MR_Integer slot, MR_Integer generation,
+extern MR_Integer merk_mailbox_wait(MR_Integer node_high,
+    MR_Integer node_low, MR_Integer place_slot, MR_Integer generation,
+    MR_Integer secret, MR_Integer position, MR_Integer deadline);
+extern MR_Word merk_mailbox_message(MR_Integer node_high,
+    MR_Integer node_low, MR_Integer place_slot, MR_Integer generation,
+    MR_Integer secret, MR_Integer position);
+extern void merk_mailbox_remove(MR_Integer node_high, MR_Integer node_low,
+    MR_Integer place_slot, MR_Integer generation, MR_Integer secret,
     MR_Integer position);
-extern void merk_mailbox_remove(MR_Integer slot, MR_Integer generation,
-    MR_Integer position);
+extern MR_Integer merk_mailbox_register(MR_Integer node_high,
+    MR_Integer node_low, MR_Integer place_slot, MR_Integer generation,
+    MR_Integer secret, MR_String name, MR_Word type_info);
+extern void merk_mailbox_unregister(MR_String name);
+extern MR_Integer merk_mailbox_lookup(MR_String name, MR_Word type_info,
+    MR_Integer *place_slot, MR_Integer *generation, MR_Integer *secret);
 ").
 
-new_mailbox(mailbox(Slot, Generation), !IO) :-
-    new_slot(Slot, Generation, !IO).
+new_mailbox(mailbox(High, Low, PlaceSlot, Generation, Secret), !IO) :-
+    this_node(node(High, Low), !IO),
+    new_slot(PlaceSlot, Generation, Secret, !IO).
 
-close_mailbox(mailbox(Slot, Generation), !IO) :-
-    close_slot(Slot, Generation, !IO).
+close_mailbox(mailbox(High, Low, PlaceSlot, Generation, Secret), !IO) :-
+    close_slot(High, Low, PlaceSlot, Generation, Secret, !IO).
 
-send(mailbox(Slot, Generation), Message, !IO) :-
-    send_message(Slot, Generation, Message, !IO).
+send(mailbox(High, Low, PlaceSlot, Generation, Secret), Message, !IO) :-
+    send_message(High, Low, PlaceSlot, Generation, Secret, Message, !IO).
 
-receive(mailbox(Slot, Generation), Selector, Timeout, Result, !IO) :-
+receive(Mailbox, Selector, Timeout, Result, !IO) :-
     (
         Timeout = infinity,
         Milliseconds = -1
@@ -86,7 +154,7 @@ receive(mailbox(Slot, Generation), Selector, Timeout, Result, !IO) :-
         Milliseconds = max(Milliseconds0, 0)
     ),
     deadline(Milliseconds, Deadline, !IO),
-    scan(Slot, Generation, Selector, Deadline, 0, Result, !IO).
+    scan(Mailbox, Selector, Deadline, 0, Result, !IO).
 
 :- pragma foreign_proc("C",
     any(M::in, N::out),
@@ -96,50 +164,111 @@ receive(mailbox(Slot, Generation), Selector, Timeout, Result, !IO) :-
     SUCCESS_INDICATOR = MR_TRUE;
 ").
 
+this_node(node(High, Low), !IO) :-
+    node_id(High, Low, !IO).
+
+node_of(Mailbox) = node(Mailbox ^ node_high, Mailbox ^ node_low).
+
+register(Name, mailbox(High, Low, PlaceSlot, Generation, Secret), Result,
+        !IO) :-
+    register_slot(High, Low, PlaceSlot, Generation, Secret, Name,
+        witness : witness(M), Status, !IO),
+    ( if Status = 0 then
+        Result = ok
+    else if Status = 1 then
+        Result = error("the name " ++ quoted(Name) ++ " is taken")
+    else if Status = 2 then
+        Result = error("the mailbox has a name already")
+    else
+        Result = error("the mailbox is closed or another node's")
+    ).
+
+unregister(Name, !IO) :-
+    unregister_name(Name, !IO).
+
+lookup(Node, Name, _Timeout, Result, !IO) :-
+    this_node(Self, !IO),
+    ( if Node = Self then
+        Node = node(High, Low),
+        lookup_name(Name, witness : witness(M), Status, PlaceSlot, Generation,
+            Secret, !IO),
+        ( if Status = 0 then
+            Result = ok(mailbox(High, Low, PlaceSlot, Generation, Secret)
+                : mailbox(M))
+        else if Status = 1 then
+            Result = error("no mailbox is registered as " ++ quoted(Name))
+        else
+            Result = error("the mailbox registered as " ++ quoted(Name) ++
+                " has messages of another type")
+        )
+    else
+        Result = error("not connected to the node")
+    ).
+
+:- func quoted(string) = string.
+
+quoted(Name) = "\"" ++ Name ++ "\"".
+
     % From the message at Position on, the first the selector accepts,
     % waiting for the next to arrive until the deadline. Only the
     % mailbox's owner removes messages, so the positions of those it has
     % passed stay as they are.
-:- pred scan(int::in, int::in, pred(M, R)::in(pred(in, out) is semidet),
+:- pred scan(mailbox(M)::in, pred(M, R)::in(pred(in, out) is semidet),
     int::in, int::in, maybe(R)::out, io::di, io::uo) is det.
 
-scan(Slot, Generation, Selector, Deadline, Position, Result, !IO) :-
-    wait_message(Slot, Generation, Position, Deadline, Arrived, !IO),
+scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
+    Mailbox = mailbox(High, Low, PlaceSlot, Generation, Secret),
+    wait_message(High, Low, PlaceSlot, Generation, Secret, Position, Deadline,
+        Arrived, !IO),
     ( if Arrived = 0 then
         Result = no
     else
-        message_at(Slot, Generation, Position, Message, !IO),
+        message_at(High, Low, PlaceSlot, Generation, Secret, Position,
+            Message, !IO),
         ( if Selector(Message, R) then
-            remove_message(Slot, Generation, Position, !IO),
+            remove_message(High, Low, PlaceSlot, Generation, Secret, Position,
+                !IO),
             Result = yes(R)
         else
-            scan(Slot, Generation, Selector, Deadline, Position + 1, Result,
-                !IO)
+            scan(Mailbox, Selector, Deadline, Position + 1, Result, !IO)
         )
     ).
 
-:- pred new_slot(int::out, int::out, io::di, io::uo) is det.
+:- pred node_id(int::out, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
-    new_slot(Slot::out, Generation::out, _IO0::di, _IO::uo),
+    node_id(High::out, Low::out, _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
-    merk_mailbox_new(&Slot, &Generation);
+    merk_node(&High, &Low);
 ").
 
-:- pred close_slot(int::in, int::in, io::di, io::uo) is det.
+:- pred new_slot(int::out, int::out, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
-    close_slot(Slot::in, Generation::in, _IO0::di, _IO::uo),
+    new_slot(PlaceSlot::out, Generation::out, Secret::out, _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
-    merk_mailbox_close(Slot, Generation);
+    merk_mailbox_new(&PlaceSlot, &Generation, &Secret);
 ").
 
-:- pred send_message(int::in, int::in, M::in, io::di, io::uo) is det.
+:- pred close_slot(int::in, int::in, int::in, int::in, int::in,
+    io::di, io::uo) is det.
 :- pragma foreign_proc("C",
-    send_message(Slot::in, Generation::in, Message::in, _IO0::di, _IO::uo),
+    close_slot(High::in, Low::in, PlaceSlot::in, Generation::in, Secret::in,
+        _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
-    merk_mailbox_send(Slot, Generation, TypeInfo_for_M, Message);
+    merk_mailbox_close(High, Low, PlaceSlot, Generation, Secret);
+").
+
+:- pred send_message(int::in, int::in, int::in, int::in, int::in, M::in,
+    io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    send_message(High::in, Low::in, PlaceSlot::in, Generation::in,
+        Secret::in, Message::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    merk_mailbox_send(High, Low, PlaceSlot, Generation, Secret,
+        TypeInfo_for_M, Message);
 ").
 
     % The time at which a receive stops waiting, -1 for never.
@@ -152,32 +281,75 @@ scan(Slot, Generation, Selector, Deadline, Position, Result, !IO) :-
 ").
 
     % 1 once the mailbox has a message at Position, 0 if the deadline
-    % passes first or the mailbox is closed.
-:- pred wait_message(int::in, int::in, int::in, int::in, int::out,
-    io::di, io::uo) is det.
+    % passes first, or the mailbox is closed or another node's.
+:- pred wait_message(int::in, int::in, int::in, int::in, int::in, int::in,
+    int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
-    wait_message(Slot::in, Generation::in, Position::in, Deadline::in,
-        Arrived::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
-"
-    Arrived = merk_mailbox_wait(Slot, Generation, Position, Deadline);
-").
-
-    % The message at Position, which wait_message has found there.
-:- pred message_at(int::in, int::in, int::in, M::out, io::di, io::uo) is det.
-:- pragma foreign_proc("C",
-    message_at(Slot::in, Generation::in, Position::in, Message::out,
+    wait_message(High::in, Low::in, PlaceSlot::in, Generation::in,
+        Secret::in, Position::in, Deadline::in, Arrived::out,
         _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
-    (void)TypeInfo_for_M;
-    Message = merk_mailbox_message(Slot, Generation, Position);
+    Arrived = merk_mailbox_wait(High, Low, PlaceSlot, Generation, Secret,
+        Position, Deadline);
 ").
 
-:- pred remove_message(int::in, int::in, int::in, io::di, io::uo) is det.
+    % The message at Position, which wait_message has found there.
+:- pred message_at(int::in, int::in, int::in, int::in, int::in, int::in,
+    M::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
-    remove_message(Slot::in, Generation::in, Position::in, _IO0::di, _IO::uo),
+    message_at(High::in, Low::in, PlaceSlot::in, Generation::in, Secret::in,
+        Position::in, Message::out, _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
-    merk_mailbox_remove(Slot, Generation, Position);
+    (void)TypeInfo_for_M;
+    Message = merk_mailbox_message(High, Low, PlaceSlot, Generation, Secret,
+        Position);
+").
+
+:- pred remove_message(int::in, int::in, int::in, int::in, int::in, int::in,
+    io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    remove_message(High::in, Low::in, PlaceSlot::in, Generation::in,
+        Secret::in, Position::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    merk_mailbox_remove(High, Low, PlaceSlot, Generation, Secret, Position);
+").
+
+    % 0 if registered, 1 if the name is taken, 2 if the mailbox has a name,
+    % 3 if it is closed or another node's.
+:- pred register_slot(int::in, int::in, int::in, int::in, int::in,
+    string::in, witness(M)::in, int::out, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    register_slot(High::in, Low::in, PlaceSlot::in, Generation::in,
+        Secret::in, Name::in, _Witness::in, Status::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Status = merk_mailbox_register(High, Low, PlaceSlot, Generation, Secret,
+        Name, TypeInfo_for_M);
+").
+
+:- pred unregister_name(string::in, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    unregister_name(Name::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    merk_mailbox_unregister(Name);
+").
+
+    % 0 and the mailbox's slot, generation and secret if its messages are
+    % of type M, 1 if no mailbox has the name, 2 if they are of another.
+:- pred lookup_name(string::in, witness(M)::in, int::out, int::out, int::out,
+    int::out, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    lookup_name(Name::in, _Witness::in, Status::out, PlaceSlot::out,
+        Generation::out, Secret::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    PlaceSlot = 0;
+    Generation = 0;
+    Secret = 0;
+    Status = merk_mailbox_lookup(Name, TypeInfo_for_M, &PlaceSlot,
+        &Generation, &Secret);
 ").
