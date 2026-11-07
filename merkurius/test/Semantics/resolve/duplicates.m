@@ -2,8 +2,10 @@
 % them: a predicate or function declared twice, whatever its types or
 % modes, with `with_type`, or as a method too; a type, inst or mode
 % defined twice, or a type as both a discriminated union type and an
-% equivalence type; and, as a warning, a type declared abstractly twice.
-% An abstract declaration or a foreign type goes with the definition.
+% equivalence type; a field label used twice in a type, in one
+% constructor or in two; and, as a warning, a type declared abstractly
+% twice. An abstract declaration or a foreign type goes with the
+% definition, and a label may be used again in another type.
 %
 % RUN: not merkc -fc1 -fdebug-dump-types %s 2>&1 >/dev/null | FileCheck --implicit-check-not=error: --implicit-check-not=warning: %s
 % RUN: %if mmc %{ %compare-types --error-lines %s %}
@@ -90,3 +92,9 @@ m(_).
 :- mode md == in.
 % CHECK: [[@LINE-1]]:9: error: mode duplicates.md/0 is defined more than once
 % CHECK: [[@LINE-3]]:9: because: it is first defined here
+:- type labels ---> one(f :: int, g :: int, f :: int) ; two(g :: int).
+% CHECK: [[@LINE-1]]:45: error: field f occurs more than once in type duplicates.labels/0
+% CHECK: [[@LINE-2]]:25: because: it first occurs here
+% CHECK: [[@LINE-3]]:61: error: field g occurs more than once in type duplicates.labels/0
+% CHECK: [[@LINE-4]]:35: because: it first occurs here
+:- type other_labels ---> other(f :: int, g :: string).
