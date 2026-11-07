@@ -8,6 +8,7 @@ add_library(merkrt STATIC
   heap.cpp
   mailbox.cpp
   main.cpp
+  string.cpp
   trace.cpp
   type-info.cpp
   write.cpp

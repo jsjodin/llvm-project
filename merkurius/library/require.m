@@ -30,8 +30,8 @@
 
 :- implementation.
 
-% The message's parts, which it joins: without the string module, which is
-% not compiled yet, the parts are joined in C.
+% The message's parts, which it joins in C, so that require does not depend
+% on the string module, which uses it.
 :- pred software_error(string::in, string::in, string::in, string::in,
     string::in) is erroneous.
 

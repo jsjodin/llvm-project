@@ -37,7 +37,7 @@ install(FILES ${sound_array} DESTINATION lib/merkurius/sound
 # foreign_procs are compiled by clang, so it is built first when it is part
 # of the build.
 set(compiled_modules io float math require pair maybe list solutions
-  process)
+  process string)
 set(compiled_objects)
 foreach(module ${compiled_modules})
   set(object ${CMAKE_CURRENT_BINARY_DIR}/${module}.o)
