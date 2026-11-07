@@ -6,9 +6,10 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// SHA-256 (FIPS 180-4), for the fingerprints of message types (encode.cpp)
-// and, later, the cookie's HMAC (docs/INPROGRESS.md, Remote handles and
-// TCP). The runtime links no library of cryptography.
+// SHA-256 (FIPS 180-4), for the fingerprints of message types (encode.cpp),
+// and HMAC-SHA-256 (RFC 2104), for the cookie's challenges in the handshake
+// between nodes (node.cpp; docs/INPROGRESS.md, Remote handles and TCP).
+// The runtime links no library of cryptography.
 //
 //===----------------------------------------------------------------------===//
 
@@ -37,6 +38,10 @@ private:
   std::size_t buffered_{0};
   std::uint64_t length_{0};
 };
+
+// HMAC-SHA-256 of the data under the key, of any length.
+void HmacSha256(const void *key, std::size_t keyBytes, const void *data,
+    std::size_t dataBytes, std::uint8_t mac[Sha256::kDigestBytes]);
 
 } // namespace merkurius::runtime
 

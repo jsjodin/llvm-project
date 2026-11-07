@@ -16,6 +16,10 @@
 %   other node quits, lookups fail and sends are dropped.
 % - Two nodes connecting to each other at once end with one connection,
 %   and messages sent while that is decided arrive in order.
+% - The cookie: a node with another one is refused; ~/.merkurius.cookie is
+%   made when it is missing, and then used; the cookie is its first line;
+%   a file that others can read, an empty one, an empty MERK_COOKIE and no
+%   HOME are errors.
 %
 % RUN: merkc -O0 %s -o %t0 && %python %S/Inputs/two-nodes.py %t0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 %s -o %t2 && %python %S/Inputs/two-nodes.py %t2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
@@ -55,6 +59,19 @@
 % OUTPUT-NEXT:lost within 0.5 to 10 seconds: yes
 % OUTPUT-NEXT:simultaneous:
 % OUTPUT-NEXT:20 rounds as expected
+% OUTPUT-NEXT:cookie:
+% OUTPUT-NEXT:another cookie: connect: 127.0.0.1:PORT: the other node has another cookie
+% OUTPUT-NEXT:the same cookie: connect: ok
+% OUTPUT-NEXT:no file, listen: listen: ok
+% OUTPUT-NEXT:made: mode 400, 20 capital letters: yes
+% OUTPUT-NEXT:the file's cookie: connect: ok
+% OUTPUT-NEXT:it in MERK_COOKIE: connect: ok
+% OUTPUT-NEXT:first line: connect: ok
+% OUTPUT-NEXT:both lines: connect: 127.0.0.1:PORT: the other node has another cookie
+% OUTPUT-NEXT:readable by its group: listen: no cookie: HOME/.merkurius.cookie: the cookie file must be its owner's and readable by its owner only
+% OUTPUT-NEXT:empty: listen: no cookie: HOME/.merkurius.cookie: the cookie file is empty
+% OUTPUT-NEXT:empty MERK_COOKIE: listen: no cookie: MERK_COOKIE: the cookie is empty
+% OUTPUT-NEXT:no HOME: listen: no cookie: ~/.merkurius.cookie: HOME is not set, and neither is MERK_COOKIE
 % OUTPUT-NOT:{{.}}
 
 :- module process_remote.
@@ -117,9 +134,13 @@ main(!IO) :-
         stall(Port, !IO)
     else if Arguments = ["peer"] then
         peer(!IO)
+    else if Arguments = ["probe", Port] then
+        probe(Port, !IO)
+    else if Arguments = ["listen"] then
+        listen_only(!IO)
     else
-        io.write_string("usage: server | client PORT | stall PORT | peer\n",
-            !IO),
+        io.write_string("usage: server | client PORT | stall PORT | peer | " ++
+            "probe PORT | listen\n", !IO),
         io.set_exit_status(2, !IO)
     ).
 
@@ -495,6 +516,34 @@ stall(Port, !IO) :-
     ;
         Connected = error(Error1),
         io.write_string("connect: " ++ Error1 ++ "\n", !IO)
+    ).
+
+%---------------------------------------------------------------------------%
+% The cookie's checks: a node that only connects, and one that only listens.
+
+:- pred probe(string::in, io::di, io::uo) is det.
+
+probe(Port, !IO) :-
+    connect("127.0.0.1:" ++ Port, Connected, !IO),
+    (
+        Connected = ok(_),
+        io.write_string("connect: ok\n", !IO)
+    ;
+        Connected = error(Error1),
+        io.write_string("connect: " ++ replace_all(Error1, Port, "PORT") ++
+            "\n", !IO)
+    ).
+
+:- pred listen_only(io::di, io::uo) is det.
+
+listen_only(!IO) :-
+    listen("127.0.0.1:0", Listening, !IO),
+    (
+        Listening = ok(_),
+        io.write_string("listen: ok\n", !IO)
+    ;
+        Listening = error(Error1),
+        io.write_string("listen: " ++ Error1 ++ "\n", !IO)
     ).
 
 %---------------------------------------------------------------------------%

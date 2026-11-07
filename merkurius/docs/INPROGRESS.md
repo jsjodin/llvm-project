@@ -532,8 +532,14 @@ standard library):
   message in its mailbox, as a local send does. A `send` to a remote handle
   encodes in the sending thread and writes the frame under the connection's
   lock, so a full socket holds the sender back.
-- **Handshake.** Magic `MERK`, a version, the node id, then, from step 4,
-  the cookie's challenges and answers. Each side learns the other's id; a connection to
+- **Handshake.** Magic `MERK`, version 1, the node id and a random
+  challenge of 32 bytes from each side; then each sends the HMAC-SHA-256,
+  under the cookie, of a label, the other's challenge, its own id and the
+  other's, and checks the other's answer to its own challenge, in constant
+  time. The ids in the answerer's order keep an answer from serving on
+  another connection, as when an attacker relays a node's challenge back
+  to it. A mismatch refuses the connection, "the other node has another
+  cookie". Each side learns the other's id; a connection to
   oneself is refused, and of two connections between the same nodes one is
   kept, as above.
 - **Frames.** `message` (the whole destination handle, node id included,
@@ -681,8 +687,13 @@ device is the first slice's sender, so the formats are made for it now:
    answer in time".
 4. The cookie: HMAC-SHA-256 in the runtime, checked against RFC 4231's
    test vectors, and the challenges in the handshake, with a test
-   of a node with the wrong cookie refused. Until then the handshake's
-   version says it has none, and only loopback is tested.
+   of a node with the wrong cookie refused. Done: `HmacSha256Test` has
+   RFC 4231's seven cases, and `process-remote.m` a node with another
+   cookie, the cookie file made with mode 0400 and used, its first line as
+   the cookie, and the errors of a file others can read, an empty one, an
+   empty `MERK_COOKIE` and no `HOME`, which `listen` and `connect`
+   report. The driver gives each node a temporary `HOME`. Not yet: TLS,
+   which the version leaves room for.
 
 ## Open types: `closed(T)`
 

@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 //
 // SHA-256 (runtime/sha256.cpp) against FIPS 180-4's examples and the edges of
-// its padding, and the wire format (runtime/encode.cpp) on descriptors the
+// its padding, HMAC-SHA-256 against RFC 4231's test cases, and the wire format (runtime/encode.cpp) on descriptors the
 // test makes, as code generation would: exact bytes, round trips, random
 // bytes that must be rejected or decode to what encodes to them again, and
 // fingerprints computed independently from the description that encode.cpp
@@ -86,6 +86,44 @@ TEST(Sha256Test, PaddingEdges) {
   for (const Case &c : kCases) {
     EXPECT_EQ(Digest(std::string(c.length, 'a')), c.digest) << c.length;
   }
+}
+
+std::string Bytes(const char *hex) {
+  std::string bytes;
+  for (const char *at{hex}; at[0] && at[1]; at += 2) {
+    bytes += static_cast<char>(std::stoi(std::string(at, 2), nullptr, 16));
+  }
+  return bytes;
+}
+
+std::string Hmac(const std::string &key, const std::string &data) {
+  std::uint8_t mac[Sha256::kDigestBytes];
+  HmacSha256(key.data(), key.size(), data.data(), data.size(), mac);
+  return Hex(mac, sizeof mac);
+}
+
+// RFC 4231, section 4: keys shorter and longer than a block, and data
+// longer than a block. Test case 5's MAC is truncated to 128 bits.
+TEST(HmacSha256Test, Rfc4231) {
+  EXPECT_EQ(Hmac(std::string(20, '\x0b'), "Hi There"),
+      "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+  EXPECT_EQ(Hmac("Jefe", "what do ya want for nothing?"),
+      "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+  EXPECT_EQ(Hmac(std::string(20, '\xaa'), std::string(50, '\xdd')),
+      "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe");
+  EXPECT_EQ(Hmac(Bytes("0102030405060708090a0b0c0d0e0f10111213141516171819"),
+                std::string(50, '\xcd')),
+      "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b");
+  EXPECT_EQ(Hmac(std::string(20, '\x0c'), "Test With Truncation").substr(0, 32),
+      "a3b6167473100ee06e0c796c2955552b");
+  EXPECT_EQ(Hmac(std::string(131, '\xaa'),
+                "Test Using Larger Than Block-Size Key - Hash Key First"),
+      "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+  EXPECT_EQ(Hmac(std::string(131, '\xaa'),
+                "This is a test using a larger than block-size key and a "
+                "larger than block-size data. The key needs to be hashed "
+                "before being used by the HMAC algorithm."),
+      "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2");
 }
 
 // The same digest whatever the pieces Update is given.

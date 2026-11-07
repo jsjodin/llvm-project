@@ -4,7 +4,9 @@ Usage: two-nodes.py PROGRAM
 
 Each node is the program with a role as its argument. A node that listens
 prints "listening PORT" first, and the driver passes the port to the
-other. Every node runs with a tick time of one second.
+other. Every node runs with a tick time of one second, a cookie in
+MERK_COOKIE, and HOME a temporary directory, so that no node reads or makes
+the user's ~/.merkurius.cookie.
 
 - pingpong: a server, and a client that connects to it, looks names up,
   sends to it and gets replies, idles for three seconds, and sees the
@@ -15,32 +17,42 @@ other. Every node runs with a tick time of one second.
 - simultaneous: two peers connect to each other at once, exchange
   messages both ways, and must each end with one connection; repeated, as
   which connection wins is a race.
+- cookie: a node with another cookie is refused, and one with the same is
+  not; without MERK_COOKIE, ~/.merkurius.cookie is made, readable by its
+  owner only, and used; a file that others can read, an empty one, an
+  empty MERK_COOKIE and no HOME stop a node from listening.
 
 The output is each node's, prefixed with its role, apart from the ports.
 """
 
 import os
+import re
+import shutil
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
 PROGRAM = sys.argv[1]
-ENVIRONMENT = dict(os.environ, MERK_TICK_TIME="1")
+HOME = tempfile.mkdtemp()
+ENVIRONMENT = dict(os.environ, MERK_TICK_TIME="1", MERK_COOKIE="the cookie",
+                   HOME=HOME)
 LIMIT = 120
 ROUNDS = 20
 PEER = ["connected", "100 pongs in order", "connections: 1", "bye"]
 
 
-def start(*arguments):
+def start(*arguments, environment=None):
     node = subprocess.Popen(
         [PROGRAM, *arguments],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=ENVIRONMENT,
+        env=environment or ENVIRONMENT,
     )
     watchdog = threading.Timer(LIMIT, node.kill)
     watchdog.daemon = True
@@ -117,6 +129,69 @@ def simultaneous():
     print(f"{ROUNDS} rounds as expected")
 
 
-pingpong()
-stall()
-simultaneous()
+def run(role, *arguments, **changes):
+    """A node's output on one line, with HOME's path written as HOME."""
+    environment = dict(ENVIRONMENT)
+    for name, value in changes.items():
+        if value is None:
+            environment.pop(name, None)
+        else:
+            environment[name] = value
+    lines = finish(start(role, *arguments, environment=environment), role)
+    return " ".join(lines).replace(HOME, "HOME")
+
+
+def stop(node):
+    node.kill()
+    node.communicate()
+
+
+def cookie():
+    print("cookie:")
+    server = start("server")
+    port = port_of(server, "server")
+    print("another cookie: " + run("probe", port, MERK_COOKIE="another"))
+    print("the same cookie: " + run("probe", port))
+    stop(server)
+    # The file, made by the first node that needs it.
+    path = os.path.join(HOME, ".merkurius.cookie")
+    print("no file, listen: " + run("listen", MERK_COOKIE=None))
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    with open(path) as file:
+        made = file.read()
+    print("made: mode %o, 20 capital letters: %s" %
+          (mode, "yes" if re.fullmatch("[A-Z]{20}", made) else repr(made)))
+    environment = dict(ENVIRONMENT)
+    del environment["MERK_COOKIE"]
+    server = start("server", environment=environment)
+    port = port_of(server, "server")
+    print("the file's cookie: " + run("probe", port, MERK_COOKIE=None))
+    print("it in MERK_COOKIE: " + run("probe", port, MERK_COOKIE=made))
+    stop(server)
+    # Its first line, without the spaces after it.
+    os.chmod(path, 0o600)
+    with open(path, "w") as file:
+        file.write("first line \t\nsecond line\n")
+    server = start("server", environment=environment)
+    port = port_of(server, "server")
+    print("first line: " + run("probe", port, MERK_COOKIE="first line"))
+    print("both lines: " +
+          run("probe", port, MERK_COOKIE="first line\nsecond line"))
+    stop(server)
+    os.chmod(path, 0o640)
+    print("readable by its group: " + run("listen", MERK_COOKIE=None))
+    os.chmod(path, 0o600)
+    with open(path, "w") as file:
+        file.write("\n")
+    print("empty: " + run("listen", MERK_COOKIE=None))
+    print("empty MERK_COOKIE: " + run("listen", MERK_COOKIE=""))
+    print("no HOME: " + run("listen", MERK_COOKIE=None, HOME=None))
+
+
+try:
+    pingpong()
+    stall()
+    simultaneous()
+    cookie()
+finally:
+    shutil.rmtree(HOME)
