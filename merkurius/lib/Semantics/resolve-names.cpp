@@ -260,19 +260,39 @@ void Resolver::Declare(ModuleSymbols &symbols, const parser::Item &item,
               return;
             }
             const Symbol &owner{*owned};
+            // "It is an error for two fields in the same type to have the
+            // same label" (reference manual, "Discriminated unions").
+            llvm::StringMap<parser::CharBlock> labels;
             for (const parser::Constructor *constructor : defn->constructors) {
               symbols.Add(SymbolKind::Constructor, constructor->name->name,
                   constructor->arguments.size(), constructor,
                   NameSource(tokens, *constructor->name), exported, &owner);
               for (const parser::ConstructorArg *argument :
                   constructor->arguments) {
-                if (argument->field) {
+                if (!argument->field) {
+                  continue;
+                }
+                parser::CharBlock source{NameSource(tokens, *argument->field)};
+                auto [first, added]{
+                    labels.try_emplace(argument->field->name, source)};
+                if (!added) {
+                  if (&symbols == own_) {
+                    std::string text;
+                    llvm::raw_string_ostream os{text};
+                    os << owner;
+                    messages_
+                        .Say(source,
+                            "field %s occurs more than once in %s"_err_en_US,
+                            argument->field->name.str(), os.str())
+                        .Attach(first->second,
+                            "it first occurs here"_because_en_US);
+                  }
+                } else {
                   symbols.Add(SymbolKind::Field, argument->field->name, 1,
-                      constructor, NameSource(tokens, *argument->field),
-                      exported, &owner);
+                      constructor, source, exported, &owner);
                   symbols.Add(SymbolKind::FieldUpdate,
                       (argument->field->name + " :=").str(), 2, constructor,
-                      NameSource(tokens, *argument->field), exported, &owner);
+                      source, exported, &owner);
                 }
               }
             }
