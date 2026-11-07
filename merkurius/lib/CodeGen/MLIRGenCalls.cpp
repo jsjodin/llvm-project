@@ -59,7 +59,7 @@ merk::ProcOp MerkGenerator::NewProc(llvm::StringRef name, parser::CharBlock at,
       NotYet(at, "values of type " + semantics::TypeToString(*type));
       return nullptr;
     }
-    if (!represented->dummy) {
+    if (!represented->dummy && !IsUnused(mode)) {
       (IsOutput(mode) ? outputs : inputs).push_back(represented->type);
     }
   }
@@ -268,7 +268,7 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
       return;
     }
     bool dummy{actual->dummy};
-    if (Represent(type)->dummy) {
+    if (Represent(type)->dummy || IsUnused(mode)) {
       continue;
     }
     if (IsOutput(mode)) {
@@ -417,7 +417,7 @@ merk::ProcOp MerkGenerator::WordProcFor(const ProcedureBody &body) {
     }
     if (IsOutput(mode)) {
       ++outputs;
-    } else if (!represented->dummy) {
+    } else if (!represented->dummy && !IsUnused(mode)) {
       inputs->push_back(represented->type);
     }
   }
@@ -771,8 +771,9 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
       outputs.push_back(var);
       arguments.push_back({true, false});
     } else {
-      arguments.push_back({false, represented->dummy});
-      if (!represented->dummy) {
+      bool unpassed{represented->dummy || IsUnused(mode)};
+      arguments.push_back({false, unpassed});
+      if (!unpassed) {
         inputs.push_back(represented->type);
       }
     }
@@ -934,14 +935,15 @@ void MerkGenerator::NameClosure(const Body &goal, const ProcedureBody &body) {
     }
   }
   auto word{merk::WordType::get(&context_)};
-  for (auto [argument, type] : llvm::zip(goal.arguments, types)) {
+  for (auto [argument, type, mode] :
+      llvm::zip(goal.arguments, types, callee.modes)) {
     std::optional<Represented> declared{Represent(type)};
     std::optional<Represented> actual{Represent(body.vars[argument].type)};
     if (!declared || !actual) {
       NotYet(at, "values of type " + semantics::TypeToString(*type));
       return;
     }
-    if (!declared->dummy) {
+    if (!declared->dummy && !IsUnused(mode)) {
       captured.push_back(actual->dummy
               ? ZeroWord(loc)
               : Coerce(Coerce(ValueOf(argument), declared->type, loc), word, loc));
@@ -967,7 +969,7 @@ void MerkGenerator::NameClosure(const Body &goal, const ProcedureBody &body) {
     llvm::SmallVector<ClosureArgument> arguments;
     for (auto [mode, type] : llvm::drop_begin(
              llvm::zip(callee.modes, types), static_cast<unsigned>(curried))) {
-      bool dummy{Represent(type)->dummy};
+      bool dummy{Represent(type)->dummy || IsUnused(mode)};
       bool output{IsOutput(mode)};
       arguments.push_back({output, dummy && !(output && copyable)});
     }
@@ -1017,7 +1019,7 @@ void MerkGenerator::HigherOrderCall(const Body &goal, const ProcedureBody &body)
         bound.push_back({argument, value});
       }
     } else {
-      inputs.push_back(represented->dummy
+      inputs.push_back(represented->dummy || IsUnused(mode)
               ? ZeroWord(loc)
               : Coerce(ValueOf(argument), word, loc));
     }
