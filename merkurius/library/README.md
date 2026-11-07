@@ -21,6 +21,11 @@ running mmc's programs (design document, Code generation, "Library").
 `unsorted_aggregate2` and `do_while` have no clauses, as code generation
 makes their procedures from `merk.aggregate`, and the others are written
 in Mercury on them (design document, Lowering, "Collecting solutions").
+`process.m`, a Merkurius extension with no counterpart in Mercury's
+library, implements the mailboxes of one process, `new_mailbox`,
+`close_mailbox`, `send`, `receive` on one mailbox and `any`, with
+`foreign_proc`s on `runtime/mailbox.cpp` (design document, Language
+extensions, "Processes and mailboxes").
 `float.m` implements its
 functions but `hash`, and `math.m` all of its
 functions but `solve_quadratic`, with C's math library. The arithmetic

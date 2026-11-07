@@ -1148,6 +1148,7 @@ The API is a library module. This interface, with stub bodies, passes Melbourne 
 - **Exhaustiveness:** a receive loop declared `det` must handle every message constructor. Removing one case is a compile error: "the switch on Msg does not cover \`stop'/0".
 - **No backtracking over messages:** send and receive thread the unique `io` state, so they cannot appear in nondeterministic code.
 - **`any` is `det`** in fact, and mmc warns that its `semidet` declaration could be tighter. It is declared `semidet` only to fit the selector's mode; a `det` `receive_any` would avoid the warning.
+- **As implemented** (2026-11-07, `library/process.m`): the mailboxes of one process, `new_mailbox`, `close_mailbox`, `send`, the one-mailbox `receive` and `any`, with this interface, which mmc accepts. A handle is a slot of the runtime's table and its generation (Message passing, "So far"). `receive` is written in Mercury over `foreign_proc`s: it waits for the message at a position, tries the selector on it, and removes it if the selector succeeds, or goes on to the next. `spawn`, selectors over several mailboxes, monitors and request and reply come with processes (`CodeGen/process-local.m`, `CodeGen/process-messages.m`). As mmc has no process module to compare with, `CodeGen/process-checks.m` checks itself: round trips of generated terms of every kind a message holds, checks that a message shares nothing with the sender's term, which `foreign_proc`s overwrite in place, and a run of random sends, receives, closes and stale handles against a model, a list of queues. The runtime's unit tests (`unittests/Runtime/MailboxTest.cpp`) test what one thread cannot reach: receives woken by a send or a close, timeouts, many senders, a selective scan while messages arrive, and the table of mailboxes growing.
 
 **Kinds of message.** The kinds of message a process handles are the constructors of one discriminated union, its protocol, as Erlang's tagged tuples are:
 
@@ -2273,6 +2274,7 @@ Rejected:
 - **Cheap mailboxes:** every `request` creates one, so creating and closing a mailbox must cost about as much as a small allocation: a slot in the owner's mailbox table and a new generation number.
 - **Observability:** a process can read its own queue lengths, since non-blocking send gives a slow consumer no backpressure.
 - **Later:** remember a scan position for repeated selective receives on the same reply, as BEAM does.
+- **So far** (2026-11-07, `runtime/mailbox.cpp`): a program is one process, so one table of mailboxes, one lock and one condition variable on the monotonic clock serve every mailbox, and a receive that waits blocks its thread on the condition variable. A mailbox is a queue of messages, each in a fragment of its own, which is never freed until the collector merges fragments. `send` copies the message by its `type_info` before taking the lock, as the collector will trace (Type descriptors): a constant, number or character is its word, a string and an array are copied, an array's elements by its element type, and a cell field by field with its tags, the secondary tag too, the last field of the term's own type in a loop rather than a call, so that a long list uses no stack. A value of an existentially typed constructor and a closure cannot be sent yet, and the runtime reports them.
 
 ### Memory management
 
@@ -2504,12 +2506,13 @@ rest of the world only through its host.
   for both could share a table of procedure references, so that closures over
   them cross between the places of one node, though not to a node running
   another binary; the handle and wire formats should not rule this out.
-- **Messages are copied** into a flat buffer, as `send` already deep-copies
-  into a fragment. Each mailbox has one message type, so at almost every
-  `send` and `receive` the type is known, and code generation specializes
-  the copy for it with no `type_info` at run time; only code that is
-  polymorphic in the message type, such as a generic dispatcher, passes one
-  (The device runtime, below). The sendability rule applies,
+- **Messages are copied** into a flat buffer, as `send` on the host
+  deep-copies into a fragment by the message's `type_info` (Memory
+  management, decided 2026-11-04). The device does no run-time dispatch, so
+  there code generation specializes the copy for the message type, which is
+  known at almost every `send` and `receive` because each mailbox has one;
+  only code that is polymorphic in the message type, such as a generic
+  dispatcher, would need a `type_info` (The device runtime, below). The sendability rule applies,
   and the GPU adds to what cannot cross: foreign handles, `io`, `store` and
   mutable references are already excluded, and closures are too.
 - **The protocol is the message type.** `mailbox(M)` says which messages may
@@ -2991,6 +2994,8 @@ node 1 to node 2. Processes on the CPU come after.
    - **On node 2:** main is the region's partner, with `send` and `receive`
      on a mailbox of its own. With one process on each node, a `receive`
      that blocks waits on a condition variable, so no scheduler is needed.
+     Done: mailboxes, `send` and `receive` within one process (Processes
+     and mailboxes, "As implemented"); next are remote handles and TCP.
    - **Between them:** TCP, with handles carrying the node and the place.
      The handshake and the handle's format are designed properly now, since
      they are hard to change once programs depend on them (Handles, routing
