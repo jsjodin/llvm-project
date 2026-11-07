@@ -70,6 +70,8 @@
 :- pred replace(list(T), T, T, list(T)).
 :- mode replace(in, in, in, in) is semidet.
 :- mode replace(in, in, in, out) is nondet.
+    % Lo .. Hi = [Lo, Lo + 1, ..., Hi] if Lo =< Hi, and [] otherwise.
+:- func int .. int = list(int).
 :- func series(T, pred(T), func(T) = T) = list(T).
 :- mode series(in, pred(in) is semidet, func(in) = out is det) = out is det.
 :- func remove_dups(list(T)) = list(T).
@@ -397,6 +399,22 @@ delete_all([X0 | Xs], X, L) :-
 replace([X | Xs], X, Y, [Y | Xs]).
 replace([X | Xs], Z, Y, [X | Zs]) :-
     replace(Xs, Z, Y, Zs).
+
+Lo .. Hi = from_down(Lo, Hi, []).
+
+    % The numbers from Lo to Hi before Tail, made from Hi down, so that a
+    % long range uses no stack; Hi = Lo stops before Hi - 1, which would
+    % wrap at min_int.
+:- func from_down(int, int, list(int)) = list(int).
+
+from_down(Lo, Hi, Tail) =
+    ( if Hi < Lo then
+        Tail
+    else if Hi = Lo then
+        [Hi | Tail]
+    else
+        from_down(Lo, Hi - 1, [Hi | Tail])
+    ).
 
 series(I, OK, Succ) =
     ( if OK(I) then
