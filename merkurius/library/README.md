@@ -13,7 +13,13 @@ the narrower integers' writes in Mercury. `write`, `print` and their
 `_line` forms are polymorphic `foreign_proc`s on `runtime/write.cpp`;
 `write_list` is in Mercury, calling its closure for each element, on the
 standard output only. `command_line_arguments` and `progname` read the
-command line that the runtime's `main` keeps. `require.m` implements its errors with mmc's
+command line that the runtime's `main` keeps, which returns the status
+`set_exit_status` sets. `flush_output` flushes the standard output, and
+`read_line_as_string` reads a line of the standard input, as mmc's does:
+its bytes, with its newline, kept even when they are not UTF-8, and a NUL
+an error, "null character in input", that drops the line up to it.
+`make_io_error` and `error_message` are those of an `io.error`, which is
+its message. `require.m` implements its errors with mmc's
 messages, but `report_lookup_error`, which is not implemented yet.
 `pair.m` and `maybe.m` implement all of theirs in Mercury. `list.m` implements all of its declarations in Mercury, every
 mode, with mmc's behaviour where the manual leaves it open, as found by
