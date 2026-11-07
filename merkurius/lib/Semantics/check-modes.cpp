@@ -1593,7 +1593,10 @@ private:
       const Goal &, VarId, const std::string &other);
   // That the first of `waits`, which are not ground, is the nonlocal of a
   // lambda expression or an argument of a higher-order term.
-  Result NonlocalError(const Goal &, const InstMap &, std::vector<VarId> waits);
+  // `receive` is whether the lambda expression is a receive goal's.
+  Result NonlocalError(const Goal &, const InstMap &, std::vector<VarId> waits,
+      bool receive = false);
+  static std::string ReceiveNote();
   // The first argument that does not fit its mode's initial inst, if any.
   // With `implied`, a bound argument fits an output too: the call outputs
   // to a fresh variable, which is then unified with it (an implied mode,
@@ -3641,13 +3644,22 @@ ProcedureChecker::Result ProcedureChecker::HigherOrderUnification(
 
 // mmc: "mode error: variable `Z' has instantiatedness `free', expected
 // instantiatedness for non-local variables of lambda goals is `ground'."
-ProcedureChecker::Result ProcedureChecker::NonlocalError(
-    const Goal &goal, const InstMap &map, std::vector<VarId> waits) {
+ProcedureChecker::Result ProcedureChecker::NonlocalError(const Goal &goal,
+    const InstMap &map, std::vector<VarId> waits, bool receive) {
   VarId var{waits.front()};
   return Error(goal,
       "mode error: " + Name(var) + " has inst " + InstText(map[var]) +
-          ", but the nonlocal variables of a lambda expression must be ground",
+          (receive ? ReceiveNote()
+                   : ", but the nonlocal variables of a lambda expression "
+                     "must be ground"),
       std::move(waits));
+}
+
+// A pattern of a receive goal tests its variables that occur outside the
+// goal (design document, "The receive goal").
+std::string ProcedureChecker::ReceiveNote() {
+  return ", but a variable of a receive goal's pattern that occurs outside "
+         "the goal is tested, so it must be ground before the goal";
 }
 
 bool ProcedureChecker::IsSubtype(const Type *s, const Type *t, unsigned depth) {
@@ -3800,7 +3812,7 @@ ProcedureChecker::Result ProcedureChecker::CheckLambda(
     }
   }
   if (!waits.empty()) {
-    return NonlocalError(goal, map, std::move(waits));
+    return NonlocalError(goal, map, std::move(waits), lambda.receive);
   }
   if (!anys.empty()) {
     // mmc: "purity error: lambda is `ground' but contains the following
@@ -3808,6 +3820,11 @@ ProcedureChecker::Result ProcedureChecker::CheckLambda(
     std::string names;
     for (VarId var : anys) {
       names += (names.empty() ? "" : ", ") + Name(var);
+    }
+    if (lambda.receive) {
+      return Error(goal,
+          "mode error: " + names + " has an inst that contains any" +
+              ReceiveNote());
     }
     return Error(goal,
         "purity error: the lambda expression is ground, but these nonlocals "

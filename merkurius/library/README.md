@@ -44,7 +44,9 @@ library, implements the mailboxes of one process, `new_mailbox`,
 `close_mailbox`, `send`, `receive` on one mailbox and `any`, selectors
 over several mailboxes, `new_selector`, `selecting`, `selecting_matching`
 and `receive` over a selector, which takes the oldest message that a case
-accepts by the runtime's stamps of arrival, and a registry of names, `register`, `unregister` and `lookup`, as Erlang's,
+accepts by the runtime's stamps of arrival, what the expansion of the
+`receive` goal names (`receive_goal`, `receive_arms`, `receive_none` and
+`receive_closed`), and a registry of names, `register`, `unregister` and `lookup`, as Erlang's,
 and connections to other nodes over TCP, `listen` and `connect`, with
 `foreign_proc`s on `runtime/mailbox.cpp` and `runtime/node.cpp` (design
 document, Language extensions, "Processes and mailboxes";
