@@ -395,7 +395,11 @@ llvm::LogicalResult Lowerer::Layouts() {
   mlir::MLIRContext *context{module_.getContext()};
   auto ptr{mlir::LLVM::LLVMPointerType::get(context)};
   auto word{mlir::IntegerType::get(context, 64)};
+  llvm::SmallVector<std::pair<std::string, mlir::Location>> abstract;
   for (auto def : llvm::make_early_inc_range(module_.getOps<merk::TypeDefOp>())) {
+    if (def.getAbstract()) {
+      abstract.push_back({def.getName().str(), def.getLoc()});
+    }
     TermLayout layout;
     unsigned constants{0}, cells{0};
     for (auto constructor :
@@ -449,7 +453,24 @@ llvm::LogicalResult Lowerer::Layouts() {
     llvm::StringSet<> seen;
     ResolveLayoutType(entry.getKey(), seen);
   }
-  return llvm::success();
+  // Other modules pass the values of a type exported abstractly as pointers,
+  // since they cannot see its layout, so it must pass as a pointer does: a
+  // notag of a float, which goes in a float register, or of a narrower
+  // integer, cannot yet.
+  bool passable{true};
+  for (auto &[name, loc] : abstract) {
+    mlir::Type type{layouts_.find(name)->second.type};
+    if (!mlir::isa<mlir::LLVM::LLVMPointerType>(type) && type != word) {
+      std::string text;
+      llvm::raw_string_ostream os{text};
+      type.print(os);
+      mlir::emitError(loc,
+          "not yet implemented: a type exported abstractly whose values are " +
+              text + ", which other modules pass as pointers");
+      passable = false;
+    }
+  }
+  return llvm::success(passable);
 }
 
 // A type of one constructor of one argument is its argument's type, a chain of

@@ -5,7 +5,8 @@
 // constant shifted past a 3-bit primary tag or a pointer to a cell with
 // its constructor's tag. Tag 0 is the constants', and the last tag is
 // shared, with a secondary tag in the cell's first word, by the
-// constructors with arguments that need more tags than are left.
+// constructors with arguments that need more tags than are left. A type
+// exported abstractly is marked so, and passes as a pointer.
 //
 // A cell is allocated by mrt.alloc, whose lowering ../Mrt/ops.mlir checks;
 // a ground term known at compile time is a static cell instead.
@@ -24,9 +25,11 @@ module @terms attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   // CHECK: merk.type_def "terms.colour" [#merk.constructor<"red">, #merk.constructor<"green">]
   // CHECK: merk.type_def "terms.wrap" [#merk.constructor<"wrap"(f64)>]
   // CHECK: merk.type_def "list.list(int)" [#merk.constructor<"[]">, #merk.constructor<"[|]"(i64, !merk.term<"list.list(int)">)>]
+  // CHECK: merk.type_def "terms.secret" [#merk.constructor<"secret"(i64, i64)>] abstract
   merk.type_def "terms.colour" [#merk.constructor<"red">, #merk.constructor<"green">]
   merk.type_def "terms.wrap" [#merk.constructor<"wrap"(f64)>]
   merk.type_def "list.list(int)" [#merk.constructor<"[]">, #merk.constructor<"[|]"(i64, !merk.term<"list.list(int)">)>]
+  merk.type_def "terms.secret" [#merk.constructor<"secret"(i64, i64)>] abstract
   // Eight constructors with arguments and a constant: tags 1 to 6, and 7
   // shared by g and h, with secondary tags 0 and 1.
   merk.type_def "terms.many" [#merk.constructor<"z">, #merk.constructor<"a"(i64)>, #merk.constructor<"b"(i64)>, #merk.constructor<"c"(i64)>, #merk.constructor<"d"(i64)>, #merk.constructor<"e"(i64)>, #merk.constructor<"f"(i64)>, #merk.constructor<"g"(i64)>, #merk.constructor<"h"(i64)>]

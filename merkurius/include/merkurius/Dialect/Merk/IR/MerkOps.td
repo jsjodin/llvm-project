@@ -489,16 +489,24 @@ def Merk_TypeDefOp : Merk_Op<"type_def", [HasParent<"mlir::ModuleOp">]> {
     Lists the constructors of the type that `!merk.term<name>` names, in
     the order the type's definition declares them, with their arguments'
     types, for lowering to choose the type's layout from. A module has one
-    for each such type its procedures use, its own or imported.
+    for each such type its procedures use, its own or imported, but for an
+    abstract type of another module, whose constructors it cannot see: such
+    a `!merk.term` has no layout, and its values are pointers.
+
+    `abstract` marks a type of the module that its interface declares
+    abstractly, which other modules pass as a pointer, so its layout must
+    be one that passes as a pointer does: a pointer or a word.
 
     ```mlir
     merk.type_def "list.list(int)" [#merk.constructor<"[]">,
         #merk.constructor<"[|]"(i64, !merk.term<"list.list(int)">)>]
+    merk.type_def "secret.box(T0)" [#merk.constructor<"box"(!merk.word, i64)>] abstract
     ```
   }];
   let arguments = (ins StrAttr:$name,
-      TypedArrayAttrBase<Merk_ConstructorAttr, "constructors">:$constructors);
-  let assemblyFormat = "$name $constructors attr-dict";
+      TypedArrayAttrBase<Merk_ConstructorAttr, "constructors">:$constructors,
+      UnitAttr:$abstract);
+  let assemblyFormat = "$name $constructors (`abstract` $abstract^)? attr-dict";
 }
 
 def Merk_ConstructOp : Merk_Op<"construct", [Pure]> {

@@ -141,7 +141,7 @@ bool MerkGenerator::Comparable(mlir::Type type, llvm::StringSet<> &seen) {
   if (!term) {
     return false;
   }
-  if (!seen.insert(term.getName()).second) {
+  if (!seen.insert(term.getName()).second || IsAbstract(term)) {
     return true;
   }
   const semantics::Type *semantic{terms_.lookup(term.getName())};
@@ -154,6 +154,15 @@ bool MerkGenerator::Comparable(mlir::Type type, llvm::StringSet<> &seen) {
     }
   }
   return true;
+}
+
+bool MerkGenerator::IsAbstract(mlir::Type type) {
+  auto term{mlir::dyn_cast<merk::TermType>(type)};
+  if (!term) {
+    return false;
+  }
+  const semantics::Type *semantic{terms_.lookup(term.getName())};
+  return semantic && !modes_.ops().ConstructorsOf(semantic);
 }
 
 merk::ProcOp MerkGenerator::UnifyProc(merk::TermType term) {
@@ -365,9 +374,10 @@ void MerkGenerator::Equal(mlir::Value x, mlir::Value y,
     merk::GuardOp::create(builder_, loc,
         merk::UnifyWordOp::create(
             builder_, loc, builder_.getI1Type(), info, x, y));
-  } else if (mlir::isa<merk::ClosureType>(type)) {
+  } else if (mlir::isa<merk::ClosureType>(type) || IsAbstract(type)) {
     // Through the descriptor of the higher-order type, whose unification
-    // procedure reports the error, as mmc's does.
+    // procedure reports the error, as mmc's does, or of the abstract type,
+    // which its module defines.
     mlir::Value info{TypeInfoOfType(semantic, loc, equalAt_)};
     if (!info) {
       failed_ = true;
@@ -483,8 +493,8 @@ mlir::Value MerkGenerator::Compare(mlir::Value x, mlir::Value y,
     }
     return merk::CompareWordOp::create(builder_, loc, result, info, x, y);
   }
-  if (mlir::isa<merk::ClosureType>(type)) {
-    // As a unification of closures.
+  if (mlir::isa<merk::ClosureType>(type) || IsAbstract(type)) {
+    // As a unification of closures, or of an abstract type's terms.
     mlir::Value info{TypeInfoOfType(semantic, loc, equalAt_)};
     if (!info) {
       failed_ = true;

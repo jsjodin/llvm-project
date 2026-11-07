@@ -311,9 +311,11 @@ program.
    step yet. Types with polymorphic recursion, whose instances
    have no end, such as `grow(T) ---> stop(T) ; more(T, grow(list(T)))`, are
    "not yet implemented" too.
-   Values of an abstract imported type are still "not yet
-   implemented": a module cannot pass one without its layout, as a notag
-   float travels in a float register.
+   Values of an abstract imported type are pointers, unified and compared
+   through the descriptor of the module that defines it, which reports as
+   "not yet implemented" a type exported abstractly whose layout does not
+   pass as a pointer does, such as a notag float, which travels in a float
+   register (design document, Lowering, "Type representation").
 5. **Done:** closures. `merk.closure`, `merk.closure_word` and
    `merk.call_closure` (D7), lambda expressions, closures of named and
    built-in procedures, higher-order calls in constant stack through word
