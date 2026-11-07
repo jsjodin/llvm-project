@@ -114,6 +114,8 @@ struct FrontendOptions {
   // -fstub-unimplemented. Temporary (chunk 1 step 6, docs/INPROGRESS.md):
   // until code generation makes every procedure of the library.
   bool stubUnimplemented{false};
+  // --trace-flag=, for the flag(Name) conditions of trace goals.
+  std::vector<std::string> traceFlags;
 };
 
 // The options of code generation: the target, and how far to optimize.

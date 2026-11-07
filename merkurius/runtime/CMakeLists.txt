@@ -7,6 +7,7 @@ add_library(merkrt STATIC
   exception.cpp
   heap.cpp
   main.cpp
+  trace.cpp
   type-info.cpp
   write.cpp
   )

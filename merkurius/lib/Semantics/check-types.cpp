@@ -396,6 +396,7 @@ private:
   void CheckFunctor(const Unify &, const parser::SymName &);
   void CheckCall(const Call &);
   void CheckHOCall(const HOCall &);
+  void TraceIo(const Scope &);
   const Type *HOCallType(const HOCall &);
   void CheckLoop(const Loop &);
   ClauseTypes Finish(const ClauseForm &, const Symbol *definition,
@@ -3085,6 +3086,36 @@ const Type *TypeChecker::HOCallType(const HOCall &call) {
   return types_.HigherOrder(call.kind, call.purity, types, result);
 }
 
+// The versions of a trace goal's io(!S) state variable are io states
+// (reference manual, "Trace goals"); a state(M, !S) one's are of the
+// mutable's type, but mutables are still to come.
+void TypeChecker::TraceIo(const Scope &scope) {
+  const Type *io{Library("io", "state")};
+  if (!io) {
+    return;
+  }
+  const auto *trace{std::get<const parser::TraceGoal *>(
+      std::get<parser::Goal>(scope.origin))};
+  std::size_t next{0};
+  for (const parser::TraceParam *param : trace->params) {
+    if (!param->var) {
+      continue;
+    }
+    if (param->kind == parser::TraceParamKind::Io) {
+      for (VarId var : scope.vars.slice(next, 2)) {
+        Constrain(
+            [&](Assignment &a) { return UnifyTypes(a, VarType(var), io); },
+            [&](const Assignment &a) {
+              messages_->Say(Source(param->tokens),
+                  "type error: %s has type %s, but io(...) needs io.state"_err_en_US,
+                  Describe(var), TypeText(a, VarType(var)));
+            });
+      }
+    }
+    next += 2;
+  }
+}
+
 void TypeChecker::CheckHOCall(const HOCall &call) {
   Constrain(
       [&](Assignment &a) {
@@ -3232,7 +3263,12 @@ void TypeChecker::CheckGoal(const Goal &goal) {
           [&](const Unify *unify) { CheckUnify(*unify); },
           [&](const Call *call) { CheckCall(*call); },
           [&](const HOCall *call) { CheckHOCall(*call); },
-          [&](const Scope *scope) { CheckGoal(scope->goal); },
+          [&](const Scope *scope) {
+            if (scope->kind == ScopeKind::Trace) {
+              TraceIo(*scope);
+            }
+            CheckGoal(scope->goal);
+          },
           [&](const Try *t) {
             if (const Type * io{Library("io", "state")}) {
               for (VarId var : t->io) {

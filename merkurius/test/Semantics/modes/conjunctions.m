@@ -26,6 +26,7 @@
 :- pred pass(T::di, T::uo) is det.
 :- func double(int) = int.
 :- pred later(int::out) is det.
+:- pred parallel(int::out, int::out) is det.
 
 :- implementation.
 :- import_module int.
@@ -104,4 +105,10 @@ later(X) :-
     trace [compile_time(flag("later"))] true,
     X = 1.
 % CHECK-LABEL: pred conjunctions.later/1 mode 0: later(out) is det
-% CHECK-NEXT: not checked: Scope
+% CHECK-NEXT: clause at
+% CHECK-NEXT: construct X = 1
+
+parallel(X, Y) :-
+    ( X = 1 & Y = 2 ).
+% CHECK-LABEL: pred conjunctions.parallel/2 mode 0: parallel(out, out) is det
+% CHECK-NEXT: not checked: ParallelConjunction
