@@ -16,9 +16,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "descriptor.h"
+#include "encode.h"
+#include "node.h"
 #include "gtest/gtest.h"
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -32,8 +35,8 @@ using merkurius::runtime::Word;
 
 extern "C" {
 void merk_node(std::int64_t *high, std::int64_t *low);
-void merk_mailbox_new(
-    std::int64_t *placeAndSlot, std::int64_t *generation, std::int64_t *secret);
+void merk_mailbox_new(Word typeInfo, std::int64_t *placeAndSlot,
+    std::int64_t *generation, std::int64_t *secret);
 void merk_mailbox_close(HANDLE_PARAMETERS);
 void merk_mailbox_send(HANDLE_PARAMETERS, Word typeInfo, Word value);
 std::int64_t merk_mailbox_deadline(std::int64_t milliseconds);
@@ -41,8 +44,7 @@ std::int64_t merk_mailbox_wait(
     HANDLE_PARAMETERS, std::int64_t position, std::int64_t deadline);
 Word merk_mailbox_message(HANDLE_PARAMETERS, std::int64_t position);
 void merk_mailbox_remove(HANDLE_PARAMETERS, std::int64_t position);
-std::int64_t merk_mailbox_register(
-    HANDLE_PARAMETERS, const char *name, Word typeInfo);
+std::int64_t merk_mailbox_register(HANDLE_PARAMETERS, const char *name);
 void merk_mailbox_unregister(const char *name);
 std::int64_t merk_mailbox_lookup(const char *name, Word typeInfo,
     std::int64_t *placeAndSlot, std::int64_t *generation, std::int64_t *secret);
@@ -70,10 +72,10 @@ struct Box {
 
 #define BOX(box) box.nodeHigh, box.nodeLow, box.slot, box.generation, box.secret
 
-Box NewBox() {
+Box NewBox(Word type = IntType()) {
   Box box;
   merk_node(&box.nodeHigh, &box.nodeLow);
-  merk_mailbox_new(&box.slot, &box.generation, &box.secret);
+  merk_mailbox_new(type, &box.slot, &box.generation, &box.secret);
   return box;
 }
 
@@ -208,7 +210,7 @@ TEST(MailboxTest, SecretsDiffer) {
 // A lookup finds a registered mailbox only for its message type.
 TEST(MailboxTest, RegisterAndLookup) {
   Box box{NewBox()};
-  ASSERT_EQ(merk_mailbox_register(BOX(box), "pong", IntType()), 0);
+  ASSERT_EQ(merk_mailbox_register(BOX(box), "pong"), 0);
   Box found{box};
   found.slot = found.generation = found.secret = -1;
   EXPECT_EQ(merk_mailbox_lookup(
@@ -231,21 +233,21 @@ TEST(MailboxTest, RegisterAndLookup) {
 // closing a mailbox or unregistering its name frees the name.
 TEST(MailboxTest, RegisterErrors) {
   Box a{NewBox()}, b{NewBox()};
-  ASSERT_EQ(merk_mailbox_register(BOX(a), "server", IntType()), 0);
-  EXPECT_EQ(merk_mailbox_register(BOX(b), "server", IntType()), 1);
-  EXPECT_EQ(merk_mailbox_register(BOX(a), "other", IntType()), 2);
+  ASSERT_EQ(merk_mailbox_register(BOX(a), "server"), 0);
+  EXPECT_EQ(merk_mailbox_register(BOX(b), "server"), 1);
+  EXPECT_EQ(merk_mailbox_register(BOX(a), "other"), 2);
   Box closed{NewBox()};
   Close(closed);
-  EXPECT_EQ(merk_mailbox_register(BOX(closed), "closed", IntType()), 3);
+  EXPECT_EQ(merk_mailbox_register(BOX(closed), "closed"), 3);
   std::int64_t slot, generation, secret;
   Close(a);
   EXPECT_EQ(
       merk_mailbox_lookup("server", IntType(), &slot, &generation, &secret), 1);
-  ASSERT_EQ(merk_mailbox_register(BOX(b), "server", IntType()), 0);
+  ASSERT_EQ(merk_mailbox_register(BOX(b), "server"), 0);
   merk_mailbox_unregister("server");
   EXPECT_EQ(
       merk_mailbox_lookup("server", IntType(), &slot, &generation, &secret), 1);
-  EXPECT_EQ(merk_mailbox_register(BOX(b), "again", IntType()), 0);
+  EXPECT_EQ(merk_mailbox_register(BOX(b), "again"), 0);
   Close(b);
 }
 
@@ -369,6 +371,70 @@ TEST(MailboxTest, WaitersOnDifferentMailboxes) {
   EXPECT_EQ(sumB, kCount * (kCount + 1));
   Close(a);
   Close(b);
+}
+
+merkurius::runtime::Handle HandleOf(Box box) {
+  return {static_cast<Word>(box.nodeHigh), static_cast<Word>(box.nodeLow),
+      static_cast<Word>(box.slot), box.generation,
+      static_cast<Word>(box.secret)};
+}
+
+// What a connection's reader does with a message for this node: decoded by
+// the mailbox's own type and queued, or dropped as a local send to a closed
+// mailbox is, or rejected if it is not a value of that type.
+TEST(MailboxTest, DeliverEncoded) {
+  using merkurius::runtime::Delivery;
+  using merkurius::runtime::DeliverEncoded;
+  Box box{NewBox()};
+  merkurius::runtime::Encoded encoded;
+  ASSERT_EQ(merkurius::runtime::Encode(static_cast<Word>(-42), IntType(),
+                encoded),
+      nullptr);
+  ASSERT_EQ(encoded.size, 8u);
+  EXPECT_EQ(DeliverEncoded(HandleOf(box), encoded.bytes, encoded.size),
+      Delivery::Delivered);
+  EXPECT_EQ(Receive(box, 0), std::optional<Word>{static_cast<Word>(-42)});
+  Box wrongSecret{box}, otherPlace{box};
+  wrongSecret.secret ^= 1;
+  otherPlace.slot |= std::int64_t{1} << 48;
+  EXPECT_EQ(DeliverEncoded(HandleOf(wrongSecret), encoded.bytes, encoded.size),
+      Delivery::Dropped);
+  EXPECT_EQ(DeliverEncoded(HandleOf(otherPlace), encoded.bytes, encoded.size),
+      Delivery::Dropped);
+  EXPECT_EQ(DeliverEncoded(HandleOf(box), encoded.bytes, 4),
+      Delivery::Undecodable);
+  std::uint8_t twoItems[16]{};
+  EXPECT_EQ(DeliverEncoded(HandleOf(box), twoItems, sizeof twoItems),
+      Delivery::Undecodable);
+  EXPECT_EQ(Receive(box, 0), std::nullopt);
+  Close(box);
+  EXPECT_EQ(DeliverEncoded(HandleOf(box), encoded.bytes, encoded.size),
+      Delivery::Dropped);
+  std::free(encoded.bytes);
+}
+
+// Another node's lookup gives the type's fingerprint, which must be the
+// registered mailbox's.
+TEST(MailboxTest, LookupForPeer) {
+  using merkurius::runtime::LookupForPeer;
+  Box box{NewBox()};
+  ASSERT_EQ(merk_mailbox_register(BOX(box), "peer-pong"), 0);
+  std::uint8_t ofInt[merkurius::runtime::kFingerprintBytes];
+  std::uint8_t ofFloat[merkurius::runtime::kFingerprintBytes];
+  merkurius::runtime::Fingerprint(IntType(), ofInt);
+  merkurius::runtime::Fingerprint(FloatType(), ofFloat);
+  merkurius::runtime::Handle found{};
+  ASSERT_EQ(LookupForPeer("peer-pong", ofInt, found), 0);
+  merkurius::runtime::Handle expected{HandleOf(box)};
+  EXPECT_EQ(found.nodeHigh, expected.nodeHigh);
+  EXPECT_EQ(found.nodeLow, expected.nodeLow);
+  EXPECT_EQ(found.placeAndSlot, expected.placeAndSlot);
+  EXPECT_EQ(found.generation, expected.generation);
+  EXPECT_EQ(found.secret, expected.secret);
+  EXPECT_EQ(LookupForPeer("peer-pong", ofFloat, found), 2);
+  EXPECT_EQ(LookupForPeer("peer-ping", ofInt, found), 1);
+  Close(box);
+  EXPECT_EQ(LookupForPeer("peer-pong", ofInt, found), 1);
 }
 
 } // namespace
