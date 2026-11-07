@@ -31,6 +31,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "fragment.h"
 #include "walk.h"
 #include <cstdint>
 #include <cstdio>
@@ -49,36 +50,6 @@ using namespace merkurius::runtime;
   std::fprintf(stderr, "Mercury runtime: %s%s\n", message, detail);
   std::exit(1);
 }
-
-void *Malloc(std::size_t bytes) {
-  void *block{std::malloc(bytes)};
-  if (!block) {
-    Fail("out of memory", "");
-  }
-  return block;
-}
-
-// A message's cells, bump-allocated in chunks from malloc, which align them
-// to a word at least, as the primary tags need.
-class Fragment {
-public:
-  void *Allocate(std::size_t bytes) {
-    bytes = (bytes + 7) & ~std::size_t{7};
-    if (static_cast<std::size_t>(limit_ - next_) < bytes) {
-      std::size_t size{bytes > kChunkBytes / 4 ? bytes : kChunkBytes};
-      next_ = static_cast<char *>(Malloc(size));
-      limit_ = next_ + size;
-    }
-    void *cell{next_};
-    next_ += bytes;
-    return cell;
-  }
-
-private:
-  static constexpr std::size_t kChunkBytes{4096};
-  char *next_{nullptr};
-  char *limit_{nullptr};
-};
 
 Word CopyTyped(Word value, const Type &type, Fragment &fragment);
 

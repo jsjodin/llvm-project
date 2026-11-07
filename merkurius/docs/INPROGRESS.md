@@ -545,18 +545,30 @@ standard library):
   items of 8 bytes, little-endian: an int, of any size, or a char as its
   value, a float as its bits, a string as its length and then its bytes,
   padded to 8, an array as its length and then its elements, and a
-  constructor as its functor number and then its arguments. No addresses,
-  no word size, no tag layout. Rejected: varints, as Erlang's small
+  constructor, a tuple's too, as its functor number and then its arguments.
+  So no value takes less than an item, which bounds an array's length by
+  the bytes left. No addresses, no word size, no tag layout. Done in step 2
+  (`runtime/encode.cpp`); `test/CodeGen/encode-checks.m` has golden
+  encodings, which a device's encoder must give too. Rejected: varints, as Erlang's small
   integers are, which save space on small numbers but make a GPU branch on
   every element, and keep an array of numbers from being one run of bytes
   (below).
 - **Decoding** walks the receiver's type_info for the mailbox, checks every
-  functor number, length and string against it, and builds the cells in a
-  fragment, as a local send does.
-- **Fingerprints.** A type's fingerprint hashes its module, name, arity,
-  and each functor's name and argument types, through every type reachable
-  from it, computed from the descriptors once and cached. `lookup` sends
-  it, so functor numbers mean the same on both sides. Type tables and
+  functor number, length, integer's range, string and padding against it,
+  and builds the cells in a fragment, as a local send does. The encoding
+  has one form for each value, so what decodes encodes to the same bytes,
+  which the unit tests check on random input. A value may nest 10000 deep,
+  but for a constructor's last argument of its own type, as a list's tail,
+  which is a loop; step 3's reader threads need the stack for that.
+- **Fingerprints.** A type's fingerprint is SHA-256, cut to 128 bits, of a
+  description of it in the encoding's items: each type constructor by its
+  module (empty for the builtin types), name and arguments, and the first
+  time one of constructors is met, its definition, each functor's name,
+  arity and argument types, with type parameters by number, through every
+  type reachable from it. Types are told apart by name, as a program may
+  have more than one descriptor for one. `lookup` sends it, so functor
+  numbers mean the same on both sides; it is computed at each lookup,
+  which is rare, rather than cached. Type tables and
   translation by functor name, which let definitions differ, come later as
   a connection record, without changing how a value is encoded.
 - **Not yet:** existentially typed constructors and closures, which the
@@ -642,11 +654,13 @@ device is the first slice's sender, so the formats are made for it now:
 
 1. Handles with node, place and secret, still local; `register` and a
    local lookup.
-2. The encoding and fingerprints, with unit tests, used by nothing yet.
+2. The encoding and fingerprints, with unit tests, used by nothing yet;
+   SHA-256, which the fingerprints need, checked against FIPS 180-4's
+   examples. Done.
 3. `listen`, `connect`, `lookup` and remote sends, with ticks and
    simultaneous connections; the loopback tests.
-4. The cookie: SHA-256 and HMAC in the runtime, checked against the
-   standard's test vectors, and the challenges in the handshake, with a test
+4. The cookie: HMAC-SHA-256 in the runtime, checked against RFC 4231's
+   test vectors, and the challenges in the handshake, with a test
    of a node with the wrong cookie refused. Until then the handshake's
    version says it has none, and only loopback is tested.
 
