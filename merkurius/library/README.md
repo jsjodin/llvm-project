@@ -12,7 +12,8 @@ have no implementation yet.
 the narrower integers' writes in Mercury. `write`, `print` and their
 `_line` forms are polymorphic `foreign_proc`s on `runtime/write.cpp`;
 `write_list` is in Mercury, calling its closure for each element, on the
-standard output only. `require.m` implements its errors with mmc's
+standard output only. `command_line_arguments` and `progname` read the
+command line that the runtime's `main` keeps. `require.m` implements its errors with mmc's
 messages, but `report_lookup_error`, which is not implemented yet.
 `pair.m` and `maybe.m` implement all of theirs in Mercury. `list.m` implements all of its declarations in Mercury, every
 mode, with mmc's behaviour where the manual leaves it open, as found by
