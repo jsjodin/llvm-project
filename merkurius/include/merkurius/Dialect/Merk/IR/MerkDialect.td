@@ -95,6 +95,14 @@ def Merk_EnvType : TypeDef<Merk_Dialect, "Env"> {
   let summary = "a continuation's environment";
 }
 
+// The address of a field of a cell being built, its hole, which a procedure
+// fills after the cell is made (design document, Lowering, "Deterministic
+// and semidet code", "Last call modulo constructor").
+def Merk_RefType : TypeDef<Merk_Dialect, "Ref"> {
+  let mnemonic = "ref";
+  let summary = "the address of a hole in a cell being built";
+}
+
 // A run-time description of a type, a tagged pointer: tag 0 for a descriptor
 // of a type of arity 0, tag 1 for a cell of a descriptor and its arguments'
 // type_infos (design document, "Type descriptors").

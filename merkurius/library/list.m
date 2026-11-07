@@ -712,11 +712,13 @@ filter(P, Xs) = Trues :-
 
 filter(_, [], []).
 filter(P, [X | Xs], Trues) :-
-    filter(P, Xs, Trues1),
+    % The recursive calls are last, so that they are tail calls (last call
+    % modulo constructor).
     ( if P(X) then
+        filter(P, Xs, Trues1),
         Trues = [X | Trues1]
     else
-        Trues = Trues1
+        filter(P, Xs, Trues)
     ).
 
 filter(_, [], [], []).
@@ -732,20 +734,21 @@ filter(P, [X | Xs], Trues, Falses) :-
 
 filter_map(_, []) = [].
 filter_map(F, [X | Xs]) = Ys :-
-    Ys1 = filter_map(F, Xs),
+    % The recursive calls are last, as in filter/3.
     ( if Y = F(X) then
-        Ys = [Y | Ys1]
+        Ys = [Y | filter_map(F, Xs)]
     else
-        Ys = Ys1
+        Ys = filter_map(F, Xs)
     ).
 
 filter_map(_, [], []).
 filter_map(P, [X | Xs], Ys) :-
-    filter_map(P, Xs, Ys1),
+    % The recursive calls are last, as in filter/3.
     ( if P(X, Y) then
+        filter_map(P, Xs, Ys1),
         Ys = [Y | Ys1]
     else
-        Ys = Ys1
+        filter_map(P, Xs, Ys)
     ).
 
 filter_map(_, [], [], []).
