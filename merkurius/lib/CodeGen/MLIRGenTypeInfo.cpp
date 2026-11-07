@@ -636,7 +636,7 @@ void MerkGenerator::GenerateDispatch(const semantics::InstanceHead &head,
       llvm::zip(procedure.modes, declared->arguments, instance)) {
     Represented asDeclared{*Represent(classType)};
     Represented asInstance{*Represent(instanceType)};
-    if (asDeclared.dummy) {
+    if (asDeclared.dummy || IsUnused(mode)) {
       continue;
     }
     if (IsOutput(mode)) {

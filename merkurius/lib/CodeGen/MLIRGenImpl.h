@@ -306,6 +306,13 @@ private:
     return modes_.ops().IsFree(mode.initial) &&
         !modes_.ops().IsFree(mode.final);
   }
+  // An argument free before and after, as of mode free >> free, carries
+  // nothing either way, so it is not passed, as one of a type with no values
+  // is not, and as mmc passes it.
+  bool IsUnused(const semantics::ArgMode &mode) {
+    return modes_.ops().IsFree(mode.initial) &&
+        modes_.ops().IsFree(mode.final);
+  }
   // The procedure's merk.proc, declared if it is not defined yet; null
   // after reporting the reason if it cannot be.
   merk::ProcOp ProcFor(const Procedure &, llvm::ArrayRef<const semantics::Type *>,
