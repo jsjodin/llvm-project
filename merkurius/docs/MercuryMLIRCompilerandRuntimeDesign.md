@@ -2500,8 +2500,12 @@ rest of the world only through its host.
   for both could share a table of procedure references, so that closures over
   them cross between the places of one node, though not to a node running
   another binary; the handle and wire formats should not rule this out.
-- **Messages are copied** into a flat buffer driven by the `type_info`, as
-  `send` already deep-copies into a fragment. The sendability rule applies,
+- **Messages are copied** into a flat buffer, as `send` already deep-copies
+  into a fragment. Each mailbox has one message type, so at almost every
+  `send` and `receive` the type is known, and code generation specializes
+  the copy for it with no `type_info` at run time; only code that is
+  polymorphic in the message type, such as a generic dispatcher, passes one
+  (The device runtime, below). The sendability rule applies,
   and the GPU adds to what cannot cross: foreign handles, `io`, `store` and
   mutable references are already excluded, and closures are too.
 - **The protocol is the message type.** `mailbox(M)` says which messages may
@@ -2526,8 +2530,8 @@ a fragment of its own.
    pointers), over libc's RPC, with the host bridge.
 2. Spawning a GPU process by kind name, as a persistent kernel, from the CPU
    only.
-3. Deep-copied messages through the `type_info`, with sendability checked at
-   compile time.
+3. Deep-copied messages, the copy specialized at the message type, with
+   sendability checked at compile time.
 
 Not in it: spawning from the GPU, monitors and links, selectors over several
 mailboxes, timeouts other than polling, and garbage collection on the device.
@@ -2540,10 +2544,12 @@ mailboxes, timeouts other than polling, and garbage collection on the device.
   and a kernel waiting for the host deadlock.
 - **What a process is on a GPU:** a wavefront or a work-group, not a lane,
   with one lane using the mailbox for all of them or one port slot per lane as
-  libc's RPC does. Between messages it may run data-parallel loops.
+  libc's RPC does. Between messages it may run data-parallel loops. The
+  first version: a kernel of one team, whose initial thread communicates
+  (The device runtime, below).
 - **Its heap:** chunks of device memory reserved at launch, bump-allocated.
   Without a collector on the device, a process is short-lived or resets its
-  heap between messages.
+  heap between messages (The device runtime, below).
 - **Memory coherence:** fine-grained host memory with system-scope atomics
   where the platform supports PCIe atomics, and coarse-grained memory with
   explicit fences and polling otherwise.
@@ -2766,6 +2772,233 @@ What it cannot show:
   launches it (`launchImpl`), and a `nowait` region runs as a task on libomp's
   hidden helper threads. That tests that the launching Mercury process is
   suspended, though not with a GPU's timing.
+
+#### The device runtime
+
+Discussed 2026-11-07. Code on a device that uses only scalars and arrays of
+scalars, with lifetimes known at compile time, needs almost none of the
+runtime a CPU process has, so the device's own runtime is a few hundred
+lines beside the OpenMP device runtime, which a target region needs anyway.
+
+**What the device does without:**
+
+- **A collector.** An array of scalars holds no pointers, so nothing is
+  traced, and with known lifetimes nothing has to be found: no stack maps,
+  safepoints or write barriers on the device.
+- **Type information at run time.** `type_info`s and `typeclass_info`s serve
+  polymorphic code and generic unification, comparison and writing. Device
+  code is monomorphic, so code generation specializes all of it.
+- **General allocation.** A device's `malloc` is slow and fragments memory.
+
+**What it keeps:**
+
+1. **The arrays a region uses,** which the host allocates and maps in with
+   `map` clauses, as target regions do now.
+2. **An arena for arrays made on the device,** one for each launch or each
+   process: allocation bumps a pointer, and everything is freed at once when
+   the kernel ends or the process resets it. This is region-based memory
+   management in its simplest form; mmc had a region grade (`rbmm`, after
+   Phan and Janssens), which is why `grade(rbmm)` is a trace goal's test. If
+   the sizes are known when the kernel starts, the host sizes the arena
+   exactly, and it cannot overflow.
+3. **Uniqueness for the rest.** An `array_di`/`array_uo` update is in place,
+   and the last use of a unique array is known at compile time, so the
+   compiler can reuse or free its space (compile-time garbage collection, as
+   Mazur's thesis on structure reuse for Mercury has it). A `send` of a unique
+   array hands it over: the sender cannot use it again, so nothing waits for
+   the send to finish before the array is reused, and nothing is copied
+   defensively.
+4. **Mailboxes:** a small queue in device memory that the host writes into,
+   and `send` and `receive` over libc's RPC. Flat messages are copied with
+   `memcpy`, so the host and the relays forward bytes without reading them.
+   libc's RPC moves a small buffer for each lane on each round trip, so a
+   large message is written by the host straight into device memory, and
+   only its address and length cross by RPC.
+5. **Errors.** An index out of range, or an exception nothing catches,
+   reports through the RPC, as `printf` does, and traps; the first version
+   does not unwind on the device. A process that traps is a place's failure
+   for its monitors (Send and receive in a target region, above).
+6. **A small stack** for each thread. Tail calls and last call modulo
+   constructor keep loops flat; recursion that is not a tail call is kept
+   shallow, as a device thread's stack does not grow.
+
+**Who communicates.** In a generic kernel, the code outside every
+`parallel` runs on each team's initial thread only, while the other threads
+wait in the runtime's state machine, so `send` and `receive` in the
+sequential part (Send and receive in a target region) already run on one
+thread for each team, with no directive. The first version runs a GPU
+process as a kernel of one team, `num_teams(1)`, so that a process is one
+team and one thread talks to the host. Later, a process for each team in an
+SPMD kernel would use `masked` (OpenMP 5.1's replacement for the deprecated
+`master`, `omp.masked` in MLIR's dialect, as Flang lowers it), with a team
+barrier after a `receive` whose message the other threads read. Either way,
+the threads that wait do so at a barrier or in the state machine, never by
+spinning on a flag the talking thread sets: lanes of one wavefront spinning
+while another lane must progress can deadlock on AMD.
+
+**The subset this needs,** checked in the device compile and reported as
+not supported on the device rather than run slowly: scalars, arrays of
+scalars and tuples of them; no strings, no terms built from constructors,
+which need a heap and a copy that knows their shape, no closures and no
+polymorphism. The checks, and proving the sizes an arena is made for, are
+the work; the runtime itself stays small. Futhark and Accelerate keep about
+as little on the GPU: neither has a collector there, and both plan memory
+statically, Futhark reusing memory blocks by its size analysis.
+
+#### Data-parallel arrays: an OpenACC-like module
+
+Proposed 2026-11-07; not designed in detail yet. OpenACC's model has two
+parts, levels of parallelism and data regions, and both have a simple
+counterpart: the levels map onto OpenMP, and the data regions become a
+type.
+
+| OpenACC | OpenMP on a GPU | OpenMP on a CPU |
+| --- | --- | --- |
+| `gang` | `teams distribute` | `parallel do` |
+| `worker` | `parallel do` | none |
+| `vector` | the team's threads (`simd` on a GPU is mostly lanes) | `simd` |
+
+Translating OpenACC into OpenMP has been done before: Clacc, from Oak Ridge
+National Laboratory, implements OpenACC in Clang that way. Flang instead has
+an `acc` dialect of its own. A translation suits Merkurius, which already
+lowers `%$omp target teams distribute parallel do` loops.
+
+**Data regions as a type.** OpenACC's `copyin`, `copyout`, `create` and
+`present` say where an array lives across kernels. Here that is the type:
+
+```mercury
+:- type device_array(T).          % an array that lives on the device
+
+:- pred to_device(array(T)::array_di, device_array(T)::uo) is det.
+:- pred from_device(device_array(T)::di, array(T)::array_uo) is det.
+```
+
+While an array is on the device the host holds no handle to it, so it
+cannot read stale data, and no `present` clause is needed, since the type
+says where the data is. Uniqueness does what OpenACC leaves to the
+programmer.
+
+**Operations** on `device_array`: `map`, `zip_with`, `generate` (an array
+from its indices), and `reduce` and `scan` with an operator promised to be
+associative, as reduction clauses are. Each is pure, with no order between
+elements, so each is one `target teams distribute parallel do` loop. Hints
+for the levels, as gang and vector sizes, can become `num_teams` and
+`thread_limit`, but the defaults should serve most code: OpenACC's own
+experience is that the levels are mostly a tuning knob.
+
+**How.** The module can be written in Mercury, each operation a `do` loop
+with an OpenMP directive (`-fopenmp -fdo-loops`), so that the same source
+runs on the CPU too, with or without `-fopenmp`, as the OpenMP tests do.
+Rejected for now: building the operations into code generation, as the
+array operations are, which needs more code for the same loops. Either way
+the operations take closures, which the device does not have, so the
+prerequisite is **specializing higher-order calls**: a call such as
+`map(func(X) = X * 2.0, A0, A)` becomes a loop whose body is the lambda's
+code, with no closure left, as mmc's `--higher-order` does for calls whose
+closure is known. That is useful well beyond the device. The same
+specialization lets a GPU process use selectors over several mailboxes,
+whose `selecting` takes a closure; until then a GPU process has the
+one-mailbox `receive`, specialized at its type.
+
+**Order:** higher-order specialization; then `to_device`, `from_device`,
+`map`, `zip_with`, `generate` and `reduce`; then `scan` and the level hints,
+once there are programs to tune.
+
+#### GPU to GPU across hosts: why, and how it is measured
+
+Decided 2026-11-07: messages between processes on GPUs of different hosts,
+GPU0 to CPU0 to CPU1 to GPU1, are the use case the implementation works
+towards. Routing needs no table for it: a device sends everything not for
+itself to its host, hosts are connected to each other directly, and a host
+delivers to its own places, so each hop finds the next from the handle's
+node and place (Handles, routing and places). Messages between a pair of
+processes take one path, so they stay in order.
+
+**What it replaces.** On a cluster today this takes MPI between hosts, CUDA
+or HIP, or OpenMP offload, on the devices, and often OpenMP threads on the
+hosts. GPU-aware MPI and NCCL or RCCL move the data, but ranks, tags,
+streams, device pointers and synchronization are the programmer's, and the
+common bugs are:
+
+- a send and a receive that do not match in tag, size or order, which hangs;
+- a buffer reused before a non-blocking send has finished, or read before a
+  receive has;
+- host and device pointers confused, or a copy synchronized on the wrong
+  stream;
+- a failed rank aborting the whole job, MPI's default; ULFM, the proposal for
+  surviving failures, is not part of the standard.
+
+**What the design gives instead:**
+
+- **One operation:** `send` to a handle, wherever its mailbox is, on this
+  GPU, another GPU of the host, or a GPU of another node.
+- **Typed messages and selective receive** instead of tags, so a mismatch is
+  a type error at compile time, not a hang.
+- **Uniqueness instead of completion tracking:** a sent unique array belongs
+  to the receiver, and a received one is complete when it arrives (The
+  device runtime).
+- **Robustness:** a GPU process that dies, a lost device or a lost host is an
+  exit or `down` message to whatever monitors it, and a supervisor restarts
+  the work, moves it to another GPU or reports it, in ordinary code.
+
+**Performance decides whether it matters,** since programmers accept MPI's
+difficulty for its speed. The acceptance criteria, each measured against an
+MPI+HIP program doing the same:
+
+1. **Ping-pong between GPUs of two hosts:** latency and bandwidth over
+   message sizes. The hop from the device to its host and the relay are the
+   extra costs, so large messages go into device memory directly with no
+   copy at each hop; GPUDirect RDMA, later, skips the hosts' memory.
+2. **A halo exchange:** a stencil on a grid split across GPUs, the common
+   pattern of HPC communication, which shows whether communication overlaps
+   computation.
+3. **Recovery:** a GPU process killed during the halo exchange, and a
+   supervisor that recovers, which the MPI program cannot do.
+
+#### The route there
+
+Decided 2026-11-07, and ahead of the rest of chunk 1 in `INPROGRESS.md`.
+Deferred until the use case works or something on the way needs them: `try`
+and `atomic` goals, open types, closures of methods, and the library's
+array predicates and `io.command_line_arguments` (chunk 1, steps 6 (d) and
+(e)). Calls with hidden arguments are not needed first either: mailboxes of
+concrete types have specialized `send` and `receive`, and only generic
+processes need them.
+
+1. **Exceptions, enough to end a process:** `throw`, and an exception nothing
+   catches ends the process with it as the exit reason. `catch` comes later;
+   ending a process needs no unwinding.
+2. **Processes on one host** (chunk 2, leaking): `spawn`, mailboxes, `send`
+   and `receive` with the copy into a fragment, the scheduler, stacks of a
+   fixed size, and links and monitors, which robustness needs.
+3. **GPU processes on one host:** the restricted first version above, a
+   process as a kernel of one team, with the device runtime, and flat
+   messages. First benchmark: ping-pong between the CPU and the GPU. Tested
+   on the CPU as a device too (Testing on the CPU).
+4. **Distribution** (M6): nodes, remote handles, a transport between hosts,
+   and node-down; relays forward bytes. Several nodes on one machine test it
+   before two machines do.
+5. **The acceptance benchmarks** above.
+
+**The collector stays deferred** (chunk 3). A long ping-pong that receives a
+new array with every message leaks, though; if that stops the benchmarks,
+freeing a unique array at its last use, which the compiler can find, comes
+first, as it needs no collector.
+
+**Open:**
+
+- **Hardware.** One machine with one GPU tests the whole route: GPU to
+  node 1 to node 2, with the nodes two processes on the machine over
+  loopback, and the reply back. That has every kind of hop: device to host,
+  host to host with a relay, and host to device; a GPU on node 2 would only
+  repeat the last, and the GPU cannot tell whether node 2 has one. Other
+  machines, which are available, are for the performance figures, which
+  loopback cannot give, and for a last check with a GPU on each host.
+- **The transport between hosts.** TCP first, which keeps failure handling
+  ours, and libfabric, UCX or verbs later (What the hardware offers). MPI
+  underneath, hidden from programs, would bring RDMA, cluster interconnects
+  and GPU-aware transfers on HPC machines, but adds a dependency, and by
+  default MPI aborts the job when a rank fails.
 
 ### Security
 
