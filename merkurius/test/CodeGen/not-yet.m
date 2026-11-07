@@ -8,7 +8,7 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module char, exception, int, list.
+:- import_module bool, exception, int, list.
 
 main(!IO).
 
@@ -36,9 +36,9 @@ w(X) = pow(X, 3).
 % CHECK: not-yet.m:[[@LINE-1]]:8: error: not yet implemented: code generation for calls of int.pow/2
 
 % Calls of library modules that are not compiled yet and not built in.
-:- func upper(char) = char.
-upper(C) = char.to_upper(C).
-% CHECK: not-yet.m:[[@LINE-1]]:12: error: not yet implemented: code generation for calls of char.to_upper/1
+:- func negate(bool) = bool.
+negate(B) = bool.not(B).
+% CHECK: not-yet.m:[[@LINE-1]]:13: error: not yet implemented: code generation for calls of bool.not/1
 
 :- pred thrown(int::out) is det.
 thrown(X) :-

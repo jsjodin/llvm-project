@@ -379,7 +379,7 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
   // Temporary (chunk 1 step 6, docs/INPROGRESS.md): modules of the library
   // that are not compiled yet and whose predicates are not built in, which
   // would otherwise be called and fail to link. Step 6 compiles them.
-  if (llvm::is_contained({"bool", "char", "exception", "univ"}, module)) {
+  if (llvm::is_contained({"bool", "exception", "univ"}, module)) {
     return LibraryCallNotYet(goal, symbol);
   }
   bool isFloat{module == "float"};

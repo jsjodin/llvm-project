@@ -412,9 +412,11 @@ later. In this order, each its own commit or commits:
    types in methods, closures and `foreign_proc`s, closures of methods,
    and unifications of terms with `string` or array arguments.
 
-**The `char` module** is not compiled, and its calls are reported as not
-implemented yet. A test of the string module's errors for NUL and
-surrogate code points waits for it, for `char.det_from_int`.
+**The `char` module** is compiled (2026-11-07). The test of the string
+module's errors for NUL and surrogate code points, which waited for
+`char.det_from_int`, comes next, with the two differences from mmc it
+found: `duplicate_char` with a count of 0 or less, and `first_char`'s
+messages.
 
 Then steps 6 (d), (e) and 7; (c), `list`, came within item 1, before the
 collection of all solutions. `-fstub-unimplemented` goes when the library
