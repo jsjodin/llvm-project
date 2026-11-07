@@ -23,6 +23,11 @@
 // (node.cpp); a message from another node is decoded by the mailbox's own
 // type, which each mailbox keeps from when it was made.
 //
+// Each message has a stamp in the order of arrival over all mailboxes, by
+// which a receive over a selector takes the oldest message that some case
+// accepts, and a count of arrivals and closes lets it wait for any of its
+// mailboxes with nothing to register.
+//
 // Temporary (chunk 2, docs/INPROGRESS.md): one lock and one condition
 // variable for every mailbox, and fragments never freed, while a program is
 // one process; chunk 2 gives each process its mailboxes, a lock-free queue
@@ -170,6 +175,8 @@ Word CopyTyped(Word value, const Type &type, Fragment &fragment) {
 struct Message {
   Message *next;
   Word value;
+  // Its place in the order of arrival over all mailboxes.
+  std::uint64_t stamp;
 };
 
 // A word from the kernel's source of random numbers.
@@ -244,6 +251,10 @@ void ChooseNode() {
 }
 pthread_cond_t arrived;
 pthread_once_t once = PTHREAD_ONCE_INIT;
+// The last message's stamp, and the number of arrivals and closes, under
+// the lock.
+std::uint64_t stamps{0};
+std::int64_t arrivals{0};
 Mailbox *slots{nullptr};
 std::int64_t slotCount{0};
 std::int64_t slotCapacity{0};
@@ -293,10 +304,28 @@ void Unregister(Mailbox *mailbox) {
 // Queues a message whose cells are in a fragment of their own. Called with
 // the lock held.
 void Queue(Mailbox *mailbox, Message *message) {
+  message->stamp = ++stamps;
   *mailbox->tail = message;
   mailbox->tail = &message->next;
   ++mailbox->count;
+  ++arrivals;
   pthread_cond_broadcast(&arrived);
+}
+
+// Waits on `arrived` until the deadline, or for ever if it is negative:
+// false once the deadline has passed. Called with the lock held.
+bool WaitArrival(std::int64_t deadline) {
+  if (deadline < 0) {
+    pthread_cond_wait(&arrived, &lock);
+    return true;
+  }
+  if (Now() >= deadline) {
+    return false;
+  }
+  timespec until{static_cast<time_t>(deadline / 1000000000),
+      static_cast<long>(deadline % 1000000000)};
+  pthread_cond_timedwait(&arrived, &lock, &until);
+  return true;
 }
 
 Message *At(Mailbox *mailbox, std::int64_t position) {
@@ -445,6 +474,7 @@ extern "C" void merk_mailbox_close(MERK_HANDLE_PARAMETERS) {
     mailbox->count = 0;
     mailbox->nextFree = firstFree;
     firstFree = mailbox - slots;
+    ++arrivals;
     pthread_cond_broadcast(&arrived);
   }
   pthread_mutex_unlock(&lock);
@@ -499,16 +529,52 @@ extern "C" std::int64_t merk_mailbox_wait(
       result = 1;
       break;
     }
-    if (deadline < 0) {
-      pthread_cond_wait(&arrived, &lock);
-      continue;
-    }
-    if (Now() >= deadline) {
+    if (!WaitArrival(deadline)) {
       break;
     }
-    timespec until{static_cast<time_t>(deadline / 1000000000),
-        static_cast<long>(deadline % 1000000000)};
-    pthread_cond_timedwait(&arrived, &lock, &until);
+  }
+  pthread_mutex_unlock(&lock);
+  return result;
+}
+
+// For a receive over a selector, without waiting: the stamp of the
+// message at `position`, which is positive, 0 if the mailbox has no message
+// there yet, or -1 if it is closed or not this node's host's.
+extern "C" std::int64_t merk_mailbox_poll(
+    MERK_HANDLE_PARAMETERS, std::int64_t position) {
+  pthread_once(&once, InitializeCondition);
+  pthread_mutex_lock(&lock);
+  Mailbox *mailbox{Find(MERK_HANDLE)};
+  std::int64_t result{!mailbox                    ? -1
+          : mailbox->count > position
+          ? static_cast<std::int64_t>(At(mailbox, position)->stamp)
+          : 0};
+  pthread_mutex_unlock(&lock);
+  return result;
+}
+
+// The number of messages queued and mailboxes closed so far, which a
+// receive over a selector reads before it looks at its mailboxes.
+extern "C" std::int64_t merk_mailbox_arrivals(void) {
+  pthread_once(&once, InitializeCondition);
+  pthread_mutex_lock(&lock);
+  std::int64_t count{arrivals};
+  pthread_mutex_unlock(&lock);
+  return count;
+}
+
+// 1 once a message has been queued or a mailbox closed since `seen` was
+// read, 0 if the deadline passes first.
+extern "C" std::int64_t merk_mailbox_wait_arrival(
+    std::int64_t seen, std::int64_t deadline) {
+  pthread_once(&once, InitializeCondition);
+  pthread_mutex_lock(&lock);
+  std::int64_t result{1};
+  while (arrivals == seen) {
+    if (!WaitArrival(deadline)) {
+      result = 0;
+      break;
+    }
   }
   pthread_mutex_unlock(&lock);
   return result;
