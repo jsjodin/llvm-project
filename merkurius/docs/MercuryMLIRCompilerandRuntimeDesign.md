@@ -3006,6 +3006,12 @@ node 1 to node 2. Processes on the CPU come after.
      connection API that is still to be designed (Remote spawn, "Nodes"):
      node 1 connects to an address given on its command line, and asks for a
      mailbox that node 2's main registered under a name.
+   - **Then, before the device's side:** selectors over several mailboxes
+     and the `receive` goal (Processes and mailboxes). The slice does not
+     need them, as node 2's main receives from one mailbox, but the device's
+     `receive` is designed once what a full `receive` lowers to is known.
+     They do not depend on TCP, since a process receives only from its own
+     mailboxes.
    - **First benchmark:** ping-pong between the GPU and node 2, over loopback
      on one machine, then between two machines.
 2. **Exceptions, enough to end a process:** `throw`, and an exception nothing

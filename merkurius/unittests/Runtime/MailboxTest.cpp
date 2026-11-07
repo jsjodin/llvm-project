@@ -26,18 +26,26 @@
 using merkurius::runtime::TypeCtor;
 using merkurius::runtime::Word;
 
+#define HANDLE_PARAMETERS                                                      \
+  std::int64_t nodeHigh, std::int64_t nodeLow, std::int64_t placeAndSlot,      \
+      std::int64_t generation, std::int64_t secret
+
 extern "C" {
-void merk_mailbox_new(std::int64_t *slot, std::int64_t *generation);
-void merk_mailbox_close(std::int64_t slot, std::int64_t generation);
-void merk_mailbox_send(std::int64_t slot, std::int64_t generation,
-    Word typeInfo, Word value);
+void merk_node(std::int64_t *high, std::int64_t *low);
+void merk_mailbox_new(
+    std::int64_t *placeAndSlot, std::int64_t *generation, std::int64_t *secret);
+void merk_mailbox_close(HANDLE_PARAMETERS);
+void merk_mailbox_send(HANDLE_PARAMETERS, Word typeInfo, Word value);
 std::int64_t merk_mailbox_deadline(std::int64_t milliseconds);
-std::int64_t merk_mailbox_wait(std::int64_t slot, std::int64_t generation,
-    std::int64_t position, std::int64_t deadline);
-Word merk_mailbox_message(
-    std::int64_t slot, std::int64_t generation, std::int64_t position);
-void merk_mailbox_remove(
-    std::int64_t slot, std::int64_t generation, std::int64_t position);
+std::int64_t merk_mailbox_wait(
+    HANDLE_PARAMETERS, std::int64_t position, std::int64_t deadline);
+Word merk_mailbox_message(HANDLE_PARAMETERS, std::int64_t position);
+void merk_mailbox_remove(HANDLE_PARAMETERS, std::int64_t position);
+std::int64_t merk_mailbox_register(
+    HANDLE_PARAMETERS, const char *name, Word typeInfo);
+void merk_mailbox_unregister(const char *name);
+std::int64_t merk_mailbox_lookup(const char *name, Word typeInfo,
+    std::int64_t *placeAndSlot, std::int64_t *generation, std::int64_t *secret);
 }
 
 namespace {
@@ -45,32 +53,45 @@ namespace {
 // int's descriptor: a message of it is its word, which the copy keeps.
 const TypeCtor kInt{merkurius::runtime::Int, 0, 0, 0, "builtin", "int",
     nullptr, nullptr, nullptr, {}, nullptr, nullptr};
+const TypeCtor kFloat{merkurius::runtime::Float, 0, 0, 0, "builtin", "float",
+    nullptr, nullptr, nullptr, {}, nullptr, nullptr};
 
+Word IntType() { return reinterpret_cast<Word>(&kInt); }
+Word FloatType() { return reinterpret_cast<Word>(&kFloat); }
+
+// A handle, as process.m's mailbox(M) has it.
 struct Box {
+  std::int64_t nodeHigh;
+  std::int64_t nodeLow;
   std::int64_t slot;
   std::int64_t generation;
+  std::int64_t secret;
 };
+
+#define BOX(box) box.nodeHigh, box.nodeLow, box.slot, box.generation, box.secret
 
 Box NewBox() {
   Box box;
-  merk_mailbox_new(&box.slot, &box.generation);
+  merk_node(&box.nodeHigh, &box.nodeLow);
+  merk_mailbox_new(&box.slot, &box.generation, &box.secret);
   return box;
 }
 
+void Close(Box box) { merk_mailbox_close(BOX(box)); }
+
 void Send(Box box, Word value) {
-  merk_mailbox_send(
-      box.slot, box.generation, reinterpret_cast<Word>(&kInt), value);
+  merk_mailbox_send(BOX(box), reinterpret_cast<Word>(&kInt), value);
 }
 
 // The oldest message, as process.receive takes it with `any`, waiting up to
 // `milliseconds`, or forever for -1; none if none arrives.
 std::optional<Word> Receive(Box box, std::int64_t milliseconds) {
-  if (!merk_mailbox_wait(box.slot, box.generation, 0,
+  if (!merk_mailbox_wait(BOX(box), 0,
           merk_mailbox_deadline(milliseconds))) {
     return std::nullopt;
   }
-  Word value{merk_mailbox_message(box.slot, box.generation, 0)};
-  merk_mailbox_remove(box.slot, box.generation, 0);
+  Word value{merk_mailbox_message(BOX(box), 0)};
+  merk_mailbox_remove(BOX(box), 0);
   return value;
 }
 
@@ -89,7 +110,7 @@ void SendLater(Box box, Word value, int milliseconds) {
 
 void CloseLater(Box box, int milliseconds) {
   std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
-  merk_mailbox_close(box.slot, box.generation);
+  Close(box);
 }
 
 TEST(MailboxTest, ReceiveForeverIsWokenBySend) {
@@ -100,7 +121,7 @@ TEST(MailboxTest, ReceiveForeverIsWokenBySend) {
   sender.join();
   EXPECT_EQ(got, std::optional<Word>{7});
   EXPECT_GE(MillisecondsSince(start), 40);
-  merk_mailbox_close(box.slot, box.generation);
+  Close(box);
 }
 
 TEST(MailboxTest, TimedReceiveIsWokenBySend) {
@@ -111,7 +132,7 @@ TEST(MailboxTest, TimedReceiveIsWokenBySend) {
   sender.join();
   EXPECT_EQ(got, std::optional<Word>{8});
   EXPECT_LT(MillisecondsSince(start), 5000);
-  merk_mailbox_close(box.slot, box.generation);
+  Close(box);
 }
 
 TEST(MailboxTest, TimeoutWaitsItsTime) {
@@ -121,7 +142,7 @@ TEST(MailboxTest, TimeoutWaitsItsTime) {
   long waited{MillisecondsSince(start)};
   EXPECT_GE(waited, 100);
   EXPECT_LT(waited, 5000);
-  merk_mailbox_close(box.slot, box.generation);
+  Close(box);
 }
 
 TEST(MailboxTest, PollDoesNotWait) {
@@ -129,7 +150,7 @@ TEST(MailboxTest, PollDoesNotWait) {
   Clock::time_point start{Clock::now()};
   EXPECT_EQ(Receive(box, 0), std::nullopt);
   EXPECT_LT(MillisecondsSince(start), 1000);
-  merk_mailbox_close(box.slot, box.generation);
+  Close(box);
 }
 
 TEST(MailboxTest, CloseWakesReceiveForever) {
@@ -141,7 +162,7 @@ TEST(MailboxTest, CloseWakesReceiveForever) {
 
 TEST(MailboxTest, StaleHandleReachesNoLaterMailbox) {
   Box old{NewBox()};
-  merk_mailbox_close(old.slot, old.generation);
+  Close(old);
   Box fresh{NewBox()};
   // The closed slot is reused, with a new generation.
   EXPECT_EQ(fresh.slot, old.slot);
@@ -151,7 +172,81 @@ TEST(MailboxTest, StaleHandleReachesNoLaterMailbox) {
   EXPECT_EQ(Receive(old, 0), std::nullopt);
   Send(fresh, 2);
   EXPECT_EQ(Receive(fresh, 0), std::optional<Word>{2});
-  merk_mailbox_close(fresh.slot, fresh.generation);
+  Close(fresh);
+}
+
+// A handle must name this node, its host, and give the mailbox's secret, or
+// the message is dropped, as for a closed mailbox.
+TEST(MailboxTest, HandleMustMatch) {
+  Box box{NewBox()};
+  Box wrongSecret{box}, otherNode{box}, otherPlace{box};
+  wrongSecret.secret ^= 1;
+  otherNode.nodeLow ^= 1;
+  otherPlace.slot |= std::int64_t{1} << 48;
+  Send(wrongSecret, 1);
+  Send(otherNode, 2);
+  Send(otherPlace, 3);
+  EXPECT_EQ(Receive(box, 0), std::nullopt);
+  EXPECT_EQ(Receive(wrongSecret, 0), std::nullopt);
+  Send(box, 4);
+  EXPECT_EQ(Receive(otherNode, 0), std::nullopt);
+  EXPECT_EQ(Receive(box, 0), std::optional<Word>{4});
+  Close(box);
+}
+
+TEST(MailboxTest, SecretsDiffer) {
+  Box a{NewBox()}, b{NewBox()};
+  EXPECT_NE(a.secret, b.secret);
+  Box c{NewBox()};
+  EXPECT_NE(a.secret, c.secret);
+  EXPECT_NE(b.secret, c.secret);
+  Close(a);
+  Close(b);
+  Close(c);
+}
+
+// A lookup finds a registered mailbox only for its message type.
+TEST(MailboxTest, RegisterAndLookup) {
+  Box box{NewBox()};
+  ASSERT_EQ(merk_mailbox_register(BOX(box), "pong", IntType()), 0);
+  Box found{box};
+  found.slot = found.generation = found.secret = -1;
+  EXPECT_EQ(merk_mailbox_lookup(
+                "pong", IntType(), &found.slot, &found.generation, &found.secret),
+      0);
+  EXPECT_EQ(found.slot, box.slot);
+  EXPECT_EQ(found.generation, box.generation);
+  EXPECT_EQ(found.secret, box.secret);
+  Send(found, 5);
+  EXPECT_EQ(Receive(box, 0), std::optional<Word>{5});
+  std::int64_t slot, generation, secret;
+  EXPECT_EQ(merk_mailbox_lookup("pong", FloatType(), &slot, &generation, &secret),
+      2);
+  EXPECT_EQ(merk_mailbox_lookup("ping", IntType(), &slot, &generation, &secret),
+      1);
+  Close(box);
+}
+
+// As Erlang's register/2: a name is taken once, a mailbox has one name, and
+// closing a mailbox or unregistering its name frees the name.
+TEST(MailboxTest, RegisterErrors) {
+  Box a{NewBox()}, b{NewBox()};
+  ASSERT_EQ(merk_mailbox_register(BOX(a), "server", IntType()), 0);
+  EXPECT_EQ(merk_mailbox_register(BOX(b), "server", IntType()), 1);
+  EXPECT_EQ(merk_mailbox_register(BOX(a), "other", IntType()), 2);
+  Box closed{NewBox()};
+  Close(closed);
+  EXPECT_EQ(merk_mailbox_register(BOX(closed), "closed", IntType()), 3);
+  std::int64_t slot, generation, secret;
+  Close(a);
+  EXPECT_EQ(
+      merk_mailbox_lookup("server", IntType(), &slot, &generation, &secret), 1);
+  ASSERT_EQ(merk_mailbox_register(BOX(b), "server", IntType()), 0);
+  merk_mailbox_unregister("server");
+  EXPECT_EQ(
+      merk_mailbox_lookup("server", IntType(), &slot, &generation, &secret), 1);
+  EXPECT_EQ(merk_mailbox_register(BOX(b), "again", IntType()), 0);
+  Close(b);
 }
 
 // The table of mailboxes grows as mailboxes are made; an empty mailbox's
@@ -173,10 +268,10 @@ TEST(MailboxTest, GrowingTheTableKeepsMailboxes) {
   for (Box box : more) {
     Send(box, 4);
     EXPECT_EQ(Receive(box, 0), std::optional<Word>{4});
-    merk_mailbox_close(box.slot, box.generation);
+    Close(box);
   }
-  merk_mailbox_close(first.slot, first.generation);
-  merk_mailbox_close(full.slot, full.generation);
+  Close(first);
+  Close(full);
 }
 
 // Each sender's messages arrive in the order it sent them, and every
@@ -212,7 +307,7 @@ TEST(MailboxTest, ManySendersKeepTheirOrder) {
     EXPECT_EQ(next[s], kEach) << "sender " << s;
   }
   EXPECT_EQ(Receive(box, 0), std::nullopt);
-  merk_mailbox_close(box.slot, box.generation);
+  Close(box);
 }
 
 // A selective receive scans by position, waiting for the next message to
@@ -224,11 +319,11 @@ TEST(MailboxTest, SelectiveScanWhileSending) {
   std::thread sender{SendNumbered, box, Word{0}, kCount};
   std::int64_t position{0};
   std::optional<Word> found;
-  while (merk_mailbox_wait(box.slot, box.generation, position,
-      merk_mailbox_deadline(10000))) {
-    Word value{merk_mailbox_message(box.slot, box.generation, position)};
+  while (merk_mailbox_wait(
+      BOX(box), position, merk_mailbox_deadline(10000))) {
+    Word value{merk_mailbox_message(BOX(box), position)};
     if (value != 0 && value % 1000 == 0) {
-      merk_mailbox_remove(box.slot, box.generation, position);
+      merk_mailbox_remove(BOX(box), position);
       found = value;
       break;
     }
@@ -243,7 +338,7 @@ TEST(MailboxTest, SelectiveScanWhileSending) {
     ASSERT_EQ(Receive(box, 0), std::optional<Word>{expected});
   }
   EXPECT_EQ(Receive(box, 0), std::nullopt);
-  merk_mailbox_close(box.slot, box.generation);
+  Close(box);
 }
 
 // Receivers waiting on different mailboxes each get their own mailbox's
@@ -272,8 +367,8 @@ TEST(MailboxTest, WaitersOnDifferentMailboxes) {
   receiverB.join();
   EXPECT_EQ(sumA, kCount * (kCount + 1) / 2);
   EXPECT_EQ(sumB, kCount * (kCount + 1));
-  merk_mailbox_close(a.slot, a.generation);
-  merk_mailbox_close(b.slot, b.generation);
+  Close(a);
+  Close(b);
 }
 
 } // namespace

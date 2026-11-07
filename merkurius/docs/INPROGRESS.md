@@ -420,6 +420,236 @@ Then steps 6 (d), (e) and 7; (c), `list`, came within item 1, before the
 collection of all solutions. `-fstub-unimplemented` goes when the library
 needs it no longer.
 
+## Remote handles and TCP
+
+Route step 1, "Between them" (design document, "The route there"): node 1
+sends to a mailbox of node 2 over TCP, and node 2 replies to a handle that
+came in the message. Decided 2026-11-07: a registry of names, and matching
+types first. Erlang's distribution has decades of commercial use, so it is
+followed wherever typed mailboxes do not call for something else.
+
+**What Erlang does** (Erlang reference manual, "Distributed Erlang"; ERTS
+User's Guide, "Distribution Protocol"):
+
+- A node is named `name@host`. On each host a daemon, EPMD, on port 4369,
+  maps node names to the ports where the nodes listen.
+- Connections are made implicitly, the first time a node's name is used,
+  and are transitive by default: a node connects to the nodes its peers
+  know. Hidden nodes connect only explicitly.
+- Authentication is a shared cookie, never sent: each side sends a random
+  challenge and checks the other's MD5 digest of the cookie and the
+  challenge. The manual calls it "not entirely safe", vulnerable to
+  takeover, and points to TLS distribution. Traffic is in clear text
+  otherwise.
+- Registered names are local to a node. `{Name, Node} ! Msg` sends to one
+  with no lookup, as a `REG_SEND` control message followed by the payload in
+  the external term format. Frames have a 4-byte length after the
+  handshake. `global` registers names across the cluster.
+
+**What we take, and what differs:**
+
+- **Lookup instead of sending to a name.** A mailbox is typed, so
+  `lookup` checks the message type's fingerprint on node 2 and returns a
+  handle, which sends use from then on. A mismatch is an error when the
+  mailbox is obtained, not a failed decode later. Erlang needs no check, as
+  any term can go anywhere.
+- **An address instead of EPMD,** for now: `connect("host:port", ...)`. Node
+  names and discovery come with node ids mapped to transports (design
+  document, Handles, routing and places).
+- **Explicit connections, not transitive.** A handle of a node this one is
+  not connected to, which a third node sent, is dropped by `send` for now.
+  Erlang's implicit and transitive connections need discovery first.
+- **A cookie, and secrets too.** As in Erlang, a connection is accepted only
+  if both sides prove they know the cookie, by answering each other's random
+  challenge, and the cookie is never sent. The digest is HMAC-SHA-256 rather
+  than Erlang's MD5, which its manual calls "not entirely safe". The cookie
+  comes from `MERK_COOKIE`, or else `~/.merkurius.cookie`, made at random
+  if it is missing, as `~/.erlang.cookie` is. A registered name is public to
+  the nodes that pass, as in Erlang; any other mailbox is reached only
+  through its handle's secret. TLS is a later addition to the handshake,
+  which carries a version for it.
+- **Ticks,** as Erlang's: a connection with nothing to send for a quarter of
+  the tick time sends a tick frame, and one that hears nothing for the whole
+  tick time, 60 seconds by default as Erlang's `net_ticktime`
+  (`MERK_TICK_TIME`), is closed as lost. TCP alone may not notice a peer
+  that vanished for hours.
+- **Simultaneous connections,** as Erlang's: when two nodes connect to each
+  other at once, the connection that the node with the greater id started is
+  kept, and the other is closed, so exactly one survives.
+- **Frames** have a 4-byte length and a kind, as Erlang's, and the
+  payload's encoding is ours (design document, Wire format).
+
+**The library** (`process`):
+
+```mercury
+:- type node.
+:- pred this_node(node::out, io::di, io::uo) is det.
+:- func node_of(mailbox(M)) = node.
+:- pred register(string::in, mailbox(M)::in, maybe_error::out,
+    io::di, io::uo) is det.
+:- pred unregister(string::in, io::di, io::uo) is det.
+:- pred lookup(node::in, string::in, timeout::in,
+    maybe_error(mailbox(M))::out, io::di, io::uo) is det.
+    % Step 3:
+    % Listens on "host:port"; port 0 picks one, which is returned.
+:- pred listen(string::in, maybe_error(int)::out, io::di, io::uo) is det.
+:- pred connect(string::in, maybe_error(node)::out, io::di, io::uo) is det.
+```
+
+`register` is an error, as Erlang's `register/2` is, if the name is taken,
+if the mailbox has a name already, or if it is closed or another node's;
+closing a mailbox removes its name. `lookup` fails with an error for an
+unknown name, a type mismatch, and from step 3 a lost connection or the
+timeout. Until step 2's fingerprints, a local lookup compares the
+type_infos.
+
+**The handle** becomes `mailbox(NodeHigh, NodeLow, PlaceAndSlot,
+Generation, Secret)`, five words: a 128-bit node id chosen at random when
+the runtime starts, the place in the top 16 bits of a word whose other 48
+are the slot, the generation, and a 64-bit secret chosen at random when the
+mailbox is made. A local handle is a value as before (the invariant of
+chunk 2). The incarnation number goes until node ids outlive a run.
+
+**The runtime** (`runtime/node.cpp`, POSIX sockets and threads, no C++
+standard library):
+
+- **Threads.** `listen` starts a thread that accepts connections. Each
+  connection has a reader thread, which decodes frames and queues each
+  message in its mailbox, as a local send does. A `send` to a remote handle
+  encodes in the sending thread and writes the frame under the connection's
+  lock, so a full socket holds the sender back.
+- **Handshake.** Magic `MERK`, a version, the node id, then the cookie's
+  challenges and answers. Each side learns the other's id; a connection to
+  oneself is refused, and of two connections between the same nodes one is
+  kept, as above.
+- **Frames.** `message` (the whole destination handle, node id included,
+  then the payload), `lookup` (a request number, the name, the type's
+  fingerprint), `found` (the request number, a handle or an error) and
+  `tick`. A message's header has a fixed size, so the device can write it.
+- **Routing** has one entry, a destination handle and an encoded payload,
+  which a remote `send` calls after encoding, a connection's reader calls
+  for each message, and the device's bridge will call for the device's
+  messages: a mailbox of this node's host is decoded into its queue, one of
+  another node goes to that node's connection, and one of a place this node
+  does not have is dropped, as for a closed mailbox. A local `send` on the
+  host still copies without encoding.
+- **Delivery.** A message for a closed mailbox, or with the wrong secret,
+  is dropped, as a local send to a closed one is. A lost connection fails
+  the lookups waiting on it and drops later sends to its node; `down`
+  messages come with monitors. A frame that does not decode closes the
+  connection.
+
+**The wire format, first version:**
+
+- **Encoding.** A value is walked by its type_info, as the copy is, into
+  items of 8 bytes, little-endian: an int, of any size, or a char as its
+  value, a float as its bits, a string as its length and then its bytes,
+  padded to 8, an array as its length and then its elements, and a
+  constructor as its functor number and then its arguments. No addresses,
+  no word size, no tag layout. Rejected: varints, as Erlang's small
+  integers are, which save space on small numbers but make a GPU branch on
+  every element, and keep an array of numbers from being one run of bytes
+  (below).
+- **Decoding** walks the receiver's type_info for the mailbox, checks every
+  functor number, length and string against it, and builds the cells in a
+  fragment, as a local send does.
+- **Fingerprints.** A type's fingerprint hashes its module, name, arity,
+  and each functor's name and argument types, through every type reachable
+  from it, computed from the descriptors once and cached. `lookup` sends
+  it, so functor numbers mean the same on both sides. Type tables and
+  translation by functor name, which let definitions differ, come later as
+  a connection record, without changing how a value is encoded.
+- **Not yet:** existentially typed constructors and closures, which the
+  local copy rejects too, open terms and back-references.
+
+**What the GPU's side needs from this** (design document, GPU processes,
+Handles, routing and places, Send and receive in a target region). The
+device is the first slice's sender, so the formats are made for it now:
+
+- **Encoded once, at the source.** A message from a GPU of node 1 to node 2
+  is encoded on the device, by code that generation specializes at the
+  message type, and the host's bridge and every later hop forward the bytes
+  without decoding them (Opaque payloads at relays). So the encoding is
+  what specialized device code can write: items of fixed size, with no
+  varints. The runtime's encoder, driven by type_infos, and the compiler's
+  specialized one must give the same bytes, which a test compares.
+- **Arrays of numbers are one run.** An `array(float)` encodes as its
+  length and then its elements as they are in memory, on the little-endian
+  machines we target, x86-64 and AMD and NVIDIA GPUs, so encoding and
+  decoding it is one copy. The benchmarks' messages are such arrays, and
+  later a payload in device memory goes to the NIC by RDMA with no copy at
+  all, which needs it contiguous.
+- **The frame names the place.** The device's bridge, or node 2's host for a
+  mailbox on its GPU, routes by the handle's place, so the message frame
+  carries the whole handle, and its node id too, so that frames can go
+  through relays later without changing.
+- **One routing entry,** above, which the bridge calls as a TCP reader does.
+  Until the bridge exists, a message for a GPU place of this node is
+  dropped, as one for a place it does not have.
+- **Secrets and generations of the device's mailboxes.** A device has no
+  source of random numbers, so the host gives a region a random key at
+  launch, from which the device makes its mailboxes' secrets, by a keyed
+  hash of a counter. Generations must not repeat between launches, as
+  mailboxes of an ended region must stay dead (Send and receive in a target
+  region), so the host keeps each place's next generation. Designed with the
+  device's runtime; nothing here rules either out.
+- **Handles are flat,** five words, so they map into a region `to` as any
+  value, and the device compares their node and place with its own, which
+  the host passes at launch.
+- **The transport between device and host,** from a survey of LLVM's
+  offload library (2026-11-07):
+  - libc's GPU RPC, which the plan builds on (design document, GPU
+    processes), is started by the device only, and carries 64 bytes per
+    lane per round trip. A program can add its own operations to it, with
+    `__tgt_register_rpc_callback`, but a handler runs on the host's one
+    server thread, which also serves `printf` and `malloc` for every
+    device, so it must not block. So RPC carries control only: "a message
+    is ready", "make a mailbox", and the like.
+  - Messages go through rings in host memory that both sides map, from
+    `llvm_omp_target_alloc_host`: fine-grained on AMD GPUs, pinned on
+    NVIDIA ones, and coherent with a running kernel under system-scope
+    loads and stores with fences. A ring with one writer and one reader
+    and separate head and tail needs no atomic operations across PCIe.
+  - So a device place's mailbox queues live in that host memory, not in
+    the device's: the host's bridge reads and writes them directly, and a
+    message from the host to a device mailbox is written there with no
+    RPC at all. The device polls them with `__gpu_thread_suspend` between
+    looks.
+  - gfx1030 has no XNACK, so there is no unified memory: everything both
+    sides touch must come from that allocator.
+  - Still open, for the GPU step: whether a doorbell that wakes the
+    host's thread needs PCIe atomics on a discrete gfx1030, when a
+    registered callback takes effect, and the throughput of one lane. The
+    host can poll the rings until then.
+
+  None of it changes the formats above: the encoding is items of fixed
+  size, which a ring holds as bytes, and the routing entry is the bridge's
+  as it is a TCP reader's.
+
+**Tests:**
+
+- Unit tests of the encoding: round trips of the descriptors' kinds, and
+  hostile input (truncated, wrong functor numbers, huge lengths) rejected
+  without a crash; later a fuzzer on the decoder.
+- Runtime tests: two programs over loopback, started by a lit script that
+  passes node 2's port to node 1, ping-pong with reply handles, a lookup
+  of an unknown name and of a mismatched type, and node 2 closing its
+  mailbox.
+- `process-checks.m`'s model and round trips, run again with the mailbox
+  on another node.
+
+**Steps,** each its own commit:
+
+1. Handles with node, place and secret, still local; `register` and a
+   local lookup.
+2. The encoding and fingerprints, with unit tests, used by nothing yet.
+3. `listen`, `connect`, `lookup` and remote sends, with ticks and
+   simultaneous connections; the loopback tests.
+4. The cookie: SHA-256 and HMAC in the runtime, checked against the
+   standard's test vectors, and the challenges in the handshake, with a test
+   of a node with the wrong cookie refused. Until then the handshake's
+   version says it has none, and only loopback is tested.
+
 ## Open types: `closed(T)`
 
 Decided 2026-11-04: `closed(T)` comes with open types, not after them. It
