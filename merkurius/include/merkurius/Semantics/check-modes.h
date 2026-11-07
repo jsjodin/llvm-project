@@ -220,6 +220,11 @@ struct ModeCheckOptions {
   // used again too, and compare the uniqueness of values that are copied,
   // such as numbers, as of any other, as mmc does (-fmmc-uniqueness).
   bool mmcUniqueness{false};
+  // Temporary (chunk 1 step 6, docs/INPROGRESS.md): with
+  // -fstub-unimplemented, a predicate or function without clauses is not
+  // reported, as the library's modules have those that code generation
+  // builds in or that are not written yet. It goes with the option.
+  bool stubUnimplemented{false};
 };
 
 std::unique_ptr<ModeChecking> CheckModes(const parser::ParseTree &,
