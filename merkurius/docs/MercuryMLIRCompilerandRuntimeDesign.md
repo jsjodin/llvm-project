@@ -2974,8 +2974,8 @@ MPI+HIP program doing the same:
 Decided 2026-11-07, and ahead of the rest of chunk 1 in `INPROGRESS.md`.
 Deferred until the use case works or something on the way needs them: `try`
 and `atomic` goals, open types, closures of methods, and the library's
-array predicates and `io.command_line_arguments` (chunk 1, steps 6 (d) and
-(e)). Calls with hidden arguments are not needed first either: mailboxes of
+array predicates (chunk 1, step 6 (d)); `io.command_line_arguments`, step
+6 (e), came first, as node 1 connects to an address on its command line. Calls with hidden arguments are not needed first either: mailboxes of
 concrete types have specialized `send` and `receive`, and only generic
 processes need them.
 
