@@ -1,5 +1,6 @@
 // The array operations print as they are parsed, and lower to loads and
-// stores of words after the array's size, or to calls of the runtime.
+// stores of words after the array's size, or to calls of the runtime;
+// merk.array_from_list's with the tag of [|] in the list's layout.
 //
 // RUN: merkc -fc1 -emit-merk %s -o %t.1.mlir
 // RUN: FileCheck %s < %t.1.mlir
@@ -8,6 +9,15 @@
 // RUN: merkc -fc1 -emit-llvm %s | FileCheck %s --check-prefix=LLVM
 
 module @arrays attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
+  merk.type_def "list.list(float)" [#merk.constructor<"[]">, #merk.constructor<"[|]"(f64, !merk.term<"list.list(float)">)>]
+
+  // CHECK-LABEL: merk.proc @arrays.from_list_2_0(%arg0: !merk.term<"list.list(float)">) -> !merk.array<f64>
+  // CHECK-NEXT: %[[A:.*]] = merk.array_from_list %arg0 : <"list.list(float)"> -> <f64>
+  merk.proc @arrays.from_list_2_0(%l: !merk.term<"list.list(float)">) -> !merk.array<f64> attributes {determinism = #merk.determinism<det>} {
+    %a = merk.array_from_list %l : !merk.term<"list.list(float)"> -> !merk.array<f64>
+    merk.succeed %a : !merk.array<f64>
+  }
+
   // CHECK-LABEL: merk.proc @arrays.new_2_0(%arg0: i64, %arg1: f64) -> (!merk.array<f64>, !merk.array<i32>)
   // CHECK-NEXT: %[[A:.*]] = merk.array_new %arg0, %arg1 : f64 -> <f64>
   // CHECK-NEXT: %[[E:.*]] = merk.array_new %arg0 -> <i32>
@@ -47,6 +57,9 @@ module @arrays attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 
 // An array is a pointer; an element is a word, a float's bits or a
 // character extended.
+// LLVM-LABEL: define tailcc ptr @arrays.from_list_2_0(ptr %0)
+// LLVM-NEXT: %[[W:.*]] = ptrtoint ptr %0 to i64
+// LLVM-NEXT: call ptr @merk_array_from_list(i64 %[[W]], i64 1)
 // LLVM-LABEL: define tailcc { ptr, ptr } @arrays.new_2_0(i64 %0, double %1)
 // LLVM: %[[W:.*]] = bitcast double %1 to i64
 // LLVM-NEXT: call ptr @merk_array_new(i64 %0, i64 %[[W]])

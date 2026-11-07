@@ -1182,7 +1182,7 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   mlir::Operation *allocates{nullptr};
   region.walk([&](mlir::Operation *op) {
     if (mlir::isa<merk::ArrayNewOp, merk::ArrayCopyOp, merk::ArrayResizeOp,
-            merk::ArrayFillOp>(op)) {
+            merk::ArrayFromListOp, merk::ArrayFillOp>(op)) {
       allocates = op;
       return mlir::WalkResult::interrupt();
     }
