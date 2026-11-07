@@ -40,6 +40,15 @@ std::string MangledName(const semantics::Procedure &);
 // code of each of its foreign_procs for C, which merk.foreign_call calls.
 inline constexpr llvm::StringLiteral kForeignCodeAttrName{"merk.foreign_code"};
 
+// What code generation is asked for besides the module.
+struct GenerationOptions {
+  // -fstub-unimplemented: see GenerateMerk.
+  bool stubUnimplemented{false};
+  // --trace-flag=: the flags that make a trace goal's flag(Name)
+  // compile_time condition hold.
+  std::vector<std::string> traceFlags;
+};
+
 // The merk module for `module`'s procedures, with the target recorded on
 // it. A construct that code generation does not handle yet is reported as
 // not yet implemented, and its procedure left out; with
@@ -52,7 +61,7 @@ mlir::OwningOpRef<mlir::ModuleOp> GenerateMerk(mlir::MLIRContext &,
     const semantics::NameResolution &, semantics::TypeChecking &,
     semantics::ModeChecking &, const semantics::DeterminismChecking &,
     const semantics::PolymorphismAnalysis &, const semantics::LoopTranslation &,
-    const TargetInfo &, parser::Messages &, bool stubUnimplemented = false);
+    const TargetInfo &, parser::Messages &, const GenerationOptions & = {});
 
 } // namespace merkurius::codegen
 

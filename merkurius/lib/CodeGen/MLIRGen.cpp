@@ -248,13 +248,14 @@ public:
       const semantics::DeterminismChecking &determinism,
       const semantics::PolymorphismAnalysis &polymorphism,
       const semantics::LoopTranslation &loops, const TargetInfo &target,
-      parser::Messages &messages, bool stubUnimplemented)
+      parser::Messages &messages, const GenerationOptions &options)
       : context_{context}, builder_{&context}, moduleName_{module},
         tree_{tree}, tokens_{tokens}, sources_{sources},
         resolution_{resolution}, types_{types},
         modes_{modes}, determinism_{determinism}, loops_{loops},
         target_{target}, messages_{messages},
-        stubUnimplemented_{stubUnimplemented} {
+        stubUnimplemented_{options.stubUnimplemented},
+        traceFlags_{options.traceFlags} {
     for (const semantics::ProcedurePolymorphism &procedure :
         polymorphism.procedures()) {
       polymorphism_[procedure.body] = &procedure;
@@ -590,14 +591,19 @@ private:
   // Starts merk.each, for a goal with branches of which one or more has
   // more than one solution, and generates the goal in its generator.
   merk::EachOp BeginEach(mlir::Location);
-  // `otherwiseGoal` is the goal that `otherwise` generates, if it is one.
-  void Ite(semantics::TokenRange, const Body &condition, const Body *thenPart,
-      llvm::function_ref<void()> otherwise, const ProcedureBody &,
-      const Body *otherwiseGoal = nullptr);
+  // `condition` generates the condition; `otherwiseGoal` is the goal that
+  // `otherwise` generates, if it is one.
+  void Ite(semantics::TokenRange, llvm::function_ref<void()> condition,
+      const Body *thenPart, llvm::function_ref<void()> otherwise,
+      const ProcedureBody &, const Body *otherwiseGoal = nullptr);
   void Switch(const Body &, const ProcedureBody &);
   void Not(const Body &, const ProcedureBody &);
   // A goal with an OpenMP directive (design document, "Target regions").
   void Omp(const Body &, const ProcedureBody &);
+  // A trace goal, and its compile_time and run_time conditions.
+  void Trace(const Body &, const ProcedureBody &);
+  bool CompileTimeHolds(const parser::TraceCondition &);
+  mlir::Value RunTimeHolds(const parser::TraceCondition &, mlir::Location);
   // A loop with a loop-associated directive, so far parallel do and target
   // teams distribute parallel do, as omp.parallel, omp.wsloop and
   // omp.loop_nest, with omp.target, omp.teams and omp.distribute for the
@@ -741,6 +747,8 @@ private:
   // for the library's procedures in modes code generation cannot make yet,
   // such as nondet ones; it goes when code generation makes them all.
   bool stubUnimplemented_{false};
+  // --trace-flag=.
+  std::vector<std::string> traceFlags_;
   // Whether a procedure's body is being generated, and the first construct
   // of it not handled yet, with -fstub-unimplemented.
   bool inBody_{false};
@@ -2977,6 +2985,10 @@ void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
       Omp(goal, body);
       return;
     }
+    if (goal.trace) {
+      Trace(goal, body);
+      return;
+    }
     Goal(*goal.goals.front(), body);
     return;
   case BodyKind::Call:
@@ -4334,7 +4346,7 @@ void MerkGenerator::IfThenElse(const Body &goal, const ProcedureBody &body) {
     SoftIte(goal, body);
     return;
   }
-  Ite(goal.tokens, *goal.goals[0], goal.goals[1],
+  Ite(goal.tokens, [&] { Goal(*goal.goals[0], body); }, goal.goals[1],
       [&] { Goal(*goal.goals[2], body); }, body, goal.goals[2]);
 }
 
@@ -4564,14 +4576,15 @@ void MerkGenerator::DisjunctionFrom(
     Goal(*goal.goals[next], body);
     return;
   }
-  Ite(goal.tokens, *goal.goals[next], nullptr,
+  Ite(goal.tokens, [&] { Goal(*goal.goals[next], body); }, nullptr,
       [&] { DisjunctionFrom(goal, next + 1, body); }, body);
 }
 
 // if condition then `then` (or true) else otherwise.
-void MerkGenerator::Ite(semantics::TokenRange tokens, const Body &condition,
-    const Body *thenPart, llvm::function_ref<void()> otherwise,
-    const ProcedureBody &body, const Body *otherwiseGoal) {
+void MerkGenerator::Ite(semantics::TokenRange tokens,
+    llvm::function_ref<void()> condition, const Body *thenPart,
+    llvm::function_ref<void()> otherwise, const ProcedureBody &body,
+    const Body *otherwiseGoal) {
   mlir::Location loc{Location(tokens)};
   Values before{values_};
   merk::EachOp each;
@@ -4585,7 +4598,7 @@ void MerkGenerator::Ite(semantics::TokenRange tokens, const Body &condition,
     mlir::OpBuilder::InsertionGuard guard{builder_};
     // The condition yields what it binds, to the then part.
     builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
-    Goal(condition, body);
+    condition();
     std::vector<BodyVar> bound{BoundSince(values_, before)};
     llvm::SmallVector<mlir::Value> yielded;
     for (BodyVar var : bound) {
@@ -4635,6 +4648,95 @@ void MerkGenerator::Ite(semantics::TokenRange tokens, const Body &condition,
   if (each) {
     builder_.setInsertionPointToStart(&each.getContinuation().front());
   }
+}
+
+// A trace goal (reference manual, "Trace goals") is left out unless its
+// compile_time condition holds, and is run only if its run_time condition
+// holds. It binds nothing outside it, and its io state is of a type with
+// no values, so it has nothing to pass. One that has more than one
+// solution is in merk.commit (NeedsCommit).
+void MerkGenerator::Trace(const Body &goal, const ProcedureBody &body) {
+  const parser::TraceCondition *runTime{nullptr};
+  for (const parser::TraceParam *param : goal.trace->params) {
+    if (param->kind == parser::TraceParamKind::CompileTime &&
+        !CompileTimeHolds(*param->condition)) {
+      return;
+    }
+    if (param->kind == parser::TraceParamKind::RunTime) {
+      runTime = param->condition;
+    }
+  }
+  if (!runTime) {
+    Goal(*goal.goals.front(), body);
+    return;
+  }
+  mlir::Location loc{Location(goal.tokens)};
+  Ite(
+      goal.tokens,
+      [&] { merk::GuardOp::create(builder_, loc, RunTimeHolds(*runTime, loc)); },
+      goal.goals.front(), [] {}, body);
+}
+
+// flag(Name) holds with --trace-flag=Name. There is no execution tracing,
+// so neither tracelevel holds, and of the grade tests only c and mlds do,
+// as in mmc's default grade, hlc.gc: the foreign language is C, and the
+// code is high level. The others are of what Merkurius does not have,
+// though trail will hold once there is a trail.
+bool MerkGenerator::CompileTimeHolds(const parser::TraceCondition &condition) {
+  using Kind = parser::TraceConditionKind;
+  switch (condition.kind) {
+  case Kind::And:
+    return llvm::all_of(condition.operands,
+        [&](const parser::TraceCondition *c) { return CompileTimeHolds(*c); });
+  case Kind::Or:
+    return llvm::any_of(condition.operands,
+        [&](const parser::TraceCondition *c) { return CompileTimeHolds(*c); });
+  case Kind::Not:
+    return !CompileTimeHolds(*condition.operands.front());
+  case Kind::Flag:
+    return llvm::is_contained(traceFlags_, *condition.value);
+  case Kind::TraceLevel:
+    return false;
+  case Kind::Grade:
+    return *condition.value == "c" || *condition.value == "mlds";
+  case Kind::Env:
+    break;
+  }
+  return false;
+}
+
+// env(Name) holds if the environment variable existed when the program
+// started, which the runtime saved (runtime/trace.cpp).
+mlir::Value MerkGenerator::RunTimeHolds(
+    const parser::TraceCondition &condition, mlir::Location loc) {
+  using Kind = parser::TraceConditionKind;
+  if (condition.kind == Kind::And || condition.kind == Kind::Or) {
+    // Each operand in turn: they have no effects to order, but the IR
+    // should not depend on the C++ compiler's order of arguments.
+    mlir::Value left{RunTimeHolds(*condition.operands[0], loc)};
+    mlir::Value right{RunTimeHolds(*condition.operands[1], loc)};
+    if (condition.kind == Kind::And) {
+      return mlir::arith::AndIOp::create(builder_, loc, left, right);
+    }
+    return mlir::arith::OrIOp::create(builder_, loc, left, right);
+  }
+  switch (condition.kind) {
+  case Kind::Not:
+    return mlir::arith::XOrIOp::create(builder_, loc,
+        RunTimeHolds(*condition.operands.front(), loc),
+        mlir::arith::ConstantIntOp::create(
+            builder_, loc, builder_.getI1Type(), 1));
+  default:
+    break;
+  }
+  auto string{merk::StringType::get(&context_)};
+  mlir::Value name{merk::ConstantOp::create(builder_, loc, string,
+      mlir::StringAttr::get(*condition.value, string))};
+  return merk::ForeignCallOp::create(builder_, loc,
+      mlir::TypeRange{builder_.getI1Type()}, "merk_env_at_start",
+      mlir::ValueRange{name}, /*can_fail=*/true)
+      .getOutputs()
+      .front();
 }
 
 // The constant of a switch's case: an integer literal, or a character's
@@ -6710,8 +6812,8 @@ static llvm::StringRef UncheckedWhat(semantics::Unchecked reason) {
     return "parallel conjunctions";
   case semantics::Unchecked::FieldClosure:
     return "closures of functions or fields";
-  case semantics::Unchecked::Scope:
-    return "trace goals";
+  case semantics::Unchecked::TraceState:
+    return "trace goals with state parameters";
   case semantics::Unchecked::Try:
     return "try goals";
   case semantics::Unchecked::Atomic:
@@ -7141,9 +7243,9 @@ mlir::OwningOpRef<mlir::ModuleOp> GenerateMerk(mlir::MLIRContext &context,
     const semantics::DeterminismChecking &determinism,
     const semantics::PolymorphismAnalysis &polymorphism,
     const semantics::LoopTranslation &loops, const TargetInfo &target,
-    parser::Messages &messages, bool stubUnimplemented) {
+    parser::Messages &messages, const GenerationOptions &options) {
   return MerkGenerator{context, module, tree, tokens, sources, resolution, types, modes,
-      determinism, polymorphism, loops, target, messages, stubUnimplemented}
+      determinism, polymorphism, loops, target, messages, options}
       .Generate();
 }
 

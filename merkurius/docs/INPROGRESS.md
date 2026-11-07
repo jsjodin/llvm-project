@@ -388,8 +388,10 @@ later. In this order, each its own commit or commits:
    reports: clauses for one mode, trace goals, and `try` and `atomic`
    goals. Done: clauses for one mode, taken before the collection of all
    solutions (decided 2026-11-06), as `list` needs them for modes such as
-   `reverse(out, in)`, and `solutions/2` needs `list`. Next: trace goals,
-   `try` and `atomic` goals, after the rest of item 1.
+   `reverse(out, in)`, and `solutions/2` needs `list`; and trace goals,
+   but for their `state(M, !S)` parameters, which wait for mutables
+   (design document, Mode analysis, Determinism analysis and Lowering,
+   "Trace goals"). Next: `try` and `atomic` goals.
 3. **Open types,** `open(T)` and `closed(T)` (below): the `any` inst,
    variable cells and the trail. After nondeterminism, as backtracking
    undoes a binding through the trail.

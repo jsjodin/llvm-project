@@ -47,6 +47,9 @@ def fstub_unimplemented : Flag<["-"], "fstub-unimplemented">,
 def fopenmp_version_EQ : Joined<["-"], "fopenmp-version=">,
   MetaVarName<"<version>">,
   HelpText<"OpenMP version to accept, such as 52 for OpenMP 5.2">;
+def trace_flag_EQ : Joined<["--"], "trace-flag=">, MetaVarName<"<name>">,
+  HelpText<"Compile in the trace goals whose compile_time condition needs "
+           "flag(\"<name>\"), as mmc's --trace-flag does">;
 def I : JoinedOrSeparate<["-"], "I">, MetaVarName<"<dir>">,
   HelpText<"Add <dir> to the directories searched for imported modules">;
 

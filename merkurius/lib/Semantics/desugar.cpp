@@ -1031,6 +1031,12 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
               if (param->var) {
                 const auto *state{
                     std::get<const parser::StateVar *>(*param->var)};
+                if (state_.count(state->name)) {
+                  // mmc: "Warning: new state variable IO shadows old one."
+                  messages_.Say(Source(state->tokens),
+                      "the new state variable !%s shadows the one outside"_warn_en_US,
+                      state->name);
+                }
                 first.push_back(NewVersion(state->name, state->tokens));
                 shadowed.push_back(Shadow(state->name, first.back()));
               }

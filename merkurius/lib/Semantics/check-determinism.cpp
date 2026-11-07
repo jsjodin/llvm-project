@@ -371,6 +371,10 @@ private:
                   out.nonlocals.push_back(map_[var]);
                 }
               }
+              if (scope->kind == ScopeKind::Trace) {
+                out.trace = std::get<const parser::TraceGoal *>(
+                    std::get<parser::Goal>(scope->origin));
+              }
               if (scope->kind == ScopeKind::PromiseSolutions) {
                 const parser::Goal &origin{std::get<parser::Goal>(scope->origin)};
                 out.promise = std::get<const parser::PromiseSolutions *>(
@@ -2013,6 +2017,9 @@ private:
       if (goal->promise) {
         return Cast(goal, bound, outside);
       }
+      if (goal->trace) {
+        return Trace(goal, bound, outside);
+      }
       return Infer(goal->goals.front(), bound, outside);
     }
     return {det};
@@ -2193,6 +2200,32 @@ private:
     if (kind != Kind::EquivalentSolutionSets && r.d.most == Solutions::Many) {
       r.d.most = Solutions::One;
     }
+    return r;
+  }
+
+  // A trace goal must be det or cc_multi: only its first solution is
+  // wanted, and the goals around it see at most one, as it binds nothing
+  // they use. Its impurity does not leak, as in mmc (check-purity.cpp).
+  Inferred Trace(const Body *goal, std::set<BodyVar> &bound,
+      const std::set<BodyVar> &outside) {
+    const Body *inner{goal->goals.front()};
+    Inferred r{Infer(inner, bound, outside)};
+    if (r.d.canFail && checked_.insert(goal->tokens.first).second) {
+      // As committed choice, with the solutions it has before it binds
+      // nothing used after it. mmc: "Error: trace goal has determinism
+      // `semidet', should be det or cc_multi."
+      Components d{r.d};
+      if (pruned_.count(inner)) {
+        d.most = Solutions::Many;
+      }
+      messages_.Say(Where(goal->tokens),
+          "the trace goal has determinism %s, but must be det or cc_multi"_err_en_US,
+          DeterminismName(DeterminismOf(d, true)));
+    }
+    if (r.d.most == Solutions::Many) {
+      r.d.most = Solutions::One;
+    }
+    r.impure = false;
     return r;
   }
 
@@ -2393,8 +2426,10 @@ private:
     case BodyKind::Scope:
       // Inside a determinism cast whose goal can succeed more than once,
       // as in mmc, only what makes it fail.
-      if (goal->promise &&
-          *goal->promise != parser::PromiseSolutionsKind::EquivalentSolutionSets &&
+      if (((goal->promise &&
+               *goal->promise !=
+                   parser::PromiseSolutionsKind::EquivalentSolutionSets) ||
+              goal->trace) &&
           Seen(goal->goals.front()).most == Solutions::Many) {
         inner = Solutions::Many;
       }
@@ -2738,6 +2773,11 @@ private:
       if (goal->promise &&
           *goal->promise != parser::PromiseSolutionsKind::EquivalentSolutionSets) {
         Contexts(goal->goals.front(), {true, context.failing});
+        return false;
+      }
+      // Nothing outside a trace goal asks it for another solution.
+      if (goal->trace) {
+        Contexts(goal->goals.front(), {true, {}});
         return false;
       }
       if (goal->scope == ScopeKind::RequireDeterminism ||

@@ -120,6 +120,8 @@ struct Body {
   // in; for it and a require_complete_switch scope, the switch's variable.
   std::optional<parser::Determinism> required;
   std::optional<BodyVar> switchOn;
+  // For a trace goal, its parameters.
+  const parser::TraceGoal *trace{nullptr};
   // For a determinism cast, its kind and the variables it lists.
   std::optional<parser::PromiseSolutionsKind> promise;
   std::vector<BodyVar> promised;
