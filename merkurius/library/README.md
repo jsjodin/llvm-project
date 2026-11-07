@@ -35,9 +35,12 @@ infinities and NaNs, written as `io.write_float` writes them. `string/1` is
 `runtime/write.cpp`'s writer, writing into a buffer instead of a stream.
 `process.m`, a Merkurius extension with no counterpart in Mercury's
 library, implements the mailboxes of one process, `new_mailbox`,
-`close_mailbox`, `send`, `receive` on one mailbox and `any`, with
-`foreign_proc`s on `runtime/mailbox.cpp` (design document, Language
-extensions, "Processes and mailboxes").
+`close_mailbox`, `send`, `receive` on one mailbox and `any`, and a
+registry of names, `register`, `unregister` and `lookup`, as Erlang's,
+with `foreign_proc`s on `runtime/mailbox.cpp` (design document, Language
+extensions, "Processes and mailboxes"). A handle names its node and place
+and carries a secret; until connections exist, `this_node` is the only
+node.
 `float.m` implements its
 functions but `hash`, and `math.m` all of its
 functions but `solve_quadratic`, with C's math library. The arithmetic

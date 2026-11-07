@@ -9,9 +9,19 @@
 // Mailboxes, under library/process.m (design document, Runtime system,
 // "Message passing"). A mailbox is a slot of a table, named by its number and
 // the generation the slot had when the mailbox was made, so that the handle of
-// a closed mailbox stays dead when the slot is reused. A send copies the
+// a closed mailbox stays dead when the slot is reused. Its handle also names
+// the node, by an id chosen at random when the runtime starts, and the place
+// within it, 0 for the host, and carries a secret chosen at random when the
+// mailbox is made, which a message from another node must give (design
+// document, Handles, routing and places). A mailbox may be registered under
+// a name, which a lookup finds, if its message type is the one asked for.
+// A send copies the
 // message by its type_info into a fragment of its own, outside the heap, and
 // queues it; the receiver reads it there, so the fragment joins its heap.
+//
+// Temporary (Remote handles and TCP, step 3, docs/INPROGRESS.md): a send to
+// a handle of another node or place is dropped, and a lookup finds only this
+// node's names, until connections route them.
 //
 // Temporary (chunk 2, docs/INPROGRESS.md): one lock and one condition
 // variable for every mailbox, and fragments never freed, while a program is
@@ -28,6 +38,7 @@
 #include <cstring>
 #include <ctime>
 #include <pthread.h>
+#include <sys/random.h>
 
 namespace {
 
@@ -188,9 +199,58 @@ struct Message {
   Word value;
 };
 
+// A word from the kernel's source of random numbers.
+Word Random() {
+  Word word;
+  while (getrandom(&word, sizeof word, 0) != sizeof word) {
+  }
+  return word;
+}
+
+// A type_info kept beyond the call that gave it, in memory of its own, as a
+// registered mailbox's message type is: its cells copied, its descriptors
+// static.
+Word KeepTypeInfo(Word info) {
+  if ((info & kTagMask) == 0) {
+    return info;
+  }
+  const Word *cell{reinterpret_cast<const Word *>(info - 1)};
+  const auto *ctor{reinterpret_cast<const TypeCtor *>(cell[0])};
+  bool counted{ctor->kind == Tuple || ctor->kind == Closure};
+  Word arity{counted ? cell[1] : ctor->arity};
+  Word before{counted ? Word{2} : Word{1}};
+  auto *copy{static_cast<Word *>(Malloc(sizeof(Word) * (before + arity)))};
+  for (Word i{0}; i < before; ++i) {
+    copy[i] = cell[i];
+  }
+  for (Word i{0}; i < arity; ++i) {
+    copy[before + i] = KeepTypeInfo(cell[before + i]);
+  }
+  return reinterpret_cast<Word>(copy) + 1;
+}
+
+void FreeTypeInfo(Word info) {
+  if ((info & kTagMask) == 0) {
+    return;
+  }
+  Word *cell{reinterpret_cast<Word *>(info - 1)};
+  const auto *ctor{reinterpret_cast<const TypeCtor *>(cell[0])};
+  bool counted{ctor->kind == Tuple || ctor->kind == Closure};
+  Word arity{counted ? cell[1] : ctor->arity};
+  Word before{counted ? Word{2} : Word{1}};
+  for (Word i{0}; i < arity; ++i) {
+    FreeTypeInfo(cell[before + i]);
+  }
+  std::free(cell);
+}
+
 struct Mailbox {
   std::int64_t generation;
+  Word secret;
   bool open;
+  // The name it is registered under, or null, and then its message type.
+  char *name;
+  Word typeInfo;
   Message *head;
   Message **tail;
   std::int64_t count;
@@ -198,7 +258,29 @@ struct Mailbox {
   std::int64_t nextFree;
 };
 
+// What a handle names: the node, the place, 0 for the host, in the top 16
+// bits of the word whose other 48 are the slot, the generation and the
+// secret.
+struct Handle {
+  Word nodeHigh;
+  Word nodeLow;
+  Word placeAndSlot;
+  std::int64_t generation;
+  Word secret;
+};
+
+constexpr unsigned kPlaceShift{48};
+constexpr Word kSlotMask{(Word{1} << kPlaceShift) - 1};
+
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_once_t nodeOnce = PTHREAD_ONCE_INIT;
+Word nodeHigh{0};
+Word nodeLow{0};
+
+void ChooseNode() {
+  nodeHigh = Random();
+  nodeLow = Random();
+}
 pthread_cond_t arrived;
 pthread_once_t once = PTHREAD_ONCE_INIT;
 Mailbox *slots{nullptr};
@@ -222,14 +304,33 @@ std::int64_t Now() {
   return static_cast<std::int64_t>(now.tv_sec) * 1000000000 + now.tv_nsec;
 }
 
-// The mailbox of a handle, or null for a closed one. Called with the lock
-// held.
-Mailbox *Find(std::int64_t slot, std::int64_t generation) {
-  if (slot < 0 || slot >= slotCount) {
+// The mailbox of a handle, or null for a closed one, or one of another node
+// or place. Called with the lock held.
+Mailbox *Find(const Handle &handle) {
+  pthread_once(&nodeOnce, ChooseNode);
+  if (handle.nodeHigh != nodeHigh || handle.nodeLow != nodeLow ||
+      handle.placeAndSlot >> kPlaceShift != 0) {
+    return nullptr;
+  }
+  Word slot{handle.placeAndSlot & kSlotMask};
+  if (slot >= static_cast<Word>(slotCount)) {
     return nullptr;
   }
   Mailbox *mailbox{&slots[slot]};
-  return mailbox->open && mailbox->generation == generation ? mailbox : nullptr;
+  return mailbox->open && mailbox->generation == handle.generation &&
+          mailbox->secret == handle.secret
+      ? mailbox
+      : nullptr;
+}
+
+// Its name and message type go, as when it is closed.
+void Unregister(Mailbox *mailbox) {
+  if (mailbox->name) {
+    std::free(mailbox->name);
+    FreeTypeInfo(mailbox->typeInfo);
+    mailbox->name = nullptr;
+    mailbox->typeInfo = 0;
+  }
 }
 
 Message *At(Mailbox *mailbox, std::int64_t position) {
@@ -242,7 +343,17 @@ Message *At(Mailbox *mailbox, std::int64_t position) {
 
 } // namespace
 
-extern "C" void merk_mailbox_new(std::int64_t *slot, std::int64_t *generation) {
+// This node's id, chosen at random the first time it is asked for.
+extern "C" void merk_node(std::int64_t *high, std::int64_t *low) {
+  pthread_once(&nodeOnce, ChooseNode);
+  *high = static_cast<std::int64_t>(nodeHigh);
+  *low = static_cast<std::int64_t>(nodeLow);
+}
+
+// A new mailbox of this node's host: its slot, with place 0, its generation
+// and its secret; merk_node gives the rest of its handle.
+extern "C" void merk_mailbox_new(
+    std::int64_t *placeAndSlot, std::int64_t *generation, std::int64_t *secret) {
   pthread_once(&once, InitializeCondition);
   pthread_mutex_lock(&lock);
   std::int64_t index{firstFree};
@@ -268,29 +379,43 @@ extern "C" void merk_mailbox_new(std::int64_t *slot, std::int64_t *generation) {
   }
   Mailbox &mailbox{slots[index]};
   mailbox.open = true;
+  mailbox.secret = Random();
+  mailbox.name = nullptr;
+  mailbox.typeInfo = 0;
   mailbox.head = nullptr;
   mailbox.tail = &mailbox.head;
   mailbox.count = 0;
   mailbox.nextFree = -1;
-  *slot = index;
+  *placeAndSlot = index;
   *generation = mailbox.generation;
+  *secret = static_cast<std::int64_t>(mailbox.secret);
   pthread_mutex_unlock(&lock);
 }
 
-// Its queued messages are dropped, and its slot gets a new generation, so
-// that its handle stays dead when the slot is reused. A receive waiting on
-// it wakes and finds nothing.
-extern "C" void merk_mailbox_close(std::int64_t slot, std::int64_t generation) {
+#define MERK_HANDLE_PARAMETERS                                                 \
+  std::int64_t nodeHigh, std::int64_t nodeLow, std::int64_t placeAndSlot,      \
+      std::int64_t generation, std::int64_t secret
+#define MERK_HANDLE                                                            \
+  Handle {                                                                     \
+    static_cast<Word>(nodeHigh), static_cast<Word>(nodeLow),                   \
+        static_cast<Word>(placeAndSlot), generation, static_cast<Word>(secret) \
+  }
+
+// Its queued messages are dropped, its name goes, and its slot gets a new
+// generation, so that its handle stays dead when the slot is reused. A
+// receive waiting on it wakes and finds nothing.
+extern "C" void merk_mailbox_close(MERK_HANDLE_PARAMETERS) {
   pthread_once(&once, InitializeCondition);
   pthread_mutex_lock(&lock);
-  if (Mailbox *mailbox{Find(slot, generation)}) {
+  if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
+    Unregister(mailbox);
     mailbox->open = false;
     ++mailbox->generation;
     mailbox->head = nullptr;
     mailbox->tail = &mailbox->head;
     mailbox->count = 0;
     mailbox->nextFree = firstFree;
-    firstFree = slot;
+    firstFree = mailbox - slots;
     pthread_cond_broadcast(&arrived);
   }
   pthread_mutex_unlock(&lock);
@@ -298,15 +423,15 @@ extern "C" void merk_mailbox_close(std::int64_t slot, std::int64_t generation) {
 
 // The copy is made before the lock is taken, since it reads only the
 // sender's cells; a message to a closed mailbox is then dropped.
-extern "C" void merk_mailbox_send(std::int64_t slot, std::int64_t generation,
-    Word typeInfo, Word value) {
+extern "C" void merk_mailbox_send(
+    MERK_HANDLE_PARAMETERS, Word typeInfo, Word value) {
   pthread_once(&once, InitializeCondition);
   Fragment fragment;
   auto *message{static_cast<Message *>(fragment.Allocate(sizeof(Message)))};
   message->next = nullptr;
   message->value = CopyValue(value, typeInfo, nullptr, fragment);
   pthread_mutex_lock(&lock);
-  if (Mailbox *mailbox{Find(slot, generation)}) {
+  if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
     *mailbox->tail = message;
     mailbox->tail = &message->next;
     ++mailbox->count;
@@ -322,14 +447,14 @@ extern "C" std::int64_t merk_mailbox_deadline(std::int64_t milliseconds) {
 }
 
 // 1 once the mailbox has a message at `position`, 0 if the deadline passes
-// first or the mailbox is closed.
-extern "C" std::int64_t merk_mailbox_wait(std::int64_t slot,
-    std::int64_t generation, std::int64_t position, std::int64_t deadline) {
+// first, or the mailbox is closed or not this node's host's.
+extern "C" std::int64_t merk_mailbox_wait(
+    MERK_HANDLE_PARAMETERS, std::int64_t position, std::int64_t deadline) {
   pthread_once(&once, InitializeCondition);
   pthread_mutex_lock(&lock);
   std::int64_t result{0};
   for (;;) {
-    Mailbox *mailbox{Find(slot, generation)};
+    Mailbox *mailbox{Find(MERK_HANDLE)};
     if (!mailbox) {
       break;
     }
@@ -354,9 +479,9 @@ extern "C" std::int64_t merk_mailbox_wait(std::int64_t slot,
 
 // The message at `position`, which merk_mailbox_wait has found there.
 extern "C" Word merk_mailbox_message(
-    std::int64_t slot, std::int64_t generation, std::int64_t position) {
+    MERK_HANDLE_PARAMETERS, std::int64_t position) {
   pthread_mutex_lock(&lock);
-  Mailbox *mailbox{Find(slot, generation)};
+  Mailbox *mailbox{Find(MERK_HANDLE)};
   if (!mailbox || mailbox->count <= position) {
     Fail("a message was read that is not in its mailbox", "");
   }
@@ -366,9 +491,9 @@ extern "C" Word merk_mailbox_message(
 }
 
 extern "C" void merk_mailbox_remove(
-    std::int64_t slot, std::int64_t generation, std::int64_t position) {
+    MERK_HANDLE_PARAMETERS, std::int64_t position) {
   pthread_mutex_lock(&lock);
-  if (Mailbox *mailbox{Find(slot, generation)};
+  if (Mailbox *mailbox{Find(MERK_HANDLE)};
       mailbox && mailbox->count > position) {
     Message **link{&mailbox->head};
     for (std::int64_t i{0}; i < position; ++i) {
@@ -382,4 +507,76 @@ extern "C" void merk_mailbox_remove(
     --mailbox->count;
   }
   pthread_mutex_unlock(&lock);
+}
+
+// Registers a mailbox of this node's host under a name, as Erlang's
+// register/2 does, which fails if the name is taken or the mailbox has one
+// already: 0 if it is registered, 1 if the name is taken, 2 if the mailbox
+// has a name, 3 if it is closed or another node's or place's.
+extern "C" std::int64_t merk_mailbox_register(
+    MERK_HANDLE_PARAMETERS, const char *name, Word typeInfo) {
+  pthread_once(&once, InitializeCondition);
+  pthread_mutex_lock(&lock);
+  std::int64_t result{0};
+  Mailbox *mailbox{Find(MERK_HANDLE)};
+  if (!mailbox) {
+    result = 3;
+  } else if (mailbox->name) {
+    result = 2;
+  } else {
+    for (std::int64_t i{0}; i < slotCount; ++i) {
+      if (slots[i].open && slots[i].name &&
+          std::strcmp(slots[i].name, name) == 0) {
+        result = 1;
+        break;
+      }
+    }
+  }
+  if (result == 0) {
+    std::size_t bytes{std::strlen(name) + 1};
+    mailbox->name = static_cast<char *>(Malloc(bytes));
+    std::memcpy(mailbox->name, name, bytes);
+    mailbox->typeInfo = KeepTypeInfo(typeInfo);
+  }
+  pthread_mutex_unlock(&lock);
+  return result;
+}
+
+// Removes a name, if it is registered.
+extern "C" void merk_mailbox_unregister(const char *name) {
+  pthread_mutex_lock(&lock);
+  for (std::int64_t i{0}; i < slotCount; ++i) {
+    if (slots[i].open && slots[i].name &&
+        std::strcmp(slots[i].name, name) == 0) {
+      Unregister(&slots[i]);
+      break;
+    }
+  }
+  pthread_mutex_unlock(&lock);
+}
+
+extern "C" std::int32_t merk_compare_type_infos(Word x, Word y);
+
+// The mailbox registered under a name on this node: 0 and its slot,
+// generation and secret if its message type is the type_info's, 1 if no
+// mailbox has the name, 2 if its message type is another.
+extern "C" std::int64_t merk_mailbox_lookup(const char *name, Word typeInfo,
+    std::int64_t *placeAndSlot, std::int64_t *generation,
+    std::int64_t *secret) {
+  pthread_mutex_lock(&lock);
+  std::int64_t result{1};
+  for (std::int64_t i{0}; i < slotCount; ++i) {
+    Mailbox &mailbox{slots[i]};
+    if (mailbox.open && mailbox.name && std::strcmp(mailbox.name, name) == 0) {
+      result = merk_compare_type_infos(mailbox.typeInfo, typeInfo) == 0 ? 0 : 2;
+      if (result == 0) {
+        *placeAndSlot = i;
+        *generation = mailbox.generation;
+        *secret = static_cast<std::int64_t>(mailbox.secret);
+      }
+      break;
+    }
+  }
+  pthread_mutex_unlock(&lock);
+  return result;
 }
