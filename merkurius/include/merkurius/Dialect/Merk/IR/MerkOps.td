@@ -726,14 +726,16 @@ def Merk_CheckIndexOp : Merk_Op<"check_index"> {
 }
 
 def Merk_YieldOp : Merk_Op<"yield", [
-    Pure, ParentOneOf<["IteOp", "SwitchOp", "NotOp"]>, ReturnLike, Terminator
+    Pure, ParentOneOf<["IteOp", "SwitchOp", "NotOp", "AggregateOp"]>,
+    ReturnLike, Terminator
   ]> {
   let summary = "end a branch with the values it binds";
   let description = [{
     Ends a region of an if-then-else, switch or negation that succeeds:
     the condition of `merk.ite` with the values it binds, which the then
     part takes as its arguments, and the then and else parts and the cases
-    of `merk.switch` with the operation's results.
+    of `merk.switch` with the operation's results. It ends the step of
+    `merk.aggregate` with whether to go on, then the new accumulators.
   }];
   let arguments = (ins Variadic<AnyType>:$values);
   let assemblyFormat = "attr-dict ($values^ `:` type($values))?";
@@ -1049,11 +1051,58 @@ def Merk_CommitOp : Merk_Op<"commit", [RecursiveMemoryEffects]> {
   }]>];
 }
 
-def Merk_SolutionOp : Merk_Op<"solution", [Pure, Terminator]> {
-  let summary = "give a solution of `merk.each`'s or `merk.commit`'s goal";
+def Merk_AggregateOp : Merk_Op<"aggregate", [RecursiveMemoryEffects]> {
+  let summary = "fold a step over the solutions of a goal";
   let description = [{
-    Gives a solution of the generator of the innermost `merk.each` or
-    `merk.commit`, with its values.
+    Runs its generator, a goal with any number of solutions, which it gives
+    with `merk.solution`, and its step once for each, in the order the
+    generator gives them, as soon as it gives it. The step takes the
+    solution's values and then the accumulators, and ends with `merk.yield`
+    of whether to go on, an `i1`, and the new accumulators. The operands
+    are the accumulators' first values; the results, their last, after the
+    generator has no more solutions or a step said not to go on. It
+    succeeds exactly once: the generator's remaining solutions are not
+    tried after it, and backtracking into the generator does not undo a
+    step, so the accumulators can be unique (`solutions.unsorted_aggregate`,
+    `unsorted_aggregate2` and `do_while`).
+
+    ```mlir
+    %sum = merk.aggregate (%zero : i64) -> i64 {
+      merk.nondet_call @m.g_1_0() {
+      ^bb0(%x: i64):
+        merk.solution %x : i64
+      }
+    } step {
+    ^bb0(%x: i64, %acc: i64):
+      %go = arith.constant true
+      %s = arith.addi %acc, %x : i64
+      merk.yield %go, %s : i1, i64
+    }
+    ```
+  }];
+  let arguments = (ins Variadic<AnyType>:$initial);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region SizedRegion<1>:$generator, SizedRegion<1>:$step);
+  let assemblyFormat = [{
+    (`(` $initial^ `:` type($initial) `)` `->` type($results))?
+    $generator `step` $step attr-dict
+  }];
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+  let builders = [OpBuilder<(ins "mlir::ValueRange":$initial), [{
+    $_state.addOperands(initial);
+    $_state.addTypes(initial.getTypes());
+    $_state.addRegion();
+    $_state.addRegion();
+  }]>];
+}
+
+def Merk_SolutionOp : Merk_Op<"solution", [Pure, Terminator]> {
+  let summary = "give a solution of a goal whose solutions are wanted";
+  let description = [{
+    Gives a solution of the generator of the innermost `merk.each`,
+    `merk.commit` or `merk.aggregate`, or the condition of
+    `merk.soft_ite`, with its values.
   }];
   let arguments = (ins Variadic<AnyType>:$values);
   let assemblyFormat = "attr-dict ($values^ `:` type($values))?";

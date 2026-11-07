@@ -427,6 +427,7 @@ private:
   // cannot make: it reports what is not implemented, and ends the program.
   void StubBody(merk::ProcOp, parser::CharBlock at);
   void GenerateUnchecked(const Procedure &);
+  void GenerateAggregate(const Procedure &);
   // A procedure's body from its foreign_proc: a call of the C function
   // around the foreign_proc's code, which is added to foreignCode_.
   void GenerateForeign(const Procedure &, const parser::ForeignProcPragma &);
@@ -6687,6 +6688,95 @@ void MerkGenerator::GenerateUnchecked(const Procedure &procedure) {
   StubBody(proc, at);
 }
 
+// solutions.unsorted_aggregate/4, unsorted_aggregate2/6 and do_while/4,
+// which have no clauses: code generation makes each of their procedures
+// from merk.aggregate (design document, Lowering, "Collecting solutions").
+static bool IsAggregate(const semantics::Symbol &symbol) {
+  return symbol.module == "solutions" &&
+      symbol.kind == semantics::SymbolKind::Predicate &&
+      ((symbol.name == "unsorted_aggregate" && symbol.arity == 4) ||
+          (symbol.name == "unsorted_aggregate2" && symbol.arity == 6) ||
+          (symbol.name == "do_while" && symbol.arity == 4));
+}
+
+// The procedure takes the type_infos, the generator, the step and the
+// accumulators' first values, and gives their last; every one of them but
+// the closures is a word, of a type variable. Its body is merk.aggregate,
+// whose generator calls the generator closure, giving each of its solutions,
+// and whose step calls the step closure; do_while's step goes on if the
+// closure says `yes`, the others' always.
+void MerkGenerator::GenerateAggregate(const Procedure &procedure) {
+  parser::CharBlock at{procedure.symbol->source};
+  mlir::Location loc{Location(at)};
+  failed_ = false;
+  inBody_ = true;
+  notYet_.clear();
+  llvm::scope_exit leave{[&] { inBody_ = false; }};
+  const semantics::Signature *signature{types_.SignatureOf(*procedure.symbol)};
+  if (!signature) {
+    return;
+  }
+  const semantics::Inst *stepInst{procedure.modes[1].initial};
+  std::optional<merk::Determinism> stepDeterminism;
+  if (stepInst->kind == semantics::InstKind::HigherOrder) {
+    stepDeterminism = MerkDeterminism(stepInst->determinism);
+  }
+  if (!stepDeterminism) {
+    NotYet(at, "this mode of " + procedure.symbol->name.str());
+    return;
+  }
+  merk::ProcOp proc{ProcFor(procedure, signature->arguments, at)};
+  if (!proc || !proc.isExternal()) {
+    return;
+  }
+  if (procedure.symbol->exported) {
+    proc.setPublic();
+  }
+  bool stops{procedure.symbol->name == "do_while"};
+  auto word{merk::WordType::get(&context_)};
+  unsigned count{proc.getFunctionType().getNumResults()};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  mlir::Block &entry{*proc.addEntryBlock()};
+  unsigned hidden{entry.getNumArguments() - 2 - count};
+  mlir::Value generator{entry.getArgument(hidden)};
+  mlir::Value step{entry.getArgument(hidden + 1)};
+  builder_.setInsertionPointToStart(&entry);
+  auto aggregate{merk::AggregateOp::create(
+      builder_, loc, entry.getArguments().drop_front(hidden + 2))};
+  builder_.setInsertionPointToStart(&aggregate.getGenerator().emplaceBlock());
+  auto call{merk::NondetCallClosureOp::create(
+      builder_, loc, generator, mlir::ValueRange{})};
+  mlir::Block &continuation{call.getContinuation().emplaceBlock()};
+  continuation.addArgument(word, loc);
+  builder_.setInsertionPointToStart(&continuation);
+  merk::SolutionOp::create(builder_, loc, continuation.getArguments());
+  mlir::Block &body{aggregate.getStep().emplaceBlock()};
+  for (unsigned i{0}; i <= count; ++i) {
+    body.addArgument(word, loc);
+  }
+  builder_.setInsertionPointToStart(&body);
+  auto apply{merk::CallClosureOp::create(builder_, loc,
+      llvm::SmallVector<mlir::Type>(count + (stops ? 1 : 0), word), step,
+      body.getArguments(), *stepDeterminism)};
+  llvm::SmallVector<mlir::Value> yielded;
+  mlir::ValueRange accumulators{apply.getResults()};
+  if (stops) {
+    const semantics::Type *boolType{signature->arguments[1]->arguments[1]};
+    mlir::Value more{
+        Coerce(apply.getResult(0), Represent(boolType)->type, loc)};
+    yielded.push_back(merk::HasFunctorOp::create(builder_, loc, more,
+        merk::FunctorAttr::get(&context_, "yes", 0)));
+    accumulators = accumulators.drop_front();
+  } else {
+    yielded.push_back(mlir::arith::ConstantIntOp::create(
+        builder_, loc, builder_.getI1Type(), 1));
+  }
+  yielded.append(accumulators.begin(), accumulators.end());
+  merk::YieldOp::create(builder_, loc, yielded);
+  builder_.setInsertionPointAfter(aggregate);
+  merk::SucceedOp::create(builder_, loc, aggregate.getResults());
+}
+
 void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
   const Procedure &procedure{*body.procedure};
   parser::CharBlock at{procedure.symbol->source};
@@ -6878,6 +6968,13 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
         !modes_.ForeignProcOf(procedure) &&
         modes_.UncheckedReason(procedure) != semantics::Unchecked::None) {
       GenerateUnchecked(procedure);
+    }
+  }
+  for (const Procedure &procedure : modes_.procedures()) {
+    if (procedure.symbol->module == moduleName_ &&
+        IsAggregate(*procedure.symbol) && !bodies_.contains(&procedure) &&
+        !modes_.ForeignProcOf(procedure)) {
+      GenerateAggregate(procedure);
     }
   }
   // The word copies that bodies called, and those that copies call; one of a

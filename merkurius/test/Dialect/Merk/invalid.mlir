@@ -25,6 +25,10 @@
 // RUN: not merkc -fc1 -emit-merk %t/nondet-callee.mlir 2>&1 | FileCheck %s --check-prefix=NONDET-CALLEE
 // RUN: not merkc -fc1 -emit-merk %t/nondet-call-type.mlir 2>&1 | FileCheck %s --check-prefix=NONDET-CALL-TYPE
 // RUN: not merkc -fc1 -emit-merk %t/solution.mlir 2>&1 | FileCheck %s --check-prefix=SOLUTION
+// RUN: not merkc -fc1 -emit-merk %t/aggregate-results.mlir 2>&1 | FileCheck %s --check-prefix=AGGREGATE-RESULTS
+// RUN: not merkc -fc1 -emit-merk %t/aggregate-step.mlir 2>&1 | FileCheck %s --check-prefix=AGGREGATE-STEP
+// RUN: not merkc -fc1 -emit-merk %t/aggregate-yield.mlir 2>&1 | FileCheck %s --check-prefix=AGGREGATE-YIELD
+// RUN: not merkc -fc1 -emit-merk %t/aggregate-solution.mlir 2>&1 | FileCheck %s --check-prefix=AGGREGATE-SOLUTION
 // RUN: not merkc -fc1 -emit-merk %t/solution-type.mlir 2>&1 | FileCheck %s --check-prefix=SOLUTION-TYPE
 // RUN: not merkc -fc1 -emit-merk %t/soft-ite-type.mlir 2>&1 | FileCheck %s --check-prefix=SOFT-ITE-TYPE
 // RUN: not merkc -fc1 -emit-merk %t/nondet-call-closure.mlir 2>&1 | FileCheck %s --check-prefix=NONDET-CALL-CLOSURE
@@ -137,7 +141,7 @@ module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 }
 
 //--- yield.mlir
-// YIELD: yield.mlir:[[@LINE+3]]:5: error: 'merk.yield' op expects parent op to be one of 'merk.ite, merk.switch, merk.not'
+// YIELD: yield.mlir:[[@LINE+3]]:5: error: 'merk.yield' op expects parent op to be one of 'merk.ite, merk.switch, merk.not, merk.aggregate'
 module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   merk.proc @p() attributes {determinism = #merk.determinism<det>} {
     merk.yield
@@ -254,7 +258,7 @@ module {
 }
 
 //--- solution.mlir
-// SOLUTION: solution.mlir:[[@LINE+3]]:5: error: 'merk.solution' op is not in the generator of merk.each or merk.commit, or the condition of merk.soft_ite
+// SOLUTION: solution.mlir:[[@LINE+3]]:5: error: 'merk.solution' op is not in the generator of merk.each, merk.commit or merk.aggregate, or the condition of merk.soft_ite
 module {
   merk.proc @p() attributes {determinism = #merk.determinism<det>} {
     merk.solution
@@ -303,5 +307,72 @@ module {
     ^bb0(%x: i64):
       merk.succeed %x : i64
     }
+  }
+}
+
+//--- aggregate-results.mlir
+// AGGREGATE-RESULTS: aggregate-results.mlir:[[@LINE+4]]:10: error: 'merk.aggregate' op results do not match its operands
+module {
+  merk.proc @p() -> i32 attributes {determinism = #merk.determinism<det>} {
+    %zero = merk.constant 0 : i64
+    %r = merk.aggregate(%zero : i64) -> i32 {
+      merk.fail
+    } step {
+    ^bb0(%x: i64, %a: i32):
+      %go = arith.constant true
+      merk.yield %go, %a : i1, i32
+    }
+    merk.succeed %r : i32
+  }
+}
+
+//--- aggregate-step.mlir
+// AGGREGATE-STEP: aggregate-step.mlir:[[@LINE+4]]:10: error: 'merk.aggregate' op step's last arguments do not match its results
+module {
+  merk.proc @p() -> i64 attributes {determinism = #merk.determinism<det>} {
+    %zero = merk.constant 0 : i64
+    %r = merk.aggregate(%zero : i64) -> i64 {
+      merk.fail
+    } step {
+    ^bb0(%x: i64, %a: i32):
+      %go = arith.constant true
+      %b = arith.extsi %a : i32 to i64
+      merk.yield %go, %b : i1, i64
+    }
+    merk.succeed %r : i64
+  }
+}
+
+//--- aggregate-yield.mlir
+// AGGREGATE-YIELD: aggregate-yield.mlir:[[@LINE+4]]:10: error: 'merk.aggregate' op step does not yield an i1 and then values of its results' types
+module {
+  merk.proc @p() -> i64 attributes {determinism = #merk.determinism<det>} {
+    %zero = merk.constant 0 : i64
+    %r = merk.aggregate(%zero : i64) -> i64 {
+      merk.fail
+    } step {
+    ^bb0(%x: i64, %a: i64):
+      merk.yield %a : i64
+    }
+    merk.succeed %r : i64
+  }
+}
+
+//--- aggregate-solution.mlir
+// AGGREGATE-SOLUTION: aggregate-solution.mlir:[[@LINE+7]]:9: error: 'merk.solution' op does not match the arguments of the step
+module {
+  merk.proc @p() -> i64 attributes {determinism = #merk.determinism<det>} {
+    %zero = merk.constant 0 : i64
+    %r = merk.aggregate(%zero : i64) -> i64 {
+      merk.disj {
+        %one = merk.constant 1 : i32
+        merk.solution %one : i32
+      }
+    } step {
+    ^bb0(%x: i64, %a: i64):
+      %go = arith.constant true
+      merk.yield %go, %a : i1, i64
+    }
+    merk.succeed %r : i64
   }
 }

@@ -17,6 +17,10 @@ messages, but `report_lookup_error`, which is not implemented yet.
 `pair.m` and `maybe.m` implement all of theirs in Mercury. `list.m` implements all of its declarations in Mercury, every
 mode, with mmc's behaviour where the manual leaves it open, as found by
 running mmc's programs (design document, Code generation, "Library").
+`solutions.m` implements all of its declarations: `unsorted_aggregate`,
+`unsorted_aggregate2` and `do_while` have no clauses, as code generation
+makes their procedures from `merk.aggregate`, and the others are written
+in Mercury on them (design document, Lowering, "Collecting solutions").
 `float.m` implements its
 functions but `hash`, and `math.m` all of its
 functions but `solve_quadratic`, with C's math library. The arithmetic
@@ -45,7 +49,8 @@ so the declarations are kept as the manual gives them.
 What the stubs leave out:
 
 - Declarations that need modules not stubbed yet, such as
-  `pretty_printer`, `random`, `enum` and `stream`.
+  `pretty_printer`, `random`, `enum`, `stream`, and `set`, which
+  `solutions_set` needs.
 - In `list`, `io` and `string`, all but the commonly used predicates and
   functions.
 - The `stm_builtin` module, which mmc provides for atomic goals and which

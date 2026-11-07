@@ -12,6 +12,10 @@
     --->    []
     ;       [I | list_skel(I)].
 :- inst list(I) == list_skel(I).
+:- inst empty_list for list/1
+    --->    [].
+:- inst non_empty_list for list/1
+    --->    [ground | ground].
 :- pred is_empty(list(T)::in) is semidet.
 :- pred is_not_empty(list(T)::in) is semidet.
 :- func head(list(T)) = T is semidet.

@@ -335,7 +335,14 @@ program.
    make is left out, as no call of it can be generated either. Rejected: leaving them all out,
    which a path to one would make a link error rather than a message; and
    removing the nondet and multi modes from the library's interfaces, which
-   would make programs that mmc accepts mode errors. Also temporary:
+   would make programs that mmc accepts mode errors. With the option, a
+   predicate without clauses is not reported either (design document,
+   "No clauses"), as the library has predicates that code generation
+   builds in: `float`'s and the integer modules' arithmetic, and
+   `solutions.unsorted_aggregate`, `unsorted_aggregate2` and `do_while`.
+   When the option goes, those need a mark that code generation implements
+   them, such as a merkc pragma or a list the check consults; which is
+   decided then. Also temporary:
    `require.report_lookup_error`, whose message needs the key's type name
    and a writer to the standard error, says it is not implemented.
 7. **The gate.** nrev at E1's sizes on our compiler against E1's C and
@@ -370,26 +377,12 @@ later. In this order, each its own commit or commits:
    one mode (item 2) and `list` (step 6 (c)), then last call modulo
    constructor, at every optimization level, so that `list` runs on long
    lists as mmc's does (design document, Lowering, "Deterministic and
-   semidet code", "Last call modulo constructor"), all done; then the
-   collection of all solutions, whose `solutions/2` sorts with `list`; then nondet methods
-   and word copies of nondet procedures, which are reported as not yet
-   implemented.
+   semidet code", "Last call modulo constructor"), and the collection of
+   all solutions, `merk.aggregate` and the library's `solutions` (design
+   document, Lowering, "Nondeterministic code", "Collecting solutions"),
+   all done. Next: nondet methods and word copies of nondet procedures,
+   which are reported as not yet implemented.
 
-   **Collecting all solutions** (decided 2026-11-06). The library's
-   `solutions` module is written in Mercury on one builtin that pure
-   Mercury cannot express, carrying an accumulator across backtracking:
-   `builtin_aggregate(Generator, Step, Acc0, Acc)`, which code generation
-   makes `merk.aggregate`, whose generator's solutions go to a region that
-   takes each with the accumulator and gives the next. Outlining keeps the
-   accumulator in a slot of an environment in the caller's frame, as a
-   soft cut's flag, which the continuation updates before it asks for the
-   next solution. `solutions/2` sorts with `list.sort_and_remove_dups`,
-   written in Mercury on `compare`. Rejected: `solutions.m` in plain
-   Mercury on a mutable heap cell updated by impure `foreign_proc`s in a
-   failure-driven loop, which needs no compiler construct but allocates
-   a cell for each collection, updates the heap destructively, which the
-   collector's write barrier must then see, and needs
-   `unsafe_promise_unique` for accumulators in `di`/`uo` modes.
 2. **What mode analysis does not check yet,** which code generation now
    reports: clauses for one mode, trace goals, and `try` and `atomic`
    goals. Done: clauses for one mode, taken before the collection of all
