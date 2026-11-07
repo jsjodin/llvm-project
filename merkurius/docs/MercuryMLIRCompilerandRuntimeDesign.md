@@ -3004,9 +3004,9 @@ node 1 to node 2. Processes on the CPU come after.
      on a mailbox of its own. With one process on each node, a `receive`
      that blocks waits on a condition variable, so no scheduler is needed.
      Done: mailboxes, `send` and `receive` within one process (Processes
-     and mailboxes, "As implemented"), and remote handles over TCP
-     without the cookie (`INPROGRESS.md`, Remote handles and TCP, steps 1
-     to 3); next is the cookie.
+     and mailboxes, "As implemented"), and remote handles over TCP, with
+     the cookie (`INPROGRESS.md`, Remote handles and TCP); next are
+     selectors and the `receive` goal.
    - **Between them:** TCP, with handles carrying the node and the place.
      The handshake and the handle's format are designed properly now, since
      they are hard to change once programs depend on them (Handles, routing

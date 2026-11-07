@@ -8,7 +8,7 @@
 //
 // SHA-256 as FIPS 180-4 gives it: sections 4.1.2 (functions), 4.2.2
 // (constants), 5.1.1 (padding), 5.3.3 (initial value) and 6.2.2 (the
-// computation).
+// computation); and HMAC on it, as RFC 2104 gives it.
 //
 //===----------------------------------------------------------------------===//
 
@@ -115,6 +115,36 @@ void Sha256::Finish(std::uint8_t digest[kDigestBytes]) {
     digest[4 * i + 2] = static_cast<std::uint8_t>(state_[i] >> 8);
     digest[4 * i + 3] = static_cast<std::uint8_t>(state_[i]);
   }
+}
+
+// H((K ^ opad) || H((K ^ ipad) || data)), where K is the key, or its digest
+// if it is longer than a block, padded with zeros to a block.
+void HmacSha256(const void *key, std::size_t keyBytes, const void *data,
+    std::size_t dataBytes, std::uint8_t mac[Sha256::kDigestBytes]) {
+  std::uint8_t block[64]{};
+  if (keyBytes > sizeof block) {
+    Sha256 digest;
+    digest.Update(key, keyBytes);
+    digest.Finish(block);
+  } else {
+    std::memcpy(block, key, keyBytes);
+  }
+  std::uint8_t pad[64];
+  for (std::size_t i{0}; i < sizeof pad; ++i) {
+    pad[i] = block[i] ^ 0x36;
+  }
+  Sha256 inner;
+  inner.Update(pad, sizeof pad);
+  inner.Update(data, dataBytes);
+  std::uint8_t innerDigest[Sha256::kDigestBytes];
+  inner.Finish(innerDigest);
+  for (std::size_t i{0}; i < sizeof pad; ++i) {
+    pad[i] = block[i] ^ 0x5c;
+  }
+  Sha256 outer;
+  outer.Update(pad, sizeof pad);
+  outer.Update(innerDigest, sizeof innerDigest);
+  outer.Finish(mac);
 }
 
 } // namespace merkurius::runtime

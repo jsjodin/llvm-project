@@ -48,7 +48,10 @@ and connections to other nodes over TCP, `listen` and `connect`, with
 document, Language extensions, "Processes and mailboxes";
 `docs/INPROGRESS.md`, "Remote handles and TCP"). A handle names its node
 and place and carries a secret, and a send to another node's mailbox
-encodes the message and writes it on the connection.
+encodes the message and writes it on the connection. Two nodes connect
+only if they have the same cookie, `MERK_COOKIE` or else the first line
+of `~/.merkurius.cookie`, which is made at random if it is missing, as
+Erlang's `~/.erlang.cookie` is.
 `char.m` implements all of its declarations, in Mercury over
 `foreign_proc`s for the conversions between characters and ints. Where the
 manual leaves it open, it is mmc's, found by running its programs: the

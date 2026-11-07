@@ -8,7 +8,8 @@
 //
 // TCP connections between nodes, after Erlang's distribution
 // (docs/INPROGRESS.md, Remote handles and TCP): listen and connect by
-// address, a handshake that exchanges node ids, frames of a 4-byte length
+// address, a handshake that exchanges node ids and proves that both nodes
+// know the cookie, frames of a 4-byte length
 // and a kind, lookups of registered names by their type's fingerprint,
 // messages to remote mailboxes, and ticks that find a peer that has gone
 // silent.
@@ -49,6 +50,14 @@
 // MERK_TICK_TIME is the tick time in seconds, 60 by default as Erlang's
 // net_ticktime.
 //
+// The cookie is MERK_COOKIE, or else the first line of ~/.merkurius.cookie,
+// which is made with 20 random capital letters if it is missing, and must
+// be readable by its owner only, as ~/.erlang.cookie. A connection is kept
+// only if each node answers the other's random challenge with the HMAC of
+// it under the cookie, which is never sent. An answer covers both ids in
+// the order of who answers, so that a node's answer on one connection is no
+// answer on another, as when it is relayed back to it.
+//
 // Connections' records are never freed, so that a thread that has found
 // one never sees it go; one is a few words per connection ever made.
 //
@@ -57,7 +66,9 @@
 #include "node.h"
 #include "fragment.h"
 #include "heap.h"
+#include "sha256.h"
 #include <cerrno>
+#include <fcntl.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -65,7 +76,9 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
+#include <sys/random.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
@@ -83,9 +96,13 @@ enum Kind : std::uint32_t {
   kTick = 6,
 };
 
-// Step 4's cookie makes it 1.
-constexpr std::uint32_t kVersion{0};
-constexpr std::size_t kHelloBytes{24};
+// 0 had no cookie; 1 has the challenges.
+constexpr std::uint32_t kVersion{1};
+constexpr std::size_t kChallengeBytes{32};
+constexpr std::size_t kHelloBytes{24 + kChallengeBytes};
+// What an answer's HMAC covers first, so that it is for nothing else.
+constexpr char kAnswerLabel[]{"merkurius node answer"};
+constexpr std::size_t kCookieBytes{1024};
 constexpr std::size_t kHeaderBytes{8};
 constexpr std::size_t kHandleBytes{40};
 constexpr std::size_t kFoundBytes{16 + kHandleBytes};
@@ -240,6 +257,140 @@ void Initialize() {
     tickTime = seconds * std::int64_t{1000000000};
   }
   StartThread(Ticker, nullptr);
+}
+
+// The cookie, or why there is none.
+pthread_once_t cookieOnce = PTHREAD_ONCE_INIT;
+char cookie[kCookieBytes];
+std::size_t cookieBytes{0};
+char cookieError[4096 + 128];
+
+void CookieProblem(const char *where, const char *problem) {
+  std::snprintf(cookieError, sizeof cookieError, "%s: %s", where, problem);
+}
+
+// The file's first line, without the spaces after it, into `cookie`; it is
+// made first if it is missing. False, with the problem in cookieError, if
+// it cannot be read, is not its owner's alone, or is empty.
+bool ReadCookieFile(const char *path) {
+  int file{open(path, O_RDONLY | O_CLOEXEC)};
+  if (file < 0 && errno == ENOENT) {
+    int made{open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0400)};
+    if (made >= 0) {
+      char letters[20];
+      std::uint8_t random[sizeof letters];
+      while (getrandom(random, sizeof random, 0) != sizeof random) {
+      }
+      for (std::size_t i{0}; i < sizeof letters; ++i) {
+        // 256 is not a multiple of 26, but the bias does not matter for a
+        // cookie of 20 letters.
+        letters[i] = static_cast<char>('A' + random[i] % 26);
+      }
+      bool written{write(made, letters, sizeof letters) ==
+          static_cast<ssize_t>(sizeof letters)};
+      close(made);
+      if (!written) {
+        CookieProblem(path, "cannot write the new cookie");
+        return false;
+      }
+    } else if (errno != EEXIST) {
+      CookieProblem(path, std::strerror(errno));
+      return false;
+    }
+    // Made by this node or, at the same time, by another.
+    file = open(path, O_RDONLY | O_CLOEXEC);
+  }
+  if (file < 0) {
+    CookieProblem(path, std::strerror(errno));
+    return false;
+  }
+  struct stat status;
+  if (fstat(file, &status) != 0 || !S_ISREG(status.st_mode) ||
+      status.st_uid != geteuid() || (status.st_mode & 077) != 0) {
+    close(file);
+    CookieProblem(path, "the cookie file must be its owner's and readable by "
+                        "its owner only");
+    return false;
+  }
+  ssize_t got{read(file, cookie, sizeof cookie)};
+  close(file);
+  if (got < 0) {
+    CookieProblem(path, std::strerror(errno));
+    return false;
+  }
+  std::size_t bytes{0};
+  while (bytes < static_cast<std::size_t>(got) && cookie[bytes] != '\n') {
+    ++bytes;
+  }
+  while (bytes > 0 && (cookie[bytes - 1] == ' ' || cookie[bytes - 1] == '\t' ||
+                          cookie[bytes - 1] == '\r')) {
+    --bytes;
+  }
+  if (bytes == 0) {
+    CookieProblem(path, "the cookie file is empty");
+    return false;
+  }
+  cookieBytes = bytes;
+  return true;
+}
+
+void LoadCookie() {
+  if (const char *text{std::getenv("MERK_COOKIE")}) {
+    std::size_t bytes{std::strlen(text)};
+    if (bytes == 0 || bytes > sizeof cookie) {
+      CookieProblem("MERK_COOKIE", bytes == 0 ? "the cookie is empty"
+                                              : "the cookie is too long");
+      return;
+    }
+    std::memcpy(cookie, text, bytes);
+    cookieBytes = bytes;
+    return;
+  }
+  const char *home{std::getenv("HOME")};
+  if (!home || !*home) {
+    CookieProblem("~/.merkurius.cookie",
+        "HOME is not set, and neither is MERK_COOKIE");
+    return;
+  }
+  char path[4096];
+  if (std::snprintf(path, sizeof path, "%s/.merkurius.cookie", home) >=
+      static_cast<int>(sizeof path)) {
+    CookieProblem("~/.merkurius.cookie", "HOME is too long");
+    return;
+  }
+  ReadCookieFile(path);
+}
+
+// Null once the cookie is known, or why it is not.
+const char *CookieError() {
+  pthread_once(&cookieOnce, LoadCookie);
+  return cookieBytes > 0 ? nullptr : cookieError;
+}
+
+// The HMAC under the cookie of the label, a challenge, and the answering
+// node's id and then the other's.
+void Answer(const std::uint8_t *challenge, Word answerHigh, Word answerLow,
+    Word otherHigh, Word otherLow, std::uint8_t answer[Sha256::kDigestBytes]) {
+  std::uint8_t data[sizeof kAnswerLabel + kChallengeBytes + 32];
+  std::memcpy(data, kAnswerLabel, sizeof kAnswerLabel);
+  std::uint8_t *at{data + sizeof kAnswerLabel};
+  std::memcpy(at, challenge, kChallengeBytes);
+  at += kChallengeBytes;
+  Put64(at, answerHigh);
+  Put64(at + 8, answerLow);
+  Put64(at + 16, otherHigh);
+  Put64(at + 24, otherLow);
+  HmacSha256(cookie, cookieBytes, data, sizeof data, answer);
+}
+
+// Whether two answers are equal, in a time that does not depend on where
+// they differ.
+bool SameAnswer(const std::uint8_t *a, const std::uint8_t *b) {
+  std::uint8_t differ{0};
+  for (std::size_t i{0}; i < Sha256::kDigestBytes; ++i) {
+    differ |= a[i] ^ b[i];
+  }
+  return differ == 0;
 }
 
 bool IsPeer(const Connection *connection, Word high, Word low) {
@@ -712,9 +863,11 @@ void SetTimeout(int socket, int option, std::int64_t nanoseconds) {
   setsockopt(socket, SOL_SOCKET, option, &time, sizeof time);
 }
 
-// Both sides send `MERK`, the version and their id, and read the other's:
-// null and the peer's id, or why the connection is refused. A handshake
-// that hears nothing for a tick time fails.
+// Both sides send `MERK`, the version, their id and a random challenge, and
+// read the other's; then each sends its answer to the other's challenge,
+// and checks the other's answer to its own: null and the peer's id, or why
+// the connection is refused. A handshake that hears nothing for a tick time
+// fails.
 const char *Handshake(int socket, Word &peerHigh, Word &peerLow) {
   int one{1};
   setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
@@ -727,6 +880,10 @@ const char *Handshake(int socket, Word &peerHigh, Word &peerLow) {
   Put32(hello + 4, kVersion);
   Put64(hello + 8, high);
   Put64(hello + 16, low);
+  std::uint8_t *challenge{hello + 24};
+  while (getrandom(challenge, kChallengeBytes, 0) !=
+      static_cast<ssize_t>(kChallengeBytes)) {
+  }
   iovec part{hello, sizeof hello};
   if (!SendAll(socket, &part, 1)) {
     return "the other node did not take the handshake";
@@ -745,6 +902,21 @@ const char *Handshake(int socket, Word &peerHigh, Word &peerLow) {
   peerLow = Get64(theirs + 16);
   if (peerHigh == high && peerLow == low) {
     return "a node cannot connect to itself";
+  }
+  std::uint8_t answer[Sha256::kDigestBytes];
+  Answer(theirs + 24, high, low, peerHigh, peerLow, answer);
+  iovec answerPart{answer, sizeof answer};
+  if (!SendAll(socket, &answerPart, 1)) {
+    return "the other node did not take the handshake";
+  }
+  std::uint8_t theirAnswer[Sha256::kDigestBytes];
+  if (!ReadAll(socket, theirAnswer, sizeof theirAnswer)) {
+    return "the other node did not answer the handshake";
+  }
+  std::uint8_t expected[Sha256::kDigestBytes];
+  Answer(challenge, peerHigh, peerLow, high, low, expected);
+  if (!SameAnswer(theirAnswer, expected)) {
+    return "the other node has another cookie";
   }
   SetTimeout(socket, SO_RCVTIMEO, 0);
   return nullptr;
@@ -897,6 +1069,10 @@ Delivery Route(
 extern "C" std::int64_t merk_node_listen(
     const char *address, std::int64_t *port, const char **error) {
   pthread_once(&once, Initialize);
+  if (const char *problem{CookieError()}) {
+    *error = HeapText("no cookie", problem);
+    return 1;
+  }
   addrinfo *found;
   if ((*error = Addresses(address, true, found))) {
     return 1;
@@ -938,6 +1114,10 @@ extern "C" std::int64_t merk_node_listen(
 extern "C" std::int64_t merk_node_connect(const char *address,
     std::int64_t *high, std::int64_t *low, const char **error) {
   pthread_once(&once, Initialize);
+  if (const char *problem{CookieError()}) {
+    *error = HeapText("no cookie", problem);
+    return 1;
+  }
   addrinfo *found;
   if ((*error = Addresses(address, false, found))) {
     return 1;
