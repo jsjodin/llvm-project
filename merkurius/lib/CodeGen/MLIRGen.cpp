@@ -885,7 +885,7 @@ void MerkGenerator::GenerateForeign(
   for (auto [argument, type, mode] :
       llvm::zip(arguments, signature->arguments, procedure.modes)) {
     std::string var{argument->var->name};
-    if (Represent(type)->dummy) {
+    if (Represent(type)->dummy || IsUnused(mode)) {
       locals += "  MR_Word " + var + " = 0;\n  (void)" + var + ";\n";
     } else if (IsOutput(mode)) {
       outputs.emplace_back(CType(*type), var);
@@ -1192,7 +1192,7 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
     if (words && IsOutput(mode)) {
       wordOutputs.push_back(var);
     }
-    if (Represent(type)->dummy) {
+    if (Represent(type)->dummy || IsUnused(mode)) {
       continue;
     }
     if (IsOutput(mode)) {
