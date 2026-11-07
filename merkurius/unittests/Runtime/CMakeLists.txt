@@ -1,4 +1,5 @@
 add_merkurius_unittest(MerkuriusRuntimeTests
+  EncodeTest.cpp
   MailboxTest.cpp
   )
 
