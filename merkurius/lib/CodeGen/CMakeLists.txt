@@ -2,6 +2,12 @@ add_merkurius_library(MerkuriusCodeGen
   Lowering.cpp
   Decomposer.cpp
   MLIRGen.cpp
+  MLIRGenBuiltins.cpp
+  MLIRGenCalls.cpp
+  MLIRGenControl.cpp
+  MLIRGenOpenMP.cpp
+  MLIRGenTypeInfo.cpp
+  MLIRGenUnify.cpp
   LastCall.cpp
   Outlining.cpp
   TargetInfo.cpp
