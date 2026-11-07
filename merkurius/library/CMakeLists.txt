@@ -37,7 +37,7 @@ install(FILES ${sound_array} DESTINATION lib/merkurius/sound
 # foreign_procs are compiled by clang, so it is built first when it is part
 # of the build.
 set(compiled_modules io float math require pair maybe list solutions
-  process string char)
+  process string char array)
 set(compiled_objects)
 foreach(module ${compiled_modules})
   set(object ${CMAKE_CURRENT_BINARY_DIR}/${module}.o)
@@ -45,9 +45,14 @@ foreach(module ${compiled_modules})
   if(TARGET clang)
     list(APPEND depends clang)
   endif()
+  # array's procedures are numbered by the sound stub's modes, which
+  # programs see.
+  set(source ${library_dir}/${module}.m)
+  if(module STREQUAL "array")
+    set(source ${sound_array})
+  endif()
   add_custom_command(OUTPUT ${object}
-    COMMAND merkc -c -O2 -fstub-unimplemented ${library_dir}/${module}.m
-      -o ${object}
+    COMMAND merkc -c -O2 -fstub-unimplemented ${source} -o ${object}
     DEPENDS ${depends}
     COMMENT "Compiling the library module ${module}.m")
   list(APPEND compiled_objects ${object})

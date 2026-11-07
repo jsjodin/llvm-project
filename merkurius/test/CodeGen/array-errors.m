@@ -49,6 +49,15 @@
 % RUN: sed 's/^which(0)\./which(15)./' %s > %t.15.m && merkc %t.15.m -o %t.15
 % RUN: not %t.15 2> %t.15.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: FileCheck %s --check-prefix=ERROR-15 --match-full-lines --strict-whitespace < %t.15.err
+% RUN: sed 's/^which(0)\./which(16)./' %s > %t.16.m && merkc %t.16.m -o %t.16
+% RUN: not %t.16 2> %t.16.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: FileCheck %s --check-prefix=ERROR-16 --match-full-lines --strict-whitespace < %t.16.err
+% RUN: sed 's/^which(0)\./which(17)./' %s > %t.17.m && merkc %t.17.m -o %t.17
+% RUN: not %t.17 2> %t.17.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: FileCheck %s --check-prefix=ERROR-17 --match-full-lines --strict-whitespace < %t.17.err
+% RUN: sed 's/^which(0)\./which(18)./' %s > %t.18.m && merkc %t.18.m -o %t.18
+% RUN: not %t.18 2> %t.18.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: FileCheck %s --check-prefix=ERROR-18 --match-full-lines --strict-whitespace < %t.18.err
 
 % OUTPUT-0:before
 % OUTPUT-0-NEXT:4after
@@ -102,6 +111,15 @@
 % ERROR-15:Uncaught Mercury exception:
 % ERROR-15-NEXT:index_out_of_bounds("array.lookup: index 0 not in range [0, -1]")
 % ERROR-15-NOT:{{.}}
+% ERROR-16:Uncaught Mercury exception:
+% ERROR-16-NEXT:Software Error: function `array.generate'/2: Unexpected: negative size
+% ERROR-16-NOT:{{.}}
+% ERROR-17:Uncaught Mercury exception:
+% ERROR-17-NEXT:Software Error: predicate `array.generate_foldl'/5: Unexpected: negative size
+% ERROR-17-NOT:{{.}}
+% ERROR-18:Uncaught Mercury exception:
+% ERROR-18-NEXT:Software Error: predicate `array.generate_foldl2'/7: Unexpected: negative size
+% ERROR-18-NOT:{{.}}
 
 :- module array_errors.
 :- interface.
@@ -146,7 +164,24 @@ main(!IO) :-
         A = array.slow_set(A0, W, 1), io.write_int(A ^ elem(0), !IO)
     else if W = 15 then
         A = array.make_empty_array : array(int), io.write_int(array.lookup(A, 0), !IO)
+    else if W = 16 then
+        A = array.generate(-W, double), io.write_int(array.size(A), !IO)
+    else if W = 17 then
+        array.generate_foldl(-W, count, A, 0, C), io.write_int(array.size(A) + C, !IO)
+    else if W = 18 then
+        array.generate_foldl2(-W, count2, A, 0, C, 0, D),
+        io.write_int(array.size(A) + C + D, !IO)
     else
         io.write_int(array.size(A0), !IO)
     ),
     io.write_string("after\n", !IO).
+
+:- func double(int) = int.
+double(I) = 2 * I.
+
+:- pred count(int::in, int::out, int::in, int::out) is det.
+count(I, I, N, N + 1).
+
+:- pred count2(int::in, int::out, int::in, int::out, int::in, int::out)
+    is det.
+count2(I, I, N, N + 1, M, M - 1).

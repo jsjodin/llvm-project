@@ -1,7 +1,8 @@
-% A declaration-only stub of the standard library module array, for name
-% resolution until the library is written. The declarations are those of
-% the library reference manual (22.01), less those that need modules not
-% stubbed yet; see README.md. Its insts are the manual's work-around, in
+% The standard library module array. The declarations are those of the
+% library reference manual (22.01), less those that need modules not
+% stubbed yet; see README.md. Code generation builds in most of its
+% predicates; generate, its folds and the foldl family are compiled from
+% here, with mmc's messages. Its insts are the manual's work-around, in
 % which arrays are not unique; the build makes sound/array.m from it, with
 % unique arrays, which merkc loads unless -fmmc-uniqueness is given.
 
@@ -454,3 +455,258 @@
 :- mode all_false(in(pred(in) is semidet), in) is semidet.
 
 :- func append(array(T)::in, array(T)::in) = (array(T)::array_uo) is det.
+
+%---------------------------------------------------------------------------%
+
+:- implementation.
+:- import_module int.
+:- import_module require.
+
+% Temporary (chunk 1 step 6, docs/INPROGRESS.md): only generate, its folds
+% and the foldl family are compiled; the predicates code generation builds
+% in are called through it, and the others are reported as not yet
+% implemented where they are called. Step 6 (d) compiles the rest.
+
+generate(Size, Func) = Array :-
+    ( if Size < 0 then
+        unexpected("function `array.generate'/2", "negative size")
+    else if Size = 0 then
+        make_empty_array(Array)
+    else
+        init(Size, Func(0), Array0),
+        generate_from(1, Size, Func, Array0, Array)
+    ).
+
+:- pred generate_from(int::in, int::in, (func(int) = T)::in,
+    array(T)::array_di, array(T)::array_uo) is det.
+
+generate_from(I, Size, Func, !Array) :-
+    ( if I >= Size then
+        true
+    else
+        unsafe_set(I, Func(I), !Array),
+        generate_from(I + 1, Size, Func, !Array)
+    ).
+
+:- pred generate_foldl_from(int, int, pred(int, T, A, A),
+    array(T), array(T), A, A).
+:- mode generate_foldl_from(in, in, in(pred(in, out, in, out) is det),
+    array_di, array_uo, in, out) is det.
+:- mode generate_foldl_from(in, in, in(pred(in, out, mdi, muo) is det),
+    array_di, array_uo, mdi, muo) is det.
+:- mode generate_foldl_from(in, in, in(pred(in, out, di, uo) is det),
+    array_di, array_uo, di, uo) is det.
+:- mode generate_foldl_from(in, in, in(pred(in, out, in, out) is semidet),
+    array_di, array_uo, in, out) is semidet.
+:- mode generate_foldl_from(in, in, in(pred(in, out, mdi, muo) is semidet),
+    array_di, array_uo, mdi, muo) is semidet.
+:- mode generate_foldl_from(in, in, in(pred(in, out, di, uo) is semidet),
+    array_di, array_uo, di, uo) is semidet.
+
+generate_foldl(Size, Pred, Array, !Acc1) :-
+    ( if Size < 0 then
+        unexpected("predicate `array.generate_foldl'/5", "negative size")
+    else if Size = 0 then
+        make_empty_array(Array)
+    else
+        Pred(0, X, !Acc1),
+        init(Size, X, Array0),
+        generate_foldl_from(1, Size, Pred, Array0, Array, !Acc1)
+    ).
+
+generate_foldl_from(I, Size, Pred, !Array, !Acc1) :-
+    ( if I >= Size then
+        true
+    else
+        Pred(I, X, !Acc1),
+        unsafe_set(I, X, !Array),
+        generate_foldl_from(I + 1, Size, Pred, !Array, !Acc1)
+    ).
+
+:- pred generate_foldl2_from(int, int, pred(int, T, A, A, B, B),
+    array(T), array(T), A, A, B, B).
+:- mode generate_foldl2_from(in, in, in(pred(in, out, in, out, in, out) is det),
+    array_di, array_uo, in, out, in, out) is det.
+:- mode generate_foldl2_from(in, in, in(pred(in, out, mdi, muo, mdi, muo) is det),
+    array_di, array_uo, mdi, muo, mdi, muo) is det.
+:- mode generate_foldl2_from(in, in, in(pred(in, out, di, uo, di, uo) is det),
+    array_di, array_uo, di, uo, di, uo) is det.
+:- mode generate_foldl2_from(in, in, in(pred(in, out, in, out, in, out) is semidet),
+    array_di, array_uo, in, out, in, out) is semidet.
+:- mode generate_foldl2_from(in, in, in(pred(in, out, mdi, muo, mdi, muo) is semidet),
+    array_di, array_uo, mdi, muo, mdi, muo) is semidet.
+:- mode generate_foldl2_from(in, in, in(pred(in, out, di, uo, di, uo) is semidet),
+    array_di, array_uo, di, uo, di, uo) is semidet.
+
+generate_foldl2(Size, Pred, Array, !Acc1, !Acc2) :-
+    ( if Size < 0 then
+        unexpected("predicate `array.generate_foldl2'/7", "negative size")
+    else if Size = 0 then
+        make_empty_array(Array)
+    else
+        Pred(0, X, !Acc1, !Acc2),
+        init(Size, X, Array0),
+        generate_foldl2_from(1, Size, Pred, Array0, Array, !Acc1, !Acc2)
+    ).
+
+generate_foldl2_from(I, Size, Pred, !Array, !Acc1, !Acc2) :-
+    ( if I >= Size then
+        true
+    else
+        Pred(I, X, !Acc1, !Acc2),
+        unsafe_set(I, X, !Array),
+        generate_foldl2_from(I + 1, Size, Pred, !Array, !Acc1, !Acc2)
+    ).
+
+foldl(Func, Array, Acc0) = Acc :-
+    foldl_func_from(Func, Array, 0, size(Array), Acc0, Acc).
+
+:- pred foldl_func_from(func(T1, T2) = T2, array(T1), int, int, T2, T2).
+:- mode foldl_func_from(func(in, in) = out is det, in, in, in, in, out)
+    is det.
+:- mode foldl_func_from(func(in, di) = uo is det, in, in, in, di, uo)
+    is det.
+
+foldl_func_from(Func, Array, I, Size, !Acc) :-
+    ( if I >= Size then
+        true
+    else
+        unsafe_lookup(Array, I, X),
+        !:Acc = Func(X, !.Acc),
+        foldl_func_from(Func, Array, I + 1, Size, !Acc)
+    ).
+
+:- pred foldl_from(pred(T1, T2, T2), array(T1), int, int,
+    T2, T2).
+:- mode foldl_from(pred(in, in, out) is det, in, in, in,
+    in, out) is det.
+:- mode foldl_from(pred(in, mdi, muo) is det, in, in, in,
+    mdi, muo) is det.
+:- mode foldl_from(pred(in, di, uo) is det, in, in, in,
+    di, uo) is det.
+:- mode foldl_from(pred(in, in, out) is semidet, in, in, in,
+    in, out) is semidet.
+:- mode foldl_from(pred(in, mdi, muo) is semidet, in, in, in,
+    mdi, muo) is semidet.
+:- mode foldl_from(pred(in, di, uo) is semidet, in, in, in,
+    di, uo) is semidet.
+
+foldl_from(Pred, Array, I, Size, !Acc1) :-
+    ( if I >= Size then
+        true
+    else
+        unsafe_lookup(Array, I, X),
+        Pred(X, !Acc1),
+        foldl_from(Pred, Array, I + 1, Size, !Acc1)
+    ).
+
+foldl(Pred, Array, !Acc1) :-
+    foldl_from(Pred, Array, 0, size(Array), !Acc1).
+
+:- pred foldl2_from(pred(T1, T2, T2, T3, T3), array(T1), int, int,
+    T2, T2, T3, T3).
+:- mode foldl2_from(pred(in, in, out, in, out) is det, in, in, in,
+    in, out, in, out) is det.
+:- mode foldl2_from(pred(in, in, out, mdi, muo) is det, in, in, in,
+    in, out, mdi, muo) is det.
+:- mode foldl2_from(pred(in, in, out, di, uo) is det, in, in, in,
+    in, out, di, uo) is det.
+:- mode foldl2_from(pred(in, in, out, in, out) is semidet, in, in, in,
+    in, out, in, out) is semidet.
+:- mode foldl2_from(pred(in, in, out, mdi, muo) is semidet, in, in, in,
+    in, out, mdi, muo) is semidet.
+:- mode foldl2_from(pred(in, in, out, di, uo) is semidet, in, in, in,
+    in, out, di, uo) is semidet.
+
+foldl2_from(Pred, Array, I, Size, !Acc1, !Acc2) :-
+    ( if I >= Size then
+        true
+    else
+        unsafe_lookup(Array, I, X),
+        Pred(X, !Acc1, !Acc2),
+        foldl2_from(Pred, Array, I + 1, Size, !Acc1, !Acc2)
+    ).
+
+foldl2(Pred, Array, !Acc1, !Acc2) :-
+    foldl2_from(Pred, Array, 0, size(Array), !Acc1, !Acc2).
+
+:- pred foldl3_from(pred(T1, T2, T2, T3, T3, T4, T4), array(T1), int, int,
+    T2, T2, T3, T3, T4, T4).
+:- mode foldl3_from(pred(in, in, out, in, out, in, out) is det, in, in, in,
+    in, out, in, out, in, out) is det.
+:- mode foldl3_from(pred(in, in, out, in, out, mdi, muo) is det, in, in, in,
+    in, out, in, out, mdi, muo) is det.
+:- mode foldl3_from(pred(in, in, out, in, out, di, uo) is det, in, in, in,
+    in, out, in, out, di, uo) is det.
+:- mode foldl3_from(pred(in, in, out, in, out, in, out) is semidet, in, in, in,
+    in, out, in, out, in, out) is semidet.
+:- mode foldl3_from(pred(in, in, out, in, out, mdi, muo) is semidet, in, in, in,
+    in, out, in, out, mdi, muo) is semidet.
+:- mode foldl3_from(pred(in, in, out, in, out, di, uo) is semidet, in, in, in,
+    in, out, in, out, di, uo) is semidet.
+
+foldl3_from(Pred, Array, I, Size, !Acc1, !Acc2, !Acc3) :-
+    ( if I >= Size then
+        true
+    else
+        unsafe_lookup(Array, I, X),
+        Pred(X, !Acc1, !Acc2, !Acc3),
+        foldl3_from(Pred, Array, I + 1, Size, !Acc1, !Acc2, !Acc3)
+    ).
+
+foldl3(Pred, Array, !Acc1, !Acc2, !Acc3) :-
+    foldl3_from(Pred, Array, 0, size(Array), !Acc1, !Acc2, !Acc3).
+
+:- pred foldl4_from(pred(T1, T2, T2, T3, T3, T4, T4, T5, T5), array(T1), int, int,
+    T2, T2, T3, T3, T4, T4, T5, T5).
+:- mode foldl4_from(pred(in, in, out, in, out, in, out, in, out) is det, in, in, in,
+    in, out, in, out, in, out, in, out) is det.
+:- mode foldl4_from(pred(in, in, out, in, out, in, out, mdi, muo) is det, in, in, in,
+    in, out, in, out, in, out, mdi, muo) is det.
+:- mode foldl4_from(pred(in, in, out, in, out, in, out, di, uo) is det, in, in, in,
+    in, out, in, out, in, out, di, uo) is det.
+:- mode foldl4_from(pred(in, in, out, in, out, in, out, in, out) is semidet, in, in, in,
+    in, out, in, out, in, out, in, out) is semidet.
+:- mode foldl4_from(pred(in, in, out, in, out, in, out, mdi, muo) is semidet, in, in, in,
+    in, out, in, out, in, out, mdi, muo) is semidet.
+:- mode foldl4_from(pred(in, in, out, in, out, in, out, di, uo) is semidet, in, in, in,
+    in, out, in, out, in, out, di, uo) is semidet.
+
+foldl4_from(Pred, Array, I, Size, !Acc1, !Acc2, !Acc3, !Acc4) :-
+    ( if I >= Size then
+        true
+    else
+        unsafe_lookup(Array, I, X),
+        Pred(X, !Acc1, !Acc2, !Acc3, !Acc4),
+        foldl4_from(Pred, Array, I + 1, Size, !Acc1, !Acc2, !Acc3, !Acc4)
+    ).
+
+foldl4(Pred, Array, !Acc1, !Acc2, !Acc3, !Acc4) :-
+    foldl4_from(Pred, Array, 0, size(Array), !Acc1, !Acc2, !Acc3, !Acc4).
+
+:- pred foldl5_from(pred(T1, T2, T2, T3, T3, T4, T4, T5, T5, T6, T6), array(T1), int, int,
+    T2, T2, T3, T3, T4, T4, T5, T5, T6, T6).
+:- mode foldl5_from(pred(in, in, out, in, out, in, out, in, out, in, out) is det, in, in, in,
+    in, out, in, out, in, out, in, out, in, out) is det.
+:- mode foldl5_from(pred(in, in, out, in, out, in, out, in, out, mdi, muo) is det, in, in, in,
+    in, out, in, out, in, out, in, out, mdi, muo) is det.
+:- mode foldl5_from(pred(in, in, out, in, out, in, out, in, out, di, uo) is det, in, in, in,
+    in, out, in, out, in, out, in, out, di, uo) is det.
+:- mode foldl5_from(pred(in, in, out, in, out, in, out, in, out, in, out) is semidet, in, in, in,
+    in, out, in, out, in, out, in, out, in, out) is semidet.
+:- mode foldl5_from(pred(in, in, out, in, out, in, out, in, out, mdi, muo) is semidet, in, in, in,
+    in, out, in, out, in, out, in, out, mdi, muo) is semidet.
+:- mode foldl5_from(pred(in, in, out, in, out, in, out, in, out, di, uo) is semidet, in, in, in,
+    in, out, in, out, in, out, in, out, di, uo) is semidet.
+
+foldl5_from(Pred, Array, I, Size, !Acc1, !Acc2, !Acc3, !Acc4, !Acc5) :-
+    ( if I >= Size then
+        true
+    else
+        unsafe_lookup(Array, I, X),
+        Pred(X, !Acc1, !Acc2, !Acc3, !Acc4, !Acc5),
+        foldl5_from(Pred, Array, I + 1, Size, !Acc1, !Acc2, !Acc3, !Acc4, !Acc5)
+    ).
+
+foldl5(Pred, Array, !Acc1, !Acc2, !Acc3, !Acc4, !Acc5) :-
+    foldl5_from(Pred, Array, 0, size(Array), !Acc1, !Acc2, !Acc3, !Acc4, !Acc5).
