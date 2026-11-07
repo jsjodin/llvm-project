@@ -349,6 +349,10 @@ private:
   // is to be called instead.
   bool ArrayBuiltin(const Body &, const Procedure &,
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
+  // A call of a field's function or its update function, which no module
+  // defines: the unifications that the manual defines it by.
+  void FieldAccess(const Body &, const Procedure &,
+      llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   // X = Y, or X = c, with both bound: a test.
   void Test(const Body &, mlir::Value, mlir::Value, const semantics::Type *);
   // A call in its procedure's own modes, each output a fresh value.

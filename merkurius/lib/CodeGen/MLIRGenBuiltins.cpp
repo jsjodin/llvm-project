@@ -298,9 +298,73 @@ mlir::Value MerkGenerator::IntegerShift(mlir::Value value, mlir::Value amount,
       : mlir::Value{arith::ShRSIOp::create(builder_, loc, value, amount)};
 }
 
+// "Field access functions are implemented directly as unifications"
+// (reference manual, "Field selection"): the term is deconstructed by the
+// field's constructor, which fails if it has another, and for an update
+// constructed again, with the new value in the field's place and the term's
+// other fields as they were.
+void MerkGenerator::FieldAccess(const Body &goal, const Procedure &callee,
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
+  const semantics::Symbol &symbol{*callee.symbol};
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  bool update{symbol.kind == semantics::SymbolKind::FieldUpdate};
+  const auto *constructor{
+      std::get<const parser::Constructor *>(symbol.declaration)};
+  llvm::StringRef label{
+      update ? llvm::StringRef{symbol.name}.drop_back(3) : symbol.name};
+  unsigned arity{static_cast<unsigned>(constructor->arguments.size())};
+  unsigned index{0};
+  while (!constructor->arguments[index]->field ||
+      constructor->arguments[index]->field->name != label) {
+    ++index;
+  }
+  const semantics::Type *type{body.vars[arguments[0]].type};
+  mlir::Value term{ValueOf(arguments[0])};
+  mlir::Value value{update ? ValueOf(arguments[1]) : mlir::Value{}};
+  BodyVar result{arguments.back()};
+  if (!term || (update && !value) || ValueOf(result)) {
+    NotYet(at, "this mode of a field access");
+    return;
+  }
+  llvm::StringRef name{constructor->name->name};
+  const semantics::ConstructorTypes *types{ConstructorOf(type, name, arity)};
+  HiddenFields hidden;
+  std::optional<llvm::SmallVector<mlir::Type>> fields;
+  if (types) {
+    fields = CellFields(type, *types, hidden);
+  }
+  if (!fields || !hidden.types.empty()) {
+    NotYet(at, "this field access");
+    return;
+  }
+  auto functor{merk::FunctorAttr::get(&context_, name, arity)};
+  if (modes_.ops().ConstructorsOf(type)->size() > 1) {
+    merk::GuardOp::create(builder_, loc,
+        merk::HasFunctorOp::create(builder_, loc, term, functor));
+  }
+  mlir::ValueRange cell{
+      merk::DeconstructOp::create(builder_, loc, *fields, term, functor)
+          .getFields()};
+  if (!update) {
+    values_[result] = cell[index];
+    return;
+  }
+  llvm::SmallVector<mlir::Value> updated{cell};
+  updated[index] = value;
+  values_[result] = merk::ConstructOp::create(builder_, loc,
+      mlir::cast<merk::TermType>(Represent(body.vars[result].type)->type),
+      functor, updated);
+}
+
 bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
   const semantics::Symbol &symbol{*callee.symbol};
+  if (symbol.kind == semantics::SymbolKind::Field ||
+      symbol.kind == semantics::SymbolKind::FieldUpdate) {
+    FieldAccess(goal, callee, arguments, body);
+    return true;
+  }
   llvm::StringRef module{symbol.module};
   if (module == "builtin" ||
       (module == "array" && symbol.name == "array_compare")) {

@@ -3175,9 +3175,15 @@ llvm::ArrayRef<const Procedure *> ProcedureChecker::ProceduresFor(
   }
   // A field's function is in(Term) = out, and its update function
   // in(Term), in(Value) = out (reference manual, "Field access
-  // functions").
+  // functions"). Each fails if the term's constructor is not the field's,
+  // so it is semidet when the type has others.
   const Procedure *&procedure{fields_[&symbol]};
   if (!procedure) {
+    const auto *type{
+        std::get_if<const parser::DuTypeDefn *>(&symbol.owner->declaration)};
+    parser::Determinism determinism{type && (*type)->constructors.size() == 1
+            ? parser::Determinism::Det
+            : parser::Determinism::Semidet};
     ArgMode in{insts_.Ground(), insts_.Ground()},
         out{insts_.Free(), insts_.Ground()};
     std::vector<ArgMode> modes{in};
@@ -3187,7 +3193,7 @@ llvm::ArrayRef<const Procedure *> ProcedureChecker::ProceduresFor(
     modes.push_back(out);
     procedure = &result_.imported_.emplace_back(Procedure{&symbol, 0,
         result_.arena_.SaveArray(llvm::ArrayRef<ArgMode>{modes}),
-        parser::Determinism::Det, {}});
+        determinism, {}});
     result_.bySymbol_[&symbol].push_back(procedure);
   }
   return result_.ProceduresOf(symbol);
