@@ -328,8 +328,10 @@ program.
    generation; `io.command_line_arguments`, which needs lists. In five
    commits: (a) `require`, and `-fstub-unimplemented` for the library's
    build; (b) `pair` and `maybe`; (c) `list`; (d) the array predicates;
-   (e) `io.command_line_arguments`. Done: (a), (b), (c). (d) and (e) wait for
-   the code generation that comes before them (below), so that `list` is
+   (e) `io.command_line_arguments`. Done: (a), (b), (c), and (e), ahead of
+   (d) because TCP between two nodes needs an address from the command
+   line (design document, "The route there"). (d) waits for
+   the code generation that comes before it (below), so that `list` is
    written plainly, with every mode working, rather than around stubs;
    (c) came once clauses for one mode and nondeterminism worked, before
    the collection of all solutions, which needs it.

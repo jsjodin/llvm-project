@@ -136,6 +136,7 @@
 
 :- implementation.
 
+:- import_module int.
 :- import_module int16.
 :- import_module int32.
 :- import_module int64.
@@ -155,6 +156,50 @@
 #include <math.h>
 extern void merk_write_float(double);
 extern void merk_write(MR_Word, MR_Word, MR_Word);
+extern MR_Integer merk_argument_count(void);
+extern MR_String merk_argument(MR_Integer);
+").
+
+progname(Default, Name, !IO) :-
+    argument_count(Count, !IO),
+    ( if Count > 0 then
+        argument(0, Name, !IO)
+    else
+        Name = Default
+    ).
+
+command_line_arguments(Arguments, !IO) :-
+    argument_count(Count, !IO),
+    arguments_before(Count, [], Arguments, !IO).
+
+    % The command line's words from the first argument, after the program's
+    % name, to the one before Index, in front of Arguments0.
+:- pred arguments_before(int::in, list(string)::in, list(string)::out,
+    io::di, io::uo) is det.
+
+arguments_before(Index, Arguments0, Arguments, !IO) :-
+    ( if Index =< 1 then
+        Arguments = Arguments0
+    else
+        argument(Index - 1, Argument, !IO),
+        arguments_before(Index - 1, [Argument | Arguments0], Arguments, !IO)
+    ).
+
+    % The number of words on the command line, the program's name first.
+:- pred argument_count(int::out, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    argument_count(Count::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Count = merk_argument_count();
+").
+
+:- pred argument(int::in, string::out, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    argument(Index::in, Argument::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Argument = merk_argument(Index);
 ").
 
 :- pragma foreign_proc("C",
