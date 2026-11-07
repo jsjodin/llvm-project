@@ -279,6 +279,13 @@ llvm::LogicalResult NondetCallClosureOp::verify() {
   return mlir::success();
 }
 
+llvm::LogicalResult NondetCallMethodOp::verify() {
+  if (getContinuation().empty()) {
+    return emitOpError("has no continuation");
+  }
+  return mlir::success();
+}
+
 // A solution is of the innermost merk.each or merk.commit whose generator
 // it is in, through the continuations of merk.each in it, and has the
 // types of the continuation's arguments or of merk.commit's results.

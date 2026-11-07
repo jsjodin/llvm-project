@@ -380,8 +380,9 @@ later. In this order, each its own commit or commits:
    semidet code", "Last call modulo constructor"), and the collection of
    all solutions, `merk.aggregate` and the library's `solutions` (design
    document, Lowering, "Nondeterministic code", "Collecting solutions"),
-   all done. Next: nondet methods and word copies of nondet procedures,
-   which are reported as not yet implemented.
+   all done, and then nondet methods and word copies of nondet procedures,
+   done too, which ends this item; next is item 2. Closures of methods are
+   still reported as not yet implemented.
 
 2. **What mode analysis does not check yet,** which code generation now
    reports: clauses for one mode, trace goals, and `try` and `atomic`
