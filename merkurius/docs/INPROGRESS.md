@@ -31,8 +31,11 @@ below, it needs no rework when the collector arrives.
    has a stack of a fixed size given at spawn, with the limit check on entry
    to procedures on cycles (Runtime system, "Processes and scheduler").
 3. **Garbage collection.** Statepoints and stack maps, minor and major
-   collection, the remembered set for destructive updates, and received
-   fragments as roots.
+   collection, the remembered set for destructive updates and the holes of
+   last call modulo constructor, and received fragments as roots. A
+   `!merk.ref` becomes the cell's pointer and the hole's offset, so that
+   the cell is a base the statepoints relocate (design document, Lowering,
+   "GC metadata and safepoints").
 
 **Invariants that keep chunk 2 from being redone in chunk 3:**
 
@@ -364,7 +367,10 @@ later. In this order, each its own commit or commits:
    conditions with more than one solution (soft cuts), and nondet and
    multi lambda expressions, closures and higher-order calls. Next, in
    lock step with the library they need (decided 2026-11-06): clauses for
-   one mode (item 2) and `list` (step 6 (c)), both done, then the
+   one mode (item 2) and `list` (step 6 (c)), then last call modulo
+   constructor, at every optimization level, so that `list` runs on long
+   lists as mmc's does (design document, Lowering, "Deterministic and
+   semidet code", "Last call modulo constructor"), all done; then the
    collection of all solutions, whose `solutions/2` sorts with `list`; then nondet methods
    and word copies of nondet procedures, which are reported as not yet
    implemented.

@@ -521,6 +521,68 @@ def Merk_ConstructOp : Merk_Op<"construct", [Pure]> {
   let hasVerifier = 1;
 }
 
+// Last call modulo constructor (design document, Lowering, "Deterministic
+// and semidet code", "Last call modulo constructor"): a cell is made with a
+// hole, whose address a call is given to fill, so that the call is a tail
+// call.
+def Merk_HoleOp : Merk_Op<"hole"> {
+  let summary = "a field to be filled after its cell is made";
+  let description = [{
+    An argument of merk.construct that a later merk.ref_store fills,
+    through the address merk.field_ref gives. It is null until then, so
+    that the collector finds no pointer there. It has effects, so that two
+    holes are never one value and two cells with holes never one cell.
+
+    ```mlir
+    %h = merk.hole : !merk.term<"list.list(int)">
+    %c = merk.construct #merk.functor<"[|]", 2>(%x, %h : i64, !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
+    ```
+  }];
+  let results = (outs AnyType:$value);
+  let assemblyFormat = "attr-dict `:` type($value)";
+}
+
+def Merk_FieldRefOp : Merk_Op<"field_ref", [Pure]> {
+  let summary = "the address of a field of a cell";
+  let description = [{
+    The address of argument `index` of a term made by merk.construct of the
+    functor, whose argument there is merk.hole. The index counts the
+    construction's arguments, an existentially typed constructor's hidden
+    fields too.
+
+    ```mlir
+    %r = merk.field_ref %c, #merk.functor<"[|]", 2>[1] : !merk.term<"list.list(int)">
+    ```
+  }];
+  let arguments = (ins Merk_TermType:$term, Merk_FunctorAttr:$functor,
+      ConfinedAttr<I64Attr, [IntNonNegative]>:$index);
+  let results = (outs Merk_RefType:$ref);
+  let assemblyFormat = [{
+    $term `,` qualified($functor) `[` $index `]` attr-dict `:` qualified(type($term))
+  }];
+  let builders = [OpBuilder<(ins "::mlir::Value":$term,
+      "::merkurius::merk::FunctorAttr":$functor, "std::int64_t":$index), [{
+    build($_builder, $_state,
+        ::merkurius::merk::RefType::get($_builder.getContext()), term, functor,
+        $_builder.getI64IntegerAttr(index));
+  }]>];
+}
+
+def Merk_RefStoreOp : Merk_Op<"ref_store"> {
+  let summary = "fill a hole";
+  let description = [{
+    Stores the value in the hole whose address the reference is, as
+    merk.construct would have stored it there. The only store into a cell
+    after it is made.
+
+    ```mlir
+    merk.ref_store %t, %r : !merk.term<"list.list(int)">
+    ```
+  }];
+  let arguments = (ins AnyType:$value, Merk_RefType:$ref);
+  let assemblyFormat = "$value `,` $ref attr-dict `:` type($value)";
+}
+
 def Merk_DeconstructOp : Merk_Op<"deconstruct", [NoMemoryEffect]> {
   let summary = "the arguments of a term whose constructor is known";
   let description = [{
