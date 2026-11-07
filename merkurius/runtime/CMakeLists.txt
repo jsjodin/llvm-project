@@ -6,6 +6,7 @@ add_library(merkrt STATIC
   array.cpp
   exception.cpp
   heap.cpp
+  mailbox.cpp
   main.cpp
   trace.cpp
   type-info.cpp
