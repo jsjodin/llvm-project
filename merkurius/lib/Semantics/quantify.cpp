@@ -661,7 +661,7 @@ Goal Quantifier::Rebuild(const Goal &goal, const Set &outside) {
               End(std::move(scope));
               functor.lambda = Make<Lambda>(lambda->tokens, lambda->kind,
                   lambda->any, lambda->purity, arguments, lambda->modes,
-                  lambda->determinism, newBody);
+                  lambda->determinism, newBody, lambda->receive);
             }
             return Make<Unify>(unify->tokens, unify->number,
                 MapVar(unify->left), unify->isVar, MapVar(unify->var), functor,

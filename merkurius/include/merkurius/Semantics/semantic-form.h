@@ -139,6 +139,9 @@ struct Lambda {
   llvm::ArrayRef<std::optional<parser::Mode>> modes;
   std::optional<parser::Determinism> determinism;
   Goal body;
+  // The predicate of a case of a receive goal's selector, whose nonlocal
+  // variables are those of its patterns that occur outside the goal.
+  bool receive{false};
 };
 
 // p(X1, ..., Xn); event p(...) is a call too.

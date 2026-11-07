@@ -847,7 +847,7 @@ Goal LoopTranslator::Rebuild(const Goal &goal) {
             Functor functor{x->functor};
             functor.lambda = Make<Lambda>(lambda->tokens, lambda->kind,
                 lambda->any, lambda->purity, lambda->arguments, lambda->modes,
-                lambda->determinism, body);
+                lambda->determinism, body, lambda->receive);
             return Make<Unify>(x->tokens, x->number, x->left, x->isVar, x->var,
                 functor, x->arguments);
           },
