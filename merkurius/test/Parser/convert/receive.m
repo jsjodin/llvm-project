@@ -9,7 +9,7 @@
 % RUN: not merkc -fc1 -fdebug-dump-parse-tree-no-sema %s 2>&1 \
 % RUN:   | FileCheck %s --check-prefix=PLAIN
 % PLAIN: receive.m:{{[0-9]+}}:{{[0-9]+}}: error: expected an operator or '.', but found '['
-% Semantics/desugar/receive.m reports that they are not desugared yet.
+% Semantics/desugar/receive.m desugars them.
 
 :- module receive_goals.
 :- interface.

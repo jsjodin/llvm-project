@@ -719,7 +719,18 @@ mailboxes, "The `receive` goal"), as sugar over the selectors of
    pattern's new variables as a constructor of a hidden result type,
    polymorphic in their types, that desugaring generates; a switch on the
    result runs the arm's goal. A codegen test runs the design document's
-   counter loop.
+   counter loop. Done: `CodeGen/receive-goal.m` runs it, with the other
+   cases, at -O0 and -O2; `Semantics/desugar/receive.m` checks the
+   expansion, and `Semantics/receive/` the errors of each pass: no import
+   of process, a pattern of another type, a tested variable that is not
+   ground, which mode analysis explains for receive goals, and an arm that
+   can fail. Each case is desugared on its own, so that its predicate's
+   copies of the new variables are its own. Not covered: a tested variable
+   bound only after the goal lets mode analysis schedule the switch before
+   the call, whose implied mode then makes the goal semidet; the code is
+   still right, since only pure goals move, but the error is puzzling. The
+   inst-based rule below removes it, since the variable is then the arm's
+   own.
 3. The `unselected-message` warning, after type checking, since it needs
    the mailboxes' types.
 
@@ -727,7 +738,21 @@ Later: guards, `select(Box, Pattern), Guard -> Goal`, a pure `semidet`
 goal run in the selector's predicate after the pattern matches (design
 document, Processes and mailboxes, "The `receive` goal").
 
-**Proposed for step 2,** not yet agreed:
+Later, with open types (Open types: `closed(T)`): each pattern variable's
+role by its inst at the goal, which is Erlang's rule, instead of by where
+it occurs. A ground variable is a test inside the selector, as now. Any
+other, new, free or a hole, gets a fresh copy inside the selector, which
+comes back through the result, and the arm unifies the variable with it
+once the message is chosen; so a hole is filled only by the arm that took
+the message, never by a selector that accepted a message which then lost to
+an older one. This also lets a pattern bind a variable used after the
+goal, which the first rule makes an input. Mode analysis knows the insts,
+so it builds the selector then, from a receive goal kept until it. Under
+the first rule a hole in a pattern is a mode error, as a lambda that
+captures a variable that is not ground is, so nothing compiles now that
+the second rule would change.
+
+**Decided for step 2** (2026-11-07):
 
 - A pattern's variable that also occurs outside the receive goal is an
   input, which the pattern tests, as a bound variable in an Erlang

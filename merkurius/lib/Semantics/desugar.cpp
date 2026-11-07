@@ -73,6 +73,44 @@ bool IsOwnArgument(parser::LoopIteratorKind kind, std::size_t j) {
 // a variable occurs directly: in the clause or a loop's body or its
 // iterators' own arguments, but not in a loop nested there, except for
 // that loop's arguments around it.
+// For each receive goal of a clause, by the parse tree's numbers, the
+// variables that occur outside it, which its patterns test (design
+// document, "The receive goal").
+class ReceiveOccurrences {
+public:
+  template <typename T> static ReceiveOccurrences Of(const T &clause) {
+    ReceiveOccurrences occurrences;
+    parser::Walk(clause, occurrences);
+    return occurrences;
+  }
+  bool Outside(const parser::ReceiveGoal &receive, unsigned number) const {
+    auto inside{receives_.find(&receive)->second.lookup(number)};
+    return total_.lookup(number) > inside;
+  }
+
+  bool Pre(const parser::ReceiveGoal &receive) {
+    open_.push_back(&receive);
+    receives_[&receive];
+    return true;
+  }
+  void Post(const parser::ReceiveGoal &) { open_.pop_back(); }
+  void Post(const parser::Variable &var) {
+    if (var.name == "_") {
+      return;
+    }
+    ++total_[var.number];
+    for (const parser::ReceiveGoal *receive : open_) {
+      ++receives_[receive][var.number];
+    }
+  }
+
+private:
+  llvm::DenseMap<unsigned, unsigned> total_;
+  llvm::DenseMap<const parser::ReceiveGoal *, llvm::DenseMap<unsigned, unsigned>>
+      receives_;
+  llvm::SmallVector<const parser::ReceiveGoal *, 2> open_;
+};
+
 class LoopScopes {
 public:
   struct Info {
@@ -176,9 +214,12 @@ private:
 
 class ClauseDesugarer {
 public:
+  // processImported is whether the module imports process, whose names a
+  // receive goal's expansion uses.
   ClauseDesugarer(const parser::TokenSequence &tokens, SemanticArena &arena,
-      parser::Messages &messages)
-      : tokens_{tokens}, arena_{arena}, messages_{messages} {}
+      parser::Messages &messages, bool processImported)
+      : tokens_{tokens}, arena_{arena}, messages_{messages},
+        processImported_{processImported} {}
 
   std::optional<const ClauseForm *> Desugar(const parser::FactOrRule &);
   std::optional<const ClauseForm *> Desugar(const parser::DcgRule &);
@@ -315,6 +356,30 @@ private:
       llvm::SmallVectorImpl<StateMap> &ends);
   void DesugarTry(const parser::TryGoal &, Goals &out);
   void DesugarLoop(const parser::LoopGoal &, Goals &out);
+  // A receive goal, as a receive over a selector of its arms and a switch
+  // on the result (design document, "The receive goal").
+  void DesugarReceive(const parser::ReceiveGoal &, Goals &out);
+  // A variable of the expansion of a receive goal, with a number the parse
+  // tree does not use: new, with the name, or for a lambda's argument, which
+  // desugaring the lambda makes, only numbered.
+  const parser::Variable *ExpansionVar(
+      TokenRange, llvm::StringRef name, bool fresh = true);
+  // process.Name(Arguments), as the parse tree has it.
+  parser::DataTerm ProcessTerm(TokenRange, llvm::StringRef name,
+      llvm::ArrayRef<parser::DataTerm> arguments = {});
+  const parser::SymName *ProcessName(TokenRange, llvm::StringRef name);
+  // The switch on the result of a receive goal's arms from `first` on,
+  // whose value is in `var`, or with no arms, the result's `yes` that
+  // cannot happen.
+  parser::Goal ReceiveSwitch(TokenRange,
+      llvm::ArrayRef<const parser::ReceiveArm *> arms,
+      llvm::ArrayRef<parser::DataTerm> payloads, std::size_t first,
+      const parser::Variable *var);
+  template <typename... A> parser::Goal Conjunction(TokenRange range,
+      A... goals) {
+    return Make<parser::Conjunction>(range, false,
+        Save(llvm::ArrayRef<parser::Goal>{parser::Goal{goals}...}));
+  }
   // Starts desugaring a clause whose loops' scopes are `scopes`.
   void Scopes(LoopScopes &&scopes) {
     scopes_ = std::move(scopes);
@@ -385,6 +450,13 @@ private:
   // may only be read as !.X in it.
   llvm::StringSet<> readOnly_;
   LoopScopes scopes_;
+  ReceiveOccurrences receives_;
+  bool processImported_;
+  // The lambda expression of the selector's case being desugared.
+  const parser::Lambda *selector_{nullptr};
+  // The next number for a variable of a receive goal's expansion, beyond
+  // the parse tree's.
+  unsigned expansionVars_{1u << 30};
   // The variables of the regions around the loop being desugared, whose
   // occurrences in it are the same variables.
   llvm::DenseSet<unsigned> visible_;
@@ -1074,13 +1146,7 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
             out.push_back(MakeScope(x->tokens, ScopeKind::Omp, goal, {}, x->goal));
           },
           [&](const parser::LoopGoal *x) { DesugarLoop(*x, out); },
-          [&](const parser::ReceiveGoal *x) {
-            // Temporary (receive goal step 2, docs/INPROGRESS.md): the
-            // goal becomes a receive over a selector of its arms.
-            messages_.Say(Source(x->tokens), "desugaring %s"_todo_en_US,
-                "receive goals");
-            ok_ = false;
-          },
+          [&](const parser::ReceiveGoal *x) { DesugarReceive(*x, out); },
       },
       goal);
 }
@@ -1615,7 +1681,7 @@ const Lambda *ClauseDesugarer::DesugarLambda(const parser::Lambda &lambda) {
   const Lambda *result{Make<Lambda>(lambda.tokens, lambda.kind,
       lambda.any, lambda.purity, Save(llvm::ArrayRef<VarId>{head_}),
       Save(llvm::ArrayRef<std::optional<parser::Mode>>{modes}),
-      lambda.determinism, Conjoin(lambda.tokens, goals))};
+      lambda.determinism, Conjoin(lambda.tokens, goals), &lambda == selector_)};
   for (const auto &[number, var] : outer) {
     if (var) {
       numbers_[number] = *var;
@@ -1765,9 +1831,260 @@ void ClauseDesugarer::DesugarLoop(const parser::LoopGoal &loop, Goals &out) {
       Conjoin(GoalTokens(loop.body), body)));
 }
 
+const parser::Variable *ClauseDesugarer::ExpansionVar(
+    TokenRange range, llvm::StringRef name, bool fresh) {
+  unsigned number{expansionVars_++};
+  if (fresh) {
+    // Named, for messages, which may show the switch on the result.
+    vars_.push_back(VarInfo{VarKind::Program, name, range});
+    numbers_[number] = vars_.size() - 1;
+  }
+  return Make<parser::Variable>(range, name, number);
+}
+
+const parser::SymName *ClauseDesugarer::ProcessName(
+    TokenRange range, llvm::StringRef name) {
+  static const llvm::StringRef process[]{"process"};
+  return Make<parser::SymName>(
+      range, llvm::ArrayRef<llvm::StringRef>{process}, name);
+}
+
+parser::DataTerm ClauseDesugarer::ProcessTerm(TokenRange range,
+    llvm::StringRef name, llvm::ArrayRef<parser::DataTerm> arguments) {
+  return Make<parser::FunctorData>(
+      range, ProcessName(range, name), Save(arguments));
+}
+
+parser::Goal ClauseDesugarer::ReceiveSwitch(TokenRange range,
+    llvm::ArrayRef<const parser::ReceiveArm *> arms,
+    llvm::ArrayRef<parser::DataTerm> payloads, std::size_t first,
+    const parser::Variable *var) {
+  if (arms.empty()) {
+    // With no arm to select a message, the result is never yes, but its
+    // type is still to be fixed.
+    return Conjunction(range,
+        Make<parser::Unification>(range, var, ProcessTerm(range, "receive_none")),
+        Make<parser::Call>(range, ProcessName(range, "receive_closed"),
+            llvm::ArrayRef<parser::DataTerm>{}));
+  }
+  const parser::ReceiveArm &arm{*arms[first]};
+  if (first + 1 == arms.size()) {
+    return Conjunction(arm.tokens,
+        Make<parser::Unification>(arm.tokens, var, payloads[first]), arm.goal);
+  }
+  parser::DataTerm payload[]{payloads[first]};
+  parser::Goal taken{Conjunction(arm.tokens,
+      Make<parser::Unification>(
+          arm.tokens, var, ProcessTerm(arm.tokens, "receive_arm", payload)),
+      arm.goal)};
+  const parser::Variable *rest{ExpansionVar(range, "ReceiveRest")};
+  parser::DataTerm restTerm[]{rest};
+  parser::Goal later{Conjunction(range,
+      Make<parser::Unification>(
+          range, var, ProcessTerm(range, "receive_rest", restTerm)),
+      ReceiveSwitch(range, arms, payloads, first + 1, rest))};
+  return Make<parser::Disjunction>(
+      range, Save(llvm::ArrayRef<parser::Goal>{taken, later}));
+}
+
+// receive [timeout(T), io(!IO)] ( select(M, P) -> G ; ... ; timeout -> H )
+// is
+//
+//   S = selecting_matching(M, (pred(Msg::in, R::out) is semidet :-
+//           ( if Msg = P then R = <the arm and P's new variables>
+//           else if ... else fail )), ..., new_selector),
+//   receive_goal(S, T, Result, !IO),
+//   ( Result = receive_nothing, H
+//   ; Result = receive_message(<the arm and P's new variables>), G
+//   ; ...
+//   )
+//
+// with all names in process. Each mailbox, by the text of its term, has one
+// case, the first written added first, whose predicate tries its arms in
+// order. A pattern's new variables are those that occur nowhere outside the
+// goal; in the predicate they are fresh copies, which come back through the
+// result to the arm, and the pattern's other variables are tested. Without
+// a timeout arm, the timeout is infinity, and a result of no, when every
+// mailbox is closed, is process.receive_closed's error.
+void ClauseDesugarer::DesugarReceive(
+    const parser::ReceiveGoal &receive, Goals &out) {
+  TokenRange range{receive.tokens};
+  if (!processImported_) {
+    Error(range,
+        "a receive goal needs the module process, which this module does "
+        "not import"_err_en_US);
+    return;
+  }
+  std::optional<parser::DataTerm> timeout, io;
+  for (const parser::ReceiveParam *param : receive.params) {
+    (param->kind == parser::ReceiveParamKind::Timeout ? timeout : io) =
+        param->value;
+  }
+  const parser::ReceiveArm *timeoutArm{nullptr};
+  llvm::SmallVector<const parser::ReceiveArm *, 4> arms;
+  for (const parser::ReceiveArm *arm : receive.arms) {
+    if (arm->mailbox) {
+      arms.push_back(arm);
+    } else {
+      timeoutArm = arm;
+    }
+  }
+  // Each arm's new variables, and what the selector returns for it.
+  struct NewVars {
+    llvm::SmallVector<const parser::Variable *, 4> vars;
+    void Post(const parser::Variable &var) {
+      if (var.name != "_" &&
+          llvm::none_of(vars, [&](const parser::Variable *v) {
+            return v->number == var.number;
+          })) {
+        vars.push_back(&var);
+      }
+    }
+  };
+  llvm::SmallVector<llvm::SmallVector<const parser::Variable *, 4>, 4> newVars;
+  llvm::SmallVector<parser::DataTerm, 4> payloads;
+  for (const parser::ReceiveArm *arm : arms) {
+    NewVars collector;
+    parser::Walk(*arm->pattern, collector);
+    llvm::erase_if(collector.vars, [&](const parser::Variable *var) {
+      return receives_.Outside(receive, var->number);
+    });
+    llvm::SmallVector<parser::DataTerm, 4> elements{
+        collector.vars.begin(), collector.vars.end()};
+    parser::DataTerm payload{ProcessTerm(arm->tokens, "receive_none")};
+    if (elements.size() == 1) {
+      payload = elements.front();
+    } else if (elements.size() > 1) {
+      payload = Make<parser::TupleData>(
+          arm->tokens, Save(llvm::ArrayRef<parser::DataTerm>{elements}));
+    }
+    payloads.push_back(payload);
+    newVars.push_back(std::move(collector.vars));
+  }
+  // What the selector returns for arm I of K: receive_rest applied I times
+  // to receive_arm of its payload, or for the last, K - 1 times to it.
+  llvm::SmallVector<parser::DataTerm, 4> encodings;
+  for (std::size_t i{0}; i < arms.size(); ++i) {
+    TokenRange at{arms[i]->tokens};
+    parser::DataTerm encoding{payloads[i]};
+    if (i + 1 < arms.size()) {
+      parser::DataTerm payload[]{encoding};
+      encoding = ProcessTerm(at, "receive_arm", payload);
+    }
+    for (std::size_t j{0}; j < i; ++j) {
+      parser::DataTerm inner[]{encoding};
+      encoding = ProcessTerm(at, "receive_rest", inner);
+    }
+    encodings.push_back(encoding);
+  }
+  // The mailboxes, by the text of their terms, in the order first written.
+  llvm::SmallVector<llvm::StringRef, 4> mailboxes;
+  llvm::SmallVector<llvm::SmallVector<std::size_t, 2>, 4> cases;
+  for (std::size_t i{0}; i < arms.size(); ++i) {
+    llvm::StringRef text{Text(std::visit(
+        [](const auto *x) { return x->tokens; }, *arms[i]->mailbox))};
+    auto found{llvm::find(mailboxes, text)};
+    if (found == mailboxes.end()) {
+      mailboxes.push_back(text);
+      cases.emplace_back();
+      found = mailboxes.end() - 1;
+    }
+    cases[found - mailboxes.begin()].push_back(i);
+  }
+  // Each case is desugared on its own, with its arms' new variables as
+  // fresh copies inside its predicate, so that no two predicates share a
+  // variable.
+  parser::DataTerm selector{ProcessTerm(range, "new_selector")};
+  for (const auto &arm : cases) {
+    TokenRange at{arms[arm.front()]->tokens};
+    const parser::Variable *message{ExpansionVar(at, "Message", false)};
+    const parser::Variable *result{ExpansionVar(at, "Selected", false)};
+    parser::Goal body{Make<parser::BuiltinGoal>(at, parser::BuiltinGoalKind::Fail)};
+    for (std::size_t j{arm.size()}; j-- > 0;) {
+      std::size_t i{arm[j]};
+      TokenRange armAt{arms[i]->tokens};
+      body = Make<parser::IfThenElse>(armAt, parser::IfThenElseForm::IfThenElse,
+          Make<parser::Unification>(armAt, message, *arms[i]->pattern),
+          Make<parser::Unification>(armAt, result, encodings[i]), body);
+    }
+    parser::Mode inMode{Make<parser::NamedMode>(at,
+        Make<parser::SymName>(
+            at, llvm::ArrayRef<llvm::StringRef>{}, llvm::StringRef{"in"}),
+        llvm::ArrayRef<parser::Inst>{})};
+    parser::Mode outMode{Make<parser::NamedMode>(at,
+        Make<parser::SymName>(
+            at, llvm::ArrayRef<llvm::StringRef>{}, llvm::StringRef{"out"}),
+        llvm::ArrayRef<parser::Inst>{})};
+    const parser::ModedTerm *arguments[]{
+        Make<parser::ModedTerm>(at, message, inMode),
+        Make<parser::ModedTerm>(at, result, outMode)};
+    const parser::Lambda *lambda{Make<parser::Lambda>(at, parser::Purity::Pure,
+        parser::PredOrFunc::Predicate, false,
+        Save(llvm::ArrayRef<const parser::ModedTerm *>{arguments}), nullptr,
+        parser::Determinism::Semidet, body)};
+    parser::DataTerm caseArguments[]{*arms[arm.front()]->mailbox, lambda,
+        selector};
+    const parser::Variable *caseVar{ExpansionVar(at, "ReceiveSelector")};
+    llvm::SmallVector<std::pair<unsigned, std::optional<VarId>>, 8> saved;
+    for (std::size_t i : arm) {
+      for (const parser::Variable *var : newVars[i]) {
+        if (llvm::any_of(saved, [&](const auto &s) {
+              return s.first == var->number;
+            })) {
+          continue;
+        }
+        auto it{numbers_.find(var->number)};
+        saved.emplace_back(var->number,
+            it == numbers_.end() ? std::nullopt : std::optional{it->second});
+        numbers_[var->number] = Fresh(var->tokens);
+      }
+    }
+    selector_ = lambda;
+    DesugarInto(Make<parser::Unification>(at, caseVar,
+                    ProcessTerm(at, "selecting_matching", caseArguments)),
+        out);
+    selector_ = nullptr;
+    for (const auto &[number, var] : saved) {
+      if (var) {
+        numbers_[number] = *var;
+      } else {
+        numbers_.erase(number);
+      }
+    }
+    selector = caseVar;
+  }
+  const parser::DataTerm selectorVar{selector};
+  const parser::Variable *resultVar{ExpansionVar(range, "Received")};
+  parser::DataTerm callArguments[]{selectorVar,
+      timeout ? *timeout : ProcessTerm(range, "infinity"), resultVar, *io};
+  DesugarInto(Make<parser::Call>(range, ProcessName(range, "receive_goal"),
+                  Save(llvm::ArrayRef<parser::DataTerm>{callArguments})),
+      out);
+  parser::Goal none{timeoutArm
+          ? timeoutArm->goal
+          : parser::Goal{Make<parser::Call>(range,
+                ProcessName(range, "receive_closed"),
+                llvm::ArrayRef<parser::DataTerm>{})}};
+  TokenRange noneAt{timeoutArm ? timeoutArm->tokens : range};
+  const parser::Variable *taken{ExpansionVar(range, "ReceiveTaken")};
+  parser::DataTerm takenTerm[]{taken};
+  parser::Goal noMessage{Conjunction(noneAt,
+      Make<parser::Unification>(
+          noneAt, resultVar, ProcessTerm(noneAt, "receive_nothing")),
+      none)};
+  parser::Goal message{Conjunction(range,
+      Make<parser::Unification>(range, resultVar,
+          ProcessTerm(range, "receive_message", takenTerm)),
+      ReceiveSwitch(range, arms, payloads, 0, taken))};
+  DesugarInto(Make<parser::Disjunction>(range,
+                  Save(llvm::ArrayRef<parser::Goal>{noMessage, message})),
+      out);
+}
+
 std::optional<const ClauseForm *> ClauseDesugarer::Desugar(
     const parser::FactOrRule &clause) {
   Scopes(LoopScopes::Of(clause));
+  receives_ = ReceiveOccurrences::Of(clause);
   llvm::SmallVector<const parser::ModedTerm *, 4> arguments{
       clause.arguments.begin(), clause.arguments.end()};
   if (clause.result) {
@@ -1797,6 +2114,7 @@ std::optional<const ClauseForm *> ClauseDesugarer::Desugar(
 std::optional<const ClauseForm *> ClauseDesugarer::Desugar(
     const parser::DcgRule &rule) {
   Scopes(LoopScopes::Of(rule));
+  receives_ = ReceiveOccurrences::Of(rule);
   Goals goals;
   Head(rule.arguments, nullptr, goals);
   DcgHead(rule.tokens);
@@ -1865,10 +2183,18 @@ const SemanticForm &Desugar(const parser::ParseTree &tree,
     parser::Messages &messages) {
   llvm::SmallVector<const ClauseForm *, 16> clauses;
   llvm::SmallVector<MethodClause, 16> methods;
+  bool processImported{false};
+  for (const parser::Item &item : tree.items) {
+    if (const auto *decl{std::get_if<const parser::ImportDecl *>(&item)}) {
+      for (const parser::SymName *module : (*decl)->modules) {
+        processImported |= module->qualifiers.empty() && module->name == "process";
+      }
+    }
+  }
   for (const parser::Item &item : tree.items) {
     if (const auto *decl{std::get_if<const parser::InstanceDecl *>(&item)}) {
       for (const parser::InstanceMethod &method : (*decl)->methods) {
-        ClauseDesugarer desugarer{tokens, arena, messages};
+        ClauseDesugarer desugarer{tokens, arena, messages, processImported};
         std::optional<const ClauseForm *> clause;
         const parser::MethodByName *byName{nullptr};
         common::visit(
@@ -1893,12 +2219,12 @@ const SemanticForm &Desugar(const parser::ParseTree &tree,
       }
     }
     if (const auto *rule{std::get_if<const parser::FactOrRule *>(&item)}) {
-      ClauseDesugarer desugarer{tokens, arena, messages};
+      ClauseDesugarer desugarer{tokens, arena, messages, processImported};
       if (auto clause{desugarer.Desugar(**rule)}) {
         clauses.push_back(&Quantify(**clause, tokens, arena, messages));
       }
     } else if (const auto *rule{std::get_if<const parser::DcgRule *>(&item)}) {
-      ClauseDesugarer desugarer{tokens, arena, messages};
+      ClauseDesugarer desugarer{tokens, arena, messages, processImported};
       if (auto clause{desugarer.Desugar(**rule)}) {
         clauses.push_back(&Quantify(**clause, tokens, arena, messages));
       }

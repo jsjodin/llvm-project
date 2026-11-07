@@ -121,9 +121,33 @@
 :- pred lookup(node::in, string::in, timeout::in,
     maybe_error(mailbox(M))::out, io::di, io::uo) is det.
 
+    % For the expansion of the receive goal (design document, "The receive
+    % goal"), not for programs. The selector of a receive goal of K arms
+    % maps a message that the arm numbered I selects, from 0, to the arm's
+    % variables, as receive_rest applied I times to receive_arm of them, or
+    % for the last arm, K - 1 times to them; with no variables, they are
+    % receive_none, and with several, a tuple.
+:- type receive_arms(A, B)
+    --->    receive_arm(A)
+    ;       receive_rest(B).
+:- type receive_none
+    --->    receive_none.
+
+    % receive/5, with a result whose type is process's, since the module
+    % with the receive goal need not import maybe.
+:- type receive_result(R)
+    --->    receive_message(R)
+    ;       receive_nothing.
+:- pred receive_goal(selector(R)::in, timeout::in, receive_result(R)::out,
+    io::di, io::uo) is det.
+
+    % A receive goal without a timeout arm whose mailboxes are all closed.
+:- pred receive_closed is erroneous.
+
 :- implementation.
 :- import_module bool.
 :- import_module int.
+:- import_module require.
 :- import_module string.
 
     % The node's id, the place in the top 16 bits of a word whose other
@@ -217,6 +241,19 @@ receive(Mailbox, Selector, Timeout, Result, !IO) :-
     N = M;
     SUCCESS_INDICATOR = MR_TRUE;
 ").
+
+receive_closed :-
+    error("receive: every mailbox is closed").
+
+receive_goal(Selector, Timeout, Result, !IO) :-
+    receive(Selector, Timeout, Received, !IO),
+    (
+        Received = yes(R),
+        Result = receive_message(R)
+    ;
+        Received = no,
+        Result = receive_nothing
+    ).
 
 new_selector = no_cases.
 
