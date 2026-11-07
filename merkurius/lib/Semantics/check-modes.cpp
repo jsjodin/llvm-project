@@ -232,6 +232,7 @@ private:
   void BuildProcedures(llvm::ArrayRef<parser::Item>, const ModuleSymbols &);
   void MatchForeignProcs(const parser::ParseTree &);
   void MatchClauses();
+  void CheckHasClauses();
   // What CheckInstForType keeps for one argument of a declaration.
   struct InstTypeWalk {
     const Symbol &symbol;
@@ -987,6 +988,38 @@ void ModeChecker::Run(const parser::ParseTree &tree) {
   }
   MatchForeignProcs(tree);
   MatchClauses();
+  CheckHasClauses();
+}
+
+// A predicate or function of the module, not a method, needs clauses or a
+// foreign_proc for C (mmc: "Error: no clauses for predicate `p'/1."). After
+// an earlier error none is reported: a clause that did not desugar may have
+// been for it, and the compilation fails anyway.
+void ModeChecker::CheckHasClauses() {
+  if (options_.stubUnimplemented || messages_.AnyFatalError()) {
+    return;
+  }
+  llvm::DenseSet<const Symbol *> defined;
+  for (const ClauseTypes &clause : types_.clauses()) {
+    if (!clause.method && clause.definition) {
+      defined.insert(clause.definition);
+    }
+  }
+  for (const Symbol *symbol : resolution_.module().symbols()) {
+    if ((symbol->kind != SymbolKind::Predicate &&
+            symbol->kind != SymbolKind::Function) ||
+        symbol->owner || defined.contains(symbol)) {
+      continue;
+    }
+    bool foreign{llvm::any_of(result_.bySymbol_.lookup(symbol),
+        [&](const Procedure *procedure) {
+          return result_.foreignProcs_.contains(procedure);
+        })};
+    if (!foreign) {
+      messages_.Say(symbol->source, "%s has no clauses"_err_en_US,
+          Text(*symbol));
+    }
+  }
 }
 
 // Each clause for one mode is of the procedure whose modes its head's
