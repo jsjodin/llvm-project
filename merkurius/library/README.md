@@ -41,6 +41,13 @@ with `foreign_proc`s on `runtime/mailbox.cpp` (design document, Language
 extensions, "Processes and mailboxes"). A handle names its node and place
 and carries a secret; until connections exist, `this_node` is the only
 node.
+`char.m` implements all of its declarations, in Mercury over
+`foreign_proc`s for the conversions between characters and ints. Where the
+manual leaves it open, it is mmc's, found by running its programs: the
+errors' messages; `from_int`, which keeps an int's low 32 bits as mmc's
+does (design document, "Where mmc and the manual disagree"); the Unicode
+13 classes; and `hash`, which is Thomas Wang's 64-bit integer hash of the
+code point.
 `float.m` implements its
 functions but `hash`, and `math.m` all of its
 functions but `solve_quadratic`, with C's math library. The arithmetic
