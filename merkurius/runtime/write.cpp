@@ -19,13 +19,15 @@
 #include "walk.h"
 #include <cinttypes>
 #include <cmath>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string_view>
 
-extern "C" void merk_write_float(double number);
+extern "C" void merk_format_float(double number, char *buffer);
+extern "C" char *merk_string_new(std::int64_t bytes);
 
 namespace {
 
@@ -95,39 +97,94 @@ const Operator *FindOperator(std::string_view name, unsigned arity) {
   return nullptr;
 }
 
-void Put(std::string_view text) { std::fwrite(text.data(), 1, text.size(), stdout); }
+// Where the writer writes: a stream, or a buffer that becomes a string, for
+// string.string. It has no destructor, which would need the C++ runtime's
+// unwinding, which the runtime does not link: Take frees the buffer.
+class Out {
+public:
+  explicit Out(std::FILE *file) : file_{file} {}
+  Out() = default;
+  Out(const Out &) = delete;
+  Out &operator=(const Out &) = delete;
+
+  void Put(std::string_view text) {
+    if (file_) {
+      std::fwrite(text.data(), 1, text.size(), file_);
+      return;
+    }
+    if (size_ + text.size() > capacity_) {
+      capacity_ = capacity_ * 2 > size_ + text.size() ? capacity_ * 2
+                                                      : size_ + text.size();
+      data_ = static_cast<char *>(std::realloc(data_, capacity_));
+      if (!data_) {
+        std::abort();
+      }
+    }
+    std::memcpy(data_ + size_, text.data(), text.size());
+    size_ += text.size();
+  }
+  void Put(char c) { Put(std::string_view{&c, 1}); }
+  // For short text only, an integer and its suffix.
+  __attribute__((format(printf, 2, 3))) void Printf(const char *format, ...) {
+    char buffer[64];
+    std::va_list arguments;
+    va_start(arguments, format);
+    int size{std::vsnprintf(buffer, sizeof buffer, format, arguments)};
+    va_end(arguments);
+    Put(std::string_view{buffer, static_cast<std::size_t>(size)});
+  }
+
+  // What was written to the buffer, as a string on the heap.
+  char *Take() {
+    char *text{merk_string_new(static_cast<std::int64_t>(size_))};
+    if (size_ != 0) {
+      std::memcpy(text, data_, size_);
+    }
+    std::free(data_);
+    data_ = nullptr;
+    size_ = capacity_ = 0;
+    return text;
+  }
+
+private:
+  std::FILE *file_{nullptr};
+  char *data_{nullptr};
+  std::size_t size_{0};
+  std::size_t capacity_{0};
+};
+
 
 // A code point, or a byte that is not part of one, as a quoted name's, a
 // character's or a string's.
-void PutEscaped(std::uint32_t c, const char *bytes, std::size_t size) {
+void PutEscaped(Out &out, std::uint32_t c, const char *bytes, std::size_t size) {
   switch (c) {
   case '\\':
-    return Put("\\\\");
+    return out.Put("\\\\");
   case '\'':
-    return Put("\\'");
+    return out.Put("\\'");
   case '"':
-    return Put("\\\"");
+    return out.Put("\\\"");
   case '\a':
-    return Put("\\a");
+    return out.Put("\\a");
   case '\b':
-    return Put("\\b");
+    return out.Put("\\b");
   case '\f':
-    return Put("\\f");
+    return out.Put("\\f");
   case '\n':
-    return Put("\\n");
+    return out.Put("\\n");
   case '\r':
-    return Put("\\r");
+    return out.Put("\\r");
   case '\t':
-    return Put("\\t");
+    return out.Put("\\t");
   case '\v':
-    return Put("\\v");
+    return out.Put("\\v");
   default:
     break;
   }
   if (c < 0x20 || (c >= 0x7f && c <= 0x9f)) {
-    std::printf("\\%03" PRIo32 "\\", c);
+    out.Printf("\\%03" PRIo32 "\\", c);
   } else {
-    Put({bytes, size});
+    out.Put({bytes, size});
   }
 }
 
@@ -156,21 +213,21 @@ std::size_t Decode(const unsigned char *s, std::uint32_t &c) {
 
 // A byte that is not part of a well-formed sequence is written as U+FFFD, as
 // mmc does, so that what is written is UTF-8.
-void PutEscapedText(const char *text) {
+void PutEscapedText(Out &out, const char *text) {
   const auto *s{reinterpret_cast<const unsigned char *>(text)};
   while (*s) {
     std::uint32_t c;
     std::size_t size{Decode(s, c)};
     if (size == 1 && *s >= 0x80) {
-      Put("\xEF\xBF\xBD");
+      out.Put("\xEF\xBF\xBD");
     } else {
-      PutEscaped(c, reinterpret_cast<const char *>(s), size);
+      PutEscaped(out, c, reinterpret_cast<const char *>(s), size);
     }
     s += size;
   }
 }
 
-void PutQuoted(const char *name) {
+void PutQuoted(Out &out, const char *name) {
   std::string_view text{name};
   bool plain{text == "[]" || text == "{}" || text == "!"};
   if (!plain && !text.empty() && text[0] >= 'a' && text[0] <= 'z') {
@@ -181,15 +238,15 @@ void PutQuoted(const char *name) {
     }
   }
   if (plain) {
-    Put(text);
+    out.Put(text);
     return;
   }
-  std::putc('\'', stdout);
-  PutEscapedText(name);
-  std::putc('\'', stdout);
+  out.Put('\'');
+  PutEscapedText(out, name);
+  out.Put('\'');
 }
 
-void PutChar(std::uint32_t c, bool quoted) {
+void PutChar(Out &out, std::uint32_t c, bool quoted) {
   char bytes[4];
   std::size_t size;
   if (c < 0x80) {
@@ -212,21 +269,21 @@ void PutChar(std::uint32_t c, bool quoted) {
     size = 4;
   }
   if (!quoted) {
-    Put({bytes, size});
+    out.Put({bytes, size});
     return;
   }
-  std::putc('\'', stdout);
-  PutEscaped(c, bytes, size);
-  std::putc('\'', stdout);
+  out.Put('\'');
+  PutEscaped(out, c, bytes, size);
+  out.Put('\'');
 }
 
-void WriteValue(Word value, Word type, const Environment *environment, int context);
-void WriteTyped(Word value, const Type &type, int context);
+void WriteValue(Out &out, Word value, Word type, const Environment *environment, int context);
+void WriteTyped(Out &out, Word value, const Type &type, int context);
 
-void WriteList(const Functor *functor, const Word *fields, const Type &type) {
-  std::putc('[', stdout);
+void WriteList(Out &out, const Functor *functor, const Word *fields, const Type &type) {
+  out.Put('[');
   for (;;) {
-    WriteValue(fields[0], functor->fields[0], &type.environment, kArgumentPriority);
+    WriteValue(out, fields[0], functor->fields[0], &type.environment, kArgumentPriority);
     Word tail{fields[1]};
     Word tailType{functor->fields[1]};
     if (IsSameType(tailType, type)) {
@@ -234,7 +291,7 @@ void WriteList(const Functor *functor, const Word *fields, const Type &type) {
       const Functor *next{FunctorOf(tail, type.ctor, tailFields)};
       std::string_view name{next->name};
       if (name == "[|]" && next->arity == 2) {
-        Put(", ");
+        out.Put(", ");
         functor = next;
         fields = tailFields;
         continue;
@@ -243,14 +300,14 @@ void WriteList(const Functor *functor, const Word *fields, const Type &type) {
         break;
       }
     }
-    Put(" | ");
-    WriteValue(tail, tailType, &type.environment, kAnyPriority);
+    out.Put(" | ");
+    WriteValue(out, tail, tailType, &type.environment, kAnyPriority);
     break;
   }
-  std::putc(']', stdout);
+  out.Put(']');
 }
 
-void WriteTerm(Word term, const Type &type, int context) {
+void WriteTerm(Out &out, Word term, const Type &type, int context) {
   const Word *fields{nullptr};
   const Functor *functor{FunctorOf(term, type.ctor, fields)};
   std::string_view name{functor->name};
@@ -261,154 +318,156 @@ void WriteTerm(Word term, const Type &type, int context) {
       functor->hidden != 0 ? &existential : &type.environment};
   if (arity == 0) {
     if (context < kAnyPriority && FirstOperator(name)) {
-      std::putc('(', stdout);
-      Put(name);
-      std::putc(')', stdout);
+      out.Put('(');
+      out.Put(name);
+      out.Put(')');
     } else {
-      PutQuoted(functor->name);
+      PutQuoted(out, functor->name);
     }
     return;
   }
   if (name == "[|]" && arity == 2) {
-    WriteList(functor, fields, type);
+    WriteList(out, functor, fields, type);
     return;
   }
   if (name == "{}") {
     if (arity == 1) {
-      Put("{ ");
-      WriteValue(fields[0], functor->fields[0], environment, kAnyPriority);
-      Put(" }");
+      out.Put("{ ");
+      WriteValue(out, fields[0], functor->fields[0], environment, kAnyPriority);
+      out.Put(" }");
       return;
     }
-    std::putc('{', stdout);
+    out.Put('{');
     for (unsigned i{0}; i < arity; ++i) {
       if (i != 0) {
-        Put(", ");
+        out.Put(", ");
       }
-      WriteValue(fields[i], functor->fields[i], environment, kArgumentPriority);
+      WriteValue(out, fields[i], functor->fields[i], environment, kArgumentPriority);
     }
-    std::putc('}', stdout);
+    out.Put('}');
     return;
   }
   if (const Operator *op{FindOperator(name, arity)}) {
     int priority{op->priority};
     bool parentheses{priority > context};
     if (parentheses) {
-      std::putc('(', stdout);
+      out.Put('(');
     }
     if (arity == 1) {
-      Put(name);
-      std::putc(' ', stdout);
-      WriteValue(fields[0], functor->fields[0], environment,
+      out.Put(name);
+      out.Put(' ');
+      WriteValue(out, fields[0], functor->fields[0], environment,
           op->specifier == FY ? priority : priority - 1);
     } else if (op->specifier == FXY) {
-      Put(name);
-      std::putc(' ', stdout);
-      WriteValue(fields[0], functor->fields[0], environment, priority - 1);
-      std::putc(' ', stdout);
-      WriteValue(fields[1], functor->fields[1], environment, priority);
+      out.Put(name);
+      out.Put(' ');
+      WriteValue(out, fields[0], functor->fields[0], environment, priority - 1);
+      out.Put(' ');
+      WriteValue(out, fields[1], functor->fields[1], environment, priority);
     } else {
-      WriteValue(fields[0], functor->fields[0], environment,
+      WriteValue(out, fields[0], functor->fields[0], environment,
           op->specifier == YFX ? priority : priority - 1);
       if (name == ",") {
-        Put(", ");
+        out.Put(", ");
       } else {
-        std::putc(' ', stdout);
-        Put(name);
-        std::putc(' ', stdout);
+        out.Put(' ');
+        out.Put(name);
+        out.Put(' ');
       }
-      WriteValue(fields[1], functor->fields[1], environment,
+      WriteValue(out, fields[1], functor->fields[1], environment,
           op->specifier == XFY ? priority : priority - 1);
     }
     if (parentheses) {
-      std::putc(')', stdout);
+      out.Put(')');
     }
     return;
   }
-  PutQuoted(functor->name);
-  std::putc('(', stdout);
+  PutQuoted(out, functor->name);
+  out.Put('(');
   for (unsigned i{0}; i < arity; ++i) {
     if (i != 0) {
-      Put(", ");
+      out.Put(", ");
     }
-    WriteValue(fields[i], functor->fields[i], environment, kArgumentPriority);
+    WriteValue(out, fields[i], functor->fields[i], environment, kArgumentPriority);
   }
-  std::putc(')', stdout);
+  out.Put(')');
 }
 
-void WriteInteger(Word value, unsigned bits, bool isSigned, const char *suffix) {
+void WriteInteger(Out &out, Word value, unsigned bits, bool isSigned, const char *suffix) {
   if (isSigned) {
     std::int64_t number{static_cast<std::int64_t>(value << (64 - bits)) >>
         (64 - bits)};
-    std::printf("%" PRId64 "%s", number, suffix);
+    out.Printf("%" PRId64 "%s", number, suffix);
   } else {
-    std::printf("%" PRIu64 "%s", value, suffix);
+    out.Printf("%" PRIu64 "%s", value, suffix);
   }
 }
 
-void WriteTyped(Word value, const Type &type, int context) {
+void WriteTyped(Out &out, Word value, const Type &type, int context) {
   switch (type.ctor->kind) {
   case Int:
-    return WriteInteger(value, 64, true, "");
+    return WriteInteger(out, value, 64, true, "");
   case Uint:
-    return WriteInteger(value, 64, false, "u");
+    return WriteInteger(out, value, 64, false, "u");
   case Int8:
-    return WriteInteger(value, 8, true, "i8");
+    return WriteInteger(out, value, 8, true, "i8");
   case Int16:
-    return WriteInteger(value, 16, true, "i16");
+    return WriteInteger(out, value, 16, true, "i16");
   case Int32:
-    return WriteInteger(value, 32, true, "i32");
+    return WriteInteger(out, value, 32, true, "i32");
   case Int64:
-    return WriteInteger(value, 64, true, "i64");
+    return WriteInteger(out, value, 64, true, "i64");
   case Uint8:
-    return WriteInteger(value, 64, false, "u8");
+    return WriteInteger(out, value, 64, false, "u8");
   case Uint16:
-    return WriteInteger(value, 64, false, "u16");
+    return WriteInteger(out, value, 64, false, "u16");
   case Uint32:
-    return WriteInteger(value, 64, false, "u32");
+    return WriteInteger(out, value, 64, false, "u32");
   case Uint64:
-    return WriteInteger(value, 64, false, "u64");
+    return WriteInteger(out, value, 64, false, "u64");
   case Float: {
     double number;
     std::memcpy(&number, &value, sizeof number);
-    merk_write_float(number);
+    char buffer[64];
+    merk_format_float(number, buffer);
+    out.Put(buffer);
     return;
   }
   case Char:
-    return PutChar(static_cast<std::uint32_t>(value), true);
+    return PutChar(out, static_cast<std::uint32_t>(value), true);
   case String:
-    std::putc('"', stdout);
-    PutEscapedText(reinterpret_cast<const char *>(value));
-    std::putc('"', stdout);
+    out.Put('"');
+    PutEscapedText(out, reinterpret_cast<const char *>(value));
+    out.Put('"');
     return;
   case Array: {
     const Word *array{reinterpret_cast<const Word *>(value)};
     Word element{(Word{0} << kTagBits) | kVariableTag};
-    Put("array([");
+    out.Put("array([");
     for (Word i{0}; i < array[0]; ++i) {
       if (i != 0) {
-        Put(", ");
+        out.Put(", ");
       }
-      WriteValue(array[1 + i], element, &type.environment, kArgumentPriority);
+      WriteValue(out, array[1 + i], element, &type.environment, kArgumentPriority);
     }
-    Put("])");
+    out.Put("])");
     return;
   }
   case Closure:
     // As mmc writes one.
-    Put(type.ctor->name[0] == 'f' ? "'<<function>>'" : "'<<predicate>>'");
+    out.Put(type.ctor->name[0] == 'f' ? "'<<function>>'" : "'<<predicate>>'");
     return;
   case Void:
     // Nothing has a value of this type.
     std::abort();
   default:
-    return WriteTerm(value, type, context);
+    return WriteTerm(out, value, type, context);
   }
 }
 
-void WriteValue(Word value, Word type, const Environment *environment, int context) {
+void WriteValue(Out &out, Word value, Word type, const Environment *environment, int context) {
   Type resolved{Resolve(type, environment)};
-  WriteTyped(value, resolved, context);
+  WriteTyped(out, value, resolved, context);
 }
 
 // merk_write's flags, as io.m passes them.
@@ -447,15 +506,23 @@ extern "C" void merk_write_float(double number) {
 // io.write and io.print, whose print writes a string or a character itself,
 // and their _line forms.
 extern "C" void merk_write(Word typeInfo, Word value, Word flags) {
+  Out out{stdout};
   Type type{Resolve(typeInfo, nullptr)};
   if ((flags & kPrint) != 0 && type.ctor->kind == String) {
-    std::fputs(reinterpret_cast<const char *>(value), stdout);
+    out.Put(reinterpret_cast<const char *>(value));
   } else if ((flags & kPrint) != 0 && type.ctor->kind == Char) {
-    PutChar(static_cast<std::uint32_t>(value), false);
+    PutChar(out, static_cast<std::uint32_t>(value), false);
   } else {
-    WriteTyped(value, type, kAnyPriority);
+    WriteTyped(out, value, type, kAnyPriority);
   }
   if ((flags & kLine) != 0) {
-    std::putc('\n', stdout);
+    out.Put('\n');
   }
+}
+
+// string.string: what io.write writes, as a string.
+extern "C" char *merk_string_of(Word typeInfo, Word value) {
+  Out out;
+  WriteTyped(out, value, Resolve(typeInfo, nullptr), kAnyPriority);
+  return out.Take();
 }
