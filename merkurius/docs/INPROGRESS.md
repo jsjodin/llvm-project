@@ -330,7 +330,12 @@ program.
    build; (b) `pair` and `maybe`; (c) `list`; (d) the array predicates;
    (e) `io.command_line_arguments`. Done: (a), (b), (c), and (e), ahead of
    (d) because TCP between two nodes needs an address from the command
-   line (design document, "The route there"). (d) waits for
+   line (design document, "The route there"). Part of (d) is done
+   (2026-11-07), for step 3 of the route's test: `generate`, its folds and
+   the foldl family are compiled from `array.m`, through the sound stub,
+   whose mode numbers programs call; `CompiledArrayCall` in code
+   generation lists them. The rest of (d), the other predicates that are
+   not built in and then those that are, waits for
    the code generation that comes before it (below), so that `list` is
    written plainly, with every mode working, rather than around stubs;
    (c) came once clauses for one mode and nondeterminism worked, before

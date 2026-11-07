@@ -924,7 +924,7 @@ bool CodeGenAction::executeAction() {
       *r.tree, r.tokens, ci.getAllSources(), *r.resolution, *a.types, *a.modes,
       *a.determinism, *polymorphism, a.loops, *target, r.messages,
       {ci.getFrontendOpts().stubUnimplemented,
-          ci.getFrontendOpts().traceFlags});
+          ci.getFrontendOpts().mmcUniqueness, ci.getFrontendOpts().traceFlags});
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   if (r.messages.AnyFatalError()) {
     return false;

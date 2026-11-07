@@ -8,7 +8,7 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module bool, exception, int, list.
+:- import_module array, bool, exception, int, list.
 
 main(!IO).
 
@@ -39,6 +39,11 @@ w(X) = pow(X, 3).
 :- func negate(bool) = bool.
 negate(B) = bool.not(B).
 % CHECK: not-yet.m:[[@LINE-1]]:13: error: not yet implemented: code generation for calls of bool.not/1
+
+% Of array, only generate, its folds and the foldl family are compiled.
+:- func total(array(int)) = int.
+total(A) = array.foldr((func(X, S) = X + S), A, 0).
+% CHECK: not-yet.m:[[@LINE-1]]:12: error: not yet implemented: code generation for calls of array.foldr/3
 
 :- pred thrown(int::out) is det.
 thrown(X) :-
