@@ -43,10 +43,12 @@ infinities and NaNs, written as `io.write_float` writes them. `string/1` is
 library, implements the mailboxes of one process, `new_mailbox`,
 `close_mailbox`, `send`, `receive` on one mailbox and `any`, and a
 registry of names, `register`, `unregister` and `lookup`, as Erlang's,
-with `foreign_proc`s on `runtime/mailbox.cpp` (design document, Language
-extensions, "Processes and mailboxes"). A handle names its node and place
-and carries a secret; until connections exist, `this_node` is the only
-node.
+and connections to other nodes over TCP, `listen` and `connect`, with
+`foreign_proc`s on `runtime/mailbox.cpp` and `runtime/node.cpp` (design
+document, Language extensions, "Processes and mailboxes";
+`docs/INPROGRESS.md`, "Remote handles and TCP"). A handle names its node
+and place and carries a secret, and a send to another node's mailbox
+encodes the message and writes it on the connection.
 `char.m` implements all of its declarations, in Mercury over
 `foreign_proc`s for the conversions between characters and ints. Where the
 manual leaves it open, it is mmc's, found by running its programs: the

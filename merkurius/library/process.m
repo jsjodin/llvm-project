@@ -21,9 +21,17 @@
 % a receive that waits with infinity for a message nobody can send waits
 % forever.
 %
-% Temporary (Remote handles and TCP, step 3, docs/INPROGRESS.md): a send
-% to a mailbox of another node is dropped, and lookup finds only this
-% node's names, until connections route them.
+% Nodes connect over TCP (runtime/node.cpp), after Erlang's distribution: a
+% node listens on an address, another connects to it, and then each can
+% look up the other's registered names and send to the other's mailboxes.
+% A message to another node is encoded by its type and decoded by the
+% mailbox's (design document, Wire format). A send to a node this one is not
+% connected to, or whose connection is lost, is dropped, as one to a closed
+% mailbox is.
+%
+% Temporary (Remote handles and TCP, step 4, docs/INPROGRESS.md): nodes do
+% not yet prove that they know a shared cookie, so any program that can
+% reach a listening node can connect to it.
 
 :- module process.
 :- interface.
@@ -65,6 +73,13 @@
     % The node a mailbox is on.
 :- func node_of(mailbox(M)) = node.
 
+    % Listens for other nodes on "host:port", where port 0 picks a free
+    % port, which is returned. An empty host listens on every address.
+:- pred listen(string::in, maybe_error(int)::out, io::di, io::uo) is det.
+
+    % Connects to the node listening on "host:port".
+:- pred connect(string::in, maybe_error(node)::out, io::di, io::uo) is det.
+
     % Registers a mailbox of this node under a name, which lookup finds, as
     % Erlang's register/2 does. It is an error if the name is taken, if the
     % mailbox has a name already, or if it is closed or another node's.
@@ -77,8 +92,9 @@
 
     % The mailbox registered under a name on a node, if its messages are of
     % type M; otherwise an error saying that no mailbox has the name, or
-    % that its messages are of another type. The timeout bounds the wait
-    % for another node's answer.
+    % that its messages are of another type. For another node, it is also
+    % an error if this node is not connected to it, if the connection is
+    % lost, or if the answer does not come within the timeout.
 :- pred lookup(node::in, string::in, timeout::in,
     maybe_error(mailbox(M))::out, io::di, io::uo) is det.
 
@@ -110,8 +126,8 @@
 
 :- pragma foreign_decl("C", local, "
 extern void merk_node(MR_Integer *high, MR_Integer *low);
-extern void merk_mailbox_new(MR_Integer *place_slot, MR_Integer *generation,
-    MR_Integer *secret);
+extern void merk_mailbox_new(MR_Word type_info, MR_Integer *place_slot,
+    MR_Integer *generation, MR_Integer *secret);
 extern void merk_mailbox_close(MR_Integer node_high, MR_Integer node_low,
     MR_Integer place_slot, MR_Integer generation, MR_Integer secret);
 extern void merk_mailbox_send(MR_Integer node_high, MR_Integer node_low,
@@ -129,15 +145,23 @@ extern void merk_mailbox_remove(MR_Integer node_high, MR_Integer node_low,
     MR_Integer position);
 extern MR_Integer merk_mailbox_register(MR_Integer node_high,
     MR_Integer node_low, MR_Integer place_slot, MR_Integer generation,
-    MR_Integer secret, MR_String name, MR_Word type_info);
+    MR_Integer secret, MR_String name);
 extern void merk_mailbox_unregister(MR_String name);
 extern MR_Integer merk_mailbox_lookup(MR_String name, MR_Word type_info,
     MR_Integer *place_slot, MR_Integer *generation, MR_Integer *secret);
+extern MR_Integer merk_node_listen(MR_String address, MR_Integer *port,
+    const char **error);
+extern MR_Integer merk_node_connect(MR_String address, MR_Integer *high,
+    MR_Integer *low, const char **error);
+extern MR_Integer merk_node_lookup(MR_Integer high, MR_Integer low,
+    MR_String name, MR_Word type_info, MR_Integer milliseconds,
+    MR_Integer *place_slot, MR_Integer *generation, MR_Integer *secret);
 ").
 
-new_mailbox(mailbox(High, Low, PlaceSlot, Generation, Secret), !IO) :-
+new_mailbox(Mailbox, !IO) :-
     this_node(node(High, Low), !IO),
-    new_slot(PlaceSlot, Generation, Secret, !IO).
+    new_slot(witness : witness(M), PlaceSlot, Generation, Secret, !IO),
+    Mailbox = mailbox(High, Low, PlaceSlot, Generation, Secret) : mailbox(M).
 
 close_mailbox(mailbox(High, Low, PlaceSlot, Generation, Secret), !IO) :-
     close_slot(High, Low, PlaceSlot, Generation, Secret, !IO).
@@ -171,8 +195,7 @@ node_of(Mailbox) = node(Mailbox ^ node_high, Mailbox ^ node_low).
 
 register(Name, mailbox(High, Low, PlaceSlot, Generation, Secret), Result,
         !IO) :-
-    register_slot(High, Low, PlaceSlot, Generation, Secret, Name,
-        witness : witness(M), Status, !IO),
+    register_slot(High, Low, PlaceSlot, Generation, Secret, Name, Status, !IO),
     ( if Status = 0 then
         Result = ok
     else if Status = 1 then
@@ -186,23 +209,53 @@ register(Name, mailbox(High, Low, PlaceSlot, Generation, Secret), Result,
 unregister(Name, !IO) :-
     unregister_name(Name, !IO).
 
-lookup(Node, Name, _Timeout, Result, !IO) :-
+lookup(Node, Name, Timeout, Result, !IO) :-
     this_node(Self, !IO),
+    Node = node(High, Low),
     ( if Node = Self then
-        Node = node(High, Low),
         lookup_name(Name, witness : witness(M), Status, PlaceSlot, Generation,
-            Secret, !IO),
-        ( if Status = 0 then
-            Result = ok(mailbox(High, Low, PlaceSlot, Generation, Secret)
-                : mailbox(M))
-        else if Status = 1 then
-            Result = error("no mailbox is registered as " ++ quoted(Name))
-        else
-            Result = error("the mailbox registered as " ++ quoted(Name) ++
-                " has messages of another type")
-        )
+            Secret, !IO)
     else
+        (
+            Timeout = infinity,
+            Milliseconds = -1
+        ;
+            Timeout = after(Milliseconds0),
+            Milliseconds = max(Milliseconds0, 0)
+        ),
+        lookup_remote(High, Low, Name, witness : witness(M), Milliseconds,
+            Status, PlaceSlot, Generation, Secret, !IO)
+    ),
+    ( if Status = 0 then
+        Result = ok(mailbox(High, Low, PlaceSlot, Generation, Secret)
+            : mailbox(M))
+    else if Status = 1 then
+        Result = error("no mailbox is registered as " ++ quoted(Name))
+    else if Status = 2 then
+        Result = error("the mailbox registered as " ++ quoted(Name) ++
+            " has messages of another type")
+    else if Status = 3 then
         Result = error("not connected to the node")
+    else if Status = 4 then
+        Result = error("the connection to the node was lost")
+    else
+        Result = error("the node did not answer in time")
+    ).
+
+listen(Address, Result, !IO) :-
+    listen_on(Address, Status, Port, Error, !IO),
+    ( if Status = 0 then
+        Result = ok(Port)
+    else
+        Result = error(Error)
+    ).
+
+connect(Address, Result, !IO) :-
+    connect_to(Address, Status, High, Low, Error, !IO),
+    ( if Status = 0 then
+        Result = ok(node(High, Low))
+    else
+        Result = error(Error)
     ).
 
 :- func quoted(string) = string.
@@ -242,12 +295,16 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
     merk_node(&High, &Low);
 ").
 
-:- pred new_slot(int::out, int::out, int::out, io::di, io::uo) is det.
+    % A mailbox for messages of type M, which decodes them when they come
+    % from another node.
+:- pred new_slot(witness(M)::in, int::out, int::out, int::out,
+    io::di, io::uo) is det.
 :- pragma foreign_proc("C",
-    new_slot(PlaceSlot::out, Generation::out, Secret::out, _IO0::di, _IO::uo),
+    new_slot(_Witness::in, PlaceSlot::out, Generation::out, Secret::out,
+        _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
-    merk_mailbox_new(&PlaceSlot, &Generation, &Secret);
+    merk_mailbox_new(TypeInfo_for_M, &PlaceSlot, &Generation, &Secret);
 ").
 
 :- pred close_slot(int::in, int::in, int::in, int::in, int::in,
@@ -320,14 +377,14 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
     % 0 if registered, 1 if the name is taken, 2 if the mailbox has a name,
     % 3 if it is closed or another node's.
 :- pred register_slot(int::in, int::in, int::in, int::in, int::in,
-    string::in, witness(M)::in, int::out, io::di, io::uo) is det.
+    string::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     register_slot(High::in, Low::in, PlaceSlot::in, Generation::in,
-        Secret::in, Name::in, _Witness::in, Status::out, _IO0::di, _IO::uo),
+        Secret::in, Name::in, Status::out, _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
     Status = merk_mailbox_register(High, Low, PlaceSlot, Generation, Secret,
-        Name, TypeInfo_for_M);
+        Name);
 ").
 
 :- pred unregister_name(string::in, io::di, io::uo) is det.
@@ -352,4 +409,49 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
     Secret = 0;
     Status = merk_mailbox_lookup(Name, TypeInfo_for_M, &PlaceSlot,
         &Generation, &Secret);
+").
+
+    % As lookup_name, for another node, and 3 if this node is not connected
+    % to it, 4 if the connection is lost, 5 if the answer does not come
+    % within the milliseconds, if they are not negative.
+:- pred lookup_remote(int::in, int::in, string::in, witness(M)::in, int::in,
+    int::out, int::out, int::out, int::out, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    lookup_remote(High::in, Low::in, Name::in, _Witness::in, Milliseconds::in,
+        Status::out, PlaceSlot::out, Generation::out, Secret::out,
+        _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    PlaceSlot = 0;
+    Generation = 0;
+    Secret = 0;
+    Status = merk_node_lookup(High, Low, Name, TypeInfo_for_M, Milliseconds,
+        &PlaceSlot, &Generation, &Secret);
+").
+
+:- pred listen_on(string::in, int::out, int::out, string::out,
+    io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    listen_on(Address::in, Status::out, Port::out, Error::out,
+        _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    const char *error = \"\";
+    Port = 0;
+    Status = merk_node_listen(Address, &Port, &error);
+    Error = (MR_String) error;
+").
+
+:- pred connect_to(string::in, int::out, int::out, int::out, string::out,
+    io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    connect_to(Address::in, Status::out, High::out, Low::out, Error::out,
+        _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    const char *error = \"\";
+    High = 0;
+    Low = 0;
+    Status = merk_node_connect(Address, &High, &Low, &error);
+    Error = (MR_String) error;
 ").

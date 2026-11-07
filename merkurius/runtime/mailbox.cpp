@@ -19,9 +19,9 @@
 // message by its type_info into a fragment of its own, outside the heap, and
 // queues it; the receiver reads it there, so the fragment joins its heap.
 //
-// Temporary (Remote handles and TCP, step 3, docs/INPROGRESS.md): a send to
-// a handle of another node or place is dropped, and a lookup finds only this
-// node's names, until connections route them.
+// A send to a handle of another node encodes the message and routes it
+// (node.cpp); a message from another node is decoded by the mailbox's own
+// type, which each mailbox keeps from when it was made.
 //
 // Temporary (chunk 2, docs/INPROGRESS.md): one lock and one condition
 // variable for every mailbox, and fragments never freed, while a program is
@@ -31,7 +31,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "encode.h"
 #include "fragment.h"
+#include "node.h"
 #include "walk.h"
 #include <cstdint>
 #include <cstdio>
@@ -219,29 +221,17 @@ struct Mailbox {
   std::int64_t generation;
   Word secret;
   bool open;
-  // The name it is registered under, or null, and then its message type.
+  // Its message type, kept, which decodes messages from other nodes and
+  // which a lookup checks.
+  Word messageType;
+  // The name it is registered under, or null.
   char *name;
-  Word typeInfo;
   Message *head;
   Message **tail;
   std::int64_t count;
   // The next closed slot, to reuse, or -1.
   std::int64_t nextFree;
 };
-
-// What a handle names: the node, the place, 0 for the host, in the top 16
-// bits of the word whose other 48 are the slot, the generation and the
-// secret.
-struct Handle {
-  Word nodeHigh;
-  Word nodeLow;
-  Word placeAndSlot;
-  std::int64_t generation;
-  Word secret;
-};
-
-constexpr unsigned kPlaceShift{48};
-constexpr Word kSlotMask{(Word{1} << kPlaceShift) - 1};
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_once_t nodeOnce = PTHREAD_ONCE_INIT;
@@ -294,14 +284,19 @@ Mailbox *Find(const Handle &handle) {
       : nullptr;
 }
 
-// Its name and message type go, as when it is closed.
+// Its name goes, as when it is closed.
 void Unregister(Mailbox *mailbox) {
-  if (mailbox->name) {
-    std::free(mailbox->name);
-    FreeTypeInfo(mailbox->typeInfo);
-    mailbox->name = nullptr;
-    mailbox->typeInfo = 0;
-  }
+  std::free(mailbox->name);
+  mailbox->name = nullptr;
+}
+
+// Queues a message whose cells are in a fragment of their own. Called with
+// the lock held.
+void Queue(Mailbox *mailbox, Message *message) {
+  *mailbox->tail = message;
+  mailbox->tail = &message->next;
+  ++mailbox->count;
+  pthread_cond_broadcast(&arrived);
 }
 
 Message *At(Mailbox *mailbox, std::int64_t position) {
@@ -314,17 +309,78 @@ Message *At(Mailbox *mailbox, std::int64_t position) {
 
 } // namespace
 
-// This node's id, chosen at random the first time it is asked for.
-extern "C" void merk_node(std::int64_t *high, std::int64_t *low) {
+namespace merkurius::runtime {
+
+void ThisNode(Word &high, Word &low) {
   pthread_once(&nodeOnce, ChooseNode);
-  *high = static_cast<std::int64_t>(nodeHigh);
-  *low = static_cast<std::int64_t>(nodeLow);
+  high = nodeHigh;
+  low = nodeLow;
 }
 
-// A new mailbox of this node's host: its slot, with place 0, its generation
-// and its secret; merk_node gives the rest of its handle.
-extern "C" void merk_mailbox_new(
-    std::int64_t *placeAndSlot, std::int64_t *generation, std::int64_t *secret) {
+bool IsThisNode(Word high, Word low) {
+  pthread_once(&nodeOnce, ChooseNode);
+  return high == nodeHigh && low == nodeLow;
+}
+
+Delivery DeliverEncoded(
+    const Handle &handle, const std::uint8_t *bytes, std::size_t size) {
+  pthread_once(&once, InitializeCondition);
+  // Decoded with the lock held, so that the mailbox, and its type, stay
+  // while it is.
+  pthread_mutex_lock(&lock);
+  Delivery delivery{Delivery::Dropped};
+  if (Mailbox *mailbox{Find(handle)}) {
+    Fragment fragment;
+    auto *message{static_cast<Message *>(fragment.Allocate(sizeof(Message)))};
+    message->next = nullptr;
+    if (Decode(bytes, size, mailbox->messageType, fragment, message->value)) {
+      delivery = Delivery::Undecodable;
+    } else {
+      Queue(mailbox, message);
+      delivery = Delivery::Delivered;
+    }
+  }
+  pthread_mutex_unlock(&lock);
+  return delivery;
+}
+
+std::int64_t LookupForPeer(const char *name,
+    const std::uint8_t fingerprint[kFingerprintBytes], Handle &found) {
+  pthread_mutex_lock(&lock);
+  std::int64_t result{1};
+  for (std::int64_t i{0}; i < slotCount; ++i) {
+    Mailbox &mailbox{slots[i]};
+    if (mailbox.open && mailbox.name && std::strcmp(mailbox.name, name) == 0) {
+      std::uint8_t own[kFingerprintBytes];
+      Fingerprint(mailbox.messageType, own);
+      result = std::memcmp(own, fingerprint, kFingerprintBytes) == 0 ? 0 : 2;
+      if (result == 0) {
+        found = {nodeHigh, nodeLow, static_cast<Word>(i), mailbox.generation,
+            mailbox.secret};
+      }
+      break;
+    }
+  }
+  pthread_mutex_unlock(&lock);
+  return result;
+}
+
+} // namespace merkurius::runtime
+
+// This node's id, chosen at random the first time it is asked for.
+extern "C" void merk_node(std::int64_t *high, std::int64_t *low) {
+  Word h, l;
+  ThisNode(h, l);
+  *high = static_cast<std::int64_t>(h);
+  *low = static_cast<std::int64_t>(l);
+}
+
+// A new mailbox of this node's host for messages of the type: its slot, with
+// place 0, its generation and its secret; merk_node gives the rest of its
+// handle.
+extern "C" void merk_mailbox_new(Word typeInfo, std::int64_t *placeAndSlot,
+    std::int64_t *generation, std::int64_t *secret) {
+  pthread_once(&nodeOnce, ChooseNode);
   pthread_once(&once, InitializeCondition);
   pthread_mutex_lock(&lock);
   std::int64_t index{firstFree};
@@ -351,8 +407,8 @@ extern "C" void merk_mailbox_new(
   Mailbox &mailbox{slots[index]};
   mailbox.open = true;
   mailbox.secret = Random();
+  mailbox.messageType = KeepTypeInfo(typeInfo);
   mailbox.name = nullptr;
-  mailbox.typeInfo = 0;
   mailbox.head = nullptr;
   mailbox.tail = &mailbox.head;
   mailbox.count = 0;
@@ -380,6 +436,8 @@ extern "C" void merk_mailbox_close(MERK_HANDLE_PARAMETERS) {
   pthread_mutex_lock(&lock);
   if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
     Unregister(mailbox);
+    FreeTypeInfo(mailbox->messageType);
+    mailbox->messageType = 0;
     mailbox->open = false;
     ++mailbox->generation;
     mailbox->head = nullptr;
@@ -393,20 +451,28 @@ extern "C" void merk_mailbox_close(MERK_HANDLE_PARAMETERS) {
 }
 
 // The copy is made before the lock is taken, since it reads only the
-// sender's cells; a message to a closed mailbox is then dropped.
+// sender's cells; a message to a closed mailbox is then dropped. A message
+// to another node's mailbox is encoded, and routed to its connection.
 extern "C" void merk_mailbox_send(
     MERK_HANDLE_PARAMETERS, Word typeInfo, Word value) {
   pthread_once(&once, InitializeCondition);
+  Handle handle{MERK_HANDLE};
+  if (!IsThisNode(handle.nodeHigh, handle.nodeLow)) {
+    Encoded encoded;
+    if (const char *error{Encode(value, typeInfo, encoded)}) {
+      Fail(error, "");
+    }
+    Route(handle, encoded.bytes, encoded.size);
+    std::free(encoded.bytes);
+    return;
+  }
   Fragment fragment;
   auto *message{static_cast<Message *>(fragment.Allocate(sizeof(Message)))};
   message->next = nullptr;
   message->value = CopyValue(value, typeInfo, nullptr, fragment);
   pthread_mutex_lock(&lock);
-  if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
-    *mailbox->tail = message;
-    mailbox->tail = &message->next;
-    ++mailbox->count;
-    pthread_cond_broadcast(&arrived);
+  if (Mailbox *mailbox{Find(handle)}) {
+    Queue(mailbox, message);
   }
   pthread_mutex_unlock(&lock);
 }
@@ -485,7 +551,7 @@ extern "C" void merk_mailbox_remove(
 // already: 0 if it is registered, 1 if the name is taken, 2 if the mailbox
 // has a name, 3 if it is closed or another node's or place's.
 extern "C" std::int64_t merk_mailbox_register(
-    MERK_HANDLE_PARAMETERS, const char *name, Word typeInfo) {
+    MERK_HANDLE_PARAMETERS, const char *name) {
   pthread_once(&once, InitializeCondition);
   pthread_mutex_lock(&lock);
   std::int64_t result{0};
@@ -507,7 +573,6 @@ extern "C" std::int64_t merk_mailbox_register(
     std::size_t bytes{std::strlen(name) + 1};
     mailbox->name = static_cast<char *>(Malloc(bytes));
     std::memcpy(mailbox->name, name, bytes);
-    mailbox->typeInfo = KeepTypeInfo(typeInfo);
   }
   pthread_mutex_unlock(&lock);
   return result;
@@ -539,7 +604,8 @@ extern "C" std::int64_t merk_mailbox_lookup(const char *name, Word typeInfo,
   for (std::int64_t i{0}; i < slotCount; ++i) {
     Mailbox &mailbox{slots[i]};
     if (mailbox.open && mailbox.name && std::strcmp(mailbox.name, name) == 0) {
-      result = merk_compare_type_infos(mailbox.typeInfo, typeInfo) == 0 ? 0 : 2;
+      result =
+          merk_compare_type_infos(mailbox.messageType, typeInfo) == 0 ? 0 : 2;
       if (result == 0) {
         *placeAndSlot = i;
         *generation = mailbox.generation;
