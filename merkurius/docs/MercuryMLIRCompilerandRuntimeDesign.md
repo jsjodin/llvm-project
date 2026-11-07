@@ -2475,10 +2475,11 @@ Both predicates pass mmc 22.01.9's type, mode and determinism checks against the
 ### GPU processes
 
 A process may run on a GPU and exchange messages with processes on the CPU
-over PCIe, starting with a restricted version (decided 2026-11-05). It comes
-after processes and messaging on the CPU and after OpenMP offload, since it
-builds on both. This is the direction; how it works in detail is still to be
-designed.
+over PCIe, starting with a restricted version (decided 2026-11-05). It
+builds on OpenMP offload, and comes before processes on the CPU are
+complete: its first form is a target region that sends and receives, whose
+partner is on another node (decided 2026-11-07; The route there, below).
+This is the direction; how it works in detail is still to be designed.
 
 **A GPU is a place of its host's node.** The design already has remote
 mailboxes and remote spawn ("Remote mailboxes, sendability and failure" and
@@ -2528,8 +2529,11 @@ a fragment of its own.
 
 1. `send` and `receive` on the device for flat message types only (no
    pointers), over libc's RPC, with the host bridge.
-2. Spawning a GPU process by kind name, as a persistent kernel, from the CPU
-   only.
+2. A target region that threads `io`, which sends and receives in its
+   sequential part (Send and receive in a target region, below). Decided
+   2026-11-07: this form comes first, and a GPU process spawned by its
+   kind's name, as a persistent kernel, from the CPU only, comes later, as
+   it needs `:- process` declarations through semantic analysis.
 3. Deep-copied messages, the copy specialized at the message type, with
    sendability checked at compile time.
 
@@ -2694,11 +2698,15 @@ with RDMA NICs.
 
 A target region whose goal threads `io` may send and receive. It is then, in
 effect, a short-lived process on the device, beside the persistent GPU
-processes above. This comes after the restricted first version, whose limits
-it shares until they are lifted. Handles are flat values, so they are mapped into the region
+processes above. It is the restricted first version's form, and has its
+limits until they are lifted. Handles are flat values, so they are mapped into the region
 `to` as any other value.
 
-- **The launch does not block.** A region that waits for a message from a CPU
+- **Before there is a scheduler,** the thread of the process that launched
+  the region waits for it, and the host's bridge thread forwards the
+  region's messages. The region's partner is then a process elsewhere: in
+  the first slice, the main process of another node (The route there).
+- **The launch does not block,** once there are processes. A region that waits for a message from a CPU
   process of its own node would deadlock if the thread that launched it
   waited for it and was the one that runs that process. A region that
   communicates is launched asynchronously, as with `nowait`, and the Mercury
@@ -2965,20 +2973,60 @@ array predicates and `io.command_line_arguments` (chunk 1, steps 6 (d) and
 concrete types have specialized `send` and `receive`, and only generic
 processes need them.
 
-1. **Exceptions, enough to end a process:** `throw`, and an exception nothing
+The order takes the part with the most risk first, the GPU's side, where
+performance is decided, and builds it together with as much distribution as
+it needs, so that the first thing to work is the use case itself, GPU to
+node 1 to node 2. Processes on the CPU come after.
+
+1. **The first slice: GPU to node 1 to node 2.**
+   - **On the device:** `send` and `receive` in the sequential part of a
+     target region (Send and receive in a target region), the device
+     runtime, and flat messages.
+   - **On node 1:** the region's launching process, its main, waits for it,
+     while the host's bridge thread forwards the region's messages to node 2
+     and writes node 2's replies into the region's mailbox in device memory.
+   - **On node 2:** main is the region's partner, with `send` and `receive`
+     on a mailbox of its own. With one process on each node, a `receive`
+     that blocks waits on a condition variable, so no scheduler is needed.
+   - **Between them:** TCP, with handles carrying the node and the place.
+     The handshake and the handle's format are designed properly now, since
+     they are hard to change once programs depend on them (Handles, routing
+     and places). How node 1 gets node 2's mailbox is the smallest part of the
+     connection API that is still to be designed (Remote spawn, "Nodes"):
+     node 1 connects to an address given on its command line, and asks for a
+     mailbox that node 2's main registered under a name.
+   - **First benchmark:** ping-pong between the GPU and node 2, over loopback
+     on one machine, then between two machines.
+2. **Exceptions, enough to end a process:** `throw`, and an exception nothing
    catches ends the process with it as the exit reason. `catch` comes later;
    ending a process needs no unwinding.
-2. **Processes on one host** (chunk 2, leaking): `spawn`, mailboxes, `send`
+3. **Processes on one host** (chunk 2, leaking): `spawn`, mailboxes, `send`
    and `receive` with the copy into a fragment, the scheduler, stacks of a
-   fixed size, and links and monitors, which robustness needs.
-3. **GPU processes on one host:** the restricted first version above, a
-   process as a kernel of one team, with the device runtime, and flat
-   messages. First benchmark: ping-pong between the CPU and the GPU. Tested
-   on the CPU as a device too (Testing on the CPU).
-4. **Distribution** (M6): nodes, remote handles, a transport between hosts,
-   and node-down; relays forward bytes. Several nodes on one machine test it
-   before two machines do.
-5. **The acceptance benchmarks** above.
+   fixed size, and links and monitors, which robustness needs. A region's
+   launch becomes asynchronous, its process suspended until it completes,
+   and ping-pong between main and a GPU of its own node works.
+4. **The other benchmarks:** the halo exchange, and recovery, with
+   node-down and a place's failure delivered to monitors.
+5. **As they are needed:** GPU processes spawned by kind name, as persistent
+   kernels; higher-order specialization, which gives the device selectors
+   over several mailboxes and the data-parallel array module.
+
+**Rejected orders:**
+
+- **Bottom-up,** processes complete with the scheduler first, then the GPU,
+  then distribution: nothing temporary, but the part with the most risk
+  comes last, and the scheduler, a large piece, is not on the use case's
+  critical path.
+- **A thin slice with a process for each OS thread,** then each layer done
+  properly: the earliest end-to-end test, but the stand-in for the scheduler
+  is thrown away, and threads share a heap where processes need their own.
+- **Distribution first,** between two mains: the least novel part first, and
+  for flat arrays the wire format proves little.
+- **GPU processes spawned by kind name first,** which would let main and a
+  GPU of its node talk without a second process, but needs `:- process`
+  declarations through semantic analysis first.
+- **A minimal `spawn` first,** so that main and a GPU of its node talk with a
+  target region: a stand-in for processes before the scheduler.
 
 **The collector stays deferred** (chunk 3). A long ping-pong that receives a
 new array with every message leaks, though; if that stops the benchmarks,
