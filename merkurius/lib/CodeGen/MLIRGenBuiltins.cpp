@@ -202,6 +202,27 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
         {merk::ArrayResizeOp::create(
             builder_, loc, array.getType(), array, n, mlir::Value{})});
   }
+  return CompiledArrayCall(goal, symbol);
+}
+
+// Temporary (chunk 1 step 6, docs/INPROGRESS.md): array.m's procedures
+// that the library compiles, and array.m's own calls when it is the module,
+// are called; the others are not yet implemented. The library has the
+// sound stub's procedures, which a module checked with -fmmc-uniqueness
+// numbers differently, so it cannot call them.
+bool MerkGenerator::CompiledArrayCall(
+    const Body &goal, const semantics::Symbol &symbol) {
+  if (moduleName_ == "array") {
+    return false;
+  }
+  llvm::StringRef name{symbol.name};
+  bool compiled{llvm::is_contained({"generate", "generate_foldl",
+                                       "generate_foldl2", "foldl", "foldl2",
+                                       "foldl3", "foldl4", "foldl5"},
+      name)};
+  if (compiled && !mmcUniqueness_) {
+    return false;
+  }
   return LibraryCallNotYet(goal, symbol);
 }
 

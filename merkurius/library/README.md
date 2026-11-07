@@ -48,6 +48,13 @@ errors' messages; `from_int`, which keeps an int's low 32 bits as mmc's
 does (design document, "Where mmc and the manual disagree"); the Unicode
 13 classes; and `hash`, which is Thomas Wang's 64-bit integer hash of the
 code point.
+`array.m` implements `generate`, `generate_foldl`, `generate_foldl2` and
+the foldl family, `foldl` to `foldl5`, in Mercury, with mmc's messages.
+Code generation builds in the predicates that make, read and update an
+array, and reports the others as not yet implemented where they are
+called. The library compiles the sound stub (below), not `array.m`, since
+calls name a procedure by its mode number, which the stub's added modes
+change; so a program checked with `-fmmc-uniqueness` cannot call them.
 `float.m` implements its
 functions but `hash`, and `math.m` all of its
 functions but `solve_quadratic`, with C's math library. The arithmetic
@@ -96,5 +103,6 @@ take it `in`. `make-sound-array.py` makes a sound stub from `array.m`, in
 (`uniq_array(I) == unique`), and with each mode that takes arrays `in`
 preceded by copies that take them `array_ui`, so that reading a unique
 array keeps it unique. merkc searches `sound` before the library's own
-directory unless `-fmmc-uniqueness` is given. Edit `array.m`, never the
-generated stub.
+directory unless `-fmmc-uniqueness` is given. The stub keeps `array.m`'s
+implementation, whose own predicates get the copies too. Edit `array.m`,
+never the generated stub.

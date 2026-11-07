@@ -44,6 +44,9 @@ inline constexpr llvm::StringLiteral kForeignCodeAttrName{"merk.foreign_code"};
 struct GenerationOptions {
   // -fstub-unimplemented: see GenerateMerk.
   bool stubUnimplemented{false};
+  // -fmmc-uniqueness: the module was checked against array.m rather than
+  // the sound array stub, whose procedures the library has.
+  bool mmcUniqueness{false};
   // --trace-flag=: the flags that make a trace goal's flag(Name)
   // compile_time condition hold.
   std::vector<std::string> traceFlags;

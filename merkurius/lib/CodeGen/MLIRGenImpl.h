@@ -143,7 +143,7 @@ public:
         modes_{modes}, determinism_{determinism}, loops_{loops},
         target_{target}, messages_{messages},
         stubUnimplemented_{options.stubUnimplemented},
-        traceFlags_{options.traceFlags} {
+        mmcUniqueness_{options.mmcUniqueness}, traceFlags_{options.traceFlags} {
     for (const semantics::ProcedurePolymorphism &procedure :
         polymorphism.procedures()) {
       polymorphism_[procedure.body] = &procedure;
@@ -347,6 +347,7 @@ private:
   // A call of a predicate or function of the library's array module, which
   // code generation has built in as merk's array operations; false if it
   // is to be called instead.
+  bool CompiledArrayCall(const Body &, const semantics::Symbol &);
   bool ArrayBuiltin(const Body &, const Procedure &,
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   // A call of a field's function or its update function, which no module
@@ -661,6 +662,7 @@ private:
   // for the library's procedures in modes code generation cannot make yet,
   // such as nondet ones; it goes when code generation makes them all.
   bool stubUnimplemented_{false};
+  bool mmcUniqueness_{false};
   // --trace-flag=.
   std::vector<std::string> traceFlags_;
   // Whether a procedure's body is being generated, and the first construct
