@@ -1,5 +1,6 @@
 % A stub of the standard library module io, for name resolution until the
-% library is written, with its output predicates implemented. The
+% library is written, with its output predicates, reading lines from the
+% standard input and the exit status implemented. The
 % declarations are those of the library reference manual (22.01), less
 % those that need modules not stubbed yet; see README.md.
 
@@ -145,8 +146,13 @@
 :- import_module uint32.
 :- import_module uint8.
 
-% The predicates implemented so far write to the standard output with C's
-% stdio, which the runtime flushes when the program exits.
+% The predicates implemented so far write to the standard output and read
+% from the standard input with C's stdio, which the runtime flushes when
+% the program exits.
+
+    % An error's message.
+:- type io.error
+    --->    io_error(string).
 
 :- pragma foreign_decl("C", local, "
 #include <stdio.h>
@@ -158,6 +164,55 @@ extern void merk_write_float(double);
 extern void merk_write(MR_Word, MR_Word, MR_Word);
 extern MR_Integer merk_argument_count(void);
 extern MR_String merk_argument(MR_Integer);
+extern MR_Integer merk_read_line(MR_String *);
+extern void merk_set_exit_status(MR_Integer);
+").
+
+make_io_error(Message) = io_error(Message).
+
+error_message(Error) = Message :-
+    error_message(Error, Message).
+
+error_message(io_error(Message), Message).
+
+:- pragma foreign_proc("C",
+    set_exit_status(Status::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    merk_set_exit_status(Status);
+").
+
+:- pragma foreign_proc("C",
+    flush_output(_IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    fflush(stdout);
+").
+
+    % A line's bytes, with its newline, which the last line may lack, as
+    % they are even when they are not UTF-8; a NUL is an error, which drops
+    % the line up to it, as in mmc.
+read_line_as_string(Result, !IO) :-
+    read_line_code(Code, Line, !IO),
+    ( if Code = 0 then
+        Result = ok(Line)
+    else if Code = 1 then
+        Result = eof
+    else if Code = 2 then
+        Result = error(io_error("null character in input"))
+    else
+        Result = error(io_error(Line))
+    ).
+
+    % merk_read_line's code: 0 for a line, 1 at the end of the input, 2 for
+    % a NUL and 3 for an error, whose message is the string.
+:- pred read_line_code(int::out, string::out, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    read_line_code(Code::out, Line::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Line = (MR_String) \"\";
+    Code = merk_read_line(&Line);
 ").
 
 progname(Default, Name, !IO) :-

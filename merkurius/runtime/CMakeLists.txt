@@ -9,6 +9,7 @@ add_library(merkrt STATIC
   heap.cpp
   mailbox.cpp
   main.cpp
+  read.cpp
   sha256.cpp
   string.cpp
   trace.cpp
