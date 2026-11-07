@@ -703,6 +703,16 @@ Signature TypeChecker::SavedSignature(parser::PredOrFunc kind,
       result_.arena_.SaveArray(constraints)};
 }
 
+// The type with each variable that `renamed` has replaced by the variable
+// it gives for it.
+static const Type *Renamed(TypeContext &types, const Type *type,
+    const llvm::DenseMap<unsigned, unsigned> &renamed) {
+  return types.Substitute(type, [&](unsigned var) {
+    auto it{renamed.find(var)};
+    return types.Variable(it == renamed.end() ? var : it->second);
+  });
+}
+
 std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
   InTokensOf in{*this, symbol};
   TypeVarNames names;
@@ -976,10 +986,29 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
           type = converted;
         }
       }
-      arguments.push_back(owner);
-      arguments.push_back(type);
       if (symbol.kind == SymbolKind::FieldUpdate) {
+        // A type parameter that occurs in the field's type and in no other
+        // field of its constructor may change: the update gives the result
+        // a type of its own for it, as mmc does, where the manual says
+        // nothing (the register, "Type-changing field updates").
+        llvm::DenseSet<unsigned> elsewhere;
+        for (auto [argument, converted] :
+            llvm::zip((*constructor)->arguments, fields)) {
+          if (!argument->field || argument->field->name != field) {
+            ForEachVariable(
+                *converted, [&](unsigned var) { elsewhere.insert(var); });
+          }
+        }
+        llvm::DenseMap<unsigned, unsigned> changed;
+        ForEachVariable(*type, [&](unsigned var) {
+          if (var < universal && !elsewhere.contains(var) &&
+              !changed.count(var)) {
+            changed[var] = names.next++;
+          }
+        });
         arguments.push_back(owner);
+        arguments.push_back(Renamed(types_, type, changed));
+        arguments.push_back(Renamed(types_, owner, changed));
         // An update constructs: it chooses the field's existential
         // variables, whose constraints it must satisfy, and keeps the
         // others, which another field must not share (mmc: "Field `a'
@@ -1022,6 +1051,9 @@ std::optional<Signature> TypeChecker::MakeSignature(const Symbol &symbol) {
         }
         existentialConstraints.clear();
         existentials = 0;
+      } else {
+        arguments.push_back(owner);
+        arguments.push_back(type);
       }
     }
     Signature sig{SavedSignature(parser::PredOrFunc::Function,
