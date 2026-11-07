@@ -183,6 +183,11 @@ const OperatorDefinition *TermReader::GetOperator(const Token &token) const {
         "do", std::nullopt, OperatorForm{Specifier::XFX, 400}};
     return &loop;
   }
+  if (options_.receiveGoal && name == "receive") {
+    static const OperatorDefinition receive{
+        "receive", OperatorForm{Specifier::FXY, 550}, std::nullopt};
+    return &receive;
+  }
   return FindOperator(name);
 }
 

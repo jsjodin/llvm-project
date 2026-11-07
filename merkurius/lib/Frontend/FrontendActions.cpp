@@ -50,6 +50,7 @@ namespace merkurius::frontend {
 static parser::ReaderOptions ReaderOptionsOf(CompilerInstance &ci) {
   parser::ReaderOptions options;
   options.doLoops = ci.getLangOpts().doLoops;
+  options.receiveGoal = ci.getLangOpts().receiveGoal;
   return options;
 }
 

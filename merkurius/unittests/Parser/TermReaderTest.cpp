@@ -26,8 +26,8 @@ struct ReadResult {
   std::vector<unsigned> variables;
 };
 
-ReadResult Read(
-    llvm::StringRef text, bool openMP = false, bool doLoops = false) {
+ReadResult Read(llvm::StringRef text, bool openMP = false,
+    bool doLoops = false, bool receiveGoal = false) {
   AllSources all;
   SourceFile *file{
       all.AddBuffer("test.m", llvm::MemoryBuffer::getMemBufferCopy(text))};
@@ -38,6 +38,7 @@ ReadResult Read(
   TermArena arena;
   ReaderOptions readerOptions;
   readerOptions.doLoops = doLoops;
+  readerOptions.receiveGoal = receiveGoal;
   TermReader reader{
       tokens, arena, messages, TermReader::defaultMaxDepth, readerOptions};
   ReadResult result;
@@ -313,6 +314,36 @@ TEST(TermReaderTest, DoLoops) {
   // Without the option, a loop is a syntax error, as in mmc.
   EXPECT_EQ(Error("p :- ( a do b ).\n"),
       "expected an operator or ')', but found 'do'");
+}
+
+// With -freceive-goal, receive is a binary prefix operator, fxy with
+// trace's priority (design document, "Processes and mailboxes"); without
+// it, it is an ordinary name.
+TEST(TermReaderTest, ReceiveGoal) {
+  ReadResult goal{Read(
+      "p :- receive [io(!IO)] ( select(B, X) -> q(X) ; timeout -> r ).\n",
+      /*openMP=*/false, /*doLoops=*/false, /*receiveGoal=*/true)};
+  EXPECT_TRUE(goal.messages.empty());
+  ASSERT_EQ(goal.items.size(), 1u);
+  EXPECT_EQ(goal.items[0],
+      "':-'(p, receive('[|]'(io('!'(IO)), []), "
+      "';'('->'(select(B, X), q(X)), '->'(timeout, r))))");
+  // Its priority is trace's, 550, so a conjunction after it is not its
+  // operand.
+  ReadResult conjunction{Read("p :- receive [] (a), b.\n", /*openMP=*/false,
+      /*doLoops=*/false, /*receiveGoal=*/true)};
+  EXPECT_TRUE(conjunction.messages.empty());
+  ASSERT_EQ(conjunction.items.size(), 1u);
+  EXPECT_EQ(conjunction.items[0], "':-'(p, ','(receive([], a), b))");
+  // receive applied as a call, and receive in parentheses, are names.
+  ReadResult names{Read("p :- receive(a, b), X = (receive).\n",
+      /*openMP=*/false, /*doLoops=*/false, /*receiveGoal=*/true)};
+  EXPECT_TRUE(names.messages.empty());
+  ASSERT_EQ(names.items.size(), 1u);
+  EXPECT_EQ(names.items[0], "':-'(p, ','(receive(a, b), '='(X, receive)))");
+  // Without the option, a receive goal is a syntax error, as in mmc.
+  EXPECT_EQ(Error("p :- receive [] (a).\n"),
+      "expected an operator or '.', but found '['");
 }
 
 TEST(TermReaderTest, Recovery) {

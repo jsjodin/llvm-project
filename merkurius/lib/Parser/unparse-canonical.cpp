@@ -802,6 +802,8 @@ bool CanonicalUnparser::IsBlockChild(const N &n, const Child &c) const {
         c.node == Pointer(n.otherwise);
   } else if constexpr (std::is_same_v<N, LoopGoal>) {
     return c.node == Pointer(n.body);
+  } else if constexpr (std::is_same_v<N, ReceiveArm>) {
+    return c.node == Pointer(n.goal);
   } else {
     return false;
   }
@@ -1001,6 +1003,46 @@ void CanonicalUnparser::Gap(const N &n, llvm::ArrayRef<Element> elements,
   std::uint32_t j{elements[e].token};
   const Token &token{tokens_[j]};
   llvm::StringRef spelling{token.spelling};
+  // receive [Params] (
+  //     Arm
+  // ;
+  //     Arm
+  // )
+  // as a disjunction is laid out, each arm's goal under its head:
+  // select(Mailbox, Pattern) ->
+  //     Goal
+  if constexpr (std::is_same_v<N, ReceiveGoal>) {
+    if (IsOpenKind(token.kind) && match_[j] == n.tokens.last) {
+      Emit(j);
+      doc_.BeginNest(4);
+      ++nests;
+      Request(Break::HardLine);
+      return;
+    }
+    if (j == n.tokens.last && nests > 0) {
+      doc_.EndNest();
+      --nests;
+      Request(Break::HardLine);
+      Emit(j);
+      return;
+    }
+    if (token.kind == TokenKind::Name && spelling == ";" && nests > 0) {
+      doc_.EndNest();
+      Request(Break::HardLine);
+      Emit(j);
+      doc_.BeginNest(4);
+      Request(Break::HardLine);
+      return;
+    }
+  } else if constexpr (std::is_same_v<N, ReceiveArm>) {
+    if (token.kind == TokenKind::Name && spelling == "->") {
+      Emit(j);
+      doc_.BeginNest(4);
+      ++nests;
+      Request(Break::HardLine);
+      return;
+    }
+  }
   switch (token.kind) {
   case TokenKind::Open:
   case TokenKind::OpenCt:
