@@ -1,6 +1,5 @@
 % The standard library module maybe, with the declarations of the library
-% reference manual (22.01). The multi and nondet modes of map_maybe are
-% stubs until code generation makes nondeterministic code (README.md).
+% reference manual (22.01), all implemented in Mercury.
 
 :- module maybe.
 :- interface.

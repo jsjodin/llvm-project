@@ -24,7 +24,8 @@
     ;       a1(int) ; a2(int) ; a3(int) ; a4(int) ; a5(int) ; a6(int)
     ;       a7(int) ; a8(int) ; a9(string, many).
 
-% MERK-DAG: merk.type_ctor "list.list/1" {{.*}} functors {{.*}}"list.list/1", 0
+% The list module's descriptor, with its functors, is libmerkstd's.
+% MERK-DAG: merk.type_ctor "list.list/1" module "list" name "list" kind "term" linkage "declaration" arity 1{{$}}
 % MERK-DAG: merk.call @io.write_3_0
 
 :- pred w(T::in, io::di, io::uo) is det.
