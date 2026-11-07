@@ -145,7 +145,7 @@ private:
   mlir::Type Convert(mlir::Type type) const {
     if (mlir::isa<merk::StringType, merk::ArrayType, merk::TypeInfoType,
             merk::TypeclassInfoType, merk::ClosureType, merk::ContType,
-            merk::EnvType>(type)) {
+            merk::EnvType, merk::RefType>(type)) {
       return mlir::LLVM::LLVMPointerType::get(type.getContext());
     }
     if (mlir::isa<merk::WordType>(type)) {
@@ -251,6 +251,7 @@ private:
   void LowerEnvNew(merk::EnvNewOp);
   void LowerEnvGet(merk::EnvGetOp);
   void LowerEnvSet(merk::EnvSetOp);
+  void LowerRefStore(merk::RefStoreOp);
   // A call of the code at `code`, with `first`, a pointer, and then `rest`.
   mlir::Value CallPointer(mlir::Operation *call, mlir::Value code,
       mlir::Value first, mlir::ValueRange rest, bool canFail, bool *tail);
@@ -611,7 +612,7 @@ llvm::LogicalResult Lowerer::LowerTerms() {
   llvm::SmallVector<std::pair<mlir::Operation *, mlir::Type>> ops;
   module_.walk([&](mlir::Operation *op) {
     if (mlir::isa<merk::ConstructOp, merk::DeconstructOp, merk::HasFunctorOp,
-            merk::SwitchOp>(op)) {
+            merk::SwitchOp, merk::FieldRefOp>(op)) {
       mlir::Type type{mlir::isa<merk::ConstructOp>(op)
               ? op->getResult(0).getType()
               : op->getOperand(0).getType()};
@@ -645,6 +646,21 @@ llvm::LogicalResult Lowerer::LowerTerms() {
       return op->emitOpError("has a functor its type does not have");
     }
     unsigned skip{functor->secondary ? 1u : 0u};
+    if (auto ref{mlir::dyn_cast<merk::FieldRefOp>(op)}) {
+      // The hole's address, inside the cell (design document, Lowering,
+      // "Deterministic and semidet code", "Last call modulo constructor").
+      // Temporary (chunk 3, docs/INPROGRESS.md): a pointer into a cell,
+      // which a variant's statepoints cannot relocate without the cell; it
+      // becomes the cell's pointer and the hole's offset.
+      mlir::Value cell{LoweredValue(op->getOperand(0), loc)};
+      if (functor->tag != 0) {
+        cell = mrt::UntagOp::create(rewriter_, loc, cell, functor->tag);
+      }
+      rewriter_.replaceOp(op,
+          OffsetBytes(cell,
+              8 * static_cast<std::int64_t>(ref.getIndex() + skip), loc));
+      continue;
+    }
     if (auto construct{mlir::dyn_cast<merk::ConstructOp>(op)}) {
       mlir::Value result;
       std::optional<StaticValue> known;
@@ -1877,6 +1893,27 @@ void Lowerer::LowerEnvSet(merk::EnvSetOp op) {
       OutputAddress(op->getOperand(0), type, op.getIndex(), loc));
 }
 
+static bool IsNarrowInteger(mlir::Type type) {
+  auto integer{mlir::dyn_cast<mlir::IntegerType>(type)};
+  return integer && integer.getWidth() < 64;
+}
+
+// Fills a hole, as merk.construct would have stored the value there. The
+// store is into a cell just made, which a collection may have moved since:
+// the hole's address is a pointer derived from the cell's.
+void Lowerer::LowerRefStore(merk::RefStoreOp op) {
+  mlir::Location loc{op.getLoc()};
+  rewriter_.setInsertionPoint(op);
+  mlir::Value value{LoweredValue(op->getOperand(0), loc)};
+  if (IsNarrowInteger(value.getType())) {
+    value = mlir::LLVM::ZExtOp::create(
+        rewriter_, loc, rewriter_.getI64Type(), value);
+  }
+  mlir::LLVM::StoreOp::create(
+      rewriter_, loc, value, LoweredValue(op->getOperand(1), loc), 8);
+  rewriter_.eraseOp(op);
+}
+
 mlir::Value Lowerer::CallPointer(mlir::Operation *call, mlir::Value code,
     mlir::Value first, mlir::ValueRange rest, bool canFail, bool *tail) {
   mlir::MLIRContext *context{call->getContext()};
@@ -2579,11 +2616,6 @@ mlir::Value Lowerer::OffsetBytes(
       llvm::ArrayRef<mlir::LLVM::GEPArg>{static_cast<std::int32_t>(bytes)});
 }
 
-static bool IsNarrowInteger(mlir::Type type) {
-  auto integer{mlir::dyn_cast<mlir::IntegerType>(type)};
-  return integer && integer.getWidth() < 64;
-}
-
 void Lowerer::LowerMrt() {
   auto i64{rewriter_.getI64Type()};
   llvm::SmallVector<mlir::Operation *> ops;
@@ -2690,7 +2722,19 @@ llvm::LogicalResult Lowerer::Lower() {
       return llvm::failure();
     }
   }
-  if (mlir::failed(Layouts()) || mlir::failed(LowerTerms())) {
+  if (mlir::failed(Layouts())) {
+    return llvm::failure();
+  }
+  LastCallModuloConstructor(module_, [this](mlir::Type type,
+                                         merk::FunctorAttr functor) {
+    const TermLayout *layout{LayoutOf(type)};
+    if (!layout || layout->kind != TermLayout::Kind::Cells) {
+      return false;
+    }
+    const TermLayout::Functor *found{layout->Find(functor)};
+    return found && found->arity > 0;
+  });
+  if (mlir::failed(LowerTerms())) {
     return llvm::failure();
   }
   for (auto proc : llvm::make_early_inc_range(module_.getOps<merk::ProcOp>())) {
@@ -2720,7 +2764,8 @@ llvm::LogicalResult Lowerer::Lower() {
             merk::CompareTypeInfoOp, merk::ForeignCallOp, merk::ArrayNewOp, merk::ArraySizeOp,
             merk::ArrayGetOp, merk::ArraySetOp, merk::ArrayFillOp,
             merk::ArrayCopyOp, merk::ArrayResizeOp, merk::ContRefOp,
-            merk::EnvNewOp, merk::EnvGetOp, merk::EnvSetOp>(op)) {
+            merk::EnvNewOp, merk::EnvGetOp, merk::EnvSetOp, merk::HoleOp,
+            merk::RefStoreOp>(op)) {
       ops.push_back(op);
     }
   });
@@ -2775,6 +2820,14 @@ llvm::LogicalResult Lowerer::Lower() {
       LowerEnvGet(envGet);
     } else if (auto envSet{mlir::dyn_cast<merk::EnvSetOp>(op)}) {
       LowerEnvSet(envSet);
+    } else if (auto hole{mlir::dyn_cast<merk::HoleOp>(op)}) {
+      // Null, so that the collector finds no pointer there until the hole
+      // is filled.
+      rewriter_.setInsertionPoint(hole);
+      rewriter_.replaceOpWithNewOp<mlir::LLVM::ZeroOp>(
+          hole, Convert(hole.getType()));
+    } else if (auto store{mlir::dyn_cast<merk::RefStoreOp>(op)}) {
+      LowerRefStore(store);
     } else if (!mlir::isa<merk::CallOp>(op)) {
       LowerArray(op);
     } else {

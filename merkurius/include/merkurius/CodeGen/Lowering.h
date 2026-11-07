@@ -14,7 +14,9 @@
 // then the target's assembly or object code.
 
 #include "merkurius/CodeGen/TargetInfo.h"
+#include "merkurius/Dialect/Merk/IR/MerkDialect.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CodeGen.h"
@@ -37,6 +39,17 @@ void PruneSolutions(mlir::ModuleOp);
 // that take continuations (design document, Lowering, "Nondeterministic
 // code"). LowerToLLVMDialect does this first.
 void OutlineNondeterminism(mlir::ModuleOp);
+
+// Whether a term of a type and functor is a cell on the heap, which can
+// have a hole.
+using InCell = llvm::function_ref<bool(mlir::Type, merk::FunctorAttr)>;
+
+// Makes a call whose result goes into a cell the procedure returns a tail
+// call, through a variant of the callee that fills a hole in the cell
+// (design document, Lowering, "Deterministic and semidet code", "Last call
+// modulo constructor"). Lowering does this once it knows the types'
+// layouts, at every optimization level.
+void LastCallModuloConstructor(mlir::ModuleOp, InCell);
 
 // Lowers a merk module to the LLVM dialect, in place. Procedures use LLVM's
 // tailcc, so that calls in tail position can be musttail (design document,
