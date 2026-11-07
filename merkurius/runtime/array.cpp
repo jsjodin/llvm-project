@@ -64,6 +64,26 @@ extern "C" Word *merk_array_resize(
   return resized;
 }
 
+// A new array of a list's elements, in order. A cell of [|] is the word
+// `list` when its primary tag is `tag`, and holds the head and then the
+// tail; the list ends at [], whose tag is another.
+extern "C" Word *merk_array_from_list(Word list, Word tag) {
+  constexpr Word kTagMask{7};
+  std::int64_t size{0};
+  for (Word cell = list; (cell & kTagMask) == tag;
+      cell = reinterpret_cast<const Word *>(cell - tag)[1]) {
+    ++size;
+  }
+  Word *array{Allocate(size)};
+  Word cell{list};
+  for (std::int64_t i = 0; i < size; ++i) {
+    const Word *fields{reinterpret_cast<const Word *>(cell - tag)};
+    array[1 + i] = fields[0];
+    cell = fields[1];
+  }
+  return array;
+}
+
 // Sets the elements from `lo` to `hi`, inclusive, to `element`, in place.
 extern "C" Word *merk_array_fill(
     Word *array, std::int64_t lo, std::int64_t hi, Word element) {

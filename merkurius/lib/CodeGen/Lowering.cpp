@@ -370,6 +370,8 @@ private:
   TargetInfo::ResultRegisters registers_;
   llvm::StringMap<TermLayout> layouts_;
   llvm::DenseMap<mlir::Operation *, const TermLayout *> termSwitches_;
+  // The tag of [|] in the list of each merk.array_from_list, by LowerTerms.
+  llvm::DenseMap<mlir::Operation *, unsigned> listTags_;
   // A word that is no secondary tag, which a test of one reads instead of a
   // constant's cell, which it has none.
   mlir::LLVM::GlobalOp noSecondary_;
@@ -633,7 +635,7 @@ llvm::LogicalResult Lowerer::LowerTerms() {
   llvm::SmallVector<std::pair<mlir::Operation *, mlir::Type>> ops;
   module_.walk([&](mlir::Operation *op) {
     if (mlir::isa<merk::ConstructOp, merk::DeconstructOp, merk::HasFunctorOp,
-            merk::SwitchOp, merk::FieldRefOp>(op)) {
+            merk::SwitchOp, merk::FieldRefOp, merk::ArrayFromListOp>(op)) {
       mlir::Type type{mlir::isa<merk::ConstructOp>(op)
               ? op->getResult(0).getType()
               : op->getOperand(0).getType()};
@@ -659,6 +661,21 @@ llvm::LogicalResult Lowerer::LowerTerms() {
         }
       }
       termSwitches_[op] = layout;
+      continue;
+    }
+    if (mlir::isa<merk::ArrayFromListOp>(op)) {
+      // The runtime follows the list's cells by the tag of [|], each its
+      // head and its tail.
+      const TermLayout::Functor *cons{nullptr};
+      for (const TermLayout::Functor &f : layout->functors) {
+        if (f.name == "[|]" && f.arity == 2) {
+          cons = &f;
+        }
+      }
+      if (layout->kind != TermLayout::Kind::Cells || !cons || cons->secondary) {
+        return op->emitOpError("is on a type that is not a list");
+      }
+      listTags_[op] = cons->tag;
       continue;
     }
     const TermLayout::Functor *functor{
@@ -2528,6 +2545,12 @@ void Lowerer::LowerArray(mlir::Operation *op) {
         loc);
   } else if (mlir::isa<merk::ArrayCopyOp>(op)) {
     result = CallRuntime("merk_array_copy", ptr, {op->getOperand(0)}, loc);
+  } else if (mlir::isa<merk::ArrayFromListOp>(op)) {
+    result = CallRuntime("merk_array_from_list", ptr,
+        {ToWord(op->getOperand(0), loc),
+            mlir::LLVM::ConstantOp::create(
+                rewriter_, loc, i64, listTags_.lookup(op))},
+        loc);
   } else {
     assert(mlir::isa<merk::ArrayResizeOp>(op));
     result = CallRuntime("merk_array_resize", ptr,
@@ -2784,7 +2807,8 @@ llvm::LogicalResult Lowerer::Lower() {
             merk::StringCompareOp, merk::StringEqualOp,
             merk::CompareTypeInfoOp, merk::ForeignCallOp, merk::ArrayNewOp, merk::ArraySizeOp,
             merk::ArrayGetOp, merk::ArraySetOp, merk::ArrayFillOp,
-            merk::ArrayCopyOp, merk::ArrayResizeOp, merk::ContRefOp,
+            merk::ArrayCopyOp, merk::ArrayFromListOp, merk::ArrayResizeOp,
+            merk::ContRefOp,
             merk::EnvNewOp, merk::EnvGetOp, merk::EnvSetOp, merk::HoleOp,
             merk::RefStoreOp>(op)) {
       ops.push_back(op);
