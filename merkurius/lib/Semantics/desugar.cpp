@@ -230,6 +230,9 @@ private:
   // Makes the !:X of the atomic goal just desugared the current versions.
   void FinishAtomic();
   Shadowed Shadow(llvm::StringRef name, std::optional<VarId> version);
+  // A warning if a new state variable, of some [!X] or a trace goal's
+  // io(!X), hides one in scope.
+  void WarnShadowing(const parser::StateVar &);
   void Restore(llvm::ArrayRef<Shadowed>);
   // Desugars a branch from `start` into `out`, and returns the state at its
   // end.
@@ -468,6 +471,16 @@ ClauseDesugarer::Shadowed ClauseDesugarer::Shadow(
       it != state_.end() ? it->second : std::nullopt, readOnly_.erase(name)};
   state_[name] = version;
   return shadowed;
+}
+
+// mmc warns, though the reference manual says nothing about it. mmc:
+// "Warning: new state variable IO shadows old one."
+void ClauseDesugarer::WarnShadowing(const parser::StateVar &state) {
+  if (state_.count(state.name)) {
+    messages_.Say(Source(state.tokens),
+        "the new state variable !%s shadows the one outside"_warn_en_US,
+        state.name);
+  }
 }
 
 void ClauseDesugarer::Restore(llvm::ArrayRef<Shadowed> shadowed) {
@@ -1031,12 +1044,7 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
               if (param->var) {
                 const auto *state{
                     std::get<const parser::StateVar *>(*param->var)};
-                if (state_.count(state->name)) {
-                  // mmc: "Warning: new state variable IO shadows old one."
-                  messages_.Say(Source(state->tokens),
-                      "the new state variable !%s shadows the one outside"_warn_en_US,
-                      state->name);
-                }
+                WarnShadowing(*state);
                 first.push_back(NewVersion(state->name, state->tokens));
                 shadowed.push_back(Shadow(state->name, first.back()));
               }
@@ -1086,6 +1094,7 @@ void ClauseDesugarer::Quantify(const ParseGoal &origin, TokenRange range,
     }
     const auto *state{std::get_if<const parser::StateVar *>(&term)};
     if (some && (*state)->kind == parser::StateVarKind::Both) {
+      WarnShadowing(**state);
       shadowed.push_back(Shadow((*state)->name, std::nullopt));
     } else {
       Error((*state)->tokens,
