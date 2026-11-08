@@ -2608,12 +2608,24 @@ mlir::LLVM::GlobalOp Lowerer::HeapGlobal() {
 }
 
 // An allocation bumps the heap's pointer if the cell fits before its limit,
-// and otherwise calls the runtime (runtime/heap.h).
+// and otherwise calls the runtime (runtime/heap.h). On an OpenMP device,
+// which has no heap of ours, it calls the device's runtime, which takes the
+// cell from the OpenMP device runtime's malloc (runtime/device).
 void Lowerer::LowerAlloc(mrt::AllocOp alloc) {
   mlir::Location loc{alloc.getLoc()};
   auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
   auto i64{rewriter_.getI64Type()};
   std::int64_t bytes{8 * static_cast<std::int64_t>(alloc.getWords())};
+  if (device_) {
+    rewriter_.setInsertionPoint(alloc);
+    rewriter_.replaceOp(alloc,
+        mlir::LLVM::CallOp::create(rewriter_, loc,
+            RuntimeFunc("merk_device_alloc", ptr, {i64}),
+            mlir::ValueRange{
+                mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, bytes)})
+            .getResult());
+    return;
+  }
   mlir::Block *before{alloc->getBlock()};
   mlir::Block *after{rewriter_.splitBlock(before, alloc->getIterator())};
   mlir::Value cell{after->addArgument(ptr, loc)};
@@ -3014,11 +3026,8 @@ llvm::LogicalResult Lowerer::LowerOpenMP() {
     if (auto uses{mlir::SymbolTable::getSymbolUses(func, module_)};
         uses && !uses->empty()) {
       mlir::emitError(uses->begin()->getUser()->getLoc(),
-          func.getSymName() == "merk_alloc_slow"
-              ? std::string{"cannot allocate a term on an OpenMP device yet:"
-                            " the device has no heap"}
-              : "cannot call " + func.getSymName() +
-                  " on an OpenMP device yet: it is not compiled for the device");
+          "cannot call " + func.getSymName() +
+              " on an OpenMP device yet: it is not compiled for the device");
       return llvm::failure();
     }
   }

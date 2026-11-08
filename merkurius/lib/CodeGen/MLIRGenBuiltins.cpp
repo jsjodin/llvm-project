@@ -392,6 +392,15 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
       return SendInTarget(goal, target, arguments, body);
     }
   }
+  if (module == "process" && symbol.name == "receive" && symbol.arity == 6) {
+    if (EnclosingTarget()) {
+      return ReceiveInTarget(goal, arguments, body, /*inRegion=*/true);
+    }
+    if (target_.options().openMPIsTargetDevice &&
+        ReceiveInTarget(goal, arguments, body, /*inRegion=*/false)) {
+      return true;
+    }
+  }
   if (module == "builtin" ||
       (module == "array" && symbol.name == "array_compare")) {
     return CompareBuiltin(goal, callee, arguments, body);

@@ -847,7 +847,23 @@ Neither uses the C++ standard library; `rpc.h` needs none.
 3. **Receive on the device.** Polling with `s_sleep` between polls, and a
    timeout by the device's clock. Test: `main` sends before the region, the
    region receives, sums and sends the sum back; a timeout that passes; the
-   errors for other receives.
+   errors for other receives. Done (design document, "Send and receive in
+   a target region", As implemented), with four findings:
+   - **Receives in called procedures work.** Unlike a send, a receive needs
+     nothing of the host's, so in the device's compile every
+     `process.receive` with `any` is the device's; the region's loop is a
+     procedure it calls.
+   - **The device allocates.** `yes(N)` is a cell, so device code now
+     allocates with the OpenMP device runtime's `malloc`. This tree's build
+     has no LLVM libc for the GPU, so it is libompdevice's bump allocator of
+     1 MiB, which never frees and traps when full; adding `libc` to
+     `RUNTIMES_amdgcn-amd-amdhsa_LLVM_ENABLE_RUNTIMES` gives libc's GPU
+     allocator. Either way nothing is freed until step 6's arena.
+   - **MLIR's `omp-stack-to-shared` broke last calls.** It freed the shared
+     memory between a `musttail` call and its return; fixed in this tree,
+     a candidate for upstream.
+   - **A poll is a round trip,** as a send is, and the server thread serves
+     polls one at a time: step 7's queue in device memory removes them.
 4. **The first slice:** node 1's region and node 2's `main`, over TCP, with
    `Inputs/two-nodes.py`, exchanging ints in a loop.
 5. **The first benchmark,** ping-pong latency between the GPU and node 2 over

@@ -156,6 +156,109 @@ bool MerkGenerator::SendInTarget(const Body &goal, mlir::omp::TargetOp target,
   return true;
 }
 
+// A process.timeout's milliseconds, -1 for infinity, as library/process.m's
+// milliseconds has them.
+mlir::Value MerkGenerator::TimeoutMilliseconds(
+    mlir::Value timeout, mlir::Location loc) {
+  auto i64{builder_.getI64Type()};
+  auto cases{builder_.getArrayAttr(
+      {builder_.getArrayAttr(
+           {merk::FunctorAttr::get(&context_, "infinity", 0)}),
+          builder_.getArrayAttr(
+              {merk::FunctorAttr::get(&context_, "after", 1)})})};
+  auto switchOp{merk::SwitchOp::create(builder_, loc, mlir::TypeRange{i64},
+      timeout, cases, /*canFail=*/false)};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToStart(&switchOp->getRegion(0).emplaceBlock());
+  merk::YieldOp::create(builder_, loc, IntegerConstant(i64, -1, loc));
+  builder_.setInsertionPointToStart(&switchOp->getRegion(1).emplaceBlock());
+  auto deconstruct{merk::DeconstructOp::create(builder_, loc,
+      mlir::TypeRange{i64}, timeout,
+      merk::FunctorAttr::get(&context_, "after", 1))};
+  mlir::Value milliseconds{mlir::arith::MaxSIOp::create(builder_, loc,
+      deconstruct.getResult(0), IntegerConstant(i64, 0, loc))};
+  merk::YieldOp::create(builder_, loc, milliseconds);
+  return switchOp->getResult(0);
+}
+
+// receive(Mailbox, any, Timeout, Result, !IO) in a target region, or in
+// any procedure of the device's compile, all of which run on the device:
+// the only receive the device has so far (docs/INPROGRESS.md, The device's
+// side of the first slice, Decision 4). It is a call of merk_device_receive
+// with the handle's cell and the timeout's milliseconds, which succeeds
+// with the mailbox's oldest message as a word, or fails once the timeout
+// passes. Unlike a send, it needs nothing of the host's, so it is the same
+// in a procedure that a region calls. Outside a region, a receive that the
+// device does not have is left to the call of process.receive, which the
+// device's compile rejects only if a region calls it (false); the procedure
+// may run only on the host, such as a polymorphic one that main calls.
+bool MerkGenerator::ReceiveInTarget(const Body &goal,
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body,
+    bool inRegion) {
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  mlir::Value mailbox{ValueOf(arguments[0])};
+  mlir::Value selector{ValueOf(arguments[1])};
+  mlir::Value timeout{ValueOf(arguments[2])};
+  if (!mailbox || !selector || !timeout) {
+    failed_ = true;
+    return true;
+  }
+  // any's closure captures only the message type's type_info.
+  auto closure{selector.getDefiningOp<merk::ClosureOp>()};
+  if (!closure || !closure.getEntry().starts_with("process.any_2_0$closure")) {
+    if (!inRegion) {
+      return false;
+    }
+    NotYet(at, "receiving in target regions with a selector other than any");
+    return true;
+  }
+  BodyVar result{arguments[3]};
+  const semantics::Type *maybe{body.vars[result].type};
+  const semantics::Type *messageType{maybe->arguments.front()};
+  mlir::Type message{Represent(messageType)->type};
+  if (!WordMessage(message)) {
+    if (!inRegion) {
+      return false;
+    }
+    NotYet(at,
+        "receiving messages of type " + semantics::TypeToString(*messageType) +
+            " in target regions");
+    return true;
+  }
+  auto word{merk::WordType::get(&context_)};
+  auto received{merk::ForeignCallOp::create(builder_, loc,
+      mlir::TypeRange{builder_.getI1Type(), word}, "merk_device_receive",
+      mlir::ValueRange{mailbox, TimeoutMilliseconds(timeout, loc)},
+      /*can_fail=*/true)};
+  auto maybeType{mlir::cast<merk::TermType>(Represent(maybe)->type)};
+  auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{maybeType})};
+  {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
+    merk::GuardOp::create(builder_, loc, received.getResult(0));
+    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+    builder_.setInsertionPointToStart(&ite.getThenRegion().emplaceBlock());
+    mlir::Value value{merk::FromWordOp::create(
+        builder_, loc, message, received.getResult(1))};
+    merk::YieldOp::create(builder_, loc,
+        mlir::ValueRange{merk::ConstructOp::create(builder_, loc, maybeType,
+            merk::FunctorAttr::get(&context_, "yes", 1),
+            mlir::ValueRange{value})});
+    builder_.setInsertionPointToStart(&ite.getElseRegion().emplaceBlock());
+    merk::YieldOp::create(builder_, loc,
+        mlir::ValueRange{merk::ConstructOp::create(builder_, loc, maybeType,
+            merk::FunctorAttr::get(&context_, "no", 0), mlir::ValueRange{})});
+  }
+  values_[result] = ite.getResult(0);
+  // any's closure, which the device cannot make, is not called.
+  if (closure->use_empty()) {
+    values_.erase(arguments[1]);
+    closure->erase();
+  }
+  return true;
+}
+
 // As MapArray maps an array: by its pointer, with the cell's words as the
 // section, which only the host compile gives.
 mlir::Value MerkGenerator::MapCell(

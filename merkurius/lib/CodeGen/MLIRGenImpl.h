@@ -580,6 +580,9 @@ private:
   // device as one of the region's values.
   bool SendInTarget(const Body &, mlir::omp::TargetOp,
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
+  bool ReceiveInTarget(const Body &, llvm::ArrayRef<BodyVar> arguments,
+      const ProcedureBody &, bool inRegion);
+  mlir::Value TimeoutMilliseconds(mlir::Value timeout, mlir::Location);
   // The map entry of a term's cell of `words` words, by its pointer.
   mlir::Value MapCell(mlir::Value term, unsigned words, llvm::StringRef name,
       mlir::Location);

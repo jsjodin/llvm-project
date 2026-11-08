@@ -28,6 +28,11 @@ constexpr uint32_t RpcOpcode(uint32_t n) { return ('m' << 24) | n; }
 // answers once it has queued it.
 constexpr uint32_t rpcSend{RpcOpcode(1)};
 
+// A poll of a mailbox: the buffer's words are the handle's five. The host
+// answers with 1 and the oldest message, which it removes, or 0 if the
+// mailbox has none, or is closed or another node's.
+constexpr uint32_t rpcPoll{RpcOpcode(2)};
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_RPC_OPCODES_H_
