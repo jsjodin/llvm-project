@@ -1010,7 +1010,7 @@ no process to collect.
    shows up alone. A `merk.live` before each safepoint holds the values, so that
    lowering's replacements follow them. It runs after last call modulo
    constructor, which looks for a call next to the cells it fills. `EmitCode`
-   takes the bundles off for now. Timed.
+   takes the bundles off for now. nrev did not change.
 3. The rewrite after the optimizer, `"frame-pointer"="all"`, leaf marking and the
    table of each statepoint's types. Timed. Tail calls that LLVM found on its own
    are lost here, so any that matter must be `musttail` from lowering first.

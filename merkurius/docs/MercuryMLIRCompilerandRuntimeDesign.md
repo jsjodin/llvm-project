@@ -3945,6 +3945,12 @@ against 559bb24685ad, with the change not yet committed: 4.00 s against 4.00 s
 monomorphic, and 4.01 s against 4.02 s polymorphic. The extra argument costs nothing
 here.
 
+The `deopt` bundles of what is live at each safepoint, still unused and taken off
+before code generation, measured the same way on 2026-11-08, commit 0de549515905
+against 4a8a4296f7f2: 3.99 s against 4.06 s monomorphic, and 4.02 s against 3.99 s
+polymorphic. Within the spread of the runs. nrev has little for an optimizer to
+inline or remove, so this says little about code that does.
+
 ## Target applications
 
 Recorded on 2026-11-05. This is judgement, not a result: the only performance evidence so far is the bandwidth benchmark, whose program is no simpler than its C version (`benchmarks/bandwidth/README.md`). That the code is simpler has still to be shown on a program with real logic in it.
