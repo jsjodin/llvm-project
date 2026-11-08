@@ -53,7 +53,13 @@ static void insertDeviceSharedMemDeallocation(OpBuilder &builder,
     Operation *terminator = block.getTerminator();
     if (!terminator->hasSuccessors() &&
         domInfo.dominates(allocaBlock, &block)) {
-      builder.setInsertionPoint(terminator);
+      // A musttail call must be followed by the return, and its callee
+      // cannot use the caller's allocations, so they are freed before it.
+      Operation *before = terminator;
+      if (auto call = dyn_cast_or_null<LLVM::CallOp>(terminator->getPrevNode());
+          call && call.getTailCallKind() == LLVM::tailcallkind::TailCallKind::MustTail)
+        before = call;
+      builder.setInsertionPoint(before);
       omp::FreeSharedMemOp::create(builder, allocVal.getLoc(), elemType,
                                    arraySize, alignment, allocVal);
     }
