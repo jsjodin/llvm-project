@@ -1037,7 +1037,14 @@ no process to collect.
    - The table from a type's index to the type is emitted in piece 5.
    - Tail calls that LLVM found on its own are lost here, so any that matter must
      be `musttail` from lowering first.
-4. Slots of environments and outputs as Direct locations.
+4. Built 2026-11-08: environments in the frame as Direct locations. A statepoint's
+   deopt state is the number of roots, a type's index for each, and then an index
+   of a layout and an address for each environment. One listed is one the frame
+   made (`merk.env_new`); one that is an argument is in a caller's frame. A call
+   given an environment lists it, as the callee uses it. Slots `merk.env_set` has
+   not filled hold null. Output slots are not listed: `merk.succeed` fills them and
+   returns, and the caller reads them before any safepoint. Being in a bundle stops
+   SROA taking apart an inlined environment; not timed.
 5. In the runtime: the table built at startup, the stack walk, recording the last
    Mercury frame on calls into C, and a test mode that lists roots at a
    safepoint and checks each against its type. No collection yet.

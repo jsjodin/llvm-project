@@ -12,7 +12,7 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module int, list.
+:- import_module int, list, solutions.
 
 :- pragma no_inline(keep/1).
 :- func keep(list(T)) = list(T).
@@ -50,12 +50,28 @@ pick(N, A, B) = R :-
         R = B
     ).
 
+% An environment in the frame is listed by its address, with its layout's
+% index, also at a call it is given to.
+% LLVM-LABEL: define internal tailcc i1 @live_bundles.pairs_2_0(
+% LLVM: call tailcc i1 @live_bundles.each_2_0({{.*}}) [ "deopt"(i64 {{[0-9]+}}, ptr %{{[0-9]+}}) ]
+:- pragma no_inline(each/2).
+:- pred each(list(int)::in, int::out) is nondet.
+each(L, X) :- list.member(X, L).
+
+:- pragma no_inline(pairs/2).
+:- pred pairs(list(int)::in, int::out) is nondet.
+pairs(L, Y) :- each(L, X), each(L, K), Y = X + K.
+
 main(!IO) :-
     L = pa([1], 2),
     io.write_int(list.length(L), !IO),
     io.nl(!IO),
     io.write_int(list.length(pick(1, last([3]), [])), !IO),
+    io.nl(!IO),
+    solutions(pairs([1, 2]), Sums),
+    io.write_int(list.length(Sums), !IO),
     io.nl(!IO).
 
 % OUTPUT:2
 % OUTPUT-NEXT:1
+% OUTPUT-NEXT:3
