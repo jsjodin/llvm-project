@@ -1041,6 +1041,7 @@ bool CodeGenAction::Emit(llvm::Module &llvmModule,
   }
   codegen::OptimizeLLVMIR(llvmModule, target);
   codegen::AddStackChecks(llvmModule);
+  codegen::ExpandHeapAddresses(llvmModule);
   if (kind_ == ActionKind::EmitLLVM) {
     llvmModule.print(os, nullptr);
     return true;

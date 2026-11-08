@@ -77,6 +77,11 @@ void OptimizeLLVMIR(llvm::Module &, const TargetInfo &);
 // left.
 void AddStackChecks(llvm::Module &);
 
+// Replaces the optimizer's stand-in for the address of the thread's heap,
+// which keeps a process that moves to another thread from using the old
+// thread's heap, with the thread-local address.
+void ExpandHeapAddresses(llvm::Module &);
+
 // Embeds each offload binary in the host module's .llvm.offloading section,
 // for the linker wrapper to extract (-fembed-offload-object=, as in Clang
 // and Flang), or reports false with the error.
