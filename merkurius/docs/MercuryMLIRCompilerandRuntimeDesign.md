@@ -3745,7 +3745,9 @@ Thread-local addresses read by an asm the backend cannot move, 2026-11-08, on ae
 
 Ping-pong with processes, 2026-11-08, on d7d31eff1a49, `-O2`, 20000 rounds, 9 runs, machine otherwise idle, median µs a round: `cpu-process` 5.83 (0.63 with one worker), `gpu-process` 13.26 (12.82), `cpu-local` 3.68, `gpu-local` 13.27, CPU and CPU between nodes 18.47, GPU and CPU 31.77, GPU and GPU 40.74. So a GPU answering a process of its own node costs the same as answering a thread.
 
-A receive with a timeout, on the same commit: `cpu-process` with `after(10000)` and with `infinity`, median µs a round, 6.03 and 1.77 with the default workers, 6.03 and 1.69 with 8, 1.98 and 1.08 with 2. A timer for each receive costs about 4 µs across workers, which `request` with a timeout pays too. Its cause, within adding and removing the timer, has not been looked at.
+A receive with a timeout, on the same commit: `cpu-process` with `after(10000)` and with `infinity`, median µs a round, 6.03 and 1.77 with the default workers, 6.03 and 1.69 with 8, 1.98 and 1.08 with 2. A timer for each receive costs about 4 µs across workers, which `request` with a timeout pays too. The cause was the order in `Block`: the timer was added before the next process was taken off the local queue, and a spinning worker stole it meanwhile. With 8 workers 81% of blocks then found nothing local, against 16% for `infinity`. Wakes of sleeping workers (0.16 futex calls a round) and false sharing of the timer's variables (separating them changed nothing) were tried and are not the cause.
+
+Taking the next process first, 2026-11-08, on top of 06f2d398af98, `cpu-process`, 20000 rounds, 9 runs, median µs a round, `after(10000)` before and after: default workers 6.01 and 3.81, 8 workers 5.83 and 3.55, 2 workers 2.15 and 1.55, 1 worker 0.65 and 0.64. `infinity` with the change: 1.67, 1.51, 1.73 and 0.54. `gpu-process` did not move (13.13 and 13.33). About 2 µs of the cost remains with several workers, and has not been explained.
 
 ## Target applications
 
