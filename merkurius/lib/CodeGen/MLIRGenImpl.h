@@ -711,6 +711,11 @@ private:
   llvm::DenseMap<const semantics::MethodModes *, merk::ProcOp> methodProcs_;
   // The variables of what goals give, in the procedure being generated.
   llvm::DenseMap<const void *, BodyVar> givenVars_;
+  // For each type variable a goal gave, the type_info or typeclass_info
+  // that has its type_info, and the word of that, or 0.
+  llvm::DenseMap<unsigned, std::pair<const void *, unsigned>> givenTypes_;
+  void NoteGivenType(const semantics::TypeInfo &);
+  void NoteGivenTypes(const semantics::Dictionary &);
   const semantics::ProcedurePolymorphism *current_{nullptr};
   bool failed_{false};
   // Temporary (chunk 1 step 6, docs/INPROGRESS.md): -fstub-unimplemented,

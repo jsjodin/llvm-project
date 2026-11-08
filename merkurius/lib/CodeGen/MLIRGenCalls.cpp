@@ -236,6 +236,7 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
   if (passed) {
     for (const semantics::TypeInfo *info : passed->typeInfos) {
       if (info->kind == semantics::TypeInfoKind::Output && info->goal == &goal) {
+        NoteGivenType(*info);
         gives.push_back(info);
       } else {
         PassTypeInfo(*info, inputs, loc, at);
@@ -244,6 +245,7 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
     for (auto [i, given] : llvm::enumerate(passed->dictionaries)) {
       if (given->kind == semantics::DictionaryKind::Output &&
           given->goal == &goal) {
+        NoteGivenTypes(*given);
         gives.push_back(given);
       } else if (!isMethod || i != 0) {
         PassDictionary(*given, inputs, loc, at);
@@ -866,6 +868,19 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
   }
   captures.append(
       dictionaryKeys.size(), builder_.getStringAttr("typeclass_info"));
+  // A type variable a goal gave has its type_info in what the goal gave.
+  for (const auto &[variable, place] : givenTypes_) {
+    auto given{givenVars_.find(place.first)};
+    if (given == givenVars_.end()) {
+      continue;
+    }
+    auto found{llvm::find(captured, given->second)};
+    if (found != captured.end()) {
+      places[variable] = {static_cast<unsigned>(infoKeys.size() +
+                              dictionaryKeys.size() + (found - captured.begin())),
+          place.second};
+    }
+  }
   for (BodyVar var : captured) {
     if (var < kFirstGivenVar) {
       mlir::Attribute capture{CaptureTypeAttr(*body.vars[var].type, places, at)};

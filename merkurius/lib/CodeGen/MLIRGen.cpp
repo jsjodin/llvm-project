@@ -541,6 +541,23 @@ mlir::Value MerkGenerator::Given(const void *node) {
   return it == givenVars_.end() ? mlir::Value{} : values_.lookup(it->second);
 }
 
+void MerkGenerator::NoteGivenType(const semantics::TypeInfo &info) {
+  if (info.type && info.type->kind == semantics::TypeKind::Variable) {
+    givenTypes_[info.type->var] = {&info, 0};
+  }
+}
+
+void MerkGenerator::NoteGivenTypes(const semantics::Dictionary &dictionary) {
+  unsigned supers{static_cast<unsigned>(
+      types_.SuperclassesOf(*dictionary.constraint.typeclass).size())};
+  for (auto [j, argument] : llvm::enumerate(dictionary.constraint.arguments)) {
+    if (argument->kind == semantics::TypeKind::Variable) {
+      givenTypes_.try_emplace(argument->var, &dictionary,
+          supers + static_cast<unsigned>(j) + 1);
+    }
+  }
+}
+
 void MerkGenerator::Give(const void *node, mlir::Value value) {
   auto [it, added]{givenVars_.try_emplace(
       node, kFirstGivenVar + static_cast<BodyVar>(givenVars_.size()))};
@@ -1175,6 +1192,7 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
   typeInfos_.clear();
   dictionaries_.clear();
   givenVars_.clear();
+  givenTypes_.clear();
   current_ = polymorphism;
   procName_ = proc.getSymName().str();
   wordOutputs_.reset();
