@@ -198,6 +198,38 @@ Word CopyTerm(Word value, const Type &type, Fragment &fragment) {
   }
 }
 
+// A closure's cell, by its layout: its code is static, and each capture is
+// copied by what the layout says. A capture's type is found in the original
+// cell, whose captured type_infos are the ones it names.
+Word CopyClosure(Word value, Fragment &fragment) {
+  const Word *cell{reinterpret_cast<const Word *>(value)};
+  const auto *layout{reinterpret_cast<const ClosureLayout *>(cell[1])};
+  if (!layout) {
+    Fail("cannot copy a closure made on a device", "");
+  }
+  Word *copy{static_cast<Word *>(
+      fragment.Allocate(sizeof(Word) * (2 + layout->count)))};
+  copy[0] = cell[0];
+  copy[1] = cell[1];
+  const Word *captured{cell + 2};
+  Environment environment{nullptr, nullptr, captured};
+  for (Word i{0}; i < layout->count; ++i) {
+    Word capture{layout->captures[i]};
+    if (capture == kCaptureUnknown) {
+      Fail("cannot copy a closure that captured a value of a type with no "
+           "description", "");
+    }
+    if (capture == kCaptureTypeInfo) {
+      copy[2 + i] = CopyTypeInfo(captured[i], fragment);
+    } else if (capture == kCaptureTypeclassInfo) {
+      copy[2 + i] = CopyDictionary(captured[i], fragment);
+    } else {
+      copy[2 + i] = CopyValue(captured[i], capture, &environment, fragment);
+    }
+  }
+  return reinterpret_cast<Word>(copy);
+}
+
 Word CopyTyped(Word value, const Type &type, Fragment &fragment) {
   switch (type.ctor->kind) {
   case Int:
@@ -245,7 +277,7 @@ Word CopyTyped(Word value, const Type &type, Fragment &fragment) {
   case Cells:
     return CopyTerm(value, type, fragment);
   case Closure:
-    Fail("cannot send a closure yet", "");
+    return CopyClosure(value, fragment);
   case Void:
     // Nothing has a value of this type.
     std::abort();

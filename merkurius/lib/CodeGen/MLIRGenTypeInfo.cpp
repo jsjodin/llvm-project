@@ -313,8 +313,14 @@ bool MerkGenerator::CanDescribe(const semantics::Type &type) {
 mlir::Attribute MerkGenerator::CaptureTypeAttr(const semantics::Type &type,
     const CapturePlaces &places, parser::CharBlock at) {
   mlir::Attribute unknown{builder_.getStringAttr("unknown")};
-  if (type.kind == semantics::TypeKind::Variable) {
-    auto it{places.find(type.var)};
+  if (type.kind == semantics::TypeKind::Variable ||
+      type.kind == semantics::TypeKind::Existential) {
+    // Polymorphism analysis numbers the types that goals gave from
+    // kExistentialVar. One an assignment made the same as another is not
+    // followed here, and is unknown.
+    auto it{places.find(type.kind == semantics::TypeKind::Existential
+            ? semantics::kExistentialVar + type.var
+            : type.var)};
     if (it == places.end()) {
       return unknown;
     }

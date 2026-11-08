@@ -115,9 +115,11 @@ void MerkGenerator::TermUnify(const Body &goal, const ProcedureBody &body) {
   if (passed) {
     unsigned field{0};
     for (const semantics::TypeInfo *info : passed->typeInfos) {
+      NoteGivenType(*info);
       Give(info, results[field++]);
     }
     for (const semantics::Dictionary *dictionary : passed->dictionaries) {
+      NoteGivenTypes(*dictionary);
       Give(dictionary, results[field++]);
     }
   }
