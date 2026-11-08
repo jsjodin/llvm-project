@@ -8,6 +8,7 @@
 
 #include "process.h"
 #include "node.h"
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -25,39 +26,58 @@ pthread_mutex_t schedulerLock = PTHREAD_MUTEX_INITIALIZER;
 
 namespace {
 constexpr std::size_t kFirstChunkBytes{4096};
+// Spinning workers beyond a few only take cores from each other.
+constexpr int kMostSpinning{2};
+
+struct Worker {
+  pthread_mutex_t lock;
+  Process *first;
+  Process *last;
+  std::int64_t count;
+  // For choosing where to steal from.
+  std::uint64_t random;
+};
+
+// One for each worker that may start; fixed once the program has started.
+Worker *workerTable{nullptr};
+int mostWorkers{1};
+// How many have started, the first thread being one.
+std::atomic<int> workers{1};
+pthread_mutex_t startLock = PTHREAD_MUTEX_INITIALIZER;
+// For a wake from a thread that is not a worker.
+std::atomic<std::uint64_t> nextQueue{0};
 
 // Constant-initialized, as merk_heap is.
 thread_local Process *current{nullptr};
-Process firstProcess{{nullptr, nullptr}, 1};
 // Where this thread's worker goes on from when it has nothing to run.
 thread_local Context workerContext{nullptr};
+thread_local Worker *thisWorker{nullptr};
+// Whether what this thread switched to is to release schedulerLock.
+thread_local bool unlockAfterSwitch{false};
+
+Process firstProcess{{nullptr, nullptr}, 1};
 std::uint64_t nextId{2};
 
-// The processes ready to run, oldest first, and how many, which the worker
-// reads without the lock as it spins.
-Process *firstRunnable{nullptr};
-Process *lastRunnable{nullptr};
-std::int64_t runnable{0};
+// The processes queued on any worker. It is added to before a process is
+// queued, so that a worker about to sleep cannot miss it.
+std::atomic<std::int64_t> runnable{0};
+std::atomic<int> idle{0};
+std::atomic<int> spinning{0};
+std::atomic<int> sleeping{0};
+std::atomic<bool> stopping{false};
 
-// Temporary (chunk 2 step 4, docs/INPROGRESS.md): a list, until each worker
-// has a timer wheel. The processes blocked with a deadline, and a time no
-// later than the earliest, or -1 if there are none.
-Process *firstTimed{nullptr};
-std::int64_t earliest{-1};
-
-// Where workers sleep when nothing can run. How many do, how many spin
-// before sleeping, and how many of those two there are in all.
+pthread_mutex_t sleepLock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t ready;
-int sleeping{0};
-int spinning{0};
-int idle{0};
 pthread_once_t readyOnce = PTHREAD_ONCE_INIT;
-// Spinning workers beyond a few only take cores from each other.
-constexpr int kMostSpinning{2};
-// How many workers have started, the first thread being one, and how many
-// may; 0 until the first process is spawned.
-int workers{1};
-int mostWorkers{0};
+
+// The processes blocked with a deadline, a binary heap by deadline, under
+// schedulerLock, and the earliest deadline, or -1. A heap rather than a timer
+// wheel for each worker: one lock guards the mailboxes anyway.
+Process **timers{nullptr};
+std::int64_t timerCount{0};
+std::int64_t timerCapacity{0};
+std::atomic<std::int64_t> earliest{-1};
+
 // What a process that has ended saves into, since its record has gone.
 Context ended{nullptr};
 
@@ -75,180 +95,347 @@ std::int64_t Now() {
   return std::int64_t{now.tv_sec} * 1000000000 + now.tv_nsec;
 }
 
+[[noreturn]] void OutOfMemory() {
+  std::fflush(stdout);
+  std::fprintf(stderr, "Mercury runtime: out of memory\n");
+  std::exit(1);
+}
+
 void *WorkerThread(void *);
+
+void InitializeWorker(Worker &worker, std::uint64_t seed) {
+  pthread_mutex_init(&worker.lock, nullptr);
+  worker.first = nullptr;
+  worker.last = nullptr;
+  worker.count = 0;
+  worker.random = seed * 2 + 1;
+}
 
 // More work than idle workers takes another worker, if one may start.
 void StartWorkerIfNeeded() {
-  if (workers >= mostWorkers || runnable <= idle) {
+  if (workers.load(std::memory_order_relaxed) >= mostWorkers ||
+      runnable.load(std::memory_order_relaxed) <=
+          idle.load(std::memory_order_relaxed)) {
     return;
   }
-  pthread_t thread;
-  pthread_attr_t attributes;
-  pthread_attr_init(&attributes);
-  pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
-  if (pthread_create(&thread, &attributes, WorkerThread, nullptr) == 0) {
-    ++workers;
-    ++idle;
+  pthread_mutex_lock(&startLock);
+  int index{workers.load(std::memory_order_relaxed)};
+  if (index < mostWorkers) {
+    pthread_t thread;
+    pthread_attr_t attributes;
+    pthread_attr_init(&attributes);
+    pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+    idle.fetch_add(1);
+    if (pthread_create(&thread, &attributes, WorkerThread, &workerTable[index]) ==
+        0) {
+      workers.store(index + 1, std::memory_order_release);
+    } else {
+      idle.fetch_sub(1);
+    }
+    pthread_attr_destroy(&attributes);
   }
-  pthread_attr_destroy(&attributes);
+  pthread_mutex_unlock(&startLock);
 }
 
-void Enqueue(Process *process) {
-  process->nextRunnable = nullptr;
-  if (lastRunnable) {
-    lastRunnable->nextRunnable = process;
-  } else {
-    firstRunnable = process;
-  }
-  lastRunnable = process;
-  __atomic_add_fetch(&runnable, 1, __ATOMIC_RELEASE);
-  if (sleeping) {
+// A sleeping worker is woken unless a spinning one will find the work.
+void WakeWorker() {
+  if (spinning.load() == 0 && sleeping.load() > 0) {
+    pthread_mutex_lock(&sleepLock);
     pthread_cond_signal(&ready);
+    pthread_mutex_unlock(&sleepLock);
   }
   StartWorkerIfNeeded();
 }
 
-void AddTimed(Process *process) {
-  process->previousTimed = nullptr;
-  process->nextTimed = firstTimed;
-  if (firstTimed) {
-    firstTimed->previousTimed = process;
+void Enqueue(Process *process) {
+  Worker *worker{thisWorker};
+  if (!worker) {
+    worker = &workerTable[nextQueue.fetch_add(1, std::memory_order_relaxed) %
+        static_cast<std::uint64_t>(workers.load(std::memory_order_acquire))];
   }
-  firstTimed = process;
-  if (earliest < 0 || process->deadline < earliest) {
-    earliest = process->deadline;
-    // A worker asleep until the old time must see the new one.
-    if (sleeping) {
-      pthread_cond_signal(&ready);
+  runnable.fetch_add(1);
+  process->nextRunnable = nullptr;
+  pthread_mutex_lock(&worker->lock);
+  if (worker->last) {
+    worker->last->nextRunnable = process;
+  } else {
+    worker->first = process;
+  }
+  worker->last = process;
+  ++worker->count;
+  pthread_mutex_unlock(&worker->lock);
+  WakeWorker();
+}
+
+Process *PopLocal(Worker &worker) {
+  pthread_mutex_lock(&worker.lock);
+  Process *process{worker.first};
+  if (process) {
+    worker.first = process->nextRunnable;
+    if (!worker.first) {
+      worker.last = nullptr;
+    }
+    --worker.count;
+  }
+  pthread_mutex_unlock(&worker.lock);
+  if (process) {
+    runnable.fetch_sub(1);
+  }
+  return process;
+}
+
+// The older half of another worker's queue: the first of it, to run, and
+// the rest on this worker's.
+Process *Steal(Worker &self) {
+  int started{workers.load(std::memory_order_acquire)};
+  self.random ^= self.random << 13;
+  self.random ^= self.random >> 7;
+  self.random ^= self.random << 17;
+  for (int i{0}; i < started; ++i) {
+    Worker &victim{workerTable[(self.random + static_cast<std::uint64_t>(i)) %
+        static_cast<std::uint64_t>(started)]};
+    if (&victim == &self || !__atomic_load_n(&victim.first, __ATOMIC_RELAXED)) {
+      continue;
+    }
+    pthread_mutex_lock(&victim.lock);
+    Process *taken{victim.first};
+    if (!taken) {
+      pthread_mutex_unlock(&victim.lock);
+      continue;
+    }
+    std::int64_t half{(victim.count + 1) / 2};
+    Process *last{taken};
+    for (std::int64_t n{1}; n < half; ++n) {
+      last = last->nextRunnable;
+    }
+    victim.first = last->nextRunnable;
+    if (!victim.first) {
+      victim.last = nullptr;
+    }
+    victim.count -= half;
+    pthread_mutex_unlock(&victim.lock);
+    last->nextRunnable = nullptr;
+    if (taken != last) {
+      pthread_mutex_lock(&self.lock);
+      if (self.last) {
+        self.last->nextRunnable = taken->nextRunnable;
+      } else {
+        self.first = taken->nextRunnable;
+      }
+      self.last = last;
+      self.count += half - 1;
+      pthread_mutex_unlock(&self.lock);
+    }
+    runnable.fetch_sub(1);
+    return taken;
+  }
+  return nullptr;
+}
+
+void SetTimer(std::int64_t index, Process *process) {
+  timers[index] = process;
+  process->timerIndex = index;
+}
+
+void SiftUp(std::int64_t index) {
+  Process *process{timers[index]};
+  while (index > 0) {
+    std::int64_t parent{(index - 1) / 2};
+    if (timers[parent]->deadline <= process->deadline) {
+      break;
+    }
+    SetTimer(index, timers[parent]);
+    index = parent;
+  }
+  SetTimer(index, process);
+}
+
+void SiftDown(std::int64_t index) {
+  Process *process{timers[index]};
+  for (;;) {
+    std::int64_t child{2 * index + 1};
+    if (child >= timerCount) {
+      break;
+    }
+    if (child + 1 < timerCount &&
+        timers[child + 1]->deadline < timers[child]->deadline) {
+      ++child;
+    }
+    if (process->deadline <= timers[child]->deadline) {
+      break;
+    }
+    SetTimer(index, timers[child]);
+    index = child;
+  }
+  SetTimer(index, process);
+}
+
+void NoteEarliest() {
+  earliest.store(timerCount ? timers[0]->deadline : -1);
+}
+
+void AddTimer(Process *process) {
+  if (timerCount == timerCapacity) {
+    timerCapacity = timerCapacity ? 2 * timerCapacity : 16;
+    timers = static_cast<Process **>(
+        std::realloc(timers, sizeof(Process *) * timerCapacity));
+    if (!timers) {
+      OutOfMemory();
     }
   }
-}
-
-void RemoveTimed(Process *process) {
-  if (process->previousTimed) {
-    process->previousTimed->nextTimed = process->nextTimed;
-  } else {
-    firstTimed = process->nextTimed;
-  }
-  if (process->nextTimed) {
-    process->nextTimed->previousTimed = process->previousTimed;
-  }
-  if (!firstTimed) {
-    earliest = -1;
+  std::int64_t before{earliest.load()};
+  SetTimer(timerCount, process);
+  SiftUp(timerCount++);
+  NoteEarliest();
+  // A worker asleep until the old time must see the new one.
+  if ((before < 0 || process->deadline < before) && sleeping.load() > 0) {
+    pthread_mutex_lock(&sleepLock);
+    pthread_cond_signal(&ready);
+    pthread_mutex_unlock(&sleepLock);
   }
 }
 
-// Wakes the processes whose deadlines have passed.
+void RemoveTimer(Process *process) {
+  std::int64_t index{process->timerIndex};
+  process->timerIndex = -1;
+  --timerCount;
+  if (index != timerCount) {
+    SetTimer(index, timers[timerCount]);
+    SiftUp(index);
+    SiftDown(timers[index]->timerIndex);
+  }
+  NoteEarliest();
+}
+
+bool TimerDue() {
+  std::int64_t time{earliest.load(std::memory_order_relaxed)};
+  return time >= 0 && Now() >= time;
+}
+
+// Wakes the processes whose deadlines have passed, with the lock held.
 void FireTimers() {
-  if (earliest < 0 || Now() < earliest) {
+  if (!TimerDue()) {
     return;
   }
   std::int64_t now{Now()};
-  std::int64_t next{-1};
-  Process *process{firstTimed};
-  while (process) {
-    Process *following{process->nextTimed};
-    if (process->deadline <= now) {
-      Wake(process);
-    } else if (next < 0 || process->deadline < next) {
-      next = process->deadline;
-    }
-    process = following;
+  while (timerCount && timers[0]->deadline <= now) {
+    Wake(timers[0]);
   }
-  earliest = next;
+}
+
+// What a thread does first after switching: on a process's stack it may be
+// another thread than last time, so this must read its thread-local afresh.
+[[gnu::noinline]] void AfterSwitch() {
+  if (unlockAfterSwitch) {
+    unlockAfterSwitch = false;
+    pthread_mutex_unlock(&schedulerLock);
+  }
 }
 
 // Nothing is runnable: spins for a while, as a wake from sleeping costs
 // more than a message's other steps, and then sleeps until something is.
 void Idle() {
-  if (spinning < kMostSpinning) {
-    ++spinning;
+  if (spinning.load() < kMostSpinning) {
+    spinning.fetch_add(1);
     std::int64_t end{Now() + SpinNanoseconds()};
-    if (earliest >= 0 && earliest < end) {
-      end = earliest;
+    std::int64_t time{earliest.load()};
+    if (time >= 0 && time < end) {
+      end = time;
     }
-    pthread_mutex_unlock(&schedulerLock);
     // It yields, so that with fewer cores than threads the one it waits for
     // can run.
-    while (__atomic_load_n(&runnable, __ATOMIC_ACQUIRE) == 0 && Now() < end) {
+    while (runnable.load() == 0 && Now() < end) {
       sched_yield();
     }
-    pthread_mutex_lock(&schedulerLock);
-    --spinning;
-    if (firstRunnable || (earliest >= 0 && Now() >= earliest)) {
+    spinning.fetch_sub(1);
+    if (runnable.load() > 0 || TimerDue()) {
       return;
     }
   }
   pthread_once(&readyOnce, InitializeReady);
-  ++sleeping;
-  if (earliest < 0) {
-    pthread_cond_wait(&ready, &schedulerLock);
-  } else {
-    timespec until{static_cast<time_t>(earliest / 1000000000),
-        static_cast<long>(earliest % 1000000000)};
-    pthread_cond_timedwait(&ready, &schedulerLock, &until);
-  }
-  --sleeping;
-}
-
-// A process that can run now, or null.
-Process *TakeRunnable() {
-  FireTimers();
-  Process *process{firstRunnable};
-  if (process) {
-    firstRunnable = process->nextRunnable;
-    if (!firstRunnable) {
-      lastRunnable = nullptr;
+  pthread_mutex_lock(&sleepLock);
+  sleeping.fetch_add(1);
+  if (runnable.load() == 0 && !TimerDue()) {
+    std::int64_t time{earliest.load()};
+    if (time < 0) {
+      pthread_cond_wait(&ready, &sleepLock);
+    } else {
+      timespec until{static_cast<time_t>(time / 1000000000),
+          static_cast<long>(time % 1000000000)};
+      pthread_cond_timedwait(&ready, &sleepLock, &until);
     }
-    __atomic_sub_fetch(&runnable, 1, __ATOMIC_RELAXED);
   }
-  return process;
+  sleeping.fetch_sub(1);
+  pthread_mutex_unlock(&sleepLock);
 }
 
-// On the thread's own stack, with the lock held: runs processes for ever.
-// A process comes back here, still holding the lock, when it finds nothing
-// to run next. The thread is the same one, so its thread-locals are too.
+// On the thread's own stack, without the lock: runs processes for ever.
 [[noreturn]] void WorkerLoop() {
+  AfterSwitch();
+  Worker &self{*thisWorker};
   for (;;) {
-    Process *next;
-    ++idle;
-    while (!(next = TakeRunnable())) {
-      Idle();
+    idle.fetch_add(1);
+    Process *next{nullptr};
+    while (!next) {
+      if (TimerDue()) {
+        pthread_mutex_lock(&schedulerLock);
+        FireTimers();
+        pthread_mutex_unlock(&schedulerLock);
+      }
+      next = stopping.load() ? nullptr : PopLocal(self);
+      if (!next && !stopping.load()) {
+        next = Steal(self);
+      }
+      if (!next) {
+        Idle();
+      }
     }
-    --idle;
+    idle.fetch_sub(1);
+    // Work may remain for a worker that is asleep.
+    if (runnable.load() > 0) {
+      WakeWorker();
+    }
     RunProcess(next);
     SwitchContext(workerContext, next->context);
+    AfterSwitch();
   }
 }
 
-void *WorkerThread(void *) {
-  pthread_mutex_lock(&schedulerLock);
-  --idle;
+void *WorkerThread(void *worker) {
+  thisWorker = static_cast<Worker *>(worker);
+  idle.fetch_sub(1);
   WorkerLoop();
+}
+
+// The next process to run on this worker, with the lock held, or null.
+Process *TakeLocal() {
+  FireTimers();
+  return stopping.load() ? nullptr : PopLocal(*thisWorker);
 }
 
 // The stack and record go back while still in use, which is safe as the
 // lock is held until this has switched away, and NewProcess takes it.
 [[noreturn]] void Finish(Process *self) {
   CloseMailboxesOf(self);
-  Process *next{TakeRunnable()};
+  Process *next{TakeLocal()};
   RunProcess(next);
   FreeStack(self->stack);
   std::free(self);
+  unlockAfterSwitch = true;
   SwitchContext(ended, next ? next->context : workerContext);
   std::abort();
 }
 
 void ProcessBody(void *argument) {
+  AfterSwitch();
   auto *self{static_cast<Process *>(argument)};
-  pthread_mutex_unlock(&schedulerLock);
   CallClosure(self->closure, self->argument);
   pthread_mutex_lock(&schedulerLock);
   Finish(self);
 }
 
 void MainBody(void *entry) {
-  pthread_mutex_unlock(&schedulerLock);
+  AfterSwitch();
   reinterpret_cast<void (*)(void)>(entry)();
   std::abort();
 }
@@ -317,20 +504,15 @@ Process *NewProcess(
   return process;
 }
 
-void Start(Process *process) {
-  if (mostWorkers == 0) {
-    mostWorkers = ReadMostWorkers();
-  }
-  Enqueue(process);
-}
+void Start(Process *process) { Enqueue(process); }
 
 void Wake(Process *process) {
   if (!process->waiting) {
     return;
   }
   process->waiting = false;
-  if (process->deadline >= 0) {
-    RemoveTimed(process);
+  if (process->timerIndex >= 0) {
+    RemoveTimer(process);
   }
   Enqueue(process);
 }
@@ -340,13 +522,16 @@ void Block(std::int64_t deadline) {
   self->waiting = true;
   self->deadline = deadline;
   if (deadline >= 0) {
-    AddTimed(self);
+    AddTimer(self);
   }
-  Process *next{TakeRunnable()};
+  Process *next{TakeLocal()};
   if (next != self) {
     RunProcess(next);
+    unlockAfterSwitch = true;
     SwitchContext(self->context, next ? next->context : workerContext);
-    // It may be on another thread now.
+    // It may be on another thread now, without the lock.
+    AfterSwitch();
+    pthread_mutex_lock(&schedulerLock);
   }
 }
 
@@ -359,16 +544,25 @@ extern "C" void merk_process_run_main(void (*entry)(void)) {
     entry();
     return;
   }
+  mostWorkers = ReadMostWorkers();
+  workerTable = static_cast<Worker *>(std::malloc(sizeof(Worker) * mostWorkers));
+  if (!workerTable) {
+    OutOfMemory();
+  }
+  for (int i{0}; i < mostWorkers; ++i) {
+    InitializeWorker(workerTable[i], static_cast<std::uint64_t>(i) + 1);
+  }
+  thisWorker = &workerTable[0];
   firstProcess.stackLimit = firstProcess.stack->limit;
   firstProcess.context = NewContext(*firstProcess.stack, MainBody,
       reinterpret_cast<void *>(entry));
   RunProcess(&firstProcess);
-  pthread_mutex_lock(&schedulerLock);
   SwitchContext(workerContext, firstProcess.context);
   WorkerLoop();
 }
 
 extern "C" void merk_process_stop(void) {
+  merkurius::runtime::stopping.store(true);
   pthread_mutex_lock(&merkurius::runtime::schedulerLock);
 }
 

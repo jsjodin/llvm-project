@@ -3684,6 +3684,18 @@ Several workers under one lock, 2026-11-08, on f42910dd8074 and its change, `-O2
 
 Work that does not communicate scales, 29 times on 48 threads. Messages do not: the one lock makes 16 pairs slower with more workers. With all workers, spawning a process took 9 µs against 2.8 µs on one worker's earlier numbers, and a message to it and its end 13 µs against 3.8.
 
+A run queue for each worker, with stealing, 2026-11-08, on db41894a8ce6 and its change, the same conditions as the table above.
+
+| Workers | Ping-pong, µs a round | `work`, ms | `pairs`, µs a round in all |
+| ---: | ---: | ---: | ---: |
+| 1 | 3.6 | 1108 | 3.7 |
+| 2 | 5.3 | 544 | 3.1 |
+| 8 | 6.2 | 139 | 2.5 |
+| 24 | 5.9 | 56 | 7.3 |
+| 48 | 5.8 | 39 | 8.2 |
+
+With 48 workers, spawning a million processes took 7.0 µs each, and a message to one and its end 6.6 µs.
+
 ## Target applications
 
 Recorded on 2026-11-05. This is judgement, not a result: the only performance evidence so far is the bandwidth benchmark, whose program is no simpler than its C version (`benchmarks/bandwidth/README.md`). That the code is simpler has still to be shown on a program with real logic in it.

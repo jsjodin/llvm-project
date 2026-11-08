@@ -20,10 +20,13 @@
 // A process may resume on another thread after any call that can block. The
 // runtime's C++ must not keep a thread-local's address across such a call.
 //
-// Temporary (chunk 2 step 4, docs/INPROGRESS.md): one lock guards the
-// scheduler and the mailboxes, and one queue holds the runnable processes.
-// A process holds the lock across a switch, and what it switches to releases
-// it.
+// Each worker has a queue of runnable processes, with a lock of its own, and
+// a worker with an empty queue takes half of another's.
+//
+// A process that blocks holds schedulerLock across its switch, and what it
+// switches to releases it, so that nothing can wake and resume it before its
+// context is saved. Temporary (chunk 2 step 4, docs/INPROGRESS.md): that lock
+// also guards the mailboxes and the timers.
 //
 //===----------------------------------------------------------------------===//
 
@@ -59,8 +62,8 @@ struct Process {
   bool waiting{false};
   std::int64_t deadline{-1};
   Process *nextRunnable{nullptr};
-  Process *previousTimed{nullptr};
-  Process *nextTimed{nullptr};
+  // Its place in the heap of timers, if it has a deadline.
+  std::int64_t timerIndex{-1};
   // The first of its mailboxes, a slot of the table, or -1.
   std::int64_t firstMailbox{-1};
   // How many target regions it is in, during which it stays on its thread,

@@ -828,9 +828,16 @@ ends the program. `spawn`, links and monitors do not exist.
    workers under the one lock, with one run queue. A worker with nothing to run
    does so on its thread's own stack, since another may resume the process it
    last ran. A process in a target region stays on its thread and blocks it, as
-   libomp ties the region to the thread. To do: a run queue for each worker,
-   stealing, timers for receive timeouts, and multi-producer mailbox queues with
-   no global lock.
+   libomp ties the region to the thread. Each worker now has a run queue with
+   its own lock, and steals half of another's when its own is empty. Timers are
+   a binary heap under the mailboxes' lock, not a wheel for each worker, as that
+   lock is held anyway. To do: mailboxes without the one lock. Measured
+   2026-11-08, 16 pairs of processes: at 24 workers over half the 3.84 million
+   acquisitions of the lock are contended, and threads wait 36 s in a 3.6 s run,
+   about 10 of them at any time. At one worker the lock is never contended, and
+   its 8 acquisitions a round are a small part of 3.6 µs. An adaptive mutex
+   gains 3 to 8%. Independent pairs share no mailbox, so a lock for each mailbox
+   may give most of what lock-free queues would.
 5. **Preemption.** Lowering the heap limit, and `mrt.yield_check` on loops that
    do not allocate.
 6. **Ending a process.** An uncaught exception ends its process with a reason
