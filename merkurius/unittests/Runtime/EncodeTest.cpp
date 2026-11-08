@@ -172,6 +172,16 @@ const Word kListOfIntCell[2]{
 const Word kArrayOfStringCell[2]{
     reinterpret_cast<Word>(&kArray), reinterpret_cast<Word>(&kString)};
 
+const TypeCtor kChar{Char, 0, 0, 0, "", "character", nullptr, nullptr, nullptr,
+    {}, nullptr, nullptr};
+const Word kArrayOfIntCell[2]{
+    reinterpret_cast<Word>(&kArray), reinterpret_cast<Word>(&kInt)};
+const Word kArrayOfCharCell[2]{
+    reinterpret_cast<Word>(&kArray), reinterpret_cast<Word>(&kChar)};
+
+Word ArrayOfInt() { return reinterpret_cast<Word>(kArrayOfIntCell) + 1; }
+Word ArrayOfChar() { return reinterpret_cast<Word>(kArrayOfCharCell) + 1; }
+
 Word IntType() { return reinterpret_cast<Word>(&kInt); }
 Word StringType() { return reinterpret_cast<Word>(&kString); }
 Word ListOfInt() { return reinterpret_cast<Word>(kListOfIntCell) + 1; }
@@ -224,6 +234,48 @@ TEST(EncodeTest, ExactBytes) {
   for (Word *cell : cells) {
     delete[] cell;
   }
+}
+
+// An array of ints is its elements as they are in memory.
+TEST(EncodeTest, ArrayOfIntExactBytes) {
+  const Word array[3]{2, 0x0102030405060708, 9};
+  EXPECT_EQ(EncodeHex(reinterpret_cast<Word>(array), ArrayOfInt()),
+      "0200000000000000"
+      "0807060504030201"
+      "0900000000000000");
+  const Word empty[1]{0};
+  EXPECT_EQ(EncodeHex(reinterpret_cast<Word>(empty), ArrayOfInt()),
+      "0000000000000000");
+}
+
+TEST(EncodeTest, ArrayOfIntRoundTrip) {
+  std::vector<Word> array{1000};
+  for (Word i{1}; i <= 1000; ++i) {
+    array.push_back(i * 0x9e3779b97f4a7c15);
+  }
+  Encoded encoded;
+  ASSERT_EQ(Encode(reinterpret_cast<Word>(array.data()), ArrayOfInt(), encoded),
+      nullptr);
+  Fragment fragment;
+  Word value;
+  ASSERT_EQ(Decode(encoded.bytes, encoded.size, ArrayOfInt(), fragment, value),
+      nullptr);
+  std::free(encoded.bytes);
+  const Word *decoded{reinterpret_cast<const Word *>(value)};
+  for (Word i{0}; i <= 1000; ++i) {
+    EXPECT_EQ(decoded[i], array[i]);
+  }
+}
+
+// An array of characters is read an element at a time, to check each.
+TEST(EncodeTest, ArrayOfCharIsChecked) {
+  std::uint8_t bytes[16]{};
+  bytes[0] = 1;
+  bytes[8 + 2] = 0x11;
+  Fragment fragment;
+  Word value;
+  EXPECT_STREQ(Decode(bytes, sizeof bytes, ArrayOfChar(), fragment, value),
+      "a character is not a code point");
 }
 
 TEST(EncodeTest, ListRoundTrip) {

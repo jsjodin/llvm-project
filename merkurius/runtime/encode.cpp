@@ -51,6 +51,13 @@ std::int64_t SignExtend(Word value, unsigned bits) {
   return static_cast<std::int64_t>(value << (64 - bits)) >> (64 - bits);
 }
 
+// Whether an element of the type is on the wire as it is in memory, on the
+// little-endian machines that are targeted, and needs no check when read.
+bool SameInMemory(const TypeCtor *ctor) {
+  return ctor->kind == Int || ctor->kind == Int64 || ctor->kind == Uint ||
+      ctor->kind == Uint64 || ctor->kind == Float;
+}
+
 bool IsTerm(const TypeCtor *ctor) {
   return ctor->kind == Enum || ctor->kind == Dummy || ctor->kind == NoTag ||
       ctor->kind == Cells;
@@ -80,6 +87,11 @@ public:
     std::uint8_t *at{Reserve(padded)};
     std::memcpy(at, text, bytes);
     std::memset(at + bytes, 0, padded - bytes);
+  }
+
+  // Words that are the same on the wire.
+  void Words(const Word *words, Word count) {
+    std::memcpy(Reserve(sizeof(Word) * count), words, sizeof(Word) * count);
   }
 
   void Encode(Word value, Word type, const Environment *environment) {
@@ -147,6 +159,11 @@ void Writer::EncodeTyped(Word value, const Type &type) {
   case Array: {
     const Word *array{reinterpret_cast<const Word *>(value)};
     Item(array[0]);
+    if (array[0] != 0 &&
+        SameInMemory(Resolve(kElement, &type.environment).ctor)) {
+      Words(array + 1, array[0]);
+      return;
+    }
     for (Word i{0}; i < array[0] && !error; ++i) {
       Encode(array[1 + i], kElement, &type.environment);
     }
@@ -352,6 +369,13 @@ bool Reader::DecodeTyped(const Type &type, Word &value) {
     auto *array{
         static_cast<Word *>(fragment_.Allocate(sizeof(Word) * (1 + size)))};
     array[0] = size;
+    if (size != 0 && SameInMemory(Resolve(kElement, &type.environment).ctor)) {
+      std::memcpy(array + 1, next_, sizeof(Word) * size);
+      next_ += sizeof(Word) * size;
+      left_ -= sizeof(Word) * size;
+      value = reinterpret_cast<Word>(array);
+      return true;
+    }
     for (Word i{0}; i < size; ++i) {
       if (!Decode(kElement, &type.environment, array[1 + i])) {
         return false;

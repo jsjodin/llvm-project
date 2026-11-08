@@ -42,50 +42,53 @@ merkurius/benchmarks/array-messages/run.sh "" gfx1030
 
 2026-11-08, an AMD Radeon RX 6950 XT (gfx1030) on PCIe, an AMD Ryzen
 Threadripper PRO 5965WX (24 cores, 48 threads) as the host, the build of this
-tree at -O2. MB/s, the median of three runs. Every message arrived, of the
+tree at -O2, with arrays of scalars copied and encoded as blocks. MB/s, the median of three runs. Every message arrived, of the
 right size, in every run.
 
 `to`, from node 1:
 
 | Words | `memcpy` | `gpu-local` | `cpu-local` | `gpu` | `cpu` |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 0.8 | 0.4 | 4.8 | 0.3 | 1.6 |
-| 16 | 12.5 | 5.5 | 76 | 5.2 | 25 |
-| 256 | 201 | 86 | 840 | 72 | 289 |
-| 4096 | 2294 | 614 | 1223 | 641 | 702 |
-| 65536 | 7836 | 847 | 1309 | 786 | 715 |
-| 262144 | 8348 | 1067 | 1314 | 335 | 728 |
-| 1048576 | 7347 | 1024 | 1301 | 380 | 590 |
+| 1 | 0.8 | 0.4 | 4.9 | 0.3 | 1.4 |
+| 16 | 13 | 5.9 | 79 | 5.0 | 23 |
+| 256 | 203 | 93 | 1240 | 68 | 319 |
+| 4096 | 2550 | 753 | 2151 | 917 | 1242 |
+| 65536 | 8565 | 1471 | 2008 | 1256 | 1422 |
+| 262144 | 8360 | 1174 | 2199 | 1504 | 1662 |
+| 1048576 | 7338 | 1184 | 2234 | 1127 | 1416 |
 
 `from`, to node 1:
 
 | Words | `memcpy` | `gpu-local` | `gpu` | `cpu` |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 0.9 | 0.3 | 0.3 | 1.5 |
-| 16 | 14 | 5.0 | 4.0 | 23 |
-| 256 | 226 | 79 | 66 | 264 |
-| 4096 | 3392 | 1133 | 472 | 638 |
-| 65536 | 10583 | 4243 | 822 | 790 |
-| 262144 | 20123 | 7155 | 742 | 664 |
-| 1048576 | 23689 | 11438 | 640 | 517 |
+| 1 | 0.9 | 0.3 | 0.3 | 1.4 |
+| 16 | 14 | 5.0 | 4.2 | 23 |
+| 256 | 226 | 79 | 68 | 310 |
+| 4096 | 3397 | 1098 | 677 | 1271 |
+| 65536 | 10539 | 4181 | 1179 | 1252 |
+| 262144 | 20404 | 6572 | 1242 | 1363 |
+| 1048576 | 23715 | 10384 | 821 | 680 |
+
+Runs between nodes vary by up to a third from one to the next.
 
 What they show:
 
 - **Small messages are latency.** Up to a few hundred words, a message costs a
   fixed time: from the GPU within a node, about 20 µs to send and 25 µs to
   receive, where `omp_target_memcpy` alone takes about 10 µs.
-- **Sending within a node stops at about 1 GB/s, and the GPU is not why.** The
-  copy from the device alone reaches 7 to 8 GB/s, but `gpu-local` stays near
-  1 GB/s, and `cpu-local`, with no GPU, near 1.3 GB/s. What they share is the
-  send's own copy of the message into its fragment, by the array's
-  `type_info`, an element at a time, into newly allocated memory. It was not
-  measured apart.
-- **Receiving within a node has no such copy,** since the host copies the
-  message straight into the device's arena, and reaches 11 GB/s, half the
-  floor.
-- **Between nodes, the GPU and the CPU are about equal up to 65536 words,** at
-  500 to 800 MB/s, so the limit there is on the host: the encoding and TCP.
-- **Sending from the GPU to node 2 falls at 2^18 words and above,** to 335 to
-  380 MB/s, where the CPU keeps 590 to 730. The callback writes to TCP on the
-  plugin's server thread, which flow control can stall, which may be why, but
-  this was not measured apart.
+- **Sending within a node stops at about 1.2 GB/s from the GPU and 2.2 GB/s
+  from the CPU,** where the copy from the device alone reaches 7 to 8 GB/s.
+  The GPU's send copies the array twice on the host, from the device into a
+  temporary and into the message's fragment, both newly allocated memory; the
+  CPU's copies it once. Copying arrays of scalars as a block raised these from
+  1.0 and 1.3 GB/s, and it was the array's copy an element at a time by its
+  `type_info` that had limited them.
+- **Receiving within a node has no second copy,** since the host copies the
+  message straight into the device's arena, and reaches about 10 GB/s, near
+  half the floor.
+- **Between nodes, from 65536 words up, the GPU and the CPU are about equal,**
+  at about 0.7 to 1.7 GB/s, so the limit is on the host: the encoding and
+  TCP. At 4096 words a receive on the GPU, at 677 MB/s, is half the CPU's. Sending 2^18
+  words or more from the GPU fell to 335 to 380 MB/s while arrays were encoded
+  an element at a time; encoded as a block they reach 1.1 to 1.5 GB/s, so the
+  callback's TCP writes were not what limited them.

@@ -952,18 +952,18 @@ Neither uses the C++ standard library; `rpc.h` needs none.
       to `main` and to node 2, beside `omp_target_memcpy` alone, the floor.
       Done (`benchmarks/array-messages`, with its results), with these
       findings:
-      - **A send within a node stops near 1 GB/s,** where the copy from the
-        device reaches 7 to 8; the same send from the CPU stops at 1.3. The
-        send's second copy, an element at a time by `type_info` into new
-        memory, is the common part; copying arrays of scalars as a block
-        is the obvious change to try.
-      - **A receive has no second copy,** and reaches 11 GB/s.
-      - **Between nodes the host's encoding and TCP are the limit,** at 500
-        to 800 MB/s from the GPU and from the CPU alike.
-      - **From the GPU to node 2, messages of 2^18 words and more fall** to
-        about 350 MB/s, where the CPU keeps 590 to 730. Step 5's question
-        of the callback's TCP writes stalling the server thread may be
-        why; not measured apart.
+      - **A send within a node stopped near 1 GB/s,** where the copy from
+        the device reaches 7 to 8, because the message's copy went an element
+        at a time by `type_info`. Arrays of scalars are now copied and
+        encoded as blocks: 1.2 GB/s from the GPU, 2.2 from the CPU. What
+        remains from the GPU is a second copy on the host, into a temporary
+        and then the fragment, which writing straight into the fragment
+        would remove.
+      - **A receive has no second copy,** and reaches about 10 GB/s.
+      - **Between nodes the host's encoding and TCP are the limit** from
+        65536 words up, at 0.7 to 1.7 GB/s from the GPU and the CPU alike. Large sends from the
+        GPU fell to about 350 MB/s only while arrays were encoded an element
+        at a time, so the callback's TCP writes were not the limit.
       - **Small messages cost 20 to 25 µs each** from the GPU within a node.
 
    Not decided, for later: `target nowait` is not supported by merkc yet;

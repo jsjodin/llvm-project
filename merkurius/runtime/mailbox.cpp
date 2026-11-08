@@ -60,6 +60,29 @@ using namespace merkurius::runtime;
 
 Word CopyTyped(Word value, const Type &type, Fragment &fragment);
 
+// Whether a value of the type is its word in a copy.
+bool CopiedAsItIs(const TypeCtor *ctor) {
+  switch (ctor->kind) {
+  case Int:
+  case Uint:
+  case Int8:
+  case Int16:
+  case Int32:
+  case Int64:
+  case Uint8:
+  case Uint16:
+  case Uint32:
+  case Uint64:
+  case Float:
+  case Char:
+  case Enum:
+  case Dummy:
+    return true;
+  default:
+    return false;
+  }
+}
+
 Word CopyValue(Word value, Word type, const Environment *environment,
     Fragment &fragment) {
   Type resolved{Resolve(type, environment)};
@@ -153,6 +176,11 @@ Word CopyTyped(Word value, const Type &type, Fragment &fragment) {
         static_cast<Word *>(fragment.Allocate(sizeof(Word) * (1 + size)))};
     copy[0] = size;
     Word element{(Word{0} << kTagBits) | kVariableTag};
+    // What is copied as it is, as CopyTyped returns it, is copied as a block.
+    if (size != 0 && CopiedAsItIs(Resolve(element, &type.environment).ctor)) {
+      std::memcpy(copy + 1, array + 1, sizeof(Word) * size);
+      return reinterpret_cast<Word>(copy);
+    }
     for (Word i{0}; i < size; ++i) {
       copy[1 + i] =
           CopyValue(array[1 + i], element, &type.environment, fragment);
