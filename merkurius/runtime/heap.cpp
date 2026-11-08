@@ -22,6 +22,7 @@
 #include "fragment.h"
 #include "heap.h"
 #include "process.h"
+#include "roots.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -81,6 +82,9 @@ char *Chunk(std::size_t bytes) {
 } // namespace
 
 extern "C" void *merk_alloc_slow(std::int64_t bytes) {
+  if (merkurius::runtime::CheckRootsEnabled()) {
+    merkurius::runtime::CheckRoots(__builtin_frame_address(0));
+  }
   std::size_t size{static_cast<std::size_t>(bytes)};
   std::size_t chunkSize{chunkBytes.load(std::memory_order_relaxed)};
   if (chunkSize == 0) {

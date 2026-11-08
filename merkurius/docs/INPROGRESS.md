@@ -1049,6 +1049,36 @@ no process to collect.
    Mercury frame on calls into C, and a test mode that lists roots at a
    safepoint and checks each against its type. No collection yet.
 
+   Split into 5a and 5b, agreed 2026-11-08.
+
+   5a, built 2026-11-08: the table, the walk and the test mode, with monomorphic
+   types (`runtime/roots.cpp`). `MERK_CHECK_ROOTS` walks the stack at each slow
+   path, and checks each root against its type.
+   - **D6, finding a module's table, decided 2026-11-08, changed when built.** Each
+     module's table is in section `merk_root_types`, found by `__start_` and
+     `__stop_`, and points at that object's own `__LLVM_StackMaps`, so link order
+     does not matter and no record count is needed. A module with no statepoint has
+     no table, or the symbol would be undefined.
+   - **D7, the last Mercury frame, decided 2026-11-08: not recorded.** C++ enters
+     Mercury only at the bottom of a stack (`CallClosure`, `merk_main`), so a walk
+     follows frame pointers from `merk_alloc_slow` and ends at the first return
+     address with no record. A foreign export would change this.
+   - A statepoint's stack map has a pair for each relocation still used, in the
+     order of `getGCRelocates`, so the type indices follow those, not `gc-live`.
+   - A frame's stack pointer is computed from its frame pointer and the function's
+     stack size, as a tail-calling callee may have popped arguments.
+   - A function with a real bundle is Mercury code whatever its convention: main
+     is inlined into `merk_main`.
+   - A monomorphic term's entry is a static `type_info` built from its name. A
+     word, a term with a type variable and a higher-order type are unresolved.
+
+   5b: a polymorphic root's `type_info`.
+   - **D5, naming a word's type variable, decided 2026-11-08.** MLIRGen puts the
+     type variable on the operations and arguments that make a `!merk.word`, as an
+     attribute, and the procedure says which value holds each variable's
+     `type_info`. A missing one is a compile error. Rejected: `!merk.word<"T0">`, as
+     a callee's `T0` is not its caller's, so every polymorphic call needs a cast.
+
 The collector itself, and `bind`'s barrier, come after this.
 
 **Decided:**

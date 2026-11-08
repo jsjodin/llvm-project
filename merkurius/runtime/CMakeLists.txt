@@ -7,6 +7,7 @@ add_library(merkrt STATIC
   encode.cpp
   exception.cpp
   heap.cpp
+  roots.cpp
   mailbox.cpp
   process.cpp
   main.cpp
