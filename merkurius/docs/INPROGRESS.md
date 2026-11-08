@@ -885,7 +885,7 @@ closure of a procedure with N captures.
 
 **Pieces,** each its own commit: the layout, unchanged behaviour (done); the
 table prefix (done); existential
-values in messages; closures in the copy, and sending them; `spawn` and `monitor`
+values in messages (done); closures in the copy, and sending them; `spawn` and `monitor`
 copying.
 
 **Left open by the scheduler:**

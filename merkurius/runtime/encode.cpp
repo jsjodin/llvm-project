@@ -31,7 +31,7 @@
 // time it is met, the definition of one of constructors: each functor's
 // name, arity and arguments' types, with its type parameters by number.
 //
-// Not yet: existentially typed constructors and closures, which the local
+// Not yet: existentially typed constructors, and closures, which the local
 // copy rejects too.
 //
 //===----------------------------------------------------------------------===//

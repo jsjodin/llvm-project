@@ -29,6 +29,8 @@ struct Functor {
   std::uint32_t arity;
   std::uint8_t tag;
   std::uint8_t hidden;
+  // Of which the first are type_infos, and the rest typeclass_infos.
+  std::uint8_t hiddenTypeInfos;
   std::int32_t secondary;
   std::int64_t constant;
   const Word *fields;
