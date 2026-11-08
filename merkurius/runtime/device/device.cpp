@@ -22,20 +22,97 @@
 // buffer when it loads the image.
 extern "C" rpc::Client __llvm_rpc_client;
 
-extern "C" void *malloc(unsigned long);
 // The OpenMP device runtime's, by the device's steady clock, whose
 // frequency the plugin gives it.
 extern "C" double omp_get_wtime(void);
+extern "C" int omp_get_device_num(void);
 
+using merkurius::runtime::rpcChunk;
 using merkurius::runtime::rpcPoll;
 using merkurius::runtime::rpcSend;
 
-// A cell of the heap, which the device does not have: the OpenMP device
-// runtime's malloc, which is LLVM libc's GPU allocator when the OpenMP
-// device runtime is built with libc, and otherwise a bump allocator of
-// 1 MiB. Nothing is freed yet (docs/INPROGRESS.md, The device's side of
-// the first slice, step 6, the device's arena).
-extern "C" void *merk_device_alloc(uint64_t bytes) { return malloc(bytes); }
+namespace {
+
+// A chunk of the arena, which the host allocated on the device: its size
+// in bytes, and how many of them are taken, this header's included. The
+// count may pass the size, by the allocations that did not fit.
+struct Chunk {
+  uint64_t size;
+  uint64_t used;
+};
+
+constexpr uint64_t kChunkBytes{uint64_t{1} << 20};
+
+// The arena's current chunk, or none, which the host clears when it frees
+// the chunks, once no region is running; and whether a wave is asking the
+// host for a new chunk. One asks at a time: a chunk that lost a race to
+// become the current one would be wasted but for one cell, and a GPU has
+// thousands of waves.
+struct Arena {
+  Chunk *current;
+  uint32_t refilling;
+};
+Arena arena{nullptr, 0};
+
+// A new chunk from the host, the current one from now on, of at least
+// `bytes` after its header, of which the first `bytes` are taken.
+void *NewChunk(uint64_t bytes) {
+  uint64_t wanted{sizeof(Chunk) + bytes};
+  Chunk *chunk{nullptr};
+  uint64_t size{0};
+  {
+    rpc::Client::Port port{__llvm_rpc_client.open<rpcChunk>()};
+    port.send([&](rpc::Buffer *buffer, uint32_t) {
+      buffer->data[0] = static_cast<uint64_t>(omp_get_device_num());
+      buffer->data[1] = reinterpret_cast<uint64_t>(&arena);
+      buffer->data[2] = wanted > kChunkBytes ? wanted : kChunkBytes;
+    });
+    port.recv([&](rpc::Buffer *buffer, uint32_t) {
+      chunk = reinterpret_cast<Chunk *>(buffer->data[0]);
+      size = buffer->data[1];
+    });
+  }
+  chunk->size = size;
+  chunk->used = wanted;
+  __atomic_store_n(&arena.current, chunk, __ATOMIC_RELEASE);
+  return chunk + 1;
+}
+
+} // namespace
+
+// A cell, or an array, in the device's arena (docs/INPROGRESS.md, The
+// device's side of the first slice, step 6): bumped from the current
+// chunk with an atomic add. When it does not fit, one lane on the device
+// asks the host for a new chunk and takes its cell from it; the others
+// sleep and try again in it.
+extern "C" void *merk_device_alloc(uint64_t bytes) {
+  bytes = (bytes + 7) & ~uint64_t{7};
+  for (;;) {
+    Chunk *chunk{__atomic_load_n(&arena.current, __ATOMIC_ACQUIRE)};
+    if (chunk) {
+      uint64_t at{__atomic_fetch_add(&chunk->used, bytes, __ATOMIC_RELAXED)};
+      if (at + bytes <= chunk->size) {
+        return reinterpret_cast<char *>(chunk) + at;
+      }
+    }
+    uint32_t idle{0};
+    if (rpc::is_first_lane(rpc::get_lane_mask()) &&
+        __atomic_compare_exchange_n(&arena.refilling, &idle, 1, false,
+            __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+      // Another wave may have made one since this one looked.
+      void *cell{nullptr};
+      if (__atomic_load_n(&arena.current, __ATOMIC_ACQUIRE) == chunk) {
+        cell = NewChunk(bytes);
+      }
+      __atomic_store_n(&arena.refilling, 0, __ATOMIC_RELEASE);
+      if (cell) {
+        return cell;
+      }
+    } else {
+      __builtin_amdgcn_s_sleep(127);
+    }
+  }
+}
 
 // Sends a one-word message to the mailbox whose handle is the cell of five
 // words at `handle`. The host queues it, or sends it on to another node,

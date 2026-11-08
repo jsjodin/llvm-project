@@ -1,0 +1,9 @@
+A region that allocates without end stops the program once the device's
+arena reaches its limit, here 64 MiB, instead of filling the GPU's memory.
+The program ends although the kernel is still running, waiting for the
+host's answer.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/Inputs/arena-forever.m -o %t
+RUN: not %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_DEVICE_ARENA_BYTES=67108864 timeout -k 1 60 %t 2>&1 | FileCheck %s
+CHECK: Mercury runtime: the devices' arenas are full: see MERK_DEVICE_ARENA_BYTES
