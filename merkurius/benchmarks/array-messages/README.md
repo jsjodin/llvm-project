@@ -15,6 +15,7 @@ one direction: `to`, node 1 sends the arrays; `from`, node 1 receives them.
 | --- | --- | --- |
 | `cpu` | `main` | node 2's `main`, another process, over TCP on loopback |
 | `gpu` | a target region on the GPU | node 2's `main`, over TCP on loopback |
+| `gpu`, `partner-gpu` | a target region on the GPU | a target region of node 2, another process using the same GPU, over TCP on loopback |
 | `cpu-local` | `main` | its own mailbox |
 | `gpu-local` | a target region on the GPU | `main`, before or after the region |
 | `memcpy` | `omp_target_memcpy` alone, from `main`, no kernel running (`memcpy-floor.cpp`) | |
@@ -92,3 +93,23 @@ What they show:
   words or more from the GPU fell to 335 to 380 MB/s while arrays were encoded
   an element at a time; encoded as a block they reach 1.1 to 1.5 GB/s, so the
   callback's TCP writes were not what limited them.
+
+## Between two GPU regions
+
+2026-11-08, two processes on this machine, each a node with target regions
+on the one GPU, over TCP on loopback, 64 MiB a measurement. MB/s, the median
+of three runs, every array of the right size and content:
+
+| Words | `to` | `from` |
+| ---: | ---: | ---: |
+| 1 | 0.3 | 0.3 |
+| 16 | 4.7 | 4.7 |
+| 256 | 69 | 72 |
+| 4096 | 776 | 843 |
+| 65536 | 1315 | 1347 |
+| 262144 | 1488 | 1283 |
+| 1048576 | 1179 | 835 |
+
+They are about what one GPU and a CPU reach between nodes, so the host's
+encoding and TCP are still the limit at these sizes. Two processes share one
+GPU here, so two GPUs in two machines, and a real network, may differ.

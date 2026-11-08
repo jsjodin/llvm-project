@@ -7,6 +7,8 @@
 % which has the region's launch and the making of the array.
 %
 % Usage, one process for each node:
+%   arraymessages partner-gpu           node 2, its operations in target
+%                                       regions
 %   arraymessages partner               node 2: listens, prints its port,
 %                                       and serves until told to stop
 %   arraymessages cpu PORT MIB          node 1's main, against node 2
@@ -29,7 +31,9 @@
 main(!IO) :-
     io.command_line_arguments(Arguments, !IO),
     ( if Arguments = ["partner"] then
-        partner(!IO)
+        partner(no, !IO)
+    else if Arguments = ["partner-gpu"] then
+        partner(yes, !IO)
     else if
         Arguments = [Where, Port, MiBString],
         ( Where = "cpu" ; Where = "gpu" ),
@@ -52,8 +56,10 @@ main(!IO) :-
 %---------------------------------------------------------------------------%
 % Node 2.
 
-:- pred partner(io::di, io::uo) is det.
-partner(!IO) :-
+    % With OnGpu, each of its operations is a target region of its own, so
+    % that the arena of what it receives goes at the operation's end.
+:- pred partner(bool::in, io::di, io::uo) is det.
+partner(OnGpu, !IO) :-
     new_mailbox(Commands : mailbox(arrays), !IO),
     new_mailbox(Data : mailbox(arrays), !IO),
     new_mailbox(Hello : mailbox(mailbox(arrays)), !IO),
@@ -68,7 +74,7 @@ partner(!IO) :-
         receive(Hello, any, infinity, GotNode1, !IO),
         (
             GotNode1 = yes(Node1),
-            serve(Commands, Data, Node1, !IO)
+            serve(OnGpu, Commands, Data, Node1, !IO)
         ;
             GotNode1 = no
         )
@@ -81,9 +87,9 @@ partner(!IO) :-
     % A command is [Operation, Words, Rounds]: 1 receives Rounds arrays and
     % answers with how many had Words elements, 2 sends Rounds arrays of
     % Words elements, and anything else ends.
-:- pred serve(mailbox(arrays)::in, mailbox(arrays)::in, mailbox(arrays)::in,
-    io::di, io::uo) is det.
-serve(Commands, Data, Node1, !IO) :-
+:- pred serve(bool::in, mailbox(arrays)::in, mailbox(arrays)::in,
+    mailbox(arrays)::in, io::di, io::uo) is det.
+serve(OnGpu, Commands, Data, Node1, !IO) :-
     receive(Commands, any, infinity, Got, !IO),
     (
         Got = yes(Command),
@@ -91,12 +97,24 @@ serve(Commands, Data, Node1, !IO) :-
         Words = Command ^ elem(1),
         Rounds = Command ^ elem(2),
         ( if Operation = 1 then
-            receive_arrays(Data, Words, Rounds, 0, Right, !IO),
+            (
+                OnGpu = yes,
+                receive_on_gpu(Data, Words, Rounds, Right, !IO)
+            ;
+                OnGpu = no,
+                receive_arrays(Data, Words, Rounds, 0, Right, !IO)
+            ),
             send(Node1, array.init(1, Right), !IO),
-            serve(Commands, Data, Node1, !IO)
+            serve(OnGpu, Commands, Data, Node1, !IO)
         else if Operation = 2 then
-            send_arrays(Node1, Words, Rounds, !IO),
-            serve(Commands, Data, Node1, !IO)
+            (
+                OnGpu = yes,
+                send_on_gpu(Node1, Words, Rounds, !IO)
+            ;
+                OnGpu = no,
+                send_arrays(Node1, Words, Rounds, !IO)
+            ),
+            serve(OnGpu, Commands, Data, Node1, !IO)
         else
             true
         )

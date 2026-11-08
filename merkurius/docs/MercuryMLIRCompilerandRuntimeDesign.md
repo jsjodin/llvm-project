@@ -3107,7 +3107,9 @@ node 1 to node 2. Processes on the CPU come after.
      They do not depend on TCP, since a process receives only from its own
      mailboxes.
    - **First benchmark:** ping-pong between the GPU and node 2, over loopback
-     on one machine, then between two machines.
+     on one machine, then between two machines. Done on one machine, and
+     also between a GPU region of each of two nodes, processes sharing the
+     machine's GPU (`INPROGRESS.md`, step 7); two machines are still to do.
 2. **Exceptions, enough to end a process:** `throw`, and an exception nothing
    catches ends the process with it as the exit reason. `catch` comes later;
    ending a process needs no unwinding.

@@ -15,6 +15,7 @@ their average.
 | `cpu` | `main` | node 2's `main`, another process, over TCP on loopback |
 | `gpu` | a target region on the GPU | node 2's `main`, over TCP on loopback |
 | `cpu-local` | `main` | an echo thread in node 1, in C, through the runtime's mailboxes |
+| `gpu`, `partner-gpu` | a target region on the GPU | a target region of node 2, another process using the same GPU, over TCP on loopback |
 | `gpu-local` | a target region on the GPU | the echo thread |
 
 A target region's time includes its launch, which `launch`, an empty
@@ -108,3 +109,16 @@ default of 50:
 
 The spin yields, so `cpu` with both nodes pinned to one core takes about 28
 µs with it, and about 39 without.
+
+### Between two GPU regions
+
+2026-11-08, the same build, 20000 rounds, five runs: two processes on this
+machine, each a node with a region on the one GPU, over TCP on loopback, as
+two machines would be but for the network. Microseconds a round:
+
+| Node 1 / node 2 | Runs |
+| --- | --- |
+| GPU / GPU | 45.2, 45.7, 46.4, 44.9, 44.4 |
+| GPU / CPU | 35.8, 34.3, 33.0, 36.5, 35.8 |
+| CPU / GPU | 33.7, 35.9, 37.7, 38.0, 37.4 |
+| CPU / CPU | 25.3, 25.6, 24.5, 25.3, 21.6 |

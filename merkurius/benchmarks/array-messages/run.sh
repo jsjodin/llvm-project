@@ -32,6 +32,8 @@ if [[ -n "$arch" ]]; then
   export OMP_TARGET_OFFLOAD=MANDATORY
   python3 -I "$pair" "$out/arraymessages" cpu "$mib"
   python3 -I "$pair" "$out/arraymessages" gpu "$mib"
+  echo "gpu below: with node 2 also on the GPU, another process"
+  python3 -I "$pair" "$out/arraymessages" gpu "$mib" partner-gpu
   "$out/arraymessages" cpu-local "$mib"
   "$out/arraymessages" gpu-local "$mib"
   "$out/memcpy-floor" "$mib"

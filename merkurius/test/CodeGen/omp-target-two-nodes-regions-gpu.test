@@ -1,0 +1,8 @@
+Two regions on the machine's GPU, of two processes, each a node of its own,
+exchanging integers over TCP as two machines would: the program of
+omp-target-two-nodes.m, compiled by the driver for it.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-two-nodes.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %python %S/Inputs/two-nodes.py %t both-regions \
+RUN:   | FileCheck %S/omp-target-two-nodes.m --check-prefix=BOTH --match-full-lines --strict-whitespace

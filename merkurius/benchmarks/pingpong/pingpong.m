@@ -8,6 +8,7 @@
 % Usage, one process for each node:
 %   pingpong partner                 node 2: listens, prints its port,
 %                                    and answers until -1
+%   pingpong partner-gpu             node 2, answering from a target region
 %   pingpong cpu PORT ROUNDS         node 1's main, against node 2
 %   pingpong gpu PORT ROUNDS         node 1's target region, against node 2
 %   pingpong cpu-local ROUNDS        node 1's main, against its echo thread
@@ -27,7 +28,9 @@ warm_up = 100.
 main(!IO) :-
     io.command_line_arguments(Arguments, !IO),
     ( if Arguments = ["partner"] then
-        partner(!IO)
+        partner("cpu", !IO)
+    else if Arguments = ["partner-gpu"] then
+        partner("gpu", !IO)
     else if
         Arguments = [Where, Port, RoundsString],
         ( Where = "cpu" ; Where = "gpu" ),
@@ -49,8 +52,8 @@ main(!IO) :-
 %---------------------------------------------------------------------------%
 % Node 2.
 
-:- pred partner(io::di, io::uo) is det.
-partner(!IO) :-
+:- pred partner(string::in, io::di, io::uo) is det.
+partner(Where, !IO) :-
     new_mailbox(Partner : mailbox(int), !IO),
     new_mailbox(Hello : mailbox(mailbox(int)), !IO),
     register("partner", Partner, _, !IO),
@@ -63,7 +66,11 @@ partner(!IO) :-
         receive(Hello, any, infinity, GotNode1, !IO),
         (
             GotNode1 = yes(Node1),
-            answer(Partner, Node1, !IO)
+            ( if Where = "gpu" then
+                answer_on_gpu(Partner, Node1, !IO)
+            else
+                answer(Partner, Node1, !IO)
+            )
         ;
             GotNode1 = no
         )
@@ -73,10 +80,16 @@ partner(!IO) :-
         io.set_exit_status(1, !IO)
     ).
 
-    % Answers each N with N + 1 until -1.
+:- pred answer_on_gpu(mailbox(int)::in, mailbox(int)::in, io::di, io::uo)
+    is det.
+answer_on_gpu(Partner, Node1, !IO) :-
+    %$omp target
+    answer(Partner, Node1, !IO).
+
+    % Answers each N with N + 1 until -1, or 20 seconds without a message.
 :- pred answer(mailbox(int)::in, mailbox(int)::in, io::di, io::uo) is det.
 answer(Partner, Node1, !IO) :-
-    receive(Partner, any, infinity, Got, !IO),
+    receive(Partner, any, after(20000), Got, !IO),
     ( if Got = yes(N), N >= 0 then
         send(Node1, N + 1, !IO),
         answer(Partner, Node1, !IO)

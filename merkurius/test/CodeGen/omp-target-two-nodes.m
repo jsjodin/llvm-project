@@ -14,6 +14,8 @@
 %
 % RUN: merkc -fopenmp %libomp-flags %s -o %t && %libomp-env %python %S/Inputs/two-nodes.py %t first-slice | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc %s -o %t.sequential && %python %S/Inputs/two-nodes.py %t.sequential first-slice | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: %libomp-env %python %S/Inputs/two-nodes.py %t both-regions | FileCheck %s --check-prefix=BOTH --match-full-lines --strict-whitespace
+% RUN: %python %S/Inputs/two-nodes.py %t.sequential both-regions | FileCheck %s --check-prefix=BOTH --match-full-lines --strict-whitespace
 % REQUIRES: libomp
 %
 % OUTPUT:first-slice:
@@ -23,6 +25,17 @@
 % OUTPUT-NEXT:partner: the region's mailbox: found
 % OUTPUT-NEXT:partner: answered: 100
 % OUTPUT-NEXT:partner: stopped
+%
+% With the partner's answers from a target region too: with a GPU, a message
+% goes from one device's region to another's through both hosts and TCP
+% (omp-target-two-nodes-regions-gpu.test).
+% BOTH:both-regions:
+% BOTH-NEXT:region: connected
+% BOTH-NEXT:region: rounds in order: 100
+% BOTH-NEXT:partner: listening
+% BOTH-NEXT:partner: the region's mailbox: found
+% BOTH-NEXT:partner: answered: 100
+% BOTH-NEXT:partner: stopped
 
 :- module omp_target_two_nodes.
 :- interface.
@@ -37,19 +50,25 @@ last = 200.
 main(!IO) :-
     io.command_line_arguments(Arguments, !IO),
     ( if Arguments = ["partner"] then
-        partner(!IO)
+        partner(no, !IO)
+    else if Arguments = ["partner-region"] then
+        partner(yes, !IO)
     else if Arguments = ["region", Port] then
         region(Port, !IO)
     else
-        io.write_string("usage: partner | region PORT\n", !IO),
+        io.write_string("usage: partner | partner-region | region PORT\n", !IO),
         io.set_exit_status(2, !IO)
     ).
 
 %---------------------------------------------------------------------------%
-% Node 2, on the CPU.
+% Node 2, answering from main or from a target region.
 
-:- pred partner(io::di, io::uo) is det.
-partner(!IO) :-
+:- type in_region
+    --->    no
+    ;       yes.
+
+:- pred partner(in_region::in, io::di, io::uo) is det.
+partner(InRegion, !IO) :-
     new_mailbox(Partner : mailbox(int), !IO),
     new_mailbox(Hello : mailbox(mailbox(int)), !IO),
     register("partner", Partner, _, !IO),
@@ -63,7 +82,13 @@ partner(!IO) :-
         (
             GotRegion = yes(Region),
             io.write_string("the region's mailbox: found\n", !IO),
-            answer(Partner, Region, 0, Answered, !IO),
+            (
+                InRegion = no,
+                answer(Partner, Region, 0, Answered, !IO)
+            ;
+                InRegion = yes,
+                answer_in_region(Partner, Region, Answered, !IO)
+            ),
             io.write_string("answered: " ++ int_to_string(Answered) ++ "\n",
                 !IO),
             io.write_string("stopped\n", !IO)
@@ -75,6 +100,12 @@ partner(!IO) :-
         Listening = error(Error),
         io.write_string("listen: " ++ Error ++ "\n", !IO)
     ).
+
+:- pred answer_in_region(mailbox(int)::in, mailbox(int)::in, int::out,
+    io::di, io::uo) is det.
+answer_in_region(Partner, Region, Answered, !IO) :-
+    %$omp target
+    answer(Partner, Region, 0, Answered, !IO).
 
     % Answers each N with N + 1 until -1.
 :- pred answer(mailbox(int)::in, mailbox(int)::in, int::in, int::out,
