@@ -15,6 +15,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "../device-ring.h"
 #include "../rpc-opcodes.h"
 #include "shared/rpc.h"
 
@@ -29,8 +30,11 @@ extern "C" int omp_get_device_num(void);
 
 using merkurius::runtime::rpcChunk;
 using merkurius::runtime::rpcGiveArray;
-using merkurius::runtime::rpcPoll;
-using merkurius::runtime::rpcPollArray;
+using merkurius::runtime::DeviceRing;
+using merkurius::runtime::kRingCacheSlots;
+using merkurius::runtime::kRingSlots;
+using merkurius::runtime::rpcAttach;
+using merkurius::runtime::rpcDrain;
 using merkurius::runtime::rpcSend;
 using merkurius::runtime::rpcSendArray;
 using merkurius::runtime::rpcTakeArray;
@@ -52,11 +56,24 @@ constexpr uint64_t kChunkBytes{uint64_t{1} << 20};
 // host for a new chunk. One asks at a time: a chunk that lost a race to
 // become the current one would be wasted but for one cell, and a GPU has
 // thousands of waves.
+//
+// The arena also has the table of the rings this device has attached, by
+// the mailbox's slot, each in the arena, which the host clears with it.
+struct RingEntry {
+  uint64_t slot, generation, secret;
+  DeviceRing *ring;
+  // The next message to take: only this device's receiver moves it.
+  uint64_t head;
+  // The next ring whose mailbox's slot falls in the same place of the table.
+  RingEntry *next;
+};
+
 struct Arena {
   Chunk *current;
+  RingEntry *rings[kRingCacheSlots];
   uint32_t refilling;
 };
-Arena arena{nullptr, 0};
+Arena arena{nullptr, {}, 0};
 
 // A new chunk from the host, the current one from now on, of at least
 // `bytes` after its header, of which the first `bytes` are taken.
@@ -179,28 +196,6 @@ extern "C" void merk_device_send_array(
 
 namespace {
 
-// One poll of the mailbox: whether it had a message, which is then in
-// `message`.
-bool Poll(const uint64_t *handle, uint64_t *message) {
-  rpc::Client::Port port{__llvm_rpc_client.open<rpcPoll>()};
-  port.send([&](rpc::Buffer *buffer, uint32_t) {
-    for (int i{0}; i < 5; ++i) {
-      buffer->data[i] = handle[i];
-    }
-  });
-  bool found{false};
-  port.recv([&](rpc::Buffer *buffer, uint32_t) {
-    found = buffer->data[0] != 0;
-    *message = buffer->data[1];
-  });
-  return found;
-}
-
-
-} // namespace
-
-namespace {
-
 // Calls `poll` until it finds a message or `milliseconds` pass, or forever
 // if it is negative; whether it found one.
 template <typename Poll> bool Wait(int64_t milliseconds, Poll poll) {
@@ -218,56 +213,128 @@ template <typename Poll> bool Wait(int64_t milliseconds, Poll poll) {
   }
 }
 
-// One poll of a mailbox of arrays: whether it had a message, whose size
-// is then in `size`.
-bool PollArray(const uint64_t *handle, uint64_t *size) {
-  rpc::Client::Port port{__llvm_rpc_client.open<rpcPollArray>()};
+// The entry of the mailbox's ring, attaching it the first time, or null if
+// the mailbox is closed.
+RingEntry *RingOf(const uint64_t *handle, bool array) {
+  RingEntry **bucket{&arena.rings[handle[2] % kRingCacheSlots]};
+  for (RingEntry *entry{__atomic_load_n(bucket, __ATOMIC_ACQUIRE)}; entry;
+       entry = entry->next) {
+    if (entry->slot == handle[2] && entry->generation == handle[3] &&
+        entry->secret == handle[4]) {
+      return entry;
+    }
+  }
+  DeviceRing *ring{nullptr};
+  uint64_t head{0};
+  {
+    rpc::Client::Port port{__llvm_rpc_client.open<rpcAttach>()};
+    port.send([&](rpc::Buffer *buffer, uint32_t) {
+      for (int i{0}; i < 5; ++i) {
+        buffer->data[i] = handle[i];
+      }
+      buffer->data[5] = static_cast<uint64_t>(omp_get_device_num());
+      buffer->data[6] = array;
+    });
+    port.recv([&](rpc::Buffer *buffer, uint32_t) {
+      ring = reinterpret_cast<DeviceRing *>(buffer->data[0]);
+      head = buffer->data[1];
+    });
+  }
+  if (!ring) {
+    return nullptr;
+  }
+  // Only a mailbox's one receiver adds its entry, but other mailboxes' may
+  // be added to the same place at once.
+  auto *entry{static_cast<RingEntry *>(merk_device_alloc(sizeof(RingEntry)))};
+  *entry = {handle[2], handle[3], handle[4], ring, head,
+      __atomic_load_n(bucket, __ATOMIC_RELAXED)};
+  while (!__atomic_compare_exchange_n(bucket, &entry->next, entry, true,
+      __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+  }
+  return entry;
+}
+
+// Asks the host for the messages that did not fit in the ring.
+void Drain(const uint64_t *handle) {
+  rpc::Client::Port port{__llvm_rpc_client.open<rpcDrain>()};
   port.send([&](rpc::Buffer *buffer, uint32_t) {
     for (int i{0}; i < 5; ++i) {
       buffer->data[i] = handle[i];
     }
   });
-  bool found{false};
-  port.recv([&](rpc::Buffer *buffer, uint32_t) {
-    found = buffer->data[0] != 0;
-    *size = buffer->data[1];
-  });
-  return found;
+  port.recv([](rpc::Buffer *, uint32_t) {});
+}
+
+// One look at the ring, with no call of the host unless messages wait
+// outside it: whether it has a message, whose slot is then in `value`, and
+// the ring's entry. The message stays until Taken.
+bool Look(const uint64_t *handle, bool array, RingEntry *&entry,
+    uint64_t *value) {
+  entry = RingOf(handle, array);
+  if (!entry) {
+    return false;
+  }
+  DeviceRing *ring{entry->ring};
+  if (entry->head == __atomic_load_n(&ring->tail, __ATOMIC_ACQUIRE)) {
+    // What waits outside the ring is in it after the drain, so that a
+    // receive with no time to wait still finds it.
+    if (!__atomic_load_n(&ring->spilled, __ATOMIC_ACQUIRE)) {
+      return false;
+    }
+    Drain(handle);
+    if (entry->head == __atomic_load_n(&ring->tail, __ATOMIC_ACQUIRE)) {
+      return false;
+    }
+  }
+  *value = __atomic_load_n(
+      &ring->slots[entry->head % kRingSlots], __ATOMIC_RELAXED);
+  return true;
+}
+
+void Taken(RingEntry *entry) {
+  __atomic_store_n(&entry->ring->head, ++entry->head, __ATOMIC_RELEASE);
 }
 
 } // namespace
 
 // Takes the oldest message of the mailbox whose handle is the cell of five
-// words at `handle`, polling the host, which has the mailbox
-// (docs/INPROGRESS.md, The device's side of the first slice, Decision 2),
-// until it has one or `milliseconds` pass, or forever if it is negative.
-// It returns 1 with the message in `message`, or 0.
+// words at `handle`, looking at its ring (device-ring.h) until it has one
+// or `milliseconds` pass, or forever if it is negative. It returns 1 with
+// the message in `message`, or 0.
 extern "C" int merk_device_receive(
     const uint64_t *handle, int64_t milliseconds, uint64_t *message) {
-  return Wait(milliseconds, [&]() { return Poll(handle, message); });
+  RingEntry *entry{nullptr};
+  if (!Wait(milliseconds,
+          [&]() { return Look(handle, false, entry, message); })) {
+    return 0;
+  }
+  Taken(entry);
+  return 1;
 }
 
-// As merk_device_receive, for a mailbox of arrays of one-word elements: a
-// poll gives the oldest message's size, the device allocates the array in
-// its arena, and the host copies the message there, given its address. The
-// message stays the oldest between the two, since only the region that has
-// the handle receives from the mailbox.
+// As merk_device_receive, for a mailbox of arrays of one-word elements: the
+// ring gives the oldest message's size, the device allocates the array in
+// its arena, and the host copies the message there, given its address.
 extern "C" int merk_device_receive_array(
     const uint64_t *handle, int64_t milliseconds, uint64_t *message) {
+  RingEntry *entry{nullptr};
   uint64_t size{0};
-  if (!Wait(milliseconds, [&]() { return PollArray(handle, &size); })) {
+  if (!Wait(milliseconds, [&]() { return Look(handle, true, entry, &size); })) {
     return 0;
   }
   void *array{merk_device_alloc(sizeof(uint64_t) * (1 + size))};
-  rpc::Client::Port port{__llvm_rpc_client.open<rpcTakeArray>()};
-  port.send([&](rpc::Buffer *buffer, uint32_t) {
-    for (int i{0}; i < 5; ++i) {
-      buffer->data[i] = handle[i];
-    }
-    buffer->data[5] = static_cast<uint64_t>(omp_get_device_num());
-    buffer->data[6] = reinterpret_cast<uint64_t>(array);
-  });
-  port.recv([](rpc::Buffer *, uint32_t) {});
+  {
+    rpc::Client::Port port{__llvm_rpc_client.open<rpcTakeArray>()};
+    port.send([&](rpc::Buffer *buffer, uint32_t) {
+      for (int i{0}; i < 5; ++i) {
+        buffer->data[i] = handle[i];
+      }
+      buffer->data[5] = static_cast<uint64_t>(omp_get_device_num());
+      buffer->data[6] = reinterpret_cast<uint64_t>(array);
+    });
+    port.recv([](rpc::Buffer *, uint32_t) {});
+  }
   *message = reinterpret_cast<uint64_t>(array);
+  Taken(entry);
   return 1;
 }

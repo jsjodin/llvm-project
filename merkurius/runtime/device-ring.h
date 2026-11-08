@@ -1,0 +1,46 @@
+//===-- runtime/device-ring.h - A mailbox's ring for the device -*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// The ring through which a device receives from a mailbox, in host-pinned
+// memory, which the device reads directly (docs/INPROGRESS.md, The device's
+// side of the first slice, step 7). The host's list stays the mailbox's
+// queue; the ring shows the device its oldest messages. For a word
+// message a slot is the message, and for an array its size. The device
+// moves `head` when it has taken a message, and the host then drops it from
+// its list.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef MERKURIUS_RUNTIME_DEVICE_RING_H_
+#define MERKURIUS_RUNTIME_DEVICE_RING_H_
+
+#include <stdint.h>
+
+namespace merkurius::runtime {
+
+constexpr uint64_t kRingSlots{64};
+
+// The device's table of the rings it has, by the mailbox's slot, beside its
+// arena's current chunk: the words that the host clears when no region is
+// running.
+constexpr uint64_t kRingCacheSlots{64};
+constexpr uint64_t kArenaClearWords{1 + kRingCacheSlots};
+
+struct DeviceRing {
+  // Written by the device, in a cache line of its own.
+  alignas(64) uint64_t head;
+  // Written by the host: the next slot, and whether its list holds messages
+  // that did not fit, for which the device must ask (rpcDrain).
+  alignas(64) uint64_t tail;
+  uint64_t spilled;
+  alignas(64) uint64_t slots[kRingSlots];
+};
+
+} // namespace merkurius::runtime
+
+#endif // MERKURIUS_RUNTIME_DEVICE_RING_H_
