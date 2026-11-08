@@ -2434,6 +2434,74 @@ How the collector finds roots in the stack, and the four points it rests on (whi
 - **Walking the stack with the DWARF unwinder**, as gollvm does: every call becomes an `invoke`, its stack map is attached to the landing pad as its type info, and the runtime finds it through the unwinder's tables. It gets past C frames for free, since they have unwind tables too, but each frame costs a table lookup and an unwinder step, and every call must be an `invoke`. Frame pointers cost a register in each frame but make the walk a chain of loads. If the record kept on calls into C proves fragile, this is the fallback.
 - **Environments on the heap** would make their roots ordinary heap fields, but every choice point would allocate, which the frame keeps free, and a continuation never outlives the frame that made it.
 
+#### Closures that say what they captured
+
+Done 2026-11-08. The first thing the collector needs: `spawn` and `monitor` do not share cells with another process, and closures can be sent between the processes of a node. A monitor's function is copied only if the watcher's mailbox is another process's, so `request` costs no copy.
+
+**Before it.** A closure's cell is the entry's code, the number of
+captured values, and the values, a word each. The captures are, in order, the
+type_infos and typeclass_infos, and then the values. Nothing says what a value's
+type is, and entries cannot say: `<symbol>$closure<N>` is shared by every
+closure of a procedure with N captures.
+
+**As built:**
+
+- **Word 1 of the cell becomes the address of a static layout,** in place of the
+  count, which nothing reads. A layout is the count and a type for each capture.
+  The cell stays its size, a closure is as cheap to make, and a call is the
+  same. One layout for each distinct content, as `linkonce_odr` or private
+  globals, made from an attribute on `merk.closure`.
+- **A capture's type is a field's type word, as in descriptors,** with a type
+  variable as the place of its type_info among the captures. That is what an
+  existentially typed constructor's hidden fields do already (`kHiddenTag`: a
+  place, and a word within a typeclass_info if the variable is constrained), so
+  `Resolve` needs nothing new. With the closure's captures as the cell.
+  - A lambda expression's variables are places in its captured type_infos, or
+    in its captured dictionaries.
+  - A closure of a named procedure uses the callee's declared types, whose
+    variables are its hidden arguments in order. A specialised callee has
+    concrete types and no hidden arguments.
+- **Marks in a layout, for the captures that are not values:** a type_info, a
+  typeclass_info, and "unknown", which cannot be copied. The hidden fields of existentially typed constructors
+  are the same two, so that a value of such a type can be sent, which is refused
+  now.
+  - A type_info: tagged 0, static, kept as it is; tagged 1, a cell of a
+    descriptor and arguments, copied.
+  - A typeclass_info: its shape depends on the instance. The method table gets
+    a prefix, before its slots, with the counts of superclasses, class types,
+    other type_infos and constraints. Tables already exist per instance, so
+    this costs nothing at run time.
+- **The message copy learns `Closure`,** by reading the layout: a new cell with
+  the same code and layout, and each capture copied by its type, type_infos and
+  dictionaries first as the values' types use the original cell's. The collector
+  will trace the same way.
+- **`spawn` copies** the closure and the handle's cell into a fragment that the
+  child owns, and `monitor` the function, which removes both Temporary comments.
+- **On a device the layout is null.** A device never copies a closure (design
+  document, GPU processes: closures do not cross), and it has no descriptors for
+  most types.
+- **To another node stays "not supported yet".** The design has closures cross
+  between nodes running the same binary, as procedure references. That is a
+  separate piece, and not on the way to the collector.
+
+**Rejected:**
+
+- **A layout for each entry,** as prefix data before its code, which would leave
+  the count alone. The entry is shared by closures of different sites. It would
+  need an entry for each site, and prefix data on every target.
+- **The layout in word 0, with the code in the layout.** Every closure call pays
+  one more load.
+- **A third word.** 8 bytes on every closure, when the count is unused.
+- **Keeping shared closures, and having the collector not move them.** A
+  closure's captures are in the parent's heap, which its collector moves.
+
+**Decision:**
+
+- **D1, what `spawn` does with a capture it cannot copy,** such as a foreign type
+  with no descriptor. Decided 2026-11-08: it reports an error at the spawn, as a
+  send does. Rejected: copying such a word as it is, which is convenient but
+  assumes that a foreign value never points into a heap.
+
 ### Type descriptors
 
 Static type descriptors describe each type's constructors, names, arguments and layout. Generic printing (`io.write`), `compare`, `unify` at polymorphic types, `univ`, the collector and the message copy all use them. A descriptor has its header, its kind, arity, module and name, the entries that unify and compare two words of the type, and a table of its functors, in the order declared. Each functor has its name, arity, tag, number of hidden fields, secondary tag, constant's word and fields' types, and `byTag`, `constants` and `shared` map a word to its functor. An existentially typed constructor's cell has its hidden fields, the type_infos and typeclass_infos of its existential variables, before its arguments, and the fields' types are its arguments'. A field's type is a `type_info`'s word, with a tag of 2 for a type parameter of the term's type, which is its number in the high bits, so `[|]`'s fields are `var 0` and a static cell of `list` and `var 0`, and a tag of 3 for an existential variable, whose type_info is in the cell: in the hidden field of the low 16 bits of the number, or, if its high bits are not 0, in that word of the typeclass_info there. So `box`'s field is hidden field 0, word 1, and a walker, which keeps the cell with the environment of its fields, finds the type there (`runtime/descriptor.h`). A walker does not allocate, so it does not make a `type_info` for each field: it keeps each type's arguments on its own stack, with the type they were made in. The `flags` byte, for the collector's `PointerFree`, is still 0, until something reads it.
