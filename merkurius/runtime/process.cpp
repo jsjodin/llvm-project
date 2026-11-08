@@ -743,13 +743,16 @@ void Block(std::int64_t deadline) {
   Process *self{current};
   self->waiting = true;
   self->deadline = deadline;
+  // First, as a process this one just woke is on the local queue: while the
+  // timer is added a spinning worker would steal it, and two processes that
+  // talk would change workers at every message.
+  Process *next{TakeLocal()};
   if (deadline >= 0) {
     pthread_mutex_lock(&schedulerLock);
     AddTimer(self);
     pthread_mutex_unlock(&schedulerLock);
   }
   FireTimers();
-  Process *next{TakeLocal()};
   RunProcess(next);
   unlockAfterSwitch = &self->waitLock;
   SwitchContext(self->context, next ? next->context : workerContext);
