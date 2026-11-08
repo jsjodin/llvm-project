@@ -31,7 +31,7 @@
 % LLVM: store ptr addrspace(1) %2, ptr addrspace(1) %3, align 8
 % LLVM-NEXT: ret void
 % LLVM: %[[CELL:[0-9]+]] = phi ptr addrspace(1)
-% LLVM-NEXT: store i64 %{{[0-9]+}}, ptr addrspace(1) %[[CELL]], align 8
+% LLVM-NEXT: store ptr addrspace(1) %{{[0-9]+}}, ptr addrspace(1) %[[CELL]], align 8
 % LLVM-NEXT: %[[HOLE:[0-9]+]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 8
 % LLVM-NEXT: store ptr addrspace(1) null, ptr addrspace(1) %[[HOLE]], align 8
 % LLVM-NEXT: %[[TAGGED:[0-9]+]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 1
@@ -145,7 +145,7 @@ double(node(L, X, R)) = node(double(L), 2 * X, double(R)).
 % LLVM: %[[CELL:[0-9]+]] = phi ptr addrspace(1)
 % LLVM-NEXT: store ptr addrspace(1) addrspacecast (ptr @merk.typeclass_info.{{[0-9]+}} to ptr addrspace(1)), ptr addrspace(1) %[[CELL]], align 8
 % LLVM-NEXT: %[[X:[0-9]+]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 8
-% LLVM-NEXT: store i64 %{{[0-9]+}}, ptr addrspace(1) %[[X]], align 8
+% LLVM-NEXT: store ptr addrspace(1) %{{[0-9]+}}, ptr addrspace(1) %[[X]], align 8
 % LLVM-NEXT: %[[HOLE:[0-9]+]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 16
 % LLVM-NEXT: store ptr addrspace(1) null, ptr addrspace(1) %[[HOLE]], align 8
 % LLVM-NEXT: %[[TAGGED:[0-9]+]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 1

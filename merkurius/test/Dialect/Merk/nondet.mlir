@@ -176,16 +176,16 @@ module @nd attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 // LLVM-LABEL: define internal tailcc i1 @nd.big_1_0.cont.0(ptr %0, i64 %1)
 // LLVM: %[[SET:.*]] = getelementptr { ptr, ptr, i1 }, ptr %0, i32 0, i32 2
 // LLVM-NEXT: store i1 true, ptr %[[SET]]
-// LLVM-LABEL: define tailcc i1 @nd.call_1_0(ptr addrspace(1) %0, i64 %1, ptr %2, ptr %3)
+// LLVM-LABEL: define tailcc i1 @nd.call_1_0(ptr addrspace(1) %0, ptr addrspace(1) %1, ptr %2, ptr %3)
 // LLVM: %[[CODE:.*]] = load ptr, ptr addrspace(1) %0
-// LLVM-NEXT: musttail call tailcc i1 %[[CODE]](ptr addrspace(1) %0, i64 %1, ptr %2, ptr %3)
+// LLVM-NEXT: musttail call tailcc i1 %[[CODE]](ptr addrspace(1) %0, ptr addrspace(1) %1, ptr %2, ptr %3)
 // A call that passes on the continuation it was given is a tail call; one
 // that passes an environment in its own frame is not.
-// LLVM-LABEL: define tailcc i1 @nd.method_1_0(ptr addrspace(1) %0, i64 %1, ptr %2, ptr %3)
+// LLVM-LABEL: define tailcc i1 @nd.method_1_0(ptr addrspace(1) %0, ptr addrspace(1) %1, ptr %2, ptr %3)
 // LLVM: %[[TABLE:.*]] = load ptr, ptr addrspace(1) %0
 // LLVM-NEXT: %[[SLOT:.*]] = getelementptr i8, ptr %[[TABLE]], i32 16
 // LLVM-NEXT: %[[METHOD:.*]] = load ptr, ptr %[[SLOT]]
-// LLVM-NEXT: musttail call tailcc i1 %[[METHOD]](ptr addrspace(1) %0, i64 %1, ptr %2, ptr %3)
+// LLVM-NEXT: musttail call tailcc i1 %[[METHOD]](ptr addrspace(1) %0, ptr addrspace(1) %1, ptr %2, ptr %3)
 // LLVM-LABEL: define tailcc i1 @nd.give_0_0(ptr %0, ptr %1)
 // LLVM: musttail call tailcc i1 %0(ptr %1, i64 1)
 // LLVM-LABEL: define tailcc { i1, i64 } @nd.first_1_0(i64 %0)

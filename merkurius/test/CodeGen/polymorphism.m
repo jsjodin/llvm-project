@@ -29,7 +29,7 @@
 % LLVM-DAG: @"merk.type_ctor.list.list/1" = external constant { i8, i8, i16, i32, ptr, ptr, ptr, ptr, ptr, [8 x i16], ptr, ptr }
 
 % MERK-LABEL: merk.proc private @polymorphism.id_2_0(%arg0: !merk.type_info, %arg1: !merk.word) -> !merk.word
-% LLVM-LABEL: define {{.*}}i64 @polymorphism.id_2_0(ptr addrspace(1) %0, i64 %1)
+% LLVM-LABEL: define {{.*}}ptr addrspace(1) @polymorphism.id_2_0(ptr addrspace(1) %0, ptr addrspace(1) %1)
 :- pred id(T::in, T::out) is det.
 id(X, X).
 

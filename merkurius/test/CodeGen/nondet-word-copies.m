@@ -70,7 +70,7 @@ main(!IO) :-
 % MERK: merk.nondet_call @nondet_word_copies.count_down_2_0$words(%arg0 : i64) {
 
 % LLVM-LABEL: define internal tailcc i1 @"nondet_word_copies.halves_2_0$words"(i64 %0, ptr %1, ptr %2)
-% LLVM: call tailcc i1 %1(ptr %2, i64 %{{.*}})
+% LLVM: call tailcc i1 %1(ptr %2, ptr addrspace(1) %{{.*}})
 % LLVM: musttail call tailcc i1 @"nondet_word_copies.halves_2_0$words"(i64 %{{.*}}, ptr %1, ptr %2)
 % LLVM-LABEL: define internal tailcc i1 @"nondet_word_copies.halves_2_0$words$closure1"(ptr addrspace(1) %0, ptr %1, ptr %2)
 % LLVM: musttail call tailcc i1 @"nondet_word_copies.halves_2_0$words"(i64 %{{.*}}, ptr %1, ptr %2)
