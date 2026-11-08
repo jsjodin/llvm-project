@@ -91,3 +91,20 @@ only differences of several microseconds mean anything. What they show:
 - **Mailboxes cost about 3 µs a message.** A round with the echo thread
   takes 14 to 16 µs from the CPU, where two threads take 9: the rest is
   copying the message, queueing it and the receive's checks.
+
+### With the spin before blocking
+
+2026-11-08, the same machine, with a mailbox's ring for the device and the
+host's threads spinning before they block. Microseconds a round, 20000
+rounds, five runs, the ranges with `MERK_SPIN_MICROSECONDS=0` and with the
+default of 50:
+
+| Name | No spin | Spin |
+| --- | --- | --- |
+| `gpu` | 47.5 to 67.7 | 33.9 to 36.0 |
+| `cpu` | 38.5 to 64.4 | 21.9 to 25.7 |
+| `gpu-local` | 23.3 to 25.8 | 19.2 to 19.4 |
+| `cpu-local` | 11.8 to 16.7 | 6.8 to 6.9 |
+
+The spin yields, so `cpu` with both nodes pinned to one core takes about 28
+µs with it, and about 39 without.

@@ -1013,6 +1013,29 @@ Neither uses the C++ standard library; `rpc.h` needs none.
    two devices from one mailbox are not supported yet, as only the region
    that made a mailbox receives from it.
 
+   **On an APU, and with unified shared memory (not measured; no APU here).**
+   An APU has one memory, so a ring in device memory would gain nothing over
+   this one, and the device's looks do not cross PCIe. Unified shared memory
+   would go further for arrays: the device could read a received array where
+   the host has it, with no copy into the arena, and a send could give a
+   pointer in place of the host's two copies. The message's memory must then
+   live as long as the device holds it.
+
+   **The wakes between nodes.** A round between nodes has three blocking
+   wakes: each node's reader thread, and `main`'s wait on node 2. A wake
+   costs more than the round's other steps here (this machine's deep idle
+   state alone takes 18 µs to leave). A thread about to block for a message
+   now spins first, for 50 µs or `MERK_SPIN_MICROSECONDS` (0 for none), and
+   yields as it spins. Without the yield, a round with both nodes on one core
+   took 237 µs in place of 39, as the spinner kept the core from the thread
+   it waited for; with it, 28. A receive with no time left does not spin.
+   Five runs each, µs a round, without and with the spin: GPU to node 2 48
+   to 68 and 34 to 36; CPU to node 2 39 to 64 and 22 to 26; GPU within a
+   node 23 to 26 and 19; CPU within a node 12 to 17 and 7. What is left of
+   the GPU's cost over the CPU's, about 12 µs, is the send's RPC and the
+   wait for the ring. A send that does not wait for the host would need
+   another way to keep sends in order.
+
 ## The receive goal: later
 
 The receive goal is done (design document, Processes and mailboxes, "The
