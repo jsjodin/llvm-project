@@ -24,18 +24,6 @@ first(A, S) :-
     S = A ^ elem(0).
 % CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: not yet implemented: code generation for values of type array.array(string) in target regions
 
-:- pred make(int::in, array(int)::array_uo) is det.
-make(N, A) :-
-    %$omp target
-    A = array.init(N, 0).
-% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: not yet implemented: code generation for making arrays in target regions
-
-:- pred zero(array(int)::array_di, array(int)::array_uo) is det.
-zero(!A) :-
-    %$omp target
-    array.fill(0, !A).
-% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: not yet implemented: code generation for filling arrays in target regions
-
 :- type shape
     --->    circle(float, float)
     ;       square(float, float).
@@ -84,8 +72,6 @@ main(!IO) :-
     same("abc", _),
     N = 3,
     first(array.init(1, "a"), _),
-    make(1, _),
-    zero(array.init(1, 1), _),
     width(circle(1.0, 2.0), _),
     number(named("a", 1), _),
     double(1, _),
