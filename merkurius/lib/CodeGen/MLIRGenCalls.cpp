@@ -916,10 +916,14 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
       captures.push_back(capture);
     } else {
       mlir::Type given{values_.lookup(var).getType()};
+      if (!mlir::isa<merk::TypeInfoType, merk::TypeclassInfoType>(given)) {
+        NotYet(at, "a closure that captures what a goal gave, which is not a "
+                   "type_info or a typeclass_info");
+        return;
+      }
       captures.push_back(builder_.getStringAttr(
-          mlir::isa<merk::TypeInfoType>(given)            ? "type_info"
-              : mlir::isa<merk::TypeclassInfoType>(given) ? "typeclass_info"
-                                                          : "unknown"));
+          mlir::isa<merk::TypeInfoType>(given) ? "type_info"
+                                               : "typeclass_info"));
     }
   }
   llvm::SmallVector<mlir::Value> words;

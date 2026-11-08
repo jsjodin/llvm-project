@@ -1652,10 +1652,10 @@ mlir::LLVM::GlobalOp Lowerer::ClosureLayout(
     for (mlir::Attribute capture : captures) {
       mlir::Value word;
       if (auto mark{mlir::dyn_cast<mlir::StringAttr>(capture)}) {
-        // runtime/descriptor.h's kCaptureUnknown and the two after it.
-        std::int64_t value{mark.getValue() == "type_info"  ? 8
-                : mark.getValue() == "typeclass_info"      ? 16
-                                                           : 0};
+        // runtime/descriptor.h's kCaptureTypeInfo and kCaptureTypeclassInfo.
+        assert(mark.getValue() == "type_info" ||
+            mark.getValue() == "typeclass_info");
+        std::int64_t value{mark.getValue() == "type_info" ? 8 : 16};
         mlir::Value bits{
             mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, value)};
         word = mlir::LLVM::IntToPtrOp::create(rewriter_, loc, ptr, bits);

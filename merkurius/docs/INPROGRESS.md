@@ -1108,7 +1108,30 @@ no process to collect.
      `type_info`. A missing one is a compile error. Rejected: `!merk.word<"T0">`, as
      a callee's `T0` is not its caller's, so every polymorphic call needs a cast.
 
-The collector itself, and `bind`'s barrier, come after this.
+The collector and the barrier, agreed 2026-11-08, each step its own commit:
+
+1. A copying collector, one generation per process, with no barrier, and
+   `MERK_GC_EVERY_ALLOC` to collect at every allocation at -O0 and -O2.
+2. A nursery and an older generation, the remembered set, and the barrier on
+   `merk.ref_store` and `array_set`. `bind` does not exist until open types do,
+   and will use the same barrier.
+3. The large object space, and timing, with a call-heavy benchmark.
+
+- **D8, copying first, decided 2026-11-08.** A barrier bug and a root bug both show
+  as heap corruption, so the roots are proven with no barrier involved. Rejected:
+  generations at once, which saves some code that is replaced but makes failures
+  much harder to tell apart.
+- **D9, allocation from C++, decided 2026-11-08.** It only grows the heap, as C++
+  frames hold raw pointers. The next allocation from Mercury code collects.
+  Rejected: registering C++ roots at each site, where one is easily missed.
+- **D10, messages still in a mailbox, decided 2026-11-08.** The chunks of a message
+  read but not taken are pinned until it is removed. It points only within its own
+  fragment, so it needs no tracing. Values taken from it are copied out at the
+  first collection after that. Rejected: the mailboxes as roots, which makes the
+  collector walk the queues.
+- A closure capture that cannot be described is a compile error, as the collector
+  and the message copy walk a closure by its captures. There is no "unknown" mark
+  any more.
 
 **Decided:**
 

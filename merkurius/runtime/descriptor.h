@@ -113,7 +113,6 @@ inline DictionaryShape ShapeOfDictionary(const Word *dictionary) {
   Word shape{*reinterpret_cast<const Word *>(dictionary[0])};
   return {shape & 0xffff, (shape >> 16) & 0xffff, (shape >> 32) & 0xffff};
 }
-constexpr Word kCaptureUnknown{0};
 constexpr Word kCaptureTypeInfo{8};
 constexpr Word kCaptureTypeclassInfo{16};
 
