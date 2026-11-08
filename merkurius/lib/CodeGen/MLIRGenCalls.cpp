@@ -233,11 +233,13 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
   }
   // What this goal gives, in the order of the callee's first results.
   llvm::SmallVector<const void *> gives;
+  std::size_t givenTypeInfos{0}; // of which the first are type_infos
   if (passed) {
     for (const semantics::TypeInfo *info : passed->typeInfos) {
       if (info->kind == semantics::TypeInfoKind::Output && info->goal == &goal) {
         NoteGivenType(*info);
         gives.push_back(info);
+        ++givenTypeInfos;
       } else {
         PassTypeInfo(*info, inputs, loc, at);
       }
@@ -367,7 +369,15 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
     }
     return;
   }
+  // The results go on with the outputs.
+  std::size_t given{0};
   for (auto [node, result] : llvm::zip(gives, results)) {
+    if (given++ < givenTypeInfos) {
+      GiveTypeInfo(*static_cast<const semantics::TypeInfo *>(node), result, loc);
+    } else {
+      GiveDictionary(
+          *static_cast<const semantics::Dictionary *>(node), result, loc);
+    }
     Give(node, result);
   }
   for (auto [var, result] :
@@ -801,6 +811,8 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
     savedValues.swap(values_);
     llvm::DenseMap<unsigned, mlir::Value> savedInfos;
     savedInfos.swap(typeInfos_);
+    llvm::DenseMap<unsigned, mlir::Value> savedGiven;
+    savedGiven.swap(givenInfos_);
     llvm::DenseMap<unsigned, mlir::Value> savedDictionaries;
     savedDictionaries.swap(dictionaries_);
     std::optional<llvm::SmallVector<BodyVar>> savedWords{std::move(wordOutputs_)};
@@ -818,6 +830,19 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
       }
       for (BodyVar var : captured) {
         values_[var] = entry->getArgument(input++);
+      }
+      // The type_infos in what goals gave that it captures.
+      for (const auto &[variable, place] : givenTypes_) {
+        auto given{givenVars_.find(place.first)};
+        mlir::Value value{given == givenVars_.end()
+                ? mlir::Value{}
+                : values_.lookup(given->second)};
+        if (value) {
+          givenInfos_[variable] = place.second == 0
+              ? value
+              : merk::TypeclassInfoWordOp::create(builder_, loc,
+                    merk::TypeInfoType::get(&context_), value, place.second);
+        }
       }
       for (auto [var, argument] : llvm::zip(goal.lambdaHead, arguments)) {
         if (!argument.output && !argument.dummy) {
@@ -845,6 +870,7 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
     }
     values_.swap(savedValues);
     typeInfos_.swap(savedInfos);
+    givenInfos_ = std::move(savedGiven);
     dictionaries_.swap(savedDictionaries);
     wordOutputs_ = std::move(savedWords);
     procName_ = savedName;

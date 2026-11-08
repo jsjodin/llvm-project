@@ -28,6 +28,8 @@ module @terms attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   // CHECK: merk.type_def "terms.secret" [#merk.constructor<"secret"(i64, i64)>] abstract
   merk.type_def "terms.colour" [#merk.constructor<"red">, #merk.constructor<"green">]
   merk.type_def "terms.wrap" [#merk.constructor<"wrap"(f64)>]
+  merk.type_ctor "int/0" module "" name "int" kind "int" linkage "declaration" arity 0
+  merk.type_ctor "list.list/1" module "list" name "list" kind "term" linkage "declaration" arity 1
   merk.type_def "list.list(int)" [#merk.constructor<"[]">, #merk.constructor<"[|]"(i64, !merk.term<"list.list(int)">)>]
   merk.type_def "terms.secret" [#merk.constructor<"secret"(i64, i64)>] abstract
   // Eight constructors with arguments and a constant: tags 1 to 6, and 7

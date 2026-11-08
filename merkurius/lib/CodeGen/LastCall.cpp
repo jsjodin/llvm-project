@@ -384,11 +384,6 @@ bool LastCall::Reaches(llvm::StringRef from, llvm::StringRef to) const {
 void LastCall::Rewrite(Site site, const Leaf &leaf, const Refs *stored,
     llvm::ArrayRef<mlir::Value> refs) {
   DropRootTypes(site.call);
-  for (const Use &use : site.uses) {
-    if (use.construct) {
-      DropRootTypes(use.construct);
-    }
-  }
   mlir::Location loc{site.call.getLoc()};
   mlir::OpBuilder builder{leaf.end};
   const Refs &callee{stored_.find(site.call.getCallee())->second};
@@ -420,6 +415,12 @@ void LastCall::Rewrite(Site site, const Leaf &leaf, const Refs *stored,
     mlir::Value hole{merk::HoleOp::create(builder, loc, result.getType())};
     use.construct->setOperand(use.argument, hole);
     use.construct->moveBefore(leaf.end);
+    // What says the term's type stays after it.
+    for (mlir::Operation *user : use.construct.getTerm().getUsers()) {
+      if (mlir::isa<merk::RootTypeOp>(user)) {
+        user->moveAfter(use.construct);
+      }
+    }
     if (stored && llvm::is_contained(*stored, use.k)) {
       std::size_t r = llvm::find(*stored, use.k) - stored->begin();
       merk::RefStoreOp::create(builder, loc, use.construct.getTerm(),

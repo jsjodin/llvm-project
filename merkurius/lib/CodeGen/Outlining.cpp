@@ -27,6 +27,7 @@
 
 #include "merkurius/CodeGen/Lowering.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Transforms/RegionUtils.h"
@@ -66,7 +67,8 @@ private:
   void RewriteAggregate(merk::AggregateOp);
   void Deliver(mlir::Operation *end, mlir::ValueRange values, const Sink &);
   merk::ProcOp Outline(mlir::Region &, llvm::ArrayRef<mlir::Type> slots,
-      llvm::SmallVectorImpl<mlir::Value> &captures, mlir::ArrayAttr &layout);
+      llvm::SmallVectorImpl<mlir::Value> &captures, mlir::ArrayAttr &layout,
+      mlir::ValueRange slotValues = {});
   merk::ProcOp OutlineWith(
       mlir::Region &, mlir::ValueRange captures, mlir::ArrayAttr layout);
   mlir::Value MakeEnv(mlir::Location, mlir::ValueRange captures,
@@ -122,6 +124,86 @@ void Prune(mlir::Operation *op, mlir::Region &generator,
   }
 }
 
+// Whether nothing uses `value`, forgetting a note of its type.
+bool Unused(mlir::Value value) {
+  if (!llvm::all_of(value.getUsers(), [](mlir::Operation *user) {
+        return mlir::isa<merk::RootTypeOp>(user);
+      })) {
+    return false;
+  }
+  for (mlir::Operation *user : llvm::make_early_inc_range(value.getUsers())) {
+    user->erase();
+  }
+  return true;
+}
+
+// The note of a value's type, if it has one or is the same value at another
+// type, across a conversion to or from a word.
+merk::RootTypeOp NoteOf(mlir::Value value) {
+  llvm::SetVector<mlir::Value> seen;
+  seen.insert(value);
+  for (std::size_t i = 0; i < seen.size(); ++i) {
+    mlir::Value at{seen[i]};
+    if (mlir::Operation *def{at.getDefiningOp()};
+        def && mlir::isa<merk::ToWordOp, merk::FromWordOp>(def)) {
+      seen.insert(def->getOperand(0));
+    }
+    for (mlir::Operation *user : at.getUsers()) {
+      if (auto note{mlir::dyn_cast<merk::RootTypeOp>(user)}) {
+        return note;
+      }
+      if (mlir::isa<merk::ToWordOp, merk::FromWordOp>(user)) {
+        seen.insert(user->getResult(0));
+      }
+    }
+  }
+  return nullptr;
+}
+
+// Adds to `captures` the type_infos of each of them and of the values that
+// will be in the environment's slots, available at `at`, so that the outlined
+// code and a walk of the environment can say what they are.
+void CaptureTypeInfos(llvm::SmallVectorImpl<mlir::Value> &captures,
+    mlir::Operation *at, mlir::ValueRange slots = {}) {
+  mlir::DominanceInfo dominance{at->getParentOfType<merk::ProcOp>()};
+  llvm::SetVector<mlir::Value> all{captures.begin(), captures.end()};
+  llvm::SmallVector<mlir::Value> described{captures.begin(), captures.end()};
+  described.append(slots.begin(), slots.end());
+  for (mlir::Value value : described) {
+    merk::RootTypeOp note{NoteOf(value)};
+    if (note &&
+        llvm::all_of(note.getInfos(), [&](mlir::Value info) {
+          return dominance.properlyDominates(info, at);
+        })) {
+      all.insert(note.getInfos().begin(), note.getInfos().end());
+    }
+  }
+  captures.assign(all.begin(), all.end());
+}
+
+// Records on an environment where the type_infos of its slots are: for each
+// slot after the captures, the captures' positions.
+void DescribeSlots(mlir::Value env, mlir::ValueRange captures,
+    mlir::ValueRange slots) {
+  mlir::Builder builder{env.getContext()};
+  llvm::SmallVector<mlir::Attribute> described;
+  for (mlir::Value slot : slots) {
+    llvm::SmallVector<std::int64_t> places;
+    if (merk::RootTypeOp note{NoteOf(slot)}) {
+      for (mlir::Value info : note.getInfos()) {
+        auto found{llvm::find(captures, info)};
+        if (found == captures.end()) {
+          places.clear();
+          break;
+        }
+        places.push_back(found - captures.begin());
+      }
+    }
+    described.push_back(builder.getI64ArrayAttr(places));
+  }
+  env.getDefiningOp()->setAttr("slot_infos", builder.getArrayAttr(described));
+}
+
 void PruneUnused(mlir::ModuleOp module) {
   llvm::SmallVector<mlir::Operation *> ops;
   module.walk([&](mlir::Operation *op) {
@@ -139,7 +221,7 @@ void PruneUnused(mlir::ModuleOp module) {
           each ? each.getContinuation().front() : ite.getThenRegion().front()};
       llvm::SmallVector<bool> dead;
       for (mlir::BlockArgument argument : continuation.getArguments()) {
-        dead.push_back(argument.use_empty());
+        dead.push_back(Unused(argument));
       }
       Prune(op, each ? each.getGenerator() : ite.getCondition(), dead);
       for (unsigned i = continuation.getNumArguments(); i-- > 0;) {
@@ -154,7 +236,7 @@ void PruneUnused(mlir::ModuleOp module) {
       unsigned given{step.getNumArguments() - aggregate.getNumResults()};
       llvm::SmallVector<bool> dead;
       for (unsigned i{0}; i < given; ++i) {
-        dead.push_back(step.getArgument(i).use_empty());
+        dead.push_back(Unused(step.getArgument(i)));
       }
       Prune(op, aggregate.getGenerator(), dead);
       for (unsigned i = given; i-- > 0;) {
@@ -169,7 +251,7 @@ void PruneUnused(mlir::ModuleOp module) {
     llvm::SmallVector<mlir::Type> types;
     llvm::SmallVector<mlir::Value> kept;
     for (mlir::OpResult result : commit.getResults()) {
-      dead.push_back(result.use_empty());
+      dead.push_back(Unused(result));
       if (!result.use_empty()) {
         types.push_back(result.getType());
         kept.push_back(result);
@@ -266,14 +348,21 @@ void Outliner::Rewrite(
 const Sink *Outliner::PassedOn(mlir::Region &continuation, const Sink *succeed,
     const Sink *solution) {
   mlir::Block &block{continuation.front()};
-  if (!llvm::hasSingleElement(block)) {
-    return nullptr;
+  mlir::Operation *only{nullptr};
+  for (mlir::Operation &op : block) {
+    if (mlir::isa<merk::RootTypeOp>(op)) {
+      continue;
+    }
+    if (only) {
+      return nullptr;
+    }
+    only = &op;
   }
   const Sink *sink{nullptr};
-  mlir::OperandRange values{block.front().getOperands()};
-  if (mlir::isa<merk::SucceedOp>(block.front())) {
+  mlir::OperandRange values{only->getOperands()};
+  if (mlir::isa<merk::SucceedOp>(only)) {
     sink = succeed;
-  } else if (mlir::isa<merk::SolutionOp>(block.front())) {
+  } else if (mlir::isa<merk::SolutionOp>(only)) {
     sink = solution;
   }
   if (!sink || !sink->cont ||
@@ -423,7 +512,8 @@ void Outliner::RewriteCommit(merk::CommitOp commit) {
   llvm::SmallVector<mlir::Value> captures;
   mlir::ArrayAttr layout;
   llvm::SmallVector<mlir::Type> results{commit.getResultTypes()};
-  merk::ProcOp proc{Outline(commit.getGenerator(), results, captures, layout)};
+  merk::ProcOp proc{Outline(
+      commit.getGenerator(), results, captures, layout, commit.getResults())};
   Sink store;
   store.env = proc.getBody().front().getArgument(0);
   store.first = static_cast<unsigned>(captures.size());
@@ -434,6 +524,7 @@ void Outliner::RewriteCommit(merk::CommitOp commit) {
   proc_ = outer;
   builder_.setInsertionPoint(commit);
   mlir::Value env{MakeEnv(loc, captures, layout)};
+  DescribeSlots(env, captures, commit.getResults());
   merk::CallOp::create(builder_, loc, mlir::TypeRange{}, proc.getSymName(),
       mlir::ValueRange{env});
   for (auto [i, result] : llvm::enumerate(commit.getResults())) {
@@ -467,6 +558,7 @@ void Outliner::RewriteAggregate(merk::AggregateOp aggregate) {
   llvm::SetVector<mlir::Value> used;
   mlir::getUsedValuesDefinedAbove(aggregate->getRegions(), used);
   llvm::SmallVector<mlir::Value> captures{used.begin(), used.end()};
+  CaptureTypeInfos(captures, aggregate, aggregate.getInitial());
   llvm::SmallVector<mlir::Attribute> types;
   for (mlir::Value capture : captures) {
     types.push_back(mlir::TypeAttr::get(capture.getType()));
@@ -516,6 +608,7 @@ void Outliner::RewriteAggregate(merk::AggregateOp aggregate) {
   proc_ = outer;
   builder_.setInsertionPoint(aggregate);
   mlir::Value shared{MakeEnv(loc, captures, layout)};
+  DescribeSlots(shared, captures, aggregate.getInitial());
   for (auto [i, value] : llvm::enumerate(aggregate.getInitial())) {
     merk::EnvSetOp::create(builder_, loc, shared, Slot(builder_, base + i), value, layout);
   }
@@ -559,12 +652,13 @@ void Outliner::Deliver(
 // then the region's arguments.
 merk::ProcOp Outliner::Outline(mlir::Region &region,
     llvm::ArrayRef<mlir::Type> slots, llvm::SmallVectorImpl<mlir::Value> &captures,
-    mlir::ArrayAttr &layout) {
+    mlir::ArrayAttr &layout, mlir::ValueRange slotValues) {
   mlir::MLIRContext *context{module_.getContext()};
   mlir::Location loc{region.getParentOp()->getLoc()};
   llvm::SetVector<mlir::Value> used;
   mlir::getUsedValuesDefinedAbove(region, region, used);
   captures.assign(used.begin(), used.end());
+  CaptureTypeInfos(captures, region.getParentOp(), slotValues);
   llvm::SmallVector<mlir::Attribute> types;
   for (mlir::Value capture : captures) {
     types.push_back(mlir::TypeAttr::get(capture.getType()));
@@ -598,6 +692,7 @@ merk::ProcOp Outliner::OutlineWith(
   mlir::Block &entry{proc.getBody().front()};
   mlir::Value envArgument{entry.insertArgument(0u, env, loc)};
   builder_.setInsertionPointToStart(&entry);
+  llvm::SmallVector<mlir::Value> values;
   for (auto [i, capture] : llvm::enumerate(captures)) {
     mlir::Value value{merk::EnvGetOp::create(builder_, loc, capture.getType(),
         envArgument, builder_.getI32IntegerAttr(static_cast<int32_t>(i)),
@@ -605,6 +700,26 @@ merk::ProcOp Outliner::OutlineWith(
     capture.replaceUsesWithIf(value, [&](mlir::OpOperand &use) {
       return proc->isProperAncestor(use.getOwner());
     });
+    values.push_back(value);
+  }
+  // What the captures' types are, now that they are this procedure's.
+  for (auto [capture, value] : llvm::zip_equal(captures, values)) {
+    merk::RootTypeOp note{NoteOf(capture)};
+    if (!note) {
+      continue;
+    }
+    llvm::SmallVector<mlir::Value> infos;
+    for (mlir::Value info : note.getInfos()) {
+      auto found{llvm::find(captures, info)};
+      if (found == captures.end()) {
+        infos.clear();
+        break;
+      }
+      infos.push_back(values[found - captures.begin()]);
+    }
+    if (!infos.empty()) {
+      merk::RootTypeOp::create(builder_, loc, value, infos);
+    }
   }
   return proc;
 }

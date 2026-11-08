@@ -35,6 +35,7 @@ enum RootKind : std::int64_t {
   RootEnvironment,
   RootPolymorphicTerm,
   RootWord,
+  RootBits,
 };
 
 struct RootEntry {
@@ -84,7 +85,7 @@ Safepoint *safepoints{nullptr};
 std::size_t safepointMask{0};
 
 std::atomic<std::uint64_t> safepointsChecked{0}, framesChecked{0}, rootsChecked{0},
-    unresolvedRoots{0}, environmentsChecked{0}, notSafepoints{0};
+    environmentsChecked{0}, notSafepoints{0};
 
 [[noreturn]] void Bad(const char *what, Word value) {
   std::fflush(stdout);
@@ -150,11 +151,10 @@ const RootTable *NextTable(const RootTable *table) {
 void Report() {
   std::fprintf(stderr,
       "Mercury runtime: roots: %llu safepoints, %llu frames, %llu roots, "
-      "%llu unresolved, %llu environments, %llu slow paths not at a safepoint\n",
+      "%llu environments, %llu slow paths not at a safepoint\n",
       static_cast<unsigned long long>(safepointsChecked.load()),
       static_cast<unsigned long long>(framesChecked.load()),
       static_cast<unsigned long long>(rootsChecked.load()),
-      static_cast<unsigned long long>(unresolvedRoots.load()),
       static_cast<unsigned long long>(environmentsChecked.load()),
       static_cast<unsigned long long>(notSafepoints.load()));
 }
@@ -258,8 +258,7 @@ void CheckRoot(Word value, const RootEntry &entry, const Word *infos = nullptr,
   case RootWord:
   case RootPolymorphicTerm:
     if (count == 0) {
-      unresolvedRoots.fetch_add(1, std::memory_order_relaxed);
-      return;
+      Bad("a polymorphic root with no type_info", value);
     }
     if (entry.kind == RootWord) {
       CheckTerm(value, Resolve(infos[0], nullptr), budget);
@@ -269,8 +268,7 @@ void CheckRoot(Word value, const RootEntry &entry, const Word *infos = nullptr,
     }
     return;
   case RootUnresolved:
-    unresolvedRoots.fetch_add(1, std::memory_order_relaxed);
-    return;
+    Bad("a root whose type has no descriptor", value);
   case RootTypeInfo:
     if (value < 4096 || (value & kTagMask) > 1) {
       Bad("a type_info with a tag it cannot have", value);
@@ -293,17 +291,28 @@ void CheckEnvironment(const Safepoint &safepoint, char *address, const RootEntry
   }
   environmentsChecked.fetch_add(1, std::memory_order_relaxed);
   const auto *layout{reinterpret_cast<const std::int64_t *>(entry.pointer)};
+  const std::int64_t *field{layout + 1};
   for (std::int64_t i{0}; i < layout[0]; ++i) {
-    std::int64_t index{layout[1 + 2 * i]};
+    std::int64_t index{field[0]};
+    std::int64_t offset{field[1]};
+    std::int64_t count{field[2]};
+    const std::int64_t *places{field + 3};
+    field = places + count;
     if (index < 0) {
       continue;
     }
     Word value;
-    std::memcpy(&value, address + layout[2 + 2 * i], sizeof value);
+    std::memcpy(&value, address + offset, sizeof value);
     // Null is a slot not filled yet, which is also a constant of tag 0.
-    if (value != 0) {
-      CheckRoot(value, safepoint.table->entries[index]);
+    if (value == 0) {
+      continue;
     }
+    Word infos[kMostTypeInfos];
+    for (std::int64_t k{0}; k < count && k < kMostTypeInfos; ++k) {
+      std::memcpy(&infos[k], address + places[k], sizeof(Word));
+    }
+    CheckRoot(value, safepoint.table->entries[index], infos,
+        count > kMostTypeInfos ? 0 : count);
   }
 }
 

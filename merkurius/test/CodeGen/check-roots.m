@@ -8,7 +8,7 @@
 % RUN: env MERK_CHECK_ROOTS=1 MERK_HEAP_CHUNK_BYTES=64 %t2 2>&1 >/dev/null | FileCheck %s --check-prefix=ROOTS
 % RUN: %t2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 
-% ROOTS: Mercury runtime: roots: {{[1-9][0-9]*}} safepoints, {{[1-9][0-9]*}} frames, {{[0-9]+}} roots, {{[0-9]+}} unresolved, {{[0-9]+}} environments, 0 slow paths not at a safepoint
+% ROOTS: Mercury runtime: roots: {{[1-9][0-9]*}} safepoints, {{[1-9][0-9]*}} frames, {{[0-9]+}} roots, {{[0-9]+}} environments, 0 slow paths not at a safepoint
 
 :- module check_roots.
 :- interface.
