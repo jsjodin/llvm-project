@@ -11,10 +11,19 @@
 // thread's merk_heap (heap.h), which holds the running process's heap: a
 // process's own heap is in its record while it does not run.
 //
-// Temporary (chunk 2 step 4, docs/INPROGRESS.md): one worker, the program's
-// first thread, runs every process, each until it blocks, and one lock
-// guards the scheduler and the mailboxes. A process holds the lock across a
-// switch, and the process switched to releases it.
+// Workers are OS threads, started as there is work for them, up to one for
+// each core or MERK_WORKERS; a program that spawns nothing has only its
+// first thread. A worker runs a process until it blocks. A worker with nothing
+// to run does so on its thread's own stack, since another worker may resume
+// the process it last ran.
+//
+// A process may resume on another thread after any call that can block. The
+// runtime's C++ must not keep a thread-local's address across such a call.
+//
+// Temporary (chunk 2 step 4, docs/INPROGRESS.md): one lock guards the
+// scheduler and the mailboxes, and one queue holds the runnable processes.
+// A process holds the lock across a switch, and what it switches to releases
+// it.
 //
 //===----------------------------------------------------------------------===//
 
@@ -54,6 +63,9 @@ struct Process {
   Process *nextTimed{nullptr};
   // The first of its mailboxes, a slot of the table, or -1.
   std::int64_t firstMailbox{-1};
+  // How many target regions it is in, during which it stays on its thread,
+  // to which libomp ties them, and blocks the thread.
+  int pinned{0};
 };
 
 // Guards the scheduler and the mailboxes (mailbox.cpp).
@@ -71,6 +83,14 @@ void RunProcess(Process *next);
 // if there is no address space for its stack. 0 bytes is the default size.
 Process *NewProcess(
     std::size_t stackBytes, std::uint64_t closure, std::uint64_t argument);
+
+// Whether a receive on this thread blocks a process, letting others run,
+// rather than the thread.
+bool CanSuspend();
+
+// A target region starts or ends on this thread.
+void Pin();
+void Unpin();
 
 // The rest take the lock held, and hold it on return.
 // Makes a new process runnable.
@@ -94,8 +114,13 @@ extern thread_local char *merk_stack_limit;
 [[noreturn]] void merk_stack_overflow(void);
 
 // Runs the program's first process, which calls `entry`, on a stack of its
-// own, and returns when it does.
+// own. `entry` ends the program, with merk_process_stop and exit, on whichever
+// thread it then runs. If there is no address space for the stack, it is
+// called on this thread, which then runs no process.
 void merk_process_run_main(void (*entry)(void));
+
+// As the program ends: no process is scheduled after this.
+void merk_process_stop(void);
 }
 
 #endif // MERKURIUS_RUNTIME_PROCESS_H_

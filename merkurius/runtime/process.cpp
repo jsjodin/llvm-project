@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <sched.h>
+#include <unistd.h>
 
 extern "C" {
 // Constant-initialized, as merk_heap is.
@@ -28,7 +29,8 @@ constexpr std::size_t kFirstChunkBytes{4096};
 // Constant-initialized, as merk_heap is.
 thread_local Process *current{nullptr};
 Process firstProcess{{nullptr, nullptr}, 1};
-Context threadContext{nullptr};
+// Where this thread's worker goes on from when it has nothing to run.
+thread_local Context workerContext{nullptr};
 std::uint64_t nextId{2};
 
 // The processes ready to run, oldest first, and how many, which the worker
@@ -43,10 +45,19 @@ std::int64_t runnable{0};
 Process *firstTimed{nullptr};
 std::int64_t earliest{-1};
 
-// Where the worker sleeps when nothing can run.
+// Where workers sleep when nothing can run. How many do, how many spin
+// before sleeping, and how many of those two there are in all.
 pthread_cond_t ready;
-bool sleeping{false};
+int sleeping{0};
+int spinning{0};
+int idle{0};
 pthread_once_t readyOnce = PTHREAD_ONCE_INIT;
+// Spinning workers beyond a few only take cores from each other.
+constexpr int kMostSpinning{2};
+// How many workers have started, the first thread being one, and how many
+// may; 0 until the first process is spawned.
+int workers{1};
+int mostWorkers{0};
 // What a process that has ended saves into, since its record has gone.
 Context ended{nullptr};
 
@@ -64,6 +75,24 @@ std::int64_t Now() {
   return std::int64_t{now.tv_sec} * 1000000000 + now.tv_nsec;
 }
 
+void *WorkerThread(void *);
+
+// More work than idle workers takes another worker, if one may start.
+void StartWorkerIfNeeded() {
+  if (workers >= mostWorkers || runnable <= idle) {
+    return;
+  }
+  pthread_t thread;
+  pthread_attr_t attributes;
+  pthread_attr_init(&attributes);
+  pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+  if (pthread_create(&thread, &attributes, WorkerThread, nullptr) == 0) {
+    ++workers;
+    ++idle;
+  }
+  pthread_attr_destroy(&attributes);
+}
+
 void Enqueue(Process *process) {
   process->nextRunnable = nullptr;
   if (lastRunnable) {
@@ -76,6 +105,7 @@ void Enqueue(Process *process) {
   if (sleeping) {
     pthread_cond_signal(&ready);
   }
+  StartWorkerIfNeeded();
 }
 
 void AddTimed(Process *process) {
@@ -87,6 +117,10 @@ void AddTimed(Process *process) {
   firstTimed = process;
   if (earliest < 0 || process->deadline < earliest) {
     earliest = process->deadline;
+    // A worker asleep until the old time must see the new one.
+    if (sleeping) {
+      pthread_cond_signal(&ready);
+    }
   }
 }
 
@@ -127,22 +161,26 @@ void FireTimers() {
 // Nothing is runnable: spins for a while, as a wake from sleeping costs
 // more than a message's other steps, and then sleeps until something is.
 void Idle() {
-  std::int64_t end{Now() + SpinNanoseconds()};
-  if (earliest >= 0 && earliest < end) {
-    end = earliest;
-  }
-  pthread_mutex_unlock(&schedulerLock);
-  // It yields, so that with fewer cores than threads the one it waits for
-  // can run.
-  while (__atomic_load_n(&runnable, __ATOMIC_ACQUIRE) == 0 && Now() < end) {
-    sched_yield();
-  }
-  pthread_mutex_lock(&schedulerLock);
-  if (firstRunnable || (earliest >= 0 && Now() >= earliest)) {
-    return;
+  if (spinning < kMostSpinning) {
+    ++spinning;
+    std::int64_t end{Now() + SpinNanoseconds()};
+    if (earliest >= 0 && earliest < end) {
+      end = earliest;
+    }
+    pthread_mutex_unlock(&schedulerLock);
+    // It yields, so that with fewer cores than threads the one it waits for
+    // can run.
+    while (__atomic_load_n(&runnable, __ATOMIC_ACQUIRE) == 0 && Now() < end) {
+      sched_yield();
+    }
+    pthread_mutex_lock(&schedulerLock);
+    --spinning;
+    if (firstRunnable || (earliest >= 0 && Now() >= earliest)) {
+      return;
+    }
   }
   pthread_once(&readyOnce, InitializeReady);
-  sleeping = true;
+  ++sleeping;
   if (earliest < 0) {
     pthread_cond_wait(&ready, &schedulerLock);
   } else {
@@ -150,33 +188,54 @@ void Idle() {
         static_cast<long>(earliest % 1000000000)};
     pthread_cond_timedwait(&ready, &schedulerLock, &until);
   }
-  sleeping = false;
+  --sleeping;
 }
 
-Process *PickNext() {
-  for (;;) {
-    FireTimers();
-    if (Process *process{firstRunnable}) {
-      firstRunnable = process->nextRunnable;
-      if (!firstRunnable) {
-        lastRunnable = nullptr;
-      }
-      __atomic_sub_fetch(&runnable, 1, __ATOMIC_RELAXED);
-      return process;
+// A process that can run now, or null.
+Process *TakeRunnable() {
+  FireTimers();
+  Process *process{firstRunnable};
+  if (process) {
+    firstRunnable = process->nextRunnable;
+    if (!firstRunnable) {
+      lastRunnable = nullptr;
     }
-    Idle();
+    __atomic_sub_fetch(&runnable, 1, __ATOMIC_RELAXED);
+  }
+  return process;
+}
+
+// On the thread's own stack, with the lock held: runs processes for ever.
+// A process comes back here, still holding the lock, when it finds nothing
+// to run next. The thread is the same one, so its thread-locals are too.
+[[noreturn]] void WorkerLoop() {
+  for (;;) {
+    Process *next;
+    ++idle;
+    while (!(next = TakeRunnable())) {
+      Idle();
+    }
+    --idle;
+    RunProcess(next);
+    SwitchContext(workerContext, next->context);
   }
 }
 
-// The stack and record go back while still in use, which is safe with one
-// worker: nothing else takes them until this has switched away.
+void *WorkerThread(void *) {
+  pthread_mutex_lock(&schedulerLock);
+  --idle;
+  WorkerLoop();
+}
+
+// The stack and record go back while still in use, which is safe as the
+// lock is held until this has switched away, and NewProcess takes it.
 [[noreturn]] void Finish(Process *self) {
   CloseMailboxesOf(self);
-  Process *next{PickNext()};
+  Process *next{TakeRunnable()};
   RunProcess(next);
   FreeStack(self->stack);
   std::free(self);
-  SwitchContext(ended, next->context);
+  SwitchContext(ended, next ? next->context : workerContext);
   std::abort();
 }
 
@@ -189,12 +248,43 @@ void ProcessBody(void *argument) {
 }
 
 void MainBody(void *entry) {
+  pthread_mutex_unlock(&schedulerLock);
   reinterpret_cast<void (*)(void)>(entry)();
-  SwitchContext(firstProcess.context, threadContext);
+  std::abort();
+}
+
+int ReadMostWorkers() {
+  if (const char *text{std::getenv("MERK_WORKERS")}; text && *text) {
+    char *end{nullptr};
+    long value{std::strtol(text, &end, 10)};
+    if (*end != '\0' || value < 1) {
+      std::fflush(stdout);
+      std::fprintf(stderr,
+          "Mercury runtime: MERK_WORKERS=%s is not a positive number\n", text);
+      std::exit(1);
+    }
+    return static_cast<int>(value);
+  }
+  long cores{sysconf(_SC_NPROCESSORS_ONLN)};
+  return cores > 0 ? static_cast<int>(cores) : 1;
 }
 } // namespace
 
 Process *CurrentProcess() { return current; }
+
+bool CanSuspend() { return current && current->pinned == 0; }
+
+void Pin() {
+  if (current) {
+    ++current->pinned;
+  }
+}
+
+void Unpin() {
+  if (current) {
+    --current->pinned;
+  }
+}
 
 void RunProcess(Process *next) {
   if (current) {
@@ -227,7 +317,12 @@ Process *NewProcess(
   return process;
 }
 
-void Start(Process *process) { Enqueue(process); }
+void Start(Process *process) {
+  if (mostWorkers == 0) {
+    mostWorkers = ReadMostWorkers();
+  }
+  Enqueue(process);
+}
 
 void Wake(Process *process) {
   if (!process->waiting) {
@@ -247,10 +342,11 @@ void Block(std::int64_t deadline) {
   if (deadline >= 0) {
     AddTimed(self);
   }
-  Process *next{PickNext()};
+  Process *next{TakeRunnable()};
   if (next != self) {
     RunProcess(next);
-    SwitchContext(self->context, next->context);
+    SwitchContext(self->context, next ? next->context : workerContext);
+    // It may be on another thread now.
   }
 }
 
@@ -260,8 +356,6 @@ extern "C" void merk_process_run_main(void (*entry)(void)) {
   using namespace merkurius::runtime;
   firstProcess.stack = NewStack(kDefaultStackBytes);
   if (!firstProcess.stack) {
-    // No address space for it: the thread's own stack serves, unchecked.
-    RunProcess(&firstProcess);
     entry();
     return;
   }
@@ -269,7 +363,13 @@ extern "C" void merk_process_run_main(void (*entry)(void)) {
   firstProcess.context = NewContext(*firstProcess.stack, MainBody,
       reinterpret_cast<void *>(entry));
   RunProcess(&firstProcess);
-  SwitchContext(threadContext, firstProcess.context);
+  pthread_mutex_lock(&schedulerLock);
+  SwitchContext(workerContext, firstProcess.context);
+  WorkerLoop();
+}
+
+extern "C" void merk_process_stop(void) {
+  pthread_mutex_lock(&merkurius::runtime::schedulerLock);
 }
 
 // Temporary (chunk 2 step 6, docs/INPROGRESS.md): ends the program, until

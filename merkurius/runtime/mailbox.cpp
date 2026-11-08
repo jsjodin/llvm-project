@@ -449,7 +449,7 @@ void Queue(Mailbox *mailbox, Message *message) {
 // Waits on `arrived` until the deadline, or for ever if it is negative:
 // false once the deadline has passed. Called with the lock held.
 bool WaitArrival(std::int64_t deadline) {
-  if (CurrentProcess()) {
+  if (CanSuspend()) {
     // A process lets others run; the scheduler spins when nothing can.
     if (deadline >= 0 && Now() >= deadline) {
       return false;
@@ -473,7 +473,7 @@ bool WaitArrival(std::int64_t deadline) {
 // When a wait that ends at the deadline may stop spinning: never past the
 // deadline, so that a receive with no time to wait does not spin.
 std::int64_t SpinEnd(std::int64_t deadline) {
-  if (CurrentProcess()) {
+  if (CanSuspend()) {
     return 0;
   }
   std::int64_t end{Now() + SpinNanoseconds()};

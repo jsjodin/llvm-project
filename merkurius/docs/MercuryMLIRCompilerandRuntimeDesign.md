@@ -3672,6 +3672,18 @@ Ping-pong with the GPU did not change: `gpu-local` 19.5, CPU and CPU between nod
 
 Reading the heap's address again after each call (`docs/INPROGRESS.md`, The scheduler, D1), 2026-11-08, on f67539332be0 and its change, `-O2`, nrev as above, 5 alternating runs: 18.14 s before and 18.14 s after, the median.
 
+Several workers under one lock, 2026-11-08, on f42910dd8074 and its change, `-O2`, `benchmarks/processes`, on 24 cores with 48 threads. `work` is 48 processes each computing `fib(34)`; `pairs` is 16 pairs playing ping-pong, the time for a round over all of them.
+
+| Workers | Ping-pong, µs a round | `work`, ms | `pairs`, µs a round in all |
+| ---: | ---: | ---: | ---: |
+| 1 | 3.6 | 1088 | 3.6 |
+| 2 | 5.6 | 545 | 3.7 |
+| 8 | 5.3 | 138 | 3.8 |
+| 24 | 5.1 | 61 | 7.1 |
+| 48 | 5.3 | 37 | 9.7 |
+
+Work that does not communicate scales, 29 times on 48 threads. Messages do not: the one lock makes 16 pairs slower with more workers. With all workers, spawning a process took 9 µs against 2.8 µs on one worker's earlier numbers, and a message to it and its end 13 µs against 3.8.
+
 ## Target applications
 
 Recorded on 2026-11-05. This is judgement, not a result: the only performance evidence so far is the bandwidth benchmark, whose program is no simpler than its C version (`benchmarks/bandwidth/README.md`). That the code is simpler has still to be shown on a program with real logic in it.

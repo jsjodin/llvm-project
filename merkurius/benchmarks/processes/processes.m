@@ -1,6 +1,8 @@
 % What a process costs (docs/INPROGRESS.md, The scheduler, step 3).
 %
 %   processes pingpong ROUNDS      two processes pass a message back and forth
+%   processes work COUNT SIZE      COUNT processes each compute fib(SIZE)
+%   processes pairs COUNT ROUNDS   COUNT pairs of processes play ping-pong
 %   processes spawn COUNT [BYTES]  COUNT processes, each of which waits for a
 %                                  message, are spawned, all told to go, and
 %                                  all have ended; BYTES is their stack's size
@@ -104,9 +106,69 @@ yield(Box, !IO) :-
 us(Nanoseconds, Count) =
     string.format("%.3f", [f(float(Nanoseconds) / 1000.0 / float(Count))]).
 
+    % Work and a reply, for each of Count processes.
+:- func fib(int) = int.
+fib(N) = (if N < 2 then N else fib(N - 1) + fib(N - 2)).
+
+:- pred worker(int::in, mailbox(int)::in, mailbox(int)::in,
+    io::di, io::uo) is det.
+worker(Size, Done, _, !IO) :-
+    send(Done, fib(Size), !IO).
+
+:- pred start_workers(int::in, int::in, mailbox(int)::in,
+    io::di, io::uo) is det.
+start_workers(N, Size, Done, !IO) :-
+    ( if N = 0 then
+        true
+    else
+        spawn(worker(Size, Done), _, !IO),
+        start_workers(N - 1, Size, Done, !IO)
+    ).
+
+:- pred start_pairs(int::in, int::in, mailbox(int)::in,
+    io::di, io::uo) is det.
+start_pairs(N, Rounds, Done, !IO) :-
+    ( if N = 0 then
+        true
+    else
+        spawn(pair_leader(Rounds, Done), _, !IO),
+        start_pairs(N - 1, Rounds, Done, !IO)
+    ).
+
+:- pred pair_leader(int::in, mailbox(int)::in, mailbox(ball)::in,
+    io::di, io::uo) is det.
+pair_leader(Rounds, Done, Mine, !IO) :-
+    spawn(partner, Other, !IO),
+    rounds(Rounds - 1, Other, Mine, !IO),
+    send(Done, 1, !IO).
+
 main(!IO) :-
     io.command_line_arguments(Arguments, !IO),
     ( if
+        Arguments = ["work", CountText, SizeText],
+        string.to_int(CountText, Count),
+        string.to_int(SizeText, Size)
+    then
+        new_mailbox(Done, !IO),
+        now(T0, !IO),
+        start_workers(Count, Size, Done, !IO),
+        collect(Count, Done, !IO),
+        now(T1, !IO),
+        io.write_string(string.format("work %d processes of fib(%d): %s ms\n",
+            [i(Count), i(Size), s(us(T1 - T0, 1000))]), !IO)
+    else if
+        Arguments = ["pairs", CountText, RoundsText],
+        string.to_int(CountText, Count),
+        string.to_int(RoundsText, Rounds)
+    then
+        new_mailbox(Done, !IO),
+        now(T0, !IO),
+        start_pairs(Count, Rounds, Done, !IO),
+        collect(Count, Done, !IO),
+        now(T1, !IO),
+        io.write_string(string.format("pairs %d of %d rounds: %s us a round in all\n",
+            [i(Count), i(Rounds), s(us(T1 - T0, Count * Rounds))]), !IO)
+    else if
         Arguments = ["pingpong", Text],
         string.to_int(Text, Rounds)
     then
@@ -141,6 +203,6 @@ main(!IO) :-
             [i(Count), s(us(T1 - T0, Count)), s(us(T2 - T1 - 1000000, Count)),
              s(us(T3 - T2, Count)), i((K1 - K0) / Count)]), !IO)
     else
-        io.write_string("usage: processes pingpong ROUNDS | spawn COUNT [BYTES]\n", !IO),
+        io.write_string("usage: processes pingpong ROUNDS | work COUNT SIZE | pairs COUNT ROUNDS | spawn COUNT [BYTES]\n", !IO),
         io.set_exit_status(1, !IO)
     ).
