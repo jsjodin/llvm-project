@@ -787,6 +787,17 @@ each GPU. The user decided to hold it until the scheduler is designed, since
 that decides how the host's threads are used, and draining may become one of its
 jobs.
 
+**Measured again 2026-11-08, on a5efa6819f86, with the scheduler.** The same prototype,
+nine alternating runs, 20000 rounds, median µs a round with the RPC and with
+the ring: GPU and a thread of its node 13.29 and 13.48; GPU and a process of its
+node 13.22 and 12.61; GPU and node 2's `main` 31.96 and 26.41; GPU and GPU
+between nodes 41.39 and 36.37. So nothing within a node, and 5 µs between
+nodes, 12 to 17%, with a host core spinning. Not yet decided. That only the
+rounds between nodes gain suggests that what helps is the TCP write leaving the
+plugin's server thread, not the ring; that is not tested. A cheaper test of it:
+the server's callback hands a send to another node to a thread, with no change
+on the device.
+
 ## The scheduler: processes on one host
 
 Route step 3 (design document, "The route there"), chunk 2. Proposed 2026-11-08;
@@ -866,8 +877,9 @@ ends the program. `spawn`, links and monitors do not exist.
 8. **The GPU with processes.** Done: a region's launch does not hold a worker
    (step 7); regions of several processes at once on one device, with
    `device(N)` (`process-target-many.m`); and benchmark modes `cpu-process` and
-   `gpu-process`, `main` against a process of its own node. To do: the numbers,
-   and whether a worker drains the send ring (The send ring). Regions on
+   `gpu-process`, `main` against a process of its own node. The numbers are
+   in the design document. Not a worker's job: the send ring, if it is built
+   (The send ring), since workers may all be busy. Regions on
    several devices at once are the same code, but need a machine with two GPUs
    to run.
 
