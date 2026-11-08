@@ -1,6 +1,6 @@
 The program of omp-target-receive.m, compiled by the driver for the
-machine's GPU and run there: the region polls the host for main's
-messages, and its receive with a timeout stops by the device's clock.
+machine's GPU and run there: the region reads main's messages from the
+mailbox's ring, and its receive with a timeout stops by the device's clock.
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-receive.m -o %t

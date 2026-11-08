@@ -37,6 +37,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "encode.h"
+#include "device-ring.h"
 #include "fragment.h"
 #include "node.h"
 #include "walk.h"
@@ -266,6 +267,12 @@ struct Mailbox {
   std::int64_t count;
   // The next closed slot, to reuse, or -1.
   std::int64_t nextFree;
+  // The ring through which a device receives from it, or null, and whether
+  // its messages are arrays; of which the first `consumed` were taken, and
+  // have gone from the list.
+  DeviceRing *ring;
+  bool ringOfArrays;
+  std::uint64_t consumed;
 };
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -287,6 +294,8 @@ Mailbox *slots{nullptr};
 std::int64_t slotCount{0};
 std::int64_t slotCapacity{0};
 std::int64_t firstFree{-1};
+// How many mailboxes have rings, so that most regions' ends need no walk.
+std::int64_t attachedRings{0};
 
 // Waits on the monotonic clock, which a change of the time of day does not
 // move.
@@ -329,6 +338,42 @@ void Unregister(Mailbox *mailbox) {
   mailbox->name = nullptr;
 }
 
+// Drops the messages the device has taken from the list. Called with the
+// lock held.
+void TrimRing(Mailbox *mailbox) {
+  std::uint64_t head{__atomic_load_n(&mailbox->ring->head, __ATOMIC_ACQUIRE)};
+  for (; mailbox->consumed != head; ++mailbox->consumed) {
+    Message *taken{mailbox->head};
+    mailbox->head = taken->next;
+    if (!mailbox->head) {
+      mailbox->tail = &mailbox->head;
+    }
+    --mailbox->count;
+  }
+}
+
+// Shows the device as many of the list's messages as fit, and tells it if
+// any are left. Called with the lock held.
+void FillRing(Mailbox *mailbox) {
+  TrimRing(mailbox);
+  DeviceRing *ring{mailbox->ring};
+  std::uint64_t tail{ring->tail};
+  std::uint64_t shown{tail - mailbox->consumed};
+  Message *message{mailbox->head};
+  for (std::uint64_t i{0}; i < shown; ++i) {
+    message = message->next;
+  }
+  while (message && tail - mailbox->consumed < kRingSlots) {
+    ring->slots[tail % kRingSlots] = mailbox->ringOfArrays
+        ? *reinterpret_cast<const Word *>(message->value)
+        : message->value;
+    ++tail;
+    __atomic_store_n(&ring->tail, tail, __ATOMIC_RELEASE);
+    message = message->next;
+  }
+  __atomic_store_n(&ring->spilled, message != nullptr, __ATOMIC_RELEASE);
+}
+
 // Queues a message whose cells are in a fragment of their own. Called with
 // the lock held.
 void Queue(Mailbox *mailbox, Message *message) {
@@ -337,6 +382,9 @@ void Queue(Mailbox *mailbox, Message *message) {
   mailbox->tail = &message->next;
   ++mailbox->count;
   ++arrivals;
+  if (mailbox->ring) {
+    FillRing(mailbox);
+  }
   pthread_cond_broadcast(&arrived);
 }
 
@@ -470,6 +518,9 @@ extern "C" void merk_mailbox_new(Word typeInfo, std::int64_t *placeAndSlot,
   mailbox.tail = &mailbox.head;
   mailbox.count = 0;
   mailbox.nextFree = -1;
+  mailbox.ring = nullptr;
+  mailbox.ringOfArrays = false;
+  mailbox.consumed = 0;
   *placeAndSlot = index;
   *generation = mailbox.generation;
   *secret = static_cast<std::int64_t>(mailbox.secret);
@@ -502,6 +553,8 @@ extern "C" void merk_mailbox_close(MERK_HANDLE_PARAMETERS) {
     mailbox->count = 0;
     mailbox->nextFree = firstFree;
     firstFree = mailbox - slots;
+    // Whoever made the ring frees it when no region is running.
+    mailbox->ring = nullptr;
     ++arrivals;
     pthread_cond_broadcast(&arrived);
   }
@@ -649,6 +702,64 @@ extern "C" void merk_mailbox_remove(
       mailbox->tail = link;
     }
     --mailbox->count;
+  }
+  pthread_mutex_unlock(&lock);
+}
+
+// The mailbox's ring for a device (device-ring.h), made by `allocate` the
+// first time, and its head; null if the mailbox is closed or not this
+// node's host's. What it holds already is shown in the ring.
+extern "C" DeviceRing *merk_mailbox_attach(MERK_HANDLE_PARAMETERS, bool arrays,
+    int device, DeviceRing *(*allocate)(int), std::uint64_t *head) {
+  pthread_once(&once, InitializeCondition);
+  pthread_mutex_lock(&lock);
+  DeviceRing *ring{nullptr};
+  if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
+    if (!mailbox->ring) {
+      mailbox->ring = allocate(device);
+      mailbox->ringOfArrays = arrays;
+      mailbox->consumed = 0;
+      ++attachedRings;
+      FillRing(mailbox);
+    }
+    ring = mailbox->ring;
+    *head = ring->head;
+  }
+  pthread_mutex_unlock(&lock);
+  return ring;
+}
+
+// Shows the device the messages that did not fit in its ring.
+extern "C" void merk_mailbox_drain(MERK_HANDLE_PARAMETERS) {
+  pthread_mutex_lock(&lock);
+  if (Mailbox *mailbox{Find(MERK_HANDLE)}; mailbox && mailbox->ring) {
+    FillRing(mailbox);
+  }
+  pthread_mutex_unlock(&lock);
+}
+
+// Drops from the list what the device has taken, so that the mailbox's
+// oldest message is the next it will take.
+extern "C" void merk_mailbox_trim(MERK_HANDLE_PARAMETERS) {
+  pthread_mutex_lock(&lock);
+  if (Mailbox *mailbox{Find(MERK_HANDLE)}; mailbox && mailbox->ring) {
+    TrimRing(mailbox);
+  }
+  pthread_mutex_unlock(&lock);
+}
+
+// When no region is running: every mailbox goes back to its list alone,
+// which still has what the devices did not take. The caller frees the rings.
+extern "C" void merk_mailbox_detach_rings(void) {
+  pthread_mutex_lock(&lock);
+  if (attachedRings != 0) {
+    for (std::int64_t i{0}; i < slotCount; ++i) {
+      if (slots[i].open && slots[i].ring) {
+        TrimRing(&slots[i]);
+        slots[i].ring = nullptr;
+      }
+    }
+    attachedRings = 0;
   }
   pthread_mutex_unlock(&lock);
 }

@@ -6,8 +6,8 @@
 % on the device, receive(Mailbox, any, Timeout, Result, !IO) is a call of
 % the runtime's merk_device_receive with the handle's cell and the
 % timeout's milliseconds, which succeeds with the oldest message as a word.
-% On a GPU, merk_device_receive is the device's runtime's, which polls the
-% host over the offload plugin's RPC server, sleeping between polls, until
+% On a GPU, merk_device_receive is the device's runtime's, which reads the
+% mailbox's ring in host-pinned memory, sleeping between looks, until
 % the timeout passes by the device's clock; on the host, it is merkrt's,
 % which waits as receive does. A procedure in the host's compile receives
 % as on the host. yes(N) is a cell, which on the device comes from
