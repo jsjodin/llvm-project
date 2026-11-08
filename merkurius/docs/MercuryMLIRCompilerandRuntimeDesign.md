@@ -2790,7 +2790,8 @@ limits until they are lifted. Handles are flat values, so they are mapped into t
   queued: without the answer, a region ended before the host had queued
   its messages, and a later send could take another port and be served
   first. On the host, `merk_device_send` is `merkrt`'s, which queues it
-  directly. A message of another type is not supported yet.
+  directly. Arrays of one-word elements are sent too (The device's
+  communication, below); a message of another type is not supported yet.
   `CodeGen/omp-target-send.m`, `omp-target-send-call.m`, each with its GPU
   run, `omp-target-send-errors.m` and `omp-target-send-polymorphic.m`.
 
@@ -2799,9 +2800,9 @@ limits until they are lifted. Handles are flat values, so they are mapped into t
   having been given node 1's mailbox by node 1's host. A send to another
   node's mailbox is encoded and written to the connection by the callback,
   on the plugin's server thread, which TCP's flow control can then stall
-  for every device of the process; a sender thread of our own, or a queue
-  that the connection's thread drains, would keep the server thread from
-  waiting, if the benchmark shows it matters.
+  for every device of the process. The benchmarks did not show this as a
+  limit (The device's communication, below); ping-pong has one message in
+  flight, and large arrays are limited by the encoding and TCP.
 
   A region receives with `receive(Mailbox, any, Timeout, Result, !IO)`,
   one-word messages, in the region or in a procedure it calls: in the
@@ -2813,23 +2814,176 @@ limits until they are lifted. Handles are flat values, so they are mapped into t
   `merk_device_receive` with the handle's cell and the timeout's
   milliseconds, a `merk.switch` on the `process.timeout`, which succeeds
   with the oldest message as a word; the result is `yes` of it, or `no`.
-  `any`'s closure is not made. On a GPU, the device's runtime polls the
-  host with the opcode `'m' << 24 | 2`, whose callback takes the mailbox's
-  oldest message if it has one and never waits, since one server thread
-  serves every device; between polls the device sleeps (`s_sleep`, about 8
-  microseconds), and it stops when the timeout passes by `omp_get_wtime`,
-  the OpenMP device runtime's steady clock. On the host, `merk_device_receive`
-  waits on the mailbox as `receive/5` does. A cell made on the device, such
-  as `yes(N)`, comes from `merk_device_alloc`, the OpenMP device runtime's
-  `malloc`: LLVM libc's GPU allocator when the OpenMP device runtime is
-  built with libc for the GPU, as `build_merk.sh` builds it, and otherwise
-  its bump allocator of 1 MiB, which traps when it is full
-  (`CodeGen/omp-target-allocate.m` needs more). Nothing is freed yet. Another selector, or a message of
-  another type, is an error at the receive; a selector over several
-  mailboxes is an error at its closures in the device's compile.
+  `any`'s closure is not made. On a GPU, the device's runtime reads the
+  mailbox's ring in host-pinned memory (The device's communication, below);
+  between looks the device sleeps (`s_sleep`, about 8 microseconds), and it
+  stops when the timeout passes by `omp_get_wtime`, the OpenMP device
+  runtime's steady clock. On the host, `merk_device_receive` waits on the
+  mailbox as `receive/5` does. A cell made on the device, such as `yes(N)`,
+  comes from `merk_device_alloc`, the device's arena. Another selector, or a
+  message of another type, is an error at the receive; a selector over
+  several mailboxes is an error at its closures in the device's compile.
   `CodeGen/omp-target-receive.m`, with its GPU run,
   `omp-target-receive-errors.m`, `omp-target-receive-selector.m`, and
   `omp-target-term.m`, with its GPU run.
+
+#### The device's communication, as built
+
+What runs today (2026-11-08) for a region's messages, within a node and
+between nodes, and why. The numbers are in Measurements.
+
+**The path of a message.** Between two nodes' regions, a message goes from
+the device to its host over RPC, is encoded there, crosses TCP, is decoded by
+the other node's reader thread, and is shown to the other device in a ring in
+host memory. Nothing was added for GPU to GPU beyond the two halves: a
+region's send to another node's mailbox and a region's receive of what arrives
+are each the first slice's. Both hosts stay on the path; a copy from the device
+straight to a network card is not built.
+
+**What LLVM's offload runtime gives.** An RPC server for every device, on a
+host thread while a kernel runs, speaking libc's protocol
+(`libc/shared/rpc.h`); it tries registered callbacks first, then its own
+opcodes, then libc's. A callback is registered with
+`__tgt_register_rpc_callback`, and on the device
+`rpc::Client __llvm_rpc_client`, a weak symbol of `libompdevice`, opens a port
+for any opcode. `omp_target_memcpy` works from a callback, after a fix below.
+One server thread serves every device under a lock, so **a callback must never
+wait for a message**: it would stop every device's RPC, `printf` included.
+
+**The transport is opcodes of our own,** `'m' << 24 | n`
+(`runtime/rpc-opcodes.h`), in `runtime/device/device.cpp` and the callback in
+`runtime/offload.cpp`:
+
+| n | Name | What |
+| ---: | --- | --- |
+| 1 | `rpcSend` | a one-word message, by the type's key; answered once queued |
+| 2 | `rpcAttach` | the mailbox's ring: its address and head |
+| 3 | `rpcChunk` | a chunk for the device's arena |
+| 4 | `rpcGiveArray` | an array the device made, copied to the host for a region's output |
+| 5 | `rpcSendArray` | an array of one-word elements; the host copies it from the device |
+| 6 | `rpcDrain` | move messages waiting on the host into the ring |
+| 7 | `rpcTakeArray` | copy the oldest array message to the arena address given |
+
+Rejected: libompdevice's host call (`__llvm_omp_host_call`), which needs a host
+function's address passed into each region and allocates a copy of the
+arguments for each call; and a server thread of our own, which would redo the
+plugin's.
+
+**Encoding happens on the host,** by the host's `type_info`, found by the
+message type's key (As implemented, above). The device does no run-time
+dispatch and never reads a `type_info`.
+
+**A send waits for the host.** Without the answer, a region could end before
+its messages were queued, and the next send could take another port, which
+the server, scanning from port 0, may serve first, out of order. It costs an
+RPC round trip per send, and it is what the GPU has left over the CPU between
+nodes, with the wait on the ring. Removing it needs another way to keep sends
+in order, such as a send ring in host memory drained by a host thread (not
+designed).
+
+**The arena.** One per device, until the last running region ends. The device
+bump-allocates cells and arrays with an atomic add, in chunks of at least 1 MiB
+that the host allocates on the device when asked (`rpcChunk`,
+`omp_target_alloc` in the callback). One thread asks at a time, since a GPU has
+thousands, and the others sleep. Each region is bracketed on the host by
+`merk_region_enter` and `merk_region_exit`, which count the running regions;
+the last to end frees the chunks and clears the device's arena words. The
+chunks are limited to 8 GiB in all, or `MERK_DEVICE_ARENA_BYTES`, past which
+the program stops with an error: a runaway allocation otherwise fills the VRAM
+and can make the driver reset a GPU that also drives the display, as one did.
+`Fail` there uses `_Exit`, since `exit` on the server thread hangs.
+
+**Arrays of scalars,** `array(T)` for a one-word `T`. `runtime/array.cpp` is
+also compiled for the device, allocating in the arena. The wire format is
+8-byte little-endian items, the length and then the elements.
+
+- **A send** gives the host the array's device address and size. The host
+  copies it from the device with `omp_target_memcpy`, into a temporary, and the
+  send copies it into the message's fragment or encodes it. Writing straight
+  into the fragment would remove the second copy, which limits a GPU's send
+  within a node to about 1.2 GB/s against 2.2 from the CPU.
+- **A receive** is the ring giving the size, the device allocating in its
+  arena, and `rpcTakeArray` giving the host the address to copy to, with no
+  second copy. The device decides the place, so the arena's accounting stays
+  on one side.
+- **Copied and encoded as blocks.** An array of scalars is copied into a
+  message with one `memcpy`. An array of `int`, `uint` or `float` (64-bit
+  ones) is encoded and decoded as one, its bytes on the wire being its bytes in
+  memory; other scalars are not, as `char`s and enumerations are checked when
+  decoded, and narrower integers masked. An element-at-a-time encode by
+  `type_info` had capped sends between nodes at 300 to 700 MB/s.
+
+**The mailbox's ring** (`runtime/device-ring.h`). The device looks for a message
+by reading host-pinned memory (`llvm_omp_target_alloc_host`) directly, with no
+RPC and no host thread involved.
+
+- **One ring for each mailbox a device receives from,** 64 slots. The first
+  receive attaches it (`rpcAttach`); the device keeps its address in a table
+  in the arena, by the mailbox's slot, chaining entries that collide, as
+  replacing one would call the host at every look.
+- **The host's list stays the mailbox's queue;** the ring shows the device its
+  oldest messages. A slot is a word message itself, or an array's size. The
+  device moves `head` when it has taken a message, and the host drops it from
+  its list.
+- **What does not fit waits on the list,** in order, and a flag tells the
+  device to ask (`rpcDrain`), after which it looks again, so that a receive
+  with no time to wait still finds it.
+- **When the last running region ends,** every ring is detached and freed,
+  and the mailbox is its list alone, holding what the device did not take, so a
+  mailbox can pass between regions and the host.
+- **One device for each mailbox:** two devices receiving from one mailbox are
+  not supported, as only the region that made a mailbox receives from it.
+
+Why host-pinned memory (chosen by the user, 2026-11-08). The first design
+had a queue in device memory that the host writes. A probe measured a one-word
+round trip between a host thread and a kernel through host-pinned memory at
+2.0 µs, against 7.5 µs for an RPC round trip and about 10 µs for
+`omp_target_memcpy`, so a queue the host could reach only by copying would
+be slower than the poll it replaced. Rejected: device memory mapped for the
+host (a large BAR), which needs the plugin to offer it, a change to take
+upstream, and depends on the machine; its gain would be the device's looks not
+crossing PCIe. **On an APU** there is one memory, so this choice is the better
+one there too.
+
+**Unified shared memory** (not built, not measured; no APU here) would go
+further for arrays: the device could read a received array where the host has
+it, with no copy into the arena, and a send could give a pointer in place of
+the host's copies. The message's memory must then live as long as the device
+holds it.
+
+**The host spins before it blocks.** A round between nodes had three blocking
+wakes, each node's reader thread and the receiver's wait, and a wake costs more
+than the round's other steps (this machine's deepest idle state alone takes
+18 µs to leave). A thread about to block for a message spins first, for 50 µs,
+or `MERK_SPIN_MICROSECONDS`, 0 for none: on the socket with `MSG_DONTWAIT`,
+and on the count of arrivals. **It yields as it spins:** without that, a round
+with both nodes on one core took 237 µs in place of 39, as the spinner kept the
+core from the thread it waited for; with it, 28. A receive with no time left
+does not spin. The cost is up to 50 µs of a core for each wait.
+
+**Fixes this needed in LLVM,** candidates for upstream:
+
+- The AMD plugin queued a small copy behind a running kernel's own copy back
+  on the same copy engine, so `omp_target_memcpy` from a callback waited for
+  the kernel, which waited for it. A copy with a pending dependency is now
+  submitted once the dependency completes.
+- MLIR's `omp-stack-to-shared` freed shared memory between a `musttail` call
+  and its return.
+- MLIR's `omp-host-op-filter` kept the arguments of every block of the host
+  function, which broke regions in branches.
+
+**What the plugins lack, for later.** A stable identity for a GPU (the gfx1030
+has no UUID, and liboffload no PCI address), which the place table needs once a
+node has two GPUs or nodes compare places. RPC on the host plugin, so the
+device's transport does not run on the CPU, and a region on the host calls the
+host's runtime directly (Testing on the CPU, below).
+
+**Tested.** `omp-target-receive-ring.m` (more messages than the ring holds, a
+mailbox passing between regions and the host, colliding table entries),
+`omp-target-two-nodes.m` (one region, or both nodes in regions, each on the CPU
+over TCP too), and their GPU runs. Two processes on one machine stand for two
+machines, over loopback, sharing its one GPU: two GPUs, two machines and a real
+network are still to be tried.
 
 #### Testing on the CPU
 
@@ -3084,8 +3238,9 @@ node 1 to node 2. Processes on the CPU come after.
      target region (Send and receive in a target region), the device
      runtime, and flat messages.
    - **On node 1:** the region's launching process, its main, waits for it,
-     while the host's bridge thread forwards the region's messages to node 2
-     and writes node 2's replies into the region's mailbox in device memory.
+     while the host forwards the region's messages to node 2 and shows node
+     2's replies to the region in the mailbox's ring in host memory (The
+     device's communication).
    - **On node 2:** main is the region's partner, with `send` and `receive`
      on a mailbox of its own. With one process on each node, a `receive`
      that blocks waits on a condition variable, so no scheduler is needed.
@@ -3109,7 +3264,7 @@ node 1 to node 2. Processes on the CPU come after.
    - **First benchmark:** ping-pong between the GPU and node 2, over loopback
      on one machine, then between two machines. Done on one machine, and
      also between a GPU region of each of two nodes, processes sharing the
-     machine's GPU (`INPROGRESS.md`, step 7); two machines are still to do.
+     machine's GPU (Measurements); two machines are still to do.
 2. **Exceptions, enough to end a process:** `throw`, and an exception nothing
    catches ends the process with it as the exit reason. `catch` comes later;
    ending a process needs no unwinding.
@@ -3302,6 +3457,147 @@ The language target is the Mercury 22.01 reference manual. The standard library 
 - **Diagnostics tests:** expected type, mode and determinism errors, such as the missing-constructor error in Language extensions. To do: a test whose expected errors are `ERR-DAG` lines, checked with `--implicit-check-not=error:`, misses an extra error that falls between two of them, as FileCheck checks the implicit pattern only outside the `DAG` group's matches. Such tests should also check the number of errors, for example with a RUN line that counts them (`grep -c error: %t.err`, compared with the number of `ERR-DAG` lines). Pass 6 found two that passed this way, `uniqueness/backtracking.m` and `scopes.m`; an audit of the error counts then found no others.
 - **Runtime stress:** a GC torture mode that collects at every safepoint, and randomized scheduling.
 - **Benchmarks:** the four baseline programs (fib, naive reverse, 12-queens, float loop) already exist in C, Mercury, SWI-Prolog and Python. Add the classic Prolog suite (deriv, tak, crypt, poly), parallel-loop scaling runs, and process benchmarks: ring, ping-pong, spawn rate, receive latency. The first parallel-loop benchmark is `benchmarks/bandwidth`, BabelStream's five kernels (copy, mul, add, triad and dot) under `target teams distribute parallel do`, built sequentially, for the host's threads and for a GPU; its GPU numbers measure the maps of each kernel's arrays until there are `target data` regions (benchmarks/bandwidth/README.md).
+
+## Measurements
+
+The speed tests' numbers, so that a change can be held against them. How each
+is run, and what is learned from it, is in its README in `benchmarks/`
+(`pingpong`, `array-messages`, `bandwidth`).
+
+All were taken on one machine: an AMD Ryzen Threadripper PRO 5965WX (24 cores,
+48 threads) and an AMD Radeon RX 6950 XT (gfx1030) on PCIe, with the programs at
+-O2. "Between nodes" means two processes over TCP on loopback, so no real
+network is in these numbers, and "GPU / GPU" means two processes sharing that
+one GPU. Runs between nodes vary from one to the next, by up to a third before
+the spin, so only differences of several microseconds mean anything. Each table
+gives the date and the commit of the tree it was measured on; a later change
+may have moved its numbers.
+
+### Message latency
+
+The round trip of a one-word message, in microseconds: 20000 rounds, after 100
+to warm up. Five runs each, 2026-11-08, at a0a56a9a0a10, without the spin
+(`MERK_SPIN_MICROSECONDS=0`) and with its default of 50 µs:
+
+| Between | No spin | Spin |
+| --- | ---: | ---: |
+| GPU and node 2 | 47.5 to 67.7 | 33.9 to 36.0 |
+| CPU and node 2 | 38.5 to 64.4 | 21.9 to 25.7 |
+| GPU and a thread of its node | 23.3 to 25.8 | 19.2 to 19.4 |
+| CPU and a thread of its node | 11.8 to 16.7 | 6.8 to 6.9 |
+| CPU and node 2, both on one core | about 39 | about 28 |
+
+Between regions of two nodes, with the spin, five runs, 2026-11-08, at the tree
+of 2dbae6c632a3:
+
+| Node 1 / node 2 | Microseconds a round |
+| --- | --- |
+| GPU / GPU | 45.2, 45.7, 46.4, 44.9, 44.4 |
+| GPU / CPU | 35.8, 34.3, 33.0, 36.5, 35.8 |
+| CPU / GPU | 33.7, 35.9, 37.7, 38.0, 37.4 |
+| CPU / CPU | 25.3, 25.6, 24.5, 25.3, 21.6 |
+
+The floors, plain round trips with nothing of ours, three runs, 2026-11-07,
+except the last line:
+
+| Floor | Microseconds a round |
+| --- | --- |
+| TCP on loopback, two processes (`tcp-floor`) | 15.4, 15.1, 15.3 |
+| Two threads through condition variables (`condvar-floor`) | 8.8, 9.1, 9.0 |
+| A region's RPC with the host (`rpc-floor`) | 7.5, 7.6, 7.5 |
+| A word through host-pinned memory, a host thread and a kernel, 2026-11-08 | 2.0 |
+
+What the mailbox's ring for the device did, the committed runtime before it
+(dc7a2eb76c55) and the ring (a3601dcc7e7d) run in turn, four runs each, before
+the spin:
+
+| Between | Before | With the ring |
+| --- | ---: | ---: |
+| GPU and a thread of its node | 28 to 32 | 24 to 26 |
+| GPU and node 2 | 45 to 53 | 49 to 65 |
+
+### Array bandwidth
+
+Arrays of ints as messages, in MB/s, the median of three runs, 64 MiB a
+measurement, every message checked. 2026-11-08, at dc7a2eb76c55: before the
+ring and the spin, which change the cost of a message, not of its bytes.
+
+From node 1 (`to`), where `memcpy` is `omp_target_memcpy` alone, from the
+device to the host:
+
+| Words | `memcpy` | GPU, its node | CPU, its node | GPU, node 2 | CPU, node 2 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.8 | 0.4 | 4.9 | 0.3 | 1.4 |
+| 16 | 13 | 5.9 | 79 | 5.0 | 23 |
+| 256 | 203 | 93 | 1240 | 68 | 319 |
+| 4096 | 2550 | 753 | 2151 | 917 | 1242 |
+| 65536 | 8565 | 1471 | 2008 | 1256 | 1422 |
+| 262144 | 8360 | 1174 | 2199 | 1504 | 1662 |
+| 1048576 | 7338 | 1184 | 2234 | 1127 | 1416 |
+
+To node 1 (`from`), where `memcpy` is from the host to the device:
+
+| Words | `memcpy` | GPU, its node | GPU, node 2 | CPU, node 2 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.9 | 0.3 | 0.3 | 1.4 |
+| 16 | 14 | 5.0 | 4.2 | 23 |
+| 256 | 226 | 79 | 68 | 310 |
+| 4096 | 3397 | 1098 | 677 | 1271 |
+| 65536 | 10539 | 4181 | 1179 | 1252 |
+| 262144 | 20404 | 6572 | 1242 | 1363 |
+| 1048576 | 23715 | 10384 | 821 | 680 |
+
+Between regions of two nodes, in the same way, 2026-11-08, at the tree of
+2dbae6c632a3:
+
+| Words | GPU / GPU, `to` | GPU / GPU, `from` |
+| ---: | ---: | ---: |
+| 1 | 0.3 | 0.3 |
+| 16 | 4.7 | 4.7 |
+| 256 | 69 | 72 |
+| 4096 | 776 | 843 |
+| 65536 | 1315 | 1347 |
+| 262144 | 1488 | 1283 |
+| 1048576 | 1179 | 835 |
+
+What copying and encoding arrays of scalars as blocks did at 2^20 words (MB/s,
+b0a0770703e9 and dc7a2eb76c55; at 2^18 words, GPU to node 2 went from 335 to
+1504):
+
+| Between | Element by element | As a block |
+| --- | ---: | ---: |
+| GPU to its node | 1024 | 1184 |
+| CPU within its node | 1301 | 2234 |
+| GPU to node 2 | 380 | 1127 |
+| CPU to node 2 | 590 | 1416 |
+| GPU from node 2 | 640 | 821 |
+| CPU from node 2 | 517 | 680 |
+
+### Memory bandwidth
+
+Five array kernels modeled on BabelStream, in MB/s, one run of `run.sh` with the
+default sizes, 2026-11-04. The card's memory is rated at 512 GB/s.
+
+| Kernel | Sequential | OpenMP, host (48 threads) | OpenMP, GPU |
+| --- | ---: | ---: | ---: |
+| Copy | 27,876 | 99,676 | 297,358 |
+| Mul | 27,728 | 96,123 | 264,506 |
+| Add | 31,355 | 105,249 | 309,747 |
+| Triad | 30,239 | 106,687 | 324,757 |
+| Dot | 20,316 | 127,659 | 417,102 |
+
+Against the same program in C with OpenMP on the GPU, built by the same clang,
+the median of 7 rounds, each a kernel's fastest of 100 runs, 2026-11-04. C's Add
+and Triad vary the most over the rounds, from 70,000 to 141,000 and from 69,000
+to 97,000:
+
+| Kernel | Mercury | C |
+| --- | ---: | ---: |
+| Copy | 311,982 | 531,733 |
+| Mul | 271,219 | 456,067 |
+| Add | 308,900 | 78,069 |
+| Triad | 324,071 | 78,711 |
+| Dot | 413,621 | 515,025 |
 
 ## Target applications
 
