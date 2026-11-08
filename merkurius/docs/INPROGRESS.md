@@ -718,7 +718,14 @@ Still open:
   with a place table and a stable identity; a path between GPUs of a node that
   does not go through the host.
 - **A send that does not wait for the host,** about 12 µs of a round from the
-  GPU with the wait on the ring; needs another way to keep sends in order.
+  GPU with the wait on the ring; needs another way to keep sends in order
+  (The send ring, below).
+- **Streamlining a node's start-up.** `listen` and `connect` are explicit, with
+  a "host:port", and the benchmarks print a port for a script to pass on. As in
+  Erlang, a node could have a name, a discovery step like `epmd`, and connect on
+  first use. The handle has a node id rather than an address, so this goes
+  underneath `send` and `receive`, and `listen` and `connect` stay as the layer
+  it is built on.
 - **The second copy of a sent array** on the host.
 - **From the device straight to a network card,** not designed.
 - **`target nowait`** is not supported by merkc; it comes with the CPU's
@@ -728,6 +735,48 @@ Still open:
   processes, is to be designed.
 - **Unified shared memory** for arrays (design document), and the ring's cost on
   an APU, not measured.
+
+## The send ring
+
+Proposed 2026-11-08; not agreed yet. A one-word send from a device is an RPC
+round trip, as it waits for the host to queue the message. That is 7.5 µs at
+the floor, and most of the 12 µs that a GPU costs over a CPU in a round between
+nodes, with the wait on the receive ring.
+
+**Why a send waits today:** so that a region does not end before its messages
+are queued, and so that two sends are not served out of order on two ports.
+
+**Proposed:**
+
+- **A ring for each device, in host-pinned memory,** that the device writes and
+  the host drains. One ring keeps a device's sends in order. A slot has the
+  handle's five words, the type's key, the message, and a full flag written
+  last. The device reserves a slot with an atomic add, as several teams may
+  send; a full ring makes the sender wait.
+- **A send returns when its slot is written.** That is about half of the 2 µs
+  round trip through host memory, where the RPC took 7.5.
+- **A drain thread on the host,** started with the first region that sends. It
+  calls `merk_mailbox_send`, so the encoding and the TCP write leave the
+  plugin's server thread too.
+- **The drain thread spins and then sleeps,** as the host's other waits do. A
+  device cannot wake a host thread directly, so the ring has an `asleep` word,
+  and a sender that finds it set makes one RPC (a new opcode) to wake the
+  thread.
+- **The end of a region drains.** `merk_region_exit` waits until the region's
+  device's ring is empty, so messages are queued when the region has ended, as
+  now.
+- **An array send drains first.** Arrays stay RPCs, and the callback empties the
+  device's ring before it handles one, so a word and an array keep their order.
+
+**What it costs:** a host thread for each device with sends, up to a core while
+it spins. **What it gains** is not measured: perhaps 5 to 8 µs of a round for
+each GPU, and fewer jobs for the one server thread. A prototype should measure
+that before the rest is built.
+
+**To decide:** whether a send may return before the message is queued. A send
+to a closed or unreachable mailbox is dropped either way, so a program cannot
+see the difference, apart from the order against what the device reads from
+host memory by other means.
 
 ## The receive goal: later
 
