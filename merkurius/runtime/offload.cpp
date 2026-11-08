@@ -20,12 +20,14 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "device-ring.h"
 #include "fragment.h"
 #include "rpc-opcodes.h"
 #include "shared/rpc.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <pthread.h>
 
 extern "C" std::int32_t merk_compare_type_infos(
@@ -49,6 +51,19 @@ extern "C" std::int64_t merk_mailbox_wait(std::int64_t nodeHigh,
     std::int64_t nodeLow, std::int64_t placeAndSlot, std::int64_t generation,
     std::int64_t secret, std::int64_t position, std::int64_t deadline);
 
+extern "C" merkurius::runtime::DeviceRing *merk_mailbox_attach(
+    std::int64_t nodeHigh, std::int64_t nodeLow, std::int64_t placeAndSlot,
+    std::int64_t generation, std::int64_t secret, bool arrays, int device,
+    merkurius::runtime::DeviceRing *(*allocate)(int), std::uint64_t *head);
+extern "C" void merk_mailbox_drain(std::int64_t nodeHigh, std::int64_t nodeLow,
+    std::int64_t placeAndSlot, std::int64_t generation, std::int64_t secret);
+extern "C" void merk_mailbox_trim(std::int64_t nodeHigh, std::int64_t nodeLow,
+    std::int64_t placeAndSlot, std::int64_t generation, std::int64_t secret);
+extern "C" void merk_mailbox_detach_rings(void);
+
+extern "C" void *llvm_omp_target_alloc_host(std::size_t, int)
+    __attribute__((weak));
+extern "C" void llvm_omp_target_free_host(void *, int) __attribute__((weak));
 extern "C" void __tgt_register_rpc_callback(unsigned (*)(void *, unsigned))
     __attribute__((weak));
 extern "C" void *omp_target_alloc(std::size_t, int) __attribute__((weak));
@@ -166,6 +181,16 @@ DeviceArena *arenas{nullptr};
 std::uint64_t arenaCount{0}, arenaCapacity{0};
 std::uint64_t runningRegions{0};
 
+// The mailboxes' rings, to free when no region is running. Its lock is taken
+// with the mailboxes' lock held, and so comes after it, and after arenaLock.
+pthread_mutex_t ringsLock = PTHREAD_MUTEX_INITIALIZER;
+struct RingOfDevice {
+  DeviceRing *ring;
+  int device;
+};
+RingOfDevice *rings{nullptr};
+std::uint64_t ringCount{0}, ringCapacity{0};
+
 // How many bytes of chunks the devices may hold at once, all told: a
 // program that allocates without end would otherwise fill the device's
 // memory, and on a GPU that also drives a display, starve its graphics
@@ -231,8 +256,8 @@ void FreeArenas() {
       omp_target_free(arena.chunks[j], arena.device);
     }
     arena.count = 0;
-    const std::uint64_t none{0};
-    if (omp_target_memcpy(reinterpret_cast<void *>(arena.address), &none,
+    const std::uint64_t none[kArenaClearWords]{};
+    if (omp_target_memcpy(reinterpret_cast<void *>(arena.address), none,
             sizeof none, 0, 0, arena.device, omp_get_initial_device()) != 0) {
       Fail("could not clear a device's arena");
     }
@@ -262,28 +287,34 @@ void SendArray(const std::uint64_t *handle, std::uint64_t key, int device,
   std::free(copy);
 }
 
-// Whether the mailbox has a message, an array, whose size is then in `size`.
-bool PeekArray(const std::uint64_t *handle, std::uint64_t &size) {
-  const std::int64_t *h{reinterpret_cast<const std::int64_t *>(handle)};
-  if (merk_mailbox_poll(h[0], h[1], h[2], h[3], h[4], 0) <= 0) {
-    return false;
-  }
-  size = *reinterpret_cast<const std::uint64_t *>(
-      merk_mailbox_message(h[0], h[1], h[2], h[3], h[4], 0));
-  return true;
-}
-
-// Copies the mailbox's oldest message, an array, to the device's array of
-// its size, and removes it.
+// Copies the mailbox's oldest message that the device has not taken, an
+// array, to the device's array of its size. The device then moves the
+// ring's head, after which the message goes.
 void TakeArray(const std::uint64_t *handle, int device, void *array) {
   const std::int64_t *h{reinterpret_cast<const std::int64_t *>(handle)};
+  merk_mailbox_trim(h[0], h[1], h[2], h[3], h[4]);
   auto *message{reinterpret_cast<const std::uint64_t *>(
       merk_mailbox_message(h[0], h[1], h[2], h[3], h[4], 0))};
   if (omp_target_memcpy(array, message, ArrayBytes(message[0]), 0, 0, device,
           omp_get_initial_device()) != 0) {
     Fail("could not copy an array to a device");
   }
-  merk_mailbox_remove(h[0], h[1], h[2], h[3], h[4], 0);
+}
+
+// A mailbox's ring, in memory that the device reads directly. It is freed
+// when no region is running.
+DeviceRing *NewRing(int device) {
+  auto *ring{static_cast<DeviceRing *>(
+      llvm_omp_target_alloc_host(sizeof(DeviceRing), device))};
+  if (!ring) {
+    Fail("out of memory for a mailbox's ring");
+  }
+  std::memset(static_cast<void *>(ring), 0, sizeof(DeviceRing));
+  pthread_mutex_lock(&ringsLock);
+  Reserve(rings, ringCount, ringCapacity);
+  rings[ringCount++] = {ring, device};
+  pthread_mutex_unlock(&ringsLock);
+  return ring;
 }
 
 unsigned HandleOpcode(void *raw, unsigned) {
@@ -295,21 +326,21 @@ unsigned HandleOpcode(void *raw, unsigned) {
       SendTo(buffer->data, buffer->data[5], buffer->data[6]);
     });
     return rpc::RPC_SUCCESS;
-  case rpcPoll:
-    // Never waits: the server thread serves every device.
+  case rpcAttach:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
-      std::uint64_t message{0};
-      bool found{TakeOldest(buffer->data, message)};
-      buffer->data[0] = found;
-      buffer->data[1] = message;
+      const std::int64_t *h{reinterpret_cast<const std::int64_t *>(buffer->data)};
+      std::uint64_t head{0};
+      DeviceRing *ring{merk_mailbox_attach(h[0], h[1], h[2], h[3], h[4],
+          buffer->data[6] != 0, static_cast<int>(buffer->data[5]), NewRing,
+          &head)};
+      buffer->data[0] = reinterpret_cast<std::uint64_t>(ring);
+      buffer->data[1] = head;
     });
     return rpc::RPC_SUCCESS;
-  case rpcPollArray:
+  case rpcDrain:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
-      std::uint64_t size{0};
-      bool found{PeekArray(buffer->data, size)};
-      buffer->data[0] = found;
-      buffer->data[1] = size;
+      const std::int64_t *h{reinterpret_cast<const std::int64_t *>(buffer->data)};
+      merk_mailbox_drain(h[0], h[1], h[2], h[3], h[4]);
     });
     return rpc::RPC_SUCCESS;
   case rpcTakeArray:
@@ -405,6 +436,13 @@ extern "C" void merk_region_enter(void) {
 extern "C" void merk_region_exit(void) {
   pthread_mutex_lock(&arenaLock);
   if (--runningRegions == 0) {
+    merk_mailbox_detach_rings();
+    pthread_mutex_lock(&ringsLock);
+    for (std::uint64_t i{0}; i < ringCount; ++i) {
+      llvm_omp_target_free_host(rings[i].ring, rings[i].device);
+    }
+    ringCount = 0;
+    pthread_mutex_unlock(&ringsLock);
     FreeArenas();
   }
   pthread_mutex_unlock(&arenaLock);

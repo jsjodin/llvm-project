@@ -45,6 +45,7 @@ if (TARGET clang AND TARGET llvm-ar AND "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
       -c ${CMAKE_CURRENT_SOURCE_DIR}/device/device.cpp -o ${merk_device_bc}
     DEPENDS clang ${CMAKE_CURRENT_SOURCE_DIR}/device/device.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/rpc-opcodes.h
+      ${CMAKE_CURRENT_SOURCE_DIR}/device-ring.h
     COMMENT "Building the Merkurius device runtime for AMD GPUs")
   add_custom_command(OUTPUT ${merk_device_array_bc}
     COMMAND $<TARGET_FILE:clang> --target=amdgcn-amd-amdhsa -nogpulib -O2

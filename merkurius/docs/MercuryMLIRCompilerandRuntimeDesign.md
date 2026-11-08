@@ -2639,8 +2639,9 @@ tables (Types instead of atoms).
 
 - **The same place:** the message is queued locally, as now.
 - **Another place of the same node:** from a device to the host over libc's
-  RPC; from the host to a device by writing into the mailbox's queue in device
-  memory; from a device to another device peer to peer where
+  RPC; from the host to a device by writing into the mailbox's ring in
+  host-pinned memory, which the device reads directly (memory of the device
+  itself would need the plugin to map it for the host); from a device to another device peer to peer where
   `hipDeviceCanAccessPeer` allows it, and through the host otherwise.
   `omp_target_memcpy` between two devices is a portable first version.
 - **Another node:** to the next hop of the node's route table, encoded once at
@@ -2916,7 +2917,7 @@ lines beside the OpenMP device runtime, which a target region needs anyway.
    array hands it over: the sender cannot use it again, so nothing waits for
    the send to finish before the array is reused, and nothing is copied
    defensively.
-4. **Mailboxes:** a small queue in device memory that the host writes into,
+4. **Mailboxes:** a small ring in host-pinned memory that the host writes into,
    and `send` and `receive` over libc's RPC. Flat messages are copied with
    `memcpy`, so the host and the relays forward bytes without reading them.
    libc's RPC moves a small buffer for each lane on each round trip, so a

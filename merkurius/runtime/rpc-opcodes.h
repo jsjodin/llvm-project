@@ -29,10 +29,11 @@ constexpr uint32_t RpcOpcode(uint32_t n) { return ('m' << 24) | n; }
 // answers once it has queued it.
 constexpr uint32_t rpcSend{RpcOpcode(1)};
 
-// A poll of a mailbox: the buffer's words are the handle's five. The host
-// answers with 1 and the oldest message, which it removes, or 0 if the
-// mailbox has none, or is closed or another node's.
-constexpr uint32_t rpcPoll{RpcOpcode(2)};
+// The ring of a mailbox the device receives from (device-ring.h): the
+// buffer's words are the handle's five, the device's number and whether the
+// messages are arrays. The host answers with the ring's address and its
+// head, or 0 if the mailbox is closed or another node's.
+constexpr uint32_t rpcAttach{RpcOpcode(2)};
 
 // A chunk for the device's arena: the buffer's words are the device's
 // number, the address of its arena, and the bytes the chunk must hold at
@@ -51,15 +52,15 @@ constexpr uint32_t rpcGiveArray{RpcOpcode(4)};
 // the array from the device, and answers once it has queued it.
 constexpr uint32_t rpcSendArray{RpcOpcode(5)};
 
-// A poll of a mailbox of arrays: the buffer's words are the handle's five.
-// The host answers with 1 and the size in elements of the oldest message,
-// which it keeps, or 0 if the mailbox has none.
-constexpr uint32_t rpcPollArray{RpcOpcode(6)};
+// The messages of a mailbox that did not fit in its ring: the buffer's
+// words are the handle's five. The host moves what fits into the ring, and
+// then answers.
+constexpr uint32_t rpcDrain{RpcOpcode(6)};
 
-// The oldest message of a mailbox of arrays, which a poll found: the
-// buffer's words are the handle's five, the device's number and the address
-// of an array on the device of the message's size. The host copies the
-// message there and removes it, and then answers.
+// The oldest message of a mailbox of arrays, whose size its ring gave: the
+// buffer's words are the handle's five, the device's number and the
+// address of an array on the device of the message's size. The host copies
+// the message there, and then answers; the device then moves the ring's head.
 constexpr uint32_t rpcTakeArray{RpcOpcode(7)};
 
 } // namespace merkurius::runtime

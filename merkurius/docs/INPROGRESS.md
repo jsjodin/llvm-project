@@ -976,6 +976,43 @@ Neither uses the C++ standard library; `rpc.h` needs none.
    GPU's whole hop, but that the hop is smaller than what the runtime's
    thread crossings cost on both nodes, which no GPU work changes.
 
+   **Design (the user chose host-pinned memory, 2026-11-08).** A probe (a one-word round trip between a
+   host thread and a kernel, through memory, no RPC) took 2.0 µs through
+   host-pinned memory (`llvm_omp_target_alloc_host`), and the same through
+   `llvm_omp_target_alloc_shared`, against 7.5 µs for an RPC round trip and
+   about 10 µs for `omp_target_memcpy` alone. So writing a queue in device
+   memory with `omp_target_memcpy` would be slower than the RPC poll it
+   replaces; the plugin gives no host mapping of device memory. Proposed:
+   - **The queue is in host-pinned memory,** which the device reads directly
+     and the host writes as ordinary memory. The design document's "in device
+     memory" assumed the host could write there cheaply. A true queue in
+     device memory needs the plugin to map VRAM for the host (a large BAR),
+     a change to offer upstream, and would save the device's reads over PCIe.
+   - **A ring for each mailbox the device receives from,** one producer lock
+     on the host and one consumer, the region. The first receive attaches it
+     (an RPC, which moves what is already queued into it and gives the ring's
+     address, cached on the device); the region's end detaches it, and what
+     is left goes back to the mailbox's queue on the host.
+   - **A one-word message is in its slot; an array's slot has its size,**
+     and the take stays the RPC that gives the host the arena's address.
+   - **When the ring is full,** messages wait in the host's queue, and the
+     device's next take drains them, so the order is kept.
+
+   **Done, with what it measured.** The committed runtime and this one, run
+   in turn (`pingpong`, 20000 rounds, four runs each): a round trip within a
+   node went from 28 to 32 µs to 24 to 26 µs. To node 2 it did not improve,
+   44 to 53 µs before and 49 to 65 µs after, within that path's noise. An
+   empty poll no longer occupies the plugin's one server thread, which serves
+   every device, though no benchmark yet has many GPU processes waiting at
+   once. The send's round trip and the thread crossings between nodes are
+   unchanged, and they are what is left between nodes.
+
+   The table of rings on the device chains the mailboxes whose slots fall in
+   the same place, since replacing the entry would call the host at every
+   look. A ring is made once for a mailbox, for one device: the receives of
+   two devices from one mailbox are not supported yet, as only the region
+   that made a mailbox receives from it.
+
 ## The receive goal: later
 
 The receive goal is done (design document, Processes and mailboxes, "The
