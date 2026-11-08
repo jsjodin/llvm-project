@@ -804,8 +804,9 @@ ends the program. `spawn`, links and monitors do not exist.
 **Steps,** each its own commit, tested on the CPU first:
 
 1. **A process's context.** A record for each process, with its heap's pointer
-   and limit, and a way for compiled code and the runtime to reach them (D1).
-   `main` is the first process. Nothing else changes.
+   and limit (`runtime/process.h`). `merk_heap` holds the running process's
+   heap, saved to its record when another runs. `main` is the first process.
+   Nothing else changes. Done.
 2. **Stacks and switching.** Slots from one `mmap` with `MAP_NORESERVE`, size
    classes with free lists, a switch of stack and callee-saved registers, and
    the limit check on procedures on cycles.
@@ -841,8 +842,10 @@ ends the program. `spawn`, links and monitors do not exist.
   change but costs a register and every signature; (c) keep the thread-local
   variable, and have lowering read its address afresh after each call, through
   an operation LLVM cannot merge, which is the smallest change and costs a read
-  after each call. Proposed: (c) first, measured at the nrev gate, leaving (a)
-  for later.
+  after each call. Chosen (the user, 2026-11-08): (c) first, measured at the
+  nrev gate, leaving (a) for later. It is built at step 4, as a process stays on
+  one OS thread until there are several workers. The operation is still to be
+  found: LLVM treats `llvm.threadlocal.address` as mergeable within a function.
 - **D2, spinning under the scheduler.** Today each waiting thread spins for 50
   µs. With workers, it is a worker with an empty queue that spins, before
   parking. Proposed: as now, spinning with a yield, for the same 50 µs.
