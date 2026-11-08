@@ -70,6 +70,13 @@ bool LinkForeignCode(llvm::Module &, mlir::ModuleOp, const TargetInfo &,
 // Runs LLVM's pipeline for the target's optimization level, -O0 to -O3.
 void OptimizeLLVMIR(llvm::Module &, const TargetInfo &);
 
+// Adds the stack's overflow check to the optimized procedures that need it
+// (design document, "Processes and scheduler", Stack overflow). It comes
+// after the optimizer, since a check at a procedure's start stops LLVM from
+// turning its recursions into loops, and so that it sees the calls that are
+// left.
+void AddStackChecks(llvm::Module &);
+
 // Embeds each offload binary in the host module's .llvm.offloading section,
 // for the linker wrapper to extract (-fembed-offload-object=, as in Clang
 // and Flang), or reports false with the error.

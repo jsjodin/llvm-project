@@ -78,7 +78,7 @@
 % LLVM-NEXT: fadd double %0, 1.000000e+00
 % A switch on the primary tag, then on the constants' words.
 % LLVM-LABEL: define internal tailcc i64 @terms.value_f1_0(ptr %0) {
-% LLVM-NEXT: %[[W:.*]] = ptrtoint ptr %0 to i64
+% LLVM: %[[W:.*]] = ptrtoint ptr %0 to i64
 % LLVM-NEXT: %[[TAG:.*]] = and i64 %[[W]], 7
 % LLVM-NEXT: %[[WORD:.*]] = ptrtoint ptr %0 to i64
 % LLVM-NEXT: switch i64 %[[TAG]], label %{{.*}} [

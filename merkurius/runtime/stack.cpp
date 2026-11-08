@@ -18,7 +18,6 @@ namespace {
 
 constexpr unsigned kSmallestShift{16}; // 64 KiB
 constexpr unsigned kLargestShift{40};
-constexpr std::size_t kMargin{32 * 1024};
 constexpr std::size_t kFirstSlabSlots{64};
 constexpr std::size_t kLargestSlabSlots{4096};
 
@@ -75,7 +74,7 @@ Stack *NewStack(std::size_t bytes) {
   } else if (sizeClass.left != 0 || Grow(sizeClass, size)) {
     stack = static_cast<Stack *>(std::malloc(sizeof(Stack)));
     if (stack) {
-      *stack = {sizeClass.next, size, sizeClass.next + kMargin, nullptr};
+      *stack = {sizeClass.next, size, sizeClass.next + kStackMargin, nullptr};
       sizeClass.next += size;
       --sizeClass.left;
     }

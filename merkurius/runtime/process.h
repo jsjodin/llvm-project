@@ -26,6 +26,9 @@ struct Process {
   // run; null for a process that has not allocated.
   MerkHeap heap;
   std::uint64_t id;
+  // Where its stack's overflow check stops, while it does not run; null for
+  // no check.
+  char *stackLimit{nullptr};
 };
 
 // The process this thread runs, or null on a thread that runs none, as a
@@ -39,6 +42,12 @@ void RunProcess(Process *next);
 } // namespace merkurius::runtime
 
 extern "C" {
+// What a procedure's entry compares the stack pointer with: the running
+// process's limit, or null on a thread that runs none, which passes.
+extern thread_local char *merk_stack_limit;
+// A checked procedure found the stack pointer below the limit.
+[[noreturn]] void merk_stack_overflow(void);
+
 // At start-up: the thread that calls it runs the program's first process.
 void merk_process_start(void);
 }

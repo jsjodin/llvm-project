@@ -1040,6 +1040,7 @@ bool CodeGenAction::Emit(llvm::Module &llvmModule,
     return false;
   }
   codegen::OptimizeLLVMIR(llvmModule, target);
+  codegen::AddStackChecks(llvmModule);
   if (kind_ == ActionKind::EmitLLVM) {
     llvmModule.print(os, nullptr);
     return true;
