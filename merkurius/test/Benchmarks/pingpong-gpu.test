@@ -1,0 +1,15 @@
+The ping-pong latency benchmark on the machine's GPU, on few rounds: node
+1's target region against node 2 over TCP and against its echo thread,
+and the RPC floor's region.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/pingpong/pingpong.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %python %S/../../benchmarks/pingpong/pair.py %t gpu 200 | FileCheck %s --check-prefix=GPU
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t gpu-local 200 | FileCheck %s --check-prefix=GPU-LOCAL
+RUN: clang++ -O2 -std=c++17 -fopenmp --offload-arch=%offload-arch -I%S/../../../libc %libomp-flags %S/../../benchmarks/pingpong/rpc-floor.cpp -o %t.rpc
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t.rpc 200 | FileCheck %s --check-prefix=RPC
+GPU: gpu {{ *}}200 rounds, {{ *}}200 in order, {{.*}} us a round
+GPU-NEXT: launch {{.*}} us
+GPU-LOCAL: gpu-local {{ *}}200 rounds, {{ *}}200 in order, {{.*}} us a round
+RPC: rpc-floor {{ *}}200 rounds, {{ *}}200 in order, {{.*}} us a round
+RPC-NEXT: launch {{.*}} us

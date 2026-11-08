@@ -1,0 +1,22 @@
+The ping-pong latency benchmark of benchmarks/pingpong, on few rounds, so
+that it keeps building and its answers come back in order: node 1's main
+against node 2 over TCP and against its echo thread, sequentially and with
+OpenMP on the host, where the region runs there; and the C floors.
+
+RUN: merkc -O2 %S/../../benchmarks/pingpong/pingpong.m -o %t.sequential
+RUN: %python %S/../../benchmarks/pingpong/pair.py %t.sequential cpu 200 | FileCheck %s --check-prefix=CPU
+RUN: %t.sequential cpu-local 200 | FileCheck %s --check-prefix=CPU-LOCAL
+RUN: %t.sequential gpu-local 200 | FileCheck %s --check-prefix=GPU-LOCAL
+RUN: merkc -O2 -fopenmp %libomp-flags %S/../../benchmarks/pingpong/pingpong.m -o %t
+RUN: %libomp-env %python %S/../../benchmarks/pingpong/pair.py %t gpu 200 | FileCheck %s --check-prefix=GPU
+RUN: %libomp-env %t gpu-local 200 | FileCheck %s --check-prefix=GPU-LOCAL
+RUN: clang -O2 %S/../../benchmarks/pingpong/tcp-floor.c -o %t.tcp && %t.tcp 200 | FileCheck %s --check-prefix=TCP
+RUN: clang -O2 %S/../../benchmarks/pingpong/condvar-floor.c -lpthread -o %t.condvar && %t.condvar 200 | FileCheck %s --check-prefix=CONDVAR
+REQUIRES: libomp
+CPU: cpu {{ *}}200 rounds, {{ *}}200 in order, {{.*}} us a round
+CPU-LOCAL: cpu-local {{ *}}200 rounds, {{ *}}200 in order, {{.*}} us a round
+GPU: gpu {{ *}}200 rounds, {{ *}}200 in order, {{.*}} us a round
+GPU-NEXT: launch {{.*}} us
+GPU-LOCAL: gpu-local {{ *}}200 rounds, {{ *}}200 in order, {{.*}} us a round
+TCP: tcp {{ *}}200 rounds, {{ *}}200 in order, {{.*}} us a round
+CONDVAR: condvar {{ *}}200 rounds, {{ *}}200 in order, {{.*}} us a round

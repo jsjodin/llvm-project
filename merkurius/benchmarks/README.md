@@ -8,3 +8,4 @@ by hand.
 | Benchmark | What it measures |
 | --- | --- |
 | [`bandwidth`](bandwidth/README.md) | Memory bandwidth of five array kernels under OpenMP, on the host's threads or a GPU, modeled on BabelStream |
+| [`pingpong`](pingpong/README.md) | Latency of a message round trip between processes, from a GPU's target region or the CPU, over TCP or within a node, beside plain C floors |
