@@ -798,93 +798,13 @@ plugin's server thread, not the ring; that is not tested. A cheaper test of it:
 the server's callback hands a send to another node to a thread, with no change
 on the device.
 
-## The scheduler: processes on one host
+## Before the collector
 
-Route step 3 (design document, "The route there"), chunk 2. Proposed 2026-11-08;
-not agreed yet. The design document decides most of it (Processes and
-scheduler; Message passing; the part on parallel regions): stacks of a fixed
-size that never move, a worker for each core with work stealing, preemption by
-lowering the heap limit, and target regions off the workers. What is here is
-the order, and what is left to decide.
+What has to be done before garbage collection (design document, Memory
+management, and Lowering, "GC metadata and safepoints"), and what the scheduler
+left open (design document, Processes and scheduler).
 
-**Where it starts.** A program is one process. Each OS thread has a heap in
-thread-local storage (`merk_heap`). Mailboxes have one global lock and a
-condition variable, and a receive blocks its OS thread. An uncaught exception
-ends the program. `spawn`, links and monitors do not exist.
-
-**Steps,** each its own commit, tested on the CPU first:
-
-1. **A process's context.** A record for each process, with its heap's pointer
-   and limit (`runtime/process.h`). `merk_heap` holds the running process's
-   heap, saved to its record when another runs. `main` is the first process.
-   Nothing else changes. Done.
-2. **Stacks and switching.** Slots with `MAP_NORESERVE`, size classes with free
-   lists, and a switch of stack and callee-saved registers, x86-64 only so far
-   (`runtime/stack.h`), are done. Each size class maps a growing run of slots
-   rather than one mapping for all, since a limit on the address space can
-   refuse a large one, and it then asks for less. The limit check is done too,
-   added after LLVM's optimizer. Done.
-3. **`spawn` on one worker.** Done. A process runs a closure on its own stack,
-   and `main` is one too, on 64 MB. The program's first thread runs them all,
-   each until it blocks: `receive` switches to the next runnable process, and
-   the thread spins and then sleeps when there is none. A send wakes the
-   mailbox's owner. Only the owner receives from a mailbox, as with Gleam's
-   subjects, since a send must know whom to wake and two receivers would have
-   no order; it closes when its owner ends. The program ends when `main` does.
-   A heap starts at 4 KB and doubles. Node connections and device bridges stay
-   OS threads, which wake processes. Benchmark: `benchmarks/processes`.
-4. **Workers.** One for each core or `MERK_WORKERS`, started as there is work
-   for them, so a program that spawns nothing has only its first thread. Done
-   so far: reading the heap's address again after a call (D1), and several
-   workers under the one lock, with one run queue. A worker with nothing to run
-   does so on its thread's own stack, since another may resume the process it
-   last ran. A process in a target region stays on its thread and blocks it, as
-   libomp ties the region to the thread. Each worker now has a run queue with
-   its own lock, and steals half of another's when its own is empty. Timers are
-   a binary heap under one small lock, rather than a wheel for each worker, which
-   has not been needed. Each mailbox has a lock, each process a lock for whether
-   it is asleep, and names and free slots one more. A process's messages are
-   stamped from its own count, as the design has it. Slots are in chunks that
-   never move, so that finding one takes no lock. Measured 2026-11-08 before the
-   locks were split: at 24 workers over half the 3.84 million acquisitions of the
-   one lock were contended, with about 10 threads waiting on it at any time. Why 16 independent pairs still did not scale
-   was found on 2026-11-08: a fragment took a 4 KB chunk for every message, so
-   each message cost a page fault, 85% of a round on one worker, and with many
-   workers the faults contended in the kernel. Chunks now start at 256 bytes and
-   double. Lock-free queues are not needed for now: to be measured again if many
-   senders to one mailbox show the lock.
-5. **Preemption.** Done, through the check of the stack's limit (design
-   document, Processes and scheduler). A ticker thread, started with the first
-   spawn, makes the running processes yield every 10 ms if another waits. Still
-   to do: a compile option to leave out what only preemption needs, for programs
-   that do not spawn.
-6. **Ending a process.** Each piece its own commit. Done: an uncaught exception
-   or a stack overflow is reported and ends only its process; in `main`, on a
-   thread with no process, or in a target or parallel region it ends the
-   program. `throw` and `catch` are not needed first (decided 2026-11-08): a
-   process has nothing to unwind, and until they exist the exit reason is the
-   exception's text, which becomes a `univ` with them; `down_reason` is abstract
-   so that programs do not change. Monitors are done (design document, Exceptions,
-   links and monitors), on one node. Links are deferred (decided 2026-11-08): two monitors give the same two-way message, and they can be added later if something needs them. `request` is done, so this step is. Open: a
-   monitor across nodes or places reports that it is not supported yet.
-7. **What blocks.** Each piece its own commit. Done: target regions and parallel
-   regions, on a blocking pool, the latter with the claim of a team's size
-   (design document, OpenMP cooperation). Blocking I/O is done too, by the same
-   move: `listen`, `connect`, `lookup`, and reading the standard input when it
-   would wait. Not moved: a send to another node when its socket is full,
-   whose write blocks its worker for up to a tick time. Node
-   connections stay OS threads, which wake processes.
-8. **The GPU with processes.** Done: a region's launch does not hold a worker
-   (step 7); regions of several processes at once on one device, with
-   `device(N)` (`process-target-many.m`); and benchmark modes `cpu-process` and
-   `gpu-process`, `main` against a process of its own node. The numbers are
-   in the design document. Not a worker's job: the send ring, if it is built
-   (The send ring), since workers may all be busy. Regions on
-   several devices at once are the same code, but need a machine with two GPUs
-   to run.
-
-**Needed before the collector.** Decided 2026-11-08 to leave these until
-processes run:
+**Needed first.** Decided 2026-11-08 to leave these until processes ran:
 
 - `spawn` shares the closure and the handle's cell with the parent, and does not
   copy them, as a closure's cell does not say the types of what it captured. The
@@ -894,30 +814,15 @@ processes run:
 - A process's heap chunks and a received message's fragments are never freed. A
   ping-pong round leaked about 8 KB until fragments started small; it now leaks about 0.6 KB.
 
-**To decide:**
+**Left open by the scheduler:**
 
-- **D1, how code reaches the current process's heap.** A process moves between
-  OS threads, and LLVM may keep the address of a thread-local variable across a
-  call within a function, so after a switch to another thread it would use the
-  old thread's. Options: (a) a register reserved for the context, as GHC's
-  `BaseReg`, which is the fastest and which foreign code keeps if it is
-  callee-saved, but needs a calling convention and changes to the back end for
-  each target; (b) a hidden argument to every procedure, which needs no back-end
-  change but costs a register and every signature; (c) keep the thread-local
-  variable, and have lowering read its address afresh after each call, through
-  an operation LLVM cannot merge, which is the smallest change and costs a read
-  after each call. Chosen (the user, 2026-11-08): (c) first, measured at the
-  nrev gate, leaving (a) for later. Built: compiled code calls a stand-in,
-  `merk.heap_address`, which LLVM knows reads only inaccessible memory, so that
-  its calls merge unless something between them may write that memory, as a call
-  that can switch the process may. `llvm.threadlocal.address` would be merged
-  across such a call. The stand-in becomes that intrinsic after the optimizer,
-  and nothing after the optimizer merges the reads across calls. Inline assembly
-  would have needed each target's thread-pointer sequence. nrev did not change.
-- **D2, spinning under the scheduler.** Decided: a worker with an empty queue
-  spins for the same 50 µs, with a yield, before it sleeps.
-- **D3, the first scope.** Steps 1 to 3 are done; the rest is to be reviewed
-  with the numbers from `benchmarks/processes`.
+- A compile option that leaves out what only preemption needs, for programs
+  that do not spawn.
+- A monitor across nodes or places reports that it is not supported yet.
+- A send to another node holds its worker while its socket is full.
+- Regions on several devices at once need a machine with two GPUs to run.
+- About 2 µs of the cost of a receive with a timeout remains, with several
+  workers, unexplained (design document, Measurements).
 
 ## Collectives and direct GPU transfers
 

@@ -7,7 +7,8 @@
 //===----------------------------------------------------------------------===//
 //
 // A process's stack and the switch between stacks (design document, "Processes
-// and scheduler"; docs/INPROGRESS.md, The scheduler, step 2). A stack has a
+// and scheduler"; design document, How the scheduler was built, step 2).
+// A stack has a
 // fixed size and never moves. It is a slot of a large mapping with
 // MAP_NORESERVE, whose pages the kernel commits as they are touched, so a
 // slot's size costs only address space. Sizes are rounded up to a power of

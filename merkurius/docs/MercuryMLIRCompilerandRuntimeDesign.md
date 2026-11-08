@@ -2288,10 +2288,113 @@ Rejected:
 - **Guard pages** as the way to find an overflow. They cost nothing at run time, but each splits the mapping, and at Linux's default `vm.max_map_count` of 65530 `mprotect` failed at 32,754 processes. Raising the limit needs administrator rights, and users must be able to run these programs without them.
 - **Segmented stacks** (LLVM's `split-stack`), which grow without copying and start smaller. Untried with `musttail`, and a hot call on a segment boundary is slow, the reason Go and Rust left them.
 - **Scheduling:** one worker thread per core, each with a run queue, plus work stealing.
-- **As built, 2026-11-08** (`runtime/process.cpp`): a worker for each core, or `MERK_WORKERS`, runs each process until it blocks, with a queue for each worker and stealing, and a lock for each mailbox (`docs/INPROGRESS.md`, The scheduler). `main` is a process too, on a 64 MB stack. A process that ends closes its mailboxes, and the program ends when `main` does, whatever others are doing: its meaning is what `main` does, and a forgotten server should not keep it alive. Only a mailbox's owner receives from it. Rejected: *any process may receive*, since a send would have to find waiters for each mailbox, and two receivers on one mailbox have no order. *Waiting for every process at the end of `main`*: one process waiting for ever would keep the program alive. The runtime calls a closure through a small assembly stub, which restores the stack pointer as the tail calling convention's callee may pop from the stack.
+- **As built, 2026-11-08** (`runtime/process.cpp`): a worker for each core, or `MERK_WORKERS`, runs each process until it blocks, with a queue for each worker and stealing, and a lock for each mailbox (How the scheduler was built). `main` is a process too, on a 64 MB stack. A process that ends closes its mailboxes, and the program ends when `main` does, whatever others are doing: its meaning is what `main` does, and a forgotten server should not keep it alive. Only a mailbox's owner receives from it. Rejected: *any process may receive*, since a send would have to find waiters for each mailbox, and two receivers on one mailbox have no order. *Waiting for every process at the end of `main`*: one process waiting for ever would keep the program alive. The runtime calls a closure through a small assembly stub, which restores the stack pointer as the tail calling convention's callee may pop from the stack.
 - **Preemption:** rides on the check of the stack's limit, as Go's does. A ticker thread, started with the first spawn, wakes every 10 ms; if a process waits for a worker, it stores a value above any stack in each worker's `merk_stack_limit`, so that the next check fails and its slow path, `merk_stack_limit_passed`, yields. The same check finds a stack overflow. It is added after LLVM's optimizer to the procedures that need it for the stack, to any on a cycle through tail calls or that tail calls unknown code, and to the header of each loop LLVM made, where a heap address moved out of the loop is taken again after the check. The ticker also fires timers when every worker is busy. A process in a target or parallel region does not yield, as libomp ties those to the thread. **Rejected: lowering the heap limit, with `mrt.yield_check` on loops that do not allocate,** as first planned. That is two mechanisms, a process would also have to be able to move at every allocation, including the runtime's own in C++, which keep thread-local addresses across calls, and a tail recursion needs a check for the sake of the other anyway.
-- **Blocking work:** I/O never blocks a worker. File and socket I/O use the operating system's asynchronous interface where possible, and a separate pool of threads otherwise, as Erlang's dirty schedulers do.
-- **Timers:** each worker keeps a timer wheel for receive timeouts.
+- **Blocking work:** I/O should not block a worker. Built on a pool of threads, as Erlang's dirty schedulers do: the process moves to one of them for the call (OpenMP cooperation). The operating system's asynchronous interface is not used so far.
+- **Timers:** planned as a timer wheel for each worker; built as one binary heap under a small lock, as nothing has needed more.
+
+#### How the scheduler was built
+
+Done 2026-11-08, as route step 3, chunk 2. The order, and what was decided on the way.
+
+**Where it starts.** A program is one process. Each OS thread has a heap in
+thread-local storage (`merk_heap`). Mailboxes have one global lock and a
+condition variable, and a receive blocks its OS thread. An uncaught exception
+ends the program. `spawn`, links and monitors do not exist.
+
+**Steps,** each its own commit, tested on the CPU first, in the order built:
+
+1. **A process's context.** A record for each process, with its heap's pointer
+   and limit (`runtime/process.h`). `merk_heap` holds the running process's
+   heap, saved to its record when another runs. `main` is the first process.
+   Nothing else changes. Done.
+2. **Stacks and switching.** Slots with `MAP_NORESERVE`, size classes with free
+   lists, and a switch of stack and callee-saved registers, x86-64 only so far
+   (`runtime/stack.h`), are done. Each size class maps a growing run of slots
+   rather than one mapping for all, since a limit on the address space can
+   refuse a large one, and it then asks for less. The limit check is done too,
+   added after LLVM's optimizer. Done.
+3. **`spawn` on one worker.** Done. A process runs a closure on its own stack,
+   and `main` is one too, on 64 MB. The program's first thread runs them all,
+   each until it blocks: `receive` switches to the next runnable process, and
+   the thread spins and then sleeps when there is none. A send wakes the
+   mailbox's owner. Only the owner receives from a mailbox, as with Gleam's
+   subjects, since a send must know whom to wake and two receivers would have
+   no order; it closes when its owner ends. The program ends when `main` does.
+   A heap starts at 4 KB and doubles. Node connections and device bridges stay
+   OS threads, which wake processes. Benchmark: `benchmarks/processes`.
+4. **Workers.** One for each core or `MERK_WORKERS`, started as there is work
+   for them, so a program that spawns nothing has only its first thread. Done
+   so far: reading the heap's address again after a call (D1), and several
+   workers under the one lock, with one run queue. A worker with nothing to run
+   does so on its thread's own stack, since another may resume the process it
+   last ran. A process in a target region stays on its thread and blocks it, as
+   libomp ties the region to the thread. Each worker now has a run queue with
+   its own lock, and steals half of another's when its own is empty. Timers are
+   a binary heap under one small lock, rather than a wheel for each worker, which
+   has not been needed. Each mailbox has a lock, each process a lock for whether
+   it is asleep, and names and free slots one more. A process's messages are
+   stamped from its own count, as the design has it. Slots are in chunks that
+   never move, so that finding one takes no lock. Measured 2026-11-08 before the
+   locks were split: at 24 workers over half the 3.84 million acquisitions of the
+   one lock were contended, with about 10 threads waiting on it at any time. Why 16 independent pairs still did not scale
+   was found on 2026-11-08: a fragment took a 4 KB chunk for every message, so
+   each message cost a page fault, 85% of a round on one worker, and with many
+   workers the faults contended in the kernel. Chunks now start at 256 bytes and
+   double. Lock-free queues are not needed for now: to be measured again if many
+   senders to one mailbox show the lock.
+5. **Preemption.** Done, through the check of the stack's limit (design
+   document, Processes and scheduler). A ticker thread, started with the first
+   spawn, makes the running processes yield every 10 ms if another waits. Still
+   to do: a compile option to leave out what only preemption needs, for programs
+   that do not spawn.
+6. **Ending a process.** Each piece its own commit. Done: an uncaught exception
+   or a stack overflow is reported and ends only its process; in `main`, on a
+   thread with no process, or in a target or parallel region it ends the
+   program. `throw` and `catch` are not needed first (decided 2026-11-08): a
+   process has nothing to unwind, and until they exist the exit reason is the
+   exception's text, which becomes a `univ` with them; `down_reason` is abstract
+   so that programs do not change. Monitors are done (design document, Exceptions,
+   links and monitors), on one node. Links are deferred (decided 2026-11-08): two monitors give the same two-way message, and they can be added later if something needs them. `request` is done, so this step is. Open: a
+   monitor across nodes or places reports that it is not supported yet.
+7. **What blocks.** Each piece its own commit. Done: target regions and parallel
+   regions, on a blocking pool, the latter with the claim of a team's size
+   (design document, OpenMP cooperation). Blocking I/O is done too, by the same
+   move: `listen`, `connect`, `lookup`, and reading the standard input when it
+   would wait. Not moved: a send to another node when its socket is full,
+   whose write blocks its worker for up to a tick time. Node
+   connections stay OS threads, which wake processes.
+8. **The GPU with processes.** Done: a region's launch does not hold a worker
+   (step 7); regions of several processes at once on one device, with
+   `device(N)` (`process-target-many.m`); and benchmark modes `cpu-process` and
+   `gpu-process`, `main` against a process of its own node. The numbers are
+   in the design document. Not a worker's job: the send ring, if it is built
+   (The send ring), since workers may all be busy. Regions on
+   several devices at once are the same code, but need a machine with two GPUs
+   to run.
+
+**Decisions:**
+
+- **D1, how code reaches the current process's heap.** A process moves between
+  OS threads, and LLVM may keep the address of a thread-local variable across a
+  call within a function, so after a switch to another thread it would use the
+  old thread's. Options: (a) a register reserved for the context, as GHC's
+  `BaseReg`, which is the fastest and which foreign code keeps if it is
+  callee-saved, but needs a calling convention and changes to the back end for
+  each target; (b) a hidden argument to every procedure, which needs no back-end
+  change but costs a register and every signature; (c) keep the thread-local
+  variable, and have lowering read its address afresh after each call, through
+  an operation LLVM cannot merge, which is the smallest change and costs a read
+  after each call. Chosen (the user, 2026-11-08): (c) first, measured at the
+  nrev gate, leaving (a) for later. Built: compiled code calls a stand-in,
+  `merk.heap_address`, which LLVM knows reads only inaccessible memory, so that
+  its calls merge unless something between them may write that memory, as a call
+  that can switch the process may. `llvm.threadlocal.address` would be merged
+  across such a call. The stand-in becomes that intrinsic after the optimizer,
+  and nothing after the optimizer merges the reads across calls. Inline assembly
+  would have needed each target's thread-pointer sequence. nrev did not change.
+- **D2, spinning under the scheduler.** Decided: a worker with an empty queue
+  spins for the same 50 µs, with a yield, before it sleeps.
 
 ### Message passing
 
@@ -3683,7 +3786,7 @@ Processes on one worker, 2026-11-08, on e742eaaa8b15 and its change, `-O2`, `ben
 
 Ping-pong with the GPU did not change: `gpu-local` 19.5, CPU and CPU between nodes 22.7, GPU and CPU 35.0, GPU and GPU 44.8 µs a round, the median of 5.
 
-Reading the heap's address again after each call (`docs/INPROGRESS.md`, The scheduler, D1), 2026-11-08, on f67539332be0 and its change, `-O2`, nrev as above, 5 alternating runs: 18.14 s before and 18.14 s after, the median.
+Reading the heap's address again after each call (How the scheduler was built, D1), 2026-11-08, on f67539332be0 and its change, `-O2`, nrev as above, 5 alternating runs: 18.14 s before and 18.14 s after, the median.
 
 Several workers under one lock, 2026-11-08, on f42910dd8074 and its change, `-O2`, `benchmarks/processes`, on 24 cores with 48 threads. `work` is 48 processes each computing `fib(34)`; `pairs` is 16 pairs playing ping-pong, the time for a round over all of them.
 
