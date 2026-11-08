@@ -1,4 +1,5 @@
 add_merkurius_unittest(MerkuriusCommonTests
+  ArenaTest.cpp
   EnumClassTest.cpp
   IndirectionTest.cpp
   VisitTest.cpp

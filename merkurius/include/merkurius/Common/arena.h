@@ -50,7 +50,8 @@ public:
     }
     T *p{allocator_.Allocate<T>(array.size())};
     std::copy(array.begin(), array.end(), p);
-    return {p, array.size()};
+    // Not {p, size}, which for ArrayRef<bool> is its initializer list.
+    return llvm::ArrayRef<T>(p, array.size());
   }
   // Frees everything made since the last reset.
   void Reset() { allocator_.Reset(); }
