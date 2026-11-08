@@ -2286,6 +2286,7 @@ Rejected:
 - **Guard pages** as the way to find an overflow. They cost nothing at run time, but each splits the mapping, and at Linux's default `vm.max_map_count` of 65530 `mprotect` failed at 32,754 processes. Raising the limit needs administrator rights, and users must be able to run these programs without them.
 - **Segmented stacks** (LLVM's `split-stack`), which grow without copying and start smaller. Untried with `musttail`, and a hot call on a segment boundary is slow, the reason Go and Rust left them.
 - **Scheduling:** one worker thread per core, each with a run queue, plus work stealing.
+- **As built, 2026-11-08** (`runtime/process.cpp`): one worker, the program's first thread, runs every process until it blocks, under the mailboxes' lock (`docs/INPROGRESS.md`, The scheduler). `main` is a process too, on a 64 MB stack. A process that ends closes its mailboxes, and the program ends when `main` does, whatever others are doing: its meaning is what `main` does, and a forgotten server should not keep it alive. Only a mailbox's owner receives from it. Rejected: *any process may receive*, since a send would have to find waiters for each mailbox, and two receivers on one mailbox have no order. *Waiting for every process at the end of `main`*: one process waiting for ever would keep the program alive. The runtime calls a closure through a small assembly stub, which restores the stack pointer as the tail calling convention's callee may pop from the stack.
 - **Preemption:** rides on the nursery limit check, as GHC does. To preempt a process, the scheduler lowers its heap limit, so the next allocation takes the slow path and yields there. Code that allocates pays nothing extra. Loops that do not allocate get an `mrt.yield_check` on their back edge, which spends a reduction budget; that check is the only preemption cost left.
 - **Blocking work:** I/O never blocks a worker. File and socket I/O use the operating system's asynchronous interface where possible, and a separate pool of threads otherwise, as Erlang's dirty schedulers do.
 - **Timers:** each worker keeps a timer wheel for receive timeouts.
@@ -3654,6 +3655,20 @@ The stack's overflow check, 2026-11-08, on 6d58c6434fe0 and its change, -O2, the
 | --- | ---: | ---: |
 | nrev | 18.19 | 18.20 |
 | Fibonacci | 0.82 | 1.12 |
+
+Processes on one worker, 2026-11-08, on e742eaaa8b15 and its change, `-O2`, `benchmarks/processes`.
+
+| Measurement | Result |
+| --- | ---: |
+| Ping-pong between two processes, a round | 3.5 µs |
+| The same between `main` and a thread, as before processes (`pingpong cpu-local`) | 7 µs |
+| Spawning a process, 64 MB stack, one million | 2.8 µs |
+| Spawning a process, 64 KB stack, one million | 2.2 µs |
+| A process's first run | 1.8 to 2.1 µs |
+| A message to it and its end | 3.7 to 3.9 µs |
+| Resident memory of a waiting process | 8 KiB |
+
+Ping-pong with the GPU did not change: `gpu-local` 19.5, CPU and CPU between nodes 22.7, GPU and CPU 35.0, GPU and GPU 44.8 µs a round, the median of 5.
 
 ## Target applications
 
