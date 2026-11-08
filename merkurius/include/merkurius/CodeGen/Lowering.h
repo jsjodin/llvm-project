@@ -40,6 +40,9 @@ void PruneSolutions(mlir::ModuleOp);
 // code"). LowerToLLVMDialect does this first.
 void OutlineNondeterminism(mlir::ModuleOp);
 
+// Puts a merk.live before each safepoint (Liveness.cpp).
+void MarkSafepoints(mlir::ModuleOp);
+
 // Whether a term of a type and functor is a cell on the heap, which can
 // have a hole.
 using InCell = llvm::function_ref<bool(mlir::Type, merk::FunctorAttr)>;

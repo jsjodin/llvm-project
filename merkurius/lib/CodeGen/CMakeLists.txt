@@ -9,6 +9,7 @@ add_merkurius_library(MerkuriusCodeGen
   MLIRGenTypeInfo.cpp
   MLIRGenUnify.cpp
   LastCall.cpp
+  Liveness.cpp
   Outlining.cpp
   TargetInfo.cpp
 

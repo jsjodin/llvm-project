@@ -1005,8 +1005,12 @@ no process to collect.
 
 1. Built 2026-11-08: `!merk.ref` as the cell's pointer and the hole's offset, with
    no runtime change. nrev did not change.
-2. The liveness pass and the bundles on calls and slow paths, still unused, so
-   that their cost to the optimizer shows up alone. Timed.
+2. Built 2026-11-08: the liveness pass (`lib/CodeGen/Liveness.cpp`) and the bundles
+   on calls and slow paths, still unused, so that their cost to the optimizer
+   shows up alone. A `merk.live` before each safepoint holds the values, so that
+   lowering's replacements follow them. It runs after last call modulo
+   constructor, which looks for a call next to the cells it fills. `EmitCode`
+   takes the bundles off for now. Timed.
 3. The rewrite after the optimizer, `"frame-pointer"="all"`, leaf marking and the
    table of each statepoint's types. Timed. Tail calls that LLVM found on its own
    are lost here, so any that matter must be `musttail` from lowering first.
@@ -1023,6 +1027,14 @@ The collector itself, and `bind`'s barrier, come after this.
 - **D4, how a bundle names a type, decided 2026-11-08.** Monomorphic types have a
   static descriptor, which a bundle names by an integer index into a module table,
   as a pointer would be a relocation in every stack map entry.
+
+**Open, for piece 5: which `type_info` is a word's.** A `!merk.word` does not say
+which type variable it is of, and a polymorphic term names its variable
+(`list.list(T0)`) without saying which `type_info` holds it. MLIRGen knows both.
+The word's type needs its variable, or each `merk.live` needs the pairing from
+MLIRGen. For now a polymorphic root keeps all of the procedure's `type_info`
+arguments live, which is the most the collector could need, so that the timing
+of piece 2 is not too kind.
 
 **Risks:**
 
