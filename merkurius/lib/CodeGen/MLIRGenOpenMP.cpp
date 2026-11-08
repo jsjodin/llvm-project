@@ -36,7 +36,7 @@ mlir::Value MerkGenerator::Slot(mlir::Type type, mlir::Location loc) {
 
 // The scalars, integers and floats, arrays of them, and terms whose cells
 // hold only scalars can cross into a target region so far; a region gives
-// only scalars and arrays, since the device cannot make a cell.
+// only scalars and arrays of them so far.
 static bool Scalar(mlir::Type type) {
   return mlir::isa<mlir::IntegerType, mlir::FloatType>(type);
 }
@@ -1497,24 +1497,6 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
       outputs.push_back(var);
     }
   }
-  // The device has no runtime to allocate or fill an array.
-  mlir::Operation *allocates{nullptr};
-  region.walk([&](mlir::Operation *op) {
-    if (mlir::isa<merk::ArrayNewOp, merk::ArrayCopyOp, merk::ArrayResizeOp,
-            merk::ArrayFromListOp, merk::ArrayFillOp>(op)) {
-      allocates = op;
-      return mlir::WalkResult::interrupt();
-    }
-    return mlir::WalkResult::advance();
-  });
-  if (allocates) {
-    NotYet(at,
-        mlir::isa<merk::ArrayFillOp>(allocates)
-            ? "filling arrays in target regions"
-            : "making arrays in target regions");
-    values_ = before;
-    return;
-  }
   for (mlir::Value input : inputs) {
     if (!FindUpdatedSlot(slots, input) && !Mappable(input.getType())) {
       std::optional<BodyVar> var{VarWithValue(before, goal.nonlocals, input)};
@@ -1527,13 +1509,14 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
       return;
     }
   }
-  // An array the region gives is one it was given, updated in place, since
-  // the device cannot allocate one: it is mapped back, and after the
-  // region is the given array. When the region's operations do not show
-  // which, as when it calls a procedure that updates it, the region finds
-  // which given array of its type it is, by its pointer, and gives its
-  // number, and its pointer too: when the region runs on the host, a
-  // procedure it calls may have allocated it.
+  // An array the region gives may be one it was given, updated in place:
+  // it is mapped back, and after the region is the given array. When the
+  // region's operations do not show which, as when it calls a procedure
+  // that updates it, the region finds which given array of its type it is,
+  // by its pointer, and gives its number. If it is none of them, the region
+  // made it, and gives its pointer too: on a GPU that of a copy on the
+  // host, since the device's arena ends with the region
+  // (merk_device_give_array).
   llvm::DenseMap<BodyVar, mlir::Value> updated;
   llvm::DenseMap<BodyVar, llvm::SmallVector<mlir::Value>> candidates;
   llvm::DenseMap<BodyVar, mlir::Type> arrayTypes;
@@ -1686,8 +1669,6 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
       if (auto same{candidates.find(var)}; same != candidates.end()) {
         // The number of the given array whose pointer it is, or -1.
         auto i64{builder_.getI64Type()};
-        mlir::LLVM::StoreOp::create(
-            builder_, loc, ArrayPointer(value, loc), pointerArgs.lookup(var));
         mlir::Value number{IntegerConstant(i64, -1, loc)};
         for (auto [i, input] : llvm::enumerate(same->second)) {
           mlir::Value is{mlir::LLVM::ICmpOp::create(builder_, loc,
@@ -1696,6 +1677,13 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
           number = mlir::arith::SelectOp::create(
               builder_, loc, is, IntegerConstant(i64, i, loc), number);
         }
+        mlir::LLVM::StoreOp::create(builder_, loc,
+            merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{ptr},
+                "merk_device_give_array",
+                mlir::ValueRange{ArrayPointer(value, loc), number},
+                /*can_fail=*/false)
+                .getResult(0),
+            pointerArgs.lookup(var));
         value = number;
       }
       mlir::LLVM::StoreOp::create(builder_, loc,

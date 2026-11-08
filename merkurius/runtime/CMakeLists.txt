@@ -36,6 +36,7 @@ target_include_directories(merkrt PRIVATE ${LLVM_MAIN_SRC_DIR}/../libc)
 # the OpenMP device runtime is.
 if (TARGET clang AND TARGET llvm-ar AND "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
   set(merk_device_bc ${CMAKE_CURRENT_BINARY_DIR}/device-amdgcn.bc)
+  set(merk_device_array_bc ${CMAKE_CURRENT_BINARY_DIR}/device-array-amdgcn.bc)
   set(merk_device_lib ${LLVM_LIBRARY_OUTPUT_INTDIR}/libmerkdevice-amdgcn.a)
   add_custom_command(OUTPUT ${merk_device_bc}
     COMMAND $<TARGET_FILE:clang> --target=amdgcn-amd-amdhsa -nogpulib -O2
@@ -45,10 +46,17 @@ if (TARGET clang AND TARGET llvm-ar AND "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
     DEPENDS clang ${CMAKE_CURRENT_SOURCE_DIR}/device/device.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/rpc-opcodes.h
     COMMENT "Building the Merkurius device runtime for AMD GPUs")
+  add_custom_command(OUTPUT ${merk_device_array_bc}
+    COMMAND $<TARGET_FILE:clang> --target=amdgcn-amd-amdhsa -nogpulib -O2
+      -flto -fvisibility=hidden -fno-exceptions -fno-rtti -std=c++17
+      -c ${CMAKE_CURRENT_SOURCE_DIR}/array.cpp -o ${merk_device_array_bc}
+    DEPENDS clang ${CMAKE_CURRENT_SOURCE_DIR}/array.cpp
+    COMMENT "Building the Merkurius device runtime's arrays for AMD GPUs")
   add_custom_command(OUTPUT ${merk_device_lib}
     COMMAND ${CMAKE_COMMAND} -E remove -f ${merk_device_lib}
     COMMAND $<TARGET_FILE:llvm-ar> rcs ${merk_device_lib} ${merk_device_bc}
-    DEPENDS llvm-ar ${merk_device_bc})
+      ${merk_device_array_bc}
+    DEPENDS llvm-ar ${merk_device_bc} ${merk_device_array_bc})
   add_custom_target(merkdevice ALL DEPENDS ${merk_device_lib})
   set_target_properties(merkdevice PROPERTIES FOLDER "Merkurius/Runtime")
   install(FILES ${merk_device_lib}

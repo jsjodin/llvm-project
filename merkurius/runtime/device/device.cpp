@@ -28,6 +28,7 @@ extern "C" double omp_get_wtime(void);
 extern "C" int omp_get_device_num(void);
 
 using merkurius::runtime::rpcChunk;
+using merkurius::runtime::rpcGiveArray;
 using merkurius::runtime::rpcPoll;
 using merkurius::runtime::rpcSend;
 
@@ -112,6 +113,27 @@ extern "C" void *merk_device_alloc(uint64_t bytes) {
       __builtin_amdgcn_s_sleep(127);
     }
   }
+}
+
+// What a region gives for an output array: the array, if it is the given
+// array numbered `number`, which is mapped back; or else, for -1, a copy on
+// the host of one the device made, since the arena does not outlive the
+// region.
+extern "C" uint64_t *merk_device_give_array(uint64_t *array, int64_t number) {
+  if (number >= 0) {
+    return array;
+  }
+  uint64_t *copy{nullptr};
+  rpc::Client::Port port{__llvm_rpc_client.open<rpcGiveArray>()};
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    buffer->data[0] = static_cast<uint64_t>(omp_get_device_num());
+    buffer->data[1] = reinterpret_cast<uint64_t>(array);
+    buffer->data[2] = array[0];
+  });
+  port.recv([&](rpc::Buffer *buffer, uint32_t) {
+    copy = reinterpret_cast<uint64_t *>(buffer->data[0]);
+  });
+  return copy;
 }
 
 // Sends a one-word message to the mailbox whose handle is the cell of five
