@@ -11,10 +11,10 @@
 // calls merk_alloc_slow when that would pass merk_heap.limit; the runtime's
 // own allocations, arrays', do the same through Allocate.
 //
-// Temporary (chunk 1 step 3, docs/INPROGRESS.md): each thread has a heap,
-// in thread-local storage, until chunk 2 gives each process one and decides
-// where its pointer and limit live (D2); the heap's chunks are never freed
-// until chunk 3's collector.
+// merk_heap is the heap of the process the thread runs (process.h), or the
+// thread's own on a thread that runs none. Temporary (chunk 1 step 3,
+// docs/INPROGRESS.md): the heap's chunks are never freed until chunk 3's
+// collector.
 //
 //===----------------------------------------------------------------------===//
 

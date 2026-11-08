@@ -8,6 +8,7 @@ add_library(merkrt STATIC
   exception.cpp
   heap.cpp
   mailbox.cpp
+  process.cpp
   main.cpp
   node.cpp
   offload.cpp
