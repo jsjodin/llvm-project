@@ -1036,6 +1036,19 @@ Neither uses the C++ standard library; `rpc.h` needs none.
    wait for the ring. A send that does not wait for the host would need
    another way to keep sends in order.
 
+   **GPU to GPU, between two nodes (2026-11-08).** Nothing more was needed
+   for it: a region's send to another node's mailbox goes through its host
+   and TCP, and what arrives is shown in the receiving region's ring. Two
+   processes on one machine stand for two machines, each a node with a region
+   on the one GPU, over TCP on loopback (`both-regions` in
+   `omp-target-two-nodes.m`, which runs on the CPU too; the `partner-gpu`
+   mode of both benchmarks). A round of one word takes 44 to 46 µs, against
+   33 to 38 with one side on the CPU and 22 to 26 with both, so each GPU
+   adds about 10 µs. Arrays reach 0.8 to 1.5 GB/s from 65536 words up, as
+   between a GPU and a CPU. Not yet tried: two GPUs, two machines, and a
+   real network. The path is still through both hosts, with no copy from the
+   device straight to the NIC.
+
 ## The receive goal: later
 
 The receive goal is done (design document, Processes and mailboxes, "The
