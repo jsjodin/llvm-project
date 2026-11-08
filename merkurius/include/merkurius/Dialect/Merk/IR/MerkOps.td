@@ -565,27 +565,30 @@ def Merk_HoleOp : Merk_Op<"hole"> {
 }
 
 def Merk_FieldRefOp : Merk_Op<"field_ref", [Pure]> {
-  let summary = "the address of a field of a cell";
+  let summary = "where a field of a cell is";
   let description = [{
-    The address of argument `index` of a term made by merk.construct of the
-    functor, whose argument there is merk.hole. The index counts the
-    construction's arguments, an existentially typed constructor's hidden
-    fields too.
+    Argument `index` of a term made by merk.construct of the functor, whose
+    argument there is merk.hole, as the term's pointer and the field's offset
+    in bytes from it. Two values, not an address, so that the pointer is one
+    the collector can relocate (design document, Lowering, "GC metadata and
+    safepoints"). The index counts the construction's arguments, an
+    existentially typed constructor's hidden fields too.
 
     ```mlir
-    %r = merk.field_ref %c, #merk.functor<"[|]", 2>[1] : !merk.term<"list.list(int)">
+    %r, %o = merk.field_ref %c, #merk.functor<"[|]", 2>[1] : !merk.term<"list.list(int)">
     ```
   }];
   let arguments = (ins Merk_TermType:$term, Merk_FunctorAttr:$functor,
       ConfinedAttr<I64Attr, [IntNonNegative]>:$index);
-  let results = (outs Merk_RefType:$ref);
+  let results = (outs Merk_RefType:$ref, I64:$offset);
   let assemblyFormat = [{
     $term `,` qualified($functor) `[` $index `]` attr-dict `:` qualified(type($term))
   }];
   let builders = [OpBuilder<(ins "::mlir::Value":$term,
       "::merkurius::merk::FunctorAttr":$functor, "std::int64_t":$index), [{
     build($_builder, $_state,
-        ::merkurius::merk::RefType::get($_builder.getContext()), term, functor,
+        ::merkurius::merk::RefType::get($_builder.getContext()),
+        $_builder.getI64Type(), term, functor,
         $_builder.getI64IntegerAttr(index));
   }]>];
 }
@@ -593,16 +596,16 @@ def Merk_FieldRefOp : Merk_Op<"field_ref", [Pure]> {
 def Merk_RefStoreOp : Merk_Op<"ref_store"> {
   let summary = "fill a hole";
   let description = [{
-    Stores the value in the hole whose address the reference is, as
+    Stores the value in the hole at the offset from the reference, as
     merk.construct would have stored it there. The only store into a cell
     after it is made.
 
     ```mlir
-    merk.ref_store %t, %r : !merk.term<"list.list(int)">
+    merk.ref_store %t, %r[%o] : !merk.term<"list.list(int)">
     ```
   }];
-  let arguments = (ins AnyType:$value, Merk_RefType:$ref);
-  let assemblyFormat = "$value `,` $ref attr-dict `:` type($value)";
+  let arguments = (ins AnyType:$value, Merk_RefType:$ref, I64:$offset);
+  let assemblyFormat = "$value `,` $ref `[` $offset `]` attr-dict `:` type($value)";
 }
 
 def Merk_DeconstructOp : Merk_Op<"deconstruct", [NoMemoryEffect]> {

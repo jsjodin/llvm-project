@@ -365,7 +365,8 @@ void LastCall::Rewrite(Site site, const Leaf &leaf, const Refs *stored,
       bool made{llvm::any_of(
           site.uses, [&, k = k](const Use &use) { return use.k == k; })};
       if (!made) {
-        merk::RefStoreOp::create(builder, loc, leaf.Output(k), refs[r]);
+        merk::RefStoreOp::create(
+            builder, loc, leaf.Output(k), refs[2 * r], refs[2 * r + 1]);
       }
     }
   }
@@ -378,18 +379,23 @@ void LastCall::Rewrite(Site site, const Leaf &leaf, const Refs *stored,
       continue;
     }
     if (use.kind == Use::Kind::Direct) {
-      inputs.push_back(refs[llvm::find(*stored, use.k) - stored->begin()]);
+      std::size_t r = llvm::find(*stored, use.k) - stored->begin();
+      inputs.push_back(refs[2 * r]);
+      inputs.push_back(refs[2 * r + 1]);
       continue;
     }
     mlir::Value hole{merk::HoleOp::create(builder, loc, result.getType())};
     use.construct->setOperand(use.argument, hole);
     use.construct->moveBefore(leaf.end);
     if (stored && llvm::is_contained(*stored, use.k)) {
+      std::size_t r = llvm::find(*stored, use.k) - stored->begin();
       merk::RefStoreOp::create(builder, loc, use.construct.getTerm(),
-          refs[llvm::find(*stored, use.k) - stored->begin()]);
+          refs[2 * r], refs[2 * r + 1]);
     }
-    inputs.push_back(merk::FieldRefOp::create(builder, loc,
-        use.construct.getTerm(), use.construct.getFunctor(), use.argument));
+    auto field{merk::FieldRefOp::create(builder, loc, use.construct.getTerm(),
+        use.construct.getFunctor(), use.argument)};
+    inputs.push_back(field.getRef());
+    inputs.push_back(field.getOffset());
   }
   auto call{merk::CallOp::create(builder, loc, results,
       VariantName(site.call.getCallee()), inputs)};
@@ -444,7 +450,8 @@ void LastCall::Store(const Leaf &leaf, const Refs &stored,
   }
   mlir::OpBuilder builder{leaf.end};
   for (auto [r, k] : llvm::enumerate(stored)) {
-    merk::RefStoreOp::create(builder, leaf.end->getLoc(), leaf.Output(k), refs[r]);
+    merk::RefStoreOp::create(builder, leaf.end->getLoc(), leaf.Output(k),
+        refs[2 * r], refs[2 * r + 1]);
   }
   EraseOperands(leaf.end, positions);
 }
@@ -481,19 +488,25 @@ void LastCall::Variant(merk::ProcOp proc, const Refs &stored) {
       results.push_back(type);
     }
   }
+  // Each reference is the cell's pointer and the hole's offset.
   auto refType{merk::RefType::get(context)};
-  inputs.append(stored.size(), refType);
+  auto offsetType{mlir::IntegerType::get(context, 64)};
+  for (std::size_t r = 0; r < stored.size(); ++r) {
+    inputs.push_back(refType);
+    inputs.push_back(offsetType);
+  }
   variant.setFunctionType(mlir::FunctionType::get(context, inputs, results));
   if (mlir::ArrayAttr argAttrs{variant.getArgAttrsAttr()}) {
     llvm::SmallVector<mlir::Attribute> attrs{argAttrs.begin(), argAttrs.end()};
-    attrs.append(stored.size(), mlir::DictionaryAttr::get(context));
+    attrs.append(2 * stored.size(), mlir::DictionaryAttr::get(context));
     variant.setArgAttrsAttr(mlir::ArrayAttr::get(context, attrs));
   }
   variant.removeResAttrsAttr();
   llvm::SmallVector<mlir::Value> refs;
   for (std::size_t r = 0; r < stored.size(); ++r) {
-    refs.push_back(
-        variant.getBody().front().addArgument(refType, proc.getLoc()));
+    mlir::Block &entry{variant.getBody().front()};
+    refs.push_back(entry.addArgument(refType, proc.getLoc()));
+    refs.push_back(entry.addArgument(offsetType, proc.getLoc()));
   }
   module_.getBody()->getOperations().insert(
       std::next(proc->getIterator()), variant);

@@ -927,6 +927,111 @@ spelling; piece 1 is mostly that.
   exists: nothing in this change would show it. The collector's stress mode has
   to cover that, by collecting at every safepoint.
 
+## Statepoints and stack maps
+
+Agreed 2026-11-08. The collector's next step, after heap
+pointers got their address space. The design document's "GC metadata and
+safepoints" settles roots in frame slots, `musttail`, holes and walking the
+stack. This section adds what it leaves open.
+
+**The gap: the type of a root.** Cells have no headers, so the collector traces
+a root by its type (Memory management). The design says that type comes from the
+stack maps, but a stack map says only where a value is. `RewriteStatepointsForGC`
+decides what is live after the optimizer has run, when the merk types are gone.
+
+**Proposed: each safepoint call carries a `deopt` bundle of what is live across
+it, with a type before each value, made while the merk types are known.** A
+backward liveness pass over the structured merk form, before lowering, annotates
+each call and allocation. Lowering emits `[ "deopt"(i64 type, ptr addrspace(1)
+value, ...) ]`. After the rewrite, a pass turns each statepoint's bundle into a
+table that says, for each entry of `gc-live`, its type, and for a polymorphic
+root, which `gc-live` entry or frame slot is its `type_info`. The values
+themselves leave the bundle, so nothing extra is kept in the stack map.
+
+Checked 2026-11-08 with hand-written IR through `opt -O2`, the rewrite and `llc`:
+
+- Inlining joins the bundles, the caller's first, which is what the frames that
+  the inlined call stands for need.
+- The values in a bundle are relocated like any other live value.
+- A tagged term can reach `gc-live` as its own base, so the collector takes
+  tagged roots.
+
+**Inlining needs every safepoint call to have a bundle, even an empty one.** The
+inliner adds the caller's bundle only to calls that already have one (checked in
+`InlineFunction.cpp` and with `opt`). A call in tail position that is inlined stops
+being a tail call, and the caller's frame is live under it, so:
+
+- A `musttail` call gets an empty bundle, `[ "deopt"() ]`, and so does any other
+  safepoint call with nothing live across it.
+- Leaf marking happens after the optimizer, on the calls that are still `musttail`,
+  and the bundle comes off those. Marking a `musttail` before the optimizer would
+  leave an inlined one with no safepoint at all, and the caller's roots lost.
+- A bundle holds a `type_info` as a value, not an index, as inlining a polymorphic
+  callee turns it into the caller's value or a constant. A constant is not in
+  `gc-live`, so the table must be able to name a static `type_info` too.
+- After the rewrite, a root in `gc-live` that no bundle names is a compile error,
+  not a guess. That catches what this list has missed.
+
+Rejected or worse:
+
+- **An identity intrinsic, `merk.typed(value, type)`, at every definition.** Every
+  load and call result would be opaque to the optimizer, on the hot paths. A
+  bundle is only on calls, whose values are live anyway.
+- **Metadata on loads and calls, recovered from each root's definition.** GVN and
+  others drop metadata they do not know, and a moving collector cannot be
+  conservative about a root with none.
+- **Liveness of our own and hand-made statepoints at lowering.** LLVM's optimizer
+  would then see statepoints from the start, which it handles badly.
+- **Cell headers,** rejected by experiment E7.
+
+**Which calls are safepoints.** A process's heap is collected only by that process,
+so a call is a safepoint only if a collection can happen under it:
+
+- A call of Mercury code, known by `tailcc`, direct or through a pointer.
+- `merk_alloc_slow`, which is also where preemption takes effect.
+
+Every other call is marked `"gc-leaf-function"`: foreign code, the runtime's
+functions and libomp's. A runtime function that allocates, as `merk_array_new`
+does, grows the heap and does not collect. Every `musttail` is a leaf too. Blocking
+in a receive is safe, since other processes do not touch this heap. Nothing in C
+calls Mercury except a process's entry and OpenMP's outlined regions, so the walk
+stops at those.
+
+**In regions (D2):** outlined functions get no `gc` attribute, so they are not
+rewritten. A process in a region has collection turned off, and a team thread has
+no process to collect.
+
+**Pieces,** each its own commit:
+
+1. Built 2026-11-08: `!merk.ref` as the cell's pointer and the hole's offset, with
+   no runtime change. nrev did not change.
+2. The liveness pass and the bundles on calls and slow paths, still unused, so
+   that their cost to the optimizer shows up alone. Timed.
+3. The rewrite after the optimizer, `"frame-pointer"="all"`, leaf marking and the
+   table of each statepoint's types. Timed. Tail calls that LLVM found on its own
+   are lost here, so any that matter must be `musttail` from lowering first.
+4. Slots of environments and outputs as Direct locations.
+5. In the runtime: the table built at startup, the stack walk, recording the last
+   Mercury frame on calls into C, and a test mode that lists roots at a
+   safepoint and checks each against its type. No collection yet.
+
+The collector itself, and `bind`'s barrier, come after this.
+
+**Decided:**
+
+- **D3, the bundle, decided 2026-11-08.** As above. It is what the pieces rest on.
+- **D4, how a bundle names a type, decided 2026-11-08.** Monomorphic types have a
+  static descriptor, which a bundle names by an integer index into a module table,
+  as a pointer would be a relocation in every stack map entry.
+
+**Risks:**
+
+- **Optimizer cost of bundles.** A call with `deopt` cannot be marked read-only or
+  removed if unused. Pure Mercury calls that LLVM could delete stay. Piece 2
+  measures that.
+- **Lost tail calls** in piece 3, which would use stack rather than time.
+- **Compile time and code size** of the table, one entry per live root per call.
+
 ## Collectives and direct GPU transfers
 
 Proposed 2026-11-08, from a side discussion; not agreed, and nothing is built.

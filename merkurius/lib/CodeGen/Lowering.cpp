@@ -748,18 +748,14 @@ llvm::LogicalResult Lowerer::LowerTerms() {
     }
     unsigned skip{functor->secondary ? 1u : 0u};
     if (auto ref{mlir::dyn_cast<merk::FieldRefOp>(op)}) {
-      // The hole's address, inside the cell (design document, Lowering,
-      // "Deterministic and semidet code", "Last call modulo constructor").
-      // Temporary (chunk 3, docs/INPROGRESS.md): a pointer into a cell,
-      // which a variant's statepoints cannot relocate without the cell; it
-      // becomes the cell's pointer and the hole's offset.
-      mlir::Value cell{LoweredValue(op->getOperand(0), loc)};
-      if (functor->tag != 0) {
-        cell = mrt::UntagOp::create(rewriter_, loc, cell, functor->tag);
-      }
-      rewriter_.replaceOp(op,
-          OffsetBytes(cell,
-              8 * static_cast<std::int64_t>(ref.getIndex() + skip), loc));
+      // The term's pointer and the hole's offset from it, past the tag
+      // (design document, Lowering, "GC metadata and safepoints"): a variant
+      // that was given a pointer into a cell could not have it relocated.
+      mlir::Value offset{mlir::LLVM::ConstantOp::create(rewriter_, loc, i64,
+          8 * static_cast<std::int64_t>(ref.getIndex() + skip) -
+              static_cast<std::int64_t>(functor->tag))};
+      rewriter_.replaceOp(
+          op, mlir::ValueRange{LoweredValue(op->getOperand(0), loc), offset});
       continue;
     }
     if (auto construct{mlir::dyn_cast<merk::ConstructOp>(op)}) {
@@ -2098,7 +2094,8 @@ static bool IsNarrowInteger(mlir::Type type) {
 
 // Fills a hole, as merk.construct would have stored the value there. The
 // store is into a cell just made, which a collection may have moved since:
-// the hole's address is a pointer derived from the cell's.
+// the hole's address is derived from the cell's pointer, here, after any
+// safepoint.
 void Lowerer::LowerRefStore(merk::RefStoreOp op) {
   mlir::Location loc{op.getLoc()};
   rewriter_.setInsertionPoint(op);
@@ -2107,8 +2104,10 @@ void Lowerer::LowerRefStore(merk::RefStoreOp op) {
     value = mlir::LLVM::ZExtOp::create(
         rewriter_, loc, rewriter_.getI64Type(), value);
   }
-  mlir::LLVM::StoreOp::create(
-      rewriter_, loc, value, LoweredValue(op->getOperand(1), loc), 8);
+  mlir::Value cell{LoweredValue(op->getOperand(1), loc)};
+  mlir::Value address{mlir::LLVM::GEPOp::create(rewriter_, loc, cell.getType(),
+      rewriter_.getI8Type(), cell, mlir::ValueRange{op->getOperand(2)})};
+  mlir::LLVM::StoreOp::create(rewriter_, loc, value, address, 8);
   rewriter_.eraseOp(op);
 }
 
