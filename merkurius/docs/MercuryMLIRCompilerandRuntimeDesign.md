@@ -2962,6 +2962,25 @@ with both nodes on one core took 237 µs in place of 39, as the spinner kept the
 core from the thread it waited for; with it, 28. A receive with no time left
 does not spin. The cost is up to 50 µs of a core for each wait.
 
+**Choosing a device.** `device(N)` on `target`, on a combined target loop and
+on `target data`, on the target leaf, as Flang's: the operand `device` of the
+operation, evaluated on the host. N is a non-negative integer, or an integer
+variable bound before the directive; a stock compiler reads the clause as a
+comment, so such a variable should have another use, or it warns of a singleton.
+Other terms and `ancestor` are reported as not yet implemented. A number the
+machine does not have stops the program in libomptarget, with or without
+`OMP_TARGET_OFFLOAD=MANDATORY`. Only device 0 has been run, on this machine's
+one GPU.
+
+**Using several devices at once.** A target region blocks the thread that
+launches it, so `main` alone runs one at a time. Two ways are open with
+`device(N)`: regions launched from the threads of `omp.parallel`, or from
+Merkurius processes, once the scheduler exists (`target nowait` belongs with
+it). The rest of a node with several GPUs is still to do: each GPU as a place
+of its own, with a place table and a stable identity, and a direct path between
+two GPUs, which goes through the host's mailboxes today. A mailbox's ring has
+one device at a time (above).
+
 **Fixes this needed in LLVM,** candidates for upstream:
 
 - The AMD plugin queued a small copy behind a running kernel's own copy back

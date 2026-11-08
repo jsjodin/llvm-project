@@ -713,6 +713,10 @@ Still open:
 
 - **Two real machines,** two GPUs and a real network. So far two processes over
   loopback on one GPU.
+- **Several GPUs in a node:** regions on them at once, through `omp.parallel` or
+  Merkurius processes with the scheduler, with `device(N)`; each GPU as a place,
+  with a place table and a stable identity; a path between GPUs of a node that
+  does not go through the host.
 - **A send that does not wait for the host,** about 12 µs of a round from the
   GPU with the wait on the ring; needs another way to keep sends in order.
 - **The second copy of a sent array** on the host.

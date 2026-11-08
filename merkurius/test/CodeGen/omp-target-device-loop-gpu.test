@@ -1,0 +1,6 @@
+The device clause on a combined target loop, on the machine's GPU, device 0.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/omp-target-device-loop.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t \
+RUN:   | FileCheck %S/omp-target-device-loop.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

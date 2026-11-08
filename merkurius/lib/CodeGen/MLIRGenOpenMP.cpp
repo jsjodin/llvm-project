@@ -459,8 +459,21 @@ static bool IsOmpLoopClauseHandled(
   if (synthesized) {
     return id == llvm::omp::OMPC_map && leaf == llvm::omp::OMPD_target;
   }
+  if (id == llvm::omp::OMPC_device) {
+    return leaf == llvm::omp::OMPD_target;
+  }
   return id == llvm::omp::OMPC_reduction &&
       (leaf == llvm::omp::OMPD_do || leaf == llvm::omp::OMPD_teams);
+}
+
+static bool IsTargetClauseHandled(
+    llvm::omp::Directive, llvm::omp::Clause id, bool) {
+  return id == llvm::omp::OMPC_device;
+}
+
+static bool IsTargetDataClauseHandled(
+    llvm::omp::Directive, llvm::omp::Clause id, bool) {
+  return id == llvm::omp::OMPC_map || id == llvm::omp::OMPC_device;
 }
 
 static bool IsNamedType(const semantics::Type &type, llvm::StringRef module,
@@ -811,9 +824,13 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
         ValueOf(loop->step > 0 ? big : small),
         IntegerConstant(builder_.getI64Type(), loop->step, loc)};
   }
+  std::optional<mlir::Value> device{DeviceOf(queue->front(), body, at, loc)};
+  if (!device) {
+    return;
+  }
   Target(
       goal, body, [&]() { GenerateParallelLoop(parallelLoop, body, loc); },
-      /*combined=*/true, kernel.mode, hostEval, updated);
+      /*combined=*/true, kernel.mode, hostEval, updated, *device);
   if (!failed_) {
     LoadReductions(reductions, *call, loc);
   }
@@ -1185,10 +1202,7 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
   }
   if (directive.id == llvm::omp::Directive::OMPD_target_data) {
     std::optional<omp::ConstructQueue> queue{Decompose(directive, at)};
-    if (queue && LeafClauses(queue->front(), at,
-            [](llvm::omp::Directive, llvm::omp::Clause id, bool) {
-              return id == llvm::omp::OMPC_map;
-            })) {
+    if (queue && LeafClauses(queue->front(), at, IsTargetDataClauseHandled)) {
       TargetData(goal, body, queue->front());
     }
     return;
@@ -1200,7 +1214,7 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
     return;
   }
   std::optional<omp::ConstructQueue> queue{Decompose(directive, at)};
-  if (!queue || !LeafClauses(queue->front(), at)) {
+  if (!queue || !LeafClauses(queue->front(), at, IsTargetClauseHandled)) {
     return;
   }
   if (builder_.getInsertionBlock()->getParent()
@@ -1208,8 +1222,71 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
     NotYet(at, "target regions in target regions");
     return;
   }
+  std::optional<mlir::Value> device{
+      DeviceOf(queue->front(), body, at, Location(goal.tokens))};
+  if (!device) {
+    return;
+  }
   Target(goal, body, [&]() { Goal(*goal.goals.front(), body); },
-      /*combined=*/false, KernelOf(*queue).mode);
+      /*combined=*/false, KernelOf(*queue).mode, {}, {}, *device);
+}
+
+// device(N), as Flang's ClauseProcessor::processDevice makes it: the number
+// is a non-negative integer, or an integer variable bound before the
+// directive. Other terms need code in a clause, which nothing has yet.
+std::optional<mlir::Value> MerkGenerator::DeviceOf(const omp::Leaf &leaf,
+    const ProcedureBody &body, parser::CharBlock at, mlir::Location loc) {
+  const parser::OmpGenericClause *clause{nullptr};
+  for (const parser::OmpClause *c : leaf.clauses) {
+    const auto *generic{std::get_if<const parser::OmpGenericClause *>(c)};
+    if (!generic || (*generic)->id != llvm::omp::OMPC_device) {
+      continue;
+    }
+    if (clause) {
+      Error(at, "a directive can have only one device clause"_err_en_US);
+      return std::nullopt;
+    }
+    clause = *generic;
+  }
+  if (!clause) {
+    return mlir::Value{};
+  }
+  if (!clause->modifiers.empty()) {
+    NotYet(at, "modifiers of the device clause");
+    return std::nullopt;
+  }
+  if (clause->arguments.size() != 1) {
+    Error(at, "the device clause takes one device number"_err_en_US);
+    return std::nullopt;
+  }
+  const parser::DataTerm &number{clause->arguments.front()};
+  if (const auto *literal{std::get_if<const parser::Literal *>(&number)}) {
+    std::int64_t value;
+    if ((*literal)->kind == parser::LiteralKind::Integer &&
+        !(*literal)->text.getAsInteger(10, value)) {
+      return IntegerConstant(builder_.getI64Type(), value, loc);
+    }
+  } else if (const auto *variable{
+                 std::get_if<const parser::Variable *>(&number)}) {
+    for (const auto &[var, value] : values_) {
+      if (body.vars[var].name != (*variable)->name) {
+        continue;
+      }
+      if (!llvm::is_contained({"int", "uint", "int8", "int16", "int32", "int64",
+                                  "uint8", "uint16", "uint32", "uint64"},
+              semantics::TypeToString(*body.vars[var].type))) {
+        Error(at, "the device number %s must be an integer"_err_en_US,
+            (*variable)->name);
+        return std::nullopt;
+      }
+      return value;
+    }
+    Error(at, "the device number %s is not bound before the directive"_err_en_US,
+        (*variable)->name);
+    return std::nullopt;
+  }
+  NotYet(at, "a device number that is not an integer or a variable");
+  return std::nullopt;
 }
 
 // An array is mapped as ClangIR maps a pointer's section, p[0:n]: by its own
@@ -1365,7 +1442,12 @@ void MerkGenerator::TargetData(const Body &goal, const ProcedureBody &body,
     Error(at, "a target data directive must have a map clause"_err_en_US);
     return;
   }
+  std::optional<mlir::Value> device{DeviceOf(leaf, body, at, loc)};
+  if (!device) {
+    return;
+  }
   mlir::omp::TargetDataOperands operands;
+  operands.device = *device;
   operands.mapVars = maps;
   auto region{mlir::omp::TargetDataOp::create(builder_, loc, operands)};
   mlir::Block *block{new mlir::Block};
@@ -1473,7 +1555,7 @@ mlir::Value MerkGenerator::ArrayPointer(mlir::Value array, mlir::Location loc) {
 void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
     llvm::function_ref<void()> generate, bool combined,
     mlir::omp::TargetExecMode mode, mlir::ValueRange hostEval,
-    llvm::ArrayRef<UpdatedSlot> slots) {
+    llvm::ArrayRef<UpdatedSlot> slots, mlir::Value device) {
   parser::CharBlock at{Where(goal.tokens)};
   mlir::Location loc{Location(goal.tokens)};
   Values before{values_};
@@ -1482,6 +1564,7 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   // The host_eval arguments come before the map entries' arguments.
   mlir::omp::TargetExtOperands operands;
   operands.kernelType = mlir::omp::TargetExecModeAttr::get(&context_, mode);
+  operands.device = device;
   operands.hostEvalVars.append(hostEval.begin(), hostEval.end());
   auto targetOp{mlir::omp::TargetOp::create(builder_, loc, operands)};
   targetOp.setCombined(combined);

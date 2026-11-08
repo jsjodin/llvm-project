@@ -57,10 +57,10 @@ section(!A) :-
     %$omp target data map(tofrom: A(0 .. 1))
     up(!A).
 
-% CHECK: :[[@LINE+3]]:5: error: not yet implemented: code generation for the device clause of the target data directive
+% CHECK: :[[@LINE+3]]:5: error: not yet implemented: code generation for the if clause of the target data directive
 :- pred clause(array(int)::array_di, array(int)::array_uo) is det.
 clause(!A) :-
-    %$omp target data map(tofrom: A) device(0)
+    %$omp target data map(tofrom: A) if(1)
     up(!A).
 
 main(!IO) :- io.nl(!IO).
