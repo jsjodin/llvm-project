@@ -17,16 +17,19 @@
 //===----------------------------------------------------------------------===//
 
 #include "descriptor.h"
+#include "device-ring.h"
 #include "encode.h"
 #include "node.h"
 #include "gtest/gtest.h"
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <thread>
 #include <vector>
 
+using merkurius::runtime::DeviceRing;
 using merkurius::runtime::TypeCtor;
 using merkurius::runtime::Word;
 
@@ -53,6 +56,9 @@ std::int64_t merk_mailbox_register(HANDLE_PARAMETERS, const char *name);
 void merk_mailbox_unregister(const char *name);
 std::int64_t merk_mailbox_lookup(const char *name, Word typeInfo,
     std::int64_t *placeAndSlot, std::int64_t *generation, std::int64_t *secret);
+DeviceRing *merk_mailbox_attach(HANDLE_PARAMETERS, bool arrays, int device,
+    DeviceRing *(*allocate)(int), std::uint64_t *head);
+void merk_mailbox_detach_rings(void);
 }
 
 namespace {
@@ -162,6 +168,30 @@ void SendLater(Box box, Word value, int milliseconds) {
 
 void CloseLater(Box box, int milliseconds) {
   std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
+  Close(box);
+}
+
+DeviceRing *NewTestRing(int) {
+  void *ring{std::aligned_alloc(alignof(DeviceRing), sizeof(DeviceRing))};
+  std::memset(ring, 0, sizeof(DeviceRing));
+  return static_cast<DeviceRing *>(ring);
+}
+
+TEST(MailboxTest, RingBelongsToOneDevice) {
+  Box box{NewBox()};
+  std::uint64_t head;
+  DeviceRing *ring{merk_mailbox_attach(BOX(box), false, 1, NewTestRing, &head)};
+  ASSERT_NE(ring, nullptr);
+  EXPECT_EQ(merk_mailbox_attach(BOX(box), false, 1, NewTestRing, &head), ring);
+  EXPECT_EXIT(merk_mailbox_attach(BOX(box), false, 2, NewTestRing, &head),
+      testing::ExitedWithCode(1), "two devices receive from one mailbox");
+  // Once no region is running, another device may have it.
+  merk_mailbox_detach_rings();
+  DeviceRing *next{merk_mailbox_attach(BOX(box), false, 2, NewTestRing, &head)};
+  EXPECT_NE(next, nullptr);
+  merk_mailbox_detach_rings();
+  std::free(ring);
+  std::free(next);
   Close(box);
 }
 
