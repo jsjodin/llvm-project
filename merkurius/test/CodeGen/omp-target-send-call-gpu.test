@@ -1,0 +1,8 @@
+The program of omp-target-send-call.m, compiled by the driver for the
+machine's GPU and run there: a procedure that the region calls sends, by
+its message type's key.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-send-call.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t \
+RUN:   | FileCheck %S/omp-target-send-call.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

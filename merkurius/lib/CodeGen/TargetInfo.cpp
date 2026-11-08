@@ -61,8 +61,12 @@ std::unique_ptr<TargetInfo> TargetInfo::Make(const TargetOptions &options,
         std::to_string(options.optimizationLevel);
     return nullptr;
   }
+  // Constructors go in .init_array, as Clang's do by default, which is all
+  // that today's dynamic loaders run, rather than in .ctors.
+  llvm::TargetOptions targetOptions;
+  targetOptions.UseInitArray = true;
   info->targetMachine_.reset(target->createTargetMachine(info->triple_,
-      info->options_.cpu, info->options_.features, llvm::TargetOptions{},
+      info->options_.cpu, info->options_.features, targetOptions,
       llvm::Reloc::PIC_, std::nullopt, *level));
   if (!info->targetMachine_) {
     error = "cannot make a target machine for " + info->triple_.str();

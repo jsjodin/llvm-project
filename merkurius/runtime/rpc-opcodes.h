@@ -24,7 +24,8 @@ namespace merkurius::runtime {
 constexpr uint32_t RpcOpcode(uint32_t n) { return ('m' << 24) | n; }
 
 // A send of a one-word message: the buffer's words are the handle's five,
-// the message type's type_info, the host's, and the message. The host
+// the message type's key, under which the host registered its type_info,
+// and the message. The host
 // answers once it has queued it.
 constexpr uint32_t rpcSend{RpcOpcode(1)};
 
