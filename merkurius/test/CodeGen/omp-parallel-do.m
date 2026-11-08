@@ -79,7 +79,7 @@ down(!A) :-
 % MLIR:         omp.parallel num_threads(%{{.*}} : i32) {
 % MLIR:           omp.wsloop {
 % MLIR-NEXT:        omp.loop_nest (%[[I:.*]]) : i64 = (%{{.*}}) to (%{{.*}}) inclusive step (%{{.*}}) {
-% MLIR-NEXT:          llvm.call tailcc @omp_parallel_do.down__body_{{[0-9]+}}_7_3_0(%[[I]], %arg0)
+% MLIR:          llvm.call tailcc @omp_parallel_do.down__body_{{[0-9]+}}_7_3_0(%[[I]], %arg0)
 % MLIR-NEXT:          omp.yield
 % MLIR-NEXT:        }
 % MLIR-NEXT:      }

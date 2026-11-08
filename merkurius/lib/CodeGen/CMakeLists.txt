@@ -10,6 +10,7 @@ add_merkurius_library(MerkuriusCodeGen
   MLIRGenUnify.cpp
   LastCall.cpp
   Liveness.cpp
+  Statepoints.cpp
   Outlining.cpp
   TargetInfo.cpp
 
@@ -51,6 +52,8 @@ add_merkurius_library(MerkuriusCodeGen
   MC
   Object
   Passes
+  ScalarOpts
+  TransformUtils
   Support
   Target
   TargetParser

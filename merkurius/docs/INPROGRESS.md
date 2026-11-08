@@ -1011,9 +1011,32 @@ no process to collect.
    lowering's replacements follow them. It runs after last call modulo
    constructor, which looks for a call next to the cells it fills. `EmitCode`
    takes the bundles off for now. nrev did not change.
-3. The rewrite after the optimizer, `"frame-pointer"="all"`, leaf marking and the
-   table of each statepoint's types. Timed. Tail calls that LLVM found on its own
-   are lost here, so any that matter must be `musttail` from lowering first.
+3. Built 2026-11-08, nrev did not change: the statepoint rewrite after the optimizer,
+   frame pointers, leaf marking and each root's type in the stack map
+   (`lib/CodeGen/Statepoints.cpp`). What it took beyond the plan:
+   - The rewrite does not take an aggregate holding a heap pointer. Such a result
+     crosses as i64, and the structs are split into scalars first.
+   - It makes roots of a call's own arguments. One the bundle does not list is
+     dead after the call, and gets index -1, which the collector ignores. It is
+     not added to the bundle, which inlining would keep alive in the callee.
+     What is loaded from static data gets -1 too.
+   - A root the optimizer substituted for a listed one (the untagged cell for the
+     tagged term, a phi over them) takes its type from the bundles of the whole
+     function, through phis and relocations.
+   - An integer word must not cross a safepoint as a pointer. `to_word` is opaque
+     to the optimizer (`merk.word_of_bits`, an inttoptr again at the end of
+     `OptimizeLLVMIR`). Rejected: `freeze`, which the optimizer moves onto the
+     pointer and into aggregates; ignoring unlisted roots, which turns a missed
+     real pointer into heap corruption instead of a compile error. Comparisons
+     and `ptrtoint`s of pointers no bundle names read the bits at the definition.
+   - Calls in OpenMP regions have the bundle `(i64 -2)` and are leaves, as an
+     outlined region can be inlined into a function with safepoints. The
+     collector must not run while a region does (D2), which piece 5 must enforce.
+   - Programs link with `-no-pie`: the stack maps hold code addresses in a
+     read-only section. `-z notext` keeps PIE, at the cost of a text relocation.
+   - The table from a type's index to the type is emitted in piece 5.
+   - Tail calls that LLVM found on its own are lost here, so any that matter must
+     be `musttail` from lowering first.
 4. Slots of environments and outputs as Direct locations.
 5. In the runtime: the table built at startup, the stack walk, recording the last
    Mercury frame on calls into C, and a test mode that lists roots at a

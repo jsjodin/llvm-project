@@ -13,6 +13,7 @@
 // generation"): merk to the LLVM dialect, terms through mrt, then LLVM IR,
 // then the target's assembly or object code.
 
+#include <cstdint>
 #include "merkurius/CodeGen/TargetInfo.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -71,6 +72,13 @@ bool LinkForeignCode(llvm::Module &, mlir::ModuleOp, const TargetInfo &,
     llvm::StringRef clang, std::string &error);
 
 // Runs LLVM's pipeline for the target's optimization level, -O0 to -O3.
+// A deopt bundle starting with this is of a call in an OpenMP region, which
+// is not a safepoint.
+inline constexpr std::int64_t kInRegion{-2};
+
+// Gives Mercury code statepoints, after the optimizer (Statepoints.cpp).
+void RewriteForCollector(llvm::Module &, const TargetInfo &);
+
 void OptimizeLLVMIR(llvm::Module &, const TargetInfo &);
 
 // Adds the check of the stack's limit, which finds an overflow and is how a

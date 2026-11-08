@@ -108,7 +108,7 @@ saxpy(A, X, !Y) :-
 % MLIR-LABEL: llvm.func internal tailcc @omp_target_teams_distribute_parallel_do.saxpy_4_0(
 % MLIR:         omp.target kernel_type(spmd) host_eval(
 % MLIR:                     omp.loop_nest
-% MLIR-NEXT:                  llvm.call tailcc @omp_target_teams_distribute_parallel_do.saxpy__body_{{[0-9]+}}_7_5_0(
+% MLIR:                  llvm.call tailcc @omp_target_teams_distribute_parallel_do.saxpy__body_{{[0-9]+}}_7_5_0(
 % The body procedure is on the device, called from the loop's body.
 % DEVICE-LABEL: define internal ptr @omp_target_teams_distribute_parallel_do.saxpy__body_
 % DEVICE: define weak_odr protected amdgpu_kernel void @__omp_offloading_{{.*}}_omp_target_teams_distribute_parallel_do.saxpy_4_0_l{{[0-9]+}}(
