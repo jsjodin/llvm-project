@@ -276,9 +276,10 @@ mlir::Value MerkGenerator::TimeoutMilliseconds(
 // any procedure of the device's compile, all of which run on the device:
 // the only receive the device has so far (docs/INPROGRESS.md, The device's
 // side of the first slice, Decision 4). It is a call of merk_device_receive
-// with the handle's cell and the timeout's milliseconds, which succeeds
-// with the mailbox's oldest message as a word, or fails once the timeout
-// passes. Unlike a send, it needs nothing of the host's, so it is the same
+// with the handle's cell and the timeout's milliseconds, or of
+// merk_device_receive_array for an array of one-word elements, which
+// succeeds with the mailbox's oldest message as a word, or fails once the
+// timeout passes. Unlike a send, it needs nothing of the host's, so it is the same
 // in a procedure that a region calls. Outside a region, a receive that the
 // device does not have is left to the call of process.receive, which the
 // device's compile rejects only if a region calls it (false); the procedure
@@ -308,7 +309,8 @@ bool MerkGenerator::ReceiveInTarget(const Body &goal,
   const semantics::Type *maybe{body.vars[result].type};
   const semantics::Type *messageType{maybe->arguments.front()};
   mlir::Type message{Represent(messageType)->type};
-  if (!WordMessage(message)) {
+  bool array{ArrayMessage(message)};
+  if (!WordMessage(message) && !array) {
     if (!inRegion) {
       return false;
     }
@@ -319,7 +321,8 @@ bool MerkGenerator::ReceiveInTarget(const Body &goal,
   }
   auto word{merk::WordType::get(&context_)};
   auto received{merk::ForeignCallOp::create(builder_, loc,
-      mlir::TypeRange{builder_.getI1Type(), word}, "merk_device_receive",
+      mlir::TypeRange{builder_.getI1Type(), word},
+      array ? "merk_device_receive_array" : "merk_device_receive",
       mlir::ValueRange{mailbox, TimeoutMilliseconds(timeout, loc)},
       /*can_fail=*/true)};
   auto maybeType{mlir::cast<merk::TermType>(Represent(maybe)->type)};

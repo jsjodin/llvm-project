@@ -1,0 +1,8 @@
+The program of omp-target-receive-array.m, compiled by the driver for the
+machine's GPU and run there: the callback copies each array into the
+device's arena while the kernel runs.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-receive-array.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout -k 1 60 %t \
+RUN:   | FileCheck %S/omp-target-receive-array.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
