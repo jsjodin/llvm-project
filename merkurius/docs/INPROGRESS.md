@@ -854,11 +854,12 @@ Neither uses the C++ standard library; `rpc.h` needs none.
      `process.receive` with `any` is the device's; the region's loop is a
      procedure it calls.
    - **The device allocates.** `yes(N)` is a cell, so device code now
-     allocates with the OpenMP device runtime's `malloc`. This tree's build
-     has no LLVM libc for the GPU, so it is libompdevice's bump allocator of
-     1 MiB, which never frees and traps when full; adding `libc` to
-     `RUNTIMES_amdgcn-amd-amdhsa_LLVM_ENABLE_RUNTIMES` gives libc's GPU
-     allocator. Either way nothing is freed until step 6's arena.
+     allocates with the OpenMP device runtime's `malloc`. Without LLVM libc
+     for the GPU that is libompdevice's bump allocator of 1 MiB, which
+     never frees and traps when full, so `build_merk.sh` now builds `libc`
+     for `amdgcn-amd-amdhsa` too, and it is libc's GPU allocator. Nothing
+     is freed until step 6's arena. libc for the GPU also gives the device
+     the rest of libc to explore other ways of doing things with.
    - **MLIR's `omp-stack-to-shared` broke last calls.** It freed the shared
      memory between a `musttail` call and its return; fixed in this tree,
      a candidate for upstream.

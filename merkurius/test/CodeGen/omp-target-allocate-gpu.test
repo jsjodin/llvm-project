@@ -1,0 +1,9 @@
+The program of omp-target-allocate.m, compiled by the driver for the
+machine's GPU and run there: its 3.2 MB of cells need LLVM libc's GPU
+allocator, which the OpenMP device runtime's malloc is when it is built
+with libc for the GPU.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-allocate.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t \
+RUN:   | FileCheck %S/omp-target-allocate.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
