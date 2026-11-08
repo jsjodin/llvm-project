@@ -272,6 +272,7 @@ struct Mailbox {
   // its messages are arrays; of which the first `consumed` were taken, and
   // have gone from the list.
   DeviceRing *ring;
+  int ringDevice;
   bool ringOfArrays;
   std::uint64_t consumed;
 };
@@ -554,6 +555,7 @@ extern "C" void merk_mailbox_new(Word typeInfo, std::int64_t *placeAndSlot,
   mailbox.count = 0;
   mailbox.nextFree = -1;
   mailbox.ring = nullptr;
+  mailbox.ringDevice = -1;
   mailbox.ringOfArrays = false;
   mailbox.consumed = 0;
   *placeAndSlot = index;
@@ -762,10 +764,19 @@ extern "C" DeviceRing *merk_mailbox_attach(MERK_HANDLE_PARAMETERS, bool arrays,
   if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
     if (!mailbox->ring) {
       mailbox->ring = allocate(device);
+      mailbox->ringDevice = device;
       mailbox->ringOfArrays = arrays;
       mailbox->consumed = 0;
       ++attachedRings;
       FillRing(mailbox);
+    } else if (mailbox->ringDevice != device) {
+      // A ring has one consumer. This runs on the plugin's server thread,
+      // where exit would hang.
+      std::fflush(stdout);
+      std::fprintf(stderr,
+          "Mercury runtime: two devices receive from one mailbox, which is "
+          "not supported yet\n");
+      std::_Exit(1);
     }
     ring = mailbox->ring;
     *head = ring->head;

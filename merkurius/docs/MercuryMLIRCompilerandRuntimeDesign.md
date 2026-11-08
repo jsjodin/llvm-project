@@ -2931,8 +2931,9 @@ RPC and no host thread involved.
 - **When the last running region ends,** every ring is detached and freed,
   and the mailbox is its list alone, holding what the device did not take, so a
   mailbox can pass between regions and the host.
-- **One device for each mailbox:** two devices receiving from one mailbox are
-  not supported, as only the region that made a mailbox receives from it.
+- **One device for each mailbox:** a second device attaching to a mailbox
+  while its ring is in use stops the program with an error. A ring has one
+  consumer.
 
 Why host-pinned memory (chosen by the user, 2026-11-08). The first design
 had a queue in device memory that the host writes. A probe measured a one-word
