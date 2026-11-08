@@ -196,6 +196,7 @@ extern MR_Integer merk_mailbox_poll(MR_Integer node_high,
     MR_Integer node_low, MR_Integer place_slot, MR_Integer generation,
     MR_Integer secret, MR_Integer position);
 extern MR_Integer merk_mailbox_arrivals(void);
+extern MR_Integer merk_mailbox_last_stamp(void);
 extern MR_Integer merk_mailbox_wait_arrival(MR_Integer seen,
     MR_Integer deadline);
 extern MR_Word merk_mailbox_message(MR_Integer node_high,
@@ -371,19 +372,28 @@ starts(matching(_, _, Rest)) = start(0, starts(Rest)).
     % The cases' oldest message, which it takes, waiting for the next
     % message to arrive in any mailbox until the deadline. The count of
     % arrivals is read before the cases look, so that one arriving while
-    % they look is not missed.
+    % they look is not missed. So is the last message's stamp: a message
+    % found with a later stamp arrived while they looked, and an older one
+    % may have arrived too, in a mailbox looked at before, so they look
+    % again. The message found is then older than the mark, so the next
+    % look takes it or an older one.
 :- pred select(selector(R)::in, int::in, starts::in, maybe(R)::out,
     io::di, io::uo) is det.
 
 select(Selector, Deadline, Starts0, Result, !IO) :-
     arrivals(Seen, !IO),
+    last_stamp(Mark, !IO),
     look(Selector, Starts0, Starts, no, Open, nothing, Found, !IO),
     (
-        Found = found(R, _, High, Low, PlaceSlot, Generation, Secret,
+        Found = found(R, Stamp, High, Low, PlaceSlot, Generation, Secret,
             Position),
-        remove_message(High, Low, PlaceSlot, Generation, Secret, Position,
-            !IO),
-        Result = yes(R)
+        ( if Stamp > Mark then
+            select(Selector, Deadline, Starts, Result, !IO)
+        else
+            remove_message(High, Low, PlaceSlot, Generation, Secret,
+                Position, !IO),
+            Result = yes(R)
+        )
     ;
         Found = nothing,
         (
@@ -592,6 +602,15 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
 "
     Stamp = merk_mailbox_poll(High, Low, PlaceSlot, Generation, Secret,
         Position);
+").
+
+    % The stamp of the last message queued.
+:- pred last_stamp(int::out, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    last_stamp(Stamp::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Stamp = merk_mailbox_last_stamp();
 ").
 
     % The number of messages queued and mailboxes closed so far.

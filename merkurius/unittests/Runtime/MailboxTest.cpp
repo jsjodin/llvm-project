@@ -45,6 +45,7 @@ std::int64_t merk_mailbox_wait(
     HANDLE_PARAMETERS, std::int64_t position, std::int64_t deadline);
 std::int64_t merk_mailbox_poll(HANDLE_PARAMETERS, std::int64_t position);
 std::int64_t merk_mailbox_arrivals(void);
+std::int64_t merk_mailbox_last_stamp(void);
 std::int64_t merk_mailbox_wait_arrival(std::int64_t seen, std::int64_t deadline);
 Word merk_mailbox_message(HANDLE_PARAMETERS, std::int64_t position);
 void merk_mailbox_remove(HANDLE_PARAMETERS, std::int64_t position);
@@ -110,8 +111,17 @@ std::optional<Word> ReceiveEither(
   std::int64_t deadline{merk_mailbox_deadline(milliseconds)};
   for (;;) {
     std::int64_t seen{merk_mailbox_arrivals()};
+    std::int64_t mark{merk_mailbox_last_stamp()};
     std::int64_t stampA{merk_mailbox_poll(BOX(a), 0)};
     std::int64_t stampB{merk_mailbox_poll(BOX(b), 0)};
+    // A message found that arrived as they were polled may be younger than
+    // one that arrived in a, after a was polled: they are polled again.
+    std::int64_t oldest{stampA > 0 && (stampB <= 0 || stampA < stampB)
+            ? stampA
+            : stampB};
+    if (oldest > mark) {
+      continue;
+    }
     if (stampA > 0 && (stampB <= 0 || stampA < stampB)) {
       Word value{merk_mailbox_message(BOX(a), 0)};
       merk_mailbox_remove(BOX(a), 0);
