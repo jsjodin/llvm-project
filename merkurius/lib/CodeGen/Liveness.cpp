@@ -75,7 +75,8 @@ public:
 
 private:
   void ScanRegions(mlir::Operation *op, Live &live);
-  void Mark(mlir::Operation *op, const Live &live);
+  void Mark(mlir::Operation *op, Live &live);
+  void MarkRegionCalls(mlir::Operation *op);
 
   llvm::SmallVector<mlir::Value> typeWords_;
 };
@@ -94,7 +95,7 @@ void UsesInside(mlir::Operation *op, Live &uses) {
   }
 }
 
-void Marker::Mark(mlir::Operation *op, const Live &live) {
+void Marker::Mark(mlir::Operation *op, Live &live) {
   llvm::SmallVector<mlir::Value> values;
   llvm::SmallVector<mlir::Attribute> types;
   bool polymorphic{false};
@@ -111,6 +112,8 @@ void Marker::Mark(mlir::Operation *op, const Live &live) {
   // procedure's stay live, as much as the collector could need.
   if (polymorphic) {
     all.insert(typeWords_.begin(), typeWords_.end());
+    // Which makes them live before here, for the safepoints before.
+    live.insert(typeWords_.begin(), typeWords_.end());
   }
   for (mlir::Value value : all) {
     if (IsRoot(value.getType())) {
@@ -121,6 +124,19 @@ void Marker::Mark(mlir::Operation *op, const Live &live) {
   mlir::OpBuilder before{op};
   merk::LiveOp::create(
       before, op->getLoc(), values, builder.getArrayAttr(types));
+}
+
+// Nothing collects during a region. Its calls say so, as the optimizer can
+// inline the outlined region into a function that has safepoints.
+void Marker::MarkRegionCalls(mlir::Operation *op) {
+  op->walk([](mlir::Operation *inner) {
+    if (Calls(inner)) {
+      mlir::OpBuilder before{inner};
+      auto live{merk::LiveOp::create(before, inner->getLoc(), mlir::ValueRange{},
+          before.getArrayAttr({}))};
+      live->setAttr("in_region", before.getUnitAttr());
+    }
+  });
 }
 
 void Marker::ScanRegions(mlir::Operation *op, Live &live) {
@@ -150,7 +166,10 @@ void Marker::ScanRegions(mlir::Operation *op, Live &live) {
   Live uses;
   UsesInside(op, uses);
   Union(live, uses);
-  if (mlir::isa<mlir::omp::OpenMPDialect>(op->getDialect())) {
+  // A target data region stays in its function, and the host runs it.
+  if (mlir::isa<mlir::omp::OpenMPDialect>(op->getDialect()) &&
+      !mlir::isa<mlir::omp::TargetDataOp>(op)) {
+    MarkRegionCalls(op);
     return;
   }
   for (mlir::Region &region : op->getRegions()) {

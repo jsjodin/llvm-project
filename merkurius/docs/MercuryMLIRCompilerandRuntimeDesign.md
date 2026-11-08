@@ -3951,6 +3951,13 @@ against 4a8a4296f7f2: 3.99 s against 4.06 s monomorphic, and 4.02 s against 3.99
 polymorphic. Within the spread of the runs. nrev has little for an optimizer to
 inline or remove, so this says little about code that does.
 
+Statepoints and stack maps, measured the same way on 2026-11-08, commit 91cf88a7b539
+against 0de549515905: 4.00 s against 3.90 s monomorphic, and 3.97 s against 4.03 s
+polymorphic. Within the spread of the runs, with the differences in both directions.
+nrev's work is in append, whose loop has safepoints only on allocation's slow path, so
+this says little about code with many calls and live values across them. The program's
+text grew from 150 KB to 164 KB, library included, with 94 KB of stack maps.
+
 ## Target applications
 
 Recorded on 2026-11-05. This is judgement, not a result: the only performance evidence so far is the bandwidth benchmark, whose program is no simpler than its C version (`benchmarks/bandwidth/README.md`). That the code is simpler has still to be shown on a program with real logic in it.

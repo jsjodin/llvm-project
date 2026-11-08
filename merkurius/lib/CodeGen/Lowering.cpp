@@ -39,12 +39,12 @@
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Linker/Linker.h"
 #include "llvm/Object/OffloadBinary.h"
 #include "llvm/Passes/PassBuilder.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FileUtilities.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -54,6 +54,8 @@
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
 namespace merkurius::codegen {
+
+static constexpr llvm::StringLiteral kWordOfBits{"merk.word_of_bits"};
 
 namespace {
 
@@ -2141,13 +2143,18 @@ void Lowerer::AttachLive(merk::LiveOp live, mlir::LLVM::CallOp call) {
   rewriter_.setInsertionPoint(call);
   mlir::Location loc{call.getLoc()};
   llvm::SmallVector<mlir::Value> bundle;
+  if (live->hasAttr("in_region")) {
+    bundle.push_back(mlir::LLVM::ConstantOp::create(
+        rewriter_, loc, rewriter_.getI64Type(), kInRegion));
+  }
   for (auto [value, attr] : llvm::zip(live.getValues(), live.getTypes())) {
     mlir::Type type{mlir::cast<mlir::TypeAttr>(attr).getValue()};
     if (!mlir::isa<mlir::LLVM::LLVMPointerType>(Convert(type))) {
       continue;
     }
     // Temporary (chunk 3, docs/INPROGRESS.md, Statepoints and stack maps,
-    // piece 3): the index of the table that does not exist yet.
+    // piece 5): the index of a table the runtime will read, which is not
+    // emitted yet.
     std::int64_t index{
         liveTypes_.try_emplace(type, liveTypes_.size()).first->second};
     bundle.push_back(mlir::LLVM::ConstantOp::create(
@@ -2698,9 +2705,26 @@ mlir::Value Lowerer::ToWord(mlir::Value value, mlir::Location loc) {
     return LoweredValue(value, loc);
   }
   mlir::Value bits{ToBits(value, loc)};
-  return word == bits.getType()
-      ? bits
-      : mlir::LLVM::IntToPtrOp::create(rewriter_, loc, word, bits).getResult();
+  if (word == bits.getType()) {
+    return bits;
+  }
+  if (bits.getDefiningOp<mlir::LLVM::ConstantOp>()) {
+    return mlir::LLVM::IntToPtrOp::create(rewriter_, loc, word, bits);
+  }
+  // Opaque to the optimizer, which would fold an inttoptr of the ptrtoint that
+  // made the number from a word, and so carry the number on as a heap pointer
+  // past safepoints that do not list it. OptimizeLLVMIR makes it an inttoptr.
+  auto toWord{RuntimeFunc(kWordOfBits, word, {bits.getType()})};
+  toWord.setMemoryEffectsAttr(mlir::LLVM::MemoryEffectsAttr::get(
+      rewriter_.getContext(), mlir::LLVM::ModRefInfo::NoModRef,
+      mlir::LLVM::ModRefInfo::NoModRef, mlir::LLVM::ModRefInfo::NoModRef,
+      mlir::LLVM::ModRefInfo::NoModRef, mlir::LLVM::ModRefInfo::NoModRef,
+      mlir::LLVM::ModRefInfo::NoModRef));
+  toWord.setNoUnwind(true);
+  toWord.setWillReturn(true);
+  return mlir::LLVM::CallOp::create(
+      rewriter_, loc, toWord, mlir::ValueRange{bits})
+      .getResult();
 }
 
 mlir::Value Lowerer::FromWord(
@@ -3812,30 +3836,25 @@ void OptimizeLLVMIR(llvm::Module &module, const TargetInfo &target) {
           ? builder.buildO0DefaultPipeline(level)
           : builder.buildPerModuleDefaultPipeline(level)};
   passes.run(module, modules);
+  if (llvm::Function *toWord{module.getFunction(kWordOfBits)}) {
+    for (llvm::User *user : llvm::make_early_inc_range(toWord->users())) {
+      auto *call{llvm::cast<llvm::CallInst>(user)};
+      llvm::IRBuilder<> builder{call};
+      call->replaceAllUsesWith(
+          builder.CreateIntToPtr(call->getArgOperand(0), call->getType()));
+      call->eraseFromParent();
+    }
+    toWord->eraseFromParent();
+  }
 }
 
 bool EmitCode(llvm::Module &module, const TargetInfo &target,
     llvm::CodeGenFileType fileType, llvm::raw_pwrite_stream &os,
     std::string &error) {
+  RewriteForCollector(module, target);
   // The back end wants its own layout, which does not say that the heap's
   // address space is non-integral; nothing after here needs to know.
   module.setDataLayout(target.targetMachine().createDataLayout());
-  // Temporary (chunk 3, docs/INPROGRESS.md, Statepoints and stack maps, piece
-  // 3): nothing reads the bundles yet, and the back end does not take them on
-  // calls that are not statepoints.
-  for (llvm::Function &function : module) {
-    for (llvm::Instruction &instruction :
-        llvm::make_early_inc_range(llvm::instructions(function))) {
-      auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)};
-      if (call && call->getOperandBundle(llvm::LLVMContext::OB_deopt)) {
-        llvm::CallBase *plain{llvm::CallBase::removeOperandBundle(
-            call, llvm::LLVMContext::OB_deopt, call->getIterator())};
-        plain->copyMetadata(*call);
-        call->replaceAllUsesWith(plain);
-        call->eraseFromParent();
-      }
-    }
-  }
   llvm::legacy::PassManager passes;
   if (target.targetMachine().addPassesToEmitFile(
           passes, os, nullptr, fileType)) {

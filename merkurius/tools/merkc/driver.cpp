@@ -327,6 +327,9 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
       job.push_back("-L" + dir);
     }
     job.push_back("-L" + libraryDir.str().str());
+    // The stack maps hold code addresses in a read-only section, which a
+    // position-independent executable could only relocate at startup.
+    job.push_back("-no-pie");
     job.push_back("-lmerkstd");
     job.push_back("-lmerkrt");
     job.push_back("-lm");
