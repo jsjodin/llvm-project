@@ -30,8 +30,10 @@ extern "C" int omp_get_device_num(void);
 using merkurius::runtime::rpcChunk;
 using merkurius::runtime::rpcGiveArray;
 using merkurius::runtime::rpcPoll;
+using merkurius::runtime::rpcPollArray;
 using merkurius::runtime::rpcSend;
 using merkurius::runtime::rpcSendArray;
+using merkurius::runtime::rpcTakeArray;
 
 namespace {
 
@@ -197,6 +199,44 @@ bool Poll(const uint64_t *handle, uint64_t *message) {
 
 } // namespace
 
+namespace {
+
+// Calls `poll` until it finds a message or `milliseconds` pass, or forever
+// if it is negative; whether it found one.
+template <typename Poll> bool Wait(int64_t milliseconds, Poll poll) {
+  double deadline{omp_get_wtime() + static_cast<double>(milliseconds) / 1000};
+  for (;;) {
+    if (poll()) {
+      return true;
+    }
+    if (milliseconds >= 0 && omp_get_wtime() >= deadline) {
+      return false;
+    }
+    // About 8 microseconds (127 * 64 clocks at about 1 GHz) between polls,
+    // so that the device does not keep the host's server thread busy.
+    __builtin_amdgcn_s_sleep(127);
+  }
+}
+
+// One poll of a mailbox of arrays: whether it had a message, whose size
+// is then in `size`.
+bool PollArray(const uint64_t *handle, uint64_t *size) {
+  rpc::Client::Port port{__llvm_rpc_client.open<rpcPollArray>()};
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    for (int i{0}; i < 5; ++i) {
+      buffer->data[i] = handle[i];
+    }
+  });
+  bool found{false};
+  port.recv([&](rpc::Buffer *buffer, uint32_t) {
+    found = buffer->data[0] != 0;
+    *size = buffer->data[1];
+  });
+  return found;
+}
+
+} // namespace
+
 // Takes the oldest message of the mailbox whose handle is the cell of five
 // words at `handle`, polling the host, which has the mailbox
 // (docs/INPROGRESS.md, The device's side of the first slice, Decision 2),
@@ -204,16 +244,30 @@ bool Poll(const uint64_t *handle, uint64_t *message) {
 // It returns 1 with the message in `message`, or 0.
 extern "C" int merk_device_receive(
     const uint64_t *handle, int64_t milliseconds, uint64_t *message) {
-  double deadline{omp_get_wtime() + static_cast<double>(milliseconds) / 1000};
-  for (;;) {
-    if (Poll(handle, message)) {
-      return 1;
-    }
-    if (milliseconds >= 0 && omp_get_wtime() >= deadline) {
-      return 0;
-    }
-    // About 8 microseconds (127 * 64 clocks at about 1 GHz) between polls,
-    // so that the device does not keep the host's server thread busy.
-    __builtin_amdgcn_s_sleep(127);
+  return Wait(milliseconds, [&]() { return Poll(handle, message); });
+}
+
+// As merk_device_receive, for a mailbox of arrays of one-word elements: a
+// poll gives the oldest message's size, the device allocates the array in
+// its arena, and the host copies the message there, given its address. The
+// message stays the oldest between the two, since only the region that has
+// the handle receives from the mailbox.
+extern "C" int merk_device_receive_array(
+    const uint64_t *handle, int64_t milliseconds, uint64_t *message) {
+  uint64_t size{0};
+  if (!Wait(milliseconds, [&]() { return PollArray(handle, &size); })) {
+    return 0;
   }
+  void *array{merk_device_alloc(sizeof(uint64_t) * (1 + size))};
+  rpc::Client::Port port{__llvm_rpc_client.open<rpcTakeArray>()};
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    for (int i{0}; i < 5; ++i) {
+      buffer->data[i] = handle[i];
+    }
+    buffer->data[5] = static_cast<uint64_t>(omp_get_device_num());
+    buffer->data[6] = reinterpret_cast<uint64_t>(array);
+  });
+  port.recv([](rpc::Buffer *, uint32_t) {});
+  *message = reinterpret_cast<uint64_t>(array);
+  return 1;
 }

@@ -51,6 +51,17 @@ constexpr uint32_t rpcGiveArray{RpcOpcode(4)};
 // the array from the device, and answers once it has queued it.
 constexpr uint32_t rpcSendArray{RpcOpcode(5)};
 
+// A poll of a mailbox of arrays: the buffer's words are the handle's five.
+// The host answers with 1 and the size in elements of the oldest message,
+// which it keeps, or 0 if the mailbox has none.
+constexpr uint32_t rpcPollArray{RpcOpcode(6)};
+
+// The oldest message of a mailbox of arrays, which a poll found: the
+// buffer's words are the handle's five, the device's number and the address
+// of an array on the device of the message's size. The host copies the
+// message there and removes it, and then answers.
+constexpr uint32_t rpcTakeArray{RpcOpcode(7)};
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_RPC_OPCODES_H_
