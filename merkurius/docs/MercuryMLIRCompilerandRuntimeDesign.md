@@ -3749,6 +3749,8 @@ A receive with a timeout, on the same commit: `cpu-process` with `after(10000)` 
 
 Taking the next process first, 2026-11-08, on top of 06f2d398af98, `cpu-process`, 20000 rounds, 9 runs, median µs a round, `after(10000)` before and after: default workers 6.01 and 3.81, 8 workers 5.83 and 3.55, 2 workers 2.15 and 1.55, 1 worker 0.65 and 0.64. `infinity` with the change: 1.67, 1.51, 1.73 and 0.54. `gpu-process` did not move (13.13 and 13.33). About 2 µs of the cost remains with several workers, and has not been explained.
 
+The send ring's prototype against the RPC, 2026-11-08, on a5efa6819f86, `-O2`, 20000 rounds, 9 alternating runs, median µs a round, RPC and ring: `gpu-local` 13.29 and 13.48, `gpu-process` 13.22 and 12.61, GPU and CPU between nodes 31.96 and 26.41, GPU and GPU between nodes 41.39 and 36.37. The ring is not built; see INPROGRESS, The send ring.
+
 ## Target applications
 
 Recorded on 2026-11-05. This is judgement, not a result: the only performance evidence so far is the bandwidth benchmark, whose program is no simpler than its C version (`benchmarks/bandwidth/README.md`). That the code is simpler has still to be shown on a program with real logic in it.
