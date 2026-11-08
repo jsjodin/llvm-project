@@ -378,6 +378,16 @@ mlir::ArrayAttr MerkGenerator::FunctorsAttr(
   return builder_.getArrayAttr(functors);
 }
 
+void MerkGenerator::EnsureRootDescriptors(const semantics::Type *type) {
+  if (type->kind == semantics::TypeKind::Variable || !CanDescribe(*type) ||
+      !EnsureDescriptor(*type, parser::CharBlock{})) {
+    return;
+  }
+  for (const semantics::Type *argument : TypeParts(*type)) {
+    EnsureRootDescriptors(argument);
+  }
+}
+
 mlir::Value MerkGenerator::TypeInfoOfType(const semantics::Type *type,
     mlir::Location loc, parser::CharBlock at, bool freeIsVoid) {
   if (type->kind == semantics::TypeKind::Variable) {

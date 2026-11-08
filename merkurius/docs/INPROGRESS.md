@@ -1072,7 +1072,19 @@ no process to collect.
    - A monomorphic term's entry is a static `type_info` built from its name. A
      word, a term with a type variable and a higher-order type are unresolved.
 
-   5b: a polymorphic root's `type_info`.
+   5b: a polymorphic root's `type_info`. Partly built 2026-11-08.
+   - MLIRGen emits `merk.root_type` notes, read and erased by `MarkSafepoints`; a
+     bundle entry's header has the number of `type_info`s above the type's index,
+     and they follow its value.
+   - Instruction selection adds a location pair for each heap pointer in the deopt
+     state that is not relocated, after the relocations, so the collector can
+     update those `type_info`s. The type indices cover those pairs too.
+   - Still unresolved, about 3% of roots in the test sweep: code in outlined
+     nondeterministic continuations; words and terms of existential types, which
+     need `ExistentialBase`; and roots at -O2 that LLVM keeps live without a bundle
+     entry, which take a type from another safepoint but no `type_info`.
+   - Missing is not yet a compile error, as D5 requires: until these are done it
+     would reject working programs.
    - **D5, naming a word's type variable, decided 2026-11-08.** MLIRGen puts the
      type variable on the operations and arguments that make a `!merk.word`, as an
      attribute, and the procedure says which value holds each variable's

@@ -109,6 +109,33 @@ void EraseOperands(mlir::Operation *op, llvm::ArrayRef<unsigned> positions) {
   }
 }
 
+// The use of `value` if it has exactly one, not counting what says its type.
+mlir::OpOperand *SoleUse(mlir::Value value) {
+  mlir::OpOperand *sole{nullptr};
+  for (mlir::OpOperand &use : value.getUses()) {
+    if (mlir::isa<merk::RootTypeOp>(use.getOwner())) {
+      continue;
+    }
+    if (sole) {
+      return nullptr;
+    }
+    sole = &use;
+  }
+  return sole;
+}
+
+// Forgets the types of what `op` makes, which is about to go or to go into a
+// cell: it is not live across a safepoint after this pass.
+void DropRootTypes(mlir::Operation *op) {
+  for (mlir::Value result : op->getResults()) {
+    for (mlir::Operation *user : llvm::make_early_inc_range(result.getUsers())) {
+      if (mlir::isa<merk::RootTypeOp>(user)) {
+        user->erase();
+      }
+    }
+  }
+}
+
 // Whether everything between `call` and `end` but `except` is free of
 // effects, so that the call can go last.
 bool Movable(merk::CallOp call, mlir::Operation *end,
@@ -188,7 +215,7 @@ mlir::Operation *LastCall::Branching(const Leaf &leaf) const {
     mlir::Value value{leaf.Output(k)};
     mlir::Operation *def{value.getDefiningOp()};
     if (!def || !mlir::isa<merk::IteOp, merk::SwitchOp>(def) ||
-        def->getBlock() != leaf.end->getBlock() || !value.hasOneUse() ||
+        def->getBlock() != leaf.end->getBlock() || !SoleUse(value) ||
         (branching && def != branching)) {
       return nullptr;
     }
@@ -234,12 +261,12 @@ std::optional<Use> LastCall::UseOf(mlir::OpOperand &use, const Leaf &leaf)
   }
   auto construct{mlir::dyn_cast<merk::ConstructOp>(user)};
   if (!construct || construct->getBlock() != leaf.end->getBlock() ||
-      !construct.getTerm().hasOneUse() ||
+      !SoleUse(construct.getTerm()) ||
       !mlir::isa<merk::TermType>(use.get().getType()) ||
       !inCell_(construct.getTerm().getType(), construct.getFunctor())) {
     return std::nullopt;
   }
-  mlir::OpOperand &output{*construct.getTerm().use_begin()};
+  mlir::OpOperand &output{*SoleUse(construct.getTerm())};
   if (output.getOwner() != leaf.end) {
     return std::nullopt;
   }
@@ -280,8 +307,8 @@ std::optional<Site> LastCall::SiteOf(const Leaf &leaf,
     bool ok{true};
     for (mlir::Value result : call->getResults()) {
       std::optional<Use> use;
-      if (result.hasOneUse()) {
-        use = UseOf(*result.use_begin(), leaf);
+      if (mlir::OpOperand *sole{SoleUse(result)}) {
+        use = UseOf(*sole, leaf);
       }
       if (!use ||
           (use->construct && llvm::is_contained(constructs, use->construct))) {
@@ -356,6 +383,12 @@ bool LastCall::Reaches(llvm::StringRef from, llvm::StringRef to) const {
 // its outputs `stored` through `refs`, those outputs are stored first.
 void LastCall::Rewrite(Site site, const Leaf &leaf, const Refs *stored,
     llvm::ArrayRef<mlir::Value> refs) {
+  DropRootTypes(site.call);
+  for (const Use &use : site.uses) {
+    if (use.construct) {
+      DropRootTypes(use.construct);
+    }
+  }
   mlir::Location loc{site.call.getLoc()};
   mlir::OpBuilder builder{leaf.end};
   const Refs &callee{stored_.find(site.call.getCallee())->second};
@@ -425,6 +458,7 @@ void LastCall::Store(const Leaf &leaf, const Refs &stored,
     positions.push_back(leaf.positions[k]);
   }
   if (mlir::Operation *branching{Branching(leaf)}) {
+    DropRootTypes(branching);
     llvm::SmallVector<unsigned> results;
     for (unsigned k = 0; k < leaf.positions.size(); ++k) {
       results.push_back(

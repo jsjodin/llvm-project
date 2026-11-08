@@ -28,6 +28,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Transforms/RegionUtils.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
@@ -353,6 +354,11 @@ private:
   // around the foreign_proc's code, which is added to foreignCode_.
   void GenerateForeign(const Procedure &, const parser::ForeignProcPragma &);
   void Goal(const Body &, const ProcedureBody &);
+  void GoalBody(const Body &, const ProcedureBody &);
+  // Says which type_infos describe the polymorphic values bound so far.
+  void AnnotateRoots(const ProcedureBody &);
+  // Makes the descriptors a root's type needs for the runtime to name it.
+  void EnsureRootDescriptors(const semantics::Type *);
   // X = c, for a literal or a character c; null after reporting a constant
   // not handled.
   mlir::Value Constant(const Body &, const ProcedureBody &);
@@ -700,6 +706,9 @@ private:
   // For the body being generated: each variable's value, and whether a
   // construct was not handled.
   llvm::DenseMap<BodyVar, mlir::Value> values_;
+  llvm::DenseSet<mlir::Value> annotated_;
+  // The types of the roots seen so far, for their descriptors.
+  llvm::SetVector<const semantics::Type *> rootTypes_;
   merk::ProcOp unifyArray_;
   llvm::StringSet<> descriptors_;
   // Where the unification being generated is, for its errors.

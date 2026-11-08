@@ -339,6 +339,20 @@ static llvm::BasicBlock::iterator AfterDefinition(llvm::Value *value,
   return function.getEntryBlock().getFirstInsertionPt();
 }
 
+// Calls `visit` with each entry of a bundle: its type's index, its value, and
+// the type_infos after it, whose number is above the index.
+template <typename Visit>
+static void ForEachEntry(llvm::ArrayRef<llvm::Use> inputs, Visit visit) {
+  for (std::size_t i = 0; i + 1 < inputs.size();) {
+    auto *header{llvm::cast<llvm::ConstantInt>(inputs[i].get())};
+    std::uint64_t bits{header->getZExtValue()};
+    std::size_t count{static_cast<std::size_t>(bits >> 32)};
+    visit(llvm::ConstantInt::get(header->getType(), bits & 0xffffffffu),
+        inputs[i + 1].get(), inputs.slice(i + 2, count));
+    i += 2 + count;
+  }
+}
+
 namespace {
 // Each value's type, as far as the bundles say, kept up to date through the
 // rewrite's replacements.
@@ -356,15 +370,18 @@ static void RecordTypes(llvm::Function &function, KnownTypes &known) {
     auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)};
     auto deopt{call ? call->getOperandBundle(llvm::LLVMContext::OB_deopt)
                     : std::nullopt};
-    for (std::size_t i = 0; deopt && i + 1 < deopt->Inputs.size(); i += 2) {
-      const llvm::Value *value{CellOf(deopt->Inputs[i + 1])};
-      if (IsHeapPointer(value->getType()) &&
-          !llvm::isa<llvm::Constant>(value) &&
-          known.insert({value, llvm::cast<llvm::Constant>(deopt->Inputs[i])})
-              .second) {
-        worklist.push_back(value);
-      }
+    if (!deopt) {
+      continue;
     }
+    ForEachEntry(deopt->Inputs,
+        [&](llvm::Constant *type, llvm::Value *entry, llvm::ArrayRef<llvm::Use>) {
+          const llvm::Value *value{CellOf(entry)};
+          if (IsHeapPointer(value->getType()) &&
+              !llvm::isa<llvm::Constant>(value) &&
+              known.insert({value, type}).second) {
+            worklist.push_back(value);
+          }
+        });
   }
   while (!worklist.empty()) {
     const llvm::Value *value{worklist.pop_back_val()};
@@ -498,6 +515,7 @@ namespace {
 struct StatepointRoots {
   llvm::GCStatepointInst *statepoint{nullptr};
   llvm::DenseMap<const llvm::Value *, llvm::Constant *> types;
+  llvm::DenseMap<const llvm::Value *, llvm::SmallVector<llvm::Value *, 2>> infos;
   llvm::SmallMapVector<llvm::Value *, llvm::Value *, 4> slots;
 };
 } // namespace
@@ -511,20 +529,29 @@ static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
   // An environment in the frame: the alloca, which the stack map gives as a
   // Direct location, and its layout's index.
   llvm::SmallMapVector<llvm::Value *, llvm::Value *, 4> slots;
-  for (std::size_t i = 0; deopt && i + 1 < deopt->Inputs.size(); i += 2) {
-    llvm::Value *value{deopt->Inputs[i + 1]};
-    if (!IsHeapPointer(value->getType())) {
-      if (!llvm::isa<llvm::AllocaInst>(value)) {
-        std::string text;
-        llvm::raw_string_ostream os{text};
-        os << "not yet implemented: an environment that is not an alloca:"
-           << *value;
-        llvm::report_fatal_error(llvm::StringRef{text});
-      }
-      slots.insert({value, deopt->Inputs[i]});
-      continue;
-    }
-    types[CellOf(value)] = llvm::cast<llvm::Constant>(deopt->Inputs[i]);
+  llvm::DenseMap<const llvm::Value *, llvm::SmallVector<llvm::Value *, 2>> infos;
+  if (deopt) {
+    ForEachEntry(deopt->Inputs,
+        [&](llvm::Constant *type, llvm::Value *value,
+            llvm::ArrayRef<llvm::Use> typeInfos) {
+          if (!IsHeapPointer(value->getType())) {
+            if (!llvm::isa<llvm::AllocaInst>(value)) {
+              std::string text;
+              llvm::raw_string_ostream os{text};
+              os << "not yet implemented: an environment that is not an alloca:"
+                 << *value;
+              llvm::report_fatal_error(llvm::StringRef{text});
+            }
+            slots.insert({value, type});
+            return;
+          }
+          types[CellOf(value)] = type;
+          auto &found{infos[CellOf(value)]};
+          found.clear();
+          for (const llvm::Use &info : typeInfos) {
+            found.push_back(info.get());
+          }
+        });
   }
   // The rewrite makes roots of the call's own arguments too. One the bundle
   // does not list is dead after the call, and the callee looks after it. It is
@@ -578,18 +605,51 @@ static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
         llvm::report_fatal_error(llvm::StringRef{text});
       }
       roots.types[root] = type;
+      if (auto it{infos.find(CellOf(root))}; it != infos.end()) {
+        roots.infos[root] = it->second;
+      }
     }
   }
 }
 
+// The type_infos of a relocation's root; none for a root that needs no type.
+static llvm::ArrayRef<llvm::Value *> InfosOf(
+    const StatepointRoots &roots, const llvm::GCRelocateInst *relocate) {
+  llvm::Value *derived{relocate->getDerivedPtr()};
+  auto it{roots.infos.find(derived)};
+  auto *type{llvm::cast_or_null<llvm::ConstantInt>(roots.types.lookup(derived))};
+  if (it == roots.infos.end() || !type || type->isNegative()) {
+    return {};
+  }
+  return it->second;
+}
+
 // The stack map has a location pair for each relocation that is still used, in
-// the order of getGCRelocates, so it is what the type indices follow. The
-// deopt state is the number of pairs, a type for each, and then a layout and
-// an address for each environment.
+// the order of getGCRelocates, and then for each heap pointer in the deopt
+// state that is not one of those, in the order of the state: instruction
+// selection adds those so that a collection can update them. The type indices
+// follow the pairs. The deopt state is the number of pairs, a type for each, a
+// layout and an address for each environment, and each root's type_infos.
 static void EncodeRootTypes(StatepointRoots &roots) {
   llvm::GCStatepointInst *statepoint{roots.statepoint};
   llvm::Type *i64{llvm::Type::getInt64Ty(statepoint->getContext())};
-  std::size_t count{statepoint->getGCRelocates().size()};
+  std::vector<const llvm::GCRelocateInst *> relocates{
+      statepoint->getGCRelocates()};
+  llvm::DenseSet<const llvm::Value *> relocated;
+  for (const llvm::GCRelocateInst *relocate : relocates) {
+    relocated.insert(relocate->getDerivedPtr());
+  }
+  std::size_t typeInfos{0};
+  llvm::SmallSetVector<llvm::Value *, 4> added;
+  for (const llvm::GCRelocateInst *relocate : relocates) {
+    for (llvm::Value *info : InfosOf(roots, relocate)) {
+      ++typeInfos;
+      if (!relocated.contains(info)) {
+        added.insert(info);
+      }
+    }
+  }
+  std::size_t count{relocates.size() + added.size()};
   std::vector<llvm::Value *> encoded(
       1 + count, llvm::ConstantInt::getSigned(i64, -1));
   encoded[0] = llvm::ConstantInt::get(i64, count);
@@ -597,6 +657,7 @@ static void EncodeRootTypes(StatepointRoots &roots) {
     encoded.push_back(layout);
     encoded.push_back(slot);
   }
+  encoded.resize(encoded.size() + typeInfos, llvm::ConstantInt::getSigned(i64, -1));
   llvm::SmallVector<llvm::OperandBundleDef, 2> bundles;
   for (unsigned b = 0; b < statepoint->getNumOperandBundles(); ++b) {
     llvm::OperandBundleUse use{statepoint->getOperandBundleAt(b)};
@@ -614,8 +675,24 @@ static void EncodeRootTypes(StatepointRoots &roots) {
   auto deopt{final->getOperandBundle(llvm::LLVMContext::OB_deopt)};
   unsigned first{static_cast<unsigned>(deopt->Inputs.data() - final->op_begin())};
   unsigned place{first + 1};
+  unsigned infoPlace{first + 1 + static_cast<unsigned>(count) +
+      2 * static_cast<unsigned>(roots.slots.size())};
   for (const llvm::GCRelocateInst *relocate : final->getGCRelocates()) {
-    final->setOperand(place++, roots.types.lookup(relocate->getDerivedPtr()));
+    auto *type{llvm::cast<llvm::ConstantInt>(
+        roots.types.lookup(relocate->getDerivedPtr()))};
+    llvm::ArrayRef<llvm::Value *> infos{InfosOf(roots, relocate)};
+    for (llvm::Value *info : infos) {
+      final->setOperand(infoPlace++, info);
+    }
+    final->setOperand(place++,
+        infos.empty() ? type
+                      : llvm::ConstantInt::get(i64,
+                            type->getZExtValue() |
+                                (std::uint64_t{infos.size()} << 32)));
+  }
+  for (llvm::Value *info : added) {
+    llvm::Constant *type{roots.types.lookup(info)};
+    final->setOperand(place++, type ? type : llvm::ConstantInt::getSigned(i64, -1));
   }
 }
 

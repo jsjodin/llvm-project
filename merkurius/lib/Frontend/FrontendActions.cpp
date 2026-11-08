@@ -963,6 +963,8 @@ bool CodeGenAction::Lower(
     return false;
   }
   if (kind_ == ActionKind::EmitMerk) {
+    // Notes for a later pass, which only clutter what is read.
+    module.walk([](merk::RootTypeOp op) { op.erase(); });
     module.print(*os);
     return true;
   }
