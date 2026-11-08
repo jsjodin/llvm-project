@@ -563,6 +563,19 @@ extern "C" std::int64_t merk_mailbox_arrivals(void) {
   return count;
 }
 
+// The stamp of the last message queued, which a receive over a selector
+// reads before it looks at its mailboxes: every message with a stamp up to
+// it was queued then, so the oldest of those it finds is the oldest of all,
+// while one it finds with a later stamp arrived as it looked, and an older
+// one may have arrived too, in a mailbox it had looked at already.
+extern "C" std::int64_t merk_mailbox_last_stamp(void) {
+  pthread_once(&once, InitializeCondition);
+  pthread_mutex_lock(&lock);
+  std::int64_t stamp{static_cast<std::int64_t>(stamps)};
+  pthread_mutex_unlock(&lock);
+  return stamp;
+}
+
 // 1 once a message has been queued or a mailbox closed since `seen` was
 // read, 0 if the deadline passes first.
 extern "C" std::int64_t merk_mailbox_wait_arrival(
