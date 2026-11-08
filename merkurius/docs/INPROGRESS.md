@@ -822,10 +822,15 @@ ends the program. `spawn`, links and monitors do not exist.
    no order; it closes when its owner ends. The program ends when `main` does.
    A heap starts at 4 KB and doubles. Node connections and device bridges stay
    OS threads, which wake processes. Benchmark: `benchmarks/processes`.
-4. **Workers.** One for each core, run queues, stealing, parking, and timers for
-   receive timeouts. Mailbox queues as the design has them, multi-producer,
-   with no global lock. The idle worker takes over the host's spin before
-   blocking (D2).
+4. **Workers.** One for each core or `MERK_WORKERS`, started as there is work
+   for them, so a program that spawns nothing has only its first thread. Done
+   so far: reading the heap's address again after a call (D1), and several
+   workers under the one lock, with one run queue. A worker with nothing to run
+   does so on its thread's own stack, since another may resume the process it
+   last ran. A process in a target region stays on its thread and blocks it, as
+   libomp ties the region to the thread. To do: a run queue for each worker,
+   stealing, timers for receive timeouts, and multi-producer mailbox queues with
+   no global lock.
 5. **Preemption.** Lowering the heap limit, and `mrt.yield_check` on loops that
    do not allocate.
 6. **Ending a process.** An uncaught exception ends its process with a reason

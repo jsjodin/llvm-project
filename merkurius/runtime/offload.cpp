@@ -20,6 +20,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "process.h"
 #include "device-ring.h"
 #include "fragment.h"
 #include "rpc-opcodes.h"
@@ -428,12 +429,14 @@ extern "C" void merk_register_message_type(
 // gives back is scalars, arrays mapped from the host and copies on the
 // host of arrays it made, so nothing in the arenas outlives it.
 extern "C" void merk_region_enter(void) {
+  merkurius::runtime::Pin();
   pthread_mutex_lock(&arenaLock);
   ++runningRegions;
   pthread_mutex_unlock(&arenaLock);
 }
 
 extern "C" void merk_region_exit(void) {
+  merkurius::runtime::Unpin();
   pthread_mutex_lock(&arenaLock);
   if (--runningRegions == 0) {
     merk_mailbox_detach_rings();

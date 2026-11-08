@@ -17,11 +17,13 @@
 //===----------------------------------------------------------------------===//
 
 #include <cstdint>
+#include <cstdlib>
 
 extern "C" void merk_main(void);
 extern "C" void merk_save_environment(void);
 extern "C" void merk_offload_start(void);
 extern "C" void merk_process_run_main(void (*entry)(void));
+extern "C" void merk_process_stop(void);
 
 namespace {
 int argumentCount{0};
@@ -41,11 +43,18 @@ extern "C" std::int64_t merk_argument_count(void) { return argumentCount; }
 // the string is not copied.
 extern "C" char *merk_argument(std::int64_t index) { return arguments[index]; }
 
+// The program ends with main, on whichever thread it then runs.
+static void EndWithMain(void) {
+  merk_main();
+  merk_process_stop();
+  std::exit(exitStatus);
+}
+
 int main(int argc, char **argv) {
   argumentCount = argc;
   arguments = argv;
   merk_save_environment();
   merk_offload_start();
-  merk_process_run_main(merk_main);
+  merk_process_run_main(EndWithMain);
   return exitStatus;
 }
