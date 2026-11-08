@@ -40,6 +40,7 @@
 #include "device-ring.h"
 #include "fragment.h"
 #include "node.h"
+#include "process.h"
 #include "walk.h"
 #include <cstdint>
 #include <cstdio>
@@ -275,9 +276,15 @@ struct Mailbox {
   int ringDevice;
   bool ringOfArrays;
   std::uint64_t consumed;
+  // The process that receives from it, which a message wakes, or null if
+  // made on a thread that runs none; and its neighbours in that process's
+  // list of mailboxes, as slots, or -1.
+  Process *owner;
+  std::int64_t previousOwned;
+  std::int64_t nextOwned;
 };
 
-pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t &lock{schedulerLock};
 pthread_once_t nodeOnce = PTHREAD_ONCE_INIT;
 Word nodeHigh{0};
 Word nodeLow{0};
@@ -335,6 +342,52 @@ Mailbox *Find(const Handle &handle) {
 }
 
 // Its name goes, as when it is closed.
+// Adds a mailbox to its owner's list; a null owner has none.
+void Own(std::int64_t index, Process *owner) {
+  Mailbox &mailbox{slots[index]};
+  mailbox.owner = owner;
+  mailbox.previousOwned = -1;
+  mailbox.nextOwned = -1;
+  if (owner) {
+    mailbox.nextOwned = owner->firstMailbox;
+    if (owner->firstMailbox >= 0) {
+      slots[owner->firstMailbox].previousOwned = index;
+    }
+    owner->firstMailbox = index;
+  }
+}
+
+void Disown(Mailbox *mailbox) {
+  Process *owner{mailbox->owner};
+  if (!owner) {
+    return;
+  }
+  if (mailbox->previousOwned >= 0) {
+    slots[mailbox->previousOwned].nextOwned = mailbox->nextOwned;
+  } else {
+    owner->firstMailbox = mailbox->nextOwned;
+  }
+  if (mailbox->nextOwned >= 0) {
+    slots[mailbox->nextOwned].previousOwned = mailbox->previousOwned;
+  }
+  mailbox->owner = nullptr;
+}
+
+// Only its owner receives from a mailbox. A thread that runs no process, as
+// on the host's side of a device, is not one; a mailbox made on such a thread
+// goes to the first process that receives from it.
+void CheckOwner(Mailbox *mailbox) {
+  Process *process{CurrentProcess()};
+  if (!process) {
+    return;
+  }
+  if (!mailbox->owner) {
+    Own(mailbox - slots, process);
+  } else if (mailbox->owner != process) {
+    Fail("a process received from a mailbox of another process", "");
+  }
+}
+
 void Unregister(Mailbox *mailbox) {
   std::free(mailbox->name);
   mailbox->name = nullptr;
@@ -388,11 +441,22 @@ void Queue(Mailbox *mailbox, Message *message) {
     FillRing(mailbox);
   }
   pthread_cond_broadcast(&arrived);
+  if (mailbox->owner) {
+    Wake(mailbox->owner);
+  }
 }
 
 // Waits on `arrived` until the deadline, or for ever if it is negative:
 // false once the deadline has passed. Called with the lock held.
 bool WaitArrival(std::int64_t deadline) {
+  if (CurrentProcess()) {
+    // A process lets others run; the scheduler spins when nothing can.
+    if (deadline >= 0 && Now() >= deadline) {
+      return false;
+    }
+    Block(deadline);
+    return true;
+  }
   if (deadline < 0) {
     pthread_cond_wait(&arrived, &lock);
     return true;
@@ -409,6 +473,9 @@ bool WaitArrival(std::int64_t deadline) {
 // When a wait that ends at the deadline may stop spinning: never past the
 // deadline, so that a receive with no time to wait does not spin.
 std::int64_t SpinEnd(std::int64_t deadline) {
+  if (CurrentProcess()) {
+    return 0;
+  }
   std::int64_t end{Now() + SpinNanoseconds()};
   return deadline >= 0 && deadline < end ? deadline : end;
 }
@@ -558,6 +625,7 @@ extern "C" void merk_mailbox_new(Word typeInfo, std::int64_t *placeAndSlot,
   mailbox.ringDevice = -1;
   mailbox.ringOfArrays = false;
   mailbox.consumed = 0;
+  Own(index, CurrentProcess());
   *placeAndSlot = index;
   *generation = mailbox.generation;
   *secret = static_cast<std::int64_t>(mailbox.secret);
@@ -575,26 +643,66 @@ extern "C" void merk_mailbox_new(Word typeInfo, std::int64_t *placeAndSlot,
 
 // Its queued messages are dropped, its name goes, and its slot gets a new
 // generation, so that its handle stays dead when the slot is reused. A
-// receive waiting on it wakes and finds nothing.
+// receive waiting on it wakes and finds nothing. Called with the lock held.
+static void Close(Mailbox *mailbox) {
+  Unregister(mailbox);
+  FreeTypeInfo(mailbox->messageType);
+  mailbox->messageType = 0;
+  mailbox->open = false;
+  ++mailbox->generation;
+  mailbox->head = nullptr;
+  mailbox->tail = &mailbox->head;
+  mailbox->count = 0;
+  mailbox->nextFree = firstFree;
+  firstFree = mailbox - slots;
+  // Whoever made the ring frees it when no region is running.
+  mailbox->ring = nullptr;
+  __atomic_add_fetch(&arrivals, 1, __ATOMIC_RELEASE);
+  pthread_cond_broadcast(&arrived);
+  if (Process *owner{mailbox->owner}) {
+    Disown(mailbox);
+    Wake(owner);
+  }
+}
+
 extern "C" void merk_mailbox_close(MERK_HANDLE_PARAMETERS) {
   pthread_once(&once, InitializeCondition);
   pthread_mutex_lock(&lock);
   if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
-    Unregister(mailbox);
-    FreeTypeInfo(mailbox->messageType);
-    mailbox->messageType = 0;
-    mailbox->open = false;
-    ++mailbox->generation;
-    mailbox->head = nullptr;
-    mailbox->tail = &mailbox->head;
-    mailbox->count = 0;
-    mailbox->nextFree = firstFree;
-    firstFree = mailbox - slots;
-    // Whoever made the ring frees it when no region is running.
-    mailbox->ring = nullptr;
-    __atomic_add_fetch(&arrivals, 1, __ATOMIC_RELEASE);
-    pthread_cond_broadcast(&arrived);
+    Close(mailbox);
   }
+  pthread_mutex_unlock(&lock);
+}
+
+namespace merkurius::runtime {
+void CloseMailboxesOf(Process *process) {
+  pthread_once(&once, InitializeCondition);
+  while (process->firstMailbox >= 0) {
+    Close(&slots[process->firstMailbox]);
+  }
+}
+} // namespace merkurius::runtime
+
+// A new process runs `closure` on `argument`, the handle's mailbox, which
+// it now owns; `stackBytes` of 0 is the default stack. Temporary (chunk 2,
+// docs/INPROGRESS.md, The scheduler, before the collector): the closure and
+// the handle's cell are shared with the parent, not copied, as a closure's
+// cell does not say the types of what it captured.
+extern "C" void merk_process_spawn(std::int64_t stackBytes, Word closure,
+    Word argument, MERK_HANDLE_PARAMETERS) {
+  if (!CurrentProcess()) {
+    Fail("spawn is not available on a thread that runs no process", "");
+  }
+  pthread_mutex_lock(&lock);
+  Process *child{
+      NewProcess(static_cast<std::size_t>(stackBytes), closure, argument)};
+  if (!child) {
+    Fail("no address space for a process's stack", "");
+  }
+  Mailbox *mailbox{Find(MERK_HANDLE)};
+  Disown(mailbox);
+  Own(mailbox - slots, child);
+  Start(child);
   pthread_mutex_unlock(&lock);
 }
 
@@ -644,6 +752,7 @@ extern "C" std::int64_t merk_mailbox_wait(
     if (!mailbox) {
       break;
     }
+    CheckOwner(mailbox);
     if (mailbox->count > position) {
       result = 1;
       break;
@@ -668,6 +777,9 @@ extern "C" std::int64_t merk_mailbox_poll(
   pthread_once(&once, InitializeCondition);
   pthread_mutex_lock(&lock);
   Mailbox *mailbox{Find(MERK_HANDLE)};
+  if (mailbox) {
+    CheckOwner(mailbox);
+  }
   std::int64_t result{!mailbox                    ? -1
           : mailbox->count > position
           ? static_cast<std::int64_t>(At(mailbox, position)->stamp)

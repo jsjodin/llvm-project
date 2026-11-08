@@ -101,6 +101,8 @@ using merkurius::runtime::Context;
 // the floating-point units, which it also has the callee keep.
 extern "C" void merk_switch_stack(void **save, void *to);
 extern "C" void merk_stack_entry(void);
+extern "C" void merk_call_closure(
+    std::uint64_t closure, std::uint64_t argument, std::uint64_t io);
 
 __asm__(R"(
     .text
@@ -144,6 +146,22 @@ merk_stack_entry:
     ud2
     .cfi_endproc
     .size merk_stack_entry, .-merk_stack_entry
+
+    # A closure's cell has its entry's code in word 0. The stack pointer is
+    # kept in a callee-saved register, as the callee may pop from the stack.
+    .p2align 4
+    .globl merk_call_closure
+    .hidden merk_call_closure
+    .type merk_call_closure, @function
+merk_call_closure:
+    pushq %rbx
+    movq %rsp, %rbx
+    andq $-16, %rsp
+    callq *(%rdi)
+    movq %rbx, %rsp
+    popq %rbx
+    ret
+    .size merk_call_closure, .-merk_call_closure
 )");
 
 namespace merkurius::runtime {
@@ -172,6 +190,10 @@ void SwitchContext(Context &from, Context &to) {
   merk_switch_stack(&from.stackPointer, to.stackPointer);
 }
 
+void CallClosure(std::uint64_t closure, std::uint64_t argument) {
+  merk_call_closure(closure, argument, 0);
+}
+
 } // namespace merkurius::runtime
 
 #else
@@ -188,6 +210,7 @@ namespace merkurius::runtime {
 
 Context NewContext(Stack &, void (*)(void *), void *) { NoSwitch(); }
 void SwitchContext(Context &, Context &) { NoSwitch(); }
+void CallClosure(std::uint64_t, std::uint64_t) { NoSwitch(); }
 
 } // namespace merkurius::runtime
 

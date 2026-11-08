@@ -1,6 +1,8 @@
 % Processes and mailboxes, a Merkurius extension with no counterpart in the
 % Mercury library (design document, Language extensions, "Processes and
-% mailboxes"). So far only the mailboxes of one process: a mailbox is
+% mailboxes"). A process is spawned with a mailbox it owns; only a mailbox's
+% owner receives from it, and it closes when its owner ends. The program
+% ends when main does. A mailbox is
 % made, sent to and received from, and may be registered under a name, which
 % a lookup finds, as in Erlang. A receive waits on one mailbox, or on several
 % joined by a selector, as Gleam's Selector joins them.
@@ -17,10 +19,9 @@
 % takes the first message in the queue that any clause matches. It leaves
 % the others queued in order, and waits until the timeout for one to arrive.
 %
-% Temporary (chunk 2, docs/INPROGRESS.md): spawn, close_mailbox's effect on
-% other processes, monitors and request and reply come with processes; until then a program is one process, and
-% a receive that waits with infinity for a message nobody can send waits
-% forever.
+% Temporary (chunk 2, docs/INPROGRESS.md): monitors and request and reply are
+% to come. A receive that waits with infinity for a message nobody can send
+% waits forever.
 %
 % Nodes connect over TCP (runtime/node.cpp), after Erlang's distribution: a
 % node listens on an address, another connects to it, and then each can
@@ -48,6 +49,17 @@
     ;       infinity.
 
 :- pred new_mailbox(mailbox(M)::out, io::di, io::uo) is det.
+
+    % A new process runs the predicate on a new mailbox, which it owns and
+    % which is returned. It runs until the predicate returns.
+:- pred spawn(pred(mailbox(M), io, io)::in(pred(in, di, uo) is det),
+    mailbox(M)::out, io::di, io::uo) is det.
+
+    % As spawn, with a stack of at least the given size in bytes, which
+    % must be positive. It costs only address space until it is used.
+:- pred spawn_with_stack(int::in,
+    pred(mailbox(M), io, io)::in(pred(in, di, uo) is det),
+    mailbox(M)::out, io::di, io::uo) is det.
 
     % Drops the queued messages and the mailbox's name; later sends to the
     % mailbox are dropped, and a receive from it finds nothing.
@@ -183,6 +195,9 @@
 extern void merk_node(MR_Integer *high, MR_Integer *low);
 extern void merk_mailbox_new(MR_Word type_info, MR_Integer *place_slot,
     MR_Integer *generation, MR_Integer *secret);
+extern void merk_process_spawn(MR_Integer stack_bytes, MR_Word closure,
+    MR_Word argument, MR_Integer node_high, MR_Integer node_low,
+    MR_Integer place_slot, MR_Integer generation, MR_Integer secret);
 extern void merk_mailbox_close(MR_Integer node_high, MR_Integer node_low,
     MR_Integer place_slot, MR_Integer generation, MR_Integer secret);
 extern void merk_mailbox_send(MR_Integer node_high, MR_Integer node_low,
@@ -224,6 +239,25 @@ new_mailbox(Mailbox, !IO) :-
     this_node(node(High, Low), !IO),
     new_slot(witness : witness(M), PlaceSlot, Generation, Secret, !IO),
     Mailbox = mailbox(High, Low, PlaceSlot, Generation, Secret) : mailbox(M).
+
+spawn(Body, Mailbox, !IO) :-
+    start(0, Body, Mailbox, !IO).
+
+spawn_with_stack(Bytes, Body, Mailbox, !IO) :-
+    ( if Bytes > 0 then
+        start(Bytes, Body, Mailbox, !IO)
+    else
+        error("spawn_with_stack: the stack's size must be positive")
+    ).
+
+:- pred start(int::in, pred(mailbox(M), io, io)::in(pred(in, di, uo) is det),
+    mailbox(M)::out, io::di, io::uo) is det.
+
+start(Bytes, Body, Mailbox, !IO) :-
+    new_mailbox(Mailbox, !IO),
+    Mailbox = mailbox(High, Low, PlaceSlot, Generation, Secret),
+    start_process(Bytes, Body, Mailbox, High, Low, PlaceSlot, Generation,
+        Secret, !IO).
 
 close_mailbox(mailbox(High, Low, PlaceSlot, Generation, Secret), !IO) :-
     close_slot(High, Low, PlaceSlot, Generation, Secret, !IO).
@@ -545,6 +579,19 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
     [will_not_call_mercury, promise_pure, thread_safe],
 "
     merk_mailbox_new(TypeInfo_for_M, &PlaceSlot, &Generation, &Secret);
+").
+
+:- pred start_process(int::in,
+    pred(mailbox(M), io, io)::in(pred(in, di, uo) is det), mailbox(M)::in,
+    int::in, int::in, int::in, int::in, int::in, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    start_process(Bytes::in, Body::in(pred(in, di, uo) is det), Mailbox::in,
+        High::in, Low::in, PlaceSlot::in, Generation::in, Secret::in,
+        _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    merk_process_spawn(Bytes, (MR_Word) Body, (MR_Word) Mailbox, High, Low,
+        PlaceSlot, Generation, Secret);
 ").
 
 :- pred close_slot(int::in, int::in, int::in, int::in, int::in,

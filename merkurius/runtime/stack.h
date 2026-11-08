@@ -19,6 +19,7 @@
 #define MERKURIUS_RUNTIME_STACK_H_
 
 #include <cstddef>
+#include <cstdint>
 
 namespace merkurius::runtime {
 
@@ -52,6 +53,11 @@ Context NewContext(Stack &, void (*body)(void *), void *argument);
 
 // Suspends the caller in `from`, and goes on from `to`.
 void SwitchContext(Context &from, Context &to);
+
+// Calls a closure of pred(T, io, io) with the word `argument`. Closures'
+// entries are in the tail calling convention, whose callee may pop from the
+// stack, which C++ cannot call.
+void CallClosure(std::uint64_t closure, std::uint64_t argument);
 
 } // namespace merkurius::runtime
 

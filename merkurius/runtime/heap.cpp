@@ -20,6 +20,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "heap.h"
+#include "process.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -85,6 +86,15 @@ extern "C" void *merk_alloc_slow(std::int64_t bytes) {
   std::size_t large{chunkSize / 2 < kLargeBytes ? chunkSize / 2 : kLargeBytes};
   if (size > large) {
     return Chunk(size);
+  }
+  // A process's heap starts small and doubles, so that a process that
+  // allocates little costs little.
+  merkurius::runtime::Process *process{merkurius::runtime::CurrentProcess()};
+  if (process && process->chunkBytes != 0 && process->chunkBytes < chunkSize) {
+    if (size <= process->chunkBytes) {
+      chunkSize = process->chunkBytes;
+    }
+    process->chunkBytes *= 2;
   }
   char *chunk{Chunk(chunkSize)};
   merk_heap.next = chunk + size;

@@ -109,6 +109,9 @@ static std::string CType(const semantics::Type &type) {
   if (type.kind == semantics::TypeKind::Tuple) {
     return "MR_Tuple";
   }
+  if (type.kind == semantics::TypeKind::HigherOrder) {
+    return "MR_Word";
+  }
   llvm::StringRef name{type.constructor->name};
   if (!type.constructor->module.empty()) {
     return type.constructor->module == "array" && name == "array"
@@ -937,7 +940,8 @@ void MerkGenerator::GenerateForeign(
   llvm::SmallVector<mlir::Value> inputs;
   for (mlir::Value argument : entry->getArguments()) {
     inputs.push_back(
-        mlir::isa<merk::TermType, merk::TypeInfoType>(argument.getType())
+        mlir::isa<merk::TermType, merk::TypeInfoType, merk::ClosureType>(
+            argument.getType())
             ? mlir::Value{merk::ToWordOp::create(builder_, loc, word, argument)}
             : argument);
   }

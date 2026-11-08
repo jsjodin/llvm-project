@@ -21,7 +21,7 @@
 extern "C" void merk_main(void);
 extern "C" void merk_save_environment(void);
 extern "C" void merk_offload_start(void);
-extern "C" void merk_process_start(void);
+extern "C" void merk_process_run_main(void (*entry)(void));
 
 namespace {
 int argumentCount{0};
@@ -45,8 +45,7 @@ int main(int argc, char **argv) {
   argumentCount = argc;
   arguments = argv;
   merk_save_environment();
-  merk_process_start();
   merk_offload_start();
-  merk_main();
+  merk_process_run_main(merk_main);
   return exitStatus;
 }

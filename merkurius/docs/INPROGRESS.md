@@ -813,10 +813,15 @@ ends the program. `spawn`, links and monitors do not exist.
    rather than one mapping for all, since a limit on the address space can
    refuse a large one, and it then asks for less. The limit check is done too,
    added after LLVM's optimizer. Done.
-3. **`spawn` on one worker.** A process from a closure, with cooperative
-   switching: `receive` suspends the process, and a send wakes it. Mailboxes
-   belong to processes. A benchmark: ping-pong between processes, against
-   today's threads, and a million processes.
+3. **`spawn` on one worker.** Done. A process runs a closure on its own stack,
+   and `main` is one too, on 64 MB. The program's first thread runs them all,
+   each until it blocks: `receive` switches to the next runnable process, and
+   the thread spins and then sleeps when there is none. A send wakes the
+   mailbox's owner. Only the owner receives from a mailbox, as with Gleam's
+   subjects, since a send must know whom to wake and two receivers would have
+   no order; it closes when its owner ends. The program ends when `main` does.
+   A heap starts at 4 KB and doubles. Node connections and device bridges stay
+   OS threads, which wake processes. Benchmark: `benchmarks/processes`.
 4. **Workers.** One for each core, run queues, stealing, parking, and timers for
    receive timeouts. Mailbox queues as the design has them, multi-producer,
    with no global lock. The idle worker takes over the host's spin before
@@ -832,6 +837,17 @@ ends the program. `spawn`, links and monitors do not exist.
    ping-pong between `main` and a GPU of its own node, regions on several
    devices at once with `device(N)`, and whether a worker drains the send ring
    (The send ring).
+
+**Needed before the collector.** Decided 2026-11-08 to leave these until
+processes run:
+
+- `spawn` shares the closure and the handle's cell with the parent, and does not
+  copy them, as a closure's cell does not say the types of what it captured. The
+  compiler has to describe them, polymorphic ones too. That also lets closures
+  be sent. It is safe until the collector moves or frees cells, as captured
+  values are never unique, and so never updated.
+- A process's heap chunks and a received message's fragments are never freed. A
+  ping-pong round leaks about 8 KB.
 
 **To decide:**
 
@@ -849,11 +865,10 @@ ends the program. `spawn`, links and monitors do not exist.
   nrev gate, leaving (a) for later. It is built at step 4, as a process stays on
   one OS thread until there are several workers. The operation is still to be
   found: LLVM treats `llvm.threadlocal.address` as mergeable within a function.
-- **D2, spinning under the scheduler.** Today each waiting thread spins for 50
-  µs. With workers, it is a worker with an empty queue that spins, before
-  parking. Proposed: as now, spinning with a yield, for the same 50 µs.
-- **D3, the first scope.** Proposed: steps 1 to 3 first, as they show the cost
-  of a process and a switch, and then a review of the rest.
+- **D2, spinning under the scheduler.** Decided: a worker with an empty queue
+  spins for the same 50 µs, with a yield, before it sleeps.
+- **D3, the first scope.** Steps 1 to 3 are done; the rest is to be reviewed
+  with the numbers from `benchmarks/processes`.
 
 ## The receive goal: later
 
