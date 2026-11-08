@@ -854,7 +854,7 @@ ends the program. `spawn`, links and monitors do not exist.
    process has nothing to unwind, and until they exist the exit reason is the
    exception's text, which becomes a `univ` with them; `down_reason` is abstract
    so that programs do not change. Monitors are done (design document, Exceptions,
-   links and monitors), on one node. Next: links; then `request`. Open: a
+   links and monitors), on one node. Links are deferred (decided 2026-11-08): two monitors give the same two-way message, and they can be added later if something needs them. Next: `request`. Open: a
    monitor across nodes or places reports that it is not supported yet.
 7. **What blocks.** Target regions on a blocking pool with the process
    suspended, the hand-off for parallel regions, and blocking I/O. Node
@@ -899,6 +899,143 @@ processes run:
   spins for the same 50 µs, with a yield, before it sleeps.
 - **D3, the first scope.** Steps 1 to 3 are done; the rest is to be reviewed
   with the numbers from `benchmarks/processes`.
+
+## Collectives and direct GPU transfers
+
+Proposed 2026-11-08, from a side discussion; not agreed, and nothing is built.
+It adds to the design document's GPU processes (What the hardware offers;
+Places say what they can do; What choosing among links adds), which already
+cover moving a message between GPUs. What they do not cover is collectives.
+
+**Checked in this tree, 2026-11-08.**
+
+- MLIR has the `shard` dialect, with `all_reduce`, `all_gather`,
+  `reduce_scatter`, `all_to_all`, `send` and `recv`, and an `mpi` dialect.
+- LLVM's AMD offload plugin is built on ROCr, not HIP:
+  `hsa_amd_memory_async_copy` and `hsa_amd_agents_allow_access`. Its
+  `isDataExchangable` is always true, and `omp_target_memcpy` between devices
+  reaches `dataExchangeImpl`.
+- Our runtime has no peer mapping yet. It uses `omp_target_memcpy` only between
+  host and device. Every queue is on the host.
+
+**From the side discussion, not checked here.** To be confirmed against the
+sources before anything depends on them.
+
+- *APIs, lowest first:* ROCr; HIP peer access (`hipDeviceEnablePeerAccess`,
+  `hipMemcpyPeer`, IPC handles); RCCL, with NCCL's API, over PCIe or xGMI within
+  a node and InfiniBand, RoCE or TCP between nodes; rocSHMEM, put and get from
+  inside a kernel, with GPU Direct Async or a host proxy between nodes;
+  GPU-aware MPI.
+- *Data center:* MI300X to MI355X are 8 GPUs per node, all-to-all over Infinity
+  Fabric, about 1,075 GB/s per GPU on MI355X. MI455X moves GPU-to-GPU traffic to
+  UALink over Ethernet. On MI250X, kernel loads and stores to a peer beat
+  `hipMemcpyPeer`, as the copy engines cannot fill a multi-link connection.
+- *Consumer Radeon:* PCIe only, with no bridge on current cards. Peer transfers
+  need CPU-attached x16 slots and Resizable BAR, sometimes `iommu=pt`. Two R9700s
+  measured about 28 GB/s one way. RCCL's peer path was reported to crash through
+  the root complex on dual R9700s, and staging through the host about halves
+  bandwidth. rocSHMEM lists Radeon cards as experimental.
+- *MSCCL++:* four device-side primitives, put, signal, wait and flush, with the
+  algorithms written above them. Reported up to 3.8 times RCCL's speed for small
+  AllReduce on MI300X, after about seven weeks' work for one developer.
+- *Licences:* MSCCL++ is said to be permissive; check before reusing it. The
+  clean-room rule covers only Melbourne Mercury.
+
+**RCCL's tables,** skimmed on GitHub 2026-11-08 (`ROCm/rccl`, whose default
+branch is `develop_deprecated`, so development may have moved). `LICENSE.txt` is
+BSD-style, with NVIDIA's, AMD's and an MIT-licensed part of Microsoft's;
+`src/graph/rome_models.cc` has an MIT-style notice. Reuse keeps the notices.
+
+- `src/graph/tuning.cc` has 8 tuning models: latency by hardware, algorithm and
+  protocol (`hwLat`), `bwRatio`, tree and ring correction factors by the log of
+  the message's size, and thresholds for protocols and channel counts. They
+  calibrate RCCL's cost model for its own kernels and protocols, so the numbers
+  do not carry over. The shape of the model does, and is close to the route
+  table's lookup by source, destination and size class. The numbers can serve as
+  a rough check on where our own crossovers fall.
+- `src/graph/rome_models.cc` has known server layouts. They describe hardware
+  rather than RCCL's speed, so they may be of use, for the servers AMD listed.
+- `ext-tuner/example` has a tuner configuration for gfx950 and a script that works
+  from performance data. Ours would likewise be measured on each target machine
+  and generated.
+
+**The proposal.** Build on what OpenMP offload and ROCr provide, and add what
+RCCL would have provided, with no dependency on RCCL. It stays the benchmark to
+beat. Most of RCCL is topology handling, tuning, the network path and robustness,
+and most of that is either expressed by processes already or not needed yet.
+
+- **Logical topology is the program's.** Who talks to whom, who holds which tile
+  and who takes part are mailboxes and places. A group is a list of mailboxes,
+  and a position in it gives what a rank gives, including the order that
+  operators that do not commute need. A participant's end is seen by monitors.
+- **Physical topology is a query.** Which GPUs share a link is a fact of the
+  hardware, which fills in the place table's "which GPUs it can reach, over which
+  link". ROCr is believed to report the link's type and bandwidth for a pair of
+  agents; not checked.
+- **Algorithms are chosen from few cases:** direct exchange over all-to-all
+  Infinity Fabric, a ring or tree over PCIe, and within a node first, then between
+  nodes. The operator and element type are known at compile time. The size may
+  not be, so the choice is partly at run time, by size class, from a table
+  measured on each target machine.
+- **Processes plan, kernels carry the data.** A process message between GPUs costs
+  about 40 µs today, through the host. Collectives over messages are the correct
+  first version; the fast one has the processes set up the pattern, and kernels
+  do peer stores.
+- **What is added below OpenMP is small:** peer-mapped buffers, signal and wait
+  with system-scope ordering, and the filled-in place table. OpenMP has no
+  collectives across devices, and does not appear to expose mapping one GPU's
+  memory for another's kernels. The plugin calls `hsa_amd_agents_allow_access`
+  internally, so this needs ROCr called directly or a small plugin extension.
+- **Collectives are in the language and in `merk`.** A parallel loop across devices
+  can do its cross-GPU reduction in its own kernel, as tiles finish, which no
+  library can do. Uniqueness makes in-place safe.
+- **The network path is later, and is ours.** Without RCCL there is no fallback to
+  it: the design's plan is libfabric, UCX or verbs under the node id, with TCP.
+
+**What the first version of this proposal got wrong, and limits.**
+
+1. *A collective on one participant is not pure.* `all_reduce(sum, A0, A)` with
+   `A0::di` and `A::uo` returns something that depends on other GPUs' data, so
+   it is not a function of `A0`, and `promise_pure` would be false. Either it
+   threads `io`, as `send` and `receive` do, or it is an operation over the whole
+   distributed array, inside a loop across devices, whose sequential meaning is
+   an ordinary reduction. Only the second can be pure, and it is also the one
+   that can be fused.
+2. *Lowering to RCCL first was rejected* (the side discussion's first step). RCCL
+   is a HIP library addressed by rank, and we have neither: our regions are OpenMP
+   offload over ROCr, and programs name mailboxes, not ranks. Buffers from
+   `omp_target_alloc` would have to be usable from HIP, which is unchecked.
+   Collectives on messages over today's route are slower, but correct, need no
+   new dependency, can be tested on this machine, and get faster when the route
+   does.
+3. *Use ROCr rather than HIP for peer access.* We already sit on ROCr through the
+   plugin, and it is the layer that HIP's peer access is built on. Whether being
+   one OS process avoids the crash reported on dual R9700s is a guess.
+4. *The primitives are the route table's "peer store" hop.* Put, signal, wait and
+   flush are what a mailbox ring in a peer's memory needs too (What choosing among
+   links adds: where the queue lives, several senders, order, size). So build one
+   transport, for messages first, as GPU-to-GPU messaging is the goal, and
+   collectives on it.
+5. *Fusion needs loops across devices,* which do not exist. Regions run on one
+   device each, and `device(N)` regions at once are scheduler step 8.
+6. *A participant can die.* The design's recovery benchmark kills a GPU process
+   during a halo exchange. A collective must end with an error rather than hang,
+   which monitors allow and rank-based libraries do not offer.
+7. *`shard` is built around sharded tensors,* and has no route to AMD peer
+   memory. Worth a look as a level below `merk`, not to be assumed.
+
+**Suggested order, for discussion.**
+
+1. Collectives over messages, as library code, once GPU processes run with the
+   scheduler (step 8). The halo exchange is the first user.
+2. Peer-mapped rings between GPUs on one node, as the route's peer-store hop.
+3. Loops across devices, and collectives as part of them, with fusion.
+4. Compare with RCCL on real hardware, with a table measured there. Only then
+   decide what to do about the network path.
+
+**What we can test.** This machine has one RX 6950 XT, so no peer transfer can
+run here. Steps 2 to 4 need at least two GPUs: two consumer cards for PCIe, or an
+Instinct node for Infinity Fabric.
 
 ## The receive goal: later
 

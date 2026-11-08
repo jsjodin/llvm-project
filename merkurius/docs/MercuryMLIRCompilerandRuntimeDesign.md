@@ -40,7 +40,7 @@ We will build a clean-room Mercury compiler on MLIR and LLVM, adding OpenMP-styl
 | Unknown messages | Impossible by typing; `det` loops must cover every constructor | No catch-all `_ -> true` needed |
 | Request/reply | Fresh reply mailbox per request, and a monitor on the server for the call | Late replies go to a dead mailbox and are dropped; a dead server ends the wait at once |
 | Generic dispatch | Existential envelopes; `sendable(M)` required where a mailbox is created | Type-safe forwarding without knowing payload types |
-| Process failure | Links and monitors, delivered with processes | Supervision depends on them |
+| Process failure | Monitors, delivered with processes; links deferred (Runtime system, "Exceptions, links and monitors") | Supervision depends on them |
 | Heaps | One heap per process, precise moving GC | No global pauses; whole heap freed on exit |
 | Heap cells | Headerless, traced by type with `type_info`s from the stack maps | A header word costs up to 50% on large data (E7) |
 | Cost rule | Advanced features cost nothing in code that does not use them | Ground, single-process code keeps the speed measured in E1 |
@@ -1280,7 +1280,7 @@ The declaration is the process kind's contract: what it is spawned with and what
 
 A module defines process kinds; it is not itself a process. Exporting the mailbox as an abstract type and keeping the message constructors private forces other modules through the module's API predicates, as Erlang's gen\_server does by convention.
 
-Failure handling follows Erlang. An uncaught exception ends the process with that exception as its exit reason. A monitor delivers a `down_info` message to a mailbox the watcher names, through a function into that mailbox's message type, so a process with one protocol needs no second mailbox for it. Links deliver exit messages the same way. Both are required and ship with processes in M4; their semantics are in Runtime system, "Exceptions, links and monitors".
+Failure handling follows Erlang. An uncaught exception ends the process with that exception as its exit reason. A monitor delivers a `down_info` message to a mailbox the watcher names, through a function into that mailbox's message type, so a process with one protocol needs no second mailbox for it. Links, deferred for now, would deliver exit messages the same way. The semantics are in Runtime system, "Exceptions, links and monitors".
 
 ### Loops
 
@@ -2343,7 +2343,7 @@ Comparison is the standard ordering (reference manual, "The standard ordering").
 
 - `throw` and `catch` work within a process.
 - An uncaught exception ends the process, with the exception as its exit reason. So does a stack overflow. It is reported on the standard error, and the program goes on. Nothing is unwound, as a process's stack and heap go as a whole. In `main`, on a thread that runs no process, or in a target or parallel region, it ends the program with status 1, as libomp's team and a device's region cannot be abandoned on their own.
-- A link is two-way: the death of one process delivers an exit message to the other. A monitor is one-way and delivers a `down_info` message. Both go to a mailbox the watcher chose, through a function into that mailbox's message type (Language extensions, "Processes and mailboxes").
+- **Links are deferred** (decided 2026-11-08): two monitors, one each way, give the two-way message, and supervisors are built on monitors. They can be added if something needs them. The rest of this item is what they would be. A link is two-way: the death of one process delivers an exit message to the other. A monitor is one-way and delivers a `down_info` message. Both go to a mailbox the watcher chose, through a function into that mailbox's message type (Language extensions, "Processes and mailboxes").
 - Monitoring a process that has already exited delivers a `down_info` message at once, so `request` cannot miss a server's death.
 - **Monitors as implemented** (2026-11-08, `runtime/mailbox.cpp`, `library/process.m`). A monitor watches the process that owns the target mailbox, and a closed mailbox counts as an ended process, with the reason `noproc`. A process closes its mailboxes first and tells its monitors after, so that a watcher told of its end finds its mailboxes closed. The function is applied by the receiver, when it reads the message: the ending process queues what happened, and the first read replaces that with the function's result, on the receiver's heap. **Rejected: applying the function in the ending process,** which would run a watcher's code on a stack that may just have overflowed, and read a closure in another process's heap; **and a helper process for each monitor,** which costs a spawn for each `request`. A monitor is in a table by id, in shards with a lock each, and on its target's list, so that `demonitor` is safe against the target ending. As with Erlang's `demonitor` without `flush`, a message already queued stays. The reason's text is `normal`, `noproc`, or the report of the failure, until exceptions can be caught and it can carry the exception. Monitors across nodes or places, and a monitor's message to a mailbox a device receives from, report that they are not supported yet.
 - Supervisors are library code built on monitors.
@@ -2601,6 +2601,8 @@ direct transfers over peer-to-peer PCIe, or AMD's Infinity Fabric links, need
 mailboxes in device memory that the other device maps, and are designed when
 that is added. Routing (below) chooses them where they exist, so programs do
 not change when they are added.
+Collectives across GPUs are an open proposal (`docs/INPROGRESS.md`,
+Collectives and direct GPU transfers).
 
 #### Handles, routing and places
 
