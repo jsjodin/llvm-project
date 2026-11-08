@@ -334,8 +334,8 @@ def Merk_ClosureOp : Merk_Op<"closure", [
     A new cell of the entry's code, the address of a static layout, and the
     captured values. `captures` has what the layout says of each captured
     value: its type, as a field's in a descriptor, with a type variable as
-    the place of its type_info among the captured values; "type_info" or
-    "typeclass_info"; or "unknown" if it cannot be copied. Without it, as on
+    the place of its type_info among the captured values; or "type_info" or
+    "typeclass_info". Without it, as on
     a device, which never copies a closure, the layout is null. The entry is a procedure taking the closure and then a
     word for each of the closure's inputs, and giving a word for each of its
     outputs; it reads the captured values with `merk.closure_word`.

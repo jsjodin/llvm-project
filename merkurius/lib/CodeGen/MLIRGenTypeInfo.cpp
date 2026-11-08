@@ -310,32 +310,47 @@ bool MerkGenerator::CanDescribe(const semantics::Type &type) {
   return represented->dummy || Comparable(represented->type, seen);
 }
 
+// The collector and the message copy walk a closure by what it captured, so
+// a capture that cannot be described is an error. A device does neither, and
+// keeps no layouts.
+mlir::Attribute MerkGenerator::UndescribedCapture(
+    const semantics::Type &type, parser::CharBlock at) {
+  if (target_.options().openMPIsTargetDevice) {
+    return builder_.getStringAttr("type_info");
+  }
+  NotYet(at, "a closure that captures a value of type " +
+          semantics::TypeToString(type) + ", which cannot be described");
+  return nullptr;
+}
+
 mlir::Attribute MerkGenerator::CaptureTypeAttr(const semantics::Type &type,
     const CapturePlaces &places, parser::CharBlock at) {
-  mlir::Attribute unknown{builder_.getStringAttr("unknown")};
   if (type.kind == semantics::TypeKind::Variable ||
       type.kind == semantics::TypeKind::Existential) {
     // Polymorphism analysis numbers the types that goals gave from
     // kExistentialVar. One an assignment made the same as another is not
-    // followed here, and is unknown.
+    // followed here.
     auto it{places.find(type.kind == semantics::TypeKind::Existential
             ? semantics::kExistentialVar + type.var
             : type.var)};
     if (it == places.end()) {
-      return unknown;
+      return UndescribedCapture(type, at);
     }
     return builder_.getDenseI64ArrayAttr(
         {it->second.first, it->second.second});
   }
-  if (!CanDescribe(type) || !EnsureDescriptor(type, at)) {
-    return failed_ ? nullptr : unknown;
+  if (!CanDescribe(type)) {
+    return UndescribedCapture(type, at);
+  }
+  if (!EnsureDescriptor(type, at)) {
+    return failed_ ? nullptr : UndescribedCapture(type, at);
   }
   llvm::SmallVector<mlir::Attribute> parts{
       builder_.getStringAttr(*TypeConstructorName(type))};
   for (const semantics::Type *argument : TypeParts(type)) {
     mlir::Attribute attribute{CaptureTypeAttr(*argument, places, at)};
-    if (!attribute || attribute == unknown) {
-      return attribute;
+    if (!attribute) {
+      return nullptr;
     }
     parts.push_back(attribute);
   }

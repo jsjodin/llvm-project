@@ -215,10 +215,6 @@ Word CopyClosure(Word value, Fragment &fragment) {
   Environment environment{nullptr, nullptr, captured};
   for (Word i{0}; i < layout->count; ++i) {
     Word capture{layout->captures[i]};
-    if (capture == kCaptureUnknown) {
-      Fail("cannot copy a closure that captured a value of a type with no "
-           "description", "");
-    }
     if (capture == kCaptureTypeInfo) {
       copy[2 + i] = CopyTypeInfo(captured[i], fragment);
     } else if (capture == kCaptureTypeclassInfo) {
