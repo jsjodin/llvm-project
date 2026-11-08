@@ -288,6 +288,7 @@ private:
   void LowerStringEqual(merk::StringEqualOp);
   void LowerForeignCall(merk::ForeignCallOp);
   void LowerEntry(merk::EntryOp);
+  void LowerConstructors();
   mlir::Value CallRuntime(llvm::StringRef name, mlir::Type result,
       mlir::ValueRange arguments, mlir::Location);
   mlir::Value InitialElement(
@@ -2593,6 +2594,40 @@ void Lowerer::LowerEntry(merk::EntryOp entry) {
   rewriter_.eraseOp(entry);
 }
 
+// Each merk.constructor's procedure is called by a C function of its own,
+// as the entry's is, which llvm.mlir.global_ctors lists.
+void Lowerer::LowerConstructors() {
+  mlir::MLIRContext *context{module_.getContext()};
+  llvm::SmallVector<mlir::Attribute> ctors, priorities, data;
+  for (auto constructor :
+      llvm::make_early_inc_range(module_.getOps<merk::ConstructorOp>())) {
+    mlir::Location loc{constructor.getLoc()};
+    rewriter_.setInsertionPoint(constructor);
+    std::string name{(constructor.getProc() + ".c").str()};
+    auto func{mlir::LLVM::LLVMFuncOp::create(rewriter_, loc, name,
+        mlir::LLVM::LLVMFunctionType::get(
+            mlir::LLVM::LLVMVoidType::get(context), {}),
+        mlir::LLVM::Linkage::Internal)};
+    mlir::Block *block{func.addEntryBlock(rewriter_)};
+    rewriter_.setInsertionPointToStart(block);
+    auto call{mlir::LLVM::CallOp::create(rewriter_, loc,
+        funcs_.lookup(constructor.getProc()), mlir::ValueRange{})};
+    call.setCConv(cconv_);
+    mlir::LLVM::ReturnOp::create(rewriter_, loc, mlir::ValueRange{});
+    ctors.push_back(mlir::FlatSymbolRefAttr::get(context, name));
+    priorities.push_back(rewriter_.getI32IntegerAttr(65535));
+    data.push_back(mlir::LLVM::ZeroAttr::get(context));
+    rewriter_.eraseOp(constructor);
+  }
+  if (ctors.empty()) {
+    return;
+  }
+  rewriter_.setInsertionPointToEnd(module_.getBody());
+  mlir::LLVM::GlobalCtorsOp::create(rewriter_, module_.getLoc(),
+      rewriter_.getArrayAttr(ctors), rewriter_.getArrayAttr(priorities),
+      rewriter_.getArrayAttr(data));
+}
+
 mlir::LLVM::GlobalOp Lowerer::HeapGlobal() {
   if (!heap_) {
     mlir::OpBuilder::InsertionGuard guard{rewriter_};
@@ -2895,6 +2930,7 @@ llvm::LogicalResult Lowerer::Lower() {
   for (auto entry : llvm::make_early_inc_range(module_.getOps<merk::EntryOp>())) {
     LowerEntry(entry);
   }
+  LowerConstructors();
   // In a device compile, omp-function-filter replaces a value that a call
   // of a host procedure made, outside the target regions, by ub.poison of
   // its type. It takes the type it lowers to, and stays ub.poison: as the

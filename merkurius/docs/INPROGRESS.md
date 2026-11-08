@@ -842,8 +842,8 @@ Neither uses the C++ standard library; `rpc.h` needs none.
      the procedure is given the `type_info` as an argument, or the device
      sends its own `type_info`, the address of the descriptor in the device
      image, and the host maps it to its own descriptor through the offload
-     entries, as libomptarget maps a declare target global. To be decided
-     at step 4.
+     entries, as libomptarget maps a declare target global. Decided at
+     step 4: neither, but a key for each message type.
 3. **Receive on the device.** Polling with `s_sleep` between polls, and a
    timeout by the device's clock. Test: `main` sends before the region, the
    region receives, sums and sends the sum back; a timeout that passes; the
@@ -866,7 +866,25 @@ Neither uses the C++ standard library; `rpc.h` needs none.
    - **A poll is a round trip,** as a send is, and the server thread serves
      polls one at a time: step 7's queue in device memory removes them.
 4. **The first slice:** node 1's region and node 2's `main`, over TCP, with
-   `Inputs/two-nodes.py`, exchanging ints in a loop.
+   `Inputs/two-nodes.py`, exchanging ints in a loop. Done (design document,
+   "Send and receive in a target region", As implemented), with these
+   findings:
+   - **Sends in called procedures, by key.** The user chose (2026-11-07) a
+     key for each message type, a hash of its name that code generation
+     computes, which the host's compile registers with its `type_info` at
+     start-up, over the device's `type_info` address mapped back by
+     libomptarget, and over the `type_info` as an argument. Polymorphic
+     sends on the device are not supported yet.
+   - **Constructors were in `.ctors`.** The registration is the first C
+     constructor that merkc makes, and its target machine put it in
+     `.ctors`, which today's dynamic loaders do not run; it now uses
+     `.init_array`, as Clang does by default.
+   - **MLIR's `omp-host-op-filter` broke regions in branches.** It kept the
+     arguments of every block of the host function; fixed in this tree, a
+     candidate for upstream.
+   - **The callback writes to TCP.** A send to another node's mailbox is
+     written to the connection on the plugin's server thread, which TCP's
+     flow control can stall; step 5 shows whether it matters.
 5. **The first benchmark,** ping-pong latency between the GPU and node 2 over
    loopback, beside the same between node 1's `main` and node 2, which shows
    what the GPU's hop costs.

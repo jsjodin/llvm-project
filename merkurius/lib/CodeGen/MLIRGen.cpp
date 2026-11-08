@@ -1402,6 +1402,7 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
     code += foreignCode_;
     module_->setAttr(kForeignCodeAttrName, builder_.getStringAttr(code));
   }
+  RegisterMessageTypes();
   // The program's entry: the main module's main(di, uo).
   for (const ProcedureBody &body : determinism_.bodies()) {
     const semantics::Symbol &symbol{*body.procedure->symbol};

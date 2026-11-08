@@ -39,18 +39,19 @@ extern "C" void *merk_device_alloc(uint64_t bytes) { return malloc(bytes); }
 
 // Sends a one-word message to the mailbox whose handle is the cell of five
 // words at `handle`. The host queues it, or sends it on to another node,
-// encoding it by `typeInfo`, which is the host's. It returns once the host
+// encoding it by the type_info that a module registered under `key`, a
+// hash of the message type's name. It returns once the host
 // has, as a send on the host does: a send alone returns when the buffer is
 // handed over, so a region could end before its messages were queued, and
 // the next send could take another port, which the server may serve first.
 extern "C" void merk_device_send(
-    const uint64_t *handle, uint64_t typeInfo, uint64_t message) {
+    const uint64_t *handle, uint64_t key, uint64_t message) {
   rpc::Client::Port port{__llvm_rpc_client.open<rpcSend>()};
   port.send([&](rpc::Buffer *buffer, uint32_t) {
     for (int i{0}; i < 5; ++i) {
       buffer->data[i] = handle[i];
     }
-    buffer->data[5] = typeInfo;
+    buffer->data[5] = key;
     buffer->data[6] = message;
   });
   port.recv([](rpc::Buffer *, uint32_t) {});

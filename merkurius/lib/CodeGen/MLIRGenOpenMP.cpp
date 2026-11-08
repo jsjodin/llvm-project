@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "MLIRGenImpl.h"
+#include "llvm/Support/xxhash.h"
 
 namespace merkurius::codegen::mlirgen {
 
@@ -120,40 +121,121 @@ bool MerkGenerator::WordMessage(mlir::Type type) {
   return false;
 }
 
-bool MerkGenerator::SendInTarget(const Body &goal, mlir::omp::TargetOp target,
-    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
+// Whether a type has no type variables, so that its type_info is known at
+// compile time.
+static bool Ground(const semantics::Type &type) {
+  if (type.kind == semantics::TypeKind::Variable ||
+      type.kind == semantics::TypeKind::Existential) {
+    return false;
+  }
+  if (type.result && !Ground(*type.result)) {
+    return false;
+  }
+  return llvm::all_of(type.arguments,
+      [](const semantics::Type *argument) { return Ground(*argument); });
+}
+
+std::optional<std::uint64_t> MerkGenerator::MessageKey(
+    const semantics::Type &type, mlir::Type represented) {
+  if (!Ground(type) || !WordMessage(represented)) {
+    return std::nullopt;
+  }
+  std::uint64_t key{llvm::xxh3_64bits(semantics::TypeToString(type))};
+  messageTypes_.try_emplace(key, &type);
+  return key;
+}
+
+// process.send in a target region, or in any procedure of the device's
+// compile, all of which run on the device. It is a call of
+// merk_device_send with the handle's cell, the message type's key and the
+// message as a word. The key is a hash of the type's name, which the
+// host's compile registers with the host's type_info at start-up
+// (RegisterMessageTypes), since the host encodes the message by it if the
+// mailbox is another node's; so a procedure that a region calls sends as
+// the region does (docs/INPROGRESS.md, The device's side of the first
+// slice, step 4). Outside a region, a send that the device does not have
+// is left to the call of process.send (false), as ReceiveInTarget leaves a
+// receive.
+bool MerkGenerator::SendInTarget(const Body &goal,
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body,
+    bool inRegion) {
   parser::CharBlock at{Where(goal.tokens)};
   mlir::Location loc{Location(goal.tokens)};
   const semantics::Type *type{body.vars[arguments[1]].type};
   mlir::Value mailbox{ValueOf(arguments[0])};
   mlir::Value message{ValueOf(arguments[1])};
-  if (!mailbox || !message || !WordMessage(message.getType())) {
+  if (!mailbox || !message) {
+    failed_ = true;
+    return true;
+  }
+  std::optional<std::uint64_t> key{MessageKey(*type, message.getType())};
+  if (!key) {
+    if (!inRegion) {
+      return false;
+    }
     NotYet(at,
         "sending messages of type " + semantics::TypeToString(*type) +
             " in target regions");
     return true;
   }
-  // One for each type in a region, which is one more of its values.
-  mlir::Value &typeInfo{
-      regionTypeInfos_[{target, semantics::TypeToString(*type)}]};
-  if (!typeInfo) {
-    mlir::OpBuilder::InsertionGuard guard{builder_};
-    builder_.setInsertionPoint(target);
-    mlir::Value info{TypeInfoOfType(type, loc, at)};
-    if (!info) {
-      failed_ = true;
-      return true;
-    }
-    typeInfo = mlir::UnrealizedConversionCastOp::create(builder_, loc,
-        mlir::LLVM::LLVMPointerType::get(&context_), info)
-                   .getResult(0);
-  }
   mlir::Value word{merk::ToWordOp::create(
       builder_, loc, merk::WordType::get(&context_), message)};
   merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
-      "merk_device_send", mlir::ValueRange{mailbox, typeInfo, word},
+      "merk_device_send",
+      mlir::ValueRange{mailbox,
+          IntegerConstant(builder_.getI64Type(),
+              static_cast<std::int64_t>(*key), loc),
+          word},
       /*can_fail=*/false);
   return true;
+}
+
+// The host's compile of a module with target regions registers the key of
+// each message type that its device code may send with the type's
+// type_info, in a procedure that runs at start-up: every one-word,
+// ground message type of the module's sends, since the host's compile does
+// not know which procedures run on the device. The runtime checks that no
+// two types have the same key.
+void MerkGenerator::RegisterMessageTypes() {
+  if (messageTypes_.empty() || target_.options().openMPIsTargetDevice) {
+    return;
+  }
+  bool regions{false};
+  module_.walk([&](mlir::omp::TargetOp) { regions = true; });
+  if (!regions) {
+    return;
+  }
+  mlir::Location loc{builder_.getUnknownLoc()};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToEnd(module_.getBody());
+  std::string name{moduleName_.str() + ".merk_register_message_types"};
+  auto proc{merk::ProcOp::create(builder_, loc, name,
+      builder_.getFunctionType({}, {}), merk::Determinism::Det)};
+  proc.setPrivate();
+  builder_.setInsertionPointToStart(proc.addEntryBlock());
+  // In the order of the keys, so that the module is the same each time.
+  llvm::SmallVector<std::pair<std::uint64_t, const semantics::Type *>> types{
+      messageTypes_.begin(), messageTypes_.end()};
+  llvm::sort(types, llvm::less_first{});
+  for (auto [key, type] : types) {
+    mlir::Value info{TypeInfoOfType(type, loc, {})};
+    if (!info) {
+      failed_ = true;
+      return;
+    }
+    merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+        "merk_register_message_type",
+        mlir::ValueRange{
+            IntegerConstant(builder_.getI64Type(),
+                static_cast<std::int64_t>(key), loc),
+            mlir::UnrealizedConversionCastOp::create(builder_, loc,
+                mlir::LLVM::LLVMPointerType::get(&context_), info)
+                .getResult(0)},
+        /*can_fail=*/false);
+  }
+  merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+  builder_.setInsertionPointToEnd(module_.getBody());
+  merk::ConstructorOp::create(builder_, loc, name);
 }
 
 // A process.timeout's milliseconds, -1 for infinity, as library/process.m's
@@ -1507,14 +1589,7 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
     }
     std::optional<BodyVar> var{VarWithValue(before, goal.nonlocals, input)};
     llvm::StringRef name{var ? llvm::StringRef{body.vars[*var].name} : ""};
-    // A type_info that a send gives back to the host is named after its
-    // type constructor.
-    if (auto cast{input.getDefiningOp<mlir::UnrealizedConversionCastOp>()};
-        !var && cast && cast->getNumOperands() == 1) {
-      if (auto info{cast->getOperand(0).getDefiningOp<merk::TypeInfoOp>()}) {
-        name = info.getConstructor();
-      }
-    }
+
     if (mlir::isa<merk::ArrayType>(input.getType())) {
       maps.push_back(MapArray(input,
           mappedBack.contains(input)

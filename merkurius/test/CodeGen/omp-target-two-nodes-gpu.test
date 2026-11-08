@@ -1,0 +1,8 @@
+The first slice on the machine's GPU: the program of omp-target-two-nodes.m,
+compiled by the driver for it, with node 1's target region running there
+and exchanging integers with node 2's main, another process, over TCP.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-two-nodes.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %python %S/Inputs/two-nodes.py %t first-slice \
+RUN:   | FileCheck %S/omp-target-two-nodes.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

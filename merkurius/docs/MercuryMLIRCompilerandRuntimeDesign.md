@@ -2757,12 +2757,27 @@ limits until they are lifted. Handles are flat values, so they are mapped into t
 - **As implemented** (2026-11-07, docs/INPROGRESS.md, The device's side
   of the first slice): a target region sends one-word messages, integers,
   floats, characters and constants of a type of constants only, with
-  `process.send` in the region itself. A handle crosses as a cell of five
-  words (Lowering, "OpenMP target regions"). The send is a call of
-  `merk_device_send` with the handle's cell, the message type's
-  `type_info` and the message as a word; the `type_info` is made before
-  the region, one for each type, so that the host's crosses by copy, named
-  after its type constructor. On a GPU, `merk_device_send` is the device's
+  `process.send` in the region or in a procedure it calls: in the device's
+  compile every procedure runs on the device. A handle crosses as a cell
+  of five words (Lowering, "OpenMP target regions"). The send is a call of
+  `merk_device_send` with the handle's cell, the message type's key and
+  the message as a word. The key is a 64-bit hash (xxh3) of the type's
+  name, computed by code generation, since the host encodes the message by
+  the host's `type_info` if the mailbox is another node's, and a procedure
+  that a region calls has no host value to take it from: the host's
+  compile of a module with target regions registers each key of its
+  sends' ground one-word message types with the type's `type_info`, in a
+  procedure that runs at start-up (`merk.constructor`, a C constructor in
+  `.init_array`), and the callback looks the key up; two types with the
+  same key stop the program at registration. Rejected: the device sending
+  its own `type_info`'s address, which the host maps back through
+  libomptarget's table of declare target globals, which has no reverse
+  lookup, so the host needs a registry anyway; and giving procedures that
+  regions call the `type_info` as an argument, which changes their
+  signatures in both compiles and every caller's. Outside a region, a send
+  that the device does not have, such as a polymorphic one, stays the call
+  of `process.send`, an error only if a region calls its procedure. On a
+  GPU, `merk_device_send` is the device's
   runtime's (`runtime/device/device.cpp`), which sends the opcode
   `'m' << 24 | 1` (`runtime/rpc-opcodes.h`) over the offload plugin's RPC
   server; `merkrt` registers a callback for our opcodes with
@@ -2774,9 +2789,18 @@ limits until they are lifted. Handles are flat values, so they are mapped into t
   queued: without the answer, a region ended before the host had queued
   its messages, and a later send could take another port and be served
   first. On the host, `merk_device_send` is `merkrt`'s, which queues it
-  directly. A message of another type, and a send in a procedure the
-  region calls, are not supported yet. `CodeGen/omp-target-send.m`, with
-  its GPU run, `omp-target-send-errors.m` and `omp-target-send-call.m`.
+  directly. A message of another type is not supported yet.
+  `CodeGen/omp-target-send.m`, `omp-target-send-call.m`, each with its GPU
+  run, `omp-target-send-errors.m` and `omp-target-send-polymorphic.m`.
+
+  The first slice (`CodeGen/omp-target-two-nodes.m`, with its GPU run):
+  node 1's region exchanges integers with node 2's `main` over TCP, node 2
+  having been given node 1's mailbox by node 1's host. A send to another
+  node's mailbox is encoded and written to the connection by the callback,
+  on the plugin's server thread, which TCP's flow control can then stall
+  for every device of the process; a sender thread of our own, or a queue
+  that the connection's thread drains, would keep the server thread from
+  waiting, if the benchmark shows it matters.
 
   A region receives with `receive(Mailbox, any, Timeout, Result, !IO)`,
   one-word messages, in the region or in a procedure it calls: in the
