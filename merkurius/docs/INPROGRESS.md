@@ -807,9 +807,12 @@ ends the program. `spawn`, links and monitors do not exist.
    and limit (`runtime/process.h`). `merk_heap` holds the running process's
    heap, saved to its record when another runs. `main` is the first process.
    Nothing else changes. Done.
-2. **Stacks and switching.** Slots from one `mmap` with `MAP_NORESERVE`, size
-   classes with free lists, a switch of stack and callee-saved registers, and
-   the limit check on procedures on cycles.
+2. **Stacks and switching.** Slots with `MAP_NORESERVE`, size classes with free
+   lists, and a switch of stack and callee-saved registers, x86-64 only so far
+   (`runtime/stack.h`), are done. Each size class maps a growing run of slots
+   rather than one mapping for all, since a limit on the address space can
+   refuse a large one, and it then asks for less. Still to do: the limit check
+   on procedures on cycles.
 3. **`spawn` on one worker.** A process from a closure, with cooperative
    switching: `receive` suspends the process, and a send wakes it. Mailboxes
    belong to processes. A benchmark: ping-pong between processes, against

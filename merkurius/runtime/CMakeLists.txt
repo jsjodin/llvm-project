@@ -14,6 +14,7 @@ add_library(merkrt STATIC
   offload.cpp
   read.cpp
   sha256.cpp
+  stack.cpp
   string.cpp
   trace.cpp
   type-info.cpp
