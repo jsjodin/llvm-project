@@ -2385,7 +2385,7 @@ The region runs on the process's own stack, which never moves (Processes and sch
 
 **Target regions.** A `target` region can block for seconds, so it does not hold a worker: it runs on a thread of the blocking pool with the process suspended. Mapped arrays cannot move meanwhile, since only the process itself collects its heap.
 
-As implemented (2026-11-08, `runtime/process.cpp`): a process can change OS threads at any call, so at `merk_region_enter` it moves, on its own stack, to a thread of the pool, and the worker goes on with its queue; at `merk_region_exit` it goes back on a run queue. The pool's threads are created as needed and reused, so each is a long-lived libomp root. A program that has never spawned does not move, so a program of only OpenMP pays for none of this. A process in a parallel region does not move either, as libomp ties that to its thread.
+As implemented (2026-11-08, `runtime/process.cpp`): a process can change OS threads at any call, so at `merk_region_enter` it moves, on its own stack, to a thread of the pool, and the worker goes on with its queue; at `merk_region_exit` it goes back on a run queue. The pool's threads are created as needed and reused, so each is a long-lived libomp root. A program that has never spawned does not move, so a program of only OpenMP pays for none of this. The move costs about 7 µs a region (Measurements). A process in a parallel region does not move either, as libomp ties that to its thread.
 
 The program ends when `main` does, which can be while another process is in a region. `exit` would then tear down libomptarget under it. So once the program is ending, a region neither starts nor cleans up, and if one is running, standard output is flushed and the library's destructors do not run. A failure that ends the program goes the same way; the runtime's own fatal errors (`Fail`) do not yet.
 
@@ -3734,6 +3734,10 @@ A ping-pong round leaks 0.64 KB. Ping-pong between mailboxes, the median of 5, �
 The checks that only preemption needs, 2026-11-08, on 9a2c1eb88c40 and its change, `-O2`, 5 alternating runs, median seconds without and with them: nrev 18.25 and 18.50, naive Fibonacci 1.12 and 1.17, a tail-recursive loop of a billion iterations 3.42 and 3.42.
 
 `request`, 2026-11-08, on 8fd150e06965 and its change, `-O2`, one process asking one server 300,000 times, with a new monitor and two new mailboxes each time: 1.8 µs at 1 worker, 2.7 at 2, 3.7 at 8, 3.6 at 48. Single runs. It leaks about 1.1 KB a request, which the collector is to take care of.
+
+A target region on the blocking pool, 2026-11-08, on ae27a5dcd1f5 and its change, `-O2`, a loop of nearly empty regions, 7 alternating runs, median µs a region, in a program that has not spawned (no move) and one that has: on the GPU 27.0 and 34.4 with the default workers, 26.8 and 34.3 with one worker; falling back to the host 0.03 and 8.7, and 0.03 and 6.8 with one worker.
+
+Thread-local addresses read by an asm the backend cannot move, 2026-11-08, on ae27a5dcd1f5 and its change, `-O2`, alternating, median, before and after: nrev 18.80 and 18.65 s, naive Fibonacci 1.12 and 0.97 s, a tail-recursive loop 3.42 and 3.42 s; `work` with 48 processes 1155 and 968 ms on one worker, 151 and 121 on 8, 42 and 35 on 48; ping-pong 0.58 and 0.58 µs on one worker, 1.88 and 1.72 on 8; 16 pairs 0.73 and 0.59 µs on 48. Not hoisting the address may free a callee-saved register, which would explain the gain; that is not established.
 
 ## Target applications
 
