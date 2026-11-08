@@ -7,6 +7,15 @@
 //===----------------------------------------------------------------------===//
 
 #include "process.h"
+#include "stack.h"
+#include <cstdio>
+#include <cstdlib>
+#include <pthread.h>
+
+extern "C" {
+// Constant-initialized, as merk_heap is.
+thread_local char *merk_stack_limit{nullptr};
+}
 
 namespace merkurius::runtime {
 namespace {
@@ -20,13 +29,36 @@ Process *CurrentProcess() { return current; }
 void RunProcess(Process *next) {
   if (current) {
     current->heap = merk_heap;
+    current->stackLimit = merk_stack_limit;
   }
+  merk_stack_limit = next ? next->stackLimit : nullptr;
   merk_heap = next ? next->heap : MerkHeap{nullptr, nullptr};
   current = next;
 }
 
 } // namespace merkurius::runtime
 
+// The first process runs on the thread's own stack until there are
+// process stacks to run it on (docs/INPROGRESS.md, The scheduler, step 3).
 extern "C" void merk_process_start(void) {
-  merkurius::runtime::RunProcess(&merkurius::runtime::firstProcess);
+  using namespace merkurius::runtime;
+  pthread_attr_t attributes;
+  if (pthread_getattr_np(pthread_self(), &attributes) == 0) {
+    void *base{nullptr};
+    std::size_t bytes{0};
+    if (pthread_attr_getstack(&attributes, &base, &bytes) == 0 &&
+        bytes > 2 * kStackMargin) {
+      firstProcess.stackLimit = static_cast<char *>(base) + kStackMargin;
+    }
+    pthread_attr_destroy(&attributes);
+  }
+  RunProcess(&firstProcess);
+}
+
+// Temporary (chunk 2 step 6, docs/INPROGRESS.md): ends the program, until
+// an uncaught error ends only its process, which its monitors see.
+extern "C" void merk_stack_overflow(void) {
+  std::fflush(stdout);
+  std::fprintf(stderr, "Mercury runtime: stack overflow\n");
+  std::exit(1);
 }

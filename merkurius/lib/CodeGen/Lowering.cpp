@@ -33,6 +33,11 @@
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include <functional>
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/MDBuilder.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Linker/Linker.h"
 #include "llvm/Object/OffloadBinary.h"
@@ -3194,6 +3199,178 @@ bool EmbedOffloadObjects(llvm::Module &module,
         llvm::Align(llvm::object::OffloadBinary::getAlignment()));
   }
   return true;
+}
+
+namespace {
+// A procedure of the module, in the graph of calls between procedures.
+struct CallNode {
+  llvm::Function *function;
+  llvm::SmallVector<std::pair<unsigned, bool>> calls; // callee, is a tail call
+  bool tailCallsUnknown{false};
+  bool callsUnknown{false};
+  int index{-1};
+  int low{0};
+  int component{-1};
+  bool onStack{false};
+  bool escapes{false};
+};
+
+// Tarjan's algorithm, over tail calls and other calls alike.
+struct CallComponents {
+  llvm::SmallVector<CallNode> &nodes;
+  llvm::SmallVector<unsigned> stack{};
+  int next{0};
+  int count{0};
+
+  void Visit(unsigned n) {
+    nodes[n].index = nodes[n].low = next++;
+    nodes[n].onStack = true;
+    stack.push_back(n);
+    for (auto [callee, tail] : nodes[n].calls) {
+      if (nodes[callee].index < 0) {
+        Visit(callee);
+        nodes[n].low = std::min(nodes[n].low, nodes[callee].low);
+      } else if (nodes[callee].onStack) {
+        nodes[n].low = std::min(nodes[n].low, nodes[callee].index);
+      }
+    }
+    if (nodes[n].low == nodes[n].index) {
+      unsigned member;
+      do {
+        member = stack.pop_back_val();
+        nodes[member].onStack = false;
+        nodes[member].component = count;
+      } while (member != n);
+      ++count;
+    }
+  }
+};
+
+// A call in the C convention is of the runtime or of foreign code, whose
+// checks are their own, unless it can lead back to procedures unseen: a
+// function of the module, or one passed to the call, as an OpenMP region's
+// outlined function is passed to the call that forks.
+bool CLeadsBack(const llvm::CallBase &call) {
+  const llvm::Function *callee{call.getCalledFunction()};
+  if (callee && !callee->isDeclaration() &&
+      !callee->getName().starts_with("merk_foreign_")) {
+    return true;
+  }
+  return llvm::any_of(call.args(), [](const llvm::Use &argument) {
+    return llvm::isa<llvm::Function>(argument->stripPointerCasts());
+  });
+}
+
+void AddCalls(CallNode &node, const llvm::StringMap<unsigned> &numbers) {
+  for (llvm::Instruction &instruction : llvm::instructions(*node.function)) {
+    auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)};
+    if (!call || llvm::isa<llvm::IntrinsicInst>(call)) {
+      continue;
+    }
+    if (call->getCallingConv() != llvm::CallingConv::Tail) {
+      node.callsUnknown |= CLeadsBack(*call);
+      continue;
+    }
+    auto *direct{llvm::dyn_cast<llvm::CallInst>(call)};
+    bool tail{direct && direct->isMustTailCall()};
+    const llvm::Function *callee{call->getCalledFunction()};
+    auto known{callee ? numbers.find(callee->getName()) : numbers.end()};
+    if (known != numbers.end()) {
+      node.calls.emplace_back(known->second, tail);
+    } else if (tail) {
+      node.tailCallsUnknown = true;
+    } else {
+      node.callsUnknown = true;
+    }
+  }
+}
+
+// Every cycle that grows the stack has a call that is not a tail call, so
+// it is enough to check its caller: one whose callee is in its component,
+// or one whose callee may lead out of the module, where a cycle cannot be
+// seen.
+bool NeedsStackCheck(const CallNode &node, llvm::ArrayRef<CallNode> nodes) {
+  return node.callsUnknown || llvm::any_of(node.calls, [&](const auto &call) {
+    return !call.second && (nodes[call.first].escapes ||
+        nodes[call.first].component == node.component);
+  });
+}
+
+// After the entry block's allocas, which must stay there to be static.
+void AddStackCheck(llvm::Function &function, llvm::GlobalVariable &limit,
+    llvm::FunctionCallee overflow) {
+  llvm::LLVMContext &context{function.getContext()};
+  llvm::BasicBlock &entry{function.getEntryBlock()};
+  llvm::BasicBlock::iterator start{entry.begin()};
+  for (auto it{entry.begin()}; it != entry.end(); ++it) {
+    if (llvm::isa<llvm::AllocaInst>(*it)) {
+      start = std::next(it);
+    }
+  }
+  llvm::BasicBlock *rest{entry.splitBasicBlock(start, "stack.ok")};
+  entry.getTerminator()->eraseFromParent();
+  auto *failed{llvm::BasicBlock::Create(context, "stack.overflow", &function)};
+  llvm::IRBuilder<> builder{&entry};
+  llvm::Value *bound{builder.CreateAlignedLoad(builder.getPtrTy(),
+      builder.CreateThreadLocalAddress(&limit), llvm::Align(8))};
+  llvm::Value *below{builder.CreateICmpULT(builder.CreateStackSave(), bound)};
+  builder.CreateCondBr(below, failed, rest,
+      llvm::MDBuilder{context}.createBranchWeights(1, 2000));
+  builder.SetInsertPoint(failed);
+  builder.CreateCall(overflow);
+  builder.CreateUnreachable();
+}
+} // namespace
+
+void AddStackChecks(llvm::Module &module) {
+  llvm::SmallVector<CallNode> nodes;
+  llvm::StringMap<unsigned> numbers;
+  for (llvm::Function &function : module) {
+    if (!function.isDeclaration() &&
+        function.getCallingConv() == llvm::CallingConv::Tail) {
+      numbers[function.getName()] = nodes.size();
+      nodes.push_back(CallNode{&function});
+    }
+  }
+  if (nodes.empty()) {
+    return;
+  }
+  for (CallNode &node : nodes) {
+    AddCalls(node, numbers);
+    node.escapes = node.tailCallsUnknown;
+  }
+  // A procedure that tail calls one that may leave the module may too.
+  for (bool changed{true}; changed;) {
+    changed = false;
+    for (CallNode &node : nodes) {
+      if (!node.escapes && llvm::any_of(node.calls, [&](const auto &call) {
+            return call.second && nodes[call.first].escapes;
+          })) {
+        node.escapes = changed = true;
+      }
+    }
+  }
+  CallComponents components{nodes};
+  for (unsigned n = 0; n < nodes.size(); ++n) {
+    if (nodes[n].index < 0) {
+      components.Visit(n);
+    }
+  }
+  llvm::PointerType *pointer{llvm::PointerType::getUnqual(module.getContext())};
+  auto *limit{llvm::cast<llvm::GlobalVariable>(
+      module.getOrInsertGlobal("merk_stack_limit", pointer))};
+  limit->setThreadLocalMode(llvm::GlobalValue::GeneralDynamicTLSModel);
+  limit->setAlignment(llvm::Align(8));
+  llvm::FunctionCallee overflow{module.getOrInsertFunction("merk_stack_overflow",
+      llvm::FunctionType::get(llvm::Type::getVoidTy(module.getContext()), false))};
+  for (const CallNode &node : nodes) {
+    if (NeedsStackCheck(node, nodes)) {
+      AddStackCheck(*node.function, *limit, overflow);
+    }
+  }
+  if (limit->use_empty()) {
+    limit->eraseFromParent();
+  }
 }
 
 void OptimizeLLVMIR(llvm::Module &module, const TargetInfo &target) {

@@ -811,8 +811,8 @@ ends the program. `spawn`, links and monitors do not exist.
    lists, and a switch of stack and callee-saved registers, x86-64 only so far
    (`runtime/stack.h`), are done. Each size class maps a growing run of slots
    rather than one mapping for all, since a limit on the address space can
-   refuse a large one, and it then asks for less. Still to do: the limit check
-   on procedures on cycles.
+   refuse a large one, and it then asks for less. The limit check is done too,
+   added after LLVM's optimizer. Done.
 3. **`spawn` on one worker.** A process from a closure, with cooperative
    switching: `receive` suspends the process, and a send wakes it. Mailboxes
    belong to processes. A benchmark: ping-pong between processes, against

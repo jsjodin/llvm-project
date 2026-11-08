@@ -2272,13 +2272,16 @@ The runtime gives each process its own stack, heap and mailboxes, schedules proc
 ### Processes and scheduler
 
 - **Process record:** identifier, stack, heap, mailboxes, links and monitors, reduction budget, scheduling state.
-- **Stacks (decided 2026-11-04):** each process has a native stack of a fixed size that never moves, a slot of one large `mmap` with `MAP_NORESERVE`, committed by the kernel a page at a time as it is touched. Its size is given when the process is spawned (Language extensions, "Processes and mailboxes"), with a default of 64 MB, and is rounded up to a size class, each with a free list, so that spawning a process reuses a slot without a system call. Suspension can happen anywhere: in `receive`, at a preemption check, or at a GC. Since a stack never moves, C frames, `alloca`s and `sret` slots on it are safe, and foreign code and libomp run on it directly. A slot that recursed deeply keeps its pages until they are released with `MADV_DONTNEED`.
+- **Stacks (decided 2026-11-04):** each process has a native stack of a fixed size that never moves, a slot of an `mmap` with `MAP_NORESERVE`, a growing run of slots for each size, committed by the kernel a page at a time as it is touched. Its size is given when the process is spawned (Language extensions, "Processes and mailboxes"), with a default of 64 MB, and is rounded up to a size class, each with a free list, so that spawning a process reuses a slot without a system call. Suspension can happen anywhere: in `receive`, at a preemption check, or at a GC. Since a stack never moves, C frames, `alloca`s and `sret` slots on it are safe, and foreign code and libomp run on it directly. A slot that recursed deeply keeps its pages until they are released with `MADV_DONTNEED`.
 - **Stack overflow:** a procedure on a cycle of non-tail calls compares the stack pointer with the process's limit on entry, and overflow ends that process with an error, which its monitors see. A tail call does not grow the stack, so loops and tail recursion have no check. Separate compilation cannot see a cycle through another module or through a closure, so a procedure that makes a non-tail call out of its module or to an unknown procedure is checked as well; a leaf, or a procedure that calls only unchecked procedures of its module, is not. The runtime's walkers (`io.write`, generic `unify` and `compare`, the message copy) check the same limit, since they recurse on a term's depth. The limit lies a margin above the bottom of the slot, which costs only address space until touched, for the frames that are not checked and foreign code. Foreign code that goes past the margin is not caught.
 
-Measured on x86-64 in a C model, 2026-11-04: a stack touched once costs 8.25 KB in a 64 MB slot (a page and 4.25 KB of page tables, which stacks this far apart do not share), 6 KB at 1 MB and 4.1 KB at 64 KB, and about 2 µs for the first touch. A million slots of 64 MB took 61 TB of address space, in one `mmap`. Switching stacks and callee-saved registers took about 6 ns each way. Erlang's process is about 2.7 KB, so we expect about 10 KB with a heap and a record, which is three to four times as much, in exchange for stacks that need no copying. The cost of the overflow check is still to be measured at the nrev gate.
+Measured on x86-64 in a C model, 2026-11-04: a stack touched once costs 8.25 KB in a 64 MB slot (a page and 4.25 KB of page tables, which stacks this far apart do not share), 6 KB at 1 MB and 4.1 KB at 64 KB, and about 2 µs for the first touch. A million slots of 64 MB took 61 TB of address space, in one `mmap`. Switching stacks and callee-saved registers took about 6 ns each way. Erlang's process is about 2.7 KB, so we expect about 10 KB with a heap and a record, which is three to four times as much, in exchange for stacks that need no copying.
+
+The check is added to LLVM IR after the optimizer (`AddStackChecks`), since that is where the calls that remain can be seen: a recursion LLVM turned into a loop needs none, and a procedure inlined into its caller cannot take its check away. A cycle may go through tail calls, so the components of the call graph count them, but only a caller that makes a call that is not a tail call in its component is checked, as every cycle that grows the stack has one. A procedure that may leave the module through tail calls counts as unknown to its callers. A thread that runs no process has a null limit, and passes. The first process has the limit of its thread's stack until it has a process stack.
 
 Rejected:
 
+- **The check at a procedure's start in the MLIR lowering,** before the optimizer, as first built. It stopped LLVM from turning `fib(N - 2)` into a loop, and naive Fibonacci took 2.3 times as long, against 1.37 afterwards.
 - **Growing a small stack by copying**, as first planned here and as Go does. Relocating a stack needs every pointer into it, and LLVM's stack maps list only GC roots, not the addresses of `alloca`s, `sret` slots and saved frame pointers, and foreign frames have no maps at all. Go can do it because it owns its compiler.
 - **Guard pages** as the way to find an overflow. They cost nothing at run time, but each splits the mapping, and at Linux's default `vm.max_map_count` of 65530 `mprotect` failed at 32,754 processes. Raising the limit needs administrator rights, and users must be able to run these programs without them.
 - **Segmented stacks** (LLVM's `split-stack`), which grow without copying and start smaller. Untried with `musttail`, and a hot call on a segment boundary is slow, the reason Go and Rust left them.
@@ -3644,6 +3647,13 @@ to 97,000:
 | Add | 308,900 | 78,069 |
 | Triad | 324,071 | 78,711 |
 | Dot | 413,621 | 515,025 |
+
+The stack's overflow check, 2026-11-08, on 6d58c6434fe0 and its change, -O2, the same compiler with the check on and off, 7 alternating runs, median seconds. nrev is 30000 rounds of a 400-element list; Fibonacci is `fib(42)`, the worst case, a small procedure that is nearly all calls.
+
+| Program | No check | Check |
+| --- | ---: | ---: |
+| nrev | 18.19 | 18.20 |
+| Fibonacci | 0.82 | 1.12 |
 
 ## Target applications
 

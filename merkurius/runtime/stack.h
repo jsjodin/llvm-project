@@ -23,6 +23,9 @@
 namespace merkurius::runtime {
 
 constexpr std::size_t kDefaultStackBytes{std::size_t{64} << 20};
+// How far above the base of a stack the overflow check stops, for frames
+// that are not checked and foreign code.
+constexpr std::size_t kStackMargin{32 * 1024};
 
 struct Stack {
   char *base; // its lowest address

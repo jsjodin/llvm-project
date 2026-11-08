@@ -82,7 +82,7 @@ module @ag attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 // are read from their slots after it.
 // LLVM-LABEL: define tailcc { i64, i64 } @ag.sum_3_0(i64 %0)
 // LLVM-NEXT: %[[ENV:.*]] = alloca { i64, i64, i64 }
-// LLVM-NEXT: %[[K:.*]] = getelementptr { i64, i64, i64 }, ptr %[[ENV]], i32 0, i32 0
+// LLVM: %[[K:.*]] = getelementptr { i64, i64, i64 }, ptr %[[ENV]], i32 0, i32 0
 // LLVM-NEXT: store i64 %0, ptr %[[K]]
 // LLVM-NEXT: %[[S0:.*]] = getelementptr { i64, i64, i64 }, ptr %[[ENV]], i32 0, i32 1
 // LLVM-NEXT: store i64 0, ptr %[[S0]]
