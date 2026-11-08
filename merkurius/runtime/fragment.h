@@ -31,19 +31,44 @@ inline void *Malloc(std::size_t bytes) {
   return block;
 }
 
+// The start of a chunk of cells from malloc, of a fragment or a process's heap.
+struct ChunkLink {
+  ChunkLink *next;
+};
+
+inline void FreeChunks(ChunkLink *chunks) {
+  while (chunks) {
+    ChunkLink *next{chunks->next};
+    std::free(chunks);
+    chunks = next;
+  }
+}
+
 // Cells bump-allocated in chunks from malloc, which align them to a word at
 // least, as the primary tags need.
 //
-// Temporary (chunk 2, docs/INPROGRESS.md): a fragment's chunks are never
-// freed; chunk 3's collector merges them into the receiver's heap.
+// A fragment's chunks are linked, and whoever takes them frees them: a process
+// when it ends, once it has read the message, or a mailbox that closes with
+// the message unread. Temporary (chunk 3, docs/INPROGRESS.md): a process keeps
+// them until it ends, until the collector merges them into its heap.
 class Fragment {
 public:
+  // Its chunks, which it no longer owns.
+  ChunkLink *Take() {
+    ChunkLink *chunks{chunks_};
+    chunks_ = nullptr;
+    return chunks;
+  }
+
   void *Allocate(std::size_t bytes) {
     bytes = (bytes + 7) & ~std::size_t{7};
     if (static_cast<std::size_t>(limit_ - next_) < bytes) {
       std::size_t size{bytes > chunkBytes_ / 4 ? bytes : chunkBytes_};
       chunkBytes_ = chunkBytes_ < kMostChunkBytes ? 2 * chunkBytes_ : chunkBytes_;
-      next_ = static_cast<char *>(Malloc(size));
+      auto *chunk{static_cast<ChunkLink *>(Malloc(sizeof(ChunkLink) + size))};
+      chunk->next = chunks_;
+      chunks_ = chunk;
+      next_ = reinterpret_cast<char *>(chunk + 1);
       limit_ = next_ + size;
     }
     void *cell{next_};
@@ -60,6 +85,7 @@ private:
   std::size_t chunkBytes_{kFirstChunkBytes};
   char *next_{nullptr};
   char *limit_{nullptr};
+  ChunkLink *chunks_{nullptr};
 };
 
 } // namespace merkurius::runtime

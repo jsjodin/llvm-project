@@ -2416,7 +2416,7 @@ ends the program. `spawn`, links and monitors do not exist.
 - **Roots:** the process stack (from stack maps), message fragments received but not yet merged, and the process record.
 - **Write barrier:** destructive updates (array `set`, mutables, `store`) record old-to-young pointers in a remembered set. Immutable terms need no barrier.
 - **Large objects** (big arrays, long strings) live in a separate space and are never copied by minor collections.
-- **Process exit** frees the whole heap at once.
+- **Process exit** frees the whole heap at once. Built 2026-11-08: a process has one list of chunks, its heap's and those of the messages it has read. A message's chunks become its reader's at the first read, even if the message stays in the mailbox, as a selective receive looks at messages without taking them. Rejected: freeing a message's chunks when it is removed, since the value it was read for may still be in use.
 - **Static data** (ground terms, type descriptors, string literals) is outside every heap and never traced.
 - **So far** (2026-11-04): a heap for each thread rather than each process, in chunks that are never freed, and large blocks of their own (Lowering, "What is lowered so far", The heap). Where a process's heap pointer and limit live is decision D2 of `INPROGRESS.md`, made with chunk 2's context switch; until then they are thread-local, which keeps the threads of OpenMP regions apart, and only `mrt.alloc`'s lowering and `runtime/heap.h` read them.
 

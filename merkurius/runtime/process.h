@@ -50,6 +50,7 @@ struct ArrivalCounts {
 };
 
 struct Monitor;
+struct ChunkLink;
 
 struct Process {
   // The next free byte of its heap and that chunk's end, while it does not
@@ -62,6 +63,9 @@ struct Process {
   // The size of the next chunk of its heap, which grows from small so that a
   // process costs little, or 0 for the heap's usual size.
   std::size_t chunkBytes{0};
+  // The chunks of its heap and of the messages it has read, which go when it
+  // ends. Only the running process changes them, once it is running.
+  ChunkLink *chunks{nullptr};
   Stack *stack{nullptr};
   Context context{nullptr};
   // What it runs: a closure of pred(mailbox(M), io, io), and the mailbox.
