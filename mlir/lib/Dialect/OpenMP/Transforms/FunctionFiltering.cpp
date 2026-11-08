@@ -15,6 +15,7 @@
 
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/OpenMP/OpenMPDialect.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 
@@ -77,13 +78,19 @@ class FunctionFilteringPass
 
         // If the callOp has users then replace them with poison values before
         // removing it. These should get removed before translation to LLVM IR
-        // by the host op filtering pass.
+        // by the host op filtering pass. A result of a type that is not the
+        // LLVM dialect's, as before lowering to it, gets ub.poison, which
+        // takes any type.
         if (!callOp->use_empty()) {
           SmallVector<Value> poisonResults;
           for (Value res : callOp->getResults()) {
             opBuilder.setInsertionPoint(callOp);
-            poisonResults.emplace_back(
-                LLVM::PoisonOp::create(opBuilder, res.getLoc(), res.getType()));
+            if (LLVM::isCompatibleType(res.getType()))
+              poisonResults.emplace_back(LLVM::PoisonOp::create(
+                  opBuilder, res.getLoc(), res.getType()));
+            else
+              poisonResults.emplace_back(
+                  ub::PoisonOp::create(opBuilder, res.getLoc(), res.getType()));
           }
           callOp->replaceAllUsesWith(poisonResults);
         }
