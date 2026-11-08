@@ -853,9 +853,9 @@ ends the program. `spawn`, links and monitors do not exist.
    program. `throw` and `catch` are not needed first (decided 2026-11-08): a
    process has nothing to unwind, and until they exist the exit reason is the
    exception's text, which becomes a `univ` with them; `down_reason` is abstract
-   so that programs do not change. Next: monitors, with `down` at once for a
-   process already dead, which replaces the waits marked Temporary in
-   `process-failure.m` and `process-spawn.m`; then links; then `request`.
+   so that programs do not change. Monitors are done (design document, Exceptions,
+   links and monitors), on one node. Next: links; then `request`. Open: a
+   monitor across nodes or places reports that it is not supported yet.
 7. **What blocks.** Target regions on a blocking pool with the process
    suspended, the hand-off for parallel regions, and blocking I/O. Node
    connections stay OS threads, which wake processes.

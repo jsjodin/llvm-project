@@ -87,10 +87,11 @@ main(!IO) :-
         spawn(thief(Mine), _ : mailbox(int), !IO),
         receive(Reply, any, infinity, _ : maybe(int), !IO)
     else if W = 2 then
-        spawn_with_stack(100000, deep_body(100000000, Reply), _, !IO),
-        % An overflow ends only its process. Temporary (chunk 2 step 6,
-        % docs/INPROGRESS.md): a wait, until a monitor says it has ended.
-        receive(Reply, any, after(1000), _ : maybe(int), !IO)
+        spawn_with_stack(100000, deep_body(100000000, Reply), Deep, !IO),
+        % An overflow ends only its process.
+        new_mailbox(Downs : mailbox(down_info), !IO),
+        monitor(Deep, Downs, (func(D) = D), _, !IO),
+        receive(Downs, any, infinity, _ : maybe(down_info), !IO)
     else
         run(Reply, !IO)
     ).

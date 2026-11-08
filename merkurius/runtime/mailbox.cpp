@@ -36,6 +36,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <atomic>
 #include "encode.h"
 #include "device-ring.h"
 #include "fragment.h"
@@ -203,9 +204,19 @@ Word CopyTyped(Word value, const Type &type, Fragment &fragment) {
   Fail("cannot send a value of type ", type.ctor->name);
 }
 
+// What a process that ended left for its monitor's owner, whose function
+// makes the message from it on the receiver's side (Monitors, below).
+struct PendingDown {
+  std::int64_t monitor;
+  std::int64_t kind;
+  const char *text;
+};
+
 struct Message {
   Message *next;
+  // With `down`, the monitor's function.
   Word value;
+  PendingDown *down;
   // Its place in the order of arrival over all mailboxes.
   std::uint64_t stamp;
 };
@@ -478,6 +489,14 @@ void FillRing(Mailbox *mailbox) {
     message = message->next;
   }
   while (message && tail - mailbox->consumed < kRingSlots) {
+    if (message->down) {
+      // This can be on the plugin's server thread, where exit would hang.
+      std::fflush(stdout);
+      std::fprintf(stderr,
+          "Mercury runtime: a monitor's message to a mailbox a device "
+          "receives from is not supported yet\n");
+      std::_Exit(1);
+    }
     ring->slots[tail % kRingSlots] = mailbox->ringOfArrays
         ? *reinterpret_cast<const Word *>(message->value)
         : message->value;
@@ -612,6 +631,7 @@ Delivery DeliverEncoded(
     Fragment fragment;
     auto *message{static_cast<Message *>(fragment.Allocate(sizeof(Message)))};
     message->next = nullptr;
+    message->down = nullptr;
     if (Decode(bytes, size, mailbox->messageType, fragment, message->value)) {
       delivery = Delivery::Undecodable;
     } else {
@@ -827,6 +847,7 @@ extern "C" void merk_mailbox_send(
   Fragment fragment;
   auto *message{static_cast<Message *>(fragment.Allocate(sizeof(Message)))};
   message->next = nullptr;
+  message->down = nullptr;
   message->value = CopyValue(value, typeInfo, nullptr, fragment);
   if (Mailbox *mailbox{Find(handle)}) {
     Queue(mailbox, message);
@@ -980,7 +1001,11 @@ extern "C" Word merk_mailbox_message(
   if (!mailbox || mailbox->count <= position) {
     Fail("a message was read that is not in its mailbox", "");
   }
-  Word value{At(mailbox, position)->value};
+  Message *message{At(mailbox, position)};
+  if (message->down) {
+    Fail("a monitor's message was read outside a receive", "");
+  }
+  Word value{message->value};
   Unlock(mailbox);
   return value;
 }
@@ -1075,6 +1100,243 @@ extern "C" void merk_mailbox_detach_rings(void) {
     pthread_mutex_unlock(&mailbox->lock);
   }
   __atomic_store_n(&attachedRings, 0, __ATOMIC_SEQ_CST);
+}
+
+// Monitors (design document, "Exceptions, links and monitors"). A process
+// that ends must not run its watcher's function, which is in the watcher's
+// heap and may be anything: it queues what happened, and the receiver applies
+// the function when it reads the message. A monitor is in a hash table by id
+// and in its target's list. Locks: a shard's, then the target's waitLock; and
+// a mailbox's, then the target's waitLock. A target that is ending takes each
+// monitor from its list, then looks for it by id, which a demonitor that holds
+// the shard's lock and has found the monitor makes it wait for, so that the
+// target's record stays valid for the demonitor.
+namespace merkurius::runtime {
+struct Monitor {
+  std::uint64_t id;
+  Process *target;
+  Handle watcher;
+  Word function;
+  Monitor *previous;
+  Monitor *next;
+  // Whether it is on the target's list.
+  bool linked;
+  Monitor *nextInShard;
+};
+} // namespace merkurius::runtime
+
+namespace {
+constexpr std::int64_t kDownNormal{1};
+constexpr std::int64_t kDownNoProcess{2};
+constexpr std::int64_t kDownFailed{3};
+
+struct MonitorShard {
+  pthread_mutex_t lock;
+  Monitor *first;
+};
+constexpr std::uint64_t kMonitorShards{256};
+MonitorShard monitorShards[kMonitorShards];
+std::atomic<std::uint64_t> nextMonitor{1};
+pthread_once_t monitorsOnce = PTHREAD_ONCE_INIT;
+
+void InitializeMonitors() {
+  for (MonitorShard &shard : monitorShards) {
+    pthread_mutex_init(&shard.lock, nullptr);
+  }
+}
+
+MonitorShard &ShardOf(std::uint64_t id) {
+  return monitorShards[id & (kMonitorShards - 1)];
+}
+
+// With the shard's lock held: takes the monitor from the table, if it is there.
+Monitor *Unhash(MonitorShard &shard, std::uint64_t id) {
+  for (Monitor **link{&shard.first}; *link; link = &(*link)->nextInShard) {
+    if ((*link)->id == id) {
+      Monitor *found{*link};
+      *link = found->nextInShard;
+      return found;
+    }
+  }
+  return nullptr;
+}
+
+bool IsHere(const Handle &handle) {
+  pthread_once(&nodeOnce, ChooseNode);
+  return handle.nodeHigh == nodeHigh && handle.nodeLow == nodeLow &&
+      handle.placeAndSlot >> kPlaceShift == 0;
+}
+
+// Queues what happened, unless the watcher's mailbox has closed. No lock held.
+void DeliverDown(const Handle &watcher, Word function, std::uint64_t monitor,
+    std::int64_t kind, const char *text) {
+  Mailbox *mailbox{Find(watcher)};
+  if (!mailbox) {
+    return;
+  }
+  Fragment fragment;
+  auto *message{static_cast<Message *>(fragment.Allocate(sizeof(Message)))};
+  auto *down{static_cast<PendingDown *>(fragment.Allocate(sizeof(PendingDown)))};
+  std::size_t bytes{std::strlen(text) + 1};
+  auto *copy{static_cast<char *>(fragment.Allocate(bytes))};
+  std::memcpy(copy, text, bytes);
+  *down = {static_cast<std::int64_t>(monitor), kind, copy};
+  message->next = nullptr;
+  message->value = function;
+  message->down = down;
+  Queue(mailbox, message);
+  Unlock(mailbox);
+}
+} // namespace
+
+namespace merkurius::runtime {
+void FireMonitorsOf(Process *process, const char *reason) {
+  pthread_once(&monitorsOnce, InitializeMonitors);
+  for (;;) {
+    pthread_mutex_lock(&process->waitLock);
+    Monitor *monitor{process->firstMonitor};
+    if (!monitor) {
+      pthread_mutex_unlock(&process->waitLock);
+      return;
+    }
+    process->firstMonitor = monitor->next;
+    if (monitor->next) {
+      monitor->next->previous = nullptr;
+    }
+    monitor->linked = false;
+    std::uint64_t id{monitor->id};
+    pthread_mutex_unlock(&process->waitLock);
+    // A demonitor may have it by now, and free it.
+    MonitorShard &shard{ShardOf(id)};
+    pthread_mutex_lock(&shard.lock);
+    Monitor *mine{Unhash(shard, id)};
+    pthread_mutex_unlock(&shard.lock);
+    if (mine) {
+      DeliverDown(mine->watcher, mine->function, id,
+          reason ? kDownFailed : kDownNormal, reason ? reason : "");
+      std::free(mine);
+    }
+  }
+}
+} // namespace merkurius::runtime
+
+// Starts watching the process that owns the target mailbox. If it has ended,
+// which a closed mailbox says, the message is queued at once. Temporary
+// (chunk 2, docs/INPROGRESS.md, The scheduler, before the collector): the
+// function is shared with the receiver, as a spawned closure is, if the
+// watcher's mailbox is not the caller's.
+extern "C" std::int64_t merk_monitor_new(std::int64_t targetHigh,
+    std::int64_t targetLow, std::int64_t targetPlaceAndSlot,
+    std::int64_t targetGeneration, std::int64_t targetSecret,
+    MERK_HANDLE_PARAMETERS, Word function) {
+  pthread_once(&once, InitializeCondition);
+  pthread_once(&monitorsOnce, InitializeMonitors);
+  Handle target{static_cast<Word>(targetHigh), static_cast<Word>(targetLow),
+      static_cast<Word>(targetPlaceAndSlot), targetGeneration,
+      static_cast<Word>(targetSecret)};
+  Handle watcher{MERK_HANDLE};
+  if (!IsHere(target) || !IsHere(watcher)) {
+    Fail("a monitor across nodes or places is not supported yet", "");
+  }
+  std::uint64_t id{nextMonitor.fetch_add(1, std::memory_order_relaxed)};
+  auto *monitor{static_cast<Monitor *>(Malloc(sizeof(Monitor)))};
+  *monitor = {id, nullptr, watcher, function, nullptr, nullptr, false, nullptr};
+  MonitorShard &shard{ShardOf(id)};
+  pthread_mutex_lock(&shard.lock);
+  monitor->nextInShard = shard.first;
+  shard.first = monitor;
+  pthread_mutex_unlock(&shard.lock);
+  if (Mailbox *mailbox{Find(target)}) {
+    Process *owner{mailbox->owner};
+    if (!owner) {
+      Fail("a mailbox of no process cannot be monitored", "");
+    }
+    // The mailbox's lock keeps it the owner's, so the owner has not ended.
+    pthread_mutex_lock(&owner->waitLock);
+    monitor->target = owner;
+    monitor->next = owner->firstMonitor;
+    if (owner->firstMonitor) {
+      owner->firstMonitor->previous = monitor;
+    }
+    owner->firstMonitor = monitor;
+    monitor->linked = true;
+    pthread_mutex_unlock(&owner->waitLock);
+    Unlock(mailbox);
+    return static_cast<std::int64_t>(id);
+  }
+  pthread_mutex_lock(&shard.lock);
+  Unhash(shard, id);
+  pthread_mutex_unlock(&shard.lock);
+  std::free(monitor);
+  DeliverDown(watcher, function, id, kDownNoProcess, "");
+  return static_cast<std::int64_t>(id);
+}
+
+// Stops watching. A message already queued stays, as with Erlang's demonitor
+// without its flush option.
+extern "C" void merk_monitor_remove(std::int64_t id) {
+  pthread_once(&monitorsOnce, InitializeMonitors);
+  MonitorShard &shard{ShardOf(static_cast<std::uint64_t>(id))};
+  pthread_mutex_lock(&shard.lock);
+  if (Monitor *monitor{Unhash(shard, static_cast<std::uint64_t>(id))}) {
+    Process *target{monitor->target};
+    pthread_mutex_lock(&target->waitLock);
+    if (monitor->linked) {
+      if (monitor->previous) {
+        monitor->previous->next = monitor->next;
+      } else {
+        target->firstMonitor = monitor->next;
+      }
+      if (monitor->next) {
+        monitor->next->previous = monitor->previous;
+      }
+    }
+    pthread_mutex_unlock(&target->waitLock);
+    std::free(monitor);
+  }
+  pthread_mutex_unlock(&shard.lock);
+}
+
+// The message at `position`, which merk_mailbox_wait has found there: 0 and
+// its value, or, for what a monitor left, its kind, the function that makes
+// the message, the monitor and the text.
+extern "C" std::int64_t merk_mailbox_read(MERK_HANDLE_PARAMETERS,
+    std::int64_t position, Word *value, Word *function, std::int64_t *monitor,
+    const char **text) {
+  Mailbox *mailbox{Find(MERK_HANDLE)};
+  if (!mailbox || mailbox->count <= position) {
+    Fail("a message was read that is not in its mailbox", "");
+  }
+  Message *message{At(mailbox, position)};
+  std::int64_t kind{0};
+  *value = 0;
+  *function = 0;
+  *monitor = 0;
+  *text = "";
+  if (message->down) {
+    kind = message->down->kind;
+    *function = message->value;
+    *monitor = message->down->monitor;
+    *text = message->down->text;
+  } else {
+    *value = message->value;
+  }
+  Unlock(mailbox);
+  return kind;
+}
+
+// The message that the monitor's function made takes the place of what the
+// monitor left.
+extern "C" void merk_mailbox_resolve(
+    MERK_HANDLE_PARAMETERS, std::int64_t position, Word value) {
+  if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
+    if (mailbox->count > position) {
+      Message *message{At(mailbox, position)};
+      message->value = value;
+      message->down = nullptr;
+    }
+    Unlock(mailbox);
+  }
 }
 
 // Registers a mailbox of this node's host under a name, as Erlang's
