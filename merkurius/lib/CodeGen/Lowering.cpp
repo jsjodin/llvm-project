@@ -56,6 +56,7 @@ namespace {
 
 // The runtime's function that reports an uncaught exception and exits.
 constexpr llvm::StringLiteral kThrowSymbol{"merk_uncaught_exception"};
+constexpr llvm::StringLiteral kHeapAddressSymbol{"merk.heap_address"};
 
 // Whether a procedure of this determinism returns a success flag (design
 // document, "Calling convention").
@@ -221,7 +222,6 @@ private:
   void LowerMrt();
   void LowerAlloc(mrt::AllocOp);
   // The thread's heap pointer and limit (runtime/heap.h).
-  mlir::LLVM::GlobalOp HeapGlobal();
   // A switch on a word: `to` by their values, or else to `otherwise`.
   void SwitchOn(mlir::Value value,
       llvm::ArrayRef<std::pair<std::int64_t, mlir::Block *>> to,
@@ -339,6 +339,7 @@ private:
       mlir::ValueRange outputs);
   mlir::LLVM::GlobalOp StringGlobal(llvm::StringRef, mlir::Location);
   mlir::LLVM::LLVMFuncOp ThrowFunc();
+  mlir::LLVM::LLVMFuncOp HeapAddressFunc();
   bool CanFail(llvm::StringRef proc) const { return canFail_.contains(proc); }
   // Whether a procedure's outputs, after its success flag if it can fail,
   // need more registers than the target returns results in, so that it
@@ -397,7 +398,6 @@ private:
   mlir::Value TypeInfoAddress(const StaticTypeInfo &, mlir::Location);
   llvm::DenseMap<mlir::Value, StaticTypeInfo> staticTypeInfos_;
   llvm::StringMap<mlir::LLVM::GlobalOp> typeInfoCells_;
-  mlir::LLVM::GlobalOp heap_;
 };
 
 llvm::LogicalResult Lowerer::Layouts() {
@@ -2639,18 +2639,25 @@ void Lowerer::LowerConstructors() {
       rewriter_.getArrayAttr(data));
 }
 
-mlir::LLVM::GlobalOp Lowerer::HeapGlobal() {
-  if (!heap_) {
-    mlir::OpBuilder::InsertionGuard guard{rewriter_};
-    rewriter_.setInsertionPointToStart(module_.getBody());
-    auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
-    heap_ = mlir::LLVM::GlobalOp::create(rewriter_, module_.getLoc(),
-        mlir::LLVM::LLVMStructType::getLiteral(module_.getContext(), {ptr, ptr}),
-        /*isConstant=*/false, mlir::LLVM::Linkage::External, "merk_heap",
-        mlir::Attribute{}, /*alignment=*/8, /*addrSpace=*/0,
-        /*dsoLocal=*/false, mlir::LLVM::ThreadLocalMode::GeneralDynamic);
-  }
-  return heap_;
+// The address of the thread's heap, for LLVM's optimizer: it reads only
+// thread state, so that calls of it merge, but it must be called again after
+// anything that may write that state, as a call that may switch the process
+// to another thread does. llvm.threadlocal.address would be merged across
+// such calls. ExpandHeapAddresses replaces it after the optimizer.
+mlir::LLVM::LLVMFuncOp Lowerer::HeapAddressFunc() {
+  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  mlir::LLVM::LLVMFuncOp func{RuntimeFunc(kHeapAddressSymbol, ptr, {})};
+  func.setMemoryEffectsAttr(mlir::LLVM::MemoryEffectsAttr::get(
+      module_.getContext(),
+      {/*other=*/mlir::LLVM::ModRefInfo::NoModRef,
+          /*argMem=*/mlir::LLVM::ModRefInfo::NoModRef,
+          /*inaccessibleMem=*/mlir::LLVM::ModRefInfo::Ref,
+          /*errnoMem=*/mlir::LLVM::ModRefInfo::NoModRef,
+          /*targetMem0=*/mlir::LLVM::ModRefInfo::NoModRef,
+          /*targetMem1=*/mlir::LLVM::ModRefInfo::NoModRef}));
+  func.setNoUnwind(true);
+  func.setWillReturn(true);
+  return func;
 }
 
 // An allocation bumps the heap's pointer if the cell fits before its limit,
@@ -2680,9 +2687,11 @@ void Lowerer::LowerAlloc(mrt::AllocOp alloc) {
   mlir::Block *fast{rewriter_.createBlock(after)};
   mlir::Block *slow{rewriter_.createBlock(after)};
   rewriter_.setInsertionPointToEnd(before);
-  auto heapType{HeapGlobal().getType()};
-  mlir::Value heap{mlir::LLVM::ThreadlocalAddressOp::create(rewriter_, loc, ptr,
-      mlir::LLVM::AddressOfOp::create(rewriter_, loc, HeapGlobal()))};
+  auto heapType{mlir::LLVM::LLVMStructType::getLiteral(
+      module_.getContext(), {ptr, ptr})};
+  mlir::Value heap{mlir::LLVM::CallOp::create(
+      rewriter_, loc, HeapAddressFunc(), mlir::ValueRange{})
+          .getResult()};
   mlir::Value next{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr, heap, 8)};
   mlir::Value end{mlir::LLVM::GEPOp::create(rewriter_, loc, ptr,
       rewriter_.getI8Type(), next,
@@ -3082,10 +3091,6 @@ llvm::LogicalResult Lowerer::LowerOpenMP() {
   }
   // The heap's declaration, which only host code that the filter removed
   // used.
-  if (heap_ && mlir::SymbolTable::symbolKnownUseEmpty(heap_, module_)) {
-    rewriter_.eraseOp(heap_);
-    heap_ = nullptr;
-  }
   return llvm::success();
 }
 
@@ -3321,6 +3326,27 @@ void AddStackCheck(llvm::Function &function, llvm::GlobalVariable &limit,
   builder.CreateUnreachable();
 }
 } // namespace
+
+void ExpandHeapAddresses(llvm::Module &module) {
+  llvm::Function *marker{module.getFunction(kHeapAddressSymbol)};
+  if (!marker) {
+    return;
+  }
+  llvm::LLVMContext &context{module.getContext()};
+  llvm::PointerType *pointer{llvm::PointerType::getUnqual(context)};
+  auto *heap{llvm::cast<llvm::GlobalVariable>(module.getOrInsertGlobal(
+      "merk_heap", llvm::StructType::get(context, {pointer, pointer})))};
+  heap->setThreadLocalMode(llvm::GlobalValue::GeneralDynamicTLSModel);
+  heap->setAlignment(llvm::Align(8));
+  while (!marker->use_empty()) {
+    auto *call{llvm::cast<llvm::CallInst>(marker->user_back())};
+    llvm::IRBuilder<> builder{call};
+    llvm::Value *address{builder.CreateThreadLocalAddress(heap)};
+    call->replaceAllUsesWith(address);
+    call->eraseFromParent();
+  }
+  marker->eraseFromParent();
+}
 
 void AddStackChecks(llvm::Module &module) {
   llvm::SmallVector<CallNode> nodes;

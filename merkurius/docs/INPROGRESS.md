@@ -862,9 +862,13 @@ processes run:
   variable, and have lowering read its address afresh after each call, through
   an operation LLVM cannot merge, which is the smallest change and costs a read
   after each call. Chosen (the user, 2026-11-08): (c) first, measured at the
-  nrev gate, leaving (a) for later. It is built at step 4, as a process stays on
-  one OS thread until there are several workers. The operation is still to be
-  found: LLVM treats `llvm.threadlocal.address` as mergeable within a function.
+  nrev gate, leaving (a) for later. Built: compiled code calls a stand-in,
+  `merk.heap_address`, which LLVM knows reads only inaccessible memory, so that
+  its calls merge unless something between them may write that memory, as a call
+  that can switch the process may. `llvm.threadlocal.address` would be merged
+  across such a call. The stand-in becomes that intrinsic after the optimizer,
+  and nothing after the optimizer merges the reads across calls. Inline assembly
+  would have needed each target's thread-pointer sequence. nrev did not change.
 - **D2, spinning under the scheduler.** Decided: a worker with an empty queue
   spins for the same 50 µs, with a yield, before it sleeps.
 - **D3, the first scope.** Steps 1 to 3 are done; the rest is to be reviewed

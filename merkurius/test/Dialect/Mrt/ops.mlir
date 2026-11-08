@@ -21,7 +21,7 @@ module @mrt attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   // CHECK-NEXT: %[[T:.*]] = mrt.tag %[[CELL]], 1
   // CHECK-NEXT: merk.succeed %[[T]]
   // LLVM-LABEL: define tailcc ptr @mrt.cons_3_0(i64 %0, ptr %1) {
-  // LLVM-NEXT: %[[HEAP:.*]] = call ptr @llvm.threadlocal.address.p0(ptr @merk_heap)
+  // LLVM-NEXT: %[[HEAP:.*]] = call align 8 ptr @llvm.threadlocal.address.p0(ptr align 8 @merk_heap)
   // LLVM-NEXT: %[[NEXT:.*]] = load ptr, ptr %[[HEAP]], align 8
   // LLVM-NEXT: %[[END:.*]] = getelementptr i8, ptr %[[NEXT]], i32 16
   // LLVM-NEXT: %[[LIMITP:.*]] = getelementptr { ptr, ptr }, ptr %[[HEAP]], i32 0, i32 1

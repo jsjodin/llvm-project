@@ -3670,6 +3670,8 @@ Processes on one worker, 2026-11-08, on e742eaaa8b15 and its change, `-O2`, `ben
 
 Ping-pong with the GPU did not change: `gpu-local` 19.5, CPU and CPU between nodes 22.7, GPU and CPU 35.0, GPU and GPU 44.8 µs a round, the median of 5.
 
+Reading the heap's address again after each call (`docs/INPROGRESS.md`, The scheduler, D1), 2026-11-08, on f67539332be0 and its change, `-O2`, nrev as above, 5 alternating runs: 18.14 s before and 18.14 s after, the median.
+
 ## Target applications
 
 Recorded on 2026-11-05. This is judgement, not a result: the only performance evidence so far is the bandwidth benchmark, whose program is no simpler than its C version (`benchmarks/bandwidth/README.md`). That the code is simpler has still to be shown on a program with real logic in it.
