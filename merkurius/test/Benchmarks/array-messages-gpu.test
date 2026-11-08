@@ -1,0 +1,15 @@
+The benchmark of arrays as messages on the machine's GPU, moving little:
+node 1's target region against node 2 over TCP and against main, and the
+floor, omp_target_memcpy alone.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/array-messages/arraymessages.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %python %S/../../benchmarks/pingpong/pair.py %t gpu 1 | FileCheck %s --check-prefix=GPU
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t gpu-local 1 | FileCheck %s --check-prefix=LOCAL
+RUN: clang++ -O2 -std=c++17 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/array-messages/memcpy-floor.cpp -o %t.floor
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t.floor 1 | FileCheck %s --check-prefix=FLOOR
+GPU: gpu to {{ *}}1 words {{ *}}20000 messages {{ *}}20000 right
+GPU: gpu from {{ *}}1048576 words {{ *}}2 messages {{ *}}2 right
+LOCAL: gpu-local to {{ *}}1 words {{ *}}20000 messages {{ *}}20000 right
+LOCAL: gpu-local from {{ *}}1048576 words {{ *}}2 messages {{ *}}2 right
+FLOOR: memcpy from {{ *}}1048576 words {{ *}}2 messages
