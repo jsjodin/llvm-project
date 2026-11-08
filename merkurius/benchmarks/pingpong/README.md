@@ -17,6 +17,8 @@ their average.
 | `cpu-local` | `main` | an echo thread in node 1, in C, through the runtime's mailboxes |
 | `gpu`, `partner-gpu` | a target region on the GPU | a target region of node 2, another process using the same GPU, over TCP on loopback |
 | `gpu-local` | a target region on the GPU | the echo thread |
+| `cpu-process` | `main` | a process of the same node |
+| `gpu-process` | `main` | a process of the same node, answering from a target region on the GPU |
 
 A target region's time includes its launch, which `launch`, an empty
 region's time, shows; over 10000 rounds it is a few nanoseconds a round.

@@ -863,10 +863,13 @@ ends the program. `spawn`, links and monitors do not exist.
    would wait. Not moved: a send to another node when its socket is full,
    whose write blocks its worker for up to a tick time. Node
    connections stay OS threads, which wake processes.
-8. **The GPU with processes.** A region's launch does not hold a worker,
-   ping-pong between `main` and a GPU of its own node, regions on several
-   devices at once with `device(N)`, and whether a worker drains the send ring
-   (The send ring).
+8. **The GPU with processes.** Done: a region's launch does not hold a worker
+   (step 7); regions of several processes at once on one device, with
+   `device(N)` (`process-target-many.m`); and benchmark modes `cpu-process` and
+   `gpu-process`, `main` against a process of its own node. To do: the numbers,
+   and whether a worker drains the send ring (The send ring). Regions on
+   several devices at once are the same code, but need a machine with two GPUs
+   to run.
 
 **Needed before the collector.** Decided 2026-11-08 to leave these until
 processes run:
