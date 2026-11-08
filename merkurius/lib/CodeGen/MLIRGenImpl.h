@@ -568,6 +568,8 @@ private:
   // Whether a value of the type can cross into a target region.
   bool Mappable(mlir::Type);
   bool WordMessage(mlir::Type);
+  // Whether a message of the type is an array of one-word elements.
+  bool ArrayMessage(mlir::Type);
   // The message types that device code may send, by their keys.
   llvm::DenseMap<std::uint64_t, const semantics::Type *> messageTypes_;
   std::optional<std::uint64_t> MessageKey(

@@ -239,18 +239,27 @@ void FreeArenas() {
   }
 }
 
-// A copy on the host of the device's array of `size` elements, in a
-// fragment, as a message is.
-std::uint64_t *CopyFromDevice(
-    int device, const void *array, std::uint64_t size) {
-  std::size_t bytes{sizeof(std::uint64_t) * (1 + size)};
-  Fragment fragment;
-  auto *copy{static_cast<std::uint64_t *>(fragment.Allocate(bytes))};
-  if (omp_target_memcpy(copy, array, bytes, 0, 0, omp_get_initial_device(),
-          device) != 0) {
+std::size_t ArrayBytes(std::uint64_t size) {
+  return sizeof(std::uint64_t) * (1 + size);
+}
+
+// Copies the device's array of `size` elements to `copy` on the host.
+void CopyFromDevice(int device, const void *array, std::uint64_t size,
+    std::uint64_t *copy) {
+  if (omp_target_memcpy(copy, array, ArrayBytes(size), 0, 0,
+          omp_get_initial_device(), device) != 0) {
     Fail("could not copy an array from a device");
   }
-  return copy;
+}
+
+// A message that is the device's array: copied to the host for the send,
+// which makes its own copy, or encodes it for another node.
+void SendArray(const std::uint64_t *handle, std::uint64_t key, int device,
+    const void *array, std::uint64_t size) {
+  auto *copy{static_cast<std::uint64_t *>(Malloc(ArrayBytes(size)))};
+  CopyFromDevice(device, array, size, copy);
+  SendTo(handle, key, reinterpret_cast<std::uint64_t>(copy));
+  std::free(copy);
 }
 
 unsigned HandleOpcode(void *raw, unsigned) {
@@ -281,10 +290,22 @@ unsigned HandleOpcode(void *raw, unsigned) {
     return rpc::RPC_SUCCESS;
   case rpcGiveArray:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
-      buffer->data[0] = reinterpret_cast<std::uint64_t>(
-          CopyFromDevice(static_cast<int>(buffer->data[0]),
-              reinterpret_cast<const void *>(buffer->data[1]),
-              buffer->data[2]));
+      // In a fragment, as a message is.
+      std::uint64_t size{buffer->data[2]};
+      Fragment fragment;
+      auto *copy{static_cast<std::uint64_t *>(
+          fragment.Allocate(ArrayBytes(size)))};
+      CopyFromDevice(static_cast<int>(buffer->data[0]),
+          reinterpret_cast<const void *>(buffer->data[1]), size, copy);
+      buffer->data[0] = reinterpret_cast<std::uint64_t>(copy);
+    });
+    return rpc::RPC_SUCCESS;
+  case rpcSendArray:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      SendArray(buffer->data, buffer->data[5],
+          static_cast<int>(buffer->data[7] & 0xff),
+          reinterpret_cast<const void *>(buffer->data[6]),
+          buffer->data[7] >> 8);
     });
     return rpc::RPC_SUCCESS;
   default:
@@ -298,6 +319,11 @@ unsigned HandleOpcode(void *raw, unsigned) {
 extern "C" void merk_device_send(const std::uint64_t *handle,
     std::uint64_t key, std::uint64_t message) {
   SendTo(handle, key, message);
+}
+
+extern "C" void merk_device_send_array(const std::uint64_t *handle,
+    std::uint64_t key, const std::uint64_t *array) {
+  SendTo(handle, key, reinterpret_cast<std::uint64_t>(array));
 }
 
 // A region that runs on the host gives the array itself.
