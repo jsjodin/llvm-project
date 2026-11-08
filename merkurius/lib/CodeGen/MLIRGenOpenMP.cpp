@@ -785,7 +785,7 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
   ParallelLoop parallelLoop{goals, trip, call, loop, *loopBody, bodyCall,
       bodyProcedure, reductions, teams, distribute, offloaded, at};
   if (!offloaded) {
-    GenerateParallelLoop(parallelLoop, body, {}, loc);
+    GenerateParallelLoop(parallelLoop, body, loc);
     if (!failed_) {
       LoadReductions(reductions, *call, loc);
     }
@@ -800,10 +800,7 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
         IntegerConstant(builder_.getI64Type(), loop->step, loc)};
   }
   Target(
-      goal, body,
-      [&](mlir::ValueRange evaluated) {
-        GenerateParallelLoop(parallelLoop, body, evaluated, loc);
-      },
+      goal, body, [&]() { GenerateParallelLoop(parallelLoop, body, loc); },
       /*combined=*/true, kernel.mode, hostEval, updated);
   if (!failed_) {
     LoadReductions(reductions, *call, loc);
@@ -815,11 +812,13 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
 // step before the target region and gives them to it as host_eval
 // values, from which it computes the trip count and so the number of
 // teams and threads, and the nest runs over them. The bounds'
-// goals are in the region too, on both sides, so that the host and the
-// device map the same values; the device's nest runs over those, as
-// Flang's does, since the device has no host_eval.
+// goals are in the region too, on both sides, and the nest is first made
+// over their values, so that the host and the device map the same values,
+// a bound that is a variable included. Target then gives the host's nest
+// the host_eval values; the device's stays over those, as Flang's does,
+// since the device has no host_eval.
 void MerkGenerator::GenerateParallelLoop(const ParallelLoop &loop,
-    const ProcedureBody &body, mlir::ValueRange hostEval, mlir::Location loc) {
+    const ProcedureBody &body, mlir::Location loc) {
   mlir::OpBuilder::InsertionGuard guard{builder_};
   // Teams and parallel end with terminators, added after what is in them,
   // since a goal is not generated after one.
@@ -872,11 +871,6 @@ void MerkGenerator::GenerateParallelLoop(const ParallelLoop &loop,
   mlir::Value upper{ValueOf(loop.translated->step > 0 ? big : small)};
   mlir::Type i64{builder_.getI64Type()};
   mlir::Value step{IntegerConstant(i64, loop.translated->step, loc)};
-  if (!hostEval.empty()) {
-    lower = hostEval[0];
-    upper = hostEval[1];
-    step = hostEval[2];
-  }
 
   llvm::SmallVector<const semantics::Type *> types;
   for (BodyVar argument : loop.bodyCall->arguments) {
@@ -1202,7 +1196,7 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
     NotYet(at, "target regions in target regions");
     return;
   }
-  Target(goal, body, [&](mlir::ValueRange) { Goal(*goal.goals.front(), body); },
+  Target(goal, body, [&]() { Goal(*goal.goals.front(), body); },
       /*combined=*/false, KernelOf(*queue).mode);
 }
 
@@ -1465,7 +1459,7 @@ mlir::Value MerkGenerator::ArrayPointer(mlir::Value array, mlir::Location loc) {
 }
 
 void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
-    llvm::function_ref<void(mlir::ValueRange hostEval)> generate, bool combined,
+    llvm::function_ref<void()> generate, bool combined,
     mlir::omp::TargetExecMode mode, mlir::ValueRange hostEval,
     llvm::ArrayRef<UpdatedSlot> slots) {
   parser::CharBlock at{Where(goal.tokens)};
@@ -1487,7 +1481,7 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   {
     mlir::OpBuilder::InsertionGuard guard{builder_};
     builder_.setInsertionPointToStart(block);
-    generate(block->getArguments());
+    generate();
   }
   if (failed_) {
     values_ = before;
@@ -1668,6 +1662,15 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
     if (candidates.contains(var)) {
       pointerArgs[var] = block->addArgument(ptr, loc);
     }
+  }
+  // The maps are decided: the host's nest runs over the host_eval values,
+  // the block's first arguments.
+  if (!hostEval.empty()) {
+    region.walk([&](mlir::omp::LoopNestOp nest) {
+      nest.getLoopLowerBoundsMutable().assign(block->getArgument(0));
+      nest.getLoopUpperBoundsMutable().assign(block->getArgument(1));
+      nest.getLoopStepsMutable().assign(block->getArgument(2));
+    });
   }
   // Where the goal ended: the last block of the region.
   mlir::Block *end{&targetOp.getRegion().back()};
