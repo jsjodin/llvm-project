@@ -63,14 +63,15 @@ main(!IO) :-
         io.write_int(100 // zero, !IO),
         io.nl(!IO)
     else
+        new_mailbox(Downs, !IO),
         spawn(divider(Reply), Divider, !IO),
+        monitor(Divider, Downs, (func(D) = D), _, !IO),
         send(Divider, 0, !IO),
+        report(Downs, !IO),
         spawn_with_stack(1048576, overflower(Reply), Overflower, !IO),
+        monitor(Overflower, Downs, (func(D) = D), _, !IO),
         send(Overflower, 0, !IO),
-        % Temporary (chunk 2 step 6, docs/INPROGRESS.md): a wait, until a
-        % monitor says when they have ended.
-        receive(Reply, any, after(1000), Early, !IO),
-        io.write_line(Early, !IO),
+        report(Downs, !IO),
         % A message to a process that has failed goes nowhere.
         send(Divider, 1, !IO),
         spawn(echo(Reply), Echo, !IO),
@@ -79,11 +80,24 @@ main(!IO) :-
         io.write_line(Late, !IO)
     ).
 
+:- pred report(mailbox(down_info)::in, io::di, io::uo) is det.
+report(Downs, !IO) :-
+    receive(Downs, any, infinity, Got, !IO),
+    (
+        Got = yes(Down),
+        io.write_string(reason_text(reason(Down)), !IO),
+        io.nl(!IO)
+    ;
+        Got = no,
+        io.write_string("no down\n", !IO)
+    ).
+
 :- func zero = int.
 :- pragma no_inline(func(zero/0)).
 zero = 0.
 
-% OUTPUT:no
+% OUTPUT:domain_error("int.\'//\': division by zero")
+% OUTPUT-NEXT:stack overflow
 % OUTPUT-NEXT:yes(42)
 % OUTPUT-NOT:{{.}}
 

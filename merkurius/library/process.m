@@ -63,6 +63,28 @@
 
     % Drops the queued messages and the mailbox's name; later sends to the
     % mailbox are dropped, and a receive from it finds nothing.
+    % Watches the process that owns the target mailbox: when it ends, or
+    % at once if it has ended, the function makes a message from a
+    % down_info, which goes to the watcher's mailbox. Across nodes it is
+    % not supported yet.
+:- type monitor_ref.
+:- type down_reason.
+:- type down_info
+    --->    down_info(monitor_ref, down_reason).
+:- pred monitor(mailbox(T)::in, mailbox(M)::in, (func(down_info) = M)::in,
+    monitor_ref::out, io::di, io::uo) is det.
+
+    % Stops watching. A message already queued stays.
+:- pred demonitor(monitor_ref::in, io::di, io::uo) is det.
+
+:- func reason(down_info) = down_reason.
+
+    % "normal", "noproc" for a process that had ended already, or what
+    % ended it, as the report of the failure says it. Temporary (chunk 2
+    % step 6, docs/INPROGRESS.md): text, until exceptions can be caught
+    % and a reason can carry the exception.
+:- func reason_text(down_reason) = string.
+
 :- pred close_mailbox(mailbox(M)::in, io::di, io::uo) is det.
 
 :- pred send(mailbox(M)::in, M::in, io::di, io::uo) is det.
@@ -175,6 +197,14 @@
                 secret      :: int
             ).
 
+:- type monitor_ref
+    --->    monitor_ref(int).
+
+:- type down_reason
+    --->    normal
+    ;       no_process
+    ;       failed(string).
+
     % The node's 128-bit id.
 :- type node
     --->    node(int, int).
@@ -217,6 +247,19 @@ extern MR_Integer merk_mailbox_wait_arrival(MR_Integer seen,
 extern MR_Word merk_mailbox_message(MR_Integer node_high,
     MR_Integer node_low, MR_Integer place_slot, MR_Integer generation,
     MR_Integer secret, MR_Integer position);
+extern MR_Integer merk_mailbox_read(MR_Integer node_high,
+    MR_Integer node_low, MR_Integer place_slot, MR_Integer generation,
+    MR_Integer secret, MR_Integer position, MR_Word *value, MR_Word *function,
+    MR_Integer *monitor, const char **text);
+extern void merk_mailbox_resolve(MR_Integer node_high, MR_Integer node_low,
+    MR_Integer place_slot, MR_Integer generation, MR_Integer secret,
+    MR_Integer position, MR_Word value);
+extern MR_Integer merk_monitor_new(MR_Integer target_high,
+    MR_Integer target_low, MR_Integer target_place_slot,
+    MR_Integer target_generation, MR_Integer target_secret,
+    MR_Integer node_high, MR_Integer node_low, MR_Integer place_slot,
+    MR_Integer generation, MR_Integer secret, MR_Word function);
+extern void merk_monitor_remove(MR_Integer monitor);
 extern void merk_mailbox_remove(MR_Integer node_high, MR_Integer node_low,
     MR_Integer place_slot, MR_Integer generation, MR_Integer secret,
     MR_Integer position);
@@ -234,6 +277,23 @@ extern MR_Integer merk_node_lookup(MR_Integer high, MR_Integer low,
     MR_String name, MR_Word type_info, MR_Integer milliseconds,
     MR_Integer *place_slot, MR_Integer *generation, MR_Integer *secret);
 ").
+
+monitor(Target, Watcher, Function, monitor_ref(Id), !IO) :-
+    Target = mailbox(TargetHigh, TargetLow, TargetPlaceSlot, TargetGeneration,
+        TargetSecret),
+    Watcher = mailbox(High, Low, PlaceSlot, Generation, Secret),
+    new_monitor(TargetHigh, TargetLow, TargetPlaceSlot, TargetGeneration,
+        TargetSecret, High, Low, PlaceSlot, Generation, Secret, Function, Id,
+        !IO).
+
+demonitor(monitor_ref(Id), !IO) :-
+    remove_monitor(Id, !IO).
+
+reason(down_info(_, Reason)) = Reason.
+
+reason_text(normal) = "normal".
+reason_text(no_process) = "noproc".
+reason_text(failed(Text)) = Text.
 
 new_mailbox(Mailbox, !IO) :-
     this_node(node(High, Low), !IO),
@@ -680,16 +740,81 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
 ").
 
     % The message at Position, which wait_message or poll has found there.
+    % What a monitor left becomes the message here, by its function, so
+    % that the function runs on the receiver's side, once.
 :- pred message_at(int::in, int::in, int::in, int::in, int::in, int::in,
     M::out, io::di, io::uo) is det.
+
+message_at(High, Low, PlaceSlot, Generation, Secret, Position, Message, !IO) :-
+    read_message(High, Low, PlaceSlot, Generation, Secret, Position, Kind,
+        Value, Function, Monitor, Text, !IO),
+    ( if Kind = 0 then
+        Message = Value
+    else
+        ( if Kind = 1 then
+            Reason = normal
+        else if Kind = 2 then
+            Reason = no_process
+        else
+            Reason = failed(Text)
+        ),
+        Message = Function(down_info(monitor_ref(Monitor), Reason)),
+        resolve_message(High, Low, PlaceSlot, Generation, Secret, Position,
+            Message, !IO)
+    ).
+
+:- pred read_message(int::in, int::in, int::in, int::in, int::in, int::in,
+    int::out, M::out, (func(down_info) = M)::out, int::out, string::out,
+    io::di, io::uo) is det.
 :- pragma foreign_proc("C",
-    message_at(High::in, Low::in, PlaceSlot::in, Generation::in, Secret::in,
-        Position::in, Message::out, _IO0::di, _IO::uo),
+    read_message(High::in, Low::in, PlaceSlot::in, Generation::in, Secret::in,
+        Position::in, Kind::out, Value::out, Function::out, Monitor::out,
+        Text::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    const char *text;
+    MR_Word function;
+    (void)TypeInfo_for_M;
+    Kind = merk_mailbox_read(High, Low, PlaceSlot, Generation, Secret,
+        Position, (MR_Word *) &Value, &function, &Monitor, &text);
+    Function = function;
+    Text = (MR_String) text;
+").
+
+:- pred resolve_message(int::in, int::in, int::in, int::in, int::in, int::in,
+    M::in, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    resolve_message(High::in, Low::in, PlaceSlot::in, Generation::in,
+        Secret::in, Position::in, Message::in, _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
     (void)TypeInfo_for_M;
-    Message = merk_mailbox_message(High, Low, PlaceSlot, Generation, Secret,
-        Position);
+    merk_mailbox_resolve(High, Low, PlaceSlot, Generation, Secret, Position,
+        Message);
+").
+
+:- pred new_monitor(int::in, int::in, int::in, int::in, int::in, int::in,
+    int::in, int::in, int::in, int::in, (func(down_info) = M)::in, int::out,
+    io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    new_monitor(TargetHigh::in, TargetLow::in, TargetPlaceSlot::in,
+        TargetGeneration::in, TargetSecret::in, High::in, Low::in,
+        PlaceSlot::in, Generation::in, Secret::in, Function::in, Id::out,
+        _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    (void)TypeInfo_for_M;
+    Id = merk_monitor_new(TargetHigh, TargetLow, TargetPlaceSlot,
+        TargetGeneration, TargetSecret, High, Low, PlaceSlot, Generation,
+        Secret, (MR_Word) Function);
+").
+
+:- pred remove_monitor(int::in, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    remove_monitor(Id::in, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    merk_monitor_remove(Id);
 ").
 
 :- pred remove_message(int::in, int::in, int::in, int::in, int::in, int::in,

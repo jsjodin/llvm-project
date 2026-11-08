@@ -453,6 +453,7 @@ void ProcessBody(void *argument) {
   auto *self{static_cast<Process *>(argument)};
   CallClosure(self->closure, self->argument);
   CloseMailboxesOf(self);
+  FireMonitorsOf(self, nullptr);
   Finish(self);
 }
 
@@ -616,7 +617,7 @@ void Block(std::int64_t deadline) {
   AfterSwitch();
 }
 
-void EndAfterFailure() {
+void EndAfterFailure(const char *reason) {
   Process *self{current};
   if (!self || self == &firstProcess || self->pinned != 0 ||
       (omp_get_level && omp_get_level() > 0)) {
@@ -624,6 +625,7 @@ void EndAfterFailure() {
   }
   // Nothing to unwind: its stack and heap go as a whole, from any depth.
   CloseMailboxesOf(self);
+  FireMonitorsOf(self, reason);
   Finish(self);
 }
 
@@ -669,6 +671,6 @@ extern "C" void merk_stack_limit_passed(void) {
   }
   std::fflush(stdout);
   std::fprintf(stderr, "Mercury runtime: stack overflow\n");
-  EndAfterFailure();
+  EndAfterFailure("stack overflow");
   std::exit(1);
 }

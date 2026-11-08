@@ -48,6 +48,8 @@ struct ArrivalCounts {
   std::int64_t arrivals{0};
 };
 
+struct Monitor;
+
 struct Process {
   // The next free byte of its heap and that chunk's end, while it does not
   // run; null for a process that has not allocated.
@@ -64,8 +66,10 @@ struct Process {
   // What it runs: a closure of pred(mailbox(M), io, io), and the mailbox.
   std::uint64_t closure{0};
   std::uint64_t argument{0};
-  // Guards `waiting` and its list of mailboxes.
+  // Guards `waiting` and its lists of mailboxes and monitors.
   pthread_mutex_t waitLock = PTHREAD_MUTEX_INITIALIZER;
+  // Who watches it (mailbox.cpp).
+  Monitor *firstMonitor{nullptr};
   ArrivalCounts counts{};
   // Whether it is blocked, and until when, on the monotonic clock in
   // nanoseconds, negative for no end.
@@ -115,11 +119,15 @@ void Wake(Process *);
 // until this one is woken, or its deadline, if not negative, has passed.
 void Block(std::int64_t deadline);
 
-// After a failure, which has been reported: ends the running process alone,
-// and does not return. It returns if the program has to end instead: on a
+// After a failure, which has been reported, with its text as the reason that
+// monitors see: ends the running process alone, and does not return. It returns if the program has to end instead: on a
 // thread that runs no process, in `main`, or in a target or parallel region,
 // which cannot be abandoned on their own.
-void EndAfterFailure();
+void EndAfterFailure(const char *reason);
+
+// mailbox.cpp: tells those who monitor a process that has closed its
+// mailboxes that it ended, for `reason`, or normally if that is null.
+void FireMonitorsOf(Process *, const char *reason);
 
 // mailbox.cpp: closes the process's mailboxes, as it ends.
 void CloseMailboxesOf(Process *);
