@@ -6,6 +6,8 @@
 % RUN: merkc -fc1 -emit-llvm -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=LLVM
 % RUN: merkc -O0 %s -o %t0 && %t0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 %s -o %t2 && %t2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_CHECK_ROOTS=1 MERK_HEAP_CHUNK_BYTES=64 %t0 2>/dev/null | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_CHECK_ROOTS=1 MERK_HEAP_CHUNK_BYTES=64 %t2 2>/dev/null | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 
 :- module live_bundles.
 :- interface.
@@ -19,8 +21,8 @@
 keep(L) = L.
 
 % LLVM-LABEL: define internal tailcc ptr addrspace(1) @live_bundles.pa_f2_0(ptr addrspace(1) %0, ptr addrspace(1) %1, ptr addrspace(1) %2)
-% LLVM: call tailcc ptr addrspace(1) @live_bundles.keep_f1_0(ptr addrspace(1) %0, ptr addrspace(1) %1) [ "deopt"(i64 {{[0-9]+}}, ptr addrspace(1) %0, i64 {{[0-9]+}}, ptr addrspace(1) %2) ]
-% LLVM: call ptr addrspace(1) @merk_alloc_slow(i64 16) [ "deopt"(i64 {{[0-9]+}}, ptr addrspace(1) %2, i64 {{[0-9]+}}, ptr addrspace(1) %{{[0-9]+}}, i64 {{[0-9]+}}, ptr addrspace(1) %0) ]
+% LLVM: call tailcc ptr addrspace(1) @live_bundles.keep_f1_0(ptr addrspace(1) %0, ptr addrspace(1) %1) [ "deopt"(i64 {{[0-9]+}}, ptr addrspace(1) %0, i64 {{[0-9]+}}, ptr addrspace(1) %2, ptr addrspace(1) %0) ]
+% LLVM: call ptr addrspace(1) @merk_alloc_slow(i64 16) [ "deopt"(i64 {{[0-9]+}}, ptr addrspace(1) %2, ptr addrspace(1) %0, i64 {{[0-9]+}}, ptr addrspace(1) %{{[0-9]+}}, ptr addrspace(1) %0, i64 {{[0-9]+}}, ptr addrspace(1) %0) ]
 :- pragma no_inline(pa/2).
 :- func pa(list(T), T) = list(T).
 pa(L, X) = R :- R0 = keep(L), R = [X | R0].

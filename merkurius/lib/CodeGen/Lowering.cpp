@@ -451,6 +451,8 @@ private:
   struct StaticTypeInfo {
     mlir::LLVM::GlobalOp global;
     std::int64_t tag;
+    // In a template, the place of a type variable among a root's type_infos.
+    std::int64_t variable{-1};
   };
   // The address of a static type_info, with its tag.
   mlir::Value TypeInfoAddress(const StaticTypeInfo &, mlir::Location);
@@ -460,7 +462,8 @@ private:
       llvm::ArrayRef<StaticTypeInfo> known, mlir::Location);
   // The static type_info of a monomorphic type's name; none for a type with
   // a type variable, or a higher-order one.
-  std::optional<StaticTypeInfo> RootTypeInfo(llvm::StringRef, mlir::Location);
+  std::optional<StaticTypeInfo> RootTypeInfo(
+      llvm::StringRef, llvm::ArrayRef<unsigned> variables, mlir::Location);
   // What the stack maps' type indices mean (docs/INPROGRESS.md, Statepoints
   // and stack maps).
   void EmitRootTable();
@@ -1142,6 +1145,13 @@ void Lowerer::AppendField(mlir::Value &aggregate, std::int64_t &position,
 
 mlir::Value Lowerer::TypeInfoAddress(
     const StaticTypeInfo &info, mlir::Location loc) {
+  if (info.variable >= 0) {
+    // A field type's tag for a type parameter (runtime/descriptor.h).
+    mlir::Value word{mlir::LLVM::ConstantOp::create(rewriter_, loc,
+        rewriter_.getI64Type(), (info.variable << 3) | 2)};
+    return mlir::LLVM::IntToPtrOp::create(
+        rewriter_, loc, mlir::LLVM::LLVMPointerType::get(module_.getContext()), word);
+  }
   mlir::Value base{
       mlir::LLVM::AddressOfOp::create(rewriter_, loc, info.global)};
   if (info.tag == 0) {
@@ -1213,9 +1223,39 @@ static llvm::SmallVector<llvm::StringRef> SplitTypeArguments(llvm::StringRef tex
   return arguments;
 }
 
+// The numbers of a type name's type variables, in increasing order.
+static llvm::SmallVector<unsigned> TypeVariablesOf(llvm::StringRef name) {
+  llvm::SmallVector<unsigned> variables;
+  for (std::size_t i = 0; i + 1 < name.size(); ++i) {
+    bool start{i == 0 || !(llvm::isAlnum(name[i - 1]) || name[i - 1] == '_' ||
+        name[i - 1] == '.')};
+    if (name[i] != 'T' || !start || !llvm::isDigit(name[i + 1])) {
+      continue;
+    }
+    std::size_t end{i + 1};
+    unsigned number{0};
+    while (end < name.size() && llvm::isDigit(name[end])) {
+      number = number * 10 + (name[end++] - '0');
+    }
+    if (end == name.size() || !(llvm::isAlnum(name[end]) || name[end] == '_')) {
+      variables.push_back(number);
+    }
+  }
+  llvm::sort(variables);
+  variables.erase(std::unique(variables.begin(), variables.end()), variables.end());
+  return variables;
+}
+
 std::optional<Lowerer::StaticTypeInfo> Lowerer::RootTypeInfo(
-    llvm::StringRef name, mlir::Location loc) {
+    llvm::StringRef name, llvm::ArrayRef<unsigned> variables, mlir::Location loc) {
   name = name.trim();
+  if (name.size() > 1 && name[0] == 'T' &&
+      llvm::all_of(name.drop_front(), llvm::isDigit)) {
+    unsigned number{0};
+    (void)name.drop_front().getAsInteger(10, number);
+    const unsigned *place{llvm::find(variables, number)};
+    return StaticTypeInfo{nullptr, 0, place - variables.begin()};
+  }
   llvm::StringRef base{name};
   llvm::SmallVector<llvm::StringRef> arguments;
   if (name.starts_with("{") && name.ends_with("}")) {
@@ -1241,12 +1281,14 @@ std::optional<Lowerer::StaticTypeInfo> Lowerer::RootTypeInfo(
   std::string key{symbol};
   llvm::SmallVector<StaticTypeInfo> known;
   for (llvm::StringRef argument : arguments) {
-    std::optional<StaticTypeInfo> info{RootTypeInfo(argument, loc)};
+    std::optional<StaticTypeInfo> info{RootTypeInfo(argument, variables, loc)};
     if (!info) {
       return std::nullopt;
     }
     known.push_back(*info);
-    key += "," + info->global.getSymName().str();
+    key += "," + (info->variable >= 0
+            ? "T" + std::to_string(info->variable)
+            : info->global.getSymName().str());
   }
   return StaticTypeInfo{StaticTypeInfoCell(descriptor, key,
                             VariableArity(constructor), known, loc),
@@ -1264,6 +1306,8 @@ enum RootKind : std::int64_t {
   kRootString,
   kRootArray,
   kRootEnvironment,
+  kRootPolymorphicTerm,
+  kRootWord,
 };
 
 std::int64_t Lowerer::RootTypeIndex(
@@ -1295,8 +1339,13 @@ void Lowerer::EmitRootTable() {
     mlir::Type type{types[i]};
     Entry entry{kRootUnresolved, std::nullopt, nullptr};
     if (auto term{mlir::dyn_cast<merk::TermType>(type)}) {
-      entry.info = RootTypeInfo(term.getName(), loc);
-      entry.kind = entry.info ? kRootTerm : kRootUnresolved;
+      llvm::SmallVector<unsigned> variables{TypeVariablesOf(term.getName())};
+      entry.info = RootTypeInfo(term.getName(), variables, loc);
+      entry.kind = !entry.info     ? kRootUnresolved
+          : variables.empty() ? kRootTerm
+                              : kRootPolymorphicTerm;
+    } else if (mlir::isa<merk::WordType>(type)) {
+      entry.kind = kRootWord;
     } else if (mlir::isa<merk::TypeInfoType>(type)) {
       entry.kind = kRootTypeInfo;
     } else if (mlir::isa<merk::TypeclassInfoType>(type)) {
@@ -2363,18 +2412,29 @@ void Lowerer::AttachLive(merk::LiveOp live, mlir::LLVM::CallOp call) {
     bundle.push_back(mlir::LLVM::ConstantOp::create(
         rewriter_, loc, rewriter_.getI64Type(), kInRegion));
   }
-  for (auto [value, attr] : llvm::zip(live.getValues(), live.getTypes())) {
+  auto counts{live->getAttrOfType<mlir::ArrayAttr>("info_counts")};
+  std::size_t position{0};
+  for (auto [k, attr] : llvm::enumerate(live.getTypes())) {
+    mlir::Value value{live.getValues()[position++]};
+    std::int64_t count{
+        counts ? mlir::cast<mlir::IntegerAttr>(counts[k]).getInt() : 0};
+    mlir::OperandRange infos{live.getValues().slice(position, count)};
+    position += count;
     mlir::Type type{mlir::cast<mlir::TypeAttr>(attr).getValue()};
     if (!mlir::isa<mlir::TupleType>(type) &&
         !mlir::isa<mlir::LLVM::LLVMPointerType>(Convert(type))) {
       continue;
     }
-    // An index in this module's table of root types (EmitRootTable).
+    // An index in this module's table of root types (EmitRootTable), with
+    // the number of the root's type_infos, which follow it, above it.
     std::int64_t index{
         liveTypes_.try_emplace(type, liveTypes_.size()).first->second};
-    bundle.push_back(mlir::LLVM::ConstantOp::create(
-        rewriter_, loc, rewriter_.getI64Type(), index));
+    bundle.push_back(mlir::LLVM::ConstantOp::create(rewriter_, loc,
+        rewriter_.getI64Type(), index | (count << 32)));
     bundle.push_back(LoweredValue(value, loc));
+    for (mlir::Value info : infos) {
+      bundle.push_back(LoweredValue(info, loc));
+    }
   }
   call.getOpBundleOperandsMutable().join().append(bundle);
   call.setOpBundleSizes({static_cast<std::int32_t>(bundle.size())});
@@ -3334,6 +3394,8 @@ llvm::LogicalResult Lowerer::Lower() {
   // After that pass, which looks for a call next to the cells it fills.
   if (!device_) {
     MarkSafepoints(module_);
+  } else {
+    module_.walk([](merk::RootTypeOp note) { note.erase(); });
   }
   if (mlir::failed(LowerTerms())) {
     return llvm::failure();

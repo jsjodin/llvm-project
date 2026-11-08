@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <set>
 #include "MLIRGenImpl.h"
 
 namespace merkurius::codegen {
@@ -656,7 +657,81 @@ mlir::Value MerkGenerator::Coerce(
   return value;
 }
 
+// The type variables of a type, into `variables`; false for a type that has
+// one the runtime cannot name.
+static bool CollectTypeVariables(
+    const semantics::Type *type, std::set<unsigned> &variables) {
+  switch (type->kind) {
+  case semantics::TypeKind::Variable:
+    variables.insert(type->var);
+    return true;
+  case semantics::TypeKind::Named:
+  case semantics::TypeKind::Tuple:
+    for (const semantics::Type *argument : type->arguments) {
+      if (!CollectTypeVariables(argument, variables)) {
+        return false;
+      }
+    }
+    return true;
+  case semantics::TypeKind::Existential:
+  case semantics::TypeKind::HigherOrder:
+    return false;
+  default:
+    return true;
+  }
+}
+
+void MerkGenerator::AnnotateRoots(const ProcedureBody &body) {
+  if (failed_ || Terminated() || target_.options().openMPIsTargetDevice) {
+    return;
+  }
+  // Temporary (chunk 3, piece 5b, docs/INPROGRESS.md, Statepoints and stack
+  // maps): code that outlining moves to a procedure of its own would have to
+  // capture the type_infos, so its roots stay unresolved for now.
+  for (mlir::Operation *parent{builder_.getBlock()->getParentOp()};
+      parent && !mlir::isa<merk::ProcOp>(parent);
+      parent = parent->getParentOp()) {
+    if (!mlir::isa<merk::IteOp, merk::SwitchOp>(parent)) {
+      return;
+    }
+  }
+  mlir::Region *here{builder_.getBlock()->getParent()};
+  for (auto [var, value] : values_) {
+    if (var >= body.vars.size() || !value ||
+        !value.getParentRegion()->isAncestor(here) ||
+        !mlir::isa<merk::WordType, merk::TermType>(value.getType()) ||
+        !annotated_.insert(value).second) {
+      continue;
+    }
+    rootTypes_.insert(body.vars[var].type);
+    std::set<unsigned> variables;
+    if (!CollectTypeVariables(body.vars[var].type, variables) ||
+        variables.empty()) {
+      continue;
+    }
+    llvm::SmallVector<mlir::Value> infos;
+    for (unsigned variable : variables) {
+      mlir::Value info{typeInfos_.lookup(variable)};
+      if (!info || !info.getParentRegion()->isAncestor(here)) {
+        infos.clear();
+        break;
+      }
+      infos.push_back(info);
+    }
+    if (!infos.empty()) {
+      merk::RootTypeOp::create(builder_, value.getLoc(), value, infos);
+    }
+  }
+}
+
 void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
+  // Before as well, as a goal that ends the body leaves no place after it.
+  AnnotateRoots(body);
+  GoalBody(goal, body);
+  AnnotateRoots(body);
+}
+
+void MerkGenerator::GoalBody(const Body &goal, const ProcedureBody &body) {
   if (failed_ || Terminated()) {
     return;
   }
@@ -1401,6 +1476,10 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
                            Comparable(represented->type, seen))) {
       EnsureDescriptor(*canonical, symbol->source);
     }
+  }
+  // Last, as each brings the procedures that test and compare its type.
+  for (const semantics::Type *type : rootTypes_) {
+    EnsureRootDescriptors(type);
   }
   if (!foreignCode_.empty()) {
     // The module's own foreign_decl and foreign_code for C come first.

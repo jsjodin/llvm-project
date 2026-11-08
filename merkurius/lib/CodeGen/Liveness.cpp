@@ -18,7 +18,7 @@
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
-#include "llvm/Support/Regex.h"
+#include "mlir/IR/Dominance.h"
 
 namespace merkurius::codegen {
 namespace {
@@ -30,18 +30,6 @@ bool IsRoot(mlir::Type type) {
   return mlir::isa<merk::TermType, merk::WordType, merk::StringType,
       merk::ArrayType, merk::ClosureType, merk::TypeInfoType,
       merk::TypeclassInfoType, merk::RefType>(type);
-}
-
-bool IsPolymorphic(mlir::Type type) {
-  if (mlir::isa<merk::WordType>(type)) {
-    return true;
-  }
-  auto term{mlir::dyn_cast<merk::TermType>(type)};
-  return term && llvm::Regex{"[(, ]T[0-9]+[,)]"}.match(term.getName());
-}
-
-bool IsTypeWord(mlir::Type type) {
-  return mlir::isa<merk::TypeInfoType, merk::TypeclassInfoType>(type);
 }
 
 // An operation that makes a cell, which can start a collection. What it stores
@@ -63,11 +51,13 @@ void Union(Live &into, const Live &from) {
 
 class Marker {
 public:
-  explicit Marker(merk::ProcOp proc) {
-    for (mlir::BlockArgument argument : proc.getArguments()) {
-      if (IsTypeWord(argument.getType())) {
-        typeWords_.push_back(argument);
-      }
+  explicit Marker(merk::ProcOp proc) : dominance_{proc} {
+    llvm::SmallVector<merk::RootTypeOp> notes;
+    proc.walk([&](merk::RootTypeOp note) { notes.push_back(note); });
+    for (merk::RootTypeOp note : notes) {
+      infos_[note.getValue()].assign(
+          note.getInfos().begin(), note.getInfos().end());
+      note.erase();
     }
   }
 
@@ -77,8 +67,13 @@ private:
   void ScanRegions(mlir::Operation *op, Live &live);
   void Mark(mlir::Operation *op, Live &live);
   void MarkRegionCalls(mlir::Operation *op);
+  // Whether the type_infos are defined before `op`. A value can be made before
+  // the code that finds its type_info.
+  bool Available(llvm::ArrayRef<mlir::Value> infos, mlir::Operation *op);
 
-  llvm::SmallVector<mlir::Value> typeWords_;
+  // The type_infos of each polymorphic value that has them.
+  llvm::DenseMap<mlir::Value, llvm::SmallVector<mlir::Value, 2>> infos_;
+  mlir::DominanceInfo dominance_;
 };
 
 // A value defined outside `op` that something inside it uses.
@@ -95,25 +90,20 @@ void UsesInside(mlir::Operation *op, Live &uses) {
   }
 }
 
+bool Marker::Available(llvm::ArrayRef<mlir::Value> infos, mlir::Operation *op) {
+  return llvm::all_of(infos, [&](mlir::Value info) {
+    return dominance_.properlyDominates(info, op);
+  });
+}
+
 void Marker::Mark(mlir::Operation *op, Live &live) {
   llvm::SmallVector<mlir::Value> values;
   llvm::SmallVector<mlir::Attribute> types;
-  bool polymorphic{false};
+  llvm::SmallVector<std::int64_t> counts;
   mlir::Builder builder{op->getContext()};
   llvm::SmallSetVector<mlir::Value, 8> all{live.begin(), live.end()};
   if (Allocates(op)) {
     all.insert(op->operand_begin(), op->operand_end());
-  }
-  for (mlir::Value value : all) {
-    polymorphic = polymorphic || IsPolymorphic(value.getType());
-  }
-  // Temporary (chunk 3, docs/INPROGRESS.md, Statepoints and stack maps, piece
-  // 5): a !merk.word does not say which type_info is its own, so all of the
-  // procedure's stay live, as much as the collector could need.
-  if (polymorphic) {
-    all.insert(typeWords_.begin(), typeWords_.end());
-    // Which makes them live before here, for the safepoints before.
-    live.insert(typeWords_.begin(), typeWords_.end());
   }
   // A call that is given an environment runs while it is in use, though it may
   // not be used after.
@@ -124,10 +114,26 @@ void Marker::Mark(mlir::Operation *op, Live &live) {
       }
     }
   }
+  // What a root's type_infos are needs them live here, and so before here.
+  llvm::SmallVector<mlir::Value> roots{all.begin(), all.end()};
+  for (mlir::Value value : roots) {
+    auto it{infos_.find(value)};
+    if (it != infos_.end() && Available(it->second, op)) {
+      all.insert(it->second.begin(), it->second.end());
+      live.insert(it->second.begin(), it->second.end());
+    }
+  }
   for (mlir::Value value : all) {
     if (IsRoot(value.getType())) {
       values.push_back(value);
       types.push_back(mlir::TypeAttr::get(value.getType()));
+      auto it{infos_.find(value)};
+      if (it != infos_.end() && Available(it->second, op)) {
+        values.append(it->second.begin(), it->second.end());
+        counts.push_back(it->second.size());
+      } else {
+        counts.push_back(0);
+      }
     } else if (auto env{value.getDefiningOp<merk::EnvNewOp>()}) {
       // One of this frame, given by its layout. One that is an argument is
       // in the frame of a caller, which lists it.
@@ -138,12 +144,14 @@ void Marker::Mark(mlir::Operation *op, Live &live) {
         values.push_back(value);
         types.push_back(mlir::TypeAttr::get(
             mlir::TupleType::get(op->getContext(), layout)));
+        counts.push_back(0);
       }
     }
   }
   mlir::OpBuilder before{op};
-  merk::LiveOp::create(
-      before, op->getLoc(), values, builder.getArrayAttr(types));
+  auto marker{merk::LiveOp::create(
+      before, op->getLoc(), values, builder.getArrayAttr(types))};
+  marker->setAttr("info_counts", builder.getI64ArrayAttr(counts));
 }
 
 // Nothing collects during a region. Its calls say so, as the optimizer can

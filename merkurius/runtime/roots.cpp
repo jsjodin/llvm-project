@@ -33,6 +33,8 @@ enum RootKind : std::int64_t {
   RootString,
   RootArray,
   RootEnvironment,
+  RootPolymorphicTerm,
+  RootWord,
 };
 
 struct RootEntry {
@@ -243,12 +245,28 @@ void CheckTerm(Word value, const Type &type, int &budget) {
   }
 }
 
-void CheckRoot(Word value, const RootEntry &entry) {
+constexpr int kMostTypeInfos{32};
+
+void CheckRoot(Word value, const RootEntry &entry, const Word *infos = nullptr,
+    std::int64_t count = 0) {
   rootsChecked.fetch_add(1, std::memory_order_relaxed);
   int budget{kBudget};
   switch (entry.kind) {
   case RootTerm:
     CheckTerm(value, Resolve(entry.pointer, nullptr), budget);
+    return;
+  case RootWord:
+  case RootPolymorphicTerm:
+    if (count == 0) {
+      unresolvedRoots.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    if (entry.kind == RootWord) {
+      CheckTerm(value, Resolve(infos[0], nullptr), budget);
+    } else {
+      Environment environment{infos, nullptr, nullptr};
+      CheckTerm(value, Resolve(entry.pointer, &environment), budget);
+    }
     return;
   case RootUnresolved:
     unresolvedRoots.fetch_add(1, std::memory_order_relaxed);
@@ -297,7 +315,16 @@ void CheckFrame(const Safepoint &safepoint, char *stackPointer) {
   std::int64_t pairs{ConstantOf(safepoint, state[0])};
   const Location *types{state + 1};
   const Location *environments{types + pairs};
-  std::int64_t environmentCount{(deopt - 1 - pairs) / 2};
+  // A type's index is -1, all ones, for one to ignore, with no type_infos.
+  std::int64_t typeInfos{0};
+  for (std::int64_t i{0}; i < pairs; ++i) {
+    std::int64_t bits{ConstantOf(safepoint, types[i])};
+    if (bits >= 0) {
+      typeInfos += bits >> 32;
+    }
+  }
+  std::int64_t environmentCount{(deopt - 1 - pairs - typeInfos) / 2};
+  const Location *infoAt{environments + 2 * environmentCount};
   const Location *gc{state + deopt};
   if (gc + 2 * pairs != locations + record->locationCount) {
     Bad("a stack map whose roots do not match its table", pairs);
@@ -312,7 +339,22 @@ void CheckFrame(const Safepoint &safepoint, char *stackPointer) {
         safepoint.table->entries[layout]);
   }
   for (std::int64_t i{0}; i < pairs; ++i) {
-    std::int64_t type{ConstantOf(safepoint, types[i])};
+    std::int64_t bits{ConstantOf(safepoint, types[i])};
+    std::int64_t type{bits < 0 ? bits : bits & 0xffffffff};
+    std::int64_t count{bits < 0 ? 0 : bits >> 32};
+    Word infos[kMostTypeInfos];
+    for (std::int64_t k{0}; k < count; ++k, ++infoAt) {
+      if (k >= kMostTypeInfos) {
+        continue;
+      }
+      if (infoAt->kind == Indirect) {
+        std::memcpy(&infos[k], stackPointer + infoAt->offset, sizeof(Word));
+      } else if (infoAt->kind == Constant || infoAt->kind == ConstantIndex) {
+        infos[k] = static_cast<Word>(ConstantOf(safepoint, *infoAt));
+      } else {
+        Bad("a type_info that is not in a stack slot", infoAt->kind);
+      }
+    }
     const Location &derived{gc[2 * i + 1]};
     if (type < 0 || derived.kind == Constant || derived.kind == ConstantIndex) {
       continue;
@@ -322,7 +364,8 @@ void CheckFrame(const Safepoint &safepoint, char *stackPointer) {
     }
     Word value;
     std::memcpy(&value, stackPointer + derived.offset, sizeof value);
-    CheckRoot(value, safepoint.table->entries[type]);
+    CheckRoot(value, safepoint.table->entries[type], infos,
+        count > kMostTypeInfos ? 0 : count);
   }
 }
 

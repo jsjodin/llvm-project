@@ -608,6 +608,17 @@ def Merk_RefStoreOp : Merk_Op<"ref_store"> {
   let assemblyFormat = "$value `,` $ref `[` $offset `]` attr-dict `:` type($value)";
 }
 
+def Merk_RootTypeOp : Merk_Op<"root_type", [NoMemoryEffect]> {
+  let summary = "the type_infos that say a polymorphic value's type";
+  let description = [{
+    For a `!merk.word`, the type_info of its type variable; for a term whose
+    type has type variables, theirs, by increasing number. Made by MLIRGen, and
+    read and erased by the pass that makes `merk.live`.
+  }];
+  let arguments = (ins AnyType:$value, Variadic<Merk_TypeInfoType>:$infos);
+  let assemblyFormat = "$value `:` type($value) `(` $infos `)` attr-dict";
+}
+
 def Merk_LiveOp : Merk_Op<"live"> {
   let summary = "what a collection at the next safepoint must find";
   let description = [{
