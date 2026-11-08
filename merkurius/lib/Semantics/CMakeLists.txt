@@ -2,6 +2,7 @@ add_merkurius_library(MerkuriusSemantics
   check-determinism.cpp
   check-modes.cpp
   check-purity.cpp
+  check-receives.cpp
   check-types.cpp
   check-uniqueness.cpp
   desugar.cpp

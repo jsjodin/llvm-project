@@ -114,6 +114,9 @@ struct FrontendOptions {
   // -fstub-unimplemented. Temporary (chunk 1 step 6, docs/INPROGRESS.md):
   // until code generation makes every procedure of the library.
   bool stubUnimplemented{false};
+  // -Wno-unselected-message turns off the warning about a mailbox whose
+  // receive goals' arms leave out a constructor of its messages.
+  bool warnUnselectedMessage{true};
   // --trace-flag=, for the flag(Name) conditions of trace goals.
   std::vector<std::string> traceFlags;
 };
