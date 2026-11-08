@@ -1,0 +1,8 @@
+The program of omp-target-branch.m, compiled by the driver for the
+machine's GPU and run there: a target region in a branch of an
+if-then-else.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-branch.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t \
+RUN:   | FileCheck %S/omp-target-branch.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
