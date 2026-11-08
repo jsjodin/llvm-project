@@ -3812,7 +3812,7 @@ ProcedureChecker::Result ProcedureChecker::CheckLambda(
     }
   }
   if (!waits.empty()) {
-    return NonlocalError(goal, map, std::move(waits), lambda.receive);
+    return NonlocalError(goal, map, std::move(waits), lambda.receive != nullptr);
   }
   if (!anys.empty()) {
     // mmc: "purity error: lambda is `ground' but contains the following

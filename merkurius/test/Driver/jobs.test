@@ -17,6 +17,11 @@ RUN: merkc -### -E -freceive-goal %S/Inputs/sumsq.m 2>&1 \
 RUN:   | FileCheck %s --check-prefix=RECEIVE
 RECEIVE: "-fc1" "-E" "-freceive-goal" "{{[^"]*}}sumsq.m"{{$}}
 
+The last of -Wunselected-message and -Wno-unselected-message is passed on.
+RUN: merkc -### -E -Wunselected-message -Wno-unselected-message \
+RUN:   %S/Inputs/sumsq.m 2>&1 | FileCheck %s --check-prefix=WARN
+WARN: "-fc1" "-E" "-Wno-unselected-message" "{{[^"]*}}sumsq.m"{{$}}
+
 Two inputs give two jobs.
 RUN: merkc -### -E %S/Inputs/sumsq.m %S/Inputs/sumsq.m 2>&1 \
 RUN:   | FileCheck %s --check-prefix=TWO

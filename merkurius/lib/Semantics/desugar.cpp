@@ -452,8 +452,10 @@ private:
   LoopScopes scopes_;
   ReceiveOccurrences receives_;
   bool processImported_;
-  // The lambda expression of the selector's case being desugared.
+  // The lambda expression of the selector's case being desugared, and the
+  // case.
   const parser::Lambda *selector_{nullptr};
+  const ReceiveCase *selectorCase_{nullptr};
   // The next number for a variable of a receive goal's expansion, beyond
   // the parse tree's.
   unsigned expansionVars_{1u << 30};
@@ -1681,7 +1683,8 @@ const Lambda *ClauseDesugarer::DesugarLambda(const parser::Lambda &lambda) {
   const Lambda *result{Make<Lambda>(lambda.tokens, lambda.kind,
       lambda.any, lambda.purity, Save(llvm::ArrayRef<VarId>{head_}),
       Save(llvm::ArrayRef<std::optional<parser::Mode>>{modes}),
-      lambda.determinism, Conjoin(lambda.tokens, goals), &lambda == selector_)};
+      lambda.determinism, Conjoin(lambda.tokens, goals),
+      &lambda == selector_ ? selectorCase_ : nullptr)};
   for (const auto &[number, var] : outer) {
     if (var) {
       numbers_[number] = *var;
@@ -2025,6 +2028,16 @@ void ClauseDesugarer::DesugarReceive(
     parser::DataTerm caseArguments[]{*arms[arm.front()]->mailbox, lambda,
         selector};
     const parser::Variable *caseVar{ExpansionVar(at, "ReceiveSelector")};
+    // An arm takes every message if its pattern is a variable of its own.
+    llvm::SmallVector<bool, 4> takesAll;
+    for (std::size_t i : arm) {
+      const auto *var{
+          std::get_if<const parser::Variable *>(&*arms[i]->pattern)};
+      takesAll.push_back(var &&
+          ((*var)->name == "_" || !receives_.Outside(receive, (*var)->number)));
+    }
+    TokenRange mailboxAt{std::visit(
+        [](const auto *x) { return x->tokens; }, *arms[arm.front()]->mailbox)};
     llvm::SmallVector<std::pair<unsigned, std::optional<VarId>>, 8> saved;
     for (std::size_t i : arm) {
       for (const parser::Variable *var : newVars[i]) {
@@ -2040,10 +2053,13 @@ void ClauseDesugarer::DesugarReceive(
       }
     }
     selector_ = lambda;
+    selectorCase_ = Make<ReceiveCase>(mailboxAt, Text(mailboxAt),
+        Save(llvm::ArrayRef<bool>(takesAll)));
     DesugarInto(Make<parser::Unification>(at, caseVar,
                     ProcessTerm(at, "selecting_matching", caseArguments)),
         out);
     selector_ = nullptr;
+    selectorCase_ = nullptr;
     for (const auto &[number, var] : saved) {
       if (var) {
         numbers_[number] = *var;

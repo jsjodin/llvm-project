@@ -135,6 +135,8 @@ public:
   InstContext &insts() { return insts_; }
   // The operations on insts, with the module's types' constructors.
   InstOps &ops() { return *ops_; }
+  // The module's types' constructors.
+  InstTypes &constructors() { return *constructors_; }
   // The procedures of the module's predicates and functions, in the order
   // of their symbols.
   llvm::ArrayRef<Procedure> procedures() const { return procedures_; }
