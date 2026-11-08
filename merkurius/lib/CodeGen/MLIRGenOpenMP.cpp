@@ -1624,6 +1624,11 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
     }
   }
   targetOp.getMapVarsMutable().assign(maps);
+  // The host counts the running regions, and the last to end frees the
+  // devices' arenas (docs/INPROGRESS.md, The device's side of the first
+  // slice, step 6).
+  merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+      "merk_region_enter", mlir::ValueRange{}, /*can_fail=*/false);
   // The region reads its inputs from their slots and stores its outputs;
   // an output may be an input's value, as in Y = X. A region that is
   // teams around a parallel region reads them in the parallel, as Flang
@@ -1699,6 +1704,8 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
     mlir::omp::TerminatorOp::create(builder_, loc);
   }
   builder_.setInsertionPointAfter(targetOp);
+  merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+      "merk_region_exit", mlir::ValueRange{}, /*can_fail=*/false);
   values_ = before;
   for (auto [var, type, slot] : llvm::zip(outputs, outputTypes, outputSlots)) {
     values_[var] = mlir::LLVM::LoadOp::create(builder_, loc, type, slot);

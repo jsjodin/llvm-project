@@ -34,6 +34,12 @@ constexpr uint32_t rpcSend{RpcOpcode(1)};
 // mailbox has none, or is closed or another node's.
 constexpr uint32_t rpcPoll{RpcOpcode(2)};
 
+// A chunk for the device's arena: the buffer's words are the device's
+// number, the address of its arena, and the bytes the chunk must hold at
+// least. The host answers with the chunk's address and its size in bytes.
+// It frees the chunks, and clears the arena, when no region is running.
+constexpr uint32_t rpcChunk{RpcOpcode(3)};
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_RPC_OPCODES_H_
