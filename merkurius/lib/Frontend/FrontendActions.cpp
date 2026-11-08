@@ -1023,7 +1023,7 @@ bool CodeGenAction::LowerLLVMIR() {
                  << triple.str() << '\n';
   }
   llvmModule->setTargetTriple(triple);
-  llvmModule->setDataLayout(target->targetMachine().createDataLayout());
+  llvmModule->setDataLayout(target->dataLayout());
   llvm::raw_ostream *os{Output()};
   if (!os) {
     return false;

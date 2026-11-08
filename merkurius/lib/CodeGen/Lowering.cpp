@@ -60,6 +60,7 @@ namespace {
 // The runtime's function that reports an uncaught exception and exits.
 constexpr llvm::StringLiteral kThrowSymbol{"merk_uncaught_exception"};
 constexpr llvm::StringLiteral kHeapAddressSymbol{"merk.heap_address"};
+constexpr unsigned kHeapAddressSpace{1};
 
 // Whether a procedure of this determinism returns a success flag (design
 // document, "Calling convention").
@@ -152,12 +153,46 @@ public:
   llvm::LogicalResult Lower();
 
 private:
+  // A pointer the collector will follow, or a word that may be one: its
+  // address space tells the statepoint rewrite which pointers are roots
+  // (docs/INPROGRESS.md, Heap pointers in an address space of their own). A
+  // device has no collector, and there the number means something else.
+  mlir::LLVM::LLVMPointerType HeapPointer() const {
+    return mlir::LLVM::LLVMPointerType::get(
+        mlir::ModuleOp{module_}.getContext(), device_ ? 0 : kHeapAddressSpace);
+  }
+  // The heap pointer to something static, whose address is a constant.
+  mlir::Value ToHeap(mlir::Value address, mlir::Location loc) {
+    return device_ ? address
+                   : mlir::LLVM::AddrSpaceCastOp::create(
+                         rewriter_, loc, HeapPointer(), address)
+                         .getResult();
+  }
+  // A pointer as C takes it, compiled with the module's foreign code or
+  // known to the optimizer by its name, as strcmp is.
+  mlir::Value ToC(mlir::Value operand, mlir::Location loc) {
+    // Its type may still be merk's, from an operation not lowered yet.
+    mlir::Value value{LoweredValue(operand, loc)};
+    auto type{mlir::dyn_cast<mlir::LLVM::LLVMPointerType>(value.getType())};
+    if (!type || type.getAddressSpace() != kHeapAddressSpace || device_) {
+      return value;
+    }
+    return mlir::LLVM::AddrSpaceCastOp::create(rewriter_, loc,
+        mlir::LLVM::LLVMPointerType::get(module_.getContext()), value);
+  }
+  mlir::Type CType(mlir::Type type) const {
+    return type == mlir::Type{HeapPointer()}
+        ? mlir::LLVM::LLVMPointerType::get(type.getContext())
+        : type;
+  }
   // A merk type's LLVM type: a string is a pointer to its bytes, an array a
   // pointer to its size and elements, and a term its layout's.
   mlir::Type Convert(mlir::Type type) const {
     if (mlir::isa<merk::StringType, merk::ArrayType, merk::TypeInfoType,
-            merk::TypeclassInfoType, merk::ClosureType, merk::ContType,
-            merk::EnvType, merk::RefType>(type)) {
+            merk::TypeclassInfoType, merk::ClosureType, merk::RefType>(type)) {
+      return HeapPointer();
+    }
+    if (mlir::isa<merk::ContType, merk::EnvType>(type)) {
       return mlir::LLVM::LLVMPointerType::get(type.getContext());
     }
     if (mlir::isa<merk::WordType>(type)) {
@@ -165,9 +200,7 @@ private:
     }
     if (auto term{mlir::dyn_cast<merk::TermType>(type)}) {
       auto it{layouts_.find(term.getName())};
-      return it == layouts_.end()
-          ? mlir::LLVM::LLVMPointerType::get(type.getContext())
-          : it->second.type;
+      return it == layouts_.end() ? mlir::Type{HeapPointer()} : it->second.type;
     }
     return type;
   }
@@ -410,7 +443,6 @@ private:
 
 llvm::LogicalResult Lowerer::Layouts() {
   mlir::MLIRContext *context{module_.getContext()};
-  auto ptr{mlir::LLVM::LLVMPointerType::get(context)};
   auto word{mlir::IntegerType::get(context, 64)};
   llvm::SmallVector<std::pair<std::string, mlir::Location>> abstract;
   for (auto def : llvm::make_early_inc_range(module_.getOps<merk::TypeDefOp>())) {
@@ -434,7 +466,7 @@ llvm::LogicalResult Lowerer::Layouts() {
                 .size() == 1) {
       layout.kind = TermLayout::Kind::NoTag;
     } else {
-      layout.type = ptr;
+      layout.type = HeapPointer();
     }
     // Tag 0 is the constants', if there are any; when the constructors
     // with arguments need more tags than are left, the last is shared.
@@ -503,7 +535,7 @@ mlir::Type Lowerer::ResolveLayoutType(
     return layout.type;
   }
   if (!seen.insert(name).second) {
-    return mlir::LLVM::LLVMPointerType::get(module_.getContext());
+    return HeapPointer();
   }
   mlir::Type field{layout.functors.front().fields.front()};
   auto term{mlir::dyn_cast<merk::TermType>(field)};
@@ -607,6 +639,10 @@ mlir::LLVM::GlobalOp Lowerer::StaticCell(const TermLayout::Functor &functor,
           mlir::cast<mlir::IntegerAttr>(value.value).getValue().zext(64));
       value.type = i64;
     }
+    // A pointer in static data is its address.
+    if (mlir::isa<mlir::LLVM::LLVMPointerType>(value.type)) {
+      value.type = mlir::LLVM::LLVMPointerType::get(context);
+    }
     words.push_back(value.type);
   }
   auto cellType{mlir::LLVM::LLVMStructType::getLiteral(context, words)};
@@ -646,7 +682,7 @@ mlir::Value Lowerer::WordsEqual(
 }
 
 llvm::LogicalResult Lowerer::LowerTerms() {
-  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  auto ptr{HeapPointer()};
   auto i64{rewriter_.getI64Type()};
   // Each with its term's type, which lowering the operation that makes the
   // term changes.
@@ -751,13 +787,15 @@ llvm::LogicalResult Lowerer::LowerTerms() {
         }
         if (fields.size() == functor->arity) {
           mlir::LLVM::GlobalOp cell{StaticCell(*functor, fields, loc)};
-          result = mlir::LLVM::AddressOfOp::create(rewriter_, loc, cell);
+          result = ToHeap(
+              mlir::LLVM::AddressOfOp::create(rewriter_, loc, cell), loc);
           known = StaticValue{StaticValue::Kind::Cell, ptr, {}, cell,
               functor->tag,
               "@" + cell.getSymName().str() + "+" +
                   std::to_string(functor->tag)};
         } else {
-          result = mrt::AllocOp::create(rewriter_, loc, functor->arity + skip);
+          result = mrt::AllocOp::create(
+              rewriter_, loc, ptr, functor->arity + skip);
           if (functor->secondary) {
             mrt::FieldStoreOp::create(rewriter_, loc,
                 mlir::LLVM::ConstantOp::create(
@@ -826,7 +864,8 @@ llvm::LogicalResult Lowerer::LowerTerms() {
         }
         mlir::Value address{mlir::LLVM::SelectOp::create(rewriter_, loc, has,
             mrt::UntagOp::create(rewriter_, loc, term, functor->tag),
-            mlir::LLVM::AddressOfOp::create(rewriter_, loc, noSecondary_))};
+            ToHeap(mlir::LLVM::AddressOfOp::create(rewriter_, loc, noSecondary_),
+                loc))};
         mlir::Value secondary{
             mrt::FieldLoadOp::create(rewriter_, loc, i64, address, 0)};
         has = mlir::LLVM::AndOp::create(rewriter_, loc, has,
@@ -1033,7 +1072,8 @@ void Lowerer::LowerConstant(merk::ConstantOp constant) {
   }
   mlir::LLVM::GlobalOp global{StringGlobal(string.getValue(), loc)};
   rewriter_.setInsertionPoint(constant);
-  rewriter_.replaceOpWithNewOp<mlir::LLVM::AddressOfOp>(constant, global);
+  rewriter_.replaceOp(constant,
+      ToHeap(mlir::LLVM::AddressOfOp::create(rewriter_, loc, global), loc));
 }
 
 void Lowerer::LowerToWord(merk::ToWordOp op) {
@@ -1100,7 +1140,7 @@ void Lowerer::LowerTypeInfo(merk::TypeInfoOp op) {
   rewriter_.setInsertionPoint(op);
   if (arguments == 0) {
     StaticTypeInfo info{descriptor, 0};
-    mlir::Value value{TypeInfoAddress(info, loc)};
+    mlir::Value value{ToHeap(TypeInfoAddress(info, loc), loc)};
     // The value that replaces it is what its users look up.
     staticTypeInfos_[value] = info;
     rewriter_.replaceOp(op, value);
@@ -1153,13 +1193,13 @@ void Lowerer::LowerTypeInfo(merk::TypeInfoOp op) {
       mlir::LLVM::ReturnOp::create(rewriter_, loc, init);
     }
     StaticTypeInfo info{cell, 1};
-    mlir::Value value{TypeInfoAddress(info, loc)};
+    mlir::Value value{ToHeap(TypeInfoAddress(info, loc), loc)};
     staticTypeInfos_[value] = info;
     rewriter_.replaceOp(op, value);
     return;
   }
   std::int64_t word{0};
-  mlir::Value new_{mrt::AllocOp::create(rewriter_, loc, ptr,
+  mlir::Value new_{mrt::AllocOp::create(rewriter_, loc, HeapPointer(),
       static_cast<std::int64_t>(arguments + (variableArity ? 2 : 1)))};
   mrt::FieldStoreOp::create(rewriter_, loc,
       TypeInfoAddress(StaticTypeInfo{descriptor, 0}, loc), new_, word++);
@@ -1172,7 +1212,7 @@ void Lowerer::LowerTypeInfo(merk::TypeInfoOp op) {
   for (mlir::Value argument : op.getArguments()) {
     mrt::FieldStoreOp::create(rewriter_, loc, argument, new_, word++);
   }
-  rewriter_.replaceOpWithNewOp<mrt::TagOp>(op, ptr, new_, 1);
+  rewriter_.replaceOpWithNewOp<mrt::TagOp>(op, HeapPointer(), new_, 1);
 }
 
 void Lowerer::LowerInstances() {
@@ -1272,14 +1312,14 @@ llvm::LogicalResult Lowerer::LowerTypeclassInfo(merk::TypeclassInfoOp op) {
       mlir::LLVM::ReturnOp::create(rewriter_, loc, init);
     }
     StaticTypeInfo info{cell, 0};
-    mlir::Value value{TypeInfoAddress(info, loc)};
+    mlir::Value value{ToHeap(TypeInfoAddress(info, loc), loc)};
     staticTypeInfos_[value] = info;
     rewriter_.replaceOp(op, value);
     return llvm::success();
   }
   std::int64_t word{0};
-  mlir::Value new_{mrt::AllocOp::create(
-      rewriter_, loc, ptr, static_cast<std::int64_t>(arguments + 1))};
+  mlir::Value new_{mrt::AllocOp::create(rewriter_, loc, HeapPointer(),
+      static_cast<std::int64_t>(arguments + 1))};
   mrt::FieldStoreOp::create(rewriter_, loc,
       mlir::LLVM::AddressOfOp::create(rewriter_, loc, table), new_, word++);
   for (mlir::Value argument : op.getArguments()) {
@@ -1292,7 +1332,7 @@ llvm::LogicalResult Lowerer::LowerTypeclassInfo(merk::TypeclassInfoOp op) {
 void Lowerer::LowerTypeclassInfoWord(merk::TypeclassInfoWordOp op) {
   mlir::Location loc{op.getLoc()};
   rewriter_.setInsertionPoint(op);
-  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  auto ptr{HeapPointer()};
   mlir::Value address{mlir::LLVM::GEPOp::create(rewriter_, loc, ptr,
       rewriter_.getI8Type(), op->getOperand(0),
       llvm::ArrayRef<mlir::LLVM::GEPArg>{
@@ -1346,7 +1386,8 @@ void Lowerer::LowerClosure(merk::ClosureOp op) {
   rewriter_.setInsertionPoint(op);
   auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
   std::int64_t captured{static_cast<std::int64_t>(op.getCaptured().size())};
-  mlir::Value cell{mrt::AllocOp::create(rewriter_, loc, ptr, captured + 2)};
+  mlir::Value cell{
+      mrt::AllocOp::create(rewriter_, loc, HeapPointer(), captured + 2)};
   mlir::Value layout;
   if (mlir::ArrayAttr captures{op.getCapturesAttr()}) {
     layout = mlir::LLVM::AddressOfOp::create(
@@ -1374,7 +1415,7 @@ void Lowerer::LowerClosure(merk::ClosureOp op) {
 void Lowerer::LowerClosureWord(merk::ClosureWordOp op) {
   mlir::Location loc{op.getLoc()};
   rewriter_.setInsertionPoint(op);
-  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  auto ptr{HeapPointer()};
   mlir::Value address{mlir::LLVM::GEPOp::create(rewriter_, loc, ptr,
       rewriter_.getI8Type(), op->getOperand(0),
       llvm::ArrayRef<mlir::LLVM::GEPArg>{
@@ -1718,7 +1759,7 @@ llvm::LogicalResult Lowerer::LowerTypeCtors() {
 void Lowerer::LowerTypeInfoWord(merk::TypeInfoWordOp op) {
   mlir::Location loc{op.getLoc()};
   rewriter_.setInsertionPoint(op);
-  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  auto ptr{HeapPointer()};
   mlir::Value address{mlir::LLVM::GEPOp::create(rewriter_, loc, ptr,
       rewriter_.getI8Type(), op->getOperand(0),
       llvm::ArrayRef<mlir::LLVM::GEPArg>{
@@ -1731,6 +1772,7 @@ mlir::Value Lowerer::CallDescriptorEntry(
   mlir::Location loc{op->getLoc()};
   rewriter_.setInsertionPoint(op);
   auto ptr{mlir::LLVM::LLVMPointerType::get(op->getContext())};
+  auto heap{HeapPointer()};
   auto i64{rewriter_.getI64Type()};
   mlir::Value info{op->getOperand(0)};
   // The descriptor: the type_info with tag 0, and a cell's first word with
@@ -1743,10 +1785,10 @@ mlir::Value Lowerer::CallDescriptorEntry(
       mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 0))};
   mlir::Block *before{rewriter_.getInsertionBlock()};
   mlir::Block *join{rewriter_.splitBlock(before, rewriter_.getInsertionPoint())};
-  mlir::Value descriptor{join->addArgument(ptr, loc)};
+  mlir::Value descriptor{join->addArgument(heap, loc)};
   mlir::Block *cell{rewriter_.createBlock(join)};
-  mlir::Value first{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr,
-      mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(), info,
+  mlir::Value first{mlir::LLVM::LoadOp::create(rewriter_, loc, heap,
+      mlir::LLVM::GEPOp::create(rewriter_, loc, heap, rewriter_.getI8Type(), info,
           llvm::ArrayRef<mlir::LLVM::GEPArg>{-1}),
       8)};
   mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{first}, join);
@@ -1755,10 +1797,10 @@ mlir::Value Lowerer::CallDescriptorEntry(
       mlir::ValueRange{info}, cell, mlir::ValueRange{});
   rewriter_.setInsertionPointToStart(join);
   mlir::Value entry{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr,
-      mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(),
+      mlir::LLVM::GEPOp::create(rewriter_, loc, heap, rewriter_.getI8Type(),
           descriptor, llvm::ArrayRef<mlir::LLVM::GEPArg>{offset}),
       8)};
-  auto type{mlir::LLVM::LLVMFunctionType::get(result, {ptr, i64, i64})};
+  auto type{mlir::LLVM::LLVMFunctionType::get(result, {heap, i64, i64})};
   auto call{mlir::LLVM::CallOp::create(rewriter_, loc, type,
       mlir::ValueRange{entry, info, op->getOperand(1), op->getOperand(2)})};
   call.setCConv(cconv_);
@@ -1793,13 +1835,14 @@ void Lowerer::LowerStringCompare(merk::StringCompareOp op) {
   auto i32{rewriter_.getI32Type()};
   auto call{mlir::LLVM::CallOp::create(rewriter_, op.getLoc(),
       RuntimeFunc("strcmp", i32, {ptr, ptr}),
-      mlir::ValueRange{op->getOperand(0), op->getOperand(1)})};
+      mlir::ValueRange{ToC(op->getOperand(0), op.getLoc()),
+          ToC(op->getOperand(1), op.getLoc())})};
   rewriter_.replaceOp(op, call.getResult());
 }
 
 void Lowerer::LowerCompareTypeInfo(merk::CompareTypeInfoOp op) {
   rewriter_.setInsertionPoint(op);
-  auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
+  auto ptr{HeapPointer()};
   auto i32{rewriter_.getI32Type()};
   auto call{mlir::LLVM::CallOp::create(rewriter_, op.getLoc(),
       RuntimeFunc("merk_compare_type_infos", i32, {ptr, ptr}),
@@ -1814,7 +1857,8 @@ void Lowerer::LowerStringEqual(merk::StringEqualOp op) {
   auto i32{rewriter_.getI32Type()};
   auto call{mlir::LLVM::CallOp::create(rewriter_, loc,
       RuntimeFunc("strcmp", i32, {ptr, ptr}),
-      mlir::ValueRange{op->getOperand(0), op->getOperand(1)})};
+      mlir::ValueRange{ToC(op->getOperand(0), op.getLoc()),
+          ToC(op->getOperand(1), op.getLoc())})};
   rewriter_.replaceOpWithNewOp<mlir::LLVM::ICmpOp>(op,
       mlir::LLVM::ICmpPredicate::eq, call.getResult(),
       mlir::LLVM::ConstantOp::create(rewriter_, loc, i32, 0));
@@ -1836,19 +1880,26 @@ void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
   auto pointer{mlir::LLVM::LLVMPointerType::get(context)};
   mlir::LLVM::LLVMFuncOp &func{funcs_[call.getCallee()]};
   if (!func) {
-    llvm::SmallVector<mlir::Type> inputs{Convert(call.getInputs().getTypes())};
+    llvm::SmallVector<mlir::Type> inputs;
+    for (mlir::Type input : Convert(call.getInputs().getTypes())) {
+      inputs.push_back(CType(input));
+    }
     if (byPointer) {
       inputs.append(outputs.size(), pointer);
     }
     mlir::Type result{canFail   ? flagType
-            : outputs.size() == 1 ? outputs.front()
+            : outputs.size() == 1 ? CType(outputs.front())
                                   : mlir::LLVM::LLVMVoidType::get(context)};
     mlir::OpBuilder::InsertionGuard guard{rewriter_};
     rewriter_.setInsertionPointToEnd(module_.getBody());
     func = mlir::LLVM::LLVMFuncOp::create(rewriter_, loc, call.getCallee(),
         mlir::LLVM::LLVMFunctionType::get(result, inputs));
   }
-  llvm::SmallVector<mlir::Value> arguments{call.getInputs()};
+  rewriter_.setInsertionPoint(call);
+  llvm::SmallVector<mlir::Value> arguments;
+  for (mlir::Value input : call.getInputs()) {
+    arguments.push_back(ToC(input, loc));
+  }
   llvm::SmallVector<mlir::Value> slots;
   if (byPointer) {
     for (mlir::Type type : outputs) {
@@ -1865,6 +1916,15 @@ void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
         mlir::LLVM::ConstantOp::create(rewriter_, loc, flagType,
             rewriter_.getI32IntegerAttr(0))));
   } else if (!byPointer) {
+    // A heap pointer cannot be cast into its address space at run time.
+    if (!outputs.empty() && outputs.front() != CType(outputs.front())) {
+      mlir::Value bits{mlir::LLVM::PtrToIntOp::create(rewriter_, loc,
+          rewriter_.getI64Type(), llvmCall.getResult())};
+      mlir::Value heap{mlir::LLVM::IntToPtrOp::create(
+          rewriter_, loc, outputs.front(), bits)};
+      rewriter_.replaceOp(call, heap);
+      return;
+    }
     rewriter_.replaceOp(call, llvmCall.getResults());
     return;
   }
@@ -2039,7 +2099,7 @@ mlir::Value Lowerer::CallPointer(mlir::Operation *call, mlir::Value code,
   if (inMemory) {
     inputs.push_back(ptr);
   }
-  inputs.push_back(ptr);
+  inputs.push_back(Convert(first.getType()));
   llvm::SmallVector<mlir::Type> converted{Convert(rest.getTypes())};
   inputs.append(converted.begin(), converted.end());
   auto funcType{mlir::LLVM::LLVMFunctionType::get(
@@ -2550,6 +2610,9 @@ mlir::Value Lowerer::ToWord(mlir::Value value, mlir::Location loc) {
   if (mlir::isa<mlir::IntegerType>(type)) {
     return mlir::LLVM::ZExtOp::create(rewriter_, loc, i64, value);
   }
+  // Temporary (chunk 3, docs/INPROGRESS.md, Heap pointers in an address space
+  // of their own, piece 3): a word that holds a pointer is an integer, which
+  // hides it from the statepoint rewrite, until a word is a heap pointer.
   if (mlir::isa<mlir::LLVM::LLVMPointerType>(type)) {
     return mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, value);
   }
@@ -2577,7 +2640,7 @@ mlir::Value Lowerer::ElementAddress(
   mlir::Value offset{mlir::LLVM::AddOp::create(rewriter_, loc, index,
       mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 1))};
   return mlir::LLVM::GEPOp::create(rewriter_, loc,
-      mlir::LLVM::LLVMPointerType::get(rewriter_.getContext()), i64, array,
+      Convert(array.getType()), i64, array,
       mlir::ValueRange{offset});
 }
 
@@ -2602,7 +2665,7 @@ mlir::Value Lowerer::InitialElement(
 void Lowerer::LowerArray(mlir::Operation *op) {
   mlir::Location loc{op->getLoc()};
   rewriter_.setInsertionPoint(op);
-  auto ptr{mlir::LLVM::LLVMPointerType::get(rewriter_.getContext())};
+  auto ptr{HeapPointer()};
   auto i64{rewriter_.getI64Type()};
   // The operands, not the accessors: an array the procedure was passed is
   // already a pointer.
@@ -2736,13 +2799,14 @@ mlir::LLVM::LLVMFuncOp Lowerer::HeapAddressFunc() {
 void Lowerer::LowerAlloc(mrt::AllocOp alloc) {
   mlir::Location loc{alloc.getLoc()};
   auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  auto cellPointer{HeapPointer()};
   auto i64{rewriter_.getI64Type()};
   std::int64_t bytes{8 * static_cast<std::int64_t>(alloc.getWords())};
   if (device_) {
     rewriter_.setInsertionPoint(alloc);
     rewriter_.replaceOp(alloc,
         mlir::LLVM::CallOp::create(rewriter_, loc,
-            RuntimeFunc("merk_device_alloc", ptr, {i64}),
+            RuntimeFunc("merk_device_alloc", cellPointer, {i64}),
             mlir::ValueRange{
                 mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, bytes)})
             .getResult());
@@ -2750,7 +2814,7 @@ void Lowerer::LowerAlloc(mrt::AllocOp alloc) {
   }
   mlir::Block *before{alloc->getBlock()};
   mlir::Block *after{rewriter_.splitBlock(before, alloc->getIterator())};
-  mlir::Value cell{after->addArgument(ptr, loc)};
+  mlir::Value cell{after->addArgument(cellPointer, loc)};
   rewriter_.replaceAllUsesWith(alloc.getResult(), cell);
   rewriter_.eraseOp(alloc);
   mlir::Block *fast{rewriter_.createBlock(after)};
@@ -2761,11 +2825,13 @@ void Lowerer::LowerAlloc(mrt::AllocOp alloc) {
   mlir::Value heap{mlir::LLVM::CallOp::create(
       rewriter_, loc, HeapAddressFunc(), mlir::ValueRange{})
           .getResult()};
-  mlir::Value next{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr, heap, 8)};
-  mlir::Value end{mlir::LLVM::GEPOp::create(rewriter_, loc, ptr,
+  // Loaded as heap pointers, so that a cell's pointer never has to be cast.
+  mlir::Value next{
+      mlir::LLVM::LoadOp::create(rewriter_, loc, cellPointer, heap, 8)};
+  mlir::Value end{mlir::LLVM::GEPOp::create(rewriter_, loc, cellPointer,
       rewriter_.getI8Type(), next,
       llvm::ArrayRef<mlir::LLVM::GEPArg>{static_cast<std::int32_t>(bytes)})};
-  mlir::Value limit{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr,
+  mlir::Value limit{mlir::LLVM::LoadOp::create(rewriter_, loc, cellPointer,
       mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, heapType, heap,
           llvm::ArrayRef<mlir::LLVM::GEPArg>{0, 1}),
       8)};
@@ -2778,7 +2844,7 @@ void Lowerer::LowerAlloc(mrt::AllocOp alloc) {
   mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{next}, after);
   rewriter_.setInsertionPointToStart(slow);
   mlir::Value slowCell{mlir::LLVM::CallOp::create(rewriter_, loc,
-      RuntimeFunc("merk_alloc_slow", ptr, {i64}),
+      RuntimeFunc("merk_alloc_slow", cellPointer, {i64}),
       mlir::ValueRange{mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, bytes)})
           .getResult()};
   mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{slowCell}, after);
@@ -2791,8 +2857,7 @@ mlir::Value Lowerer::OffsetBytes(
   if (bytes == 0) {
     return address;
   }
-  return mlir::LLVM::GEPOp::create(rewriter_, loc,
-      mlir::LLVM::LLVMPointerType::get(module_.getContext()),
+  return mlir::LLVM::GEPOp::create(rewriter_, loc, Convert(address.getType()),
       rewriter_.getI8Type(), address,
       llvm::ArrayRef<mlir::LLVM::GEPArg>{static_cast<std::int32_t>(bytes)});
 }
@@ -3040,6 +3105,30 @@ llvm::LogicalResult Lowerer::Lower() {
             Convert(cast.getResult(0).getType())) {
       cast.getResult(0).replaceAllUsesWith(cast.getOperand(0));
       rewriter_.eraseOp(cast);
+    } else if (cast->getNumOperands() == 1 && cast->getNumResults() == 1 &&
+        !device_) {
+      // OpenMP's lowering and the runtime's take an ordinary pointer. A heap
+      // pointer cannot be cast back into its address space at run time, so
+      // what comes back is its bits.
+      mlir::Type heap{HeapPointer()};
+      mlir::Type from{Convert(cast.getOperand(0).getType())};
+      mlir::Type to{Convert(cast.getResult(0).getType())};
+      mlir::Location loc{cast.getLoc()};
+      rewriter_.setInsertionPoint(cast);
+      mlir::Value operand{cast.getOperand(0)};
+      if (from == heap && to == CType(heap)) {
+        cast.getResult(0).replaceAllUsesWith(
+            mlir::LLVM::AddrSpaceCastOp::create(rewriter_, loc, to, operand)
+                .getResult());
+        rewriter_.eraseOp(cast);
+      } else if (from == CType(heap) && to == heap) {
+        mlir::Value bits{mlir::LLVM::PtrToIntOp::create(
+            rewriter_, loc, rewriter_.getI64Type(), operand)};
+        cast.getResult(0).replaceAllUsesWith(
+            mlir::LLVM::IntToPtrOp::create(rewriter_, loc, to, bits)
+                .getResult());
+        rewriter_.eraseOp(cast);
+      }
     }
   });
   LowerMrt();
@@ -3609,6 +3698,9 @@ void OptimizeLLVMIR(llvm::Module &module, const TargetInfo &target) {
 bool EmitCode(llvm::Module &module, const TargetInfo &target,
     llvm::CodeGenFileType fileType, llvm::raw_pwrite_stream &os,
     std::string &error) {
+  // The back end wants its own layout, which does not say that the heap's
+  // address space is non-integral; nothing after here needs to know.
+  module.setDataLayout(target.targetMachine().createDataLayout());
   llvm::legacy::PassManager passes;
   if (target.targetMachine().addPassesToEmitFile(
           passes, os, nullptr, fileType)) {

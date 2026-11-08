@@ -75,6 +75,18 @@ std::unique_ptr<TargetInfo> TargetInfo::Make(const TargetOptions &options,
   info->dataLayout_ = dataLayout
       ? llvm::DataLayout{*dataLayout}
       : info->targetMachine_->createDataLayout();
+  // The collector's address space, on the host, is non-integral: the optimizer
+  // must not turn its pointers into integers, which would hide a root from
+  // the statepoint rewrite. A device has no collector.
+  if (!dataLayout && !info->triple_.isAMDGPU() && !info->triple_.isNVPTX()) {
+    llvm::Expected<llvm::DataLayout> layout{llvm::DataLayout::parse(
+        info->dataLayout_.getStringRepresentation() + "-ni:1")};
+    if (!layout) {
+      error = llvm::toString(layout.takeError());
+      return nullptr;
+    }
+    info->dataLayout_ = *layout;
+  }
   info->addressSpaces_ = AddressSpacesOf(info->triple_);
   return info;
 }

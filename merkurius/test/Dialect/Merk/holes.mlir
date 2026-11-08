@@ -21,16 +21,16 @@ module @holes attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   // CHECK-NEXT: %[[F:.*]] = merk.field_ref %[[C]], #merk.functor<"[|]", 2>[1] : !merk.term<"list.list(int)">
   // CHECK-NEXT: %[[N:.*]] = merk.construct #merk.functor<"[]", 0> -> !merk.term<"list.list(int)">
   // CHECK-NEXT: merk.ref_store %[[N]], %[[F]] : !merk.term<"list.list(int)">
-  // LLVM-LABEL: define tailcc void @holes.fill_2_0(i64 %0, ptr %1) {
-  // LLVM: %[[CELL:.*]] = phi ptr
-  // LLVM-NEXT: store i64 %0, ptr %[[CELL]], align 8
-  // LLVM-NEXT: %[[HOLE:.*]] = getelementptr i8, ptr %[[CELL]], i32 8
-  // LLVM-NEXT: store ptr null, ptr %[[HOLE]], align 8
-  // LLVM-NEXT: %[[TERM:.*]] = getelementptr i8, ptr %[[CELL]], i32 1
-  // LLVM-NEXT: store ptr %[[TERM]], ptr %1, align 8
-  // LLVM-NEXT: %[[UNTAGGED:.*]] = getelementptr i8, ptr %[[TERM]], i32 -1
-  // LLVM-NEXT: %[[FIELD:.*]] = getelementptr i8, ptr %[[UNTAGGED]], i32 8
-  // LLVM-NEXT: store ptr null, ptr %[[FIELD]], align 8
+  // LLVM-LABEL: define tailcc void @holes.fill_2_0(i64 %0, ptr addrspace(1) %1) {
+  // LLVM: %[[CELL:.*]] = phi ptr addrspace(1)
+  // LLVM-NEXT: store i64 %0, ptr addrspace(1) %[[CELL]], align 8
+  // LLVM-NEXT: %[[HOLE:.*]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 8
+  // LLVM-NEXT: store ptr addrspace(1) null, ptr addrspace(1) %[[HOLE]], align 8
+  // LLVM-NEXT: %[[TERM:.*]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 1
+  // LLVM-NEXT: store ptr addrspace(1) %[[TERM]], ptr addrspace(1) %1, align 8
+  // LLVM-NEXT: %[[UNTAGGED:.*]] = getelementptr i8, ptr addrspace(1) %[[TERM]], i32 -1
+  // LLVM-NEXT: %[[FIELD:.*]] = getelementptr i8, ptr addrspace(1) %[[UNTAGGED]], i32 8
+  // LLVM-NEXT: store ptr addrspace(1) null, ptr addrspace(1) %[[FIELD]], align 8
   // LLVM-NEXT: ret void
   merk.proc @holes.fill_2_0(%x: i64, %r: !merk.ref) attributes {determinism = #merk.determinism<det>} {
     %h = merk.hole : !merk.term<"list.list(int)">
@@ -44,9 +44,9 @@ module @holes attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 
   // CHECK-LABEL: merk.proc @holes.narrow_2_0(%arg0: i8, %arg1: !merk.ref)
   // CHECK-NEXT: merk.ref_store %arg0, %arg1 : i8
-  // LLVM-LABEL: define tailcc void @holes.narrow_2_0(i8 %0, ptr %1) {
+  // LLVM-LABEL: define tailcc void @holes.narrow_2_0(i8 %0, ptr addrspace(1) %1) {
   // LLVM-NEXT: %[[WORD:.*]] = zext i8 %0 to i64
-  // LLVM-NEXT: store i64 %[[WORD]], ptr %1, align 8
+  // LLVM-NEXT: store i64 %[[WORD]], ptr addrspace(1) %1, align 8
   merk.proc @holes.narrow_2_0(%x: i8, %r: !merk.ref) attributes {determinism = #merk.determinism<det>} {
     merk.ref_store %x, %r : i8
     merk.succeed

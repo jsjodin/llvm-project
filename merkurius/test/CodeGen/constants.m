@@ -33,10 +33,10 @@
 % LLVM-DAG: @merk.str.0 = private unnamed_addr constant [6 x i8] c"a\09b\0A\22\00"
 % LLVM-DAG: @merk.str.1 = private unnamed_addr constant [1 x i8] zeroinitializer
 % LLVM-LABEL: define tailcc void @constants.main_2_0()
-% LLVM-NEXT: call tailcc void @constants.p_6_0(i64 42, double 1.000500e+03, i32 233, ptr @merk.str.0, i8 -5, i64 7)
-% LLVM-NEXT: call tailcc void @constants.p_6_0(i64 97, double 2.000000e+03, i32 128512, ptr @merk.str.1, i8 100, i64 5)
+% LLVM-NEXT: call tailcc void @constants.p_6_0(i64 42, double 1.000500e+03, i32 233, ptr addrspace(1) addrspacecast (ptr @merk.str.0 to ptr addrspace(1)), i8 -5, i64 7)
+% LLVM-NEXT: call tailcc void @constants.p_6_0(i64 97, double 2.000000e+03, i32 128512, ptr addrspace(1) addrspacecast (ptr @merk.str.1 to ptr addrspace(1)), i8 100, i64 5)
 % LLVM-NEXT: call tailcc void @constants.q_4_0(i64 1000000, i64 255, i64 8, i64 -1)
-% LLVM-NEXT: call tailcc void @constants.r_1_0(ptr @merk.str.0)
+% LLVM-NEXT: call tailcc void @constants.r_1_0(ptr addrspace(1) addrspacecast (ptr @merk.str.0 to ptr addrspace(1)))
 
 :- module constants.
 :- interface.

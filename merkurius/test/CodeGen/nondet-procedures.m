@@ -58,10 +58,10 @@ member2(X, [H | T]) :-
 % After outlining, the procedure takes a continuation and its environment,
 % gives the head to the continuation, and if that does not stop, passes it
 % on to the call of the second branch, a tail call.
-% LLVM-LABEL: define internal tailcc i1 @nondet_procedures.member2_2_0(ptr %0, ptr %1, ptr %2)
+% LLVM-LABEL: define internal tailcc i1 @nondet_procedures.member2_2_0(ptr addrspace(1) %0, ptr %1, ptr %2)
 % LLVM: call tailcc i1 %1(ptr %2, i64 %{{.*}})
 % LLVM: ret i1 true
-% LLVM: musttail call tailcc i1 @nondet_procedures.member2_2_0(ptr %{{.*}}, ptr %1, ptr %2)
+% LLVM: musttail call tailcc i1 @nondet_procedures.member2_2_0(ptr addrspace(1) %{{.*}}, ptr %1, ptr %2)
 
 % Polymorphic: the call passes a type_info.
 :- pred elem(T::out, list(T)::in) is nondet.

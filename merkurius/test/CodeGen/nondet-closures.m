@@ -93,13 +93,13 @@ main(!IO) :-
 % MERK-NEXT: merk.nondet_call_closure %arg0() {
 % MERK-NEXT: ^bb0(%[[Y:.*]]: !merk.word):
 
-% LLVM-LABEL: define internal tailcc i1 @"nondet_closures.elem_2_0$words$closure2"(ptr %0, ptr %1, ptr %2)
-% LLVM: musttail call tailcc i1 @"nondet_closures.elem_2_0$words"(ptr %{{.*}}, ptr %{{.*}}, ptr %1, ptr %2)
-% LLVM-LABEL: define internal tailcc i1 @"nondet_closures.main_2_0$lambda0$closure1"(ptr %0, ptr %1, ptr %2)
+% LLVM-LABEL: define internal tailcc i1 @"nondet_closures.elem_2_0$words$closure2"(ptr addrspace(1) %0, ptr %1, ptr %2)
+% LLVM: musttail call tailcc i1 @"nondet_closures.elem_2_0$words"(ptr addrspace(1) %{{.*}}, ptr addrspace(1) %{{.*}}, ptr %1, ptr %2)
+% LLVM-LABEL: define internal tailcc i1 @"nondet_closures.main_2_0$lambda0$closure1"(ptr addrspace(1) %0, ptr %1, ptr %2)
 % LLVM: musttail call tailcc i1 @"nondet_closures.main_2_0$lambda0"(i64 %{{.*}}, ptr %1, ptr %2)
-% LLVM-LABEL: define internal tailcc i1 @"nondet_closures.main_2_0$lambda1"(ptr %0, ptr %1, ptr %2)
-% LLVM: %[[CODE:.*]] = load ptr, ptr %0
-% LLVM: call tailcc i1 %[[CODE]](ptr %0, ptr @"nondet_closures.main_2_0$lambda1.cont.0", ptr %{{.*}})
+% LLVM-LABEL: define internal tailcc i1 @"nondet_closures.main_2_0$lambda1"(ptr addrspace(1) %0, ptr %1, ptr %2)
+% LLVM: %[[CODE:.*]] = load ptr, ptr addrspace(1) %0
+% LLVM: call tailcc i1 %[[CODE]](ptr addrspace(1) %0, ptr @"nondet_closures.main_2_0$lambda1.cont.0", ptr %{{.*}})
 
 % OUTPUT:8
 % OUTPUT-NEXT:none

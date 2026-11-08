@@ -20,8 +20,8 @@ main(!IO) :-
     io.write(any(5), !IO), io.nl(!IO),
     deep(3000000, D), u(D, !IO).
 
-% LLVM: define internal tailcc { ptr, i64 } @existential_modules.deep_2_0(i64 %0)
-% LLVM: musttail call tailcc { ptr, i64 } @exgive.give_2_0(i64 %0)
+% LLVM: define internal tailcc { ptr addrspace(1), i64 } @existential_modules.deep_2_0(i64 %0)
+% LLVM: musttail call tailcc { ptr addrspace(1), i64 } @exgive.give_2_0(i64 %0)
 % CHECK: 43
 % CHECK-NEXT: 43
 % CHECK-NEXT: 10

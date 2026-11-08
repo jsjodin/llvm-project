@@ -9,6 +9,7 @@
 % of more than 32 bytes has a block of its own.
 %
 % RUN: merkc -fc1 -emit-llvm -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=LLVM
+% RUN: merkc -fc1 -emit-llvm -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=LAYOUT
 % RUN: merkc %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: env MERK_HEAP_CHUNK_BYTES=64 %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: not env MERK_HEAP_CHUNK_BYTES=8 %t 2>&1 | FileCheck %s --check-prefix=BAD
@@ -53,18 +54,18 @@ small = [1, 2, 3].
 % LLVM-DAG: @[[TWO:merk.term.[0-9]+]] = private unnamed_addr constant { i64, ptr } { i64 2, ptr getelementptr inbounds nuw (i8, ptr @[[THREE]], i64 1) }, align 8
 % LLVM-DAG: @[[ONE:merk.term.[0-9]+]] = private unnamed_addr constant { i64, ptr } { i64 1, ptr getelementptr inbounds nuw (i8, ptr @[[TWO]], i64 1) }, align 8
 % LLVM-DAG: @[[SHAPE:merk.term.[0-9]+]] = private unnamed_addr constant { ptr, i64, ptr } { ptr getelementptr inbounds nuw (i8, ptr @{{merk.term.[0-9]+}}, i64 1), i64 2, ptr getelementptr inbounds nuw (i8, ptr @{{merk.term.[0-9]+}}, i64 1) }, align 8
-% LLVM-LABEL: define internal tailcc ptr @heap.small_f0_0() {
-% LLVM-NEXT: ret ptr getelementptr inbounds nuw (i8, ptr @[[ONE]], i64 1)
+% LLVM-LABEL: define internal tailcc ptr addrspace(1) @heap.small_f0_0() {
+% LLVM-NEXT: ret ptr addrspace(1) getelementptr (i8, ptr addrspace(1) addrspacecast (ptr @[[ONE]] to ptr addrspace(1)), i64 1)
 
 :- func same = list(int).
 same = [1, 2, 3].
-% LLVM-LABEL: define internal tailcc ptr @heap.same_f0_0() {
-% LLVM-NEXT: ret ptr getelementptr inbounds nuw (i8, ptr @[[ONE]], i64 1)
+% LLVM-LABEL: define internal tailcc ptr addrspace(1) @heap.same_f0_0() {
+% LLVM-NEXT: ret ptr addrspace(1) getelementptr (i8, ptr addrspace(1) addrspacecast (ptr @[[ONE]] to ptr addrspace(1)), i64 1)
 
 :- func shape = tree.
 shape = node(node(leaf, 1, leaf), 2, node(leaf, 3, leaf)).
-% LLVM-LABEL: define internal tailcc ptr @heap.shape_f0_0() {
-% LLVM-NEXT: ret ptr getelementptr inbounds nuw (i8, ptr @[[SHAPE]], i64 1)
+% LLVM-LABEL: define internal tailcc ptr addrspace(1) @heap.shape_f0_0() {
+% LLVM-NEXT: ret ptr addrspace(1) getelementptr (i8, ptr addrspace(1) addrspacecast (ptr @[[SHAPE]] to ptr addrspace(1)), i64 1)
 
 main(!IO) :-
     % A list of 16 MB.
@@ -90,3 +91,7 @@ main(!IO) :-
 % OUTPUT-NEXT:5000500000
 % OUTPUT-NEXT:65
 % OUTPUT-NEXT:18
+
+% The heap's address space is non-integral, so that the optimizer cannot hide
+% a root in an integer.
+% LAYOUT: target datalayout = "{{.*}}-ni:1"

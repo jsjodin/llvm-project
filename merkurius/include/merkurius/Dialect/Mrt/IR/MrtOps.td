@@ -37,37 +37,32 @@ def Mrt_AllocOp : Mrt_Op<"alloc"> {
     runtime's `merk_alloc_slow` when that passes the heap's limit.
 
     ```mlir
-    %cell = mrt.alloc 2
+    %cell = mrt.alloc 2 : !llvm.ptr<1>
     ```
   }];
   let arguments = (ins ConfinedAttr<I64Attr, [IntPositive]>:$words);
-  let results = (outs Res<LLVM_DefaultPointer, "",
+  let results = (outs Res<LLVM_AnyPointer, "",
       [MemAlloc<DefaultResource>]>:$cell);
-  let assemblyFormat = "$words attr-dict";
-  let builders = [OpBuilder<(ins "std::int64_t":$words), [{
-    build($_builder, $_state,
-        ::mlir::LLVM::LLVMPointerType::get($_builder.getContext()),
-        $_builder.getI64IntegerAttr(words));
-  }]>];
+  let assemblyFormat = "$words attr-dict `:` qualified(type($cell))";
 }
 
-def Mrt_TagOp : Mrt_Op<"tag", [Pure]> {
+def Mrt_TagOp : Mrt_Op<"tag", [Pure, AllTypesMatch<["cell", "term"]>]> {
   let summary = "a pointer to a cell, tagged";
   let description = [{
     ```mlir
     %t = mrt.tag %cell, 1
     ```
   }];
-  let arguments = (ins LLVM_DefaultPointer:$cell, Mrt_TagAttr:$tag);
-  let results = (outs LLVM_DefaultPointer:$term);
-  let assemblyFormat = "$cell `,` $tag attr-dict";
+  let arguments = (ins LLVM_AnyPointer:$cell, Mrt_TagAttr:$tag);
+  let results = (outs LLVM_AnyPointer:$term);
+  let assemblyFormat = "$cell `,` $tag attr-dict `:` qualified(type($cell))";
   let builders = [OpBuilder<(ins "::mlir::Value":$cell, "std::int64_t":$tag), [{
     build($_builder, $_state, cell.getType(), cell,
         $_builder.getI64IntegerAttr(tag));
   }]>];
 }
 
-def Mrt_UntagOp : Mrt_Op<"untag", [Pure]> {
+def Mrt_UntagOp : Mrt_Op<"untag", [Pure, AllTypesMatch<["cell", "term"]>]> {
   let summary = "the pointer to a cell, from its tagged pointer";
   let description = [{
     The term's tag is `tag`: a switch or a test has found it to be.
@@ -76,9 +71,9 @@ def Mrt_UntagOp : Mrt_Op<"untag", [Pure]> {
     %cell = mrt.untag %t, 1
     ```
   }];
-  let arguments = (ins LLVM_DefaultPointer:$term, Mrt_TagAttr:$tag);
-  let results = (outs LLVM_DefaultPointer:$cell);
-  let assemblyFormat = "$term `,` $tag attr-dict";
+  let arguments = (ins LLVM_AnyPointer:$term, Mrt_TagAttr:$tag);
+  let results = (outs LLVM_AnyPointer:$cell);
+  let assemblyFormat = "$term `,` $tag attr-dict `:` qualified(type($term))";
   let builders = [OpBuilder<(ins "::mlir::Value":$term, "std::int64_t":$tag), [{
     build($_builder, $_state, term.getType(), term,
         $_builder.getI64IntegerAttr(tag));
@@ -95,9 +90,9 @@ def Mrt_PrimaryTagOp : Mrt_Op<"primary_tag", [Pure]> {
     %tag = mrt.primary_tag %t
     ```
   }];
-  let arguments = (ins LLVM_DefaultPointer:$term);
+  let arguments = (ins LLVM_AnyPointer:$term);
   let results = (outs I64:$tag);
-  let assemblyFormat = "$term attr-dict";
+  let assemblyFormat = "$term attr-dict `:` qualified(type($term))";
   let builders = [OpBuilder<(ins "::mlir::Value":$term), [{
     build($_builder, $_state, $_builder.getI64Type(), term);
   }]>];
@@ -112,10 +107,10 @@ def Mrt_FieldLoadOp : Mrt_Op<"field_load"> {
     %h = mrt.field_load %cell[0] : i64
     ```
   }];
-  let arguments = (ins Arg<LLVM_DefaultPointer, "", [MemRead]>:$cell,
+  let arguments = (ins Arg<LLVM_AnyPointer, "", [MemRead]>:$cell,
       ConfinedAttr<I64Attr, [IntNonNegative]>:$word);
   let results = (outs Mrt_FieldType:$value);
-  let assemblyFormat = "$cell `[` $word `]` attr-dict `:` type($value)";
+  let assemblyFormat = "$cell `[` $word `]` attr-dict `:` qualified(type($cell)) `,` type($value)";
   let hasVerifier = 1;
 }
 
@@ -129,10 +124,10 @@ def Mrt_FieldStoreOp : Mrt_Op<"field_store"> {
     ```
   }];
   let arguments = (ins Mrt_FieldType:$value,
-      Arg<LLVM_DefaultPointer, "", [MemWrite]>:$cell,
+      Arg<LLVM_AnyPointer, "", [MemWrite]>:$cell,
       ConfinedAttr<I64Attr, [IntNonNegative]>:$word);
   let assemblyFormat = [{
-    $value `,` $cell `[` $word `]` attr-dict `:` type($value)
+    $value `,` $cell `[` $word `]` attr-dict `:` type($value) `,` qualified(type($cell))
   }];
   let hasVerifier = 1;
 }

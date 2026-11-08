@@ -115,10 +115,10 @@ pong(N, A0, B0, C0, A, B, C, D) :-
 
 % The loop that found it: an array and three ints. Its call is not a tail
 % call: the loop's caller gives a slot, which it loads.
-% X86-LABEL: define internal tailcc void @results_in_memory.loop_5_0(ptr %0, ptr %1) {
-% X86:         %[[SLOT:.*]] = alloca { i64, i64, i64, ptr }
+% X86-LABEL: define internal tailcc void @results_in_memory.loop_5_0(ptr %0, ptr addrspace(1) %1) {
+% X86:         %[[SLOT:.*]] = alloca { i64, i64, i64, ptr addrspace(1) }
 % X86:         call tailcc void @results_in_memory.loop__loop_{{.*}}(ptr %[[SLOT]],
-% X86-NEXT:    %[[FIRST:.*]] = getelementptr { i64, i64, i64, ptr }, ptr %[[SLOT]], i32 0, i32 0
+% X86-NEXT:    %[[FIRST:.*]] = getelementptr { i64, i64, i64, ptr addrspace(1) }, ptr %[[SLOT]], i32 0, i32 0
 % X86-NEXT:    load i64, ptr %[[FIRST]]
 :- pred loop(array(int)::array_di, array(int)::array_uo,
     int::out, int::out, int::out) is det.
