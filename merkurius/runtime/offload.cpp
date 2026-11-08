@@ -262,6 +262,30 @@ void SendArray(const std::uint64_t *handle, std::uint64_t key, int device,
   std::free(copy);
 }
 
+// Whether the mailbox has a message, an array, whose size is then in `size`.
+bool PeekArray(const std::uint64_t *handle, std::uint64_t &size) {
+  const std::int64_t *h{reinterpret_cast<const std::int64_t *>(handle)};
+  if (merk_mailbox_poll(h[0], h[1], h[2], h[3], h[4], 0) <= 0) {
+    return false;
+  }
+  size = *reinterpret_cast<const std::uint64_t *>(
+      merk_mailbox_message(h[0], h[1], h[2], h[3], h[4], 0));
+  return true;
+}
+
+// Copies the mailbox's oldest message, an array, to the device's array of
+// its size, and removes it.
+void TakeArray(const std::uint64_t *handle, int device, void *array) {
+  const std::int64_t *h{reinterpret_cast<const std::int64_t *>(handle)};
+  auto *message{reinterpret_cast<const std::uint64_t *>(
+      merk_mailbox_message(h[0], h[1], h[2], h[3], h[4], 0))};
+  if (omp_target_memcpy(array, message, ArrayBytes(message[0]), 0, 0, device,
+          omp_get_initial_device()) != 0) {
+    Fail("could not copy an array to a device");
+  }
+  merk_mailbox_remove(h[0], h[1], h[2], h[3], h[4], 0);
+}
+
 unsigned HandleOpcode(void *raw, unsigned) {
   auto &port{*static_cast<rpc::Server::Port *>(raw)};
   switch (port.get_opcode()) {
@@ -278,6 +302,20 @@ unsigned HandleOpcode(void *raw, unsigned) {
       bool found{TakeOldest(buffer->data, message)};
       buffer->data[0] = found;
       buffer->data[1] = message;
+    });
+    return rpc::RPC_SUCCESS;
+  case rpcPollArray:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      std::uint64_t size{0};
+      bool found{PeekArray(buffer->data, size)};
+      buffer->data[0] = found;
+      buffer->data[1] = size;
+    });
+    return rpc::RPC_SUCCESS;
+  case rpcTakeArray:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      TakeArray(buffer->data, static_cast<int>(buffer->data[5]),
+          reinterpret_cast<void *>(buffer->data[6]));
     });
     return rpc::RPC_SUCCESS;
   case rpcChunk:
@@ -392,4 +430,10 @@ extern "C" int merk_device_receive(const std::uint64_t *handle,
     return 0;
   }
   return TakeOldest(handle, *message);
+}
+
+// A region that runs on the host receives an array as any other message.
+extern "C" int merk_device_receive_array(const std::uint64_t *handle,
+    std::int64_t milliseconds, std::uint64_t *message) {
+  return merk_device_receive(handle, milliseconds, message);
 }
