@@ -255,6 +255,25 @@ module attributes {omp.is_target_device = true} {
     llvm.return
   }
 
+  // An argument of a block of the function other than its entry block goes
+  // with its block, so it is replaced by a placeholder too.
+  // CHECK-LABEL: llvm.func @successor_block_args
+  // CHECK-SAME: (%[[ARG0:.*]]: i1, %[[ARG1:.*]]: !llvm.ptr, %[[PLACEHOLDER:.*]]: !llvm.ptr)
+  llvm.func @successor_block_args(%arg0: i1, %arg1: !llvm.ptr) {
+    // CHECK-NEXT: %[[MAP:.*]] = omp.map.info var_ptr(%[[PLACEHOLDER]] : !llvm.ptr, i32) map_clauses(tofrom) capture(ByRef) -> !llvm.ptr
+    // CHECK-NEXT: omp.target kernel_type(generic) map_entries(%[[MAP]] -> %{{.*}} : !llvm.ptr)
+    %0 = llvm.mlir.constant(1 : i64) : i64
+    %1 = llvm.alloca %0 x i32 : (i64) -> !llvm.ptr
+    llvm.cond_br %arg0, ^bb1(%arg1 : !llvm.ptr), ^bb1(%1 : !llvm.ptr)
+  ^bb1(%2: !llvm.ptr):  // 2 preds: ^bb0, ^bb0
+    %3 = omp.map.info var_ptr(%2 : !llvm.ptr, i32) map_clauses(tofrom) capture(ByRef) -> !llvm.ptr
+    omp.target kernel_type(generic) map_entries(%3 -> %arg2 : !llvm.ptr) {
+      omp.terminator
+    }
+    // CHECK: llvm.return
+    llvm.return
+  }
+
   // CHECK-LABEL: llvm.func @block_args
   // CHECK-SAME: (%[[ARG0:.*]]: !llvm.ptr, %[[PLACEHOLDER0:.*]]: !llvm.ptr, %[[PLACEHOLDER1:.*]]: !llvm.ptr)
   llvm.func @block_args(%arg0: !llvm.ptr) {
