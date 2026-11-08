@@ -12,6 +12,10 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "process.h"
+
+#include <poll.h>
+
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
@@ -32,15 +36,52 @@ enum ReadLine : std::int64_t {
   kError = 3,
 };
 
+// Before a character is read: if that would wait for input, the process waits
+// on a thread of the blocking pool, and holds up no worker. What is in the
+// stdio buffer, or ready to be read, costs no move.
+void MoveIfInputWouldWait(bool &moved) {
+#ifdef __GLIBC__
+  if (moved || stdin->_IO_read_ptr < stdin->_IO_read_end) {
+    return;
+  }
+#else
+  if (moved) {
+    return;
+  }
+#endif
+  pollfd input{fileno(stdin), POLLIN, 0};
+  if (poll(&input, 1, 0) == 0) {
+    merkurius::runtime::Pin();
+    moved = true;
+  }
+}
+
+std::int64_t ReadLine(char **line, bool &moved);
+
 } // namespace
 
+extern "C" std::int64_t merk_read_line(char **line) {
+  bool moved{false};
+  std::int64_t result{ReadLine(line, moved)};
+  if (moved) {
+    merkurius::runtime::Unpin();
+  }
+  return result;
+}
+
+namespace {
 // The next line of the standard input in `*line`, a new string, for kLine;
 // for kError, the C library's message in `*line`.
-extern "C" std::int64_t merk_read_line(char **line) {
+std::int64_t ReadLine(char **line, bool &moved) {
   std::size_t size{0}, capacity{128};
   char *buffer{static_cast<char *>(std::malloc(capacity))};
   int c;
-  while ((c = std::getc(stdin)) != EOF) {
+  for (;;) {
+    MoveIfInputWouldWait(moved);
+    c = std::getc(stdin);
+    if (c == EOF) {
+      break;
+    }
     if (c == 0) {
       std::free(buffer);
       return kNull;
@@ -71,3 +112,5 @@ extern "C" std::int64_t merk_read_line(char **line) {
   std::free(buffer);
   return kLine;
 }
+
+} // namespace

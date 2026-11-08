@@ -858,8 +858,10 @@ ends the program. `spawn`, links and monitors do not exist.
    monitor across nodes or places reports that it is not supported yet.
 7. **What blocks.** Each piece its own commit. Done: target regions and parallel
    regions, on a blocking pool, the latter with the claim of a team's size
-   (design document, OpenMP cooperation). Next: blocking I/O, including `lookup`
-   and `connect`, by the same move to the pool. Node
+   (design document, OpenMP cooperation). Blocking I/O is done too, by the same
+   move: `listen`, `connect`, `lookup`, and reading the standard input when it
+   would wait. Not moved: a send to another node when its socket is full,
+   whose write blocks its worker for up to a tick time. Node
    connections stay OS threads, which wake processes.
 8. **The GPU with processes.** A region's launch does not hold a worker,
    ping-pong between `main` and a GPU of its own node, regions on several
