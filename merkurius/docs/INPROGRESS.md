@@ -879,6 +879,18 @@ address space at run time. The ways in are a load, a call's result, an
 - **The data layout** gets `ni:1` on the host (D1). The back end insists on its
   own layout, so `EmitCode` puts that back after the optimizer.
 
+**Built, pieces 1 to 3, 2026-11-08.** Piece 2 went into piece 1, since nothing
+compiled without it. In piece 3:
+
+- A word on the host is a heap pointer; on a device it stays an `i64`.
+- A number in a word is an `inttoptr` of its bits, which the rewrite takes as its
+  own base.
+- An array of numbers still loads and stores its elements as integers, so that
+  loops over arrays do not go through pointers. Rejected: elements as words,
+  which would have put an `inttoptr` in every array loop.
+- A foreign call takes and gives a word as an integer, as C's `MR_Word` is one, so
+  that the call matches the definition it is linked with.
+
 **Not in this:** statepoints themselves, `!merk.ref` as a cell and an offset, and
 the frame slots.
 

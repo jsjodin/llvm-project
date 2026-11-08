@@ -161,6 +161,13 @@ private:
     return mlir::LLVM::LLVMPointerType::get(
         mlir::ModuleOp{module_}.getContext(), device_ ? 0 : kHeapAddressSpace);
   }
+  // A word that may hold a term is a heap pointer, so that the rewrite sees
+  // it; an integer or a float in one is an inttoptr of its bits, which the
+  // rewrite takes as its own base. A device has no collector.
+  mlir::Type WordPointerOrInteger(mlir::MLIRContext *context) const {
+    return device_ ? mlir::Type{mlir::IntegerType::get(context, 64)}
+                   : mlir::Type{HeapPointer()};
+  }
   // The heap pointer to something static, whose address is a constant.
   mlir::Value ToHeap(mlir::Value address, mlir::Location loc) {
     return device_ ? address
@@ -196,7 +203,7 @@ private:
       return mlir::LLVM::LLVMPointerType::get(type.getContext());
     }
     if (mlir::isa<merk::WordType>(type)) {
-      return mlir::IntegerType::get(type.getContext(), 64);
+      return WordPointerOrInteger(type.getContext());
     }
     if (auto term{mlir::dyn_cast<merk::TermType>(type)}) {
       auto it{layouts_.find(term.getName())};
@@ -341,12 +348,14 @@ private:
       mlir::Operation *, unsigned operand, mlir::Location);
   void LowerArray(mlir::Operation *);
   // An array element's word, from its value, and its value, from the word.
+  mlir::Value ToBits(mlir::Value, mlir::Location);
   mlir::Value ToWord(mlir::Value, mlir::Location);
   mlir::Value FromWord(mlir::Value word, mlir::Type, mlir::Location);
   // The address of an array's element.
   mlir::Value ElementAddress(mlir::Value array, mlir::Value index,
       mlir::Location);
   // A function of the runtime library, declared once.
+  llvm::DenseMap<mlir::Operation *, llvm::SmallVector<bool>> foreignWords_;
   mlir::LLVM::LLVMFuncOp RuntimeFunc(llvm::StringRef name, mlir::Type result,
       llvm::ArrayRef<mlir::Type> arguments, bool noreturn = false);
   // Makes the if-then-elses, switches, negations, tests and calls that can
@@ -1421,7 +1430,7 @@ void Lowerer::LowerClosureWord(merk::ClosureWordOp op) {
       llvm::ArrayRef<mlir::LLVM::GEPArg>{
           static_cast<std::int32_t>(8 * (op.getIndex() + 2))})};
   rewriter_.replaceOpWithNewOp<mlir::LLVM::LoadOp>(
-      op, rewriter_.getI64Type(), address, 8);
+      op, Convert(op.getType()), address, 8);
 }
 
 // The descriptors' kinds, as runtime/write.cpp reads them: a term's is its
@@ -1800,7 +1809,9 @@ mlir::Value Lowerer::CallDescriptorEntry(
       mlir::LLVM::GEPOp::create(rewriter_, loc, heap, rewriter_.getI8Type(),
           descriptor, llvm::ArrayRef<mlir::LLVM::GEPArg>{offset}),
       8)};
-  auto type{mlir::LLVM::LLVMFunctionType::get(result, {heap, i64, i64})};
+  mlir::Type wordType{WordPointerOrInteger(op->getContext())};
+  auto type{mlir::LLVM::LLVMFunctionType::get(
+      result, {heap, wordType, wordType})};
   auto call{mlir::LLVM::CallOp::create(rewriter_, loc, type,
       mlir::ValueRange{entry, info, op->getOperand(1), op->getOperand(2)})};
   call.setCConv(cconv_);
@@ -1879,15 +1890,21 @@ void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
   mlir::Type flagType{rewriter_.getI32Type()};
   auto pointer{mlir::LLVM::LLVMPointerType::get(context)};
   mlir::LLVM::LLVMFuncOp &func{funcs_[call.getCallee()]};
+  // C's MR_Word is an integer, so a word crosses as one.
+  const llvm::SmallVector<bool> &wordInputs{foreignWords_[call]};
+  auto i64{rewriter_.getI64Type()};
+  bool wordOutput{!canFail && !byPointer && outputs.size() == 1 &&
+      mlir::isa<merk::WordType>(call.getOutputs().back().getType())};
   if (!func) {
     llvm::SmallVector<mlir::Type> inputs;
-    for (mlir::Type input : Convert(call.getInputs().getTypes())) {
-      inputs.push_back(CType(input));
+    for (auto [i, input] : llvm::enumerate(Convert(call.getInputs().getTypes()))) {
+      inputs.push_back(wordInputs[i] ? mlir::Type{i64} : CType(input));
     }
     if (byPointer) {
       inputs.append(outputs.size(), pointer);
     }
     mlir::Type result{canFail   ? flagType
+            : wordOutput          ? mlir::Type{i64}
             : outputs.size() == 1 ? CType(outputs.front())
                                   : mlir::LLVM::LLVMVoidType::get(context)};
     mlir::OpBuilder::InsertionGuard guard{rewriter_};
@@ -1897,8 +1914,9 @@ void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
   }
   rewriter_.setInsertionPoint(call);
   llvm::SmallVector<mlir::Value> arguments;
-  for (mlir::Value input : call.getInputs()) {
-    arguments.push_back(ToC(input, loc));
+  for (auto [i, input] : llvm::enumerate(call.getInputs())) {
+    arguments.push_back(
+        wordInputs[i] ? ToBits(input, loc) : ToC(input, loc));
   }
   llvm::SmallVector<mlir::Value> slots;
   if (byPointer) {
@@ -1916,6 +1934,12 @@ void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
         mlir::LLVM::ConstantOp::create(rewriter_, loc, flagType,
             rewriter_.getI32IntegerAttr(0))));
   } else if (!byPointer) {
+    if (wordOutput && !device_) {
+      mlir::Value heap{mlir::LLVM::IntToPtrOp::create(
+          rewriter_, loc, outputs.front(), llvmCall.getResult())};
+      rewriter_.replaceOp(call, heap);
+      return;
+    }
     // A heap pointer cannot be cast into its address space at run time.
     if (!outputs.empty() && outputs.front() != CType(outputs.front())) {
       mlir::Value bits{mlir::LLVM::PtrToIntOp::create(rewriter_, loc,
@@ -2600,7 +2624,8 @@ mlir::LLVM::LLVMFuncOp Lowerer::RuntimeFunc(llvm::StringRef name,
 
 // An element's word: an integer extended, a float's bits, a pointer's
 // address.
-mlir::Value Lowerer::ToWord(mlir::Value value, mlir::Location loc) {
+// A value's bits as an integer: the whole word of a narrow one.
+mlir::Value Lowerer::ToBits(mlir::Value value, mlir::Location loc) {
   auto i64{rewriter_.getI64Type()};
   // Its type may still be merk's, from an operation not lowered yet.
   mlir::Type type{Convert(value.getType())};
@@ -2610,19 +2635,35 @@ mlir::Value Lowerer::ToWord(mlir::Value value, mlir::Location loc) {
   if (mlir::isa<mlir::IntegerType>(type)) {
     return mlir::LLVM::ZExtOp::create(rewriter_, loc, i64, value);
   }
-  // Temporary (chunk 3, docs/INPROGRESS.md, Heap pointers in an address space
-  // of their own, piece 3): a word that holds a pointer is an integer, which
-  // hides it from the statepoint rewrite, until a word is a heap pointer.
   if (mlir::isa<mlir::LLVM::LLVMPointerType>(type)) {
-    return mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, value);
+    return mlir::LLVM::PtrToIntOp::create(
+        rewriter_, loc, i64, LoweredValue(value, loc));
   }
   return mlir::LLVM::BitcastOp::create(rewriter_, loc, i64, value);
+}
+
+mlir::Value Lowerer::ToWord(mlir::Value value, mlir::Location loc) {
+  mlir::Type word{WordPointerOrInteger(rewriter_.getContext())};
+  if (Convert(value.getType()) == word) {
+    return LoweredValue(value, loc);
+  }
+  mlir::Value bits{ToBits(value, loc)};
+  return word == bits.getType()
+      ? bits
+      : mlir::LLVM::IntToPtrOp::create(rewriter_, loc, word, bits).getResult();
 }
 
 mlir::Value Lowerer::FromWord(
     mlir::Value word, mlir::Type type, mlir::Location loc) {
   if (type == word.getType()) {
     return word;
+  }
+  auto i64{rewriter_.getI64Type()};
+  if (mlir::isa<mlir::LLVM::LLVMPointerType>(word.getType())) {
+    word = mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, word);
+    if (type == i64) {
+      return word;
+    }
   }
   if (mlir::isa<mlir::IntegerType>(type)) {
     return mlir::LLVM::TruncOp::create(rewriter_, loc, type, word);
@@ -2658,8 +2699,10 @@ mlir::Value Lowerer::InitialElement(
     mlir::Operation *op, unsigned operand, mlir::Location loc) {
   return op->getNumOperands() > operand
       ? ToWord(op->getOperand(operand), loc)
-      : mlir::LLVM::ConstantOp::create(
-            rewriter_, loc, rewriter_.getI64Type(), 0);
+      : device_ ? mlir::Value{mlir::LLVM::ConstantOp::create(
+                      rewriter_, loc, rewriter_.getI64Type(), 0)}
+                : mlir::Value{mlir::LLVM::ZeroOp::create(
+                      rewriter_, loc, HeapPointer())};
 }
 
 void Lowerer::LowerArray(mlir::Operation *op) {
@@ -2676,11 +2719,19 @@ void Lowerer::LowerArray(mlir::Operation *op) {
   } else if (mlir::isa<merk::ArraySizeOp>(op)) {
     result = mlir::LLVM::LoadOp::create(rewriter_, loc, i64, op->getOperand(0));
   } else if (mlir::isa<merk::ArrayGetOp>(op)) {
-    mlir::Value word{mlir::LLVM::LoadOp::create(rewriter_, loc, i64,
+    // A pointer is loaded as one, and a number as its bits, so that an array
+    // of numbers does not go through pointers.
+    mlir::Type type{Convert(op->getResult(0).getType())};
+    mlir::Value word{mlir::LLVM::LoadOp::create(rewriter_, loc,
+        mlir::isa<mlir::LLVM::LLVMPointerType>(type) ? type : mlir::Type{i64},
         ElementAddress(op->getOperand(0), op->getOperand(1), loc))};
-    result = FromWord(word, Convert(op->getResult(0).getType()), loc);
+    result = FromWord(word, type, loc);
   } else if (mlir::isa<merk::ArraySetOp>(op)) {
-    mlir::LLVM::StoreOp::create(rewriter_, loc, ToWord(op->getOperand(2), loc),
+    mlir::Value element{op->getOperand(2)};
+    mlir::LLVM::StoreOp::create(rewriter_, loc,
+        mlir::isa<mlir::LLVM::LLVMPointerType>(Convert(element.getType()))
+            ? LoweredValue(element, loc)
+            : ToBits(element, loc),
         ElementAddress(op->getOperand(0), op->getOperand(1), loc));
     result = op->getOperand(0);
   } else if (mlir::isa<merk::ArrayFillOp>(op)) {
@@ -2934,6 +2985,13 @@ static bool RejectOnDevice(mlir::Operation *op, llvm::StringRef what) {
 
 llvm::LogicalResult Lowerer::Lower() {
   module_.getContext()->loadDialect<mlir::LLVM::LLVMDialect, mrt::MrtDialect>();
+  // Lowering the operands takes away what says that they are words.
+  module_.walk([&](merk::ForeignCallOp call) {
+    llvm::SmallVector<bool> &words{foreignWords_[call]};
+    for (mlir::Value input : call.getInputs()) {
+      words.push_back(!device_ && mlir::isa<merk::WordType>(input.getType()));
+    }
+  });
   // On a device nothing calls a descriptor's unify entry, since a generic
   // unification is an error there, and the procedure is not compiled for it.
   if (device_) {

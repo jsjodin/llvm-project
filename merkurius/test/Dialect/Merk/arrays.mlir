@@ -58,12 +58,12 @@ module @arrays attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 // An array is a pointer; an element is a word, a float's bits or a
 // character extended.
 // LLVM-LABEL: define tailcc ptr addrspace(1) @arrays.from_list_2_0(ptr addrspace(1) %0)
-// LLVM-NEXT: %[[W:.*]] = ptrtoint ptr addrspace(1) %0 to i64
-// LLVM-NEXT: call ptr addrspace(1) @merk_array_from_list(i64 %[[W]], i64 1)
+// LLVM-NEXT: call ptr addrspace(1) @merk_array_from_list(ptr addrspace(1) %0, i64 1)
 // LLVM-LABEL: define tailcc { ptr addrspace(1), ptr addrspace(1) } @arrays.new_2_0(i64 %0, double %1)
 // LLVM: %[[W:.*]] = bitcast double %1 to i64
-// LLVM-NEXT: call ptr addrspace(1) @merk_array_new(i64 %0, i64 %[[W]])
-// LLVM-NEXT: call ptr addrspace(1) @merk_array_new(i64 %0, i64 0)
+// LLVM-NEXT: %[[P:.*]] = inttoptr i64 %[[W]] to ptr addrspace(1)
+// LLVM-NEXT: call ptr addrspace(1) @merk_array_new(i64 %0, ptr addrspace(1) %[[P]])
+// LLVM-NEXT: call ptr addrspace(1) @merk_array_new(i64 %0, ptr addrspace(1) null)
 // The index is checked against the size, the first word, as unsigned.
 // LLVM-LABEL: define tailcc { i64, double } @arrays.get_3_0(ptr addrspace(1) %0, i64 %1)
 // LLVM-NEXT: %[[SIZE:.*]] = load i64, ptr addrspace(1) %0
@@ -80,11 +80,10 @@ module @arrays attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 // LLVM-NEXT: bitcast i64 %[[X]] to double
 // A set stores in place; the others are the runtime's.
 // LLVM-LABEL: define tailcc ptr addrspace(1) @arrays.update_5_0(ptr addrspace(1) %0, i64 %1, ptr addrspace(1) %2)
-// LLVM: %[[W:.*]] = ptrtoint ptr addrspace(1) %2 to i64
-// LLVM-NEXT: store i64 %[[W]], ptr addrspace(1)
-// LLVM: call ptr addrspace(1) @merk_array_fill(ptr addrspace(1) %0, i64 %1, i64 %1, i64
+// LLVM: store ptr addrspace(1) %2, ptr addrspace(1)
+// LLVM: call ptr addrspace(1) @merk_array_fill(ptr addrspace(1) %0, i64 %1, i64 %1, ptr addrspace(1)
 // LLVM: call ptr addrspace(1) @merk_array_copy(ptr addrspace(1)
-// LLVM: call ptr addrspace(1) @merk_array_resize(ptr addrspace(1) {{.*}}, i64 %1, i64
-// LLVM: call ptr addrspace(1) @merk_array_resize(ptr addrspace(1) {{.*}}, i64 %1, i64 0)
+// LLVM: call ptr addrspace(1) @merk_array_resize(ptr addrspace(1) {{.*}}, i64 %1, ptr addrspace(1)
+// LLVM: call ptr addrspace(1) @merk_array_resize(ptr addrspace(1) {{.*}}, i64 %1, ptr addrspace(1) null)
 // LLVM: declare void @merk_index_out_of_bounds(ptr, i64, i64) #[[NORETURN:[0-9]+]]
 // LLVM: attributes #[[NORETURN]] = { noreturn nounwind }
