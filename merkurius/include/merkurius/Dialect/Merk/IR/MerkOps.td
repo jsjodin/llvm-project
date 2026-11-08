@@ -1243,4 +1243,22 @@ def Merk_EntryOp : Merk_Op<"entry", [
   let assemblyFormat = "$proc attr-dict";
 }
 
+def Merk_ConstructorOp : Merk_Op<"constructor", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>
+  ]> {
+  let summary = "a procedure that runs before the program starts";
+  let description = [{
+    Names a procedure of no inputs or outputs that runs at start-up, before
+    the main procedure, as a C constructor: one that registers what the
+    runtime needs of the module, such as the type_infos of the messages that
+    target regions send.
+
+    ```mlir
+    merk.constructor @m.merk_register_message_types
+    ```
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$proc);
+  let assemblyFormat = "$proc attr-dict";
+}
+
 #endif // MERKURIUS_DIALECT_MERK_IR_MERKOPS_TD

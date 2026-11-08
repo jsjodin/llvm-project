@@ -388,8 +388,17 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
   }
   llvm::StringRef module{symbol.module};
   if (module == "process" && symbol.name == "send" && symbol.arity == 4) {
-    if (mlir::omp::TargetOp target{EnclosingTarget()}) {
-      return SendInTarget(goal, target, arguments, body);
+    if (EnclosingTarget()) {
+      return SendInTarget(goal, arguments, body, /*inRegion=*/true);
+    }
+    if (target_.options().openMPIsTargetDevice) {
+      if (SendInTarget(goal, arguments, body, /*inRegion=*/false)) {
+        return true;
+      }
+    } else if (mlir::Value message{ValueOf(arguments[1])};
+        message && target_.options().openMP) {
+      // The host's compile registers what the device's may send.
+      MessageKey(*body.vars[arguments[1]].type, message.getType());
     }
   }
   if (module == "process" && symbol.name == "receive" && symbol.arity == 6) {

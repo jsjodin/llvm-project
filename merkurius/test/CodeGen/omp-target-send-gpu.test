@@ -7,10 +7,10 @@ RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-sen
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
 RUN:   | FileCheck %S/omp-target-send.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: FileCheck %s < %t.info
-CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-send.m:{{[0-9]+}}:5 with 9 arguments:
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-send.m:{{[0-9]+}}:5 with 5 arguments:
+CHECK-DAG: info: to(N)[8]
 CHECK-DAG: info: to(Ints)[40]
-CHECK-DAG: info: to(int/0)[8]
-CHECK-DAG: info: to(float/0)[8]
-CHECK-DAG: info: to(character/0)[8]
-CHECK-DAG: info: to(omp_target_send.colour/0)[8]
+CHECK-DAG: info: to(Floats)[40]
+CHECK-DAG: info: to(Chars)[40]
+CHECK-DAG: info: to(Colours)[40]
 CHECK-NOT: Entering OpenMP kernel

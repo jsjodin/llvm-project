@@ -1,6 +1,9 @@
-"""Runs process-remote.m's nodes against each other over loopback.
+"""Runs a program's nodes against each other over loopback.
 
-Usage: two-nodes.py PROGRAM
+Usage: two-nodes.py PROGRAM [SCENARIO...]
+
+With no scenarios, it runs process-remote.m's: pingpong, stall,
+simultaneous and cookie. first-slice is omp-target-two-nodes.m's.
 
 Each node is the program with a role as its argument. A node that listens
 prints "listening PORT" first, and the driver passes the port to the
@@ -21,6 +24,8 @@ the user's ~/.merkurius.cookie.
   not; without MERK_COOKIE, ~/.merkurius.cookie is made, readable by its
   owner only, and used; a file that others can read, an empty one, an
   empty MERK_COOKIE and no HOME stop a node from listening.
+- first-slice: a partner node listens, and a region node connects to it
+  and exchanges with it from a target region, which may run on a GPU.
 
 The output is each node's, prefixed with its role, apart from the ports.
 """
@@ -188,10 +193,28 @@ def cookie():
     print("no HOME: " + run("listen", MERK_COOKIE=None, HOME=None))
 
 
+def first_slice():
+    print("first-slice:")
+    partner = start("partner")
+    port = port_of(partner, "partner")
+    region = start("region", port)
+    for line in finish(region, "region"):
+        print("region: " + line)
+    print("partner: listening")
+    for line in finish(partner, "partner"):
+        print("partner: " + line)
+
+
+SCENARIOS = {
+    "pingpong": pingpong,
+    "stall": stall,
+    "simultaneous": simultaneous,
+    "cookie": cookie,
+    "first-slice": first_slice,
+}
+
 try:
-    pingpong()
-    stall()
-    simultaneous()
-    cookie()
+    for name in sys.argv[2:] or ["pingpong", "stall", "simultaneous", "cookie"]:
+        SCENARIOS[name]()
 finally:
     shutil.rmtree(HOME)
