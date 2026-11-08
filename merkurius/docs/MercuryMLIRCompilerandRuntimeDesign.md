@@ -3958,6 +3958,14 @@ nrev's work is in append, whose loop has safepoints only on allocation's slow pa
 this says little about code with many calls and live values across them. The program's
 text grew from 150 KB to 164 KB, library included, with 94 KB of stack maps.
 
+Every root's type and `type_info`s in the bundles, measured on 2026-11-08, commit
+7c4ca12cb257 against 91cf88a7b539, nine runs of each on one core. These are medians
+of elapsed time, kernel included, so they are not comparable with the user times above:
+18.635 s against 18.606 s monomorphic, and 18.607 s against 18.566 s polymorphic.
+The monomorphic program's text grew from 298 KB to 318 KB, and its stack maps from
+94 KB to 107 KB, with 0.6 KB of root table. nrev has few live values at its safepoints,
+so as before this says little about code with many calls.
+
 ## Target applications
 
 Recorded on 2026-11-05. This is judgement, not a result: the only performance evidence so far is the bandwidth benchmark, whose program is no simpler than its C version (`benchmarks/bandwidth/README.md`). That the code is simpler has still to be shown on a program with real logic in it.
