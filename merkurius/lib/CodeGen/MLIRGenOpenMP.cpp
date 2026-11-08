@@ -33,17 +33,85 @@ mlir::Value MerkGenerator::Slot(mlir::Type type, mlir::Location loc) {
   return slot;
 }
 
-// Only the scalars, integers and floats, and arrays of them can cross into
-// a target region so far.
+// The scalars, integers and floats, arrays of them, and terms whose cells
+// hold only scalars can cross into a target region so far; a region gives
+// only scalars and arrays, since the device cannot make a cell.
 static bool Scalar(mlir::Type type) {
   return mlir::isa<mlir::IntegerType, mlir::FloatType>(type);
 }
 
-static bool Mappable(mlir::Type type) {
+static bool Givable(mlir::Type type) {
   if (auto array{mlir::dyn_cast<merk::ArrayType>(type)}) {
     return Scalar(array.getElement());
   }
   return Scalar(type);
+}
+
+// A mailbox handle is process.mailbox's cell of five words, the node's id
+// in two, the place and slot, the generation and the secret
+// (library/process.m): the type is abstract outside the library, so its
+// layout is known here, as an array's is.
+static constexpr unsigned mailboxWords{5};
+
+std::optional<unsigned> MerkGenerator::FlatCell(mlir::Type type) {
+  auto term{mlir::dyn_cast<merk::TermType>(type)};
+  if (!term) {
+    return std::nullopt;
+  }
+  if (term.getName().starts_with("process.mailbox(")) {
+    return mailboxWords;
+  }
+  for (auto def : module_.getOps<merk::TypeDefOp>()) {
+    if (def.getName() != term.getName()) {
+      continue;
+    }
+    // One constructor of one argument is the argument, with no cell.
+    if (def.getConstructors().size() != 1) {
+      return std::nullopt;
+    }
+    auto constructor{mlir::cast<merk::ConstructorAttr>(def.getConstructors()[0])};
+    llvm::ArrayRef<mlir::Type> fields{constructor.getFields()};
+    if (constructor.getHidden() != 0 || fields.size() < 2 ||
+        !llvm::all_of(fields, Scalar)) {
+      return std::nullopt;
+    }
+    return static_cast<unsigned>(fields.size());
+  }
+  return std::nullopt;
+}
+
+bool MerkGenerator::Mappable(mlir::Type type) {
+  return Givable(type) || FlatCell(type);
+}
+
+// As MapArray maps an array: by its pointer, with the cell's words as the
+// section, which only the host compile gives.
+mlir::Value MerkGenerator::MapCell(
+    mlir::Value term, unsigned words, llvm::StringRef name, mlir::Location loc) {
+  auto ptr{mlir::LLVM::LLVMPointerType::get(&context_)};
+  auto i64{builder_.getI64Type()};
+  llvm::SmallVector<mlir::Value, 1> bounds;
+  if (!target_.options().openMPIsTargetDevice) {
+    bounds.push_back(mlir::omp::MapBoundsOp::create(builder_, loc,
+        builder_.getType<mlir::omp::MapBoundsType>(),
+        IntegerConstant(i64, 0, loc), IntegerConstant(i64, words - 1, loc),
+        IntegerConstant(i64, words, loc),
+        /*stride=*/IntegerConstant(i64, 1, loc), /*strideInBytes=*/false,
+        /*startIdx=*/IntegerConstant(i64, 0, loc)));
+  }
+  mlir::Value pointer{
+      mlir::UnrealizedConversionCastOp::create(builder_, loc, ptr, term)
+          .getResult(0)};
+  return mlir::omp::MapInfoOp::create(builder_, loc, ptr, pointer,
+      mlir::TypeAttr::get(i64),
+      builder_.getAttr<mlir::omp::ClauseMapFlagsAttr>(
+          mlir::omp::ClauseMapFlags::to),
+      builder_.getAttr<mlir::omp::VariableCaptureKindAttr>(
+          mlir::omp::VariableCaptureKind::ByRef),
+      /*varPtrPtr=*/mlir::Value{}, /*varPtrPtrType=*/mlir::TypeAttr{},
+      /*members=*/mlir::ValueRange{}, /*membersIndex=*/mlir::ArrayAttr{},
+      bounds, /*mapperId=*/mlir::FlatSymbolRefAttr{},
+      builder_.getStringAttr(name), builder_.getBoolAttr(false));
 }
 
 // The kernel of a target region with the leaves `queue`, target first, and
@@ -1220,7 +1288,7 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   llvm::DenseMap<BodyVar, mlir::Type> arrayTypes;
   for (BodyVar var : outputs) {
     mlir::Value value{values_.lookup(var)};
-    if (!Mappable(value.getType())) {
+    if (!Givable(value.getType())) {
       NotYet(at,
           "values of type " + semantics::TypeToString(*body.vars[var].type) +
               " in target regions");
@@ -1272,6 +1340,10 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
           name, loc));
       continue;
     }
+    if (std::optional<unsigned> words{FlatCell(input.getType())}) {
+      maps.push_back(MapCell(input, *words, name, loc));
+      continue;
+    }
     mlir::Value slot{Slot(input.getType(), loc)};
     mlir::LLVM::StoreOp::create(builder_, loc, input, slot);
     // Named after the variable whose value it is, if it is one's.
@@ -1315,11 +1387,12 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   builder_.setInsertionPointToStart(reads);
   llvm::DenseMap<mlir::Value, mlir::Value> loaded;
   for (mlir::Value input : inputs) {
-    // An array's argument is its pointer on the device, and so is an
-    // updated slot's.
+    // An array's argument is its pointer on the device, and so is a
+    // term's and an updated slot's.
     mlir::Value argument{block->addArgument(ptr, loc)};
     mlir::Value value{FindUpdatedSlot(slots, input) ? argument
-            : mlir::isa<merk::ArrayType>(input.getType())
+            : mlir::isa<merk::ArrayType>(input.getType()) ||
+                FlatCell(input.getType())
             ? mlir::UnrealizedConversionCastOp::create(
                   builder_, loc, input.getType(), argument)
                   .getResult(0)

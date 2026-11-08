@@ -1,6 +1,7 @@
-% What target regions cannot do yet: map values that are not scalars or
-% arrays of them, make or fill arrays, which the device has no runtime
-% for, or take clauses; and the other directives.
+% What target regions cannot do yet: map values that are not scalars,
+% arrays of them or terms whose cells hold only scalars, give terms, make
+% or fill arrays, which the device has no runtime for, or take clauses;
+% and the other directives.
 %
 % RUN: not merkc -fc1 -fopenmp -emit-merk %s 2>&1 | FileCheck %s --implicit-check-not=error:
 
@@ -35,6 +36,38 @@ zero(!A) :-
     array.fill(0, !A).
 % CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: not yet implemented: code generation for filling arrays in target regions
 
+:- type shape
+    --->    circle(float, float)
+    ;       square(float, float).
+
+:- pred width(shape::in, float::out) is det.
+width(Shape, W) :-
+    %$omp target
+    (
+        Shape = circle(W, _)
+    ;
+        Shape = square(W, _)
+    ).
+% CHECK: omp-target-errors.m:[[@LINE-6]]:5: error: not yet implemented: code generation for values of type omp_target_errors.shape in target regions
+
+:- type named
+    --->    named(string, int).
+
+:- pred number(named::in, int::out) is det.
+number(Named, N) :-
+    %$omp target
+    Named = named(_, N).
+% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: not yet implemented: code generation for values of type omp_target_errors.named in target regions
+
+:- type pair
+    --->    pair(int, int).
+
+:- pred double(int::in, pair::out) is det.
+double(X, P) :-
+    %$omp target
+    P = pair(X, X).
+% CHECK: omp-target-errors.m:[[@LINE-2]]:5: error: not yet implemented: code generation for values of type omp_target_errors.pair in target regions
+
 :- pred next(int::in, int::out) is det.
 next(X, Y) :-
     %$omp target map(tofrom: X)
@@ -53,6 +86,9 @@ main(!IO) :-
     first(array.init(1, "a"), _),
     make(1, _),
     zero(array.init(1, 1), _),
+    width(circle(1.0, 2.0), _),
+    number(named("a", 1), _),
+    double(1, _),
     next(N, M),
     twice(M, K),
     io.write_int(K, !IO).
