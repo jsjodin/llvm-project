@@ -55,13 +55,15 @@ static void collectRewrite(omp::MapInfoOp mapOp,
 /// Add the given value to a sorted set if it should be replaced by a
 /// placeholder when used as an operand that must remain for the device.
 ///
-/// Values that are block arguments of function operations are skipped, since
-/// they will still be available after all rewrites are completed, and operands
-/// of operations that need to remain on the host are recursively collected.
+/// Values that are arguments of function operations, those of their entry
+/// blocks, are skipped, since they will still be available after all rewrites
+/// are completed, and operands of operations that need to remain on the host
+/// are recursively collected. Arguments of other blocks go with their blocks,
+/// so they are replaced too.
 static void collectRewrite(Value value, llvm::SetVector<Value> &rewrites) {
-  if ((isa<BlockArgument>(value) &&
-       isa<FunctionOpInterface>(
-           cast<BlockArgument>(value).getOwner()->getParentOp())) ||
+  auto blockArg = dyn_cast<BlockArgument>(value);
+  if ((blockArg && blockArg.getOwner()->isEntryBlock() &&
+       isa<FunctionOpInterface>(blockArg.getOwner()->getParentOp())) ||
       rewrites.contains(value))
     return;
 
