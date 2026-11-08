@@ -18,7 +18,7 @@
 % MERK: merk.entry @main.main_2_0
 
 % MLIR: llvm.func tailcc @main.main_2_0() {
-% MLIR-NEXT: llvm.call tailcc musttail @main.step_2_0() : () -> ()
+% MLIR-NEXT: llvm.call tailcc musttail @main.step_2_0() ["deopt"()] : () -> ()
 % MLIR-NEXT: llvm.return
 % MLIR: llvm.func internal tailcc @main.step_2_0() {
 % MLIR: llvm.func @merk_main() {

@@ -608,6 +608,18 @@ def Merk_RefStoreOp : Merk_Op<"ref_store"> {
   let assemblyFormat = "$value `,` $ref `[` $offset `]` attr-dict `:` type($value)";
 }
 
+def Merk_LiveOp : Merk_Op<"live"> {
+  let summary = "what a collection at the next safepoint must find";
+  let description = [{
+    Before an operation at which a collection can happen: the values live
+    across it, each with its merk type, which lowering loses. Made after
+    outlining, for lowering, which turns it into the safepoint's deopt bundle
+    (docs/INPROGRESS.md, Statepoints and stack maps).
+  }];
+  let arguments = (ins Variadic<AnyType>:$values, ArrayAttr:$types);
+  let assemblyFormat = "`(` $values `)` $types attr-dict `:` type($values)";
+}
+
 def Merk_DeconstructOp : Merk_Op<"deconstruct", [NoMemoryEffect]> {
   let summary = "the arguments of a term whose constructor is known";
   let description = [{

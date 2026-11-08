@@ -306,6 +306,11 @@ private:
   void LowerEnvGet(merk::EnvGetOp);
   void LowerEnvSet(merk::EnvSetOp);
   void LowerRefStore(merk::RefStoreOp);
+  // The merk.live of a safepoint, before it, past what lowering put there.
+  merk::LiveOp LiveBefore(mlir::Operation *);
+  // Makes it the call's deopt bundle. Null: not a marked safepoint.
+  void AttachLive(merk::LiveOp, mlir::LLVM::CallOp);
+  llvm::DenseMap<mlir::Type, std::int64_t> liveTypes_;
   // A call of the code at `code`, with `first`, a pointer, and then `rest`.
   mlir::Value CallPointer(mlir::Operation *call, mlir::Value code,
       mlir::Value first, mlir::ValueRange rest, bool canFail, bool *tail);
@@ -1776,6 +1781,7 @@ mlir::Value Lowerer::CallDescriptorEntry(
     mlir::Operation *op, std::int32_t offset, mlir::Type result) {
   mlir::Location loc{op->getLoc()};
   rewriter_.setInsertionPoint(op);
+  merk::LiveOp live{LiveBefore(op)};
   auto ptr{mlir::LLVM::LLVMPointerType::get(op->getContext())};
   auto heap{HeapPointer()};
   auto i64{rewriter_.getI64Type()};
@@ -1811,6 +1817,7 @@ mlir::Value Lowerer::CallDescriptorEntry(
   auto call{mlir::LLVM::CallOp::create(rewriter_, loc, type,
       mlir::ValueRange{entry, info, op->getOperand(1), op->getOperand(2)})};
   call.setCConv(cconv_);
+  AttachLive(live, call);
   return call.getResult();
 }
 
@@ -2111,6 +2118,49 @@ void Lowerer::LowerRefStore(merk::RefStoreOp op) {
   rewriter_.eraseOp(op);
 }
 
+merk::LiveOp Lowerer::LiveBefore(mlir::Operation *op) {
+  for (mlir::Operation *before{op->getPrevNode()}; before;
+      before = before->getPrevNode()) {
+    if (auto live{mlir::dyn_cast<merk::LiveOp>(before)}) {
+      return live;
+    }
+    if (!mlir::isa_and_present<mlir::LLVM::LLVMDialect, mrt::MrtDialect>(
+            before->getDialect()) &&
+        !mlir::isa<mlir::UnrealizedConversionCastOp>(before)) {
+      break;
+    }
+  }
+  return nullptr;
+}
+
+void Lowerer::AttachLive(merk::LiveOp live, mlir::LLVM::CallOp call) {
+  if (!live) {
+    return;
+  }
+  mlir::OpBuilder::InsertionGuard guard{rewriter_};
+  rewriter_.setInsertionPoint(call);
+  mlir::Location loc{call.getLoc()};
+  llvm::SmallVector<mlir::Value> bundle;
+  for (auto [value, attr] : llvm::zip(live.getValues(), live.getTypes())) {
+    mlir::Type type{mlir::cast<mlir::TypeAttr>(attr).getValue()};
+    if (!mlir::isa<mlir::LLVM::LLVMPointerType>(Convert(type))) {
+      continue;
+    }
+    // Temporary (chunk 3, docs/INPROGRESS.md, Statepoints and stack maps,
+    // piece 3): the index of the table that does not exist yet.
+    std::int64_t index{
+        liveTypes_.try_emplace(type, liveTypes_.size()).first->second};
+    bundle.push_back(mlir::LLVM::ConstantOp::create(
+        rewriter_, loc, rewriter_.getI64Type(), index));
+    bundle.push_back(LoweredValue(value, loc));
+  }
+  call.getOpBundleOperandsMutable().join().append(bundle);
+  call.setOpBundleSizes({static_cast<std::int32_t>(bundle.size())});
+  call.setOpBundleTagsAttr(
+      rewriter_.getArrayAttr({rewriter_.getStringAttr("deopt")}));
+  rewriter_.eraseOp(live);
+}
+
 mlir::Value Lowerer::CallPointer(mlir::Operation *call, mlir::Value code,
     mlir::Value first, mlir::ValueRange rest, bool canFail, bool *tail) {
   mlir::MLIRContext *context{call->getContext()};
@@ -2174,6 +2224,7 @@ mlir::Value Lowerer::CallCode(mlir::Operation *call, mlir::LLVM::LLVMFuncOp func
     llvmCall = mlir::LLVM::CallOp::create(rewriter_, loc, funcType, arguments);
   }
   llvmCall.setCConv(cconv_);
+  AttachLive(LiveBefore(call), llvmCall);
   mlir::Value result{
       llvmCall.getNumResults() ? llvmCall.getResult() : mlir::Value{}};
   if (isTail) {
@@ -2862,6 +2913,8 @@ void Lowerer::LowerAlloc(mrt::AllocOp alloc) {
             .getResult());
     return;
   }
+  // Found before the split, as it is before the allocation.
+  merk::LiveOp live{LiveBefore(alloc)};
   mlir::Block *before{alloc->getBlock()};
   mlir::Block *after{rewriter_.splitBlock(before, alloc->getIterator())};
   mlir::Value cell{after->addArgument(cellPointer, loc)};
@@ -2893,10 +2946,12 @@ void Lowerer::LowerAlloc(mrt::AllocOp alloc) {
   mlir::LLVM::StoreOp::create(rewriter_, loc, end, heap, 8);
   mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{next}, after);
   rewriter_.setInsertionPointToStart(slow);
-  mlir::Value slowCell{mlir::LLVM::CallOp::create(rewriter_, loc,
+  auto slowCall{mlir::LLVM::CallOp::create(rewriter_, loc,
       RuntimeFunc("merk_alloc_slow", cellPointer, {i64}),
-      mlir::ValueRange{mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, bytes)})
-          .getResult()};
+      mlir::ValueRange{
+          mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, bytes)})};
+  mlir::Value slowCell{slowCall.getResult()};
+  AttachLive(live, slowCall);
   mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{slowCell}, after);
 }
 
@@ -3037,6 +3092,10 @@ llvm::LogicalResult Lowerer::Lower() {
     const TermLayout::Functor *found{layout->Find(functor)};
     return found && found->arity > 0;
   });
+  // After that pass, which looks for a call next to the cells it fills.
+  if (!device_) {
+    MarkSafepoints(module_);
+  }
   if (mlir::failed(LowerTerms())) {
     return llvm::failure();
   }
@@ -3189,6 +3248,9 @@ llvm::LogicalResult Lowerer::Lower() {
     }
   });
   LowerMrt();
+  // Those of allocations that turned out static, and of code a device filter
+  // left.
+  module_.walk([&](merk::LiveOp live) { rewriter_.eraseOp(live); });
   // Arithmetic, which is the arith dialect's.
   mlir::LLVMTypeConverter converter{module_.getContext()};
   mlir::RewritePatternSet patterns{module_.getContext()};
@@ -3758,6 +3820,22 @@ bool EmitCode(llvm::Module &module, const TargetInfo &target,
   // The back end wants its own layout, which does not say that the heap's
   // address space is non-integral; nothing after here needs to know.
   module.setDataLayout(target.targetMachine().createDataLayout());
+  // Temporary (chunk 3, docs/INPROGRESS.md, Statepoints and stack maps, piece
+  // 3): nothing reads the bundles yet, and the back end does not take them on
+  // calls that are not statepoints.
+  for (llvm::Function &function : module) {
+    for (llvm::Instruction &instruction :
+        llvm::make_early_inc_range(llvm::instructions(function))) {
+      auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)};
+      if (call && call->getOperandBundle(llvm::LLVMContext::OB_deopt)) {
+        llvm::CallBase *plain{llvm::CallBase::removeOperandBundle(
+            call, llvm::LLVMContext::OB_deopt, call->getIterator())};
+        plain->copyMetadata(*call);
+        call->replaceAllUsesWith(plain);
+        call->eraseFromParent();
+      }
+    }
+  }
   llvm::legacy::PassManager passes;
   if (target.targetMachine().addPassesToEmitFile(
           passes, os, nullptr, fileType)) {
