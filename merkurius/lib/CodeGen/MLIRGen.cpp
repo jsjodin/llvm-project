@@ -607,7 +607,7 @@ std::string MerkGenerator::InstanceSymbol(
     builder_.setInsertionPointToStart(module_.getBody());
     merk::InstanceOp::create(builder_, builder_.getUnknownLoc(),
         builder_.getStringAttr(text), /*sym_visibility=*/mlir::StringAttr{},
-        /*methods=*/mlir::ArrayAttr{});
+        /*methods=*/mlir::ArrayAttr{}, /*shape=*/mlir::DenseI64ArrayAttr{});
   }
   return text;
 }

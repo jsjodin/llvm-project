@@ -100,6 +100,17 @@ struct ClosureLayout {
   Word count;
   Word captures[];
 };
+// What a typeclass_info holds after its method table, which is its word 0:
+// the table's word 0, in 16 bits each from the low end.
+struct DictionaryShape {
+  Word superclasses;
+  Word typeInfos;
+  Word constraints;
+};
+inline DictionaryShape ShapeOfDictionary(const Word *dictionary) {
+  Word shape{*reinterpret_cast<const Word *>(dictionary[0])};
+  return {shape & 0xffff, (shape >> 16) & 0xffff, (shape >> 32) & 0xffff};
+}
 constexpr Word kCaptureUnknown{0};
 constexpr Word kCaptureTypeInfo{8};
 constexpr Word kCaptureTypeclassInfo{16};

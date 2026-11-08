@@ -602,9 +602,26 @@ void MerkGenerator::GenerateInstances() {
     }
     auto op{module_.lookupSymbol<merk::InstanceOp>(symbol)};
     op.setMethodsAttr(builder_.getArrayAttr(table));
+    op.setShape(llvm::ArrayRef<std::int64_t>{
+        static_cast<std::int64_t>(
+            types_.SuperclassesOf(*head.typeclass).size()),
+        static_cast<std::int64_t>(
+            head.types.size() + UnconstrainedInstanceVariables(head)),
+        static_cast<std::int64_t>(head.constraints.size())});
     op.setVisibility(exported ? mlir::SymbolTable::Visibility::Public
                               : mlir::SymbolTable::Visibility::Private);
   }
+}
+
+unsigned MerkGenerator::UnconstrainedInstanceVariables(
+    const semantics::InstanceHead &head) {
+  unsigned variables{0};
+  for (const semantics::Type *type : head.types) {
+    semantics::ForEachVariable(*type,
+        [&](unsigned var) { variables = std::max(variables, var + 1); });
+  }
+  return static_cast<unsigned>(
+      llvm::count(ConstrainedVariables(variables, head.constraints), false));
 }
 
 void MerkGenerator::GenerateDispatch(const semantics::InstanceHead &head,

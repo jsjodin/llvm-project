@@ -884,7 +884,7 @@ closure of a procedure with N captures.
   assumes that a foreign value never points into a heap.
 
 **Pieces,** each its own commit: the layout, unchanged behaviour (done); the
-table prefix; existential
+table prefix (done); existential
 values in messages; closures in the copy, and sending them; `spawn` and `monitor`
 copying.
 

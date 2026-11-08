@@ -183,7 +183,7 @@ module @nd attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 // that passes an environment in its own frame is not.
 // LLVM-LABEL: define tailcc i1 @nd.method_1_0(ptr %0, i64 %1, ptr %2, ptr %3)
 // LLVM: %[[TABLE:.*]] = load ptr, ptr %0
-// LLVM-NEXT: %[[SLOT:.*]] = getelementptr i8, ptr %[[TABLE]], i32 8
+// LLVM-NEXT: %[[SLOT:.*]] = getelementptr i8, ptr %[[TABLE]], i32 16
 // LLVM-NEXT: %[[METHOD:.*]] = load ptr, ptr %[[SLOT]]
 // LLVM-NEXT: musttail call tailcc i1 %[[METHOD]](ptr %0, i64 %1, ptr %2, ptr %3)
 // LLVM-LABEL: define tailcc i1 @nd.give_0_0(ptr %0, ptr %1)

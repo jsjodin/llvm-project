@@ -194,6 +194,9 @@ private:
   // None for another constructor; null if a variable's type_info is only
   // inside a constraint's argument's, which is not handled yet.
   std::optional<HiddenFields> HiddenFieldsOf(const semantics::ConstructorTypes &);
+  // How many of an instance's type variables its constraints do not have,
+  // each with a type_info in its typeclass_info.
+  unsigned UnconstrainedInstanceVariables(const semantics::InstanceHead &);
   // Where a constrained variable's type_info is: the typeclass_info of the
   // first constraint that has it as an argument, `first` being the first
   // typeclass_info's place, and the word of it, after the method table and
