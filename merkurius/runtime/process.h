@@ -23,10 +23,10 @@
 // Each worker has a queue of runnable processes, with a lock of its own, and
 // a worker with an empty queue takes half of another's.
 //
-// A process that blocks holds schedulerLock across its switch, and what it
+// A process that blocks holds its waitLock across its switch, and what it
 // switches to releases it, so that nothing can wake and resume it before its
-// context is saved. Temporary (chunk 2 step 4, docs/INPROGRESS.md): that lock
-// also guards the mailboxes and the timers.
+// context is saved. Locks are taken in this order: a mailbox's, a process's
+// waitLock, schedulerLock (timers and new stacks), a worker's queue.
 //
 //===----------------------------------------------------------------------===//
 
@@ -40,6 +40,13 @@
 #include <pthread.h>
 
 namespace merkurius::runtime {
+
+// A process's messages are stamped in the order they arrive, over all its
+// mailboxes. `arrivals` also counts its mailboxes' closes.
+struct ArrivalCounts {
+  std::uint64_t stamps{0};
+  std::int64_t arrivals{0};
+};
 
 struct Process {
   // The next free byte of its heap and that chunk's end, while it does not
@@ -57,6 +64,9 @@ struct Process {
   // What it runs: a closure of pred(mailbox(M), io, io), and the mailbox.
   std::uint64_t closure{0};
   std::uint64_t argument{0};
+  // Guards `waiting` and its list of mailboxes.
+  pthread_mutex_t waitLock = PTHREAD_MUTEX_INITIALIZER;
+  ArrivalCounts counts{};
   // Whether it is blocked, and until when, on the monotonic clock in
   // nanoseconds, negative for no end.
   bool waiting{false};
@@ -71,7 +81,7 @@ struct Process {
   int pinned{0};
 };
 
-// Guards the scheduler and the mailboxes (mailbox.cpp).
+// Guards the timers, and a stack freed until its process has switched away.
 extern pthread_mutex_t schedulerLock;
 
 // The process this thread runs, or null on a thread that runs none, as a
@@ -84,6 +94,7 @@ void RunProcess(Process *next);
 
 // A process that will run `closure` on `argument`, not yet runnable, or null
 // if there is no address space for its stack. 0 bytes is the default size.
+// With schedulerLock held.
 Process *NewProcess(
     std::size_t stackBytes, std::uint64_t closure, std::uint64_t argument);
 
@@ -95,13 +106,13 @@ bool CanSuspend();
 void Pin();
 void Unpin();
 
-// The rest take the lock held, and hold it on return.
 // Makes a new process runnable.
 void Start(Process *);
-// Makes a blocked process runnable; one that is not blocked is left alone.
+// With the process's waitLock held, which it keeps: makes a blocked process
+// runnable; one that is not blocked is left alone.
 void Wake(Process *);
-// Runs other processes until this one is woken, or its deadline, if not
-// negative, has passed.
+// With this process's waitLock held, which it releases: runs other processes
+// until this one is woken, or its deadline, if not negative, has passed.
 void Block(std::int64_t deadline);
 
 // mailbox.cpp: closes the process's mailboxes, as it ends.

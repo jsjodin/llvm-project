@@ -282,9 +282,18 @@ struct Mailbox {
   Process *owner;
   std::int64_t previousOwned;
   std::int64_t nextOwned;
+  std::int64_t index;
+  // Guards the rest, but for its neighbours in the list, which its owner's
+  // waitLock guards, and its name, which registryLock does. It lives as long
+  // as the slot.
+  pthread_mutex_t lock;
 };
 
-pthread_mutex_t &lock{schedulerLock};
+// Guards the free slots, new chunks of slots, and names.
+pthread_mutex_t registryLock = PTHREAD_MUTEX_INITIALIZER;
+// Where a thread that cannot suspend a process waits for a message: one that
+// runs no process, or a process in a target region.
+pthread_mutex_t waitersLock = PTHREAD_MUTEX_INITIALIZER;
 pthread_once_t nodeOnce = PTHREAD_ONCE_INIT;
 Word nodeHigh{0};
 Word nodeLow{0};
@@ -295,16 +304,28 @@ void ChooseNode() {
 }
 pthread_cond_t arrived;
 pthread_once_t once = PTHREAD_ONCE_INIT;
-// The last message's stamp, and the number of arrivals and closes, under
-// the lock.
-std::uint64_t stamps{0};
-std::int64_t arrivals{0};
-Mailbox *slots{nullptr};
+// The counts of mailboxes that no process owns, and of threads that run none.
+ArrivalCounts unowned{};
+// How many threads are about to wait on `arrived`, and a count that tells
+// them something happened since they looked.
+std::int64_t waiters{0};
+std::int64_t waitersEvents{0};
+
+// Slots are in chunks that never move, so that a slot's lock and queue stay
+// put and finding one needs no lock.
+constexpr unsigned kChunkShift{10};
+constexpr std::int64_t kChunkSlots{1 << kChunkShift};
+constexpr std::int64_t kMostChunks{1 << 20};
+Mailbox *chunks[kMostChunks];
 std::int64_t slotCount{0};
-std::int64_t slotCapacity{0};
 std::int64_t firstFree{-1};
 // How many mailboxes have rings, so that most regions' ends need no walk.
 std::int64_t attachedRings{0};
+
+Mailbox *SlotAt(std::int64_t index) {
+  return &__atomic_load_n(&chunks[index >> kChunkShift],
+      __ATOMIC_ACQUIRE)[index & (kChunkSlots - 1)];
+}
 
 // Waits on the monotonic clock, which a change of the time of day does not
 // move.
@@ -322,8 +343,8 @@ std::int64_t Now() {
   return static_cast<std::int64_t>(now.tv_sec) * 1000000000 + now.tv_nsec;
 }
 
-// The mailbox of a handle, or null for a closed one, or one of another node
-// or place. Called with the lock held.
+// The mailbox of a handle, with its lock held, or null for a closed one, or
+// one of another node or place.
 Mailbox *Find(const Handle &handle) {
   pthread_once(&nodeOnce, ChooseNode);
   if (handle.nodeHigh != nodeHigh || handle.nodeLow != nodeLow ||
@@ -331,64 +352,102 @@ Mailbox *Find(const Handle &handle) {
     return nullptr;
   }
   Word slot{handle.placeAndSlot & kSlotMask};
-  if (slot >= static_cast<Word>(slotCount)) {
+  if (slot >= static_cast<Word>(__atomic_load_n(&slotCount, __ATOMIC_ACQUIRE))) {
     return nullptr;
   }
-  Mailbox *mailbox{&slots[slot]};
-  return mailbox->open && mailbox->generation == handle.generation &&
-          mailbox->secret == handle.secret
-      ? mailbox
-      : nullptr;
+  Mailbox *mailbox{SlotAt(static_cast<std::int64_t>(slot))};
+  pthread_mutex_lock(&mailbox->lock);
+  if (mailbox->open && mailbox->generation == handle.generation &&
+      mailbox->secret == handle.secret) {
+    return mailbox;
+  }
+  pthread_mutex_unlock(&mailbox->lock);
+  return nullptr;
 }
 
-// Its name goes, as when it is closed.
-// Adds a mailbox to its owner's list; a null owner has none.
-void Own(std::int64_t index, Process *owner) {
-  Mailbox &mailbox{slots[index]};
-  mailbox.owner = owner;
-  mailbox.previousOwned = -1;
-  mailbox.nextOwned = -1;
+void Unlock(Mailbox *mailbox) { pthread_mutex_unlock(&mailbox->lock); }
+
+ArrivalCounts &CountsOf(const Mailbox *mailbox) {
+  return mailbox->owner ? mailbox->owner->counts : unowned;
+}
+
+ArrivalCounts &MyCounts() {
+  Process *process{CurrentProcess()};
+  return process ? process->counts : unowned;
+}
+
+// Adds a mailbox, with its lock held, to its owner's list; a null owner has
+// none.
+void Own(Mailbox *mailbox, Process *owner) {
+  mailbox->owner = owner;
+  mailbox->previousOwned = -1;
+  mailbox->nextOwned = -1;
   if (owner) {
-    mailbox.nextOwned = owner->firstMailbox;
+    pthread_mutex_lock(&owner->waitLock);
+    mailbox->nextOwned = owner->firstMailbox;
     if (owner->firstMailbox >= 0) {
-      slots[owner->firstMailbox].previousOwned = index;
+      SlotAt(owner->firstMailbox)->previousOwned = mailbox->index;
     }
-    owner->firstMailbox = index;
+    owner->firstMailbox = mailbox->index;
+    pthread_mutex_unlock(&owner->waitLock);
   }
 }
 
-void Disown(Mailbox *mailbox) {
+// With the mailbox's lock and its owner's waitLock held.
+void Unlink(Mailbox *mailbox) {
   Process *owner{mailbox->owner};
-  if (!owner) {
-    return;
-  }
   if (mailbox->previousOwned >= 0) {
-    slots[mailbox->previousOwned].nextOwned = mailbox->nextOwned;
+    SlotAt(mailbox->previousOwned)->nextOwned = mailbox->nextOwned;
   } else {
     owner->firstMailbox = mailbox->nextOwned;
   }
   if (mailbox->nextOwned >= 0) {
-    slots[mailbox->nextOwned].previousOwned = mailbox->previousOwned;
+    SlotAt(mailbox->nextOwned)->previousOwned = mailbox->previousOwned;
   }
   mailbox->owner = nullptr;
 }
 
+void Disown(Mailbox *mailbox) {
+  if (Process *owner{mailbox->owner}) {
+    pthread_mutex_lock(&owner->waitLock);
+    Unlink(mailbox);
+    pthread_mutex_unlock(&owner->waitLock);
+  }
+}
+
+// Its queued messages get new stamps, from the counts it now uses, so that
+// they compare with the receiver's others. With its lock held.
+void Restamp(Mailbox *mailbox) {
+  ArrivalCounts &counts{CountsOf(mailbox)};
+  for (Message *message{mailbox->head}; message; message = message->next) {
+    message->stamp = __atomic_add_fetch(&counts.stamps, 1, __ATOMIC_SEQ_CST);
+  }
+}
+
 // Only its owner receives from a mailbox. A thread that runs no process, as
-// on the host's side of a device, is not one; a mailbox made on such a thread
-// goes to the first process that receives from it.
+// on the host's side of a device, has no counts of its own: a mailbox it
+// receives from goes to no process, so that it and the senders use the same
+// ones. A mailbox of no process goes to the first process that receives from
+// it. With its lock held.
 void CheckOwner(Mailbox *mailbox) {
   Process *process{CurrentProcess()};
   if (!process) {
+    if (mailbox->owner) {
+      Disown(mailbox);
+      Restamp(mailbox);
+    }
     return;
   }
   if (!mailbox->owner) {
-    Own(mailbox - slots, process);
+    Own(mailbox, process);
+    Restamp(mailbox);
   } else if (mailbox->owner != process) {
     Fail("a process received from a mailbox of another process", "");
   }
 }
 
-void Unregister(Mailbox *mailbox) {
+// With registryLock held.
+void RemoveName(Mailbox *mailbox) {
   std::free(mailbox->name);
   mailbox->name = nullptr;
 }
@@ -429,68 +488,82 @@ void FillRing(Mailbox *mailbox) {
   __atomic_store_n(&ring->spilled, message != nullptr, __ATOMIC_RELEASE);
 }
 
-// Queues a message whose cells are in a fragment of their own. Called with
-// the lock held.
-void Queue(Mailbox *mailbox, Message *message) {
-  message->stamp = ++stamps;
-  *mailbox->tail = message;
-  mailbox->tail = &message->next;
-  ++mailbox->count;
-  __atomic_add_fetch(&arrivals, 1, __ATOMIC_RELEASE);
-  if (mailbox->ring) {
-    FillRing(mailbox);
-  }
-  pthread_cond_broadcast(&arrived);
-  if (mailbox->owner) {
-    Wake(mailbox->owner);
+// Something a thread waiting on `arrived` may be waiting for has happened.
+void TellWaiters() {
+  if (__atomic_load_n(&waiters, __ATOMIC_SEQ_CST) > 0) {
+    pthread_mutex_lock(&waitersLock);
+    __atomic_add_fetch(&waitersEvents, 1, __ATOMIC_SEQ_CST);
+    pthread_cond_broadcast(&arrived);
+    pthread_mutex_unlock(&waitersLock);
   }
 }
 
-// Waits on `arrived` until the deadline, or for ever if it is negative:
-// false once the deadline has passed. Called with the lock held.
-bool WaitArrival(std::int64_t deadline) {
-  if (CanSuspend()) {
-    // A process lets others run; the scheduler spins when nothing can.
-    if (deadline >= 0 && Now() >= deadline) {
-      return false;
-    }
-    Block(deadline);
-    return true;
+// Queues a message whose cells are in a fragment of their own, with the
+// mailbox's lock held. The count goes up before the owner's waitLock is
+// taken, so that a receive about to block either sees it or is woken.
+void Queue(Mailbox *mailbox, Message *message) {
+  ArrivalCounts &counts{CountsOf(mailbox)};
+  message->stamp = __atomic_add_fetch(&counts.stamps, 1, __ATOMIC_SEQ_CST);
+  *mailbox->tail = message;
+  mailbox->tail = &message->next;
+  ++mailbox->count;
+  __atomic_add_fetch(&counts.arrivals, 1, __ATOMIC_SEQ_CST);
+  if (mailbox->ring) {
+    FillRing(mailbox);
   }
-  if (deadline < 0) {
-    pthread_cond_wait(&arrived, &lock);
-    return true;
+  if (Process *owner{mailbox->owner}) {
+    pthread_mutex_lock(&owner->waitLock);
+    Wake(owner);
+    pthread_mutex_unlock(&owner->waitLock);
   }
-  if (Now() >= deadline) {
+  TellWaiters();
+}
+
+// A thread that cannot suspend a process is about to look for what it waits
+// for: anything that happens after this reaches WaitForEvent.
+std::int64_t StartLooking() {
+  __atomic_add_fetch(&waiters, 1, __ATOMIC_SEQ_CST);
+  return __atomic_load_n(&waitersEvents, __ATOMIC_SEQ_CST);
+}
+
+void StopLooking() { __atomic_sub_fetch(&waiters, 1, __ATOMIC_SEQ_CST); }
+
+// Waits for an event after `seen` until the deadline, or for ever if it is
+// negative: false once the deadline has passed.
+bool WaitForEvent(std::int64_t seen, std::int64_t deadline) {
+  if (deadline >= 0 && Now() >= deadline) {
     return false;
   }
-  timespec until{static_cast<time_t>(deadline / 1000000000),
-      static_cast<long>(deadline % 1000000000)};
-  pthread_cond_timedwait(&arrived, &lock, &until);
+  pthread_mutex_lock(&waitersLock);
+  if (__atomic_load_n(&waitersEvents, __ATOMIC_SEQ_CST) == seen) {
+    if (deadline < 0) {
+      pthread_cond_wait(&arrived, &waitersLock);
+    } else {
+      timespec until{static_cast<time_t>(deadline / 1000000000),
+          static_cast<long>(deadline % 1000000000)};
+      pthread_cond_timedwait(&arrived, &waitersLock, &until);
+    }
+  }
+  pthread_mutex_unlock(&waitersLock);
   return true;
 }
 
 // When a wait that ends at the deadline may stop spinning: never past the
 // deadline, so that a receive with no time to wait does not spin.
 std::int64_t SpinEnd(std::int64_t deadline) {
-  if (CanSuspend()) {
-    return 0;
-  }
   std::int64_t end{Now() + SpinNanoseconds()};
   return deadline >= 0 && deadline < end ? deadline : end;
 }
 
-// Spins, without the lock, until something has arrived or the time is
-// `end`. Called with the lock held, which it holds again on return.
-void SpinForArrival(std::int64_t end) {
-  std::int64_t seen{arrivals};
-  pthread_mutex_unlock(&lock);
-  // It yields, so that with fewer cores than threads the one it waits for
-  // can run.
-  while (__atomic_load_n(&arrivals, __ATOMIC_ACQUIRE) == seen && Now() < end) {
+// Spins until the number of arrivals is no longer `seen`, or the time is
+// `end`. It yields, so that with fewer cores than threads the one it waits
+// for can run.
+void SpinForArrival(std::int64_t seen, std::int64_t end) {
+  ArrivalCounts &counts{MyCounts()};
+  while (__atomic_load_n(&counts.arrivals, __ATOMIC_ACQUIRE) == seen &&
+      Now() < end) {
     sched_yield();
   }
-  pthread_mutex_lock(&lock);
 }
 
 pthread_once_t spinOnce = PTHREAD_ONCE_INIT;
@@ -533,9 +606,7 @@ bool IsThisNode(Word high, Word low) {
 Delivery DeliverEncoded(
     const Handle &handle, const std::uint8_t *bytes, std::size_t size) {
   pthread_once(&once, InitializeCondition);
-  // Decoded with the lock held, so that the mailbox, and its type, stay
-  // while it is.
-  pthread_mutex_lock(&lock);
+  // Decoded with the mailbox's lock held, so that it, and its type, stay.
   Delivery delivery{Delivery::Dropped};
   if (Mailbox *mailbox{Find(handle)}) {
     Fragment fragment;
@@ -547,29 +618,38 @@ Delivery DeliverEncoded(
       Queue(mailbox, message);
       delivery = Delivery::Delivered;
     }
+    Unlock(mailbox);
   }
-  pthread_mutex_unlock(&lock);
   return delivery;
+}
+
+// A mailbox with a name, whose fields do not change while registryLock is
+// held, as closing it takes the name away under that lock first.
+static Mailbox *Named(const char *name) {
+  std::int64_t count{__atomic_load_n(&slotCount, __ATOMIC_ACQUIRE)};
+  for (std::int64_t i{0}; i < count; ++i) {
+    Mailbox *mailbox{SlotAt(i)};
+    if (mailbox->name && std::strcmp(mailbox->name, name) == 0) {
+      return mailbox;
+    }
+  }
+  return nullptr;
 }
 
 std::int64_t LookupForPeer(const char *name,
     const std::uint8_t fingerprint[kFingerprintBytes], Handle &found) {
-  pthread_mutex_lock(&lock);
+  pthread_mutex_lock(&registryLock);
   std::int64_t result{1};
-  for (std::int64_t i{0}; i < slotCount; ++i) {
-    Mailbox &mailbox{slots[i]};
-    if (mailbox.open && mailbox.name && std::strcmp(mailbox.name, name) == 0) {
-      std::uint8_t own[kFingerprintBytes];
-      Fingerprint(mailbox.messageType, own);
-      result = std::memcmp(own, fingerprint, kFingerprintBytes) == 0 ? 0 : 2;
-      if (result == 0) {
-        found = {nodeHigh, nodeLow, static_cast<Word>(i), mailbox.generation,
-            mailbox.secret};
-      }
-      break;
+  if (Mailbox *mailbox{Named(name)}) {
+    std::uint8_t own[kFingerprintBytes];
+    Fingerprint(mailbox->messageType, own);
+    result = std::memcmp(own, fingerprint, kFingerprintBytes) == 0 ? 0 : 2;
+    if (result == 0) {
+      found = {nodeHigh, nodeLow, static_cast<Word>(mailbox->index),
+          mailbox->generation, mailbox->secret};
     }
   }
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&registryLock);
   return result;
 }
 
@@ -590,33 +670,34 @@ extern "C" void merk_mailbox_new(Word typeInfo, std::int64_t *placeAndSlot,
     std::int64_t *generation, std::int64_t *secret) {
   pthread_once(&nodeOnce, ChooseNode);
   pthread_once(&once, InitializeCondition);
-  pthread_mutex_lock(&lock);
+  pthread_mutex_lock(&registryLock);
   std::int64_t index{firstFree};
   if (index >= 0) {
-    firstFree = slots[index].nextFree;
+    firstFree = SlotAt(index)->nextFree;
   } else {
-    if (slotCount == slotCapacity) {
-      slotCapacity = slotCapacity ? 2 * slotCapacity : 16;
-      slots = static_cast<Mailbox *>(
-          std::realloc(slots, sizeof(Mailbox) * slotCapacity));
-      if (!slots) {
+    index = slotCount;
+    if ((index & (kChunkSlots - 1)) == 0) {
+      if (index >> kChunkShift == kMostChunks) {
+        Fail("too many mailboxes", "");
+      }
+      auto *chunk{static_cast<Mailbox *>(
+          std::calloc(kChunkSlots, sizeof(Mailbox)))};
+      if (!chunk) {
         Fail("out of memory", "");
       }
-      // An empty mailbox's queue ends at its own head, which has moved.
-      for (std::int64_t i{0}; i < slotCount; ++i) {
-        if (!slots[i].head) {
-          slots[i].tail = &slots[i].head;
-        }
+      for (std::int64_t i{0}; i < kChunkSlots; ++i) {
+        pthread_mutex_init(&chunk[i].lock, nullptr);
+        chunk[i].index = index + i;
       }
+      __atomic_store_n(&chunks[index >> kChunkShift], chunk, __ATOMIC_RELEASE);
     }
-    index = slotCount++;
-    slots[index].generation = 0;
+    __atomic_store_n(&slotCount, index + 1, __ATOMIC_RELEASE);
   }
-  Mailbox &mailbox{slots[index]};
-  mailbox.open = true;
+  pthread_mutex_unlock(&registryLock);
+  Mailbox &mailbox{*SlotAt(index)};
+  pthread_mutex_lock(&mailbox.lock);
   mailbox.secret = Random();
   mailbox.messageType = KeepTypeInfo(typeInfo);
-  mailbox.name = nullptr;
   mailbox.head = nullptr;
   mailbox.tail = &mailbox.head;
   mailbox.count = 0;
@@ -625,11 +706,12 @@ extern "C" void merk_mailbox_new(Word typeInfo, std::int64_t *placeAndSlot,
   mailbox.ringDevice = -1;
   mailbox.ringOfArrays = false;
   mailbox.consumed = 0;
-  Own(index, CurrentProcess());
+  Own(&mailbox, CurrentProcess());
+  mailbox.open = true;
   *placeAndSlot = index;
   *generation = mailbox.generation;
   *secret = static_cast<std::int64_t>(mailbox.secret);
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&mailbox.lock);
 }
 
 #define MERK_HANDLE_PARAMETERS                                                 \
@@ -643,9 +725,13 @@ extern "C" void merk_mailbox_new(Word typeInfo, std::int64_t *placeAndSlot,
 
 // Its queued messages are dropped, its name goes, and its slot gets a new
 // generation, so that its handle stays dead when the slot is reused. A
-// receive waiting on it wakes and finds nothing. Called with the lock held.
+// receive waiting on it wakes and finds nothing. With the mailbox's lock held.
 static void Close(Mailbox *mailbox) {
-  Unregister(mailbox);
+  pthread_mutex_lock(&registryLock);
+  if (mailbox->name) {
+    RemoveName(mailbox);
+  }
+  pthread_mutex_unlock(&registryLock);
   FreeTypeInfo(mailbox->messageType);
   mailbox->messageType = 0;
   mailbox->open = false;
@@ -653,32 +739,47 @@ static void Close(Mailbox *mailbox) {
   mailbox->head = nullptr;
   mailbox->tail = &mailbox->head;
   mailbox->count = 0;
-  mailbox->nextFree = firstFree;
-  firstFree = mailbox - slots;
   // Whoever made the ring frees it when no region is running.
   mailbox->ring = nullptr;
-  __atomic_add_fetch(&arrivals, 1, __ATOMIC_RELEASE);
-  pthread_cond_broadcast(&arrived);
+  __atomic_add_fetch(&CountsOf(mailbox).arrivals, 1, __ATOMIC_SEQ_CST);
   if (Process *owner{mailbox->owner}) {
-    Disown(mailbox);
+    pthread_mutex_lock(&owner->waitLock);
+    Unlink(mailbox);
     Wake(owner);
+    pthread_mutex_unlock(&owner->waitLock);
   }
+  TellWaiters();
+  // Last, so that whoever takes the slot next waits for this one's lock.
+  pthread_mutex_lock(&registryLock);
+  mailbox->nextFree = firstFree;
+  firstFree = mailbox->index;
+  pthread_mutex_unlock(&registryLock);
 }
 
 extern "C" void merk_mailbox_close(MERK_HANDLE_PARAMETERS) {
   pthread_once(&once, InitializeCondition);
-  pthread_mutex_lock(&lock);
   if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
     Close(mailbox);
+    Unlock(mailbox);
   }
-  pthread_mutex_unlock(&lock);
 }
 
 namespace merkurius::runtime {
 void CloseMailboxesOf(Process *process) {
   pthread_once(&once, InitializeCondition);
-  while (process->firstMailbox >= 0) {
-    Close(&slots[process->firstMailbox]);
+  for (;;) {
+    pthread_mutex_lock(&process->waitLock);
+    std::int64_t first{process->firstMailbox};
+    pthread_mutex_unlock(&process->waitLock);
+    if (first < 0) {
+      return;
+    }
+    Mailbox *mailbox{SlotAt(first)};
+    pthread_mutex_lock(&mailbox->lock);
+    if (mailbox->owner == process) {
+      Close(mailbox);
+    }
+    pthread_mutex_unlock(&mailbox->lock);
   }
 }
 } // namespace merkurius::runtime
@@ -693,17 +794,18 @@ extern "C" void merk_process_spawn(std::int64_t stackBytes, Word closure,
   if (!CurrentProcess()) {
     Fail("spawn is not available on a thread that runs no process", "");
   }
-  pthread_mutex_lock(&lock);
+  pthread_mutex_lock(&schedulerLock);
   Process *child{
       NewProcess(static_cast<std::size_t>(stackBytes), closure, argument)};
+  pthread_mutex_unlock(&schedulerLock);
   if (!child) {
     Fail("no address space for a process's stack", "");
   }
   Mailbox *mailbox{Find(MERK_HANDLE)};
   Disown(mailbox);
-  Own(mailbox - slots, child);
+  Own(mailbox, child);
+  Unlock(mailbox);
   Start(child);
-  pthread_mutex_unlock(&lock);
 }
 
 // The copy is made before the lock is taken, since it reads only the
@@ -726,11 +828,10 @@ extern "C" void merk_mailbox_send(
   auto *message{static_cast<Message *>(fragment.Allocate(sizeof(Message)))};
   message->next = nullptr;
   message->value = CopyValue(value, typeInfo, nullptr, fragment);
-  pthread_mutex_lock(&lock);
   if (Mailbox *mailbox{Find(handle)}) {
     Queue(mailbox, message);
+    Unlock(mailbox);
   }
-  pthread_mutex_unlock(&lock);
 }
 
 // When a receive of this many milliseconds stops waiting, on the monotonic
@@ -744,28 +845,52 @@ extern "C" std::int64_t merk_mailbox_deadline(std::int64_t milliseconds) {
 extern "C" std::int64_t merk_mailbox_wait(
     MERK_HANDLE_PARAMETERS, std::int64_t position, std::int64_t deadline) {
   pthread_once(&once, InitializeCondition);
-  std::int64_t spinEnd{SpinEnd(deadline)};
-  pthread_mutex_lock(&lock);
+  bool suspends{CanSuspend()};
+  std::int64_t spinEnd{suspends ? 0 : SpinEnd(deadline)};
   std::int64_t result{0};
   for (;;) {
+    std::int64_t seen{suspends ? 0 : StartLooking()};
+    std::int64_t arrivals{
+        __atomic_load_n(&MyCounts().arrivals, __ATOMIC_SEQ_CST)};
     Mailbox *mailbox{Find(MERK_HANDLE)};
     if (!mailbox) {
+      if (!suspends) {
+        StopLooking();
+      }
       break;
     }
     CheckOwner(mailbox);
     if (mailbox->count > position) {
+      Unlock(mailbox);
+      if (!suspends) {
+        StopLooking();
+      }
       result = 1;
       break;
     }
-    if (Now() < spinEnd) {
-      SpinForArrival(spinEnd);
+    if (suspends) {
+      // The process scheduled next spins if nothing can run.
+      if (deadline >= 0 && Now() >= deadline) {
+        Unlock(mailbox);
+        break;
+      }
+      pthread_mutex_lock(&CurrentProcess()->waitLock);
+      Unlock(mailbox);
+      Block(deadline);
       continue;
     }
-    if (!WaitArrival(deadline)) {
+    Unlock(mailbox);
+    bool waited{true};
+    if (Now() < spinEnd) {
+      SpinForArrival(arrivals, spinEnd);
+    } else {
+      waited = WaitForEvent(seen, deadline);
+    }
+    StopLooking();
+    if (!waited) {
       break;
     }
   }
-  pthread_mutex_unlock(&lock);
   return result;
 }
 
@@ -775,16 +900,15 @@ extern "C" std::int64_t merk_mailbox_wait(
 extern "C" std::int64_t merk_mailbox_poll(
     MERK_HANDLE_PARAMETERS, std::int64_t position) {
   pthread_once(&once, InitializeCondition);
-  pthread_mutex_lock(&lock);
   Mailbox *mailbox{Find(MERK_HANDLE)};
-  if (mailbox) {
-    CheckOwner(mailbox);
+  if (!mailbox) {
+    return -1;
   }
-  std::int64_t result{!mailbox                    ? -1
-          : mailbox->count > position
+  CheckOwner(mailbox);
+  std::int64_t result{mailbox->count > position
           ? static_cast<std::int64_t>(At(mailbox, position)->stamp)
           : 0};
-  pthread_mutex_unlock(&lock);
+  Unlock(mailbox);
   return result;
 }
 
@@ -792,23 +916,20 @@ extern "C" std::int64_t merk_mailbox_poll(
 // receive over a selector reads before it looks at its mailboxes.
 extern "C" std::int64_t merk_mailbox_arrivals(void) {
   pthread_once(&once, InitializeCondition);
-  pthread_mutex_lock(&lock);
-  std::int64_t count{arrivals};
-  pthread_mutex_unlock(&lock);
-  return count;
+  return __atomic_load_n(&MyCounts().arrivals, __ATOMIC_SEQ_CST);
 }
 
 // The stamp of the last message queued, which a receive over a selector
 // reads before it looks at its mailboxes: every message with a stamp up to
-// it was queued then, so the oldest of those it finds is the oldest of all,
-// while one it finds with a later stamp arrived as it looked, and an older
-// one may have arrived too, in a mailbox it had looked at already.
+// it was queued then, or is being queued by a sender that holds its mailbox's
+// lock, which looking at that mailbox waits for. So the oldest of those it
+// finds is the oldest of all, while one it finds with a later stamp arrived
+// as it looked, and an older one may have arrived too, in a mailbox it had
+// looked at already.
 extern "C" std::int64_t merk_mailbox_last_stamp(void) {
   pthread_once(&once, InitializeCondition);
-  pthread_mutex_lock(&lock);
-  std::int64_t stamp{static_cast<std::int64_t>(stamps)};
-  pthread_mutex_unlock(&lock);
-  return stamp;
+  return static_cast<std::int64_t>(
+      __atomic_load_n(&MyCounts().stamps, __ATOMIC_SEQ_CST));
 }
 
 // 1 once a message has been queued or a mailbox closed since `seen` was
@@ -816,41 +937,61 @@ extern "C" std::int64_t merk_mailbox_last_stamp(void) {
 extern "C" std::int64_t merk_mailbox_wait_arrival(
     std::int64_t seen, std::int64_t deadline) {
   pthread_once(&once, InitializeCondition);
-  std::int64_t spinEnd{SpinEnd(deadline)};
-  pthread_mutex_lock(&lock);
-  std::int64_t result{1};
-  while (arrivals == seen) {
-    if (Now() < spinEnd) {
-      SpinForArrival(spinEnd);
-      continue;
-    }
-    if (!WaitArrival(deadline)) {
-      result = 0;
-      break;
+  ArrivalCounts &counts{MyCounts()};
+  if (CanSuspend()) {
+    Process *self{CurrentProcess()};
+    for (;;) {
+      pthread_mutex_lock(&self->waitLock);
+      if (__atomic_load_n(&counts.arrivals, __ATOMIC_SEQ_CST) != seen) {
+        pthread_mutex_unlock(&self->waitLock);
+        return 1;
+      }
+      if (deadline >= 0 && Now() >= deadline) {
+        pthread_mutex_unlock(&self->waitLock);
+        return 0;
+      }
+      Block(deadline);
     }
   }
-  pthread_mutex_unlock(&lock);
-  return result;
+  std::int64_t spinEnd{SpinEnd(deadline)};
+  for (;;) {
+    std::int64_t event{StartLooking()};
+    if (__atomic_load_n(&counts.arrivals, __ATOMIC_SEQ_CST) != seen) {
+      StopLooking();
+      return 1;
+    }
+    bool waited{true};
+    if (Now() < spinEnd) {
+      SpinForArrival(seen, spinEnd);
+    } else {
+      waited = WaitForEvent(event, deadline);
+    }
+    StopLooking();
+    if (!waited) {
+      return 0;
+    }
+  }
 }
 
 // The message at `position`, which merk_mailbox_wait has found there.
 extern "C" Word merk_mailbox_message(
     MERK_HANDLE_PARAMETERS, std::int64_t position) {
-  pthread_mutex_lock(&lock);
   Mailbox *mailbox{Find(MERK_HANDLE)};
   if (!mailbox || mailbox->count <= position) {
     Fail("a message was read that is not in its mailbox", "");
   }
   Word value{At(mailbox, position)->value};
-  pthread_mutex_unlock(&lock);
+  Unlock(mailbox);
   return value;
 }
 
 extern "C" void merk_mailbox_remove(
     MERK_HANDLE_PARAMETERS, std::int64_t position) {
-  pthread_mutex_lock(&lock);
-  if (Mailbox *mailbox{Find(MERK_HANDLE)};
-      mailbox && mailbox->count > position) {
+  Mailbox *mailbox{Find(MERK_HANDLE)};
+  if (!mailbox) {
+    return;
+  }
+  if (mailbox->count > position) {
     Message **link{&mailbox->head};
     for (std::int64_t i{0}; i < position; ++i) {
       link = &(*link)->next;
@@ -862,7 +1003,7 @@ extern "C" void merk_mailbox_remove(
     }
     --mailbox->count;
   }
-  pthread_mutex_unlock(&lock);
+  Unlock(mailbox);
 }
 
 // The mailbox's ring for a device (device-ring.h), made by `allocate` the
@@ -871,7 +1012,6 @@ extern "C" void merk_mailbox_remove(
 extern "C" DeviceRing *merk_mailbox_attach(MERK_HANDLE_PARAMETERS, bool arrays,
     int device, DeviceRing *(*allocate)(int), std::uint64_t *head) {
   pthread_once(&once, InitializeCondition);
-  pthread_mutex_lock(&lock);
   DeviceRing *ring{nullptr};
   if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
     if (!mailbox->ring) {
@@ -879,7 +1019,7 @@ extern "C" DeviceRing *merk_mailbox_attach(MERK_HANDLE_PARAMETERS, bool arrays,
       mailbox->ringDevice = device;
       mailbox->ringOfArrays = arrays;
       mailbox->consumed = 0;
-      ++attachedRings;
+      __atomic_add_fetch(&attachedRings, 1, __ATOMIC_SEQ_CST);
       FillRing(mailbox);
     } else if (mailbox->ringDevice != device) {
       // A ring has one consumer. This runs on the plugin's server thread,
@@ -892,44 +1032,49 @@ extern "C" DeviceRing *merk_mailbox_attach(MERK_HANDLE_PARAMETERS, bool arrays,
     }
     ring = mailbox->ring;
     *head = ring->head;
+    Unlock(mailbox);
   }
-  pthread_mutex_unlock(&lock);
   return ring;
 }
 
 // Shows the device the messages that did not fit in its ring.
 extern "C" void merk_mailbox_drain(MERK_HANDLE_PARAMETERS) {
-  pthread_mutex_lock(&lock);
-  if (Mailbox *mailbox{Find(MERK_HANDLE)}; mailbox && mailbox->ring) {
-    FillRing(mailbox);
+  if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
+    if (mailbox->ring) {
+      FillRing(mailbox);
+    }
+    Unlock(mailbox);
   }
-  pthread_mutex_unlock(&lock);
 }
 
 // Drops from the list what the device has taken, so that the mailbox's
 // oldest message is the next it will take.
 extern "C" void merk_mailbox_trim(MERK_HANDLE_PARAMETERS) {
-  pthread_mutex_lock(&lock);
-  if (Mailbox *mailbox{Find(MERK_HANDLE)}; mailbox && mailbox->ring) {
-    TrimRing(mailbox);
+  if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
+    if (mailbox->ring) {
+      TrimRing(mailbox);
+    }
+    Unlock(mailbox);
   }
-  pthread_mutex_unlock(&lock);
 }
 
 // When no region is running: every mailbox goes back to its list alone,
 // which still has what the devices did not take. The caller frees the rings.
 extern "C" void merk_mailbox_detach_rings(void) {
-  pthread_mutex_lock(&lock);
-  if (attachedRings != 0) {
-    for (std::int64_t i{0}; i < slotCount; ++i) {
-      if (slots[i].open && slots[i].ring) {
-        TrimRing(&slots[i]);
-        slots[i].ring = nullptr;
-      }
-    }
-    attachedRings = 0;
+  if (__atomic_load_n(&attachedRings, __ATOMIC_SEQ_CST) == 0) {
+    return;
   }
-  pthread_mutex_unlock(&lock);
+  std::int64_t count{__atomic_load_n(&slotCount, __ATOMIC_ACQUIRE)};
+  for (std::int64_t i{0}; i < count; ++i) {
+    Mailbox *mailbox{SlotAt(i)};
+    pthread_mutex_lock(&mailbox->lock);
+    if (mailbox->open && mailbox->ring) {
+      TrimRing(mailbox);
+      mailbox->ring = nullptr;
+    }
+    pthread_mutex_unlock(&mailbox->lock);
+  }
+  __atomic_store_n(&attachedRings, 0, __ATOMIC_SEQ_CST);
 }
 
 // Registers a mailbox of this node's host under a name, as Erlang's
@@ -939,42 +1084,30 @@ extern "C" void merk_mailbox_detach_rings(void) {
 extern "C" std::int64_t merk_mailbox_register(
     MERK_HANDLE_PARAMETERS, const char *name) {
   pthread_once(&once, InitializeCondition);
-  pthread_mutex_lock(&lock);
-  std::int64_t result{0};
   Mailbox *mailbox{Find(MERK_HANDLE)};
   if (!mailbox) {
-    result = 3;
-  } else if (mailbox->name) {
-    result = 2;
-  } else {
-    for (std::int64_t i{0}; i < slotCount; ++i) {
-      if (slots[i].open && slots[i].name &&
-          std::strcmp(slots[i].name, name) == 0) {
-        result = 1;
-        break;
-      }
-    }
+    return 3;
   }
+  pthread_mutex_lock(&registryLock);
+  std::int64_t result{mailbox->name ? 2 : Named(name) ? 1 : 0};
   if (result == 0) {
     std::size_t bytes{std::strlen(name) + 1};
-    mailbox->name = static_cast<char *>(Malloc(bytes));
-    std::memcpy(mailbox->name, name, bytes);
+    char *copy{static_cast<char *>(Malloc(bytes))};
+    std::memcpy(copy, name, bytes);
+    mailbox->name = copy;
   }
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&registryLock);
+  Unlock(mailbox);
   return result;
 }
 
 // Removes a name, if it is registered.
 extern "C" void merk_mailbox_unregister(const char *name) {
-  pthread_mutex_lock(&lock);
-  for (std::int64_t i{0}; i < slotCount; ++i) {
-    if (slots[i].open && slots[i].name &&
-        std::strcmp(slots[i].name, name) == 0) {
-      Unregister(&slots[i]);
-      break;
-    }
+  pthread_mutex_lock(&registryLock);
+  if (Mailbox *mailbox{Named(name)}) {
+    RemoveName(mailbox);
   }
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&registryLock);
 }
 
 extern "C" std::int32_t merk_compare_type_infos(Word x, Word y);
@@ -985,21 +1118,17 @@ extern "C" std::int32_t merk_compare_type_infos(Word x, Word y);
 extern "C" std::int64_t merk_mailbox_lookup(const char *name, Word typeInfo,
     std::int64_t *placeAndSlot, std::int64_t *generation,
     std::int64_t *secret) {
-  pthread_mutex_lock(&lock);
+  pthread_mutex_lock(&registryLock);
   std::int64_t result{1};
-  for (std::int64_t i{0}; i < slotCount; ++i) {
-    Mailbox &mailbox{slots[i]};
-    if (mailbox.open && mailbox.name && std::strcmp(mailbox.name, name) == 0) {
-      result =
-          merk_compare_type_infos(mailbox.messageType, typeInfo) == 0 ? 0 : 2;
-      if (result == 0) {
-        *placeAndSlot = i;
-        *generation = mailbox.generation;
-        *secret = static_cast<std::int64_t>(mailbox.secret);
-      }
-      break;
+  if (Mailbox *mailbox{Named(name)}) {
+    result =
+        merk_compare_type_infos(mailbox->messageType, typeInfo) == 0 ? 0 : 2;
+    if (result == 0) {
+      *placeAndSlot = mailbox->index;
+      *generation = mailbox->generation;
+      *secret = static_cast<std::int64_t>(mailbox->secret);
     }
   }
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&registryLock);
   return result;
 }
