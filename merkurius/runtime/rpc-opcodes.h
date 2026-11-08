@@ -40,6 +40,11 @@ constexpr uint32_t rpcPoll{RpcOpcode(2)};
 // It frees the chunks, and clears the arena, when no region is running.
 constexpr uint32_t rpcChunk{RpcOpcode(3)};
 
+// An array the device made, which a region gives: the buffer's words are
+// the device's number, the array's address and its size in elements. The
+// host copies it to the host and answers with the copy's address.
+constexpr uint32_t rpcGiveArray{RpcOpcode(4)};
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_RPC_OPCODES_H_

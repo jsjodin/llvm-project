@@ -934,10 +934,13 @@ Neither uses the C++ standard library; `rpc.h` needs none.
 
    In steps, each its own commit:
    1. **The arena:** `merk_device_alloc` from it, and the host's side.
+      Done.
    2. **Arrays made on the device:** `runtime/array.cpp` compiled for the
       device too, allocating in the arena; the error for making arrays in
       regions goes. An array the region gives that the device made is
-      copied to the host at the region's end, as a sent one is.
+      copied to the host at the region's end, as a sent one is. Done
+      (`merk_device_give_array`). The copy is in a fragment, which is never
+      freed yet, as a message is.
    3. **Sending arrays of scalars from the device,** `array(T)` for a
       one-word `T`, by key as other messages.
    4. **Receiving them on the device,** in the two RPCs above.

@@ -20,6 +20,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "fragment.h"
 #include "rpc-opcodes.h"
 #include "shared/rpc.h"
 #include <cstdint>
@@ -238,6 +239,20 @@ void FreeArenas() {
   }
 }
 
+// A copy on the host of the device's array of `size` elements, in a
+// fragment, as a message is.
+std::uint64_t *CopyFromDevice(
+    int device, const void *array, std::uint64_t size) {
+  std::size_t bytes{sizeof(std::uint64_t) * (1 + size)};
+  Fragment fragment;
+  auto *copy{static_cast<std::uint64_t *>(fragment.Allocate(bytes))};
+  if (omp_target_memcpy(copy, array, bytes, 0, 0, omp_get_initial_device(),
+          device) != 0) {
+    Fail("could not copy an array from a device");
+  }
+  return copy;
+}
+
 unsigned HandleOpcode(void *raw, unsigned) {
   auto &port{*static_cast<rpc::Server::Port *>(raw)};
   switch (port.get_opcode()) {
@@ -264,6 +279,14 @@ unsigned HandleOpcode(void *raw, unsigned) {
       buffer->data[1] = bytes;
     });
     return rpc::RPC_SUCCESS;
+  case rpcGiveArray:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      buffer->data[0] = reinterpret_cast<std::uint64_t>(
+          CopyFromDevice(static_cast<int>(buffer->data[0]),
+              reinterpret_cast<const void *>(buffer->data[1]),
+              buffer->data[2]));
+    });
+    return rpc::RPC_SUCCESS;
   default:
     return rpc::RPC_UNHANDLED_OPCODE;
   }
@@ -275,6 +298,12 @@ unsigned HandleOpcode(void *raw, unsigned) {
 extern "C" void merk_device_send(const std::uint64_t *handle,
     std::uint64_t key, std::uint64_t message) {
   SendTo(handle, key, message);
+}
+
+// A region that runs on the host gives the array itself.
+extern "C" std::uint64_t *merk_device_give_array(
+    std::uint64_t *array, std::int64_t) {
+  return array;
 }
 
 // Registers a message type that device code may send, by its key, a hash
@@ -301,8 +330,8 @@ extern "C" void merk_register_message_type(
 
 // Before and after each target region, on the host, wherever the region
 // runs: the last region to end frees the devices' arenas. What a region
-// gives back is scalars and arrays mapped from the host, so nothing in the
-// arenas outlives it.
+// gives back is scalars, arrays mapped from the host and copies on the
+// host of arrays it made, so nothing in the arenas outlives it.
 extern "C" void merk_region_enter(void) {
   pthread_mutex_lock(&arenaLock);
   ++runningRegions;
