@@ -2076,6 +2076,16 @@ void Lowerer::LowerEnvNew(merk::EnvNewOp op) {
     mlir::LLVM::StoreOp::create(
         rewriter_, loc, value, OutputAddress(env, type, i, loc));
   }
+  // A collection finds the slots of a live environment, and null says that
+  // merk.env_set has not filled one yet.
+  for (unsigned i = op.getValues().size(); i < type.getBody().size(); ++i) {
+    auto pointer{mlir::dyn_cast<mlir::LLVM::LLVMPointerType>(type.getBody()[i])};
+    if (pointer && pointer.getAddressSpace() == kHeapAddressSpace) {
+      mlir::LLVM::StoreOp::create(rewriter_, loc,
+          mlir::LLVM::ZeroOp::create(rewriter_, loc, pointer),
+          OutputAddress(env, type, i, loc));
+    }
+  }
   rewriter_.replaceOp(op, env);
 }
 
@@ -2149,7 +2159,8 @@ void Lowerer::AttachLive(merk::LiveOp live, mlir::LLVM::CallOp call) {
   }
   for (auto [value, attr] : llvm::zip(live.getValues(), live.getTypes())) {
     mlir::Type type{mlir::cast<mlir::TypeAttr>(attr).getValue()};
-    if (!mlir::isa<mlir::LLVM::LLVMPointerType>(Convert(type))) {
+    if (!mlir::isa<mlir::TupleType>(type) &&
+        !mlir::isa<mlir::LLVM::LLVMPointerType>(Convert(type))) {
       continue;
     }
     // Temporary (chunk 3, docs/INPROGRESS.md, Statepoints and stack maps,

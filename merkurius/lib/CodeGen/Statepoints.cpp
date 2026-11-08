@@ -13,6 +13,7 @@
 
 #include "merkurius/CodeGen/Lowering.h"
 #include "merkurius/CodeGen/TargetInfo.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/BuiltinGCs.h"
@@ -356,7 +357,8 @@ static void RecordTypes(llvm::Function &function, KnownTypes &known) {
                     : std::nullopt};
     for (std::size_t i = 0; deopt && i + 1 < deopt->Inputs.size(); i += 2) {
       const llvm::Value *value{CellOf(deopt->Inputs[i + 1])};
-      if (!llvm::isa<llvm::Constant>(value) &&
+      if (IsHeapPointer(value->getType()) &&
+          !llvm::isa<llvm::Constant>(value) &&
           known.insert({value, llvm::cast<llvm::Constant>(deopt->Inputs[i])})
               .second) {
         worklist.push_back(value);
@@ -497,9 +499,23 @@ static void EncodeRootTypes(
   auto live{statepoint->getOperandBundle(llvm::LLVMContext::OB_gc_live)};
   llvm::Function &function{*statepoint->getFunction()};
   llvm::DenseMap<const llvm::Value *, llvm::Constant *> types;
+  // An environment in the frame: the alloca, which the stack map gives as a
+  // Direct location, and its layout's index.
+  llvm::SmallMapVector<llvm::Value *, llvm::Value *, 4> slots;
   for (std::size_t i = 0; deopt && i + 1 < deopt->Inputs.size(); i += 2) {
-    types[CellOf(deopt->Inputs[i + 1])] =
-        llvm::cast<llvm::Constant>(deopt->Inputs[i]);
+    llvm::Value *value{deopt->Inputs[i + 1]};
+    if (!IsHeapPointer(value->getType())) {
+      if (!llvm::isa<llvm::AllocaInst>(value)) {
+        std::string text;
+        llvm::raw_string_ostream os{text};
+        os << "not yet implemented: an environment that is not an alloca:"
+           << *value;
+        llvm::report_fatal_error(llvm::StringRef{text});
+      }
+      slots.insert({value, deopt->Inputs[i]});
+      continue;
+    }
+    types[CellOf(value)] = llvm::cast<llvm::Constant>(deopt->Inputs[i]);
   }
   // The rewrite makes roots of the call's own arguments too. One the bundle
   // does not list is dead after the call, and the callee looks after it. It is
@@ -531,7 +547,12 @@ static void EncodeRootTypes(
   }
   llvm::Constant *dead{llvm::ConstantInt::getSigned(
       llvm::Type::getInt64Ty(function.getContext()), -1)};
+  // The number of roots, a type for each, then a layout and an address for
+  // each environment.
   std::vector<llvm::Value *> encoded;
+  encoded.push_back(llvm::ConstantInt::get(
+      llvm::Type::getInt64Ty(function.getContext()),
+      live ? live->Inputs.size() : 0));
   if (live) {
     for (llvm::Value *root : live->Inputs) {
       auto it{types.find(CellOf(root))};
@@ -555,6 +576,10 @@ static void EncodeRootTypes(
       }
       encoded.push_back(it->second);
     }
+  }
+  for (auto [slot, layout] : slots) {
+    encoded.push_back(layout);
+    encoded.push_back(slot);
   }
   llvm::SmallVector<llvm::OperandBundleDef, 2> bundles;
   for (unsigned b = 0; b < statepoint->getNumOperandBundles(); ++b) {

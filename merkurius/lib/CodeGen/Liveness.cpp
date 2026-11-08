@@ -115,10 +115,30 @@ void Marker::Mark(mlir::Operation *op, Live &live) {
     // Which makes them live before here, for the safepoints before.
     live.insert(typeWords_.begin(), typeWords_.end());
   }
+  // A call that is given an environment runs while it is in use, though it may
+  // not be used after.
+  if (Calls(op)) {
+    for (mlir::Value operand : op->getOperands()) {
+      if (mlir::isa<merk::EnvType>(operand.getType())) {
+        all.insert(operand);
+      }
+    }
+  }
   for (mlir::Value value : all) {
     if (IsRoot(value.getType())) {
       values.push_back(value);
       types.push_back(mlir::TypeAttr::get(value.getType()));
+    } else if (auto env{value.getDefiningOp<merk::EnvNewOp>()}) {
+      // One of this frame, given by its layout. One that is an argument is
+      // in the frame of a caller, which lists it.
+      if (llvm::any_of(env.getLayout().getAsValueRange<mlir::TypeAttr>(),
+              IsRoot)) {
+        llvm::SmallVector<mlir::Type> layout{
+            env.getLayout().getAsValueRange<mlir::TypeAttr>()};
+        values.push_back(value);
+        types.push_back(mlir::TypeAttr::get(
+            mlir::TupleType::get(op->getContext(), layout)));
+      }
     }
   }
   mlir::OpBuilder before{op};
