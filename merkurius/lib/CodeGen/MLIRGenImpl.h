@@ -550,7 +550,12 @@ private:
   void Target(const Body &, const ProcedureBody &,
       llvm::function_ref<void()> generate, bool combined,
       mlir::omp::TargetExecMode mode,
-      mlir::ValueRange hostEval = {}, llvm::ArrayRef<UpdatedSlot> slots = {});
+      mlir::ValueRange hostEval = {}, llvm::ArrayRef<UpdatedSlot> slots = {},
+      mlir::Value device = {});
+  // The value of the leaf's device clause, a null one if it has none, or
+  // nothing after an error.
+  std::optional<mlir::Value> DeviceOf(const omp::Leaf &, const ProcedureBody &,
+      parser::CharBlock at, mlir::Location);
   // The module's omp.declare_reduction for the operator on `type`, an
   // integer or a float, by value, made the first time, as Flang's ReductionProcessor makes
   // and names them.
