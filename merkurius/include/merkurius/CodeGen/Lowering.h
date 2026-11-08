@@ -70,8 +70,9 @@ bool LinkForeignCode(llvm::Module &, mlir::ModuleOp, const TargetInfo &,
 // Runs LLVM's pipeline for the target's optimization level, -O0 to -O3.
 void OptimizeLLVMIR(llvm::Module &, const TargetInfo &);
 
-// Adds the stack's overflow check to the optimized procedures that need it
-// (design document, "Processes and scheduler", Stack overflow). It comes
+// Adds the check of the stack's limit, which finds an overflow and is how a
+// process is preempted, to the optimized procedures and loops that need it
+// (design document, "Processes and scheduler"). It comes
 // after the optimizer, since a check at a procedure's start stops LLVM from
 // turning its recursions into loops, and so that it sees the calls that are
 // left.

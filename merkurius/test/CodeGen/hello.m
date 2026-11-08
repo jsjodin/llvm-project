@@ -15,7 +15,7 @@
 
 % LLVM: @merk.str.0 = private unnamed_addr constant [15 x i8] c"Hello, world!\0A\00"
 % LLVM: define tailcc void @hello.main_2_0() {
-% LLVM-NEXT: call tailcc void @io.write_string_3_0(ptr @merk.str.0)
+% LLVM: call tailcc void @io.write_string_3_0(ptr @merk.str.0)
 % LLVM: declare tailcc void @io.write_string_3_0(ptr)
 
 % OUTPUT:Hello, world!

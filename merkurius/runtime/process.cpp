@@ -36,6 +36,8 @@ struct Worker {
   std::int64_t count;
   // For choosing where to steal from.
   std::uint64_t random;
+  // This worker's thread's merk_stack_limit, which the ticker sets.
+  char **stackLimit;
 };
 
 // One for each worker that may start; fixed once the program has started.
@@ -54,6 +56,8 @@ thread_local Context workerContext{nullptr};
 thread_local Worker *thisWorker{nullptr};
 // The lock that what this thread switched to is to release, or null.
 thread_local pthread_mutex_t *unlockAfterSwitch{nullptr};
+// A process that yielded, to queue once it is saved.
+thread_local Process *enqueueAfterSwitch{nullptr};
 
 Process firstProcess{{nullptr, nullptr}, 1};
 std::uint64_t nextId{2};
@@ -76,6 +80,11 @@ Process **timers{nullptr};
 std::int64_t timerCount{0};
 std::int64_t timerCapacity{0};
 std::atomic<std::int64_t> earliest{-1};
+
+// A stack limit above any stack: the next check fails, and looks here.
+char *const kPreempted{reinterpret_cast<char *>(~std::uintptr_t{0})};
+constexpr long kTimeSliceNanoseconds{10000000};
+pthread_once_t tickerOnce = PTHREAD_ONCE_INIT;
 
 // What a process that has ended saves into, since its record has gone.
 Context ended{nullptr};
@@ -108,6 +117,7 @@ void InitializeWorker(Worker &worker, std::uint64_t seed) {
   worker.last = nullptr;
   worker.count = 0;
   worker.random = seed * 2 + 1;
+  worker.stackLimit = nullptr;
 }
 
 // More work than idle workers takes another worker, if one may start.
@@ -340,6 +350,11 @@ void FireTimers() {
     unlockAfterSwitch = nullptr;
     pthread_mutex_unlock(lock);
   }
+  if (enqueueAfterSwitch) {
+    Process *process{enqueueAfterSwitch};
+    enqueueAfterSwitch = nullptr;
+    Enqueue(process);
+  }
 }
 
 // Nothing is runnable: spins for a while, as a wake from sleeping costs
@@ -409,6 +424,7 @@ void Idle() {
 
 void *WorkerThread(void *worker) {
   thisWorker = static_cast<Worker *>(worker);
+  thisWorker->stackLimit = &merk_stack_limit;
   idle.fetch_sub(1);
   WorkerLoop();
 }
@@ -510,7 +526,64 @@ Process *NewProcess(
   return process;
 }
 
-void Start(Process *process) { Enqueue(process); }
+// Runs while the program has more than one process: fires timers even when
+// every worker is busy, and if a process waits for a worker, makes the
+// running ones yield at their next check.
+static void *Ticker(void *) {
+  for (;;) {
+    timespec slice{0, kTimeSliceNanoseconds};
+    nanosleep(&slice, nullptr);
+    if (stopping.load()) {
+      return nullptr;
+    }
+    FireTimers();
+    if (runnable.load() > 0) {
+      int started{workers.load(std::memory_order_acquire)};
+      for (int i{0}; i < started; ++i) {
+        if (char **limit{__atomic_load_n(
+                &workerTable[i].stackLimit, __ATOMIC_ACQUIRE)}) {
+          __atomic_store_n(limit, kPreempted, __ATOMIC_RELAXED);
+        }
+      }
+    }
+  }
+}
+
+static void StartTicker() {
+  pthread_t thread;
+  if (pthread_create(&thread, nullptr, Ticker, nullptr) == 0) {
+    pthread_detach(thread);
+  }
+}
+
+void Start(Process *process) {
+  pthread_once(&tickerOnce, StartTicker);
+  Enqueue(process);
+}
+
+// libomp ties a parallel region to its thread. Weak, as a program without
+// OpenMP does not link it.
+extern "C" int omp_get_level(void) __attribute__((weak));
+
+// Lets another process run, if one waits and this one may move.
+static void Yield() {
+  Process *self{current};
+  if (!self || self->pinned != 0 || (omp_get_level && omp_get_level() > 0)) {
+    return;
+  }
+  Process *next{TakeLocal()};
+  if (!next && !stopping.load()) {
+    next = Steal(*thisWorker);
+  }
+  if (!next) {
+    return;
+  }
+  RunProcess(next);
+  enqueueAfterSwitch = self;
+  SwitchContext(self->context, next->context);
+  // It may be on another thread now.
+  AfterSwitch();
+}
 
 void Wake(Process *process) {
   if (!process->waiting) {
@@ -561,6 +634,7 @@ extern "C" void merk_process_run_main(void (*entry)(void)) {
     InitializeWorker(workerTable[i], static_cast<std::uint64_t>(i) + 1);
   }
   thisWorker = &workerTable[0];
+  thisWorker->stackLimit = &merk_stack_limit;
   firstProcess.stackLimit = firstProcess.stack->limit;
   firstProcess.context = NewContext(*firstProcess.stack, MainBody,
       reinterpret_cast<void *>(entry));
@@ -574,9 +648,17 @@ extern "C" void merk_process_stop(void) {
   pthread_mutex_lock(&merkurius::runtime::schedulerLock);
 }
 
-// Temporary (chunk 2 step 6, docs/INPROGRESS.md): ends the program, until
-// an uncaught error ends only its process, which its monitors see.
-extern "C" void merk_stack_overflow(void) {
+// Temporary (chunk 2 step 6, docs/INPROGRESS.md): an overflow ends the
+// program, until an uncaught error ends only its process, which its monitors
+// see.
+extern "C" void merk_stack_limit_passed(void) {
+  using namespace merkurius::runtime;
+  if (merk_stack_limit == kPreempted) {
+    Process *process{CurrentProcess()};
+    merk_stack_limit = process ? process->stack->limit : nullptr;
+    Yield();
+    return;
+  }
   std::fflush(stdout);
   std::fprintf(stderr, "Mercury runtime: stack overflow\n");
   std::exit(1);

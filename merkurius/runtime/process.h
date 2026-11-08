@@ -124,8 +124,10 @@ extern "C" {
 // What a procedure's entry compares the stack pointer with: the running
 // process's limit, or null on a thread that runs none, which passes.
 extern thread_local char *merk_stack_limit;
-// A checked procedure found the stack pointer below the limit.
-[[noreturn]] void merk_stack_overflow(void);
+// A check found the stack pointer below the limit: the process is being
+// preempted, and this returns, perhaps on another thread, or its stack has
+// overflowed, and this does not.
+void merk_stack_limit_passed(void);
 
 // Runs the program's first process, which calls `entry`, on a stack of its
 // own. `entry` ends the program, with merk_process_stop and exit, on whichever

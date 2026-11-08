@@ -43,7 +43,7 @@ main(!IO) :-
 % LLVM: call tailcc i1 @ndgive.elem_2_0(ptr @"merk.type_ctor.int/0", ptr %{{.*}}, ptr @nondet_modules.big_2_0.cont.0, ptr %{{.*}})
 % LLVM: declare tailcc i1 @ndgive.elem_2_0(ptr, ptr, ptr, ptr)
 % LLVM-LABEL: define internal tailcc i1 @nondet_modules.also_small_1_0(ptr %0, ptr %1)
-% LLVM-NEXT: musttail call tailcc i1 @ndgive.small_1_0(ptr %0, ptr %1)
+% LLVM: musttail call tailcc i1 @ndgive.small_1_0(ptr %0, ptr %1)
 
 % CHECK:5
 % CHECK-NEXT:2 3
