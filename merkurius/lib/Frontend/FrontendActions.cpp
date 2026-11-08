@@ -965,6 +965,9 @@ bool CodeGenAction::Lower(
   if (kind_ == ActionKind::EmitMerk) {
     // Notes for a later pass, which only clutter what is read.
     module.walk([](merk::RootTypeOp op) { op.erase(); });
+    // Printed without its roots' type_infos: it can be compiled again, for a
+    // test, but what it makes cannot be collected.
+    module->setAttr("merk.no_root_types", mlir::UnitAttr::get(module.getContext()));
     module.print(*os);
     return true;
   }

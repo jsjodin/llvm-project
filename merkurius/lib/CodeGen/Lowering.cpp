@@ -1224,6 +1224,28 @@ static llvm::SmallVector<llvm::StringRef> SplitTypeArguments(llvm::StringRef tex
   return arguments;
 }
 
+// The name of an array's type as semantics::TypeToString prints it, from the
+// type of its elements, for RootTypeInfo. The one type variable an array of
+// words can have is T0.
+static std::string ArrayRootName(mlir::Type type) {
+  if (auto array{mlir::dyn_cast<merk::ArrayType>(type)}) {
+    return "array.array(" + ArrayRootName(array.getElement()) + ")";
+  }
+  if (auto term{mlir::dyn_cast<merk::TermType>(type)}) {
+    return term.getName().str();
+  }
+  if (mlir::isa<merk::WordType>(type)) {
+    return "T0";
+  }
+  if (mlir::isa<merk::StringType>(type)) {
+    return "string";
+  }
+  if (mlir::isa<merk::ClosureType>(type)) {
+    return "pred";
+  }
+  return mlir::isa<mlir::FloatType>(type) ? "float" : "int";
+}
+
 std::optional<Lowerer::StaticTypeInfo> Lowerer::RootTypeInfo(
     llvm::StringRef name, llvm::SmallVectorImpl<std::string> &variables,
     mlir::Location loc) {
@@ -1361,8 +1383,21 @@ void Lowerer::EmitRootTable() {
       entry.kind = kRootClosure;
     } else if (mlir::isa<merk::StringType>(type)) {
       entry.kind = kRootString;
-    } else if (mlir::isa<merk::ArrayType>(type)) {
-      entry.kind = kRootArray;
+    } else if (auto array{mlir::dyn_cast<merk::ArrayType>(type)}) {
+      entry.kind = kRootArray; // Of words that are not pointers.
+      if (!mlir::isa<mlir::IntegerType, mlir::FloatType>(array.getElement())) {
+        // An array of what can point to the heap: walked by its type_info,
+        // as a term is, which goes from the element's type.
+        std::string name{ArrayRootName(array)};
+        llvm::SmallVector<std::string> variables;
+        entry.info = RootTypeInfo(name, variables, loc);
+        if (!entry.info) {
+          std::string text{"not yet implemented: a garbage collector root of "
+                           "type " + name + ", which the runtime cannot describe"};
+          llvm::report_fatal_error(llvm::StringRef{text});
+        }
+        entry.kind = variables.empty() ? kRootTerm : kRootPolymorphicTerm;
+      }
     } else if (auto tuple{mlir::dyn_cast<mlir::TupleType>(type)}) {
       entry.kind = kRootEnvironment;
       // The number of fields, and for each its type index, its byte offset,

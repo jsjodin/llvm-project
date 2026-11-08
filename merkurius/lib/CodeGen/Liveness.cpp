@@ -52,7 +52,10 @@ void Union(Live &into, const Live &from) {
 
 class Marker {
 public:
-  explicit Marker(merk::ProcOp proc) : dominance_{proc} {
+  explicit Marker(merk::ProcOp proc)
+      : dominance_{proc},
+        printed_{proc->getParentOfType<mlir::ModuleOp>()->hasAttr(
+            "merk.no_root_types")} {
     llvm::SmallVector<merk::RootTypeOp> notes;
     proc.walk([&](merk::RootTypeOp note) { notes.push_back(note); });
     for (merk::RootTypeOp note : notes) {
@@ -83,6 +86,8 @@ private:
   // The type_infos of each polymorphic value that has them.
   llvm::DenseMap<mlir::Value, llvm::SmallVector<mlir::Value, 2>> infos_;
   mlir::DominanceInfo dominance_;
+  // Read back from what -emit-merk printed, which has no notes.
+  bool printed_;
 };
 
 // A value defined outside `op` that something inside it uses.
@@ -103,6 +108,9 @@ void UsesInside(mlir::Operation *op, Live &uses) {
 static bool IsPolymorphic(mlir::Type type) {
   if (mlir::isa<merk::WordType>(type)) {
     return true;
+  }
+  if (auto array{mlir::dyn_cast<merk::ArrayType>(type)}) {
+    return IsPolymorphic(array.getElement());
   }
   auto term{mlir::dyn_cast<merk::TermType>(type)};
   static const llvm::Regex variable{"[(, {]T[0-9]+[,)} ]|some \\["};
@@ -203,7 +211,7 @@ void Marker::Mark(mlir::Operation *op, Live &live) {
         values.append(it->second.begin(), it->second.end());
         counts.push_back(it->second.size());
       } else {
-        if (IsPolymorphic(described.getType())) {
+        if (IsPolymorphic(described.getType()) && !printed_) {
           std::string text;
           llvm::raw_string_ostream os{text};
           os << "not yet implemented: a garbage collector root of type "
@@ -266,7 +274,7 @@ void Marker::Mark(mlir::Operation *op, Live &live) {
           }
         }
         for (mlir::Type type : layout) {
-          if (IsPolymorphic(type)) {
+          if (IsPolymorphic(type) && !printed_) {
             std::string text;
             llvm::raw_string_ostream os{text};
             os << "not yet implemented: an environment field of type " << type
