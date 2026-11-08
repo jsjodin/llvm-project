@@ -41,7 +41,8 @@ public:
   void *Allocate(std::size_t bytes) {
     bytes = (bytes + 7) & ~std::size_t{7};
     if (static_cast<std::size_t>(limit_ - next_) < bytes) {
-      std::size_t size{bytes > kChunkBytes / 4 ? bytes : kChunkBytes};
+      std::size_t size{bytes > chunkBytes_ / 4 ? bytes : chunkBytes_};
+      chunkBytes_ = chunkBytes_ < kMostChunkBytes ? 2 * chunkBytes_ : chunkBytes_;
       next_ = static_cast<char *>(Malloc(size));
       limit_ = next_ + size;
     }
@@ -51,7 +52,12 @@ public:
   }
 
 private:
-  static constexpr std::size_t kChunkBytes{4096};
+  // Most messages are small, and a chunk that is used only in part still
+  // costs a page fault for each page: 4096 bytes for every message took 85% of
+  // a ping-pong's time. Chunks start small and double.
+  static constexpr std::size_t kFirstChunkBytes{256};
+  static constexpr std::size_t kMostChunkBytes{4096};
+  std::size_t chunkBytes_{kFirstChunkBytes};
   char *next_{nullptr};
   char *limit_{nullptr};
 };

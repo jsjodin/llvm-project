@@ -836,11 +836,12 @@ ends the program. `spawn`, links and monitors do not exist.
    stamped from its own count, as the design has it. Slots are in chunks that
    never move, so that finding one takes no lock. Measured 2026-11-08 before the
    locks were split: at 24 workers over half the 3.84 million acquisitions of the
-   one lock were contended, with about 10 threads waiting on it at any time. To
-   decide, with measurements: why 16 independent pairs still do not scale (2.1 µs
-   a round overall at 8 workers, where 0.23 would be linear, and 4.2 at 48), and
-   whether lock-free queues are then worth having. Not looked at yet: `malloc`
-   for each message, waking workers, and the counters every worker shares.
+   one lock were contended, with about 10 threads waiting on it at any time. Why 16 independent pairs still did not scale
+   was found on 2026-11-08: a fragment took a 4 KB chunk for every message, so
+   each message cost a page fault, 85% of a round on one worker, and with many
+   workers the faults contended in the kernel. Chunks now start at 256 bytes and
+   double. Lock-free queues are not needed for now: to be measured again if many
+   senders to one mailbox show the lock.
 5. **Preemption.** Lowering the heap limit, and `mrt.yield_check` on loops that
    do not allocate.
 6. **Ending a process.** An uncaught exception ends its process with a reason
@@ -862,7 +863,7 @@ processes run:
   be sent. It is safe until the collector moves or frees cells, as captured
   values are never unique, and so never updated.
 - A process's heap chunks and a received message's fragments are never freed. A
-  ping-pong round leaks about 8 KB.
+  ping-pong round leaked about 8 KB until fragments started small; it now leaks about 0.6 KB.
 
 **To decide:**
 
