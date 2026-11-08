@@ -76,6 +76,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
+#include <sched.h>
 #include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -465,10 +466,25 @@ bool SendAll(int socket, iovec *parts, int count) {
   }
 }
 
+// As recv, looking for what is there for a while before it blocks.
+ssize_t Receive(int socket, void *into, std::size_t bytes) {
+  if (std::int64_t spin{SpinNanoseconds()}; spin != 0) {
+    std::int64_t end{Now() + spin};
+    do {
+      ssize_t got{recv(socket, into, bytes, MSG_DONTWAIT)};
+      if (got >= 0 || errno != EAGAIN) {
+        return got;
+      }
+      sched_yield();
+    } while (Now() < end);
+  }
+  return recv(socket, into, bytes, 0);
+}
+
 bool ReadAll(int socket, void *into, std::size_t bytes) {
   auto *at{static_cast<char *>(into)};
   while (bytes > 0) {
-    ssize_t got{recv(socket, at, bytes, 0)};
+    ssize_t got{Receive(socket, at, bytes)};
     if (got < 0 && errno == EINTR) {
       continue;
     }

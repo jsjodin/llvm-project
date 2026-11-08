@@ -52,6 +52,11 @@ enum class Delivery {
 
 // mailbox.cpp: an encoded message for a mailbox of this node's host,
 // decoded by the mailbox's own type and queued.
+// How long a thread about to block for a message spins first, in
+// nanoseconds: 50 microseconds, or MERK_SPIN_MICROSECONDS, 0 for none. A wake
+// from blocking costs more than a round trip's other steps.
+std::int64_t SpinNanoseconds();
+
 Delivery DeliverEncoded(
     const Handle &handle, const std::uint8_t *bytes, std::size_t size);
 

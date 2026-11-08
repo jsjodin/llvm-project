@@ -47,6 +47,7 @@
 #include <cstring>
 #include <ctime>
 #include <pthread.h>
+#include <sched.h>
 #include <sys/random.h>
 
 namespace {
@@ -381,7 +382,7 @@ void Queue(Mailbox *mailbox, Message *message) {
   *mailbox->tail = message;
   mailbox->tail = &message->next;
   ++mailbox->count;
-  ++arrivals;
+  __atomic_add_fetch(&arrivals, 1, __ATOMIC_RELEASE);
   if (mailbox->ring) {
     FillRing(mailbox);
   }
@@ -404,6 +405,35 @@ bool WaitArrival(std::int64_t deadline) {
   return true;
 }
 
+// When a wait that ends at the deadline may stop spinning: never past the
+// deadline, so that a receive with no time to wait does not spin.
+std::int64_t SpinEnd(std::int64_t deadline) {
+  std::int64_t end{Now() + SpinNanoseconds()};
+  return deadline >= 0 && deadline < end ? deadline : end;
+}
+
+// Spins, without the lock, until something has arrived or the time is
+// `end`. Called with the lock held, which it holds again on return.
+void SpinForArrival(std::int64_t end) {
+  std::int64_t seen{arrivals};
+  pthread_mutex_unlock(&lock);
+  // It yields, so that with fewer cores than threads the one it waits for
+  // can run.
+  while (__atomic_load_n(&arrivals, __ATOMIC_ACQUIRE) == seen && Now() < end) {
+    sched_yield();
+  }
+  pthread_mutex_lock(&lock);
+}
+
+pthread_once_t spinOnce = PTHREAD_ONCE_INIT;
+std::int64_t spinNanoseconds{50000};
+
+void ReadSpin() {
+  if (const char *microseconds{std::getenv("MERK_SPIN_MICROSECONDS")}) {
+    spinNanoseconds = std::strtoll(microseconds, nullptr, 10) * 1000;
+  }
+}
+
 Message *At(Mailbox *mailbox, std::int64_t position) {
   Message *message{mailbox->head};
   for (; position > 0; --position) {
@@ -415,6 +445,11 @@ Message *At(Mailbox *mailbox, std::int64_t position) {
 } // namespace
 
 namespace merkurius::runtime {
+
+std::int64_t SpinNanoseconds() {
+  pthread_once(&spinOnce, ReadSpin);
+  return spinNanoseconds;
+}
 
 void ThisNode(Word &high, Word &low) {
   pthread_once(&nodeOnce, ChooseNode);
@@ -555,7 +590,7 @@ extern "C" void merk_mailbox_close(MERK_HANDLE_PARAMETERS) {
     firstFree = mailbox - slots;
     // Whoever made the ring frees it when no region is running.
     mailbox->ring = nullptr;
-    ++arrivals;
+    __atomic_add_fetch(&arrivals, 1, __ATOMIC_RELEASE);
     pthread_cond_broadcast(&arrived);
   }
   pthread_mutex_unlock(&lock);
@@ -599,6 +634,7 @@ extern "C" std::int64_t merk_mailbox_deadline(std::int64_t milliseconds) {
 extern "C" std::int64_t merk_mailbox_wait(
     MERK_HANDLE_PARAMETERS, std::int64_t position, std::int64_t deadline) {
   pthread_once(&once, InitializeCondition);
+  std::int64_t spinEnd{SpinEnd(deadline)};
   pthread_mutex_lock(&lock);
   std::int64_t result{0};
   for (;;) {
@@ -609,6 +645,10 @@ extern "C" std::int64_t merk_mailbox_wait(
     if (mailbox->count > position) {
       result = 1;
       break;
+    }
+    if (Now() < spinEnd) {
+      SpinForArrival(spinEnd);
+      continue;
     }
     if (!WaitArrival(deadline)) {
       break;
@@ -662,9 +702,14 @@ extern "C" std::int64_t merk_mailbox_last_stamp(void) {
 extern "C" std::int64_t merk_mailbox_wait_arrival(
     std::int64_t seen, std::int64_t deadline) {
   pthread_once(&once, InitializeCondition);
+  std::int64_t spinEnd{SpinEnd(deadline)};
   pthread_mutex_lock(&lock);
   std::int64_t result{1};
   while (arrivals == seen) {
+    if (Now() < spinEnd) {
+      SpinForArrival(spinEnd);
+      continue;
+    }
     if (!WaitArrival(deadline)) {
       result = 0;
       break;
