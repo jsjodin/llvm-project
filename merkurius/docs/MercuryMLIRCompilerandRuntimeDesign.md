@@ -3743,6 +3743,10 @@ A target region on the blocking pool, 2026-11-08, on ae27a5dcd1f5 and its change
 
 Thread-local addresses read by an asm the backend cannot move, 2026-11-08, on ae27a5dcd1f5 and its change, `-O2`, alternating, median, before and after: nrev 18.80 and 18.65 s, naive Fibonacci 1.12 and 0.97 s, a tail-recursive loop 3.42 and 3.42 s; `work` with 48 processes 1155 and 968 ms on one worker, 151 and 121 on 8, 42 and 35 on 48; ping-pong 0.58 and 0.58 µs on one worker, 1.88 and 1.72 on 8; 16 pairs 0.73 and 0.59 µs on 48. Not hoisting the address may free a callee-saved register, which would explain the gain; that is not established.
 
+Ping-pong with processes, 2026-11-08, on d7d31eff1a49, `-O2`, 20000 rounds, 9 runs, machine otherwise idle, median µs a round: `cpu-process` 5.83 (0.63 with one worker), `gpu-process` 13.26 (12.82), `cpu-local` 3.68, `gpu-local` 13.27, CPU and CPU between nodes 18.47, GPU and CPU 31.77, GPU and GPU 40.74. So a GPU answering a process of its own node costs the same as answering a thread.
+
+A receive with a timeout, on the same commit: `cpu-process` with `after(10000)` and with `infinity`, median µs a round, 6.03 and 1.77 with the default workers, 6.03 and 1.69 with 8, 1.98 and 1.08 with 2. A timer for each receive costs about 4 µs across workers, which `request` with a timeout pays too. Its cause, within adding and removing the timer, has not been looked at.
+
 ## Target applications
 
 Recorded on 2026-11-05. This is judgement, not a result: the only performance evidence so far is the bandwidth benchmark, whose program is no simpler than its C version (`benchmarks/bandwidth/README.md`). That the code is simpler has still to be shown on a program with real logic in it.
