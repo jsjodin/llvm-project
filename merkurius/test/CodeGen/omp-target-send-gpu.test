@@ -1,0 +1,16 @@
+The program of omp-target-send.m, compiled by the driver for the machine's
+GPU and run there: the region's sends go over the offload plugin's RPC
+server to the host, which queues them in order before the region ends.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-send.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
+RUN:   | FileCheck %S/omp-target-send.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: FileCheck %s < %t.info
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-send.m:{{[0-9]+}}:5 with 9 arguments:
+CHECK-DAG: info: to(Ints)[40]
+CHECK-DAG: info: to(int/0)[8]
+CHECK-DAG: info: to(float/0)[8]
+CHECK-DAG: info: to(character/0)[8]
+CHECK-DAG: info: to(omp_target_send.colour/0)[8]
+CHECK-NOT: Entering OpenMP kernel

@@ -39,6 +39,7 @@
 #include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
+#include <map>
 #include <optional>
 
 namespace merkurius::codegen {
@@ -567,6 +568,18 @@ private:
   std::optional<unsigned> FlatCell(mlir::Type);
   // Whether a value of the type can cross into a target region.
   bool Mappable(mlir::Type);
+  bool WordMessage(mlir::Type);
+  // The type_infos made before each target region for its sends, by type.
+  std::map<std::pair<mlir::Operation *, std::string>, mlir::Value>
+      regionTypeInfos_;
+  // The target region that code is generated in now, if any.
+  mlir::omp::TargetOp EnclosingTarget();
+  // process.send(Mailbox, Message, !IO) in a target region: a call of the
+  // runtime's merk_device_send, with the message as a word and its
+  // type_info made before the region, so that the host's reaches the
+  // device as one of the region's values.
+  bool SendInTarget(const Body &, mlir::omp::TargetOp,
+      llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   // The map entry of a term's cell of `words` words, by its pointer.
   mlir::Value MapCell(mlir::Value term, unsigned words, llvm::StringRef name,
       mlir::Location);

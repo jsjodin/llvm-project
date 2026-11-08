@@ -10,8 +10,9 @@
 // The compiler gives the main module's main(di, uo) a C entry, merk_main;
 // this starts the runtime, saving the environment that the run time
 // conditions of trace goals test (trace.cpp) and the command line, which
-// io.command_line_arguments and io.progname read, calls it, and returns the
-// program's exit status, 0 unless io.set_exit_status set another.
+// io.command_line_arguments and io.progname read, and the host's side of
+// target regions (offload.cpp), calls it, and returns the program's exit
+// status, 0 unless io.set_exit_status set another.
 //
 //===----------------------------------------------------------------------===//
 
@@ -19,6 +20,7 @@
 
 extern "C" void merk_main(void);
 extern "C" void merk_save_environment(void);
+extern "C" void merk_offload_start(void);
 
 namespace {
 int argumentCount{0};
@@ -42,6 +44,7 @@ int main(int argc, char **argv) {
   argumentCount = argc;
   arguments = argv;
   merk_save_environment();
+  merk_offload_start();
   merk_main();
   return exitStatus;
 }

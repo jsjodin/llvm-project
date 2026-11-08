@@ -314,6 +314,11 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
         offloadArch += (&arch == &archs.front() ? "" : ",") + arch.arch;
       }
       job.push_back(offloadArch);
+      // The device's runtime, which target regions call to send and
+      // receive, goes into the device image, as the linker wrapper links
+      // the OpenMP device runtime. Only AMD GPUs are offloaded to so far.
+      job.push_back("-Xoffload-linker-amdgcn-amd-amdhsa");
+      job.push_back((libraryDir + "/libmerkdevice-amdgcn.a").str());
     }
     job.push_back("-o");
     job.push_back(output.empty() ? "a.out" : output.str());

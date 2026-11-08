@@ -2180,7 +2180,7 @@ The unparser's exact, canonical and fully parenthesized modes (Front end, Unpars
   3. `llvm-offload-binary`, beside `merkc` or on the `PATH`, packages the device bitcode, one `--image=` per GPU;
   4. host `-fc1 -emit-obj -fembed-offload-object=` naming the package, from the host bitcode read back with `-x ir`, as in Flang: the module's triple and data layout are the compile's, the package goes into `.llvm.offloading` as Clang's `EmbedObject` puts it, and the module is optimized and compiled.
 
-  The link is Clang's, with `-fopenmp --offload-arch=`, which runs `clang-linker-wrapper`: it extracts the device bitcode, links it with `libompdevice` and compiles it for each GPU, adds the code that registers it with the offload runtime, and links the host with `libomp` and `libomptarget`. `-L` adds library directories for the link, such as those of the OpenMP runtime when it is not beside Clang. `-v` is passed on to the link, so that Clang shows its own jobs, such as the linker wrapper's for the GPUs' code, as Flang's `-v` does. With `-c` the jobs stop after step 4; `-E` has no offload jobs; `-S` and GPUs other than AMD's are not supported yet. Not yet done, as Flang does: linking the device libraries (`-mlink-builtin-bitcode` with ROCm's `ocml` and the rest), which device code that calls maths will need, and `-flto=full` for the device compile.
+  The link is Clang's, with `-fopenmp --offload-arch=`, which runs `clang-linker-wrapper`: it extracts the device bitcode, links it with `libompdevice` and compiles it for each GPU, adds the code that registers it with the offload runtime, and links the host with `libomp` and `libomptarget`. `-L` adds library directories for the link, such as those of the OpenMP runtime when it is not beside Clang. `-v` is passed on to the link, so that Clang shows its own jobs, such as the linker wrapper's for the GPUs' code, as Flang's `-v` does. With `-c` the jobs stop after step 4; `-E` has no offload jobs; `-S` and GPUs other than AMD's are not supported yet. The link adds Merkurius's device runtime, `libmerkdevice-amdgcn.a` beside `libmerkrt.a`, bitcode for any AMD GPU that this build's Clang compiles from `runtime/device`, with `-Xoffload-linker-amdgcn-amd-amdhsa`, so that the linker wrapper links it into the device image beside `libompdevice` (Send and receive in a target region, As implemented). Not yet done, as Flang does: linking the device libraries (`-mlink-builtin-bitcode` with ROCm's `ocml` and the rest), which device code that calls maths will need, and `-flto=full` for the device compile.
 
 ### Example
 
@@ -2753,6 +2753,30 @@ limits until they are lifted. Handles are flat values, so they are mapped into t
   a closed mailbox; the generation number tells them apart.
 - **A kernel that faults** sends a `down` message to whatever monitors the
   region's process, with a reason saying that its place failed.
+
+- **As implemented** (2026-11-07, docs/INPROGRESS.md, The device's side
+  of the first slice): a target region sends one-word messages, integers,
+  floats, characters and constants of a type of constants only, with
+  `process.send` in the region itself. A handle crosses as a cell of five
+  words (Lowering, "OpenMP target regions"). The send is a call of
+  `merk_device_send` with the handle's cell, the message type's
+  `type_info` and the message as a word; the `type_info` is made before
+  the region, one for each type, so that the host's crosses by copy, named
+  after its type constructor. On a GPU, `merk_device_send` is the device's
+  runtime's (`runtime/device/device.cpp`), which sends the opcode
+  `'m' << 24 | 1` (`runtime/rpc-opcodes.h`) over the offload plugin's RPC
+  server; `merkrt` registers a callback for our opcodes with
+  libomptarget's `__tgt_register_rpc_callback` at start-up, weakly, so
+  that programs without offloading link without it
+  (`runtime/offload.cpp`). The callback queues the message with
+  `merk_mailbox_send`, which sends it on if the mailbox is another node's,
+  and answers, so that the device's send returns once the message is
+  queued: without the answer, a region ended before the host had queued
+  its messages, and a later send could take another port and be served
+  first. On the host, `merk_device_send` is `merkrt`'s, which queues it
+  directly. A message of another type, and a send in a procedure the
+  region calls, are not supported yet. `CodeGen/omp-target-send.m`, with
+  its GPU run, `omp-target-send-errors.m` and `omp-target-send-call.m`.
 
 #### Testing on the CPU
 

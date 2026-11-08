@@ -40,6 +40,12 @@ static bool Scalar(mlir::Type type) {
   return mlir::isa<mlir::IntegerType, mlir::FloatType>(type);
 }
 
+// A pointer the region passes on without reading it, such as a type_info
+// of the host's that a send gives back to the host.
+static bool Passed(mlir::Type type) {
+  return mlir::isa<mlir::LLVM::LLVMPointerType>(type);
+}
+
 static bool Givable(mlir::Type type) {
   if (auto array{mlir::dyn_cast<merk::ArrayType>(type)}) {
     return Scalar(array.getElement());
@@ -81,7 +87,73 @@ std::optional<unsigned> MerkGenerator::FlatCell(mlir::Type type) {
 }
 
 bool MerkGenerator::Mappable(mlir::Type type) {
-  return Givable(type) || FlatCell(type);
+  return Givable(type) || Passed(type) || FlatCell(type);
+}
+
+mlir::omp::TargetOp MerkGenerator::EnclosingTarget() {
+  mlir::Operation *op{builder_.getInsertionBlock()->getParentOp()};
+  if (auto target{mlir::dyn_cast<mlir::omp::TargetOp>(op)}) {
+    return target;
+  }
+  return op->getParentOfType<mlir::omp::TargetOp>();
+}
+
+// Whether a message of the type is one word that the device sends as it
+// is: an integer, a float, a character, or a constant of a type of
+// constants only (docs/INPROGRESS.md, The device's side of the first
+// slice, Decision 3).
+bool MerkGenerator::WordMessage(mlir::Type type) {
+  if (Scalar(type)) {
+    return true;
+  }
+  auto term{mlir::dyn_cast<merk::TermType>(type)};
+  if (!term) {
+    return false;
+  }
+  for (auto def : module_.getOps<merk::TypeDefOp>()) {
+    if (def.getName() == term.getName()) {
+      return llvm::all_of(def.getConstructors(), [](mlir::Attribute a) {
+        return mlir::cast<merk::ConstructorAttr>(a).getFields().empty();
+      });
+    }
+  }
+  return false;
+}
+
+bool MerkGenerator::SendInTarget(const Body &goal, mlir::omp::TargetOp target,
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  const semantics::Type *type{body.vars[arguments[1]].type};
+  mlir::Value mailbox{ValueOf(arguments[0])};
+  mlir::Value message{ValueOf(arguments[1])};
+  if (!mailbox || !message || !WordMessage(message.getType())) {
+    NotYet(at,
+        "sending messages of type " + semantics::TypeToString(*type) +
+            " in target regions");
+    return true;
+  }
+  // One for each type in a region, which is one more of its values.
+  mlir::Value &typeInfo{
+      regionTypeInfos_[{target, semantics::TypeToString(*type)}]};
+  if (!typeInfo) {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.setInsertionPoint(target);
+    mlir::Value info{TypeInfoOfType(type, loc, at)};
+    if (!info) {
+      failed_ = true;
+      return true;
+    }
+    typeInfo = mlir::UnrealizedConversionCastOp::create(builder_, loc,
+        mlir::LLVM::LLVMPointerType::get(&context_), info)
+                   .getResult(0);
+  }
+  mlir::Value word{merk::ToWordOp::create(
+      builder_, loc, merk::WordType::get(&context_), message)};
+  merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+      "merk_device_send", mlir::ValueRange{mailbox, typeInfo, word},
+      /*can_fail=*/false);
+  return true;
 }
 
 // As MapArray maps an array: by its pointer, with the cell's words as the
@@ -1332,6 +1404,14 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
     }
     std::optional<BodyVar> var{VarWithValue(before, goal.nonlocals, input)};
     llvm::StringRef name{var ? llvm::StringRef{body.vars[*var].name} : ""};
+    // A type_info that a send gives back to the host is named after its
+    // type constructor.
+    if (auto cast{input.getDefiningOp<mlir::UnrealizedConversionCastOp>()};
+        !var && cast && cast->getNumOperands() == 1) {
+      if (auto info{cast->getOperand(0).getDefiningOp<merk::TypeInfoOp>()}) {
+        name = info.getConstructor();
+      }
+    }
     if (mlir::isa<merk::ArrayType>(input.getType())) {
       maps.push_back(MapArray(input,
           mappedBack.contains(input)
