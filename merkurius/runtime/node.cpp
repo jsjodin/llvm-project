@@ -63,6 +63,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "process.h"
+
 #include "node.h"
 #include "fragment.h"
 #include "heap.h"
@@ -1082,7 +1084,7 @@ Delivery Route(
 
 // Listens on "host:port", where port 0 picks a free one: 0 and the port, or
 // 1 and why not.
-extern "C" std::int64_t merk_node_listen(
+static std::int64_t ListenOnNode(
     const char *address, std::int64_t *port, const char **error) {
   pthread_once(&once, Initialize);
   if (const char *problem{CookieError()}) {
@@ -1127,7 +1129,7 @@ extern "C" std::int64_t merk_node_listen(
 
 // Connects to the node listening on "host:port": 0 and its id once the
 // connection is current, or 1 and why not.
-extern "C" std::int64_t merk_node_connect(const char *address,
+static std::int64_t ConnectNode(const char *address,
     std::int64_t *high, std::int64_t *low, const char **error) {
   pthread_once(&once, Initialize);
   if (const char *problem{CookieError()}) {
@@ -1188,7 +1190,7 @@ extern "C" std::int64_t merk_node_connect(const char *address,
 // has the name, 2 if its type is another, 3 if this node is not connected
 // to that one, 4 if the connection is lost before the answer, and 5 if the
 // answer does not come within the milliseconds, if they are not negative.
-extern "C" std::int64_t merk_node_lookup(std::int64_t high, std::int64_t low,
+static std::int64_t LookupOnNode(std::int64_t high, std::int64_t low,
     const char *name, Word typeInfo, std::int64_t milliseconds,
     std::int64_t *placeAndSlot, std::int64_t *generation,
     std::int64_t *secret) {
@@ -1255,6 +1257,35 @@ extern "C" std::int64_t merk_node_lookup(std::int64_t high, std::int64_t low,
 }
 
 // For tests: the connections that are not done.
+// These wait for the network, or a name server, so the process waits on a
+// thread of the blocking pool and holds up no worker.
+extern "C" std::int64_t merk_node_listen(
+    const char *address, std::int64_t *port, const char **error) {
+  merkurius::runtime::Pin();
+  std::int64_t result{ListenOnNode(address, port, error)};
+  merkurius::runtime::Unpin();
+  return result;
+}
+
+extern "C" std::int64_t merk_node_connect(const char *address,
+    std::int64_t *high, std::int64_t *low, const char **error) {
+  merkurius::runtime::Pin();
+  std::int64_t result{ConnectNode(address, high, low, error)};
+  merkurius::runtime::Unpin();
+  return result;
+}
+
+extern "C" std::int64_t merk_node_lookup(std::int64_t high, std::int64_t low,
+    const char *name, Word typeInfo, std::int64_t milliseconds,
+    std::int64_t *placeAndSlot, std::int64_t *generation,
+    std::int64_t *secret) {
+  merkurius::runtime::Pin();
+  std::int64_t result{LookupOnNode(
+      high, low, name, typeInfo, milliseconds, placeAndSlot, generation, secret)};
+  merkurius::runtime::Unpin();
+  return result;
+}
+
 extern "C" std::int64_t merk_node_connection_count() {
   pthread_mutex_lock(&lock);
   std::int64_t count{0};
