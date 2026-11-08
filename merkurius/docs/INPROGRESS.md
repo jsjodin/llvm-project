@@ -778,6 +778,77 @@ to a closed or unreachable mailbox is dropped either way, so a program cannot
 see the difference, apart from the order against what the device reads from
 host memory by other means.
 
+**Prototype, measured 2026-11-08, and put off.** One device's word sends through
+a ring in host-pinned memory, with a drain thread that spins without sleeping.
+Five alternating runs, 20000 rounds, µs a round, the median with the RPC and
+with the ring: GPU and a thread of its node 21.8 and 18.2; GPU and node 2's
+`main` 38.2 and 32.9; GPU and GPU between nodes 49.4 and 39.0. About 5 µs for
+each GPU. The user decided to hold it until the scheduler is designed, since
+that decides how the host's threads are used, and draining may become one of its
+jobs.
+
+## The scheduler: processes on one host
+
+Route step 3 (design document, "The route there"), chunk 2. Proposed 2026-11-08;
+not agreed yet. The design document decides most of it (Processes and
+scheduler; Message passing; the part on parallel regions): stacks of a fixed
+size that never move, a worker for each core with work stealing, preemption by
+lowering the heap limit, and target regions off the workers. What is here is
+the order, and what is left to decide.
+
+**Where it starts.** A program is one process. Each OS thread has a heap in
+thread-local storage (`merk_heap`). Mailboxes have one global lock and a
+condition variable, and a receive blocks its OS thread. An uncaught exception
+ends the program. `spawn`, links and monitors do not exist.
+
+**Steps,** each its own commit, tested on the CPU first:
+
+1. **A process's context.** A record for each process, with its heap's pointer
+   and limit, and a way for compiled code and the runtime to reach them (D1).
+   `main` is the first process. Nothing else changes.
+2. **Stacks and switching.** Slots from one `mmap` with `MAP_NORESERVE`, size
+   classes with free lists, a switch of stack and callee-saved registers, and
+   the limit check on procedures on cycles.
+3. **`spawn` on one worker.** A process from a closure, with cooperative
+   switching: `receive` suspends the process, and a send wakes it. Mailboxes
+   belong to processes. A benchmark: ping-pong between processes, against
+   today's threads, and a million processes.
+4. **Workers.** One for each core, run queues, stealing, parking, and timers for
+   receive timeouts. Mailbox queues as the design has them, multi-producer,
+   with no global lock. The idle worker takes over the host's spin before
+   blocking (D2).
+5. **Preemption.** Lowering the heap limit, and `mrt.yield_check` on loops that
+   do not allocate.
+6. **Ending a process.** An uncaught exception ends its process with a reason
+   (route step 2), then links, monitors and `request`.
+7. **What blocks.** Target regions on a blocking pool with the process
+   suspended, the hand-off for parallel regions, and blocking I/O. Node
+   connections stay OS threads, which wake processes.
+8. **The GPU with processes.** A region's launch does not hold a worker,
+   ping-pong between `main` and a GPU of its own node, regions on several
+   devices at once with `device(N)`, and whether a worker drains the send ring
+   (The send ring).
+
+**To decide:**
+
+- **D1, how code reaches the current process's heap.** A process moves between
+  OS threads, and LLVM may keep the address of a thread-local variable across a
+  call within a function, so after a switch to another thread it would use the
+  old thread's. Options: (a) a register reserved for the context, as GHC's
+  `BaseReg`, which is the fastest and which foreign code keeps if it is
+  callee-saved, but needs a calling convention and changes to the back end for
+  each target; (b) a hidden argument to every procedure, which needs no back-end
+  change but costs a register and every signature; (c) keep the thread-local
+  variable, and have lowering read its address afresh after each call, through
+  an operation LLVM cannot merge, which is the smallest change and costs a read
+  after each call. Proposed: (c) first, measured at the nrev gate, leaving (a)
+  for later.
+- **D2, spinning under the scheduler.** Today each waiting thread spins for 50
+  µs. With workers, it is a worker with an empty queue that spins, before
+  parking. Proposed: as now, spinning with a yield, for the same 50 µs.
+- **D3, the first scope.** Proposed: steps 1 to 3 first, as they show the cost
+  of a process and a switch, and then a review of the rest.
+
 ## The receive goal: later
 
 The receive goal is done (design document, Processes and mailboxes, "The
