@@ -12,6 +12,9 @@
 %   pingpong cpu PORT ROUNDS         node 1's main, against node 2
 %   pingpong gpu PORT ROUNDS         node 1's target region, against node 2
 %   pingpong cpu-local ROUNDS        node 1's main, against its echo thread
+%   pingpong cpu-process ROUNDS      node 1's main, against a process of its own
+%   pingpong gpu-process ROUNDS      node 1's main, against a process's target
+%                                    region on the GPU
 %   pingpong gpu-local ROUNDS        node 1's target region, against its
 %                                    echo thread
 
@@ -43,9 +46,16 @@ main(!IO) :-
         string.to_int(RoundsString, Rounds)
     then
         local(Where, Rounds, !IO)
+    else if
+        Arguments = [Where, RoundsString],
+        ( Where = "cpu-process" ; Where = "gpu-process" ),
+        string.to_int(RoundsString, Rounds)
+    then
+        with_process(Where, Rounds, !IO)
     else
         io.write_string("usage: partner | cpu PORT ROUNDS | gpu PORT ROUNDS" ++
-            " | cpu-local ROUNDS | gpu-local ROUNDS\n", !IO),
+            " | cpu-local ROUNDS | gpu-local ROUNDS" ++
+            " | cpu-process ROUNDS | gpu-process ROUNDS\n", !IO),
         io.set_exit_status(2, !IO)
     ).
 
@@ -133,6 +143,42 @@ local(Where, Rounds, !IO) :-
     measure(Where, Echo, Mine, Rounds, !IO),
     send(Echo, -1, !IO),
     join_echo(!IO).
+
+    % main against a process of its own node, whose answers come from the
+    % CPU or from a target region on the GPU.
+:- pred with_process(string::in, int::in, io::di, io::uo) is det.
+with_process(Where, Rounds, !IO) :-
+    new_mailbox(Mine : mailbox(int), !IO),
+    ( if Where = "gpu-process" then
+        spawn(echo_on_gpu(Mine), Echo, !IO)
+    else
+        spawn(echo_process(Mine), Echo, !IO)
+    ),
+    measure(Where, Echo, Mine, Rounds, !IO),
+    send(Echo, -1, !IO).
+
+:- pred echo_on_gpu(mailbox(int)::in, mailbox(int)::in, io::di, io::uo)
+    is det.
+echo_on_gpu(Mine, Echo, !IO) :-
+    %$omp target
+    echo_process(Mine, Echo, !IO).
+
+    % Answers N with N + 1 until it gets a negative number.
+:- pred echo_process(mailbox(int)::in, mailbox(int)::in, io::di, io::uo)
+    is det.
+echo_process(Mine, Echo, !IO) :-
+    receive(Echo, any, after(10000), Got, !IO),
+    (
+        Got = yes(N),
+        ( if N < 0 then
+            true
+        else
+            send(Mine, N + 1, !IO),
+            echo_process(Mine, Echo, !IO)
+        )
+    ;
+        Got = no
+    ).
 
     % Warms up, then times the rounds, from main or from a target region.
 :- pred measure(string::in, mailbox(int)::in, mailbox(int)::in, int::in,
