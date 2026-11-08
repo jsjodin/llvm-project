@@ -15,8 +15,8 @@
 
 % LLVM: @merk.str.0 = private unnamed_addr constant [15 x i8] c"Hello, world!\0A\00"
 % LLVM: define tailcc void @hello.main_2_0() {
-% LLVM: call tailcc void @io.write_string_3_0(ptr @merk.str.0)
-% LLVM: declare tailcc void @io.write_string_3_0(ptr)
+% LLVM: call tailcc void @io.write_string_3_0(ptr addrspace(1) addrspacecast (ptr @merk.str.0 to ptr addrspace(1)))
+% LLVM: declare tailcc void @io.write_string_3_0(ptr addrspace(1))
 
 % OUTPUT:Hello, world!
 % OUTPUT-EMPTY:

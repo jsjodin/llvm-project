@@ -51,36 +51,36 @@
 % LLVM: @merk_no_secondary_tag = internal constant i64 -1
 % A constant's word is its number shifted past the tag, and a cell is
 % tagged by its constructor's tag.
-% LLVM-LABEL: define internal tailcc ptr @terms.insert_f2_0(i64 %0, ptr %1) {
-% LLVM: call ptr @merk_alloc_slow(i64 24)
-% LLVM: %[[CELL:.*]] = phi ptr
-% LLVM-NEXT: store ptr null, ptr %[[CELL]], align 8
-% LLVM-NEXT: %[[V:.*]] = getelementptr i8, ptr %[[CELL]], i32 8
-% LLVM-NEXT: store i64 %0, ptr %[[V]], align 8
-% LLVM-NEXT: %[[R:.*]] = getelementptr i8, ptr %[[CELL]], i32 16
-% LLVM-NEXT: store ptr null, ptr %[[R]], align 8
-% LLVM-NEXT: %[[NODE:.*]] = getelementptr i8, ptr %[[CELL]], i32 1
-% LLVM-NEXT: ret ptr %[[NODE]]
+% LLVM-LABEL: define internal tailcc ptr addrspace(1) @terms.insert_f2_0(i64 %0, ptr addrspace(1) %1) {
+% LLVM: call ptr addrspace(1) @merk_alloc_slow(i64 24)
+% LLVM: %[[CELL:.*]] = phi ptr addrspace(1)
+% LLVM-NEXT: store ptr addrspace(1) null, ptr addrspace(1) %[[CELL]], align 8
+% LLVM-NEXT: %[[V:.*]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 8
+% LLVM-NEXT: store i64 %0, ptr addrspace(1) %[[V]], align 8
+% LLVM-NEXT: %[[R:.*]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 16
+% LLVM-NEXT: store ptr addrspace(1) null, ptr addrspace(1) %[[R]], align 8
+% LLVM-NEXT: %[[NODE:.*]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 1
+% LLVM-NEXT: ret ptr addrspace(1) %[[NODE]]
 % Constants only: a word.
 % LLVM-LABEL: define internal tailcc i64 @terms.next_f1_0(i64 %0) {
 % LLVM-NEXT: switch i64 %0, label %{{.*}} [
 % A tuple is a cell with tag 0.
-% LLVM-LABEL: define internal tailcc ptr @terms.swap_f1_0(ptr %0) {
-% LLVM-NEXT: %[[X:.*]] = load i64, ptr %0, align 8
-% LLVM-NEXT: %[[YP:.*]] = getelementptr i8, ptr %0, i32 8
-% LLVM-NEXT: %[[Y:.*]] = load i64, ptr %[[YP]], align 8
-% LLVM: call ptr @merk_alloc_slow(i64 16)
-% LLVM: %[[T:.*]] = phi ptr
-% LLVM-NEXT: store i64 %[[Y]], ptr %[[T]], align 8
-% LLVM: ret ptr %[[T]]
+% LLVM-LABEL: define internal tailcc ptr addrspace(1) @terms.swap_f1_0(ptr addrspace(1) %0) {
+% LLVM-NEXT: %[[X:.*]] = load i64, ptr addrspace(1) %0, align 8
+% LLVM-NEXT: %[[YP:.*]] = getelementptr i8, ptr addrspace(1) %0, i32 8
+% LLVM-NEXT: %[[Y:.*]] = load i64, ptr addrspace(1) %[[YP]], align 8
+% LLVM: call ptr addrspace(1) @merk_alloc_slow(i64 16)
+% LLVM: %[[T:.*]] = phi ptr addrspace(1)
+% LLVM-NEXT: store i64 %[[Y]], ptr addrspace(1) %[[T]], align 8
+% LLVM: ret ptr addrspace(1) %[[T]]
 % One constructor of one argument: the argument.
 % LLVM-LABEL: define internal tailcc double @terms.warm_f1_0(double %0) {
 % LLVM-NEXT: fadd double %0, 1.000000e+00
 % A switch on the primary tag, then on the constants' words.
-% LLVM-LABEL: define internal tailcc i64 @terms.value_f1_0(ptr %0) {
-% LLVM: %[[W:.*]] = ptrtoint ptr %0 to i64
+% LLVM-LABEL: define internal tailcc i64 @terms.value_f1_0(ptr addrspace(1) %0) {
+% LLVM: %[[W:.*]] = ptrtoint ptr addrspace(1) %0 to i64
 % LLVM-NEXT: %[[TAG:.*]] = and i64 %[[W]], 7
-% LLVM-NEXT: %[[WORD:.*]] = ptrtoint ptr %0 to i64
+% LLVM-NEXT: %[[WORD:.*]] = ptrtoint ptr addrspace(1) %0 to i64
 % LLVM-NEXT: switch i64 %[[TAG]], label %{{.*}} [
 % LLVM-NEXT: i64 1, label %{{.*}}
 % LLVM: i64 6, label %{{.*}}
@@ -90,28 +90,28 @@
 % A field is at its word less the tag.
 % LLVM-EMPTY:
 % LLVM-NEXT: {{.*}}:
-% LLVM-NEXT: getelementptr i8, ptr %0, i32 -1
+% LLVM-NEXT: getelementptr i8, ptr addrspace(1) %0, i32 -1
 % LLVM: [[CONSTANTS]]:
 % LLVM-NEXT: switch i64 %[[WORD]], label %{{.*}} [
 % LLVM-NEXT: i64 0, label %{{.*}}
 % LLVM-NEXT: i64 8, label %{{.*}}
 % LLVM: [[SHARED]]:
-% LLVM-NEXT: %[[SP:.*]] = getelementptr i8, ptr %0, i32 -7
-% LLVM-NEXT: %[[S:.*]] = load i64, ptr %[[SP]], align 8
+% LLVM-NEXT: %[[SP:.*]] = getelementptr i8, ptr addrspace(1) %0, i32 -7
+% LLVM-NEXT: %[[S:.*]] = load i64, ptr addrspace(1) %[[SP]], align 8
 % LLVM-NEXT: switch i64 %[[S]], label %{{.*}} [
 % LLVM-NEXT: i64 0, label %{{.*}}
 % LLVM-NEXT: i64 1, label %{{.*}}
 % LLVM-NEXT: i64 2, label %{{.*}}
 % A test of a shared tag reads the secondary tag, or a word that is none
 % if the term is a constant, which has no cell.
-% LLVM-LABEL: define internal tailcc i1 @terms.is_g_1_0(ptr %0) {
+% LLVM-LABEL: define internal tailcc i1 @terms.is_g_1_0(ptr addrspace(1) %0) {
 % LLVM: %[[IS7:.*]] = icmp eq i64 %{{.*}}, 7
-% LLVM-NEXT: %[[P:.*]] = getelementptr i8, ptr %0, i32 -7
-% LLVM-NEXT: %[[AT:.*]] = select i1 %[[IS7]], ptr %[[P]], ptr @merk_no_secondary_tag
-% LLVM-NEXT: %[[SEC:.*]] = load i64, ptr %[[AT]], align 8
+% LLVM-NEXT: %[[P:.*]] = getelementptr i8, ptr addrspace(1) %0, i32 -7
+% LLVM-NEXT: %[[AT:.*]] = select i1 %[[IS7]], ptr addrspace(1) %[[P]], ptr addrspace(1) addrspacecast (ptr @merk_no_secondary_tag to ptr addrspace(1))
+% LLVM-NEXT: %[[SEC:.*]] = load i64, ptr addrspace(1) %[[AT]], align 8
 % LLVM-NEXT: %[[IS0:.*]] = icmp eq i64 %[[SEC]], 0
 % LLVM-NEXT: and i1 %[[IS7]], %[[IS0]]
-% LLVM: declare ptr @merk_alloc_slow(i64)
+% LLVM: declare ptr addrspace(1) @merk_alloc_slow(i64)
 
 % OUTPUT:100 0
 % OUTPUT-NEXT:1 1

@@ -39,9 +39,9 @@ main(!IO) :-
     ( if first_name(["a", "b"], N) then io.write_string(N, !IO) else io.write_string("none", !IO) ),
     io.nl(!IO).
 
-% LLVM-LABEL: define internal tailcc i1 @nondet_modules.big_2_0(ptr %0, ptr %1, ptr %2)
-% LLVM: call tailcc i1 @ndgive.elem_2_0(ptr @"merk.type_ctor.int/0", ptr %{{.*}}, ptr @nondet_modules.big_2_0.cont.0, ptr %{{.*}})
-% LLVM: declare tailcc i1 @ndgive.elem_2_0(ptr, ptr, ptr, ptr)
+% LLVM-LABEL: define internal tailcc i1 @nondet_modules.big_2_0(ptr addrspace(1) %0, ptr %1, ptr %2)
+% LLVM: call tailcc i1 @ndgive.elem_2_0(ptr addrspace(1) addrspacecast (ptr @"merk.type_ctor.int/0" to ptr addrspace(1)), ptr addrspace(1) %{{.*}}, ptr @nondet_modules.big_2_0.cont.0, ptr %{{.*}})
+% LLVM: declare tailcc i1 @ndgive.elem_2_0(ptr addrspace(1), ptr addrspace(1), ptr, ptr)
 % LLVM-LABEL: define internal tailcc i1 @nondet_modules.also_small_1_0(ptr %0, ptr %1)
 % LLVM: musttail call tailcc i1 @ndgive.small_1_0(ptr %0, ptr %1)
 

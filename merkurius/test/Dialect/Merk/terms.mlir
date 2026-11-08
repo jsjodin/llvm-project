@@ -37,14 +37,14 @@ module @terms attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   // CHECK-LABEL: merk.proc @terms.cons_3_0(%arg0: i64, %arg1: !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
   // CHECK-NEXT: %[[L:.*]] = merk.construct #merk.functor<"[|]", 2>(%arg0, %arg1 : i64, !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
   // CHECK-NEXT: merk.succeed %[[L]]
-  // LLVM-LABEL: define tailcc ptr @terms.cons_3_0(i64 %0, ptr %1) {
-  // LLVM: call ptr @merk_alloc_slow(i64 16)
-  // LLVM: %[[CELL:.*]] = phi ptr
-  // LLVM-NEXT: store i64 %0, ptr %[[CELL]]
-  // LLVM-NEXT: %[[T:.*]] = getelementptr i8, ptr %[[CELL]], i32 8
-  // LLVM-NEXT: store ptr %1, ptr %[[T]]
-  // LLVM-NEXT: %[[L:.*]] = getelementptr i8, ptr %[[CELL]], i32 1
-  // LLVM-NEXT: ret ptr %[[L]]
+  // LLVM-LABEL: define tailcc ptr addrspace(1) @terms.cons_3_0(i64 %0, ptr addrspace(1) %1) {
+  // LLVM: call ptr addrspace(1) @merk_alloc_slow(i64 16)
+  // LLVM: %[[CELL:.*]] = phi ptr addrspace(1)
+  // LLVM-NEXT: store i64 %0, ptr addrspace(1) %[[CELL]]
+  // LLVM-NEXT: %[[T:.*]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 8
+  // LLVM-NEXT: store ptr addrspace(1) %1, ptr addrspace(1) %[[T]]
+  // LLVM-NEXT: %[[L:.*]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 1
+  // LLVM-NEXT: ret ptr addrspace(1) %[[L]]
   merk.proc @terms.cons_3_0(%h: i64, %t: !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)"> attributes {determinism = #merk.determinism<det>} {
     %l = merk.construct #merk.functor<"[|]", 2>(%h, %t : i64, !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
     merk.succeed %l : !merk.term<"list.list(int)">
@@ -54,15 +54,15 @@ module @terms attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   // CHECK-NEXT: %[[IS:.*]] = merk.has_functor #merk.functor<"[|]", 2> %arg0 : !merk.term<"list.list(int)">
   // CHECK-NEXT: merk.guard %[[IS]]
   // CHECK-NEXT: %[[F:.*]]:2 = merk.deconstruct #merk.functor<"[|]", 2> %arg0 : !merk.term<"list.list(int)"> -> i64, !merk.term<"list.list(int)">
-  // LLVM-LABEL: define tailcc { i1, i64 } @terms.head_2_0(ptr %0) {
-  // LLVM-NEXT: %[[W:.*]] = ptrtoint ptr %0 to i64
+  // LLVM-LABEL: define tailcc { i1, i64 } @terms.head_2_0(ptr addrspace(1) %0) {
+  // LLVM-NEXT: %[[W:.*]] = ptrtoint ptr addrspace(1) %0 to i64
   // LLVM-NEXT: %[[TAG:.*]] = and i64 %[[W]], 7
   // LLVM-NEXT: %[[IS:.*]] = icmp eq i64 %[[TAG]], 1
   // LLVM-NEXT: br i1 %[[IS]]
-  // LLVM: %[[CELL:.*]] = getelementptr i8, ptr %0, i32 -1
-  // LLVM-NEXT: load i64, ptr %[[CELL]]
-  // LLVM-NEXT: %[[TP:.*]] = getelementptr i8, ptr %[[CELL]], i32 8
-  // LLVM-NEXT: load ptr, ptr %[[TP]]
+  // LLVM: %[[CELL:.*]] = getelementptr i8, ptr addrspace(1) %0, i32 -1
+  // LLVM-NEXT: load i64, ptr addrspace(1) %[[CELL]]
+  // LLVM-NEXT: %[[TP:.*]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 8
+  // LLVM-NEXT: load ptr addrspace(1), ptr addrspace(1) %[[TP]]
   merk.proc @terms.head_2_0(%l: !merk.term<"list.list(int)">) -> i64 attributes {determinism = #merk.determinism<semidet>} {
     %is = merk.has_functor #merk.functor<"[|]", 2> %l : !merk.term<"list.list(int)">
     merk.guard %is
@@ -74,8 +74,8 @@ module @terms attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   // constant is its number.
   // CHECK-LABEL: merk.proc @terms.constants_2_0() -> (!merk.term<"list.list(int)">, !merk.term<"terms.colour">)
   // CHECK-NEXT: merk.construct #merk.functor<"[]", 0> -> !merk.term<"list.list(int)">
-  // LLVM-LABEL: define tailcc { ptr, i64 } @terms.constants_2_0() {
-  // LLVM-NEXT: ret { ptr, i64 } { ptr null, i64 1 }
+  // LLVM-LABEL: define tailcc { ptr addrspace(1), i64 } @terms.constants_2_0() {
+  // LLVM-NEXT: ret { ptr addrspace(1), i64 } { ptr addrspace(1) null, i64 1 }
   merk.proc @terms.constants_2_0() -> (!merk.term<"list.list(int)">, !merk.term<"terms.colour">) attributes {determinism = #merk.determinism<det>} {
     %nil = merk.construct #merk.functor<"[]", 0> -> !merk.term<"list.list(int)">
     %green = merk.construct #merk.functor<"green", 0> -> !merk.term<"terms.colour">
@@ -94,18 +94,18 @@ module @terms attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   // constructors that share one; tag 0 is the only constant's.
   // CHECK-LABEL: merk.proc @terms.which_2_0(%arg0: !merk.term<"terms.many">) -> i64
   // CHECK-NEXT: merk.switch %arg0 : !merk.term<"terms.many"> -> i64 cases {{\[}}[#merk.functor<"z", 0>], [#merk.functor<"a", 1>, #merk.functor<"h", 1>]] can_fail {
-  // LLVM-LABEL: define tailcc { i1, i64 } @terms.which_2_0(ptr %0) {
-  // LLVM-NEXT: %[[W:.*]] = ptrtoint ptr %0 to i64
+  // LLVM-LABEL: define tailcc { i1, i64 } @terms.which_2_0(ptr addrspace(1) %0) {
+  // LLVM-NEXT: %[[W:.*]] = ptrtoint ptr addrspace(1) %0 to i64
   // LLVM-NEXT: %[[TAG:.*]] = and i64 %[[W]], 7
-  // LLVM-NEXT: ptrtoint ptr %0 to i64
+  // LLVM-NEXT: ptrtoint ptr addrspace(1) %0 to i64
   // LLVM-NEXT: switch i64 %[[TAG]], label %[[NO:.*]] [
   // LLVM-NEXT: i64 1, label %[[A:.*]]
   // LLVM-NEXT: i64 0, label %{{.*}}
   // LLVM-NEXT: i64 7, label %[[SHARED:.*]]
   // LLVM-NEXT: ]
   // LLVM: [[SHARED]]:
-  // LLVM-NEXT: %[[SP:.*]] = getelementptr i8, ptr %0, i32 -7
-  // LLVM-NEXT: %[[S:.*]] = load i64, ptr %[[SP]]
+  // LLVM-NEXT: %[[SP:.*]] = getelementptr i8, ptr addrspace(1) %0, i32 -7
+  // LLVM-NEXT: %[[S:.*]] = load i64, ptr addrspace(1) %[[SP]]
   // LLVM-NEXT: switch i64 %[[S]], label %[[NO]] [
   // LLVM-NEXT: i64 1, label %[[A]]
   // LLVM-NEXT: ]
@@ -121,13 +121,13 @@ module @terms attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   }
 
   // A cell of a shared tag starts with its secondary tag.
-  // LLVM-LABEL: define tailcc ptr @terms.h_2_0(i64 %0) {
-  // LLVM: call ptr @merk_alloc_slow(i64 16)
-  // LLVM: %[[CELL:.*]] = phi ptr
-  // LLVM-NEXT: store i64 1, ptr %[[CELL]]
-  // LLVM-NEXT: %[[X:.*]] = getelementptr i8, ptr %[[CELL]], i32 8
-  // LLVM-NEXT: store i64 %0, ptr %[[X]]
-  // LLVM-NEXT: getelementptr i8, ptr %[[CELL]], i32 7
+  // LLVM-LABEL: define tailcc ptr addrspace(1) @terms.h_2_0(i64 %0) {
+  // LLVM: call ptr addrspace(1) @merk_alloc_slow(i64 16)
+  // LLVM: %[[CELL:.*]] = phi ptr addrspace(1)
+  // LLVM-NEXT: store i64 1, ptr addrspace(1) %[[CELL]]
+  // LLVM-NEXT: %[[X:.*]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 8
+  // LLVM-NEXT: store i64 %0, ptr addrspace(1) %[[X]]
+  // LLVM-NEXT: getelementptr i8, ptr addrspace(1) %[[CELL]], i32 7
   merk.proc @terms.h_2_0(%x: i64) -> !merk.term<"terms.many"> attributes {determinism = #merk.determinism<det>} {
     %h = merk.construct #merk.functor<"h", 1>(%x : i64) -> !merk.term<"terms.many">
     merk.succeed %h : !merk.term<"terms.many">
@@ -136,8 +136,8 @@ module @terms attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   // A ground term is a static cell, of its fields' words, which the term
   // points to with its tag; equal contents are one cell, whatever their
   // types, so the two lists [1] are one (the globals are checked above).
-  // LLVM-LABEL: define tailcc { ptr, ptr, ptr } @terms.static_3_0() {
-  // LLVM-NEXT: ret { ptr, ptr, ptr } { ptr getelementptr inbounds nuw (i8, ptr @[[TWO]], i64 1), ptr getelementptr inbounds nuw (i8, ptr @[[ONE]], i64 1), ptr getelementptr inbounds nuw (i8, ptr @[[H]], i64 7) }
+  // LLVM-LABEL: define tailcc { ptr addrspace(1), ptr addrspace(1), ptr addrspace(1) } @terms.static_3_0() {
+  // LLVM-NEXT: ret { ptr addrspace(1), ptr addrspace(1), ptr addrspace(1) } { ptr addrspace(1) getelementptr (i8, ptr addrspace(1) addrspacecast (ptr @[[TWO]] to ptr addrspace(1)), i64 1), ptr addrspace(1) getelementptr (i8, ptr addrspace(1) addrspacecast (ptr @[[ONE]] to ptr addrspace(1)), i64 1), ptr addrspace(1) getelementptr (i8, ptr addrspace(1) addrspacecast (ptr @[[H]] to ptr addrspace(1)), i64 7) }
   merk.proc @terms.static_3_0() -> (!merk.term<"list.list(int)">, !merk.term<"list.list(int)">, !merk.term<"terms.many">) attributes {determinism = #merk.determinism<det>} {
     %nil = merk.construct #merk.functor<"[]", 0> -> !merk.term<"list.list(int)">
     %one = merk.constant 1 : i64

@@ -823,6 +823,98 @@ left open (design document, Processes and scheduler).
 - About 2 µs of the cost of a receive with a timeout remains, with several
   workers, unexplained (design document, Measurements).
 
+## Heap pointers in an address space of their own
+
+Proposed 2026-11-08; not agreed yet. The collector's next step (design document,
+Lowering, "GC metadata and safepoints"). `RewriteStatepointsForGC` finds roots by
+type, so a heap pointer has to look different from the other pointers a frame
+holds. Nothing runs differently: this change must not alter a program's
+behaviour, and it is measured against nrev because it could change what LLVM's
+optimizer does.
+
+**Checked 2026-11-08,** with hand-written IR through `opt -O2`, the statepoint
+rewrite and `llc`, on `x86_64` with `ni:1` in the data layout. All of these came
+through correctly:
+
+- A tag added by a GEP is relocated as a pointer derived from the cell. The
+  rewrite rematerialises the GEP after the call.
+- `llvm.ptrmask` removes a tag and tests one.
+- An integer in a word by `inttoptr` is its own base, so a word may hold one.
+  The rewrite's source says this is deliberate.
+- A phi of a heap term and a static term, the latter an `addrspacecast` constant.
+- `musttail` with `"gc-leaf-function"` stays a tail call.
+
+Found by reading the rewrite: a non-constant `addrspacecast` to a heap pointer
+is an assertion ("unsupported addrspacecast"). So nothing may be cast into the
+address space at run time. The ways in are a load, a call's result, an
+`inttoptr` and a constant.
+
+**What changes:**
+
+- **The types.** A term, an array, a string, a closure, a type_info, a
+  typeclass_info and a word that may hold one of those are `ptr addrspace(1)`.
+  Continuations, environments, frame slots, descriptors and the runtime's own
+  records stay in address space 0. One function in lowering says which, and it
+  answers address space 0 on a device: there, address space 1 means something
+  else (AMDGPU's global memory), and a device has no collector.
+- **Allocation.** The heap's `next` is loaded as a heap pointer, so that the
+  bump is a GEP from it. `merk_alloc_slow` returns one.
+- **Tags.** Adding a tag is a GEP and removing it a GEP or `llvm.ptrmask`, not a
+  round trip through an integer. Reading a tag may stay `ptrtoint`, as the
+  integer is not made into a pointer again.
+- **Words.** `merk.word` lowers to `ptr addrspace(1)`. An integer goes in by
+  `inttoptr` and a float through an `i64`.
+- **Static terms.** A reference to one in code is a constant `addrspacecast`.
+  Static data holds plain addresses in address space 0, which are only bits
+  there.
+- **Calls into C.** A foreign call, which may be inlined from the module's
+  foreign code, and `strcmp`, which the optimizer knows by name, take address
+  space 0, by an `addrspacecast` on the way out. A heap pointer coming back is
+  an `inttoptr` of its bits. The runtime's own functions are in other objects,
+  so they are declared with heap pointers and need no casts.
+- **OpenMP on the host.** A region's and a loop's outlined arguments and maps
+  stay in address space 0, cast at the boundary as for C, since Flang's and
+  OpenMP's lowering assume it. Collection during a region is a separate
+  question (below).
+- **The data layout** gets `ni:1` on the host (D1). The back end insists on its
+  own layout, so `EmitCode` puts that back after the optimizer.
+
+**Not in this:** statepoints themselves, `!merk.ref` as a cell and an offset, and
+the frame slots.
+
+**Pieces,** each its own commit, with nrev measured after 1 and after 3:
+
+1. The types, allocation and tags, with words still `i64`: a word is
+   `ptrtoint` of a term and `inttoptr` back, marked Temporary.
+2. Static terms and the C and OpenMP boundaries, which piece 1 needs in part.
+3. Words as heap pointers, which removes the Temporary conversions.
+
+About 42 test files name a pointer in their CHECK lines, and those lines change
+spelling; piece 1 is mostly that.
+
+**To decide:**
+
+- **D1, decided 2026-11-08: use `ni:1`.** It tells LLVM that it may not turn these pointers
+  into integers on its own, as by rewriting a load and a store of a pointer as
+  integer ones, which would hide a root from the rewrite. It may also stop some
+  folds, which nrev would show. Proposed: use it, since a missed root is a
+  memory error that shows up rarely, and a lost fold is a number that can be
+  measured.
+- **D2, decided 2026-11-08: a process does not collect while it is in a parallel
+  or target region,** and its heap grows instead. Regions rarely allocate, what
+  they use is nearly always arrays, and other parallelism is done with
+  processes, which the collector handles.
+
+**Risks:**
+
+- **Code quality.** Vectorization and some of InstCombine treat non-integral
+  pointers more carefully. Polymorphic code is the most exposed, since a float
+  or an integer in a word goes through a pointer.
+- **The size of piece 3.** Every place that treats a word as an integer has to be
+  found, and an `i64` that remains is a root that is missed once the collector
+  exists: nothing in this change would show it. The collector's stress mode has
+  to cover that, by collecting at every safepoint.
+
 ## Collectives and direct GPU transfers
 
 Proposed 2026-11-08, from a side discussion; not agreed, and nothing is built.

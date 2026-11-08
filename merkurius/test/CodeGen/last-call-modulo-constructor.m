@@ -22,30 +22,30 @@
 % goes into. The procedure makes the cell, with the hole null, and calls the
 % variant, which stores the cell it makes in its caller's hole and calls
 % itself last.
-% LLVM-LABEL: define internal tailcc ptr @last_call_modulo_constructor.app_3_0(ptr %0, ptr %1, ptr %2) {
-% LLVM: store ptr null, ptr %{{[0-9]+}}, align 8
-% LLVM-NEXT: %[[TERM:[0-9]+]] = getelementptr i8, ptr %{{[0-9]+}}, i32 1
-% LLVM: {{^}}  call tailcc void @last_call_modulo_constructor.app_3_0.lcmc(ptr %0, ptr %{{[0-9]+}}, ptr %2, ptr %{{[0-9]+}})
-% LLVM-NEXT: ret ptr %[[TERM]]
-% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.app_3_0.lcmc(ptr %0, ptr %1, ptr %2, ptr %3) {
-% LLVM: store ptr %2, ptr %3, align 8
+% LLVM-LABEL: define internal tailcc ptr addrspace(1) @last_call_modulo_constructor.app_3_0(ptr addrspace(1) %0, ptr addrspace(1) %1, ptr addrspace(1) %2) {
+% LLVM: store ptr addrspace(1) null, ptr addrspace(1) %{{[0-9]+}}, align 8
+% LLVM-NEXT: %[[TERM:[0-9]+]] = getelementptr i8, ptr addrspace(1) %{{[0-9]+}}, i32 1
+% LLVM: {{^}}  call tailcc void @last_call_modulo_constructor.app_3_0.lcmc(ptr addrspace(1) %0, ptr addrspace(1) %{{[0-9]+}}, ptr addrspace(1) %2, ptr addrspace(1) %{{[0-9]+}})
+% LLVM-NEXT: ret ptr addrspace(1) %[[TERM]]
+% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.app_3_0.lcmc(ptr addrspace(1) %0, ptr addrspace(1) %1, ptr addrspace(1) %2, ptr addrspace(1) %3) {
+% LLVM: store ptr addrspace(1) %2, ptr addrspace(1) %3, align 8
 % LLVM-NEXT: ret void
-% LLVM: %[[CELL:[0-9]+]] = phi ptr
-% LLVM-NEXT: store i64 %{{[0-9]+}}, ptr %[[CELL]], align 8
-% LLVM-NEXT: %[[HOLE:[0-9]+]] = getelementptr i8, ptr %[[CELL]], i32 8
-% LLVM-NEXT: store ptr null, ptr %[[HOLE]], align 8
-% LLVM-NEXT: %[[TAGGED:[0-9]+]] = getelementptr i8, ptr %[[CELL]], i32 1
-% LLVM-NEXT: store ptr %[[TAGGED]], ptr %3, align 8
-% LLVM-NEXT: %[[UNTAGGED:[0-9]+]] = getelementptr i8, ptr %[[TAGGED]], i32 -1
-% LLVM-NEXT: %[[REF:[0-9]+]] = getelementptr i8, ptr %[[UNTAGGED]], i32 8
-% LLVM-NEXT: musttail call tailcc void @last_call_modulo_constructor.app_3_0.lcmc(ptr %0, ptr %{{[0-9]+}}, ptr %2, ptr %[[REF]])
+% LLVM: %[[CELL:[0-9]+]] = phi ptr addrspace(1)
+% LLVM-NEXT: store i64 %{{[0-9]+}}, ptr addrspace(1) %[[CELL]], align 8
+% LLVM-NEXT: %[[HOLE:[0-9]+]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 8
+% LLVM-NEXT: store ptr addrspace(1) null, ptr addrspace(1) %[[HOLE]], align 8
+% LLVM-NEXT: %[[TAGGED:[0-9]+]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 1
+% LLVM-NEXT: store ptr addrspace(1) %[[TAGGED]], ptr addrspace(1) %3, align 8
+% LLVM-NEXT: %[[UNTAGGED:[0-9]+]] = getelementptr i8, ptr addrspace(1) %[[TAGGED]], i32 -1
+% LLVM-NEXT: %[[REF:[0-9]+]] = getelementptr i8, ptr addrspace(1) %[[UNTAGGED]], i32 8
+% LLVM-NEXT: musttail call tailcc void @last_call_modulo_constructor.app_3_0.lcmc(ptr addrspace(1) %0, ptr addrspace(1) %{{[0-9]+}}, ptr addrspace(1) %2, ptr addrspace(1) %[[REF]])
 % LLVM-NEXT: ret void
 :- pred app(list(T)::in, list(T)::in, list(T)::out) is det.
 app([], Ys, Ys).
 app([X | Xs], Ys, [X | Zs]) :- app(Xs, Ys, Zs).
 
 % In both branches of an if-then-else.
-% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.mrg_3_0.lcmc(ptr %0, ptr %1, ptr %2) {
+% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.mrg_3_0.lcmc(ptr addrspace(1) %0, ptr addrspace(1) %1, ptr addrspace(1) %2) {
 % LLVM: musttail call tailcc void @last_call_modulo_constructor.mrg_3_0.lcmc(
 % LLVM: musttail call tailcc void @last_call_modulo_constructor.mrg_3_0.lcmc(
 :- pred mrg(list(int)::in, list(int)::in, list(int)::out) is det.
@@ -67,13 +67,13 @@ mrg([X | Xs], L2, L) :-
 
 % A call that is the output itself, in the else branch, is a tail call in
 % the variant too.
-% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.evens_2_0.lcmc(ptr %0, ptr %1) {
-% LLVM: store ptr null, ptr %1, align 8
-% LLVM: store ptr %{{[0-9]+}}, ptr %1, align 8
+% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.evens_2_0.lcmc(ptr addrspace(1) %0, ptr addrspace(1) %1) {
+% LLVM: store ptr addrspace(1) null, ptr addrspace(1) %1, align 8
+% LLVM: store ptr addrspace(1) %{{[0-9]+}}, ptr addrspace(1) %1, align 8
 % LLVM-NEXT: getelementptr
 % LLVM-NEXT: getelementptr
-% LLVM-NEXT: musttail call tailcc void @last_call_modulo_constructor.evens_2_0.lcmc(ptr %{{[0-9]+}}, ptr %{{[0-9]+}})
-% LLVM: musttail call tailcc void @last_call_modulo_constructor.evens_2_0.lcmc(ptr %{{[0-9]+}}, ptr %1)
+% LLVM-NEXT: musttail call tailcc void @last_call_modulo_constructor.evens_2_0.lcmc(ptr addrspace(1) %{{[0-9]+}}, ptr addrspace(1) %{{[0-9]+}})
+% LLVM: musttail call tailcc void @last_call_modulo_constructor.evens_2_0.lcmc(ptr addrspace(1) %{{[0-9]+}}, ptr addrspace(1) %1)
 :- pred evens(list(int)::in, list(int)::out) is det.
 evens([], []).
 evens([X | Xs], Es) :-
@@ -85,19 +85,19 @@ evens([X | Xs], Es) :-
     ).
 
 % Two outputs that go into cells.
-% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.unzip_3_0.lcmc(ptr %0, ptr %1, ptr %2) {
-% LLVM: store ptr %{{[0-9]+}}, ptr %1, align 8
-% LLVM: store ptr %{{[0-9]+}}, ptr %2, align 8
-% LLVM: musttail call tailcc void @last_call_modulo_constructor.unzip_3_0.lcmc(ptr %{{[0-9]+}}, ptr %{{[0-9]+}}, ptr %{{[0-9]+}})
+% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.unzip_3_0.lcmc(ptr addrspace(1) %0, ptr addrspace(1) %1, ptr addrspace(1) %2) {
+% LLVM: store ptr addrspace(1) %{{[0-9]+}}, ptr addrspace(1) %1, align 8
+% LLVM: store ptr addrspace(1) %{{[0-9]+}}, ptr addrspace(1) %2, align 8
+% LLVM: musttail call tailcc void @last_call_modulo_constructor.unzip_3_0.lcmc(ptr addrspace(1) %{{[0-9]+}}, ptr addrspace(1) %{{[0-9]+}}, ptr addrspace(1) %{{[0-9]+}})
 :- pred unzip(list({int, int})::in, list(int)::out, list(int)::out) is det.
 unzip([], [], []).
 unzip([{A, B} | Ps], [A | As], [B | Bs]) :- unzip(Ps, As, Bs).
 
 % One output that goes into a cell and an accumulator, which the variant
 % returns.
-% LLVM-LABEL: define internal tailcc { ptr, i64 } @last_call_modulo_constructor.number_4_0(ptr %0, i64 %1) {
+% LLVM-LABEL: define internal tailcc { ptr addrspace(1), i64 } @last_call_modulo_constructor.number_4_0(ptr addrspace(1) %0, i64 %1) {
 % LLVM: {{^}}  %{{[0-9]+}} = call tailcc i64 @last_call_modulo_constructor.number_4_0.lcmc(
-% LLVM-LABEL: define internal tailcc i64 @last_call_modulo_constructor.number_4_0.lcmc(ptr %0, i64 %1, ptr %2) {
+% LLVM-LABEL: define internal tailcc i64 @last_call_modulo_constructor.number_4_0.lcmc(ptr addrspace(1) %0, i64 %1, ptr addrspace(1) %2) {
 % LLVM: %[[N:[0-9]+]] = musttail call tailcc i64 @last_call_modulo_constructor.number_4_0.lcmc(
 % LLVM-NEXT: ret i64 %[[N]]
 :- pred number(list(int)::in, list({int, int})::out, int::in, int::out) is det.
@@ -108,7 +108,7 @@ number([X | Xs], [{!.N, X} | Ps], !N) :- !:N = !.N + 1, number(Xs, Ps, !N).
 % Mutual recursion: even_pos's call is the output itself, a tail call to
 % odd_pos's variant in even_pos's, which is checked last, as even_pos comes
 % after the procedures main calls.
-% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.odd_pos_2_0.lcmc(ptr %0, ptr %1) {
+% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.odd_pos_2_0.lcmc(ptr addrspace(1) %0, ptr addrspace(1) %1) {
 % LLVM: musttail call tailcc void @last_call_modulo_constructor.even_pos_2_0.lcmc(
 :- pred odd_pos(list(int)::in, list(int)::out) is det.
 odd_pos([], []).
@@ -118,7 +118,7 @@ even_pos([], []).
 even_pos([_ | Xs], Ys) :- odd_pos(Xs, Ys).
 
 % A semidet procedure.
-% LLVM-LABEL: define internal tailcc i1 @last_call_modulo_constructor.upto_3_0.lcmc(i64 %0, ptr %1, ptr %2) {
+% LLVM-LABEL: define internal tailcc i1 @last_call_modulo_constructor.upto_3_0.lcmc(i64 %0, ptr addrspace(1) %1, ptr addrspace(1) %2) {
 % LLVM: %[[OK:[0-9]+]] = musttail call tailcc i1 @last_call_modulo_constructor.upto_3_0.lcmc(
 % LLVM-NEXT: ret i1 %[[OK]]
 :- pred upto(int::in, list(int)::in, list(int)::out) is semidet.
@@ -132,8 +132,8 @@ upto(N, L, Start) :-
     ).
 
 % Of two recursive calls, only the last one.
-% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.double_f1_0.lcmc(ptr %0, ptr %1) {
-% LLVM: {{^}}  %{{[0-9]+}} = call tailcc ptr @last_call_modulo_constructor.double_f1_0(
+% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.double_f1_0.lcmc(ptr addrspace(1) %0, ptr addrspace(1) %1) {
+% LLVM: {{^}}  %{{[0-9]+}} = call tailcc ptr addrspace(1) @last_call_modulo_constructor.double_f1_0(
 % LLVM: musttail call tailcc void @last_call_modulo_constructor.double_f1_0.lcmc(
 :- type tree ---> leaf ; node(tree, int, tree).
 :- func double(tree) = tree.
@@ -141,20 +141,20 @@ double(leaf) = leaf.
 double(node(L, X, R)) = node(double(L), 2 * X, double(R)).
 
 % An existentially typed constructor's hidden field comes first in its cell.
-% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.shows_f1_0.lcmc(ptr %0, ptr %1) {
-% LLVM: %[[CELL:[0-9]+]] = phi ptr
-% LLVM-NEXT: store ptr @merk.typeclass_info.{{[0-9]+}}, ptr %[[CELL]], align 8
-% LLVM-NEXT: %[[X:[0-9]+]] = getelementptr i8, ptr %[[CELL]], i32 8
-% LLVM-NEXT: store i64 %{{[0-9]+}}, ptr %[[X]], align 8
-% LLVM-NEXT: %[[HOLE:[0-9]+]] = getelementptr i8, ptr %[[CELL]], i32 16
-% LLVM-NEXT: store ptr null, ptr %[[HOLE]], align 8
-% LLVM-NEXT: %[[TAGGED:[0-9]+]] = getelementptr i8, ptr %[[CELL]], i32 1
-% LLVM-NEXT: store ptr %[[TAGGED]], ptr %1, align 8
-% LLVM-NEXT: %[[UNTAGGED:[0-9]+]] = getelementptr i8, ptr %[[TAGGED]], i32 -1
-% LLVM-NEXT: %[[REF:[0-9]+]] = getelementptr i8, ptr %[[UNTAGGED]], i32 16
-% LLVM-NEXT: musttail call tailcc void @last_call_modulo_constructor.shows_f1_0.lcmc(ptr %{{[0-9]+}}, ptr %[[REF]])
-% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.even_pos_2_0.lcmc(ptr %0, ptr %1) {
-% LLVM: musttail call tailcc void @last_call_modulo_constructor.odd_pos_2_0.lcmc(ptr %{{[0-9]+}}, ptr %1)
+% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.shows_f1_0.lcmc(ptr addrspace(1) %0, ptr addrspace(1) %1) {
+% LLVM: %[[CELL:[0-9]+]] = phi ptr addrspace(1)
+% LLVM-NEXT: store ptr addrspace(1) addrspacecast (ptr @merk.typeclass_info.{{[0-9]+}} to ptr addrspace(1)), ptr addrspace(1) %[[CELL]], align 8
+% LLVM-NEXT: %[[X:[0-9]+]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 8
+% LLVM-NEXT: store i64 %{{[0-9]+}}, ptr addrspace(1) %[[X]], align 8
+% LLVM-NEXT: %[[HOLE:[0-9]+]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 16
+% LLVM-NEXT: store ptr addrspace(1) null, ptr addrspace(1) %[[HOLE]], align 8
+% LLVM-NEXT: %[[TAGGED:[0-9]+]] = getelementptr i8, ptr addrspace(1) %[[CELL]], i32 1
+% LLVM-NEXT: store ptr addrspace(1) %[[TAGGED]], ptr addrspace(1) %1, align 8
+% LLVM-NEXT: %[[UNTAGGED:[0-9]+]] = getelementptr i8, ptr addrspace(1) %[[TAGGED]], i32 -1
+% LLVM-NEXT: %[[REF:[0-9]+]] = getelementptr i8, ptr addrspace(1) %[[UNTAGGED]], i32 16
+% LLVM-NEXT: musttail call tailcc void @last_call_modulo_constructor.shows_f1_0.lcmc(ptr addrspace(1) %{{[0-9]+}}, ptr addrspace(1) %[[REF]])
+% LLVM-LABEL: define internal tailcc void @last_call_modulo_constructor.even_pos_2_0.lcmc(ptr addrspace(1) %0, ptr addrspace(1) %1) {
+% LLVM: musttail call tailcc void @last_call_modulo_constructor.odd_pos_2_0.lcmc(ptr addrspace(1) %{{[0-9]+}}, ptr addrspace(1) %1)
 :- type shown ---> some [T] shown(T, shown) => show(T) ; none.
 :- typeclass show(T) where [ func show(T) = int ].
 :- instance show(int) where [ show(X) = 10 * X ].
