@@ -26,6 +26,8 @@ the user's ~/.merkurius.cookie.
   empty MERK_COOKIE and no HOME stop a node from listening.
 - first-slice: a partner node listens, and a region node connects to it
   and exchanges with it from a target region, which may run on a GPU.
+- both-regions: first-slice with the partner answering from a target
+  region too, so two GPUs, or one used by two processes, exchange messages.
 
 The output is each node's, prefixed with its role, apart from the ports.
 """
@@ -205,12 +207,25 @@ def first_slice():
         print("partner: " + line)
 
 
+def both_regions():
+    print("both-regions:")
+    partner = start("partner-region")
+    port = port_of(partner, "partner-region")
+    region = start("region", port)
+    for line in finish(region, "region"):
+        print("region: " + line)
+    print("partner: listening")
+    for line in finish(partner, "partner-region"):
+        print("partner: " + line)
+
+
 SCENARIOS = {
     "pingpong": pingpong,
     "stall": stall,
     "simultaneous": simultaneous,
     "cookie": cookie,
     "first-slice": first_slice,
+    "both-regions": both_regions,
 }
 
 try:
