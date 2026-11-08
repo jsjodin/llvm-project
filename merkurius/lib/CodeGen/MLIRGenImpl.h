@@ -524,7 +524,7 @@ private:
   // The leaves of a loop's directive around its omp.loop_nest, in the current
   // block, which is in the target region if it is offloaded.
   void GenerateParallelLoop(const ParallelLoop &, const ProcedureBody &,
-      mlir::ValueRange hostEval, mlir::Location);
+      mlir::Location);
   template <typename Operands>
   void AddReductions(Operands &, llvm::ArrayRef<LoopReduction>,
       mlir::ValueRange vars, mlir::Location);
@@ -546,10 +546,10 @@ private:
   // A target region around what `generate` builds, for the goal, which
   // maps the values it uses and those it binds, and `updated`. Its kernel
   // is `mode` (KernelOf); `hostEval` are the values computed on the host
-  // for it, which `generate` is given as the region's arguments.
+  // for it, which become the bounds of the host's loop nest.
   void Target(const Body &, const ProcedureBody &,
-      llvm::function_ref<void(mlir::ValueRange hostEval)> generate,
-      bool combined, mlir::omp::TargetExecMode mode,
+      llvm::function_ref<void()> generate, bool combined,
+      mlir::omp::TargetExecMode mode,
       mlir::ValueRange hostEval = {}, llvm::ArrayRef<UpdatedSlot> slots = {});
   // The module's omp.declare_reduction for the operator on `type`, an
   // integer or a float, by value, made the first time, as Flang's ReductionProcessor makes
