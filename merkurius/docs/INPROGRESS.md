@@ -842,8 +842,11 @@ ends the program. `spawn`, links and monitors do not exist.
    workers the faults contended in the kernel. Chunks now start at 256 bytes and
    double. Lock-free queues are not needed for now: to be measured again if many
    senders to one mailbox show the lock.
-5. **Preemption.** Lowering the heap limit, and `mrt.yield_check` on loops that
-   do not allocate.
+5. **Preemption.** Done, through the check of the stack's limit (design
+   document, Processes and scheduler). A ticker thread, started with the first
+   spawn, makes the running processes yield every 10 ms if another waits. Still
+   to do: a compile option to leave out what only preemption needs, for programs
+   that do not spawn.
 6. **Ending a process.** An uncaught exception ends its process with a reason
    (route step 2), then links, monitors and `request`.
 7. **What blocks.** Target regions on a blocking pool with the process

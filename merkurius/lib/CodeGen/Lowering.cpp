@@ -33,6 +33,8 @@
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include <functional>
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -3301,10 +3303,43 @@ bool NeedsStackCheck(const CallNode &node, llvm::ArrayRef<CallNode> nodes) {
   });
 }
 
+// Whether the procedure needs to look at the stack's limit, which the
+// scheduler also uses to preempt a process (Processes and scheduler): one
+// that can recurse without limit, one that is on any cycle through tail calls,
+// which would otherwise never look, and one that tail calls unknown code.
+bool NeedsCheck(const CallNode &node, llvm::ArrayRef<CallNode> nodes) {
+  return NeedsStackCheck(node, nodes) || node.tailCallsUnknown ||
+      llvm::any_of(node.calls, [&](const auto &call) {
+        return call.second && nodes[call.first].component == node.component;
+      });
+}
+
+// The check of the stack's limit before `start`. Returns the block with what
+// was after it. What it calls may not return, for a stack overflow, or may
+// have run other processes.
+llvm::BasicBlock *AddCheckAt(llvm::BasicBlock &block,
+    llvm::BasicBlock::iterator start, llvm::GlobalVariable &limit,
+    llvm::FunctionCallee passed) {
+  llvm::LLVMContext &context{block.getContext()};
+  llvm::BasicBlock *rest{block.splitBasicBlock(start, "stack.ok")};
+  block.getTerminator()->eraseFromParent();
+  auto *failed{
+      llvm::BasicBlock::Create(context, "stack.passed", block.getParent())};
+  llvm::IRBuilder<> builder{&block};
+  llvm::Value *bound{builder.CreateAlignedLoad(builder.getPtrTy(),
+      builder.CreateThreadLocalAddress(&limit), llvm::Align(8))};
+  llvm::Value *below{builder.CreateICmpULT(builder.CreateStackSave(), bound)};
+  builder.CreateCondBr(below, failed, rest,
+      llvm::MDBuilder{context}.createBranchWeights(1, 2000));
+  builder.SetInsertPoint(failed);
+  builder.CreateCall(passed);
+  builder.CreateBr(rest);
+  return rest;
+}
+
 // After the entry block's allocas, which must stay there to be static.
-void AddStackCheck(llvm::Function &function, llvm::GlobalVariable &limit,
-    llvm::FunctionCallee overflow) {
-  llvm::LLVMContext &context{function.getContext()};
+void AddEntryCheck(llvm::Function &function, llvm::GlobalVariable &limit,
+    llvm::FunctionCallee passed) {
   llvm::BasicBlock &entry{function.getEntryBlock()};
   llvm::BasicBlock::iterator start{entry.begin()};
   for (auto it{entry.begin()}; it != entry.end(); ++it) {
@@ -3312,18 +3347,69 @@ void AddStackCheck(llvm::Function &function, llvm::GlobalVariable &limit,
       start = std::next(it);
     }
   }
-  llvm::BasicBlock *rest{entry.splitBasicBlock(start, "stack.ok")};
-  entry.getTerminator()->eraseFromParent();
-  auto *failed{llvm::BasicBlock::Create(context, "stack.overflow", &function)};
-  llvm::IRBuilder<> builder{&entry};
-  llvm::Value *bound{builder.CreateAlignedLoad(builder.getPtrTy(),
-      builder.CreateThreadLocalAddress(&limit), llvm::Align(8))};
-  llvm::Value *below{builder.CreateICmpULT(builder.CreateStackSave(), bound)};
-  builder.CreateCondBr(below, failed, rest,
-      llvm::MDBuilder{context}.createBranchWeights(1, 2000));
-  builder.SetInsertPoint(failed);
-  builder.CreateCall(overflow);
-  builder.CreateUnreachable();
+  AddCheckAt(entry, start, limit, passed);
+}
+
+// The optimizer may have moved the heap's address out of a loop, and a check
+// in the loop may now move the process to another thread: the loop's uses
+// take the address again after the check.
+void TakeHeapAddressAgain(llvm::Function &function, llvm::Function *marker,
+    const llvm::SmallPtrSetImpl<llvm::BasicBlock *> &loop,
+    llvm::BasicBlock &rest) {
+  llvm::SmallVector<llvm::CallInst *> calls;
+  for (llvm::User *user : marker->users()) {
+    auto *call{llvm::cast<llvm::CallInst>(user)};
+    if (call->getFunction() == &function && !loop.contains(call->getParent())) {
+      calls.push_back(call);
+    }
+  }
+  for (llvm::CallInst *call : calls) {
+    llvm::SmallVector<llvm::Use *> inLoop;
+    for (llvm::Use &use : call->uses()) {
+      auto *user{llvm::cast<llvm::Instruction>(use.getUser())};
+      auto *phi{llvm::dyn_cast<llvm::PHINode>(user)};
+      if (loop.contains(phi ? phi->getIncomingBlock(use) : user->getParent())) {
+        inLoop.push_back(&use);
+      }
+    }
+    if (inLoop.empty()) {
+      continue;
+    }
+    auto *again{llvm::cast<llvm::CallInst>(call->clone())};
+    again->insertBefore(rest.getFirstInsertionPt());
+    for (llvm::Use *use : inLoop) {
+      use->set(again);
+    }
+  }
+}
+
+// Each loop that LLVM made looks at the limit too, on every iteration.
+void AddLoopChecks(llvm::Function &function, llvm::GlobalVariable &limit,
+    llvm::FunctionCallee passed, llvm::Function *marker) {
+  llvm::DominatorTree dominators{function};
+  llvm::LoopInfo loops{dominators};
+  struct LoopBlocks {
+    llvm::BasicBlock *header;
+    llvm::SmallPtrSet<llvm::BasicBlock *, 16> blocks;
+  };
+  llvm::SmallVector<LoopBlocks> all;
+  for (llvm::Loop *loop : loops.getLoopsInPreorder()) {
+    all.push_back({loop->getHeader(),
+        llvm::SmallPtrSet<llvm::BasicBlock *, 16>{
+            loop->block_begin(), loop->block_end()}});
+  }
+  for (LoopBlocks &loop : all) {
+    llvm::BasicBlock *rest{AddCheckAt(*loop.header,
+        loop.header->getFirstNonPHIIt(), limit, passed)};
+    for (LoopBlocks &other : all) {
+      if (other.blocks.contains(loop.header)) {
+        other.blocks.insert(rest);
+      }
+    }
+    if (marker) {
+      TakeHeapAddressAgain(function, marker, loop.blocks, *rest);
+    }
+  }
 }
 } // namespace
 
@@ -3387,11 +3473,13 @@ void AddStackChecks(llvm::Module &module) {
       module.getOrInsertGlobal("merk_stack_limit", pointer))};
   limit->setThreadLocalMode(llvm::GlobalValue::GeneralDynamicTLSModel);
   limit->setAlignment(llvm::Align(8));
-  llvm::FunctionCallee overflow{module.getOrInsertFunction("merk_stack_overflow",
+  llvm::FunctionCallee passed{module.getOrInsertFunction("merk_stack_limit_passed",
       llvm::FunctionType::get(llvm::Type::getVoidTy(module.getContext()), false))};
+  llvm::Function *marker{module.getFunction(kHeapAddressSymbol)};
   for (const CallNode &node : nodes) {
-    if (NeedsStackCheck(node, nodes)) {
-      AddStackCheck(*node.function, *limit, overflow);
+    AddLoopChecks(*node.function, *limit, passed, marker);
+    if (NeedsCheck(node, nodes)) {
+      AddEntryCheck(*node.function, *limit, passed);
     }
   }
   if (limit->use_empty()) {
