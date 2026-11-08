@@ -858,13 +858,37 @@ void MerkGenerator::LambdaClosure(const Body &goal, const ProcedureBody &body) {
   if (!entry) {
     return;
   }
+  CapturePlaces places;
+  llvm::SmallVector<mlir::Attribute> captures;
+  for (auto [i, var] : llvm::enumerate(infoKeys)) {
+    places[var] = {static_cast<unsigned>(i), 0};
+    captures.push_back(builder_.getStringAttr("type_info"));
+  }
+  captures.append(
+      dictionaryKeys.size(), builder_.getStringAttr("typeclass_info"));
+  for (BodyVar var : captured) {
+    if (var < kFirstGivenVar) {
+      mlir::Attribute capture{CaptureTypeAttr(*body.vars[var].type, places, at)};
+      if (!capture) {
+        return;
+      }
+      captures.push_back(capture);
+    } else {
+      mlir::Type given{values_.lookup(var).getType()};
+      captures.push_back(builder_.getStringAttr(
+          mlir::isa<merk::TypeInfoType>(given)            ? "type_info"
+              : mlir::isa<merk::TypeclassInfoType>(given) ? "typeclass_info"
+                                                          : "unknown"));
+    }
+  }
   llvm::SmallVector<mlir::Value> words;
   for (mlir::Value value : capturedValues) {
     words.push_back(Coerce(value, word, loc));
   }
   values_[goal.left] = merk::ClosureOp::create(builder_, loc,
       merk::ClosureType::get(&context_),
-      mlir::FlatSymbolRefAttr::get(&context_, entry.getSymName()), words);
+      mlir::FlatSymbolRefAttr::get(&context_, entry.getSymName()), words,
+      CapturesAttr(captures));
 }
 
 void MerkGenerator::NameClosure(const Body &goal, const ProcedureBody &body) {
@@ -934,6 +958,32 @@ void MerkGenerator::NameClosure(const Body &goal, const ProcedureBody &body) {
       return;
     }
   }
+  // The declared types' variables are the hidden arguments', in their order.
+  CapturePlaces places;
+  llvm::SmallVector<mlir::Attribute> captures;
+  if (!hidden->empty()) {
+    const semantics::PassedInfos &passed{current_->goals.find(&goal)->second};
+    const semantics::Signature &signature{*types_.SignatureOf(*callee.symbol)};
+    llvm::SmallVector<bool> constrained{
+        ConstrainedVariables(signature.typeVars, signature.constraints)};
+    unsigned infos{0};
+    for (unsigned var{0}; var < signature.typeVars; ++var) {
+      if (!constrained[var]) {
+        places[var] = {infos++, 0};
+      }
+    }
+    for (unsigned var{0}; var < signature.typeVars; ++var) {
+      if (constrained[var]) {
+        if (auto place{ConstrainedPlace(var, signature.constraints, infos)}) {
+          places[var] = *place;
+        }
+      }
+    }
+    captures.append(
+        passed.typeInfos.size(), builder_.getStringAttr("type_info"));
+    captures.append(
+        passed.dictionaries.size(), builder_.getStringAttr("typeclass_info"));
+  }
   auto word{merk::WordType::get(&context_)};
   for (auto [argument, type, mode] :
       llvm::zip(goal.arguments, types, callee.modes)) {
@@ -944,6 +994,11 @@ void MerkGenerator::NameClosure(const Body &goal, const ProcedureBody &body) {
       return;
     }
     if (!declared->dummy && !IsUnused(mode)) {
+      mlir::Attribute capture{CaptureTypeAttr(*type, places, at)};
+      if (!capture) {
+        return;
+      }
+      captures.push_back(capture);
       captured.push_back(actual->dummy
               ? ZeroWord(loc)
               : Coerce(Coerce(ValueOf(argument), declared->type, loc), word, loc));
@@ -980,7 +1035,8 @@ void MerkGenerator::NameClosure(const Body &goal, const ProcedureBody &body) {
   }
   values_[goal.left] = merk::ClosureOp::create(builder_, loc,
       merk::ClosureType::get(&context_),
-      mlir::FlatSymbolRefAttr::get(&context_, entry.getSymName()), captured);
+      mlir::FlatSymbolRefAttr::get(&context_, entry.getSymName()), captured,
+      CapturesAttr(captures));
 }
 
 void MerkGenerator::HigherOrderCall(const Body &goal, const ProcedureBody &body) {

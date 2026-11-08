@@ -295,6 +295,54 @@ mlir::Attribute MerkGenerator::FieldTypeAttr(const semantics::Type &type,
   return builder_.getArrayAttr(parts);
 }
 
+bool MerkGenerator::CanDescribe(const semantics::Type &type) {
+  if (!TypeConstructorName(type)) {
+    return false;
+  }
+  if (type.kind == semantics::TypeKind::HigherOrder) {
+    return true;
+  }
+  std::optional<Represented> represented{Represent(&type)};
+  if (!represented) {
+    return false;
+  }
+  llvm::StringSet<> seen;
+  return represented->dummy || Comparable(represented->type, seen);
+}
+
+mlir::Attribute MerkGenerator::CaptureTypeAttr(const semantics::Type &type,
+    const CapturePlaces &places, parser::CharBlock at) {
+  mlir::Attribute unknown{builder_.getStringAttr("unknown")};
+  if (type.kind == semantics::TypeKind::Variable) {
+    auto it{places.find(type.var)};
+    if (it == places.end()) {
+      return unknown;
+    }
+    return builder_.getDenseI64ArrayAttr(
+        {it->second.first, it->second.second});
+  }
+  if (!CanDescribe(type) || !EnsureDescriptor(type, at)) {
+    return failed_ ? nullptr : unknown;
+  }
+  llvm::SmallVector<mlir::Attribute> parts{
+      builder_.getStringAttr(*TypeConstructorName(type))};
+  for (const semantics::Type *argument : TypeParts(type)) {
+    mlir::Attribute attribute{CaptureTypeAttr(*argument, places, at)};
+    if (!attribute || attribute == unknown) {
+      return attribute;
+    }
+    parts.push_back(attribute);
+  }
+  return builder_.getArrayAttr(parts);
+}
+
+mlir::ArrayAttr MerkGenerator::CapturesAttr(
+    llvm::ArrayRef<mlir::Attribute> captures) {
+  return target_.options().openMPIsTargetDevice
+      ? mlir::ArrayAttr{}
+      : builder_.getArrayAttr(captures);
+}
+
 mlir::ArrayAttr MerkGenerator::FunctorsAttr(
     const semantics::Type *canonical, parser::CharBlock at) {
   const std::vector<semantics::ConstructorTypes> *constructors{

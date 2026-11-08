@@ -92,6 +92,18 @@ constexpr unsigned kTagBits{3};
 constexpr Word kVariableTag{2};
 constexpr Word kHiddenTag{3};
 
+// Word 1 of a closure's cell, after its entry's code; the captured values
+// follow it. Each capture's word is a field's type, in which a type variable
+// is hidden-tagged: the place of its type_info among the captures. Or one of
+// the marks below. The layout is null on a device.
+struct ClosureLayout {
+  Word count;
+  Word captures[];
+};
+constexpr Word kCaptureUnknown{0};
+constexpr Word kCaptureTypeInfo{8};
+constexpr Word kCaptureTypeclassInfo{16};
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_DESCRIPTOR_H_

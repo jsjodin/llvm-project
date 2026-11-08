@@ -325,8 +325,12 @@ def Merk_ClosureOp : Merk_Op<"closure", [
   ]> {
   let summary = "a closure of an entry and the values it captures";
   let description = [{
-    A new cell of the entry's code, the number of captured values, and the
-    captured values. The entry is a procedure taking the closure and then a
+    A new cell of the entry's code, the address of a static layout, and the
+    captured values. `captures` has what the layout says of each captured
+    value: its type, as a field's in a descriptor, with a type variable as
+    the place of its type_info among the captured values; "type_info" or
+    "typeclass_info"; or "unknown" if it cannot be copied. Without it, as on
+    a device, which never copies a closure, the layout is null. The entry is a procedure taking the closure and then a
     word for each of the closure's inputs, and giving a word for each of its
     outputs; it reads the captured values with `merk.closure_word`.
 
@@ -335,9 +339,10 @@ def Merk_ClosureOp : Merk_Op<"closure", [
     ```
   }];
   let arguments = (ins FlatSymbolRefAttr:$entry,
-      Variadic<Merk_WordType>:$captured);
+      Variadic<Merk_WordType>:$captured, OptionalAttr<ArrayAttr>:$captures);
   let results = (outs Merk_ClosureType:$closure);
-  let assemblyFormat = "$entry (`(` $captured^ `)`)? attr-dict";
+  let assemblyFormat =
+      "$entry (`(` $captured^ `)`)? (`captures` $captures^)? attr-dict";
 }
 
 def Merk_ClosureWordOp : Merk_Op<"closure_word", [Pure]> {

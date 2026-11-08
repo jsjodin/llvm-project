@@ -250,6 +250,9 @@ private:
   void LowerTypeclassInfoWord(merk::TypeclassInfoWordOp);
   // A closure's cell, a captured value from it, and a call through it.
   void LowerClosure(merk::ClosureOp);
+  mlir::LLVM::GlobalOp ClosureLayout(mlir::ArrayAttr, mlir::Location);
+  llvm::DenseMap<mlir::Attribute, mlir::LLVM::GlobalOp> closureLayouts_;
+  llvm::DenseMap<mlir::Attribute, mlir::LLVM::GlobalOp> closureFieldCells_;
   void LowerClosureWord(merk::ClosureWordOp);
   mlir::Value CallClosure(merk::CallClosureOp, bool *tail = nullptr);
   // Outlined nondeterministic code's continuations and their environments
@@ -1284,21 +1287,64 @@ void Lowerer::LowerTypeclassInfoWord(merk::TypeclassInfoWordOp op) {
 
 // A closure's cell: its entry's code, the number of values it captured, and
 // those values (design document, Lowering, "Closures").
+// The number of captures and a word for each, which runtime/descriptor.h's
+// ClosureLayout reads. One for each distinct content.
+mlir::LLVM::GlobalOp Lowerer::ClosureLayout(
+    mlir::ArrayAttr captures, mlir::Location loc) {
+  if (mlir::LLVM::GlobalOp known{closureLayouts_.lookup(captures)}) {
+    return known;
+  }
+  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  auto i64{rewriter_.getI64Type()};
+  llvm::SmallVector<mlir::Type> words{i64};
+  words.append(captures.size(), ptr);
+  auto type{mlir::LLVM::LLVMStructType::getLiteral(module_.getContext(), words)};
+  mlir::LLVM::GlobalOp layout{RttiTable(type, loc, [&](mlir::Value init) {
+    std::int64_t position{0};
+    AppendField(init, position,
+        mlir::LLVM::ConstantOp::create(rewriter_, loc, i64,
+            static_cast<std::int64_t>(captures.size())),
+        loc);
+    for (mlir::Attribute capture : captures) {
+      mlir::Value word;
+      if (auto mark{mlir::dyn_cast<mlir::StringAttr>(capture)}) {
+        // runtime/descriptor.h's kCaptureUnknown and the two after it.
+        std::int64_t value{mark.getValue() == "type_info"  ? 8
+                : mark.getValue() == "typeclass_info"      ? 16
+                                                           : 0};
+        mlir::Value bits{
+            mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, value)};
+        word = mlir::LLVM::IntToPtrOp::create(rewriter_, loc, ptr, bits);
+      } else {
+        word = FieldTypeValue(capture, closureFieldCells_);
+      }
+      AppendField(init, position, word, loc);
+    }
+    return init;
+  })};
+  closureLayouts_[captures] = layout;
+  return layout;
+}
+
 void Lowerer::LowerClosure(merk::ClosureOp op) {
   mlir::Location loc{op.getLoc()};
   rewriter_.setInsertionPoint(op);
   auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
   std::int64_t captured{static_cast<std::int64_t>(op.getCaptured().size())};
   mlir::Value cell{mrt::AllocOp::create(rewriter_, loc, ptr, captured + 2)};
+  mlir::Value layout;
+  if (mlir::ArrayAttr captures{op.getCapturesAttr()}) {
+    layout = mlir::LLVM::AddressOfOp::create(
+        rewriter_, loc, ClosureLayout(captures, loc));
+  } else {
+    layout = mlir::LLVM::ZeroOp::create(rewriter_, loc, ptr);
+  }
   std::int64_t word{0};
   mrt::FieldStoreOp::create(rewriter_, loc,
       mlir::LLVM::AddressOfOp::create(
           rewriter_, loc, funcs_.lookup(op.getEntry())),
       cell, word++);
-  mrt::FieldStoreOp::create(rewriter_, loc,
-      mlir::LLVM::ConstantOp::create(
-          rewriter_, loc, rewriter_.getI64Type(), captured),
-      cell, word++);
+  mrt::FieldStoreOp::create(rewriter_, loc, layout, cell, word++);
   for (mlir::Value value : op->getOperands()) {
     mlir::Type type{Convert(value.getType())};
     if (type != value.getType()) {
