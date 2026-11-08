@@ -906,7 +906,49 @@ Neither uses the C++ standard library; `rpc.h` needs none.
      message in flight, so flow control never stalls; step 6's bandwidth
      test is the one that would show it.
 6. **Arrays of scalars as messages,** with the device's arena, and the
-   bandwidth over message sizes.
+   bandwidth over message sizes. The user decided (2026-11-07):
+   - **The host moves an array's elements** with `omp_target_memcpy`, from
+     the callback, given the array's device address and size. It used to
+     hang: the AMD plugin queued a small copy behind the running kernel's
+     own copy back on the same copy engine, so it waited for the kernel,
+     which waited for it. Fixed in this tree (a copy with a pending
+     dependency is submitted once the dependency completes), a candidate
+     for upstream, with `offload/test/libc/rpc_callback_memcpy.cpp`.
+   - **One arena per device, until the last region ends.** The device
+     bump-allocates cells and arrays, with an atomic add, in chunks that
+     the host allocates on the device when the device asks (an RPC), so it
+     does not overflow while the host has chunks to give; the host frees
+     them when no region is running. Each region is bracketed on the host
+     by calls that count the running regions; the last to end frees the
+     chunks and clears the device's arena, whose address the device gave
+     with its first request. One wave asks for a chunk at a time, since a
+     GPU has thousands. The chunks are limited to 8 GiB in all, or
+     `MERK_DEVICE_ARENA_BYTES`, past which the program stops with an
+     error: a runaway allocation otherwise fills the VRAM and can make the
+     driver reset a GPU that also drives the display, as one did
+     (2026-11-08, from a loop run with garbage bounds).
+   - **A received array is allocated by the device:** a poll gives the
+     oldest message's size, the device allocates the array in its arena,
+     and a second RPC gives the host its address, where the host copies
+     the elements.
+
+   In steps, each its own commit:
+   1. **The arena:** `merk_device_alloc` from it, and the host's side.
+   2. **Arrays made on the device:** `runtime/array.cpp` compiled for the
+      device too, allocating in the arena; the error for making arrays in
+      regions goes. An array the region gives that the device made is
+      copied to the host at the region's end, as a sent one is.
+   3. **Sending arrays of scalars from the device,** `array(T)` for a
+      one-word `T`, by key as other messages.
+   4. **Receiving them on the device,** in the two RPCs above.
+   5. **The bandwidth benchmark:** arrays of 1 to 2^20 words from the GPU
+      to `main` and to node 2, beside `omp_target_memcpy` alone, the floor.
+
+   Not decided, for later: `target nowait` is not supported by merkc yet;
+   it comes with the CPU's scheduler, since a region that does not block
+   its thread needs the process that started it to wait for it somewhere.
+   A GPU runtime of our own, beyond OpenMP's regions (persistent kernels
+   with a scheduler of GPU processes), is designed after step 7.
 7. **The queue in device memory,** if the benchmark shows that the round
    trip of each poll dominates. Step 5 shows that the round trips are the
    GPU's whole hop, but that the hop is smaller than what the runtime's

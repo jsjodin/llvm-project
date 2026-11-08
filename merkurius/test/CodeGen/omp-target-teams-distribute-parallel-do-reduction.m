@@ -49,7 +49,8 @@ pi(N, Pi) :-
     Pi = Step * Sum.
 % MERK-LABEL: merk.proc private @omp_target_teams_distribute_parallel_do_reduction.pi_2_0(
 % MERK:         %[[MAP:.*]] = omp.map.info var_ptr(%[[SLOT:[0-9]+]] : !llvm.ptr, f64) map_clauses(tofrom) capture(ByRef) name("Sum")
-% MERK:         omp.target kernel_type(spmd) host_eval({{.*}}) map_entries({{.*}}%[[MAP]] -> %[[ARG:[a-z0-9]+]] : {{.*}}) {
+% MERK:         merk.foreign_call @merk_region_enter() : () -> ()
+% MERK-NEXT:    omp.target kernel_type(spmd) host_eval({{.*}}) map_entries({{.*}}%[[MAP]] -> %[[ARG:[a-z0-9]+]] : {{.*}}) {
 % MERK-NEXT:      omp.teams reduction(@add_reduction_f64 %[[ARG]] -> %[[TEAMS:.*]] : !llvm.ptr) {
 % MERK-NEXT:        omp.parallel {
 % MERK:               omp.distribute {
@@ -61,6 +62,7 @@ pi(N, Pi) :-
 % MERK:           } {omp.combined}
 % MERK-NEXT:      omp.terminator
 % MERK-NEXT:    } {omp.combined}
+% MERK-NEXT:    merk.foreign_call @merk_region_exit() : () -> ()
 % MERK-NEXT:    %[[LAST:.*]] = llvm.load %[[SLOT]] : !llvm.ptr -> f64
 % MERK-NEXT:    %{{.*}} = arith.mulf %{{.*}}, %[[LAST]] : f64
 % DEVICE-MERK-LABEL: omp.declare_reduction @add_reduction_f64 : f64 init {

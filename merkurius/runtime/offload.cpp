@@ -50,16 +50,29 @@ extern "C" std::int64_t merk_mailbox_wait(std::int64_t nodeHigh,
 
 extern "C" void __tgt_register_rpc_callback(unsigned (*)(void *, unsigned))
     __attribute__((weak));
+extern "C" void *omp_target_alloc(std::size_t, int) __attribute__((weak));
+extern "C" void omp_target_free(void *, int) __attribute__((weak));
+extern "C" int omp_target_memcpy(void *, const void *, std::size_t,
+    std::size_t, std::size_t, int, int) __attribute__((weak));
+extern "C" int omp_get_initial_device(void) __attribute__((weak));
 
 namespace {
 
 using namespace merkurius::runtime;
 
+// Not exit: on the plugin's server thread, its handlers would wait for
+// a kernel that is itself waiting for the server.
 [[noreturn]] void Fail(const char *message, std::uint64_t key) {
   std::fflush(stdout);
   std::fprintf(stderr, "Mercury runtime: %s%016llx\n", message,
       static_cast<unsigned long long>(key));
-  std::exit(1);
+  std::_Exit(1);
+}
+
+[[noreturn]] void Fail(const char *message) {
+  std::fflush(stdout);
+  std::fprintf(stderr, "Mercury runtime: %s\n", message);
+  std::_Exit(1);
 }
 
 // The message types that device code sends, by their keys, which the
@@ -136,6 +149,95 @@ bool TakeOldest(const std::uint64_t *handle, std::uint64_t &message) {
   return true;
 }
 
+// The devices' arenas (docs/INPROGRESS.md, The device's side of the first
+// slice, step 6): the chunks the host allocated on each device for its
+// cells and arrays, which it frees when no region is running, and where
+// the device keeps its current chunk, which it then clears. Regions on
+// any device are counted together.
+struct DeviceArena {
+  int device;
+  std::uint64_t address;
+  void **chunks;
+  std::uint64_t count, capacity;
+};
+pthread_mutex_t arenaLock = PTHREAD_MUTEX_INITIALIZER;
+DeviceArena *arenas{nullptr};
+std::uint64_t arenaCount{0}, arenaCapacity{0};
+std::uint64_t runningRegions{0};
+
+// How many bytes of chunks the devices may hold at once, all told: a
+// program that allocates without end would otherwise fill the device's
+// memory, and on a GPU that also drives a display, starve its graphics
+// until the driver resets the GPU. MERK_DEVICE_ARENA_BYTES replaces it.
+std::uint64_t arenaBytes{0}, arenaLimit{std::uint64_t{8} << 30};
+
+// Grows an array of `T` to hold one more than `count`.
+template <typename T>
+void Reserve(T *&items, std::uint64_t count, std::uint64_t &capacity) {
+  if (count < capacity) {
+    return;
+  }
+  capacity = capacity ? 2 * capacity : 8;
+  items = static_cast<T *>(std::realloc(items, capacity * sizeof(T)));
+  if (!items) {
+    Fail("out of memory for the devices' arenas");
+  }
+}
+
+// The device's arena, made when it first asks for a chunk.
+DeviceArena &ArenaOf(int device, std::uint64_t address) {
+  for (std::uint64_t i{0}; i < arenaCount; ++i) {
+    if (arenas[i].device == device) {
+      return arenas[i];
+    }
+  }
+  Reserve(arenas, arenaCount, arenaCapacity);
+  arenas[arenaCount] = {device, address, nullptr, 0, 0};
+  return arenas[arenaCount++];
+}
+
+// A chunk of `bytes` on the device, for its arena at `address`.
+void *NewChunk(int device, std::uint64_t address, std::uint64_t bytes) {
+  pthread_mutex_lock(&arenaLock);
+  arenaBytes += bytes;
+  bool tooMany{arenaBytes > arenaLimit};
+  pthread_mutex_unlock(&arenaLock);
+  if (tooMany) {
+    Fail("the devices' arenas are full: see MERK_DEVICE_ARENA_BYTES");
+  }
+  void *chunk{omp_target_alloc(bytes, device)};
+  if (!chunk) {
+    Fail("out of memory on a device, for its arena");
+  }
+  pthread_mutex_lock(&arenaLock);
+  DeviceArena &arena{ArenaOf(device, address)};
+  Reserve(arena.chunks, arena.count, arena.capacity);
+  arena.chunks[arena.count++] = chunk;
+  pthread_mutex_unlock(&arenaLock);
+  return chunk;
+}
+
+// With arenaLock held and no region running: every chunk freed, and each
+// device's current chunk cleared.
+void FreeArenas() {
+  arenaBytes = 0;
+  for (std::uint64_t i{0}; i < arenaCount; ++i) {
+    DeviceArena &arena{arenas[i]};
+    if (arena.count == 0) {
+      continue;
+    }
+    for (std::uint64_t j{0}; j < arena.count; ++j) {
+      omp_target_free(arena.chunks[j], arena.device);
+    }
+    arena.count = 0;
+    const std::uint64_t none{0};
+    if (omp_target_memcpy(reinterpret_cast<void *>(arena.address), &none,
+            sizeof none, 0, 0, arena.device, omp_get_initial_device()) != 0) {
+      Fail("could not clear a device's arena");
+    }
+  }
+}
+
 unsigned HandleOpcode(void *raw, unsigned) {
   auto &port{*static_cast<rpc::Server::Port *>(raw)};
   switch (port.get_opcode()) {
@@ -152,6 +254,14 @@ unsigned HandleOpcode(void *raw, unsigned) {
       bool found{TakeOldest(buffer->data, message)};
       buffer->data[0] = found;
       buffer->data[1] = message;
+    });
+    return rpc::RPC_SUCCESS;
+  case rpcChunk:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      std::uint64_t bytes{buffer->data[2]};
+      buffer->data[0] = reinterpret_cast<std::uint64_t>(NewChunk(
+          static_cast<int>(buffer->data[0]), buffer->data[1], bytes));
+      buffer->data[1] = bytes;
     });
     return rpc::RPC_SUCCESS;
   default:
@@ -189,8 +299,29 @@ extern "C" void merk_register_message_type(
   pthread_mutex_unlock(&typesLock);
 }
 
+// Before and after each target region, on the host, wherever the region
+// runs: the last region to end frees the devices' arenas. What a region
+// gives back is scalars and arrays mapped from the host, so nothing in the
+// arenas outlives it.
+extern "C" void merk_region_enter(void) {
+  pthread_mutex_lock(&arenaLock);
+  ++runningRegions;
+  pthread_mutex_unlock(&arenaLock);
+}
+
+extern "C" void merk_region_exit(void) {
+  pthread_mutex_lock(&arenaLock);
+  if (--runningRegions == 0) {
+    FreeArenas();
+  }
+  pthread_mutex_unlock(&arenaLock);
+}
+
 // At start-up, before any region runs.
 extern "C" void merk_offload_start(void) {
+  if (const char *limit{std::getenv("MERK_DEVICE_ARENA_BYTES")}) {
+    arenaLimit = std::strtoull(limit, nullptr, 10);
+  }
   if (__tgt_register_rpc_callback) {
     __tgt_register_rpc_callback(HandleOpcode);
   }
