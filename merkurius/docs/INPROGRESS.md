@@ -830,14 +830,17 @@ ends the program. `spawn`, links and monitors do not exist.
    last ran. A process in a target region stays on its thread and blocks it, as
    libomp ties the region to the thread. Each worker now has a run queue with
    its own lock, and steals half of another's when its own is empty. Timers are
-   a binary heap under the mailboxes' lock, not a wheel for each worker, as that
-   lock is held anyway. To do: mailboxes without the one lock. Measured
-   2026-11-08, 16 pairs of processes: at 24 workers over half the 3.84 million
-   acquisitions of the lock are contended, and threads wait 36 s in a 3.6 s run,
-   about 10 of them at any time. At one worker the lock is never contended, and
-   its 8 acquisitions a round are a small part of 3.6 µs. An adaptive mutex
-   gains 3 to 8%. Independent pairs share no mailbox, so a lock for each mailbox
-   may give most of what lock-free queues would.
+   a binary heap under one small lock, rather than a wheel for each worker, which
+   has not been needed. Each mailbox has a lock, each process a lock for whether
+   it is asleep, and names and free slots one more. A process's messages are
+   stamped from its own count, as the design has it. Slots are in chunks that
+   never move, so that finding one takes no lock. Measured 2026-11-08 before the
+   locks were split: at 24 workers over half the 3.84 million acquisitions of the
+   one lock were contended, with about 10 threads waiting on it at any time. To
+   decide, with measurements: why 16 independent pairs still do not scale (2.1 µs
+   a round overall at 8 workers, where 0.23 would be linear, and 4.2 at 48), and
+   whether lock-free queues are then worth having. Not looked at yet: `malloc`
+   for each message, waking workers, and the counters every worker shares.
 5. **Preemption.** Lowering the heap limit, and `mrt.yield_check` on loops that
    do not allocate.
 6. **Ending a process.** An uncaught exception ends its process with a reason

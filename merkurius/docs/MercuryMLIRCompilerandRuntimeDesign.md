@@ -2286,7 +2286,7 @@ Rejected:
 - **Guard pages** as the way to find an overflow. They cost nothing at run time, but each splits the mapping, and at Linux's default `vm.max_map_count` of 65530 `mprotect` failed at 32,754 processes. Raising the limit needs administrator rights, and users must be able to run these programs without them.
 - **Segmented stacks** (LLVM's `split-stack`), which grow without copying and start smaller. Untried with `musttail`, and a hot call on a segment boundary is slow, the reason Go and Rust left them.
 - **Scheduling:** one worker thread per core, each with a run queue, plus work stealing.
-- **As built, 2026-11-08** (`runtime/process.cpp`): one worker, the program's first thread, runs every process until it blocks, under the mailboxes' lock (`docs/INPROGRESS.md`, The scheduler). `main` is a process too, on a 64 MB stack. A process that ends closes its mailboxes, and the program ends when `main` does, whatever others are doing: its meaning is what `main` does, and a forgotten server should not keep it alive. Only a mailbox's owner receives from it. Rejected: *any process may receive*, since a send would have to find waiters for each mailbox, and two receivers on one mailbox have no order. *Waiting for every process at the end of `main`*: one process waiting for ever would keep the program alive. The runtime calls a closure through a small assembly stub, which restores the stack pointer as the tail calling convention's callee may pop from the stack.
+- **As built, 2026-11-08** (`runtime/process.cpp`): a worker for each core, or `MERK_WORKERS`, runs each process until it blocks, with a queue for each worker and stealing, and a lock for each mailbox (`docs/INPROGRESS.md`, The scheduler). `main` is a process too, on a 64 MB stack. A process that ends closes its mailboxes, and the program ends when `main` does, whatever others are doing: its meaning is what `main` does, and a forgotten server should not keep it alive. Only a mailbox's owner receives from it. Rejected: *any process may receive*, since a send would have to find waiters for each mailbox, and two receivers on one mailbox have no order. *Waiting for every process at the end of `main`*: one process waiting for ever would keep the program alive. The runtime calls a closure through a small assembly stub, which restores the stack pointer as the tail calling convention's callee may pop from the stack.
 - **Preemption:** rides on the nursery limit check, as GHC does. To preempt a process, the scheduler lowers its heap limit, so the next allocation takes the slow path and yields there. Code that allocates pays nothing extra. Loops that do not allocate get an `mrt.yield_check` on their back edge, which spends a reduction budget; that check is the only preemption cost left.
 - **Blocking work:** I/O never blocks a worker. File and socket I/O use the operating system's asynchronous interface where possible, and a separate pool of threads otherwise, as Erlang's dirty schedulers do.
 - **Timers:** each worker keeps a timer wheel for receive timeouts.
@@ -3695,6 +3695,20 @@ A run queue for each worker, with stealing, 2026-11-08, on db41894a8ce6 and its 
 | 48 | 5.8 | 39 | 8.2 |
 
 With 48 workers, spawning a million processes took 7.0 µs each, and a message to one and its end 6.6 µs.
+
+A lock for each mailbox, 2026-11-08, on 69694be5f5a1 and its change, the same conditions.
+
+| Workers | Ping-pong, µs a round | `work`, ms | `pairs`, µs a round in all |
+| ---: | ---: | ---: | ---: |
+| 1 | 3.6 | 1097 | 3.6 |
+| 2 | 5.4 | 548 | 2.6 |
+| 8 | 5.9 | 138 | 2.1 |
+| 24 | 6.3 | 56 | 3.8 |
+| 48 | 6.3 | 35 | 4.2 |
+
+With 48 workers, spawning a million processes took 3.9 µs each, and a message to one and its end 5.4 µs.
+
+Once a receive from a thread that runs no process used the same counts as its senders, `pairs` was 2.3 µs at 8 workers and 4.0 at 48. Ping-pong with the GPU, the median of 5, against the numbers before the mailbox locks: `cpu-local` 7.1 (7.0), `gpu-local` 21.3 (19.5), CPU and CPU between nodes 24.6 (22.7), GPU and CPU 37.7 (35.0), GPU and GPU 48.4 (44.8) µs a round. The cost on the GPU paths has not been explained.
 
 ## Target applications
 

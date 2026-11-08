@@ -52,8 +52,8 @@ thread_local Process *current{nullptr};
 // Where this thread's worker goes on from when it has nothing to run.
 thread_local Context workerContext{nullptr};
 thread_local Worker *thisWorker{nullptr};
-// Whether what this thread switched to is to release schedulerLock.
-thread_local bool unlockAfterSwitch{false};
+// The lock that what this thread switched to is to release, or null.
+thread_local pthread_mutex_t *unlockAfterSwitch{nullptr};
 
 Process firstProcess{{nullptr, nullptr}, 1};
 std::uint64_t nextId{2};
@@ -71,8 +71,7 @@ pthread_cond_t ready;
 pthread_once_t readyOnce = PTHREAD_ONCE_INIT;
 
 // The processes blocked with a deadline, a binary heap by deadline, under
-// schedulerLock, and the earliest deadline, or -1. A heap rather than a timer
-// wheel for each worker: one lock guards the mailboxes anyway.
+// schedulerLock, and the earliest deadline, or -1.
 Process **timers{nullptr};
 std::int64_t timerCount{0};
 std::int64_t timerCapacity{0};
@@ -312,23 +311,34 @@ bool TimerDue() {
   return time >= 0 && Now() >= time;
 }
 
-// Wakes the processes whose deadlines have passed, with the lock held.
+// Wakes the processes whose deadlines have passed. A process whose waitLock
+// is taken is being blocked or woken; it is tried again later.
 void FireTimers() {
   if (!TimerDue()) {
     return;
   }
+  pthread_mutex_lock(&schedulerLock);
   std::int64_t now{Now()};
   while (timerCount && timers[0]->deadline <= now) {
-    Wake(timers[0]);
+    Process *process{timers[0]};
+    if (pthread_mutex_trylock(&process->waitLock) != 0) {
+      break;
+    }
+    process->waiting = false;
+    RemoveTimer(process);
+    pthread_mutex_unlock(&process->waitLock);
+    Enqueue(process);
   }
+  pthread_mutex_unlock(&schedulerLock);
 }
 
 // What a thread does first after switching: on a process's stack it may be
 // another thread than last time, so this must read its thread-local afresh.
 [[gnu::noinline]] void AfterSwitch() {
   if (unlockAfterSwitch) {
-    unlockAfterSwitch = false;
-    pthread_mutex_unlock(&schedulerLock);
+    pthread_mutex_t *lock{unlockAfterSwitch};
+    unlockAfterSwitch = nullptr;
+    pthread_mutex_unlock(lock);
   }
 }
 
@@ -377,11 +387,7 @@ void Idle() {
     idle.fetch_add(1);
     Process *next{nullptr};
     while (!next) {
-      if (TimerDue()) {
-        pthread_mutex_lock(&schedulerLock);
-        FireTimers();
-        pthread_mutex_unlock(&schedulerLock);
-      }
+      FireTimers();
       next = stopping.load() ? nullptr : PopLocal(self);
       if (!next && !stopping.load()) {
         next = Steal(self);
@@ -407,21 +413,21 @@ void *WorkerThread(void *worker) {
   WorkerLoop();
 }
 
-// The next process to run on this worker, with the lock held, or null.
+// The next process to run on this worker, or null.
 Process *TakeLocal() {
-  FireTimers();
   return stopping.load() ? nullptr : PopLocal(*thisWorker);
 }
 
-// The stack and record go back while still in use, which is safe as the
-// lock is held until this has switched away, and NewProcess takes it.
+// The stack and record go back while still in use, which is safe as
+// schedulerLock is held until this has switched away, and NewProcess is
+// called with it.
 [[noreturn]] void Finish(Process *self) {
-  CloseMailboxesOf(self);
+  pthread_mutex_lock(&schedulerLock);
   Process *next{TakeLocal()};
   RunProcess(next);
   FreeStack(self->stack);
   std::free(self);
-  unlockAfterSwitch = true;
+  unlockAfterSwitch = &schedulerLock;
   SwitchContext(ended, next ? next->context : workerContext);
   std::abort();
 }
@@ -430,7 +436,7 @@ void ProcessBody(void *argument) {
   AfterSwitch();
   auto *self{static_cast<Process *>(argument)};
   CallClosure(self->closure, self->argument);
-  pthread_mutex_lock(&schedulerLock);
+  CloseMailboxesOf(self);
   Finish(self);
 }
 
@@ -512,7 +518,9 @@ void Wake(Process *process) {
   }
   process->waiting = false;
   if (process->timerIndex >= 0) {
+    pthread_mutex_lock(&schedulerLock);
     RemoveTimer(process);
+    pthread_mutex_unlock(&schedulerLock);
   }
   Enqueue(process);
 }
@@ -522,17 +530,17 @@ void Block(std::int64_t deadline) {
   self->waiting = true;
   self->deadline = deadline;
   if (deadline >= 0) {
-    AddTimer(self);
-  }
-  Process *next{TakeLocal()};
-  if (next != self) {
-    RunProcess(next);
-    unlockAfterSwitch = true;
-    SwitchContext(self->context, next ? next->context : workerContext);
-    // It may be on another thread now, without the lock.
-    AfterSwitch();
     pthread_mutex_lock(&schedulerLock);
+    AddTimer(self);
+    pthread_mutex_unlock(&schedulerLock);
   }
+  FireTimers();
+  Process *next{TakeLocal()};
+  RunProcess(next);
+  unlockAfterSwitch = &self->waitLock;
+  SwitchContext(self->context, next ? next->context : workerContext);
+  // It may be on another thread now.
+  AfterSwitch();
 }
 
 } // namespace merkurius::runtime
