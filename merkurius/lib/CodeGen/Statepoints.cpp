@@ -26,6 +26,7 @@
 #include "llvm/IR/Statepoint.h"
 #include "llvm/IR/ValueMap.h"
 #include "llvm/Passes/PassBuilder.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/Transforms/Scalar/RewriteStatepointsForGC.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -481,6 +482,303 @@ static llvm::Constant *FindType(const llvm::Value *root, KnownTypes &known) {
   return nullptr;
 }
 
+namespace {
+using TypeInfosOf =
+    llvm::DenseMap<const llvm::Value *, llvm::SmallVector<llvm::Value *, 2>>;
+using ValueSet = llvm::DenseSet<llvm::Value *>;
+} // namespace
+
+static bool IsFromStaticData(const llvm::Value *root);
+static bool IsPolymorphicIndex(llvm::Module &module, llvm::ConstantInt *type);
+
+// Whether a value is one the collector has to find, at a safepoint after it.
+static bool IsLiveRoot(llvm::Value *value) {
+  return IsHeapPointer(value->getType()) &&
+      (llvm::isa<llvm::Instruction>(value) ||
+          llvm::isa<llvm::Argument>(value)) &&
+      !IsFromStaticData(value);
+}
+
+// Applies an instruction to what is live before it, from what is after it.
+static void StepBack(llvm::Instruction &instruction, ValueSet &live) {
+  live.erase(&instruction);
+  if (llvm::isa<llvm::PHINode>(instruction)) {
+    return;
+  }
+  for (llvm::Value *operand : instruction.operands()) {
+    if (IsLiveRoot(operand)) {
+      live.insert(operand);
+    }
+  }
+}
+
+// What is live at the end of `block`, given what is live into each successor.
+static ValueSet LiveOut(llvm::BasicBlock &block,
+    const llvm::DenseMap<llvm::BasicBlock *, ValueSet> &liveIn) {
+  ValueSet live;
+  for (llvm::BasicBlock *successor : llvm::successors(&block)) {
+    auto it{liveIn.find(successor)};
+    if (it != liveIn.end()) {
+      live.insert(it->second.begin(), it->second.end());
+    }
+    for (llvm::PHINode &phi : successor->phis()) {
+      live.erase(&phi);
+    }
+    for (llvm::PHINode &phi : successor->phis()) {
+      llvm::Value *incoming{phi.getIncomingValueForBlock(&block)};
+      if (IsLiveRoot(incoming)) {
+        live.insert(incoming);
+      }
+    }
+  }
+  return live;
+}
+
+// Makes a phi or select of each of the type_infos of what `merge` chooses
+// between, if each has them where the choice is made.
+static bool MergeTypeInfos(llvm::Instruction *merge, TypeInfosOf &infos,
+    llvm::DominatorTree &dominators, TypeInfosOf &made) {
+  auto *phi{llvm::dyn_cast<llvm::PHINode>(merge)};
+  auto *select{llvm::dyn_cast<llvm::SelectInst>(merge)};
+  unsigned count{phi ? phi->getNumIncomingValues() : 2};
+  llvm::SmallVector<const llvm::SmallVector<llvm::Value *, 2> *> incoming(count);
+  std::size_t width{0};
+  for (unsigned i{0}; i < count; ++i) {
+    llvm::Value *value{phi ? phi->getIncomingValue(i) : select->getOperand(i + 1)};
+    if (!IsLiveRoot(value)) {
+      continue; // A constant takes on the others'.
+    }
+    auto it{infos.find(CellOf(value))};
+    if (CellOf(value) == CellOf(merge) || it == infos.end() ||
+        (width && width != it->second.size())) {
+      return false;
+    }
+    width = it->second.size();
+    incoming[i] = &it->second;
+    llvm::Instruction *where{
+        phi ? phi->getIncomingBlock(i)->getTerminator() : merge};
+    for (llvm::Value *info : it->second) {
+      auto *defined{llvm::dyn_cast<llvm::Instruction>(info)};
+      if (defined && !dominators.dominates(defined, where)) {
+        return false;
+      }
+    }
+  }
+  if (!width) {
+    return false;
+  }
+  llvm::SmallVector<llvm::Value *, 2> merged;
+  for (std::size_t w{0}; w < width; ++w) {
+    // What a branch with a constant passes, which has no type to describe.
+    llvm::Value *any{nullptr};
+    for (const auto *from : incoming) {
+      any = from ? (*from)[w] : any;
+    }
+    llvm::Type *type{any->getType()};
+    if (phi) {
+      auto *infoPhi{llvm::PHINode::Create(
+          type, count, "type_info", phi->getParent()->begin())};
+      for (unsigned i{0}; i < count; ++i) {
+        infoPhi->addIncoming(
+            incoming[i] ? (*incoming[i])[w] : any, phi->getIncomingBlock(i));
+      }
+      merged.push_back(infoPhi);
+    } else {
+      merged.push_back(llvm::SelectInst::Create(select->getCondition(),
+          incoming[0] ? (*incoming[0])[w] : any,
+          incoming[1] ? (*incoming[1])[w] : any, "type_info",
+          select->getIterator()));
+    }
+  }
+  infos[CellOf(merge)] = merged;
+  made[CellOf(merge)] = std::move(merged);
+  return true;
+}
+
+// The type_infos each value of the function has in some bundle, and a phi or
+// select of values that have the same ones.
+static TypeInfosOf GatherTypeInfos(
+    llvm::Function &function, llvm::DominatorTree &dominators, TypeInfosOf &made) {
+  TypeInfosOf infos{made};
+  llvm::SmallVector<llvm::Instruction *> merges;
+  for (llvm::Instruction &instruction : llvm::instructions(function)) {
+    if (auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)}) {
+      if (auto deopt{call->getOperandBundle(llvm::LLVMContext::OB_deopt)}) {
+        ForEachEntry(deopt->Inputs,
+            [&](llvm::Constant *, llvm::Value *value,
+                llvm::ArrayRef<llvm::Use> typeInfos) {
+              if (!typeInfos.empty()) {
+                auto &found{infos[CellOf(value)]};
+                found.clear();
+                for (const llvm::Use &info : typeInfos) {
+                  found.push_back(info.get());
+                }
+              }
+            });
+      }
+    }
+    if (IsHeapPointer(instruction.getType()) &&
+        (llvm::isa<llvm::PHINode>(instruction) ||
+            llvm::isa<llvm::SelectInst>(instruction))) {
+      merges.push_back(&instruction);
+    }
+  }
+  for (bool changed{true}; changed;) {
+    changed = false;
+    for (llvm::Instruction *merge : merges) {
+      if (infos.count(CellOf(merge))) {
+        continue;
+      }
+      const llvm::SmallVector<llvm::Value *, 2> *common{nullptr};
+      bool same{true};
+      unsigned first{llvm::isa<llvm::SelectInst>(merge) ? 1u : 0u};
+      for (unsigned i{first}; i < merge->getNumOperands() && same; ++i) {
+        llvm::Value *incoming{merge->getOperand(i)};
+        if (!IsLiveRoot(incoming) || CellOf(incoming) == CellOf(merge)) {
+          continue; // A constant has no type_infos to agree with.
+        }
+        auto it{infos.find(CellOf(incoming))};
+        same = it != infos.end() && (!common || *common == it->second);
+        if (same) {
+          common = &it->second;
+        }
+      }
+      if (same && common) {
+        llvm::SmallVector<llvm::Value *, 2> copy{*common};
+        infos[CellOf(merge)] = std::move(copy);
+        changed = true;
+      }
+    }
+    if (!changed) {
+      // Those whose branches have different type_infos, as code that two
+      // existentially typed constructors share: merge the type_infos too.
+      for (llvm::Instruction *merge : merges) {
+        if (!infos.count(CellOf(merge)) &&
+            MergeTypeInfos(merge, infos, dominators, made)) {
+          changed = true;
+          break;
+        }
+      }
+    }
+  }
+  return infos;
+}
+
+// Lists at a safepoint what is live there and its bundle does not have: the
+// optimizer can keep a value alive for longer than the Mercury code did, and
+// the rewrite would then make a root that nothing describes. Its type_infos
+// are found here, while each is still one SSA value, and listing them makes
+// the rewrite relocate them. That can make one live at an earlier safepoint.
+static void ListLiveRoots(llvm::Function &function, KnownTypes &known) {
+  TypeInfosOf made;
+  for (bool changed{true}; changed;) {
+    changed = false;
+    llvm::DenseMap<llvm::BasicBlock *, ValueSet> liveIn;
+    for (bool stable{false}; !stable;) {
+      stable = true;
+      for (llvm::BasicBlock *block : llvm::post_order(&function)) {
+        ValueSet live{LiveOut(*block, liveIn)};
+        for (llvm::Instruction &instruction : llvm::reverse(*block)) {
+          StepBack(instruction, live);
+        }
+        ValueSet &in{liveIn[block]};
+        if (in.size() != live.size()) {
+          in = std::move(live);
+          stable = false;
+        }
+      }
+    }
+    llvm::DominatorTree dominators{function};
+    TypeInfosOf infos{GatherTypeInfos(function, dominators, made)};
+    for (llvm::BasicBlock &block : function) {
+      ValueSet live{LiveOut(block, liveIn)};
+      for (llvm::Instruction &instruction :
+          llvm::make_early_inc_range(llvm::reverse(block))) {
+        auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)};
+        auto deopt{call ? call->getOperandBundle(llvm::LLVMContext::OB_deopt)
+                        : std::nullopt};
+        if (deopt) {
+          ValueSet after{live};
+          after.erase(call);
+          llvm::SmallPtrSet<const llvm::Value *, 16> listed;
+          ForEachEntry(deopt->Inputs,
+              [&](llvm::Constant *, llvm::Value *value,
+                  llvm::ArrayRef<llvm::Use>) { listed.insert(CellOf(value)); });
+          // In a fixed order, for the same code from the same module.
+          llvm::SmallVector<llvm::Value *> missing;
+          for (llvm::Value *value : after) {
+            if (!listed.contains(CellOf(value))) {
+              missing.push_back(value);
+            }
+          }
+          std::vector<llvm::Value *> entries{
+              deopt->Inputs.begin(), deopt->Inputs.end()};
+          llvm::SmallVector<std::pair<std::string, llvm::Value *>> named;
+          for (llvm::Value *value : missing) {
+            std::string text;
+            llvm::raw_string_ostream os{text};
+            value->printAsOperand(os, false);
+            named.push_back({std::move(text), value});
+          }
+          llvm::sort(named, [](const auto &a, const auto &b) {
+            return a.first < b.first;
+          });
+          bool added{false};
+          for (auto &[text, value] : named) {
+            auto *type{llvm::cast_or_null<llvm::ConstantInt>(
+                FindType(value, known))};
+            if (!type) {
+              continue;
+            }
+            llvm::SmallVector<llvm::Value *, 2> given;
+            if (auto it{infos.find(CellOf(value))};
+                it != infos.end() &&
+                llvm::all_of(it->second, [&](llvm::Value *info) {
+                  auto *defined{llvm::dyn_cast<llvm::Instruction>(info)};
+                  return !defined || dominators.dominates(defined, call);
+                })) {
+              given = it->second;
+            }
+            if (given.empty() && IsPolymorphicIndex(*function.getParent(), type)) {
+              std::string text;
+              llvm::raw_string_ostream os{text};
+              os << "not yet implemented: a garbage collector root whose "
+                 << "type_infos are not known, in " << function.getName() << ":"
+                 << *value;
+              llvm::report_fatal_error(llvm::StringRef{text});
+            }
+            entries.push_back(llvm::ConstantInt::get(type->getType(),
+                type->getZExtValue() | (std::uint64_t{given.size()} << 32)));
+            entries.push_back(value);
+            entries.insert(entries.end(), given.begin(), given.end());
+            added = true;
+          }
+          if (added) {
+            llvm::SmallVector<llvm::OperandBundleDef, 2> bundles;
+            for (unsigned b = 0; b < call->getNumOperandBundles(); ++b) {
+              llvm::OperandBundleUse use{call->getOperandBundleAt(b)};
+              if (use.getTagID() != llvm::LLVMContext::OB_deopt) {
+                bundles.emplace_back(use);
+              }
+            }
+            bundles.emplace_back("deopt", std::move(entries));
+            llvm::CallBase *replaced{llvm::CallBase::Create(
+                call, bundles, call->getIterator())};
+            replaced->takeName(call);
+            call->replaceAllUsesWith(replaced);
+            StepBack(*replaced, live);
+            call->eraseFromParent();
+            changed = true;
+            continue;
+          }
+        }
+        StepBack(instruction, live);
+      }
+    }
+  }
+}
+
+
 // What static data holds is static or a number, and does not move.
 static bool IsFromStaticData(const llvm::Value *root) {
   llvm::SmallPtrSet<const llvm::Value *, 16> seen;
@@ -520,6 +818,9 @@ struct StatepointRoots {
 };
 } // namespace
 
+// Type index of a root that a collection only updates, -1 being one it ignores.
+static constexpr std::int64_t kForwardOnly{-2};
+
 static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
     StatepointRoots &roots) {
   auto deopt{statepoint->getOperandBundle(llvm::LLVMContext::OB_deopt)};
@@ -545,8 +846,12 @@ static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
             slots.insert({value, type});
             return;
           }
-          types[CellOf(value)] = type;
+          // A value listed at two types has the one that has type_infos.
           auto &found{infos[CellOf(value)]};
+          if (typeInfos.empty() && !found.empty()) {
+            return;
+          }
+          types[CellOf(value)] = type;
           found.clear();
           for (const llvm::Use &info : typeInfos) {
             found.push_back(info.get());
@@ -580,6 +885,14 @@ static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
       types.try_emplace(base, type);
       types.try_emplace(derived, type);
     }
+    // And its type_infos.
+    if (auto it{infos.find(derived)}; it != infos.end()) {
+      llvm::SmallVector<llvm::Value *, 2> copy{it->second};
+      infos.try_emplace(base, std::move(copy));
+    } else if (auto at{infos.find(base)}; at != infos.end()) {
+      llvm::SmallVector<llvm::Value *, 2> copy{at->second};
+      infos.try_emplace(derived, std::move(copy));
+    }
   }
   llvm::Constant *dead{llvm::ConstantInt::getSigned(
       llvm::Type::getInt64Ty(function.getContext()), -1)};
@@ -604,6 +917,16 @@ static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
            << " has no type at a safepoint:" << *root << "\n at:" << *statepoint;
         llvm::report_fatal_error(llvm::StringRef{text});
       }
+      // Every value live before the rewrite is in the bundle (ListLiveRoots),
+      // so one of a polymorphic type that is not is a base the rewrite keeps
+      // for a pointer into the same cell. That pointer is live here too and
+      // says what the cell holds; this only has to be updated when it moves.
+      if (!infos.count(CellOf(root)) &&
+          IsPolymorphicIndex(*function.getParent(),
+              llvm::cast<llvm::ConstantInt>(type))) {
+        type = llvm::ConstantInt::getSigned(
+            llvm::Type::getInt64Ty(function.getContext()), kForwardOnly);
+      }
       roots.types[root] = type;
       if (auto it{infos.find(CellOf(root))}; it != infos.end()) {
         roots.infos[root] = it->second;
@@ -622,6 +945,19 @@ static llvm::ArrayRef<llvm::Value *> InfosOf(
     return {};
   }
   return it->second;
+}
+
+// Whether a type index means a type that is walked by type_infos.
+static bool IsPolymorphicIndex(llvm::Module &module, llvm::ConstantInt *type) {
+  if (type->isNegative()) {
+    return false;
+  }
+  auto *table{llvm::cast<llvm::ConstantStruct>(
+      module.getNamedGlobal(kRootTable)->getInitializer())};
+  auto *kind{llvm::cast<llvm::ConstantInt>(
+      table->getOperand(2 + 2 * type->getZExtValue()))};
+  return kind->getSExtValue() == kRootPolymorphicTerm ||
+      kind->getSExtValue() == kRootWord;
 }
 
 // The stack map has a location pair for each relocation that is still used, in
@@ -681,6 +1017,14 @@ static void EncodeRootTypes(StatepointRoots &roots) {
     auto *type{llvm::cast<llvm::ConstantInt>(
         roots.types.lookup(relocate->getDerivedPtr()))};
     llvm::ArrayRef<llvm::Value *> infos{InfosOf(roots, relocate)};
+    if (infos.empty() && IsPolymorphicIndex(*final->getModule(), type)) {
+      std::string text;
+      llvm::raw_string_ostream os{text};
+      os << "not yet implemented: a garbage collector root whose type_infos "
+         << "are not known, in " << final->getFunction()->getName() << ":"
+         << *relocate;
+      llvm::report_fatal_error(llvm::StringRef{text});
+    }
     for (llvm::Value *info : infos) {
       final->setOperand(infoPlace++, info);
     }
@@ -769,6 +1113,7 @@ void RewriteForCollector(llvm::Module &module, const TargetInfo &target) {
       MarkLeaves(function);
       RecordTypes(function, known);
       ReadBitsEarly(function, known);
+      ListLiveRoots(function, known);
       any = true;
     }
   }

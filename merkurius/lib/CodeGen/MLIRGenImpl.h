@@ -126,6 +126,10 @@ struct ParallelLoop {
   parser::CharBlock at;
 };
 
+// In typeInfos_, a type that a goal gave, of TypeKind::Existential, by its
+// number from here.
+inline constexpr unsigned kGivenTypeKey{semantics::kExistentialVar};
+
 class MerkGenerator {
 public:
   MerkGenerator(mlir::MLIRContext &context, llvm::StringRef module,
@@ -357,6 +361,9 @@ private:
   void GoalBody(const Body &, const ProcedureBody &);
   // Says which type_infos describe the polymorphic values bound so far.
   void AnnotateRoots(const ProcedureBody &);
+  // Says which type_infos describe `value` of `type`, if it needs them and
+  // this code has them. Returns whether nothing more is needed.
+  bool NoteRoot(mlir::Value value, const semantics::Type *type);
   // Makes the descriptors a root's type needs for the runtime to name it.
   void EnsureRootDescriptors(const semantics::Type *);
   // X = c, for a literal or a character c; null after reporting a constant
@@ -403,6 +410,10 @@ private:
   static constexpr BodyVar kFirstGivenVar{1u << 30};
   mlir::Value Given(const void *node);
   void Give(const void *node, mlir::Value);
+  // What a goal gives says the type of a type variable, for typeInfos_.
+  void GiveTypeInfo(const semantics::TypeInfo &, mlir::Value, mlir::Location);
+  void GiveTypeInfo(const semantics::Type &, mlir::Value, mlir::Location);
+  void GiveDictionary(const semantics::Dictionary &, mlir::Value, mlir::Location);
   // Whether what a clause gives can be made at the end of the body.
   bool CanMake(const semantics::TypeInfo &);
   bool CanMake(const semantics::Dictionary &);
@@ -707,6 +718,9 @@ private:
   // construct was not handled.
   llvm::DenseMap<BodyVar, mlir::Value> values_;
   llvm::DenseSet<mlir::Value> annotated_;
+  // The type_infos of types goals gave, by type variable or kGivenTypeKey on.
+  // The latest of each; another branch's fails NoteRoot's region check.
+  llvm::DenseMap<unsigned, mlir::Value> givenInfos_;
   // The types of the roots seen so far, for their descriptors.
   llvm::SetVector<const semantics::Type *> rootTypes_;
   merk::ProcOp unifyArray_;

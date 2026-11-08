@@ -367,6 +367,9 @@ void MerkGenerator::FieldAccess(const Body &goal, const Procedure &callee,
   mlir::ValueRange cell{
       merk::DeconstructOp::create(builder_, loc, *fields, term, functor)
           .getFields()};
+  for (auto [field, argument] : llvm::zip(cell, ArgumentsOf(type, *types))) {
+    NoteRoot(field, argument);
+  }
   if (!update) {
     values_[result] = cell[index];
     return;

@@ -116,10 +116,12 @@ void MerkGenerator::TermUnify(const Body &goal, const ProcedureBody &body) {
     unsigned field{0};
     for (const semantics::TypeInfo *info : passed->typeInfos) {
       NoteGivenType(*info);
+      GiveTypeInfo(*info, results[field], loc);
       Give(info, results[field++]);
     }
     for (const semantics::Dictionary *dictionary : passed->dictionaries) {
       NoteGivenTypes(*dictionary);
+      GiveDictionary(*dictionary, results[field], loc);
       Give(dictionary, results[field++]);
     }
   }
@@ -197,6 +199,8 @@ merk::ProcOp MerkGenerator::UnifyProc(merk::TermType term) {
   }
   mlir::Value x{entry->getArgument(variables.size())};
   mlir::Value y{entry->getArgument(variables.size() + 1)};
+  NoteRoot(x, type);
+  NoteRoot(y, type);
   llvm::SmallVector<mlir::Attribute> cases;
   for (const semantics::ConstructorTypes &constructor : constructors) {
     cases.push_back(builder_.getArrayAttr({merk::FunctorAttr::get(&context_,
@@ -235,6 +239,8 @@ merk::ProcOp MerkGenerator::UnifyProc(merk::TermType term) {
           llvm::zip(xs.getFields().drop_front(first),
               ys.getFields().drop_front(first),
               ArgumentsOf(type, constructor))) {
+        NoteRoot(a, argument);
+        NoteRoot(b, argument);
         Equal(a, b, argument, loc);
       }
     }
@@ -647,6 +653,8 @@ merk::ProcOp MerkGenerator::CompareProc(merk::TermType term) {
   }
   mlir::Value x{entry->getArgument(variables.size())};
   mlir::Value y{entry->getArgument(variables.size() + 1)};
+  NoteRoot(x, type);
+  NoteRoot(y, type);
   llvm::SmallVector<mlir::Attribute> cases;
   for (const semantics::ConstructorTypes &constructor : constructors) {
     cases.push_back(builder_.getArrayAttr({merk::FunctorAttr::get(&context_,
@@ -715,6 +723,8 @@ merk::ProcOp MerkGenerator::CompareProc(merk::TermType term) {
                 ComparisonValue(">", loc), loc);
             typeInfos_[var] = p;
           }
+          NoteRoot(a, argument);
+          NoteRoot(b, argument);
           mlir::Value order{Compare(a, b, argument,
               declaredVariable[c][i], loc)};
           if (!order) {

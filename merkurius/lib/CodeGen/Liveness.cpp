@@ -19,6 +19,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "mlir/IR/Dominance.h"
+#include "llvm/Support/Regex.h"
 
 namespace merkurius::codegen {
 namespace {
@@ -70,6 +71,14 @@ private:
   // Whether the type_infos are defined before `op`. A value can be made before
   // the code that finds its type_info.
   bool Available(llvm::ArrayRef<mlir::Value> infos, mlir::Operation *op);
+  mlir::Value Described(mlir::Value value);
+
+public:
+  // What was made only to say a root's type and no safepoint needed: left
+  // between a call and the return, it would stop a tail call.
+  void EraseUnusedTypeInfos();
+
+private:
 
   // The type_infos of each polymorphic value that has them.
   llvm::DenseMap<mlir::Value, llvm::SmallVector<mlir::Value, 2>> infos_;
@@ -87,6 +96,58 @@ void UsesInside(mlir::Operation *op, Live &uses) {
         }
       }
     });
+  }
+}
+
+// Whether a value's type says all there is to know about it.
+static bool IsPolymorphic(mlir::Type type) {
+  if (mlir::isa<merk::WordType>(type)) {
+    return true;
+  }
+  auto term{mlir::dyn_cast<merk::TermType>(type)};
+  static const llvm::Regex variable{"[(, {]T[0-9]+[,)} ]|some \\["};
+  return term && variable.match(term.getName());
+}
+
+// The value that says what `value` is: of those that are it at another type
+// across conversions to and from a word, as a callee's instance of a type is
+// made the caller's, one with a type or a note that says.
+mlir::Value Marker::Described(mlir::Value value) {
+  llvm::SetVector<mlir::Value> seen;
+  seen.insert(value);
+  for (std::size_t i = 0; i < seen.size(); ++i) {
+    mlir::Value at{seen[i]};
+    if (!IsPolymorphic(at.getType()) || infos_.count(at)) {
+      return at;
+    }
+    if (mlir::Operation *def{at.getDefiningOp()};
+        def && mlir::isa<merk::ToWordOp, merk::FromWordOp>(def)) {
+      seen.insert(def->getOperand(0));
+    }
+    for (mlir::Operation *user : at.getUsers()) {
+      if (mlir::isa<merk::ToWordOp, merk::FromWordOp>(user)) {
+        seen.insert(user->getResult(0));
+      }
+    }
+  }
+  return value;
+}
+
+void Marker::EraseUnusedTypeInfos() {
+  llvm::SmallVector<mlir::Value> work;
+  for (auto &entry : infos_) {
+    work.append(entry.second.begin(), entry.second.end());
+  }
+  while (!work.empty()) {
+    mlir::Value value{work.pop_back_val()};
+    mlir::Operation *def{value.getDefiningOp()};
+    if (!def || !value.use_empty() ||
+        !mlir::isa<merk::TypeInfoWordOp, merk::TypeclassInfoWordOp,
+            merk::TypeInfoOp>(def)) {
+      continue;
+    }
+    work.append(def->operand_begin(), def->operand_end());
+    def->erase();
   }
 }
 
@@ -117,21 +178,40 @@ void Marker::Mark(mlir::Operation *op, Live &live) {
   // What a root's type_infos are needs them live here, and so before here.
   llvm::SmallVector<mlir::Value> roots{all.begin(), all.end()};
   for (mlir::Value value : roots) {
-    auto it{infos_.find(value)};
+    auto it{infos_.find(Described(value))};
     if (it != infos_.end() && Available(it->second, op)) {
       all.insert(it->second.begin(), it->second.end());
       live.insert(it->second.begin(), it->second.end());
     }
   }
   for (mlir::Value value : all) {
+    if (value.getDefiningOp<merk::HoleOp>()) {
+      continue; // Null, until the call fills it through the cell.
+    }
+    if (auto construct{value.getDefiningOp<merk::ConstructOp>()};
+        construct && construct.getArguments().empty()) {
+      // A constant, which needs no type_info: it can be made before what
+      // gives its type, as a [] in a procedure with an existential type.
+      continue;
+    }
     if (IsRoot(value.getType())) {
+      mlir::Value described{Described(value)};
       values.push_back(value);
-      types.push_back(mlir::TypeAttr::get(value.getType()));
-      auto it{infos_.find(value)};
+      types.push_back(mlir::TypeAttr::get(described.getType()));
+      auto it{infos_.find(described)};
       if (it != infos_.end() && Available(it->second, op)) {
         values.append(it->second.begin(), it->second.end());
         counts.push_back(it->second.size());
       } else {
+        if (IsPolymorphic(described.getType())) {
+          std::string text;
+          llvm::raw_string_ostream os{text};
+          os << "not yet implemented: a garbage collector root of type "
+             << described.getType() << " whose type_infos are not known, in "
+             << op->getParentOfType<merk::ProcOp>().getSymName() << ": "
+             << value;
+          llvm::report_fatal_error(llvm::StringRef{text});
+        }
         counts.push_back(0);
       }
     } else if (auto env{value.getDefiningOp<merk::EnvNewOp>()}) {
@@ -141,6 +221,60 @@ void Marker::Mark(mlir::Operation *op, Live &live) {
               IsRoot)) {
         llvm::SmallVector<mlir::Type> layout{
             env.getLayout().getAsValueRange<mlir::TypeAttr>()};
+        // A field with type_infos: the field's type, and for each type_info
+        // the field it is in, as the width of an integer type, plus one.
+        for (auto [field, type] : llvm::zip(env.getValues(), layout)) {
+          if (auto construct{field.getDefiningOp<merk::ConstructOp>()};
+              construct && construct.getArguments().empty()) {
+            type = mlir::IntegerType::get(op->getContext(), 64); // a constant
+            continue;
+          }
+          auto it{infos_.find(Described(field))};
+          if (it == infos_.end()) {
+            continue;
+          }
+          llvm::SmallVector<mlir::Type> described{type};
+          for (mlir::Value info : it->second) {
+            auto place{llvm::find(env.getValues(), info)};
+            if (place == env.getValues().end()) {
+              described.clear();
+              break;
+            }
+            described.push_back(mlir::IntegerType::get(op->getContext(),
+                static_cast<unsigned>(place - env.getValues().begin()) + 1));
+          }
+          if (!described.empty()) {
+            type = mlir::TupleType::get(op->getContext(), described);
+          }
+        }
+        // The slots after the captures, which outlining says the types of.
+        if (auto slots{env->getAttrOfType<mlir::ArrayAttr>("slot_infos")}) {
+          std::size_t first{env.getValues().size()};
+          for (auto [k, attribute] : llvm::enumerate(slots)) {
+            auto places{mlir::cast<mlir::ArrayAttr>(attribute)};
+            if (places.empty()) {
+              continue;
+            }
+            llvm::SmallVector<mlir::Type> described{layout[first + k]};
+            for (mlir::Attribute place : places) {
+              described.push_back(mlir::IntegerType::get(op->getContext(),
+                  static_cast<unsigned>(
+                      mlir::cast<mlir::IntegerAttr>(place).getInt()) +
+                      1));
+            }
+            layout[first + k] = mlir::TupleType::get(op->getContext(), described);
+          }
+        }
+        for (mlir::Type type : layout) {
+          if (IsPolymorphic(type)) {
+            std::string text;
+            llvm::raw_string_ostream os{text};
+            os << "not yet implemented: an environment field of type " << type
+               << " whose type_infos are not known, in "
+               << op->getParentOfType<merk::ProcOp>().getSymName();
+            llvm::report_fatal_error(llvm::StringRef{text});
+          }
+        }
         values.push_back(value);
         types.push_back(mlir::TypeAttr::get(
             mlir::TupleType::get(op->getContext(), layout)));
@@ -241,6 +375,7 @@ void MarkSafepoints(mlir::ModuleOp module) {
     Marker marker{proc};
     Live live;
     marker.Scan(proc.getBody().front(), live);
+    marker.EraseUnusedTypeInfos();
   }
 }
 

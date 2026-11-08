@@ -1070,21 +1070,38 @@ no process to collect.
    - A function with a real bundle is Mercury code whatever its convention: main
      is inlined into `merk_main`.
    - A monomorphic term's entry is a static `type_info` built from its name. A
-     word, a term with a type variable and a higher-order type are unresolved.
+     word and a term with a type variable take `type_info`s (5b).
 
-   5b: a polymorphic root's `type_info`. Partly built 2026-11-08.
+   5b: a polymorphic root's `type_info`. Built 2026-11-08.
    - MLIRGen emits `merk.root_type` notes, read and erased by `MarkSafepoints`; a
      bundle entry's header has the number of `type_info`s above the type's index,
      and they follow its value.
    - Instruction selection adds a location pair for each heap pointer in the deopt
      state that is not relocated, after the relocations, so the collector can
      update those `type_info`s. The type indices cover those pairs too.
-   - Still unresolved, about 3% of roots in the test sweep: code in outlined
-     nondeterministic continuations; words and terms of existential types, which
-     need `ExistentialBase`; and roots at -O2 that LLVM keeps live without a bundle
-     entry, which take a type from another safepoint but no `type_info`.
-   - Missing is not yet a compile error, as D5 requires: until these are done it
-     would reject working programs.
+   - A note goes in the region that defines the value. Outlining captures the
+     `type_info`s with the value and notes it again in the continuation; a value
+     converted to or from a word shares its note.
+   - An environment's layout holds, for a polymorphic field, the positions of the
+     `type_info`s among its captures. Accumulator and result slots get theirs from
+     outlining (`slot_infos`).
+   - `ListLiveRoots`, before the LLVM rewrite: inlining can keep a value live past a
+     safepoint whose bundle does not have it. It is listed there, with `type_info`s
+     from another bundle of the function. Where branches had different ones, a phi
+     or select of them is made.
+   - A root the rewrite adds that no bundle lists, of a polymorphic type, is a base
+     kept for a pointer into the same cell. Its index is -2: the collector updates
+     it and does not trace it, as the pointer into the cell is live there and says
+     what the cell holds. The compiler does not check that this pointer is live; it
+     follows from how the rewrite picks bases.
+   - D5's compile errors, all "not yet implemented": a polymorphic root or
+     environment field with no `type_info`s, a root the runtime cannot describe,
+     and a live root with no type. The runtime check treats an undescribed root as
+     a bad root, so no root is left unresolved.
+   - Rejected: letting a missing `type_info` through and counting it at run time.
+     It hid real gaps, such as the built-in `aggregate`'s accumulators.
+   - These are consistency checks. Whether a description is right is tested by the
+     root check, and by the collector running at every allocation.
    - **D5, naming a word's type variable, decided 2026-11-08.** MLIRGen puts the
      type variable on the operations and arguments that make a `!merk.word`, as an
      attribute, and the procedure says which value holds each variable's

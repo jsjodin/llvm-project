@@ -79,6 +79,22 @@ inline constexpr std::int64_t kInRegion{-2};
 // A module's table of root types, in the section the runtime finds them by.
 inline constexpr llvm::StringLiteral kRootTable{"merk.root_types"};
 
+// The order of runtime/roots.cpp's RootKind.
+enum RootKind : std::int64_t {
+  kRootUnresolved,
+  kRootTerm,
+  kRootTypeInfo,
+  kRootTypeclassInfo,
+  kRootRef,
+  kRootClosure,
+  kRootString,
+  kRootArray,
+  kRootEnvironment,
+  kRootPolymorphicTerm,
+  kRootWord,
+  kRootBits,
+};
+
 // Gives Mercury code statepoints, after the optimizer (Statepoints.cpp).
 void RewriteForCollector(llvm::Module &, const TargetInfo &);
 

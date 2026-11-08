@@ -139,6 +139,7 @@ module @ops attributes {merk.foreign_code = "#include <stdio.h>\0Along merk_fore
   merk.proc @use_classes(%t: !merk.type_info, %x: !merk.word) -> !merk.word
       attributes {determinism = #merk.determinism<det>} {
     // CHECK: merk.typeclass_info @tables(%{{.*}} : !merk.type_info)
+    merk.root_type %x : !merk.word (%t)
     %d = merk.typeclass_info @tables(%t : !merk.type_info)
     // CHECK: merk.typeclass_info_word %{{.*}}, 1 : !merk.type_info
     %i = merk.typeclass_info_word %d, 1 : !merk.type_info

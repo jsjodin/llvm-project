@@ -559,6 +559,70 @@ void MerkGenerator::NoteGivenTypes(const semantics::Dictionary &dictionary) {
   }
 }
 
+static unsigned GivenKey(const semantics::Type &type) {
+  return type.kind == semantics::TypeKind::Existential ? kGivenTypeKey + type.var
+                                                       : type.var;
+}
+
+// Whether a type has a type variable or a type a goal gave.
+static bool HasTypeVariable(const semantics::Type &type) {
+  if (type.kind == semantics::TypeKind::Variable ||
+      type.kind == semantics::TypeKind::Existential) {
+    return true;
+  }
+  return (type.kind == semantics::TypeKind::Named ||
+             type.kind == semantics::TypeKind::Tuple) &&
+      llvm::any_of(type.arguments, [](const semantics::Type *argument) {
+        return HasTypeVariable(*argument);
+      });
+}
+
+void MerkGenerator::GiveTypeInfo(
+    const semantics::Type &type, mlir::Value info, mlir::Location loc) {
+  if (type.kind == semantics::TypeKind::Variable ||
+      type.kind == semantics::TypeKind::Existential) {
+    givenInfos_[GivenKey(type)] = info;
+    return;
+  }
+  if (type.kind != semantics::TypeKind::Named &&
+      type.kind != semantics::TypeKind::Tuple) {
+    return;
+  }
+  // Word 0 of a cell is the descriptor, and a tuple's word 1 its arity.
+  std::int64_t first{type.kind == semantics::TypeKind::Tuple ? 2 : 1};
+  for (auto [k, argument] : llvm::enumerate(type.arguments)) {
+    if (HasTypeVariable(*argument)) {
+      GiveTypeInfo(*argument,
+          merk::TypeInfoWordOp::create(builder_, loc,
+              merk::TypeInfoType::get(&context_), info,
+              first + static_cast<std::int64_t>(k)),
+          loc);
+    }
+  }
+}
+
+void MerkGenerator::GiveTypeInfo(
+    const semantics::TypeInfo &info, mlir::Value value, mlir::Location loc) {
+  if (info.type) {
+    GiveTypeInfo(*info.type, value, loc);
+  }
+}
+
+void MerkGenerator::GiveDictionary(const semantics::Dictionary &dictionary,
+    mlir::Value value, mlir::Location loc) {
+  unsigned supers{static_cast<unsigned>(
+      types_.SuperclassesOf(*dictionary.constraint.typeclass).size())};
+  for (auto [j, argument] : llvm::enumerate(dictionary.constraint.arguments)) {
+    if (HasTypeVariable(*argument)) {
+      GiveTypeInfo(*argument,
+          merk::TypeclassInfoWordOp::create(builder_, loc,
+              merk::TypeInfoType::get(&context_), value,
+              supers + static_cast<unsigned>(j) + 1),
+          loc);
+    }
+  }
+}
+
 void MerkGenerator::Give(const void *node, mlir::Value value) {
   auto [it, added]{givenVars_.try_emplace(
       node, kFirstGivenVar + static_cast<BodyVar>(givenVars_.size()))};
@@ -657,13 +721,19 @@ mlir::Value MerkGenerator::Coerce(
   return value;
 }
 
-// The type variables of a type, into `variables`; false for a type that has
-// one the runtime cannot name.
+// The type variables of a type, in the order its name has them: a variable
+// once, and each occurrence of a type that a goal gave, which has its own.
+// False for a type with one the runtime cannot name.
 static bool CollectTypeVariables(
-    const semantics::Type *type, std::set<unsigned> &variables) {
+    const semantics::Type *type, llvm::SmallVectorImpl<unsigned> &variables) {
   switch (type->kind) {
   case semantics::TypeKind::Variable:
-    variables.insert(type->var);
+    if (!llvm::is_contained(variables, type->var)) {
+      variables.push_back(type->var);
+    }
+    return true;
+  case semantics::TypeKind::Existential:
+    variables.push_back(kGivenTypeKey + type->var);
     return true;
   case semantics::TypeKind::Named:
   case semantics::TypeKind::Tuple:
@@ -673,9 +743,13 @@ static bool CollectTypeVariables(
       }
     }
     return true;
-  case semantics::TypeKind::Existential:
   case semantics::TypeKind::HigherOrder:
-    return false;
+    for (const semantics::Type *argument : type->arguments) {
+      if (!CollectTypeVariables(argument, variables)) {
+        return false;
+      }
+    }
+    return !type->result || CollectTypeVariables(type->result, variables);
   default:
     return true;
   }
@@ -685,43 +759,70 @@ void MerkGenerator::AnnotateRoots(const ProcedureBody &body) {
   if (failed_ || Terminated() || target_.options().openMPIsTargetDevice) {
     return;
   }
-  // Temporary (chunk 3, piece 5b, docs/INPROGRESS.md, Statepoints and stack
-  // maps): code that outlining moves to a procedure of its own would have to
-  // capture the type_infos, so its roots stay unresolved for now.
-  for (mlir::Operation *parent{builder_.getBlock()->getParentOp()};
-      parent && !mlir::isa<merk::ProcOp>(parent);
-      parent = parent->getParentOp()) {
-    if (!mlir::isa<merk::IteOp, merk::SwitchOp>(parent)) {
-      return;
+  // A value's note is in the region that defines it. Outlining takes it along
+  // with a value that it captures. In order, as the notes decide the order of
+  // what outlining captures.
+  mlir::Region *here{builder_.getBlock()->getParent()};
+  llvm::SmallVector<BodyVar> bound;
+  for (auto [var, value] : values_) {
+    if (var < body.vars.size() && value && value.getParentRegion() == here &&
+        mlir::isa<merk::WordType, merk::TermType>(value.getType()) &&
+        !annotated_.contains(value)) {
+      bound.push_back(var);
     }
   }
-  mlir::Region *here{builder_.getBlock()->getParent()};
-  for (auto [var, value] : values_) {
-    if (var >= body.vars.size() || !value ||
-        !value.getParentRegion()->isAncestor(here) ||
-        !mlir::isa<merk::WordType, merk::TermType>(value.getType()) ||
-        !annotated_.insert(value).second) {
+  llvm::sort(bound);
+  for (BodyVar var : bound) {
+    mlir::Value value{values_.lookup(var)};
+    if (annotated_.contains(value)) {
       continue;
     }
     rootTypes_.insert(body.vars[var].type);
-    std::set<unsigned> variables;
-    if (!CollectTypeVariables(body.vars[var].type, variables) ||
-        variables.empty()) {
-      continue;
-    }
-    llvm::SmallVector<mlir::Value> infos;
-    for (unsigned variable : variables) {
-      mlir::Value info{typeInfos_.lookup(variable)};
-      if (!info || !info.getParentRegion()->isAncestor(here)) {
-        infos.clear();
-        break;
-      }
-      infos.push_back(info);
-    }
-    if (!infos.empty()) {
-      merk::RootTypeOp::create(builder_, value.getLoc(), value, infos);
+    if (NoteRoot(value, body.vars[var].type)) {
+      annotated_.insert(value);
     }
   }
+}
+
+bool MerkGenerator::NoteRoot(mlir::Value value, const semantics::Type *type) {
+  if (target_.options().openMPIsTargetDevice ||
+      !mlir::isa<merk::WordType, merk::TermType>(value.getType())) {
+    return true;
+  }
+  llvm::SmallVector<unsigned> variables;
+  if (!CollectTypeVariables(type, variables)) {
+    return false;
+  }
+  if (variables.empty()) {
+    return true;
+  }
+  mlir::Region *here{builder_.getBlock()->getParent()};
+  llvm::SmallVector<mlir::Value> infos;
+  for (unsigned variable : variables) {
+    mlir::Value info{typeInfos_.lookup(variable)};
+    if (!info) {
+      info = givenInfos_.lookup(variable);
+    }
+    if (!info && variable < kCellExistential) {
+      // Nothing determines it, as the elements of a [] that nothing uses.
+      // At the start, as it must be there at every safepoint the value is at.
+      EnsureVoidDescriptor();
+      mlir::OpBuilder::InsertionGuard guard{builder_};
+      auto proc{mlir::dyn_cast<merk::ProcOp>(builder_.getBlock()->getParentOp())};
+      if (!proc) {
+        proc = builder_.getBlock()->getParentOp()->getParentOfType<merk::ProcOp>();
+      }
+      builder_.setInsertionPointToStart(&proc.getBody().front());
+      info = merk::TypeInfoOp::create(builder_, value.getLoc(),
+          merk::TypeInfoType::get(&context_), "void/0", mlir::ValueRange{});
+    }
+    if (!info || !info.getParentRegion()->isAncestor(here)) {
+      return false;
+    }
+    infos.push_back(info);
+  }
+  merk::RootTypeOp::create(builder_, value.getLoc(), value, infos);
+  return true;
 }
 
 void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
@@ -1191,6 +1292,21 @@ void MerkGenerator::GenerateAggregate(const Procedure &procedure) {
   mlir::Value generator{entry.getArgument(hidden)};
   mlir::Value step{entry.getArgument(hidden + 1)};
   builder_.setInsertionPointToStart(&entry);
+  // The accumulators' types, for the collector. Nothing constrains these type
+  // variables, so the type_infos are in the order of their numbers.
+  typeInfos_.clear();
+  givenInfos_.clear();
+  for (unsigned variable{0}; variable < hidden; ++variable) {
+    typeInfos_[variable] = entry.getArgument(variable);
+  }
+  unsigned accumulator{hidden + 2};
+  for (auto [type, mode] : llvm::zip(
+           llvm::ArrayRef(signature->arguments).drop_front(2),
+           llvm::ArrayRef(procedure.modes).drop_front(2))) {
+    if (!IsOutput(mode) && accumulator < entry.getNumArguments()) {
+      NoteRoot(entry.getArgument(accumulator++), type);
+    }
+  }
   auto aggregate{merk::AggregateOp::create(
       builder_, loc, entry.getArguments().drop_front(hidden + 2))};
   builder_.setInsertionPointToStart(&aggregate.getGenerator().emplaceBlock());
@@ -1268,6 +1384,7 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
   dictionaries_.clear();
   givenVars_.clear();
   givenTypes_.clear();
+  givenInfos_.clear();
   current_ = polymorphism;
   procName_ = proc.getSymName().str();
   wordOutputs_.reset();
@@ -1312,6 +1429,10 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
       outputs.push_back(var);
     } else {
       values_[var] = entry->getArgument(input++);
+      // Here, whatever the body makes of it.
+      if (NoteRoot(values_[var], type)) {
+        annotated_.insert(values_[var]);
+      }
     }
   }
   if (words) {
