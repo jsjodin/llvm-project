@@ -90,6 +90,24 @@ llvm.func @device_func(%arg0: i64, %cond: i1) attributes {omp.declare_target = #
   llvm.return
 }
 
+// A musttail call must be followed by the return, so the deallocation goes
+// before the call.
+// CHECK-LABEL: llvm.func @device_func_musttail(
+llvm.func @device_func_musttail(%arg0: i64) -> i64 attributes {omp.declare_target = #omp.declaretarget<device_type = nohost, capture_clause = to>} {
+  // CHECK: %[[ALLOC:.*]] = omp.alloc_shared_mem %{{.*}} x i64 : (i64) -> !llvm.ptr
+  %c = llvm.mlir.constant(1 : i64) : i64
+  %0 = llvm.alloca %c x i64 : (i64) -> !llvm.ptr
+  // CHECK: llvm.call @foo(%[[ALLOC]])
+  llvm.call @foo(%0) : (!llvm.ptr) -> ()
+  // CHECK-NEXT: %[[V:.*]] = llvm.load %[[ALLOC]]
+  %1 = llvm.load %0 : !llvm.ptr -> i64
+  // CHECK-NEXT: omp.free_shared_mem [%{{.*}} x i64 : (i64)] %[[ALLOC]] : !llvm.ptr
+  // CHECK-NEXT: %[[R:.*]] = llvm.call musttail @device_func_musttail(%[[V]])
+  %2 = llvm.call musttail @device_func_musttail(%1) : (i64) -> i64
+  // CHECK-NEXT: llvm.return %[[R]]
+  llvm.return %2 : i64
+}
+
 // CHECK-LABEL: llvm.func @host_func(
 // CHECK-SAME:  %[[N:.*]]: i64)
 llvm.func @host_func(%arg0: i64) {
