@@ -806,7 +806,7 @@ void CloseMailboxesOf(Process *process) {
 
 // A new process runs `closure` on `argument`, the handle's mailbox, which
 // it now owns; `stackBytes` of 0 is the default stack. Temporary (chunk 2,
-// docs/INPROGRESS.md, The scheduler, before the collector): the closure and
+// docs/INPROGRESS.md, Before the collector): the closure and
 // the handle's cell are shared with the parent, not copied, as a closure's
 // cell does not say the types of what it captured.
 extern "C" void merk_process_spawn(std::int64_t stackBytes, Word closure,
@@ -1222,7 +1222,7 @@ void FireMonitorsOf(Process *process, const char *reason) {
 
 // Starts watching the process that owns the target mailbox. If it has ended,
 // which a closed mailbox says, the message is queued at once. Temporary
-// (chunk 2, docs/INPROGRESS.md, The scheduler, before the collector): the
+// (chunk 2, docs/INPROGRESS.md, Before the collector): the
 // function is shared with the receiver, as a spawned closure is, if the
 // watcher's mailbox is not the caller's.
 extern "C" std::int64_t merk_monitor_new(std::int64_t targetHigh,

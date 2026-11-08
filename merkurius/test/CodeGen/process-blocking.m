@@ -1,5 +1,5 @@
 % A process that waits for input or for the network holds up no worker
-% (docs/INPROGRESS.md, The scheduler, step 7). With one worker, another process
+% (design document, How the scheduler was built, step 7). With one worker, another process
 % runs while main waits, and writes first.
 %
 % RUN: merkc -O2 %s -o %t

@@ -7,7 +7,8 @@
 //===----------------------------------------------------------------------===//
 //
 // Processes and their scheduler (design document, "Processes and scheduler";
-// docs/INPROGRESS.md, The scheduler). Compiled code allocates through the
+// design document, How the scheduler was built).
+// Compiled code allocates through the
 // thread's merk_heap (heap.h), which holds the running process's heap: a
 // process's own heap is in its record while it does not run.
 //
