@@ -1250,6 +1250,8 @@ loop(Count, Self, Downs, !IO) :-
 3. It receives from the reply mailbox and the `down` mailbox, with the timeout.
 4. It removes the monitor and closes both mailboxes, then returns `reply(N)`, `timeout` or `down(Reason)`.
 
+As implemented (2026-11-08, `library/process.m`), the server's mailbox must be on this node, as a monitor's must, and a remote one reports that it is not supported yet; `send_request` works across nodes. A server whose process lives on but has closed the mailbox is not noticed, as a monitor watches the process: the request then waits for its timeout.
+
 The server answers with an ordinary `send(ReplyTo, N, !IO)`. A fresh mailbox per request has four effects:
 
 - **Each request has its own reply type.** A process can call servers that reply with different types without adding them to its own protocol.
@@ -3726,6 +3728,8 @@ Fragments that start at 256 bytes and double, 2026-11-08, on 8d0d2c124bb6 and it
 A ping-pong round leaks 0.64 KB. Ping-pong between mailboxes, the median of 5, µs a round: `cpu-local` 4.2, `gpu-local` 13.2, CPU and CPU between nodes 18.2, GPU and CPU 32.1, GPU and GPU 40.4. Linear scaling of `pairs` would be 0.035 µs at 16 pairs; what limits it now has not been looked at.
 
 The checks that only preemption needs, 2026-11-08, on 9a2c1eb88c40 and its change, `-O2`, 5 alternating runs, median seconds without and with them: nrev 18.25 and 18.50, naive Fibonacci 1.12 and 1.17, a tail-recursive loop of a billion iterations 3.42 and 3.42.
+
+`request`, 2026-11-08, on 8fd150e06965 and its change, `-O2`, one process asking one server 300,000 times, with a new monitor and two new mailboxes each time: 1.8 µs at 1 worker, 2.7 at 2, 3.7 at 8, 3.6 at 48. Single runs. It leaks about 1.1 KB a request, which the collector is to take care of.
 
 ## Target applications
 

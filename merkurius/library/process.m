@@ -85,6 +85,25 @@
     % and a reason can carry the exception.
 :- func reason_text(down_reason) = string.
 
+    % Sends a request made by applying the function to a new mailbox for
+    % the reply, which it returns, for the caller to add to its selector
+    % and to close when it is done with it.
+:- pred send_request(mailbox(Req)::in, (func(mailbox(Rep)) = Req)::in,
+    mailbox(Rep)::out, io::di, io::uo) is det.
+
+    % The result of a request.
+:- type reply(Rep)
+    --->    reply(Rep)
+    ;       timeout
+    ;       down(down_reason).
+
+    % Sends a request and waits for its reply, for the timeout to pass, or
+    % for the process that owns the server's mailbox to end, whichever
+    % comes first. A reply that comes later goes nowhere. The server's
+    % mailbox must be on this node, as a monitor's must, for now.
+:- pred request(mailbox(Req)::in, (func(mailbox(Rep)) = Req)::in,
+    timeout::in, reply(Rep)::out, io::di, io::uo) is det.
+
 :- pred close_mailbox(mailbox(M)::in, io::di, io::uo) is det.
 
 :- pred send(mailbox(M)::in, M::in, io::di, io::uo) is det.
@@ -294,6 +313,29 @@ reason(down_info(_, Reason)) = Reason.
 reason_text(normal) = "normal".
 reason_text(no_process) = "noproc".
 reason_text(failed(Text)) = Text.
+
+send_request(Server, MakeRequest, ReplyTo, !IO) :-
+    new_mailbox(ReplyTo, !IO),
+    send(Server, MakeRequest(ReplyTo), !IO).
+
+request(Server, MakeRequest, Timeout, Result, !IO) :-
+    % The monitor comes first, so that a server that ends after the request
+    % is sent cannot be missed.
+    new_mailbox(Downs, !IO),
+    monitor(Server, Downs, reason, Monitor, !IO),
+    send_request(Server, MakeRequest, ReplyTo, !IO),
+    Selector = selecting(ReplyTo, (func(R) = reply(R)),
+        selecting(Downs, (func(D) = down(D)), new_selector)),
+    receive(Selector, Timeout, Got, !IO),
+    demonitor(Monitor, !IO),
+    close_mailbox(ReplyTo, !IO),
+    close_mailbox(Downs, !IO),
+    (
+        Got = yes(Result)
+    ;
+        Got = no,
+        Result = timeout
+    ).
 
 new_mailbox(Mailbox, !IO) :-
     this_node(node(High, Low), !IO),
