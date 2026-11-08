@@ -887,11 +887,30 @@ Neither uses the C++ standard library; `rpc.h` needs none.
      flow control can stall; step 5 shows whether it matters.
 5. **The first benchmark,** ping-pong latency between the GPU and node 2 over
    loopback, beside the same between node 1's `main` and node 2, which shows
-   what the GPU's hop costs.
+   what the GPU's hop costs. Done (`benchmarks/pingpong`, with its results),
+   with these findings:
+   - **The GPU's hop costs 5 to 12 µs a round,** over 35 to 45 µs between
+     the CPU and node 2, about one more trip between threads. A plain RPC
+     round trip from the GPU takes 7.5 µs, and a round has at least two:
+     the send's wait for the host, and the poll that finds the answer.
+   - **The sleep between polls does not matter.** The device's `s_sleep`
+     at 127, 16 and 1 gave the same rounds within the noise, so step 7's
+     queue would remove a round trip, not a sleep; a send that does not
+     wait for the host would remove the other.
+   - **Our runtime costs more than the GPU's hop.** A round between nodes
+     takes about 45 µs where plain TCP takes 15: each message crosses from
+     the connection's reader thread to the receiver, about 9 µs a crossing
+     with condition variables, and is encoded and decoded. A round within
+     a node through mailboxes takes 15 µs where two threads take 9.
+   - **The callback's TCP writes did not show,** but ping-pong has one
+     message in flight, so flow control never stalls; step 6's bandwidth
+     test is the one that would show it.
 6. **Arrays of scalars as messages,** with the device's arena, and the
    bandwidth over message sizes.
 7. **The queue in device memory,** if the benchmark shows that the round
-   trip of each poll dominates.
+   trip of each poll dominates. Step 5 shows that the round trips are the
+   GPU's whole hop, but that the hop is smaller than what the runtime's
+   thread crossings cost on both nodes, which no GPU work changes.
 
 ## The receive goal: later
 
