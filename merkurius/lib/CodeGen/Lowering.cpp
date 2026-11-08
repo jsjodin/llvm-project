@@ -38,6 +38,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IRReader/IRReader.h"
@@ -453,6 +454,18 @@ private:
   };
   // The address of a static type_info, with its tag.
   mlir::Value TypeInfoAddress(const StaticTypeInfo &, mlir::Location);
+  // The constant cell of a type_info with arguments, shared by its key.
+  mlir::LLVM::GlobalOp StaticTypeInfoCell(mlir::LLVM::GlobalOp descriptor,
+      llvm::StringRef key, bool variableArity,
+      llvm::ArrayRef<StaticTypeInfo> known, mlir::Location);
+  // The static type_info of a monomorphic type's name; none for a type with
+  // a type variable, or a higher-order one.
+  std::optional<StaticTypeInfo> RootTypeInfo(llvm::StringRef, mlir::Location);
+  // What the stack maps' type indices mean (docs/INPROGRESS.md, Statepoints
+  // and stack maps).
+  void EmitRootTable();
+  // A type's index, which a layout's fields can add to.
+  std::int64_t RootTypeIndex(mlir::Type, llvm::SmallVectorImpl<mlir::Type> &);
   llvm::DenseMap<mlir::Value, StaticTypeInfo> staticTypeInfos_;
   llvm::StringMap<mlir::LLVM::GlobalOp> typeInfoCells_;
 };
@@ -1140,6 +1153,228 @@ mlir::Value Lowerer::TypeInfoAddress(
       llvm::ArrayRef<mlir::LLVM::GEPArg>{static_cast<std::int32_t>(info.tag)});
 }
 
+mlir::LLVM::GlobalOp Lowerer::StaticTypeInfoCell(
+    mlir::LLVM::GlobalOp descriptor, llvm::StringRef key, bool variableArity,
+    llvm::ArrayRef<StaticTypeInfo> known, mlir::Location loc) {
+  mlir::LLVM::GlobalOp &cell{typeInfoCells_[key]};
+  if (cell) {
+    return cell;
+  }
+  mlir::MLIRContext *context{module_.getContext()};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(context)};
+  auto i64{rewriter_.getI64Type()};
+  llvm::SmallVector<mlir::Type> words{ptr};
+  if (variableArity) {
+    words.push_back(i64);
+  }
+  words.append(known.size(), ptr);
+  auto cellType{mlir::LLVM::LLVMStructType::getLiteral(context, words)};
+  mlir::OpBuilder::InsertionGuard guard{rewriter_};
+  rewriter_.setInsertionPointToStart(module_.getBody());
+  cell = mlir::LLVM::GlobalOp::create(rewriter_, loc, cellType,
+      /*isConstant=*/true, mlir::LLVM::Linkage::Private,
+      "merk.type_info." + std::to_string(typeInfoCells_.size() - 1),
+      mlir::Attribute{}, /*alignment=*/8);
+  rewriter_.createBlock(&cell.getInitializerRegion());
+  mlir::Value init{mlir::LLVM::ZeroOp::create(rewriter_, loc, cellType)};
+  std::int64_t position{0};
+  AppendField(init, position,
+      TypeInfoAddress(StaticTypeInfo{descriptor, 0}, loc), loc);
+  if (variableArity) {
+    AppendField(init, position,
+        mlir::LLVM::ConstantOp::create(
+            rewriter_, loc, i64, static_cast<std::int64_t>(known.size())),
+        loc);
+  }
+  for (const StaticTypeInfo &argument : known) {
+    AppendField(init, position, TypeInfoAddress(argument, loc), loc);
+  }
+  mlir::LLVM::ReturnOp::create(rewriter_, loc, init);
+  return cell;
+}
+
+// The arguments of a type's name, split at its top level.
+static llvm::SmallVector<llvm::StringRef> SplitTypeArguments(llvm::StringRef text) {
+  llvm::SmallVector<llvm::StringRef> arguments;
+  int depth{0};
+  std::size_t start{0};
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    char c{text[i]};
+    depth += c == '(' || c == '{' || c == '[';
+    depth -= c == ')' || c == '}' || c == ']';
+    if (c == ',' && depth == 0) {
+      arguments.push_back(text.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  if (start < text.size()) {
+    arguments.push_back(text.substr(start).trim());
+  }
+  return arguments;
+}
+
+std::optional<Lowerer::StaticTypeInfo> Lowerer::RootTypeInfo(
+    llvm::StringRef name, mlir::Location loc) {
+  name = name.trim();
+  llvm::StringRef base{name};
+  llvm::SmallVector<llvm::StringRef> arguments;
+  if (name.starts_with("{") && name.ends_with("}")) {
+    base = "{}";
+    arguments = SplitTypeArguments(name.drop_front().drop_back());
+  } else if (std::size_t open{name.find('(')}; open != llvm::StringRef::npos) {
+    if (!name.ends_with(")")) {
+      return std::nullopt;
+    }
+    base = name.take_front(open);
+    arguments = SplitTypeArguments(name.slice(open + 1, name.size() - 1));
+  }
+  std::string constructor{
+      base.str() + "/" + std::to_string(arguments.size())};
+  std::string symbol{"merk.type_ctor." + constructor};
+  auto descriptor{module_.lookupSymbol<mlir::LLVM::GlobalOp>(symbol)};
+  if (!descriptor) {
+    return std::nullopt;
+  }
+  if (arguments.empty()) {
+    return StaticTypeInfo{descriptor, 0};
+  }
+  std::string key{symbol};
+  llvm::SmallVector<StaticTypeInfo> known;
+  for (llvm::StringRef argument : arguments) {
+    std::optional<StaticTypeInfo> info{RootTypeInfo(argument, loc)};
+    if (!info) {
+      return std::nullopt;
+    }
+    known.push_back(*info);
+    key += "," + info->global.getSymName().str();
+  }
+  return StaticTypeInfo{StaticTypeInfoCell(descriptor, key,
+                            VariableArity(constructor), known, loc),
+      1};
+}
+
+// The order of runtime/roots.cpp's RootKind.
+enum RootKind : std::int64_t {
+  kRootUnresolved,
+  kRootTerm,
+  kRootTypeInfo,
+  kRootTypeclassInfo,
+  kRootRef,
+  kRootClosure,
+  kRootString,
+  kRootArray,
+  kRootEnvironment,
+};
+
+std::int64_t Lowerer::RootTypeIndex(
+    mlir::Type type, llvm::SmallVectorImpl<mlir::Type> &types) {
+  auto [it, added]{liveTypes_.try_emplace(type, liveTypes_.size())};
+  if (added) {
+    types.push_back(type);
+  }
+  return it->second;
+}
+
+void Lowerer::EmitRootTable() {
+  mlir::Location loc{module_.getLoc()};
+  mlir::MLIRContext *context{module_.getContext()};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(context)};
+  auto i64{rewriter_.getI64Type()};
+  mlir::OpBuilder::InsertionGuard guard{rewriter_};
+  llvm::SmallVector<mlir::Type> types(liveTypes_.size());
+  for (auto [type, index] : liveTypes_) {
+    types[index] = type;
+  }
+  struct Entry {
+    std::int64_t kind;
+    std::optional<StaticTypeInfo> info;
+    mlir::LLVM::GlobalOp layout;
+  };
+  llvm::SmallVector<Entry> entries;
+  for (std::size_t i = 0; i < types.size(); ++i) {
+    mlir::Type type{types[i]};
+    Entry entry{kRootUnresolved, std::nullopt, nullptr};
+    if (auto term{mlir::dyn_cast<merk::TermType>(type)}) {
+      entry.info = RootTypeInfo(term.getName(), loc);
+      entry.kind = entry.info ? kRootTerm : kRootUnresolved;
+    } else if (mlir::isa<merk::TypeInfoType>(type)) {
+      entry.kind = kRootTypeInfo;
+    } else if (mlir::isa<merk::TypeclassInfoType>(type)) {
+      entry.kind = kRootTypeclassInfo;
+    } else if (mlir::isa<merk::RefType>(type)) {
+      entry.kind = kRootRef;
+    } else if (mlir::isa<merk::ClosureType>(type)) {
+      entry.kind = kRootClosure;
+    } else if (mlir::isa<merk::StringType>(type)) {
+      entry.kind = kRootString;
+    } else if (mlir::isa<merk::ArrayType>(type)) {
+      entry.kind = kRootArray;
+    } else if (auto tuple{mlir::dyn_cast<mlir::TupleType>(type)}) {
+      entry.kind = kRootEnvironment;
+      // The number of fields, and each's type index and byte offset.
+      llvm::SmallVector<std::int64_t> words{
+          static_cast<std::int64_t>(tuple.size())};
+      std::int64_t offset{0};
+      for (mlir::Type field : tuple.getTypes()) {
+        mlir::Type lowered{Convert(field)};
+        std::int64_t size{8};
+        if (auto integer{mlir::dyn_cast<mlir::IntegerType>(lowered)}) {
+          size = (integer.getWidth() + 7) / 8;
+        }
+        offset = llvm::alignTo(offset, size);
+        bool root{mlir::isa<merk::TermType, merk::WordType, merk::StringType,
+            merk::ArrayType, merk::ClosureType, merk::TypeInfoType,
+            merk::TypeclassInfoType, merk::RefType>(field)};
+        words.push_back(root ? RootTypeIndex(field, types) : -1);
+        words.push_back(offset);
+        offset += size;
+      }
+      auto layoutType{mlir::LLVM::LLVMArrayType::get(i64, words.size())};
+      rewriter_.setInsertionPointToStart(module_.getBody());
+      entry.layout = mlir::LLVM::GlobalOp::create(rewriter_, loc, layoutType,
+          /*isConstant=*/true, mlir::LLVM::Linkage::Private,
+          "merk.root_layout." + std::to_string(i),
+          rewriter_.getI64ArrayAttr(words), /*alignment=*/8);
+    }
+    entries.push_back(entry);
+  }
+  rewriter_.setInsertionPointToStart(module_.getBody());
+  auto stackMaps{mlir::LLVM::GlobalOp::create(rewriter_, loc,
+      rewriter_.getI8Type(), /*isConstant=*/true,
+      mlir::LLVM::Linkage::External, "__LLVM_StackMaps", mlir::Attribute{})};
+  llvm::SmallVector<mlir::Type> words{ptr, i64};
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    words.push_back(i64);
+    words.push_back(ptr);
+  }
+  auto tableType{mlir::LLVM::LLVMStructType::getLiteral(context, words)};
+  auto table{mlir::LLVM::GlobalOp::create(rewriter_, loc, tableType,
+      /*isConstant=*/true, mlir::LLVM::Linkage::Private, kRootTable,
+      mlir::Attribute{}, /*alignment=*/8)};
+  table.setSection(llvm::StringRef{"merk_root_types"});
+  rewriter_.createBlock(&table.getInitializerRegion());
+  mlir::Value init{mlir::LLVM::ZeroOp::create(rewriter_, loc, tableType)};
+  std::int64_t position{0};
+  AppendField(init, position,
+      mlir::LLVM::AddressOfOp::create(rewriter_, loc, stackMaps), loc);
+  AppendField(init, position,
+      mlir::LLVM::ConstantOp::create(rewriter_, loc, i64,
+          static_cast<std::int64_t>(entries.size())),
+      loc);
+  for (const Entry &entry : entries) {
+    AppendField(init, position,
+        mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, entry.kind), loc);
+    mlir::Value pointer{mlir::LLVM::ZeroOp::create(rewriter_, loc, ptr)};
+    if (entry.info) {
+      pointer = TypeInfoAddress(*entry.info, loc);
+    } else if (entry.layout) {
+      pointer = mlir::LLVM::AddressOfOp::create(rewriter_, loc, entry.layout);
+    }
+    AppendField(init, position, pointer, loc);
+  }
+  mlir::LLVM::ReturnOp::create(rewriter_, loc, init);
+}
+
 void Lowerer::LowerTypeInfo(merk::TypeInfoOp op) {
   mlir::Location loc{op.getLoc()};
   auto ptr{mlir::LLVM::LLVMPointerType::get(op.getContext())};
@@ -1173,37 +1408,8 @@ void Lowerer::LowerTypeInfo(merk::TypeInfoOp op) {
     key += "," + it->second.global.getSymName().str();
   }
   if (isStatic) {
-    mlir::LLVM::GlobalOp &cell{typeInfoCells_[key]};
-    if (!cell) {
-      llvm::SmallVector<mlir::Type> words{ptr};
-      if (variableArity) {
-        words.push_back(i64);
-      }
-      words.append(arguments, ptr);
-      auto cellType{
-          mlir::LLVM::LLVMStructType::getLiteral(op.getContext(), words)};
-      mlir::OpBuilder::InsertionGuard guard{rewriter_};
-      rewriter_.setInsertionPointToStart(module_.getBody());
-      cell = mlir::LLVM::GlobalOp::create(rewriter_, loc, cellType,
-          /*isConstant=*/true, mlir::LLVM::Linkage::Private,
-          "merk.type_info." + std::to_string(typeInfoCells_.size() - 1),
-          mlir::Attribute{}, /*alignment=*/8);
-      rewriter_.createBlock(&cell.getInitializerRegion());
-      mlir::Value init{mlir::LLVM::ZeroOp::create(rewriter_, loc, cellType)};
-      std::int64_t position{0};
-      AppendField(init, position,
-          TypeInfoAddress(StaticTypeInfo{descriptor, 0}, loc), loc);
-      if (variableArity) {
-        AppendField(init, position,
-            mlir::LLVM::ConstantOp::create(
-                rewriter_, loc, i64, static_cast<std::int64_t>(arguments)),
-            loc);
-      }
-      for (const StaticTypeInfo &argument : known) {
-        AppendField(init, position, TypeInfoAddress(argument, loc), loc);
-      }
-      mlir::LLVM::ReturnOp::create(rewriter_, loc, init);
-    }
+    mlir::LLVM::GlobalOp cell{
+        StaticTypeInfoCell(descriptor, key, variableArity, known, loc)};
     StaticTypeInfo info{cell, 1};
     mlir::Value value{ToHeap(TypeInfoAddress(info, loc), loc)};
     staticTypeInfos_[value] = info;
@@ -2163,9 +2369,7 @@ void Lowerer::AttachLive(merk::LiveOp live, mlir::LLVM::CallOp call) {
         !mlir::isa<mlir::LLVM::LLVMPointerType>(Convert(type))) {
       continue;
     }
-    // Temporary (chunk 3, docs/INPROGRESS.md, Statepoints and stack maps,
-    // piece 5): the index of a table the runtime will read, which is not
-    // emitted yet.
+    // An index in this module's table of root types (EmitRootTable).
     std::int64_t index{
         liveTypes_.try_emplace(type, liveTypes_.size()).first->second};
     bundle.push_back(mlir::LLVM::ConstantOp::create(
@@ -3286,6 +3490,9 @@ llvm::LogicalResult Lowerer::Lower() {
   // Those of allocations that turned out static, and of code a device filter
   // left.
   module_.walk([&](merk::LiveOp live) { rewriter_.eraseOp(live); });
+  if (!device_) {
+    EmitRootTable();
+  }
   // Arithmetic, which is the arith dialect's.
   mlir::LLVMTypeConverter converter{module_.getContext()};
   mlir::RewritePatternSet patterns{module_.getContext()};
@@ -3842,6 +4049,11 @@ void OptimizeLLVMIR(llvm::Module &module, const TargetInfo &target) {
   default:
     level = llvm::OptimizationLevel::O3;
     break;
+  }
+  // Nothing refers to it but the runtime, through its section.
+  if (llvm::GlobalVariable *table{
+          module.getNamedGlobal(kRootTable)}) {
+    llvm::appendToUsed(module, {table});
   }
   llvm::ModulePassManager passes{level == llvm::OptimizationLevel::O0
           ? builder.buildO0DefaultPipeline(level)

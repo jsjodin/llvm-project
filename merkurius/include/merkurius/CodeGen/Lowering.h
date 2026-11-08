@@ -76,6 +76,9 @@ bool LinkForeignCode(llvm::Module &, mlir::ModuleOp, const TargetInfo &,
 // is not a safepoint.
 inline constexpr std::int64_t kInRegion{-2};
 
+// A module's table of root types, in the section the runtime finds them by.
+inline constexpr llvm::StringLiteral kRootTable{"merk.root_types"};
+
 // Gives Mercury code statepoints, after the optimizer (Statepoints.cpp).
 void RewriteForCollector(llvm::Module &, const TargetInfo &);
 

@@ -28,6 +28,7 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Transforms/Scalar/RewriteStatepointsForGC.h"
 #include "llvm/Transforms/Utils/Local.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 
 namespace merkurius::codegen {
 
@@ -493,8 +494,16 @@ static bool IsFromStaticData(const llvm::Value *root) {
 // index for each entry of its gc-live list, so that the stack map says each
 // root's type, or -1 for a root the collector can ignore (docs/INPROGRESS.md,
 // Statepoints and stack maps).
-static void EncodeRootTypes(
-    llvm::GCStatepointInst *statepoint, KnownTypes &known) {
+namespace {
+struct StatepointRoots {
+  llvm::GCStatepointInst *statepoint{nullptr};
+  llvm::DenseMap<const llvm::Value *, llvm::Constant *> types;
+  llvm::SmallMapVector<llvm::Value *, llvm::Value *, 4> slots;
+};
+} // namespace
+
+static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
+    StatepointRoots &roots) {
   auto deopt{statepoint->getOperandBundle(llvm::LLVMContext::OB_deopt)};
   auto live{statepoint->getOperandBundle(llvm::LLVMContext::OB_gc_live)};
   llvm::Function &function{*statepoint->getFunction()};
@@ -547,37 +556,44 @@ static void EncodeRootTypes(
   }
   llvm::Constant *dead{llvm::ConstantInt::getSigned(
       llvm::Type::getInt64Ty(function.getContext()), -1)};
-  // The number of roots, a type for each, then a layout and an address for
-  // each environment.
-  std::vector<llvm::Value *> encoded;
-  encoded.push_back(llvm::ConstantInt::get(
-      llvm::Type::getInt64Ty(function.getContext()),
-      live ? live->Inputs.size() : 0));
+  // Which root has which type, while the relocations still pair each base
+  // with what is derived from it.
+  roots.statepoint = statepoint;
+  roots.slots = std::move(slots);
   if (live) {
     for (llvm::Value *root : live->Inputs) {
       auto it{types.find(CellOf(root))};
-      if (it == types.end()) {
-        if (llvm::Constant *type{FindType(root, known)}) {
-          encoded.push_back(type);
-          continue;
-        }
+      llvm::Constant *type{it != types.end() ? it->second : nullptr};
+      if (!type) {
+        type = FindType(root, known);
       }
-      if (it == types.end() &&
-          (IsFromStaticData(root) || arguments.contains(CellOf(root)))) {
-        encoded.push_back(dead);
-        continue;
+      if (!type && (IsFromStaticData(root) || arguments.contains(CellOf(root)))) {
+        type = dead;
       }
-      if (it == types.end()) {
+      if (!type) {
         std::string text;
         llvm::raw_string_ostream os{text};
         os << "a root in " << function.getName()
            << " has no type at a safepoint:" << *root << "\n at:" << *statepoint;
         llvm::report_fatal_error(llvm::StringRef{text});
       }
-      encoded.push_back(it->second);
+      roots.types[root] = type;
     }
   }
-  for (auto [slot, layout] : slots) {
+}
+
+// The stack map has a location pair for each relocation that is still used, in
+// the order of getGCRelocates, so it is what the type indices follow. The
+// deopt state is the number of pairs, a type for each, and then a layout and
+// an address for each environment.
+static void EncodeRootTypes(StatepointRoots &roots) {
+  llvm::GCStatepointInst *statepoint{roots.statepoint};
+  llvm::Type *i64{llvm::Type::getInt64Ty(statepoint->getContext())};
+  std::size_t count{statepoint->getGCRelocates().size()};
+  std::vector<llvm::Value *> encoded(
+      1 + count, llvm::ConstantInt::getSigned(i64, -1));
+  encoded[0] = llvm::ConstantInt::get(i64, count);
+  for (auto [slot, layout] : roots.slots) {
     encoded.push_back(layout);
     encoded.push_back(slot);
   }
@@ -593,6 +609,53 @@ static void EncodeRootTypes(
       statepoint, bundles, statepoint->getIterator())};
   statepoint->replaceAllUsesWith(replaced);
   statepoint->eraseFromParent();
+  // Only now, as replacing the uses reverses their order.
+  auto *final{llvm::cast<llvm::GCStatepointInst>(replaced)};
+  auto deopt{final->getOperandBundle(llvm::LLVMContext::OB_deopt)};
+  unsigned first{static_cast<unsigned>(deopt->Inputs.data() - final->op_begin())};
+  unsigned place{first + 1};
+  for (const llvm::GCRelocateInst *relocate : final->getGCRelocates()) {
+    final->setOperand(place++, roots.types.lookup(relocate->getDerivedPtr()));
+  }
+}
+
+// Mercury's calling convention, or Mercury code inlined into another's, as
+// main's is into the C function merk_main. An OpenMP region's outlined function
+// holds only calls marked as in the region.
+static bool IsMercuryCode(llvm::Function &function) {
+  if (function.getCallingConv() == llvm::CallingConv::Tail) {
+    return true;
+  }
+  for (llvm::Instruction &instruction : llvm::instructions(function)) {
+    auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)};
+    auto deopt{call ? call->getOperandBundle(llvm::LLVMContext::OB_deopt)
+                    : std::nullopt};
+    if (!deopt) {
+      continue;
+    }
+    auto *first{deopt->Inputs.empty()
+            ? nullptr
+            : llvm::dyn_cast<llvm::ConstantInt>(deopt->Inputs[0])};
+    if (!first || first->getSExtValue() != kInRegion) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// With no statepoint there is no stack map for the table to point to.
+static void DropRootTable(llvm::Module &module) {
+  llvm::GlobalVariable *table{module.getNamedGlobal(kRootTable)};
+  if (!table) {
+    return;
+  }
+  llvm::removeFromUsedLists(module, [&](llvm::Constant *constant) {
+    return constant == table;
+  });
+  table->eraseFromParent();
+  if (llvm::GlobalVariable *maps{module.getNamedGlobal("__LLVM_StackMaps")}) {
+    maps->eraseFromParent();
+  }
 }
 
 static void RemoveDeadCode(llvm::Function &function) {
@@ -623,8 +686,7 @@ void RewriteForCollector(llvm::Module &module, const TargetInfo &target) {
   KnownTypes known;
   bool any{false};
   for (llvm::Function &function : module) {
-    if (!function.isDeclaration() &&
-        function.getCallingConv() == llvm::CallingConv::Tail) {
+    if (!function.isDeclaration() && IsMercuryCode(function)) {
       function.setGC("statepoint-example");
       function.addFnAttr("frame-pointer", "all");
       MarkLeaves(function);
@@ -634,6 +696,7 @@ void RewriteForCollector(llvm::Module &module, const TargetInfo &target) {
     }
   }
   if (!any) {
+    DropRootTable(module);
     return;
   }
   llvm::LoopAnalysisManager loops;
@@ -657,8 +720,9 @@ void RewriteForCollector(llvm::Module &module, const TargetInfo &target) {
       }
     }
   }
-  for (llvm::GCStatepointInst *statepoint : statepoints) {
-    EncodeRootTypes(statepoint, known);
+  std::vector<StatepointRoots> all(statepoints.size());
+  for (auto [statepoint, roots] : llvm::zip(statepoints, all)) {
+    FindRootTypes(statepoint, known, roots);
   }
   // After the types, which pair a base with what is derived from it through
   // the relocations. Fast instruction selection skips a relocation only dead
@@ -667,6 +731,12 @@ void RewriteForCollector(llvm::Module &module, const TargetInfo &target) {
     if (function.hasGC()) {
       RemoveDeadCode(function);
     }
+  }
+  for (StatepointRoots &roots : all) {
+    EncodeRootTypes(roots);
+  }
+  if (statepoints.empty()) {
+    DropRootTable(module);
   }
 }
 
