@@ -300,7 +300,28 @@ struct Message {
   PendingDown *down;
   // Its place in the order of arrival over all mailboxes.
   std::uint64_t stamp;
+  // The fragment's, until the message is read or dropped.
+  ChunkLink *chunks;
 };
+
+// The reader's value is in the message's chunks, so they are the reader's
+// now, whether or not the message then stays in its mailbox. A thread that
+// runs no process keeps them for ever. Called with the mailbox's lock held.
+void GiveToReader(Message *message) {
+  ChunkLink *chunks{message->chunks};
+  if (!chunks) {
+    return;
+  }
+  message->chunks = nullptr;
+  if (Process *process{CurrentProcess()}) {
+    ChunkLink *last{chunks};
+    while (last->next) {
+      last = last->next;
+    }
+    last->next = process->chunks;
+    process->chunks = chunks;
+  }
+}
 
 // A word from the kernel's source of random numbers.
 Word Random() {
@@ -714,8 +735,10 @@ Delivery DeliverEncoded(
     message->next = nullptr;
     message->down = nullptr;
     if (Decode(bytes, size, mailbox->messageType, fragment, message->value)) {
+      FreeChunks(fragment.Take());
       delivery = Delivery::Undecodable;
     } else {
+      message->chunks = fragment.Take();
       Queue(mailbox, message);
       delivery = Delivery::Delivered;
     }
@@ -837,6 +860,14 @@ static void Close(Mailbox *mailbox) {
   mailbox->messageType = 0;
   mailbox->open = false;
   ++mailbox->generation;
+  // Unread messages go, but not ones a device's ring may have shown.
+  if (!mailbox->ring) {
+    for (Message *message{mailbox->head}; message;) {
+      Message *next{message->next};
+      FreeChunks(message->chunks);
+      message = next;
+    }
+  }
   mailbox->head = nullptr;
   mailbox->tail = &mailbox->head;
   mailbox->count = 0;
@@ -907,6 +938,7 @@ extern "C" void merk_process_spawn(std::int64_t stackBytes, Word closure,
   if (!child) {
     Fail("no address space for a process's stack", "");
   }
+  child->chunks = fragment.Take();
   Mailbox *mailbox{Find(MERK_HANDLE)};
   Disown(mailbox);
   Own(mailbox, child);
@@ -935,9 +967,12 @@ extern "C" void merk_mailbox_send(
   message->next = nullptr;
   message->down = nullptr;
   message->value = CopyValue(value, typeInfo, nullptr, fragment);
+  message->chunks = fragment.Take();
   if (Mailbox *mailbox{Find(handle)}) {
     Queue(mailbox, message);
     Unlock(mailbox);
+  } else {
+    FreeChunks(message->chunks);
   }
 }
 
@@ -1091,6 +1126,7 @@ extern "C" Word merk_mailbox_message(
   if (message->down) {
     Fail("a monitor's message was read outside a receive", "");
   }
+  GiveToReader(message);
   Word value{message->value};
   Unlock(mailbox);
   return value;
@@ -1270,6 +1306,7 @@ void DeliverDown(const Handle &watcher, Word function, std::uint64_t monitor,
   message->next = nullptr;
   message->value = function;
   message->down = down;
+  message->chunks = fragment.Take();
   Queue(mailbox, message);
   Unlock(mailbox);
 }
@@ -1402,6 +1439,7 @@ extern "C" std::int64_t merk_mailbox_read(MERK_HANDLE_PARAMETERS,
     Fail("a message was read that is not in its mailbox", "");
   }
   Message *message{At(mailbox, position)};
+  GiveToReader(message);
   std::int64_t kind{0};
   *value = 0;
   *function = 0;

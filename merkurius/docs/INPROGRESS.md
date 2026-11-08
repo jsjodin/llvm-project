@@ -806,8 +806,12 @@ left open (design document, Processes and scheduler).
 
 **Needed first.** Decided 2026-11-08 to leave these until processes ran:
 
-- A process's heap chunks and a received message's fragments are never freed. A
-  ping-pong round leaked about 8 KB until fragments started small; it now leaks about 0.6 KB.
+- Freed so far: when a process ends, its heap's chunks and the fragments of the
+  messages it read; a mailbox that closes frees its unread messages, unless a
+  device's ring may have shown them; a dropped send frees its copy. Still kept:
+  everything a live process has allocated or read, which is the collector's
+  job, and a monitor's copied function, an array a device gave, messages a
+  device's ring took, and what a thread that runs no process allocates.
 
 **Left open by the scheduler:**
 

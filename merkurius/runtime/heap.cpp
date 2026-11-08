@@ -14,11 +14,12 @@
 // path, and those of more than half a chunk have blocks of their own.
 //
 // Temporary (chunk 1 step 3, docs/INPROGRESS.md): chunks come from malloc
-// and are never freed, and the rest of a full chunk is wasted, until chunk
-// 3's collector empties the nursery instead.
+// and go only when a process ends, and the rest of a full chunk is wasted,
+// until chunk 3's collector empties the nursery instead.
 //
 //===----------------------------------------------------------------------===//
 
+#include "fragment.h"
 #include "heap.h"
 #include "process.h"
 #include <atomic>
@@ -65,14 +66,17 @@ std::size_t ReadChunkBytes() {
 std::atomic<std::size_t> chunkBytes{0};
 
 char *Chunk(std::size_t bytes) {
-  // malloc aligns to at least a word, which the primary tags need.
-  void *chunk{std::malloc(bytes)};
-  if (!chunk) {
-    std::fflush(stdout);
-    std::fprintf(stderr, "Mercury runtime: out of memory\n");
-    std::exit(1);
+  // malloc aligns to at least a word, which the primary tags need. A thread
+  // that runs no process keeps its chunks.
+  auto *chunk{static_cast<merkurius::runtime::ChunkLink *>(
+      merkurius::runtime::Malloc(sizeof(merkurius::runtime::ChunkLink) + bytes))};
+  chunk->next = nullptr;
+  if (merkurius::runtime::Process *process{
+          merkurius::runtime::CurrentProcess()}) {
+    chunk->next = process->chunks;
+    process->chunks = chunk;
   }
-  return static_cast<char *>(chunk);
+  return reinterpret_cast<char *>(chunk + 1);
 }
 } // namespace
 

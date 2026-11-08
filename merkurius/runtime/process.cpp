@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "process.h"
+#include "fragment.h"
 #include "node.h"
 #include <atomic>
 #include <cstdio>
@@ -470,6 +471,8 @@ Process *TakeLocal() {
 // schedulerLock is held until this has switched away, and NewProcess is
 // called with it.
 [[noreturn]] void Finish(Process *self) {
+  FreeChunks(self->chunks);
+  self->chunks = nullptr;
   pthread_mutex_lock(&schedulerLock);
   Process *next{TakeLocal()};
   RunProcess(next);

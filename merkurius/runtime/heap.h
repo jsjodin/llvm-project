@@ -13,8 +13,8 @@
 //
 // merk_heap is the heap of the process the thread runs (process.h), or the
 // thread's own on a thread that runs none. Temporary (chunk 1 step 3,
-// docs/INPROGRESS.md): the heap's chunks are never freed until chunk 3's
-// collector.
+// docs/INPROGRESS.md): the heap's chunks are freed only when a process ends,
+// until chunk 3's collector.
 //
 //===----------------------------------------------------------------------===//
 
