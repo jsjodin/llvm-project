@@ -560,6 +560,16 @@ private:
   // clause that none of them allows.
   mlir::Value MapArray(mlir::Value array, mlir::omp::ClauseMapFlags,
       llvm::StringRef name, mlir::Location);
+  // The number of words of the cell of a term that can cross into a target
+  // region, by copying its cell: a term of a type of one constructor, of
+  // scalars only, two or more, whose pointer has no tag, or a mailbox
+  // handle. None for any other type.
+  std::optional<unsigned> FlatCell(mlir::Type);
+  // Whether a value of the type can cross into a target region.
+  bool Mappable(mlir::Type);
+  // The map entry of a term's cell of `words` words, by its pointer.
+  mlir::Value MapCell(mlir::Value term, unsigned words, llvm::StringRef name,
+      mlir::Location);
   void TargetData(const Body &, const ProcedureBody &, const omp::Leaf &);
   std::optional<omp::ConstructQueue> Decompose(const parser::OmpDirective &,
       parser::CharBlock at, std::optional<llvm::StringRef> counter = {});

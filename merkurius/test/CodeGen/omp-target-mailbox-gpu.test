@@ -1,0 +1,12 @@
+The program of omp-target-mailbox.m, compiled by the driver for the
+machine's GPU and run there: the handle's cell, five words, is copied in.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-mailbox.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
+RUN:   | FileCheck %S/omp-target-mailbox.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: FileCheck %s < %t.info
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-mailbox.m:{{[0-9]+}}:5 with 2 arguments:
+CHECK-NEXT: info: to(Mailbox)[40]
+CHECK-NEXT: info: from(W)[8]
+CHECK-NOT: Entering OpenMP kernel

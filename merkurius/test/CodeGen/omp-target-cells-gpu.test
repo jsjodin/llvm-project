@@ -1,0 +1,15 @@
+The program of omp-target-cells.m, compiled by the driver for the
+machine's GPU and run there: each term's cell is copied in, a word for
+each of its arguments.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-cells.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
+RUN:   | FileCheck %S/omp-target-cells.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: FileCheck %s < %t.info
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-cells.m:{{[0-9]+}}:5 with 4 arguments:
+CHECK-NEXT: info: to(P)[24]
+CHECK-NEXT: info: to(Q)[16]
+CHECK-NEXT: info: from(S)[8]
+CHECK-NEXT: info: from(F)[8]
+CHECK-NOT: Entering OpenMP kernel
