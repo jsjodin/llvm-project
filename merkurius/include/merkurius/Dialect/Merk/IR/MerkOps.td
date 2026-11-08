@@ -248,7 +248,11 @@ def Merk_InstanceOp : Merk_Op<"instance", [
   let description = [{
     The procedures of its methods, each taking the `typeclass_info` first and
     then the method's arguments as its declaration in the type class has them.
-    One without `methods` is defined in another module.
+    One without `methods` is defined in another module. `shape` says what
+    follows the table in an instance's `typeclass_info`: how many superclass
+    `typeclass_info`s, then how many `type_info`s, then how many constraints'
+    `typeclass_info`s. It is the word before the first method, for the
+    message copy and the collector.
 
     ```mlir
     merk.instance @"merk.instance.m.show(int)" methods [@m.show_2_0$int]
@@ -256,9 +260,11 @@ def Merk_InstanceOp : Merk_Op<"instance", [
   }];
   let arguments = (ins SymbolNameAttr:$sym_name,
       OptionalAttr<StrAttr>:$sym_visibility,
-      OptionalAttr<SymbolRefArrayAttr>:$methods);
+      OptionalAttr<SymbolRefArrayAttr>:$methods,
+      OptionalAttr<DenseI64ArrayAttr>:$shape);
   let assemblyFormat = [{
-    $sym_name (`visibility` $sym_visibility^)? (`methods` $methods^)? attr-dict
+    $sym_name (`visibility` $sym_visibility^)? (`methods` $methods^)?
+    (`shape` $shape^)? attr-dict
   }];
 }
 

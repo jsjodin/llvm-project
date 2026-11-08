@@ -1187,7 +1187,8 @@ void Lowerer::LowerInstances() {
       rewriter_.eraseOp(op);
       continue;
     }
-    auto type{mlir::LLVM::LLVMArrayType::get(ptr, methods->size())};
+    // The shape's word, then the methods.
+    auto type{mlir::LLVM::LLVMArrayType::get(ptr, 1 + methods->size())};
     auto global{mlir::LLVM::GlobalOp::create(rewriter_, loc, type,
         /*isConstant=*/true,
         op.getVisibility() == mlir::SymbolTable::Visibility::Private
@@ -1196,12 +1197,21 @@ void Lowerer::LowerInstances() {
         op.getSymName(), mlir::Attribute{}, /*alignment=*/8)};
     rewriter_.createBlock(&global.getInitializerRegion());
     mlir::Value init{mlir::LLVM::UndefOp::create(rewriter_, loc, type)};
+    assert(op.getShape() && op.getShape()->size() == 3 && "a table's shape");
+    llvm::ArrayRef<std::int64_t> shape{*op.getShape()};
+    mlir::Value shapeBits{mlir::LLVM::ConstantOp::create(rewriter_, loc,
+        rewriter_.getI64Type(),
+        shape[0] | (shape[1] << 16) | (shape[2] << 32))};
+    mlir::Value shapeWord{
+        mlir::LLVM::IntToPtrOp::create(rewriter_, loc, ptr, shapeBits)};
+    init = mlir::LLVM::InsertValueOp::create(rewriter_, loc, init, shapeWord,
+        llvm::SmallVector<std::int64_t>{0});
     for (auto [i, method] : llvm::enumerate(*methods)) {
       llvm::StringRef name{mlir::cast<mlir::FlatSymbolRefAttr>(method).getValue()};
       init = mlir::LLVM::InsertValueOp::create(rewriter_, loc, init,
           mlir::LLVM::AddressOfOp::create(
               rewriter_, loc, funcs_.lookup(name)),
-          llvm::SmallVector<std::int64_t>{static_cast<std::int64_t>(i)});
+          llvm::SmallVector<std::int64_t>{static_cast<std::int64_t>(1 + i)});
     }
     mlir::LLVM::ReturnOp::create(rewriter_, loc, init);
     rewriter_.setInsertionPoint(global);
@@ -1910,13 +1920,13 @@ mlir::Value Lowerer::CallMethod(merk::CallMethodOp call, bool *tail) {
   rewriter_.setInsertionPoint(call);
   mlir::MLIRContext *context{call.getContext()};
   auto ptr{mlir::LLVM::LLVMPointerType::get(context)};
-  // The table is the cell's first word.
+  // The table is the cell's first word; its first word is its shape.
   mlir::Value info{call->getOperand(0)};
   mlir::Value table{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr, info, 8)};
   mlir::Value slot{mlir::LLVM::GEPOp::create(rewriter_, loc, ptr,
       rewriter_.getI8Type(), table,
       llvm::ArrayRef<mlir::LLVM::GEPArg>{
-          static_cast<std::int32_t>(8 * call.getMethod())})};
+          static_cast<std::int32_t>(8 * (1 + call.getMethod()))})};
   mlir::Value code{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr, slot, 8)};
   return CallPointer(call, code, info, call.getInputs(),
       codegen::CanFail(call.getDeterminism()), tail);

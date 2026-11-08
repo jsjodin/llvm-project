@@ -90,7 +90,7 @@ main(!IO) :-
 
 % LLVM-LABEL: define internal tailcc i1 @"nondet_methods.evens_2_0$words"(ptr %0, i64 %1, ptr %2, ptr %3)
 % LLVM: %[[TABLE:.*]] = load ptr, ptr %0
-% LLVM-NEXT: %[[SLOT:.*]] = getelementptr i8, ptr %[[TABLE]], i32 0
+% LLVM-NEXT: %[[SLOT:.*]] = getelementptr i8, ptr %[[TABLE]], i32 8
 % LLVM-NEXT: %[[METHOD:.*]] = load ptr, ptr %[[SLOT]]
 % LLVM-NEXT: call tailcc i1 %[[METHOD]](ptr %0, i64 %1, ptr @"nondet_methods.evens_2_0$words.cont.0", ptr %{{.*}})
 % LLVM-LABEL: define internal tailcc i1 @"nondet_methods.elem_2_0$nondet_methods.gen(nondet_methods.three)$dispatch"(ptr %0, i64 %1, ptr %2, ptr %3)

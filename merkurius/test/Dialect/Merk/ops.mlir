@@ -127,8 +127,8 @@ module @ops attributes {merk.foreign_code = "#include <stdio.h>\0Along merk_fore
   // CHECK: merk.entry @ops.main_2_0
   merk.entry @ops.main_2_0
 
-  // CHECK: merk.instance @tables methods [@method]
-  merk.instance @tables methods [@method]
+  // CHECK: merk.instance @tables methods [@method] shape [0, 0, 0]
+  merk.instance @tables methods [@method] shape [0, 0, 0]
   // CHECK: merk.instance @elsewhere
   merk.instance @elsewhere
   merk.proc private @method(%d: !merk.typeclass_info, %x: !merk.word) -> !merk.word
