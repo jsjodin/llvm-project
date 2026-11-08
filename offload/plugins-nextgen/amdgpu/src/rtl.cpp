@@ -1564,6 +1564,63 @@ private:
     return false;
   }
 
+  /// The arguments of a copy whose submission waits for its input dependency.
+  struct DeferredMemCopyTy {
+    bool UseMultipleSdmaEngines;
+    void *Dst;
+    hsa_agent_t DstAgent;
+    const void *Src;
+    hsa_agent_t SrcAgent;
+    size_t Size;
+    hsa_signal_t OutputSignal;
+  };
+
+  /// Callback for a copy whose input dependency completed: submit it.
+  static bool deferredMemCopyCallback(hsa_signal_value_t Value, void *Data) {
+    auto *Copy = reinterpret_cast<DeferredMemCopyTy *>(Data);
+    if (auto Err = hsa_utils::asyncMemCopy(
+            Copy->UseMultipleSdmaEngines, Copy->Dst, Copy->DstAgent, Copy->Src,
+            Copy->SrcAgent, Copy->Size, 0, nullptr, Copy->OutputSignal))
+      FATAL_MESSAGE(1, "Error submitting a deferred memory copy: %s",
+                    toString(std::move(Err)).data());
+    delete Copy;
+
+    // Unregister callback.
+    return false;
+  }
+
+  /// Submit a memory copy that starts once the input signal, if any, is
+  /// complete. A copy with a pending dependency is submitted only when the
+  /// dependency completes, from an async handler, rather than with the
+  /// dependency: a copy engine processes its copies in order, so a copy
+  /// waiting on it, such as the copy back of a kernel's results waiting for
+  /// the kernel, would hold back every later copy on the engine, those of
+  /// other streams too, until the kernel finished. A kernel that waits on such
+  /// a copy, made by an RPC callback, would never finish.
+  Error pushAsyncMemCopy(void *Dst, hsa_agent_t DstAgent, const void *Src,
+                         hsa_agent_t SrcAgent, size_t Size,
+                         AMDGPUSignalTy *InputSignal,
+                         AMDGPUSignalTy *OutputSignal) {
+    if (!InputSignal || !InputSignal->load())
+      return hsa_utils::asyncMemCopy(UseMultipleSdmaEngines, Dst, DstAgent,
+                                     Src, SrcAgent, Size, 0, nullptr,
+                                     OutputSignal->get());
+
+    auto *Copy = new DeferredMemCopyTy{UseMultipleSdmaEngines,
+                                       Dst,
+                                       DstAgent,
+                                       Src,
+                                       SrcAgent,
+                                       Size,
+                                       OutputSignal->get()};
+    hsa_status_t Status = hsa_amd_signal_async_handler(
+        InputSignal->get(), HSA_SIGNAL_CONDITION_EQ, 0, deferredMemCopyCallback,
+        Copy);
+    if (Status != HSA_STATUS_SUCCESS)
+      delete Copy;
+    return Plugin::check(Status, "error in hsa_amd_signal_async_handler: %s");
+  }
+
   // Callback for host-to-host memory copies. This is an asynchronous action.
   static Error memcpyAction(void *Data) {
     MemcpyArgsTy *Args = reinterpret_cast<MemcpyArgsTy *>(Data);
@@ -1707,16 +1764,8 @@ public:
     auto [Curr, InputSignal] = consume(OutputSignal);
 
     // Issue the async memory copy.
-    if (InputSignal && InputSignal->load()) {
-      hsa_signal_t InputSignalRaw = InputSignal->get();
-      return hsa_utils::asyncMemCopy(UseMultipleSdmaEngines, Dst, Agent, Src,
-                                     Agent, CopySize, 1, &InputSignalRaw,
-                                     OutputSignal->get());
-    }
-
-    return hsa_utils::asyncMemCopy(UseMultipleSdmaEngines, Dst, Agent, Src,
-                                   Agent, CopySize, 0, nullptr,
-                                   OutputSignal->get());
+    return pushAsyncMemCopy(Dst, Agent, Src, Agent, CopySize, InputSignal,
+                            OutputSignal);
   }
 
   /// Push an asynchronous memory copy device-to-host involving an unpinned
@@ -1748,20 +1797,10 @@ public:
     if (auto Err = Slots[Curr].schedReleaseBuffer(Inter, MemoryManager))
       return Err;
 
-    // Issue the first step: device to host transfer. Avoid defining the input
-    // dependency if already satisfied.
-    if (InputSignal && InputSignal->load()) {
-      hsa_signal_t InputSignalRaw = InputSignal->get();
-      if (auto Err = hsa_utils::asyncMemCopy(
-              UseMultipleSdmaEngines, Inter, Agent, Src, Agent, CopySize, 1,
-              &InputSignalRaw, OutputSignals[0]->get()))
-        return Err;
-    } else {
-      if (auto Err = hsa_utils::asyncMemCopy(UseMultipleSdmaEngines, Inter,
-                                             Agent, Src, Agent, CopySize, 0,
-                                             nullptr, OutputSignals[0]->get()))
-        return Err;
-    }
+    // Issue the first step: device to host transfer.
+    if (auto Err = pushAsyncMemCopy(Inter, Agent, Src, Agent, CopySize,
+                                    InputSignal, OutputSignals[0]))
+      return Err;
 
     // Consume another stream slot and compute dependencies.
     std::tie(Curr, InputSignal) = consume(OutputSignals[1]);
@@ -1854,17 +1893,9 @@ public:
     if (auto Err = Slots[Curr].schedReleaseBuffer(Inter, MemoryManager))
       return Err;
 
-    // Issue the second step: host to device transfer. Avoid defining the input
-    // dependency if already satisfied.
-    if (InputSignal && InputSignal->load()) {
-      hsa_signal_t InputSignalRaw = InputSignal->get();
-      return hsa_utils::asyncMemCopy(UseMultipleSdmaEngines, Dst, Agent, Inter,
-                                     Agent, CopySize * NumTimes, 1,
-                                     &InputSignalRaw, OutputSignal->get());
-    }
-    return hsa_utils::asyncMemCopy(UseMultipleSdmaEngines, Dst, Agent, Inter,
-                                   Agent, CopySize * NumTimes, 0, nullptr,
-                                   OutputSignal->get());
+    // Issue the second step: host to device transfer.
+    return pushAsyncMemCopy(Dst, Agent, Inter, Agent, CopySize * NumTimes,
+                            InputSignal, OutputSignal);
   }
 
   // AMDGPUDeviceTy is incomplete here, passing the underlying agent instead
@@ -1888,15 +1919,8 @@ public:
     // allocated by this runtime or the caller made the appropriate
     // access calls.
 
-    if (InputSignal && InputSignal->load()) {
-      hsa_signal_t InputSignalRaw = InputSignal->get();
-      return hsa_utils::asyncMemCopy(UseMultipleSdmaEngines, Dst, DstAgent, Src,
-                                     SrcAgent, CopySize, 1, &InputSignalRaw,
-                                     OutputSignal->get());
-    }
-    return hsa_utils::asyncMemCopy(UseMultipleSdmaEngines, Dst, DstAgent, Src,
-                                   SrcAgent, CopySize, 0, nullptr,
-                                   OutputSignal->get());
+    return pushAsyncMemCopy(Dst, DstAgent, Src, SrcAgent, CopySize,
+                            InputSignal, OutputSignal);
   }
 
   Error pushHostCallback(HostFnType Callback, void *UserData) {
