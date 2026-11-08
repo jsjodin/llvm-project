@@ -3708,7 +3708,19 @@ A lock for each mailbox, 2026-11-08, on 69694be5f5a1 and its change, the same co
 
 With 48 workers, spawning a million processes took 3.9 µs each, and a message to one and its end 5.4 µs.
 
-Once a receive from a thread that runs no process used the same counts as its senders, `pairs` was 2.3 µs at 8 workers and 4.0 at 48. Ping-pong with the GPU, the median of 5, against the numbers before the mailbox locks: `cpu-local` 7.1 (7.0), `gpu-local` 21.3 (19.5), CPU and CPU between nodes 24.6 (22.7), GPU and CPU 37.7 (35.0), GPU and GPU 48.4 (44.8) µs a round. The cost on the GPU paths has not been explained.
+Once a receive from a thread that runs no process used the same counts as its senders, `pairs` was 2.3 µs at 8 workers and 4.0 at 48. Ping-pong with the GPU, the median of 5, against the numbers before the mailbox locks: `cpu-local` 7.1 (7.0), `gpu-local` 21.3 (19.5), CPU and CPU between nodes 24.6 (22.7), GPU and CPU 37.7 (35.0), GPU and GPU 48.4 (44.8) µs a round. Run alternately with the runtime before the mailbox locks, 9 runs each, the GPU paths matched (`gpu-local` 21.6 and 20.7, GPU and GPU 49.0 and 49.1), so the difference was what else the machine was doing.
+
+Fragments that start at 256 bytes and double, 2026-11-08, on 8d0d2c124bb6 and its change, the same conditions with the machine otherwise idle. A 4 KB chunk for every message had cost a page fault each: 975,000 faults and 1.73 of 2.05 s in the kernel for 16 pairs on one worker; 75,000 and 0.13 of 0.28 s with 256 bytes.
+
+| Workers | Ping-pong, µs a round | `work`, ms | `pairs`, µs a round in all |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.57 | 1098 | 0.56 |
+| 2 | 1.26 | 550 | 0.56 |
+| 8 | 1.47 | 138 | 0.52 |
+| 24 | 1.40 | 55 | 0.45 |
+| 48 | 1.50 | 41 | 0.64 |
+
+A ping-pong round leaks 0.64 KB. Ping-pong between mailboxes, the median of 5, µs a round: `cpu-local` 4.2, `gpu-local` 13.2, CPU and CPU between nodes 18.2, GPU and CPU 32.1, GPU and GPU 40.4. Linear scaling of `pairs` would be 0.035 µs at 16 pairs; what limits it now has not been looked at.
 
 ## Target applications
 
