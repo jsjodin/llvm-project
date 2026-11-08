@@ -854,7 +854,7 @@ ends the program. `spawn`, links and monitors do not exist.
    process has nothing to unwind, and until they exist the exit reason is the
    exception's text, which becomes a `univ` with them; `down_reason` is abstract
    so that programs do not change. Monitors are done (design document, Exceptions,
-   links and monitors), on one node. Links are deferred (decided 2026-11-08): two monitors give the same two-way message, and they can be added later if something needs them. Next: `request`. Open: a
+   links and monitors), on one node. Links are deferred (decided 2026-11-08): two monitors give the same two-way message, and they can be added later if something needs them. `request` is done, so this step is. Open: a
    monitor across nodes or places reports that it is not supported yet.
 7. **What blocks.** Target regions on a blocking pool with the process
    suspended, the hand-off for parallel regions, and blocking I/O. Node
