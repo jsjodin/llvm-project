@@ -1,5 +1,5 @@
 % Closures in messages: a copy carries what the closure captured, by its
-% layout, however the capture's type is known (docs/INPROGRESS.md, Closures
+% layout, however the capture's type is known (design document, Closures
 % that say what they captured).
 %
 % RUN: merkc -O0 %s -o %t0 && %t0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace

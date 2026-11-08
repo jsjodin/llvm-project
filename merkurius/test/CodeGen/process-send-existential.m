@@ -1,6 +1,6 @@
 % A value of an existentially typed constructor in a message: the type_infos
 % and typeclass_infos in its cell are copied with it, including ones made at
-% run time (docs/INPROGRESS.md, Closures that say what they captured).
+% run time (design document, Closures that say what they captured).
 %
 % RUN: merkc -O0 %s -o %t0 && %t0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 %s -o %t2 && %t2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace

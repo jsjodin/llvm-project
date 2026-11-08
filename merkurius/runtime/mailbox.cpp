@@ -886,18 +886,23 @@ void CloseMailboxesOf(Process *process) {
 } // namespace merkurius::runtime
 
 // A new process runs `closure` on `argument`, the handle's mailbox, which
-// it now owns; `stackBytes` of 0 is the default stack. Temporary (chunk 2,
-// docs/INPROGRESS.md, Before the collector): the closure and
-// the handle's cell are shared with the parent, not copied, as a closure's
-// cell does not say the types of what it captured.
+// it now owns; `stackBytes` of 0 is the default stack. The closure and the
+// handle's cell are copied, so that the child shares nothing with its parent's
+// heap, which is an error if the closure captured what cannot be copied.
 extern "C" void merk_process_spawn(std::int64_t stackBytes, Word closure,
     Word argument, MERK_HANDLE_PARAMETERS) {
   if (!CurrentProcess()) {
     Fail("spawn is not available on a thread that runs no process", "");
   }
+  Fragment fragment;
+  Word closureCopy{CopyClosure(closure, fragment)};
+  Word tag{argument & kTagMask};
+  auto *handleCopy{static_cast<Word *>(fragment.Allocate(5 * sizeof(Word)))};
+  std::memcpy(handleCopy, reinterpret_cast<const Word *>(argument - tag),
+      5 * sizeof(Word));
   pthread_mutex_lock(&schedulerLock);
-  Process *child{
-      NewProcess(static_cast<std::size_t>(stackBytes), closure, argument)};
+  Process *child{NewProcess(static_cast<std::size_t>(stackBytes), closureCopy,
+      reinterpret_cast<Word>(handleCopy) + tag)};
   pthread_mutex_unlock(&schedulerLock);
   if (!child) {
     Fail("no address space for a process's stack", "");
@@ -1302,10 +1307,10 @@ void FireMonitorsOf(Process *process, const char *reason) {
 } // namespace merkurius::runtime
 
 // Starts watching the process that owns the target mailbox. If it has ended,
-// which a closed mailbox says, the message is queued at once. Temporary
-// (chunk 2, docs/INPROGRESS.md, Before the collector): the
-// function is shared with the receiver, as a spawned closure is, if the
-// watcher's mailbox is not the caller's.
+// which a closed mailbox says, the message is queued at once. The function
+// is applied by the watcher's mailbox's owner, so it is copied if that is
+// another process. A mailbox changes owner only when it is made, by spawn,
+// before anything can watch through it.
 extern "C" std::int64_t merk_monitor_new(std::int64_t targetHigh,
     std::int64_t targetLow, std::int64_t targetPlaceAndSlot,
     std::int64_t targetGeneration, std::int64_t targetSecret,
@@ -1318,6 +1323,14 @@ extern "C" std::int64_t merk_monitor_new(std::int64_t targetHigh,
   Handle watcher{MERK_HANDLE};
   if (!IsHere(target) || !IsHere(watcher)) {
     Fail("a monitor across nodes or places is not supported yet", "");
+  }
+  if (Mailbox *mailbox{Find(watcher)}) {
+    bool mine{mailbox->owner == CurrentProcess()};
+    Unlock(mailbox);
+    if (!mine) {
+      Fragment fragment;
+      function = CopyClosure(function, fragment);
+    }
   }
   std::uint64_t id{nextMonitor.fetch_add(1, std::memory_order_relaxed)};
   auto *monitor{static_cast<Monitor *>(Malloc(sizeof(Monitor)))};

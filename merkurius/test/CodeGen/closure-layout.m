@@ -1,4 +1,4 @@
-% What a closure's layout says of each thing it captured (docs/INPROGRESS.md,
+% What a closure's layout says of each thing it captured (design document,
 % Closures that say what they captured).
 %
 % RUN: merkc -fc1 -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MERK
