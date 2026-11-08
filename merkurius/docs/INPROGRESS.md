@@ -942,7 +942,10 @@ Neither uses the C++ standard library; `rpc.h` needs none.
       (`merk_device_give_array`). The copy is in a fragment, which is never
       freed yet, as a message is.
    3. **Sending arrays of scalars from the device,** `array(T)` for a
-      one-word `T`, by key as other messages.
+      one-word `T`, by key as other messages. Done
+      (`merk_device_send_array`). The host copies the array from the device
+      into a temporary, and the send then copies it again, or encodes it
+      for another node; step 5 shows whether that second copy matters.
    4. **Receiving them on the device,** in the two RPCs above.
    5. **The bandwidth benchmark:** arrays of 1 to 2^20 words from the GPU
       to `main` and to node 2, beside `omp_target_memcpy` alone, the floor.

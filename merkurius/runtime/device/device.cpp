@@ -31,6 +31,7 @@ using merkurius::runtime::rpcChunk;
 using merkurius::runtime::rpcGiveArray;
 using merkurius::runtime::rpcPoll;
 using merkurius::runtime::rpcSend;
+using merkurius::runtime::rpcSendArray;
 
 namespace {
 
@@ -152,6 +153,24 @@ extern "C" void merk_device_send(
     }
     buffer->data[5] = key;
     buffer->data[6] = message;
+  });
+  port.recv([](rpc::Buffer *, uint32_t) {});
+}
+
+// Sends an array of one-word elements, as merk_device_send sends a word:
+// the host copies the array from the device, given its address, and
+// returns once it has queued it.
+extern "C" void merk_device_send_array(
+    const uint64_t *handle, uint64_t key, const uint64_t *array) {
+  rpc::Client::Port port{__llvm_rpc_client.open<rpcSendArray>()};
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    for (int i{0}; i < 5; ++i) {
+      buffer->data[i] = handle[i];
+    }
+    buffer->data[5] = key;
+    buffer->data[6] = reinterpret_cast<uint64_t>(array);
+    buffer->data[7] =
+        array[0] << 8 | static_cast<uint64_t>(omp_get_device_num());
   });
   port.recv([](rpc::Buffer *, uint32_t) {});
 }

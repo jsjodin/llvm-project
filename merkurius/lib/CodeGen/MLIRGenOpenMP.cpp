@@ -121,6 +121,11 @@ bool MerkGenerator::WordMessage(mlir::Type type) {
   return false;
 }
 
+bool MerkGenerator::ArrayMessage(mlir::Type type) {
+  auto array{mlir::dyn_cast<merk::ArrayType>(type)};
+  return array && WordMessage(array.getElement());
+}
+
 // Whether a type has no type variables, so that its type_info is known at
 // compile time.
 static bool Ground(const semantics::Type &type) {
@@ -137,7 +142,8 @@ static bool Ground(const semantics::Type &type) {
 
 std::optional<std::uint64_t> MerkGenerator::MessageKey(
     const semantics::Type &type, mlir::Type represented) {
-  if (!Ground(type) || !WordMessage(represented)) {
+  if (!Ground(type) ||
+      (!WordMessage(represented) && !ArrayMessage(represented))) {
     return std::nullopt;
   }
   std::uint64_t key{llvm::xxh3_64bits(semantics::TypeToString(type))};
@@ -148,7 +154,8 @@ std::optional<std::uint64_t> MerkGenerator::MessageKey(
 // process.send in a target region, or in any procedure of the device's
 // compile, all of which run on the device. It is a call of
 // merk_device_send with the handle's cell, the message type's key and the
-// message as a word. The key is a hash of the type's name, which the
+// message as a word, or of merk_device_send_array with the array's pointer
+// if it is an array of one-word elements. The key is a hash of the type's name, which the
 // host's compile registers with the host's type_info at start-up
 // (RegisterMessageTypes), since the host encodes the message by it if the
 // mailbox is another node's; so a procedure that a region calls sends as
@@ -178,10 +185,12 @@ bool MerkGenerator::SendInTarget(const Body &goal,
             " in target regions");
     return true;
   }
-  mlir::Value word{merk::ToWordOp::create(
-      builder_, loc, merk::WordType::get(&context_), message)};
+  bool array{ArrayMessage(message.getType())};
+  mlir::Value word{array ? ArrayPointer(message, loc)
+                         : mlir::Value{merk::ToWordOp::create(builder_, loc,
+                               merk::WordType::get(&context_), message)}};
   merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
-      "merk_device_send",
+      array ? "merk_device_send_array" : "merk_device_send",
       mlir::ValueRange{mailbox,
           IntegerConstant(builder_.getI64Type(),
               static_cast<std::int64_t>(*key), loc),
