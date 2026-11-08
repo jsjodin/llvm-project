@@ -1,0 +1,8 @@
+The program of omp-target-host-made.m, compiled by the driver for the
+machine's GPU and run there: the kernel reads the array it is given,
+which a procedure only the host runs made.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-host-made.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t \
+RUN:   | FileCheck %S/omp-target-host-made.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

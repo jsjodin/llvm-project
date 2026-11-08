@@ -150,3 +150,24 @@ module attributes {omp.is_target_device = false} {
   }
 }
 
+
+// -----
+
+// A result of a type that is not the LLVM dialect's, as before lowering to
+// it, is replaced by ub.poison.
+
+// CHECK-LABEL: func.func @index_target_call
+// CHECK-NOT: call @host_index
+// CHECK: %[[POISON:.*]] = ub.poison : index
+// CHECK: return %[[POISON]] : index
+// CHECK-NOT: func.func private @host_index
+module attributes {omp.is_target_device = true} {
+  func.func private @host_index() -> index
+  func.func @index_target_call() -> index {
+    omp.target kernel_type(generic) {
+      omp.terminator
+    }
+    %0 = func.call @host_index() : () -> index
+    return %0 : index
+  }
+}

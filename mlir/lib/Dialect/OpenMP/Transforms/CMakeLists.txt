@@ -26,4 +26,5 @@ add_mlir_dialect_library(MLIROpenMPTransforms
   MLIRPass
   MLIRSupport
   MLIRTransforms
+  MLIRUBDialect
   )

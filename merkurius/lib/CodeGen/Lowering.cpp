@@ -18,6 +18,7 @@
 #include "mlir/Dialect/OpenMP/OpenMPDialect.h"
 #include "mlir/Dialect/OpenMP/Transforms/Passes.h"
 #include "mlir/Dialect/OpenMP/Utils/Utils.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/PassManager.h"
@@ -2882,6 +2883,18 @@ llvm::LogicalResult Lowerer::Lower() {
   for (auto entry : llvm::make_early_inc_range(module_.getOps<merk::EntryOp>())) {
     LowerEntry(entry);
   }
+  // In a device compile, omp-function-filter replaces a value that a call
+  // of a host procedure made, outside the target regions, by ub.poison of
+  // its type. It takes the type it lowers to, and stays ub.poison: as the
+  // var_ptr of a map entry, such as an array's or a cell's, it must not be
+  // the LLVM dialect's poison, which omp-host-op-filter keeps, and which
+  // translation cannot tell from another entry's or replace by the kernel's
+  // argument, since an LLVM constant has no uses of its own. A value of
+  // another dialect becomes an argument of the function that the filter
+  // keeps.
+  module_.walk([&](mlir::ub::PoisonOp poison) {
+    poison.getResult().setType(Convert(poison.getType()));
+  });
   // An array is a pointer now: the casts between them that a target
   // region's map entries make go.
   module_.walk([&](mlir::UnrealizedConversionCastOp cast) {
