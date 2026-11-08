@@ -918,12 +918,12 @@ static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
         llvm::report_fatal_error(llvm::StringRef{text});
       }
       // Every value live before the rewrite is in the bundle (ListLiveRoots),
-      // so one of a polymorphic type that is not is a base the rewrite keeps
-      // for a pointer into the same cell. That pointer is live here too and
-      // says what the cell holds; this only has to be updated when it moves.
+      // so one that is not is a base the rewrite keeps for a pointer into the
+      // same cell. That pointer is live here too and says what the cell
+      // holds; this only has to be updated when it moves. Its bits are the
+      // untagged cell, which the type would misread as a constant.
       if (!infos.count(CellOf(root)) &&
-          IsPolymorphicIndex(*function.getParent(),
-              llvm::cast<llvm::ConstantInt>(type))) {
+          !llvm::cast<llvm::ConstantInt>(type)->isNegative()) {
         type = llvm::ConstantInt::getSigned(
             llvm::Type::getInt64Ty(function.getContext()), kForwardOnly);
       }
@@ -931,6 +931,13 @@ static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
       if (auto it{infos.find(CellOf(root))}; it != infos.end()) {
         roots.infos[root] = it->second;
       }
+    }
+  }
+  // A base of another pointer, which is the tagged term, is the untagged cell.
+  for (const llvm::GCRelocateInst *relocate : statepoint->getGCRelocates()) {
+    if (relocate->getBasePtr() != relocate->getDerivedPtr()) {
+      roots.types[relocate->getBasePtr()] = llvm::ConstantInt::getSigned(
+          llvm::Type::getInt64Ty(function.getContext()), kForwardOnly);
     }
   }
 }

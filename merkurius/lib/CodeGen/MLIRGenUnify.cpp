@@ -306,6 +306,15 @@ bool HasShape(llvm::ArrayRef<mlir::Value> in, llvm::ArrayRef<BodyVar> out,
 }
 
 // An array's elements are words whatever its type, so one procedure serves.
+// The arrays that the generated array procedures take, for the collector:
+// the type_info is of their elements.
+void MerkGenerator::NoteArrayArguments(mlir::Block *entry, mlir::Location loc) {
+  for (unsigned i : {1u, 2u}) {
+    merk::RootTypeOp::create(
+        builder_, loc, entry->getArgument(i), entry->getArgument(0));
+  }
+}
+
 merk::ProcOp MerkGenerator::UnifyArrayProc() {
   if (unifyArray_) {
     return unifyArray_;
@@ -326,6 +335,7 @@ merk::ProcOp MerkGenerator::UnifyArrayProc() {
   {
     mlir::Block *entry{from.addEntryBlock()};
     builder_.setInsertionPointToStart(entry);
+    NoteArrayArguments(entry, loc);
     mlir::Value i{entry->getArgument(3)}, n{entry->getArgument(4)};
     auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
     builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
@@ -356,6 +366,7 @@ merk::ProcOp MerkGenerator::UnifyArrayProc() {
   unifyArray_.setPrivate();
   mlir::Block *entry{unifyArray_.addEntryBlock()};
   builder_.setInsertionPointToStart(entry);
+  NoteArrayArguments(entry, loc);
   mlir::Value size{merk::ArraySizeOp::create(
       builder_, loc, i64, entry->getArgument(1))};
   merk::GuardOp::create(builder_, loc,
@@ -780,6 +791,7 @@ merk::ProcOp MerkGenerator::CompareArrayProc() {
   {
     mlir::Block *entry{from.addEntryBlock()};
     builder_.setInsertionPointToStart(entry);
+    NoteArrayArguments(entry, loc);
     mlir::Value i{entry->getArgument(3)}, n{entry->getArgument(4)};
     auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
     builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
@@ -823,6 +835,7 @@ merk::ProcOp MerkGenerator::CompareArrayProc() {
   compareArray_.setPrivate();
   mlir::Block *entry{compareArray_.addEntryBlock()};
   builder_.setInsertionPointToStart(entry);
+  NoteArrayArguments(entry, loc);
   mlir::Value xSize{merk::ArraySizeOp::create(
       builder_, loc, i64, entry->getArgument(1))};
   mlir::Value ySize{merk::ArraySizeOp::create(

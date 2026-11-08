@@ -766,7 +766,8 @@ void MerkGenerator::AnnotateRoots(const ProcedureBody &body) {
   llvm::SmallVector<BodyVar> bound;
   for (auto [var, value] : values_) {
     if (var < body.vars.size() && value && value.getParentRegion() == here &&
-        mlir::isa<merk::WordType, merk::TermType>(value.getType()) &&
+        mlir::isa<merk::WordType, merk::TermType, merk::ArrayType>(
+            value.getType()) &&
         !annotated_.contains(value)) {
       bound.push_back(var);
     }
@@ -786,7 +787,8 @@ void MerkGenerator::AnnotateRoots(const ProcedureBody &body) {
 
 bool MerkGenerator::NoteRoot(mlir::Value value, const semantics::Type *type) {
   if (target_.options().openMPIsTargetDevice ||
-      !mlir::isa<merk::WordType, merk::TermType>(value.getType())) {
+      !mlir::isa<merk::WordType, merk::TermType, merk::ArrayType>(
+          value.getType())) {
     return true;
   }
   llvm::SmallVector<unsigned> variables;
@@ -1430,6 +1432,7 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
     } else {
       values_[var] = entry->getArgument(input++);
       // Here, whatever the body makes of it.
+      rootTypes_.insert(type);
       if (NoteRoot(values_[var], type)) {
         annotated_.insert(values_[var]);
       }

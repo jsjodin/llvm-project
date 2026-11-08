@@ -214,6 +214,7 @@ private:
       llvm::DenseMap<unsigned, std::pair<unsigned, unsigned>>;
   // What a closure's layout says of a capture of this type, as
   // merk.closure's `captures`; null if code generation has failed.
+  void NoteArrayArguments(mlir::Block *entry, mlir::Location loc);
   mlir::Attribute UndescribedCapture(const semantics::Type &, parser::CharBlock);
   mlir::Attribute CaptureTypeAttr(const semantics::Type &,
       const CapturePlaces &, parser::CharBlock);
