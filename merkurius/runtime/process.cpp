@@ -23,6 +23,7 @@ thread_local char *merk_stack_limit{nullptr};
 // libomp ties a parallel region to its thread. Weak, as a program without
 // OpenMP does not link it.
 extern "C" int omp_get_level(void) __attribute__((weak));
+extern "C" int omp_get_max_threads(void) __attribute__((weak));
 
 namespace merkurius::runtime {
 
@@ -78,6 +79,8 @@ constexpr std::size_t kBlockingThreadBytes{256 * 1024};
 pthread_mutex_t blockingLock = PTHREAD_MUTEX_INITIALIZER;
 BlockingThread *idleBlocking{nullptr};
 thread_local BlockingThread *thisBlocking{nullptr};
+// The cores that parallel regions have claimed.
+std::atomic<int> claimedCores{0};
 // Whether the program has ever spawned: before that nothing can be held up.
 std::atomic<bool> spawned{false};
 
@@ -564,6 +567,49 @@ Process *CurrentProcess() { return current; }
 
 bool CanSuspend() { return current && current->pinned == 0; }
 
+// A team's size: 1, for this thread, and the cores that no worker is busy on
+// and no other region has claimed. Atomic, as two regions could otherwise take
+// the same cores. A program that has not spawned has what libomp would give.
+static int ClaimTeam() {
+  int most{omp_get_max_threads ? omp_get_max_threads() : 1};
+  Process *self{current};
+  if (!self || self->pinned != 0 || !spawned.load()) {
+    return most;
+  }
+  for (;;) {
+    int taken{claimedCores.load()};
+    int busy{workers.load() - idle.load()};
+    int others{mostWorkers - (busy < 1 ? 1 : busy) - taken};
+    int team{1 + (others > 0 ? others : 0)};
+    if (team > most) {
+      team = most;
+    }
+    if (claimedCores.compare_exchange_weak(taken, taken + team)) {
+      self->team = team;
+      return team;
+    }
+  }
+}
+
+static void ReleaseTeam() {
+  Process *self{current};
+  if (self && self->team != 0) {
+    claimedCores.fetch_sub(self->team);
+    self->team = 0;
+  }
+}
+
+int EnterParallelRegion() {
+  int team{ClaimTeam()};
+  Pin();
+  return team;
+}
+
+void ExitParallelRegion() {
+  ReleaseTeam();
+  Unpin();
+}
+
 void Pin() {
   Process *self{current};
   if (!self || self->pinned++ != 0 || !spawned.load() ||
@@ -735,6 +781,16 @@ void EndAfterFailure(const char *reason) {
 }
 
 } // namespace merkurius::runtime
+
+// Before and after a parallel region on the host; what the first returns is
+// the team's size.
+extern "C" std::int32_t merk_parallel_enter(void) {
+  return merkurius::runtime::EnterParallelRegion();
+}
+
+extern "C" void merk_parallel_exit(void) {
+  merkurius::runtime::ExitParallelRegion();
+}
 
 extern "C" void merk_process_run_main(void (*entry)(void)) {
   using namespace merkurius::runtime;

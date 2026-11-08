@@ -84,7 +84,7 @@ pi(N) = Step * Sum :-
 % MERK:         %[[SLOT:.*]] = llvm.alloca %{{.*}} x f64
 % MERK:         %[[FIRST:.*]] = merk.constant 0.000000e+00 : f64
 % MERK:         llvm.store %[[FIRST]], %[[SLOT]] : f64, !llvm.ptr
-% MERK:         omp.parallel {
+% MERK:         omp.parallel num_threads(%{{.*}} : i32) {
 % MERK:           omp.wsloop reduction(@add_reduction_f64 %[[SLOT]] -> %[[COPY:.*]] : !llvm.ptr) {
 % MERK-NEXT:        omp.loop_nest (%[[I:.*]]) : i64 = {{.*}} {
 % MERK-NEXT:          %[[IN:.*]] = llvm.load %[[COPY]] : !llvm.ptr -> f64
@@ -92,7 +92,7 @@ pi(N) = Step * Sum :-
 % MERK-NEXT:          llvm.store %[[OUT]], %[[COPY]] : f64, !llvm.ptr
 % MERK-NEXT:          omp.yield
 % MERK:         } {omp.combined}
-% MERK-NEXT:    %[[LAST:.*]] = llvm.load %[[SLOT]] : !llvm.ptr -> f64
+% MERK:    %[[LAST:.*]] = llvm.load %[[SLOT]] : !llvm.ptr -> f64
 % MERK-NEXT:    %{{.*}} = arith.mulf %{{.*}}, %[[LAST]] : f64
 
 % A state variable, named by its name; S0 is combined with the partial

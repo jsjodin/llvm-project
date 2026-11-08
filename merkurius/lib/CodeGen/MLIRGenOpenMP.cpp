@@ -878,8 +878,24 @@ void MerkGenerator::GenerateParallelLoop(const ParallelLoop &loop,
         builder_.createBlock(&op.getRegion(), {}, pointers, locs));
     originals.assign(op.getRegion().args_begin(), op.getRegion().args_end());
   }
-  auto parallel{mlir::omp::ParallelOp::create(
-      builder_, loc, mlir::omp::ParallelOperands{})};
+  // A parallel region on the host holds up no worker, and its team's size is
+  // claimed from the cores that are free (design document, "OpenMP
+  // cooperation"). In a target region or on a device, the process has moved
+  // already, or is not there.
+  mlir::Operation *around{builder_.getInsertionBlock()->getParentOp()};
+  bool claims{!target_.options().openMPIsTargetDevice && !loop.teams &&
+      !mlir::isa<mlir::omp::TargetOp>(around) &&
+      !around->getParentOfType<mlir::omp::TargetOp>()};
+  mlir::omp::ParallelOperands parallelOperands;
+  if (claims) {
+    parallelOperands.numThreadsVars.push_back(
+        merk::ForeignCallOp::create(builder_, loc,
+            mlir::TypeRange{builder_.getI32Type()}, "merk_parallel_enter",
+            mlir::ValueRange{}, /*can_fail=*/false)
+            .getResult(0));
+  }
+  auto parallel{
+      mlir::omp::ParallelOp::create(builder_, loc, parallelOperands)};
   if (loop.distribute) {
     parallel.setComposite(true);
   } else {
@@ -994,6 +1010,11 @@ void MerkGenerator::GenerateParallelLoop(const ParallelLoop &loop,
   for (mlir::Block *block : terminated) {
     builder_.setInsertionPointToEnd(block);
     mlir::omp::TerminatorOp::create(builder_, loc);
+  }
+  if (claims) {
+    builder_.setInsertionPointAfter(parallel);
+    merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+        "merk_parallel_exit", mlir::ValueRange{}, /*can_fail=*/false);
   }
   for (const semantics::TranslatedLoop::Threaded &value :
       loop.translated->threaded) {

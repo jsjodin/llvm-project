@@ -49,7 +49,8 @@ saxpy(A, X, !Y) :-
     ).
 % MERK-LABEL: merk.proc private @omp_parallel_do.saxpy_4_0(%arg0: f64, %arg1: !merk.array<f64>, %arg2: !merk.array<f64>) -> !merk.array<f64>
 % MERK-NEXT:    %[[SIZE:.*]] = merk.array_size %arg1
-% MERK-NEXT:    omp.parallel {
+% MERK:    %[[TEAM:.*]] = merk.foreign_call @merk_parallel_enter() : () -> i32
+% MERK-NEXT:    omp.parallel num_threads(%[[TEAM]] : i32) {
 % MERK-NEXT:      %[[LO:.*]] = merk.constant 0 : i64
 % MERK:           %[[HI:.*]] = arith.subi %[[SIZE]], %{{.*}} : i64
 % MERK:           %[[STEP:.*]] = arith.constant 1 : i64
@@ -61,7 +62,7 @@ saxpy(A, X, !Y) :-
 % MERK-NEXT:      }
 % MERK-NEXT:      omp.terminator
 % MERK-NEXT:    } {omp.combined}
-% MERK-NEXT:    merk.succeed %arg2 : !merk.array<f64>
+% MERK:    merk.succeed %arg2 : !merk.array<f64>
 % MERK-NOT:   merk.call @omp_parallel_do.saxpy__loop
 
 % A negative step: the elements from 9 down to 5.
@@ -75,7 +76,7 @@ down(!A) :-
 % MERK-NEXT:    %[[STEP:.*]] = arith.constant -1 : i64
 % MERK:         omp.loop_nest (%{{.*}}) : i64 = (%[[LO]]) to (%[[HI]]) inclusive step (%[[STEP]]) {
 % MLIR-LABEL: llvm.func internal tailcc @omp_parallel_do.down_2_0(
-% MLIR:         omp.parallel {
+% MLIR:         omp.parallel num_threads(%{{.*}} : i32) {
 % MLIR:           omp.wsloop {
 % MLIR-NEXT:        omp.loop_nest (%[[I:.*]]) : i64 = (%{{.*}}) to (%{{.*}}) inclusive step (%{{.*}}) {
 % MLIR-NEXT:          llvm.call tailcc @omp_parallel_do.down__body_{{[0-9]+}}_7_3_0(%[[I]], %arg0)
@@ -84,7 +85,7 @@ down(!A) :-
 % MLIR-NEXT:      }
 % MLIR-NEXT:      omp.terminator
 % MLIR-NEXT:    } {omp.combined}
-% MLIR-NEXT:    llvm.return %arg0 : !llvm.ptr
+% MLIR:    llvm.return %arg0 : !llvm.ptr
 
 % Every third element from 0: 0, 3, 6 and 9, which down set already.
 :- pred stride(array(int)::array_di, array(int)::array_uo) is det.
