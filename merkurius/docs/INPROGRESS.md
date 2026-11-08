@@ -695,6 +695,152 @@ device is the first slice's sender, so the formats are made for it now:
    report. The driver gives each node a temporary `HOME`. Not yet: TLS,
    which the version leaves room for.
 
+## The device's side of the first slice
+
+Route step 1, "On the device" (design document, "The route there"): a target
+region on node 1's GPU sends and receives, and its partner is node 2's main.
+Written 2026-11-07; the decisions below are proposals until the user has
+agreed to them.
+
+**What LLVM's offload runtime gives** (read 2026-11-07, `offload/` and
+`openmp/device/` of this tree):
+
+- **An RPC server for every device,** libc's protocol (`libc/shared/rpc.h`),
+  run by the plugin on a host thread while a kernel runs
+  (`offload/plugins-nextgen/common/src/RPC.cpp`). It tries the callbacks
+  registered with it first, then its own opcodes (`malloc`, `free`, the host
+  call), then libc's (`printf` and the rest).
+- **Callbacks of our own,** with `__tgt_register_rpc_callback(unsigned
+  (*)(void *port, unsigned lanes))`, which libomptarget exports and which
+  registers through liboffload's `olPlatformRegisterRPCCallback`. On the
+  device, `rpc::Client __llvm_rpc_client`, a weak symbol of `libompdevice`,
+  opens a port for any opcode. A probe in C++, built with this tree's
+  Clang, sent an opcode `'m' << 24 | 1` from a target region
+  on the gfx1030, and a callback registered at the start of `main` answered
+  it.
+- **A host call,** `__llvm_omp_host_call(fn, args, size)` in `libompdevice`:
+  the server calls the host function `fn` with a copy of `args` and returns
+  its 64-bit result. It needs the host function's address on the device,
+  and allocates a copy of the arguments for each call.
+- **Memory:** device, host-pinned and managed allocations, host memory
+  registration, copies between devices (`omp_target_memcpy`, `olMemcpy`),
+  and `olMemIsAccessible`.
+- **Device identity:** `omp_get_uid_from_device`, liboffload's `UID` and
+  `VENDOR_ID`.
+
+**What it lacks, for this design:**
+
+- **Blocking in a callback.** One server thread serves every device, under
+  a lock, so a callback that waited for a message would stop every device's
+  RPC, `printf` included. A receive on the device polls instead, sleeping
+  between polls, which the design has anyway (GPU processes, "Waiting").
+- **The CPU as a device with RPC.** The host plugin
+  (`offload/plugins-nextgen/host`) sets up no RPC server, and liboffload
+  does not support it yet, so "Testing on the CPU" (design document) cannot
+  run the device's transport on the CPU without changes to the plugin. Until
+  then a region that runs on the host, as without a GPU, calls the host
+  runtime directly, and the transport is tested on the gfx1030 only.
+- **A stable identity for our GPU.** The gfx1030 has no UUID, and the
+  plugin then falls back to the device number. liboffload has no PCI address
+  among its device information. The place table needs one only when a node
+  has two GPUs or nodes compare places, so not in the first slice; then it
+  takes HSA's or a new info key in liboffload, a change to offer upstream.
+- **Writing into device memory while a kernel runs,** from a callback, has
+  not been tried: a copy from the server thread, while it holds the lock,
+  may wait for the server. The first slice does not need it (Decision 2).
+
+Neither lack blocks the first slice. The utilities that would make a device
+a full place, a stable identity and RPC on the CPU, are small additions to
+the plugins.
+
+**Decisions to make:**
+
+1. **Transport: opcodes of our own** (proposed). The device runtime opens
+   ports with Merkurius opcodes (base `'m'`), and `merkrt` registers one
+   callback for them at start-up. The protocol is ours and typed, no address
+   has to reach the device, and nothing is allocated for each call. Against:
+   the host call, which works today with no device code of ours, but needs a
+   host function's address passed into each region and copies its
+   arguments for each call; and a server thread of our own, which would redo
+   the plugin's.
+2. **The device's mailbox stays on the host in the first slice** (proposed).
+   The host makes the region's mailbox before the region, an ordinary
+   mailbox of its own place, and the device receives by polling it over RPC:
+   a call that gives the first message or none. The queue in device memory
+   that the design has (The device runtime, "Mailboxes"), which the host
+   writes into and the device polls without a round trip, comes after the
+   first benchmark, which shows what the round trip costs. Against: the
+   queue in device memory first, which needs the untried writes above before
+   anything works.
+3. **Scalar messages first** (proposed): `int`, `float`, `char` and types of
+   constants only, each one word, which the device sends and receives as it
+   is. Arrays of scalars, which the bandwidth benchmark needs, come next:
+   a sent one crosses by the RPC's `send_n`, and a received one needs the
+   device's arena (The device runtime). Terms with cells, such as a message
+   holding a handle, come after, since the device makes no cells yet.
+   Mailbox handles still cross into the region as values: the host makes the
+   handles, and sends node 2 the device's handle itself, before the region.
+4. **The device's receive takes the first message** (proposed):
+   `process.receive(Mailbox, any, Timeout, Result, !IO)`, the one-mailbox
+   receive with the library's `any`. Any other closure, selectors and the
+   `receive` goal are not supported on the device, an error at the call in
+   the device compile, until higher-order specialization (route step 5).
+   Selecting on the device needs the queue there too, or a round trip for
+   each message looked at.
+5. **Encoding happens on the host, by the host's `type_info`** (proposed).
+   A send to node 2 encodes the message by its `type_info` (Wire format),
+   which the device does not have. The host compile knows the message type
+   of each `send` in a region, since it compiles the region too, and passes
+   that type's `type_info`, a host address, into the region as one more
+   value mapped `to`; the device hands it back with each send, and the
+   callback calls `merk_mailbox_send` with it. The device never reads it.
+   Against: a table of the region's message types in the device image, which
+   both compiles would have to number alike.
+
+**How code generation sees it.** `process.send` and `process.receive`
+called in a region are compiled for the device as built-in operations, as
+the array operations are, at the message type the call has: a call into the
+device runtime with the handle's words, the message word and the
+`type_info`. The library's modules are still not compiled for the device.
+The device compile rejects them at a message type that is not scalar, and a
+`process` predicate other than these two. A handle is a cell of five words,
+`process.mailbox`'s abstract type in a user's module; code generation knows
+its layout, as it knows an array's, and maps it `to` by copying the cell.
+
+**The device runtime** is `runtime/device/`, C++ compiled by this build's
+Clang for `amdgcn-amd-amdhsa` into a bitcode library that the driver links
+into the device image, beside `libompdevice`. The host's side is a callback
+in `merkrt`, registered at start-up when the program has offload images.
+Neither uses the C++ standard library; `rpc.h` needs none.
+
+**Steps:**
+
+1. **Handles into regions.** A `process.mailbox` value used in a target
+   region is mapped `to`, its cell copied, and the device can pass it on.
+   Done, for any term whose type has one constructor of two or more
+   scalars: `omp-target-cells.m` takes such terms apart on the device, and
+   `omp-target-mailbox.m` passes a handle on, each run on the host and on
+   the GPU (design document, Lowering, "OpenMP target regions").
+2. **Send from the device.** The device runtime, the callback, the driver's
+   link of the device library, and `process.send` at a scalar type in the
+   device compile, with the `type_info` passed in. Test, on one node: a
+   region sends ints and floats to a mailbox `main` made before it, and
+   `main` receives and prints them after the region; the errors for a
+   message type that is not scalar.
+3. **Receive on the device.** Polling with `s_sleep` between polls, and a
+   timeout by the device's clock. Test: `main` sends before the region, the
+   region receives, sums and sends the sum back; a timeout that passes; the
+   errors for other receives.
+4. **The first slice:** node 1's region and node 2's `main`, over TCP, with
+   `Inputs/two-nodes.py`, exchanging ints in a loop.
+5. **The first benchmark,** ping-pong latency between the GPU and node 2 over
+   loopback, beside the same between node 1's `main` and node 2, which shows
+   what the GPU's hop costs.
+6. **Arrays of scalars as messages,** with the device's arena, and the
+   bandwidth over message sizes.
+7. **The queue in device memory,** if the benchmark shows that the round
+   trip of each poll dominates.
+
 ## The receive goal: later
 
 The receive goal is done (design document, Processes and mailboxes, "The
