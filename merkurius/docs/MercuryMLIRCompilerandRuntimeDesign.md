@@ -2105,7 +2105,7 @@ Six points follow from how LLVM's statepoints work, found on 2026-11-06 and to b
   - A tagged term is a pointer derived from its cell, which statepoints relocate correctly, but only if the tag is added on the pointer itself, by a GEP or `llvm.ptrmask`. A round trip through `ptrtoint` and `inttoptr`, as lowering does for constant words today, hides the base.
 - **Roots in frame slots.** Statepoints track SSA values only. A heap pointer *stored* in a frame slot is not a root to them, and we keep some there: the environments of nondeterministic code (`merk.env_new`, a struct `alloca` in the caller's frame) and the slots callees write their outputs into. The fix is to give each live slot's address to the statepoint as a deopt operand: the stack map records it as a "Direct" location, a frame register plus an offset, which needs no relocation, since the slot itself does not move. The collector reads and updates the slot in memory, by the environment's `layout` attribute; since its address is passed to the callee, LLVM reloads it after the call. This is how gollvm records its `alloca`s, with a liveness analysis of slots and a pointer bitmap for each aggregate. A polymorphic value in a slot needs its `type_info` recorded as well.
 - **`musttail` calls.** The rewrite turns `musttail call @f` into `musttail call @llvm.experimental.gc.statepoint(...)`, which the verifier rejects (tested 2026-11-06 with `opt -passes=rewrite-statepoints-for-gc`). A real tail call needs no statepoint, because it replaces the caller's frame, leaving nothing in it to scan, and the callee's own safepoints cover the arguments. So lowering marks every `musttail` call `"gc-leaf-function"`, which the rewrite skips; it still compiles to a `jmp`. A plain `tail call`, though, becomes a statepoint and loses its tail call (`callq` and `ret`), so with the collector on, LLVM no longer turns calls into tail calls on its own. Every tail call we need must therefore be a `musttail` from lowering, as last calls of nondeterministic code and tail recursion are now.
-- **Holes of last call modulo constructor.** A `!merk.ref` lowers to the address of the hole, a pointer into the middle of a cell. Within one function, statepoints relocate it as a pointer derived from the cell, with `gc.relocate`'s base and derived pair. But a variant gets it as an argument, without the cell, and a cell has no header from which the collector could find its start, so the variant's own safepoints cannot relocate it. So with statepoints a `!merk.ref` becomes two arguments, the cell's tagged pointer, which is a root like any other, and the hole's offset in bytes, and `merk.ref_store` adds them; the variant's signature has a pair for each reference. The hole is null from the cell's allocation until it is filled, so a collection in between, as the variant's own allocations can start, finds no pointer there.
+- **Holes of last call modulo constructor.** A `!merk.ref` lowers to the address of the hole, a pointer into the middle of a cell. Within one function, statepoints relocate it as a pointer derived from the cell, with `gc.relocate`'s base and derived pair. But a variant gets it as an argument, without the cell, and a cell has no header from which the collector could find its start, so the variant's own safepoints cannot relocate it. So a `!merk.ref` is two arguments, the cell's tagged pointer, which is a root like any other, and the hole's offset in bytes from that pointer, and `merk.ref_store` adds them; the variant's signature has a pair for each reference. Built 2026-11-08. Rejected: one LLVM struct of the two, as the statepoint rewrite does not take a struct that holds a heap pointer. The hole is null from the cell's allocation until it is filled, so a collection in between, as the variant's own allocations can start, finds no pointer there.
 - **The hole's store and the remembered set.** Filling a hole is the one store into a cell after it is made. A collection between the cell's allocation and the store can promote the cell to the old generation, and the value stored, a cell the variant made after the collection, is young, so the store needs the write barrier that destructive updates and bindings have: if the hole's cell is old, the hole is recorded in the remembered set. Usually no collection has happened in between and the cell is still in the nursery, which a comparison with the nursery's bounds tells, so the barrier costs a compare and a branch.
 - **Walking the stack.** `.llvm_stackmaps` holds one record per safepoint, found by the call's return address. The runtime builds a hash table from them at startup and walks a process's stack frame by frame, scanning what each frame's record lists. Mercury code is compiled with frame pointers (`"frame-pointer"="all"`) and the walk follows their chain. Frames without stack maps (C frames of the runtime, of `foreign_proc` code and of libomp) hold no roots, because the runtime's C++ holds no raw heap pointer across a safepoint, but the walk must get past them, and a chain breaks at a C frame built without frame pointers. So every call from Mercury into C records the last Mercury frame's stack pointer and return address in the process record, as OCaml does, and the walk jumps from there to the next Mercury frame.
 
@@ -3921,6 +3921,29 @@ A receive with a timeout, on the same commit: `cpu-process` with `after(10000)` 
 Taking the next process first, 2026-11-08, on top of 06f2d398af98, `cpu-process`, 20000 rounds, 9 runs, median µs a round, `after(10000)` before and after: default workers 6.01 and 3.81, 8 workers 5.83 and 3.55, 2 workers 2.15 and 1.55, 1 worker 0.65 and 0.64. `infinity` with the change: 1.67, 1.51, 1.73 and 0.54. `gpu-process` did not move (13.13 and 13.33). About 2 µs of the cost remains with several workers, and has not been explained.
 
 The send ring's prototype against the RPC, 2026-11-08, on a5efa6819f86, `-O2`, 20000 rounds, 9 alternating runs, median µs a round, RPC and ring: `gpu-local` 13.29 and 13.48, `gpu-process` 13.22 and 12.61, GPU and CPU between nodes 31.96 and 26.41, GPU and GPU between nodes 41.39 and 36.37. The ring is not built; see INPROGRESS, The send ring.
+
+
+### Heap pointers in an address space of their own
+
+Measured on 2026-11-08, commit 559bb24685ad against 5df05bc20023, the commit
+before the change, and 38f0d96813d1 between them. nrev of 400 elements, 30000
+rounds, about 2.4 billion cells, at `-O2` on one pinned core; user time in seconds,
+median of 5 runs.
+
+| | Before | Terms in address space 1 | Words too |
+| --- | --- | --- | --- |
+| Monomorphic | 4.05 | 4.01 | 3.97 |
+| Polymorphic | 4.01 | 3.97 | 4.00 |
+
+The spread of the runs of one build, about 0.2 s, is larger than any difference, so
+the change costs nothing here. User time only: until the collector, a process
+never reuses its heap, so the run takes 37 GB and spends a further 15 s in the
+kernel, which hides the code.
+
+A hole as the cell's pointer and an offset, measured the same way on 2026-11-08
+against 559bb24685ad, with the change not yet committed: 4.00 s against 4.00 s
+monomorphic, and 4.01 s against 4.02 s polymorphic. The extra argument costs nothing
+here.
 
 ## Target applications
 
