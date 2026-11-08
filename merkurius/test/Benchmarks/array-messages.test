@@ -1,0 +1,11 @@
+The benchmark of arrays as messages on the CPU, moving little: node 1's main
+against node 2 over TCP and against its own mailbox.
+REQUIRES: libomp
+
+RUN: merkc -O2 %S/../../benchmarks/array-messages/arraymessages.m -o %t
+RUN: %python %S/../../benchmarks/pingpong/pair.py %t cpu 1 | FileCheck %s --check-prefix=CPU
+RUN: %t cpu-local 1 | FileCheck %s --check-prefix=LOCAL
+CPU: cpu to {{ *}}1 words {{ *}}20000 messages {{ *}}20000 right
+CPU: cpu from {{ *}}1048576 words {{ *}}2 messages {{ *}}2 right
+LOCAL: cpu-local to {{ *}}1 words {{ *}}20000 messages {{ *}}20000 right
+LOCAL: cpu-local from {{ *}}1048576 words {{ *}}2 messages {{ *}}2 right
