@@ -1987,9 +1987,15 @@ mlir::Value Lowerer::CallCode(mlir::Operation *call, mlir::LLVM::LLVMFuncOp func
   auto caller{call->getParentOfType<mlir::LLVM::LLVMFuncOp>()};
   // Only where failing returns from the procedure: in a disjunction's
   // branch, it goes to the next branch. A call passing an environment in
-  // the caller's frame needs the frame after the call.
+  // the caller's frame needs the frame after the call. Without the tail
+  // calling convention, as on an AMD GPU, LLVM takes a musttail call only
+  // between procedures of the same type; any other is an ordinary call,
+  // which uses the stack.
   bool isTail{succeed && CanFail(caller.getSymName()) == canFail &&
       fail_ == topFail_ &&
+      (cconv_ == mlir::LLVM::CConv::Tail ||
+          caller.getFunctionType() ==
+              (func ? func.getFunctionType() : funcType)) &&
       llvm::none_of(call->getOperands(), [](mlir::Value operand) {
         return operand.getDefiningOp<merk::EnvNewOp>() ||
             operand.getDefiningOp<mlir::LLVM::AllocaOp>();
