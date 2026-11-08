@@ -1198,6 +1198,12 @@ The mapping happens in the receiver, so senders know nothing of it. Separate mai
 
 A selector option for strict priority between its cases can be added later if programs need it. Strict priority can starve the lower cases, which is why it is not the default.
 
+**Which receive to write.** There are three forms, and `select` belongs only to the last:
+
+- **Every message, in order:** `receive(Box, any, Timeout, Got, !IO)`, with a match on `Got` after it. This is the form to use when one mailbox's messages are all handled as they arrive, since it says that no message is skipped. A message that fits no later pattern has been taken all the same, so the program must handle it. It is the only form a target region has today (Send and receive in a target region).
+- **Selected messages of one mailbox:** `receive(Box, Selector, Timeout, Got, !IO)`, with a `semidet` predicate, such as `is_reply(Ref)`, to take a reply out of order. Messages it does not accept stay queued, in order, for a later receive.
+- **Several mailboxes, or arms by pattern:** a selector built with `selecting` and `selecting_matching`, or the `receive` goal below, with `-freceive-goal`. Each arm of the goal is `select(Mailbox, Pattern) -> Goal`, even if there is only one mailbox; what its arms leave out stays queued.
+
 **The `receive` goal.** Building a selector, a result type to map every mailbox into, and a switch on `yes(message(...))` is boilerplate. The `receive` goal writes the same loop directly. The goal receives one message; each arm selects the messages it wants, by mailbox and pattern:
 
 ```mercury
