@@ -20,6 +20,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <unistd.h>
 #include "process.h"
 #include "device-ring.h"
 #include "fragment.h"
@@ -428,15 +429,37 @@ extern "C" void merk_register_message_type(
 // runs: the last region to end frees the devices' arenas. What a region
 // gives back is scalars, arrays mapped from the host and copies on the
 // host of arrays it made, so nothing in the arenas outlives it.
+// While the program is ending, a region neither starts nor cleans up. Its
+// thread waits for the end.
+static void StopIfProgramEnding() {
+  if (merkurius::runtime::ProgramEnding()) {
+    for (;;) {
+      pause();
+    }
+  }
+}
+
+namespace merkurius::runtime {
+bool RegionsRunning() {
+  pthread_mutex_lock(&arenaLock);
+  bool running{runningRegions != 0};
+  pthread_mutex_unlock(&arenaLock);
+  return running;
+}
+} // namespace merkurius::runtime
+
 extern "C" void merk_region_enter(void) {
   merkurius::runtime::Pin();
   pthread_mutex_lock(&arenaLock);
   ++runningRegions;
   pthread_mutex_unlock(&arenaLock);
+  // After the count, so that ExitProgram sees the region or the region sees
+  // that the program is ending.
+  StopIfProgramEnding();
 }
 
 extern "C" void merk_region_exit(void) {
-  merkurius::runtime::Unpin();
+  StopIfProgramEnding();
   pthread_mutex_lock(&arenaLock);
   if (--runningRegions == 0) {
     merk_mailbox_detach_rings();
@@ -449,6 +472,7 @@ extern "C" void merk_region_exit(void) {
     FreeArenas();
   }
   pthread_mutex_unlock(&arenaLock);
+  merkurius::runtime::Unpin();
 }
 
 // At start-up, before any region runs.

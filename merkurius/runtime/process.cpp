@@ -20,6 +20,10 @@ extern "C" {
 thread_local char *merk_stack_limit{nullptr};
 }
 
+// libomp ties a parallel region to its thread. Weak, as a program without
+// OpenMP does not link it.
+extern "C" int omp_get_level(void) __attribute__((weak));
+
 namespace merkurius::runtime {
 
 pthread_mutex_t schedulerLock = PTHREAD_MUTEX_INITIALIZER;
@@ -58,6 +62,26 @@ thread_local Worker *thisWorker{nullptr};
 thread_local pthread_mutex_t *unlockAfterSwitch{nullptr};
 // A process that yielded, to queue once it is saved.
 thread_local Process *enqueueAfterSwitch{nullptr};
+// A process going to the blocking pool, to give it once it is saved.
+thread_local Process *moveAfterSwitch{nullptr};
+
+// A thread of the blocking pool, which runs one process at a time. Its stack
+// is small, as the process runs on its own.
+struct BlockingThread {
+  pthread_cond_t wake;
+  Process *work;
+  BlockingThread *nextIdle;
+  Context context;
+};
+constexpr std::size_t kBlockingThreadBytes{256 * 1024};
+// Guards the idle threads and what each is given.
+pthread_mutex_t blockingLock = PTHREAD_MUTEX_INITIALIZER;
+BlockingThread *idleBlocking{nullptr};
+thread_local BlockingThread *thisBlocking{nullptr};
+// Whether the program has ever spawned: before that nothing can be held up.
+std::atomic<bool> spawned{false};
+
+void GiveToBlockingThread(Process *);
 
 Process firstProcess{{nullptr, nullptr}, 1};
 std::uint64_t nextId{2};
@@ -355,6 +379,11 @@ void FireTimers() {
     enqueueAfterSwitch = nullptr;
     Enqueue(process);
   }
+  if (moveAfterSwitch) {
+    Process *process{moveAfterSwitch};
+    moveAfterSwitch = nullptr;
+    GiveToBlockingThread(process);
+  }
 }
 
 // Nothing is runnable: spins for a while, as a wake from sleeping costs
@@ -448,6 +477,57 @@ Process *TakeLocal() {
   std::abort();
 }
 
+void *BlockingThreadBody(void *argument) {
+  auto *self{static_cast<BlockingThread *>(argument)};
+  thisBlocking = self;
+  pthread_mutex_lock(&blockingLock);
+  for (;;) {
+    while (!self->work) {
+      pthread_cond_wait(&self->wake, &blockingLock);
+    }
+    Process *process{self->work};
+    self->work = nullptr;
+    pthread_mutex_unlock(&blockingLock);
+    RunProcess(process);
+    SwitchContext(self->context, process->context);
+    AfterSwitch();
+    pthread_mutex_lock(&blockingLock);
+    self->nextIdle = idleBlocking;
+    idleBlocking = self;
+  }
+}
+
+void GiveToBlockingThread(Process *process) {
+  pthread_mutex_lock(&blockingLock);
+  BlockingThread *thread{idleBlocking};
+  if (thread) {
+    idleBlocking = thread->nextIdle;
+    thread->work = process;
+    pthread_cond_signal(&thread->wake);
+    pthread_mutex_unlock(&blockingLock);
+    return;
+  }
+  pthread_mutex_unlock(&blockingLock);
+  thread = static_cast<BlockingThread *>(std::malloc(sizeof(BlockingThread)));
+  pthread_attr_t attributes;
+  pthread_attr_init(&attributes);
+  pthread_attr_setstacksize(&attributes, kBlockingThreadBytes);
+  pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+  pthread_t id;
+  if (!thread) {
+    std::abort();
+  }
+  pthread_cond_init(&thread->wake, nullptr);
+  thread->work = process;
+  thread->nextIdle = nullptr;
+  if (pthread_create(&id, &attributes, BlockingThreadBody, thread) != 0) {
+    std::fflush(stdout);
+    std::fprintf(stderr, "Mercury runtime: no thread for a target region\n");
+    std::exit(1);
+  }
+  pthread_attr_destroy(&attributes);
+}
+
 void ProcessBody(void *argument) {
   AfterSwitch();
   auto *self{static_cast<Process *>(argument)};
@@ -485,15 +565,32 @@ Process *CurrentProcess() { return current; }
 bool CanSuspend() { return current && current->pinned == 0; }
 
 void Pin() {
-  if (current) {
-    ++current->pinned;
+  Process *self{current};
+  if (!self || self->pinned++ != 0 || !spawned.load() ||
+      (omp_get_level && omp_get_level() > 0)) {
+    return;
   }
+  self->moved = true;
+  Process *next{TakeLocal()};
+  RunProcess(next);
+  moveAfterSwitch = self;
+  SwitchContext(self->context, next ? next->context : workerContext);
+  // It is on a thread of the pool now.
+  AfterSwitch();
 }
 
 void Unpin() {
-  if (current) {
-    --current->pinned;
+  Process *self{current};
+  if (!self || --self->pinned != 0 || !self->moved) {
+    return;
   }
+  self->moved = false;
+  BlockingThread *thread{thisBlocking};
+  RunProcess(nullptr);
+  enqueueAfterSwitch = self;
+  SwitchContext(self->context, thread->context);
+  // It is back on a worker.
+  AfterSwitch();
 }
 
 void RunProcess(Process *next) {
@@ -559,12 +656,9 @@ static void StartTicker() {
 
 void Start(Process *process) {
   pthread_once(&tickerOnce, StartTicker);
+  spawned.store(true);
   Enqueue(process);
 }
-
-// libomp ties a parallel region to its thread. Weak, as a program without
-// OpenMP does not link it.
-extern "C" int omp_get_level(void) __attribute__((weak));
 
 // Lets another process run, if one waits and this one may move.
 static void Yield() {
@@ -616,6 +710,17 @@ void Block(std::int64_t deadline) {
   // It may be on another thread now.
   AfterSwitch();
 }
+
+void ExitProgram(int status) {
+  stopping.store(true);
+  if (RegionsRunning()) {
+    std::fflush(nullptr);
+    std::_Exit(status);
+  }
+  std::exit(status);
+}
+
+bool ProgramEnding() { return stopping.load(); }
 
 void EndAfterFailure(const char *reason) {
   Process *self{current};
@@ -672,5 +777,5 @@ extern "C" void merk_stack_limit_passed(void) {
   std::fflush(stdout);
   std::fprintf(stderr, "Mercury runtime: stack overflow\n");
   EndAfterFailure("stack overflow");
-  std::exit(1);
+  ExitProgram(1);
 }

@@ -66,6 +66,8 @@ struct Process {
   // What it runs: a closure of pred(mailbox(M), io, io), and the mailbox.
   std::uint64_t closure{0};
   std::uint64_t argument{0};
+  // Whether it is on a thread of the blocking pool.
+  bool moved{false};
   // Guards `waiting` and its lists of mailboxes and monitors.
   pthread_mutex_t waitLock = PTHREAD_MUTEX_INITIALIZER;
   // Who watches it (mailbox.cpp).
@@ -106,7 +108,9 @@ Process *NewProcess(
 // rather than the thread.
 bool CanSuspend();
 
-// A target region starts or ends on this thread.
+// A target region starts or ends. Once the program has spawned, the process
+// runs the region on a thread of the blocking pool, so that it holds up no
+// worker, and goes back to the workers afterwards.
 void Pin();
 void Unpin();
 
@@ -118,6 +122,16 @@ void Wake(Process *);
 // With this process's waitLock held, which it releases: runs other processes
 // until this one is woken, or its deadline, if not negative, has passed.
 void Block(std::int64_t deadline);
+
+// Ends the program with this status. A target region still running must not
+// have libomptarget torn down under it, so then the library's destructors do
+// not run. Standard output is flushed either way.
+[[noreturn]] void ExitProgram(int status);
+// Whether ExitProgram has been called: what a region does next would use what
+// is being torn down, so it stops instead (offload.cpp).
+bool ProgramEnding();
+// offload.cpp: whether a target region is running.
+bool RegionsRunning();
 
 // After a failure, which has been reported, with its text as the reason that
 // monitors see: ends the running process alone, and does not return. It returns if the program has to end instead: on a
