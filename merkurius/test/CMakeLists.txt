@@ -8,6 +8,9 @@ configure_lit_site_cfg(
   )
 
 set(MERKURIUS_TEST_DEPENDS merkc merkstd merkurius-term-fuzzer)
+if (TARGET merkdevice)
+  list(APPEND MERKURIUS_TEST_DEPENDS merkdevice)
+endif()
 if(NOT MERKURIUS_STANDALONE_BUILD)
   list(APPEND MERKURIUS_TEST_DEPENDS FileCheck count not)
 endif()

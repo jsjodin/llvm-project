@@ -826,7 +826,24 @@ Neither uses the C++ standard library; `rpc.h` needs none.
    device compile, with the `type_info` passed in. Test, on one node: a
    region sends ints and floats to a mailbox `main` made before it, and
    `main` receives and prints them after the region; the errors for a
-   message type that is not scalar.
+   message type that is not scalar. Done (design document, "Send and
+   receive in a target region", As implemented), with two findings:
+   - **Each send waits for the host.** libc's `send` returns once the
+     buffer is handed over, so the region ended before the host had queued
+     its messages, which `main` then did not find; and the next send took
+     another port, which the server, scanning from port 0 each time, may
+     serve first, out of order. The host now answers once it has queued the
+     message, a round trip for each send, as a send on the host returns once
+     the message is queued. Batching, with arrays as messages (step 6),
+     makes up for the round trips.
+   - **Only a send in the region itself.** One in a procedure that the
+     region calls is an error in the device's compile, since its
+     `type_info` is made before the region. Step 4's loop needs it: either
+     the procedure is given the `type_info` as an argument, or the device
+     sends its own `type_info`, the address of the descriptor in the device
+     image, and the host maps it to its own descriptor through the offload
+     entries, as libomptarget maps a declare target global. To be decided
+     at step 4.
 3. **Receive on the device.** Polling with `s_sleep` between polls, and a
    timeout by the device's clock. Test: `main` sends before the region, the
    region receives, sums and sends the sum back; a timeout that passes; the
