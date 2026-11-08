@@ -115,6 +115,12 @@ void Wake(Process *);
 // until this one is woken, or its deadline, if not negative, has passed.
 void Block(std::int64_t deadline);
 
+// After a failure, which has been reported: ends the running process alone,
+// and does not return. It returns if the program has to end instead: on a
+// thread that runs no process, in `main`, or in a target or parallel region,
+// which cannot be abandoned on their own.
+void EndAfterFailure();
+
 // mailbox.cpp: closes the process's mailboxes, as it ends.
 void CloseMailboxesOf(Process *);
 

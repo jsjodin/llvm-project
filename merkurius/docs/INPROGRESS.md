@@ -847,8 +847,15 @@ ends the program. `spawn`, links and monitors do not exist.
    spawn, makes the running processes yield every 10 ms if another waits. Still
    to do: a compile option to leave out what only preemption needs, for programs
    that do not spawn.
-6. **Ending a process.** An uncaught exception ends its process with a reason
-   (route step 2), then links, monitors and `request`.
+6. **Ending a process.** Each piece its own commit. Done: an uncaught exception
+   or a stack overflow is reported and ends only its process; in `main`, on a
+   thread with no process, or in a target or parallel region it ends the
+   program. `throw` and `catch` are not needed first (decided 2026-11-08): a
+   process has nothing to unwind, and until they exist the exit reason is the
+   exception's text, which becomes a `univ` with them; `down_reason` is abstract
+   so that programs do not change. Next: monitors, with `down` at once for a
+   process already dead, which replaces the waits marked Temporary in
+   `process-failure.m` and `process-spawn.m`; then links; then `request`.
 7. **What blocks.** Target regions on a blocking pool with the process
    suspended, the hand-off for parallel regions, and blocking I/O. Node
    connections stay OS threads, which wake processes.

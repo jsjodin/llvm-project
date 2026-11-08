@@ -616,6 +616,17 @@ void Block(std::int64_t deadline) {
   AfterSwitch();
 }
 
+void EndAfterFailure() {
+  Process *self{current};
+  if (!self || self == &firstProcess || self->pinned != 0 ||
+      (omp_get_level && omp_get_level() > 0)) {
+    return;
+  }
+  // Nothing to unwind: its stack and heap go as a whole, from any depth.
+  CloseMailboxesOf(self);
+  Finish(self);
+}
+
 } // namespace merkurius::runtime
 
 extern "C" void merk_process_run_main(void (*entry)(void)) {
@@ -648,9 +659,6 @@ extern "C" void merk_process_stop(void) {
   pthread_mutex_lock(&merkurius::runtime::schedulerLock);
 }
 
-// Temporary (chunk 2 step 6, docs/INPROGRESS.md): an overflow ends the
-// program, until an uncaught error ends only its process, which its monitors
-// see.
 extern "C" void merk_stack_limit_passed(void) {
   using namespace merkurius::runtime;
   if (merk_stack_limit == kPreempted) {
@@ -661,5 +669,6 @@ extern "C" void merk_stack_limit_passed(void) {
   }
   std::fflush(stdout);
   std::fprintf(stderr, "Mercury runtime: stack overflow\n");
+  EndAfterFailure();
   std::exit(1);
 }

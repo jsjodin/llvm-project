@@ -12,12 +12,15 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "process.h"
+
 #include <cstdio>
 #include <cstdlib>
 
 extern "C" [[noreturn]] void merk_uncaught_exception(const char *exception) {
   std::fflush(stdout);
   std::fprintf(stderr, "Uncaught Mercury exception:\n%s\n", exception);
+  merkurius::runtime::EndAfterFailure();
   std::exit(1);
 }
 
