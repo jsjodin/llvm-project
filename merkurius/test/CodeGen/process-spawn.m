@@ -10,7 +10,7 @@
 % RUN: not %t.1 2> %t.1.err | FileCheck %s --check-prefix=NOTHING --allow-empty
 % RUN: FileCheck %s --check-prefix=OWNER --match-full-lines --strict-whitespace < %t.1.err
 % RUN: sed 's/^which = 0\./which = 2./' %s > %t.3.m && merkc %t.3.m -o %t.3
-% RUN: not %t.3 2> %t.3.err | FileCheck %s --check-prefix=NOTHING --allow-empty
+% RUN: %t.3 2> %t.3.err | FileCheck %s --check-prefix=NOTHING --allow-empty
 % RUN: FileCheck %s --check-prefix=OVERFLOW --match-full-lines --strict-whitespace < %t.3.err
 
 :- module process_spawn.
@@ -88,7 +88,9 @@ main(!IO) :-
         receive(Reply, any, infinity, _ : maybe(int), !IO)
     else if W = 2 then
         spawn_with_stack(100000, deep_body(100000000, Reply), _, !IO),
-        receive(Reply, any, infinity, _ : maybe(int), !IO)
+        % An overflow ends only its process. Temporary (chunk 2 step 6,
+        % docs/INPROGRESS.md): a wait, until a monitor says it has ended.
+        receive(Reply, any, after(1000), _ : maybe(int), !IO)
     else
         run(Reply, !IO)
     ).
