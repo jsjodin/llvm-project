@@ -1,0 +1,14 @@
+Regions on the GPU hold up no worker: process-target.m, whose regions run on the
+device, with one worker and with the default.
+
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/process-target.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_WORKERS=1 %t \
+RUN:   | FileCheck %S/process-target.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t \
+RUN:   | FileCheck %S/process-target.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: sed 's/^ends_early = no\./ends_early = yes./' %S/process-target.m > %t.e.m
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %t.e.m -o %t.e
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout 10 %t.e \
+RUN:   | FileCheck %S/process-target.m --check-prefix=EARLY --match-full-lines --strict-whitespace

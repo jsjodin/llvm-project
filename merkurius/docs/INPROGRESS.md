@@ -856,8 +856,10 @@ ends the program. `spawn`, links and monitors do not exist.
    so that programs do not change. Monitors are done (design document, Exceptions,
    links and monitors), on one node. Links are deferred (decided 2026-11-08): two monitors give the same two-way message, and they can be added later if something needs them. `request` is done, so this step is. Open: a
    monitor across nodes or places reports that it is not supported yet.
-7. **What blocks.** Target regions on a blocking pool with the process
-   suspended, the hand-off for parallel regions, and blocking I/O. Node
+7. **What blocks.** Each piece its own commit. Done: target regions, on a
+   blocking pool (design document, OpenMP cooperation). Next: the hand-off for
+   parallel regions, with the claim of a team's size, and blocking I/O,
+   including `lookup` and `connect`, both by the same move to the pool. Node
    connections stay OS threads, which wake processes.
 8. **The GPU with processes.** A region's launch does not hold a worker,
    ping-pong between `main` and a GPU of its own node, regions on several
