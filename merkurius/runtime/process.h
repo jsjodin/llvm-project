@@ -66,6 +66,8 @@ struct Process {
   // What it runs: a closure of pred(mailbox(M), io, io), and the mailbox.
   std::uint64_t closure{0};
   std::uint64_t argument{0};
+  // The cores its parallel region has claimed, or 0.
+  int team{0};
   // Whether it is on a thread of the blocking pool.
   bool moved{false};
   // Guards `waiting` and its lists of mailboxes and monitors.
@@ -113,6 +115,10 @@ bool CanSuspend();
 // worker, and goes back to the workers afterwards.
 void Pin();
 void Unpin();
+// The same for a parallel region, which also claims its team's cores: the
+// first returns the team's size.
+int EnterParallelRegion();
+void ExitParallelRegion();
 
 // Makes a new process runnable.
 void Start(Process *);
