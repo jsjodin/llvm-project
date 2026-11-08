@@ -2719,6 +2719,26 @@ Only the relay through the host can be tested on our machine, whose gfx1030
 is a consumer GPU; the direct paths need Instinct or NVIDIA datacenter GPUs
 with RDMA NICs.
 
+**What choosing among links adds** (discussed 2026-11-08; not built). With two
+GPUs joined by Infinity Fabric, or by NVLink and NVSwitch, the program still
+names only a mailbox, and the route depends on the pair of places. Going
+faster than through the host needs four more things than the table above:
+
+- **Where the mailbox's queue lives.** Every queue is on the host today. To
+  gain from a fast link, the queue must be in memory that the sending GPU can
+  write directly, normally the receiving GPU's. So the queue's place is part of
+  the choice, made when a device first uses the mailbox.
+- **Several senders.** The host's queue is protected by a lock, and the ring it
+  fills has one producer. GPUs writing straight into a peer's ring have no such
+  lock, so that ring needs its slots reserved atomically.
+- **The order of messages.** Messages from one sender to one mailbox stay in
+  order, and mixing routes can break that: small messages through a ring and
+  large ones through a copy can overtake each other. Either a sender and a
+  mailbox keep one route, or messages carry sequence numbers.
+- **The size of the message.** A small message suits a direct store into the
+  ring. A large one suits a DMA copy, with only its address and size going
+  through the ring. So the lookup is by source, destination and size class.
+
 #### Send and receive in a target region
 
 A target region whose goal threads `io` may send and receive. It is then, in
