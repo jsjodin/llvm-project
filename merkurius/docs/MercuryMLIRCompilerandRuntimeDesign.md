@@ -2797,8 +2797,9 @@ limits until they are lifted. Handles are flat values, so they are mapped into t
   waits on the mailbox as `receive/5` does. A cell made on the device, such
   as `yes(N)`, comes from `merk_device_alloc`, the OpenMP device runtime's
   `malloc`: LLVM libc's GPU allocator when the OpenMP device runtime is
-  built with libc, and otherwise its bump allocator of 1 MiB, which is this
-  tree's build. Nothing is freed yet. Another selector, or a message of
+  built with libc for the GPU, as `build_merk.sh` builds it, and otherwise
+  its bump allocator of 1 MiB, which traps when it is full
+  (`CodeGen/omp-target-allocate.m` needs more). Nothing is freed yet. Another selector, or a message of
   another type, is an error at the receive; a selector over several
   mailboxes is an error at its closures in the device's compile.
   `CodeGen/omp-target-receive.m`, with its GPU run,

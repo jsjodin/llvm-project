@@ -19,8 +19,10 @@ usage() {
 Usage: $(basename "$0") [command]
 
 Builds LLVM with MLIR, Clang (with CIR), LLD, Flang and Merkurius, plus the
-openmp, compiler-rt and offload runtimes for the host and for AMD GPUs
-(amdgcn-amd-amdhsa). Targets: X86, AMDGPU, AArch64. Uses Ninja and ccache.
+openmp, compiler-rt and offload runtimes for the host, and openmp and libc
+for AMD GPUs (amdgcn-amd-amdhsa), so that the OpenMP device runtime's malloc
+is libc's GPU allocator. Targets: X86, AMDGPU, AArch64. Uses Ninja and
+ccache.
 
 Commands:
   (none)      Configure from scratch, build and install. Use this the first
@@ -76,7 +78,7 @@ do_configure() {
     -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU;AArch64" \
     -DLLVM_ENABLE_RUNTIMES="openmp;compiler-rt;offload" \
     -DLLVM_RUNTIME_TARGETS="default;amdgcn-amd-amdhsa" \
-    -DRUNTIMES_amdgcn-amd-amdhsa_LLVM_ENABLE_RUNTIMES=openmp \
+    -DRUNTIMES_amdgcn-amd-amdhsa_LLVM_ENABLE_RUNTIMES="libc;openmp" \
     -DRUNTIMES_amdgcn-amd-amdhsa_LLVM_ENABLE_PER_TARGET_RUNTIME_DIR=ON \
     -DCOMPILER_RT_BUILD_SANITIZERS=ON \
     -DCLANG_DEFAULT_LINKER=lld \
