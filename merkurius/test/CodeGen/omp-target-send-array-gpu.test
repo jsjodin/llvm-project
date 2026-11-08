@@ -1,0 +1,8 @@
+The program of omp-target-send-array.m, compiled by the driver for the
+machine's GPU and run there: the callback copies each array from the device
+while the kernel runs, by the small copies' path and, at 2 MiB, the large.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-send-array.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout -k 1 60 %t \
+RUN:   | FileCheck %S/omp-target-send-array.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

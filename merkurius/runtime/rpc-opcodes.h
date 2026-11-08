@@ -45,6 +45,12 @@ constexpr uint32_t rpcChunk{RpcOpcode(3)};
 // host copies it to the host and answers with the copy's address.
 constexpr uint32_t rpcGiveArray{RpcOpcode(4)};
 
+// A send of an array of one-word elements: the buffer's words are the
+// handle's five, the message type's key, the array's address, and its size
+// in elements above the device's number in the low 8 bits. The host copies
+// the array from the device, and answers once it has queued it.
+constexpr uint32_t rpcSendArray{RpcOpcode(5)};
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_RPC_OPCODES_H_
