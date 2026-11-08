@@ -11,12 +11,12 @@ CHECK:      "-fc1" "-emit-llvm-bc" "-fopenmp" "-O2" "--offload-targets=amdgpu-am
 CHECK-NEXT: "-fc1" "-emit-llvm-bc" "-fopenmp" "-triple" "amdgpu10.30-amd-amdhsa" "-O2" "-fopenmp-is-target-device" "-fopenmp-host-ir-file-path" "[[HOST]]" "-o" "[[DEVICE:[^"]*sumsq-gfx1030-[^"]*\.bc]]" "{{[^"]*}}sumsq.m"{{$}}
 CHECK-NEXT: "{{[^"]*}}llvm-offload-binary{{(\.exe)?}}" "-o" "[[BINARY:[^"]*\.out]]" "--image=file=[[DEVICE]],triple=amdgpu10.30-amd-amdhsa,arch=gfx1030,kind=openmp"{{$}}
 CHECK-NEXT: "-fc1" "-emit-obj" "-fopenmp" "-O2" "-fembed-offload-object=[[BINARY]]" "--offload-targets=amdgpu-amd-amdhsa" "-o" "[[OBJECT:[^"]*sumsq-[^"]*\.o]]" "-x" "ir" "[[HOST]]"{{$}}
-CHECK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "-fopenmp" "--offload-arch=gfx1030" "-o" "prog" "[[OBJECT]]" "-L/omp/lib" "-L{{[^"]*}}lib" "-lmerkstd" "-lmerkrt" "-lm"{{$}}
+CHECK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "-fopenmp" "--offload-arch=gfx1030" "-Xoffload-linker-amdgcn-amd-amdhsa" "{{[^"]*}}libmerkdevice-amdgcn.a" "-o" "prog" "[[OBJECT]]" "-L/omp/lib" "-L{{[^"]*}}lib" "-lmerkstd" "-lmerkrt" "-lm"{{$}}
 
 With -v, Clang shows the link's own jobs too, such as the linker wrapper's.
 RUN: merkc -### -v -fopenmp --offload-arch=gfx1030 %S/Inputs/sumsq.m -o prog 2>&1 \
 RUN:   | FileCheck %s --check-prefix=VERBOSE
-VERBOSE: "{{[^"]*}}clang{{(\.exe)?}}" "-v" "-fopenmp" "--offload-arch=gfx1030" "-o" "prog"
+VERBOSE: "{{[^"]*}}clang{{(\.exe)?}}" "-v" "-fopenmp" "--offload-arch=gfx1030" "-Xoffload-linker-amdgcn-amd-amdhsa" "{{[^"]*}}libmerkdevice-amdgcn.a" "-o" "prog"
 
 Two GPUs give a device job each, and two images in the binary.
 RUN: merkc -### -fopenmp --offload-arch=gfx1030,gfx90a -c %S/Inputs/sumsq.m 2>&1 \

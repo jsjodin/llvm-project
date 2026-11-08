@@ -3004,9 +3004,11 @@ llvm::LogicalResult Lowerer::LowerOpenMP() {
     return llvm::success();
   }
   // Only this module's procedures are compiled for the device so far: not
-  // other modules', such as the library's, nor foreign code.
+  // other modules', such as the library's, nor foreign code. The device's
+  // runtime library has the merk_device_ functions (runtime/device), which
+  // the driver links into the device image.
   for (auto func : module_.getOps<mlir::LLVM::LLVMFuncOp>()) {
-    if (!func.isExternal()) {
+    if (!func.isExternal() || func.getSymName().starts_with("merk_device_")) {
       continue;
     }
     if (auto uses{mlir::SymbolTable::getSymbolUses(func, module_)};

@@ -387,6 +387,11 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     return true;
   }
   llvm::StringRef module{symbol.module};
+  if (module == "process" && symbol.name == "send" && symbol.arity == 4) {
+    if (mlir::omp::TargetOp target{EnclosingTarget()}) {
+      return SendInTarget(goal, target, arguments, body);
+    }
+  }
   if (module == "builtin" ||
       (module == "array" && symbol.name == "array_compare")) {
     return CompareBuiltin(goal, callee, arguments, body);
