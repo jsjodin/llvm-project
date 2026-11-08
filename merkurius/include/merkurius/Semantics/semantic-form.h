@@ -105,6 +105,19 @@ ENUM_CLASS(FunctorKind, Name, Cons, Nil, Tuple, Literal,
 
 struct Lambda;
 
+// A case of a receive goal's selector (design document, "The receive
+// goal"): the predicate that tries one mailbox's arms, in order, as a chain
+// of if-then-elses whose conditions unify its first argument, the message,
+// with the arms' patterns. For the unselected-message warning, the
+// mailbox's term, by whose text the cases of a predicate's receive goals
+// are grouped, and for each arm whether its pattern selects every message,
+// as a variable of the arm's own does.
+struct ReceiveCase {
+  TokenRange mailbox;
+  llvm::StringRef text;
+  llvm::ArrayRef<bool> takesAll;
+};
+
 struct Functor {
   FunctorKind kind;
   const parser::SymName *name; // for Name
@@ -139,9 +152,10 @@ struct Lambda {
   llvm::ArrayRef<std::optional<parser::Mode>> modes;
   std::optional<parser::Determinism> determinism;
   Goal body;
-  // The predicate of a case of a receive goal's selector, whose nonlocal
-  // variables are those of its patterns that occur outside the goal.
-  bool receive{false};
+  // For the predicate of a case of a receive goal's selector, whose
+  // nonlocal variables are those of its patterns that occur outside the
+  // goal, the case.
+  const ReceiveCase *receive{nullptr};
 };
 
 // p(X1, ..., Xn); event p(...) is a call too.

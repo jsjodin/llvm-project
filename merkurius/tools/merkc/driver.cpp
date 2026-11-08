@@ -86,6 +86,10 @@ static void addFrontendOptions(const InputArgList &args, Job &job,
   if (args.hasArg(OPT_fstub_unimplemented)) {
     job.push_back("-fstub-unimplemented");
   }
+  if (const llvm::opt::Arg *arg = args.getLastArg(
+          OPT_Wunselected_message, OPT_Wno_unselected_message)) {
+    job.push_back(arg->getAsString(args));
+  }
   for (const llvm::opt::Arg *arg : args.filtered(OPT_trace_flag_EQ)) {
     job.push_back(arg->getAsString(args));
   }

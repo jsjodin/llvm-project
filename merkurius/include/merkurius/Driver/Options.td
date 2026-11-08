@@ -42,6 +42,12 @@ def fdo_loops : Flag<["-"], "fdo-loops">,
   HelpText<"Read ( Iterators do Body ) loops, which are not Mercury">;
 def freceive_goal : Flag<["-"], "freceive-goal">,
   HelpText<"Read receive [Params] ( Arms ) goals, which are not Mercury">;
+def Wunselected_message : Flag<["-"], "Wunselected-message">,
+  HelpText<"Warn about a mailbox whose receive goals' arms leave out a "
+           "constructor of its messages (the default)">;
+def Wno_unselected_message : Flag<["-"], "Wno-unselected-message">,
+  HelpText<"Do not warn about a mailbox whose receive goals' arms leave out "
+           "a constructor of its messages">;
 def fstub_unimplemented : Flag<["-"], "fstub-unimplemented">,
   HelpText<"Give a procedure that code generation cannot make yet a body "
            "that reports it at run time, rather than report it; for "

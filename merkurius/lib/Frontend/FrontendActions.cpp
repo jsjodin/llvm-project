@@ -23,6 +23,7 @@
 #include "merkurius/Semantics/check-uniqueness.h"
 #include "merkurius/Semantics/check-modes.h"
 #include "merkurius/Semantics/check-purity.h"
+#include "merkurius/Semantics/check-receives.h"
 #include "merkurius/Semantics/check-types.h"
 #include "merkurius/Semantics/desugar.h"
 #include "merkurius/Semantics/module-loader.h"
@@ -736,6 +737,9 @@ Analysed Analyse(CompilerInstance &ci, Resolved &r) {
   bool earlier{r.messages.AnyFatalError()};
   std::unique_ptr<semantics::ModeChecking> modes{semantics::CheckModes(*r.tree,
       r.tokens, *r.form, *r.resolution, *types, r.messages, options)};
+  if (frontend.warnUnselectedMessage) {
+    semantics::CheckReceives(r.tokens, *types, modes->constructors(), r.messages);
+  }
   std::unique_ptr<semantics::DeterminismChecking> determinism{
       semantics::CheckDeterminism(
           r.tokens, *types, *modes, r.messages, !earlier)};
