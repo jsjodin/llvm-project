@@ -157,8 +157,8 @@ const Word kListOfParameter[2]{
 const Word kConsFields[2]{
     kParameter0, reinterpret_cast<Word>(kListOfParameter) + 1};
 const Functor kListFunctors[2]{
-    {"[]", 0, 0, 0, -1, 0, nullptr},
-    {"[|]", 2, 1, 0, -1, 0, kConsFields},
+    {"[]", 0, 0, 0, 0, -1, 0, nullptr},
+    {"[|]", 2, 1, 0, 0, -1, 0, kConsFields},
 };
 const std::uint16_t kListConstants[1]{0};
 const TypeCtor kList{Cells, 0, 1, 2, "list", "list", nullptr, nullptr,

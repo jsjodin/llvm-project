@@ -90,6 +90,8 @@ struct TermLayout {
     // (Merk_ConstructorAttr).
     unsigned arity;
     unsigned hidden{0};
+    // How many of those are type_infos; the rest are typeclass_infos.
+    unsigned hiddenTypeInfos{0};
     // A constant's word, or a cell's primary tag and secondary tag.
     std::int64_t value{0};
     unsigned tag{0};
@@ -447,6 +449,9 @@ llvm::LogicalResult Lowerer::Layouts() {
           constructor.getFields().begin(), constructor.getFields().end());
       functor.arity = functor.fields.size();
       functor.hidden = constructor.getHidden();
+      functor.hiddenTypeInfos = static_cast<unsigned>(llvm::count_if(
+          constructor.getFields().take_front(functor.hidden),
+          [](mlir::Type type) { return mlir::isa<merk::TypeInfoType>(type); }));
       if (functor.arity == 0) {
         functor.value = layout.kind == TermLayout::Kind::Enum
             ? constant
@@ -1396,7 +1401,7 @@ static std::optional<unsigned> DescriptorKind(llvm::StringRef kind) {
 // Each is { i8 kind, i8 flags, i16 arity, i32 functor count, ptr module,
 // ptr name, ptr unify, ptr compare, ptr functors, [8 x i16] byTag,
 // ptr constants, ptr shared }, and a functor { ptr name, i32 arity, i8 tag,
-// i8 hidden, i32 secondary, i64 constant, ptr fields } (design document, "Type
+// i8 hidden, i8 hiddenTypeInfos, i32 secondary, i64 constant, ptr fields } (design document, "Type
 // descriptors", and runtime/write.cpp, which reads them).
 // A private constant global, whose initializer is made by `make`, which is given
 // the zero value and returns the value.
@@ -1504,7 +1509,7 @@ llvm::LogicalResult Lowerer::LowerTypeCtors() {
           mlir::LLVM::LLVMArrayType::get(i16, kTags), ptr, ptr})};
   auto i64{rewriter_.getI64Type()};
   auto functorType{mlir::LLVM::LLVMStructType::getLiteral(
-      context, {ptr, i32, i8, i8, i32, i64, ptr})};
+      context, {ptr, i32, i8, i8, i8, i32, i64, ptr})};
   llvm::DenseMap<mlir::Attribute, mlir::LLVM::GlobalOp> fieldCells;
   for (auto op :
       llvm::make_early_inc_range(module_.getOps<merk::TypeCtorOp>())) {
@@ -1633,17 +1638,22 @@ llvm::LogicalResult Lowerer::LowerTypeCtors() {
                       functor ? static_cast<std::int32_t>(functor->hidden) : 0),
                   loc);
               init = InsertAt(init, {index, 4},
+                  mlir::LLVM::ConstantOp::create(rewriter_, loc, i8,
+                      functor ? static_cast<std::int32_t>(functor->hiddenTypeInfos)
+                              : 0),
+                  loc);
+              init = InsertAt(init, {index, 5},
                   mlir::LLVM::ConstantOp::create(rewriter_, loc, i32,
                       functor && functor->secondary
                           ? static_cast<std::int32_t>(*functor->secondary)
                           : -1),
                   loc);
-              init = InsertAt(init, {index, 5},
+              init = InsertAt(init, {index, 6},
                   mlir::LLVM::ConstantOp::create(
                       rewriter_, loc, i64, functor ? functor->value : 0),
                   loc);
               if (fields[i]) {
-                init = InsertAt(init, {index, 6},
+                init = InsertAt(init, {index, 7},
                     mlir::LLVM::AddressOfOp::create(rewriter_, loc, fields[i]),
                     loc);
               }

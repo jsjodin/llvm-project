@@ -87,6 +87,45 @@ bool CopiedAsItIs(const TypeCtor *ctor) {
   }
 }
 
+// A type_info: a descriptor is static, and a cell of one and its arguments'
+// type_infos is copied.
+Word CopyTypeInfo(Word info, Fragment &fragment) {
+  if ((info & kTagMask) == 0) {
+    return info;
+  }
+  const Word *cell{reinterpret_cast<const Word *>(info - 1)};
+  const auto *ctor{reinterpret_cast<const TypeCtor *>(cell[0])};
+  bool counted{ctor->kind == Tuple || ctor->kind == Closure};
+  Word arity{counted ? cell[1] : ctor->arity};
+  Word before{counted ? Word{2} : Word{1}};
+  auto *copy{
+      static_cast<Word *>(fragment.Allocate(sizeof(Word) * (before + arity)))};
+  for (Word i{0}; i < before; ++i) {
+    copy[i] = cell[i];
+  }
+  for (Word i{0}; i < arity; ++i) {
+    copy[before + i] = CopyTypeInfo(cell[before + i], fragment);
+  }
+  return reinterpret_cast<Word>(copy) + 1;
+}
+
+// A typeclass_info, by its method table's shape. The table is static.
+Word CopyDictionary(Word dictionary, Fragment &fragment) {
+  const Word *cell{reinterpret_cast<const Word *>(dictionary)};
+  DictionaryShape shape{ShapeOfDictionary(cell)};
+  Word total{shape.superclasses + shape.typeInfos + shape.constraints};
+  auto *copy{
+      static_cast<Word *>(fragment.Allocate(sizeof(Word) * (1 + total)))};
+  copy[0] = cell[0];
+  for (Word i{1}; i <= total; ++i) {
+    bool isTypeInfo{i > shape.superclasses &&
+        i <= shape.superclasses + shape.typeInfos};
+    copy[i] = isTypeInfo ? CopyTypeInfo(cell[i], fragment)
+                         : CopyDictionary(cell[i], fragment);
+  }
+  return reinterpret_cast<Word>(copy);
+}
+
 Word CopyValue(Word value, Word type, const Environment *environment,
     Fragment &fragment) {
   Type resolved{Resolve(type, environment)};
@@ -113,10 +152,6 @@ Word CopyTerm(Word value, const Type &type, Fragment &fragment) {
       *slot = CopyValue(value, functor->fields[0], &type.environment, fragment);
       return result;
     }
-    if (functor->hidden != 0) {
-      Fail("cannot send a value with an existentially typed constructor yet: ",
-          functor->name);
-    }
     unsigned tag{type.ctor->kind == Tuple
             ? functor->tag
             : static_cast<unsigned>(value & kTagMask)};
@@ -126,9 +161,23 @@ Word CopyTerm(Word value, const Type &type, Fragment &fragment) {
     unsigned arity{functor->arity};
     Word *cell{static_cast<Word *>(
         fragment.Allocate(sizeof(Word) * (before + arity)))};
-    for (unsigned i{0}; i < before; ++i) {
+    // Its secondary tag, and then the type_infos and typeclass_infos of an
+    // existentially typed constructor, which the fields' types read.
+    unsigned hidden{functor->hidden};
+    for (unsigned i{0}; i < before - hidden; ++i) {
       cell[i] = from[i];
     }
+    const Word *hiddenFrom{fields - hidden};
+    Word *hiddenTo{cell + before - hidden};
+    for (unsigned i{0}; i < hidden; ++i) {
+      hiddenTo[i] = i < functor->hiddenTypeInfos
+          ? CopyTypeInfo(hiddenFrom[i], fragment)
+          : CopyDictionary(hiddenFrom[i], fragment);
+    }
+    Environment existential{type.environment.arguments,
+        type.environment.parent, hiddenFrom};
+    const Environment *environment{
+        hidden != 0 ? &existential : &type.environment};
     *slot = reinterpret_cast<Word>(cell) + tag;
     Word *copied{cell + before};
     if (arity == 0) {
@@ -136,12 +185,12 @@ Word CopyTerm(Word value, const Type &type, Fragment &fragment) {
     }
     for (unsigned i{0}; i + 1 < arity; ++i) {
       copied[i] =
-          CopyValue(fields[i], functor->fields[i], &type.environment, fragment);
+          CopyValue(fields[i], functor->fields[i], environment, fragment);
     }
     Word last{functor->fields[arity - 1]};
     if (!IsSameType(last, type) || type.ctor->kind == Tuple) {
       copied[arity - 1] =
-          CopyValue(fields[arity - 1], last, &type.environment, fragment);
+          CopyValue(fields[arity - 1], last, environment, fragment);
       return result;
     }
     value = fields[arity - 1];
