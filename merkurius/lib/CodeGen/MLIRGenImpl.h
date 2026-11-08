@@ -194,6 +194,24 @@ private:
   // None for another constructor; null if a variable's type_info is only
   // inside a constraint's argument's, which is not handled yet.
   std::optional<HiddenFields> HiddenFieldsOf(const semantics::ConstructorTypes &);
+  // Where a constrained variable's type_info is: the typeclass_info of the
+  // first constraint that has it as an argument, `first` being the first
+  // typeclass_info's place, and the word of it, after the method table and
+  // the superclasses' typeclass_infos.
+  std::optional<std::pair<unsigned, unsigned>> ConstrainedPlace(unsigned var,
+      llvm::ArrayRef<semantics::ClassConstraint>, unsigned first);
+  // Where a closure's captures have the type_info of each type variable:
+  // the capture, and the word of it if that is a typeclass_info, or else 0.
+  using CapturePlaces =
+      llvm::DenseMap<unsigned, std::pair<unsigned, unsigned>>;
+  // What a closure's layout says of a capture of this type, as
+  // merk.closure's `captures`; null if code generation has failed.
+  mlir::Attribute CaptureTypeAttr(const semantics::Type &,
+      const CapturePlaces &, parser::CharBlock);
+  // Whether a descriptor can be made for the type without an error.
+  bool CanDescribe(const semantics::Type &);
+  // Null on a device, which never copies a closure.
+  mlir::ArrayAttr CapturesAttr(llvm::ArrayRef<mlir::Attribute>);
   // A constructor's arguments' types in `type`, an existentially quantified
   // type variable numbered from ExistentialBase(type) by its order, so that it
   // is none of the type's.

@@ -400,6 +400,23 @@ llvm::SmallVector<mlir::Type> MerkGenerator::HiddenOutputs(
   return hidden;
 }
 
+std::optional<std::pair<unsigned, unsigned>> MerkGenerator::ConstrainedPlace(
+    unsigned var, llvm::ArrayRef<semantics::ClassConstraint> constraints,
+    unsigned first) {
+  for (auto [i, constraint] : llvm::enumerate(constraints)) {
+    unsigned supers{static_cast<unsigned>(
+        types_.SuperclassesOf(*constraint.typeclass).size())};
+    for (auto [j, argument] : llvm::enumerate(constraint.arguments)) {
+      if (argument->kind == semantics::TypeKind::Variable &&
+          argument->var == var) {
+        return std::make_pair(first + static_cast<unsigned>(i),
+            supers + static_cast<unsigned>(j) + 1);
+      }
+    }
+  }
+  return std::nullopt;
+}
+
 std::optional<MerkGenerator::HiddenFields> MerkGenerator::HiddenFieldsOf(
     const semantics::ConstructorTypes &constructor) {
   HiddenFields hidden;
@@ -434,22 +451,8 @@ std::optional<MerkGenerator::HiddenFields> MerkGenerator::HiddenFieldsOf(
     if (!constrained[var]) {
       continue;
     }
-    std::optional<std::pair<unsigned, unsigned>> place;
-    for (auto [i, constraint] : llvm::enumerate(constraints)) {
-      unsigned supers{static_cast<unsigned>(
-          types_.SuperclassesOf(*constraint.typeclass).size())};
-      for (auto [j, argument] : llvm::enumerate(constraint.arguments)) {
-        if (argument->kind == semantics::TypeKind::Variable &&
-            argument->var == var) {
-          place = {first + static_cast<unsigned>(i),
-              supers + static_cast<unsigned>(j) + 1};
-          break;
-        }
-      }
-      if (place) {
-        break;
-      }
-    }
+    std::optional<std::pair<unsigned, unsigned>> place{
+        ConstrainedPlace(var, constraints, first)};
     if (!place) {
       return std::nullopt;
     }
