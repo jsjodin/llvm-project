@@ -36,6 +36,7 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -3303,6 +3304,26 @@ bool NeedsStackCheck(const CallNode &node, llvm::ArrayRef<CallNode> nodes) {
   });
 }
 
+// The address of a thread-local variable of the runtime, on the thread that
+// runs now. A process can change threads at any call, and LLVM's
+// llvm.threadlocal.address does not say so to the backend, which treats the
+// thread pointer as a constant and moves it out of loops and across calls. An
+// inline asm with a side effect stays where it is. Other targets have no
+// processes yet (runtime/stack.h).
+llvm::Value *CurrentThreadAddress(
+    llvm::IRBuilder<> &builder, llvm::GlobalVariable &variable) {
+  llvm::Module &module{*builder.GetInsertBlock()->getModule()};
+  if (module.getTargetTriple().getArch() != llvm::Triple::x86_64) {
+    return builder.CreateThreadLocalAddress(&variable);
+  }
+  std::string assembly{"movq %fs:0, $0\n\tleaq "};
+  assembly += variable.getName();
+  assembly += "@tpoff($0), $0";
+  auto *type{llvm::FunctionType::get(builder.getPtrTy(), false)};
+  return builder.CreateCall(
+      llvm::InlineAsm::get(type, assembly, "=r", /*hasSideEffects=*/true));
+}
+
 // Whether the procedure needs to look at the stack's limit, which the
 // scheduler also uses to preempt a process (Processes and scheduler): one
 // that can recurse without limit, one that is on any cycle through tail calls,
@@ -3327,7 +3348,7 @@ llvm::BasicBlock *AddCheckAt(llvm::BasicBlock &block,
       llvm::BasicBlock::Create(context, "stack.passed", block.getParent())};
   llvm::IRBuilder<> builder{&block};
   llvm::Value *bound{builder.CreateAlignedLoad(builder.getPtrTy(),
-      builder.CreateThreadLocalAddress(&limit), llvm::Align(8))};
+      CurrentThreadAddress(builder, limit), llvm::Align(8))};
   llvm::Value *below{builder.CreateICmpULT(builder.CreateStackSave(), bound)};
   builder.CreateCondBr(below, failed, rest,
       llvm::MDBuilder{context}.createBranchWeights(1, 2000));
@@ -3427,7 +3448,7 @@ void ExpandHeapAddresses(llvm::Module &module) {
   while (!marker->use_empty()) {
     auto *call{llvm::cast<llvm::CallInst>(marker->user_back())};
     llvm::IRBuilder<> builder{call};
-    llvm::Value *address{builder.CreateThreadLocalAddress(heap)};
+    llvm::Value *address{CurrentThreadAddress(builder, *heap)};
     call->replaceAllUsesWith(address);
     call->eraseFromParent();
   }
