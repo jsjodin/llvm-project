@@ -103,6 +103,10 @@ def stall():
     client = start("stall", port)
     print("client: " + client.stdout.readline().rstrip("\n"))
     server.send_signal(signal.SIGSTOP)
+    # kill returns before all of the server's threads have stopped: the one
+    # that takes the signal stops the others once it runs, and until then
+    # they can still answer.
+    os.waitpid(server.pid, os.WUNTRACED)
     began = time.monotonic()
     client.stdin.write("go\n")
     client.stdin.flush()
