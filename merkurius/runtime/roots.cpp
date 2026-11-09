@@ -256,6 +256,10 @@ constexpr std::int64_t kIgnored{-1};
 constexpr std::int64_t kUpdateOnly{-2};
 // A process's first collection comes after this many bytes.
 constexpr std::size_t kFirstCollectBytes{4 << 20};
+// A collection walks the whole stack, so that the allocation between two
+// pays for it. A round number, not tuned: 4 took the deep stack benchmark from
+// 16.2 s to 3.5 s (design document, Measurements).
+constexpr std::size_t kStackFactor{4};
 constexpr std::size_t kMostToChunkBytes{1 << 20};
 constexpr std::size_t kKeepBytes{1 << 16};
 
@@ -460,6 +464,8 @@ public:
   void UpdateOnly(Word *slot);
   void Drain();
   void Finish();
+  // A frame of this many bytes was walked.
+  void CountStack(std::uint64_t bytes) { stackBytes_ += bytes; }
 
 private:
   bool KeepLarge(ChunkLink *chunk);
@@ -511,6 +517,7 @@ private:
   char *toLimit_{nullptr};
   std::size_t toChunkBytes_{4096};
   std::size_t liveBytes_{0};
+  std::size_t stackBytes_{0};
   Pending *pending_{nullptr};
   std::size_t pendingCount_{0};
   std::size_t pendingCapacity_{0};
@@ -1025,8 +1032,12 @@ void Collector::Finish() {
   }
   merk_heap = poison ? MerkHeap{nullptr, nullptr} : MerkHeap{toNext_, toLimit_};
   process_->allocatedBytes = 0;
+  // Enough allocation to pay for the next collection's work, as well as for
+  // what the heap has: it copies what is live and walks the whole stack.
+  std::size_t due{2 * liveBytes_ > kFirstCollectBytes ? 2 * liveBytes_
+                                                      : kFirstCollectBytes};
   process_->collectAtBytes =
-      2 * liveBytes_ > kFirstCollectBytes ? 2 * liveBytes_ : kFirstCollectBytes;
+      kStackFactor * stackBytes_ > due ? kStackFactor * stackBytes_ : due;
 }
 
 std::atomic<int> rootsState{-1};
@@ -1124,6 +1135,9 @@ bool CollectIfDue(void *frame) {
   }
   Collector collector{process};
   VisitFrames(frame, [&](const Safepoint &safepoint, char *stack) {
+    if (safepoint.stackSize != ~std::uint64_t{0}) {
+      collector.CountStack(safepoint.stackSize);
+    }
     VisitFrame(safepoint, stack,
         [&](Word *slot, std::int64_t type, const Word *infos, std::int64_t count) {
           if (type >= 0) {
