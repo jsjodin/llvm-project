@@ -3949,6 +3949,8 @@ Taking the next process first, 2026-11-08, on top of 06f2d398af98, `cpu-process`
 The send ring's prototype against the RPC, 2026-11-08, on a5efa6819f86, `-O2`, 20000 rounds, 9 alternating runs, median µs a round, RPC and ring: `gpu-local` 13.29 and 13.48, `gpu-process` 13.22 and 12.61, GPU and CPU between nodes 31.96 and 26.41, GPU and GPU between nodes 41.39 and 36.37. The ring is not built; see INPROGRESS, The send ring.
 
 
+A token between a kernel's teams through device memory, 2026-11-09, on 51e6275ebfde, a C++ OpenMP probe at `-O2`, gfx1030 (RX 6950 XT), 200,000 one-way hops, 3 runs, machine otherwise idle apart from the desktop on the same GPU, ns a hop on the device's clock, polling teams: 2 teams 200, 4 to 64 teams 240, 256 teams 264, 1024 teams 520, 2048 teams 1125. Teams of 64 idle threads cost the same as teams of one (2 and 16 teams). One word with a cache line to itself, not yet a message with a queue; proposed in `INPROGRESS.md`, "Processes as teams".
+
 ### Heap pointers in an address space of their own
 
 Measured on 2026-11-08, commit 559bb24685ad against 5df05bc20023, the commit
