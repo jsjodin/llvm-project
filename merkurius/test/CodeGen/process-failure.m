@@ -26,10 +26,10 @@ in_main = no.
 divider(Reply, Box, !IO) :-
     receive(Box, any, infinity, Got, !IO),
     (
-        Got = yes(N),
+        Got = message(N),
         send(Reply, 100 // N, !IO)
     ;
-        Got = no
+        Got = timeout
     ).
 
 :- func deep(int) = int.
@@ -40,20 +40,20 @@ deep(N) = (deep(N + 1) >> 1) - N.
 overflower(Reply, Box, !IO) :-
     receive(Box, any, infinity, Got, !IO),
     (
-        Got = yes(N),
+        Got = message(N),
         send(Reply, deep(N), !IO)
     ;
-        Got = no
+        Got = timeout
     ).
 
 :- pred echo(mailbox(int)::in, mailbox(int)::in, io::di, io::uo) is det.
 echo(Reply, Box, !IO) :-
     receive(Box, any, infinity, Got, !IO),
     (
-        Got = yes(N),
+        Got = message(N),
         send(Reply, N + 1, !IO)
     ;
-        Got = no
+        Got = timeout
     ).
 
 main(!IO) :-
@@ -84,11 +84,11 @@ main(!IO) :-
 report(Downs, !IO) :-
     receive(Downs, any, infinity, Got, !IO),
     (
-        Got = yes(Down),
+        Got = message(Down),
         io.write_string(reason_text(reason(Down)), !IO),
         io.nl(!IO)
     ;
-        Got = no,
+        Got = timeout,
         io.write_string("no down\n", !IO)
     ).
 
@@ -98,7 +98,7 @@ zero = 0.
 
 % OUTPUT:domain_error("int.\'//\': division by zero")
 % OUTPUT-NEXT:stack overflow
-% OUTPUT-NEXT:yes(42)
+% OUTPUT-NEXT:message(42)
 % OUTPUT-NOT:{{.}}
 
 % REPORTS-DAG:Uncaught Mercury exception:

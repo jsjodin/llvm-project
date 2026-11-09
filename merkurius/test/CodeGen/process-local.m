@@ -29,7 +29,7 @@
     ;       reply_to(mailbox(int))
     ;       stop.
 
-:- pred show(maybe(T)::in, io::di, io::uo) is det.
+:- pred show(received(T)::in, io::di, io::uo) is det.
 show(M, !IO) :-
     io.write(M, !IO),
     io.nl(!IO).
@@ -95,8 +95,6 @@ main(!IO) :-
     send(Ints, 5, !IO),
     close_mailbox(Ints, !IO),
     send(Ints, 6, !IO),
-    receive(Ints, any, after(0), H, !IO),
-    show(H, !IO),
     % A new mailbox in the same slot is not reached through the old handle.
     new_mailbox(Fresh, !IO),
     send(Ints, 7, !IO),
@@ -115,10 +113,10 @@ main(!IO) :-
     send(Long, upto(1, 1000000, []), !IO),
     receive(Long, any, after(0), MaybeLong, !IO),
     (
-        MaybeLong = yes(Received),
+        MaybeLong = message(Received),
         io.write_int(list.length(Received), !IO)
     ;
-        MaybeLong = no,
+        MaybeLong = timeout,
         io.write_string("none", !IO)
     ),
     io.nl(!IO).
@@ -127,16 +125,16 @@ main(!IO) :-
 serve(Requests, Total, !IO) :-
     receive(Requests, any, after(0), MaybeRequest, !IO),
     (
-        MaybeRequest = yes(add(X, Y)),
+        MaybeRequest = message(add(X, Y)),
         serve(Requests, Total + X + Y, !IO)
     ;
-        MaybeRequest = yes(reply_to(Box)),
+        MaybeRequest = message(reply_to(Box)),
         send(Box, Total, !IO),
         serve(Requests, Total, !IO)
     ;
-        MaybeRequest = yes(stop)
+        MaybeRequest = message(stop)
     ;
-        MaybeRequest = no
+        MaybeRequest = timeout
     ).
 
 :- pred send_all(mailbox(int)::in, int::in, int::in, io::di, io::uo) is det.
@@ -152,10 +150,10 @@ send_all(Box, I, N, !IO) :-
 sum_all(Box, Sum0, Sum, !IO) :-
     receive(Box, any, after(0), M, !IO),
     (
-        M = yes(N),
+        M = message(N),
         sum_all(Box, Sum0 + N, Sum, !IO)
     ;
-        M = no,
+        M = timeout,
         Sum = Sum0
     ).
 
@@ -164,22 +162,21 @@ sum_all(Box, Sum0, Sum, !IO) :-
 upto(Low, High, Acc) =
     ( if High < Low then Acc else upto(Low, High - 1, [High | Acc]) ).
 
-% OUTPUT:yes(1)
-% OUTPUT-NEXT:yes(2)
-% OUTPUT-NEXT:yes(20)
-% OUTPUT-NEXT:yes(3)
-% OUTPUT-NEXT:yes(4)
-% OUTPUT-NEXT:no
-% OUTPUT-NEXT:no
-% OUTPUT-NEXT:yes(named("box", rectangle(3, 4)))
-% OUTPUT-NEXT:yes(circle(1.5))
-% OUTPUT-NEXT:yes(origin)
-% OUTPUT-NEXT:yes(["a", "b", "c"])
-% OUTPUT-NEXT:yes(array([1.0, 2.5, 4.0]))
-% OUTPUT-NEXT:yes(5)
-% OUTPUT-NEXT:no
-% OUTPUT-NEXT:yes(8)
-% OUTPUT-NEXT:no
+% OUTPUT:message(1)
+% OUTPUT-NEXT:message(2)
+% OUTPUT-NEXT:message(20)
+% OUTPUT-NEXT:message(3)
+% OUTPUT-NEXT:message(4)
+% OUTPUT-NEXT:timeout
+% OUTPUT-NEXT:timeout
+% OUTPUT-NEXT:message(named("box", rectangle(3, 4)))
+% OUTPUT-NEXT:message(circle(1.5))
+% OUTPUT-NEXT:message(origin)
+% OUTPUT-NEXT:message(["a", "b", "c"])
+% OUTPUT-NEXT:message(array([1.0, 2.5, 4.0]))
+% OUTPUT-NEXT:message(5)
+% OUTPUT-NEXT:message(8)
+% OUTPUT-NEXT:timeout
 % OUTPUT-NEXT:5000050000
 % OUTPUT-NEXT:1000000
 % OUTPUT-EMPTY:

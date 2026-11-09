@@ -344,8 +344,8 @@ bool MerkGenerator::ReceiveInTarget(const Body &goal,
     return true;
   }
   BodyVar result{arguments[3]};
-  const semantics::Type *maybe{body.vars[result].type};
-  const semantics::Type *messageType{maybe->arguments.front()};
+  const semantics::Type *receivedType{body.vars[result].type};
+  const semantics::Type *messageType{receivedType->arguments.front()};
   mlir::Type message{Represent(messageType)->type};
   bool array{ArrayMessage(message)};
   if (!WordMessage(message) && !array) {
@@ -363,8 +363,8 @@ bool MerkGenerator::ReceiveInTarget(const Body &goal,
       array ? "merk_device_receive_array" : "merk_device_receive",
       mlir::ValueRange{mailbox, TimeoutMilliseconds(timeout, loc)},
       /*can_fail=*/true)};
-  auto maybeType{mlir::cast<merk::TermType>(Represent(maybe)->type)};
-  auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{maybeType})};
+  auto termType{mlir::cast<merk::TermType>(Represent(receivedType)->type)};
+  auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{termType})};
   {
     mlir::OpBuilder::InsertionGuard guard{builder_};
     builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
@@ -374,13 +374,14 @@ bool MerkGenerator::ReceiveInTarget(const Body &goal,
     mlir::Value value{merk::FromWordOp::create(
         builder_, loc, message, received.getResult(1))};
     merk::YieldOp::create(builder_, loc,
-        mlir::ValueRange{merk::ConstructOp::create(builder_, loc, maybeType,
-            merk::FunctorAttr::get(&context_, "yes", 1),
+        mlir::ValueRange{merk::ConstructOp::create(builder_, loc, termType,
+            merk::FunctorAttr::get(&context_, "message", 1),
             mlir::ValueRange{value})});
     builder_.setInsertionPointToStart(&ite.getElseRegion().emplaceBlock());
     merk::YieldOp::create(builder_, loc,
-        mlir::ValueRange{merk::ConstructOp::create(builder_, loc, maybeType,
-            merk::FunctorAttr::get(&context_, "no", 0), mlir::ValueRange{})});
+        mlir::ValueRange{merk::ConstructOp::create(builder_, loc, termType,
+            merk::FunctorAttr::get(&context_, "timeout", 0),
+            mlir::ValueRange{})});
   }
   values_[result] = ite.getResult(0);
   // any's closure, which the device cannot make, is not called.

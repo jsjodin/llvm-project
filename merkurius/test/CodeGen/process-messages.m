@@ -23,14 +23,14 @@
 
 :- type wrap ---> wrap(string).
 
-:- pred show(maybe(T)::in, io::di, io::uo) is det.
+:- pred show(received(T)::in, io::di, io::uo) is det.
 show(M, !IO) :-
     io.write(M, !IO),
     io.nl(!IO).
 
     % Sends and receives a message in polymorphic code, through its
     % type_info.
-:- pred round_trip(T::in, maybe(T)::out, io::di, io::uo) is det.
+:- pred round_trip(T::in, received(T)::out, io::di, io::uo) is det.
 round_trip(X, R, !IO) :-
     new_mailbox(Box, !IO),
     send(Box, X, !IO),
@@ -56,13 +56,13 @@ main(!IO) :-
     io.write(A1, !IO),
     io.nl(!IO).
 
-% OUTPUT:yes(2.75)
-% OUTPUT-NEXT:yes('λ')
-% OUTPUT-NEXT:yes({1, "two", 3.0})
-% OUTPUT-NEXT:yes(wrap("notag"))
-% OUTPUT-NEXT:yes(array(["x", "y"]))
-% OUTPUT-NEXT:yes(array({{\[\[}}1, 2], [3]]))
-% OUTPUT-NEXT:yes([e(h({7, "seven"})), g('q'), f([4, 5]), d(1, 2), c(0.5), b("bee"), a(-3), none])
-% OUTPUT-NEXT:yes(array([10, 20]))
+% OUTPUT:message(2.75)
+% OUTPUT-NEXT:message('λ')
+% OUTPUT-NEXT:message({1, "two", 3.0})
+% OUTPUT-NEXT:message(wrap("notag"))
+% OUTPUT-NEXT:message(array(["x", "y"]))
+% OUTPUT-NEXT:message(array({{\[\[}}1, 2], [3]]))
+% OUTPUT-NEXT:message([e(h({7, "seven"})), g('q'), f([4, 5]), d(1, 2), c(0.5), b("bee"), a(-3), none])
+% OUTPUT-NEXT:message(array([10, 20]))
 % OUTPUT-NEXT:array([99, 20])
 % OUTPUT-EMPTY:

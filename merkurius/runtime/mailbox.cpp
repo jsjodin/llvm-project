@@ -1006,7 +1006,7 @@ extern "C" std::int64_t merk_mailbox_deadline(std::int64_t milliseconds) {
 }
 
 // 1 once the mailbox has a message at `position`, 0 if the deadline passes
-// first, or the mailbox is closed or not this node's host's.
+// first, or -1 if the mailbox is closed or not this node's host's.
 extern "C" std::int64_t merk_mailbox_wait(
     MERK_HANDLE_PARAMETERS, std::int64_t position, std::int64_t deadline) {
   pthread_once(&once, InitializeCondition);
@@ -1022,6 +1022,7 @@ extern "C" std::int64_t merk_mailbox_wait(
       if (!suspends) {
         StopLooking();
       }
+      result = -1;
       break;
     }
     CheckOwner(mailbox);

@@ -21,29 +21,29 @@
 
 :- pred stopper(mailbox(int)::in, io::di, io::uo) is det.
 stopper(Box, !IO) :-
-    receive(Box, any, infinity, _ : maybe(int), !IO).
+    receive(Box, any, infinity, _ : received(int), !IO).
 
 :- pred divider(mailbox(int)::in, io::di, io::uo) is det.
 divider(Box, !IO) :-
     receive(Box, any, infinity, Got, !IO),
     (
-        Got = yes(N),
+        Got = message(N),
         io.write_int(100 // N, !IO)
     ;
-        Got = no
+        Got = timeout
     ).
 
 :- pred show(mailbox(happening)::in, io::di, io::uo) is det.
 show(Events, !IO) :-
     receive(Events, any, after(10000), Got, !IO),
     (
-        Got = yes(value(N)),
+        Got = message(value(N)),
         show_int(N, !IO)
     ;
-        Got = yes(went(Name, Down)),
+        Got = message(went(Name, Down)),
         io.write_string(Name ++ ": " ++ reason_text(reason(Down)) ++ "\n", !IO)
     ;
-        Got = no,
+        Got = timeout,
         io.write_string("nothing\n", !IO)
     ).
 

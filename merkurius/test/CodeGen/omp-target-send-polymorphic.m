@@ -28,4 +28,4 @@ main(!IO) :-
     receive(Mailbox, any, after(0), Got, !IO),
     io.print_line(Got, !IO).
 
-% OUTPUT:yes(7)
+% OUTPUT:message(7)

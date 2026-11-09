@@ -75,14 +75,14 @@ partner(Where, !IO) :-
         io.flush_output(!IO),
         receive(Hello, any, infinity, GotNode1, !IO),
         (
-            GotNode1 = yes(Node1),
+            GotNode1 = message(Node1),
             ( if Where = "gpu" then
                 answer_on_gpu(Partner, Node1, !IO)
             else
                 answer(Partner, Node1, !IO)
             )
         ;
-            GotNode1 = no
+            GotNode1 = timeout
         )
     ;
         Listening = error(Error),
@@ -100,7 +100,7 @@ answer_on_gpu(Partner, Node1, !IO) :-
 :- pred answer(mailbox(int)::in, mailbox(int)::in, io::di, io::uo) is det.
 answer(Partner, Node1, !IO) :-
     receive(Partner, any, after(20000), Got, !IO),
-    ( if Got = yes(N), N >= 0 then
+    ( if Got = message(N), N >= 0 then
         send(Node1, N + 1, !IO),
         answer(Partner, Node1, !IO)
     else
@@ -169,7 +169,7 @@ echo_on_gpu(Mine, Echo, !IO) :-
 echo_process(Mine, Echo, !IO) :-
     receive(Echo, any, after(10000), Got, !IO),
     (
-        Got = yes(N),
+        Got = message(N),
         ( if N < 0 then
             true
         else
@@ -177,7 +177,7 @@ echo_process(Mine, Echo, !IO) :-
             echo_process(Mine, Echo, !IO)
         )
     ;
-        Got = no
+        Got = timeout
     ).
 
     % Warms up, then times the rounds, from main or from a target region.
@@ -226,7 +226,7 @@ exchange(Partner, Mine, N, Rounds, !InOrder, !IO) :-
         send(Partner, N, !IO),
         receive(Mine, any, after(10000), Got, !IO),
         (
-            Got = yes(M),
+            Got = message(M),
             ( if M = N + 1 then
                 !:InOrder = !.InOrder + 1
             else
@@ -234,7 +234,7 @@ exchange(Partner, Mine, N, Rounds, !InOrder, !IO) :-
             ),
             exchange(Partner, Mine, M + 1, Rounds - 1, !InOrder, !IO)
         ;
-            Got = no
+            Got = timeout
         )
     ).
 
@@ -270,7 +270,7 @@ static void *run_echo(void *raw)
     echo_args *e = raw;
     MR_Word *i = e->in, *o = e->out;
     for (;;) {
-        if (!merk_mailbox_wait(i[0], i[1], i[2], i[3], i[4], 0, -1)) {
+        if (merk_mailbox_wait(i[0], i[1], i[2], i[3], i[4], 0, -1) <= 0) {
             break;
         }
         MR_Integer n = (MR_Integer)

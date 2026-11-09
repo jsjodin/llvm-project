@@ -52,4 +52,4 @@ main(!IO) :-
     receive(Mailbox, any, after(0), B, !IO),
     io.print_line({A, B}, !IO).
 
-% OUTPUT:{yes(5), yes(6)}
+% OUTPUT:{message(5), message(6)}

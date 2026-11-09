@@ -58,5 +58,5 @@ main(!IO) :-
     io.write_line(Sum, !IO).
 
 % OUTPUT:timeouts fired
-% OUTPUT-NEXT:yes({{[0-9]+}})
+% OUTPUT-NEXT:message({{[0-9]+}})
 % OUTPUT-NOT:{{.}}

@@ -29,12 +29,12 @@ main(!IO) :-
     send(Mailbox, W, !IO),
     receive(Mailbox, any, after(0), Got, !IO),
     (
-        Got = yes(N),
+        Got = message(N),
         io.write_string("got ", !IO),
         io.write_int(N, !IO),
         io.nl(!IO)
     ;
-        Got = no,
+        Got = timeout,
         io.write_string("nothing\n", !IO)
     ).
 % MERK-LABEL: merk.proc @omp_target_mailbox.main_2_0()

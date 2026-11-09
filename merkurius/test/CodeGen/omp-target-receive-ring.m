@@ -57,9 +57,9 @@ main(!IO) :-
     receive(Out, any, after(0), R3, !IO),
     io.print_line(R3, !IO).
 
-:- func got(maybe(int)) = int.
-got(no) = 0.
-got(yes(N)) = N.
+:- func got(received(int)) = int.
+got(timeout) = 0.
+got(message(N)) = N.
 
 :- pred more_mailboxes(int::in, io::di, io::uo) is det.
 more_mailboxes(N, !IO) :-
@@ -78,7 +78,7 @@ take(In, Place, Last, !Sum, !IO) :-
         true
     else
         receive(In, any, after(0), Got, !IO),
-        ( if Got = yes(Place) then
+        ( if Got = message(Place) then
             !:Sum = !.Sum + Place,
             take(In, Place + 1, Last, !Sum, !IO)
         else
@@ -92,9 +92,9 @@ take(In, Place, Last, !Sum, !IO) :-
 rest(In, Place, !Sum, !IO) :-
     receive(In, any, after(0), Got, !IO),
     (
-        Got = no
+        Got = timeout
     ;
-        Got = yes(N),
+        Got = message(N),
         ( if N = Place then
             !:Sum = !.Sum + N,
             rest(In, Place + 1, !Sum, !IO)
@@ -112,5 +112,5 @@ send_from(I, N, M, !IO) :-
         send_from(I + 1, N, M, !IO)
     ).
 
-% OUTPUT:{yes(6), yes(4), yes(20090), no}
-% OUTPUT-NEXT:yes(1234)
+% OUTPUT:{message(6), message(4), message(20090), timeout}
+% OUTPUT-NEXT:message(1234)

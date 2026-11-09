@@ -25,6 +25,7 @@
 % RUN: merkc -O2 %s -o %t2 && %python %S/Inputs/two-nodes.py %t2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 %
 % OUTPUT:pingpong:
+% OUTPUT-NEXT:client exited with 0: "Uncaught Mercury exception:\nSoftware Error: receive: the mailbox is closed or another node's\n"
 % OUTPUT-NEXT:client: connected
 % OUTPUT-NEXT:client: the server is another node: yes
 % OUTPUT-NEXT:client: connect to nonsense: not an address of the form host:port: nonsense
@@ -37,18 +38,19 @@
 % OUTPUT-NEXT:client: pong is on the server: yes
 % OUTPUT-NEXT:client: round trips answered: 1000
 % OUTPUT-NEXT:client: 10000 pipelined replies in order: yes
-% OUTPUT-NEXT:client: sums: yes(sums(5000050000, 2499975000.0))
+% OUTPUT-NEXT:client: sums: message(sums(5000050000, 2499975000.0))
 % OUTPUT-NEXT:client: echoes equal: 300 of 300
-% OUTPUT-NEXT:client: reply to another mailbox: yes(pong(7))
-% OUTPUT-NEXT:client: and to the first: no
-% OUTPUT-NEXT:client: idle for three seconds: no
-% OUTPUT-NEXT:client: then: yes(pong(8))
-% OUTPUT-NEXT:client: stop: yes(stopping)
-% OUTPUT-NEXT:client: the closed mailbox answers: no
+% OUTPUT-NEXT:client: reply to another mailbox: message(pong(7))
+% OUTPUT-NEXT:client: and to the first: timeout
+% OUTPUT-NEXT:client: idle for three seconds: timeout
+% OUTPUT-NEXT:client: then: message(pong(8))
+% OUTPUT-NEXT:client: stop: message(stopping)
+% OUTPUT-NEXT:client: a receive from another node's mailbox: Software Error: receive: the mailbox is closed or another node's
+% OUTPUT-NEXT:client: the closed mailbox answers: timeout
 % OUTPUT-NEXT:client: pong after its close: no mailbox is registered as "pong"
-% OUTPUT-NEXT:client: quit: yes(stopping)
+% OUTPUT-NEXT:client: quit: message(stopping)
 % OUTPUT-NEXT:client: the server is gone: yes
-% OUTPUT-NEXT:client: after it is gone: no
+% OUTPUT-NEXT:client: after it is gone: timeout
 % OUTPUT-NEXT:server: listening
 % OUTPUT-NEXT:server: register pong: ok
 % OUTPUT-NEXT:server: pong closed
@@ -167,11 +169,11 @@ server(!IO) :-
         io.write_string("pong closed\n", !IO),
         receive(Control, any, infinity, Quit, !IO),
         (
-            Quit = yes(quit(Reply)),
+            Quit = message(quit(Reply)),
             send(Reply, stopping, !IO),
             io.write_string("quitting\n", !IO)
         ;
-            Quit = no,
+            Quit = timeout,
             io.write_string("no quit\n", !IO)
         )
     ;
@@ -184,7 +186,7 @@ server(!IO) :-
 serve(Pong, !IO) :-
     receive(Pong, any, infinity, Got, !IO),
     (
-        Got = yes(Request),
+        Got = message(Request),
         (
             Request = ping(N, Reply),
             send(Reply, pong(N), !IO),
@@ -203,7 +205,7 @@ serve(Pong, !IO) :-
             send(Reply, stopping, !IO)
         )
     ;
-        Got = no
+        Got = timeout
     ).
 
 :- func add_int(int, int) = int.
@@ -328,6 +330,7 @@ talk(Server, Pong, !IO) :-
     io.write_string("stop: ", !IO),
     io.write(Stopped, !IO),
     io.nl(!IO),
+    receive_elsewhere(Pong, !IO),
     send(Pong, ping(9, Replies), !IO),
     receive(Replies, any, after(500), FromClosed, !IO),
     io.write_string("the closed mailbox answers: ", !IO),
@@ -370,7 +373,7 @@ round_trips(Pong, Replies, I, N, !Good, !IO) :-
     else
         send(Pong, ping(I, Replies), !IO),
         receive(Replies, any, after(10000), Reply, !IO),
-        ( if Reply = yes(pong(I)) then
+        ( if Reply = message(pong(I)) then
             !:Good = !.Good + 1
         else
             true
@@ -397,7 +400,7 @@ receive_pongs(Replies, I, N, !InOrder, !IO) :-
         true
     else
         receive(Replies, any, after(10000), Reply, !IO),
-        ( if Reply = yes(pong(I)) then
+        ( if Reply = message(pong(I)) then
             true
         else
             !:InOrder = no
@@ -419,7 +422,7 @@ send_echoes(Pong, Replies, [Data | Datas], !IO) :-
 receive_echoes(_, [], !Equal, !IO).
 receive_echoes(Replies, [Data | Datas], !Equal, !IO) :-
     receive(Replies, any, after(10000), Reply, !IO),
-    ( if Reply = yes(echoed(Data)) then
+    ( if Reply = message(echoed(Data)) then
         !:Equal = !.Equal + 1
     else
         true
@@ -600,7 +603,7 @@ exchange(Box, Other, !IO) :-
     io.write_string("connections: " ++ int_to_string(Count) ++ "\n", !IO),
     send(Other, peer_bye, !IO),
     receive(Box, any, after(20000), Bye, !IO),
-    ( if Bye = yes(peer_bye) then
+    ( if Bye = message(peer_bye) then
         io.write_string("bye\n", !IO)
     else
         io.write_string("no bye: ", !IO),
@@ -630,11 +633,11 @@ serve_peer(Box, Other, Next, OtherDone, !InOrder, !IO) :-
     else
         receive(Box, any, after(20000), Got, !IO),
         (
-            Got = no,
+            Got = timeout,
             io.write_string("nothing for 20 seconds\n", !IO),
             !:InOrder = no
         ;
-            Got = yes(Message),
+            Got = message(Message),
             (
                 Message = peer_ping(I, Reply),
                 send(Reply, peer_pong(I), !IO),
@@ -688,6 +691,30 @@ pause(Milliseconds, !IO) :-
 yes_no(Label, Value, !IO) :-
     io.write_string(Label ++ ": " ++
         ( if Value = yes then "yes" else "no" ) ++ "\n", !IO).
+
+    % A receive from another node's mailbox is an error, in a process of its
+    % own so that the client goes on.
+:- pred receive_elsewhere(mailbox(T)::in, io::di, io::uo) is det.
+receive_elsewhere(Elsewhere, !IO) :-
+    new_mailbox(Downs, !IO),
+    spawn(prober(Elsewhere), Prober : mailbox(int), !IO),
+    monitor(Prober, Downs, reason, _, !IO),
+    send(Prober, 0, !IO),
+    receive(Downs, any, after(10000), Got, !IO),
+    (
+        Got = message(Reason),
+        io.write_string("a receive from another node's mailbox: ", !IO),
+        io.write_string(reason_text(Reason), !IO),
+        io.nl(!IO)
+    ;
+        Got = timeout,
+        io.write_string("the prober did not end\n", !IO)
+    ).
+
+:- pred prober(mailbox(T)::in, mailbox(int)::in, io::di, io::uo) is det.
+prober(Elsewhere, Own, !IO) :-
+    receive(Own, any, infinity, _, !IO),
+    receive(Elsewhere, any, after(0), _, !IO).
 
 :- pred show_lookup(string::in, maybe_error(mailbox(M))::in,
     io::di, io::uo) is det.

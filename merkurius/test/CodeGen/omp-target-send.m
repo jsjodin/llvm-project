@@ -88,11 +88,11 @@ main(!IO) :-
 receive_all(Mailbox, !IO) :-
     receive(Mailbox, any, after(0), Got, !IO),
     (
-        Got = yes(M),
+        Got = message(M),
         io.print_line(M, !IO),
         receive_all(Mailbox, !IO)
     ;
-        Got = no
+        Got = timeout
     ).
 
 % OUTPUT:42

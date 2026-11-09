@@ -25,27 +25,27 @@
 server(Box, !IO) :-
     receive(Box, any, infinity, Got, !IO),
     (
-        Got = yes(double(N, To)),
+        Got = message(double(N, To)),
         send(To, 2 * N, !IO),
         server(Box, !IO)
     ;
-        Got = yes(slow(N, To)),
+        Got = message(slow(N, To)),
         new_mailbox(Idle : mailbox(int), !IO),
         receive(Idle, any, after(100), _, !IO),
         close_mailbox(Idle, !IO),
         send(To, N, !IO),
         server(Box, !IO)
     ;
-        Got = yes(divide(N, To)),
+        Got = message(divide(N, To)),
         send(To, 100 // N, !IO),
         server(Box, !IO)
     ;
-        Got = yes(last(N, To)),
+        Got = message(last(N, To)),
         send(To, N, !IO)
     ;
-        Got = yes(stop)
+        Got = message(stop)
     ;
-        Got = no
+        Got = timeout
     ).
 
 :- pred show(reply(int)::in, io::di, io::uo) is det.
@@ -120,5 +120,5 @@ main(!IO) :-
 % OUTPUT-NEXT:reply 5
 % OUTPUT-NEXT:down: noproc
 % OUTPUT-NEXT:down: domain_error("int.\'//\': division by zero")
-% OUTPUT-NEXT:yes(100)
+% OUTPUT-NEXT:message(100)
 % OUTPUT-NOT:{{.}}

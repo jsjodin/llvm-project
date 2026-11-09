@@ -19,7 +19,7 @@
 positive(N, N) :-
     N > 0.
 
-:- pred filtered(mailbox(int)::in, maybe(int)::out, io::di, io::uo) is det.
+:- pred filtered(mailbox(int)::in, received(int)::out, io::di, io::uo) is det.
 filtered(Ints, Got, !IO) :-
     %$omp target
     receive(Ints, positive, after(0), Got, !IO).

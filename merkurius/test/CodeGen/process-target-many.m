@@ -27,11 +27,11 @@ answer(N, Box, Out, !IO) :-
     else
         receive(Box, any, after(20000), Got, !IO),
         (
-            Got = yes(V),
+            Got = message(V),
             send(Out, V + 1, !IO),
             answer(N - 1, Box, Out, !IO)
         ;
-            Got = no,
+            Got = timeout,
             send(Out, -1000000, !IO)
         )
     ).
@@ -78,10 +78,10 @@ collect([peer(Limit, _, Out) | Peers], Round, !Sum, !IO) :-
     ( if Round < Limit then
         receive(Out, any, after(30000), Got, !IO),
         (
-            Got = yes(V),
+            Got = message(V),
             !:Sum = !.Sum + V
         ;
-            Got = no,
+            Got = timeout,
             !:Sum = !.Sum - 1000000
         )
     else

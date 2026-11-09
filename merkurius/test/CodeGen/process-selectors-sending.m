@@ -44,7 +44,7 @@ receive_all(Selector, Expected, !Received, !OutOfOrder, !IO) :-
     else
         receive(Selector, after(10000), Got, !IO),
         (
-            Got = yes(N),
+            Got = message(N),
             !:Received = !.Received + 1,
             ( if N = Expected then
                 true
@@ -53,7 +53,7 @@ receive_all(Selector, Expected, !Received, !OutOfOrder, !IO) :-
             ),
             receive_all(Selector, Expected + 1, !Received, !OutOfOrder, !IO)
         ;
-            Got = no
+            Got = timeout
         )
     ).
 

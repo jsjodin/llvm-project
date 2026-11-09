@@ -28,10 +28,10 @@ sum(N, D) = S :-
 divider(Reply, Box, !IO) :-
     receive(Box, any, infinity, Got, !IO),
     (
-        Got = yes(D),
+        Got = message(D),
         send(Reply, sum(1000, D), !IO)
     ;
-        Got = no
+        Got = timeout
     ).
 
 main(!IO) :-

@@ -29,9 +29,9 @@ main(!IO) :-
 % CHECK: omp-target-receive-selector.m:[[@LINE-2]]:30: error: 'merk.closure' op makes a closure, which cannot be done on an OpenMP device yet
 % CHECK: omp-target-receive-selector.m:[[@LINE-3]]:51: error: 'merk.closure' op makes a closure, which cannot be done on an OpenMP device yet
         (
-            Got = yes(N)
+            Got = message(N)
         ;
-            Got = no,
+            Got = timeout,
             N = 0
         )
     ),

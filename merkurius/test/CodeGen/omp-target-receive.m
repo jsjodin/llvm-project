@@ -10,7 +10,7 @@
 % mailbox's ring in host-pinned memory, sleeping between looks, until
 % the timeout passes by the device's clock; on the host, it is merkrt's,
 % which waits as receive does. A procedure in the host's compile receives
-% as on the host. yes(N) is a cell, which on the device comes from
+% as on the host. message(N) is a cell, which on the device comes from
 % merk_device_alloc.
 %
 % mmc has no process module to run it with, so the output is written by
@@ -40,10 +40,10 @@ main(!IO) :-
         send(Out, Sum, !IO),
         receive(In, any, after(20), Late, !IO),
         (
-            Late = yes(_),
+            Late = message(_),
             send(Out, -1, !IO)
         ;
-            Late = no,
+            Late = timeout,
             send(Out, -2, !IO)
         )
     ),
@@ -64,20 +64,20 @@ main(!IO) :-
 % MERK-NEXT: merk.yield %[[MAX]] : i64
 % MERK-NEXT: }
 % MERK-NEXT: %[[GOT:.*]]:2 = merk.foreign_call @merk_device_receive(%{{.*}}, %[[MS]]) can_fail : (!merk.term<"process.mailbox(int)">, i64) -> (i1, !merk.word)
-% MERK-NEXT: merk.ite -> !merk.term<"maybe.maybe(int)"> {
+% MERK-NEXT: merk.ite -> !merk.term<"process.received(int)"> {
 % MERK-NEXT: merk.guard %[[GOT]]#0
 % MERK-NEXT: merk.yield
 % MERK-NEXT: } then {
 % MERK-NEXT: %[[M:.*]] = merk.from_word %[[GOT]]#1 : i64
-% MERK-NEXT: %[[YES:.*]] = merk.construct #merk.functor<"yes", 1>(%[[M]] : i64) -> !merk.term<"maybe.maybe(int)">
+% MERK-NEXT: %[[YES:.*]] = merk.construct #merk.functor<"message", 1>(%[[M]] : i64) -> !merk.term<"process.received(int)">
 % MERK-NEXT: merk.yield %[[YES]]
 % MERK-NEXT: } else {
-% MERK-NEXT: %[[NO:.*]] = merk.construct #merk.functor<"no", 0> -> !merk.term<"maybe.maybe(int)">
+% MERK-NEXT: %[[NO:.*]] = merk.construct #merk.functor<"timeout", 0> -> !merk.term<"process.received(int)">
 % MERK-NEXT: merk.yield %[[NO]]
 % MERK-NEXT: }
 % MERK: omp.terminator
 
-% The device's sum polls too, and makes yes(N) with merk_device_alloc.
+% The device's sum polls too, and makes message(N) with merk_device_alloc.
 % DEVICE-LABEL: define internal i64 @omp_target_receive.sum_5_0(
 % DEVICE: call i32 @merk_device_receive(ptr %{{.*}}, i64 %{{.*}}, ptr %{{.*}})
 % DEVICE: call ptr @merk_device_alloc(i64 8)
@@ -87,11 +87,11 @@ main(!IO) :-
 sum(In, !Sum, !IO) :-
     receive(In, any, after(0), Got, !IO),
     (
-        Got = yes(N),
+        Got = message(N),
         !:Sum = !.Sum + N,
         sum(In, !Sum, !IO)
     ;
-        Got = no
+        Got = timeout
     ).
 % The host's sum receives as on the host.
 % MERK-LABEL: merk.proc private @omp_target_receive.sum_5_0(
@@ -106,4 +106,4 @@ send_from(I, N, M, !IO) :-
         send_from(I + 1, N, M, !IO)
     ).
 
-% OUTPUT:{yes(55), yes(-2)}
+% OUTPUT:{message(55), message(-2)}

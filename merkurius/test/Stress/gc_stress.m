@@ -427,12 +427,12 @@ replace(K, !T, !R, !IO) :-
 drain(Box, !T, !R, !Got, !IO) :-
     receive(Box, any, after(0), M, !IO),
     (
-        M = no
+        M = timeout
     ;
-        M = yes(next(_)),
+        M = message(next(_)),
         drain(Box, !T, !R, !Got, !IO)
     ;
-        M = yes(item(E)),
+        M = message(item(E)),
         check("message", E, !IO),
         random(array.size(!.T), I, !R),
         array.set(I, E, !T),
@@ -500,7 +500,7 @@ round(Config, Box, Next, Number, Moves, Seed, Sentinel, !.T, !:T,
 worker(Config, Deadline, Box, !IO) :-
     receive(Box, any, infinity, First, !IO),
     Config = config(Entries, Seed, Id, Reports),
-    ( if First = yes(next(Next)) then
+    ( if First = message(next(Next)) then
         array.init(Entries, entry(0, none), T0),
         fill(0, T0, T1, Seed + Id, R),
         check_all(0, T1, !IO),
@@ -544,11 +544,11 @@ reports(N, Box, !IO) :-
     else
         receive(Box, any, infinity, R, !IO),
         (
-            R = yes(Text),
+            R = message(Text),
             io.write_string(Text, !IO),
             io.nl(!IO)
         ;
-            R = no
+            R = timeout
         ),
         reports(N - 1, Box, !IO)
     ).

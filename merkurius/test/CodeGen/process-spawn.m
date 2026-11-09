@@ -30,10 +30,10 @@ which = 0.
 :- pred server(mailbox(request)::in, io::di, io::uo) is det.
 server(Box, !IO) :-
     receive(Box, any, infinity, Got, !IO),
-    ( if Got = yes(ping(N, Reply)) then
+    ( if Got = message(ping(N, Reply)) then
         send(Reply, length(1 .. N) * 2, !IO),
         server(Box, !IO)
-    else if Got = yes(stop(Reply)) then
+    else if Got = message(stop(Reply)) then
         send(Reply, -1, !IO)
     else
         true
@@ -43,7 +43,7 @@ server(Box, !IO) :-
 :- pred link(mailbox(int)::in, mailbox(int)::in, io::di, io::uo) is det.
 link(Next, Box, !IO) :-
     receive(Box, any, infinity, Got, !IO),
-    ( if Got = yes(N) then send(Next, N + 1, !IO) else true ).
+    ( if Got = message(N) then send(Next, N + 1, !IO) else true ).
 
 :- pred chain(int::in, mailbox(int)::in, mailbox(int)::out,
     io::di, io::uo) is det.
@@ -60,10 +60,10 @@ chain(Count, Last, First, !IO) :-
 timer(Reply, Box, !IO) :-
     receive(Box, any, after(5), Got, !IO),
     (
-        Got = no,
+        Got = timeout,
         send(Reply, "timed out", !IO)
     ;
-        Got = yes(_),
+        Got = message(_),
         send(Reply, "got one", !IO)
     ).
 
@@ -85,13 +85,13 @@ main(!IO) :-
     ( if W = 1 then
         new_mailbox(Mine : mailbox(request), !IO),
         spawn(thief(Mine), _ : mailbox(int), !IO),
-        receive(Reply, any, infinity, _ : maybe(int), !IO)
+        receive(Reply, any, infinity, _ : received(int), !IO)
     else if W = 2 then
         spawn_with_stack(100000, deep_body(100000000, Reply), Deep, !IO),
         % An overflow ends only its process.
         new_mailbox(Downs : mailbox(down_info), !IO),
         monitor(Deep, Downs, (func(D) = D), _, !IO),
-        receive(Downs, any, infinity, _ : maybe(down_info), !IO)
+        receive(Downs, any, infinity, _ : received(down_info), !IO)
     else
         run(Reply, !IO)
     ).
@@ -138,14 +138,14 @@ run(Reply, !IO) :-
     spawn(link(Forever), _, !IO),
     io.write_string("done\n", !IO).
 
-% OUTPUT:yes(42)
-% OUTPUT-NEXT:yes(1000)
-% OUTPUT-NEXT:yes("timed out")
-% OUTPUT-NEXT:yes("got one")
-% OUTPUT-NEXT:yes({{[0-6]}})
-% OUTPUT-NEXT:yes(-1)
-% OUTPUT-NEXT:no
-% OUTPUT-NEXT:no
+% OUTPUT:message(42)
+% OUTPUT-NEXT:message(1000)
+% OUTPUT-NEXT:message("timed out")
+% OUTPUT-NEXT:message("got one")
+% OUTPUT-NEXT:message({{[0-6]}})
+% OUTPUT-NEXT:message(-1)
+% OUTPUT-NEXT:timeout
+% OUTPUT-NEXT:timeout
 % OUTPUT-NEXT:done
 % OUTPUT-NOT:{{.}}
 
