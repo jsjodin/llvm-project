@@ -3119,6 +3119,15 @@ void Lowerer::LowerArray(mlir::Operation *op) {
   // The operands, not the accessors: an array the procedure was passed is
   // already a pointer.
   mlir::Value result;
+  // Before the runtime's allocation, which only grows the heap: a loop that
+  // makes only arrays would never reach a collection otherwise.
+  if (!device_ && mlir::isa<merk::ArrayNewOp, merk::ArrayCopyOp,
+                      merk::ArrayFromListOp, merk::ArrayResizeOp>(op)) {
+    AttachLive(LiveBefore(op),
+        mlir::LLVM::CallOp::create(rewriter_, loc,
+            RuntimeFunc("merk_gc_poll", mlir::LLVM::LLVMVoidType::get(op->getContext()), {}),
+            mlir::ValueRange{}));
+  }
   if (mlir::isa<merk::ArrayNewOp>(op)) {
     result = CallRuntime("merk_array_new", ptr,
         {op->getOperand(0), InitialElement(op, 1, loc)}, loc);

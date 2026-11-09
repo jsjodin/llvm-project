@@ -86,6 +86,15 @@ char *Chunk(std::size_t bytes, bool large = false) {
 }
 } // namespace
 
+// A safepoint before the runtime allocates an array, as the runtime's own
+// allocations only grow the heap.
+extern "C" void merk_gc_poll() {
+  if (merkurius::runtime::CollectIfDue(__builtin_frame_address(0)) &&
+      merkurius::runtime::CheckRootsEnabled()) {
+    merkurius::runtime::CheckRoots(__builtin_frame_address(0));
+  }
+}
+
 extern "C" void *merk_alloc_slow(std::int64_t bytes) {
   if (merkurius::runtime::CheckRootsEnabled()) {
     merkurius::runtime::CheckRoots(__builtin_frame_address(0));

@@ -37,7 +37,8 @@ bool IsRoot(mlir::Type type) {
 // is live while it does.
 bool Allocates(mlir::Operation *op) {
   return mlir::isa<merk::ConstructOp, merk::ClosureOp, merk::TypeInfoOp,
-      merk::TypeclassInfoOp>(op);
+      merk::TypeclassInfoOp, merk::ArrayNewOp, merk::ArrayCopyOp,
+      merk::ArrayFromListOp, merk::ArrayResizeOp>(op);
 }
 
 // An operation that runs Mercury code, which can collect.
