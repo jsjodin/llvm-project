@@ -1,0 +1,22 @@
+The GPU to GPU demo, with its regions on the CPU. Two nodes' lines interleave
+as they happen, so each node's are checked in order after a stable sort.
+
+RUN: mkdir -p %t && cd %t && merkc -O2 %S/../../examples/gpu-to-gpu/gpu_to_gpu.m %S/../../examples/gpu-to-gpu/demo_node.m -o %t/demo
+RUN: %python %S/../../examples/gpu-to-gpu/run.py %t/demo | sort -s -k1,2 | FileCheck %s --match-full-lines
+
+CHECK:[node A] connecting to node B at 127.0.0.1:{{[0-9]+}}
+CHECK-NEXT:[node A] found node B's mailboxes
+CHECK-NEXT:[node A] round 1: GPU A sends 1000 numbers, each 1
+CHECK-NEXT:[node A] GPU A got the sum 1000, correct
+CHECK-NEXT:[node A] round 2: GPU A sends 1000 numbers, each 2
+CHECK-NEXT:[node A] GPU A got the sum 2000, correct
+CHECK-NEXT:[node A] round 3: GPU A sends 1000 numbers, each 3
+CHECK-NEXT:[node A] GPU A got the sum 3000, correct
+CHECK-NEXT:[node B] listening on port {{[0-9]+}}
+CHECK-NEXT:[node B] node A has connected
+CHECK-NEXT:[node B] round 1: GPU B waits for an array
+CHECK-NEXT:[node B] GPU B got 1000 numbers and sent back their sum, 1000
+CHECK-NEXT:[node B] round 2: GPU B waits for an array
+CHECK-NEXT:[node B] GPU B got 1000 numbers and sent back their sum, 2000
+CHECK-NEXT:[node B] round 3: GPU B waits for an array
+CHECK-NEXT:[node B] GPU B got 1000 numbers and sent back their sum, 3000
