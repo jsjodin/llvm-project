@@ -1365,6 +1365,83 @@ and most of that is either expressed by processes already or not needed yet.
 run here. Steps 2 to 4 need at least two GPUs: two consumer cards for PCIe, or an
 Instinct node for Infinity Fabric.
 
+## Processes as teams, and messages within a GPU
+
+Proposed 2026-11-09; nothing is built, and it is not agreed. The design document
+(The device runtime, "Who communicates") has a process for each team in an SPMD
+kernel as a later step. This adds messages between such processes that do not go
+through the host.
+
+**Why.** Separating a step's communication from its computation with several
+target regions, so that several teams can compute, goes back through the host
+for each launch. A kernel whose teams are processes stays running. And a halo
+exchange between teams needs no second GPU to develop.
+
+**Proposed.**
+
+- A kernel starts N teams. Each is a process, with its own mailbox and arena.
+- A handle has node, place and slot; the team is the slot, so `send` chooses the
+  route as it does now.
+- **A send within a GPU** writes to a ring in device memory, which the receiver
+  polls, using device atomics and no call of the host.
+- **An array within a GPU moves by its pointer.** A send hands over a unique
+  array, and both teams can address it, so nothing is copied.
+- One thread of each team communicates. The others wait in the state machine or
+  at a barrier until there is parallel work, with `masked` and a barrier for a
+  message the whole team reads. Those bind to the team; nothing in OpenMP
+  synchronizes between teams, apart from the end of the teams region.
+
+**Risks, the first being the largest.**
+
+1. **Forward progress.** A GPU does not promise that every team makes progress.
+   A team that spins for a message from a team that is not running deadlocks. It
+   must be known how many teams run at once, and whether that is a limit a
+   program can stay within. Threads of one wavefront must not spin on each other
+   either (design document).
+2. **A fixed set of processes.** One kernel gives the processes it starts with.
+   Spawning needs persistent kernels and a scheduler of GPU processes, not
+   designed. A halo exchange needs only a fixed set.
+3. **The compiler** needs `target teams` with Mercury code in each team, `masked`
+   and `barrier`, and an arena for each team.
+4. **Failure.** A trap ends the whole kernel, so one team cannot fail alone as a
+   monitor expects. That weakens recovery within a kernel.
+
+**The experiment (2026-11-09, RX 6950 XT, gfx1030, 80 compute units).** A C++
+OpenMP program whose teams pass a token around a ring in device memory, each wait
+bounded, one team giving up ending the others. Each team first ran a `parallel`
+that used its threads. No GPU resets.
+
+| Threads per team | Teams that worked | Teams that gave up | Hops before stopping |
+|---|---|---|---|
+| 1, 8, 32 | 2560 | 4096 | 2561 |
+| 64 | 1024 | 2048 | 1281 |
+| 128 | 512 | 1024 | 641 |
+| 256 | 256 | 512 | 318 |
+| 320 | 128 | 256 | 238 |
+
+The hops show how many teams were on the GPU at once: 2560, 1280, 640, 320 and 240.
+That fits `80 * floor(32 / waves)`, with 32 threads to a wave. The 32 wave slots for
+each compute unit are read from these results, not from a specification.
+
+- **The limit is sharp and can be computed,** and a program within it made progress
+  in every run. A team beyond it does not start until a team on the GPU ends, so a
+  cycle of waits through such a team deadlocks.
+- **No OpenMP query gives it.** `omp_get_num_teams()` reported 65536 teams launched,
+  when 2560 could run together. The compute units are in the device's information.
+- **It is observed, not promised.** One GPU; other users of the GPU, such as the
+  display, could lower it; waits must be bounded in the runtime, or a mistake hangs
+  the GPU.
+- **Latency** (Measurements): a one-way hop takes 200 ns between 2 teams, 240 ns up
+  to 64 teams, 520 ns at 1024 and 1125 ns at 2048, so a round trip between two teams
+  is about 0.4 µs, against 7.5 µs for one RPC round trip. Idle threads in a team cost
+  nothing. This is one word, not a message: a real send adds a queue's bookkeeping.
+  The growth with the number of teams, while only one team has work, suggests that
+  polling itself loads the memory system; that was not tested.
+
+**A later use: streaming on the GPU.** Teams as the stages of a pipeline, passing
+arrays by pointer. It has no cycle of waits, but a stage that is not on the GPU
+still stalls the one before it when the ring between them fills.
+
 ## The halo exchange
 
 Proposed 2026-11-09; nothing is built. Implementation waits until several
