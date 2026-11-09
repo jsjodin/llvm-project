@@ -3064,6 +3064,21 @@ for any opcode. `omp_target_memcpy` works from a callback, after a fix below.
 One server thread serves every device under a lock, so **a callback must never
 wait for a message**: it would stop every device's RPC, `printf` included.
 
+**`parallel do` in a target region,** directly or in a procedure the region calls,
+as Flang has it: a generic kernel with an `omp.parallel` in it. On a device the
+thread that starts the loop has a stack the rest of the team cannot read, so the
+loop's reduction variables and the scalars it uses from outside are in
+`__kmpc_alloc_shared` memory, as Clang's globalization has for a shared variable
+(`SharedSlots`, `ShareCapturedScalars`); pointers pass as they are. The host's slot
+for a reduction is inside the region, or it would be an argument of the kernel that
+the device's compile does not have. The driver turns off OpenMPOpt's SPMD conversion
+at the device's link (`-openmp-opt-disable-spmdization`): its guarded form of such a
+kernel faulted at address 0 when a value read from memory before the region reached
+the region through a call. Not reduced further or reported; a kernel we mark SPMD,
+such as `target teams distribute parallel do`, is not affected, though a generic
+kernel does not get the speed of the conversion. `teams` cannot be used this way:
+OpenMP does not allow statements beside it in a `target`.
+
 **Output from a region.** In the device's compile, `io.write_string`, `io.write_int`
 and `io.nl` are calls of `merk_device_write_string` and so on, which send the text
 or number to the host with opcodes of ours (`rpcWriteText`, `rpcWriteInt`). The
