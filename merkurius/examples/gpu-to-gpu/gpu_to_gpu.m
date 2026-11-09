@@ -61,6 +61,39 @@ node_b(Links, Round, !IO) :-
     ).
 
 %---------------------------------------------------------------------------%
+% How a message gets from one GPU to the other.
+%
+% The program only sees mailboxes: new_mailbox, send and receive, from
+% library/process.m, the same on a GPU and on a CPU. A mailbox lives on the
+% host of the node that made it, and a handle to it says which node that is, so
+% `send` needs no address and the runtime picks the route.
+%
+% An array from GPU A to GPU B:
+%
+%   GPU A          send: a call to its host through LLVM's GPU RPC, in memory
+%                  both can reach. The region waits for the answer.
+%   host A         The offload plugin's RPC server thread takes the call. It
+%                  copies the array from the GPU (omp_target_memcpy), encodes
+%                  it, and writes it to the node's TCP socket, all on that
+%                  thread. There is no separate forwarding thread.
+%   TCP            A plain socket between the two nodes.
+%   host B         A reader thread, one for each connection, decodes the bytes
+%                  into a message and queues it in the mailbox. If a region is
+%                  receiving from that mailbox, it also writes the array's size
+%                  to the mailbox's ring, in host memory that the GPU can read.
+%   GPU B          receive: polls the ring, with no call to the host. It sees
+%                  the size, makes an array, and asks by RPC for the contents,
+%                  which host B's RPC server thread copies to the GPU
+%                  (omp_target_memcpy).
+%
+% The sum, a single word, goes the same way without the copies to and from the
+% GPU: its value is in the RPC call and then in the ring's slot, so GPU A reads
+% it straight from the ring.
+%
+% One RPC server thread serves all of a node's GPUs, so a send that is
+% stalled writing to the socket holds up that node's other GPU calls.
+
+%---------------------------------------------------------------------------%
 % What runs on the GPUs.
 
     % GPU A: makes an array, sends it to GPU B, and waits for the sum.
