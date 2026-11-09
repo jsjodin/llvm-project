@@ -125,7 +125,7 @@ gpu_b(links(ToB, ToA), Size, !IO) :-
             Got = yes(Numbers),
             Size = array.size(Numbers),
             say("[GPU B] got this many numbers:", Size, !IO),
-            Sum = sum_from(Numbers, 0, 0),
+            Sum = sum_of(Numbers),
             say("[GPU B] sending back their sum", Sum, !IO),
             send(ToA, Sum, !IO)
         ;
@@ -142,10 +142,11 @@ say(Text, Number, !IO) :-
     io.write_int(Number, !IO),
     io.nl(!IO).
 
-:- func sum_from(numbers, int, int) = int.
-sum_from(Numbers, I, Sum) =
-    ( if I >= array.size(Numbers) then
-        Sum
-    else
-        sum_from(Numbers, I + 1, Sum + Numbers ^ elem(I))
+    % Adds up an array with all of the GPU's threads in the region's team.
+:- func sum_of(numbers) = int.
+sum_of(Numbers) = Sum :-
+    Last = array.size(Numbers) - 1,
+    %$omp parallel do reduction((+) : Sum)
+    ( for(I, 0, Last), fromto(0, S0, S1, Sum) do
+        S1 = S0 + Numbers ^ elem(I)
     ).
