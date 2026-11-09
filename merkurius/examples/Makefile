@@ -109,11 +109,11 @@ LIBOMP_PATH := $(subst $(eval) ,:,$(strip $(LIBOMP_DIRS)))
 
 $(BUILD)/gpu_to_gpu: $(GPU_SOURCES) $(BUILD)/.O$(O) | check-merkc $(BUILD)
 	@echo "merkc -O$(O) -fopenmp --offload-arch=$(ARCH) gpu_to_gpu.m demo_node.m -o build/gpu_to_gpu"
-	@cd $(BUILD) && $(MERKC) -O$(O) -fopenmp --offload-arch=$(ARCH) $(LIBOMP_FLAGS) $(GPU_SOURCES) -o $@
+	@cd $(BUILD) && $(MERKC) -O$(O) -fdo-loops -fopenmp --offload-arch=$(ARCH) $(LIBOMP_FLAGS) $(GPU_SOURCES) -o $@
 
 $(BUILD)/gpu_to_gpu_cpu: $(GPU_SOURCES) $(BUILD)/.O$(O) | check-merkc $(BUILD)
 	@echo "merkc -O$(O) gpu_to_gpu.m demo_node.m -o build/gpu_to_gpu_cpu"
-	@cd $(BUILD) && $(MERKC) -O$(O) $(GPU_SOURCES) -o $@
+	@cd $(BUILD) && $(MERKC) -O$(O) -fdo-loops $(GPU_SOURCES) -o $@
 
 gpu-to-gpu: $(BUILD)/gpu_to_gpu
 gpu-to-gpu-cpu: $(BUILD)/gpu_to_gpu_cpu
