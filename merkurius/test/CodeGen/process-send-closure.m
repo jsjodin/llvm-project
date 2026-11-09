@@ -67,11 +67,11 @@ take(Out, N, !IO) :-
     else
         receive(Out, any, after(20000), Got, !IO),
         (
-            Got = yes(F),
+            Got = message(F),
             io.write_int(apply(F, 1), !IO),
             io.nl(!IO)
         ;
-            Got = no,
+            Got = timeout,
             io.write_string("nothing\n", !IO)
         ),
         take(Out, N - 1, !IO)
@@ -84,13 +84,13 @@ main(!IO) :-
     take(Out, 7, !IO),
     receive(Held, any, after(20000), Got, !IO),
     (
-        Got = yes(holder(Name, F)),
+        Got = message(holder(Name, F)),
         io.write_string(Name, !IO),
         io.write_string(" ", !IO),
         io.write_int(apply(F, 2), !IO),
         io.nl(!IO)
     ;
-        Got = no,
+        Got = timeout,
         io.write_string("nothing\n", !IO)
     ).
 

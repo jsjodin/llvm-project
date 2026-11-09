@@ -80,7 +80,7 @@ partner(InRegion, !IO) :-
         io.flush_output(!IO),
         receive(Hello, any, after(60000), GotRegion, !IO),
         (
-            GotRegion = yes(Region),
+            GotRegion = message(Region),
             io.write_string("the region's mailbox: found\n", !IO),
             (
                 InRegion = no,
@@ -93,7 +93,7 @@ partner(InRegion, !IO) :-
                 !IO),
             io.write_string("stopped\n", !IO)
         ;
-            GotRegion = no,
+            GotRegion = timeout,
             io.write_string("the region's mailbox: none\n", !IO)
         )
     ;
@@ -112,7 +112,7 @@ answer_in_region(Partner, Region, Answered, !IO) :-
     io::di, io::uo) is det.
 answer(Partner, Region, !Answered, !IO) :-
     receive(Partner, any, after(60000), Got, !IO),
-    ( if Got = yes(N), N >= 0 then
+    ( if Got = message(N), N >= 0 then
         send(Region, N + 1, !IO),
         !:Answered = !.Answered + 1,
         answer(Partner, Region, !Answered, !IO)
@@ -162,7 +162,7 @@ exchange(Partner, Mine, N, !Rounds, !IO) :-
         send(Partner, N, !IO),
         receive(Mine, any, after(10000), Got, !IO),
         (
-            Got = yes(M),
+            Got = message(M),
             ( if M = N + 1 then
                 !:Rounds = !.Rounds + 1
             else
@@ -170,6 +170,6 @@ exchange(Partner, Mine, N, !Rounds, !IO) :-
             ),
             exchange(Partner, Mine, M + 1, !Rounds, !IO)
         ;
-            Got = no
+            Got = timeout
         )
     ).

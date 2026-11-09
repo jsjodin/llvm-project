@@ -99,8 +99,8 @@ void Send(Box box, Word value) {
 // The oldest message, as process.receive takes it with `any`, waiting up to
 // `milliseconds`, or forever for -1; none if none arrives.
 std::optional<Word> Receive(Box box, std::int64_t milliseconds) {
-  if (!merk_mailbox_wait(BOX(box), 0,
-          merk_mailbox_deadline(milliseconds))) {
+  if (merk_mailbox_wait(BOX(box), 0,
+          merk_mailbox_deadline(milliseconds)) <= 0) {
     return std::nullopt;
   }
   Word value{merk_mailbox_message(BOX(box), 0)};
@@ -402,7 +402,7 @@ TEST(MailboxTest, SelectiveScanWhileSending) {
   std::int64_t position{0};
   std::optional<Word> found;
   while (merk_mailbox_wait(
-      BOX(box), position, merk_mailbox_deadline(10000))) {
+             BOX(box), position, merk_mailbox_deadline(10000)) > 0) {
     Word value{merk_mailbox_message(BOX(box), position)};
     if (value != 0 && value % 1000 == 0) {
       merk_mailbox_remove(BOX(box), position);

@@ -36,9 +36,9 @@ child(L, Out, _, !IO) :-
 take(Out, V, !IO) :-
     receive(Out, any, after(20000), Got, !IO),
     (
-        Got = yes(V)
+        Got = message(V)
     ;
-        Got = no,
+        Got = timeout,
         V = -1
     ).
 

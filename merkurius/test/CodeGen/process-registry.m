@@ -21,7 +21,7 @@
 % OUTPUT-NEXT:the server is on this node: yes
 % OUTPUT-NEXT:found the registered handle: yes
 % OUTPUT-NEXT:two mailboxes' handles differ: yes
-% OUTPUT-NEXT:reply: yes("pong")
+% OUTPUT-NEXT:reply: message("pong")
 % OUTPUT-NEXT:lists as itself: found
 % OUTPUT-NEXT:lists as list(pair(string, int)): the mailbox registered as "lists" has messages of another type
 % OUTPUT-NEXT:lists as list(int): the mailbox registered as "lists" has messages of another type
@@ -74,7 +74,7 @@ main(!IO) :-
             ( if Reply = to_string_mailbox(Server) then no else yes ), !IO),
         send(S, ping(Reply), !IO),
         receive(Server, any, after(0), Got, !IO),
-        ( if Got = yes(ping(R)) then
+        ( if Got = message(ping(R)) then
             send(R, "pong", !IO),
             receive(Reply, any, after(0), Answer, !IO),
             io.write_string("reply: ", !IO),

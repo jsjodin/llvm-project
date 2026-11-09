@@ -62,7 +62,7 @@
     mailbox(M)::out, io::di, io::uo) is det.
 
     % Drops the queued messages and the mailbox's name; later sends to the
-    % mailbox are dropped, and a receive from it finds nothing.
+    % mailbox are dropped, and a receive from it is a run-time error.
     % Watches the process that owns the target mailbox: when it ends, or
     % at once if it has ended, the function makes a message from a
     % down_info, which goes to the watcher's mailbox. Across nodes it is
@@ -108,11 +108,17 @@
 
 :- pred send(mailbox(M)::in, M::in, io::di, io::uo) is det.
 
+    % What a receive gets: a message, or timeout if none arrives in time.
+:- type received(R)
+    --->    message(R)
+    ;       timeout.
+
     % The oldest message for which the selector succeeds, mapped by it, or
-    % no if none arrives before the timeout. A mailbox of another node
-    % finds nothing.
+    % timeout if none arrives in time. A mailbox that is closed or another
+    % node's can never have a message for this receive, which is a mistake:
+    % it is a run-time error, at once.
 :- pred receive(mailbox(M)::in, pred(M, R)::in(pred(in, out) is semidet),
-    timeout::in, maybe(R)::out, io::di, io::uo) is det.
+    timeout::in, received(R)::out, io::di, io::uo) is det.
 
     % The selector that takes any message. It never fails, but is declared
     % semidet to fit receive's mode.
@@ -136,11 +142,11 @@
     = (selector(R)::out) is det.
 
     % The oldest message, across the selector's mailboxes, that one of its
-    % cases accepts, mapped by that case, or no if none arrives before the
-    % timeout. Of cases that accept the same message, the one added first
-    % takes it. It finds nothing at once if every mailbox is closed or
-    % another node's.
-:- pred receive(selector(R)::in, timeout::in, maybe(R)::out,
+    % cases accepts, mapped by that case, or timeout if none arrives in
+    % time. Of cases that accept the same message, the one added first
+    % takes it. Some mailboxes may be closed; it is a run-time error, at
+    % once, if every one is closed or another node's, or there are none.
+:- pred receive(selector(R)::in, timeout::in, received(R)::out,
     io::di, io::uo) is det.
 
     % The node this program is.
@@ -194,7 +200,9 @@
 :- pred receive_goal(selector(R)::in, timeout::in, receive_result(R)::out,
     io::di, io::uo) is det.
 
-    % A receive goal without a timeout arm whose mailboxes are all closed.
+    % The arm for a receive goal without a timeout arm, which has no time
+    % limit: it is not reached, as receive/4 reports a goal with no open
+    % mailbox.
 :- pred receive_closed is erroneous.
 
 :- implementation.
@@ -331,9 +339,9 @@ request(Server, MakeRequest, Timeout, Result, !IO) :-
     close_mailbox(ReplyTo, !IO),
     close_mailbox(Downs, !IO),
     (
-        Got = yes(Result)
+        Got = message(Result)
     ;
-        Got = no,
+        Got = timeout,
         Result = timeout
     ).
 
@@ -385,10 +393,10 @@ receive_closed :-
 receive_goal(Selector, Timeout, Result, !IO) :-
     receive(Selector, Timeout, Received, !IO),
     (
-        Received = yes(R),
+        Received = message(R),
         Result = receive_message(R)
     ;
-        Received = no,
+        Received = timeout,
         Result = receive_nothing
     ).
 
@@ -513,7 +521,7 @@ starts(matching(_, _, Rest)) = start(0, starts(Rest)).
     % may have arrived too, in a mailbox looked at before, so they look
     % again. The message found is then older than the mark, so the next
     % look takes it or an older one.
-:- pred select(selector(R)::in, int::in, starts::in, maybe(R)::out,
+:- pred select(selector(R)::in, int::in, starts::in, received(R)::out,
     io::di, io::uo) is det.
 
 select(Selector, Deadline, Starts0, Result, !IO) :-
@@ -528,18 +536,18 @@ select(Selector, Deadline, Starts0, Result, !IO) :-
         else
             remove_message(High, Low, PlaceSlot, Generation, Secret,
                 Position, !IO),
-            Result = yes(R)
+            Result = message(R)
         )
     ;
         Found = nothing,
         (
             Open = no,
-            Result = no
+            error("receive: every mailbox is closed or another node's")
         ;
             Open = yes,
             wait_arrival(Seen, Deadline, Arrived, !IO),
             ( if Arrived = 0 then
-                Result = no
+                Result = timeout
             else
                 select(Selector, Deadline, Starts, Result, !IO)
             )
@@ -643,21 +651,23 @@ keep(New, Found0, Found) :-
     % mailbox's owner removes messages, so the positions of those it has
     % passed stay as they are.
 :- pred scan(mailbox(M)::in, pred(M, R)::in(pred(in, out) is semidet),
-    int::in, int::in, maybe(R)::out, io::di, io::uo) is det.
+    int::in, int::in, received(R)::out, io::di, io::uo) is det.
 
 scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
     Mailbox = mailbox(High, Low, PlaceSlot, Generation, Secret),
     wait_message(High, Low, PlaceSlot, Generation, Secret, Position, Deadline,
         Arrived, !IO),
-    ( if Arrived = 0 then
-        Result = no
+    ( if Arrived < 0 then
+        error("receive: the mailbox is closed or another node's")
+    else if Arrived = 0 then
+        Result = timeout
     else
         message_at(High, Low, PlaceSlot, Generation, Secret, Position,
             Message, !IO),
         ( if Selector(Message, R) then
             remove_message(High, Low, PlaceSlot, Generation, Secret, Position,
                 !IO),
-            Result = yes(R)
+            Result = message(R)
         else
             scan(Mailbox, Selector, Deadline, Position + 1, Result, !IO)
         )
@@ -727,7 +737,7 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
 ").
 
     % 1 once the mailbox has a message at Position, 0 if the deadline
-    % passes first, or the mailbox is closed or another node's.
+    % passes first, or -1 if the mailbox is closed or another node's.
 :- pred wait_message(int::in, int::in, int::in, int::in, int::in, int::in,
     int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",

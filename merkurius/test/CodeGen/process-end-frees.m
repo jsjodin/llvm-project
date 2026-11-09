@@ -33,10 +33,10 @@ child(Out, Box, !IO) :-
     Mine = make(20000, []),
     receive(Box, any, after(20000), Got, !IO),
     (
-        Got = yes(L),
+        Got = message(L),
         send(Out, list.length(L) + list.length(Mine), !IO)
     ;
-        Got = no,
+        Got = timeout,
         send(Out, -1, !IO)
     ).
 
@@ -50,10 +50,10 @@ run(N, Message, Out, !Sum, !IO) :-
         send(Box, Message, !IO),
         receive(Out, any, after(20000), Got, !IO),
         (
-            Got = yes(V),
+            Got = message(V),
             !:Sum = !.Sum + V
         ;
-            Got = no
+            Got = timeout
         ),
         run(N - 1, Message, Out, !Sum, !IO)
     ).

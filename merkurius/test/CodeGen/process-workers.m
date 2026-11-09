@@ -25,7 +25,7 @@
 relay(Left, Next, Done, Box, !IO) :-
     Before = 1 .. 50,
     receive(Box, any, infinity, Got, !IO),
-    ( if Got = yes(token(N, Seen)) then
+    ( if Got = message(token(N, Seen)) then
         After = 1 .. 50,
         Added = list.foldl(int.plus, Before, 0)
             - list.foldl(int.plus, After, 0) + 1,
@@ -58,7 +58,7 @@ laps(Left, First, Home, !Sum, !IO) :-
     else
         send(First, token(0, []), !IO),
         receive(Home, any, infinity, Got, !IO),
-        ( if Got = yes(token(N, Seen)), N = list.length(Seen) then
+        ( if Got = message(token(N, Seen)), N = list.length(Seen) then
             !:Sum = !.Sum + N
         else
             !:Sum = -1000000000
@@ -73,7 +73,7 @@ collect(Left, Done, !Sum, !IO) :-
         true
     else
         receive(Done, any, infinity, Got, !IO),
-        ( if Got = yes(N) then !:Sum = !.Sum + N else true ),
+        ( if Got = message(N) then !:Sum = !.Sum + N else true ),
         collect(Left - 1, Done, !Sum, !IO)
     ).
 

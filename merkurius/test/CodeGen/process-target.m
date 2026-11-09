@@ -28,10 +28,10 @@ region(In, Out, !IO) :-
     (
         receive(In, any, after(20000), Got, !IO),
         (
-            Got = yes(N),
+            Got = message(N),
             send(Out, N + 1, !IO)
         ;
-            Got = no,
+            Got = timeout,
             send(Out, -1, !IO)
         )
     ).
@@ -88,8 +88,8 @@ everything(In, Out, !IO) :-
 % EARLY:main ended
 % EARLY-NOT:{{.}}
 
-% OUTPUT:yes(4)
-% OUTPUT-NEXT:yes(3)
-% OUTPUT-NEXT:yes(2)
-% OUTPUT-NEXT:yes(11)
+% OUTPUT:message(4)
+% OUTPUT-NEXT:message(3)
+% OUTPUT-NEXT:message(2)
+% OUTPUT-NEXT:message(11)
 % OUTPUT-NOT:{{.}}

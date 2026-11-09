@@ -74,7 +74,7 @@ main(!IO) :-
     ( if Sum = 0 then
         io.write_string("no sum\n", !IO)
     else
-        ( if Got = yes(Time), Time < End then
+        ( if Got = message(Time), Time < End then
             io.write_string("ran during the region\n", !IO)
         else
             io.write_string("did not run during the region\n", !IO)

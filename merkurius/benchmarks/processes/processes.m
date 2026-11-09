@@ -45,7 +45,7 @@
 :- pred partner(mailbox(ball)::in, io::di, io::uo) is det.
 partner(Box, !IO) :-
     receive(Box, any, infinity, Got, !IO),
-    ( if Got = yes(ball(N, Back)) then
+    ( if Got = message(ball(N, Back)) then
         send(Back, ball(N, Box), !IO),
         ( if N > 0 then partner(Box, !IO) else true )
     else
@@ -57,7 +57,7 @@ partner(Box, !IO) :-
 rounds(N, Other, Mine, !IO) :-
     send(Other, ball(N, Mine), !IO),
     receive(Mine, any, infinity, Got, !IO),
-    ( if Got = yes(_), N > 0 then
+    ( if Got = message(_), N > 0 then
         rounds(N - 1, Other, Mine, !IO)
     else
         true
@@ -66,7 +66,7 @@ rounds(N, Other, Mine, !IO) :-
 :- pred waiter(mailbox(int)::in, mailbox(int)::in, io::di, io::uo) is det.
 waiter(Done, Box, !IO) :-
     receive(Box, any, infinity, Got, !IO),
-    ( if Got = yes(N) then send(Done, N, !IO) else true ).
+    ( if Got = message(N) then send(Done, N, !IO) else true ).
 
 :- pred spawn_all(int::in, int::in, mailbox(int)::in,
     list(mailbox(int))::in, list(mailbox(int))::out, io::di, io::uo) is det.

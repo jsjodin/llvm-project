@@ -54,11 +54,11 @@ main(!IO) :-
     receive_ints(Ints, !IO),
     receive(Floats, any, after(0), F, !IO),
     (
-        F = yes(A),
+        F = message(A),
         io.write_int(array.size(A), !IO), io.write_string(" ", !IO),
         io.write_float(A ^ elem(1), !IO), io.nl(!IO)
     ;
-        F = no,
+        F = timeout,
         io.write_string("no floats\n", !IO)
     ).
 
@@ -70,12 +70,12 @@ total(A, I, S) =
 receive_ints(Ints, !IO) :-
     receive(Ints, any, after(0), R, !IO),
     (
-        R = yes(A),
+        R = message(A),
         io.write_int(array.size(A), !IO), io.write_string(" ", !IO),
         io.write_int(total(A, 0, 0), !IO), io.nl(!IO),
         receive_ints(Ints, !IO)
     ;
-        R = no,
+        R = timeout,
         io.write_string("end\n", !IO)
     ).
 

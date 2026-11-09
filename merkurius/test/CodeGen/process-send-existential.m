@@ -61,17 +61,17 @@ main(!IO) :-
     receive(Out, any, after(20000), A, !IO),
     receive(Out, any, after(20000), B, !IO),
     (
-        A = yes(BoxA),
+        A = message(BoxA),
         show(BoxA, !IO)
     ;
-        A = no,
+        A = timeout,
         io.write_string("no first\n", !IO)
     ),
     (
-        B = yes(_),
+        B = message(_),
         io.write_string("second\n", !IO)
     ;
-        B = no,
+        B = timeout,
         io.write_string("no second\n", !IO)
     ).
 

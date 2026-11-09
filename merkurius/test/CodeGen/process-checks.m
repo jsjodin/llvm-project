@@ -154,11 +154,11 @@ send_each(Box, [X | Xs], !IO) :-
     io::di, io::uo) is det.
 check_each(Box, [], !Bad, !IO) :-
     receive(Box, any, after(0), Left, !IO),
-    ( if Left = yes(_) then !:Bad = !.Bad + 1 else true ).
+    ( if Left = message(_) then !:Bad = !.Bad + 1 else true ).
 check_each(Box, [X | Xs], !Bad, !IO) :-
     receive(Box, any, after(0), M, !IO),
     ( if
-        M = yes(Y),
+        M = message(Y),
         X = Y,
         compare((=), X, Y)
     then
@@ -270,14 +270,14 @@ check_no_sharing(!IO) :-
     send(Strings, S, !IO),
     overwrite_string(S, !IO),
     receive(Strings, any, after(0), RS, !IO),
-    check("string", ( if RS = yes("hello") then yes else no ), !IO),
+    check("string", ( if RS = message("hello") then yes else no ), !IO),
 
     A = array([1, 2, 3]),
     new_mailbox(Arrays, !IO),
     send(Arrays, A, !IO),
     overwrite_array(A, !IO),
     receive(Arrays, any, after(0), RA, !IO),
-    check("array", ( if RA = yes(array([1, 2, 3])) then yes else no ), !IO),
+    check("array", ( if RA = message(array([1, 2, 3])) then yes else no ), !IO),
 
     % Cells made at run time, not static ones, inside a list, a tuple
     % and an array.
@@ -292,7 +292,7 @@ check_no_sharing(!IO) :-
     overwrite_cell(C3, !IO),
     receive(Cells, any, after(0), RC, !IO),
     check("cells in a list, an array and a tuple",
-        ( if RC = yes({[cell(3, 3)], array([cell(4, 3)]), cell(5, 3)}) then
+        ( if RC = message({[cell(3, 3)], array([cell(4, 3)]), cell(5, 3)}) then
             yes
         else
             no
@@ -300,12 +300,12 @@ check_no_sharing(!IO) :-
 
     % A message received is a copy too: sending it again and overwriting
     % the received one leaves the second message as it was.
-    ( if RA = yes(A1) then
+    ( if RA = message(A1) then
         send(Arrays, A1, !IO),
         overwrite_array(A1, !IO),
         receive(Arrays, any, after(0), RA2, !IO),
         check("a received array sent again",
-            ( if RA2 = yes(array([1, 2, 3])) then yes else no ), !IO)
+            ( if RA2 = message(array([1, 2, 3])) then yes else no ), !IO)
     else
         check("a received array sent again", no, !IO)
     ).
@@ -370,28 +370,27 @@ step(Step, !Model, !Stale, !Stats, !S, !IO) :-
         ),
         !Stats ^ sends := !.Stats ^ sends + 1
     else if Op =< 5 then
-        receive(Box, any, after(0), Got, !IO),
+        receive_if_open(Box, Open, any, Got, !IO),
         ( if Queue = [X | Rest] then
-            Expected = yes(X),
+            Expected = message(X),
             replace(I, entry(Box, Open, Rest), !Model),
             !Stats ^ got := !.Stats ^ got + 1
         else
-            Expected = no,
+            Expected = timeout,
             !Stats ^ none := !.Stats ^ none + 1
         ),
         compare_step(Step, "receive", Expected, Got, !Stats, !IO)
     else if Op =< 8 then
         next(4, D0, !S),
         D = D0 + 2,
-        receive(Box,
-            (pred(M::in, M::out) is semidet :- M mod D = 0),
-            after(0), Got, !IO),
+        receive_if_open(Box, Open,
+            (pred(M::in, M::out) is semidet :- M mod D = 0), Got, !IO),
         ( if take_first(D, Queue, X, Rest) then
-            Expected = yes(X),
+            Expected = message(X),
             replace(I, entry(Box, Open, Rest), !Model),
             !Stats ^ got_selected := !.Stats ^ got_selected + 1
         else
-            Expected = no,
+            Expected = timeout,
             !Stats ^ none := !.Stats ^ none + 1
         ),
         compare_step(Step, "selective receive", Expected, Got, !Stats, !IO)
@@ -423,7 +422,20 @@ step(Step, !Model, !Stale, !Stats, !S, !IO) :-
         )
     ).
 
-:- pred compare_step(int::in, string::in, maybe(int)::in, maybe(int)::in,
+    % A receive from a closed mailbox is an error.
+:- pred receive_if_open(mailbox(int)::in, bool::in,
+    pred(int, int)::in(pred(in, out) is semidet), received(int)::out,
+    io::di, io::uo) is det.
+receive_if_open(Box, Open, Selector, Got, !IO) :-
+    (
+        Open = yes,
+        receive(Box, Selector, after(0), Got, !IO)
+    ;
+        Open = no,
+        Got = timeout
+    ).
+
+:- pred compare_step(int::in, string::in, received(int)::in, received(int)::in,
     stats::in, stats::out, io::di, io::uo) is det.
 compare_step(Step, What, Expected, Got, !Stats, !IO) :-
     ( if Expected = Got then
@@ -459,8 +471,13 @@ steps(Step, N, !Model, !Stale, !Stats, !S, !IO) :-
     % At the end, each open mailbox must hold exactly its model queue.
 :- pred drain(list(entry)::in, int::in, int::out, io::di, io::uo) is det.
 drain([], !Bad, !IO).
-drain([entry(Box, _, Queue) | Es], !Bad, !IO) :-
-    check_each(Box, Queue, !Bad, !IO),
+drain([entry(Box, Open, Queue) | Es], !Bad, !IO) :-
+    (
+        Open = yes,
+        check_each(Box, Queue, !Bad, !IO)
+    ;
+        Open = no
+    ),
     drain(Es, !Bad, !IO).
 
 :- pred new_entries(int::in, list(entry)::out, io::di, io::uo) is det.

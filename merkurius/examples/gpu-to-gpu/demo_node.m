@@ -59,11 +59,11 @@ start_b(Address, Node, !IO) :-
         say("B", "listening on port " ++ int_to_string(Port), !IO),
         receive(Hello, any, wait, Got, !IO),
         (
-            Got = yes(ToA),
+            Got = message(ToA),
             say("B", "node A has connected", !IO),
             Node = node_b(links(ToB, ToA))
         ;
-            Got = no,
+            Got = timeout,
             fail_with("node A did not connect", Node, !IO)
         )
     ;

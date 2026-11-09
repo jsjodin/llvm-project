@@ -1127,12 +1127,13 @@ The API is a library module. This interface, with stub bodies, passes Melbourne 
 :- func selecting_matching(mailbox(M)::in,
     pred(M, R)::in(pred(in, out) is semidet), selector(R)::in)
     = (selector(R)::out) is det.
-:- pred receive(selector(R)::in, timeout::in, maybe(R)::out,
+:- type received(R) ---> message(R) ; timeout.
+:- pred receive(selector(R)::in, timeout::in, received(R)::out,
     io::di, io::uo) is det.
 
     % One mailbox.
 :- pred receive(mailbox(M)::in, pred(M, R)::in(pred(in, out) is semidet),
-    timeout::in, maybe(R)::out, io::di, io::uo) is det.
+    timeout::in, received(R)::out, io::di, io::uo) is det.
 :- pred any(M::in, M::out) is semidet.      % the selector that takes anything
 
     % Monitors.
@@ -1153,7 +1154,7 @@ The API is a library module. This interface, with stub bodies, passes Melbourne 
 ```
 
 - **Send** never blocks. It deep-copies the message for the receiver and returns.
-- **Receive** blocks until a message matches or the timeout expires, and returns `yes(R)` or `no`. It takes the oldest message for which the `semidet` selector succeeds; the rest stay queued in order. Erlang's `receive {reply, Ref, S} -> …` becomes the selector `(pred(M::in, S::out) is semidet :- M = reply(Ref, S))`. `receive/6`, on one mailbox, is `receive/5` over a one-mailbox selector.
+- **Receive** blocks until a message matches or the timeout expires, and returns `message(R)` or `timeout`, which only ever means that the time ran out. `no` would say less, and would also have covered what follows. A receive that can never get a message, from a closed mailbox, from another node's, or over a selector with no open mailbox, is a mistake in the program, as only a mailbox's owner receives from it and closes it, so it is a run-time error at once; on a device, which cannot see that a mailbox is closed, it is a timeout (Rejected: a third result, `closed`, which every receive would have to handle for a case that should never happen). It takes the oldest message for which the `semidet` selector succeeds; the rest stay queued in order. Erlang's `receive {reply, Ref, S} -> …` becomes the selector `(pred(M::in, S::out) is semidet :- M = reply(Ref, S))`. `receive/6`, on one mailbox, is `receive/5` over a one-mailbox selector.
 - **Order is Erlang's.** Erlang's `receive` takes the first message in the queue that matches any clause; the order of the clauses only decides which clause handles a message that matches several (Erlang reference manual, Expressions, "Receive"; checked with OTP 24). Typed mailboxes never hold an unknown message, so a mailbox is a plain FIFO, and a selector keeps this rule across all its mailboxes: it takes the matching message that arrived first.
 - **Exhaustiveness:** a receive loop declared `det` must handle every message constructor. Removing one case is a compile error: "the switch on Msg does not cover \`stop'/0".
 - **No backtracking over messages:** send and receive thread the unique `io` state, so they cannot appear in nondeterministic code.
@@ -1204,7 +1205,7 @@ A selector option for strict priority between its cases can be added later if pr
 - **Selected messages of one mailbox:** `receive(Box, Selector, Timeout, Got, !IO)`, with a `semidet` predicate, such as `is_reply(Ref)`, to take a reply out of order. Messages it does not accept stay queued, in order, for a later receive.
 - **Several mailboxes, or arms by pattern:** a selector built with `selecting` and `selecting_matching`, or the `receive` goal below, with `-freceive-goal`. Each arm of the goal is `select(Mailbox, Pattern) -> Goal`, even if there is only one mailbox; what its arms leave out stays queued.
 
-**The `receive` goal.** Building a selector, a result type to map every mailbox into, and a switch on `yes(message(...))` is boilerplate. The `receive` goal writes the same loop directly. The goal receives one message; each arm selects the messages it wants, by mailbox and pattern:
+**The `receive` goal.** Building a selector, a result type to map every mailbox into, and a switch on `message(...)` is boilerplate. The `receive` goal writes the same loop directly. The goal receives one message; each arm selects the messages it wants, by mailbox and pattern:
 
 ```mercury
 loop(Count, Self, Downs, !IO) :-
@@ -1234,7 +1235,7 @@ loop(Count, Self, Downs, !IO) :-
   - A switch on the result runs the arm's goal, with the pattern's variables bound. The goal is `det` if every arm's goal is.
   - **A pattern's variables.** One that occurs outside the goal, as `Ref` in `select(Replies, reply(Ref, S))`, is tested in the predicate, so it must be ground before the goal; mode analysis says so otherwise. The others are the arm's own: fresh copies in the predicate, which come back through the result. So an arm's pattern cannot bind a variable for the goals after the receive goal; its goal can. The rule goes by where a variable occurs because desugaring, before mode analysis, builds the selector and cannot know insts. Deciding by inst instead, Erlang's rule, comes later (`INPROGRESS.md`, The receive goal: later), and changes no program that compiles now: under this rule a variable of a pattern that is not ground before the goal, such as a hole of an open term, is a mode error, as for any lambda expression's nonlocal. One case gives a puzzling error under this rule: a tested variable bound only after the goal, as in `receive [io(!IO)] ( select(B, N) -> true ), N = 1`, lets mode analysis move the pure goals of the switch on the result before the call, whose implied mode then makes the goal `semidet`. The code is still right, since only pure goals move; the inst-based rule removes the error, since the variable is then the arm's own.
   - **The result** needs no type of the program's: `library/process.m` exports, for the expansion only, `receive_arms(A, B)`, whose `receive_rest` applied I times to `receive_arm` of the variables is arm I's result, the last arm's without `receive_arm`, with `receive_none` for no variables and a tuple for several, and `receive_goal`, which is `receive/5` with a result of process's own type, since the module need not import `maybe`. So the expansion names only process, which the module must import, or a receive goal is an error.
-  - **Every mailbox closed.** Without a `timeout` arm, a receive whose mailboxes are all closed would wait for a message nobody can send; it is the run-time error "receive: every mailbox is closed" instead.
+  - **Every mailbox closed.** A receive whose mailboxes are all closed would wait for a message nobody can send; with or without a `timeout` arm, it is the run-time error "receive: every mailbox is closed or another node's" instead.
 - **Selective arms.** The arms need not cover a mailbox's type. A message that no arm selects stays queued for a later `receive`, as in Erlang. Since that can leave messages piling up, a mailbox whose arms leave a constructor out draws the warning `unselected-message`, unless some other `receive` in the same predicate selects it. `-Wno-unselected-message` turns it off.
   - **What counts as selected.** A mailbox is its term's text, as for grouping the arms, over all the clauses of the predicate, so `Self` in two clauses is one mailbox. An arm selects the constructor of its pattern's functor, whatever the arguments, so `select(Box, data(1, _))` counts for every `data/2`: the warning is for messages that nothing in the predicate is written to take, not a check that the patterns cover every value, which would warn about every receive that waits for a particular reply. An arm whose pattern is a variable of its own selects every message; a tested variable, one that occurs outside the goal, selects no constructor. A type without a known set of constructors, such as `int`, a type variable or an abstract type, is selected only by such a variable.
   - **Where.** Once per predicate and mailbox, at the mailbox of the first arm for it, listing the constructors left out in the order of the type's definition. A predicate with a type error is left out, since its arms' constructors are not known.
@@ -3033,7 +3034,7 @@ limits until they are lifted. Handles are flat values, so they are mapped into t
   between looks the device sleeps (`s_sleep`, about 8 microseconds), and it
   stops when the timeout passes by `omp_get_wtime`, the OpenMP device
   runtime's steady clock. On the host, `merk_device_receive` waits on the
-  mailbox as `receive/5` does. A cell made on the device, such as `yes(N)`,
+  mailbox as `receive/5` does. A cell made on the device, such as `message(N)`,
   comes from `merk_device_alloc`, the device's arena. Another selector, or a
   message of another type, is an error at the receive; a selector over
   several mailboxes is an error at its closures in the device's compile.

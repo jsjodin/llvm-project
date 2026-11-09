@@ -30,10 +30,10 @@ take(In, N, S0, S, !IO) :-
     ( if N > 0 then
         receive(In, any, infinity, R, !IO),
         (
-            R = yes(A),
+            R = message(A),
             take(In, N - 1, S0 + total(A, 0, 0), S, !IO)
         ;
-            R = no,
+            R = timeout,
             S = -1
         )
     else
@@ -45,12 +45,12 @@ take(In, N, S0, S, !IO) :-
 echo(In, Back, !IO) :-
     receive(In, any, after(1000), R, !IO),
     (
-        R = yes(A),
+        R = message(A),
         array.copy(A, C0),
         array.set(0, 99, C0, C),
         send(Back, C, !IO)
     ;
-        R = no
+        R = timeout
     ).
 
 :- pred count_up(int::in, int::in,
@@ -79,10 +79,10 @@ main(!IO) :-
         echo(In, Back, !IO),
         receive(In, any, after(20), Late, !IO),
         (
-            Late = yes(_),
+            Late = message(_),
             send(Out, -1, !IO)
         ;
-            Late = no,
+            Late = timeout,
             send(Out, -2, !IO)
         )
     ),
@@ -94,14 +94,14 @@ main(!IO) :-
     io.print_line({R1, R2}, !IO),
     receive(Back, any, after(0), B, !IO),
     (
-        B = yes(C),
+        B = message(C),
         io.write_int(array.size(C), !IO), io.write_string(" ", !IO),
         io.write_int(C ^ elem(0), !IO), io.write_string(" ", !IO),
         io.write_int(C ^ elem(1), !IO), io.nl(!IO)
     ;
-        B = no,
+        B = timeout,
         io.write_string("nothing back\n", !IO)
     ).
 
-% OUTPUT:{yes(34359607302), yes(-2)}
+% OUTPUT:{message(34359607302), message(-2)}
 % OUTPUT-NEXT:2 99 20

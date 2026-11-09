@@ -13,7 +13,7 @@
 :- pred main(io::di, io::uo) is det.
 
 :- implementation.
-:- import_module array, demo_node, int, io, maybe, process.
+:- import_module array, demo_node, int, io, process.
 
 :- type numbers == array(int).
 
@@ -107,10 +107,10 @@ gpu_a(links(ToB, ToA), Round, Sum, !IO) :-
         send(ToB, Numbers, !IO),
         receive(ToA, any, after(10000), Answer, !IO),
         (
-            Answer = yes(Sum),
+            Answer = message(Sum),
             say("[GPU A] got the sum", Sum, !IO)
         ;
-            Answer = no,
+            Answer = timeout,
             Sum = -1
         )
     ).
@@ -122,14 +122,14 @@ gpu_b(links(ToB, ToA), Size, !IO) :-
     (
         receive(ToB, any, after(10000), Got, !IO),
         (
-            Got = yes(Numbers),
+            Got = message(Numbers),
             Size = array.size(Numbers),
             say("[GPU B] got this many numbers:", Size, !IO),
             Sum = sum_of(Numbers),
             say("[GPU B] sending back their sum", Sum, !IO),
             send(ToA, Sum, !IO)
         ;
-            Got = no,
+            Got = timeout,
             Size = 0
         )
     ).

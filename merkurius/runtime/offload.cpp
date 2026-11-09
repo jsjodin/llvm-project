@@ -521,8 +521,8 @@ extern "C" void merk_offload_start(void) {
 extern "C" int merk_device_receive(const std::uint64_t *handle,
     std::int64_t milliseconds, std::uint64_t *message) {
   const std::int64_t *h{reinterpret_cast<const std::int64_t *>(handle)};
-  if (!merk_mailbox_wait(h[0], h[1], h[2], h[3], h[4], 0,
-          merk_mailbox_deadline(milliseconds))) {
+  if (merk_mailbox_wait(h[0], h[1], h[2], h[3], h[4], 0,
+          merk_mailbox_deadline(milliseconds)) <= 0) {
     return 0;
   }
   return TakeOldest(handle, *message);

@@ -23,14 +23,12 @@
 % OUTPUT:oldest across mailboxes: [message(increment(1)), down("worker 1"), message(increment(2)), message(stop), down("worker 2"), none]
 % OUTPUT-NEXT:cases in the other order: [message(increment(1)), down("worker 1"), message(increment(2)), message(stop), down("worker 2"), none]
 % OUTPUT-NEXT:selective: [even(4), odd_word("three"), even(2), none]
-% OUTPUT-NEXT:left queued: yes(1)
-% OUTPUT-NEXT:left queued: yes("five")
-% OUTPUT-NEXT:the case added first: yes(first(6))
-% OUTPUT-NEXT:the other case next: yes(second(7))
+% OUTPUT-NEXT:left queued: message(1)
+% OUTPUT-NEXT:left queued: message("five")
+% OUTPUT-NEXT:the case added first: message(first(6))
+% OUTPUT-NEXT:the other case next: message(second(7))
 % OUTPUT-NEXT:priority: [down("urgent"), message(increment(10)), message(stop)]
-% OUTPUT-NEXT:no cases: no
-% OUTPUT-NEXT:closed mailboxes: no
-% OUTPUT-NEXT:timeout: no
+% OUTPUT-NEXT:timeout: timeout
 % OUTPUT-NEXT:model: 30000 steps, 0 differ, 0 queues differ at the end
 % OUTPUT-NEXT:stats(15096, 4070, 4853, 1502, 1498)
 % OUTPUT-NOT:{{.}}
@@ -63,11 +61,11 @@ to_down(D) = down(D).
 receive_all(Selector, Rs, !IO) :-
     receive(Selector, after(0), Got, !IO),
     (
-        Got = yes(R),
+        Got = message(R),
         receive_all(Selector, Rs0, !IO),
         Rs = [R | Rs0]
     ;
-        Got = no,
+        Got = timeout,
         Rs = []
     ).
 
@@ -165,15 +163,15 @@ added_first(!IO) :-
 next_event(Sel, Downs, Event, !IO) :-
     receive(Downs, any, after(0), MaybeDown, !IO),
     (
-        MaybeDown = yes(D),
+        MaybeDown = message(D),
         Event = down(D)
     ;
-        MaybeDown = no,
+        MaybeDown = timeout,
         receive(Sel, after(0), MaybeEvent, !IO),
         (
-            MaybeEvent = yes(Event)
+            MaybeEvent = message(Event)
         ;
-            MaybeEvent = no,
+            MaybeEvent = timeout,
             Event = none
         )
     ).
@@ -193,17 +191,6 @@ priority(!IO) :-
 
 :- pred nothing(io::di, io::uo) is det.
 nothing(!IO) :-
-    receive(new_selector : selector(int), infinity, NoCases, !IO),
-    show("no cases", NoCases, !IO),
-    new_mailbox(A, !IO),
-    new_mailbox(B, !IO),
-    send(A, 1, !IO),
-    close_mailbox(A, !IO),
-    close_mailbox(B, !IO),
-    Closed = selecting(A, (func(N) = N),
-        selecting(B, (func(N) = N), new_selector)),
-    receive(Closed, infinity, ClosedGot, !IO),
-    show("closed mailboxes", ClosedGot, !IO),
     new_mailbox(C, !IO),
     receive(selecting(C, (func(N) = N + 1), new_selector), after(50),
         TimedOut, !IO),
@@ -363,17 +350,26 @@ step(Step, !Model, !Stamp, !Bad, !Stats, !S, !IO) :-
     else if Op =< 7 then
         next(4, N, !S),
         random_cases(length(!.Model), N + 1, Cases, !S),
-        receive(selector(!.Model, 0, Cases), after(0), Got, !IO),
+        % With no open mailbox, a receive is an error.
+        ( if
+            list.member(case(K, _), Cases),
+            entry(_, OpenK, _) = det_index0(!.Model, K),
+            OpenK = yes
+        then
+            receive(selector(!.Model, 0, Cases), after(0), Got, !IO)
+        else
+            Got = timeout
+        ),
         expect(!.Model, 0, Cases, no, Best),
         (
             Best = yes(expected(R, _, J, Rest)),
-            Expected = yes(R),
+            Expected = message(R),
             entry(BoxJ, OpenJ, _) = det_index0(!.Model, J),
             replace(J, entry(BoxJ, OpenJ, Rest), !Model),
             !Stats ^ got := !.Stats ^ got + 1
         ;
             Best = no,
-            Expected = no,
+            Expected = timeout,
             !Stats ^ none := !.Stats ^ none + 1
         ),
         ( if Expected = Got then
@@ -419,12 +415,17 @@ steps(Step, N, !Model, !Stamp, !Bad, !Stats, !S, !IO) :-
     % At the end, each open mailbox must hold exactly its model queue.
 :- pred drain(list(entry)::in, int::in, int::out, io::di, io::uo) is det.
 drain([], !Left, !IO).
-drain([entry(Box, _, Queue) | Es], !Left, !IO) :-
-    receive_all(selecting(Box, (func(V) = V), new_selector), Got, !IO),
-    ( if Got = map(queued_value, Queue) then
-        true
-    else
-        !:Left = !.Left + 1
+drain([entry(Box, Open, Queue) | Es], !Left, !IO) :-
+    (
+        Open = yes,
+        receive_all(selecting(Box, (func(V) = V), new_selector), Got, !IO),
+        ( if Got = map(queued_value, Queue) then
+            true
+        else
+            !:Left = !.Left + 1
+        )
+    ;
+        Open = no
     ),
     drain(Es, !Left, !IO).
 

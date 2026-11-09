@@ -73,10 +73,10 @@ partner(OnGpu, !IO) :-
         io.flush_output(!IO),
         receive(Hello, any, infinity, GotNode1, !IO),
         (
-            GotNode1 = yes(Node1),
+            GotNode1 = message(Node1),
             serve(OnGpu, Commands, Data, Node1, !IO)
         ;
-            GotNode1 = no
+            GotNode1 = timeout
         )
     ;
         Listening = error(Error),
@@ -92,7 +92,7 @@ partner(OnGpu, !IO) :-
 serve(OnGpu, Commands, Data, Node1, !IO) :-
     receive(Commands, any, infinity, Got, !IO),
     (
-        Got = yes(Command),
+        Got = message(Command),
         Operation = Command ^ elem(0),
         Words = Command ^ elem(1),
         Rounds = Command ^ elem(2),
@@ -119,7 +119,7 @@ serve(OnGpu, Commands, Data, Node1, !IO) :-
             true
         )
     ;
-        Got = no
+        Got = timeout
     ).
 
 %---------------------------------------------------------------------------%
@@ -151,7 +151,7 @@ receive_arrays(From, Words, Rounds, !Right, !IO) :-
     else
         receive(From, any, after(60000), Got, !IO),
         (
-            Got = yes(A),
+            Got = message(A),
             ( if
                 array.size(A) = Words,
                 A ^ elem(Words - 1) = Words
@@ -162,7 +162,7 @@ receive_arrays(From, Words, Rounds, !Right, !IO) :-
             ),
             receive_arrays(From, Words, Rounds - 1, !Right, !IO)
         ;
-            Got = no
+            Got = timeout
         )
     ).
 
@@ -264,7 +264,7 @@ measure_to(Where, Remote, Commands, To, From, Words, Rounds, !IO) :-
         receive(From, any, after(60000), Answer, !IO),
         now(T1, !IO),
         Time = T1 - T0,
-        ( if Answer = yes(A) then Right = A ^ elem(0) else Right = -1 )
+        ( if Answer = message(A) then Right = A ^ elem(0) else Right = -1 )
     ;
         Remote = no,
         sending(Where, To, Words, Rounds, Time, !IO),
