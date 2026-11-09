@@ -401,6 +401,62 @@ static void RecordTypes(llvm::Function &function, KnownTypes &known) {
   }
 }
 
+// A clone of `chain`'s `last`, and of what it is computed from, before `place`.
+static llvm::Value *CloneChain(
+    llvm::Instruction *last, llvm::Instruction *place,
+    const llvm::SetVector<llvm::Instruction *> &chain) {
+  llvm::Instruction *clone{last->clone()};
+  clone->insertBefore(place->getIterator());
+  auto *parent{llvm::dyn_cast<llvm::Instruction>(last->getOperand(0))};
+  if (parent && chain.contains(parent)) {
+    clone->setOperand(0, CloneChain(parent, clone, chain));
+  }
+  return clone;
+}
+
+// A C pointer made from a heap pointer is not a root. The optimizer hoists one
+// out of a loop, past safepoints, and its use then has the address from before
+// a collection. Making it again at each use, before statepoints are made, has
+// it use the relocated heap pointer, as GEPs on it do.
+static void CastAtUses(llvm::Function &function) {
+  llvm::SmallVector<llvm::AddrSpaceCastInst *> casts;
+  for (llvm::Instruction &instruction : llvm::instructions(function)) {
+    auto *cast{llvm::dyn_cast<llvm::AddrSpaceCastInst>(&instruction)};
+    if (cast && IsHeapPointer(cast->getSrcTy())) {
+      casts.push_back(cast);
+    }
+  }
+  for (llvm::AddrSpaceCastInst *cast : casts) {
+    llvm::SetVector<llvm::Instruction *> chain;
+    chain.insert(cast);
+    for (std::size_t i{0}; i < chain.size(); ++i) {
+      for (llvm::User *user : chain[i]->users()) {
+        auto *gep{llvm::dyn_cast<llvm::GetElementPtrInst>(user)};
+        if (gep && gep->getPointerOperand() == chain[i]) {
+          chain.insert(gep);
+        }
+      }
+    }
+    for (llvm::Instruction *link : chain) {
+      for (llvm::Use &use : llvm::make_early_inc_range(link->uses())) {
+        auto *user{llvm::cast<llvm::Instruction>(use.getUser())};
+        if (chain.contains(user)) {
+          continue;
+        }
+        if (llvm::isa<llvm::PHINode>(user)) {
+          llvm::report_fatal_error(llvm::Twine{
+              "not yet implemented: a C pointer from a heap pointer that "
+              "goes through a phi, in "} + function.getName());
+        }
+        use.set(CloneChain(link, user, chain));
+      }
+    }
+    for (llvm::Instruction *link : llvm::reverse(chain)) {
+      link->eraseFromParent();
+    }
+  }
+}
+
 // A comparison with a constant needs only the value's bits, and a move does not
 // change what it says: tags and being non-null stay, and static data does not
 // move. The optimizer folds `(ptrtoint x) < 2` to a comparison of pointers, and
@@ -1212,6 +1268,7 @@ void RewriteForCollector(llvm::Module &module, const TargetInfo &target) {
       function.addFnAttr("frame-pointer", "all");
       MarkLeaves(function);
       RecordTypes(function, known);
+      CastAtUses(function);
       ReadBitsEarly(function, known);
       ListLiveRoots(function, known);
       any = true;
