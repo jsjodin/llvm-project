@@ -17,6 +17,11 @@
 
 :- type numbers == array(int).
 
+    % How a GPU's wait ended, which its node's host acts on.
+:- type outcome
+    --->    arrived
+    ;       timed_out.
+
 :- func rounds = int.
 rounds = 3.
 
@@ -36,7 +41,7 @@ main(!IO) :-
     ).
 
 %---------------------------------------------------------------------------%
-% Each node's host: runs its GPU's region once a round.
+% Each node's host: runs its GPU's region once a round, until one times out.
 
 :- pred node_a(links(numbers, int)::in, int::in, io::di, io::uo) is det.
 node_a(Links, Round, !IO) :-
@@ -44,9 +49,15 @@ node_a(Links, Round, !IO) :-
         true
     else
         report_round("A", Round, !IO),
-        gpu_a(Links, Round, Sum, !IO),
-        check_sum(Sum, array_size * Round, !IO),
-        node_a(Links, Round + 1, !IO)
+        gpu_a(Links, Round, Outcome, Sum, !IO),
+        (
+            Outcome = arrived,
+            check_sum(Sum, array_size * Round, !IO),
+            node_a(Links, Round + 1, !IO)
+        ;
+            Outcome = timed_out,
+            report_timeout("GPU A waiting for the sum", !IO)
+        )
     ).
 
 :- pred node_b(links(numbers, int)::in, int::in, io::di, io::uo) is det.
@@ -55,9 +66,14 @@ node_b(Links, Round, !IO) :-
         true
     else
         report_round("B", Round, !IO),
-        gpu_b(Links, Size, !IO),
-        check_received(Size, !IO),
-        node_b(Links, Round + 1, !IO)
+        gpu_b(Links, Outcome, !IO),
+        (
+            Outcome = arrived,
+            node_b(Links, Round + 1, !IO)
+        ;
+            Outcome = timed_out,
+            report_timeout("GPU B waiting for the numbers", !IO)
+        )
     ).
 
 %---------------------------------------------------------------------------%
@@ -97,9 +113,9 @@ node_b(Links, Round, !IO) :-
 % What runs on the GPUs.
 
     % GPU A: makes an array, sends it to GPU B, and waits for the sum.
-:- pred gpu_a(links(numbers, int)::in, int::in, int::out, io::di, io::uo)
-    is det.
-gpu_a(links(ToB, ToA), Round, Sum, !IO) :-
+:- pred gpu_a(links(numbers, int)::in, int::in, outcome::out, int::out,
+    io::di, io::uo) is det.
+gpu_a(links(ToB, ToA), Round, Outcome, Sum, !IO) :-
     %$omp target
     (
         Numbers = array.init(array_size, Round),
@@ -108,29 +124,31 @@ gpu_a(links(ToB, ToA), Round, Sum, !IO) :-
         receive(ToA, any, after(10000), Answer, !IO),
         (
             Answer = message(Sum),
-            say("[GPU A] got the sum", Sum, !IO)
+            say("[GPU A] got the sum", Sum, !IO),
+            Outcome = arrived
         ;
             Answer = timeout,
-            Sum = -1
+            Sum = 0,
+            Outcome = timed_out
         )
     ).
 
     % GPU B: waits for an array, adds it up, and sends the sum to GPU A.
-:- pred gpu_b(links(numbers, int)::in, int::out, io::di, io::uo) is det.
-gpu_b(links(ToB, ToA), Size, !IO) :-
+:- pred gpu_b(links(numbers, int)::in, outcome::out, io::di, io::uo) is det.
+gpu_b(links(ToB, ToA), Outcome, !IO) :-
     %$omp target
     (
         receive(ToB, any, after(10000), Got, !IO),
         (
             Got = message(Numbers),
-            Size = array.size(Numbers),
-            say("[GPU B] got this many numbers:", Size, !IO),
+            say("[GPU B] got this many numbers:", array.size(Numbers), !IO),
             Sum = sum_of(Numbers),
             say("[GPU B] sending back their sum", Sum, !IO),
-            send(ToA, Sum, !IO)
+            send(ToA, Sum, !IO),
+            Outcome = arrived
         ;
             Got = timeout,
-            Size = 0
+            Outcome = timed_out
         )
     ).
 

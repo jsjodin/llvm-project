@@ -25,7 +25,7 @@
 
     % These say so, and fail the program, if a GPU's region went wrong.
 :- pred check_sum(int::in, int::in, io::di, io::uo) is det.
-:- pred check_received(int::in, io::di, io::uo) is det.
+:- pred report_timeout(string::in, io::di, io::uo) is det.
 
 :- implementation.
 :- import_module int, list, maybe, string.
@@ -132,12 +132,8 @@ check_sum(Sum, Expected, !IO) :-
             int_to_string(Expected), _ : node(int, int), !IO)
     ).
 
-check_received(Size, !IO) :-
-    ( if Size > 0 then
-        true
-    else
-        fail_with("GPU B got no array", _ : node(int, int), !IO)
-    ).
+report_timeout(Waiting, !IO) :-
+    fail_with(Waiting ++ ": nothing arrived in time", _ : node(int, int), !IO).
 
 :- pred say(string::in, string::in, io::di, io::uo) is det.
 say(Name, Text, !IO) :-
