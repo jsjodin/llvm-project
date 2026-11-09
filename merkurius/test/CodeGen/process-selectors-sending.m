@@ -73,6 +73,7 @@ typedef struct {
 } sender_args;
 
 static pthread_t sender;
+static MR_Word handles[2][5];
 static sender_args args;
 
 static void *send_alternately(void *raw)
@@ -95,8 +96,13 @@ static void *send_alternately(void *raw)
     start_sender(A::in, B::in, Count::in, _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure],
 "
-    args.a = (MR_Word *) A;
-    args.b = (MR_Word *) B;
+    // The words, as a collection moves the cells.
+    for (int i = 0; i < 5; ++i) {
+        handles[0][i] = ((MR_Word *) A)[i];
+        handles[1][i] = ((MR_Word *) B)[i];
+    }
+    args.a = handles[0];
+    args.b = handles[1];
     args.type_info = TypeInfo_for_T;
     args.count = Count;
     pthread_create(&sender, NULL, send_alternately, &args);

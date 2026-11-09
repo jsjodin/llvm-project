@@ -272,7 +272,7 @@ extern MR_Integer merk_mailbox_read(MR_Integer node_high,
     MR_Integer *monitor, const char **text);
 extern void merk_mailbox_resolve(MR_Integer node_high, MR_Integer node_low,
     MR_Integer place_slot, MR_Integer generation, MR_Integer secret,
-    MR_Integer position, MR_Word value);
+    MR_Integer position, MR_Word type_info, MR_Word value);
 extern MR_Integer merk_monitor_new(MR_Integer target_high,
     MR_Integer target_low, MR_Integer target_place_slot,
     MR_Integer target_generation, MR_Integer target_secret,
@@ -830,9 +830,8 @@ message_at(High, Low, PlaceSlot, Generation, Secret, Position, Message, !IO) :-
         Secret::in, Position::in, Message::in, _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
-    (void)TypeInfo_for_M;
     merk_mailbox_resolve(High, Low, PlaceSlot, Generation, Secret, Position,
-        Message);
+        TypeInfo_for_M, Message);
 ").
 
 :- pred new_monitor(int::in, int::in, int::in, int::in, int::in, int::in,

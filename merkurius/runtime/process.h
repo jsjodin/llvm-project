@@ -66,6 +66,10 @@ struct Process {
   // The chunks of its heap and of the messages it has read, which go when it
   // ends. Only the running process changes them, once it is running.
   ChunkLink *chunks{nullptr};
+  // Bytes added to `chunks` since its last collection, and how many start the
+  // next, or 0 for the first size.
+  std::size_t allocatedBytes{0};
+  std::size_t collectAtBytes{0};
   Stack *stack{nullptr};
   Context context{nullptr};
   // What it runs: a closure of pred(mailbox(M), io, io), and the mailbox.
@@ -110,6 +114,10 @@ void RunProcess(Process *next);
 // With schedulerLock held.
 Process *NewProcess(
     std::size_t stackBytes, std::uint64_t closure, std::uint64_t argument);
+
+// Whether this thread's process, which is not null, can be collected: not
+// while it is in a target or parallel region, whose threads hold its cells.
+bool MayCollect(const Process *);
 
 // Whether a receive on this thread blocks a process, letting others run,
 // rather than the thread.

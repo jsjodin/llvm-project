@@ -34,6 +34,12 @@ inline void *Malloc(std::size_t bytes) {
 // The start of a chunk of cells from malloc, of a fragment or a process's heap.
 struct ChunkLink {
   ChunkLink *next;
+  // Its cells' bytes, which follow this.
+  std::size_t bytes;
+  // A message's chunks, in a list that stays as it is when `next` changes.
+  ChunkLink *sibling;
+  // Whether a message still in its mailbox is in it: the collector leaves it.
+  bool pinned;
 };
 
 inline void FreeChunks(ChunkLink *chunks) {
@@ -49,8 +55,8 @@ inline void FreeChunks(ChunkLink *chunks) {
 //
 // A fragment's chunks are linked, and whoever takes them frees them: a process
 // when it ends, once it has read the message, or a mailbox that closes with
-// the message unread. Temporary (chunk 3, docs/INPROGRESS.md): a process keeps
-// them until it ends, until the collector merges them into its heap.
+// the message unread. A process's collector frees them, once the message has
+// left its mailbox and what is still used of it has been copied.
 class Fragment {
 public:
   // Its chunks, which it no longer owns.
@@ -67,6 +73,9 @@ public:
       chunkBytes_ = chunkBytes_ < kMostChunkBytes ? 2 * chunkBytes_ : chunkBytes_;
       auto *chunk{static_cast<ChunkLink *>(Malloc(sizeof(ChunkLink) + size))};
       chunk->next = chunks_;
+      chunk->bytes = size;
+      chunk->sibling = nullptr;
+      chunk->pinned = false;
       chunks_ = chunk;
       next_ = reinterpret_cast<char *>(chunk + 1);
       limit_ = next_ + size;

@@ -1110,13 +1110,30 @@ no process to collect.
 
 The collector and the barrier, agreed 2026-11-08, each step its own commit:
 
-1. A copying collector, one generation per process, with no barrier, and
-   `MERK_GC_EVERY_ALLOC` to collect at every allocation at -O0 and -O2.
+1. Built 2026-11-08. A copying collector, one generation per process, with no
+   barrier, and `MERK_GC_EVERY_ALLOC` to collect at every allocation at -O0 and
+   -O2, or at every N-th with `MERK_GC_EVERY_ALLOC=N`, for programs too long for
+   the first.
 2. A nursery and an older generation, the remembered set, and the barrier on
    `merk.ref_store` and `array_set`. `bind` does not exist until open types do,
    and will use the same barrier.
 3. The large object space, and timing, with a call-heavy benchmark.
 
+- What step 1 fixed about roots, which steps 2 and 3 rely on:
+  - A stack map location is at the frame pointer in a frame that pushes call
+    arguments, and at the stack pointer otherwise. Any other register is an error.
+  - A value the bundle lists that is dead after the call has no relocation, but
+    can be the only pointer with a type to a live cell. It gets a pair of its own,
+    after the type_infos in the deopt state. The word for the number of pairs
+    has the number of those above bit 32.
+  - A root that is the untagged cell of a term has the term's tag in bits 56 to 58
+    of its type word. A base that nothing lists is update-only, and those are
+    updated after every typed root has gone.
+  - A field whose type's arguments are all type parameters does not add to the
+    chain of environments, or a long list costs its length squared. Polymorphic
+    recursion, as `foo(T)` holding `foo(list(T))`, can still lengthen the chain.
+  - A monitor's function is always copied into chunks of the monitor's, as it
+    outlives the collections of the process that made it.
 - **D8, copying first, decided 2026-11-08.** A barrier bug and a root bug both show
   as heap corruption, so the roots are proven with no barrier involved. Rejected:
   generations at once, which saves some code that is replaced but makes failures

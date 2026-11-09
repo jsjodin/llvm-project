@@ -815,11 +815,25 @@ struct StatepointRoots {
   llvm::DenseMap<const llvm::Value *, llvm::Constant *> types;
   llvm::DenseMap<const llvm::Value *, llvm::SmallVector<llvm::Value *, 2>> infos;
   llvm::SmallMapVector<llvm::Value *, llvm::Value *, 4> slots;
+  // The tag of a root that is the untagged cell of a term the bundle has.
+  llvm::DenseMap<const llvm::Value *, std::uint64_t> tags;
+  // What the bundle has that is dead after the call, so has no relocation.
+  // It can still be the only pointer with a type to a cell that is live.
+  llvm::SmallVector<llvm::Value *> dead;
 };
 } // namespace
 
 // Type index of a root that a collection only updates, -1 being one it ignores.
 static constexpr std::int64_t kForwardOnly{-2};
+
+static std::int64_t RootKindOf(llvm::Module &module, llvm::Constant *type) {
+  auto *table{llvm::cast<llvm::ConstantStruct>(
+      module.getNamedGlobal(kRootTable)->getInitializer())};
+  auto *index{llvm::cast<llvm::ConstantInt>(type)};
+  return llvm::cast<llvm::ConstantInt>(
+      table->getOperand(2 + 2 * (index->getZExtValue() & 0xffffffff)))
+      ->getSExtValue();
+}
 
 static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
     StatepointRoots &roots) {
@@ -831,6 +845,9 @@ static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
   // Direct location, and its layout's index.
   llvm::SmallMapVector<llvm::Value *, llvm::Value *, 4> slots;
   llvm::DenseMap<const llvm::Value *, llvm::SmallVector<llvm::Value *, 2>> infos;
+  // The values the bundle has, and a cell's tag where it has the tagged term.
+  llvm::SmallPtrSet<const llvm::Value *, 16> listed;
+  llvm::DenseMap<const llvm::Value *, std::uint64_t> tags;
   if (deopt) {
     ForEachEntry(deopt->Inputs,
         [&](llvm::Constant *type, llvm::Value *value,
@@ -846,12 +863,26 @@ static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
             slots.insert({value, type});
             return;
           }
-          // A value listed at two types has the one that has type_infos.
+          listed.insert(value);
+          // A value listed at two types has the one that has type_infos, and
+          // a hole's cell has its term's rather than the reference's.
           auto &found{infos[CellOf(value)]};
           if (typeInfos.empty() && !found.empty()) {
             return;
           }
+          if (auto it{types.find(CellOf(value))};
+              it != types.end() && typeInfos.empty() &&
+              RootKindOf(*function.getParent(), type) == kRootRef) {
+            return;
+          }
           types[CellOf(value)] = type;
+          if (auto *tagged{llvm::dyn_cast<llvm::GetElementPtrInst>(value)}) {
+            llvm::APInt offset{64, 0};
+            if (tagged->accumulateConstantOffset(
+                    function.getDataLayout(), offset)) {
+              tags[CellOf(value)] = offset.getZExtValue();
+            }
+          }
           found.clear();
           for (const llvm::Use &info : typeInfos) {
             found.push_back(info.get());
@@ -922,8 +953,12 @@ static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
       // same cell. That pointer is live here too and says what the cell
       // holds; this only has to be updated when it moves. Its bits are the
       // untagged cell, which the type would misread as a constant.
-      if (!infos.count(CellOf(root)) &&
-          !llvm::cast<llvm::ConstantInt>(type)->isNegative()) {
+      auto *known{llvm::cast<llvm::ConstantInt>(type)};
+      if (!listed.contains(root) && !known->isNegative() && root == CellOf(root) &&
+          infos.count(root) && tags.count(root) && tags.lookup(root) < 8) {
+        // The cell of a term the bundle has, whose tag the rewrite left behind.
+        roots.tags[root] = tags.lookup(root);
+      } else if (!listed.contains(root) && !known->isNegative()) {
         type = llvm::ConstantInt::getSigned(
             llvm::Type::getInt64Ty(function.getContext()), kForwardOnly);
       }
@@ -932,6 +967,28 @@ static void FindRootTypes(llvm::GCStatepointInst *statepoint, KnownTypes &known,
         roots.infos[root] = it->second;
       }
     }
+  }
+  if (deopt && live) {
+    llvm::SmallPtrSet<const llvm::Value *, 16> relocated;
+    for (llvm::Value *root : live->Inputs) {
+      relocated.insert(root);
+    }
+    ForEachEntry(deopt->Inputs,
+        [&](llvm::Constant *type, llvm::Value *value,
+            llvm::ArrayRef<llvm::Use> typeInfos) {
+          if (!IsHeapPointer(value->getType()) ||
+              llvm::isa<llvm::Constant>(value) || IsFromStaticData(value) ||
+              relocated.contains(value) || roots.types.count(value) ||
+              RootKindOf(*function.getParent(), type) == kRootRef) {
+            return;
+          }
+          roots.dead.push_back(value);
+          roots.types[value] = type;
+          auto &found{roots.infos[value]};
+          for (const llvm::Use &info : typeInfos) {
+            found.push_back(info.get());
+          }
+        });
   }
   // A base of another pointer, which is the tagged term, is the untagged cell.
   for (const llvm::GCRelocateInst *relocate : statepoint->getGCRelocates()) {
@@ -992,15 +1049,32 @@ static void EncodeRootTypes(StatepointRoots &roots) {
       }
     }
   }
+  for (llvm::Value *value : roots.dead) {
+    for (llvm::Value *info : roots.infos.lookup(value)) {
+      ++typeInfos;
+      if (!relocated.contains(info)) {
+        added.insert(info);
+      }
+    }
+  }
+  // After the type_infos, in the deopt state, as the pairs are in its order.
+  llvm::SmallVector<llvm::Value *> deadOperands;
+  for (llvm::Value *value : roots.dead) {
+    if (added.insert(value)) {
+      deadOperands.push_back(value);
+    }
+  }
   std::size_t count{relocates.size() + added.size()};
   std::vector<llvm::Value *> encoded(
       1 + count, llvm::ConstantInt::getSigned(i64, -1));
-  encoded[0] = llvm::ConstantInt::get(i64, count);
+  encoded[0] = llvm::ConstantInt::get(
+      i64, count | (std::uint64_t{deadOperands.size()} << 32));
   for (auto [slot, layout] : roots.slots) {
     encoded.push_back(layout);
     encoded.push_back(slot);
   }
   encoded.resize(encoded.size() + typeInfos, llvm::ConstantInt::getSigned(i64, -1));
+  encoded.insert(encoded.end(), deadOperands.begin(), deadOperands.end());
   llvm::SmallVector<llvm::OperandBundleDef, 2> bundles;
   for (unsigned b = 0; b < statepoint->getNumOperandBundles(); ++b) {
     llvm::OperandBundleUse use{statepoint->getOperandBundleAt(b)};
@@ -1035,15 +1109,34 @@ static void EncodeRootTypes(StatepointRoots &roots) {
     for (llvm::Value *info : infos) {
       final->setOperand(infoPlace++, info);
     }
+    std::uint64_t tag{roots.tags.lookup(relocate->getDerivedPtr())};
     final->setOperand(place++,
-        infos.empty() ? type
-                      : llvm::ConstantInt::get(i64,
-                            type->getZExtValue() |
-                                (std::uint64_t{infos.size()} << 32)));
+        infos.empty() && tag == 0
+            ? type
+            : llvm::ConstantInt::get(i64,
+                  type->getZExtValue() | (std::uint64_t{infos.size()} << 32) |
+                      (tag << 56)));
   }
-  for (llvm::Value *info : added) {
-    llvm::Constant *type{roots.types.lookup(info)};
-    final->setOperand(place++, type ? type : llvm::ConstantInt::getSigned(i64, -1));
+  for (llvm::Value *value : added) {
+    llvm::Constant *type{roots.types.lookup(value)};
+    if (!type) {
+      final->setOperand(place++, llvm::ConstantInt::getSigned(i64, -1));
+      continue;
+    }
+    // Only what was counted above: a type_info added here has none.
+    llvm::SmallVector<llvm::Value *, 2> infos;
+    if (llvm::is_contained(roots.dead, value)) {
+      infos = roots.infos.lookup(value);
+    }
+    for (llvm::Value *info : infos) {
+      final->setOperand(infoPlace++, info);
+    }
+    final->setOperand(place++,
+        infos.empty()
+            ? type
+            : llvm::ConstantInt::get(i64,
+                  llvm::cast<llvm::ConstantInt>(type)->getZExtValue() |
+                      (std::uint64_t{infos.size()} << 32)));
   }
 }
 

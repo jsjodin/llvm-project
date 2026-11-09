@@ -12,9 +12,8 @@
 // own allocations, arrays', do the same through Allocate.
 //
 // merk_heap is the heap of the process the thread runs (process.h), or the
-// thread's own on a thread that runs none. Temporary (chunk 1 step 3,
-// docs/INPROGRESS.md): the heap's chunks are freed only when a process ends,
-// until chunk 3's collector.
+// thread's own on a thread that runs none. A process's chunks are freed by its
+// collections (roots.h) and when it ends.
 //
 //===----------------------------------------------------------------------===//
 
