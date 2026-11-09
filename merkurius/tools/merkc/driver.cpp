@@ -319,6 +319,12 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
       // the OpenMP device runtime. Only AMD GPUs are offloaded to so far.
       job.push_back("-Xoffload-linker-amdgcn-amd-amdhsa");
       job.push_back((libraryDir + "/libmerkdevice-amdgcn.a").str());
+      // A kernel with statements around a parallel region stays generic:
+      // OpenMPOpt's guarded SPMD form of one faults at address 0 when a value
+      // read from memory before the region reaches it through a call
+      // (test/CodeGen/omp-target-parallel-do.m).
+      job.push_back("-Xoffload-linker-amdgcn-amd-amdhsa");
+      job.push_back("-mllvm=-openmp-opt-disable-spmdization");
     }
     job.push_back("-o");
     job.push_back(output.empty() ? "a.out" : output.str());

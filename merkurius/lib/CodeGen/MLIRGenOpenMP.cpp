@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "MLIRGenImpl.h"
+#include "mlir/Transforms/RegionUtils.h"
 #include "llvm/Support/xxhash.h"
 
 namespace merkurius::codegen::mlirgen {
@@ -20,7 +21,11 @@ mlir::Value MerkGenerator::Slot(mlir::Type type, mlir::Location loc) {
   auto proc{builder_.getInsertionBlock()->getParent()
                 ->getParentOfType<merk::ProcOp>()};
   mlir::OpBuilder::InsertionGuard guard{builder_};
-  builder_.setInsertionPointToStart(&proc.getBody().front());
+  // In a target region, in the region: otherwise it would be another of the
+  // kernel's arguments, which the host and device compiles must agree on.
+  mlir::omp::TargetOp target{EnclosingTarget()};
+  builder_.setInsertionPointToStart(
+      target ? &target.getRegion().front() : &proc.getBody().front());
   unsigned addressSpace{target_.allocaAddressSpace()};
   mlir::Value one{mlir::LLVM::ConstantOp::create(
       builder_, loc, builder_.getI64Type(), builder_.getI64IntegerAttr(1))};
@@ -584,12 +589,11 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
     NotYet(at, "the " + name + " directive");
     return;
   }
-  if (builder_.getInsertionBlock()
+  if (offloaded &&
+      builder_.getInsertionBlock()
           ->getParent()
           ->getParentOfType<mlir::omp::TargetOp>()) {
-    NotYet(at,
-        offloaded ? std::string{"target regions in target regions"}
-                  : name + " in target regions");
+    NotYet(at, "target regions in target regions");
     return;
   }
   std::vector<const Body *> goals;
@@ -834,8 +838,16 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
     }
   }
   llvm::SmallVector<UpdatedSlot> updated;
+  // On a device, a loop that is not a kernel of its own starts from one thread
+  // of a region, whose stack the team's other threads cannot read.
+  bool sharedSlots{!offloaded && target_.options().openMPIsTargetDevice};
+  llvm::SmallVector<mlir::Value> shared;
   for (LoopReduction &reduction : reductions) {
-    reduction.slot = Slot(reduction.type, loc);
+    reduction.slot =
+        sharedSlots ? SharedSlots(1, loc) : Slot(reduction.type, loc);
+    if (sharedSlots) {
+      shared.push_back(reduction.slot);
+    }
     mlir::LLVM::StoreOp::create(builder_, loc,
         ValueOf(call->arguments[reduction.value->in]), reduction.slot);
     updated.push_back({reduction.slot, reduction.type, reduction.value->name});
@@ -844,8 +856,17 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
       bodyProcedure, reductions, teams, distribute, offloaded, at};
   if (!offloaded) {
     GenerateParallelLoop(parallelLoop, body, loc);
-    if (!failed_) {
-      LoadReductions(reductions, *call, loc);
+    if (failed_) {
+      return;
+    }
+    if (sharedSlots) {
+      ShareCapturedScalars(
+          mlir::cast<mlir::omp::ParallelOp>(builder_.getInsertionBlock()->back()),
+          loc);
+    }
+    LoadReductions(reductions, *call, loc);
+    for (mlir::Value slots : llvm::reverse(shared)) {
+      FreeShared(slots, 1, loc);
     }
     return;
   }
@@ -879,6 +900,70 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
 // a bound that is a variable included. Target then gives the host's nest
 // the host_eval values; the device's stays over those, as Flang's does,
 // since the device has no host_eval.
+// Words that the threads of a device's team can all reach, as Clang's
+// globalization has for a variable that a parallel region shares: the device
+// runtime's __kmpc_alloc_shared, freed in the reverse order.
+mlir::Value MerkGenerator::SharedSlots(std::size_t count, mlir::Location loc) {
+  return merk::ForeignCallOp::create(builder_, loc,
+      mlir::TypeRange{mlir::LLVM::LLVMPointerType::get(&context_)},
+      "merk_device_shared_alloc",
+      mlir::ValueRange{IntegerConstant(builder_.getI64Type(),
+          static_cast<std::int64_t>(count * sizeof(std::uint64_t)), loc)},
+      /*can_fail=*/false)
+      .getResult(0);
+}
+
+void MerkGenerator::FreeShared(
+    mlir::Value slots, std::size_t count, mlir::Location loc) {
+  merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+      "merk_device_shared_free",
+      mlir::ValueRange{slots,
+          IntegerConstant(builder_.getI64Type(),
+              static_cast<std::int64_t>(count * sizeof(std::uint64_t)), loc)},
+      /*can_fail=*/false);
+}
+
+// A scalar that a parallel region on a device uses from outside it: the
+// outlining would pass it in a slot of the starting thread's stack, which the
+// team's other threads cannot read. So it goes in shared memory, stored before
+// the region and loaded at its start. A pointer is passed as it is.
+void MerkGenerator::ShareCapturedScalars(
+    mlir::omp::ParallelOp parallel, mlir::Location loc) {
+  llvm::SetVector<mlir::Value> used;
+  mlir::getUsedValuesDefinedAbove(parallel.getRegion(), used);
+  llvm::SmallVector<mlir::Value> scalars;
+  for (mlir::Value value : used) {
+    if (mlir::isa<mlir::IntegerType, mlir::FloatType>(value.getType())) {
+      scalars.push_back(value);
+    }
+  }
+  if (scalars.empty()) {
+    return;
+  }
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPoint(parallel);
+  mlir::Value slots{SharedSlots(scalars.size(), loc)};
+  mlir::Type pointer{mlir::LLVM::LLVMPointerType::get(&context_)};
+  mlir::Type byte{builder_.getI8Type()};
+  auto at{[&](std::size_t index) -> mlir::Value {
+    return mlir::LLVM::GEPOp::create(builder_, loc, pointer, byte, slots,
+        llvm::ArrayRef<mlir::LLVM::GEPArg>{static_cast<std::int32_t>(
+            index * sizeof(std::uint64_t))});
+  }};
+  for (auto [index, value] : llvm::enumerate(scalars)) {
+    mlir::LLVM::StoreOp::create(builder_, loc, value, at(index));
+  }
+  mlir::Block &entry{parallel.getRegion().front()};
+  builder_.setInsertionPointToStart(&entry);
+  for (auto [index, value] : llvm::enumerate(scalars)) {
+    mlir::Value loaded{mlir::LLVM::LoadOp::create(
+        builder_, loc, value.getType(), at(index))};
+    mlir::replaceAllUsesInRegionWith(value, loaded, parallel.getRegion());
+  }
+  builder_.setInsertionPointAfter(parallel);
+  FreeShared(slots, scalars.size(), loc);
+}
+
 void MerkGenerator::GenerateParallelLoop(const ParallelLoop &loop,
     const ProcedureBody &body, mlir::Location loc) {
   mlir::OpBuilder::InsertionGuard guard{builder_};

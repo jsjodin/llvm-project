@@ -568,6 +568,9 @@ private:
   template <typename Operands>
   void AddReductions(Operands &, llvm::ArrayRef<LoopReduction>,
       mlir::ValueRange vars, mlir::Location);
+  mlir::Value SharedSlots(std::size_t count, mlir::Location loc);
+  void FreeShared(mlir::Value slots, std::size_t count, mlir::Location loc);
+  void ShareCapturedScalars(mlir::omp::ParallelOp, mlir::Location loc);
   void LoadReductions(
       llvm::ArrayRef<LoopReduction>, const Body &call, mlir::Location);
   // A slot of the procedure that a target region updates, mapped tofrom

@@ -103,6 +103,19 @@ void *NewChunk(uint64_t bytes) {
 
 } // namespace
 
+// Memory that the threads of a parallel region on the device can all reach,
+// unlike a thread's stack. Freed in the reverse order.
+extern "C" void *__kmpc_alloc_shared(uint64_t bytes);
+extern "C" void __kmpc_free_shared(void *pointer, uint64_t bytes);
+
+extern "C" void *merk_device_shared_alloc(uint64_t bytes) {
+  return __kmpc_alloc_shared(bytes);
+}
+
+extern "C" void merk_device_shared_free(void *pointer, uint64_t bytes) {
+  __kmpc_free_shared(pointer, bytes);
+}
+
 // A cell, or an array, in the device's arena (docs/INPROGRESS.md, The
 // device's side of the first slice, step 6): bumped from the current
 // chunk with an atomic add. When it does not fit, one lane on the device
