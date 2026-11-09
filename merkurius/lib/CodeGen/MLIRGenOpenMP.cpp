@@ -1755,8 +1755,15 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   llvm::DenseMap<BodyVar, mlir::Value> updated;
   llvm::DenseMap<BodyVar, llvm::SmallVector<mlir::Value>> candidates;
   llvm::DenseMap<BodyVar, mlir::Type> arrayTypes;
+  // A constant of a type of constants only is one word, and leaves as one.
+  llvm::DenseMap<BodyVar, mlir::Type> constants;
   for (BodyVar var : outputs) {
     mlir::Value value{values_.lookup(var)};
+    if (mlir::isa<merk::TermType>(value.getType()) &&
+        WordMessage(value.getType())) {
+      constants[var] = value.getType();
+      continue;
+    }
     if (!Givable(value.getType())) {
       NotYet(at,
           "values of type " + semantics::TypeToString(*body.vars[var].type) +
@@ -1824,8 +1831,9 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   llvm::SmallVector<mlir::Type> outputTypes;
   for (BodyVar var : outputs) {
     // An array whose given array the region finds gives its number.
-    mlir::Type type{candidates.contains(var) ? builder_.getI64Type()
-                                             : values_.lookup(var).getType()};
+    mlir::Type type{candidates.contains(var) || constants.contains(var)
+            ? builder_.getI64Type()
+            : values_.lookup(var).getType()};
     outputTypes.push_back(type);
     outputSlots.push_back(Slot(type, loc));
     maps.push_back(
@@ -1921,8 +1929,13 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
             pointerArgs.lookup(var));
         value = number;
       }
-      mlir::LLVM::StoreOp::create(builder_, loc,
-          loaded.lookup(value) ? loaded.lookup(value) : value, arg);
+      if (loaded.lookup(value)) {
+        value = loaded.lookup(value);
+      }
+      if (constants.contains(var)) {
+        value = Coerce(value, builder_.getI64Type(), loc);
+      }
+      mlir::LLVM::StoreOp::create(builder_, loc, value, arg);
     }
     mlir::omp::TerminatorOp::create(builder_, loc);
   }
@@ -1932,6 +1945,9 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   values_ = before;
   for (auto [var, type, slot] : llvm::zip(outputs, outputTypes, outputSlots)) {
     values_[var] = mlir::LLVM::LoadOp::create(builder_, loc, type, slot);
+    if (auto constant{constants.find(var)}; constant != constants.end()) {
+      values_[var] = Coerce(values_[var], constant->second, loc);
+    }
     if (auto same{candidates.find(var)}; same != candidates.end()) {
       // Chosen among the pointers, which the arrays become.
       mlir::Value number{values_[var]};
