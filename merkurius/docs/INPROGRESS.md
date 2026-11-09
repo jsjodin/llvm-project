@@ -1117,7 +1117,10 @@ The collector and the barrier, agreed 2026-11-08, each step its own commit:
 2. A nursery and an older generation, the remembered set, and the barrier on
    `merk.ref_store` and `array_set`. `bind` does not exist until open types do,
    and will use the same barrier.
-3. The large object space, and timing, with a call-heavy benchmark.
+3. The large object space, built 2026-11-08 ahead of step 2: an allocation with
+   a block of its own is marked where it is, traced in place, and freed if
+   unreached, so its address does not change. Then timing, with a call-heavy
+   benchmark.
 
 - What step 1 fixed about roots, which steps 2 and 3 rely on:
   - A stack map location is at the frame pointer in a frame that pushes call
@@ -1134,6 +1137,45 @@ The collector and the barrier, agreed 2026-11-08, each step its own commit:
     recursion, as `foo(T)` holding `foo(list(T))`, can still lengthen the chain.
   - A monitor's function is always copied into chunks of the monitor's, as it
     outlives the collections of the process that made it.
+- **Step 2, deferred 2026-11-08.** Generations lose no correctness by waiting,
+  and arrays, used destructively, stay put once large objects do. Timing will
+  say when they are worth building. Barrier-needing features added before
+  then (`bind`, mutables) should keep D11's rule, a type at each store. The plan
+  as written: each process has a nursery, one
+  contiguous block, and an older generation, the chunk list that step 1 collects.
+  A minor collection copies what is reachable in the nursery into the older
+  generation, with no aging. A major collection is step 1's. It runs when the
+  older generation has doubled since the last major.
+  - **D11, the barrier records a type.** Cells have no headers, so a remembered
+    slot means nothing without the type of what it holds. The record is the
+    slot, a count, the root table entry of the stored value's type, and its
+    type_infos, as a safepoint has. Only the slow path uses them. Inline, the
+    barrier tests that the value is in the nursery and the slot is not, two
+    compares on the bounds in `merk_heap`. A store of a non-pointer type has no
+    barrier. A polymorphic store with no type_infos in reach is a compile error,
+    as a root is. Rejected: a type_info in each array's header, which changes
+    every array's layout, the device's included, and does not help holes.
+  - **D12, the same record for runtime array operations.** `fill`, `copy`,
+    `resize` and `from_list` can write young pointers into an array that is not
+    in the nursery. The compiler adds a range record after the call: the
+    elements, their count and their type. Rejected: making the next collection
+    major, which costs a major each time for arrays of terms.
+  - **D13, a nursery that cannot be collected.** If it fills where no collection
+    can run (no safepoint, a pinned process, an OpenMP team, or C++), the
+    allocation takes an ordinary chunk and the next collection is major. Such
+    a chunk's cells can hold nursery pointers no barrier saw, and the bounds
+    do not recognize them as young. The end of an OpenMP team also makes the next
+    collection major, as other threads' `merk_heap` is not the process's.
+  - **D14, message chunks.** A minor collection leaves them alone, unpinned or
+    not. A nursery cell or an older one may point into them, and a major frees
+    them. Their size counts towards the next major. Rejected: treating them as
+    young, as the barrier's bounds do not see them.
+  - **Nursery size.** It starts small and doubles at each minor up to 1 MB, as
+    the chunks do, so a process that allocates little costs little.
+  - **Known cost, for step 3's timing:** each minor walks the whole stack, so
+    deep recursion pays for its depth at each one. A stack watermark is the
+    fix if the call-heavy benchmark shows it.
+
 - **D8, copying first, decided 2026-11-08.** A barrier bug and a root bug both show
   as heap corruption, so the roots are proven with no barrier involved. Rejected:
   generations at once, which saves some code that is replaced but makes failures

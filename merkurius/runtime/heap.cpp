@@ -7,7 +7,8 @@
 //===----------------------------------------------------------------------===//
 //
 // The heap's slow path (heap.h): a new chunk when the current one is full,
-// and a block of its own for an allocation too large to share one.
+// and a block of its own for an allocation too large to share one, which a
+// collection does not move.
 //
 // MERK_HEAP_CHUNK_BYTES, if set, is the chunk's size instead, for testing:
 // with a small one, such as 64, nearly every allocation takes the slow
@@ -65,7 +66,7 @@ std::size_t ReadChunkBytes() {
 // which programs are not linked with; threads that race read the same.
 std::atomic<std::size_t> chunkBytes{0};
 
-char *Chunk(std::size_t bytes) {
+char *Chunk(std::size_t bytes, bool large = false) {
   // malloc aligns to at least a word, which the primary tags need. A thread
   // that runs no process keeps its chunks.
   auto *chunk{static_cast<merkurius::runtime::ChunkLink *>(
@@ -74,6 +75,7 @@ char *Chunk(std::size_t bytes) {
   chunk->bytes = bytes;
   chunk->sibling = nullptr;
   chunk->pinned = false;
+  chunk->large = large;
   if (merkurius::runtime::Process *process{
           merkurius::runtime::CurrentProcess()}) {
     chunk->next = process->chunks;
@@ -99,10 +101,6 @@ extern "C" void *merk_alloc_slow(std::int64_t bytes) {
       return cell;
     }
   }
-  if (merkurius::runtime::CollectsEveryAllocation()) {
-    // So that the next allocation comes here too.
-    return Chunk(size);
-  }
   std::size_t chunkSize{chunkBytes.load(std::memory_order_relaxed)};
   if (chunkSize == 0) {
     chunkSize = ReadChunkBytes();
@@ -110,6 +108,10 @@ extern "C" void *merk_alloc_slow(std::int64_t bytes) {
   }
   std::size_t large{chunkSize / 2 < kLargeBytes ? chunkSize / 2 : kLargeBytes};
   if (size > large) {
+    return Chunk(size, true);
+  }
+  if (merkurius::runtime::CollectsEveryAllocation()) {
+    // So that the next allocation comes here too.
     return Chunk(size);
   }
   // A process's heap starts small and doubles, so that a process that
