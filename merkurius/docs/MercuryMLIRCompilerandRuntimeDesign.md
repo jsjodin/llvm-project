@@ -3966,6 +3966,52 @@ The monomorphic program's text grew from 298 KB to 318 KB, and its stack maps fr
 94 KB to 107 KB, with 0.6 KB of root table. nrev has few live values at its safepoints,
 so as before this says little about code with many calls.
 
+### The collector
+
+Measured 2026-11-08 at commit d1d4d913b2f8, -O2, one process pinned to one core
+of an otherwise idle machine, five runs each, median seconds. "No collection" is
+the same program linked with a runtime whose threshold is never reached, so its
+chunks are only freed at the end.
+
+| Program | Collecting | Peak | No collection | Peak |
+| --- | --- | --- | --- | --- |
+| nrev, monomorphic | 3.01 | 6 MB | 18.84 | 36.9 GB |
+| nrev, polymorphic | 3.03 | 5 MB | 18.81 | 36.9 GB |
+| Garbage under 300,000 frames | 16.25 | 41 MB | 4.58 | 8.4 GB |
+| Garbage with a live list of 128 MB | 18.72 | 499 MB | 9.34 | 17.5 GB |
+
+The spread between runs was under 1%.
+
+- **nrev is six times faster collecting.** Almost nothing survives, so a
+  collection costs little, and reusing a few MB avoids the page faults of touching
+  37 GB of new memory. The polymorphic program costs the same.
+- **A deep stack is the worst case: 3.5 times slower.** A collection each 4 MB
+  walks all 300,000 frames, whatever survives. A stack watermark, which skips
+  frames that have not run since the last collection, needs generations: here
+  every collection moves every live object, so every frame must be updated.
+  The threshold below pays for the walk instead.
+- **A large live heap costs twice the time.** Each collection copies what is
+  live. Generations are what would remove this, so they stay deferred until a
+  program that matters looks like this one.
+- Comparing with no collection flatters neither side simply: its page faults
+  are part of its time, so the collector's own cost is more than the difference
+  in the last two rows shows.
+
+With the next collection due only after allocating four times the bytes of
+stack just walked, as well as 4 MB and twice what is live (2026-11-09, on commit
+a3234f334282 plus that change, same method):
+
+| Program | Collecting | Peak | Before the change | Peak |
+| --- | --- | --- | --- | --- |
+| nrev, monomorphic | 3.01 | 6 MB | 3.01 | 6 MB |
+| nrev, polymorphic | 3.03 | 6 MB | 3.03 | 5 MB |
+| Garbage under 300,000 frames | 3.47 | 96 MB | 16.25 | 41 MB |
+| Garbage with a live list of 128 MB | 18.69 | 499 MB | 18.72 | 499 MB |
+
+The deep stack now runs faster than with no collection (4.58), for 55 MB more
+at its peak, and the others do not change. The factor of 4 is a round number, not
+tuned. Frames whose size the stack map does not give are not counted.
+
 ## Target applications
 
 Recorded on 2026-11-05. This is judgement, not a result: the only performance evidence so far is the bandwidth benchmark, whose program is no simpler than its C version (`benchmarks/bandwidth/README.md`). That the code is simpler has still to be shown on a program with real logic in it.
