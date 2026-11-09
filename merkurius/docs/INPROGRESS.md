@@ -1182,6 +1182,9 @@ The collector and the barrier, agreed 2026-11-08, each step its own commit:
   much harder to tell apart.
 - **D9, allocation from C++, decided 2026-11-08.** It only grows the heap, as C++
   frames hold raw pointers. The next allocation from Mercury code collects.
+  Array creation has a safepoint of its own before the runtime call, so that a
+  loop that makes only arrays collects. A loop that allocates only in other C++,
+  such as string concatenation, still does not collect until Mercury allocates.
   Rejected: registering C++ roots at each site, where one is easily missed.
 - **D10, messages still in a mailbox, decided 2026-11-08.** The chunks of a message
   read but not taken are pinned until it is removed. It points only within its own

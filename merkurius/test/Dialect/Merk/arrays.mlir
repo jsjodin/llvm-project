@@ -8,7 +8,11 @@
 // RUN: diff %t.1.mlir %t.2.mlir
 // RUN: merkc -fc1 -emit-llvm %s | FileCheck %s --check-prefix=LLVM
 
-module @arrays attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
+module @arrays attributes {llvm.target_triple = "x86_64-unknown-linux-gnu", merk.no_root_types} {
+  merk.type_ctor "string/0" module "" name "string" kind "string" linkage "declaration" arity 0
+  merk.type_ctor "array.array/1" module "array" name "array" kind "array" linkage "declaration" arity 1
+  merk.type_ctor "float/0" module "" name "float" kind "float" linkage "declaration" arity 0
+  merk.type_ctor "list.list/1" module "list" name "list" kind "term" linkage "declaration" arity 1
   merk.type_def "list.list(float)" [#merk.constructor<"[]">, #merk.constructor<"[|]"(f64, !merk.term<"list.list(float)">)>]
 
   // CHECK-LABEL: merk.proc @arrays.from_list_2_0(%arg0: !merk.term<"list.list(float)">) -> !merk.array<f64>
@@ -58,11 +62,13 @@ module @arrays attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
 // An array is a pointer; an element is a word, a float's bits or a
 // character extended.
 // LLVM-LABEL: define tailcc ptr addrspace(1) @arrays.from_list_2_0(ptr addrspace(1) %0)
+// LLVM-NEXT: call void @merk_gc_poll()
 // LLVM-NEXT: call ptr addrspace(1) @merk_array_from_list(ptr addrspace(1) %0, i64 1)
 // LLVM-LABEL: define tailcc { ptr addrspace(1), ptr addrspace(1) } @arrays.new_2_0(i64 %0, double %1)
 // LLVM: %[[W:.*]] = bitcast double %1 to i64
 // LLVM-NEXT: %[[P:.*]] = inttoptr i64 %[[W]] to ptr addrspace(1)
 // LLVM-NEXT: call ptr addrspace(1) @merk_array_new(i64 %0, ptr addrspace(1) %[[P]])
+// LLVM-NEXT: call void @merk_gc_poll()
 // LLVM-NEXT: call ptr addrspace(1) @merk_array_new(i64 %0, ptr addrspace(1) null)
 // The index is checked against the size, the first word, as unsigned.
 // LLVM-LABEL: define tailcc { i64, double } @arrays.get_3_0(ptr addrspace(1) %0, i64 %1)
