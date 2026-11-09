@@ -1527,6 +1527,122 @@ they arrive.
 - **The MPI+HIP program** to compare with is not written.
 - **Decomposition in two dimensions** and corners are left for later.
 
+## Topology: GPUs, NUMA domains and NICs within a node
+
+Proposed 2026-11-09; nothing is built, and it is not agreed. Real numbers wait for
+a machine with several GPUs, as the halo exchange does; the model, routing and
+placement can be developed before (Developing without the machines).
+
+**Why.** Inside a node, the route between two GPUs, or from a GPU to the network,
+decides the bandwidth, and the fast route is often not through the CPU. Today a
+GPU's messages go through host memory and a socket, whatever the machine.
+
+**Two machines as examples.**
+
+- **Supermicro AS-4124GQ-TNMI** (user's manual, 1.7 System Architecture, figure
+  1-8, 4U):
+  - Two CPU sockets, with three xGMI links between them.
+  - Four MI250 OAM cards, each two GCDs, each GCD shown as 100 CUs.
+  - Between the cards, xGMI links every card to every other: a square and both
+    diagonals. Within a card, the two GCDs are linked.
+  - Each card has x32 lanes to its own PCIe switch, which has x16 to a CPU (two
+    switches on each socket), x32 to two NICs, and NVMe drives.
+  - Not shown: which GCD of a card carries the PCIe link, and the xGMI bandwidths.
+- **Frontier or Crusher node** (OLCF Crusher quick start guide, node diagram;
+  Crusher was retired in 2024, Frontier's node is the same):
+  - One 64-core CPU in 4 NUMA domains, each two L3 regions of 8 cores.
+  - Four MI250X cards, two GCDs each, 8 GPUs to the program.
+  - Each GPU has its own Infinity Fabric link to one L3 region, 36+36 GB/s. The
+    numbering is not in order: L3 region 0 is GPU 4, and GPU 0 is in NUMA domain 3.
+  - Within a card, 4 links, 200 GB/s. Between cards, links of 50+50 GB/s, unevenly:
+    2 between GPUs 4 and 2 and between 6 and 0, 1 for 5–7, 4–6, 2–0, 3–1, 5–1 and
+    3–7, and none for other pairs.
+  - Four NICs of 25+25 GB/s, one on each card, attached to one GPU (5, 3, 7 and 1)
+    over PCIe Gen4 ESM, 50+50 GB/s.
+
+What follows for routes:
+
+- On the Supermicro machine, a GPU and its NICs share a PCIe switch, whose link to
+  the CPU is half as wide. Data for the network should go GPU, switch, NIC, not
+  through host memory.
+- On Frontier, GPU 4 has no NIC; its fast route out is over 200 GB/s to GPU 5,
+  which has one. Between GPUs with one link, a large transfer may be faster split
+  over a second route through a neighbour.
+- Processes that talk to a GPU belong on its NUMA domain or L3 region. Slurm's
+  `--gpu-bind=closest` does this for MPI ranks, and the guide warns that rank i is
+  not GPU i.
+
+**What RCCL does** (ROCm/rocm-systems, `projects/rccl/src/graph`):
+
+- A graph whose nodes are GPUs, PCIe switches, CPUs (commented "Actually NUMA
+  domains"), NICs and the network, with typed links and a bandwidth constant for
+  each kind.
+- It searches the graph for rings and trees, which become the channels of its
+  collectives.
+- `rome_models.cc` is 5,335 lines of ring orders written for particular machines,
+  matched by a pattern string: detection alone was not enough.
+- A collective is a kernel launched from the host, over a communicator fixed in
+  advance.
+
+**Where Merkurius could do better.**
+
+1. **No host in the loop.** A launch for each collective costs tens of µs, which
+   dominates small and medium messages. GPU processes that keep running send and
+   receive themselves (Processes as teams). rocSHMEM and MSCCL++ start transfers
+   from the GPU too, so they are the ones to compare with.
+2. **The runtime uses the topology.** A GPU is a place with distances, so `send`
+   chooses the route, such as through GPU 5's NIC on Frontier, and a spawn puts a
+   process near its GPU.
+3. **Patterns other than collectives.** A halo exchange and irregular point to
+   point traffic, overlapped with computation; collectives written in Mercury,
+   fused with the computation around them.
+
+Not claimed: RCCL's bandwidth for large collectives, tuned for these machines.
+
+**Proposed, in order.**
+
+1. **Direct paths.** Peer access between GPUs of a node, and sends from GPU memory
+   to the NIC (GPU-direct RDMA), so a message need not go through host memory.
+2. **A model.** Places (GPUs, NUMA domains, NICs), links with bandwidth and
+   latency, and which NIC belongs to which GPU. On Linux,
+   `/sys/class/kfd/kfd/topology/nodes/*/io_links` gives link types and weights.
+   A file can describe the machine instead, for what detection gets wrong, which
+   is `rome_models.cc`'s lesson.
+3. **Routing and placement** from the model.
+4. **Measurements** against `rccl-tests` and an MPI+HIP program.
+
+**Developing without the machines.**
+
+- **The model is data.** With the topology read from a file (an environment
+  variable naming it), the Supermicro and Frontier nodes are two files, and unit
+  tests check routing and placement on them: from GPU 4 on Frontier, the network
+  is through GPU 5. This needs no hardware.
+- **Places on one GPU.** Several processes on the one GPU, each told by the file
+  that it is a different GPU, check that messages take the routes chosen, as
+  both-regions already runs two processes on one GPU.
+- **Several OpenMP devices on the CPU.** LLVM's host offload plugin is built here
+  and presents 4 devices (`NUM_DEVICES` in `offload/plugins-nextgen/host`), so
+  `device(N)`, transfers between devices and regions on several devices can run
+  on the CPU. Whether merkc can target the host as an offload device is not checked.
+- **Links slowed on purpose.** A transport for tests that delays each message by a
+  link's latency and bandwidth from the file shows whether routing picks the
+  faster path. Only the choice is tested; the speed is made up.
+- **APIs with stand-ins.** The runtime calls an interface of its own for
+  transports, with real backends (HIP peer access, verbs or libfabric) and one
+  over host memory or sockets. libfabric's tcp provider runs without special
+  hardware. Soft-RoCE gives verbs over ordinary Ethernet but needs a kernel module,
+  which is the user's to decide.
+- **Not simulated:** real bandwidths, contention between links, and the cost of
+  GPU-direct RDMA. Those wait for the machines.
+
+**Open.**
+
+- Which GPU of a Supermicro card carries the PCIe link, and the xGMI bandwidths.
+- Whether to split a large transfer over several routes, and how to set its size.
+- How a program sees the topology: not at all, as hints to spawn, or as places it
+  can name.
+- Whether the model also covers nodes, where the network's topology matters.
+
 ## The receive goal: later
 
 The receive goal is done (design document, Processes and mailboxes, "The
