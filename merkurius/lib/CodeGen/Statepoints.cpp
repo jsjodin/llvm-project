@@ -286,6 +286,23 @@ static const llvm::Value *CellOf(const llvm::Value *value) {
   }
 }
 
+// Whether a bundle has the mark of a call in a target region. The mark is first
+// as lowering makes it; once the region's procedure is inlined, the entries of
+// the caller's bundle are before it.
+static bool InRegion(llvm::ArrayRef<llvm::Use> inputs) {
+  for (std::size_t i = 0; i < inputs.size();) {
+    auto *header{llvm::dyn_cast<llvm::ConstantInt>(inputs[i].get())};
+    if (!header) {
+      return false;
+    }
+    if (header->getSExtValue() == kInRegion) {
+      return true;
+    }
+    i += 2 + static_cast<std::size_t>(header->getZExtValue() >> 32);
+  }
+  return false;
+}
+
 // In a function the collector scans: a call is a safepoint if it has a bundle
 // and is not a tail call, which leaves no frame to scan. Any other is a leaf,
 // which is why this is after the optimizer: an inlined musttail call is an
@@ -299,10 +316,7 @@ static void MarkLeaves(llvm::Function &function) {
     }
     auto deopt{call->getOperandBundle(llvm::LLVMContext::OB_deopt)};
     bool bundle{deopt.has_value()};
-    auto *first{deopt && !deopt->Inputs.empty()
-            ? llvm::dyn_cast<llvm::ConstantInt>(deopt->Inputs[0])
-            : nullptr};
-    bool inRegion{first && first->getSExtValue() == kInRegion};
+    bool inRegion{deopt && InRegion(deopt->Inputs)};
     auto *direct{llvm::dyn_cast<llvm::CallInst>(call)};
     if (inRegion || (direct && direct->isMustTailCall())) {
       if (bundle) {
@@ -1210,10 +1224,7 @@ static bool IsMercuryCode(llvm::Function &function) {
     if (!deopt) {
       continue;
     }
-    auto *first{deopt->Inputs.empty()
-            ? nullptr
-            : llvm::dyn_cast<llvm::ConstantInt>(deopt->Inputs[0])};
-    if (!first || first->getSExtValue() != kInRegion) {
+    if (!InRegion(deopt->Inputs)) {
       return true;
     }
   }
