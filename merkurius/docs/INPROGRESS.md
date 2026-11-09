@@ -1438,6 +1438,52 @@ each compute unit are read from these results, not from a specification.
   The growth with the number of teams, while only one team has work, suggests that
   polling itself loads the memory system; that was not tested.
 
+**Coordinating teams with messages.** OpenMP has nothing that makes one team wait
+for another inside a teams region, and code in `teams` outside `distribute` runs
+once in every team, so a `receive` there would run in each. With a process for each
+team, `send` and `receive` give the coordination:
+
+1. Team 0 receives from the network.
+2. It sends the array to the other teams, by its pointer.
+3. Each team computes its slice and sends its part to team 0.
+4. Waiting for those replies is the barrier.
+
+Rejected for this:
+
+- *`omp_get_team_num() == 0` and a flag that the other teams spin on:* a barrier
+  written by hand for each program, and only team 0 would have the array.
+- *Three target regions in a row* (receive, compute with `target teams distribute
+  parallel do`, send): the end of a region is the barrier, but each step returns to
+  the host for a launch of about 30 µs, and a received array would have to outlive
+  its region.
+
+The cost of a barrier, in which every team reports and then is released, estimated
+from the hops measured above at 240 ns. Hops of a tree overlap, so what counts is
+the hops in sequence. Not measured, and a real message costs more than a word.
+
+| Teams | Shape | Hops in sequence | Estimate |
+|---|---|---|---|
+| 4 | team 0 with each | 6 | 1.5 µs |
+| 64 | team 0 with each | 126 | 30 µs |
+| 64 | tree | 12 | 3 µs |
+
+What it needs, beyond risk 1:
+
+- **Every team that takes part must be on the GPU.** The kernel must not start more
+  teams than fit, and no OpenMP query gives that number, so it comes from a table
+  for each GPU or a probe at startup. Which of them is open.
+- **An owner for the array.** If it is in team 0's arena, team 0 must not reclaim it
+  until every team has replied. The replies guarantee that only if the program keeps
+  to the protocol, so it needs a rule that the runtime or compiler can check. Memory
+  shared by the teams, with a lifetime of its own, may be cleaner. Open.
+- **Bounded waits.** A team blocked in `receive` keeps its wave slot and polls; a
+  bound in the runtime is what keeps a mistake from hanging the GPU.
+
+Written with `send` and `receive`, a barrier or a gather is ordinary Mercury library
+code, so the same predicates could serve the collectives between nodes, at another
+cost. The first test, once teams are processes, is such a barrier, measured against
+the estimates above.
+
 **A later use: streaming on the GPU.** Teams as the stages of a pipeline, passing
 arrays by pointer. It has no cycle of waits, but a stage that is not on the GPU
 still stalls the one before it when the ring between them fills.
