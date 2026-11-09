@@ -82,9 +82,14 @@ void MerkGenerator::Call(const Body &goal, const Procedure &callee,
     // are already bound, and each is then tested against its own value.
     // The value stays for the call to read, as A = A mod B also passes A
     // as an input; the call reads its inputs before it sets its outputs.
+    // A partially instantiated term has no value, only bound parts to test.
     llvm::SmallVector<std::pair<BodyVar, mlir::Value>> bound;
+    llvm::SmallVector<std::pair<BodyVar, const Body *>> partials;
     for (auto [argument, mode] : llvm::zip(arguments, callee.modes)) {
-      if (IsOutput(mode) && ValueOf(argument) &&
+      if (const Body *partial{PartialTerm(body, argument)};
+          partial && IsOutput(mode) && !values_.lookup(argument)) {
+        partials.push_back({argument, partial});
+      } else if (IsOutput(mode) && ValueOf(argument) &&
           !Represent(body.vars[argument].type)->dummy &&
           !llvm::is_contained(llvm::make_first_range(bound), argument)) {
         bound.push_back({argument, values_.lookup(argument)});
@@ -98,6 +103,11 @@ void MerkGenerator::Call(const Body &goal, const Procedure &callee,
         continue;
       }
       Test(goal, value, output, body.vars[argument].type);
+    }
+    for (auto [argument, partial] : partials) {
+      if (!failed_ && !Terminated()) {
+        TestPartial(goal, ValueOf(argument), *partial, body);
+      }
     }
     return;
   }
@@ -1092,6 +1102,14 @@ void MerkGenerator::HigherOrderCall(const Body &goal, const ProcedureBody &body)
   if (!closure || modes.size() != goal.arguments.size()) {
     NotYet(at, "this higher-order call");
     return;
+  }
+  // Its implied mode tests whole values, so a partial term's bound parts
+  // would go unchecked.
+  for (BodyVar argument : goal.arguments) {
+    if (PartialTerm(body, argument) && !values_.lookup(argument)) {
+      NotYet(at, "this higher-order call with a partially instantiated term");
+      return;
+    }
   }
   std::optional<merk::Determinism> determinism{
       ClosureDeterminism(goal.modes->determinism)};

@@ -69,8 +69,15 @@ void MerkGenerator::TermUnify(const Body &goal, const ProcedureBody &body) {
     for (BodyVar argument : goal.arguments) {
       mlir::Value value{ValueOf(argument)};
       if (!value) {
-        // A term with free or dummy arguments.
-        NotYet(at, "this unification");
+        // A term with free arguments. As in mmc it comes before the call of
+        // an implied mode, which binds the free parts; it needs no cell.
+        std::optional<Represented> represented{
+            Represent(body.vars[argument].type)};
+        if (!hidden.types.empty() || !represented || represented->dummy) {
+          NotYet(at, "this unification");
+          return;
+        }
+        partialTerms_[{&body, goal.left}] = &goal;
         return;
       }
       if (!hidden.types.empty()) {
@@ -130,6 +137,44 @@ void MerkGenerator::TermUnify(const Body &goal, const ProcedureBody &body) {
     values_[argument] = hidden.types.empty()
         ? field
         : Coerce(field, Represent(body.vars[argument].type)->type, loc);
+  }
+}
+
+void MerkGenerator::TestPartial(const Body &goal, mlir::Value value,
+    const Body &partial, const ProcedureBody &body) {
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  const semantics::Type *type{body.vars[partial.left].type};
+  auto functor{merk::FunctorAttr::get(&context_, partial.functor.name,
+      static_cast<unsigned>(partial.arguments.size()))};
+  const std::vector<semantics::ConstructorTypes> *constructors{
+      modes_.ops().ConstructorsOf(type)};
+  if (!constructors || constructors->size() > 1) {
+    merk::GuardOp::create(builder_, loc,
+        merk::HasFunctorOp::create(builder_, loc, value, functor));
+  }
+  llvm::SmallVector<mlir::Type> fields;
+  for (BodyVar argument : partial.arguments) {
+    std::optional<Represented> represented{
+        Represent(body.vars[argument].type)};
+    if (!represented || represented->dummy) {
+      NotYet(at, "this unification");
+      return;
+    }
+    fields.push_back(represented->type);
+  }
+  auto deconstruct{
+      merk::DeconstructOp::create(builder_, loc, fields, value, functor)};
+  for (auto [argument, field] :
+      llvm::zip(partial.arguments, deconstruct.getFields())) {
+    if (failed_ || Terminated()) {
+      return;
+    }
+    if (mlir::Value bound{ValueOf(argument)}) {
+      Test(goal, bound, field, body.vars[argument].type);
+    } else if (const Body *inner{PartialTerm(body, argument)}) {
+      TestPartial(goal, field, *inner, body);
+    }
   }
 }
 
