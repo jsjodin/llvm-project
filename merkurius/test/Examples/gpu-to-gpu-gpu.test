@@ -2,8 +2,7 @@ The GPU to GPU demo, on the machine's GPU. Two nodes' lines interleave
 as they happen, so each node's are checked in order after a stable sort.
 REQUIRES: amdgpu-gpu
 
-RUN: mkdir -p %t && cd %t && merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/../../examples/gpu-to-gpu/gpu_to_gpu.m %S/../../examples/gpu-to-gpu/demo_node.m -o %t/demo
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %python %S/../../examples/gpu-to-gpu/run.py %t/demo | sort -s -k1,2 | FileCheck %s --match-full-lines
+RUN: %libomp-env make -s -C %S/../../examples run-gpu-to-gpu MERKC=merkc BUILD=%t O=2 PORT=47102 ARCH=%offload-arch "LIBOMP_FLAGS=%libomp-flags" | grep "^.node" | sort -s -k1,2 | FileCheck %s --match-full-lines
 
 CHECK:[node A] connecting to node B at 127.0.0.1:{{[0-9]+}}
 CHECK-NEXT:[node A] found node B's mailboxes

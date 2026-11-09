@@ -1,0 +1,60 @@
+<h1 id="merkurius-status-november-2026">Merkurius: status, November 2026</h1>
+<p>Merkurius is a clean-room Mercury compiler built on MLIR and LLVM. It is written from the Mercury 22.01 manuals, published papers and experiments with mmc’s output, never from Melbourne Mercury’s source. The aim is to compile standard Mercury to native code at C speed, and later to add parallel loops and Erlang-style processes. The programs in this directory run today: <code>make</code> lists the commands.</p>
+<h2 id="done">Done</h2>
+<p><strong>Front end.</strong> A lexer and parser for the whole language, including OpenMP-style <code>%$omp</code> directives. The reader agrees with mmc’s term reader, and is fuzzed after every change.</p>
+<p><strong>Semantic analysis, complete and compatible with mmc.</strong> Every pass is checked against mmc 22.01.9 by oracles that generate random programs. About 13,000 generated modules agree with mmc on every error line and determinism. - Name resolution and module imports. - Type checking and inference, type classes, functional dependencies, existential types, subtypes and <code>coerce</code>. - Purity checking. - Mode analysis, after Overton’s thesis: constrained polymorphic modes, unique modes, and mode inference. - Determinism analysis: switch detection, committed choice, inference. - Uniqueness checking. It is sound by default, and <code>-fmmc-uniqueness</code> gives mmc’s rules. - Polymorphism analysis: where each <code>type_info</code> and <code>typeclass_info</code> comes from.</p>
+<p>mmc bugs found on the way are recorded with reproducers, so they can be reported.</p>
+<p><strong>Code generation.</strong> - <strong>Path:</strong> Mercury → our <code>merk</code> MLIR dialect → MLIR’s LLVM dialect → LLVM IR → native code. A Clang-style driver (<code>merkc -c</code>, <code>-O2</code>, <code>--target=</code>) links the result with our runtime. - <strong>Covered so far:</strong> - <code>det</code> and <code>semidet</code> procedures on primitive types; - integer and float arithmetic, with mmc’s checks and error messages; - if-then-else, switches, negation; - tail calls guaranteed with LLVM’s <code>musttail</code>, so loops run in constant stack. - <strong>Foreign code:</strong> <code>pragma foreign_proc("C")</code> is compiled by clang and linked into the module as bitcode, so LLVM can inline it. - <strong>Library:</strong> the <code>io</code> output predicates and the <code>float</code> and <code>math</code> modules work. - <strong>Target:</strong> the target is recorded on the MLIR module, so a dumped <code>.mlir</code> file can be compiled again later.</p>
+<p><strong>Testing.</strong> 378 lit tests check both the MLIR and the LLVM IR, and the programs’ output against mmc’s. There are unit tests, the random-program sweeps, and a fuzzer.</p>
+<h2 id="what-remains">What remains</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Area</th>
+<th>Work</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Data</td>
+<td>Term layouts and the <code>mrt</code> runtime dialect: lists, discriminated unions, strings, construction and switches on constructors</td>
+</tr>
+<tr class="even">
+<td>Control</td>
+<td>Disjunctions and <code>nondet</code> code, by continuation passing; commits</td>
+</tr>
+<tr class="odd">
+<td>Higher order</td>
+<td><code>type_info</code> passing, type-class dispatch, closures and higher-order calls</td>
+</tr>
+<tr class="even">
+<td>Exceptions</td>
+<td><code>throw</code> and <code>catch</code> with LLVM’s zero-cost exception handling. Now an exception ends the program, as mmc’s report does</td>
+</tr>
+<tr class="odd">
+<td>Memory</td>
+<td>A precise, moving garbage collector with LLVM statepoints, and per-process heaps</td>
+</tr>
+<tr class="even">
+<td>Library</td>
+<td>The rest of the standard library (<code>list</code>, <code>string</code>, <code>map</code>, …). Later, <code>math</code> through MLIR’s <code>math</code> dialect and LLVM intrinsics</td>
+</tr>
+<tr class="odd">
+<td>Modules</td>
+<td>Interface files and separate compilation, with <code>foreign_decl</code> visible to importers</td>
+</tr>
+<tr class="even">
+<td>Extensions</td>
+<td>Parallel loops lowered to OpenMP, lightweight processes with mailboxes, open terms, and offloading to GPUs</td>
+</tr>
+<tr class="odd">
+<td>Tooling</td>
+<td>Debug information, and performance gates against mmc’s measured baseline</td>
+</tr>
+</tbody>
+</table>
+<p>The order planned next: terms and the runtime’s allocation, then nondeterminism and higher-order code. That is when ordinary Mercury programs, such as list processing, start to compile.</p>
