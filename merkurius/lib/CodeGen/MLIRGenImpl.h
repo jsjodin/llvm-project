@@ -392,6 +392,12 @@ private:
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
   // X = Y, or X = c, with both bound: a test.
   void Test(const Body &, mlir::Value, mlir::Value, const semantics::Type *);
+  // Tests a value against the bound parts of a partially instantiated term.
+  void TestPartial(const Body &goal, mlir::Value value, const Body &partial,
+      const ProcedureBody &body);
+  const Body *PartialTerm(const ProcedureBody &body, BodyVar var) const {
+    return partialTerms_.lookup({&body, var});
+  }
   // A call in its procedure's own modes, each output a fresh value.
   // The type_infos and then the typeclass_infos a procedure takes, or none
   // with an error if it has what code generation does not handle yet.
@@ -724,6 +730,10 @@ private:
   // For the body being generated: each variable's value, and whether a
   // construct was not handled.
   llvm::DenseMap<BodyVar, mlir::Value> values_;
+  // The terms with free arguments, which have no value: the call of an
+  // implied mode tests their bound parts.
+  llvm::DenseMap<std::pair<const ProcedureBody *, BodyVar>, const Body *>
+      partialTerms_;
   llvm::DenseSet<mlir::Value> annotated_;
   // The type_infos of types goals gave, by type variable or kGivenTypeKey on.
   // The latest of each; another branch's fails NoteRoot's region check.
