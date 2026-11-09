@@ -3064,6 +3064,17 @@ for any opcode. `omp_target_memcpy` works from a callback, after a fix below.
 One server thread serves every device under a lock, so **a callback must never
 wait for a message**: it would stop every device's RPC, `printf` included.
 
+**Output from a region.** In the device's compile, `io.write_string`, `io.write_int`
+and `io.nl` are calls of `merk_device_write_string` and so on, which send the text
+or number to the host with opcodes of ours (`rpcWriteText`, `rpcWriteInt`). The
+callback writes to the host's `stdout` and flushes at the end of a line, so that a
+line of several writes stays whole and in order with what the host prints. A region
+on the host calls `io`'s. LLVM's other routes were not taken: libc's `printf` on
+the GPU would add libc to the device image; Flang's I/O over RPC
+(`flang-rt/lib/runtime/io-api-gpu.cpp`) buffers each statement on the server, which
+Mercury's separate write calls do not map to. Each write is a round trip on the one
+server thread, so it is for messages, not for a loop that is being timed.
+
 **The transport is opcodes of our own,** `'m' << 24 | n`
 (`runtime/rpc-opcodes.h`), in `runtime/device/device.cpp` and the callback in
 `runtime/offload.cpp`:

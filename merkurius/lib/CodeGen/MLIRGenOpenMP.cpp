@@ -199,6 +199,39 @@ bool MerkGenerator::SendInTarget(const Body &goal,
   return true;
 }
 
+// io.write_string, io.write_int and io.nl to the standard output, in the
+// device's compile: calls of the device's runtime, which has the host print
+// over the offload plugin's RPC server. The host's compile calls io's, as a
+// region that runs on the host does. Other output is left to the call, which
+// is then reported as not compiled for the device.
+bool MerkGenerator::WriteOnDevice(const Body &goal,
+    const semantics::Symbol &symbol, llvm::ArrayRef<BodyVar> arguments) {
+  llvm::StringRef runtime;
+  bool hasValue{true};
+  if (symbol.name == "write_string" && symbol.arity == 3) {
+    runtime = "merk_device_write_string";
+  } else if (symbol.name == "write_int" && symbol.arity == 3) {
+    runtime = "merk_device_write_int";
+  } else if (symbol.name == "nl" && symbol.arity == 2) {
+    runtime = "merk_device_nl";
+    hasValue = false;
+  } else {
+    return false;
+  }
+  llvm::SmallVector<mlir::Value, 1> operands;
+  if (hasValue) {
+    mlir::Value value{ValueOf(arguments[0])};
+    if (!value) {
+      failed_ = true;
+      return true;
+    }
+    operands.push_back(value);
+  }
+  merk::ForeignCallOp::create(builder_, Location(goal.tokens),
+      mlir::TypeRange{}, runtime, operands, /*can_fail=*/false);
+  return true;
+}
+
 // The host's compile of a module with target regions registers the key of
 // each message type that its device code may send with the type's
 // type_info, in a procedure that runs at start-up: every one-word,

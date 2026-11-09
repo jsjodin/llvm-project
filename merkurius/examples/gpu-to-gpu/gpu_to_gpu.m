@@ -4,7 +4,7 @@
 % sum back. The sends and receives run inside the target regions below; the
 % network, the two hosts and the copies in between are the runtime's job.
 %
-% How the nodes find each other, and the messages printed, are in demo_node.m.
+% How the nodes find each other, and what the hosts check, are in demo_node.m.
 % Run it with the Makefile in the directory above (README.md).
 
 :- module gpu_to_gpu.
@@ -13,7 +13,7 @@
 :- pred main(io::di, io::uo) is det.
 
 :- implementation.
-:- import_module array, demo_node, int, maybe, process.
+:- import_module array, demo_node, int, io, maybe, process.
 
 :- type numbers == array(int).
 
@@ -36,16 +36,16 @@ main(!IO) :-
     ).
 
 %---------------------------------------------------------------------------%
-% Each node's host: runs its GPU's region once a round, and reports on it.
+% Each node's host: runs its GPU's region once a round.
 
 :- pred node_a(links(numbers, int)::in, int::in, io::di, io::uo) is det.
 node_a(Links, Round, !IO) :-
     ( if Round > rounds then
         true
     else
-        report_sending(array_size, Round, !IO),
+        report_round("A", Round, !IO),
         gpu_a(Links, Round, Sum, !IO),
-        report_sum(Sum, array_size * Round, !IO),
+        check_sum(Sum, array_size * Round, !IO),
         node_a(Links, Round + 1, !IO)
     ).
 
@@ -54,9 +54,9 @@ node_b(Links, Round, !IO) :-
     ( if Round > rounds then
         true
     else
-        report_waiting(Round, !IO),
-        gpu_b(Links, Size, Sum, !IO),
-        report_received(Size, Sum, !IO),
+        report_round("B", Round, !IO),
+        gpu_b(Links, Size, !IO),
+        check_received(Size, !IO),
         node_b(Links, Round + 1, !IO)
     ).
 
@@ -103,10 +103,12 @@ gpu_a(links(ToB, ToA), Round, Sum, !IO) :-
     %$omp target
     (
         Numbers = array.init(array_size, Round),
+        say("[GPU A] sending numbers, each", Round, !IO),
         send(ToB, Numbers, !IO),
         receive(ToA, any, after(10000), Answer, !IO),
         (
-            Answer = yes(Sum)
+            Answer = yes(Sum),
+            say("[GPU A] got the sum", Sum, !IO)
         ;
             Answer = no,
             Sum = -1
@@ -114,23 +116,31 @@ gpu_a(links(ToB, ToA), Round, Sum, !IO) :-
     ).
 
     % GPU B: waits for an array, adds it up, and sends the sum to GPU A.
-:- pred gpu_b(links(numbers, int)::in, int::out, int::out, io::di, io::uo)
-    is det.
-gpu_b(links(ToB, ToA), Size, Sum, !IO) :-
+:- pred gpu_b(links(numbers, int)::in, int::out, io::di, io::uo) is det.
+gpu_b(links(ToB, ToA), Size, !IO) :-
     %$omp target
     (
         receive(ToB, any, after(10000), Got, !IO),
         (
             Got = yes(Numbers),
             Size = array.size(Numbers),
+            say("[GPU B] got this many numbers:", Size, !IO),
             Sum = sum_from(Numbers, 0, 0),
+            say("[GPU B] sending back their sum", Sum, !IO),
             send(ToA, Sum, !IO)
         ;
             Got = no,
-            Size = 0,
-            Sum = -1
+            Size = 0
         )
     ).
+
+    % Printed by the host, over the same route as a send.
+:- pred say(string::in, int::in, io::di, io::uo) is det.
+say(Text, Number, !IO) :-
+    io.write_string(Text, !IO),
+    io.write_string(" ", !IO),
+    io.write_int(Number, !IO),
+    io.nl(!IO).
 
 :- func sum_from(numbers, int, int) = int.
 sum_from(Numbers, I, Sum) =

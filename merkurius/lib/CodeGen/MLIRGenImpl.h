@@ -628,6 +628,8 @@ private:
   // device as one of the region's values.
   bool SendInTarget(const Body &, llvm::ArrayRef<BodyVar> arguments,
       const ProcedureBody &, bool inRegion);
+  bool WriteOnDevice(const Body &, const semantics::Symbol &,
+      llvm::ArrayRef<BodyVar> arguments);
   bool ReceiveInTarget(const Body &, llvm::ArrayRef<BodyVar> arguments,
       const ProcedureBody &, bool inRegion);
   mlir::Value TimeoutMilliseconds(mlir::Value timeout, mlir::Location);

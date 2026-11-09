@@ -3,9 +3,6 @@
 %
 %   gpu_to_gpu b [ADDRESS]    node B: listens, 127.0.0.1:0 by default
 %   gpu_to_gpu a HOST:PORT    node A: connects to node B, waiting for it
-%
-% GPU code cannot print, so each node's host prints what its region is about to
-% do and what it gave back.
 
 :- module demo_node.
 :- interface.
@@ -24,10 +21,11 @@
     % Starts this node from the command line and connects it to the other.
 :- pred start(node(Request, Reply)::out, io::di, io::uo) is det.
 
-:- pred report_sending(int::in, int::in, io::di, io::uo) is det.
-:- pred report_sum(int::in, int::in, io::di, io::uo) is det.
-:- pred report_waiting(int::in, io::di, io::uo) is det.
-:- pred report_received(int::in, int::in, io::di, io::uo) is det.
+:- pred report_round(string::in, int::in, io::di, io::uo) is det.
+
+    % These say so, and fail the program, if a GPU's region went wrong.
+:- pred check_sum(int::in, int::in, io::di, io::uo) is det.
+:- pred check_received(int::in, io::di, io::uo) is det.
 
 :- implementation.
 :- import_module int, list, maybe, string.
@@ -123,26 +121,20 @@ connect_retrying(Address, Tries, Connected, !IO) :-
 
 %---------------------------------------------------------------------------%
 
-report_sending(Size, Round, !IO) :-
-    say("A", "round " ++ int_to_string(Round) ++ ": GPU A sends " ++
-        int_to_string(Size) ++ " numbers, each " ++ int_to_string(Round), !IO).
+report_round(Name, Round, !IO) :-
+    say(Name, "round " ++ int_to_string(Round), !IO).
 
-report_sum(Sum, Expected, !IO) :-
+check_sum(Sum, Expected, !IO) :-
     ( if Sum = Expected then
-        say("A", "GPU A got the sum " ++ int_to_string(Sum) ++ ", correct", !IO)
+        true
     else
         fail_with("GPU A got the sum " ++ int_to_string(Sum) ++ ", expected " ++
             int_to_string(Expected), _ : node(int, int), !IO)
     ).
 
-report_waiting(Round, !IO) :-
-    say("B", "round " ++ int_to_string(Round) ++
-        ": GPU B waits for an array", !IO).
-
-report_received(Size, Sum, !IO) :-
+check_received(Size, !IO) :-
     ( if Size > 0 then
-        say("B", "GPU B got " ++ int_to_string(Size) ++
-            " numbers and sent back their sum, " ++ int_to_string(Sum), !IO)
+        true
     else
         fail_with("GPU B got no array", _ : node(int, int), !IO)
     ).

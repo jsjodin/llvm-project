@@ -46,6 +46,14 @@ constexpr uint32_t rpcChunk{RpcOpcode(3)};
 // host copies it to the host and answers with the copy's address.
 constexpr uint32_t rpcGiveArray{RpcOpcode(4)};
 
+// Text for the host's standard output: the characters, by send_n. The host
+// answers once it has written them.
+constexpr uint32_t rpcWriteText{RpcOpcode(8)};
+
+// An integer for the host's standard output, in decimal: the buffer's first
+// word. The host answers once it has written it.
+constexpr uint32_t rpcWriteInt{RpcOpcode(9)};
+
 // A send of an array of one-word elements: the buffer's words are the
 // handle's five, the message type's key, the array's address, and its size
 // in elements above the device's number in the low 8 bits. The host copies

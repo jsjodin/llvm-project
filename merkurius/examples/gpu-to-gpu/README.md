@@ -4,7 +4,10 @@ Two GPUs, on two nodes, play ping-pong: GPU A sends an array of numbers, GPU B
 adds them up and sends back the sum, three times.
 
 - `gpu_to_gpu.m` is the demo. The sends and receives are in `gpu_a` and `gpu_b`.
-- `demo_node.m` starts the nodes, connects them and prints the messages.
+- `demo_node.m` starts the nodes, connects them and checks the results.
+
+The lines marked `[GPU A]` and `[GPU B]` are printed from the GPUs, through their
+hosts; those marked `[node A]` and `[node B]` are printed by the hosts.
 
 ## Running it
 
