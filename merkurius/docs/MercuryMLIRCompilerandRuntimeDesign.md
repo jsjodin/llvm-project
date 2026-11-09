@@ -3998,8 +3998,8 @@ The spread between runs was under 1%.
   in the last two rows shows.
 
 With the next collection due only after allocating four times the bytes of
-stack just walked, as well as 4 MB and twice what is live (2026-11-09, on commit
-a3234f334282 plus that change, same method):
+stack just walked, as well as 4 MB and twice what is live (2026-11-09, at commit
+b4d7d9366528, same method):
 
 | Program | Collecting | Peak | Before the change | Peak |
 | --- | --- | --- | --- | --- |

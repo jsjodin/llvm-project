@@ -798,6 +798,16 @@ plugin's server thread, not the ring; that is not tested. A cheaper test of it:
 the server's callback hands a send to another node to a thread, with no change
 on the device.
 
+**That test, 2026-11-09, on b4d7d9366528: the TCP write is not what helps.** The
+server's callback queued a word send to another node for one thread, which made
+the `merk_mailbox_send` call; the device still waited for the RPC's answer. Nine
+alternating runs, 20000 rounds, median µs a round, with today's path, a thread
+that spins, and a thread that spins for 50 µs and then sleeps: GPU and node 2's
+`main` 31.73, 30.70 and 31.00; GPU and GPU between nodes 40.75, 44.65 and 44.10.
+So at most 1 µs against a CPU partner and 3.5 to 4 µs worse between GPUs, and no
+reason to move the write. What the ring gains between nodes is therefore not
+explained, and the ring stays undecided.
+
 ## Before the collector
 
 What has to be done before garbage collection (design document, Memory
