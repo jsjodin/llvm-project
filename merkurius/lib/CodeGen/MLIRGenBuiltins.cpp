@@ -404,6 +404,10 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
       MessageKey(*body.vars[arguments[1]].type, message.getType());
     }
   }
+  if (module == "io" && target_.options().openMPIsTargetDevice &&
+      WriteOnDevice(goal, symbol, arguments)) {
+    return true;
+  }
   if (module == "process" && symbol.name == "receive" && symbol.arity == 6) {
     if (EnclosingTarget()) {
       return ReceiveInTarget(goal, arguments, body, /*inRegion=*/true);

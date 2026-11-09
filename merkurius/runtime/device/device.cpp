@@ -36,6 +36,8 @@ using merkurius::runtime::kRingSlots;
 using merkurius::runtime::rpcAttach;
 using merkurius::runtime::rpcDrain;
 using merkurius::runtime::rpcSend;
+using merkurius::runtime::rpcWriteInt;
+using merkurius::runtime::rpcWriteText;
 using merkurius::runtime::rpcSendArray;
 using merkurius::runtime::rpcTakeArray;
 
@@ -193,6 +195,28 @@ extern "C" void merk_device_send_array(
   });
   port.recv([](rpc::Buffer *, uint32_t) {});
 }
+
+// Output from the device: the host prints it, and these return once it has,
+// so that a region's output comes before what follows the region.
+extern "C" void merk_device_write_string(const char *text) {
+  uint64_t size{0};
+  while (text[size]) {
+    ++size;
+  }
+  rpc::Client::Port port{__llvm_rpc_client.open<rpcWriteText>()};
+  port.send_n(text, size);
+  port.recv([](rpc::Buffer *, uint32_t) {});
+}
+
+extern "C" void merk_device_write_int(int64_t value) {
+  rpc::Client::Port port{__llvm_rpc_client.open<rpcWriteInt>()};
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    buffer->data[0] = static_cast<uint64_t>(value);
+  });
+  port.recv([](rpc::Buffer *, uint32_t) {});
+}
+
+extern "C" void merk_device_nl(void) { merk_device_write_string("\n"); }
 
 namespace {
 

@@ -2,21 +2,27 @@ The GPU to GPU demo, on the machine's GPU. Two nodes' lines interleave
 as they happen, so each node's are checked in order after a stable sort.
 REQUIRES: amdgpu-gpu
 
-RUN: %libomp-env make -s -C %S/../../examples run-gpu-to-gpu MERKC=merkc BUILD=%t O=2 PORT=47102 ARCH=%offload-arch "LIBOMP_FLAGS=%libomp-flags" | grep "^.node" | sort -s -k1,2 | FileCheck %s --match-full-lines
+RUN: %libomp-env make -s -C %S/../../examples run-gpu-to-gpu MERKC=merkc BUILD=%t O=2 PORT=47102 ARCH=%offload-arch "LIBOMP_FLAGS=%libomp-flags" | grep "^.[nG]" | sort -s -k1,2 | FileCheck %s --match-full-lines
 
-CHECK:[node A] connecting to node B at 127.0.0.1:{{[0-9]+}}
+CHECK:[GPU A] sending numbers, each 1
+CHECK-NEXT:[GPU A] got the sum 1000
+CHECK-NEXT:[GPU A] sending numbers, each 2
+CHECK-NEXT:[GPU A] got the sum 2000
+CHECK-NEXT:[GPU A] sending numbers, each 3
+CHECK-NEXT:[GPU A] got the sum 3000
+CHECK-NEXT:[GPU B] got this many numbers: 1000
+CHECK-NEXT:[GPU B] sending back their sum 1000
+CHECK-NEXT:[GPU B] got this many numbers: 1000
+CHECK-NEXT:[GPU B] sending back their sum 2000
+CHECK-NEXT:[GPU B] got this many numbers: 1000
+CHECK-NEXT:[GPU B] sending back their sum 3000
+CHECK-NEXT:[node A] connecting to node B at 127.0.0.1:{{[0-9]+}}
 CHECK-NEXT:[node A] found node B's mailboxes
-CHECK-NEXT:[node A] round 1: GPU A sends 1000 numbers, each 1
-CHECK-NEXT:[node A] GPU A got the sum 1000, correct
-CHECK-NEXT:[node A] round 2: GPU A sends 1000 numbers, each 2
-CHECK-NEXT:[node A] GPU A got the sum 2000, correct
-CHECK-NEXT:[node A] round 3: GPU A sends 1000 numbers, each 3
-CHECK-NEXT:[node A] GPU A got the sum 3000, correct
+CHECK-NEXT:[node A] round 1
+CHECK-NEXT:[node A] round 2
+CHECK-NEXT:[node A] round 3
 CHECK-NEXT:[node B] listening on port {{[0-9]+}}
 CHECK-NEXT:[node B] node A has connected
-CHECK-NEXT:[node B] round 1: GPU B waits for an array
-CHECK-NEXT:[node B] GPU B got 1000 numbers and sent back their sum, 1000
-CHECK-NEXT:[node B] round 2: GPU B waits for an array
-CHECK-NEXT:[node B] GPU B got 1000 numbers and sent back their sum, 2000
-CHECK-NEXT:[node B] round 3: GPU B waits for an array
-CHECK-NEXT:[node B] GPU B got 1000 numbers and sent back their sum, 3000
+CHECK-NEXT:[node B] round 1
+CHECK-NEXT:[node B] round 2
+CHECK-NEXT:[node B] round 3
