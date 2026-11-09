@@ -1365,6 +1365,45 @@ and most of that is either expressed by processes already or not needed yet.
 run here. Steps 2 to 4 need at least two GPUs: two consumer cards for PCIe, or an
 Instinct node for Infinity Fabric.
 
+## The halo exchange
+
+Proposed 2026-11-09; nothing is built. Implementation waits until several
+machines are available, as real numbers need them. It is the design document's
+second acceptance criterion (GPU processes): a stencil on a grid split across
+GPUs, against an MPI+HIP program doing the same, to show whether communication
+overlaps computation.
+
+**First version, without overlap.**
+
+- A 2D grid split in one dimension, each piece owned by one target region, with
+  a left and a right neighbour. On one machine, several nodes on one GPU over
+  loopback, as the ping-pong has.
+- **One mailbox for each direction,** "from left" and "from right", made by the
+  region that receives from it. A device's receive takes the first message
+  (The device's side of the first slice, decision 4), so mailboxes do what MPI's
+  tags do, and the type of a mailbox's messages is checked.
+- **Each step:** copy the edge rows into arrays, send them, receive the
+  neighbours', compute. A send hands over a unique array, so a buffer cannot be
+  reused before the send has finished.
+- This gives the baseline that overlap has to beat.
+
+**Second version, with overlap:** start the interior, and fill in the edges when
+they arrive.
+
+**Open.**
+
+- **A send from a device waits for the host,** so a region cannot compute during
+  it unless the computation is in separate teams or regions. This is the main
+  question for overlap, and it may bring back the send ring (The send ring), for
+  overlap rather than latency.
+- **Array speed,** 0.8 to 1.5 GB/s with a second copy on the host, limits a large
+  halo.
+- **The recovery benchmark** (a GPU process killed during the exchange) needs
+  monitors across nodes, a way to report a dead GPU process, and a receive that
+  does not wait forever.
+- **The MPI+HIP program** to compare with is not written.
+- **Decomposition in two dimensions** and corners are left for later.
+
 ## The receive goal: later
 
 The receive goal is done (design document, Processes and mailboxes, "The
