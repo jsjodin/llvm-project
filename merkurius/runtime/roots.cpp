@@ -462,10 +462,12 @@ public:
   void Finish();
 
 private:
+  bool KeepLarge(ChunkLink *chunk);
   struct FromChunk {
     char *begin;
     char *end;
     std::uint64_t *marks;
+    bool large;
   };
   // What is left to do of a cell in to-space: its fields, each of its type in
   // `types`, or all of `single`'s for an array.
@@ -486,6 +488,8 @@ private:
   bool Forwarded(FromChunk *, const Word *cell, Word *&to) const;
   void Forward(FromChunk *, Word *cell, Word *to);
   Word *ToSpace(std::size_t words);
+  Word *CopyOut(
+      FromChunk *chunk, const Word *from, std::size_t words, std::size_t bytes);
   void *Keep(std::size_t bytes);
   const Environment *KeepEnvironment(const Environment &);
   void Push(const Pending &);
@@ -539,7 +543,7 @@ void Collector::Prepare() {
     if (!marks) {
       Bad("no memory for a collection's marks", chunk->bytes);
     }
-    chunks_[i++] = {begin, begin + chunk->bytes, marks};
+    chunks_[i++] = {begin, begin + chunk->bytes, marks, chunk->large};
   }
   std::qsort(chunks_, chunkCount_, sizeof(FromChunk), CompareChunks);
 }
@@ -566,7 +570,7 @@ bool Collector::Forwarded(FromChunk *chunk, const Word *cell, Word *&to) const {
   if ((chunk->marks[index / 64] >> (index % 64) & 1) == 0) {
     return false;
   }
-  to = reinterpret_cast<Word *>(*cell);
+  to = chunk->large ? const_cast<Word *>(cell) : reinterpret_cast<Word *>(*cell);
   return true;
 }
 
@@ -574,7 +578,21 @@ void Collector::Forward(FromChunk *chunk, Word *cell, Word *to) {
   std::size_t index{static_cast<std::size_t>(
       reinterpret_cast<const char *>(cell) - chunk->begin) / sizeof(Word)};
   chunk->marks[index / 64] |= std::uint64_t{1} << (index % 64);
-  *cell = reinterpret_cast<Word>(to);
+  if (!chunk->large) {
+    *cell = reinterpret_cast<Word>(to);
+  }
+}
+
+// Where a reached object is from now on. A large object stays where it is.
+Word *Collector::CopyOut(
+    FromChunk *chunk, const Word *from, std::size_t words, std::size_t bytes) {
+  if (chunk->large) {
+    liveBytes_ += words * sizeof(Word);
+    return const_cast<Word *>(from);
+  }
+  Word *to{ToSpace(words)};
+  std::memcpy(to, from, bytes);
+  return to;
 }
 
 Word *Collector::ToSpace(std::size_t words) {
@@ -655,8 +673,7 @@ Word Collector::ForwardTypeInfo(Word info) {
   bool counted{ctor->kind == Tuple || ctor->kind == Closure};
   Word arity{counted ? cell[1] : ctor->arity};
   Word before{counted ? Word{2} : Word{1}};
-  to = ToSpace(before + arity);
-  std::memcpy(to, cell, sizeof(Word) * (before + arity));
+  to = CopyOut(chunk, cell, before + arity, sizeof(Word) * (before + arity));
   Forward(chunk, cell, to);
   // As deep as the type is written, so a call is enough.
   for (Word i{0}; i < arity; ++i) {
@@ -677,8 +694,7 @@ Word Collector::ForwardDictionary(Word dictionary) {
   }
   DictionaryShape shape{ShapeOfDictionary(cell)};
   Word total{shape.superclasses + shape.typeInfos + shape.constraints};
-  to = ToSpace(1 + total);
-  std::memcpy(to, cell, sizeof(Word) * (1 + total));
+  to = CopyOut(chunk, cell, 1 + total, sizeof(Word) * (1 + total));
   Forward(chunk, cell, to);
   for (Word i{1}; i <= total; ++i) {
     bool isTypeInfo{i > shape.superclasses &&
@@ -759,8 +775,7 @@ void Collector::ForwardString(Word *slot) {
     return;
   }
   std::size_t bytes{std::strlen(reinterpret_cast<const char *>(text)) + 1};
-  to = ToSpace((bytes + 7) / sizeof(Word));
-  std::memcpy(to, text, bytes);
+  to = CopyOut(chunk, text, (bytes + 7) / sizeof(Word), bytes);
   Forward(chunk, text, to);
   *slot = reinterpret_cast<Word>(to);
 }
@@ -779,8 +794,7 @@ void Collector::ForwardArray(Word *slot, const Type *type) {
     return;
   }
   Word size{array[0]};
-  to = ToSpace(1 + size);
-  std::memcpy(to, array, sizeof(Word) * (1 + size));
+  to = CopyOut(chunk, array, 1 + size, sizeof(Word) * (1 + size));
   Forward(chunk, array, to);
   *slot = reinterpret_cast<Word>(to);
   if (type && size != 0) {
@@ -806,8 +820,7 @@ void Collector::ForwardClosure(Word *slot) {
   if (!layout) {
     Bad("a closure made on a device in a process's heap", value);
   }
-  to = ToSpace(2 + layout->count);
-  std::memcpy(to, cell, sizeof(Word) * (2 + layout->count));
+  to = CopyOut(chunk, cell, 2 + layout->count, sizeof(Word) * (2 + layout->count));
   Forward(chunk, cell, to);
   *slot = reinterpret_cast<Word>(to);
   Word *captured{to + 2};
@@ -872,8 +885,7 @@ void Collector::ForwardCell(Word *slot, const Type &type) {
     }
   }
   unsigned arity{functor->arity};
-  to = ToSpace(before + arity);
-  std::memcpy(to, cell, sizeof(Word) * (before + arity));
+  to = CopyOut(chunk, cell, before + arity, sizeof(Word) * (before + arity));
   Forward(chunk, cell, to);
   *slot = reinterpret_cast<Word>(to) + tag;
   Word *fields{to + before};
@@ -977,12 +989,19 @@ void Collector::UpdateOnly(Word *slot) {
   *slot = reinterpret_cast<Word>(to) + (value & kTagMask);
 }
 
+// Whether a chunk is a large object that was reached, which its first word's
+// mark says, as it holds the one object.
+bool Collector::KeepLarge(ChunkLink *chunk) {
+  return chunk->large &&
+      (FindFrom(reinterpret_cast<Word>(chunk + 1))->marks[0] & 1) != 0;
+}
+
 void Collector::Finish() {
   ChunkLink *kept{toChunks_};
   bool poison{CollectsEveryAllocation()};
   for (ChunkLink *chunk{process_->chunks}; chunk;) {
     ChunkLink *next{chunk->next};
-    if (chunk->pinned) {
+    if (chunk->pinned || KeepLarge(chunk)) {
       chunk->next = kept;
       kept = chunk;
     } else {

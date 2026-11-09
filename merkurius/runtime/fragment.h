@@ -40,6 +40,8 @@ struct ChunkLink {
   ChunkLink *sibling;
   // Whether a message still in its mailbox is in it: the collector leaves it.
   bool pinned;
+  // One large object, which a collection marks where it is instead of copying.
+  bool large{false};
 };
 
 inline void FreeChunks(ChunkLink *chunks) {
@@ -76,6 +78,7 @@ public:
       chunk->bytes = size;
       chunk->sibling = nullptr;
       chunk->pinned = false;
+      chunk->large = false;
       chunks_ = chunk;
       next_ = reinterpret_cast<char *>(chunk + 1);
       limit_ = next_ + size;
