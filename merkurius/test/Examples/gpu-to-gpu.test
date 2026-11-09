@@ -1,8 +1,7 @@
 The GPU to GPU demo, with its regions on the CPU. Two nodes' lines interleave
 as they happen, so each node's are checked in order after a stable sort.
 
-RUN: mkdir -p %t && cd %t && merkc -O2 %S/../../examples/gpu-to-gpu/gpu_to_gpu.m %S/../../examples/gpu-to-gpu/demo_node.m -o %t/demo
-RUN: %python %S/../../examples/gpu-to-gpu/run.py %t/demo | sort -s -k1,2 | FileCheck %s --match-full-lines
+RUN: make -s -C %S/../../examples run-gpu-to-gpu-cpu MERKC=merkc BUILD=%t O=2 PORT=47101 | grep "^.node" | sort -s -k1,2 | FileCheck %s --match-full-lines
 
 CHECK:[node A] connecting to node B at 127.0.0.1:{{[0-9]+}}
 CHECK-NEXT:[node A] found node B's mailboxes

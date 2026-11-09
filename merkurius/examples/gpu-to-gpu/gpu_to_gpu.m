@@ -5,7 +5,7 @@
 % network, the two hosts and the copies in between are the runtime's job.
 %
 % How the nodes find each other, and the messages printed, are in demo_node.m.
-% Run it with run.py (README.md).
+% Run it with the Makefile in the directory above (README.md).
 
 :- module gpu_to_gpu.
 :- interface.

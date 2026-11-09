@@ -2,7 +2,7 @@
 % the other node, and the messages printed along the way.
 %
 %   gpu_to_gpu b [ADDRESS]    node B: listens, 127.0.0.1:0 by default
-%   gpu_to_gpu a HOST:PORT    node A: connects to node B
+%   gpu_to_gpu a HOST:PORT    node A: connects to node B, waiting for it
 %
 % GPU code cannot print, so each node's host prints what its region is about to
 % do and what it gave back.
@@ -76,7 +76,7 @@ start_b(Address, Node, !IO) :-
 :- pred start_a(string::in, node(Request, Reply)::out, io::di, io::uo) is det.
 start_a(Address, Node, !IO) :-
     say("A", "connecting to node B at " ++ Address, !IO),
-    connect(Address, Connected, !IO),
+    connect_retrying(Address, connect_tries, Connected, !IO),
     (
         Connected = ok(B),
         lookup(B, "requests", wait, FoundRequests, !IO),
@@ -96,6 +96,30 @@ start_a(Address, Node, !IO) :-
         Connected = error(Error),
         fail_with("connect: " ++ Error, Node, !IO)
     ).
+
+:- func connect_tries = int.
+connect_tries = 50.
+
+    % Node B may not be listening yet: tries each 100 ms.
+:- pred connect_retrying(string::in, int::in, maybe_error(node)::out,
+    io::di, io::uo) is det.
+connect_retrying(Address, Tries, Connected, !IO) :-
+    connect(Address, Result, !IO),
+    ( if Result = error(_), Tries > 1 then
+        pause(!IO),
+        connect_retrying(Address, Tries - 1, Connected, !IO)
+    else
+        Connected = Result
+    ).
+
+:- pragma foreign_decl("C", local, "#include <unistd.h>").
+
+:- pred pause(io::di, io::uo) is det.
+:- pragma foreign_proc("C", pause(_IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure],
+"
+    usleep(100000);
+").
 
 %---------------------------------------------------------------------------%
 
