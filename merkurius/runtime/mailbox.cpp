@@ -298,6 +298,10 @@ struct Message {
   std::uint64_t stamp;
   // The fragment's, until the message is read or dropped.
   ChunkLink *chunks;
+  // Those its reader has, by their siblings, which stay pinned until the
+  // message is removed, and the reader's id.
+  ChunkLink *pinned;
+  std::uint64_t reader;
 };
 
 // The reader's value is in the message's chunks, so they are the reader's
@@ -311,12 +315,31 @@ void GiveToReader(Message *message) {
   message->chunks = nullptr;
   if (Process *process{CurrentProcess()}) {
     ChunkLink *last{chunks};
-    while (last->next) {
-      last = last->next;
+    for (;; last = last->next) {
+      last->pinned = true;
+      last->sibling = last->next ? last->next : message->pinned;
+      process->allocatedBytes += last->bytes;
+      if (!last->next) {
+        break;
+      }
     }
+    message->pinned = chunks;
+    message->reader = process->id;
     last->next = process->chunks;
     process->chunks = chunks;
   }
+}
+
+// The message has left its mailbox: what is still used of it can be copied.
+void Unpin(Message *message) {
+  Process *process{CurrentProcess()};
+  if (!process || process->id != message->reader) {
+    return;
+  }
+  for (ChunkLink *chunk{message->pinned}; chunk; chunk = chunk->sibling) {
+    chunk->pinned = false;
+  }
+  message->pinned = nullptr;
 }
 
 // A word from the kernel's source of random numbers.
@@ -728,6 +751,8 @@ Delivery DeliverEncoded(
   if (Mailbox *mailbox{Find(handle)}) {
     Fragment fragment;
     auto *message{static_cast<Message *>(fragment.Allocate(sizeof(Message)))};
+  message->pinned = nullptr;
+  message->reader = 0;
     message->next = nullptr;
     message->down = nullptr;
     if (Decode(bytes, size, mailbox->messageType, fragment, message->value)) {
@@ -960,6 +985,8 @@ extern "C" void merk_mailbox_send(
   }
   Fragment fragment;
   auto *message{static_cast<Message *>(fragment.Allocate(sizeof(Message)))};
+  message->pinned = nullptr;
+  message->reader = 0;
   message->next = nullptr;
   message->down = nullptr;
   message->value = CopyValue(value, typeInfo, nullptr, fragment);
@@ -1145,6 +1172,7 @@ extern "C" void merk_mailbox_remove(
       mailbox->tail = link;
     }
     --mailbox->count;
+    Unpin(removed);
   }
   Unlock(mailbox);
 }
@@ -1235,6 +1263,8 @@ struct Monitor {
   Process *target;
   Handle watcher;
   Word function;
+  // The copy of the function, which the message takes when the monitor fires.
+  ChunkLink *chunks;
   Monitor *previous;
   Monitor *next;
   // Whether it is on the target's list.
@@ -1286,14 +1316,17 @@ bool IsHere(const Handle &handle) {
 }
 
 // Queues what happened, unless the watcher's mailbox has closed. No lock held.
-void DeliverDown(const Handle &watcher, Word function, std::uint64_t monitor,
-    std::int64_t kind, const char *text) {
+void DeliverDown(const Handle &watcher, Word function, ChunkLink *functionChunks,
+    std::uint64_t monitor, std::int64_t kind, const char *text) {
   Mailbox *mailbox{Find(watcher)};
   if (!mailbox) {
+    FreeChunks(functionChunks);
     return;
   }
   Fragment fragment;
   auto *message{static_cast<Message *>(fragment.Allocate(sizeof(Message)))};
+  message->pinned = nullptr;
+  message->reader = 0;
   auto *down{static_cast<PendingDown *>(fragment.Allocate(sizeof(PendingDown)))};
   std::size_t bytes{std::strlen(text) + 1};
   auto *copy{static_cast<char *>(fragment.Allocate(bytes))};
@@ -1303,6 +1336,11 @@ void DeliverDown(const Handle &watcher, Word function, std::uint64_t monitor,
   message->value = function;
   message->down = down;
   message->chunks = fragment.Take();
+  ChunkLink *last{message->chunks};
+  while (last->next) {
+    last = last->next;
+  }
+  last->next = functionChunks;
   Queue(mailbox, message);
   Unlock(mailbox);
 }
@@ -1331,7 +1369,7 @@ void FireMonitorsOf(Process *process, const char *reason) {
     Monitor *mine{Unhash(shard, id)};
     pthread_mutex_unlock(&shard.lock);
     if (mine) {
-      DeliverDown(mine->watcher, mine->function, id,
+      DeliverDown(mine->watcher, mine->function, mine->chunks, id,
           reason ? kDownFailed : kDownNormal, reason ? reason : "");
       std::free(mine);
     }
@@ -1357,17 +1395,13 @@ extern "C" std::int64_t merk_monitor_new(std::int64_t targetHigh,
   if (!IsHere(target) || !IsHere(watcher)) {
     Fail("a monitor across nodes or places is not supported yet", "");
   }
-  if (Mailbox *mailbox{Find(watcher)}) {
-    bool mine{mailbox->owner == CurrentProcess()};
-    Unlock(mailbox);
-    if (!mine) {
-      Fragment fragment;
-      function = CopyClosure(function, fragment);
-    }
-  }
+  // Always, as the monitor outlives the collections of who made it.
+  Fragment fragment;
+  function = CopyClosure(function, fragment);
   std::uint64_t id{nextMonitor.fetch_add(1, std::memory_order_relaxed)};
   auto *monitor{static_cast<Monitor *>(Malloc(sizeof(Monitor)))};
-  *monitor = {id, nullptr, watcher, function, nullptr, nullptr, false, nullptr};
+  *monitor = {id, nullptr, watcher, function, fragment.Take(), nullptr, nullptr,
+      false, nullptr};
   MonitorShard &shard{ShardOf(id)};
   pthread_mutex_lock(&shard.lock);
   monitor->nextInShard = shard.first;
@@ -1394,8 +1428,9 @@ extern "C" std::int64_t merk_monitor_new(std::int64_t targetHigh,
   pthread_mutex_lock(&shard.lock);
   Unhash(shard, id);
   pthread_mutex_unlock(&shard.lock);
+  ChunkLink *chunks{monitor->chunks};
   std::free(monitor);
-  DeliverDown(watcher, function, id, kDownNoProcess, "");
+  DeliverDown(watcher, function, chunks, id, kDownNoProcess, "");
   return static_cast<std::int64_t>(id);
 }
 
@@ -1419,6 +1454,7 @@ extern "C" void merk_monitor_remove(std::int64_t id) {
       }
     }
     pthread_mutex_unlock(&target->waitLock);
+    FreeChunks(monitor->chunks);
     std::free(monitor);
   }
   pthread_mutex_unlock(&shard.lock);
@@ -1455,13 +1491,19 @@ extern "C" std::int64_t merk_mailbox_read(MERK_HANDLE_PARAMETERS,
 
 // The message that the monitor's function made takes the place of what the
 // monitor left.
-extern "C" void merk_mailbox_resolve(
-    MERK_HANDLE_PARAMETERS, std::int64_t position, Word value) {
+extern "C" void merk_mailbox_resolve(MERK_HANDLE_PARAMETERS,
+    std::int64_t position, Word typeInfo, Word value) {
+  // A fragment, as the reader's heap moves and a mailbox is not a root.
+  Fragment fragment;
+  Word copy{CopyTyped(value, Resolve(typeInfo, nullptr), fragment)};
   if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
     if (mailbox->count > position) {
       Message *message{At(mailbox, position)};
-      message->value = value;
+      message->value = copy;
       message->down = nullptr;
+      message->chunks = fragment.Take();
+      // Still in the mailbox, and read again before it is removed.
+      GiveToReader(message);
     }
     Unlock(mailbox);
   }

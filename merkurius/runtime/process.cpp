@@ -613,6 +613,11 @@ void ExitParallelRegion() {
   Unpin();
 }
 
+bool MayCollect(const Process *process) {
+  return process->pinned == 0 && process->team == 0 &&
+      !(omp_get_level && omp_get_level() > 0);
+}
+
 void Pin() {
   Process *self{current};
   if (!self || self->pinned++ != 0 || !spawned.load() ||

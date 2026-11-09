@@ -13,9 +13,8 @@
 // with a small one, such as 64, nearly every allocation takes the slow
 // path, and those of more than half a chunk have blocks of their own.
 //
-// Temporary (chunk 1 step 3, docs/INPROGRESS.md): chunks come from malloc
-// and go only when a process ends, and the rest of a full chunk is wasted,
-// until chunk 3's collector empties the nursery instead.
+// A process's heap is collected from here, when the allocation comes from
+// Mercury code at a safepoint (roots.h). The rest of a full chunk is wasted.
 //
 //===----------------------------------------------------------------------===//
 
@@ -72,10 +71,14 @@ char *Chunk(std::size_t bytes) {
   auto *chunk{static_cast<merkurius::runtime::ChunkLink *>(
       merkurius::runtime::Malloc(sizeof(merkurius::runtime::ChunkLink) + bytes))};
   chunk->next = nullptr;
+  chunk->bytes = bytes;
+  chunk->sibling = nullptr;
+  chunk->pinned = false;
   if (merkurius::runtime::Process *process{
           merkurius::runtime::CurrentProcess()}) {
     chunk->next = process->chunks;
     process->chunks = chunk;
+    process->allocatedBytes += bytes;
   }
   return reinterpret_cast<char *>(chunk + 1);
 }
@@ -86,6 +89,20 @@ extern "C" void *merk_alloc_slow(std::int64_t bytes) {
     merkurius::runtime::CheckRoots(__builtin_frame_address(0));
   }
   std::size_t size{static_cast<std::size_t>(bytes)};
+  if (merkurius::runtime::CollectIfDue(__builtin_frame_address(0))) {
+    if (merkurius::runtime::CheckRootsEnabled()) {
+      merkurius::runtime::CheckRoots(__builtin_frame_address(0));
+    }
+    if (static_cast<std::size_t>(merk_heap.limit - merk_heap.next) >= size) {
+      char *cell{merk_heap.next};
+      merk_heap.next = cell + size;
+      return cell;
+    }
+  }
+  if (merkurius::runtime::CollectsEveryAllocation()) {
+    // So that the next allocation comes here too.
+    return Chunk(size);
+  }
   std::size_t chunkSize{chunkBytes.load(std::memory_order_relaxed)};
   if (chunkSize == 0) {
     chunkSize = ReadChunkBytes();
