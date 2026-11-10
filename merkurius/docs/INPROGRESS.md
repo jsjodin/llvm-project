@@ -2326,13 +2326,20 @@ the process asks the host to launch. The first version has neither.
 
      **Leaks found meanwhile, in code before 4e, each to be fixed as a
      commit of its own after it:**
-     - `TrimRing` unlinks the messages that a device has taken but never
-       frees their fragments, for every message any device receives.
-     - `merk_mailbox_message` gives the chunks of a message that the host's
-       side of `rpcTakeArray` reads to a reader, and a thread that runs no
-       process, as the plugin's server thread, keeps them for ever.
-     - `Close` keeps the messages a ring has shown, as `TakeArray` copies a
-       message after the mailbox's lock is released.
+     - Fixed 2026-11-10, together, as messages that went through a
+       device's ring: `TrimRing` unlinked the messages that a device had
+       taken but never freed them, for every message any device received;
+       `merk_mailbox_message` gave the chunks of a message that the host's
+       side of `rpcTakeArray` read to a reader, and the plugin's server
+       thread, which runs no process, kept them for ever; and `Close` kept
+       the messages a ring had shown, as `TakeArray` copied a message after
+       the mailbox's lock was released. The host now copies an array for a
+       device with the lock held (`merk_mailbox_copy_array_for_ring`), as
+       it copies a term, and answers whether the mailbox was open; then
+       `TrimRing` and `Close` free the messages. `MERK_CHECK_MESSAGES`
+       counts the queued messages that no process read and no mailbox
+       freed; without the fix, the two hundred GPU processes of
+       `process-gpu-messages-gpu.test` left four hundred.
      - In a program with GPU processes but no target regions nothing frees
        the rings, the arenas or the retired copies, since only the end of
        the last region does, and a GPU process's end runs on liboffload's

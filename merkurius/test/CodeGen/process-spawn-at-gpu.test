@@ -17,3 +17,7 @@ LEAVE:main ends
 RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx906 %libomp-flags %S/process-spawn-at.m -o %t.other
 RUN: not %libomp-env %t.other gpu 2>&1 | FileCheck %s --check-prefix=OTHER
 OTHER: Software Error: process_spawn_at.spawn_summer_at: the module process_spawn_at has no image of its GPU process kinds for GPU 0, a {{gfx[0-9a-f]+}}: it must be compiled with --offload-arch={{gfx[0-9a-f]+}}
+
+The messages that the GPU process took from its ring are freed.
+RUN: %libomp-env MERK_CHECK_MESSAGES=1 %t2 gpu 2>&1 | FileCheck %s --check-prefix=MESSAGES --match-full-lines
+MESSAGES:Mercury runtime: 0 messages are neither read nor freed

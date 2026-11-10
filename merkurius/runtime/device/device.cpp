@@ -847,6 +847,7 @@ extern "C" int merk_device_receive_array(
     return 0;
   }
   void *array{merk_device_alloc(sizeof(uint64_t) * (1 + size))};
+  bool found{false};
   {
     rpc::Client::Port port{__llvm_rpc_client.open<rpcTakeArray>()};
     port.send([&](rpc::Buffer *buffer, uint32_t) {
@@ -856,7 +857,12 @@ extern "C" int merk_device_receive_array(
       buffer->data[5] = static_cast<uint64_t>(DeviceNumber());
       buffer->data[6] = reinterpret_cast<uint64_t>(array);
     });
-    port.recv([](rpc::Buffer *, uint32_t) {});
+    port.recv(
+        [&](rpc::Buffer *buffer, uint32_t) { found = buffer->data[0] != 0; });
+  }
+  // A mailbox that closed meanwhile has no message.
+  if (!found) {
+    return 0;
   }
   *message = reinterpret_cast<uint64_t>(array);
   Taken(entry);

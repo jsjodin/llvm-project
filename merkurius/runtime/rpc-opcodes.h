@@ -64,7 +64,9 @@ constexpr uint32_t rpcDrain{RpcOpcode(6)};
 // The oldest message of a mailbox of arrays, whose size its ring gave: the
 // buffer's words are the handle's five, the device's number and the
 // address of an array on the device of the message's size. The host copies
-// the message there, and then answers; the device then moves the ring's head.
+// the message there, with the mailbox's lock held, and then answers with
+// whether it did, which it does not if the mailbox is closed; the device
+// then moves the ring's head.
 constexpr uint32_t rpcTakeArray{RpcOpcode(7)};
 
 // An error on the device that ends the program: the buffer's first word is

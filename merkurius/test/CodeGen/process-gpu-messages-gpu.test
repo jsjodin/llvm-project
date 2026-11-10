@@ -13,8 +13,9 @@ RUN: %libomp-env timeout -k 1 60 %t gpu | FileCheck %S/process-gpu-messages.m --
 RUN: not %libomp-env timeout -k 1 60 %t2 gpu closure 2>&1 | FileCheck %s --check-prefix=CLOSURE --match-full-lines
 CLOSURE:Mercury runtime: cannot copy a closure between the host and a GPU
 
-Two hundred GPU processes that each take one message and end leave none of
-the host's copies of their messages.
-RUN: %libomp-env MERK_CHECK_PINNED=1 timeout -k 1 60 %t2 gpu many 2>&1 | FileCheck %s --check-prefix=MANY --match-full-lines
+Two hundred GPU processes that each take one message of two and end leave
+none of the host's copies of their messages, nor any of the messages.
+RUN: %libomp-env MERK_CHECK_PINNED=1 MERK_CHECK_MESSAGES=1 timeout -k 1 60 %t2 gpu many 2>&1 | FileCheck %s --check-prefix=MANY --match-full-lines
 MANY:20300
 MANY-NEXT:Mercury runtime: 0 chunks of host memory for devices' messages are allocated
+MANY-NEXT:Mercury runtime: 0 messages are neither read nor freed
