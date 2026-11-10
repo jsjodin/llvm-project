@@ -3404,13 +3404,6 @@ static bool RejectOnDevice(mlir::Operation *op, llvm::StringRef what) {
 
 llvm::LogicalResult Lowerer::Lower() {
   module_.getContext()->loadDialect<mlir::LLVM::LLVMDialect, mrt::MrtDialect>();
-  // Lowering the operands takes away what says that they are words.
-  module_.walk([&](merk::ForeignCallOp call) {
-    llvm::SmallVector<bool> &words{foreignWords_[call]};
-    for (mlir::Value input : call.getInputs()) {
-      words.push_back(!device_ && mlir::isa<merk::WordType>(input.getType()));
-    }
-  });
   // On a device nothing calls a descriptor's unify entry, since a generic
   // unification is an error there, and the procedure is not compiled for it.
   if (device_) {
@@ -3456,6 +3449,15 @@ llvm::LogicalResult Lowerer::Lower() {
     }
     const TermLayout::Functor *found{layout->Find(functor)};
     return found && found->arity > 0;
+  });
+  // Which of each foreign call's inputs are words, since lowering the
+  // operands takes away what says so: after that pass, whose variants of
+  // procedures are copies with foreign calls of their own.
+  module_.walk([&](merk::ForeignCallOp call) {
+    llvm::SmallVector<bool> &words{foreignWords_[call]};
+    for (mlir::Value input : call.getInputs()) {
+      words.push_back(!device_ && mlir::isa<merk::WordType>(input.getType()));
+    }
   });
   // After that pass, which looks for a call next to the cells it fills.
   if (!device_) {
