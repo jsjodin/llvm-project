@@ -18,6 +18,9 @@
 //   runtime defines it the same way for a region's image.
 // - The device's number, which the host's runtime sets when it loads the
 //   image (device.cpp).
+// - That this is a GPU process's image, so that the device's runtime takes
+//   the process's arena from its kernel's arguments (device.cpp). It is not
+//   exported: libmerkdevice's weak definition, 0, is left out.
 // - omp_get_device_num, which device.cpp refers to weakly for a region's
 //   image, where OpenMP's device runtime defines it. An undefined dynamic
 //   symbol, even a weak one, stops HSA's loader from loading the image, so
@@ -34,6 +37,8 @@ extern "C"
 
 extern "C"
     [[gnu::visibility("protected"), gnu::weak]] int merk_device_number{-1};
+
+extern "C" [[gnu::visibility("hidden")]] int merk_device_process_image{1};
 
 extern "C" [[gnu::visibility("hidden")]] int omp_get_device_num(void) {
   return -1;

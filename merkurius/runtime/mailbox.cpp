@@ -796,6 +796,31 @@ extern "C" void merk_mailbox_close(MERK_HANDLE_PARAMETERS) {
   }
 }
 
+// Closes the mailbox of a GPU process whose kernel has ended, which no
+// device reads any more: its ring, if it has one, and the copy of the
+// message that the device was taking go to the caller to free, now, with
+// `release`, not when no region or GPU process runs.
+extern "C" void merk_mailbox_close_ended(MERK_HANDLE_PARAMETERS,
+    DeviceRing **ring, int *device, void **copy,
+    void (**release)(int device, void *copy)) {
+  pthread_once(&once, InitializeCondition);
+  *ring = nullptr;
+  *copy = nullptr;
+  if (Mailbox * mailbox{Find(MERK_HANDLE)}) {
+    if (mailbox->ring) {
+      TrimRing(mailbox);
+      *ring = mailbox->ring;
+      *device = mailbox->ringDevice;
+      *copy = mailbox->ringCopy;
+      *release = mailbox->releaseCopy;
+      mailbox->ringCopy = nullptr;
+      __atomic_sub_fetch(&attachedRings, 1, __ATOMIC_SEQ_CST);
+    }
+    Close(mailbox);
+    Unlock(mailbox);
+  }
+}
+
 namespace merkurius::runtime {
 void CloseMailboxesOf(Process *process) {
   pthread_once(&once, InitializeCondition);

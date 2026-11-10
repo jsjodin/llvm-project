@@ -137,9 +137,33 @@ struct Arena {
 };
 Arena arena{nullptr, {}, {}, 0};
 
+} // namespace
+
+// Whether this is a GPU process's image, whose start object defines it as
+// 1 (process-start.cpp). In a region's image it stays 0, and the compiler
+// folds what depends on it.
+extern "C"
+    [[gnu::visibility("hidden"), gnu::weak]] int merk_device_process_image{0};
+
+namespace {
+
+// The arena of what runs: a region's image has one, its global, and each GPU
+// process one of its own, which the host allocates and frees when the
+// process ends (gpu-processes.cpp). The process's kernel takes it as its
+// first argument, which the kernel's dispatch packet has at the start of its
+// arguments, so it is found from anywhere in the process.
+Arena *CurrentArena() {
+  if (!merk_device_process_image) {
+    return &arena;
+  }
+  // hsa_kernel_dispatch_packet_t: kernarg_address is its sixth word.
+  auto *packet{(const uint64_t *)__builtin_amdgcn_dispatch_ptr()};
+  return *reinterpret_cast<Arena *const *>(packet[5]);
+}
+
 // A new chunk from the host, the current one from now on, of at least
 // `bytes` after its header, of which the first `bytes` are taken.
-void *NewChunk(uint64_t bytes) {
+void *NewChunk(Arena *arena, uint64_t bytes) {
   uint64_t wanted{sizeof(Chunk) + bytes};
   Chunk *chunk{nullptr};
   uint64_t size{0};
@@ -147,7 +171,7 @@ void *NewChunk(uint64_t bytes) {
     rpc::Client::Port port{__llvm_rpc_client.open<rpcChunk>()};
     port.send([&](rpc::Buffer *buffer, uint32_t) {
       buffer->data[0] = static_cast<uint64_t>(DeviceNumber());
-      buffer->data[1] = reinterpret_cast<uint64_t>(&arena);
+      buffer->data[1] = reinterpret_cast<uint64_t>(arena);
       buffer->data[2] = wanted > kChunkBytes ? wanted : kChunkBytes;
     });
     port.recv([&](rpc::Buffer *buffer, uint32_t) {
@@ -157,7 +181,7 @@ void *NewChunk(uint64_t bytes) {
   }
   chunk->size = size;
   chunk->used = wanted;
-  __atomic_store_n(&arena.current, chunk, __ATOMIC_RELEASE);
+  __atomic_store_n(&arena->current, chunk, __ATOMIC_RELEASE);
   return chunk + 1;
 }
 
@@ -183,8 +207,9 @@ extern "C" void merk_device_shared_free(void *pointer, uint64_t bytes) {
 // sleep and try again in it.
 extern "C" void *merk_device_alloc(uint64_t bytes) {
   bytes = (bytes + 7) & ~uint64_t{7};
+  Arena *arena{CurrentArena()};
   for (;;) {
-    Chunk *chunk{__atomic_load_n(&arena.current, __ATOMIC_ACQUIRE)};
+    Chunk *chunk{__atomic_load_n(&arena->current, __ATOMIC_ACQUIRE)};
     if (chunk) {
       uint64_t at{__atomic_fetch_add(&chunk->used, bytes, __ATOMIC_RELAXED)};
       if (at + bytes <= chunk->size) {
@@ -193,14 +218,14 @@ extern "C" void *merk_device_alloc(uint64_t bytes) {
     }
     uint32_t idle{0};
     if (rpc::is_first_lane(rpc::get_lane_mask()) &&
-        __atomic_compare_exchange_n(&arena.refilling, &idle, 1, false,
+        __atomic_compare_exchange_n(&arena->refilling, &idle, 1, false,
             __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
       // Another wave may have made one since this one looked.
       void *cell{nullptr};
-      if (__atomic_load_n(&arena.current, __ATOMIC_ACQUIRE) == chunk) {
-        cell = NewChunk(bytes);
+      if (__atomic_load_n(&arena->current, __ATOMIC_ACQUIRE) == chunk) {
+        cell = NewChunk(arena, bytes);
       }
-      __atomic_store_n(&arena.refilling, 0, __ATOMIC_RELEASE);
+      __atomic_store_n(&arena->refilling, 0, __ATOMIC_RELEASE);
       if (cell) {
         return cell;
       }
@@ -338,7 +363,7 @@ template <typename T> using Local = __attribute__((address_space(3))) T;
 // team's.
 extern "C" void merk_device_teams_enter(
     uint64_t id, uint64_t nodeHigh, uint64_t nodeLow, int32_t teams) {
-  TeamTable **bucket{&arena.teams[id % kTeamTableSlots]};
+  TeamTable **bucket{&CurrentArena()->teams[id % kTeamTableSlots]};
   TeamTable *made{nullptr};
   for (;;) {
     TeamTable *first{__atomic_load_n(bucket, __ATOMIC_ACQUIRE)};
@@ -732,7 +757,7 @@ template <typename Poll> bool Wait(int64_t milliseconds, Poll poll) {
 // The entry of the mailbox's ring, attaching it the first time, or null if
 // the mailbox is closed.
 RingEntry *RingOf(const uint64_t *handle, uint64_t kind) {
-  RingEntry **bucket{&arena.rings[handle[2] % kRingCacheSlots]};
+  RingEntry **bucket{&CurrentArena()->rings[handle[2] % kRingCacheSlots]};
   for (RingEntry *entry{__atomic_load_n(bucket, __ATOMIC_ACQUIRE)}; entry;
        entry = entry->next) {
     if (entry->slot == handle[2] && entry->generation == handle[3] &&

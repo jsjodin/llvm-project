@@ -2258,6 +2258,8 @@ the process asks the host to launch. The first version has neither.
        (`GpuProcessStarted` and `GpuProcessEnded` in `runtime/offload.cpp`).
        Arenas are freed when the next region ends, not on liboffload's
        thread, and the program ends at once if main ends while one runs.
+       Since replaced: each GPU process has an arena of its own, which a
+       thread of the runtime's frees when it ends (the leaks after 4e).
      - **Two images on one GPU have arenas of their own:** `ArenaOf` matched
        a device alone, so a process image's allocation could take a region
        image's arena. It matches the device and the arena's address.
@@ -2340,10 +2342,30 @@ the process asks the host to launch. The first version has neither.
        counts the queued messages that no process read and no mailbox
        freed; without the fix, the two hundred GPU processes of
        `process-gpu-messages-gpu.test` left four hundred.
-     - In a program with GPU processes but no target regions nothing frees
-       the rings, the arenas or the retired copies, since only the end of
-       the last region does, and a GPU process's end runs on liboffload's
-       thread, which must not call liboffload.
+     - Fixed 2026-11-10: in a program with GPU processes but no target
+       regions nothing freed the rings, the arenas or the retired copies,
+       since only the end of the last region did, and a GPU process's end
+       runs on liboffload's thread, which must not call liboffload. Running
+       that cleanup when the last GPU process ends would not have been
+       enough: the GPU processes of one image shared its arena, which was
+       freed only when nothing ran on any device, so a server whose GPU
+       processes overlap would never have freed it. So each GPU process
+       now has an arena of its own, as 4d planned: the host allocates its
+       words on the device and passes them as the kernel's first argument,
+       which the device's runtime reads from the kernel's dispatch packet
+       in a process's image (`merk_device_process_image`, defined by the
+       start object), so that no state is set up on the device. When the
+       kernel ends, the host function on liboffload's thread closes the
+       mailbox and takes its ring and the copy there
+       (`merk_mailbox_close_ended`), and a thread of the runtime's, the
+       reaper, frees them, the arena and its chunks, and the queue, and then
+       counts the process as ended; the last of the regions and GPU
+       processes to end runs the cleanup when nothing runs. A GPU process
+       still counts as a running region, so that a ring of another
+       mailbox that it reads stays. `MERK_CHECK_DEVICE_MEMORY` reports how
+       many arena chunks and rings are left at the end; without the fix,
+       the two hundred GPU processes of `process-gpu-messages-gpu.test`
+       left two hundred of each.
 
    **Decisions,** made by the user on 2026-11-10, each as recommended:
    - **D1. Which kinds get a kernel: those whose declaration says so,**

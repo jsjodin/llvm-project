@@ -64,9 +64,12 @@ void MerkGenerator::GenerateProcessKernels() {
   }
 }
 
-// The kernel merk_process_<kind>, which takes the kind's arguments and its
-// mailbox's handle by value, and calls the kind's predicate. In the first
-// version, the arguments are integers, floats, characters and mailboxes,
+// The kernel merk_process_<kind>, which takes the process's arena, the
+// kind's arguments and its mailbox's handle by value, and calls the kind's
+// predicate. The arena is the address of the words on the device that the
+// host allocated for the process alone, which the device's runtime finds in
+// the kernel's arguments (device.cpp), so the kernel does not use it. In the
+// first version, the arguments are integers, floats, characters and mailboxes,
 // and the kind is not polymorphic (decision D3); the kernel is one team,
 // whose initial thread runs the predicate, as the runtime launches it. A
 // mailbox's handle is five words, which the kernel puts in a cell on its
@@ -92,7 +95,7 @@ void MerkGenerator::GenerateProcessKernel(const parser::ProcessDecl &decl) {
   }
   // The kind's arguments and its mailbox; the io state has no value.
   auto i64{builder_.getI64Type()};
-  llvm::SmallVector<mlir::Type> parameters;
+  llvm::SmallVector<mlir::Type> parameters{i64};
   llvm::SmallVector<mlir::Type> values;
   bool ok{true};
   for (const semantics::Type *type :
@@ -132,7 +135,7 @@ void MerkGenerator::GenerateProcessKernel(const parser::ProcessDecl &decl) {
   auto stack{mlir::LLVM::LLVMPointerType::get(
       &context_, target_.addressSpaces().private_)};
   llvm::SmallVector<mlir::Value> arguments;
-  unsigned next{0};
+  unsigned next{1};
   for (mlir::Type type : values) {
     if (!mlir::isa<merk::TermType>(type)) {
       arguments.push_back(entry->getArgument(next++));

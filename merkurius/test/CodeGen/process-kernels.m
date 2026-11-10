@@ -1,7 +1,8 @@
 % Process kinds that run on a GPU (docs/INPROGRESS.md, GPU processes without
 % omp target, step 4b). The kernels' compile, -fprocess-kernels, makes a
-% kernel merk_process_<kind> for each such kind, which takes the kind's
-% arguments and its mailbox's handle by value and calls the kind's predicate,
+% kernel merk_process_<kind> for each such kind, which takes the process's
+% arena, the kind's arguments and its mailbox's handle by value and calls
+% the kind's predicate,
 % and keeps only what the kernels reach: not main, nor the kinds that run on
 % the host. It hides the rest, so that the image exports only the kernels.
 % The host's compile embeds the image it is given and registers it at
@@ -75,21 +76,22 @@ main(!IO) :-
         true
     ).
 
-% The kernel takes the kind's integer and float by value, and each mailbox's
-% handle as five words, which it puts in a cell on its stack.
-% KERNEL0:define protected amdgpu_kernel void @merk_process_summer(i64 %0, double %1, i64 %2, i64 %3, i64 %4, i64 %5, i64 %6, i64 %7, i64 %8, i64 %9, i64 %10, i64 %11) {
-% KERNEL0-NEXT:  %13 = alloca [5 x i64], i64 1, align 8, addrspace(5)
-% KERNEL0-NEXT:  %14 = addrspacecast ptr addrspace(5) %13 to ptr
-% KERNEL0-NEXT:  %15 = getelementptr i64, ptr %14, i32 0
-% KERNEL0-NEXT:  store i64 %2, ptr %15, align 8
-% KERNEL0:  store i64 %6, ptr %19, align 8
-% KERNEL0-NEXT:  %20 = alloca [5 x i64], i64 1, align 8, addrspace(5)
-% KERNEL0-NEXT:  %21 = addrspacecast ptr addrspace(5) %20 to ptr
-% KERNEL0:  store i64 %11, ptr %26, align 8
-% KERNEL0-NEXT:  call void @process_kernels.summer_6_0(i64 %0, double %1, ptr %14, ptr %21)
+% The kernel takes the process's arena, which the device's runtime finds in
+% the kernel's arguments, the kind's integer and float by value, and each
+% mailbox's handle as five words, which it puts in a cell on its stack.
+% KERNEL0:define protected amdgpu_kernel void @merk_process_summer(i64 %0, i64 %1, double %2, i64 %3, i64 %4, i64 %5, i64 %6, i64 %7, i64 %8, i64 %9, i64 %10, i64 %11, i64 %12) {
+% KERNEL0-NEXT:  %14 = alloca [5 x i64], i64 1, align 8, addrspace(5)
+% KERNEL0-NEXT:  %15 = addrspacecast ptr addrspace(5) %14 to ptr
+% KERNEL0-NEXT:  %16 = getelementptr i64, ptr %15, i32 0
+% KERNEL0-NEXT:  store i64 %3, ptr %16, align 8
+% KERNEL0:  store i64 %7, ptr %20, align 8
+% KERNEL0-NEXT:  %21 = alloca [5 x i64], i64 1, align 8, addrspace(5)
+% KERNEL0-NEXT:  %22 = addrspacecast ptr addrspace(5) %21 to ptr
+% KERNEL0:  store i64 %12, ptr %27, align 8
+% KERNEL0-NEXT:  call void @process_kernels.summer_6_0(i64 %1, double %2, ptr %15, ptr %22)
 % KERNEL0-NEXT:  ret void
 % KERNEL0-NEXT:}
-% KERNEL2:define protected amdgpu_kernel void @merk_process_summer(i64 %0, double %1, i64 %2, i64 %3, i64 %4, i64 %5, i64 %6, i64 %7, i64 %8, i64 %9, i64 %10, i64 %11) local_unnamed_addr {
+% KERNEL2:define protected amdgpu_kernel void @merk_process_summer(i64 %0, i64 %1, double %2, i64 %3, i64 %4, i64 %5, i64 %6, i64 %7, i64 %8, i64 %9, i64 %10, i64 %11, i64 %12) local_unnamed_addr {
 
 % The host embeds the image, and registers it, after the message types.
 % HOST:@process_kernels.merk_process_image.module = internal constant [16 x i8] c"process_kernels\00", align 1
