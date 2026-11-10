@@ -2820,8 +2820,8 @@ mailboxes, timeouts other than polling, and garbage collection on the device.
 - **Its heap:** chunks of device memory reserved at launch, bump-allocated.
   Without a collector on the device, a process is short-lived or resets its
   heap between messages (The device runtime, below). Decided 2026-11-10:
-  it resets it at each `receive`, one turn per message (A GPU process's
-  turns, below).
+  a GPU process makes no cells but arrays, so it needs neither (Messages
+  and memory on the device, below).
 - **Memory coherence:** fine-grained host memory with system-scope atomics
   where the platform supports PCIe atomics, and coarse-grained memory with
   explicit fences and polling otherwise.
@@ -3419,47 +3419,72 @@ lines beside the OpenMP device runtime, which a target region needs anyway.
    constructor keep loops flat; recursion that is not a tail call is kept
    shallow, as a device thread's stack does not grow.
 
-**A GPU process's turns.** Decided by the user on 2026-11-10, for GPU
-processes that live long and receive messages that are terms, which step 4e
-allowed (`INPROGRESS.md`, GPU processes without `omp target`). That moved away
-from the flat messages above, whose lifetimes were known; turns bring known
-lifetimes back, without a collector, as the device's performance needs.
+**Messages and memory on the device.** Decided by the user on 2026-11-10.
+The GPU is for fast parallel execution of work that splits easily, not for
+pointer structures such as lists and trees; where two places share no
+memory, copying a message and sending it is the better option. Step 4e
+(`INPROGRESS.md`, GPU processes without `omp target`) had let GPU processes
+and target regions send and receive any ground term, copied by its
+`type_info`, which moved away from the flat messages and known lifetimes
+above. This brings them back.
 
-- **A turn** is what a GPU process does from one `receive` to the next. Each
-  `receive`, whether it takes a message or times out, ends the turn before
-  it and starts a new one.
-- **A received message lives for its turn,** and so do the cells the
-  process makes during the turn. They are in the turn's region, which the
-  next `receive` frees at once, by resetting one pointer. The region keeps
-  its chunks for the next turn, so a turn costs no call to the host once
-  the process has the memory it needs.
-- **Only values without cells in a turn's region cross into the next
-  turn:** scalars, enumerations, mailboxes, and arrays of scalars, which live
-  in the process's own arena and are freed at their last use where the
-  compiler knows it (uniqueness, above), or when the process ends.
-- **The compiler checks it.** At each call in a GPU kind's code that may
-  receive, directly or through what it calls, a variable that lives across
-  the call must be of such a type, or it is an error at compile time that
-  names the variable and its type. A program that must keep a term copies
-  it into scalars or an array; keeping terms across turns is a later
-  feature. Nothing is checked or traced at run time.
-- **A message is read where it arrives.** Once a GPU process's queue is in
-  its GPU's memory, the sender's copy is the one the process reads, for its
-  turn, and the queue takes the space back at the next `receive`: nothing is
-  copied on the receiving side.
-- **Target regions are not affected:** a region's arena lives as long as
-  the region, as before.
+- **Messages to and from GPU code are flat,** in GPU processes and target
+  regions alike: a fixed-size value of scalars, enumerations and mailboxes,
+  such as `add(int) ; get(mailbox(int))`; or one block of variable size, an
+  array of scalars, a multi-dimensional array or a view of one, or a
+  string; or a shared array's handle (below). No message holds a pointer,
+  so any sender writes it where the receiver reads it, as bytes, and the
+  receiver reads it in place. A message type of another kind in a GPU
+  kind's or a region's `send` or `receive` is an error at compile time.
+  Messages between the host's processes keep any type.
+- **A GPU process's code makes only such values,** checked by type: a goal
+  that makes a value of another type, by a construction or as a call's
+  result, is an error at compile time that names the type. GPU code is
+  monomorphic, so every type is known. A GPU process then allocates only
+  arrays, which are freed at their last use where uniqueness shows it, as
+  compile-time garbage collection does, or when the process ends. It needs
+  no collector, no turns and no check of what lives across a `receive`.
+- **A target region's code may make terms,** as code compiled from ordinary
+  procedures does, in an arena that lives as long as the region. A region
+  is a computation and ends; a GPU process is an actor and may live for
+  ever. Messages handled for long belong in a GPU process.
+- **Portions of arrays travel by value:** `send_slice` sends a range of a
+  one-dimensional array and `send_tile` a tile of a multi-dimensional one,
+  each as a dense array of its own, copied straight from the sender's array
+  into the receiver's queue, by a rectangular DMA or a strided copy kernel,
+  with no packing in the program.
+- **Multi-dimensional arrays** have their rank in their type, and a view of
+  one is a strided descriptor, as MLIR's `memref` has: a handle, an offset,
+  and an extent and a stride for each dimension, so a tile is a view, not a
+  list of ranges, and views of views compose. Code generation follows
+  `memref`'s semantics, so that MLIR's tiling, vectorization and mapping to
+  GPUs apply. A layout stored tile by tile, which makes each tile one
+  block, may come later, if measurements ask for it.
+- **Shared arrays,** `shared_array(T)`, made from a unique array, are
+  read-only and counted: the sender increments the count before the
+  message leaves, each holder decrements it when done, and the array is
+  freed at zero. An array of scalars holds no reference, so no cycle can
+  keep one alive. It lives in a heap of its own on the device, not in a
+  process's memory, from LLVM's GPU libc's `malloc`. Within a GPU,
+  processes read it in place, as workers of a reduction that each send
+  back a scalar do; another place copies it unless peer access lets it
+  read it. A view of a shared array holds a reference to the whole array.
 
 Rejected:
+- **Terms in messages to GPU code,** step 4e's, which needs a walk of
+  `type_info` on the device, pointers fixed up for each place, and memory
+  whose lifetime the compiler does not know.
+- **Turns,** decided earlier the same day: a GPU process's memory reset at
+  each `receive`, with a check at compile time that nothing that has cells
+  lives across one. Without cells in GPU processes there is nothing to
+  reset, and the check by type is simpler than one by liveness.
 - **A collector on the device,** copying with stack maps, or collecting at
-  each `receive` with the live state as roots. Either costs time on every
-  turn or in the compiler and the runtime, which the GPU's performance does
-  not allow, and known lifetimes need neither.
-- **Flat messages again** for GPU processes, which would make step 4e's
-  copying of terms a feature of the host alone. Turns keep it, and keep the
-  lifetimes known.
-- **An arena for the whole process,** as built in step 4e, which grows
-  with every message until `MERK_DEVICE_ARENA_BYTES` stops it.
+  each `receive`: time on every turn, which the GPU's performance does not
+  allow, and known lifetimes need none.
+- **Pointers to parts of arrays in messages:** the receiver may have another
+  address space, and the sender may free or update the array.
+- **Counting every array once it is sent:** a cost that the program does not
+  see. Only shared arrays are counted.
 
 **Who communicates.** In a generic kernel, the code outside every
 `parallel` runs on each team's initial thread only, while the other threads

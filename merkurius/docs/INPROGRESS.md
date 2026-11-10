@@ -1424,6 +1424,10 @@ conjunctions steal work too (Bone's thesis, a paper we may read).
    - **Balancing as a library.** Pools, dispatchers and stealing are library
      code over processes and mailboxes, not the runtime's, so a program can
      choose its policy.
+   - **Data shared, not copied, within a GPU:** a pool's workers on one GPU
+     read their parts of a shared array in place, counted, and send back
+     results; across places without shared memory, the parts are copied and
+     sent (design document, "Messages and memory on the device").
 
 **Steps, for discussion.**
 1. **A pool on one GPU, as the first measure of GPU messaging.** A host
@@ -2478,74 +2482,115 @@ the process asks the host to launch. The first version has neither.
    - **D3. One message type for each kind in the first version,** and
      scalar and mailbox arguments for a GPU kind. Several message types,
      and other arguments, come later.
-5. **A GPU process's queue on its GPU, and its turns.** Decided by the user
-   on 2026-11-10, in place of "spawning from the GPU's other places, and the
-   place table's identities", which said too little to plan: a GPU process's
-   mailbox lives at its GPU's place, and its handle says so. With it, the
-   process's memory is reset at each `receive`, one turn per message (design
-   document, "A GPU process's turns"), as step 4e had moved away from the
-   known lifetimes that the device's design rests on. Performance on the GPU
-   comes first: what can be decided at compile time is, and the receiving
-   side copies nothing.
+5. **Flat messages, and a GPU process's queue on its GPU.** Decided by the
+   user on 2026-11-10, in place of "spawning from the GPU's other places,
+   and the place table's identities", which said too little to plan: a GPU
+   process's mailbox lives at its GPU's place, and its handle says so; and
+   messages to and from GPU code are flat, and a GPU process makes no cells
+   but arrays (design document, "Messages and memory on the device"). That
+   replaces turns, decided earlier the same day, which the design document
+   keeps among the rejected. Performance on the GPU comes first: what can
+   be decided at compile time is, and the receiving side copies nothing.
 
    **Why the queue moves.** Today the host's list is the queue, and the GPU
    reads it through a ring in host memory, asking the host for each message
    that is not one word. Every message to a GPU process crosses PCIe on the
-   GPU's request, two GPU processes on one GPU talk through the host, and the
-   handle's place, the host's, cannot tell a sender that the receiver is on
-   a GPU. The goal, messages between GPUs, needs the queue where the
-   receiver is, so that a sender, the host or a peer, writes into it.
+   GPU's request, two GPU processes on one GPU talk through the host, and
+   the handle's place, the host's, cannot tell a sender that the receiver
+   is on a GPU. The goal, messages between GPUs, needs the queue where the
+   receiver is, so that a sender, the host or a peer, writes into it. Flat
+   messages make that a write of bytes, with no pointer to fix up.
 
-   **Steps,** turns first, as they bound the memory of what follows:
-   - **5a. The turn check, at compile time.** Which predicates of a GPU kind's
-     code may receive, directly or through what they call; at each call to
-     one, the variables that live across it must be of types without cells
-     in a turn's region (scalars, enumerations, mailboxes, arrays of
-     scalars), or it is an error that names the variable and its type. Tests
-     of each kind of error, and of a server loop whose state is scalars.
-   - **5b. Turn regions in the device's runtime.** A GPU process's arena is
-     split: the turn's region, for cells and messages, which each `receive`
-     resets, keeping its chunks; and the process's arena, for what crosses
-     turns. A test: a GPU process that receives a million messages that are
-     lists stays within one chunk, which `MERK_CHECK_DEVICE_MEMORY` shows.
-   - **5c. The place table.** Place 0 is the host and each GPU of the node
+   **Steps:**
+   - **5a. The checks by type, at compile time.** A message type that is not
+     flat in a GPU kind's or a target region's `send` or `receive`; a goal of
+     a GPU kind's code that makes a value of a type that is not flat; each
+     an error that names the type. Step 4e's term messages then go: the
+     ring of terms, `rpcTakeTerm`, `rpcSendTerm` and `rpcPinnedChunk`, and
+     the device's use of `copy.h`, which the host keeps. Strings become a
+     one-block message. Tests of each error, and the GPU tests of 4e turned
+     into flat messages or error tests.
+   - **5b. The place table.** Place 0 is the host and each GPU of the node
      has a place of its own, with its kind, its architecture and its
      identity: liboffload's UID where the GPU has a UUID, and otherwise its
      PCI address, from the kernel's topology in sysfs, as liboffload gives
      none (design document, "What the plugins lack"). A GPU process's handle
      carries its GPU's place. Nodes exchange their tables at the handshake.
-   - **5d. The queue in the GPU's memory.** The mailbox's memory, on the GPU,
-     owned by the mailbox: senders reserve space in it and write the
-     message, with its pointers as the GPU sees them, and the receiver reads
-     it there for its turn. Space is taken back at the next `receive`. A
-     message that a selective receive passes over is moved to the host's
-     list for the mailbox, so that it does not hold the queue's space.
-   - **5e. Routing by place.** `send` to a handle of a GPU place: from the
+   - **5c. The queue in the GPU's memory.** The mailbox's memory, on the GPU,
+     owned by the mailbox: a sender reserves space in it and writes the
+     message's bytes, and the receiver reads it there. A message that a
+     selective receive passes over is moved to the host's list for the
+     mailbox, so that it does not hold the queue's space.
+   - **5d. Routing by place.** `send` to a handle of a GPU place: from the
      host, into the GPU's queue; from a GPU process on the same GPU, straight
      into the queue, with no host on the way; from another GPU, through the
      host until peers write to each other's memory, which this machine's one
      GPU cannot test.
-   - **5f. Measurements,** in the design document: a ping-pong between two
-     GPU processes on one GPU, through the host before 5e and direct after
-     it, and from the host to a GPU process, before and after 5d.
+   - **5e. Measurements,** in the design document: a ping-pong between two
+     GPU processes on one GPU, through the host before 5d and direct after
+     it, and from the host to a GPU process, before and after 5c. Each
+     beside the same written directly in HIP or C, a ping-pong through
+     pinned memory and a queue in device memory, so that the gap to code
+     written by hand is measured, not guessed: that is the bar.
+
+   **After step 5,** each a step of its own:
+   - **An arena for each region launch,** freed when the region ends, not
+     when no region runs, which overlapping `nowait` regions never reach.
+     A bug, the same that GPU processes had; it comes first, as its own
+     commit.
+   - **Arrays freed at their last use** in GPU processes, where uniqueness
+     shows it (compile-time garbage collection), so that a GPU process that
+     lives long does not grow.
+   - **`send_slice` and `send_tile`,** copying a range or a tile straight
+     into the receiver's queue: a rectangular DMA, which liboffload does not
+     expose, or a strided copy kernel.
+   - **Multi-dimensional arrays and views** as strided descriptors, following
+     `memref`.
+   - **Shared arrays,** counted, in a heap of their own from libc's `malloc`
+     on the device, with views; for reductions and pools of workers
+     (Distributing work).
 
    **Open, to decide before the step that needs it:**
-   - **Arrays that cross turns (5b).** An array from a message, or made
-     during a turn, is in the turn's region. One that a turn keeps must
-     move to the process's arena. Recommended: the compiler, which knows
-     the variables that cross a `receive` from 5a, copies an array there
-     at the crossing, unless it is there already, and frees the copy that
-     a unique update replaces. Alternative: every array in the process's
-     arena, freed only at its last use, which needs compile-time reuse
-     first.
-   - **How the host writes into the GPU's memory (5d).** Copying each message
+   - **How the host writes into the GPU's memory (5c).** Copying each message
      with a DMA from pinned memory costs a copy's latency per message.
      Writing through host-visible device memory, a large BAR, which a
      consumer Radeon may not offer. Or the queue's slots in host memory, as
      now, with the GPU copying each message into its memory once. To be
      measured on this machine before choosing.
-   - **What a GPU sender on the same GPU reserves with (5e):** an atomic on
+   - **What a GPU sender on the same GPU reserves with (5d):** an atomic on
      the queue's tail in device memory, and how a full queue spills.
+   - **Whether a type with a string field is a message,** such as
+     `greet(string)`: not one block, so not in the first version; a header
+     and a tail would allow it.
+
+   **Papers,** downloaded 2026-11-10 from mercurylang.org's papers page to
+   `~/Downloads/Mercury/` (Execution, Memory, Parallelism), and what each
+   serves:
+   - *The execution algorithm of Mercury* (Somogyi, Henderson and Conway,
+     JLP 1996): the type, mode and determinism information is used for
+     speed, not paid for with it. The stance of the whole step.
+   - Mazur's thesis, *Compile-time garbage collection for the declarative
+     language Mercury* (KU Leuven 2004), and *Practical aspects for a
+     working compile time garbage collection system* (ICLP 2001): freeing
+     and reusing arrays at their last use, after step 5.
+   - *Runtime support for region-based memory management in Mercury* (Phan,
+     Somogyi and Janssens, ISMM 2008), Phan's thesis (KU Leuven 2009) and
+     *Path-sensitive region analysis* (Phan and Janssens, PPDP 2009): a
+     region's arena is a region in their sense; their analysis is the way
+     to finer ones, if regions' code ever needs them. The ISMM paper
+     measures regions about 25% faster than Boehm's collector on their
+     benchmarks.
+   - *Run time type information in Mercury* (Dowd et al., PPDP 1999): the
+     generic operations that step 4e's walk is, which flat messages leave
+     to the host.
+   - *Compiling Mercury to high-level C code* (Henderson and Somogyi, CC
+     2002), for code that the target's compiler optimizes well, and
+     *Accurate garbage collection in an uncooperative environment*
+     (Henderson, ISMM 2002), the shadow stack, for the host's collector in
+     chunk 3, not the device.
+   - Bone's thesis, *Automatic parallelisation for Mercury* (Melbourne
+     2012): work stealing and parallelising only where profiling says it
+     pays, for Distributing work.
 
 **Rejected alternatives.**
 - **The whole program on the GPU,** run by `llvm-gpu-loader` as libc's tests
