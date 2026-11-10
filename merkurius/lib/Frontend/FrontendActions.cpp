@@ -275,7 +275,7 @@ bool DebugDumpImportsAction::executeAction() {
       parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci))};
   semantics::ModuleLoader loader{ci.getAllSources(),
       ci.getFrontendOpts().libraryDirectory, messages,
-      !ci.getFrontendOpts().mmcUniqueness};
+      !ci.getFrontendOpts().mmcUniqueness, ReaderOptionsOf(ci)};
   llvm::StringRef directory{
       llvm::sys::path::parent_path(getSourceFile().path())};
   semantics::ModuleLoader::Imports imports{
@@ -329,7 +329,7 @@ void Resolve(CompilerInstance &ci, parser::SourceFile &file,
   r.form = &semantics::Desugar(*r.tree, r.tokens, r.semanticArena, r.messages);
   r.loader = std::make_unique<semantics::ModuleLoader>(ci.getAllSources(),
       ci.getFrontendOpts().libraryDirectory, r.messages,
-      !ci.getFrontendOpts().mmcUniqueness);
+      !ci.getFrontendOpts().mmcUniqueness, ReaderOptionsOf(ci));
   llvm::StringRef directory{llvm::sys::path::parent_path(file.path())};
   r.loader->LoadImports(
       *r.tree, r.tokens, directory.empty() ? "." : directory);

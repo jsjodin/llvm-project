@@ -50,9 +50,10 @@ std::string Directory(const parser::SourceFile &file) {
 } // namespace
 
 ModuleLoader::ModuleLoader(parser::AllSources &sources,
-    std::string libraryDirectory, parser::Messages &messages, bool sound)
+    std::string libraryDirectory, parser::Messages &messages, bool sound,
+    parser::ReaderOptions readerOptions)
     : sources_{sources}, libraryDirectory_{std::move(libraryDirectory)},
-      messages_{messages}, sound_{sound} {}
+      messages_{messages}, sound_{sound}, readerOptions_{readerOptions} {}
 
 ModuleLoader::~ModuleLoader() = default;
 
@@ -102,7 +103,8 @@ const ModuleInterface *ModuleLoader::Load(
   order_.push_back(&interface);
   file.tokens = parser::Lex(*source, parser::LexerOptions{}, messages_);
   const parser::ParseTree &tree{
-      parser::ConvertFile(file.tokens, file.arena, messages_)};
+      parser::ConvertFile(file.tokens, file.arena, messages_,
+          parser::TermReader::defaultMaxDepth, readerOptions_)};
   // The file must be the module's, and its interface section is the items
   // from :- interface to :- implementation.
   bool inInterface{false}, named{false};
