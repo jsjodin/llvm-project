@@ -171,3 +171,26 @@ module attributes {omp.is_target_device = true} {
     return %0 : index
   }
 }
+
+// -----
+
+// A use of a host function that the walk visits next, such as an operation
+// beside the function in the module's body, is removed after the walk.
+
+// CHECK-LABEL: llvm.func @host_ctor
+// CHECK: omp.target
+// CHECK-NOT: llvm.mlir.global_ctors
+// CHECK-NOT: llvm.func @host_helper
+module attributes {omp.is_target_device = true} {
+  llvm.func @host_ctor() -> () {
+    omp.target kernel_type(generic) {
+      omp.terminator
+    }
+    llvm.return
+  }
+  llvm.mlir.global_ctors ctors = [@host_ctor], priorities = [0 : i32], data = [#llvm.zero]
+  llvm.func @host_helper() -> () {
+    llvm.call @host_helper() : () -> ()
+    llvm.return
+  }
+}

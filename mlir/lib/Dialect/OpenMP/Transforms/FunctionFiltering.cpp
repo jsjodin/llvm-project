@@ -41,6 +41,10 @@ class FunctionFilteringPass
       return;
 
     OpBuilder opBuilder(&getContext());
+    // The uses and functions to remove are erased after the walk: a use may
+    // be the operation that the walk visits next, such as one beside the
+    // function in the module's body.
+    SetVector<Operation *> toErase;
     op->walk<WalkOrder::PreOrder>([&](FunctionOpInterface funcOp) {
       // Do not filter functions with target regions inside, because they have
       // to be available for both host and device so that regular and reverse
@@ -95,11 +99,11 @@ class FunctionFilteringPass
           callOp->replaceAllUsesWith(poisonResults);
         }
 
-        callOp->erase();
+        toErase.insert(callOp);
       }
 
       if (!hasTargetRegion) {
-        funcOp.erase();
+        toErase.insert(funcOp);
         return WalkResult::skip();
       }
 
@@ -113,6 +117,17 @@ class FunctionFilteringPass
                                          /*automap=*/false, /*implicit=*/true);
       return WalkResult::advance();
     });
+    // A use inside a function being removed goes with the function.
+    SmallVector<Operation *> roots;
+    for (Operation *erased : toErase) {
+      Operation *parent = erased->getParentOp();
+      while (parent && !toErase.contains(parent))
+        parent = parent->getParentOp();
+      if (!parent)
+        roots.push_back(erased);
+    }
+    for (Operation *root : roots)
+      root->erase();
   }
 };
 
