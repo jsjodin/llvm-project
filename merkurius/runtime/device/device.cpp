@@ -263,6 +263,10 @@ struct TeamTable {
   // one of them is reporting that the others did not.
   int64_t started;
   uint32_t reporting;
+  // The barrier's (merk_device_team_barrier): the teams that have arrived
+  // in this round, and the rounds that have ended.
+  int64_t arrived;
+  int64_t rounds;
 };
 
 // The table of the target teams region that this team runs, or none in any
@@ -301,6 +305,8 @@ extern "C" void merk_device_teams_enter(
       made->teams = teams;
       made->started = 0;
       made->reporting = 0;
+      made->arrived = 0;
+      made->rounds = 0;
       made->rings = reinterpret_cast<TeamRing **>(bytes + sizeof(TeamTable));
       for (uint64_t i{0}; i < count; ++i) {
         made->rings[i] = nullptr;
@@ -352,6 +358,31 @@ extern "C" void merk_device_teams_wait_all(void) {
     }
     __builtin_amdgcn_s_sleep(127);
     started = __atomic_load_n(&table->started, __ATOMIC_ACQUIRE);
+  }
+}
+
+// process.team_barrier on a device: the last team to arrive ends the round,
+// and the others wait until it has, which costs about one atomic round trip
+// a team. Only a region whose teams all run at once can wait like this, so
+// one that calls it waits for its teams to start (merk_device_teams_wait_all,
+// MarkRegionsForTeamMailboxes), and reports it if they do not. Outside a
+// teams region there is one team.
+extern "C" void merk_device_team_barrier(void) {
+  TeamTable *table{currentTeams};
+  if (!table || table->teams <= 1) {
+    return;
+  }
+  // Read before arriving: the round cannot end before this team arrives.
+  int64_t round{__atomic_load_n(&table->rounds, __ATOMIC_ACQUIRE)};
+  if (__atomic_add_fetch(&table->arrived, 1, __ATOMIC_ACQ_REL) ==
+      table->teams) {
+    // No team arrives in the next round until it sees this one end.
+    __atomic_store_n(&table->arrived, 0, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&table->rounds, 1, __ATOMIC_RELEASE);
+    return;
+  }
+  while (__atomic_load_n(&table->rounds, __ATOMIC_ACQUIRE) == round) {
+    __builtin_amdgcn_s_sleep(1);
   }
 }
 

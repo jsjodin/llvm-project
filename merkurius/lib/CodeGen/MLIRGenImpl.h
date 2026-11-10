@@ -651,11 +651,11 @@ private:
   // Processes as teams, step 2).
   bool TeamMailboxOnDevice(const Body &, llvm::ArrayRef<BodyVar> arguments,
       const ProcedureBody &, bool inRegion);
-  // In the device's compile of a module with team mailboxes: every target
-  // region that is not a teams region's says so at its start, since the
-  // device keeps the current region's teams in memory that starts undefined;
-  // and the teams of each teams region whose code uses team mailboxes wait
-  // until all have started. Marking only such modules relies on a region
+  // In the device's compile of a module with team mailboxes or
+  // process.team_barrier: every target region that is not a teams region's
+  // says so at its start, since the device keeps the current region's teams
+  // in memory that starts undefined; and the teams of each teams region
+  // whose code uses either wait until all have started. Marking only such modules relies on a region
   // reaching no code of another module on the device but the copies that
   // CopyDeviceLibrary makes, which this follows as the module's own.
   void MarkRegionsForTeamMailboxes();

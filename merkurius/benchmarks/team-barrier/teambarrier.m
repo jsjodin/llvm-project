@@ -1,18 +1,19 @@
 % A barrier between the teams of a target teams region, from team mailboxes
-% (README.md; docs/INPROGRESS.md, Processes as teams, step 5). Every team
-% arrives, and is released once all have. Two shapes:
+% (README.md; docs/INPROGRESS.md, Processes as teams, step 5), or the
+% library's. Every team arrives, and is released once all have. Three shapes:
 %
 %   central   each team sends its arrival to team 0, which then releases each
 %   tree      a binary tree: a team waits for its children's arrivals, sends
 %             its own to its parent, waits for the release, and passes it on
 %             to its children
+%   library   process.team_barrier, a counter in the runtime
 %
 % An arrival in round R is the message 2R, a release 2R + 1, and each team
 % counts the messages it did not expect. The rounds are timed on the host with
 % clock_gettime, less an empty region's time, which holds the launch and the
 % teams' wait for each other to start.
 %
-% Usage: teambarrier central|tree TEAMS ROUNDS
+% Usage: teambarrier central|tree|library TEAMS ROUNDS
 
 :- module teambarrier.
 :- interface.
@@ -48,7 +49,8 @@ main(!IO) :-
         report(Shape, Teams, Rounds, Reported, Wrong,
             (T1 - T0) - (Empty1 - Empty0), !IO)
     else
-        io.write_string("usage: teambarrier central|tree TEAMS ROUNDS\n", !IO),
+        io.write_string(
+            "usage: teambarrier central|tree|library TEAMS ROUNDS\n", !IO),
         io.set_exit_status(2, !IO)
     ).
 
@@ -56,6 +58,7 @@ main(!IO) :-
 
 shape_number("central", 0).
 shape_number("tree", 1).
+shape_number("library", 2).
 
     % Rounds barriers in each of Teams teams, each of which then sends the
     % number of messages it did not expect to Reports.
@@ -69,6 +72,28 @@ run(Kind, Teams, Rounds, Reports, !IO) :-
 :- pred barriers(int::in, int::in, mailbox(int)::in, io::di, io::uo) is det.
 
 barriers(Kind, Rounds, Reports, !IO) :-
+    ( if Kind = 2 then
+        library_rounds(Rounds, !IO),
+        send(Reports, 0, !IO)
+    else
+        message_barriers(Kind, Rounds, Reports, !IO)
+    ).
+
+:- pred library_rounds(int::in, io::di, io::uo) is det.
+
+library_rounds(Rounds, !IO) :-
+    ( if Rounds > 0 then
+        team_barrier(!IO),
+        library_rounds(Rounds - 1, !IO)
+    else
+        true
+    ).
+
+    % A barrier from team mailboxes, central or tree.
+:- pred message_barriers(int::in, int::in, mailbox(int)::in, io::di, io::uo)
+    is det.
+
+message_barriers(Kind, Rounds, Reports, !IO) :-
     team_number(Me, !IO),
     number_of_teams(All, !IO),
     team_mailbox(Me, Mine, !IO),
