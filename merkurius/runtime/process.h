@@ -156,7 +156,7 @@ bool RegionsRunning();
 // memory is still allocated (offload.cpp).
 void CheckFreedAtEnd();
 // mailbox.cpp: how many queued messages neither a process read nor a
-// mailbox freed.
+// mailbox freed, and are in no open mailbox.
 std::int64_t HeldMessages();
 
 // After a failure, which has been reported, with its text as the reason that

@@ -2366,6 +2366,15 @@ the process asks the host to launch. The first version has neither.
        many arena chunks and rings are left at the end; without the fix,
        the two hundred GPU processes of `process-gpu-messages-gpu.test`
        left two hundred of each.
+     - Fixed 2026-11-10: `merk_mailbox_resolve` dropped the fragment of a
+       monitor's message if the mailbox had closed meanwhile. Found with
+       it: the message's new chunks were given to the reader without being
+       counted as held, so `MERK_CHECK_MESSAGES` went below zero for each
+       message a monitor made, five in `process-monitor.m`; and the check
+       counted messages still queued in open mailboxes, which the processes
+       that the program does not wait for may not have read yet. It now
+       leaves those out, looking again if a message changes hands while it
+       looks.
 
    **Decisions,** made by the user on 2026-11-10, each as recommended:
    - **D1. Which kinds get a kernel: those whose declaration says so,**
