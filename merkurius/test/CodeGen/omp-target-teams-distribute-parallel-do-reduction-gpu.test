@@ -13,22 +13,26 @@ RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=17 %t.O2 2> %t.O2.info \
 RUN:   | FileCheck %S/omp-target-teams-distribute-parallel-do-reduction.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: FileCheck %s < %t.O2.info
-CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-teams-distribute-parallel-do-reduction.m:{{[0-9]+}}:5 with 3 arguments:
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-teams-distribute-parallel-do-reduction.m:{{[0-9]+}}:5 with 4 arguments:
+CHECK-NEXT: info: to(region_slot)[8]
 CHECK-NEXT: info: to(N)[8]
 CHECK-NEXT: info: to(Step)[8]
 CHECK-NEXT: info: tofrom(Sum)[8]
 CHECK: info: Launching kernel {{.*}}pi_2_0{{.*}} in SPMD mode
 In normalize, the first loop reads !A and gives Sum, which the second
 reads as it updates !A.
-CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-teams-distribute-parallel-do-reduction.m:{{[0-9]+}}:5 with 3 arguments:
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-teams-distribute-parallel-do-reduction.m:{{[0-9]+}}:5 with 4 arguments:
+CHECK-NEXT: info: to(region_slot)[8]
 CHECK-NEXT: info: to(N)[8]
 CHECK-NEXT: info: to(STATE_VARIABLE_A_0)[8200]
 CHECK-NEXT: info: tofrom(Sum)[8]
-CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-teams-distribute-parallel-do-reduction.m:{{[0-9]+}}:5 with 3 arguments:
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-teams-distribute-parallel-do-reduction.m:{{[0-9]+}}:5 with 4 arguments:
+CHECK-NEXT: info: to(region_slot)[8]
 CHECK-NEXT: info: to(N)[8]
 CHECK-NEXT: info: tofrom(STATE_VARIABLE_A_0)[8200]
 CHECK-NEXT: info: to(Sum)[8]
-CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-teams-distribute-parallel-do-reduction.m:{{[0-9]+}}:5 with 3 arguments:
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-teams-distribute-parallel-do-reduction.m:{{[0-9]+}}:5 with 4 arguments:
+CHECK-NEXT: info: to(region_slot)[8]
 CHECK-NEXT: info: to(N)[8]
 CHECK-NEXT: info: tofrom(Lo)[8]
 CHECK-NEXT: info: tofrom(Hi)[8]

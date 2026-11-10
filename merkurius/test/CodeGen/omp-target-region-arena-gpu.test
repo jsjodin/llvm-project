@@ -1,0 +1,20 @@
+Each target region's cells on the device are bumped from chunks of its own,
+in the slot that the host gives it, which the host frees as the region ends
+(docs/INPROGRESS.md, The device's side of the first slice, step 6). Here a
+GPU process waits while 40 regions run, each making about 3 MB of cells,
+some in the teams of a loop, so no moment comes when nothing runs on the
+device. With the arenas limited to 32 MiB, the regions run only if each
+region's chunks go when it ends; with 2 MiB, less than one region needs,
+the program stops.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/Inputs/region-arena-beside-process.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_DEVICE_ARENA_BYTES=33554432 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 120 %t 2>&1 | FileCheck %s --match-full-lines --strict-whitespace
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/Inputs/region-arena-beside-process.m -o %t.O2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_DEVICE_ARENA_BYTES=33554432 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 120 %t.O2 2>&1 | FileCheck %s --match-full-lines --strict-whitespace
+CHECK:200006200000
+CHECK-NEXT:7
+CHECK-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+
+RUN: not %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_DEVICE_ARENA_BYTES=2097152 timeout -k 1 120 %t.O2 2>&1 | FileCheck %s --check-prefix=FULL
+FULL: Mercury runtime: the devices' arenas are full: see MERK_DEVICE_ARENA_BYTES

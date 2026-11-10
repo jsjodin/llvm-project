@@ -58,9 +58,11 @@ main(!IO) :-
 % MERK-NEXT: omp.map.info var_ptr(%[[PP]] : !llvm.ptr, i64) map_clauses(to) capture(ByRef) bounds(%[[PB]]) name("P")
 % MERK: %[[QQ:.*]] = builtin.unrealized_conversion_cast %[[Q]] : !merk.term<"omp_target_cells.pair"> to !llvm.ptr
 % MERK-NEXT: omp.map.info var_ptr(%[[QQ]] : !llvm.ptr, i64) map_clauses(to) capture(ByRef) bounds(%{{.*}}) name("Q")
-% MERK: omp.target kernel_type(generic) map_entries(%{{[0-9]+}} -> %[[ARGP:[^,]*]], %{{[0-9]+}} -> %[[ARGQ:[^,]*]],
+% MERK: omp.target kernel_type(generic) map_entries(%{{[0-9]+}} -> %{{[^,]*}}, %{{[0-9]+}} -> %[[ARGP:[^,]*]], %{{[0-9]+}} -> %[[ARGQ:[^,]*]],
+% MERK-NEXT: llvm.load %{{.*}} : !llvm.ptr -> i64
 % MERK-NEXT: %[[TP:.*]] = builtin.unrealized_conversion_cast %[[ARGP]] : !llvm.ptr to !merk.term<"omp_target_cells.point">
 % MERK-NEXT: %[[TQ:.*]] = builtin.unrealized_conversion_cast %[[ARGQ]] : !llvm.ptr to !merk.term<"omp_target_cells.pair">
+% MERK-NEXT: merk.foreign_call @merk_device_region_enter(%{{.*}}) : (i64) -> ()
 % MERK-NEXT: merk.deconstruct #merk.functor<"point", 3> %[[TP]]
 % MERK-NEXT: merk.deconstruct #merk.functor<"pair", 2> %[[TQ]]
 

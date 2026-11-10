@@ -43,7 +43,7 @@
 % MERK: omp.map.info var_ptr(%{{.*}} : !llvm.ptr, i64) map_clauses(tofrom) capture(ByRef) bounds(%{{.*}}) name("F0")
 % MERK: omp.map.info var_ptr(%{{.*}} : !llvm.ptr, i64) map_clauses(tofrom) capture(ByRef) bounds(%{{.*}}) name("F1")
 % MERK-NOT: name("F")
-% MERK: omp.target kernel_type(generic) map_entries(%{{.*}} -> %arg0 : !llvm.ptr)
+% MERK: omp.target kernel_type(generic) map_entries(%{{.*}} -> %arg0, %{{.*}} -> %arg1 : !llvm.ptr, !llvm.ptr)
 % MERK: merk.array_set
 
 % MLIR-LABEL: llvm.func tailcc @omp_target_arrays.main_2_0()

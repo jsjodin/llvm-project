@@ -1895,8 +1895,8 @@ Open:
 - **Lifetime:** the memory under the slices must live until they are joined. On
   the host, a large array has a block that a collection does not move
   (`runtime/heap.cpp`), so a pointer into it stays valid; the block must still not
-  be reclaimed while a slice is out. On a device, the region's arena is freed when
-  no region runs, so slices that outlive a region need memory with a lifetime of
+  be reclaimed while a slice is out. On a device, a region's cells are freed when
+  it ends, so slices that outlive a region need memory with a lifetime of
   its own: the question of an owner for the array, above.
 - **Boundaries** on multiples of a cache line (128 bytes), so that two teams do not
   write to one line.
@@ -2666,10 +2666,15 @@ the process asks the host to launch. The first version has neither.
      written by hand is measured, not guessed: that is the bar.
 
    **After step 5,** each a step of its own:
-   - **An arena for each region launch,** freed when the region ends, not
-     when no region runs, which overlapping `nowait` regions never reach.
-     A bug, the same that GPU processes had; it comes first, as its own
-     commit.
+   - **Rings that regions attach, freed with their mailboxes.** A region's
+     cells go when it ends (done 2026-11-10, design document, "The arena"),
+     but the rings that regions receive from, the entries of the image's
+     table of them, and the copies a device may still be reading go only
+     when no region or GPU process runs. Beside a GPU process that lives
+     long, regions that receive from many mailboxes, one after another,
+     grow them: a bug, to fix next as its own commit, by freeing a ring and
+     its entries when its mailbox closes and no region that attached it
+     still runs.
    - **Arrays freed at their last use** in GPU processes, where uniqueness
      shows it (compile-time garbage collection), so that a GPU process that
      lives long does not grow.

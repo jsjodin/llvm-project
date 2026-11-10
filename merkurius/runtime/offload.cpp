@@ -173,13 +173,17 @@ bool TakeOldest(const std::uint64_t *handle, std::uint64_t &message) {
 // The devices' arenas (docs/INPROGRESS.md, The device's side of the first
 // slice, step 6): the chunks the host allocated for each arena of a device
 // for its cells and arrays, how many bytes they have, and where the device
-// keeps its current chunk. A region's image has an arena, whose chunks the
-// host frees when no region is running, and whose current chunk it then
-// clears. Regions on any device are counted together. Each GPU process has
-// an arena of its own, which goes when the process ends.
+// keeps its current chunk. A region's image has an arena for its table of
+// rings, whose chunks the host frees when no region is running, and whose
+// words it then clears. Regions on any device are counted together. Each
+// region that runs has a slot (device-ring.h), and the cells it makes on a
+// device are bumped from chunks of that slot, which go when it ends. Each
+// GPU process has an arena of its own, which goes when the process ends.
 struct DeviceArena {
   int device;
   std::uint64_t address;
+  // The region's slot, or kNoRegionSlot.
+  std::uint64_t region;
   void **chunks;
   std::uint64_t count, capacity, bytes;
 };
@@ -187,6 +191,12 @@ pthread_mutex_t arenaLock = PTHREAD_MUTEX_INITIALIZER;
 DeviceArena *arenas{nullptr};
 std::uint64_t arenaCount{0}, arenaCapacity{0};
 std::uint64_t runningRegions{0};
+
+// The regions' slots that are taken, and a condition that a region waiting
+// for one waits on, with arenaLock.
+bool regionSlotTaken[kRegionSlots];
+std::uint64_t regionSlotsTaken{0};
+pthread_cond_t regionSlotFreed = PTHREAD_COND_INITIALIZER;
 
 // The mailboxes' rings, to free when no region is running. Its lock is taken
 // with the mailboxes' lock held, and so comes after it, and after arenaLock.
@@ -218,19 +228,21 @@ void Reserve(T *&items, std::uint64_t count, std::uint64_t &capacity) {
 }
 
 // The device's arena at the address, made when it first asks for a chunk.
-DeviceArena &ArenaOf(int device, std::uint64_t address) {
+DeviceArena &ArenaOf(int device, std::uint64_t address, std::uint64_t region) {
   for (std::uint64_t i{0}; i < arenaCount; ++i) {
     if (arenas[i].device == device && arenas[i].address == address) {
       return arenas[i];
     }
   }
   Reserve(arenas, arenaCount, arenaCapacity);
-  arenas[arenaCount] = {device, address, nullptr, 0, 0, 0};
+  arenas[arenaCount] = {device, address, region, nullptr, 0, 0, 0};
   return arenas[arenaCount++];
 }
 
-// A chunk of `bytes` on the device, for its arena at `address`.
-void *NewChunk(int device, std::uint64_t address, std::uint64_t bytes) {
+// A chunk of `bytes` on the device, for its arena at `address`, which is the
+// region's of that slot, or none.
+void *NewChunk(int device, std::uint64_t address, std::uint64_t bytes,
+    std::uint64_t region) {
   pthread_mutex_lock(&arenaLock);
   arenaBytes += bytes;
   bool tooMany{arenaBytes > arenaLimit};
@@ -243,7 +255,7 @@ void *NewChunk(int device, std::uint64_t address, std::uint64_t bytes) {
     Fail("out of memory on a device, for its arena");
   }
   pthread_mutex_lock(&arenaLock);
-  DeviceArena &arena{ArenaOf(device, address)};
+  DeviceArena &arena{ArenaOf(device, address, region)};
   Reserve(arena.chunks, arena.count, arena.capacity);
   arena.chunks[arena.count++] = chunk;
   arena.bytes += bytes;
@@ -260,21 +272,41 @@ void FreeChunks(DeviceArena &arena) {
   arena.bytes = 0;
 }
 
+// Frees the arena's chunks and clears its words on the device, `words` of
+// them, with arenaLock held.
+void ClearArena(DeviceArena &arena, std::uint64_t words) {
+  FreeChunks(arena);
+  const std::uint64_t none[kArenaClearWords]{};
+  if (!CopyToDevice(arena.device, reinterpret_cast<void *>(arena.address), none,
+          words * sizeof(std::uint64_t))) {
+    Fail("could not clear a device's arena");
+  }
+}
+
 // With arenaLock held and no region or GPU process running, so that only
-// regions' images have arenas: every chunk freed, and each device's current
-// chunk cleared.
+// regions' images have arenas: every chunk freed, and each device's arena
+// cleared.
 void FreeArenas() {
   for (std::uint64_t i{0}; i < arenaCount; ++i) {
+    if (arenas[i].count != 0) {
+      ClearArena(arenas[i], kArenaClearWords);
+    }
+  }
+}
+
+// With arenaLock held, as the region of the slot ends: the chunks of its
+// cells on each device go, and the slot is cleared for the next region.
+void FreeRegionArenas(std::uint64_t region) {
+  static_assert(kRegionSlotWords <= kArenaClearWords);
+  for (std::uint64_t i{0}; i < arenaCount;) {
     DeviceArena &arena{arenas[i]};
-    if (arena.count == 0) {
+    if (arena.region != region) {
+      ++i;
       continue;
     }
-    FreeChunks(arena);
-    const std::uint64_t none[kArenaClearWords]{};
-    if (!CopyToDevice(arena.device, reinterpret_cast<void *>(arena.address),
-            none, sizeof none)) {
-      Fail("could not clear a device's arena");
-    }
+    ClearArena(arena, kRegionSlotWords);
+    std::free(arena.chunks);
+    arena = arenas[--arenaCount];
   }
 }
 
@@ -491,8 +523,9 @@ unsigned HandleOpcode(void *raw, unsigned) {
   case rpcChunk:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
       std::uint64_t bytes{buffer->data[2]};
-      buffer->data[0] = reinterpret_cast<std::uint64_t>(NewChunk(
-          static_cast<int>(buffer->data[0]), buffer->data[1], bytes));
+      buffer->data[0] = reinterpret_cast<std::uint64_t>(
+          NewChunk(static_cast<int>(buffer->data[0]), buffer->data[1], bytes,
+              buffer->data[3]));
       buffer->data[1] = bytes;
     });
     return rpc::RPC_SUCCESS;
@@ -711,9 +744,9 @@ void GpuProcessEnded() {
 // A GPU process's arena: the words on the device where it keeps its current
 // chunk and its tables, cleared, or null.
 void *NewProcessArena(int device) {
-  constexpr std::size_t bytes{sizeof(std::uint64_t) * (kArenaClearWords + 1)};
+  constexpr std::size_t bytes{sizeof(std::uint64_t) * kArenaClearWords};
   void *arena{DeviceAllocate(device, bytes)};
-  const std::uint64_t none[kArenaClearWords + 1]{};
+  const std::uint64_t none[kArenaClearWords]{};
   if (arena && !CopyToDevice(device, arena, none, bytes)) {
     DeviceFree(device, arena);
     arena = nullptr;
@@ -753,25 +786,47 @@ void FreeRing(int device, DeviceRing *ring) {
 }
 } // namespace merkurius::runtime
 
-extern "C" void merk_region_enter(void) {
+// Before a target region: counts it, and gives it a slot for the cells it
+// makes on a device, which it passes to the device (merk_device_region_enter)
+// and back to merk_region_exit.
+extern "C" std::int64_t merk_region_enter(void) {
   merkurius::runtime::Pin();
   pthread_mutex_lock(&arenaLock);
+  while (regionSlotsTaken == kRegionSlots) {
+    pthread_cond_wait(&regionSlotFreed, &arenaLock);
+  }
+  std::uint64_t slot{0};
+  while (regionSlotTaken[slot]) {
+    ++slot;
+  }
+  regionSlotTaken[slot] = true;
+  ++regionSlotsTaken;
   ++runningRegions;
   pthread_mutex_unlock(&arenaLock);
   // After the count, so that ExitProgram sees the region or the region sees
   // that the program is ending.
   StopIfProgramEnding();
+  return static_cast<std::int64_t>(slot);
 }
 
-extern "C" void merk_region_exit(void) {
+// After a target region, whose device has finished with what it made.
+extern "C" void merk_region_exit(std::int64_t slot) {
   StopIfProgramEnding();
   pthread_mutex_lock(&arenaLock);
+  FreeRegionArenas(static_cast<std::uint64_t>(slot));
+  regionSlotTaken[slot] = false;
+  --regionSlotsTaken;
+  pthread_cond_signal(&regionSlotFreed);
   if (--runningRegions == 0) {
     FreeWhenIdle();
   }
   pthread_mutex_unlock(&arenaLock);
   merkurius::runtime::Unpin();
 }
+
+// At the start of each team of a target region that runs on the host, whose
+// cells are the host's.
+extern "C" void merk_device_region_enter(std::int64_t) {}
 
 // A target teams region's num_teams, before it starts: OpenMP's is 32 bits,
 // and libomptarget takes one that is not positive for its default.

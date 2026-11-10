@@ -11,7 +11,8 @@ RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t.O2 2> %t.O2.info \
 RUN:   | FileCheck %S/omp-target-loop-variable-bound.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: FileCheck %s < %t.O2.info
-CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-loop-variable-bound.m:{{[0-9]+}}:5 with 3 arguments:
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-loop-variable-bound.m:{{[0-9]+}}:5 with 4 arguments:
+CHECK-NEXT: info: to(region_slot)[8]
 CHECK-DAG: info: to(Lo)[8]
 CHECK-DAG: info: to(Hi)[8]
 CHECK-DAG: info: tofrom(Sum)[8]

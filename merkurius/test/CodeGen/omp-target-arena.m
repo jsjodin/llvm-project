@@ -1,8 +1,8 @@
 % The device's cells come from its arena (docs/INPROGRESS.md, The device's
 % side of the first slice, step 6): bumped from chunks that the host
-% allocates on the device when the device asks, and frees once no region
-% is running. Before and after each region, the host calls the runtime,
-% which counts the running regions. Here three regions in turn each build
+% allocates on the device when the device asks. Before each region the host
+% gives it a slot, which the region passes to the device, whose cells are
+% bumped from the slot's chunks; after it, the host frees them. Here three regions in turn each build
 % a list longer than a chunk on one thread, and a loop's threads each
 % build short lists, all at once, through many chunks. On the host the
 % calls are made too, and nothing is allocated in an arena.
@@ -40,9 +40,10 @@ rounds(R, !IO) :-
         true
     ).
 % MERK-LABEL: merk.proc private @omp_target_arena.rounds_3_0(
-% MERK:         merk.foreign_call @merk_region_enter() : () -> ()
-% MERK-NEXT:    omp.target
-% MERK:         merk.foreign_call @merk_region_exit() : () -> ()
+% MERK:         %[[SLOT:[0-9]+]] = merk.foreign_call @merk_region_enter() : () -> i64
+% MERK:         omp.target
+% MERK:           merk.foreign_call @merk_device_region_enter(
+% MERK:         merk.foreign_call @merk_region_exit(%[[SLOT]]) : (i64) -> ()
 
 :- pred short_lists(int::in, int::out) is det.
 short_lists(N, Sum) :-

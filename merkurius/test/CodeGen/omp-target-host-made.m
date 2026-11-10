@@ -33,8 +33,9 @@ main(!IO) :-
     io.nl(!IO).
 % The array is the host function's argument that omp-host-op-filter
 % made of the ub.poison.
-% DEVICE-LABEL: llvm.func @omp_target_host_made.main_2_0(%arg0: !llvm.ptr,
-% DEVICE: omp.map.info var_ptr(%arg0 : !llvm.ptr, i64) map_clauses(to) capture(ByRef) name("A")
+% DEVICE-LABEL: llvm.func @omp_target_host_made.main_2_0(
+% DEVICE-SAME: %[[A:arg[0-9]+]]: !llvm.ptr,
+% DEVICE: omp.map.info var_ptr(%[[A]] : !llvm.ptr, i64) map_clauses(to) capture(ByRef) name("A")
 % DEVICE-NOT: llvm.func {{.*}}@omp_target_host_made.make_f1_0
 
 % LLVM-LABEL: define weak_odr protected amdgpu_kernel void @__omp_offloading_{{.*}}_omp_target_host_made.main_2_0_l{{[0-9]+}}(
