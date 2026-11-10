@@ -1003,7 +1003,9 @@ bool CodeGenAction::Lower(
     }
     return true;
   }
-  if (mlir::failed(codegen::LowerToLLVMDialect(module, target))) {
+  std::string clang{options::findClang(llvm::sys::fs::getMainExecutable(
+      "merkc", reinterpret_cast<void *>(&options::findClang)))};
+  if (mlir::failed(codegen::LowerToLLVMDialect(module, target, clang))) {
     return false;
   }
   if (kind_ == ActionKind::EmitMLIR) {
@@ -1017,10 +1019,7 @@ bool CodeGenAction::Lower(
     options::reportError("cannot translate the module to LLVM IR");
     return false;
   }
-  if (!codegen::LinkForeignCode(*llvmModule, module, target,
-          options::findClang(llvm::sys::fs::getMainExecutable(
-              "merkc", reinterpret_cast<void *>(&options::findClang))),
-          error)) {
+  if (!codegen::LinkForeignCode(*llvmModule, module, target, clang, error)) {
     options::reportError(error);
     return false;
   }

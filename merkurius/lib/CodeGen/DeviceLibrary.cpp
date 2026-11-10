@@ -18,6 +18,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "merkurius/CodeGen/DeviceLibrary.h"
+#include "merkurius/CodeGen/Lowering.h"
+#include "merkurius/CodeGen/MLIRGen.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/DLTI/DLTI.h"
@@ -26,6 +28,17 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Parser/Parser.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/TargetParser/AMDGPUTargetParser.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IRReader/IRReader.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/SourceMgr.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
@@ -33,6 +46,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include <memory>
+#include <optional>
 
 namespace merkurius::codegen {
 namespace {
@@ -85,6 +99,8 @@ private:
   llvm::SmallVector<Pending> copied_;
   // The constructors of the copies' types, with where to find them.
   llvm::SmallVector<std::pair<std::string, mlir::ModuleOp>> terms_;
+  // The foreign code of the library modules whose foreign_procs were copied.
+  llvm::MapVector<mlir::StringAttr, mlir::Attribute> foreignCode_;
 };
 
 // Whether `symbol` is a procedure of the module's own, which the library
@@ -371,6 +387,27 @@ llvm::LogicalResult Copier::Copy() {
     CollectTerms(copy.op, copy.source);
   }
   CopyTypeDefs();
+  for (const Pending &copy : copied_) {
+    mlir::ModuleOp source{copy.source};
+    bool foreign{false};
+    copy.op->walk([&](merk::ForeignCallOp call) {
+      foreign = foreign || call.getCallee().starts_with("merk_foreign_");
+    });
+    mlir::Attribute code{source->getAttr(kForeignCodeAttrName)};
+    if (foreign && code) {
+      foreignCode_.insert({mlir::StringAttr::get(module_.getContext(),
+                               source.getName().value_or("")),
+          code});
+    }
+  }
+  if (!foreignCode_.empty()) {
+    llvm::SmallVector<mlir::NamedAttribute> entries;
+    for (auto [name, code] : foreignCode_) {
+      entries.emplace_back(name, code);
+    }
+    module_->setAttr(kDeviceForeignCodeAttrName,
+        mlir::DictionaryAttr::get(module_.getContext(), entries));
+  }
   return llvm::failure(failed_);
 }
 
@@ -386,6 +423,279 @@ llvm::LogicalResult CopyDeviceLibrary(
           mlir::DLTIDialect, mlir::LLVM::LLVMDialect,
           mlir::omp::OpenMPDialect>();
   return Copier{module, directory, array}.Copy();
+}
+
+std::string ForeignFunctionGuard(llvm::StringRef name) {
+  return ("#if !defined(MERK_DEVICE) || defined(MERK_WANT_" + name + ")").str();
+}
+
+namespace {
+
+// Compiles a device's foreign code: CompileDeviceForeignCode.
+class ForeignCompiler {
+public:
+  ForeignCompiler(mlir::ModuleOp module, const TargetInfo &target,
+      llvm::StringRef clang)
+      : module_{module}, target_{target}, clang_{clang} {}
+
+  llvm::LogicalResult Compile();
+
+private:
+  void CompileUnit(llvm::StringRef module, llvm::StringRef code);
+  std::vector<std::string> DeviceOptions() const;
+  void LoadAvailable();
+  bool Available(const llvm::GlobalValue &value);
+  void CheckNeeds(llvm::Function &function, merk::ForeignCallOp call);
+  mlir::InFlightDiagnostic Report(merk::ForeignCallOp call);
+
+  mlir::ModuleOp module_;
+  const TargetInfo &target_;
+  std::string clang_;
+  bool failed_{false};
+  // Each C function called, with a call of it.
+  llvm::MapVector<llvm::StringRef, merk::ForeignCallOp> calls_;
+  llvm::SmallVector<mlir::Attribute> bitcode_;
+  // What libc and libm for the GPU define, once read; whether they were
+  // found.
+  std::optional<llvm::StringSet<>> available_;
+  bool libraries_{false};
+};
+
+// An error at a call of a foreign_proc's C function, named for the procedure
+// that wraps it, with the chain of calls that reached that one.
+mlir::InFlightDiagnostic ForeignCompiler::Report(merk::ForeignCallOp call) {
+  auto proc{call->getParentOfType<merk::ProcOp>()};
+  mlir::InFlightDiagnostic diagnostic{mlir::emitError(call.getLoc())
+      << "cannot call " << (proc ? proc.getSymName() : call.getCallee())
+      << " on an OpenMP device yet: "};
+  return diagnostic;
+}
+
+// What libc and libm for the device's GPU define, from their bitcode in the
+// build or installation beside clang, as clang links them into an OpenMP
+// device's image. Without them, the device's link finds what is missing.
+void ForeignCompiler::LoadAvailable() {
+  available_.emplace();
+  llvm::SmallString<256> dir{
+      llvm::sys::path::parent_path(llvm::sys::path::parent_path(clang_))};
+  llvm::sys::path::append(dir, "lib", "amdgcn-amd-amdhsa");
+  if (!target_.triple().isAMDGPU()) {
+    return;
+  }
+  for (llvm::StringRef library : {"libc.bc", "libm.bc"}) {
+    llvm::SmallString<256> path{dir};
+    llvm::sys::path::append(path, library);
+    llvm::LLVMContext context;
+    llvm::SMDiagnostic diagnostic;
+    std::unique_ptr<llvm::Module> module{
+        llvm::getLazyIRFileModule(path, diagnostic, context)};
+    if (!module) {
+      continue;
+    }
+    libraries_ = true;
+    for (const llvm::GlobalValue &value : module->global_values()) {
+      if (!value.isDeclaration()) {
+        available_->insert(value.getName());
+      }
+    }
+  }
+}
+
+// Whether a device's image has what `value` declares.
+bool ForeignCompiler::Available(const llvm::GlobalValue &value) {
+  llvm::StringRef name{value.getName()};
+  if (auto *function{llvm::dyn_cast<llvm::Function>(&value)};
+      function && function->isIntrinsic()) {
+    return true;
+  }
+  if (name.starts_with("merk_device_") || name.starts_with("merk_array_") ||
+      name.starts_with("omp_") || name.starts_with("__kmpc_")) {
+    return true;
+  }
+  if (!available_) {
+    LoadAvailable();
+  }
+  // Without the libraries' bitcode, only the host's runtime is known not to
+  // be there.
+  return libraries_ ? available_->contains(name) : !name.starts_with("merk_");
+}
+
+// Reports what `function`, the C function `call` calls, needs that a device
+// does not have, following the functions of its module that it calls.
+void ForeignCompiler::CheckNeeds(
+    llvm::Function &function, merk::ForeignCallOp call) {
+  llvm::SmallPtrSet<const llvm::Value *, 32> seen;
+  llvm::SmallVector<const llvm::Value *> pending{&function};
+  llvm::SetVector<const llvm::GlobalValue *> missing;
+  while (!pending.empty()) {
+    const llvm::Value *value{pending.pop_back_val()};
+    if (!seen.insert(value).second) {
+      continue;
+    }
+    if (const auto *global{llvm::dyn_cast<llvm::GlobalValue>(value)}) {
+      if (global->isDeclaration()) {
+        if (!Available(*global)) {
+          missing.insert(global);
+        }
+        continue;
+      }
+      if (const auto *defined{llvm::dyn_cast<llvm::Function>(global)}) {
+        for (const llvm::BasicBlock &block : *defined) {
+          for (const llvm::Instruction &instruction : block) {
+            for (const llvm::Value *operand : instruction.operands()) {
+              pending.push_back(operand);
+            }
+          }
+        }
+      } else if (const auto *variable{
+                     llvm::dyn_cast<llvm::GlobalVariable>(global)};
+          variable && variable->hasInitializer()) {
+        pending.push_back(variable->getInitializer());
+      }
+    } else if (const auto *constant{llvm::dyn_cast<llvm::Constant>(value)}) {
+      for (const llvm::Value *operand : constant->operands()) {
+        pending.push_back(operand);
+      }
+    }
+  }
+  for (const llvm::GlobalValue *global : missing) {
+    mlir::InFlightDiagnostic diagnostic{Report(call)
+        << "its foreign code calls " << global->getName()
+        << ", which is not on the device"};
+    NoteReachedFrom(diagnostic, call->getParentOfType<merk::ProcOp>());
+    failed_ = true;
+  }
+}
+
+// The device's GPU, as its CPU names it or the triple's sub-architecture
+// does, as the driver gives it (amdgpu10.30-amd-amdhsa for gfx1030); empty if
+// neither does.
+static std::string DeviceGPU(const TargetInfo &target) {
+  if (!target.options().cpu.empty() ||
+      !target.triple().isAMDGCN() ||
+      target.triple().getSubArch() == llvm::Triple::NoSubArch) {
+    return target.options().cpu;
+  }
+  return llvm::AMDGPU::getArchNameAMDGCN(
+      llvm::AMDGPU::getGPUKindFromSubArch(target.triple().getSubArch()))
+      .str();
+}
+
+// clang's options for C that OpenMP compiles for the device, as clang
+// compiles a C file's declare target functions for an offloading target: with
+// the host's headers, for the device's GPU. The
+// device's image has libc and libm for the GPU, whose functions the code calls
+// as the host's headers declare them: not clang's wrappers for the GPU, whose
+// maths functions are ROCm's.
+std::vector<std::string> ForeignCompiler::DeviceOptions() const {
+  std::vector<std::string> options{"-fopenmp",
+      "--offload-arch=" + DeviceGPU(target_), "--offload-device-only", "-nogpulib", "-nogpuinc",
+      "-O" + std::to_string(target_.options().optimizationLevel),
+      "-mcode-object-version=" +
+          std::to_string(target_.options().codeObjectVersion / 100),
+      "-DMERK_DEVICE"};
+  return options;
+}
+
+// Compiles one module's foreign code for the C functions of it that are
+// called.
+void ForeignCompiler::CompileUnit(
+    llvm::StringRef module, llvm::StringRef code) {
+  llvm::SmallVector<std::pair<llvm::StringRef, merk::ForeignCallOp>> wanted;
+  for (auto [name, call] : calls_) {
+    if (code.contains((" " + name + "(").str())) {
+      wanted.push_back({name, call});
+    }
+  }
+  if (wanted.empty()) {
+    return;
+  }
+  std::vector<std::string> options{DeviceOptions()};
+  for (auto [name, call] : wanted) {
+    options.push_back(("-DMERK_WANT_" + name).str());
+  }
+  // The code is the host's C, which OpenMP compiles for the device as
+  // declare target.
+  std::string unit{("#pragma omp begin declare target\n" + code +
+      "\n#pragma omp end declare target\n")
+                       .str()};
+  std::string bitcode, error;
+  // clang has reported the code's errors.
+  if (!CompileForeignCode(clang_, unit, options, bitcode, error)) {
+    mlir::InFlightDiagnostic diagnostic{
+        mlir::emitError(wanted.front().second.getLoc())
+        << module << "'s foreign code does not compile for the device"
+        << (error.empty() ? "" : ": " + error)};
+    NoteReachedFrom(
+        diagnostic, wanted.front().second->getParentOfType<merk::ProcOp>());
+    failed_ = true;
+    return;
+  }
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic diagnostic;
+  std::unique_ptr<llvm::Module> compiled{llvm::parseIR(
+      llvm::MemoryBufferRef{bitcode, "foreign code"}, diagnostic, context)};
+  if (!compiled) {
+    mlir::emitError(wanted.front().second.getLoc())
+        << "cannot read the foreign code clang compiled: "
+        << diagnostic.getMessage();
+    failed_ = true;
+    return;
+  }
+  for (auto [name, call] : wanted) {
+    llvm::Function *function{compiled->getFunction(name)};
+    if (!function || function->isDeclaration()) {
+      mlir::emitError(call.getLoc())
+          << "the foreign code compiled for the device has no " << name;
+      failed_ = true;
+      continue;
+    }
+    CheckNeeds(*function, call);
+  }
+  bitcode_.push_back(mlir::StringAttr::get(module_.getContext(), bitcode));
+}
+
+llvm::LogicalResult ForeignCompiler::Compile() {
+  module_.walk([&](merk::ForeignCallOp call) {
+    if (call.getCallee().starts_with("merk_foreign_")) {
+      calls_.insert({call.getCallee(), call});
+    }
+  });
+  auto library{
+      module_->getAttrOfType<mlir::DictionaryAttr>(kDeviceForeignCodeAttrName)};
+  module_->removeAttr(kDeviceForeignCodeAttrName);
+  if (calls_.empty()) {
+    return llvm::success();
+  }
+  // clang would otherwise look for one on the machine.
+  if (DeviceGPU(target_).empty()) {
+    mlir::emitError(calls_.front().second.getLoc())
+        << "compiling foreign code for an OpenMP device needs its GPU, as "
+           "-target-cpu or the triple names it, such as "
+           "amdgpu10.30-amd-amdhsa for gfx1030";
+    return llvm::failure();
+  }
+  if (auto own{module_->getAttrOfType<mlir::StringAttr>(kForeignCodeAttrName)}) {
+    CompileUnit(module_.getName().value_or("the module"), own.getValue());
+  }
+  for (mlir::NamedAttribute entry : library ? library.getValue()
+                                            : llvm::ArrayRef<mlir::NamedAttribute>{}) {
+    CompileUnit(entry.getName(),
+        mlir::cast<mlir::StringAttr>(entry.getValue()).getValue());
+  }
+  if (failed_) {
+    return llvm::failure();
+  }
+  module_->setAttr(kDeviceForeignBitcodeAttrName,
+      mlir::ArrayAttr::get(module_.getContext(), bitcode_));
+  return llvm::success();
+}
+
+} // namespace
+
+llvm::LogicalResult CompileDeviceForeignCode(
+    mlir::ModuleOp module, const TargetInfo &target, llvm::StringRef clang) {
+  return ForeignCompiler{module, target, clang}.Compile();
 }
 
 void NoteReachedFrom(

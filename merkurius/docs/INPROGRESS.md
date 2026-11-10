@@ -1688,7 +1688,7 @@ still stalls the one before it when the ring between them fills.
 
 ## Library code on the device
 
-Proposed 2026-11-10; steps 1 and 2 are built.
+Proposed 2026-11-10; steps 1 to 3 are built.
 
 **Why.** A target region can call only its own module's procedures and the
 runtime's `merk_device_` functions (`Lowerer::LowerOpenMP`). So nothing of the
@@ -1769,10 +1769,8 @@ Each new predicate a region needs would add another special case or copy.
      come with them.
    - **Errors:** each copy records the procedure that reached it and where, so
      the device's errors give a note for each call back to the module's own
-     code, also for the check after lowering. Until step 3, a copy's
-     `foreign_proc` is an error named for the procedure, "its foreign code is
-     not compiled for the device". The frontend prints MLIR's notes now,
-     without MLIR's own note of the operation.
+     code, also for the check after lowering. The frontend prints MLIR's
+     notes now, without MLIR's own note of the operation.
    - **Not copied:** the module's own procedures, after an error that left one
      out, and `array`'s under `-fmmc-uniqueness`, whose procedures are numbered
      by `array.m` rather than the sound stub. A procedure of another module of
@@ -1787,6 +1785,45 @@ Each new predicate a region needs would add another special case or copy.
    functions, with the module's `foreign_decl`s, so that host-only C elsewhere in
    the module does not have to compile for the device. The user's own module
    goes the same way; today its foreign code is never compiled for the device.
+   Built 2026-11-10 (`CompileDeviceForeignCode` in
+   `lib/CodeGen/DeviceLibrary.cpp`):
+   - **Which C:** each `foreign_proc`'s C function in a module's foreign code
+     is guarded by `#if !defined(MERK_DEVICE) || defined(MERK_WANT_<name>)`.
+     The copier records the foreign code of each library module a copy with a
+     `foreign_proc` came from. Lowering compiles the module's own foreign code
+     and each such library module's, as separate translation units, defining
+     `MERK_WANT_` for the functions the device module calls. The bitcode is
+     linked after translation with `LinkOnlyNeeded`, so other functions of a
+     `foreign_code` block, which may be for the host alone, stay out.
+   - **How:** as clang compiles a C file's declare target functions:
+     `-fopenmp --offload-arch=<gpu> --offload-device-only -nogpulib -nogpuinc`,
+     with the code inside `#pragma omp begin declare target`. The GPU comes
+     from `-target-cpu` or the triple's sub-architecture. Without either, it is
+     an error, as clang would look for a GPU on the machine.
+   - **What the device has:** what a compiled function needs, following the
+     functions it calls, must be an intrinsic, the device runtime's
+     (`merk_device_`, `merk_array_`), OpenMP's, or defined in the GPU's
+     `libc.bc` or `libm.bc` beside clang, which the device's image links.
+     Anything else is an error at the `foreign_proc`, "its foreign code calls
+     X, which is not on the device", with the chain of calls. `math.sqrt`
+     (`merk_uncaught_exception`), `io.write` (`merk_write`) and
+     `process.send_message` (`merk_mailbox_send`) are such cases now; step 4
+     handles the special cases. C that does not compile for the device gets
+     clang's errors and "<module>'s foreign code does not compile for the
+     device".
+   - **Rejected:**
+     - Compiling the C as plain `--target=amdgcn-amd-amdhsa` C. The GPU libc
+       has no `unistd.h` and others, so the host's are found and do not parse.
+       Foreign code is the host's C, which OpenMP compiles for the device with
+       the host's headers.
+     - clang's GPU wrapper headers (dropped by `-nogpuinc`). Their maths
+       functions call ROCm's `__ocml_` functions, which no device image here
+       links. The GPU's libm defines the C names.
+   - **Tests:** `omp-target-foreign.m` and its `-gpu.test`. They cover the
+     module's own C (with `printf` to the host, `sin` and `hypot`),
+     `math.ceiling`, `floor` and `string.length`, and a host-only
+     `foreign_code` function calling `getpid`. The error tests are
+     `omp-target-foreign-errors.m` and `omp-target-foreign-c-error.m`.
 4. **Move the special cases into the library.**
    - **Into `foreign_proc`s:** `io.write_string`, `write_int` and `nl`, and
      `process.team_number` and `number_of_teams`. Under `__AMDGPU__` their C

@@ -7,7 +7,7 @@
 % call back to the region's code.
 % On the host it runs.
 %
-% RUN: not merkc -fc1 -fopenmp -fopenmp-is-target-device -triple amdgcn-amd-amdhsa -emit-mlir %s 2>&1 | FileCheck %s --implicit-check-not=error:
+% RUN: not merkc -fc1 -fopenmp -fopenmp-is-target-device -triple amdgpu10.30-amd-amdhsa -emit-mlir %s 2>&1 | FileCheck %s --implicit-check-not=error:
 % RUN: merkc -fopenmp %libomp-flags %s -o %t && %libomp-env %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % REQUIRES: amdgpu-registered-target, libomp
 
@@ -21,7 +21,7 @@
 :- pred forward(mailbox(T)::in, T::in, io::di, io::uo) is det.
 forward(Mailbox, Message, !IO) :-
     send(Mailbox, Message, !IO).
-% CHECK: process.m:{{[0-9]+}}:{{[0-9]+}}: error: cannot call process.send_message_8_0 on an OpenMP device yet: its foreign code is not compiled for the device
+% CHECK: process.m:{{[0-9]+}}:{{[0-9]+}}: error: cannot call process.send_message_8_0 on an OpenMP device yet: its foreign code calls merk_mailbox_send, which is not on the device
 % CHECK-NEXT: process.m:{{[0-9]+}}:{{[0-9]+}}: note: called by process.send_4_0 here: process.send_message_8_0
 % CHECK-NEXT: omp-target-send-polymorphic.m:[[@LINE-3]]:5: note: called by omp_target_send_polymorphic.forward_4_0 here: process.send_4_0
 

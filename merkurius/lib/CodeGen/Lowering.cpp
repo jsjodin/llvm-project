@@ -144,11 +144,12 @@ static bool VariableArity(llvm::StringRef constructor) {
 
 class Lowerer {
 public:
-  Lowerer(mlir::ModuleOp module, const TargetInfo &target)
+  Lowerer(mlir::ModuleOp module, const TargetInfo &target,
+      llvm::StringRef clang = {})
       : module_{module}, rewriter_{module.getContext()},
         cconv_{target.HasTailCallConvention() ? mlir::LLVM::CConv::Tail
                                               : mlir::LLVM::CConv::C},
-        registers_{target.Results()} {
+        registers_{target.Results()}, target_{target}, clang_{clang} {
     auto offload{mlir::dyn_cast<mlir::omp::OffloadModuleInterface>(
         module.getOperation())};
     device_ = mlir::omp::isOpenMPModule(module) && offload &&
@@ -431,6 +432,9 @@ private:
   mlir::LLVM::LLVMFuncOp throw_;
   // Whether this is an OpenMP device compile.
   bool device_{false};
+  const TargetInfo &target_;
+  // What compiles a device's foreign code.
+  std::string clang_;
   // The procedures' calling convention, the target's (design document,
   // "Calling convention").
   mlir::LLVM::CConv cconv_;
@@ -3443,7 +3447,7 @@ llvm::LogicalResult Lowerer::Lower() {
     module_.walk([&](merk::CompareTypeInfoOp op) {
       bad = RejectOnDevice(op, "compares types") || bad;
     });
-    if (bad) {
+    if (bad || mlir::failed(CompileDeviceForeignCode(module_, target_, clang_))) {
       return llvm::failure();
     }
   }
@@ -3729,14 +3733,18 @@ llvm::LogicalResult Lowerer::LowerOpenMP() {
   if (!device_) {
     return llvm::success();
   }
-  // Only this module's procedures are compiled for the device so far: not
-  // other modules', such as the library's, nor foreign code. The device's
+  // What a device's code calls must be in the module, as its own procedures,
+  // the library's copied in (CopyDeviceLibrary) and their foreign code
+  // (CompileDeviceForeignCode), or in the device's image: the device's
   // runtime library has the merk_device_ and merk_array_ functions
   // (runtime/device, runtime/array.cpp), which the driver links into the
   // device image, and the OpenMP device runtime has the team queries that
   // process.team_number and number_of_teams become.
   for (auto func : module_.getOps<mlir::LLVM::LLVMFuncOp>()) {
+    // A foreign_proc's C function was compiled for the device, or reported,
+    // by CompileDeviceForeignCode.
     if (!func.isExternal() || func.getSymName().starts_with("merk_device_") ||
+        func.getSymName().starts_with("merk_foreign_") ||
         func.getSymName().starts_with("merk_array_") ||
         func.getSymName() == "omp_get_team_num" ||
         func.getSymName() == "omp_get_num_teams") {
@@ -3746,16 +3754,9 @@ llvm::LogicalResult Lowerer::LowerOpenMP() {
         uses && !uses->empty()) {
       mlir::Operation *user{uses->begin()->getUser()};
       auto caller{user->getParentOfType<mlir::LLVM::LLVMFuncOp>()};
-      // The C function of a library procedure's foreign_proc, in the
-      // procedure that wraps it, is named for the procedure.
-      bool foreign{caller && func.getSymName().starts_with("merk_foreign_") &&
-          caller->hasAttr(kReachedFromAttrName)};
       mlir::InFlightDiagnostic diagnostic{mlir::emitError(user->getLoc())
-          << "cannot call "
-          << (foreign ? caller.getSymName() : func.getSymName())
-          << " on an OpenMP device yet: "
-          << (foreign ? "its foreign code" : "it")
-          << " is not compiled for the device"};
+          << "cannot call " << func.getSymName()
+          << " on an OpenMP device yet: it is not compiled for the device"};
       NoteReachedFrom(diagnostic, caller);
       return llvm::failure();
     }
@@ -3773,9 +3774,9 @@ llvm::LogicalResult Lowerer::LowerOpenMP() {
 } // namespace
 
 llvm::LogicalResult LowerToLLVMDialect(
-    mlir::ModuleOp module, const TargetInfo &target) {
+    mlir::ModuleOp module, const TargetInfo &target, llvm::StringRef clang) {
   OutlineNondeterminism(module);
-  return Lowerer{module, target}.Lower();
+  return Lowerer{module, target, clang}.Lower();
 }
 
 std::unique_ptr<llvm::Module> TranslateToLLVMIR(mlir::ModuleOp module,
@@ -3795,20 +3796,23 @@ std::unique_ptr<llvm::Module> TranslateToLLVMIR(mlir::ModuleOp module,
   return llvmModule;
 }
 
-bool LinkForeignCode(llvm::Module &module, mlir::ModuleOp mlirModule,
-    const TargetInfo &target, llvm::StringRef clang, std::string &error) {
-  auto code{mlirModule->getAttrOfType<mlir::StringAttr>(kForeignCodeAttrName)};
-  auto offload{mlir::dyn_cast<mlir::omp::OffloadModuleInterface>(
-      mlirModule.getOperation())};
-  // A device compile calls none of it (LowerOpenMP).
-  if (!code || (offload && offload.getIsTargetDevice())) {
-    return true;
+std::vector<std::string> ForeignCodeOptions(const TargetInfo &target) {
+  std::vector<std::string> options{"--target=" + target.triple().str(),
+      "-O" + std::to_string(target.options().optimizationLevel)};
+  if (!target.options().cpu.empty()) {
+    options.push_back("-mcpu=" + target.options().cpu);
   }
+  return options;
+}
+
+bool CompileForeignCode(llvm::StringRef clang, llvm::StringRef code,
+    llvm::ArrayRef<std::string> options, std::string &bitcode,
+    std::string &error) {
   if (clang.empty()) {
     error = "foreign code needs clang, which was not found";
     return false;
   }
-  llvm::SmallString<128> source, bitcode;
+  llvm::SmallString<128> source, output;
   int fd;
   if (std::error_code ec{
           llvm::sys::fs::createTemporaryFile("merk-foreign", "c", fd, source)}) {
@@ -3818,34 +3822,46 @@ bool LinkForeignCode(llvm::Module &module, mlir::ModuleOp mlirModule,
   llvm::FileRemover removeSource{source};
   {
     llvm::raw_fd_ostream os{fd, /*shouldClose=*/true};
-    os << code.getValue();
+    os << code;
   }
   if (std::error_code ec{
-          llvm::sys::fs::createTemporaryFile("merk-foreign", "bc", bitcode)}) {
+          llvm::sys::fs::createTemporaryFile("merk-foreign", "bc", output)}) {
     error = "cannot write the foreign code: " + ec.message();
     return false;
   }
-  llvm::FileRemover removeBitcode{bitcode};
-  std::string triple{"--target=" + target.triple().str()};
-  std::string optimization{
-      "-O" + std::to_string(target.options().optimizationLevel)};
-  llvm::SmallVector<llvm::StringRef> args{clang, triple, optimization, "-fPIC",
-      "-c", "-emit-llvm", "-x", "c", source, "-o", bitcode};
-  std::string cpu{"-mcpu=" + target.options().cpu};
-  if (!target.options().cpu.empty()) {
-    args.insert(args.begin() + 2, cpu);
+  llvm::FileRemover removeOutput{output};
+  llvm::SmallVector<llvm::StringRef> args{clang};
+  for (const std::string &option : options) {
+    args.push_back(option);
   }
+  args.append({"-c", "-emit-llvm", "-x", "c", source, "-o", output});
   std::string message;
   int status{llvm::sys::ExecuteAndWait(
       clang, args, std::nullopt, {}, 0, 0, &message)};
   if (status != 0) {
-    error = "clang could not compile the module's foreign code" +
-        (message.empty() ? std::string{} : ": " + message);
+    // clang has reported the code's errors, unless it could not run.
+    error = message;
     return false;
   }
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer{
+      llvm::MemoryBuffer::getFile(output)};
+  if (!buffer) {
+    error = "cannot read the foreign code clang compiled: " +
+        buffer.getError().message();
+    return false;
+  }
+  bitcode = (*buffer)->getBuffer().str();
+  return true;
+}
+
+// Links bitcode of foreign code into `module`, only what it needs if
+// `needed`; false after setting `error` if it cannot.
+static bool LinkBitcode(llvm::Module &module, llvm::StringRef bitcode,
+    bool needed, std::string &error) {
   llvm::SMDiagnostic diagnostic;
-  std::unique_ptr<llvm::Module> foreign{
-      llvm::parseIRFile(bitcode, diagnostic, module.getContext())};
+  std::unique_ptr<llvm::Module> foreign{llvm::parseIR(
+      llvm::MemoryBufferRef{bitcode, "foreign code"}, diagnostic,
+      module.getContext())};
   if (!foreign) {
     error = "cannot read the foreign code clang compiled: " +
         diagnostic.getMessage().str();
@@ -3853,9 +3869,47 @@ bool LinkForeignCode(llvm::Module &module, mlir::ModuleOp mlirModule,
   }
   foreign->setDataLayout(module.getDataLayout());
   foreign->setTargetTriple(module.getTargetTriple());
-  if (llvm::Linker::linkModules(module, std::move(foreign))) {
+  if (llvm::Linker::linkModules(module, std::move(foreign),
+          needed ? llvm::Linker::Flags::LinkOnlyNeeded
+                 : llvm::Linker::Flags::None)) {
     error = "cannot link the module's foreign code";
     return false;
+  }
+  return true;
+}
+
+bool LinkForeignCode(llvm::Module &module, mlir::ModuleOp mlirModule,
+    const TargetInfo &target, llvm::StringRef clang, std::string &error) {
+  auto offload{mlir::dyn_cast<mlir::omp::OffloadModuleInterface>(
+      mlirModule.getOperation())};
+  if (offload && offload.getIsTargetDevice()) {
+    // A device's compile has compiled what its regions reach already
+    // (CompileDeviceForeignCode). Only that is linked: other functions of
+    // the module's foreign code may be for the host alone.
+    auto compiled{mlirModule->getAttrOfType<mlir::ArrayAttr>(
+        kDeviceForeignBitcodeAttrName)};
+    for (mlir::Attribute bitcode : compiled ? compiled.getValue()
+                                            : llvm::ArrayRef<mlir::Attribute>{}) {
+      if (!LinkBitcode(module, mlir::cast<mlir::StringAttr>(bitcode).getValue(),
+              /*needed=*/true, error)) {
+        return false;
+      }
+    }
+  } else if (auto code{mlirModule->getAttrOfType<mlir::StringAttr>(
+                 kForeignCodeAttrName)}) {
+    std::string bitcode;
+    std::vector<std::string> options{ForeignCodeOptions(target)};
+    options.push_back("-fPIC");
+    if (!CompileForeignCode(clang, code.getValue(), options, bitcode, error)) {
+      error = "clang could not compile the module's foreign code" +
+          (error.empty() ? std::string{} : ": " + error);
+      return false;
+    }
+    if (!LinkBitcode(module, bitcode, /*needed=*/false, error)) {
+      return false;
+    }
+  } else {
+    return true;
   }
   // The functions around foreign_procs are called only from the module.
   for (llvm::Function &function : module) {
