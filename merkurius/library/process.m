@@ -281,12 +281,13 @@ extern void merk_device_team_barrier(void);
 #else
 extern void merk_team_barrier(void);
 #endif
-/* A team's number and the number of teams are OpenMP's, on a device and on
-   the host, when the program is linked with OpenMP's runtime; without it,
+/* A team's number and the number of teams: on a device, its block's and
+   the number of blocks, which are OpenMP's team number and number of teams
+   in a region's kernel, and need no OpenMP in a GPU process's. On the host,
+   OpenMP's when the program is linked with OpenMP's runtime; without it,
    the only team is 0. */
 #ifdef __AMDGPU__
-extern int omp_get_team_num(void);
-extern int omp_get_num_teams(void);
+#include <gpuintrin.h>
 #else
 extern int omp_get_team_num(void) __attribute__((weak));
 extern int omp_get_num_teams(void) __attribute__((weak));
@@ -716,14 +717,14 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
         )
     ).
 
-    % OpenMP's when the program is linked with its runtime, which a weak
-    % reference finds on the host.
+    % The block's on a device. On the host, OpenMP's when the program is
+    % linked with its runtime, which a weak reference finds.
 :- pragma foreign_proc("C",
     team_number(Number::out, _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
 #ifdef __AMDGPU__
-    Number = omp_get_team_num();
+    Number = __gpu_block_id_x();
 #else
     Number = omp_get_team_num ? omp_get_team_num() : 0;
 #endif
@@ -734,7 +735,7 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
     [will_not_call_mercury, promise_pure, thread_safe],
 "
 #ifdef __AMDGPU__
-    Number = omp_get_num_teams();
+    Number = __gpu_num_blocks_x();
 #else
     Number = omp_get_num_teams ? omp_get_num_teams() : 1;
 #endif
