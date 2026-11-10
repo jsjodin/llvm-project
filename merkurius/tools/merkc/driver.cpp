@@ -222,11 +222,12 @@ static std::string libraryDirectory(llvm::StringRef executable) {
 // shared object that Clang links from it with LTO, with the start object
 // that exports what the offload plugin and the runtime look up, the
 // device's runtime library, and libc and libm for the GPU, which Clang finds
-// beside itself. The link optimizes at -O2 whatever -O is, as the linker
-// wrapper does for OpenMP's device code: AMDGPU's code generation at -O0 and
-// -O1 fails on a musttail call in divergent control flow ("failed to
-// annotate CFG"), which code generation makes of a tail call between
-// procedures of the same type. The host's compile of `input` embeds each
+// beside itself. The link optimizes at the -O given, or else at -O2, as the
+// linker wrapper does for OpenMP's device code: AMDGPU's code generation is
+// not well tested at -O0. At -O0 and -O1 it fails on a musttail call in
+// divergent control flow ("failed to annotate CFG"), which code generation
+// makes of a tail call between procedures of the same type (design document,
+// LLVM bugs to report). The host's compile of `input` embeds each
 // image with the options that come back. A module without such kinds gets
 // an image without kernels, which its host compile leaves out.
 static std::vector<std::string> addProcessImageJobs(const InputArgList &args,
@@ -247,8 +248,10 @@ static std::vector<std::string> addProcessImageJobs(const InputArgList &args,
     jobs.push_back(std::move(device));
     std::string image{
         temporaries.Name((stem + "-" + arch.arch + "-processes").str(), "elf")};
+    const llvm::opt::Arg *level{args.getLastArg(OPT_O)};
     Job link{findLinker(executable), "--target=amdgcn-amd-amdhsa",
-        "-mcpu=" + arch.arch, "-flto", "-O2"};
+        "-mcpu=" + arch.arch, "-flto",
+        level ? level->getAsString(args) : std::string{"-O2"}};
     link.insert(link.end(),
         {kernels, libraryDir + "/merk-process-start-amdgcn.o",
             libraryDir + "/libmerkdevice-amdgcn.a", "-lc", "-lm", "-o", image});
@@ -426,6 +429,11 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
         offloadArch += (&arch == &archs.front() ? "" : ",") + arch.arch;
       }
       job.push_back(offloadArch);
+      // The linker wrapper compiles the GPUs' code at the -O given, or else
+      // at -O2, as Clang's and Flang's links do with the compile's -O.
+      if (const llvm::opt::Arg *arg = args.getLastArg(OPT_O)) {
+        job.push_back(arg->getAsString(args));
+      }
       // The device's runtime, which target regions call to send and
       // receive, goes into the device image, as the linker wrapper links
       // the OpenMP device runtime. Only AMD GPUs are offloaded to so far.

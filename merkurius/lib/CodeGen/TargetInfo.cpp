@@ -24,6 +24,9 @@ static constexpr llvm::StringLiteral kCPU{"merk.target_cpu"};
 static constexpr llvm::StringLiteral kFeatures{"merk.target_features"};
 static constexpr llvm::StringLiteral kOptimizationLevel{
     "merk.optimization_level"};
+// No -O was given (TargetOptions::optimizationLevelGiven).
+static constexpr llvm::StringLiteral kNoOptimizationLevel{
+    "merk.optimization_level_default"};
 static constexpr llvm::StringLiteral kAddressSpaces{"merk.address_spaces"};
 static constexpr llvm::StringLiteral kCodeObjectVersion{
     "merk.amdgpu_code_object_version"};
@@ -56,8 +59,14 @@ std::unique_ptr<TargetInfo> TargetInfo::Make(const TargetOptions &options,
   if (!target) {
     return nullptr;
   }
+  // Code generation for an AMD GPU is at -O2 unless -O was given
+  // (TargetOptions::optimizationLevelGiven); the passes before it follow -O.
+  unsigned codeGenLevel{
+      info->triple_.isAMDGPU() && !options.optimizationLevelGiven
+          ? 2
+          : options.optimizationLevel};
   std::optional<llvm::CodeGenOptLevel> level{
-      llvm::CodeGenOpt::getLevel(options.optimizationLevel)};
+      llvm::CodeGenOpt::getLevel(codeGenLevel)};
   if (!level) {
     error = "invalid optimization level " +
         std::to_string(options.optimizationLevel);
@@ -117,6 +126,7 @@ std::unique_ptr<TargetInfo> TargetInfo::FromModule(
   if (auto level{module->getAttrOfType<mlir::IntegerAttr>(kOptimizationLevel)}) {
     options.optimizationLevel = level.getInt();
   }
+  options.optimizationLevelGiven = !module->hasAttr(kNoOptimizationLevel);
   if (auto version{
           module->getAttrOfType<mlir::IntegerAttr>(kCodeObjectVersion)}) {
     options.codeObjectVersion = version.getInt();
@@ -162,6 +172,9 @@ void TargetInfo::Record(mlir::ModuleOp module) const {
   }
   module->setAttr(kOptimizationLevel,
       builder.getI32IntegerAttr(options_.optimizationLevel));
+  if (!options_.optimizationLevelGiven) {
+    module->setAttr(kNoOptimizationLevel, builder.getUnitAttr());
+  }
   module->setAttr(kAddressSpaces,
       merk::AddressSpacesAttr::get(context, addressSpaces_.generic,
           addressSpaces_.global, addressSpaces_.shared,

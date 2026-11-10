@@ -22,6 +22,11 @@ struct TargetOptions {
   std::string cpu; // -target-cpu
   std::string features; // -target-feature, joined with commas
   unsigned optimizationLevel{0}; // -O
+  // Whether -O was given. Without it, code generation for an AMD GPU is at
+  // -O2, as Clang's linker wrapper compiles OpenMP's device code: AMDGPU's
+  // code generation is not well tested at -O0. An -O that was given is
+  // respected.
+  bool optimizationLevelGiven{false};
   // AMDGPU's code object version, as Clang's -mcode-object-version= gives
   // it: by default 6, which ROCm's device libraries (oclc_abi_version_600)
   // and Clang's default agree on.

@@ -27,6 +27,21 @@
 % AARCH64: target triple = "aarch64-unknown-linux-gnu"
 % AARCH64: define tailcc void @target.main_2_0()
 %
+% Without -O, code generation for an AMD GPU is at -O2, as Clang's linker
+% wrapper compiles OpenMP's device code, while the passes before it are at
+% -O0; the module records that no -O was given. An -O that was given is
+% respected. The code is llc's at -O2 and at -O0 for the module's IR.
+% RUN: merkc -fc1 -emit-merk -triple amdgpu9.0a-amd-amdhsa %s | FileCheck %s --check-prefix=DEFAULT
+% DEFAULT: merk.optimization_level = 0 : i32, merk.optimization_level_default
+% RUN: merkc -fc1 -emit-llvm -triple amdgpu9.0a-amd-amdhsa %s -o %t.amdgpu.ll
+% RUN: merkc -fc1 -S -triple amdgpu9.0a-amd-amdhsa %s -o - | grep -E '^\s+[sv]_' > %t.default.s
+% RUN: merkc -fc1 -S -O0 -triple amdgpu9.0a-amd-amdhsa %s -o - | grep -E '^\s+[sv]_' > %t.O0.s
+% RUN: llc -O2 %t.amdgpu.ll -o - | grep -E '^\s+[sv]_' > %t.llc2.s
+% RUN: llc -O0 %t.amdgpu.ll -o - | grep -E '^\s+[sv]_' > %t.llc0.s
+% RUN: diff %t.default.s %t.llc2.s
+% RUN: diff %t.O0.s %t.llc0.s
+% RUN: not diff %t.default.s %t.O0.s
+%
 % A module without a target cannot be lowered.
 % RUN: sed -e 's/llvm.target_triple = "[^"]*", //' %t.aarch64.mlir > %t.none.mlir
 % RUN: not merkc -fc1 -emit-llvm %t.none.mlir 2>&1 | FileCheck %s --check-prefix=NONE

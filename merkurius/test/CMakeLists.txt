@@ -15,7 +15,7 @@ if (TARGET merkurius-device-library)
   list(APPEND MERKURIUS_TEST_DEPENDS merkurius-device-library)
 endif()
 if(NOT MERKURIUS_STANDALONE_BUILD)
-  list(APPEND MERKURIUS_TEST_DEPENDS FileCheck count not)
+  list(APPEND MERKURIUS_TEST_DEPENDS FileCheck count not llc llvm-readelf)
 endif()
 
 if(MERKURIUS_GTEST_AVAIL)

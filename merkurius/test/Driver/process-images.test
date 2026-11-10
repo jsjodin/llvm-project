@@ -7,14 +7,14 @@ the host's compile embeds each image. Without -fopenmp nothing else is
 offloaded, and the link is the host's alone.
 REQUIRES: amdgpu-registered-target
 
-The image's link optimizes at -O2 whatever -O is, as the linker wrapper
-does for OpenMP's device code.
+The image's link optimizes at the -O given, or else at -O2, as the linker
+wrapper does for OpenMP's device code (the OMP run below has no -O).
 RUN: merkc -### -fprocess-declarations --offload-arch=gfx1030 -O2 %S/Inputs/sumsq.m -o prog 2>&1 \
 RUN:   | FileCheck %s
 RUN: merkc -### -fprocess-declarations --offload-arch=gfx1030 -O0 %S/Inputs/sumsq.m -o prog 2>&1 \
 RUN:   | FileCheck %s --check-prefix=O0
 O0: "-fc1" "-emit-llvm-bc" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-O0" "-fprocess-kernels"
-O0: "-mcpu=gfx1030" "-flto" "-O2"
+O0: "-mcpu=gfx1030" "-flto" "-O0"
 CHECK:      "-fc1" "-emit-llvm-bc" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-O2" "-fprocess-kernels" "-o" "[[KERNELS:[^"]*sumsq-gfx1030-processes-[^"]*\.o]]" "{{[^"]*}}sumsq.m"{{$}}
 CHECK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "--target=amdgcn-amd-amdhsa" "-mcpu=gfx1030" "-flto" "-O2" "[[KERNELS]]" "{{[^"]*}}merk-process-start-amdgcn.o" "{{[^"]*}}libmerkdevice-amdgcn.a" "-lc" "-lm" "-o" "[[IMAGE:[^"]*sumsq-gfx1030-processes-[^"]*\.elf]]"{{$}}
 CHECK-NEXT: "-fc1" "-emit-obj" "-fprocess-declarations" "-O2" "-fembed-process-image=gfx1030:[[IMAGE]]" "-o" "[[OBJECT:[^"]*sumsq-[^"]*\.o]]" "{{[^"]*}}sumsq.m"{{$}}
