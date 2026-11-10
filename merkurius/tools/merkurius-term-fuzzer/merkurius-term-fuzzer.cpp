@@ -61,9 +61,10 @@ struct Config {
   bool openMP;
   bool doLoops;
   bool receiveGoal;
+  bool processDeclarations;
 };
-constexpr Config configs[]{
-    {false, false, false}, {true, false, false}, {true, true, true}};
+constexpr Config configs[]{{false, false, false, false},
+    {true, false, false, false}, {true, true, true, true}};
 
 void Fail(const char *what, llvm::StringRef input, llvm::StringRef detail) {
   llvm::errs() << "merkurius-term-fuzzer: " << what << "\ninput: " << input
@@ -92,9 +93,9 @@ std::vector<std::string> ReadCanonical(
   }
   bool lexerErrors{messages.AnyFatalError()};
   TermArena arena;
-  TermReader reader{
-      tokens, arena, messages, maxDepth,
-      ReaderOptions{config.doLoops, config.receiveGoal}};
+  TermReader reader{tokens, arena, messages, maxDepth,
+      ReaderOptions{
+          config.doLoops, config.receiveGoal, config.processDeclarations}};
   std::vector<std::string> items;
   std::size_t count{messages.messages().size()};
   while (std::optional<ItemTerm> item{reader.ReadItem()}) {
@@ -127,9 +128,9 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, Config config) {
   options.openMP = config.openMP;
   TokenSequence tokens{Lex(*file, options, messages)};
   ParseTreeArena arena;
-  const ParseTree &tree{ConvertFile(
-      tokens, arena, messages, maxDepth,
-      ReaderOptions{config.doLoops, config.receiveGoal})};
+  const ParseTree &tree{ConvertFile(tokens, arena, messages, maxDepth,
+      ReaderOptions{
+          config.doLoops, config.receiveGoal, config.processDeclarations})};
   Unparsed result;
   result.ok = !messages.AnyFatalError();
   Messages problems;
@@ -145,20 +146,23 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, Config config) {
   UnparseCanonical(canonical, tree, tokens);
   llvm::raw_string_ostream parenthesized{result.parenthesized};
   UnparseCanonical(parenthesized, tree, tokens, true);
-  // Desugaring must not crash on whatever converted.
+  // Desugaring must not crash on whatever converted, with process
+  // declarations' predicates as items.
+  const ParseTree &expanded{
+      merkurius::semantics::ExpandProcesses(tree, tokens, arena, messages)};
   merkurius::semantics::SemanticArena semanticArena;
   std::string form;
   llvm::raw_string_ostream formStream{form};
   const merkurius::semantics::SemanticForm &semanticForm{
-      merkurius::semantics::Desugar(tree, tokens, semanticArena, messages)};
+      merkurius::semantics::Desugar(expanded, tokens, semanticArena, messages)};
   merkurius::semantics::DumpSemanticForm(formStream, semanticForm);
   // So must name resolution. No imported module can be found, so only the
   // module's own names resolve.
   merkurius::semantics::ModuleLoader loader{all, "", messages};
-  loader.LoadImports(tree, tokens, "/nonexistent");
+  loader.LoadImports(expanded, tokens, "/nonexistent");
   std::unique_ptr<merkurius::semantics::NameResolution> resolution{
       merkurius::semantics::ResolveNames(
-          tree, tokens, semanticForm, loader, messages)};
+          expanded, tokens, semanticForm, loader, messages)};
   // And type checking, purity checking, mode checking, determinism
   // analysis, uniqueness checking and polymorphism analysis.
   std::unique_ptr<merkurius::semantics::TypeChecking> checking{
@@ -166,13 +170,13 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, Config config) {
           semanticForm, *resolution, tokens, messages)};
   merkurius::semantics::LoopPurities loops;
   merkurius::semantics::CheckPurity(
-      tree, tokens, semanticForm, *resolution, *checking, messages, &loops);
+      expanded, tokens, semanticForm, *resolution, *checking, messages, &loops);
   merkurius::semantics::TranslateLoops(
       *resolution, *checking, loops, tokens, semanticArena, messages);
   bool earlier{messages.AnyFatalError()};
   std::unique_ptr<merkurius::semantics::ModeChecking> modes{
       merkurius::semantics::CheckModes(
-          tree, tokens, semanticForm, *resolution, *checking, messages)};
+          expanded, tokens, semanticForm, *resolution, *checking, messages)};
   std::unique_ptr<merkurius::semantics::DeterminismChecking> determinism{
       merkurius::semantics::CheckDeterminism(
           tokens, *checking, *modes, messages, !earlier)};
@@ -217,9 +221,10 @@ extern "C" int LLVMFuzzerTestOneInput(
       // Without directives, a canonical form is one item that prints the
       // same; '%$omp' is a quoted name there. A do loop prints as do(...).
       std::string item{canonical + ".\n"};
-      std::vector<std::string> again{
-          ReadCanonical(item,
-              Config{false, config.doLoops, config.receiveGoal}, false)};
+      std::vector<std::string> again{ReadCanonical(item,
+          Config{false, config.doLoops, config.receiveGoal,
+              config.processDeclarations},
+          false)};
       if (again.size() != 1 || again[0] != canonical) {
         Fail("a canonical form does not read back as itself", input,
             canonical + " became " + (again.empty() ? "nothing" : again[0]));

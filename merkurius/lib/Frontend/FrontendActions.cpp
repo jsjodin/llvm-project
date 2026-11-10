@@ -53,6 +53,7 @@ static parser::ReaderOptions ReaderOptionsOf(CompilerInstance &ci) {
   parser::ReaderOptions options;
   options.doLoops = ci.getLangOpts().doLoops;
   options.receiveGoal = ci.getLangOpts().receiveGoal;
+  options.processDeclarations = ci.getLangOpts().processDeclarations;
   return options;
 }
 
@@ -235,8 +236,10 @@ bool DebugDumpSemanticFormAction::executeAction() {
   parser::Messages messages;
   parser::TokenSequence tokens{parser::Lex(getSourceFile(), options, messages)};
   parser::ParseTreeArena arena;
-  const parser::ParseTree &tree{parser::ConvertFile(tokens, arena, messages,
-      parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci))};
+  const parser::ParseTree &tree{semantics::ExpandProcesses(
+      parser::ConvertFile(tokens, arena, messages,
+          parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci)),
+      tokens, arena, messages)};
   semantics::SemanticArena semanticArena;
   const semantics::SemanticForm &form{
       semantics::Desugar(tree, tokens, semanticArena, messages)};
@@ -324,8 +327,10 @@ void Resolve(CompilerInstance &ci, parser::SourceFile &file,
   parser::LexerOptions options;
   options.openMP = ci.getLangOpts().openMP;
   r.tokens = parser::Lex(file, options, r.messages);
-  r.tree = &parser::ConvertFile(r.tokens, r.arena, r.messages,
-      parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci));
+  r.tree = &semantics::ExpandProcesses(
+      parser::ConvertFile(r.tokens, r.arena, r.messages,
+          parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci)),
+      r.tokens, r.arena, r.messages);
   r.form = &semantics::Desugar(*r.tree, r.tokens, r.semanticArena, r.messages);
   r.loader = std::make_unique<semantics::ModuleLoader>(ci.getAllSources(),
       ci.getFrontendOpts().libraryDirectory, r.messages,

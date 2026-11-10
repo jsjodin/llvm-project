@@ -44,6 +44,12 @@ struct ReaderOptions {
   // receive goals (design document, "Processes and mailboxes"). mmc has no
   // such operator.
   bool receiveGoal{false};
+  // `process` as a prefix operator and `receives` and `on` as infix
+  // operators, for process declarations (design document, "Processes and
+  // mailboxes"). mmc has none of them. They are operators only in an item
+  // that begins with `:- process`, and `process` only there, so that
+  // `:- import_module process` and a constructor `on` read as before.
+  bool processDeclarations{false};
 };
 
 class TermReader {
@@ -118,6 +124,9 @@ private:
   // operator. argumentStart_ is the first token of the innermost argument,
   // element, parenthesized term or item.
   bool commaIsOperator_{true};
+  // The `process` of an item that begins with `:- process`, with
+  // -fprocess-declarations, or null.
+  const Token *processToken_{nullptr};
   std::uint32_t argumentStart_{0};
   llvm::StringMap<unsigned> variableNumbers_;
   unsigned variables_{0};

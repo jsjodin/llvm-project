@@ -24,8 +24,9 @@
 // types. A module imported with use_module is visible only qualified.
 
 #include "merkurius/Semantics/resolve-names.h"
-#include "merkurius/Semantics/insts.h"
 #include "merkurius/Common/idioms.h"
+#include "merkurius/Semantics/insts.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
@@ -155,6 +156,13 @@ private:
     const parser::TokenSequence *tokens;
   };
   std::vector<Pending> pending_;
+  // The spawn_Kind declarations of process declarations, here and in the
+  // interfaces, by which a call of spawn_Kind_on is known as remote spawn.
+  llvm::DenseSet<const parser::PredDecl *> spawnDecls_;
+  // Whether a call of the undefined name is spawn_Kind_on for a process
+  // kind that `scope` sees, which is remote spawn.
+  bool IsRemoteSpawn(const parser::SymName &, NameUse, unsigned arity,
+      const Visibility &scope) const;
   // The scope of an imported module's interface.
   Visibility InterfaceScope(const ModuleInterface &);
   ModuleSymbols &Symbols(const ModuleInterface &);
@@ -311,6 +319,12 @@ void Resolver::Declare(ModuleSymbols &symbols, const parser::Item &item,
           },
           [&](const parser::PredDecl *decl) {
             DeclarePredicate(symbols, *decl, nullptr, exported, tokens);
+          },
+          [&](const parser::ProcessDecl *decl) {
+            // Its predicates are items of their own (ExpandProcesses).
+            if (decl->spawnDecl) {
+              spawnDecls_.insert(decl->spawnDecl);
+            }
           },
           [&](const parser::InstDefn *defn) {
             if (!Duplicate(symbols, SymbolKind::Inst, defn->name->name,
@@ -653,8 +667,39 @@ bool IsCharConstant(const parser::SymName &name, unsigned arity) {
       }) == 1;
 }
 
+bool Resolver::IsRemoteSpawn(const parser::SymName &name, NameUse use,
+    unsigned arity, const Visibility &scope) const {
+  llvm::StringRef kind{name.name};
+  if (use != NameUse::Call || arity == 0 || !kind.consume_front("spawn_") ||
+      !kind.consume_back("_on")) {
+    return false;
+  }
+  std::string qualifier{llvm::join(name.qualifiers, ".")};
+  std::string spawn{"spawn_" + kind.str()};
+  for (const Visible &visible : scope) {
+    if (!qualifier.empty() && !Names(visible, qualifier)) {
+      continue;
+    }
+    for (const Symbol *symbol : visible.symbols->Lookup(spawn)) {
+      const auto *decl{
+          std::get_if<const parser::PredDecl *>(&symbol->declaration)};
+      if (symbol->kind == SymbolKind::Predicate && symbol->arity == arity - 1 &&
+          decl && spawnDecls_.contains(*decl)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void Resolver::Undefined(const parser::SymName &name, NameUse use,
     unsigned arity, const Visibility &scope, const Visibility *outer) {
+  // spawn_Kind_on (design document, "Remote spawn") needs remote spawn.
+  if (IsRemoteSpawn(name, use, arity, scope)) {
+    messages_.Say(Source(name), "%s (%s/%u)"_todo_en_US,
+        "spawning a process kind on another node", FullName(name), arity);
+    return;
+  }
   // mmc: "undefined predicate `p'/1", "undefined symbol `f'/1", "undefined
   // type `t'/0".
   parser::Message &message{messages_.Say(Source(name),

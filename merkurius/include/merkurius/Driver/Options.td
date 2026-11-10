@@ -42,6 +42,8 @@ def fdo_loops : Flag<["-"], "fdo-loops">,
   HelpText<"Read ( Iterators do Body ) loops, which are not Mercury">;
 def freceive_goal : Flag<["-"], "freceive-goal">,
   HelpText<"Read receive [Params] ( Arms ) goals, which are not Mercury">;
+def fprocess_declarations : Flag<["-"], "fprocess-declarations">,
+  HelpText<"Read :- process declarations, which are not Mercury">;
 def Wunselected_message : Flag<["-"], "Wunselected-message">,
   HelpText<"Warn about a mailbox whose receive goals' arms leave out a "
            "constructor of its messages (the default)">;

@@ -416,6 +416,15 @@ struct MutableRule {
   void Expected(llvm::raw_ostream &os) const { os << "a mutable declaration"; }
 };
 
+// process Kind receives Types [on gpu], with -fprocess-declarations
+// (convert-processes.cpp).
+struct ProcessRule {
+  using resultType = const ProcessDecl *;
+  bool Matches(const Term &t) const { return AsCompound(t, "process", 1); }
+  std::optional<resultType> Convert(const Term &, ConvertState &) const;
+  void Expected(llvm::raw_ostream &os) const { os << "a process declaration"; }
+};
+
 // initialise p/2 and finalise p/2, with their spellings initialize and
 // finalize.
 struct InitialiseRule {

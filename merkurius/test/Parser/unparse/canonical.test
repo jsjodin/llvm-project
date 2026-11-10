@@ -21,6 +21,15 @@
 # RUN: merkc -fc1 -freceive-goal -fdebug-unparse-no-sema \
 # RUN:   %S/Inputs/receive.canonical.m | diff %S/Inputs/receive.canonical.m -
 #
+# Process declarations, with -fprocess-declarations (design document,
+# "Processes and mailboxes"): message types that do not fit on the line go
+# below it, indented.
+# RUN: merkc -fc1 -fprocess-declarations -fdebug-unparse-no-sema \
+# RUN:   %S/Inputs/processes-messy.m | diff %S/Inputs/processes.canonical.m -
+# RUN: merkc -fc1 -fprocess-declarations -fdebug-unparse-no-sema \
+# RUN:   %S/Inputs/processes.canonical.m \
+# RUN:   | diff %S/Inputs/processes.canonical.m -
+#
 # With every operator term in parentheses:
 # RUN: merkc -fc1 -fdebug-unparse-parenthesized-no-sema %S/Inputs/messy.m \
 # RUN:   | FileCheck %s

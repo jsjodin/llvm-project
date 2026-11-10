@@ -55,6 +55,13 @@ struct ConvertState {
   unsigned variables{0};
   // How deeply the terms of a directive may nest (TermReader).
   unsigned maxDepth{TermReader::defaultMaxDepth};
+  // Whether process declarations are read (ReaderOptions), and the arena
+  // of the item's terms, in which their expansion's terms are made.
+  bool processDeclarations{false};
+  TermArena *terms{nullptr};
+  // The name of the module being converted, which qualifies the calls that
+  // expansions make, or null before its :- module.
+  const SymName *module{nullptr};
 };
 
 // The term inside any parentheses.

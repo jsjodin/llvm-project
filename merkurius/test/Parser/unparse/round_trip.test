@@ -26,3 +26,7 @@
 # With -freceive-goal, on the files with receive goals:
 # RUN: %round-trip --receive-goal %S/../convert/receive.m \
 # RUN:   %S/Inputs/receive-messy.m %S/Inputs/receive.canonical.m
+#
+# With -fprocess-declarations, on the files with process declarations:
+# RUN: %round-trip --process-declarations %S/../convert/processes.m \
+# RUN:   %S/Inputs/processes-messy.m %S/Inputs/processes.canonical.m

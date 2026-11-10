@@ -1131,6 +1131,14 @@ void CanonicalUnparser::Gap(const N &n, llvm::ArrayRef<Element> elements,
       Emit(j);
       return;
     }
+  } else if constexpr (std::is_same_v<N, ProcessDecl>) {
+    // Message types that do not fit on the line go below, indented.
+    if (spelling == "receives") {
+      doc_.BeginNest(4);
+      ++nests;
+      Emit(j);
+      return;
+    }
   } else if constexpr (std::is_same_v<N, NameAndArity>) {
     if (spelling == "/") {
       Emit(j, tight);

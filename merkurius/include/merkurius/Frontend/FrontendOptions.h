@@ -139,6 +139,10 @@ struct LangOptions {
   // -freceive-goal: read `receive` as an operator, for receive goals
   // (design document, "Processes and mailboxes").
   bool receiveGoal{false};
+  // -fprocess-declarations: read `process`, `receives` and `on` as
+  // operators, for process declarations (design document, "Processes and
+  // mailboxes").
+  bool processDeclarations{false};
 };
 
 } // namespace merkurius::frontend
