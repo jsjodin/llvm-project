@@ -19,7 +19,7 @@
 :- implementation.
 :- import_module int, list.
 
-% Library procedures are not compiled for the device yet.
+% The module's own list functions, so that the arena is all this tests.
 :- func build(int, list(int)) = list(int).
 build(N, Xs) = ( if N = 0 then Xs else build(N - 1, [N | Xs]) ).
 

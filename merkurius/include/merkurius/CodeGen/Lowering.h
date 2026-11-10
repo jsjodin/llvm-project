@@ -58,16 +58,32 @@ void LastCallModuloConstructor(mlir::ModuleOp, InCell);
 // Lowers a merk module to the LLVM dialect, in place. Procedures use LLVM's
 // tailcc, so that calls in tail position can be musttail (design document,
 // "Calling convention"); merk.entry becomes merk_main.
-llvm::LogicalResult LowerToLLVMDialect(mlir::ModuleOp, const TargetInfo &);
+// A device's compile compiles the foreign code its regions reach with
+// `clang`.
+llvm::LogicalResult LowerToLLVMDialect(
+    mlir::ModuleOp, const TargetInfo &, llvm::StringRef clang = {});
 
 // The LLVM IR of a module in the LLVM dialect, with the target's triple and
 // data layout; null if it cannot be translated.
 std::unique_ptr<llvm::Module> TranslateToLLVMIR(
     mlir::ModuleOp, llvm::LLVMContext &, const TargetInfo &);
 
+// clang's options for compiling foreign code for the target: its triple,
+// CPU and optimization level.
+std::vector<std::string> ForeignCodeOptions(const TargetInfo &);
+
+// Compiles C `code`, foreign code, with clang and `options` into LLVM
+// `bitcode`; false if it cannot, after setting `error` unless clang ran and
+// reported the code's errors itself.
+bool CompileForeignCode(llvm::StringRef clang, llvm::StringRef code,
+    llvm::ArrayRef<std::string> options, std::string &bitcode,
+    std::string &error);
+
 // Compiles the module's foreign code (its merk.foreign_code attribute), if
 // it has any, with clang, and links it into its LLVM IR; false after
-// setting `error` if it cannot.
+// setting `error` if it cannot. A device's compile links what lowering
+// compiled of it and of the library's, for what its regions reach
+// (CompileDeviceForeignCode).
 bool LinkForeignCode(llvm::Module &, mlir::ModuleOp, const TargetInfo &,
     llvm::StringRef clang, std::string &error);
 

@@ -1123,10 +1123,12 @@ void MerkGenerator::GenerateForeign(
       stores += "  return SUCCESS_INDICATOR;\n";
     }
   }
-  foreignCode_ += "\n" + result + " " + name + "(" +
-      (parameters.empty() ? "void" : parameters) + ") {\n" + locals + "  {\n" +
-      LineDirective(pragma.code->tokens) + pragma.code->text.str() +
-      "\n  }\n" + stores + "}\n";
+  // Compiled for a device only when its compile calls it, as other C of the
+  // module may be for the host alone (CompileDeviceForeignCode).
+  foreignCode_ += "\n" + ForeignFunctionGuard(name) + "\n" + result + " " +
+      name + "(" + (parameters.empty() ? "void" : parameters) + ") {\n" +
+      locals + "  {\n" + LineDirective(pragma.code->tokens) +
+      pragma.code->text.str() + "\n  }\n" + stores + "}\n#endif\n";
 
   mlir::Block *entry{proc.addEntryBlock()};
   mlir::OpBuilder::InsertionGuard guard{builder_};

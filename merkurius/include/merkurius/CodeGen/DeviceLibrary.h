@@ -13,6 +13,7 @@
 // the device): a device's compile copies the procedures its target regions
 // reach from the library's modules, as their merk bytecode has them.
 
+#include "merkurius/CodeGen/TargetInfo.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
 #include "llvm/ADT/StringRef.h"
@@ -25,6 +26,15 @@ namespace merkurius::codegen {
 inline constexpr llvm::StringLiteral kReachedFromAttrName{"merk.reached_from"};
 inline constexpr llvm::StringLiteral kReachedAtAttrName{"merk.reached_at"};
 
+// On a device's module: the foreign code of each library module that a copy
+// came from with a foreign_proc, by the module's name; and what
+// CompileDeviceForeignCode compiled for the device, as bitcode, which
+// LinkForeignCode links after translation.
+inline constexpr llvm::StringLiteral kDeviceForeignCodeAttrName{
+    "merk.device_foreign_code"};
+inline constexpr llvm::StringLiteral kDeviceForeignBitcodeAttrName{
+    "merk.device_foreign_bitcode"};
+
 // Copies into `module`, a device's merk module, each procedure of another
 // module that its target regions reach, from `directory`/<module>.merkbc,
 // with what the copies refer to: the procedures they call, transitively, and
@@ -35,6 +45,19 @@ inline constexpr llvm::StringLiteral kReachedAtAttrName{"merk.reached_at"};
 // call, with the chain of calls from the region.
 llvm::LogicalResult CopyDeviceLibrary(
     mlir::ModuleOp module, llvm::StringRef directory, bool array);
+
+// Compiles for the device, with `clang`, the C functions of the foreign_procs
+// that a device's module calls, its own and the library's, and only those, as
+// a module's foreign code defines each one only when the device asks for it.
+// What one of them needs that is not on a device is reported at the call: a
+// function that is neither an intrinsic, the device's runtime, OpenMP's, nor
+// in libc or libm for the GPU, which the device's image has.
+llvm::LogicalResult CompileDeviceForeignCode(
+    mlir::ModuleOp module, const TargetInfo &target, llvm::StringRef clang);
+
+// The guard around a foreign_proc's C function `name` in a module's foreign
+// code: defined on the host, and on a device when its compile asks for it.
+std::string ForeignFunctionGuard(llvm::StringRef name);
 
 // Adds to `diagnostic`, on an operation of `proc`, a note for each procedure
 // in the chain that reached `proc` if it was copied from the library: a
