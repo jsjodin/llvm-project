@@ -8,6 +8,7 @@
 
 #include <set>
 #include "MLIRGenImpl.h"
+#include "merkurius/CodeGen/DeviceLibrary.h"
 
 namespace merkurius::codegen {
 
@@ -1631,6 +1632,15 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
     module_->setAttr(kForeignCodeAttrName, builder_.getStringAttr(code));
   }
   RegisterMessageTypes();
+  // The library's procedures that the regions reach, before what follows
+  // their calls; not after an error, which may have left out one of the
+  // module's own.
+  if (target_.options().openMPIsTargetDevice &&
+      !messages_.AnyFatalError() &&
+      mlir::failed(CopyDeviceLibrary(
+          module_, deviceLibraryDirectory_, !mmcUniqueness_))) {
+    return nullptr;
+  }
   MarkRegionsForTeamMailboxes();
   // The program's entry: the main module's main(di, uo).
   for (const ProcedureBody &body : determinism_.bodies()) {

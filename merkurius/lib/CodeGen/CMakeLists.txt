@@ -1,6 +1,7 @@
 add_merkurius_library(MerkuriusCodeGen
   Lowering.cpp
   Decomposer.cpp
+  DeviceLibrary.cpp
   MLIRGen.cpp
   MLIRGenBuiltins.cpp
   MLIRGenCalls.cpp
@@ -28,6 +29,7 @@ add_merkurius_library(MerkuriusCodeGen
   MLIRBuiltinToLLVMIRTranslation
   MLIRDLTIDialect
   MLIRIR
+  MLIRParser
   MLIRLLVMCommonConversion
   MLIRLLVMDialect
   MLIRLLVMToLLVMIRTranslation

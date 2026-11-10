@@ -1688,7 +1688,7 @@ still stalls the one before it when the ring between them fills.
 
 ## Library code on the device
 
-Proposed 2026-11-10; step 1 is built.
+Proposed 2026-11-10; steps 1 and 2 are built.
 
 **Why.** A target region can call only its own module's procedures and the
 runtime's `merk_device_` functions (`Lowerer::LowerOpenMP`). So nothing of the
@@ -1757,6 +1757,32 @@ Each new predicate a region needs would add another special case or copy.
    `MarkRegionsForTeamMailboxes`, which moves from the end of MLIR generation to
    after this step. Tests: a region calling `list.length` and `list.reverse`,
    and the chain of calls in an error for `list.foldl`.
+   Built 2026-11-10 (`lib/CodeGen/DeviceLibrary.cpp`):
+   - **What is copied:** a declaration that the regions reach is replaced by
+     the library's procedure, found by the longest module name its symbol
+     begins with. Then what the copy refers to comes from the same module:
+     procedures, closures' entries and instances, without their methods.
+   - **Descriptors and constructors:** the descriptor of each type whose
+     type_info the module makes and only declares comes from its module, as
+     `linkonce` without its unify and compare entries, since no library is
+     linked into a device's image. The copies' constructors (`merk.type_def`)
+     come with them.
+   - **Errors:** each copy records the procedure that reached it and where, so
+     the device's errors give a note for each call back to the module's own
+     code, also for the check after lowering. Until step 3, a copy's
+     `foreign_proc` is an error named for the procedure, "its foreign code is
+     not compiled for the device". The frontend prints MLIR's notes now,
+     without MLIR's own note of the operation.
+   - **Not copied:** the module's own procedures, after an error that left one
+     out, and `array`'s under `-fmmc-uniqueness`, whose procedures are numbered
+     by `array.m` rather than the sound stub. A procedure of another module of
+     the program is still not compiled for a device
+     (`omp-target-other-module.m`); its bytecode could come from the build
+     driver later.
+   - **Tests:** `omp-target-library.m` and its `-gpu.test` (`list.length`,
+     `reverse` and `append` on `list(maybe(int))`), `omp-target-library-errors.m`
+     (`list.filter`'s closure, with a chain of two calls). The benchmark's
+     `list.length` stand-in went here, rather than in step 4.
 3. **Foreign code on the device.** Compile only the reachable `merk_foreign_`
    functions, with the module's `foreign_decl`s, so that host-only C elsewhere in
    the module does not have to compile for the device. The user's own module
@@ -1768,7 +1794,6 @@ Each new predicate a region needs would add another special case or copy.
    - **Kept in the compiler:** `send`, `receive` and `team_mailbox` stay
      builtins, as they need the message type's key, and `send` and `receive`
      choose by the type between a word and an array.
-   - The benchmark's `list.length` stand-in goes.
 5. **`process.team_barrier` in the runtime,** as the paper on specialized
    kernels does a cross-team reduction (next section), not with messages:
    - **On a device:** a counter in the region's team table that flips sense

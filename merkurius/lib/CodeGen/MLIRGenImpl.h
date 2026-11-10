@@ -148,7 +148,8 @@ public:
         modes_{modes}, determinism_{determinism}, loops_{loops},
         target_{target}, messages_{messages},
         stubUnimplemented_{options.stubUnimplemented},
-        mmcUniqueness_{options.mmcUniqueness}, traceFlags_{options.traceFlags} {
+        mmcUniqueness_{options.mmcUniqueness}, traceFlags_{options.traceFlags},
+        deviceLibraryDirectory_{options.deviceLibraryDirectory} {
     for (const semantics::ProcedurePolymorphism &procedure :
         polymorphism.procedures()) {
       polymorphism_[procedure.body] = &procedure;
@@ -657,9 +658,8 @@ private:
   // device keeps the current region's teams in memory that starts undefined;
   // and the teams of each teams region whose code uses team mailboxes wait
   // until all have started. Marking only such modules relies on a region
-  // calling no other module's procedures on the device, which is not yet
-  // implemented; when it is, every region without teams must be marked, and
-  // the use of team mailboxes found across modules.
+  // reaching no code of another module on the device but the copies that
+  // CopyDeviceLibrary makes, which this follows as the module's own.
   void MarkRegionsForTeamMailboxes();
   mlir::Value TimeoutMilliseconds(mlir::Value timeout, mlir::Location);
   // The map entry of a term's cell of `words` words, by its pointer.
@@ -785,6 +785,7 @@ private:
   bool mmcUniqueness_{false};
   // --trace-flag=.
   std::vector<std::string> traceFlags_;
+  std::string deviceLibraryDirectory_;
   // Whether a procedure's body is being generated, and the first construct
   // of it not handled yet, with -fstub-unimplemented.
   bool inBody_{false};
