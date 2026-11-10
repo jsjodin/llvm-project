@@ -351,6 +351,9 @@ void WriteText(const char *text, std::uint64_t size) {
     if (kinds[lane] == 0) {
       merk_uncaught_exception(text);
     }
+    if (kinds[lane] == 2) {
+      Fail(text);
+    }
     std::fflush(stdout);
     std::fprintf(stderr, "Not yet implemented: %s\n", text);
     ExitProgram(1);

@@ -654,11 +654,13 @@ private:
       const ProcedureBody &, bool inRegion);
   // In the device's compile of a module with team mailboxes: every target
   // region that is not a teams region's says so at its start, since the
-  // device keeps the current region's teams in memory that starts undefined.
-  // Marking only such modules relies on a region calling no other module's
-  // procedures on the device, which is not yet implemented; when it is, every
-  // region without teams must be marked.
-  void MarkRegionsWithoutTeams();
+  // device keeps the current region's teams in memory that starts undefined;
+  // and the teams of each teams region whose code uses team mailboxes wait
+  // until all have started. Marking only such modules relies on a region
+  // calling no other module's procedures on the device, which is not yet
+  // implemented; when it is, every region without teams must be marked, and
+  // the use of team mailboxes found across modules.
+  void MarkRegionsForTeamMailboxes();
   mlir::Value TimeoutMilliseconds(mlir::Value timeout, mlir::Location);
   // The map entry of a term's cell of `words` words, by its pointer.
   mlir::Value MapCell(mlir::Value term, unsigned words, llvm::StringRef name,

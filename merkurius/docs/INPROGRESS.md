@@ -1367,7 +1367,7 @@ Instinct node for Infinity Fabric.
 
 ## Processes as teams, and messages within a GPU
 
-Proposed 2026-11-09; steps 1 to 3 below are built. The design document
+Proposed 2026-11-09; steps 1 to 4 below are built. The design document
 (The device runtime, "Who communicates") has a process for each team in an SPMD
 kernel as a later step. This adds messages between such processes that do not go
 through the host.
@@ -1504,7 +1504,37 @@ worker(!IO) :-
      message has mode `di`, with a receive that gives a unique array, and
      belongs with the pieces of one array (below).
 4. A check at launch that the teams fit on the GPU at once (risk 1), reported as an
-   error, since a team that is not running deadlocks the others.
+   error, since a team that is not running deadlocks the others. Implemented
+   2026-11-09 (`CodeGen/omp-target-teams-wait.m`,
+   `omp-target-teams-too-many-gpu.test`), as a start barrier, which the user
+   chose:
+   - **The teams of a region whose code uses team mailboxes wait until all
+     have started.** Each team adds itself to a count in the region's table and
+     waits, with `s_sleep`, until the count is the number of teams. Teams that
+     fit start within microseconds. If not all have started within a second, one
+     team reports "Mercury runtime: target teams: only M of the N teams ran at
+     once on the device, …" and the program ends.
+   - **Only regions with team mailboxes wait.** Code uses them if it calls
+     `team_mailbox`, or refers by a symbol to code of the module that does,
+     at any depth. Other teams regions may still run more teams than fit, a few
+     at a time: 2000 teams without team mailboxes run. The host's teams are
+     threads, which all run, so the host does not wait.
+   - **Measured, 2026-11-09, RX 6950 XT.** A generic kernel's teams have 256
+     threads, 8 waves. With 124 VGPRs, 157 of 400 teams ran at once. A rough
+     estimate from the kernel's registers alone gives about 160, so something
+     else, probably the display, held a few slots. A smaller kernel fit 197 of
+     2000. The token ring experiment above, with almost no registers, fit 320
+     at 8 waves.
+   - Rejected: *a table for each GPU,* since how many teams fit depends on the
+     kernel's registers and LDS as much as on the GPU. *An occupancy estimate in
+     the offload plugin before launch,* from the kernel's metadata and the
+     device's compute units: it gives an error before launch, but cannot see
+     what else holds the GPU, so 158 to 160 teams would pass it and deadlock.
+     It would also be a local change to the plugin. *A probe at startup* has
+     the same problem, and depends on the kernel too.
+   - **Later:** fewer threads per team, by `thread_limit`, which is not yet
+     implemented. One wave per team would let about eight times as many teams
+     run at once, when the team has no parallel work.
 5. A barrier from messages, measured against the estimates below.
 
 **Later:** SPMD kernels with `masked` and a team barrier; team mailboxes reachable
@@ -1593,8 +1623,9 @@ the hops in sequence. Not measured, and a real message costs more than a word.
 What it needs, beyond risk 1:
 
 - **Every team that takes part must be on the GPU.** The kernel must not start more
-  teams than fit, and no OpenMP query gives that number, so it comes from a table
-  for each GPU or a probe at startup. Which of them is open.
+  teams than fit, and no OpenMP query gives that number. Decided in step 4: the
+  teams wait for each other to start, and the program ends if they do not all
+  run at once.
 - **An owner for the array.** If it is in team 0's arena, team 0 must not reclaim it
   until every team has replied. The replies guarantee that only if the program keeps
   to the protocol, so it needs a rule that the runtime or compiler can check. Memory

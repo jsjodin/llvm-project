@@ -1,0 +1,15 @@
+More teams than run at once on the machine's GPU (docs/INPROGRESS.md,
+Processes as teams, step 4): a region without team mailboxes runs its 2000
+teams a few at a time; a region with them ends the program after its teams
+have waited for each other for a second, saying how many ran at once.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/Inputs/omp-target-teams-too-many.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY not %t > %t.out 2> %t.err
+RUN: FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace < %t.out
+RUN: FileCheck %s --check-prefix=ERROR --match-full-lines --strict-whitespace < %t.err
+
+OUTPUT:teams without team mailboxes: 2000
+OUTPUT-NOT:{{.}}
+ERROR:Mercury runtime: target teams: only {{[1-9][0-9]*}} of the 2000 teams ran at once on the device, and the teams of a region with team mailboxes must all run at once
+ERROR-NOT:{{.}}
