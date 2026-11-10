@@ -72,6 +72,9 @@ enum class ActionKind {
   DebugDumpPolymorphism,
   // -emit-merk: generate the module's merk operations and write them.
   EmitMerk,
+  // -emit-merk-bc: the same, as MLIR bytecode, with what a later pass needs:
+  // the form of the library that a device's compile copies procedures from.
+  EmitMerkBytecode,
   // -emit-mlir: the same, lowered to MLIR's LLVM dialect.
   EmitMLIR,
   // -emit-llvm: the same, translated to LLVM IR and optimized.

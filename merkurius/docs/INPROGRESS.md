@@ -1688,7 +1688,7 @@ still stalls the one before it when the ring between them fills.
 
 ## Library code on the device
 
-Proposed 2026-11-10; nothing is built.
+Proposed 2026-11-10; step 1 is built.
 
 **Why.** A target region can call only its own module's procedures and the
 runtime's `merk_device_` functions (`Lowerer::LowerOpenMP`). So nothing of the
@@ -1748,7 +1748,9 @@ Each new predicate a region needs would add another special case or copy.
    Two flavours, because MLIR generation makes device-only choices
    (`WriteOnDevice`, `SendOnDevice`). Step 4 removes most of them, and one
    bytecode for every target can come later, with lowering making the rest of
-   the choices.
+   the choices. Built 2026-11-10: the 12 compiled modules give 4 to 61 KB
+   each, about a quarter of the text's size. A module compiled from its
+   bytecode gives the same LLVM IR as from its source (`emit-merk-bc.m`).
 2. **Copy what regions reach.** Load an imported module's bytecode when a region
    first reaches one of its procedures. Merge the symbols the module defines
    once: type descriptors, instances and type-info constants. Then run
