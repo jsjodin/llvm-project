@@ -1,0 +1,15 @@
+The benchmark of a barrier between teams, on few rounds: both shapes on the
+host's teams, which libomp runs as threads, and without OpenMP, where the one
+team needs no messages.
+REQUIRES: libomp
+
+RUN: merkc -O2 -fopenmp %libomp-flags %S/../../benchmarks/team-barrier/teambarrier.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED %t central 4 20 | FileCheck %s --check-prefix=CENTRAL
+RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED %t tree 5 20 | FileCheck %s --check-prefix=TREE
+RUN: merkc -O2 %S/../../benchmarks/team-barrier/teambarrier.m -o %t.sequential
+RUN: %t.sequential tree 4 20 | FileCheck %s --check-prefix=SEQUENTIAL
+RUN: not %t.sequential ring 4 20 | FileCheck %s --check-prefix=USAGE
+CENTRAL: central {{ *}}4 teams {{ *}}20 rounds, {{ *}}4 reported, 0 wrong, {{.*}} us a barrier
+TREE: tree {{ *}}5 teams {{ *}}20 rounds, {{ *}}5 reported, 0 wrong, {{.*}} us a barrier
+SEQUENTIAL: tree {{ *}}4 teams {{ *}}20 rounds, {{ *}}1 reported, 0 wrong, {{.*}} us a barrier
+USAGE: usage: teambarrier central|tree TEAMS ROUNDS
