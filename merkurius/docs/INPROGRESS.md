@@ -2126,6 +2126,77 @@ the process asks the host to launch. The first version has neither.
    The kernel sends to and receives from the host's processes. `:- process`
    declarations need semantic analysis first; until then, which predicate is
    a GPU process's entry is an open question for review.
+
+   Designed 2026-11-10, in parts, each a commit of its own. The entry is
+   the kind's predicate from its `:- process` declaration, as the design
+   document has it (Processes and mailboxes), so the declarations come
+   first. Nothing parses them yet: `process` and `receives` are not
+   operators.
+
+   - **4a. `:- process` declarations, on the host.** Parsed as `:- mutable`
+     is, checked, and expanded into the kind's `pred` declaration and
+     `spawn_<kind>`, which calls `process.spawn` with a closure that calls
+     the kind's predicate. In the first version a kind receives one message
+     type; more report "not yet implemented". `spawn_<kind>_on` needs
+     remote spawn, which does not exist, so a call of it reports "not yet
+     implemented" too. Tests: the declaration's errors, and programs that
+     spawn kinds, with the output they print. mmc has no `:- process`, so
+     the expected output is written by hand.
+   - **4b. A GPU kind's kernel.** For each kind that runs on a GPU (decision
+     D1), merkc makes a kernel `merk_process_<kind>`, which takes the
+     mailbox's handle and the kind's arguments by value. In the first
+     version the arguments are scalars and mailboxes, and the kernel is one
+     team, whose initial thread runs the kind's predicate (design document,
+     "What a process is on a GPU"). A driver job compiles the module for the
+     GPU without OpenMP. Clang links it with `libmerkdevice`, libc and libm,
+     into an image of its own. Code generation defines the RPC client and
+     `merk_device_number` in the module, weak and protected, so that LTO
+     exports them (steps 1 and 2). The image goes into the host's object as
+     a global, which a start-up call registers with the runtime, as message
+     types are registered. Not the linker wrapper's offload binary: the
+     wrapper links only OpenMP's, CUDA's and HIP's kinds.
+   - **4c. Spawning on a GPU.** `spawn_<kind>_at` (decision D2) spawns the
+     kind on a GPU. On the first such spawn, the runtime calls `olInit`,
+     registers its RPC callback, and matches liboffload's devices to
+     OpenMP's numbers by UID, or numbers them in liboffload's order without
+     libomptarget. It loads the image on the device when first needed and
+     sets its `merk_device_number`. Each process gets a queue of its own.
+     A record on the host stands for the process: it owns the process's
+     mailbox, whose place is the GPU. It ends when the kernel does, which a
+     host function queued after the kernel (`olLaunchHostFunction`) tells
+     it, and its mailbox then closes as any process's does. `devices.cpp`
+     uses liboffload for these devices.
+   - **4d. Memory of a running process.** The devices' arenas and rings are
+     freed when no region runs (The device's side of the first slice). A
+     GPU process lives longer than any region. So a running GPU process
+     counts as a running region for them, until a process has an arena of
+     its own (design document, "Its heap"). There is no collector on the
+     device, as for regions, and MERK_DEVICE_ARENA_BYTES limits it.
+   - **4e. Tests on the GPU.** A host process spawns a counter on the GPU,
+     sends it `add(N)` and `get(Reply)` messages, and prints its answers.
+     Then two GPU processes exchange messages through the host. Run small
+     first, with a timeout, as the GPU drives the display.
+
+   **Decisions,** made by the user on 2026-11-10, each as recommended:
+   - **D1. Which kinds get a kernel: those whose declaration says so,**
+     such as `:- process counter(int) receives counter_msg on gpu`.
+     merkc reports at compile time what a marked kind cannot do on a GPU.
+     It is explicit, so its errors are reported where they belong.
+     Rejected: every kind the device can compile, with the others skipped,
+     and the kinds that some `spawn_<kind>_at` call names. The first
+     compiles every kind twice and skips silently, which the rule against
+     skipping known-unsupported features rules out. The second cannot see a
+     spawn in another module.
+   - **D2. How a place is named:** `spawn_<kind>_at(Place, Args, Mailbox,
+     !IO)` with `:- type place ---> host ; gpu(int)` in `process`, and
+     `process.gpus(Count, !IO)` for how many there are. Spawning at `host`
+     is `spawn_<kind>`. A GPU that does not exist, or a kind without a
+     kernel, is a software error at the spawn. Rejected:
+     `spawn_<kind>_on_gpu(N, ...)`, which names no place, though handles and
+     routing are by place (design document, Handles, routing and places).
+   - **D3. One message type for each kind in the first version,** and
+     scalar and mailbox arguments for a GPU kind. Several message types,
+     and other arguments, come later.
 5. **Spawning from the GPU's other places,** and the place table's
    identities. liboffload gives a device's name and its PCI vendor id, but
    still no UUID or PCI address (design document, "What the plugins lack").
