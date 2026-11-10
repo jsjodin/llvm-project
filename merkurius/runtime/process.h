@@ -151,9 +151,10 @@ void Block(std::int64_t deadline);
 bool ProgramEnding();
 // offload.cpp: whether a target region is running.
 bool RegionsRunning();
-// With MERK_CHECK_PINNED or MERK_CHECK_MESSAGES, reports at the program's
-// normal end what of the messages is still allocated (offload.cpp).
-void CheckPinnedAtEnd();
+// With MERK_CHECK_PINNED, MERK_CHECK_MESSAGES or MERK_CHECK_DEVICE_MEMORY,
+// reports at the program's normal end what of the messages and the devices'
+// memory is still allocated (offload.cpp).
+void CheckFreedAtEnd();
 // mailbox.cpp: how many queued messages neither a process read nor a
 // mailbox freed.
 std::int64_t HeldMessages();

@@ -49,7 +49,7 @@ extern "C" char *merk_argument(std::int64_t index) { return arguments[index]; }
 static void EndWithMain(void) {
   merk_main();
   merk_process_stop();
-  merkurius::runtime::CheckPinnedAtEnd();
+  merkurius::runtime::CheckFreedAtEnd();
   merkurius::runtime::ExitProgram(exitStatus);
 }
 

@@ -172,16 +172,16 @@ bool TakeOldest(const std::uint64_t *handle, std::uint64_t &message) {
 
 // The devices' arenas (docs/INPROGRESS.md, The device's side of the first
 // slice, step 6): the chunks the host allocated for each arena of a device
-// for its cells and arrays, which it frees when no region is running, and
-// where the device keeps its current chunk, which it then clears. Each
-// image on a device has an arena of its own, at its own address: a
-// region's image and a GPU process's on the same GPU have two. Regions on
-// any device are counted together.
+// for its cells and arrays, how many bytes they have, and where the device
+// keeps its current chunk. A region's image has an arena, whose chunks the
+// host frees when no region is running, and whose current chunk it then
+// clears. Regions on any device are counted together. Each GPU process has
+// an arena of its own, which goes when the process ends.
 struct DeviceArena {
   int device;
   std::uint64_t address;
   void **chunks;
-  std::uint64_t count, capacity;
+  std::uint64_t count, capacity, bytes;
 };
 pthread_mutex_t arenaLock = PTHREAD_MUTEX_INITIALIZER;
 DeviceArena *arenas{nullptr};
@@ -225,7 +225,7 @@ DeviceArena &ArenaOf(int device, std::uint64_t address) {
     }
   }
   Reserve(arenas, arenaCount, arenaCapacity);
-  arenas[arenaCount] = {device, address, nullptr, 0, 0};
+  arenas[arenaCount] = {device, address, nullptr, 0, 0, 0};
   return arenas[arenaCount++];
 }
 
@@ -246,23 +246,30 @@ void *NewChunk(int device, std::uint64_t address, std::uint64_t bytes) {
   DeviceArena &arena{ArenaOf(device, address)};
   Reserve(arena.chunks, arena.count, arena.capacity);
   arena.chunks[arena.count++] = chunk;
+  arena.bytes += bytes;
   pthread_mutex_unlock(&arenaLock);
   return chunk;
 }
 
-// With arenaLock held and no region running: every chunk freed, and each
-// device's current chunk cleared.
+void FreeChunks(DeviceArena &arena) {
+  for (std::uint64_t j{0}; j < arena.count; ++j) {
+    DeviceFree(arena.device, arena.chunks[j]);
+  }
+  arena.count = 0;
+  arenaBytes -= arena.bytes;
+  arena.bytes = 0;
+}
+
+// With arenaLock held and no region or GPU process running, so that only
+// regions' images have arenas: every chunk freed, and each device's current
+// chunk cleared.
 void FreeArenas() {
-  arenaBytes = 0;
   for (std::uint64_t i{0}; i < arenaCount; ++i) {
     DeviceArena &arena{arenas[i]};
     if (arena.count == 0) {
       continue;
     }
-    for (std::uint64_t j{0}; j < arena.count; ++j) {
-      DeviceFree(arena.device, arena.chunks[j]);
-    }
-    arena.count = 0;
+    FreeChunks(arena);
     const std::uint64_t none[kArenaClearWords]{};
     if (!CopyToDevice(arena.device, reinterpret_cast<void *>(arena.address),
             none, sizeof none)) {
@@ -402,7 +409,8 @@ void ReleaseForDevice(int, void *held) {
 }
 
 // A mailbox's ring, in memory that the device reads directly. It is freed
-// when no region is running.
+// when no region or GPU process is running, or when the GPU process whose
+// mailbox it is ends (FreeRing).
 DeviceRing *NewRing(int device) {
   auto *ring{static_cast<DeviceRing *>(
       DeviceAllocateHost(device, sizeof(DeviceRing)))};
@@ -614,16 +622,19 @@ bool RegionsRunning() {
 // it reports how many chunks of copies of messages between the host and
 // the devices are still allocated (docs/INPROGRESS.md, GPU processes
 // without omp target, step 4e); with MERK_CHECK_MESSAGES, how many messages
-// that were queued neither a process read nor a mailbox freed.
+// that were queued neither a process read nor a mailbox freed; and with
+// MERK_CHECK_DEVICE_MEMORY, how many chunks of the devices' arenas and how
+// many mailboxes' rings are still allocated.
 namespace merkurius::runtime {
 static bool Set(const char *name) {
   const char *value{std::getenv(name)};
   return value && *value;
 }
 
-void CheckPinnedAtEnd() {
+void CheckFreedAtEnd() {
   bool pinned{Set("MERK_CHECK_PINNED")}, messages{Set("MERK_CHECK_MESSAGES")};
-  if (!pinned && !messages) {
+  bool device{Set("MERK_CHECK_DEVICE_MEMORY")};
+  if (!pinned && !messages && !device) {
     return;
   }
   for (int i{0}; i < 10000 && RegionsRunning(); ++i) {
@@ -642,14 +653,44 @@ void CheckPinnedAtEnd() {
         "Mercury runtime: %lld messages are neither read nor freed\n",
         static_cast<long long>(HeldMessages()));
   }
+  if (device) {
+    pthread_mutex_lock(&arenaLock);
+    std::uint64_t chunks{0};
+    for (std::uint64_t i{0}; i < arenaCount; ++i) {
+      chunks += arenas[i].count;
+    }
+    pthread_mutex_unlock(&arenaLock);
+    pthread_mutex_lock(&ringsLock);
+    std::uint64_t ringsLeft{ringCount};
+    pthread_mutex_unlock(&ringsLock);
+    std::fprintf(stderr,
+        "Mercury runtime: %llu chunks of the devices' arenas and %llu rings "
+        "are allocated\n",
+        static_cast<unsigned long long>(chunks),
+        static_cast<unsigned long long>(ringsLeft));
+  }
 }
 } // namespace merkurius::runtime
 
+// With arenaLock held, once no region or GPU process runs: the rings, the
+// copies their devices may have been reading, and the regions' arenas go.
+static void FreeWhenIdle() {
+  merk_mailbox_detach_rings();
+  pthread_mutex_lock(&ringsLock);
+  for (std::uint64_t i{0}; i < ringCount; ++i) {
+    DeviceFreeHost(rings[i].device, rings[i].ring);
+  }
+  ringCount = 0;
+  pthread_mutex_unlock(&ringsLock);
+  FreeArenas();
+}
+
 // A process that runs on a GPU (gpu-processes.cpp) counts as a running
-// region while its kernel runs, so that what it uses of the arenas and the
-// rings stays, and the program ends at once if main ends first. Its end
-// runs on liboffload's thread, which must not call liboffload, so the
-// arenas are freed when the next region ends, not then.
+// region while its kernel runs, so that a ring that it may read stays, and
+// the program ends at once if main ends first. What is its own, its arena
+// and its mailbox's ring, goes when it ends, before it stops counting, on a
+// thread of the runtime's: its kernel's end runs on liboffload's thread,
+// which must not call liboffload.
 namespace merkurius::runtime {
 void GpuProcessStarted() {
   pthread_mutex_lock(&arenaLock);
@@ -659,8 +700,55 @@ void GpuProcessStarted() {
 
 void GpuProcessEnded() {
   pthread_mutex_lock(&arenaLock);
-  --runningRegions;
+  // As the program ends, its end frees everything.
+  if (--runningRegions == 0 && !ProgramEnding()) {
+    FreeWhenIdle();
+  }
   pthread_mutex_unlock(&arenaLock);
+}
+
+// A GPU process's arena: the words on the device where it keeps its current
+// chunk and its tables, cleared, or null.
+void *NewProcessArena(int device) {
+  constexpr std::size_t bytes{sizeof(std::uint64_t) * (kArenaClearWords + 1)};
+  void *arena{DeviceAllocate(device, bytes)};
+  const std::uint64_t none[kArenaClearWords + 1]{};
+  if (arena && !CopyToDevice(device, arena, none, bytes)) {
+    DeviceFree(device, arena);
+    arena = nullptr;
+  }
+  return arena;
+}
+
+// Frees a GPU process's arena, and the chunks it took, once its kernel has
+// ended.
+void FreeProcessArena(int device, void *address) {
+  pthread_mutex_lock(&arenaLock);
+  for (std::uint64_t i{0}; i < arenaCount; ++i) {
+    DeviceArena &arena{arenas[i]};
+    if (arena.device == device &&
+        arena.address == reinterpret_cast<std::uint64_t>(address)) {
+      FreeChunks(arena);
+      std::free(arena.chunks);
+      arena = arenas[--arenaCount];
+      break;
+    }
+  }
+  pthread_mutex_unlock(&arenaLock);
+  DeviceFree(device, address);
+}
+
+// Frees the ring of a GPU process's mailbox once its kernel has ended.
+void FreeRing(int device, DeviceRing *ring) {
+  pthread_mutex_lock(&ringsLock);
+  for (std::uint64_t i{0}; i < ringCount; ++i) {
+    if (rings[i].ring == ring) {
+      rings[i] = rings[--ringCount];
+      break;
+    }
+  }
+  pthread_mutex_unlock(&ringsLock);
+  DeviceFreeHost(device, ring);
 }
 } // namespace merkurius::runtime
 
@@ -678,14 +766,7 @@ extern "C" void merk_region_exit(void) {
   StopIfProgramEnding();
   pthread_mutex_lock(&arenaLock);
   if (--runningRegions == 0) {
-    merk_mailbox_detach_rings();
-    pthread_mutex_lock(&ringsLock);
-    for (std::uint64_t i{0}; i < ringCount; ++i) {
-      DeviceFreeHost(rings[i].device, rings[i].ring);
-    }
-    ringCount = 0;
-    pthread_mutex_unlock(&ringsLock);
-    FreeArenas();
+    FreeWhenIdle();
   }
   pthread_mutex_unlock(&arenaLock);
   merkurius::runtime::Unpin();
