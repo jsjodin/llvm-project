@@ -1695,10 +1695,9 @@ What is left:
 
 **The next piece: closures and type classes on a device.** Most of `list` is
 higher-order: `foldl`, `map` and `filter` make or call closures, which a device
-rejects. The specializer that `pragma inline` needs (design document,
-Optimizations) makes a call with a known closure a direct call, so with the
-bodies the device's compile copies in, it would make those predicates run on a
-device. It needs nothing else.
+rejects. The specializer makes a call with a known closure a direct call, so
+with the bodies the device's compile copies in, it makes those predicates run
+on a device (The specializer: known closures and dictionaries).
 
 **Open.**
 
@@ -1715,6 +1714,139 @@ device. It needs nothing else.
   fits a region that computes its value late.
 - **The program's other modules on a device** (`omp-target-other-module.m`):
   their bytecode could come from the build driver.
+
+## The specializer: known closures and dictionaries
+
+Proposed 2026-11-10; nothing is built. The `merk` pass that the design
+document's Optimizations section names for higher-order and type
+specialization and for `pragma inline`. This piece is its first part: calls
+given a closure or a dictionary known at the call become direct calls.
+
+**Why now.** On a device, a closure or a dispatch on a type class is an error
+(`RejectOnDevice`), so most of `list` cannot run in a region: `foldl`, `map`
+and `filter` take closures. The `parallel` library proposed in GPU processes
+without `omp target` (option a) is predicates of that kind too. On the host,
+a closure call costs about three times the monomorphic loop over an array
+(design document, "What polymorphism costs"), and blocks vectorization.
+
+**What the code looks like now.** `scaled(K, L) = foldl(func(X, A) = A + K * X,
+L, 0)` gives:
+
+```mlir
+%1 = merk.closure @ho.scaled_f2_0$lambda1$closure1(%0) captures [["int/0"]]
+%8 = merk.call @list.foldl_f3_0(%3, %4, %1, %6, %7) : (...) -> !merk.word
+```
+
+and `list.foldl_f3_0` calls `merk.call_closure %arg2(...)` for each element,
+then itself with `%arg2` again. The closure's entry takes the closure first
+and reads `K` with `merk.closure_word`. A dictionary is the same:
+`merk.typeclass_info @instance(type_infos)` in the caller, and
+`merk.typeclass_info_word` and `merk.call_method` in the callee.
+
+**Proposed: specialize on values made by known operations.**
+
+- **Known values.** An argument is known when one of these makes it:
+  - `merk.closure @entry(captured)`: known as its entry; the captured words
+    are not, and stay values.
+  - `merk.typeclass_info @instance(arguments)`: known as its instance, with
+    its arguments known or not in the same way.
+  - `merk.type_info` of constants, which are static already.
+  A known value's pattern is its operation with each unknown word as a hole,
+  such as `closure @e(_)` or `typeclass_info @show(int)(type_info "int/0")`.
+- **A call with a known argument is cloned.** The clone is the callee with,
+  for each known argument, a parameter for each hole in place of the
+  argument, and the operation rebuilt from them at its entry. Clones are
+  private, named `<callee>$spec<N>`, and kept by callee and patterns, so the
+  same call elsewhere gets the same clone.
+- **Then the clone folds:**
+  - `merk.call_closure` of a `merk.closure @e` becomes `merk.call @e` with the
+    closure and the inputs, and `merk.nondet_call_closure` becomes
+    `merk.nondet_call`. That call has a known argument, so the entry is
+    cloned with the captured words as parameters, and its
+    `merk.closure_word`s fold to them.
+  - `merk.typeclass_info_word` of a `merk.typeclass_info` becomes its
+    argument.
+  - `merk.call_method` of a `merk.typeclass_info @i` becomes a call of the
+    procedure in the method's slot of `@i`'s table: the dispatch procedure,
+    which takes the dictionary. Cloned in turn, it calls the instance's
+    method procedure with the dictionary's words.
+  - A call in the clone that passes the rebuilt value on, such as
+    `foldl`'s call of itself, has the same patterns, so it calls the clone:
+    the loop calls its body directly.
+  Afterwards the rebuilt `merk.closure` and `merk.typeclass_info` that nothing
+  uses are removed. One that something still uses stays, as when it is put
+  in a term or passed to a callee without a body. On the host that is
+  correct and only slower; on a device it is the error it is now, at that
+  use.
+- **One mechanism for all three.** A closure's entry and a dispatch
+  procedure are cloned by the same rule as `foldl`, because each takes the
+  known value as an argument. The direct calls of known instances that MLIR
+  generation makes now (design document, Lowering, "Type classes") remain,
+  as they need no dictionary at all; the specializer handles the rest.
+- **Limits, as mmc has** (`--higher-order-size-limit`,
+  `--higher-order-arg-limit`): a pattern no deeper than a few levels, such as
+  a closure that captured a known closure; a limit on clones of one callee;
+  and polymorphic recursion, whose patterns grow at each call, stops at the
+  limit. Then the call stays as it is. On the host nothing is reported yet
+  (`pragma inline`'s remarks come later); on a device what is left is the
+  error it is now.
+- **Where it runs.** On the `merk` module after MLIR generation, after
+  `CopyDeviceLibrary`, and before `MarkRegionsForTeamMailboxes`, so that the
+  calls these follow are the specialized ones. Only procedures with bodies
+  are cloned: the module's own, and on a device the library's copies.
+- **When.**
+  - **On a device, always,** for what target regions reach, at every
+    optimization level. It is what lets a region run `list.foldl`, so a region
+    that compiles at `-O2` also compiles at `-O0`, as `pragma inline` has it.
+  - **On the host, at `-O2`,** within the module first. Across modules it
+    needs the library's bodies in the host's compile. That is the open
+    question kept from Library code on the device (step 5).
+
+**Steps.**
+
+1. **Closures within a module.** The pass, known closures, cloning and
+   folding of `merk.call_closure`, `merk.nondet_call_closure` and
+   `merk.closure_word`, and the limits. Tests: `merk` checks of the clones
+   for a module's own fold, an entry with captured values, a recursive
+   higher-order predicate, a closure that escapes into a term, and the depth
+   limit; each also runs at -O0/-O2 against mmc's output. Host only, at -O2.
+2. **Dictionaries.** Known `typeclass_info`s, `merk.typeclass_info_word`,
+   and `merk.call_method` through a table slot's dispatch procedure.
+   Instances with constraints, so a dictionary inside a dictionary. Tests as
+   step 1, plus a superclass's method.
+3. **On a device.** Running it on a device's module at every level. The
+   copier copies an instance's dispatch procedures when the specializer
+   reaches its table, as it copies procedures now: the two alternate until
+   nothing new is reached. The device's errors then name only what is left.
+   Tests: a region with `list.foldl`, `map` and `filter` with lambdas that
+   capture values, and a type class method in `list.foldl`'s closure, each
+   with a `-gpu.test`; an error test for a closure in a term.
+4. **Measured.** The array loop of "What polymorphism costs", closure and type
+   class versions at -O2, against the monomorphic one, before and after.
+5. **Across modules on the host,** once that question is decided: host
+   bytecode of the library, and the specializer loading the body of an
+   imported procedure that a call gives a known value.
+
+**Later:** specializing on `type_info`s alone (type specialization), which
+turns `merk.unify_word` and `merk.compare_word` of a known type into calls of
+its entries, and then lets a device unify and compare polymorphically; and
+`pragma inline`'s promise and remarks.
+
+**Rejected alternatives.**
+
+- **Inlining instead of cloning.** A recursive callee such as `foldl` cannot be
+  inlined completely; a clone that calls itself is the loop. Inlining small
+  clones is left to LLVM, which does it once the calls are direct.
+- **LLVM's devirtualization.** By then a closure is a cell in memory and its
+  call an indirect call through a load, and the closure would have to be
+  proved constant across the recursion. gcc did not do it even for a constant
+  closure (design document, "What polymorphism costs").
+- **Specializing on the source or the semantic form,** as mmc does on its
+  HLDS. The `merk` form has the closures and dictionaries as values and calls,
+  and the device's copies of the library exist only in this form.
+- **Clones that keep the closure cell and pass it,** with only the call
+  inside made direct. A device cannot make the cell, and the captured values
+  would stay loads from memory.
 
 ## Specialized kernels for loops
 
@@ -1846,9 +1978,10 @@ or `parallel.map` over an array, beside loops under directives:
 - **(a) Library predicates written with directives:** a `parallel` module in
   Mercury whose bodies are loops under `%$omp target teams distribute parallel
   do` with `reduction`. A call's closure becomes a direct call through the
-  specializer, the next piece (Library code on the device: later). Then the
-  loop is an ordinary OpenMP loop. It gets the cross-team reduction, and big-jump
-  and no-loop when they come (Specialized kernels for loops).
+  specializer, the next piece (The specializer: known closures and
+  dictionaries). Then the loop is an ordinary OpenMP loop. It gets the
+  cross-team reduction, and big-jump and no-loop when they come (Specialized
+  kernels for loops).
 - **(b) A builtin that lowers to the `omp` dialect,** as Flang lowers `do
   concurrent`, a construct of the language rather than of OpenMP, onto
   OpenMP's operations (`DoConcurrentConversion`). This needs no specializer,
