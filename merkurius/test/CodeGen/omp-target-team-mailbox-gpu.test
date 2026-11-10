@@ -1,0 +1,12 @@
+Team mailboxes on the machine's GPU: omp-target-team-mailbox.m, whose teams
+pass a token around a ring and send team 0 more messages than its ring holds,
+through rings in the device's memory. At -O2 too: heap-to-stack once left a
+tail marker on the receive, and the loop then kept the first message.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O0 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-team-mailbox.m -o %t0
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t0 \
+RUN:   | FileCheck %S/omp-target-team-mailbox.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-team-mailbox.m -o %t2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t2 \
+RUN:   | FileCheck %S/omp-target-team-mailbox.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

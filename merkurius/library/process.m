@@ -187,6 +187,16 @@
 :- pred team_number(int::out, io::di, io::uo) is det.
 :- pred number_of_teams(int::out, io::di, io::uo) is det.
 
+    % The mailbox of team T for messages of type M, in the target teams
+    % region that this process is a team of: one for each team and type,
+    % made when first used, which lasts as long as the region. Any team of
+    % the region sends to it, and only team T receives from it. Outside a
+    % teams region, and without OpenMP, the only team is 0, whose mailboxes
+    % last as long as the program. It is an error if T is not from 0 to the
+    % number of teams less one. On a device, the messages must be of one
+    % word so far.
+:- pred team_mailbox(int::in, mailbox(M)::out, io::di, io::uo) is det.
+
     % For the expansion of the receive goal (design document, "The receive
     % goal"), not for programs. The selector of a receive goal of K arms
     % maps a message that the arm numbered I selects, from 0, to the arm's
@@ -257,6 +267,8 @@
 
 :- pragma foreign_decl("C", local, "
 extern void merk_node(MR_Integer *high, MR_Integer *low);
+extern MR_Integer merk_team_mailbox(MR_Integer team, MR_Word type_info,
+    MR_Integer *place_slot, MR_Integer *generation, MR_Integer *secret);
 extern void merk_mailbox_new(MR_Word type_info, MR_Integer *place_slot,
     MR_Integer *generation, MR_Integer *secret);
 extern void merk_process_spawn(MR_Integer stack_bytes, MR_Word closure,
@@ -693,6 +705,34 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
     [will_not_call_mercury, promise_pure, thread_safe],
 "
     Number = 1;
+").
+
+team_mailbox(Team, Mailbox, !IO) :-
+    this_node(node(High, Low), !IO),
+    team_slot(Team, witness : witness(M), Teams, PlaceSlot, Generation, Secret,
+        !IO),
+    ( if 0 =< Team, Team < Teams then
+        Mailbox = mailbox(High, Low, PlaceSlot, Generation, Secret)
+            : mailbox(M)
+    else
+        error("team_mailbox: the team number, " ++ int_to_string(Team) ++
+            ", is not from 0 to " ++ int_to_string(Teams - 1))
+    ).
+
+    % The number of teams, and if the team is one of them, its mailbox for
+    % messages of type M: its slot, generation and secret.
+:- pred team_slot(int::in, witness(M)::in, int::out, int::out, int::out,
+    int::out, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    team_slot(Team::in, _Witness::in, Teams::out, PlaceSlot::out,
+        Generation::out, Secret::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    PlaceSlot = 0;
+    Generation = 0;
+    Secret = 0;
+    Teams = merk_team_mailbox(Team, TypeInfo_for_M, &PlaceSlot, &Generation,
+        &Secret);
 ").
 
 :- pred node_id(int::out, int::out, io::di, io::uo) is det.

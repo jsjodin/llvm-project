@@ -647,6 +647,18 @@ private:
       llvm::ArrayRef<BodyVar> arguments);
   bool ReceiveInTarget(const Body &, llvm::ArrayRef<BodyVar> arguments,
       const ProcedureBody &, bool inRegion);
+  // process.team_mailbox(T, Box, !IO) in the device's compile: a call of the
+  // device's runtime, for the message type's key (docs/INPROGRESS.md,
+  // Processes as teams, step 2).
+  bool TeamMailboxOnDevice(const Body &, llvm::ArrayRef<BodyVar> arguments,
+      const ProcedureBody &, bool inRegion);
+  // In the device's compile of a module with team mailboxes: every target
+  // region that is not a teams region's says so at its start, since the
+  // device keeps the current region's teams in memory that starts undefined.
+  // Marking only such modules relies on a region calling no other module's
+  // procedures on the device, which is not yet implemented; when it is, every
+  // region without teams must be marked.
+  void MarkRegionsWithoutTeams();
   mlir::Value TimeoutMilliseconds(mlir::Value timeout, mlir::Location);
   // The map entry of a term's cell of `words` words, by its pointer.
   mlir::Value MapCell(mlir::Value term, unsigned words, llvm::StringRef name,

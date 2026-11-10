@@ -811,7 +811,19 @@ extern "C" void merk_node(std::int64_t *high, std::int64_t *low) {
 // A new mailbox of this node's host for messages of the type: its slot, with
 // place 0, its generation and its secret; merk_node gives the rest of its
 // handle.
+namespace {
+void NewMailbox(Word typeInfo, Process *owner, std::int64_t *placeAndSlot,
+    std::int64_t *generation, std::int64_t *secret);
+} // namespace
+
 extern "C" void merk_mailbox_new(Word typeInfo, std::int64_t *placeAndSlot,
+    std::int64_t *generation, std::int64_t *secret) {
+  NewMailbox(typeInfo, CurrentProcess(), placeAndSlot, generation, secret);
+}
+
+namespace {
+// A new mailbox, as merk_mailbox_new makes, of the owner, or of no process.
+void NewMailbox(Word typeInfo, Process *owner, std::int64_t *placeAndSlot,
     std::int64_t *generation, std::int64_t *secret) {
   pthread_once(&nodeOnce, ChooseNode);
   pthread_once(&once, InitializeCondition);
@@ -851,13 +863,14 @@ extern "C" void merk_mailbox_new(Word typeInfo, std::int64_t *placeAndSlot,
   mailbox.ringDevice = -1;
   mailbox.ringOfArrays = false;
   mailbox.consumed = 0;
-  Own(&mailbox, CurrentProcess());
+  Own(&mailbox, owner);
   mailbox.open = true;
   *placeAndSlot = index;
   *generation = mailbox.generation;
   *secret = static_cast<std::int64_t>(mailbox.secret);
   pthread_mutex_unlock(&mailbox.lock);
 }
+} // namespace
 
 #define MERK_HANDLE_PARAMETERS                                                 \
   std::int64_t nodeHigh, std::int64_t nodeLow, std::int64_t placeAndSlot,      \
@@ -1564,4 +1577,135 @@ extern "C" std::int64_t merk_mailbox_lookup(const char *name, Word typeInfo,
   }
   pthread_mutex_unlock(&registryLock);
   return result;
+}
+
+// Team mailboxes on the host (docs/INPROGRESS.md, Processes as teams, step
+// 2): when a target teams region runs on the host, a team's mailbox for a
+// message type is an ordinary mailbox, made when first used, in a table of
+// the region, which is closed when the region ends. A device has rings of
+// its own instead (runtime/device). Outside a teams region, and in a program
+// without OpenMP, the only team is 0, whose mailboxes last as long as the
+// program. They belong to no process until one receives from them.
+namespace {
+
+struct TeamMailbox {
+  Word messageType;
+  std::int64_t placeAndSlot, generation, secret;
+  TeamMailbox *next;
+};
+
+struct TeamTable {
+  std::int64_t id;
+  std::int64_t teams;
+  // By team.
+  TeamMailbox **mailboxes;
+  TeamTable *next;
+};
+
+pthread_mutex_t teamsLock = PTHREAD_MUTEX_INITIALIZER;
+TeamTable *teamTables;
+std::int64_t lastTeamsId;
+TeamMailbox *outerMailboxes;
+TeamTable outerTeams{0, 1, &outerMailboxes, nullptr};
+// The table of the teams region that the thread runs a team of. A process
+// that runs a region is pinned to its thread until the region ends.
+thread_local TeamTable *currentTeams;
+
+} // namespace
+
+// Before a target teams region: its id, which its teams' tables are found
+// by on the host and on a device, and the node's id, for their handles.
+extern "C" void merk_teams_begin(
+    std::int64_t *id, std::int64_t *nodeHigh, std::int64_t *nodeLow) {
+  *id = __atomic_add_fetch(&lastTeamsId, 1, __ATOMIC_RELAXED);
+  merk_node(nodeHigh, nodeLow);
+}
+
+// At the start of each team of a target teams region that runs on the host.
+extern "C" void merk_device_teams_enter(
+    std::int64_t id, std::int64_t, std::int64_t, std::int32_t teams) {
+  pthread_mutex_lock(&teamsLock);
+  TeamTable *table{teamTables};
+  while (table && table->id != id) {
+    table = table->next;
+  }
+  if (!table) {
+    table = static_cast<TeamTable *>(Malloc(sizeof(TeamTable)));
+    table->mailboxes = static_cast<TeamMailbox **>(
+        std::calloc(static_cast<std::size_t>(teams), sizeof(TeamMailbox *)));
+    if (!table->mailboxes) {
+      Fail("out of memory", "");
+    }
+    table->id = id;
+    table->teams = teams;
+    table->next = teamTables;
+    teamTables = table;
+  }
+  pthread_mutex_unlock(&teamsLock);
+  currentTeams = table;
+}
+
+extern "C" void merk_device_teams_leave(void) { currentTeams = nullptr; }
+
+// After a target teams region, wherever it ran: closes the mailboxes of its
+// teams on the host, dropping what they hold.
+extern "C" void merk_teams_end(std::int64_t id) {
+  pthread_mutex_lock(&teamsLock);
+  TeamTable **link{&teamTables};
+  while (*link && (*link)->id != id) {
+    link = &(*link)->next;
+  }
+  TeamTable *table{*link};
+  if (table) {
+    *link = table->next;
+  }
+  pthread_mutex_unlock(&teamsLock);
+  if (!table) {
+    return;
+  }
+  std::int64_t high, low;
+  merk_node(&high, &low);
+  for (std::int64_t team{0}; team < table->teams; ++team) {
+    for (TeamMailbox *mailbox{table->mailboxes[team]}; mailbox;) {
+      TeamMailbox *next{mailbox->next};
+      merk_mailbox_close(high, low, mailbox->placeAndSlot, mailbox->generation,
+          mailbox->secret);
+      FreeTypeInfo(mailbox->messageType);
+      std::free(mailbox);
+      mailbox = next;
+    }
+  }
+  std::free(table->mailboxes);
+  std::free(table);
+}
+
+// Team `team`'s mailbox for messages of the type, in the teams region that
+// the thread runs a team of, or outside one, team 0's: its slot, generation
+// and secret, if the team is one of the region's. It returns the number of
+// teams.
+extern "C" std::int64_t merk_team_mailbox(std::int64_t team, Word typeInfo,
+    std::int64_t *placeAndSlot, std::int64_t *generation,
+    std::int64_t *secret) {
+  TeamTable *table{currentTeams ? currentTeams : &outerTeams};
+  if (team < 0 || team >= table->teams) {
+    return table->teams;
+  }
+  pthread_mutex_lock(&teamsLock);
+  TeamMailbox *mailbox{table->mailboxes[team]};
+  while (mailbox && merk_compare_type_infos(mailbox->messageType, typeInfo)) {
+    mailbox = mailbox->next;
+  }
+  if (!mailbox) {
+    mailbox = static_cast<TeamMailbox *>(Malloc(sizeof(TeamMailbox)));
+    NewMailbox(typeInfo, nullptr, &mailbox->placeAndSlot, &mailbox->generation,
+        &mailbox->secret);
+    mailbox->messageType = KeepTypeInfo(typeInfo);
+    mailbox->next = table->mailboxes[team];
+    table->mailboxes[team] = mailbox;
+  }
+  *placeAndSlot = mailbox->placeAndSlot;
+  *generation = mailbox->generation;
+  *secret = mailbox->secret;
+  pthread_mutex_unlock(&teamsLock);
+  return table->teams;
 }

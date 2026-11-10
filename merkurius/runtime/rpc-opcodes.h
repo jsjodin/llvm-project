@@ -71,6 +71,12 @@ constexpr uint32_t rpcDrain{RpcOpcode(6)};
 // the message there, and then answers; the device then moves the ring's head.
 constexpr uint32_t rpcTakeArray{RpcOpcode(7)};
 
+// An error on the device that ends the program: the buffer's first word is
+// what the text is, 0 for an uncaught exception's and 1 for a feature not
+// yet implemented, and then the text, by send_n. The host reports it as it
+// reports the same on the host, and ends the program, so it does not answer.
+constexpr uint32_t rpcFail{RpcOpcode(10)};
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_RPC_OPCODES_H_

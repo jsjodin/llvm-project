@@ -99,16 +99,20 @@ collect_bools(Box, !Answers, !IO) :-
 % MERK: merk.foreign_call @merk_check_teams(%[[N:.*]]) : (i64) -> ()
 % MERK: %[[COUNT:.*]] = arith.trunci %[[N]] : i64 to i32
 % MERK: %[[MAP:.*]] = omp.map.info var_ptr(%{{.*}} : !llvm.ptr, i32) map_clauses(to) capture(ByCopy)
-% MERK: omp.target kernel_type(generic) host_eval(%[[COUNT]] -> %[[EVAL:.*]] : i32) map_entries(%{{.*}} -> %{{.*}}, %[[MAP]] -> %{{.*}} : !llvm.ptr, !llvm.ptr) {
+% MERK: omp.target kernel_type(generic) host_eval(%[[COUNT]] -> %[[EVAL:.*]] : i32) map_entries({{.*}}, %[[MAP]] -> %{{.*}} : {{.*}}) {
 % MERK: omp.teams num_teams( to %[[EVAL]] : i32) {
+% MERK-NEXT: merk.foreign_call @omp_get_num_teams()
+% MERK-NEXT: merk.foreign_call @merk_device_teams_enter(
 % MERK-NEXT: merk.call @omp_target_teams.report_3_0
-% MERK: omp.terminator
+% MERK-NEXT: merk.foreign_call @merk_device_teams_leave()
+% MERK-NEXT: omp.terminator
 % MERK: omp.terminator
 % MERK-NEXT: } {omp.combined}
 % MERK-NOT: merk_check_teams
-% MERK: omp.target kernel_type(generic) map_entries(%{{.*}} -> %{{.*}} : !llvm.ptr) {
-% MERK-NEXT: %{{.*}} = builtin.unrealized_conversion_cast
-% MERK-NEXT: omp.teams {
+% MERK: omp.target kernel_type(generic) map_entries(
+% MERK: omp.teams {
+% MERK-NEXT: merk.foreign_call @omp_get_num_teams()
+% MERK-NEXT: merk.foreign_call @merk_device_teams_enter(
 % MERK-NEXT: merk.call @omp_target_teams.some_teams_3_0
 % MERK: merk.foreign_call @omp_get_team_num() : () -> i32
 % MERK: merk.foreign_call @omp_get_num_teams() : () -> i32
@@ -117,7 +121,7 @@ collect_bools(Box, !Answers, !IO) :-
 % MERK: merk.foreign_call @omp_get_num_teams() : () -> i32
 
 % DEVICE-LABEL: merk.proc @omp_target_teams.main_2_0()
-% DEVICE: omp.target kernel_type(generic) map_entries(%{{.*}} -> %{{.*}}, %{{.*}} -> %[[ARG:[^ ]*]] : !llvm.ptr, !llvm.ptr) {
+% DEVICE: omp.target kernel_type(generic) map_entries({{.*}}, %{{.*}} -> %[[ARG:[^ ]*]] : {{.*}}) {
 % DEVICE: %[[COUNT:.*]] = llvm.load %[[ARG]] : !llvm.ptr -> i32
 % DEVICE: omp.teams num_teams( to %[[COUNT]] : i32) {
 

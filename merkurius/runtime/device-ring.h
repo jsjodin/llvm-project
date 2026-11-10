@@ -25,11 +25,18 @@ namespace merkurius::runtime {
 
 constexpr uint64_t kRingSlots{64};
 
-// The device's table of the rings it has, by the mailbox's slot, beside its
-// arena's current chunk: the words that the host clears when no region is
-// running.
+// The device's table of the rings it has, by the mailbox's slot, and its
+// table of the target teams regions running on it, by the region's id
+// (docs/INPROGRESS.md, Processes as teams, step 2), beside its arena's
+// current chunk: the words that the host clears when no region is running.
 constexpr uint64_t kRingCacheSlots{64};
-constexpr uint64_t kArenaClearWords{1 + kRingCacheSlots};
+constexpr uint64_t kTeamTableSlots{16};
+constexpr uint64_t kArenaClearWords{1 + kRingCacheSlots + kTeamTableSlots};
+
+// The place in a team mailbox's handle on a device, whose slot is the team.
+// Temporary (GPU processes, docs/INPROGRESS.md): a GPU becomes a place of its
+// node, with a number of its own, when the host can send to a team.
+constexpr uint64_t kTeamsPlace{0xffff};
 
 struct DeviceRing {
   // Written by the device, in a cache line of its own.
