@@ -644,8 +644,6 @@ private:
   // device as one of the region's values.
   bool SendInTarget(const Body &, llvm::ArrayRef<BodyVar> arguments,
       const ProcedureBody &, bool inRegion);
-  bool WriteOnDevice(const Body &, const semantics::Symbol &,
-      llvm::ArrayRef<BodyVar> arguments);
   bool ReceiveInTarget(const Body &, llvm::ArrayRef<BodyVar> arguments,
       const ProcedureBody &, bool inRegion);
   // process.team_mailbox(T, Box, !IO) in the device's compile: a call of the
