@@ -1484,6 +1484,36 @@ code, so the same predicates could serve the collectives between nodes, at anoth
 cost. The first test, once teams are processes, is such a barrier, measured against
 the estimates above.
 
+**Pieces of one array, in place.** A large array is not copied to each team: each
+team gets a piece and updates it where it is. All teams of a GPU address the same
+device memory, so a piece is a pointer, an offset and a length. Within one region,
+`target teams distribute parallel do` already gives each team a range of the same
+array; messages are for pieces that teams keep across steps, as a halo exchange's.
+
+- **Split and join.** A unique array is split into disjoint unique slices, each
+  consuming its part of the original. A slice is sent to a team, which updates it
+  in place and sends it back; joining the slices gives back the whole array, as
+  Rust's `split_at_mut`. Uniqueness means no two teams can hold the same element,
+  so there is no data race, and mode analysis checks it.
+- **A read-only array** is shared by every team at once, with no transfer of
+  ownership. Its memory must outlive the readers.
+- **Between nodes,** a sent slice copies only itself: the halo exchange's
+  decomposition. The same program runs on one GPU or several, at another cost.
+
+Open:
+
+- **Representation:** a slice type, or the array type with an offset, and the
+  library's split and join. mmc has no slices, so for running on mmc the library
+  can split and join by copying, with the same meaning.
+- **Lifetime:** the memory under the slices must live until they are joined. On
+  the host, a large array has a block that a collection does not move
+  (`runtime/heap.cpp`), so a pointer into it stays valid; the block must still not
+  be reclaimed while a slice is out. On a device, the region's arena is freed when
+  no region runs, so slices that outlive a region need memory with a lifetime of
+  its own: the question of an owner for the array, above.
+- **Boundaries** on multiples of a cache line (128 bytes), so that two teams do not
+  write to one line.
+
 **A later use: streaming on the GPU.** Teams as the stages of a pipeline, passing
 arrays by pointer. It has no cycle of waits, but a stage that is not on the GPU
 still stalls the one before it when the ring between them fills.
