@@ -13,6 +13,9 @@
 % RUN: merkc %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: env MERK_HEAP_CHUNK_BYTES=64 %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: not env MERK_HEAP_CHUNK_BYTES=8 %t 2>&1 | FileCheck %s --check-prefix=BAD
+% RUN: merkc -O2 %s -o %t.O2 && %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_HEAP_CHUNK_BYTES=64 %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: not env MERK_HEAP_CHUNK_BYTES=8 %t.O2 2>&1 | FileCheck %s --check-prefix=BAD
 % BAD: Mercury runtime: MERK_HEAP_CHUNK_BYTES=8 is not a number of at least 16
 
 :- module heap.

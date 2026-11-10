@@ -1,5 +1,7 @@
 % RUN: merkc -O0 %s -o %t0
 % RUN: %t0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %s -o %t0.O2
+% RUN: %t0.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc %s -o %t
 % RUN: %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 %

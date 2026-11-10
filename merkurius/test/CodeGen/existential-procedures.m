@@ -9,6 +9,7 @@
 %
 % RUN: merkc -fc1 -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MERK
 % RUN: merkc -O0 %s -o %t0 && %t0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines
+% RUN: merkc -O2 %s -o %t0.O2 && %t0.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines
 % RUN: merkc %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines
 % RUN: env MERK_HEAP_CHUNK_BYTES=64 %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines
 

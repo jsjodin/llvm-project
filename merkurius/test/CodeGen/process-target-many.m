@@ -6,7 +6,11 @@
 % RUN: merkc -fopenmp %libomp-flags %s -o %t
 % RUN: %libomp-env MERK_WORKERS=1 %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: %libomp-env %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fopenmp %libomp-flags %s -o %t.O2
+% RUN: %libomp-env MERK_WORKERS=1 %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: %libomp-env %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc %s -o %t.sequential && %t.sequential | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %s -o %t.sequential.O2 && %t.sequential.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % REQUIRES: libomp
 
 :- module process_target_many.

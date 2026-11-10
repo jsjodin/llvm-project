@@ -8,6 +8,7 @@
 % since mmc's call there is not a tail call.
 %
 % RUN: merkc -O0 -fdo-loops -I %S/Inputs %S/Inputs/tcshapes.m %s -o %t0 && %t0 | FileCheck %s --match-full-lines
+% RUN: merkc -O2 -fdo-loops -I %S/Inputs %S/Inputs/tcshapes.m %s -o %t0.O2 && %t0.O2 | FileCheck %s --match-full-lines
 % RUN: merkc -fdo-loops -I %S/Inputs %S/Inputs/tcshapes.m %s -o %t && %t | FileCheck %s --match-full-lines
 
 :- module typeclass_modules.

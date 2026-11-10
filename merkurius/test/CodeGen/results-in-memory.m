@@ -14,6 +14,7 @@
 % RUN: merkc -fc1 -fdo-loops -emit-llvm -triple aarch64-unknown-linux-gnu %s | FileCheck %s --check-prefix=AARCH64
 % RUN: merkc -fc1 -fdo-loops -emit-obj -triple aarch64-unknown-linux-gnu %s -o /dev/null
 % RUN: merkc -fdo-loops %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fdo-loops %s -o %t.O2 && %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 
 :- module results_in_memory.
 :- interface.

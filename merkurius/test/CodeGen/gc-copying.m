@@ -1,5 +1,7 @@
 % RUN: merkc -O0 %s -o %t0
 % RUN: env MERK_GC_EVERY_ALLOC=1 %t0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %s -o %t0.O2
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t0.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc %s -o %t
 % RUN: env MERK_GC_EVERY_ALLOC=1 %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: env MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace

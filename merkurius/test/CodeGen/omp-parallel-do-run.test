@@ -5,6 +5,12 @@ REQUIRES: libomp
 RUN: merkc -fopenmp -fdo-loops %libomp-flags %S/omp-parallel-do.m -o %t
 RUN: %libomp-env OMP_NUM_THREADS=4 %t \
 RUN:   | FileCheck %S/omp-parallel-do.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: merkc -O2 -fopenmp -fdo-loops %libomp-flags %S/omp-parallel-do.m -o %t.O2
+RUN: %libomp-env OMP_NUM_THREADS=4 %t.O2 \
+RUN:   | FileCheck %S/omp-parallel-do.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: merkc -fdo-loops %S/omp-parallel-do.m -o %t.sequential
 RUN: %t.sequential \
+RUN:   | FileCheck %S/omp-parallel-do.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: merkc -O2 -fdo-loops %S/omp-parallel-do.m -o %t.sequential.O2
+RUN: %t.sequential.O2 \
 RUN:   | FileCheck %S/omp-parallel-do.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

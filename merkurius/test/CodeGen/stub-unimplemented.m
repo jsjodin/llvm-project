@@ -9,6 +9,9 @@
 % RUN: merkc -fstub-unimplemented %s -o %t
 % RUN: not %t 2> %t.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: FileCheck %s --check-prefix=ERROR --match-full-lines --strict-whitespace < %t.err
+% RUN: merkc -O2 -fstub-unimplemented %s -o %t.O2
+% RUN: not %t.O2 2> %t.O2.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: FileCheck %s --check-prefix=ERROR --match-full-lines --strict-whitespace < %t.O2.err
 
 :- module stub_unimplemented.
 :- interface.

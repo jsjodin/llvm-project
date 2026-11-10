@@ -7,6 +7,7 @@
 %
 % RUN: merkc -fc1 -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MERK
 % RUN: merkc %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %s -o %t.O2 && %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 
 % MERK-LABEL: merk.proc @arrays.main_2_0()
 % MERK: merk.throw_if %{{.*}}, "Software Error: predicate `array.init'/3: Unexpected: negative size"

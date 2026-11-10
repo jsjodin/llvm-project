@@ -8,6 +8,7 @@
 % RUN: FileCheck %s --check-prefix=C < %t.mlir
 % RUN: merkc -fc1 -emit-llvm -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=LLVM
 % RUN: merkc %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %s -o %t.O2 && %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 
 % C: merk.foreign_code = "{{.*}}typedef int MR_bool;\0A#define MR_TRUE 1\0A#define MR_FALSE 0\0A
 % C-SAME: \0AMR_bool merk_foreign_foreign__proc__semidet_Dhalf__2__0(MR_Integer X, MR_Integer *merk_out_Y) {\0A  MR_bool SUCCESS_INDICATOR = MR_TRUE;\0A  MR_Integer Y;\0A

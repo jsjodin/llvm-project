@@ -6,4 +6,6 @@ REQUIRES: amdgpu-gpu
 
 RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/Inputs/arena-forever.m -o %t
 RUN: not %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_DEVICE_ARENA_BYTES=67108864 timeout -k 1 60 %t 2>&1 | FileCheck %s
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/Inputs/arena-forever.m -o %t.O2
+RUN: not %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_DEVICE_ARENA_BYTES=67108864 timeout -k 1 60 %t.O2 2>&1 | FileCheck %s
 CHECK: Mercury runtime: the devices' arenas are full: see MERK_DEVICE_ARENA_BYTES

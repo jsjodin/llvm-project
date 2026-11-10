@@ -5,6 +5,8 @@
 %
 % RUN: merkc -fopenmp -fdo-loops %libomp-flags %s -o %t
 % RUN: %libomp-env not %t 2>&1 | FileCheck %s
+% RUN: merkc -O2 -fopenmp -fdo-loops %libomp-flags %s -o %t.O2
+% RUN: %libomp-env not %t.O2 2>&1 | FileCheck %s
 
 :- module omp_target_data_replaced.
 :- interface.

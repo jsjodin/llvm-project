@@ -2,6 +2,7 @@
 % region starts, as libomptarget would take it for its default.
 %
 % RUN: merkc -fopenmp %libomp-flags %s -o %t && not %libomp-env %t 2>&1 | FileCheck %s --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fopenmp %libomp-flags %s -o %t.O2 && not %libomp-env %t.O2 2>&1 | FileCheck %s --match-full-lines --strict-whitespace
 % REQUIRES: libomp
 
 :- module omp_target_teams_count.

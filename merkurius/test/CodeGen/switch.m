@@ -7,6 +7,7 @@
 % RUN: merkc -fc1 -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MERK
 % RUN: merkc -fc1 -emit-llvm -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=LLVM
 % RUN: merkc %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %s -o %t.O2 && %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 
 % MERK-LABEL: merk.proc private @switch.s_2_0(%arg0: i64) -> i64 attributes {determinism = #merk.determinism<semidet>} {
 % MERK-NEXT: %[[Y:.*]] = merk.switch %arg0 : i64 -> i64 cases {{\[}}[-2], [0], [3]] can_fail {

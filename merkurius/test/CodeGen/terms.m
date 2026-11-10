@@ -13,6 +13,7 @@
 % RUN: merkc -fc1 -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MERK
 % RUN: merkc -fc1 -emit-llvm -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=LLVM
 % RUN: merkc %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %s -o %t.O2 && %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 
 % MERK: merk.type_def "terms.many" [#merk.constructor<"k0">, #merk.constructor<"a"(i64)>, #merk.constructor<"b"(i64, i64)>, #merk.constructor<"c"(f64)>, #merk.constructor<"d"(!merk.term<"terms.many">)>, {{.*}}, #merk.constructor<"k1">]
 % MERK: merk.type_def "list.list(int)" [#merk.constructor<"[]">, #merk.constructor<"[|]"(i64, !merk.term<"list.list(int)">)>]

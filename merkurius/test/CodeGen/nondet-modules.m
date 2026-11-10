@@ -5,6 +5,7 @@
 % continuation converts, so that call is not one. The output is mmc's.
 %
 % RUN: merkc -I %S/Inputs %S/Inputs/ndgive.m %s -o %t && %t | FileCheck %s --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -I %S/Inputs %S/Inputs/ndgive.m %s -o %t.O2 && %t.O2 | FileCheck %s --match-full-lines --strict-whitespace
 % RUN: merkc -fc1 -emit-llvm -triple x86_64-unknown-linux-gnu -I %S/Inputs %s -o - | FileCheck %s --check-prefix=LLVM
 
 :- module nondet_modules.

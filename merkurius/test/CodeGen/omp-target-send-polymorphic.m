@@ -9,6 +9,7 @@
 %
 % RUN: not merkc -fc1 -fopenmp -fopenmp-is-target-device -triple amdgpu10.30-amd-amdhsa -emit-mlir %s 2>&1 | FileCheck %s --implicit-check-not=error:
 % RUN: merkc -fopenmp %libomp-flags %s -o %t && %libomp-env %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fopenmp %libomp-flags %s -o %t.O2 && %libomp-env %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % REQUIRES: amdgpu-registered-target, libomp
 
 :- module omp_target_send_polymorphic.
