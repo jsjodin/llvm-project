@@ -3457,6 +3457,21 @@ above. This brings them back.
   receiver reads it in place. A message type of another kind in a GPU
   kind's or a region's `send` or `receive` is an error at compile time.
   Messages between the host's processes keep any type.
+- **Flat records** (added by the user on 2026-11-10), as Fortran's derived
+  types and C's structs are used in GPU code, such as the element of an
+  array of particles, or the accumulator of a reduction that OpenMP's
+  `declare reduction` combines: a type of one constructor, not recursive,
+  whose fields are flat, that is scalars, enumerations, mailboxes, other
+  flat records, which are inline, and arrays of a size fixed by the type
+  (INPROGRESS, step 5, "Flat records"). A tuple of flat types is one too.
+  It has a layout of its own, C's for the target, so that its bytes are
+  the same on the host and the GPU and in C or HIP code. In GPU code it is
+  a value, never a cell: it is kept in registers or on the stack, passed
+  and returned by value, and an array of them holds them inline, so
+  nothing made in one iteration of a loop, or one call of a recursion,
+  outlives it but by being copied into the next by value, or stored into an
+  array. A flat record is a fixed-size message, and an array of them a
+  one-block message.
 - **A GPU process's code makes only such values,** checked by type: a goal
   that makes a value of another type, by a construction or as a call's
   result, is an error at compile time that names the type. GPU code is
