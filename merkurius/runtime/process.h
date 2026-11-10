@@ -151,6 +151,9 @@ void Block(std::int64_t deadline);
 bool ProgramEnding();
 // offload.cpp: whether a target region is running.
 bool RegionsRunning();
+// With MERK_CHECK_PINNED, reports at the program's normal end how much of
+// the host memory for devices' messages is still allocated (offload.cpp).
+void CheckPinnedAtEnd();
 
 // After a failure, which has been reported, with its text as the reason that
 // monitors see: ends the running process alone, and does not return. It returns if the program has to end instead: on a

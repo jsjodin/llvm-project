@@ -1,0 +1,12 @@
+The program of omp-target-term-messages.m, compiled by the driver for the
+machine's GPU and run there: the host copies each message for the region into
+host memory, which the GPU copies into its arena, and the GPU copies each one
+it sends into host memory, from which the host queues it.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-term-messages.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout -k 1 60 %t \
+RUN:   | FileCheck %S/omp-target-term-messages.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-term-messages.m -o %t.O2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout -k 1 60 %t.O2 \
+RUN:   | FileCheck %S/omp-target-term-messages.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

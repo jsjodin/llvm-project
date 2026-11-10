@@ -631,6 +631,13 @@ private:
   bool WordMessage(mlir::Type);
   // Whether a message of the type is an array of one-word elements.
   bool ArrayMessage(mlir::Type);
+  // Whether a message of the type is copied by its type_info between the
+  // host and a device: any other ground type whose closures, if any, are not
+  // in its arguments.
+  bool CopiedMessage(const semantics::Type &, mlir::Type represented);
+  // The type_info of a copied message's type, as the runtime takes it.
+  mlir::Value MessageTypeInfo(
+      const semantics::Type *, mlir::Location, parser::CharBlock);
   // The message types that device code may send, by their keys.
   llvm::DenseMap<std::uint64_t, const semantics::Type *> messageTypes_;
   std::optional<std::uint64_t> MessageKey(

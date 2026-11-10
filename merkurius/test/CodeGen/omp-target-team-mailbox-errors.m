@@ -1,5 +1,7 @@
 % Team mailboxes on a device hold one-word messages and arrays of them so far
-% (docs/INPROGRESS.md, Processes as teams, steps 2 and 3). A team mailbox
+% (docs/INPROGRESS.md, Processes as teams, steps 2 and 3), though a region
+% sends and receives messages of other types through the host's mailboxes
+% (GPU processes without omp target, step 4e). A team mailbox
 % for another type, such as strings, terms with arguments or arrays of
 % strings, is an error at team_mailbox in the device's compile. The host's
 % compile calls the library's team_mailbox, whose mailboxes hold any type.

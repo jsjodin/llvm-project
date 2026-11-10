@@ -2756,15 +2756,25 @@ rest of the world only through its host.
   for both could share a table of procedure references, so that closures over
   them cross between the places of one node, though not to a node running
   another binary; the handle and wire formats should not rule this out.
-- **Messages are copied** into a flat buffer, as `send` on the host
-  deep-copies into a fragment by the message's `type_info` (Memory
-  management, decided 2026-11-04). The device does no run-time dispatch, so
-  there code generation specializes the copy for the message type, which is
-  known at almost every `send` and `receive` because each mailbox has one;
-  only code that is polymorphic in the message type, such as a generic
-  dispatcher, would need a `type_info` (The device runtime, below). The sendability rule applies,
-  and the GPU adds to what cannot cross: foreign handles, `io`, `store` and
-  mutable references are already excluded, and closures are too.
+- **Messages are copied**, as `send` on the host deep-copies into a
+  fragment by the message's `type_info` (Memory management, decided
+  2026-11-04). One-word messages and arrays of one-word elements go as a
+  word or a block. Any other message is copied by its `type_info` with the
+  host's own walk (`runtime/copy.h`), which the GPU's runtime runs too: the
+  GPU copies a message it sends into host memory, from which the host
+  queues it, and the host copies a message for the GPU into host memory, from
+  which the GPU copies it into its arena (Spawning on a GPU as implemented,
+  "Messages"). Decided by the user 2026-11-10, for the functionality: "If
+  this is an inefficient way of doing things we will have to revisit and
+  come up with something more optimal". **Rejected for now: a copy that
+  code generation specializes for each message type**, as first planned,
+  which has no dispatch on the GPU but repeats the terms' layout, which
+  Lowering decides, in generated code, and would have covered flat types
+  first; it may come back for the types where the walk is too slow. The
+  sendability rule applies, and the GPU adds to what cannot cross: foreign
+  handles, `io`, `store` and mutable references are already excluded, and
+  closures and existentially typed values are too, as they name procedures
+  and descriptors of the other image.
 - **The protocol is the message type.** `mailbox(M)` says which messages may
   be sent, and a message's constructor stands for the kind of communication.
   The order of messages is not checked, as between CPU processes; session
@@ -2831,7 +2841,8 @@ Collectives and direct GPU transfers).
 - **The GPUs** (`runtime/devices.cpp`). The first use calls liboffload's `olInit` and takes its devices other than the host, each with a context and its name and UID. A GPU's number is OpenMP's for it, found by UID with `omp_get_device_from_uid`, so that a region and a process name a device alike; one that libomptarget does not number, or every GPU without libomptarget, is numbered after OpenMP's devices in liboffload's order. liboffload itself has no numbers, only handles in `olIterateDevices`' order, and libomptarget numbers devices in the order that compatible images are first registered. The runtime's RPC callback is registered with each platform. Memory and copies use libomptarget for OpenMP's devices and liboffload for the others. liboffload's functions are declared weakly in `runtime/liboffload.h`, from its `.td` files, since its generated header is built after merkrt; a program with GPU kinds links `-lLLVMOffload`.
 - **A spawn** (`runtime/gpu-processes.cpp`) loads the module's image on the GPU the first time (`olCreateProgram`), and sets its `merk_device_number`. It makes the process's mailbox on the host, owned by no host process, and launches `merk_process_<kind>`, one team of one thread, on a queue of its own, with the words and then the mailbox's handle, each an 8-byte argument, as AMDGPU's plugin copies them by the kernel's metadata. The GPU receives from the mailbox through its ring, as a region does. A host function queued after the kernel closes the mailbox when it ends; the queue is destroyed at the next spawn. The handle's place is still the host's, 0, until handles are routed by place. Messages between GPU processes, regions and host processes all go through the host's mailboxes, so a device's number only chooses memory.
 - **Memory.** A running GPU process counts as a running region, so the devices' arenas and rings stay while it runs, and are freed when the next region ends, not on liboffload's thread. The program ends at once when main does, even while GPU processes run. Each image on a device has an arena of its own.
-- **Tests.** `CodeGen/process-spawn-at.m` spawns at the host and checks the software errors; `CodeGen/process-spawn-at-gpu.test` spawns on the GPU with an `int`, a `float`, a `character` and a mailbox, ends a program while its GPU process waits, and runs a program compiled for another GPU; at `-O0` the image does not link (LLVM bugs to report).
+- **Messages** (step 4e). A message that is neither one word nor an array of one-word elements, of a ground type with no higher-order argument, is copied by its `type_info` (`runtime/copy.h`, the host's copy, templated on where the cells go), between GPU processes or target regions and the host's mailboxes. The device's compile passes the message type's `type_info` to `merk_device_send_term` and `merk_device_receive_term`, and keeps its descriptors' functors, by which the copy walks, though not their unify and compare entries. A send copies the message into chunks of host memory that the host gives (`rpcPinnedChunk`), and the host queues it from there (`rpcSendTerm`) and frees them. A mailbox that a device receives such messages from has a ring of terms, whose slots only say that a message is there: the device asks the host to copy the oldest into host memory (`rpcTakeTerm`), copies that into its arena, and moves the ring's head, after which the host frees its copy (`merk_mailbox_copy_for_ring`). A mailbox that closes frees the copy if the head has passed its message, as it has when a GPU process ends after its last receive; a copy the device may still be reading goes when no region or GPU process runs (`merk_mailbox_detach_rings`). With `MERK_CHECK_PINNED` set, the program's normal end waits up to ten seconds for running regions and GPU processes and reports how many chunks of such copies are still allocated, for tests. A copy for the other image refuses a closure and an existentially typed constructor's `type_info`s and `typeclass_info`s, which name the other image's procedures and descriptors ("cannot copy a closure between the host and a GPU"); a message type with a higher-order argument is reported at compile time. A team mailbox still holds only one-word messages and arrays.
+- **Tests.** `CodeGen/process-gpu-messages.m` and `-gpu.test`: a counter that takes `add(N)` and `get(Reply)`, a ping-pong of a hundred rounds between two GPU processes through the host, a list and a string to a GPU process and back, and a closure that cannot cross; `CodeGen/omp-target-term-messages.m` and `-gpu.test`: a target region that receives and sends a point, a string, a list and an array of strings. `CodeGen/process-spawn-at.m` spawns at the host and checks the software errors; `CodeGen/process-spawn-at-gpu.test` spawns on the GPU with an `int`, a `float`, a `character` and a mailbox, ends a program while its GPU process waits, and runs a program compiled for another GPU; at `-O0` the image does not link (LLVM bugs to report).
 
 #### Handles, routing and places
 

@@ -22,9 +22,10 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "shared/rpc.h"
+#include "../copy.h"
 #include "../device-ring.h"
 #include "../rpc-opcodes.h"
-#include "shared/rpc.h"
 #include <gpuintrin.h>
 #include <time.h>
 
@@ -77,19 +78,25 @@ int64_t Deadline(int64_t milliseconds) {
 
 } // namespace
 
-using merkurius::runtime::kTeamsPlace;
-using merkurius::runtime::kTeamTableSlots;
-using merkurius::runtime::rpcChunk;
-using merkurius::runtime::rpcFail;
-using merkurius::runtime::rpcGiveArray;
 using merkurius::runtime::DeviceRing;
 using merkurius::runtime::kRingCacheSlots;
+using merkurius::runtime::kRingOfArrays;
+using merkurius::runtime::kRingOfTerms;
+using merkurius::runtime::kRingOfWords;
 using merkurius::runtime::kRingSlots;
+using merkurius::runtime::kTeamsPlace;
+using merkurius::runtime::kTeamTableSlots;
 using merkurius::runtime::rpcAttach;
+using merkurius::runtime::rpcChunk;
 using merkurius::runtime::rpcDrain;
+using merkurius::runtime::rpcFail;
+using merkurius::runtime::rpcGiveArray;
+using merkurius::runtime::rpcPinnedChunk;
 using merkurius::runtime::rpcSend;
 using merkurius::runtime::rpcSendArray;
+using merkurius::runtime::rpcSendTerm;
 using merkurius::runtime::rpcTakeArray;
+using merkurius::runtime::rpcTakeTerm;
 
 namespace {
 
@@ -724,7 +731,7 @@ template <typename Poll> bool Wait(int64_t milliseconds, Poll poll) {
 
 // The entry of the mailbox's ring, attaching it the first time, or null if
 // the mailbox is closed.
-RingEntry *RingOf(const uint64_t *handle, bool array) {
+RingEntry *RingOf(const uint64_t *handle, uint64_t kind) {
   RingEntry **bucket{&arena.rings[handle[2] % kRingCacheSlots]};
   for (RingEntry *entry{__atomic_load_n(bucket, __ATOMIC_ACQUIRE)}; entry;
        entry = entry->next) {
@@ -742,7 +749,7 @@ RingEntry *RingOf(const uint64_t *handle, bool array) {
         buffer->data[i] = handle[i];
       }
       buffer->data[5] = static_cast<uint64_t>(DeviceNumber());
-      buffer->data[6] = array;
+      buffer->data[6] = kind;
     });
     port.recv([&](rpc::Buffer *buffer, uint32_t) {
       ring = reinterpret_cast<DeviceRing *>(buffer->data[0]);
@@ -777,9 +784,9 @@ void Drain(const uint64_t *handle) {
 // One look at the ring, with no call of the host unless messages wait
 // outside it: whether it has a message, whose slot is then in `value`, and
 // the ring's entry. The message stays until Taken.
-bool Look(const uint64_t *handle, bool array, RingEntry *&entry,
-    uint64_t *value) {
-  entry = RingOf(handle, array);
+bool Look(
+    const uint64_t *handle, uint64_t kind, RingEntry *&entry, uint64_t *value) {
+  entry = RingOf(handle, kind);
   if (!entry) {
     return false;
   }
@@ -817,7 +824,7 @@ extern "C" int merk_device_receive(
   }
   RingEntry *entry{nullptr};
   if (!Wait(milliseconds,
-          [&]() { return Look(handle, false, entry, message); })) {
+          [&]() { return Look(handle, kRingOfWords, entry, message); })) {
     return 0;
   }
   Taken(entry);
@@ -835,7 +842,8 @@ extern "C" int merk_device_receive_array(
   }
   RingEntry *entry{nullptr};
   uint64_t size{0};
-  if (!Wait(milliseconds, [&]() { return Look(handle, true, entry, &size); })) {
+  if (!Wait(milliseconds,
+          [&]() { return Look(handle, kRingOfArrays, entry, &size); })) {
     return 0;
   }
   void *array{merk_device_alloc(sizeof(uint64_t) * (1 + size))};
@@ -851,6 +859,152 @@ extern "C" int merk_device_receive_array(
     port.recv([](rpc::Buffer *, uint32_t) {});
   }
   *message = reinterpret_cast<uint64_t>(array);
+  Taken(entry);
+  return 1;
+}
+
+namespace {
+
+using merkurius::runtime::CopyTyped;
+using merkurius::runtime::Resolve;
+
+// Reports a value that a copy of a message cannot copy (copy.h).
+[[noreturn]] void CopyFailed(const char *message, const char *detail) {
+  Fail(2, Text{}.Append(message).Append(detail).characters);
+}
+
+// Where the device's copy of a message it receives goes: its arena.
+struct ArenaMemory {
+  static constexpr bool kOtherImage{true};
+  void *Allocate(uint64_t bytes) { return merk_device_alloc(bytes); }
+  [[noreturn]] void Fail(const char *message, const char *detail) {
+    CopyFailed(message, detail);
+  }
+};
+
+// Where the device's copy of a message it sends goes: host memory that the
+// host reads, in chunks that the host gives (rpcPinnedChunk), linked by
+// their first word. Only the sending thread uses them.
+struct PinnedChunk {
+  PinnedChunk *next;
+  uint64_t device;
+  uint64_t bytes;
+};
+
+class PinnedMemory {
+public:
+  static constexpr bool kOtherImage{true};
+  PinnedChunk *First() const { return first_; }
+
+  void *Allocate(uint64_t bytes) {
+    bytes = (bytes + 7) & ~uint64_t{7};
+    if (static_cast<uint64_t>(limit_ - next_) < bytes) {
+      PinnedChunk *chunk{nullptr};
+      {
+        rpc::Client::Port port{__llvm_rpc_client.open<rpcPinnedChunk>()};
+        port.send([&](rpc::Buffer *buffer, uint32_t) {
+          buffer->data[0] = static_cast<uint64_t>(DeviceNumber());
+          buffer->data[1] = bytes;
+        });
+        port.recv([&](rpc::Buffer *buffer, uint32_t) {
+          chunk = reinterpret_cast<PinnedChunk *>(buffer->data[0]);
+        });
+      }
+      if (last_) {
+        last_->next = chunk;
+      } else {
+        first_ = chunk;
+      }
+      last_ = chunk;
+      next_ = reinterpret_cast<char *>(chunk + 1);
+      limit_ = reinterpret_cast<char *>(chunk) + chunk->bytes;
+    }
+    void *cell{next_};
+    next_ += bytes;
+    return cell;
+  }
+
+  [[noreturn]] void Fail(const char *message, const char *detail) {
+    CopyFailed(message, detail);
+  }
+
+private:
+  PinnedChunk *first_{nullptr};
+  PinnedChunk *last_{nullptr};
+  char *next_{nullptr};
+  char *limit_{nullptr};
+};
+
+} // namespace
+
+// Sends a message of any type that is not one word or an array of one-word
+// elements (docs/INPROGRESS.md, GPU processes without omp target, step 4e):
+// the device copies it by its type_info, `typeInfo`, into host memory, and
+// the host sends that copy, as merk_device_send sends a word, and frees it.
+// To a team mailbox, the message goes by its pointer, as an array does.
+extern "C" void merk_device_send_term(const uint64_t *handle, uint64_t key,
+    uint64_t message, const void *typeInfo) {
+  if (IsTeamHandle(handle)) {
+    TeamSend(handle, message);
+    return;
+  }
+  PinnedMemory memory;
+  uint64_t copy{CopyTyped(
+      message, Resolve(reinterpret_cast<uint64_t>(typeInfo), nullptr), memory)};
+  // The host reads the copy once it has the buffer.
+  __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+  rpc::Client::Port port{__llvm_rpc_client.open<rpcSendTerm>()};
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    for (int i{0}; i < 5; ++i) {
+      buffer->data[i] = handle[i];
+    }
+    buffer->data[5] = key;
+    buffer->data[6] = copy;
+    buffer->data[7] = reinterpret_cast<uint64_t>(memory.First());
+  });
+  port.recv([](rpc::Buffer *, uint32_t) {});
+}
+
+// As merk_device_receive, for a mailbox of messages of any other type: the
+// ring says that a message is there, the host copies it into host memory
+// that the device reads (rpcTakeTerm), and the device copies that into its
+// arena by the message type's type_info, `typeInfo`, before it moves the
+// ring's head, after which the host frees its copy. A mailbox that closed
+// meanwhile has no message. From a team mailbox, the sender's message
+// itself.
+extern "C" int merk_device_receive_term(const uint64_t *handle,
+    int64_t milliseconds, const void *typeInfo, uint64_t *message) {
+  if (IsTeamHandle(handle)) {
+    return TeamReceive(handle, milliseconds, message);
+  }
+  RingEntry *entry{nullptr};
+  uint64_t present{0};
+  if (!Wait(milliseconds,
+          [&]() { return Look(handle, kRingOfTerms, entry, &present); })) {
+    return 0;
+  }
+  bool found{false};
+  uint64_t copy{0};
+  {
+    rpc::Client::Port port{__llvm_rpc_client.open<rpcTakeTerm>()};
+    port.send([&](rpc::Buffer *buffer, uint32_t) {
+      for (int i{0}; i < 5; ++i) {
+        buffer->data[i] = handle[i];
+      }
+    });
+    port.recv([&](rpc::Buffer *buffer, uint32_t) {
+      found = buffer->data[0] != 0;
+      copy = buffer->data[1];
+    });
+  }
+  if (!found) {
+    return 0;
+  }
+  // The host wrote the copy before it answered.
+  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
+  ArenaMemory memory;
+  *message = CopyTyped(
+      copy, Resolve(reinterpret_cast<uint64_t>(typeInfo), nullptr), memory);
   Taken(entry);
   return 1;
 }

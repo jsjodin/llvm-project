@@ -2280,6 +2280,64 @@ the process asks the host to launch. The first version has neither.
      Then two GPU processes exchange messages through the host. Run small
      first, with a timeout, as the GPU drives the display.
 
+     Done 2026-11-10, as the design document records (GPU processes,
+     "Spawning on a GPU as implemented", Messages). What differs from the
+     plan:
+     - **Messages of any type.** `get(Reply)` is a term with a mailbox in
+       it, which the device did not send or receive: only one-word messages
+       and arrays of them. Decided by the user the same day, as recommended:
+       such a message is copied by its `type_info`, with the host's copy,
+       which the GPU's runtime runs too (`runtime/copy.h`), through host
+       memory that both sides address. "If this is an inefficient way of
+       doing things we will have to revisit and come up with something more
+       optimal, but more functionality now is important." Rejected: a copy
+       that code generation specializes for each type, as the design
+       document had it, which is much more work, repeats the terms' layout
+       and would have covered flat types first; and fixed words for flat
+       types only, which every later type would have had to extend.
+     - **The device keeps its descriptors' functors,** by which the copy
+       walks, though nothing unifies or compares there.
+     - **What cannot cross is refused when copied:** a closure, and an
+       existentially typed constructor's hidden fields, which name the
+       other image's procedures and descriptors. A message type with a
+       higher-order argument is reported at compile time.
+     - **Target regions get it too,** as they send and receive the same
+       way: strings, terms and arrays of non-word elements, which were "not
+       yet implemented" in regions. A team mailbox still holds only words
+       and arrays ("Temporary" in `lib/CodeGen/MLIRGenOpenMP.cpp`), as
+       sharing a term by its pointer between teams is not tested yet.
+     - **`descriptor.h` includes `stdint.h`,** not `cstdint`, so that the
+       GPU's runtime, which has no C++ library, includes it.
+     - **The host's copy for a ring is freed when its mailbox closes,** if
+       the device has moved the head past its message. Found in review: a
+       first version dropped it at close, which leaked a chunk of pinned
+       memory for each GPU process whose last message had cells, as the
+       ring is not trimmed after the last receive. A copy that the device
+       may still be reading is freed when no region or GPU process runs.
+       `MERK_CHECK_PINNED` reports at the end how many chunks are left;
+       without the fix, two hundred such processes left two hundred.
+     - **Not on the GPU yet:** the string library's operations that call
+       the runtime, such as `++` (`merk_string_append`), which the compile
+       reports, so the test's GPU process sends its string back as it got
+       it; and making closures, so it sums a list without `foldl`.
+     Tests: `CodeGen/process-gpu-messages.m` and `-gpu.test`,
+     `CodeGen/omp-target-term-messages.m` and `-gpu.test`, and the region
+     error tests, which keep the higher-order case.
+
+     **Leaks found meanwhile, in code before 4e, each to be fixed as a
+     commit of its own after it:**
+     - `TrimRing` unlinks the messages that a device has taken but never
+       frees their fragments, for every message any device receives.
+     - `merk_mailbox_message` gives the chunks of a message that the host's
+       side of `rpcTakeArray` reads to a reader, and a thread that runs no
+       process, as the plugin's server thread, keeps them for ever.
+     - `Close` keeps the messages a ring has shown, as `TakeArray` copies a
+       message after the mailbox's lock is released.
+     - In a program with GPU processes but no target regions nothing frees
+       the rings, the arenas or the retired copies, since only the end of
+       the last region does, and a GPU process's end runs on liboffload's
+       thread, which must not call liboffload.
+
    **Decisions,** made by the user on 2026-11-10, each as recommended:
    - **D1. Which kinds get a kernel: those whose declaration says so,**
      such as `:- process counter(int) receives counter_msg on gpu`.

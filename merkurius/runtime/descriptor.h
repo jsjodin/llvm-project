@@ -15,44 +15,46 @@
 #ifndef MERKURIUS_RUNTIME_DESCRIPTOR_H_
 #define MERKURIUS_RUNTIME_DESCRIPTOR_H_
 
-#include <cstdint>
+// stdint.h, not cstdint, so that the GPU's runtime, built without a C++
+// library, includes it too (copy.h).
+#include <stdint.h>
 
 namespace merkurius::runtime {
 
-using Word = std::uint64_t;
+using Word = uint64_t;
 
 // The fields' order and types are LowerTypeCtors'. An existentially typed
 // constructor's cell has `hidden` fields before its arguments: the type_infos
 // and typeclass_infos of its existentially quantified type variables.
 struct Functor {
   const char *name;
-  std::uint32_t arity;
-  std::uint8_t tag;
-  std::uint8_t hidden;
+  uint32_t arity;
+  uint8_t tag;
+  uint8_t hidden;
   // Of which the first are type_infos, and the rest typeclass_infos.
-  std::uint8_t hiddenTypeInfos;
-  std::int32_t secondary;
-  std::int64_t constant;
+  uint8_t hiddenTypeInfos;
+  int32_t secondary;
+  int64_t constant;
   const Word *fields;
 };
 
 struct TypeCtor {
-  std::uint8_t kind;
-  std::uint8_t flags;
-  std::uint16_t arity;
-  std::uint32_t functorCount;
+  uint8_t kind;
+  uint8_t flags;
+  uint16_t arity;
+  uint32_t functorCount;
   const char *module;
   const char *name;
   const void *unify;
   const void *compare;
   const Functor *functors;
-  std::uint16_t byTag[8];
-  const std::uint16_t *constants;
-  const std::uint16_t *shared;
+  uint16_t byTag[8];
+  const uint16_t *constants;
+  const uint16_t *shared;
 };
 
 // The order of Lowering.cpp's DescriptorKind.
-enum Kind : std::uint8_t {
+enum Kind : uint8_t {
   Int,
   Uint,
   Int8,
@@ -79,8 +81,8 @@ enum Kind : std::uint8_t {
 
 // byTag's marks, for a tag whose word is a constant, and for one that
 // constructors share.
-constexpr std::uint16_t kConstantTag{0xffff};
-constexpr std::uint16_t kSharedTag{0xfffe};
+constexpr uint16_t kConstantTag{0xffff};
+constexpr uint16_t kSharedTag{0xfffe};
 
 constexpr Word kTagMask{7};
 constexpr unsigned kTagBits{3};

@@ -1,10 +1,10 @@
-% A target region sends only one-word messages and arrays of them so far:
-% integers, floats, characters and constants of a type of constants only.
-% A message of another type, such as a string, a term with arguments or an
-% array of strings, is an error at
-% the send, in the host's compile as in the device's, since both compile
-% the region (docs/INPROGRESS.md, The device's side of the first slice,
-% Decision 3).
+% A target region sends a message of any ground type whose arguments are
+% not higher-order (docs/INPROGRESS.md, GPU processes without omp target,
+% step 4e), as omp-target-term-messages.m does. A message of a type with a
+% closure in its arguments, which cannot cross between the host and a GPU,
+% is an error at the send, in the host's compile as in the device's, since
+% both compile the region. A closure in a constructor's field is found when
+% the runtime copies the message (process-gpu-messages.m).
 %
 % RUN: not merkc -fc1 -fopenmp -emit-merk %s 2>&1 | FileCheck %s --implicit-check-not=error:
 % RUN: not merkc -fc1 -fopenmp -fopenmp-is-target-device -triple amdgcn-amd-amdhsa -emit-merk %s 2>&1 | FileCheck %s --implicit-check-not=error:
@@ -15,33 +15,14 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module array, int, process.
+:- import_module list, process.
 
-:- type point
-    --->    point(int, int).
-
-:- pred greet(mailbox(string)::in, io::di, io::uo) is det.
-greet(Strings, !IO) :-
+:- pred tests(mailbox(list(pred(int)))::in, io::di, io::uo) is det.
+tests(Tests, !IO) :-
     %$omp target
-    send(Strings, "hello", !IO).
-% CHECK: omp-target-send-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for sending messages of type string in target regions
-
-:- pred words(mailbox(array(string))::in, io::di, io::uo) is det.
-words(Words, !IO) :-
-    %$omp target
-    send(Words, array.init(1, "a"), !IO).
-% CHECK: omp-target-send-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for sending messages of type array.array(string) in target regions
-
-:- pred origin(mailbox(point)::in, io::di, io::uo) is det.
-origin(Points, !IO) :-
-    %$omp target
-    send(Points, point(0, 0), !IO).
-% CHECK: omp-target-send-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for sending messages of type omp_target_send_errors.point in target regions
+    send(Tests, [], !IO).
+% CHECK: omp-target-send-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for sending messages of type list.list(pred(int)) in target regions
 
 main(!IO) :-
-    new_mailbox(Strings, !IO),
-    greet(Strings, !IO),
-    new_mailbox(Words, !IO),
-    words(Words, !IO),
-    new_mailbox(Points, !IO),
-    origin(Points, !IO).
+    new_mailbox(Tests, !IO),
+    tests(Tests, !IO).

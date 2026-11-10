@@ -19,18 +19,21 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include <unistd.h>
-#include "process.h"
-#include "devices.h"
+#include "copy.h"
 #include "device-ring.h"
+#include "devices.h"
 #include "fragment.h"
+#include "process.h"
 #include "rpc-opcodes.h"
 #include "shared/rpc.h"
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <pthread.h>
+#include <unistd.h>
 
 extern "C" std::int32_t merk_compare_type_infos(
     std::uint64_t x, std::uint64_t y);
@@ -55,8 +58,15 @@ extern "C" std::int64_t merk_mailbox_wait(std::int64_t nodeHigh,
 
 extern "C" merkurius::runtime::DeviceRing *merk_mailbox_attach(
     std::int64_t nodeHigh, std::int64_t nodeLow, std::int64_t placeAndSlot,
-    std::int64_t generation, std::int64_t secret, bool arrays, int device,
-    merkurius::runtime::DeviceRing *(*allocate)(int), std::uint64_t *head);
+    std::int64_t generation, std::int64_t secret, std::uint64_t kind,
+    int device, merkurius::runtime::DeviceRing *(*allocate)(int),
+    std::uint64_t *head);
+extern "C" bool merk_mailbox_copy_for_ring(std::int64_t nodeHigh,
+    std::int64_t nodeLow, std::int64_t placeAndSlot, std::int64_t generation,
+    std::int64_t secret,
+    std::uint64_t (*copy)(
+        int device, std::uint64_t typeInfo, std::uint64_t value, void **held),
+    void (*release)(int device, void *held), std::uint64_t *result);
 extern "C" void merk_mailbox_drain(std::int64_t nodeHigh, std::int64_t nodeLow,
     std::int64_t placeAndSlot, std::int64_t generation, std::int64_t secret);
 extern "C" void merk_mailbox_trim(std::int64_t nodeHigh, std::int64_t nodeLow,
@@ -294,6 +304,97 @@ void TakeArray(const std::uint64_t *handle, int device, void *array) {
   }
 }
 
+// Chunks of host memory that a device reads and writes directly, for a
+// copy of a message (copy.h), as rpc-opcodes.h's rpcPinnedChunk describes
+// them: the next chunk of the copy, the device's number and the chunk's
+// size, and then its cells. The device writes a copy into chunks that it
+// asks for, and the host one that it makes for the device.
+struct PinnedChunk {
+  PinnedChunk *next;
+  std::uint64_t device;
+  std::uint64_t bytes;
+};
+
+constexpr std::uint64_t kPinnedChunkBytes{4096};
+
+// How many such chunks are allocated, for MERK_CHECK_PINNED.
+std::atomic<std::int64_t> pinnedChunks{0};
+
+PinnedChunk *NewPinnedChunk(int device, std::uint64_t bytes) {
+  std::uint64_t size{sizeof(PinnedChunk) + bytes};
+  size = size < kPinnedChunkBytes ? kPinnedChunkBytes : size;
+  auto *chunk{static_cast<PinnedChunk *>(DeviceAllocateHost(device, size))};
+  if (!chunk) {
+    Fail("out of host memory for a device's message");
+  }
+  *chunk = {nullptr, static_cast<std::uint64_t>(device), size};
+  pinnedChunks.fetch_add(1);
+  return chunk;
+}
+
+void FreePinnedChunks(PinnedChunk *chunk) {
+  while (chunk) {
+    pinnedChunks.fetch_sub(1);
+    PinnedChunk *next{chunk->next};
+    DeviceFreeHost(static_cast<int>(chunk->device), chunk);
+    chunk = next;
+  }
+}
+
+// Where the host's copy of a message for a device goes (copy.h).
+class PinnedMemory {
+public:
+  explicit PinnedMemory(int device) : device_{device} {}
+  static constexpr bool kOtherImage{true};
+  PinnedChunk *First() const { return first_; }
+
+  void *Allocate(std::uint64_t bytes) {
+    bytes = (bytes + 7) & ~std::uint64_t{7};
+    if (static_cast<std::uint64_t>(limit_ - next_) < bytes) {
+      PinnedChunk *chunk{NewPinnedChunk(device_, bytes)};
+      if (last_) {
+        last_->next = chunk;
+      } else {
+        first_ = chunk;
+      }
+      last_ = chunk;
+      next_ = reinterpret_cast<char *>(chunk + 1);
+      limit_ = reinterpret_cast<char *>(chunk) + chunk->bytes;
+    }
+    void *cell{next_};
+    next_ += bytes;
+    return cell;
+  }
+
+  // On the plugin's server thread, where exit would hang.
+  [[noreturn]] void Fail(const char *message, const char *detail) {
+    std::fflush(stdout);
+    std::fprintf(stderr, "Mercury runtime: %s%s\n", message, detail);
+    std::_Exit(1);
+  }
+
+private:
+  int device_;
+  PinnedChunk *first_{nullptr};
+  PinnedChunk *last_{nullptr};
+  char *next_{nullptr};
+  char *limit_{nullptr};
+};
+
+// The mailbox's message, copied by its type_info into host memory that the
+// device reads, for merk_mailbox_copy_for_ring.
+std::uint64_t CopyForDevice(
+    int device, std::uint64_t typeInfo, std::uint64_t value, void **held) {
+  PinnedMemory memory{device};
+  std::uint64_t copy{CopyTyped(value, Resolve(typeInfo, nullptr), memory)};
+  *held = memory.First();
+  return copy;
+}
+
+void ReleaseForDevice(int, void *held) {
+  FreePinnedChunks(static_cast<PinnedChunk *>(held));
+}
+
 // A mailbox's ring, in memory that the device reads directly. It is freed
 // when no region is running.
 DeviceRing *NewRing(int device) {
@@ -356,8 +457,7 @@ unsigned HandleOpcode(void *raw, unsigned) {
       const std::int64_t *h{reinterpret_cast<const std::int64_t *>(buffer->data)};
       std::uint64_t head{0};
       DeviceRing *ring{merk_mailbox_attach(h[0], h[1], h[2], h[3], h[4],
-          buffer->data[6] != 0, static_cast<int>(buffer->data[5]), NewRing,
-          &head)};
+          buffer->data[6], static_cast<int>(buffer->data[5]), NewRing, &head)};
       buffer->data[0] = reinterpret_cast<std::uint64_t>(ring);
       buffer->data[1] = head;
     });
@@ -402,6 +502,30 @@ unsigned HandleOpcode(void *raw, unsigned) {
           buffer->data[7] >> 8);
     });
     return rpc::RPC_SUCCESS;
+  case rpcPinnedChunk:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      buffer->data[0] = reinterpret_cast<std::uint64_t>(
+          NewPinnedChunk(static_cast<int>(buffer->data[0]), buffer->data[1]));
+    });
+    return rpc::RPC_SUCCESS;
+  case rpcSendTerm:
+    // The copy is in the chunks, which the send copies again.
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      SendTo(buffer->data, buffer->data[5], buffer->data[6]);
+      FreePinnedChunks(reinterpret_cast<PinnedChunk *>(buffer->data[7]));
+    });
+    return rpc::RPC_SUCCESS;
+  case rpcTakeTerm:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      const std::int64_t *h{
+          reinterpret_cast<const std::int64_t *>(buffer->data)};
+      std::uint64_t copy{0};
+      bool found{merk_mailbox_copy_for_ring(h[0], h[1], h[2], h[3], h[4],
+          CopyForDevice, ReleaseForDevice, &copy)};
+      buffer->data[0] = found;
+      buffer->data[1] = copy;
+    });
+    return rpc::RPC_SUCCESS;
   default:
     return rpc::RPC_UNHANDLED_OPCODE;
   }
@@ -418,6 +542,13 @@ extern "C" void merk_device_send(const std::uint64_t *handle,
 extern "C" void merk_device_send_array(const std::uint64_t *handle,
     std::uint64_t key, const std::uint64_t *array) {
   SendTo(handle, key, reinterpret_cast<std::uint64_t>(array));
+}
+
+// A region that runs on the host sends a message of any other type as the
+// device does, by its key.
+extern "C" void merk_device_send_term(const std::uint64_t *handle,
+    std::uint64_t key, std::uint64_t message, const void *) {
+  SendTo(handle, key, message);
 }
 
 // A region that runs on the host gives the array itself.
@@ -468,6 +599,30 @@ bool RegionsRunning() {
   bool running{runningRegions != 0};
   pthread_mutex_unlock(&arenaLock);
   return running;
+}
+} // namespace merkurius::runtime
+
+// With MERK_CHECK_PINNED set, a check that the copies of messages between
+// the host and the devices were freed: when the program ends, it waits up
+// to ten seconds for the regions and GPU processes still running, so that
+// the copies their mailboxes held have gone, and reports how many chunks of
+// them are still allocated (docs/INPROGRESS.md, GPU processes without omp
+// target, step 4e).
+namespace merkurius::runtime {
+void CheckPinnedAtEnd() {
+  const char *value{std::getenv("MERK_CHECK_PINNED")};
+  if (!value || !*value) {
+    return;
+  }
+  for (int i{0}; i < 10000 && RegionsRunning(); ++i) {
+    timespec millisecond{0, 1000000};
+    nanosleep(&millisecond, nullptr);
+  }
+  std::fflush(stdout);
+  std::fprintf(stderr,
+      "Mercury runtime: %lld chunks of host memory for devices' messages "
+      "are allocated\n",
+      static_cast<long long>(pinnedChunks.load()));
 }
 } // namespace merkurius::runtime
 
@@ -549,6 +704,13 @@ extern "C" int merk_device_receive(const std::uint64_t *handle,
     return 0;
   }
   return TakeOldest(handle, *message);
+}
+
+// A region that runs on the host receives a message of any other type as
+// it receives a word.
+extern "C" int merk_device_receive_term(const std::uint64_t *handle,
+    std::int64_t milliseconds, const void *, std::uint64_t *message) {
+  return merk_device_receive(handle, milliseconds, message);
 }
 
 // A region that runs on the host receives an array as any other message.
