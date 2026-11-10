@@ -1288,7 +1288,7 @@ A module defines process kinds; it is not itself a process. Exporting the mailbo
 - **Syntax and the option.** `:- process Kind(Types) receives Types`, with `on gpu` after it for a kind that runs on a GPU (decision D1). `process` is a prefix operator with the other declarations' priority, and `receives` and `on` are infix operators that bind less tightly than `,`, which separates several message types: the declaration reads as `process((Kind receives Types) on gpu)`. mmc has none of them, so they exist only with `-fprocess-declarations`, as `receive` exists only with `-freceive-goal`. Even then they are operators only in an item that begins with `:- process`, and `process` only there. **Rejected: operators everywhere**, as `do` and `receive` are. Every program with processes imports the module `process`, and `:- import_module int, process, string` would then be an error, an operator used as an operand; a constructor `on`, as in `turn ---> on ; off`, would be one too.
 - **Conversion.** The converter reads a `ProcessDecl`: the kind's name, which is not module-qualified, its argument types, its message types in order, and whether it runs on a GPU. While the declaration's terms exist, it makes the expansion as the terms it would be written as, and converts them as items: the kind's `pred` declaration, and, for one message type, `spawn_Kind`'s declaration and its clause. The names in them are qualified, `io.io`, `process.mailbox`, `process.spawn` and the module's own kind, so that they mean the same whatever else the module declares. The node keeps the expansion out of its fields, so the parse tree prints and unparses as written. The canonical layout puts message types that do not fit on the line below it, indented.
 - **Expansion.** `ExpandProcesses` (`lib/Semantics/expand-processes.cpp`) puts the predicates into the items, after the declaration, which stays: the declarations where the declaration is, so that a declaration in the interface exports them, and `spawn_Kind`'s clause in the implementation section, or at the end of the module. Every later pass sees ordinary declarations and clauses. The module loader expands an imported module too, without the clause. The module must import `io` and `process` where the declaration is, as for any declaration that names them; name resolution says so otherwise. A kind declared twice, or with its predicate declared as well, is a predicate declared more than once.
-- **Not yet implemented,** each reported: several message types, a kind on a GPU (step 4b), and a call of `spawn_Kind_on`, which needs remote spawn. Name resolution reports the last instead of an undefined predicate when a `spawn_Kind` that a process declaration made, of one less arity, is visible.
+- **Not yet implemented,** each reported: several message types, and a call of `spawn_Kind_on`, which needs remote spawn. Name resolution reports the last instead of an undefined predicate when a `spawn_Kind` that a process declaration made, of one less arity, is visible.
 - **Tests.** `Parser/convert/processes.m` and `process-errors.m` read declarations and their errors, with the canonical layout and round trips in the unparser's tests; `Semantics/desugar/processes.m` checks the expansion, and `Semantics/processes/` the errors after conversion; `CodeGen/process-declarations.m` spawns kinds of its own module and of another's interface, one polymorphic, at -O0 and -O2, its output written by hand, since mmc has no process declarations.
 
 Failure handling follows Erlang. An uncaught exception ends the process with that exception as its exit reason. A monitor delivers a `down_info` message to a mailbox the watcher names, through a function into that mailbox's message type, so a process with one protocol needs no second mailbox for it. Links, deferred for now, would deliver exit messages the same way. The semantics are in Runtime system, "Exceptions, links and monitors".
@@ -2140,7 +2140,7 @@ Flang's driver cannot be reused as it stands. It is Clang's driver library, `cla
 | `--trace-flag=`*name* | Compile in the trace goals whose `compile_time` condition needs `flag("`*name*`")`, as mmc's option of the same name (Lowering, "Deterministic and semidet code") |
 | `-freceive-goal` | Read `receive` goals (Language extensions, "Processes and mailboxes") |
 | `-fprocess-declarations` | Read `:- process` declarations (Language extensions, "Processes and mailboxes") |
-| `--offload-arch=` | Compile target regions for a device (Linking and offloading, below) |
+| `--offload-arch=` | Compile target regions, with `-fopenmp`, and process kinds that run on a GPU, with `-fprocess-declarations`, for the GPUs named (Linking and offloading, below) |
 | `--target=`, `-march=`, `-mcpu=` | Target triple and CPU |
 | `-I` *dir*, `-module-dir` *dir* | Where interface files are searched for, and where they are written; Flang uses the same two options for `.mod` files |
 | `-W`*name*, `-Wno-`*name*, `-Werror=`*name* | Per-message control, by the identifiers in Semantic analysis, Diagnostics |
@@ -2199,6 +2199,32 @@ The unparser's exact, canonical and fully parenthesized modes (Front end, Unpars
   4. host `-fc1 -emit-obj -fembed-offload-object=` naming the package, from the host bitcode read back with `-x ir`, as in Flang: the module's triple and data layout are the compile's, the package goes into `.llvm.offloading` as Clang's `EmbedObject` puts it, and the module is optimized and compiled.
 
   The link is Clang's, with `-fopenmp --offload-arch=`, which runs `clang-linker-wrapper`: it extracts the device bitcode, links it with `libompdevice` and compiles it for each GPU, adds the code that registers it with the offload runtime, and links the host with `libomp` and `libomptarget`. `-L` adds library directories for the link, such as those of the OpenMP runtime when it is not beside Clang. `-v` is passed on to the link, so that Clang shows its own jobs, such as the linker wrapper's for the GPUs' code, as Flang's `-v` does. With `-c` the jobs stop after step 4; `-E` has no offload jobs; `-S` and GPUs other than AMD's are not supported yet. The link adds Merkurius's device runtime, `libmerkdevice-amdgcn.a` beside `libmerkrt.a`, bitcode for any AMD GPU that this build's Clang compiles from `runtime/device`, with `-Xoffload-linker-amdgcn-amd-amdhsa`, so that the linker wrapper links it into the device image beside `libompdevice` (Send and receive in a target region, As implemented). Not yet done, as Flang does: linking the device libraries (`-mlink-builtin-bitcode` with ROCm's `ocml` and the rest), which device code that calls maths will need, and `-flto=full` for the device compile.
+- **Images of GPU process kinds** (docs/INPROGRESS.md, GPU processes without `omp target`, step 4b). With `-fprocess-declarations --offload-arch=`, each source first gets, for each GPU:
+  1. device `-fc1 -emit-llvm-bc -fprocess-kernels`, for the GPU's triple and without OpenMP, which compiles a kernel `merk_process_<kind>` for each kind marked `on gpu` and keeps only what the kernels reach; its bitcode is named `.o`, so that Clang hands it to the linker as it is;
+  2. `clang --target=amdgcn-amd-amdhsa -mcpu=<gpu> -flto -O2`, which links the image, a shared object, from it, `merk-process-start-amdgcn.o` (the start object, which defines libc's RPC client and `merk_device_number` so that LTO exports them), `libmerkdevice-amdgcn.a`, and libc and libm for the GPU, which Clang finds beside itself. It optimizes at `-O2` whatever `-O` is, as the linker wrapper does for OpenMP's device code: AMDGPU's code generation is not well tested at `-O0`, and fails at `-O0` and `-O1` on a `musttail` call in divergent control flow (LLVM bugs to report, below).
+
+  The host's compile, the object's or with `-fopenmp` the host bitcode's, gets `-fembed-process-image=<gpu>:<image>` for each, and embeds the image of a module that has such kinds as a constant, which a constructor registers with the runtime (`merk_register_process_image`). The link is the host's alone without `-fopenmp`. A module without such kinds gets an image without kernels, which its host compile leaves out.
+
+#### LLVM bugs to report
+
+Bugs found in LLVM, to report upstream once checked against its main branch. Each was searched for among the GitHub issues when it was found.
+
+- **AMDGPU: "failed to annotate CFG" on a `musttail` call in divergent control flow** (found 2026-11-10). `llc -O0` or `-O1` for `amdgpu10.30-amd-amdhsa` stops in `SI annotate control flow` on this, which `llvm-reduce` made from a GPU process's kind; `-O2` compiles it. Issue 170830 is the same error from a `callbr`, not this. Not reported.
+
+  ```llvm
+  define void @f(i64 %0, double %1, ptr %2, ptr %3) {
+    %5 = icmp eq i64 %0, 0
+    br i1 %5, label %6, label %9
+  6:
+    %7 = icmp eq i64 %0, 0
+    br i1 %7, label %9, label %8
+  8:
+    musttail call void @f(i64 0, double 0.0, ptr null, ptr null)
+    ret void
+  9:
+    ret void
+  }
+  ```
 
 ### Example
 

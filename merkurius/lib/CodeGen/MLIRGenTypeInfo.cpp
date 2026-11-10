@@ -315,7 +315,7 @@ bool MerkGenerator::CanDescribe(const semantics::Type &type) {
 // keeps no layouts.
 mlir::Attribute MerkGenerator::UndescribedCapture(
     const semantics::Type &type, parser::CharBlock at) {
-  if (target_.options().openMPIsTargetDevice) {
+  if (target_.options().IsDevice()) {
     return builder_.getStringAttr("type_info");
   }
   NotYet(at, "a closure that captures a value of type " +
@@ -359,9 +359,8 @@ mlir::Attribute MerkGenerator::CaptureTypeAttr(const semantics::Type &type,
 
 mlir::ArrayAttr MerkGenerator::CapturesAttr(
     llvm::ArrayRef<mlir::Attribute> captures) {
-  return target_.options().openMPIsTargetDevice
-      ? mlir::ArrayAttr{}
-      : builder_.getArrayAttr(captures);
+  return target_.options().IsDevice() ? mlir::ArrayAttr{}
+                                      : builder_.getArrayAttr(captures);
 }
 
 mlir::ArrayAttr MerkGenerator::FunctorsAttr(

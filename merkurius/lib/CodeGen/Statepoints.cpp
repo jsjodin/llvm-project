@@ -1288,9 +1288,9 @@ static void RemoveDeadCode(llvm::Function &function) {
 
 // Mercury code gets statepoints, here, after the optimizer, which handles them
 // badly. Code an OpenMP region outlined is not rewritten: nothing collects
-// during a region.
+// during a region. A device has no collector.
 void RewriteForCollector(llvm::Module &module, const TargetInfo &target) {
-  if (target.options().openMPIsTargetDevice) {
+  if (target.options().IsDevice()) {
     return;
   }
   llvm::linkAllBuiltinGCs();

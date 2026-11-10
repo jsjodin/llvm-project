@@ -34,7 +34,7 @@ PRE: "-fc1" "-E" "-fopenmp" "{{[^"]*}}sumsq.m"{{$}}
 
 RUN: not merkc -### --offload-arch=gfx1030 %S/Inputs/sumsq.m 2>&1 \
 RUN:   | FileCheck %s --check-prefix=NO-OMP
-NO-OMP: merkc: error: --offload-arch needs -fopenmp
+NO-OMP: merkc: error: --offload-arch needs -fopenmp or -fprocess-declarations
 RUN: not merkc -### -fopenmp --offload-arch=sm_80 %S/Inputs/sumsq.m 2>&1 \
 RUN:   | FileCheck %s --check-prefix=NVPTX
 NVPTX: merkc: error: offloading to 'sm_80' is not supported yet: only AMD GPUs, such as gfx1030, are

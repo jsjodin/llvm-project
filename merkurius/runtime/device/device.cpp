@@ -1,4 +1,4 @@
-//===-- runtime/device/device.cpp - The device's runtime -------------------===//
+//===-- runtime/device/device.cpp - The device's runtime ------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -10,8 +10,10 @@
 // device runtime"): send and receive over the offload plugin's RPC server,
 // with our opcodes (rpc-opcodes.h), which the host's callback (offload.cpp)
 // handles. It is compiled to bitcode, which the driver links into the device
-// image beside the OpenMP device runtime, whose RPC client it uses. The
-// host's merkrt has the same functions for a region that runs on the host.
+// image beside the OpenMP device runtime, whose RPC client it uses, and into
+// the image of a module's GPU process kinds, whose start object defines the
+// client (process-start.cpp). The host's merkrt has the same functions for
+// a region that runs on the host.
 //
 // It uses gpuintrin.h and LLVM's GPU libc rather than OpenMP's API, so that
 // it works in a GPU process's kernel, which has no OpenMP device runtime, as
@@ -34,10 +36,11 @@ extern "C" rpc::Client __llvm_rpc_client;
 extern "C" int omp_get_device_num(void) __attribute__((weak));
 
 // The device's number, as the host's runtime knows it, or -1 if not set.
-// Temporary (step 4 of GPU processes without omp target, docs/INPROGRESS.md):
-// the runtime sets it when it loads a GPU process's image, which defines it
-// in its own object so that it is exported. Until then it is -1, and a
-// region's image takes OpenMP's number.
+// A GPU process's image defines it in its start object, so that it is
+// exported (process-start.cpp). Temporary (step 4c of GPU processes without
+// omp target, docs/INPROGRESS.md): the runtime sets it when it loads such an
+// image. Until then it is -1, as in a region's image, which takes OpenMP's
+// number.
 extern "C" [[gnu::visibility("protected"), gnu::weak]] int merk_device_number{
     -1};
 

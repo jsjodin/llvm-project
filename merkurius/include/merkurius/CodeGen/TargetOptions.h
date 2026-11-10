@@ -39,6 +39,17 @@ struct TargetOptions {
   std::vector<std::string> openMPTargets;
   // -fembed-offload-object=: offload binaries to embed in the host object.
   std::vector<std::string> offloadObjects;
+  // GPU processes (docs/INPROGRESS.md, GPU processes without omp target):
+  // -fprocess-kernels, for the device compile that makes a kernel for each
+  // process kind that runs on a GPU, without OpenMP; and
+  // -fembed-process-image=, the images of those kernels, one for each GPU,
+  // which the host's compile embeds and registers.
+  bool processKernels{false};
+  std::vector<std::string> processImages;
+
+  // Whether the compile is for a device: OpenMP's device compile or GPU
+  // processes'.
+  bool IsDevice() const { return openMPIsTargetDevice || processKernels; }
 };
 
 } // namespace merkurius::codegen

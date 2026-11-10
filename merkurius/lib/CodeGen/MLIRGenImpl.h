@@ -636,6 +636,15 @@ private:
   std::optional<std::uint64_t> MessageKey(
       const semantics::Type &, mlir::Type represented);
   void RegisterMessageTypes();
+  // Process kinds that run on a GPU (MLIRGenProcesses.cpp): those the
+  // module declares, the kernel of each in a device's compile of them, and
+  // the images of the kernels, embedded and registered in the host's.
+  llvm::SmallVector<const parser::ProcessDecl *> gpuKinds_;
+  void CollectGpuKinds();
+  const semantics::Procedure *KindProcedure(const parser::ProcessDecl &);
+  void GenerateProcessKernels();
+  void GenerateProcessKernel(const parser::ProcessDecl &);
+  bool RegisterProcessImages();
   // The target region that code is generated in now, if any.
   mlir::omp::TargetOp EnclosingTarget();
   // process.send(Mailbox, Message, !IO) in a target region: a call of the

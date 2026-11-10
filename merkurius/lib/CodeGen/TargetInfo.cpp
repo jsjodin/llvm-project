@@ -27,6 +27,8 @@ static constexpr llvm::StringLiteral kOptimizationLevel{
 static constexpr llvm::StringLiteral kAddressSpaces{"merk.address_spaces"};
 static constexpr llvm::StringLiteral kCodeObjectVersion{
     "merk.amdgpu_code_object_version"};
+// A device compile of GPU processes' kernels (-fprocess-kernels).
+static constexpr llvm::StringLiteral kProcessKernels{"merk.process_kernels"};
 
 // The numbers LLVM's back ends give the address spaces.
 static AddressSpaces AddressSpacesOf(const llvm::Triple &triple) {
@@ -119,6 +121,7 @@ std::unique_ptr<TargetInfo> TargetInfo::FromModule(
           module->getAttrOfType<mlir::IntegerAttr>(kCodeObjectVersion)}) {
     options.codeObjectVersion = version.getInt();
   }
+  options.processKernels = module->hasAttr(kProcessKernels);
   std::optional<std::string> layout;
   if (auto attr{module->getAttrOfType<mlir::StringAttr>(
           mlir::LLVM::LLVMDialect::getDataLayoutAttrName())}) {
@@ -134,6 +137,10 @@ std::unique_ptr<TargetInfo> TargetInfo::FromModule(
     }
   }
   return info;
+}
+
+bool TargetInfo::ProcessKernels(mlir::ModuleOp module) {
+  return module->hasAttr(kProcessKernels);
 }
 
 void TargetInfo::Record(mlir::ModuleOp module) const {
@@ -162,6 +169,9 @@ void TargetInfo::Record(mlir::ModuleOp module) const {
   if (triple_.isAMDGPU()) {
     module->setAttr(kCodeObjectVersion,
         builder.getI32IntegerAttr(options_.codeObjectVersion));
+  }
+  if (options_.processKernels) {
+    module->setAttr(kProcessKernels, builder.getUnitAttr());
   }
   // OpenMP's: the omp dialect's offload attributes, as Clang and Flang set
   // them, which its translation to LLVM IR reads.

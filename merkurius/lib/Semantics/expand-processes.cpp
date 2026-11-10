@@ -36,11 +36,6 @@ void ReportUnimplemented(const parser::ProcessDecl &decl,
     messages.Say(at, "%s"_todo_en_US,
         "process kinds that receive several message types");
   }
-  // Temporary (step 4b of GPU processes without omp target,
-  // docs/INPROGRESS.md): a GPU kind's kernel replaces this.
-  if (decl.onGpu) {
-    messages.Say(at, "%s"_todo_en_US, "process kinds that run on a GPU");
-  }
 }
 
 } // namespace

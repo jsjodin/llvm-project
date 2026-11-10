@@ -204,19 +204,19 @@ bool MerkGenerator::SendInTarget(const Body &goal,
   return true;
 }
 
-// The host's compile of a module with target regions registers the key of
-// each message type that its device code may send with the type's
-// type_info, in a procedure that runs at start-up: every one-word,
-// ground message type of the module's sends, since the host's compile does
-// not know which procedures run on the device. The runtime checks that no
-// two types have the same key.
+// The host's compile of a module with target regions, or with process kinds
+// that run on a GPU, registers the key of each message type that its device
+// code may send with the type's type_info, in a procedure that runs at
+// start-up: every one-word, ground message type of the module's sends,
+// since the host's compile does not know which procedures run on the
+// device. The runtime checks that no two types have the same key.
 void MerkGenerator::RegisterMessageTypes() {
-  if (messageTypes_.empty() || target_.options().openMPIsTargetDevice) {
+  if (messageTypes_.empty() || target_.options().IsDevice()) {
     return;
   }
-  bool regions{false};
-  module_.walk([&](mlir::omp::TargetOp) { regions = true; });
-  if (!regions) {
+  bool device{!gpuKinds_.empty()};
+  module_.walk([&](mlir::omp::TargetOp) { device = true; });
+  if (!device) {
     return;
   }
   mlir::Location loc{builder_.getUnknownLoc()};

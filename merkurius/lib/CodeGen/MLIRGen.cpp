@@ -758,7 +758,7 @@ static bool CollectTypeVariables(
 }
 
 void MerkGenerator::AnnotateRoots(const ProcedureBody &body) {
-  if (failed_ || Terminated() || target_.options().openMPIsTargetDevice) {
+  if (failed_ || Terminated() || target_.options().IsDevice()) {
     return;
   }
   // A value's note is in the region that defines it. Outlining takes it along
@@ -788,7 +788,7 @@ void MerkGenerator::AnnotateRoots(const ProcedureBody &body) {
 }
 
 bool MerkGenerator::NoteRoot(mlir::Value value, const semantics::Type *type) {
-  if (target_.options().openMPIsTargetDevice ||
+  if (target_.options().IsDevice() ||
       !mlir::isa<merk::WordType, merk::TermType, merk::ArrayType>(
           value.getType())) {
     return true;
@@ -1523,6 +1523,7 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
       mlir::ModuleOp::create(builder_.getUnknownLoc(), moduleName_)};
   module_ = *owned;
   target_.Record(module_);
+  CollectGpuKinds();
   bool interface{false};
   for (const parser::Item &item : tree_.items) {
     if (const auto *section{std::get_if<const parser::SectionDecl *>(&item)}) {
@@ -1635,11 +1636,14 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
     module_->setAttr(kForeignCodeAttrName, builder_.getStringAttr(code));
   }
   RegisterMessageTypes();
-  // The library's procedures that the regions reach, before what follows
-  // their calls; not after an error, which may have left out one of the
-  // module's own.
-  if (target_.options().openMPIsTargetDevice &&
-      !messages_.AnyFatalError() &&
+  GenerateProcessKernels();
+  if (!RegisterProcessImages()) {
+    return nullptr;
+  }
+  // The library's procedures that the regions and kernels reach, before
+  // what follows their calls; not after an error, which may have left out
+  // one of the module's own.
+  if (target_.options().IsDevice() && !messages_.AnyFatalError() &&
       mlir::failed(CopyDeviceLibrary(
           module_, deviceLibraryDirectory_, !mmcUniqueness_))) {
     return nullptr;
@@ -1647,7 +1651,7 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
   // Calls given known closures call clones of their callees, before what
   // follows calls. Temporary (specializer step 1, docs/INPROGRESS.md): on
   // the host at -O2 only; step 3 runs it on a device at every level.
-  if (!target_.options().openMPIsTargetDevice &&
+  if (!target_.options().IsDevice() &&
       target_.options().optimizationLevel >= 2 && !messages_.AnyFatalError()) {
     SpecializeKnownClosures(module_);
   }

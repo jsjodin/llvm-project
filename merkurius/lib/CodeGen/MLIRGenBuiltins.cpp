@@ -394,12 +394,12 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     if (EnclosingTarget()) {
       return SendInTarget(goal, arguments, body, /*inRegion=*/true);
     }
-    if (target_.options().openMPIsTargetDevice) {
+    if (target_.options().IsDevice()) {
       if (SendInTarget(goal, arguments, body, /*inRegion=*/false)) {
         return true;
       }
     } else if (mlir::Value message{ValueOf(arguments[1])};
-        message && target_.options().openMP) {
+        message && (target_.options().openMP || !gpuKinds_.empty())) {
       // The host's compile registers what the device's may send.
       MessageKey(*body.vars[arguments[1]].type, message.getType());
     }
@@ -415,7 +415,7 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     if (EnclosingTarget()) {
       return ReceiveInTarget(goal, arguments, body, /*inRegion=*/true);
     }
-    if (target_.options().openMPIsTargetDevice &&
+    if (target_.options().IsDevice() &&
         ReceiveInTarget(goal, arguments, body, /*inRegion=*/false)) {
       return true;
     }

@@ -946,7 +946,7 @@ bool CodeGenAction::executeAction() {
   // A device's compile copies the library's procedures from their merk
   // bytecode, which the library's build writes beside its sources.
   std::string deviceLibrary;
-  if (target->options().openMPIsTargetDevice &&
+  if (target->options().IsDevice() &&
       !ci.getFrontendOpts().libraryDirectory.empty()) {
     llvm::SmallString<256> path{ci.getFrontendOpts().libraryDirectory};
     llvm::sys::path::append(path, "device");
@@ -1027,6 +1027,9 @@ bool CodeGenAction::Lower(
   if (!codegen::LinkForeignCode(*llvmModule, module, target, clang, error)) {
     options::reportError(error);
     return false;
+  }
+  if (target.options().processKernels) {
+    codegen::HideAllButKernels(*llvmModule);
   }
   return Emit(*llvmModule, target, *os);
 }
