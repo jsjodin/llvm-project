@@ -1925,7 +1925,7 @@ threads (`-fopenmp-target-ignore-env-vars`). That stays a flag.
 
 ## GPU processes without `omp target`: liboffload and libc
 
-Proposed 2026-11-10; steps 1 and 2 are done. Decided by the user the same
+Proposed 2026-11-10; steps 1 to 3 are done. Decided by the user the same
 day:
 - **GPU processes launch without `omp target`.** A process on a GPU is a
   kernel that our runtime launches, not a target region.
@@ -2102,8 +2102,27 @@ the process asks the host to launch. The first version has neither.
      region's code calls is OpenMP's lowering, as its `__kmpc_` calls are.
 3. **The host's device calls behind one interface,** and the RPC callback
    registered through liboffload.
+
+   Done 2026-11-10, but for the registration. `runtime/devices.h` has the
+   calls `offload.cpp` makes: memory on a device, host memory a device
+   reads, copies each way, and the callback's registration. A device is
+   OpenMP's number of it, which the device's runtime sends with its opcodes.
+   `devices.cpp` puts them over libomptarget, through weak references, as
+   `offload.cpp` did. The behaviour is the same, and all tests pass.
+
+   The registration through liboffload moved to step 4. The probe found
+   that the runtime's liboffload is a copy of its own, beside
+   libomptarget's (step 1). Registering with it serves only images it
+   loaded, and it loads none before step 4.
 4. **A GPU process's kernel:** merkc compiles a process kind to a kernel, a
    separate image linked and embedded, and the runtime spawns it on a GPU.
+   The runtime calls `olInit` when it loads the first such image. It
+   registers its callback with `olPlatformRegisterRPCCallback` then. It
+   matches liboffload's devices to OpenMP's numbers by UID, and sets the
+   image's `merk_device_number`. `devices.cpp` uses liboffload for the
+   devices of processes, so that a program with GPU processes and no
+   regions does not need libomptarget. The image defines the RPC client and
+   `merk_device_number` in its own object, so that LTO exports them.
    The kernel sends to and receives from the host's processes. `:- process`
    declarations need semantic analysis first; until then, which predicate is
    a GPU process's entry is an open question for review.
