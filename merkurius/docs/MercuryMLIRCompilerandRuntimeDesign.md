@@ -2819,7 +2819,9 @@ mailboxes, timeouts other than polling, and garbage collection on the device.
   (The device runtime, below).
 - **Its heap:** chunks of device memory reserved at launch, bump-allocated.
   Without a collector on the device, a process is short-lived or resets its
-  heap between messages (The device runtime, below).
+  heap between messages (The device runtime, below). Decided 2026-11-10:
+  it resets it at each `receive`, one turn per message (A GPU process's
+  turns, below).
 - **Memory coherence:** fine-grained host memory with system-scope atomics
   where the platform supports PCIe atomics, and coarse-grained memory with
   explicit fences and polling otherwise.
@@ -3416,6 +3418,48 @@ lines beside the OpenMP device runtime, which a target region needs anyway.
 6. **A small stack** for each thread. Tail calls and last call modulo
    constructor keep loops flat; recursion that is not a tail call is kept
    shallow, as a device thread's stack does not grow.
+
+**A GPU process's turns.** Decided by the user on 2026-11-10, for GPU
+processes that live long and receive messages that are terms, which step 4e
+allowed (`INPROGRESS.md`, GPU processes without `omp target`). That moved away
+from the flat messages above, whose lifetimes were known; turns bring known
+lifetimes back, without a collector, as the device's performance needs.
+
+- **A turn** is what a GPU process does from one `receive` to the next. Each
+  `receive`, whether it takes a message or times out, ends the turn before
+  it and starts a new one.
+- **A received message lives for its turn,** and so do the cells the
+  process makes during the turn. They are in the turn's region, which the
+  next `receive` frees at once, by resetting one pointer. The region keeps
+  its chunks for the next turn, so a turn costs no call to the host once
+  the process has the memory it needs.
+- **Only values without cells in a turn's region cross into the next
+  turn:** scalars, enumerations, mailboxes, and arrays of scalars, which live
+  in the process's own arena and are freed at their last use where the
+  compiler knows it (uniqueness, above), or when the process ends.
+- **The compiler checks it.** At each call in a GPU kind's code that may
+  receive, directly or through what it calls, a variable that lives across
+  the call must be of such a type, or it is an error at compile time that
+  names the variable and its type. A program that must keep a term copies
+  it into scalars or an array; keeping terms across turns is a later
+  feature. Nothing is checked or traced at run time.
+- **A message is read where it arrives.** Once a GPU process's queue is in
+  its GPU's memory, the sender's copy is the one the process reads, for its
+  turn, and the queue takes the space back at the next `receive`: nothing is
+  copied on the receiving side.
+- **Target regions are not affected:** a region's arena lives as long as
+  the region, as before.
+
+Rejected:
+- **A collector on the device,** copying with stack maps, or collecting at
+  each `receive` with the live state as roots. Either costs time on every
+  turn or in the compiler and the runtime, which the GPU's performance does
+  not allow, and known lifetimes need neither.
+- **Flat messages again** for GPU processes, which would make step 4e's
+  copying of terms a feature of the host alone. Turns keep it, and keep the
+  lifetimes known.
+- **An arena for the whole process,** as built in step 4e, which grows
+  with every message until `MERK_DEVICE_ARENA_BYTES` stops it.
 
 **Who communicates.** In a generic kernel, the code outside every
 `parallel` runs on each team's initial thread only, while the other threads

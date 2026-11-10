@@ -1365,6 +1365,88 @@ and most of that is either expressed by processes already or not needed yet.
 run here. Steps 2 to 4 need at least two GPUs: two consumer cards for PCIe, or an
 Instinct node for Infinity Fabric.
 
+## Distributing work: balancing and stealing across GPUs
+
+Proposed 2026-11-10, from a discussion; not agreed, and nothing is built. It
+waits for messages between GPU processes (GPU processes without `omp target`,
+step 5 and after) and adds to Collectives and direct GPU transfers, which
+cover the operations whose shape is known in advance.
+
+**Why.** Collectives move data whose split is fixed before they start. Much of
+the work that the goal serves is not split that way. Running large language
+models is the main case:
+- **Serving** takes requests that arrive at any time, with prompts and outputs
+  of very different lengths. Servers batch continuously, adding and removing
+  requests at each step, and newer ones run the prompt on some GPUs and the
+  generation on others, moving each request's KV cache between them, as the
+  scheduler decides at run time.
+- **Mixture of experts** routes each token to the experts that its router
+  picks, so the all-to-all carries uneven amounts, and the GPU of an expert
+  in demand holds the others up. Systems balance it by copying busy experts,
+  limiting each expert's tokens, or adding a balancing term to the loss.
+- **Training** splits evenly by design, but sequences of different lengths,
+  pipeline bubbles and slow GPUs leave some waiting at each step.
+- **Within a GPU** the same idea is persistent kernels that take tiles from
+  a shared counter, Stream-K matrix multiplication, and split-KV attention.
+
+**What RCCL gives,** from the discussion, not checked against its sources:
+collectives and grouped `send`/`recv`, NCCL's API, queued on streams from the
+host. Every rank calls the same collectives in the same order, and a `send`
+needs a `recv` that knows its size. So it has no work stealing and no
+balancing: an idle GPU cannot ask for work or take from another's queue.
+That needs writes and atomics on another GPU's memory, started from a
+kernel, which NVSHMEM, rocSHMEM and MSCCL++ (put, signal and wait) give.
+Serving systems move KV caches with libraries of their own (NIXL, Mooncake's
+transfer engine, UCX), and DeepSeek's mixture-of-experts inference uses
+all-to-all kernels that the GPU starts (DeepEP). Recent NCCL adds calls
+that a kernel makes; whether RCCL follows is not known.
+
+**What we have.** The host's scheduler already steals between its workers
+(design document, How the scheduler was built). Mailboxes are asynchronous,
+and a receiver need not know what it is sent, which is the shape that
+dynamic work needs, as Erlang's pools of workers use. Mercury's own parallel
+conjunctions steal work too (Bone's thesis, a paper we may read).
+
+**Proposed.** Two layers, the second this section's:
+1. **Collectives** for what is split in advance: all-reduce and all-gather
+   for tensor parallelism, and all-to-all with uneven sizes for experts
+   (Collectives and direct GPU transfers).
+2. **Work that moves at run time,** built from processes and mailboxes:
+   - **Pulling from a pool first.** A dispatcher process holds the work, and
+     each worker, on the host or on a GPU, asks it for more when it is
+     idle. It needs only messages, so it works as soon as GPU processes
+     can message each other and the host.
+   - **Stealing between GPUs later.** Each GPU keeps its queue in its own
+     memory, and an idle GPU takes from another's with an atomic on that
+     queue, over xGMI or PCIe between peers, or an RDMA atomic between
+     hosts. A ring on the receiving GPU (The send ring) is close to such a
+     queue already, once peers can write to it.
+   - **Balancing as a library.** Pools, dispatchers and stealing are library
+     code over processes and mailboxes, not the runtime's, so a program can
+     choose its policy.
+
+**Steps, for discussion.**
+1. **A pool on one GPU, as the first measure of GPU messaging.** A host
+   dispatcher and GPU worker processes on this machine's one GPU, with work
+   items of uneven cost, measured against a static split. It serves
+   handling a single GPU well first.
+2. **Workers that are GPUs' teams,** taking items from a counter in device
+   memory, within one kernel, measured against a static split of the teams.
+3. **Pulling between GPUs,** when messages go between GPU processes of
+   different GPUs, and then of different hosts.
+4. **Stealing between GPUs,** when peers can write to each other's memory.
+5. **Mixture of experts and moving KV caches** as the tests of the first
+   four, with an all-to-all of uneven sizes.
+
+**Open.**
+- Whether a pool's dispatcher may run on a GPU, which needs messages
+  between GPU processes, or stays on the host.
+- How much of it the language says: a `parallel` library over processes,
+  or directives as OpenMP's loops have (Data parallelism, and a
+  `parallel` library, in GPU processes without `omp target`).
+- What this machine can measure: one GPU, so stealing between GPUs waits
+  for the user's other machines, as the halo exchange does.
+
 ## Processes as teams, and messages within a GPU
 
 Proposed 2026-11-09; steps 1 to 5 below are built. The design document
@@ -2396,9 +2478,74 @@ the process asks the host to launch. The first version has neither.
    - **D3. One message type for each kind in the first version,** and
      scalar and mailbox arguments for a GPU kind. Several message types,
      and other arguments, come later.
-5. **Spawning from the GPU's other places,** and the place table's
-   identities. liboffload gives a device's name and its PCI vendor id, but
-   still no UUID or PCI address (design document, "What the plugins lack").
+5. **A GPU process's queue on its GPU, and its turns.** Decided by the user
+   on 2026-11-10, in place of "spawning from the GPU's other places, and the
+   place table's identities", which said too little to plan: a GPU process's
+   mailbox lives at its GPU's place, and its handle says so. With it, the
+   process's memory is reset at each `receive`, one turn per message (design
+   document, "A GPU process's turns"), as step 4e had moved away from the
+   known lifetimes that the device's design rests on. Performance on the GPU
+   comes first: what can be decided at compile time is, and the receiving
+   side copies nothing.
+
+   **Why the queue moves.** Today the host's list is the queue, and the GPU
+   reads it through a ring in host memory, asking the host for each message
+   that is not one word. Every message to a GPU process crosses PCIe on the
+   GPU's request, two GPU processes on one GPU talk through the host, and the
+   handle's place, the host's, cannot tell a sender that the receiver is on
+   a GPU. The goal, messages between GPUs, needs the queue where the
+   receiver is, so that a sender, the host or a peer, writes into it.
+
+   **Steps,** turns first, as they bound the memory of what follows:
+   - **5a. The turn check, at compile time.** Which predicates of a GPU kind's
+     code may receive, directly or through what they call; at each call to
+     one, the variables that live across it must be of types without cells
+     in a turn's region (scalars, enumerations, mailboxes, arrays of
+     scalars), or it is an error that names the variable and its type. Tests
+     of each kind of error, and of a server loop whose state is scalars.
+   - **5b. Turn regions in the device's runtime.** A GPU process's arena is
+     split: the turn's region, for cells and messages, which each `receive`
+     resets, keeping its chunks; and the process's arena, for what crosses
+     turns. A test: a GPU process that receives a million messages that are
+     lists stays within one chunk, which `MERK_CHECK_DEVICE_MEMORY` shows.
+   - **5c. The place table.** Place 0 is the host and each GPU of the node
+     has a place of its own, with its kind, its architecture and its
+     identity: liboffload's UID where the GPU has a UUID, and otherwise its
+     PCI address, from the kernel's topology in sysfs, as liboffload gives
+     none (design document, "What the plugins lack"). A GPU process's handle
+     carries its GPU's place. Nodes exchange their tables at the handshake.
+   - **5d. The queue in the GPU's memory.** The mailbox's memory, on the GPU,
+     owned by the mailbox: senders reserve space in it and write the
+     message, with its pointers as the GPU sees them, and the receiver reads
+     it there for its turn. Space is taken back at the next `receive`. A
+     message that a selective receive passes over is moved to the host's
+     list for the mailbox, so that it does not hold the queue's space.
+   - **5e. Routing by place.** `send` to a handle of a GPU place: from the
+     host, into the GPU's queue; from a GPU process on the same GPU, straight
+     into the queue, with no host on the way; from another GPU, through the
+     host until peers write to each other's memory, which this machine's one
+     GPU cannot test.
+   - **5f. Measurements,** in the design document: a ping-pong between two
+     GPU processes on one GPU, through the host before 5e and direct after
+     it, and from the host to a GPU process, before and after 5d.
+
+   **Open, to decide before the step that needs it:**
+   - **Arrays that cross turns (5b).** An array from a message, or made
+     during a turn, is in the turn's region. One that a turn keeps must
+     move to the process's arena. Recommended: the compiler, which knows
+     the variables that cross a `receive` from 5a, copies an array there
+     at the crossing, unless it is there already, and frees the copy that
+     a unique update replaces. Alternative: every array in the process's
+     arena, freed only at its last use, which needs compile-time reuse
+     first.
+   - **How the host writes into the GPU's memory (5d).** Copying each message
+     with a DMA from pinned memory costs a copy's latency per message.
+     Writing through host-visible device memory, a large BAR, which a
+     consumer Radeon may not offer. Or the queue's slots in host memory, as
+     now, with the GPU copying each message into its memory once. To be
+     measured on this machine before choosing.
+   - **What a GPU sender on the same GPU reserves with (5e):** an atomic on
+     the queue's tail in device memory, and how a full queue spills.
 
 **Rejected alternatives.**
 - **The whole program on the GPU,** run by `llvm-gpu-loader` as libc's tests
