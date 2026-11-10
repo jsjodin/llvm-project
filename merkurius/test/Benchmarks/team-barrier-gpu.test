@@ -1,9 +1,11 @@
 The benchmark of a barrier between teams on the machine's GPU, on few rounds:
-both shapes, with a tree of an uneven number of teams.
+the three shapes, with a tree of an uneven number of teams.
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/team-barrier/teambarrier.m -o %t
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t central 16 50 | FileCheck %s --check-prefix=CENTRAL
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t tree 21 50 | FileCheck %s --check-prefix=TREE
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t library 21 50 | FileCheck %s --check-prefix=LIBRARY
 CENTRAL: central {{ *}}16 teams {{ *}}50 rounds, {{ *}}16 reported, 0 wrong, {{.*}} us a barrier
 TREE: tree {{ *}}21 teams {{ *}}50 rounds, {{ *}}21 reported, 0 wrong, {{.*}} us a barrier
+LIBRARY: library {{ *}}21 teams {{ *}}50 rounds, {{ *}}21 reported, 0 wrong, {{.*}} us a barrier

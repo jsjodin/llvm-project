@@ -414,14 +414,24 @@ static merk::ForeignCallOp TeamsEnter(mlir::omp::TargetOp target) {
   return enter;
 }
 
+// The library's process.team_barrier, as the device's compile copies it in
+// (CopyDeviceLibrary), whose C waits for the region's other teams.
+static constexpr llvm::StringLiteral kTeamBarrier{"process.team_barrier_2_0"};
+
 // Whether `op`, or code of the module that it refers to by a symbol, such as
-// a procedure it calls or a closure's entry, calls merk_device_team_mailbox.
-// `seen` holds the symbols' operations looked at already.
-static bool UsesTeamMailboxes(mlir::Operation *op, mlir::ModuleOp module,
+// a procedure it calls or a closure's entry, waits for the other teams of
+// its region: it calls merk_device_team_mailbox, whose messages come from
+// them, or is the barrier. `seen` holds the symbols' operations looked at
+// already.
+static bool WaitsForTeams(mlir::Operation *op, mlir::ModuleOp module,
     llvm::DenseSet<mlir::Operation *> &seen) {
   mlir::WalkResult result{op->walk([&](mlir::Operation *inner) {
     auto call{mlir::dyn_cast<merk::ForeignCallOp>(inner)};
     if (call && call.getCallee() == "merk_device_team_mailbox") {
+      return mlir::WalkResult::interrupt();
+    }
+    auto proc{mlir::dyn_cast<merk::ProcOp>(inner)};
+    if (proc && proc.getSymName() == kTeamBarrier) {
       return mlir::WalkResult::interrupt();
     }
     for (mlir::NamedAttribute attribute : inner->getAttrs()) {
@@ -434,7 +444,7 @@ static bool UsesTeamMailboxes(mlir::Operation *op, mlir::ModuleOp module,
         symbol = module.lookupSymbol(name);
       }
       if (symbol && seen.insert(symbol).second &&
-          UsesTeamMailboxes(symbol, module, seen)) {
+          WaitsForTeams(symbol, module, seen)) {
         return mlir::WalkResult::interrupt();
       }
     }
@@ -447,7 +457,7 @@ void MerkGenerator::MarkRegionsForTeamMailboxes() {
   if (!target_.options().openMPIsTargetDevice) {
     return;
   }
-  bool teamMailboxes{false};
+  bool teamMailboxes{module_.lookupSymbol(kTeamBarrier) != nullptr};
   module_.walk([&](merk::ForeignCallOp call) {
     if (call.getCallee() == "merk_device_team_mailbox") {
       teamMailboxes = true;
@@ -465,13 +475,13 @@ void MerkGenerator::MarkRegionsForTeamMailboxes() {
       return;
     }
     llvm::DenseSet<mlir::Operation *> seen;
-    if (UsesTeamMailboxes(target, module_, seen)) {
+    if (WaitsForTeams(target, module_, seen)) {
       waits.push_back(enter);
     }
   });
-  // The teams of a region with team mailboxes wait until all have started,
-  // as a team that is not running would deadlock those waiting for it
-  // (docs/INPROGRESS.md, Processes as teams, step 4).
+  // The teams of a region with team mailboxes or the barrier wait until all
+  // have started, as a team that is not running would deadlock those
+  // waiting for it (docs/INPROGRESS.md, Processes as teams, step 4).
   for (merk::ForeignCallOp enter : waits) {
     mlir::OpBuilder::InsertionGuard guard{builder_};
     builder_.setInsertionPointAfter(enter);

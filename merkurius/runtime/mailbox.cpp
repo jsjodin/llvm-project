@@ -1600,6 +1600,10 @@ struct TeamTable {
   // By team.
   TeamMailbox **mailboxes;
   TeamTable *next;
+  // The barrier's (merk_team_barrier): the teams that have arrived in this
+  // round, and the rounds that have ended.
+  std::int64_t arrived;
+  std::int64_t rounds;
 };
 
 pthread_mutex_t teamsLock = PTHREAD_MUTEX_INITIALIZER;
@@ -1638,6 +1642,8 @@ extern "C" void merk_device_teams_enter(
     }
     table->id = id;
     table->teams = teams;
+    table->arrived = 0;
+    table->rounds = 0;
     table->next = teamTables;
     teamTables = table;
   }
@@ -1646,6 +1652,48 @@ extern "C" void merk_device_teams_enter(
 }
 
 extern "C" void merk_device_teams_leave(void) { currentTeams = nullptr; }
+
+namespace {
+
+// What the teams that wait at a barrier block on, once they have spun.
+pthread_mutex_t barrierLock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t barrierEnded = PTHREAD_COND_INITIALIZER;
+
+} // namespace
+
+// process.team_barrier on the host: the last team to arrive ends the round,
+// and the others wait until it has, spinning for a while and then blocking,
+// as a receive does. Each team of a region that runs on the host is a
+// thread of its own, so the teams that wait do not keep the others from
+// arriving. Outside a teams region there is one team.
+extern "C" void merk_team_barrier(void) {
+  TeamTable *table{currentTeams};
+  if (!table || table->teams <= 1) {
+    return;
+  }
+  // Read before arriving: the round cannot end before this team arrives.
+  std::int64_t round{__atomic_load_n(&table->rounds, __ATOMIC_ACQUIRE)};
+  if (__atomic_add_fetch(&table->arrived, 1, __ATOMIC_ACQ_REL) ==
+      table->teams) {
+    // No team arrives in the next round until it sees this one end.
+    __atomic_store_n(&table->arrived, 0, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&table->rounds, 1, __ATOMIC_RELEASE);
+    pthread_mutex_lock(&barrierLock);
+    pthread_cond_broadcast(&barrierEnded);
+    pthread_mutex_unlock(&barrierLock);
+    return;
+  }
+  std::int64_t end{Now() + SpinNanoseconds()};
+  while (__atomic_load_n(&table->rounds, __ATOMIC_ACQUIRE) == round &&
+      Now() < end) {
+    sched_yield();
+  }
+  pthread_mutex_lock(&barrierLock);
+  while (__atomic_load_n(&table->rounds, __ATOMIC_ACQUIRE) == round) {
+    pthread_cond_wait(&barrierEnded, &barrierLock);
+  }
+  pthread_mutex_unlock(&barrierLock);
+}
 
 // After a target teams region, wherever it ran: closes the mailboxes of its
 // teams on the host, dropping what they hold.

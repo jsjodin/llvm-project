@@ -187,6 +187,15 @@
 :- pred team_number(int::out, io::di, io::uo) is det.
 :- pred number_of_teams(int::out, io::di, io::uo) is det.
 
+    % Waits until every team of the target teams region that this process is
+    % a team of has called team_barrier as many times as this one has. What
+    % a team did before its call, such as a send, has been done for every
+    % team after its call returns. Outside a teams region, and without
+    % OpenMP, there is one team, and it returns at once. The teams of a
+    % region that calls it on a device must all run at once, as for team
+    % mailboxes.
+:- pred team_barrier(io::di, io::uo) is det.
+
     % The mailbox of team T for messages of type M, in the target teams
     % region that this process is a team of: one for each team and type,
     % made when first used, which lasts as long as the region. Any team of
@@ -267,6 +276,11 @@
 
 :- pragma foreign_decl("C", local, "
 extern void merk_node(MR_Integer *high, MR_Integer *low);
+#ifdef __AMDGPU__
+extern void merk_device_team_barrier(void);
+#else
+extern void merk_team_barrier(void);
+#endif
 /* A team's number and the number of teams are OpenMP's, on a device and on
    the host, when the program is linked with OpenMP's runtime; without it,
    the only team is 0. */
@@ -723,6 +737,17 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
     Number = omp_get_num_teams();
 #else
     Number = omp_get_num_teams ? omp_get_num_teams() : 1;
+#endif
+").
+
+:- pragma foreign_proc("C",
+    team_barrier(_IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+#ifdef __AMDGPU__
+    merk_device_team_barrier();
+#else
+    merk_team_barrier();
 #endif
 ").
 

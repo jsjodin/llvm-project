@@ -1689,7 +1689,8 @@ still stalls the one before it when the ring between them fills.
 
 ## Library code on the device
 
-Proposed 2026-11-10; steps 1 to 4 are built.
+Proposed 2026-11-10; all five steps are built. Step 5's measurements are
+still to be taken.
 
 **Why.** A target region can call only its own module's procedures and the
 runtime's `merk_device_` functions (`Lowerer::LowerOpenMP`). So nothing of the
@@ -1859,6 +1860,28 @@ Each new predicate a region needs would add another special case or copy.
    - **Without OpenMP:** there is one team, and it returns at once.
    - **Measured:** `benchmarks/team-barrier` gains a `library` shape beside the
      two made of messages, which stay, as they measure messages.
+   Built 2026-11-10:
+   - **The library:** `process.team_barrier(!IO)`, a `foreign_proc` whose C
+     calls `merk_device_team_barrier` on a device and `merk_team_barrier` on
+     the host. libc has nothing for teams to wait for each other.
+   - **The counter:** both runtimes keep, in the region's team table, the
+     teams that have arrived in this round and the rounds that have ended. A
+     team reads the rounds before it arrives, and the last to arrive clears
+     the count and ends the round. The others wait for the rounds to change:
+     on a device with `s_sleep`, on the host spinning for
+     `MERK_SPIN_MICROSECONDS` and then on a condition variable. A
+     generation count in place of a flipping sense does the same, and a team
+     can read it without knowing the round.
+   - **The start barrier:** a teams region whose code reaches the copied
+     `process.team_barrier_2_0` waits for its teams to start, as one with
+     team mailboxes does, so teams that cannot all run at once are reported
+     and do not hang the GPU. A module that reaches it also marks its other
+     regions as having no teams, so the barrier returns at once there.
+   - **Tests:** `omp-target-team-barrier.m` and its `-gpu.test`, 50 rounds
+     in which team 0 polls without waiting for every team's message after
+     the barrier. Without the barrier, 150 of 200 polls fail on the host, and
+     189 on the GPU. 64 teams pass on the GPU as well. The benchmark's tests
+     run the `library` shape on the host, sequentially and on the GPU.
 
 **After this piece:** closures and type classes on a device. Most of `list` is
 higher-order: `foldl`, `map` and `filter` make or call closures, which a device

@@ -1,10 +1,11 @@
 # A barrier between teams
 
 `teambarrier.m` measures a barrier between the teams of a target teams region,
-made from team mailboxes (docs/INPROGRESS.md, Processes as teams, step 5).
-Every team arrives, and is released once all have. It is ordinary Mercury code
-of the program, as a barrier in the library would be, and calls the library's
-`list.length` on the device.
+made from team mailboxes (docs/INPROGRESS.md, Processes as teams, step 5), and
+the library's `process.team_barrier` (Library code on the device, step 5).
+Every team arrives, and is released once all have. The shapes from messages are
+ordinary Mercury code of the program, which calls the library's `list.length`
+on the device.
 
 ## What it measures
 
@@ -12,10 +13,12 @@ of the program, as a barrier in the library would be, and calls the library's
 | --- | --- |
 | `central` | Each team sends its arrival to team 0, which then sends each a release. Team 0 receives and sends one message per team, so a round takes about twice as many hops in sequence as there are teams. |
 | `tree` | A binary tree of the teams: a team waits for its children's arrivals, sends its own to its parent, waits for its parent's release and passes it on. A round takes about twice the tree's depth in hops in sequence. |
+| `library` | `process.team_barrier`: a counter in the region's team table that each team adds to, and the round that the last to arrive ends, which the others wait for. No messages. |
 
-An arrival in round R is the message 2R, a release 2R + 1. Each team counts the
-messages it did not expect, or that did not come within 10 s, and reports them
-to the host, which prints their sum as `wrong`.
+In the shapes from messages, an arrival in round R is the message 2R, a release
+2R + 1. Each team counts the messages it did not expect, or that did not come
+within 10 s, and reports them to the host, which prints their sum as `wrong`.
+The `library` shape reports 0.
 
 The rounds are timed on the host with `clock_gettime`, after 100 rounds to warm
 up, less the time of a region of no rounds. That holds the launch and the teams'
@@ -24,7 +27,7 @@ rounds.
 
 ## Building and running
 
-`run.sh [build-dir] [offload-arch]` builds the program and runs both shapes,
+`run.sh [build-dir] [offload-arch]` builds the program and runs the three shapes,
 over numbers of teams, on the GPU and on the host's teams, which libomp runs as
 threads. The build directory defaults to `build-merk`, beside `llvm-project`.
 Without an offload-arch, the GPU's measurements are left out.
@@ -35,9 +38,11 @@ Without an offload-arch, the GPU's measurements are left out.
 merkurius/benchmarks/team-barrier/run.sh "" gfx1030
 ```
 
-`teambarrier central|tree TEAMS ROUNDS` runs one measurement.
+`teambarrier central|tree|library TEAMS ROUNDS` runs one measurement.
 
 ## Results
+
+The `library` shape is not measured yet.
 
 2026-11-10, an AMD Radeon RX 6950 XT (gfx1030) on PCIe, an AMD Ryzen
 Threadripper PRO 5965WX (24 cores, 48 threads) as the host, the build of
