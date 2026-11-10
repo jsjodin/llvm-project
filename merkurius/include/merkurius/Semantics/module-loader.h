@@ -19,6 +19,7 @@
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/parse-tree.h"
 #include "merkurius/Parser/provenance.h"
+#include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/token.h"
 #include "llvm/ADT/StringMap.h"
 #include <memory>
@@ -45,8 +46,11 @@ public:
   // directory is searched after the search path of `sources`, and with
   // `sound`, its sound/ directory before it, which has the sound stubs of
   // modules whose manual's declarations work around mmc's unique modes.
+  // Each file is read with `readerOptions`, the importing compile's, so
+  // that an imported module may use the extensions it may, such as loops.
   ModuleLoader(parser::AllSources &sources, std::string libraryDirectory,
-      parser::Messages &messages, bool sound = false);
+      parser::Messages &messages, bool sound = false,
+      parser::ReaderOptions readerOptions = {});
   ~ModuleLoader();
 
   // The interface of the module named `name`, loaded once, with the
@@ -82,6 +86,7 @@ private:
   std::string libraryDirectory_;
   parser::Messages &messages_;
   bool sound_;
+  parser::ReaderOptions readerOptions_;
   std::vector<std::unique_ptr<File>> files_;
   llvm::StringMap<ModuleInterface *> loaded_;
   std::vector<const ModuleInterface *> order_;
