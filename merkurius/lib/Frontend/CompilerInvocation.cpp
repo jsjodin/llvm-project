@@ -9,6 +9,7 @@
 #include "merkurius/Frontend/CompilerInvocation.h"
 #include "merkurius/Driver/Options.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/TargetParser/Triple.h"
 
 using namespace merkurius::options;
 using llvm::opt::InputArgList;
@@ -196,6 +197,18 @@ static bool parseCodeGenArgs(CodeGenOptions &opts, const InputArgList &args) {
       args.getLastArgValue(OPT_fopenmp_host_ir_file_path).str();
   opts.openMPTargets = args.getAllArgValues(OPT_offload_targets_EQ);
   opts.offloadObjects = args.getAllArgValues(OPT_fembed_offload_object_EQ);
+  opts.processKernels = args.hasArg(OPT_fprocess_kernels);
+  opts.processImages = args.getAllArgValues(OPT_fembed_process_image_EQ);
+  if (opts.processKernels && opts.openMP) {
+    reportError("-fprocess-kernels compiles without OpenMP: it cannot be "
+                "given with -fopenmp");
+    return false;
+  }
+  if (opts.processKernels && !llvm::Triple{opts.triple}.isAMDGPU()) {
+    reportError("-fprocess-kernels needs the triple of an AMD GPU, such as "
+                "amdgpu10.30-amd-amdhsa");
+    return false;
+  }
   if ((opts.openMPIsTargetDevice || !opts.openMPTargets.empty()) &&
       !opts.openMP) {
     reportError("OpenMP offloading needs -fopenmp");

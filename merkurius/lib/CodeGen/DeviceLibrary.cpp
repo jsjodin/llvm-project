@@ -182,8 +182,8 @@ void Copier::Replace(merk::ProcOp declaration, mlir::Operation *user) {
       return;
     }
     mlir::InFlightDiagnostic diagnostic{mlir::emitError(user->getLoc())
-        << "cannot call " << declaration.getSymName()
-        << " on an OpenMP device yet: it is not compiled for the device"};
+        << "cannot call " << declaration.getSymName() << " "
+        << DevicePlace(module_) << " yet: it is not compiled for the device"};
     NoteReachedFrom(diagnostic, user->getParentOfType<merk::ProcOp>());
     failed_ = true;
     return;
@@ -375,6 +375,11 @@ llvm::LogicalResult Copier::Copy() {
   module_.walk([&](mlir::omp::TargetOp target) {
     pending_.push_back({target, nullptr});
   });
+  for (auto proc : module_.getOps<merk::ProcOp>()) {
+    if (proc->hasAttr(kKernelAttrName)) {
+      pending_.push_back({proc, nullptr});
+    }
+  }
   while (!pending_.empty()) {
     Follow(pending_.pop_back_val());
   }
@@ -466,8 +471,8 @@ private:
 mlir::InFlightDiagnostic ForeignCompiler::Report(merk::ForeignCallOp call) {
   auto proc{call->getParentOfType<merk::ProcOp>()};
   mlir::InFlightDiagnostic diagnostic{mlir::emitError(call.getLoc())
-      << "cannot call " << (proc ? proc.getSymName() : call.getCallee())
-      << " on an OpenMP device yet: "};
+      << "cannot call " << (proc ? proc.getSymName() : call.getCallee()) << " "
+      << DevicePlace(module_) << " yet: "};
   return diagnostic;
 }
 
@@ -670,7 +675,10 @@ llvm::LogicalResult ForeignCompiler::Compile() {
   // clang would otherwise look for one on the machine.
   if (DeviceGPU(target_).empty()) {
     mlir::emitError(calls_.front().second.getLoc())
-        << "compiling foreign code for an OpenMP device needs its GPU, as "
+        << "compiling foreign code for "
+        << (TargetInfo::ProcessKernels(module_) ? "a GPU process"
+                                                : "an OpenMP device")
+        << " needs its GPU, as "
            "-target-cpu or the triple names it, such as "
            "amdgpu10.30-amd-amdhsa for gfx1030";
     return llvm::failure();
@@ -696,6 +704,11 @@ llvm::LogicalResult ForeignCompiler::Compile() {
 llvm::LogicalResult CompileDeviceForeignCode(
     mlir::ModuleOp module, const TargetInfo &target, llvm::StringRef clang) {
   return ForeignCompiler{module, target, clang}.Compile();
+}
+
+llvm::StringRef DevicePlace(mlir::ModuleOp module) {
+  return TargetInfo::ProcessKernels(module) ? "in a GPU process"
+                                            : "on an OpenMP device";
 }
 
 void NoteReachedFrom(

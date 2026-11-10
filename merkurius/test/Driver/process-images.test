@@ -1,0 +1,59 @@
+With -fprocess-declarations and --offload-arch=, each source's process kinds
+that run on a GPU get an image for each GPU (docs/INPROGRESS.md, GPU processes
+without omp target, step 4b): a device job compiles their kernels without
+OpenMP, to bitcode named as an object; Clang links the image from it with LTO,
+the image's start object, the device's runtime library, and libc and libm; and
+the host's compile embeds each image. Without -fopenmp nothing else is
+offloaded, and the link is the host's alone.
+REQUIRES: amdgpu-registered-target
+
+The image's link optimizes at -O2 whatever -O is, as the linker wrapper
+does for OpenMP's device code.
+RUN: merkc -### -fprocess-declarations --offload-arch=gfx1030 -O2 %S/Inputs/sumsq.m -o prog 2>&1 \
+RUN:   | FileCheck %s
+RUN: merkc -### -fprocess-declarations --offload-arch=gfx1030 -O0 %S/Inputs/sumsq.m -o prog 2>&1 \
+RUN:   | FileCheck %s --check-prefix=O0
+O0: "-fc1" "-emit-llvm-bc" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-O0" "-fprocess-kernels"
+O0: "-mcpu=gfx1030" "-flto" "-O2"
+CHECK:      "-fc1" "-emit-llvm-bc" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-O2" "-fprocess-kernels" "-o" "[[KERNELS:[^"]*sumsq-gfx1030-processes-[^"]*\.o]]" "{{[^"]*}}sumsq.m"{{$}}
+CHECK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "--target=amdgcn-amd-amdhsa" "-mcpu=gfx1030" "-flto" "-O2" "[[KERNELS]]" "{{[^"]*}}merk-process-start-amdgcn.o" "{{[^"]*}}libmerkdevice-amdgcn.a" "-lc" "-lm" "-o" "[[IMAGE:[^"]*sumsq-gfx1030-processes-[^"]*\.elf]]"{{$}}
+CHECK-NEXT: "-fc1" "-emit-obj" "-fprocess-declarations" "-O2" "-fembed-process-image=gfx1030:[[IMAGE]]" "-o" "[[OBJECT:[^"]*sumsq-[^"]*\.o]]" "{{[^"]*}}sumsq.m"{{$}}
+CHECK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "-o" "prog" "[[OBJECT]]" "-L{{[^"]*}}lib" "-no-pie" "-lmerkstd" "-lmerkrt" "-lm"{{$}}
+
+Two GPUs give an image each. With -c, the host's compile writes the object.
+RUN: merkc -### -fprocess-declarations --offload-arch=gfx1030,gfx90a -c %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=TWO
+TWO:      "-triple" "amdgpu10.30-amd-amdhsa"{{.*}} "-fprocess-kernels"
+TWO:      "-mcpu=gfx1030" {{.*}} "-o" "[[IMAGE1:[^"]*\.elf]]"{{$}}
+TWO:      "-triple" "amdgpu9.0a-amd-amdhsa"{{.*}} "-fprocess-kernels"
+TWO:      "-mcpu=gfx90a" {{.*}} "-o" "[[IMAGE2:[^"]*\.elf]]"{{$}}
+TWO:      "-fc1" "-emit-obj" "-fprocess-declarations" "-fembed-process-image=gfx1030:[[IMAGE1]]" "-fembed-process-image=gfx90a:[[IMAGE2]]" "{{[^"]*}}sumsq.m"{{$}}
+TWO-NOT:  clang
+
+With -fopenmp too, the images come first, and the host's bitcode job of
+OpenMP's offload jobs embeds them. The kernels are still compiled without
+OpenMP.
+RUN: merkc -### -fopenmp -fprocess-declarations --offload-arch=gfx1030 %S/Inputs/sumsq.m -o prog 2>&1 \
+RUN:   | FileCheck %s --check-prefix=OMP
+OMP:      "-fc1" "-emit-llvm-bc" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-fprocess-kernels" "-o" "[[KERNELS:[^"]*\.o]]" "{{[^"]*}}sumsq.m"{{$}}
+OMP-NEXT: "-mcpu=gfx1030" "-flto" "-O2" "[[KERNELS]]" {{.*}} "-o" "[[IMAGE:[^"]*\.elf]]"{{$}}
+OMP-NEXT: "-fc1" "-emit-llvm-bc" "-fopenmp" "-fprocess-declarations" "-fembed-process-image=gfx1030:[[IMAGE]]" "--offload-targets=amdgpu-amd-amdhsa" "-o" "{{[^"]*}}.bc" "{{[^"]*}}sumsq.m"{{$}}
+OMP-NEXT: "-fc1" "-emit-llvm-bc" "-fopenmp" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-fopenmp-is-target-device"
+OMP:      "{{[^"]*}}clang{{(\.exe)?}}" "-fopenmp" "--offload-arch=gfx1030"
+
+-E has no image jobs, nor does a compile without -fprocess-declarations.
+RUN: merkc -### -fprocess-declarations --offload-arch=gfx1030 -E %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=PRE --implicit-check-not=-fprocess-kernels
+PRE: "-fc1" "-E" "-fprocess-declarations" "{{[^"]*}}sumsq.m"{{$}}
+RUN: merkc -### -fopenmp --offload-arch=gfx1030 %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=NO-DECL
+NO-DECL-NOT: -fprocess-kernels
+NO-DECL-NOT: -fembed-process-image
+
+The kernels' compile is without OpenMP, for an AMD GPU.
+RUN: not merkc -fc1 -fprocess-kernels -fopenmp -triple amdgpu10.30-amd-amdhsa %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=FC1-OMP
+FC1-OMP: merkc: error: -fprocess-kernels compiles without OpenMP: it cannot be given with -fopenmp
+RUN: not merkc -fc1 -fprocess-kernels %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=FC1-HOST
+FC1-HOST: merkc: error: -fprocess-kernels needs the triple of an AMD GPU, such as amdgpu10.30-amd-amdhsa

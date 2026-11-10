@@ -52,8 +52,12 @@ public:
 
   // Records the target on the module: llvm.target_triple, llvm.data_layout
   // and its DLTI form, merk.target_cpu, merk.target_features,
-  // merk.optimization_level and merk.address_spaces.
+  // merk.optimization_level and merk.address_spaces, and
+  // merk.process_kernels for a compile of GPU processes' kernels.
   void Record(mlir::ModuleOp) const;
+  // Whether a module that Record recorded is a compile of GPU processes'
+  // kernels.
+  static bool ProcessKernels(mlir::ModuleOp);
 
   const llvm::Triple &triple() const { return triple_; }
   const llvm::DataLayout &dataLayout() const { return dataLayout_; }

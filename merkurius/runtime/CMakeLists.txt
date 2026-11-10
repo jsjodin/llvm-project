@@ -14,6 +14,7 @@ add_library(merkrt STATIC
   main.cpp
   node.cpp
   offload.cpp
+  process-images.cpp
   read.cpp
   sha256.cpp
   stack.cpp
@@ -36,8 +37,8 @@ target_include_directories(merkrt PRIVATE ${LLVM_MAIN_SRC_DIR}/../libc)
 
 # libmerkdevice-amdgcn.a, the device's runtime (device/device.cpp), as
 # bitcode for any AMD GPU, which the driver links into the device image
-# beside the OpenMP device runtime. It is compiled by this build's Clang, as
-# the OpenMP device runtime is.
+# beside the OpenMP device runtime, and into GPU processes' images. It is
+# compiled by this build's Clang, as the OpenMP device runtime is.
 if (TARGET clang AND TARGET llvm-ar AND "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
   set(merk_device_bc ${CMAKE_CURRENT_BINARY_DIR}/device-amdgcn.bc)
   set(merk_device_array_bc ${CMAKE_CURRENT_BINARY_DIR}/device-array-amdgcn.bc)
@@ -62,9 +63,24 @@ if (TARGET clang AND TARGET llvm-ar AND "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
     COMMAND $<TARGET_FILE:llvm-ar> rcs ${merk_device_lib} ${merk_device_bc}
       ${merk_device_array_bc}
     DEPENDS llvm-ar ${merk_device_bc} ${merk_device_array_bc})
-  add_custom_target(merkdevice ALL DEPENDS ${merk_device_lib})
+  # merk-process-start-amdgcn.o, the object that each image of GPU process
+  # kinds starts with (device/process-start.cpp): not in the archive, so
+  # that LTO exports what it defines. It is bitcode, named as an object so
+  # that Clang gives it to the linker as it is.
+  set(merk_process_start_bc
+    ${LLVM_LIBRARY_OUTPUT_INTDIR}/merk-process-start-amdgcn.o)
+  add_custom_command(OUTPUT ${merk_process_start_bc}
+    COMMAND $<TARGET_FILE:clang> --target=amdgcn-amd-amdhsa -nogpulib -O2
+      -flto -fvisibility=hidden -fno-exceptions -fno-rtti -std=c++17
+      -I${LLVM_MAIN_SRC_DIR}/../libc
+      -c ${CMAKE_CURRENT_SOURCE_DIR}/device/process-start.cpp
+      -o ${merk_process_start_bc}
+    DEPENDS clang ${CMAKE_CURRENT_SOURCE_DIR}/device/process-start.cpp
+    COMMENT "Building the start of GPU process images for AMD GPUs")
+  add_custom_target(merkdevice ALL
+    DEPENDS ${merk_device_lib} ${merk_process_start_bc})
   set_target_properties(merkdevice PROPERTIES FOLDER "Merkurius/Runtime")
-  install(FILES ${merk_device_lib}
+  install(FILES ${merk_device_lib} ${merk_process_start_bc}
     DESTINATION lib${LLVM_LIBDIR_SUFFIX}
     COMPONENT merkrt)
 endif()

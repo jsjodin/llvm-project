@@ -152,8 +152,10 @@ public:
         registers_{target.Results()}, target_{target}, clang_{clang} {
     auto offload{mlir::dyn_cast<mlir::omp::OffloadModuleInterface>(
         module.getOperation())};
-    device_ = mlir::omp::isOpenMPModule(module) && offload &&
-        offload.getIsTargetDevice();
+    kernels_ = target.options().processKernels;
+    device_ = kernels_ ||
+        (mlir::omp::isOpenMPModule(module) && offload &&
+            offload.getIsTargetDevice());
   }
   llvm::LogicalResult Lower();
 
@@ -380,6 +382,10 @@ private:
   // only those and the target regions.
   llvm::LogicalResult FilterProcs();
   llvm::LogicalResult LowerOpenMP();
+  // A compile of GPU processes' kernels keeps only what the kernels reach.
+  llvm::LogicalResult FilterKernelProcs();
+  // Reports a call of a function that the device does not have.
+  llvm::LogicalResult CheckDeviceCalls();
   mlir::Block *SplitAfter(mlir::Operation *);
   mlir::Block *Inline(mlir::Region &, mlir::Block *before);
   void Exit(mlir::Block *, mlir::Block *after);
@@ -430,8 +436,10 @@ private:
   mlir::Block *fail_{nullptr};
   mlir::Block *topFail_{nullptr};
   mlir::LLVM::LLVMFuncOp throw_;
-  // Whether this is an OpenMP device compile.
+  // Whether this is a device's compile: OpenMP's, or of GPU processes'
+  // kernels (kernels_).
   bool device_{false};
+  bool kernels_{false};
   const TargetInfo &target_;
   // What compiles a device's foreign code.
   std::string clang_;
@@ -1022,8 +1030,16 @@ mlir::Value Lowerer::Alloca(
   rewriter_.setInsertionPointToStart(allocas);
   mlir::Value one{mlir::LLVM::ConstantOp::create(
       rewriter_, loc, rewriter_.getI64Type(), rewriter_.getI64IntegerAttr(1))};
-  return mlir::LLVM::AllocaOp::create(rewriter_, loc,
-      mlir::LLVM::LLVMPointerType::get(module_.getContext()), type, one);
+  // On a GPU the stack is an address space of its own, as in Slot.
+  unsigned addressSpace{target_.allocaAddressSpace()};
+  auto pointer{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  mlir::Value slot{mlir::LLVM::AllocaOp::create(rewriter_, loc,
+      mlir::LLVM::LLVMPointerType::get(module_.getContext(), addressSpace),
+      type, one)};
+  if (addressSpace != 0) {
+    slot = mlir::LLVM::AddrSpaceCastOp::create(rewriter_, loc, pointer, slot);
+  }
+  return slot;
 }
 
 void Lowerer::LowerProc(merk::ProcOp proc) {
@@ -1062,6 +1078,12 @@ void Lowerer::LowerProc(merk::ProcOp proc) {
   }
   if (mlir::Attribute declare{proc->getDiscardableAttr("omp.declare_target")}) {
     func->setDiscardableAttr("omp.declare_target", declare);
+  }
+  // A GPU process's kernel, which the host's runtime launches by its name,
+  // with its arguments by value.
+  if (proc->hasAttr(kKernelAttrName)) {
+    func.setCConv(mlir::LLVM::CConv::AMDGPU_KERNEL);
+    func.setVisibility_(mlir::LLVM::Visibility::Protected);
   }
   rewriter_.inlineRegionBefore(
       proc.getBody(), func.getBody(), func.getBody().end());
@@ -2148,8 +2170,9 @@ mlir::Value Lowerer::CallDescriptorEntry(
 
 llvm::LogicalResult Lowerer::LowerUnifyWord(merk::UnifyWordOp op) {
   if (device_) {
-    return op.emitOpError(
-        "compares values of a type variable, which cannot be done on an OpenMP device yet");
+    return op.emitOpError("compares values of a type variable, which cannot "
+                          "be done ")
+        << DevicePlace(module_) << " yet";
   }
   // Past the header's word, the module's and the name's.
   mlir::Value result{CallDescriptorEntry(op, 24, rewriter_.getI1Type())};
@@ -2159,8 +2182,9 @@ llvm::LogicalResult Lowerer::LowerUnifyWord(merk::UnifyWordOp op) {
 
 llvm::LogicalResult Lowerer::LowerCompareWord(merk::CompareWordOp op) {
   if (device_) {
-    return op.emitOpError(
-        "compares values of a type variable, which cannot be done on an OpenMP device yet");
+    return op.emitOpError("compares values of a type variable, which cannot "
+                          "be done ")
+        << DevicePlace(module_) << " yet";
   }
   // Past the unify entry too.
   mlir::Value result{CallDescriptorEntry(op, 32, Convert(op.getType()))};
@@ -2554,6 +2578,9 @@ mlir::Value Lowerer::CallCode(mlir::Operation *call, mlir::LLVM::LLVMFuncOp func
           caller.getFunctionType() ==
               (func ? func.getFunctionType() : funcType)) &&
       llvm::none_of(call->getOperands(), [](mlir::Value operand) {
+        if (auto cast{operand.getDefiningOp<mlir::LLVM::AddrSpaceCastOp>()}) {
+          operand = cast.getArg();
+        }
         return operand.getDefiningOp<merk::EnvNewOp>() ||
             operand.getDefiningOp<mlir::LLVM::AllocaOp>();
       })};
@@ -3401,16 +3428,19 @@ void Lowerer::LowerMrt() {
 }
 
 // Reports an operation that does `what`, which needs the host's runtime, if it
-// would run on a device: in a target region or a procedure one calls. Whether
-// it did.
-static bool RejectOnDevice(mlir::Operation *op, llvm::StringRef what) {
+// would run on a device: in a target region or a procedure one calls, or
+// anywhere in a compile of GPU processes' kernels (`kernels`), which keeps
+// only what they reach. Whether it did.
+static bool RejectOnDevice(
+    mlir::Operation *op, llvm::StringRef what, bool kernels = false) {
   auto proc{op->getParentOfType<merk::ProcOp>()};
-  if (!op->getParentOfType<mlir::omp::TargetOp>() &&
+  if (!kernels && !op->getParentOfType<mlir::omp::TargetOp>() &&
       !(proc && proc->getDiscardableAttr("omp.declare_target"))) {
     return false;
   }
+  auto module{op->getParentOfType<mlir::ModuleOp>()};
   mlir::InFlightDiagnostic diagnostic{op->emitOpError(what)
-      << ", which cannot be done on an OpenMP device yet"};
+      << ", which cannot be done " << DevicePlace(module) << " yet"};
   NoteReachedFrom(diagnostic, proc);
   return true;
 }
@@ -3434,18 +3464,21 @@ llvm::LogicalResult Lowerer::Lower() {
   if (mlir::omp::isOpenMPModule(module_) && mlir::failed(FilterProcs())) {
     return llvm::failure();
   }
+  if (kernels_ && mlir::failed(FilterKernelProcs())) {
+    return llvm::failure();
+  }
   // What stays on a device of a procedure that only holds a target region
   // does not run there; a procedure a target region calls does.
   if (device_) {
     bool bad{false};
     module_.walk([&](merk::CallMethodOp op) {
-      bad = RejectOnDevice(op, "dispatches on a type class") || bad;
+      bad = RejectOnDevice(op, "dispatches on a type class", kernels_) || bad;
     });
     module_.walk([&](merk::TypeclassInfoOp op) {
-      bad = RejectOnDevice(op, "dispatches on a type class") || bad;
+      bad = RejectOnDevice(op, "dispatches on a type class", kernels_) || bad;
     });
     module_.walk([&](merk::CompareTypeInfoOp op) {
-      bad = RejectOnDevice(op, "compares types") || bad;
+      bad = RejectOnDevice(op, "compares types", kernels_) || bad;
     });
     if (bad || mlir::failed(CompileDeviceForeignCode(module_, target_, clang_))) {
       return llvm::failure();
@@ -3650,6 +3683,9 @@ llvm::LogicalResult Lowerer::Lower() {
   if (mlir::omp::isOpenMPModule(module_) && mlir::failed(LowerOpenMP())) {
     return llvm::failure();
   }
+  if (kernels_ && mlir::failed(CheckDeviceCalls())) {
+    return llvm::failure();
+  }
   // Every operation left must be the LLVM dialect's or OpenMP's.
   mlir::WalkResult result{module_.walk([](mlir::Operation *op) {
     if (mlir::isa_and_present<merk::MerkDialect, mrt::MrtDialect,
@@ -3660,6 +3696,51 @@ llvm::LogicalResult Lowerer::Lower() {
     return mlir::WalkResult::advance();
   })};
   return llvm::failure(result.wasInterrupted());
+}
+
+// A compile of GPU processes' kernels keeps the kernels and the procedures
+// they reach, and removes the rest, which are the host's, with the
+// program's entry and the constructors. A closure is an error there, as on
+// an OpenMP device: its entry runs on the host only.
+llvm::LogicalResult Lowerer::FilterKernelProcs() {
+  mlir::SymbolTable symbols{module_};
+  llvm::SmallVector<mlir::Operation *> pending;
+  llvm::DenseSet<mlir::Operation *> reached;
+  for (auto proc : module_.getOps<merk::ProcOp>()) {
+    if (proc->hasAttr(kKernelAttrName)) {
+      pending.push_back(proc);
+      reached.insert(proc);
+    }
+  }
+  while (!pending.empty()) {
+    mlir::Operation *op{pending.pop_back_val()};
+    std::optional<mlir::SymbolTable::UseRange> uses{
+        mlir::SymbolTable::getSymbolUses(op)};
+    for (const mlir::SymbolTable::SymbolUse &use :
+        uses ? *uses : mlir::SymbolTable::UseRange{{}}) {
+      mlir::Operation *callee{
+          symbols.lookup(use.getSymbolRef().getRootReference())};
+      if (mlir::isa_and_present<merk::ProcOp>(callee) &&
+          reached.insert(callee).second) {
+        pending.push_back(callee);
+      }
+    }
+  }
+  for (mlir::Operation &op :
+      llvm::make_early_inc_range(module_.getBody()->getOperations())) {
+    if (mlir::isa<merk::EntryOp, merk::ConstructorOp>(op) ||
+        (mlir::isa<merk::ProcOp>(op) && !reached.contains(&op))) {
+      op.erase();
+    }
+  }
+  bool bad{false};
+  module_.walk([&](merk::ClosureOp op) {
+    bad = RejectOnDevice(op, "makes a closure", /*kernels=*/true) || bad;
+  });
+  module_.walk([&](merk::CallClosureOp op) {
+    bad = RejectOnDevice(op, "calls a closure", /*kernels=*/true) || bad;
+  });
+  return llvm::failure(bad);
 }
 
 // The omp dialect's passes on the merk module, before it is lowered, so
@@ -3733,20 +3814,24 @@ llvm::LogicalResult Lowerer::LowerOpenMP() {
   if (!device_) {
     return llvm::success();
   }
-  // What a device's code calls must be in the module, as its own procedures,
-  // the library's copied in (CopyDeviceLibrary) and their foreign code
-  // (CompileDeviceForeignCode), or in the device's image: the device's
-  // runtime library has the merk_device_ and merk_array_ functions
-  // (runtime/device, runtime/array.cpp), which the driver links into the
-  // device image, and the OpenMP device runtime has the number of teams,
-  // which a teams region gives the runtime.
+  return CheckDeviceCalls();
+}
+
+// What a device's code calls must be in the module, as its own procedures,
+// the library's copied in (CopyDeviceLibrary) and their foreign code
+// (CompileDeviceForeignCode), or in the device's image: the device's runtime
+// library has the merk_device_ and merk_array_ functions (runtime/device,
+// runtime/array.cpp), which the driver links into the device image, and the
+// OpenMP device runtime has the number of teams, which a teams region gives
+// the runtime. A GPU process's image has no OpenMP device runtime.
+llvm::LogicalResult Lowerer::CheckDeviceCalls() {
   for (auto func : module_.getOps<mlir::LLVM::LLVMFuncOp>()) {
     // A foreign_proc's C function was compiled for the device, or reported,
     // by CompileDeviceForeignCode.
     if (!func.isExternal() || func.getSymName().starts_with("merk_device_") ||
         func.getSymName().starts_with("merk_foreign_") ||
         func.getSymName().starts_with("merk_array_") ||
-        func.getSymName() == "omp_get_num_teams") {
+        (!kernels_ && func.getSymName() == "omp_get_num_teams")) {
       continue;
     }
     if (auto uses{mlir::SymbolTable::getSymbolUses(func, module_)};
@@ -3754,8 +3839,8 @@ llvm::LogicalResult Lowerer::LowerOpenMP() {
       mlir::Operation *user{uses->begin()->getUser()};
       auto caller{user->getParentOfType<mlir::LLVM::LLVMFuncOp>()};
       mlir::InFlightDiagnostic diagnostic{mlir::emitError(user->getLoc())
-          << "cannot call " << func.getSymName()
-          << " on an OpenMP device yet: it is not compiled for the device"};
+          << "cannot call " << func.getSymName() << " " << DevicePlace(module_)
+          << " yet: it is not compiled for the device"};
       NoteReachedFrom(diagnostic, caller);
       return llvm::failure();
     }
@@ -3881,10 +3966,11 @@ bool LinkForeignCode(llvm::Module &module, mlir::ModuleOp mlirModule,
     const TargetInfo &target, llvm::StringRef clang, std::string &error) {
   auto offload{mlir::dyn_cast<mlir::omp::OffloadModuleInterface>(
       mlirModule.getOperation())};
-  if (offload && offload.getIsTargetDevice()) {
-    // A device's compile has compiled what its regions reach already
-    // (CompileDeviceForeignCode). Only that is linked: other functions of
-    // the module's foreign code may be for the host alone.
+  if ((offload && offload.getIsTargetDevice()) ||
+      TargetInfo::ProcessKernels(mlirModule)) {
+    // A device's compile has compiled what its regions or kernels reach
+    // already (CompileDeviceForeignCode). Only that is linked: other
+    // functions of the module's foreign code may be for the host alone.
     auto compiled{mlirModule->getAttrOfType<mlir::ArrayAttr>(
         kDeviceForeignBitcodeAttrName)};
     for (mlir::Attribute bitcode : compiled ? compiled.getValue()
@@ -3918,6 +4004,18 @@ bool LinkForeignCode(llvm::Module &module, mlir::ModuleOp mlirModule,
     }
   }
   return true;
+}
+
+void HideAllButKernels(llvm::Module &module) {
+  for (llvm::GlobalValue &value : module.global_values()) {
+    auto *function{llvm::dyn_cast<llvm::Function>(&value)};
+    if (value.isDeclaration() || value.hasLocalLinkage() ||
+        (function &&
+            function->getCallingConv() == llvm::CallingConv::AMDGPU_KERNEL)) {
+      continue;
+    }
+    value.setVisibility(llvm::GlobalValue::HiddenVisibility);
+  }
 }
 
 bool EmbedOffloadObjects(llvm::Module &module,

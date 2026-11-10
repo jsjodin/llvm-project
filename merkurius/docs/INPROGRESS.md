@@ -2165,6 +2165,46 @@ the process asks the host to launch. The first version has neither.
      a global, which a start-up call registers with the runtime, as message
      types are registered. Not the linker wrapper's offload binary: the
      wrapper links only OpenMP's, CUDA's and HIP's kinds.
+
+     Done 2026-11-10, as the design document records (Driver, Linking and
+     offloading, "Images of GPU process kinds"). What differs from the plan:
+     - **The start object defines the RPC client and `merk_device_number`,**
+       not code generation: `merk-process-start-amdgcn.o`, from
+       `runtime/device/process-start.cpp`, given to the link as an object.
+       Rejected: code generation defining them, which would copy
+       `rpc::Client`'s size and layout into the compiler.
+     - **A device mode without OpenMP:** `TargetOptions::IsDevice()` is true
+       for OpenMP's device compile and for `-fprocess-kernels`, and the code
+       that a device does without (roots, statepoints, the collector,
+       descriptors' entries, the specializer) checks it. The kernels are the
+       roots that the library's procedures are copied from, and
+       `FilterKernelProcs` keeps what they reach, without OpenMP's
+       declare-target passes. Errors say "in a GPU process". Rejected:
+       compiling the kernels as an OpenMP device module, which would bring
+       OpenMP's attributes and its target regions into an image without
+       OpenMP's device runtime.
+     - **Everything but the kernels is hidden,** so that the image, a shared
+       object, exports only them (`HideAllButKernels`).
+     - **The Lowerer's own stack slots are in the stack's address space,**
+       as region slots were: OpenMP's translation had fixed them for
+       regions.
+     - **The image's link is at `-O2` whatever `-O` is,** as the linker
+       wrapper's for OpenMP's device code; AMDGPU's code generation fails
+       at `-O0` on a `musttail` call in divergent control flow (design
+       document, LLVM bugs to report). Decided by the user the same day:
+       AMDGPU code goes to executable code at `-O2` always.
+     - **The host registers message types** for a module with GPU kinds,
+       as for one with target regions.
+     - **Arguments:** a kind that is polymorphic, or takes a value other
+       than an integer, a float, a character or a mailbox, is reported as
+       not yet implemented in the kernels' compile. So is a message type
+       the device's receive does not take yet, as a closure through the
+       library's `receive`, as in a region's callee.
+     - **The runtime records each image** (`runtime/process-images.cpp`),
+       by module and GPU, for step 4c to load.
+     Tests: `Driver/process-images.test`, `CodeGen/process-kernels.m` (the
+     kernel, the registration, the image's exports, and the program on the
+     host at `-O0` and `-O2`), and `CodeGen/process-kernel-errors.m`.
    - **4c. Spawning on a GPU.** `spawn_<kind>_at` (decision D2) spawns the
      kind on a GPU. On the first such spawn, the runtime calls `olInit`,
      registers its RPC callback, and matches liboffload's devices to

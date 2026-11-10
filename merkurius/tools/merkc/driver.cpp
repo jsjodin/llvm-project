@@ -68,13 +68,15 @@ static bool isObjectFile(llvm::StringRef input) {
 }
 
 // The options the driver passes on to each -fc1 job: for the host, or with
-// `deviceTriple` for an OpenMP device.
+// `deviceTriple` for a device, OpenMP's unless `openMP` is false, as for
+// GPU processes' kernels, which are compiled without OpenMP.
 static void addFrontendOptions(const InputArgList &args, Job &job,
-    llvm::StringRef deviceTriple = "") {
-  if (args.hasArg(OPT_fopenmp)) {
+    llvm::StringRef deviceTriple = "", bool openMP = true) {
+  if (openMP && args.hasArg(OPT_fopenmp)) {
     job.push_back("-fopenmp");
   }
-  if (const llvm::opt::Arg *arg = args.getLastArg(OPT_fopenmp_version_EQ)) {
+  if (const llvm::opt::Arg *arg = args.getLastArg(OPT_fopenmp_version_EQ);
+      arg && openMP) {
     job.push_back(arg->getAsString(args));
   }
   if (args.hasArg(OPT_fdo_loops)) {
@@ -122,12 +124,15 @@ struct OffloadArch {
 
 // The GPUs that --offload-arch= names, or false after reporting an error.
 // Each AMD GPU's triple has its subarchitecture, as Clang's and Flang's
-// drivers give it: gfx1030's is amdgpu10.30-amd-amdhsa.
+// drivers give it: gfx1030's is amdgpu10.30-amd-amdhsa. The GPUs are for
+// OpenMP's target regions, with -fopenmp, and for the process kinds that run
+// on a GPU, with -fprocess-declarations.
 static bool getOffloadArchs(
     const InputArgList &args, std::vector<OffloadArch> &archs) {
   std::vector<std::string> values{args.getAllArgValues(OPT_offload_arch_EQ)};
-  if (!values.empty() && !args.hasArg(OPT_fopenmp)) {
-    reportError("--offload-arch needs -fopenmp");
+  if (!values.empty() && !args.hasArg(OPT_fopenmp) &&
+      !args.hasArg(OPT_fprocess_declarations)) {
+    reportError("--offload-arch needs -fopenmp or -fprocess-declarations");
     return false;
   }
   for (const std::string &value : values) {
@@ -195,14 +200,74 @@ private:
 };
 } // namespace
 
+// The program that links: Clang, beside merkc or else on the PATH (design
+// document, "Linking and offloading").
+static std::string findLinker(llvm::StringRef executable) {
+  std::string clang{findClang(executable)};
+  return clang.empty() ? "clang" : clang;
+}
+
+// The directory of the compiled standard library and the runtime library:
+// lib beside bin/merkc, in the build directory and the installation alike.
+static std::string libraryDirectory(llvm::StringRef executable) {
+  llvm::SmallString<128> dir{
+      llvm::sys::path::parent_path(llvm::sys::path::parent_path(executable))};
+  llvm::sys::path::append(dir, "lib");
+  return dir.str().str();
+}
+
+// The jobs that make the image of `input`'s process kinds that run on a GPU,
+// for each of `archs` (docs/INPROGRESS.md, GPU processes without omp target,
+// step 4b): the kernels' bitcode, compiled without OpenMP; and the image, a
+// shared object that Clang links from it with LTO, with the start object
+// that exports what the offload plugin and the runtime look up, the
+// device's runtime library, and libc and libm for the GPU, which Clang finds
+// beside itself. The link optimizes at -O2 whatever -O is, as the linker
+// wrapper does for OpenMP's device code: AMDGPU's code generation at -O0 and
+// -O1 fails on a musttail call in divergent control flow ("failed to
+// annotate CFG"), which code generation makes of a tail call between
+// procedures of the same type. The host's compile of `input` embeds each
+// image with the options that come back. A module without such kinds gets
+// an image without kernels, which its host compile leaves out.
+static std::vector<std::string> addProcessImageJobs(const InputArgList &args,
+    llvm::StringRef executable, const std::string &input,
+    const std::vector<OffloadArch> &archs, std::vector<Job> &jobs,
+    TemporaryFiles &temporaries) {
+  llvm::StringRef stem{llvm::sys::path::stem(input)};
+  std::string libraryDir{libraryDirectory(executable)};
+  std::vector<std::string> embeds;
+  for (const OffloadArch &arch : archs) {
+    // Bitcode named as an object, which Clang gives to the linker as it is,
+    // for LTO, rather than compile it again.
+    std::string kernels{
+        temporaries.Name((stem + "-" + arch.arch + "-processes").str(), "o")};
+    Job device{executable.str(), "-fc1", "-emit-llvm-bc"};
+    addFrontendOptions(args, device, arch.triple, /*openMP=*/false);
+    device.insert(device.end(), {"-fprocess-kernels", "-o", kernels, input});
+    jobs.push_back(std::move(device));
+    std::string image{
+        temporaries.Name((stem + "-" + arch.arch + "-processes").str(), "elf")};
+    Job link{findLinker(executable), "--target=amdgcn-amd-amdhsa",
+        "-mcpu=" + arch.arch, "-flto", "-O2"};
+    link.insert(link.end(),
+        {kernels, libraryDir + "/merk-process-start-amdgcn.o",
+            libraryDir + "/libmerkdevice-amdgcn.a", "-lc", "-lm", "-o", image});
+    jobs.push_back(std::move(link));
+    embeds.push_back("-fembed-process-image=" + arch.arch + ":" + image);
+  }
+  return embeds;
+}
+
 // The jobs that compile `input` to the object file `object` with its target
 // regions offloaded to `archs`, as Flang's are: the host's bitcode, with its
-// offload entries; each GPU's, which matches them; the GPUs' code in one
-// offload binary; and the host's object file, from its bitcode, with the
-// offload binary embedded, for the linker wrapper to extract.
+// offload entries and the options in `hostOptions`; each GPU's, which
+// matches them; the GPUs' code in one offload binary; and the host's object
+// file, from its bitcode, with the offload binary embedded, for the linker
+// wrapper to extract.
 static void addOffloadJobs(const InputArgList &args, llvm::StringRef executable,
     const std::string &input, const std::string &object,
-    const std::vector<OffloadArch> &archs, std::vector<Job> &jobs,
+    const std::vector<OffloadArch> &archs,
+    const std::vector<std::string> &hostOptions, std::vector<Job> &jobs,
     TemporaryFiles &temporaries) {
   llvm::StringRef stem{llvm::sys::path::stem(input)};
   std::string offloadTargets{"--offload-targets=" +
@@ -210,6 +275,7 @@ static void addOffloadJobs(const InputArgList &args, llvm::StringRef executable,
   std::string hostBitcode{temporaries.Name(stem, "bc")};
   Job host{executable.str(), "-fc1", "-emit-llvm-bc"};
   addFrontendOptions(args, host);
+  host.insert(host.end(), hostOptions.begin(), hostOptions.end());
   host.insert(host.end(), {offloadTargets, "-o", hostBitcode, input});
   jobs.push_back(std::move(host));
   Job binary{findTool(executable, "llvm-offload-binary")};
@@ -239,18 +305,13 @@ static void addOffloadJobs(const InputArgList &args, llvm::StringRef executable,
   jobs.push_back(std::move(embed));
 }
 
-// The program that links: Clang, beside merkc or else on the PATH (design
-// document, "Linking and offloading").
-static std::string findLinker(llvm::StringRef executable) {
-  std::string clang{findClang(executable)};
-  return clang.empty() ? "clang" : clang;
-}
-
 // The jobs for the command line, or false after reporting an error: with
 // -E, -S or -c, one -fc1 job per source; otherwise one per source, writing
 // a temporary object file, and a link of the objects with the runtime
-// library. With --offload-arch=, each source's object file comes from the
-// offload jobs instead. `temporaries` names the intermediate files.
+// library. With --offload-arch= and -fopenmp, each source's object file comes
+// from the offload jobs instead; with --offload-arch= and
+// -fprocess-declarations, the images of its GPU process kinds come first.
+// `temporaries` names the intermediate files.
 static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
     std::vector<Job> &jobs, TemporaryFiles &temporaries) {
   std::vector<std::string> inputs{args.getAllArgValues(OPT_INPUT)};
@@ -275,11 +336,13 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
   if (!getOffloadArchs(args, archs)) {
     return false;
   }
-  bool offload{!archs.empty() && !preprocess};
+  bool offload{!archs.empty() && !preprocess && args.hasArg(OPT_fopenmp)};
   if (offload && assemble) {
     reportError("-S with --offload-arch is not supported yet");
     return false;
   }
+  bool processImages{
+      !archs.empty() && !preprocess && args.hasArg(OPT_fprocess_declarations)};
   bool ok{true};
   std::vector<std::string> objects;
   for (const std::string &input : inputs) {
@@ -292,6 +355,11 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
       ok = false;
       continue;
     }
+    std::vector<std::string> hostOptions;
+    if (processImages) {
+      hostOptions = addProcessImageJobs(
+          args, executable, input, archs, jobs, temporaries);
+    }
     if (offload) {
       std::string object{link ? temporaries.Name(
                                     llvm::sys::path::stem(input), "o")
@@ -301,8 +369,8 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
       if (link) {
         objects.push_back(object);
       }
-      addOffloadJobs(
-          args, executable, input, object, archs, jobs, temporaries);
+      addOffloadJobs(args, executable, input, object, archs, hostOptions, jobs,
+          temporaries);
       continue;
     }
     Job job{executable.str(), "-fc1"};
@@ -314,6 +382,7 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
       job.push_back("-emit-obj");
     }
     addFrontendOptions(args, job);
+    job.insert(job.end(), hostOptions.begin(), hostOptions.end());
     std::string jobOutput{link ? "" : output.str()};
     if (link) {
       jobOutput = temporaries.Name(llvm::sys::path::stem(input), "o");
@@ -327,12 +396,8 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
     jobs.push_back(std::move(job));
   }
   if (ok && link) {
-    // The compiled standard library and the runtime library are in lib
-    // beside bin/merkc, in the build directory and the installation alike;
-    // the standard library's foreign code may call C's maths library.
-    llvm::SmallString<128> libraryDir{llvm::sys::path::parent_path(
-        llvm::sys::path::parent_path(executable))};
-    llvm::sys::path::append(libraryDir, "lib");
+    // The standard library's foreign code may call C's maths library.
+    std::string libraryDir{libraryDirectory(executable)};
     Job job{findLinker(executable)};
     // -v shows the link's own jobs too, such as the linker wrapper's for
     // the GPUs' code, as Flang's -v does.
@@ -355,7 +420,7 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
     if (args.hasArg(OPT_fopenmp)) {
       job.push_back("-fopenmp");
     }
-    if (!archs.empty()) {
+    if (offload) {
       std::string offloadArch{"--offload-arch="};
       for (const OffloadArch &arch : archs) {
         offloadArch += (&arch == &archs.front() ? "" : ",") + arch.arch;
@@ -365,7 +430,7 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
       // receive, goes into the device image, as the linker wrapper links
       // the OpenMP device runtime. Only AMD GPUs are offloaded to so far.
       job.push_back("-Xoffload-linker-amdgcn-amd-amdhsa");
-      job.push_back((libraryDir + "/libmerkdevice-amdgcn.a").str());
+      job.push_back(libraryDir + "/libmerkdevice-amdgcn.a");
       // A kernel with statements around a parallel region stays generic:
       // OpenMPOpt's guarded SPMD form of one faults at address 0 when a value
       // read from memory before the region reaches it through a call
@@ -379,7 +444,7 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
     for (const std::string &dir : args.getAllArgValues(OPT_L)) {
       job.push_back("-L" + dir);
     }
-    job.push_back("-L" + libraryDir.str().str());
+    job.push_back("-L" + libraryDir);
     // The stack maps hold code addresses in a read-only section, which a
     // position-independent executable could only relocate at startup.
     job.push_back("-no-pie");

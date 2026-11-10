@@ -166,6 +166,13 @@ def fopenmp_targets_EQ : CommaJoined<["-"], "fopenmp-targets=">,
 def fembed_offload_object_EQ : Joined<["-"], "fembed-offload-object=">,
   MetaVarName<"<file>">,
   HelpText<"Embed the offload binary <file> in the host's object file">;
+def fprocess_kernels : Flag<["-"], "fprocess-kernels">,
+  HelpText<"Compile a kernel for each process kind that runs on a GPU, for "
+           "the device of -triple, without OpenMP">;
+def fembed_process_image_EQ : Joined<["-"], "fembed-process-image=">,
+  MetaVarName<"<file>">,
+  HelpText<"Embed the image of the module's GPU process kinds <file> in the "
+           "host's object file, and register it at start-up">;
 def x : Separate<["-"], "x">, MetaVarName<"<language>">,
   HelpText<"Read the input as <language>: mercury, mlir (text or bytecode) or "
            "ir (LLVM IR); by default from its extension">;

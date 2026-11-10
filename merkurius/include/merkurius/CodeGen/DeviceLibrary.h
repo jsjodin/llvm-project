@@ -35,14 +35,18 @@ inline constexpr llvm::StringLiteral kDeviceForeignCodeAttrName{
 inline constexpr llvm::StringLiteral kDeviceForeignBitcodeAttrName{
     "merk.device_foreign_bitcode"};
 
+// Where a device's code runs, for its errors: "on an OpenMP device", or "in
+// a GPU process" in a compile of GPU processes' kernels.
+llvm::StringRef DevicePlace(mlir::ModuleOp module);
+
 // Copies into `module`, a device's merk module, each procedure of another
-// module that its target regions reach, from `directory`/<module>.merkbc,
-// with what the copies refer to: the procedures they call, transitively, and
-// the descriptors and constructors of their types. Without
-// `array`, the array module's procedures are left out, as when the module was
-// checked against array.m rather than the sound stub that the library's are
-// numbered by. A procedure that is still not defined is reported at the
-// call, with the chain of calls from the region.
+// module that its target regions or kernels reach, from
+// `directory`/<module>.merkbc, with what the copies refer to: the procedures
+// they call, transitively, and the descriptors and constructors of their types.
+// Without `array`, the array module's procedures are left out, as when the
+// module was checked against array.m rather than the sound stub that the
+// library's are numbered by. A procedure that is still not defined is reported
+// at the call, with the chain of calls from the region or the kernel.
 llvm::LogicalResult CopyDeviceLibrary(
     mlir::ModuleOp module, llvm::StringRef directory, bool array);
 

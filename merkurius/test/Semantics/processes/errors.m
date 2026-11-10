@@ -2,8 +2,9 @@
 % "Processes and mailboxes"): the declarations are ordinary ones, so a kind
 % declared twice, or with its predicate declared too, is a predicate declared
 % more than once. What is not implemented yet is reported: several message
-% types, a kind that runs on a GPU, and spawn_Kind_on, which needs remote
-% spawn; a spawn_Name_on that is no kind's stays an undefined predicate.
+% types, and spawn_Kind_on, which needs remote spawn; a spawn_Name_on that is
+% no kind's stays an undefined predicate. A kind that runs on a GPU is an
+% ordinary kind here, with no error.
 %
 % RUN: not merkc -fc1 -fprocess-declarations -fdebug-dump-resolved-names %s 2>&1 \
 % RUN:   | FileCheck %s --implicit-check-not=error:
@@ -33,7 +34,6 @@ counter(_, _, !IO).
 server(_, _, _, !IO).
 
 :- process summer(int) receives msg on gpu.
-% CHECK: errors.m:[[@LINE-1]]:4: error: not yet implemented: process kinds that run on a GPU
 summer(_, _, !IO).
 
 :- pred spawn_thing(int::in, io::di, io::uo) is det.
