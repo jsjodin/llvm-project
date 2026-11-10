@@ -196,6 +196,13 @@ def offload_arch_EQ : CommaJoined<["--"], "offload-arch=">,
            "too, such as gfx1030, and link for offloading to them">;
 def L : JoinedOrSeparate<["-"], "L">, MetaVarName<"<dir>">,
   HelpText<"Search <dir> for libraries when linking">;
+def save_temps_EQ : Joined<["-", "--"], "save-temps=">,
+  MetaVarName<"<where>">, Values<"cwd,obj">,
+  HelpText<"Keep the intermediate files, and the link's, in the current "
+           "directory (cwd) or beside the output (obj)">;
+def save_temps : Flag<["-", "--"], "save-temps">,
+  Alias<save_temps_EQ>, AliasArgs<["cwd"]>,
+  HelpText<"The same as -save-temps=cwd">;
 
 def _HASH_HASH_HASH : Flag<["-"], "###">,
   HelpText<"Print the jobs to run, without running them">;
