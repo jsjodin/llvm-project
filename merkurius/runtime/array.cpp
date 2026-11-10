@@ -95,6 +95,18 @@ extern "C" Word *merk_array_from_list(Word list, Word tag) {
   return array;
 }
 
+// A new array of a list's elements, the last first, as
+// array.from_reverse_list has them.
+extern "C" Word *merk_array_from_reverse_list(Word list, Word tag) {
+  Word *array{merk_array_from_list(list, tag)};
+  for (int64_t i = 0, j = static_cast<int64_t>(array[0]) - 1; i < j; ++i, --j) {
+    Word element{array[1 + i]};
+    array[1 + i] = array[1 + j];
+    array[1 + j] = element;
+  }
+  return array;
+}
+
 // Sets the elements from `lo` to `hi`, inclusive, to `element`, in place.
 extern "C" Word *merk_array_fill(
     Word *array, int64_t lo, int64_t hi, Word element) {

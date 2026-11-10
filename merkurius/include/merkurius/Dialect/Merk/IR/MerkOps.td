@@ -746,11 +746,14 @@ def Merk_ArrayFromListOp : Merk_Op<"array_from_list"> {
   let summary = "a new array of a list's elements, in order";
   let description = [{
     `list` is a `list.list(T)` and the array's elements are `T`s, each the
-    word the list's cell holds.
+    word the list's cell holds; with `reversed`, the last first, as
+    `array.from_reverse_list` has them.
   }];
-  let arguments = (ins Merk_TermType:$list);
+  let arguments = (ins Merk_TermType:$list, UnitAttr:$reversed);
   let results = (outs Merk_ArrayType:$array);
-  let assemblyFormat = "$list attr-dict `:` type($list) `->` type($array)";
+  let assemblyFormat = [{
+    (`reversed` $reversed^)? $list attr-dict `:` type($list) `->` type($array)
+  }];
 }
 
 def Merk_ArrayResizeOp : Merk_Op<"array_resize", [

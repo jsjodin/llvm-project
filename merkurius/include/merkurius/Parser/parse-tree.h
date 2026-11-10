@@ -1708,6 +1708,12 @@ struct ProcessDecl {
   // receives one message type.
   const PredDecl *spawnDecl;
   const FactOrRule *spawnClause;
+  // pred spawn_Kind_at(process.place::in, Arguments::in,
+  // mailbox(Receive)::out, io::di, io::uo) is det, and its clause, which
+  // spawns at the host or a GPU (docs/INPROGRESS.md, GPU processes without
+  // omp target, step 4c); null unless the kind receives one message type.
+  const PredDecl *spawnAtDecl;
+  const FactOrRule *spawnAtClause;
   template <typename F> void ForEachField(F &&f) const {
     f("name", name);
     f("arguments", arguments);

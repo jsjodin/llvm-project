@@ -3195,7 +3195,10 @@ void Lowerer::LowerArray(mlir::Operation *op) {
   } else if (mlir::isa<merk::ArrayCopyOp>(op)) {
     result = CallRuntime("merk_array_copy", ptr, {op->getOperand(0)}, loc);
   } else if (mlir::isa<merk::ArrayFromListOp>(op)) {
-    result = CallRuntime("merk_array_from_list", ptr,
+    result = CallRuntime(mlir::cast<merk::ArrayFromListOp>(op).getReversed()
+            ? "merk_array_from_reverse_list"
+            : "merk_array_from_list",
+        ptr,
         {ToWord(op->getOperand(0), loc),
             mlir::LLVM::ConstantOp::create(
                 rewriter_, loc, i64, listTags_.lookup(op))},

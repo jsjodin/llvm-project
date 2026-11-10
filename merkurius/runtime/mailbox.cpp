@@ -821,6 +821,14 @@ extern "C" void merk_mailbox_new(Word typeInfo, std::int64_t *placeAndSlot,
   NewMailbox(typeInfo, CurrentProcess(), placeAndSlot, generation, secret);
 }
 
+// A new mailbox that no process owns, as a GPU process's is
+// (gpu-processes.cpp).
+extern "C" void merk_mailbox_new_unowned(Word typeInfo,
+    std::int64_t *placeAndSlot, std::int64_t *generation,
+    std::int64_t *secret) {
+  NewMailbox(typeInfo, nullptr, placeAndSlot, generation, secret);
+}
+
 namespace {
 // A new mailbox, as merk_mailbox_new makes, of the owner, or of no process.
 void NewMailbox(Word typeInfo, Process *owner, std::int64_t *placeAndSlot,

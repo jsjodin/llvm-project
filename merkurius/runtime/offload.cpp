@@ -159,9 +159,11 @@ bool TakeOldest(const std::uint64_t *handle, std::uint64_t &message) {
 }
 
 // The devices' arenas (docs/INPROGRESS.md, The device's side of the first
-// slice, step 6): the chunks the host allocated on each device for its
-// cells and arrays, which it frees when no region is running, and where
-// the device keeps its current chunk, which it then clears. Regions on
+// slice, step 6): the chunks the host allocated for each arena of a device
+// for its cells and arrays, which it frees when no region is running, and
+// where the device keeps its current chunk, which it then clears. Each
+// image on a device has an arena of its own, at its own address: a
+// region's image and a GPU process's on the same GPU have two. Regions on
 // any device are counted together.
 struct DeviceArena {
   int device;
@@ -203,10 +205,10 @@ void Reserve(T *&items, std::uint64_t count, std::uint64_t &capacity) {
   }
 }
 
-// The device's arena, made when it first asks for a chunk.
+// The device's arena at the address, made when it first asks for a chunk.
 DeviceArena &ArenaOf(int device, std::uint64_t address) {
   for (std::uint64_t i{0}; i < arenaCount; ++i) {
-    if (arenas[i].device == device) {
+    if (arenas[i].device == device && arenas[i].address == address) {
       return arenas[i];
     }
   }
@@ -466,6 +468,25 @@ bool RegionsRunning() {
   bool running{runningRegions != 0};
   pthread_mutex_unlock(&arenaLock);
   return running;
+}
+} // namespace merkurius::runtime
+
+// A process that runs on a GPU (gpu-processes.cpp) counts as a running
+// region while its kernel runs, so that what it uses of the arenas and the
+// rings stays, and the program ends at once if main ends first. Its end
+// runs on liboffload's thread, which must not call liboffload, so the
+// arenas are freed when the next region ends, not then.
+namespace merkurius::runtime {
+void GpuProcessStarted() {
+  pthread_mutex_lock(&arenaLock);
+  ++runningRegions;
+  pthread_mutex_unlock(&arenaLock);
+}
+
+void GpuProcessEnded() {
+  pthread_mutex_lock(&arenaLock);
+  --runningRegions;
+  pthread_mutex_unlock(&arenaLock);
 }
 } // namespace merkurius::runtime
 

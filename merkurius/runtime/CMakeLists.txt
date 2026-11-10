@@ -7,6 +7,7 @@ add_library(merkrt STATIC
   devices.cpp
   encode.cpp
   exception.cpp
+  gpu-processes.cpp
   heap.cpp
   roots.cpp
   mailbox.cpp

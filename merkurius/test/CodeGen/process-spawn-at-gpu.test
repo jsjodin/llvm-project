@@ -1,0 +1,19 @@
+process-spawn-at.m's process kind spawned on the machine's GPU
+(docs/INPROGRESS.md, GPU processes without omp target, step 4c): the runtime
+loads the module's image through liboffload, sets its device number, and
+launches the kind's kernel, which receives the host's messages through its
+mailbox's ring and sends its answer back. The program ends when main does,
+even while a GPU process waits for messages. A program compiled for another
+GPU has no image for this one, which is a software error at the spawn.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-spawn-at.m -o %t2
+RUN: %libomp-env %t2 gpu | FileCheck %S/process-spawn-at.m --match-full-lines --strict-whitespace
+RUN: merkc -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-spawn-at.m -o %t
+RUN: %libomp-env %t gpu | FileCheck %S/process-spawn-at.m --match-full-lines --strict-whitespace
+RUN: %libomp-env %t2 leave | FileCheck %s --check-prefix=LEAVE --match-full-lines
+LEAVE:main ends
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx906 %libomp-flags %S/process-spawn-at.m -o %t.other
+RUN: not %libomp-env %t.other gpu 2>&1 | FileCheck %s --check-prefix=OTHER
+OTHER: Software Error: process_spawn_at.spawn_summer_at: the module process_spawn_at has no image of its GPU process kinds for GPU 0, a {{gfx[0-9a-f]+}}: it must be compiled with --offload-arch={{gfx[0-9a-f]+}}

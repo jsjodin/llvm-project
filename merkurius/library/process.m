@@ -231,9 +231,54 @@
     % mailbox.
 :- pred receive_closed is erroneous.
 
+    % Where a process runs: this node's host, or one of its GPUs, by its
+    % number (design document, Handles, routing and places). A process
+    % declaration's spawn_Kind_at(Place, ...) spawns a process at a place;
+    % only a kind declared on gpu runs on a GPU.
+:- type place
+    --->    host
+    ;       gpu(int).
+
+    % How many GPUs this node has for processes: those that LLVM's offload
+    % library finds. With OpenMP's offloading they have OpenMP's numbers
+    % for them, and otherwise they are numbered from 0.
+:- pred gpus(int::out, io::di, io::uo) is det.
+
+    % For the expansion of process declarations (design document, "Processes
+    % and mailboxes"), not for programs. A GPU process's kernel takes its
+    % arguments as words: an int, a float or a character as one, and a
+    % mailbox as its handle's five. gpu_words gives the words of the value
+    % after those it is given.
+:- type gpu_words.
+:- func no_gpu_words = gpu_words.
+:- typeclass gpu_argument(T) where [
+    func gpu_words(T, gpu_words) = gpu_words
+].
+:- instance gpu_argument(int).
+:- instance gpu_argument(float).
+:- instance gpu_argument(character).
+:- instance gpu_argument(mailbox(M)).
+
+    % spawn_kernel(GPU, Spawn, Module, Kind, Words, Mailbox, !IO) spawns a
+    % process of the module's kind, which runs on a GPU, on the GPU with the
+    % number, with the words of its arguments and a new mailbox, which it
+    % returns. A GPU that does not exist, or the module's image of its
+    % kinds missing for the GPU, is a software error, which names the
+    % predicate Spawn.
+:- pred spawn_kernel(int::in, string::in, string::in, string::in,
+    gpu_words::in, mailbox(M)::out, io::di, io::uo) is det.
+
+    % The software error of spawning the kind, which runs on the host, at
+    % gpu(GPU), which names the predicate Spawn.
+:- pred spawn_host_kind_at_gpu(int::in, string::in, string::in,
+    mailbox(M)::out, io::di, io::uo) is erroneous.
+
 :- implementation.
+:- import_module array.
 :- import_module bool.
+:- import_module char.
 :- import_module int.
+:- import_module list.
 :- import_module require.
 :- import_module string.
 
@@ -347,6 +392,10 @@ extern MR_Integer merk_node_connect(MR_String address, MR_Integer *high,
 extern MR_Integer merk_node_lookup(MR_Integer high, MR_Integer low,
     MR_String name, MR_Word type_info, MR_Integer milliseconds,
     MR_Integer *place_slot, MR_Integer *generation, MR_Integer *secret);
+extern MR_Integer merk_gpu_count(void);
+extern const char *merk_gpu_process_spawn(MR_Word type_info, MR_Integer gpu,
+    MR_String module, MR_String kind, MR_ArrayPtr words,
+    MR_Integer *place_slot, MR_Integer *generation, MR_Integer *secret);
 ").
 
 monitor(Target, Watcher, Function, monitor_ref(Id), !IO) :-
@@ -433,6 +482,78 @@ receive(Mailbox, Selector, Timeout, Result, !IO) :-
 
 receive_closed :-
     error("receive: every mailbox is closed").
+
+    % The words, the last first.
+:- type gpu_words
+    --->    gpu_words(list(int)).
+
+no_gpu_words = gpu_words([]).
+
+:- instance gpu_argument(int) where [
+    gpu_words(N, gpu_words(Words)) = gpu_words([N | Words])
+].
+:- instance gpu_argument(float) where [
+    gpu_words(X, gpu_words(Words)) = gpu_words([float_bits(X) | Words])
+].
+:- instance gpu_argument(character) where [
+    gpu_words(C, gpu_words(Words)) = gpu_words([char.to_int(C) | Words])
+].
+:- instance gpu_argument(mailbox(M)) where [
+    gpu_words(mailbox(High, Low, PlaceSlot, Generation, Secret),
+        gpu_words(Words)) =
+        gpu_words([Secret, Generation, PlaceSlot, Low, High | Words])
+].
+
+:- func float_bits(float) = int.
+:- pragma foreign_proc("C",
+    float_bits(X::in) = (Bits::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Bits = (MR_Integer) MR_float_to_word(X);
+").
+
+gpus(Count, !IO) :-
+    gpu_count(Count, !IO).
+
+spawn_kernel(GPU, Spawn, Module, Kind, gpu_words(Words), Mailbox, !IO) :-
+    % The words are gathered the last first.
+    Array = array.from_reverse_list(Words),
+    launch_kernel(witness : witness(M), GPU, Module, Kind, Array, PlaceSlot,
+        Generation, Secret, Error, !IO),
+    ( if Error = "" then
+        this_node(node(High, Low), !IO),
+        Mailbox = mailbox(High, Low, PlaceSlot, Generation, Secret)
+            : mailbox(M)
+    else
+        error(Spawn ++ ": " ++ Error)
+    ).
+
+spawn_host_kind_at_gpu(GPU, Spawn, Kind, _Mailbox, !IO) :-
+    error(string.format("%s: the process kind %s runs on the host, not at " ++
+        "gpu(%d): its declaration does not say on gpu", [s(Spawn), s(Kind),
+        i(GPU)])).
+
+:- pred gpu_count(int::out, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    gpu_count(Count::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Count = merk_gpu_count();
+").
+
+:- pred launch_kernel(witness(M)::in, int::in, string::in, string::in,
+    array(int)::in, int::out, int::out, int::out, string::out,
+    io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    launch_kernel(_Witness::in, GPU::in, Module::in, Kind::in, Words::in,
+        PlaceSlot::out, Generation::out, Secret::out, Error::out,
+        _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    const char *error = merk_gpu_process_spawn(TypeInfo_for_M, GPU, Module,
+        Kind, Words, &PlaceSlot, &Generation, &Secret);
+    Error = (MR_String) (error ? error : \"\");
+").
 
 receive_goal(Selector, Timeout, Result, !IO) :-
     receive(Selector, Timeout, Received, !IO),

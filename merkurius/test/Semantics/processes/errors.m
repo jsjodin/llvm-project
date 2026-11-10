@@ -28,6 +28,8 @@ counter(_, _, !IO).
 % CHECK: errors.m:[[@LINE-8]]:4: because: it is first declared here
 % CHECK: errors.m:[[@LINE-3]]:4: error: pred errors.spawn_counter/4 is declared more than once
 % CHECK: errors.m:[[@LINE-10]]:4: because: it is first declared here
+% CHECK: errors.m:[[@LINE-5]]:4: error: pred errors.spawn_counter_at/5 is declared more than once
+% CHECK: errors.m:[[@LINE-12]]:4: because: it is first declared here
 
 :- process server(int) receives msg, string.
 % CHECK: errors.m:[[@LINE-1]]:4: error: not yet implemented: process kinds that receive several message types

@@ -4,7 +4,8 @@ without omp target, step 4b): a device job compiles their kernels without
 OpenMP, to bitcode named as an object; Clang links the image from it with LTO,
 the image's start object, the device's runtime library, and libc and libm; and
 the host's compile embeds each image. Without -fopenmp nothing else is
-offloaded, and the link is the host's alone.
+offloaded, and the link is the host's alone, with LLVM's offload library,
+through which the runtime launches the kernels (step 4c).
 REQUIRES: amdgpu-registered-target
 
 The image's link optimizes at the -O given, or else at -O2, as the linker
@@ -18,7 +19,7 @@ O0: "-mcpu=gfx1030" "-flto" "-O0"
 CHECK:      "-fc1" "-emit-llvm-bc" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-O2" "-fprocess-kernels" "-o" "[[KERNELS:[^"]*sumsq-gfx1030-processes-[^"]*\.o]]" "{{[^"]*}}sumsq.m"{{$}}
 CHECK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "--target=amdgcn-amd-amdhsa" "-mcpu=gfx1030" "-flto" "-O2" "[[KERNELS]]" "{{[^"]*}}merk-process-start-amdgcn.o" "{{[^"]*}}libmerkdevice-amdgcn.a" "-lc" "-lm" "-o" "[[IMAGE:[^"]*sumsq-gfx1030-processes-[^"]*\.elf]]"{{$}}
 CHECK-NEXT: "-fc1" "-emit-obj" "-fprocess-declarations" "-O2" "-fembed-process-image=gfx1030:[[IMAGE]]" "-o" "[[OBJECT:[^"]*sumsq-[^"]*\.o]]" "{{[^"]*}}sumsq.m"{{$}}
-CHECK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "-o" "prog" "[[OBJECT]]" "-L{{[^"]*}}lib" "-no-pie" "-lmerkstd" "-lmerkrt" "-lm"{{$}}
+CHECK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "-o" "prog" "[[OBJECT]]" "-L{{[^"]*}}lib" "-no-pie" "-lmerkstd" "-lmerkrt" "-lLLVMOffload" "-lm"{{$}}
 
 Two GPUs give an image each. With -c, the host's compile writes the object.
 RUN: merkc -### -fprocess-declarations --offload-arch=gfx1030,gfx90a -c %S/Inputs/sumsq.m 2>&1 \
