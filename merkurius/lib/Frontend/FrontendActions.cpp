@@ -882,7 +882,8 @@ static InputLanguage Language(
     return language;
   }
   llvm::StringRef extension{llvm::sys::path::extension(file.path())};
-  if (extension == ".mlir" || extension == ".mlirbc") {
+  // A merk module, as -emit-merk or -emit-merk-bc writes it, or any other.
+  if (extension == ".merk" || extension == ".merkbc" || extension == ".mlir") {
     return InputLanguage::MLIR;
   }
   if (extension == ".ll" || extension == ".bc") {
