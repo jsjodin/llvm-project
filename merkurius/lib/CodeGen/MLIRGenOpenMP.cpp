@@ -396,9 +396,9 @@ bool MerkGenerator::ReceiveInTarget(const Body &goal,
 // procedure of the device's compile, all of which run on the device: a call
 // of merk_device_team_mailbox with the team and the message type's key,
 // which gives the handle's cell in the device's arena (docs/INPROGRESS.md,
-// Processes as teams, step 2). Messages of one word only, so far; other
-// types are left to the call outside a region, as SendInTarget leaves a
-// send.
+// Processes as teams, step 2). Messages of one word, and arrays of one-word
+// elements, which go by their pointer (step 3); other types are left to the
+// call outside a region, as SendInTarget leaves a send.
 bool MerkGenerator::TeamMailboxOnDevice(const Body &goal,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body,
     bool inRegion) {
@@ -412,9 +412,7 @@ bool MerkGenerator::TeamMailboxOnDevice(const Body &goal,
   const semantics::Type *mailboxType{body.vars[arguments[1]].type};
   const semantics::Type *messageType{mailboxType->arguments.front()};
   mlir::Type message{Represent(messageType)->type};
-  std::optional<std::uint64_t> key{WordMessage(message)
-          ? MessageKey(*messageType, message)
-          : std::nullopt};
+  std::optional<std::uint64_t> key{MessageKey(*messageType, message)};
   if (!key) {
     if (!inRegion) {
       return false;

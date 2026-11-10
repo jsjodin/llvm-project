@@ -1367,7 +1367,7 @@ Instinct node for Infinity Fabric.
 
 ## Processes as teams, and messages within a GPU
 
-Proposed 2026-11-09; steps 1 and 2 below are built. The design document
+Proposed 2026-11-09; steps 1 to 3 below are built. The design document
 (The device runtime, "Who communicates") has a process for each team in an SPMD
 kernel as a later step. This adds messages between such processes that do not go
 through the host.
@@ -1474,8 +1474,9 @@ worker(!IO) :-
    - **Errors on the device** reach the host by a new RPC opcode, `rpcFail`. The
      host reports them as it reports the same error on the host, and ends the
      program.
-   - **Not yet implemented,** reported when compiled or run: messages that are
-     not one word, arrays (step 3), and sends from the host or another node. A
+   - **Not yet implemented,** reported when compiled or run
+     (`CodeGen/omp-target-team-mailbox-errors.m`): messages that are not one
+     word or an array of them, and sends from the host or another node. A
      team handle cannot leave the device, since a device cannot yet send a
      mailbox in a message.
    - **An LLVM bug** showed up here first, at -O2 on the GPU, and its fix is
@@ -1484,7 +1485,24 @@ worker(!IO) :-
      hoisted the slot's load out of the receive loop, so every message read
      as the first. Upstream fixed it in llvm/llvm-project#231611 and #239059,
      which we applied ahead of a rebase.
-3. Arrays between teams by their pointer.
+3. Arrays between teams by their pointer. Implemented 2026-11-09
+   (`CodeGen/omp-target-team-arrays.m`, and its `-gpu.test` at -O0 and -O2;
+   also right with 64 teams, by hand):
+   - **On a device**, a team mailbox of arrays of one-word elements holds the
+     arrays' pointers in its ring, as a mailbox of words holds words. Every team
+     of the region can address an array, whether made in the arena or mapped
+     for the region, and the arena lasts as long as the region. So the region
+     owns the arrays, which answers the question of an owner within a region.
+     An array that must outlive its region is still open (below).
+   - **Sharing keeps the meaning of a copy.** `send` takes its message with mode
+     `in`, so the sender's array is shared after the send, and `receive` gives
+     a shared array. Neither team can then update it in place: a team that
+     wants to change it copies it first, as on the host. So the program means
+     the same on the host, where team mailboxes copy, and sequentially.
+   - **Not the hand-over of a unique array** that "Proposed" has, which would
+     let the receiver update the array in place. That needs a send whose
+     message has mode `di`, with a receive that gives a unique array, and
+     belongs with the pieces of one array (below).
 4. A check at launch that the teams fit on the GPU at once (risk 1), reported as an
    error, since a team that is not running deadlocks the others.
 5. A barrier from messages, measured against the estimates below.
