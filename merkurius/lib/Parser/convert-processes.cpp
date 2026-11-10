@@ -19,14 +19,31 @@
 //   spawn_counter(A1, Mailbox, IO0, IO) :-
 //       process.spawn((pred(Self::in, Self0::di, Self1::uo) is det :-
 //           m.counter(A1, Self, Self0, Self1)), Mailbox, IO0, IO).
+//   :- pred spawn_counter_at(process.place::in, int::in,
+//       process.mailbox(counter_msg)::out, io.io::di, io.io::uo) is det.
+//   spawn_counter_at(Place, A1, Mailbox, IO0, IO) :-
+//       ( Place = process.host,
+//           m.spawn_counter(A1, Mailbox, IO0, IO)
+//       ; Place = process.gpu(GPU),
+//           process.spawn_host_kind_at_gpu(GPU, "m.spawn_counter_at",
+//               "counter", Mailbox, IO0, IO)
+//       ).
 //
-// where m is the module. The names are qualified, so that the expansion
+// where m is the module. For a kind declared on gpu, spawn_counter_at's
+// second branch spawns its kernel instead (docs/INPROGRESS.md, GPU
+// processes without omp target, step 4c):
+//
+//           process.spawn_kernel(GPU, "m.spawn_counter_at", "m", "counter",
+//               process.gpu_words(A1, process.no_gpu_words), Mailbox, IO0,
+//               IO)
+// The names are qualified, so that the expansion
 // means the same whatever else the module declares; the module must import
 // io and process, as the kind's clauses use them.
 
 #include "convert-rules.h"
 #include "merkurius/Parser/convert.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include <string>
 
 namespace merkurius::parser {
@@ -58,6 +75,9 @@ public:
   }
   const Term *Prefix(llvm::StringRef op, const Term *operand) {
     return Compound(op, {operand}, CompoundForm::Prefix);
+  }
+  const Term *String(llvm::StringRef value) {
+    return arena_.Make<StringTerm>(tokens_, arena_.Save(value));
   }
   const Term *Variable(llvm::StringRef name, unsigned number) {
     return arena_.Make<VariableTerm>(tokens_, arena_.Save(name), number);
@@ -131,6 +151,31 @@ const PredDecl *SpawnDecl(TermMaker &make, llvm::StringRef spawnName,
   return item ? std::get<const PredDecl *>(*item) : nullptr;
 }
 
+// The module's name and qualifiers, the outermost first.
+llvm::SmallVector<llvm::StringRef, 4> ModuleQualifiers(ConvertState &state) {
+  llvm::SmallVector<llvm::StringRef, 4> module;
+  if (state.module) {
+    module.append(
+        state.module->qualifiers.begin(), state.module->qualifiers.end());
+    module.push_back(state.module->name);
+  }
+  return module;
+}
+
+// Converts a clause made for the declaration, whose variables, `count` of
+// them, are its own.
+const FactOrRule *ConvertClause(
+    const Term *clause, unsigned count, ConvertState &state) {
+  const Term *item{state.item};
+  unsigned variables{state.variables};
+  state.item = clause;
+  state.variables = count;
+  std::optional<Item> converted{ConvertItem(*clause, state)};
+  state.item = item;
+  state.variables = variables;
+  return converted ? std::get<const FactOrRule *>(*converted) : nullptr;
+}
+
 // spawn_Kind's clause, which spawns a process that calls the kind's
 // predicate, module-qualified, with the arguments and its mailbox.
 const FactOrRule *SpawnClause(TermMaker &make, llvm::StringRef name,
@@ -150,12 +195,7 @@ const FactOrRule *SpawnClause(TermMaker &make, llvm::StringRef name,
   const Term *self1{make.Variable("Self1", count + 5)};
   head.append({mailbox, io0, io});
   call.append({self, self0, self1});
-  llvm::SmallVector<llvm::StringRef, 4> module;
-  if (state.module) {
-    module.append(
-        state.module->qualifiers.begin(), state.module->qualifiers.end());
-    module.push_back(state.module->name);
-  }
+  llvm::SmallVector<llvm::StringRef, 4> module{ModuleQualifiers(state)};
   const Term *lambda{make.Infix(":-",
       make.Infix("is",
           make.Compound("pred",
@@ -166,15 +206,77 @@ const FactOrRule *SpawnClause(TermMaker &make, llvm::StringRef name,
   const Term *body{make.Qualified(
       {"process"}, make.Compound("spawn", {lambda, mailbox, io0, io}))};
   const Term *clause{make.Infix(":-", make.Compound(spawnName, head), body)};
-  // The clause's variables are its own, not the declaration's.
-  const Term *item{state.item};
-  unsigned variables{state.variables};
-  state.item = clause;
-  state.variables = count + 6;
-  std::optional<Item> converted{ConvertItem(*clause, state)};
-  state.item = item;
-  state.variables = variables;
-  return converted ? std::get<const FactOrRule *>(*converted) : nullptr;
+  return ConvertClause(clause, count + 6, state);
+}
+
+// spawn_Kind_at's declaration, which takes the place first.
+const PredDecl *SpawnAtDecl(TermMaker &make, llvm::StringRef spawnAtName,
+    llvm::ArrayRef<const Term *> arguments, const Term *message,
+    ConvertState &state) {
+  llvm::SmallVector<const Term *, 8> args;
+  args.push_back(
+      make.Moded(make.Qualified({"process"}, make.Name("place")), "in"));
+  for (const Term *argument : arguments) {
+    args.push_back(make.Moded(argument, "in"));
+  }
+  args.push_back(make.Moded(make.MailboxType(message), "out"));
+  args.push_back(make.Moded(make.IoType(), "di"));
+  args.push_back(make.Moded(make.IoType(), "uo"));
+  std::optional<Item> item{
+      ConvertItem(PredDeclTerm(make, spawnAtName, args), state)};
+  return item ? std::get<const PredDecl *>(*item) : nullptr;
+}
+
+// spawn_Kind_at's clause: at the host, spawn_Kind; at a GPU, the kind's
+// kernel for a kind that runs on a GPU, and otherwise a software error.
+const FactOrRule *SpawnAtClause(TermMaker &make, llvm::StringRef name,
+    llvm::StringRef spawnName, llvm::StringRef spawnAtName, std::size_t arity,
+    bool onGpu, ConvertState &state) {
+  auto count{static_cast<unsigned>(arity)};
+  const Term *place{make.Variable("Place", 0)};
+  llvm::SmallVector<const Term *, 8> head{place}, call;
+  for (unsigned i{0}; i < count; ++i) {
+    const Term *variable{make.Variable("A" + std::to_string(i + 1), i + 1)};
+    head.push_back(variable);
+    call.push_back(variable);
+  }
+  const Term *mailbox{make.Variable("Mailbox", count + 1)};
+  const Term *io0{make.Variable("IO0", count + 2)};
+  const Term *io{make.Variable("IO", count + 3)};
+  const Term *gpu{make.Variable("GPU", count + 4)};
+  head.append({mailbox, io0, io});
+  call.append({mailbox, io0, io});
+  llvm::SmallVector<llvm::StringRef, 4> module{ModuleQualifiers(state)};
+  std::string moduleName{llvm::join(module, ".")};
+  std::string spawnAt{moduleName.empty()
+          ? spawnAtName.str()
+          : moduleName + "." + spawnAtName.str()};
+  const Term *atHost{make.Infix(",",
+      make.Infix("=", place, make.Qualified({"process"}, make.Name("host"))),
+      make.Qualified(module, make.Compound(spawnName, call)))};
+  const Term *spawnAtGpu;
+  if (onGpu) {
+    const Term *words{make.Qualified({"process"}, make.Name("no_gpu_words"))};
+    for (unsigned i{0}; i < count; ++i) {
+      words = make.Qualified(
+          {"process"}, make.Compound("gpu_words", {call[i], words}));
+    }
+    spawnAtGpu = make.Qualified({"process"},
+        make.Compound("spawn_kernel",
+            {gpu, make.String(spawnAt), make.String(moduleName),
+                make.String(name), words, mailbox, io0, io}));
+  } else {
+    spawnAtGpu = make.Qualified({"process"},
+        make.Compound("spawn_host_kind_at_gpu",
+            {gpu, make.String(spawnAt), make.String(name), mailbox, io0, io}));
+  }
+  const Term *atGpu{make.Infix(",",
+      make.Infix(
+          "=", place, make.Qualified({"process"}, make.Compound("gpu", {gpu}))),
+      spawnAtGpu)};
+  const Term *clause{make.Infix(
+      ":-", make.Compound(spawnAtName, head), make.Infix(";", atHost, atGpu))};
+  return ConvertClause(clause, count + 5, state);
 }
 
 // The types of `terms`, or none after an error, which is reported.
@@ -254,18 +356,25 @@ std::optional<const ProcessDecl *> ProcessRule::Convert(
   TermMaker make{*state.terms, t.tokens()};
   const PredDecl *kindDecl{
       KindDecl(make, name, argumentTerms, received, state)};
-  const PredDecl *spawnDecl{nullptr};
-  const FactOrRule *spawnClause{nullptr};
+  std::string spawnAtName{spawnName + "_at"};
+  const PredDecl *spawnDecl{nullptr}, *spawnAtDecl{nullptr};
+  const FactOrRule *spawnClause{nullptr}, *spawnAtClause{nullptr};
   if (received.size() == 1) {
     spawnDecl = SpawnDecl(make, spawnName, argumentTerms, received[0], state);
     spawnClause =
         SpawnClause(make, name, spawnName, argumentTerms.size(), state);
+    spawnAtDecl =
+        SpawnAtDecl(make, spawnAtName, argumentTerms, received[0], state);
+    spawnAtClause = SpawnAtClause(
+        make, name, spawnName, spawnAtName, argumentTerms.size(), onGpu, state);
   }
-  if (!kindDecl || (received.size() == 1 && (!spawnDecl || !spawnClause))) {
+  if (!kindDecl ||
+      (received.size() == 1 &&
+          (!spawnDecl || !spawnClause || !spawnAtDecl || !spawnAtClause))) {
     return std::nullopt;
   }
   return state.arena.Make<ProcessDecl>(t.tokens(), name, *arguments, *messages,
-      onGpu, kindDecl, spawnDecl, spawnClause);
+      onGpu, kindDecl, spawnDecl, spawnClause, spawnAtDecl, spawnAtClause);
 }
 
 } // namespace merkurius::parser

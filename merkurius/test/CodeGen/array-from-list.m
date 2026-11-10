@@ -1,8 +1,10 @@
 % array/1 and from_list make an array of a list's elements, in order: of
 % floats, an empty list, strings, characters, narrow integers, terms and
-% arrays, and of a long list made at run time. merk.array_from_list lowers
-% to a call of the runtime, which follows the list's cells by the tag of
-% [|] in the list's layout. The output is mmc's for the same program.
+% arrays, and of a long list made at run time. from_reverse_list makes it
+% of them the last first, of lists of odd and even length, one element and
+% none. merk.array_from_list lowers to a call of the runtime, which follows
+% the list's cells by the tag of [|] in the list's layout. The output is
+% mmc's for the same program.
 %
 % RUN: merkc -fc1 -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MERK
 % RUN: merkc -fc1 -emit-llvm -triple x86_64-unknown-linux-gnu %s -o - | FileCheck %s --check-prefix=LLVM
@@ -47,6 +49,17 @@ main(!IO) :-
     io.nl(!IO),
     Nested = array([array([1, 2]), array([3])]),
     io.write(Nested, !IO),
+    io.nl(!IO),
+    io.write(from_reverse_list(["a", "b", "c"]), !IO),
+    io.nl(!IO),
+    io.write(from_reverse_list([1.0, 2.0, 3.0, 4.0]), !IO),
+    io.nl(!IO),
+    io.write(from_reverse_list([square(7)]), !IO),
+    io.nl(!IO),
+    io.write(from_reverse_list([]) : array(int), !IO),
+    io.nl(!IO),
+    Reversed = from_reverse_list(upto(1, 200000)),
+    io.write_int(Reversed ^ elem(0) - Reversed ^ elem(199999), !IO),
     io.nl(!IO).
 
 :- func upto(int, int) = list(int).
@@ -71,11 +84,13 @@ upto_acc(N, Lo, !L) :-
 % MERK: merk.array_from_list %{{.*}} : <"list.list(character)"> -> <i32>
 % MERK: merk.array_from_list %{{.*}} : <"list.list(int8)"> -> <i8>
 % MERK: merk.array_from_list %{{.*}} : <"list.list(array_from_list.shape)"> -> <!merk.term<"array_from_list.shape">>
+% MERK: merk.array_from_list reversed %{{.*}} : <"list.list(string)"> -> <!merk.string>
 
 % The tag of [|] is 1, after the constants' 0; [] is the word 0.
 % LLVM-LABEL: define {{.*}} @array_from_list.main_2_0(
 % LLVM: call ptr addrspace(1) @merk_array_from_list(ptr addrspace(1) getelementptr (i8, ptr addrspace(1) addrspacecast (ptr @merk.term.{{[0-9]+}} to ptr addrspace(1)), i64 1), i64 1)
 % LLVM: call ptr addrspace(1) @merk_array_from_list(ptr addrspace(1) null, i64 1)
+% LLVM: call ptr addrspace(1) @merk_array_from_reverse_list(
 
 % OUTPUT:array([1.0, 2.5, 4.0])
 % OUTPUT-NEXT:array([])
@@ -86,4 +101,9 @@ upto_acc(N, Lo, !L) :-
 % OUTPUT-NEXT:200000
 % OUTPUT-NEXT:200001
 % OUTPUT-NEXT:array([array([1, 2]), array([3])])
+% OUTPUT-NEXT:array(["c", "b", "a"])
+% OUTPUT-NEXT:array([4.0, 3.0, 2.0, 1.0])
+% OUTPUT-NEXT:array([square(7)])
+% OUTPUT-NEXT:array([])
+% OUTPUT-NEXT:199999
 % OUTPUT-EMPTY:

@@ -458,6 +458,12 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
     job.push_back("-no-pie");
     job.push_back("-lmerkstd");
     job.push_back("-lmerkrt");
+    // The runtime loads and launches GPU processes' kernels through LLVM's
+    // offload library (runtime/gpu-processes.cpp), which -L must find when
+    // it is not beside Clang.
+    if (processImages) {
+      job.push_back("-lLLVMOffload");
+    }
     job.push_back("-lm");
     jobs.push_back(std::move(job));
   }

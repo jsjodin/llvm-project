@@ -7,11 +7,11 @@
 % The host's compile embeds the image it is given and registers it at
 % start-up, with the message types that the device's code may send.
 %
-% The program runs its kinds on the host: spawning on a GPU is step 4c. Its
-% image is linked all the same, and exports the kernel, libc's RPC client
-% and the device's number, which the offload plugin and the runtime look up.
-% Without -O, the image is linked at -O2. At -O0 its link fails on an
-% AMDGPU bug (process-kernels-O0.m).
+% The image exports the kernel, libc's RPC client and the device's number,
+% which the offload plugin and the runtime look up, and has no undefined
+% dynamic symbol, with which HSA's loader would not load it. Without -O,
+% the image is linked at -O2. At -O0 its link fails on an AMDGPU bug
+% (process-kernels-O0.m). process-spawn-at.m runs the program.
 %
 % REQUIRES: amdgpu-registered-target
 % RUN: merkc -fc1 -O0 -fprocess-declarations -fprocess-kernels -triple amdgpu10.30-amd-amdhsa -emit-llvm %s -o - | FileCheck %s --check-prefix=KERNEL0 --implicit-check-not=main --implicit-check-not=doubler --match-full-lines --strict-whitespace
@@ -20,9 +20,9 @@
 % RUN: merkc -fc1 -O0 -fprocess-declarations -fembed-process-image=gfx1030:%t.elf -emit-llvm %s -o - | FileCheck %s --check-prefix=HOST --match-full-lines --strict-whitespace
 % RUN: merkc -fc1 -O2 -fprocess-declarations -fembed-process-image=gfx1030:%t.elf -emit-llvm %s -o - | FileCheck %s --check-prefix=HOST --match-full-lines --strict-whitespace
 % RUN: rm -rf %t.dir && mkdir %t.dir
-% RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx1030 -save-temps=obj %s -o %t.dir/p2 && %t.dir/p2 | FileCheck %s --match-full-lines --strict-whitespace
-% RUN: merkc -fprocess-declarations --offload-arch=gfx1030 %s -o %t && %t | FileCheck %s --match-full-lines --strict-whitespace
+% RUN: merkc -c -fprocess-declarations --offload-arch=gfx1030 -save-temps=obj %s -o %t.dir/p.o
 % RUN: llvm-readelf --dyn-syms %t.dir/process-kernels-gfx1030-processes.elf | FileCheck %s --check-prefix=IMAGE
+% RUN: llvm-readelf --dyn-syms %t.dir/process-kernels-gfx1030-processes.elf | not grep -E ' UND +[^ ]' 
 
 :- module process_kernels.
 :- interface.
@@ -74,8 +74,6 @@ main(!IO) :-
     else
         true
     ).
-% CHECK:42
-% CHECK-NEXT:84
 
 % The kernel takes the kind's integer and float by value, and each mailbox's
 % handle as five words, which it puts in a cell on its stack.

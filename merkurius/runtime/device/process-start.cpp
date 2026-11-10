@@ -18,6 +18,12 @@
 //   runtime defines it the same way for a region's image.
 // - The device's number, which the host's runtime sets when it loads the
 //   image (device.cpp).
+// - omp_get_device_num, which device.cpp refers to weakly for a region's
+//   image, where OpenMP's device runtime defines it. An undefined dynamic
+//   symbol, even a weak one, stops HSA's loader from loading the image, so
+//   the start object defines it, hidden. It is called only while the
+//   device's number is -1, which it is not once the runtime has loaded the
+//   image.
 //
 //===----------------------------------------------------------------------===//
 
@@ -28,3 +34,7 @@ extern "C"
 
 extern "C"
     [[gnu::visibility("protected"), gnu::weak]] int merk_device_number{-1};
+
+extern "C" [[gnu::visibility("hidden")]] int omp_get_device_num(void) {
+  return -1;
+}

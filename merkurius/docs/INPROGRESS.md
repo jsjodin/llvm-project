@@ -2226,6 +2226,55 @@ the process asks the host to launch. The first version has neither.
      counts as a running region for them, until a process has an arena of
      its own (design document, "Its heap"). There is no collector on the
      device, as for regions, and MERK_DEVICE_ARENA_BYTES limits it.
+
+     4c and 4d done 2026-11-10, together, as the design document records
+     (GPU processes, "Spawning on a GPU as implemented"). What
+     differs from the plan:
+     - **Numbers:** a GPU's number is OpenMP's for it, found by its UID with
+       `omp_get_device_from_uid`, so that a region and a process name a
+       device alike. A GPU that libomptarget has no number for, or every GPU
+       without libomptarget, is numbered after OpenMP's devices, in
+       liboffload's order. liboffload has no device numbers, only handles in
+       `olIterateDevices`' order, and libomptarget numbers devices in the
+       order that compatible images are first registered, so neither order
+       alone stays OpenMP's. Messages between processes and regions go
+       through the host's mailboxes, so the numbers only choose memory.
+     - **No record on the host owns the mailbox.** The runtime makes an
+       unowned mailbox (`merk_mailbox_new_unowned`) and closes it from the
+       host function queued after the kernel. The handle's place stays the
+       host's, 0, until step 5 routes by place ("Temporary" in
+       `runtime/gpu-processes.cpp`). The queue is destroyed at the next
+       spawn, not on liboffload's thread, which runs the host function.
+     - **Arguments are words,** one each, and five for a mailbox, which
+       `process.gpu_argument`'s instances give, so that an argument of
+       another type is a type class error at compile time (because: "a
+       process kind that runs on a GPU takes integers, floats, characters
+       and mailboxes so far"), not the kernels' compile's "not yet
+       implemented". AMDGPU's plugin copies the arguments by the kernel's
+       metadata, ignoring the sizes passed, so each is an 8-byte word.
+       `array.from_reverse_list` got code generation for it
+       (`merk.array_from_list reversed`).
+     - **4d:** a running GPU process counts as a running region
+       (`GpuProcessStarted` and `GpuProcessEnded` in `runtime/offload.cpp`).
+       Arenas are freed when the next region ends, not on liboffload's
+       thread, and the program ends at once if main ends while one runs.
+     - **Two images on one GPU have arenas of their own:** `ArenaOf` matched
+       a device alone, so a process image's allocation could take a region
+       image's arena. It matches the device and the arena's address.
+     - **The start object defines `omp_get_device_num`,** returning -1:
+       libc's code refers to it weakly, and HSA's loader does not load an
+       image with that undefined symbol ("HSA_STATUS_ERROR_VARIABLE_UNDEFINED").
+     - **liboffload's API is declared in `runtime/liboffload.h`,** weakly, as
+       its `.td` files define it. Rejected: including the generated
+       `OffloadAPI.h`, which the runtimes' build makes after merkrt's.
+       `devices.cpp` uses libomptarget for OpenMP's devices and liboffload
+       for the others. A program with GPU kinds links `-lLLVMOffload`.
+     - **At `-O0`** the image's link fails on AMDGPU's bug, as in 4b.
+     Tests: `CodeGen/process-spawn-at.m` (the host, the software errors),
+     `CodeGen/process-spawn-at-gpu.test` (on the GPU, a program ending
+     while its GPU process waits, and an image for another GPU),
+     `CodeGen/process-spawn-at-O0.m` (XFAIL), `Semantics/desugar/processes.m`,
+     `CodeGen/process-kernel-errors.m` and `CodeGen/array-from-list.m`.
    - **4e. Tests on the GPU.** A host process spawns a counter on the GPU,
      sends it `add(N)` and `get(Reply)` messages, and prints its answers.
      Then two GPU processes exchange messages through the host. Run small

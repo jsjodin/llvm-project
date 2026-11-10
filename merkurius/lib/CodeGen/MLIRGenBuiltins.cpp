@@ -65,14 +65,17 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
         {merk::ArrayNewOp::create(builder_, loc,
             merk::ArrayType::get(&context_, in[1].getType()), in[0], in[1])});
   }
-  // array(L) and from_list(L, A).
-  if ((name == "array" || name == "from_list") && HasShape(in, out, 1, 1)) {
+  // array(L), from_list(L, A) and from_reverse_list(L).
+  bool reversed{name == "from_reverse_list"};
+  if ((name == "array" || name == "from_list" || reversed) &&
+      HasShape(in, out, 1, 1)) {
     std::optional<Represented> array{Represent(body.vars[out[0]].type)};
     if (!array || !mlir::isa<merk::TermType>(in[0].getType())) {
       return LibraryCallNotYet(goal, symbol);
     }
     return GiveOutputs(out,
-        {merk::ArrayFromListOp::create(builder_, loc, array->type, in[0])});
+        {merk::ArrayFromListOp::create(
+            builder_, loc, array->type, in[0], reversed)});
   }
   if (name == "size" && HasShape(in, out, 1, 1)) {
     return GiveOutputs(out, {ArraySize(in[0], loc)});

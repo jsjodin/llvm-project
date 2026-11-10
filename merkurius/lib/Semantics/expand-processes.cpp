@@ -73,9 +73,11 @@ const parser::ParseTree &ExpandProcesses(const parser::ParseTree &tree,
       items.push_back((*decl)->kindDecl);
       if ((*decl)->spawnDecl) {
         items.push_back((*decl)->spawnDecl);
+        items.push_back((*decl)->spawnAtDecl);
       }
       if (clauses && (*decl)->spawnClause) {
         (inInterface ? waiting : items).push_back((*decl)->spawnClause);
+        (inInterface ? waiting : items).push_back((*decl)->spawnAtClause);
       }
     }
   }
