@@ -4,3 +4,5 @@ REQUIRES: amdgpu-gpu
 
 RUN: merkc -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/omp-target-polymorphic.m -o %t
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t | FileCheck %S/omp-target-polymorphic.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/omp-target-polymorphic.m -o %t.O2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t.O2 | FileCheck %S/omp-target-polymorphic.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

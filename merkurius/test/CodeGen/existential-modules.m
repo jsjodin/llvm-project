@@ -2,6 +2,7 @@
 % tail position that gives what its callee gave. The output is mmc's.
 %
 % RUN: merkc -I %S/Inputs %S/Inputs/exgive.m %s -o %t && %t | FileCheck %s --match-full-lines
+% RUN: merkc -O2 -I %S/Inputs %S/Inputs/exgive.m %s -o %t.O2 && %t.O2 | FileCheck %s --match-full-lines
 % RUN: merkc -fc1 -emit-llvm -I %S/Inputs %s -o - | FileCheck %s --check-prefix=LLVM
 
 :- module existential_modules.

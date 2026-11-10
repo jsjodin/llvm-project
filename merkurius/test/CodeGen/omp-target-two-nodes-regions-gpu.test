@@ -6,3 +6,6 @@ REQUIRES: amdgpu-gpu
 RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-two-nodes.m -o %t
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %python %S/Inputs/two-nodes.py %t both-regions \
 RUN:   | FileCheck %S/omp-target-two-nodes.m --check-prefix=BOTH --match-full-lines --strict-whitespace
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-two-nodes.m -o %t.O2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %python %S/Inputs/two-nodes.py %t.O2 both-regions \
+RUN:   | FileCheck %S/omp-target-two-nodes.m --check-prefix=BOTH --match-full-lines --strict-whitespace

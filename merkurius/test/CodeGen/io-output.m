@@ -4,6 +4,7 @@
 % has no fraction or exponent; a character in UTF-8.
 %
 % RUN: merkc %s -o %t && %t | FileCheck %s --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %s -o %t.O2 && %t.O2 | FileCheck %s --match-full-lines --strict-whitespace
 
 % CHECK:-42
 % CHECK-NEXT:9223372036854775807

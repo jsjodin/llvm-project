@@ -7,6 +7,7 @@
 % lists differ here.
 %
 % RUN: merkc %s -o %t.0 && %t.0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %s -o %t.0.O2 && %t.0.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: sed 's/^which = 0\./which = 1./' %s > %t.1.m && merkc %t.1.m -o %t.1
 % RUN: not %t.1 2> %t.1.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: FileCheck %s --check-prefix=UNIFY --match-full-lines --strict-whitespace < %t.1.err

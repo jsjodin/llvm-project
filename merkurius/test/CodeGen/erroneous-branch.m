@@ -2,6 +2,7 @@
 % other branch binds: an erroneous call, and a failure one. The output is mmc's.
 %
 % RUN: merkc %s -o %t && not %t | FileCheck %s --match-full-lines
+% RUN: merkc -O2 %s -o %t.O2 && not %t.O2 | FileCheck %s --match-full-lines
 
 :- module erroneous_branch.
 :- interface.

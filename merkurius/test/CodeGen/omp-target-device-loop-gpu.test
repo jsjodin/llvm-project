@@ -4,3 +4,6 @@ REQUIRES: amdgpu-gpu
 RUN: merkc -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/omp-target-device-loop.m -o %t
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t \
 RUN:   | FileCheck %S/omp-target-device-loop.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/omp-target-device-loop.m -o %t.O2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t.O2 \
+RUN:   | FileCheck %S/omp-target-device-loop.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

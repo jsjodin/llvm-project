@@ -5,6 +5,7 @@
 % constants").
 %
 % RUN: merkc %s -o %t && %t | FileCheck %s --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %s -o %t.O2 && %t.O2 | FileCheck %s --match-full-lines --strict-whitespace
 
 :- module unify_unique_constants.
 :- interface.

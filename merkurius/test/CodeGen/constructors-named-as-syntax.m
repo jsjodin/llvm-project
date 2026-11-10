@@ -4,6 +4,7 @@
 % program.
 %
 % RUN: merkc %s -o %t && %t | FileCheck %s --match-full-lines
+% RUN: merkc -O2 %s -o %t.O2 && %t.O2 | FileCheck %s --match-full-lines
 
 :- module constructors_named_as_syntax.
 :- interface.

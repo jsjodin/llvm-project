@@ -13,7 +13,9 @@
 % polls. Here the region runs on the host, and sequentially.
 %
 % RUN: merkc -fopenmp %libomp-flags %s -o %t && %libomp-env %python %S/Inputs/two-nodes.py %t first-slice | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fopenmp %libomp-flags %s -o %t.O2 && %libomp-env %python %S/Inputs/two-nodes.py %t.O2 first-slice | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc %s -o %t.sequential && %python %S/Inputs/two-nodes.py %t.sequential first-slice | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %s -o %t.sequential.O2 && %python %S/Inputs/two-nodes.py %t.sequential.O2 first-slice | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: %libomp-env %python %S/Inputs/two-nodes.py %t both-regions | FileCheck %s --check-prefix=BOTH --match-full-lines --strict-whitespace
 % RUN: %python %S/Inputs/two-nodes.py %t.sequential both-regions | FileCheck %s --check-prefix=BOTH --match-full-lines --strict-whitespace
 % REQUIRES: libomp

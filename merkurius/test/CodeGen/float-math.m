@@ -11,6 +11,10 @@
 % RUN: not %t > %t.out 2> %t.err
 % RUN: FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace < %t.out
 % RUN: FileCheck %s --check-prefix=ERROR --match-full-lines --strict-whitespace < %t.err
+% RUN: merkc -O2 %s -o %t.O2
+% RUN: not %t.O2 > %t.O2.out 2> %t.O2.err
+% RUN: FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace < %t.O2.out
+% RUN: FileCheck %s --check-prefix=ERROR --match-full-lines --strict-whitespace < %t.O2.err
 
 % MERK-LABEL: merk.proc @float_math.main_2_0()
 % MERK: %[[Z:.*]] = merk.call @float_math.zero_1_0() : () -> f64

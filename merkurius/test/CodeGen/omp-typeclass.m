@@ -5,7 +5,9 @@
 %
 % RUN: merkc -fc1 -fopenmp -fopenmp-is-target-device -fdo-loops -triple amdgcn-amd-amdhsa -emit-llvm %s -o - | FileCheck %s --check-prefix=DEVICE
 % RUN: merkc -fopenmp -fdo-loops %libomp-flags %s -o %t && env OMP_NUM_THREADS=4 %libomp-env %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines
+% RUN: merkc -O2 -fopenmp -fdo-loops %libomp-flags %s -o %t.O2 && env OMP_NUM_THREADS=4 %libomp-env %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines
 % RUN: merkc -fdo-loops %s -o %t.sequential && %t.sequential | FileCheck %s --check-prefix=OUTPUT --match-full-lines
+% RUN: merkc -O2 -fdo-loops %s -o %t.sequential.O2 && %t.sequential.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines
 % REQUIRES: amdgpu-registered-target, libomp
 
 :- module omp_typeclass.

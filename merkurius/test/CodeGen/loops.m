@@ -7,6 +7,7 @@
 %
 % RUN: merkc -fc1 -fdo-loops -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MERK
 % RUN: merkc -fdo-loops %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fdo-loops %s -o %t.O2 && %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 
 % MERK-LABEL: merk.proc private @loops.pi__loop_{{[0-9]+}}_7_5_0(
 % MERK:         merk.call @loops.pi__body_{{[0-9]+}}_7_4_0(

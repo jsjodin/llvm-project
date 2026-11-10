@@ -9,6 +9,14 @@ RUN:   | FileCheck %S/process-target.m --check-prefix=OUTPUT --match-full-lines 
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t \
 RUN:   | FileCheck %S/process-target.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: sed 's/^ends_early = no\./ends_early = yes./' %S/process-target.m > %t.e.m
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/process-target.m -o %t.O2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_WORKERS=1 %t.O2 \
+RUN:   | FileCheck %S/process-target.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t.O2 \
+RUN:   | FileCheck %S/process-target.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %t.e.m -o %t.e
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout 10 %t.e \
+RUN:   | FileCheck %S/process-target.m --check-prefix=EARLY --match-full-lines --strict-whitespace
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %t.e.m -o %t.e.O2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout 10 %t.e.O2 \
 RUN:   | FileCheck %S/process-target.m --check-prefix=EARLY --match-full-lines --strict-whitespace

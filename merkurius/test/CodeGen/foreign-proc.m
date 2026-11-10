@@ -10,6 +10,7 @@
 % RUN: FileCheck %s --check-prefix=C < %t.mlir
 % RUN: merkc -fc1 -emit-llvm -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=LLVM
 % RUN: merkc %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines
+% RUN: merkc -O2 %s -o %t.O2 && %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines
 
 % C: merk.foreign_code = "{{.*}}typedef intptr_t MR_Integer;
 % C-SAME: #include <string.h>
