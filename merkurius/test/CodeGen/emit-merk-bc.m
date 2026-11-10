@@ -5,21 +5,23 @@
 % device's compile to copy procedures from (docs/INPROGRESS.md, Library code
 % on the device).
 %
-% RUN: merkc -fc1 -emit-merk-bc -triple x86_64-unknown-linux-gnu %s -o %t.mlirbc
-% RUN: merkc -fc1 -emit-llvm %t.mlirbc -o - | grep -v -e "^; ModuleID" -e "^source_filename" > %t.from-bytecode.ll
+% RUN: merkc -fc1 -emit-merk-bc -triple x86_64-unknown-linux-gnu %s -o %t.merkbc
+% RUN: merkc -fc1 -emit-llvm %t.merkbc -o - | grep -v -e "^; ModuleID" -e "^source_filename" > %t.from-bytecode.ll
 % RUN: merkc -fc1 -emit-llvm -triple x86_64-unknown-linux-gnu %s -o - | grep -v -e "^; ModuleID" -e "^source_filename" > %t.from-source.ll
 % RUN: diff %t.from-source.ll %t.from-bytecode.ll
 % RUN: FileCheck %s --check-prefix=LLVM < %t.from-bytecode.ll
 %
 % As for a device: the same merk module as from the source.
-% RUN: merkc -fc1 -fopenmp -fopenmp-is-target-device -triple amdgcn-amd-amdhsa -emit-merk-bc %s -o %t.device.mlirbc
-% RUN: merkc -fc1 -emit-merk %t.device.mlirbc -o %t.device-from-bytecode.merk
+% RUN: merkc -fc1 -fopenmp -fopenmp-is-target-device -triple amdgcn-amd-amdhsa -emit-merk-bc %s -o %t.device.merkbc
+% RUN: merkc -fc1 -emit-merk %t.device.merkbc -o %t.device-from-bytecode.merk
 % RUN: merkc -fc1 -fopenmp -fopenmp-is-target-device -triple amdgcn-amd-amdhsa -emit-merk %s -o %t.device-from-source.merk
 % RUN: diff %t.device-from-source.merk %t.device-from-bytecode.merk
 % RUN: FileCheck %s --check-prefix=DEVICE < %t.device-from-bytecode.merk
 %
-% -x mlir reads bytecode whatever the file is called.
-% RUN: cp %t.mlirbc %t.bytes
+% The text form reads back by its extension, .merk, and -x mlir reads
+% bytecode whatever the file is called.
+% RUN: merkc -fc1 -emit-llvm %t.device-from-source.merk -o /dev/null
+% RUN: cp %t.merkbc %t.bytes
 % RUN: merkc -fc1 -x mlir -emit-merk %t.bytes | FileCheck %s --check-prefix=ANY-NAME
 % REQUIRES: amdgpu-registered-target
 
