@@ -86,9 +86,25 @@ struct Message {
   std::uint64_t reader;
 };
 
+// How many queued messages have chunks that neither a process has taken
+// nor a mailbox has freed: those in mailboxes, and any lost. With
+// MERK_CHECK_MESSAGES, the program's end reports them (offload.cpp).
+std::atomic<std::int64_t> heldMessages{0};
+
+// Frees a message's chunks, the message's own cell among them, if a process
+// has not taken them.
+void FreeMessage(Message *message) {
+  if (message->chunks) {
+    heldMessages.fetch_sub(1);
+    FreeChunks(message->chunks);
+  }
+}
+
 // The reader's value is in the message's chunks, so they are the reader's
 // now, whether or not the message then stays in its mailbox. A thread that
-// runs no process keeps them for ever. Called with the mailbox's lock held.
+// runs no process keeps them for ever, so none reads a message this way:
+// the host's side of a device copies one with the mailbox's lock held.
+// Called with the mailbox's lock held.
 void GiveToReader(Message *message) {
   ChunkLink *chunks{message->chunks};
   if (!chunks) {
@@ -96,6 +112,7 @@ void GiveToReader(Message *message) {
   }
   message->chunks = nullptr;
   if (Process *process{CurrentProcess()}) {
+    heldMessages.fetch_sub(1);
     ChunkLink *last{chunks};
     for (;; last = last->next) {
       last->pinned = true;
@@ -413,6 +430,8 @@ void TrimRing(Mailbox *mailbox) {
   if (mailbox->consumed != head) {
     ReleaseRingCopy(mailbox);
   }
+  // The device has what it took: a word from the ring, or a copy that the
+  // host made with the lock held.
   for (; mailbox->consumed != head; ++mailbox->consumed) {
     Message *taken{mailbox->head};
     mailbox->head = taken->next;
@@ -420,6 +439,7 @@ void TrimRing(Mailbox *mailbox) {
       mailbox->tail = &mailbox->head;
     }
     --mailbox->count;
+    FreeMessage(taken);
   }
 }
 
@@ -468,6 +488,9 @@ void TellWaiters() {
 // mailbox's lock held. The count goes up before the owner's waitLock is
 // taken, so that a receive about to block either sees it or is woken.
 void Queue(Mailbox *mailbox, Message *message) {
+  if (message->chunks) {
+    heldMessages.fetch_add(1);
+  }
   ArrivalCounts &counts{CountsOf(mailbox)};
   message->stamp = __atomic_add_fetch(&counts.stamps, 1, __ATOMIC_SEQ_CST);
   *mailbox->tail = message;
@@ -737,13 +760,13 @@ static void Close(Mailbox *mailbox) {
     TrimRing(mailbox);
     RetireRingCopy(mailbox);
   }
-  // Unread messages go, but not ones a device's ring may have shown.
-  if (!mailbox->ring) {
-    for (Message *message{mailbox->head}; message;) {
-      Message *next{message->next};
-      FreeChunks(message->chunks);
-      message = next;
-    }
+  // Unread messages go, those a device's ring has shown too: a device
+  // reads a word in the ring, and the host copies any other message for it
+  // with the lock held, which it no longer can.
+  for (Message *message{mailbox->head}; message;) {
+    Message *next{message->next};
+    FreeMessage(message);
+    message = next;
   }
   mailbox->head = nullptr;
   mailbox->tail = &mailbox->head;
@@ -1097,22 +1120,41 @@ extern "C" bool merk_mailbox_copy_for_ring(MERK_HANDLE_PARAMETERS,
   return found;
 }
 
+// The oldest message that the device has not taken from its ring of arrays,
+// copied by `copy` to the device's array at `to`, with the lock held; false
+// if the mailbox is closed.
+extern "C" bool merk_mailbox_copy_array_for_ring(MERK_HANDLE_PARAMETERS,
+    void (*copy)(int device, const Word *array, void *to), void *to) {
+  bool found{false};
+  if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
+    if (mailbox->ring && mailbox->ringKind == kRingOfArrays) {
+      TrimRing(mailbox);
+      if (!mailbox->head) {
+        // On the plugin's server thread, where exit would hang.
+        std::fflush(stdout);
+        std::fputs("Mercury runtime: a device took a message that is not in "
+                   "its mailbox\n",
+            stderr);
+        std::_Exit(1);
+      }
+      copy(mailbox->ringDevice,
+          reinterpret_cast<const Word *>(mailbox->head->value), to);
+      found = true;
+    }
+    Unlock(mailbox);
+  }
+  return found;
+}
+
+namespace merkurius::runtime {
+std::int64_t HeldMessages() { return heldMessages.load(); }
+} // namespace merkurius::runtime
+
 // Shows the device the messages that did not fit in its ring.
 extern "C" void merk_mailbox_drain(MERK_HANDLE_PARAMETERS) {
   if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
     if (mailbox->ring) {
       FillRing(mailbox);
-    }
-    Unlock(mailbox);
-  }
-}
-
-// Drops from the list what the device has taken, so that the mailbox's
-// oldest message is the next it will take.
-extern "C" void merk_mailbox_trim(MERK_HANDLE_PARAMETERS) {
-  if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
-    if (mailbox->ring) {
-      TrimRing(mailbox);
     }
     Unlock(mailbox);
   }

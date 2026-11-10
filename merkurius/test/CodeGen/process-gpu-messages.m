@@ -7,9 +7,10 @@
 % get(Reply); two processes on the GPU play ping-pong through the host's
 % mailboxes; and a summer takes a list and a string and answers with the
 % string and the list's sum. A closure cannot cross, as the GPU has other
-% procedures. With "many", two hundred summers each take one message and
-% end, after which none of the host's copies of their messages is left
-% (MERK_CHECK_PINNED). The program runs its kinds at the host here, and at the GPU in
+% procedures. With "many", two hundred summers each take one message of the
+% two they are sent and end, after which none of the host's copies of their
+% messages is left (MERK_CHECK_PINNED), nor any of the messages, those the
+% GPU took and those it did not (MERK_CHECK_MESSAGES). The program runs its kinds at the host here, and at the GPU in
 % process-gpu-messages-gpu.test.
 %
 % REQUIRES: amdgpu-registered-target, libomp
@@ -18,7 +19,7 @@
 % RUN: merkc -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t
 % RUN: %libomp-env %t host | FileCheck %s --match-full-lines --strict-whitespace
 % RUN: %libomp-env %t2 host closure | FileCheck %s --check-prefix=CLOSURE --match-full-lines --strict-whitespace
-% RUN: %libomp-env %t2 host many | FileCheck %s --check-prefix=MANY --match-full-lines --strict-whitespace
+% RUN: %libomp-env MERK_CHECK_MESSAGES=1 %t2 host many 2>&1 | FileCheck %s --check-prefixes=MANY,MESSAGES --match-full-lines --strict-whitespace
 
 :- module process_gpu_messages.
 :- interface.
@@ -149,6 +150,7 @@ many(Place, N, !Total, Reports, !IO) :-
     ( if N > 0 then
         spawn_summer_at(Place, S, !IO),
         send(S, sum([N, 1], "many", Reports), !IO),
+        send(S, sum([N], "unread", Reports), !IO),
         receive(Reports, any, after(10000), R, !IO),
         ( if R = message(report(_, Sum)) then
             !:Total = !.Total + Sum
@@ -193,3 +195,4 @@ run(Place, !IO) :-
 % CHECK-NEXT:message(report("one to a hundred", 5050))
 % CLOSURE:message(1)
 % MANY:20300
+% MESSAGES-NEXT:Mercury runtime: 0 messages are neither read nor freed

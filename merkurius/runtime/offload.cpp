@@ -67,9 +67,11 @@ extern "C" bool merk_mailbox_copy_for_ring(std::int64_t nodeHigh,
     std::uint64_t (*copy)(
         int device, std::uint64_t typeInfo, std::uint64_t value, void **held),
     void (*release)(int device, void *held), std::uint64_t *result);
+extern "C" bool merk_mailbox_copy_array_for_ring(std::int64_t nodeHigh,
+    std::int64_t nodeLow, std::int64_t placeAndSlot, std::int64_t generation,
+    std::int64_t secret,
+    void (*copy)(int device, const std::uint64_t *array, void *to), void *to);
 extern "C" void merk_mailbox_drain(std::int64_t nodeHigh, std::int64_t nodeLow,
-    std::int64_t placeAndSlot, std::int64_t generation, std::int64_t secret);
-extern "C" void merk_mailbox_trim(std::int64_t nodeHigh, std::int64_t nodeLow,
     std::int64_t placeAndSlot, std::int64_t generation, std::int64_t secret);
 extern "C" void merk_mailbox_detach_rings(void);
 extern "C" [[noreturn]] void merk_uncaught_exception(const char *exception);
@@ -291,17 +293,21 @@ void SendArray(const std::uint64_t *handle, std::uint64_t key, int device,
   std::free(copy);
 }
 
-// Copies the mailbox's oldest message that the device has not taken, an
-// array, to the device's array of its size. The device then moves the
-// ring's head, after which the message goes.
-void TakeArray(const std::uint64_t *handle, int device, void *array) {
-  const std::int64_t *h{reinterpret_cast<const std::int64_t *>(handle)};
-  merk_mailbox_trim(h[0], h[1], h[2], h[3], h[4]);
-  auto *message{reinterpret_cast<const std::uint64_t *>(
-      merk_mailbox_message(h[0], h[1], h[2], h[3], h[4], 0))};
+void CopyArrayToDevice(int device, const std::uint64_t *message, void *array) {
   if (!CopyToDevice(device, array, message, ArrayBytes(message[0]))) {
     Fail("could not copy an array to a device");
   }
+}
+
+// Copies the mailbox's oldest message that the device has not taken, an
+// array, to the device's array of its size, with the mailbox's lock held,
+// so that the message stays while it is copied; whether the mailbox was
+// open. The device then moves the ring's head, after which the message
+// goes.
+bool TakeArray(const std::uint64_t *handle, void *array) {
+  const std::int64_t *h{reinterpret_cast<const std::int64_t *>(handle)};
+  return merk_mailbox_copy_array_for_ring(
+      h[0], h[1], h[2], h[3], h[4], CopyArrayToDevice, array);
 }
 
 // Chunks of host memory that a device reads and writes directly, for a
@@ -470,8 +476,8 @@ unsigned HandleOpcode(void *raw, unsigned) {
     return rpc::RPC_SUCCESS;
   case rpcTakeArray:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
-      TakeArray(buffer->data, static_cast<int>(buffer->data[5]),
-          reinterpret_cast<void *>(buffer->data[6]));
+      buffer->data[0] =
+          TakeArray(buffer->data, reinterpret_cast<void *>(buffer->data[6]));
     });
     return rpc::RPC_SUCCESS;
   case rpcChunk:
@@ -602,16 +608,22 @@ bool RegionsRunning() {
 }
 } // namespace merkurius::runtime
 
-// With MERK_CHECK_PINNED set, a check that the copies of messages between
-// the host and the devices were freed: when the program ends, it waits up
-// to ten seconds for the regions and GPU processes still running, so that
-// the copies their mailboxes held have gone, and reports how many chunks of
-// them are still allocated (docs/INPROGRESS.md, GPU processes without omp
-// target, step 4e).
+// Checks that messages were freed, for tests. When the program ends, it
+// waits up to ten seconds for the regions and GPU processes still running,
+// so that what their mailboxes held has gone. With MERK_CHECK_PINNED set,
+// it reports how many chunks of copies of messages between the host and
+// the devices are still allocated (docs/INPROGRESS.md, GPU processes
+// without omp target, step 4e); with MERK_CHECK_MESSAGES, how many messages
+// that were queued neither a process read nor a mailbox freed.
 namespace merkurius::runtime {
+static bool Set(const char *name) {
+  const char *value{std::getenv(name)};
+  return value && *value;
+}
+
 void CheckPinnedAtEnd() {
-  const char *value{std::getenv("MERK_CHECK_PINNED")};
-  if (!value || !*value) {
+  bool pinned{Set("MERK_CHECK_PINNED")}, messages{Set("MERK_CHECK_MESSAGES")};
+  if (!pinned && !messages) {
     return;
   }
   for (int i{0}; i < 10000 && RegionsRunning(); ++i) {
@@ -619,10 +631,17 @@ void CheckPinnedAtEnd() {
     nanosleep(&millisecond, nullptr);
   }
   std::fflush(stdout);
-  std::fprintf(stderr,
-      "Mercury runtime: %lld chunks of host memory for devices' messages "
-      "are allocated\n",
-      static_cast<long long>(pinnedChunks.load()));
+  if (pinned) {
+    std::fprintf(stderr,
+        "Mercury runtime: %lld chunks of host memory for devices' messages "
+        "are allocated\n",
+        static_cast<long long>(pinnedChunks.load()));
+  }
+  if (messages) {
+    std::fprintf(stderr,
+        "Mercury runtime: %lld messages are neither read nor freed\n",
+        static_cast<long long>(HeldMessages()));
+  }
 }
 } // namespace merkurius::runtime
 
