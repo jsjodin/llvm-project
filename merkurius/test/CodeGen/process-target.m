@@ -9,7 +9,12 @@
 % RUN: %libomp-env MERK_WORKERS=1 %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: %libomp-env MERK_WORKERS=2 %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: %libomp-env %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 -fopenmp %libomp-flags %s -o %t.O2
+% RUN: %libomp-env MERK_WORKERS=1 %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: %libomp-env MERK_WORKERS=2 %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: %libomp-env %t.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc %s -o %t.sequential && env MERK_WORKERS=1 %t.sequential | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %s -o %t.sequential.O2 && env MERK_WORKERS=1 %t.sequential.O2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % The program ends when main does, with a region still waiting, at once.
 % RUN: sed 's/^ends_early = no\./ends_early = yes./' %s > %t.e.m && merkc -fopenmp %libomp-flags %t.e.m -o %t.e
 % RUN: %libomp-env timeout 10 %t.e | FileCheck %s --check-prefix=EARLY --match-full-lines --strict-whitespace
