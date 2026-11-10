@@ -1925,7 +1925,7 @@ threads (`-fopenmp-target-ignore-env-vars`). That stays a flag.
 
 ## GPU processes without `omp target`: liboffload and libc
 
-Proposed 2026-11-10; step 1, the probe, is done. Decided by the user the same
+Proposed 2026-11-10; steps 1 and 2 are done. Decided by the user the same
 day:
 - **GPU processes launch without `omp target`.** A process on a GPU is a
   kernel that our runtime launches, not a target region.
@@ -2000,8 +2000,8 @@ wrong shape for that:
   number comes from a global the runtime sets at load, or from the
   kernel's arguments. The `__kmpc_` calls stay in the code that OpenMP's
   lowering makes. Library C under `__AMDGPU__` does the same:
-  `process.team_number` becomes `__gpu_block_id`, which is OpenMP's team
-  number in a region's kernel on an AMD GPU (to be checked).
+  `process.team_number` becomes `__gpu_block_id_x`, which is OpenMP's team
+  number in a region's kernel on an AMD GPU (step 2 checked it).
 - **The host's device calls behind one interface** in `runtime/offload.cpp`.
   `omp_target_alloc`, `omp_target_memcpy` and the rest are used for regions
   today. The interface would let the process side use liboffload, and later
@@ -2077,6 +2077,29 @@ the process asks the host to launch. The first version has neither.
 2. **The device runtime off OpenMP's API:** `gpuintrin.h` and libc in
    `runtime/device` and in the library's C under `__AMDGPU__`. The existing
    tests check that regions behave the same.
+
+   Done 2026-11-10. All tests pass, the GPU's included:
+   - **Team number and number of teams:** `__gpu_block_id_x` and
+     `__gpu_num_blocks_x`, in `device.cpp` and in `process.team_number` and
+     `process.number_of_teams`. In a region's kernel on an AMD GPU they are
+     OpenMP's, as the team mailbox tests show.
+   - **Time:** libc's `clock_gettime(CLOCK_MONOTONIC)`, in nanoseconds, for
+     the receive deadlines and the teams' start. libc takes the clock to be
+     100 MHz unless the loader sets `__llvm_libc_clock_freq`, which the
+     offload plugin does not. That is right from gfx9 on. Before, deadlines
+     would be up to four times too long. `omp_get_wtime` had the plugin's
+     frequency.
+   - **The device's number:** a global, `merk_device_number`, which starts
+     at -1. A region's image keeps that and takes `omp_get_device_num`,
+     through a weak reference, so an image without OpenMP's device runtime
+     still links. Step 4 sets the global when it loads a process's image.
+     That image must define it in its own object, or LTO internalizes it, as
+     it did libc's RPC client (step 1).
+   - **What stays OpenMP's:** `merk_device_shared_alloc` and `_free` call
+     `__kmpc_alloc_shared`. Code generation calls them only in a parallel
+     region's code, which a process's kernel does not have, and LTO drops
+     them from an image that does not. The `omp_get_num_teams` that a teams
+     region's code calls is OpenMP's lowering, as its `__kmpc_` calls are.
 3. **The host's device calls behind one interface,** and the RPC callback
    registered through liboffload.
 4. **A GPU process's kernel:** merkc compiles a process kind to a kernel, a

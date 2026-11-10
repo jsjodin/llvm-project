@@ -13,21 +13,66 @@
 // image beside the OpenMP device runtime, whose RPC client it uses. The
 // host's merkrt has the same functions for a region that runs on the host.
 //
+// It uses gpuintrin.h and LLVM's GPU libc rather than OpenMP's API, so that
+// it works in a GPU process's kernel, which has no OpenMP device runtime, as
+// in a region's (docs/INPROGRESS.md, GPU processes without omp target,
+// step 2).
+//
 //===----------------------------------------------------------------------===//
 
 #include "../device-ring.h"
 #include "../rpc-opcodes.h"
 #include "shared/rpc.h"
+#include <gpuintrin.h>
+#include <time.h>
 
 // The OpenMP device runtime's client, which the plugin points at the host's
 // buffer when it loads the image.
 extern "C" rpc::Client __llvm_rpc_client;
 
-// The OpenMP device runtime's, by the device's steady clock, whose
-// frequency the plugin gives it.
-extern "C" double omp_get_wtime(void);
-extern "C" int omp_get_device_num(void);
-extern "C" int omp_get_team_num(void);
+// OpenMP's number of the device, in a region's image only.
+extern "C" int omp_get_device_num(void) __attribute__((weak));
+
+// The device's number, as the host's runtime knows it, or -1 if not set.
+// Temporary (step 4 of GPU processes without omp target, docs/INPROGRESS.md):
+// the runtime sets it when it loads a GPU process's image, which defines it
+// in its own object so that it is exported. Until then it is -1, and a
+// region's image takes OpenMP's number.
+extern "C" [[gnu::visibility("protected"), gnu::weak]] int merk_device_number{
+    -1};
+
+namespace {
+
+int DeviceNumber() {
+  int number{__scoped_atomic_load_n(
+      &merk_device_number, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE)};
+  if (number >= 0) {
+    return number;
+  }
+  return omp_get_device_num ? omp_get_device_num() : 0;
+}
+
+// Nanoseconds by libc's steady clock. libc takes its frequency to be
+// 100 MHz unless the loader sets __llvm_libc_clock_freq, which the offload
+// plugin does not: right from gfx9 on, and too slow by up to four times
+// before.
+int64_t Now() {
+  timespec time;
+  clock_gettime(CLOCK_MONOTONIC, &time);
+  return static_cast<int64_t>(time.tv_sec) * 1000000000 + time.tv_nsec;
+}
+
+// The time `milliseconds` from now, or the end of time for a wait of more
+// than about 146 years.
+int64_t Deadline(int64_t milliseconds) {
+  constexpr int64_t kLongest{INT64_MAX / 2 / 1000000};
+  if (milliseconds > kLongest) {
+    return INT64_MAX;
+  }
+  return Now() + milliseconds * 1000000;
+}
+
+} // namespace
 
 using merkurius::runtime::kTeamsPlace;
 using merkurius::runtime::kTeamTableSlots;
@@ -91,7 +136,7 @@ void *NewChunk(uint64_t bytes) {
   {
     rpc::Client::Port port{__llvm_rpc_client.open<rpcChunk>()};
     port.send([&](rpc::Buffer *buffer, uint32_t) {
-      buffer->data[0] = static_cast<uint64_t>(omp_get_device_num());
+      buffer->data[0] = static_cast<uint64_t>(DeviceNumber());
       buffer->data[1] = reinterpret_cast<uint64_t>(&arena);
       buffer->data[2] = wanted > kChunkBytes ? wanted : kChunkBytes;
     });
@@ -323,7 +368,7 @@ extern "C" void merk_device_teams_enter(
 
 // How long the teams of a region with team mailboxes wait for each other to
 // start. Teams that fit on the device start within microseconds.
-constexpr double kTeamsStartSeconds{1.0};
+constexpr int64_t kTeamsStartMilliseconds{1000};
 
 // After merk_device_teams_enter, in each team of a target teams region whose
 // code uses team mailboxes: waits until every team of the region has started
@@ -335,9 +380,9 @@ constexpr double kTeamsStartSeconds{1.0};
 extern "C" void merk_device_teams_wait_all(void) {
   TeamTable *table{currentTeams};
   int64_t started{__atomic_add_fetch(&table->started, 1, __ATOMIC_ACQ_REL)};
-  double deadline{omp_get_wtime() + kTeamsStartSeconds};
+  int64_t deadline{Deadline(kTeamsStartMilliseconds)};
   while (started < table->teams) {
-    if (omp_get_wtime() >= deadline) {
+    if (Now() >= deadline) {
       uint32_t none{0};
       if (__atomic_compare_exchange_n(&table->reporting, &none, 1, false,
               __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
@@ -530,10 +575,10 @@ int TeamReceive(const uint64_t *handle, int64_t milliseconds,
     uint64_t *message) {
   TableOf(handle, "receive");
   int64_t team{TeamOf(handle)};
-  if (team != omp_get_team_num()) {
+  if (team != __gpu_block_id_x()) {
     Fail(0, Text{}
                 .Append("Software Error: receive: team ")
-                .Append(static_cast<int64_t>(omp_get_team_num()))
+                .Append(static_cast<int64_t>(__gpu_block_id_x()))
                 .Append(" received from the mailbox of team ")
                 .Append(team)
                 .characters);
@@ -542,9 +587,9 @@ int TeamReceive(const uint64_t *handle, int64_t milliseconds,
   if (TeamTake(ring, message)) {
     return 1;
   }
-  double deadline{omp_get_wtime() + static_cast<double>(milliseconds) / 1000};
+  int64_t deadline{Deadline(milliseconds)};
   for (;;) {
-    if (milliseconds >= 0 && omp_get_wtime() >= deadline) {
+    if (milliseconds >= 0 && Now() >= deadline) {
       return 0;
     }
     // About 64 clocks between looks: no host thread serves this ring.
@@ -595,7 +640,7 @@ extern "C" uint64_t *merk_device_give_array(uint64_t *array, int64_t number) {
   uint64_t *copy{nullptr};
   rpc::Client::Port port{__llvm_rpc_client.open<rpcGiveArray>()};
   port.send([&](rpc::Buffer *buffer, uint32_t) {
-    buffer->data[0] = static_cast<uint64_t>(omp_get_device_num());
+    buffer->data[0] = static_cast<uint64_t>(DeviceNumber());
     buffer->data[1] = reinterpret_cast<uint64_t>(array);
     buffer->data[2] = array[0];
   });
@@ -650,7 +695,7 @@ extern "C" void merk_device_send_array(
     buffer->data[5] = key;
     buffer->data[6] = reinterpret_cast<uint64_t>(array);
     buffer->data[7] =
-        array[0] << 8 | static_cast<uint64_t>(omp_get_device_num());
+        array[0] << 8 | static_cast<uint64_t>(DeviceNumber());
   });
   port.recv([](rpc::Buffer *, uint32_t) {});
 }
@@ -660,12 +705,12 @@ namespace {
 // Calls `poll` until it finds a message or `milliseconds` pass, or forever
 // if it is negative; whether it found one.
 template <typename Poll> bool Wait(int64_t milliseconds, Poll poll) {
-  double deadline{omp_get_wtime() + static_cast<double>(milliseconds) / 1000};
+  int64_t deadline{Deadline(milliseconds)};
   for (;;) {
     if (poll()) {
       return true;
     }
-    if (milliseconds >= 0 && omp_get_wtime() >= deadline) {
+    if (milliseconds >= 0 && Now() >= deadline) {
       return false;
     }
     // About 8 microseconds (127 * 64 clocks at about 1 GHz) between polls,
@@ -693,7 +738,7 @@ RingEntry *RingOf(const uint64_t *handle, bool array) {
       for (int i{0}; i < 5; ++i) {
         buffer->data[i] = handle[i];
       }
-      buffer->data[5] = static_cast<uint64_t>(omp_get_device_num());
+      buffer->data[5] = static_cast<uint64_t>(DeviceNumber());
       buffer->data[6] = array;
     });
     port.recv([&](rpc::Buffer *buffer, uint32_t) {
@@ -797,7 +842,7 @@ extern "C" int merk_device_receive_array(
       for (int i{0}; i < 5; ++i) {
         buffer->data[i] = handle[i];
       }
-      buffer->data[5] = static_cast<uint64_t>(omp_get_device_num());
+      buffer->data[5] = static_cast<uint64_t>(DeviceNumber());
       buffer->data[6] = reinterpret_cast<uint64_t>(array);
     });
     port.recv([](rpc::Buffer *, uint32_t) {});
