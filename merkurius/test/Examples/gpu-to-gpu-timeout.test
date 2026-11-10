@@ -1,11 +1,14 @@
 The GPU to GPU demo, with its regions on the CPU, when node B never answers: node
-A reports the timeout and stops at the first round, then so does node B.
+A reports the timeout and stops at the first round, then so does node B. Each
+node's lines are checked in order after a stable sort, and the errors, which the
+nodes report in either order, after a full sort.
 
 RUN: rm -rf %t.src && mkdir -p %t.src
 RUN: sed 's/send(ToA, Sum, !IO)/true/; s/after(10000)/after(300)/' %S/../../examples/gpu-to-gpu/gpu_to_gpu.m > %t.src/gpu_to_gpu.m
 RUN: cp %S/../../examples/gpu-to-gpu/demo_node.m %t.src/
 RUN: not make -s -C %S/../../examples run-gpu-to-gpu-cpu MERKC=merkc BUILD=%t O=0 PORT=47102 GPU_SOURCES="%t.src/gpu_to_gpu.m %t.src/demo_node.m" > %t.out
-RUN: grep "^.[nG]\|^error" %t.out | sort -s -k1,2 | FileCheck %s --match-full-lines --strict-whitespace
+RUN: grep "^.[nG]" %t.out | sort -s -k1,2 | FileCheck %s --match-full-lines --strict-whitespace
+RUN: grep "^error" %t.out | sort | FileCheck %s --check-prefix=ERRORS --match-full-lines --strict-whitespace
 
 CHECK:[GPU A] sending numbers, each 1
 CHECK-NEXT:[GPU B] got this many numbers: 1000
@@ -17,6 +20,8 @@ CHECK-NEXT:[node B] listening on port {{[0-9]+}}
 CHECK-NEXT:[node B] node A has connected
 CHECK-NEXT:[node B] round 1
 CHECK-NEXT:[node B] round 2
-CHECK-NEXT:error: GPU A waiting for the sum: nothing arrived in time
-CHECK-NEXT:error: GPU B waiting for the numbers: nothing arrived in time
 CHECK-NOT:{{.}}
+
+ERRORS:error: GPU A waiting for the sum: nothing arrived in time
+ERRORS-NEXT:error: GPU B waiting for the numbers: nothing arrived in time
+ERRORS-NOT:{{.}}
