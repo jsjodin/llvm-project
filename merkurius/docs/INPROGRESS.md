@@ -2533,7 +2533,7 @@ the process asks the host to launch. The first version has neither.
        first version dropped it at close, which leaked a chunk of pinned
        memory for each GPU process whose last message had cells, as the
        ring is not trimmed after the last receive. A copy that the device
-       may still be reading is freed when no region or GPU process runs.
+       may still be reading is freed with the ring, when its last user ends.
        `MERK_CHECK_PINNED` reports at the end how many chunks are left;
        without the fix, two hundred such processes left two hundred.
      - **Not on the GPU yet:** the string library's operations that call
@@ -2710,15 +2710,6 @@ the process asks the host to launch. The first version has neither.
      written by hand is measured, not guessed: that is the bar.
 
    **After step 5,** each a step of its own:
-   - **Rings that regions attach, freed with their mailboxes.** A region's
-     cells go when it ends (done 2026-11-10, design document, "The arena"),
-     but the rings that regions receive from, the entries of the image's
-     table of them, and the copies a device may still be reading go only
-     when no region or GPU process runs. Beside a GPU process that lives
-     long, regions that receive from many mailboxes, one after another,
-     grow them: a bug, to fix next as its own commit, by freeing a ring and
-     its entries when its mailbox closes and no region that attached it
-     still runs.
    - **Arrays freed at their last use** in GPU processes, where uniqueness
      shows it (compile-time garbage collection), so that a GPU process that
      lives long does not grow.

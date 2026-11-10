@@ -218,6 +218,12 @@ struct Mailbox {
   std::uint64_t consumed;
   void *ringCopy;
   void (*releaseCopy)(int device, void *copy);
+  // Frees the ring, which goes once no running region, nor the GPU process
+  // whose mailbox it is, has it attached: how many regions have, and
+  // whether the process has.
+  void (*freeRing)(int device, DeviceRing *ring);
+  std::int64_t ringUsers;
+  bool ringProcessUse;
   // The process that receives from it, which a message wakes, or null if
   // made on a thread that runs none; and its neighbours in that process's
   // list of mailboxes, as slots, or -1.
@@ -261,8 +267,6 @@ constexpr std::int64_t kMostChunks{1 << 20};
 Mailbox *chunks[kMostChunks];
 std::int64_t slotCount{0};
 std::int64_t firstFree{-1};
-// How many mailboxes have rings, so that most regions' ends need no walk.
-std::int64_t attachedRings{0};
 
 Mailbox *SlotAt(std::int64_t index) {
   return &__atomic_load_n(&chunks[index >> kChunkShift],
@@ -403,33 +407,45 @@ void ReleaseRingCopy(Mailbox *mailbox) {
   }
 }
 
-// Copies of messages that a device may still have been copying when their
-// mailboxes closed, which merk_mailbox_detach_rings frees once no region or
-// GPU process runs.
-struct RetiredCopy {
-  RetiredCopy *next;
+// A ring whose mailbox closed while a running region, or its GPU process,
+// still had it attached, and the copy of the message that the device may
+// still have been taking: they go when the last of them ends. By the
+// mailbox's slot and the generation it had.
+struct OrphanRing {
+  OrphanRing *next;
+  std::int64_t index, generation;
+  DeviceRing *ring;
   int device;
   void *copy;
   void (*release)(int device, void *copy);
+  void (*freeRing)(int device, DeviceRing *ring);
+  std::int64_t users;
 };
-pthread_mutex_t retiredLock = PTHREAD_MUTEX_INITIALIZER;
-RetiredCopy *retired{nullptr};
+// Taken with a mailbox's lock held.
+pthread_mutex_t orphansLock = PTHREAD_MUTEX_INITIALIZER;
+OrphanRing *orphans{nullptr};
 
-// The copy of the message that the device is taking, kept until no region
-// or GPU process runs. Called with the lock held.
-void RetireRingCopy(Mailbox *mailbox) {
-  if (!mailbox->ringCopy) {
-    return;
+// Removes the orphan of the mailbox's slot and generation from the list, or
+// gives null. With orphansLock held.
+OrphanRing *TakeOrphan(std::int64_t index, std::int64_t generation) {
+  for (OrphanRing **link{&orphans}; *link; link = &(*link)->next) {
+    if ((*link)->index == index && (*link)->generation == generation) {
+      OrphanRing *orphan{*link};
+      *link = orphan->next;
+      return orphan;
+    }
   }
-  auto *entry{static_cast<RetiredCopy *>(Malloc(sizeof(RetiredCopy)))};
-  *entry = {
-      nullptr, mailbox->ringDevice, mailbox->ringCopy, mailbox->releaseCopy};
-  pthread_mutex_lock(&retiredLock);
-  entry->next = retired;
-  retired = entry;
-  pthread_mutex_unlock(&retiredLock);
-  mailbox->ringCopy = nullptr;
+  return nullptr;
 }
+
+// The mailboxes whose rings each running region has attached, by its slot
+// (device-ring.h), each once. Taken with a mailbox's lock held.
+struct RingUse {
+  RingUse *next;
+  std::int64_t index, generation;
+};
+pthread_mutex_t ringUsesLock = PTHREAD_MUTEX_INITIALIZER;
+RingUse *regionRingUses[kRegionSlots];
 
 // Drops the messages the device has taken from the list. Called with the
 // lock held.
@@ -730,6 +746,9 @@ void NewMailbox(Word typeInfo, Process *owner, std::int64_t *placeAndSlot,
   mailbox.consumed = 0;
   mailbox.ringCopy = nullptr;
   mailbox.releaseCopy = nullptr;
+  mailbox.freeRing = nullptr;
+  mailbox.ringUsers = 0;
+  mailbox.ringProcessUse = false;
   Own(&mailbox, owner);
   mailbox.open = true;
   *placeAndSlot = index;
@@ -762,11 +781,25 @@ static void Close(Mailbox *mailbox) {
   mailbox->open = false;
   ++mailbox->generation;
   // The copy of a message that the device has taken goes now; it took what
-  // the ring's head has passed. One it may still be copying goes when no
-  // region or GPU process runs.
+  // the ring's head has passed. The ring, and a copy that the device may
+  // still be taking, go when the last region or GPU process that attached
+  // it ends.
   if (mailbox->ring) {
     TrimRing(mailbox);
-    RetireRingCopy(mailbox);
+    if (mailbox->ringUsers == 0) {
+      ReleaseRingCopy(mailbox);
+      mailbox->freeRing(mailbox->ringDevice, mailbox->ring);
+    } else {
+      auto *orphan{static_cast<OrphanRing *>(Malloc(sizeof(OrphanRing)))};
+      *orphan = {nullptr, mailbox->index, mailbox->generation - 1,
+          mailbox->ring, mailbox->ringDevice, mailbox->ringCopy,
+          mailbox->releaseCopy, mailbox->freeRing, mailbox->ringUsers};
+      pthread_mutex_lock(&orphansLock);
+      orphan->next = orphans;
+      orphans = orphan;
+      pthread_mutex_unlock(&orphansLock);
+      mailbox->ringCopy = nullptr;
+    }
   }
   // Unread messages go, those a device's ring has shown too: a device
   // reads a word in the ring, and the host copies any other message for it
@@ -779,7 +812,6 @@ static void Close(Mailbox *mailbox) {
   mailbox->head = nullptr;
   mailbox->tail = &mailbox->head;
   mailbox->count = 0;
-  // Whoever made the ring frees it when no region is running.
   mailbox->ring = nullptr;
   __atomic_add_fetch(&CountsOf(mailbox).arrivals, 1, __ATOMIC_SEQ_CST);
   if (Process *owner{mailbox->owner}) {
@@ -805,9 +837,11 @@ extern "C" void merk_mailbox_close(MERK_HANDLE_PARAMETERS) {
 }
 
 // Closes the mailbox of a GPU process whose kernel has ended, which no
-// device reads any more: its ring, if it has one, and the copy of the
-// message that the device was taking go to the caller to free, now, with
-// `release`, not when no region or GPU process runs.
+// device reads any more. If the process was the last that had its ring
+// attached, the ring and the copy of the message that the device was taking
+// go to the caller to free, with `release`: this runs on liboffload's
+// thread, which must not call liboffload. The mailbox may have closed
+// before, leaving its ring to the process.
 extern "C" void merk_mailbox_close_ended(MERK_HANDLE_PARAMETERS,
     DeviceRing **ring, int *device, void **copy,
     void (**release)(int device, void *copy)) {
@@ -815,17 +849,45 @@ extern "C" void merk_mailbox_close_ended(MERK_HANDLE_PARAMETERS,
   *ring = nullptr;
   *copy = nullptr;
   if (Mailbox * mailbox{Find(MERK_HANDLE)}) {
-    if (mailbox->ring) {
-      TrimRing(mailbox);
-      *ring = mailbox->ring;
-      *device = mailbox->ringDevice;
-      *copy = mailbox->ringCopy;
-      *release = mailbox->releaseCopy;
-      mailbox->ringCopy = nullptr;
-      __atomic_sub_fetch(&attachedRings, 1, __ATOMIC_SEQ_CST);
+    if (mailbox->ring && mailbox->ringProcessUse) {
+      mailbox->ringProcessUse = false;
+      if (--mailbox->ringUsers == 0) {
+        TrimRing(mailbox);
+        *ring = mailbox->ring;
+        *device = mailbox->ringDevice;
+        *copy = mailbox->ringCopy;
+        *release = mailbox->releaseCopy;
+        mailbox->ringCopy = nullptr;
+        mailbox->ring = nullptr;
+      }
     }
     Close(mailbox);
     Unlock(mailbox);
+    return;
+  }
+  // Closed already: the process gives up its use of the orphaned ring.
+  std::int64_t index{
+      static_cast<std::int64_t>(static_cast<Word>(placeAndSlot) & kSlotMask)};
+  if (index >= __atomic_load_n(&slotCount, __ATOMIC_ACQUIRE)) {
+    return;
+  }
+  Mailbox *slot{SlotAt(index)};
+  pthread_mutex_lock(&slot->lock);
+  pthread_mutex_lock(&orphansLock);
+  OrphanRing *orphan{TakeOrphan(index, generation)};
+  if (orphan && --orphan->users > 0) {
+    orphan->next = orphans;
+    orphans = orphan;
+    orphan = nullptr;
+  }
+  pthread_mutex_unlock(&orphansLock);
+  pthread_mutex_unlock(&slot->lock);
+  if (orphan) {
+    *ring = orphan->ring;
+    *device = orphan->device;
+    *copy = orphan->copy;
+    *release = orphan->release;
+    std::free(orphan);
   }
 }
 
@@ -1092,9 +1154,13 @@ extern "C" void merk_mailbox_remove(
 
 // The mailbox's ring for a device (device-ring.h), made by `allocate` the
 // first time, and its head; null if the mailbox is closed or not this
-// node's host's. What it holds already is shown in the ring.
+// node's host's. What it holds already is shown in the ring. The region of
+// the slot `region` that attaches it, or else the GPU process whose mailbox
+// it is, uses the ring until it ends, and `freeRing` frees it once nothing
+// uses it.
 extern "C" DeviceRing *merk_mailbox_attach(MERK_HANDLE_PARAMETERS,
     std::uint64_t kind, int device, DeviceRing *(*allocate)(int),
+    void (*freeRing)(int, DeviceRing *), std::uint64_t region,
     std::uint64_t *head) {
   pthread_once(&once, InitializeCondition);
   DeviceRing *ring{nullptr};
@@ -1104,7 +1170,7 @@ extern "C" DeviceRing *merk_mailbox_attach(MERK_HANDLE_PARAMETERS,
       mailbox->ringDevice = device;
       mailbox->ringKind = kind;
       mailbox->consumed = 0;
-      __atomic_add_fetch(&attachedRings, 1, __ATOMIC_SEQ_CST);
+      mailbox->freeRing = freeRing;
       FillRing(mailbox);
     } else if (mailbox->ringDevice != device) {
       // A ring has one consumer. This runs on the plugin's server thread,
@@ -1114,6 +1180,26 @@ extern "C" DeviceRing *merk_mailbox_attach(MERK_HANDLE_PARAMETERS,
           "Mercury runtime: two devices receive from one mailbox, which is "
           "not supported yet\n");
       std::_Exit(1);
+    }
+    if (region == kNoRegionSlot) {
+      if (!mailbox->ringProcessUse) {
+        mailbox->ringProcessUse = true;
+        ++mailbox->ringUsers;
+      }
+    } else if (region < kRegionSlots) {
+      pthread_mutex_lock(&ringUsesLock);
+      bool counted{false};
+      for (RingUse *use{regionRingUses[region]}; use; use = use->next) {
+        counted |= use->index == mailbox->index &&
+            use->generation == mailbox->generation;
+      }
+      if (!counted) {
+        auto *use{static_cast<RingUse *>(Malloc(sizeof(RingUse)))};
+        *use = {regionRingUses[region], mailbox->index, mailbox->generation};
+        regionRingUses[region] = use;
+        ++mailbox->ringUsers;
+      }
+      pthread_mutex_unlock(&ringUsesLock);
     }
     ring = mailbox->ring;
     *head = ring->head;
@@ -1218,35 +1304,55 @@ extern "C" void merk_mailbox_drain(MERK_HANDLE_PARAMETERS) {
   }
 }
 
-// When no region is running: every mailbox goes back to its list alone,
-// which still has what the devices did not take. The caller frees the rings.
-extern "C" void merk_mailbox_detach_rings(void) {
-  pthread_mutex_lock(&retiredLock);
-  RetiredCopy *list{retired};
-  retired = nullptr;
-  pthread_mutex_unlock(&retiredLock);
-  while (list) {
-    RetiredCopy *next{list->next};
-    list->release(list->device, list->copy);
-    std::free(list);
-    list = next;
-  }
-  if (__atomic_load_n(&attachedRings, __ATOMIC_SEQ_CST) == 0) {
-    return;
-  }
-  std::int64_t count{__atomic_load_n(&slotCount, __ATOMIC_ACQUIRE)};
-  for (std::int64_t i{0}; i < count; ++i) {
-    Mailbox *mailbox{SlotAt(i)};
-    pthread_mutex_lock(&mailbox->lock);
-    if (mailbox->open && mailbox->ring) {
+// A region that had the mailbox's ring attached has ended: the ring goes if
+// nothing else uses it, and the mailbox goes back to its list alone, which
+// still has what the device did not take; or, if the mailbox has closed, its
+// orphaned ring goes once nothing uses it.
+static void ReleaseRingUse(std::int64_t index, std::int64_t generation) {
+  Mailbox *mailbox{SlotAt(index)};
+  pthread_mutex_lock(&mailbox->lock);
+  if (mailbox->open && mailbox->generation == generation) {
+    if (mailbox->ring && --mailbox->ringUsers == 0) {
       TrimRing(mailbox);
       // No device is taking a message.
       ReleaseRingCopy(mailbox);
+      mailbox->freeRing(mailbox->ringDevice, mailbox->ring);
       mailbox->ring = nullptr;
     }
     pthread_mutex_unlock(&mailbox->lock);
+    return;
   }
-  __atomic_store_n(&attachedRings, 0, __ATOMIC_SEQ_CST);
+  pthread_mutex_lock(&orphansLock);
+  OrphanRing *orphan{TakeOrphan(index, generation)};
+  if (orphan && --orphan->users > 0) {
+    orphan->next = orphans;
+    orphans = orphan;
+    orphan = nullptr;
+  }
+  pthread_mutex_unlock(&orphansLock);
+  if (orphan) {
+    if (orphan->copy) {
+      orphan->release(orphan->device, orphan->copy);
+    }
+    orphan->freeRing(orphan->device, orphan->ring);
+    std::free(orphan);
+  }
+  pthread_mutex_unlock(&mailbox->lock);
+}
+
+// As the region of the slot ends, once its device has finished: it no longer
+// uses the rings it attached.
+extern "C" void merk_mailbox_region_ended(std::uint64_t region) {
+  pthread_mutex_lock(&ringUsesLock);
+  RingUse *uses{regionRingUses[region]};
+  regionRingUses[region] = nullptr;
+  pthread_mutex_unlock(&ringUsesLock);
+  while (uses) {
+    RingUse *next{uses->next};
+    ReleaseRingUse(uses->index, uses->generation);
+    std::free(uses);
+    uses = next;
+  }
 }
 
 // Monitors (design document, "Exceptions, links and monitors"). A process
