@@ -1971,6 +1971,154 @@ does not do this ("We currently don't multi-version kernels").
 **Not in it:** the paper's rule against environment variables that set teams or
 threads (`-fopenmp-target-ignore-env-vars`). That stays a flag.
 
+## GPU processes without `omp target`: liboffload and libc
+
+Proposed 2026-11-10; nothing is built. Decided by the user the same day:
+- **GPU processes launch without `omp target`.** A process on a GPU is a
+  kernel that our runtime launches, not a target region.
+- **OpenMP stays the programming model for parallelism:** target regions,
+  teams and parallel loops keep their directives and their lowering through
+  the `omp` dialect, following Flang.
+- **libc over our own code.** Where LLVM's GPU libc does something, the
+  runtime uses it rather than code of ours (as for output, "Library code on
+  the device", step 4).
+
+**Why.** A GPU process lives as long as its work, sends and receives, and runs
+beside the host's processes and the GPU's other kernels. A target region is the
+wrong shape for that:
+- **Its host thread waits.** `omp target` returns when the region ends, unless
+  it is a `nowait` task, which libomp runs on a host thread of its own.
+- **Its arguments are OpenMP's.** They are maps of host variables, with a
+  kernel environment and launch arguments that libomptarget makes. A process
+  is given a mailbox handle and its arguments, by value.
+- **The decided form needs a kernel by name.** The design document has a GPU
+  process spawned by its kind's name from its `:- process` declaration, as a
+  persistent kernel (GPU processes, "The restricted first version").
+
+**What LLVM has.** Read in the tree on 2026-11-10:
+- **liboffload** (`offload/liboffload`, the `ol` API) is the
+  language-neutral layer for devices. It covers what we need:
+  - `olCreateProgram` loads an image.
+  - `olGetSymbol` finds a kernel or a global by name.
+  - `olLaunchKernel` launches a kernel with arguments by value, on a queue
+    if given, without the host waiting.
+  - `olMemAlloc`, `olMemAllocHost` and `olMemcpy` handle memory.
+  - `olPlatformRegisterRPCCallback` takes a callback for RPC opcodes before
+    libc's. It is what `__tgt_register_rpc_callback` calls.
+- **libomptarget is built on liboffload.** Upstream finished removing the
+  plugin interface from it (#239525), so only liboffload makes the plugins.
+  `olInit` counts references. So our runtime and libomptarget can both use
+  it in one process, with one plugin and one RPC server for each platform.
+- **Other languages use it too.** `offload/languages` is a CUDA and HIP
+  runtime on liboffload (`LLVMOffloadKernel`), registering images and
+  launching kernels by name. `llvm-gpu-loader` is built on it.
+- **`gpuintrin.h`** (clang's headers) gives the GPU's ids and sizes, lanes
+  and syncs: `__gpu_block_id`, `__gpu_num_blocks`, `__gpu_thread_id`,
+  `__gpu_sync_threads`, `__gpu_ballot` and so on. LLVM's GPU libc is
+  written on it. It needs no OpenMP.
+- **LLVM's GPU libc** gives `stdio` over its RPC, `clock_gettime`, `malloc`
+  and the maths library. The device's image links it already.
+
+**Proposed.**
+- **Launching:** the runtime calls liboffload itself. It loads the image of
+  the program's GPU processes with `olCreateProgram`, finds each kind's
+  kernel with `olGetSymbol`, and spawns a process with `olLaunchKernel` on a
+  queue of its own. The kernel's arguments are the mailbox handle, the
+  process's place and its arguments. The host does not wait. The process ends
+  when its kernel returns, which the runtime learns from the queue or from
+  a message.
+- **Its image is a separate one.** merkc compiles the GPU processes of a
+  module as plain kernels for the GPU, without OpenMP. They are linked with
+  `libmerkdevice`, libc and libm, and their foreign code as in "Library code
+  on the device", step 3. The image is embedded in the host's binary, where
+  the runtime finds it. OpenMP's regions stay in OpenMP's image. The two are
+  separate programs on the device, each with its own globals. So a process
+  and a region share only what goes through the host or through device
+  memory that a handle names, as between any two processes.
+- **RPC:** the runtime registers its opcodes with
+  `olPlatformRegisterRPCCallback` itself. Then they work with or without
+  libomptarget in the program.
+- **The device runtime without OpenMP's API.** `libmerkdevice` uses
+  `gpuintrin.h` and libc instead of `omp_get_team_num`,
+  `omp_get_num_teams`, `omp_get_wtime` and `omp_get_device_num`, so that it
+  works in a process's kernel and in a region's alike. A device's place
+  number comes from a global the runtime sets at load, or from the
+  kernel's arguments. The `__kmpc_` calls stay in the code that OpenMP's
+  lowering makes. Library C under `__AMDGPU__` does the same:
+  `process.team_number` becomes `__gpu_block_id`, which is OpenMP's team
+  number in a region's kernel on an AMD GPU (to be checked).
+- **The host's device calls behind one interface** in `runtime/offload.cpp`.
+  `omp_target_alloc`, `omp_target_memcpy` and the rest are used for regions
+  today. The interface would let the process side use liboffload, and later
+  the region side too, where nothing of OpenMP's is needed.
+
+**Data parallelism, and a `parallel` library.** OpenMP stays the model. The
+open question is a library form, such as `parallel.fold(F, Range, Acc0, Acc)`
+or `parallel.map` over an array, beside loops under directives:
+- **(a) Library predicates written with directives:** a `parallel` module in
+  Mercury whose bodies are loops under `%$omp target teams distribute parallel
+  do` with `reduction`. A call's closure becomes a direct call through the
+  specializer, the piece after "Library code on the device". Then the loop is
+  an ordinary OpenMP loop. It gets the cross-team reduction, and big-jump
+  and no-loop when they come (Specialized kernels for loops).
+- **(b) A builtin that lowers to the `omp` dialect,** as Flang lowers `do
+  concurrent`, a construct of the language rather than of OpenMP, onto
+  OpenMP's operations (`DoConcurrentConversion`). This needs no specializer,
+  but puts each predicate in the compiler.
+- **(c) A runtime of our own:** work split over teams and threads with
+  `gpuintrin.h`, and a reduction of our own. That would redo what OpenMP's
+  device runtime and OpenMPOpt do, and get none of its improvements.
+
+Recommended: (a), with (b) only where a predicate cannot be written as a loop.
+Its semantics is the loop's: the operator of a fold must be associative, and
+the call is the programmer's promise, as a directive is (design document,
+Parallel loop annotations). Not decided: the predicates and their names, and
+whether a GPU process may run a parallel loop itself. A process's kernel has no
+OpenMP device runtime, so a loop there would be (c), or a target region that
+the process asks the host to launch. The first version has neither.
+
+**Steps.**
+
+1. **Probe coexistence.** In a program that runs an OpenMP region, the runtime
+   calls `olInit`, loads a small kernel image of its own, launches it on a
+   queue while the region runs, and serves an opcode of ours from it through
+   `olPlatformRegisterRPCCallback`. It checks:
+   - that the devices `olIterateDevices` gives can be matched to OpenMP's
+     device numbers;
+   - that a persistent kernel and a region's kernel run at once;
+   - that one RPC server serves both programs' clients.
+   Run small first, with a timeout, as the GPU drives the display.
+2. **The device runtime off OpenMP's API:** `gpuintrin.h` and libc in
+   `runtime/device` and in the library's C under `__AMDGPU__`. The existing
+   tests check that regions behave the same.
+3. **The host's device calls behind one interface,** and the RPC callback
+   registered through liboffload.
+4. **A GPU process's kernel:** merkc compiles a process kind to a kernel, a
+   separate image linked and embedded, and the runtime spawns it on a GPU.
+   The kernel sends to and receives from the host's processes. `:- process`
+   declarations need semantic analysis first; until then, which predicate is
+   a GPU process's entry is an open question for review.
+5. **Spawning from the GPU's other places,** and the place table's
+   identities. liboffload gives a device's name and its PCI vendor id, but
+   still no UUID or PCI address (design document, "What the plugins lack").
+
+**Rejected alternatives.**
+- **The whole program on the GPU,** run by `llvm-gpu-loader` as libc's tests
+  are. Half of the runtime lives on the host: the scheduler, TCP between
+  nodes, the collector, and mailboxes that hosts and GPUs share. The loader
+  serves only libc's opcodes. It stays an option for testing device code.
+- **A process as a `nowait` target region.** It is still `omp target`, with
+  OpenMP's maps and a libomp task on a host thread for as long as it lives.
+- **A process's kernel in OpenMP's image,** launched by liboffload. The two
+  would share globals, but libomptarget does not give the program handle that
+  it made, and launching a kernel that OpenMP's lowering made would need its
+  kernel environment. It could come later, if libomptarget gives the handle.
+- **The CUDA and HIP runtime's registration** (`__llvmRegisterFunction`).
+  That is the interface clang's generated code uses for those languages, and
+  not one for other languages.
+- **HSA directly.** It would redo the plugin, and liboffload covers CUDA and
+  Level Zero devices too.
+
 ## The halo exchange
 
 Proposed 2026-11-09; nothing is built. Implementation waits until several

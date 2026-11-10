@@ -2696,6 +2696,9 @@ builds on OpenMP offload, and comes before processes on the CPU are
 complete: its first form is a target region that sends and receives, whose
 partner is on another node (decided 2026-11-07; The route there, below).
 This is the direction; how it works in detail is still to be designed.
+Decided 2026-11-10: a GPU process is a kernel that the runtime launches through
+liboffload, not a target region, while OpenMP stays the model for parallelism
+(docs/INPROGRESS.md, GPU processes without `omp target`).
 
 **A GPU is a place of its host's node.** The design already has remote
 mailboxes and remote spawn ("Remote mailboxes, sendability and failure" and
