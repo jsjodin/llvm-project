@@ -1367,7 +1367,7 @@ Instinct node for Infinity Fabric.
 
 ## Processes as teams, and messages within a GPU
 
-Proposed 2026-11-09; steps 1 to 4 below are built. The design document
+Proposed 2026-11-09; steps 1 to 5 below are built. The design document
 (The device runtime, "Who communicates") has a process for each team in an SPMD
 kernel as a later step. This adds messages between such processes that do not go
 through the host.
@@ -1535,7 +1535,21 @@ worker(!IO) :-
    - **Later:** fewer threads per team, by `thread_limit`, which is not yet
      implemented. One wave per team would let about eight times as many teams
      run at once, when the team has no parallel work.
-5. A barrier from messages, measured against the estimates below.
+5. A barrier from messages, measured against the estimates below. Done
+   2026-11-10 (`benchmarks/team-barrier`; the numbers are in the design
+   document's Measurements, "Barriers between teams"):
+   - **Two shapes,** as in the estimates: `central`, where every team reports to
+     team 0, which releases each, and `tree`, a binary tree. Each message carries
+     its round, so a wrong order is counted. None was wrong.
+   - **About 5 to 10 times the estimates** on the GPU: 153 µs for central and
+     29 µs for the tree at 64 teams, against 30 and 3. A hop of a real message
+     costs about 1.2 µs, against the 240 ns of a word that the estimates
+     assumed. Where the rest goes is not measured yet.
+   - **The barrier is the program's code,** not the library's, since library
+     code is not yet compiled for the device; nor is `list.length`, which the
+     benchmark works around (marked Temporary). The barrier moves into the
+     library, as `process.team_barrier`, when the library is compiled for the
+     device.
 
 **Later:** SPMD kernels with `masked` and a team barrier; team mailboxes reachable
 from the host and other nodes; and spawn. Spawning on a GPU may need a first

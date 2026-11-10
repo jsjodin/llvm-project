@@ -10,3 +10,4 @@ by hand.
 | [`array-messages`](array-messages/README.md) | Bandwidth of arrays as messages, from a GPU's target region or the CPU, over message sizes, beside `omp_target_memcpy` alone |
 | [`bandwidth`](bandwidth/README.md) | Memory bandwidth of five array kernels under OpenMP, on the host's threads or a GPU, modeled on BabelStream |
 | [`pingpong`](pingpong/README.md) | Latency of a message round trip between processes, from a GPU's target region or the CPU, over TCP or within a node, beside plain C floors |
+| [`team-barrier`](team-barrier/README.md) | Time of a barrier between the teams of a target teams region, from team mailboxes, central or a tree, on a GPU or the host's teams |

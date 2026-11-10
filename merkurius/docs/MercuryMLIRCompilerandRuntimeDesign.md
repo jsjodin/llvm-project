@@ -3723,7 +3723,7 @@ The language target is the Mercury 22.01 reference manual. The standard library 
 
 The speed tests' numbers, so that a change can be held against them. How each
 is run, and what is learned from it, is in its README in `benchmarks/`
-(`pingpong`, `array-messages`, `bandwidth`).
+(`pingpong`, `array-messages`, `bandwidth`, `team-barrier`).
 
 All were taken on one machine: an AMD Ryzen Threadripper PRO 5965WX (24 cores,
 48 threads) and an AMD Radeon RX 6950 XT (gfx1030) on PCIe, with the programs at
@@ -3776,6 +3776,33 @@ the spin:
 | --- | ---: | ---: |
 | GPU and a thread of its node | 28 to 32 | 24 to 26 |
 | GPU and node 2 | 45 to 53 | 49 to 65 |
+
+### Barriers between teams
+
+A barrier between the teams of a target teams region, from team mailboxes
+(`benchmarks/team-barrier`), in microseconds a barrier: 10000 rounds, after 100
+to warm up. `central` has every team report to team 0, which releases each;
+`tree` is a binary tree. Medians of three runs, 2026-11-10, at 801205c01704 with
+the benchmark added. The runs differed by under 3% on the GPU:
+
+| Teams | GPU, central | GPU, tree | Host's teams, central | Host's teams, tree |
+| ---: | ---: | ---: | ---: | ---: |
+| 2 | 3.79 | 3.74 | 2.03 | 2.05 |
+| 4 | 6.72 | 7.99 | 8.15 | 8.61 |
+| 16 | 33.4 | 17.1 | 90.1 | 53.7 |
+| 64 | 152.9 | 28.7 | 2251 | 1567 |
+
+- **On the GPU, a hop of a real message costs about 1.2 µs,** from central's 126
+  hops in sequence at 64 teams. The estimates in docs/INPROGRESS.md assumed the
+  240 ns of a word written to memory and polled, so both shapes are 5 to 10
+  times those estimates: 153 µs against 30, and 29 µs against 3. Where the
+  rest goes is not measured yet. Each receive also checks the handle, reads the
+  clock, and makes its result's cell in the arena by an atomic add that all the
+  teams share.
+- **The tree pays off from 16 teams.** At 64 it is 5 times faster than central.
+- **The host's teams are threads with condition variables,** so a hop costs a
+  thread's wake-up. At 64 teams there are more threads than the machine's 48
+  hardware threads, and a barrier takes milliseconds.
 
 ### Array bandwidth
 
