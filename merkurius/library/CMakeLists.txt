@@ -62,7 +62,7 @@ set_source_files_properties(${compiled_objects} PROPERTIES
 
 # The same modules in the merk dialect, compiled as for an OpenMP device, as
 # MLIR bytecode in lib/merkurius/device: a device's compile copies the
-# procedures its target regions reach from them (docs/INPROGRESS.md, Library
+# procedures its target regions reach from them (design document, Library
 # code on the device). Their foreign code is still C text, which each
 # target's compile gives to clang. Only AMD GPUs are offloaded to so far.
 if("AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)

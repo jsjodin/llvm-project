@@ -3085,7 +3085,7 @@ OpenMP does not allow statements beside it in a `target`.
 
 **Output from a region.** On a device, `io.write_string`, `io.write_int` and `io.nl`
 are io's procedures, copied into the region's compile with their foreign code
-(docs/INPROGRESS.md, Library code on the device). Their C is the host's,
+(Library code on the device, below). Their C is the host's,
 `fputs(S, stdout)` and so on, which on a GPU is LLVM's libc. Its `stdio` sends each
 call to the host over libc's own RPC opcodes. The offload plugin's server writes the
 text into the host's `stdout` and answers once it has. So a region's output is in
@@ -3384,6 +3384,133 @@ polymorphism. The checks, and proving the sizes an arena is made for, are
 the work; the runtime itself stays small. Futhark and Accelerate keep about
 as little on the GPU: neither has a collector there, and both plan memory
 statically, Futhark reusing memory blocks by its size analysis.
+
+#### Library code on the device
+
+Built 2026-11-10 (`lib/CodeGen/DeviceLibrary.cpp`). A target region calls the
+library's procedures as it calls the module's own: the device's compile copies
+in what its regions reach, from the library's `merk` bytecode, with their
+foreign code compiled for the GPU. Before, a region could call only its own
+module's procedures and the runtime's `merk_device_` functions, and MLIR
+generation turned the few library predicates a region needed into special
+cases. On the host, programs link `libmerkstd` as before.
+
+**The library as bytecode.** The library's build writes each compiled module's
+`merk` dialect as MLIR bytecode, `lib/merkurius/device/<module>.merkbc`
+(`-emit-merk-bc`), compiled as for a device. That is the form before lowering:
+each procedure's body with its types, `type_info`s and closures, and the
+module's foreign C as text (`merk.foreign_code`). The 12 modules give 4 to 61
+KB each, about a quarter of their text. A module compiled from its bytecode gives
+the same LLVM IR as from its source (`emit-merk-bc.m`).
+
+**Copying what regions reach.** After MLIR generation, the device's compile
+follows the calls from its target regions:
+- **Procedures:** a declaration that the regions reach is replaced by the
+  library's procedure, found by the longest module name its symbol begins
+  with. What the copy refers to comes from the same module: procedures,
+  transitively and across modules, closures' entries, and instances without
+  their methods. Copies are private.
+- **Types:** the descriptor of each type whose `type_info` the module makes
+  and only declares comes from its module, as `linkonce` without its unify and
+  compare entries, since no library is linked into a device's image. The
+  copies' constructors (`merk.type_def`) come with them.
+- **After it,** everything works on the copies as on the module's own code:
+  `MarkRegionsForTeamMailboxes`, omp-mark-declare-target, and the checks for
+  closures and type classes. Polymorphic first-order code works as it is:
+  a `type_info` is a constant in device memory, so `list.length` runs with
+  its `type_info` argument.
+- **Not copied:** the module's own procedures, and `array`'s under
+  `-fmmc-uniqueness`, whose procedures are numbered by `array.m` rather than
+  the sound stub. A procedure of another module of the program is not compiled
+  for a device yet (`omp-target-other-module.m`); its bytecode could come from
+  the build driver.
+
+**Errors come at compile time, at the call.** Each copy records the procedure
+that first reached it and where. What cannot run on a device is reported with
+a note for each call back to the module's own code, also from the check after
+lowering, as in "list.filter's closure" (`omp-target-library-errors.m`). The
+frontend prints MLIR's notes, without MLIR's own note of the operation.
+
+**Foreign code on the device** (`CompileDeviceForeignCode`):
+- **Which C:** each `foreign_proc`'s C function in a module's foreign code is
+  guarded by `#if !defined(MERK_DEVICE) || defined(MERK_WANT_<name>)`. Lowering
+  compiles the module's own foreign code, and that of each library module a
+  copied `foreign_proc` came from, as separate translation units, defining
+  `MERK_WANT_` for the functions the device's module calls. The bitcode is
+  linked after translation with `LinkOnlyNeeded`, so other functions of a
+  `foreign_code` block, which may be for the host alone, stay out.
+- **How:** as clang compiles a C file's declare target functions: `-fopenmp
+  --offload-arch=<gpu> --offload-device-only -nogpulib -nogpuinc`, with the code
+  inside `#pragma omp begin declare target`. The GPU comes from `-target-cpu` or
+  the triple's sub-architecture (`amdgpu10.30-amd-amdhsa`, as the driver gives
+  it). Without either, it is an error, as clang would look for a GPU on the
+  machine. Library C that differs on a device chooses with `__AMDGPU__`.
+- **What the device has:** what a compiled function needs, following the
+  functions it calls, must be an intrinsic, the device runtime's
+  (`merk_device_`, `merk_array_`), OpenMP's, or defined in the GPU's `libc.bc`
+  or `libm.bc` beside clang, which the device's image links. Anything else is
+  an error at the `foreign_proc`, "its foreign code calls X, which is not on the
+  device", with the chain of calls: `math.sqrt` needs `merk_uncaught_exception`,
+  `io.write` needs `merk_write`. C that does not compile for the device gets
+  clang's errors and "<module>'s foreign code does not compile for the device".
+
+**What moved out of the compiler.** `io.write_string`, `write_int` and `nl` need
+no special case: their C, `fputs(S, stdout)` and so on, is LLVM's GPU libc on a
+device (Output from a region, above). `process.team_number` and
+`number_of_teams` are `foreign_proc`s that call `omp_get_team_num` and
+`omp_get_num_teams`, on the host through weak references, so a program without
+OpenMP's runtime gets team 0 of 1. `send`, `receive` and `team_mailbox` stay
+builtins, as they need the message type's key, and `send` and `receive` choose
+by the type between a word and an array.
+
+**`process.team_barrier`** waits until every team of the region has called it as
+often. It is a counter, not messages: both runtimes keep, in the region's team
+table, the teams that have arrived in this round and the rounds that have
+ended. A team reads the rounds before it arrives, and the last to arrive clears
+the count and ends the round. The others wait for the rounds to change, on a
+device with `s_sleep`, on the host spinning for `MERK_SPIN_MICROSECONDS` and then
+on a condition variable. A region whose code reaches it waits for its teams to
+start, as one with team mailboxes does, so teams that cannot all run at once are
+reported and do not hang the GPU. On the GPU it costs 1 µs or less at up to 64
+teams, against 29 µs for a tree of messages (Measurements, "Barriers between
+teams"). libc has nothing for teams to wait for each other.
+
+**Tests:** `omp-target-library.m` (`list.length`, `reverse` and `append` on
+`list(maybe(int))`), `omp-target-foreign.m` (the module's C with `printf`,
+`sin` and `hypot`, `math.ceiling`, `string.length`, and a host-only function in
+`foreign_code` that calls `getpid`), `omp-target-team-barrier.m` (team 0 polls
+for every team's message after the barrier: without it, 150 of 200 polls fail
+on the host and 189 on the GPU), each with a `-gpu.test`; and the error tests
+`omp-target-library-errors.m`, `omp-target-foreign-errors.m` and
+`omp-target-foreign-c-error.m`.
+
+**Rejected alternatives.**
+- **A device archive of LLVM bitcode,** compiled once from the whole library,
+  as the OpenMP device runtime and libc for GPUs are. Every procedure of every
+  module would have to compile for a device, or be a stub that fails when it
+  runs; an error would come at link time, as a missing symbol, not at the call;
+  and polymorphic and higher-order bodies would reach no specializer. It can
+  come back for large monomorphic procedures, if compile time needs it.
+- **Reading the library's source in each device compile,** as the module loader
+  reads interfaces. Each compile would type-check and mode-check the library's
+  bodies again; bytecode costs one write when the library is built.
+- **The type-checked semantic form,** which this document has for the interface
+  file's optimization section and `pragma inline`. Nothing serializes it yet,
+  while MLIR bytecode exists, and the specializer is a `merk` pass
+  (Optimizations, "`pragma inline`"), which this form feeds directly.
+- **Indirect calls for closures on a device.** AMDGPU has them, but a call to an
+  unknown function keeps OpenMPOpt from making a kernel SPMD, and its register
+  use follows the calling convention. A specializer removes the call instead.
+- **Compiling foreign C as plain `--target=amdgcn-amd-amdhsa` C.** The GPU libc
+  has no `unistd.h` and others, so the host's are found and do not parse.
+  Foreign code is the host's C, which OpenMP compiles for the device with the
+  host's headers.
+- **clang's GPU wrapper headers** (left out by `-nogpuinc`). Their maths
+  functions call ROCm's `__ocml_` functions, which no device image here links.
+  The GPU's libm defines the C names.
+- **Special cases in MLIR generation** for each library predicate a region
+  needs, and copies of library code in programs, as before: each new predicate
+  would have added another.
 
 #### Data-parallel arrays: an OpenACC-like module
 
@@ -3819,6 +3946,31 @@ the benchmark added. The runs differed by under 3% on the GPU:
 - **The host's teams are threads with condition variables,** so a hop costs a
   thread's wake-up. At 64 teams there are more threads than the machine's 48
   hardware threads, and a barrier takes milliseconds.
+
+With `process.team_barrier` (`library`, Library code on the device, above)
+beside them, medians of three runs, 2026-11-10, at 6a90cadd2fac. The runs
+differed by under 4% on the GPU, but 9% for `library` at 2 teams, and by up to
+half on the host's teams below 64:
+
+| Teams | GPU, central | GPU, tree | GPU, library | Host's teams, central | Host's teams, tree | Host's teams, library |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 3.76 | 3.74 | 0.68 | 2.02 | 2.02 | 0.27 |
+| 4 | 6.85 | 7.93 | 0.76 | 9.11 | 8.40 | 1.09 |
+| 16 | 34.0 | 17.2 | 0.79 | 105.7 | 48.2 | 10.1 |
+| 64 | 151.4 | 28.8 | 0.97 | 2264 | 1541 | 35.4 |
+
+- **On the GPU, the library's barrier hardly grows with the teams:** 0.68 µs at
+  2 and 0.97 at 64, 5 times faster than the tree at 2 and 30 times at 64. The
+  design expected about one atomic round trip per team. The teams' adds to one
+  counter overlap rather than queue, so the cost stays near one round trip and
+  the wait's poll.
+- **On the host's teams it is 5 to 8 times faster than the tree up to 16
+  teams, and 43 times at 64,** and still grows with the teams: past the
+  machine's 48 hardware threads, the teams that wait block, and the last to
+  arrive wakes them all.
+- **The shapes from messages are unchanged** from the first table, within the
+  runs' spread, so the change from our output opcodes to libc's and the library
+  copies did not slow messages.
 
 ### Array bandwidth
 

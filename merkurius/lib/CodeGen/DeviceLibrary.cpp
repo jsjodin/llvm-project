@@ -7,8 +7,8 @@
 //===----------------------------------------------------------------------===//
 //
 // Copies the procedures a device's target regions reach from the library's
-// merk bytecode into the device's module (docs/INPROGRESS.md, Library code on
-// the device, step 2). A module declares another module's procedures that it
+// merk bytecode into the device's module (design document, Library code on
+// the device). A module declares another module's procedures that it
 // calls, without a body; each one that a region reaches is replaced by the
 // library's, and what that refers to is copied in turn: the procedures it
 // calls and closures it makes, the descriptors of the types whose type_infos

@@ -1434,8 +1434,8 @@ worker(!IO) :-
    `team_number` and `number_of_teams`, on the host, sequentially and on a GPU.
    Implemented 2026-11-09 (`CodeGen/omp-target-teams.m`): with OpenMP the two
    become `omp_get_team_num` and `omp_get_num_teams`, on the host and in the
-   device's runtime (the library's C since "Library code on the device", step
-   4); a number of teams that is not from 1 to 2^31 - 1 is a
+   device's runtime (the library's C since 2026-11-10: design document,
+   Library code on the device); a number of teams that is not from 1 to 2^31 - 1 is a
    compile-time error for a literal and a run-time error before the region for
    a variable; `thread_limit` is not yet implemented. A variable used only in
    the clause is not bound, as for `device` (mmc reads a clause as a comment).
@@ -1687,246 +1687,34 @@ Open:
 arrays by pointer. It has no cycle of waits, but a stage that is not on the GPU
 still stalls the one before it when the ring between them fills.
 
-## Library code on the device
+## Library code on the device: later
 
-Proposed 2026-11-10; all five steps are built. Step 5's measurements are
-still to be taken.
+Built 2026-11-10 and moved to the design document (Library code on the
+device), with its measurements (Measurements, "Barriers between teams").
+What is left:
 
-**Why.** A target region can call only its own module's procedures and the
-runtime's `merk_device_` functions (`Lowerer::LowerOpenMP`). So nothing of the
-library runs on a device, not even `list.length`. The compiler works around it
-for the few library predicates a region needs:
-- **Special cases in MLIR generation.** `io.write_string`, `write_int` and `nl`
-  become `merk_device_` calls (`WriteOnDevice`), and so do `process.send`,
-  `receive` and `team_mailbox`. `team_number` and `number_of_teams` become the
-  OpenMP device runtime's team queries.
-- **Copies in programs.** The barrier of `benchmarks/team-barrier` is the
-  program's own code, and it counts a team's children itself instead of calling
-  `list.length` (marked Temporary).
-
-Each new predicate a region needs would add another special case or copy.
-
-**What it does not change.** On the host, programs link `libmerkstd` as now.
-
-**Proposed: the library as `merk` bytecode, linked into the device's compile.**
-
-- **The library's build writes each module's `merk` dialect as MLIR bytecode,**
-  beside the object it builds now. That is the form before lowering, so it has
-  each procedure's body with its types, `type_info`s and closures, and the
-  module's foreign C as text (`merk.foreign_code`). It is compiled in the
-  device's flavour, since MLIR generation still makes device-only choices; see
-  step 1.
-- **A device compile copies in what its regions reach.** After MLIR generation,
-  it walks the calls from its target regions. A procedure of an imported module
-  is copied from that module's bytecode, with what it refers to: other
-  procedures, transitively and across modules, type descriptors and constants.
-  Copies get internal linkage. Then everything after this step works as on the
-  module's own procedures:
-  - `MarkRegionsForTeamMailboxes` sees the library's sends;
-  - omp-mark-declare-target marks the copies;
-  - the checks for closures and type classes apply to them.
-- **Errors come at compile time, at the call.** What still cannot run on a device
-  is reported with the chain of calls from the region, such as "list.foldl, which
-  t.step calls, calls a closure, which cannot be done on an OpenMP device yet".
-- **Foreign code is compiled for the device too.** clang compiles the C of the
-  reachable `foreign_proc`s for the device's triple and CPU, and it is linked
-  into the device's module, as `LinkForeignCode` does on the host. Library C
-  that differs on a device chooses with `#if defined(__AMDGPU__)`. Then
-  `io.write_string`'s C calls `merk_device_write_string` there, and MLIR
-  generation needs no special case for it. A `foreign_proc` whose C does not
-  compile for the device is reported at the call, with clang's message.
-- **Polymorphic first-order code works from the start.** A `type_info` is a
-  constant in device memory, which a device can already pass and read; only
-  dispatch on a type class, comparison of types and closures are rejected
-  (`RejectOnDevice`). So `list.length` runs on a device as it is, with its
-  `type_info` argument.
-
-**Steps.**
-
-1. **Bytecode of the library.** A merkc option writes the `merk` module in place
-   of an object (MLIR bytecode, `-emit-merk-bc`), and the library's CMake writes
-   it for each compiled module, in the device's flavour, into
-   `lib/merkurius/device/`. The driver passes that directory to device compiles.
-   Two flavours, because MLIR generation makes device-only choices
-   (`WriteOnDevice`, `SendOnDevice`). Step 4 removes most of them, and one
-   bytecode for every target can come later, with lowering making the rest of
-   the choices. Built 2026-11-10: the 12 compiled modules give 4 to 61 KB
-   each, about a quarter of the text's size. A module compiled from its
-   bytecode gives the same LLVM IR as from its source (`emit-merk-bc.m`).
-2. **Copy what regions reach.** Load an imported module's bytecode when a region
-   first reaches one of its procedures. Merge the symbols the module defines
-   once: type descriptors, instances and type-info constants. Then run
-   `MarkRegionsForTeamMailboxes`, which moves from the end of MLIR generation to
-   after this step. Tests: a region calling `list.length` and `list.reverse`,
-   and the chain of calls in an error for `list.foldl`.
-   Built 2026-11-10 (`lib/CodeGen/DeviceLibrary.cpp`):
-   - **What is copied:** a declaration that the regions reach is replaced by
-     the library's procedure, found by the longest module name its symbol
-     begins with. Then what the copy refers to comes from the same module:
-     procedures, closures' entries and instances, without their methods.
-   - **Descriptors and constructors:** the descriptor of each type whose
-     type_info the module makes and only declares comes from its module, as
-     `linkonce` without its unify and compare entries, since no library is
-     linked into a device's image. The copies' constructors (`merk.type_def`)
-     come with them.
-   - **Errors:** each copy records the procedure that reached it and where, so
-     the device's errors give a note for each call back to the module's own
-     code, also for the check after lowering. The frontend prints MLIR's
-     notes now, without MLIR's own note of the operation.
-   - **Not copied:** the module's own procedures, after an error that left one
-     out, and `array`'s under `-fmmc-uniqueness`, whose procedures are numbered
-     by `array.m` rather than the sound stub. A procedure of another module of
-     the program is still not compiled for a device
-     (`omp-target-other-module.m`); its bytecode could come from the build
-     driver later.
-   - **Tests:** `omp-target-library.m` and its `-gpu.test` (`list.length`,
-     `reverse` and `append` on `list(maybe(int))`), `omp-target-library-errors.m`
-     (`list.filter`'s closure, with a chain of two calls). The benchmark's
-     `list.length` stand-in went here, rather than in step 4.
-3. **Foreign code on the device.** Compile only the reachable `merk_foreign_`
-   functions, with the module's `foreign_decl`s, so that host-only C elsewhere in
-   the module does not have to compile for the device. The user's own module
-   goes the same way; today its foreign code is never compiled for the device.
-   Built 2026-11-10 (`CompileDeviceForeignCode` in
-   `lib/CodeGen/DeviceLibrary.cpp`):
-   - **Which C:** each `foreign_proc`'s C function in a module's foreign code
-     is guarded by `#if !defined(MERK_DEVICE) || defined(MERK_WANT_<name>)`.
-     The copier records the foreign code of each library module a copy with a
-     `foreign_proc` came from. Lowering compiles the module's own foreign code
-     and each such library module's, as separate translation units, defining
-     `MERK_WANT_` for the functions the device module calls. The bitcode is
-     linked after translation with `LinkOnlyNeeded`, so other functions of a
-     `foreign_code` block, which may be for the host alone, stay out.
-   - **How:** as clang compiles a C file's declare target functions:
-     `-fopenmp --offload-arch=<gpu> --offload-device-only -nogpulib -nogpuinc`,
-     with the code inside `#pragma omp begin declare target`. The GPU comes
-     from `-target-cpu` or the triple's sub-architecture. Without either, it is
-     an error, as clang would look for a GPU on the machine.
-   - **What the device has:** what a compiled function needs, following the
-     functions it calls, must be an intrinsic, the device runtime's
-     (`merk_device_`, `merk_array_`), OpenMP's, or defined in the GPU's
-     `libc.bc` or `libm.bc` beside clang, which the device's image links.
-     Anything else is an error at the `foreign_proc`, "its foreign code calls
-     X, which is not on the device", with the chain of calls. `math.sqrt`
-     (`merk_uncaught_exception`), `io.write` (`merk_write`) and
-     `process.send_message` (`merk_mailbox_send`) are such cases now; step 4
-     handles the special cases. C that does not compile for the device gets
-     clang's errors and "<module>'s foreign code does not compile for the
-     device".
-   - **Rejected:**
-     - Compiling the C as plain `--target=amdgcn-amd-amdhsa` C. The GPU libc
-       has no `unistd.h` and others, so the host's are found and do not parse.
-       Foreign code is the host's C, which OpenMP compiles for the device with
-       the host's headers.
-     - clang's GPU wrapper headers (dropped by `-nogpuinc`). Their maths
-       functions call ROCm's `__ocml_` functions, which no device image here
-       links. The GPU's libm defines the C names.
-   - **Tests:** `omp-target-foreign.m` and its `-gpu.test`. They cover the
-     module's own C (with `printf` to the host, `sin` and `hypot`),
-     `math.ceiling`, `floor` and `string.length`, and a host-only
-     `foreign_code` function calling `getpid`. The error tests are
-     `omp-target-foreign-errors.m` and `omp-target-foreign-c-error.m`.
-4. **Move the special cases into the library.**
-   - **Into `foreign_proc`s:** `io.write_string`, `write_int` and `nl`, and
-     `process.team_number` and `number_of_teams`. Under `__AMDGPU__` their C
-     calls the `merk_device_` functions and the OpenMP team queries.
-   - **Kept in the compiler:** `send`, `receive` and `team_mailbox` stay
-     builtins, as they need the message type's key, and `send` and `receive`
-     choose by the type between a word and an array.
-   Built 2026-11-10:
-   - **io:** `write_string`, `write_int` and `nl` need no change. Their C,
-     `fputs(S, stdout)` and so on, runs on a device as LLVM's GPU libc, whose
-     `stdio` writes into the host's `stdout` over libc's RPC. A region reaches
-     them as copies of io's procedures. `WriteOnDevice` is gone, and so are our
-     output opcodes, `rpcWriteText` and `rpcWriteInt`, and their
-     `merk_device_` functions (design document, "Output from a region", which
-     says why).
-   - **process:** `team_number` and `number_of_teams` call
-     `omp_get_team_num` and `omp_get_num_teams` on a device. On the host they
-     call them through weak references, so a program linked with OpenMP's
-     runtime gets its answers and one without gets team 0 of 1, as before.
-     The builtin is gone, also from the host's compile with OpenMP.
-   - **Tests:** `omp-target-write.m` checks the device's IR for libc's calls
-     from io's copies; `omp-target-teams.m` checks the calls of
-     process's procedures. The GPU tests of output and teams run unchanged.
-5. **`process.team_barrier` in the runtime,** as the paper on specialized
-   kernels does a cross-team reduction (next section), not with messages:
-   - **On a device:** a counter in the region's team table that flips sense
-     each round, so a barrier costs about one atomic round trip per team. It
-     waits, so its regions get the start barrier (step 4 of the previous
-     section).
-   - **On the host's teams:** an atomic counter with a wait the runtime already
-     has.
-   - **Without OpenMP:** there is one team, and it returns at once.
-   - **Measured:** `benchmarks/team-barrier` gains a `library` shape beside the
-     two made of messages, which stay, as they measure messages.
-   Built 2026-11-10:
-   - **The library:** `process.team_barrier(!IO)`, a `foreign_proc` whose C
-     calls `merk_device_team_barrier` on a device and `merk_team_barrier` on
-     the host. libc has nothing for teams to wait for each other.
-   - **The counter:** both runtimes keep, in the region's team table, the
-     teams that have arrived in this round and the rounds that have ended. A
-     team reads the rounds before it arrives, and the last to arrive clears
-     the count and ends the round. The others wait for the rounds to change:
-     on a device with `s_sleep`, on the host spinning for
-     `MERK_SPIN_MICROSECONDS` and then on a condition variable. A
-     generation count in place of a flipping sense does the same, and a team
-     can read it without knowing the round.
-   - **The start barrier:** a teams region whose code reaches the copied
-     `process.team_barrier_2_0` waits for its teams to start, as one with
-     team mailboxes does, so teams that cannot all run at once are reported
-     and do not hang the GPU. A module that reaches it also marks its other
-     regions as having no teams, so the barrier returns at once there.
-   - **Tests:** `omp-target-team-barrier.m` and its `-gpu.test`, 50 rounds
-     in which team 0 polls without waiting for every team's message after
-     the barrier. Without the barrier, 150 of 200 polls fail on the host, and
-     189 on the GPU. 64 teams pass on the GPU as well. The benchmark's tests
-     run the `library` shape on the host, sequentially and on the GPU.
-
-**After this piece:** closures and type classes on a device. Most of `list` is
+**The next piece: closures and type classes on a device.** Most of `list` is
 higher-order: `foldl`, `map` and `filter` make or call closures, which a device
 rejects. The specializer that `pragma inline` needs (design document,
 Optimizations) makes a call with a known closure a direct call, so with the
-bodies this piece copies in, it would make those predicates run on a device. It
-is the next piece after this one, and needs nothing else.
-
-**Rejected alternatives.**
-
-- **A device archive of LLVM bitcode,** compiled once from the whole library,
-  as the OpenMP device runtime and libc for GPUs are:
-  - every procedure of every module would have to compile for a device, or be a
-    stub that fails when it runs;
-  - an error would come at link time, as a missing symbol, not at the call;
-  - polymorphic and higher-order bodies would reach no specializer.
-
-  It can come back later, for large monomorphic procedures, if compile time
-  needs it.
-- **Reading the library's source in each device compile,** as the module loader
-  reads interfaces now. Each compile would type-check and mode-check the
-  library's bodies again; bytecode costs one write when the library is built.
-- **The type-checked semantic form,** which the design document has for the
-  interface file's optimization section and `pragma inline`. Nothing serializes
-  it yet, while MLIR bytecode exists, and the specializer is a `merk` pass
-  (Optimizations, "`pragma inline`"), which this form feeds directly. Open: if
-  this holds, the optimization section becomes `merk` bytecode too, and the
-  design document changes to say so.
-- **Indirect calls for closures on a device.** AMDGPU has them, but a call to an
-  unknown function keeps OpenMPOpt from making a kernel SPMD, and its register
-  use follows the calling convention. A specializer removes the call instead.
+bodies the device's compile copies in, it would make those predicates run on a
+device. It needs nothing else.
 
 **Open.**
 
 - Whether host compiles use the same bytecode, for inlining and specialization
-  across modules (the optimization section above). This piece needs it only on
-  the device.
-- **A `teams` reduction or a library predicate.** The paper's other pattern
-  between teams: each team leaves its value, and the last to finish combines
-  them, so no team waits. In OpenMP that is `reduction` on `teams`, which
-  upstream lowers to the same cross-team call as our `reduction` on `distribute`
-  does. It could also be a library predicate, such as a `team_sum` that gives
-  `yes(Total)` to the last team and `no` to the others. The clause is the
-  feature and needs no new library; the predicate fits a region that computes
-  its value late. Neither is in this piece.
+  across modules. If they do, the interface file's optimization section becomes
+  `merk` bytecode too, and the design document changes to say so.
+- **A `teams` reduction or a library predicate.** The other pattern between
+  teams in the paper on specialized kernels: each team leaves its value, and the
+  last to finish combines them, so no team waits. In OpenMP that is `reduction`
+  on `teams`, which upstream lowers to the same cross-team call as our
+  `reduction` on `distribute` does. It could also be a library predicate, such
+  as a `team_sum` that gives `yes(Total)` to the last team and `no` to the
+  others. The clause is the feature and needs no new library; the predicate
+  fits a region that computes its value late.
+- **The program's other modules on a device** (`omp-target-other-module.m`):
+  their bytecode could come from the build driver.
 
 ## Specialized kernels for loops
 
@@ -1980,8 +1768,8 @@ Proposed 2026-11-10; nothing is built. Decided by the user the same day:
   teams and parallel loops keep their directives and their lowering through
   the `omp` dialect, following Flang.
 - **libc over our own code.** Where LLVM's GPU libc does something, the
-  runtime uses it rather than code of ours (as for output, "Library code on
-  the device", step 4).
+  runtime uses it rather than code of ours (as for output: design document,
+  Output from a region).
 
 **Why.** A GPU process lives as long as its work, sends and receives, and runs
 beside the host's processes and the GPU's other kernels. A target region is the
@@ -2029,8 +1817,8 @@ wrong shape for that:
   a message.
 - **Its image is a separate one.** merkc compiles the GPU processes of a
   module as plain kernels for the GPU, without OpenMP. They are linked with
-  `libmerkdevice`, libc and libm, and their foreign code as in "Library code
-  on the device", step 3. The image is embedded in the host's binary, where
+  `libmerkdevice`, libc and libm, and their foreign code as a region's is
+  (design document, Library code on the device). The image is embedded in the host's binary, where
   the runtime finds it. OpenMP's regions stay in OpenMP's image. The two are
   separate programs on the device, each with its own globals. So a process
   and a region share only what goes through the host or through device
@@ -2058,8 +1846,8 @@ or `parallel.map` over an array, beside loops under directives:
 - **(a) Library predicates written with directives:** a `parallel` module in
   Mercury whose bodies are loops under `%$omp target teams distribute parallel
   do` with `reduction`. A call's closure becomes a direct call through the
-  specializer, the piece after "Library code on the device". Then the loop is
-  an ordinary OpenMP loop. It gets the cross-team reduction, and big-jump
+  specializer, the next piece (Library code on the device: later). Then the
+  loop is an ordinary OpenMP loop. It gets the cross-team reduction, and big-jump
   and no-loop when they come (Specialized kernels for loops).
 - **(b) A builtin that lowers to the `omp` dialect,** as Flang lowers `do
   concurrent`, a construct of the language rather than of OpenMP, onto

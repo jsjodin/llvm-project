@@ -1,5 +1,5 @@
-% Foreign code on a device (docs/INPROGRESS.md, Library code on the device,
-% step 3): the device's compile compiles the C of the foreign_procs that its
+% Foreign code on a device (design document, Library code on the device):
+% the device's compile compiles the C of the foreign_procs that its
 % target region reaches, the module's own and the library's, as OpenMP
 % compiles C for the device, with the GPU's libc and libm, whose printf goes
 % to the host. Only the functions reached are compiled and linked: pid's C
