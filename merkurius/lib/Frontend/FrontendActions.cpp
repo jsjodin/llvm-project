@@ -32,6 +32,7 @@
 #include "merkurius/Semantics/translate-loops.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
 #include "merkurius/Dialect/Mrt/IR/MrtDialect.h"
+#include "mlir/Bytecode/BytecodeWriter.h"
 #include "mlir/Dialect/DLTI/DLTI.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/OpenMP/OpenMPDialect.h"
@@ -881,7 +882,7 @@ static InputLanguage Language(
     return language;
   }
   llvm::StringRef extension{llvm::sys::path::extension(file.path())};
-  if (extension == ".mlir") {
+  if (extension == ".mlir" || extension == ".mlirbc") {
     return InputLanguage::MLIR;
   }
   if (extension == ".ll" || extension == ".bc") {
@@ -969,6 +970,15 @@ bool CodeGenAction::Lower(
     // test, but what it makes cannot be collected.
     module->setAttr("merk.no_root_types", mlir::UnitAttr::get(module.getContext()));
     module.print(*os);
+    return true;
+  }
+  if (kind_ == ActionKind::EmitMerkBytecode) {
+    // Whole, with the notes that -emit-merk leaves out, as a module compiled
+    // from it must be the same as one compiled from the source.
+    if (mlir::failed(mlir::writeBytecodeToFile(module, *os))) {
+      options::reportError("cannot write the merk module as bytecode");
+      return false;
+    }
     return true;
   }
   if (mlir::failed(codegen::LowerToLLVMDialect(module, target))) {

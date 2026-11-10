@@ -55,6 +55,7 @@ std::unique_ptr<FrontendAction> createFrontendAction(CompilerInstance &ci) {
   case ActionKind::DebugDumpPolymorphism:
     return std::make_unique<DebugDumpPolymorphismAction>();
   case ActionKind::EmitMerk:
+  case ActionKind::EmitMerkBytecode:
   case ActionKind::EmitMLIR:
   case ActionKind::EmitLLVM:
   case ActionKind::EmitLLVMBitcode:

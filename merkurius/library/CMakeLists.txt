@@ -59,6 +59,36 @@ foreach(module ${compiled_modules})
 endforeach()
 set_source_files_properties(${compiled_objects} PROPERTIES
   EXTERNAL_OBJECT TRUE GENERATED TRUE)
+
+# The same modules in the merk dialect, compiled as for an OpenMP device, as
+# MLIR bytecode in lib/merkurius/device: a device's compile copies the
+# procedures its target regions reach from them (docs/INPROGRESS.md, Library
+# code on the device). Their foreign code is still C text, which each
+# target's compile gives to clang. Only AMD GPUs are offloaded to so far.
+if("AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
+  set(device_dir ${library_dir}/device)
+  set(device_outputs)
+  foreach(module ${compiled_modules})
+    set(output ${device_dir}/${module}.mlirbc)
+    set(source ${library_dir}/${module}.m)
+    if(module STREQUAL "array")
+      set(source ${sound_array})
+    endif()
+    add_custom_command(OUTPUT ${output}
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${device_dir}
+      COMMAND merkc -fc1 -fopenmp -fopenmp-is-target-device
+        -triple amdgcn-amd-amdhsa -fstub-unimplemented -emit-merk-bc
+        ${source} -o ${output}
+      DEPENDS merkc ${library_outputs}
+      COMMENT "Compiling the library module ${module}.m for a device")
+    list(APPEND device_outputs ${output})
+  endforeach()
+  add_custom_target(merkurius-device-library ALL DEPENDS ${device_outputs})
+  set_target_properties(merkurius-device-library PROPERTIES
+    FOLDER "Merkurius/Library")
+  install(FILES ${device_outputs} DESTINATION lib/merkurius/device
+    COMPONENT merkc)
+endif()
 add_library(merkstd STATIC ${compiled_objects})
 set_target_properties(merkstd PROPERTIES
   LINKER_LANGUAGE C

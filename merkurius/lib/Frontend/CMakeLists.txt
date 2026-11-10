@@ -15,6 +15,7 @@ add_merkurius_library(MerkuriusFrontend
   MerkuriusDriver
   MerkuriusParser
   MerkuriusSemantics
+  MLIRBytecodeWriter
   MLIRDLTIDialect
   MLIRIR
   MLIRLLVMDialect

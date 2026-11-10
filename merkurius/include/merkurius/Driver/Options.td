@@ -165,10 +165,12 @@ def fembed_offload_object_EQ : Joined<["-"], "fembed-offload-object=">,
   MetaVarName<"<file>">,
   HelpText<"Embed the offload binary <file> in the host's object file">;
 def x : Separate<["-"], "x">, MetaVarName<"<language>">,
-  HelpText<"Read the input as <language>: mercury, mlir or ir (LLVM IR); by "
-           "default from its extension">;
+  HelpText<"Read the input as <language>: mercury, mlir (text or bytecode) or "
+           "ir (LLVM IR); by default from its extension">;
 def emit_merk : Flag<["-"], "emit-merk">,
   HelpText<"Write the module in the merk dialect">;
+def emit_merk_bc : Flag<["-"], "emit-merk-bc">,
+  HelpText<"Write the module in the merk dialect as MLIR bytecode">;
 def emit_mlir : Flag<["-"], "emit-mlir">,
   HelpText<"Write the module lowered to MLIR's LLVM dialect">;
 def emit_llvm : Flag<["-"], "emit-llvm">,

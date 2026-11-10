@@ -32,7 +32,7 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
               OPT_fdebug_dump_types, OPT_fdebug_dump_loops,
               OPT_fdebug_dump_modes,
               OPT_fdebug_dump_determinism, OPT_fdebug_dump_polymorphism,
-              OPT_emit_merk, OPT_emit_mlir, OPT_emit_llvm, OPT_emit_llvm_bc, OPT_S,
+              OPT_emit_merk, OPT_emit_merk_bc, OPT_emit_mlir, OPT_emit_llvm, OPT_emit_llvm_bc, OPT_S,
               OPT_emit_obj)) {
     switch (arg->getOption().getID()) {
     case OPT_E:
@@ -85,6 +85,9 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
       break;
     case OPT_emit_merk:
       opts.programAction = ActionKind::EmitMerk;
+      break;
+    case OPT_emit_merk_bc:
+      opts.programAction = ActionKind::EmitMerkBytecode;
       break;
     case OPT_emit_mlir:
       opts.programAction = ActionKind::EmitMLIR;
