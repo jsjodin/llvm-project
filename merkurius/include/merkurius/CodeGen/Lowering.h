@@ -44,6 +44,10 @@ void OutlineNondeterminism(mlir::ModuleOp);
 // Puts a merk.live before each safepoint (Liveness.cpp).
 void MarkSafepoints(mlir::ModuleOp);
 
+// Whether a value of the type needs type_infos to say what it is: a word, or
+// a term or an array whose type has type variables (Liveness.cpp).
+bool IsPolymorphic(mlir::Type);
+
 // Whether a term of a type and functor is a cell on the heap, which can
 // have a hole.
 using InCell = llvm::function_ref<bool(mlir::Type, merk::FunctorAttr)>;

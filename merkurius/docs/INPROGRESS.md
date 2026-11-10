@@ -1717,7 +1717,7 @@ on a device (The specializer: known closures and dictionaries).
 
 ## The specializer: known closures and dictionaries
 
-Proposed 2026-11-10; nothing is built. The `merk` pass that the design
+Proposed 2026-11-10; step 1 is built. The `merk` pass that the design
 document's Optimizations section names for higher-order and type
 specialization and for `pragma inline`. This piece is its first part: calls
 given a closure or a dictionary known at the call become direct calls.
@@ -1810,6 +1810,38 @@ and reads `K` with `merk.closure_word`. A dictionary is the same:
    for a module's own fold, an entry with captured values, a recursive
    higher-order predicate, a closure that escapes into a term, and the depth
    limit; each also runs at -O0/-O2 against mmc's output. Host only, at -O2.
+   Built 2026-11-10 (`lib/CodeGen/Specializer.cpp`, `SpecializeKnownClosures`):
+   - **The closure stays a parameter.** A clone takes the closure as well as
+     what it captured, rather than making it again at its start, which
+     would allocate on each call of a recursive clone. Once nothing is left
+     to clone, a clone's parameters that nothing uses, or that it only
+     passes on to itself in the same place, are removed from it and its
+     calls, and then the closures and conversions that the specializer left
+     unused. Only those: MLIR generation leaves unused conversions as notes
+     of a word's type, which the collector reads.
+   - **Captured values' types, for the collector.** A captured `type_info`
+     or `typeclass_info` is a parameter of that type. A word whose type the
+     closure's `captures` describes is followed by a `type_info` parameter,
+     which the caller makes from the description and the clone's
+     `merk.root_type` names. Made in the clone, a `type_info` that is not
+     static would be a safepoint at which the captured value has no type yet.
+     A recursive call passes its own `type_info` parameters on.
+   - **Two fixes the clones needed.** The safepoints and outlining find the
+     type of a word that a continuation's environment holds from the typed
+     value it was converted from, as they did for a root. Before, a closure
+     held such a word, and the environment held the closure.
+   - **Useless clones.** A clone that comes out the same as the procedure it
+     was copied from is removed, and its calls call that procedure, as for a
+     callee that only puts the closure into another closure (`compose`).
+   - **Not cloned:** a procedure without a body, with foreign code, which may
+     not be duplicated, or with a target region, whose kernel would be.
+   - **Limits:** closures captured by closures are followed three levels
+     deep, and a procedure gets at most 16 clones.
+   - **Tests:** `specialize-closures.m`, with a fold, a predicate with `io`,
+     a closure in a term, `compose`, a nondet closure, a chain of four
+     closures, a captured value of a type variable, and two closures
+     captured by closures. Every runtime test also builds at -O2, so the
+     whole suite runs the specializer.
 2. **Dictionaries.** Known `typeclass_info`s, `merk.typeclass_info_word`,
    and `merk.call_method` through a table slot's dispatch procedure.
    Instances with constraints, so a dictionary inside a dictionary. Tests as

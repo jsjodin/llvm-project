@@ -9,6 +9,7 @@
 #include <set>
 #include "MLIRGenImpl.h"
 #include "merkurius/CodeGen/DeviceLibrary.h"
+#include "merkurius/CodeGen/Specializer.h"
 
 namespace merkurius::codegen {
 
@@ -1642,6 +1643,13 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
       mlir::failed(CopyDeviceLibrary(
           module_, deviceLibraryDirectory_, !mmcUniqueness_))) {
     return nullptr;
+  }
+  // Calls given known closures call clones of their callees, before what
+  // follows calls. Temporary (specializer step 1, docs/INPROGRESS.md): on
+  // the host at -O2 only; step 3 runs it on a device at every level.
+  if (!target_.options().openMPIsTargetDevice &&
+      target_.options().optimizationLevel >= 2 && !messages_.AnyFatalError()) {
+    SpecializeKnownClosures(module_);
   }
   MarkRegionsForTeamMailboxes();
   // The program's entry: the main module's main(di, uo).

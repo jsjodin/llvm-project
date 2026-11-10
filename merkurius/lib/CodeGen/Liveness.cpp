@@ -105,8 +105,10 @@ void UsesInside(mlir::Operation *op, Live &uses) {
   }
 }
 
+} // namespace
+
 // Whether a value's type says all there is to know about it.
-static bool IsPolymorphic(mlir::Type type) {
+bool IsPolymorphic(mlir::Type type) {
   if (mlir::isa<merk::WordType>(type)) {
     return true;
   }
@@ -117,6 +119,8 @@ static bool IsPolymorphic(mlir::Type type) {
   static const llvm::Regex variable{"[(, {]T[0-9]+[,)} ]|some \\["};
   return term && variable.match(term.getName());
 }
+
+namespace {
 
 // The value that says what `value` is: of those that are it at another type
 // across conversions to and from a word, as a callee's instance of a type is
@@ -238,7 +242,13 @@ void Marker::Mark(mlir::Operation *op, Live &live) {
             type = mlir::IntegerType::get(op->getContext(), 64); // a constant
             continue;
           }
-          auto it{infos_.find(Described(field))};
+          // A word of a value whose type says what it is, as a root's.
+          mlir::Value at{Described(field)};
+          if (!IsPolymorphic(at.getType())) {
+            type = at.getType();
+            continue;
+          }
+          auto it{infos_.find(at)};
           if (it == infos_.end()) {
             continue;
           }
