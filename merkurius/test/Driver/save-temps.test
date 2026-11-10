@@ -1,0 +1,38 @@
+With -save-temps, or -save-temps=cwd, the driver's intermediate files are
+named <stem>.<suffix> in the current directory and kept; with
+-save-temps=obj, they go beside the output. The link gets the option too, so
+that Clang keeps its own, such as the linker wrapper's for the GPUs' code.
+The jobs are the same as without it.
+REQUIRES: amdgpu-registered-target
+
+RUN: merkc -### -save-temps -fopenmp --offload-arch=gfx1030 %S/Inputs/sumsq.m -o prog 2>&1 \
+RUN:   | FileCheck %s
+CHECK:      "-fc1" "-emit-llvm-bc" "-fopenmp" "--offload-targets=amdgpu-amd-amdhsa" "-o" "sumsq.bc" "{{[^"]*}}sumsq.m"{{$}}
+CHECK-NEXT: "-fc1" "-emit-llvm-bc" "-fopenmp" "-triple" "amdgpu10.30-amd-amdhsa" "-fopenmp-is-target-device" "-fopenmp-host-ir-file-path" "sumsq.bc" "-o" "sumsq-gfx1030.bc" "{{[^"]*}}sumsq.m"{{$}}
+CHECK-NEXT: "{{[^"]*}}llvm-offload-binary{{(\.exe)?}}" "-o" "sumsq.out" "--image=file=sumsq-gfx1030.bc,triple=amdgpu10.30-amd-amdhsa,arch=gfx1030,kind=openmp"{{$}}
+CHECK-NEXT: "-fc1" "-emit-obj" "-fopenmp" "-fembed-offload-object=sumsq.out" "--offload-targets=amdgpu-amd-amdhsa" "-o" "sumsq.o" "-x" "ir" "sumsq.bc"{{$}}
+CHECK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "-save-temps=cwd" "-fopenmp" "--offload-arch=gfx1030" {{.*}} "-o" "prog" "sumsq.o"
+
+RUN: merkc -### --save-temps=cwd %S/Inputs/sumsq.m -o out/prog 2>&1 \
+RUN:   | FileCheck %s --check-prefix=CWD
+CWD:      "-fc1" "-emit-obj" "-o" "sumsq.o" "{{[^"]*}}sumsq.m"{{$}}
+CWD-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "-save-temps=cwd" "-o" "out/prog" "sumsq.o"
+
+RUN: merkc -### -save-temps=obj %S/Inputs/sumsq.m -o out/prog 2>&1 \
+RUN:   | FileCheck %s --check-prefix=OBJ
+OBJ:      "-fc1" "-emit-obj" "-o" "out{{/|\\\\}}sumsq.o" "{{[^"]*}}sumsq.m"{{$}}
+OBJ-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "-save-temps=obj" "-o" "out/prog" "out{{/|\\\\}}sumsq.o"
+
+RUN: not merkc -### -save-temps=tmp %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=BAD
+BAD: merkc: error: -save-temps=tmp: expected cwd or obj
+
+The files are kept; without the option, only the program is left.
+RUN: rm -rf %t.dir && mkdir -p %t.dir/keep %t.dir/none
+RUN: cd %t.dir/keep && merkc -save-temps %S/Inputs/empty-main.m -o prog
+RUN: ls %t.dir/keep | FileCheck %s --check-prefix=KEEP
+KEEP: empty-main.o
+KEEP: prog
+RUN: cd %t.dir/none && merkc %S/Inputs/empty-main.m -o prog
+RUN: ls %t.dir/none | FileCheck %s --check-prefix=NONE --implicit-check-not=empty-main
+NONE: prog

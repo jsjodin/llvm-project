@@ -141,14 +141,56 @@ static bool getOffloadArchs(
   return true;
 }
 
-// A temporary file's name, from `stem` and `suffix`, added to `temporaries`.
-static std::string temporaryFile(llvm::StringRef stem, llvm::StringRef suffix,
-    std::vector<std::string> &temporaries) {
-  llvm::SmallString<128> name;
-  llvm::sys::fs::getPotentiallyUniqueTempFileName(stem, suffix, name);
-  temporaries.push_back(name.str().str());
-  return temporaries.back();
-}
+namespace {
+// The intermediate files of the jobs. Each is a unique temporary file, which
+// the driver removes at the end, or with -save-temps, `<stem>.<suffix>` in
+// the directory it names, kept.
+class TemporaryFiles {
+public:
+  // The directory of -save-temps, or false after reporting an error.
+  bool Configure(const InputArgList &args) {
+    const llvm::opt::Arg *arg{args.getLastArg(OPT_save_temps_EQ)};
+    if (!arg) {
+      return true;
+    }
+    llvm::StringRef where{arg->getValue()};
+    if (where != "cwd" && where != "obj") {
+      reportError("-save-temps=" + where.str() +
+          ": expected cwd or obj");
+      return false;
+    }
+    keep_ = true;
+    if (where == "obj") {
+      dir_ = llvm::sys::path::parent_path(args.getLastArgValue(OPT_o)).str();
+    }
+    return true;
+  }
+
+  // A file's name, from `stem` and `suffix`.
+  std::string Name(llvm::StringRef stem, llvm::StringRef suffix) {
+    llvm::SmallString<128> name;
+    if (keep_) {
+      name = dir_;
+      llvm::sys::path::append(name, stem + "." + suffix);
+      return name.str().str();
+    }
+    llvm::sys::fs::getPotentiallyUniqueTempFileName(stem, suffix, name);
+    removed_.push_back(name.str().str());
+    return removed_.back();
+  }
+
+  void Remove() {
+    for (const std::string &name : removed_) {
+      llvm::sys::fs::remove(name);
+    }
+  }
+
+private:
+  bool keep_{false};
+  std::string dir_;
+  std::vector<std::string> removed_;
+};
+} // namespace
 
 // The jobs that compile `input` to the object file `object` with its target
 // regions offloaded to `archs`, as Flang's are: the host's bitcode, with its
@@ -158,11 +200,11 @@ static std::string temporaryFile(llvm::StringRef stem, llvm::StringRef suffix,
 static void addOffloadJobs(const InputArgList &args, llvm::StringRef executable,
     const std::string &input, const std::string &object,
     const std::vector<OffloadArch> &archs, std::vector<Job> &jobs,
-    std::vector<std::string> &temporaries) {
+    TemporaryFiles &temporaries) {
   llvm::StringRef stem{llvm::sys::path::stem(input)};
   std::string offloadTargets{"--offload-targets=" +
       std::string{kOffloadTargetAMDGPU}};
-  std::string hostBitcode{temporaryFile(stem, "bc", temporaries)};
+  std::string hostBitcode{temporaries.Name(stem, "bc")};
   Job host{executable.str(), "-fc1", "-emit-llvm-bc"};
   addFrontendOptions(args, host);
   host.insert(host.end(), {offloadTargets, "-o", hostBitcode, input});
@@ -171,11 +213,11 @@ static void addOffloadJobs(const InputArgList &args, llvm::StringRef executable,
   if (binary[0].empty()) {
     binary[0] = "llvm-offload-binary";
   }
-  std::string offloadBinary{temporaryFile(stem, "out", temporaries)};
+  std::string offloadBinary{temporaries.Name(stem, "out")};
   binary.insert(binary.end(), {"-o", offloadBinary});
   for (const OffloadArch &arch : archs) {
     std::string deviceBitcode{
-        temporaryFile((stem + "-" + arch.arch).str(), "bc", temporaries)};
+        temporaries.Name((stem + "-" + arch.arch).str(), "bc")};
     Job device{executable.str(), "-fc1", "-emit-llvm-bc"};
     addFrontendOptions(args, device, arch.triple);
     device.insert(device.end(),
@@ -205,9 +247,9 @@ static std::string findLinker(llvm::StringRef executable) {
 // -E, -S or -c, one -fc1 job per source; otherwise one per source, writing
 // a temporary object file, and a link of the objects with the runtime
 // library. With --offload-arch=, each source's object file comes from the
-// offload jobs instead. `temporaries` gets the temporary files' names.
+// offload jobs instead. `temporaries` names the intermediate files.
 static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
-    std::vector<Job> &jobs, std::vector<std::string> &temporaries) {
+    std::vector<Job> &jobs, TemporaryFiles &temporaries) {
   std::vector<std::string> inputs{args.getAllArgValues(OPT_INPUT)};
   if (inputs.empty()) {
     reportError("no input files");
@@ -248,8 +290,8 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
       continue;
     }
     if (offload) {
-      std::string object{link ? temporaryFile(llvm::sys::path::stem(input),
-                                    "o", temporaries)
+      std::string object{link ? temporaries.Name(
+                                    llvm::sys::path::stem(input), "o")
               : !output.empty()
               ? output.str()
               : (llvm::sys::path::stem(input) + ".o").str()};
@@ -271,11 +313,7 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
     addFrontendOptions(args, job);
     std::string jobOutput{link ? "" : output.str()};
     if (link) {
-      llvm::SmallString<128> temporary;
-      llvm::sys::fs::getPotentiallyUniqueTempFileName(
-          llvm::sys::path::stem(input), "o", temporary);
-      jobOutput = temporary.str().str();
-      temporaries.push_back(jobOutput);
+      jobOutput = temporaries.Name(llvm::sys::path::stem(input), "o");
       objects.push_back(jobOutput);
     }
     if (!jobOutput.empty()) {
@@ -297,6 +335,12 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
     // the GPUs' code, as Flang's -v does.
     if (args.hasArg(OPT_v)) {
       job.push_back("-v");
+    }
+    // Clang keeps the link's own intermediate files, such as the linker
+    // wrapper's for the GPUs' code: the device link's LTO stages and its
+    // image.
+    if (const llvm::opt::Arg *arg = args.getLastArg(OPT_save_temps_EQ)) {
+      job.push_back("-save-temps=" + std::string{arg->getValue()});
     }
     if (const llvm::opt::Arg *arg = args.getLastArg(OPT_target_EQ)) {
       job.push_back(arg->getAsString(args));
@@ -391,8 +435,9 @@ int main(int argc, const char **argv) {
   }
 
   std::vector<Job> jobs;
-  std::vector<std::string> temporaries;
-  if (!buildJobs(*parsed, executable, jobs, temporaries)) {
+  TemporaryFiles temporaries;
+  if (!temporaries.Configure(*parsed) ||
+      !buildJobs(*parsed, executable, jobs, temporaries)) {
     return 1;
   }
   int result{0};
@@ -405,8 +450,6 @@ int main(int argc, const char **argv) {
       break;
     }
   }
-  for (const std::string &temporary : temporaries) {
-    llvm::sys::fs::remove(temporary);
-  }
+  temporaries.Remove();
   return result;
 }

@@ -1,0 +1,19 @@
+With -save-temps, an offload build keeps the driver's files and the linker
+wrapper's: the device link's LTO stages and the device image, which exports
+the RPC client that the offload plugin finds by name. The program is the
+same as without it.
+REQUIRES: amdgpu-gpu
+
+RUN: rm -rf %t.dir && mkdir -p %t.dir
+RUN: cd %t.dir && merkc -save-temps -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-allocate.m -o prog
+RUN: ls %t.dir | FileCheck %s
+CHECK-DAG: omp-target-allocate.bc
+CHECK-DAG: omp-target-allocate-[[ARCH:gfx[0-9a-z]+]].bc
+CHECK-DAG: omp-target-allocate.out
+CHECK-DAG: omp-target-allocate.o
+CHECK-DAG: prog.{{[^ ]*}}[[ARCH]].img
+CHECK-DAG: prog.{{[^ ]*}}[[ARCH]].img.0.0.preopt.bc
+RUN: llvm-readelf --dyn-syms %t.dir/prog.*.img | FileCheck %s --check-prefix=IMAGE
+IMAGE: __llvm_rpc_client
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t.dir/prog \
+RUN:   | FileCheck %S/omp-target-allocate.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
