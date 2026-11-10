@@ -506,6 +506,22 @@ extern "C" void merk_region_exit(void) {
   merkurius::runtime::Unpin();
 }
 
+extern "C" [[noreturn]] void merk_uncaught_exception(const char *exception);
+
+// A target teams region's num_teams, before it starts: OpenMP's is 32 bits,
+// and libomptarget takes one that is not positive for its default.
+extern "C" void merk_check_teams(std::int64_t teams) {
+  if (teams >= 1 && teams <= INT32_MAX) {
+    return;
+  }
+  char text[128];
+  std::snprintf(text, sizeof text,
+      "Software Error: target teams: the number of teams, %lld, is not from 1 "
+      "to %d",
+      static_cast<long long>(teams), INT32_MAX);
+  merk_uncaught_exception(text);
+}
+
 // At start-up, before any region runs.
 extern "C" void merk_offload_start(void) {
   if (const char *limit{std::getenv("MERK_DEVICE_ARENA_BYTES")}) {

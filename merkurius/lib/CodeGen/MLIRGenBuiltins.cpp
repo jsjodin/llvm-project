@@ -404,6 +404,20 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
       MessageKey(*body.vars[arguments[1]].type, message.getType());
     }
   }
+  // With OpenMP, a team's number and the number of teams are OpenMP's, on
+  // the host and on a device; outside a teams region, 0 and 1. Without it,
+  // the library's give those (docs/INPROGRESS.md, Processes as teams).
+  if (module == "process" && target_.options().openMP && symbol.arity == 3 &&
+      (symbol.name == "team_number" || symbol.name == "number_of_teams")) {
+    mlir::Location loc{Location(goal.tokens)};
+    auto call{merk::ForeignCallOp::create(builder_, loc,
+        mlir::TypeRange{builder_.getI32Type()},
+        symbol.name == "team_number" ? "omp_get_team_num" : "omp_get_num_teams",
+        mlir::ValueRange{}, /*can_fail=*/false)};
+    values_[arguments[0]] = mlir::arith::ExtSIOp::create(builder_, loc,
+        Represent(body.vars[arguments[0]].type)->type, call.getResult(0));
+    return true;
+  }
   if (module == "io" && target_.options().openMPIsTargetDevice &&
       WriteOnDevice(goal, symbol, arguments)) {
     return true;
