@@ -2642,6 +2642,50 @@ the process asks the host to launch. The first version has neither.
      the device's use of `copy.h`, which the host keeps. Strings become a
      one-block message. Tests of each error, and the GPU tests of 4e turned
      into flat messages or error tests.
+   - **Flat records,** with 5a, since its check says what is flat (design
+     document, "Messages and memory on the device"; the user, 2026-11-10:
+     arrays may hold structs, as in OpenMP's custom reductions, with an
+     internal array of fixed size and scalars, and temporaries that do not
+     live across loops or recursions). The check accepts a type of one
+     constructor, with no existential type or constraint, not recursive,
+     whose fields are flat, and a tuple of flat types. Then, each a step:
+     1. **By value in GPU code.** A flat record is an LLVM struct, in SSA
+        values, never `merk_device_alloc`ed: construction builds the value,
+        deconstruction reads its fields. A record received or passed in as a
+        cell on the host's side is read into a value at the start.
+     2. **Arrays of flat records, inline,** with C's layout, so that mapping
+        an array to a region, or sending it, is one copy, and C or HIP code
+        reads the same bytes. On the host too, which is the decision below.
+     3. **Fields that are arrays of a fixed size,** with element reads by a
+        variable index, as a histogram's bins are.
+     4. **Custom reductions:** `reduction(F : V)` where `F` is a function of
+        `(R, R) = R` on a flat record `R`, with an initializer, as OpenMP's
+        `declare reduction` has, lowered to `omp.declare_reduction`, as
+        Flang lowers one of a derived type.
+
+     **Open, to decide before step 2:**
+     - **How the host holds an array of flat records.** (a) Inline on the
+       host as on the GPU, with a lookup boxing the element into a cell, but
+       for a lookup whose result is only deconstructed, which reads the
+       fields in place, the usual case; polymorphic array code then needs
+       the element's size, from its `type_info` or from the specializer.
+       (b) Boxed on the host, as now, and packed or unpacked at each map or
+       send: a copy and a pass over the array each time, against the bar
+       of C, which copies once. (c) A type of its own, such as
+       `record_array(T)`, inline everywhere, leaving `array(T)` as it is.
+       Recommended: (a), since the array stays the one the program names,
+       and the copy is one block, as C's is.
+     - **How a fixed size is written,** since Mercury's types have no
+       numbers: a pragma on the type naming the field and its size; a
+       library type whose size a type-level marker gives, `fixed(T, n16)`;
+       or tuples, which have a size but no indexing by a variable. Wanted
+       first: an example from the user's OpenMP codes, to choose by.
+     - **Records of several constructors** (tagged unions, as messages
+       already may be) inside arrays: later, if a program needs them.
+     - **Narrow fields' layout:** `int8` to `int32` and enumerations at their
+       C sizes, so a record of small fields is small; a float is 64 bits, as
+       Mercury has no 32-bit float, which GPU codes use widely, to be
+       raised separately.
    - **5b. The place table.** Place 0 is the host and each GPU of the node
      has a place of its own, with its kind, its architecture and its
      identity: liboffload's UID where the GPU has a UUID, and otherwise its
