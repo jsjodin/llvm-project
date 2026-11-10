@@ -13,15 +13,15 @@
 // here handles them on the plugin's server thread. A region that runs on the
 // host calls the same functions here.
 //
-// The callback is registered with libomptarget's __tgt_register_rpc_callback,
-// which is weak, so that a program without offloading links without
-// libomptarget. One server thread serves every device, so the callback never
-// waits (docs/INPROGRESS.md, The device's side of the first slice).
+// The device calls, and the callback's registration, are devices.h's. One
+// server thread serves every device, so the callback never waits
+// (docs/INPROGRESS.md, The device's side of the first slice).
 //
 //===----------------------------------------------------------------------===//
 
 #include <unistd.h>
 #include "process.h"
+#include "devices.h"
 #include "device-ring.h"
 #include "fragment.h"
 #include "rpc-opcodes.h"
@@ -64,16 +64,6 @@ extern "C" void merk_mailbox_trim(std::int64_t nodeHigh, std::int64_t nodeLow,
 extern "C" void merk_mailbox_detach_rings(void);
 extern "C" [[noreturn]] void merk_uncaught_exception(const char *exception);
 
-extern "C" void *llvm_omp_target_alloc_host(std::size_t, int)
-    __attribute__((weak));
-extern "C" void llvm_omp_target_free_host(void *, int) __attribute__((weak));
-extern "C" void __tgt_register_rpc_callback(unsigned (*)(void *, unsigned))
-    __attribute__((weak));
-extern "C" void *omp_target_alloc(std::size_t, int) __attribute__((weak));
-extern "C" void omp_target_free(void *, int) __attribute__((weak));
-extern "C" int omp_target_memcpy(void *, const void *, std::size_t,
-    std::size_t, std::size_t, int, int) __attribute__((weak));
-extern "C" int omp_get_initial_device(void) __attribute__((weak));
 
 namespace {
 
@@ -234,7 +224,7 @@ void *NewChunk(int device, std::uint64_t address, std::uint64_t bytes) {
   if (tooMany) {
     Fail("the devices' arenas are full: see MERK_DEVICE_ARENA_BYTES");
   }
-  void *chunk{omp_target_alloc(bytes, device)};
+  void *chunk{DeviceAllocate(device, bytes)};
   if (!chunk) {
     Fail("out of memory on a device, for its arena");
   }
@@ -256,12 +246,12 @@ void FreeArenas() {
       continue;
     }
     for (std::uint64_t j{0}; j < arena.count; ++j) {
-      omp_target_free(arena.chunks[j], arena.device);
+      DeviceFree(arena.device, arena.chunks[j]);
     }
     arena.count = 0;
     const std::uint64_t none[kArenaClearWords]{};
-    if (omp_target_memcpy(reinterpret_cast<void *>(arena.address), none,
-            sizeof none, 0, 0, arena.device, omp_get_initial_device()) != 0) {
+    if (!CopyToDevice(arena.device, reinterpret_cast<void *>(arena.address),
+            none, sizeof none)) {
       Fail("could not clear a device's arena");
     }
   }
@@ -272,10 +262,9 @@ std::size_t ArrayBytes(std::uint64_t size) {
 }
 
 // Copies the device's array of `size` elements to `copy` on the host.
-void CopyFromDevice(int device, const void *array, std::uint64_t size,
+void CopyArrayFromDevice(int device, const void *array, std::uint64_t size,
     std::uint64_t *copy) {
-  if (omp_target_memcpy(copy, array, ArrayBytes(size), 0, 0,
-          omp_get_initial_device(), device) != 0) {
+  if (!CopyFromDevice(device, copy, array, ArrayBytes(size))) {
     Fail("could not copy an array from a device");
   }
 }
@@ -285,7 +274,7 @@ void CopyFromDevice(int device, const void *array, std::uint64_t size,
 void SendArray(const std::uint64_t *handle, std::uint64_t key, int device,
     const void *array, std::uint64_t size) {
   auto *copy{static_cast<std::uint64_t *>(Malloc(ArrayBytes(size)))};
-  CopyFromDevice(device, array, size, copy);
+  CopyArrayFromDevice(device, array, size, copy);
   SendTo(handle, key, reinterpret_cast<std::uint64_t>(copy));
   std::free(copy);
 }
@@ -298,8 +287,7 @@ void TakeArray(const std::uint64_t *handle, int device, void *array) {
   merk_mailbox_trim(h[0], h[1], h[2], h[3], h[4]);
   auto *message{reinterpret_cast<const std::uint64_t *>(
       merk_mailbox_message(h[0], h[1], h[2], h[3], h[4], 0))};
-  if (omp_target_memcpy(array, message, ArrayBytes(message[0]), 0, 0, device,
-          omp_get_initial_device()) != 0) {
+  if (!CopyToDevice(device, array, message, ArrayBytes(message[0]))) {
     Fail("could not copy an array to a device");
   }
 }
@@ -308,7 +296,7 @@ void TakeArray(const std::uint64_t *handle, int device, void *array) {
 // when no region is running.
 DeviceRing *NewRing(int device) {
   auto *ring{static_cast<DeviceRing *>(
-      llvm_omp_target_alloc_host(sizeof(DeviceRing), device))};
+      DeviceAllocateHost(device, sizeof(DeviceRing)))};
   if (!ring) {
     Fail("out of memory for a mailbox's ring");
   }
@@ -399,7 +387,7 @@ unsigned HandleOpcode(void *raw, unsigned) {
       Fragment fragment;
       auto *copy{static_cast<std::uint64_t *>(
           fragment.Allocate(ArrayBytes(size)))};
-      CopyFromDevice(static_cast<int>(buffer->data[0]),
+      CopyArrayFromDevice(static_cast<int>(buffer->data[0]),
           reinterpret_cast<const void *>(buffer->data[1]), size, copy);
       buffer->data[0] = reinterpret_cast<std::uint64_t>(copy);
     });
@@ -498,7 +486,7 @@ extern "C" void merk_region_exit(void) {
     merk_mailbox_detach_rings();
     pthread_mutex_lock(&ringsLock);
     for (std::uint64_t i{0}; i < ringCount; ++i) {
-      llvm_omp_target_free_host(rings[i].ring, rings[i].device);
+      DeviceFreeHost(rings[i].device, rings[i].ring);
     }
     ringCount = 0;
     pthread_mutex_unlock(&ringsLock);
@@ -527,9 +515,7 @@ extern "C" void merk_offload_start(void) {
   if (const char *limit{std::getenv("MERK_DEVICE_ARENA_BYTES")}) {
     arenaLimit = std::strtoull(limit, nullptr, 10);
   }
-  if (__tgt_register_rpc_callback) {
-    __tgt_register_rpc_callback(HandleOpcode);
-  }
+  RegisterRpcCallback(HandleOpcode);
 }
 
 // A region that runs on the host receives as receive/5 does with any:

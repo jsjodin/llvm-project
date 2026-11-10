@@ -4,6 +4,7 @@
 # installed there too.
 add_library(merkrt STATIC
   array.cpp
+  devices.cpp
   encode.cpp
   exception.cpp
   heap.cpp
