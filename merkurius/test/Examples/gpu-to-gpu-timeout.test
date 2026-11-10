@@ -1,12 +1,13 @@
 The GPU to GPU demo, with its regions on the CPU, when node B never answers: node
 A reports the timeout and stops at the first round, then so does node B. Each
 node's lines are checked in order after a stable sort, and the errors, which the
-nodes report in either order, after a full sort.
+nodes report in either order, after a full sort. Its port is its own, as lit
+runs the other gpu-to-gpu tests at the same time.
 
 RUN: rm -rf %t.src && mkdir -p %t.src
 RUN: sed 's/send(ToA, Sum, !IO)/true/; s/after(10000)/after(300)/' %S/../../examples/gpu-to-gpu/gpu_to_gpu.m > %t.src/gpu_to_gpu.m
 RUN: cp %S/../../examples/gpu-to-gpu/demo_node.m %t.src/
-RUN: not make -s -C %S/../../examples run-gpu-to-gpu-cpu MERKC=merkc BUILD=%t O=0 PORT=47102 GPU_SOURCES="%t.src/gpu_to_gpu.m %t.src/demo_node.m" > %t.out
+RUN: not make -s -C %S/../../examples run-gpu-to-gpu-cpu MERKC=merkc BUILD=%t O=0 PORT=47103 GPU_SOURCES="%t.src/gpu_to_gpu.m %t.src/demo_node.m" > %t.out
 RUN: grep "^.[nG]" %t.out | sort -s -k1,2 | FileCheck %s --match-full-lines --strict-whitespace
 RUN: grep "^error" %t.out | sort | FileCheck %s --check-prefix=ERRORS --match-full-lines --strict-whitespace
 
