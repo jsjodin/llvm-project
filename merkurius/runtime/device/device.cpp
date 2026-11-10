@@ -79,13 +79,17 @@ int64_t Deadline(int64_t milliseconds) {
 } // namespace
 
 using merkurius::runtime::DeviceRing;
+using merkurius::runtime::kArenaClearWords;
+using merkurius::runtime::kBumpWords;
+using merkurius::runtime::kNoRegionSlot;
+using merkurius::runtime::kRegionSlots;
+using merkurius::runtime::kRegionSlotWords;
 using merkurius::runtime::kRingCacheSlots;
 using merkurius::runtime::kRingOfArrays;
 using merkurius::runtime::kRingOfTerms;
 using merkurius::runtime::kRingOfWords;
 using merkurius::runtime::kRingSlots;
 using merkurius::runtime::kTeamsPlace;
-using merkurius::runtime::kTeamTableSlots;
 using merkurius::runtime::rpcAttach;
 using merkurius::runtime::rpcChunk;
 using merkurius::runtime::rpcDrain;
@@ -110,14 +114,22 @@ struct Chunk {
 
 constexpr uint64_t kChunkBytes{uint64_t{1} << 20};
 
-// The arena's current chunk, or none, which the host clears when it frees
-// the chunks, once no region is running; and whether a wave is asking the
-// host for a new chunk. One asks at a time: a chunk that lost a race to
-// become the current one would be wasted but for one cell, and a GPU has
-// thousands of waves.
-//
-// The arena also has the table of the rings this device has attached, by
-// the mailbox's slot, each in the arena, which the host clears with it.
+// Where cells are bumped from: the current chunk, or none, which the host
+// clears when it frees the chunks; and whether a wave is asking the host for
+// a new chunk. One asks at a time: a chunk that lost a race to become the
+// current one would be wasted but for one cell, and a GPU has thousands of
+// waves.
+struct Bump {
+  Chunk *current;
+  uint32_t refilling;
+  uint32_t unused;
+};
+static_assert(sizeof(Bump) == kBumpWords * sizeof(uint64_t));
+
+// An arena: its chunks, freed when no region is running, or for a GPU
+// process's when it ends. It has the table of the rings this device has
+// attached, by the mailbox's slot, each in the arena, which the host clears
+// with it.
 struct RingEntry {
   uint64_t slot, generation, secret;
   DeviceRing *ring;
@@ -130,12 +142,31 @@ struct RingEntry {
 struct TeamTable;
 
 struct Arena {
-  Chunk *current;
+  Bump bump;
   RingEntry *rings[kRingCacheSlots];
-  TeamTable *teams[kTeamTableSlots];
-  uint32_t refilling;
 };
-Arena arena{nullptr, {}, {}, 0};
+static_assert(sizeof(Arena) == kArenaClearWords * sizeof(uint64_t));
+Arena arena{{nullptr, 0, 0}, {}};
+
+// In a region's image, by the slot of each region that runs (device-ring.h):
+// where its cells are bumped from, and its teams' table if it is a target
+// teams region, which its first team to start makes. The host frees a
+// region's chunks, and clears its slot, when it ends. The image's arena
+// holds only its table of rings, and what it leads to, which later regions
+// find.
+struct RegionSlot {
+  Bump bump;
+  TeamTable *teams;
+  uint64_t unused;
+};
+static_assert(sizeof(RegionSlot) == kRegionSlotWords * sizeof(uint64_t));
+RegionSlot regionSlots[kRegionSlots];
+
+// The slot of the region that the team runs, which merk_device_region_enter
+// sets at the start of each of its teams, since local memory starts
+// undefined.
+template <typename T> using Local = __attribute__((address_space(3))) T;
+[[clang::loader_uninitialized]] Local<RegionSlot *> regionSlot;
 
 } // namespace
 
@@ -147,11 +178,11 @@ extern "C"
 
 namespace {
 
-// The arena of what runs: a region's image has one, its global, and each GPU
-// process one of its own, which the host allocates and frees when the
-// process ends (gpu-processes.cpp). The process's kernel takes it as its
-// first argument, which the kernel's dispatch packet has at the start of its
-// arguments, so it is found from anywhere in the process.
+// The arena of what runs, for its tables: a region's image has one, its
+// global, and each GPU process one of its own, which the host allocates and
+// frees when the process ends (gpu-processes.cpp). The process's kernel takes
+// it as its first argument, which the kernel's dispatch packet has at the start
+// of its arguments, so it is found from anywhere in the process.
 Arena *CurrentArena() {
   if (!merk_device_process_image) {
     return &arena;
@@ -161,18 +192,33 @@ Arena *CurrentArena() {
   return *reinterpret_cast<Arena *const *>(packet[5]);
 }
 
+// Where the cells of what runs are bumped from: a GPU process's arena, or
+// the slot of the region.
+Bump *CurrentBump() {
+  if (merk_device_process_image) {
+    return &CurrentArena()->bump;
+  }
+  return &regionSlot->bump;
+}
+
 // A new chunk from the host, the current one from now on, of at least
-// `bytes` after its header, of which the first `bytes` are taken.
-void *NewChunk(Arena *arena, uint64_t bytes) {
+// `bytes` after its header, of which the first `bytes` are taken. The host
+// frees a region's chunks when it ends, and others when no region runs.
+void *NewChunk(Bump *bump, uint64_t bytes) {
   uint64_t wanted{sizeof(Chunk) + bytes};
   Chunk *chunk{nullptr};
   uint64_t size{0};
+  auto *region{reinterpret_cast<RegionSlot *>(bump)};
+  uint64_t slot{region >= regionSlots && region < regionSlots + kRegionSlots
+          ? static_cast<uint64_t>(region - regionSlots)
+          : kNoRegionSlot};
   {
     rpc::Client::Port port{__llvm_rpc_client.open<rpcChunk>()};
     port.send([&](rpc::Buffer *buffer, uint32_t) {
       buffer->data[0] = static_cast<uint64_t>(DeviceNumber());
-      buffer->data[1] = reinterpret_cast<uint64_t>(arena);
+      buffer->data[1] = reinterpret_cast<uint64_t>(bump);
       buffer->data[2] = wanted > kChunkBytes ? wanted : kChunkBytes;
+      buffer->data[3] = slot;
     });
     port.recv([&](rpc::Buffer *buffer, uint32_t) {
       chunk = reinterpret_cast<Chunk *>(buffer->data[0]);
@@ -181,11 +227,55 @@ void *NewChunk(Arena *arena, uint64_t bytes) {
   }
   chunk->size = size;
   chunk->used = wanted;
-  __atomic_store_n(&arena->current, chunk, __ATOMIC_RELEASE);
+  __atomic_store_n(&bump->current, chunk, __ATOMIC_RELEASE);
   return chunk + 1;
 }
 
+// `bytes` bumped from the chunks of `bump`. When they do not fit, one lane
+// on the device asks the host for a new chunk and takes its cell from it;
+// the others sleep and try again in it.
+void *Allocate(Bump *bump, uint64_t bytes) {
+  bytes = (bytes + 7) & ~uint64_t{7};
+  for (;;) {
+    Chunk *chunk{__atomic_load_n(&bump->current, __ATOMIC_ACQUIRE)};
+    if (chunk) {
+      uint64_t at{__atomic_fetch_add(&chunk->used, bytes, __ATOMIC_RELAXED)};
+      if (at + bytes <= chunk->size) {
+        return reinterpret_cast<char *>(chunk) + at;
+      }
+    }
+    uint32_t idle{0};
+    if (rpc::is_first_lane(rpc::get_lane_mask()) &&
+        __atomic_compare_exchange_n(&bump->refilling, &idle, 1, false,
+            __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+      // Another wave may have made one since this one looked.
+      void *cell{nullptr};
+      if (__atomic_load_n(&bump->current, __ATOMIC_ACQUIRE) == chunk) {
+        cell = NewChunk(bump, bytes);
+      }
+      __atomic_store_n(&bump->refilling, 0, __ATOMIC_RELEASE);
+      if (cell) {
+        return cell;
+      }
+    } else {
+      __builtin_amdgcn_s_sleep(127);
+    }
+  }
+}
+
+// What a table of the arena leads to, which outlives the region that made
+// it, as later regions look in the table.
+void *AllocateForTable(uint64_t bytes) {
+  return Allocate(&CurrentArena()->bump, bytes);
+}
+
 } // namespace
+
+// At the start of each team of a target region, before it makes a cell: the
+// slot that the host gave the region (merk_region_enter).
+extern "C" void merk_device_region_enter(uint64_t slot) {
+  regionSlot = &regionSlots[slot];
+}
 
 // Memory that the threads of a parallel region on the device can all reach,
 // unlike a thread's stack. Freed in the reverse order.
@@ -200,39 +290,11 @@ extern "C" void merk_device_shared_free(void *pointer, uint64_t bytes) {
   __kmpc_free_shared(pointer, bytes);
 }
 
-// A cell, or an array, in the device's arena (docs/INPROGRESS.md, The
-// device's side of the first slice, step 6): bumped from the current
-// chunk with an atomic add. When it does not fit, one lane on the device
-// asks the host for a new chunk and takes its cell from it; the others
-// sleep and try again in it.
+// A cell, or an array, on the device (docs/INPROGRESS.md, The device's side
+// of the first slice, step 6): bumped from the chunks of the region that
+// runs, or of the GPU process, with an atomic add.
 extern "C" void *merk_device_alloc(uint64_t bytes) {
-  bytes = (bytes + 7) & ~uint64_t{7};
-  Arena *arena{CurrentArena()};
-  for (;;) {
-    Chunk *chunk{__atomic_load_n(&arena->current, __ATOMIC_ACQUIRE)};
-    if (chunk) {
-      uint64_t at{__atomic_fetch_add(&chunk->used, bytes, __ATOMIC_RELAXED)};
-      if (at + bytes <= chunk->size) {
-        return reinterpret_cast<char *>(chunk) + at;
-      }
-    }
-    uint32_t idle{0};
-    if (rpc::is_first_lane(rpc::get_lane_mask()) &&
-        __atomic_compare_exchange_n(&arena->refilling, &idle, 1, false,
-            __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-      // Another wave may have made one since this one looked.
-      void *cell{nullptr};
-      if (__atomic_load_n(&arena->current, __ATOMIC_ACQUIRE) == chunk) {
-        cell = NewChunk(arena, bytes);
-      }
-      __atomic_store_n(&arena->refilling, 0, __ATOMIC_RELEASE);
-      if (cell) {
-        return cell;
-      }
-    } else {
-      __builtin_amdgcn_s_sleep(127);
-    }
-  }
+  return Allocate(CurrentBump(), bytes);
 }
 
 namespace {
@@ -337,7 +399,6 @@ struct TeamTable {
   uint64_t id;
   uint64_t nodeHigh, nodeLow;
   int64_t teams;
-  TeamTable *next;
   TeamRing **rings;
   // The teams that have started (merk_device_teams_wait_all), and whether
   // one of them is reporting that the others did not.
@@ -353,51 +414,44 @@ struct TeamTable {
 // other region: in the team's local memory, so each team of each kernel has
 // its own. A region's code sets it at its start (merk_device_teams_enter and
 // merk_device_no_teams), since local memory starts undefined.
-template <typename T> using Local = __attribute__((address_space(3))) T;
 [[clang::loader_uninitialized]] Local<TeamTable *> currentTeams;
 
 } // namespace
 
-// At the start of each team of a target teams region: finds the region's
-// table by its id, which the host chose, or makes it, and makes it the
-// team's.
+// At the start of each team of a target teams region, after
+// merk_device_region_enter: finds the region's table in its slot, or makes
+// it, and makes it the team's. Its id is the one the host chose, which its
+// teams' mailboxes are named by.
 extern "C" void merk_device_teams_enter(
     uint64_t id, uint64_t nodeHigh, uint64_t nodeLow, int32_t teams) {
-  TeamTable **bucket{&CurrentArena()->teams[id % kTeamTableSlots]};
-  TeamTable *made{nullptr};
-  for (;;) {
-    TeamTable *first{__atomic_load_n(bucket, __ATOMIC_ACQUIRE)};
-    for (TeamTable *table{first}; table; table = table->next) {
-      if (table->id == id) {
-        currentTeams = table;
-        return;
-      }
-    }
-    if (!made) {
-      // Another team may make one too, wasting this one if it is first.
-      uint64_t count{static_cast<uint64_t>(teams)};
-      auto *bytes{static_cast<char *>(
-          merk_device_alloc(sizeof(TeamTable) + count * sizeof(TeamRing *)))};
-      made = reinterpret_cast<TeamTable *>(bytes);
-      made->id = id;
-      made->nodeHigh = nodeHigh;
-      made->nodeLow = nodeLow;
-      made->teams = teams;
-      made->started = 0;
-      made->reporting = 0;
-      made->arrived = 0;
-      made->rounds = 0;
-      made->rings = reinterpret_cast<TeamRing **>(bytes + sizeof(TeamTable));
-      for (uint64_t i{0}; i < count; ++i) {
-        made->rings[i] = nullptr;
-      }
-    }
-    made->next = first;
-    if (__atomic_compare_exchange_n(bucket, &first, made, false,
-            __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
-      currentTeams = made;
-      return;
-    }
+  TeamTable **slot{&regionSlot->teams};
+  if (TeamTable * table{__atomic_load_n(slot, __ATOMIC_ACQUIRE)}) {
+    currentTeams = table;
+    return;
+  }
+  // Another team may make one too, wasting this one if it is first.
+  uint64_t count{static_cast<uint64_t>(teams)};
+  auto *bytes{static_cast<char *>(
+      merk_device_alloc(sizeof(TeamTable) + count * sizeof(TeamRing *)))};
+  auto *made{reinterpret_cast<TeamTable *>(bytes)};
+  made->id = id;
+  made->nodeHigh = nodeHigh;
+  made->nodeLow = nodeLow;
+  made->teams = teams;
+  made->started = 0;
+  made->reporting = 0;
+  made->arrived = 0;
+  made->rounds = 0;
+  made->rings = reinterpret_cast<TeamRing **>(bytes + sizeof(TeamTable));
+  for (uint64_t i{0}; i < count; ++i) {
+    made->rings[i] = nullptr;
+  }
+  TeamTable *none{nullptr};
+  if (__atomic_compare_exchange_n(
+          slot, &none, made, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    currentTeams = made;
+  } else {
+    currentTeams = none;
   }
 }
 
@@ -786,7 +840,7 @@ RingEntry *RingOf(const uint64_t *handle, uint64_t kind) {
   }
   // Only a mailbox's one receiver adds its entry, but other mailboxes' may
   // be added to the same place at once.
-  auto *entry{static_cast<RingEntry *>(merk_device_alloc(sizeof(RingEntry)))};
+  auto *entry{static_cast<RingEntry *>(AllocateForTable(sizeof(RingEntry)))};
   *entry = {handle[2], handle[3], handle[4], ring, head,
       __atomic_load_n(bucket, __ATOMIC_RELAXED)};
   while (!__atomic_compare_exchange_n(bucket, &entry->next, entry, true,

@@ -182,12 +182,13 @@ collect(Box, !Got, !IO) :-
 % MERK: %[[BEGIN:.*]]:3 = merk.foreign_call @merk_teams_begin() : () -> (i64, i64, i64)
 % MERK: omp.target kernel_type(generic)
 % MERK: omp.teams num_teams(
+% MERK-NEXT: merk.foreign_call @merk_device_region_enter(%{{.*}}) : (i64) -> ()
 % MERK-NEXT: %[[TEAMS:.*]] = merk.foreign_call @omp_get_num_teams() : () -> i32
 % MERK-NEXT: merk.foreign_call @merk_device_teams_enter(%{{.*}}, %{{.*}}, %{{.*}}, %[[TEAMS]]) : (i64, i64, i64, i32) -> ()
 % MERK-NEXT: merk.call @omp_target_team_mailbox.ring_4_0
 % MERK-NEXT: merk.foreign_call @merk_device_teams_leave() : () -> ()
 % MERK-NEXT: omp.terminator
-% MERK: merk.foreign_call @merk_region_exit()
+% MERK: merk.foreign_call @merk_region_exit(%{{.*}}) : (i64) -> ()
 % MERK-NEXT: merk.foreign_call @merk_teams_end(%[[BEGIN]]#0) : (i64) -> ()
 % MERK-NOT: merk_device_no_teams
 % MERK: merk.call @omp_target_team_mailbox.gather_3_0
@@ -196,6 +197,7 @@ collect(Box, !Got, !IO) :-
 
 % DEVICE-LABEL: merk.proc @omp_target_team_mailbox.main_2_0()
 % DEVICE: omp.teams num_teams(
+% DEVICE-NEXT: merk.foreign_call @merk_device_region_enter(
 % DEVICE-NEXT: merk.foreign_call @omp_get_num_teams()
 % DEVICE-NEXT: merk.foreign_call @merk_device_teams_enter(
 % DEVICE-NEXT: merk.foreign_call @merk_device_teams_wait_all() : () -> ()

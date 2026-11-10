@@ -67,10 +67,14 @@ main(!IO) :-
 
 % The module has OpenMP's attributes, and the goal is an omp.target, a
 % generic kernel, whose map entries are its inputs, by copy, and its
-% outputs.
+% outputs. The first input is the slot that the host gives the region, which
+% the region passes to the device before it makes a cell.
 % MERK: omp.is_gpu = false, omp.is_target_device = false, omp.target_triples = [], omp.version = #omp.version<version = 52>
 % MERK-LABEL: merk.proc private @omp_target.compute_6_0(
 % MERK-SAME: %[[N:arg0]]: i64, %[[D:arg1]]: i64, %[[X:arg2]]: f64
+% MERK: %[[SLOT:[0-9]+]] = merk.foreign_call @merk_region_enter() : () -> i64
+% MERK-NEXT: llvm.store %[[SLOT]], %[[SLOTS:[0-9]+]] : i64, !llvm.ptr
+% MERK-NEXT: %[[SLOTM:[0-9]+]] = omp.map.info var_ptr(%[[SLOTS]] : !llvm.ptr, i64) map_clauses(to) capture(ByCopy) name("region_slot")
 % MERK: llvm.store %[[N]], %[[NS:[0-9]+]] : i64, !llvm.ptr
 % MERK: %[[NM:[0-9]+]] = omp.map.info var_ptr(%[[NS]] : !llvm.ptr, i64) map_clauses(to) capture(ByCopy) name("N")
 % MERK: omp.map.info {{.*}} map_clauses(to) capture(ByCopy) name("D")
@@ -79,15 +83,19 @@ main(!IO) :-
 % MERK: omp.map.info {{.*}} map_clauses(from) capture(ByRef) name("Q")
 % MERK: omp.map.info {{.*}} map_clauses(from) capture(ByRef) name("Y")
 % MERK-NOT: omp.map.info
-% MERK: omp.target kernel_type(generic) map_entries(%[[NM]] -> %[[NA:arg[0-9]+]], {{.*}}, %[[SM]] -> %[[SA:arg[0-9]+]], {{.*}}) {
-% MERK: %[[NV:[0-9]+]] = llvm.load %[[NA]] : !llvm.ptr -> i64
+% MERK: omp.target kernel_type(generic) map_entries(%[[SLOTM]] -> %[[SLOTA:arg[0-9]+]], %[[NM]] -> %[[NA:arg[0-9]+]], {{.*}}, %[[SM]] -> %[[SA:arg[0-9]+]], {{.*}}) {
+% MERK-NEXT: %[[SLOTV:[0-9]+]] = llvm.load %[[SLOTA]] : !llvm.ptr -> i64
+% MERK-NEXT: %[[NV:[0-9]+]] = llvm.load %[[NA]] : !llvm.ptr -> i64
+% MERK: merk.foreign_call @merk_device_region_enter(%[[SLOTV]]) : (i64) -> ()
 % MERK: %[[S:[0-9]+]] = merk.call @omp_target.sum_4_0(%{{[0-9]+}}, %[[NV]], %{{[0-9]+}})
 % MERK: merk.throw_if
 % MERK: llvm.store %[[S]], %[[SA]] : i64, !llvm.ptr
 % MERK: omp.terminator
-% MERK: llvm.load %[[SS]] : !llvm.ptr -> i64
+% MERK: merk.foreign_call @merk_region_exit(%[[SLOT]]) : (i64) -> ()
+% MERK-NEXT: llvm.load %[[SS]] : !llvm.ptr -> i64
 % MERK-LABEL: merk.proc private @omp_target.same_3_0(
-% MERK: omp.target kernel_type(generic) map_entries(%{{[0-9]+}} -> %[[XA:arg[0-9]+]], %{{[0-9]+}} -> %[[YA:arg[0-9]+]], %{{[0-9]+}} -> %{{arg[0-9]+}} :
+% MERK: omp.target kernel_type(generic) map_entries(%{{[0-9]+}} -> %{{arg[0-9]+}}, %{{[0-9]+}} -> %[[XA:arg[0-9]+]], %{{[0-9]+}} -> %[[YA:arg[0-9]+]], %{{[0-9]+}} -> %{{arg[0-9]+}} :
+% MERK-NEXT: llvm.load %{{arg[0-9]+}} : !llvm.ptr -> i64
 % MERK-NEXT: %[[XV:[0-9]+]] = llvm.load %[[XA]] : !llvm.ptr -> i64
 % MERK: llvm.store %[[XV]], %[[YA]] : i64, !llvm.ptr
 

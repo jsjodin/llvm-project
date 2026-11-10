@@ -32,13 +32,24 @@ constexpr uint64_t kRingOfWords{0};
 constexpr uint64_t kRingOfArrays{1};
 constexpr uint64_t kRingOfTerms{2};
 
-// The device's table of the rings it has, by the mailbox's slot, and its
-// table of the target teams regions running on it, by the region's id
-// (docs/INPROGRESS.md, Processes as teams, step 2), beside its arena's
-// current chunk: the words that the host clears when no region is running.
+// The device's table of the rings it has, by the mailbox's slot, after its
+// arena's current chunk and whether a wave is asking for one: the words
+// that the host clears when no region is running.
+constexpr uint64_t kBumpWords{2};
 constexpr uint64_t kRingCacheSlots{64};
-constexpr uint64_t kTeamTableSlots{16};
-constexpr uint64_t kArenaClearWords{1 + kRingCacheSlots + kTeamTableSlots};
+constexpr uint64_t kArenaClearWords{kBumpWords + kRingCacheSlots};
+
+// How many regions may run at once, all told. Each running region has a
+// slot, which the host gives it as it starts and takes back as it ends. A
+// region's image has, for each slot, the current chunk and its flag, and
+// the table of the region's teams (docs/INPROGRESS.md, Processes as teams,
+// step 2): the cells a region makes are bumped from chunks of its own,
+// which the host frees when the region ends, clearing the slot's words. A
+// region that starts while all are taken waits for one.
+constexpr uint64_t kRegionSlots{256};
+constexpr uint64_t kRegionSlotWords{kBumpWords + 2};
+// The slot of a chunk that is not a region's.
+constexpr uint64_t kNoRegionSlot{~uint64_t{0}};
 
 // The place in a team mailbox's handle on a device, whose slot is the team.
 // Temporary (GPU processes, docs/INPROGRESS.md): a GPU becomes a place of its

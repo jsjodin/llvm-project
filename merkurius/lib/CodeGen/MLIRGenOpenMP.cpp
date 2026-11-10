@@ -1981,6 +1981,13 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   operands.kernelType = mlir::omp::TargetExecModeAttr::get(&context_, mode);
   operands.device = device;
   operands.hostEvalVars.append(hostEval.begin(), hostEval.end());
+  // The host counts the running regions, and gives each a slot, whose
+  // chunks on the device hold the cells the region makes, freed as it ends
+  // (docs/INPROGRESS.md, The device's side of the first slice, step 6).
+  auto regionSlot{merk::ForeignCallOp::create(builder_, loc,
+      mlir::TypeRange{builder_.getI64Type()}, "merk_region_enter",
+      mlir::ValueRange{}, /*can_fail=*/false)
+          .getResult(0)};
   auto targetOp{mlir::omp::TargetOp::create(builder_, loc, operands)};
   targetOp.setCombined(combined);
   mlir::Region &region{targetOp.getRegion()};
@@ -1996,6 +2003,27 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   if (failed_) {
     values_ = before;
     return;
+  }
+  {
+    // Each team says which slot is the region's before it makes a cell: in
+    // omp.teams, and in a parallel region nested in it, where the ops of
+    // an SPMD kernel are, after the inputs that the region reads.
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    mlir::Block *enter{block};
+    if (auto teams{enter->empty()
+                ? nullptr
+                : mlir::dyn_cast<mlir::omp::TeamsOp>(enter->front())}) {
+      enter = &teams.getRegion().front();
+      if (auto parallel{enter->empty()
+                  ? nullptr
+                  : mlir::dyn_cast<mlir::omp::ParallelOp>(enter->front())}) {
+        enter = &parallel.getRegion().front();
+      }
+    }
+    builder_.setInsertionPointToStart(enter);
+    merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+        "merk_device_region_enter", mlir::ValueRange{regionSlot},
+        /*can_fail=*/false);
   }
   builder_.setInsertionPoint(targetOp);
   llvm::SetVector<mlir::Value> inputs;
@@ -2094,7 +2122,9 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
       continue;
     }
     std::optional<BodyVar> var{VarWithValue(before, goal.nonlocals, input)};
-    llvm::StringRef name{var ? llvm::StringRef{body.vars[*var].name} : ""};
+    llvm::StringRef name{var      ? llvm::StringRef{body.vars[*var].name}
+            : input == regionSlot ? "region_slot"
+                                  : ""};
 
     if (mlir::isa<merk::ArrayType>(input.getType())) {
       maps.push_back(MapArray(input,
@@ -2137,11 +2167,6 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
     }
   }
   targetOp.getMapVarsMutable().assign(maps);
-  // The host counts the running regions, and the last to end frees the
-  // devices' arenas (docs/INPROGRESS.md, The device's side of the first
-  // slice, step 6).
-  merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
-      "merk_region_enter", mlir::ValueRange{}, /*can_fail=*/false);
   // The region reads its inputs from their slots and stores its outputs;
   // an output may be an input's value, as in Y = X. A region that is
   // teams around a parallel region reads them in the parallel, as Flang
@@ -2230,7 +2255,8 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   }
   builder_.setInsertionPointAfter(targetOp);
   merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
-      "merk_region_exit", mlir::ValueRange{}, /*can_fail=*/false);
+      "merk_region_exit", mlir::ValueRange{regionSlot},
+      /*can_fail=*/false);
   values_ = before;
   for (auto [var, type, slot] : llvm::zip(outputs, outputTypes, outputSlots)) {
     values_[var] = mlir::LLVM::LoadOp::create(builder_, loc, type, slot);

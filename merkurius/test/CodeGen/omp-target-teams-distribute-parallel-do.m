@@ -78,7 +78,7 @@ saxpy(A, X, !Y) :-
 % MERK:         omp.map.info var_ptr(%{{.*}} : !llvm.ptr, i64) map_clauses(tofrom) capture(ByRef) bounds(%{{.*}}) name("STATE_VARIABLE_Y_0")
 % MERK:         omp.map.info var_ptr(%{{.*}} : !llvm.ptr, f64) map_clauses(to) capture(ByCopy) name("A")
 % MERK:         omp.map.info var_ptr(%{{.*}} : !llvm.ptr, i64) map_clauses(to) capture(ByRef) bounds(%{{.*}}) name("X")
-% MERK:         omp.target kernel_type(spmd) host_eval(%[[HLO]] -> %[[LO:.*]], %[[HHI]] -> %[[HI:.*]], %[[HSTEP]] -> %[[STEP:.*]] : i64, i64, i64) map_entries(%{{.*}} -> %[[N:.*]], %{{.*}} -> %[[Y:.*]], %{{.*}} -> %[[A:.*]], %{{.*}} -> %[[X:.*]] : !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) {
+% MERK:         omp.target kernel_type(spmd) host_eval(%[[HLO]] -> %[[LO:.*]], %[[HHI]] -> %[[HI:.*]], %[[HSTEP]] -> %[[STEP:.*]] : i64, i64, i64) map_entries(%{{.*}} -> %{{.*}}, %{{.*}} -> %[[N:.*]], %{{.*}} -> %[[Y:.*]], %{{.*}} -> %[[A:.*]], %{{.*}} -> %[[X:.*]] : !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) {
 % MERK-NEXT:      omp.teams {
 % MERK-NEXT:        omp.parallel {
 % MERK:               %[[NV:.*]] = llvm.load %[[N]] : !llvm.ptr -> i64
@@ -101,7 +101,7 @@ saxpy(A, X, !Y) :-
 % MERK-NOT:   merk.call @omp_target_teams_distribute_parallel_do.saxpy__loop
 % The device has no host_eval: its nest runs over the bounds it computes.
 % DEVICE-MERK-LABEL: merk.proc private @omp_target_teams_distribute_parallel_do.saxpy_4_0(
-% DEVICE-MERK:         omp.target kernel_type(spmd) map_entries(%{{[0-9]+}} -> %[[N:[a-z0-9]+]], {{.*}}) {
+% DEVICE-MERK:         omp.target kernel_type(spmd) map_entries(%{{[0-9]+}} -> %{{[a-z0-9]+}}, %{{[0-9]+}} -> %[[N:[a-z0-9]+]], {{.*}}) {
 % DEVICE-MERK:             %[[NV:.*]] = llvm.load %[[N]] : !llvm.ptr -> i64
 % DEVICE-MERK:             %[[LO:.*]] = merk.constant 0 : i64
 % DEVICE-MERK:             %[[HI:.*]] = arith.subi %[[NV]], %{{.*}} : i64
@@ -123,7 +123,7 @@ down(!A) :-
     %$omp target teams distribute parallel do
     ( for(I, 9, 5, -1) do !A ^ elem(I) := I ).
 % MERK-LABEL: merk.proc private @omp_target_teams_distribute_parallel_do.down_2_0(
-% MERK-NEXT:    %[[HLO:.*]] = merk.constant 9 : i64
+% MERK:         %[[HLO:.*]] = merk.constant 9 : i64
 % MERK-NEXT:    %[[HHI:.*]] = merk.constant 5 : i64
 % MERK-NEXT:    %[[HSTEP:.*]] = arith.constant -1 : i64
 % MERK:         omp.target kernel_type(spmd) host_eval(%[[HLO]] -> %[[LO:.*]], %[[HHI]] -> %[[HI:.*]], %[[HSTEP]] -> %[[STEP:.*]] : i64, i64, i64)
