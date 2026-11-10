@@ -3738,15 +3738,14 @@ llvm::LogicalResult Lowerer::LowerOpenMP() {
   // (CompileDeviceForeignCode), or in the device's image: the device's
   // runtime library has the merk_device_ and merk_array_ functions
   // (runtime/device, runtime/array.cpp), which the driver links into the
-  // device image, and the OpenMP device runtime has the team queries that
-  // process.team_number and number_of_teams become.
+  // device image, and the OpenMP device runtime has the number of teams,
+  // which a teams region gives the runtime.
   for (auto func : module_.getOps<mlir::LLVM::LLVMFuncOp>()) {
     // A foreign_proc's C function was compiled for the device, or reported,
     // by CompileDeviceForeignCode.
     if (!func.isExternal() || func.getSymName().starts_with("merk_device_") ||
         func.getSymName().starts_with("merk_foreign_") ||
         func.getSymName().starts_with("merk_array_") ||
-        func.getSymName() == "omp_get_team_num" ||
         func.getSymName() == "omp_get_num_teams") {
       continue;
     }

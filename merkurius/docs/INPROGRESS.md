@@ -1434,7 +1434,8 @@ worker(!IO) :-
    `team_number` and `number_of_teams`, on the host, sequentially and on a GPU.
    Implemented 2026-11-09 (`CodeGen/omp-target-teams.m`): with OpenMP the two
    become `omp_get_team_num` and `omp_get_num_teams`, on the host and in the
-   device's runtime; a number of teams that is not from 1 to 2^31 - 1 is a
+   device's runtime (the library's C since "Library code on the device", step
+   4); a number of teams that is not from 1 to 2^31 - 1 is a
    compile-time error for a literal and a run-time error before the region for
    a variable; `thread_limit` is not yet implemented. A variable used only in
    the clause is not bound, as for `device` (mmc reads a clause as a comment).
@@ -1688,7 +1689,7 @@ still stalls the one before it when the ring between them fills.
 
 ## Library code on the device
 
-Proposed 2026-11-10; steps 1 to 3 are built.
+Proposed 2026-11-10; steps 1 to 4 are built.
 
 **Why.** A target region can call only its own module's procedures and the
 runtime's `merk_device_` functions (`Lowerer::LowerOpenMP`). So nothing of the
@@ -1831,6 +1832,22 @@ Each new predicate a region needs would add another special case or copy.
    - **Kept in the compiler:** `send`, `receive` and `team_mailbox` stay
      builtins, as they need the message type's key, and `send` and `receive`
      choose by the type between a word and an array.
+   Built 2026-11-10:
+   - **io:** `write_string`, `write_int` and `nl` need no change. Their C,
+     `fputs(S, stdout)` and so on, runs on a device as LLVM's GPU libc, whose
+     `stdio` writes into the host's `stdout` over libc's RPC. A region reaches
+     them as copies of io's procedures. `WriteOnDevice` is gone, and so are our
+     output opcodes, `rpcWriteText` and `rpcWriteInt`, and their
+     `merk_device_` functions (design document, "Output from a region", which
+     says why).
+   - **process:** `team_number` and `number_of_teams` call
+     `omp_get_team_num` and `omp_get_num_teams` on a device. On the host they
+     call them through weak references, so a program linked with OpenMP's
+     runtime gets its answers and one without gets team 0 of 1, as before.
+     The builtin is gone, also from the host's compile with OpenMP.
+   - **Tests:** `omp-target-write.m` checks the device's IR for libc's calls
+     from io's copies; `omp-target-teams.m` checks the calls of
+     process's procedures. The GPU tests of output and teams run unchanged.
 5. **`process.team_barrier` in the runtime,** as the paper on specialized
    kernels does a cross-team reduction (next section), not with messages:
    - **On a device:** a counter in the region's team table that flips sense

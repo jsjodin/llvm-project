@@ -267,6 +267,16 @@
 
 :- pragma foreign_decl("C", local, "
 extern void merk_node(MR_Integer *high, MR_Integer *low);
+/* A team's number and the number of teams are OpenMP's, on a device and on
+   the host, when the program is linked with OpenMP's runtime; without it,
+   the only team is 0. */
+#ifdef __AMDGPU__
+extern int omp_get_team_num(void);
+extern int omp_get_num_teams(void);
+#else
+extern int omp_get_team_num(void) __attribute__((weak));
+extern int omp_get_num_teams(void) __attribute__((weak));
+#endif
 extern MR_Integer merk_team_mailbox(MR_Integer team, MR_Word type_info,
     MR_Integer *place_slot, MR_Integer *generation, MR_Integer *secret);
 extern void merk_mailbox_new(MR_Word type_info, MR_Integer *place_slot,
@@ -692,19 +702,28 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
         )
     ).
 
-    % With OpenMP, code generation makes these OpenMP's.
+    % OpenMP's when the program is linked with its runtime, which a weak
+    % reference finds on the host.
 :- pragma foreign_proc("C",
     team_number(Number::out, _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
-    Number = 0;
+#ifdef __AMDGPU__
+    Number = omp_get_team_num();
+#else
+    Number = omp_get_team_num ? omp_get_team_num() : 0;
+#endif
 ").
 
 :- pragma foreign_proc("C",
     number_of_teams(Number::out, _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
-    Number = 1;
+#ifdef __AMDGPU__
+    Number = omp_get_num_teams();
+#else
+    Number = omp_get_num_teams ? omp_get_num_teams() : 1;
+#endif
 ").
 
 team_mailbox(Team, Mailbox, !IO) :-

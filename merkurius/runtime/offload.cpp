@@ -320,17 +320,6 @@ DeviceRing *NewRing(int device) {
   return ring;
 }
 
-// Text from a device. Flushed at the end of a line only, so that a line made
-// of several writes reaches the terminal or pipe whole.
-void WriteText(const char *text, std::uint64_t size) {
-  flockfile(stdout);
-  fwrite_unlocked(text, 1, size, stdout);
-  if (size && text[size - 1] == '\n') {
-    fflush_unlocked(stdout);
-  }
-  funlockfile(stdout);
-}
-
 // An error on a device, reported for its first lane that has one, as the
 // host reports the same. A region is running, so the program ends at once
 // (ExitProgram), with the kernel, and the device gets no answer.
@@ -370,26 +359,6 @@ unsigned HandleOpcode(void *raw, unsigned) {
     // The answer tells the device that the message is queued.
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
       SendTo(buffer->data, buffer->data[5], buffer->data[6]);
-    });
-    return rpc::RPC_SUCCESS;
-  case rpcWriteText: {
-    // At most 64 lanes on the GPUs that the offload plugin serves.
-    std::uint64_t sizes[64]{};
-    void *texts[64]{};
-    port.recv_n(texts, sizes, [](std::uint64_t size) { return Malloc(size + 1); });
-    port.send([&](rpc::Buffer *, std::uint32_t lane) {
-      WriteText(static_cast<const char *>(texts[lane]), sizes[lane]);
-    });
-    for (void *text : texts) {
-      std::free(text);
-    }
-    return rpc::RPC_SUCCESS;
-  }
-  case rpcWriteInt:
-    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
-      flockfile(stdout);
-      printf("%lld", static_cast<long long>(buffer->data[0]));
-      funlockfile(stdout);
     });
     return rpc::RPC_SUCCESS;
   case rpcAttach:

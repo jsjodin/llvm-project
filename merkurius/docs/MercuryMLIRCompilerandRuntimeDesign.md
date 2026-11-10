@@ -3080,16 +3080,29 @@ such as `target teams distribute parallel do`, is not affected, though a generic
 kernel does not get the speed of the conversion. `teams` cannot be used this way:
 OpenMP does not allow statements beside it in a `target`.
 
-**Output from a region.** In the device's compile, `io.write_string`, `io.write_int`
-and `io.nl` are calls of `merk_device_write_string` and so on, which send the text
-or number to the host with opcodes of ours (`rpcWriteText`, `rpcWriteInt`). The
-callback writes to the host's `stdout` and flushes at the end of a line, so that a
-line of several writes stays whole and in order with what the host prints. A region
-on the host calls `io`'s. LLVM's other routes were not taken: libc's `printf` on
-the GPU would add libc to the device image; Flang's I/O over RPC
-(`flang-rt/lib/runtime/io-api-gpu.cpp`) buffers each statement on the server, which
-Mercury's separate write calls do not map to. Each write is a round trip on the one
-server thread, so it is for messages, not for a loop that is being timed.
+**Output from a region.** On a device, `io.write_string`, `io.write_int` and `io.nl`
+are io's procedures, copied into the region's compile with their foreign code
+(docs/INPROGRESS.md, Library code on the device). Their C is the host's,
+`fputs(S, stdout)` and so on, which on a GPU is LLVM's libc. Its `stdio` sends each
+call to the host over libc's own RPC opcodes. The offload plugin's server writes the
+text into the host's `stdout` and answers once it has. So a region's output is in
+order with what the host prints, through the same buffer, and is flushed as the
+host's is: at the end of a line on a terminal, in blocks into a pipe or file, and
+when the program exits, also after a device's error. A region on the host calls the
+same C.
+
+Each write is a round trip on the plugin's one server thread, so it is for messages,
+not for a loop that is being timed. Several teams' writes may interleave within a
+line, as several threads' do on the host.
+
+Rejected:
+- *Output opcodes of our own* (`rpcWriteText`, `rpcWriteInt`, until 2026-11-10),
+  whose callback flushed at the end of each line. The flush was not needed for order,
+  since both go into the host's one `stdout` buffer. It cost a system call per line
+  into a pipe. libc's `stdio` is developed and improved upstream, and ours would not
+  be.
+- *Flang's I/O over RPC* (`flang-rt/lib/runtime/io-api-gpu.cpp`), which buffers each
+  statement on the server, which Mercury's separate write calls do not map to.
 
 **The transport is opcodes of our own,** `'m' << 24 | n`
 (`runtime/rpc-opcodes.h`), in `runtime/device/device.cpp` and the callback in

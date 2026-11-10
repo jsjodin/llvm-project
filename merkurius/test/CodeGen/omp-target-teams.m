@@ -114,11 +114,11 @@ collect_bools(Box, !Answers, !IO) :-
 % MERK-NEXT: merk.foreign_call @omp_get_num_teams()
 % MERK-NEXT: merk.foreign_call @merk_device_teams_enter(
 % MERK-NEXT: merk.call @omp_target_teams.some_teams_3_0
-% MERK: merk.foreign_call @omp_get_team_num() : () -> i32
-% MERK: merk.foreign_call @omp_get_num_teams() : () -> i32
+% MERK: merk.call @process.team_number_3_0()
+% MERK: merk.call @process.number_of_teams_3_0()
 % MERK-LABEL: merk.proc private @omp_target_teams.report_3_0(
-% MERK: merk.foreign_call @omp_get_team_num() : () -> i32
-% MERK: merk.foreign_call @omp_get_num_teams() : () -> i32
+% MERK: merk.call @process.team_number_3_0()
+% MERK: merk.call @process.number_of_teams_3_0()
 
 % DEVICE-LABEL: merk.proc @omp_target_teams.main_2_0()
 % DEVICE: omp.target kernel_type(generic) map_entries({{.*}}, %{{.*}} -> %[[ARG:[^ ]*]] : {{.*}}) {
