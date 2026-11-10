@@ -3722,10 +3722,13 @@ llvm::LogicalResult Lowerer::LowerOpenMP() {
   // other modules', such as the library's, nor foreign code. The device's
   // runtime library has the merk_device_ and merk_array_ functions
   // (runtime/device, runtime/array.cpp), which the driver links into the
-  // device image.
+  // device image, and the OpenMP device runtime has the team queries that
+  // process.team_number and number_of_teams become.
   for (auto func : module_.getOps<mlir::LLVM::LLVMFuncOp>()) {
     if (!func.isExternal() || func.getSymName().starts_with("merk_device_") ||
-        func.getSymName().starts_with("merk_array_")) {
+        func.getSymName().starts_with("merk_array_") ||
+        func.getSymName() == "omp_get_team_num" ||
+        func.getSymName() == "omp_get_num_teams") {
       continue;
     }
     if (auto uses{mlir::SymbolTable::getSymbolUses(func, module_)};

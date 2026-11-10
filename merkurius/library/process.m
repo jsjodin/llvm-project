@@ -180,6 +180,13 @@
 :- pred lookup(node::in, string::in, timeout::in,
     maybe_error(mailbox(M))::out, io::di, io::uo) is det.
 
+    % The number of this process's team in a target teams region, from 0,
+    % and how many teams the region has; 0 and 1 outside one. Without
+    % OpenMP, the region runs once, as team 0 of 1 (docs/INPROGRESS.md,
+    % Processes as teams).
+:- pred team_number(int::out, io::di, io::uo) is det.
+:- pred number_of_teams(int::out, io::di, io::uo) is det.
+
     % For the expansion of the receive goal (design document, "The receive
     % goal"), not for programs. The selector of a receive goal of K arms
     % maps a message that the arm numbered I selects, from 0, to the arm's
@@ -672,6 +679,21 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
             scan(Mailbox, Selector, Deadline, Position + 1, Result, !IO)
         )
     ).
+
+    % With OpenMP, code generation makes these OpenMP's.
+:- pragma foreign_proc("C",
+    team_number(Number::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Number = 0;
+").
+
+:- pragma foreign_proc("C",
+    number_of_teams(Number::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Number = 1;
+").
 
 :- pred node_id(int::out, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",

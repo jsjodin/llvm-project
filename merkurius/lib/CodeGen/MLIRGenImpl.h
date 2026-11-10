@@ -601,10 +601,16 @@ private:
       mlir::omp::TargetExecMode mode,
       mlir::ValueRange hostEval = {}, llvm::ArrayRef<UpdatedSlot> slots = {},
       mlir::Value device = {});
-  // The value of the leaf's device clause, a null one if it has none, or
-  // nothing after an error.
-  std::optional<mlir::Value> DeviceOf(const omp::Leaf &, const ProcedureBody &,
-      parser::CharBlock at, mlir::Location);
+  // The value of the leaf's clause `id`, which takes one integer, `what`,
+  // such as "device number": a null one if it has none, or nothing after an
+  // error.
+  std::optional<mlir::Value> IntegerClause(const omp::Leaf &, llvm::omp::Clause id,
+      llvm::StringRef what, const ProcedureBody &, parser::CharBlock at,
+      mlir::Location);
+  // A target teams region, whose teams each run the goal (docs/INPROGRESS.md,
+  // Processes as teams).
+  void TargetTeams(const Body &, const ProcedureBody &,
+      const omp::ConstructQueue &, mlir::Value device);
   // The module's omp.declare_reduction for the operator on `type`, an
   // integer or a float, by value, made the first time, as Flang's ReductionProcessor makes
   // and names them.

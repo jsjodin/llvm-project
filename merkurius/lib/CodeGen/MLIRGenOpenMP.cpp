@@ -510,6 +510,11 @@ static bool IsTargetClauseHandled(
   return id == llvm::omp::OMPC_device;
 }
 
+static bool IsTeamsClauseHandled(
+    llvm::omp::Directive, llvm::omp::Clause id, bool) {
+  return id == llvm::omp::OMPC_num_teams;
+}
+
 static bool IsTargetDataClauseHandled(
     llvm::omp::Directive, llvm::omp::Clause id, bool) {
   return id == llvm::omp::OMPC_map || id == llvm::omp::OMPC_device;
@@ -879,7 +884,8 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
         ValueOf(loop->step > 0 ? big : small),
         IntegerConstant(builder_.getI64Type(), loop->step, loc)};
   }
-  std::optional<mlir::Value> device{DeviceOf(queue->front(), body, at, loc)};
+  std::optional<mlir::Value> device{IntegerClause(queue->front(),
+      llvm::omp::OMPC_device, "device number", body, at, loc)};
   if (!device) {
     return;
   }
@@ -1347,14 +1353,16 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
     }
     return;
   }
-  if (directive.id != llvm::omp::Directive::OMPD_target) {
+  bool teams{directive.id == llvm::omp::Directive::OMPD_target_teams};
+  if (directive.id != llvm::omp::Directive::OMPD_target && !teams) {
     NotYet(at,
         "the " + std::string{parser::EnumToString(directive.id)} +
             " directive");
     return;
   }
   std::optional<omp::ConstructQueue> queue{Decompose(directive, at)};
-  if (!queue || !LeafClauses(queue->front(), at, IsTargetClauseHandled)) {
+  if (!queue || !LeafClauses(queue->front(), at, IsTargetClauseHandled) ||
+      (teams && !LeafClauses(queue->back(), at, IsTeamsClauseHandled))) {
     return;
   }
   if (builder_.getInsertionBlock()->getParent()
@@ -1362,28 +1370,98 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
     NotYet(at, "target regions in target regions");
     return;
   }
-  std::optional<mlir::Value> device{
-      DeviceOf(queue->front(), body, at, Location(goal.tokens))};
+  std::optional<mlir::Value> device{IntegerClause(queue->front(),
+      llvm::omp::OMPC_device, "device number", body, at, Location(goal.tokens))};
   if (!device) {
+    return;
+  }
+  if (teams) {
+    TargetTeams(goal, body, *queue, *device);
     return;
   }
   Target(goal, body, [&]() { Goal(*goal.goals.front(), body); },
       /*combined=*/false, KernelOf(*queue).mode, {}, {}, *device);
 }
 
-// device(N), as Flang's ClauseProcessor::processDevice makes it: the number
-// is a non-negative integer, or an integer variable bound before the
-// directive. Other terms need code in a clause, which nothing has yet.
-std::optional<mlir::Value> MerkGenerator::DeviceOf(const omp::Leaf &leaf,
-    const ProcedureBody &body, parser::CharBlock at, mlir::Location loc) {
+// target teams, as Flang lowers it with no loop: a generic kernel whose
+// omp.teams runs the goal on each team's initial thread, while the team's
+// other threads wait in the state machine (design document, Who
+// communicates). Its num_teams is a host_eval value on the host, from which
+// the host launches the teams, and on the device the value mapped in, read
+// before omp.teams. The region maps it in both compiles, so that the
+// kernel's arguments agree. The number is checked when the region starts,
+// as one that is not positive, or does not fit in OpenMP's 32 bits, would
+// ask libomptarget for its default or for billions of teams.
+void MerkGenerator::TargetTeams(const Body &goal, const ProcedureBody &body,
+    const omp::ConstructQueue &queue, mlir::Value device) {
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  std::optional<mlir::Value> number{IntegerClause(queue.back(),
+      llvm::omp::OMPC_num_teams, "number of teams", body, at, loc)};
+  if (!number) {
+    return;
+  }
+  mlir::Value count;
+  if (*number) {
+    if (std::optional<std::int64_t> constant{
+            mlir::getConstantIntValue(*number)};
+        constant && (*constant <= 0 || *constant > INT32_MAX)) {
+      Error(at, "the number of teams must be from 1 to %s"_err_en_US,
+          std::to_string(INT32_MAX));
+      return;
+    }
+    merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+        "merk_check_teams", mlir::ValueRange{*number}, /*can_fail=*/false);
+    count = mlir::arith::TruncIOp::create(
+        builder_, loc, builder_.getI32Type(), *number);
+  }
+  bool host{!target_.options().openMPIsTargetDevice};
+  mlir::omp::TeamsOp teamsOp;
+  Target(
+      goal, body,
+      [&]() {
+        mlir::omp::TeamsOperands operands;
+        if (count) {
+          operands.numTeamsUpperVars.push_back(count);
+        }
+        teamsOp = mlir::omp::TeamsOp::create(builder_, loc, operands);
+        mlir::OpBuilder::InsertionGuard guard{builder_};
+        builder_.setInsertionPointToStart(
+            &teamsOp.getRegion().emplaceBlock());
+        Goal(*goal.goals.front(), body);
+        if (!failed_ && !Terminated()) {
+          mlir::omp::TerminatorOp::create(builder_, loc);
+        }
+      },
+      /*combined=*/true, KernelOf(queue).mode,
+      host && count ? mlir::ValueRange{count} : mlir::ValueRange{}, {},
+      device);
+  // The host launches by the host_eval value, the block's first argument.
+  if (!failed_ && host && count && teamsOp) {
+    teamsOp.getNumTeamsUpperVarsMutable().assign(
+        teamsOp->getParentOfType<mlir::omp::TargetOp>()
+            .getRegion()
+            .front()
+            .getArgument(0));
+  }
+}
+
+// A clause of one integer, as Flang's ClauseProcessor makes device(N) and
+// num_teams(N): the number is a non-negative integer, or an integer
+// variable bound before the directive. Other terms need code in a clause,
+// which nothing has yet.
+std::optional<mlir::Value> MerkGenerator::IntegerClause(const omp::Leaf &leaf,
+    llvm::omp::Clause id, llvm::StringRef what, const ProcedureBody &body,
+    parser::CharBlock at, mlir::Location loc) {
+  std::string name{llvm::omp::getOpenMPClauseName(id).str()};
   const parser::OmpGenericClause *clause{nullptr};
   for (const parser::OmpClause *c : leaf.clauses) {
     const auto *generic{std::get_if<const parser::OmpGenericClause *>(c)};
-    if (!generic || (*generic)->id != llvm::omp::OMPC_device) {
+    if (!generic || (*generic)->id != id) {
       continue;
     }
     if (clause) {
-      Error(at, "a directive can have only one device clause"_err_en_US);
+      Error(at, "a directive can have only one %s clause"_err_en_US, name);
       return std::nullopt;
     }
     clause = *generic;
@@ -1392,11 +1470,11 @@ std::optional<mlir::Value> MerkGenerator::DeviceOf(const omp::Leaf &leaf,
     return mlir::Value{};
   }
   if (!clause->modifiers.empty()) {
-    NotYet(at, "modifiers of the device clause");
+    NotYet(at, "modifiers of the " + name + " clause");
     return std::nullopt;
   }
   if (clause->arguments.size() != 1) {
-    Error(at, "the device clause takes one device number"_err_en_US);
+    Error(at, "%s"_err_en_US, "the " + name + " clause takes one " + what.str());
     return std::nullopt;
   }
   const parser::DataTerm &number{clause->arguments.front()};
@@ -1415,17 +1493,19 @@ std::optional<mlir::Value> MerkGenerator::DeviceOf(const omp::Leaf &leaf,
       if (!llvm::is_contained({"int", "uint", "int8", "int16", "int32", "int64",
                                   "uint8", "uint16", "uint32", "uint64"},
               semantics::TypeToString(*body.vars[var].type))) {
-        Error(at, "the device number %s must be an integer"_err_en_US,
-            (*variable)->name);
+        Error(at, "%s"_err_en_US,
+            "the " + what.str() + " " + (*variable)->name.str() +
+                " must be an integer");
         return std::nullopt;
       }
       return value;
     }
-    Error(at, "the device number %s is not bound before the directive"_err_en_US,
-        (*variable)->name);
+    Error(at, "%s"_err_en_US,
+        "the " + what.str() + " " + (*variable)->name.str() +
+            " is not bound before the directive");
     return std::nullopt;
   }
-  NotYet(at, "a device number that is not an integer or a variable");
+  NotYet(at, "a " + what.str() + " that is not an integer or a variable");
   return std::nullopt;
 }
 
@@ -1582,7 +1662,8 @@ void MerkGenerator::TargetData(const Body &goal, const ProcedureBody &body,
     Error(at, "a target data directive must have a map clause"_err_en_US);
     return;
   }
-  std::optional<mlir::Value> device{DeviceOf(leaf, body, at, loc)};
+  std::optional<mlir::Value> device{IntegerClause(
+      leaf, llvm::omp::OMPC_device, "device number", body, at, loc)};
   if (!device) {
     return;
   }
@@ -1732,6 +1813,18 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
       outputs.push_back(var);
     }
   }
+  // A teams region with no loop runs its goal in every team, which would
+  // each bind the output.
+  bool teamsGoal{mode == mlir::omp::TargetExecMode::generic &&
+      !block->empty() && mlir::isa<mlir::omp::TeamsOp>(block->front())};
+  if (teamsGoal && !outputs.empty()) {
+    Error(at,
+        "a target teams region must not bind %s, which is used after it, "
+        "since every team would bind it"_err_en_US,
+        body.vars[outputs.front()].name);
+    values_ = before;
+    return;
+  }
   for (mlir::Value input : inputs) {
     if (!FindUpdatedSlot(slots, input) && !Mappable(input.getType())) {
       std::optional<BodyVar> var{VarWithValue(before, goal.nonlocals, input)};
@@ -1858,10 +1951,12 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   // The region reads its inputs from their slots and stores its outputs;
   // an output may be an input's value, as in Y = X. A region that is
   // teams around a parallel region reads them in the parallel, as Flang
-  // does, for the reason OmpLoop computes its bounds there.
+  // does, for the reason OmpLoop computes its bounds there. One whose teams
+  // run a goal reads them before omp.teams, whose number of teams may be
+  // one of them.
   mlir::Block *reads{block};
   if (auto teams{mlir::dyn_cast<mlir::omp::TeamsOp>(block->front())};
-      teams && outputs.empty()) {
+      teams && outputs.empty() && !teamsGoal) {
     reads = &teams.getRegion().front();
     if (auto parallel{mlir::dyn_cast<mlir::omp::ParallelOp>(reads->front())}) {
       reads = &parallel.getRegion().front();

@@ -1391,6 +1391,68 @@ exchange between teams needs no second GPU to develop.
   message the whole team reads. Those bind to the team; nothing in OpenMP
   synchronizes between teams, apart from the end of the teams region.
 
+**Decided 2026-11-09: a teams region first.** A program starts the processes with
+`%$omp target teams num_teams(N)` before a goal that threads `io`; each team runs
+the goal as a process. Rejected for now: spawning by a `:- process` declaration's
+kind name, which the design document has for GPU processes, as those declarations
+need semantic analysis first; spawn comes later (below).
+
+```mercury
+%$omp target teams num_teams(4)
+worker(!IO)
+
+worker(!IO) :-
+    team_number(Me, !IO),
+    number_of_teams(N, !IO),
+    team_mailbox((Me + 1) mod N, Next, !IO),
+    send(Next, token(Me), !IO),
+    team_mailbox(Me, Mine, !IO),
+    receive(Mine, any, after(1000), Got, !IO),
+    ...
+```
+
+- **As Flang lowers `target teams`:** a generic kernel, `omp.teams` in
+  `omp.target`, its `num_teams` a `host_eval` value on the host and read from its
+  map on the device. A generic kernel runs the goal on each team's initial thread,
+  so the first version needs no `masked` or barrier.
+- **`num_teams(N)` asks; the program asks back.** As in OpenMP, a program may get
+  fewer teams, so it uses `number_of_teams`, not N.
+- **Its sequential meaning** is OpenMP's: without `-fopenmp`, the goal runs once,
+  as team 0 of 1. A ring of `number_of_teams` teams is then one team sending to
+  itself. With `-fopenmp` and no device, libomp runs the teams as host threads.
+- **A teams region binds nothing used after it,** as each team would bind it. Its
+  results leave in messages or output.
+- **Team mailboxes.** `team_mailbox(T, Box, !IO)` gives team T's mailbox for Box's
+  message type, in the current teams region: one for each team and type, made when
+  first used, in the region's memory, living as long as the region. Only the teams
+  of the region send to them at first; a send from elsewhere is reported as not
+  yet implemented.
+
+**Steps.**
+
+1. `target teams` with `num_teams` (an integer, or a variable bound before), and
+   `team_number` and `number_of_teams`, on the host, sequentially and on a GPU.
+   Implemented 2026-11-09 (`CodeGen/omp-target-teams.m`): with OpenMP the two
+   become `omp_get_team_num` and `omp_get_num_teams`, on the host and in the
+   device's runtime; a number of teams that is not from 1 to 2^31 - 1 is a
+   compile-time error for a literal and a run-time error before the region for
+   a variable; `thread_limit` is not yet implemented. A variable used only in
+   the clause is not bound, as for `device` (mmc reads a clause as a comment).
+2. Team mailboxes for one-word messages: a ring for each team and type, which any
+   team appends to with an atomic add and its team takes from, with no call of the
+   host. The same code in merkrt for the host's teams and the sequential program.
+3. Arrays between teams by their pointer.
+4. A check at launch that the teams fit on the GPU at once (risk 1), reported as an
+   error, since a team that is not running deadlocks the others.
+5. A barrier from messages, measured against the estimates below.
+
+**Later:** SPMD kernels with `masked` and a team barrier; team mailboxes reachable
+from the host and other nodes; and spawn. Spawning on a GPU may need a first
+process there, a persistent kernel that the host starts, perhaps when the node
+starts, which then spawns into free team slots. Whether that needs a call of its
+own before `spawn` (a `spawn_init`), or the first `spawn` to a GPU starts it, is
+open.
+
 **Risks, the first being the largest.**
 
 1. **Forward progress.** A GPU does not promise that every team makes progress.
