@@ -1925,7 +1925,8 @@ threads (`-fopenmp-target-ignore-env-vars`). That stays a flag.
 
 ## GPU processes without `omp target`: liboffload and libc
 
-Proposed 2026-11-10; nothing is built. Decided by the user the same day:
+Proposed 2026-11-10; step 1, the probe, is done. Decided by the user the same
+day:
 - **GPU processes launch without `omp target`.** A process on a GPU is a
   kernel that our runtime launches, not a target region.
 - **OpenMP stays the programming model for parallelism:** target regions,
@@ -1959,8 +1960,10 @@ wrong shape for that:
     libc's. It is what `__tgt_register_rpc_callback` calls.
 - **libomptarget is built on liboffload.** Upstream finished removing the
   plugin interface from it (#239525), so only liboffload makes the plugins.
-  `olInit` counts references. So our runtime and libomptarget can both use
-  it in one process, with one plugin and one RPC server for each platform.
+  But libomptarget links its own static copy (`LLVMOffloadStatic`) and its
+  export list hides the `ol` functions. A program that also loads
+  `libLLVMOffload.so` has two copies, each with its own plugin and RPC
+  server (found by the probe, step 1).
 - **Other languages use it too.** `offload/languages` is a CUDA and HIP
   runtime on liboffload (`LLVMOffloadKernel`), registering images and
   launching kernels by name. `llvm-gpu-loader` is built on it.
@@ -2041,6 +2044,36 @@ the process asks the host to launch. The first version has neither.
    - that a persistent kernel and a region's kernel run at once;
    - that one RPC server serves both programs' clients.
    Run small first, with a timeout, as the GPU drives the display.
+
+   Done 2026-11-10, a probe outside the tree: a C++ program with one OpenMP
+   region, and a kernel built without OpenMP from `gpuintrin.h` and libc,
+   launched through `libLLVMOffload.so`. Each kernel waits for the other's
+   flag, in host memory from `olMemAllocHost`, for at most five seconds.
+   Found:
+   - **The two copies coexist,** with liboffload or libomptarget
+     initialized first. Both RPC servers serve our opcode, liboffload's to
+     the process and libomptarget's to the region. libc's `printf` works in
+     the process. So the runtime registers its callback with both:
+     `olPlatformRegisterRPCCallback` for its own copy, and
+     `__tgt_register_rpc_callback` for libomptarget's.
+   - **Devices match by UID.** `OL_DEVICE_INFO_UID` gives `AMDGPU-0`, and
+     OpenMP 6.0's `omp_get_device_from_uid` maps it to device 0.
+   - **The process and the region run at once.** `olLaunchKernel` returns
+     at once, and each kernel saw the other's flag.
+   - **The image must export `__llvm_rpc_client`.** The plugin finds the
+     client by its dynamic symbol. Without it, nothing initializes the
+     client, and the first send reads address 0. With LTO, the client is
+     exported only if an object given to the link defines it. libc's and
+     `libompdevice`'s definitions come from archives and are internalized.
+     A weak, protected definition in the image's own object, as OpenMP's
+     device runtime has, keeps it (merkc's images get one from the module).
+     A process's image needs one too.
+   - **A region's body must be the same in the host and device compiles.**
+     Device-only code under `#ifdef __AMDGPU__` inside the region changed
+     its kernel's arguments, and a `declare target` variable that only the
+     device declares added an offload entry the host lacks. Both faulted.
+     Device-only operations go in functions declared `declare target`, with
+     host versions, as `libmerkdevice`'s are.
 2. **The device runtime off OpenMP's API:** `gpuintrin.h` and libc in
    `runtime/device` and in the library's C under `__AMDGPU__`. The existing
    tests check that regions behave the same.
