@@ -527,6 +527,28 @@ static void ReadBitsEarly(llvm::Function &function, KnownTypes &known) {
   }
 }
 
+// The pointer that a pointer made from an integer was, if the integer is its
+// bits, across address spaces: a handle passed into a target region is
+// mapped as a generic pointer's bits. At -O2 the region's host version is
+// inlined, and one region's conversion can be shared with the next's and
+// with the code between them, where it is live across a safepoint. It is the
+// same cell as the pointer.
+static const llvm::Value *RoundTripped(const llvm::Value *value) {
+  auto *made{llvm::dyn_cast<llvm::IntToPtrInst>(value)};
+  if (!made) {
+    return nullptr;
+  }
+  auto *bits{llvm::dyn_cast<llvm::PtrToIntOperator>(made->getOperand(0))};
+  if (!bits) {
+    return nullptr;
+  }
+  const llvm::Value *pointer{bits->getPointerOperand()};
+  while (auto *cast{llvm::dyn_cast<llvm::AddrSpaceCastOperator>(pointer)}) {
+    pointer = cast->getPointerOperand();
+  }
+  return IsHeapPointer(pointer->getType()) ? pointer : nullptr;
+}
+
 // What the bundles said of a value the rewrite made, from what it was made of.
 static llvm::Constant *FindType(const llvm::Value *root, KnownTypes &known) {
   llvm::SmallPtrSet<const llvm::Value *, 16> seen;
@@ -541,6 +563,8 @@ static llvm::Constant *FindType(const llvm::Value *root, KnownTypes &known) {
     }
     if (auto *relocate{llvm::dyn_cast<llvm::GCRelocateInst>(value)}) {
       worklist.push_back(relocate->getDerivedPtr());
+    } else if (const llvm::Value *pointer{RoundTripped(value)}) {
+      worklist.push_back(pointer);
     } else if (llvm::isa<llvm::PHINode, llvm::SelectInst>(value)) {
       for (const llvm::Use &use : llvm::cast<llvm::User>(value)->operands()) {
         if (use->getType()->isPointerTy()) {
