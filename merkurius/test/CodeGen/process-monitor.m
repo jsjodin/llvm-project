@@ -7,6 +7,10 @@
 % RUN: merkc -O0 %s -o %t.0 && %t.0 2>/dev/null | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 %s -o %t.2 && %t.2 2>/dev/null | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: env MERK_WORKERS=1 %t.2 2>/dev/null | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+%
+% Every message is read or freed, those that monitors made among them.
+% RUN: env MERK_CHECK_MESSAGES=1 %t.2 2>&1 >/dev/null | FileCheck %s --check-prefix=MESSAGES --match-full-lines
+% MESSAGES:Mercury runtime: 0 messages are neither read nor freed
 
 :- module process_monitor.
 :- interface.

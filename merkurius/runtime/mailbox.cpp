@@ -88,14 +88,22 @@ struct Message {
 
 // How many queued messages have chunks that neither a process has taken
 // nor a mailbox has freed: those in mailboxes, and any lost. With
-// MERK_CHECK_MESSAGES, the program's end reports them (offload.cpp).
+// MERK_CHECK_MESSAGES, the program's end reports those lost (offload.cpp).
 std::atomic<std::int64_t> heldMessages{0};
+// How many times the count has changed, so that the check can tell that a
+// message changed hands while it looked through the mailboxes.
+std::atomic<std::uint64_t> heldChanges{0};
+
+void CountHeld(std::int64_t change) {
+  heldMessages.fetch_add(change);
+  heldChanges.fetch_add(1);
+}
 
 // Frees a message's chunks, the message's own cell among them, if a process
 // has not taken them.
 void FreeMessage(Message *message) {
   if (message->chunks) {
-    heldMessages.fetch_sub(1);
+    CountHeld(-1);
     FreeChunks(message->chunks);
   }
 }
@@ -112,7 +120,7 @@ void GiveToReader(Message *message) {
   }
   message->chunks = nullptr;
   if (Process *process{CurrentProcess()}) {
-    heldMessages.fetch_sub(1);
+    CountHeld(-1);
     ChunkLink *last{chunks};
     for (;; last = last->next) {
       last->pinned = true;
@@ -489,7 +497,7 @@ void TellWaiters() {
 // taken, so that a receive about to block either sees it or is woken.
 void Queue(Mailbox *mailbox, Message *message) {
   if (message->chunks) {
-    heldMessages.fetch_add(1);
+    CountHeld(1);
   }
   ArrivalCounts &counts{CountsOf(mailbox)};
   message->stamp = __atomic_add_fetch(&counts.stamps, 1, __ATOMIC_SEQ_CST);
@@ -1172,7 +1180,32 @@ extern "C" bool merk_mailbox_copy_array_for_ring(MERK_HANDLE_PARAMETERS,
 }
 
 namespace merkurius::runtime {
-std::int64_t HeldMessages() { return heldMessages.load(); }
+// The messages that are held but in no open mailbox: those lost. Messages
+// still queued in mailboxes are left out, as processes that have not read
+// them may still run as the program ends. Looked for again if a message
+// changes hands meanwhile.
+std::int64_t HeldMessages() {
+  for (int attempt{0};; ++attempt) {
+    std::uint64_t changes{heldChanges.load()};
+    std::int64_t held{heldMessages.load()};
+    std::int64_t queued{0};
+    std::int64_t count{__atomic_load_n(&slotCount, __ATOMIC_ACQUIRE)};
+    for (std::int64_t i{0}; i < count; ++i) {
+      Mailbox *mailbox{SlotAt(i)};
+      pthread_mutex_lock(&mailbox->lock);
+      if (mailbox->open) {
+        for (Message *message{mailbox->head}; message;
+            message = message->next) {
+          queued += message->chunks != nullptr;
+        }
+      }
+      pthread_mutex_unlock(&mailbox->lock);
+    }
+    if (heldChanges.load() == changes || attempt == 100) {
+      return held - queued;
+    }
+  }
+}
 } // namespace merkurius::runtime
 
 // Shows the device the messages that did not fit in its ring.
@@ -1464,15 +1497,22 @@ extern "C" void merk_mailbox_resolve(MERK_HANDLE_PARAMETERS,
   // A fragment, as the reader's heap moves and a mailbox is not a root.
   Fragment fragment;
   Word copy{CopyTyped(value, Resolve(typeInfo, nullptr), fragment)};
-  if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
-    if (mailbox->count > position) {
-      Message *message{At(mailbox, position)};
-      message->value = copy;
-      message->down = nullptr;
-      message->chunks = fragment.Take();
-      // Still in the mailbox, and read again before it is removed.
-      GiveToReader(message);
-    }
+  Mailbox *mailbox{Find(MERK_HANDLE)};
+  if (mailbox && mailbox->count > position) {
+    Message *message{At(mailbox, position)};
+    message->value = copy;
+    message->down = nullptr;
+    message->chunks = fragment.Take();
+    // Still in the mailbox, and read again before it is removed. The read
+    // gave the reader what the monitor left, so these chunks are counted
+    // as held until they are given too.
+    CountHeld(1);
+    GiveToReader(message);
+  } else {
+    // The mailbox closed, and dropped the message.
+    FreeChunks(fragment.Take());
+  }
+  if (mailbox) {
     Unlock(mailbox);
   }
 }

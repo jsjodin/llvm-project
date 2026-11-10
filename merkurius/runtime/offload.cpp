@@ -622,7 +622,8 @@ bool RegionsRunning() {
 // it reports how many chunks of copies of messages between the host and
 // the devices are still allocated (docs/INPROGRESS.md, GPU processes
 // without omp target, step 4e); with MERK_CHECK_MESSAGES, how many messages
-// that were queued neither a process read nor a mailbox freed; and with
+// that were queued neither a process read nor a mailbox freed, leaving out
+// those still in open mailboxes, as their processes may still run; and with
 // MERK_CHECK_DEVICE_MEMORY, how many chunks of the devices' arenas and how
 // many mailboxes' rings are still allocated.
 namespace merkurius::runtime {
