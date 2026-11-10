@@ -556,12 +556,16 @@ extern "C" void merk_device_send(
 
 // Sends an array of one-word elements, as merk_device_send sends a word:
 // the host copies the array from the device, given its address, and
-// returns once it has queued it.
+// returns once it has queued it. To a team mailbox, the array goes by its
+// pointer (docs/INPROGRESS.md, Processes as teams, step 3): every team of
+// the region can address it, in the arena or mapped for the region, and
+// neither team can update it in place, since a send makes the sender's
+// array shared and a receive gives a shared one.
 extern "C" void merk_device_send_array(
     const uint64_t *handle, uint64_t key, const uint64_t *array) {
-  // Code generation gives a team mailbox of arrays no handle yet.
   if (IsTeamHandle(handle)) {
-    Fail(1, "arrays in team mailboxes");
+    TeamSend(handle, reinterpret_cast<uint64_t>(array));
+    return;
   }
   rpc::Client::Port port{__llvm_rpc_client.open<rpcSendArray>()};
   port.send([&](rpc::Buffer *buffer, uint32_t) {
@@ -721,11 +725,12 @@ extern "C" int merk_device_receive(
 
 // As merk_device_receive, for a mailbox of arrays of one-word elements: the
 // ring gives the oldest message's size, the device allocates the array in
-// its arena, and the host copies the message there, given its address.
+// its arena, and the host copies the message there, given its address. From
+// a team mailbox, the sender's array itself (merk_device_send_array).
 extern "C" int merk_device_receive_array(
     const uint64_t *handle, int64_t milliseconds, uint64_t *message) {
   if (IsTeamHandle(handle)) {
-    Fail(1, "arrays in team mailboxes");
+    return TeamReceive(handle, milliseconds, message);
   }
   RingEntry *entry{nullptr};
   uint64_t size{0};
