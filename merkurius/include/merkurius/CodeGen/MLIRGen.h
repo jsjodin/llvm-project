@@ -50,6 +50,10 @@ struct GenerationOptions {
   // --trace-flag=: the flags that make a trace goal's flag(Name)
   // compile_time condition hold.
   std::vector<std::string> traceFlags;
+  // In a device's compile, where the library's modules are as merk
+  // bytecode, to copy the procedures its target regions reach from
+  // (CopyDeviceLibrary); empty for none.
+  std::string deviceLibraryDirectory;
 };
 
 // The merk module for `module`'s procedures, with the target recorded on

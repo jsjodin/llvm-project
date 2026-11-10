@@ -852,7 +852,7 @@ static mlir::OwningOpRef<mlir::ModuleOp> ReadMLIR(mlir::MLIRContext &context,
 
 // Reports MLIR's diagnostics as the front end reports its messages, at
 // file:line:column.
-static mlir::LogicalResult ReportDiagnostic(mlir::Diagnostic &diagnostic) {
+static void PrintDiagnostic(const mlir::Diagnostic &diagnostic) {
   std::string message;
   llvm::raw_string_ostream os{message};
   if (auto loc{mlir::dyn_cast<mlir::FileLineColLoc>(diagnostic.getLocation())}) {
@@ -872,6 +872,14 @@ static mlir::LogicalResult ReportDiagnostic(mlir::Diagnostic &diagnostic) {
   }
   os << diagnostic.str();
   llvm::errs() << message << '\n';
+}
+
+// An MLIR diagnostic, as file:line:column, then its notes, each so.
+static mlir::LogicalResult ReportDiagnostic(mlir::Diagnostic &diagnostic) {
+  PrintDiagnostic(diagnostic);
+  for (const mlir::Diagnostic &note : diagnostic.getNotes()) {
+    PrintDiagnostic(note);
+  }
   return mlir::success();
 }
 
@@ -896,6 +904,9 @@ bool CodeGenAction::executeAction() {
   CompilerInstance &ci{getInstance()};
   mlir::MLIRContext context;
   mlir::ScopedDiagnosticHandler diagnostics{&context, ReportDiagnostic};
+  // An error names the operation; printing it in generic form is for
+  // debugging the compiler.
+  context.printOpOnDiagnostic(false);
   std::unique_ptr<codegen::TargetInfo> target;
   mlir::OwningOpRef<mlir::ModuleOp> module;
   switch (Language(ci.getFrontendOpts().inputLanguage, getSourceFile())) {
@@ -927,13 +938,23 @@ bool CodeGenAction::executeAction() {
     options::reportError(error);
     return false;
   }
+  // A device's compile copies the library's procedures from their merk
+  // bytecode, which the library's build writes beside its sources.
+  std::string deviceLibrary;
+  if (target->options().openMPIsTargetDevice &&
+      !ci.getFrontendOpts().libraryDirectory.empty()) {
+    llvm::SmallString<256> path{ci.getFrontendOpts().libraryDirectory};
+    llvm::sys::path::append(path, "device");
+    deviceLibrary = path.str().str();
+  }
   module = codegen::GenerateMerk(context, r.resolution->module().name(),
       *r.tree, r.tokens, ci.getAllSources(), *r.resolution, *a.types, *a.modes,
       *a.determinism, *polymorphism, a.loops, *target, r.messages,
       {ci.getFrontendOpts().stubUnimplemented,
-          ci.getFrontendOpts().mmcUniqueness, ci.getFrontendOpts().traceFlags});
+          ci.getFrontendOpts().mmcUniqueness, ci.getFrontendOpts().traceFlags,
+          deviceLibrary});
   r.messages.Emit(llvm::errs(), ci.getAllSources());
-  if (r.messages.AnyFatalError()) {
+  if (!module || r.messages.AnyFatalError()) {
     return false;
   }
   if (mlir::failed(mlir::verify(*module))) {

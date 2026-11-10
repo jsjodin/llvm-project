@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "merkurius/CodeGen/DeviceLibrary.h"
 #include "merkurius/CodeGen/Lowering.h"
 #include "merkurius/CodeGen/MLIRGen.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
@@ -1049,6 +1050,12 @@ void Lowerer::LowerProc(merk::ProcOp proc) {
       proc.getSymName(), funcType, linkage, /*dsoLocal=*/false,
       cconv_)};
   // What omp-mark-declare-target found, for the passes after lowering.
+  // What reached a copy of the library's procedure, for LowerOpenMP's errors.
+  for (llvm::StringRef name : {kReachedFromAttrName, kReachedAtAttrName}) {
+    if (mlir::Attribute reached{proc->getDiscardableAttr(name)}) {
+      func->setDiscardableAttr(name, reached);
+    }
+  }
   if (mlir::Attribute declare{proc->getDiscardableAttr("omp.declare_target")}) {
     func->setDiscardableAttr("omp.declare_target", declare);
   }
@@ -3398,7 +3405,9 @@ static bool RejectOnDevice(mlir::Operation *op, llvm::StringRef what) {
       !(proc && proc->getDiscardableAttr("omp.declare_target"))) {
     return false;
   }
-  op->emitOpError(what) << ", which cannot be done on an OpenMP device yet";
+  mlir::InFlightDiagnostic diagnostic{op->emitOpError(what)
+      << ", which cannot be done on an OpenMP device yet"};
+  NoteReachedFrom(diagnostic, proc);
   return true;
 }
 
@@ -3735,11 +3744,26 @@ llvm::LogicalResult Lowerer::LowerOpenMP() {
     }
     if (auto uses{mlir::SymbolTable::getSymbolUses(func, module_)};
         uses && !uses->empty()) {
-      mlir::emitError(uses->begin()->getUser()->getLoc(),
-          "cannot call " + func.getSymName() +
-              " on an OpenMP device yet: it is not compiled for the device");
+      mlir::Operation *user{uses->begin()->getUser()};
+      auto caller{user->getParentOfType<mlir::LLVM::LLVMFuncOp>()};
+      // The C function of a library procedure's foreign_proc, in the
+      // procedure that wraps it, is named for the procedure.
+      bool foreign{caller && func.getSymName().starts_with("merk_foreign_") &&
+          caller->hasAttr(kReachedFromAttrName)};
+      mlir::InFlightDiagnostic diagnostic{mlir::emitError(user->getLoc())
+          << "cannot call "
+          << (foreign ? caller.getSymName() : func.getSymName())
+          << " on an OpenMP device yet: "
+          << (foreign ? "its foreign code" : "it")
+          << " is not compiled for the device"};
+      NoteReachedFrom(diagnostic, caller);
       return llvm::failure();
     }
+  }
+  // Translation has no use for them.
+  for (auto func : module_.getOps<mlir::LLVM::LLVMFuncOp>()) {
+    func->removeDiscardableAttr(kReachedFromAttrName);
+    func->removeDiscardableAttr(kReachedAtAttrName);
   }
   // The heap's declaration, which only host code that the filter removed
   // used.

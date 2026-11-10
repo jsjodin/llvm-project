@@ -90,7 +90,8 @@ barriers(Kind, Rounds, Reports, !IO) :-
             team_mailbox((Me - 1) / 2, Parent, !IO),
             Up = [Parent]
         ),
-        children(Me, All, Down, Waits, !IO)
+        children(Me, All, Down, !IO),
+        Waits = list.length(Down)
     ),
     rounds(Mine, Up, Down, Waits, 0, Rounds, 0, Wrong, !IO),
     send(Reports, Wrong, !IO).
@@ -108,27 +109,22 @@ mailboxes(From, All, Boxes, !IO) :-
         Boxes = []
     ).
 
-    % The mailboxes of a team's children in the tree, and how many there are.
-    % Temporary (Processes as teams, step 5, docs/INPROGRESS.md): the number,
-    % which list.length gives once library code is compiled for the device.
-:- pred children(int::in, int::in, list(mailbox(int))::out, int::out,
-    io::di, io::uo) is det.
+    % The mailboxes of a team's children in the tree.
+:- pred children(int::in, int::in, list(mailbox(int))::out, io::di, io::uo)
+    is det.
 
-children(Me, All, Children, Count, !IO) :-
+children(Me, All, Children, !IO) :-
     Left = 2 * Me + 1,
     Right = 2 * Me + 2,
     ( if Right < All then
         team_mailbox(Left, LeftBox, !IO),
         team_mailbox(Right, RightBox, !IO),
-        Children = [LeftBox, RightBox],
-        Count = 2
+        Children = [LeftBox, RightBox]
     else if Left < All then
         team_mailbox(Left, LeftBox, !IO),
-        Children = [LeftBox],
-        Count = 1
+        Children = [LeftBox]
     else
-        Children = [],
-        Count = 0
+        Children = []
     ).
 
     % Round R of Rounds: waits for Waits arrivals, arrives Up, waits for the

@@ -3,8 +3,8 @@
 `teambarrier.m` measures a barrier between the teams of a target teams region,
 made from team mailboxes (docs/INPROGRESS.md, Processes as teams, step 5).
 Every team arrives, and is released once all have. It is ordinary Mercury code
-of the program, as a barrier in the library would be. Library code is not yet
-compiled for the device.
+of the program, as a barrier in the library would be, and calls the library's
+`list.length` on the device.
 
 ## What it measures
 
