@@ -1451,6 +1451,138 @@ conjunctions steal work too (Bone's thesis, a paper we may read).
 - What this machine can measure: one GPU, so stealing between GPUs waits
   for the user's other machines, as the halo exchange does.
 
+## Choosing among the ways: experiments for GPU code
+
+Written 2026-11-10 at the user's request: there are several ways of doing
+each thing, and which are worth having is not known. This lists them by the
+question each answers, and orders the experiments that decide them, cheapest
+and most deciding first. Each experiment says what it measures, against
+what, and what result chooses what. Results go in the design document's
+Measurements, with date and commit; decisions here, with the numbers that
+made them, and then to the design document as usual. The bar is code
+written by hand in HIP or C, not our own earlier versions.
+
+**This machine** (checked 2026-11-10): one RX 6950 XT (gfx1030, wave32, 16
+GB, a 128 MB Infinity Cache), which drives the display; ROCm 7.2's HIP and
+ROCr are installed (`hipcc`, `libamdhip64`, `libhsa-runtime64`); BAR 0 is
+16 GiB, the whole of the card's memory, so resizable BAR is on and the host
+can write into all of the GPU's memory. No peer GPU, no xGMI, no second
+node: what needs them waits, as the halo exchange does. Every run is small
+first, with a timeout, and the user is told before benchmarks, so that
+they can close what else uses the GPU.
+
+### The ways, by question
+
+- **Q1. How a GPU process computes in parallel.**
+  - *One thread* of one team: as built. A sliver of one compute unit.
+  - *OpenMP within its team:* the process's kernel is a generic-mode
+    OpenMP kernel (`__kmpc_target_init`, its `KernelEnvironmentTy`, and the
+    launch environment's argument, which `libompaccsupport/device.cpp`
+    makes for libomptarget and we would make), with OpenMP's device runtime
+    linked into the image. `parallel` and worksharing loops across the
+    team's threads.
+  - *Our own SPMD kernel* without OpenMP's runtime: every thread runs the
+    process, with the sequential parts guarded.
+  - *A pool:* one persistent cooperative kernel
+    (`OL_KERNEL_LAUNCH_PROP_TYPE_IS_COOPERATIVE`) that fills the GPU.
+    Processes run in some of its teams or waves; a parallel loop is posted
+    as a work item that the worker teams take in chunks from a counter,
+    each chunk run with OpenMP's `parallel for` within the team. Processes
+    share the teams. Work functions are outlined and dispatched by a switch
+    over the image's known ones, not by pointer.
+  - *Regions for the process:* the host launches a target region for each
+    parallel loop that the process asks for, by RPC. About 27 µs a region
+    as measured.
+- **Q2. Where processes run.** A kernel and a queue for each, as built; many
+  processes in one persistent kernel (the pool); processes as the teams of
+  one region (Processes as teams, below).
+- **Q3. How a message reaches a GPU process from the host** (5c). Its ring in
+  host-pinned memory with an RPC for what is not one word, as built; the
+  host writing into a queue in the GPU's memory through the large BAR; a
+  DMA for each message into that queue; slots in host memory that the GPU
+  copies from once.
+- **Q4. How a message leaves a GPU process for the host.** libc's RPC, as
+  built; the GPU writing into a queue in host-pinned memory with
+  system-scope atomics, which the host polls.
+- **Q5. Between processes on one GPU** (5d). Through the host, as built; a
+  queue in device memory, reserved by an atomic on its tail.
+- **Q6. How a GPU process waits.** Polling with `s_sleep`, as built, with
+  other backoffs; in a pool, a worker that waits gives its team to other
+  work.
+- **Q7. How work is split** (Distributing work). A static split; chunks
+  from an atomic counter within a GPU; a dispatcher process that hands out
+  items by message; stealing between GPUs, later.
+- **Q8. How data is shared.** Copied by value (`send`, `send_slice`,
+  `send_tile`); a shared array, counted, read in place; a unique array
+  handed over whole within a GPU.
+- **Q9. How a tile is copied.** A rectangular DMA (ROCr's, below
+  liboffload); a strided copy kernel; a layout stored tile by tile.
+- **Q10. How fast our kernels are** (Specialized kernels for loops). The
+  `omp` lowering as built, against C and HIP, at sizes beyond the Infinity
+  Cache, which the measurements of 2026-11-04 did not pass.
+
+### The experiments, in order
+
+**E1. Baselines and floors, in HIP and C, with no compiler change** (Q3 to
+Q6, Q10). Small programs under `benchmarks/gpu-floors/`, each a number that
+our runtime is later held to:
+- (a) A word from the host to a kernel and back: through pinned host
+  memory (2.0 µs on 2026-11-08), through device memory written over the
+  large BAR, and by a DMA for each message (`hipMemcpyAsync` of 8 bytes).
+  Then 64 B, 4 KB and 1 MB messages each way.
+- (b) Two workgroups of one kernel, and two kernels on two queues, passing
+  a word through device memory: the floor for Q5.
+- (c) Launching an empty kernel through liboffload and through HIP, and
+  through `omp target`: what a kernel or queue per process costs (Q2).
+- (d) BabelStream in HIP, and ours and C's with OpenMP, at 2^25 and 2^27
+  elements, beyond the cache.
+- (e) A persistent cooperative kernel of all the teams that fit: the
+  latency from a post in device memory to a worker team taking it, and
+  chunks taken per second from one atomic counter by all teams.
+
+Decides: Q3 by the latency and the host's CPU time at each size, the large
+BAR if it is within 20% of the best for small messages; Q4 likewise; Q5's
+floor; whether a pool's post is ten times cheaper than a launch (Q1, Q2).
+
+**E2. OpenMP within a GPU process's team** (Q1). A process kernel in C,
+compiled as a generic-mode OpenMP kernel, launched through liboffload with a
+launch environment we make, running `parallel for` over an array: it
+works or it does not, and its parallel region's overhead against the same
+in a target region, and against one thread. Small, and needed whatever the
+pool decides. Decides: whether process kernels become OpenMP kernels.
+
+**E3. The pool against a launch per loop** (Q1, Q2, Q6). A pool in C or HIP,
+with two processes posting loops to worker teams, against launching a
+kernel for each loop, over loops of 10^3 to 10^8 iterations, with the
+registers of the largest work function varied to see occupancy fall.
+Decides: the pool, if it beats a launch per loop by five times or more
+for loops that take under 100 µs and costs under 5% for long ones;
+otherwise a launch per loop, with OpenMP within the team.
+
+**E4. Splitting work** (Q7). Synthetic loads in the pool of E3, or in a
+region if E3 rejects the pool: costs that are even, that follow a power law,
+and token counts routed as a mixture of experts routes them. A static
+split, chunks from a counter at several chunk sizes, and a dispatcher by
+message. Measures the time to finish, against a perfect split. Decides:
+counters within a GPU and their chunk size; the smallest item that a
+dispatcher by message should hand out.
+
+**E5. Sharing against copying** (Q8, Q9). A reduction of a large array by N
+workers on one GPU, each sending back a scalar: copying each worker's part,
+against reading a shared array in place, whose count costs two atomics a
+worker. A tile of a matrix sent by a rectangular DMA, by a strided copy
+kernel, and packed by the program, at several shapes. Decides: whether
+shared arrays come before `send_tile`, and how tiles are copied.
+
+**E6. Across GPUs and nodes** (Q5 between GPUs, Q7 stealing, Q8 peers,
+collectives against RCCL). Waits for the user's machines with several GPUs;
+until then nothing here is chosen.
+
+**What comes first in code meanwhile.** 5a (the checks by type) and 5b
+(the place table) depend on none of these. 5c waits for E1, and the pool
+for E3. E2 comes before OpenMP is put in process kernels. The experiments
+are run in this order, and a result may reorder what follows.
+
 ## Processes as teams, and messages within a GPU
 
 Proposed 2026-11-09; steps 1 to 5 below are built. The design document
@@ -2550,8 +2682,9 @@ the process asks the host to launch. The first version has neither.
      on the device, with views; for reductions and pools of workers
      (Distributing work).
 
-   **Open, to decide before the step that needs it:**
-   - **How the host writes into the GPU's memory (5c).** Copying each message
+   **Open, to decide before the step that needs it,** by the experiments
+   of Choosing among the ways, above:
+   - **How the host writes into the GPU's memory (5c),** by E1. Copying each message
      with a DMA from pinned memory costs a copy's latency per message.
      Writing through host-visible device memory, a large BAR, which a
      consumer Radeon may not offer. Or the queue's slots in host memory, as
