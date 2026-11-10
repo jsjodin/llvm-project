@@ -1,7 +1,7 @@
 % What the library's code does that a device cannot is an error in the
 % device's compile, as in the module's own code, at the library's line, with
 % a note for each call in the chain from the region: here list.filter, which
-% calls its predicate, a closure (docs/INPROGRESS.md, Library code on the
+% calls its predicate, a closure (design document, Library code on the
 % device). The host's compile is the ordinary one.
 %
 % RUN: not merkc -fc1 -fopenmp -fopenmp-is-target-device -triple amdgcn-amd-amdhsa -emit-mlir %s -o /dev/null 2>&1 | FileCheck %s --implicit-check-not=error: --implicit-check-not=note:

@@ -1,7 +1,6 @@
 % C that compiles for the host but not for a device, as OpenMP compiles it
 % there: clang reports its errors, and the device's compile names the module
-% whose foreign code it is (docs/INPROGRESS.md, Library code on the device,
-% step 3).
+% whose foreign code it is (design document, Library code on the device).
 %
 % RUN: not merkc -fc1 -fopenmp -fopenmp-is-target-device -triple amdgpu10.30-amd-amdhsa -emit-llvm %s -o /dev/null 2>&1 | FileCheck %s --implicit-check-not=error:
 % RUN: merkc -fc1 -fopenmp -emit-llvm %s -o /dev/null
@@ -35,4 +34,4 @@ main(!IO) :-
 
 % Without the device's GPU, clang would look for one on the machine.
 % RUN: not merkc -fc1 -fopenmp -fopenmp-is-target-device -triple amdgcn-amd-amdhsa -emit-llvm %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=NO-GPU --implicit-check-not=error:
-% NO-GPU: omp-target-foreign-c-error.m:24:4: error: compiling foreign code for an OpenMP device needs its GPU, as -target-cpu or the triple names it, such as amdgpu10.30-amd-amdhsa for gfx1030
+% NO-GPU: omp-target-foreign-c-error.m:[[#@LINE-14]]:4: error: compiling foreign code for an OpenMP device needs its GPU, as -target-cpu or the triple names it, such as amdgpu10.30-amd-amdhsa for gfx1030

@@ -1,6 +1,6 @@
 % A region that calls a procedure of another module of the program, which is
 % not the library's, is an error in the device's compile: only the library's
-% modules are compiled for a device yet (docs/INPROGRESS.md, Library code on
+% modules are compiled for a device yet (design document, Library code on
 % the device).
 %
 % RUN: not merkc -fc1 -fopenmp -fopenmp-is-target-device -triple amdgcn-amd-amdhsa -I %S/Inputs -emit-merk %s -o /dev/null 2>&1 | FileCheck %s --implicit-check-not=error: --implicit-check-not=note:

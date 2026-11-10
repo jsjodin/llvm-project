@@ -1,5 +1,5 @@
-% process.team_barrier (docs/INPROGRESS.md, Library code on the device, step
-% 5): in each round, every team of a target teams region sends the round's
+% process.team_barrier (design document, Library code on the device): in
+% each round, every team of a target teams region sends the round's
 % number to team 0, and all wait at the barrier; then team 0 polls, without
 % waiting, for every team's message, and all wait again before the next
 % round. On a device the barrier is a counter in the region's team table,

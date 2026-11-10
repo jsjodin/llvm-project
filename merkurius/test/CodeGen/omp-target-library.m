@@ -1,5 +1,5 @@
-% The library's procedures on a device (docs/INPROGRESS.md, Library code on
-% the device, step 2): the device's compile copies those its target region
+% The library's procedures on a device (design document, Library code on
+% the device): the device's compile copies those its target region
 % reaches from the library's merk bytecode, with the procedures they call,
 % as internal functions, and the descriptor of maybe(T), whose type_info the
 % region makes and which the module only declares.

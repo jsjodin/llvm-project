@@ -9,7 +9,7 @@
 #ifndef MERKURIUS_CODEGEN_DEVICELIBRARY_H_
 #define MERKURIUS_CODEGEN_DEVICELIBRARY_H_
 
-// The library's code on an OpenMP device (docs/INPROGRESS.md, Library code on
+// The library's code on an OpenMP device (design document, Library code on
 // the device): a device's compile copies the procedures its target regions
 // reach from the library's modules, as their merk bytecode has them.
 

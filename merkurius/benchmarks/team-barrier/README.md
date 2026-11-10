@@ -2,10 +2,10 @@
 
 `teambarrier.m` measures a barrier between the teams of a target teams region,
 made from team mailboxes (docs/INPROGRESS.md, Processes as teams, step 5), and
-the library's `process.team_barrier` (Library code on the device, step 5).
-Every team arrives, and is released once all have. The shapes from messages are
-ordinary Mercury code of the program, which calls the library's `list.length`
-on the device.
+the library's `process.team_barrier` (design document, Library code on the
+device). Every team arrives, and is released once all have. The shapes from
+messages are ordinary Mercury code of the program, which calls the library's
+`list.length` on the device.
 
 ## What it measures
 
@@ -42,8 +42,6 @@ merkurius/benchmarks/team-barrier/run.sh "" gfx1030
 
 ## Results
 
-The `library` shape is not measured yet.
-
 2026-11-10, an AMD Radeon RX 6950 XT (gfx1030) on PCIe, an AMD Ryzen
 Threadripper PRO 5965WX (24 cores, 48 threads) as the host, the build of
 801205c01704 with this benchmark at -O2. Microseconds a barrier, 10000 rounds,
@@ -66,3 +64,24 @@ in docs/INPROGRESS.md assumed. The tree is 5 times faster than central at 64
 teams. The host's teams are threads waking each other through condition
 variables, and at 64 there are more of them than hardware threads. The design
 document's Measurements section has what is learned from it.
+
+2026-11-10, the same machine, the build of 6a90cadd2fac, with the `library`
+shape (`process.team_barrier`), three runs, none with a wrong message:
+
+| Shape | Teams | GPU | Host's teams |
+| --- | ---: | --- | --- |
+| `central` | 2 | 3.79, 3.76, 3.76 | 2.02, 1.12, 2.02 |
+| `central` | 4 | 6.85, 6.79, 6.87 | 8.92, 9.76, 9.11 |
+| `central` | 16 | 34.00, 34.33, 33.61 | 124.32, 64.96, 105.69 |
+| `central` | 64 | 150.30, 151.42, 152.19 | 2264.41, 2246.40, 2264.84 |
+| `tree` | 2 | 3.73, 3.79, 3.74 | 2.04, 2.01, 2.02 |
+| `tree` | 4 | 8.04, 7.93, 7.89 | 8.40, 9.18, 7.58 |
+| `tree` | 16 | 17.24, 17.08, 17.15 | 48.16, 56.73, 46.91 |
+| `tree` | 64 | 28.86, 28.78, 28.80 | 1522.38, 1541.47, 1580.33 |
+| `library` | 2 | 0.68, 0.74, 0.68 | 0.31, 0.24, 0.27 |
+| `library` | 4 | 0.76, 0.75, 0.78 | 1.09, 0.70, 1.31 |
+| `library` | 16 | 0.80, 0.78, 0.79 | 10.48, 8.10, 10.08 |
+| `library` | 64 | 1.00, 0.96, 0.97 | 36.42, 35.43, 35.14 |
+
+The library's barrier, a counter in the runtime, takes 1 µs or less on the GPU
+at every number of teams, 30 times faster than the tree at 64.

@@ -2,7 +2,7 @@
 % from it, the module is the same as compiled from the source, with the
 % collector's notes on roots that -emit-merk leaves out, its closures and its
 % foreign code. The library is written so in a device's flavour, for a
-% device's compile to copy procedures from (docs/INPROGRESS.md, Library code
+% device's compile to copy procedures from (design document, Library code
 % on the device).
 %
 % RUN: merkc -fc1 -emit-merk-bc -triple x86_64-unknown-linux-gnu %s -o %t.merkbc

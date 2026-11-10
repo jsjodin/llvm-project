@@ -2,7 +2,7 @@
 % bytecode with their foreign code, but a target region cannot call one whose
 % C calls the host's runtime, such as io's beyond the output that has a device
 % version (omp-target-write.m): the error is at the foreign code, naming the
-% runtime's function, with a note at the region's call (docs/INPROGRESS.md,
+% runtime's function, with a note at the region's call (design document,
 % Library code on the device). On the host it runs.
 %
 % RUN: not merkc -fc1 -fopenmp -fopenmp-is-target-device -triple amdgpu10.30-amd-amdhsa -emit-mlir %s 2>&1 | FileCheck %s --implicit-check-not=error:

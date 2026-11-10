@@ -1,7 +1,7 @@
 % Output from a target region, directly and in a procedure that it calls: on a
 % device, io's procedures, copied from the library with their C, which there
 % calls the GPU's libc, whose stdio writes into the host's stdout
-% (docs/INPROGRESS.md, Library code on the device, step 4). On the host, a
+% (design document, Library code on the device). On the host, a
 % region calls io's too.
 %
 % RUN: merkc -fc1 -fopenmp --offload-targets=amdgpu-amd-amdhsa -emit-llvm-bc -triple x86_64-unknown-linux-gnu %s -o %t.host.bc

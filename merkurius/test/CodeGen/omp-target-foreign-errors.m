@@ -1,5 +1,5 @@
 % Foreign code that a device cannot run is an error in the device's compile
-% (docs/INPROGRESS.md, Library code on the device, step 3), at the
+% (design document, Library code on the device), at the
 % foreign_proc, naming what its C calls that the device does not have: a
 % function that neither the GPU's libc nor its libm has, or the host's
 % runtime, with a note for each call in the chain from the region. The
