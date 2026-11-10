@@ -137,6 +137,29 @@ bool Unused(mlir::Value value) {
   return true;
 }
 
+// The type of the same value as `value` across conversions to and from a
+// word that says what it is, if there is one.
+mlir::Type TypedOf(mlir::Value value) {
+  llvm::SetVector<mlir::Value> seen;
+  seen.insert(value);
+  for (std::size_t i = 0; i < seen.size(); ++i) {
+    mlir::Value at{seen[i]};
+    if (!IsPolymorphic(at.getType())) {
+      return at.getType();
+    }
+    if (mlir::Operation *def{at.getDefiningOp()};
+        def && mlir::isa<merk::ToWordOp, merk::FromWordOp>(def)) {
+      seen.insert(def->getOperand(0));
+    }
+    for (mlir::Operation *user : at.getUsers()) {
+      if (mlir::isa<merk::ToWordOp, merk::FromWordOp>(user)) {
+        seen.insert(user->getResult(0));
+      }
+    }
+  }
+  return {};
+}
+
 // The note of a value's type, if it has one or is the same value at another
 // type, across a conversion to or from a word.
 merk::RootTypeOp NoteOf(mlir::Value value) {
@@ -706,6 +729,14 @@ merk::ProcOp Outliner::OutlineWith(
   for (auto [capture, value] : llvm::zip_equal(captures, values)) {
     merk::RootTypeOp note{NoteOf(capture)};
     if (!note) {
+      // A word of a value whose type says what it is, as a specialized
+      // procedure's call passes a closure's captured value: that value's
+      // conversion, which the collector reads as MLIR generation's.
+      if (mlir::isa<merk::WordType>(value.getType())) {
+        if (mlir::Type type{TypedOf(capture)}) {
+          merk::FromWordOp::create(builder_, loc, type, value);
+        }
+      }
       continue;
     }
     llvm::SmallVector<mlir::Value> infos;
