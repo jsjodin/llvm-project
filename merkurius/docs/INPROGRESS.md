@@ -1367,7 +1367,7 @@ Instinct node for Infinity Fabric.
 
 ## Processes as teams, and messages within a GPU
 
-Proposed 2026-11-09; nothing is built, and it is not agreed. The design document
+Proposed 2026-11-09; steps 1 and 2 below are built. The design document
 (The device runtime, "Who communicates") has a process for each team in an SPMD
 kernel as a later step. This adds messages between such processes that do not go
 through the host.
@@ -1441,6 +1441,49 @@ worker(!IO) :-
 2. Team mailboxes for one-word messages: a ring for each team and type, which any
    team appends to with an atomic add and its team takes from, with no call of the
    host. The same code in merkrt for the host's teams and the sequential program.
+   Implemented 2026-11-09 (`CodeGen/omp-target-team-mailbox.m`, and its
+   `-gpu.test` at -O0 and -O2; also right with 64 teams, by hand):
+   - **On a device**, each (team, message type) has a ring of 256 slots in the
+     device's arena, made when first used. A slot holds a sequence and a message,
+     as in Vyukov's bounded queue. A sender takes a position with an atomic add
+     on the tail, and writes the slot if its sequence says it is free.
+   - **A send never waits.** If the slot is still full, the sender pushes the
+     position and the message onto a lock-free list for that slot, and the
+     receiver takes the position from there when it reaches it. So the order of
+     positions is kept, and a host mailbox has no bound either. Rejected: *a
+     send that waits for a free slot.* The first GPU run showed why: team 0 sent
+     300 messages to itself before receiving any, and waited forever. Any
+     program in which a team sends more than a ring holds before it receives
+     would deadlock, and the bound would be a property of the device, not of
+     the program.
+   - **Only the owning team receives,** which the device checks: a receive from
+     another team's mailbox ends the program with an error. The host does not
+     check it.
+   - **Regions.** The host gives each region an id. The first team to enter
+     makes the region's table of rings in the arena, with a compare and swap, and
+     each team keeps the table in LDS. A device handle names the team in its
+     slot, with place `kTeamsPlace`, and the region by its id. Using it in
+     another region is an error. Calling `team_mailbox` in a target region
+     without teams is not yet implemented. Such a region says it has no teams
+     at its start, since LDS starts undefined. Only modules that use team
+     mailboxes do so, which holds while a region on a device calls only its
+     own module's procedures.
+   - **On the host and sequentially,** a team mailbox is an ordinary mailbox with
+     no owner, from a table for the region that is closed when the region ends.
+     Outside a region there is one table, of team 0 of 1, for the whole program.
+   - **Errors on the device** reach the host by a new RPC opcode, `rpcFail`. The
+     host reports them as it reports the same error on the host, and ends the
+     program.
+   - **Not yet implemented,** reported when compiled or run: messages that are
+     not one word, arrays (step 3), and sends from the host or another node. A
+     team handle cannot leave the device, since a device cannot yet send a
+     mailbox in a message.
+   - **An LLVM bug** showed up here first, at -O2 on the GPU, and its fix is
+     a separate commit. OpenMPOpt's heap-to-stack turned the receive's
+     out-slot into an alloca but kept the call's `tail` marker. LICM then
+     hoisted the slot's load out of the receive loop, so every message read
+     as the first. Upstream fixed it in llvm/llvm-project#231611 and #239059,
+     which we applied ahead of a rebase.
 3. Arrays between teams by their pointer.
 4. A check at launch that the teams fit on the GPU at once (risk 1), reported as an
    error, since a team that is not running deadlocks the others.

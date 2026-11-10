@@ -392,6 +392,99 @@ bool MerkGenerator::ReceiveInTarget(const Body &goal,
   return true;
 }
 
+// process.team_mailbox(T, Box, !IO) in a target region, or in any
+// procedure of the device's compile, all of which run on the device: a call
+// of merk_device_team_mailbox with the team and the message type's key,
+// which gives the handle's cell in the device's arena (docs/INPROGRESS.md,
+// Processes as teams, step 2). Messages of one word only, so far; other
+// types are left to the call outside a region, as SendInTarget leaves a
+// send.
+bool MerkGenerator::TeamMailboxOnDevice(const Body &goal,
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body,
+    bool inRegion) {
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  mlir::Value team{ValueOf(arguments[0])};
+  if (!team) {
+    failed_ = true;
+    return true;
+  }
+  const semantics::Type *mailboxType{body.vars[arguments[1]].type};
+  const semantics::Type *messageType{mailboxType->arguments.front()};
+  mlir::Type message{Represent(messageType)->type};
+  std::optional<std::uint64_t> key{WordMessage(message)
+          ? MessageKey(*messageType, message)
+          : std::nullopt};
+  if (!key) {
+    if (!inRegion) {
+      return false;
+    }
+    NotYet(at,
+        "team mailboxes for messages of type " +
+            semantics::TypeToString(*messageType) + " on a device");
+    return true;
+  }
+  auto ptr{mlir::LLVM::LLVMPointerType::get(&context_)};
+  auto handle{merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{ptr},
+      "merk_device_team_mailbox",
+      mlir::ValueRange{team,
+          IntegerConstant(builder_.getI64Type(),
+              static_cast<std::int64_t>(*key), loc)},
+      /*can_fail=*/false)};
+  values_[arguments[1]] = mlir::UnrealizedConversionCastOp::create(builder_,
+      loc, Represent(mailboxType)->type, handle.getResult(0))
+                              .getResult(0);
+  return true;
+}
+
+// Whether the region is a target teams region's, whose teams say so at their
+// start (TargetTeams).
+static bool EntersTeams(mlir::omp::TargetOp target) {
+  bool enters{false};
+  target.walk([&](merk::ForeignCallOp call) {
+    if (call.getCallee() == "merk_device_teams_enter") {
+      enters = true;
+    }
+  });
+  return enters;
+}
+
+void MerkGenerator::MarkRegionsWithoutTeams() {
+  if (!target_.options().openMPIsTargetDevice) {
+    return;
+  }
+  bool teamMailboxes{false};
+  module_.walk([&](merk::ForeignCallOp call) {
+    if (call.getCallee() == "merk_device_team_mailbox") {
+      teamMailboxes = true;
+    }
+  });
+  if (!teamMailboxes) {
+    return;
+  }
+  llvm::SmallVector<mlir::omp::TargetOp> regions;
+  module_.walk([&](mlir::omp::TargetOp target) {
+    if (!EntersTeams(target)) {
+      regions.push_back(target);
+    }
+  });
+  for (mlir::omp::TargetOp target : regions) {
+    // Where the region reads its inputs (Target): in an SPMD kernel, in its
+    // teams and parallel, which every thread runs.
+    mlir::Block *start{&target.getRegion().front()};
+    if (auto teams{mlir::dyn_cast<mlir::omp::TeamsOp>(start->front())}) {
+      start = &teams.getRegion().front();
+      if (auto parallel{mlir::dyn_cast<mlir::omp::ParallelOp>(start->front())}) {
+        start = &parallel.getRegion().front();
+      }
+    }
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.setInsertionPointToStart(start);
+    merk::ForeignCallOp::create(builder_, target.getLoc(), mlir::TypeRange{},
+        "merk_device_no_teams", mlir::ValueRange{}, /*can_fail=*/false);
+  }
+}
+
 // As MapArray maps an array: by its pointer, with the cell's words as the
 // section, which only the host compile gives.
 mlir::Value MerkGenerator::MapCell(
@@ -1415,6 +1508,13 @@ void MerkGenerator::TargetTeams(const Body &goal, const ProcedureBody &body,
     count = mlir::arith::TruncIOp::create(
         builder_, loc, builder_.getI32Type(), *number);
   }
+  // The region's id and the node's, which its teams' mailboxes are found by
+  // and named by (docs/INPROGRESS.md, Processes as teams, step 2).
+  auto i64{builder_.getI64Type()};
+  auto begin{merk::ForeignCallOp::create(builder_, loc,
+      mlir::TypeRange{i64, i64, i64}, "merk_teams_begin", mlir::ValueRange{},
+      /*can_fail=*/false)};
+  mlir::Value id{begin.getResult(0)};
   bool host{!target_.options().openMPIsTargetDevice};
   mlir::omp::TeamsOp teamsOp;
   Target(
@@ -1428,22 +1528,38 @@ void MerkGenerator::TargetTeams(const Body &goal, const ProcedureBody &body,
         mlir::OpBuilder::InsertionGuard guard{builder_};
         builder_.setInsertionPointToStart(
             &teamsOp.getRegion().emplaceBlock());
+        auto teams{merk::ForeignCallOp::create(builder_, loc,
+            mlir::TypeRange{builder_.getI32Type()}, "omp_get_num_teams",
+            mlir::ValueRange{}, /*can_fail=*/false)};
+        merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+            "merk_device_teams_enter",
+            mlir::ValueRange{id, begin.getResult(1), begin.getResult(2),
+                teams.getResult(0)},
+            /*can_fail=*/false);
         Goal(*goal.goals.front(), body);
         if (!failed_ && !Terminated()) {
+          merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+              "merk_device_teams_leave", mlir::ValueRange{},
+              /*can_fail=*/false);
           mlir::omp::TerminatorOp::create(builder_, loc);
         }
       },
       /*combined=*/true, KernelOf(queue).mode,
       host && count ? mlir::ValueRange{count} : mlir::ValueRange{}, {},
       device);
+  if (failed_) {
+    return;
+  }
   // The host launches by the host_eval value, the block's first argument.
-  if (!failed_ && host && count && teamsOp) {
+  if (host && count && teamsOp) {
     teamsOp.getNumTeamsUpperVarsMutable().assign(
         teamsOp->getParentOfType<mlir::omp::TargetOp>()
             .getRegion()
             .front()
             .getArgument(0));
   }
+  merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+      "merk_teams_end", mlir::ValueRange{id}, /*can_fail=*/false);
 }
 
 // A clause of one integer, as Flang's ClauseProcessor makes device(N) and

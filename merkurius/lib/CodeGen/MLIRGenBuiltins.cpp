@@ -418,6 +418,13 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
         Represent(body.vars[arguments[0]].type)->type, call.getResult(0));
     return true;
   }
+  // On the host, a team's mailbox is the library's, wherever its region
+  // runs.
+  if (module == "process" && symbol.name == "team_mailbox" &&
+      symbol.arity == 4 && target_.options().openMPIsTargetDevice &&
+      TeamMailboxOnDevice(goal, arguments, body, EnclosingTarget() != nullptr)) {
+    return true;
+  }
   if (module == "io" && target_.options().openMPIsTargetDevice &&
       WriteOnDevice(goal, symbol, arguments)) {
     return true;

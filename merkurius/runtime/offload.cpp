@@ -62,6 +62,7 @@ extern "C" void merk_mailbox_drain(std::int64_t nodeHigh, std::int64_t nodeLow,
 extern "C" void merk_mailbox_trim(std::int64_t nodeHigh, std::int64_t nodeLow,
     std::int64_t placeAndSlot, std::int64_t generation, std::int64_t secret);
 extern "C" void merk_mailbox_detach_rings(void);
+extern "C" [[noreturn]] void merk_uncaught_exception(const char *exception);
 
 extern "C" void *llvm_omp_target_alloc_host(std::size_t, int)
     __attribute__((weak));
@@ -330,9 +331,38 @@ void WriteText(const char *text, std::uint64_t size) {
   funlockfile(stdout);
 }
 
+// An error on a device, reported for its first lane that has one, as the
+// host reports the same. A region is running, so the program ends at once
+// (ExitProgram), with the kernel, and the device gets no answer.
+[[noreturn]] void ReportDeviceFailure(rpc::Server::Port &port) {
+  std::uint64_t kinds[64]{};
+  std::uint64_t sizes[64]{};
+  void *texts[64]{};
+  port.recv([&](rpc::Buffer *buffer, std::uint32_t lane) {
+    kinds[lane] = buffer->data[0];
+  });
+  port.recv_n(texts, sizes, [](std::uint64_t size) { return Malloc(size + 1); });
+  for (int lane{0}; lane < 64; ++lane) {
+    if (!texts[lane]) {
+      continue;
+    }
+    auto *text{static_cast<char *>(texts[lane])};
+    text[sizes[lane]] = '\0';
+    if (kinds[lane] == 0) {
+      merk_uncaught_exception(text);
+    }
+    std::fflush(stdout);
+    std::fprintf(stderr, "Not yet implemented: %s\n", text);
+    ExitProgram(1);
+  }
+  Fail("a device reported an error with no text");
+}
+
 unsigned HandleOpcode(void *raw, unsigned) {
   auto &port{*static_cast<rpc::Server::Port *>(raw)};
   switch (port.get_opcode()) {
+  case rpcFail:
+    ReportDeviceFailure(port);
   case rpcSend:
     // The answer tells the device that the message is queued.
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
@@ -505,8 +535,6 @@ extern "C" void merk_region_exit(void) {
   pthread_mutex_unlock(&arenaLock);
   merkurius::runtime::Unpin();
 }
-
-extern "C" [[noreturn]] void merk_uncaught_exception(const char *exception);
 
 // A target teams region's num_teams, before it starts: OpenMP's is 32 bits,
 // and libomptarget takes one that is not positive for its default.
