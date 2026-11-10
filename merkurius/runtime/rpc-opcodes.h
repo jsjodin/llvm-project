@@ -30,9 +30,10 @@ constexpr uint32_t RpcOpcode(uint32_t n) { return ('m' << 24) | n; }
 constexpr uint32_t rpcSend{RpcOpcode(1)};
 
 // The ring of a mailbox the device receives from (device-ring.h): the
-// buffer's words are the handle's five, the device's number and whether the
-// messages are arrays. The host answers with the ring's address and its
-// head, or 0 if the mailbox is closed or another node's.
+// buffer's words are the handle's five, the device's number and what the
+// messages are (kRingOfWords, kRingOfArrays or kRingOfTerms). The host answers
+// with the ring's address and its head, or 0 if the mailbox is closed or
+// another node's.
 constexpr uint32_t rpcAttach{RpcOpcode(2)};
 
 // A chunk for the device's arena: the buffer's words are the device's
@@ -71,6 +72,27 @@ constexpr uint32_t rpcTakeArray{RpcOpcode(7)};
 // implemented and 2 for a limit of the runtime, and then the text, by
 // send_n. The host reports it as it
 // reports the same on the host, and ends the program, so it does not answer.
+// Host memory that the device writes and the host reads, for a copy of a
+// message (copy.h): the buffer's words are the device's number and the
+// bytes the chunk must hold at least. The host answers with the chunk's
+// address. Its first word is for the next chunk of the copy, and its second
+// is the device's number; its size in bytes is its third.
+constexpr uint32_t rpcPinnedChunk{RpcOpcode(8)};
+
+// A send of a message that the device copied into such chunks: the buffer's
+// words are the handle's five, the message type's key, the copy, and the
+// copy's first chunk. The host answers once it has queued the message, and
+// frees the chunks.
+constexpr uint32_t rpcSendTerm{RpcOpcode(9)};
+
+// The oldest message that the device has not taken from a ring of terms,
+// copied by the host into host memory that the device reads: the buffer's
+// words are the handle's five. The host answers with whether it found the
+// message, which it does not if the mailbox is closed, and the copy. The device
+// copies it, by the message type's type_info, into its arena, and then moves
+// the ring's head, after which the host frees the copy.
+constexpr uint32_t rpcTakeTerm{RpcOpcode(11)};
+
 constexpr uint32_t rpcFail{RpcOpcode(10)};
 
 } // namespace merkurius::runtime

@@ -36,13 +36,14 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include <atomic>
-#include "encode.h"
+#include "copy.h"
 #include "device-ring.h"
+#include "encode.h"
 #include "fragment.h"
 #include "node.h"
 #include "process.h"
 #include "walk.h"
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -60,225 +61,6 @@ using namespace merkurius::runtime;
   std::fflush(stdout);
   std::fprintf(stderr, "Mercury runtime: %s%s\n", message, detail);
   std::exit(1);
-}
-
-Word CopyTyped(Word value, const Type &type, Fragment &fragment);
-
-// Whether a value of the type is its word in a copy.
-bool CopiedAsItIs(const TypeCtor *ctor) {
-  switch (ctor->kind) {
-  case Int:
-  case Uint:
-  case Int8:
-  case Int16:
-  case Int32:
-  case Int64:
-  case Uint8:
-  case Uint16:
-  case Uint32:
-  case Uint64:
-  case Float:
-  case Char:
-  case Enum:
-  case Dummy:
-    return true;
-  default:
-    return false;
-  }
-}
-
-// A type_info: a descriptor is static, and a cell of one and its arguments'
-// type_infos is copied.
-Word CopyTypeInfo(Word info, Fragment &fragment) {
-  if ((info & kTagMask) == 0) {
-    return info;
-  }
-  const Word *cell{reinterpret_cast<const Word *>(info - 1)};
-  const auto *ctor{reinterpret_cast<const TypeCtor *>(cell[0])};
-  bool counted{ctor->kind == Tuple || ctor->kind == Closure};
-  Word arity{counted ? cell[1] : ctor->arity};
-  Word before{counted ? Word{2} : Word{1}};
-  auto *copy{
-      static_cast<Word *>(fragment.Allocate(sizeof(Word) * (before + arity)))};
-  for (Word i{0}; i < before; ++i) {
-    copy[i] = cell[i];
-  }
-  for (Word i{0}; i < arity; ++i) {
-    copy[before + i] = CopyTypeInfo(cell[before + i], fragment);
-  }
-  return reinterpret_cast<Word>(copy) + 1;
-}
-
-// A typeclass_info, by its method table's shape. The table is static.
-Word CopyDictionary(Word dictionary, Fragment &fragment) {
-  const Word *cell{reinterpret_cast<const Word *>(dictionary)};
-  DictionaryShape shape{ShapeOfDictionary(cell)};
-  Word total{shape.superclasses + shape.typeInfos + shape.constraints};
-  auto *copy{
-      static_cast<Word *>(fragment.Allocate(sizeof(Word) * (1 + total)))};
-  copy[0] = cell[0];
-  for (Word i{1}; i <= total; ++i) {
-    bool isTypeInfo{i > shape.superclasses &&
-        i <= shape.superclasses + shape.typeInfos};
-    copy[i] = isTypeInfo ? CopyTypeInfo(cell[i], fragment)
-                         : CopyDictionary(cell[i], fragment);
-  }
-  return reinterpret_cast<Word>(copy);
-}
-
-Word CopyValue(Word value, Word type, const Environment *environment,
-    Fragment &fragment) {
-  Type resolved{Resolve(type, environment)};
-  return CopyTyped(value, resolved, fragment);
-}
-
-// A term of constructors: its cell copied, field by field, and its tag kept.
-// A field of the term's own type is copied in the loop rather than by a
-// call, so that the length of a list uses no stack.
-Word CopyTerm(Word value, const Type &type, Fragment &fragment) {
-  Word result{0};
-  Word *slot{&result};
-  for (;;) {
-    const Word *fields{nullptr};
-    Word term{value};
-    const Functor *functor{FunctorOf(term, type.ctor, fields)};
-    if (!fields || fields == &term) {
-      // A constant, or a notag's or a tuple of one's only field, which is
-      // the value itself.
-      if (!fields) {
-        *slot = value;
-        return result;
-      }
-      *slot = CopyValue(value, functor->fields[0], &type.environment, fragment);
-      return result;
-    }
-    unsigned tag{type.ctor->kind == Tuple
-            ? functor->tag
-            : static_cast<unsigned>(value & kTagMask)};
-    // A constructor that shares its tag has its secondary tag in word 0.
-    const Word *from{reinterpret_cast<const Word *>(value - tag)};
-    unsigned before{static_cast<unsigned>(fields - from)};
-    unsigned arity{functor->arity};
-    Word *cell{static_cast<Word *>(
-        fragment.Allocate(sizeof(Word) * (before + arity)))};
-    // Its secondary tag, and then the type_infos and typeclass_infos of an
-    // existentially typed constructor, which the fields' types read.
-    unsigned hidden{functor->hidden};
-    for (unsigned i{0}; i < before - hidden; ++i) {
-      cell[i] = from[i];
-    }
-    const Word *hiddenFrom{fields - hidden};
-    Word *hiddenTo{cell + before - hidden};
-    for (unsigned i{0}; i < hidden; ++i) {
-      hiddenTo[i] = i < functor->hiddenTypeInfos
-          ? CopyTypeInfo(hiddenFrom[i], fragment)
-          : CopyDictionary(hiddenFrom[i], fragment);
-    }
-    Environment existential{type.environment.arguments,
-        type.environment.parent, hiddenFrom};
-    const Environment *environment{
-        hidden != 0 ? &existential : &type.environment};
-    *slot = reinterpret_cast<Word>(cell) + tag;
-    Word *copied{cell + before};
-    if (arity == 0) {
-      return result;
-    }
-    for (unsigned i{0}; i + 1 < arity; ++i) {
-      copied[i] =
-          CopyValue(fields[i], functor->fields[i], environment, fragment);
-    }
-    Word last{functor->fields[arity - 1]};
-    if (!IsSameType(last, type) || type.ctor->kind == Tuple) {
-      copied[arity - 1] =
-          CopyValue(fields[arity - 1], last, environment, fragment);
-      return result;
-    }
-    value = fields[arity - 1];
-    slot = &copied[arity - 1];
-  }
-}
-
-// A closure's cell, by its layout: its code is static, and each capture is
-// copied by what the layout says. A capture's type is found in the original
-// cell, whose captured type_infos are the ones it names.
-Word CopyClosure(Word value, Fragment &fragment) {
-  const Word *cell{reinterpret_cast<const Word *>(value)};
-  const auto *layout{reinterpret_cast<const ClosureLayout *>(cell[1])};
-  if (!layout) {
-    Fail("cannot copy a closure made on a device", "");
-  }
-  Word *copy{static_cast<Word *>(
-      fragment.Allocate(sizeof(Word) * (2 + layout->count)))};
-  copy[0] = cell[0];
-  copy[1] = cell[1];
-  const Word *captured{cell + 2};
-  Environment environment{nullptr, nullptr, captured};
-  for (Word i{0}; i < layout->count; ++i) {
-    Word capture{layout->captures[i]};
-    if (capture == kCaptureTypeInfo) {
-      copy[2 + i] = CopyTypeInfo(captured[i], fragment);
-    } else if (capture == kCaptureTypeclassInfo) {
-      copy[2 + i] = CopyDictionary(captured[i], fragment);
-    } else {
-      copy[2 + i] = CopyValue(captured[i], capture, &environment, fragment);
-    }
-  }
-  return reinterpret_cast<Word>(copy);
-}
-
-Word CopyTyped(Word value, const Type &type, Fragment &fragment) {
-  switch (type.ctor->kind) {
-  case Int:
-  case Uint:
-  case Int8:
-  case Int16:
-  case Int32:
-  case Int64:
-  case Uint8:
-  case Uint16:
-  case Uint32:
-  case Uint64:
-  case Float:
-  case Char:
-  case Enum:
-  case Dummy:
-    return value;
-  case String: {
-    const char *text{reinterpret_cast<const char *>(value)};
-    std::size_t bytes{std::strlen(text) + 1};
-    char *copy{static_cast<char *>(fragment.Allocate(bytes))};
-    std::memcpy(copy, text, bytes);
-    return reinterpret_cast<Word>(copy);
-  }
-  case Array: {
-    const Word *array{reinterpret_cast<const Word *>(value)};
-    Word size{array[0]};
-    Word *copy{
-        static_cast<Word *>(fragment.Allocate(sizeof(Word) * (1 + size)))};
-    copy[0] = size;
-    Word element{(Word{0} << kTagBits) | kVariableTag};
-    // What is copied as it is, as CopyTyped returns it, is copied as a block.
-    if (size != 0 && CopiedAsItIs(Resolve(element, &type.environment).ctor)) {
-      std::memcpy(copy + 1, array + 1, sizeof(Word) * size);
-      return reinterpret_cast<Word>(copy);
-    }
-    for (Word i{0}; i < size; ++i) {
-      copy[1 + i] =
-          CopyValue(array[1 + i], element, &type.environment, fragment);
-    }
-    return reinterpret_cast<Word>(copy);
-  }
-  case NoTag:
-  case Tuple:
-  case Cells:
-    return CopyTerm(value, type, fragment);
-  case Closure:
-    return CopyClosure(value, fragment);
-  case Void:
-    // Nothing has a value of this type.
-    std::abort();
-  }
-  Fail("cannot send a value of type ", type.ctor->name);
 }
 
 // What a process that ended left for its monitor's owner, whose function
@@ -401,13 +183,16 @@ struct Mailbox {
   std::int64_t count;
   // The next closed slot, to reuse, or -1.
   std::int64_t nextFree;
-  // The ring through which a device receives from it, or null, and whether
-  // its messages are arrays; of which the first `consumed` were taken, and
-  // have gone from the list.
+  // The ring through which a device receives from it, or null, and what
+  // its messages are (device-ring.h); of which the first `consumed` were
+  // taken, and have gone from the list. For a ring of terms, the copy of the
+  // message the device is taking, which `releaseCopy` frees once it has.
   DeviceRing *ring;
   int ringDevice;
-  bool ringOfArrays;
+  std::uint64_t ringKind;
   std::uint64_t consumed;
+  void *ringCopy;
+  void (*releaseCopy)(int device, void *copy);
   // The process that receives from it, which a message wakes, or null if
   // made on a thread that runs none; and its neighbours in that process's
   // list of mailboxes, as slots, or -1.
@@ -584,10 +369,50 @@ void RemoveName(Mailbox *mailbox) {
   mailbox->name = nullptr;
 }
 
+// Frees the copy of the message that the device was taking, which it has
+// taken. Called with the lock held.
+void ReleaseRingCopy(Mailbox *mailbox) {
+  if (mailbox->ringCopy) {
+    mailbox->releaseCopy(mailbox->ringDevice, mailbox->ringCopy);
+    mailbox->ringCopy = nullptr;
+  }
+}
+
+// Copies of messages that a device may still have been copying when their
+// mailboxes closed, which merk_mailbox_detach_rings frees once no region or
+// GPU process runs.
+struct RetiredCopy {
+  RetiredCopy *next;
+  int device;
+  void *copy;
+  void (*release)(int device, void *copy);
+};
+pthread_mutex_t retiredLock = PTHREAD_MUTEX_INITIALIZER;
+RetiredCopy *retired{nullptr};
+
+// The copy of the message that the device is taking, kept until no region
+// or GPU process runs. Called with the lock held.
+void RetireRingCopy(Mailbox *mailbox) {
+  if (!mailbox->ringCopy) {
+    return;
+  }
+  auto *entry{static_cast<RetiredCopy *>(Malloc(sizeof(RetiredCopy)))};
+  *entry = {
+      nullptr, mailbox->ringDevice, mailbox->ringCopy, mailbox->releaseCopy};
+  pthread_mutex_lock(&retiredLock);
+  entry->next = retired;
+  retired = entry;
+  pthread_mutex_unlock(&retiredLock);
+  mailbox->ringCopy = nullptr;
+}
+
 // Drops the messages the device has taken from the list. Called with the
 // lock held.
 void TrimRing(Mailbox *mailbox) {
   std::uint64_t head{__atomic_load_n(&mailbox->ring->head, __ATOMIC_ACQUIRE)};
+  if (mailbox->consumed != head) {
+    ReleaseRingCopy(mailbox);
+  }
   for (; mailbox->consumed != head; ++mailbox->consumed) {
     Message *taken{mailbox->head};
     mailbox->head = taken->next;
@@ -618,9 +443,10 @@ void FillRing(Mailbox *mailbox) {
           "receives from is not supported yet\n");
       std::_Exit(1);
     }
-    ring->slots[tail % kRingSlots] = mailbox->ringOfArrays
+    ring->slots[tail % kRingSlots] = mailbox->ringKind == kRingOfArrays
         ? *reinterpret_cast<const Word *>(message->value)
-        : message->value;
+        : mailbox->ringKind == kRingOfTerms ? Word{1}
+                                            : message->value;
     ++tail;
     __atomic_store_n(&ring->tail, tail, __ATOMIC_RELEASE);
     message = message->next;
@@ -869,8 +695,10 @@ void NewMailbox(Word typeInfo, Process *owner, std::int64_t *placeAndSlot,
   mailbox.nextFree = -1;
   mailbox.ring = nullptr;
   mailbox.ringDevice = -1;
-  mailbox.ringOfArrays = false;
+  mailbox.ringKind = kRingOfWords;
   mailbox.consumed = 0;
+  mailbox.ringCopy = nullptr;
+  mailbox.releaseCopy = nullptr;
   Own(&mailbox, owner);
   mailbox.open = true;
   *placeAndSlot = index;
@@ -902,6 +730,13 @@ static void Close(Mailbox *mailbox) {
   mailbox->messageType = 0;
   mailbox->open = false;
   ++mailbox->generation;
+  // The copy of a message that the device has taken goes now; it took what
+  // the ring's head has passed. One it may still be copying goes when no
+  // region or GPU process runs.
+  if (mailbox->ring) {
+    TrimRing(mailbox);
+    RetireRingCopy(mailbox);
+  }
   // Unread messages go, but not ones a device's ring may have shown.
   if (!mailbox->ring) {
     for (Message *message{mailbox->head}; message;) {
@@ -1202,15 +1037,16 @@ extern "C" void merk_mailbox_remove(
 // The mailbox's ring for a device (device-ring.h), made by `allocate` the
 // first time, and its head; null if the mailbox is closed or not this
 // node's host's. What it holds already is shown in the ring.
-extern "C" DeviceRing *merk_mailbox_attach(MERK_HANDLE_PARAMETERS, bool arrays,
-    int device, DeviceRing *(*allocate)(int), std::uint64_t *head) {
+extern "C" DeviceRing *merk_mailbox_attach(MERK_HANDLE_PARAMETERS,
+    std::uint64_t kind, int device, DeviceRing *(*allocate)(int),
+    std::uint64_t *head) {
   pthread_once(&once, InitializeCondition);
   DeviceRing *ring{nullptr};
   if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
     if (!mailbox->ring) {
       mailbox->ring = allocate(device);
       mailbox->ringDevice = device;
-      mailbox->ringOfArrays = arrays;
+      mailbox->ringKind = kind;
       mailbox->consumed = 0;
       __atomic_add_fetch(&attachedRings, 1, __ATOMIC_SEQ_CST);
       FillRing(mailbox);
@@ -1228,6 +1064,37 @@ extern "C" DeviceRing *merk_mailbox_attach(MERK_HANDLE_PARAMETERS, bool arrays,
     Unlock(mailbox);
   }
   return ring;
+}
+
+// The oldest message that the device has not taken from its ring of terms,
+// copied by `copy` with the mailbox's message type, where the device reads
+// it, into `result`; false if the mailbox is closed. `copy` sets `held` to
+// what `release` frees once the device has taken the message, which is when
+// its ring's head next moves, or when it asks for the next.
+extern "C" bool merk_mailbox_copy_for_ring(MERK_HANDLE_PARAMETERS,
+    Word (*copy)(int device, Word typeInfo, Word value, void **held),
+    void (*release)(int device, void *held), Word *result) {
+  bool found{false};
+  if (Mailbox * mailbox{Find(MERK_HANDLE)}) {
+    if (mailbox->ring && mailbox->ringKind == kRingOfTerms) {
+      TrimRing(mailbox);
+      ReleaseRingCopy(mailbox);
+      if (!mailbox->head) {
+        // On the plugin's server thread, where exit would hang.
+        std::fflush(stdout);
+        std::fputs("Mercury runtime: a device took a message that is not in "
+                   "its mailbox\n",
+            stderr);
+        std::_Exit(1);
+      }
+      *result = copy(mailbox->ringDevice, mailbox->messageType,
+          mailbox->head->value, &mailbox->ringCopy);
+      mailbox->releaseCopy = release;
+      found = true;
+    }
+    Unlock(mailbox);
+  }
+  return found;
 }
 
 // Shows the device the messages that did not fit in its ring.
@@ -1254,6 +1121,16 @@ extern "C" void merk_mailbox_trim(MERK_HANDLE_PARAMETERS) {
 // When no region is running: every mailbox goes back to its list alone,
 // which still has what the devices did not take. The caller frees the rings.
 extern "C" void merk_mailbox_detach_rings(void) {
+  pthread_mutex_lock(&retiredLock);
+  RetiredCopy *list{retired};
+  retired = nullptr;
+  pthread_mutex_unlock(&retiredLock);
+  while (list) {
+    RetiredCopy *next{list->next};
+    list->release(list->device, list->copy);
+    std::free(list);
+    list = next;
+  }
   if (__atomic_load_n(&attachedRings, __ATOMIC_SEQ_CST) == 0) {
     return;
   }
@@ -1263,6 +1140,8 @@ extern "C" void merk_mailbox_detach_rings(void) {
     pthread_mutex_lock(&mailbox->lock);
     if (mailbox->open && mailbox->ring) {
       TrimRing(mailbox);
+      // No device is taking a message.
+      ReleaseRingCopy(mailbox);
       mailbox->ring = nullptr;
     }
     pthread_mutex_unlock(&mailbox->lock);

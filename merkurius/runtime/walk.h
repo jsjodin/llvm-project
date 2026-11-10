@@ -110,7 +110,7 @@ inline const Functor *FunctorOf(Word &value, const TypeCtor *ctor, const Word *&
     break;
   }
   unsigned tag{static_cast<unsigned>(value & kTagMask)};
-  std::uint16_t index{ctor->byTag[tag]};
+  uint16_t index{ctor->byTag[tag]};
   if (index == kConstantTag) {
     return &ctor->functors[ctor->constants[value >> kTagBits]];
   }

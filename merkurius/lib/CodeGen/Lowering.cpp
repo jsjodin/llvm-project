@@ -3452,11 +3452,11 @@ llvm::LogicalResult Lowerer::Lower() {
   module_.getContext()->loadDialect<mlir::LLVM::LLVMDialect, mrt::MrtDialect>();
   // On a device nothing calls a descriptor's unify entry, since a generic
   // unification is an error there, and the procedure is not compiled for it.
+  // Its functors stay, by which a message is copied (runtime/copy.h).
   if (device_) {
     for (auto op : module_.getOps<merk::TypeCtorOp>()) {
       op.removeUnifyAttr();
       op.removeCompareAttr();
-      op.removeFunctorsAttr();
     }
     // Nor does anything dispatch on a type class, and a table's symbols would
     // keep the filter below from removing the host's procedures.

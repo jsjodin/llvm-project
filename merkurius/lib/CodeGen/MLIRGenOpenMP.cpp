@@ -145,10 +145,40 @@ static bool Ground(const semantics::Type &type) {
       [](const semantics::Type *argument) { return Ground(*argument); });
 }
 
+// Whether a type, or one of its arguments, is a higher-order type.
+static bool HasHigherOrder(const semantics::Type &type) {
+  if (type.kind == semantics::TypeKind::HigherOrder) {
+    return true;
+  }
+  return llvm::any_of(type.arguments, [](const semantics::Type *argument) {
+    return HasHigherOrder(*argument);
+  });
+}
+
+// docs/INPROGRESS.md, GPU processes without omp target, step 4e. A closure
+// in a constructor's field is found when the runtime copies it.
+bool MerkGenerator::CopiedMessage(
+    const semantics::Type &type, mlir::Type represented) {
+  return Ground(type) && !HasHigherOrder(type) && !WordMessage(represented) &&
+      !ArrayMessage(represented);
+}
+
+mlir::Value MerkGenerator::MessageTypeInfo(
+    const semantics::Type *type, mlir::Location loc, parser::CharBlock at) {
+  mlir::Value info{TypeInfoOfType(type, loc, at)};
+  if (!info) {
+    return {};
+  }
+  return mlir::UnrealizedConversionCastOp::create(
+      builder_, loc, mlir::LLVM::LLVMPointerType::get(&context_), info)
+      .getResult(0);
+}
+
 std::optional<std::uint64_t> MerkGenerator::MessageKey(
     const semantics::Type &type, mlir::Type represented) {
   if (!Ground(type) ||
-      (!WordMessage(represented) && !ArrayMessage(represented))) {
+      (!WordMessage(represented) && !ArrayMessage(represented) &&
+          !CopiedMessage(type, represented))) {
     return std::nullopt;
   }
   std::uint64_t key{llvm::xxh3_64bits(semantics::TypeToString(type))};
@@ -194,13 +224,24 @@ bool MerkGenerator::SendInTarget(const Body &goal,
   mlir::Value word{array ? ArrayPointer(message, loc)
                          : mlir::Value{merk::ToWordOp::create(builder_, loc,
                                merk::WordType::get(&context_), message)}};
+  llvm::SmallVector<mlir::Value> operands{mailbox,
+      IntegerConstant(
+          builder_.getI64Type(), static_cast<std::int64_t>(*key), loc),
+      word};
+  bool copied{CopiedMessage(*type, message.getType())};
+  if (copied) {
+    mlir::Value info{MessageTypeInfo(type, loc, at)};
+    if (!info) {
+      failed_ = true;
+      return true;
+    }
+    operands.push_back(info);
+  }
   merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
-      array ? "merk_device_send_array" : "merk_device_send",
-      mlir::ValueRange{mailbox,
-          IntegerConstant(builder_.getI64Type(),
-              static_cast<std::int64_t>(*key), loc),
-          word},
-      /*can_fail=*/false);
+      array        ? "merk_device_send_array"
+          : copied ? "merk_device_send_term"
+                   : "merk_device_send",
+      operands, /*can_fail=*/false);
   return true;
 }
 
@@ -315,7 +356,8 @@ bool MerkGenerator::ReceiveInTarget(const Body &goal,
   const semantics::Type *messageType{receivedType->arguments.front()};
   mlir::Type message{Represent(messageType)->type};
   bool array{ArrayMessage(message)};
-  if (!WordMessage(message) && !array) {
+  bool copied{CopiedMessage(*messageType, message)};
+  if (!WordMessage(message) && !array && !copied) {
     if (!inRegion) {
       return false;
     }
@@ -324,12 +366,23 @@ bool MerkGenerator::ReceiveInTarget(const Body &goal,
             " in target regions");
     return true;
   }
+  llvm::SmallVector<mlir::Value> operands{
+      mailbox, TimeoutMilliseconds(timeout, loc)};
+  if (copied) {
+    mlir::Value info{MessageTypeInfo(messageType, loc, at)};
+    if (!info) {
+      failed_ = true;
+      return true;
+    }
+    operands.push_back(info);
+  }
   auto word{merk::WordType::get(&context_)};
   auto received{merk::ForeignCallOp::create(builder_, loc,
       mlir::TypeRange{builder_.getI1Type(), word},
-      array ? "merk_device_receive_array" : "merk_device_receive",
-      mlir::ValueRange{mailbox, TimeoutMilliseconds(timeout, loc)},
-      /*can_fail=*/true)};
+      array        ? "merk_device_receive_array"
+          : copied ? "merk_device_receive_term"
+                   : "merk_device_receive",
+      operands, /*can_fail=*/true)};
   auto termType{mlir::cast<merk::TermType>(Represent(receivedType)->type)};
   auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{termType})};
   {
@@ -379,7 +432,12 @@ bool MerkGenerator::TeamMailboxOnDevice(const Body &goal,
   const semantics::Type *mailboxType{body.vars[arguments[1]].type};
   const semantics::Type *messageType{mailboxType->arguments.front()};
   mlir::Type message{Represent(messageType)->type};
-  std::optional<std::uint64_t> key{MessageKey(*messageType, message)};
+  // Temporary (docs/INPROGRESS.md, GPU processes without omp target, step
+  // 4e): a team mailbox of messages that are copied by their type_info
+  // would share them by their pointer, as arrays, but is not tested yet.
+  std::optional<std::uint64_t> key{CopiedMessage(*messageType, message)
+          ? std::nullopt
+          : MessageKey(*messageType, message)};
   if (!key) {
     if (!inRegion) {
       return false;

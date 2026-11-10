@@ -88,6 +88,16 @@ public:
     return cell;
   }
 
+  // The copy is for the host's code (copy.h).
+  static constexpr bool kOtherImage{false};
+
+  // A value that a copy into the fragment cannot copy (copy.h).
+  [[noreturn]] void Fail(const char *message, const char *detail) {
+    std::fflush(stdout);
+    std::fprintf(stderr, "Mercury runtime: %s%s\n", message, detail);
+    std::exit(1);
+  }
+
 private:
   // Most messages are small, and a chunk that is used only in part still
   // costs a page fault for each page: 4096 bytes for every message took 85% of

@@ -1,0 +1,20 @@
+process-gpu-messages.m's process kinds spawned on the machine's GPU
+(docs/INPROGRESS.md, GPU processes without omp target, step 4e): a counter
+that takes add(N) and get(Reply), two processes that play ping-pong through
+the host's mailboxes, and a summer that takes a list and a string. A closure
+in a message cannot cross to the GPU, which the host finds when it copies the
+message for the GPU, and the program ends.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-gpu-messages.m -o %t2
+RUN: %libomp-env timeout -k 1 60 %t2 gpu | FileCheck %S/process-gpu-messages.m --match-full-lines --strict-whitespace
+RUN: merkc -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-gpu-messages.m -o %t
+RUN: %libomp-env timeout -k 1 60 %t gpu | FileCheck %S/process-gpu-messages.m --match-full-lines --strict-whitespace
+RUN: not %libomp-env timeout -k 1 60 %t2 gpu closure 2>&1 | FileCheck %s --check-prefix=CLOSURE --match-full-lines
+CLOSURE:Mercury runtime: cannot copy a closure between the host and a GPU
+
+Two hundred GPU processes that each take one message and end leave none of
+the host's copies of their messages.
+RUN: %libomp-env MERK_CHECK_PINNED=1 timeout -k 1 60 %t2 gpu many 2>&1 | FileCheck %s --check-prefix=MANY --match-full-lines
+MANY:20300
+MANY-NEXT:Mercury runtime: 0 chunks of host memory for devices' messages are allocated

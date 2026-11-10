@@ -280,12 +280,12 @@ void Copier::CollectTerms(mlir::Operation *op, mlir::ModuleOp source) {
 }
 
 // A copied descriptor, which each module of the device's image that needs it
-// has, and by which nothing unifies or compares on a device.
+// has, and by which nothing unifies or compares on a device. Its functors
+// stay, by which a message is copied (runtime/copy.h).
 static void ForDevice(merk::TypeCtorOp ctor) {
   ctor.setLinkage("linkonce");
   ctor.removeUnifyAttr();
   ctor.removeCompareAttr();
-  ctor.removeFunctorsAttr();
 }
 
 // The descriptor of each type whose type_info a copy makes that the module

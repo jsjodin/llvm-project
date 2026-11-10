@@ -10,9 +10,10 @@
 // memory, which the device reads directly (docs/INPROGRESS.md, The device's
 // side of the first slice, step 7). The host's list stays the mailbox's
 // queue; the ring shows the device its oldest messages. For a word
-// message a slot is the message, and for an array its size. The device
-// moves `head` when it has taken a message, and the host then drops it from
-// its list.
+// message a slot is the message, and for an array its size. Any other
+// message the device asks the host to copy where it reads it (rpcTakeTerm),
+// and its slot says only that it is there. The device moves `head` when it
+// has taken a message, and the host then drops it from its list.
 //
 //===----------------------------------------------------------------------===//
 
@@ -24,6 +25,12 @@
 namespace merkurius::runtime {
 
 constexpr uint64_t kRingSlots{64};
+
+// What a ring's mailbox holds: one-word messages, arrays of one-word
+// elements, or other values, which are copied by their type_info (copy.h).
+constexpr uint64_t kRingOfWords{0};
+constexpr uint64_t kRingOfArrays{1};
+constexpr uint64_t kRingOfTerms{2};
 
 // The device's table of the rings it has, by the mailbox's slot, and its
 // table of the target teams regions running on it, by the region's id
