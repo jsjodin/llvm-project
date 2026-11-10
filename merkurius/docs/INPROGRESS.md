@@ -2142,6 +2142,16 @@ the process asks the host to launch. The first version has neither.
      implemented" too. Tests: the declaration's errors, and programs that
      spawn kinds, with the output they print. mmc has no `:- process`, so
      the expected output is written by hand.
+
+     Done 2026-11-10, behind `-fprocess-declarations`, as the design
+     document records (Processes and mailboxes, "Process declarations as
+     implemented"). `process`, `receives` and `on` are operators only in an
+     item that begins with `:- process`, so that importing the module
+     `process` still reads. The converter makes the expansion while the
+     declaration's terms exist, and `ExpandProcesses` puts it into the
+     items, so later passes see ordinary declarations and clauses. A kind
+     marked `on gpu` is parsed, and reports "not yet implemented" until 4b
+     ("Temporary" in `lib/Semantics/expand-processes.cpp`).
    - **4b. A GPU kind's kernel.** For each kind that runs on a GPU (decision
      D1), merkc makes a kernel `merk_process_<kind>`, which takes the
      mailbox's handle and the kind's arguments by value. In the first

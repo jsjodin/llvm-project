@@ -1283,6 +1283,14 @@ The declaration is the process kind's contract: what it is spawned with and what
 
 A module defines process kinds; it is not itself a process. Exporting the mailbox as an abstract type and keeping the message constructors private forces other modules through the module's API predicates, as Erlang's gen\_server does by convention.
 
+**Process declarations as implemented** (2026-11-10, step 4a of GPU processes without `omp target`, docs/INPROGRESS.md):
+
+- **Syntax and the option.** `:- process Kind(Types) receives Types`, with `on gpu` after it for a kind that runs on a GPU (decision D1). `process` is a prefix operator with the other declarations' priority, and `receives` and `on` are infix operators that bind less tightly than `,`, which separates several message types: the declaration reads as `process((Kind receives Types) on gpu)`. mmc has none of them, so they exist only with `-fprocess-declarations`, as `receive` exists only with `-freceive-goal`. Even then they are operators only in an item that begins with `:- process`, and `process` only there. **Rejected: operators everywhere**, as `do` and `receive` are. Every program with processes imports the module `process`, and `:- import_module int, process, string` would then be an error, an operator used as an operand; a constructor `on`, as in `turn ---> on ; off`, would be one too.
+- **Conversion.** The converter reads a `ProcessDecl`: the kind's name, which is not module-qualified, its argument types, its message types in order, and whether it runs on a GPU. While the declaration's terms exist, it makes the expansion as the terms it would be written as, and converts them as items: the kind's `pred` declaration, and, for one message type, `spawn_Kind`'s declaration and its clause. The names in them are qualified, `io.io`, `process.mailbox`, `process.spawn` and the module's own kind, so that they mean the same whatever else the module declares. The node keeps the expansion out of its fields, so the parse tree prints and unparses as written. The canonical layout puts message types that do not fit on the line below it, indented.
+- **Expansion.** `ExpandProcesses` (`lib/Semantics/expand-processes.cpp`) puts the predicates into the items, after the declaration, which stays: the declarations where the declaration is, so that a declaration in the interface exports them, and `spawn_Kind`'s clause in the implementation section, or at the end of the module. Every later pass sees ordinary declarations and clauses. The module loader expands an imported module too, without the clause. The module must import `io` and `process` where the declaration is, as for any declaration that names them; name resolution says so otherwise. A kind declared twice, or with its predicate declared as well, is a predicate declared more than once.
+- **Not yet implemented,** each reported: several message types, a kind on a GPU (step 4b), and a call of `spawn_Kind_on`, which needs remote spawn. Name resolution reports the last instead of an undefined predicate when a `spawn_Kind` that a process declaration made, of one less arity, is visible.
+- **Tests.** `Parser/convert/processes.m` and `process-errors.m` read declarations and their errors, with the canonical layout and round trips in the unparser's tests; `Semantics/desugar/processes.m` checks the expansion, and `Semantics/processes/` the errors after conversion; `CodeGen/process-declarations.m` spawns kinds of its own module and of another's interface, one polymorphic, at -O0 and -O2, its output written by hand, since mmc has no process declarations.
+
 Failure handling follows Erlang. An uncaught exception ends the process with that exception as its exit reason. A monitor delivers a `down_info` message to a mailbox the watcher names, through a function into that mailbox's message type, so a process with one protocol needs no second mailbox for it. Links, deferred for now, would deliver exit messages the same way. The semantics are in Runtime system, "Exceptions, links and monitors".
 
 ### Loops
@@ -2131,6 +2139,7 @@ Flang's driver cannot be reused as it stands. It is Clang's driver library, `cla
 | `-fopenmp`, `-fopenmp-version=` | Read `%$omp` directives (Front end, Lexer) |
 | `--trace-flag=`*name* | Compile in the trace goals whose `compile_time` condition needs `flag("`*name*`")`, as mmc's option of the same name (Lowering, "Deterministic and semidet code") |
 | `-freceive-goal` | Read `receive` goals (Language extensions, "Processes and mailboxes") |
+| `-fprocess-declarations` | Read `:- process` declarations (Language extensions, "Processes and mailboxes") |
 | `--offload-arch=` | Compile target regions for a device (Linking and offloading, below) |
 | `--target=`, `-march=`, `-mcpu=` | Target triple and CPU |
 | `-I` *dir*, `-module-dir` *dir* | Where interface files are searched for, and where they are written; Flang uses the same two options for `.mod` files |
@@ -4343,6 +4352,7 @@ Seven decisions remain open. The two that most constrain the runtime are the non
 - [x] Receiving from several mailboxes: selectors, as in Gleam, taking the oldest matching message across mailboxes, as Erlang's receive does; priority by Erlang's two-step receive (Language extensions, "Processes and mailboxes").
 - [x] Target regions: only scalars, arrays of scalars and tuples, by value, cross into one; map types follow from modes; array sections, `A(Lo .. Hi)`, are inclusive and keep the array's indices (Language extensions, "Target regions").
 - [x] Receive syntax: a `receive` goal whose arms each `select` a message by mailbox and pattern, as sugar over the selector API, behind `-freceive-goal` (Language extensions, "Processes and mailboxes").
+- [x] Process declarations: `:- process Kind(Types) receives Types [on gpu]`, expanded into the kind's predicate and `spawn_Kind`, behind `-fprocess-declarations` (Language extensions, "Processes and mailboxes").
 
 **Risks**
 

@@ -1307,7 +1307,7 @@ public:
 static constexpr auto declaration{anyOf<Item>(moduleDecl, endModuleDecl,
     sectionDecl, importDecl, PredDeclRule{}, ModeDeclRule{}, TypeDefnRule{},
     InstDefnRule{}, ModeDefnRule{}, TypeclassDeclRule{}, InstanceDeclRule{},
-    pragma, InitialiseRule{}, MutableRule{}, PromiseRule{},
+    pragma, InitialiseRule{}, MutableRule{}, ProcessRule{}, PromiseRule{},
     PromiseDisjunctionRule{}, SolverTypeRule{})};
 
 std::optional<Item> ConvertItem(const Term &term, ConvertState &state) {
@@ -1347,6 +1347,8 @@ const ParseTree &ConvertFile(const TokenSequence &tokens,
   TermReader reader{tokens, terms, messages, maxDepth, options};
   ConvertState state{tokens, arena, messages};
   state.maxDepth = maxDepth;
+  state.processDeclarations = options.processDeclarations;
+  state.terms = &terms;
   std::vector<Item> items;
   while (std::optional<ItemTerm> item{reader.ReadItem()}) {
     const Token &first{tokens.tokens[item->tokens.first]};
@@ -1358,6 +1360,10 @@ const ParseTree &ConvertFile(const TokenSequence &tokens,
       state.item = item->term;
       state.variables = item->variables;
       if (std::optional<Item> converted{ConvertItem(*item->term, state)}) {
+        if (const auto *module{std::get_if<const ModuleDecl *>(&*converted)};
+            module && !state.module) {
+          state.module = (*module)->name;
+        }
         items.push_back(*converted);
       }
     }

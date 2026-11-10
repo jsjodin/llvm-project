@@ -188,6 +188,27 @@ const OperatorDefinition *TermReader::GetOperator(const Token &token) const {
         "receive", OperatorForm{Specifier::FXY, 550}, std::nullopt};
     return &receive;
   }
+  // :- process counter(int) receives counter_msg on gpu, read as
+  // process((counter(int) receives counter_msg) on gpu). Each binds less
+  // tightly than ',', which separates several message types, and more
+  // tightly than ':-'; process has the other declarations' priority.
+  if (processToken_) {
+    static const OperatorDefinition process{
+        "process", OperatorForm{Specifier::FX, 301}, std::nullopt};
+    static const OperatorDefinition on{
+        "on", std::nullopt, OperatorForm{Specifier::XFX, 305}};
+    static const OperatorDefinition receives{
+        "receives", std::nullopt, OperatorForm{Specifier::XFX, 310}};
+    if (&token == processToken_) {
+      return &process;
+    }
+    if (name == "on") {
+      return &on;
+    }
+    if (name == "receives") {
+      return &receives;
+    }
+  }
   return FindOperator(name);
 }
 
@@ -257,6 +278,13 @@ std::optional<ItemTerm> TermReader::ReadItem() {
   argumentStart_ = at_;
   variableNumbers_.clear();
   variables_ = 0;
+  processToken_ = nullptr;
+  if (options_.processDeclarations && PeekKind() == TokenKind::Name &&
+      UnquoteSpelling(Peek().spelling) == ":-" &&
+      PeekKind(1) == TokenKind::Name &&
+      UnquoteSpelling(Peek(1).spelling) == "process") {
+    processToken_ = &Peek(1);
+  }
   Parsed parsed{Parse(itemPriority)};
   if (!failed_ && PeekKind() == TokenKind::End) {
     Next();
@@ -275,6 +303,7 @@ const Term *TermReader::ReadApplication(std::uint32_t &at,
   argumentStart_ = at_;
   variableNumbers_ = numbers;
   variables_ = count;
+  processToken_ = nullptr;
   Parsed parsed{ParseName(primaryPriority)};
   at = at_;
   return failed_ ? nullptr : parsed.term;

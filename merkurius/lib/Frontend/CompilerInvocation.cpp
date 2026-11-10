@@ -171,6 +171,7 @@ static bool parseLangArgs(LangOptions &opts, const InputArgList &args) {
   opts.openMP = args.hasArg(OPT_fopenmp);
   opts.doLoops = args.hasArg(OPT_fdo_loops);
   opts.receiveGoal = args.hasArg(OPT_freceive_goal);
+  opts.processDeclarations = args.hasArg(OPT_fprocess_declarations);
   if (const llvm::opt::Arg *arg = args.getLastArg(OPT_fopenmp_version_EQ)) {
     llvm::StringRef value{arg->getValue()};
     if (value.getAsInteger(10, opts.openMPVersion)) {

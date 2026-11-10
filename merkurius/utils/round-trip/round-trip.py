@@ -14,8 +14,10 @@ round-trip tests").
    locations or trivia.
 
 With --openmp, %$omp directives are read as directives, not comments, and
-with --do-loops, ( Iterators do Body ) is read as a loop, and with
---receive-goal, receive [Params] ( Arms ) is read as a receive goal.
+with --do-loops, ( Iterators do Body ) is read as a loop, with
+--receive-goal, receive [Params] ( Arms ) is read as a receive goal, and
+with --process-declarations, :- process Kind receives Types is read as a
+process declaration.
 
 The script exits with status 1 and reports every file that fails a test.
 """
@@ -98,6 +100,7 @@ def main():
     parser.add_argument("--openmp", action="store_true")
     parser.add_argument("--do-loops", action="store_true")
     parser.add_argument("--receive-goal", action="store_true")
+    parser.add_argument("--process-declarations", action="store_true")
     parser.add_argument("files", nargs="+")
     args = parser.parse_args()
     if args.openmp:
@@ -106,6 +109,8 @@ def main():
         OPTIONS.append("-fdo-loops")
     if args.receive_goal:
         OPTIONS.append("-freceive-goal")
+    if args.process_declarations:
+        OPTIONS.append("-fprocess-declarations")
     failed = False
     for path in args.files:
         for problem in check(args.merkc, path):

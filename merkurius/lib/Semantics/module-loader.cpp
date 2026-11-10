@@ -11,6 +11,7 @@
 #include "merkurius/Parser/convert.h"
 #include "merkurius/Parser/lexer.h"
 #include "merkurius/Parser/source.h"
+#include "merkurius/Semantics/desugar.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Path.h"
 #include <list>
@@ -102,9 +103,12 @@ const ModuleInterface *ModuleLoader::Load(
   loaded_[name] = &interface;
   order_.push_back(&interface);
   file.tokens = parser::Lex(*source, parser::LexerOptions{}, messages_);
+  // Process declarations' predicates are declared in the interface; their
+  // clauses are the module's own.
   const parser::ParseTree &tree{
-      parser::ConvertFile(file.tokens, file.arena, messages_,
-          parser::TermReader::defaultMaxDepth, readerOptions_)};
+      ExpandProcesses(parser::ConvertFile(file.tokens, file.arena, messages_,
+                          parser::TermReader::defaultMaxDepth, readerOptions_),
+          file.tokens, file.arena, messages_, false)};
   // The file must be the module's, and its interface section is the items
   // from :- interface to :- implementation.
   bool inInterface{false}, named{false};

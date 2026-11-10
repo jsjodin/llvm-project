@@ -6,6 +6,7 @@ add_merkurius_library(MerkuriusSemantics
   check-types.cpp
   check-uniqueness.cpp
   desugar.cpp
+  expand-processes.cpp
   insts.cpp
   module-loader.cpp
   polymorphism.cpp

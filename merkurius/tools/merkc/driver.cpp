@@ -83,6 +83,9 @@ static void addFrontendOptions(const InputArgList &args, Job &job,
   if (args.hasArg(OPT_freceive_goal)) {
     job.push_back("-freceive-goal");
   }
+  if (args.hasArg(OPT_fprocess_declarations)) {
+    job.push_back("-fprocess-declarations");
+  }
   if (args.hasArg(OPT_fstub_unimplemented)) {
     job.push_back("-fstub-unimplemented");
   }

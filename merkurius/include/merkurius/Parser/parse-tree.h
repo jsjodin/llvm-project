@@ -1689,6 +1689,33 @@ struct MutableDecl {
   }
 };
 
+// :- process Kind(Types) receives Types, or ... receives Types on gpu, an
+// extension (design document, "Processes and mailboxes"). The kind's name
+// is not module-qualified. The predicates it expands to are made with it,
+// while its terms exist; desugaring's ExpandProcesses puts them in the
+// tree. They are not fields, so the tree prints as written.
+struct ProcessDecl {
+  static constexpr llvm::StringLiteral kindName{"ProcessDecl"};
+  TokenRange tokens;
+  llvm::StringRef name;
+  llvm::ArrayRef<Type> arguments;
+  llvm::ArrayRef<Type> receives; // one mailbox each, in order
+  bool onGpu;
+  // pred Kind(Arguments::in, mailbox(Receives)::in..., io::di, io::uo) is det.
+  const PredDecl *kindDecl;
+  // pred spawn_Kind(Arguments::in, mailbox(Receive)::out, io::di, io::uo)
+  // is det, and its clause, which calls process.spawn; null unless the kind
+  // receives one message type.
+  const PredDecl *spawnDecl;
+  const FactOrRule *spawnClause;
+  template <typename F> void ForEachField(F &&f) const {
+    f("name", name);
+    f("arguments", arguments);
+    f("receives", receives);
+    f("onGpu", onGpu);
+  }
+};
+
 // :- promise Goal.
 struct PromiseDecl {
   static constexpr llvm::StringLiteral kindName{"PromiseDecl"};
@@ -2173,19 +2200,20 @@ struct InstanceDecl {
 //===----------------------------------------------------------------------===//
 
 using Item = std::variant<const ModuleDecl *, const EndModuleDecl *,
-    const SectionDecl *, const ImportDecl *, const PredDecl *,
-    const ModeDecl *, const DuTypeDefn *, const EquivalenceTypeDefn *,
-    const AbstractTypeDecl *, const InstDefn *, const ModeDefn *,
-    const TypeclassDecl *, const InstanceDecl *, const FactOrRule *,
-    const DcgRule *, const PredPragma *, const ObsoletePragma *,
-    const TypeSpecPragma *, const TablingPragma *, const FactTablePragma *,
+    const SectionDecl *, const ImportDecl *, const PredDecl *, const ModeDecl *,
+    const DuTypeDefn *, const EquivalenceTypeDefn *, const AbstractTypeDecl *,
+    const InstDefn *, const ModeDefn *, const TypeclassDecl *,
+    const InstanceDecl *, const FactOrRule *, const DcgRule *,
+    const PredPragma *, const ObsoletePragma *, const TypeSpecPragma *,
+    const TablingPragma *, const FactTablePragma *,
     const RequireFeatureSetPragma *, const SourceFilePragma *,
     const ForeignDeclPragma *, const ForeignCodePragma *,
     const ForeignProcPragma *, const ForeignTypePragma *,
     const ForeignEnumPragma *, const ForeignExportEnumPragma *,
     const ForeignExportPragma *, const ForeignImportModulePragma *,
-    const InitialiseDecl *, const MutableDecl *, const PromiseDecl *,
-    const PromiseDisjunctionDecl *, const SolverTypeDefn *>;
+    const InitialiseDecl *, const MutableDecl *, const ProcessDecl *,
+    const PromiseDecl *, const PromiseDisjunctionDecl *,
+    const SolverTypeDefn *>;
 
 // The items of a file that converted without errors, in order.
 struct ParseTree {
