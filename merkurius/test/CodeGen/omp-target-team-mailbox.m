@@ -198,6 +198,7 @@ collect(Box, !Got, !IO) :-
 % DEVICE: omp.teams num_teams(
 % DEVICE-NEXT: merk.foreign_call @omp_get_num_teams()
 % DEVICE-NEXT: merk.foreign_call @merk_device_teams_enter(
+% DEVICE-NEXT: merk.foreign_call @merk_device_teams_wait_all() : () -> ()
 % DEVICE-NOT: merk_device_no_teams
 % DEVICE: merk.call @omp_target_team_mailbox.gather_3_0
 % DEVICE-NOT: merk_device_no_teams

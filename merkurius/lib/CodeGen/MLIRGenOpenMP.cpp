@@ -435,19 +435,48 @@ bool MerkGenerator::TeamMailboxOnDevice(const Body &goal,
   return true;
 }
 
-// Whether the region is a target teams region's, whose teams say so at their
-// start (TargetTeams).
-static bool EntersTeams(mlir::omp::TargetOp target) {
-  bool enters{false};
+// The call with which a target teams region's teams say so at their start
+// (TargetTeams), or null for another region.
+static merk::ForeignCallOp TeamsEnter(mlir::omp::TargetOp target) {
+  merk::ForeignCallOp enter;
   target.walk([&](merk::ForeignCallOp call) {
     if (call.getCallee() == "merk_device_teams_enter") {
-      enters = true;
+      enter = call;
     }
   });
-  return enters;
+  return enter;
 }
 
-void MerkGenerator::MarkRegionsWithoutTeams() {
+// Whether `op`, or code of the module that it refers to by a symbol, such as
+// a procedure it calls or a closure's entry, calls merk_device_team_mailbox.
+// `seen` holds the symbols' operations looked at already.
+static bool UsesTeamMailboxes(mlir::Operation *op, mlir::ModuleOp module,
+    llvm::DenseSet<mlir::Operation *> &seen) {
+  mlir::WalkResult result{op->walk([&](mlir::Operation *inner) {
+    auto call{mlir::dyn_cast<merk::ForeignCallOp>(inner)};
+    if (call && call.getCallee() == "merk_device_team_mailbox") {
+      return mlir::WalkResult::interrupt();
+    }
+    for (mlir::NamedAttribute attribute : inner->getAttrs()) {
+      mlir::Operation *symbol{nullptr};
+      if (auto ref{mlir::dyn_cast<mlir::FlatSymbolRefAttr>(
+              attribute.getValue())}) {
+        symbol = module.lookupSymbol(ref);
+      } else if (auto name{mlir::dyn_cast<mlir::StringAttr>(
+                     attribute.getValue())}) {
+        symbol = module.lookupSymbol(name);
+      }
+      if (symbol && seen.insert(symbol).second &&
+          UsesTeamMailboxes(symbol, module, seen)) {
+        return mlir::WalkResult::interrupt();
+      }
+    }
+    return mlir::WalkResult::advance();
+  })};
+  return result.wasInterrupted();
+}
+
+void MerkGenerator::MarkRegionsForTeamMailboxes() {
   if (!target_.options().openMPIsTargetDevice) {
     return;
   }
@@ -461,11 +490,27 @@ void MerkGenerator::MarkRegionsWithoutTeams() {
     return;
   }
   llvm::SmallVector<mlir::omp::TargetOp> regions;
+  llvm::SmallVector<merk::ForeignCallOp> waits;
   module_.walk([&](mlir::omp::TargetOp target) {
-    if (!EntersTeams(target)) {
+    merk::ForeignCallOp enter{TeamsEnter(target)};
+    if (!enter) {
       regions.push_back(target);
+      return;
+    }
+    llvm::DenseSet<mlir::Operation *> seen;
+    if (UsesTeamMailboxes(target, module_, seen)) {
+      waits.push_back(enter);
     }
   });
+  // The teams of a region with team mailboxes wait until all have started,
+  // as a team that is not running would deadlock those waiting for it
+  // (docs/INPROGRESS.md, Processes as teams, step 4).
+  for (merk::ForeignCallOp enter : waits) {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.setInsertionPointAfter(enter);
+    merk::ForeignCallOp::create(builder_, enter.getLoc(), mlir::TypeRange{},
+        "merk_device_teams_wait_all", mlir::ValueRange{}, /*can_fail=*/false);
+  }
   for (mlir::omp::TargetOp target : regions) {
     // Where the region reads its inputs (Target): in an SPMD kernel, in its
     // teams and parallel, which every thread runs.

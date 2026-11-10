@@ -160,8 +160,8 @@ extern "C" void *merk_device_alloc(uint64_t bytes) {
 namespace {
 
 // Reports an error that ends the program, as the host reports the same:
-// `kind` is 0 for an uncaught exception and 1 for a feature not yet
-// implemented (rpc-opcodes.h). The host ends the program, so this does not
+// `kind` is 0 for an uncaught exception, 1 for a feature not yet
+// implemented and 2 for a limit of the runtime (rpc-opcodes.h). The host ends the program, so this does not
 // return.
 [[noreturn]] void Fail(uint64_t kind, const char *text) {
   uint64_t size{0};
@@ -261,6 +261,10 @@ struct TeamTable {
   int64_t teams;
   TeamTable *next;
   TeamRing **rings;
+  // The teams that have started (merk_device_teams_wait_all), and whether
+  // one of them is reporting that the others did not.
+  int64_t started;
+  uint32_t reporting;
 };
 
 // The table of the target teams region that this team runs, or none in any
@@ -297,6 +301,8 @@ extern "C" void merk_device_teams_enter(
       made->nodeHigh = nodeHigh;
       made->nodeLow = nodeLow;
       made->teams = teams;
+      made->started = 0;
+      made->reporting = 0;
       made->rings = reinterpret_cast<TeamRing **>(bytes + sizeof(TeamTable));
       for (uint64_t i{0}; i < count; ++i) {
         made->rings[i] = nullptr;
@@ -308,6 +314,46 @@ extern "C" void merk_device_teams_enter(
       currentTeams = made;
       return;
     }
+  }
+}
+
+// How long the teams of a region with team mailboxes wait for each other to
+// start. Teams that fit on the device start within microseconds.
+constexpr double kTeamsStartSeconds{1.0};
+
+// After merk_device_teams_enter, in each team of a target teams region whose
+// code uses team mailboxes: waits until every team of the region has started
+// (docs/INPROGRESS.md, Processes as teams, step 4). A team that is not
+// running deadlocks the teams that wait for its messages, and a GPU runs no
+// more teams at once than its compute units hold, which depends on the
+// kernel's registers and on what else the GPU runs. So when not all have
+// started in time, one team reports how many have, and the program ends.
+extern "C" void merk_device_teams_wait_all(void) {
+  TeamTable *table{currentTeams};
+  int64_t started{__atomic_add_fetch(&table->started, 1, __ATOMIC_ACQ_REL)};
+  double deadline{omp_get_wtime() + kTeamsStartSeconds};
+  while (started < table->teams) {
+    if (omp_get_wtime() >= deadline) {
+      uint32_t none{0};
+      if (__atomic_compare_exchange_n(&table->reporting, &none, 1, false,
+              __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        Fail(2, Text{}
+                    .Append("target teams: only ")
+                    .Append(started)
+                    .Append(" of the ")
+                    .Append(table->teams)
+                    .Append(" teams ran at once on the device, and the teams "
+                            "of a region with team mailboxes must all run at "
+                            "once")
+                    .characters);
+      }
+      // The host ends the program for the team that reports.
+      for (;;) {
+        __builtin_amdgcn_s_sleep(127);
+      }
+    }
+    __builtin_amdgcn_s_sleep(127);
+    started = __atomic_load_n(&table->started, __ATOMIC_ACQUIRE);
   }
 }
 
