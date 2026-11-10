@@ -56,9 +56,11 @@ std::int64_t merk_mailbox_register(HANDLE_PARAMETERS, const char *name);
 void merk_mailbox_unregister(const char *name);
 std::int64_t merk_mailbox_lookup(const char *name, Word typeInfo,
     std::int64_t *placeAndSlot, std::int64_t *generation, std::int64_t *secret);
-DeviceRing *merk_mailbox_attach(HANDLE_PARAMETERS, bool arrays, int device,
-    DeviceRing *(*allocate)(int), std::uint64_t *head);
-void merk_mailbox_detach_rings(void);
+DeviceRing *merk_mailbox_attach(HANDLE_PARAMETERS, std::uint64_t kind,
+    int device, DeviceRing *(*allocate)(int),
+    void (*freeRing)(int, DeviceRing *), std::uint64_t region,
+    std::uint64_t *head);
+void merk_mailbox_region_ended(std::uint64_t region);
 }
 
 namespace {
@@ -171,28 +173,62 @@ void CloseLater(Box box, int milliseconds) {
   Close(box);
 }
 
+int ringsAllocated{0};
+
 DeviceRing *NewTestRing(int) {
   void *ring{std::aligned_alloc(alignof(DeviceRing), sizeof(DeviceRing))};
   std::memset(ring, 0, sizeof(DeviceRing));
+  ++ringsAllocated;
   return static_cast<DeviceRing *>(ring);
+}
+
+void FreeTestRing(int, DeviceRing *ring) {
+  --ringsAllocated;
+  std::free(ring);
+}
+
+DeviceRing *Attach(const Box &box, int device, std::uint64_t region) {
+  std::uint64_t head;
+  return merk_mailbox_attach(
+      BOX(box), 0, device, NewTestRing, FreeTestRing, region, &head);
 }
 
 TEST(MailboxTest, RingBelongsToOneDevice) {
   Box box{NewBox()};
-  std::uint64_t head;
-  DeviceRing *ring{merk_mailbox_attach(BOX(box), false, 1, NewTestRing, &head)};
+  DeviceRing *ring{Attach(box, 1, 0)};
   ASSERT_NE(ring, nullptr);
-  EXPECT_EQ(merk_mailbox_attach(BOX(box), false, 1, NewTestRing, &head), ring);
-  EXPECT_EXIT(merk_mailbox_attach(BOX(box), false, 2, NewTestRing, &head),
-      testing::ExitedWithCode(1), "two devices receive from one mailbox");
-  // Once no region is running, another device may have it.
-  merk_mailbox_detach_rings();
-  DeviceRing *next{merk_mailbox_attach(BOX(box), false, 2, NewTestRing, &head)};
-  EXPECT_NE(next, nullptr);
-  merk_mailbox_detach_rings();
-  std::free(ring);
-  std::free(next);
+  EXPECT_EQ(Attach(box, 1, 0), ring);
+  EXPECT_EXIT(Attach(box, 2, 0), testing::ExitedWithCode(1),
+      "two devices receive from one mailbox");
+  // Once the region that attached it ends, the ring goes, and another
+  // device may have one.
+  merk_mailbox_region_ended(0);
+  EXPECT_EQ(ringsAllocated, 0);
+  EXPECT_NE(Attach(box, 2, 0), nullptr);
+  merk_mailbox_region_ended(0);
+  EXPECT_EQ(ringsAllocated, 0);
   Close(box);
+}
+
+TEST(MailboxTest, RingGoesWithItsLastRegion) {
+  Box box{NewBox()};
+  ASSERT_NE(Attach(box, 1, 3), nullptr);
+  ASSERT_NE(Attach(box, 1, 4), nullptr);
+  merk_mailbox_region_ended(3);
+  EXPECT_EQ(ringsAllocated, 1);
+  merk_mailbox_region_ended(4);
+  EXPECT_EQ(ringsAllocated, 0);
+  Close(box);
+}
+
+TEST(MailboxTest, ClosedMailboxsRingGoesWhenItsRegionEnds) {
+  Box box{NewBox()};
+  ASSERT_NE(Attach(box, 1, 5), nullptr);
+  // A region may still read it.
+  Close(box);
+  EXPECT_EQ(ringsAllocated, 1);
+  merk_mailbox_region_ended(5);
+  EXPECT_EQ(ringsAllocated, 0);
 }
 
 TEST(MailboxTest, ReceiveForeverIsWokenBySend) {

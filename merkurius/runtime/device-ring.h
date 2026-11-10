@@ -45,9 +45,11 @@ constexpr uint64_t kArenaClearWords{kBumpWords + kRingCacheSlots};
 // the table of the region's teams (docs/INPROGRESS.md, Processes as teams,
 // step 2): the cells a region makes are bumped from chunks of its own,
 // which the host frees when the region ends, clearing the slot's words. A
-// region that starts while all are taken waits for one.
+// region that starts while all are taken waits for one. A slot also has the
+// table of the rings the region has attached, which go with it.
 constexpr uint64_t kRegionSlots{256};
-constexpr uint64_t kRegionSlotWords{kBumpWords + 2};
+constexpr uint64_t kRegionRingSlots{16};
+constexpr uint64_t kRegionSlotWords{kBumpWords + 2 + kRegionRingSlots};
 // The slot of a chunk that is not a region's.
 constexpr uint64_t kNoRegionSlot{~uint64_t{0}};
 

@@ -60,7 +60,8 @@ extern "C" merkurius::runtime::DeviceRing *merk_mailbox_attach(
     std::int64_t nodeHigh, std::int64_t nodeLow, std::int64_t placeAndSlot,
     std::int64_t generation, std::int64_t secret, std::uint64_t kind,
     int device, merkurius::runtime::DeviceRing *(*allocate)(int),
-    std::uint64_t *head);
+    void (*freeRing)(int, merkurius::runtime::DeviceRing *),
+    std::uint64_t region, std::uint64_t *head);
 extern "C" bool merk_mailbox_copy_for_ring(std::int64_t nodeHigh,
     std::int64_t nodeLow, std::int64_t placeAndSlot, std::int64_t generation,
     std::int64_t secret,
@@ -73,7 +74,10 @@ extern "C" bool merk_mailbox_copy_array_for_ring(std::int64_t nodeHigh,
     void (*copy)(int device, const std::uint64_t *array, void *to), void *to);
 extern "C" void merk_mailbox_drain(std::int64_t nodeHigh, std::int64_t nodeLow,
     std::int64_t placeAndSlot, std::int64_t generation, std::int64_t secret);
-extern "C" void merk_mailbox_detach_rings(void);
+extern "C" void merk_mailbox_region_ended(std::uint64_t region);
+namespace merkurius::runtime {
+void FreeRing(int device, DeviceRing *ring);
+} // namespace merkurius::runtime
 extern "C" [[noreturn]] void merk_uncaught_exception(const char *exception);
 
 
@@ -198,8 +202,9 @@ bool regionSlotTaken[kRegionSlots];
 std::uint64_t regionSlotsTaken{0};
 pthread_cond_t regionSlotFreed = PTHREAD_COND_INITIALIZER;
 
-// The mailboxes' rings, to free when no region is running. Its lock is taken
-// with the mailboxes' lock held, and so comes after it, and after arenaLock.
+// The mailboxes' rings that are allocated, which MERK_CHECK_DEVICE_MEMORY
+// counts. Its lock is taken with the mailboxes' lock held, and so comes
+// after it, and after arenaLock.
 pthread_mutex_t ringsLock = PTHREAD_MUTEX_INITIALIZER;
 struct RingOfDevice {
   DeviceRing *ring;
@@ -441,8 +446,8 @@ void ReleaseForDevice(int, void *held) {
 }
 
 // A mailbox's ring, in memory that the device reads directly. It is freed
-// when no region or GPU process is running, or when the GPU process whose
-// mailbox it is ends (FreeRing).
+// (FreeRing) once no running region, nor the GPU process whose mailbox it
+// is, has it attached (merk_mailbox_attach).
 DeviceRing *NewRing(int device) {
   auto *ring{static_cast<DeviceRing *>(
       DeviceAllocateHost(device, sizeof(DeviceRing)))};
@@ -503,7 +508,8 @@ unsigned HandleOpcode(void *raw, unsigned) {
       const std::int64_t *h{reinterpret_cast<const std::int64_t *>(buffer->data)};
       std::uint64_t head{0};
       DeviceRing *ring{merk_mailbox_attach(h[0], h[1], h[2], h[3], h[4],
-          buffer->data[6], static_cast<int>(buffer->data[5]), NewRing, &head)};
+          buffer->data[6], static_cast<int>(buffer->data[5]), NewRing,
+          merkurius::runtime::FreeRing, buffer->data[7], &head)};
       buffer->data[0] = reinterpret_cast<std::uint64_t>(ring);
       buffer->data[1] = head;
     });
@@ -706,18 +712,9 @@ void CheckFreedAtEnd() {
 }
 } // namespace merkurius::runtime
 
-// With arenaLock held, once no region or GPU process runs: the rings, the
-// copies their devices may have been reading, and the regions' arenas go.
-static void FreeWhenIdle() {
-  merk_mailbox_detach_rings();
-  pthread_mutex_lock(&ringsLock);
-  for (std::uint64_t i{0}; i < ringCount; ++i) {
-    DeviceFreeHost(rings[i].device, rings[i].ring);
-  }
-  ringCount = 0;
-  pthread_mutex_unlock(&ringsLock);
-  FreeArenas();
-}
+// With arenaLock held, once no region or GPU process runs: the regions'
+// images' arenas go. Rings go as their last users end.
+static void FreeWhenIdle() { FreeArenas(); }
 
 // A process that runs on a GPU (gpu-processes.cpp) counts as a running
 // region while its kernel runs, so that a ring that it may read stays, and
@@ -812,6 +809,7 @@ extern "C" std::int64_t merk_region_enter(void) {
 // After a target region, whose device has finished with what it made.
 extern "C" void merk_region_exit(std::int64_t slot) {
   StopIfProgramEnding();
+  merk_mailbox_region_ended(static_cast<std::uint64_t>(slot));
   pthread_mutex_lock(&arenaLock);
   FreeRegionArenas(static_cast<std::uint64_t>(slot));
   regionSlotTaken[slot] = false;

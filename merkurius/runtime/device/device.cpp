@@ -82,6 +82,7 @@ using merkurius::runtime::DeviceRing;
 using merkurius::runtime::kArenaClearWords;
 using merkurius::runtime::kBumpWords;
 using merkurius::runtime::kNoRegionSlot;
+using merkurius::runtime::kRegionRingSlots;
 using merkurius::runtime::kRegionSlots;
 using merkurius::runtime::kRegionSlotWords;
 using merkurius::runtime::kRingCacheSlots;
@@ -149,15 +150,17 @@ static_assert(sizeof(Arena) == kArenaClearWords * sizeof(uint64_t));
 Arena arena{{nullptr, 0, 0}, {}};
 
 // In a region's image, by the slot of each region that runs (device-ring.h):
-// where its cells are bumped from, and its teams' table if it is a target
-// teams region, which its first team to start makes. The host frees a
-// region's chunks, and clears its slot, when it ends. The image's arena
-// holds only its table of rings, and what it leads to, which later regions
-// find.
+// where its cells are bumped from, its teams' table if it is a target teams
+// region, which its first team to start makes, and the table of the rings
+// it has attached, by the mailbox's slot. The host frees a region's chunks,
+// and clears its slot, when it ends, and frees a ring once no running region
+// or GPU process has attached it. A GPU process keeps its table of rings in
+// its arena.
 struct RegionSlot {
   Bump bump;
   TeamTable *teams;
   uint64_t unused;
+  RingEntry *rings[kRegionRingSlots];
 };
 static_assert(sizeof(RegionSlot) == kRegionSlotWords * sizeof(uint64_t));
 RegionSlot regionSlots[kRegionSlots];
@@ -261,12 +264,6 @@ void *Allocate(Bump *bump, uint64_t bytes) {
       __builtin_amdgcn_s_sleep(127);
     }
   }
-}
-
-// What a table of the arena leads to, which outlives the region that made
-// it, as later regions look in the table.
-void *AllocateForTable(uint64_t bytes) {
-  return Allocate(&CurrentArena()->bump, bytes);
 }
 
 } // namespace
@@ -811,7 +808,9 @@ template <typename Poll> bool Wait(int64_t milliseconds, Poll poll) {
 // The entry of the mailbox's ring, attaching it the first time, or null if
 // the mailbox is closed.
 RingEntry *RingOf(const uint64_t *handle, uint64_t kind) {
-  RingEntry **bucket{&CurrentArena()->rings[handle[2] % kRingCacheSlots]};
+  RingEntry **bucket{merk_device_process_image
+          ? &CurrentArena()->rings[handle[2] % kRingCacheSlots]
+          : &regionSlot->rings[handle[2] % kRegionRingSlots]};
   for (RingEntry *entry{__atomic_load_n(bucket, __ATOMIC_ACQUIRE)}; entry;
        entry = entry->next) {
     if (entry->slot == handle[2] && entry->generation == handle[3] &&
@@ -829,6 +828,11 @@ RingEntry *RingOf(const uint64_t *handle, uint64_t kind) {
       }
       buffer->data[5] = static_cast<uint64_t>(DeviceNumber());
       buffer->data[6] = kind;
+      // The region that attaches it, which the host counts as a user of the
+      // ring until it ends.
+      buffer->data[7] = merk_device_process_image
+          ? kNoRegionSlot
+          : static_cast<uint64_t>(regionSlot - regionSlots);
     });
     port.recv([&](rpc::Buffer *buffer, uint32_t) {
       ring = reinterpret_cast<DeviceRing *>(buffer->data[0]);
@@ -840,7 +844,7 @@ RingEntry *RingOf(const uint64_t *handle, uint64_t kind) {
   }
   // Only a mailbox's one receiver adds its entry, but other mailboxes' may
   // be added to the same place at once.
-  auto *entry{static_cast<RingEntry *>(AllocateForTable(sizeof(RingEntry)))};
+  auto *entry{static_cast<RingEntry *>(merk_device_alloc(sizeof(RingEntry)))};
   *entry = {handle[2], handle[3], handle[4], ring, head,
       __atomic_load_n(bucket, __ATOMIC_RELAXED)};
   while (!__atomic_compare_exchange_n(bucket, &entry->next, entry, true,
