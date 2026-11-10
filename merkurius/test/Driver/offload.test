@@ -2,7 +2,9 @@ With -fopenmp and --offload-arch=, the driver runs Flang's offload jobs for
 each source: the host's bitcode, with offload entries for the GPUs; each
 GPU's bitcode, matching them; one offload binary of the GPUs' code; and the
 host's object file from its bitcode, with the binary embedded. The link is
-Clang's with -fopenmp and --offload-arch=, which runs the linker wrapper.
+Clang's with -fopenmp and --offload-arch=, which runs the linker wrapper,
+and with -O when it was given, which the linker wrapper compiles the GPUs'
+code at, as Clang's and Flang's links do; it is -O2 without one.
 REQUIRES: amdgpu-registered-target
 
 RUN: merkc -### -fopenmp --offload-arch=gfx1030 -O2 -L/omp/lib %S/Inputs/sumsq.m -o prog 2>&1 \
@@ -11,7 +13,7 @@ CHECK:      "-fc1" "-emit-llvm-bc" "-fopenmp" "-O2" "--offload-targets=amdgpu-am
 CHECK-NEXT: "-fc1" "-emit-llvm-bc" "-fopenmp" "-triple" "amdgpu10.30-amd-amdhsa" "-O2" "-fopenmp-is-target-device" "-fopenmp-host-ir-file-path" "[[HOST]]" "-o" "[[DEVICE:[^"]*sumsq-gfx1030-[^"]*\.bc]]" "{{[^"]*}}sumsq.m"{{$}}
 CHECK-NEXT: "{{[^"]*}}llvm-offload-binary{{(\.exe)?}}" "-o" "[[BINARY:[^"]*\.out]]" "--image=file=[[DEVICE]],triple=amdgpu10.30-amd-amdhsa,arch=gfx1030,kind=openmp"{{$}}
 CHECK-NEXT: "-fc1" "-emit-obj" "-fopenmp" "-O2" "-fembed-offload-object=[[BINARY]]" "--offload-targets=amdgpu-amd-amdhsa" "-o" "[[OBJECT:[^"]*sumsq-[^"]*\.o]]" "-x" "ir" "[[HOST]]"{{$}}
-CHECK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "-fopenmp" "--offload-arch=gfx1030" "-Xoffload-linker-amdgcn-amd-amdhsa" "{{[^"]*}}libmerkdevice-amdgcn.a" "-Xoffload-linker-amdgcn-amd-amdhsa" "-mllvm=-openmp-opt-disable-spmdization" "-o" "prog" "[[OBJECT]]" "-L/omp/lib" "-L{{[^"]*}}lib" "-no-pie" "-lmerkstd" "-lmerkrt" "-lm"{{$}}
+CHECK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "-fopenmp" "--offload-arch=gfx1030" "-O2" "-Xoffload-linker-amdgcn-amd-amdhsa" "{{[^"]*}}libmerkdevice-amdgcn.a" "-Xoffload-linker-amdgcn-amd-amdhsa" "-mllvm=-openmp-opt-disable-spmdization" "-o" "prog" "[[OBJECT]]" "-L/omp/lib" "-L{{[^"]*}}lib" "-no-pie" "-lmerkstd" "-lmerkrt" "-lm"{{$}}
 
 With -v, Clang shows the link's own jobs too, such as the linker wrapper's.
 RUN: merkc -### -v -fopenmp --offload-arch=gfx1030 %S/Inputs/sumsq.m -o prog 2>&1 \

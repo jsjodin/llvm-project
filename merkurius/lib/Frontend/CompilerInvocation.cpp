@@ -215,6 +215,7 @@ static bool parseCodeGenArgs(CodeGenOptions &opts, const InputArgList &args) {
     return false;
   }
   if (const llvm::opt::Arg *arg = args.getLastArg(OPT_O)) {
+    opts.optimizationLevelGiven = true;
     llvm::StringRef value{arg->getValue()};
     if (value.empty()) {
       opts.optimizationLevel = 1; // -O, as in Clang

@@ -2188,11 +2188,15 @@ the process asks the host to launch. The first version has neither.
      - **The Lowerer's own stack slots are in the stack's address space,**
        as region slots were: OpenMP's translation had fixed them for
        regions.
-     - **The image's link is at `-O2` whatever `-O` is,** as the linker
-       wrapper's for OpenMP's device code; AMDGPU's code generation fails
-       at `-O0` on a `musttail` call in divergent control flow (design
-       document, LLVM bugs to report). Decided by the user the same day:
-       AMDGPU code goes to executable code at `-O2` always.
+     - **The image's link is at the `-O` given, or else at `-O2`,** as the
+       linker wrapper's for OpenMP's device code. AMDGPU's code generation
+       fails at `-O0` on a `musttail` call in divergent control flow (design
+       document, LLVM bugs to report), which is left as LLVM's bug, not
+       worked around. Decided by the user the same day, after a first
+       version linked at `-O2` whatever `-O` was: an `-O` that is given is
+       respected; `-O2` is the default for code generation for an AMD GPU,
+       in the image's link, OpenMP's link (which now passes `-O` on, as
+       Clang's and Flang's do) and `-fc1 -S` and `-emit-obj`.
      - **The host registers message types** for a module with GPU kinds,
        as for one with target regions.
      - **Arguments:** a kind that is polymorphic, or takes a value other
