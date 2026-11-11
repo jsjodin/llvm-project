@@ -115,7 +115,8 @@ saxpy(A, X, !Y) :-
 % DEVICE-LABEL: define internal ptr @omp_target_teams_distribute_parallel_do.saxpy__body_
 % DEVICE: define weak_odr protected amdgpu_kernel void @__omp_offloading_{{.*}}_omp_target_teams_distribute_parallel_do.saxpy_4_0_l{{[0-9]+}}(
 % DEVICE: call void @__kmpc_parallel_60(
-% DEVICE: call void @__kmpc_distribute_for_static_loop_8u(
+% The flags ask for a barrier across the team after each round of iterations.
+% DEVICE: call void @__kmpc_distribute_for_static_loop_8u({{.*}}, i8 2)
 
 % A negative step: the elements from 9 down to 5.
 :- pred down(array(int)::array_di, array(int)::array_uo) is det.

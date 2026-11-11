@@ -1343,6 +1343,9 @@ saxpy(A, X, !Y) :-
   - *Which kernel.* MLIRGen decides from the leaves, by Flang's patterns (`KernelTypeVisitor` and `HostEvalVisitor`), as ClangIR's `isTargetSPMD` decides from the directive: after `target`, `teams distribute parallel do` and `parallel do` are SPMD, with the bounds on the host; `teams distribute` is generic, with the bounds on the host too, from which the host computes the number of teams; anything else, such as a plain `target`, is generic. Flang also follows a target region whose body is a single directive, as a combined directive; that waits for directives in target regions.
   - *Where the bounds are computed* in the region. In `omp.parallel`, where the region also reads the values it is given, as Flang places them when they are not evaluated on the host. OpenMP allows nothing in the target region but `teams`, and on an AMD GPU a generic kernel traps when the parallel in its `teams` uses a value computed outside the parallel, in `teams` or before it. The OMPIRBuilder passes such a value through `__kmpc_alloc_shared` memory that the teams function allocates and the kernel frees after it returns; why that traps is not known yet, and a reduced case for the OMPIRBuilder is to be made. Flang never makes one, since its values are in memory and loaded where they are used.
   - *Reductions.* The decomposition puts a `reduction` on `teams` and on the `do`, and implies a `map` of its variable on `target`, as Flang has them: the slot is mapped `tofrom` by reference, the target region's argument for it is the `teams`' reduction variable, and the `teams`' copy is the `do`'s. The device combines the threads' and then the teams' partial results through the runtime (`__kmpc_nvptx_parallel_reduce_nowait_v2` and `__kmpc_gpu_xteam_reduce_nowait`), as Flang's does. `CodeGen/omp-target-teams-distribute-parallel-do-reduction.m` checks both sides and runs π, the `normalize` example below and a `min` and `max` of ints on the host's threads and sequentially; its `-gpu.test` runs them on the GPU and checks the maps, `!A` `to` in `normalize`'s first loop and `tofrom` in its second, which reads `Sum` `to`.
+  - *A barrier after each round* (shared with Flang, in `OpenMPIRBuilder` and the device runtime). On the device, the loop is a call to the runtime's `__kmpc_distribute_for_static_loop`, which deals the iterations out in rounds: a team's threads take the next `threads` iterations, all the teams' threads `teams × threads` apart, as clang's lowering deals them out. Clang's has the implicit barrier of its inner worksharing loop after each round, and the runtime's had none, so a team's warps drifted apart. In a stencil, the warps of a team read the same rows of the input, and warps far apart read them from memory again instead of from the cache. The 4096² Game of Life read 24% more from memory than the same loop compiled by clang and was 26% slower, the reacting front 18% slower (Measurements, "Dense stencils"); Flang's build of the same Life was slower still. The runtime now goes round in lockstep, with a barrier across the team after each round, when the call's flags ask for it, which `OpenMPIRBuilder` does for a combined loop on the device unless it is `nowait` or `spmd_no_loop`, as clang has its barrier. Every thread goes round as often as the team's first, so that all reach every barrier, and only in SPMD mode with all the block's threads in the parallel region, which a barrier across the block needs. `LIBOMPTARGET_LOOP_BARRIER=on` or `off` overrides the flags for the whole program, to measure a loop both ways; any other value is reported and ignored.
+    - *Why not the round loop in the kernel,* as clang's, with `OpenMPIRBuilder`'s own barrier in it: it would take the body out of the runtime's call and change much more of what Flang's tests check, for the same barrier. The flag keeps the decision per loop with the compiler, as clang's is, in one constant.
+    - *Why not only the environment variable:* it would set every loop of a program alike, those that gain, such as stencils, and those that may lose, such as irregular loops whose warps would wait for the slowest, or pure streaming. *Why not in Merkurius only,* with its own loop around `omp.parallel`: it would give up what `omp.distribute` and `omp.wsloop` give, the trip count that sizes the launch, SPMD detection and the reductions, and leave Flang as slow.
   - *Not yet.* Its other clauses (an explicit `map`, `num_teams`, `thread_limit`, `dist_schedule` and the rest), reported for the leaf they apply to, of which `num_teams`, `thread_limit` and `num_threads` would be `host_eval` values too, and the directive in a target region.
   - *Running.* `CodeGen/omp-target-teams-distribute-parallel-do.m` checks the operations and the device's LLVM IR, and runs the program on the host's threads and as the sequential program; `omp-target-teams-distribute-parallel-do-gpu.test` runs it on the GPU, `saxpy` over 100000 elements, more than a team has threads, two arrays in one loop, and loops with a negative step, a stride and no iterations, and checks the maps and that each kernel is launched in SPMD mode, with one team for a short loop; `omp-parallel-do-errors.m` has its checks too.
 - **Iterators.** All the iterators of a loop advance together, in lockstep; a nest is a loop in a loop's body.
@@ -4154,6 +4157,54 @@ two-node Life is what pays these each step.
 - **A region's scalar output** is mapped `from`, which costs a copy from the
   device and a wait, about 27 µs. It is what is left of the two-node Life's
   exchange beyond its send and receive, and is not addressed yet.
+
+### Dense stencils
+
+2026-11-11, gfx1030, 4096 × 4096 cells, 100 steps, at -O2: the average step,
+the median of five rounds, of `benchmarks/life` and `benchmarks/front` against
+their C programs, built by the same tree's clang. The first column is the tree
+of 6eb3f50c92be with the barrier after each round of a combined loop
+(Translation, "Target teams distribute parallel do"), on by default;
+`LIBOMPTARGET_LOOP_BARRIER=off` gives the runtime's loop as it was. Life in
+Fortran is a program written for this and not kept, the same step as
+`life.c`'s, built by the same tree's flang. Every build gives the same cells
+and sums.
+
+| Program | With the barrier | Against C | Without | Against C | C |
+| --- | --- | --- | --- | --- | --- |
+| Game of Life, Mercury | 0.671 ms | 6% slower | 0.822 ms | 29% slower | 0.635 ms |
+| Game of Life, Fortran | 0.699 ms | 10% slower | 0.933 ms | 47% slower | 0.635 ms |
+| Reacting front, Mercury | 2.402 ms | 5% slower | 2.700 ms | 17% slower | 2.298 ms |
+
+C's own loops have the barrier as clang builds them, so its time is the same
+either way.
+
+- **Without the barrier,** a profile of Life's step (rocprofv3) gave the
+  same launch as C's, 320 teams of 256 threads, and the same 4.2 million
+  memory instructions, but 24% more
+  64-byte reads from memory, 2.66 million against 2.15 million, and 27% more
+  requests to L2. The kernels' loops are nearly instruction for instruction
+  the same. A C loop written as the runtime's, with no barrier, was slower
+  than Mercury's, 0.96 ms, and with a barrier after each round 0.67 ms.
+- **Not the cause:** clang's fused multiplies and adds (C built with
+  `-ffp-contract=off` is as fast, 2.34 ms for the front), the arrays starting
+  8 bytes past a cache line after their size word (C's shifted so is as
+  fast, with the same reads), the claim of the region's slot, and the
+  arrays' places on the device.
+- **What is left** of the gap, 6% for Life and 5% for the front, is not
+  diagnosed. Life's C program with 1-byte cells takes 0.258 ms, which narrow
+  fields in flat records would give Mercury.
+
+`benchmarks/bandwidth`'s kernels, which reuse nothing, gained too, three runs
+each, the median of the best of 100 in MB/s, 2^25 elements:
+
+| Kernel | With the barrier | Without |
+| --- | --- | --- |
+| Copy | 346423 | 299501 |
+| Mul | 330141 | 272264 |
+| Add | 365521 | 314036 |
+| Triad | 361610 | 319748 |
+| Dot | 476031 | 421783 |
 
 ### Message latency
 

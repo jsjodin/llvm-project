@@ -24,6 +24,16 @@ enum class DeviceDebugKind : uint32_t {
   PGODump = 1U << 4,
 };
 
+/// LIBOMPTARGET_LOOP_BARRIER: whether a combined distribute and worksharing
+/// loop on the device has a barrier across the team after each round. Unset,
+/// each loop has it as the compiler asked; "on" and "off" override that for
+/// every loop.
+enum class LoopBarrierKind : uint32_t {
+  AsCompiled = 0,
+  On = 1,
+  Off = 2,
+};
+
 struct DeviceEnvironmentTy {
   uint32_t DeviceDebugKind;
   uint32_t NumDevices;
@@ -33,6 +43,7 @@ struct DeviceEnvironmentTy {
   uintptr_t IndirectCallTable;
   uint64_t IndirectCallTableSize;
   uint64_t HardwareParallelism;
+  uint32_t LoopBarrier;
 };
 
 // NOTE: Please don't change the order of those members as their indices are

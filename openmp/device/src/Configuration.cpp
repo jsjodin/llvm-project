@@ -68,6 +68,10 @@ uint64_t config::getHardwareParallelism() {
   return __omp_rtl_device_environment.HardwareParallelism;
 }
 
+LoopBarrierKind config::getLoopBarrier() {
+  return static_cast<LoopBarrierKind>(__omp_rtl_device_environment.LoopBarrier);
+}
+
 uint64_t config::getIndirectCallTableSize() {
   return __omp_rtl_device_environment.IndirectCallTableSize;
 }

@@ -13,6 +13,18 @@ RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=17 %t.O2 2> %t.O2.info \
 RUN:   | FileCheck %S/omp-target-teams-distribute-parallel-do.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: FileCheck %s < %t.O2.info
+LIBOMPTARGET_LOOP_BARRIER overrides the barrier after each round of the
+loops, which they have by default, in either direction; any other value is
+reported and ignored.
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_LOOP_BARRIER=off %t.O2 \
+RUN:   | FileCheck %S/omp-target-teams-distribute-parallel-do.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_LOOP_BARRIER=on %t.O2 \
+RUN:   | FileCheck %S/omp-target-teams-distribute-parallel-do.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_LOOP_BARRIER=sometimes %t.O2 2> %t.bad \
+RUN:   | FileCheck %S/omp-target-teams-distribute-parallel-do.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: FileCheck %s --check-prefix=BAD < %t.bad
+BAD-COUNT-1: LIBOMPTARGET_LOOP_BARRIER must be on or off, not 'sometimes'; the loops have barriers as compiled
+BAD-NOT: LIBOMPTARGET_LOOP_BARRIER
 CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-teams-distribute-parallel-do.m:{{[0-9]+}}:5 with 5 arguments:
 CHECK-NEXT: info: to(region_slot)[8]
 CHECK-NEXT: info: to(N)[8]
