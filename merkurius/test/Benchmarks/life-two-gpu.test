@@ -1,0 +1,19 @@
+Game of Life on two nodes over TCP on loopback, each half on the machine's
+GPU, at -O0 and -O2: the cells are life.m's, with an even split and an odd
+one, and each node's kernels are SPMD, its rows going to the other from a
+target region.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O0 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/life/life_two.m -o %t0
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIFE_SIZE=301 LIFE_STEPS=17 %python %S/../../benchmarks/life/pair.py %t0 | FileCheck %s --check-prefix=ODD
+RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/life/life_two.m -o %t2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIFE_SIZE=301 LIFE_STEPS=17 %python %S/../../benchmarks/life/pair.py %t2 | FileCheck %s --check-prefix=ODD
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=16 LIFE_SIZE=300 LIFE_STEPS=25 %python %S/../../benchmarks/life/pair.py %t2 2> %t.info | FileCheck %s
+RUN: FileCheck %s --check-prefix=INFO < %t.info
+CHECK: Population: 9339
+CHECK-NEXT: Checksum: 429141631
+ODD: Population: 15169
+ODD-NEXT: Checksum: 691583707
+INFO: Launching kernel {{.*}}life_two.init_{{.*}} in SPMD mode
+INFO: Launching kernel {{.*}}life_two.exchange_{{.*}}
+INFO: Launching kernel {{.*}}life_two.step_{{.*}} in SPMD mode

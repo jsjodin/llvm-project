@@ -3201,10 +3201,19 @@ its reference is in C or Fortran.
    Fortran with OpenMP offload, the bar to measure against, and the same
    program in Mercury, dense, on one GPU. The two together say whether
    Mercury's code is slower, which the process-oriented version would have to
-   make up for, before any process is involved.
+   make up for, before any process is involved. Life done 2026-11-11
+   (`benchmarks/life`: `life.m`, `life.c` with cells of 8 or 1 bytes); the
+   front next.
 2. **Two places over TCP, to try things out:** two nodes on one machine, over
    loopback, each with the GPU (Remote handles and TCP), the tiles split
-   between them and halos as messages. It needs no second GPU.
+   between them and halos as messages. It needs no second GPU. Life done
+   2026-11-11 (`benchmarks/life/life_two.m`): each node owns half of the
+   rows; after each step a target region sends its edge row and takes the
+   other's into its halo. It showed that a target region that allocates
+   costs about 45 µs more than one that does not, since its arena's chunk
+   is allocated, freed and its slot cleared every time, through
+   `omp_target_alloc`, `omp_target_free` and `omp_target_memcpy`: fixed next,
+   in the runtime, by keeping the chunks.
 3. Sparse tiles on one place: tiles start and end, one GPU process.
 4. The Mandelbrot zoom with stealing between several places.
 5. Several places with a directory, growing, shrinking and moving tiles, on one
