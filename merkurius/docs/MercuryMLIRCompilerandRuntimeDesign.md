@@ -4195,16 +4195,24 @@ either way.
   diagnosed. Life's C program with 1-byte cells takes 0.258 ms, which narrow
   fields in flat records would give Mercury.
 
-`benchmarks/bandwidth`'s kernels, which reuse nothing, gained too, three runs
-each, the median of the best of 100 in MB/s, 2^25 elements:
+`benchmarks/bandwidth`'s kernels, which reuse nothing, gained too. Against
+`bandwidth.c`, built by the same tree's clang, at 5192433284b7, Mercury and C
+taking turns, three rounds, the median of each kernel's best of 100, in MB/s,
+2^25 elements:
 
-| Kernel | With the barrier | Without |
-| --- | --- | --- |
-| Copy | 346423 | 299501 |
-| Mul | 330141 | 272264 |
-| Add | 365521 | 314036 |
-| Triad | 361610 | 319748 |
-| Dot | 476031 | 421783 |
+| Kernel | With the barrier | Without | C | With the barrier, against C |
+| --- | --- | --- | --- | --- |
+| Copy | 332087 | 303421 | 530183 | 37% slower |
+| Mul | 317131 | 274011 | 456577 | 31% slower |
+| Add | 371603 | 317882 | 63243 | 5.9 times as fast |
+| Triad | 368700 | 323441 | 62671 | 5.9 times as fast |
+| Dot | 476855 | 424203 | 521129 | 8% slower |
+
+- **C's Add and Triad** were as slow on 2026-11-04 (`benchmarks/bandwidth`'s
+  README), so it is clang's code, not the barrier, that is slow there; why
+  is not known.
+- **Copy and Mul** are what is left to close: a kernel that reads one array
+  and writes another, where C is near the card's peak.
 
 ### Message latency
 
