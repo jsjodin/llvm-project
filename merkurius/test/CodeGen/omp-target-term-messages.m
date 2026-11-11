@@ -1,10 +1,15 @@
-% A target region sends and receives messages of any type, which are copied
-% by their type_info (docs/INPROGRESS.md, GPU processes without omp
-% target, step 4e): here a point, a string, a list and an array of strings,
-% each of which the region receives from the host and sends back changed
-% or as it is. On a GPU (the -gpu test) the host copies a message for the
-% region into host memory that the GPU copies into its arena, and the GPU
-% copies one it sends into host memory that the host queues from.
+% A target region sends and receives flat messages (design document,
+% "Messages and memory on the device"): here a record, a record of
+% records, a constructor of an enumeration, a character and a float, and a
+% string, each of which the region receives from the host and sends back
+% changed or as it is. A message that is not flat is an error
+% (omp-target-send-errors.m). On a GPU (the -gpu test) the host copies a
+% message for the region into host memory that the GPU copies into its
+% arena, and the GPU copies one it sends into host memory that the host
+% queues from.
+% Temporary (docs/INPROGRESS.md, GPU processes without omp target, step 5,
+% "Flat records"): the copies walk the messages' type_info, until flat
+% records are values on the device and travel as their bytes.
 %
 % mmc has no process module to run it with, so the output is written by
 % hand.
@@ -21,58 +26,64 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module array, int, list, process.
+:- import_module int, process.
+
+:- type colour
+    --->    red
+    ;       green
+    ;       blue.
+
+:- type pos
+    --->    pos(int, int).
 
 :- type msg
     --->    point(int, int)
-    ;       label(string)
-    ;       numbers(list(int))
-    ;       words(array(string)).
+    ;       segment(pos, pos)
+    ;       tagged(character, colour, float).
 
     % Receives N messages from In and sends each to Out: a point with its
-    % coordinates swapped, numbers with their sum in front, and the others
-    % as they are.
-:- pred relay(mailbox(msg)::in, mailbox(msg)::in, int::in,
-    io::di, io::uo) is det.
+    % coordinates swapped, a segment with its ends swapped, and the others
+    % as they are; then a string from Words, which it sends back.
+:- pred relay(mailbox(msg)::in, mailbox(msg)::in, mailbox(string)::in,
+    int::in, io::di, io::uo) is det.
 
-relay(In, Out, N, !IO) :-
+relay(In, Out, Words, N, !IO) :-
     ( if N > 0 then
         receive(In, any, after(10000), R, !IO),
         ( if R = message(M) then
             send(Out, changed(M), !IO)
         else
-            send(Out, label("no message"), !IO)
+            send(Out, point(-1, -1), !IO)
         ),
-        relay(In, Out, N - 1, !IO)
+        relay(In, Out, Words, N - 1, !IO)
     else
-        true
+        receive(Words, any, after(10000), W, !IO),
+        ( if W = message(S) then
+            send(Words, S, !IO)
+        else
+            send(Words, "no message", !IO)
+        )
     ).
 
 :- func changed(msg) = msg.
 
 changed(point(X, Y)) = point(Y, X).
-changed(label(S)) = label(S).
-changed(numbers(Ns)) = numbers([sum(Ns) | Ns]).
-changed(words(Ws)) = words(Ws).
-
-:- func sum(list(int)) = int.
-
-sum([]) = 0.
-sum([N | Ns]) = N + sum(Ns).
-
-% DEVICE: call i32 @merk_device_receive_term(ptr %{{.*}}, i64 %{{.*}}, ptr @"merk.type_ctor.omp_target_term_messages.msg/0", ptr %{{.*}})
-% DEVICE: call void @merk_device_send_term(ptr %{{.*}}, i64 {{-?[0-9]+}}, i64 %{{.*}}, ptr @"merk.type_ctor.omp_target_term_messages.msg/0")
+changed(segment(A, B)) = segment(B, A).
+changed(tagged(C, Colour, F)) = tagged(C, Colour, F).
 
 main(!IO) :-
     new_mailbox(In, !IO),
     new_mailbox(Out, !IO),
+    new_mailbox(Words, !IO),
     send(In, point(1, 2), !IO),
-    send(In, label("a label"), !IO),
-    send(In, numbers([1, 2, 3, 4]), !IO),
-    send(In, words(array(["one", "two"])), !IO),
+    send(In, segment(pos(1, 2), pos(3, 4)), !IO),
+    send(In, tagged('x', blue, 2.5), !IO),
+    send(Words, "a string", !IO),
     %$omp target
-    relay(In, Out, 4, !IO),
-    print_all(Out, 4, !IO).
+    relay(In, Out, Words, 3, !IO),
+    print_all(Out, 3, !IO),
+    receive(Words, any, after(0), W, !IO),
+    io.print_line(W, !IO).
 
 :- pred print_all(mailbox(msg)::in, int::in, io::di, io::uo) is det.
 
@@ -85,7 +96,10 @@ print_all(Out, N, !IO) :-
         true
     ).
 
+% DEVICE: call i32 @merk_device_receive_term(ptr %{{.*}}, i64 %{{.*}}, ptr @"merk.type_ctor.omp_target_term_messages.msg/0", ptr %{{.*}})
+% DEVICE: call void @merk_device_send_term(ptr %{{.*}}, i64 {{-?[0-9]+}}, i64 %{{.*}}, ptr @"merk.type_ctor.omp_target_term_messages.msg/0")
+
 % OUTPUT:message(point(2, 1))
-% OUTPUT-NEXT:message(label("a label"))
-% OUTPUT-NEXT:message(numbers([10, 1, 2, 3, 4]))
-% OUTPUT-NEXT:message(words(array(["one", "two"])))
+% OUTPUT-NEXT:message(segment(pos(3, 4), pos(1, 2)))
+% OUTPUT-NEXT:message(tagged('x', blue, 2.5))
+% OUTPUT-NEXT:message("a string")

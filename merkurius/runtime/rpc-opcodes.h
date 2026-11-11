@@ -42,31 +42,29 @@ constexpr uint32_t rpcAttach{RpcOpcode(2)};
 // It frees the chunks, and clears the arena, when no region is running.
 constexpr uint32_t rpcChunk{RpcOpcode(3)};
 
-// An array the device made, which a region gives: the buffer's words are
-// the device's number, the array's address and its size in elements. The
-// host copies it to the host and answers with the copy's address.
+// An array the device made, which a region gives, copied by the device into
+// chunks of host memory (rpcPinnedChunk): the buffer's words are the copy,
+// its size in elements and the copy's first chunk. The host copies it again
+// and answers with that copy's address, and frees the chunks.
 constexpr uint32_t rpcGiveArray{RpcOpcode(4)};
 
 // 8 and 9 were output, which is libc's stdio now (design document, "Output
 // from a region").
 
-// A send of an array of one-word elements: the buffer's words are the
-// handle's five, the message type's key, the array's address, and its size
-// in elements above the device's number in the low 8 bits. The host copies
-// the array from the device, and answers once it has queued it.
-constexpr uint32_t rpcSendArray{RpcOpcode(5)};
+// 5 was a send of an array that the host copied from the device's memory,
+// which the device's caches may not have written back while it runs: the
+// device copies the array into host memory (rpcSendTerm).
 
 // The messages of a mailbox that did not fit in its ring: the buffer's
 // words are the handle's five. The host moves what fits into the ring, and
 // then answers.
 constexpr uint32_t rpcDrain{RpcOpcode(6)};
 
-// The oldest message of a mailbox of arrays, whose size its ring gave: the
-// buffer's words are the handle's five, the device's number and the
-// address of an array on the device of the message's size. The host copies
-// the message there, with the mailbox's lock held, and then answers with
-// whether it did, which it does not if the mailbox is closed; the device
-// then moves the ring's head.
+// The oldest message of a mailbox of arrays, whose size its ring gave, as
+// rpcTakeTerm takes a term: the host copies it into host memory that the
+// device reads, rather than into the device's memory, which the device's
+// caches may hold stale while it runs. The device copies it into its arena
+// and then moves the ring's head, after which the host frees the copy.
 constexpr uint32_t rpcTakeArray{RpcOpcode(7)};
 
 // An error on the device that ends the program: the buffer's first word is

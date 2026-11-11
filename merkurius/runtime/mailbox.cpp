@@ -1208,8 +1208,9 @@ extern "C" DeviceRing *merk_mailbox_attach(MERK_HANDLE_PARAMETERS,
   return ring;
 }
 
-// The oldest message that the device has not taken from its ring of terms,
-// copied by `copy` with the mailbox's message type, where the device reads
+// The oldest message that the device has not taken from its ring of terms
+// or of arrays, copied by `copy` with the mailbox's message type, where the
+// device reads
 // it, into `result`; false if the mailbox is closed. `copy` sets `held` to
 // what `release` frees once the device has taken the message, which is when
 // its ring's head next moves, or when it asks for the next.
@@ -1218,7 +1219,9 @@ extern "C" bool merk_mailbox_copy_for_ring(MERK_HANDLE_PARAMETERS,
     void (*release)(int device, void *held), Word *result) {
   bool found{false};
   if (Mailbox * mailbox{Find(MERK_HANDLE)}) {
-    if (mailbox->ring && mailbox->ringKind == kRingOfTerms) {
+    if (mailbox->ring &&
+        (mailbox->ringKind == kRingOfTerms ||
+            mailbox->ringKind == kRingOfArrays)) {
       TrimRing(mailbox);
       ReleaseRingCopy(mailbox);
       if (!mailbox->head) {
@@ -1232,32 +1235,6 @@ extern "C" bool merk_mailbox_copy_for_ring(MERK_HANDLE_PARAMETERS,
       *result = copy(mailbox->ringDevice, mailbox->messageType,
           mailbox->head->value, &mailbox->ringCopy);
       mailbox->releaseCopy = release;
-      found = true;
-    }
-    Unlock(mailbox);
-  }
-  return found;
-}
-
-// The oldest message that the device has not taken from its ring of arrays,
-// copied by `copy` to the device's array at `to`, with the lock held; false
-// if the mailbox is closed.
-extern "C" bool merk_mailbox_copy_array_for_ring(MERK_HANDLE_PARAMETERS,
-    void (*copy)(int device, const Word *array, void *to), void *to) {
-  bool found{false};
-  if (Mailbox *mailbox{Find(MERK_HANDLE)}) {
-    if (mailbox->ring && mailbox->ringKind == kRingOfArrays) {
-      TrimRing(mailbox);
-      if (!mailbox->head) {
-        // On the plugin's server thread, where exit would hang.
-        std::fflush(stdout);
-        std::fputs("Mercury runtime: a device took a message that is not in "
-                   "its mailbox\n",
-            stderr);
-        std::_Exit(1);
-      }
-      copy(mailbox->ringDevice,
-          reinterpret_cast<const Word *>(mailbox->head->value), to);
       found = true;
     }
     Unlock(mailbox);

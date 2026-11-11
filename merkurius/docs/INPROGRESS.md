@@ -2554,7 +2554,8 @@ the process asks the host to launch. The first version has neither.
        thread, which runs no process, kept them for ever; and `Close` kept
        the messages a ring had shown, as `TakeArray` copied a message after
        the mailbox's lock was released. The host now copies an array for a
-       device with the lock held (`merk_mailbox_copy_array_for_ring`), as
+       device with the lock held (`merk_mailbox_copy_array_for_ring`, since
+       merged into `merk_mailbox_copy_for_ring`), as
        it copies a term, and answers whether the mailbox was open; then
        `TrimRing` and `Close` free the messages. `MERK_CHECK_MESSAGES`
        counts the queued messages that no process read and no mailbox
@@ -2656,6 +2657,11 @@ the process asks the host to launch. The first version has neither.
      2. **Arrays of flat records, inline,** with C's layout, so that mapping
         an array to a region, or sending it, is one copy, and C or HIP code
         reads the same bytes. On the host too, which is the decision below.
+        A message then travels as its bytes, which a wave's lanes copy
+        together between the arena and host memory; arrays are copied word
+        by word by one lane until then, since a DMA copy into or out of a
+        running device's memory can meet stale lines of its L2 cache
+        (design document, "The device's communication, as built").
      3. **Fields that are arrays of a fixed size,** with element reads by a
         variable index, as a histogram's bins are.
      4. **Custom reductions:** `reduction(F : V)` where `F` is a function of

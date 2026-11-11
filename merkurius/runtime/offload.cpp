@@ -68,10 +68,6 @@ extern "C" bool merk_mailbox_copy_for_ring(std::int64_t nodeHigh,
     std::uint64_t (*copy)(
         int device, std::uint64_t typeInfo, std::uint64_t value, void **held),
     void (*release)(int device, void *held), std::uint64_t *result);
-extern "C" bool merk_mailbox_copy_array_for_ring(std::int64_t nodeHigh,
-    std::int64_t nodeLow, std::int64_t placeAndSlot, std::int64_t generation,
-    std::int64_t secret,
-    void (*copy)(int device, const std::uint64_t *array, void *to), void *to);
 extern "C" void merk_mailbox_drain(std::int64_t nodeHigh, std::int64_t nodeLow,
     std::int64_t placeAndSlot, std::int64_t generation, std::int64_t secret);
 extern "C" void merk_mailbox_region_ended(std::uint64_t region);
@@ -319,41 +315,6 @@ std::size_t ArrayBytes(std::uint64_t size) {
   return sizeof(std::uint64_t) * (1 + size);
 }
 
-// Copies the device's array of `size` elements to `copy` on the host.
-void CopyArrayFromDevice(int device, const void *array, std::uint64_t size,
-    std::uint64_t *copy) {
-  if (!CopyFromDevice(device, copy, array, ArrayBytes(size))) {
-    Fail("could not copy an array from a device");
-  }
-}
-
-// A message that is the device's array: copied to the host for the send,
-// which makes its own copy, or encodes it for another node.
-void SendArray(const std::uint64_t *handle, std::uint64_t key, int device,
-    const void *array, std::uint64_t size) {
-  auto *copy{static_cast<std::uint64_t *>(Malloc(ArrayBytes(size)))};
-  CopyArrayFromDevice(device, array, size, copy);
-  SendTo(handle, key, reinterpret_cast<std::uint64_t>(copy));
-  std::free(copy);
-}
-
-void CopyArrayToDevice(int device, const std::uint64_t *message, void *array) {
-  if (!CopyToDevice(device, array, message, ArrayBytes(message[0]))) {
-    Fail("could not copy an array to a device");
-  }
-}
-
-// Copies the mailbox's oldest message that the device has not taken, an
-// array, to the device's array of its size, with the mailbox's lock held,
-// so that the message stays while it is copied; whether the mailbox was
-// open. The device then moves the ring's head, after which the message
-// goes.
-bool TakeArray(const std::uint64_t *handle, void *array) {
-  const std::int64_t *h{reinterpret_cast<const std::int64_t *>(handle)};
-  return merk_mailbox_copy_array_for_ring(
-      h[0], h[1], h[2], h[3], h[4], CopyArrayToDevice, array);
-}
-
 // Chunks of host memory that a device reads and writes directly, for a
 // copy of a message (copy.h), as rpc-opcodes.h's rpcPinnedChunk describes
 // them: the next chunk of the copy, the device's number and the chunk's
@@ -441,6 +402,20 @@ std::uint64_t CopyForDevice(
   return copy;
 }
 
+// The mailbox's message, an array, copied into host memory that the device
+// reads, for merk_mailbox_copy_for_ring. Not into the device's memory: a
+// device that runs may hold stale lines of it in its L2 cache, which its
+// fences do not invalidate.
+std::uint64_t CopyArrayForDevice(
+    int device, std::uint64_t, std::uint64_t value, void **held) {
+  const auto *array{reinterpret_cast<const std::uint64_t *>(value)};
+  PinnedMemory memory{device};
+  void *copy{memory.Allocate(ArrayBytes(array[0]))};
+  std::memcpy(copy, array, ArrayBytes(array[0]));
+  *held = memory.First();
+  return reinterpret_cast<std::uint64_t>(copy);
+}
+
 void ReleaseForDevice(int, void *held) {
   FreePinnedChunks(static_cast<PinnedChunk *>(held));
 }
@@ -522,8 +497,13 @@ unsigned HandleOpcode(void *raw, unsigned) {
     return rpc::RPC_SUCCESS;
   case rpcTakeArray:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
-      buffer->data[0] =
-          TakeArray(buffer->data, reinterpret_cast<void *>(buffer->data[6]));
+      const std::int64_t *h{
+          reinterpret_cast<const std::int64_t *>(buffer->data)};
+      std::uint64_t copy{0};
+      bool found{merk_mailbox_copy_for_ring(h[0], h[1], h[2], h[3], h[4],
+          CopyArrayForDevice, ReleaseForDevice, &copy)};
+      buffer->data[0] = found;
+      buffer->data[1] = copy;
     });
     return rpc::RPC_SUCCESS;
   case rpcChunk:
@@ -538,21 +518,13 @@ unsigned HandleOpcode(void *raw, unsigned) {
   case rpcGiveArray:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
       // In a fragment, as a message is.
-      std::uint64_t size{buffer->data[2]};
+      std::uint64_t size{buffer->data[1]};
       Fragment fragment;
-      auto *copy{static_cast<std::uint64_t *>(
-          fragment.Allocate(ArrayBytes(size)))};
-      CopyArrayFromDevice(static_cast<int>(buffer->data[0]),
-          reinterpret_cast<const void *>(buffer->data[1]), size, copy);
+      void *copy{fragment.Allocate(ArrayBytes(size))};
+      std::memcpy(copy, reinterpret_cast<const void *>(buffer->data[0]),
+          ArrayBytes(size));
+      FreePinnedChunks(reinterpret_cast<PinnedChunk *>(buffer->data[2]));
       buffer->data[0] = reinterpret_cast<std::uint64_t>(copy);
-    });
-    return rpc::RPC_SUCCESS;
-  case rpcSendArray:
-    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
-      SendArray(buffer->data, buffer->data[5],
-          static_cast<int>(buffer->data[7] & 0xff),
-          reinterpret_cast<const void *>(buffer->data[6]),
-          buffer->data[7] >> 8);
     });
     return rpc::RPC_SUCCESS;
   case rpcPinnedChunk:

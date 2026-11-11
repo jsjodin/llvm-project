@@ -1,24 +1,26 @@
-% Messages of any type between the host and process kinds that run on a GPU
-% (docs/INPROGRESS.md, GPU processes without omp target, step 4e). A
-% message that is not one word, nor an array of one-word elements, is
-% copied by its type_info (runtime/copy.h): from the GPU into host memory,
-% which the host sends on, and from the host's mailbox into host memory that
-% the GPU copies into its arena. A counter on the GPU takes add(N) and
-% get(Reply); two processes on the GPU play ping-pong through the host's
-% mailboxes; and a summer takes a list and a string and answers with the
-% string and the list's sum. A closure cannot cross, as the GPU has other
-% procedures. With "many", two hundred summers each take one message of the
-% two they are sent and end, after which none of the host's copies of their
-% messages is left (MERK_CHECK_PINNED), nor any of the messages, those the
-% GPU took and those it did not (MERK_CHECK_MESSAGES). The program runs its kinds at the host here, and at the GPU in
-% process-gpu-messages-gpu.test.
+% Flat messages between the host and process kinds that run on a GPU
+% (design document, "Messages and memory on the device"). A message that is
+% not one word, nor an array of one-word elements, is copied: from the GPU
+% into host memory, which the host sends on, and from the host's mailbox
+% into host memory that the GPU copies into its arena. A counter on the GPU
+% takes add(N) and get(Reply); two processes on the GPU play ping-pong
+% through the host's mailboxes; and a summer takes an array and answers
+% with its sum. A message that is not flat, or a value that a GPU process
+% makes that is not, is an error at compile time (process-gpu-flat-errors.m).
+% With "many", two hundred summers each take one message of the two they are
+% sent and end, after which none of the host's copies of their messages is
+% left (MERK_CHECK_PINNED), nor any of the messages, those the GPU took and
+% those it did not (MERK_CHECK_MESSAGES). The program runs its kinds at the
+% host here, and at the GPU in process-gpu-messages-gpu.test.
+% Temporary (docs/INPROGRESS.md, GPU processes without omp target, step 5,
+% "Flat records"): the copies walk the messages' type_info, until flat
+% records are values on the device and travel as their bytes.
 %
 % REQUIRES: amdgpu-registered-target, libomp
 % RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 host | FileCheck %s --match-full-lines --strict-whitespace
 % RUN: merkc -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t
 % RUN: %libomp-env %t host | FileCheck %s --match-full-lines --strict-whitespace
-% RUN: %libomp-env %t2 host closure | FileCheck %s --check-prefix=CLOSURE --match-full-lines --strict-whitespace
 % RUN: %libomp-env MERK_CHECK_MESSAGES=1 %t2 host many 2>&1 | FileCheck %s --check-prefixes=MANY,MESSAGES --match-full-lines --strict-whitespace
 
 :- module process_gpu_messages.
@@ -26,7 +28,7 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module int, list, process, string.
+:- import_module array, int, list, process, string.
 
 :- type counter_msg
     --->    add(int)
@@ -68,7 +70,9 @@ ponger(Self, !IO) :-
 :- process pinger(int, mailbox(ping), mailbox(report)) receives int on gpu.
 
 :- type report
-    --->    report(string, int).
+    --->    pinged(int)
+    ;       no_answer(int)
+    ;       summed(int).
 
 pinger(Rounds, Ponger, Report, Self, !IO) :-
     pinger_loop(Rounds, 0, Ponger, Report, Self, !IO).
@@ -78,7 +82,7 @@ pinger(Rounds, Ponger, Report, Self, !IO) :-
 
 pinger_loop(Rounds, N, Ponger, Report, Self, !IO) :-
     ( if Rounds = 0 then
-        send(Report, report("pinged", N), !IO),
+        send(Report, pinged(N), !IO),
         send(Ponger, done, !IO)
     else
         send(Ponger, ping(N, Self), !IO),
@@ -86,41 +90,27 @@ pinger_loop(Rounds, N, Ponger, Report, Self, !IO) :-
         ( if R = message(M) then
             pinger_loop(Rounds - 1, M, Ponger, Report, Self, !IO)
         else
-            send(Report, report("no answer", N), !IO)
+            send(Report, no_answer(N), !IO)
         )
     ).
 
-:- type sum_request
-    --->    sum(list(int), string, mailbox(report)).
+    % Answers an array with its sum, once.
+:- process summer(mailbox(report)) receives array(int) on gpu.
 
-    % Answers sum(Numbers, Name, Reply) with the name and the numbers' sum,
-    % once.
-:- process summer receives sum_request on gpu.
-
-summer(Self, !IO) :-
+summer(Reply, Self, !IO) :-
     receive(Self, any, infinity, R, !IO),
-    ( if R = message(sum(Numbers, Name, Reply)) then
-        send(Reply, report(Name, sum(Numbers)), !IO)
+    ( if R = message(Numbers) then
+        send(Reply, summed(sum(Numbers, 0, 0)), !IO)
     else
         true
     ).
 
-    % Without a closure, which a GPU process cannot make yet.
-:- func sum(list(int)) = int.
+    % Without a closure, which a GPU process cannot make.
+:- func sum(array(int), int, int) = int.
 
-sum([]) = 0.
-sum([N | Ns]) = N + sum(Ns).
-
-:- type closure_msg
-    --->    use(pred(int, int)).
-
-    % Says when it has its message, which at a GPU it never has: the
-    % closure cannot cross.
-:- process applier(mailbox(int)) receives closure_msg on gpu.
-
-applier(Back, Self, !IO) :-
-    receive(Self, any, infinity, _, !IO),
-    send(Back, 1, !IO).
+sum(A, I, S) =
+    ( if I < array.size(A) then sum(A, I + 1, S + array.lookup(A, I))
+    else S ).
 
 main(!IO) :-
     io.command_line_arguments(Args, !IO),
@@ -130,17 +120,11 @@ main(!IO) :-
             new_mailbox(Reports, !IO),
             many(Place, 200, 0, Total, Reports, !IO),
             io.write_int(Total, !IO), io.nl(!IO)
-        else if Rest = ["closure"] then
-            new_mailbox(Back, !IO),
-            spawn_applier_at(Place, Back, A, !IO),
-            send(A, use(twice), !IO),
-            receive(Back, any, after(10000), R, !IO),
-            io.write(R, !IO), io.nl(!IO)
         else
             run(Place, !IO)
         )
     else
-        io.write_string("usage: host or gpu, then closure or nothing\n", !IO)
+        io.write_string("usage: host or gpu, then many or nothing\n", !IO)
     ).
 
 :- pred many(place::in, int::in, int::in, int::out, mailbox(report)::in,
@@ -148,11 +132,11 @@ main(!IO) :-
 
 many(Place, N, !Total, Reports, !IO) :-
     ( if N > 0 then
-        spawn_summer_at(Place, S, !IO),
-        send(S, sum([N, 1], "many", Reports), !IO),
-        send(S, sum([N], "unread", Reports), !IO),
+        spawn_summer_at(Place, Reports, S, !IO),
+        send(S, array([N, 1]), !IO),
+        send(S, array([N]), !IO),
         receive(Reports, any, after(10000), R, !IO),
-        ( if R = message(report(_, Sum)) then
+        ( if R = message(summed(Sum)) then
             !:Total = !.Total + Sum
         else
             true
@@ -161,10 +145,6 @@ many(Place, N, !Total, Reports, !IO) :-
     else
         true
     ).
-
-:- pred twice(int::in, int::out) is det.
-
-twice(N, 2 * N).
 
 :- pred run(place::in, io::di, io::uo) is det.
 
@@ -185,14 +165,13 @@ run(Place, !IO) :-
     spawn_pinger_at(Place, 100, P, Reports, _, !IO),
     receive(Reports, any, after(10000), R3, !IO),
     io.write(R3, !IO), io.nl(!IO),
-    spawn_summer_at(Place, S, !IO),
-    send(S, sum(1 .. 100, "one to a hundred", Reports), !IO),
+    spawn_summer_at(Place, Reports, S, !IO),
+    send(S, array(1 .. 100), !IO),
     receive(Reports, any, after(10000), R4, !IO),
     io.write(R4, !IO), io.nl(!IO).
 % CHECK:message(15)
 % CHECK-NEXT:message(42)
-% CHECK-NEXT:message(report("pinged", 100))
-% CHECK-NEXT:message(report("one to a hundred", 5050))
-% CLOSURE:message(1)
+% CHECK-NEXT:message(pinged(100))
+% CHECK-NEXT:message(summed(5050))
 % MANY:20300
 % MESSAGES-NEXT:Mercury runtime: 0 messages are neither read nor freed
