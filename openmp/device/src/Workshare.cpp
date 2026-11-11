@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Workshare.h"
+#include "Configuration.h"
 #include "Debug.h"
 #include "DeviceTypes.h"
 #include "DeviceUtils.h"
@@ -687,7 +688,52 @@ namespace ompx {
 
 /// Helper class to hide the generic loop nest and provide the template argument
 /// throughout.
+/// The flags argument of __kmpc_distribute_for_static_loop*, which
+/// OpenMPIRBuilder's createTargetLoopWorkshareCall sets; keep the two in step.
+namespace DistributeForFlags {
+enum : uint8_t {
+  OneIterationPerThread = 1 << 0,
+  TeamBarrier = 1 << 1,
+};
+} // namespace DistributeForFlags
+
+/// Whether a combined distribute and worksharing loop has a barrier across the
+/// team after each round: as the compiler asked, unless
+/// LIBOMPTARGET_LOOP_BARRIER says otherwise for the whole program.
+static bool wantsTeamBarrier(uint8_t Flags) {
+  switch (config::getLoopBarrier()) {
+  case LoopBarrierKind::On:
+    return true;
+  case LoopBarrierKind::Off:
+    return false;
+  default:
+    return Flags & DistributeForFlags::TeamBarrier;
+  }
+}
+
 template <typename Ty> class StaticLoopChunker {
+
+  /// The loop nest of NormalizedLoopNestNoChunk with a barrier across the
+  /// team after each round of KernelIteration iterations. Every thread goes
+  /// round as often as the team's first one, including rounds in which it
+  /// has no iteration, so that all of them reach every barrier. This keeps
+  /// the team's warps together: in a stencil, a team's iterations read the
+  /// same rows of the input, and warps that drift apart read them from memory
+  /// again instead of from the cache. Only for a team of whole blocks, every
+  /// thread of the block calling this, and so the caller checks for SPMD mode
+  /// and that the parallel region has all the block's threads.
+  static void NormalizedLoopNestTeamBarrier(void (*LoopBody)(Ty, void *),
+                                            void *Arg, Ty NumBlocks, Ty BId,
+                                            Ty NumThreads, Ty TId,
+                                            Ty NumIters) {
+    Ty KernelIteration = NumBlocks * NumThreads;
+    for (Ty Round = BId * NumThreads; Round < NumIters;
+         Round += KernelIteration) {
+      if (TId < NumIters - Round)
+        LoopBody(Round + TId, Arg);
+      synchronize::threads(atomic::relaxed);
+    }
+  }
 
   /// Generic loop nest that handles block and/or thread distribution in the
   /// absence of user specified chunk sizes. This implicitly picks a block chunk
@@ -871,13 +917,16 @@ public:
   /// \param[in] NumThreads Number of GPU threads
   /// \param[in] BlockChunk Size of block chunk
   /// \param[in] ThreadChunk Size of thread chunk
-  /// \param[in] OneIterationPerThread If true/nonzero, each thread executes
-  /// only one loop iteration or one thread chunk. This avoids an outer loop
-  /// over all loop iterations/chunks.
+  /// \param[in] Flags DistributeForFlags: whether each thread executes only
+  /// one loop iteration or one thread chunk, which avoids an outer loop over
+  /// all loop iterations/chunks, and whether the compiler asks for a barrier
+  /// across the team after each round (NormalizedLoopNestTeamBarrier), which
+  /// LIBOMPTARGET_LOOP_BARRIER can override.
   static void DistributeFor(IdentTy *Loc, void (*LoopBody)(Ty, void *),
                             void *Arg, Ty NumIters, Ty NumThreads,
-                            Ty BlockChunk, Ty ThreadChunk,
-                            uint8_t OneIterationPerThread) {
+                            Ty BlockChunk, Ty ThreadChunk, uint8_t Flags) {
+    uint8_t OneIterationPerThread =
+        Flags & DistributeForFlags::OneIterationPerThread;
     ASSERT(icv::Level == 1, "Bad distribute");
     ASSERT(icv::ActiveLevel == 1, "Bad distribute");
     ASSERT(state::ParallelRegionFn == nullptr, "Bad distribute");
@@ -917,6 +966,11 @@ public:
       NormalizedLoopNestChunked(LoopBody, Arg, BlockChunk, NumBlocks, BId,
                                 ThreadChunk, NumThreads, TId, NumIters,
                                 OneIterationPerThread);
+    else if (!OneIterationPerThread && wantsTeamBarrier(Flags) &&
+             mapping::isSPMDMode() &&
+             NumThreads == mapping::getNumberOfThreadsInBlock())
+      NormalizedLoopNestTeamBarrier(LoopBody, Arg, NumBlocks, BId, NumThreads,
+                                    TId, NumIters);
     else
       NormalizedLoopNestNoChunk(LoopBody, Arg, NumBlocks, BId, NumThreads, TId,
                                 NumIters, OneIterationPerThread);
@@ -933,11 +987,10 @@ public:
   [[gnu::flatten, clang::always_inline]] void                                  \
   __kmpc_distribute_for_static_loop##BW(                                       \
       IdentTy *loc, void (*fn)(TY, void *), void *arg, TY num_iters,           \
-      TY num_threads, TY block_chunk, TY thread_chunk,                         \
-      uint8_t one_iteration_per_thread) {                                      \
-    ompx::StaticLoopChunker<TY>::DistributeFor(                                \
-        loc, fn, arg, num_iters, num_threads, block_chunk, thread_chunk,       \
-        one_iteration_per_thread);                                             \
+      TY num_threads, TY block_chunk, TY thread_chunk, uint8_t flags) {        \
+    ompx::StaticLoopChunker<TY>::DistributeFor(loc, fn, arg, num_iters,        \
+                                               num_threads, block_chunk,       \
+                                               thread_chunk, flags);           \
   }                                                                            \
   [[gnu::flatten, clang::always_inline]] void                                  \
   __kmpc_distribute_static_loop##BW(IdentTy *loc, void (*fn)(TY, void *),      \

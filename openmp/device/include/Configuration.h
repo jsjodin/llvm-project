@@ -51,6 +51,9 @@ uint64_t getIndirectCallTableSize();
 /// Returns the size of the indirect call table.
 uint64_t getHardwareParallelism();
 
+/// Returns LIBOMPTARGET_LOOP_BARRIER's setting.
+LoopBarrierKind getLoopBarrier();
+
 /// Return if debugging is enabled for the given debug kind.
 bool isDebugMode(DeviceDebugKind Level);
 

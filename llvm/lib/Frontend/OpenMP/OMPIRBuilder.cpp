@@ -6550,11 +6550,25 @@ getKmpcForStaticLoopForType(Type *Ty, OpenMPIRBuilder *OMPBuilder,
 
 // Inserts a call to proper OpenMP Device RTL function which handles
 // loop worksharing.
+/// The flags argument of __kmpc_distribute_for_static_loop*, as the device
+/// runtime reads it (DistributeForFlags in openmp/device/src/Workshare.cpp).
+enum DistributeForFlags : uint8_t {
+  /// Each thread runs at most one iteration (NoLoop).
+  DistributeForOneIterationPerThread = 1 << 0,
+  /// A barrier across the team after each round of iterations, as the
+  /// implicit barrier of clang's inner worksharing loop gives. It keeps the
+  /// team's warps together, so that iterations next to each other share the
+  /// cache: a stencil reads its rows from memory up to a quarter more often
+  /// without it. LIBOMPTARGET_LOOP_BARRIER overrides it at run time.
+  DistributeForTeamBarrier = 1 << 1,
+};
+
 static void createTargetLoopWorkshareCall(OpenMPIRBuilder *OMPBuilder,
                                           WorksharingLoopType LoopType,
                                           BasicBlock *InsertBlock, Value *Ident,
                                           Value *LoopBodyArg, Value *TripCount,
-                                          Function &LoopBodyFn, bool NoLoop) {
+                                          Function &LoopBodyFn, bool NoLoop,
+                                          bool TeamBarrier) {
   Type *TripCountTy = TripCount->getType();
   Module &M = OMPBuilder->M;
   IRBuilder<> &Builder = OMPBuilder->Builder;
@@ -6581,8 +6595,13 @@ static void createTargetLoopWorkshareCall(OpenMPIRBuilder *OMPBuilder,
       Builder.CreateZExtOrTrunc(NumThreads, TripCountTy, "num.threads.cast"));
   RealArgs.push_back(ConstantInt::get(TripCountTy, 0));
   if (LoopType == WorksharingLoopType::DistributeForStaticLoop) {
+    uint8_t Flags = 0;
+    if (NoLoop)
+      Flags |= DistributeForOneIterationPerThread;
+    if (TeamBarrier)
+      Flags |= DistributeForTeamBarrier;
     RealArgs.push_back(ConstantInt::get(TripCountTy, 0));
-    RealArgs.push_back(ConstantInt::get(Builder.getInt8Ty(), NoLoop));
+    RealArgs.push_back(ConstantInt::get(Builder.getInt8Ty(), Flags));
   } else {
     RealArgs.push_back(ConstantInt::get(Builder.getInt8Ty(), 0));
   }
@@ -6593,7 +6612,7 @@ static void createTargetLoopWorkshareCall(OpenMPIRBuilder *OMPBuilder,
 static void workshareLoopTargetCallback(
     OpenMPIRBuilder *OMPIRBuilder, CanonicalLoopInfo *CLI, Value *Ident,
     Function &OutlinedFn, const SmallVector<Instruction *, 4> &ToBeDeleted,
-    WorksharingLoopType LoopType, bool NoLoop) {
+    WorksharingLoopType LoopType, bool NoLoop, bool TeamBarrier) {
   IRBuilder<> &Builder = OMPIRBuilder->Builder;
   BasicBlock *Preheader = CLI->getPreheader();
   Value *TripCount = CLI->getTripCount();
@@ -6640,7 +6659,8 @@ static void workshareLoopTargetCallback(
   OutlinedFnCallInstruction->eraseFromParent();
 
   createTargetLoopWorkshareCall(OMPIRBuilder, LoopType, Preheader, Ident,
-                                LoopBodyArg, TripCount, OutlinedFn, NoLoop);
+                                LoopBodyArg, TripCount, OutlinedFn, NoLoop,
+                                TeamBarrier);
 
   for (auto &ToBeDeletedItem : ToBeDeleted)
     ToBeDeletedItem->eraseFromParent();
@@ -6764,10 +6784,14 @@ OpenMPIRBuilder::InsertPointOrErrorTy OpenMPIRBuilder::applyWorkshareLoopTarget(
   // call to OpenMP device rtl inside loop preheader. OpenMP device rtl
   // function will handle loop control logic.
   //
+  // A combined loop has a barrier across the team after each round unless it
+  // is nowait, as clang's has (DistributeForTeamBarrier).
+  bool TeamBarrier = LoopType == WorksharingLoopType::DistributeForStaticLoop &&
+                     NeedsBarrier && !NoLoop;
   OI->PostOutlineCB = [=, ToBeDeletedVec =
                               std::move(ToBeDeleted)](Function &OutlinedFn) {
     workshareLoopTargetCallback(this, CLI, Ident, OutlinedFn, ToBeDeletedVec,
-                                LoopType, NoLoop);
+                                LoopType, NoLoop, TeamBarrier);
   };
   addOutlineInfo(std::move(OI));
 

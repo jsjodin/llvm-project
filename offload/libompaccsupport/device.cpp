@@ -398,6 +398,22 @@ setupIndirectCallTable(DeviceTy &Device, __tgt_device_image *Image,
   return std::pair<void *, uint64_t>(DevicePtr, IndirectCallTable.size());
 }
 
+/// LIBOMPTARGET_LOOP_BARRIER: whether combined distribute and worksharing
+/// loops have a barrier across the team after each round, overriding what the
+/// compiler asked for.
+static LoopBarrierKind readLoopBarrier() {
+  StringEnvar Setting("LIBOMPTARGET_LOOP_BARRIER");
+  if (Setting.get() == "on")
+    return LoopBarrierKind::On;
+  if (Setting.get() == "off")
+    return LoopBarrierKind::Off;
+  if (!Setting.get().empty())
+    MESSAGE("LIBOMPTARGET_LOOP_BARRIER must be on or off, not '%s'; the loops "
+            "have barriers as compiled",
+            Setting.get().c_str());
+  return LoopBarrierKind::AsCompiled;
+}
+
 // Load binary to device and perform global initialization if needed.
 llvm::Expected<ProgramTy> DeviceTy::loadBinary(__tgt_device_image *Img) {
   auto ProgramOrErr = ProgramTy::create(Context, DeviceHandle, Img);
@@ -431,8 +447,9 @@ llvm::Expected<ProgramTy> DeviceTy::loadBinary(__tgt_device_image *Img) {
   if (!CallTablePairOrErr)
     return CallTablePairOrErr.takeError();
 
-  // Debug flags for the device runtime.
+  // Debug flags and loop barriers for the device runtime.
   static Int32Envar OMPX_DebugKind("LIBOMPTARGET_DEVICE_RTL_DEBUG");
+  static const LoopBarrierKind LoopBarrier = readLoopBarrier();
 
   DeviceEnvironmentTy DeviceEnvironment;
   DeviceEnvironment.DeviceDebugKind = OMPX_DebugKind.get();
@@ -446,6 +463,7 @@ llvm::Expected<ProgramTy> DeviceTy::loadBinary(__tgt_device_image *Img) {
   DeviceEnvironment.IndirectCallTableSize = CallTablePairOrErr->second;
   DeviceEnvironment.HardwareParallelism =
       getInfo<uint64_t>(OL_DEVICE_INFO_HARDWARE_PARALLELISM);
+  DeviceEnvironment.LoopBarrier = static_cast<uint32_t>(LoopBarrier);
 
   // DeviceEnvironment is on the stack, so the copy must be synchronous.
   if (submitDataSync(DeviceEnvironmentPtr, &DeviceEnvironment,
