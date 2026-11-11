@@ -1078,6 +1078,11 @@ bool CodeGenAction::LowerLLVMIR() {
   return Emit(*llvmModule, *target, *os);
 }
 
+namespace {
+// The module flag of a module that Emit has optimized.
+constexpr llvm::StringLiteral kIRPreparedFlag{"merk.ir_prepared"};
+} // namespace
+
 bool CodeGenAction::Emit(llvm::Module &llvmModule,
     const codegen::TargetInfo &target, llvm::raw_ostream &os) {
   std::string error;
@@ -1086,9 +1091,17 @@ bool CodeGenAction::Emit(llvm::Module &llvmModule,
     options::reportError(error);
     return false;
   }
-  codegen::OptimizeLLVMIR(llvmModule, target);
-  codegen::AddStackChecks(llvmModule);
-  codegen::ExpandHeapAddresses(llvmModule);
+  // The optimizer, the stack checks and the heap's addresses run once on a
+  // module: the host's offload compile writes its IR as bitcode and reads it
+  // back (LowerLLVMIR), and a second run of the optimizer would fold the
+  // inttoptrs that OptimizeLLVMIR makes of words at its end, carrying a
+  // number on as a heap pointer, and add the stack checks twice.
+  if (!llvmModule.getModuleFlag(kIRPreparedFlag)) {
+    codegen::OptimizeLLVMIR(llvmModule, target);
+    codegen::AddStackChecks(llvmModule);
+    codegen::ExpandHeapAddresses(llvmModule);
+    llvmModule.addModuleFlag(llvm::Module::Max, kIRPreparedFlag, 1);
+  }
   if (kind_ == ActionKind::EmitLLVM) {
     llvmModule.print(os, nullptr);
     return true;
