@@ -3259,12 +3259,19 @@ and a launch, 15 to 40 µs, every loop.
     target regions.
 
 **(d1a) done 2026-11-11:** queues with compute units of their own.
-- `olCreateQueueWithComputeUnitMask` gives a queue a stream with an HSA
-  queue of its own, under `hsa_amd_queue_cu_set_mask`, destroyed when the
-  stream returns to the pool. A queue destroyed while busy is never reused
-  by another, but released once done, when a queue is next created or
-  destroyed, or with its context. A mask must set some of the units that
-  `olGetDeviceComputeUnitMask` gives: `LIBOMPTARGET_AMDGPU_CU_MASK`'s, or
+- `olCreateQueueWithComputeUnitMask` gives a queue a stream on an HSA queue
+  under `hsa_amd_queue_cu_set_mask`, which the queues of one mask share, made
+  for the first and destroyed with the last. An HSA queue for each first
+  oversubscribed the GPU's scheduler when lit ran processes in parallel
+  ("Runlist is getting oversubscribed", 107 times in a minute, 2026-11-11), as
+  each process has a queue of its own. Kernels on one HSA queue run at once: a
+  kernel packet does not set the barrier bit, and a stream pushes a barrier
+  packet, which holds up the whole HSA queue, only behind an operation of its
+  own, which a process's kernel, the first on its stream, never is; a host
+  function is a signal handler, not a packet. A queue destroyed while busy is
+  never reused by another, but released once done, when a queue is next
+  created or destroyed, or with its context. A mask must set some of the units
+  that `olGetDeviceComputeUnitMask` gives: `LIBOMPTARGET_AMDGPU_CU_MASK`'s, or
   else ROCr's for its queues (none known under `HSA_CU_MASK`, the ROCr 7.2
   bug, which is reported).
 - `olGetKernelMaxCooperativeGroupCountOnQueue` counts on the queue's own
