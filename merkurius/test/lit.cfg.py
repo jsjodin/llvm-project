@@ -21,8 +21,13 @@ config.excludes = ["Inputs", "CMakeLists.txt"]
 
 # MERK_HEAP_CHUNK_BYTES makes every program's heap chunks that size
 # (runtime/heap.cpp): MERK_HEAP_CHUNK_BYTES=64 llvm-lit runs every program
-# with nearly every allocation on the slow path.
-llvm_config.with_system_environment(["HOME", "TMP", "TEMP", "MERK_HEAP_CHUNK_BYTES"])
+# with nearly every allocation on the slow path. ROCR_VISIBLE_DEVICES and
+# HIP_VISIBLE_DEVICES choose the GPUs the tests may use, as
+# utils/gpu/with-gpus.py sets them: on a machine that others share, a test
+# must not reach the GPUs they use.
+llvm_config.with_system_environment(
+    ["HOME", "TMP", "TEMP", "MERK_HEAP_CHUNK_BYTES", "ROCR_VISIBLE_DEVICES",
+     "HIP_VISIBLE_DEVICES"])
 # The targets LLVM was built for, as in LLVM's tests: x86-registered-target,
 # amdgpu-registered-target and so on.
 for arch in config.targets_to_build.split():
@@ -96,6 +101,19 @@ from merkurius_lit import gpu_parallelism_group
 config.parallelism_group = gpu_parallelism_group
 lit_config.parallelism_groups["merkurius-gpu"] = int(
     os.environ.get("MERK_LIT_GPU_JOBS", "4"))
+
+# The script that runs a command on free GPUs (utils/gpu/with-gpus.py).
+config.substitutions.append(
+    (
+        "%with-gpus",
+        "%s -I %s"
+        % (
+            config.python_executable,
+            os.path.join(config.merkurius_src_root, "utils", "gpu",
+                         "with-gpus.py"),
+        ),
+    )
+)
 
 # The unparser's round-trip tests 2, 3 and 4.
 config.substitutions.append(

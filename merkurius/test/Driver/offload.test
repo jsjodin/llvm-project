@@ -40,6 +40,18 @@ NO-OMP: merkc: error: --offload-arch needs -fopenmp or -fprocess-declarations
 RUN: not merkc -### -fopenmp --offload-arch=sm_80 %S/Inputs/sumsq.m 2>&1 \
 RUN:   | FileCheck %s --check-prefix=NVPTX
 NVPTX: merkc: error: offloading to 'sm_80' is not supported yet: only AMD GPUs, such as gfx1030, are
+A target ID with features, as Clang takes, is reported for now: the device's
+bitcode does not carry them yet. A processor that is not one is still
+reported as not an AMD GPU.
+RUN: not merkc -### -fopenmp --offload-arch=gfx90a:xnack- %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=FEATURES
+FEATURES: merkc: error: --offload-arch=gfx90a:xnack-: target features are not supported yet; give the processor alone, gfx90a, whose code runs with them on or off
+RUN: not merkc -### -fprocess-declarations --offload-arch=gfx942:sramecc+:xnack+ %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=FEATURES2
+FEATURES2: merkc: error: --offload-arch=gfx942:sramecc+:xnack+: target features are not supported yet; give the processor alone, gfx942, whose code runs with them on or off
+RUN: not merkc -### -fopenmp --offload-arch=gfx9999:xnack- %S/Inputs/sumsq.m 2>&1 \
+RUN:   | FileCheck %s --check-prefix=UNKNOWN
+UNKNOWN: merkc: error: offloading to 'gfx9999:xnack-' is not supported yet: only AMD GPUs, such as gfx1030, are
 RUN: not merkc -### -fopenmp --offload-arch=gfx1030 -S %S/Inputs/sumsq.m 2>&1 \
 RUN:   | FileCheck %s --check-prefix=ASM
 ASM: merkc: error: -S with --offload-arch is not supported yet
