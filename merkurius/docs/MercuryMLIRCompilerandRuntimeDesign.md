@@ -3173,10 +3173,10 @@ Rejected:
 | 1 | `rpcSend` | a one-word message, by the type's key; answered once queued |
 | 2 | `rpcAttach` | the mailbox's ring: its address and head |
 | 3 | `rpcChunk` | a chunk for the device's arena |
-| 4 | `rpcGiveArray` | an array the device made, copied to the host for a region's output |
-| 5 | `rpcSendArray` | an array of one-word elements; the host copies it from the device |
+| 4 | `rpcGiveArray` | an array the device made and copied into host memory, copied again for a region's output |
+| 5 | | unused: was a send of an array that the host copied from the device |
 | 6 | `rpcDrain` | move messages waiting on the host into the ring |
-| 7 | `rpcTakeArray` | copy the oldest array message to the arena address given |
+| 7 | `rpcTakeArray` | the oldest array message, copied into host memory that the device reads |
 
 Rejected: libompdevice's host call (`__llvm_omp_host_call`), which needs a host
 function's address passed into each region and allocates a copy of the
@@ -3230,15 +3230,25 @@ and can make the driver reset a GPU that also drives the display, as one did.
 also compiled for the device, allocating in the arena. The wire format is
 8-byte little-endian items, the length and then the elements.
 
-- **A send** gives the host the array's device address and size. The host
-  copies it from the device with `omp_target_memcpy`, into a temporary, and the
-  send copies it into the message's fragment or encodes it. Writing straight
-  into the fragment would remove the second copy, which limits a GPU's send
-  within a node to about 1.2 GB/s against 2.2 from the CPU.
-- **A receive** is the ring giving the size, the device allocating in its
-  arena, and `rpcTakeArray` giving the host the address to copy to, with no
-  second copy. The device decides the place, so the arena's accounting stays
-  on one side.
+- **A send** copies the array into host memory (`rpcPinnedChunk`), and
+  `rpcSendTerm` gives the host the copy, which the send copies into the
+  message's fragment or encodes.
+- **A receive** is the ring giving the size, `rpcTakeArray` copying the message
+  into host memory that the device reads, and the device copying that into an
+  array in its arena. The device decides the place, so the arena's accounting
+  stays on one side.
+- **Rejected: copying into or out of the device's memory while it runs**
+  (`omp_target_memcpy`, `olMemcpy`), as both did until 2026-11-10. The
+  arena is coarse-grained memory, whose lines the device's L2 cache keeps
+  without regard to a DMA copy; a system-scope fence on gfx10 invalidates
+  the L0 and L1 caches but not L2. A GPU process that took an array, the
+  first thing in an arena whose memory another process had used, read old
+  cells, and a GPU page fault followed (`process-gpu-arrays-gpu.test`).
+  Regions met it less as they start as kernels, when the caches are
+  invalidated. The copy was faster: a send from a GPU within a node reached
+  about 1.2 GB/s. One lane copying word by word is slower, until messages
+  travel as their bytes and a wave's lanes copy them together
+  (docs/INPROGRESS.md, GPU processes without omp target, step 5).
 - **Copied and encoded as blocks.** An array of scalars is copied into a
   message with one `memcpy`. An array of `int`, `uint` or `float` (64-bit
   ones) is encoded and decoded as one, its bytes on the wire being its bytes in

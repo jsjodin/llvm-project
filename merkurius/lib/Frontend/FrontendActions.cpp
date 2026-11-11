@@ -9,8 +9,9 @@
 #include "merkurius/Frontend/FrontendActions.h"
 #include "merkurius/CodeGen/Lowering.h"
 #include "merkurius/CodeGen/MLIRGen.h"
+#include "merkurius/Dialect/Merk/IR/MerkDialect.h"
+#include "merkurius/Dialect/Mrt/IR/MrtDialect.h"
 #include "merkurius/Driver/Options.h"
-#include "llvm/Support/FileSystem.h"
 #include "merkurius/Frontend/CompilerInstance.h"
 #include "merkurius/Parser/convert.h"
 #include "merkurius/Parser/lexer.h"
@@ -20,30 +21,30 @@
 #include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/unparse.h"
 #include "merkurius/Semantics/check-determinism.h"
-#include "merkurius/Semantics/check-uniqueness.h"
+#include "merkurius/Semantics/check-gpu-code.h"
 #include "merkurius/Semantics/check-modes.h"
 #include "merkurius/Semantics/check-purity.h"
 #include "merkurius/Semantics/check-receives.h"
 #include "merkurius/Semantics/check-types.h"
+#include "merkurius/Semantics/check-uniqueness.h"
 #include "merkurius/Semantics/desugar.h"
 #include "merkurius/Semantics/module-loader.h"
 #include "merkurius/Semantics/polymorphism.h"
 #include "merkurius/Semantics/resolve-names.h"
 #include "merkurius/Semantics/translate-loops.h"
-#include "merkurius/Dialect/Merk/IR/MerkDialect.h"
-#include "merkurius/Dialect/Mrt/IR/MrtDialect.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/IRReader/IRReader.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/SourceMgr.h"
 #include "mlir/Bytecode/BytecodeWriter.h"
 #include "mlir/Dialect/DLTI/DLTI.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/OpenMP/OpenMPDialect.h"
-#include "mlir/IR/Verifier.h"
 #include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/Verifier.h"
 #include "mlir/Parser/Parser.h"
-#include "llvm/Support/SourceMgr.h"
-#include "llvm/Bitcode/BitcodeWriter.h"
-#include "llvm/IRReader/IRReader.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/Path.h"
 #include <string>
 #include <vector>
 
@@ -751,6 +752,8 @@ Analysed Analyse(CompilerInstance &ci, Resolved &r) {
           r.tokens, *types, *modes, r.messages, !earlier)};
   semantics::CheckUniqueness(
       r.tokens, *modes, *determinism, r.messages, frontend.mmcUniqueness);
+  semantics::CheckGpuCode(*r.tree, r.tokens, *modes, *determinism,
+      modes->constructors(), r.messages);
   return {std::move(types), std::move(modes), std::move(determinism),
       std::move(translation)};
 }

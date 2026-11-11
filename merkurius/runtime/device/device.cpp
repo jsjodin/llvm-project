@@ -98,7 +98,6 @@ using merkurius::runtime::rpcFail;
 using merkurius::runtime::rpcGiveArray;
 using merkurius::runtime::rpcPinnedChunk;
 using merkurius::runtime::rpcSend;
-using merkurius::runtime::rpcSendArray;
 using merkurius::runtime::rpcSendTerm;
 using merkurius::runtime::rpcTakeArray;
 using merkurius::runtime::rpcTakeTerm;
@@ -715,27 +714,6 @@ extern "C" uint64_t *merk_device_team_mailbox(int64_t team, uint64_t key) {
   return handle;
 }
 
-// What a region gives for an output array: the array, if it is the given
-// array numbered `number`, which is mapped back; or else, for -1, a copy on
-// the host of one the device made, since the arena does not outlive the
-// region.
-extern "C" uint64_t *merk_device_give_array(uint64_t *array, int64_t number) {
-  if (number >= 0) {
-    return array;
-  }
-  uint64_t *copy{nullptr};
-  rpc::Client::Port port{__llvm_rpc_client.open<rpcGiveArray>()};
-  port.send([&](rpc::Buffer *buffer, uint32_t) {
-    buffer->data[0] = static_cast<uint64_t>(DeviceNumber());
-    buffer->data[1] = reinterpret_cast<uint64_t>(array);
-    buffer->data[2] = array[0];
-  });
-  port.recv([&](rpc::Buffer *buffer, uint32_t) {
-    copy = reinterpret_cast<uint64_t *>(buffer->data[0]);
-  });
-  return copy;
-}
-
 // Sends a one-word message to the mailbox whose handle is the cell of five
 // words at `handle`. The host queues it, or sends it on to another node,
 // encoding it by the type_info that a module registered under `key`, a
@@ -756,32 +734,6 @@ extern "C" void merk_device_send(
     }
     buffer->data[5] = key;
     buffer->data[6] = message;
-  });
-  port.recv([](rpc::Buffer *, uint32_t) {});
-}
-
-// Sends an array of one-word elements, as merk_device_send sends a word:
-// the host copies the array from the device, given its address, and
-// returns once it has queued it. To a team mailbox, the array goes by its
-// pointer (docs/INPROGRESS.md, Processes as teams, step 3): every team of
-// the region can address it, in the arena or mapped for the region, and
-// neither team can update it in place, since a send makes the sender's
-// array shared and a receive gives a shared one.
-extern "C" void merk_device_send_array(
-    const uint64_t *handle, uint64_t key, const uint64_t *array) {
-  if (IsTeamHandle(handle)) {
-    TeamSend(handle, reinterpret_cast<uint64_t>(array));
-    return;
-  }
-  rpc::Client::Port port{__llvm_rpc_client.open<rpcSendArray>()};
-  port.send([&](rpc::Buffer *buffer, uint32_t) {
-    for (int i{0}; i < 5; ++i) {
-      buffer->data[i] = handle[i];
-    }
-    buffer->data[5] = key;
-    buffer->data[6] = reinterpret_cast<uint64_t>(array);
-    buffer->data[7] =
-        array[0] << 8 | static_cast<uint64_t>(DeviceNumber());
   });
   port.recv([](rpc::Buffer *, uint32_t) {});
 }
@@ -915,9 +867,14 @@ extern "C" int merk_device_receive(
 }
 
 // As merk_device_receive, for a mailbox of arrays of one-word elements: the
-// ring gives the oldest message's size, the device allocates the array in
-// its arena, and the host copies the message there, given its address. From
-// a team mailbox, the sender's array itself (merk_device_send_array).
+// ring gives the oldest message's size, the host copies the message into
+// host memory that the device reads (rpcTakeArray), and the device copies
+// that into an array in its arena before it moves the ring's head, after
+// which the host frees its copy. From a team mailbox, the sender's array
+// itself (merk_device_send_array).
+// Temporary (docs/INPROGRESS.md, GPU processes without omp target, step 5,
+// "Flat records"): one lane copies word by word, until messages travel as
+// their bytes and a wave's lanes copy them together.
 extern "C" int merk_device_receive_array(
     const uint64_t *handle, int64_t milliseconds, uint64_t *message) {
   if (IsTeamHandle(handle)) {
@@ -929,23 +886,30 @@ extern "C" int merk_device_receive_array(
           [&]() { return Look(handle, kRingOfArrays, entry, &size); })) {
     return 0;
   }
-  void *array{merk_device_alloc(sizeof(uint64_t) * (1 + size))};
   bool found{false};
+  const uint64_t *copy{nullptr};
   {
     rpc::Client::Port port{__llvm_rpc_client.open<rpcTakeArray>()};
     port.send([&](rpc::Buffer *buffer, uint32_t) {
       for (int i{0}; i < 5; ++i) {
         buffer->data[i] = handle[i];
       }
-      buffer->data[5] = static_cast<uint64_t>(DeviceNumber());
-      buffer->data[6] = reinterpret_cast<uint64_t>(array);
     });
-    port.recv(
-        [&](rpc::Buffer *buffer, uint32_t) { found = buffer->data[0] != 0; });
+    port.recv([&](rpc::Buffer *buffer, uint32_t) {
+      found = buffer->data[0] != 0;
+      copy = reinterpret_cast<const uint64_t *>(buffer->data[1]);
+    });
   }
   // A mailbox that closed meanwhile has no message.
   if (!found) {
     return 0;
+  }
+  // The host wrote the copy before it answered.
+  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
+  auto *array{static_cast<uint64_t *>(
+      merk_device_alloc(sizeof(uint64_t) * (1 + size)))};
+  for (uint64_t i{0}; i <= size; ++i) {
+    array[i] = copy[i];
   }
   *message = reinterpret_cast<uint64_t>(array);
   Taken(entry);
@@ -1025,6 +989,79 @@ private:
 };
 
 } // namespace
+
+namespace {
+
+// The array, copied into host memory, which the host reads once the device
+// has passed it the copy: not read by the host from the device's memory,
+// whose lines the device's L2 cache may hold unwritten while it runs, which
+// the device's fences do not write back.
+// Temporary (docs/INPROGRESS.md, GPU processes without omp target, step 5,
+// "Flat records"): one lane copies word by word, until messages travel as
+// their bytes and a wave's lanes copy them together.
+uint64_t *CopyToHost(const uint64_t *array, PinnedMemory &memory) {
+  uint64_t words{1 + array[0]};
+  auto *copy{
+      static_cast<uint64_t *>(memory.Allocate(sizeof(uint64_t) * words))};
+  for (uint64_t i{0}; i < words; ++i) {
+    copy[i] = array[i];
+  }
+  __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+  return copy;
+}
+
+} // namespace
+
+// What a region gives for an output array: the array, if it is the given
+// array numbered `number`, which is mapped back; or else, for -1, a copy on
+// the host of one the device made, since the arena does not outlive the
+// region.
+extern "C" uint64_t *merk_device_give_array(uint64_t *array, int64_t number) {
+  if (number >= 0) {
+    return array;
+  }
+  PinnedMemory memory;
+  uint64_t *pinned{CopyToHost(array, memory)};
+  uint64_t *copy{nullptr};
+  rpc::Client::Port port{__llvm_rpc_client.open<rpcGiveArray>()};
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    buffer->data[0] = reinterpret_cast<uint64_t>(pinned);
+    buffer->data[1] = array[0];
+    buffer->data[2] = reinterpret_cast<uint64_t>(memory.First());
+  });
+  port.recv([&](rpc::Buffer *buffer, uint32_t) {
+    copy = reinterpret_cast<uint64_t *>(buffer->data[0]);
+  });
+  return copy;
+}
+
+// Sends an array of one-word elements, as merk_device_send sends a word:
+// the device copies the array into host memory (CopyToHost), and the host
+// sends that copy, as merk_device_send_term sends a term's, and returns
+// once it has queued it. To a team mailbox, the array goes by its
+// pointer (docs/INPROGRESS.md, Processes as teams, step 3): every team of
+// the region can address it, in the arena or mapped for the region, and
+// neither team can update it in place, since a send makes the sender's
+// array shared and a receive gives a shared one.
+extern "C" void merk_device_send_array(
+    const uint64_t *handle, uint64_t key, const uint64_t *array) {
+  if (IsTeamHandle(handle)) {
+    TeamSend(handle, reinterpret_cast<uint64_t>(array));
+    return;
+  }
+  PinnedMemory memory;
+  uint64_t *copy{CopyToHost(array, memory)};
+  rpc::Client::Port port{__llvm_rpc_client.open<rpcSendTerm>()};
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    for (int i{0}; i < 5; ++i) {
+      buffer->data[i] = handle[i];
+    }
+    buffer->data[5] = key;
+    buffer->data[6] = reinterpret_cast<uint64_t>(copy);
+    buffer->data[7] = reinterpret_cast<uint64_t>(memory.First());
+  });
+  port.recv([](rpc::Buffer *, uint32_t) {});
+}
 
 // Sends a message of any type that is not one word or an array of one-word
 // elements (docs/INPROGRESS.md, GPU processes without omp target, step 4e):

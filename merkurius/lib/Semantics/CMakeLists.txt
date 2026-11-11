@@ -1,5 +1,6 @@
 add_merkurius_library(MerkuriusSemantics
   check-determinism.cpp
+  check-gpu-code.cpp
   check-modes.cpp
   check-purity.cpp
   check-receives.cpp
@@ -22,5 +23,6 @@ add_merkurius_library(MerkuriusSemantics
   MerkuriusParser
 
   LINK_COMPONENTS
+  FrontendOpenMP
   Support
   )
