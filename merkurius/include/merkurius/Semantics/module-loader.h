@@ -22,6 +22,7 @@
 #include "merkurius/Parser/term-reader.h"
 #include "merkurius/Parser/token.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,7 +39,16 @@ struct ModuleInterface {
   std::vector<parser::Item> items;
   std::vector<const ModuleInterface *> imports; // import_module
   std::vector<const ModuleInterface *> uses; // use_module
+  // The predicates and functions that the module's file defines, by a
+  // clause or a C foreign_proc, by their DefinitionKey; known unless the
+  // file is a sound stub, which declares what another file defines.
+  llvm::StringSet<> defined;
+  bool definitionsKnown{true};
 };
+
+// How ModuleInterface::defined names a predicate or function: its kind,
+// name and arity, a function's without its result, as a Symbol's is.
+std::string DefinitionKey(bool function, llvm::StringRef name, unsigned arity);
 
 class ModuleLoader {
 public:

@@ -1917,6 +1917,35 @@ rejects. The specializer makes a call with a known closure a direct call, so
 with the bodies the device's compile copies in, it makes those predicates run
 on a device (The specializer: known closures and dictionaries).
 
+**Strings and formatted output on a device** (the user, 2026-11-10: "will
+strings be okay with GPU code if we want to print things?"). Step 5a lets
+GPU code make strings, as whole values, and a GPU process prints literals
+and integers through LLVM libc's stdio. What is missing, each a step:
+1. **The string helpers on the device:** `++`, `int_to_string`,
+   `float_to_string` and the others whose `foreign_proc`s call runtime
+   functions (`merk_string_append`, `merk_string_from_int`) that the device
+   library lacks, which the device's compile reports today ("its foreign
+   code calls merk_string_append, which is not on the device"). Each
+   allocates its string in the arena, with LLVM libc's `snprintf` where it
+   formats.
+2. **A call of `format` whose format and argument list are written in it,**
+   as nearly all are, compiled to one `printf` of libc's: the list of
+   `poly_type`s is never made, which step 5a's check rejects in a GPU
+   process, and one call writes the whole line, so that lines from many
+   lanes do not interleave within one. Parsing the format at compile time
+   also gives mmc's warning for a call whose arguments do not fit its
+   format (`io-format.m`, whose mismatch mmc reports when compiling), on the
+   host as well. A format that is not known at compile time stays an error
+   on a device.
+
+**Streams on the host,** next in the library: `io.m`'s stream types are
+abstract and every predicate with a stream argument is only declared:
+`stdout_stream`, `stderr_stream`, `stdin_stream`, `open_input`,
+`open_output`, `close_input`, `close_output`, the stream forms of the
+`write_*` predicates, `format/5`, `write_strings/4`, `print/4` and
+`read_line/4`. A call of one is an error at compile time; writing to the
+standard error is the case programs need most.
+
 **Open.**
 
 - Whether host compiles use the same bytecode, for inlining and specialization

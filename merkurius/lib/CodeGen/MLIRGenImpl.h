@@ -348,6 +348,7 @@ private:
   }
   // The procedure's merk.proc, declared if it is not defined yet; null
   // after reporting the reason if it cannot be.
+  bool Defined(const Procedure &) const;
   merk::ProcOp ProcFor(const Procedure &, llvm::ArrayRef<const semantics::Type *>,
       parser::CharBlock at);
   // A procedure's body, or its word copy's (WordProcFor).

@@ -292,6 +292,16 @@ arguments_before(Index, Arguments0, Arguments, !IO) :-
     printf(\"%\" PRIu64, N);
 ").
 
+% format writes what string.format makes of its arguments, which reports an
+% error in them as it does.
+format(Format, Arguments, !IO) :-
+    write_string(string.format(Format, Arguments), !IO).
+
+write_strings([], !IO).
+write_strings([S | Ss], !IO) :-
+    write_string(S, !IO),
+    write_strings(Ss, !IO).
+
 % The narrower integers are written as ints, and int64 as an int, which has
 % its width on the targets so far.
 write_int8(N, !IO) :- write_int(int8.to_int(N), !IO).

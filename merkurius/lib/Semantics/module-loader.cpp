@@ -58,6 +58,46 @@ ModuleLoader::ModuleLoader(parser::AllSources &sources,
 
 ModuleLoader::~ModuleLoader() = default;
 
+// The arity of a clause's head: a state variable !X is two arguments.
+static unsigned HeadArity(llvm::ArrayRef<const parser::ModedTerm *> arguments) {
+  unsigned arity{0};
+  for (const parser::ModedTerm *argument : arguments) {
+    const auto *state{std::get_if<const parser::StateVar *>(&argument->term)};
+    arity += state && (*state)->kind == parser::StateVarKind::Both ? 2 : 1;
+  }
+  return arity;
+}
+
+// What the item defines, if it is a clause or a C foreign_proc.
+static void AddDefinition(
+    const parser::Item &item, llvm::StringSet<> &defined) {
+  if (const auto *clause{std::get_if<const parser::FactOrRule *>(&item)}) {
+    defined.insert(
+        DefinitionKey((*clause)->kind == parser::PredOrFunc::Function,
+            (*clause)->name->name, HeadArity((*clause)->arguments)));
+  } else if (const auto *rule{std::get_if<const parser::DcgRule *>(&item)}) {
+    defined.insert(DefinitionKey(
+        false, (*rule)->name->name, HeadArity((*rule)->arguments) + 2));
+  } else if (const auto *proc{
+                 std::get_if<const parser::ForeignProcPragma *>(&item)}) {
+    if ((*proc)->language == parser::ForeignLanguage::C) {
+      defined.insert(
+          DefinitionKey((*proc)->kind == parser::PredOrFunc::Function,
+              (*proc)->name->name, (*proc)->arguments.size()));
+    }
+  } else if (const auto *decl{
+                 std::get_if<const parser::ProcessDecl *>(&item)}) {
+    // A kind's spawn_Kind and spawn_Kind_at, whose clauses the module's own
+    // compile adds (ExpandProcesses).
+    for (const parser::FactOrRule *spawn :
+        {(*decl)->spawnClause, (*decl)->spawnAtClause}) {
+      if (spawn) {
+        AddDefinition(parser::Item{spawn}, defined);
+      }
+    }
+  }
+}
+
 const ModuleInterface *ModuleLoader::Load(
     llvm::StringRef name, parser::CharBlock where, llvm::StringRef directory) {
   if (auto it{loaded_.find(name)}; it != loaded_.end()) {
@@ -69,9 +109,10 @@ const ModuleInterface *ModuleLoader::Load(
   for (const std::string &dir : sources_.searchPath()) {
     path.push_back(dir);
   }
+  llvm::SmallString<256> sound;
   if (!libraryDirectory_.empty()) {
     if (sound_) {
-      llvm::SmallString<256> sound{libraryDirectory_};
+      sound = libraryDirectory_;
       llvm::sys::path::append(sound, "sound");
       path.push_back(std::string{sound});
     }
@@ -100,6 +141,17 @@ const ModuleInterface *ModuleLoader::Load(
   interface.name = name.str();
   interface.file = source;
   interface.tokens = &file.tokens;
+  interface.definitionsKnown =
+      sound.empty() || llvm::sys::path::parent_path(*found) != sound;
+  // solutions' aggregates, which have no clauses: code generation makes
+  // their procedures from merk.aggregate (design document, Lowering,
+  // "Collecting solutions").
+  if (name == "solutions") {
+    for (auto [aggregate, arity] : {std::pair{"unsorted_aggregate", 4u},
+             {"unsorted_aggregate2", 6u}, {"do_while", 4u}}) {
+      interface.defined.insert(DefinitionKey(false, aggregate, arity));
+    }
+  }
   loaded_[name] = &interface;
   order_.push_back(&interface);
   file.tokens = parser::Lex(*source, parser::LexerOptions{}, messages_);
@@ -130,6 +182,7 @@ const ModuleInterface *ModuleLoader::Load(
         !std::holds_alternative<const parser::ImportDecl *>(item)) {
       interface.items.push_back(item);
     }
+    AddDefinition(item, interface.defined);
   }
   if (!named) {
     messages_.Say(where, "%s does not begin with :- module %s"_err_en_US,
@@ -140,6 +193,11 @@ const ModuleInterface *ModuleLoader::Load(
   interface.imports = std::move(imports.imports);
   interface.uses = std::move(imports.uses);
   return &interface;
+}
+
+std::string DefinitionKey(bool function, llvm::StringRef name, unsigned arity) {
+  return ((function ? "func " : "pred ") + name + "/" + llvm::Twine(arity))
+      .str();
 }
 
 ModuleLoader::Imports ModuleLoader::LoadImports(const parser::ParseTree &tree,
