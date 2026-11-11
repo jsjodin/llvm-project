@@ -32,7 +32,7 @@ def olCreateQueueWithComputeUnitMask : Function {
     let desc = "Create a queue for the given device whose kernels run only on the given compute units.";
     let details = [
         "As `olCreateQueue`, but the queue's kernels run only on the compute units whose bits are set in `Mask`, bit `I % 32` of word `I / 32` for compute unit `I`, as HIP's `hipExtStreamCreateWithCUMask`.",
-        "The queue has the device's hardware queue to itself, so that no other queue's kernels share its mask, and returns it when it is destroyed.",
+        "The queues of one mask share a hardware queue of the device, which no queue of another mask uses; their kernels may run at once. The last of them to be destroyed returns it.",
         "`Mask` may only set bits of compute units that `olGetDeviceComputeUnitMask` sets.",
         "A cooperative launch on the queue may have as many work groups as `olGetKernelMaxCooperativeGroupCountOnQueue` gives for it."
     ];

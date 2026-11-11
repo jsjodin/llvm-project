@@ -1491,10 +1491,10 @@ private:
   /// The queue that the stream uses to launch kernels.
   AMDGPUQueueTy *Queue;
 
-  /// The queue of the stream's own, limited to some compute units, which
-  /// Queue is while the stream has it, and the compute units of it that a
-  /// cooperative launch may use, or why it may not.
-  std::unique_ptr<AMDGPUQueueTy> OwnQueue;
+  /// Whether Queue is limited to some compute units, as the stream's queue
+  /// manager shares it between the streams of one mask, and the compute
+  /// units of it that a cooperative launch may use, or why it may not.
+  bool OwnQueue = false;
   uint32_t OwnCooperativeComputeUnits = 0;
   std::string OwnCooperativeUnsupported;
 
@@ -1795,7 +1795,7 @@ public:
 
   /// Whether the stream has a queue of its own, limited to some compute
   /// units, and what a cooperative launch on it may use.
-  bool hasOwnQueue() const { return OwnQueue != nullptr; }
+  bool hasOwnQueue() const { return OwnQueue; }
   uint32_t getOwnCooperativeComputeUnits() const {
     return OwnCooperativeComputeUnits;
   }
@@ -2427,6 +2427,12 @@ struct AMDGPUStreamManagerTy final
       if (auto Err = Queue.deinit())
         return Err;
     }
+    // And the limited ones of streams that were never returned.
+    for (LimitedQueueTy &Limited : LimitedQueues) {
+      if (auto Err = Limited.Queue->deinit())
+        return Err;
+    }
+    LimitedQueues.clear();
 
     return GenericDeviceResourceManagerTy::deinit();
   }
@@ -2438,40 +2444,40 @@ struct AMDGPUStreamManagerTy final
     });
   }
 
-  /// Get a stream from the pool with a queue of its own, limited to the
-  /// compute units of \p Mask, of which a cooperative launch may use
-  /// \p CooperativeUnits, or none for \p CooperativeUnsupported.
+  /// Get a stream from the pool on an HSA queue limited to the compute units
+  /// of \p Mask, of which a cooperative launch may use \p CooperativeUnits,
+  /// or none for \p CooperativeUnsupported. The streams of one mask share
+  /// an HSA queue, made for the first and destroyed with the last. Their
+  /// kernels may run at once, as a kernel packet does not set the barrier
+  /// bit, and a stream pushes a barrier packet, which holds up the whole
+  /// HSA queue, only behind an operation of its own.
   Error getResourceWithComputeUnitMask(AMDGPUStreamTy *&StreamHandle,
                                        ArrayRef<uint32_t> Mask,
                                        uint32_t CooperativeUnits,
                                        StringRef CooperativeUnsupported) {
     return getResourcesImpl(
         1, &StreamHandle, [&, this](AMDGPUStreamTy *&Handle) -> Error {
-          auto Queue = std::make_unique<AMDGPUQueueTy>();
-          if (auto Err = Queue->init(Device, Agent, QueueSize, Mask)) {
-            // A queue that was created is destroyed with the error.
-            if (auto DeinitErr = Queue->deinit())
-              return joinErrors(std::move(Err), std::move(DeinitErr));
-            return Err;
-          }
-          Queue->addUser();
-          Handle->Queue = Queue.get();
-          Handle->OwnQueue = std::move(Queue);
+          auto QueueOrErr = takeLimitedQueue(Mask);
+          if (!QueueOrErr)
+            return QueueOrErr.takeError();
+          Handle->Queue = *QueueOrErr;
+          Handle->OwnQueue = true;
           Handle->OwnCooperativeComputeUnits = CooperativeUnits;
           Handle->OwnCooperativeUnsupported = CooperativeUnsupported.str();
           return Plugin::success();
         });
   }
 
-  /// Return stream to the pool. A queue of its own is destroyed.
+  /// Return stream to the pool. A limited HSA queue that no other stream
+  /// uses is destroyed.
   virtual Error returnResource(AMDGPUStreamTy *StreamHandle) override {
-    return returnResourceImpl(StreamHandle, [](AMDGPUStreamTy *Handle) {
+    return returnResourceImpl(StreamHandle, [this](AMDGPUStreamTy *Handle) {
       Handle->Queue->removeUser();
       if (!Handle->OwnQueue)
         return Plugin::success();
-      Error Err = Handle->OwnQueue->deinit();
-      Handle->OwnQueue.reset();
+      Error Err = giveLimitedQueue(Handle->Queue);
       Handle->Queue = nullptr;
+      Handle->OwnQueue = false;
       Handle->OwnCooperativeComputeUnits = 0;
       Handle->OwnCooperativeUnsupported.clear();
       return Err;
@@ -2479,6 +2485,55 @@ struct AMDGPUStreamManagerTy final
   }
 
 private:
+  /// An HSA queue limited to the compute units of Mask, and the streams that
+  /// use it.
+  struct LimitedQueueTy {
+    SmallVector<uint32_t> Mask;
+    std::unique_ptr<AMDGPUQueueTy> Queue;
+    uint32_t Users;
+  };
+
+  /// The limited HSA queue of \p Mask, made if no stream uses one, for one
+  /// stream more. With the pool's lock held.
+  Expected<AMDGPUQueueTy *> takeLimitedQueue(ArrayRef<uint32_t> Mask) {
+    for (LimitedQueueTy &Limited : LimitedQueues) {
+      if (ArrayRef<uint32_t>(Limited.Mask) == Mask) {
+        ++Limited.Users;
+        Limited.Queue->addUser();
+        return Limited.Queue.get();
+      }
+    }
+    auto Queue = std::make_unique<AMDGPUQueueTy>();
+    if (auto Err = Queue->init(Device, Agent, QueueSize, Mask)) {
+      // A queue that was created is destroyed with the error.
+      if (auto DeinitErr = Queue->deinit())
+        return joinErrors(std::move(Err), std::move(DeinitErr));
+      return std::move(Err);
+    }
+    Queue->addUser();
+    AMDGPUQueueTy *Result = Queue.get();
+    LimitedQueues.push_back(
+        {SmallVector<uint32_t>(Mask.begin(), Mask.end()), std::move(Queue), 1});
+    return Result;
+  }
+
+  /// One stream fewer uses the limited HSA queue \p Queue, which is destroyed
+  /// if it was the last. With the pool's lock held.
+  Error giveLimitedQueue(AMDGPUQueueTy *Queue) {
+    for (size_t I = 0; I < LimitedQueues.size(); ++I) {
+      LimitedQueueTy &Limited = LimitedQueues[I];
+      if (Limited.Queue.get() != Queue)
+        continue;
+      if (--Limited.Users > 0)
+        return Plugin::success();
+      Error Err = Limited.Queue->deinit();
+      LimitedQueues.erase(LimitedQueues.begin() + I);
+      return Err;
+    }
+    return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                         "a stream returned an unknown limited queue");
+  }
+
   /// Search for and assign an preferably idle queue to the given Stream. If
   /// there is no queue without current users, choose the queue with the lowest
   /// user count. If utilization is ignored: use round robin selection.
@@ -2531,6 +2586,10 @@ private:
   /// The size of created queues.
   /// The compute units the queues are limited to, if not empty.
   SmallVector<uint32_t> CUMask;
+
+  /// The HSA queues limited to some compute units, by their masks, which
+  /// streams with olCreateQueueWithComputeUnitMask's masks share.
+  SmallVector<LimitedQueueTy> LimitedQueues;
 
   uint32_t QueueSize;
 };
