@@ -3256,6 +3256,26 @@ differs from the plan:
   its tests that crash kernels on purpose reset the GPU that drives the
   display (2026-11-11), so it waits for the shared machine.
 
+**(c) done 2026-11-11:** `merk_device_grid_barrier` in
+`runtime/device/device.cpp`, which every thread of every team calls. Each
+thread fences its writes at device scope, the team synchronizes, its first
+thread arrives at the barrier's counts (the last to arrive ends the round,
+as `process.team_barrier`'s teams do, which shares the code), the team
+synchronizes again, and each thread fences to acquire. The counts are two
+words in device memory, zero at the launch, one pair for each launch, so
+that several GPU processes of one image do not share them. No time limit,
+for (e). Its cost is to measure with (d).
+- **Tests:** `test/Runtime/grid-barrier-gpu.test`: a kernel linked as a GPU
+  process's image is, launched cooperatively through liboffload with the
+  most teams that are resident at once, of 64 to 1024 threads, under
+  `LIBOMPTARGET_AMDGPU_CU_MASK=0-39`, at `-O2` and `-O0`. In each of 1000
+  rounds every thread writes its slot, crosses the barrier, and checks a
+  slot of the next team and of the one before. The same kernel with a
+  barrier of each team in its place reported 40,957,700 wrong slots of
+  65,536,000, so the test sees a barrier that does not hold. `%merk-lib-dir`
+  is the build's lib directory, for linking device code by hand;
+  `runtime/liboffload.h` declares cooperative launch and `olSyncQueue`.
+
 **Open.**
 - *Which teams a loop uses:* all the kernel's, or fewer for a small loop.
 - *Arrays a process makes* are in its arena, in device memory, which every

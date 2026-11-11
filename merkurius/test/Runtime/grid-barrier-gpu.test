@@ -1,0 +1,23 @@
+The device runtime's barrier across the teams of a cooperative kernel,
+merk_device_grid_barrier (docs/INPROGRESS.md, GPU processes that run loops,
+(c)): a kernel linked as a GPU process's image is, launched cooperatively
+through liboffload with as many teams as can be resident at once, checks in
+each round that every thread sees the other teams' writes of that round. The
+queues are limited to half the GPU's compute units, so that a GPU that drives
+a display keeps the rest.
+REQUIRES: amdgpu-gpu
+
+RUN: clang++ --target=amdgcn-amd-amdhsa -mcpu=%offload-arch -flto -O2 -c %S/Inputs/grid-barrier-kernel.cpp -o %t.o
+RUN: clang --target=amdgcn-amd-amdhsa -mcpu=%offload-arch -flto -O2 %t.o %merk-lib-dir/merk-process-start-amdgcn.o %merk-lib-dir/libmerkdevice-amdgcn.a -lc -lm -o %t.elf
+RUN: clang++ -O2 -std=c++17 %S/Inputs/grid-barrier-host.cpp %libomp-flags -lLLVMOffload -o %t
+RUN: %libomp-env LIBOMPTARGET_AMDGPU_CU_MASK=0-39 %t %t.elf 64 1000 | FileCheck %s --check-prefix=T64
+RUN: %libomp-env LIBOMPTARGET_AMDGPU_CU_MASK=0-39 %t %t.elf 256 1000 | FileCheck %s --check-prefix=T256
+RUN: %libomp-env LIBOMPTARGET_AMDGPU_CU_MASK=0-39 %t %t.elf 1024 1000 | FileCheck %s --check-prefix=T1024
+T64: 64 threads, 1000 rounds: 0 wrong
+T256: 256 threads, 1000 rounds: 0 wrong
+T1024: 1024 threads, 1000 rounds: 0 wrong
+
+The same at -O0, the kernel and the image's link.
+RUN: clang++ --target=amdgcn-amd-amdhsa -mcpu=%offload-arch -flto -O0 -c %S/Inputs/grid-barrier-kernel.cpp -o %t.O0.o
+RUN: clang --target=amdgcn-amd-amdhsa -mcpu=%offload-arch -flto -O0 %t.O0.o %merk-lib-dir/merk-process-start-amdgcn.o %merk-lib-dir/libmerkdevice-amdgcn.a -lc -lm -o %t.O0.elf
+RUN: %libomp-env LIBOMPTARGET_AMDGPU_CU_MASK=0-39 %t %t.O0.elf 256 1000 | FileCheck %s --check-prefix=T256
