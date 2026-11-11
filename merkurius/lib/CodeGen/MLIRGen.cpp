@@ -1636,7 +1636,7 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
     module_->setAttr(kForeignCodeAttrName, builder_.getStringAttr(code));
   }
   RegisterMessageTypes();
-  GenerateProcessKernels();
+  GenerateProcessStarts();
   if (!RegisterProcessImages()) {
     return nullptr;
   }

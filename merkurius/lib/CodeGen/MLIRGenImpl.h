@@ -645,13 +645,14 @@ private:
       const semantics::Type &, mlir::Type represented);
   void RegisterMessageTypes();
   // Process kinds that run on a GPU (MLIRGenProcesses.cpp): those the
-  // module declares, the kernel of each in a device's compile of them, and
-  // the images of the kernels, embedded and registered in the host's.
+  // module declares, numbered in that order; in a device's compile of them,
+  // the start of each and the procedure that starts them by their numbers;
+  // and their images, embedded and registered in the host's.
   llvm::SmallVector<const parser::ProcessDecl *> gpuKinds_;
   void CollectGpuKinds();
   const semantics::Procedure *KindProcedure(const parser::ProcessDecl &);
-  void GenerateProcessKernels();
-  void GenerateProcessKernel(const parser::ProcessDecl &);
+  void GenerateProcessStarts();
+  merk::ProcOp GenerateProcessStart(const parser::ProcessDecl &);
   bool RegisterProcessImages();
   // The target region that code is generated in now, if any.
   mlir::omp::TargetOp EnclosingTarget();

@@ -45,6 +45,8 @@ using ol_symbol_handle_t = struct ol_symbol_impl_t *;
 constexpr std::uint32_t kOlDeviceInfoPlatform{1};
 constexpr std::uint32_t kOlDeviceInfoName{2};
 constexpr std::uint32_t kOlDeviceInfoUid{4};
+constexpr std::uint32_t kOlDeviceInfoNumComputeUnits{12};
+constexpr std::uint32_t kOlDeviceInfoNumLanes{19};
 // ol_platform_info_t
 constexpr std::uint32_t kOlPlatformInfoBackend{3};
 // ol_platform_backend_t
@@ -108,6 +110,15 @@ ol_result_t olGetKernelMaxCooperativeGroupCount(ol_device_handle_t device,
     ol_symbol_handle_t kernel, const ol_kernel_launch_size_args_t *size,
     std::uint32_t *count) __attribute__((weak));
 ol_result_t olSyncQueue(ol_queue_handle_t queue) __attribute__((weak));
+// Queues limited to some compute units, for GPU processes (compute-units.h).
+ol_result_t olGetDeviceComputeUnitMask(ol_device_handle_t device,
+    std::size_t words, std::uint32_t *mask) __attribute__((weak));
+ol_result_t olCreateQueueWithComputeUnitMask(ol_context_handle_t context,
+    ol_device_handle_t device, const std::uint32_t *mask, std::size_t words,
+    ol_queue_handle_t *queue) __attribute__((weak));
+ol_result_t olGetKernelMaxCooperativeGroupCountOnQueue(ol_queue_handle_t queue,
+    ol_symbol_handle_t kernel, const ol_kernel_launch_size_args_t *size,
+    std::uint32_t *count) __attribute__((weak));
 ol_result_t olLaunchHostFunction(ol_queue_handle_t queue,
     void (*callback)(void *data), void *data) __attribute__((weak));
 ol_result_t olMemAlloc(ol_context_handle_t context, ol_device_handle_t device,

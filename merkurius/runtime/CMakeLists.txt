@@ -4,6 +4,7 @@
 # installed there too.
 add_library(merkrt STATIC
   array.cpp
+  compute-units.cpp
   devices.cpp
   encode.cpp
   exception.cpp
@@ -52,6 +53,7 @@ if (TARGET clang AND TARGET llvm-ar AND "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
     DEPENDS clang ${CMAKE_CURRENT_SOURCE_DIR}/device/device.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/rpc-opcodes.h
       ${CMAKE_CURRENT_SOURCE_DIR}/device-ring.h
+      ${CMAKE_CURRENT_SOURCE_DIR}/place.h
       ${CMAKE_CURRENT_SOURCE_DIR}/copy.h
       ${CMAKE_CURRENT_SOURCE_DIR}/walk.h
       ${CMAKE_CURRENT_SOURCE_DIR}/descriptor.h
@@ -80,6 +82,7 @@ if (TARGET clang AND TARGET llvm-ar AND "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
       -c ${CMAKE_CURRENT_SOURCE_DIR}/device/process-start.cpp
       -o ${merk_process_start_bc}
     DEPENDS clang ${CMAKE_CURRENT_SOURCE_DIR}/device/process-start.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/place.h
     COMMENT "Building the start of GPU process images for AMD GPUs")
   add_custom_target(merkdevice ALL
     DEPENDS ${merk_device_lib} ${merk_process_start_bc})

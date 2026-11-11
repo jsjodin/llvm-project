@@ -91,11 +91,11 @@ bool CompileForeignCode(llvm::StringRef clang, llvm::StringRef code,
 bool LinkForeignCode(llvm::Module &, mlir::ModuleOp, const TargetInfo &,
     llvm::StringRef clang, std::string &error);
 
-// In a compile of GPU processes' kernels, hides every symbol the module
-// defines but the kernels, so that the image of the kernels, a shared
-// object, exports only them, and LTO may internalize the rest
+// In a compile of GPU processes, hides every symbol the module defines, so
+// that their image, a shared object, exports only what its start object
+// does, its kernel among them, and LTO may internalize the rest
 // (docs/INPROGRESS.md, GPU processes without omp target, step 4b).
-void HideAllButKernels(llvm::Module &);
+void HideModuleSymbols(llvm::Module &);
 
 // Runs LLVM's pipeline for the target's optimization level, -O0 to -O3.
 // A deopt bundle starting with this is of a call in an OpenMP region, which

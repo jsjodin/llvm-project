@@ -25,6 +25,7 @@
 #include "shared/rpc.h"
 #include "../copy.h"
 #include "../device-ring.h"
+#include "../place.h"
 #include "../rpc-opcodes.h"
 #include <gpuintrin.h>
 #include <time.h>
@@ -83,6 +84,9 @@ using merkurius::runtime::kArenaClearWords;
 using merkurius::runtime::kBumpWords;
 using merkurius::runtime::kChunkBytes;
 using merkurius::runtime::kNoRegionSlot;
+using merkurius::runtime::kPlaceIdle;
+using merkurius::runtime::kPlaceRunning;
+using merkurius::runtime::kPlaceTeamThreads;
 using merkurius::runtime::kRegionRingSlots;
 using merkurius::runtime::kRegionSlotClearing;
 using merkurius::runtime::kRegionSlots;
@@ -93,6 +97,9 @@ using merkurius::runtime::kRingOfTerms;
 using merkurius::runtime::kRingOfWords;
 using merkurius::runtime::kRingSlots;
 using merkurius::runtime::kTeamsPlace;
+using merkurius::runtime::PlaceSlot;
+using merkurius::runtime::PlaceSlots;
+using merkurius::runtime::PlaceTable;
 using merkurius::runtime::RegionSlotGeneration;
 using merkurius::runtime::RegionSlotNumber;
 using merkurius::runtime::rpcAttach;
@@ -101,6 +108,7 @@ using merkurius::runtime::rpcDrain;
 using merkurius::runtime::rpcFail;
 using merkurius::runtime::rpcGiveArray;
 using merkurius::runtime::rpcPinnedChunk;
+using merkurius::runtime::rpcProcessEnded;
 using merkurius::runtime::rpcSend;
 using merkurius::runtime::rpcSendTerm;
 using merkurius::runtime::rpcTakeArray;
@@ -174,6 +182,12 @@ RegionSlot regionSlots[kRegionSlots];
 template <typename T> using Local = __attribute__((address_space(3))) T;
 [[clang::loader_uninitialized]] Local<RegionSlot *> regionSlot;
 
+// In the kernel of a GPU's processes (place.h), the arena of the process
+// that each wave of the team runs, by the wave's place in the team, which
+// the wave sets as the process starts.
+constexpr uint32_t kMostPlaceWaves{kPlaceTeamThreads / 32};
+[[clang::loader_uninitialized]] Local<Arena *> placeArenas[kMostPlaceWaves];
+
 } // namespace
 
 // Whether this is a GPU process's image, whose start object defines it as
@@ -186,16 +200,25 @@ namespace {
 
 // The arena of what runs, for its tables: a region's image has one, its
 // global, and each GPU process one of its own, which the host allocates and
-// frees when the process ends (gpu-processes.cpp). The process's kernel takes
-// it as its first argument, which the kernel's dispatch packet has at the start
-// of its arguments, so it is found from anywhere in the process.
+// frees when the process ends (gpu-processes.cpp). The wave that runs the
+// process keeps it in local memory, so it is found from anywhere in the
+// process.
 Arena *CurrentArena() {
   if (!merk_device_process_image) {
     return &arena;
   }
-  // hsa_kernel_dispatch_packet_t: kernarg_address is its sixth word.
-  auto *packet{(const uint64_t *)__builtin_amdgcn_dispatch_ptr()};
-  return *reinterpret_cast<Arena *const *>(packet[5]);
+  return placeArenas[__gpu_thread_id_x() / __gpu_num_lanes()];
+}
+
+// Tells the host that the process of the slot has ended (rpcProcessEnded).
+void ProcessEnded(PlaceTable *table, uint64_t slot) {
+  rpc::Client::Port port{__llvm_rpc_client.open<rpcProcessEnded>()};
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    buffer->data[0] = static_cast<uint64_t>(DeviceNumber());
+    buffer->data[1] = reinterpret_cast<uint64_t>(table);
+    buffer->data[2] = slot;
+  });
+  port.recv([](rpc::Buffer *, uint32_t) {});
 }
 
 // Where the cells of what runs are bumped from: a GPU process's arena, or
@@ -625,6 +648,60 @@ extern "C" void merk_device_grid_barrier(MerkGridBarrier *barrier) {
 // At the end of each team of a target teams region: nothing to do on a
 // device, whose next region sets the team's table again.
 extern "C" void merk_device_teams_leave(void) {}
+
+// The start of a process of the module by its kind's number, with the
+// address of its argument words, which merkc makes in each image of GPU
+// processes (MLIRGenProcesses.cpp).
+extern "C" void merk_process_dispatch(uint64_t kind, uint64_t words);
+
+// Each wave of the kernel of a GPU's processes, merk_place (place.h): lane 0
+// polls the wave's slot of the table, sleeping, runs each process the host
+// starts there, and returns once the table's end is set while the slot is
+// idle. The other lanes return at once. The table is in host memory, which
+// the host writes while the kernel runs, so it is read at system scope.
+extern "C" void merk_device_place(PlaceTable *table) {
+  if (__gpu_lane_id() != 0) {
+    return;
+  }
+  uint32_t inTeam{__gpu_thread_id_x() / __gpu_num_lanes()};
+  uint64_t wave{static_cast<uint64_t>(__gpu_block_id_x()) *
+          (__gpu_num_threads_x() / __gpu_num_lanes()) +
+      inTeam};
+  if (inTeam >= kMostPlaceWaves ||
+      wave >= __scoped_atomic_load_n(
+                  &table->slots, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)) {
+    return;
+  }
+  PlaceSlot *slot{PlaceSlots(table) + wave};
+  for (;;) {
+    if (__scoped_atomic_load_n(&slot->state, __ATOMIC_ACQUIRE,
+            __MEMORY_SCOPE_SYSTEM) != kPlaceRunning) {
+      if (__scoped_atomic_load_n(
+              &table->end, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)) {
+        return;
+      }
+      __builtin_amdgcn_s_sleep(127);
+      continue;
+    }
+    uint64_t kind{__scoped_atomic_load_n(
+        &slot->kind, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
+    uint64_t words{__scoped_atomic_load_n(
+        &slot->words, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
+    // The arena is in the device's memory, which only the device writes
+    // while the kernel runs, so the wave clears it rather than the host.
+    auto *arena{reinterpret_cast<Arena *>(__scoped_atomic_load_n(
+        &slot->arena, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM))};
+    auto *clear{reinterpret_cast<uint64_t *>(arena)};
+    for (uint64_t i{0}; i < kArenaClearWords; ++i) {
+      clear[i] = 0;
+    }
+    placeArenas[inTeam] = arena;
+    merk_process_dispatch(kind, words);
+    __scoped_atomic_store_n(
+        &slot->state, kPlaceIdle, __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+    ProcessEnded(table, wave);
+  }
+}
 
 // At the start of any other region that a module with team mailboxes runs.
 extern "C" void merk_device_no_teams(void) { currentTeams = nullptr; }

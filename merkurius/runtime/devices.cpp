@@ -35,9 +35,6 @@ namespace merkurius::runtime {
 
 namespace {
 
-// The most GPUs a node has for processes.
-constexpr int kMostGpus{64};
-
 Gpu gpus[kMostGpus];
 int gpuCount{0};
 pthread_once_t gpusOnce = PTHREAD_ONCE_INIT;

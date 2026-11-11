@@ -9,9 +9,10 @@
 // The images of the modules' process kinds that run on a GPU, one for each
 // module and GPU, which each module's start-up code registers
 // (docs/INPROGRESS.md, GPU processes without omp target, step 4b). An image
-// is a shared object for the GPU, with a kernel merk_process_<kind> for
-// each such kind of the module. The runtime loads it when a process is
-// first spawned on a GPU of its kind (step 4c).
+// is a shared object for the GPU, whose one kernel, merk_place, runs the
+// module's processes on that GPU (place.h), each kind by its number, its
+// place in the list of the module's kinds that run on a GPU. The runtime
+// loads it when a process is first spawned on a GPU of its kind (step 4c).
 //
 //===----------------------------------------------------------------------===//
 
@@ -27,7 +28,11 @@ struct ProcessImage {
   const char *gpu; // the GPU it is for, as --offload-arch names it: gfx1030
   const void *image;
   std::uint64_t bytes;
+  const char *kinds; // the kinds' names, in their order, separated by spaces
 };
+
+// The number of the kind in the image, or -1 if it has none of that name.
+int KindNumber(const ProcessImage &image, const char *kind);
 
 // The image of `module`'s kinds for `gpu`, or null if it registered none.
 const ProcessImage *FindProcessImage(const char *module, const char *gpu);

@@ -376,7 +376,7 @@ llvm::LogicalResult Copier::Copy() {
     pending_.push_back({target, nullptr});
   });
   for (auto proc : module_.getOps<merk::ProcOp>()) {
-    if (proc->hasAttr(kKernelAttrName)) {
+    if (proc->hasAttr(kProcessRootAttrName)) {
       pending_.push_back({proc, nullptr});
     }
   }

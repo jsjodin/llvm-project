@@ -101,6 +101,13 @@ constexpr uint32_t rpcFail{RpcOpcode(10)};
 // MERK_TEAMS_STALL_MILLISECONDS gives, or 10000.
 constexpr uint32_t rpcTeamsStall{RpcOpcode(12)};
 
+// A GPU process has ended, in the kernel of its module's processes
+// (place.h): the buffer's words are the device's number, the kernel's
+// table and the process's slot, which the device has set idle. The host
+// answers once it has taken the process off the slot, which it may then
+// give another.
+constexpr uint32_t rpcProcessEnded{RpcOpcode(13)};
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_RPC_OPCODES_H_

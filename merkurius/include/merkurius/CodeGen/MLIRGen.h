@@ -40,10 +40,11 @@ std::string MangledName(const semantics::Procedure &);
 // code of each of its foreign_procs for C, which merk.foreign_call calls.
 inline constexpr llvm::StringLiteral kForeignCodeAttrName{"merk.foreign_code"};
 
-// The attribute of a procedure that is a GPU process's kernel,
-// merk_process_<kind>, which the host's runtime launches (docs/INPROGRESS.md,
-// GPU processes without omp target, step 4b).
-inline constexpr llvm::StringLiteral kKernelAttrName{"merk.kernel"};
+// The attribute of the procedure that a module's image of GPU processes
+// starts them by, merk_process_dispatch, which the image's kernel calls
+// (docs/INPROGRESS.md, GPU processes that run loops, one kernel for a GPU's
+// processes): what it reaches is what the image keeps of the module.
+inline constexpr llvm::StringLiteral kProcessRootAttrName{"merk.process_root"};
 
 // What code generation is asked for besides the module.
 struct GenerationOptions {

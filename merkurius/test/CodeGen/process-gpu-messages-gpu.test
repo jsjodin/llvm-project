@@ -5,14 +5,14 @@ through the host's mailboxes, and a summer that takes an array.
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-gpu-messages.m -o %t2
-RUN: %libomp-env timeout -k 1 60 %t2 gpu | FileCheck %S/process-gpu-messages.m --match-full-lines --strict-whitespace
+RUN: %gpu-env timeout -k 1 60 %t2 gpu | FileCheck %S/process-gpu-messages.m --match-full-lines --strict-whitespace
 RUN: merkc -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-gpu-messages.m -o %t
-RUN: %libomp-env timeout -k 1 60 %t gpu | FileCheck %S/process-gpu-messages.m --match-full-lines --strict-whitespace
+RUN: %gpu-env timeout -k 1 60 %t gpu | FileCheck %S/process-gpu-messages.m --match-full-lines --strict-whitespace
 
 Two hundred GPU processes that each take one message of two and end leave
 none of the host's copies of their messages, nor any of the messages, nor
 their arenas or their mailboxes' rings, though no target region ends.
-RUN: %libomp-env MERK_CHECK_PINNED=1 MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu many 2>&1 | FileCheck %s --check-prefix=MANY --match-full-lines
+RUN: %gpu-env MERK_CHECK_PINNED=1 MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu many 2>&1 | FileCheck %s --check-prefix=MANY --match-full-lines
 MANY:20300
 MANY-NEXT:Mercury runtime: 0 chunks of host memory for devices' messages are allocated
 MANY-NEXT:Mercury runtime: 0 messages are neither read nor freed

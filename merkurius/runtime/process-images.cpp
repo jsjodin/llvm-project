@@ -48,9 +48,10 @@ Entry *Find(const char *module, const char *gpu) {
 
 // Registers the image of `module`'s process kinds that run on a GPU, for
 // `gpu`: `bytes` at `image`, which stays where it is, in the program's
-// data. A module registers each GPU's image once.
+// data, with the names of the kinds, `kinds`, in the order that numbers
+// them, separated by spaces. A module registers each GPU's image once.
 extern "C" void merk_register_process_image(const char *module, const char *gpu,
-    const void *image, std::uint64_t bytes) {
+    const void *image, std::uint64_t bytes, const char *kinds) {
   pthread_mutex_lock(&imagesLock);
   if (Find(module, gpu)) {
     Fail("GPU processes' image registered twice: ", module, gpu);
@@ -59,7 +60,7 @@ extern "C" void merk_register_process_image(const char *module, const char *gpu,
   if (!entry) {
     Fail("out of memory for the GPU processes' image of ", module, gpu);
   }
-  *entry = {{module, gpu, image, bytes}, images};
+  *entry = {{module, gpu, image, bytes, kinds}, images};
   images = entry;
   pthread_mutex_unlock(&imagesLock);
 }
@@ -71,6 +72,24 @@ const ProcessImage *FindProcessImage(const char *module, const char *gpu) {
   Entry *entry{Find(module, gpu)};
   pthread_mutex_unlock(&imagesLock);
   return entry ? &entry->image : nullptr;
+}
+
+int KindNumber(const ProcessImage &image, const char *kind) {
+  std::size_t length{std::strlen(kind)};
+  int number{0};
+  for (const char *name{image.kinds}; *name; ++number) {
+    const char *after{std::strchr(name, ' ')};
+    std::size_t size{
+        after ? static_cast<std::size_t>(after - name) : std::strlen(name)};
+    if (size == length && std::strncmp(name, kind, length) == 0) {
+      return number;
+    }
+    if (!after) {
+      break;
+    }
+    name = after + 1;
+  }
+  return -1;
 }
 
 } // namespace merkurius::runtime

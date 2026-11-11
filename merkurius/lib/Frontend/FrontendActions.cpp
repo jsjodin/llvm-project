@@ -1032,7 +1032,7 @@ bool CodeGenAction::Lower(
     return false;
   }
   if (target.options().processKernels) {
-    codegen::HideAllButKernels(*llvmModule);
+    codegen::HideModuleSymbols(*llvmModule);
   }
   return Emit(*llvmModule, target, *os);
 }

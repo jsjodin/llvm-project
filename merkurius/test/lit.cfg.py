@@ -83,6 +83,15 @@ if omp_dirs:
         ("%libomp-flags", " ".join("-L" + d for d in omp_dirs)))
     config.substitutions.append(
         ("%libomp-env", "env LD_LIBRARY_PATH=" + ":".join(omp_dirs)))
+    # %gpu-env is %libomp-env for programs that spawn GPU processes, whose
+    # kernel takes every compute unit that the offload plugin's queues may
+    # use (runtime/compute-units.h): LIBOMPTARGET_AMDGPU_CU_MASK limits them,
+    # to half of an 80-unit GPU unless the environment says otherwise, so
+    # that a GPU that drives the display keeps units for it.
+    config.substitutions.append(
+        ("%gpu-env", "env LD_LIBRARY_PATH=" + ":".join(omp_dirs) +
+         " LIBOMPTARGET_AMDGPU_CU_MASK=" +
+         os.environ.get("LIBOMPTARGET_AMDGPU_CU_MASK", "0-39")))
 if gpus and omp_dirs:
     config.available_features.add("amdgpu-gpu")
     config.substitutions.append(("%offload-arch", gpus[0]))

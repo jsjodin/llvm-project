@@ -4,9 +4,9 @@ each, read right at the GPU and at the host.
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-gpu-arrays.m -o %t
-RUN: %libomp-env timeout -k 1 60 %t gpu | FileCheck %S/process-gpu-arrays.m --match-full-lines --strict-whitespace
+RUN: %gpu-env timeout -k 1 60 %t gpu | FileCheck %S/process-gpu-arrays.m --match-full-lines --strict-whitespace
 RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-gpu-arrays.m -o %t2
-RUN: %libomp-env MERK_CHECK_PINNED=1 timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %s --match-full-lines
+RUN: %gpu-env MERK_CHECK_PINNED=1 timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %s --match-full-lines
 CHECK:0 wrong of 300
 CHECK-NEXT:0 wrong of 100
 CHECK-NEXT:Mercury runtime: 0 chunks of host memory for devices' messages are allocated
