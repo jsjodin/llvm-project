@@ -151,6 +151,10 @@ Error L0KernelTy::launchImpl(GenericDeviceTy &GenericDevice,
         ErrorCode::UNSUPPORTED,
         "cooperative kernel launch is not supported by the device");
   }
+  if (LaunchArgs.StackSize)
+    return Plugin::error(
+        ErrorCode::UNSUPPORTED,
+        "a kernel launch's stack size is not supported by the device");
   auto QueueOrErr = L0Device.getOrCreateQueue(AsyncInfo);
   if (!QueueOrErr)
     return QueueOrErr.takeError();
