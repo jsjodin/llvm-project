@@ -15,10 +15,42 @@
 
 namespace merkurius::codegen::mlirgen {
 
+// Whether another module's predicate or function has a definition, a clause
+// or a C foreign_proc, in its module's file, so that its procedure is there
+// to call; true where that is not known, and for this module's and type
+// class methods.
+bool MerkGenerator::Defined(const Procedure &procedure) const {
+  const semantics::Symbol &symbol{*procedure.symbol};
+  bool function{symbol.kind == semantics::SymbolKind::Function};
+  if (symbol.module == moduleName_ ||
+      (!function && symbol.kind != semantics::SymbolKind::Predicate) ||
+      (symbol.owner &&
+          symbol.owner->kind == semantics::SymbolKind::Typeclass)) {
+    return true;
+  }
+  for (const semantics::ModuleInterface *module : resolution_.interfaces()) {
+    if (module->name == symbol.module) {
+      return !module->definitionsKnown ||
+          module->defined.contains(
+              semantics::DefinitionKey(function, symbol.name, symbol.arity));
+    }
+  }
+  return true;
+}
+
 merk::ProcOp MerkGenerator::ProcFor(const Procedure &procedure,
     llvm::ArrayRef<const semantics::Type *> types, parser::CharBlock at) {
   if (merk::ProcOp proc{procs_.lookup(&procedure)}) {
     return proc;
+  }
+  if (!Defined(procedure)) {
+    const semantics::Symbol &symbol{*procedure.symbol};
+    NotYet(at,
+        ("calls of " + symbol.module + "." + symbol.name + "/" +
+            llvm::Twine(symbol.arity) +
+            ", which its module declares but does not define yet")
+            .str());
+    return nullptr;
   }
   std::optional<parser::Determinism> determinism{
       determinism_.DeterminismOf(procedure)};

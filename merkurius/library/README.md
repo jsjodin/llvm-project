@@ -12,7 +12,12 @@ have no implementation yet.
 the narrower integers' writes in Mercury. `write`, `print` and their
 `_line` forms are polymorphic `foreign_proc`s on `runtime/write.cpp`;
 `write_list` is in Mercury, calling its closure for each element, on the
-standard output only. `command_line_arguments` and `progname` read the
+standard output only, as are `format`, which writes what `string.format`
+makes, and `write_strings`. Nothing takes a stream yet: the stream types
+are abstract, and the forms with a stream argument are declared only. A
+call of a predicate or function that a library module declares but does
+not define is an error at compile time, "not yet implemented", at the
+call. `command_line_arguments` and `progname` read the
 command line that the runtime's `main` keeps, which returns the status
 `set_exit_status` sets. `flush_output` flushes the standard output, and
 `read_line_as_string` reads a line of the standard input, as mmc's does:

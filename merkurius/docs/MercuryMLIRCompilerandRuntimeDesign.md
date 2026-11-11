@@ -4058,6 +4058,19 @@ The language target is the Mercury 22.01 reference manual. The standard library 
 - **Unique arrays.** The manual's `array` module declares its unique insts as `ground`, `:- inst uniq_array(I) == array(I).  % XXX work-around`, because, its comment says, "the current Mercury compiler doesn't support `ui` modes", and it takes the array `in` in every predicate that reads one; its header warns that "arrays are currently not unique objects". So mmc checks no array's uniqueness (see the register). merkc's library has two stubs: `array.m`, the manual's declarations, and `sound/array.m`, which `library/make-sound-array.py` makes from it at build time, with the insts the manual's comments give, `uniq_array(I) == unique` and `mostly_uniq_array(I) == mostly_unique`, and each mode that takes arrays `in` preceded by copies that take them `array_ui`, every mix, those with more first, so that reading a unique array keeps it unique, as copied values make possible (Uniqueness checking). The `int` stub has the manual's `array_di`/`array_uo` modes of `fold_up`, `fold_down` and their variants, and so imports `array`. merkc searches `lib/merkurius/sound` first unless `-fmmc-uniqueness` is given (`library/README.md`).
 - Pure-Mercury modules (`list`, `map`, `set`, `cord` and others) are reimplemented the same way. Where the manual leaves behaviour unstated, such as which exceptions are thrown, exact output formats, unstated orderings and performance, differential tests against mmc decide.
 
+- **What is declared but not written yet is an error at compile time,** at
+  the call: "not yet implemented: code generation for calls of
+  io.format/5, which its module declares but does not define yet". The
+  module loader records what each imported module's file defines: a
+  clause, counting a state variable `!X` as two arguments; a DCG rule; a C
+  `foreign_proc`; a process kind's `spawn_Kind` and `spawn_Kind_at`; and
+  `solutions`' aggregates, which code generation makes. Code generation
+  checks a call or closure of another module's predicate or function
+  against it, after the calls it generates itself. A sound stub
+  (`library/sound/`) declares what another file defines, so its module is
+  not checked. Before this, such a call compiled and failed when the program
+  linked, as `io.format` did (test `undefined-calls.m`).
+
 **Compatibility promise**
 
 - Source compatibility with Melbourne Mercury for the supported language.
