@@ -1019,12 +1019,15 @@ Error olCreateQueue_impl(ol_context_handle_t Context, ol_device_handle_t Device,
     if (auto Err =
             Device->Device->synchronize(OutstandingQueue, /*Release=*/false)) {
       // This only fails after a fatal device error on the destroyed queue.
+      // Keep it, for olDestroyContext to release.
+      Context->addOutstandingQueue(Device, OutstandingQueue);
       return createOffloadError(ErrorCode::UNKNOWN, std::move(Err),
                                 "failed to reuse a destroyed queue");
     }
     CreatedQueue->AsyncInfo = OutstandingQueue;
   } else if (auto Err = Context->PluginCtx->initAsyncInfo(
                  *Device->Device, &(CreatedQueue->AsyncInfo))) {
+    delete CreatedQueue->AsyncInfo;
     return Err;
   }
 
@@ -1047,6 +1050,7 @@ Error olDestroyQueue_impl(ol_queue_handle_t Queue) {
     if (auto Err = Device->Device->synchronize(Queue->AsyncInfo,
                                                /*Release=*/true))
       return Err;
+    delete Queue->AsyncInfo;
   } else {
     // The queue still has outstanding work. Store it so we can check it later.
     Context->addOutstandingQueue(Device, Queue->AsyncInfo);
