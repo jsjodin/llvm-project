@@ -1,6 +1,9 @@
 The GPU to GPU demo, with its regions on the CPU. Two nodes' lines interleave
 as they happen, so each node's are checked in order after a stable sort.
 
+The program is built afresh: the Makefile rebuilds it only when its sources
+change, not merkc or the runtime, and %t outlives a run.
+RUN: rm -rf %t
 RUN: make -s -C %S/../../examples run-gpu-to-gpu-cpu MERKC=merkc BUILD=%t O=2 PORT=47101 | grep "^.[nG]" | sort -s -k1,2 | FileCheck %s --match-full-lines
 
 CHECK:[GPU A] sending numbers, each 1

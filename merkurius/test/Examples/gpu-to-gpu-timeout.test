@@ -4,6 +4,9 @@ node's lines are checked in order after a stable sort, and the errors, which the
 nodes report in either order, after a full sort. Its port is its own, as lit
 runs the other gpu-to-gpu tests at the same time.
 
+The program is built afresh: the Makefile rebuilds it only when its sources
+change, not merkc or the runtime, and %t outlives a run.
+RUN: rm -rf %t
 RUN: rm -rf %t.src && mkdir -p %t.src
 RUN: sed 's/send(ToA, Sum, !IO)/true/; s/after(10000)/after(300)/' %S/../../examples/gpu-to-gpu/gpu_to_gpu.m > %t.src/gpu_to_gpu.m
 RUN: cp %S/../../examples/gpu-to-gpu/demo_node.m %t.src/

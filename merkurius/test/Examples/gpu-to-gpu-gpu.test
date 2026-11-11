@@ -2,6 +2,9 @@ The GPU to GPU demo, on the machine's GPU. Two nodes' lines interleave
 as they happen, so each node's are checked in order after a stable sort.
 REQUIRES: amdgpu-gpu
 
+The program is built afresh: the Makefile rebuilds it only when its sources
+change, not merkc or the runtime, and %t outlives a run.
+RUN: rm -rf %t
 RUN: %libomp-env make -s -C %S/../../examples run-gpu-to-gpu MERKC=merkc BUILD=%t O=2 PORT=47102 ARCH=%offload-arch "LIBOMP_FLAGS=%libomp-flags" | grep "^.[nG]" | sort -s -k1,2 | FileCheck %s --match-full-lines
 
 CHECK:[GPU A] sending numbers, each 1
