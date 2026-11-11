@@ -51,6 +51,10 @@
 namespace merkurius::codegen {
 namespace {
 
+// On a descriptor copied from a library module while the copies are made:
+// the module, whose descriptors its fields name.
+constexpr llvm::StringLiteral kCopiedFromAttrName{"merk.copied_from"};
+
 // A library module's bytecode, read once.
 struct LibraryModule {
   mlir::OwningOpRef<mlir::ModuleOp> module;
@@ -83,6 +87,7 @@ private:
   void Reached(mlir::Operation *copy, mlir::Operation *user);
   void CopyTypeInfoCtors();
   void CopyTypeCtors();
+  bool DeclareFieldCtors(merk::TypeCtorOp ctor, llvm::StringSet<> &have);
   void CollectTerms(mlir::Operation *op, mlir::ModuleOp source);
   void CollectTermsOf(mlir::Type type, mlir::ModuleOp source);
   void CopyTypeDefs();
@@ -308,6 +313,10 @@ void Copier::CopyTypeInfoCtors() {
           auto ctor{mlir::cast<merk::TypeCtorOp>(builder.clone(*op))};
           if (ctor.getLinkage() != "declaration") {
             ForDevice(ctor);
+            if (std::optional<llvm::StringRef> name{source.getName()}) {
+              ctor->setAttr(kCopiedFromAttrName,
+                  mlir::StringAttr::get(module_.getContext(), *name));
+            }
           }
           break;
         }
@@ -316,36 +325,120 @@ void Copier::CopyTypeInfoCtors() {
   }
 }
 
+// The constructors that a field's type names, by FieldTypeAttr's encoding:
+// an array of its constructor and its arguments, or a number for a type
+// parameter or a hidden type_info, which name none.
+static void FieldConstructors(
+    mlir::Attribute type, llvm::SmallVectorImpl<std::string> &names) {
+  auto parts{mlir::dyn_cast<mlir::ArrayAttr>(type)};
+  if (!parts || parts.empty()) {
+    return;
+  }
+  names.push_back(mlir::cast<mlir::StringAttr>(parts[0]).getValue().str());
+  for (mlir::Attribute argument : parts.getValue().drop_front()) {
+    FieldConstructors(argument, names);
+  }
+}
+
+// The constructors that the fields of a descriptor's functors name.
+static void FieldConstructors(
+    merk::TypeCtorOp ctor, llvm::SmallVectorImpl<std::string> &names) {
+  if (!ctor.getFunctors()) {
+    return;
+  }
+  for (mlir::Attribute functor : ctor.getFunctors()->getValue()) {
+    for (mlir::Attribute type :
+        mlir::cast<mlir::ArrayAttr>(functor).getValue().drop_front()) {
+      FieldConstructors(type, names);
+    }
+  }
+}
+
 // The descriptor of each type whose type_info the module's code makes and
 // that it only declares, from the library module that defines it, as no
-// library is linked into a device's image.
+// library is linked into a device's image; and the descriptors that the
+// fields of each descriptor it has name, which a copy from a library module
+// may not have, as declarations, from the module it came from, which are
+// then copied the same way.
 void Copier::CopyTypeCtors() {
-  for (auto declaration : llvm::make_early_inc_range(
-           module_.getOps<merk::TypeCtorOp>())) {
-    if (declaration.getLinkage() != "declaration") {
+  bool changed{true};
+  while (changed) {
+    changed = false;
+    llvm::StringSet<> have;
+    for (auto op : module_.getOps<merk::TypeCtorOp>()) {
+      have.insert(op.getConstructor());
+    }
+    for (auto ctor :
+        llvm::make_early_inc_range(module_.getOps<merk::TypeCtorOp>())) {
+      if (ctor.getLinkage() != "declaration") {
+        changed = DeclareFieldCtors(ctor, have) || changed;
+        continue;
+      }
+      LibraryModule *library{Load(ctor.getModule())};
+      if (!library) {
+        continue;
+      }
+      merk::TypeCtorOp definition;
+      for (auto op : library->module->getOps<merk::TypeCtorOp>()) {
+        if (op.getConstructor() == ctor.getConstructor() &&
+            op.getLinkage() != "declaration") {
+          definition = op;
+          break;
+        }
+      }
+      if (!definition) {
+        continue;
+      }
+      mlir::OpBuilder builder{ctor};
+      auto copy{mlir::cast<merk::TypeCtorOp>(builder.clone(*definition))};
+      copy->setAttr(kCopiedFromAttrName,
+          mlir::StringAttr::get(module_.getContext(), ctor.getModule()));
+      ForDevice(copy);
+      ctor.erase();
+      CollectTerms(copy, *library->module);
+      changed = true;
+    }
+  }
+  for (auto ctor : module_.getOps<merk::TypeCtorOp>()) {
+    ctor->removeAttr(kCopiedFromAttrName);
+  }
+}
+
+// Adds the descriptors that the fields of `ctor`, a copy from a library
+// module, name and the module does not have, as that library module has
+// them, a declaration or a definition. Whether it added any.
+bool Copier::DeclareFieldCtors(merk::TypeCtorOp ctor, llvm::StringSet<> &have) {
+  auto from{ctor->getAttrOfType<mlir::StringAttr>(kCopiedFromAttrName)};
+  if (!from) {
+    return false;
+  }
+  llvm::SmallVector<std::string> names;
+  FieldConstructors(ctor, names);
+  LibraryModule *library{nullptr};
+  bool added{false};
+  for (const std::string &name : names) {
+    if (have.contains(name)) {
       continue;
     }
-    LibraryModule *library{Load(declaration.getModule())};
-    if (!library) {
-      continue;
+    if (!library && !(library = Load(from.getValue()))) {
+      return added;
     }
-    merk::TypeCtorOp definition;
     for (auto op : library->module->getOps<merk::TypeCtorOp>()) {
-      if (op.getConstructor() == declaration.getConstructor() &&
-          op.getLinkage() != "declaration") {
-        definition = op;
+      if (op.getConstructor() == name) {
+        mlir::OpBuilder builder{module_.getBody(), module_.getBody()->begin()};
+        auto copy{mlir::cast<merk::TypeCtorOp>(builder.clone(*op))};
+        if (copy.getLinkage() != "declaration") {
+          copy->setAttr(kCopiedFromAttrName, from);
+          ForDevice(copy);
+          CollectTerms(copy, *library->module);
+        }
+        have.insert(name);
+        added = true;
         break;
       }
     }
-    if (!definition) {
-      continue;
-    }
-    mlir::OpBuilder builder{declaration};
-    auto copy{mlir::cast<merk::TypeCtorOp>(builder.clone(*definition))};
-    ForDevice(copy);
-    declaration.erase();
-    CollectTerms(copy, *library->module);
   }
+  return added;
 }
 
 // The constructors of the copies' types that the module does not have, and
