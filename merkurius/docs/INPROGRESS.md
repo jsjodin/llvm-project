@@ -1598,6 +1598,9 @@ conjunctions steal work too (Bone's thesis, a paper we may read).
   `parallel` library, in GPU processes without `omp target`).
 - What this machine can measure: one GPU, so stealing between GPUs waits
   for the user's other machines, as the halo exchange does.
+- On a GPU, the workers are waves and teams of the one kernel of a phase's
+  processes (GPU processes that run loops, decided 2026-11-11), which take
+  work without the host and can move between the phase's processes.
 
 ## Choosing among the ways: experiments for GPU code
 
@@ -3245,7 +3248,9 @@ and a launch, 15 to 40 µs, every loop.
     kernels' work groups need not fit together, as the hardware places
     them and kernels differ in registers, so a hang stays possible; and *at
     most one process with loops on a GPU,* which would allow one tile
-    process a GPU.
+    process a GPU. Replaced 2026-11-11 by one kernel for a GPU's
+    processes (below), as queues of their own run out and kernels that
+    share a queue may run one at a time.
   - *Parts,* each a commit of its own: (d1a) queues with a CU mask of their
     own in liboffload (`olCreateQueueWithComputeUnitMask`, as HIP's
     `hipExtStreamCreateWithCUMask`), each on an HSA queue of its own, and
@@ -3268,7 +3273,9 @@ and a launch, 15 to 40 µs, every loop.
   kernel packet does not set the barrier bit, and a stream pushes a barrier
   packet, which holds up the whole HSA queue, only behind an operation of its
   own, which a process's kernel, the first on its stream, never is; a host
-  function is a signal handler, not a packet. A queue destroyed while busy is
+  function is a signal handler, not a packet. But a kernel that uses scratch
+  may run alone (One kernel for a GPU's processes, below), which the API's
+  text says since. A queue destroyed while busy is
   never reused by another, but released once done, when a queue is next
   created or destroyed, or with its context. A mask must set some of the units
   that `olGetDeviceComputeUnitMask` gives: `LIBOMPTARGET_AMDGPU_CU_MASK`'s, or
@@ -3291,6 +3298,134 @@ and a launch, 15 to 40 µs, every loop.
   `AllGroupsResidentOnLimitedQueue`: on half the units the count is below
   the device's, every work group meets at the barrier, and one more is
   refused.
+
+**Decided 2026-11-11: one kernel for a GPU's processes,** replacing (d1b),
+(d1c) and the partition of compute units between processes. The user: "I
+think we should go with one kernel per gpu", with a kernel for each phase of
+a computation, as "having too wide of a variety would perhaps affect
+performance because of register pressure". Found while testing (d1b), which
+gave each process a kernel of its own on a queue limited to the compute
+units that processes share:
+
+- *Queues run out.* KFD maps 8 compute queues of the gfx1030 to its hardware
+  (`num_cp_queues` in the KFD topology), for all programs together, and as
+  many processes as it has VMIDs. Beyond them it time-slices the queues
+  ("Runlist is getting oversubscribed"), by preemption, which failed and
+  reset the GPU that drives the display on 2026-11-11 ("qcm fence wait loop
+  timeout expired ... unsuccessful queues preemption"). A GPU test
+  program uses 3 HSA queues at most (sampled from
+  `/sys/class/kfd/kfd/proc/*/queues`); the four GPU tests that lit runs at
+  once (`MERK_LIT_GPU_JOBS`) need 12. A queue for each process with loops
+  would allow a few of them a GPU here.
+- *Kernels that share an HSA queue may run one at a time.* A dispatch that
+  needs more scratch than its HSA queue has makes ROCr give the queue more;
+  if ROCr does not keep it, the scratch serves one dispatch at a time
+  (`AMD_QUEUE_PROPERTIES_USE_SCRATCH_ONCE`, read in ROCr 7.2.0's
+  `amd_aql_queue.cpp`, not measured). Measured with two kernels that each
+  wait for the other on one HSA queue (a timeout of about 2 s makes ones that
+  run in turn report it), at 3181ee73b1fc:
+
+  | The kernels | Ran at once |
+  | --- | --- |
+  | no scratch, or a fixed frame of 260 bytes | yes |
+  | a dynamic stack of 1024 to 1792 bytes a lane | yes |
+  | a dynamic stack of 1920 bytes or more, or the plugin's 16 KiB | no, in either order, also beside a kernel without scratch |
+  | 16 KiB after a kernel that grew the queue's scratch, or with `HSA_SCRATCH_MEM=16384` | no |
+  | 1792 bytes after kernels with scratch on 1 other queue / on 3 | yes / no |
+
+  So whether two processes run at once depends on the scratch of the
+  program's other queues: no stack size is safe. `process-gpu-messages-gpu`
+  hung that way under (d1b): its kinds use a dynamic stack, and pinger waited
+  behind ponger.
+- *Where the hardware places kernels is not known.* Kernels that differ in
+  registers might fragment a SIMD's register file, so a count of what fits
+  need not hold for kernels of several kinds.
+
+The robust shape is one dispatch that never ends on each HSA queue, and so
+one kernel for a GPU's processes.
+
+- *The kernel and phases:* `merk_place`, one in each module's process image
+  (as each module has one), with a `switch` over the module's kinds and
+  loops. A module is a phase: the loops of one computation, such as a
+  stencil's, go in one module and share its kernel, and a computation with
+  phases that want different code starts each phase's main process from a
+  module of its own. The runtime launches a module's kernel cooperatively at
+  the first spawn of one of its kinds on a GPU, on a queue limited to the
+  compute units that `LIBOMPTARGET_AMDGPU_CU_MASK` leaves, with as many teams
+  of 256 threads as are resident at once there
+  (`olGetKernelMaxCooperativeGroupCountOnQueue`), which the launch then
+  guarantees.
+- *Phases take turns on a GPU's compute units.* A kernel ends when its last
+  process ends, which frees its units for the next phase's. A spawn of a
+  kind of another module while a kernel holds them fails, naming the module
+  that holds them, rather than waiting, which could deadlock if the running
+  processes wait for the new one. So a program ends a phase, as by its main
+  process ending once its workers report, and then spawns the next phase's
+  main process. A kernel launched after another on the same HSA queue waits
+  for it to end, which is safe as it does end, whatever ROCr does with
+  scratch. Two computations at once on one GPU are an exception: kernels on
+  disjoint compute units, each on a queue of its own, as few as the
+  hardware's queues allow.
+- *Waves and teams:* a process without loops takes a wave, whose lane 0 runs
+  the kind's predicate, so a team of waves that never cross a team barrier
+  holds 8 of them on wave32; a process with loops takes a wave for itself and
+  whole teams as workers, which cross team barriers together and a barrier
+  across the process's teams (c), at which the process's wave arrives alone.
+- *Spawn:* the host's runtime finds free waves and teams, writes the
+  process's slot (kind, arguments, arena, mailbox) and releases its
+  assignment word, which idle waves poll, sleeping. A spawn that finds too
+  few fails, with what holds them, instead of hanging. The end of a process
+  is written to its slot, which the host's bridge thread reads, as there is
+  no kernel end to follow.
+- *Scratch:* the kernel's one dispatch has all of it, at the kernel's private
+  size for every resident wave, 512 KiB a wave at the plugin's 16 KiB a lane,
+  640 MiB over 40 compute units; a per-launch stack size in liboffload would
+  make it the program's choice.
+- *Balancing work.* Which worker takes which work, from a pool or by
+  stealing, stays library code over processes and mailboxes (Distributing
+  work, above), with either shape. But one kernel gives every GPU waves
+  that are already running, which can take work from its own queue, a
+  dispatcher or a peer's without the host; a spawn that is a write to a
+  slot, microseconds, which fits or fails, instead of a launch of 15 to 40
+  µs and a guess at residency; and worker teams that move between the
+  phase's processes between chunks of a loop, if loops take chunks from a
+  counter rather than a static split. Kernels of their own fix each
+  process's teams for its life, and a GPU's free compute units belong to no
+  kernel that could take work.
+- *The cost:* the kernel's registers, and so its occupancy, are those of the
+  module's heaviest kind or loop, measured with (d4) against kernels of
+  their own, which phases in modules of their own keep to what a phase
+  needs; the kernel holds its compute units while its phase has processes,
+  idle or not; a phase runs only the code of its module; and a kernel
+  launched again for the next spawn after its last process ended costs a
+  launch, to measure in (d4), with a short wait before a kernel ends if it
+  shows. A fault in a process ends them all, as ROCr ends the program on a
+  GPU memory fault anyway.
+- *Rejected:* *kernels of their own on a queue the processes share* ((d1b)
+  above), by the measurements; *a small stack for process kernels,* whose
+  safe size depends on the rest of the program; *an HSA queue for each
+  process,* which runs out at 8 here; *raising ROCr's limits*
+  (`HSA_SCRATCH_MEM`, `HSA_SCRATCH_SINGLE_LIMIT`), which apply to every
+  queue of the program, each then with scratch for all 80 compute units,
+  2.7 GB at 16 KiB a lane; *all of a program's kinds in one kernel,* linking
+  the modules' process images into one, whose registers would be those of
+  the heaviest kind of any phase; and *phases' kernels sharing compute units
+  at once,* which brings back what fits and scratch.
+- *What (d) above keeps:* the cooperative launch, the barrier across teams
+  (c), the outlined loops and their `switch`, the schedule and the
+  directive. What changes: a process takes a wave, not team 0, and its
+  teams are those the runtime gives it in the kernel, not the whole launch.
+- *Parts,* each a commit of its own: (p1) `merk_place` with processes
+  without loops, launched at a module's first spawn on a GPU and ended with
+  its last process, with spawns that do not fit, or that find another
+  module's kernel, failing, the GPU process tests passing; (p2) processes
+  with loops: worker teams, the control block and the barrier across a
+  process's teams; then (d2), (d3) and (d4) as above. Of (d1b), the
+  runtime's lists of each GPU's compute units stay.
+- *Open:* how data outlives a phase, as a process's arena is freed when it
+  ends: the ending phase sends what the next needs, or it lives in memory
+  that the program owns rather than a process; whether the queues of one
+  mask still share an HSA queue, which only one queue a GPU would use.
 
 - **(e) Waiting.** While team 0 waits in a receive, the other teams wait at
   the barrier across teams, sleeping, so the process holds its compute
