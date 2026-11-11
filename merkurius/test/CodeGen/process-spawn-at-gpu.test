@@ -15,6 +15,13 @@ RUN: %gpu-env %t gpu | FileCheck %S/process-spawn-at.m --match-full-lines --stri
 RUN: %gpu-env %t2 leave | FileCheck %s --check-prefix=LEAVE --match-full-lines
 LEAVE:main ends
 
+The runtime that stops the program while a GPU process runs leaves the
+offload library to the process's end: its destructors would free the host
+memory that the GPU's kernel reads, and the GPU would fault.
+RUN: not %gpu-env %t2 closures 2>&1 | FileCheck %s --check-prefix=CLOSURES
+CLOSURES: Mercury runtime: called unify/2 for `pred' type
+CLOSURES-NOT: memory access fault
+
 RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx906 %libomp-flags %S/process-spawn-at.m -o %t.other
 RUN: not %gpu-env %t.other gpu 2>&1 | FileCheck %s --check-prefix=OTHER
 OTHER: Software Error: process_spawn_at.spawn_summer_at: the module process_spawn_at has no image of its GPU process kinds for GPU 0, a {{gfx[0-9a-f]+}}: it must be compiled with --offload-arch={{gfx[0-9a-f]+}}

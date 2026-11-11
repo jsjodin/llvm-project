@@ -134,7 +134,7 @@ std::int64_t Now() {
 [[noreturn]] void OutOfMemory() {
   std::fflush(stdout);
   std::fprintf(stderr, "Mercury runtime: out of memory\n");
-  std::exit(1);
+  merkurius::runtime::ExitProgram(1);
 }
 
 void *WorkerThread(void *);
@@ -529,7 +529,7 @@ void GiveToBlockingThread(Process *process) {
   if (pthread_create(&id, &attributes, BlockingThreadBody, thread) != 0) {
     std::fflush(stdout);
     std::fprintf(stderr, "Mercury runtime: no thread for a target region\n");
-    std::exit(1);
+    merkurius::runtime::ExitProgram(1);
   }
   pthread_attr_destroy(&attributes);
 }
@@ -557,7 +557,7 @@ int ReadMostWorkers() {
       std::fflush(stdout);
       std::fprintf(stderr,
           "Mercury runtime: MERK_WORKERS=%s is not a positive number\n", text);
-      std::exit(1);
+      merkurius::runtime::ExitProgram(1);
     }
     return static_cast<int>(value);
   }

@@ -31,5 +31,5 @@ extern "C" [[noreturn]] void merk_uncaught_exception(const char *exception) {
 extern "C" [[noreturn]] void merk_not_implemented(const char *what) {
   std::fflush(stdout);
   std::fprintf(stderr, "Not yet implemented: %s\n", what);
-  std::exit(1);
+  merkurius::runtime::ExitProgram(1);
 }

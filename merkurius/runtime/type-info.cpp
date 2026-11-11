@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "descriptor.h"
+#include "process.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -87,5 +88,5 @@ extern "C" [[noreturn]] void merk_higher_order_called(std::int32_t compare) {
   std::fflush(stdout);
   std::fprintf(stderr, "Mercury runtime: called %s for `pred' type\n",
       compare ? "compare/3" : "unify/2");
-  std::exit(1);
+  merkurius::runtime::ExitProgram(1);
 }
