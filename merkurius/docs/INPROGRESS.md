@@ -2048,8 +2048,11 @@ Open:
   be reclaimed while a slice is out. On a device, a region's cells are freed when
   it ends, so slices that outlive a region need memory with a lifetime of
   its own: the question of an owner for the array, above.
-- **Boundaries** on multiples of a cache line (128 bytes), so that two teams do not
-  write to one line.
+- **Boundaries** on multiples of 256 bytes: a cache line is 128, so that two
+  teams do not write to one line, but a stream from elements not on 256 bytes
+  is up to a quarter slower on gfx1030 (design document, Measurements, "Dense
+  stencils", where an array's elements start). The same holds for where an
+  array's own elements start, which its size word puts 8 bytes off.
 
 **A later use: streaming on the GPU.** Teams as the stages of a pipeline, passing
 arrays by pointer. It has no cycle of waits, but a stage that is not on the GPU

@@ -103,8 +103,10 @@ fastest of 100 runs, in MB/s:
 
 C's Add and Triad vary the most, from 70,000 to 141,000 MB/s and from 69,000
 to 97,000 MB/s over the rounds. Both programs launch the same teams and threads,
-in SPMD mode. Clang gives each team repeated chunks of 256 iterations where merkc
-gives each one block, and that is the larger part of the difference.
+in SPMD mode. Most of the difference in Copy and Mul is where the elements
+start: a Mercury array's size word puts them 8 bytes past the device block's
+start, and a stream from elements not on 256 bytes is up to a quarter slower
+(design document, Measurements, "Dense stencils").
 
 ## Differences from BabelStream
 
