@@ -74,12 +74,34 @@ if("AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
     if(module STREQUAL "array")
       set(source ${sound_array})
     endif()
+    # A module's compile copies what its code reaches from the bytecode of
+    # the modules it imports, so theirs are written first; one not yet
+    # written would be left out, and one being written would be read half.
+    # The imports are read from the module's source here, whose changes
+    # configure again; array's stub imports what array.m does.
+    set(module_source ${CMAKE_CURRENT_SOURCE_DIR}/${module}.m)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+      ${module_source})
+    file(READ ${module_source} text)
+    string(REGEX MATCHALL ":-[ \t\n]*(import|use)_module[^.]*" imports
+      "${text}")
+    set(imported_outputs)
+    foreach(declaration ${imports})
+      string(REGEX REPLACE ":-[ \t\n]*(import|use)_module" "" declaration
+        "${declaration}")
+      string(REGEX MATCHALL "[a-z_]+" names "${declaration}")
+      foreach(name ${names})
+        if(NOT name STREQUAL module AND name IN_LIST compiled_modules)
+          list(APPEND imported_outputs ${device_dir}/${name}.merkbc)
+        endif()
+      endforeach()
+    endforeach()
     add_custom_command(OUTPUT ${output}
       COMMAND ${CMAKE_COMMAND} -E make_directory ${device_dir}
       COMMAND merkc -fc1 -fopenmp -fopenmp-is-target-device
         -triple amdgcn-amd-amdhsa -fstub-unimplemented -emit-merk-bc
         ${source} -o ${output}
-      DEPENDS merkc ${library_outputs}
+      DEPENDS merkc ${library_outputs} ${imported_outputs}
       COMMENT "Compiling the library module ${module}.m for a device")
     list(APPEND device_outputs ${output})
   endforeach()
