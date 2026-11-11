@@ -73,6 +73,8 @@ extern "C" void merk_mailbox_drain(std::int64_t nodeHigh, std::int64_t nodeLow,
 extern "C" void merk_mailbox_region_ended(std::uint64_t region);
 namespace merkurius::runtime {
 void FreeRing(int device, DeviceRing *ring);
+// A GPU process has ended (rpcProcessEnded, gpu-processes.cpp).
+void PlaceProcessEnded(int device, std::uint64_t table, std::uint64_t slot);
 } // namespace merkurius::runtime
 extern "C" [[noreturn]] void merk_uncaught_exception(const char *exception);
 
@@ -548,6 +550,12 @@ unsigned HandleOpcode(void *raw, unsigned) {
   switch (port.get_opcode()) {
   case rpcFail:
     ReportDeviceFailure(port);
+  case rpcProcessEnded:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      PlaceProcessEnded(
+          static_cast<int>(buffer->data[0]), buffer->data[1], buffer->data[2]);
+    });
+    return rpc::RPC_SUCCESS;
   case rpcTeamsStall:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
       buffer->data[0] = teamsStallMilliseconds;
@@ -792,20 +800,13 @@ void GpuProcessEnded() {
 }
 
 // A GPU process's arena: the words on the device where it keeps its current
-// chunk and its tables, cleared, or null.
+// chunk and its tables, or null. The wave that runs the process clears them
+// (place.h), as the device may hold stale lines of what the host writes.
 void *NewProcessArena(int device) {
-  constexpr std::size_t bytes{sizeof(std::uint64_t) * kArenaClearWords};
-  void *arena{DeviceAllocate(device, bytes)};
-  const std::uint64_t none[kArenaClearWords]{};
-  if (arena && !CopyToDevice(device, arena, none, bytes)) {
-    DeviceFree(device, arena);
-    arena = nullptr;
-  }
-  return arena;
+  return DeviceAllocate(device, sizeof(std::uint64_t) * kArenaClearWords);
 }
 
-// Frees a GPU process's arena, and the chunks it took, once its kernel has
-// ended.
+// Frees a GPU process's arena, and the chunks it took, once it has ended.
 void FreeProcessArena(int device, void *address) {
   pthread_mutex_lock(&arenaLock);
   for (std::uint64_t i{0}; i < arenaCount; ++i) {

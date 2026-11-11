@@ -7,22 +7,30 @@
 //===----------------------------------------------------------------------===//
 //
 // Spawning a process on a GPU (docs/INPROGRESS.md, GPU processes without
-// omp target, step 4c). A process kind that runs on a GPU has a kernel,
-// merk_process_<kind>, in its module's image for each GPU it was compiled
-// for (process-images.h). The first spawn of one of a module's kinds on a
-// GPU loads the module's image there through liboffload, and sets the
-// image's merk_device_number to the GPU's number, which the device's runtime
-// sends with its opcodes. Each process is a launch of its kind's kernel,
-// one team of one thread, on a queue of its own, so the host does not wait
-// for it. Its arguments are words: its arena first, then the kind's, and
-// the last five are its mailbox's handle.
+// omp target, step 4c, and GPU processes that run loops, one kernel for a
+// GPU's processes). The first spawn of one of a module's kinds on a GPU
+// loads the module's image there through liboffload (process-images.h), and
+// sets the image's merk_device_number to the GPU's number, which the
+// device's runtime sends with its opcodes.
+//
+// A GPU's processes run in one kernel, the image's merk_place, a wave for
+// each process (place.h). The runtime launches it at the first spawn of a
+// module's kind on the GPU, cooperatively, with as many teams as are
+// resident at once on its compute units for processes (compute-units.h), on a
+// queue limited to them that the GPU keeps for the program's life. A spawn
+// writes the process's slot of the kernel's table. A spawn fails, rather than
+// waits, when no slot is free, or when the GPU's kernel is another module's:
+// the processes running there could be waiting for the new one. The kernel ends
+// once its last process has ended, and the next module's kernel starts then,
+// after it on the queue.
 //
 // The mailbox is the host's, and no process of the host's owns it: the
-// GPU receives from it through a ring, as a region does (offload.cpp). A
-// host function queued after the kernel closes it when the kernel ends.
-// That runs on liboffload's thread, which must not call liboffload, so a
-// thread of the runtime's, the reaper, then frees what the process had: its
-// arena, its mailbox's ring and the copy of a message there, and its queue.
+// GPU receives from it through a ring, as a region does (offload.cpp). When
+// the process ends, the device tells the host (rpcProcessEnded), which
+// closes the mailbox on the plugin's thread, which must not call liboffload,
+// so a thread of the runtime's, the reaper, then frees what the process had:
+// its arena, its argument words, and its mailbox's ring and the copy of a
+// message there; and frees each kernel's table once the kernel has ended.
 // Temporary (step 5 of GPU processes without omp target,
 // docs/INPROGRESS.md): its handle's place is the host's, 0, until handles
 // are routed by place.
@@ -33,10 +41,12 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "compute-units.h"
 #include "device-ring.h"
 #include "devices.h"
 #include "fragment.h"
 #include "liboffload.h"
+#include "place.h"
 #include "process-images.h"
 #include "process.h"
 #include <cstdint>
@@ -76,19 +86,23 @@ struct LoadedImage {
   const char *module;
   int gpu;
   ol_program_handle_t program;
+  const ProcessImage *image;
   LoadedImage *next;
 };
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 LoadedImage *loaded{nullptr};
 
-// A running process: its queue, its GPU and arena, and its mailbox's handle,
-// which the host function that follows its kernel closes, taking the ring
-// and the copy of a message there for the reaper to free.
+struct Place;
+
+// A running process: its GPU, arena and argument words, its kernel, and its
+// mailbox's handle, which is closed when it ends, taking the ring and the
+// copy of a message there for the reaper to free.
 struct RunningProcess {
-  ol_queue_handle_t queue;
   int gpu;
   void *arena;
+  std::uint64_t *words;
+  Place *place;
   std::int64_t handle[kHandleWords];
   DeviceRing *ring;
   int ringDevice;
@@ -97,7 +111,35 @@ struct RunningProcess {
   RunningProcess *next;
 };
 
-// The processes whose kernels have ended, for the reaper.
+// A launch of a module's kernel on a GPU: its table, in host memory, the
+// process in each slot, and how many processes it has that the reaper has
+// not freed, of which the last ends the kernel. Once the kernel has ended,
+// the reaper frees the table.
+struct Place {
+  const char *module;
+  int gpu;
+  PlaceTable *table;
+  RunningProcess **processes;
+  std::uint64_t running;
+  bool ending;
+  Place *next;
+};
+
+// The queue of each GPU's processes' kernels, limited to its units for
+// processes (compute-units.h), from its first spawn, and the kernel that
+// spawns use, unless it is ending.
+struct GpuPlaces {
+  bool ready;
+  ol_queue_handle_t queue;
+  Place *current;
+};
+GpuPlaces gpuPlaces[kMostGpus];
+
+// Every kernel that has not ended, and those that have, for the reaper.
+Place *places{nullptr};
+Place *endedPlaces{nullptr};
+
+// The processes that have ended, for the reaper.
 pthread_cond_t endedCondition = PTHREAD_COND_INITIALIZER;
 RunningProcess *ended{nullptr};
 pthread_once_t reaperOnce = PTHREAD_ONCE_INIT;
@@ -115,8 +157,14 @@ const char *Details(ol_result_t result) {
   return result && result->details ? result->details : "failed";
 }
 
-// Frees what an ended process had. Its queue may still be running the host
-// function that ended it, which liboffload then keeps until it is done.
+// Ends the kernel, whose processes have all ended: its idle waves return.
+// With the lock held.
+void EndPlace(Place *place) {
+  place->ending = true;
+  __atomic_store_n(&place->table->end, 1, __ATOMIC_RELEASE);
+}
+
+// Frees what an ended process had, and ends its kernel if it was the last.
 void Reap(RunningProcess *process) {
   if (process->copy) {
     process->release(process->ringDevice, process->copy);
@@ -125,25 +173,47 @@ void Reap(RunningProcess *process) {
     FreeRing(process->ringDevice, process->ring);
   }
   FreeProcessArena(process->gpu, process->arena);
-  olDestroyQueue(process->queue);
+  DeviceFreeHost(process->gpu, process->words);
+  pthread_mutex_lock(&lock);
+  Place *place{process->place};
+  if (--place->running == 0 && !place->ending) {
+    EndPlace(place);
+  }
+  pthread_mutex_unlock(&lock);
   std::free(process);
   GpuProcessEnded();
 }
 
-// The reaper's thread, for the program's life.
+// Frees an ended kernel's table.
+void ReapPlace(Place *place) {
+  DeviceFreeHost(place->gpu, place->table);
+  std::free(place->processes);
+  std::free(place);
+}
+
+// The reaper's thread, for the program's life. A kernel ends only after its
+// processes have told the host that they ended, so the reaper has taken
+// them, in the same round or an earlier one, before it takes the kernel.
 void *Reaper(void *) {
   for (;;) {
     pthread_mutex_lock(&lock);
-    while (!ended) {
+    while (!ended && !endedPlaces) {
       pthread_cond_wait(&endedCondition, &lock);
     }
     RunningProcess *list{ended};
     ended = nullptr;
+    Place *placeList{endedPlaces};
+    endedPlaces = nullptr;
     pthread_mutex_unlock(&lock);
     while (list) {
       RunningProcess *next{list->next};
       Reap(list);
       list = next;
+    }
+    while (placeList) {
+      Place *next{placeList->next};
+      ReapPlace(placeList);
+      placeList = next;
     }
   }
   return nullptr;
@@ -161,27 +231,32 @@ void StartReaper() {
   pthread_detach(thread);
 }
 
-// On liboffload's thread, after the process's kernel: its mailbox closes,
-// and the reaper frees the rest.
-void Ended(void *data) {
-  auto *process{static_cast<RunningProcess *>(data)};
-  const std::int64_t *h{process->handle};
-  merk_mailbox_close_ended(h[0], h[1], h[2], h[3], h[4], &process->ring,
-      &process->ringDevice, &process->copy, &process->release);
+// On liboffload's thread, after a kernel has ended: the reaper frees its
+// table.
+void PlaceDone(void *data) {
+  auto *place{static_cast<Place *>(data)};
   pthread_mutex_lock(&lock);
-  process->next = ended;
-  ended = process;
+  GpuPlaces &gpu{gpuPlaces[place->gpu]};
+  if (gpu.current == place) {
+    gpu.current = nullptr;
+  }
+  for (Place **link{&places}; *link; link = &(*link)->next) {
+    if (*link == place) {
+      *link = place->next;
+      break;
+    }
+  }
+  place->next = endedPlaces;
+  endedPlaces = place;
   pthread_cond_signal(&endedCondition);
   pthread_mutex_unlock(&lock);
 }
 
 // The module's image on the GPU, loaded the first time, or the text of the
 // error. With the lock held.
-const char *Load(const char *module, const Gpu &gpu,
-    ol_program_handle_t &program) {
-  for (LoadedImage *image{loaded}; image; image = image->next) {
-    if (image->gpu == gpu.number && std::strcmp(image->module, module) == 0) {
-      program = image->program;
+const char *Load(const char *module, const Gpu &gpu, LoadedImage *&entry) {
+  for (entry = loaded; entry; entry = entry->next) {
+    if (entry->gpu == gpu.number && std::strcmp(entry->module, module) == 0) {
       return nullptr;
     }
   }
@@ -191,6 +266,7 @@ const char *Load(const char *module, const Gpu &gpu,
                  "GPU %lld, a %s: it must be compiled with --offload-arch=%s%s",
         module, gpu.number, gpu.name, gpu.name, "");
   }
+  ol_program_handle_t program;
   if (ol_result_t result{olCreateProgram(gpu.context, gpu.device, image->image,
           image->bytes, &program)}) {
     return Error("could not load the module %s's image on GPU %lld: %s%s%s",
@@ -209,13 +285,207 @@ const char *Load(const char *module, const Gpu &gpu,
                  "on GPU %lld%s%s%s",
         module, gpu.number, "", "", "");
   }
-  auto *entry{static_cast<LoadedImage *>(Malloc(sizeof(LoadedImage)))};
-  *entry = {module, gpu.number, program, loaded};
+  entry = static_cast<LoadedImage *>(Malloc(sizeof(LoadedImage)));
+  *entry = {module, gpu.number, program, image, loaded};
   loaded = entry;
   return nullptr;
 }
 
+// The GPU's compute units and its processes' queue, made the first time, or
+// the text of the error. With the lock held.
+const char *Ready(const Gpu &gpu) {
+  GpuPlaces &places{gpuPlaces[gpu.number]};
+  if (places.ready) {
+    return nullptr;
+  }
+  std::uint32_t count{0};
+  std::uint32_t mask[kUnitMaskWords + 1]{};
+  if (ol_result_t result{olGetDeviceInfo(
+          gpu.device, kOlDeviceInfoNumComputeUnits, sizeof count, &count)}) {
+    return Error("could not count GPU %s%lld's compute units: %s%s%s", "",
+        gpu.number, Details(result), "", "");
+  }
+  if (count > 32 * kUnitMaskWords) {
+    return Error("GPU %s%lld has more than %s256 compute units, which "
+                 "processes cannot share%s%s",
+        "", gpu.number, "", "", "");
+  }
+  if (ol_result_t result{
+          olGetDeviceComputeUnitMask(gpu.device, kUnitMaskWords + 1, mask)}) {
+    return Error("could not find the compute units of GPU %s%lld that "
+                 "processes may use: %s%s%s",
+        "", gpu.number, Details(result), "", "");
+  }
+  UnitMask units;
+  if (!ProcessUnits(mask, kUnitMaskWords + 1, units)) {
+    return Error("GPU %s%lld has no pair of compute units for processes, "
+                 "units 2N and 2N+1%s%s%s",
+        "", gpu.number, "", "", "");
+  }
+  // Temporary (one kernel for a GPU's processes, docs/INPROGRESS.md, open:
+  // the units of the processes' kernel): the kernel takes only the first
+  // pair, as it holds every team slot of its units, so that target regions
+  // and other kernels keep the rest; which units it takes is to decide.
+  FirstPair(units);
+  if (ol_result_t result{olCreateQueueWithComputeUnitMask(gpu.context,
+          gpu.device, units.words, kUnitMaskWords, &places.queue)}) {
+    return Error("could not make a queue for GPU %s%lld's processes: %s%s%s",
+        "", gpu.number, Details(result), "", "");
+  }
+  places.ready = true;
+  return nullptr;
+}
+
+// Launches the module's kernel on the GPU, with a slot for each of its
+// waves, and makes it the kernel that spawns use; or gives the text of the
+// error. With the lock held.
+const char *Launch(const Gpu &gpu, const LoadedImage &image) {
+  GpuPlaces &gpuPlace{gpuPlaces[gpu.number]};
+  ol_symbol_handle_t kernel;
+  if (olGetSymbol(image.program, "merk_place", kOlSymbolKindKernel, &kernel)) {
+    return Error("the module %s's image for GPU %lld has no kernel "
+                 "merk_place%s%s%s",
+        image.module, gpu.number, "", "", "");
+  }
+  ol_kernel_launch_size_args_t size{1, {1, 1, 1}, {kPlaceTeamThreads, 1, 1}, 0};
+  std::uint32_t teams{0};
+  std::uint32_t lanes{0};
+  if (ol_result_t result{olGetKernelMaxCooperativeGroupCountOnQueue(
+          gpuPlace.queue, kernel, &size, &teams)}) {
+    return Error("could not count the teams of the module %s's processes "
+                 "that GPU %lld holds at once: %s%s%s",
+        image.module, gpu.number, Details(result), "", "");
+  }
+  if (ol_result_t result{olGetDeviceInfo(
+          gpu.device, kOlDeviceInfoNumLanes, sizeof lanes, &lanes)}) {
+    return Error("could not ask for GPU %s%lld's wave size: %s%s%s", "",
+        gpu.number, Details(result), "", "");
+  }
+  if (teams == 0 || lanes == 0 || kPlaceTeamThreads % lanes != 0) {
+    return Error("GPU %s%lld cannot run the module %s's processes: their "
+                 "kernel has no room on its compute units%s%s",
+        "", gpu.number, image.module, "", "");
+  }
+  std::uint64_t slots{
+      static_cast<std::uint64_t>(teams) * (kPlaceTeamThreads / lanes)};
+  std::size_t bytes{sizeof(PlaceTable) + slots * sizeof(PlaceSlot)};
+  auto *table{static_cast<PlaceTable *>(DeviceAllocateHost(gpu.number, bytes))};
+  if (!table) {
+    return Error("out of host memory for the table of GPU %s%lld's "
+                 "processes%s%s%s",
+        "", gpu.number, "", "", "");
+  }
+  std::memset(static_cast<void *>(table), 0, bytes);
+  table->slots = slots;
+  auto *place{static_cast<Place *>(Malloc(sizeof(Place)))};
+  auto *processes{
+      static_cast<RunningProcess **>(Malloc(slots * sizeof(RunningProcess *)))};
+  std::memset(
+      static_cast<void *>(processes), 0, slots * sizeof(RunningProcess *));
+  *place = {image.module, gpu.number, table, processes, 0, false, places};
+  size.numGroups.x = teams;
+  bool cooperative{true};
+  ol_kernel_launch_prop_t properties[]{
+      {kOlKernelLaunchPropTypeIsCooperative, &cooperative},
+      {kOlKernelLaunchPropTypeNone, nullptr}};
+  void *argument{table};
+  void *arguments[]{&argument};
+  std::size_t sizes[]{sizeof argument};
+  if (ol_result_t result{olLaunchKernel(gpuPlace.queue, gpu.device, kernel,
+          &size, properties, 1, arguments, sizes)}) {
+    DeviceFreeHost(gpu.number, table);
+    std::free(processes);
+    std::free(place);
+    return Error("could not launch the module %s's processes' kernel on GPU "
+                 "%lld: %s%s%s",
+        image.module, gpu.number, Details(result), "", "");
+  }
+  if (ol_result_t queued{
+          olLaunchHostFunction(gpuPlace.queue, PlaceDone, place)}) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+        "Mercury runtime: could not follow a GPU processes' kernel: %s\n",
+        Details(queued));
+    ExitProgram(1);
+  }
+  places = place;
+  gpuPlace.current = place;
+  return nullptr;
+}
+
+// The kernel and a free slot of it for a process of the module's kind on
+// the GPU, which it takes for `process`, or the text of the error. With the
+// lock held.
+const char *TakeSlot(const Gpu &gpu, const LoadedImage &image,
+    RunningProcess *process, std::uint64_t &slot) {
+  GpuPlaces &gpuPlace{gpuPlaces[gpu.number]};
+  Place *place{gpuPlace.current};
+  if (place && !place->ending && std::strcmp(place->module, image.module)) {
+    return Error("GPU %s%lld runs processes of the module %s, and a GPU runs "
+                 "one module's processes at a time: those of %s may start "
+                 "there once they have ended%s",
+        "", gpu.number, place->module, image.module, "");
+  }
+  if (!place || place->ending) {
+    if (const char *error{Launch(gpu, image)}) {
+      return error;
+    }
+    place = gpuPlace.current;
+  }
+  for (slot = 0; slot < place->table->slots; ++slot) {
+    if (!place->processes[slot]) {
+      place->processes[slot] = process;
+      process->place = place;
+      ++place->running;
+      return nullptr;
+    }
+  }
+  char *text{static_cast<char *>(Malloc(512))};
+  std::snprintf(text, 512,
+      "GPU %d has no room for another process: the module %s's kernel there "
+      "runs %llu processes at once, and they are all running",
+      gpu.number, image.module,
+      static_cast<unsigned long long>(place->table->slots));
+  return text;
+}
+
 } // namespace
+
+namespace merkurius::runtime {
+
+// On the plugin's thread, when the device tells the host that the process
+// of the slot has ended (rpcProcessEnded): its mailbox closes, the slot is
+// free for another, and the reaper frees the rest.
+void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
+  RunningProcess *process{nullptr};
+  pthread_mutex_lock(&lock);
+  for (Place *place{places}; place; place = place->next) {
+    if (reinterpret_cast<std::uint64_t>(place->table) == table &&
+        slot < place->table->slots) {
+      process = place->processes[slot];
+      place->processes[slot] = nullptr;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&lock);
+  if (!process) {
+    std::fflush(stdout);
+    std::fputs("Mercury runtime: a GPU told the host that a process ended "
+               "that it does not know\n",
+        stderr);
+    std::_Exit(1);
+  }
+  const std::int64_t *h{process->handle};
+  merk_mailbox_close_ended(h[0], h[1], h[2], h[3], h[4], &process->ring,
+      &process->ringDevice, &process->copy, &process->release);
+  pthread_mutex_lock(&lock);
+  process->next = ended;
+  ended = process;
+  pthread_cond_signal(&endedCondition);
+  pthread_mutex_unlock(&lock);
+}
+
+} // namespace merkurius::runtime
 
 // How many GPUs this node has for processes (process.gpus).
 extern "C" std::int64_t merk_gpu_count(void) { return GpuCount(); }
@@ -237,81 +507,73 @@ extern "C" const char *merk_gpu_process_spawn(std::uint64_t typeInfo,
                               : "several, from GPU 0",
         "", "");
   }
-  ol_program_handle_t program;
+  if (gpu->number >= kMostGpus) {
+    return Error("GPU %s%lld is beyond the %s64 GPUs that the runtime runs "
+                 "processes on%s%s",
+        "", number, "", "", "");
+  }
+  // The process's argument words, in host memory that the device reads:
+  // the kind's arguments and then its mailbox's handle.
+  std::size_t count{static_cast<std::size_t>(words[0]) + kHandleWords};
+  auto *process{static_cast<RunningProcess *>(Malloc(sizeof(RunningProcess)))};
+  *process = {};
+  process->gpu = gpu->number;
+  process->words = static_cast<std::uint64_t *>(
+      DeviceAllocateHost(gpu->number, count * sizeof(std::uint64_t)));
+  process->arena = NewProcessArena(gpu->number);
+  if (!process->words || !process->arena) {
+    if (process->words) {
+      DeviceFreeHost(gpu->number, process->words);
+    }
+    if (process->arena) {
+      FreeProcessArena(gpu->number, process->arena);
+    }
+    std::free(process);
+    return Error("out of memory for a process on GPU %s%lld%s%s%s", "", number,
+        "", "", "");
+  }
+  std::uint64_t slot{0};
+  int kindNumber{-1};
   pthread_mutex_lock(&lock);
-  const char *error{Load(module, *gpu, program)};
+  LoadedImage *image{nullptr};
+  const char *error{Load(module, *gpu, image)};
+  if (!error) {
+    kindNumber = KindNumber(*image->image, kind);
+    if (kindNumber < 0) {
+      error = Error("the module %s's image for GPU %lld has no process kind "
+                    "%s%s%s",
+          module, number, kind, "", "");
+    }
+  }
+  if (!error) {
+    error = Ready(*gpu);
+  }
+  if (!error) {
+    error = TakeSlot(*gpu, *image, process, slot);
+  }
   pthread_mutex_unlock(&lock);
   if (error) {
-    return error;
-  }
-  char name[256];
-  std::snprintf(name, sizeof name, "merk_process_%s", kind);
-  ol_symbol_handle_t kernel;
-  if (olGetSymbol(program, name, kOlSymbolKindKernel, &kernel)) {
-    return Error("the module %s's image for GPU %lld has no kernel for the "
-                 "process kind %s%s%s",
-        module, number, kind, "", "");
-  }
-  auto *process{static_cast<RunningProcess *>(Malloc(sizeof(RunningProcess)))};
-  process->gpu = gpu->number;
-  process->arena = NewProcessArena(gpu->number);
-  if (!process->arena) {
+    DeviceFreeHost(gpu->number, process->words);
+    FreeProcessArena(gpu->number, process->arena);
     std::free(process);
-    return Error("out of memory on GPU %s%lld, for a process's arena%s%s%s", "",
-        number, "", "", "");
+    return error;
   }
   std::int64_t *h{process->handle};
   merk_node(&h[0], &h[1]);
   merk_mailbox_new_unowned(typeInfo, &h[2], &h[3], &h[4]);
-  if (ol_result_t result{
-          olCreateQueue(gpu->context, gpu->device, &process->queue)}) {
-    merk_mailbox_close(h[0], h[1], h[2], h[3], h[4]);
-    FreeProcessArena(process->gpu, process->arena);
-    std::free(process);
-    return Error("could not make a queue on GPU %s%lld: %s%s%s", "", number,
-        Details(result), "", "");
-  }
-  // Each parameter of the kernel is a word, of which the plugin copies as
-  // many bytes as the parameter has: the arena, the kind's arguments and
-  // the mailbox's handle.
-  std::size_t count{1 + static_cast<std::size_t>(words[0]) + kHandleWords};
-  auto *values{static_cast<std::uint64_t *>(
-      Malloc(count * (2 * sizeof(std::uint64_t) + sizeof(void *))))};
-  auto *sizes{reinterpret_cast<std::size_t *>(values + count)};
-  auto *pointers{reinterpret_cast<void **>(sizes + count)};
-  values[0] = reinterpret_cast<std::uint64_t>(process->arena);
-  for (std::size_t i{1}; i < count; ++i) {
-    values[i] = i <= words[0] ? words[i]
-                              : static_cast<std::uint64_t>(h[i - 1 - words[0]]);
-  }
   for (std::size_t i{0}; i < count; ++i) {
-    sizes[i] = sizeof(std::uint64_t);
-    pointers[i] = &values[i];
+    process->words[i] = i < words[0]
+        ? words[i + 1]
+        : static_cast<std::uint64_t>(h[i - words[0]]);
   }
-  ol_kernel_launch_size_args_t size{1, {1, 1, 1}, {1, 1, 1}, 0};
   GpuProcessStarted();
-  ol_result_t result{olLaunchKernel(process->queue, gpu->device, kernel, &size,
-      nullptr, count, pointers, sizes)};
-  std::free(values);
-  if (result) {
-    merk_mailbox_close(h[0], h[1], h[2], h[3], h[4]);
-    FreeProcessArena(process->gpu, process->arena);
-    olDestroyQueue(process->queue);
-    std::free(process);
-    GpuProcessEnded();
-    return Error("could not launch the process kind %s's kernel on GPU "
-                 "%lld: %s%s%s",
-        kind, number, Details(result), "", "");
-  }
+  PlaceSlot &placeSlot{PlaceSlots(process->place->table)[slot]};
+  placeSlot.kind = static_cast<std::uint64_t>(kindNumber);
+  placeSlot.arena = reinterpret_cast<std::uint64_t>(process->arena);
+  placeSlot.words = reinterpret_cast<std::uint64_t>(process->words);
+  __atomic_store_n(&placeSlot.state, kPlaceRunning, __ATOMIC_RELEASE);
   *placeAndSlot = h[2];
   *generation = h[3];
   *secret = h[4];
-  if (ol_result_t queued{olLaunchHostFunction(process->queue, Ended, process)}) {
-    std::fflush(stdout);
-    std::fprintf(stderr,
-        "Mercury runtime: could not follow a GPU process's kernel: %s\n",
-        Details(queued));
-    ExitProgram(1);
-  }
   return nullptr;
 }

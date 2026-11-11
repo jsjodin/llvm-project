@@ -67,6 +67,9 @@ struct Gpu {
   char uid[128];
 };
 
+// The most GPUs the runtime uses for processes.
+constexpr int kMostGpus{64};
+
 // How many GPUs there are for processes; liboffload is initialized the
 // first time it is asked.
 int GpuCount();

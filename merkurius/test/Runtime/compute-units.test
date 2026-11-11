@@ -1,0 +1,17 @@
+The compute units on which a GPU's processes run (runtime/compute-units.cpp,
+docs/INPROGRESS.md, GPU processes that run loops, one kernel for a GPU's
+processes): the pairs of those its queues may use, units 2P and 2P + 1, as
+LIBOMPTARGET_AMDGPU_CU_MASK leaves them, of which the processes' kernel takes
+the first pair for now. The mask is the host's, so the test
+needs no GPU.
+
+RUN: clang++ -O2 -std=c++17 %S/Inputs/compute-units-test.cpp %S/../../runtime/compute-units.cpp -o %t
+RUN: %t | FileCheck %s --match-full-lines
+
+CHECK: 80 units: 0000ffff ffffffff ffffffff (80), first pair 00000000 00000000 00000003
+CHECK-NEXT: units 0-39: 00000000 000000ff ffffffff (40), first pair 00000000 00000000 00000003
+
+Units 1 and 6 have no pair, so they are not used.
+CHECK-NEXT: units 1-6: 00000000 00000000 0000003c (4), first pair 00000000 00000000 0000000c
+CHECK-NEXT: units 0, 2 and 4: none
+CHECK-NEXT: a unit beyond the 256th: none

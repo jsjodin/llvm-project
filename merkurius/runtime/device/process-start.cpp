@@ -21,6 +21,9 @@
 // - That this is a GPU process's image, so that the device's runtime takes
 //   the process's arena from its kernel's arguments (device.cpp). It is not
 //   exported: libmerkdevice's weak definition, 0, is left out.
+// - The image's one kernel, merk_place, whose waves run the module's
+//   processes (place.h), which the host launches with the table of its
+//   slots, in teams of kPlaceTeamThreads threads.
 // - omp_get_device_num, which device.cpp refers to weakly for a region's
 //   image, where OpenMP's device runtime defines it. An undefined dynamic
 //   symbol, even a weak one, stops HSA's loader from loading the image, so
@@ -31,6 +34,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "shared/rpc.h"
+#include "../place.h"
+#include <gpuintrin.h>
 
 extern "C"
     [[gnu::visibility("protected"), gnu::weak]] rpc::Client __llvm_rpc_client;
@@ -42,4 +47,13 @@ extern "C" [[gnu::visibility("hidden")]] int merk_device_process_image{1};
 
 extern "C" [[gnu::visibility("hidden")]] int omp_get_device_num(void) {
   return -1;
+}
+
+extern "C" void merk_device_place(merkurius::runtime::PlaceTable *table);
+
+extern "C" __gpu_kernel __attribute__((
+    amdgpu_flat_work_group_size(merkurius::runtime::kPlaceTeamThreads,
+        merkurius::runtime::kPlaceTeamThreads))) void
+merk_place(merkurius::runtime::PlaceTable *table) {
+  merk_device_place(table);
 }

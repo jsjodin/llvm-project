@@ -1,16 +1,19 @@
 % Process kinds that run on a GPU (docs/INPROGRESS.md, GPU processes without
-% omp target, step 4b). The kernels' compile, -fprocess-kernels, makes a
-% kernel merk_process_<kind> for each such kind, which takes the process's
-% arena, the kind's arguments and its mailbox's handle by value and calls
-% the kind's predicate,
-% and keeps only what the kernels reach: not main, nor the kinds that run on
-% the host. It hides the rest, so that the image exports only the kernels.
-% The host's compile embeds the image it is given and registers it at
-% start-up, with the message types that the device's code may send.
+% omp target, step 4b, and GPU processes that run loops, one kernel for a
+% GPU's processes). The device's compile, -fprocess-kernels, makes a start
+% merk_process_<kind> for each such kind, which takes the address of the
+% process's argument words, the kind's arguments and its mailbox's handle,
+% and calls the kind's predicate; and merk_process_dispatch, which starts a
+% kind by its number, its place among the module's GPU kinds. It keeps only
+% what merk_process_dispatch reaches: not main, nor the kinds that run on
+% the host, and hides it all. The host's compile embeds the image it is
+% given and registers it at start-up, with the kinds' names in their order,
+% and the message types that the device's code may send.
 %
-% The image exports the kernel, libc's RPC client and the device's number,
-% which the offload plugin and the runtime look up, and has no undefined
-% dynamic symbol, with which HSA's loader would not load it. Without -O,
+% The image exports its one kernel, merk_place, from its start object,
+% libc's RPC client and the device's number, which the offload plugin and
+% the runtime look up, and has no undefined dynamic symbol, with which HSA's
+% loader would not load it. Without -O,
 % the image is linked at -O2. At -O0 its link fails on an AMDGPU bug
 % (process-kernels-O0.m). process-spawn-at.m runs the program.
 %
@@ -76,33 +79,45 @@ main(!IO) :-
         true
     ).
 
-% The kernel takes the process's arena, which the device's runtime finds in
-% the kernel's arguments, the kind's integer and float by value, and each
-% mailbox's handle as five words, which it puts in a cell on its stack.
-% KERNEL0:define protected amdgpu_kernel void @merk_process_summer(i64 %0, i64 %1, double %2, i64 %3, i64 %4, i64 %5, i64 %6, i64 %7, i64 %8, i64 %9, i64 %10, i64 %11, i64 %12) {
-% KERNEL0-NEXT:  %14 = alloca [5 x i64], i64 1, align 8, addrspace(5)
-% KERNEL0-NEXT:  %15 = addrspacecast ptr addrspace(5) %14 to ptr
-% KERNEL0-NEXT:  %16 = getelementptr i64, ptr %15, i32 0
-% KERNEL0-NEXT:  store i64 %3, ptr %16, align 8
-% KERNEL0:  store i64 %7, ptr %20, align 8
-% KERNEL0-NEXT:  %21 = alloca [5 x i64], i64 1, align 8, addrspace(5)
-% KERNEL0-NEXT:  %22 = addrspacecast ptr addrspace(5) %21 to ptr
-% KERNEL0:  store i64 %12, ptr %27, align 8
-% KERNEL0-NEXT:  call void @process_kernels.summer_6_0(i64 %1, double %2, ptr %15, ptr %22)
+% The start takes the address of the process's words: the kind's integer and
+% float, and each mailbox's handle as five words, which it puts in a cell on
+% its stack.
+% KERNEL0:define internal void @merk_process_summer(i64 %0) {
+% KERNEL0-NEXT:  %2 = inttoptr i64 %0 to ptr
+% KERNEL0-NEXT:  %3 = getelementptr i64, ptr %2, i32 0
+% KERNEL0-NEXT:  %4 = load i64, ptr %3, align 8
+% KERNEL0-NEXT:  %5 = getelementptr i64, ptr %2, i32 1
+% KERNEL0-NEXT:  %6 = load i64, ptr %5, align 8
+% KERNEL0-NEXT:  %7 = bitcast i64 %6 to double
+% KERNEL0-NEXT:  %8 = alloca [5 x i64], i64 1, align 8, addrspace(5)
+% KERNEL0-NEXT:  %9 = addrspacecast ptr addrspace(5) %8 to ptr
+% KERNEL0:  %25 = alloca [5 x i64], i64 1, align 8, addrspace(5)
+% KERNEL0:  %40 = getelementptr i64, ptr %2, i32 11
+% KERNEL0:  call void @process_kernels.summer_6_0(i64 %4, double %7, ptr %9, ptr %26)
 % KERNEL0-NEXT:  ret void
 % KERNEL0-NEXT:}
-% KERNEL2:define protected amdgpu_kernel void @merk_process_summer(i64 %0, i64 %1, double %2, i64 %3, i64 %4, i64 %5, i64 %6, i64 %7, i64 %8, i64 %9, i64 %10, i64 %11, i64 %12) local_unnamed_addr {
+% KERNEL0-EMPTY:
+% KERNEL0-NEXT:define hidden void @merk_process_dispatch(i64 %0, i64 %1) {
+% KERNEL0-NEXT:  switch i64 %0, label %4 [
+% KERNEL0-NEXT:    i64 0, label %3
+% KERNEL0-NEXT:  ]
+% KERNEL0-EMPTY:
+% KERNEL0-NEXT:3:                                                ; preds = %2
+% KERNEL0-NEXT:  call void @merk_process_summer(i64 %1)
+% KERNEL0-NEXT:  ret void
+% KERNEL2:define hidden void @merk_process_dispatch(i64 %0, i64 %1) local_unnamed_addr {
 
 % The host embeds the image, and registers it, after the message types.
 % HOST:@process_kernels.merk_process_image.module = internal constant [16 x i8] c"process_kernels\00", align 1
+% HOST-NEXT:@process_kernels.merk_process_image.kinds = internal constant [7 x i8] c"summer\00", align 1
 % HOST-NEXT:@process_kernels.merk_process_image.gfx1030.gpu = internal constant [8 x i8] c"gfx1030\00", align 1
 % HOST-NEXT:@process_kernels.merk_process_image.gfx1030 = internal constant [5 x i8] c"IMAGE", align 16
 % HOST-NEXT:@llvm.global_ctors = appending global [2 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @process_kernels.merk_register_message_types.c, ptr null }, { i32, ptr, ptr } { i32 65535, ptr @process_kernels.merk_register_process_images.c, ptr null }]
 % HOST:  {{(tail )?}}call void @merk_register_message_type(i64 -7556727498917921977, ptr {{(nonnull )?}}@"merk.type_ctor.int/0")
-% HOST:  {{(tail )?}}call void @merk_register_process_image(ptr {{(nonnull )?}}@process_kernels.merk_process_image.module, ptr {{(nonnull )?}}@process_kernels.merk_process_image.gfx1030.gpu, ptr {{(nonnull )?}}@process_kernels.merk_process_image.gfx1030, i64 5)
+% HOST:  {{(tail )?}}call void @merk_register_process_image(ptr {{(nonnull )?}}@process_kernels.merk_process_image.module, ptr {{(nonnull )?}}@process_kernels.merk_process_image.gfx1030.gpu, ptr {{(nonnull )?}}@process_kernels.merk_process_image.gfx1030, i64 5, ptr {{(nonnull )?}}@process_kernels.merk_process_image.kinds)
 
 % The image exports the kernel and what the plugin and the runtime look up.
-% IMAGE-DAG:{{.*}} GLOBAL PROTECTED {{.*}} merk_process_summer
+% IMAGE-DAG:{{.*}} GLOBAL PROTECTED {{.*}} merk_place
 % IMAGE-DAG:{{.*}} WEAK   PROTECTED {{.*}} merk_device_number
 % IMAGE-DAG:{{.*}} GLOBAL PROTECTED {{.*}} __llvm_rpc_client
-% IMAGE-NOT:summer_6_0
+% IMAGE-NOT:summer

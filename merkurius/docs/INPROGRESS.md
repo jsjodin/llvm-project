@@ -3427,6 +3427,49 @@ one kernel for a GPU's processes.
   that the program owns rather than a process; whether the queues of one
   mask still share an HSA queue, which only one queue a GPU would use.
 
+**(p1) done 2026-11-11.** The device's compile makes a start
+`merk_process_<kind>`, which loads the kind's arguments and mailbox handle
+from the process's words, and `merk_process_dispatch`, which starts a kind
+by its number, its place among the module's GPU kinds; the host registers
+the kinds' names with the image. `merk_place` (`runtime/device/
+process-start.cpp`) is the image's one kernel. `runtime/place.h` is its
+table, in host memory: a slot for each wave, with state, kind, arena and
+words, and a flag that ends the kernel. Lane 0 of each wave polls its slot
+with `s_sleep`, clears the process's arena, runs it and sends
+`rpcProcessEnded`. The host (`runtime/gpu-processes.cpp`) launches the
+kernel cooperatively on one queue per GPU, with as many teams of 256 threads
+as are resident at once, and frees each launch's table after it ends. A
+spawn fails, rather than waits, if another module's kernel runs or no slot
+is free. What differs from the plan:
+- *The kernel's compute units.* On every unit that the mask leaves, the
+  kernel holds every team slot, so target regions beside a GPU process
+  never became resident: `omp-target-region-rings-gpu` hung. For now the
+  kernel takes the first pair of units, as (d1b)'s processes of one team
+  did (Temporary in `Ready`). Open below.
+- *Tests:* `%gpu-env` in `test/lit.cfg.py` sets
+  `LIBOMPTARGET_AMDGPU_CU_MASK`, `0-39` unless the environment gives one,
+  for programs that spawn GPU processes. `process-places-gpu.test`: a
+  module's processes one after another, a spawn of another module's kind
+  while the first module's kernel runs, and spawns until no slot is free,
+  which fails. Its last run, which fills every slot, has not been run on
+  the gfx1030.
+- *Not testable yet: a phase that follows another.* A process answers
+  before its wave tells the host that it ended, so a spawn of the next
+  phase's kind right after the answer may still find the kernel running.
+  A program needs to see the end: a monitor of a GPU process, which is not
+  supported (its mailbox has no process of the host's), or a spawn that
+  waits for a kernel whose processes have all answered. Catching the
+  spawn's error and trying again needs `exception.try_io`, which code
+  generation does not support yet.
+
+**Open after (p1).**
+- *Which units the processes' kernel takes,* as it holds every team slot
+  of them: a share of the usable units, set by the program or the
+  environment, with the rest for target regions and other kernels; or all
+  of them once loops run in the kernel (p2) and target regions do not run
+  beside GPU processes.
+- *How a program sees that a GPU process ended,* for phases (above).
+
 - **(e) Waiting.** While team 0 waits in a receive, the other teams wait at
   the barrier across teams, sleeping, so the process holds its compute
   units and little else. Between messages the process uses no other

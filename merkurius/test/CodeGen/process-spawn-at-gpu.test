@@ -1,25 +1,36 @@
 process-spawn-at.m's process kind spawned on the machine's GPU
-(docs/INPROGRESS.md, GPU processes without omp target, step 4c): the runtime
+(docs/INPROGRESS.md, GPU processes without omp target, step 4c, and GPU
+processes that run loops, one kernel for a GPU's processes): the runtime
 loads the module's image through liboffload, sets its device number, and
-launches the kind's kernel, which receives the host's messages through its
+starts the process in the image's kernel, which receives the host's messages through its
 mailbox's ring and sends its answer back. The program ends when main does,
 even while a GPU process waits for messages. A program compiled for another
 GPU has no image for this one, which is a software error at the spawn.
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-spawn-at.m -o %t2
-RUN: %libomp-env %t2 gpu | FileCheck %S/process-spawn-at.m --match-full-lines --strict-whitespace
+RUN: %gpu-env %t2 gpu | FileCheck %S/process-spawn-at.m --match-full-lines --strict-whitespace
 RUN: merkc -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-spawn-at.m -o %t
-RUN: %libomp-env %t gpu | FileCheck %S/process-spawn-at.m --match-full-lines --strict-whitespace
-RUN: %libomp-env %t2 leave | FileCheck %s --check-prefix=LEAVE --match-full-lines
+RUN: %gpu-env %t gpu | FileCheck %S/process-spawn-at.m --match-full-lines --strict-whitespace
+RUN: %gpu-env %t2 leave | FileCheck %s --check-prefix=LEAVE --match-full-lines
 LEAVE:main ends
 
 RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx906 %libomp-flags %S/process-spawn-at.m -o %t.other
-RUN: not %libomp-env %t.other gpu 2>&1 | FileCheck %s --check-prefix=OTHER
+RUN: not %gpu-env %t.other gpu 2>&1 | FileCheck %s --check-prefix=OTHER
 OTHER: Software Error: process_spawn_at.spawn_summer_at: the module process_spawn_at has no image of its GPU process kinds for GPU 0, a {{gfx[0-9a-f]+}}: it must be compiled with --offload-arch={{gfx[0-9a-f]+}}
 
 The messages that the GPU process took from its ring are freed, and so are
 its arena and its mailbox's ring when it ends.
-RUN: %libomp-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 %t2 gpu 2>&1 | FileCheck %s --check-prefix=MESSAGES --match-full-lines
+RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 %t2 gpu 2>&1 | FileCheck %s --check-prefix=MESSAGES --match-full-lines
 MESSAGES:Mercury runtime: 0 messages are neither read nor freed
 MESSAGES-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+
+The GPU's processes run on the first pair of compute units that its queues
+may use, on a queue limited to them (runtime/compute-units.h), which
+LIBOMPTARGET_AMDGPU_CU_MASK sets (%gpu-env). A GPU left without a pair of units
+is a software error at the spawn, or, on a processor with work group
+processors, which enables units in pairs, the offload plugin's error when it
+starts.
+RUN: %gpu-env LIBOMPTARGET_AMDGPU_CU_MASK=4-7 %t2 gpu | FileCheck %S/process-spawn-at.m --match-full-lines --strict-whitespace
+RUN: not %gpu-env LIBOMPTARGET_AMDGPU_CU_MASK=0 %t2 gpu 2>&1 | FileCheck %s --check-prefix=NOPAIR
+NOPAIR: {{Software Error: process_spawn_at.spawn_summer_at: GPU 0 has no pair of compute units for processes, units 2N and 2N\+1|Mercury runtime: could not list liboffload's devices: .* enables compute units in pairs}}

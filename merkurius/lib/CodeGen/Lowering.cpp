@@ -1079,11 +1079,10 @@ void Lowerer::LowerProc(merk::ProcOp proc) {
   if (mlir::Attribute declare{proc->getDiscardableAttr("omp.declare_target")}) {
     func->setDiscardableAttr("omp.declare_target", declare);
   }
-  // A GPU process's kernel, which the host's runtime launches by its name,
-  // with its arguments by value.
-  if (proc->hasAttr(kKernelAttrName)) {
-    func.setCConv(mlir::LLVM::CConv::AMDGPU_KERNEL);
-    func.setVisibility_(mlir::LLVM::Visibility::Protected);
+  // The procedure that starts a module's GPU processes, which the device's
+  // runtime calls from C++ (device.cpp).
+  if (proc->hasAttr(kProcessRootAttrName)) {
+    func.setCConv(mlir::LLVM::CConv::C);
   }
   rewriter_.inlineRegionBefore(
       proc.getBody(), func.getBody(), func.getBody().end());
@@ -3701,16 +3700,16 @@ llvm::LogicalResult Lowerer::Lower() {
   return llvm::failure(result.wasInterrupted());
 }
 
-// A compile of GPU processes' kernels keeps the kernels and the procedures
-// they reach, and removes the rest, which are the host's, with the
-// program's entry and the constructors. A closure is an error there, as on
-// an OpenMP device: its entry runs on the host only.
+// A compile of GPU processes keeps the procedure that starts them, and the
+// procedures it reaches, and removes the rest, which are the host's, with
+// the program's entry and the constructors. A closure is an error there, as
+// on an OpenMP device: its entry runs on the host only.
 llvm::LogicalResult Lowerer::FilterKernelProcs() {
   mlir::SymbolTable symbols{module_};
   llvm::SmallVector<mlir::Operation *> pending;
   llvm::DenseSet<mlir::Operation *> reached;
   for (auto proc : module_.getOps<merk::ProcOp>()) {
-    if (proc->hasAttr(kKernelAttrName)) {
+    if (proc->hasAttr(kProcessRootAttrName)) {
       pending.push_back(proc);
       reached.insert(proc);
     }
@@ -4009,12 +4008,9 @@ bool LinkForeignCode(llvm::Module &module, mlir::ModuleOp mlirModule,
   return true;
 }
 
-void HideAllButKernels(llvm::Module &module) {
+void HideModuleSymbols(llvm::Module &module) {
   for (llvm::GlobalValue &value : module.global_values()) {
-    auto *function{llvm::dyn_cast<llvm::Function>(&value)};
-    if (value.isDeclaration() || value.hasLocalLinkage() ||
-        (function &&
-            function->getCallingConv() == llvm::CallingConv::AMDGPU_KERNEL)) {
+    if (value.isDeclaration() || value.hasLocalLinkage()) {
       continue;
     }
     value.setVisibility(llvm::GlobalValue::HiddenVisibility);
