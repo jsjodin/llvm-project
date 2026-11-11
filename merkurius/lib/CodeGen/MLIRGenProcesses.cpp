@@ -72,19 +72,18 @@ mlir::Value LoadWord(mlir::OpBuilder &builder, mlir::Location loc,
 } // namespace
 
 void MerkGenerator::GenerateProcessStarts() {
-  if (!target_.options().processKernels || gpuKinds_.empty()) {
+  if (!target_.options().processKernels) {
     return;
   }
   llvm::SmallVector<merk::ProcOp> starts;
   for (const parser::ProcessDecl *decl : gpuKinds_) {
     starts.push_back(GenerateProcessStart(*decl));
   }
-  if (llvm::none_of(starts, [](merk::ProcOp start) { return bool(start); })) {
-    return;
-  }
   // merk_process_dispatch(kind, words): the start of the kind with the
   // number, by the kinds' order in the module, which the host's runtime
-  // finds by their names (RegisterProcessImages).
+  // finds by their names (RegisterProcessImages). Every image has it, as its
+  // kernel calls it (process-start.cpp), even one of a module without kinds
+  // that run on a GPU, which the host's compile leaves out.
   mlir::Location loc{builder_.getUnknownLoc()};
   auto i64{builder_.getI64Type()};
   mlir::OpBuilder::InsertionGuard guard{builder_};
@@ -94,6 +93,10 @@ void MerkGenerator::GenerateProcessStarts() {
   dispatch->setAttr(kProcessRootAttrName, builder_.getUnitAttr());
   mlir::Block *entry{dispatch.addEntryBlock()};
   builder_.setInsertionPointToStart(entry);
+  if (llvm::none_of(starts, [](merk::ProcOp start) { return bool(start); })) {
+    merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+    return;
+  }
   llvm::SmallVector<mlir::Attribute> cases;
   llvm::SmallVector<merk::ProcOp> called;
   for (auto [number, start] : llvm::enumerate(starts)) {
