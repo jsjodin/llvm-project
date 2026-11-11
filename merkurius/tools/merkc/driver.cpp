@@ -136,10 +136,25 @@ static bool getOffloadArchs(
     return false;
   }
   for (const std::string &value : values) {
-    llvm::AMDGPU::GPUKind kind{llvm::AMDGPU::parseArchAMDGCN(value)};
+    // A target ID, as Clang's: the processor, then features such as
+    // gfx90a:xnack-.
+    auto [processor, features]{llvm::StringRef{value}.split(':')};
+    llvm::AMDGPU::GPUKind kind{llvm::AMDGPU::parseArchAMDGCN(processor)};
     if (kind == llvm::AMDGPU::GK_NONE) {
       reportError("offloading to '" + value +
           "' is not supported yet: only AMD GPUs, such as gfx1030, are");
+      return false;
+    }
+    // Temporary (docs/INPROGRESS.md, A demo: a stencil whose active region
+    // moves): features are reported until the device's bitcode carries them
+    // as Clang's does, on each function, since the image's link gives LTO
+    // only the processor. Code for the processor alone runs with xnack and
+    // sramecc either on or off.
+    if (!features.empty()) {
+      reportError("--offload-arch=" + value +
+          ": target features are not supported yet; give the processor "
+          "alone, " +
+          processor.str() + ", whose code runs with them on or off");
       return false;
     }
     llvm::Triple triple{kOffloadTargetAMDGPU};

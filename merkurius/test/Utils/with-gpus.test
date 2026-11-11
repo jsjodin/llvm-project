@@ -1,0 +1,70 @@
+utils/gpu/with-gpus.py, on a machine of this test's making: its KFD topology,
+the GPUs' files in sysfs and one process of another user, under --root. GPU 0
+is free; another process has memory on GPU 1; GPU 2 is busy with no process
+on it. ROCR_VISIBLE_DEVICES is unset, as lit passes it on to the tests.
+
+RUN: rm -rf %t && mkdir -p %t/sys/class/kfd/kfd/topology/nodes/0 %t/sys/class/kfd/kfd/topology/nodes/1 %t/sys/class/kfd/kfd/topology/nodes/2 %t/sys/class/kfd/kfd/topology/nodes/3
+RUN: printf 'cpu_cores_count 16\nsimd_count 0\n' > %t/sys/class/kfd/kfd/topology/nodes/0/properties
+RUN: printf 'simd_count 416\ngfx_target_version 90010\ndrm_render_minor 128\n' > %t/sys/class/kfd/kfd/topology/nodes/1/properties
+RUN: printf '1111\n' > %t/sys/class/kfd/kfd/topology/nodes/1/gpu_id
+RUN: printf 'simd_count 416\ngfx_target_version 90010\ndrm_render_minor 129\n' > %t/sys/class/kfd/kfd/topology/nodes/2/properties
+RUN: printf '2222\n' > %t/sys/class/kfd/kfd/topology/nodes/2/gpu_id
+RUN: printf 'simd_count 1216\ngfx_target_version 90402\ndrm_render_minor 130\n' > %t/sys/class/kfd/kfd/topology/nodes/3/properties
+RUN: printf '3333\n' > %t/sys/class/kfd/kfd/topology/nodes/3/gpu_id
+RUN: mkdir -p %t/sys/class/drm/renderD128/device %t/sys/class/drm/renderD129/device %t/sys/class/drm/renderD130/device
+RUN: printf '0\n' > %t/sys/class/drm/renderD128/device/gpu_busy_percent
+RUN: printf '0\n' > %t/sys/class/drm/renderD129/device/gpu_busy_percent
+RUN: printf '90\n' > %t/sys/class/drm/renderD130/device/gpu_busy_percent
+RUN: printf '1048576\n' > %t/sys/class/drm/renderD128/device/mem_info_vram_used
+RUN: printf '68702699520\n' > %t/sys/class/drm/renderD128/device/mem_info_vram_total
+RUN: mkdir -p %t/sys/class/kfd/kfd/proc/4242 %t/proc/4242
+RUN: printf '0\n' > %t/sys/class/kfd/kfd/proc/4242/vram_1111
+RUN: printf '2147483648\n' > %t/sys/class/kfd/kfd/proc/4242/vram_2222
+RUN: printf 'trainer\n' > %t/proc/4242/comm
+
+With no command, it lists the GPUs, numbered as the ROCm runtime numbers
+them, which skips the CPU's node.
+RUN: env -u ROCR_VISIBLE_DEVICES %with-gpus --root %t --samples 1 \
+RUN:   | FileCheck %s --check-prefix=LIST --match-full-lines --strict-whitespace
+LIST:GPU  arch      busy  memory used        other processes
+LIST-NEXT:0    gfx90a      0%       1/ 65520 MiB  free
+LIST-NEXT:1    gfx90a      0%       0/     0 MiB  busy: {{[^ ]+}} trainer (pid 4242, 2048 MiB)
+LIST-NEXT:2    gfx942     90%       0/     0 MiB  busy
+LIST-NOT:{{.}}
+
+--count takes free GPUs, and runs the command with ROCR_VISIBLE_DEVICES set.
+RUN: env -u ROCR_VISIBLE_DEVICES %with-gpus --root %t --samples 1 --count 1 -- printenv ROCR_VISIBLE_DEVICES 2>&1 \
+RUN:   | FileCheck %s --check-prefix=ONE --match-full-lines
+ONE:with-gpus: ROCR_VISIBLE_DEVICES=0 (gfx90a)
+ONE-NEXT:0
+RUN: env -u ROCR_VISIBLE_DEVICES not %with-gpus --root %t --samples 1 --count 2 -- true 2>&1 \
+RUN:   | FileCheck %s --check-prefix=TWO
+TWO: with-gpus: only 1 of the 2 GPUs asked for are free
+
+--gpus takes the GPUs named, if they are free, or with --force.
+RUN: env -u ROCR_VISIBLE_DEVICES not %with-gpus --root %t --samples 1 --gpus 0,1 -- true 2>&1 \
+RUN:   | FileCheck %s --check-prefix=USED
+USED: with-gpus: GPU 1 is in use; --force uses it anyway
+RUN: env -u ROCR_VISIBLE_DEVICES %with-gpus --root %t --samples 1 --gpus 0,1 --force --dry-run 2>&1 \
+RUN:   | FileCheck %s --check-prefix=FORCE
+FORCE: with-gpus: ROCR_VISIBLE_DEVICES=0,1 (gfx90a, gfx90a)
+RUN: env -u ROCR_VISIBLE_DEVICES %with-gpus --root %t --samples 1 --max-busy 95 --gpus 2 --dry-run 2>&1 \
+RUN:   | FileCheck %s --check-prefix=MAX
+MAX: with-gpus: ROCR_VISIBLE_DEVICES=2 (gfx942)
+
+A run holds its GPUs until it ends, so another of the user's runs cannot take
+them meanwhile.
+RUN: env -u ROCR_VISIBLE_DEVICES %with-gpus --root %t --samples 1 --gpus 0 -- env -u ROCR_VISIBLE_DEVICES not %with-gpus --root %t --samples 1 --gpus 0 -- true 2>&1 \
+RUN:   | FileCheck %s --check-prefix=HELD
+HELD: with-gpus: another of your runs holds GPU 0
+
+Errors.
+RUN: env -u ROCR_VISIBLE_DEVICES not %with-gpus --root %t --samples 1 --gpus 5 -- true 2>&1 \
+RUN:   | FileCheck %s --check-prefix=NONE
+NONE: with-gpus: there is no GPU 5; the machine has 3
+RUN: env ROCR_VISIBLE_DEVICES=3 not %with-gpus --root %t --samples 1 --count 1 -- true 2>&1 \
+RUN:   | FileCheck %s --check-prefix=SET
+SET: with-gpus: ROCR_VISIBLE_DEVICES is already set, to 3; unset it, as this script numbers every GPU
+RUN: env -u ROCR_VISIBLE_DEVICES not %with-gpus --root %t/missing --samples 1 2>&1 \
+RUN:   | FileCheck %s --check-prefix=EMPTY
+EMPTY: with-gpus: no GPU found in the KFD topology

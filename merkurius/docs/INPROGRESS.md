@@ -3194,25 +3194,66 @@ orders of magnitude near the set's boundary, unpredictably, so stealing beats a
 split in advance. No tiles start or end, so it tests balancing alone, and is
 simple to write and check.
 
-**Steps,** for discussion:
+**Steps.** Decided 2026-11-10 (the user): the work heads for this demo, and
+its reference is in C or Fortran.
 
-1. A sequential reference in Mercury, on the CPU, and a dense version on one
-   GPU, for Life and then for the front.
-2. Sparse tiles on one place: tiles start and end, one GPU process.
-3. The Mandelbrot zoom with stealing between several places.
-4. Several places with a directory, growing, shrinking and moving tiles, on one
+1. **References,** for Life and then for the front: a program in C or
+   Fortran with OpenMP offload, the bar to measure against, and the same
+   program in Mercury, dense, on one GPU. The two together say whether
+   Mercury's code is slower, which the process-oriented version would have to
+   make up for, before any process is involved.
+2. **Two places over TCP, to try things out:** two nodes on one machine, over
+   loopback, each with the GPU (Remote handles and TCP), the tiles split
+   between them and halos as messages. It needs no second GPU.
+3. Sparse tiles on one place: tiles start and end, one GPU process.
+4. The Mandelbrot zoom with stealing between several places.
+5. Several places with a directory, growing, shrinking and moving tiles, on one
    GPU at first (below).
-5. Several GPUs and nodes, against the MPI+HIP program, when the machines exist.
-6. Recovery from a killed place.
+6. Several GPUs, on the shared machine (below), and then several nodes,
+   against the MPI+HIP program.
+7. Recovery from a killed place.
 
 **What it needs.** It uses GPU processes, `spawn_<kind>_at`, flat messages and
 arrays, which exist. It also needs the place table and routing by place (GPU
 processes without `omp target`, steps 5b to 5d), flat records and packed
-messages, monitors across places, and for steps 5 and 6, several GPUs.
+messages, monitors across places, and for steps 6 and 7, several GPUs.
+
+**Running on a shared machine.** Development moves to a machine of about
+eight GPUs that others use too, of which 3 or 4 are ours (the user,
+2026-11-10). So:
+
+- `utils/gpu/with-gpus.py` runs a command on GPUs that no other process has
+  memory on and that are idle, by KFD's files in sysfs, and sets
+  `ROCR_VISIBLE_DEVICES` to them, which the ROCm runtime honours below
+  OpenMP's offloading and liboffload alike. It holds a lock on each until the
+  command ends, so two of one user's runs never share a GPU. Every test,
+  benchmark and demo run goes through it.
+- lit passes `ROCR_VISIBLE_DEVICES` and `HIP_VISIBLE_DEVICES` to the tests,
+  which it dropped before, and runs at most four `-gpu.test` files at once.
+- **Target IDs with features,** such as `gfx90a:xnack-`, are reported by the
+  driver for now. The device's bitcode carries no target features, and the
+  image's link gives LTO only the processor, so a feature would be dropped.
+  Carrying them means setting `target-cpu` and `target-features` on each
+  device function, as Clang does. Code for the processor alone is for "any",
+  and runs with xnack and sramecc on or off.
+- **Its hardware,** from `rocminfo` (2026-11-10): eight gfx90a dies of 104
+  compute units, four MI250 packages of two, each die a GPU of its own with
+  64 GB of HBM, 8 MB of L2 and lines of 128 bytes; ISA
+  `gfx90a:sramecc+:xnack-`, XNACK off. Waves of 64, not 32: 4 SIMDs and at
+  most 32 waves a compute unit, 64 KB of LDS a workgroup, so a team of 256
+  threads is 4 waves. Coarse-grained, fine-grained and extended fine-grained
+  device memory; fine-grained gives the coherence and atomics at system scope
+  that rings in a peer's memory need. The host: two EPYC 7713, 128 cores in
+  16 NUMA nodes, about 1 TB, so builds and lit runs there give `-j`.
+- **Which GPUs:** two whole packages, four dies, give both links, between a
+  package's dies and between packages, for the route table's choice. Which
+  dies share a package is to confirm with `rocm-smi --showtopo`.
+- To expect: memory coherence unlike gfx10's, including the L2 cache that
+  array copies work around, and other occupancy.
 
 **Open.**
 
-- *Several places on one GPU,* to develop steps 3 and 4 here: several GPU
+- *Several places on one GPU,* to develop steps 4 and 5 here: several GPU
   processes, or queues each limited to some of the compute units by ROCr's
   `hsa_amd_queue_cu_set_mask`, as "virtual GPUs". Untried. This GPU drives the
   display, so it starts small.
