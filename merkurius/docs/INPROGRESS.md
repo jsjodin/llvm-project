@@ -3210,6 +3210,52 @@ and a launch, 15 to 40 µs, every loop.
 tested together; (c); (d) in parts; (e) and (f). Then sparse Life (demo,
 step 3) on them.
 
+**(a) and (b) done 2026-11-11,** in `offload/plugins-nextgen/amdgpu`. What
+differs from the plan:
+- **The mask is the plugin's own, `LIBOMPTARGET_AMDGPU_CU_MASK`,** a list
+  of compute units and ranges, such as `0-39`, or a mask in hexadecimal, as
+  `HSA_CU_MASK` takes for one GPU. The plugin applies it to each queue it
+  creates (`hsa_amd_queue_cu_set_mask`). `HSA_CU_MASK` does confine the
+  work (a probe of the work group processors that groups ran on, by
+  `HW_ID1`), but ROCr up to 7.2 does not record a mask it applies:
+  `SetCUMasking` returns after applying it without updating the mask that
+  `hsa_amd_queue_cu_get_mask` reports, which is then empty (ROCr's main
+  branch records it). The plugin takes the queue's mask when it applied
+  none, and refuses a cooperative launch, saying why, when that mask is
+  empty. A mask that `HSA_CU_MASK` reduces is an error, as the plugin
+  would count compute units the queue lacks.
+- **Counted by shader engine.** The hardware deals work groups to the
+  shader engines in turn and waits for one that is full, so an engine with
+  fewer compute units than the others limits them all. Measured: with
+  compute units 0-19, which the kernel driver deals in pairs to the four
+  engines in turn (6, 6, 4 and 4 compute units; `mqd_symmetrically_map_cu_mask`
+  in amdkfd), 260 groups of two waves were resident at once, against 320
+  that the compute units hold; with 0-39 (10 each), all 640. So the count
+  is the engines the mask uses, times the fewest compute units any of them
+  has, times the groups a compute unit holds. It assumes the compute units
+  are spread evenly over the shader arrays and one XCC, and refuses a
+  cooperative launch otherwise, saying why.
+- **Groups a compute unit holds,** by LLVM's limits, from
+  `AMDGPUTargetParser`: waves a SIMD holds, VGPRs (with AGPRs on processors
+  with a unified register file), SGPRs before gfx10, 16 barriers for
+  groups of more than one wave, and LDS. A group's waves are taken to share
+  the SIMDs of one compute unit, which counts fewer than a work group
+  processor holds, never more (one-wave groups: 16 a compute unit counted,
+  32 fit).
+- **Not done:** cooperative queues (`HSA_QUEUE_TYPE_COOPERATIVE`), which
+  gfx1030 lacks; `utils/gpu/with-gpus.py` setting a mask, as the
+  environment variable is enough.
+- **Tests:** liboffload's unit tests (`olLaunchKernelCooperative.cpp`), with
+  `AllGroupsResident`: the most groups that a cooperative launch allows, of
+  32 to 1024 threads, meet at a barrier across the grid, each waiting a
+  bounded time, so a group that is not resident fails the test instead of
+  hanging the GPU. It passes on the whole GPU and with the masks 0-39,
+  20-39, 0-19, 0-21, 0-7 and 0x3. The unit tests are built by hand here, as
+  the build also wants their SPIR-V device code, which needs a SPIR-V target
+  this build does not have. Offload's lit suite is not run on the gfx1030:
+  its tests that crash kernels on purpose reset the GPU that drives the
+  display (2026-11-11), so it waits for the shared machine.
+
 **Open.**
 - *Which teams a loop uses:* all the kernel's, or fewer for a small loop.
 - *Arrays a process makes* are in its arena, in device memory, which every

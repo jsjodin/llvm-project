@@ -11,8 +11,10 @@
 #include <gtest/gtest.h>
 
 struct olLaunchKernelCooperativeTest : LaunchSingleKernelTestBase {
-  void SetUp() override {
-    SetUpKernel("noargs");
+  void SetUp() override { SetUpKernelWithSupport("noargs"); }
+
+  void SetUpKernelWithSupport(const char *KernelName) {
+    RETURN_ON_FATAL_FAILURE(SetUpKernel(KernelName));
 
     bool SupportsCooperative = false;
     auto Result =
@@ -117,4 +119,47 @@ TEST_P(olLaunchKernelCooperativeTest, InvalidNullPointerGroupCountRet) {
   ASSERT_ERROR(OL_ERRC_INVALID_NULL_POINTER,
                olGetKernelMaxCooperativeGroupCount(Device, Kernel, &LaunchArgs,
                                                    nullptr));
+}
+
+struct olLaunchKernelCooperativeBarrierTest : olLaunchKernelCooperativeTest {
+  void SetUp() override {
+    RETURN_ON_FATAL_FAILURE(SetUpKernelWithSupport("cooperative_barrier"));
+  }
+};
+OFFLOAD_TESTS_INSTANTIATE_DEVICE_FIXTURE(olLaunchKernelCooperativeBarrierTest);
+
+// All the work groups of a cooperative launch of the most it allows meet at a
+// barrier across the grid, for groups of one wave and of several.
+TEST_P(olLaunchKernelCooperativeBarrierTest, AllGroupsResident) {
+  void *Mem;
+  ASSERT_SUCCESS(olMemAlloc(Context, Device, OL_ALLOC_TYPE_MANAGED,
+                            2 * sizeof(uint32_t), &Mem));
+  uint32_t *Arrived = static_cast<uint32_t *>(Mem);
+  uint32_t *TimedOut = Arrived + 1;
+  void *ArgPtrs[] = {&Arrived, &TimedOut};
+  size_t ArgSizes[] = {sizeof(Arrived), sizeof(TimedOut)};
+
+  for (uint32_t Threads : {32u, 64u, 256u, 1024u}) {
+    LaunchArgs.GroupSize = {Threads, 1, 1};
+    uint32_t MaxGroupCount = 0;
+    ASSERT_SUCCESS(olGetKernelMaxCooperativeGroupCount(
+        Device, Kernel, &LaunchArgs, &MaxGroupCount));
+    ASSERT_GT(MaxGroupCount, 0u);
+    LaunchArgs.NumGroups.x = MaxGroupCount;
+
+    *Arrived = 0;
+    *TimedOut = 0;
+    bool IsCooperative = true;
+    ol_kernel_launch_prop_t Props[] = {
+        {OL_KERNEL_LAUNCH_PROP_TYPE_IS_COOPERATIVE, &IsCooperative},
+        OL_KERNEL_LAUNCH_PROP_END};
+    ASSERT_SUCCESS(olLaunchKernel(Queue, Device, Kernel, &LaunchArgs, Props,
+                                  std::size(ArgPtrs), ArgPtrs, ArgSizes));
+    ASSERT_SUCCESS(olSyncQueue(Queue));
+    EXPECT_EQ(*TimedOut, 0u)
+        << Threads << " threads, " << MaxGroupCount << " groups";
+    EXPECT_EQ(*Arrived, MaxGroupCount);
+  }
+
+  ASSERT_SUCCESS(olMemFree(Context, Mem));
 }

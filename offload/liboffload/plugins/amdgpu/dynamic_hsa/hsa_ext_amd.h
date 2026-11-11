@@ -99,9 +99,13 @@ typedef enum hsa_amd_agent_info_s {
   HSA_AMD_AGENT_INFO_PRODUCT_NAME = 0xA009,
   HSA_AMD_AGENT_INFO_MAX_WAVES_PER_CU = 0xA00A,
   HSA_AMD_AGENT_INFO_NUM_SIMDS_PER_CU = 0xA00B,
+  HSA_AMD_AGENT_INFO_NUM_SHADER_ENGINES = 0xA00C,
+  HSA_AMD_AGENT_INFO_NUM_SHADER_ARRAYS_PER_SE = 0xA00D,
   HSA_AMD_AGENT_INFO_COOPERATIVE_QUEUES = 0xA010,
   HSA_AMD_AGENT_INFO_UUID = 0xA011,
+  HSA_AMD_AGENT_INFO_COOPERATIVE_COMPUTE_UNIT_COUNT = 0xA014,
   HSA_AMD_AGENT_INFO_TIMESTAMP_FREQUENCY = 0xA016,
+  HSA_AMD_AGENT_INFO_NUM_XCC = 0xA111,
   HSA_AMD_AGENT_INFO_NEAREST_CPU = 0xA113,
   HSA_AMD_AGENT_INFO_MEMORY_PROPERTIES = 0xA114,
 } hsa_amd_agent_info_t;
@@ -259,6 +263,16 @@ hsa_amd_profiling_get_dispatch_time(hsa_agent_t agent, hsa_signal_t signal,
 
 hsa_status_t hsa_amd_profiling_set_profiler_enabled(hsa_queue_t *queue,
                                                     int enable);
+
+enum { HSA_STATUS_CU_MASK_REDUCED = 44 };
+
+hsa_status_t hsa_amd_queue_cu_set_mask(const hsa_queue_t *queue,
+                                       uint32_t num_cu_mask_count,
+                                       const uint32_t *cu_mask);
+
+hsa_status_t hsa_amd_queue_cu_get_mask(const hsa_queue_t *queue,
+                                       uint32_t num_cu_mask_count,
+                                       uint32_t *cu_mask);
 
 typedef struct hsa_amd_profiling_async_copy_time_s {
   uint64_t start;
