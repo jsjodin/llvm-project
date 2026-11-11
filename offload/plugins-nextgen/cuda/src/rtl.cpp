@@ -1533,6 +1533,12 @@ Error CUDAKernelTy::launchImpl(GenericDeviceTy &GenericDevice,
     MaxDynBlockMemSize = DynBlockMemSize;
   }
 
+  // CUDA's stack size is the context's (cuCtxSetLimit), not a launch's.
+  if (LaunchArgs.StackSize)
+    return Plugin::error(ErrorCode::UNSUPPORTED,
+                         "a kernel launch's stack size is not supported for "
+                         "CUDA");
+
   CUlaunchAttribute CoopAttr;
   CoopAttr.id = CU_LAUNCH_ATTRIBUTE_COOPERATIVE;
   CoopAttr.value.cooperative = LaunchArgs.Flags.Cooperative;

@@ -90,6 +90,10 @@ struct GenELF64KernelTy : public GenericKernelTy {
     if (LaunchArgs.Flags.Cooperative)
       return Plugin::error(ErrorCode::UNSUPPORTED,
                            "cooperative kernel launch not supported for host");
+    if (LaunchArgs.StackSize)
+      return Plugin::error(ErrorCode::UNSUPPORTED,
+                           "a kernel launch's stack size is not supported for "
+                           "host");
     // TODO: The data will need to be copied locally if we ever support
     //       asynchronous kernel launches in the host interface.
     Func(LaunchArgs.Args);

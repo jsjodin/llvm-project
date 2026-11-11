@@ -30,7 +30,11 @@ def ol_kernel_launch_prop_type_t : Enum {
   let is_typed = 1;
   let etors =
       [TaggedEtor<"none", "void *", "Used for null terminating property array">,
-       TaggedEtor<"is_cooperative ", "bool *", "Cooperative kernel launch">];
+       TaggedEtor<"is_cooperative ", "bool *", "Cooperative kernel launch">,
+       TaggedEtor<"stack_size", "uint64_t *",
+                  "Bytes of stack for each thread of a kernel whose stack size "
+                  "is not fixed, instead of the device's; a kernel with a "
+                  "fixed stack size uses its own">];
 }
 
 def ol_kernel_launch_prop_t : Struct {

@@ -29,6 +29,7 @@ KERNEL_TEST(GlobalCtor, global_ctor)
 KERNEL_TEST(GlobalDtor, global_dtor)
 KERNEL_TEST(GridSize, gridsize)
 KERNEL_TEST(ByValPtr, byval_ptr)
+KERNEL_TEST(Recursive, recursive)
 
 struct LaunchMultipleKernelTestBase : LaunchKernelTestBase {
   void SetUpKernels(const char *program, std::vector<const char *> kernels) {
@@ -525,4 +526,47 @@ TEST_P(olLaunchKernelGridSizeTest, Success) {
   }
 
   ASSERT_SUCCESS(olMemFree(Context, Mem));
+}
+
+TEST_P(olLaunchKernelRecursiveTest, SuccessStackSize) {
+  void *Mem;
+  ASSERT_SUCCESS(olMemAlloc(Context, Device, OL_ALLOC_TYPE_MANAGED,
+                            LaunchArgs.GroupSize.x * sizeof(uint32_t), &Mem));
+  uint32_t Depth = 10;
+  void *ArgPtrs[] = {&Mem, &Depth};
+  size_t ArgSizes[] = {sizeof(Mem), sizeof(Depth)};
+  uint64_t StackSize = 4096;
+  ol_kernel_launch_prop_t Props[] = {
+      {OL_KERNEL_LAUNCH_PROP_TYPE_STACK_SIZE, &StackSize},
+      OL_KERNEL_LAUNCH_PROP_END};
+
+  auto *Result = olLaunchKernel(Queue, Device, Kernel, &LaunchArgs, Props,
+                                std::size(ArgPtrs), ArgPtrs, ArgSizes);
+  if (getPlatformBackend() != OL_PLATFORM_BACKEND_AMDGPU) {
+    ASSERT_ERROR(OL_ERRC_UNSUPPORTED, Result);
+    ASSERT_SUCCESS(olMemFree(Context, Mem));
+    return;
+  }
+  ASSERT_SUCCESS(Result);
+  ASSERT_SUCCESS(olSyncQueue(Queue));
+
+  uint32_t *Data = static_cast<uint32_t *>(Mem);
+  for (uint32_t I = 0; I < LaunchArgs.GroupSize.x; ++I)
+    ASSERT_EQ(Data[I], Depth * (Depth + 1) / 2);
+
+  ASSERT_SUCCESS(olMemFree(Context, Mem));
+}
+
+TEST_P(olLaunchKernelRecursiveTest, InvalidZeroStackSize) {
+  void *Mem = nullptr;
+  uint32_t Depth = 1;
+  void *ArgPtrs[] = {&Mem, &Depth};
+  size_t ArgSizes[] = {sizeof(Mem), sizeof(Depth)};
+  uint64_t StackSize = 0;
+  ol_kernel_launch_prop_t Props[] = {
+      {OL_KERNEL_LAUNCH_PROP_TYPE_STACK_SIZE, &StackSize},
+      OL_KERNEL_LAUNCH_PROP_END};
+  ASSERT_ERROR(OL_ERRC_INVALID_ARGUMENT,
+               olLaunchKernel(Queue, Device, Kernel, &LaunchArgs, Props,
+                              std::size(ArgPtrs), ArgPtrs, ArgSizes));
 }

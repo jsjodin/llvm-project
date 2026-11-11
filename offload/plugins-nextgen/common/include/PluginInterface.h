@@ -342,6 +342,9 @@ struct KernelLaunchArgsTy {
     uint64_t Cooperative : 1; // Was this kernel spawned as cooperative.
     uint64_t Unused : 63;
   } Flags = {0, 0};
+  /// Bytes of stack for each thread of a kernel whose stack size is not
+  /// fixed, or 0 for the device's.
+  uint64_t StackSize = 0;
 };
 
 /// Class implementing common functionalities of offload kernels. Each plugin

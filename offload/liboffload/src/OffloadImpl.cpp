@@ -1545,6 +1545,13 @@ Error olLaunchKernel_impl(ol_queue_handle_t Queue, ol_device_handle_t Device,
       LaunchArgs.Flags.Cooperative =
           *reinterpret_cast<const bool *>(Properties->data);
       break;
+    case OL_KERNEL_LAUNCH_PROP_TYPE_STACK_SIZE:
+      LaunchArgs.StackSize =
+          *reinterpret_cast<const uint64_t *>(Properties->data);
+      if (LaunchArgs.StackSize == 0)
+        return createOffloadError(ErrorCode::INVALID_ARGUMENT,
+                                  "olLaunchKernel stack size must not be 0");
+      break;
     default:
       return createOffloadError(ErrorCode::INVALID_ENUMERATION,
                                 "olLaunchKernel property enum '%i' is invalid",

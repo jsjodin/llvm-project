@@ -5225,9 +5225,10 @@ Error AMDGPUKernelTy::launchImpl(GenericDeviceTy &GenericDevice,
   if (auto Err = ArgsMemoryManager.allocate(ArgsSize, &AllArgs))
     return Err;
 
-  uint64_t StackSize;
-  if (auto Err = GenericDevice.getDeviceStackSize(StackSize))
-    return Err;
+  uint64_t StackSize = LaunchArgs.StackSize;
+  if (!StackSize)
+    if (auto Err = GenericDevice.getDeviceStackSize(StackSize))
+      return Err;
 
   // Copy explicit arguments.
   size_t ExplicitEnd = 0;
