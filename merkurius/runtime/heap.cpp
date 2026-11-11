@@ -53,7 +53,7 @@ std::size_t ReadChunkBytes() {
           "Mercury runtime: MERK_HEAP_CHUNK_BYTES=%s is not a number of at "
           "least 16\n",
           bytes);
-      std::exit(1);
+      merkurius::runtime::ExitProgram(1);
     }
     // A multiple of the word, so that cells stay aligned.
     chunk = static_cast<std::size_t>(value) & ~std::size_t{7};

@@ -47,6 +47,13 @@ doubler(Reply, Self, !IO) :-
         true
     ).
 
+    % Unifies through a type variable, which stops the program for closures.
+:- pred same(T::in, T::in) is semidet.
+:- pragma no_inline(same/2).
+
+same(X, Y) :-
+    X = Y.
+
 main(!IO) :-
     io.command_line_arguments(Args, !IO),
     new_mailbox(Me, !IO),
@@ -54,6 +61,15 @@ main(!IO) :-
         spawn_doubler_at(gpu(0), Me, _, !IO)
     else if Args = ["no-gpu"] then
         spawn_summer_at(gpu(1000000), 1, 0.5, 'A', Me, _, !IO)
+    else if Args = ["closures"] then
+        % The runtime stops the program while the process waits.
+        spawn_summer_at(gpu(0), 1, 0.5, 'A', Me, _, !IO),
+        P = (pred(X::out) is det :- X = 1),
+        ( if same(P, P) then
+            io.write_string("same\n", !IO)
+        else
+            true
+        )
     else if Args = ["leave"] then
         % main ends while the process waits for more.
         spawn_summer_at(gpu(0), 1, 0.5, 'A', Me, S, !IO),

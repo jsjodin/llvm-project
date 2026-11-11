@@ -911,7 +911,7 @@ extern "C" void merk_offload_start(void) {
           "Mercury runtime: MERK_TEAMS_STALL_MILLISECONDS is not a positive "
           "number of milliseconds: %s\n",
           stall);
-      std::exit(1);
+      merkurius::runtime::ExitProgram(1);
     }
     teamsStallMilliseconds = milliseconds;
   }

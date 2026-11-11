@@ -142,9 +142,11 @@ void Wake(Process *);
 // until this one is woken, or its deadline, if not negative, has passed.
 void Block(std::int64_t deadline);
 
-// Ends the program with this status. A target region still running must not
-// have libomptarget torn down under it, so then the library's destructors do
-// not run. Standard output is flushed either way.
+// Ends the program with this status. A target region or GPU process still
+// running must not have libomptarget or liboffload torn down under it, so
+// then the library's destructors do not run. Standard output is flushed
+// either way. Every way the runtime ends the program goes through it, as a
+// GPU's kernel reads host memory that the destructors free.
 [[noreturn]] void ExitProgram(int status);
 // Whether ExitProgram has been called: what a region does next would use what
 // is being torn down, so it stops instead (offload.cpp).

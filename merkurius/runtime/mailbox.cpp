@@ -60,7 +60,7 @@ using namespace merkurius::runtime;
 [[noreturn]] void Fail(const char *message, const char *detail) {
   std::fflush(stdout);
   std::fprintf(stderr, "Mercury runtime: %s%s\n", message, detail);
-  std::exit(1);
+  merkurius::runtime::ExitProgram(1);
 }
 
 // What a process that ended left for its monitor's owner, whose function

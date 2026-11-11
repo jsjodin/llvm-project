@@ -116,7 +116,7 @@ constexpr std::size_t kReaderStackBytes{std::size_t{64} << 20};
 [[noreturn]] void Fail(const char *message, const char *detail) {
   std::fflush(stdout);
   std::fprintf(stderr, "Mercury runtime: %s%s\n", message, detail);
-  std::exit(1);
+  merkurius::runtime::ExitProgram(1);
 }
 
 void Put32(std::uint8_t *at, std::uint32_t value) {
