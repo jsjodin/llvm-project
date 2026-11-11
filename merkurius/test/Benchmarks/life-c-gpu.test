@@ -1,0 +1,15 @@
+The C version of Game of Life, which compare-c.sh runs against life.m, on
+the machine's GPU on a small grid, with cells of 8 bytes and of 1: the
+cells are the same as life.m's.
+REQUIRES: amdgpu-gpu
+
+RUN: clang -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/life/life.c -o %t64
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIFE_SIZE=300 LIFE_STEPS=25 %t64 | FileCheck %s --check-prefixes=CHECK,WIDE
+RUN: clang -O2 -fopenmp --offload-arch=%offload-arch -DCELL=uint8_t %libomp-flags %S/../../benchmarks/life/life.c -o %t8
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIFE_SIZE=300 LIFE_STEPS=25 %t8 | FileCheck %s --check-prefixes=CHECK,NARROW
+WIDE: Game of Life, C (int64_t)
+WIDE-NEXT: Grid: 300 x 300 cells, 8 bytes a cell
+NARROW: Game of Life, C (uint8_t)
+NARROW-NEXT: Grid: 300 x 300 cells, 1 bytes a cell
+CHECK: Population: 9339
+CHECK-NEXT: Checksum: 429141631
