@@ -1,0 +1,14 @@
+omp-target-region-slot-reuse.m on the machine's GPU, at -O0 and -O2: the
+region's slot, used by 600 regions one after another, is cleared by each
+region's device as it starts, and their chunks, which the host keeps, hold
+no earlier region's tables. Every chunk is back with the host at the end.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/omp-target-region-slot-reuse.m -o %t0
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 120 %t0 2>&1 \
+RUN:   | FileCheck %s --match-full-lines --strict-whitespace
+RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/omp-target-region-slot-reuse.m -o %t2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 120 %t2 2>&1 \
+RUN:   | FileCheck %s --match-full-lines --strict-whitespace
+CHECK:300 of 300 rounds were right
+CHECK-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated

@@ -179,12 +179,16 @@ bool TakeOldest(const std::uint64_t *handle, std::uint64_t &message) {
 // region that runs has a slot (device-ring.h), and the cells it makes on a
 // device are bumped from chunks of that slot, which go when it ends. Each
 // GPU process has an arena of its own, which goes when the process ends.
+struct ArenaChunk {
+  void *address;
+  std::uint64_t bytes;
+};
 struct DeviceArena {
   int device;
   std::uint64_t address;
   // The region's slot, or kNoRegionSlot.
   std::uint64_t region;
-  void **chunks;
+  ArenaChunk *chunks;
   std::uint64_t count, capacity, bytes;
 };
 pthread_mutex_t arenaLock = PTHREAD_MUTEX_INITIALIZER;
@@ -196,6 +200,8 @@ std::uint64_t runningRegions{0};
 // for one waits on, with arenaLock.
 bool regionSlotTaken[kRegionSlots];
 std::uint64_t regionSlotsTaken{0};
+// Each slot's last generation (device-ring.h).
+std::uint64_t regionSlotGeneration[kRegionSlots];
 pthread_cond_t regionSlotFreed = PTHREAD_COND_INITIALIZER;
 
 // The mailboxes' rings that are allocated, which MERK_CHECK_DEVICE_MEMORY
@@ -208,6 +214,22 @@ struct RingOfDevice {
 };
 RingOfDevice *rings{nullptr};
 std::uint64_t ringCount{0}, ringCapacity{0};
+
+// Chunks of kChunkBytes that arenas have finished with, kept for the next
+// that asks on the same device, with arenaLock: a target region allocates
+// its first chunk when it first makes a cell, and an allocation and a free
+// on the device each take tens of microseconds, which a short region, such
+// as one that sends a halo every step, would otherwise pay every time.
+// At most kPooledChunks for each device are kept; they count towards
+// arenaBytes, and go when an allocation would pass the limit.
+constexpr std::uint64_t kPooledChunks{16};
+struct ChunkPool {
+  int device;
+  std::uint64_t count;
+  void *chunks[kPooledChunks];
+};
+ChunkPool *pools{nullptr};
+std::uint64_t poolCount{0}, poolCapacity{0};
 
 // How many bytes of chunks the devices may hold at once, all told: a
 // program that allocates without end would otherwise fill the device's
@@ -247,36 +269,83 @@ DeviceArena &ArenaOf(int device, std::uint64_t address, std::uint64_t region) {
   return arenas[arenaCount++];
 }
 
+// The device's pool of chunks, with arenaLock held.
+ChunkPool &PoolOf(int device) {
+  for (std::uint64_t i{0}; i < poolCount; ++i) {
+    if (pools[i].device == device) {
+      return pools[i];
+    }
+  }
+  Reserve(pools, poolCount, poolCapacity);
+  pools[poolCount] = {device, 0, {}};
+  return pools[poolCount++];
+}
+
+// With arenaLock held: frees every pooled chunk, of every device.
+void FreePools() {
+  for (std::uint64_t i{0}; i < poolCount; ++i) {
+    ChunkPool &pool{pools[i]};
+    for (std::uint64_t j{0}; j < pool.count; ++j) {
+      DeviceFree(pool.device, pool.chunks[j]);
+    }
+    arenaBytes -= pool.count * kChunkBytes;
+    pool.count = 0;
+  }
+}
+
+// With arenaLock held: a pooled chunk of the device, or null.
+void *PooledChunk(int device) {
+  ChunkPool &pool{PoolOf(device)};
+  return pool.count == 0 ? nullptr : pool.chunks[--pool.count];
+}
+
 // A chunk of `bytes` on the device, for its arena at `address`, which is the
-// region's of that slot, or none.
+// region's of that slot, or none: a pooled one if it is of kChunkBytes and
+// the device has one, which needs no call to the device.
 void *NewChunk(int device, std::uint64_t address, std::uint64_t bytes,
     std::uint64_t region) {
   pthread_mutex_lock(&arenaLock);
-  arenaBytes += bytes;
-  bool tooMany{arenaBytes > arenaLimit};
-  pthread_mutex_unlock(&arenaLock);
-  if (tooMany) {
-    Fail("the devices' arenas are full: see MERK_DEVICE_ARENA_BYTES");
-  }
-  void *chunk{DeviceAllocate(device, bytes)};
+  void *chunk{bytes == kChunkBytes ? PooledChunk(device) : nullptr};
   if (!chunk) {
-    Fail("out of memory on a device, for its arena");
+    arenaBytes += bytes;
+    if (arenaBytes > arenaLimit) {
+      FreePools();
+    }
+    bool tooMany{arenaBytes > arenaLimit};
+    pthread_mutex_unlock(&arenaLock);
+    if (tooMany) {
+      Fail("the devices' arenas are full: see MERK_DEVICE_ARENA_BYTES");
+    }
+    chunk = DeviceAllocate(device, bytes);
+    if (!chunk) {
+      Fail("out of memory on a device, for its arena");
+    }
+    pthread_mutex_lock(&arenaLock);
   }
-  pthread_mutex_lock(&arenaLock);
   DeviceArena &arena{ArenaOf(device, address, region)};
   Reserve(arena.chunks, arena.count, arena.capacity);
-  arena.chunks[arena.count++] = chunk;
+  arena.chunks[arena.count++] = {chunk, bytes};
   arena.bytes += bytes;
   pthread_mutex_unlock(&arenaLock);
   return chunk;
 }
 
+// With arenaLock held: the arena's chunks go to its device's pool while it
+// has room for those of kChunkBytes, and are freed otherwise.
 void FreeChunks(DeviceArena &arena) {
+  ChunkPool &pool{PoolOf(arena.device)};
+  std::uint64_t pooled{0};
   for (std::uint64_t j{0}; j < arena.count; ++j) {
-    DeviceFree(arena.device, arena.chunks[j]);
+    const ArenaChunk &chunk{arena.chunks[j]};
+    if (chunk.bytes == kChunkBytes && pool.count < kPooledChunks) {
+      pool.chunks[pool.count++] = chunk.address;
+      pooled += chunk.bytes;
+    } else {
+      DeviceFree(arena.device, chunk.address);
+    }
   }
   arena.count = 0;
-  arenaBytes -= arena.bytes;
+  arenaBytes -= arena.bytes - pooled;
   arena.bytes = 0;
 }
 
@@ -303,16 +372,16 @@ void FreeArenas() {
 }
 
 // With arenaLock held, as the region of the slot ends: the chunks of its
-// cells on each device go, and the slot is cleared for the next region.
+// cells on each device go. The next region of the slot clears its words on
+// the device (device-ring.h).
 void FreeRegionArenas(std::uint64_t region) {
-  static_assert(kRegionSlotWords <= kArenaClearWords);
   for (std::uint64_t i{0}; i < arenaCount;) {
     DeviceArena &arena{arenas[i]};
     if (arena.region != region) {
       ++i;
       continue;
     }
-    ClearArena(arena, kRegionSlotWords);
+    FreeChunks(arena);
     std::free(arena.chunks);
     arena = arenas[--arenaCount];
   }
@@ -768,8 +837,9 @@ void FreeRing(int device, DeviceRing *ring) {
 } // namespace merkurius::runtime
 
 // Before a target region: counts it, and gives it a slot for the cells it
-// makes on a device, which it passes to the device (merk_device_region_enter)
-// and back to merk_region_exit.
+// makes on a device, with the slot's next generation (device-ring.h), which
+// it passes to the device (merk_device_region_enter) and back to
+// merk_region_exit.
 extern "C" std::int64_t merk_region_enter(void) {
   merkurius::runtime::Pin();
   pthread_mutex_lock(&arenaLock);
@@ -783,15 +853,18 @@ extern "C" std::int64_t merk_region_enter(void) {
   regionSlotTaken[slot] = true;
   ++regionSlotsTaken;
   ++runningRegions;
+  std::uint64_t generation{regionSlotGeneration[slot] % 0xfffffffe + 1};
+  regionSlotGeneration[slot] = generation;
   pthread_mutex_unlock(&arenaLock);
   // After the count, so that ExitProgram sees the region or the region sees
   // that the program is ending.
   StopIfProgramEnding();
-  return static_cast<std::int64_t>(slot);
+  return static_cast<std::int64_t>(slot | generation << 32);
 }
 
 // After a target region, whose device has finished with what it made.
-extern "C" void merk_region_exit(std::int64_t slot) {
+extern "C" void merk_region_exit(std::int64_t word) {
+  std::uint64_t slot{RegionSlotNumber(static_cast<std::uint64_t>(word))};
   StopIfProgramEnding();
   merk_mailbox_region_ended(static_cast<std::uint64_t>(slot));
   pthread_mutex_lock(&arenaLock);
