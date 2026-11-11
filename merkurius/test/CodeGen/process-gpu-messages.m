@@ -6,7 +6,8 @@
 % takes add(N) and get(Reply); two processes on the GPU play ping-pong
 % through the host's mailboxes; and a summer takes an array and answers
 % with its sum. A message that is not flat, or a value that a GPU process
-% makes that is not, is an error at compile time (process-gpu-flat-errors.m).
+% makes that is not, is an error at compile time
+% (test/Semantics/processes/gpu-flat.m).
 % With "many", two hundred summers each take one message of the two they are
 % sent and end, after which none of the host's copies of their messages is
 % left (MERK_CHECK_PINNED), nor any of the messages, those the GPU took and

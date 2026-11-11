@@ -32,6 +32,7 @@
 #include "merkurius/Parser/term.h"
 #include "merkurius/Parser/unparse.h"
 #include "merkurius/Semantics/check-determinism.h"
+#include "merkurius/Semantics/check-gpu-code.h"
 #include "merkurius/Semantics/check-uniqueness.h"
 #include "merkurius/Semantics/check-modes.h"
 #include "merkurius/Semantics/check-purity.h"
@@ -164,7 +165,8 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, Config config) {
       merkurius::semantics::ResolveNames(
           expanded, tokens, semanticForm, loader, messages)};
   // And type checking, purity checking, mode checking, determinism
-  // analysis, uniqueness checking and polymorphism analysis.
+  // analysis, uniqueness checking, the checks of GPU code and polymorphism
+  // analysis.
   std::unique_ptr<merkurius::semantics::TypeChecking> checking{
       merkurius::semantics::CheckTypes(
           semanticForm, *resolution, tokens, messages)};
@@ -181,6 +183,8 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, Config config) {
       merkurius::semantics::CheckDeterminism(
           tokens, *checking, *modes, messages, !earlier)};
   merkurius::semantics::CheckUniqueness(tokens, *modes, *determinism, messages);
+  merkurius::semantics::CheckGpuCode(expanded, tokens, *modes, *determinism,
+      modes->constructors(), messages);
   merkurius::semantics::AnalysePolymorphism(*checking, *modes, *determinism);
   return result;
 }
