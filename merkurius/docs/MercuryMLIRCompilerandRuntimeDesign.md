@@ -4236,8 +4236,9 @@ before them under `target data`, two rounds, in GB/s, 2026-11-11 at
 - **Not for stencils:** Life's C program with its arrays 8 bytes off took the
   same time and fetched the same bytes (Dense stencils, above), since its
   rows are read from the cache again.
-- **Mercury is 17% below C off by 8** on Copy, which is not explained; its Dot
-  is above it, 476 against 437, which the barrier after each round may give.
+- **Off by 8, Mercury is 17% below C** on Copy, but aligned it is level
+  with C (below), so the misalignment costs Mercury's loop more than C's;
+  why is not known. Its Dot is above C's off by 8, 476 against 437.
 - **Not changed yet.** Aligning a large array's elements would pad it before
   its size word and map it from the padding, and every allocation of an
   array on the host would have to pad, the heap's, a message's and a
@@ -4246,7 +4247,23 @@ before them under `target data`, two rounds, in GB/s, 2026-11-11 at
   out, so it waits for them. A program can align a kernel's elements itself
   meanwhile: element 31 of an array is at 256 bytes on the device, as the
   size word is at the block's start, so an array 31 elements longer, indexed
-  from 31, should stream as C does; not measured yet.
+  from 31, has its elements aligned.
+
+`bandwidth.m` with its arrays 31 elements longer and its loops from 31, a
+copy written for this and not kept, against `bandwidth.m` as it is and
+`bandwidth.c`, three rounds taking turns, the median of each kernel's best of
+100, in GB/s, 2026-11-11 at 5192433284b7; its check passed:
+
+| Kernel | Mercury | Indexed from 31 | C | From 31, against C |
+| --- | --- | --- | --- | --- |
+| Copy | 340 | 542 | 531 | 2% faster |
+| Mul | 326 | 470 | 456 | 3% faster |
+| Add | 372 | 474 | 89 | 5.3 times as fast |
+| Triad | 370 | 486 | 89 | 5.5 times as fast |
+| Dot | 475 | 486 | 521 | 7% slower |
+
+With its elements aligned, Mercury's streaming kernels are as fast as C's,
+and Add and Triad gain about 30% too. Only Dot, a reduction, stays behind.
 
 ### Message latency
 
