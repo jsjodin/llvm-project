@@ -89,6 +89,7 @@ TEST_P(olCreateQueueWithComputeUnitMaskTest, SuccessDestroyedBusy) {
 
 // The kernels of two queues of one mask run at once: each waits for the
 // other's flag, and gives up and reports it if they run one after the other.
+// The kernel uses no scratch: on AMDGPU, a kernel that does may run alone.
 TEST_P(olCreateQueueWithComputeUnitMaskTest, SuccessSameMaskConcurrent) {
   std::unique_ptr<llvm::MemoryBuffer> Bin;
   ASSERT_TRUE(TestEnvironment::loadDeviceBinary("wait_for_peer", Device, Bin));
