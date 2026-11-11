@@ -27,6 +27,7 @@
 % RUN: merkc -c -fprocess-declarations --offload-arch=gfx1030 -save-temps=obj %s -o %t.dir/p.o
 % RUN: llvm-readelf --dyn-syms %t.dir/process-kernels-gfx1030-processes.elf | FileCheck %s --check-prefix=IMAGE
 % RUN: llvm-readelf --dyn-syms %t.dir/process-kernels-gfx1030-processes.elf | not grep -E ' UND +[^ ]' 
+% RUN: llvm-readelf --notes %t.dir/process-kernels-gfx1030-processes.elf | FileCheck %s --check-prefix=STACK
 
 :- module process_kernels.
 :- interface.
@@ -115,6 +116,11 @@ main(!IO) :-
 % HOST-NEXT:@llvm.global_ctors = appending global [2 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @process_kernels.merk_register_message_types.c, ptr null }, { i32, ptr, ptr } { i32 65535, ptr @process_kernels.merk_register_process_images.c, ptr null }]
 % HOST:  {{(tail )?}}call void @merk_register_message_type(i64 -7556727498917921977, ptr {{(nonnull )?}}@"merk.type_ctor.int/0")
 % HOST:  {{(tail )?}}call void @merk_register_process_image(ptr {{(nonnull )?}}@process_kernels.merk_process_image.module, ptr {{(nonnull )?}}@process_kernels.merk_process_image.gfx1030.gpu, ptr {{(nonnull )?}}@process_kernels.merk_process_image.gfx1030, i64 5, ptr {{(nonnull )?}}@process_kernels.merk_process_image.kinds)
+
+% The kernel's stack is a fixed size: a dynamic one, which a call of a
+% function that is not norecurse gives it, has scratch that the GPU may not
+% hold for all its teams at once (process-teams-gpu.test).
+% STACK: .uses_dynamic_stack: false
 
 % The image exports the kernel and what the plugin and the runtime look up.
 % IMAGE-DAG:{{.*}} GLOBAL PROTECTED {{.*}} merk_place

@@ -57,6 +57,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <pthread.h>
 
 extern "C" void merk_node(std::int64_t *high, std::int64_t *low);
@@ -74,6 +75,9 @@ void GpuProcessEnded();
 void *NewProcessArena(int device);
 void FreeProcessArena(int device, void *arena);
 void FreeRing(int device, DeviceRing *ring);
+// How long teams that must all run at once wait for another of them to
+// start (offload.cpp, MERK_TEAMS_STALL_MILLISECONDS).
+std::uint64_t TeamsStallMilliseconds();
 } // namespace merkurius::runtime
 
 namespace {
@@ -135,6 +139,9 @@ struct GpuPlaces {
   bool ready;
   ol_queue_handle_t queue;
   Place *current;
+  // A spawn is waiting for the teams of a kernel it launched, without the
+  // lock (Launch), and the GPU's other spawns wait for it.
+  bool launching;
 };
 GpuPlaces gpuPlaces[kMostGpus];
 
@@ -144,6 +151,8 @@ Place *endedPlaces{nullptr};
 
 // The processes that have ended, for the reaper.
 pthread_cond_t endedCondition = PTHREAD_COND_INITIALIZER;
+// Signalled when a launch has seen its teams start, or not (Launch).
+pthread_cond_t launchedCondition = PTHREAD_COND_INITIALIZER;
 RunningProcess *ended{nullptr};
 pthread_once_t reaperOnce = PTHREAD_ONCE_INIT;
 
@@ -334,9 +343,69 @@ const char *Ready(const Gpu &gpu) {
   return nullptr;
 }
 
+std::uint64_t MonotonicMilliseconds() {
+  timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return static_cast<std::uint64_t>(now.tv_sec) * 1000 +
+      static_cast<std::uint64_t>(now.tv_nsec) / 1000000;
+}
+
+// Waits for the teams of the kernel to start, as a team's slots wait for
+// processes only once it runs, and teams that cannot all be resident at once
+// never do: the GPU holds a team back until another ends, which none does.
+// The plugin counts how many fit by their registers and local memory, but
+// not by their scratch, which the GPU may not hold for all of them. Each
+// team that starts restarts the wait; whether they all started.
+bool TeamsStarted(const PlaceTable *table, std::uint64_t teams) {
+  std::uint64_t stall{TeamsStallMilliseconds()};
+  std::uint64_t seen{0};
+  std::uint64_t deadline{MonotonicMilliseconds() + stall};
+  for (;;) {
+    std::uint64_t started{__atomic_load_n(&table->started, __ATOMIC_ACQUIRE)};
+    if (started >= teams) {
+      return true;
+    }
+    if (started != seen) {
+      seen = started;
+      deadline = MonotonicMilliseconds() + stall;
+    } else if (MonotonicMilliseconds() >= deadline) {
+      return false;
+    }
+    timespec pause{0, 100000};
+    nanosleep(&pause, nullptr);
+  }
+}
+
+// The bytes of stack for each thread of a processes' kernel whose stack is
+// not fixed, as one whose code recurses: the plugin's own, 16 KiB, has
+// scratch that the GPU does not hold for all the kernel's teams, and with
+// 1 KiB it did (docs/INPROGRESS.md, GPU processes that run loops).
+// MERK_GPU_PROCESS_STACK_BYTES replaces it. A kernel with a fixed stack
+// size has its own. Or 0, with the text of the error.
+constexpr std::uint64_t kProcessStackBytes{1024};
+
+std::uint64_t ProcessStackBytes(const char *&error) {
+  const char *given{std::getenv("MERK_GPU_PROCESS_STACK_BYTES")};
+  if (!given || !*given) {
+    return kProcessStackBytes;
+  }
+  char *end{nullptr};
+  unsigned long long bytes{std::strtoull(given, &end, 10)};
+  if (*end != '\0' || bytes == 0) {
+    char *text{static_cast<char *>(Malloc(512))};
+    std::snprintf(text, 512,
+        "MERK_GPU_PROCESS_STACK_BYTES is not a positive number of bytes: %s",
+        given);
+    error = text;
+    return 0;
+  }
+  return bytes;
+}
+
 // Launches the module's kernel on the GPU, with a slot for each of its
-// waves, and makes it the kernel that spawns use; or gives the text of the
-// error. With the lock held.
+// waves, and makes it the kernel that spawns use once its teams have all
+// started; or gives the text of the error. With the lock held, which it
+// lets go while it waits for the teams.
 const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   GpuPlaces &gpuPlace{gpuPlaces[gpu.number]};
   ol_symbol_handle_t kernel;
@@ -383,8 +452,17 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   *place = {image.module, gpu.number, table, processes, 0, false, places};
   size.numGroups.x = teams;
   bool cooperative{true};
+  const char *stackError{nullptr};
+  std::uint64_t stack{ProcessStackBytes(stackError)};
+  if (!stack) {
+    DeviceFreeHost(gpu.number, table);
+    std::free(processes);
+    std::free(place);
+    return stackError;
+  }
   ol_kernel_launch_prop_t properties[]{
       {kOlKernelLaunchPropTypeIsCooperative, &cooperative},
+      {kOlKernelLaunchPropTypeStackSize, &stack},
       {kOlKernelLaunchPropTypeNone, nullptr}};
   void *argument{table};
   void *arguments[]{&argument};
@@ -407,6 +485,31 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
     ExitProgram(1);
   }
   places = place;
+  // The wait is without the lock: a kernel launched while the GPU's last
+  // one ends starts after the host function that follows that one on the
+  // queue (PlaceDone), which takes the lock.
+  gpuPlace.launching = true;
+  pthread_mutex_unlock(&lock);
+  bool started{TeamsStarted(table, teams)};
+  pthread_mutex_lock(&lock);
+  gpuPlace.launching = false;
+  pthread_cond_broadcast(&launchedCondition);
+  if (!started) {
+    // Its waves that run return, after which the others start and return
+    // too, and the reaper frees the table.
+    EndPlace(place);
+    std::uint64_t started{__atomic_load_n(&table->started, __ATOMIC_ACQUIRE)};
+    char *text{static_cast<char *>(Malloc(512))};
+    std::snprintf(text, 512,
+        "GPU %d started %llu of the %u teams of the module %s's processes' "
+        "kernel, which must all run at once, and no other within %llu ms "
+        "(MERK_TEAMS_STALL_MILLISECONDS): the GPU may not hold their scratch "
+        "for all of them, as for a kernel with a dynamic stack",
+        gpu.number, static_cast<unsigned long long>(started), teams,
+        image.module,
+        static_cast<unsigned long long>(TeamsStallMilliseconds()));
+    return text;
+  }
   gpuPlace.current = place;
   return nullptr;
 }
@@ -417,6 +520,9 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
 const char *TakeSlot(const Gpu &gpu, const LoadedImage &image,
     RunningProcess *process, std::uint64_t &slot) {
   GpuPlaces &gpuPlace{gpuPlaces[gpu.number]};
+  while (gpuPlace.launching) {
+    pthread_cond_wait(&launchedCondition, &lock);
+  }
   Place *place{gpuPlace.current};
   if (place && !place->ending && std::strcmp(place->module, image.module)) {
     return Error("GPU %s%lld runs processes of the module %s, and a GPU runs "

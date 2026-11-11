@@ -366,7 +366,12 @@ namespace {
   port.send([&](rpc::Buffer *buffer, uint32_t) { buffer->data[0] = kind; });
   port.send_n(text, size + 1);
   port.recv([](rpc::Buffer *, uint32_t) {});
-  __builtin_trap();
+  // The host ends the program rather than answer, so the wave never gets
+  // here. It ends rather than trap: llvm.trap is not nocallback, so no
+  // function that calls it is norecurse, and a kernel that calls one has
+  // the plugin's dynamic stack, whose scratch can keep some of a GPU
+  // process kernel's teams from ever starting.
+  __builtin_amdgcn_endpgm();
 }
 
 // Text for Fail, built without a C library: each Append adds to the end.
@@ -659,7 +664,12 @@ extern "C" void merk_process_dispatch(uint64_t kind, uint64_t words);
 // starts there, and returns once the table's end is set while the slot is
 // idle. The other lanes return at once. The table is in host memory, which
 // the host writes while the kernel runs, so it is read at system scope.
+// Each team first counts itself started, which the host waits for.
 extern "C" void merk_device_place(PlaceTable *table) {
+  if (__gpu_thread_id_x() == 0) {
+    __scoped_atomic_fetch_add(
+        &table->started, 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+  }
   if (__gpu_lane_id() != 0) {
     return;
   }
