@@ -1,8 +1,10 @@
 process-places.m's processes on the machine's GPU (docs/INPROGRESS.md, GPU
 processes that run loops, one kernel for a GPU's processes): processes of
 one module that run one after another, a spawn of another module's kind
-while the first module's kernel runs, and spawns until the kernel has no
-free wave, which fail rather than wait. The program then ends while the
+while the first module's kernel runs, phases that follow each other once a
+monitor says the last one's process ended, a host process that receives
+from a GPU process's mailbox, and spawns until the kernel has no free wave,
+which fail rather than wait. The program then ends while the
 kernel's waves wait for messages.
 REQUIRES: amdgpu-gpu
 
@@ -12,9 +14,13 @@ RUN: merkc -fprocess-declarations --offload-arch=%offload-arch -I %S/Inputs %lib
 RUN: %gpu-env %t | FileCheck %S/process-places.m --match-full-lines --strict-whitespace
 RUN: not %gpu-env %t2 other 2>&1 | FileCheck %S/process-places.m --check-prefix=OTHER
 RUN: not %gpu-env %t other 2>&1 | FileCheck %S/process-places.m --check-prefix=OTHER
+RUN: %gpu-env %t2 phases | FileCheck %S/process-places.m --check-prefix=PHASES --match-full-lines --strict-whitespace
+RUN: %gpu-env %t phases | FileCheck %S/process-places.m --check-prefix=PHASES --match-full-lines --strict-whitespace
+RUN: not %gpu-env %t2 steal 2>&1 | FileCheck %S/process-places.m --check-prefix=STEAL
 RUN: not %gpu-env %t2 full 2>&1 | FileCheck %S/process-places.m --check-prefix=FULL
 
 The waves that a process has run are free again, and what it had is freed.
-RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 %t2 2>&1 | FileCheck %s --check-prefix=FREED --match-full-lines
-FREED:11
+RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 %t2 phases 2>&1 | FileCheck %s --check-prefix=FREED --match-full-lines
+FREED:11 normal 22 noproc
+FREED:Mercury runtime: 0 messages are neither read nor freed
 FREED:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated

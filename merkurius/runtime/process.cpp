@@ -657,6 +657,16 @@ void RunProcess(Process *next) {
   current = next;
 }
 
+Process *NewGpuProcessRecord() {
+  auto *process{static_cast<Process *>(std::malloc(sizeof(Process)))};
+  if (process) {
+    pthread_mutex_lock(&schedulerLock);
+    *process = Process{{nullptr, nullptr}, nextId++};
+    pthread_mutex_unlock(&schedulerLock);
+  }
+  return process;
+}
+
 Process *NewProcess(
     std::size_t stackBytes, std::uint64_t closure, std::uint64_t argument) {
   Stack *stack{NewStack(stackBytes ? stackBytes : kDefaultStackBytes)};

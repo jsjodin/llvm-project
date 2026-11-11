@@ -174,6 +174,17 @@ void FireMonitorsOf(Process *, const char *reason);
 // mailbox.cpp: closes the process's mailboxes, as it ends.
 void CloseMailboxesOf(Process *);
 
+// The host's record of a process that runs on a GPU (gpu-processes.cpp),
+// or null if there is no memory for it: it owns the process's mailbox, so
+// that monitors can watch it and only the GPU receives from it, and it is
+// never run. It is freed with std::free once the process has ended and its
+// monitors have fired.
+Process *NewGpuProcessRecord();
+
+// mailbox.cpp: a new mailbox, as merk_mailbox_new makes, of `owner`.
+void NewMailboxOf(Process *owner, std::uint64_t typeInfo,
+    std::int64_t *placeAndSlot, std::int64_t *generation, std::int64_t *secret);
+
 } // namespace merkurius::runtime
 
 extern "C" {

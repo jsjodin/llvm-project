@@ -3453,22 +3453,55 @@ is free. What differs from the plan:
   while the first module's kernel runs, and spawns until no slot is free,
   which fails. Its last run, which fills every slot, has not been run on
   the gfx1030.
-- *Not testable yet: a phase that follows another.* A process answers
-  before its wave tells the host that it ended, so a spawn of the next
-  phase's kind right after the answer may still find the kernel running.
-  A program needs to see the end: a monitor of a GPU process, which is not
-  supported (its mailbox has no process of the host's), or a spawn that
-  waits for a kernel whose processes have all answered. Catching the
-  spawn's error and trying again needs `exception.try_io`, which code
-  generation does not support yet.
+- *A phase that follows another* needed a monitor of a GPU process, done
+  below: a process answers before its wave tells the host that it ended,
+  so a spawn of the next phase's kind right after the answer could still
+  find the kernel running.
+
+**Monitors of GPU processes, done 2026-11-11.** A GPU process has a record
+on the host (`NewGpuProcessRecord` in `runtime/process.cpp`), which owns its
+mailbox and is never run, so that `monitor` and `demonitor` work on it as
+on a host process's. When the device reports the end (`rpcProcessEnded`),
+the host frees the slot, ends the kernel if it was the last, closes the
+mailbox, fires the record's monitors (normal; a fault in a GPU process ends
+the program) and frees the record, in that order: a watcher that spawns the
+next module's kind on the down message finds the kernel ending, and the
+spawn launches the next kernel after it. A monitor made after the end says
+noproc, by the closed mailbox. A host process that receives from a GPU
+process's mailbox is now an error, as for any other process's, where it
+used to take the mailbox over. Tests: `process-places`, cases `phases` and
+`steal`. Rejected: monitors on the mailbox itself, which a close before the
+end, or the slot's reuse, would leave pointing at another mailbox.
+
+Found while testing, each fixed in a commit of its own first: the device's
+compile copied a library descriptor without those its fields name
+(`process.down_info`'s); and the runtime's errors ended the program with
+`std::exit`, whose handlers freed host memory that a running kernel read,
+so the GPU faulted.
 
 **Open after (p1).**
 - *Which units the processes' kernel takes,* as it holds every team slot
-  of them: a share of the usable units, set by the program or the
-  environment, with the rest for target regions and other kernels; or all
-  of them once loops run in the kernel (p2) and target regions do not run
-  beside GPU processes.
-- *How a program sees that a GPU process ended,* for phases (above).
+  of them. **Decided 2026-11-11:** a percentage of the available compute
+  units, those `LIBOMPTARGET_AMDGPU_CU_MASK` leaves, 100% by default (the
+  user: "Saying a % of the total available compute units would be the
+  easiest for the user"), set by the environment or by the program before
+  its first spawn on the GPU, with the rest for target regions and other
+  kernels; a target region launched while GPU processes hold all the units
+  fails, saying why, rather than hangs. With (p2); until then the kernel
+  takes the first pair.
+- **Decided 2026-11-11: spawning names the kind,** as
+  `spawn(adder(Reply), Mailbox, !IO)` and
+  `spawn_at(gpu(0), adder(Reply), Mailbox, !IO)`: a form that the compiler
+  resolves, whose second argument must be a declared kind applied to its
+  arguments, written out, not a variable or a closure, so that the kind,
+  whether it runs on a GPU and its arguments' types are known at compile
+  time. The predicates that a declaration generates, `spawn_<kind>` and
+  `spawn_<kind>_at`, are hidden (the user: the same look and feel for
+  `spawn` and `spawn_at`). Rejected: a closure, which names host code and
+  captures cells of any type, so neither the kind nor its arguments' words
+  are known.
+- *Spawning from a GPU process:* a wave that writes a free slot of its own
+  kernel's table, without the host. A piece of its own, later.
 
 - **(e) Waiting.** While team 0 waits in a receive, the other teams wait at
   the barrier across teams, sleeping, so the process holds its compute

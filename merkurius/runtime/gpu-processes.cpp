@@ -24,11 +24,15 @@
 // once its last process has ended, and the next module's kernel starts then,
 // after it on the queue.
 //
-// The mailbox is the host's, and no process of the host's owns it: the
-// GPU receives from it through a ring, as a region does (offload.cpp). When
-// the process ends, the device tells the host (rpcProcessEnded), which
-// closes the mailbox on the plugin's thread, which must not call liboffload,
-// so a thread of the runtime's, the reaper, then frees what the process had:
+// The mailbox is the host's, owned by a record of the process's that is never
+// run (NewGpuProcessRecord), so that monitors can watch the process and no
+// process of the host's receives from it: the GPU receives from it through a
+// ring, as a region does (offload.cpp). When the process ends, the device
+// tells the host (rpcProcessEnded), which, on the plugin's thread, frees its
+// slot, ends the kernel if it was the last, closes the mailbox and tells the
+// process's monitors, in that order, so that a watcher may spawn the next
+// module's kind at once. That thread must not call liboffload, so a thread
+// of the runtime's, the reaper, then frees what the process had:
 // its arena, its argument words, and its mailbox's ring and the copy of a
 // message there; and frees each kernel's table once the kernel has ended.
 // Temporary (step 5 of GPU processes without omp target,
@@ -56,9 +60,6 @@
 #include <pthread.h>
 
 extern "C" void merk_node(std::int64_t *high, std::int64_t *low);
-extern "C" void merk_mailbox_new_unowned(std::uint64_t typeInfo,
-    std::int64_t *placeAndSlot, std::int64_t *generation,
-    std::int64_t *secret);
 extern "C" void merk_mailbox_close(std::int64_t nodeHigh, std::int64_t nodeLow,
     std::int64_t placeAndSlot, std::int64_t generation, std::int64_t secret);
 
@@ -95,14 +96,16 @@ LoadedImage *loaded{nullptr};
 
 struct Place;
 
-// A running process: its GPU, arena and argument words, its kernel, and its
-// mailbox's handle, which is closed when it ends, taking the ring and the
-// copy of a message there for the reaper to free.
+// A running process: its GPU, arena and argument words, its kernel, its
+// record, which owns its mailbox, and its mailbox's handle, which is closed
+// when it ends, taking the ring and the copy of a message there for the
+// reaper to free.
 struct RunningProcess {
   int gpu;
   void *arena;
   std::uint64_t *words;
   Place *place;
+  Process *record;
   std::int64_t handle[kHandleWords];
   DeviceRing *ring;
   int ringDevice;
@@ -112,8 +115,8 @@ struct RunningProcess {
 };
 
 // A launch of a module's kernel on a GPU: its table, in host memory, the
-// process in each slot, and how many processes it has that the reaper has
-// not freed, of which the last ends the kernel. Once the kernel has ended,
+// process in each slot, and how many processes it runs, of which the last
+// ends the kernel. Once the kernel has ended,
 // the reaper frees the table.
 struct Place {
   const char *module;
@@ -164,7 +167,7 @@ void EndPlace(Place *place) {
   __atomic_store_n(&place->table->end, 1, __ATOMIC_RELEASE);
 }
 
-// Frees what an ended process had, and ends its kernel if it was the last.
+// Frees what an ended process had.
 void Reap(RunningProcess *process) {
   if (process->copy) {
     process->release(process->ringDevice, process->copy);
@@ -174,12 +177,6 @@ void Reap(RunningProcess *process) {
   }
   FreeProcessArena(process->gpu, process->arena);
   DeviceFreeHost(process->gpu, process->words);
-  pthread_mutex_lock(&lock);
-  Place *place{process->place};
-  if (--place->running == 0 && !place->ending) {
-    EndPlace(place);
-  }
-  pthread_mutex_unlock(&lock);
   std::free(process);
   GpuProcessEnded();
 }
@@ -193,7 +190,8 @@ void ReapPlace(Place *place) {
 
 // The reaper's thread, for the program's life. A kernel ends only after its
 // processes have told the host that they ended, so the reaper has taken
-// them, in the same round or an earlier one, before it takes the kernel.
+// them, in the same round or an earlier one, before it takes the kernel;
+// the processes no longer refer to it by then.
 void *Reaper(void *) {
   for (;;) {
     pthread_mutex_lock(&lock);
@@ -464,6 +462,9 @@ void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
         slot < place->table->slots) {
       process = place->processes[slot];
       place->processes[slot] = nullptr;
+      if (process && --place->running == 0 && !place->ending) {
+        EndPlace(place);
+      }
       break;
     }
   }
@@ -478,6 +479,9 @@ void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
   const std::int64_t *h{process->handle};
   merk_mailbox_close_ended(h[0], h[1], h[2], h[3], h[4], &process->ring,
       &process->ringDevice, &process->copy, &process->release);
+  FireMonitorsOf(process->record, nullptr);
+  std::free(process->record);
+  process->record = nullptr;
   pthread_mutex_lock(&lock);
   process->next = ended;
   ended = process;
@@ -521,13 +525,15 @@ extern "C" const char *merk_gpu_process_spawn(std::uint64_t typeInfo,
   process->words = static_cast<std::uint64_t *>(
       DeviceAllocateHost(gpu->number, count * sizeof(std::uint64_t)));
   process->arena = NewProcessArena(gpu->number);
-  if (!process->words || !process->arena) {
+  process->record = NewGpuProcessRecord();
+  if (!process->words || !process->arena || !process->record) {
     if (process->words) {
       DeviceFreeHost(gpu->number, process->words);
     }
     if (process->arena) {
       FreeProcessArena(gpu->number, process->arena);
     }
+    std::free(process->record);
     std::free(process);
     return Error("out of memory for a process on GPU %s%lld%s%s%s", "", number,
         "", "", "");
@@ -555,12 +561,13 @@ extern "C" const char *merk_gpu_process_spawn(std::uint64_t typeInfo,
   if (error) {
     DeviceFreeHost(gpu->number, process->words);
     FreeProcessArena(gpu->number, process->arena);
+    std::free(process->record);
     std::free(process);
     return error;
   }
   std::int64_t *h{process->handle};
   merk_node(&h[0], &h[1]);
-  merk_mailbox_new_unowned(typeInfo, &h[2], &h[3], &h[4]);
+  NewMailboxOf(process->record, typeInfo, &h[2], &h[3], &h[4]);
   for (std::size_t i{0}; i < count; ++i) {
     process->words[i] = i < words[0]
         ? words[i + 1]
