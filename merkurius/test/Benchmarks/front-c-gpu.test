@@ -1,0 +1,19 @@
+The C version of the reacting front, which compare-c.sh runs against front.m,
+sequentially and on the machine's GPU, on a small grid. Sequentially it
+gives the same bits as front.m; on the GPU, clang fuses multiplies and adds,
+so only the leading digits are checked there.
+REQUIRES: amdgpu-gpu
+
+RUN: clang -O2 %S/../../benchmarks/front/front.c -o %t.sequential
+RUN: env FRONT_SIZE=256 FRONT_STEPS=100 %t.sequential | FileCheck %s --check-prefix=EXACT
+RUN: clang -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/front/front.c -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY FRONT_SIZE=256 FRONT_STEPS=100 %t | FileCheck %s
+CHECK: Reacting front, C
+CHECK-NEXT: Grid: 256 x 256 cells
+CHECK-NEXT: Steps: 100, of 100 substeps where a cell burns
+CHECK-NEXT: Burnt cells: 13329
+CHECK-NEXT: Heat: 1.0430241352339{{[0-9]+}}e+05
+CHECK-NEXT: Fuel: 5.2205299232132{{[0-9]+}}e+04
+EXACT: Burnt cells: 13329
+EXACT-NEXT: Heat: 1.043024135233932e+05
+EXACT-NEXT: Fuel: 5.220529923213294e+04
