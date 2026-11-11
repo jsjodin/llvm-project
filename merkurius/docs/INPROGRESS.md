@@ -1546,7 +1546,8 @@ kernel, which NVSHMEM, rocSHMEM and MSCCL++ (put, signal and wait) give.
 Serving systems move KV caches with libraries of their own (NIXL, Mooncake's
 transfer engine, UCX), and DeepSeek's mixture-of-experts inference uses
 all-to-all kernels that the GPU starts (DeepEP). Recent NCCL adds calls
-that a kernel makes; whether RCCL follows is not known.
+that a kernel makes, and RCCL 2.30 has them too, experimentally (One message
+transport, with backends, above).
 
 **What we have.** The host's scheduler already steals between its workers
 (design document, How the scheduler was built). Mailboxes are asynchronous,
@@ -3102,6 +3103,128 @@ they arrive.
   does not wait forever.
 - **The MPI+HIP program** to compare with is not written.
 - **Decomposition in two dimensions** and corners are left for later.
+
+## A demo: a stencil whose active region moves
+
+Proposed 2026-11-10, from a discussion; not agreed, and nothing is built. A demo
+of what a decomposition fixed in advance, as MPI and RCCL programs have, cannot
+do: work that grows, moves and shrinks while the program runs, placed on GPUs as
+it appears, onto more GPUs when it needs them, and off them when it no longer
+does. It extends The halo exchange, above, whose grid is split once.
+
+**The problem.** A grid of tiles, of which only the active ones are computed.
+Each step updates every cell from its neighbours, so a tile needs its
+neighbours' edge cells, its halo. Two versions:
+
+- *A reacting front, the demo:* diffusion between cells, a cheap stencil, and in
+  each burning cell a stiff system of chemical reactions, hundreds to thousands
+  of operations a cell and step with no communication. The front advances, tiles
+  ahead of it start, and tiles behind it burn out, go quiet and end. The
+  computation is heavy exactly where the front is, as in combustion codes, where
+  chemistry takes most of the time (AMReX's Pele codes), while the halos stay
+  the diffusion's. The user, 2026-11-10: the demo wants heavy computation, as a
+  plain stencil's communication costs as much as its computation.
+- *Conway's Game of Life,* with a glider gun, as the first step: the simplest
+  stencil, exact in integers, easy to see, and growing without bound, so it runs
+  out of one GPU. Its computation is light, so it tests growing and shrinking,
+  not speed.
+
+**Where the pattern occurs,** from general knowledge, not checked here: adaptive
+mesh refinement, which refines around flames, shocks and collapsing gas (AMReX,
+Chombo); tsunami and flood models, which compute only wet cells (GeoClaw);
+narrow-band level sets, which compute only near a moving surface, for fluids in
+graphics and for segmenting images; sparse voxel grids for smoke and fire in
+visual effects (OpenVDB); seismic waves spreading from their source; phase-field
+models of solidification, around a growing crystal's surface; and wildfire
+models that couple a fire front to the weather (WRF-SFIRE).
+
+**Design.**
+
+- **A process for each place, owning many tiles,** not a process for each tile.
+  Each GPU process is a kernel today, and hundreds of kernels oversubscribe the
+  GPU's scheduler (design document, the teams' stall time). A place's process
+  holds its tiles' arrays, handed to it, and steps them all with one
+  data-parallel kernel, a big-jump loop over tiles and cells (Specialized
+  kernels for loops; What teams as processes are for). Rejected for now: *a
+  process for each tile,* which needs processes far lighter than a kernel on the
+  GPU.
+- **Halos.** Between tiles of one place, a copy within the GPU. Between places,
+  one packed message per neighbouring place and step, `{step, edges}` with each
+  tile's coordinates and edge cells (flat records, Arrays whose length is known
+  only at run time), so that many tiles' edges cost one message. No global
+  barrier: a tile's step `s` needs only its neighbours' edges of step `s`, which
+  the message's step number names, so places may be a step apart.
+- **Computation against communication.** A plain stencil does a few operations
+  for each value it loads: it is bound by memory, and a step's halo messages
+  cost as much as its computation. A message between GPU processes costs about
+  40 µs today, through the host, so a step must compute for much longer than
+  that. The chemistry gives that. **Deep halos** add to it: a halo of width k
+  sent every k steps, which is k times fewer messages for some computation
+  repeated at the tiles' edges. The halo of a tile grows with its edge and its
+  work with its area, so larger tiles help too.
+- **A directory process** maps a tile's coordinates to the place that owns it.
+  Only the directory creates tiles, so two places that find activity at the edge
+  of the same missing tile get the same owner.
+- **Growing.** A tile whose edge becomes active next to a tile that does not
+  exist asks the directory, which gives the new tile to the place with the most
+  room, the asker's own if it has room. When every place is full, the directory
+  starts a process on another GPU, of this node or another (`spawn_<kind>_at`).
+- **Shrinking.** A tile that has been quiet for some steps, with quiet
+  neighbours, is dropped, and its last state goes to the directory. A place left
+  with no tiles ends, which frees its GPU. A missing neighbour's halo is quiet.
+- **Balancing.** The directory moves tiles from busy places to idle ones: the
+  tile's arrays go to the new owner in a message, and its neighbours learn of
+  the move from the directory. Work stealing (Distributing work, above) is the
+  same move, asked for by the idle place.
+- **Output.** Every few steps each place sends a reduced picture of its tiles to
+  an output process, which writes frames, and the number of tiles on each place,
+  which charts the growing and shrinking.
+- **Checking.** The final grid against a dense sequential run on the CPU. Exact
+  for Life; for the front, integers or a fixed order of floating-point sums.
+- **Failure, later.** Kill a place's process: the directory sees it by a monitor
+  and gives its tiles to other places from their last pictures, which are
+  checkpoints. That is the halo exchange's recovery benchmark.
+- **Comparison.** An MPI+HIP program that splits the grid in advance, either
+  computing every tile or only the active ones without moving them: time to
+  solution and GPU time used as the pattern grows. AMReX, which regrids at fixed
+  intervals, is a stronger comparison, later.
+
+**A stepping stone: a deep Mandelbrot zoom.** The cost of a tile varies by
+orders of magnitude near the set's boundary, unpredictably, so stealing beats a
+split in advance. No tiles start or end, so it tests balancing alone, and is
+simple to write and check.
+
+**Steps,** for discussion:
+
+1. A sequential reference in Mercury, on the CPU, and a dense version on one
+   GPU, for Life and then for the front.
+2. Sparse tiles on one place: tiles start and end, one GPU process.
+3. The Mandelbrot zoom with stealing between several places.
+4. Several places with a directory, growing, shrinking and moving tiles, on one
+   GPU at first (below).
+5. Several GPUs and nodes, against the MPI+HIP program, when the machines exist.
+6. Recovery from a killed place.
+
+**What it needs.** It uses GPU processes, `spawn_<kind>_at`, flat messages and
+arrays, which exist. It also needs the place table and routing by place (GPU
+processes without `omp target`, steps 5b to 5d), flat records and packed
+messages, monitors across places, and for steps 5 and 6, several GPUs.
+
+**Open.**
+
+- *Several places on one GPU,* to develop steps 3 and 4 here: several GPU
+  processes, or queues each limited to some of the compute units by ROCr's
+  `hsa_amd_queue_cu_set_mask`, as "virtual GPUs". Untried. This GPU drives the
+  display, so it starts small.
+- *The size of a tile:* large enough that a step's kernel and messages are worth
+  their cost, and small enough to follow the front closely. To measure.
+- *The chemistry:* a real mechanism, such as hydrogen and air's, or a synthetic
+  one of chosen size and stiffness, which makes the cost a cell a parameter of
+  the demo. Its solver is per cell and implicit, so a cell's cost varies with
+  how stiff it is.
+- *Other heavy problems,* if the front does not suit: particles that cluster, as
+  two colliding galaxies, which need rebalancing; or a service of matrix
+  multiplications of mixed sizes, measured against rocBLAS.
 
 ## Topology: GPUs, NUMA domains and NICs within a node
 
