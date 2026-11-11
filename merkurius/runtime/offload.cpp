@@ -215,6 +215,13 @@ std::uint64_t ringCount{0}, ringCapacity{0};
 // until the driver resets the GPU. MERK_DEVICE_ARENA_BYTES replaces it.
 std::uint64_t arenaBytes{0}, arenaLimit{std::uint64_t{8} << 30};
 
+// How long the teams of a region with team mailboxes wait for another of
+// them to start (rpcTeamsStall). MERK_TEAMS_STALL_MILLISECONDS replaces it:
+// a program that shares its GPU with others that fill it may need longer,
+// and one that is known to have too many teams, as a test, shorter, so that
+// it does not hold the GPU from the others meanwhile.
+std::uint64_t teamsStallMilliseconds{10000};
+
 // Grows an array of `T` to hold one more than `count`.
 template <typename T>
 void Reserve(T *&items, std::uint64_t count, std::uint64_t &capacity) {
@@ -472,6 +479,11 @@ unsigned HandleOpcode(void *raw, unsigned) {
   switch (port.get_opcode()) {
   case rpcFail:
     ReportDeviceFailure(port);
+  case rpcTeamsStall:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      buffer->data[0] = teamsStallMilliseconds;
+    });
+    return rpc::RPC_SUCCESS;
   case rpcSend:
     // The answer tells the device that the message is queued.
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
@@ -816,6 +828,18 @@ extern "C" void merk_check_teams(std::int64_t teams) {
 extern "C" void merk_offload_start(void) {
   if (const char *limit{std::getenv("MERK_DEVICE_ARENA_BYTES")}) {
     arenaLimit = std::strtoull(limit, nullptr, 10);
+  }
+  if (const char *stall{std::getenv("MERK_TEAMS_STALL_MILLISECONDS")}) {
+    char *end{nullptr};
+    unsigned long long milliseconds{std::strtoull(stall, &end, 10)};
+    if (end == stall || *end != '\0' || milliseconds == 0) {
+      std::fprintf(stderr,
+          "Mercury runtime: MERK_TEAMS_STALL_MILLISECONDS is not a positive "
+          "number of milliseconds: %s\n",
+          stall);
+      std::exit(1);
+    }
+    teamsStallMilliseconds = milliseconds;
   }
   RegisterRpcCallback(HandleOpcode);
 }

@@ -101,6 +101,7 @@ using merkurius::runtime::rpcSend;
 using merkurius::runtime::rpcSendTerm;
 using merkurius::runtime::rpcTakeArray;
 using merkurius::runtime::rpcTakeTerm;
+using merkurius::runtime::rpcTeamsStall;
 
 namespace {
 
@@ -451,22 +452,53 @@ extern "C" void merk_device_teams_enter(
   }
 }
 
-// How long the teams of a region with team mailboxes wait for each other to
-// start. Teams that fit on the device start within microseconds.
-constexpr int64_t kTeamsStartMilliseconds{1000};
+// How long, unless the host says otherwise (rpcTeamsStall), the teams of a
+// region with team mailboxes wait for another of them to start. Teams that
+// fit on an idle device start within microseconds, but on a device that
+// other programs' kernels fill they start as those end: a region whose
+// teams waited a second from their own start for all to start failed so
+// under a full test run, beside a test whose teams filled the GPU.
+constexpr int64_t kTeamsStallMilliseconds{10000};
+
+// The host's answer for how long teams wait for another to start.
+int64_t TeamsStallMilliseconds() {
+  int64_t milliseconds{kTeamsStallMilliseconds};
+  rpc::Client::Port port{__llvm_rpc_client.open<rpcTeamsStall>()};
+  port.send([](rpc::Buffer *, uint32_t) {});
+  port.recv([&](rpc::Buffer *buffer, uint32_t) {
+    milliseconds = static_cast<int64_t>(buffer->data[0]);
+  });
+  return milliseconds;
+}
 
 // After merk_device_teams_enter, in each team of a target teams region whose
 // code uses team mailboxes: waits until every team of the region has started
 // (docs/INPROGRESS.md, Processes as teams, step 4). A team that is not
 // running deadlocks the teams that wait for its messages, and a GPU runs no
 // more teams at once than its compute units hold, which depends on the
-// kernel's registers and on what else the GPU runs. So when not all have
-// started in time, one team reports how many have, and the program ends.
+// kernel's registers and on what else the GPU runs. So while teams still
+// start the others wait, and when none has started for the stall time, one
+// team reports how many have, and the program ends. A team asks the host
+// for the stall time only once it has waited a millisecond, which teams
+// that fit do not.
 extern "C" void merk_device_teams_wait_all(void) {
   TeamTable *table{currentTeams};
   int64_t started{__atomic_add_fetch(&table->started, 1, __ATOMIC_ACQ_REL)};
-  int64_t deadline{Deadline(kTeamsStartMilliseconds)};
+  int64_t seen{started};
+  int64_t stall{kTeamsStallMilliseconds};
+  bool asked{false};
+  int64_t asking{Deadline(1)};
+  int64_t deadline{Deadline(stall)};
   while (started < table->teams) {
+    if (!asked && Now() >= asking) {
+      asked = true;
+      stall = TeamsStallMilliseconds();
+      deadline = Deadline(stall);
+    }
+    if (started != seen) {
+      seen = started;
+      deadline = Deadline(stall);
+    }
     if (Now() >= deadline) {
       uint32_t none{0};
       if (__atomic_compare_exchange_n(&table->reporting, &none, 1, false,

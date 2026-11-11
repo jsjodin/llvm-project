@@ -1,11 +1,15 @@
 More teams than run at once on the machine's GPU (docs/INPROGRESS.md,
 Processes as teams, step 4): a region without team mailboxes runs its 2000
-teams a few at a time; a region with them ends the program after its teams
-have waited for each other for a second, saying how many ran at once.
+teams a few at a time; a region with them ends the program once no more of
+its teams have started for the stall time, saying how many ran at once. The
+default is ten seconds, so that a region on a GPU that other programs fill
+waits for them; this one is known to have too many, so it sets a second
+(MERK_TEAMS_STALL_MILLISECONDS), not to hold the GPU from the tests beside
+it for longer, whose teams would not start meanwhile.
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/Inputs/omp-target-teams-too-many.m -o %t
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY not %t > %t.out 2> %t.err
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_TEAMS_STALL_MILLISECONDS=1000 not %t > %t.out 2> %t.err
 RUN: FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace < %t.out
 RUN: FileCheck %s --check-prefix=ERROR --match-full-lines --strict-whitespace < %t.err
 
@@ -13,3 +17,7 @@ OUTPUT:teams without team mailboxes: 2000
 OUTPUT-NOT:{{.}}
 ERROR:Mercury runtime: target teams: only {{[1-9][0-9]*}} of the 2000 teams ran at once on the device, and the teams of a region with team mailboxes must all run at once
 ERROR-NOT:{{.}}
+
+A stall time that is not a positive number is an error at start-up.
+RUN: %libomp-env MERK_TEAMS_STALL_MILLISECONDS=soon not %t 2>&1 | FileCheck %s --check-prefix=BAD
+BAD:Mercury runtime: MERK_TEAMS_STALL_MILLISECONDS is not a positive number of milliseconds: soon

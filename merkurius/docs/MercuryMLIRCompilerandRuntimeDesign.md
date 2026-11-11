@@ -3681,7 +3681,19 @@ the count and ends the round. The others wait for the rounds to change, on a
 device with `s_sleep`, on the host spinning for `MERK_SPIN_MICROSECONDS` and then
 on a condition variable. A region whose code reaches it waits for its teams to
 start, as one with team mailboxes does, so teams that cannot all run at once are
-reported and do not hang the GPU. On the GPU it costs 1 µs or less at up to 64
+reported and do not hang the GPU. The teams wait while others still start, and
+the region is reported once none has started for ten seconds
+(`kTeamsStallMilliseconds`). Rejected: a second from each team's own start,
+the first version, which a full test run broke now and then, when other
+programs' kernels, such as hundreds of GPU processes, filled the GPU and the
+region's last teams started only as those ended. Waiting longer did not help:
+with one GPU test per lit worker, the GPU had more programs' queues than its
+scheduler holds, and a region's later teams did not start for more than ten
+seconds, though the first had (the kernel logs "Runlist is getting
+oversubscribed"). Once, too, a queue could not be taken off the GPU in time and
+the driver reset it. So lit runs at most four `-gpu.test` files at once
+(`MERK_LIT_GPU_JOBS` changes it, `test/lit.cfg.py`). A program that shares a
+GPU with others can still be reported, which is the error's purpose. On the GPU it costs 1 µs or less at up to 64
 teams, against 29 µs for a tree of messages (Measurements, "Barriers between
 teams"). libc has nothing for teams to wait for each other.
 

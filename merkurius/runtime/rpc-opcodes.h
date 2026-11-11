@@ -95,6 +95,12 @@ constexpr uint32_t rpcTakeTerm{RpcOpcode(11)};
 
 constexpr uint32_t rpcFail{RpcOpcode(10)};
 
+// How long the teams of a region with team mailboxes wait for another of
+// them to start before the region is reported, which a team asks once it
+// has waited a millisecond: the host answers with the milliseconds that
+// MERK_TEAMS_STALL_MILLISECONDS gives, or 10000.
+constexpr uint32_t rpcTeamsStall{RpcOpcode(12)};
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_RPC_OPCODES_H_
