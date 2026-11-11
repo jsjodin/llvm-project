@@ -1343,7 +1343,7 @@ and most of that is either expressed by processes already or not needed yet.
    flush are what a mailbox ring in a peer's memory needs too (What choosing among
    links adds: where the queue lives, several senders, order, size). So build one
    transport, for messages first, as GPU-to-GPU messaging is the goal, and
-   collectives on it.
+   collectives on it (One message transport, with backends, below).
 5. *Fusion needs loops across devices,* which do not exist. Regions run on one
    device each, and `device(N)` regions at once are scheduler step 8.
 6. *A participant can die.* The design's recovery benchmark kills a GPU process
@@ -1364,6 +1364,144 @@ and most of that is either expressed by processes already or not needed yet.
 **What we can test.** This machine has one RX 6950 XT, so no peer transfer can
 run here. Steps 2 to 4 need at least two GPUs: two consumer cards for PCIe, or an
 Instinct node for Infinity Fabric.
+
+## One message transport, with backends
+
+Proposed 2026-11-10, from a discussion; not agreed, and nothing is built. The
+design document's route table has five kinds of hop (GPU processes, Places say
+what they can do), and Collectives and direct GPU transfers, above, says to
+build one transport for messages and put collectives on it. This makes that
+concrete: one interface that every hop implements, a backend for each, and a
+table measured on each machine that picks among them. No library is chosen once
+for the whole program. RCCL's device API becomes one candidate backend among
+several.
+
+**RCCL's GPU-initiated networking** (RCCL 2.30 documentation, "Device API:
+GPU-initiated networking", read 2026-11-10; not tried here).
+
+- It is NCCL 2.30.3's device API, and marked experimental. A kernel holds an
+  `ncclDevComm` and builds an `ncclGin` on one of its contexts.
+- `gin.put(team, peer, dstWindow, dstOffset, srcWindow, srcOffset, bytes,
+  ncclGin_SignalInc{n})` writes into the peer's window and increments a signal
+  there. `gin.flush(ncclCoopCta())` makes the source reusable, but does not mean
+  the peer can see the data: the peer waits on the signal for that.
+  `ncclGinBarrierSession` is a barrier with a timeout.
+- The host allocates with `ncclMemAlloc`, registers windows with
+  `ncclCommWindowRegister(..., NCCL_WIN_COLL_SYMMETRIC)`, and makes the device
+  communicator with `ncclDevCommCreate`. All three are collective.
+- On AMD the only validated backend is a host proxy (`NCCL_GIN_TYPE=2`): the
+  kernel queues the operation and a CPU thread posts it to an InfiniBand or RoCE
+  NIC. That is the same shape as our device's RPC to its host, so it brings
+  RCCL's network handling but no lower latency than a proxy of our own.
+- It needs a NIC and driver that register GPU memory by DMA-BUF. Windows are
+  single-segment. `ncclDevComm`'s layout is versioned, so device code is rebuilt
+  for each RCCL release.
+- It is HIP C++ (`ncclCoopCta`, `cuda::memory_order_acq_rel`). We would call it
+  through a shim of `extern "C"` device functions compiled to AMDGPU bitcode and
+  linked into the device image, as `device.cpp` is. Its host side needs the HIP
+  runtime in the same process as liboffload. Both sit on ROCr; untried.
+- Not on that page: how a receiver waits on a signal or counter, whether the
+  device side is header-only, and the load-store API within a node ("LSA").
+
+**The interface.** MSCCL++, rocSHMEM and GIN agree on four device-side
+primitives: put, signal, wait and flush. A mailbox needs two more, a slot to put
+into and a way to give it back. So, between a sender and a mailbox's ring at the
+receiver:
+
+- **reserve** a slot, atomically when there can be several senders;
+- **put** the message's bytes into it: a store, a DMA copy or an RDMA write;
+- **signal** the receiver, ordered after the put;
+- **wait**, at the receiver, until a counter reaches a value, or a deadline
+  passes, which `receive`'s `after(T)` needs;
+- **flush**, at the sender, until the source can be reused;
+- **credit** back a slot, from the receiver, as a signal in the other direction,
+  so that a sender learns of free slots without reading remote memory. Today's
+  rings have their own flow control; this replaces it with one scheme for all.
+
+`send` is reserve, put and signal. `receive` is wait, read and credit. The host
+keeps the control path, as the design document has it: it opens a route between
+a sender's place and a mailbox, registers memory and exchanges keys, closes it,
+and tells the mailbox's monitors when a peer has gone.
+
+**Backends,** by the route table's hops, with what can run here:
+
+1. *The host's queue,* within a place's host process. Built.
+2. *Between a host and its devices,* the RPC and the rings in pinned memory.
+   Built.
+3. *Peer stores between GPUs of a node,* with ROCr's
+   `hsa_amd_agents_allow_access`. Needs two GPUs.
+4. *Host-posted RDMA between nodes,* over verbs or libfabric, with the GPU's
+   memory registered with the NIC. Needs machines with RDMA NICs.
+5. *GPU-posted RDMA,* the GPU ringing the NIC's doorbell itself, as rocSHMEM's
+   GDA backend does. Needs a NIC that supports it.
+6. *RCCL's GIN,* through the shim above. A proxy today, perhaps GPU-posted
+   later. Needs RDMA NICs.
+7. *TCP,* the fallback between nodes (Remote handles and TCP). Built for the
+   host.
+
+On the device, a mailbox handle's route is fixed when the device first uses it,
+and compiled code calls one entry per primitive, which dispatches on it. Where
+the specializer knows the place at compile time, the call goes straight to the
+backend. On the host, a backend is a table of functions, as the runtime has no
+C++ standard library.
+
+**Where this can do more than RCCL.** The user's point: a framework of our own
+can be much more flexible.
+
+- *Mailboxes, not ranks.* RCCL's communicators and windows are made
+  collectively, by every rank at once, and membership is fixed. Here a route is
+  opened on a pair's first send, processes come and go, and no step needs
+  everyone.
+- *A route per pair, not per communicator.* One program can use peer stores
+  within a node, RDMA between nodes and the host's queue for CPU processes, each
+  pair on its fastest link.
+- *Types known at compile time.* GPU messages are flat, so most sends have a
+  size known at compile time. The choice between a store into the ring and a DMA
+  copy can then be made by the compiler, and a ring's slots can be exactly the
+  message's size. RCCL chooses its protocol at run time from the byte count.
+- *Communication fused with computation.* A loop across devices can send a
+  tile's part of a reduction as the tile finishes (Collectives and direct GPU
+  transfers). A library called between kernels cannot.
+- *Failure is a message.* A peer that dies ends the waits on it with an error,
+  through monitors. GIN's barrier has only a timeout.
+- *CPU and GPU processes alike.* Both send to the same mailboxes. RCCL is for
+  GPUs only.
+- *No lock-in.* GIN's version coupling and HIP dependency stay inside its
+  backend. Where it is fastest, the measured table picks it; where it is not,
+  nothing else changes.
+- *Balancing and stealing* (Distributing work, below) use the same messages.
+
+**What it costs.** We own the hard parts that RCCL has already done: ordering at
+system scope across PCIe and the NIC, flow control, and robustness on many NICs.
+Order between one sender and one mailbox holds only if they keep one route,
+which the design document already requires (What choosing among links adds).
+Each backend is a set of tests on hardware we may not have.
+
+**Suggested order, for discussion.**
+
+1. Define the interface, and move backends 1, 2 and 7 behind it with no change
+   in behaviour. Check that messages are no slower, with the benchmarks in
+   Measurements.
+2. Credits, and reserving slots for several senders, in the rings. Today's rings
+   have one producer; peer stores will need several. The host and the device as
+   two senders to one ring can test it here.
+3. Calls straight to a backend where the place is known at compile time.
+4. Peer stores within a node (backend 3), once there are two GPUs.
+5. Between nodes: a host proxy over verbs first (backend 4), then GIN's shim and
+   GPU-posted RDMA (5, 6), measured side by side against RCCL's collectives.
+   Waits for the machines, as the halo exchange does.
+6. Collectives on the transport (Collectives and direct GPU transfers, steps 1
+   and 2).
+
+**Open questions.**
+
+- GIN: the receiver's wait, whether the device side is header-only, and LSA.
+- Whether GIN can register memory that liboffload allocated, or only memory from
+  `ncclMemAlloc`. If only the latter, a mailbox's ring would be allocated by
+  RCCL when its route is GIN.
+- Which NICs rocSHMEM's GPU-posted backend supports outside Instinct systems.
+- Whether one OS process running HIP and liboffload side by side has problems on
+  ROCr.
 
 ## Distributing work: balancing and stealing across GPUs
 
