@@ -51,10 +51,35 @@ python3 -I merkurius/utils/gpu/with-gpus.py --count 1 -- \
 On a machine that others share, both go through `utils/gpu/with-gpus.py`,
 which gives them a GPU that no one else is using.
 
+## Two nodes over TCP
+
+`life_two.m` is step 2 of the demo: the same Life on two nodes on one
+machine, over TCP on loopback, both with the GPU. Node 1 owns the top half
+of the rows, node 2 the bottom half, each in an array with a halo row above
+and below. After each step, a target region on the GPU makes an array of the
+node's edge row, with the step's number after it, sends it to the other
+node's mailbox, receives the other's and copies it into the halo. Node 2
+sends its population and checksum to node 1 at the end, which prints the
+whole grid's, and its step times, with the exchanges' part of them.
+
+```sh
+python3 -I merkurius/benchmarks/life/pair.py PROGRAM
+```
+
+`pair.py` starts node 2, `PROGRAM partner`, which prints its port, and then
+node 1, `PROGRAM first PORT`, with a cookie of their own and a temporary
+HOME. `LIFE_SIZE` and `LIFE_STEPS` pass through.
+
+2026-11-11, gfx1030, 300 x 300 cells: an exchange from the GPU took about
+240 µs, from the CPU (the sequential build) about 16 µs. A probe put most of
+it on the region's arena (`docs/INPROGRESS.md`, the demo's step 2), which a
+fix to the runtime is next for; this is not yet a measurement of the design.
+
 ## Tests
 
 `test/Benchmarks/life.test` runs `life.m` sequentially and on the host's
 threads, at -O0 and -O2; `life-gpu.test` on the GPU, checking that the
 kernels are SPMD and that no step copies the arrays; `life-c-gpu.test` the C
-program with both cell types. All check the population and checksum, which
+program with both cell types; `life-two.test` and `life-two-gpu.test` the two
+nodes, with even and odd splits. All check the population and checksum, which
 come from an independent program in Python.

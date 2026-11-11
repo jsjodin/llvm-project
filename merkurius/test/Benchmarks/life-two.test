@@ -1,0 +1,44 @@
+Game of Life on two nodes over TCP on loopback, benchmarks/life/life_two.m,
+on small grids: the halves' cells together must be life.m's, with an even
+split, an odd one, and halves of one and two rows. Sequentially, and with
+OpenMP on the host, where the target regions that exchange the rows run
+there, each at -O0 and -O2. The populations and checksums are from an
+independent program in Python.
+
+RUN: merkc -O0 -fdo-loops %S/../../benchmarks/life/life_two.m -o %t.sequential0
+RUN: env LIFE_SIZE=300 LIFE_STEPS=25 %python %S/../../benchmarks/life/pair.py %t.sequential0 | FileCheck %s --check-prefix=EVEN
+RUN: merkc -O2 -fdo-loops %S/../../benchmarks/life/life_two.m -o %t.sequential2
+RUN: env LIFE_SIZE=300 LIFE_STEPS=25 %python %S/../../benchmarks/life/pair.py %t.sequential2 | FileCheck %s --check-prefix=EVEN
+RUN: env LIFE_SIZE=301 LIFE_STEPS=17 %python %S/../../benchmarks/life/pair.py %t.sequential2 | FileCheck %s --check-prefix=ODD
+RUN: env LIFE_SIZE=10 LIFE_STEPS=4 %python %S/../../benchmarks/life/pair.py %t.sequential2 | FileCheck %s --check-prefix=TEN
+RUN: env LIFE_SIZE=3 LIFE_STEPS=2 %python %S/../../benchmarks/life/pair.py %t.sequential2 | FileCheck %s --check-prefix=THREE
+RUN: merkc -O0 -fopenmp -fdo-loops %libomp-flags %S/../../benchmarks/life/life_two.m -o %t.host0
+RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_SIZE=301 LIFE_STEPS=17 %python %S/../../benchmarks/life/pair.py %t.host0 | FileCheck %s --check-prefix=ODD
+RUN: merkc -O2 -fopenmp -fdo-loops %libomp-flags %S/../../benchmarks/life/life_two.m -o %t.host2
+RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_SIZE=300 LIFE_STEPS=25 %python %S/../../benchmarks/life/pair.py %t.host2 | FileCheck %s --check-prefix=EVEN
+RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_SIZE=301 LIFE_STEPS=17 %python %S/../../benchmarks/life/pair.py %t.host2 | FileCheck %s --check-prefix=ODD
+REQUIRES: libomp
+
+EVEN: Game of Life, Mercury, two nodes
+EVEN-NEXT: Grid: 300 x 300 cells, 8 bytes a cell
+EVEN-NEXT: Steps: 25
+EVEN-NEXT: Population: 9339
+EVEN-NEXT: Checksum: 429141631
+EVEN-NEXT: Gcells/sec    Min (sec)   Max         Average
+EVEN-NEXT: {{[0-9.]+ +[0-9.]+ +[0-9.]+ +[0-9.]+}}
+EVEN-NEXT: Exchange: min {{[0-9.]+}}, average {{[0-9.]+}} sec
+
+ODD: Population: 15169
+ODD-NEXT: Checksum: 691583707
+
+TEN: Population: 28
+TEN-NEXT: Checksum: 1156
+
+THREE: Population: 0
+THREE-NEXT: Checksum: 0
+
+Usage is reported.
+RUN: not %t.sequential2 2>&1 | FileCheck %s --check-prefix=USAGE
+RUN: env LIFE_SIZE=1 not %t.sequential2 partner 2>&1 | FileCheck %s --check-prefix=USAGE
+USAGE: usage: life_two partner | life_two first PORT
+USAGE-NEXT: LIFE_SIZE must be at least 2 and LIFE_STEPS at least 2.
