@@ -3212,8 +3212,13 @@ its reference is in C or Fortran.
    other's into its halo. It showed that a target region that allocates
    costs about 45 µs more than one that does not, since its arena's chunk
    is allocated, freed and its slot cleared every time, through
-   `omp_target_alloc`, `omp_target_free` and `omp_target_memcpy`: fixed next,
-   in the runtime, by keeping the chunks.
+   `omp_target_alloc`, `omp_target_free` and `omp_target_memcpy`. Fixed
+   2026-11-11 (design document, "The arena"): the host keeps chunks, and
+   the device clears the slot by its generation; such a region costs about
+   12 µs more now. A scalar output of a region still costs about 27 µs, a
+   copy from the device and a wait, which the exchange's `Ok` pays every
+   step: open, for instance outputs written to host memory that the device
+   can reach, read after the kernel ends.
 3. Sparse tiles on one place: tiles start and end, one GPU process.
 4. The Mandelbrot zoom with stealing between several places.
 5. Several places with a directory, growing, shrinking and moving tiles, on one

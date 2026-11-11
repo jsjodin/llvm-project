@@ -81,8 +81,10 @@ int64_t Deadline(int64_t milliseconds) {
 using merkurius::runtime::DeviceRing;
 using merkurius::runtime::kArenaClearWords;
 using merkurius::runtime::kBumpWords;
+using merkurius::runtime::kChunkBytes;
 using merkurius::runtime::kNoRegionSlot;
 using merkurius::runtime::kRegionRingSlots;
+using merkurius::runtime::kRegionSlotClearing;
 using merkurius::runtime::kRegionSlots;
 using merkurius::runtime::kRegionSlotWords;
 using merkurius::runtime::kRingCacheSlots;
@@ -91,6 +93,8 @@ using merkurius::runtime::kRingOfTerms;
 using merkurius::runtime::kRingOfWords;
 using merkurius::runtime::kRingSlots;
 using merkurius::runtime::kTeamsPlace;
+using merkurius::runtime::RegionSlotGeneration;
+using merkurius::runtime::RegionSlotNumber;
 using merkurius::runtime::rpcAttach;
 using merkurius::runtime::rpcChunk;
 using merkurius::runtime::rpcDrain;
@@ -112,8 +116,6 @@ struct Chunk {
   uint64_t size;
   uint64_t used;
 };
-
-constexpr uint64_t kChunkBytes{uint64_t{1} << 20};
 
 // Where cells are bumped from: the current chunk, or none, which the host
 // clears when it frees the chunks; and whether a wave is asking the host for
@@ -152,14 +154,15 @@ Arena arena{{nullptr, 0, 0}, {}};
 // In a region's image, by the slot of each region that runs (device-ring.h):
 // where its cells are bumped from, its teams' table if it is a target teams
 // region, which its first team to start makes, and the table of the rings
-// it has attached, by the mailbox's slot. The host frees a region's chunks,
-// and clears its slot, when it ends, and frees a ring once no running region
-// or GPU process has attached it. A GPU process keeps its table of rings in
-// its arena.
+// it has attached, by the mailbox's slot; and the generation of the region
+// whose they are (device-ring.h). The host takes back a region's chunks when
+// it ends, and frees a ring once no running region or GPU process has
+// attached it; the next region of the slot clears its words as it starts. A
+// GPU process keeps its table of rings in its arena.
 struct RegionSlot {
   Bump bump;
   TeamTable *teams;
-  uint64_t unused;
+  uint64_t generation;
   RingEntry *rings[kRegionRingSlots];
 };
 static_assert(sizeof(RegionSlot) == kRegionSlotWords * sizeof(uint64_t));
@@ -266,12 +269,43 @@ void *Allocate(Bump *bump, uint64_t bytes) {
   }
 }
 
+// The region's slot, cleared if its words are an earlier region's, by the
+// first wave of the region to find so; the first lane of each wave asks, so
+// that no lane waits for another of its own wave. A wave that finds another
+// clearing it waits for that one.
+void ClaimRegionSlot(RegionSlot *slot, uint64_t generation) {
+  for (;;) {
+    uint64_t seen{__atomic_load_n(&slot->generation, __ATOMIC_ACQUIRE)};
+    if (seen == generation) {
+      return;
+    }
+    if (seen != kRegionSlotClearing &&
+        __atomic_compare_exchange_n(&slot->generation, &seen,
+            kRegionSlotClearing, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+      slot->bump.current = nullptr;
+      slot->bump.refilling = 0;
+      slot->bump.unused = 0;
+      slot->teams = nullptr;
+      for (uint64_t i{0}; i < kRegionRingSlots; ++i) {
+        slot->rings[i] = nullptr;
+      }
+      __atomic_store_n(&slot->generation, generation, __ATOMIC_RELEASE);
+      return;
+    }
+    __builtin_amdgcn_s_sleep(1);
+  }
+}
+
 } // namespace
 
 // At the start of each team of a target region, before it makes a cell: the
-// slot that the host gave the region (merk_region_enter).
-extern "C" void merk_device_region_enter(uint64_t slot) {
-  regionSlot = &regionSlots[slot];
+// slot that the host gave the region, and its generation (merk_region_enter).
+extern "C" void merk_device_region_enter(uint64_t word) {
+  RegionSlot *slot{&regionSlots[RegionSlotNumber(word)]};
+  if (rpc::is_first_lane(rpc::get_lane_mask())) {
+    ClaimRegionSlot(slot, RegionSlotGeneration(word));
+  }
+  regionSlot = slot;
 }
 
 // Memory that the threads of a parallel region on the device can all reach,

@@ -32,6 +32,11 @@ constexpr uint64_t kRingOfWords{0};
 constexpr uint64_t kRingOfArrays{1};
 constexpr uint64_t kRingOfTerms{2};
 
+// The size of a chunk of an arena that the device asks the host for, unless
+// it needs a larger one for a single cell. The host keeps a few chunks of
+// this size that regions have finished with, for the next to ask.
+constexpr uint64_t kChunkBytes{uint64_t{1} << 20};
+
 // The device's table of the rings it has, by the mailbox's slot, after its
 // arena's current chunk and whether a wave is asking for one: the words
 // that the host clears when no region is running.
@@ -44,12 +49,22 @@ constexpr uint64_t kArenaClearWords{kBumpWords + kRingCacheSlots};
 // region's image has, for each slot, the current chunk and its flag, and
 // the table of the region's teams (docs/INPROGRESS.md, Processes as teams,
 // step 2): the cells a region makes are bumped from chunks of its own,
-// which the host frees when the region ends, clearing the slot's words. A
-// region that starts while all are taken waits for one. A slot also has the
-// table of the rings the region has attached, which go with it.
+// which the host takes back when the region ends. A region that starts
+// while all are taken waits for one. A slot also has the table of the rings
+// the region has attached, which go with it.
+//
+// The host gives a slot with a generation, new each time, as the slot's
+// number in the low 32 bits of the region's word and the generation in the
+// high: the region's device clears the slot's words as the region starts if
+// they are of another generation, which a copy from the host would take
+// tens of microseconds for, every region. The generation is never 0, which
+// a slot starts with, or kRegionSlotClearing.
 constexpr uint64_t kRegionSlots{256};
 constexpr uint64_t kRegionRingSlots{16};
 constexpr uint64_t kRegionSlotWords{kBumpWords + 2 + kRegionRingSlots};
+constexpr uint64_t kRegionSlotClearing{~uint64_t{0}};
+constexpr uint64_t RegionSlotNumber(uint64_t word) { return word & 0xffffffff; }
+constexpr uint64_t RegionSlotGeneration(uint64_t word) { return word >> 32; }
 // The slot of a chunk that is not a region's.
 constexpr uint64_t kNoRegionSlot{~uint64_t{0}};
 

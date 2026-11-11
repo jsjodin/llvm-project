@@ -3209,11 +3209,33 @@ in a parallel region nested in it, where an SPMD kernel's operations are. A
 region's image has, by slot, the current chunk, whether a wave is asking for
 one, a target teams region's table of its teams' rings, and the table of the
 mailboxes' rings the region has attached (The mailbox's ring, below). A
-chunk request carries the slot, and `merk_region_exit` frees the slot's
-chunks on each device and clears its words, so a region's cells go when it
-ends, though other regions or GPU processes still run (2026-11-10;
+chunk request carries the slot, and `merk_region_exit` takes back the slot's
+chunks on each device, so a region's cells go when it ends, though other
+regions or GPU processes still run (2026-11-10;
 `CodeGen/omp-target-region-arena-gpu.test` runs 40 regions beside a waiting
-GPU process within a 32 MiB limit). Rejected: one arena for the image, freed
+GPU process within a 32 MiB limit).
+
+A short region pays for its arena only once (2026-11-11). The host keeps up
+to 16 chunks of 1 MiB a device that regions have finished with, counted
+towards the limit and freed if an allocation would pass it, and gives them to
+the next to ask, without `omp_target_alloc` or `omp_target_free`. The slot's
+words are cleared by the next region of the slot on the device, not by the
+host: the host gives the slot with a generation, new each time, in the high 32
+bits of the region's word, and the first lane of each wave compares the slot's
+generation with it as the region starts; the first to find it older swaps in a
+mark that it is clearing, clears the words, and stores the new generation,
+while others that see the mark wait. It is the first lane of each wave, so
+that no lane spins waiting for a lane of its own wave, which is masked off
+beside it. `CodeGen/omp-target-region-slot-reuse-gpu.test` reuses one slot
+600 times, with team tables and rings in it; without the clear it hangs. Each
+region that allocated cost about 45 µs more than one that did not, the
+allocation, the free and the host's copy to clear the slot; now it costs about
+the chunk's RPC (Measurements, Target regions). Rejected: the host clearing
+the slot as before, a synchronous copy to the device of about 12 µs per
+region; clearing it at `merk_device_region_enter` without a generation, since
+a team that starts late would clear what earlier teams of the region had
+made; and the device keeping freed chunks itself, which needs a free list on
+the device shared by regions and processes, for the same saving. Rejected: one arena for the image, freed
 when the last running region ends, as it was, since regions that overlap, or
 any region beside a GPU process, which lives as long as it likes, never let
 it end; a table on the device keyed by a launch id, its entries in the
@@ -4111,6 +4133,27 @@ one GPU. Runs between nodes vary from one to the next, by up to a third before
 the spin, so only differences of several microseconds mean anything. Each table
 gives the date and the commit of the tree it was measured on; a later change
 may have moved its numbers.
+
+### Target regions
+
+2026-11-11, gfx1030, the build of this tree at -O2: the time of a target
+region by what it does, from a loop of 500 regions on the host, after 20 to
+warm up. The probe was written for this and is not kept; `benchmarks/life`'s
+two-node Life is what pays these each step.
+
+| The region | Before | After the chunk pool and the device's clear |
+| --- | --- | --- |
+| does nothing | 17.9 µs | 17.6 µs |
+| sends an int | 25.8 µs | 26.5 µs |
+| makes an array of one int and sends an int | 54.0 µs | 38.5 µs |
+| returns an int to the host | not measured | 44.8 µs |
+
+- **A region that makes a cell** costs about 12 µs more than one that does
+  not, from 28 µs: the chunk's RPC, about 8 µs, and the slot's clear on the
+  device.
+- **A region's scalar output** is mapped `from`, which costs a copy from the
+  device and a wait, about 27 µs. It is what is left of the two-node Life's
+  exchange beyond its send and receive, and is not addressed yet.
 
 ### Message latency
 
