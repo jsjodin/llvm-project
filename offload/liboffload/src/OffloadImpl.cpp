@@ -253,7 +253,8 @@ struct ol_context_impl_t {
   ///
   /// Queues may be added to the outstanding queue list by olDestroyQueue if
   /// they are destroyed but not completed.
-  __tgt_async_info *getOutstandingQueue(ol_device_handle_t Device) {
+  llvm::Expected<__tgt_async_info *>
+  getOutstandingQueue(ol_device_handle_t Device) {
     std::lock_guard<std::mutex> Lock(OutstandingQueuesMutex);
     auto It = OutstandingQueues.find(Device);
     if (It == OutstandingQueues.end() || It->second.empty())
@@ -263,7 +264,10 @@ struct ol_context_impl_t {
     // As queues are pulled and popped from this list, longer running queues
     // naturally bubble to the start of the array. Hence looping backwards.
     for (auto Q = Bucket.rbegin(); Q != Bucket.rend(); Q++) {
-      if (!Device->Device->hasPendingWork(*Q)) {
+      auto Pending = Device->Device->hasPendingWork(*Q);
+      if (!Pending)
+        return Pending.takeError();
+      if (!*Pending) {
         auto OutstandingQueue = *Q;
         *Q = Bucket.back();
         Bucket.pop_back();
@@ -997,7 +1001,10 @@ Error olCreateQueue_impl(ol_context_handle_t Context, ol_device_handle_t Device,
   auto CreatedQueue =
       std::make_unique<ol_queue_impl_t>(nullptr, Context, Device);
 
-  auto OutstandingQueue = Context->getOutstandingQueue(Device);
+  auto OutstandingQueueOrErr = Context->getOutstandingQueue(Device);
+  if (!OutstandingQueueOrErr)
+    return OutstandingQueueOrErr.takeError();
+  __tgt_async_info *OutstandingQueue = *OutstandingQueueOrErr;
   if (OutstandingQueue) {
     // The queue is empty, but we still need to sync it to release any temporary
     // memory allocations or do other cleanup.
