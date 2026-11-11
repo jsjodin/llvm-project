@@ -4214,6 +4214,40 @@ taking turns, three rounds, the median of each kernel's best of 100, in MB/s,
 - **Copy and Mul** are what is left to close: a kernel that reads one array
   and writes another, where C is near the card's peak.
 
+**Where an array's elements start.** The two programs launch the same teams
+and threads, deal out the same iterations, and their loops are the same load
+and store; the kernels themselves differ (rocprofv3: Copy 1.57 to 1.70 ms,
+C's 1.00 ms). A Mercury array's size word comes first, so on the device its
+elements start 8 bytes past the 2 MB boundary that libomptarget gives the
+mapped block. `bandwidth.c` built with its arrays moved, by mapping elements
+before them under `target data`, two rounds, in GB/s, 2026-11-11 at
+5192433284b7:
+
+| The elements' offset from the block | Copy | Mul | Dot |
+| --- | --- | --- | --- |
+| 0, as `bandwidth.c` is | 530 | 457 | 523 |
+| 8 bytes, as Mercury's are | 405 | 352 | 437 |
+| 16 to 128 bytes | 386 to 455 | 345 to 392 | 419 to 441 |
+| 256 bytes, 512 bytes, 4 KB | 530 | 458 | 523 |
+| Mercury | 336 | 320 to 335 | 476 |
+
+- **Streaming wants elements on 256 bytes,** not on a cache line: 128 bytes
+  off still loses 15% of Copy. Off by 8, C loses a quarter of Copy and Mul.
+- **Not for stencils:** Life's C program with its arrays 8 bytes off took the
+  same time and fetched the same bytes (Dense stencils, above), since its
+  rows are read from the cache again.
+- **Mercury is 17% below C off by 8** on Copy, which is not explained; its Dot
+  is above it, 476 against 437, which the barrier after each round may give.
+- **Not changed yet.** Aligning a large array's elements would pad it before
+  its size word and map it from the padding, and every allocation of an
+  array on the host would have to pad, the heap's, a message's and a
+  collection's copies, or a map would copy another object's bytes. In-place
+  slices (`docs/INPROGRESS.md`, Split and join) bear on how arrays are laid
+  out, so it waits for them. A program can align a kernel's elements itself
+  meanwhile: element 31 of an array is at 256 bytes on the device, as the
+  size word is at the block's start, so an array 31 elements longer, indexed
+  from 31, should stream as C does; not measured yet.
+
 ### Message latency
 
 The round trip of a one-word message, in microseconds: 20000 rounds, after 100
