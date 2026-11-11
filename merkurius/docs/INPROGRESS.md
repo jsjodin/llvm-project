@@ -3107,6 +3107,116 @@ they arrive.
 - **The MPI+HIP program** to compare with is not written.
 - **Decomposition in two dimensions** and corners are left for later.
 
+## GPU processes that run loops: cooperative kernels
+
+Proposed 2026-11-11 for step 3 of the demo (A demo: a stencil whose active
+region moves). Decided by the user the same day: a GPU process runs its own
+data-parallel loops, as a kernel of many teams launched cooperatively, rather
+than a host process driving the GPU with target regions ("If we need to
+implement something to make the sparse tiles work, we should implement
+that"); and development is on the gfx1030, which drives the display, with
+the process limited to some of its compute units by a CU mask.
+
+**Why.** A GPU process today is one team, whose initial thread runs the
+kind's predicate (GPU processes without `omp target`, 4b). A place that owns
+many tiles must step them all with the whole GPU, between its messages, as
+the design document has it: "Between messages it may run data-parallel
+loops." Rejected: *the process launching each loop as a kernel from the
+GPU,* by writing the launch packet into a queue, which would repeat the
+plugin's arguments and environment for an OpenMP kernel on the device; and
+*the process asking the host to launch each loop,* which costs a round trip
+and a launch, 15 to 40 µs, every loop.
+
+**What LLVM has,** read on 2026-11-11:
+- **liboffload's API has cooperative launch:** the launch property
+  `OL_KERNEL_LAUNCH_PROP_TYPE_IS_COOPERATIVE`,
+  `olGetKernelMaxCooperativeGroupCount` and
+  `OL_DEVICE_INFO_COOPERATIVE_LAUNCH_SUPPORT`, with unit tests
+  (`offload/unittests/OffloadAPI/kernel/olLaunchKernelCooperative.cpp`).
+  CUDA's and Level Zero's plugins implement it. AMDGPU's refuses it:
+  "cooperative kernel launch not supported for AMDGPU".
+- **ROCr** has cooperative queues (`HSA_QUEUE_TYPE_COOPERATIVE`, by GWS,
+  the global wave sync), but not on gfx1030: its agent reports
+  `HSA_AMD_AGENT_INFO_COOPERATIVE_QUEUES` false (probe, 2026-11-11), and 80
+  compute units, all of them fully enabled for cooperative dispatch. Queues
+  take a CU mask (`hsa_amd_queue_cu_set_mask`, in pairs on processors with
+  work group processors, as gfx10's), ANDed with the process's
+  `HSA_CU_MASK`.
+- **No barrier across teams** in OpenMP's device runtime or ours.
+
+**Design.**
+
+- **(a) Cooperative launch in AMDGPU's plugin,** for upstream, as CUDA's.
+  - *The largest count of teams* that are resident at once: the compute
+    units the queue may use, times the teams a compute unit holds, from the
+    kernel's metadata, its waves a team, VGPRs, SGPRs and LDS, against the
+    processor's limits, as LLVM's AMDGPU occupancy computation counts them.
+    At most `HSA_AMD_AGENT_INFO_COOPERATIVE_COMPUTE_UNIT_COUNT` compute
+    units.
+  - *A launch of more teams than that is refused,* as CUDA's is.
+  - *Residency:* on a processor with cooperative queues, the launch goes to
+    one, which guarantees that the teams run together. Without them, as on
+    gfx1030, teams that fit are resident unless other work holds the compute
+    units, and then they become resident when it ends; what never ends, such
+    as another cooperative kernel on the same units, can deadlock it. That
+    is documented, as HIP's is for such processors (to check).
+  - *Tests:* liboffload's existing unit tests, which skip without the
+    support, and a kernel that crosses a barrier across teams.
+- **(b) A CU mask.** For development on a GPU that drives the display, the
+  process's GPU work is limited to some of the compute units, so that the
+  display always has free ones. First by `HSA_CU_MASK`, which ROCr applies
+  to every queue of the program, set by the tests that run cooperative
+  kernels and by `utils/gpu/with-gpus.py` when asked. The count of (a)
+  takes the queue's mask (`hsa_amd_queue_cu_get_mask`). Later, if places
+  share a GPU (Several places on one GPU, open, in the demo), a mask a
+  queue, which liboffload's API does not have yet.
+- **(c) A barrier across teams,** in the device runtime: each team's thread
+  0 arrives after a barrier of its team, on a counter in device memory with
+  a sense that flips each time, and waits with `s_sleep`; then the team's
+  barrier again. Its cost, measured, against a kernel launch.
+- **(d) A process's kernel as an SPMD kernel of OpenMP's,** linked with
+  OpenMP's device runtime, so that its loops are lowered as a target
+  region's are, by OMPIRBuilder, and run the same code the dense kernels
+  were measured with (the barrier after each round included).
+  - *Its sequential code,* receives, sends and bookkeeping, runs in team 0's
+    thread 0. What a loop needs from it is written to device memory, and
+    the barrier across teams (c) comes before and after each loop; the
+    other teams wait at it.
+  - *A loop in a process's body:* `%$omp distribute parallel do`, without
+    `target teams`, since the process's kernel is the teams. With
+    `reduction`, OpenMP's reduction across teams.
+  - *Its launch:* the runtime loads the image with liboffload, as now, sets
+    OpenMP's device environment in it, as libomptarget does
+    (`__omp_rtl_device_environment`, `offload/include/Shared/Environment.h`),
+    and passes the kernel launch environment that `__kmpc_target_init`
+    takes, with the teams and threads (a) gives.
+  - *It reverses a decision of 4b:* "compiling the kernels as an OpenMP
+    device module" was rejected there, as it would bring OpenMP's device
+    runtime into a process's image; now that runtime is what the loops
+    need. Rejected: *a static loop of our own* in `libmerkdevice`, on
+    `gpuintrin.h`, which repeats OpenMP's loops, their barrier after each
+    round and its reductions across teams, and gets none of their
+    improvements (option (c) under Data parallelism, above).
+- **(e) Waiting.** While team 0 waits in a receive, the other teams wait at
+  the barrier across teams, sleeping, so the process holds its compute
+  units and little else. Between messages the process uses no other
+  resource, but it holds its units, which is why (b) comes first.
+- **(f) Tests on the GPU,** small first and with a timeout, under a CU mask
+  that leaves half the compute units free: a process that sums an array it
+  receives with a loop across teams and replies; then one that runs many
+  loops between messages, against the same loops in target regions.
+
+**Steps,** each a commit of its own: (a) and (b) together, as they are
+tested together; (c); (d) in parts; (e) and (f). Then sparse Life (demo,
+step 3) on them.
+
+**Open.**
+- *Which teams a loop uses:* all the kernel's, or fewer for a small loop.
+- *Arrays a process makes* are in its arena, in device memory, which every
+  team addresses, so a loop reads them in place.
+- *HIP on processors without cooperative queues:* how it keeps cooperative
+  launches resident, from its documentation, to follow or to differ from.
+
 ## A demo: a stencil whose active region moves
 
 Proposed 2026-11-10, from a discussion; not agreed, and nothing is built. A demo
@@ -3225,7 +3335,9 @@ its reference is in C or Fortran.
    copy from the device and a wait, which the exchange's `Ok` pays every
    step: open, for instance outputs written to host memory that the device
    can reach, read after the kernel ends.
-3. Sparse tiles on one place: tiles start and end, one GPU process.
+3. Sparse tiles on one place: tiles start and end, one GPU process, which
+   steps its tiles with loops across its teams (GPU processes that run
+   loops: cooperative kernels, above).
 4. The Mandelbrot zoom with stealing between several places.
 5. Several places with a directory, growing, shrinking and moving tiles, on one
    GPU at first (below).
