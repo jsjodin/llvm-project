@@ -557,10 +557,30 @@ extern "C" void merk_device_teams_wait_all(void) {
   }
 }
 
-// process.team_barrier on a device: the last team to arrive ends the round,
-// and the others wait until it has, which costs about one atomic round trip
-// a team. Only a region whose teams all run at once can wait like this, so
-// one that calls it waits for its teams to start (merk_device_teams_wait_all,
+namespace {
+
+// One team's arrival at a barrier of `teams` teams, whose counts are
+// `arrived` and `rounds`: the last team to arrive ends the round, and the
+// others wait until it has, which costs about one atomic round trip a team.
+void ArriveAndWait(int64_t *arrived, int64_t *rounds, int64_t teams) {
+  // Read before arriving: the round cannot end before this team arrives.
+  int64_t round{__atomic_load_n(rounds, __ATOMIC_ACQUIRE)};
+  if (__atomic_add_fetch(arrived, 1, __ATOMIC_ACQ_REL) == teams) {
+    // No team arrives in the next round until it sees this one end.
+    __atomic_store_n(arrived, 0, __ATOMIC_RELAXED);
+    __atomic_add_fetch(rounds, 1, __ATOMIC_RELEASE);
+    return;
+  }
+  while (__atomic_load_n(rounds, __ATOMIC_ACQUIRE) == round) {
+    __builtin_amdgcn_s_sleep(1);
+  }
+}
+
+} // namespace
+
+// process.team_barrier on a device, which a team's initial thread calls. Only
+// a region whose teams all run at once can wait like this, so one that calls
+// it waits for its teams to start (merk_device_teams_wait_all,
 // MarkRegionsForTeamMailboxes), and reports it if they do not. Outside a
 // teams region there is one team.
 extern "C" void merk_device_team_barrier(void) {
@@ -568,18 +588,38 @@ extern "C" void merk_device_team_barrier(void) {
   if (!table || table->teams <= 1) {
     return;
   }
-  // Read before arriving: the round cannot end before this team arrives.
-  int64_t round{__atomic_load_n(&table->rounds, __ATOMIC_ACQUIRE)};
-  if (__atomic_add_fetch(&table->arrived, 1, __ATOMIC_ACQ_REL) ==
-      table->teams) {
-    // No team arrives in the next round until it sees this one end.
-    __atomic_store_n(&table->arrived, 0, __ATOMIC_RELAXED);
-    __atomic_add_fetch(&table->rounds, 1, __ATOMIC_RELEASE);
-    return;
+  ArriveAndWait(&table->arrived, &table->rounds, table->teams);
+}
+
+// A barrier across all the threads of all the teams of a cooperative kernel,
+// a GPU process's (docs/INPROGRESS.md, GPU processes that run loops, (c)).
+// Its counts are in device memory, zero when the kernel starts, one pair for
+// each launch. Every thread of every team calls it, and every thread's writes
+// before it are seen by every thread after it. The teams must all be
+// resident at once, which a cooperative launch promises; there is no time
+// limit, as a GPU process's other teams wait at it while its first team
+// waits for a message.
+struct MerkGridBarrier {
+  int64_t arrived;
+  int64_t rounds;
+};
+
+extern "C" void merk_device_grid_barrier(MerkGridBarrier *barrier) {
+  // Each thread's writes are made visible to the device before its team's
+  // barrier, so that thread 0's arrival publishes the team's.
+  __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+  __gpu_sync_threads();
+  if (__gpu_thread_id_x() == 0 && __gpu_thread_id_y() == 0 &&
+      __gpu_thread_id_z() == 0) {
+    int64_t teams{static_cast<int64_t>(__gpu_num_blocks_x()) *
+        __gpu_num_blocks_y() * __gpu_num_blocks_z()};
+    if (teams > 1) {
+      ArriveAndWait(&barrier->arrived, &barrier->rounds, teams);
+    }
   }
-  while (__atomic_load_n(&table->rounds, __ATOMIC_ACQUIRE) == round) {
-    __builtin_amdgcn_s_sleep(1);
-  }
+  __gpu_sync_threads();
+  // And each thread sees the other teams' writes after it.
+  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE);
 }
 
 // At the end of each team of a target teams region: nothing to do on a

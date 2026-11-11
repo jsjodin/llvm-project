@@ -56,6 +56,17 @@ constexpr std::uint32_t kOlSymbolKindGlobalVariable{1};
 constexpr std::uint32_t kOlSymbolInfoGlobalVariableAddress{1};
 // ol_alloc_type_t
 constexpr std::uint32_t kOlAllocTypeDevice{1};
+// ol_platform_backend_t
+constexpr std::uint32_t kOlPlatformBackendAmdgpu{2};
+// ol_kernel_launch_prop_type_t
+constexpr std::uint32_t kOlKernelLaunchPropTypeNone{0};
+constexpr std::uint32_t kOlKernelLaunchPropTypeIsCooperative{1};
+
+// A launch's properties, ended by one of type kOlKernelLaunchPropTypeNone.
+struct ol_kernel_launch_prop_t {
+  std::uint32_t type;
+  void *data;
+};
 
 struct ol_dimensions_t {
   std::uint32_t x, y, z;
@@ -93,6 +104,10 @@ ol_result_t olLaunchKernel(ol_queue_handle_t queue, ol_device_handle_t device,
     ol_symbol_handle_t kernel, const ol_kernel_launch_size_args_t *size,
     const void *properties, std::size_t count, void **arguments,
     const std::size_t *sizes) __attribute__((weak));
+ol_result_t olGetKernelMaxCooperativeGroupCount(ol_device_handle_t device,
+    ol_symbol_handle_t kernel, const ol_kernel_launch_size_args_t *size,
+    std::uint32_t *count) __attribute__((weak));
+ol_result_t olSyncQueue(ol_queue_handle_t queue) __attribute__((weak));
 ol_result_t olLaunchHostFunction(ol_queue_handle_t queue,
     void (*callback)(void *data), void *data) __attribute__((weak));
 ol_result_t olMemAlloc(ol_context_handle_t context, ol_device_handle_t device,
