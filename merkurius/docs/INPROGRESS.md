@@ -1418,7 +1418,16 @@ receiver:
   so that a sender learns of free slots without reading remote memory. Today's
   rings have their own flow control; this replaces it with one scheme for all.
 
-`send` is reserve, put and signal. `receive` is wait, read and credit. The host
+`send` is reserve, put and signal. `receive` is wait, read and credit.
+
+**Messages of variable size.** A whole array, a string and a packed message
+(flat records, above) have a size known only when they are sent. So a ring's
+entries are of variable length: reserve takes a number of bytes, not one slot.
+A message above a threshold goes by rendezvous instead: its bytes are put into
+a buffer at the receiver, and only their place and size go through the ring,
+as the design document's size classes have it (What choosing among links adds).
+Fixed-size slots are then an optimisation for a message whose size the compiler
+knows. The host
 keeps the control path, as the design document has it: it opens a route between
 a sender's place and a mailbox, registers memory and exchanges keys, closes it,
 and tells the mailbox's monitors when a peer has gone.
@@ -2860,6 +2869,32 @@ the process asks the host to launch. The first version has neither.
        first: an example from the user's OpenMP codes, to choose by.
      - **Records of several constructors** (tagged unions, as messages
        already may be) inside arrays: later, if a program needs them.
+     - **Arrays whose length is known only at run time,** in records
+       (discussed 2026-11-10). An array of scalars or enumerations is flat
+       today only as a whole message; a record or tuple with an array field,
+       or an array of arrays, "has no fixed size". Two ways, not exclusive:
+       - *Packed messages.* A record with array fields may be a whole
+         message, as one block: its fixed part first, each array field as an
+         offset from the block's start and a length, and the elements after.
+         Offsets from the block, not pointers, so a store, a DMA copy or an
+         RDMA write moves the bytes unchanged, and the receiver reads the
+         message where it lies, with no unpacking. Such a record is never an
+         array's element, as its size varies. It covers metadata with data,
+         such as a halo message `{tile, step, cells}`, which C also sends as
+         one buffer. Ragged arrays are one with two fields, the elements and
+         their offsets, as in CSR. Recommended, with step 2, as both need
+         the same layout.
+       - *Bounded arrays:* a capacity fixed in the type and a length field,
+         such as `bounded(T, n64)` (the spelling as for fixed sizes, below).
+         Of a fixed size, so a field, an element or a value in registers, at
+         the cost of the space up to the capacity, as GPU codes' neighbour
+         lists with a maximum count have it. Step 3 with a length; when a
+         program needs it.
+       - *Not planned: temporaries of variable length inside records.* The
+         user, 2026-11-10: processes are handed the data they work on, so
+         they are unlikely to need array temporaries, and the limit is
+         acceptable for now. A GPU process can still make an array in its
+         arena, as a value of its own.
      - **Narrow fields' layout:** `int8` to `int32` and enumerations at their
        C sizes, so a record of small fields is small; a float is 64 bits, as
        Mercury has no 32-bit float, which GPU codes use widely, to be
