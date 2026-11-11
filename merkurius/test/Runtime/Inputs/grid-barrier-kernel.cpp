@@ -10,6 +10,11 @@
 struct MerkGridBarrier;
 extern "C" void merk_device_grid_barrier(MerkGridBarrier *barrier);
 
+// The image's kernel of GPU processes, merk_place, which the start object
+// links in, starts kinds through merk_process_dispatch, which the device's
+// compile of a module makes; this image has no kinds.
+extern "C" void merk_process_dispatch(uint64_t, uint64_t) {}
+
 extern "C" __gpu_kernel void grid_barrier_test(MerkGridBarrier *barrier,
     uint64_t *slots, uint32_t rounds, uint32_t *errors) {
   uint64_t teams{__gpu_num_blocks_x()};
