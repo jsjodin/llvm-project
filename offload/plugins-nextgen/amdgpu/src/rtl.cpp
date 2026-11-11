@@ -863,6 +863,18 @@ struct AMDGPUKernelTy : public GenericKernelTy {
                               const uint32_t NumThreads[3],
                               uint32_t DynBlockMemSize) const override;
 
+  /// The same, on the queue of \p AsyncInfo, which may have compute units of
+  /// its own.
+  Expected<uint32_t> getMaxCooperativeGroupCountOnQueue(
+      GenericDeviceTy &GenericDevice, __tgt_async_info *AsyncInfo,
+      const uint32_t NumThreads[3], uint32_t DynBlockMemSize) const override;
+
+  /// The work groups that one compute unit holds at once.
+  Expected<uint32_t>
+  getCooperativeGroupsPerComputeUnit(AMDGPUDeviceTy &Device,
+                                     const uint32_t NumThreads[3],
+                                     uint32_t DynBlockMemSize) const;
+
   /// Return maximum block size for maximum occupancy
   ///
   /// TODO: This needs to be implemented for amdgpu
@@ -1069,13 +1081,13 @@ struct AMDGPUQueueTy {
       // and the plugin would count compute units the queue does not have.
       if (Status == static_cast<hsa_status_t>(HSA_STATUS_CU_MASK_REDUCED))
         return Plugin::error(ErrorCode::INVALID_ARGUMENT,
-                             "LIBOMPTARGET_AMDGPU_CU_MASK enables compute "
-                             "units that HSA_CU_MASK disables");
+                             "the queue's CU mask enables compute units that "
+                             "HSA_CU_MASK disables");
       if (auto Err = Plugin::check(
-              Status, "error in hsa_amd_queue_cu_set_mask for "
-                      "LIBOMPTARGET_AMDGPU_CU_MASK (a processor with work "
-                      "group processors enables compute units in pairs, 0 "
-                      "and 1, 2 and 3 and so on): %s"))
+              Status, "error in hsa_amd_queue_cu_set_mask for the queue's "
+                      "CU mask (a processor with work group processors "
+                      "enables compute units in pairs, 0 and 1, 2 and 3 and "
+                      "so on): %s"))
         return Err;
     }
 
@@ -1479,6 +1491,13 @@ private:
   /// The queue that the stream uses to launch kernels.
   AMDGPUQueueTy *Queue;
 
+  /// The queue of the stream's own, limited to some compute units, which
+  /// Queue is while the stream has it, and the compute units of it that a
+  /// cooperative launch may use, or why it may not.
+  std::unique_ptr<AMDGPUQueueTy> OwnQueue;
+  uint32_t OwnCooperativeComputeUnits = 0;
+  std::string OwnCooperativeUnsupported;
+
   /// The manager of signals to reuse signals.
   AMDGPUSignalManagerTy &SignalManager;
 
@@ -1773,6 +1792,16 @@ private:
 public:
   /// Create an empty stream associated with a specific device.
   AMDGPUStreamTy(AMDGPUDeviceTy &Device);
+
+  /// Whether the stream has a queue of its own, limited to some compute
+  /// units, and what a cooperative launch on it may use.
+  bool hasOwnQueue() const { return OwnQueue != nullptr; }
+  uint32_t getOwnCooperativeComputeUnits() const {
+    return OwnCooperativeComputeUnits;
+  }
+  const std::string &getOwnCooperativeUnsupported() const {
+    return OwnCooperativeUnsupported;
+  }
 
   /// Initialize the stream's signals.
   Error init() { return Plugin::success(); }
@@ -2409,11 +2438,43 @@ struct AMDGPUStreamManagerTy final
     });
   }
 
-  /// Return stream to the pool.
+  /// Get a stream from the pool with a queue of its own, limited to the
+  /// compute units of \p Mask, of which a cooperative launch may use
+  /// \p CooperativeUnits, or none for \p CooperativeUnsupported.
+  Error getResourceWithComputeUnitMask(AMDGPUStreamTy *&StreamHandle,
+                                       ArrayRef<uint32_t> Mask,
+                                       uint32_t CooperativeUnits,
+                                       StringRef CooperativeUnsupported) {
+    return getResourcesImpl(
+        1, &StreamHandle, [&, this](AMDGPUStreamTy *&Handle) -> Error {
+          auto Queue = std::make_unique<AMDGPUQueueTy>();
+          if (auto Err = Queue->init(Device, Agent, QueueSize, Mask)) {
+            // A queue that was created is destroyed with the error.
+            if (auto DeinitErr = Queue->deinit())
+              return joinErrors(std::move(Err), std::move(DeinitErr));
+            return Err;
+          }
+          Queue->addUser();
+          Handle->Queue = Queue.get();
+          Handle->OwnQueue = std::move(Queue);
+          Handle->OwnCooperativeComputeUnits = CooperativeUnits;
+          Handle->OwnCooperativeUnsupported = CooperativeUnsupported.str();
+          return Plugin::success();
+        });
+  }
+
+  /// Return stream to the pool. A queue of its own is destroyed.
   virtual Error returnResource(AMDGPUStreamTy *StreamHandle) override {
     return returnResourceImpl(StreamHandle, [](AMDGPUStreamTy *Handle) {
       Handle->Queue->removeUser();
-      return Plugin::success();
+      if (!Handle->OwnQueue)
+        return Plugin::success();
+      Error Err = Handle->OwnQueue->deinit();
+      Handle->OwnQueue.reset();
+      Handle->Queue = nullptr;
+      Handle->OwnCooperativeComputeUnits = 0;
+      Handle->OwnCooperativeUnsupported.clear();
+      return Err;
     });
   }
 
@@ -3047,6 +3108,7 @@ struct AMDGPUDeviceTy : public GenericDeviceTy, AMDGenericDeviceTy {
   /// than the others counts that engine's for each of them.
   Error initCooperativeComputeUnits(uint32_t ComputeUnits,
                                     ArrayRef<uint32_t> CUMask) {
+    NumComputeUnits = ComputeUnits;
     // ROCr up to 7.2 does not record a mask that it applies, from HSA_CU_MASK
     // or from hsa_amd_queue_cu_set_mask, and then reports none, so the plugin
     // takes the mask it applied itself.
@@ -3064,29 +3126,39 @@ struct AMDGPUDeviceTy : public GenericDeviceTy, AMDGenericDeviceTy {
           "LIBOMPTARGET_AMDGPU_CU_MASK does instead";
       return Plugin::success();
     }
+    QueueComputeUnitMask = Mask;
+    CooperativeComputeUnits =
+        countCooperativeComputeUnits(Mask, CooperativeUnsupported);
+    return Plugin::success();
+  }
 
+  /// The compute units of \p Mask that a cooperative launch on a queue
+  /// limited to them may use, or 0 and why in \p Unsupported.
+  uint32_t countCooperativeComputeUnits(ArrayRef<uint32_t> Mask,
+                                        std::string &Unsupported) {
+    uint32_t ComputeUnits = NumComputeUnits;
     uint32_t Engines = 0, ArraysPerEngine = 0, XCCs = 1;
     if (getDeviceAttrRaw(HSA_AMD_AGENT_INFO_NUM_SHADER_ENGINES, Engines) !=
             HSA_STATUS_SUCCESS ||
         getDeviceAttrRaw(HSA_AMD_AGENT_INFO_NUM_SHADER_ARRAYS_PER_SE,
                          ArraysPerEngine) != HSA_STATUS_SUCCESS ||
         Engines == 0 || ArraysPerEngine == 0) {
-      CooperativeUnsupported = "the agent does not report its shader engines";
-      return Plugin::success();
+      Unsupported = "the agent does not report its shader engines";
+      return 0;
     }
     if (getDeviceAttrRaw(HSA_AMD_AGENT_INFO_NUM_XCC, XCCs) !=
         HSA_STATUS_SUCCESS)
       XCCs = 1;
     if (XCCs != 1) {
-      CooperativeUnsupported =
+      Unsupported =
           "how its compute units are dealt to its several XCCs is not known";
-      return Plugin::success();
+      return 0;
     }
     uint32_t Arrays = Engines * ArraysPerEngine;
     if (ComputeUnits % Arrays != 0) {
-      CooperativeUnsupported =
+      Unsupported =
           "its compute units are not spread evenly over its shader arrays";
-      return Plugin::success();
+      return 0;
     }
 
     llvm::AMDGPU::IsaVersion Version =
@@ -3108,14 +3180,13 @@ struct AMDGPUDeviceTy : public GenericDeviceTy, AMDGenericDeviceTy {
       ++Used;
       Fewest = std::min(Fewest, Units);
     }
-    CooperativeComputeUnits = Used * Fewest;
+    uint32_t Units = Used * Fewest;
 
     uint32_t CooperativeLimit = ComputeUnits;
     if (getDeviceAttrRaw(HSA_AMD_AGENT_INFO_COOPERATIVE_COMPUTE_UNIT_COUNT,
                          CooperativeLimit) == HSA_STATUS_SUCCESS)
-      CooperativeComputeUnits =
-          std::min(CooperativeComputeUnits, CooperativeLimit);
-    return Plugin::success();
+      Units = std::min(Units, CooperativeLimit);
+    return Units;
   }
 
   /// Why the device has no cooperative launch, if it has none.
@@ -3126,6 +3197,57 @@ struct AMDGPUDeviceTy : public GenericDeviceTy, AMDGenericDeviceTy {
   /// The compute units that a cooperative launch may use.
   uint32_t getCooperativeComputeUnits() const {
     return CooperativeComputeUnits;
+  }
+
+  /// The compute units that the device's queues use: those of
+  /// LIBOMPTARGET_AMDGPU_CU_MASK, or of the queues that ROCr creates.
+  Expected<SmallVector<uint32_t>> getComputeUnitMask() override {
+    if (QueueComputeUnitMask.empty())
+      return Plugin::error(ErrorCode::UNSUPPORTED,
+                           "the compute units of device %d's queues are not "
+                           "known: ROCr up to 7.2 reports none when "
+                           "HSA_CU_MASK limits them, which "
+                           "LIBOMPTARGET_AMDGPU_CU_MASK does instead",
+                           getDeviceId());
+    return QueueComputeUnitMask;
+  }
+
+  /// A stream of its own for \p AsyncInfo, on an HSA queue of its own limited
+  /// to the compute units of \p Mask, which must be some of the device's
+  /// queues'.
+  Error initQueueWithComputeUnitMask(__tgt_async_info &AsyncInfo,
+                                     ArrayRef<uint32_t> Mask) override {
+    auto DeviceMaskOrErr = getComputeUnitMask();
+    if (!DeviceMaskOrErr)
+      return DeviceMaskOrErr.takeError();
+    SmallVector<uint32_t> Limited(DeviceMaskOrErr->size(), 0);
+    bool Any = false;
+    for (size_t I = 0; I < Mask.size(); ++I) {
+      uint32_t Allowed = I < Limited.size() ? (*DeviceMaskOrErr)[I] : 0;
+      if (Mask[I] & ~Allowed)
+        return Plugin::error(
+            ErrorCode::INVALID_ARGUMENT,
+            "the mask sets compute units of device %d, from %zu, that its "
+            "queues do not use",
+            getDeviceId(), I * 32 + llvm::countr_zero(Mask[I] & ~Allowed));
+      if (I < Limited.size())
+        Limited[I] = Mask[I];
+      Any |= Mask[I] != 0;
+    }
+    if (!Any)
+      return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                           "the mask sets no compute unit");
+
+    std::string Unsupported = CooperativeUnsupported;
+    uint32_t Units = Unsupported.empty()
+                         ? countCooperativeComputeUnits(Limited, Unsupported)
+                         : 0;
+    AMDGPUStreamTy *Stream = nullptr;
+    if (auto Err = AMDGPUStreamManager.getResourceWithComputeUnitMask(
+            Stream, Limited, Units, Unsupported))
+      return Err;
+    AsyncInfo.Queue = Stream;
+    return Plugin::success();
   }
 
   /// The SIMDs of a compute unit, and the waves that each one holds at most.
@@ -4227,6 +4349,10 @@ private:
   /// The compute units that a cooperative launch may use, the SIMDs of a
   /// compute unit and the waves that each one holds at most.
   uint32_t CooperativeComputeUnits = 0;
+
+  /// The device's compute units, and those its queues may use by default.
+  uint32_t NumComputeUnits = 0;
+  SmallVector<uint32_t> QueueComputeUnitMask;
   std::string CooperativeUnsupported;
   uint32_t SIMDsPerComputeUnit = 0;
   uint32_t WavesPerSIMD = 0;
@@ -4901,12 +5027,10 @@ AMDGPUPluginContextTy::getAllocInfo(const void *Ptr) {
                            HsaInfo.sizeInBytes};
 }
 
-Expected<uint32_t>
-AMDGPUKernelTy::getMaxCooperativeGroupCount(GenericDeviceTy &GenericDevice,
-                                            const uint32_t NumThreads[3],
-                                            uint32_t DynBlockMemSize) const {
+Expected<uint32_t> AMDGPUKernelTy::getCooperativeGroupsPerComputeUnit(
+    AMDGPUDeviceTy &Device, const uint32_t NumThreads[3],
+    uint32_t DynBlockMemSize) const {
   using namespace llvm::AMDGPU;
-  AMDGPUDeviceTy &Device = static_cast<AMDGPUDeviceTy &>(GenericDevice);
   GPUKind Kind = parseArchAMDGCN(Device.getComputeUnitKind());
   if (Kind == GK_NONE)
     return Plugin::error(ErrorCode::UNSUPPORTED,
@@ -4972,11 +5096,40 @@ AMDGPUKernelTy::getMaxCooperativeGroupCount(GenericDeviceTy &GenericDevice,
         Groups, Available / alignTo(LDS, getLDSAllocGranule(Kind)));
   }
 
-  if (!Device.getCooperativeUnsupported().empty())
-    return Plugin::error(
-        ErrorCode::UNSUPPORTED, "no cooperative launch on device %d: %s",
-        Device.getDeviceId(), Device.getCooperativeUnsupported().c_str());
-  return Groups * Device.getCooperativeComputeUnits();
+  return Groups;
+}
+
+Expected<uint32_t>
+AMDGPUKernelTy::getMaxCooperativeGroupCount(GenericDeviceTy &GenericDevice,
+                                            const uint32_t NumThreads[3],
+                                            uint32_t DynBlockMemSize) const {
+  return getMaxCooperativeGroupCountOnQueue(GenericDevice, nullptr, NumThreads,
+                                            DynBlockMemSize);
+}
+
+Expected<uint32_t> AMDGPUKernelTy::getMaxCooperativeGroupCountOnQueue(
+    GenericDeviceTy &GenericDevice, __tgt_async_info *AsyncInfo,
+    const uint32_t NumThreads[3], uint32_t DynBlockMemSize) const {
+  AMDGPUDeviceTy &Device = static_cast<AMDGPUDeviceTy &>(GenericDevice);
+  auto GroupsOrErr =
+      getCooperativeGroupsPerComputeUnit(Device, NumThreads, DynBlockMemSize);
+  if (!GroupsOrErr)
+    return GroupsOrErr.takeError();
+
+  // A queue of a stream's own has its own compute units; any other queue has
+  // the device's.
+  auto *Stream = AsyncInfo
+                     ? reinterpret_cast<AMDGPUStreamTy *>(AsyncInfo->Queue)
+                     : nullptr;
+  bool Own = Stream && Stream->hasOwnQueue();
+  const std::string &Unsupported = Own ? Stream->getOwnCooperativeUnsupported()
+                                       : Device.getCooperativeUnsupported();
+  if (!Unsupported.empty())
+    return Plugin::error(ErrorCode::UNSUPPORTED,
+                         "no cooperative launch on device %d: %s",
+                         Device.getDeviceId(), Unsupported.c_str());
+  return *GroupsOrErr * (Own ? Stream->getOwnCooperativeComputeUnits()
+                             : Device.getCooperativeComputeUnits());
 }
 
 Error AMDGPUKernelTy::launchImpl(GenericDeviceTy &GenericDevice,
@@ -4987,8 +5140,8 @@ Error AMDGPUKernelTy::launchImpl(GenericDeviceTy &GenericDevice,
                                  GenericProfilerTy *ProfilerPtr) const {
   // The work groups of a cooperative launch must all be resident at once.
   if (LaunchArgs.Flags.Cooperative) {
-    auto MaxGroupsOrErr =
-        getMaxCooperativeGroupCount(GenericDevice, NumThreads, DynBlockMemSize);
+    auto MaxGroupsOrErr = getMaxCooperativeGroupCountOnQueue(
+        GenericDevice, AsyncInfoWrapper, NumThreads, DynBlockMemSize);
     if (!MaxGroupsOrErr)
       return MaxGroupsOrErr.takeError();
     uint64_t NumGroups = uint64_t(NumBlocks[0]) * uint64_t(NumBlocks[1]) *

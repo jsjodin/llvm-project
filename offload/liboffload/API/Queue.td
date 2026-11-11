@@ -28,6 +28,34 @@ def olCreateQueue : Function {
     ];
 }
 
+def olCreateQueueWithComputeUnitMask : Function {
+    let desc = "Create a queue for the given device whose kernels run only on the given compute units.";
+    let details = [
+        "As `olCreateQueue`, but the queue's kernels run only on the compute units whose bits are set in `Mask`, bit `I % 32` of word `I / 32` for compute unit `I`, as HIP's `hipExtStreamCreateWithCUMask`.",
+        "The queue has the device's hardware queue to itself, so that no other queue's kernels share its mask, and returns it when it is destroyed.",
+        "`Mask` may only set bits of compute units that `olGetDeviceComputeUnitMask` sets.",
+        "A cooperative launch on the queue may have as many work groups as `olGetKernelMaxCooperativeGroupCountOnQueue` gives for it."
+    ];
+    let params = [
+        Param<"ol_context_handle_t", "Context", "handle of the context", PARAM_IN>,
+        Param<"ol_device_handle_t", "Device", "handle of the device", PARAM_IN>,
+        Param<"const uint32_t*", "Mask", "the compute units' mask, of `MaskWords` words", PARAM_IN>,
+        Param<"size_t", "MaskWords", "the number of words of `Mask`", PARAM_IN>,
+        Param<"ol_queue_handle_t*", "Queue", "output pointer for the created queue", PARAM_OUT>
+    ];
+    let returns = [
+        Return<"OL_ERRC_INVALID_DEVICE", [
+            "Device does not belong to `Context`"
+        ]>,
+        Return<"OL_ERRC_INVALID_ARGUMENT", [
+            "`Mask` sets no bit, or one of a compute unit that `olGetDeviceComputeUnitMask` does not set"
+        ]>,
+        Return<"OL_ERRC_UNSUPPORTED", [
+            "The device's backend cannot limit a queue to some of its compute units"
+        ]>
+    ];
+}
+
 def olDestroyQueue : Function {
     let desc = "Destroy the queue and free all underlying resources.";
     let details = [

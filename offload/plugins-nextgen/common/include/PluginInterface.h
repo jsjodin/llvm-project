@@ -383,6 +383,16 @@ struct GenericKernelTy {
                          "cooperative launch not supported");
   }
 
+  /// Get the maximum number of work groups that can be launched cooperatively
+  /// on the queue of \p AsyncInfo, whose compute units may be fewer than the
+  /// device's. By default, the device's count.
+  virtual Expected<uint32_t> getMaxCooperativeGroupCountOnQueue(
+      GenericDeviceTy &GenericDevice, __tgt_async_info *AsyncInfo,
+      const uint32_t NumThreads[3], uint32_t DynBlockMemSize) const {
+    return getMaxCooperativeGroupCount(GenericDevice, NumThreads,
+                                       DynBlockMemSize);
+  }
+
   /// Get the kernel name.
   const char *getName() const { return Name.c_str(); }
 
@@ -873,6 +883,24 @@ struct GenericDeviceTy : public DeviceAllocatorTy {
   Error synchronize(__tgt_async_info *AsyncInfo, bool ReleaseQueue = true);
   virtual Error synchronizeImpl(__tgt_async_info &AsyncInfo,
                                 bool ReleaseQueue) = 0;
+
+  /// Give \p AsyncInfo, which has no queue yet, a queue of its own whose
+  /// kernels run only on the compute units of \p Mask, bit I % 32 of word
+  /// I / 32 for compute unit I. Releasing the queue frees it.
+  virtual Error initQueueWithComputeUnitMask(__tgt_async_info &AsyncInfo,
+                                             ArrayRef<uint32_t> Mask) {
+    return Plugin::error(error::ErrorCode::UNSUPPORTED,
+                         "queues limited to some compute units are not "
+                         "supported");
+  }
+
+  /// The compute units that the device's queues run kernels on, as a mask
+  /// with a bit for each of its compute units.
+  virtual Expected<SmallVector<uint32_t>> getComputeUnitMask() {
+    return Plugin::error(error::ErrorCode::UNSUPPORTED,
+                         "the compute units of the device's queues are not "
+                         "known");
+  }
 
   /// Invokes any global constructors on the device if present and is required
   /// by the target.

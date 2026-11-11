@@ -3230,11 +3230,61 @@ and a launch, 15 to 40 µs, every loop.
   - *Memory:* the control block and the values' blocks are in the process's
     arena; arrays the process makes are in device memory, which every team
     addresses, so a loop reads and writes them in place.
-  - *Parts,* each a commit of its own: (d1) the kernel's teams, the control
-    block, the workers' loop and the end, without loops, the existing GPU
-    process tests passing; (d2) loops without reductions, outlined, with the
-    schedule; (d3) reductions; (d4) the cost of a loop and of the barrier
-    across teams, measured, against the same loops in target regions.
+  - *Sharing a GPU between its processes,* decided by the user 2026-11-11.
+    Two processes that each took as many teams as fit would hang: the
+    second cannot become resident while the first waits for it, as pinger
+    and ponger of `process-gpu-messages.m` would. So each process's queue
+    has a CU mask of its own, and the runtime partitions each GPU's compute
+    units (of those `LIBOMPTARGET_AMDGPU_CU_MASK` leaves): a kind whose
+    module has no process loops runs as one team on a small set of compute
+    units that such processes share; a kind with loops takes compute units
+    of its own, by default all those free, and a spawn that finds none
+    fails with an error that says what holds them, rather than hang. Its
+    teams are counted on its queue's mask, so they are resident at once.
+    Rejected: *a budget of teams on queues that share the GPU,* whose
+    kernels' work groups need not fit together, as the hardware places
+    them and kernels differ in registers, so a hang stays possible; and *at
+    most one process with loops on a GPU,* which would allow one tile
+    process a GPU.
+  - *Parts,* each a commit of its own: (d1a) queues with a CU mask of their
+    own in liboffload (`olCreateQueueWithComputeUnitMask`, as HIP's
+    `hipExtStreamCreateWithCUMask`), each on an HSA queue of its own, and
+    the cooperative count on a queue's mask
+    (`olGetKernelMaxCooperativeGroupCountOnQueue`), an upstream candidate;
+    (d1b) the runtime's partition of each GPU's compute units; (d1c) the
+    kernel's teams, the control block, the workers' loop and the end,
+    without loops, the existing GPU process tests passing; (d2) loops without
+    reductions, outlined, with the schedule; (d3) reductions; (d4) the cost of a
+    loop and of the barrier across teams, measured, against the same loops in
+    target regions.
+
+**(d1a) done 2026-11-11:** queues with compute units of their own.
+- `olCreateQueueWithComputeUnitMask` gives a queue a stream with an HSA
+  queue of its own, under `hsa_amd_queue_cu_set_mask`, destroyed when the
+  stream returns to the pool. A queue destroyed while busy is never reused
+  by another, but released once done, when a queue is next created or
+  destroyed, or with its context. A mask must set some of the units that
+  `olGetDeviceComputeUnitMask` gives: `LIBOMPTARGET_AMDGPU_CU_MASK`'s, or
+  else ROCr's for its queues (none known under `HSA_CU_MASK`, the ROCr 7.2
+  bug, which is reported).
+- `olGetKernelMaxCooperativeGroupCountOnQueue` counts on the queue's own
+  mask by the KFD model of (b); a cooperative launch on the queue is
+  refused above it.
+- Measured on the gfx1030 with a kernel that records each work group's
+  HW_ID1: all 80 units ran on 40 WGPs, units 0-39 on 20 (5 in each SE),
+  0-3 on SE 0's and SE 1's first WGPs, 0-1 on SE 0's alone, 2-3 on SE 1's
+  alone: the mask reaches the hardware, dealt as (b) models it.
+- Found on the way, fixed first as commits of their own: a queue destroyed
+  while busy was never reused (`getOutstandingQueue` tested an `Expected`
+  for an error, not its value), and a queue destroyed while idle lost its
+  `__tgt_async_info`, about 110 bytes each.
+- Tests: OffloadAPI unittests `olGetDeviceComputeUnitMask`,
+  `olCreateQueueWithComputeUnitMask` (64 busy limited queues destroyed in
+  turn, with plain queues between), and
+  `AllGroupsResidentOnLimitedQueue`: on half the units the count is below
+  the device's, every work group meets at the barrier, and one more is
+  refused.
+
 - **(e) Waiting.** While team 0 waits in a receive, the other teams wait at
   the barrier across teams, sleeping, so the process holds its compute
   units and little else. Between messages the process uses no other

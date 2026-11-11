@@ -140,6 +140,9 @@ struct ol_queue_impl_t {
   __tgt_async_info *AsyncInfo;
   ol_context_handle_t Context;
   ol_device_handle_t Device;
+  // Whether the queue has a backend queue of its own, limited to some compute
+  // units, which no other queue may reuse.
+  bool HasComputeUnitMask = false;
   // A unique identifier for the queue
   size_t Id;
   static std::atomic<size_t> IdCounter;
@@ -284,6 +287,42 @@ struct ol_context_impl_t {
     OutstandingQueues[Device].push_back(AsyncInfo);
   }
 
+  /// Queues limited to some compute units that were destroyed while still
+  /// busy. They are never reused, as their backend queues are their own, but
+  /// released once complete, when a queue is next created or destroyed.
+  llvm::SmallVector<std::pair<ol_device_handle_t, __tgt_async_info *>>
+      OutstandingLimitedQueues;
+
+  /// Record \p AsyncInfo, of a queue limited to some compute units, as
+  /// destroyed while busy.
+  void addOutstandingLimitedQueue(ol_device_handle_t Device,
+                                  __tgt_async_info *AsyncInfo) {
+    std::lock_guard<std::mutex> Lock(OutstandingQueuesMutex);
+    OutstandingLimitedQueues.push_back({Device, AsyncInfo});
+  }
+
+  /// Release the queues limited to some compute units, destroyed while busy,
+  /// that are now complete.
+  llvm::Error releaseCompletedLimitedQueues() {
+    std::lock_guard<std::mutex> Lock(OutstandingQueuesMutex);
+    for (size_t I = OutstandingLimitedQueues.size(); I-- > 0;) {
+      auto [Device, AsyncInfo] = OutstandingLimitedQueues[I];
+      auto Pending = Device->Device->hasPendingWork(AsyncInfo);
+      if (!Pending)
+        return Pending.takeError();
+      if (*Pending)
+        continue;
+      OutstandingLimitedQueues[I] = OutstandingLimitedQueues.back();
+      OutstandingLimitedQueues.pop_back();
+      if (auto Err = Device->Device->synchronize(AsyncInfo, /*Release=*/true)) {
+        delete AsyncInfo;
+        return Err;
+      }
+      delete AsyncInfo;
+    }
+    return llvm::Error::success();
+  }
+
   /// Complete all pending work for this context. Called from olDestroyContext.
   llvm::Error drainOutstandingQueues() {
     llvm::Error Result = Plugin::success();
@@ -297,6 +336,12 @@ struct ol_context_impl_t {
       }
     }
     OutstandingQueues.clear();
+    for (auto [Device, AI] : OutstandingLimitedQueues) {
+      if (auto Err = Device->Device->synchronize(AI, /*Release=*/true))
+        Result = llvm::joinErrors(std::move(Result), std::move(Err));
+      delete AI;
+    }
+    OutstandingLimitedQueues.clear();
     return Result;
   }
 
@@ -993,9 +1038,26 @@ Error olGetMemInfoSize_impl(ol_context_handle_t Context, const void *Ptr,
                                 PropSizeRet);
 }
 
+Error olGetDeviceComputeUnitMask_impl(ol_device_handle_t Device,
+                                      size_t MaskWords, uint32_t *Mask) {
+  auto MaskOrErr = Device->Device->getComputeUnitMask();
+  if (!MaskOrErr)
+    return MaskOrErr.takeError();
+  if (MaskWords < MaskOrErr->size())
+    return createOffloadError(ErrorCode::INVALID_SIZE,
+                              "the device's %zu compute unit mask words do "
+                              "not fit in %zu",
+                              MaskOrErr->size(), MaskWords);
+  std::fill_n(Mask, MaskWords, 0u);
+  std::copy(MaskOrErr->begin(), MaskOrErr->end(), Mask);
+  return Error::success();
+}
+
 Error olCreateQueue_impl(ol_context_handle_t Context, ol_device_handle_t Device,
                          ol_queue_handle_t *Queue) {
   if (auto Err = Context->requireDevice(Device))
+    return Err;
+  if (auto Err = Context->releaseCompletedLimitedQueues())
     return Err;
 
   auto CreatedQueue =
@@ -1025,9 +1087,34 @@ Error olCreateQueue_impl(ol_context_handle_t Context, ol_device_handle_t Device,
   return Error::success();
 }
 
+Error olCreateQueueWithComputeUnitMask_impl(ol_context_handle_t Context,
+                                            ol_device_handle_t Device,
+                                            const uint32_t *Mask,
+                                            size_t MaskWords,
+                                            ol_queue_handle_t *Queue) {
+  if (auto Err = Context->requireDevice(Device))
+    return Err;
+  if (auto Err = Context->releaseCompletedLimitedQueues())
+    return Err;
+
+  auto CreatedQueue =
+      std::make_unique<ol_queue_impl_t>(nullptr, Context, Device);
+  CreatedQueue->HasComputeUnitMask = true;
+  auto AsyncInfo = std::make_unique<__tgt_async_info>();
+  if (auto Err = Device->Device->initQueueWithComputeUnitMask(
+          *AsyncInfo, llvm::ArrayRef<uint32_t>(Mask, MaskWords)))
+    return Err;
+  CreatedQueue->AsyncInfo = AsyncInfo.release();
+
+  *Queue = CreatedQueue.release();
+  return Error::success();
+}
+
 Error olDestroyQueue_impl(ol_queue_handle_t Queue) {
   auto *Device = Queue->Device;
   auto *Context = Queue->Context;
+  if (auto Err = Context->releaseCompletedLimitedQueues())
+    return Err;
   // This is safe; as soon as olDestroyQueue is called it is not possible to add
   // any more work to the queue, so if it's finished now it will remain finished
   // forever.
@@ -1041,6 +1128,8 @@ Error olDestroyQueue_impl(ol_queue_handle_t Queue) {
                                                /*Release=*/true))
       return Err;
     delete Queue->AsyncInfo;
+  } else if (Queue->HasComputeUnitMask) {
+    Context->addOutstandingLimitedQueue(Device, Queue->AsyncInfo);
   } else {
     // The queue still has outstanding work. Store it so we can check it later.
     Context->addOutstandingQueue(Device, Queue->AsyncInfo);
@@ -1361,6 +1450,33 @@ Error olCalculateOptimalOccupancy_impl(ol_device_handle_t Device,
 
   *GroupSize = *Res;
 
+  return Error::success();
+}
+
+Error olGetKernelMaxCooperativeGroupCountOnQueue_impl(
+    ol_queue_handle_t Queue, ol_symbol_handle_t Kernel,
+    const ol_kernel_launch_size_args_t *LaunchSizeArgs,
+    uint32_t *MaxGroupCount) {
+  if (Kernel->Kind != OL_SYMBOL_KIND_KERNEL)
+    return createOffloadError(ErrorCode::SYMBOL_KIND,
+                              "provided symbol is not a kernel");
+
+  GenericDeviceTy *DeviceImpl = Queue->Device->Device;
+  auto *KernelImpl = std::get<GenericKernelTy *>(Kernel->PluginImpl);
+
+  uint32_t Dims = LaunchSizeArgs->Dimensions;
+  uint32_t LocalWorkSize[3];
+  LocalWorkSize[0] = LaunchSizeArgs->GroupSize.x;
+  LocalWorkSize[1] = (Dims >= 2) ? LaunchSizeArgs->GroupSize.y : 1;
+  LocalWorkSize[2] = (Dims == 3) ? LaunchSizeArgs->GroupSize.z : 1;
+
+  auto Res = KernelImpl->getMaxCooperativeGroupCountOnQueue(
+      *DeviceImpl, Queue->AsyncInfo, LocalWorkSize,
+      LaunchSizeArgs->DynSharedMemory);
+  if (auto Err = Res.takeError())
+    return Err;
+
+  *MaxGroupCount = *Res;
   return Error::success();
 }
 
