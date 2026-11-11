@@ -1877,9 +1877,11 @@ worker(!IO) :-
    - **The teams of a region whose code uses team mailboxes wait until all
      have started.** Each team adds itself to a count in the region's table and
      waits, with `s_sleep`, until the count is the number of teams. Teams that
-     fit start within microseconds. If not all have started within a second, one
-     team reports "Mercury runtime: target teams: only M of the N teams ran at
-     once on the device, …" and the program ends.
+     fit start within microseconds. If no more have started for the stall
+     time, ten seconds or `MERK_TEAMS_STALL_MILLISECONDS`, one team reports
+     "Mercury runtime: target teams: only M of the N teams ran at once on the
+     device, …" and the program ends. (A second from each team's start at
+     first, which a full test run broke: design document.)
    - **Only regions with team mailboxes wait.** Code uses them if it calls
      `team_mailbox`, or refers by a symbol to code of the module that does,
      at any depth. Other teams regions may still run more teams than fit, a few
@@ -2051,6 +2053,73 @@ Open:
 **A later use: streaming on the GPU.** Teams as the stages of a pipeline, passing
 arrays by pointer. It has no cycle of waits, but a stage that is not on the GPU
 still stalls the one before it when the ring between them fills.
+
+### What teams as processes are for, beside the specialized kernels
+
+Proposed 2026-11-10, from a discussion; not agreed. The user was unsure how a
+process per team relates to the optimized reductions of Specialized kernels for
+loops, below. The two rest on opposite assumptions about teams, so they are for
+different work.
+
+**Two models of a team.**
+
+- *The paper's: teams are anonymous, short-lived and independent.* No-loop and
+  big-jump kernels want many more teams than run at once, and the hardware's
+  dispatcher runs them in waves, which hides memory latency and balances the
+  load. The cross-team reduction never waits for another team: each team reduces
+  within itself, by wave shuffles and then LDS, writes its value to a slot and
+  increments a counter, and the team that sees the last count combines the
+  slots. Teams may finish in any order, and need never run at the same time.
+- *Teams as processes: named, long-lived actors that wait for each other.* All
+  of a region's teams must run at once (step 4), which the scheduler of a shared
+  GPU does not promise: the teams tests failed so under a full test run, when
+  more programs had queues than it holds (design document, the teams' stall
+  time). How many fit depends on the kernel: 157 of 400 at 124 VGPRs, above. And
+  such a kernel holds its compute units for as long as it runs, away from
+  data-parallel kernels.
+
+**Proposed.**
+
+1. **Data-parallel loops and their reductions use the paper's kernels,** never
+   messages between teams. `reduction` already lowers to the cross-team
+   reduction; no-loop and big-jump are planned. A barrier from messages cost
+   29 µs at 64 teams (step 5), and the paper's reduction needs no barrier.
+2. **Within a process, the paper still applies.** A parallel loop in a team's
+   goal runs on the team's threads, and its reduction is the paper's within a
+   team.
+3. **Between processes, the same pattern.** A slot and a counter, where the last
+   to arrive combines, is put and signal in One message transport, with
+   backends, above. A reduction across GPU processes, or across GPUs, puts each
+   partial value into a slot at the root and signals; the one that sees the
+   count reach N combines. No participant waits for another to be running, so it
+   needs neither co-residency nor a barrier. Collectives and direct GPU
+   transfers, above, would use it.
+4. **Few processes, which coordinate.** One process, or a few, per GPU, holding
+   data and exchanging messages. The large loops they are handed run as
+   specialized kernels, with more teams than fit and every compute unit. The
+   host launches them when a process's message asks; a running GPU process
+   queueing a kernel itself, by writing a dispatch packet to a queue, may be
+   possible on AMD hardware, but is not explored.
+5. **A pool of anonymous workers as the default for work handed out.** Workers
+   take tasks from a queue in device memory. No worker waits for a particular
+   other, so a pool of which only some are running is slower, not deadlocked,
+   and it needs no co-residency. It suits processes that are handed the data
+   they work on (the user, 2026-11-10). Work stealing (Distributing work, above)
+   is its extension across GPUs.
+6. **Named teams as processes, where a pattern needs them:** a halo exchange
+   between tiles of one GPU with no relaunch, a pipeline (above), irregular work
+   whose teams talk to particular others. They keep the check of step 4 and its
+   report.
+
+**Open.**
+
+- Whether a pool replaces team mailboxes for most programs, or sits beside them:
+  a library over team mailboxes, or a construct of its own.
+- How a process hands a loop to a specialized kernel and learns that it has
+  ended, through the host at first, and what that costs per launch, to measure.
+- Whether a persistent process should use fewer threads per team
+  (`thread_limit`, step 4's "Later"), so that it holds less of the GPU while
+  kernels run.
 
 ## Library code on the device: later
 
