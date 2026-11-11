@@ -79,6 +79,24 @@ if gpus and omp_dirs:
     config.available_features.add("amdgpu-gpu")
     config.substitutions.append(("%offload-arch", gpus[0]))
 
+
+# The GPU tests, the -gpu.test files, run at most MERK_LIT_GPU_JOBS (4) at a
+# time. With one per lit worker, the GPU had more programs' queues than its
+# scheduler holds ("Runlist is getting oversubscribed" in the kernel's log),
+# so it took queues off the GPU in turns: a target teams region's later teams
+# then did not start for seconds and the region was reported, and once a
+# queue could not be taken off in time and the driver reset the GPU, which
+# also drives the display. lit pickles the group's function for its workers,
+# so it is in a module they import (utils/lit/merkurius_lit.py).
+import sys
+
+sys.path.insert(0, os.path.join(config.merkurius_src_root, "utils", "lit"))
+from merkurius_lit import gpu_parallelism_group
+
+config.parallelism_group = gpu_parallelism_group
+lit_config.parallelism_groups["merkurius-gpu"] = int(
+    os.environ.get("MERK_LIT_GPU_JOBS", "4"))
+
 # The unparser's round-trip tests 2, 3 and 4.
 config.substitutions.append(
     (
