@@ -3,7 +3,7 @@
 % In the first version a kind's kernel takes integers, floats, characters
 % and mailboxes, and the kind is not polymorphic (decision D3). An argument
 % of another type has no instance of process.gpu_argument, through which
-% spawn_Kind_at gives it to the kernel (Inputs/process_kernel_list.m). What
+% spawn/5 gives it to the kernel (Inputs/process_kernel_list.m). What
 % the kinds reach is compiled for the GPU, where a closure cannot be made
 % (Inputs/process_kernel_closure.m), which the check of GPU code reports
 % (test/Semantics/processes/gpu-flat.m). A kind that runs on the host only

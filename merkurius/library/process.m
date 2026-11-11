@@ -55,6 +55,15 @@
 :- pred spawn(pred(mailbox(M), io, io)::in(pred(in, di, uo) is det),
     mailbox(M)::out, io::di, io::uo) is det.
 
+    % As spawn, at a place. A process kind written out with its arguments,
+    % as in spawn(gpu(0), counter(0), Counter, !IO), spawns that kind there,
+    % which on a GPU must be declared on gpu; the compiler makes such a call
+    % one of the kind's own. Any other closure runs at the host, and at a
+    % GPU is a software error, as a closure is the host's code.
+:- pred spawn(place::in,
+    pred(mailbox(M), io, io)::in(pred(in, di, uo) is det),
+    mailbox(M)::out, io::di, io::uo) is det.
+
     % As spawn, with a stack of at least the given size in bytes, which
     % must be positive. It costs only address space until it is used.
 :- pred spawn_with_stack(int::in,
@@ -232,9 +241,9 @@
 :- pred receive_closed is erroneous.
 
     % Where a process runs: this node's host, or one of its GPUs, by its
-    % number (design document, Handles, routing and places). A process
-    % declaration's spawn_Kind_at(Place, ...) spawns a process at a place;
-    % only a kind declared on gpu runs on a GPU.
+    % number (design document, Handles, routing and places). spawn/5
+    % spawns a process at a place; only a kind declared on gpu runs on a
+    % GPU.
 :- type place
     --->    host
     ;       gpu(int).
@@ -445,6 +454,18 @@ new_mailbox(Mailbox, !IO) :-
 
 spawn(Body, Mailbox, !IO) :-
     start(0, Body, Mailbox, !IO).
+
+spawn(Place, Body, Mailbox, !IO) :-
+    (
+        Place = host,
+        spawn(Body, Mailbox, !IO)
+    ;
+        Place = gpu(GPU),
+        error(string.format("process.spawn: a closure cannot run at " ++
+            "gpu(%d): write the process kind with its arguments in the " ++
+            "call, as in spawn(gpu(%d), kind(Arguments), Mailbox, !IO)",
+            [i(GPU), i(GPU)]))
+    ).
 
 spawn_with_stack(Bytes, Body, Mailbox, !IO) :-
     ( if Bytes > 0 then

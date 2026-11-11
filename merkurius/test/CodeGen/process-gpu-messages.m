@@ -133,7 +133,7 @@ main(!IO) :-
 
 many(Place, N, !Total, Reports, !IO) :-
     ( if N > 0 then
-        spawn_summer_at(Place, Reports, S, !IO),
+        spawn(Place, summer(Reports), S, !IO),
         send(S, array([N, 1]), !IO),
         send(S, array([N]), !IO),
         receive(Reports, any, after(10000), R, !IO),
@@ -151,7 +151,7 @@ many(Place, N, !Total, Reports, !IO) :-
 
 run(Place, !IO) :-
     new_mailbox(Ints, !IO),
-    spawn_counter_at(Place, 10, C, !IO),
+    spawn(Place, counter(10), C, !IO),
     send(C, add(5), !IO),
     send(C, get(Ints), !IO),
     send(C, add(27), !IO),
@@ -162,11 +162,11 @@ run(Place, !IO) :-
     io.write(R1, !IO), io.nl(!IO),
     io.write(R2, !IO), io.nl(!IO),
     new_mailbox(Reports, !IO),
-    spawn_ponger_at(Place, P, !IO),
-    spawn_pinger_at(Place, 100, P, Reports, _, !IO),
+    spawn(Place, ponger, P, !IO),
+    spawn(Place, pinger(100, P, Reports), _, !IO),
     receive(Reports, any, after(10000), R3, !IO),
     io.write(R3, !IO), io.nl(!IO),
-    spawn_summer_at(Place, Reports, S, !IO),
+    spawn(Place, summer(Reports), S, !IO),
     send(S, array(1 .. 100), !IO),
     receive(Reports, any, after(10000), R4, !IO),
     io.write(R4, !IO), io.nl(!IO).

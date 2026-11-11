@@ -87,7 +87,7 @@ static void AddDefinition(
     }
   } else if (const auto *decl{
                  std::get_if<const parser::ProcessDecl *>(&item)}) {
-    // A kind's spawn_Kind and spawn_Kind_at, whose clauses the module's own
+    // A kind's 'spawn$Kind' and 'spawn_at$Kind', whose clauses the module's own
     // compile adds (ExpandProcesses).
     for (const parser::FactOrRule *spawn :
         {(*decl)->spawnClause, (*decl)->spawnAtClause}) {

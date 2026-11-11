@@ -60,14 +60,14 @@ doubler(Reply, Self, !IO) :-
 
 main(!IO) :-
     new_mailbox(Me, !IO),
-    spawn_summer(1, 0.5, Me, S, !IO),
+    spawn(summer(1, 0.5, Me), S, !IO),
     send(S, 20, !IO),
     send(S, 63, !IO),
     send(S, 0, !IO),
     receive(Me, any, infinity, R1, !IO),
     ( if R1 = message(N1) then
         io.write_int(N1, !IO), io.nl(!IO),
-        spawn_doubler(Me, D, !IO),
+        spawn(doubler(Me), D, !IO),
         send(D, N1, !IO),
         receive(Me, any, infinity, R2, !IO),
         ( if R2 = message(N2) then

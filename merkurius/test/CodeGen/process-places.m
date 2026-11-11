@@ -53,12 +53,12 @@ main(!IO) :-
     new_mailbox(Me, !IO),
     ( if Args = ["other"] then
         % adder holds the GPU while it waits.
-        spawn_adder_at(gpu(0), Me, _, !IO),
-        spawn_doubler_at(gpu(0), Me, _, !IO)
+        spawn(gpu(0), adder(Me), _, !IO),
+        spawn(gpu(0), doubler(Me), _, !IO)
     else if Args = ["full"] then
         spawn_waiters(0, !IO)
     else if Args = ["steal"] then
-        spawn_adder_at(gpu(0), Me, A, !IO),
+        spawn(gpu(0), adder(Me), A, !IO),
         receive(A, any, after(10), _, !IO)
     else if Args = ["phases"] then
         new_mailbox(Downs, !IO),
@@ -75,7 +75,7 @@ adders(Count, N, Me, !IO) :-
     ( if Count = 0 then
         true
     else
-        spawn_adder_at(gpu(0), Me, A, !IO),
+        spawn(gpu(0), adder(Me), A, !IO),
         send(A, N, !IO),
         receive(Me, any, after(10000), R, !IO),
         ( if R = message(M) then
@@ -94,12 +94,12 @@ phases(Count, N, Me, Downs, !IO) :-
     ( if Count = 0 then
         true
     else
-        spawn_adder_at(gpu(0), Me, A, !IO),
+        spawn(gpu(0), adder(Me), A, !IO),
         monitor(A, Downs, id, _, !IO),
         send(A, N, !IO),
         answer(Me, Added, !IO),
         ended(Downs, AddedEnd, !IO),
-        spawn_doubler_at(gpu(0), Me, D, !IO),
+        spawn(gpu(0), doubler(Me), D, !IO),
         send(D, Added, !IO),
         answer(Me, Doubled, !IO),
         ended(Downs, _, !IO),
@@ -143,7 +143,7 @@ spawn_waiters(Count, !IO) :-
     ( if Count > 100000 then
         io.write_string("no spawn failed\n", !IO)
     else
-        spawn_waiter_at(gpu(0), _, !IO),
+        spawn(gpu(0), waiter, _, !IO),
         spawn_waiters(Count + 1, !IO)
     ).
 % CHECK:11
@@ -152,6 +152,6 @@ spawn_waiters(Count, !IO) :-
 % PHASES:11 normal 22 noproc
 % PHASES-NEXT:23 normal 46 noproc
 % PHASES-NEXT:47 normal 94 noproc
-% OTHER:Software Error: place_phase.spawn_doubler_at: GPU 0 runs processes of the module process_places, and a GPU runs one module's processes at a time: those of place_phase may start there once they have ended
+% OTHER:Software Error: process.spawn: GPU 0 runs processes of the module process_places, and a GPU runs one module's processes at a time: those of place_phase may start there once they have ended
 % STEAL:Mercury runtime: a process received from a mailbox of another process
-% FULL:Software Error: process_places.spawn_waiter_at: GPU 0 has no room for another process: the module process_places's kernel there runs {{[1-9][0-9]*}} processes at once, and they are all running
+% FULL:Software Error: process.spawn: GPU 0 has no room for another process: the module process_places's kernel there runs {{[1-9][0-9]*}} processes at once, and they are all running

@@ -53,7 +53,7 @@ main(!IO) :-
     Place = ( if Args = ["gpu"] then gpu(0) else host ),
     new_mailbox(Sums, !IO),
     new_mailbox(Ends, !IO),
-    spawn_summer_at(Place, Sums, Ends, S, !IO),
+    spawn(Place, summer(Sums, Ends), S, !IO),
     rounds(S, Sums, Ends, 1, 300, 0, Wrong, !IO),
     send(S, array([]), !IO),
     io.write_int(Wrong, !IO),
@@ -68,7 +68,7 @@ main(!IO) :-
 
 fresh(Place, Sums, Ends, N, Max, !Wrong, !IO) :-
     ( if N =< Max then
-        spawn_summer_at(Place, Sums, Ends, S, !IO),
+        spawn(Place, summer(Sums, Ends), S, !IO),
         rounds(S, Sums, Ends, N, N, !Wrong, !IO),
         send(S, array([]), !IO),
         fresh(Place, Sums, Ends, N + 1, Max, !Wrong, !IO)

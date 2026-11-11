@@ -156,7 +156,7 @@ private:
     const parser::TokenSequence *tokens;
   };
   std::vector<Pending> pending_;
-  // The spawn_Kind declarations of process declarations, here and in the
+  // The 'spawn$Kind' declarations of process declarations, here and in the
   // interfaces, by which a call of spawn_Kind_on is known as remote spawn.
   llvm::DenseSet<const parser::PredDecl *> spawnDecls_;
   // Whether a call of the undefined name is spawn_Kind_on for a process
@@ -388,6 +388,13 @@ bool Resolver::Duplicate(const ModuleSymbols &symbols, SymbolKind kind,
       }
       if (owner && symbol->owner == owner) {
         return true; // a type class defined twice, which is reported
+      }
+      // A process kind declared twice, which its predicate's duplicate
+      // reports, also declares its spawn predicates twice, whose names no
+      // program writes (parser::ProcessDecl).
+      if (name.starts_with(parser::kSpawnPrefix) ||
+          name.starts_with(parser::kSpawnAtPrefix)) {
+        return true;
       }
       // mmc: "pred `m.p'/1 multiply defined".
       messages_
@@ -675,7 +682,7 @@ bool Resolver::IsRemoteSpawn(const parser::SymName &name, NameUse use,
     return false;
   }
   std::string qualifier{llvm::join(name.qualifiers, ".")};
-  std::string spawn{"spawn_" + kind.str()};
+  std::string spawn{parser::kSpawnPrefix.str() + kind.str()};
   for (const Visible &visible : scope) {
     if (!qualifier.empty() && !Names(visible, qualifier)) {
       continue;
@@ -694,6 +701,22 @@ bool Resolver::IsRemoteSpawn(const parser::SymName &name, NameUse use,
 
 void Resolver::Undefined(const parser::SymName &name, NameUse use,
     unsigned arity, const Visibility &scope, const Visibility *outer) {
+  // spawn(Place, Kind(Arguments), Mailbox, !IO), which desugaring made a
+  // call of 'spawn_at$Kind' (parser::ProcessDecl), names no kind of that
+  // many arguments that receives one message type.
+  if (llvm::StringRef kind{name.name};
+      use == NameUse::Call && kind.consume_front(parser::kSpawnAtPrefix)) {
+    std::string full{kind.str()};
+    if (!name.qualifiers.empty()) {
+      full = llvm::join(name.qualifiers, ".") + "." + full;
+    }
+    messages_.Say(Source(name),
+        "spawn's second argument must be a process kind applied to its "
+        "arguments, but %s/%u is not a process kind that receives one "
+        "message type"_err_en_US,
+        full, arity - 4);
+    return;
+  }
   // spawn_Kind_on (design document, "Remote spawn") needs remote spawn.
   if (IsRemoteSpawn(name, use, arity, scope)) {
     messages_.Say(Source(name), "%s (%s/%u)"_todo_en_US,

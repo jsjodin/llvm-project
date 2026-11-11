@@ -1694,6 +1694,14 @@ struct MutableDecl {
 // is not module-qualified. The predicates it expands to are made with it,
 // while its terms exist; desugaring's ExpandProcesses puts them in the
 // tree. They are not fields, so the tree prints as written.
+//
+// The spawn predicates' names are the kind's after a prefix with a '$',
+// which an unquoted name cannot have: a program spawns a kind as
+// spawn(Place, Kind(Arguments), Mailbox, !IO), which desugaring makes a call
+// of 'spawn_at$Kind'.
+inline constexpr llvm::StringLiteral kSpawnPrefix{"spawn$"};
+inline constexpr llvm::StringLiteral kSpawnAtPrefix{"spawn_at$"};
+
 struct ProcessDecl {
   static constexpr llvm::StringLiteral kindName{"ProcessDecl"};
   TokenRange tokens;
@@ -1703,12 +1711,12 @@ struct ProcessDecl {
   bool onGpu;
   // pred Kind(Arguments::in, mailbox(Receives)::in..., io::di, io::uo) is det.
   const PredDecl *kindDecl;
-  // pred spawn_Kind(Arguments::in, mailbox(Receive)::out, io::di, io::uo)
-  // is det, and its clause, which calls process.spawn; null unless the kind
-  // receives one message type.
+  // pred 'spawn$Kind'(Arguments::in, mailbox(Receive)::out, io::di,
+  // io::uo) is det, and its clause, which calls process.spawn; null unless
+  // the kind receives one message type.
   const PredDecl *spawnDecl;
   const FactOrRule *spawnClause;
-  // pred spawn_Kind_at(process.place::in, Arguments::in,
+  // pred 'spawn_at$Kind'(process.place::in, Arguments::in,
   // mailbox(Receive)::out, io::di, io::uo) is det, and its clause, which
   // spawns at the host or a GPU (docs/INPROGRESS.md, GPU processes without
   // omp target, step 4c); null unless the kind receives one message type.
