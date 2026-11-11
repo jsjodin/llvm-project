@@ -3174,29 +3174,67 @@ and a launch, 15 to 40 µs, every loop.
   0 arrives after a barrier of its team, on a counter in device memory with
   a sense that flips each time, and waits with `s_sleep`; then the team's
   barrier again. Its cost, measured, against a kernel launch.
-- **(d) A process's kernel as an SPMD kernel of OpenMP's,** linked with
-  OpenMP's device runtime, so that its loops are lowered as a target
-  region's are, by OMPIRBuilder, and run the same code the dense kernels
-  were measured with (the barrier after each round included).
-  - *Its sequential code,* receives, sends and bookkeeping, runs in team 0's
-    thread 0. What a loop needs from it is written to device memory, and
-    the barrier across teams (c) comes before and after each loop; the
-    other teams wait at it.
-  - *A loop in a process's body:* `%$omp distribute parallel do`, without
-    `target teams`, since the process's kernel is the teams. With
-    `reduction`, OpenMP's reduction across teams.
-  - *Its launch:* the runtime loads the image with liboffload, as now, sets
-    OpenMP's device environment in it, as libomptarget does
-    (`__omp_rtl_device_environment`, `offload/include/Shared/Environment.h`),
-    and passes the kernel launch environment that `__kmpc_target_init`
-    takes, with the teams and threads (a) gives.
-  - *It reverses a decision of 4b:* "compiling the kernels as an OpenMP
-    device module" was rejected there, as it would bring OpenMP's device
-    runtime into a process's image; now that runtime is what the loops
-    need. Rejected: *a static loop of our own* in `libmerkdevice`, on
-    `gpuintrin.h`, which repeats OpenMP's loops, their barrier after each
-    round and its reductions across teams, and gets none of their
-    improvements (option (c) under Data parallelism, above).
+- **(d) A process's kernel runs its loops on its other teams, by a schedule
+  of ours.** Decided by the user 2026-11-11, replacing the first design,
+  "a process's kernel as an SPMD kernel of OpenMP's", which could not be
+  built:
+  - *The omp dialect has no such kernel.* An SPMD `omp.target` must capture
+    an `omp.loop_nest` ("SPMD kernel must capture an 'omp.loop_nest'
+    operation"), a tight `target teams distribute parallel do`; sequential
+    code with loops between messages is a generic kernel, in which every
+    team's main thread runs the sequential code.
+  - *One thread of a wave cannot run the process while the others wait.* A
+    team's barrier (`s_barrier`) counts waves, so every lane of a wave must
+    reach it on the same path; a wave whose lane 0 runs the process and
+    whose other lanes wait elsewhere would execute each barrier twice and
+    deadlock the team. OpenMP's generic mode keeps the main thread's wave
+    out of the work for the same reason.
+  Rejected with it: *emulating an SPMD kernel of OpenMP's by hand,* with the
+  kernel environment, `__kmpc_target_init` and `__kmpc_parallel_60` around
+  the process, so that `__kmpc_distribute_for_static_loop` runs the loops,
+  which copies OpenMP's internal ABI into merkc and the runtime, and breaks
+  when it changes, as the device environment's size did (2026-11-11); and
+  *a kernel kind of its own in the omp dialect and OMPIRBuilder,* upstream,
+  the most correct, but a large project before any tile; it could replace
+  the schedule later.
+
+  The design:
+  - *The kernel* stays a plain kernel, launched by liboffload, now
+    cooperatively, with as many teams as are resident at once, of 256
+    threads unless the kind says otherwise.
+  - *Team 0 is the process's.* Lane 0 of its first wave runs the kind's
+    predicate, as the one team's initial thread does now; the other lanes
+    of that wave end, and its other waves only take part in the barriers
+    across teams. Every other team is a worker. Rejected: *team 0's other
+    waves as workers too,* which a barrier after each round of a loop would
+    deadlock, as the process's wave does not take part; one team of the
+    launch is the cost, about 1% at 256 threads.
+  - *A loop:* merkc outlines a loop's body in a process's predicate into a
+    procedure of the kernel's module, with the values it uses passed in a
+    block of device memory. At the loop, the process writes the loop's
+    number, its bounds and the block into the process's control block, a
+    barrier across teams starts the workers, and a second one ends the loop.
+    Each worker team waits at the barrier, reads the control block, and
+    calls the loop's procedure through a `switch` that merkc makes over the
+    module's loops, so there are no function pointers. The process ending
+    tells the workers to end.
+  - *The schedule,* in `libmerkdevice`: the worker teams' threads take
+    iterations in rounds, a block of consecutive iterations to each team
+    and one to each thread, with a team barrier after each round, as the
+    barrier after each round does for OpenMP's loops (Dense stencils).
+    Reductions: each thread's partial result, combined in the team, then
+    across teams after the barrier that ends the loop, by the process.
+  - *The directive:* `%$omp distribute parallel do`, without `target teams`,
+    as the process's kernel is the teams; a loop under another directive in
+    a process's predicate is reported. Its checks are a parallel loop's.
+  - *Memory:* the control block and the values' blocks are in the process's
+    arena; arrays the process makes are in device memory, which every team
+    addresses, so a loop reads and writes them in place.
+  - *Parts,* each a commit of its own: (d1) the kernel's teams, the control
+    block, the workers' loop and the end, without loops, the existing GPU
+    process tests passing; (d2) loops without reductions, outlined, with the
+    schedule; (d3) reductions; (d4) the cost of a loop and of the barrier
+    across teams, measured, against the same loops in target regions.
 - **(e) Waiting.** While team 0 waits in a receive, the other teams wait at
   the barrier across teams, sleeping, so the process holds its compute
   units and little else. Between messages the process uses no other
