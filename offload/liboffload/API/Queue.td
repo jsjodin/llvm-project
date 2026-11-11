@@ -32,7 +32,8 @@ def olCreateQueueWithComputeUnitMask : Function {
     let desc = "Create a queue for the given device whose kernels run only on the given compute units.";
     let details = [
         "As `olCreateQueue`, but the queue's kernels run only on the compute units whose bits are set in `Mask`, bit `I % 32` of word `I / 32` for compute unit `I`, as HIP's `hipExtStreamCreateWithCUMask`.",
-        "The queues of one mask share a hardware queue of the device, which no queue of another mask uses; their kernels may run at once. The last of them to be destroyed returns it.",
+        "The queues of one mask share a hardware queue of the device, which no queue of another mask uses. The last of them to be destroyed returns it.",
+        "The kernels of the queues of one mask may run at once, but on AMDGPU a kernel that uses private (scratch) memory may run alone on the hardware queue: ROCr keeps scratch for concurrent kernels within a budget that the program's other hardware queues share. Kernels that must run at once, such as kernels that wait for each other, should use no private memory.",
         "`Mask` may only set bits of compute units that `olGetDeviceComputeUnitMask` sets.",
         "A cooperative launch on the queue may have as many work groups as `olGetKernelMaxCooperativeGroupCountOnQueue` gives for it."
     ];

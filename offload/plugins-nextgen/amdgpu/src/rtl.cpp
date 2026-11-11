@@ -2450,7 +2450,11 @@ struct AMDGPUStreamManagerTy final
   /// an HSA queue, made for the first and destroyed with the last. Their
   /// kernels may run at once, as a kernel packet does not set the barrier
   /// bit, and a stream pushes a barrier packet, which holds up the whole
-  /// HSA queue, only behind an operation of its own.
+  /// HSA queue, only behind an operation of its own. A kernel that uses
+  /// scratch may still run alone: if the HSA queue's scratch is too small
+  /// for it, ROCr gives it more, which it keeps for later kernels only
+  /// within a budget that all the process's HSA queues share; beyond it,
+  /// the scratch serves one kernel at a time.
   Error getResourceWithComputeUnitMask(AMDGPUStreamTy *&StreamHandle,
                                        ArrayRef<uint32_t> Mask,
                                        uint32_t CooperativeUnits,
