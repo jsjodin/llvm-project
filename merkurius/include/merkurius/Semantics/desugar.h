@@ -23,8 +23,9 @@ const SemanticForm &Desugar(const parser::ParseTree &,
 
 // The tree with the predicates of its process declarations as items of
 // their own (design document, "Processes and mailboxes"): after each
-// declaration, the kind's and spawn_Kind's declarations, and with
-// `clauses`, spawn_Kind's clause, in the implementation section. Reports
+// declaration, the kind's and its spawn predicates' declarations, and with
+// `clauses`, the spawn predicates' clauses, in the implementation section
+// (parser::ProcessDecl). Reports
 // what the declarations need that is not implemented yet. Without process
 // declarations, the tree itself.
 const parser::ParseTree &ExpandProcesses(const parser::ParseTree &,

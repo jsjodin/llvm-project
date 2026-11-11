@@ -147,7 +147,7 @@ pthread_cond_t endedCondition = PTHREAD_COND_INITIALIZER;
 RunningProcess *ended{nullptr};
 pthread_once_t reaperOnce = PTHREAD_ONCE_INIT;
 
-// The text of an error, for spawn_<kind>_at to report: it is never freed,
+// The text of an error, for process.spawn to report: it is never freed,
 // as the program ends with it.
 const char *Error(const char *format, const char *a, long long n,
     const char *b, const char *c, const char *d) {
@@ -497,7 +497,7 @@ extern "C" std::int64_t merk_gpu_count(void) { return GpuCount(); }
 // Spawns a process of the module's kind on the GPU, with the words of its
 // arguments, an array (array.cpp: its size, then its elements), and a new
 // mailbox for messages of the type, whose handle it gives: null, or the
-// text of the error, for spawn_<kind>_at to report.
+// text of the error, for process.spawn to report.
 extern "C" const char *merk_gpu_process_spawn(std::uint64_t typeInfo,
     std::int64_t number, const char *module, const char *kind,
     const std::uint64_t *words, std::int64_t *placeAndSlot,

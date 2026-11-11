@@ -24,7 +24,7 @@ CLOSURES-NOT: memory access fault
 
 RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx906 %libomp-flags %S/process-spawn-at.m -o %t.other
 RUN: not %gpu-env %t.other gpu 2>&1 | FileCheck %s --check-prefix=OTHER
-OTHER: Software Error: process_spawn_at.spawn_summer_at: the module process_spawn_at has no image of its GPU process kinds for GPU 0, a {{gfx[0-9a-f]+}}: it must be compiled with --offload-arch={{gfx[0-9a-f]+}}
+OTHER: Software Error: process.spawn: the module process_spawn_at has no image of its GPU process kinds for GPU 0, a {{gfx[0-9a-f]+}}: it must be compiled with --offload-arch={{gfx[0-9a-f]+}}
 
 The messages that the GPU process took from its ring are freed, and so are
 its arena and its mailbox's ring when it ends.
@@ -40,4 +40,4 @@ processors, which enables units in pairs, the offload plugin's error when it
 starts.
 RUN: %gpu-env LIBOMPTARGET_AMDGPU_CU_MASK=4-7 %t2 gpu | FileCheck %S/process-spawn-at.m --match-full-lines --strict-whitespace
 RUN: not %gpu-env LIBOMPTARGET_AMDGPU_CU_MASK=0 %t2 gpu 2>&1 | FileCheck %s --check-prefix=NOPAIR
-NOPAIR: {{Software Error: process_spawn_at.spawn_summer_at: GPU 0 has no pair of compute units for processes, units 2N and 2N\+1|Mercury runtime: could not list liboffload's devices: .* enables compute units in pairs}}
+NOPAIR: {{Software Error: process.spawn: GPU 0 has no pair of compute units for processes, units 2N and 2N\+1|Mercury runtime: could not list liboffload's devices: .* enables compute units in pairs}}

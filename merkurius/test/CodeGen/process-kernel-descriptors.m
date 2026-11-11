@@ -39,7 +39,7 @@ id(D) = D.
 main(!IO) :-
     new_mailbox(Me, !IO),
     new_mailbox(Downs, !IO),
-    spawn_adder_at(host, Me, A, !IO),
+    spawn(host, adder(Me), A, !IO),
     monitor(A, Downs, id, _, !IO),
     send(A, 41, !IO),
     receive(Me, any, infinity, R, !IO),

@@ -39,7 +39,7 @@ rounds(R, Total0, Total, !IO) :-
 main(!IO) :-
     io.command_line_arguments(Args, !IO),
     new_mailbox(Me, !IO),
-    spawn_echo_at(gpu(0), Me, Echo, !IO),
+    spawn(gpu(0), echo(Me), Echo, !IO),
     rounds(40, 0, Total, !IO),
     io.write_int(Total, !IO), io.nl(!IO),
     ( if Args = ["leave"] then

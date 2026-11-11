@@ -287,6 +287,9 @@ private:
   void Merge(const StateMap &start, llvm::ArrayRef<StateMap> ends,
       llvm::MutableArrayRef<Goals> arms, TokenRange);
   // A call's arguments, in which !X is the two arguments !.X and !:X.
+  // spawn(Place, Kind(Arguments), Mailbox, !IO), with the kind written
+  // out: the kind's term, or null for any other call.
+  static const parser::FunctorData *SpawnedKind(const parser::Call &);
   llvm::ArrayRef<VarId> CallArguments(
       llvm::ArrayRef<parser::DataTerm>, Goals &out);
   // The variable that a data-term is, if it is a variable or !.X or !:X.
@@ -592,6 +595,29 @@ void ClauseDesugarer::Merge(const StateMap &start,
     }
     current = merged;
   }
+}
+
+// process.spawn/5, unqualified or qualified by process, as its arguments
+// count once a !S stands for two, whose second argument is a name or a name
+// applied to arguments. The name is the kind's, which name resolution finds
+// as that of its 'spawn_at$Kind'; a variable or a lambda expression there is
+// a closure, for the library's process.spawn/5, which runs it at the host.
+const parser::FunctorData *ClauseDesugarer::SpawnedKind(
+    const parser::Call &call) {
+  const parser::SymName &name{*call.name};
+  if (name.name != "spawn" || name.qualifiers.size() > 1 ||
+      (name.qualifiers.size() == 1 && name.qualifiers.front() != "process") ||
+      call.arguments.size() < 2) {
+    return nullptr;
+  }
+  std::size_t count{0};
+  for (const parser::DataTerm &term : call.arguments) {
+    const auto *state{std::get_if<const parser::StateVar *>(&term)};
+    count += state && (*state)->kind == parser::StateVarKind::Both ? 2 : 1;
+  }
+  const auto *kind{
+      std::get_if<const parser::FunctorData *>(&call.arguments[1])};
+  return count == 5 && kind ? *kind : nullptr;
 }
 
 llvm::ArrayRef<VarId> ClauseDesugarer::CallArguments(
@@ -1059,6 +1085,24 @@ void ClauseDesugarer::DesugarInto(const parser::Goal &goal, Goals &out) {
               out.push_back(Make<HOCall>(call->tokens, Number(),
                   parser::PredOrFunc::Predicate, closure, arguments,
                   annotation_));
+              FinishAtomic();
+              return;
+            }
+            if (const parser::FunctorData *kind{SpawnedKind(*call)}) {
+              // A call of the kind's 'spawn_at$Kind', with the place, the
+              // kind's arguments and the rest of spawn's (expand-processes,
+              // convert-processes.cpp).
+              llvm::SmallVector<parser::DataTerm, 8> terms{
+                  call->arguments.front()};
+              terms.append(kind->arguments.begin(), kind->arguments.end());
+              terms.append(call->arguments.begin() + 2, call->arguments.end());
+              const parser::SymName *name{Make<parser::SymName>(
+                  kind->name->tokens, kind->name->qualifiers,
+                  arena_.Save(
+                      (parser::kSpawnAtPrefix + kind->name->name).str()))};
+              llvm::ArrayRef<VarId> arguments{CallArguments(terms, out)};
+              out.push_back(
+                  Make<Call>(call->tokens, Number(), name, arguments, false));
               FinishAtomic();
               return;
             }

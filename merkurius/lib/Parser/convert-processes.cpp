@@ -14,31 +14,36 @@
 //
 //   :- pred counter(int::in, process.mailbox(counter_msg)::in,
 //       io.io::di, io.io::uo) is det.
-//   :- pred spawn_counter(int::in, process.mailbox(counter_msg)::out,
+//   :- pred 'spawn$counter'(int::in, process.mailbox(counter_msg)::out,
 //       io.io::di, io.io::uo) is det.
-//   spawn_counter(A1, Mailbox, IO0, IO) :-
+//   'spawn$counter'(A1, Mailbox, IO0, IO) :-
 //       process.spawn((pred(Self::in, Self0::di, Self1::uo) is det :-
 //           m.counter(A1, Self, Self0, Self1)), Mailbox, IO0, IO).
-//   :- pred spawn_counter_at(process.place::in, int::in,
+//   :- pred 'spawn_at$counter'(process.place::in, int::in,
 //       process.mailbox(counter_msg)::out, io.io::di, io.io::uo) is det.
-//   spawn_counter_at(Place, A1, Mailbox, IO0, IO) :-
+//   'spawn_at$counter'(Place, A1, Mailbox, IO0, IO) :-
 //       ( Place = process.host,
-//           m.spawn_counter(A1, Mailbox, IO0, IO)
+//           m.'spawn$counter'(A1, Mailbox, IO0, IO)
 //       ; Place = process.gpu(GPU),
-//           process.spawn_host_kind_at_gpu(GPU, "m.spawn_counter_at",
+//           process.spawn_host_kind_at_gpu(GPU, "process.spawn",
 //               "counter", Mailbox, IO0, IO)
 //       ).
 //
-// where m is the module. For a kind declared on gpu, spawn_counter_at's
-// second branch spawns its kernel instead (docs/INPROGRESS.md, GPU
+// where m is the module. For a kind declared on gpu, the clause's
+// second branch spawns it on the GPU instead (docs/INPROGRESS.md, GPU
 // processes without omp target, step 4c):
 //
-//           process.spawn_kernel(GPU, "m.spawn_counter_at", "m", "counter",
+//           process.spawn_kernel(GPU, "process.spawn", "m", "counter",
 //               process.gpu_words(A1, process.no_gpu_words), Mailbox, IO0,
 //               IO)
-// The names are qualified, so that the expansion
-// means the same whatever else the module declares; the module must import
-// io and process, as the kind's clauses use them.
+//
+// A program does not call them by these names, which an unquoted name cannot
+// spell: a call spawn(Place, counter(A1), Mailbox, !IO), with the kind
+// written out, is a call of 'spawn_at$counter' (desugar.cpp), as the
+// software errors at run time say, by "process.spawn". The names are
+// qualified, so that the expansion means the same whatever else the module
+// declares; the module must import io and process, as the kind's clauses use
+// them.
 
 #include "convert-rules.h"
 #include "merkurius/Parser/convert.h"
@@ -135,7 +140,7 @@ const PredDecl *KindDecl(TermMaker &make, llvm::StringRef name,
   return item ? std::get<const PredDecl *>(*item) : nullptr;
 }
 
-// spawn_Kind's declaration, for a kind that receives one message type.
+// The declaration of 'spawn$Kind', for a kind that receives one message type.
 const PredDecl *SpawnDecl(TermMaker &make, llvm::StringRef spawnName,
     llvm::ArrayRef<const Term *> arguments, const Term *message,
     ConvertState &state) {
@@ -176,7 +181,7 @@ const FactOrRule *ConvertClause(
   return converted ? std::get<const FactOrRule *>(*converted) : nullptr;
 }
 
-// spawn_Kind's clause, which spawns a process that calls the kind's
+// The clause of 'spawn$Kind', which spawns a process that calls the kind's
 // predicate, module-qualified, with the arguments and its mailbox.
 const FactOrRule *SpawnClause(TermMaker &make, llvm::StringRef name,
     llvm::StringRef spawnName, std::size_t arity, ConvertState &state) {
@@ -209,7 +214,7 @@ const FactOrRule *SpawnClause(TermMaker &make, llvm::StringRef name,
   return ConvertClause(clause, count + 6, state);
 }
 
-// spawn_Kind_at's declaration, which takes the place first.
+// The declaration of 'spawn_at$Kind', which takes the place first.
 const PredDecl *SpawnAtDecl(TermMaker &make, llvm::StringRef spawnAtName,
     llvm::ArrayRef<const Term *> arguments, const Term *message,
     ConvertState &state) {
@@ -227,8 +232,8 @@ const PredDecl *SpawnAtDecl(TermMaker &make, llvm::StringRef spawnAtName,
   return item ? std::get<const PredDecl *>(*item) : nullptr;
 }
 
-// spawn_Kind_at's clause: at the host, spawn_Kind; at a GPU, the kind's
-// kernel for a kind that runs on a GPU, and otherwise a software error.
+// The clause of 'spawn_at$Kind': at the host, 'spawn$Kind'; at a GPU, the
+// kind's kernel for a kind that runs on a GPU, and otherwise a software error.
 const FactOrRule *SpawnAtClause(TermMaker &make, llvm::StringRef name,
     llvm::StringRef spawnName, llvm::StringRef spawnAtName, std::size_t arity,
     bool onGpu, ConvertState &state) {
@@ -248,9 +253,9 @@ const FactOrRule *SpawnAtClause(TermMaker &make, llvm::StringRef name,
   call.append({mailbox, io0, io});
   llvm::SmallVector<llvm::StringRef, 4> module{ModuleQualifiers(state)};
   std::string moduleName{llvm::join(module, ".")};
-  std::string spawnAt{moduleName.empty()
-          ? spawnAtName.str()
-          : moduleName + "." + spawnAtName.str()};
+  // What a software error at run time names: the call that the program
+  // wrote.
+  std::string spawnAt{"process.spawn"};
   const Term *atHost{make.Infix(",",
       make.Infix("=", place, make.Qualified({"process"}, make.Name("host"))),
       make.Qualified(module, make.Compound(spawnName, call)))};
@@ -352,11 +357,11 @@ std::optional<const ProcessDecl *> ProcessRule::Convert(
     return std::nullopt;
   }
   llvm::StringRef name{state.arena.Save(FunctorName(kind))};
-  std::string spawnName{"spawn_" + name.str()};
+  std::string spawnName{kSpawnPrefix.str() + name.str()};
   TermMaker make{*state.terms, t.tokens()};
   const PredDecl *kindDecl{
       KindDecl(make, name, argumentTerms, received, state)};
-  std::string spawnAtName{spawnName + "_at"};
+  std::string spawnAtName{kSpawnAtPrefix.str() + name.str()};
   const PredDecl *spawnDecl{nullptr}, *spawnAtDecl{nullptr};
   const FactOrRule *spawnClause{nullptr}, *spawnAtClause{nullptr};
   if (received.size() == 1) {

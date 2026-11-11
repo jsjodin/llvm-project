@@ -2858,7 +2858,8 @@ the process asks the host to launch. The first version has neither.
      skipping known-unsupported features rules out. The second cannot see a
      spawn in another module.
    - **D2. How a place is named:** `spawn_<kind>_at(Place, Args, Mailbox,
-     !IO)` with `:- type place ---> host ; gpu(int)` in `process`, and
+     !IO)` (since 2026-11-11 `spawn(Place, Kind(Args), Mailbox, !IO)`, see
+     "spawning names the kind" below) with `:- type place ---> host ; gpu(int)` in `process`, and
      `process.gpus(Count, !IO)` for how many there are. Spawning at `host`
      is `spawn_<kind>`. A GPU that does not exist, or a kind without a
      kernel, is a software error at the spawn. Rejected:
@@ -3491,15 +3492,47 @@ so the GPU faulted.
   takes the first pair.
 - **Decided 2026-11-11: spawning names the kind,** as
   `spawn(adder(Reply), Mailbox, !IO)` and
-  `spawn_at(gpu(0), adder(Reply), Mailbox, !IO)`: a form that the compiler
-  resolves, whose second argument must be a declared kind applied to its
-  arguments, written out, not a variable or a closure, so that the kind,
-  whether it runs on a GPU and its arguments' types are known at compile
-  time. The predicates that a declaration generates, `spawn_<kind>` and
-  `spawn_<kind>_at`, are hidden (the user: the same look and feel for
-  `spawn` and `spawn_at`). Rejected: a closure, which names host code and
-  captures cells of any type, so neither the kind nor its arguments' words
-  are known.
+  `spawn(gpu(0), adder(Reply), Mailbox, !IO)`, one name for both, the place
+  first, as Erlang's `spawn(Node, Fun)` (the user: "spawn for both. It
+  looks uniform and no need to remember two forms"). Implemented
+  2026-11-11:
+  - Desugaring makes a call of `spawn/5`, unqualified or as
+    `process.spawn`, whose second argument is a name or a name applied to
+    arguments, a call of the kind's `'spawn_at$<kind>'` with the place, the
+    kind's arguments and the rest. Name resolution then finds the kind,
+    module-qualified or not, and a name that is no kind's of that many
+    arguments, or a kind that receives several message types, is an error
+    there: "spawn's second argument must be a process kind applied to its
+    arguments". The kind, whether it runs on a GPU and its arguments'
+    types are known at compile time, as GPU spawn needs.
+  - The predicates that a declaration generates are `'spawn$<kind>'` and
+    `'spawn_at$<kind>'`, names that an unquoted name cannot spell, so a
+    program does not call them and a predicate of the program named
+    `spawn_<kind>` no longer clashes. A kind declared twice reports its
+    predicate's duplicate alone. Software errors at the spawn name
+    `process.spawn`, the predicate that the program wrote.
+  - `spawn/4` stays the library's closure spawn, which a kind written out
+    already is: `adder(Reply)` is a closure of `adder/4`. The library has
+    `spawn/5` for a closure in a variable: at `host` it is `spawn/4`, and at
+    a GPU a software error that says to write the kind out. Not a compile
+    error, as the place is a value.
+  - A module's own `spawn/5` with a name applied to arguments as its second
+    argument is taken for the spawn form too. A module that wants such a
+    predicate has to name its own module in the call (`m.spawn(...)`).
+  - Compared with Erlang (OTP 29, module erlang): the place is Erlang's
+    `Node`, a mailbox stands for its pid, and the kind written out is the
+    `Module, Function, Args` form, checked at compile time where Erlang
+    returns a pid whose process exits with `undef`. A GPU with no room is a
+    software error at the spawn, as `spawn_request`'s `system_limit` is an
+    error rather than a process that never runs. `spawn_monitor` is
+    deferred until a program needs it (`process.monitor` after the spawn
+    does the same, as a kind's process cannot end before its first
+    receive); links do not exist.
+  Rejected: `spawn_at` beside `spawn`, a second name to remember; a closure
+  for GPU spawn, which names host code and captures cells of any type, so
+  neither the kind nor its arguments' words are known; rewriting after type
+  checking, as goals are numbered in a table and the polymorphism pass
+  adds a polymorphic kind's type_infos.
 - *Spawning from a GPU process:* a wave that writes a free slot of its own
   kernel's table, without the host. A piece of its own, later.
 

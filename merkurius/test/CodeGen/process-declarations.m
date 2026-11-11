@@ -1,6 +1,7 @@
 % Process declarations, with -fprocess-declarations (design document,
-% "Processes and mailboxes"): spawn_Kind spawns a process that runs the
-% kind's predicate with the arguments and the process's mailbox.
+% "Processes and mailboxes"): spawn(Kind(Arguments), Mailbox, !IO), with the
+% kind written out, spawns a process that runs the kind's predicate with the
+% arguments and the process's mailbox.
 %
 % - A kind of this module, counter, spawned twice, so that each process has
 %   its own count.
@@ -51,8 +52,8 @@ get(Counter, Reply, !IO) :-
 
 main(!IO) :-
     new_mailbox(Reply, !IO),
-    spawn_counter(10, C1, !IO),
-    spawn_counter(100, C2, !IO),
+    spawn(counter(10), C1, !IO),
+    spawn(counter(100), C2, !IO),
     send(C1, add(5), !IO),
     send(C2, add(1), !IO),
     send(C1, add(2), !IO),
@@ -61,11 +62,11 @@ main(!IO) :-
     send(C1, stop, !IO),
     send(C2, stop, !IO),
 
-    spawn_echo(0, E1, !IO),
+    spawn(echo(0), E1, !IO),
     new_mailbox(Strings, !IO),
     send(E1, echo("hello", Strings), !IO),
     receive(Strings, any, infinity, R1, !IO),
-    spawn_echo(0, E2, !IO),
+    spawn(echo(0), E2, !IO),
     new_mailbox(Lists, !IO),
     send(E2, echo([1, 2, 3], Lists), !IO),
     receive(Lists, any, infinity, R2, !IO),
@@ -80,14 +81,14 @@ main(!IO) :-
     ),
 
     new_mailbox(Counts, !IO),
-    spawn_logger(Log1, !IO),
+    spawn(logger, Log1, !IO),
     send(Log1, line("one"), !IO),
     send(Log1, line("two"), !IO),
     send(Log1, done(Counts), !IO),
     receive(Counts, any, infinity, C3, !IO),
     io.write(C3, !IO),
     io.nl(!IO),
-    process_kinds.spawn_logger(Log2, !IO),
+    spawn(process_kinds.logger, Log2, !IO),
     send(Log2, line("three"), !IO),
     send(Log2, done(Counts), !IO),
     receive(Counts, any, infinity, C4, !IO),

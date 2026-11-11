@@ -3570,7 +3570,7 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
             ConstraintText(
                 wanted, [&](unsigned var) { return ClauseVarName(var); }));
       }
-      // A process declaration's spawn_Kind_at gives each argument of a kind
+      // A process declaration's 'spawn_at$Kind' gives each argument of a kind
       // that runs on a GPU to its kernel through process.gpu_argument
       // (docs/INPROGRESS.md, GPU processes without omp target, step 4c).
       if (unsatisfied.typeclass->module == "process" &&

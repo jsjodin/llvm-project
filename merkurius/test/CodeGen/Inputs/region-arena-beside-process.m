@@ -48,7 +48,7 @@ short_lists(N, Sum) :-
 
 main(!IO) :-
     new_mailbox(Me, !IO),
-    spawn_echo_at(gpu(0), Me, Echo, !IO),
+    spawn(gpu(0), echo(Me), Echo, !IO),
     rounds(40, 0, Total),
     io.write_int(Total, !IO), io.nl(!IO),
     send(Echo, 7, !IO),
