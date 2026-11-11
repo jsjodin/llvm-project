@@ -5,7 +5,8 @@
 % of another type has no instance of process.gpu_argument, through which
 % spawn_Kind_at gives it to the kernel (Inputs/process_kernel_list.m). What
 % the kinds reach is compiled for the GPU, where a closure cannot be made
-% yet (Inputs/process_kernel_closure.m). A kind that runs on the host only
+% (Inputs/process_kernel_closure.m), which the check of GPU code reports
+% (test/Semantics/processes/gpu-flat.m). A kind that runs on the host only
 % is not compiled for the GPU, and is no error.
 %
 % REQUIRES: amdgpu-registered-target
@@ -31,8 +32,7 @@
 echo(_, !IO).
 host_lister(_, _, !IO).
 
-% CLOSURE: process_kernel_closure.m:11:12: error: 'merk.closure' op makes a closure, which cannot be done in a GPU process yet
-% CLOSURE: process_kernel_closure.m:14:9: error: 'merk.call_closure' op calls a closure, which cannot be done in a GPU process yet
+% CLOSURE: process_kernel_closure.m:11:12: error: code of a process kind that runs on a GPU must make only flat values, but this makes Add of type pred(int, int): pred(int, int) is a higher-order type
 % LIST: process_kernel_list.m:6:4: error: unsatisfiable type class constraint `process.gpu_argument(list.list(int))'
 % LIST: process_kernel_list.m:6:4: because: a process kind that runs on a GPU takes integers, floats, characters and mailboxes so far
 % OPTION: error: -fembed-process-image={{.*}}.missing: expected the GPU and the image's file, as gfx1030:file

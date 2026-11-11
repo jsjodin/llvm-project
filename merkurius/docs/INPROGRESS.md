@@ -2635,14 +2635,19 @@ the process asks the host to launch. The first version has neither.
    messages make that a write of bytes, with no pointer to fix up.
 
    **Steps:**
-   - **5a. The checks by type, at compile time.** A message type that is not
-     flat in a GPU kind's or a target region's `send` or `receive`; a goal of
-     a GPU kind's code that makes a value of a type that is not flat; each
-     an error that names the type. Step 4e's term messages then go: the
-     ring of terms, `rpcTakeTerm`, `rpcSendTerm` and `rpcPinnedChunk`, and
-     the device's use of `copy.h`, which the host keeps. Strings become a
-     one-block message. Tests of each error, and the GPU tests of 4e turned
-     into flat messages or error tests.
+   - **5a. The checks by type, at compile time.** Built 2026-11-10 (design
+     document, "Messages and memory on the device", As built): a message
+     type that is not flat in a GPU kind's or a target region's `send` or
+     `receive`, and a goal of a GPU kind's code that makes a value of a type
+     that is not flat, are errors that name the type. The GPU tests of 4e
+     send flat messages now.
+     Moved to flat records' steps 1 and 2, decided while building 5a: the
+     end of step 4e's term messages (the ring of terms, `rpcTakeTerm`,
+     `rpcSendTerm`, `rpcPinnedChunk` and the device's use of `copy.h`), and
+     strings as one-block messages. A flat record of several words is still
+     a tree of cells on the host, and on the device until step 1, so its
+     bytes are not yet the message; until then the `type_info` copy carries
+     every message that is not one word or an array, marked Temporary.
    - **Flat records,** with 5a, since its check says what is flat (design
      document, "Messages and memory on the device"; the user, 2026-11-10:
      arrays may hold structs, as in OpenMP's custom reductions, with an

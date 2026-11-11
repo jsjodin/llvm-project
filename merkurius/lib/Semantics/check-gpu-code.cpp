@@ -104,6 +104,8 @@ private:
   // Where a message was reported, so that a goal reached twice, as in the
   // bodies of two modes of one procedure, is reported once.
   llvm::DenseSet<const char *> reported_;
+  // The mailboxes of the GPU kinds' processes themselves, by body.
+  llvm::DenseSet<std::pair<const ProcedureBody *, BodyVar>> selves_;
 };
 
 bool GpuCodeChecker::IsEnumeration(const Type &type) {
@@ -213,9 +215,15 @@ void GpuCodeChecker::CheckValue(
   }
   if (std::optional<std::string> why{NotFlat(*type)};
       why && reported_.insert(Source(goal.tokens).begin()).second) {
+    // A variable that the compiler made is named as a value.
+    llvm::StringRef name{body.vars[var].name};
+    std::string what{name.starts_with("V_") || name.starts_with("HeadVar__") ||
+                name.starts_with("STATE_VARIABLE_")
+            ? std::string{"a value"}
+            : name.str()};
     messages_.Say(Source(goal.tokens),
         "code of a process kind that runs on a GPU must make only flat values, but this makes %s of type %s: %s"_err_en_US,
-        body.vars[var].name, TypeToString(*type), *why);
+        what, TypeToString(*type), *why);
   }
 }
 
@@ -245,14 +253,19 @@ void GpuCodeChecker::Call(const ProcedureBody &body, const Body &goal,
   if (send && goal.arguments.size() >= 2) {
     CheckMessage(goal.tokens, body.vars[goal.arguments[1]].type);
   }
-  if (receive && goal.arguments.size() >= 4) {
+  // A kind's own mailbox's messages are checked at the kind's declaration.
+  if (receive && goal.arguments.size() >= 4 &&
+      !selves_.contains({&body, goal.arguments[0]})) {
     // received(T): its argument is the message's type.
     const Type *received{body.vars[goal.arguments[3]].type};
     if (received && received->arguments.size() == 1) {
       CheckMessage(goal.tokens, received->arguments.front());
     }
   }
-  if (process) {
+  const ProcedureBody *called{determinism_.BodyOf(*callee)};
+  // The values that a procedure of the module makes are checked in its
+  // body, where they are made.
+  if (process && !called) {
     for (auto [i, var] : llvm::enumerate(goal.arguments)) {
       // any's closure, the receive's selector, which code generation
       // removes (MLIRGenOpenMP.cpp, ReceiveInTarget).
@@ -270,7 +283,7 @@ void GpuCodeChecker::Call(const ProcedureBody &body, const Body &goal,
       }
     }
   }
-  if (const ProcedureBody *called{determinism_.BodyOf(*callee)}) {
+  if (called) {
     if (!visited_.contains({called, process ? 1u : 0u})) {
       pending_.push_back({called, process});
     }
@@ -311,25 +324,32 @@ void GpuCodeChecker::Walk(
   }
 }
 
-// The selectors of a body's receives, any's closures, which code generation
-// removes (MLIRGenOpenMP.cpp, ReceiveInTarget), so the process makes none.
-static void FindSelectors(
-    const Body &goal, llvm::SmallVectorImpl<BodyVar> &selectors) {
+// The variables of a body that its sends and receives cover: the
+// receives' selectors, any's closures, which code generation removes
+// (MLIRGenOpenMP.cpp, ReceiveInTarget), so that the process makes none;
+// and the messages sent and received, whose types are checked as messages.
+static void FindCovered(
+    const Body &goal, llvm::SmallVectorImpl<BodyVar> &covered) {
   if (goal.kind == BodyKind::Call && goal.modes && goal.modes->callee) {
     const Symbol &symbol{*goal.modes->callee->symbol};
     if (symbol.module == "process" && symbol.name == "receive" &&
-        symbol.arity == 6 && goal.arguments.size() >= 2) {
-      selectors.push_back(goal.arguments[1]);
+        symbol.arity == 6 && goal.arguments.size() >= 4) {
+      covered.push_back(goal.arguments[1]);
+      covered.push_back(goal.arguments[3]);
+    }
+    if (symbol.module == "process" && symbol.name == "send" &&
+        symbol.arity == 4 && goal.arguments.size() >= 2) {
+      covered.push_back(goal.arguments[1]);
     }
   }
   if (goal.lambda) {
-    FindSelectors(*goal.lambda, selectors);
+    FindCovered(*goal.lambda, covered);
   }
   for (const SwitchCase &arm : goal.cases) {
-    FindSelectors(*arm.goal, selectors);
+    FindCovered(*arm.goal, covered);
   }
   for (const Body *inner : goal.goals) {
-    FindSelectors(*inner, selectors);
+    FindCovered(*inner, covered);
   }
 }
 
@@ -338,9 +358,9 @@ void GpuCodeChecker::Visit(const ProcedureBody &body, bool process) {
     return;
   }
   if (process) {
-    llvm::SmallVector<BodyVar> selectors;
-    FindSelectors(*body.body, selectors);
-    for (BodyVar var : selectors) {
+    llvm::SmallVector<BodyVar> covered;
+    FindCovered(*body.body, covered);
+    for (BodyVar var : covered) {
       checked_.insert({&body, var});
     }
   }
@@ -381,11 +401,14 @@ void GpuCodeChecker::Check(const parser::ParseTree &tree) {
         continue;
       }
       if (const ProcedureBody *body{determinism_.BodyOf(procedure)}) {
-        // What its mailboxes receive is its messages.
-        for (BodyVar var : body->head) {
-          const Type *type{body->vars[var].type};
+        // What its own mailbox, before the I/O states, receives is its
+        // messages.
+        if (body->head.size() >= 3) {
+          BodyVar self{body->head[body->head.size() - 3]};
+          const Type *type{body->vars[self].type};
           if (type && IsNamed(*type, "process", "mailbox")) {
             CheckMessage((*decl)->tokens, type->arguments.front());
+            selves_.insert({body, self});
           }
         }
         pending_.push_back({body, true});
