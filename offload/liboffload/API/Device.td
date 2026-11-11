@@ -145,6 +145,27 @@ def olIterateDevices : Function {
   ];
 }
 
+def olGetDeviceComputeUnitMask : Function {
+  let desc = "Queries the compute units that the device's queues run kernels on.";
+  let details = [
+    "Bit `I % 32` of word `I / 32` of `Mask` is set if compute unit `I` runs the kernels of a queue that `olCreateQueue` creates, of `OL_DEVICE_INFO_NUM_COMPUTE_UNITS`, and the words after the last are cleared.",
+    "A queue that `olCreateQueueWithComputeUnitMask` creates may use these."
+  ];
+  let params = [
+    Param<"ol_device_handle_t", "Device", "handle of the device instance", PARAM_IN>,
+    Param<"size_t", "MaskWords", "the number of words of `Mask`", PARAM_IN>,
+    Param<"uint32_t*", "Mask", "the compute units' mask, of `MaskWords` words", PARAM_OUT>
+  ];
+  let returns = [
+    Return<"OL_ERRC_INVALID_SIZE", [
+      "`MaskWords` is fewer than the words of the device's compute units"
+    ]>,
+    Return<"OL_ERRC_UNSUPPORTED", [
+      "The device's backend does not know its queues' compute units"
+    ]>
+  ];
+}
+
 def olGetDeviceInfo : Function {
   let desc = "Queries the given property of the device.";
   let details = [];

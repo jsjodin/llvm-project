@@ -9,6 +9,7 @@
 #include "../common/Fixtures.hpp"
 #include <OffloadAPI.h>
 #include <gtest/gtest.h>
+#include <vector>
 
 struct olLaunchKernelCooperativeTest : LaunchSingleKernelTestBase {
   void SetUp() override { SetUpKernelWithSupport("noargs"); }
@@ -162,4 +163,90 @@ TEST_P(olLaunchKernelCooperativeBarrierTest, AllGroupsResident) {
   }
 
   ASSERT_SUCCESS(olMemFree(Context, Mem));
+}
+
+// A queue limited to the first half of the device's compute units, in pairs,
+// or null if the device cannot limit queues.
+static ol_queue_handle_t createHalfQueue(ol_context_handle_t Context,
+                                         ol_device_handle_t Device) {
+  uint32_t Units = 0;
+  if (olGetDeviceInfo(Device, OL_DEVICE_INFO_NUM_COMPUTE_UNITS, sizeof(Units),
+                      &Units))
+    return nullptr;
+  std::vector<uint32_t> DeviceMask((Units + 31) / 32, 0);
+  if (olGetDeviceComputeUnitMask(Device, DeviceMask.size(), DeviceMask.data()))
+    return nullptr;
+  uint32_t Set = 0;
+  for (uint32_t Word : DeviceMask)
+    Set += __builtin_popcount(Word);
+  uint32_t Wanted = std::max(2u, Set / 2 & ~1u);
+  std::vector<uint32_t> Mask(DeviceMask.size(), 0);
+  for (uint32_t Bit = 0; Bit < Units && Wanted > 0; ++Bit) {
+    if ((DeviceMask[Bit / 32] >> (Bit % 32)) & 1) {
+      Mask[Bit / 32] |= 1u << (Bit % 32);
+      --Wanted;
+    }
+  }
+  ol_queue_handle_t Queue = nullptr;
+  if (olCreateQueueWithComputeUnitMask(Context, Device, Mask.data(),
+                                       Mask.size(), &Queue))
+    return nullptr;
+  return Queue;
+}
+
+// On a queue limited to half the device's compute units, a cooperative launch
+// may have fewer work groups than on the device, all resident at once, and
+// no more.
+TEST_P(olLaunchKernelCooperativeBarrierTest, AllGroupsResidentOnLimitedQueue) {
+  ol_queue_handle_t Half = createHalfQueue(Context, Device);
+  if (!Half)
+    GTEST_SKIP() << "the device cannot limit a queue to compute units";
+
+  void *Mem;
+  ASSERT_SUCCESS(olMemAlloc(Context, Device, OL_ALLOC_TYPE_MANAGED,
+                            2 * sizeof(uint32_t), &Mem));
+  uint32_t *Arrived = static_cast<uint32_t *>(Mem);
+  uint32_t *TimedOut = Arrived + 1;
+  void *ArgPtrs[] = {&Arrived, &TimedOut};
+  size_t ArgSizes[] = {sizeof(Arrived), sizeof(TimedOut)};
+  bool IsCooperative = true;
+  ol_kernel_launch_prop_t Props[] = {
+      {OL_KERNEL_LAUNCH_PROP_TYPE_IS_COOPERATIVE, &IsCooperative},
+      OL_KERNEL_LAUNCH_PROP_END};
+
+  for (uint32_t Threads : {64u, 256u}) {
+    LaunchArgs.GroupSize = {Threads, 1, 1};
+    uint32_t DeviceCount = 0, QueueCount = 0;
+    ASSERT_SUCCESS(olGetKernelMaxCooperativeGroupCount(
+        Device, Kernel, &LaunchArgs, &DeviceCount));
+    ASSERT_SUCCESS(olGetKernelMaxCooperativeGroupCountOnQueue(
+        Half, Kernel, &LaunchArgs, &QueueCount));
+    ASSERT_GT(QueueCount, 0u);
+    EXPECT_LT(QueueCount, DeviceCount);
+    LaunchArgs.NumGroups.x = QueueCount;
+
+    *Arrived = 0;
+    *TimedOut = 0;
+    ASSERT_SUCCESS(olLaunchKernel(Half, Device, Kernel, &LaunchArgs, Props,
+                                  std::size(ArgPtrs), ArgPtrs, ArgSizes));
+    ASSERT_SUCCESS(olSyncQueue(Half));
+    EXPECT_EQ(*TimedOut, 0u)
+        << Threads << " threads, " << QueueCount << " groups";
+    EXPECT_EQ(*Arrived, QueueCount);
+
+    LaunchArgs.NumGroups.x = QueueCount + 1;
+    ASSERT_ERROR(OL_ERRC_INVALID_ARGUMENT,
+                 olLaunchKernel(Half, Device, Kernel, &LaunchArgs, Props,
+                                std::size(ArgPtrs), ArgPtrs, ArgSizes));
+  }
+
+  ASSERT_SUCCESS(olMemFree(Context, Mem));
+  ASSERT_SUCCESS(olDestroyQueue(Half));
+}
+
+TEST_P(olLaunchKernelCooperativeTest, InvalidNullHandleQueueOnQueue) {
+  uint32_t MaxGroupCount = 0;
+  ASSERT_ERROR(OL_ERRC_INVALID_NULL_HANDLE,
+               olGetKernelMaxCooperativeGroupCountOnQueue(
+                   nullptr, Kernel, &LaunchArgs, &MaxGroupCount));
 }

@@ -11,6 +11,7 @@ add_offload_unittest("context"
 
 add_offload_unittest("device"
     device/olIterateDevices.cpp
+    device/olGetDeviceComputeUnitMask.cpp
     device/olGetDeviceInfo.cpp
     device/olGetDeviceInfoSize.cpp)
 
@@ -59,6 +60,7 @@ add_offload_unittest("program"
 
 add_offload_unittest("queue"
     queue/olCreateQueue.cpp
+    queue/olCreateQueueWithComputeUnitMask.cpp
     queue/olSyncQueue.cpp
     queue/olDestroyQueue.cpp
     queue/olGetQueueInfo.cpp

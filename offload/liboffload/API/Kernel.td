@@ -88,6 +88,30 @@ def olCalculateOptimalOccupancy : Function {
     ];
 }
 
+def olGetKernelMaxCooperativeGroupCountOnQueue : Function {
+  let desc = "Query the maximum number of work groups that can be launched "
+             "cooperatively for a kernel on a queue.";
+  let details =
+      ["As `olGetKernelMaxCooperativeGroupCount`, for a launch on `Queue`, "
+       "whose compute units may be fewer than the device's, as for a queue "
+       "that `olCreateQueueWithComputeUnitMask` created.",
+  ];
+  let params = [Param<"ol_queue_handle_t", "Queue",
+                      "queue intended to run the kernel", PARAM_IN>,
+                Param<"ol_symbol_handle_t", "Kernel", "handle of the kernel",
+                      PARAM_IN>,
+                Param<"const ol_kernel_launch_size_args_t*", "LaunchSizeArgs",
+                      "launch size parameters", PARAM_IN>,
+                Param<"uint32_t*", "MaxGroupCount",
+                      "maximum number of cooperative groups", PARAM_OUT>];
+  let returns =
+      [Return<"OL_ERRC_SYMBOL_KIND", ["The provided symbol is not a kernel"]>,
+       Return<
+           "OL_ERRC_UNSUPPORTED", ["Cooperative launch is not supported or "
+                                   "backend cannot provide this information"]>,
+  ];
+}
+
 def olGetKernelMaxCooperativeGroupCount : Function {
   let desc = "Query the maximum number of work groups that can be launched "
              "cooperatively for a kernel.";
