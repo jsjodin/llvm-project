@@ -1,0 +1,35 @@
+The reacting front of benchmarks/front, the demo's reference in Mercury, on
+small grids, so that it keeps building and giving the right cells:
+sequentially, and on the host's threads, where OpenMP runs its target
+regions when there is no device, each at -O0 and -O2. The values are from
+an independent program in Python, which adds and multiplies in the same
+order, so every build that does not fuse them gives the same bits.
+
+RUN: merkc -O0 -fdo-loops %S/../../benchmarks/front/front.m -o %t.sequential0
+RUN: env FRONT_SIZE=256 FRONT_STEPS=100 %t.sequential0 | FileCheck %s --check-prefix=SQUARE
+RUN: env FRONT_SIZE=101 FRONT_STEPS=150 FRONT_SUBSTEPS=20 %t.sequential0 | FileCheck %s --check-prefix=ODD
+RUN: merkc -O2 -fdo-loops %S/../../benchmarks/front/front.m -o %t.sequential2
+RUN: env FRONT_SIZE=256 FRONT_STEPS=100 %t.sequential2 | FileCheck %s --check-prefix=SQUARE
+RUN: env FRONT_SIZE=101 FRONT_STEPS=150 FRONT_SUBSTEPS=20 %t.sequential2 | FileCheck %s --check-prefix=ODD
+RUN: merkc -O0 -fopenmp -fdo-loops %libomp-flags %S/../../benchmarks/front/front.m -o %t.host0
+RUN: %libomp-env OMP_NUM_THREADS=4 FRONT_SIZE=101 FRONT_STEPS=150 FRONT_SUBSTEPS=20 %t.host0 | FileCheck %s --check-prefix=ODD
+RUN: merkc -O2 -fopenmp -fdo-loops %libomp-flags %S/../../benchmarks/front/front.m -o %t.host2
+RUN: %libomp-env OMP_NUM_THREADS=4 FRONT_SIZE=256 FRONT_STEPS=100 %t.host2 | FileCheck %s --check-prefix=SQUARE
+RUN: %libomp-env OMP_NUM_THREADS=4 FRONT_SIZE=101 FRONT_STEPS=150 FRONT_SUBSTEPS=20 %t.host2 | FileCheck %s --check-prefix=ODD
+REQUIRES: libomp
+
+SQUARE: Reacting front, Mercury
+SQUARE-NEXT: Grid: 256 x 256 cells
+SQUARE-NEXT: Steps: 100, of 100 substeps where a cell burns
+SQUARE-NEXT: Burnt cells: 13329
+SQUARE-NEXT: Heat: 1.043024135233932e+05
+SQUARE-NEXT: Fuel: 5.220529923213294e+04
+SQUARE-NEXT: Gcells/sec    Min (sec)   Max         Average
+
+ODD: Burnt cells: 10198
+ODD-NEXT: Heat: 2.833095487108859e+04
+ODD-NEXT: Fuel: 3.004395167297623e+00
+
+Usage is reported.
+RUN: env FRONT_SUBSTEPS=0 not %t.sequential2 | FileCheck %s --check-prefix=USAGE
+USAGE: FRONT_SIZE and FRONT_SUBSTEPS must be at least 1 and FRONT_STEPS at least 2.

@@ -3202,8 +3202,11 @@ its reference is in C or Fortran.
    program in Mercury, dense, on one GPU. The two together say whether
    Mercury's code is slower, which the process-oriented version would have to
    make up for, before any process is involved. Life done 2026-11-11
-   (`benchmarks/life`: `life.m`, `life.c` with cells of 8 or 1 bytes); the
-   front next.
+   (`benchmarks/life`: `life.m`, `life.c` with cells of 8 or 1 bytes). The
+   front done 2026-11-11 (`benchmarks/front`: diffusion, a loss of heat, and
+   two stiff reactions in 100 linearly implicit substeps where a cell burns;
+   checked to the bit against Python). merkc does not fuse multiplies and
+   adds on the GPU where clang does, which the comparison will show.
 2. **Two places over TCP, to try things out:** two nodes on one machine, over
    loopback, each with the GPU (Remote handles and TCP), the tiles split
    between them and halos as messages. It needs no second GPU. Life done

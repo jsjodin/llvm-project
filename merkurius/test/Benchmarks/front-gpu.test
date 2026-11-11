@@ -1,0 +1,31 @@
+The reacting front of benchmarks/front on the machine's GPU, at -O0 and -O2,
+on small grids: the cells are the same bits as sequentially (front.test),
+each kernel is an SPMD kernel, and the arrays stay on the device for the
+steps.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O0 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/front/front.m -o %t0
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY FRONT_SIZE=101 FRONT_STEPS=150 FRONT_SUBSTEPS=20 %t0 | FileCheck %s --check-prefix=ODD
+RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/front/front.m -o %t2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY FRONT_SIZE=101 FRONT_STEPS=150 FRONT_SUBSTEPS=20 %t2 | FileCheck %s --check-prefix=ODD
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=16 FRONT_SIZE=256 FRONT_STEPS=100 %t2 2> %t.info | FileCheck %s
+RUN: FileCheck %s --check-prefix=INFO < %t.info
+CHECK: Burnt cells: 13329
+CHECK-NEXT: Heat: 1.043024135233932e+05
+CHECK-NEXT: Fuel: 5.220529923213294e+04
+ODD: Burnt cells: 10198
+ODD-NEXT: Heat: 2.833095487108859e+04
+ODD-NEXT: Fuel: 3.004395167297623e+00
+INFO: Launching kernel {{.*}}front.init_{{.*}} in SPMD mode
+INFO: Launching kernel {{.*}}front.step_{{.*}} in SPMD mode
+INFO-NOT: Generic
+
+After the region's copies to the device, no step copies any array, until the
+region copies them back: 258 x 258 cells of 8 bytes and the array's size are
+532520 bytes.
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=32 FRONT_SIZE=256 FRONT_STEPS=10 %t2 2> %t.copies > /dev/null
+RUN: FileCheck %s --check-prefix=COPIES < %t.copies
+COPIES: Copying data from host to device, {{.*}}Name=T, at {{.*}}front.m:[[REGION:[0-9]+]]:
+COPIES: Copying data from host to device, {{.*}}Name=Z0, at {{.*}}front.m:[[REGION]]:
+COPIES-NOT: Size=532520
+COPIES: Copying data from device to host, {{.*}}Size=532520, {{.*}}front.m:[[REGION]]:
