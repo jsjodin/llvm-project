@@ -1,0 +1,25 @@
+process-teams.m's seventeen adders spawned on the machine's GPU: they fill
+more slots than one team of the kernel has, and every one answers, as all
+the kernel's teams run (docs/INPROGRESS.md, GPU processes without omp
+target, step 4b).
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-teams.m -o %t2
+RUN: %gpu-env %t2 | FileCheck %S/process-teams.m --match-full-lines --strict-whitespace
+RUN: merkc -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-teams.m -o %t
+RUN: %gpu-env %t | FileCheck %S/process-teams.m --match-full-lines --strict-whitespace
+
+A kernel whose code recurses has a stack that is not fixed, of the size its
+launch gives, 1 KiB a lane, whose scratch the GPU holds for every team.
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/Inputs/process_teams_recursive.m -o %t.recursive
+RUN: %gpu-env %t.recursive | FileCheck %s --check-prefix=FIB
+FIB: 6765
+
+With the plugin's own size, 16 KiB, the GPU does not hold the scratch of
+every team, and those it holds back would never start. The spawn that
+launches the kernel waits for them, and reports it.
+RUN: not %gpu-env MERK_GPU_PROCESS_STACK_BYTES=16384 MERK_TEAMS_STALL_MILLISECONDS=1000 %t.recursive 2>&1 | FileCheck %s --check-prefix=HELD
+HELD: Software Error: process.spawn: GPU 0 started {{[0-9]+}} of the {{[0-9]+}} teams of the module process_teams_recursive's processes' kernel, which must all run at once, and no other within 1000 ms (MERK_TEAMS_STALL_MILLISECONDS): the GPU may not hold their scratch for all of them, as for a kernel with a dynamic stack
+
+RUN: not %gpu-env MERK_GPU_PROCESS_STACK_BYTES=1k %t.recursive 2>&1 | FileCheck %s --check-prefix=BAD
+BAD: Software Error: process.spawn: MERK_GPU_PROCESS_STACK_BYTES is not a positive number of bytes: 1k

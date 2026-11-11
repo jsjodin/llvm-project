@@ -708,6 +708,8 @@ static void StopIfProgramEnding() {
 }
 
 namespace merkurius::runtime {
+std::uint64_t TeamsStallMilliseconds() { return teamsStallMilliseconds; }
+
 bool RegionsRunning() {
   pthread_mutex_lock(&arenaLock);
   bool running{runningRegions != 0};

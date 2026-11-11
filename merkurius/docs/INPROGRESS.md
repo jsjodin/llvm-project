@@ -3354,8 +3354,36 @@ one kernel for a GPU's processes.
   the first spawn of one of its kinds on a GPU, on a queue limited to the
   compute units that `LIBOMPTARGET_AMDGPU_CU_MASK` leaves, with as many teams
   of 256 threads as are resident at once there
-  (`olGetKernelMaxCooperativeGroupCountOnQueue`), which the launch then
-  guarantees.
+  (`olGetKernelMaxCooperativeGroupCountOnQueue`), and waits for them all to
+  start before any spawn uses it.
+- *Scratch can hold teams back* (found 2026-11-11, gfx1030, ROCm 7.2.0).
+  The cooperative count takes the kernel's registers and local memory, not
+  its scratch. A kernel with a dynamic stack gets the plugin's size, 16 KiB
+  a lane unless `LIBOMPTARGET_STACK_SIZE` says otherwise, and of a kernel of
+  four teams the GPU ran one: the others, held back until a team ended,
+  never started, and a process in their slots never ran. With 1 KiB all
+  four ran. A call of a function that is not `norecurse` makes the stack
+  dynamic, and `llvm.trap` is not `nocallback`, so LLVM infers `norecurse`
+  for no function that traps: the device runtime's `Fail`, which every
+  kernel calls, ended with a trap that it never reaches, as the host ends
+  the program first. It ends the wave instead (`s_endpgm`), and a kernel
+  without recursion has a fixed frame (`process-kernels.m` checks it).
+  Code that recurses, or a call of a generated procedure that traps and is
+  not inlined, still makes the stack dynamic, as `process-gpu-messages`'
+  kinds and `process-gpu-arrays`' at -O0 do. So the runtime launches the
+  kernel with a stack of its own, 1 KiB a lane
+  (`MERK_GPU_PROCESS_STACK_BYTES`), through liboffload's launch property
+  `OL_KERNEL_LAUNCH_PROP_TYPE_STACK_SIZE`, which we added to the AMDGPU
+  plugin for it. And each team counts itself started
+  (`PlaceTable::started`), and the launch waits for them as a target
+  region's teams wait for each other (`MERK_TEAMS_STALL_MILLISECONDS`): a
+  spawn that launches a kernel whose teams do not all start fails, naming
+  the counts (`process-teams-gpu.test`). Open: the stack overflows
+  silently, and a kernel's fixed frames count towards it
+  (`process-gpu-messages`' are 1008 bytes), so a deeper recursion needs a
+  check of its own or code that does not use the stack; the measurements
+  above say no larger size is safe beside other queues' scratch;
+  `nocallback` on `llvm.trap` upstream.
 - *Phases take turns on a GPU's compute units.* A kernel ends when its last
   process ends, which frees its units for the next phase's. A spawn of a
   kind of another module while a kernel holds them fails, naming the module

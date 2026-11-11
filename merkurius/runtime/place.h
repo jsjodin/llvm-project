@@ -47,11 +47,14 @@ struct PlaceSlot {
   uint64_t words;
 };
 
-// The table: whether the kernel is to end, and how many slots follow it,
-// one for each of the kernel's waves, by their order in the launch.
+// The table: whether the kernel is to end, how many slots follow it, one
+// for each of the kernel's waves, by their order in the launch, and how many
+// of the kernel's teams have started, which the host waits for, as a team
+// that is not resident at once with the others would never start.
 struct PlaceTable {
   uint64_t end;
   uint64_t slots;
+  uint64_t started;
 };
 
 inline PlaceSlot *PlaceSlots(PlaceTable *table) {

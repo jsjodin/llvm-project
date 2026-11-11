@@ -63,6 +63,7 @@ constexpr std::uint32_t kOlPlatformBackendAmdgpu{2};
 // ol_kernel_launch_prop_type_t
 constexpr std::uint32_t kOlKernelLaunchPropTypeNone{0};
 constexpr std::uint32_t kOlKernelLaunchPropTypeIsCooperative{1};
+constexpr std::uint32_t kOlKernelLaunchPropTypeStackSize{2};
 
 // A launch's properties, ended by one of type kOlKernelLaunchPropTypeNone.
 struct ol_kernel_launch_prop_t {
