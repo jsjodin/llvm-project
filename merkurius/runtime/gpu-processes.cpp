@@ -17,7 +17,13 @@
 // each process (place.h). The runtime launches it at the first spawn of a
 // module's kind on the GPU, cooperatively, with as many teams as are
 // resident at once on its compute units for processes (compute-units.h), on a
-// queue limited to them that the GPU keeps for the program's life. A spawn
+// queue limited to them. The kernel takes a percentage of the units that the
+// GPU's queues may use, 100 by default, MERK_GPU_PROCESS_UNITS, or what the
+// program sets between kernels (merk_gpu_set_units); a launch makes a new
+// queue when the units change, and the reaper destroys the old one once no
+// kernel uses it. A target region on a GPU whose processes' kernel holds
+// every unit would never start, and fails instead (merk_check_region_units).
+// A spawn
 // writes the process's slot of the kernel's table. A spawn fails, rather than
 // waits, when no slot is free, or when the GPU's kernel is another module's:
 // the processes running there could be waiting for the new one. The kernel ends
@@ -61,6 +67,9 @@
 #include <pthread.h>
 
 extern "C" void merk_node(std::int64_t *high, std::int64_t *low);
+extern "C" [[noreturn]] void merk_uncaught_exception(const char *exception);
+// OpenMP's, in a program with target regions, the only one that asks.
+extern "C" int omp_get_default_device(void) __attribute__((weak));
 extern "C" void merk_mailbox_close(std::int64_t nodeHigh, std::int64_t nodeLow,
     std::int64_t placeAndSlot, std::int64_t generation, std::int64_t secret);
 
@@ -126,6 +135,9 @@ struct RunningProcess {
 struct Place {
   const char *module;
   int gpu;
+  // Its queue, and whether its units are all those of the GPU's queues.
+  ol_queue_handle_t queue;
+  bool allUnits;
   PlaceTable *table;
   RunningProcess **processes;
   std::uint64_t *owners;
@@ -135,12 +147,18 @@ struct Place {
   Place *next;
 };
 
-// The queue of each GPU's processes' kernels, limited to its units for
-// processes (compute-units.h), from its first spawn, and the kernel that
-// spawns use, unless it is ending.
+// For each GPU, from its first spawn: the pairs of units that its queues may
+// use (compute-units.h), and how many units they may use; the percentage of
+// them that the program set for its processes' kernels, or 0 for the
+// default; the queue of its latest kernel, limited to that kernel's units,
+// or none; and the kernel that spawns use, unless it is ending.
 struct GpuPlaces {
   bool ready;
+  UnitMask units;
+  int usable;
+  int percent;
   ol_queue_handle_t queue;
+  UnitMask queueUnits;
   Place *current;
   // A spawn is waiting for the teams of a kernel it launched, without the
   // lock (Launch), and the GPU's other spawns wait for it.
@@ -201,6 +219,29 @@ void ReapPlace(Place *place) {
   std::free(place);
 }
 
+// Whether a kernel of the list was launched on the queue.
+bool QueueIn(const Place *list, ol_queue_handle_t queue) {
+  for (const Place *place{list}; place; place = place->next) {
+    if (place->queue == queue) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Whether a kernel that the reaper has not taken was launched on the queue.
+// With the lock held.
+bool QueueUsed(ol_queue_handle_t queue) {
+  return QueueIn(places, queue) || QueueIn(endedPlaces, queue);
+}
+
+// Destroys a queue on which no kernel runs any longer, once the host
+// function that followed its last kernel has returned.
+void DestroyQueue(ol_queue_handle_t queue) {
+  olSyncQueue(queue);
+  olDestroyQueue(queue);
+}
+
 // The reaper's thread, for the program's life. A kernel ends only after its
 // processes have told the host that they ended, so the reaper has taken
 // them, in the same round or an earlier one, before it takes the kernel;
@@ -223,7 +264,18 @@ void *Reaper(void *) {
     }
     while (placeList) {
       Place *next{placeList->next};
+      // Its queue goes with the last kernel on it, unless the GPU's next
+      // kernel may use it.
+      pthread_mutex_lock(&lock);
+      ol_queue_handle_t queue{placeList->queue};
+      placeList->queue = nullptr;
+      bool unused{queue != gpuPlaces[placeList->gpu].queue &&
+          !QueueUsed(queue) && !QueueIn(next, queue)};
+      pthread_mutex_unlock(&lock);
       ReapPlace(placeList);
+      if (unused) {
+        DestroyQueue(queue);
+      }
       placeList = next;
     }
   }
@@ -352,8 +404,8 @@ const char *Load(const char *module, const Gpu &gpu, LoadedImage *&entry) {
   return nullptr;
 }
 
-// The GPU's compute units and its processes' queue, made the first time, or
-// the text of the error. With the lock held.
+// The GPU's compute units for processes, found the first time, or the text
+// of the error. With the lock held.
 const char *Ready(const Gpu &gpu) {
   GpuPlaces &places{gpuPlaces[gpu.number]};
   if (places.ready) {
@@ -377,23 +429,74 @@ const char *Ready(const Gpu &gpu) {
                  "processes may use: %s%s%s",
         "", gpu.number, Details(result), "", "");
   }
-  UnitMask units;
-  if (!ProcessUnits(mask, kUnitMaskWords + 1, units)) {
+  if (!ProcessUnits(mask, kUnitMaskWords + 1, places.units)) {
     return Error("GPU %s%lld has no pair of compute units for processes, "
                  "units 2N and 2N+1%s%s%s",
         "", gpu.number, "", "", "");
   }
-  // Temporary (one kernel for a GPU's processes, docs/INPROGRESS.md, open:
-  // the units of the processes' kernel): the kernel takes only the first
-  // pair, as it holds every team slot of its units, so that target regions
-  // and other kernels keep the rest; which units it takes is to decide.
-  FirstPair(units);
-  if (ol_result_t result{olCreateQueueWithComputeUnitMask(gpu.context,
-          gpu.device, units.words, kUnitMaskWords, &places.queue)}) {
-    return Error("could not make a queue for GPU %s%lld's processes: %s%s%s",
-        "", gpu.number, Details(result), "", "");
-  }
+  UnitMask usable{};
+  std::memcpy(usable.words, mask, sizeof usable.words);
+  places.usable = UnitCount(usable);
   places.ready = true;
+  return nullptr;
+}
+
+// The percentage of the GPU's units that its processes' kernels take: what
+// the program set, or MERK_GPU_PROCESS_UNITS, or 100; or 0, with the text of
+// the error.
+int UnitsPercent(const GpuPlaces &places, const char *&error) {
+  if (places.percent != 0) {
+    return places.percent;
+  }
+  const char *text{std::getenv("MERK_GPU_PROCESS_UNITS")};
+  if (!text) {
+    return 100;
+  }
+  char *end{nullptr};
+  long percent{std::strtol(text, &end, 10)};
+  if (end == text || *end != '\0' || percent < 1 || percent > 100) {
+    char *message{static_cast<char *>(Malloc(256))};
+    std::snprintf(message, 256,
+        "MERK_GPU_PROCESS_UNITS is not a percentage from 1 to 100: %s", text);
+    error = message;
+    return 0;
+  }
+  return static_cast<int>(percent);
+}
+
+// The queue for the GPU's next processes' kernel, limited to the share of
+// its units that the kernel takes: the GPU's latest queue if its units are
+// the same, or else a new one; and whether the units are all those of the
+// GPU's queues. Or the text of the error. With the lock held.
+const char *KernelQueue(
+    const Gpu &gpu, ol_queue_handle_t &queue, bool &allUnits) {
+  GpuPlaces &places{gpuPlaces[gpu.number]};
+  const char *error{nullptr};
+  int percent{UnitsPercent(places, error)};
+  if (!percent) {
+    return error;
+  }
+  UnitMask units{places.units};
+  KeepShare(units, percent);
+  allUnits = UnitCount(units) == places.usable;
+  if (!places.queue ||
+      std::memcmp(units.words, places.queueUnits.words, sizeof units.words)) {
+    ol_queue_handle_t made;
+    if (ol_result_t result{olCreateQueueWithComputeUnitMask(
+            gpu.context, gpu.device, units.words, kUnitMaskWords, &made)}) {
+      return Error("could not make a queue for GPU %s%lld's processes: "
+                   "%s%s%s",
+          "", gpu.number, Details(result), "", "");
+    }
+    // The old queue goes now if no kernel that has not been freed ran on
+    // it, or else when the reaper frees its last.
+    if (places.queue && !QueueUsed(places.queue)) {
+      DestroyQueue(places.queue);
+    }
+    places.queue = made;
+    places.queueUnits = units;
+  }
+  queue = places.queue;
   return nullptr;
 }
 
@@ -464,6 +567,11 @@ std::uint64_t ProcessStackBytes(const char *&error) {
 // lets go while it waits for the teams.
 const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   GpuPlaces &gpuPlace{gpuPlaces[gpu.number]};
+  ol_queue_handle_t queue;
+  bool allUnits{false};
+  if (const char *error{KernelQueue(gpu, queue, allUnits)}) {
+    return error;
+  }
   ol_symbol_handle_t kernel;
   if (olGetSymbol(image.program, "merk_place", kOlSymbolKindKernel, &kernel)) {
     return Error("the module %s's image for GPU %lld has no kernel "
@@ -474,7 +582,7 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   std::uint32_t teams{0};
   std::uint32_t lanes{0};
   if (ol_result_t result{olGetKernelMaxCooperativeGroupCountOnQueue(
-          gpuPlace.queue, kernel, &size, &teams)}) {
+          queue, kernel, &size, &teams)}) {
     return Error("could not count the teams of the module %s's processes "
                  "that GPU %lld holds at once: %s%s%s",
         image.module, gpu.number, Details(result), "", "");
@@ -508,7 +616,7 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   auto *owners{
       static_cast<std::uint64_t *>(Malloc(slots * sizeof(std::uint64_t)))};
   std::memset(static_cast<void *>(owners), 0, slots * sizeof(std::uint64_t));
-  *place = {image.module, gpu.number, table, processes, owners,
+  *place = {image.module, gpu.number, queue, allUnits, table, processes, owners,
       kPlaceTeamThreads / lanes, 0, false, places};
   size.numGroups.x = teams;
   bool cooperative{true};
@@ -527,8 +635,8 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   void *argument{table};
   void *arguments[]{&argument};
   std::size_t sizes[]{sizeof argument};
-  if (ol_result_t result{olLaunchKernel(gpuPlace.queue, gpu.device, kernel,
-          &size, properties, 1, arguments, sizes)}) {
+  if (ol_result_t result{olLaunchKernel(
+          queue, gpu.device, kernel, &size, properties, 1, arguments, sizes)}) {
     DeviceFreeHost(gpu.number, table);
     std::free(processes);
     std::free(owners);
@@ -537,8 +645,7 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
                  "%lld: %s%s%s",
         image.module, gpu.number, Details(result), "", "");
   }
-  if (ol_result_t queued{
-          olLaunchHostFunction(gpuPlace.queue, PlaceDone, place)}) {
+  if (ol_result_t queued{olLaunchHostFunction(queue, PlaceDone, place)}) {
     std::fflush(stdout);
     std::fprintf(stderr,
         "Mercury runtime: could not follow a GPU processes' kernel: %s\n",
@@ -731,6 +838,73 @@ void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
 
 // How many GPUs this node has for processes (process.gpus).
 extern "C" std::int64_t merk_gpu_count(void) { return GpuCount(); }
+
+// process.set_gpu_units: the percentage of the GPU's units, those its queues
+// may use, that its next processes' kernels take, rounded up to a pair of
+// units. It changes only between kernels: while the GPU's kernel runs
+// processes, it is the text of the error.
+extern "C" const char *merk_gpu_set_units(
+    std::int64_t number, std::int64_t percent) {
+  if (number < 0 || number >= GpuCount()) {
+    char *text{static_cast<char *>(Malloc(128))};
+    std::snprintf(text, 128, "there is no GPU %lld for processes",
+        static_cast<long long>(number));
+    return text;
+  }
+  if (percent < 1 || percent > 100) {
+    char *text{static_cast<char *>(Malloc(128))};
+    std::snprintf(text, 128, "%lld is not a percentage from 1 to 100",
+        static_cast<long long>(percent));
+    return text;
+  }
+  pthread_mutex_lock(&lock);
+  GpuPlaces &places{gpuPlaces[number]};
+  while (places.launching) {
+    pthread_cond_wait(&launchedCondition, &lock);
+  }
+  if (places.current && !places.current->ending) {
+    char *text{static_cast<char *>(Malloc(256))};
+    std::snprintf(text, 256,
+        "GPU %lld runs processes of the module %s: the units of its "
+        "processes' kernels change between kernels, once its processes have "
+        "all ended",
+        static_cast<long long>(number), places.current->module);
+    pthread_mutex_unlock(&lock);
+    return text;
+  }
+  places.percent = static_cast<int>(percent);
+  pthread_mutex_unlock(&lock);
+  return nullptr;
+}
+
+// Before a target region on the device, -1 for OpenMP's default: one on a
+// GPU whose processes' kernel holds every unit that its queues may use would
+// never start, as the kernel holds every team slot of its units until its
+// processes end, so it is a software error.
+extern "C" void merk_check_region_units(std::int64_t device) {
+  if (device < 0 && omp_get_default_device) {
+    device = omp_get_default_device();
+  }
+  if (device < 0 || device >= kMostGpus) {
+    return;
+  }
+  pthread_mutex_lock(&lock);
+  const GpuPlaces &places{gpuPlaces[device]};
+  bool held{
+      places.current && !places.current->ending && places.current->allUnits};
+  pthread_mutex_unlock(&lock);
+  if (!held) {
+    return;
+  }
+  char text[512];
+  std::snprintf(text, sizeof text,
+      "Software Error: target region: the GPU processes' kernel on GPU %lld "
+      "holds every compute unit that its queues may use, so the region would "
+      "never start: process.set_gpu_units, between kernels, or "
+      "MERK_GPU_PROCESS_UNITS leaves it a share of them",
+      static_cast<long long>(device));
+  merk_uncaught_exception(text);
+}
 
 // Spawns a process of the module's kind on the GPU, with the words of its
 // arguments, an array (array.cpp: its size, then its elements), and a new

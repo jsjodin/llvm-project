@@ -1,6 +1,7 @@
 % Target regions that run while a GPU process waits, for
 % omp-target-region-arena-gpu.test: no moment comes when nothing runs on the
-% device, so each region's cells must go when it ends.
+% device, so each region's cells must go when it ends. The process's kernel
+% takes half of the GPU's units, so that the regions have the rest.
 :- module region_arena_beside_process.
 :- interface.
 :- import_module io.
@@ -48,6 +49,7 @@ short_lists(N, Sum) :-
 
 main(!IO) :-
     new_mailbox(Me, !IO),
+    set_gpu_units(gpu(0), 50, !IO),
     spawn(gpu(0), echo(Me), Echo, !IO),
     rounds(40, 0, Total),
     io.write_int(Total, !IO), io.nl(!IO),

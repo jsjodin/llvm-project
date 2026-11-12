@@ -14,10 +14,12 @@ RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags
 RUN: %gpu-env %t.recursive | FileCheck %s --check-prefix=FIB
 FIB: 6765
 
-With the plugin's own size, 16 KiB, the GPU does not hold the scratch of
-every team, and those it holds back would never start. The spawn that
-launches the kernel waits for them, and reports it.
-RUN: not %gpu-env MERK_GPU_PROCESS_STACK_BYTES=16384 MERK_TEAMS_STALL_MILLISECONDS=1000 %t.recursive 2>&1 | FileCheck %s --check-prefix=HELD
+With the plugin's own size, 16 KiB, on one pair of units (1%), the GPU does
+not hold the scratch of every team, and those it holds back would never
+start. The spawn that launches the kernel waits for them, and reports it.
+On 20 or 40 units this kernel's teams all started (2026-11-11), why is not
+known.
+RUN: not %gpu-env MERK_GPU_PROCESS_UNITS=1 MERK_GPU_PROCESS_STACK_BYTES=16384 MERK_TEAMS_STALL_MILLISECONDS=1000 %t.recursive 2>&1 | FileCheck %s --check-prefix=HELD
 HELD: Software Error: process.spawn: GPU 0 started {{[0-9]+}} of the {{[0-9]+}} teams of the module process_teams_recursive's processes' kernel, which must all run at once, and no other within 1000 ms (MERK_TEAMS_STALL_MILLISECONDS): the GPU may not hold their scratch for all of them, as for a kernel with a dynamic stack
 
 RUN: not %gpu-env MERK_GPU_PROCESS_STACK_BYTES=1k %t.recursive 2>&1 | FileCheck %s --check-prefix=BAD

@@ -28,6 +28,7 @@ main(!IO) :-
     number(D),
     One = 1,
     % MERK: %[[ZERO:.*]] = arith.constant 0 : i64
+    % MERK: merk.foreign_call @merk_check_region_units(%[[ZERO]]) : (i64) -> ()
     % MERK: omp.target {{.*}}device(%[[ZERO]] : i64)
     %$omp target device(0)
     Two = One + 1,
