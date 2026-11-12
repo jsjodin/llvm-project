@@ -13,3 +13,7 @@ NARROW: Game of Life, C (uint8_t)
 NARROW-NEXT: Grid: 300 x 300 cells, 1 bytes a cell
 CHECK: Population: 9339
 CHECK-NEXT: Checksum: 429141631
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIFE_SIZE=300 LIFE_STEPS=25 LIFE_SOUP=100 %t8 | FileCheck %s --check-prefix=SOUP
+SOUP: Soup: 100 x 100 cells at the centre
+SOUP-NEXT: Population: 1133
+SOUP-NEXT: Checksum: 51448204
