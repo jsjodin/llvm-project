@@ -1,6 +1,7 @@
 Game of Life run by a GPU process across its worker teams, on a small grid
 (benchmarks/life/life-process.m): the cells are life.m's (life-gpu.test),
-with the live cells counted by a loop of two reductions.
+with the live cells counted by a loop of two reductions; and with cells of
+one byte (life-process8.m), which must agree.
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/life/life-process.m -o %t
@@ -16,3 +17,13 @@ CHECK-NEXT: Steps: 25
 CHECK-NEXT: Population: 9339
 CHECK-NEXT: Checksum: 429141631
 CHECK-NEXT: Gcells/sec    Min (sec)   Max         Average
+
+The cells of one byte, uint8 (runtime/array.h).
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/life/life-process8.m -o %t.u8
+RUN: %gpu-env LIFE_SIZE=300 LIFE_STEPS=25 %t.u8 | FileCheck %s --check-prefix=U8
+U8: Game of Life, Mercury, GPU process, uint8
+U8-NEXT: Grid: 300 x 300 cells, 1 byte a cell
+U8-NEXT: Steps: 25
+U8-NEXT: Population: 9339
+U8-NEXT: Checksum: 429141631
+U8-NEXT: Gcells/sec    Min (sec)   Max         Average

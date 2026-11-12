@@ -4365,7 +4365,9 @@ beat, as a decomposition fixed in advance computes every tile.
 - (s2) Narrow array elements. Tests for each element type, on the host and
   the GPU, sent and mapped. Done 2026-11-12 ((s2) narrow array elements,
   below). Then dense Life in a GPU process with `uint8` cells, measured
-  against `life.c`'s `uint8_t`.
+  against `life.c`'s `uint8_t`: done 2026-11-12, `life-process8.m`, 37.3
+  Gcells/s against C's 31.8 at 4096², 32.8 against 23.6 at 1024² (design
+  document, Measurements).
 - (s3) Flat records' steps 1 to 3, after the user's two decisions.
 - (s4) The `LIFE_SOUP` setting in `life.m` and `life.c`, for the dense check
   and the bar.

@@ -4288,6 +4288,26 @@ The GPU process is 20% faster than C with cells as wide as Mercury's at
 narrow cells are 29% faster at 4096², where the grid is bandwidth's: they
 wait for flat records' narrow fields (docs/INPROGRESS.md).
 
+**Game of Life in a GPU process with `uint8` cells,** 2026-11-12, on
+7e1a961fceb6 with `benchmarks/life/life-process8.m`, not committed: the GPU
+process above with arrays of one-byte elements (Lowering and code
+generation, "Arrays"), measured as above, all five programs in turn; every
+build gave the same cells. The earlier programs' numbers are this run's.
+
+| Program | 4096², 100 steps, 5 rounds | Average step | 1024², 200 steps, 3 rounds | Average step |
+| --- | ---: | ---: | ---: | ---: |
+| Mercury, target regions | 21.8 Gcells/s | 0.814 ms | 28.3 Gcells/s | 39 µs |
+| Mercury, GPU process | 24.7 Gcells/s | 0.798 ms | 30.0 Gcells/s | 38 µs |
+| Mercury, GPU process, `uint8` cells | 37.3 Gcells/s | 0.466 ms | 32.8 Gcells/s | 33 µs |
+| C, `int64_t` cells | 20.6 Gcells/s | 0.834 ms | 23.7 Gcells/s | 47 µs |
+| C, `uint8_t` cells | 31.8 Gcells/s | 0.542 ms | 23.6 Gcells/s | 48 µs |
+
+With cells of C's width, the GPU process is 17% faster than C's `uint8_t`
+at 4096², where a step is bandwidth's and narrow cells gain 51% over
+Mercury's 8-byte ones, and 39% faster at 1024², where a step is short and
+the GPU process starts no kernel. The device's code loads and stores single
+bytes, and LLVM merges a row's neighbours' loads.
+
 ### Message latency
 
 The round trip of a one-word message, in microseconds: 20000 rounds, after 100

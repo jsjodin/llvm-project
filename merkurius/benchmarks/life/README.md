@@ -28,8 +28,7 @@ its state, and any other dies. The two arrays swap after each step, for
 - **The cells** are Mercury's `int`, 8 bytes. The C program's cell type is
   `CELL`: `int64_t` by default, to compare like with like, and `uint8_t`
   (`-DCELL=uint8_t`) as C would usually have it, which shows what Mercury's
-  wider cells cost. Narrow fields are planned with flat records
-  (`docs/INPROGRESS.md`).
+  wider cells cost. The GPU process has both (In a GPU process, below).
 - **The output** is the final population and a checksum, the sum of the live
   cells' indices, which every build must agree on, as Life is exact; and each
   step's time but the first, which includes starting the kernels, as min,
@@ -83,17 +82,20 @@ target region each (`docs/INPROGRESS.md`, GPU processes that run loops).
 The process makes both grids in its arena, times each step by the device's
 clock, counts the live cells with a loop of two reductions, and sends the
 times and the count to the host, which prints them as `life.m` does.
-`compare-c.sh` runs it as a fourth program.
+`life-process8.m` is the same with cells of one byte, `uint8`, as C's
+`uint8_t` (arrays of narrow elements, `runtime/array.h`). `compare-c.sh`
+runs them as the fourth and fifth programs.
 
 2026-11-12, gfx1030, on compute units 0-39 (`LIBOMPTARGET_AMDGPU_CU_MASK`),
 the median over the rounds of each program's fastest step:
 
 | Program | 4096², 100 steps | 1024², 200 steps |
 | --- | ---: | ---: |
-| Mercury, target regions | 21.7 Gcells/s | 27.3 Gcells/s |
-| Mercury, GPU process | 24.6 Gcells/s | 29.8 Gcells/s |
-| C, `int64_t` cells | 20.5 Gcells/s | 23.7 Gcells/s |
-| C, `uint8_t` cells | 31.7 Gcells/s | 23.3 Gcells/s |
+| Mercury, target regions | 21.8 Gcells/s | 28.3 Gcells/s |
+| Mercury, GPU process | 24.7 Gcells/s | 30.0 Gcells/s |
+| Mercury, GPU process, `uint8` cells | 37.3 Gcells/s | 32.8 Gcells/s |
+| C, `int64_t` cells | 20.6 Gcells/s | 23.7 Gcells/s |
+| C, `uint8_t` cells | 31.8 Gcells/s | 23.6 Gcells/s |
 
 A step of the GPU process starts no kernel, which counts most where steps
 are short. The others time their steps from the host, a target region's
@@ -106,5 +108,5 @@ threads, at -O0 and -O2; `life-gpu.test` on the GPU, checking that the
 kernels are SPMD and that no step copies the arrays; `life-c-gpu.test` the C
 program with both cell types; `life-two.test` and `life-two-gpu.test` the two
 nodes, with even and odd splits; `life-process-gpu.test` the GPU process,
-in parallel and on the process's own lane. All check the population and checksum, which
+in parallel and on the process's own lane, and with `uint8` cells. All check the population and checksum, which
 come from an independent program in Python.
