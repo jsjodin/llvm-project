@@ -836,8 +836,8 @@ void Work(PlaceSlot *slot, uint32_t inTeam) {
   placeControls[inTeam] = nullptr;
   int64_t threads{static_cast<int64_t>(__gpu_num_threads_x())};
   int64_t stride{static_cast<int64_t>(workers) * threads};
-  int64_t start{static_cast<int64_t>(worker) * threads +
-      static_cast<int64_t>(__gpu_thread_id_x())};
+  int64_t base{static_cast<int64_t>(worker) * threads};
+  int64_t thread{static_cast<int64_t>(__gpu_thread_id_x())};
   for (;;) {
     WorkerArrive(control);
     if (__scoped_atomic_load_n(
@@ -849,8 +849,18 @@ void Work(PlaceSlot *slot, uint32_t inTeam) {
     int64_t step{control->step};
     int64_t count{control->count};
     auto values{reinterpret_cast<uint64_t>(control->values)};
-    for (int64_t i{start}; i < count; i += stride) {
-      merk_process_loop(loop, first + i * step, values);
+    // In rounds, the team's threads `threads` consecutive iterations, the
+    // teams `stride` apart, with a barrier across the team after each round,
+    // so that its waves stay together, as the device runtime's loops do for
+    // stencils, whose waves read the same rows (design document, A barrier
+    // after each round). Every thread goes round as often as the team.
+    int64_t rounds{count > base ? (count - base + stride - 1) / stride : 0};
+    for (int64_t round{0}; round < rounds; ++round) {
+      int64_t i{base + round * stride + thread};
+      if (i < count) {
+        merk_process_loop(loop, first + i * step, values);
+      }
+      __gpu_sync_threads();
     }
     WorkerArrive(control);
   }
