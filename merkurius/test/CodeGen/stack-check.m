@@ -6,6 +6,16 @@
 % error, after what it wrote.
 %
 % RUN: merkc -fc1 -emit-llvm -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=LLVM
+% The checks come after the optimizer, and a check may yield to other
+% processes, so what it inferred of the checked procedures and their callers,
+% that they touch no memory, do not synchronize and return, is dropped, but
+% not from intrinsics, which are nocallback.
+% RUN: merkc -fc1 -emit-llvm -O2 -triple x86_64-unknown-linux-gnu %s -o %t.ll
+% RUN: grep "^attributes" %t.ll | grep -v nocallback | FileCheck %s --check-prefix=INFERRED
+% INFERRED: attributes
+% INFERRED-NOT: memory(
+% INFERRED-NOT: nosync
+% INFERRED-NOT: willreturn
 % RUN: merkc -O0 %s -o %t.0 && not %t.0 2> %t.0.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: FileCheck %s --check-prefix=ERROR --match-full-lines --strict-whitespace < %t.0.err
 % RUN: merkc -O2 %s -o %t.2 && not %t.2 2> %t.2.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
