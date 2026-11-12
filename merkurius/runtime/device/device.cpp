@@ -755,12 +755,12 @@ extern "C" void merk_process_loop(uint64_t loop, int64_t start, int64_t rounds,
 
 // Sets the partial results at the address to the identities of the loop's
 // reductions.
-extern "C" void merk_process_loop_start(uint64_t loop, uint64_t partials);
+extern "C" void merk_process_loop_start(uint64_t loop, uint64_t *partials);
 
 // Combines the partial results at `from` into those at `into`, each by its
 // reduction's operator.
 extern "C" void merk_process_loop_reduce(
-    uint64_t loop, uint64_t into, uint64_t from);
+    uint64_t loop, uint64_t *into, const uint64_t *from);
 
 namespace {
 
@@ -862,38 +862,50 @@ uint64_t LoadSlotWord(uint64_t *word) {
   ProcessEnded(table, wave);
 }
 
-// The partial results of a loop's reductions of the team's threads, at
-// `partials`, combined into those of its first thread: in each wave, by
-// exchanging them across halves of the wave, then the waves', by the first
-// thread, through the team's local memory.
-void ReduceAcrossTeam(
-    uint64_t loop, uint64_t reductions, uint64_t *partials, uint32_t inTeam) {
+// The partial results of a loop's reductions of the wave's lanes, at
+// `partials`, combined into those of every lane, by exchanging them across
+// halves of the wave.
+void ReduceAcrossWave(uint64_t loop, uint64_t *partials) {
   uint64_t mask{__gpu_lane_mask()};
   uint32_t lanes{__gpu_num_lanes()};
   uint32_t lane{__gpu_lane_id()};
-  auto partialsAt{reinterpret_cast<uint64_t>(partials)};
   uint64_t other[kProcessLoopReductions];
-  auto otherAt{reinterpret_cast<uint64_t>(other)};
   for (uint32_t offset{lanes / 2}; offset > 0; offset /= 2) {
-    for (uint64_t r{0}; r < reductions; ++r) {
+    for (uint32_t r{0}; r < kProcessLoopReductions; ++r) {
       other[r] = __gpu_shuffle_idx_u64(mask, lane ^ offset, partials[r], lanes);
     }
-    merk_process_loop_reduce(loop, partialsAt, otherAt);
+    merk_process_loop_reduce(loop, partials, other);
   }
+}
+
+static_assert(kMostPlaceWaves <= 32, "a team's waves fit in a wave's lanes");
+
+// The partial results of a loop's reductions of the team's threads, at
+// `partials`, combined into those of its first thread: in each wave, then
+// the waves', which the first wave's lanes load from the team's local memory,
+// one wave's a lane, the rest of its lanes the reductions' identities, and
+// combine in the same way. The first thread combining them one after another
+// took 5 µs a loop of 160 teams (design document, Measurements, Memory
+// bandwidth).
+void ReduceAcrossTeam(uint64_t loop, uint64_t *partials, uint32_t inTeam) {
+  ReduceAcrossWave(loop, partials);
+  uint32_t lanes{__gpu_num_lanes()};
+  uint32_t lane{__gpu_lane_id()};
   if (lane == 0) {
-    for (uint64_t r{0}; r < reductions; ++r) {
+    for (uint32_t r{0}; r < kProcessLoopReductions; ++r) {
       wavePartials[inTeam][r] = partials[r];
     }
   }
   __gpu_sync_threads();
-  if (__gpu_thread_id_x() == 0) {
-    uint32_t waves{__gpu_num_threads_x() / lanes};
-    for (uint32_t wave{1}; wave < waves; ++wave) {
-      for (uint64_t r{0}; r < reductions; ++r) {
-        other[r] = wavePartials[wave][r];
+  if (__gpu_thread_id_x() < lanes) {
+    if (lane < __gpu_num_threads_x() / lanes) {
+      for (uint32_t r{0}; r < kProcessLoopReductions; ++r) {
+        partials[r] = wavePartials[lane][r];
       }
-      merk_process_loop_reduce(loop, partialsAt, otherAt);
+    } else {
+      merk_process_loop_start(loop, partials);
     }
+    ReduceAcrossWave(loop, partials);
   }
 }
 
@@ -905,11 +917,17 @@ void ReduceAcrossTeam(
 // GPU of 160 teams took 26 µs a loop (design document, Measurements, Memory
 // bandwidth). The process reads them after the barrier that ends the loop.
 [[gnu::noinline]] void CombineTeamPartials(ProcessControl *control,
-    uint64_t loop, uint64_t reductions, uint64_t *partials, uint64_t worker,
+    uint64_t loop, const uint64_t *threadPartials, uint64_t worker,
     uint64_t workers, uint32_t inTeam) {
-  ReduceAcrossTeam(loop, reductions, partials, inTeam);
+  // A copy of all kProcessLoopReductions words, so that the indices are
+  // constants and the copy stays in registers.
+  uint64_t partials[kProcessLoopReductions];
+  for (uint32_t r{0}; r < kProcessLoopReductions; ++r) {
+    partials[r] = threadPartials[r];
+  }
+  ReduceAcrossTeam(loop, partials, inTeam);
   if (__gpu_thread_id_x() == 0) {
-    for (uint64_t r{0}; r < reductions; ++r) {
+    for (uint32_t r{0}; r < kProcessLoopReductions; ++r) {
       control->partials[worker * kProcessLoopReductions + r] = partials[r];
     }
     lastToStore = __scoped_atomic_fetch_add(&control->stored, 1,
@@ -920,18 +938,15 @@ void ReduceAcrossTeam(
     return;
   }
   __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE);
-  auto partialsAt{reinterpret_cast<uint64_t>(partials)};
-  merk_process_loop_start(loop, partialsAt);
+  merk_process_loop_start(loop, partials);
   uint64_t threads{__gpu_num_threads_x()};
   for (uint64_t team{__gpu_thread_id_x()}; team < workers; team += threads) {
-    merk_process_loop_reduce(loop, partialsAt,
-        reinterpret_cast<uint64_t>(
-            control->partials + team * kProcessLoopReductions));
-  }
-  ReduceAcrossTeam(loop, reductions, partials, inTeam);
-  if (__gpu_thread_id_x() == 0) {
     merk_process_loop_reduce(
-        loop, reinterpret_cast<uint64_t>(control->results), partialsAt);
+        loop, partials, control->partials + team * kProcessLoopReductions);
+  }
+  ReduceAcrossTeam(loop, partials, inTeam);
+  if (__gpu_thread_id_x() == 0) {
+    merk_process_loop_reduce(loop, control->results, partials);
   }
 }
 
@@ -965,7 +980,7 @@ void ReduceAcrossTeam(
     uint64_t partials[kProcessLoopReductions];
     auto partialsAt{reinterpret_cast<uint64_t>(partials)};
     if (reductions) {
-      merk_process_loop_start(loop, partialsAt);
+      merk_process_loop_start(loop, partials);
     }
     // In rounds, the team's threads `threads` consecutive iterations, the
     // teams `stride` apart, with a barrier across the team after each round,
@@ -979,8 +994,7 @@ void ReduceAcrossTeam(
     merk_process_loop(loop, base + thread, rounds, stride, count, first, step,
         values, partialsAt);
     if (reductions) {
-      CombineTeamPartials(
-          control, loop, reductions, partials, worker, workers, inTeam);
+      CombineTeamPartials(control, loop, partials, worker, workers, inTeam);
     }
     WorkerArrive(control);
   }

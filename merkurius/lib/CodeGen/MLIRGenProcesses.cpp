@@ -463,10 +463,11 @@ void MerkGenerator::GenerateProcessLoops() {
     llvm::StringRef name{which == 0 ? "merk_process_loop"
             : which == 1            ? "merk_process_loop_start"
                                     : "merk_process_loop_reduce"};
-    llvm::SmallVector<mlir::Type> parameters(which == 1 ? 2
-            : which == 2                                ? 3
-                                                        : 9,
-        i64);
+    // The partial results come as pointers, not words, so that, inlined
+    // into the runtime's combine, they can stay in registers.
+    llvm::SmallVector<mlir::Type> parameters{i64};
+    parameters.append(which == 0 ? 8 : which,
+        which == 0 ? mlir::Type{i64} : mlir::Type{generic});
     auto proc{merk::ProcOp::create(builder_, loc, name,
         builder_.getFunctionType(parameters, {}), merk::Determinism::Det)};
     proc->setAttr(kProcessRootAttrName, builder_.getUnitAttr());
@@ -490,18 +491,15 @@ void MerkGenerator::GenerateProcessLoops() {
       if (which == 0) {
         ProcessLoopShare(loop, entry, generic, loc);
       } else if (which == 1) {
-        mlir::Value partials{mlir::LLVM::IntToPtrOp::create(
-            builder_, loc, generic, entry->getArgument(1))};
+        mlir::Value partials{entry->getArgument(1)};
         for (auto [index, reduction] : llvm::enumerate(loop.reductions)) {
           StoreWord(builder_, loc, partials, static_cast<std::int32_t>(index),
               WordBits(builder_, loc,
                   ReductionIdentity(reduction.op, reduction.type, loc)));
         }
       } else {
-        mlir::Value into{mlir::LLVM::IntToPtrOp::create(
-            builder_, loc, generic, entry->getArgument(1))};
-        mlir::Value from{mlir::LLVM::IntToPtrOp::create(
-            builder_, loc, generic, entry->getArgument(2))};
+        mlir::Value into{entry->getArgument(1)};
+        mlir::Value from{entry->getArgument(2)};
         for (auto [index, reduction] : llvm::enumerate(loop.reductions)) {
           auto at{static_cast<std::int32_t>(index)};
           mlir::Value a{FromWordBits(builder_, loc, reduction.type,
