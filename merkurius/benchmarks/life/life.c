@@ -34,7 +34,8 @@ static double now(void) {
 }
 
 // Whether the cell of index k, counting the grid's cells by rows from 0,
-// starts alive: about 30% do, by a multiplicative hash of k.
+// starts alive, if it is in the soup: about 30% do, by a multiplicative hash
+// of k.
 #pragma omp declare target
 static inline cell alive(int64_t k) {
   int64_t h = (k * 2654435761) & 4294967295;
@@ -42,12 +43,19 @@ static inline cell alive(int64_t k) {
 }
 #pragma omp end declare target
 
-KERNEL void init(int64_t n, cell *a) {
+// The cells alive at the start, in a square soup of side `soup` at the
+// grid's centre, its rows and columns from..from + soup - 1.
+KERNEL void init(int64_t n, int64_t soup, cell *a) {
   int64_t w = n + 2;
+  int64_t from = (n - soup) / 2;
 #pragma omp target teams distribute parallel for map(tofrom : a[0 : w * w])
   for (int64_t k = 0; k < n * n; k++) {
-    int64_t c = (k / n + 1) * w + k % n + 1;
-    a[c] = alive(k);
+    int64_t row = k / n, column = k % n;
+    int64_t c = (row + 1) * w + column + 1;
+    a[c] = row >= from && row < from + soup && column >= from &&
+            column < from + soup
+        ? alive(k)
+        : 0;
   }
 }
 
@@ -74,14 +82,18 @@ KERNEL void step(int64_t n, const cell *a, cell *b) {
 int main(void) {
   int64_t n = setting("LIFE_SIZE", 4096);
   long steps = setting("LIFE_STEPS", 100);
-  if (n < 1 || steps < 2) {
-    printf("LIFE_SIZE must be at least 1 and LIFE_STEPS at least 2.\n");
+  int64_t soup = setting("LIFE_SOUP", n);
+  if (n < 1 || steps < 2 || soup < 0 || soup > n) {
+    printf("LIFE_SIZE must be at least 1, LIFE_STEPS at least 2, and "
+           "LIFE_SOUP from 0 to LIFE_SIZE.\n");
     return 1;
   }
   printf("Game of Life, C (" STRINGIFY(CELL) ")\n");
   printf("Grid: %ld x %ld cells, %ld bytes a cell\n", (long)n, (long)n,
          (long)sizeof(cell));
   printf("Steps: %ld\n", steps);
+  if (soup < n)
+    printf("Soup: %ld x %ld cells at the centre\n", (long)soup, (long)soup);
   int64_t w = n + 2;
   cell *a = calloc(w * w, sizeof(cell));
   cell *b = calloc(w * w, sizeof(cell));
@@ -90,7 +102,7 @@ int main(void) {
     printf("out of memory\n");
     return 1;
   }
-  init(n, a);
+  init(n, soup, a);
   // The arrays stay on the device for the steps; each step's own maps find
   // them there and copy nothing.
   cell *final = a;

@@ -4407,6 +4407,13 @@ stencils), and a step moves nothing but cells.
   The dead tile stands in for a missing neighbour, so the step never
   branches on one. How a fixed size is written is open (Features to build,
   flat records); `fixed(int32, n8)`, as the user decided 2026-11-12.
+
+  *As built, separate arrays* (the user, 2026-11-12, deferring flat
+  records' 2b and 3): one array for each field, `Capacity` long, and the
+  neighbours in one `int32` array of `Capacity * 8`, tile `I`'s at
+  `I * 8 + D`. A team reads its tile's fields once a step, against the
+  4096 cells it steps, so the layout costs nothing measurable; an array of
+  records waits for `fixed` fields, which the neighbours need.
 - *The active tiles:* their pool indices packed, with their number, and a
   free list of pool indices.
 
@@ -4512,9 +4519,15 @@ beat, as a decomposition fixed in advance computes every tile.
   Gcells/s against C's 31.8 at 4096², 32.8 against 23.6 at 1024² (design
   document, Measurements).
 - (s3) Flat records' steps 1 to 3 (decided 2026-11-12: (a), and
-  `fixed(T, n8)`).
+  `fixed(T, n8)`). Steps 1 and 2a done 2026-11-12. The user, 2026-11-12:
+  defer 2b and start the tiled Life, since the tiles' records can be
+  separate arrays (below); 2b and 3 wait for a program that needs them.
 - (s4) The `LIFE_SOUP` setting in `life.m` and `life.c`, for the dense check
-  and the bar.
+  and the bar. Done 2026-11-12: a soup of side `LIFE_SOUP`, the whole grid
+  by default, from `(LIFE_SIZE - LIFE_SOUP) / 2` in rows and columns, each
+  cell alive by the hash of its index in the grid; both programs, and an
+  independent one in Python, agree (`Benchmarks/life.test`, and the GPU
+  runs in `life-gpu.test` and `life-c-gpu.test`).
 - (s5) `life-sparse.m`: the world, tiles starting and ending, checked
   against the dense programs.
 - (s6) `life-sparse.c`, the C reference. Measurements against it and

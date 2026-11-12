@@ -1,12 +1,16 @@
 Game of Life of benchmarks/life, the demo's reference in Mercury, on small
 grids, so that it keeps building and giving the right cells: sequentially,
 and on the host's threads, where OpenMP runs its target regions when there
-is no device, each at -O0 and -O2. The populations and checksums are from
-an independent program in Python; Life is exact, so every build gives them.
+is no device, each at -O0 and -O2, the whole grid alive at the start or a
+soup at its centre (LIFE_SOUP), as the sparse program starts. The
+populations and checksums are from an independent program in Python; Life
+is exact, so every build gives them.
 
 RUN: merkc -O0 -fdo-loops %S/../../benchmarks/life/life.m -o %t.sequential0
 RUN: env LIFE_SIZE=64 LIFE_STEPS=10 %t.sequential0 | FileCheck %s --check-prefix=SMALL
 RUN: env LIFE_SIZE=300 LIFE_STEPS=25 %t.sequential0 | FileCheck %s --check-prefix=LARGER
+RUN: env LIFE_SIZE=301 LIFE_STEPS=40 LIFE_SOUP=64 %t.sequential0 | FileCheck %s --check-prefix=SOUP
+RUN: env LIFE_SIZE=10 LIFE_SOUP=11 not %t.sequential0 | FileCheck %s --check-prefix=USAGE
 RUN: merkc -O2 -fdo-loops %S/../../benchmarks/life/life.m -o %t.sequential2
 RUN: env LIFE_SIZE=64 LIFE_STEPS=10 %t.sequential2 | FileCheck %s --check-prefix=SMALL
 RUN: env LIFE_SIZE=300 LIFE_STEPS=25 %t.sequential2 | FileCheck %s --check-prefix=LARGER
@@ -15,6 +19,7 @@ RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_SIZE=300 LIFE_STEPS=25 %t.host0 | FileCh
 RUN: merkc -O2 -fopenmp -fdo-loops %libomp-flags %S/../../benchmarks/life/life.m -o %t.host2
 RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_SIZE=64 LIFE_STEPS=10 %t.host2 | FileCheck %s --check-prefix=SMALL
 RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_SIZE=300 LIFE_STEPS=25 %t.host2 | FileCheck %s --check-prefix=LARGER
+RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_SIZE=300 LIFE_STEPS=25 LIFE_SOUP=100 %t.host2 | FileCheck %s --check-prefix=SOUP100
 REQUIRES: libomp
 
 SMALL: Game of Life, Mercury
@@ -26,3 +31,14 @@ SMALL-NEXT: Gcells/sec    Min (sec)   Max         Average
 
 LARGER: Population: 9339
 LARGER-NEXT: Checksum: 429141631
+
+SOUP: Steps: 40
+SOUP-NEXT: Soup: 64 x 64 cells at the centre
+SOUP-NEXT: Population: 608
+SOUP-NEXT: Checksum: 28223380
+
+SOUP100: Soup: 100 x 100 cells at the centre
+SOUP100-NEXT: Population: 1133
+SOUP100-NEXT: Checksum: 51448204
+
+USAGE: LIFE_SIZE must be at least 1, LIFE_STEPS at least 2, and LIFE_SOUP from 0 to LIFE_SIZE.
