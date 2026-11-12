@@ -3635,6 +3635,76 @@ so the GPU faulted.
   a product, a maximum of floats and a loop with no iterations, of one to a
   million iterations.
 
+**(s1) done 2026-11-12: loops across a team's threads, in the bodies of
+distribute loops,** for the demo's sparse tiles (A demo, step 3), whose
+cells a team steps.
+- *The language:* `%$omp distribute` before a loop in a GPU process's code
+  runs its iterations across the process's worker teams, a team's first
+  wave running each iteration's body. A loop under `%$omp parallel do` in
+  that body, or in a predicate of the module that it calls, runs across the
+  team's threads, with reductions. As OpenMP's `distribute`, the outer loop
+  takes no reduction clause; its body updates arrays in place, each
+  iteration its own elements. On the host, as in a kind spawned there,
+  `distribute` is a parallel do, and a `parallel do` in its body a nested
+  one, which OpenMP runs on one thread unless nesting is enabled.
+- *The checks* (`check-gpu-code.cpp`): each body is followed in one of four
+  contexts: a region's, the process's lane, a distribute loop's body, and a
+  loop's body across threads. Errors, each naming its case:
+  - a parallel do on the process's lane;
+  - a loop under distribute or distribute parallel do in the body of
+    another loop;
+  - a parallel do in the body of a loop across threads.
+
+  The runtime checks the same, and fails with a message rather than hang,
+  for code the checker cannot see.
+- *The compile:*
+  - A distribute loop goes to `merk_device_process_distribute`. Its rounds
+    have no barrier, as only a team's first wave runs them.
+  - A team loop's words go into the team's local memory
+    (`merk_device_team_values`, `merk_device_team_results`), and
+    `merk_device_team_loop` runs it.
+  - Team loops' cases are in `merk_team_loop`, apart from
+    `merk_process_loop`'s. One function would make the kernel's calls
+    recurse, from a distribute body through the runtime back into the
+    switch, which makes the kernel's stack dynamic; ROCr's dynamic scratch
+    serializes dispatches.
+  - The compile finds the bodies that distribute loops reach
+    (`CollectTeamBodies`), so that a parallel do elsewhere in the module,
+    in the host's code, stays as it is.
+- *The runtime* (`Distribute`, `TeamShare`):
+  - The first wave of each worker team runs the team's iterations,
+    `workers` apart. All 64 lanes run with the same values, in lockstep, so
+    an update of an element that the body read is one load and one store.
+  - The other waves wait at the team's barrier. At a team loop, the first
+    wave writes the loop into the team's local memory and crosses the
+    barrier. Every thread takes its rounds, with a barrier after each, as in
+    a loop across the process's teams; the reductions are combined across
+    the team's waves (`ReduceAcrossTeam`); and the team crosses a barrier,
+    after which the first wave reads the results. When its iterations end,
+    the first wave says so and crosses once more.
+  - The branch between the first wave and the others is on a value that
+    the compiler knows is the wave's own (`readfirstlane`), so that no wave
+    runs the other's barriers. AMDGPU's backend also keeps the skip of a
+    block with no active lanes around barriers and calls
+    (`SIInstrInfo::hasUnwantedEffectsWhenEXECEmpty`).
+- *Cells made in a distribute loop's body:* the first wave's lanes make one
+  between them, which their first lane bumps (`merk_device_alloc`,
+  `teamMains`). With one each, a team loop filled only the array of the
+  lane whose words won the team's local memory, and a lane reading its own
+  saw it unfilled. The test shows it: a team loop's bound is read from an
+  array that the body made and another team loop filled.
+- *Rejected:*
+  - *OpenMP's generic mode,* one thread of a team running the sequential
+    code while the others wait in a state machine. On AMD a wave crosses a
+    barrier as a whole, so the thread's wave could not join the team loops'
+    barriers while the thread ran apart, and the wave would sit them out.
+  - *Every wave running the body:* waves do not run in lockstep, so two
+    waves' updates of an element that each read race, and both add to it.
+- *Tests:* `process-team-loops.m` (the compile, and runs at the host at -O0
+  and -O2, parallel and sequential) and `process-team-loops-gpu.test`, from
+  one tile to 400, more than the GPU has teams; the errors in
+  `process-loops-errors.m`.
+
 **(d4) measured 2026-11-11: Bandwidth's kernels in a GPU process.**
 `benchmarks/bandwidth/bandwidth-process.m` runs the five kernels across a
 process's teams; the numbers are in the design document, Measurements,
@@ -4222,7 +4292,8 @@ beat, as a decomposition fixed in advance computes every tile.
 *Steps,* each a commit:
 - (s1) `distribute` with `parallel do` inside, in GPU processes, with
   reductions in the inner loop. Tests on the GPU as for the combined
-  loops, sequential builds too.
+  loops, sequential builds too. Done 2026-11-12 (GPU processes that run
+  loops, (s1)).
 - (s2) Narrow array elements. Tests for each element type, on the host and
   the GPU, sent and mapped. Then dense Life in a GPU process with `uint8`
   cells, measured against `life.c`'s `uint8_t`.

@@ -209,9 +209,10 @@ constexpr uint32_t kMostPlaceSleeps{64};
 // A process's control block, in its arena, through which it runs its loops
 // across its worker teams (place.h): the counts of the barrier that the
 // process's wave and its worker teams cross together, how many cross it, the
-// loop that runs, its first counter, its step and its trip count, and the
-// words its body takes; whether the process has ended; and the process's
-// arena, which the workers bump the cells of the loops' bodies from.
+// loop that runs, its first counter, its step and its trip count, whether
+// it is a distribute loop, which the teams' first waves run, and the words
+// its body takes; whether the process has ended; and the process's arena,
+// which the workers bump the cells of the loops' bodies from.
 struct ProcessControl {
   int64_t arrived;
   int64_t rounds;
@@ -220,6 +221,7 @@ struct ProcessControl {
   int64_t first;
   int64_t step;
   int64_t count;
+  uint64_t distribute;
   uint64_t end;
   Arena *arena;
   uint64_t values[kProcessLoopWords];
@@ -247,6 +249,31 @@ struct ProcessControl {
 // Whether the worker team is the last to store its partial results of a
 // loop's reductions, which then combines all the teams'.
 [[clang::loader_uninitialized]] Local<uint32_t> lastToStore;
+
+// In a worker team, the loop under parallel do that the team's first wave,
+// running a distribute loop's body, has the team's threads run
+// (merk_device_team_loop), or that the team's share of the distribute loop
+// has ended; with the words its body takes, and its reductions' values
+// before it, which are their results after it.
+struct TeamLoop {
+  uint64_t loop;
+  int64_t first;
+  int64_t step;
+  int64_t count;
+  uint64_t reductions;
+  uint64_t end;
+};
+[[clang::loader_uninitialized]] Local<TeamLoop> teamLoop;
+[[clang::loader_uninitialized]] Local<uint64_t> teamValues[kProcessLoopWords];
+[[clang::loader_uninitialized]] Local<uint64_t>
+    teamResults[kProcessLoopReductions];
+
+// By the wave's place in the team, whether it runs a distribute loop's body,
+// as the first wave of a worker team does, all its lanes the same: they
+// make one cell between them (merk_device_alloc), and may run a loop across
+// the team's threads. Each wave sets its own when it starts a process or
+// works for one.
+[[clang::loader_uninitialized]] Local<uint32_t> teamMains[kMostPlaceWaves];
 
 } // namespace
 
@@ -406,8 +433,21 @@ extern "C" void merk_device_shared_free(void *pointer, uint64_t bytes) {
 
 // A cell, or an array, on the device (docs/INPROGRESS.md, The device's side
 // of the first slice, step 6): bumped from the chunks of the region that
-// runs, or of the GPU process, with an atomic add.
+// runs, or of the GPU process, with an atomic add. The lanes of a team's
+// first wave that run a distribute loop's body all run the same code with
+// the same values, so they make one cell between them, which their first
+// active lane bumps: each its own would leave the lanes' arrays apart, and
+// a loop across the team's threads would update only one of them.
 extern "C" void *merk_device_alloc(uint64_t bytes) {
+  if (merk_device_process_image &&
+      teamMains[__gpu_thread_id_x() / __gpu_num_lanes()]) {
+    uint64_t mask{__gpu_lane_mask()};
+    uint64_t cell{0};
+    if (__gpu_is_first_in_lane(mask)) {
+      cell = reinterpret_cast<uint64_t>(Allocate(CurrentBump(), bytes));
+    }
+    return reinterpret_cast<void *>(__gpu_read_first_lane_u64(mask, cell));
+  }
   return Allocate(CurrentBump(), bytes);
 }
 
@@ -762,6 +802,13 @@ extern "C" void merk_process_loop_start(uint64_t loop, uint64_t *partials);
 extern "C" void merk_process_loop_reduce(
     uint64_t loop, uint64_t *into, const uint64_t *from);
 
+// A thread's share of a loop under parallel do in the body of a distribute
+// loop, as merk_process_loop's of another, with the words its body takes in
+// the team's local memory.
+extern "C" void merk_team_loop(uint64_t loop, int64_t start, int64_t rounds,
+    int64_t stride, int64_t count, int64_t first, int64_t step, uint64_t values,
+    uint64_t partials);
+
 namespace {
 
 // The process's wave arrives at its control block's barrier and waits there
@@ -818,6 +865,7 @@ uint64_t LoadSlotWord(uint64_t *word) {
     clear[i] = 0;
   }
   placeArenas[inTeam] = arena;
+  teamMains[inTeam] = 0;
   ProcessControl *control{nullptr};
   if (workers > 0) {
     control = static_cast<ProcessControl *>(Allocate(&arena->bump,
@@ -950,6 +998,73 @@ void ReduceAcrossTeam(uint64_t loop, uint64_t *partials, uint32_t inTeam) {
   }
 }
 
+// The team's local memory as the generic address that generated code takes.
+uint64_t *TeamWords(Local<uint64_t> *words) { return (uint64_t *)words; }
+
+// Every thread of a worker team: its share of the loop under parallel do
+// that the team's first wave, running a distribute loop's body, set in
+// teamLoop, in rounds of the team's threads' consecutive iterations, with a
+// barrier across the team after each, as a loop across the process's teams
+// has (Work); its reductions combined across the team into teamResults; and
+// a barrier, after which the first wave reads them, and may set the next.
+[[gnu::noinline]] void TeamShare(uint32_t inTeam) {
+  uint64_t loop{teamLoop.loop};
+  int64_t first{teamLoop.first};
+  int64_t step{teamLoop.step};
+  int64_t count{teamLoop.count};
+  uint64_t reductions{teamLoop.reductions};
+  uint64_t partials[kProcessLoopReductions];
+  if (reductions) {
+    merk_process_loop_start(loop, partials);
+  }
+  int64_t threads{static_cast<int64_t>(__gpu_num_threads_x())};
+  int64_t rounds{count > 0 ? (count + threads - 1) / threads : 0};
+  merk_team_loop(loop, static_cast<int64_t>(__gpu_thread_id_x()), rounds,
+      threads, count, first, step,
+      reinterpret_cast<uint64_t>(TeamWords(teamValues)),
+      reinterpret_cast<uint64_t>(partials));
+  if (reductions) {
+    ReduceAcrossTeam(loop, partials, inTeam);
+    if (__gpu_thread_id_x() == 0) {
+      merk_process_loop_reduce(loop, TeamWords(teamResults), partials);
+    }
+  }
+  __gpu_sync_threads();
+}
+
+// Every thread of a worker team, for a distribute loop: the team's first
+// wave runs the bodies of the team's iterations, `workers` apart from
+// `worker`, all its lanes the same, and its other waves wait for the loops
+// that the bodies run across the team's threads, until the first wave says
+// that its iterations have ended. The first wave is told by a value that the
+// compiler knows is the same in all its lanes, so that whole waves take each
+// branch, and none crosses the other's barriers.
+void Distribute(uint64_t loop, int64_t first, int64_t step, int64_t count,
+    uint64_t values, uint64_t worker, uint64_t workers, uint32_t inTeam) {
+  uint32_t wave{__gpu_read_first_lane_u32(__gpu_lane_mask(), inTeam)};
+  if (wave == 0) {
+    teamMains[0] = 1;
+    auto start{static_cast<int64_t>(worker)};
+    auto stride{static_cast<int64_t>(workers)};
+    int64_t rounds{count > start ? (count - start + stride - 1) / stride : 0};
+    merk_process_loop(
+        loop, start, rounds, stride, count, first, step, values, 0);
+    teamMains[0] = 0;
+    if (__gpu_lane_id() == 0) {
+      teamLoop.end = 1;
+    }
+    __gpu_sync_threads();
+    return;
+  }
+  for (;;) {
+    __gpu_sync_threads();
+    if (teamLoop.end) {
+      return;
+    }
+    TeamShare(wave);
+  }
+}
+
 // Every thread of a wave whose slot its process has set working: the team
 // runs the process's loops with its other worker teams, each thread taking
 // iterations a team's threads apart, from its own in its team's block, until
@@ -961,6 +1076,7 @@ void ReduceAcrossTeam(uint64_t loop, uint64_t *partials, uint32_t inTeam) {
   uint64_t workers{LoadSlotWord(&slot->workers)};
   placeArenas[inTeam] = control->arena;
   placeControls[inTeam] = nullptr;
+  teamMains[inTeam] = 0;
   int64_t threads{static_cast<int64_t>(__gpu_num_threads_x())};
   int64_t stride{static_cast<int64_t>(workers) * threads};
   int64_t base{static_cast<int64_t>(worker) * threads};
@@ -977,6 +1093,11 @@ void ReduceAcrossTeam(uint64_t loop, uint64_t *partials, uint32_t inTeam) {
     int64_t count{control->count};
     uint64_t reductions{control->reductions};
     auto values{reinterpret_cast<uint64_t>(control->values)};
+    if (control->distribute) {
+      Distribute(loop, first, step, count, values, worker, workers, inTeam);
+      WorkerArrive(control);
+      continue;
+    }
     uint64_t partials[kProcessLoopReductions];
     auto partialsAt{reinterpret_cast<uint64_t>(partials)};
     if (reductions) {
@@ -1068,8 +1189,8 @@ extern "C" uint64_t *merk_device_loop_values(void) {
       placeControls[__gpu_thread_id_x() / __gpu_num_lanes()]};
   if (!control) {
     Fail(1,
-        "a loop under distribute parallel do in the body of another, or "
-        "in a GPU process without worker teams");
+        "a loop under distribute parallel do or distribute in the body of "
+        "another loop, or in a GPU process without worker teams");
   }
   return control->values;
 }
@@ -1081,8 +1202,8 @@ extern "C" uint64_t *merk_device_loop_results(void) {
       placeControls[__gpu_thread_id_x() / __gpu_num_lanes()]};
   if (!control) {
     Fail(1,
-        "a loop under distribute parallel do in the body of another, or "
-        "in a GPU process without worker teams");
+        "a loop under distribute parallel do or distribute in the body of "
+        "another loop, or in a GPU process without worker teams");
   }
   return control->results;
 }
@@ -1100,17 +1221,98 @@ extern "C" void merk_device_process_loop(uint64_t loop, int64_t first,
       placeControls[__gpu_thread_id_x() / __gpu_num_lanes()]};
   if (!control) {
     Fail(1,
-        "a loop under distribute parallel do in the body of another, or "
-        "in a GPU process without worker teams");
+        "a loop under distribute parallel do or distribute in the body of "
+        "another loop, or in a GPU process without worker teams");
   }
   control->loop = loop;
   control->first = first;
   control->step = step;
   control->count = count;
+  control->distribute = 0;
   control->reductions = reductions;
   control->stored = 0;
   ProcessArrive(control);
   ProcessArrive(control);
+}
+
+// Runs the distribute loop with the number across the process's worker
+// teams, each team's first wave running the bodies of its iterations, from
+// the first counter by the step, `count` times, with the words that
+// merk_device_loop_values gave (Distribute).
+extern "C" void merk_device_process_distribute(
+    uint64_t loop, int64_t first, int64_t step, int64_t count) {
+  ProcessControl *control{
+      placeControls[__gpu_thread_id_x() / __gpu_num_lanes()]};
+  if (!control) {
+    Fail(1,
+        "a loop under distribute parallel do or distribute in the body of "
+        "another loop, or in a GPU process without worker teams");
+  }
+  control->loop = loop;
+  control->first = first;
+  control->step = step;
+  control->count = count;
+  control->distribute = 1;
+  control->reductions = 0;
+  control->stored = 0;
+  ProcessArrive(control);
+  ProcessArrive(control);
+}
+
+namespace {
+
+// The wave runs a distribute loop's body, the only code that may run a loop
+// across a team's threads; check-gpu-code reports any other at compile time.
+void CheckTeamMain() {
+  if (!merk_device_process_image ||
+      !teamMains[__gpu_thread_id_x() / __gpu_num_lanes()]) {
+    Fail(1,
+        "a loop under parallel do in a GPU process's code outside the body "
+        "of a distribute loop");
+  }
+}
+
+} // namespace
+
+// The words of the loop under parallel do that a distribute loop's body is
+// about to run across the team's threads (MLIRGenProcesses.cpp,
+// ProcessLoop), in the team's local memory.
+extern "C" uint64_t *merk_device_team_values(void) {
+  CheckTeamMain();
+  return TeamWords(teamValues);
+}
+
+// The words of the values of its reductions before it, which the first wave
+// sets, and which are their results after it.
+extern "C" uint64_t *merk_device_team_results(void) {
+  CheckTeamMain();
+  return TeamWords(teamResults);
+}
+
+// Runs the loop with the number across the team's threads, from the first
+// counter by the step, `count` times, with the words that
+// merk_device_team_values gave, and `reductions` reductions, whose results
+// are in those of merk_device_team_results when it returns: the team's
+// other waves, waiting in Distribute, start when the first wave crosses the
+// team's barrier, and every thread of the team takes its share (TeamShare).
+// Every lane of the first wave calls it, with the same values.
+extern "C" void merk_device_team_loop(uint64_t loop, int64_t first,
+    int64_t step, int64_t count, uint64_t reductions) {
+  CheckTeamMain();
+  uint32_t inTeam{__gpu_thread_id_x() / __gpu_num_lanes()};
+  if (__gpu_is_first_in_lane(__gpu_lane_mask())) {
+    teamLoop.loop = loop;
+    teamLoop.first = first;
+    teamLoop.step = step;
+    teamLoop.count = count;
+    teamLoop.reductions = reductions;
+    teamLoop.end = 0;
+  }
+  // The iterations make their own cells.
+  teamMains[inTeam] = 0;
+  __gpu_sync_threads();
+  TeamShare(inTeam);
+  teamMains[inTeam] = 1;
 }
 
 // At the start of any other region that a module with team mailboxes runs.

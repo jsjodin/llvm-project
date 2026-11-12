@@ -262,18 +262,27 @@ merk::ProcOp MerkGenerator::GenerateProcessStart(
   return start;
 }
 
-// A loop under distribute parallel do in a GPU process's code
-// (docs/INPROGRESS.md, GPU processes that run loops): the process's wave
-// computes the bounds and the trip count, puts the body procedure's inputs,
-// but the counter, in the words of its control block, a word each, and calls
-// merk_device_process_loop with the loop's number, which starts its worker
-// teams on the iterations and returns when they have run them all. Each
-// worker thread runs its iterations through merk_process_loop
-// (GenerateProcessLoops). By the directive's promise, an array that the body
-// updates in place gives each iteration its own elements, so after the loop
-// it is the array given, as for a parallel do.
-void MerkGenerator::ProcessLoop(
-    const ParallelLoop &loop, const ProcedureBody &body, mlir::Location loc) {
+// A loop that a GPU process runs across its teams (docs/INPROGRESS.md, GPU
+// processes that run loops), of the kind:
+// - Under distribute parallel do, in the process's code, its threads': the
+//   process's wave computes the bounds and the trip count, puts the body
+//   procedure's inputs, but the counter, in the words of its control block,
+//   a word each, and calls merk_device_process_loop with the loop's number,
+//   which starts its worker teams on the iterations and returns when they
+//   have run them all. Each worker thread runs its iterations through
+//   merk_process_loop (GenerateProcessLoops).
+// - Under distribute, the teams': the same, through
+//   merk_device_process_distribute, each team's first wave running the
+//   iterations' bodies, with no reductions, as OpenMP's distribute has none.
+// - Under parallel do, in the body of a distribute loop, the team's threads:
+//   the team's first wave puts the words in the team's local memory, through
+//   merk_device_team_values, and calls merk_device_team_loop, and each thread
+//   of the team runs its iterations through merk_team_loop.
+// By the directive's promise, an array that the body updates in place gives
+// each iteration its own elements, so after the loop it is the array given,
+// as for a parallel do.
+void MerkGenerator::ProcessLoop(const ParallelLoop &loop, ProcessLoopKind kind,
+    const ProcedureBody &body, mlir::Location loc) {
   for (const Body *g : loop.goals) {
     if (g != loop.trip && g != loop.call) {
       Goal(*g, body);
@@ -305,7 +314,7 @@ void MerkGenerator::ProcessLoop(
   }
   // The body procedure's inputs: the counter, and the values the loop
   // procedure was called with for its other arguments.
-  ProcessLoopCase entry{proc.getSymName().str(), {}, {}, 0, {}};
+  ProcessLoopCase entry{proc.getSymName().str(), {}, {}, 0, {}, kind};
   llvm::SmallVector<mlir::Value> words;
   // The reductions' values before the loop, in the order of their inputs.
   llvm::SmallVector<mlir::Value> before;
@@ -350,6 +359,10 @@ void MerkGenerator::ProcessLoop(
         "not take the reduction's value");
     return;
   }
+  if (kind == ProcessLoopKind::Teams && !entry.reductions.empty()) {
+    NotYet(loop.at, "reductions of distribute loops in GPU processes");
+    return;
+  }
   if (entry.reductions.size() > kProcessLoopReductions) {
     NotYet(loop.at,
         "loops across a GPU process's teams with more than 8 reductions");
@@ -373,10 +386,12 @@ void MerkGenerator::ProcessLoop(
   auto i64{builder_.getI64Type()};
   auto generic{mlir::LLVM::LLVMPointerType::get(
       &context_, target_.addressSpaces().generic)};
+  bool team{kind == ProcessLoopKind::Team};
   if (!words.empty()) {
     mlir::Value values{
         merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{generic},
-            "merk_device_loop_values", mlir::ValueRange{}, /*can_fail=*/false)
+            team ? "merk_device_team_values" : "merk_device_loop_values",
+            mlir::ValueRange{}, /*can_fail=*/false)
             .getResult(0)};
     for (auto [index, value] : llvm::enumerate(words)) {
       mlir::Value word{merk::FromWordOp::create(builder_, loc, i64,
@@ -395,7 +410,8 @@ void MerkGenerator::ProcessLoop(
   if (!before.empty()) {
     results =
         merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{generic},
-            "merk_device_loop_results", mlir::ValueRange{}, /*can_fail=*/false)
+            team ? "merk_device_team_results" : "merk_device_loop_results",
+            mlir::ValueRange{}, /*can_fail=*/false)
             .getResult(0);
     for (auto [index, value] : llvm::enumerate(before)) {
       StoreWord(builder_, loc, results, static_cast<std::int32_t>(index),
@@ -415,14 +431,21 @@ void MerkGenerator::ProcessLoop(
       builder_, loc, mlir::arith::CmpIPredicate::slt, distance, zero)};
   mlir::Value count{
       mlir::arith::SelectOp::create(builder_, loc, none, zero, trips)};
-  merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
-      "merk_device_process_loop",
-      mlir::ValueRange{
-          IntegerConstant(
-              i64, static_cast<std::int64_t>(processLoops_.size()), loc),
-          lower, IntegerConstant(i64, step, loc), count,
-          IntegerConstant(i64, static_cast<std::int64_t>(before.size()), loc)},
-      /*can_fail=*/false);
+  mlir::Value number{IntegerConstant(
+      i64, static_cast<std::int64_t>(processLoops_.size()), loc)};
+  if (kind == ProcessLoopKind::Teams) {
+    merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+        "merk_device_process_distribute",
+        mlir::ValueRange{number, lower, IntegerConstant(i64, step, loc), count},
+        /*can_fail=*/false);
+  } else {
+    merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+        team ? "merk_device_team_loop" : "merk_device_process_loop",
+        mlir::ValueRange{number, lower, IntegerConstant(i64, step, loc), count,
+            IntegerConstant(
+                i64, static_cast<std::int64_t>(before.size()), loc)},
+        /*can_fail=*/false);
+  }
   processLoops_.push_back(std::move(entry));
   for (const semantics::TranslatedLoop::Threaded &value :
       loop.translated->threaded) {
@@ -442,10 +465,16 @@ void MerkGenerator::ProcessLoop(
 // the runtime calls them, even with no loops.
 // - merk_process_loop(loop, start, rounds, stride, count, first, step,
 //   values, partials), which each thread of a process's worker teams calls
-//   once for each loop, for its share of the iterations: the loop's rounds
-//   (ProcessLoopRounds), with the values from the control block's words, at
-//   `values`, and the thread's partial results, at `partials`, which it
-//   stores back after the last round.
+//   once for each loop under distribute parallel do, for its share of the
+//   iterations, and each team's first wave once for each loop under
+//   distribute: the loop's rounds (ProcessLoopRounds), with the values from
+//   the control block's words, at `values`, and the thread's partial
+//   results, at `partials`, which it stores back after the last round.
+// - merk_team_loop, the same for the loops under parallel do in the bodies
+//   of distribute loops, with the values from the team's local memory, which
+//   each thread of the team calls. A function of its own, so that the
+//   kernel's calls, which run a team loop from a distribute loop's body, do
+//   not recurse, which would make the kernel's stack dynamic.
 // - merk_process_loop_start(loop, partials): the reductions' identities.
 // - merk_process_loop_reduce(loop, into, from): the partial results at
 //   `from` combined into those at `into`, by each reduction's operator.
@@ -458,37 +487,48 @@ void MerkGenerator::GenerateProcessLoops() {
   auto generic{mlir::LLVM::LLVMPointerType::get(
       &context_, target_.addressSpaces().generic)};
   mlir::OpBuilder::InsertionGuard guard{builder_};
-  for (unsigned which{0}; which < 3; ++which) {
+  // 0 and 3 run loops, merk_process_loop and merk_team_loop.
+  for (unsigned which{0}; which < 4; ++which) {
     builder_.setInsertionPointToEnd(module_.getBody());
     llvm::StringRef name{which == 0 ? "merk_process_loop"
             : which == 1            ? "merk_process_loop_start"
-                                    : "merk_process_loop_reduce"};
+            : which == 2            ? "merk_process_loop_reduce"
+                                    : "merk_team_loop"};
+    bool runs{which == 0 || which == 3};
     // The partial results come as pointers, not words, so that, inlined
     // into the runtime's combine, they can stay in registers.
     llvm::SmallVector<mlir::Type> parameters{i64};
-    parameters.append(which == 0 ? 8 : which,
-        which == 0 ? mlir::Type{i64} : mlir::Type{generic});
+    parameters.append(
+        runs ? 8 : which, runs ? mlir::Type{i64} : mlir::Type{generic});
     auto proc{merk::ProcOp::create(builder_, loc, name,
         builder_.getFunctionType(parameters, {}), merk::Determinism::Det)};
     proc->setAttr(kProcessRootAttrName, builder_.getUnitAttr());
     mlir::Block *entry{proc.addEntryBlock()};
     builder_.setInsertionPointToStart(entry);
-    if (processLoops_.empty()) {
+    // The loops that the procedure has a case for, by their numbers.
+    llvm::SmallVector<std::size_t> numbers;
+    for (auto [number, loop] : llvm::enumerate(processLoops_)) {
+      if (!runs || (which == 3) == (loop.kind == ProcessLoopKind::Team)) {
+        numbers.push_back(number);
+      }
+    }
+    if (numbers.empty()) {
       merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
       continue;
     }
     llvm::SmallVector<mlir::Attribute> cases;
-    for (std::size_t number{0}; number < processLoops_.size(); ++number) {
+    for (std::size_t number : numbers) {
       cases.push_back(builder_.getArrayAttr(
           {builder_.getI64IntegerAttr(static_cast<std::int64_t>(number))}));
     }
     auto op{merk::SwitchOp::create(builder_, loc, mlir::TypeRange{},
         entry->getArgument(0), builder_.getArrayAttr(cases),
         /*canFail=*/false)};
-    for (auto [region, loop] :
-        llvm::zip_equal(op.getCaseRegions(), processLoops_)) {
+    for (auto [region, number] :
+        llvm::zip_equal(op.getCaseRegions(), numbers)) {
+      const ProcessLoopCase &loop{processLoops_[number]};
       builder_.setInsertionPointToStart(&region.emplaceBlock());
-      if (which == 0) {
+      if (runs) {
         ProcessLoopShare(loop, entry, generic, loc);
       } else if (which == 1) {
         mlir::Value partials{entry->getArgument(1)};
@@ -573,7 +613,8 @@ bool MerkGenerator::IsReductionInput(
 //       rounds(Rounds - 1, I + Stride, ..., Next...)
 //     else Partials
 //
-// Every thread of a team goes round as often, so all reach each barrier.
+// Every thread of a team goes round as often, so all reach each barrier. A
+// distribute loop's rounds, which a team's first wave runs alone, have none.
 merk::ProcOp MerkGenerator::ProcessLoopRounds(
     const ProcessLoopCase &loop, mlir::Location loc) {
   auto i64{builder_.getI64Type()};
@@ -654,8 +695,10 @@ merk::ProcOp MerkGenerator::ProcessLoopRounds(
         &iteration.getElseRegion().emplaceBlock());
     merk::YieldOp::create(builder_, loc, partials);
   }
-  merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
-      "merk_device_sync_threads", mlir::ValueRange{}, /*can_fail=*/false);
+  if (loop.kind != ProcessLoopKind::Teams) {
+    merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+        "merk_device_sync_threads", mlir::ValueRange{}, /*can_fail=*/false);
+  }
   llvm::SmallVector<mlir::Value> arguments{
       mlir::arith::SubIOp::create(
           builder_, loc, remaining, IntegerConstant(i64, 1, loc)),
@@ -674,7 +717,8 @@ merk::ProcOp MerkGenerator::ProcessLoopRounds(
 }
 
 // Whether the kind's code, or a procedure of the module that it calls, has a
-// loop under distribute parallel do, as check-gpu-code follows them.
+// loop under distribute parallel do or distribute, as check-gpu-code follows
+// them.
 bool MerkGenerator::KindRunsLoops(const parser::ProcessDecl &decl) {
   const Procedure *procedure{KindProcedure(decl)};
   if (!procedure) {
@@ -695,8 +739,9 @@ bool MerkGenerator::KindRunsLoops(const parser::ProcessDecl &decl) {
     while (!goals.empty()) {
       const Body *goal{goals.pop_back_val()};
       if (goal->kind == BodyKind::Scope && goal->directive &&
-          goal->directive->id ==
-              llvm::omp::Directive::OMPD_distribute_parallel_do) {
+          (goal->directive->id ==
+                  llvm::omp::Directive::OMPD_distribute_parallel_do ||
+              goal->directive->id == llvm::omp::Directive::OMPD_distribute)) {
         return true;
       }
       if ((goal->kind == BodyKind::Call ||
@@ -719,6 +764,73 @@ bool MerkGenerator::KindRunsLoops(const parser::ProcessDecl &decl) {
     }
   }
   return false;
+}
+
+// The bodies of the module's procedures that the goal calls, as
+// KindRunsLoops follows them, and, if `distributes`, its goals under
+// distribute, which are not followed into.
+void MerkGenerator::CalledBodies(const Body &goal,
+    llvm::SmallVectorImpl<const ProcedureBody *> &called,
+    llvm::SmallVectorImpl<const Body *> *distributes) {
+  llvm::SmallVector<const Body *> goals{&goal};
+  while (!goals.empty()) {
+    const Body *g{goals.pop_back_val()};
+    if (distributes && g->kind == BodyKind::Scope && g->directive &&
+        g->directive->id == llvm::omp::Directive::OMPD_distribute) {
+      distributes->push_back(g);
+      continue;
+    }
+    if ((g->kind == BodyKind::Call ||
+            (g->kind == BodyKind::Unify &&
+                g->unify == semantics::UnifyKind::Call)) &&
+        g->modes && g->modes->callee &&
+        g->modes->callee->symbol->module == moduleName_) {
+      if (const ProcedureBody *body{determinism_.BodyOf(*g->modes->callee)}) {
+        called.push_back(body);
+      }
+    }
+    if (g->lambda) {
+      goals.push_back(g->lambda);
+    }
+    for (const semantics::SwitchCase &arm : g->cases) {
+      goals.push_back(arm.goal);
+    }
+    goals.append(g->goals.begin(), g->goals.end());
+  }
+}
+
+// In a device's compile of GPU processes, the bodies that the goals of the
+// kinds' distribute loops reach, whose parallel do loops run across a team's
+// threads (ProcessLoop), as check-gpu-code follows them.
+void MerkGenerator::CollectTeamBodies() {
+  if (!target_.options().processKernels) {
+    return;
+  }
+  llvm::SmallVector<const ProcedureBody *> pending;
+  for (const parser::ProcessDecl *decl : gpuKinds_) {
+    if (const Procedure *procedure{KindProcedure(*decl)}) {
+      if (const ProcedureBody *body{determinism_.BodyOf(*procedure)}) {
+        pending.push_back(body);
+      }
+    }
+  }
+  llvm::DenseSet<const ProcedureBody *> reached;
+  llvm::SmallVector<const Body *> distributes;
+  while (!pending.empty()) {
+    const ProcedureBody *body{pending.pop_back_val()};
+    if (body->body && reached.insert(body).second) {
+      CalledBodies(*body->body, pending, &distributes);
+    }
+  }
+  for (const Body *distribute : distributes) {
+    CalledBodies(*distribute, pending, nullptr);
+  }
+  while (!pending.empty()) {
+    const ProcedureBody *body{pending.pop_back_val()};
+    if (body->body && teamBodies_.insert(body).second) {
+      CalledBodies(*body->body, pending, nullptr);
+    }
+  }
 }
 
 // A global of the module with `bytes`, constant and internal.
