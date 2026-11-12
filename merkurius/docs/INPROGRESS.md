@@ -3635,6 +3635,28 @@ so the GPU faulted.
   a product, a maximum of floats and a loop with no iterations, of one to a
   million iterations.
 
+**(d4) measured 2026-11-11: Bandwidth's kernels in a GPU process.**
+`benchmarks/bandwidth/bandwidth-process.m` runs the five kernels across a
+process's teams; the numbers are in the design document, Measurements,
+"Memory bandwidth".
+- A loop costs about 2 µs (Dot, with its reduction, 6.5), a target region
+  15 to 17 (Dot 36).
+- At 2^25 elements the kernels were 6 to 42% slower than target regions,
+  because `merk_place` takes 205 VGPRs, the most of anything inlined into
+  it, and so has 4 waves a SIMD resident, where a stream wants more. Capped
+  at 128 by hand, Copy passed the target regions and the rest came within
+  14%.
+- The barrier after each round (d2) gains 8 to 17% even here.
+- *Open:* how the loops get the waves they need. Ways: a VGPR budget for
+  `merk_place` (`amdgpu-num-vgpr` or `amdgpu-waves-per-eu`), which spills
+  in the process's code (195 spills at 128); keeping the cold paths
+  (messages, copying terms, failure) out of line behind calls, so that only
+  what they use counts at their call; or the loops in a kernel of their own,
+  which the user's "one kernel per GPU" ruled out. Also open: Dot's 14%
+  left, where each iteration loads and stores the partials through private
+  memory, and each loop generated twice, for the kind's procedure and its
+  `$words` variant.
+
 **Open after (p1).**
 - *Which units the processes' kernel takes,* as it holds every team slot
   of them. **Decided 2026-11-11:** a percentage of the available compute
