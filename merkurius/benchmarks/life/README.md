@@ -13,10 +13,14 @@ The grid is `LIFE_SIZE` cells square (4096 by default), with a border of
 dead cells around it, in one array of `(LIFE_SIZE + 2)^2` cells by rows.
 About 30% of the cells start alive, chosen by a multiplicative hash of each
 cell's index, so every program starts from the same grid without a random
-number generator. A step computes every cell from its eight neighbours into
-the other array: a cell with three live neighbours lives, one with two keeps
-its state, and any other dies. The two arrays swap after each step, for
-`LIFE_STEPS` steps (100 by default).
+number generator. With `LIFE_SOUP` set, only a square of that side at the
+grid's centre starts so, a *soup*, and every other cell starts dead: a soup
+burns for a while, sheds gliders and settles, so the live region moves, as
+the sparse program's world starts (`docs/INPROGRESS.md`, sparse tiles). By
+default the soup is the whole grid. A step computes every cell from its
+eight neighbours into the other array: a cell with three live neighbours
+lives, one with two keeps its state, and any other dies. The two arrays swap
+after each step, for `LIFE_STEPS` steps (100 by default).
 
 - **The kernels** are flat loops over the grid's cells, under
   `target teams distribute parallel do` in Mercury and

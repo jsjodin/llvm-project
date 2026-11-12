@@ -8,6 +8,10 @@ RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=16 LIFE_SIZE=300
 RUN: FileCheck %s --check-prefix=INFO < %t.info
 CHECK: Population: 9339
 CHECK-NEXT: Checksum: 429141631
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIFE_SIZE=300 LIFE_STEPS=25 LIFE_SOUP=100 %t2 | FileCheck %s --check-prefix=SOUP
+SOUP: Soup: 100 x 100 cells at the centre
+SOUP-NEXT: Population: 1133
+SOUP-NEXT: Checksum: 51448204
 INFO: Launching kernel {{.*}}life.init_{{.*}} in SPMD mode
 INFO: Launching kernel {{.*}}life.step_{{.*}} in SPMD mode
 INFO-NOT: Generic

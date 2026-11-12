@@ -4,9 +4,12 @@
 % any process is involved. See README.md.
 %
 % The grid is LIFE_SIZE cells square, with a border of dead cells around it,
-% in one array of (LIFE_SIZE + 2)^2 ints by rows. A step computes every cell
-% from its eight neighbours into the other array, and the two swap. The
-% arrays stay on the device for all LIFE_STEPS steps.
+% in one array of (LIFE_SIZE + 2)^2 ints by rows. The cells that start alive
+% are in a square soup of side LIFE_SOUP at the grid's centre, the whole grid
+% by default; outside it all are dead, as the sparse program's world starts
+% (docs/INPROGRESS.md, sparse tiles). A step computes every cell from its
+% eight neighbours into the other array, and the two swap. The arrays stay
+% on the device for all LIFE_STEPS steps.
 
 :- module life.
 :- interface.
@@ -18,14 +21,19 @@
 main(!IO) :-
     setting("LIFE_SIZE", 4096, N, !IO),
     setting("LIFE_STEPS", 100, Steps, !IO),
+    setting("LIFE_SOUP", N, Soup, !IO),
     ( if N < 1 then
         usage(!IO)
     else if Steps < 2 then
         usage(!IO)
+    else if Soup < 0 then
+        usage(!IO)
+    else if Soup > N then
+        usage(!IO)
     else
-        header(N, Steps, !IO),
+        header(N, Steps, Soup, !IO),
         W = N + 2,
-        init(N, array.init(W * W, 0), A),
+        init(N, Soup, array.init(W * W, 0), A),
         array.init(W * W, 0, B),
         array.init(Steps, 0.0, T0),
         %$omp target data map(tofrom: A, B)
@@ -36,25 +44,39 @@ main(!IO) :-
 
 :- pred usage(io::di, io::uo) is det.
 usage(!IO) :-
-    io.write_string("LIFE_SIZE must be at least 1 and LIFE_STEPS at least 2.\n",
-        !IO),
+    io.write_string("LIFE_SIZE must be at least 1, LIFE_STEPS at least 2, \
+and LIFE_SOUP from 0 to LIFE_SIZE.\n", !IO),
     exit_failure(!IO).
 
     % Whether the cell of index K, counting the grid's cells by rows from 0,
-    % starts alive: about 30% do, by a multiplicative hash of K.
+    % starts alive, if it is in the soup: about 30% do, by a multiplicative
+    % hash of K.
     %
 :- func alive(int) = int.
 alive(K) = V :-
     H = (K * 2654435761) /\ 4294967295,
     ( if unchecked_rem(H >> 16, 100) < 30 then V = 1 else V = 0 ).
 
-:- pred init(int::in, array(int)::array_di, array(int)::array_uo) is det.
-init(N, !A) :-
+:- pred init(int::in, int::in, array(int)::array_di, array(int)::array_uo)
+    is det.
+init(N, Soup, !A) :-
     W = N + 2,
+    % The soup's rows and columns are From to From + Soup - 1.
+    From = unchecked_quotient(N - Soup, 2),
     %$omp target teams distribute parallel do
     ( for(K, 0, N * N - 1) do
-        C = (unchecked_quotient(K, N) + 1) * W + unchecked_rem(K, N) + 1,
-        !A ^ unsafe_elem(C) := alive(K)
+        Row = unchecked_quotient(K, N),
+        Column = unchecked_rem(K, N),
+        C = (Row + 1) * W + Column + 1,
+        ( if
+            Row >= From, Row < From + Soup,
+            Column >= From, Column < From + Soup
+        then
+            V = alive(K)
+        else
+            V = 0
+        ),
+        !A ^ unsafe_elem(C) := V
     ).
 
     % One step: B's cells from A's.
@@ -163,15 +185,19 @@ results(N, Steps, T, Population, Checksum, !IO) :-
     T = (double) ts.tv_sec + 1.0e-9 * (double) ts.tv_nsec;
 ").
 
-:- pred header(int::in, int::in, io::di, io::uo) is det.
+:- pred header(int::in, int::in, int::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
-    header(N::in, Steps::in, _IO0::di, _IO::uo),
+    header(N::in, Steps::in, Soup::in, _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure],
 "
     printf(\"Game of Life, Mercury\\n\");
     printf(\"Grid: %ld x %ld cells, %ld bytes a cell\\n\", (long) N, (long) N,
         (long) sizeof(MR_Integer));
     printf(\"Steps: %ld\\n\", (long) Steps);
+    if (Soup < N) {
+        printf(\"Soup: %ld x %ld cells at the centre\\n\", (long) Soup,
+            (long) Soup);
+    }
 ").
 
 :- pred write_results(int::in, int::in, float::in, float::in, float::in,
