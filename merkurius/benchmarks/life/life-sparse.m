@@ -23,13 +23,16 @@
 %
 % A step is a loop under distribute over the active tiles, a team for each,
 % with a loop under parallel do over its cells across the team's threads,
-% which reduces its live cells and its edges' bits. After it, on the
-% process's lane, the bookkeeping: a tile with no live cells and no live
-% edge facing it from a neighbour for `quiet_steps` steps ends; then each
-% live edge facing no tile starts one there, inside the world, linked to its
-% neighbours both ways; then the new tiles' cells are zeroed, a loop across
-% the teams. A tile can come alive only next to a live edge or corner of
-% another, so a world without a tile somewhere is dead there.
+% which reduces its live cells and its edges' bits. After it, the
+% bookkeeping. A loop across all the teams' threads decides each tile's
+% fate from the step's results alone: a tile with no live cells and no live
+% edge facing it from a neighbour for `quiet_steps` steps ends, and each
+% live edge facing no tile, inside the world, starts one there. Only if
+% some tile has a fate does the process's lane act on them: it ends those
+% that end, starts the new tiles, linked to their neighbours both ways, and
+% a loop across the teams zeroes their cells. A tile can come alive only
+% next to a live edge or corner of another, so a world without a tile
+% somewhere is dead there.
 %
 % The process sends the host each step's time, the bookkeeping's part of
 % it, the active tiles after each step, and the outcome. LIFE_TRACE=1 prints
@@ -145,6 +148,7 @@ life(TimesBox, CountsBox, OutcomeBox, World, Log, Soup, Steps, Capacity,
     array.init(Capacity, 0u8, Quiet0),
     array.init(Capacity, 0i32, Actives0),
     array.init(Capacity, 0i32, Free0),
+    array.init(Capacity, 0u16, Fate0),
     % Tile 0 is the dead tile; the free list gives 1, 2 and so on first.
     ( for(J, 0, Capacity - 2), fromto(Free0, F0, F1, Free1) do
         F1 = F0 ^ unsafe_elem(J) := int32.cast_from_int(Capacity - 1 - J)
@@ -163,17 +167,17 @@ life(TimesBox, CountsBox, OutcomeBox, World, Log, Soup, Steps, Capacity,
         Quiet0, Quiet1, Actives0, Actives1, 0, NActive1, Free1, Free2,
         Capacity - 1, NFree1, 0, Overflow1),
     init(G, From, Soup, NActive1, Actives1, Pos1, Cur0, Cur1),
-    ( for(J, 0, NActive1 - 1), fromto(Edges0, E0, E1, Edges1) do
-        E1 = E0 ^ unsafe_elem(int32.to_int(Actives1 ^ unsafe_elem(J))) :=
-            all_edges
+    ( for(J, 0, NActive1 - 1), fromto(Fate0, E0, E1, Fate1) do
+        E1 = E0 ^ unsafe_elem(J) := all_edges
     ),
-    grow(G, 0, NActive1, Edges1, Dir1, Dir, Pos1, Pos, Nb1, Nb,
+    grow(G, 0, NActive1, Fate1, Fate, Dir1, Dir, Pos1, Pos, Nb1, Nb,
         Quiet1, Quiet, Actives1, Actives, NActive1, NActive, Free2, Free,
         NFree1, NFree, Overflow1, Overflow),
     array.init(2 * Steps, 0.0, Times0),
     array.init(Steps, 0, Counts0),
     run(G, 0, Steps, Cur1, Next, Final, Dir, _, Pos, Pos2, Nb, _, Live,
-        LiveF, Edges1, _, Quiet, _, Actives, ActivesF, NActive, NActiveF,
+        LiveF, Edges0, _, Quiet, _, Fate, _, Actives, ActivesF, NActive,
+        NActiveF,
         Free, _, NFree, _, Overflow, OverflowF, NActive, Peak,
         Times0, Times, Counts0, Counts, !IO),
     count(G, NActiveF, ActivesF, Pos2, LiveF, Final, Population, Checksum),
@@ -184,6 +188,10 @@ life(TimesBox, CountsBox, OutcomeBox, World, Log, Soup, Steps, Capacity,
     % Every direction's bit but the middle's.
 :- func all_edges = uint16.
 all_edges = 0x1ef_u16.
+
+    % The bit of a tile's fate that ends it, above the directions'.
+:- func ends = int.
+ends = 0x200.
 
     % The steps a tile with nothing alive near it waits before it ends, so
     % that one that life is about to cross again stays.
@@ -201,14 +209,15 @@ quiet_steps = 4.
     array(int32)::array_di, array(int32)::array_uo,
     array(uint16)::array_di, array(uint16)::array_uo,
     array(uint8)::array_di, array(uint8)::array_uo,
+    array(uint16)::array_di, array(uint16)::array_uo,
     array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
     array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
     int::in, int::out, int::in, int::out,
     array(float)::array_di, array(float)::array_uo,
     array(int)::array_di, array(int)::array_uo, io::di, io::uo) is det.
 run(G, S, Steps, Cur, Next0, Final, !Dir, !Pos, !Nb, !Live, !Edges, !Quiet,
-        !Actives, !NActive, !Free, !NFree, !Overflow, !Peak, !Times, !Counts,
-        !IO) :-
+        !Fate, !Actives, !NActive, !Free, !NFree, !Overflow, !Peak, !Times,
+        !Counts, !IO) :-
     ( if S >= Steps then
         Final = Cur
     else if !.Overflow \= 0 then
@@ -217,17 +226,23 @@ run(G, S, Steps, Cur, Next0, Final, !Dir, !Pos, !Nb, !Live, !Edges, !Quiet,
         now(T0, !IO),
         step(G, !.NActive, !.Actives, !.Nb, Cur, Next0, Next, !Live, !Edges),
         now(T1, !IO),
-        shrink(G, 0, !.Live, !.Edges, !Dir, !.Pos, !Nb, !Quiet, !Actives,
-            !NActive, !Free, !NFree),
-        Kept = !.NActive,
-        grow(G, 0, Kept, !.Edges, !Dir, !Pos, !Nb, !Quiet, !Actives,
-            !NActive, !Free, !NFree, !Overflow),
-        % A loop across the teams costs microseconds even with nothing to
-        % do.
-        ( if !.NActive > Kept then
-            zero(G, Kept, !.NActive, !.Actives, Next, Next1)
-        else
+        decide(G, !.NActive, !.Actives, !.Pos, !.Nb, !.Live, !.Edges,
+            !Quiet, !Fate, Pending),
+        ( if Pending = 0 then
             Next1 = Next
+        else
+            finish(0, !Fate, !Dir, !.Pos, !Nb, !Actives, !NActive, !Free,
+                !NFree),
+            Kept = !.NActive,
+            grow(G, 0, Kept, !Fate, !Dir, !Pos, !Nb, !Quiet, !Actives,
+                !NActive, !Free, !NFree, !Overflow),
+            % A loop across the teams costs microseconds even with nothing
+            % to do.
+            ( if !.NActive > Kept then
+                zero(G, Kept, !.NActive, !.Actives, Next, Next1)
+            else
+                Next1 = Next
+            )
         ),
         now(T2, !IO),
         !Times ^ elem(S) := T2 - T0,
@@ -235,8 +250,8 @@ run(G, S, Steps, Cur, Next0, Final, !Dir, !Pos, !Nb, !Live, !Edges, !Quiet,
         !Counts ^ elem(S) := !.NActive,
         !:Peak = int.max(!.Peak, !.NActive),
         run(G, S + 1, Steps, Next1, Cur, Final, !Dir, !Pos, !Nb, !Live,
-            !Edges, !Quiet, !Actives, !NActive, !Free, !NFree, !Overflow,
-            !Peak, !Times, !Counts, !IO)
+            !Edges, !Quiet, !Fate, !Actives, !NActive, !Free, !NFree,
+            !Overflow, !Peak, !Times, !Counts, !IO)
     ).
 
 %---------------------------------------------------------------------------%
@@ -324,70 +339,110 @@ edge_bits(R, C, M) = bit(Row, 0) \/ bit(0, Column) \/ bit(Row, Column) :-
 bit(DY, DX) = ( if DY = 0, DX = 0 then 0 else 1 << ((DY + 1) * 3 + DX + 1) ).
 
 %---------------------------------------------------------------------------%
-% The bookkeeping, on the process's lane.
+% The bookkeeping.
 
-    % From the J'th active tile on: each tile with no live cells, and no
-    % neighbour with a live edge facing it, for quiet_steps steps ends,
-    % its place in the actives taken by the last one.
+    % Each active tile's fate after a step, from the step's results alone,
+    % across the process's teams: its quiet steps, which end it at
+    % quiet_steps, and the directions where it starts a tile, each a bit of
+    % its element of Fate, which is by its place in the actives; and how
+    % many tiles have a fate. A tile's live cells and edges, and its
+    % neighbours' edges, are the step's; the dead tile's edges are none.
     %
-:- pred shrink(geometry::in, int::in, array(int32)::array_ui,
-    array(uint16)::array_ui, array(int32)::array_di, array(int32)::array_uo,
-    array(int32)::array_ui, array(int32)::array_di, array(int32)::array_uo,
-    array(uint8)::array_di, array(uint8)::array_uo,
-    array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
-    array(int32)::array_di, array(int32)::array_uo, int::in, int::out) is det.
-shrink(G, J, Live, Edges, !Dir, Pos, !Nb, !Quiet, !Actives, !NActive, !Free,
-        !NFree) :-
-    ( if J >= !.NActive then
-        true
-    else
-        I = int32.to_int(!.Actives ^ unsafe_elem(J)),
+:- pred decide(geometry::in, int::in, array(int32)::array_ui,
+    array(int32)::array_ui, array(int32)::array_ui, array(int32)::array_ui,
+    array(uint16)::array_ui, array(uint8)::array_di, array(uint8)::array_uo,
+    array(uint16)::array_di, array(uint16)::array_uo, int::out) is det.
+decide(G, NActive, Actives, Pos, Nb, Live, Edges, !Quiet, !Fate, Pending) :-
+    %$omp distribute parallel do reduction((+) : Pending)
+    ( for(J, 0, NActive - 1), fromto(0, P0, P1, Pending) do
+        I = int32.to_int(Actives ^ unsafe_elem(J)),
+        Base = I * 9,
+        Place = int32.to_int(Pos ^ unsafe_elem(I)),
+        Starts = uint16.to_int(Edges ^ unsafe_elem(I)) /\
+            missing(Nb, Base) /\ inside(G, Place),
         ( if
             Live ^ unsafe_elem(I) = 0i32,
-            not facing_edge(I, 0, !.Nb, Edges)
+            facing(Nb, Edges, Base) = 0
         then
-            Q = uint8.to_int(!.Quiet ^ unsafe_elem(I)) + 1,
-            ( if Q >= quiet_steps then
-                unlink(I, 0, !Nb),
-                !Dir ^ unsafe_elem(int32.to_int(Pos ^ unsafe_elem(I))) := 0i32,
-                !Free ^ unsafe_elem(!.NFree) := int32.cast_from_int(I),
-                !:NFree = !.NFree + 1,
-                !:NActive = !.NActive - 1,
-                !Actives ^ unsafe_elem(J) :=
-                    !.Actives ^ unsafe_elem(!.NActive),
-                shrink(G, J, Live, Edges, !Dir, Pos, !Nb, !Quiet, !Actives,
-                    !NActive, !Free, !NFree)
-            else
-                !Quiet ^ unsafe_elem(I) := uint8.cast_from_int(Q),
-                shrink(G, J + 1, Live, Edges, !Dir, Pos, !Nb, !Quiet,
-                    !Actives, !NActive, !Free, !NFree)
-            )
+            Q = uint8.to_int(!.Quiet ^ unsafe_elem(I)) + 1
         else
-            !Quiet ^ unsafe_elem(I) := 0u8,
-            shrink(G, J + 1, Live, Edges, !Dir, Pos, !Nb, !Quiet, !Actives,
-                !NActive, !Free, !NFree)
-        )
+            Q = 0
+        ),
+        !Quiet ^ unsafe_elem(I) := uint8.cast_from_int(Q),
+        F = ( if Q >= quiet_steps then Starts \/ ends else Starts ),
+        !Fate ^ unsafe_elem(J) := uint16.cast_from_int(F),
+        P1 = ( if F = 0 then P0 else P0 + 1 )
     ).
 
-    % Whether a neighbour of tile I, in direction D or after it, has a live
-    % edge or corner facing I.
+    % The directions in which the tile whose neighbours start at Base has
+    % none.
     %
-:- pred facing_edge(int::in, int::in, array(int32)::array_ui,
-    array(uint16)::array_ui) is semidet.
-facing_edge(I, D, Nb, Edges) :-
-    D =< 8,
-    ( if D = 4 then
-        Neighbour = 0
-    else
-        Neighbour = int32.to_int(Nb ^ unsafe_elem(I * 9 + D))
-    ),
-    ( if
-        Neighbour \= 0,
-        uint16.to_int(Edges ^ unsafe_elem(Neighbour)) /\ (1 << (8 - D)) \= 0
-    then
+:- func missing(array(int32), int) = int.
+:- mode missing(array_ui, in) = out is det.
+missing(Nb, Base) =
+    gap(Nb, Base, 0) \/ gap(Nb, Base, 1) \/ gap(Nb, Base, 2) \/
+    gap(Nb, Base, 3) \/ gap(Nb, Base, 5) \/
+    gap(Nb, Base, 6) \/ gap(Nb, Base, 7) \/ gap(Nb, Base, 8).
+
+:- func gap(array(int32), int, int) = int.
+:- mode gap(array_ui, in, in) = out is det.
+gap(Nb, Base, D) = ( if Nb ^ unsafe_elem(Base + D) = 0i32 then 1 << D else 0 ).
+
+    % The directions in which the tile whose neighbours start at Base has a
+    % neighbour with a live edge or corner facing it.
+    %
+:- func facing(array(int32), array(uint16), int) = int.
+:- mode facing(array_ui, array_ui, in) = out is det.
+facing(Nb, Edges, Base) =
+    faces(Nb, Edges, Base, 0) \/ faces(Nb, Edges, Base, 1) \/
+    faces(Nb, Edges, Base, 2) \/ faces(Nb, Edges, Base, 3) \/
+    faces(Nb, Edges, Base, 5) \/ faces(Nb, Edges, Base, 6) \/
+    faces(Nb, Edges, Base, 7) \/ faces(Nb, Edges, Base, 8).
+
+:- func faces(array(int32), array(uint16), int, int) = int.
+:- mode faces(array_ui, array_ui, in, in) = out is det.
+faces(Nb, Edges, Base, D) = uint16.to_int(Edges ^ unsafe_elem(Neighbour)) /\
+        (1 << (8 - D)) :-
+    Neighbour = int32.to_int(Nb ^ unsafe_elem(Base + D)).
+
+    % The directions from place P that are in the world: the rows' and the
+    % columns' that are.
+    %
+:- func inside(geometry, int) = int.
+inside(G, P) = Rows /\ Columns :-
+    Side = G ^ side,
+    Y = P / Side,
+    X = P mod Side,
+    Rows = ( if Y > 0 then 0x007 else 0 ) \/ 0x038 \/
+        ( if Y < Side - 1 then 0x1c0 else 0 ),
+    Columns = ( if X > 0 then 0x049 else 0 ) \/ 0x092 \/
+        ( if X < Side - 1 then 0x124 else 0 ).
+
+    % From the J'th active tile on, on the process's lane: each tile whose
+    % fate ends it ends, its place in the actives, and its fate, taken by
+    % the last one's.
+    %
+:- pred finish(int::in, array(uint16)::array_di, array(uint16)::array_uo,
+    array(int32)::array_di, array(int32)::array_uo, array(int32)::array_ui,
+    array(int32)::array_di, array(int32)::array_uo,
+    array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
+    array(int32)::array_di, array(int32)::array_uo, int::in, int::out) is det.
+finish(J, !Fate, !Dir, Pos, !Nb, !Actives, !NActive, !Free, !NFree) :-
+    ( if J >= !.NActive then
         true
+    else if uint16.to_int(!.Fate ^ unsafe_elem(J)) /\ ends = 0 then
+        finish(J + 1, !Fate, !Dir, Pos, !Nb, !Actives, !NActive, !Free,
+            !NFree)
     else
-        facing_edge(I, D + 1, Nb, Edges)
+        I = int32.to_int(!.Actives ^ unsafe_elem(J)),
+        unlink(I, 0, !Nb),
+        !Dir ^ unsafe_elem(int32.to_int(Pos ^ unsafe_elem(I))) := 0i32,
+        !Free ^ unsafe_elem(!.NFree) := int32.cast_from_int(I),
+        !:NFree = !.NFree + 1,
+        !:NActive = !.NActive - 1,
+        !Actives ^ unsafe_elem(J) := !.Actives ^ unsafe_elem(!.NActive),
+        !Fate ^ unsafe_elem(J) := !.Fate ^ unsafe_elem(!.NActive),
+        finish(J, !Fate, !Dir, Pos, !Nb, !Actives, !NActive, !Free, !NFree)
     ).
 
     % Tile I's neighbours from direction D on forget it.
@@ -407,10 +462,12 @@ unlink(I, D, !Nb) :-
         unlink(I, D + 1, !Nb)
     ).
 
-    % From the J'th active tile to the Kept'th: each live edge or corner
-    % that faces no tile, inside the world, starts one there.
+    % From the J'th active tile to the Kept'th, on the process's lane: each
+    % direction of its fate starts a tile there, if none has started there
+    % since the fate was decided.
     %
-:- pred grow(geometry::in, int::in, int::in, array(uint16)::array_ui,
+:- pred grow(geometry::in, int::in, int::in,
+    array(uint16)::array_di, array(uint16)::array_uo,
     array(int32)::array_di, array(int32)::array_uo,
     array(int32)::array_di, array(int32)::array_uo,
     array(int32)::array_di, array(int32)::array_uo,
@@ -418,19 +475,24 @@ unlink(I, D, !Nb) :-
     array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
     array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
     int::in, int::out) is det.
-grow(G, J, Kept, Edges, !Dir, !Pos, !Nb, !Quiet, !Actives, !NActive, !Free,
+grow(G, J, Kept, !Fate, !Dir, !Pos, !Nb, !Quiet, !Actives, !NActive, !Free,
         !NFree, !Overflow) :-
     ( if J >= Kept then
         true
     else
-        I = int32.to_int(!.Actives ^ unsafe_elem(J)),
-        grow_tile(G, I, 0, uint16.to_int(Edges ^ unsafe_elem(I)), !Dir, !Pos,
-            !Nb, !Quiet, !Actives, !NActive, !Free, !NFree, !Overflow),
-        grow(G, J + 1, Kept, Edges, !Dir, !Pos, !Nb, !Quiet, !Actives,
+        Bits = uint16.to_int(!.Fate ^ unsafe_elem(J)) /\ 0x1ff,
+        ( if Bits = 0 then
+            true
+        else
+            I = int32.to_int(!.Actives ^ unsafe_elem(J)),
+            grow_tile(G, I, 0, Bits, !Dir, !Pos, !Nb, !Quiet, !Actives,
+                !NActive, !Free, !NFree, !Overflow)
+        ),
+        grow(G, J + 1, Kept, !Fate, !Dir, !Pos, !Nb, !Quiet, !Actives,
             !NActive, !Free, !NFree, !Overflow)
     ).
 
-    % Tile I's directions from D on, of its live edges' bits Bits.
+    % Tile I's directions from D on, of the bits Bits.
     %
 :- pred grow_tile(geometry::in, int::in, int::in, int::in,
     array(int32)::array_di, array(int32)::array_uo,
