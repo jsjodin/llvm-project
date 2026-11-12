@@ -39,9 +39,10 @@ mlir::Value MerkGenerator::Slot(mlir::Type type, mlir::Location loc) {
   return slot;
 }
 
-// The scalars, integers and floats, arrays of them, and terms whose cells
-// hold only scalars can cross into a target region so far; a region gives
-// only scalars and arrays of them so far.
+// The scalars, integers and floats, arrays of them and of constants of
+// types of constants only, and terms whose cells hold only scalars can
+// cross into a target region so far; a region gives only scalars and such
+// arrays so far.
 static bool Scalar(mlir::Type type) {
   return mlir::isa<mlir::IntegerType, mlir::FloatType>(type);
 }
@@ -93,7 +94,7 @@ std::optional<unsigned> MerkGenerator::FlatCell(mlir::Type type) {
 }
 
 bool MerkGenerator::Mappable(mlir::Type type) {
-  return Givable(type) || Passed(type) || FlatCell(type);
+  return Givable(type) || ArrayMessage(type) || Passed(type) || FlatCell(type);
 }
 
 mlir::omp::TargetOp MerkGenerator::EnclosingTarget() {
@@ -1756,19 +1757,17 @@ std::optional<mlir::Value> MerkGenerator::IntegerClause(const omp::Leaf &leaf,
 }
 
 // An array is mapped as ClangIR maps a pointer's section, p[0:n]: by its own
-// pointer, with bounds over its size word and its elements, which only the
-// host needs, to copy them.
+// pointer, with bounds over its words, its header's and its elements', which
+// only the host needs, to copy them.
 mlir::Value MerkGenerator::MapArray(mlir::Value array,
     mlir::omp::ClauseMapFlags flags, llvm::StringRef name, mlir::Location loc) {
   auto ptr{mlir::LLVM::LLVMPointerType::get(&context_)};
   auto i64{builder_.getI64Type()};
   llvm::SmallVector<mlir::Value, 1> bounds;
   if (!target_.options().openMPIsTargetDevice) {
-    // Words 0 to the size.
-    mlir::Value upper{merk::ArraySizeOp::create(builder_, loc, i64, array)};
-    mlir::Value extent{
-        mlir::arith::AddIOp::create(
-            builder_, loc, upper, IntegerConstant(i64, 1, loc))};
+    mlir::Value extent{merk::ArrayWordsOp::create(builder_, loc, i64, array)};
+    mlir::Value upper{mlir::arith::SubIOp::create(
+        builder_, loc, extent, IntegerConstant(i64, 1, loc))};
     bounds.push_back(mlir::omp::MapBoundsOp::create(builder_, loc,
         builder_.getType<mlir::omp::MapBoundsType>(),
         IntegerConstant(i64, 0, loc), upper, extent,
@@ -2138,7 +2137,7 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
       constants[var] = value.getType();
       continue;
     }
-    if (!Givable(value.getType())) {
+    if (!Givable(value.getType()) && !ArrayMessage(value.getType())) {
       NotYet(at,
           "values of type " + semantics::TypeToString(*body.vars[var].type) +
               " in target regions");

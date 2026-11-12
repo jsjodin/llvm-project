@@ -88,8 +88,8 @@ upto_acc(N, Lo, !L) :-
 
 % The tag of [|] is 1, after the constants' 0; [] is the word 0.
 % LLVM-LABEL: define {{.*}} @array_from_list.main_2_0(
-% LLVM: call ptr addrspace(1) @merk_array_from_list(ptr addrspace(1) getelementptr (i8, ptr addrspace(1) addrspacecast (ptr @merk.term.{{[0-9]+}} to ptr addrspace(1)), i64 1), i64 1)
-% LLVM: call ptr addrspace(1) @merk_array_from_list(ptr addrspace(1) null, i64 1)
+% LLVM: call ptr addrspace(1) @merk_array_from_list(ptr addrspace(1) getelementptr (i8, ptr addrspace(1) addrspacecast (ptr @merk.term.{{[0-9]+}} to ptr addrspace(1)), i64 1), i64 1, i64 0)
+% LLVM: call ptr addrspace(1) @merk_array_from_list(ptr addrspace(1) null, i64 1, i64 0)
 % LLVM: call ptr addrspace(1) @merk_array_from_reverse_list(
 
 % OUTPUT:array([1.0, 2.5, 4.0])

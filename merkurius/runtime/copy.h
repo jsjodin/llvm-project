@@ -28,6 +28,7 @@
 #ifndef MERKURIUS_RUNTIME_COPY_H_
 #define MERKURIUS_RUNTIME_COPY_H_
 
+#include "array.h"
 #include "walk.h"
 
 namespace merkurius::runtime {
@@ -237,13 +238,17 @@ Word CopyTyped(Word value, const Type &type, Memory &memory) {
   }
   case Array: {
     const Word *array{reinterpret_cast<const Word *>(value)};
-    Word size{array[0]};
-    Word *copy{static_cast<Word *>(memory.Allocate(sizeof(Word) * (1 + size)))};
-    copy[0] = size;
+    Word size{ArraySize(array)};
+    Word words{ArrayWords(array)};
+    Word *copy{static_cast<Word *>(memory.Allocate(sizeof(Word) * words))};
+    copy[0] = array[0];
     Word element{(Word{0} << kTagBits) | kVariableTag};
-    // What is copied as it is, as CopyTyped returns it, is copied as a block.
-    if (size != 0 && CopiedAsItIs(Resolve(element, &type.environment).ctor)) {
-      __builtin_memcpy(copy + 1, array + 1, sizeof(Word) * size);
+    // What is copied as it is, as CopyTyped returns it, is copied as a
+    // block, as narrow elements always are (array.h).
+    if (size != 0 &&
+        (!IsWordArray(array) ||
+            CopiedAsItIs(Resolve(element, &type.environment).ctor))) {
+      __builtin_memcpy(copy + 1, array + 1, sizeof(Word) * (words - 1));
       return reinterpret_cast<Word>(copy);
     }
     for (Word i{0}; i < size; ++i) {

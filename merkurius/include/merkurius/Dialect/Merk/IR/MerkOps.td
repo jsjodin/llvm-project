@@ -679,14 +679,21 @@ def Merk_HasFunctorOp : Merk_Op<"has_functor", [NoMemoryEffect]> {
 // the others allocate one. None checks its indices: merk.check_index does.
 //===----------------------------------------------------------------------===//
 
-def Merk_ArrayNewOp : Merk_Op<"array_new"> {
+def Merk_ArrayNewOp : Merk_Op<"array_new", [AttrSizedOperandSegments]> {
   let summary = "allocate an array of a size, each element the same";
   let description = [{
-    Without `init`, the elements are undefined: for an empty array.
+    Without `init`, the elements are undefined: for an empty array. The
+    elements' width is their type's (runtime/array.h); for elements of a
+    type variable, `!merk.word`, the type_info of what it stands for, from
+    which the runtime finds it, and without one they are words.
   }];
-  let arguments = (ins I64:$size, Optional<AnyType>:$init);
+  let arguments = (ins I64:$size, Optional<AnyType>:$init,
+      Optional<Merk_TypeInfoType>:$element_type_info);
   let results = (outs Merk_ArrayType:$array);
-  let assemblyFormat = "$size (`,` $init^ `:` type($init))? attr-dict `->` type($array)";
+  let assemblyFormat = [{
+    $size (`,` $init^ `:` type($init))? (`width` `of` $element_type_info^)?
+    attr-dict `->` type($array)
+  }];
   let hasVerifier = 1;
 }
 
@@ -694,6 +701,17 @@ def Merk_ArraySizeOp : Merk_Op<"array_size"> {
   let summary = "the number of an array's elements";
   let arguments = (ins Merk_ArrayType:$array);
   let results = (outs I64:$size);
+  let assemblyFormat = "$array attr-dict `:` type($array)";
+}
+
+def Merk_ArrayWordsOp : Merk_Op<"array_words"> {
+  let summary = "the words of an array, its header's and its elements'";
+  let description = [{
+    What a copy of the array copies: one word for its header, and its
+    elements' words, which narrow elements share (runtime/array.h).
+  }];
+  let arguments = (ins Merk_ArrayType:$array);
+  let results = (outs I64:$words);
   let assemblyFormat = "$array attr-dict `:` type($array)";
 }
 
@@ -747,12 +765,15 @@ def Merk_ArrayFromListOp : Merk_Op<"array_from_list"> {
   let description = [{
     `list` is a `list.list(T)` and the array's elements are `T`s, each the
     word the list's cell holds; with `reversed`, the last first, as
-    `array.from_reverse_list` has them.
+    `array.from_reverse_list` has them. The elements' width is as for
+    `merk.array_new`.
   }];
-  let arguments = (ins Merk_TermType:$list, UnitAttr:$reversed);
+  let arguments = (ins Merk_TermType:$list, UnitAttr:$reversed,
+      Optional<Merk_TypeInfoType>:$element_type_info);
   let results = (outs Merk_ArrayType:$array);
   let assemblyFormat = [{
-    (`reversed` $reversed^)? $list attr-dict `:` type($list) `->` type($array)
+    (`reversed` $reversed^)? $list (`width` `of` $element_type_info^)?
+    attr-dict `:` type($list) `->` type($array)
   }];
 }
 

@@ -44,7 +44,8 @@ constexpr uint32_t rpcChunk{RpcOpcode(3)};
 
 // An array the device made, which a region gives, copied by the device into
 // chunks of host memory (rpcPinnedChunk): the buffer's words are the copy,
-// its size in elements and the copy's first chunk. The host copies it again
+// its header, which has its size and its elements' width (array.h), and the
+// copy's first chunk. The host copies it again
 // and answers with that copy's address, and frees the chunks.
 constexpr uint32_t rpcGiveArray{RpcOpcode(4)};
 
@@ -60,7 +61,7 @@ constexpr uint32_t rpcGiveArray{RpcOpcode(4)};
 // then answers.
 constexpr uint32_t rpcDrain{RpcOpcode(6)};
 
-// The oldest message of a mailbox of arrays, whose size its ring gave, as
+// The oldest message of a mailbox of arrays, whose header its ring gave, as
 // rpcTakeTerm takes a term: the host copies it into host memory that the
 // device reads, rather than into the device's memory, which the device's
 // caches may hold stale while it runs. The device copies it into its arena

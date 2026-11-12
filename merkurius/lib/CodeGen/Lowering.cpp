@@ -356,16 +356,46 @@ private:
   void LowerConstructors();
   mlir::Value CallRuntime(llvm::StringRef name, mlir::Type result,
       mlir::ValueRange arguments, mlir::Location);
-  mlir::Value InitialElement(
-      mlir::Operation *, unsigned operand, mlir::Location);
+  mlir::Value InitialElement(mlir::Value init, mlir::Location);
+  // An optional operand of an operation, by its group, or none.
+  template <typename Op>
+  static mlir::Value OptionalOperand(Op op, unsigned group) {
+    auto operands{op.getODSOperands(group)};
+    return operands.empty() ? mlir::Value{} : operands.front();
+  }
   void LowerArray(mlir::Operation *);
+  // The width's code of an array of the element type (runtime/array.h), or
+  // none for one whose arrays' headers alone say: a type variable's, and
+  // another module's abstract type's, whose layout this module does not see.
+  std::optional<std::int64_t> ArrayWidth(mlir::Type element) const;
+  // The width's code an array operation makes its array with: the element
+  // type's, or the runtime's, from the type_info of what a type variable
+  // stands for, its operand `typeInfo`.
+  mlir::Value MadeArrayWidth(
+      mlir::Operation *, mlir::Value typeInfo, mlir::Location);
+  // An array's header, and from it its size.
+  mlir::Value ArrayHeader(mlir::Value array, mlir::Location);
+  mlir::Value ArraySizeOf(mlir::Value array, mlir::Location);
+  // Its words, its header's and its elements', as merk.array_words has them.
+  mlir::Value ArrayWords(mlir::Value array, mlir::Location);
+  // The width of the elements of a merk.array_get's array, by its result,
+  // or a merk.array_set's, by its result, the array; their operands may be
+  // lowered already.
+  std::optional<std::int64_t> ElementWidth(mlir::Operation *op) const {
+    mlir::Type result{op->getResult(0).getType()};
+    auto array{mlir::dyn_cast<merk::ArrayType>(result)};
+    return ArrayWidth(array ? array.getElement() : result);
+  }
+  // The functions that read and write an element of an array whose width
+  // only its header says, as a word, inlined where they are called.
+  mlir::LLVM::LLVMFuncOp ArrayElementFunc(bool store);
   // An array element's word, from its value, and its value, from the word.
   mlir::Value ToBits(mlir::Value, mlir::Location);
   mlir::Value ToWord(mlir::Value, mlir::Location);
   mlir::Value FromWord(mlir::Value word, mlir::Type, mlir::Location);
-  // The address of an array's element.
-  mlir::Value ElementAddress(mlir::Value array, mlir::Value index,
-      mlir::Location);
+  // The address of an array's element, for the width's code.
+  mlir::Value ElementAddress(
+      mlir::Value array, mlir::Value index, std::int64_t width, mlir::Location);
   // A function of the runtime library, declared once.
   llvm::DenseMap<mlir::Operation *, llvm::SmallVector<bool>> foreignWords_;
   mlir::LLVM::LLVMFuncOp RuntimeFunc(llvm::StringRef name, mlir::Type result,
@@ -437,6 +467,7 @@ private:
   mlir::Block *fail_{nullptr};
   mlir::Block *topFail_{nullptr};
   mlir::LLVM::LLVMFuncOp throw_;
+  mlir::LLVM::LLVMFuncOp arrayLoad_, arrayStore_;
   // Whether this is a device's compile: OpenMP's, or of GPU processes'
   // kernels (kernels_).
   bool device_{false};
@@ -2792,11 +2823,10 @@ void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
         // As an unsigned comparison, a negative index is out of range too.
         next = SplitAfter(check);
         rewriter_.setInsertionPoint(check);
-        // The array's size is its first word; the array may still be
+        // The array's size is in its header; the array may still be
         // merk's, from an operation not lowered yet.
         mlir::Value array{check->getOperand(0)}, index{check->getOperand(1)};
-        mlir::Value size{mlir::LLVM::LoadOp::create(
-            rewriter_, loc, rewriter_.getI64Type(), array)};
+        mlir::Value size{ArraySizeOf(array, loc)};
         mlir::Value in{mlir::LLVM::ICmpOp::create(
             rewriter_, loc, mlir::LLVM::ICmpPredicate::ult, index, size)};
         mlir::Block *raise{rewriter_.createBlock(next)};
@@ -3118,15 +3148,195 @@ mlir::Value Lowerer::FromWord(
   return mlir::LLVM::BitcastOp::create(rewriter_, loc, type, word);
 }
 
-// Element I is the word after I + 1 words, the first being the size.
-mlir::Value Lowerer::ElementAddress(
-    mlir::Value array, mlir::Value index, mlir::Location loc) {
+// Element I of an array of the width's code is the I-th of its width after
+// the header word.
+mlir::Value Lowerer::ElementAddress(mlir::Value array, mlir::Value index,
+    std::int64_t width, mlir::Location loc) {
   auto i64{rewriter_.getI64Type()};
-  mlir::Value offset{mlir::LLVM::AddOp::create(rewriter_, loc, index,
-      mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 1))};
-  return mlir::LLVM::GEPOp::create(rewriter_, loc,
-      Convert(array.getType()), i64, array,
-      mlir::ValueRange{offset});
+  mlir::Type pointer{Convert(array.getType())};
+  if (width == 0) {
+    mlir::Value offset{mlir::LLVM::AddOp::create(rewriter_, loc, index,
+        mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 1))};
+    return mlir::LLVM::GEPOp::create(
+        rewriter_, loc, pointer, i64, array, mlir::ValueRange{offset});
+  }
+  mlir::Value elements{mlir::LLVM::GEPOp::create(rewriter_, loc, pointer, i64,
+      array, llvm::ArrayRef<mlir::LLVM::GEPArg>{1})};
+  return mlir::LLVM::GEPOp::create(rewriter_, loc, pointer,
+      rewriter_.getIntegerType(8 << (width - 1)), elements,
+      mlir::ValueRange{index});
+}
+
+std::optional<std::int64_t> Lowerer::ArrayWidth(mlir::Type element) const {
+  if (mlir::isa<merk::WordType>(element)) {
+    return std::nullopt;
+  }
+  if (mlir::isa<merk::TermType>(element)) {
+    const TermLayout *layout{LayoutOf(element)};
+    if (!layout) {
+      return std::nullopt;
+    }
+    // A notag's descriptor is a notag's, whatever its argument.
+    return layout->kind == TermLayout::Kind::Enum ? 3 : 0;
+  }
+  if (auto integer{mlir::dyn_cast<mlir::IntegerType>(element)}) {
+    switch (integer.getWidth()) {
+    case 8:
+      return 1;
+    case 16:
+      return 2;
+    case 32:
+      return 3;
+    default:
+      return 0;
+    }
+  }
+  return 0;
+}
+
+mlir::Value Lowerer::MadeArrayWidth(
+    mlir::Operation *op, mlir::Value typeInfo, mlir::Location loc) {
+  auto i64{rewriter_.getI64Type()};
+  mlir::Type element{
+      mlir::cast<merk::ArrayType>(op->getResult(0).getType()).getElement()};
+  if (std::optional<std::int64_t> width{ArrayWidth(element)}) {
+    return mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, *width);
+  }
+  if (!typeInfo) {
+    // An empty array's: no elements to be narrow.
+    return mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 0);
+  }
+  return CallRuntime("merk_array_width", i64, {ToC(typeInfo, loc)}, loc);
+}
+
+mlir::Value Lowerer::ArrayHeader(mlir::Value array, mlir::Location loc) {
+  return mlir::LLVM::LoadOp::create(
+      rewriter_, loc, rewriter_.getI64Type(), LoweredValue(array, loc));
+}
+
+// 1 + (size << log2(bytes) + 7) / 8, where a word's code, 0, is 8 bytes.
+mlir::Value Lowerer::ArrayWords(mlir::Value array, mlir::Location loc) {
+  auto i64{rewriter_.getI64Type()};
+  mlir::Value header{ArrayHeader(array, loc)};
+  mlir::Value size{mlir::LLVM::AndOp::create(rewriter_, loc, header,
+      mlir::LLVM::ConstantOp::create(
+          rewriter_, loc, i64, (std::int64_t{1} << 56) - 1))};
+  mlir::Value code{mlir::LLVM::LShrOp::create(rewriter_, loc, header,
+      mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 56))};
+  mlir::Value one{mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 1)};
+  mlir::Value shift{mlir::LLVM::SelectOp::create(rewriter_, loc,
+      mlir::LLVM::ICmpOp::create(rewriter_, loc, mlir::LLVM::ICmpPredicate::eq,
+          code, mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 0)),
+      mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 3),
+      mlir::LLVM::SubOp::create(rewriter_, loc, code, one))};
+  mlir::Value bytes{mlir::LLVM::ShlOp::create(rewriter_, loc, size, shift)};
+  mlir::Value words{mlir::LLVM::LShrOp::create(rewriter_, loc,
+      mlir::LLVM::AddOp::create(rewriter_, loc, bytes,
+          mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 7)),
+      mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 3))};
+  return mlir::LLVM::AddOp::create(rewriter_, loc, words, one);
+}
+
+mlir::Value Lowerer::ArraySizeOf(mlir::Value array, mlir::Location loc) {
+  auto i64{rewriter_.getI64Type()};
+  return mlir::LLVM::AndOp::create(rewriter_, loc, ArrayHeader(array, loc),
+      mlir::LLVM::ConstantOp::create(
+          rewriter_, loc, i64, (std::int64_t{1} << 56) - 1));
+}
+
+// load(array, i) and store(array, i, word): a word array's element is its
+// word; a narrow one's is its bits, zero-extended into a word, as ToBits
+// makes a narrow integer's (runtime/array.h, LoadElement and StoreElement).
+mlir::LLVM::LLVMFuncOp Lowerer::ArrayElementFunc(bool store) {
+  mlir::LLVM::LLVMFuncOp &func{store ? arrayStore_ : arrayLoad_};
+  if (func) {
+    return func;
+  }
+  mlir::OpBuilder::InsertionGuard guard{rewriter_};
+  rewriter_.setInsertionPointToEnd(module_.getBody());
+  mlir::MLIRContext *context{module_.getContext()};
+  mlir::Location loc{module_.getLoc()};
+  auto i64{rewriter_.getI64Type()};
+  mlir::Type pointer{HeapPointer()};
+  mlir::Type word{WordPointerOrInteger(context)};
+  llvm::SmallVector<mlir::Type> arguments{pointer, i64};
+  if (store) {
+    arguments.push_back(word);
+  }
+  func = mlir::LLVM::LLVMFuncOp::create(rewriter_, loc,
+      store ? "merk.array_store" : "merk.array_load",
+      mlir::LLVM::LLVMFunctionType::get(
+          store ? mlir::Type{mlir::LLVM::LLVMVoidType::get(context)} : word,
+          arguments),
+      mlir::LLVM::Linkage::Internal);
+  func.setNoUnwind(true);
+  func.setAlwaysInline(true);
+  mlir::Block *entry{func.addEntryBlock(rewriter_)};
+  mlir::Value array{entry->getArgument(0)}, index{entry->getArgument(1)};
+  mlir::Region &body{func.getBody()};
+  auto *words{new mlir::Block};
+  auto *narrow{new mlir::Block};
+  body.push_back(words);
+  body.push_back(narrow);
+  std::array<mlir::Block *, 3> widths;
+  for (mlir::Block *&block : widths) {
+    block = new mlir::Block;
+    body.push_back(block);
+  }
+  // A load's narrow bits come together here, to be a word.
+  mlir::Block *bits{nullptr};
+  if (!store) {
+    bits = new mlir::Block;
+    bits->addArgument(i64, loc);
+    body.push_back(bits);
+  }
+  rewriter_.setInsertionPointToEnd(entry);
+  mlir::Value code{
+      mlir::LLVM::LShrOp::create(rewriter_, loc, ArrayHeader(array, loc),
+          mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 56))};
+  mlir::Value isWords{
+      mlir::LLVM::ICmpOp::create(rewriter_, loc, mlir::LLVM::ICmpPredicate::eq,
+          code, mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 0))};
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, isWords, words, narrow);
+  rewriter_.setInsertionPointToEnd(words);
+  mlir::Value address{ElementAddress(array, index, 0, loc)};
+  if (store) {
+    mlir::LLVM::StoreOp::create(rewriter_, loc, entry->getArgument(2), address);
+    mlir::LLVM::ReturnOp::create(rewriter_, loc, mlir::ValueRange{});
+  } else {
+    mlir::LLVM::ReturnOp::create(rewriter_, loc,
+        mlir::ValueRange{
+            mlir::LLVM::LoadOp::create(rewriter_, loc, word, address)});
+  }
+  rewriter_.setInsertionPointToEnd(narrow);
+  SwitchOn(code, {{1, widths[0]}, {2, widths[1]}}, widths[2], loc);
+  for (auto [i, block] : llvm::enumerate(widths)) {
+    rewriter_.setInsertionPointToEnd(block);
+    auto width{static_cast<std::int64_t>(i + 1)};
+    auto type{rewriter_.getIntegerType(8 << i)};
+    mlir::Value at{ElementAddress(array, index, width, loc)};
+    if (store) {
+      mlir::Value value{entry->getArgument(2)};
+      if (value.getType() != i64) {
+        value = mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, value);
+      }
+      mlir::LLVM::StoreOp::create(rewriter_, loc,
+          mlir::LLVM::TruncOp::create(rewriter_, loc, type, value), at);
+      mlir::LLVM::ReturnOp::create(rewriter_, loc, mlir::ValueRange{});
+    } else {
+      mlir::Value loaded{mlir::LLVM::LoadOp::create(rewriter_, loc, type, at)};
+      mlir::LLVM::BrOp::create(rewriter_, loc,
+          mlir::ValueRange{
+              mlir::LLVM::ZExtOp::create(rewriter_, loc, i64, loaded)},
+          bits);
+    }
+  }
+  if (!store) {
+    rewriter_.setInsertionPointToEnd(bits);
+    mlir::LLVM::ReturnOp::create(
+        rewriter_, loc, mlir::ValueRange{ToWord(bits->getArgument(0), loc)});
+  }
+  return func;
 }
 
 mlir::Value Lowerer::CallRuntime(llvm::StringRef name, mlir::Type result,
@@ -3139,14 +3349,12 @@ mlir::Value Lowerer::CallRuntime(llvm::StringRef name, mlir::Type result,
 }
 
 // An array operation's initial element as a word. An absent one: any word.
-mlir::Value Lowerer::InitialElement(
-    mlir::Operation *op, unsigned operand, mlir::Location loc) {
-  return op->getNumOperands() > operand
-      ? ToWord(op->getOperand(operand), loc)
-      : device_ ? mlir::Value{mlir::LLVM::ConstantOp::create(
-                      rewriter_, loc, rewriter_.getI64Type(), 0)}
-                : mlir::Value{mlir::LLVM::ZeroOp::create(
-                      rewriter_, loc, HeapPointer())};
+mlir::Value Lowerer::InitialElement(mlir::Value init, mlir::Location loc) {
+  return init ? ToWord(init, loc)
+      : device_
+      ? mlir::Value{mlir::LLVM::ConstantOp::create(
+            rewriter_, loc, rewriter_.getI64Type(), 0)}
+      : mlir::Value{mlir::LLVM::ZeroOp::create(rewriter_, loc, HeapPointer())};
 }
 
 void Lowerer::LowerArray(mlir::Operation *op) {
@@ -3166,26 +3374,65 @@ void Lowerer::LowerArray(mlir::Operation *op) {
             RuntimeFunc("merk_gc_poll", mlir::LLVM::LLVMVoidType::get(op->getContext()), {}),
             mlir::ValueRange{}));
   }
-  if (mlir::isa<merk::ArrayNewOp>(op)) {
+  if (auto make{mlir::dyn_cast<merk::ArrayNewOp>(op)}) {
+    // The operands by their groups, which lowering may have retyped.
     result = CallRuntime("merk_array_new", ptr,
-        {op->getOperand(0), InitialElement(op, 1, loc)}, loc);
+        {make->getOperand(0), InitialElement(OptionalOperand(make, 1), loc),
+            MadeArrayWidth(op, OptionalOperand(make, 2), loc)},
+        loc);
   } else if (mlir::isa<merk::ArraySizeOp>(op)) {
-    result = mlir::LLVM::LoadOp::create(rewriter_, loc, i64, op->getOperand(0));
+    result = ArraySizeOf(op->getOperand(0), loc);
+  } else if (mlir::isa<merk::ArrayWordsOp>(op)) {
+    result = ArrayWords(op->getOperand(0), loc);
   } else if (mlir::isa<merk::ArrayGetOp>(op)) {
-    // A pointer is loaded as one, and a number as its bits, so that an array
-    // of numbers does not go through pointers.
+    std::optional<std::int64_t> width{ElementWidth(op)};
     mlir::Type type{Convert(op->getResult(0).getType())};
-    mlir::Value word{mlir::LLVM::LoadOp::create(rewriter_, loc,
-        mlir::isa<mlir::LLVM::LLVMPointerType>(type) ? type : mlir::Type{i64},
-        ElementAddress(op->getOperand(0), op->getOperand(1), loc))};
-    result = FromWord(word, type, loc);
+    mlir::Value array{LoweredValue(op->getOperand(0), loc)};
+    if (!width) {
+      mlir::Value word{mlir::LLVM::CallOp::create(rewriter_, loc,
+          ArrayElementFunc(/*store=*/false),
+          mlir::ValueRange{array, op->getOperand(1)})
+              .getResult()};
+      result = FromWord(word, type, loc);
+    } else if (*width != 0) {
+      // Its bits, extended into an enumeration's word.
+      mlir::Value bits{mlir::LLVM::LoadOp::create(rewriter_, loc,
+          rewriter_.getIntegerType(8 << (*width - 1)),
+          ElementAddress(array, op->getOperand(1), *width, loc))};
+      result = bits.getType() == type
+          ? bits
+          : mlir::LLVM::ZExtOp::create(rewriter_, loc, type, bits);
+    } else {
+      // A pointer is loaded as one, and a number as its bits, so that an
+      // array of numbers does not go through pointers.
+      mlir::Value word{mlir::LLVM::LoadOp::create(rewriter_, loc,
+          mlir::isa<mlir::LLVM::LLVMPointerType>(type) ? type : mlir::Type{i64},
+          ElementAddress(array, op->getOperand(1), 0, loc))};
+      result = FromWord(word, type, loc);
+    }
   } else if (mlir::isa<merk::ArraySetOp>(op)) {
+    std::optional<std::int64_t> width{ElementWidth(op)};
     mlir::Value element{op->getOperand(2)};
-    mlir::LLVM::StoreOp::create(rewriter_, loc,
-        mlir::isa<mlir::LLVM::LLVMPointerType>(Convert(element.getType()))
-            ? LoweredValue(element, loc)
-            : ToBits(element, loc),
-        ElementAddress(op->getOperand(0), op->getOperand(1), loc));
+    mlir::Value array{LoweredValue(op->getOperand(0), loc)};
+    if (!width) {
+      mlir::LLVM::CallOp::create(rewriter_, loc,
+          ArrayElementFunc(/*store=*/true),
+          mlir::ValueRange{array, op->getOperand(1), ToWord(element, loc)});
+    } else if (*width != 0) {
+      auto type{rewriter_.getIntegerType(8 << (*width - 1))};
+      mlir::Value value{LoweredValue(element, loc)};
+      if (value.getType() != type) {
+        value = mlir::LLVM::TruncOp::create(rewriter_, loc, type, value);
+      }
+      mlir::LLVM::StoreOp::create(rewriter_, loc, value,
+          ElementAddress(array, op->getOperand(1), *width, loc));
+    } else {
+      mlir::LLVM::StoreOp::create(rewriter_, loc,
+          mlir::isa<mlir::LLVM::LLVMPointerType>(Convert(element.getType()))
+              ? LoweredValue(element, loc)
+              : ToBits(element, loc),
+          ElementAddress(array, op->getOperand(1), 0, loc));
+    }
     result = op->getOperand(0);
   } else if (mlir::isa<merk::ArrayFillOp>(op)) {
     result = CallRuntime("merk_array_fill", ptr,
@@ -3195,18 +3442,22 @@ void Lowerer::LowerArray(mlir::Operation *op) {
   } else if (mlir::isa<merk::ArrayCopyOp>(op)) {
     result = CallRuntime("merk_array_copy", ptr, {op->getOperand(0)}, loc);
   } else if (mlir::isa<merk::ArrayFromListOp>(op)) {
-    result = CallRuntime(mlir::cast<merk::ArrayFromListOp>(op).getReversed()
-            ? "merk_array_from_reverse_list"
-            : "merk_array_from_list",
+    auto fromList{mlir::cast<merk::ArrayFromListOp>(op)};
+    result = CallRuntime(fromList.getReversed() ? "merk_array_from_reverse_list"
+                                                : "merk_array_from_list",
         ptr,
-        {ToWord(op->getOperand(0), loc),
+        {ToWord(fromList->getOperand(0), loc),
             mlir::LLVM::ConstantOp::create(
-                rewriter_, loc, i64, listTags_.lookup(op))},
+                rewriter_, loc, i64, listTags_.lookup(op)),
+            MadeArrayWidth(op, OptionalOperand(fromList, 1), loc)},
         loc);
   } else {
     assert(mlir::isa<merk::ArrayResizeOp>(op));
     result = CallRuntime("merk_array_resize", ptr,
-        {op->getOperand(0), op->getOperand(1), InitialElement(op, 2, loc)},
+        {op->getOperand(0), op->getOperand(1),
+            InitialElement(
+                op->getNumOperands() > 2 ? op->getOperand(2) : mlir::Value{},
+                loc)},
         loc);
   }
   rewriter_.replaceOp(op, result);
@@ -3539,12 +3790,11 @@ llvm::LogicalResult Lowerer::Lower() {
             merk::TypeInfoWordOp, merk::TypeclassInfoOp,
             merk::TypeclassInfoWordOp, merk::CallMethodOp, merk::ClosureOp,
             merk::ClosureWordOp, merk::CallClosureOp, merk::UnifyWordOp,
-            merk::CompareWordOp,
-            merk::StringCompareOp, merk::StringEqualOp,
-            merk::CompareTypeInfoOp, merk::ForeignCallOp, merk::ArrayNewOp, merk::ArraySizeOp,
-            merk::ArrayGetOp, merk::ArraySetOp, merk::ArrayFillOp,
-            merk::ArrayCopyOp, merk::ArrayFromListOp, merk::ArrayResizeOp,
-            merk::ContRefOp,
+            merk::CompareWordOp, merk::StringCompareOp, merk::StringEqualOp,
+            merk::CompareTypeInfoOp, merk::ForeignCallOp, merk::ArrayNewOp,
+            merk::ArraySizeOp, merk::ArrayGetOp, merk::ArraySetOp,
+            merk::ArrayFillOp, merk::ArrayCopyOp, merk::ArrayFromListOp,
+            merk::ArrayResizeOp, merk::ArrayWordsOp, merk::ContRefOp,
             merk::EnvNewOp, merk::EnvGetOp, merk::EnvSetOp, merk::HoleOp,
             merk::RefStoreOp>(op)) {
       ops.push_back(op);

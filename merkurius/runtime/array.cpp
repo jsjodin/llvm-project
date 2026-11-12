@@ -6,15 +6,17 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Arrays: a pointer to the array's size, a word, followed by its elements,
-// a word each, whatever their type (design document, "Type
-// representation"). Code generation reads and writes elements itself; these
-// are the operations that allocate, on the heap, as mrt.alloc allocates
+// Arrays: a pointer to the array's header, its size and its elements'
+// width, followed by its elements (array.h). Code generation reads and
+// writes elements itself, but for narrow ones in polymorphic code; these are
+// the operations that allocate, on the heap, as mrt.alloc allocates
 // (heap.h), and those over many elements. The device's runtime is compiled
 // from this file too, for the device code generation calls them from.
 //
 //===----------------------------------------------------------------------===//
 
+#include "array.h"
+#include "walk.h"
 #include <stdint.h>
 
 #ifdef __AMDGPU__
@@ -30,66 +32,97 @@ extern "C" void *merk_device_alloc(uint64_t bytes);
 extern "C" [[noreturn]] void merk_uncaught_exception(const char *exception);
 #endif
 
+using merkurius::runtime::ArrayHeader;
+using merkurius::runtime::ArraySize;
+using merkurius::runtime::ArrayWidthCode;
+using merkurius::runtime::ArrayWidthOfKind;
+using merkurius::runtime::ElementBytes;
+using merkurius::runtime::ElementWords;
+using merkurius::runtime::kArrayWords;
+using merkurius::runtime::LoadElement;
+using merkurius::runtime::StoreElement;
+using merkurius::runtime::Word;
+
 namespace {
-using Word = uint64_t;
 
-Word *Allocate(int64_t size) {
-  uint64_t bytes{sizeof(Word) * (1 + size)};
+// An array of `size` elements of the width's code, whose last word, which
+// narrow elements may not fill, is 0, so that an array's bytes depend only
+// on its elements.
+Word *Allocate(int64_t size, Word code) {
+  Word words{ElementWords(static_cast<Word>(size), code)};
+  uint64_t bytes{sizeof(Word) * (1 + words)};
 #ifdef __AMDGPU__
-  Word *words{static_cast<Word *>(merk_device_alloc(bytes))};
+  Word *array{static_cast<Word *>(merk_device_alloc(bytes))};
 #else
-  Word *words{static_cast<Word *>(merkurius::runtime::Allocate(bytes))};
+  Word *array{static_cast<Word *>(merkurius::runtime::Allocate(bytes))};
 #endif
-  words[0] = static_cast<Word>(size);
-  return words;
-}
-} // namespace
-
-// An array of `size` elements, each `init`. The size is not negative: the
-// library's check comes first.
-extern "C" Word *merk_array_new(int64_t size, Word init) {
-  Word *array{Allocate(size)};
-  for (int64_t i = 0; i < size; ++i) {
-    array[1 + i] = init;
+  array[0] = ArrayHeader(static_cast<Word>(size), code);
+  if (words > 0) {
+    array[words] = 0;
   }
   return array;
 }
 
+// Sets elements `lo` to `hi`, inclusive, to the word's bits.
+void Fill(Word *array, int64_t lo, int64_t hi, Word element) {
+  if (ArrayWidthCode(array) == kArrayWords) {
+    for (int64_t i = lo; i <= hi; ++i) {
+      array[1 + i] = element;
+    }
+    return;
+  }
+  for (int64_t i = lo; i <= hi; ++i) {
+    StoreElement(array, static_cast<Word>(i), element);
+  }
+}
+
+} // namespace
+
+// An array of `size` elements, each `init`, of the width's code (array.h).
+// The size is not negative: the library's check comes first.
+extern "C" Word *merk_array_new(int64_t size, Word init, Word code) {
+  Word *array{Allocate(size, code)};
+  Fill(array, 0, size - 1, init);
+  return array;
+}
+
 extern "C" Word *merk_array_copy(const Word *array) {
-  int64_t size{static_cast<int64_t>(array[0])};
-  Word *copy{Allocate(size)};
-  __builtin_memcpy(copy + 1, array + 1, sizeof(Word) * size);
+  Word size{ArraySize(array)};
+  Word code{ArrayWidthCode(array)};
+  Word *copy{Allocate(static_cast<int64_t>(size), code)};
+  __builtin_memcpy(
+      copy + 1, array + 1, sizeof(Word) * ElementWords(size, code));
   return copy;
 }
 
 // A new array of `size` elements: as many of `array`'s as fit, then `init`.
 extern "C" Word *merk_array_resize(
     const Word *array, int64_t size, Word init) {
-  int64_t old{static_cast<int64_t>(array[0])};
+  auto old{static_cast<int64_t>(ArraySize(array))};
+  Word code{ArrayWidthCode(array)};
   int64_t kept{old < size ? old : size};
-  Word *resized{Allocate(size)};
-  __builtin_memcpy(resized + 1, array + 1, sizeof(Word) * kept);
-  for (int64_t i = kept; i < size; ++i) {
-    resized[1 + i] = init;
-  }
+  Word *resized{Allocate(size, code)};
+  __builtin_memcpy(
+      resized + 1, array + 1, static_cast<uint64_t>(kept) * ElementBytes(code));
+  Fill(resized, kept, size - 1, init);
   return resized;
 }
 
-// A new array of a list's elements, in order. A cell of [|] is the word
-// `list` when its primary tag is `tag`, and holds the head and then the
-// tail; the list ends at [], whose tag is another.
-extern "C" Word *merk_array_from_list(Word list, Word tag) {
+// A new array of a list's elements, in order, of the width's code. A cell of
+// [|] is the word `list` when its primary tag is `tag`, and holds the head
+// and then the tail; the list ends at [], whose tag is another.
+extern "C" Word *merk_array_from_list(Word list, Word tag, Word code) {
   constexpr Word kTagMask{7};
   int64_t size{0};
   for (Word cell = list; (cell & kTagMask) == tag;
       cell = reinterpret_cast<const Word *>(cell - tag)[1]) {
     ++size;
   }
-  Word *array{Allocate(size)};
+  Word *array{Allocate(size, code)};
   Word cell{list};
   for (int64_t i = 0; i < size; ++i) {
     const Word *fields{reinterpret_cast<const Word *>(cell - tag)};
-    array[1 + i] = fields[0];
+    StoreElement(array, static_cast<Word>(i), fields[0]);
     cell = fields[1];
   }
   return array;
@@ -97,12 +130,14 @@ extern "C" Word *merk_array_from_list(Word list, Word tag) {
 
 // A new array of a list's elements, the last first, as
 // array.from_reverse_list has them.
-extern "C" Word *merk_array_from_reverse_list(Word list, Word tag) {
-  Word *array{merk_array_from_list(list, tag)};
-  for (int64_t i = 0, j = static_cast<int64_t>(array[0]) - 1; i < j; ++i, --j) {
-    Word element{array[1 + i]};
-    array[1 + i] = array[1 + j];
-    array[1 + j] = element;
+extern "C" Word *merk_array_from_reverse_list(Word list, Word tag, Word code) {
+  Word *array{merk_array_from_list(list, tag, code)};
+  for (int64_t i = 0, j = static_cast<int64_t>(ArraySize(array)) - 1; i < j;
+      ++i, --j) {
+    Word element{LoadElement(array, static_cast<Word>(i))};
+    StoreElement(
+        array, static_cast<Word>(i), LoadElement(array, static_cast<Word>(j)));
+    StoreElement(array, static_cast<Word>(j), element);
   }
   return array;
 }
@@ -110,10 +145,26 @@ extern "C" Word *merk_array_from_reverse_list(Word list, Word tag) {
 // Sets the elements from `lo` to `hi`, inclusive, to `element`, in place.
 extern "C" Word *merk_array_fill(
     Word *array, int64_t lo, int64_t hi, Word element) {
-  for (int64_t i = lo; i <= hi; ++i) {
-    array[1 + i] = element;
-  }
+  Fill(array, lo, hi, element);
   return array;
+}
+
+// Element `i` of an array of narrow elements, as a word, zero-extended, and
+// the store of one, for polymorphic code, which reads a word array's
+// elements itself (Lowering.cpp, LowerArray).
+extern "C" Word merk_array_load(const Word *array, int64_t i) {
+  return LoadElement(array, static_cast<Word>(i));
+}
+
+extern "C" void merk_array_store(Word *array, int64_t i, Word element) {
+  StoreElement(array, static_cast<Word>(i), element);
+}
+
+// The width's code of an array whose elements are of the type_info's type,
+// for polymorphic code that makes one.
+extern "C" Word merk_array_width(Word typeInfo) {
+  return ArrayWidthOfKind(
+      merkurius::runtime::Resolve(typeInfo, nullptr).ctor->kind);
 }
 
 #ifndef __AMDGPU__

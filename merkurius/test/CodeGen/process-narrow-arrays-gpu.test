@@ -1,0 +1,13 @@
+process-narrow-arrays.m's mirror spawned on the machine's GPU: uint8 arrays
+of 0 to 70 elements to it, and uint8, int16 and colour arrays that it makes
+back, each copied by its header, and nothing left allocated.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-narrow-arrays.m -o %t2
+RUN: %gpu-env timeout -k 1 60 %t2 gpu | FileCheck %S/process-narrow-arrays.m --match-full-lines --strict-whitespace
+RUN: %gpu-env MERK_CHECK_PINNED=1 MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %s --match-full-lines
+CHECK:empty answered
+CHECK-NEXT:0 wrong of 70
+CHECK-DAG:Mercury runtime: 0 chunks of host memory for devices' messages are allocated
+CHECK-DAG:Mercury runtime: 0 messages are neither read nor freed
+CHECK-DAG:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated

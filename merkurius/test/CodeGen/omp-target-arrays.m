@@ -21,12 +21,13 @@
 % REQUIRES: amdgpu-registered-target, libomp
 
 % The squares region updates A0 through a call: the only given array of
-% its type, mapped tofrom over its 11 words, 0 to its size.
+% its type, mapped tofrom over its 11 words, its header's and its
+% elements'.
 % MERK-LABEL: merk.proc @omp_target_arrays.main_2_0()
 % MERK: %[[A0:.*]] = merk.array_new
-% MERK: %[[SIZE:.*]] = merk.array_size %[[A0]] : <i64>
-% MERK: %[[EXTENT:.*]] = arith.addi %[[SIZE]], %{{.*}} : i64
-% MERK: %[[BOUNDS:.*]] = omp.map.bounds lower_bound(%{{.*}} : i64) upper_bound(%[[SIZE]] : i64) extent(%[[EXTENT]] : i64)
+% MERK: %[[EXTENT:.*]] = merk.array_words %[[A0]] : <i64>
+% MERK: %[[UPPER:.*]] = arith.subi %[[EXTENT]], %{{.*}} : i64
+% MERK: %[[BOUNDS:.*]] = omp.map.bounds lower_bound(%{{.*}} : i64) upper_bound(%[[UPPER]] : i64) extent(%[[EXTENT]] : i64)
 % MERK-NEXT: %[[P:.*]] = builtin.unrealized_conversion_cast %[[A0]] : !merk.array<i64> to !llvm.ptr
 % MERK-NEXT: omp.map.info var_ptr(%[[P]] : !llvm.ptr, i64) map_clauses(tofrom) capture(ByRef) bounds(%[[BOUNDS]]) name("A0")
 % Its number, and its pointer.

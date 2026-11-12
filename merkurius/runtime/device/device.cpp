@@ -91,6 +91,8 @@ int64_t Deadline(int64_t milliseconds) {
 
 } // namespace
 
+using merkurius::runtime::ArrayWords;
+using merkurius::runtime::ArrayWordsOfHeader;
 using merkurius::runtime::DeviceRing;
 using merkurius::runtime::kArenaClearWords;
 using merkurius::runtime::kBumpWords;
@@ -1676,9 +1678,10 @@ extern "C" int merk_device_receive_array(
     return TeamReceive(handle, milliseconds, message);
   }
   RingEntry *entry{nullptr};
-  uint64_t size{0};
+  // The slot is the array's header (array.h).
+  uint64_t header{0};
   if (!Wait(milliseconds,
-          [&]() { return Look(handle, kRingOfArrays, entry, &size); })) {
+          [&]() { return Look(handle, kRingOfArrays, entry, &header); })) {
     return 0;
   }
   bool found{false};
@@ -1701,9 +1704,10 @@ extern "C" int merk_device_receive_array(
   }
   // The host wrote the copy before it answered.
   __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
-  auto *array{static_cast<uint64_t *>(
-      merk_device_alloc(sizeof(uint64_t) * (1 + size)))};
-  for (uint64_t i{0}; i <= size; ++i) {
+  uint64_t words{ArrayWordsOfHeader(header)};
+  auto *array{
+      static_cast<uint64_t *>(merk_device_alloc(sizeof(uint64_t) * words))};
+  for (uint64_t i{0}; i < words; ++i) {
     array[i] = copy[i];
   }
   *message = reinterpret_cast<uint64_t>(array);
@@ -1811,7 +1815,7 @@ namespace {
 // "Flat records"): one lane copies word by word, until messages travel as
 // their bytes and a wave's lanes copy them together.
 uint64_t *CopyToHost(const uint64_t *array, PinnedMemory &memory) {
-  uint64_t words{1 + array[0]};
+  uint64_t words{ArrayWords(array)};
   auto *copy{
       static_cast<uint64_t *>(memory.Allocate(sizeof(uint64_t) * words))};
   for (uint64_t i{0}; i < words; ++i) {
@@ -1837,6 +1841,7 @@ extern "C" uint64_t *merk_device_give_array(uint64_t *array, int64_t number) {
   rpc::Client::Port port{__llvm_rpc_client.open<rpcGiveArray>()};
   port.send([&](rpc::Buffer *buffer, uint32_t) {
     buffer->data[0] = reinterpret_cast<uint64_t>(pinned);
+    // Its header, from which the host finds its bytes.
     buffer->data[1] = array[0];
     buffer->data[2] = reinterpret_cast<uint64_t>(memory.First());
   });

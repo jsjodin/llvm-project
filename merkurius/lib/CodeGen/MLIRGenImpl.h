@@ -388,6 +388,8 @@ private:
   bool CompiledArrayCall(const Body &, const semantics::Symbol &);
   bool ArrayBuiltin(const Body &, const Procedure &,
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
+  mlir::Value ElementTypeInfo(const semantics::Type *array,
+      mlir::Type represented, mlir::Location, semantics::TokenRange);
   // A call of a field's function or its update function, which no module
   // defines: the unifications that the manual defines it by.
   void FieldAccess(const Body &, const Procedure &,

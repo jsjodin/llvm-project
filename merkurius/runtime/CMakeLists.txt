@@ -55,6 +55,7 @@ if (TARGET clang AND TARGET llvm-ar AND "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
       ${CMAKE_CURRENT_SOURCE_DIR}/device-ring.h
       ${CMAKE_CURRENT_SOURCE_DIR}/place.h
       ${CMAKE_CURRENT_SOURCE_DIR}/copy.h
+      ${CMAKE_CURRENT_SOURCE_DIR}/array.h
       ${CMAKE_CURRENT_SOURCE_DIR}/walk.h
       ${CMAKE_CURRENT_SOURCE_DIR}/descriptor.h
     COMMENT "Building the Merkurius device runtime for AMD GPUs")
@@ -63,6 +64,8 @@ if (TARGET clang AND TARGET llvm-ar AND "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
       -flto -fvisibility=hidden -fno-exceptions -fno-rtti -std=c++17
       -c ${CMAKE_CURRENT_SOURCE_DIR}/array.cpp -o ${merk_device_array_bc}
     DEPENDS clang ${CMAKE_CURRENT_SOURCE_DIR}/array.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/array.h ${CMAKE_CURRENT_SOURCE_DIR}/walk.h
+      ${CMAKE_CURRENT_SOURCE_DIR}/descriptor.h
     COMMENT "Building the Merkurius device runtime's arrays for AMD GPUs")
   add_custom_command(OUTPUT ${merk_device_lib}
     COMMAND ${CMAKE_COMMAND} -E remove -f ${merk_device_lib}
