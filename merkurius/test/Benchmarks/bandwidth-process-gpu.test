@@ -1,0 +1,22 @@
+The memory bandwidth benchmark's kernels run by a GPU process across its
+worker teams, on small arrays (benchmarks/bandwidth/bandwidth-process.m): the
+arrays' final values and the dot product, which is a loop with a reduction,
+are right.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/bandwidth/bandwidth-process.m -o %t
+RUN: %gpu-env BANDWIDTH_ARRAY_SIZE=100003 BANDWIDTH_NUM_TIMES=5 %t | FileCheck %s
+
+Without -fopenmp the process runs the loops on its own lane.
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/bandwidth/bandwidth-process.m -o %t.sequential
+RUN: %gpu-env BANDWIDTH_ARRAY_SIZE=100003 BANDWIDTH_NUM_TIMES=5 %t.sequential | FileCheck %s
+
+CHECK: Merkurius memory bandwidth benchmark, GPU process
+CHECK: Running kernels 5 times
+CHECK-NOT: Validation failed
+CHECK: Function    MBytes/sec  Min (sec)   Max         Average
+CHECK-NEXT: Copy
+CHECK-NEXT: Mul
+CHECK-NEXT: Add
+CHECK-NEXT: Triad
+CHECK-NEXT: Dot

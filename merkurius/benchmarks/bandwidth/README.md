@@ -108,6 +108,31 @@ start: a Mercury array's size word puts them 8 bytes past the device block's
 start, and a stream from elements not on 256 bytes is up to a quarter slower
 (design document, Measurements, "Dense stencils").
 
+## In a GPU process
+
+`bandwidth-process.m` runs the same kernels, with the same check and table,
+in a GPU process: each kernel is a do loop under `%$omp distribute parallel
+do`, which the process runs across its worker teams, and Dot and the check's
+average errors are loops with reductions. The process makes the arrays in
+its arena and times each kernel with libc's clock on the device; it sends the
+times and what the check needs to the host, which prints the table. Build it
+with `-fprocess-declarations`, and give the device's arenas room for the
+three arrays:
+
+```sh
+merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 \
+  bandwidth-process.m -o process
+MERK_DEVICE_ARENA_BYTES=2147483648 ./process
+```
+
+`run.sh` runs it after the OpenMP GPU build. On 2026-11-11 its kernels were
+6 to 42% slower than the target regions', as the processes' kernel takes 205
+VGPRs and so runs a quarter of the waves; with the kernel capped at 128 they
+were within 14%, and Copy faster. A loop costs about 2 µs, a target region
+about 16. The numbers are in the design document, Measurements, "Memory
+bandwidth". `test/Benchmarks/bandwidth-process-gpu.test` runs it on small
+arrays.
+
 ## Differences from BabelStream
 
 - One program for every build: BabelStream's OpenMP model chooses between
