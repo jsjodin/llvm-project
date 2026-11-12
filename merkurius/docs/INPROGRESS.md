@@ -4551,12 +4551,22 @@ beat, as a decomposition fixed in advance computes every tile.
     8192²: all the same (`Benchmarks/life-sparse.test`,
     `life-sparse-gpu.test`).
   - *First timings, not yet measurements* (s6 measures): at the default
-    world, about 45 active tiles, a step takes 72 µs on average against
-    dense `life.c`'s 2.0 ms with `uint8_t` cells; but 47 µs of it is the
+    world, about 45 active tiles, a step took 72 µs on average against
+    dense `life.c`'s 2.0 ms with `uint8_t` cells; but 47 µs of it was the
     bookkeeping on the process's one lane, about 1 µs a tile, a chain of
-    dependent loads from global memory. The design's fallback (above,
-    bookkeeping) applies: decide each tile's fate in parallel, across the
-    teams, and leave the lane only the tiles that start or end.
+    dependent loads from global memory.
+  - *Parallel bookkeeping,* the design's fallback (above, bookkeeping),
+    done 2026-11-12: `decide`, a loop under `distribute parallel do` over
+    the active tiles, finds each tile's quiet steps and its fate, from the
+    step's live cells and edges alone, as bits by its place in the
+    actives: the directions where its live edges face no tile inside the
+    world, and a bit that ends it; it reduces the count of tiles with a
+    fate. Only when that is not zero does the lane end the tiles that end
+    (`finish`, moving the last tile's fate with it) and start the tiles
+    the fates ask for (`grow`, which skips a direction a tile started
+    earlier in the same pass already fills). The default world's step now
+    takes 34 µs on average, the bookkeeping 12 µs, most steps no more
+    than the one loop.
 - (s6) `life-sparse.c`, the C reference. Measurements against it and
   against dense C, with the active tiles over time.
 

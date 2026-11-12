@@ -127,10 +127,13 @@ for the same world and `LIFE_STEPS` (1000).
 - **A step** is a loop under `distribute` over the active tiles, a team
   for each, around a loop under `parallel do` over the tile's cells, which
   reduces its live cells and the bits of its live edges and corners.
-- **The bookkeeping,** on the process's lane after each step, ends a tile
-  that has had no live cell, and no live edge of a neighbour facing it, for
-  four steps, and starts one beyond each live edge or corner that faces no
-  tile; a loop across the teams zeroes the new tiles' cells.
+- **The bookkeeping** after each step is a loop across all the teams'
+  threads that decides each tile's fate from the step's results: it ends
+  when it has had no live cell, and no live edge of a neighbour facing it,
+  for four steps, and starts a tile beyond each live edge or corner that
+  faces none, inside the world. Only when some tile has a fate does the
+  process's lane end and start tiles, and a loop across the teams zero the
+  new tiles' cells.
 
 The output is the population, the checksum, the most active tiles at once
 and at the end, and the steps' times, with the bookkeeping's part;
