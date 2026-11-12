@@ -140,6 +140,37 @@ and at the end, and the steps' times, with the bookkeeping's part;
 `LIFE_TRACE=1` prints each step's tiles and time, for a chart. The first
 argument `host` spawns the process at the host.
 
+`life-sparse.c` is the C reference: the same world, tiles and rules in C
+with OpenMP, as a C programmer would write them for a GPU. The host keeps
+the tiles' tables and does the bookkeeping; the GPU keeps the cells. Each
+step is one kernel, `target teams distribute` over the active tiles with
+`parallel for` over their cells, which reduce each tile's live cells and
+edges. The host copies those back, a pair for each tile, and only when
+tiles end or start copies the active tiles' neighbours to the GPU and
+zeroes the new tiles there, a second kernel. It prints what `life-sparse.m`
+prints, active tiles too.
+
+`compare-sparse.sh` runs `life-sparse.m`, `life-sparse.c` and dense
+`life.c` with `uint8_t` cells on the same world in turns, checks that they
+give the same cells and that the sparse ones have the same tiles, and
+prints each one's median average step and bookkeeping. The first round
+writes both sparse programs' steps, with their active tiles, to
+`mercury.trace` and `c.trace`, for a chart.
+
+2026-11-12, gfx1030, on compute units 0-39, a soup of 256², 1000 steps, the
+median over 5 rounds of each program's average step:
+
+| World, tile | Active tiles, most | Mercury, GPU process | C, sparse | C, dense |
+| --- | ---: | ---: | ---: | ---: |
+| 8192², 64² | 45 | 33 µs | 62 µs | 2000 µs |
+| 8192², 32² | 126 | 42 µs | 64 µs | 1999 µs |
+| 8192², 128² | 21 | 59 µs | 88 µs | 1998 µs |
+| 2048², 64² | 57 | 37 µs | 65 µs | 138 µs |
+
+The GPU process starts no kernel and copies nothing. With 64² tiles, a
+third of its step is the bookkeeping, against nearly half of C's (design
+document, Measurements, Dense stencils).
+
 ## Tests
 
 `test/Benchmarks/life.test` runs `life.m` sequentially and on the host's
@@ -148,7 +179,7 @@ kernels are SPMD and that no step copies the arrays; `life-c-gpu.test` the C
 program with both cell types; `life-two.test` and `life-two-gpu.test` the two
 nodes, with even and odd splits; `life-process-gpu.test` the GPU process,
 in parallel and on the process's own lane, and with `uint8` cells;
-`life-sparse.test` the sparse program at the host and `life-sparse-gpu.test`
-on the GPU. All check the population and checksum, which come from an
+`life-sparse.test` the sparse programs at the host, `life-sparse-gpu.test`
+the Mercury one on the GPU and `life-sparse-c-gpu.test` the C one. All check the population and checksum, which come from an
 independent program in Python, or from the dense programs for the sparse
 one.

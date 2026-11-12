@@ -1,0 +1,30 @@
+The C version of Life on sparse tiles (benchmarks/life/life-sparse.c),
+which compare-sparse.sh runs against life-sparse.m, on the machine's GPU:
+its population, checksum and active tiles are life-sparse.m's, and the
+dense programs' for the same world (life-sparse.test), the default world
+too.
+REQUIRES: amdgpu-gpu
+
+RUN: clang -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/life/life-sparse.c -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 timeout -k 1 60 %t | FileCheck %s --check-prefix=A
+A: Game of Life, C, sparse tiles
+A-NEXT: World: 256 x 256 cells, tiles of 16 x 16, 256 in the pool
+A-NEXT: Soup: 64 x 64 cells at the centre
+A-NEXT: Steps: 50
+A-NEXT: Population: 562
+A-NEXT: Checksum: 17668223
+A-NEXT: Active tiles: 36 at most, 32 at the end
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIFE_WORLD=200 LIFE_TILE=8 LIFE_SOUP=37 LIFE_STEPS=120 timeout -k 1 60 %t | FileCheck %s --check-prefix=ODD
+ODD: Population: 157
+ODD-NEXT: Checksum: 2963654
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIFE_WORLD=256 LIFE_TILE=8 LIFE_SOUP=256 LIFE_STEPS=100 timeout -k 1 60 %t | FileCheck %s --check-prefix=WHOLE
+WHOLE: Population: 4947
+WHOLE-NEXT: Checksum: 158368224
+WHOLE-NEXT: Active tiles: 1024 at most, 856 at the end
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout -k 1 60 %t | FileCheck %s --check-prefix=DEFAULT
+DEFAULT: World: 8192 x 8192 cells, tiles of 64 x 64, 8192 in the pool
+DEFAULT: Population: 3719
+DEFAULT-NEXT: Checksum: 124925383998
+DEFAULT-NEXT: Active tiles: 45 at most, 43 at the end
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIFE_WORLD=256 LIFE_TILE=8 LIFE_SOUP=256 LIFE_STEPS=10 LIFE_CAPACITY=100 not %t | FileCheck %s --check-prefix=FULL
+FULL: The pool ran out of tiles: raise LIFE_CAPACITY.

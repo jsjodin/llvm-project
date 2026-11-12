@@ -4568,11 +4568,22 @@ beat, as a decomposition fixed in advance computes every tile.
     takes 34 µs on average, the bookkeeping 12 µs, most steps no more
     than the one loop.
 - (s6) `life-sparse.c`, the C reference. Measurements against it and
-  against dense C, with the active tiles over time.
+  against dense C, with the active tiles over time. Done 2026-11-12:
+  `life-sparse.c` keeps the tiles' tables on the host, a kernel a step,
+  the results copied back by the active tiles' slots and their neighbours
+  forward only when tiles change; it gives the same cells and the same
+  active tiles at every step as `life-sparse.m` (`Benchmarks/
+  life-sparse.test` at the host, `life-sparse-c-gpu.test`), and
+  `compare-sparse.sh` runs the three programs in turn. At the default
+  world the GPU process's step is 33 µs, C's sparse one 62 µs and dense
+  C's 2.0 ms; 64² tiles beat 32² and 128² (design document, Measurements,
+  Dense stencils). Step 3 is done.
 
 *Open.*
 - The tile size. 64² cells of one byte are 4 KiB. Smaller tiles follow the
   gliders more closely; larger ones waste less on teams and bookkeeping.
+  Measured 2026-11-12 (s6): 64² is the fastest at the default world, 33 µs
+  a step against 42 µs for 32² and 59 µs for 128².
 - Teams with no tile in a step: with fewer active tiles than teams, the
   rest wait. Fewer teams for a small loop is open above (Which teams a loop
   uses).

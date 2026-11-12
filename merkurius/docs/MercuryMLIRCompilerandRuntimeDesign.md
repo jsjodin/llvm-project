@@ -4323,6 +4323,47 @@ Mercury's 8-byte ones, and 39% faster at 1024², where a step is short and
 the GPU process starts no kernel. The device's code loads and stores single
 bytes, and LLVM merges a row's neighbours' loads.
 
+**Game of Life on sparse tiles,** 2026-11-12, on 426e6dcfb065 with
+`benchmarks/life/life-sparse.c` and `compare-sparse.sh`, not committed
+(docs/INPROGRESS.md, sparse tiles on one place, s6), on compute units 0-39:
+`life-sparse.m`, the active tiles stepped and their bookkeeping done in one
+GPU process; `life-sparse.c`, the same tiles in C, a kernel a step, with
+the step's results copied back and the bookkeeping on the host; and dense
+`life.c` with `uint8_t` cells over the whole world. A soup of 256² at the
+world's centre, 1000 steps, 5 rounds in turn, the median of each program's
+average step but the first; all gave the same cells, and the sparse ones the
+same active tiles at every step. Bookkeeping is the part of the step after
+the cells are stepped: in the GPU process, the loop that decides the tiles'
+fates and the lane's starting and ending of tiles; in C, the copies both
+ways, the host's bookkeeping and the zeroing kernel.
+
+| World, tile | Active tiles, most | Mercury, GPU process | Its bookkeeping | C, sparse | Its bookkeeping | C, dense |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8192², 64² | 45 | 33 µs | 12 µs | 62 µs | 28 µs | 2000 µs |
+| 8192², 32² | 126 | 42 µs | 18 µs | 64 µs | 35 µs | 1999 µs |
+| 8192², 128² | 21 | 59 µs | 15 µs | 88 µs | 28 µs | 1998 µs |
+| 2048², 64² | 57 | 37 µs | 13 µs | 65 µs | 31 µs | 138 µs |
+
+- *Sparseness:* at the default world, about 45 of its 16384 tiles are
+  active, and the GPU process's step is 61 times faster than dense C's. At
+  2048², a world 16 times smaller, it is still 3.7 times faster.
+- *Against sparse C:* the GPU process is 1.5 to 1.9 times faster. It starts
+  no kernel and copies nothing, and its bookkeeping takes about half of
+  C's, which copies the step's results back over PCIe every step, and the
+  neighbours forward when tiles change.
+- *The cells' part* (the step less the bookkeeping): the GPU process 21 µs
+  at 64², against C's 34 µs, for 184 thousand cells, about 9 Gcells/s, a
+  quarter of the dense rate, since some 40 teams leave most of the GPU
+  idle and each team's step is latency's.
+- *The tile size:* 64² is the fastest. Tiles of 32² cover the gliders more
+  closely, 126 tiles of a quarter the cells, but each team's tile is too
+  small to hide its latency and there are more fates to decide; 128² tiles
+  step 4 times the cells of a 64² tile with the same team, and a step is
+  longer than the gain in bookkeeping.
+- *Over time:* the active tiles go from 36 at the soup's start to 32 as it
+  burns down, then 43 to 45 as gliders fly out, each one's tiles starting
+  ahead of it and ending behind (`compare-sparse.sh`'s traces).
+
 ### Message latency
 
 The round trip of a one-word message, in microseconds: 20000 rounds, after 100
