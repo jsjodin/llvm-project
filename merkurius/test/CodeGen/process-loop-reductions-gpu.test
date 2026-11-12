@@ -1,0 +1,20 @@
+process-loop-reductions.m's reducer spawned on the machine's GPU
+(docs/INPROGRESS.md, GPU processes that run loops): its loops run across
+every team of its module's kernel that no process uses, each thread with
+partial results of the loops' reductions, which its team combines across
+its waves and the process across the teams, from loops of one to a million
+iterations.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-loop-reductions.m -o %t2
+RUN: %gpu-env %t2 gpu | FileCheck %S/process-loop-reductions.m --match-full-lines --strict-whitespace
+
+Without -fopenmp the directives are comments, and the reducer runs its loops
+itself, one iteration after another.
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-loop-reductions.m -o %t.sequential
+RUN: %gpu-env %t.sequential gpu | FileCheck %S/process-loop-reductions.m --match-full-lines --strict-whitespace
+
+What the loops' bodies made goes with the reducer's arena when it ends.
+RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 %t2 gpu 2>&1 | FileCheck %s --check-prefix=FREED
+FREED: Mercury runtime: 0 messages are neither read nor freed
+FREED-NEXT: Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated

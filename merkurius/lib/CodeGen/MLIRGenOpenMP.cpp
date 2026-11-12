@@ -998,12 +998,6 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
     reduction.output = *output;
   }
   if (processLoop && target_.options().processKernels) {
-    if (!reductions.empty()) {
-      NotYet(at,
-          "reductions in the loops that a GPU process runs across its "
-          "teams");
-      return;
-    }
     ProcessLoop({goals, trip, call, loop, *loopBody, bodyCall, bodyProcedure,
                     reductions, false, false, false, at},
         body, Location(goal.tokens));
@@ -1409,6 +1403,20 @@ mlir::omp::DeclareReductionOp MerkGenerator::DeclareReduction(
   auto decl{mlir::omp::DeclareReductionOp::create(builder_, loc, name,
       /*sym_visibility=*/nullptr, type, /*byref_element_type=*/nullptr)};
   builder_.createBlock(&decl.getInitializerRegion(), {}, {type}, {loc});
+  mlir::omp::YieldOp::create(builder_, loc, ReductionIdentity(op, type, loc));
+  mlir::Block *combiner{builder_.createBlock(
+      &decl.getReductionRegion(), {}, {type, type}, {loc, loc})};
+  mlir::omp::YieldOp::create(builder_, loc,
+      ReductionCombine(
+          op, combiner->getArgument(0), combiner->getArgument(1), loc));
+  return decl;
+}
+
+// The identity of the reduction's operator on the type, Flang's
+// (getReductionInitValue).
+mlir::Value MerkGenerator::ReductionIdentity(
+    ReductionOp op, mlir::Type type, mlir::Location loc) {
+  bool real{mlir::isa<mlir::FloatType>(type)};
   mlir::Value identity;
   if (real) {
     const llvm::fltSemantics &semantics{
@@ -1430,11 +1438,14 @@ mlir::omp::DeclareReductionOp MerkGenerator::DeclareReduction(
     identity = mlir::arith::ConstantOp::create(
         builder_, loc, type, builder_.getIntegerAttr(type, value));
   }
-  mlir::omp::YieldOp::create(builder_, loc, identity);
-  mlir::Block *combiner{builder_.createBlock(
-      &decl.getReductionRegion(), {}, {type, type}, {loc, loc})};
-  mlir::Value a{combiner->getArgument(0)};
-  mlir::Value b{combiner->getArgument(1)};
+  return identity;
+}
+
+// Two values combined by the reduction's operator, Flang's
+// (createScalarCombiner).
+mlir::Value MerkGenerator::ReductionCombine(
+    ReductionOp op, mlir::Value a, mlir::Value b, mlir::Location loc) {
+  bool real{mlir::isa<mlir::FloatType>(a.getType())};
   mlir::Value combined;
   switch (op) {
   case ReductionOp::Add:
@@ -1465,8 +1476,7 @@ mlir::omp::DeclareReductionOp MerkGenerator::DeclareReduction(
     combined = mlir::arith::XOrIOp::create(builder_, loc, a, b);
     break;
   }
-  mlir::omp::YieldOp::create(builder_, loc, combined);
-  return decl;
+  return combined;
 }
 
 std::optional<omp::ConstructQueue> MerkGenerator::Decompose(

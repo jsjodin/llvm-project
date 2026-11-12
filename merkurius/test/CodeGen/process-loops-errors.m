@@ -3,12 +3,10 @@
 % the code of a process kind declared on gpu, or a predicate of the module
 % that it calls, and no target region runs it; the code of a kind that runs
 % on a GPU has no other directive, as its kernel is compiled without OpenMP.
-% Each compile checks it. Reductions in such a loop come later, which the
-% kernels' compile reports.
+% Each compile checks it.
 %
 % RUN: not merkc -fc1 -fopenmp -fdo-loops -fprocess-declarations -emit-merk -triple x86_64-unknown-linux-gnu %s -o /dev/null 2>&1 | FileCheck %s --implicit-check-not=error:
 % RUN: not merkc -fc1 -fprocess-loops -fdo-loops -fprocess-declarations -fprocess-kernels -triple amdgcn-amd-amdhsa -target-cpu gfx1030 -emit-merk %s -o /dev/null 2>&1 | FileCheck %s --implicit-check-not=error:
-% RUN: not merkc -fc1 -fprocess-loops -fdo-loops -fprocess-declarations -fprocess-kernels -triple amdgcn-amd-amdhsa -target-cpu gfx1030 -emit-merk %S/Inputs/process_loop_reduction.m -o /dev/null 2>&1 | FileCheck %s --check-prefix=REDUCTION
 % RUN: not merkc -fc1 -fprocess-loops -fdo-loops -triple x86_64-unknown-linux-gnu -emit-merk %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPTION
 % OPTION: error: -fprocess-loops is given only with -fprocess-kernels
 
@@ -59,4 +57,3 @@ main(!IO) :-
         X = array.lookup(C, 0)
     ),
     io.write_int(array.lookup(B, 0) + X, !IO).
-% REDUCTION: process_loop_reduction.m:15:9: error: not yet implemented: code generation for reductions in the loops that a GPU process runs across its teams
