@@ -59,6 +59,13 @@ bool HasVariable(const Type &type) {
   return false;
 }
 
+// Where code of the module runs on a GPU: called from a target region; in
+// a GPU process's code, on the process's lane; in the body of a distribute
+// loop of a GPU process, on a worker team's first wave; and in the body of
+// a loop that runs across a team's threads, a parallel do's or a distribute
+// parallel do's. Each body is checked once in each.
+enum class Context : unsigned { Region, Process, Team, Thread };
+
 class GpuCodeChecker {
 public:
   GpuCodeChecker(const parser::TokenSequence &tokens, const ModeChecking &modes,
@@ -82,26 +89,28 @@ private:
       const Type &, llvm::SmallVectorImpl<const Type *> &enclosing);
   bool IsEnumeration(const Type &);
 
-  // A body of the module's that runs on a GPU, in a process kind's code if
-  // `process`, else called from a target region: each is checked once.
-  void Visit(const ProcedureBody &, bool process);
-  void Walk(const ProcedureBody &, const Body &, bool process);
+  // A body of the module's that runs on a GPU, in the context.
+  void Visit(const ProcedureBody &, Context);
+  void Walk(const ProcedureBody &, const Body &, Context);
   void CheckValue(const ProcedureBody &, const Body &, BodyVar);
   void CheckMessage(TokenRange where, const Type *message);
-  void Call(const ProcedureBody &, const Body &, const Procedure *callee,
-      bool process);
+  void Call(
+      const ProcedureBody &, const Body &, const Procedure *callee, Context);
   void CheckProcessLoops();
+  bool Visited(const ProcedureBody &body, Context context) const {
+    return visited_.contains({&body, static_cast<unsigned>(context)});
+  }
 
   const parser::TokenSequence &tokens_;
   const ModeChecking &modes_;
   const DeterminismChecking &determinism_;
   InstTypes &constructors_;
   parser::Messages &messages_;
-  // By body, whether visited as a process kind's code (1) or a region's (0).
+  // By body, the contexts it was visited in.
   llvm::DenseSet<std::pair<const ProcedureBody *, unsigned>> visited_;
   // The variables already checked, by body, so each is reported once.
   llvm::DenseSet<std::pair<const ProcedureBody *, BodyVar>> checked_;
-  std::vector<std::pair<const ProcedureBody *, bool>> pending_;
+  std::vector<std::pair<const ProcedureBody *, Context>> pending_;
   // Where a message was reported, so that a goal reached twice, as in the
   // bodies of two modes of one procedure, is reported once.
   llvm::DenseSet<const char *> reported_;
@@ -241,7 +250,8 @@ void GpuCodeChecker::CheckMessage(TokenRange where, const Type *message) {
 }
 
 void GpuCodeChecker::Call(const ProcedureBody &body, const Body &goal,
-    const Procedure *callee, bool process) {
+    const Procedure *callee, Context context) {
+  bool process{context != Context::Region};
   if (!callee) {
     return;
   }
@@ -285,27 +295,45 @@ void GpuCodeChecker::Call(const ProcedureBody &body, const Body &goal,
     }
   }
   if (called) {
-    if (!visited_.contains({called, process ? 1u : 0u})) {
-      pending_.push_back({called, process});
+    if (!Visited(*called, context)) {
+      pending_.push_back({called, context});
     }
   }
 }
 
+// The context of a GPU process's code under the loop directive, which its
+// calls run in: a distribute loop's body on a team's first wave, and a
+// parallel do's or a distribute parallel do's across a team's threads.
+static Context InnerContext(Context context, llvm::omp::Directive id) {
+  if (context == Context::Region) {
+    return context;
+  }
+  if (id == llvm::omp::OMPD_distribute) {
+    return Context::Team;
+  }
+  if (id == llvm::omp::OMPD_distribute_parallel_do ||
+      id == llvm::omp::OMPD_parallel_do) {
+    return Context::Thread;
+  }
+  return context;
+}
+
 void GpuCodeChecker::Walk(
-    const ProcedureBody &body, const Body &goal, bool process) {
+    const ProcedureBody &body, const Body &goal, Context context) {
+  bool process{context != Context::Region};
   switch (goal.kind) {
   case BodyKind::Unify:
     if (goal.unify == UnifyKind::Call) {
-      Call(body, goal, goal.modes ? goal.modes->callee : nullptr, process);
+      Call(body, goal, goal.modes ? goal.modes->callee : nullptr, context);
     } else if (process && goal.unify == UnifyKind::Construct) {
       CheckValue(body, goal, goal.left);
     }
     if (goal.lambda) {
-      Walk(body, *goal.lambda, process);
+      Walk(body, *goal.lambda, context);
     }
     break;
   case BodyKind::Call:
-    Call(body, goal, goal.modes ? goal.modes->callee : nullptr, process);
+    Call(body, goal, goal.modes ? goal.modes->callee : nullptr, context);
     break;
   case BodyKind::HOCall:
     if (process) {
@@ -314,14 +342,18 @@ void GpuCodeChecker::Walk(
     break;
   case BodyKind::Switch:
     for (const SwitchCase &arm : goal.cases) {
-      Walk(body, *arm.goal, process);
+      Walk(body, *arm.goal, context);
     }
     break;
-  default:
-    for (const Body *inner : goal.goals) {
-      Walk(body, *inner, process);
+  default: {
+    Context inner{goal.kind == BodyKind::Scope && goal.directive
+            ? InnerContext(context, goal.directive->id)
+            : context};
+    for (const Body *g : goal.goals) {
+      Walk(body, *g, inner);
     }
     break;
+  }
   }
 }
 
@@ -354,18 +386,19 @@ static void FindCovered(
   }
 }
 
-void GpuCodeChecker::Visit(const ProcedureBody &body, bool process) {
-  if (!visited_.insert({&body, process ? 1u : 0u}).second || !body.body) {
+void GpuCodeChecker::Visit(const ProcedureBody &body, Context context) {
+  if (!visited_.insert({&body, static_cast<unsigned>(context)}).second ||
+      !body.body) {
     return;
   }
-  if (process) {
+  if (context != Context::Region) {
     llvm::SmallVector<BodyVar> covered;
     FindCovered(*body.body, covered);
     for (BodyVar var : covered) {
       checked_.insert({&body, var});
     }
   }
-  Walk(body, *body.body, process);
+  Walk(body, *body.body, context);
 }
 
 // The target regions of a body, and what they call: their messages.
@@ -412,7 +445,7 @@ void GpuCodeChecker::Check(const parser::ParseTree &tree) {
             selves_.insert({body, self});
           }
         }
-        pending_.push_back({body, true});
+        pending_.push_back({body, Context::Process});
       }
     }
   }
@@ -423,13 +456,13 @@ void GpuCodeChecker::Check(const parser::ParseTree &tree) {
     llvm::SmallVector<const Body *> regions;
     FindRegions(*body.body, regions);
     for (const Body *region : regions) {
-      Walk(body, *region, /*process=*/false);
+      Walk(body, *region, Context::Region);
     }
   }
   while (!pending_.empty()) {
-    auto [body, process] = pending_.back();
+    auto [body, context] = pending_.back();
     pending_.pop_back();
-    Visit(*body, process);
+    Visit(*body, context);
   }
   CheckProcessLoops();
 }
@@ -456,47 +489,84 @@ void FindDirectives(const Body &goal, bool inRegion,
   }
 }
 
-// A loop under distribute parallel do runs across the teams of a GPU process
-// (docs/INPROGRESS.md, GPU processes that run loops): its code is that of a
-// process kind that runs on a GPU. In a target region it would be OpenMP's,
-// under target teams, which is not implemented. On the host,
-// as in a kind spawned there, it is a parallel do. A GPU process's code has
-// no other directive, as its kernel is compiled without OpenMP.
+// The loops of a GPU process (docs/INPROGRESS.md, GPU processes that run
+// loops): under distribute parallel do, a loop runs across the process's
+// teams' threads; under distribute, across its teams, a worker team's first
+// wave running an iteration's body, in which a loop under parallel do runs
+// across the team's threads. Their code is that of a process kind that runs
+// on a GPU. In a target region a distribute loop would be OpenMP's, under
+// target teams, which is not implemented. On the host, as in a kind spawned
+// there, distribute loops are parallel do loops. A GPU process's code has no
+// other directive, as its kernel is compiled without OpenMP.
 void GpuCodeChecker::CheckProcessLoops() {
   for (const ProcedureBody &body : determinism_.bodies()) {
     if (!body.body) {
       continue;
     }
+    bool region{Visited(body, Context::Region)};
+    bool process{Visited(body, Context::Process)};
+    bool team{Visited(body, Context::Team)};
+    bool thread{Visited(body, Context::Thread)};
     llvm::SmallVector<std::pair<const Body *, bool>> directives;
     FindDirectives(*body.body, /*inRegion=*/false, directives);
     for (auto [directive, inRegion] : directives) {
       parser::CharBlock where{Source(directive->tokens)};
-      if (directive->directive->id != llvm::omp::OMPD_distribute_parallel_do) {
-        if (!inRegion && visited_.contains({&body, 1u}) &&
+      llvm::omp::Directive id{directive->directive->id};
+      std::string name{parser::EnumToString(id)};
+      bool distribute{id == llvm::omp::OMPD_distribute_parallel_do ||
+          id == llvm::omp::OMPD_distribute};
+      if (!distribute && id != llvm::omp::OMPD_parallel_do) {
+        if (!inRegion && (process || team || thread) &&
             reported_.insert(where.begin()).second) {
           messages_.Say(where,
               "a process kind that runs on a GPU runs its loops across its "
-              "teams under distribute parallel do, and its code has no %s "
+              "teams under distribute parallel do, or under distribute with "
+              "parallel do loops in their bodies, and its code has no %s "
               "directive"_err_en_US,
-              std::string{parser::EnumToString(directive->directive->id)});
+              name);
+        }
+        continue;
+      }
+      if (!distribute) {
+        // A parallel do of a region's code, or of the host's, is OpenMP's.
+        if (inRegion || (!process && !thread) ||
+            !reported_.insert(where.begin()).second) {
+          continue;
+        }
+        if (process) {
+          messages_.Say(where,
+              "a parallel do loop in a GPU process's code runs across a "
+              "team's threads, so it must be in the body of a distribute "
+              "loop, or in a predicate of the module that such a body "
+              "calls"_err_en_US);
+        } else {
+          messages_.Say(where,
+              "a parallel do loop in a GPU process's code cannot be in the "
+              "body of another loop that runs across a team's "
+              "threads"_err_en_US);
         }
         continue;
       }
       if (!reported_.insert(where.begin()).second) {
         continue;
       }
-      if (inRegion || visited_.contains({&body, 0u})) {
-        // OpenMP's distribute parallel do under target teams, which differs.
+      if (inRegion || region) {
+        // OpenMP's distribute under target teams, which differs.
         messages_.Say(where,
-            "not yet implemented: a distribute parallel do loop in a target "
-            "region; in a GPU process's code it runs across the process's "
-            "teams"_err_en_US);
-      } else if (!visited_.contains({&body, 1u})) {
+            "not yet implemented: a %s loop in a target region; in a GPU "
+            "process's code it runs across the process's teams"_err_en_US,
+            name);
+      } else if (team || thread) {
         messages_.Say(where,
-            "a distribute parallel do loop runs across the teams of a GPU "
-            "process, so it must be in the code of a process kind declared "
-            "on gpu, or in a predicate of the module that such a kind "
-            "calls"_err_en_US);
+            "a %s loop runs across the teams of a GPU process, so it cannot "
+            "be in the body of another loop"_err_en_US,
+            name);
+      } else if (!process) {
+        messages_.Say(where,
+            "a %s loop runs across the teams of a GPU process, so it must be "
+            "in the code of a process kind declared on gpu, or in a "
+            "predicate of the module that such a kind calls"_err_en_US,
+            name);
       }
     }
   }

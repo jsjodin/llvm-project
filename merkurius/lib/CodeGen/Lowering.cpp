@@ -3713,16 +3713,18 @@ llvm::LogicalResult Lowerer::Lower() {
 // team (MLIRGenProcesses.cpp, ProcessLoopRounds), which an optimization must
 // not move into a branch, and LLVM takes the attribute away from a function
 // that calls nothing convergent. The kinds' code, which merk_process_dispatch
-// starts, and the loops, which merk_process_loop runs, stay out of line, so
-// that the registers of each count only while it runs and not in the
-// kernel's other code, as they would inlined into it: a loop's waves are
+// starts, and the loops, which merk_process_loop and merk_team_loop run,
+// stay out of line, so that the registers of each count only while it runs
+// and not in the kernel's other code, as they would inlined into it: a
+// loop's waves are
 // then not limited by the most that the kinds' code needs (design document,
 // Measurements, Memory bandwidth).
 void Lowerer::MarkKernelFunctions() {
   for (auto func : module_.getOps<mlir::LLVM::LLVMFuncOp>()) {
     func.setConvergent(true);
     if (func.getSymName() == "merk_process_dispatch" ||
-        func.getSymName() == "merk_process_loop") {
+        func.getSymName() == "merk_process_loop" ||
+        func.getSymName() == "merk_team_loop") {
       func.setNoInline(true);
     }
   }
@@ -4255,7 +4257,8 @@ void TakeHeapAddressAgain(llvm::Function &function, llvm::Function *marker,
 // the C convention and a tail call is a musttail call: those of the module's
 // functions, and whether a call of code unseen may lead back, as an indirect
 // call may, or a call that passes a function. The device runtime's own
-// calls back, of merk_process_dispatch and merk_process_loop, do not recurse.
+// calls back, of merk_process_dispatch, merk_process_loop and
+// merk_team_loop, do not recurse.
 void AddDeviceCalls(CallNode &node, const llvm::StringMap<unsigned> &numbers) {
   for (llvm::Instruction &instruction : llvm::instructions(*node.function)) {
     auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)};

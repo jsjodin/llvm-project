@@ -12,11 +12,13 @@ extern "C" void merk_device_grid_barrier(MerkGridBarrier *barrier);
 
 // The image's kernel of GPU processes, merk_place, which the start object
 // links in, starts kinds through merk_process_dispatch and runs their loops
-// across teams through merk_process_loop, with their reductions through
-// merk_process_loop_start and merk_process_loop_reduce, which the device's
-// compile of a module makes; this image has no kinds.
+// across teams through merk_process_loop and merk_team_loop, with their
+// reductions through merk_process_loop_start and merk_process_loop_reduce,
+// which the device's compile of a module makes; this image has no kinds.
 extern "C" void merk_process_dispatch(uint64_t, uint64_t) {}
 extern "C" void merk_process_loop(uint64_t, int64_t, int64_t, int64_t, int64_t,
+    int64_t, int64_t, uint64_t, uint64_t) {}
+extern "C" void merk_team_loop(uint64_t, int64_t, int64_t, int64_t, int64_t,
     int64_t, int64_t, uint64_t, uint64_t) {}
 extern "C" void merk_process_loop_start(uint64_t, uint64_t *) {}
 extern "C" void merk_process_loop_reduce(

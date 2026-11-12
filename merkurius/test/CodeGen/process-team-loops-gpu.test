@@ -1,0 +1,20 @@
+process-team-loops.m's tiler spawned on the machine's GPU (docs/INPROGRESS.md,
+GPU processes that run loops): its distribute loops' iterations run on the
+first waves of the teams of its module's kernel that no process uses, and
+the loops under parallel do in their bodies across each team's threads,
+from one tile to more tiles than the GPU has teams.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-team-loops.m -o %t2
+RUN: %gpu-env %t2 gpu | FileCheck %S/process-team-loops.m --match-full-lines --strict-whitespace
+
+Without -fopenmp the directives are comments, and the tiler runs its loops
+itself, one iteration after another.
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-team-loops.m -o %t.sequential
+RUN: %gpu-env %t.sequential gpu | FileCheck %S/process-team-loops.m --match-full-lines --strict-whitespace
+
+What the loops' bodies made, the arrays of the distribute loops' bodies
+among them, goes with the tiler's arena when it ends.
+RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 %t2 gpu 2>&1 | FileCheck %s --check-prefix=FREED
+FREED: Mercury runtime: 0 messages are neither read nor freed
+FREED-NEXT: Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated

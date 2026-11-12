@@ -1524,6 +1524,7 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
   module_ = *owned;
   target_.Record(module_);
   CollectGpuKinds();
+  CollectTeamBodies();
   bool interface{false};
   for (const parser::Item &item : tree_.items) {
     if (const auto *section{std::get_if<const parser::SectionDecl *>(&item)}) {
