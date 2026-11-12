@@ -1,0 +1,18 @@
+Game of Life run by a GPU process across its worker teams, on a small grid
+(benchmarks/life/life-process.m): the cells are life.m's (life-gpu.test),
+with the live cells counted by a loop of two reductions.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/life/life-process.m -o %t
+RUN: %gpu-env LIFE_SIZE=300 LIFE_STEPS=25 %t | FileCheck %s
+
+Without -fopenmp the process runs the loops on its own lane.
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/life/life-process.m -o %t.sequential
+RUN: %gpu-env LIFE_SIZE=300 LIFE_STEPS=25 %t.sequential | FileCheck %s
+
+CHECK: Game of Life, Mercury, GPU process
+CHECK-NEXT: Grid: 300 x 300 cells, 8 bytes a cell
+CHECK-NEXT: Steps: 25
+CHECK-NEXT: Population: 9339
+CHECK-NEXT: Checksum: 429141631
+CHECK-NEXT: Gcells/sec    Min (sec)   Max         Average

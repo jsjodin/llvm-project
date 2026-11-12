@@ -75,11 +75,36 @@ HOME. `LIFE_SIZE` and `LIFE_STEPS` pass through.
 it on the region's arena (`docs/INPROGRESS.md`, the demo's step 2), which a
 fix to the runtime is next for; this is not yet a measurement of the design.
 
+## In a GPU process
+
+`life-process.m` runs the same steps in a GPU process, each a loop across
+the process's teams under `%$omp distribute parallel do`, rather than a
+target region each (`docs/INPROGRESS.md`, GPU processes that run loops).
+The process makes both grids in its arena, times each step by the device's
+clock, counts the live cells with a loop of two reductions, and sends the
+times and the count to the host, which prints them as `life.m` does.
+`compare-c.sh` runs it as a fourth program.
+
+2026-11-12, gfx1030, on compute units 0-39 (`LIBOMPTARGET_AMDGPU_CU_MASK`),
+the median over the rounds of each program's fastest step:
+
+| Program | 4096², 100 steps | 1024², 200 steps |
+| --- | ---: | ---: |
+| Mercury, target regions | 21.7 Gcells/s | 27.3 Gcells/s |
+| Mercury, GPU process | 24.6 Gcells/s | 29.8 Gcells/s |
+| C, `int64_t` cells | 20.5 Gcells/s | 23.7 Gcells/s |
+| C, `uint8_t` cells | 31.7 Gcells/s | 23.3 Gcells/s |
+
+A step of the GPU process starts no kernel, which counts most where steps
+are short. The others time their steps from the host, a target region's
+start included.
+
 ## Tests
 
 `test/Benchmarks/life.test` runs `life.m` sequentially and on the host's
 threads, at -O0 and -O2; `life-gpu.test` on the GPU, checking that the
 kernels are SPMD and that no step copies the arrays; `life-c-gpu.test` the C
 program with both cell types; `life-two.test` and `life-two-gpu.test` the two
-nodes, with even and odd splits. All check the population and checksum, which
+nodes, with even and odd splits; `life-process-gpu.test` the GPU process,
+in parallel and on the process's own lane. All check the population and checksum, which
 come from an independent program in Python.
