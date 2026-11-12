@@ -101,6 +101,7 @@ using merkurius::runtime::kPlaceReserved;
 using merkurius::runtime::kPlaceRunning;
 using merkurius::runtime::kPlaceTeamThreads;
 using merkurius::runtime::kPlaceWorking;
+using merkurius::runtime::kProcessLoopReductions;
 using merkurius::runtime::kProcessLoopWords;
 using merkurius::runtime::kRegionRingSlots;
 using merkurius::runtime::kRegionSlotClearing;
@@ -222,6 +223,13 @@ struct ProcessControl {
   uint64_t end;
   Arena *arena;
   uint64_t values[kProcessLoopWords];
+  // The loop's reductions: how many, their values before the loop, which the
+  // process sets and which are their results after it, and each worker
+  // team's partial results, kProcessLoopReductions words a team, which
+  // follow the block.
+  uint64_t reductions;
+  uint64_t results[kProcessLoopReductions];
+  uint64_t partials[];
 };
 
 // The control block of the process that each wave of the team runs, by the
@@ -229,6 +237,11 @@ struct ProcessControl {
 // worker team's waves.
 [[clang::loader_uninitialized]] Local<ProcessControl *>
     placeControls[kMostPlaceWaves];
+
+// The partial results of a loop's reductions of each wave of a worker team,
+// which the team's first thread combines.
+[[clang::loader_uninitialized]] Local<uint64_t>
+    wavePartials[kMostPlaceWaves][kProcessLoopReductions];
 
 } // namespace
 
@@ -719,10 +732,20 @@ extern "C" [[noreturn]] void merk_device_stack_overflow(void) {
 extern "C" void merk_process_dispatch(uint64_t kind, uint64_t words);
 
 // An iteration of the module's loop with the number, which runs across a GPU
-// process's teams, with its counter and the address of the words its body
-// takes (MLIRGenProcesses.cpp, GenerateProcessLoops).
+// process's teams, with its counter, the address of the words its body
+// takes and that of the thread's partial results of the loop's reductions,
+// which it updates (MLIRGenProcesses.cpp, GenerateProcessLoops).
 extern "C" void merk_process_loop(
-    uint64_t loop, int64_t counter, uint64_t values);
+    uint64_t loop, int64_t counter, uint64_t values, uint64_t partials);
+
+// Sets the partial results at the address to the identities of the loop's
+// reductions.
+extern "C" void merk_process_loop_start(uint64_t loop, uint64_t partials);
+
+// Combines the partial results at `from` into those at `into`, each by its
+// reduction's operator.
+extern "C" void merk_process_loop_reduce(
+    uint64_t loop, uint64_t into, uint64_t from);
 
 namespace {
 
@@ -782,8 +805,9 @@ void RunProcess(
   placeArenas[inTeam] = arena;
   ProcessControl *control{nullptr};
   if (workers > 0) {
-    control = static_cast<ProcessControl *>(
-        Allocate(&arena->bump, sizeof(ProcessControl)));
+    control = static_cast<ProcessControl *>(Allocate(&arena->bump,
+        sizeof(ProcessControl) +
+            workers * kProcessLoopReductions * sizeof(uint64_t)));
     control->arrived = 0;
     control->rounds = 0;
     control->crossing = static_cast<int64_t>(workers) + 1;
@@ -827,6 +851,44 @@ void RunProcess(
 // runs the process's loops with its other worker teams, each thread taking
 // iterations a team's threads apart, from its own in its team's block, until
 // the process ends.
+// The partial results of a loop's reductions of a worker team's threads,
+// combined: in each wave, by exchanging them across halves of the wave, then
+// the waves', by the team's first thread, into the team's words of the
+// control block, which the process combines after the loop.
+void CombineTeamPartials(ProcessControl *control, uint64_t loop,
+    uint64_t reductions, uint64_t *partials, uint64_t worker, uint32_t inTeam) {
+  uint64_t mask{__gpu_lane_mask()};
+  uint32_t lanes{__gpu_num_lanes()};
+  uint32_t lane{__gpu_lane_id()};
+  auto partialsAt{reinterpret_cast<uint64_t>(partials)};
+  uint64_t other[kProcessLoopReductions];
+  auto otherAt{reinterpret_cast<uint64_t>(other)};
+  for (uint32_t offset{lanes / 2}; offset > 0; offset /= 2) {
+    for (uint64_t r{0}; r < reductions; ++r) {
+      other[r] = __gpu_shuffle_idx_u64(mask, lane ^ offset, partials[r], lanes);
+    }
+    merk_process_loop_reduce(loop, partialsAt, otherAt);
+  }
+  if (lane == 0) {
+    for (uint64_t r{0}; r < reductions; ++r) {
+      wavePartials[inTeam][r] = partials[r];
+    }
+  }
+  __gpu_sync_threads();
+  if (__gpu_thread_id_x() == 0) {
+    uint32_t waves{__gpu_num_threads_x() / lanes};
+    for (uint32_t wave{1}; wave < waves; ++wave) {
+      for (uint64_t r{0}; r < reductions; ++r) {
+        other[r] = wavePartials[wave][r];
+      }
+      merk_process_loop_reduce(loop, partialsAt, otherAt);
+    }
+    for (uint64_t r{0}; r < reductions; ++r) {
+      control->partials[worker * kProcessLoopReductions + r] = partials[r];
+    }
+  }
+}
+
 void Work(PlaceSlot *slot, uint32_t inTeam) {
   auto *control{
       reinterpret_cast<ProcessControl *>(LoadSlotWord(&slot->control))};
@@ -848,7 +910,13 @@ void Work(PlaceSlot *slot, uint32_t inTeam) {
     int64_t first{control->first};
     int64_t step{control->step};
     int64_t count{control->count};
+    uint64_t reductions{control->reductions};
     auto values{reinterpret_cast<uint64_t>(control->values)};
+    uint64_t partials[kProcessLoopReductions];
+    auto partialsAt{reinterpret_cast<uint64_t>(partials)};
+    if (reductions) {
+      merk_process_loop_start(loop, partialsAt);
+    }
     // In rounds, the team's threads `threads` consecutive iterations, the
     // teams `stride` apart, with a barrier across the team after each round,
     // so that its waves stay together, as the device runtime's loops do for
@@ -858,9 +926,12 @@ void Work(PlaceSlot *slot, uint32_t inTeam) {
     for (int64_t round{0}; round < rounds; ++round) {
       int64_t i{base + round * stride + thread};
       if (i < count) {
-        merk_process_loop(loop, first + i * step, values);
+        merk_process_loop(loop, first + i * step, values, partialsAt);
       }
       __gpu_sync_threads();
+    }
+    if (reductions) {
+      CombineTeamPartials(control, loop, reductions, partials, worker, inTeam);
     }
     WorkerArrive(control);
   }
@@ -940,12 +1011,27 @@ extern "C" uint64_t *merk_device_loop_values(void) {
   return control->values;
 }
 
+// The words of the values of the loop's reductions before it, which the
+// process sets, and which are their results after it.
+extern "C" uint64_t *merk_device_loop_results(void) {
+  ProcessControl *control{
+      placeControls[__gpu_thread_id_x() / __gpu_num_lanes()]};
+  if (!control) {
+    Fail(1,
+        "a loop under distribute parallel do in the body of another, or "
+        "in a GPU process without worker teams");
+  }
+  return control->results;
+}
+
 // Runs the loop with the number across the process's worker teams, from the
 // first counter by the step, `count` times, with the words that
-// merk_device_loop_values gave: the workers start when the process's wave
-// arrives at the barrier, and it returns when they arrive again, done.
-extern "C" void merk_device_process_loop(
-    uint64_t loop, int64_t first, int64_t step, int64_t count) {
+// merk_device_loop_values gave, and `reductions` reductions: the workers
+// start when the process's wave arrives at the barrier, and it returns when
+// they arrive again, done, after it has combined their teams' partial
+// results into those of merk_device_loop_results.
+extern "C" void merk_device_process_loop(uint64_t loop, int64_t first,
+    int64_t step, int64_t count, uint64_t reductions) {
   ProcessControl *control{
       placeControls[__gpu_thread_id_x() / __gpu_num_lanes()]};
   if (!control) {
@@ -957,8 +1043,18 @@ extern "C" void merk_device_process_loop(
   control->first = first;
   control->step = step;
   control->count = count;
+  control->reductions = reductions;
   ProcessArrive(control);
   ProcessArrive(control);
+  if (reductions) {
+    uint64_t workers{static_cast<uint64_t>(control->crossing) - 1};
+    for (uint64_t worker{0}; worker < workers; ++worker) {
+      merk_process_loop_reduce(loop,
+          reinterpret_cast<uint64_t>(control->results),
+          reinterpret_cast<uint64_t>(
+              control->partials + worker * kProcessLoopReductions));
+    }
+  }
 }
 
 // At the start of any other region that a module with team mailboxes runs.

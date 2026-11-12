@@ -40,6 +40,9 @@ constexpr unsigned kMailboxWords{5};
 // The words that a loop across a GPU process's teams gives its body, in the
 // process's control block: runtime/place.h's kProcessLoopWords.
 constexpr unsigned kProcessLoopWords{32};
+// The most reductions of such a loop: runtime/place.h's
+// kProcessLoopReductions.
+constexpr unsigned kProcessLoopReductions{8};
 } // namespace
 
 void MerkGenerator::CollectGpuKinds() {
@@ -74,6 +77,31 @@ mlir::Value LoadWord(mlir::OpBuilder &builder, mlir::Location loc,
   mlir::Value address{mlir::LLVM::GEPOp::create(builder, loc, words.getType(),
       i64, words, llvm::ArrayRef<mlir::LLVM::GEPArg>{index})};
   return mlir::LLVM::LoadOp::create(builder, loc, i64, address);
+}
+
+// Stores `word`, an i64, at `index` of `words`, a generic pointer.
+void StoreWord(mlir::OpBuilder &builder, mlir::Location loc, mlir::Value words,
+    std::int32_t index, mlir::Value word) {
+  auto i64{builder.getI64Type()};
+  mlir::Value address{mlir::LLVM::GEPOp::create(builder, loc, words.getType(),
+      i64, words, llvm::ArrayRef<mlir::LLVM::GEPArg>{index})};
+  mlir::LLVM::StoreOp::create(builder, loc, word, address);
+}
+
+// A value as the i64 of its word.
+mlir::Value WordBits(
+    mlir::OpBuilder &builder, mlir::Location loc, mlir::Value value) {
+  return merk::FromWordOp::create(builder, loc, builder.getI64Type(),
+      merk::ToWordOp::create(
+          builder, loc, merk::WordType::get(builder.getContext()), value));
+}
+
+// The value of the type whose word's bits are the i64 `bits`.
+mlir::Value FromWordBits(mlir::OpBuilder &builder, mlir::Location loc,
+    mlir::Type type, mlir::Value bits) {
+  return merk::FromWordOp::create(builder, loc, type,
+      merk::ToWordOp::create(
+          builder, loc, merk::WordType::get(builder.getContext()), bits));
 }
 } // namespace
 
@@ -277,8 +305,11 @@ void MerkGenerator::ProcessLoop(
   }
   // The body procedure's inputs: the counter, and the values the loop
   // procedure was called with for its other arguments.
-  ProcessLoopCase entry{proc.getSymName().str(), {}, {}, 0};
+  ProcessLoopCase entry{proc.getSymName().str(), {}, {}, 0, {}};
   llvm::SmallVector<mlir::Value> words;
+  // The reductions' values before the loop, in the order of their inputs.
+  llvm::SmallVector<mlir::Value> before;
+  llvm::SmallVector<const LoopReduction *> reduced;
   bool counted{false};
   for (auto [argument, mode] :
       llvm::zip(loop.bodyCall->arguments, loop.bodyProcedure.modes)) {
@@ -294,13 +325,35 @@ void MerkGenerator::ProcessLoop(
       return;
     }
     std::size_t k(position - loop.loopBody.head.begin());
+    const LoopReduction *reduction{nullptr};
+    for (const LoopReduction &r : loop.reductions) {
+      if (r.value->in == k) {
+        reduction = &r;
+      }
+    }
     if (k == 0) {
       entry.counter = static_cast<unsigned>(entry.inputs.size());
       counted = true;
+    } else if (reduction) {
+      entry.reductions.push_back({static_cast<unsigned>(entry.inputs.size()),
+          reduction->output, reduction->op, reduction->type});
+      before.push_back(ValueOf(loop.call->arguments[k]));
+      reduced.push_back(reduction);
     } else {
       words.push_back(ValueOf(loop.call->arguments[k]));
     }
     entry.inputs.push_back(represented->type);
+  }
+  if (entry.reductions.size() != loop.reductions.size()) {
+    NotYet(loop.at,
+        "reductions in a loop across a GPU process's teams whose body does "
+        "not take the reduction's value");
+    return;
+  }
+  if (entry.reductions.size() > kProcessLoopReductions) {
+    NotYet(loop.at,
+        "loops across a GPU process's teams with more than 8 reductions");
+    return;
   }
   if (!counted || !entry.inputs[entry.counter].isInteger(64)) {
     NotYet(loop.at,
@@ -336,6 +389,19 @@ void MerkGenerator::ProcessLoop(
       mlir::LLVM::StoreOp::create(builder_, loc, word, address);
     }
   }
+  // The reductions' values before the loop, which the runtime combines with
+  // the worker teams' partial results into their results.
+  mlir::Value results;
+  if (!before.empty()) {
+    results =
+        merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{generic},
+            "merk_device_loop_results", mlir::ValueRange{}, /*can_fail=*/false)
+            .getResult(0);
+    for (auto [index, value] : llvm::enumerate(before)) {
+      StoreWord(builder_, loc, results, static_cast<std::int32_t>(index),
+          WordBits(builder_, loc, value));
+    }
+  }
   // The trip count: from lower to upper by the step, inclusive, or none.
   mlir::Value distance{step > 0
           ? mlir::arith::SubIOp::create(builder_, loc, upper, lower)
@@ -354,7 +420,8 @@ void MerkGenerator::ProcessLoop(
       mlir::ValueRange{
           IntegerConstant(
               i64, static_cast<std::int64_t>(processLoops_.size()), loc),
-          lower, IntegerConstant(i64, step, loc), count},
+          lower, IntegerConstant(i64, step, loc), count,
+          IntegerConstant(i64, static_cast<std::int64_t>(before.size()), loc)},
       /*can_fail=*/false);
   processLoops_.push_back(std::move(entry));
   for (const semantics::TranslatedLoop::Threaded &value :
@@ -362,63 +429,130 @@ void MerkGenerator::ProcessLoop(
     values_[loop.call->arguments[value.after]] =
         ValueOf(loop.call->arguments[value.in]);
   }
+  for (auto [index, reduction] : llvm::enumerate(reduced)) {
+    values_[loop.call->arguments[reduction->value->after]] =
+        FromWordBits(builder_, loc, reduction->type,
+            LoadWord(builder_, loc, results, static_cast<std::int32_t>(index)));
+  }
 }
 
-// merk_process_loop(loop, counter, values), which each thread of a GPU
-// process's worker teams calls for each of its iterations of the loop with
-// the number (ProcessLoop): the loop's body procedure, with the counter and
-// the values from the control block's words. The body is det and pure, and
-// what it gives is the arrays it updated in place, so its results are
-// dropped. Every image of GPU processes has it, as the device's runtime calls
-// it, even with no loops.
+// The procedures that the device's runtime calls for the loops that GPU
+// processes run across their teams (ProcessLoop), each a switch over the
+// module's loops by their number. Every image of GPU processes has them, as
+// the runtime calls them, even with no loops.
+// - merk_process_loop(loop, counter, values, partials), which each thread of
+//   a process's worker teams calls for each of its iterations: the loop's
+//   body procedure, with the counter, each reduction's value from the
+//   thread's partial results, at `partials`, and the other values from the
+//   control block's words, at `values`. The body is det and pure, and gives
+//   the arrays it updated in place, whose results are dropped, and the
+//   reductions' next values, which become the thread's partial results.
+// - merk_process_loop_start(loop, partials): the reductions' identities.
+// - merk_process_loop_reduce(loop, into, from): the partial results at
+//   `from` combined into those at `into`, by each reduction's operator.
 void MerkGenerator::GenerateProcessLoops() {
   if (!target_.options().processKernels) {
     return;
   }
   mlir::Location loc{builder_.getUnknownLoc()};
   auto i64{builder_.getI64Type()};
-  mlir::OpBuilder::InsertionGuard guard{builder_};
-  builder_.setInsertionPointToEnd(module_.getBody());
-  auto proc{merk::ProcOp::create(builder_, loc, "merk_process_loop",
-      builder_.getFunctionType({i64, i64, i64}, {}), merk::Determinism::Det)};
-  proc->setAttr(kProcessRootAttrName, builder_.getUnitAttr());
-  mlir::Block *entry{proc.addEntryBlock()};
-  builder_.setInsertionPointToStart(entry);
-  if (processLoops_.empty()) {
-    merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
-    return;
-  }
-  llvm::SmallVector<mlir::Attribute> cases;
-  for (std::size_t number{0}; number < processLoops_.size(); ++number) {
-    cases.push_back(builder_.getArrayAttr(
-        {builder_.getI64IntegerAttr(static_cast<std::int64_t>(number))}));
-  }
-  auto op{merk::SwitchOp::create(builder_, loc, mlir::TypeRange{},
-      entry->getArgument(0), builder_.getArrayAttr(cases), /*canFail=*/false)};
   auto generic{mlir::LLVM::LLVMPointerType::get(
       &context_, target_.addressSpaces().generic)};
-  for (auto [region, loop] :
-      llvm::zip_equal(op.getCaseRegions(), processLoops_)) {
-    builder_.setInsertionPointToStart(&region.emplaceBlock());
-    mlir::Value values{mlir::LLVM::IntToPtrOp::create(
-        builder_, loc, generic, entry->getArgument(2))};
-    llvm::SmallVector<mlir::Value> inputs;
-    std::int32_t next{0};
-    for (auto [index, type] : llvm::enumerate(loop.inputs)) {
-      if (index == loop.counter) {
-        inputs.push_back(entry->getArgument(1));
-        continue;
-      }
-      mlir::Value word{LoadWord(builder_, loc, values, next++)};
-      inputs.push_back(merk::FromWordOp::create(builder_, loc, type,
-          merk::ToWordOp::create(
-              builder_, loc, merk::WordType::get(&context_), word)));
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  for (unsigned which{0}; which < 3; ++which) {
+    builder_.setInsertionPointToEnd(module_.getBody());
+    llvm::StringRef name{which == 0 ? "merk_process_loop"
+            : which == 1            ? "merk_process_loop_start"
+                                    : "merk_process_loop_reduce"};
+    llvm::SmallVector<mlir::Type> parameters(which == 1 ? 2
+            : which == 2                                ? 3
+                                                        : 4,
+        i64);
+    auto proc{merk::ProcOp::create(builder_, loc, name,
+        builder_.getFunctionType(parameters, {}), merk::Determinism::Det)};
+    proc->setAttr(kProcessRootAttrName, builder_.getUnitAttr());
+    mlir::Block *entry{proc.addEntryBlock()};
+    builder_.setInsertionPointToStart(entry);
+    if (processLoops_.empty()) {
+      merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+      continue;
     }
-    merk::CallOp::create(builder_, loc, loop.results, loop.body, inputs);
-    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+    llvm::SmallVector<mlir::Attribute> cases;
+    for (std::size_t number{0}; number < processLoops_.size(); ++number) {
+      cases.push_back(builder_.getArrayAttr(
+          {builder_.getI64IntegerAttr(static_cast<std::int64_t>(number))}));
+    }
+    auto op{merk::SwitchOp::create(builder_, loc, mlir::TypeRange{},
+        entry->getArgument(0), builder_.getArrayAttr(cases),
+        /*canFail=*/false)};
+    for (auto [region, loop] :
+        llvm::zip_equal(op.getCaseRegions(), processLoops_)) {
+      builder_.setInsertionPointToStart(&region.emplaceBlock());
+      if (which == 0) {
+        ProcessLoopIteration(loop, entry, generic, loc);
+      } else if (which == 1) {
+        mlir::Value partials{mlir::LLVM::IntToPtrOp::create(
+            builder_, loc, generic, entry->getArgument(1))};
+        for (auto [index, reduction] : llvm::enumerate(loop.reductions)) {
+          StoreWord(builder_, loc, partials, static_cast<std::int32_t>(index),
+              WordBits(builder_, loc,
+                  ReductionIdentity(reduction.op, reduction.type, loc)));
+        }
+      } else {
+        mlir::Value into{mlir::LLVM::IntToPtrOp::create(
+            builder_, loc, generic, entry->getArgument(1))};
+        mlir::Value from{mlir::LLVM::IntToPtrOp::create(
+            builder_, loc, generic, entry->getArgument(2))};
+        for (auto [index, reduction] : llvm::enumerate(loop.reductions)) {
+          auto at{static_cast<std::int32_t>(index)};
+          mlir::Value a{FromWordBits(builder_, loc, reduction.type,
+              LoadWord(builder_, loc, into, at))};
+          mlir::Value b{FromWordBits(builder_, loc, reduction.type,
+              LoadWord(builder_, loc, from, at))};
+          StoreWord(builder_, loc, into, at,
+              WordBits(
+                  builder_, loc, ReductionCombine(reduction.op, a, b, loc)));
+        }
+      }
+      merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+    }
+    builder_.setInsertionPointAfter(op);
+    merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
   }
-  builder_.setInsertionPointAfter(op);
-  merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+}
+
+// An iteration of the loop, in merk_process_loop's case for it, whose
+// arguments `entry` has (GenerateProcessLoops).
+void MerkGenerator::ProcessLoopIteration(const ProcessLoopCase &loop,
+    mlir::Block *entry, mlir::Type generic, mlir::Location loc) {
+  mlir::Value values{mlir::LLVM::IntToPtrOp::create(
+      builder_, loc, generic, entry->getArgument(2))};
+  mlir::Value partials{mlir::LLVM::IntToPtrOp::create(
+      builder_, loc, generic, entry->getArgument(3))};
+  llvm::SmallVector<mlir::Value> inputs;
+  std::int32_t next{0};
+  for (auto [index, type] : llvm::enumerate(loop.inputs)) {
+    if (index == loop.counter) {
+      inputs.push_back(entry->getArgument(1));
+      continue;
+    }
+    auto reduction{llvm::find_if(loop.reductions,
+        [&](const ProcessLoopReduction &r) { return r.input == index; })};
+    if (reduction != loop.reductions.end()) {
+      inputs.push_back(FromWordBits(builder_, loc, type,
+          LoadWord(builder_, loc, partials,
+              static_cast<std::int32_t>(reduction - loop.reductions.begin()))));
+      continue;
+    }
+    inputs.push_back(FromWordBits(
+        builder_, loc, type, LoadWord(builder_, loc, values, next++)));
+  }
+  auto call{
+      merk::CallOp::create(builder_, loc, loop.results, loop.body, inputs)};
+  for (auto [index, reduction] : llvm::enumerate(loop.reductions)) {
+    StoreWord(builder_, loc, partials, static_cast<std::int32_t>(index),
+        WordBits(builder_, loc, call->getResult(reduction.output)));
+  }
 }
 
 // Whether the kind's code, or a procedure of the module that it calls, has a

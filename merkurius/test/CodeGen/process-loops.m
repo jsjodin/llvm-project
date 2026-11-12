@@ -14,7 +14,8 @@
 %
 % The device's compile gives each loop a number, calls the runtime with it,
 % and makes merk_process_loop, which calls a loop's body by its number with
-% the counter and the loop's words; the host's registers which kinds run
+% the counter and the loop's words, with no reductions here
+% (process-loop-reductions.m); the host's registers which kinds run
 % loops, worker 1 and echo 0.
 %
 % REQUIRES: amdgpu-registered-target, libomp
@@ -164,11 +165,11 @@ print_answer(R, !IO) :-
 
 % DEVICE-LABEL: merk.proc private @process_loops.worker_4_0(
 % DEVICE:         merk.foreign_call @merk_device_loop_values() : () -> !llvm.ptr
-% DEVICE:         merk.foreign_call @merk_device_process_loop(%c0_i64{{.*}}, %{{.*}}, %c1_i64{{.*}}, %{{.*}}) : (i64, i64, i64, i64) -> ()
-% DEVICE:         merk.foreign_call @merk_device_process_loop(%c1_i64{{.*}}, %{{.*}}, %c-1_i64{{.*}}, %{{.*}})
+% DEVICE:         merk.foreign_call @merk_device_process_loop(%c0_i64{{.*}}, %{{.*}}, %c1_i64{{.*}}, %{{.*}}, %c0_i64{{.*}}) : (i64, i64, i64, i64, i64) -> ()
+% DEVICE:         merk.foreign_call @merk_device_process_loop(%c1_i64{{.*}}, %{{.*}}, %c-1_i64{{.*}}, %{{.*}}, %c0_i64{{.*}})
 % DEVICE-LABEL: merk.proc private @process_loops.add_previous_3_0(
 % DEVICE:         merk.foreign_call @merk_device_process_loop(
-% DEVICE-LABEL: merk.proc @merk_process_loop(%arg0: i64, %arg1: i64, %arg2: i64) attributes {merk.process_root
+% DEVICE-LABEL: merk.proc @merk_process_loop(%arg0: i64, %arg1: i64, %arg2: i64, %arg3: i64) attributes {merk.process_root
 % DEVICE:         merk.switch %arg0 : i64 cases {{\[\[}}0], [1], [2], [3], [4]
 
 % HOST: llvm.mlir.global internal constant @process_loops.merk_process_image.loops("10\00")

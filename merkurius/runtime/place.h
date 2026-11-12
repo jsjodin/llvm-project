@@ -52,6 +52,10 @@ constexpr uint64_t kPlaceWorking{3};
 // process's control block (MLIRGenProcesses.cpp's kProcessLoopWords).
 constexpr uint32_t kProcessLoopWords{32};
 
+// The most reductions of such a loop (MLIRGenProcesses.cpp's
+// kProcessLoopReductions).
+constexpr uint32_t kProcessLoopReductions{8};
+
 // The threads of each of the kernel's teams.
 constexpr uint32_t kPlaceTeamThreads{256};
 
