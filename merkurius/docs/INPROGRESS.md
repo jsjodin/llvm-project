@@ -3690,21 +3690,38 @@ are in the design document, Measurements, Memory bandwidth.
   target regions on every kernel, Copy at 95% of the rated bandwidth.
 - The barrier after each round (d2) is worth 8 to 17% even for a stream.
 - A loop costs about 2 µs, a target region 15 to 17 µs.
-- Open: Dot at 1024 elements takes 25 µs (6.5 before the split). Skipping
-  the team combine gives 4.4 µs, so the combine is the cost, and it grows
-  with the number of teams. Moving the cross-team step into the last team
-  to finish, its threads loading the teams' partials in parallel
-  (`stored`, `lastToStore`), did not change it, so the sequential combine on
-  the process's lane was not the cause. The combine does about 214 scratch
-  accesses: the partials are in arrays whose addresses reach the generated
-  `merk_process_loop_reduce`/`_start` as integers (inttoptr), so they stay
-  in memory. Passing them as pointers and always handling all 8 words cut
-  that to 58, but gave a wrong Dot sum (-0.81 relative) and one GPU page
-  fault: not yet understood; the attempt is kept as a patch in the job's
-  tmp directory (`attempt-pointer-partials.*.diff`). Candidates: the lowering
-  of `!llvm.ptr` parameters of a `merk.proc`, the copy into the local array
-  of words past the loop's reductions, the last team reading teams' words
-  that were never stored.
+- Dot at 1024 elements took 25 µs (6.5 before the split). Skipping the
+  team combine gave 4.4 µs, and the cost grew with the number of teams.
+  Moving the cross-team step into the last team to finish, its threads
+  loading the teams' partials in parallel (`stored`, `lastToStore`), did
+  not change it. The combine did 214 scratch accesses: the partials were in
+  arrays whose addresses reached the generated `merk_process_loop_reduce`
+  and `_start` as integers. As pointers, with all 8 words handled so that
+  the indices are constants, 20.
+- That gave wrong sums, 3/16 of the right ones at every size and number of
+  teams, and a page fault with few teams. Each step across a wave's lanes
+  added the thread's first value, not its running sum: 6 lanes of 32. The
+  bitcode was right going into the device link's LTO and wrong after
+  OpenMPOpt, which runs the Attributor on OpenMP device code (the device
+  library is). AAPointerInfo skipped a write in a callee in a loop: it asked
+  whether the dominating write before the loop could reach the callee
+  without passing the load, which in a loop it cannot, though the call's
+  value comes back round to the load. Fixed in 232e9ac212a1 (the load is
+  excluded only when it cannot be in a cycle), with a reproducer in
+  `llvm/test/Transforms/Attributor/value-simplify-pointer-info-loop-call.ll`.
+  Bisecting LTO: `opt -passes='lto<O2>' <img>.0.2.internalize.bc
+  -print-changed -filter-print-funcs=<f>`, `-openmp-opt-disable` to rule
+  OpenMPOpt out, `-debug-only=attributor`.
+- Dot at 1024 is now 12 µs. Cut-short variants (design document,
+  Measurements, Memory bandwidth) put most of the rest after the team's
+  barrier, but combining the waves' values in parallel did not remove it.
+  Open: with the combine returning at once Dot still takes 6.4 µs at 100%
+  of the units and 2.6 at 50%, against Copy's 2.2: something in a loop with
+  reductions grows with the number of teams. Next step: timestamps inside
+  the kernel (`s_memtime`) rather than more variants, whose noise is
+  1 to 2 µs.
+- At 2^25 elements Dot is 8% below `bandwidth.c`; the combine is under 1%
+  of a run there, so that gap is in the loop.
 - `with-gpus.py` twice printed its GPU listing instead of running the
   program; a retry worked. Cause not looked at.
 
@@ -3739,8 +3756,11 @@ are in the design document, Measurements, Memory bandwidth.
 *Committed 2026-11-12:* the rounds in generated procedures, `convergent`
 and `noinline` marking (`Lowering.cpp`, `MarkKernelFunctions`),
 `Work`/`RunProcess`/`CombineTeamPartials` out of line, and the last team's
-parallel combine; all GPU tests and the non-GPU suite pass. Next: Dot's
-combine (above), then the design document's description of the loops.
+parallel combine; all GPU tests and the non-GPU suite pass. Then, 2026-11-12,
+the combine's partials as pointers with constant indices, and the waves'
+combined in parallel (Dot 25 to 12 µs). Next: the reduction loops' cost that
+grows with the teams (above), then the design document's description of
+the loops.
 
 **Open after (p1).**
 - *Which units the processes' kernel takes,* as it holds every team slot

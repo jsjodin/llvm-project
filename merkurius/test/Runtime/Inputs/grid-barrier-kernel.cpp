@@ -18,8 +18,9 @@ extern "C" void merk_device_grid_barrier(MerkGridBarrier *barrier);
 extern "C" void merk_process_dispatch(uint64_t, uint64_t) {}
 extern "C" void merk_process_loop(uint64_t, int64_t, int64_t, int64_t, int64_t,
     int64_t, int64_t, uint64_t, uint64_t) {}
-extern "C" void merk_process_loop_start(uint64_t, uint64_t) {}
-extern "C" void merk_process_loop_reduce(uint64_t, uint64_t, uint64_t) {}
+extern "C" void merk_process_loop_start(uint64_t, uint64_t *) {}
+extern "C" void merk_process_loop_reduce(
+    uint64_t, uint64_t *, const uint64_t *) {}
 
 extern "C" __gpu_kernel void grid_barrier_test(MerkGridBarrier *barrier,
     uint64_t *slots, uint32_t rounds, uint32_t *errors) {

@@ -156,14 +156,14 @@ print_result(V, !IO) :-
 % DEVICE:           merk.call @[[MINMAX]]$rounds(%{{.*}}, %{{.*}}, %arg2, %arg3, %arg4, %arg5, %[[NEXT]]#0, %[[NEXT]]#1)
 % DEVICE:         } else {
 % DEVICE:           merk.yield %arg6, %arg7
-% DEVICE-LABEL: merk.proc @merk_process_loop_start(%arg0: i64, %arg1: i64) attributes {merk.process_root
+% DEVICE-LABEL: merk.proc @merk_process_loop_start(%arg0: i64, %arg1: !llvm.ptr) attributes {merk.process_root
 % DEVICE:         arith.constant 0 : i64
 % DEVICE:       }, {
 % DEVICE:         arith.constant 9223372036854775807 : i64
 % DEVICE:         arith.constant -9223372036854775808 : i64
 % DEVICE:       }, {
 % DEVICE:         arith.constant 0.000000e+00 : f64
-% DEVICE-LABEL: merk.proc @merk_process_loop_reduce(%arg0: i64, %arg1: i64, %arg2: i64) attributes {merk.process_root
+% DEVICE-LABEL: merk.proc @merk_process_loop_reduce(%arg0: i64, %arg1: !llvm.ptr, %arg2: !llvm.ptr) attributes {merk.process_root
 % DEVICE:         arith.addi
 % DEVICE:       }, {
 % DEVICE:         arith.minsi
