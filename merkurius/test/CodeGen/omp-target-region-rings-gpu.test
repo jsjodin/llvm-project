@@ -3,11 +3,12 @@ running region, nor the GPU process whose mailbox it is, has it attached;
 one whose mailbox closes while a region still reads it goes when that
 region ends. Here 40 target regions each receive from a mailbox of their
 own, which then closes, while a GPU process waits, so no moment comes when
-nothing runs on the device.
+nothing runs on the device. The process's kernel takes half of the GPU's
+units (MERK_GPU_PROCESS_UNITS), so that the regions have the rest.
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fopenmp -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/Inputs/region-rings-beside-process.m -o %t.O2
-RUN: %gpu-env OMP_TARGET_OFFLOAD=MANDATORY MERK_CHECK_DEVICE_MEMORY=1 MERK_CHECK_MESSAGES=1 timeout -k 1 120 %t.O2 2>&1 | FileCheck %s --match-full-lines --strict-whitespace
+RUN: %gpu-env MERK_GPU_PROCESS_UNITS=50 OMP_TARGET_OFFLOAD=MANDATORY MERK_CHECK_DEVICE_MEMORY=1 MERK_CHECK_MESSAGES=1 timeout -k 1 120 %t.O2 2>&1 | FileCheck %s --match-full-lines --strict-whitespace
 CHECK:820
 CHECK-NEXT:7
 CHECK-NEXT:Mercury runtime: 0 messages are neither read nor freed
@@ -16,6 +17,12 @@ CHECK-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allo
 When main ends while the GPU process still waits, the end's check waits ten
 seconds for it, and then only the process's own ring and the chunk of its
 table of rings are left: the regions' rings went as each region ended.
-RUN: %gpu-env OMP_TARGET_OFFLOAD=MANDATORY MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 120 %t.O2 leave 2>&1 | FileCheck %s --check-prefix=LEAVE --match-full-lines --strict-whitespace
+RUN: %gpu-env MERK_GPU_PROCESS_UNITS=50 OMP_TARGET_OFFLOAD=MANDATORY MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 120 %t.O2 leave 2>&1 | FileCheck %s --check-prefix=LEAVE --match-full-lines --strict-whitespace
 LEAVE:820
 LEAVE-NEXT:Mercury runtime: 1 chunks of the devices' arenas and 1 rings are allocated
+
+With every unit for the process's kernel, the default, the first region
+could never start, as the kernel holds every team slot of its units, so it
+is a software error rather than a hang.
+RUN: not %gpu-env OMP_TARGET_OFFLOAD=MANDATORY timeout -k 1 120 %t.O2 2>&1 | FileCheck %s --check-prefix=HELD
+HELD: Software Error: target region: the GPU processes' kernel on GPU 0 holds every compute unit that its queues may use, so the region would never start: process.set_gpu_units, between kernels, or MERK_GPU_PROCESS_UNITS leaves it a share of them

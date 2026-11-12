@@ -253,6 +253,19 @@
     % for them, and otherwise they are numbered from 0.
 :- pred gpus(int::out, io::di, io::uo) is det.
 
+    % set_gpu_units(gpu(GPU), Percent, !IO): the GPU's processes run in one
+    % kernel, a module's at a time, which holds every team slot of the
+    % compute units it runs on until its processes have all ended. It takes
+    % Percent of the units that the GPU's queues may use, from 1 to 100,
+    % rounded up to a pair of units; the rest are for target regions and
+    % other kernels, and a target region on a GPU whose processes' kernel
+    % holds every unit is a software error. The default is 100, or
+    % MERK_GPU_PROCESS_UNITS. It applies to the GPU's next kernel, so a
+    % program sets it before its first spawn there, or between kernels, once
+    % the processes of the last have all ended: while they run, as for the
+    % host, which is not a GPU, it is a software error.
+:- pred set_gpu_units(place::in, int::in, io::di, io::uo) is det.
+
     % For the expansion of process declarations (design document, "Processes
     % and mailboxes"), not for programs. A GPU process's kernel takes its
     % arguments as words: an int, a float or a character as one, and a
@@ -402,6 +415,7 @@ extern MR_Integer merk_node_lookup(MR_Integer high, MR_Integer low,
     MR_String name, MR_Word type_info, MR_Integer milliseconds,
     MR_Integer *place_slot, MR_Integer *generation, MR_Integer *secret);
 extern MR_Integer merk_gpu_count(void);
+extern const char *merk_gpu_set_units(MR_Integer gpu, MR_Integer percent);
 extern const char *merk_gpu_process_spawn(MR_Word type_info, MR_Integer gpu,
     MR_String module, MR_String kind, MR_ArrayPtr words,
     MR_Integer *place_slot, MR_Integer *generation, MR_Integer *secret);
@@ -553,6 +567,29 @@ spawn_host_kind_at_gpu(GPU, Spawn, Kind, _Mailbox, !IO) :-
     error(string.format("%s: the process kind %s runs on the host, not at " ++
         "gpu(%d): its declaration does not say on gpu", [s(Spawn), s(Kind),
         i(GPU)])).
+
+set_gpu_units(Place, Percent, !IO) :-
+    (
+        Place = host,
+        error("process.set_gpu_units: the host is not a GPU")
+    ;
+        Place = gpu(GPU),
+        set_units(GPU, Percent, Error, !IO),
+        ( if Error = "" then
+            true
+        else
+            error("process.set_gpu_units: " ++ Error)
+        )
+    ).
+
+:- pred set_units(int::in, int::in, string::out, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    set_units(GPU::in, Percent::in, Error::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    const char *error = merk_gpu_set_units(GPU, Percent);
+    Error = (MR_String) (error ? error : \"\");
+").
 
 :- pred gpu_count(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",

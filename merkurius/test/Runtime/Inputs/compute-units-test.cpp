@@ -13,9 +13,14 @@ void Units(const char *what, const std::uint32_t *usable, int words) {
   if (ProcessUnits(usable, words, mask)) {
     std::printf("%s: %08x %08x %08x (%d)", what, mask.words[2], mask.words[1],
         mask.words[0], UnitCount(mask));
-    FirstPair(mask);
-    std::printf(", first pair %08x %08x %08x\n", mask.words[2], mask.words[1],
-        mask.words[0]);
+    const int percents[]{50, 1};
+    for (int percent : percents) {
+      UnitMask share{mask};
+      KeepShare(share, percent);
+      std::printf(", %d%% %08x %08x %08x", percent, share.words[2],
+          share.words[1], share.words[0]);
+    }
+    std::printf("\n");
   } else {
     std::printf("%s: none\n", what);
   }

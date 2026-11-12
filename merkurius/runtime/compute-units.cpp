@@ -34,14 +34,19 @@ bool ProcessUnits(const std::uint32_t *usable, int words, UnitMask &mask) {
   return UnitCount(mask) != 0;
 }
 
-void FirstPair(UnitMask &mask) {
-  bool found{false};
+void KeepShare(UnitMask &mask, int percent) {
+  int pairs{UnitCount(mask) / 2};
+  int keep{(pairs * percent + 99) / 100};
   for (std::uint32_t &word : mask.words) {
-    if (found) {
-      word = 0;
-    } else if (word != 0) {
-      word &= std::uint32_t{3} << (__builtin_ctz(word) & ~1);
-      found = true;
+    for (int bit{0}; bit < 32; bit += 2) {
+      if (!(word & (std::uint32_t{3} << bit))) {
+        continue;
+      }
+      if (keep > 0) {
+        --keep;
+      } else {
+        word &= ~(std::uint32_t{3} << bit);
+      }
     }
   }
 }

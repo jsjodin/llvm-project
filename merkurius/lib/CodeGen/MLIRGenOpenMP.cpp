@@ -2010,6 +2010,13 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
   operands.kernelType = mlir::omp::TargetExecModeAttr::get(&context_, mode);
   operands.device = device;
   operands.hostEvalVars.append(hostEval.begin(), hostEval.end());
+  // A region on a GPU whose processes' kernel holds every unit would never
+  // start (gpu-processes.cpp): the device's number, or -1 for the default.
+  merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+      "merk_check_region_units",
+      mlir::ValueRange{
+          device ? device : IntegerConstant(builder_.getI64Type(), -1, loc)},
+      /*can_fail=*/false);
   // The host counts the running regions, and gives each a slot, whose
   // chunks on the device hold the cells the region makes, freed as it ends
   // (docs/INPROGRESS.md, The device's side of the first slice, step 6).

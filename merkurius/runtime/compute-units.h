@@ -36,8 +36,9 @@ int UnitCount(const UnitMask &mask);
 // its pair is not used.
 bool ProcessUnits(const std::uint32_t *usable, int words, UnitMask &mask);
 
-// Keeps only the lowest pair of `mask`, which has one.
-void FirstPair(UnitMask &mask);
+// Keeps the lowest pairs of `mask`, which has one: `percent` of them, from 1
+// to 100, rounded up, so at least one.
+void KeepShare(UnitMask &mask, int percent);
 
 } // namespace merkurius::runtime
 
