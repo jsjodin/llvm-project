@@ -103,6 +103,10 @@ private:
   /// MCResourceInfo symbols are known.
   void validateMCResourceInfo(Function &F);
 
+  /// Emits SI_CALLEE_STACK_SIZE: an s_mov_b32 of the function's private
+  /// segment size symbol less its frame.
+  void emitCalleeStackSize(const MachineInstr &MI);
+
 public:
   std::function<const AMDGPUResourceUsageAnalysisImpl::SIFunctionResourceInfo *(
       MachineFunction &)>
