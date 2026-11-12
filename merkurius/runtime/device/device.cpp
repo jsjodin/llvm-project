@@ -92,7 +92,6 @@ int64_t Deadline(int64_t milliseconds) {
 } // namespace
 
 using merkurius::runtime::ArrayWords;
-using merkurius::runtime::ArrayWordsOfHeader;
 using merkurius::runtime::DeviceRing;
 using merkurius::runtime::kArenaClearWords;
 using merkurius::runtime::kBumpWords;
@@ -1704,7 +1703,7 @@ extern "C" int merk_device_receive_array(
   }
   // The host wrote the copy before it answered.
   __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
-  uint64_t words{ArrayWordsOfHeader(header)};
+  uint64_t words{ArrayWords(copy)};
   auto *array{
       static_cast<uint64_t *>(merk_device_alloc(sizeof(uint64_t) * words))};
   for (uint64_t i{0}; i < words; ++i) {
@@ -1841,8 +1840,6 @@ extern "C" uint64_t *merk_device_give_array(uint64_t *array, int64_t number) {
   rpc::Client::Port port{__llvm_rpc_client.open<rpcGiveArray>()};
   port.send([&](rpc::Buffer *buffer, uint32_t) {
     buffer->data[0] = reinterpret_cast<uint64_t>(pinned);
-    // Its header, from which the host finds its bytes.
-    buffer->data[1] = array[0];
     buffer->data[2] = reinterpret_cast<uint64_t>(memory.First());
   });
   port.recv([&](rpc::Buffer *buffer, uint32_t) {

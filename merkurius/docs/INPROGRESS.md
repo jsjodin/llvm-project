@@ -2984,6 +2984,91 @@ the process asks the host to launch. The first version has neither.
        `CodeGen/process-records.m` with `process-records-gpu.test` (records
        as GPU processes' messages and state, by value in their code).
 
+     **Step 2's design, 2026-11-12: arrays of records inline.** Two
+     parts, each a commit: 2a, arrays; 2b, messages and maps as bytes.
+     - *C's layout.* A record's struct has each field at its C size and
+       alignment: `int8` to `int32`, `char` and enumerations (4 bytes, as
+       an array holds them and as C's `enum` is) at their sizes, `int`,
+       `float` and the 64-bit integers at 8. Step 1 gave an enumeration a
+       word; that changes, with a `trunc` and a `zext` at construction and
+       deconstruction.
+     - *The header.* A fifth width code, 4, for inline records, and a second
+       header word, the element's bytes (C's `sizeof`, a multiple of its
+       alignment); the elements start at word 2. The size stays in the low
+       56 bits of word 0, so `merk.array_size` is unchanged, and the whole
+       array's words come from the two words alone, which the collector,
+       the copies and the maps need. *Rejected:* the element's bytes in
+       the header's spare bits, which caps them at 255 or takes bits from
+       the size and makes every size read depend on the code; a pointer to
+       the descriptor in word 1, which a copy to a device would carry as a
+       host address.
+     - *The descriptors.* A record's, and an enumeration's and a notag's
+       that is a flat field, get a flag, which `LowerTypeCtors` sets by the
+       same rule as `ChooseRecords`, so that the runtime agrees with the
+       compiler on what is inline, and on a tuple, whose descriptor all
+       tuples share, from its arguments. The runtime computes a record's
+       layout from its fields' kinds by C's rules, which are LLVM's for a
+       literal struct on both targets; no table of offsets.
+     - *Monomorphic code* reads and writes an element in place: a load or
+       store of the struct at word 2 plus `i` times its bytes. Making,
+       filling and resizing pass the element's bytes by pointer to the
+       runtime (`merk_array_new_bytes` and the like), which copies them.
+       `from_list`, whose elements are cells, passes the type_info.
+     - *Polymorphic code* gets the element's type_info, as narrow arrays'
+       making operations already do (MLIRGen's `ElementTypeInfo`), on
+       `merk.array_get`, `array_set`, `array_fill` and `array_resize` too.
+       A get tests the code: a record is boxed by the runtime, by the
+       type_info, after a `merk_gc_poll`, since the runtime's allocation
+       only grows the heap; any other is `merk.array_load` as now. A set,
+       fill, resize or making unboxes a cell into the bytes, which
+       allocates nothing. *Rejected:* a get entry in the descriptor, a
+       Mercury procedure the compiler makes for each record type: no
+       runtime code to box, but a second way to reach an element, and
+       the runtime's boxing is needed anyway for `io.write`'s and the
+       decoder's sake.
+     - *The runtime's walkers.* The collector and the copies move an
+       inline array as one block and scan nothing in it. `io.write` and
+       the encoder read the fields in place; the decoder copies the bytes
+       and checks each character and enumeration, as it does a narrow
+       array's.
+     - *2b, messages and maps:* a record message, and an array of records,
+       travels as its bytes, and a target region's map of a record is its
+       struct's bytes, not a cell. Designed when 2a is built.
+
+     **Step 2a, built 2026-11-12** (design document, Type representation,
+     and Lowering, "Arrays" and "Records"). As designed above, with:
+     - *One rule in one place.* `lib/CodeGen/Records.h` decides which types
+       are records from a module's `merk.type_def`s; lowering's choice, the
+       descriptors' flag and MLIRGen's target regions all ask it, so they
+       cannot disagree.
+     - *Target regions* map an array of records by its words, as an array
+       of numbers, in both directions, and the device makes such arrays
+       too. That was planned for 2b, but needed nothing of 2b's.
+     - *The decoder* also checks a record's padding is zeros, so that equal
+       records keep equal bytes, and names what is wrong with a record:
+       its padding, a character or an enumeration.
+     - *Messages* of arrays of records between host processes are copied
+       by their `type_info`s, as one block; a GPU kind still rejects them
+       as messages, until 2b.
+     - *Not built:* `array.sort`, `binary_search`, `foldr` and the others
+       of `array.m` without clauses are not yet implemented for any element
+       type, records included.
+     - *Tests:* `CodeGen/record-arrays.m` (every array procedure on records,
+       monomorphic and polymorphic, a field read alone in a loop, mmc's
+       output, the collector at every allocation), `record-imports.m` (a
+       record type of another module, and abstract ones, which are not
+       records), `omp-target-record-arrays.m` and its GPU run (the mapped
+       sizes), `process-record-arrays.m` (host processes), and the record
+       arrays in `encode-checks.m` (golden bytes, round trips, hostile
+       input).
+     - *The oracle:* `generate-layout-programs.py --arrays` makes a quarter
+       of its types of one constructor of two to four fields, and puts
+       each type's values in arrays, read and set in monomorphic and
+       polymorphic code (`CodeGen/oracle/layouts-arrays-1.test`). Of 200
+       modules (seed 503), 110 with arrays of records, all print what mmc's
+       print at -O0 and -O2, and the same with the collector at every
+       allocation; so do the 460 modules of the earlier layout batches.
+
      **Decided by the user, 2026-11-12:** (a), inline on the host as on
      the GPU; and a fixed size as a library type, `fixed(T, n8)`, whose
      size is an ordinary type the library declares, so that the type

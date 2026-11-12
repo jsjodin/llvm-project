@@ -104,6 +104,13 @@ llvm::LogicalResult SucceedOp::verify() {
 static llvm::LogicalResult VerifyElement(
     mlir::Operation *op, mlir::Value array, mlir::Type type, llvm::StringRef what) {
   mlir::Type element{mlir::cast<ArrayType>(array.getType()).getElement()};
+  // A flat record's value, which the array holds inline (lowering's
+  // MakeRecords).
+  auto record{mlir::dyn_cast<RecordType>(type)};
+  auto term{mlir::dyn_cast<TermType>(element)};
+  if (record && term && record.getName() == term.getName()) {
+    return mlir::success();
+  }
   if (type != element) {
     return op->emitOpError() << what << " of type " << type
                              << " is not of the array's element type " << element;

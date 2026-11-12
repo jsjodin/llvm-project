@@ -308,16 +308,18 @@ llvm::SmallVector<unsigned> MerkGenerator::VariablesOf(
   return variables;
 }
 
-mlir::Value MerkGenerator::ArrayElement(
-    mlir::Value array, mlir::Value index, mlir::Location loc) {
+mlir::Value MerkGenerator::ArrayElement(mlir::Value array, mlir::Value index,
+    mlir::Value elementTypeInfo, mlir::Location loc) {
   return merk::ArrayGetOp::create(builder_, loc,
-      mlir::cast<merk::ArrayType>(array.getType()).getElement(), array, index);
+      mlir::cast<merk::ArrayType>(array.getType()).getElement(), array, index,
+      elementTypeInfo);
 }
 
 mlir::Value MerkGenerator::ArrayWithElement(mlir::Value array,
-    mlir::Value index, mlir::Value element, mlir::Location loc) {
+    mlir::Value index, mlir::Value element, mlir::Value elementTypeInfo,
+    mlir::Location loc) {
   return merk::ArraySetOp::create(
-      builder_, loc, array.getType(), array, index, element)
+      builder_, loc, array.getType(), array, index, element, elementTypeInfo)
       .getResult();
 }
 
@@ -391,8 +393,10 @@ merk::ProcOp MerkGenerator::UnifyArrayProc() {
     builder_.setInsertionPointToStart(&ite.getThenRegion().emplaceBlock());
     merk::GuardOp::create(builder_, loc,
         merk::UnifyWordOp::create(builder_, loc, builder_.getI1Type(),
-            entry->getArgument(0), ArrayElement(entry->getArgument(1), i, loc),
-            ArrayElement(entry->getArgument(2), i, loc)));
+            entry->getArgument(0),
+            ArrayElement(entry->getArgument(1), i, entry->getArgument(0), loc),
+            ArrayElement(
+                entry->getArgument(2), i, entry->getArgument(0), loc)));
     mlir::Value next{mlir::arith::AddIOp::create(
         builder_, loc, i, IntegerConstant(i64, 1, loc))};
     merk::CallOp::create(builder_, loc, mlir::TypeRange{}, from.getSymName(),
@@ -846,8 +850,9 @@ merk::ProcOp MerkGenerator::CompareArrayProc() {
     merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
     builder_.setInsertionPointToStart(&ite.getThenRegion().emplaceBlock());
     mlir::Value order{merk::CompareWordOp::create(builder_, loc, result,
-        entry->getArgument(0), ArrayElement(entry->getArgument(1), i, loc),
-        ArrayElement(entry->getArgument(2), i, loc))};
+        entry->getArgument(0),
+        ArrayElement(entry->getArgument(1), i, entry->getArgument(0), loc),
+        ArrayElement(entry->getArgument(2), i, entry->getArgument(0), loc))};
     auto differs{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
     {
       mlir::OpBuilder::InsertionGuard inner{builder_};

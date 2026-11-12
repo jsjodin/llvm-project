@@ -79,6 +79,10 @@ enum Kind : uint8_t {
   Closure,
 };
 
+// A TypeCtor's flags: a term type's whose values are flat records, or flat
+// fields of them, as the compiler chose them (record.h).
+constexpr uint8_t kFlat{1};
+
 // byTag's marks, for a tag whose word is a constant, and for one that
 // constructors share.
 constexpr uint16_t kConstantTag{0xffff};

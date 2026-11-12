@@ -16,6 +16,8 @@
 
 #include "array.h"
 #include "descriptor.h"
+#include "heap.h"
+#include "record.h"
 #include "walk.h"
 #include <array>
 #include <cinttypes>
@@ -279,6 +281,19 @@ void PutChar(Out &out, std::uint32_t c, bool quoted) {
 }
 
 void WriteValue(Out &out, Word value, Word type, const Environment *environment, int context);
+
+void *AllocateCell(Word bytes) { return Allocate(bytes); }
+
+// Element `i` of an array of the element type, as a word: a record boxed,
+// on the heap, which only grows it, as the runtime's other allocations do.
+Word ElementWord(
+    const Word *array, Word i, Word element, const Environment &environment) {
+  if (!IsRecordArray(array)) {
+    return LoadElement(array, i);
+  }
+  return BoxRecord(Resolve(element, &environment),
+      ArrayElements(array) + array[1] * i, AllocateCell);
+}
 void WriteTyped(Out &out, Word value, const Type &type, int context);
 
 void WriteList(Out &out, const Functor *functor, const Word *fields, const Type &type) {
@@ -449,8 +464,8 @@ void WriteTyped(Out &out, Word value, const Type &type, int context) {
       if (i != 0) {
         out.Put(", ");
       }
-      WriteValue(out, LoadElement(array, i), element, &type.environment,
-          kArgumentPriority);
+      WriteValue(out, ElementWord(array, i, element, type.environment), element,
+          &type.environment, kArgumentPriority);
     }
     out.Put("])");
     return;

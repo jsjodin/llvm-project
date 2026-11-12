@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "merkurius/CodeGen/Lowering.h"
+#include "Records.h"
 #include "merkurius/CodeGen/DeviceLibrary.h"
 #include "merkurius/CodeGen/MLIRGen.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
@@ -247,15 +248,15 @@ private:
   llvm::LogicalResult Layouts();
   // Which terms are flat records, by value, and their structs
   // (docs/INPROGRESS.md, Flat records, step 1).
-  bool IsRecord(llvm::StringRef name, llvm::StringSet<> &seen);
-  bool HasRecordShape(llvm::StringRef name, llvm::StringSet<> &seen);
-  bool IsFlatField(mlir::Type field, llvm::StringSet<> &seen);
+  mlir::Type FieldStorage(mlir::Type field);
   void ChooseRecords();
   mlir::LLVM::LLVMStructType RecordStruct(
       llvm::StringRef name, const llvm::StringSet<> &chosen);
   merk::FunctorAttr RecordFunctor(llvm::StringRef name) const;
   void BoxOperands(mlir::Operation *, bool atDefinition = false);
   void LowerRecordOp(mlir::Operation *, merk::RecordType);
+  mlir::Value ToFieldStorage(
+      mlir::Value value, mlir::Type storage, mlir::Location loc);
   llvm::SmallVector<mlir::Type> RecordsOf(mlir::TypeRange) const;
   void UnboxResults(mlir::Operation *);
   // Makes every value of a record's term a merk.record, boxing it into its
@@ -394,13 +395,34 @@ private:
     return operands.empty() ? mlir::Value{} : operands.front();
   }
   void LowerArray(mlir::Operation *);
+  // The struct of the records an array operation's array holds inline, or
+  // null (docs/INPROGRESS.md, Flat records, step 2).
+  mlir::LLVM::LLVMStructType ArrayRecord(mlir::Operation *op) const;
+  // Record I of an array of records, after its two header words.
+  mlir::Value RecordAddress(mlir::Value array, mlir::Value index,
+      mlir::LLVM::LLVMStructType record, mlir::Location);
+  // A stack slot holding a record, whose padding is 0, for the runtime to
+  // copy from; or null for none.
+  mlir::Value RecordSlot(mlir::Operation *op, mlir::Value value,
+      mlir::LLVM::LLVMStructType record, mlir::Location);
+  // A polymorphic merk.array_get's word: a record the array holds inline
+  // boxed by the runtime, by the type_info, any other element as
+  // merk.array_load reads it.
+  mlir::Value PolymorphicElement(mlir::Operation *op, mlir::Value array,
+      mlir::Value index, mlir::Value typeInfo, mlir::Location);
+  // A polymorphic merk.array_set's store of a word: into a record the array
+  // holds inline unboxed by the runtime, which allocates nothing, and into
+  // any other element as merk.array_store writes it.
+  void PolymorphicStore(mlir::Operation *op, mlir::Value array,
+      mlir::Value index, mlir::Value word, mlir::Value typeInfo,
+      mlir::Location);
   // The width's code of an array of the element type (runtime/array.h), or
   // none for one whose arrays' headers alone say: a type variable's, and
   // another module's abstract type's, whose layout this module does not see.
   std::optional<std::int64_t> ArrayWidth(mlir::Type element) const;
-  // The width's code an array operation makes its array with: the element
-  // type's, or the runtime's, from the type_info of what a type variable
-  // stands for, its operand `typeInfo`.
+  // The width's code an array operation makes its array with, for an
+  // element type whose width lowering knows, or a word's for an empty array
+  // with no `typeInfo`; the runtime makes one of a type_info's elements.
   mlir::Value MadeArrayWidth(
       mlir::Operation *, mlir::Value typeInfo, mlir::Location);
   // An array's header, and from it its size.
@@ -512,6 +534,9 @@ private:
   llvm::StringMap<TermLayout> layouts_;
   // The types exported abstractly, which other modules pass as pointers.
   llvm::StringSet<> abstract_;
+  // Which terms are flat records (Records.h), read from the merk.type_defs
+  // before Layouts erases them.
+  std::optional<RecordRule> recordRule_;
   llvm::StringMap<mlir::LLVM::LLVMStructType> records_;
   // A record's layout as a switch on it sees it, which has one case.
   llvm::StringMap<TermLayout> recordLayouts_;
@@ -568,6 +593,7 @@ llvm::LogicalResult Lowerer::Layouts() {
   mlir::MLIRContext *context{module_.getContext()};
   auto word{mlir::IntegerType::get(context, 64)};
   llvm::SmallVector<std::pair<std::string, mlir::Location>> abstract;
+  recordRule_.emplace(module_);
   for (auto def : llvm::make_early_inc_range(module_.getOps<merk::TypeDefOp>())) {
     if (def.getAbstract()) {
       abstract.push_back({def.getName().str(), def.getLoc()});
@@ -669,85 +695,32 @@ mlir::Type Lowerer::ResolveLayoutType(
   return layout.type;
 }
 
-// Whether a field of a record is flat in every module that sees the
-// record's constructors: a number or a character, or a term of a type not
-// exported abstractly that is an enumeration, a notag of such a field, or a
-// record. Another module has no merk.type_def for a type it sees only
-// abstractly, so it decides alike.
-bool Lowerer::IsFlatField(mlir::Type field, llvm::StringSet<> &seen) {
-  if (mlir::isa<mlir::IntegerType, mlir::FloatType>(field)) {
-    return true;
-  }
-  auto term{mlir::dyn_cast<merk::TermType>(field)};
-  if (!term || abstract_.contains(term.getName())) {
-    return false;
-  }
-  auto it{layouts_.find(term.getName())};
-  if (it == layouts_.end()) {
-    return false;
-  }
-  const TermLayout &layout{it->second};
-  if (layout.kind == TermLayout::Kind::Enum) {
-    return true;
-  }
-  if (layout.kind == TermLayout::Kind::NoTag) {
-    if (!seen.insert(term.getName()).second) {
-      return false;
-    }
-    bool flat{IsFlatField(layout.functors.front().fields.front(), seen) &&
-        mlir::isa<mlir::IntegerType, mlir::FloatType>(layout.type)};
-    seen.erase(term.getName());
-    return flat;
-  }
-  return IsRecord(term.getName(), seen);
-}
-
-// A type of one constructor of two or more flat fields, with no hidden
-// ones, not exported abstractly (docs/INPROGRESS.md, Flat records, step 1).
-// `seen` has the types whose fields are being checked, whose own term in a
-// field makes a recursive type; a type in two fields, as a record of two
-// points, is checked twice.
-bool Lowerer::IsRecord(llvm::StringRef name, llvm::StringSet<> &seen) {
-  if (!seen.insert(name).second) {
-    return false;
-  }
-  bool record{HasRecordShape(name, seen)};
-  seen.erase(name);
-  return record;
-}
-
-bool Lowerer::HasRecordShape(llvm::StringRef name, llvm::StringSet<> &seen) {
-  auto it{layouts_.find(name)};
-  if (it == layouts_.end() || abstract_.contains(name)) {
-    return false;
-  }
-  const TermLayout &layout{it->second};
-  if (layout.kind != TermLayout::Kind::Cells || layout.functors.size() != 1) {
-    return false;
-  }
-  const TermLayout::Functor &functor{layout.functors.front()};
-  if (functor.arity < 2 || functor.hidden != 0) {
-    return false;
-  }
-  for (mlir::Type field : functor.fields) {
-    if (!IsFlatField(field, seen)) {
-      return false;
-    }
-  }
-  return true;
-}
-
 void Lowerer::ChooseRecords() {
   llvm::StringSet<> chosen;
   for (auto &entry : layouts_) {
-    llvm::StringSet<> seen;
-    if (IsRecord(entry.getKey(), seen)) {
+    if (recordRule_->IsRecord(entry.getKey())) {
       chosen.insert(entry.getKey());
     }
   }
   for (auto &entry : chosen) {
     RecordStruct(entry.getKey(), chosen);
   }
+}
+
+// A flat field's type in a record's struct, as C holds it: an enumeration
+// in 4 bytes, as an array holds it and as C's enum is, and a notag as its
+// argument (docs/INPROGRESS.md, Flat records, step 2).
+mlir::Type Lowerer::FieldStorage(mlir::Type field) {
+  if (auto term{mlir::dyn_cast<merk::TermType>(field)}) {
+    const TermLayout &layout{layouts_.find(term.getName())->second};
+    if (layout.kind == TermLayout::Kind::Enum) {
+      return rewriter_.getI32Type();
+    }
+    if (layout.kind == TermLayout::Kind::NoTag) {
+      return FieldStorage(layout.functors.front().fields.front());
+    }
+  }
+  return Convert(field);
 }
 
 // A record's struct: its fields' LLVM types, a nested record's struct.
@@ -761,7 +734,7 @@ mlir::LLVM::LLVMStructType Lowerer::RecordStruct(
     auto term{mlir::dyn_cast<merk::TermType>(field)};
     fields.push_back(term && chosen.contains(term.getName())
             ? mlir::Type{RecordStruct(term.getName(), chosen)}
-            : Convert(field));
+            : FieldStorage(field));
   }
   auto type{
       mlir::LLVM::LLVMStructType::getLiteral(module_.getContext(), fields)};
@@ -903,10 +876,9 @@ llvm::LogicalResult Lowerer::MakeRecords() {
       if (mlir::isa<merk::RecordType>(note.getValue().getType())) {
         rewriter_.eraseOp(op);
       }
-    } else if (mlir::isa<merk::ToWordOp, merk::ArrayNewOp, merk::ArraySetOp,
-                   merk::ArrayFillOp>(op)) {
+    } else if (mlir::isa<merk::ToWordOp>(op)) {
       BoxOperands(op);
-    } else if (mlir::isa<merk::FromWordOp, merk::ArrayGetOp>(op)) {
+    } else if (mlir::isa<merk::FromWordOp>(op)) {
       UnboxResults(op);
     } else if (mlir::isa<merk::ForeignCallOp>(op)) {
       BoxOperands(op);
@@ -1067,6 +1039,15 @@ mlir::Value Lowerer::WordsEqual(
 // An operation on a record by value: a construction builds its struct, a
 // deconstruction reads its fields, a test of its one functor is true, and a
 // switch on it, which has one case, goes to that case.
+// A field's value as its struct holds it: an enumeration's word truncated.
+mlir::Value Lowerer::ToFieldStorage(
+    mlir::Value value, mlir::Type storage, mlir::Location loc) {
+  if (value.getType() == storage) {
+    return value;
+  }
+  return mlir::LLVM::TruncOp::create(rewriter_, loc, storage, value);
+}
+
 void Lowerer::LowerRecordOp(mlir::Operation *op, merk::RecordType record) {
   mlir::Location loc{op->getLoc()};
   auto type{records_.find(record.getName())->second};
@@ -1074,7 +1055,7 @@ void Lowerer::LowerRecordOp(mlir::Operation *op, merk::RecordType record) {
     mlir::Value value{mlir::LLVM::UndefOp::create(rewriter_, loc, type)};
     for (auto [i, argument] : llvm::enumerate(construct.getArguments())) {
       value = mlir::LLVM::InsertValueOp::create(rewriter_, loc, value,
-          LoweredValue(argument, loc),
+          ToFieldStorage(LoweredValue(argument, loc), type.getBody()[i], loc),
           llvm::ArrayRef<std::int64_t>{static_cast<std::int64_t>(i)});
     }
     rewriter_.replaceOp(op, value);
@@ -1102,8 +1083,14 @@ void Lowerer::LowerRecordOp(mlir::Operation *op, merk::RecordType record) {
   llvm::SmallVector<mlir::Value> fields;
   for (std::int64_t i{0}; i < static_cast<std::int64_t>(type.getBody().size());
       ++i) {
-    fields.push_back(mlir::LLVM::ExtractValueOp::create(
-        rewriter_, loc, value, llvm::ArrayRef<std::int64_t>{i}));
+    mlir::Value field{mlir::LLVM::ExtractValueOp::create(
+        rewriter_, loc, value, llvm::ArrayRef<std::int64_t>{i})};
+    mlir::Type wanted{Convert(deconstruct->getResult(i).getType())};
+    if (field.getType() != wanted) {
+      // An enumeration's 4 bytes, zero-extended into its word.
+      field = mlir::LLVM::ZExtOp::create(rewriter_, loc, wanted, field);
+    }
+    fields.push_back(field);
   }
   rewriter_.replaceOp(op, fields);
 }
@@ -2267,6 +2254,9 @@ void Lowerer::LowerClosureWord(merk::ClosureWordOp op) {
       op, Convert(op.getType()), address, 8);
 }
 
+// runtime/descriptor.h's kFlat.
+constexpr std::int64_t kFlatDescriptor{1};
+
 // The descriptors' kinds, as runtime/write.cpp reads them: a term's is its
 // layout's.
 static std::optional<unsigned> DescriptorKind(llvm::StringRef kind) {
@@ -2424,6 +2414,15 @@ llvm::LogicalResult Lowerer::LowerTypeCtors() {
     if (!kind) {
       return op.emitOpError("has an unknown kind");
     }
+    // A record's, or a flat field's of a term type, by the rule ChooseRecords
+    // follows (Records.h), so that the runtime agrees on what an array holds
+    // inline (runtime/descriptor.h, kFlat).
+    std::int64_t flags{0};
+    if (op.getKind() == "term") {
+      if (recordRule_->IsFlatField(*op.getTerm())) {
+        flags |= kFlatDescriptor;
+      }
+    }
     mlir::LLVM::GlobalOp moduleName{StringGlobal(op.getModule(), loc)};
     mlir::LLVM::GlobalOp name{StringGlobal(op.getName(), loc)};
     rewriter_.setInsertionPointToStart(module_.getBody());
@@ -2439,7 +2438,7 @@ llvm::LogicalResult Lowerer::LowerTypeCtors() {
     AppendField(init, position,
         mlir::LLVM::ConstantOp::create(rewriter_, loc, i8, *kind), loc);
     AppendField(init, position,
-        mlir::LLVM::ConstantOp::create(rewriter_, loc, i8, 0), loc);
+        mlir::LLVM::ConstantOp::create(rewriter_, loc, i8, flags), loc);
     AppendField(init, position,
         mlir::LLVM::ConstantOp::create(rewriter_, loc, i16, op.getArity()),
         loc);
@@ -3658,11 +3657,10 @@ mlir::Value Lowerer::MadeArrayWidth(
   if (std::optional<std::int64_t> width{ArrayWidth(element)}) {
     return mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, *width);
   }
-  if (!typeInfo) {
-    // An empty array's: no elements to be narrow.
-    return mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 0);
-  }
-  return CallRuntime("merk_array_width", i64, {ToC(typeInfo, loc)}, loc);
+  // An empty array's, with no type_info: no elements to be narrow. One with
+  // a type_info is made by the runtime (merk_array_new_typed).
+  assert(!typeInfo && "an array of a type_info's elements is the runtime's");
+  return mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 0);
 }
 
 mlir::Value Lowerer::ArrayHeader(mlir::Value array, mlir::Location loc) {
@@ -3813,6 +3811,134 @@ mlir::Value Lowerer::InitialElement(mlir::Value init, mlir::Location loc) {
       : mlir::Value{mlir::LLVM::ZeroOp::create(rewriter_, loc, HeapPointer())};
 }
 
+// A record's bytes and alignment, as C holds it, which is LLVM's layout of
+// a literal struct (runtime/record.h, RecordLayout).
+static std::pair<std::int64_t, std::int64_t> CLayout(mlir::Type type) {
+  if (auto record{mlir::dyn_cast<mlir::LLVM::LLVMStructType>(type)}) {
+    std::int64_t offset{0}, alignment{1};
+    for (mlir::Type field : record.getBody()) {
+      auto [bytes, align]{CLayout(field)};
+      offset = (offset + align - 1) / align * align + bytes;
+      alignment = std::max(alignment, align);
+    }
+    return {(offset + alignment - 1) / alignment * alignment, alignment};
+  }
+  std::int64_t bytes{
+      static_cast<std::int64_t>(type.getIntOrFloatBitWidth() / 8)};
+  return {bytes, bytes};
+}
+
+mlir::LLVM::LLVMStructType Lowerer::ArrayRecord(mlir::Operation *op) const {
+  mlir::Type element{op->getResult(0).getType()};
+  if (auto array{mlir::dyn_cast<merk::ArrayType>(element)}) {
+    element = array.getElement();
+  }
+  llvm::StringRef name;
+  if (auto record{mlir::dyn_cast<merk::RecordType>(element)}) {
+    name = record.getName();
+  } else if (auto term{mlir::dyn_cast<merk::TermType>(element)}) {
+    name = term.getName();
+  } else {
+    return {};
+  }
+  auto it{records_.find(name)};
+  return it == records_.end() ? mlir::LLVM::LLVMStructType{} : it->second;
+}
+
+mlir::Value Lowerer::RecordAddress(mlir::Value array, mlir::Value index,
+    mlir::LLVM::LLVMStructType record, mlir::Location loc) {
+  mlir::Type pointer{HeapPointer()};
+  mlir::Value elements{mlir::LLVM::GEPOp::create(rewriter_, loc, pointer,
+      rewriter_.getI64Type(), array, llvm::ArrayRef<mlir::LLVM::GEPArg>{2})};
+  return mlir::LLVM::GEPOp::create(
+      rewriter_, loc, pointer, record, elements, mlir::ValueRange{index});
+}
+
+mlir::Value Lowerer::RecordSlot(mlir::Operation *op, mlir::Value value,
+    mlir::LLVM::LLVMStructType record, mlir::Location loc) {
+  if (!value) {
+    return mlir::LLVM::ZeroOp::create(
+        rewriter_, loc, mlir::LLVM::LLVMPointerType::get(op->getContext()));
+  }
+  mlir::Value slot{Alloca(op, record, loc)};
+  mlir::LLVM::MemsetOp::create(rewriter_, loc, slot,
+      mlir::LLVM::ConstantOp::create(rewriter_, loc, rewriter_.getI8Type(), 0),
+      mlir::LLVM::ConstantOp::create(
+          rewriter_, loc, rewriter_.getI64Type(), CLayout(record).first),
+      /*isVolatile=*/false);
+  mlir::LLVM::StoreOp::create(rewriter_, loc, LoweredValue(value, loc), slot);
+  return slot;
+}
+
+mlir::Value Lowerer::PolymorphicElement(mlir::Operation *op, mlir::Value array,
+    mlir::Value index, mlir::Value typeInfo, mlir::Location loc) {
+  auto i64{rewriter_.getI64Type()};
+  mlir::Type word{WordPointerOrInteger(op->getContext())};
+  merk::LiveOp live{LiveBefore(op)};
+  mlir::Value code{
+      mlir::LLVM::LShrOp::create(rewriter_, loc, ArrayHeader(array, loc),
+          mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 56))};
+  mlir::Value isRecords{
+      mlir::LLVM::ICmpOp::create(rewriter_, loc, mlir::LLVM::ICmpPredicate::eq,
+          code, mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 4))};
+  mlir::Block *before{rewriter_.getInsertionBlock()};
+  mlir::Block *join{
+      rewriter_.splitBlock(before, rewriter_.getInsertionPoint())};
+  mlir::Value result{join->addArgument(word, loc)};
+  mlir::Block *records{rewriter_.createBlock(join)};
+  // The runtime's allocation only grows the heap, as for the operations that
+  // make arrays.
+  if (!device_) {
+    AttachLive(live,
+        mlir::LLVM::CallOp::create(rewriter_, loc,
+            RuntimeFunc("merk_gc_poll",
+                mlir::LLVM::LLVMVoidType::get(op->getContext()), {}),
+            mlir::ValueRange{}));
+  }
+  mlir::Value boxed{CallRuntime(
+      "merk_array_load_record", word, {array, index, ToC(typeInfo, loc)}, loc)};
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{boxed}, join);
+  mlir::Block *other{rewriter_.createBlock(join)};
+  mlir::Value loaded{mlir::LLVM::CallOp::create(rewriter_, loc,
+      ArrayElementFunc(/*store=*/false), mlir::ValueRange{array, index})
+          .getResult()};
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{loaded}, join);
+  rewriter_.setInsertionPointToEnd(before);
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, isRecords, records, other);
+  rewriter_.setInsertionPointToStart(join);
+  return result;
+}
+
+void Lowerer::PolymorphicStore(mlir::Operation *op, mlir::Value array,
+    mlir::Value index, mlir::Value word, mlir::Value typeInfo,
+    mlir::Location loc) {
+  auto i64{rewriter_.getI64Type()};
+  mlir::Value code{
+      mlir::LLVM::LShrOp::create(rewriter_, loc, ArrayHeader(array, loc),
+          mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 56))};
+  mlir::Value isRecords{
+      mlir::LLVM::ICmpOp::create(rewriter_, loc, mlir::LLVM::ICmpPredicate::eq,
+          code, mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 4))};
+  mlir::Block *before{rewriter_.getInsertionBlock()};
+  mlir::Block *join{
+      rewriter_.splitBlock(before, rewriter_.getInsertionPoint())};
+  mlir::Block *records{rewriter_.createBlock(join)};
+  auto void_{mlir::LLVM::LLVMVoidType::get(op->getContext())};
+  mlir::Value info{ToC(typeInfo, loc)};
+  mlir::LLVM::CallOp::create(rewriter_, loc,
+      RuntimeFunc("merk_array_store_record", void_,
+          {array.getType(), i64, word.getType(), info.getType()}),
+      mlir::ValueRange{array, index, word, info});
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{}, join);
+  mlir::Block *other{rewriter_.createBlock(join)};
+  mlir::LLVM::CallOp::create(rewriter_, loc, ArrayElementFunc(/*store=*/true),
+      mlir::ValueRange{array, index, word});
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{}, join);
+  rewriter_.setInsertionPointToEnd(before);
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, isRecords, records, other);
+  rewriter_.setInsertionPointToStart(join);
+}
+
 void Lowerer::LowerArray(mlir::Operation *op) {
   mlir::Location loc{op->getLoc()};
   rewriter_.setInsertionPoint(op);
@@ -3830,21 +3956,54 @@ void Lowerer::LowerArray(mlir::Operation *op) {
             RuntimeFunc("merk_gc_poll", mlir::LLVM::LLVMVoidType::get(op->getContext()), {}),
             mlir::ValueRange{}));
   }
+  // Records inline, with C's layout, of known bytes (runtime/array.h).
+  mlir::LLVM::LLVMStructType record{
+      mlir::isa<merk::ArraySizeOp, merk::ArrayWordsOp, merk::ArrayCopyOp>(op)
+          ? mlir::LLVM::LLVMStructType{}
+          : ArrayRecord(op)};
+  mlir::Value recordBytes;
+  if (record) {
+    recordBytes = mlir::LLVM::ConstantOp::create(
+        rewriter_, loc, i64, CLayout(record).first);
+  }
   if (auto make{mlir::dyn_cast<merk::ArrayNewOp>(op)}) {
     // The operands by their groups, which lowering may have retyped.
-    result = CallRuntime("merk_array_new", ptr,
-        {make->getOperand(0), InitialElement(OptionalOperand(make, 1), loc),
-            MadeArrayWidth(op, OptionalOperand(make, 2), loc)},
-        loc);
+    mlir::Value init{OptionalOperand(make, 1)};
+    mlir::Value typeInfo{OptionalOperand(make, 2)};
+    if (record) {
+      result = CallRuntime("merk_array_new_bytes", ptr,
+          {make->getOperand(0), RecordSlot(op, init, record, loc), recordBytes},
+          loc);
+    } else if (typeInfo && !ElementWidth(op)) {
+      result = CallRuntime("merk_array_new_typed", ptr,
+          {make->getOperand(0), InitialElement(init, loc), ToC(typeInfo, loc)},
+          loc);
+    } else {
+      result = CallRuntime("merk_array_new", ptr,
+          {make->getOperand(0), InitialElement(init, loc),
+              MadeArrayWidth(op, typeInfo, loc)},
+          loc);
+    }
   } else if (mlir::isa<merk::ArraySizeOp>(op)) {
     result = ArraySizeOf(op->getOperand(0), loc);
   } else if (mlir::isa<merk::ArrayWordsOp>(op)) {
-    result = ArrayWords(op->getOperand(0), loc);
-  } else if (mlir::isa<merk::ArrayGetOp>(op)) {
+    // An array of records' words need its word 1, which a word array may
+    // not have.
+    result = CallRuntime(
+        "merk_array_words", i64, {LoweredValue(op->getOperand(0), loc)}, loc);
+  } else if (auto get{mlir::dyn_cast<merk::ArrayGetOp>(op)}) {
     std::optional<std::int64_t> width{ElementWidth(op)};
     mlir::Type type{Convert(op->getResult(0).getType())};
     mlir::Value array{LoweredValue(op->getOperand(0), loc)};
-    if (!width) {
+    mlir::Value typeInfo{OptionalOperand(get, 2)};
+    if (record) {
+      result = mlir::LLVM::LoadOp::create(rewriter_, loc, record,
+          RecordAddress(array, op->getOperand(1), record, loc));
+    } else if (!width && typeInfo) {
+      result = FromWord(
+          PolymorphicElement(op, array, op->getOperand(1), typeInfo, loc), type,
+          loc);
+    } else if (!width) {
       mlir::Value word{mlir::LLVM::CallOp::create(rewriter_, loc,
           ArrayElementFunc(/*store=*/false),
           mlir::ValueRange{array, op->getOperand(1)})
@@ -3866,11 +4025,18 @@ void Lowerer::LowerArray(mlir::Operation *op) {
           ElementAddress(array, op->getOperand(1), 0, loc))};
       result = FromWord(word, type, loc);
     }
-  } else if (mlir::isa<merk::ArraySetOp>(op)) {
+  } else if (auto set{mlir::dyn_cast<merk::ArraySetOp>(op)}) {
     std::optional<std::int64_t> width{ElementWidth(op)};
     mlir::Value element{op->getOperand(2)};
     mlir::Value array{LoweredValue(op->getOperand(0), loc)};
-    if (!width) {
+    mlir::Value typeInfo{OptionalOperand(set, 3)};
+    if (record) {
+      mlir::LLVM::StoreOp::create(rewriter_, loc, LoweredValue(element, loc),
+          RecordAddress(array, op->getOperand(1), record, loc));
+    } else if (!width && typeInfo) {
+      PolymorphicStore(
+          op, array, op->getOperand(1), ToWord(element, loc), typeInfo, loc);
+    } else if (!width) {
       mlir::LLVM::CallOp::create(rewriter_, loc,
           ArrayElementFunc(/*store=*/true),
           mlir::ValueRange{array, op->getOperand(1), ToWord(element, loc)});
@@ -3890,31 +4056,67 @@ void Lowerer::LowerArray(mlir::Operation *op) {
           ElementAddress(array, op->getOperand(1), 0, loc));
     }
     result = op->getOperand(0);
-  } else if (mlir::isa<merk::ArrayFillOp>(op)) {
-    result = CallRuntime("merk_array_fill", ptr,
-        {op->getOperand(0), op->getOperand(1), op->getOperand(2),
-            ToWord(op->getOperand(3), loc)},
-        loc);
+  } else if (auto fill{mlir::dyn_cast<merk::ArrayFillOp>(op)}) {
+    mlir::Value typeInfo{OptionalOperand(fill, 4)};
+    if (record) {
+      result = CallRuntime("merk_array_fill_bytes", ptr,
+          {op->getOperand(0), op->getOperand(1), op->getOperand(2),
+              RecordSlot(op, op->getOperand(3), record, loc)},
+          loc);
+    } else if (typeInfo && !ElementWidth(op)) {
+      result = CallRuntime("merk_array_fill_typed", ptr,
+          {op->getOperand(0), op->getOperand(1), op->getOperand(2),
+              ToWord(op->getOperand(3), loc), ToC(typeInfo, loc)},
+          loc);
+    } else {
+      result = CallRuntime("merk_array_fill", ptr,
+          {op->getOperand(0), op->getOperand(1), op->getOperand(2),
+              ToWord(op->getOperand(3), loc)},
+          loc);
+    }
   } else if (mlir::isa<merk::ArrayCopyOp>(op)) {
     result = CallRuntime("merk_array_copy", ptr, {op->getOperand(0)}, loc);
   } else if (mlir::isa<merk::ArrayFromListOp>(op)) {
     auto fromList{mlir::cast<merk::ArrayFromListOp>(op)};
-    result = CallRuntime(fromList.getReversed() ? "merk_array_from_reverse_list"
-                                                : "merk_array_from_list",
-        ptr,
-        {ToWord(fromList->getOperand(0), loc),
-            mlir::LLVM::ConstantOp::create(
-                rewriter_, loc, i64, listTags_.lookup(op)),
-            MadeArrayWidth(op, OptionalOperand(fromList, 1), loc)},
-        loc);
+    mlir::Value typeInfo{OptionalOperand(fromList, 1)};
+    mlir::Value tag{mlir::LLVM::ConstantOp::create(
+        rewriter_, loc, i64, listTags_.lookup(op))};
+    // A record's cells are unboxed by its type_info, which MLIRGen gives
+    // for every element type of terms.
+    if (typeInfo && (record || !ElementWidth(op))) {
+      result = CallRuntime(fromList.getReversed()
+              ? "merk_array_from_reverse_list_typed"
+              : "merk_array_from_list_typed",
+          ptr, {ToWord(fromList->getOperand(0), loc), tag, ToC(typeInfo, loc)},
+          loc);
+    } else {
+      result =
+          CallRuntime(fromList.getReversed() ? "merk_array_from_reverse_list"
+                                             : "merk_array_from_list",
+              ptr,
+              {ToWord(fromList->getOperand(0), loc), tag,
+                  MadeArrayWidth(op, typeInfo, loc)},
+              loc);
+    }
   } else {
-    assert(mlir::isa<merk::ArrayResizeOp>(op));
-    result = CallRuntime("merk_array_resize", ptr,
-        {op->getOperand(0), op->getOperand(1),
-            InitialElement(
-                op->getNumOperands() > 2 ? op->getOperand(2) : mlir::Value{},
-                loc)},
-        loc);
+    auto resize{mlir::cast<merk::ArrayResizeOp>(op)};
+    mlir::Value init{OptionalOperand(resize, 2)};
+    mlir::Value typeInfo{OptionalOperand(resize, 3)};
+    if (record) {
+      result = CallRuntime("merk_array_resize_bytes", ptr,
+          {op->getOperand(0), op->getOperand(1),
+              RecordSlot(op, init, record, loc), recordBytes},
+          loc);
+    } else if (typeInfo && !ElementWidth(op)) {
+      result = CallRuntime("merk_array_resize_typed", ptr,
+          {op->getOperand(0), op->getOperand(1), InitialElement(init, loc),
+              ToC(typeInfo, loc)},
+          loc);
+    } else {
+      result = CallRuntime("merk_array_resize", ptr,
+          {op->getOperand(0), op->getOperand(1), InitialElement(init, loc)},
+          loc);
+    }
   }
   rewriter_.replaceOp(op, result);
 }

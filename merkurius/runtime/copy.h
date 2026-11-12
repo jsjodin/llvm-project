@@ -244,10 +244,10 @@ Word CopyTyped(Word value, const Type &type, Memory &memory) {
     copy[0] = array[0];
     Word element{(Word{0} << kTagBits) | kVariableTag};
     // What is copied as it is, as CopyTyped returns it, is copied as a
-    // block, as narrow elements always are (array.h).
-    if (size != 0 &&
-        (!IsWordArray(array) ||
-            CopiedAsItIs(Resolve(element, &type.environment).ctor))) {
+    // block, as narrow elements and records always are, with a records
+    // array's word 1 (array.h).
+    if (!IsWordArray(array) ||
+        (size != 0 && CopiedAsItIs(Resolve(element, &type.environment).ctor))) {
       __builtin_memcpy(copy + 1, array + 1, sizeof(Word) * (words - 1));
       return reinterpret_cast<Word>(copy);
     }

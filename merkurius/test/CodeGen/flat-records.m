@@ -15,14 +15,14 @@
 % RUN: env MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 %t | FileCheck %s --match-full-lines --strict-whitespace
 % RUN: env MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 %t2 | FileCheck %s --match-full-lines --strict-whitespace
 %
-% LLVM-LABEL: define internal tailcc i64 @flat_records.score_f1_0({ { i32, i32 }, i32, i8, i64, double, double } %0) {
+% LLVM-LABEL: define internal tailcc i64 @flat_records.score_f1_0({ { i32, i32 }, i32, i8, i32, double, double } %0) {
 % LLVM-NOT: merk_alloc
 % LLVM: extractvalue { i32, i32 }
 % LLVM-NOT: merk_alloc
 % LLVM: ret i64
-% LLVM-LABEL: define internal tailcc void @flat_records.bump_2_0(ptr %0, { { i32, i32 }, i32, i8, i64, double, double } %1) {
+% LLVM-LABEL: define internal tailcc void @flat_records.bump_2_0(ptr %0, { { i32, i32 }, i32, i8, i32, double, double } %1) {
 % LLVM-NOT: merk_alloc
-% LLVM: store { { i32, i32 }, i32, i8, i64, double, double } %{{.*}}, ptr %{{.*}}, align 8
+% LLVM: store { { i32, i32 }, i32, i8, i32, double, double } %{{.*}}, ptr %{{.*}}, align 8
 % LLVM-NEXT: ret void
 %
 % The output is mmc's.

@@ -206,7 +206,8 @@ std::optional<std::string> GpuCodeChecker::NotFlat(const Type &type) {
       return std::nullopt;
     }
     // Temporary (docs/INPROGRESS.md, GPU processes without omp target, step
-    // 5, "Flat records", step 2): arrays of flat records.
+    // 5, "Flat records", step 2b): arrays of flat records, inline since 2a,
+    // as messages.
     return std::string{TypeToString(type)} +
         "'s elements are not scalars or enumerations";
   }

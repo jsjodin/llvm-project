@@ -12,8 +12,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "MLIRGenImpl.h"
-#include "mlir/Transforms/RegionUtils.h"
+#include "Records.h"
 #include "llvm/Support/xxhash.h"
+#include "mlir/Transforms/RegionUtils.h"
 
 namespace merkurius::codegen::mlirgen {
 
@@ -39,10 +40,10 @@ mlir::Value MerkGenerator::Slot(mlir::Type type, mlir::Location loc) {
   return slot;
 }
 
-// The scalars, integers and floats, arrays of them and of constants of
-// types of constants only, and terms whose cells hold only scalars can
-// cross into a target region so far; a region gives only scalars and such
-// arrays so far.
+// The scalars, integers and floats, arrays of them, of constants of types
+// of constants only and of flat records, and terms whose cells hold only
+// scalars can cross into a target region so far; a region gives only
+// scalars and such arrays so far.
 static bool Scalar(mlir::Type type) {
   return mlir::isa<mlir::IntegerType, mlir::FloatType>(type);
 }
@@ -94,7 +95,19 @@ std::optional<unsigned> MerkGenerator::FlatCell(mlir::Type type) {
 }
 
 bool MerkGenerator::Mappable(mlir::Type type) {
-  return Givable(type) || ArrayMessage(type) || Passed(type) || FlatCell(type);
+  return Givable(type) || ArrayMessage(type) || RecordArray(type) ||
+      Passed(type) || FlatCell(type);
+}
+
+// An array of flat records, which holds them inline (runtime/array.h), so
+// that it is mapped by its words as an array of numbers is.
+bool MerkGenerator::RecordArray(mlir::Type type) {
+  auto array{mlir::dyn_cast<merk::ArrayType>(type)};
+  if (!array) {
+    return false;
+  }
+  auto term{mlir::dyn_cast<merk::TermType>(array.getElement())};
+  return term && RecordRule{module_}.IsRecord(term.getName());
 }
 
 mlir::omp::TargetOp MerkGenerator::EnclosingTarget() {
@@ -2137,7 +2150,8 @@ void MerkGenerator::Target(const Body &goal, const ProcedureBody &body,
       constants[var] = value.getType();
       continue;
     }
-    if (!Givable(value.getType()) && !ArrayMessage(value.getType())) {
+    if (!Givable(value.getType()) && !ArrayMessage(value.getType()) &&
+        !RecordArray(value.getType())) {
       NotYet(at,
           "values of type " + semantics::TypeToString(*body.vars[var].type) +
               " in target regions");
