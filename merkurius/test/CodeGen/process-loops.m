@@ -13,13 +13,17 @@
 % hand.
 %
 % The device's compile gives each loop a number, calls the runtime with it,
-% and makes merk_process_loop, which calls a loop's body by its number with
-% the counter and the loop's words, with no reductions here
+% and makes merk_process_loop, which runs a thread's rounds of a loop by its
+% number, with the loop's words, with no reductions here
 % (process-loop-reductions.m); the host's registers which kinds run
-% loops, worker 1 and echo 0.
+% loops, worker 1 and echo 0. Every function of the device's compile is
+% convergent, as a loop's rounds end with a barrier across the team, and the
+% kinds' code and the loops stay out of line, so that the registers each
+% needs count only while it runs.
 %
 % REQUIRES: amdgpu-registered-target, libomp
 % RUN: merkc -fc1 -fprocess-loops -fdo-loops -fprocess-declarations -fprocess-kernels -triple amdgcn-amd-amdhsa -target-cpu gfx1030 -emit-merk %s -o - | FileCheck %s --check-prefix=DEVICE
+% RUN: merkc -fc1 -fprocess-loops -fdo-loops -fprocess-declarations -fprocess-kernels -triple amdgcn-amd-amdhsa -target-cpu gfx1030 -emit-llvm %s -o - | FileCheck %s --check-prefix=LLVM
 % RUN: merkc -fc1 -fopenmp -fdo-loops -fprocess-declarations -emit-merk -triple x86_64-unknown-linux-gnu -fembed-process-image=gfx1030:%s %s -o - | FileCheck %s --check-prefix=HOST
 % RUN: merkc -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t
 % RUN: %libomp-env %t host | FileCheck %s --match-full-lines --strict-whitespace
@@ -169,7 +173,13 @@ print_answer(R, !IO) :-
 % DEVICE:         merk.foreign_call @merk_device_process_loop(%c1_i64{{.*}}, %{{.*}}, %c-1_i64{{.*}}, %{{.*}}, %c0_i64{{.*}})
 % DEVICE-LABEL: merk.proc private @process_loops.add_previous_3_0(
 % DEVICE:         merk.foreign_call @merk_device_process_loop(
-% DEVICE-LABEL: merk.proc @merk_process_loop(%arg0: i64, %arg1: i64, %arg2: i64, %arg3: i64) attributes {merk.process_root
+% DEVICE-LABEL: merk.proc @merk_process_loop(%arg0: i64, %arg1: i64, %arg2: i64, %arg3: i64, %arg4: i64, %arg5: i64, %arg6: i64, %arg7: i64, %arg8: i64) attributes {merk.process_root
 % DEVICE:         merk.switch %arg0 : i64 cases {{\[\[}}0], [1], [2], [3], [4]
 
 % HOST: llvm.mlir.global internal constant @process_loops.merk_process_image.loops("10\00")
+
+% LLVM-DAG: define hidden void @merk_process_dispatch({{.*}}) #[[OUT:[0-9]+]]
+% LLVM-DAG: define hidden void @merk_process_loop({{.*}}) #[[OUT]]
+% LLVM-DAG: declare void @merk_device_sync_threads() #[[CONVERGENT:[0-9]+]]
+% LLVM-DAG: attributes #[[CONVERGENT]] = { convergent }
+% LLVM-DAG: attributes #[[OUT]] = { convergent noinline }

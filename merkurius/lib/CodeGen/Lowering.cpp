@@ -384,6 +384,7 @@ private:
   llvm::LogicalResult LowerOpenMP();
   // A compile of GPU processes' kernels keeps only what the kernels reach.
   llvm::LogicalResult FilterKernelProcs();
+  void MarkKernelFunctions();
   // Reports a call of a function that the device does not have.
   llvm::LogicalResult CheckDeviceCalls();
   mlir::Block *SplitAfter(mlir::Operation *);
@@ -3688,6 +3689,9 @@ llvm::LogicalResult Lowerer::Lower() {
   if (kernels_ && mlir::failed(CheckDeviceCalls())) {
     return llvm::failure();
   }
+  if (kernels_) {
+    MarkKernelFunctions();
+  }
   // Every operation left must be the LLVM dialect's or OpenMP's.
   mlir::WalkResult result{module_.walk([](mlir::Operation *op) {
     if (mlir::isa_and_present<merk::MerkDialect, mrt::MrtDialect,
@@ -3704,6 +3708,26 @@ llvm::LogicalResult Lowerer::Lower() {
 // procedures it reaches, and removes the rest, which are the host's, with
 // the program's entry and the constructors. A closure is an error there, as
 // on an OpenMP device: its entry runs on the host only.
+// In a compile of GPU processes, every function is convergent, as clang
+// makes a GPU language's: a loop's rounds end with a barrier across the
+// team (MLIRGenProcesses.cpp, ProcessLoopRounds), which an optimization must
+// not move into a branch, and LLVM takes the attribute away from a function
+// that calls nothing convergent. The kinds' code, which merk_process_dispatch
+// starts, and the loops, which merk_process_loop runs, stay out of line, so
+// that the registers of each count only while it runs and not in the
+// kernel's other code, as they would inlined into it: a loop's waves are
+// then not limited by the most that the kinds' code needs (design document,
+// Measurements, Memory bandwidth).
+void Lowerer::MarkKernelFunctions() {
+  for (auto func : module_.getOps<mlir::LLVM::LLVMFuncOp>()) {
+    func.setConvergent(true);
+    if (func.getSymName() == "merk_process_dispatch" ||
+        func.getSymName() == "merk_process_loop") {
+      func.setNoInline(true);
+    }
+  }
+}
+
 llvm::LogicalResult Lowerer::FilterKernelProcs() {
   mlir::SymbolTable symbols{module_};
   llvm::SmallVector<mlir::Operation *> pending;

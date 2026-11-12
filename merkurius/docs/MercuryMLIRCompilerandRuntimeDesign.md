@@ -4564,6 +4564,31 @@ of 100 runs. Three alternating rounds agreed within 2%; the best of each:
   a target region 15 to 17 (Dot 36), a loop of a GPU process 1.9 to 2.0
   (Dot 6.5), 2.2 (Dot 10.6) with the kernel at 128 VGPRs.
 
+Each loop's rounds in a generated procedure of its own, with its barrier,
+and the kinds' code, the loops and the runtime's `Work`, `RunProcess` and
+team combine out of line (docs/INPROGRESS.md, GPU experiments, 2026-11-11),
+on 75e58a86b854 with those changes, not committed: `merk_place` 95 VGPRs, no
+spills, 10 waves a SIMD. 2^25 elements, three alternating rounds, MB/s, the
+best of each:
+
+| Kernel | Target regions | GPU process before | GPU process after |
+| --- | ---: | ---: | ---: |
+| Copy | 380,743 | 260,855 | 485,469 |
+| Mul | 336,875 | 241,642 | 391,602 |
+| Add | 357,983 | 349,489 | 429,983 |
+| Triad | 355,311 | 341,446 | 426,892 |
+| Dot | 434,637 | 276,225 | 479,811 |
+
+Copy is 95% of the card's rated 512 GB/s. At 1024 elements a loop took 2.2
+to 2.5 µs, but Dot 25 µs, against 6.5 before: the team combine of the
+partial results, not the loop, as Dot took 4.4 µs with the combine skipped.
+It scales with the number of teams (2 a compute unit now, 1 before): 25 µs
+at 100% of the units, 13.6 at 50% and 11.2 at 25%. Combining the teams'
+partials in the last team to finish, its threads loading them in parallel,
+rather than one after another on the process's lane, did not change it; the
+combine's code does 214 scratch accesses, its partial results being in
+arrays whose addresses reach the generated combine as integers.
+
 ### Idle waves of GPU processes' kernels
 
 `process-loops.m`'s worker run without `-fopenmp`, so its process runs its
