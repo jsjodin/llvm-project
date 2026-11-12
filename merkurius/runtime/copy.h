@@ -10,7 +10,9 @@
 // (mailbox.cpp, design document, "Message passing"). `Memory` says where
 // the copy's cells go: `void *Allocate(Word bytes)` gives memory aligned to a
 // word at least, `[[noreturn]] void Fail(const char *, const char *)`
-// reports a value that cannot be copied, and `kOtherImage` says whether the
+// reports a value that cannot be copied, `void CheckStack()` checks the
+// stack before each value, as the copy recurses on the value's structure, and
+// `kOtherImage` says whether the
 // copy is for code of another image, the host's for a GPU's or a GPU's for
 // the host's. Such code has other procedures and descriptors, so a closure
 // and an existentially typed constructor's type_infos and typeclass_infos
@@ -99,6 +101,11 @@ template <typename Memory>
 Word CopyValue(
     Word value, Word type, const Environment *environment, Memory &memory) {
   Type resolved{Resolve(type, environment)};
+  // A field that is its word takes no call, so that a flat record's copy
+  // does not recurse, nor take a frame for each field.
+  if (CopiedAsItIs(resolved.ctor)) {
+    return value;
+  }
   return CopyTyped(value, resolved, memory);
 }
 
@@ -203,6 +210,8 @@ template <typename Memory> Word CopyClosure(Word value, Memory &memory) {
 
 template <typename Memory>
 Word CopyTyped(Word value, const Type &type, Memory &memory) {
+  // Inlined here, as the device's check measures this frame's callees.
+  memory.CheckStack();
   switch (type.ctor->kind) {
   case Int:
   case Uint:
@@ -252,8 +261,9 @@ Word CopyTyped(Word value, const Type &type, Memory &memory) {
     }
     return CopyClosure(value, memory);
   case Void:
-    // Nothing has a value of this type.
-    __builtin_trap();
+    // Nothing has a value of this type. A trap would make every kernel that
+    // copies have a stack that is not fixed (device/device.cpp, Fail).
+    memory.Fail("a value of a type that has none: ", type.ctor->name);
   }
   memory.Fail("cannot send a value of type ", type.ctor->name);
 }

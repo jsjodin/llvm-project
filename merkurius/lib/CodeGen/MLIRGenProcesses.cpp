@@ -20,6 +20,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "MLIRGenImpl.h"
+#include "llvm/BinaryFormat/ELF.h"
+#include "llvm/BinaryFormat/MsgPackDocument.h"
+#include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 
@@ -241,10 +244,85 @@ static mlir::LLVM::GlobalOp BytesGlobal(mlir::OpBuilder &builder,
   return global;
 }
 
+// The bytes of stack a lane that the calls of the image's kernel take at
+// most, outside any recursion, from its AMDGPU metadata, if its stack is
+// not fixed, which the runtime checks against the stack that it launches the
+// kernel with (runtime/gpu-processes.cpp); or 0 for a kernel whose stack
+// size is fixed, which the plugin launches with its own. An image without
+// the metadata, which the runtime cannot load either, has 0 too.
+static std::uint64_t StackFrames(llvm::StringRef image) {
+  llvm::Expected<std::unique_ptr<llvm::object::ObjectFile>> object{
+      llvm::object::ObjectFile::createObjectFile(
+          llvm::MemoryBufferRef{image, "image"})};
+  if (!object) {
+    llvm::consumeError(object.takeError());
+    return 0;
+  }
+  auto *elf{llvm::dyn_cast<llvm::object::ELF64LEObjectFile>(object->get())};
+  if (!elf) {
+    return 0;
+  }
+  const auto &file{elf->getELFFile()};
+  auto headers{file.program_headers()};
+  if (!headers) {
+    llvm::consumeError(headers.takeError());
+    return 0;
+  }
+  for (const auto &header : *headers) {
+    if (header.p_type != llvm::ELF::PT_NOTE) {
+      continue;
+    }
+    llvm::Error error{llvm::Error::success()};
+    for (const auto &note : file.notes(header, error)) {
+      if (note.getName() != "AMDGPU" ||
+          note.getType() != llvm::ELF::NT_AMDGPU_METADATA) {
+        continue;
+      }
+      auto desc{note.getDesc(header.p_align)};
+      llvm::msgpack::Document document;
+      if (!document.readFromBlob(
+              llvm::StringRef{
+                  reinterpret_cast<const char *>(desc.data()), desc.size()},
+              /*Multi=*/false)) {
+        continue;
+      }
+      llvm::msgpack::DocNode &kernels{
+          document.getRoot().getMap(true)["amdhsa.kernels"]};
+      if (!kernels.isArray()) {
+        continue;
+      }
+      for (llvm::msgpack::DocNode &kernel : kernels.getArray()) {
+        if (!kernel.isMap()) {
+          continue;
+        }
+        llvm::msgpack::MapDocNode &fields{kernel.getMap()};
+        llvm::msgpack::DocNode &name{fields[".name"]};
+        if (!name.isString() || name.getString() != "merk_place") {
+          continue;
+        }
+        llvm::msgpack::DocNode &dynamic{fields[".uses_dynamic_stack"]};
+        llvm::msgpack::DocNode &frames{fields[".private_segment_fixed_size"]};
+        if (dynamic.getKind() != llvm::msgpack::Type::Boolean ||
+            !dynamic.getBool() ||
+            frames.getKind() != llvm::msgpack::Type::UInt) {
+          llvm::consumeError(std::move(error));
+          return 0;
+        }
+        std::uint64_t bytes{frames.getUInt()};
+        llvm::consumeError(std::move(error));
+        return bytes;
+      }
+    }
+    llvm::consumeError(std::move(error));
+  }
+  return 0;
+}
+
 // The host's compile of a module with kinds that run on a GPU embeds the
 // image of their kernels for each GPU that -fembed-process-image= names,
 // as gpu:file, and registers each at start-up, with the module's name, the
-// GPU's and its kinds' names, in their order, separated by spaces, in a
+// GPU's and its kinds' names, in their order, separated by spaces, and the
+// stack its kernel's calls take (StackFrames), in a
 // procedure that a constructor calls, as message types are registered. The
 // runtime loads an image when a process is first spawned on a GPU of its kind
 // (step 4c). False after reporting an image that cannot be read.
@@ -312,7 +390,11 @@ bool MerkGenerator::RegisterProcessImages() {
             mlir::LLVM::AddressOfOp::create(builder_, loc, bytes),
             IntegerConstant(i64,
                 static_cast<std::int64_t>(image.bytes->getBufferSize()), loc),
-            mlir::LLVM::AddressOfOp::create(builder_, loc, kinds)},
+            mlir::LLVM::AddressOfOp::create(builder_, loc, kinds),
+            IntegerConstant(i64,
+                static_cast<std::int64_t>(
+                    StackFrames(image.bytes->getBuffer())),
+                loc)},
         /*can_fail=*/false);
   }
   merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});

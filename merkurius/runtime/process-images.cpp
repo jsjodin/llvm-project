@@ -49,9 +49,11 @@ Entry *Find(const char *module, const char *gpu) {
 // Registers the image of `module`'s process kinds that run on a GPU, for
 // `gpu`: `bytes` at `image`, which stays where it is, in the program's
 // data, with the names of the kinds, `kinds`, in the order that numbers
-// them, separated by spaces. A module registers each GPU's image once.
+// them, separated by spaces, and the stack that its kernel's calls take,
+// `frames`. A module registers each GPU's image once.
 extern "C" void merk_register_process_image(const char *module, const char *gpu,
-    const void *image, std::uint64_t bytes, const char *kinds) {
+    const void *image, std::uint64_t bytes, const char *kinds,
+    std::uint64_t frames) {
   pthread_mutex_lock(&imagesLock);
   if (Find(module, gpu)) {
     Fail("GPU processes' image registered twice: ", module, gpu);
@@ -60,7 +62,7 @@ extern "C" void merk_register_process_image(const char *module, const char *gpu,
   if (!entry) {
     Fail("out of memory for the GPU processes' image of ", module, gpu);
   }
-  *entry = {{module, gpu, image, bytes, kinds}, images};
+  *entry = {{module, gpu, image, bytes, kinds, frames}, images};
   images = entry;
   pthread_mutex_unlock(&imagesLock);
 }

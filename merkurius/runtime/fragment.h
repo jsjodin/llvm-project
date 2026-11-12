@@ -91,6 +91,9 @@ public:
   // The copy is for the host's code (copy.h).
   static constexpr bool kOtherImage{false};
 
+  // A host thread's stack is checked by the code that calls the copy.
+  void CheckStack() {}
+
   // A value that a copy into the fragment cannot copy (copy.h).
   [[noreturn]] void Fail(const char *message, const char *detail) {
     std::fflush(stdout);

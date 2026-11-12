@@ -3371,19 +3371,78 @@ one kernel for a GPU's processes.
   Code that recurses, or a call of a generated procedure that traps and is
   not inlined, still makes the stack dynamic, as `process-gpu-messages`'
   kinds and `process-gpu-arrays`' at -O0 do. So the runtime launches the
-  kernel with a stack of its own, 1 KiB a lane
+  kernel with a stack of its own, 1 KiB a lane, now 1536 bytes (below)
   (`MERK_GPU_PROCESS_STACK_BYTES`), through liboffload's launch property
   `OL_KERNEL_LAUNCH_PROP_TYPE_STACK_SIZE`, which we added to the AMDGPU
   plugin for it. And each team counts itself started
   (`PlaceTable::started`), and the launch waits for them as a target
   region's teams wait for each other (`MERK_TEAMS_STALL_MILLISECONDS`): a
   spawn that launches a kernel whose teams do not all start fails, naming
-  the counts (`process-teams-gpu.test`). Open: the stack overflows
-  silently, and a kernel's fixed frames count towards it
-  (`process-gpu-messages`' are 1008 bytes), so a deeper recursion needs a
-  check of its own or code that does not use the stack; the measurements
-  above say no larger size is safe beside other queues' scratch;
-  `nocallback` on `llvm.trap` upstream.
+  the counts (`process-teams-gpu.test`).
+- *The stack is checked* (2026-11-11). A GPU's stack overflows silently,
+  and a kernel's fixed frames take part of it (`process-gpu-messages`'
+  took 1056 bytes, more than its 1 KiB). So:
+  - *At compile time,* each call in GPU process code of the module that may
+    recurse and is not a tail call is warned of, after lowering to the LLVM
+    dialect, where tail calls are known (`WarnGpuRecursion`).
+  - *At load,* the host's compile has read what the kernel's calls take
+    outside any recursion from the image's metadata
+    (`.private_segment_fixed_size`, if `.uses_dynamic_stack`), and
+    registered it. The runtime refuses an image whose calls take more than
+    the stack, naming `MERK_GPU_PROCESS_STACK_BYTES`, as nothing checks code
+    that does not recurse, and otherwise sets the image's
+    `merk_device_stack_bytes` to the stack.
+  - *At run time,* each procedure on a cycle of calls that are not tail
+    calls, or that makes an indirect call, checks at its entry, after the
+    optimizer (`AddDeviceStackChecks`), that the stack pointer, after its
+    frame, plus what its calls may take below it fits in the stack, and
+    otherwise ends the program with "stack overflow in a GPU process". What
+    the calls may take is the backend's: `llvm.amdgcn.callee.stack.size`,
+    which we added to the AMDGPU backend for it, is the function's resource
+    usage symbol `.L<f>.private_seg_size` (its frame and its callees' most,
+    leaving out calls back into its cycle) less its frame, a literal that
+    the asm printer emits once the frame is known. A first version compared
+    the stack pointer with one limit, the stack less the kernel's fixed
+    frames, which is safe but fires falsely at a check on the kernel's
+    deepest path, whose frames above it count twice:
+    `process-gpu-messages`' first copy of a message failed so with 1536
+    bytes, and would have needed about twice its 896 fixed bytes.
+  - *The optimizer's inferences are dropped* where the checks make them
+    false: it had found the recursive procedures, and those that call
+    them, to touch no memory and need no flat scratch (`amdgpu-no-*`), so
+    the kernel did not set flat scratch up, and the report of an overflow,
+    which builds its RPC port on the stack through a flat pointer, faulted
+    at 768 bytes a lane (0x6000, 768 × 32 lanes). `ForgetInferredAbove`
+    drops them from the checked procedures, their callers and their calls;
+    the device's link infers the `amdgpu-no-*` again.
+  - *The runtime's copy of a message checks too:* it recurses on the
+    message's structure (`copy.h`, `CopyTyped`, a Memory's `CheckStack`,
+    inlined into the copy, with `llvm.stacksave` and the callee stack size
+    as above), and its scalar fields take no call, so that a flat record
+    does not recurse. The device's `Fail` sends its text in two parts, which
+    the host joins, rather than build it in a 160-byte buffer on the stack,
+    which was the copy's deepest path: `process-gpu-messages`' fixed frames
+    went from 1056 to 896 bytes, 544 of them `merk_process_dispatch`'s
+    (device runtime code that LTO inlined, and saved registers: AMDGPU's
+    calling convention has a callee save the VGPRs v40-v47, v56-v63, ...
+    that it uses, 4 bytes a lane each; `CopyTyped`'s 176 bytes are all
+    saves).
+  - *The default stack is 1536 bytes:* a copy level takes 176 bytes, and
+    with 1 KiB a message with a mailbox in it had 128 bytes below the fixed
+    frames, where it had overflowed silently before the checks.
+  - *How large a stack can be:* ROCr allocates scratch for every wave slot
+    of the GPU, 80 CUs × 32 slots × 32 lanes on the gfx1030, and keeps it
+    bound to a queue, reused, only up to `HSA_SCRATCH_SINGLE_LIMIT`, 140 MiB
+    by default: 140 MiB / 81920 lanes is 1792 bytes, the boundary measured
+    above. Above it, the scratch serves one dispatch, which holds a kernel's
+    teams back. Without async reclaim, all such bound scratch is limited to
+    an eighth of the scratch pool too. The hardware allows about 256 KiB a
+    lane. Raising `HSA_SCRATCH_SINGLE_LIMIT` from the runtime is not yet
+    measured.
+  Open: the measurements above say no stack larger than about 1792 bytes is
+  safe beside other queues' scratch, and 1536 is not measured beside three;
+  `merk_process_dispatch`'s 544 bytes; `nocallback` on `llvm.trap` upstream;
+  the same checks in target regions' code, whose stack is the plugin's.
 - *Phases take turns on a GPU's compute units.* A kernel ends when its last
   process ends, which frees its units for the next phase's. A spawn of a
   kind of another module while a kernel holds them fails, naming the module

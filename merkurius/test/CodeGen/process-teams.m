@@ -19,6 +19,48 @@
 % RUN: merkc -c -fprocess-declarations --offload-arch=gfx1030 -save-temps=obj %S/Inputs/process_teams_recursive.m -o %t.dir/r.o
 % RUN: llvm-readelf --notes %t.dir/process_teams_recursive-gfx1030-processes.elf | FileCheck %s --check-prefix=DYNAMIC
 % DYNAMIC: .uses_dynamic_stack: true
+%
+% The recursive module's calls that recurse other than by tail calls are
+% warned of, and each procedure that makes one checks at its entry that the
+% stack has room for what its calls take below its frame, which the backend
+% knows, in the stack that the runtime sets.
+% RUN: merkc -fc1 -O2 -fprocess-declarations -fprocess-kernels -triple amdgpu10.30-amd-amdhsa -emit-llvm %S/Inputs/process_teams_recursive.m -o %t.ll 2>&1 | FileCheck %s --check-prefix=WARN --implicit-check-not=warning:
+% WARN: process_teams_recursive.m:20:33: warning: this call may recurse, and it is not a tail call, so each call takes more of the stack of a GPU process, which is limited (MERK_GPU_PROCESS_STACK_BYTES): a recursion deeper than it has room for ends the program
+% WARN: process_teams_recursive.m:20:46: warning: this call may recurse
+% WARN: process_teams_recursive.m:32:35: warning: this call may recurse
+% RUN: FileCheck %s --check-prefix=CHECKED < %t.ll
+% CHECKED: @merk_device_stack_bytes = external addrspace(1) global i32
+% CHECKED-LABEL: define internal fastcc {{.*}}@process_teams_recursive.fib_f1_0(
+% CHECKED-NEXT: %[[BYTES:[0-9]+]] = load i32, ptr addrspace(1) @merk_device_stack_bytes
+% CHECKED-NEXT: %[[SP:[0-9]+]] = call ptr addrspace(5) @llvm.stacksave.p5()
+% CHECKED-NEXT: %[[AT:[0-9]+]] = ptrtoint ptr addrspace(5) %[[SP]] to i32
+% CHECKED-NEXT: %[[CALLEES:[0-9]+]] = call i32 @llvm.amdgcn.callee.stack.size()
+% CHECKED-NEXT: %[[END:[0-9]+]] = add nuw i32 %[[AT]], %[[CALLEES]]
+% CHECKED-NEXT: icmp ugt i32 %[[END]], %[[BYTES]]
+% CHECKED: call void @merk_device_stack_overflow()
+% CHECKED-LABEL: define internal fastcc {{.*}}@process_teams_recursive.deep_f1_0(
+% CHECKED-NEXT: load i32, ptr addrspace(1) @merk_device_stack_bytes
+% CHECKED: call void @merk_device_stack_overflow()
+%
+% What the optimizer inferred before the checks, that the procedures, and
+% those that call them, touch no memory and need no flat scratch, no longer
+% holds: the report of an overflow writes its stack through flat addresses,
+% which faulted at 768 bytes a lane.
+% Intrinsics, which are nocallback, keep theirs.
+% RUN: grep "^attributes" %t.ll | grep -v nocallback | FileCheck %s --check-prefix=INFERRED
+% INFERRED: attributes
+% INFERRED-NOT: memory(none)
+% INFERRED-NOT: amdgpu-no-
+%
+% The adders recurse only by tail calls: no warning, no check.
+% RUN: merkc -fc1 -O2 -fprocess-declarations -fprocess-kernels -triple amdgpu10.30-amd-amdhsa -emit-llvm %s -o %t.adders.ll 2>&1 | count 0
+% RUN: not grep merk_device_stack %t.adders.ll
+%
+% The host registers the image with what its kernel's calls take outside
+% the recursion, which the runtime checks against the stack it launches the
+% kernel with.
+% RUN: merkc -fc1 -fprocess-declarations -fembed-process-image=gfx1030:%t.dir/process_teams_recursive-gfx1030-processes.elf -emit-llvm %S/Inputs/process_teams_recursive.m -o - 2>/dev/null | FileCheck %s --check-prefix=FRAMES
+% FRAMES: call void @merk_register_process_image({{.*}}, ptr @process_teams_recursive.merk_process_image.kinds, i64 {{[1-9][0-9]*}})
 
 :- module process_teams.
 :- interface.

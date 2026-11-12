@@ -46,6 +46,18 @@ extern "C" int omp_get_device_num(void) __attribute__((weak));
 extern "C" [[gnu::visibility("protected"), gnu::weak]] int merk_device_number{
     -1};
 
+// The stack, a lane, that the image's kernel was launched with, which its
+// recursion checks (process-start.cpp, which defines it for a GPU process's
+// image). In a region's image nothing sets it, and there is no limit.
+extern "C" [[gnu::visibility("protected"),
+    gnu::weak]] uint32_t merk_device_stack_bytes{0xffffffffu};
+
+// The stack pointer, which is an offset in the lane's scratch.
+extern "C" __attribute__((address_space(5))) void *merk_device_stack_save(
+    void) __asm("llvm.stacksave.p5");
+
+extern "C" [[noreturn]] void merk_device_stack_overflow(void);
+
 namespace {
 
 int DeviceNumber() {
@@ -355,16 +367,23 @@ namespace {
 
 // Reports an error that ends the program, as the host reports the same:
 // `kind` is 0 for an uncaught exception, 1 for a feature not yet
-// implemented and 2 for a limit of the runtime (rpc-opcodes.h). The host ends the program, so this does not
-// return.
-[[noreturn]] void Fail(uint64_t kind, const char *text) {
+// implemented and 2 for a limit of the runtime (rpc-opcodes.h), and the text
+// is `text` followed by `detail`, which the host joins, so that no buffer on
+// the stack holds them. The host ends the program, so this does not return.
+[[noreturn]] void Fail(
+    uint64_t kind, const char *text, const char *detail = "") {
   uint64_t size{0};
   while (text[size]) {
     ++size;
   }
+  uint64_t detailSize{0};
+  while (detail[detailSize]) {
+    ++detailSize;
+  }
   rpc::Client::Port port{__llvm_rpc_client.open<rpcFail>()};
   port.send([&](rpc::Buffer *buffer, uint32_t) { buffer->data[0] = kind; });
   port.send_n(text, size + 1);
+  port.send_n(detail, detailSize + 1);
   port.recv([](rpc::Buffer *, uint32_t) {});
   // The host ends the program rather than answer, so the wave never gets
   // here. It ends rather than trap: llvm.trap is not nocallback, so no
@@ -653,6 +672,16 @@ extern "C" void merk_device_grid_barrier(MerkGridBarrier *barrier) {
 // At the end of each team of a target teams region: nothing to do on a
 // device, whose next region sets the team's table again.
 extern "C" void merk_device_teams_leave(void) {}
+
+// A procedure of a GPU process that recurses other than by tail calls has
+// found no room for its calls in merk_device_stack_bytes (Lowering.cpp,
+// AddDeviceStackChecks): rather than overflow the stack that its kernel was
+// launched with, the program ends, as on the host.
+extern "C" [[noreturn]] void merk_device_stack_overflow(void) {
+  Fail(2,
+      "stack overflow in a GPU process: MERK_GPU_PROCESS_STACK_BYTES "
+      "gives GPU processes more stack");
+}
 
 // The start of a process of the module by its kind's number, with the
 // address of its argument words, which merkc makes in each image of GPU
@@ -1116,13 +1145,28 @@ using merkurius::runtime::Resolve;
 
 // Reports a value that a copy of a message cannot copy (copy.h).
 [[noreturn]] void CopyFailed(const char *message, const char *detail) {
-  Fail(2, Text{}.Append(message).Append(detail).characters);
+  Fail(2, message, detail);
+}
+
+// Before each value that a copy copies, which recurses on the value's
+// structure: that the stack has room after the copy's frame for what its
+// calls may take, as the image's own recursion checks (Lowering.cpp,
+// AddDeviceStackChecks). It is inlined into the copy, whose callees the
+// backend measures.
+[[gnu::always_inline]] inline void CheckCopyStack() {
+  auto at{static_cast<uint32_t>(
+      reinterpret_cast<uintptr_t>(merk_device_stack_save()))};
+  if (at + __builtin_amdgcn_callee_stack_size() > merk_device_stack_bytes)
+      [[unlikely]] {
+    merk_device_stack_overflow();
+  }
 }
 
 // Where the device's copy of a message it receives goes: its arena.
 struct ArenaMemory {
   static constexpr bool kOtherImage{true};
   void *Allocate(uint64_t bytes) { return merk_device_alloc(bytes); }
+  [[gnu::always_inline]] void CheckStack() { CheckCopyStack(); }
   [[noreturn]] void Fail(const char *message, const char *detail) {
     CopyFailed(message, detail);
   }
@@ -1141,6 +1185,7 @@ class PinnedMemory {
 public:
   static constexpr bool kOtherImage{true};
   PinnedChunk *First() const { return first_; }
+  [[gnu::always_inline]] void CheckStack() { CheckCopyStack(); }
 
   void *Allocate(uint64_t bytes) {
     bytes = (bytes + 7) & ~uint64_t{7};

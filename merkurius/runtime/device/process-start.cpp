@@ -18,6 +18,11 @@
 //   runtime defines it the same way for a region's image.
 // - The device's number, which the host's runtime sets when it loads the
 //   image (device.cpp).
+// - The stack, a lane, that the image's kernel is launched with, which its
+//   procedures that recurse other than by tail calls check, which the host's
+//   runtime sets when it loads an image whose kernel's stack is not fixed
+//   (gpu-processes.cpp, SetStackLimit; Lowering.cpp, AddDeviceStackChecks).
+//   Until then there is no limit.
 // - That this is a GPU process's image, so that the device's runtime takes
 //   the process's arena from its kernel's arguments (device.cpp). It is not
 //   exported: libmerkdevice's weak definition, 0, is left out.
@@ -42,6 +47,9 @@ extern "C"
 
 extern "C"
     [[gnu::visibility("protected"), gnu::weak]] int merk_device_number{-1};
+
+extern "C" [[gnu::visibility("protected")]] uint32_t merk_device_stack_bytes{
+    0xffffffffu};
 
 extern "C" [[gnu::visibility("hidden")]] int merk_device_process_image{1};
 
