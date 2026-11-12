@@ -4266,6 +4266,28 @@ copy written for this and not kept, against `bandwidth.m` as it is and
 With its elements aligned, Mercury's streaming kernels are as fast as C's,
 and Add and Triad gain about 30% too. Only Dot, a reduction, stays behind.
 
+**Game of Life in a GPU process,** 2026-11-12, on 6df5223c0873 with
+`benchmarks/life/life-process.m`, not committed: the same steps, each a loop
+across a GPU process's teams (docs/INPROGRESS.md, GPU processes that run
+loops), against `life.m`'s target regions and `life.c`, by `compare-c.sh`,
+all at -O2 and on compute units 0-39
+(`LIBOMPTARGET_AMDGPU_CU_MASK`), half the GPU, unlike the table above. The
+median over the rounds of each program's fastest step and its average step;
+every build gave the same cells. The GPU process times its steps by the
+device's clock, the others from the host, a target region's start included.
+
+| Program | 4096², 100 steps, 5 rounds | Average step | 1024², 200 steps, 3 rounds | Average step |
+| --- | ---: | ---: | ---: | ---: |
+| Mercury, target regions | 21.7 Gcells/s | 0.809 ms | 27.3 Gcells/s | 46 µs |
+| Mercury, GPU process | 24.6 Gcells/s | 0.755 ms | 29.8 Gcells/s | 42 µs |
+| C, `int64_t` cells | 20.5 Gcells/s | 0.851 ms | 23.7 Gcells/s | 47 µs |
+| C, `uint8_t` cells | 31.7 Gcells/s | 0.539 ms | 23.3 Gcells/s | 49 µs |
+
+The GPU process is 20% faster than C with cells as wide as Mercury's at
+4096², and 26% at 1024², where it is faster than C's narrow cells too. C's
+narrow cells are 29% faster at 4096², where the grid is bandwidth's: they
+wait for flat records' narrow fields (docs/INPROGRESS.md).
+
 ### Message latency
 
 The round trip of a one-word message, in microseconds: 20000 rounds, after 100
