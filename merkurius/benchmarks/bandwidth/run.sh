@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds the memory bandwidth benchmark three ways, sequential, OpenMP on
-# the host's threads and OpenMP on a GPU, and runs each.
+# the host's threads and OpenMP on a GPU, and runs each; with a GPU, also
+# bandwidth-process.m, whose kernels a GPU process runs across its teams.
 #
 #   run.sh [build-dir] [offload-arch]
 #
@@ -34,6 +35,12 @@ if [[ -n "$arch" ]]; then
   echo "== OpenMP, GPU ($arch)"
   "$merkc" -O2 -fopenmp -fdo-loops --offload-arch="$arch" "${flags[@]}" "$src" -o "$out/gpu"
   OMP_TARGET_OFFLOAD=MANDATORY "$out/gpu"
+  echo "== GPU process ($arch)"
+  "$merkc" -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch="$arch" \
+    "${flags[@]}" "$here/bandwidth-process.m" -o "$out/process"
+  # The process's arena holds the three arrays.
+  MERK_DEVICE_ARENA_BYTES="${MERK_DEVICE_ARENA_BYTES:-$((4 * 8 * ${BANDWIDTH_ARRAY_SIZE:-33554432} + (64 << 20)))}" \
+    "$out/process"
 else
   echo "== OpenMP, GPU: skipped, no offload-arch given"
 fi

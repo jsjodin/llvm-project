@@ -4536,6 +4536,34 @@ The send ring's prototype against the RPC, 2026-11-08, on a5efa6819f86, `-O2`, 2
 
 A token between a kernel's teams through device memory, 2026-11-09, on 51e6275ebfde, a C++ OpenMP probe at `-O2`, gfx1030 (RX 6950 XT), 200,000 one-way hops, 3 runs, machine otherwise idle apart from the desktop on the same GPU, ns a hop on the device's clock, polling teams: 2 teams 200, 4 to 64 teams 240, 256 teams 264, 1024 teams 520, 2048 teams 1125. Teams of 64 idle threads cost the same as teams of one (2 and 16 teams). One word with a cache line to itself, not yet a message with a queue; proposed in `INPROGRESS.md`, "Processes as teams".
 
+The kernels run by a GPU process across its worker teams
+(`bandwidth-process.m`, `distribute parallel do`, Dot a loop with a reduction),
+against target regions (`bandwidth.m`), 2026-11-11, on 63760df5b0a8, `-O2`,
+gfx1030 with all 80 compute units, 2^25 elements, MB/s from each kernel's fastest
+of 100 runs. Three alternating rounds agreed within 2%; the best of each:
+
+| Kernel | Target regions | GPU process | Process, kernel at 128 VGPRs | Same, no barrier after each round |
+| --- | ---: | ---: | ---: | ---: |
+| Copy | 338,857 | 260,663 | 395,153 | 333,137 |
+| Mul | 334,895 | 241,856 | 326,786 | 274,912 |
+| Add | 371,831 | 349,192 | 360,994 | 313,862 |
+| Triad | 375,357 | 341,018 | 342,905 | 320,839 |
+| Dot | 480,000 | 277,183 | 411,875 | 378,665 |
+
+- The processes' kernel, `merk_place`, has every kind's code, the runtime's
+  and the loops' bodies inlined into it and takes 205 VGPRs, so at most 4
+  waves a SIMD (1024 VGPRs for wave32), where the target regions' kernels
+  take 8 (Dot 43) and run 16. Capped at 128 VGPRs (`"amdgpu-num-vgpr"` on
+  `merk_place`, by hand), with 195 spills in the process's code, 8 waves a
+  SIMD are resident, and Copy passes the target regions; 96 and 91 (the
+  floor, `CopyTyped`'s, which is not inlined) measured the same as 128.
+- Without the barrier across a team after each round (d2), every kernel was
+  8 to 17% slower, though no wave reads another's elements: the waves of a
+  team that stay together keep the memory's accesses close.
+- What a loop costs, at 1024 elements and 1000 runs, µs from the fastest:
+  a target region 15 to 17 (Dot 36), a loop of a GPU process 1.9 to 2.0
+  (Dot 6.5), 2.2 (Dot 10.6) with the kernel at 128 VGPRs.
+
 ### Idle waves of GPU processes' kernels
 
 `process-loops.m`'s worker run without `-fopenmp`, so its process runs its
