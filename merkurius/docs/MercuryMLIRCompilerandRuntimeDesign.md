@@ -4364,6 +4364,31 @@ ways, the host's bookkeeping and the zeroing kernel.
   burns down, then 43 to 45 as gliders fly out, each one's tiles starting
   ahead of it and ending behind (`compare-sparse.sh`'s traces).
 
+### Uneven work
+
+**A deep Mandelbrot zoom,** 2026-11-12, on 88484930b646 with `benchmarks/mandel`,
+not committed (docs/INPROGRESS.md, step 4 of the demo, (m2)), on compute
+units 0-39: `mandel.m`, each frame a loop across all a GPU process's teams,
+against `mandel.c`, a kernel a frame, both doubles without fused multiplies
+and adds; 40 frames, the width halving from 3 to 5.5e-12, escape limits from
+256 to 2752; `compare-c.sh`, 5 rounds in turn, the median of the whole
+zoom's time, the spawn and the launches included. Both gave the same
+iterations, as `mandel.py` does on small frames; rounds varied by 0.2%.
+
+| Frames | Iterations | Mercury, GPU process | C, a kernel a frame |
+| --- | ---: | ---: | ---: |
+| 2048² | 133.8 × 10⁹ | 3.45 s, 38.8 Giterations/s | 3.57 s, 37.4 Giterations/s |
+| 1024² | 33.5 × 10⁹ | 0.90 s, 37.0 Giterations/s | 0.98 s, 34.0 Giterations/s |
+
+The GPU process is 3% faster than C at 2048² and 9% at 1024², where frames
+are shorter and C's launches count more. The work is the double-precision
+iterations alone, whose cost a pixel varies from 1 to 2752. In the GPU
+process, consecutive pixels go to the teams' threads in rounds, so that
+each round spreads a few rows over every team; in C, the hardware starts a
+work group as a compute unit frees. Either way no part of the GPU is left
+with the costly region alone. It is the bar for the places of
+`mandel-places.m`, which split the teams.
+
 ### Message latency
 
 The round trip of a one-word message, in microseconds: 20000 rounds, after 100

@@ -4617,7 +4617,10 @@ Decided by the user 2026-11-12, from four questions:
   tiles that take milliseconds, so 40 µs a message is small beside them.
   The direct queue in the GPU's memory (5c, 5d) stays a step of its own.
 - *Doubles,* zooming to a width of about 10^-13, with the escape limit
-  rising frame by frame.
+  rising frame by frame. As built, to 5.5 * 10^-12 in 40 frames: at 2048
+  pixels, a pixel's step is then some 25 units in the last place of the
+  centre's coordinates, and below about 2 * 10^-13 pixels would collapse
+  onto each other.
 
 *Why stealing here.* A pixel's iterations run from 1 to the limit, and near
 the set's boundary a tile's cost varies by orders of magnitude, from frame to
@@ -4691,7 +4694,13 @@ small sizes, and every program must give the same totals, exactly.
   arenas are freed. The share counts the kernel's teams, so the first
   worker takes a K'th and a later one may get a team fewer, as each
   worker's own wave sits in a team that is then not free.
-- (m2) `mandel.c`, `mandel.m` and the Python check, measured.
+- (m2) `mandel.c`, `mandel.m` and the Python check, measured. Built
+  2026-11-12 (`benchmarks/mandel`): all three give the same counts, at the
+  host and on the GPU (`Benchmarks/mandel.test`, `mandel-gpu.test`), and
+  `compare-c.sh` runs the two programs in turn. Measured: the GPU process
+  takes 3.45 s for the 2048² zoom, 38.8 Giterations/s, against C's 3.57 s,
+  and 0.90 s against 0.98 s at 1024² (design document, Measurements,
+  Uneven work).
 - (m3) `mandel-places.m` with the three policies, checked against the
   dense totals, and measured: the time to finish the zoom, each policy
   against the others and the dense programs, and how even the places'

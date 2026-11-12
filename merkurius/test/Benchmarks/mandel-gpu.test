@@ -1,0 +1,26 @@
+The Mandelbrot zoom of benchmarks/mandel on the machine's GPU: mandel.m's
+GPU process, each frame a loop across all its teams, and mandel.c, a kernel
+a frame, give mandel.py's iterations (mandel.test), and the same as each
+other on 512 pixels square for the whole zoom of 40 frames.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/mandel/mandel.m -o %t
+RUN: clang -O2 -ffp-contract=off -fopenmp --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/mandel/mandel.c -o %t.c
+RUN: %gpu-env MANDEL_SIZE=64 MANDEL_FRAMES=12 timeout -k 1 60 %t | FileCheck %s --check-prefix=SMALL
+RUN: %gpu-env OMP_TARGET_OFFLOAD=MANDATORY MANDEL_SIZE=64 MANDEL_FRAMES=12 timeout -k 1 60 %t.c | FileCheck %s --check-prefix=SMALL
+SMALL: Iterations: 10601425
+SMALL-NEXT: Checksum: 63198496
+RUN: %gpu-env MANDEL_SIZE=51 MANDEL_FRAMES=30 timeout -k 1 60 %t | FileCheck %s --check-prefix=ODD
+ODD: Iterations: 44379424
+ODD-NEXT: Checksum: 956766019
+RUN: %gpu-env MANDEL_SIZE=512 timeout -k 1 60 %t | FileCheck %s --check-prefix=ZOOM
+RUN: %gpu-env OMP_TARGET_OFFLOAD=MANDATORY MANDEL_SIZE=512 timeout -k 1 60 %t.c | FileCheck %s --check-prefix=ZOOM
+ZOOM: Frames: 40 of 512 x 512 pixels
+ZOOM: Iterations: 8362906608
+ZOOM-NEXT: Checksum: 237665807406
+
+Without -fopenmp the process runs the loops on its own lane: a small zoom.
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/mandel/mandel.m -o %t.sequential
+RUN: %gpu-env MANDEL_SIZE=16 MANDEL_FRAMES=4 timeout -k 1 60 %t.sequential | FileCheck %s --check-prefix=TINY
+TINY: Iterations: 219354
+TINY-NEXT: Checksum: 686820
