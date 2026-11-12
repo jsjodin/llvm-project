@@ -372,6 +372,11 @@ namespace {
 // Each value's type, as far as the bundles say, kept up to date through the
 // rewrite's replacements.
 using KnownTypes = llvm::ValueMap<const llvm::Value *, llvm::Constant *>;
+// A field's root type by its cell's and its offset from the tagged pointer
+// (kFieldTypes).
+using FieldTypes =
+    llvm::DenseMap<std::pair<std::int64_t, std::int64_t>, std::int64_t>;
+FieldTypes fieldTypes;
 } // namespace
 
 // Records the bundles' types, for all the program points. The optimizer can
@@ -381,6 +386,23 @@ using KnownTypes = llvm::ValueMap<const llvm::Value *, llvm::Constant *>;
 // is all the collector asks of the type.
 static void RecordTypes(llvm::Function &function, KnownTypes &known) {
   llvm::SmallVector<const llvm::Value *> worklist;
+  // An argument's, from the procedure's signature (Lowering, LowerProc): a
+  // root the optimizer kept live past a safepoint that liveness did not list
+  // it at, as a cell whose field's load it sank past a call, may be a phi of
+  // an argument and values no bundle names.
+  for (llvm::Argument &argument : function.args()) {
+    llvm::Attribute type{function.getAttributes().getParamAttr(
+        argument.getArgNo(), kRootTypeAttrName)};
+    std::int64_t index{0};
+    if (type.isValid() && !type.getValueAsString().getAsInteger(10, index) &&
+        known
+            .insert({&argument,
+                llvm::ConstantInt::getSigned(
+                    llvm::Type::getInt64Ty(function.getContext()), index)})
+            .second) {
+      worklist.push_back(&argument);
+    }
+  }
   for (llvm::Instruction &instruction : llvm::instructions(function)) {
     auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)};
     auto deopt{call ? call->getOperandBundle(llvm::LLVMContext::OB_deopt)
@@ -389,11 +411,28 @@ static void RecordTypes(llvm::Function &function, KnownTypes &known) {
       continue;
     }
     ForEachEntry(deopt->Inputs,
-        [&](llvm::Constant *type, llvm::Value *entry, llvm::ArrayRef<llvm::Use>) {
+        [&](llvm::Constant *type, llvm::Value *entry,
+            llvm::ArrayRef<llvm::Use>) {
+          // A static cell too, whose type says what a phi of it and of
+          // what is loaded from it is, as a loop down a static list has;
+          // but equal ground terms of two types share a cell, and a
+          // constant's word is many types', so only a cell that every
+          // bundle gives one type.
           const llvm::Value *value{CellOf(entry)};
-          if (IsHeapPointer(value->getType()) &&
-              !llvm::isa<llvm::Constant>(value) &&
-              known.insert({value, type}).second) {
+          if (!IsHeapPointer(value->getType())) {
+            return;
+          }
+          if (llvm::isa<llvm::Constant>(value)) {
+            if (!llvm::isa<llvm::GlobalVariable>(value->stripPointerCasts())) {
+              return;
+            }
+            auto [it, added]{known.insert({value, type})};
+            if (!added && it->second != type) {
+              it->second = nullptr;
+            }
+            return;
+          }
+          if (known.insert({value, type}).second) {
             worklist.push_back(value);
           }
         });
@@ -550,8 +589,10 @@ static const llvm::Value *RoundTripped(const llvm::Value *value) {
 }
 
 // What the bundles said of a value the rewrite made, from what it was made of.
-static llvm::Constant *FindType(const llvm::Value *root, KnownTypes &known) {
-  llvm::SmallPtrSet<const llvm::Value *, 16> seen;
+// `seen` has the values already followed, by this search and those that
+// asked for the type of a cell a pointer was loaded from.
+static llvm::Constant *FindType(const llvm::Value *root, KnownTypes &known,
+    llvm::SmallPtrSetImpl<const llvm::Value *> &seen) {
   llvm::SmallVector<const llvm::Value *> worklist{root};
   while (!worklist.empty()) {
     const llvm::Value *value{CellOf(worklist.pop_back_val())};
@@ -560,6 +601,23 @@ static llvm::Constant *FindType(const llvm::Value *root, KnownTypes &known) {
     }
     if (llvm::Constant *type{known.lookup(value)}) {
       return type;
+    }
+    // A pointer loaded from a field of a cell of a known type.
+    if (auto *load{llvm::dyn_cast<llvm::LoadInst>(value)}) {
+      const llvm::DataLayout &layout{load->getModule()->getDataLayout()};
+      llvm::APInt offset{64, 0};
+      const llvm::Value *base{
+          load->getPointerOperand()->stripAndAccumulateConstantOffsets(
+              layout, offset, /*AllowNonInbounds=*/true)};
+      if (auto *cell{llvm::dyn_cast_or_null<llvm::ConstantInt>(
+              FindType(base, known, seen))}) {
+        auto it{fieldTypes.find({cell->getSExtValue(), offset.getSExtValue()})};
+        if (it != fieldTypes.end()) {
+          return llvm::ConstantInt::getSigned(
+              llvm::Type::getInt64Ty(load->getContext()), it->second);
+        }
+      }
+      continue;
     }
     if (auto *relocate{llvm::dyn_cast<llvm::GCRelocateInst>(value)}) {
       worklist.push_back(relocate->getDerivedPtr());
@@ -574,6 +632,11 @@ static llvm::Constant *FindType(const llvm::Value *root, KnownTypes &known) {
     }
   }
   return nullptr;
+}
+
+static llvm::Constant *FindType(const llvm::Value *root, KnownTypes &known) {
+  llvm::SmallPtrSet<const llvm::Value *, 16> seen;
+  return FindType(root, known, seen);
 }
 
 namespace {
@@ -1255,6 +1318,26 @@ static bool IsMercuryCode(llvm::Function &function) {
   return false;
 }
 
+// In a function the collector does not scan, an OpenMP region's outlined
+// function: its calls marked as in the region lose their bundles. Code
+// generation would make a stack map record of a call with a deopt bundle
+// in any function, and the collector would take the frame, which has no
+// frame pointer of its own, for Mercury's; without it the walk of a
+// worker's stack ends at the region's procedure.
+static void StripRegionBundles(llvm::Function &function) {
+  for (llvm::Instruction &instruction :
+      llvm::make_early_inc_range(llvm::instructions(function))) {
+    auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)};
+    if (!call || !call->getOperandBundle(llvm::LLVMContext::OB_deopt)) {
+      continue;
+    }
+    llvm::CallBase *plain{llvm::CallBase::removeOperandBundle(
+        call, llvm::LLVMContext::OB_deopt, call->getIterator())};
+    call->replaceAllUsesWith(plain);
+    call->eraseFromParent();
+  }
+}
+
 // With no statepoint there is no stack map for the table to point to.
 static void DropRootTable(llvm::Module &module) {
   llvm::GlobalVariable *table{module.getNamedGlobal(kRootTable)};
@@ -1289,11 +1372,36 @@ static void RemoveDeadCode(llvm::Function &function) {
 // Mercury code gets statepoints, here, after the optimizer, which handles them
 // badly. Code an OpenMP region outlined is not rewritten: nothing collects
 // during a region. A device has no collector.
+void DropRootTypeNotes(llvm::Module &module) {
+  for (llvm::Function &function : module) {
+    for (llvm::Argument &argument : function.args()) {
+      function.removeParamAttr(argument.getArgNo(), kRootTypeAttrName);
+    }
+  }
+  if (llvm::NamedMDNode * node{module.getNamedMetadata(kFieldTypes)}) {
+    module.eraseNamedMetadata(node);
+  }
+}
+
 void RewriteForCollector(llvm::Module &module, const TargetInfo &target) {
   if (target.options().IsDevice()) {
+    DropRootTypeNotes(module);
     return;
   }
   llvm::linkAllBuiltinGCs();
+  fieldTypes.clear();
+  if (llvm::NamedMDNode * node{module.getNamedMetadata(kFieldTypes)}) {
+    for (llvm::MDNode *entry : node->operands()) {
+      std::int64_t values[3];
+      for (unsigned k = 0; k < 3; ++k) {
+        values[k] =
+            llvm::mdconst::extract<llvm::ConstantInt>(entry->getOperand(k))
+                ->getSExtValue();
+      }
+      fieldTypes[{values[0], values[1]}] = values[2];
+    }
+    module.eraseNamedMetadata(node);
+  }
   FlattenResults(module);
   KnownTypes known;
   bool any{false};
@@ -1301,14 +1409,21 @@ void RewriteForCollector(llvm::Module &module, const TargetInfo &target) {
     if (!function.isDeclaration() && IsMercuryCode(function)) {
       function.setGC("statepoint-example");
       function.addFnAttr("frame-pointer", "all");
+      // The collector reads from .eh_frame where the frame keeps its return
+      // address (runtime/frame-info.h).
+      function.setUWTableKind(llvm::UWTableKind::Async);
       MarkLeaves(function);
       RecordTypes(function, known);
       CastAtUses(function);
       ReadBitsEarly(function, known);
       ListLiveRoots(function, known);
       any = true;
+    } else if (!function.isDeclaration()) {
+      StripRegionBundles(function);
     }
   }
+  // The arguments' types are in `known` now (RecordTypes).
+  DropRootTypeNotes(module);
   if (!any) {
     DropRootTable(module);
     return;
