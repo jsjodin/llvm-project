@@ -1293,8 +1293,15 @@ struct AAPointerInfoImpl
         if (FnReachabilityAA) {
           // Without going backwards in the call tree, can we reach the access
           // from the least dominating write. Do not allow to pass the
-          // instruction itself either.
-          bool Inserted = ExclusionSet.insert(&I).second;
+          // instruction itself either, unless the instruction may be in a
+          // cycle: a call after the instruction can then reach the access and
+          // return, and the cycle bring the access's value back to the
+          // instruction.
+          bool Inserted = false;
+          if (!mayBeInCycle(
+                  InfoCache.getAnalysisResultForFunction<CycleAnalysis>(Scope),
+                  &I, /* HeaderOnly */ false))
+            Inserted = ExclusionSet.insert(&I).second;
 
           if (!FnReachabilityAA->instructionCanReach(
                   A, *LeastDominatingWriteInst,
