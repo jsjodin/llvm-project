@@ -36,6 +36,10 @@ bool IsRoot(mlir::Type type) {
 // An operation that makes a cell, which can start a collection. What it stores
 // is live while it does.
 bool Allocates(mlir::Operation *op) {
+  // A record by value is no cell (docs/INPROGRESS.md, Flat records).
+  if (auto construct{mlir::dyn_cast<merk::ConstructOp>(op)}) {
+    return mlir::isa<merk::TermType>(construct.getType());
+  }
   return mlir::isa<merk::ConstructOp, merk::ClosureOp, merk::TypeInfoOp,
       merk::TypeclassInfoOp, merk::ArrayNewOp, merk::ArrayCopyOp,
       merk::ArrayFromListOp, merk::ArrayResizeOp>(op);

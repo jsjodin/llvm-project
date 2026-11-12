@@ -164,7 +164,7 @@ llvm::LogicalResult SwitchOp::verify() {
         << getCases().size() << " cases but " << getCaseRegions().size()
         << " regions";
   }
-  bool term{mlir::isa<TermType>(getValue().getType())};
+  bool term{mlir::isa<TermType, RecordType>(getValue().getType())};
   for (mlir::Attribute c : getCases()) {
     auto constants{mlir::dyn_cast<mlir::ArrayAttr>(c)};
     if (!constants || constants.empty()) {

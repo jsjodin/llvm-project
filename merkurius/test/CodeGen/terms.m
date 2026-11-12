@@ -65,15 +65,14 @@
 % Constants only: a word.
 % LLVM-LABEL: define internal tailcc i64 @terms.next_f1_0(i64 %0) {
 % LLVM-NEXT: switch i64 %0, label %{{.*}} [
-% A tuple is a cell with tag 0.
-% LLVM-LABEL: define internal tailcc ptr addrspace(1) @terms.swap_f1_0(ptr addrspace(1) %0) {
-% LLVM-NEXT: %[[X:.*]] = load i64, ptr addrspace(1) %0, align 8
-% LLVM-NEXT: %[[YP:.*]] = getelementptr i8, ptr addrspace(1) %0, i32 8
-% LLVM-NEXT: %[[Y:.*]] = load i64, ptr addrspace(1) %[[YP]], align 8
-% LLVM: call ptr addrspace(1) @merk_alloc_slow(i64 16)
-% LLVM: %[[T:.*]] = phi ptr addrspace(1)
-% LLVM-NEXT: store i64 %[[Y]], ptr addrspace(1) %[[T]], align 8
-% LLVM: ret ptr addrspace(1) %[[T]]
+% A tuple of numbers is a flat record, a struct by value, with no cell
+% (docs/INPROGRESS.md, Flat records, step 1).
+% LLVM-LABEL: define internal tailcc { i64, i64 } @terms.swap_f1_0({ i64, i64 } %0) {
+% LLVM-NEXT: %[[X:.*]] = extractvalue { i64, i64 } %0, 0
+% LLVM-NEXT: %[[Y:.*]] = extractvalue { i64, i64 } %0, 1
+% LLVM-NEXT: %[[T:.*]] = insertvalue { i64, i64 } undef, i64 %[[Y]], 0
+% LLVM-NEXT: %[[U:.*]] = insertvalue { i64, i64 } %[[T]], i64 %[[X]], 1
+% LLVM-NEXT: ret { i64, i64 } %[[U]]
 % One constructor of one argument: the argument.
 % LLVM-LABEL: define internal tailcc double @terms.warm_f1_0(double %0) {
 % LLVM-NEXT: fadd double %0, 1.000000e+00

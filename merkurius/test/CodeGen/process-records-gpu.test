@@ -1,0 +1,14 @@
+process-records.m's process kinds spawned on the machine's GPU
+(docs/INPROGRESS.md, Flat records, step 1): a mover that steps particles by
+value and a weigher that keeps their sum, with none of the host's copies of
+the messages, nor the messages, nor the arenas left.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-records.m -o %t2
+RUN: %gpu-env MERK_CHECK_PINNED=1 MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %s --match-full-lines --strict-whitespace
+
+CHECK:[message(particle(point(1i32, 2i32), point(3i32, 4i32), 64.0)), message(particle(point(10i32, 11i32), point(3i32, 1i32), 8.0)), message(particle(point(-4i32, -8i32), point(-1i32, -5i32), 2.0))]
+CHECK-NEXT:message(particle(point(55i32, 110i32), point(0i32, 0i32), 55.0))
+CHECK-NEXT:Mercury runtime: 0 chunks of host memory for devices' messages are allocated
+CHECK-NEXT:Mercury runtime: 0 messages are neither read nor freed
+CHECK-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated

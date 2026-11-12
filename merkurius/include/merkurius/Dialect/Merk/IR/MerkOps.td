@@ -535,7 +535,7 @@ def Merk_ConstructOp : Merk_Op<"construct", [Pure]> {
   }];
   let arguments = (ins Merk_FunctorAttr:$functor,
       Variadic<AnyType>:$arguments);
-  let results = (outs Merk_TermType:$term);
+  let results = (outs Merk_TermOrRecord:$term);
   let assemblyFormat = [{
     qualified($functor) (`(` $arguments^ `:` type($arguments) `)`)? attr-dict
     `->` qualified(type($term))
@@ -644,7 +644,7 @@ def Merk_DeconstructOp : Merk_Op<"deconstruct", [NoMemoryEffect]> {
     %h, %t = merk.deconstruct #merk.functor<"[|]", 2> %l : !merk.term<"list.list(int)"> -> i64, !merk.term<"list.list(int)">
     ```
   }];
-  let arguments = (ins Merk_TermType:$term, Merk_FunctorAttr:$functor);
+  let arguments = (ins Merk_TermOrRecord:$term, Merk_FunctorAttr:$functor);
   let results = (outs Variadic<AnyType>:$fields);
   let assemblyFormat = [{
     qualified($functor) $term attr-dict `:` qualified(type($term))
@@ -662,7 +662,7 @@ def Merk_HasFunctorOp : Merk_Op<"has_functor", [NoMemoryEffect]> {
     %is = merk.has_functor #merk.functor<"[]", 0> %l : !merk.term<"list.list(int)">
     ```
   }];
-  let arguments = (ins Merk_TermType:$term, Merk_FunctorAttr:$functor);
+  let arguments = (ins Merk_TermOrRecord:$term, Merk_FunctorAttr:$functor);
   let results = (outs I1:$result);
   let assemblyFormat = [{
     qualified($functor) $term attr-dict `:` qualified(type($term))
@@ -925,7 +925,8 @@ def Merk_SwitchOp : Merk_Op<"switch", [RecursiveMemoryEffects]> {
     }
     ```
   }];
-  let arguments = (ins AnyTypeOf<[AnySignlessInteger, Merk_TermType]>:$value,
+  let arguments = (ins AnyTypeOf<[AnySignlessInteger, Merk_TermType,
+                           Merk_RecordType]>:$value,
       ArrayAttr:$cases,
       UnitAttr:$can_fail);
   let results = (outs Variadic<AnyType>:$results);

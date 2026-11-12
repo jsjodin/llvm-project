@@ -2930,7 +2930,66 @@ the process asks the host to launch. The first version has neither.
         `declare reduction` has, lowered to `omp.declare_reduction`, as
         Flang lowers one of a derived type.
 
-     **Open, to decide before step 2:**
+     **Step 1's design, 2026-11-12: records by value everywhere.** Not
+     only in GPU code: the user's (a) puts records inline in host arrays
+     too, and one layout on both sides spares conversions at every map and
+     message.
+     - *Which types:* one constructor of two or more fields, no hidden
+       ones, not exported abstractly, every field an integer, a float, a
+       character, an enumeration that is not exported abstractly, a notag
+       of one of those, or such a record. The rule reads only the
+       `merk.type_def`s, so every module that sees a type's constructors
+       decides alike; one that sees a field type only abstractly has no
+       `merk.type_def` for it and decides it is not one, as does the module
+       that exports it abstractly.
+     - *`!merk.record<"name">`:* the value, an LLVM struct of its fields'
+       types, a nested record inline. `!merk.term<"name">` keeps its meaning,
+       the cell, which is what the runtime, polymorphic code and other cells
+       see: a record is boxed into it by `merk.deconstruct` of the record
+       and `merk.construct` of the term, and unboxed the other way, the
+       existing operations, so liveness and safepoints need nothing new.
+       Not a root.
+     - *Where:* MLIRGen is unchanged. After lowering has chosen the layouts,
+       before last call modulo constructor and safepoints, a rewrite makes
+       every value of such a term a record: procedures' signatures, block
+       arguments, results, environments' layouts. It boxes where a cell or
+       a word is wanted: `merk.to_word`, a field of a cell, an array's
+       element (until step 2), a foreign call's input, a cast to a pointer
+       for a target region's map; and unboxes at the reverse. Every
+       indirect call passes words already (closures, unify and compare
+       entries, methods), so signatures change only for direct calls.
+     - *Lowered:* construct to `insertvalue`s, deconstruct to
+       `extractvalue`s, a test of the functor to true.
+     - *Rejected:* boxing during lowering, as `ToBits` would: it allocates
+       after safepoints are placed, so a collection there would miss live
+       values. Records in GPU code only: two layouts of one type, and a
+       conversion at every boundary between the host's and the device's.
+       A record type in MLIRGen: every place there that handles terms
+       would need a second case, where the rewrite has a few boundaries.
+
+     **Step 1, built 2026-11-12** (design document, Type representation, and
+     Lowering, "Records"). As designed above, with:
+     - *Tuples* of flat types are records too, as the check has them.
+     - *The choice* walks a type's fields with the set of types on the path
+       to it, so a type in two fields, as a particle's two points, is
+       checked twice, and only a type in its own fields is recursive.
+     - *A record too large for registers* among a procedure's outputs is
+       returned in memory, as any outputs are.
+     - *Still boxed* until step 2: a record in an array, in a message
+       (`send`, `receive` and the copies walk its `type_info`), and in a
+       target region's map, an allocation on the host at each region. A map
+       by value, the struct's bytes, is open for step 2.
+     - *Tests:* `CodeGen/flat-records.m` (signatures, the boundaries where
+       a record is boxed, `solutions`, results in memory) and
+       `CodeGen/process-records.m` with `process-records-gpu.test` (records
+       as GPU processes' messages and state, by value in their code).
+
+     **Decided by the user, 2026-11-12:** (a), inline on the host as on
+     the GPU; and a fixed size as a library type, `fixed(T, n8)`, whose
+     size is an ordinary type the library declares, so that the type
+     checker keeps sizes apart and mmc still runs the programs.
+
+     **Were open, before step 2:**
      - **How the host holds an array of flat records.** (a) Inline on the
        host as on the GPU, with a lookup boxing the element into a cell, but
        for a lookup whose result is only deconstructed, which reads the
@@ -4254,7 +4313,7 @@ stencils), and a step moves nothing but cells.
   :- type tile
       --->    tile(
                   x :: int32, y :: int32,      % position, in tiles
-                  neighbours :: fixed(int32, 8), % pool indices, 0 if none
+                  neighbours :: fixed(int32, n8), % pool indices, 0 if none
                   live :: int32,               % from the last step
                   edges :: uint8,              % live edges and corners
                   quiet :: uint8               % steps without life near
@@ -4262,7 +4321,7 @@ stencils), and a step moves nothing but cells.
   ```
   The dead tile stands in for a missing neighbour, so the step never
   branches on one. How a fixed size is written is open (Features to build,
-  flat records); `fixed(int32, 8)` is a placeholder.
+  flat records); `fixed(int32, n8)`, as the user decided 2026-11-12.
 - *The active tiles:* their pool indices packed, with their number, and a
   free list of pool indices.
 
@@ -4349,10 +4408,9 @@ beat, as a decomposition fixed in advance computes every tile.
   elements, and independent of the rest of flat records.
 - *Flat records' steps 1 to 3* (step 5, Flat records, above): records as
   values in GPU code, arrays of flat records inline, and fields that are
-  arrays of a fixed size. They wait on two decisions, the user's: how the
-  host holds an array of flat records (recommended there: (a), inline), and
-  how a fixed size is written. The tile record is the example that was
-  wanted for choosing the spelling.
+  arrays of a fixed size. The user decided 2026-11-12: arrays of flat
+  records inline on the host too, (a), and `fixed(int32, n8)`, a library
+  type with the size as a type.
 - Multi-dimensional arrays and views (After step 5, above) would spare the
   pool's index arithmetic. They change how the program is written, not its
   speed, and the step does not wait for them.
@@ -4368,7 +4426,8 @@ beat, as a decomposition fixed in advance computes every tile.
   against `life.c`'s `uint8_t`: done 2026-11-12, `life-process8.m`, 37.3
   Gcells/s against C's 31.8 at 4096², 32.8 against 23.6 at 1024² (design
   document, Measurements).
-- (s3) Flat records' steps 1 to 3, after the user's two decisions.
+- (s3) Flat records' steps 1 to 3 (decided 2026-11-12: (a), and
+  `fixed(T, n8)`).
 - (s4) The `LIFE_SOUP` setting in `life.m` and `life.c`, for the dense check
   and the bar.
 - (s5) `life-sparse.m`: the world, tiles starting and ending, checked
