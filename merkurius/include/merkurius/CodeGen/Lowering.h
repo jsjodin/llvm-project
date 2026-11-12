@@ -104,6 +104,13 @@ inline constexpr std::int64_t kInRegion{-2};
 
 // A module's table of root types, in the section the runtime finds them by.
 inline constexpr llvm::StringLiteral kRootTable{"merk.root_types"};
+// A procedure's argument's root type, an index in kRootTable, as a string
+// attribute of the argument (Statepoints, RecordTypes).
+inline constexpr llvm::StringLiteral kRootTypeAttrName{"merk.root_type"};
+// Named metadata of (cell's root type, offset of a field from the tagged
+// pointer, the field's root type), for a pointer loaded from a field that the
+// optimizer keeps live past a safepoint (Statepoints, FindType).
+inline constexpr llvm::StringLiteral kFieldTypes{"merk.field_types"};
 
 // The order of runtime/roots.cpp's RootKind.
 enum RootKind : std::int64_t {
@@ -123,6 +130,9 @@ enum RootKind : std::int64_t {
 
 // Gives Mercury code statepoints, after the optimizer (Statepoints.cpp).
 void RewriteForCollector(llvm::Module &, const TargetInfo &);
+// Removes what lowering tells RewriteForCollector of roots' types, the
+// arguments' attributes and the fields' table, from IR that is printed.
+void DropRootTypeNotes(llvm::Module &);
 
 void OptimizeLLVMIR(llvm::Module &, const TargetInfo &);
 

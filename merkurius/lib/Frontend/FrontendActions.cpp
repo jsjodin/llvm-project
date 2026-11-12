@@ -1099,7 +1099,8 @@ bool CodeGenAction::Emit(llvm::Module &llvmModule,
   // back (LowerLLVMIR), and a second run of the optimizer would fold the
   // inttoptrs that OptimizeLLVMIR makes of words at its end, carrying a
   // number on as a heap pointer, and add the stack checks twice.
-  if (!llvmModule.getModuleFlag(kIRPreparedFlag)) {
+  bool readBack{llvmModule.getModuleFlag(kIRPreparedFlag) != nullptr};
+  if (!readBack) {
     codegen::OptimizeLLVMIR(llvmModule, target);
     codegen::AddStackChecks(llvmModule);
     if (target.options().processKernels) {
@@ -1109,6 +1110,11 @@ bool CodeGenAction::Emit(llvm::Module &llvmModule,
     llvmModule.addModuleFlag(llvm::Module::Max, kIRPreparedFlag, 1);
   }
   if (kind_ == ActionKind::EmitLLVM) {
+    // Bitcode keeps them, for the compile that reads it back, and IR read
+    // back is printed as it is.
+    if (!readBack) {
+      codegen::DropRootTypeNotes(llvmModule);
+    }
     llvmModule.print(os, nullptr);
     return true;
   }

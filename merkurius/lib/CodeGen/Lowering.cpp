@@ -515,6 +515,16 @@ private:
   void EmitRootTable();
   // A type's index, which a layout's fields can add to.
   std::int64_t RootTypeIndex(mlir::Type, llvm::SmallVectorImpl<mlir::Type> &);
+  // A monomorphic root type's index, or none.
+  std::optional<std::int64_t> MonomorphicRootIndex(mlir::Type);
+  // That a field at the offset from a tagged pointer of the type is of the
+  // field's type, for the statepoint pass (kFieldTypes).
+  void NoteFieldType(mlir::Type term, mlir::Type field, std::int64_t offset);
+  // Type index, offset, field's type index, for each field noted.
+  llvm::SetVector<std::tuple<std::int64_t, std::int64_t, std::int64_t>>
+      fieldTypes_;
+  // The root types a bundle or an environment's layout has.
+  llvm::DenseSet<mlir::Type> listedTypes_;
   llvm::DenseMap<mlir::Value, StaticTypeInfo> staticTypeInfos_;
   llvm::StringMap<mlir::LLVM::GlobalOp> typeInfoCells_;
 };
@@ -904,6 +914,9 @@ llvm::LogicalResult Lowerer::LowerTerms() {
         for (auto [i, field] : llvm::enumerate(functor->fields)) {
           fields.push_back(mrt::FieldLoadOp::create(
               rewriter_, loc, Convert(field), cell, i + skip));
+          NoteFieldType(type, field,
+              8 * static_cast<std::int64_t>(i + skip) -
+                  static_cast<std::int64_t>(functor->tag));
         }
       }
       rewriter_.replaceOp(op, fields);
@@ -1115,6 +1128,40 @@ void Lowerer::LowerProc(merk::ProcOp proc) {
   // runtime calls from C++ (device.cpp).
   if (proc->hasAttr(kProcessRootAttrName)) {
     func.setCConv(mlir::LLVM::CConv::C);
+  }
+  // Each argument's type, for a root the optimizer keeps live across a
+  // safepoint where liveness found it dead, as a load of a field sunk past
+  // a call: a phi of an argument and a value of no bundle's (Statepoints).
+  // Translation keeps no attribute of ours on an argument, so they go as
+  // the function's, "argument:index ...", which TranslateToLLVMIR makes the
+  // arguments' before the optimizer can remove any.
+  {
+    std::string types;
+    for (auto [i, declared] : llvm::enumerate(type.getInputs())) {
+      mlir::Type input{declared};
+      // A word the procedure makes a value of one type, as a unify or
+      // compare entry does, is of that type.
+      if (mlir::isa<merk::WordType>(input) && !proc.isExternal()) {
+        for (mlir::Operation *user :
+            proc.getBody().front().getArgument(i).getUsers()) {
+          if (mlir::isa<merk::FromWordOp>(user)) {
+            input = user->getResult(0).getType();
+            break;
+          }
+        }
+      }
+      if (std::optional<std::int64_t> index{MonomorphicRootIndex(input)}) {
+        types += (types.empty() ? "" : " ") +
+            std::to_string(i + (inMemory ? 1 : 0)) + ":" +
+            std::to_string(*index);
+      }
+    }
+    if (!types.empty()) {
+      func->setAttr("passthrough",
+          rewriter_.getArrayAttr({rewriter_.getArrayAttr(
+              {rewriter_.getStringAttr(kRootTypeAttrName),
+                  rewriter_.getStringAttr(types)})}));
+    }
   }
   rewriter_.inlineRegionBefore(
       proc.getBody(), func.getBody(), func.getBody().end());
@@ -1393,16 +1440,43 @@ std::optional<Lowerer::StaticTypeInfo> Lowerer::RootTypeInfo(
       1};
 }
 
+std::optional<std::int64_t> Lowerer::MonomorphicRootIndex(mlir::Type type) {
+  if (device_ ||
+      !mlir::isa<merk::TermType, merk::StringType, merk::ArrayType,
+          merk::ClosureType>(type) ||
+      IsPolymorphic(type)) {
+    return std::nullopt;
+  }
+  return liveTypes_.try_emplace(type, liveTypes_.size()).first->second;
+}
+
+void Lowerer::NoteFieldType(
+    mlir::Type term, mlir::Type field, std::int64_t offset) {
+  std::optional<std::int64_t> cell{MonomorphicRootIndex(term)};
+  std::optional<std::int64_t> value{MonomorphicRootIndex(field)};
+  if (cell && value) {
+    fieldTypes_.insert({*cell, offset, *value});
+  }
+}
+
 std::int64_t Lowerer::RootTypeIndex(
     mlir::Type type, llvm::SmallVectorImpl<mlir::Type> &types) {
   auto [it, added]{liveTypes_.try_emplace(type, liveTypes_.size())};
   if (added) {
     types.push_back(type);
   }
+  listedTypes_.insert(type);
   return it->second;
 }
 
 void Lowerer::EmitRootTable() {
+  if (!fieldTypes_.empty()) {
+    llvm::SmallVector<std::int64_t> entries;
+    for (auto [cell, offset, field] : fieldTypes_) {
+      entries.append({cell, offset, field});
+    }
+    module_->setAttr(kFieldTypes, rewriter_.getDenseI64ArrayAttr(entries));
+  }
   mlir::Location loc{module_.getLoc()};
   mlir::MLIRContext *context{module_.getContext()};
   auto ptr{mlir::LLVM::LLVMPointerType::get(context)};
@@ -1424,6 +1498,13 @@ void Lowerer::EmitRootTable() {
     if (auto term{mlir::dyn_cast<merk::TermType>(type)}) {
       llvm::SmallVector<std::string> variables;
       entry.info = RootTypeInfo(term.getName(), variables, loc);
+      // A type only an argument or a field has, for the statepoint pass's
+      // types of roots no bundle lists, which the runtime cannot describe,
+      // stays unresolved; one a bundle lists must be described.
+      if (!entry.info && !listedTypes_.contains(type)) {
+        entries.push_back(entry);
+        continue;
+      }
       if (!entry.info) {
         std::string text{"not yet implemented: a garbage collector root of "
                          "type " + term.getName().str() +
@@ -2552,6 +2633,7 @@ void Lowerer::AttachLive(merk::LiveOp live, mlir::LLVM::CallOp call) {
     // the number of the root's type_infos, which follow it, above it.
     std::int64_t index{
         liveTypes_.try_emplace(type, liveTypes_.size()).first->second};
+    listedTypes_.insert(type);
     bundle.push_back(mlir::LLVM::ConstantOp::create(rewriter_, loc,
         rewriter_.getI64Type(), index | (count << 32)));
     bundle.push_back(LoweredValue(value, loc));
@@ -4143,6 +4225,10 @@ llvm::LogicalResult LowerToLLVMDialect(
 
 std::unique_ptr<llvm::Module> TranslateToLLVMIR(mlir::ModuleOp module,
     llvm::LLVMContext &context, const TargetInfo &target) {
+  // The fields' types (EmitRootTable), as named metadata, which the
+  // optimizer keeps for the statepoint pass.
+  auto fieldTypes{module->getAttrOfType<mlir::DenseI64ArrayAttr>(kFieldTypes)};
+  module->removeAttr(kFieldTypes);
   mlir::DialectRegistry registry;
   mlir::registerBuiltinDialectTranslation(registry);
   mlir::registerLLVMDialectTranslation(registry);
@@ -4151,6 +4237,40 @@ std::unique_ptr<llvm::Module> TranslateToLLVMIR(mlir::ModuleOp module,
   std::unique_ptr<llvm::Module> llvmModule{mlir::translateModuleToLLVMIR(
       module, context, module.getName().value_or("module"))};
   if (llvmModule) {
+    // Each argument's root type, from the function's attribute (LowerProc).
+    for (llvm::Function &function : *llvmModule) {
+      llvm::Attribute types{function.getFnAttribute(kRootTypeAttrName)};
+      if (!types.isValid()) {
+        continue;
+      }
+      llvm::SmallVector<llvm::StringRef> entries;
+      types.getValueAsString().split(entries, ' ');
+      for (llvm::StringRef entry : entries) {
+        auto [argument, index]{entry.split(':')};
+        unsigned number{0};
+        if (!argument.getAsInteger(10, number) &&
+            number < function.arg_size()) {
+          function.addParamAttr(number,
+              llvm::Attribute::get(
+                  llvmModule->getContext(), kRootTypeAttrName, index));
+        }
+      }
+      function.removeFnAttr(kRootTypeAttrName);
+    }
+    if (fieldTypes) {
+      llvm::NamedMDNode *node{
+          llvmModule->getOrInsertNamedMetadata(kFieldTypes)};
+      llvm::Type *i64{llvm::Type::getInt64Ty(context)};
+      llvm::ArrayRef<std::int64_t> entries{fieldTypes.asArrayRef()};
+      for (std::size_t i = 0; i + 2 < entries.size(); i += 3) {
+        llvm::SmallVector<llvm::Metadata *, 3> entry;
+        for (std::size_t k = 0; k < 3; ++k) {
+          entry.push_back(llvm::ConstantAsMetadata::get(
+              llvm::ConstantInt::getSigned(i64, entries[i + k])));
+        }
+        node->addOperand(llvm::MDNode::get(context, entry));
+      }
+    }
     llvmModule->setTargetTriple(target.triple());
     llvmModule->setDataLayout(target.dataLayout());
     target.AddModuleFlags(*llvmModule);

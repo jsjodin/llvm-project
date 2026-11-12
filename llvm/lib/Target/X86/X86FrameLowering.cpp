@@ -3110,9 +3110,11 @@ X86FrameLowering::getFrameIndexReferencePreferSP(const MachineFunction &MF,
   if (!IgnoreSPUpdates && !hasReservedCallFrame(MF))
     return getFrameIndexReference(MF, FI, FrameReg);
 
-  // We don't handle tail calls, and shouldn't be seeing them either.
-  assert(MF.getInfo<X86MachineFunctionInfo>()->getTCReturnAddrDelta() >= 0 &&
-         "we don't handle this case!");
+  // A function whose tail calls pass more stack arguments than it received
+  // (a negative TCReturnAddrDelta) reserves the room for them in its
+  // prologue, before it pushes the frame pointer. StackSize includes the
+  // reserve and the objects' offsets lie below it, so the reference from SP
+  // below holds for such a function too.
 
   // This is how the math works out:
   //

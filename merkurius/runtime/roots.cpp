@@ -10,6 +10,7 @@
 #include "array.h"
 #include "descriptor.h"
 #include "fragment.h"
+#include "frame-info.h"
 #include "heap.h"
 #include "process.h"
 #include "walk.h"
@@ -83,6 +84,10 @@ struct Safepoint {
   const RootTable *table;
   const std::uint64_t *constants;
   std::uint64_t stackSize;
+  // The bytes the frame reserves between its return address and its saved
+  // frame pointer for its tail calls' stack arguments (frame-info.h), which
+  // stackSize includes.
+  std::uint64_t reserve;
 };
 
 Safepoint *safepoints{nullptr};
@@ -179,11 +184,18 @@ void BuildSafepoints() {
   safepoints = static_cast<Safepoint *>(std::calloc(capacity, sizeof(Safepoint)));
   safepointMask = capacity - 1;
   for (const RootTable *table{begin}; table < end; table = NextTable(table)) {
-    ForEachRecord(table, [table](Word address, const Record *record,
-                             const std::uint64_t *constants,
-                             std::uint64_t stackSize) {
-      Insert({address, record, table, constants, stackSize});
-    });
+    ForEachRecord(table,
+        [table](Word address, const Record *record,
+            const std::uint64_t *constants, std::uint64_t stackSize) {
+          std::int64_t reserve{ReserveAt(address)};
+          if (reserve < 0) {
+            Bad("a safepoint whose frame has no frame pointer rule in "
+                ".eh_frame",
+                address);
+          }
+          Insert({address, record, table, constants, stackSize,
+              static_cast<std::uint64_t>(reserve)});
+        });
   }
   if (CheckRootsEnabled()) {
     std::atexit(Report);
@@ -338,6 +350,14 @@ void VisitEnvironment(
   }
 }
 
+// The frame pointer of a frame whose stack pointer is `stackPointer`: below
+// the return address, the reserve for tail calls' arguments, and the saved
+// frame pointer.
+char *FramePointerOf(const Safepoint &safepoint, char *stackPointer) {
+  return stackPointer +
+      (safepoint.stackSize - safepoint.reserve - sizeof(Word));
+}
+
 // Where a location of a frame is. A frame that pushes the arguments of a call
 // has its slots at the frame pointer, as its stack pointer varies.
 char *BaseOf(const Safepoint &safepoint, const Location &location,
@@ -345,7 +365,7 @@ char *BaseOf(const Safepoint &safepoint, const Location &location,
   constexpr std::uint16_t kFramePointer{6};
   constexpr std::uint16_t kStackPointer{7};
   if (location.reg == kFramePointer) {
-    return stackPointer + (safepoint.stackSize - sizeof(Word));
+    return FramePointerOf(safepoint, stackPointer);
   }
   if (location.reg != kStackPointer || safepoint.stackSize == ~std::uint64_t{0}) {
     Bad("a stack map location not in a frame of a known size", location.reg);
@@ -435,10 +455,14 @@ void VisitFrame(const Safepoint &safepoint, char *stackPointer, Visit visit) {
 // safepoint. `visit` takes each frame's safepoint and stack pointer.
 template <typename Visit>
 bool VisitFrames(void *frame, Visit visit) {
+  // The callee's frame pointer, and where its return address is: next to
+  // its saved frame pointer, or above the reserve for its tail calls'
+  // arguments (frame-info.h). merk_alloc_slow reserves none.
   auto *callee{static_cast<Word *>(frame)};
+  Word *returnAddress{callee + 1};
   bool first{true};
   for (;;) {
-    const Safepoint *safepoint{Find(callee[1])};
+    const Safepoint *safepoint{Find(*returnAddress)};
     if (!safepoint) {
       return !first;
     }
@@ -446,9 +470,12 @@ bool VisitFrames(void *frame, Visit visit) {
     // The frame's stack pointer, from its frame pointer, as a tail-calling
     // callee may have popped arguments.
     char *stackPointer{reinterpret_cast<char *>(framePointer) -
-        (safepoint->stackSize - sizeof(Word))};
+        (safepoint->stackSize - safepoint->reserve - sizeof(Word))};
     visit(*safepoint, stackPointer);
     callee = framePointer;
+    returnAddress =
+        reinterpret_cast<Word *>(reinterpret_cast<char *>(framePointer) +
+            sizeof(Word) + safepoint->reserve);
     first = false;
   }
 }
