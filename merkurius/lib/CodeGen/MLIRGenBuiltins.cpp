@@ -25,6 +25,29 @@ static std::string SoftwareError(llvm::StringRef pred, unsigned arity,
       .str();
 }
 
+// For an array made of elements of a type variable, the type_info of what
+// it stands for, from which the runtime finds the elements' width
+// (runtime/array.h), and likewise for one of another module's abstract type,
+// whose layout lowering does not see; none for elements of a type whose
+// width lowering knows.
+mlir::Value MerkGenerator::ElementTypeInfo(const semantics::Type *array,
+    mlir::Type represented, mlir::Location loc, semantics::TokenRange at) {
+  mlir::Type element{mlir::cast<merk::ArrayType>(represented).getElement()};
+  if (!array || array->arguments.size() != 1) {
+    return {};
+  }
+  if (auto term{mlir::dyn_cast<merk::TermType>(element)}) {
+    for (auto def : module_.getOps<merk::TypeDefOp>()) {
+      if (def.getName() == term.getName()) {
+        return {};
+      }
+    }
+  } else if (!mlir::isa<merk::WordType>(element)) {
+    return {};
+  }
+  return TypeInfoOfType(array->arguments.front(), loc, Where(at));
+}
+
 bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
   const semantics::Symbol &symbol{*callee.symbol};
@@ -54,16 +77,19 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
     }
     return GiveOutputs(out,
         {merk::ArrayNewOp::create(builder_, loc, array->type,
-            IntegerConstant(i64, 0, loc), mlir::Value{})});
+            IntegerConstant(i64, 0, loc), mlir::Value{},
+            ElementTypeInfo(
+                body.vars[out[0]].type, array->type, loc, goal.tokens))});
   }
   if (name == "init" && HasShape(in, out, 2, 1)) {
     merk::ThrowIfOp::create(builder_, loc,
         CompareInts(arith::CmpIPredicate::slt, in[0],
             IntegerConstant(i64, 0, loc), loc),
         SoftwareError("init", 3, "negative size"));
+    auto type{merk::ArrayType::get(&context_, in[1].getType())};
     return GiveOutputs(out,
-        {merk::ArrayNewOp::create(builder_, loc,
-            merk::ArrayType::get(&context_, in[1].getType()), in[0], in[1])});
+        {merk::ArrayNewOp::create(builder_, loc, type, in[0], in[1],
+            ElementTypeInfo(body.vars[out[0]].type, type, loc, goal.tokens))});
   }
   // array(L), from_list(L, A) and from_reverse_list(L).
   bool reversed{name == "from_reverse_list"};
@@ -74,8 +100,10 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
       return LibraryCallNotYet(goal, symbol);
     }
     return GiveOutputs(out,
-        {merk::ArrayFromListOp::create(
-            builder_, loc, array->type, in[0], reversed)});
+        {merk::ArrayFromListOp::create(builder_, loc, array->type, in[0],
+            reversed,
+            ElementTypeInfo(
+                body.vars[out[0]].type, array->type, loc, goal.tokens))});
   }
   if (name == "size" && HasShape(in, out, 1, 1)) {
     return GiveOutputs(out, {ArraySize(in[0], loc)});
@@ -219,9 +247,9 @@ bool MerkGenerator::CompiledArrayCall(
     return false;
   }
   llvm::StringRef name{symbol.name};
-  bool compiled{llvm::is_contained({"generate", "generate_foldl",
-                                       "generate_foldl2", "foldl", "foldl2",
-                                       "foldl3", "foldl4", "foldl5"},
+  bool compiled{llvm::is_contained(
+      {"generate", "generate_foldl", "generate_foldl2", "foldl", "foldl2",
+          "foldl3", "foldl4", "foldl5", "map", "to_list"},
       name)};
   if (compiled && !mmcUniqueness_) {
     return false;
