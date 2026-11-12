@@ -4072,6 +4072,190 @@ its reference is in C or Fortran.
    against the MPI+HIP program.
 7. Recovery from a killed place.
 
+**Step 3, sparse tiles on one place: design.** Agreed 2026-11-12; nothing
+is built yet. The user: "If features are missing we should implement
+them." So the program is written as it should be, and every feature it
+needs and the compiler lacks is a step to build first (Features to build,
+below), never a limit the design accepts.
+
+One GPU process steps the active tiles of a Life world on one GPU. Tiles
+start where life reaches them and end where it dies out. There are no
+messages and no directory process: those are steps 4 and 5. This step
+settles the layout and the step that the later ones send halos and move
+tiles for.
+
+*The world.* Bounded at first:
+- `LIFE_WORLD` cells square, 8192 by default, dead beyond its edge, as
+  `life.m`'s border is.
+- Tiles of `LIFE_TILE` cells square, 64 by default, a power of two; 32 and
+  128 to be measured.
+- It starts from a soup of side `LIFE_SOUP`, 256 by default, at its centre,
+  alive by `life.m`'s hash of the cell's index in the world.
+
+A soup burns for a few thousand steps. It sheds gliders that fly off across
+empty tiles to the world's edge, and it leaves ash. Tiles start in front of
+each glider and end behind it, and the soup's own tiles end as it settles.
+Unbounded worlds need a map from coordinates to tiles that grows, a hash
+table in arrays; later.
+
+*Cells* are `uint8`, one byte each, as C's are. Dense, C's 1-byte cells were
+29% faster than 8-byte ones at 4096² (design document, Measurements, Dense
+stencils), and a step moves nothing but cells.
+
+*Layout.* The process makes its arrays once:
+- *The pool:* two arrays of `Capacity * T * T` cells, the current step and
+  the next, swapped as `life-process.m`'s grids are. Tile `I`'s cells are
+  `I * T * T` onwards, by rows. Tile 0 is the *dead tile*: always all
+  zero, never stepped.
+- *The directory:* one int for each tile position of the world, `(W / T)^2`
+  of them, holding the pool index of the tile there, or 0 for the dead
+  tile. The world is bounded, so this is a dense array, not a hash table.
+- *The tiles' records:* an array of `Capacity` flat records, inline, one
+  for each pool tile, as C's array of structs:
+  ```
+  :- type tile
+      --->    tile(
+                  x :: int32, y :: int32,      % position, in tiles
+                  neighbours :: fixed(int32, 8), % pool indices, 0 if none
+                  live :: int32,               % from the last step
+                  edges :: uint8,              % live edges and corners
+                  quiet :: uint8               % steps without life near
+              ).
+  ```
+  The dead tile stands in for a missing neighbour, so the step never
+  branches on one. How a fixed size is written is open (Features to build,
+  flat records); `fixed(int32, 8)` is a placeholder.
+- *The active tiles:* their pool indices packed, with their number, and a
+  free list of pool indices.
+
+A pool made once is what C does too, and a long-lived process then never
+allocates as it goes.
+
+*The step: a team for each tile, its threads over the tile's cells.*
+```
+%$omp distribute
+( for(J, 0, Active - 1) do
+    Tile = Actives ^ elem(J),
+    %$omp parallel do reduction((+) : Live) reduction(\/ : Edges)
+    ( for(K, 0, T * T - 1), ... do
+        % The cell's eight neighbours, from this tile or, at its edges,
+        % from the neighbour tile that the tile's record names.
+        ...
+    ),
+    !Tiles ^ elem(Tile) := (Tiles ^ elem(Tile)
+        ^ live := Live) ^ edges := Edges
+)
+```
+- *Halos are read in place.* A cell at a tile's edge reads its neighbour
+  tile's cell through the neighbour indices, so there is no copy pass
+  between the tiles of one place.
+- *Ghost tiles.* When places exchange edges (step 5), a remote neighbour's
+  edge cells arrive into a ghost tile of the pool that the neighbour index
+  names, and the step does not change.
+- *Per-tile results.* The team's reductions give the tile's live cells and
+  its edges bitmask, which is all the bookkeeping needs, with no pass over
+  the cells of its own.
+
+*Bookkeeping, after each step, on the process's lane:*
+- An edge bit set towards a dead-tile neighbour makes that neighbour: taken
+  from the free list, zeroed, entered in the directory, and linked to its
+  eight neighbours both ways.
+- A tile with no live cells, whose neighbours have no live cells on the
+  edges facing it, for `Q` steps (4), ends: it is unlinked, goes back on
+  the free list, and leaves the actives.
+- The cost is linear in the active tiles, on one lane, against a step that
+  is linear in their cells: about a thousand tiles' bookkeeping against a
+  step of 4 million cells, to be measured. If it shows, the bookkeeping
+  runs every `k` steps with tiles made a ring ahead, or in parallel with a
+  scan.
+
+*Output:*
+- The population and checksum, the sum of the live cells' indices in the
+  world, from a loop with two reductions over the active tiles' cells.
+- The time of each step, and the number of active tiles after it, for a
+  chart of the active region growing and shrinking.
+
+*Checking.* The same world run dense by `life.m` and `life.c`, given the
+world's size and the soup (a `LIFE_SOUP` setting for both: the soup at the
+centre and the rest dead), must give the same population and checksum.
+Exact, as Life is.
+
+*The C reference,* `life-sparse.c`: the same tiles, records and step, in C
+with OpenMP, as a C programmer would write it. The host keeps the tile
+table and launches one kernel a step: `target teams distribute` over the
+active tiles, with `parallel for` over their cells. It does the
+bookkeeping after copying back the tiles' counts. It is the bar for the
+GPU process, which keeps the bookkeeping on the GPU and starts no kernel a
+step. Dense `life.c` over the whole world is the bar that sparseness must
+beat, as a decomposition fixed in advance computes every tile.
+
+*Features to build,* each before the program step that uses it:
+- *A loop under `distribute` with a loop under `parallel do` in it, in a
+  GPU process:* teams take the outer iterations and each team's threads
+  the inner one, with reductions in the inner loop. Today a GPU process has
+  only the combined `distribute parallel do`. The runtime has most of it:
+  the team barrier after each round, `ReduceAcrossTeam` for a team's
+  reduction, and the process's loop control. What is new:
+  - dealing outer iterations to teams;
+  - running the inner loop's rounds over a team's threads;
+  - leaving the inner reduction's result with the team for the rest of the
+    outer iteration's body.
+  Clang and Flang lower the same nest to `omp.distribute` around
+  `omp.parallel` and `omp.wsloop`.
+- *Narrow array elements.* Every array element is one 8-byte word today
+  (`Lowering.cpp`, `LowerArray`). An array of `int8` to `int32`, `uint8` to
+  `uint32`, `char` or an enumeration should hold its elements at their C
+  sizes, on the host and the GPU alike. Then mapping an array to a region,
+  sending it, or handing it to C reads the same bytes as C's array. This
+  is the narrow-fields layout of flat records (step 5, above), for arrays'
+  elements, and independent of the rest of flat records.
+- *Flat records' steps 1 to 3* (step 5, Flat records, above): records as
+  values in GPU code, arrays of flat records inline, and fields that are
+  arrays of a fixed size. They wait on two decisions, the user's: how the
+  host holds an array of flat records (recommended there: (a), inline), and
+  how a fixed size is written. The tile record is the example that was
+  wanted for choosing the spelling.
+- Multi-dimensional arrays and views (After step 5, above) would spare the
+  pool's index arithmetic. They change how the program is written, not its
+  speed, and the step does not wait for them.
+
+*Steps,* each a commit:
+- (s1) `distribute` with `parallel do` inside, in GPU processes, with
+  reductions in the inner loop. Tests on the GPU as for the combined
+  loops, sequential builds too.
+- (s2) Narrow array elements. Tests for each element type, on the host and
+  the GPU, sent and mapped. Then dense Life in a GPU process with `uint8`
+  cells, measured against `life.c`'s `uint8_t`.
+- (s3) Flat records' steps 1 to 3, after the user's two decisions.
+- (s4) The `LIFE_SOUP` setting in `life.m` and `life.c`, for the dense check
+  and the bar.
+- (s5) `life-sparse.m`: the world, tiles starting and ending, checked
+  against the dense programs.
+- (s6) `life-sparse.c`, the C reference. Measurements against it and
+  against dense C, with the active tiles over time.
+
+*Open.*
+- The tile size. 64² cells of one byte are 4 KiB. Smaller tiles follow the
+  gliders more closely; larger ones waste less on teams and bookkeeping.
+- Teams with no tile in a step: with fewer active tiles than teams, the
+  rest wait. Fewer teams for a small loop is open above (Which teams a loop
+  uses).
+- The cost of a loop with reductions grows with the number of teams (GPU
+  experiments, above), and a short step pays it every time.
+
+*Rejected.*
+- *A flat loop over all active cells:* it gives no per-tile live count or
+  edges without atomics or a pass on one lane, and no team shares a tile's
+  cache.
+- *Halo copies into tiles of side `T + 2`:* a copy pass each step that the
+  neighbour indices make unnecessary on one place. Ghost tiles keep the
+  step the same when edges come from other places.
+- *A process for each tile:* a GPU process is one wave, 64 lanes, against a
+  team of 256 threads for a tile of 4096 cells. A tile's work is a team's.
+- *Working around missing features:* 8-byte cells, the tile table as
+  parallel int arrays. First drafted that way on 2026-11-12, and rewritten
+  at the user's direction with the features as steps to build.
+
 **What it needs.** It uses GPU processes, `spawn_<kind>_at`, flat messages and
 arrays, which exist. It also needs the place table and routing by place (GPU
 processes without `omp target`, steps 5b to 5d), flat records and packed
