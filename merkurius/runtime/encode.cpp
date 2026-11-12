@@ -41,6 +41,7 @@
 
 #include "encode.h"
 #include "array.h"
+#include "record.h"
 #include "sha256.h"
 #include "walk.h"
 #include <cstring>
@@ -166,12 +167,13 @@ void Writer::EncodeTyped(Word value, const Type &type) {
     return Text(text, std::strlen(text));
   }
   case Array: {
-    // A narrow array's elements are their bytes, as in memory (array.h).
+    // A narrow array's elements, and a records array's, are their bytes,
+    // as in memory (array.h, record.h).
     const Word *array{reinterpret_cast<const Word *>(value)};
     Word size{ArraySize(array)};
     Item(size);
     if (!IsWordArray(array)) {
-      Bytes(array + 1, size * ElementBytes(ArrayWidthCode(array)));
+      Bytes(ArrayElements(array), size * ArrayElementBytes(array));
       return;
     }
     if (size != 0 && SameInMemory(Resolve(kElement, &type.environment).ctor)) {
@@ -250,6 +252,7 @@ public:
   }
 
   bool DecodeTyped(const Type &type, Word &value);
+  bool DecodeRecords(const Type &element, Word size, Word &value);
 
   std::size_t Left() const { return left_; }
 
@@ -376,6 +379,41 @@ bool Reader::DecodeNarrow(
   return true;
 }
 
+// An array of records, `size` of them, from their bytes and padding; each
+// must be a value of its type, its padding zeros too, so that equal records
+// have equal bytes (record.h, RecordValueError).
+bool Reader::DecodeRecords(const Type &element, Word size, Word &value) {
+  Word bytes{RecordLayout(element).bytes};
+  if (size > left_ / bytes) {
+    return Fail("an array is longer than the bytes left");
+  }
+  std::size_t used{static_cast<std::size_t>(size * bytes)};
+  std::size_t padded{(used + 7) & ~std::size_t{7}};
+  if (padded > left_) {
+    return Fail("an array is longer than the bytes left");
+  }
+  for (std::size_t i{used}; i < padded; ++i) {
+    if (next_[i] != 0) {
+      return Fail("an array's padding is not zeros");
+    }
+  }
+  auto *array{
+      static_cast<Word *>(fragment_.Allocate(sizeof(Word) * 2 + padded))};
+  array[0] = ArrayHeader(size, kArrayRecords);
+  array[1] = bytes;
+  std::memcpy(array + 2, next_, padded);
+  next_ += padded;
+  left_ -= padded;
+  for (Word i{0}; i < size; ++i) {
+    if (const char *error{
+            RecordValueError(element, ArrayElements(array) + bytes * i)}) {
+      return Fail(error);
+    }
+  }
+  value = reinterpret_cast<Word>(array);
+  return true;
+}
+
 bool Reader::DecodeTyped(const Type &type, Word &value) {
   switch (type.ctor->kind) {
   case Int:
@@ -413,8 +451,12 @@ bool Reader::DecodeTyped(const Type &type, Word &value) {
     }
     // As wide as code generation makes an array of the element type. Each
     // element takes an item at least, or a narrow one its bytes.
-    const TypeCtor *element{Resolve(kElement, &type.environment).ctor};
-    Word code{ArrayWidthOfKind(element->kind)};
+    Type elementType{Resolve(kElement, &type.environment)};
+    const TypeCtor *element{elementType.ctor};
+    Word code{ArrayCodeOf(elementType)};
+    if (code == kArrayRecords) {
+      return DecodeRecords(elementType, size, value);
+    }
     if (size > left_ / ElementBytes(code)) {
       return Fail("an array is longer than the bytes left");
     }

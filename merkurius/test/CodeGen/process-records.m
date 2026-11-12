@@ -5,7 +5,7 @@
 % of its loop. The program runs its kinds at the host here, and at the GPU
 % in process-records-gpu.test. particle's two fields of one record type
 % make it a record too, a struct of two structs.
-% Temporary (docs/INPROGRESS.md, Flat records, step 2): a record is boxed
+% Temporary (docs/INPROGRESS.md, Flat records, step 2b): a record is boxed
 % into a cell where it is sent, and the copies walk its type_info, until
 % messages travel as their bytes.
 % The -O0 build has no --offload-arch: AMDGPU's code generation at -O0

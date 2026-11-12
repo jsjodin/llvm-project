@@ -1,0 +1,14 @@
+# Random modules as layouts-1.test's, with --arrays: a quarter of the types
+# of one constructor of two to four fields, flat records when their fields
+# are flat, and each type's values in arrays, which hold records inline,
+# set and read in monomorphic and polymorphic code, copied, resized,
+# filled, written, unified and compared (see
+# utils/codegen-oracle/generate-layout-programs.py): merkc's programs, at -O0
+# and -O2, and with heap chunks of 64 bytes, print what mmc's print. The seed
+# is fixed, so the modules are too; to search further, run
+# generate-layout-programs.py --arrays with other seeds.
+#
+# REQUIRES: mmc
+# RUN: rm -rf %t && mkdir %t
+# RUN: %python %S/../../../utils/codegen-oracle/generate-layout-programs.py --seed 1 --count 20 --arrays %t
+# RUN: %compare-runs --levels 0 2 --chunk-bytes 64 --jobs 4 %t/*.m

@@ -40,6 +40,11 @@ bool Allocates(mlir::Operation *op) {
   if (auto construct{mlir::dyn_cast<merk::ConstructOp>(op)}) {
     return mlir::isa<merk::TermType>(construct.getType());
   }
+  // A get in polymorphic code, which boxes a record an array holds inline
+  // (runtime/record.h).
+  if (auto get{mlir::dyn_cast<merk::ArrayGetOp>(op)}) {
+    return static_cast<bool>(get.getElementTypeInfo());
+  }
   return mlir::isa<merk::ConstructOp, merk::ClosureOp, merk::TypeInfoOp,
       merk::TypeclassInfoOp, merk::ArrayNewOp, merk::ArrayCopyOp,
       merk::ArrayFromListOp, merk::ArrayResizeOp>(op);
@@ -68,6 +73,13 @@ public:
           note.getInfos().begin(), note.getInfos().end());
       note.erase();
     }
+    // A polymorphic get's element, whose type_info the get has.
+    proc.walk([&](merk::ArrayGetOp get) {
+      if (mlir::Value info{get.getElementTypeInfo()}) {
+        infos_.try_emplace(
+            get.getElement(), llvm::SmallVector<mlir::Value>{info});
+      }
+    });
   }
 
   void Scan(mlir::Block &block, Live &live);

@@ -31,14 +31,15 @@ static std::string SoftwareError(llvm::StringRef pred, unsigned arity,
 // whose layout lowering does not see; none for elements of a type whose
 // width lowering knows.
 mlir::Value MerkGenerator::ElementTypeInfo(const semantics::Type *array,
-    mlir::Type represented, mlir::Location loc, semantics::TokenRange at) {
+    mlir::Type represented, mlir::Location loc, semantics::TokenRange at,
+    bool forTerms) {
   mlir::Type element{mlir::cast<merk::ArrayType>(represented).getElement()};
   if (!array || array->arguments.size() != 1) {
     return {};
   }
   if (auto term{mlir::dyn_cast<merk::TermType>(element)}) {
     for (auto def : module_.getOps<merk::TypeDefOp>()) {
-      if (def.getName() == term.getName()) {
+      if (def.getName() == term.getName() && !forTerms) {
         return {};
       }
     }
@@ -46,6 +47,19 @@ mlir::Value MerkGenerator::ElementTypeInfo(const semantics::Type *array,
     return {};
   }
   return TypeInfoOfType(array->arguments.front(), loc, Where(at));
+}
+
+mlir::Value MerkGenerator::ArgumentElementTypeInfo(
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body,
+    mlir::Location loc, semantics::TokenRange at) {
+  for (BodyVar argument : arguments) {
+    mlir::Value value{ValueOf(argument)};
+    if (value && mlir::isa<merk::ArrayType>(value.getType())) {
+      return ElementTypeInfo(
+          body.vars[argument].type, value.getType(), loc, at);
+    }
+  }
+  return {};
 }
 
 bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
@@ -102,8 +116,8 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
     return GiveOutputs(out,
         {merk::ArrayFromListOp::create(builder_, loc, array->type, in[0],
             reversed,
-            ElementTypeInfo(
-                body.vars[out[0]].type, array->type, loc, goal.tokens))});
+            ElementTypeInfo(body.vars[out[0]].type, array->type, loc,
+                goal.tokens, /*forTerms=*/true))});
   }
   if (name == "size" && HasShape(in, out, 1, 1)) {
     return GiveOutputs(out, {ArraySize(in[0], loc)});
@@ -141,11 +155,15 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
     if (!name.starts_with("unsafe")) {
       merk::CheckIndexOp::create(builder_, loc, array, index, "array.lookup");
     }
-    return GiveOutputs(out, {ArrayElement(array, index, loc)});
+    return GiveOutputs(out,
+        {ArrayElement(array, index,
+            ArgumentElementTypeInfo(arguments, body, loc, goal.tokens), loc)});
   }
   if (name == "semidet_lookup" && HasShape(in, out, 2, 1)) {
     merk::GuardOp::create(builder_, loc, InArrayBounds(in[0], in[1], loc));
-    return GiveOutputs(out, {ArrayElement(in[0], in[1], loc)});
+    return GiveOutputs(out,
+        {ArrayElement(in[0], in[1],
+            ArgumentElementTypeInfo(arguments, body, loc, goal.tokens), loc)});
   }
   // set(I, X, !A), set(A, I, X) and 'elem :='(I, A, X); slow_set's copy.
   bool slow{name == "slow_set" || name == "semidet_slow_set"};
@@ -169,7 +187,9 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
     if (slow) {
       array = merk::ArrayCopyOp::create(builder_, loc, array.getType(), array);
     }
-    return GiveOutputs(out, {ArrayWithElement(array, index, element, loc)});
+    return GiveOutputs(out,
+        {ArrayWithElement(array, index, element,
+            ArgumentElementTypeInfo(arguments, body, loc, goal.tokens), loc)});
   }
   if ((name == "swap" || name == "unsafe_swap") && HasShape(in, out, 3, 1)) {
     mlir::Value i{in[0]}, j{in[1]}, array{in[2]};
@@ -179,16 +199,21 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
       merk::CheckIndexOp::create(
           builder_, loc, array, j, "second argument of array.swap");
     }
-    mlir::Value x{ArrayElement(array, i, loc)}, y{ArrayElement(array, j, loc)};
-    return GiveOutputs(
-        out, {ArrayWithElement(ArrayWithElement(array, i, y, loc), j, x, loc)});
+    mlir::Value info{
+        ArgumentElementTypeInfo(arguments, body, loc, goal.tokens)};
+    mlir::Value x{ArrayElement(array, i, info, loc)},
+        y{ArrayElement(array, j, info, loc)};
+    return GiveOutputs(out,
+        {ArrayWithElement(
+            ArrayWithElement(array, i, y, info, loc), j, x, info, loc)});
   }
   if (name == "fill" && HasShape(in, out, 2, 1)) {
     mlir::Value hi{arith::SubIOp::create(
         builder_, loc, ArraySize(in[1], loc), IntegerConstant(i64, 1, loc))};
     return GiveOutputs(out,
         {merk::ArrayFillOp::create(builder_, loc, in[1].getType(), in[1],
-            IntegerConstant(i64, 0, loc), hi, in[0])});
+            IntegerConstant(i64, 0, loc), hi, in[0],
+            ArgumentElementTypeInfo(arguments, body, loc, goal.tokens))});
   }
   if (name == "fill_range" && HasShape(in, out, 4, 1)) {
     mlir::Value element{in[0]}, lo{in[1]}, hi{in[2]}, array{in[3]};
@@ -200,8 +225,9 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
     merk::CheckIndexOp::create(
         builder_, loc, array, hi, "third argument of fill_range");
     return GiveOutputs(out,
-        {merk::ArrayFillOp::create(
-            builder_, loc, array.getType(), array, lo, hi, element)});
+        {merk::ArrayFillOp::create(builder_, loc, array.getType(), array, lo,
+            hi, element,
+            ArgumentElementTypeInfo(arguments, body, loc, goal.tokens))});
   }
   if (name == "copy" && HasShape(in, out, 1, 1)) {
     return GiveOutputs(out,
@@ -216,8 +242,9 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
             arith::CmpIPredicate::slt, n, IntegerConstant(i64, 0, loc), loc),
         SoftwareError("resize", 4, "cannot resize to a negative size"));
     return GiveOutputs(out,
-        {merk::ArrayResizeOp::create(
-            builder_, loc, array.getType(), array, n, element)});
+        {merk::ArrayResizeOp::create(builder_, loc, array.getType(), array, n,
+            element,
+            ArgumentElementTypeInfo(arguments, body, loc, goal.tokens))});
   }
   // shrink(N, !A) and shrink(A, N).
   if (name == "shrink" && HasShape(in, out, 2, 1)) {
@@ -230,8 +257,8 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
             arith::CmpIPredicate::slt, n, IntegerConstant(i64, 0, loc), loc),
         SoftwareError("shrink", 3, "cannot shrink to a negative size"));
     return GiveOutputs(out,
-        {merk::ArrayResizeOp::create(
-            builder_, loc, array.getType(), array, n, mlir::Value{})});
+        {merk::ArrayResizeOp::create(builder_, loc, array.getType(), array, n,
+            mlir::Value{}, mlir::Value{})});
   }
   return CompiledArrayCall(goal, symbol);
 }

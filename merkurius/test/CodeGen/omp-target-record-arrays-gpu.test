@@ -1,0 +1,17 @@
+The program of omp-target-record-arrays.m, compiled by the driver for the
+machine's GPU and run there: each array of records is copied in, and back if
+the region updates it, as its header and its records' bytes, 16 and 24 for
+each of 7 cells, and the array the device makes is copied to the host by its
+header.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-record-arrays.m -o %t.O2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 timeout -k 1 60 %t.O2 2> %t.O2.info \
+RUN:   | FileCheck %S/omp-target-record-arrays.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+RUN: FileCheck %s < %t.O2.info
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-record-arrays.m:{{[0-9]+}}:5 with {{[0-9]+}} arguments:
+CHECK: info: tofrom(A0)[184]
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-record-arrays.m:{{[0-9]+}}:5 with {{[0-9]+}} arguments:
+CHECK: info: to(A1)[184]
+CHECK: info: Entering OpenMP kernel at {{.*}}omp-target-record-arrays.m:{{[0-9]+}}:5 with {{[0-9]+}} arguments:
+CHECK: info: tofrom(X0)[40]

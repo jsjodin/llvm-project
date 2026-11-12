@@ -14,6 +14,10 @@
 %   value that can be written, without a crash; and lengths, numbers and
 %   ranges out of bounds, a NUL in a string, padding that is not zeros, and
 %   nesting past the limit, each rejected with its reason.
+% - Arrays of flat records: golden bytes, as C lays the records out, round
+%   trips, and records whose padding, enumeration or character is not one
+%   a record of the type has, rejected with the reason, as is a length
+%   past the bytes.
 % - Fingerprints: equal for the same type in monomorphic and polymorphic
 %   code, different for different types, and golden for a few.
 %
@@ -62,6 +66,14 @@
 % OUTPUT-NEXT:nested 9000 deep: decoded, equal
 % OUTPUT-NEXT:nested 10001 deep: the value nests too deeply
 % OUTPUT-NEXT:a list of 50000 decoded from bytes: yes
+% OUTPUT-NEXT:array([rec(-1i8, blue, 'a', point(3i16, -2i16), 1.5)]): 0100000000000000ff00000002000000610000000300feff000000000000f83f
+% OUTPUT-NEXT:array([{1i8, 2.5}]): 010000000000000001000000000000000000000000000440
+% OUTPUT-NEXT:arrays of records: 61 checked, 0 differ
+% OUTPUT-NEXT:record padding: a record's padding is not zeros
+% OUTPUT-NEXT:record tail padding: a record's padding is not zeros
+% OUTPUT-NEXT:record enum number: a functor's number is not one of its type's
+% OUTPUT-NEXT:record char range: a character is not a code point
+% OUTPUT-NEXT:record length: an array is longer than the bytes left
 % OUTPUT-NEXT:fingerprint of t in polymorphic code is the same: yes
 % OUTPUT-NEXT:fingerprints of list(int) and list(string) differ: yes
 % OUTPUT-NEXT:fingerprints of list(int) and list(int8) differ: yes
@@ -543,10 +555,75 @@ check_fingerprints(!IO) :-
         !IO).
 
 %---------------------------------------------------------------------------%
+% Arrays of flat records, whose records travel as their bytes, as C lays
+% them out (runtime/record.h): a rec is an int8 at 0, a colour at 4, a char
+% at 8, a point of two int16s at 12 and a float at 16, 24 bytes.
+
+:- type point ---> point(int16, int16).
+:- type rec
+    --->    rec(
+                small :: int8,
+                hue :: colour,
+                letter :: char,
+                at :: point,
+                x :: float
+            ).
+
+:- func rec(int) = rec.
+rec(I) = rec(int8.cast_from_int(I * 37 - 128), det_index0([red, green, blue],
+    I mod 3), det_index0(['a', 'λ', '😀', 'Z'], I mod 4),
+    point(int16.cast_from_int(I * 1000), int16.cast_from_int(-I)),
+    float(I) / 8.0).
+
+:- func recs(int) = array(rec).
+recs(N) = array.generate(N, rec).
+
+    % The arrays that do not come back equal, by unification and compare.
+:- pred count_bad_recs(int::in, int::in, int::in, int::out) is det.
+count_bad_recs(N, Max, !Bad) :-
+    ( if N =< Max then
+        A = recs(N),
+        decode_as(A, encode(A), B, Error),
+        ( if Error = "", A = B, compare((=), A, B) then
+            true
+        else
+            !:Bad = !.Bad + 1
+        ),
+        count_bad_recs(N + 1, Max, !Bad)
+    else
+        true
+    ).
+
+:- pred check_records(io::di, io::uo) is det.
+check_records(!IO) :-
+    golden("array([rec(-1i8, blue, 'a', point(3i16, -2i16), 1.5)])",
+        array([rec(-1i8, blue, 'a', point(3i16, -2i16), 1.5)]), !IO),
+    golden("array([{1i8, 2.5}])", array([{1i8, 2.5}]), !IO),
+    count_bad_recs(0, 60, 0, Bad),
+    Arrays = list.map(recs, 0 .. 60),
+    count_bad(Arrays, 0, PolyBad),
+    io.write_string("arrays of records: 61 checked, " ++
+        int_to_string(Bad + PolyBad) ++ " differ\n", !IO),
+    One = item(1),
+    Fields = "02000000" ++ "61000000" ++ "0300feff" ++ "000000000000f83f",
+    rejected("record padding", recs(1), One ++ "ff010000" ++ Fields, !IO),
+    rejected("record tail padding", array([{1i8, 2.5}]),
+        One ++ "0100000000000001" ++ "0000000000000440", !IO),
+    rejected("record enum number", recs(1),
+        One ++ "ff000000" ++ "03000000" ++ "61000000" ++ "0300feff" ++
+        "000000000000f83f", !IO),
+    rejected("record char range", recs(1),
+        One ++ "ff000000" ++ "02000000" ++ "00001100" ++ "0300feff" ++
+        "000000000000f83f", !IO),
+    rejected("record length", recs(1),
+        item(2) ++ "ff000000" ++ Fields, !IO).
+
+%---------------------------------------------------------------------------%
 
 main(!IO) :-
     check_golden(!IO),
     gen_list(3000, 5, Terms, 12345, _),
     check_round_trips(Terms, !IO),
     check_hostile(Terms, !IO),
+    check_records(!IO),
     check_fingerprints(!IO).

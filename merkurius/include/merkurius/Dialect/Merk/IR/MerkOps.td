@@ -717,9 +717,20 @@ def Merk_ArrayWordsOp : Merk_Op<"array_words"> {
 
 def Merk_ArrayGetOp : Merk_Op<"array_get"> {
   let summary = "an array's element";
-  let arguments = (ins Merk_ArrayType:$array, I64:$index);
+  let description = [{
+    For elements of a type variable, or of a type whose layout the module
+    does not see, `element_type_info` is the type_info of their type, by
+    which the runtime boxes a flat record that the array holds inline
+    (runtime/record.h); without one, they are not records. The same holds
+    for `merk.array_set`, `merk.array_fill` and `merk.array_resize`.
+  }];
+  let arguments = (ins Merk_ArrayType:$array, I64:$index,
+      Optional<Merk_TypeInfoType>:$element_type_info);
   let results = (outs AnyType:$element);
-  let assemblyFormat = "$array `[` $index `]` attr-dict `:` type($array) `->` type($element)";
+  let assemblyFormat = [{
+    $array `[` $index `]` (`of` $element_type_info^)? attr-dict `:`
+    type($array) `->` type($element)
+  }];
   let hasVerifier = 1;
 }
 
@@ -727,10 +738,12 @@ def Merk_ArraySetOp : Merk_Op<"array_set", [
     AllTypesMatch<["array", "result"]>
   ]> {
   let summary = "set an array's element, in place";
-  let arguments = (ins Merk_ArrayType:$array, I64:$index, AnyType:$element);
+  let arguments = (ins Merk_ArrayType:$array, I64:$index, AnyType:$element,
+      Optional<Merk_TypeInfoType>:$element_type_info);
   let results = (outs Merk_ArrayType:$result);
   let assemblyFormat = [{
-    $array `[` $index `]` `,` $element attr-dict `:` type($array) `,` type($element)
+    $array `[` $index `]` `,` $element (`of` $element_type_info^)? attr-dict
+    `:` type($array) `,` type($element)
   }];
   let hasVerifier = 1;
 }
@@ -743,10 +756,12 @@ def Merk_ArrayFillOp : Merk_Op<"array_fill", [
     Sets the elements from `lo` to `hi`, inclusive, to `element`; none if
     `lo` is greater than `hi`.
   }];
-  let arguments = (ins Merk_ArrayType:$array, I64:$lo, I64:$hi, AnyType:$element);
+  let arguments = (ins Merk_ArrayType:$array, I64:$lo, I64:$hi, AnyType:$element,
+      Optional<Merk_TypeInfoType>:$element_type_info);
   let results = (outs Merk_ArrayType:$result);
   let assemblyFormat = [{
-    $array `[` $lo `,` $hi `]` `,` $element attr-dict `:` type($array) `,` type($element)
+    $array `[` $lo `,` $hi `]` `,` $element (`of` $element_type_info^)?
+    attr-dict `:` type($array) `,` type($element)
   }];
   let hasVerifier = 1;
 }
@@ -778,17 +793,19 @@ def Merk_ArrayFromListOp : Merk_Op<"array_from_list"> {
 }
 
 def Merk_ArrayResizeOp : Merk_Op<"array_resize", [
-    AllTypesMatch<["array", "result"]>
+    AllTypesMatch<["array", "result"]>, AttrSizedOperandSegments
   ]> {
   let summary = "a new array of a size, with an array's elements";
   let description = [{
     A new array of `size` elements: as many of the array's as fit, and then
     `init`; without `init`, `size` is no greater than the array's.
   }];
-  let arguments = (ins Merk_ArrayType:$array, I64:$size, Optional<AnyType>:$init);
+  let arguments = (ins Merk_ArrayType:$array, I64:$size, Optional<AnyType>:$init,
+      Optional<Merk_TypeInfoType>:$element_type_info);
   let results = (outs Merk_ArrayType:$result);
   let assemblyFormat = [{
-    $array `,` $size (`,` $init^ `:` type($init))? attr-dict `:` type($array)
+    $array `,` $size (`,` $init^ `:` type($init))? (`of` $element_type_info^)?
+    attr-dict `:` type($array)
   }];
   let hasVerifier = 1;
 }
