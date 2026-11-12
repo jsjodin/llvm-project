@@ -3657,6 +3657,91 @@ process's teams; the numbers are in the design document, Measurements,
   memory, and each loop generated twice, for the kind's procedure and its
   `$words` variant.
 
+**GPU experiments, 2026-11-11 night: what limits a GPU process's loops.**
+Kept for the multi-GPU machine (8× gfx90a), where the numbers will differ:
+wave64, a unified register file of 512 VGPRs and AGPRs a lane, 110 compute
+units a die, HBM. The methods below are what to repeat there. The numbers
+are in the design document, Measurements, Memory bandwidth.
+
+*Findings on the gfx1030 (RX 6950 XT, 80 compute units, wave32).*
+- `merk_place`, the processes' one kernel, had 205 VGPRs: every kind's code,
+  the runtime and the loops' bodies were inlined into it, and a kernel's
+  count is the most of anything it runs. That left 4 waves a SIMD (1024
+  VGPRs a SIMD for wave32), where the target regions' kernels (8 VGPRs, Dot
+  43) run 16, and Bandwidth's kernels were 6 to 42% slower than target
+  regions.
+- Capping it by hand (`"amdgpu-num-vgpr"` on `merk_place`): 128 gave 8
+  waves, with 195 spills in the process's code, and recovered most of it;
+  96 and 91 measured the same as 128. 8 waves a SIMD are enough for a
+  stream here.
+- Splitting instead of capping, by `noinline`: with the kinds' code
+  (`merk_process_dispatch`) and the loops (`merk_process_loop`) out of line,
+  `merk_place` took 128 with no spills; with `Work`, `RunProcess` and
+  `CombineTeamPartials` out too, 95 with no spills. Each piece alone: the
+  kinds' code 91 (`CopyTyped`'s, the floor), `Work` 85, the team combine 37,
+  a loop like Copy's 12.
+- A call for each iteration would cost a stream too much, so each loop's
+  rounds became a generated procedure (`<body>$rounds`, tail recursion that
+  becomes a loop), one call a thread a loop, with the body inlined and the
+  barrier after each round (`merk_device_sync_threads`); in the ISA each loop
+  is then a tight loop with no calls and no scratch. Every function of a
+  GPU-process compile is `convergent`, as clang makes a GPU language's, so
+  that the barrier is not duplicated into branches. Result: faster than
+  target regions on every kernel, Copy at 95% of the rated bandwidth.
+- The barrier after each round (d2) is worth 8 to 17% even for a stream.
+- A loop costs about 2 µs, a target region 15 to 17 µs.
+- Open: Dot at 1024 elements takes 25 µs (6.5 before the split). Skipping
+  the team combine gives 4.4 µs, so the combine is the cost, and it grows
+  with the number of teams. Moving the cross-team step into the last team
+  to finish, its threads loading the teams' partials in parallel
+  (`stored`, `lastToStore`), did not change it, so the sequential combine on
+  the process's lane was not the cause. The combine does about 214 scratch
+  accesses: the partials are in arrays whose addresses reach the generated
+  `merk_process_loop_reduce`/`_start` as integers (inttoptr), so they stay
+  in memory. Passing them as pointers and always handling all 8 words cut
+  that to 58, but gave a wrong Dot sum (-0.81 relative) and one GPU page
+  fault: not yet understood; the attempt is kept as a patch in the job's
+  tmp directory (`attempt-pointer-partials.*.diff`). Candidates: the lowering
+  of `!llvm.ptr` parameters of a `merk.proc`, the copy into the local array
+  of words past the loop's reductions, the last team reading teams' words
+  that were never stored.
+- `with-gpus.py` twice printed its GPU listing instead of running the
+  program; a retry worked. Cause not looked at.
+
+*Methods.*
+- The process image and its metadata: `merkc ... -save-temps=obj` keeps
+  `<name>-<arch>-processes.elf`; `llvm-readelf --notes` gives
+  `.vgpr_count`, `.vgpr_spill_count`, `.private_segment_fixed_size`,
+  `.uses_dynamic_stack`, `.group_segment_fixed_size`.
+- Each function's registers: relink with `clang --target=amdgcn-amd-amdhsa
+  -mcpu=<arch> -flto -O2 <processes.o> lib/merk-process-start-amdgcn.o
+  lib/libmerkdevice-amdgcn.a -lc -lm -Wl,--save-temps`, then
+  `opt -O2 -force-attribute=<f>:noinline ...` on `.0.2.internalize.bc`
+  (or the link with `-Wl,-mllvm,-force-attribute=<f>:noinline`), `llc
+  -mtriple=amdgpu10.30-amd-amdhsa -mcpu=<arch>`, and read the `.set
+  <f>.num_vgpr` lines. `-pass-remarks-analysis=kernel-resource-usage`
+  reports kernels only. `-inline-threshold` below 0 asserts. The device
+  library's own functions are inlined when it is built; to split them,
+  `[[gnu::noinline]]` in `device.cpp`.
+- A register cap: `llvm-dis lib/merk-process-start-amdgcn.o`, add
+  `"amdgpu-num-vgpr"="<n>"` to `merk_place`'s attribute group, `llvm-as`,
+  and replay `merkc -###`'s steps with that object in the device link
+  (there is no `-amdgpu-num-vgpr` option).
+- A runtime variant: edit `runtime/device/device.cpp`, `ninja merkdevice
+  merkurius-device-library`, build the program, restore the file and
+  rebuild. A variant that breaks the results is timed with a copy of the
+  benchmark whose check does not stop it (`if Valid = Valid`).
+- A loop's cost: `BANDWIDTH_ARRAY_SIZE=1024 BANDWIDTH_NUM_TIMES=1000`, µs
+  from the bytes over the MB/s; teams halved with `MERK_GPU_PROCESS_UNITS`.
+- The ISA: `llvm-objdump -d` of the image, counting `buffer_load`/
+  `buffer_store` (scratch on gfx10), `s_swappc_b64` (calls), `s_barrier`.
+
+*Committed 2026-11-12:* the rounds in generated procedures, `convergent`
+and `noinline` marking (`Lowering.cpp`, `MarkKernelFunctions`),
+`Work`/`RunProcess`/`CombineTeamPartials` out of line, and the last team's
+parallel combine; all GPU tests and the non-GPU suite pass. Next: Dot's
+combine (above), then the design document's description of the loops.
+
 **Open after (p1).**
 - *Which units the processes' kernel takes,* as it holds every team slot
   of them. **Decided 2026-11-11:** a percentage of the available compute

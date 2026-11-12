@@ -83,7 +83,7 @@ main(!IO) :-
 % The start takes the address of the process's words: the kind's integer and
 % float, and each mailbox's handle as five words, which it puts in a cell on
 % its stack.
-% KERNEL0:define internal void @merk_process_summer(i64 %0) {
+% KERNEL0:define internal void @merk_process_summer(i64 %0) #{{[0-9]+}} {
 % KERNEL0-NEXT:  %2 = inttoptr i64 %0 to ptr
 % KERNEL0-NEXT:  %3 = getelementptr i64, ptr %2, i32 0
 % KERNEL0-NEXT:  %4 = load i64, ptr %3, align 8
@@ -98,7 +98,8 @@ main(!IO) :-
 % KERNEL0-NEXT:  ret void
 % KERNEL0-NEXT:}
 % KERNEL0-EMPTY:
-% KERNEL0-NEXT:define hidden void @merk_process_dispatch(i64 %0, i64 %1) {
+% KERNEL0-NEXT:; Function Attrs: convergent noinline
+% KERNEL0-NEXT:define hidden void @merk_process_dispatch(i64 %0, i64 %1) #{{[0-9]+}} {
 % KERNEL0-NEXT:  switch i64 %0, label %4 [
 % KERNEL0-NEXT:    i64 0, label %3
 % KERNEL0-NEXT:  ]
@@ -106,7 +107,7 @@ main(!IO) :-
 % KERNEL0-NEXT:3:                                                ; preds = %2
 % KERNEL0-NEXT:  call void @merk_process_summer(i64 %1)
 % KERNEL0-NEXT:  ret void
-% KERNEL2:define hidden void @merk_process_dispatch(i64 %0, i64 %1) local_unnamed_addr {
+% KERNEL2:define hidden void @merk_process_dispatch(i64 %0, i64 %1) local_unnamed_addr #{{[0-9]+}} {
 
 % The host embeds the image, and registers it, after the message types.
 % HOST:@process_kernels.merk_process_image.module = internal constant [16 x i8] c"process_kernels\00", align 1
