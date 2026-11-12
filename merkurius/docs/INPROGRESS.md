@@ -3764,9 +3764,14 @@ cells a team steps.
   sizes; `process-narrow-arrays.m` and its GPU run, arrays of 0 to 70
   elements both ways; `Dialect/Merk/arrays.mlir`; the encodings in
   `encode-checks.m` and `EncodeTest.cpp`.
-- *Found meanwhile:* mmc reorders a conjunction so that a call that would
-  clobber a unique array comes after the array's other uses; merkc does not,
-  and reports a misleading "has inst free" error. To be fixed next.
+- *Not a bug, though it looked like one:* `io.write_line(array.sort(A),
+  !IO), io.write_line(first(A), !IO)`, which mmc accepts, is rejected. merkc
+  reorders as mmc does, `first(A)` before the `sort` that clobbers `A`, but
+  `first` takes `A` `in`, which shares it under the sound array stub, so the
+  `sort` cannot clobber it (design document, "Arrays are unique by default";
+  declaring `first` `array_ui` is the fix). With `-fmmc-uniqueness` it is
+  accepted. The error is at the `write_line` that waits for the `sort`'s
+  result, the first goal left waiting.
 
 **(d4) measured 2026-11-11: Bandwidth's kernels in a GPU process.**
 `benchmarks/bandwidth/bandwidth-process.m` runs the five kernels across a
