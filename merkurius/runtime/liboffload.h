@@ -96,6 +96,7 @@ ol_result_t olCreateContext(std::size_t count, ol_device_handle_t *devices,
 ol_result_t olCreateProgram(ol_context_handle_t context,
     ol_device_handle_t device, const void *image, std::size_t size,
     ol_program_handle_t *program) __attribute__((weak));
+ol_result_t olDestroyProgram(ol_program_handle_t program) __attribute__((weak));
 ol_result_t olGetSymbol(ol_program_handle_t program, const char *name,
     std::uint32_t kind, ol_symbol_handle_t *symbol) __attribute__((weak));
 ol_result_t olGetSymbolInfo(ol_symbol_handle_t symbol, std::uint32_t property,

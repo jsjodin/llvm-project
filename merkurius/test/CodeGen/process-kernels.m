@@ -115,7 +115,7 @@ main(!IO) :-
 % HOST-NEXT:@process_kernels.merk_process_image.gfx1030 = internal constant [5 x i8] c"IMAGE", align 16
 % HOST-NEXT:@llvm.global_ctors = appending global [2 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @process_kernels.merk_register_message_types.c, ptr null }, { i32, ptr, ptr } { i32 65535, ptr @process_kernels.merk_register_process_images.c, ptr null }]
 % HOST:  {{(tail )?}}call void @merk_register_message_type(i64 -7556727498917921977, ptr {{(nonnull )?}}@"merk.type_ctor.int/0")
-% HOST:  {{(tail )?}}call void @merk_register_process_image(ptr {{(nonnull )?}}@process_kernels.merk_process_image.module, ptr {{(nonnull )?}}@process_kernels.merk_process_image.gfx1030.gpu, ptr {{(nonnull )?}}@process_kernels.merk_process_image.gfx1030, i64 5, ptr {{(nonnull )?}}@process_kernels.merk_process_image.kinds)
+% HOST:  {{(tail )?}}call void @merk_register_process_image(ptr {{(nonnull )?}}@process_kernels.merk_process_image.module, ptr {{(nonnull )?}}@process_kernels.merk_process_image.gfx1030.gpu, ptr {{(nonnull )?}}@process_kernels.merk_process_image.gfx1030, i64 5, ptr {{(nonnull )?}}@process_kernels.merk_process_image.kinds, i64 0)
 
 % The kernel's stack is a fixed size: a dynamic one, which a call of a
 % function that is not norecurse gives it, has scratch that the GPU may not

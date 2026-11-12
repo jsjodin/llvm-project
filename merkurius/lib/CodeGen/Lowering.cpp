@@ -6,11 +6,35 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "merkurius/CodeGen/DeviceLibrary.h"
 #include "merkurius/CodeGen/Lowering.h"
+#include "merkurius/CodeGen/DeviceLibrary.h"
 #include "merkurius/CodeGen/MLIRGen.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
 #include "merkurius/Dialect/Mrt/IR/MrtDialect.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
+#include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/IntrinsicsAMDGPU.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/MDBuilder.h"
+#include "llvm/IRReader/IRReader.h"
+#include "llvm/Linker/Linker.h"
+#include "llvm/Object/OffloadBinary.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/FileUtilities.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Program.h"
+#include "llvm/Support/SourceMgr.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -29,31 +53,7 @@
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/RegionUtils.h"
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/ADT/StringMap.h"
-#include "llvm/ADT/StringSet.h"
-#include "llvm/ADT/TypeSwitch.h"
 #include <functional>
-#include "llvm/Analysis/LoopInfo.h"
-#include "llvm/IR/Dominators.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/InlineAsm.h"
-#include "llvm/IR/InstIterator.h"
-#include "llvm/Transforms/Utils/ModuleUtils.h"
-#include "llvm/IR/Instructions.h"
-#include "llvm/IR/MDBuilder.h"
-#include "llvm/IRReader/IRReader.h"
-#include "llvm/Linker/Linker.h"
-#include "llvm/Object/OffloadBinary.h"
-#include "llvm/Passes/PassBuilder.h"
-#include "llvm/IR/IntrinsicInst.h"
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Support/FileUtilities.h"
-#include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/Program.h"
-#include "llvm/Support/SourceMgr.h"
-#include "llvm/Target/TargetMachine.h"
-#include "llvm/Transforms/Utils/ModuleUtils.h"
 
 namespace merkurius::codegen {
 
@@ -4227,6 +4227,110 @@ void TakeHeapAddressAgain(llvm::Function &function, llvm::Function *marker,
   }
 }
 
+// The calls of a procedure of a GPU process's image, where procedures are in
+// the C convention and a tail call is a musttail call: those of the module's
+// functions, and whether a call of code unseen may lead back, as an indirect
+// call may, or a call that passes a function. The device runtime's own
+// calls back, of merk_process_dispatch and merk_process_loop, do not recurse.
+void AddDeviceCalls(CallNode &node, const llvm::StringMap<unsigned> &numbers) {
+  for (llvm::Instruction &instruction : llvm::instructions(*node.function)) {
+    auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)};
+    if (!call || llvm::isa<llvm::IntrinsicInst>(call) || call->isInlineAsm()) {
+      continue;
+    }
+    auto *direct{llvm::dyn_cast<llvm::CallInst>(call)};
+    bool tail{direct && direct->isMustTailCall()};
+    const llvm::Function *callee{call->getCalledFunction()};
+    auto known{callee ? numbers.find(callee->getName()) : numbers.end()};
+    if (known != numbers.end()) {
+      node.calls.emplace_back(known->second, tail);
+    } else if (!callee ||
+        llvm::any_of(call->args(), [](const llvm::Use &argument) {
+          return llvm::isa<llvm::Function>(argument->stripPointerCasts());
+        })) {
+      node.callsUnknown = true;
+    }
+  }
+}
+
+// The check, at a procedure's entry, that the stack, which grows up from 0
+// in each lane's scratch, has room after the procedure's frame for what its
+// calls may take outside its recursion, which the backend knows
+// (llvm.amdgcn.callee.stack.size), in merk_device_stack_bytes.
+void AddDeviceEntryCheck(llvm::Function &function, llvm::GlobalVariable &stack,
+    llvm::FunctionCallee overflow) {
+  llvm::BasicBlock &entry{function.getEntryBlock()};
+  llvm::BasicBlock::iterator start{entry.begin()};
+  for (auto it{entry.begin()}; it != entry.end(); ++it) {
+    if (llvm::isa<llvm::AllocaInst>(*it)) {
+      start = std::next(it);
+    }
+  }
+  llvm::LLVMContext &context{function.getContext()};
+  llvm::BasicBlock *rest{entry.splitBasicBlock(start, "stack.ok")};
+  entry.getTerminator()->eraseFromParent();
+  auto *failed{llvm::BasicBlock::Create(context, "stack.overflow", &function)};
+  llvm::IRBuilder<> builder{&entry};
+  llvm::Value *bound{
+      builder.CreateAlignedLoad(builder.getInt32Ty(), &stack, llvm::Align(4))};
+  llvm::Value *at{
+      builder.CreatePtrToInt(builder.CreateStackSave(), builder.getInt32Ty())};
+  llvm::Value *callees{
+      builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_callee_stack_size, {})};
+  llvm::Value *end{builder.CreateNUWAdd(at, callees)};
+  builder.CreateCondBr(builder.CreateICmpUGT(end, bound), failed, rest,
+      llvm::MDBuilder{context}.createBranchWeights(1, 2000));
+  builder.SetInsertPoint(failed);
+  builder.CreateCall(overflow);
+  builder.CreateUnreachable();
+}
+
+// Drops what the optimizer inferred of a function, or of a call, that a call
+// of merk_device_stack_overflow in it, or below it, makes false: that it
+// touches no memory, does not synchronize, returns, frees nothing, and the
+// AMDGPU attributor's "amdgpu-no-" attributes, which say what the kernel
+// need not set up for it, as flat scratch, which the device runtime's report
+// of the overflow uses. The device's link infers them again.
+template <typename T> void ForgetInferred(T &holder) {
+  for (llvm::Attribute::AttrKind kind :
+      {llvm::Attribute::Memory, llvm::Attribute::NoSync,
+          llvm::Attribute::WillReturn, llvm::Attribute::NoFree}) {
+    holder.removeFnAttr(kind);
+  }
+  llvm::SmallVector<llvm::StringRef> hints;
+  for (const llvm::Attribute &attribute : holder.getAttributes().getFnAttrs()) {
+    if (attribute.isStringAttribute() &&
+        attribute.getKindAsString().starts_with("amdgpu-no-")) {
+      hints.push_back(attribute.getKindAsString());
+    }
+  }
+  for (llvm::StringRef hint : hints) {
+    holder.removeFnAttr(hint);
+  }
+}
+
+// Forgets what the optimizer inferred of each checked function and of every
+// function that may call one, and of their calls (ForgetInferred).
+void ForgetInferredAbove(llvm::ArrayRef<llvm::Function *> checked) {
+  llvm::SmallPtrSet<llvm::Function *, 16> seen{checked.begin(), checked.end()};
+  llvm::SmallVector<llvm::Function *> work{checked};
+  while (!work.empty()) {
+    llvm::Function *function{work.pop_back_val()};
+    ForgetInferred(*function);
+    for (llvm::User *user : function->users()) {
+      auto *call{llvm::dyn_cast<llvm::CallBase>(user)};
+      if (!call) {
+        continue;
+      }
+      ForgetInferred(*call);
+      llvm::Function *caller{call->getFunction()};
+      if (seen.insert(caller).second) {
+        work.push_back(caller);
+      }
+    }
+  }
+}
+
 // Each loop that LLVM made looks at the limit too, on every iteration.
 void AddLoopChecks(llvm::Function &function, llvm::GlobalVariable &limit,
     llvm::FunctionCallee passed, llvm::Function *marker) {
@@ -4256,6 +4360,105 @@ void AddLoopChecks(llvm::Function &function, llvm::GlobalVariable &limit,
   }
 }
 } // namespace
+
+void WarnGpuRecursion(mlir::ModuleOp module) {
+  std::string prefix{(module.getSymName().value_or("") + ".").str()};
+  llvm::SmallVector<mlir::LLVM::LLVMFuncOp> functions;
+  llvm::StringMap<unsigned> numbers;
+  module.walk([&](mlir::LLVM::LLVMFuncOp function) {
+    if (!function.isExternal()) {
+      numbers[function.getSymName()] = functions.size();
+      functions.push_back(function);
+    }
+  });
+  llvm::SmallVector<CallNode> nodes(functions.size(), CallNode{nullptr});
+  llvm::SmallVector<llvm::SmallVector<mlir::LLVM::CallOp>> calls(
+      functions.size());
+  for (auto [n, function] : llvm::enumerate(functions)) {
+    function.walk([&](mlir::LLVM::CallOp call) {
+      std::optional<llvm::StringRef> callee{call.getCallee()};
+      auto known{callee ? numbers.find(*callee) : numbers.end()};
+      if (known == numbers.end()) {
+        return;
+      }
+      nodes[n].calls.emplace_back(known->second,
+          call.getTailCallKind() == mlir::LLVM::TailCallKind::MustTail);
+      calls[n].push_back(call);
+    });
+  }
+  CallComponents components{nodes};
+  for (unsigned n = 0; n < nodes.size(); ++n) {
+    if (nodes[n].index < 0) {
+      components.Visit(n);
+    }
+  }
+  for (auto [n, function] : llvm::enumerate(functions)) {
+    if (!function.getSymName().starts_with(prefix)) {
+      continue;
+    }
+    for (auto [call, edge] : llvm::zip_equal(calls[n], nodes[n].calls)) {
+      if (edge.second || nodes[edge.first].component != nodes[n].component) {
+        continue;
+      }
+      mlir::Location loc{call.getLoc()};
+      if (auto at{loc->findInstanceOf<mlir::FileLineColLoc>()}) {
+        loc = at;
+      }
+      mlir::emitWarning(loc)
+          << "this call may recurse, and it is not a tail call, so each call "
+             "takes more of the stack of a GPU process, which is limited "
+             "(MERK_GPU_PROCESS_STACK_BYTES): a recursion deeper than it has "
+             "room for ends the program";
+    }
+  }
+}
+
+void AddDeviceStackChecks(llvm::Module &module) {
+  llvm::SmallVector<CallNode> nodes;
+  llvm::StringMap<unsigned> numbers;
+  for (llvm::Function &function : module) {
+    if (!function.isDeclaration()) {
+      numbers[function.getName()] = nodes.size();
+      nodes.push_back(CallNode{&function});
+    }
+  }
+  for (CallNode &node : nodes) {
+    AddDeviceCalls(node, numbers);
+  }
+  CallComponents components{nodes};
+  for (unsigned n = 0; n < nodes.size(); ++n) {
+    if (nodes[n].index < 0) {
+      components.Visit(n);
+    }
+  }
+  llvm::GlobalVariable *limit{nullptr};
+  llvm::FunctionCallee overflow;
+  llvm::SmallVector<llvm::Function *> checked;
+  for (const CallNode &node : nodes) {
+    if (!NeedsStackCheck(node, nodes)) {
+      continue;
+    }
+    checked.push_back(node.function);
+    if (!limit) {
+      llvm::LLVMContext &context{module.getContext()};
+      limit = new llvm::GlobalVariable(module, llvm::Type::getInt32Ty(context),
+          /*isConstant=*/false, llvm::GlobalValue::ExternalLinkage,
+          /*Initializer=*/nullptr, "merk_device_stack_bytes", nullptr,
+          llvm::GlobalValue::NotThreadLocal,
+          module.getDataLayout().getDefaultGlobalsAddressSpace());
+      limit->setAlignment(llvm::Align(4));
+      overflow = module.getOrInsertFunction("merk_device_stack_overflow",
+          llvm::FunctionType::get(llvm::Type::getVoidTy(context), false));
+      if (auto *declared{
+              llvm::dyn_cast<llvm::Function>(overflow.getCallee())}) {
+        declared->setDoesNotReturn();
+        declared->setDoesNotRecurse();
+      }
+    }
+    AddDeviceEntryCheck(*node.function, *limit, overflow);
+  }
+  ForgetInferredAbove(checked);
+}
 
 void ExpandHeapAddresses(llvm::Module &module) {
   llvm::Function *marker{module.getFunction(kHeapAddressSymbol)};

@@ -1016,6 +1016,9 @@ bool CodeGenAction::Lower(
   if (mlir::failed(codegen::LowerToLLVMDialect(module, target, clang))) {
     return false;
   }
+  if (target.options().processKernels) {
+    codegen::WarnGpuRecursion(module);
+  }
   if (kind_ == ActionKind::EmitMLIR) {
     module.print(*os);
     return true;
@@ -1099,6 +1102,9 @@ bool CodeGenAction::Emit(llvm::Module &llvmModule,
   if (!llvmModule.getModuleFlag(kIRPreparedFlag)) {
     codegen::OptimizeLLVMIR(llvmModule, target);
     codegen::AddStackChecks(llvmModule);
+    if (target.options().processKernels) {
+      codegen::AddDeviceStackChecks(llvmModule);
+    }
     codegen::ExpandHeapAddresses(llvmModule);
     llvmModule.addModuleFlag(llvm::Module::Max, kIRPreparedFlag, 1);
   }

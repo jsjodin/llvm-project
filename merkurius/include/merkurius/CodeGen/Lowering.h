@@ -134,6 +134,17 @@ void OptimizeLLVMIR(llvm::Module &, const TargetInfo &);
 // left.
 void AddStackChecks(llvm::Module &);
 
+// Adds to a GPU process image's procedures that recurse other than by tail
+// calls, after the optimizer, the check of the stack against the limit that
+// the runtime sets when it loads the image, which ends the program rather
+// than let the stack overflow (runtime/gpu-processes.cpp, SetStackLimit).
+void AddDeviceStackChecks(llvm::Module &);
+
+// Warns of each call in a GPU process image's code of the module that may
+// recurse and is not a tail call, after lowering to the LLVM dialect, where
+// tail calls are known: a GPU process's stack is small.
+void WarnGpuRecursion(mlir::ModuleOp);
+
 // Replaces the optimizer's stand-in for the address of the thread's heap,
 // which keeps a process that moves to another thread from using the old
 // thread's heap, with the thread-local address.

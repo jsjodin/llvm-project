@@ -10,7 +10,8 @@ RUN: merkc -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/
 RUN: %gpu-env %t | FileCheck %S/process-teams.m --match-full-lines --strict-whitespace
 
 A kernel whose code recurses has a stack that is not fixed, of the size its
-launch gives, 1 KiB a lane, whose scratch the GPU holds for every team.
+launch gives, 1536 bytes a lane, whose scratch the GPU holds for every
+team.
 RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/Inputs/process_teams_recursive.m -o %t.recursive
 RUN: %gpu-env %t.recursive | FileCheck %s --check-prefix=FIB
 FIB: 6765
@@ -23,3 +24,16 @@ HELD: Software Error: process.spawn: GPU 0 started {{[0-9]+}} of the {{[0-9]+}} 
 
 RUN: not %gpu-env MERK_GPU_PROCESS_STACK_BYTES=1k %t.recursive 2>&1 | FileCheck %s --check-prefix=BAD
 BAD: Software Error: process.spawn: MERK_GPU_PROCESS_STACK_BYTES is not a positive number of bytes: 1k
+
+A recursion deeper than the stack has room for ends the program, rather
+than overflow it: the procedure checks the stack at its entry against the
+limit that the runtime set. A shallow one runs.
+RUN: not %gpu-env %t.recursive deep 2>&1 | FileCheck %s --check-prefix=DEEP
+DEEP: Mercury runtime: stack overflow in a GPU process: MERK_GPU_PROCESS_STACK_BYTES gives GPU processes more stack
+RUN: %gpu-env %t.recursive shallow | FileCheck %s --check-prefix=SHALLOW
+SHALLOW: 121
+
+A stack smaller than what the kernel's calls take outside the recursion
+cannot run it: the spawn that loads the image says so.
+RUN: not %gpu-env MERK_GPU_PROCESS_STACK_BYTES=64 %t.recursive 2>&1 | FileCheck %s --check-prefix=FRAMES
+FRAMES: Software Error: process.spawn: the module process_teams_recursive's processes take {{[0-9]+}} bytes of stack a lane for their calls on GPU 0, and GPU processes have 64: a larger MERK_GPU_PROCESS_STACK_BYTES gives them more, which may keep some of their kernel's teams from starting

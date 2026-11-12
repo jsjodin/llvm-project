@@ -29,6 +29,9 @@ struct ProcessImage {
   const void *image;
   std::uint64_t bytes;
   const char *kinds; // the kinds' names, in their order, separated by spaces
+  // The bytes of stack a lane that its kernel's calls take outside any
+  // recursion, if its stack is not fixed, or 0 (MLIRGenProcesses.cpp).
+  std::uint64_t frames;
 };
 
 // The number of the kind in the image, or -1 if it has none of that name.

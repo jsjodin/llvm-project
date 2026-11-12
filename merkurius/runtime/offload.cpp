@@ -435,6 +435,8 @@ class PinnedMemory {
 public:
   explicit PinnedMemory(int device) : device_{device} {}
   static constexpr bool kOtherImage{true};
+  // A host thread's stack is checked by the code that calls the copy.
+  void CheckStack() {}
   PinnedChunk *First() const { return first_; }
 
   void *Allocate(std::uint64_t bytes) {
@@ -526,12 +528,20 @@ DeviceRing *NewRing(int device) {
     kinds[lane] = buffer->data[0];
   });
   port.recv_n(texts, sizes, [](std::uint64_t size) { return Malloc(size + 1); });
+  // What follows the text, which the device sends apart (device.cpp, Fail).
+  std::uint64_t detailSizes[64]{};
+  void *details[64]{};
+  port.recv_n(details, detailSizes,
+      [](std::uint64_t size) { return Malloc(size + 1); });
   for (int lane{0}; lane < 64; ++lane) {
     if (!texts[lane]) {
       continue;
     }
-    auto *text{static_cast<char *>(texts[lane])};
-    text[sizes[lane]] = '\0';
+    auto *text{
+        static_cast<char *>(Malloc(sizes[lane] + detailSizes[lane] + 1))};
+    std::memcpy(text, texts[lane], sizes[lane]);
+    std::memcpy(text + sizes[lane], details[lane], detailSizes[lane]);
+    text[sizes[lane] + detailSizes[lane]] = '\0';
     if (kinds[lane] == 0) {
       merk_uncaught_exception(text);
     }

@@ -261,6 +261,52 @@ void PlaceDone(void *data) {
 
 // The module's image on the GPU, loaded the first time, or the text of the
 // error. With the lock held.
+std::uint64_t ProcessStackBytes(const char *&error);
+
+// Sets the stack that the image's kernel is launched with, a lane, in its
+// merk_device_stack_bytes, which its procedures that recurse other than by
+// tail calls check, with what their calls may take below them (Lowering.cpp,
+// AddDeviceStackChecks), as the device runtime's copy of a message does. Or
+// gives the text of the error, for a kernel whose calls outside any
+// recursion take more than the stack, which nothing checks. A kernel whose
+// stack is fixed has none to check.
+const char *SetStackLimit(const char *module, const Gpu &gpu,
+    ol_program_handle_t program, const ProcessImage &image) {
+  if (image.frames == 0) {
+    return nullptr;
+  }
+  const char *error{nullptr};
+  std::uint64_t stack{ProcessStackBytes(error)};
+  if (!stack) {
+    return error;
+  }
+  if (image.frames > stack) {
+    char *text{static_cast<char *>(Malloc(512))};
+    std::snprintf(text, 512,
+        "the module %s's processes take %llu bytes of stack a lane for their "
+        "calls on GPU %d, and GPU processes have %llu: a larger "
+        "MERK_GPU_PROCESS_STACK_BYTES gives them more, which may keep some "
+        "of their kernel's teams from starting",
+        module, static_cast<unsigned long long>(image.frames), gpu.number,
+        static_cast<unsigned long long>(stack));
+    return text;
+  }
+  ol_symbol_handle_t symbol;
+  void *address{nullptr};
+  std::uint32_t limit{
+      stack > 0xffffffffu ? 0xffffffffu : static_cast<std::uint32_t>(stack)};
+  if (olGetSymbol(program, "merk_device_stack_bytes",
+          kOlSymbolKindGlobalVariable, &symbol) ||
+      olGetSymbolInfo(symbol, kOlSymbolInfoGlobalVariableAddress,
+          sizeof address, &address) ||
+      olMemcpy(nullptr, address, gpu.device, &limit, nullptr, sizeof limit)) {
+    return Error("could not set the stack's limit in the module %s's image "
+                 "on GPU %lld%s%s%s",
+        module, gpu.number, "", "", "");
+  }
+  return nullptr;
+}
+
 const char *Load(const char *module, const Gpu &gpu, LoadedImage *&entry) {
   for (entry = loaded; entry; entry = entry->next) {
     if (entry->gpu == gpu.number && std::strcmp(entry->module, module) == 0) {
@@ -291,6 +337,10 @@ const char *Load(const char *module, const Gpu &gpu, LoadedImage *&entry) {
     return Error("could not set the device's number in the module %s's image "
                  "on GPU %lld%s%s%s",
         module, gpu.number, "", "", "");
+  }
+  if (const char *error{SetStackLimit(module, gpu, program, *image)}) {
+    olDestroyProgram(program);
+    return error;
   }
   entry = static_cast<LoadedImage *>(Malloc(sizeof(LoadedImage)));
   *entry = {module, gpu.number, program, image, loaded};
@@ -379,10 +429,12 @@ bool TeamsStarted(const PlaceTable *table, std::uint64_t teams) {
 // The bytes of stack for each thread of a processes' kernel whose stack is
 // not fixed, as one whose code recurses: the plugin's own, 16 KiB, has
 // scratch that the GPU does not hold for all the kernel's teams, and with
-// 1 KiB it did (docs/INPROGRESS.md, GPU processes that run loops).
-// MERK_GPU_PROCESS_STACK_BYTES replaces it. A kernel with a fixed stack
-// size has its own. Or 0, with the text of the error.
-constexpr std::uint64_t kProcessStackBytes{1024};
+// 1 KiB it did, as it did up to 1792 bytes beside another queue's scratch
+// (docs/INPROGRESS.md, GPU processes that run loops). 1 KiB left no room for
+// a message's copy below the fixed frames of process-gpu-messages' kernel
+// (The stack is checked). MERK_GPU_PROCESS_STACK_BYTES replaces it. A kernel
+// with a fixed stack size has its own. Or 0, with the text of the error.
+constexpr std::uint64_t kProcessStackBytes{1536};
 
 std::uint64_t ProcessStackBytes(const char *&error) {
   const char *given{std::getenv("MERK_GPU_PROCESS_STACK_BYTES")};
