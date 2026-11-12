@@ -14,6 +14,7 @@ add_merkurius_library(MerkuriusCodeGen
   Liveness.cpp
   Statepoints.cpp
   Outlining.cpp
+  Records.cpp
   Specializer.cpp
   TargetInfo.cpp
 

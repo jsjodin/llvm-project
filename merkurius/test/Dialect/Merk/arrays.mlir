@@ -67,8 +67,8 @@ module @arrays attributes {llvm.target_triple = "x86_64-unknown-linux-gnu", merk
   // CHECK-NEXT: %[[B:.*]] = merk.array_new %[[W]] -> <i8>
   // CHECK-NEXT: %[[X:.*]] = merk.array_get %[[B]][%arg1] : <i8> -> i8
   // CHECK-NEXT: %[[S:.*]] = merk.array_set %[[B]][%arg1], %[[X]] : <i8>, i8
-  // CHECK-NEXT: %[[Y:.*]] = merk.array_get %[[N]][%arg1] : <!merk.word> -> !merk.word
-  // CHECK-NEXT: %[[T:.*]] = merk.array_set %[[L]][%arg1], %[[Y]] : <!merk.word>, !merk.word
+  // CHECK-NEXT: %[[Y:.*]] = merk.array_get %[[N]][%arg1] of %arg0 : <!merk.word> -> !merk.word
+  // CHECK-NEXT: %[[T:.*]] = merk.array_set %[[L]][%arg1], %[[Y]] of %arg0 : <!merk.word>, !merk.word
   merk.proc @arrays.narrow_4_0(%ti: !merk.type_info, %n: i64, %x: !merk.word, %l: !merk.term<"list.list(float)">) -> (!merk.array<i8>, !merk.array<!merk.word>) attributes {determinism = #merk.determinism<det>} {
     %a = merk.array_new %n, %x : !merk.word width of %ti -> !merk.array<!merk.word>
     %f = merk.array_from_list %l width of %ti : !merk.term<"list.list(float)"> -> !merk.array<!merk.word>
@@ -76,8 +76,8 @@ module @arrays attributes {llvm.target_triple = "x86_64-unknown-linux-gnu", merk
     %b = merk.array_new %w -> !merk.array<i8>
     %y = merk.array_get %b[%n] : !merk.array<i8> -> i8
     %c = merk.array_set %b[%n], %y : !merk.array<i8>, i8
-    %z = merk.array_get %a[%n] : !merk.array<!merk.word> -> !merk.word
-    %d = merk.array_set %f[%n], %z : !merk.array<!merk.word>, !merk.word
+    %z = merk.array_get %a[%n] of %ti : !merk.array<!merk.word> -> !merk.word
+    %d = merk.array_set %f[%n], %z of %ti : !merk.array<!merk.word>, !merk.word
     merk.succeed %c, %d : !merk.array<i8>, !merk.array<!merk.word>
   }
 }
@@ -116,29 +116,33 @@ module @arrays attributes {llvm.target_triple = "x86_64-unknown-linux-gnu", merk
 // LLVM: call ptr addrspace(1) @merk_array_copy(ptr addrspace(1)
 // LLVM: call ptr addrspace(1) @merk_array_resize(ptr addrspace(1) {{.*}}, i64 %1, ptr addrspace(1)
 // LLVM: call ptr addrspace(1) @merk_array_resize(ptr addrspace(1) {{.*}}, i64 %1, ptr addrspace(1) null)
-// Polymorphic arrays are made as wide as the runtime finds the type_info's
-// type; an array's words come from its header; an i8 element is its byte,
-// after the header; a word array's element, or a narrow one's, as the
-// header says (runtime/array.h).
+// Polymorphic arrays are made by the runtime, as wide as the type_info's
+// type, or of its records inline; an array's words are the runtime's, as an
+// array of records has two header words; an i8 element is its byte, after
+// the header; a word array's element, or a narrow one's, as the header says,
+// and a record's boxed, or unboxed into it, by the runtime (runtime/array.h,
+// runtime/record.h).
 // LLVM-LABEL: define tailcc { ptr addrspace(1), ptr addrspace(1) } @arrays.narrow_4_0(
-// LLVM: %[[WIDTH:.*]] = call i64 @merk_array_width(ptr %{{.*}})
-// LLVM-NEXT: call ptr addrspace(1) @merk_array_new(i64 %1, ptr addrspace(1) %2, i64 %[[WIDTH]])
-// LLVM: %[[WIDTH2:.*]] = call i64 @merk_array_width(ptr %{{.*}})
-// LLVM-NEXT: call ptr addrspace(1) @merk_array_from_list(ptr addrspace(1) %3, i64 1, i64 %[[WIDTH2]])
-// LLVM: %[[H:.*]] = load i64, ptr addrspace(1) %{{.*}}
-// LLVM-NEXT: and i64 %[[H]], 72057594037927935
-// LLVM-NEXT: lshr i64 %[[H]], 56
-// LLVM: call ptr addrspace(1) @merk_array_new(i64 %{{.*}}, ptr addrspace(1) null, i64 1)
+// LLVM: call ptr addrspace(1) @merk_array_new_typed(i64 %1, ptr addrspace(1) %2, ptr %{{.*}})
+// LLVM: call ptr addrspace(1) @merk_array_from_list_typed(ptr addrspace(1) %3, i64 1, ptr %{{.*}})
+// LLVM: %[[W:.*]] = call i64 @merk_array_words(ptr addrspace(1) %{{.*}})
+// LLVM: call ptr addrspace(1) @merk_array_new(i64 %[[W]], ptr addrspace(1) null, i64 1)
 // LLVM: %[[E:.*]] = getelementptr i64, ptr addrspace(1) %[[B:.*]], i32 1
 // LLVM-NEXT: %[[AT:.*]] = getelementptr i8, ptr addrspace(1) %[[E]], i64 %1
 // LLVM-NEXT: %[[X:.*]] = load i8, ptr addrspace(1) %[[AT]]
 // LLVM: store i8 %[[X]], ptr addrspace(1)
+// LLVM: %[[H1:.*]] = load i64, ptr addrspace(1) %{{.*}}
+// LLVM-NEXT: %[[RECORDS:.*]] = lshr i64 %[[H1]], 56
+// LLVM-NEXT: icmp eq i64 %[[RECORDS]], 4
+// LLVM: call void @merk_gc_poll()
+// LLVM: call ptr addrspace(1) @merk_array_load_record(
 // LLVM: %[[H2:.*]] = load i64, ptr addrspace(1) %{{.*}}
 // LLVM-NEXT: %[[CODE:.*]] = lshr i64 %[[H2]], 56
 // LLVM-NEXT: %[[WORDS:.*]] = icmp eq i64 %[[CODE]], 0
 // LLVM-NEXT: br i1 %[[WORDS]]
 // LLVM: switch i64 %[[CODE]]
 // LLVM: merk.array_load.exit:
+// LLVM: call void @merk_array_store_record(
 // LLVM: merk.array_store.exit:
 // LLVM-NOT: define {{.*}}@merk.array_
 // LLVM: declare void @merk_index_out_of_bounds(ptr, i64, i64) #[[NORETURN:[0-9]+]]

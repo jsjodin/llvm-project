@@ -255,10 +255,13 @@ private:
   // that the second has the same constructor and equal arguments.
   merk::ProcOp UnifyProc(merk::TermType);
   merk::ProcOp UnifyArrayProc();
-  mlir::Value ArrayElement(mlir::Value array, mlir::Value index, mlir::Location);
+  // An element, with the type_info of the elements' type, if the module does
+  // not see its layout (ElementTypeInfo).
+  mlir::Value ArrayElement(mlir::Value array, mlir::Value index,
+      mlir::Value elementTypeInfo, mlir::Location);
   // The array with that element set, which may be the same array.
-  mlir::Value ArrayWithElement(
-      mlir::Value array, mlir::Value index, mlir::Value element, mlir::Location);
+  mlir::Value ArrayWithElement(mlir::Value array, mlir::Value index,
+      mlir::Value element, mlir::Value elementTypeInfo, mlir::Location);
   mlir::Value ArraySize(mlir::Value array, mlir::Location);
   mlir::Value InArrayBounds(
       mlir::Value array, mlir::Value index, mlir::Location);
@@ -388,8 +391,12 @@ private:
   bool CompiledArrayCall(const Body &, const semantics::Symbol &);
   bool ArrayBuiltin(const Body &, const Procedure &,
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &);
+  // ElementTypeInfo of the first of a call's arguments that is an array.
+  mlir::Value ArgumentElementTypeInfo(llvm::ArrayRef<BodyVar> arguments,
+      const ProcedureBody &body, mlir::Location loc, semantics::TokenRange at);
   mlir::Value ElementTypeInfo(const semantics::Type *array,
-      mlir::Type represented, mlir::Location, semantics::TokenRange);
+      mlir::Type represented, mlir::Location, semantics::TokenRange,
+      bool forTerms = false);
   // A call of a field's function or its update function, which no module
   // defines: the unifications that the manual defines it by.
   void FieldAccess(const Body &, const Procedure &,
@@ -633,6 +640,7 @@ private:
   // scalars only, two or more, whose pointer has no tag, or a mailbox
   // handle. None for any other type.
   std::optional<unsigned> FlatCell(mlir::Type);
+  bool RecordArray(mlir::Type);
   // Whether a value of the type can cross into a target region.
   bool Mappable(mlir::Type);
   bool WordMessage(mlir::Type);

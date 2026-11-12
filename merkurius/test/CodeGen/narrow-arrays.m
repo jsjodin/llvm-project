@@ -204,10 +204,18 @@ reversed(A) = B :-
 :- mode reversed_from(in, in, in, array_di) = array_uo is det.
 % A polymorphic element is read and written by the width in the header,
 % merk.array_load and merk.array_store, inlined: a word, or 1, 2 or 4 bytes,
-% zero-extended.
+% zero-extended. A record that the array holds inline is boxed by the
+% runtime, by the element's type_info, after a poll for a collection, and
+% unboxed into its place (runtime/record.h).
 % LLVM-LABEL: define {{.*}} @narrow_arrays.reversed_from_f4_0(
 % LLVM: %[[HEADER:.*]] = load i64, ptr addrspace(1) %1
 % LLVM-NEXT: %[[SIZE:.*]] = and i64 %[[HEADER]], 72057594037927935
+% LLVM: %[[HEADER1:.*]] = load i64, ptr addrspace(1) %1
+% LLVM-NEXT: %[[RECORDS:.*]] = lshr i64 %[[HEADER1]], 56
+% LLVM-NEXT: icmp eq i64 %[[RECORDS]], 4
+% LLVM: call void @merk_gc_poll() [ "deopt"(
+% LLVM-NEXT: addrspacecast ptr addrspace(1) %0 to ptr
+% LLVM-NEXT: call ptr addrspace(1) @merk_array_load_record(ptr addrspace(1) %1,
 % LLVM: %[[HEADER2:.*]] = load i64, ptr addrspace(1) %1
 % LLVM-NEXT: %[[CODE:.*]] = lshr i64 %[[HEADER2]], 56
 % LLVM-NEXT: %[[WORDS:.*]] = icmp eq i64 %[[CODE]], 0
@@ -219,6 +227,7 @@ reversed(A) = B :-
 % LLVM: load i16, ptr addrspace(1)
 % LLVM: load i32, ptr addrspace(1)
 % LLVM: merk.array_load.exit:
+% LLVM: call void @merk_array_store_record(ptr addrspace(1) %4,
 % LLVM: store i8 {{.*}}, ptr addrspace(1)
 % LLVM: store i16 {{.*}}, ptr addrspace(1)
 % LLVM: store i32 {{.*}}, ptr addrspace(1)

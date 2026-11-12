@@ -389,9 +389,9 @@ void FreeRegionArenas(std::uint64_t region) {
   }
 }
 
-// The bytes of an array, from its header (array.h).
-std::size_t ArrayBytes(std::uint64_t header) {
-  return sizeof(std::uint64_t) * ArrayWordsOfHeader(header);
+// The bytes of an array, from its header words (array.h).
+std::size_t ArrayBytes(const std::uint64_t *array) {
+  return sizeof(std::uint64_t) * ArrayWords(array);
 }
 
 // Chunks of host memory that a device reads and writes directly, for a
@@ -491,8 +491,8 @@ std::uint64_t CopyArrayForDevice(
     int device, std::uint64_t, std::uint64_t value, void **held) {
   const auto *array{reinterpret_cast<const std::uint64_t *>(value)};
   PinnedMemory memory{device};
-  void *copy{memory.Allocate(ArrayBytes(array[0]))};
-  std::memcpy(copy, array, ArrayBytes(array[0]));
+  void *copy{memory.Allocate(ArrayBytes(array))};
+  std::memcpy(copy, array, ArrayBytes(array));
   *held = memory.First();
   return reinterpret_cast<std::uint64_t>(copy);
 }
@@ -617,12 +617,13 @@ unsigned HandleOpcode(void *raw, unsigned) {
     return rpc::RPC_SUCCESS;
   case rpcGiveArray:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
-      // In a fragment, as a message is. The device sends its header.
-      std::uint64_t header{buffer->data[1]};
+      // In a fragment, as a message is. The device's copy is in host
+      // memory, which it wrote before it called.
+      const auto *array{
+          reinterpret_cast<const std::uint64_t *>(buffer->data[0])};
       Fragment fragment;
-      void *copy{fragment.Allocate(ArrayBytes(header))};
-      std::memcpy(copy, reinterpret_cast<const void *>(buffer->data[0]),
-          ArrayBytes(header));
+      void *copy{fragment.Allocate(ArrayBytes(array))};
+      std::memcpy(copy, array, ArrayBytes(array));
       FreePinnedChunks(reinterpret_cast<PinnedChunk *>(buffer->data[2]));
       buffer->data[0] = reinterpret_cast<std::uint64_t>(copy);
     });

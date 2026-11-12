@@ -12,12 +12,15 @@
 // each, the layout of every array of another type, so that such an array's
 // header is its size; or the code of 1, 2 or 4 bytes each, for an array of
 // int8, uint8, int16, uint16, int32, uint32, char or an enumeration, as C
-// holds them. A narrow element is its bits; as a word, in polymorphic code,
-// it is zero-extended, as every narrow integer is (Lowering.cpp, ToBits), so
-// the width says all there is to an element and its signedness is the
-// type's. The elements take whole words, the last padded, as the heap and
-// the arenas allocate words. lib/CodeGen/Lowering.cpp lowers the same
-// layout; the device's runtime is compiled from this header too.
+// holds them; or 4 for flat records, inline as C holds them, whose bytes
+// each, C's sizeof, are the array's word 1, so that their elements start at
+// word 2 (record.h; docs/INPROGRESS.md, Flat records, step 2). A narrow element
+// is its bits; as a word, in polymorphic code, it is zero-extended, as every
+// narrow integer is (Lowering.cpp, ToBits), so the width says all there is to
+// an element and its signedness is the type's. The elements take whole words,
+// the last padded, as the heap and the arenas allocate words.
+// lib/CodeGen/Lowering.cpp lowers the same layout; the device's runtime is
+// compiled from this header too.
 //
 //===----------------------------------------------------------------------===//
 
@@ -35,12 +38,13 @@ constexpr Word kArrayWords{0};
 constexpr Word kArrayBytes1{1};
 constexpr Word kArrayBytes2{2};
 constexpr Word kArrayBytes4{3};
+constexpr Word kArrayRecords{4};
 
 inline Word ArraySize(const Word *array) { return array[0] & kArraySizeMask; }
 inline Word ArrayWidthCode(const Word *array) {
   return array[0] >> kArrayWidthShift;
 }
-// The bytes of an element of the width's code.
+// The bytes of an element of the width's code, which is not records'.
 inline Word ElementBytes(Word code) {
   return code == kArrayWords ? sizeof(Word) : Word{1} << (code - 1);
 }
@@ -48,12 +52,30 @@ inline Word ElementBytes(Word code) {
 inline Word ElementWords(Word size, Word code) {
   return (size * ElementBytes(code) + sizeof(Word) - 1) / sizeof(Word);
 }
-// The words of the whole array, its header and its elements, from its header.
-inline Word ArrayWordsOfHeader(Word header) {
-  return 1 + ElementWords(header & kArraySizeMask, header >> kArrayWidthShift);
+inline bool IsRecordArray(const Word *array) {
+  return ArrayWidthCode(array) == kArrayRecords;
 }
+// The bytes of an element of any array.
+inline Word ArrayElementBytes(const Word *array) {
+  return IsRecordArray(array) ? array[1] : ElementBytes(ArrayWidthCode(array));
+}
+// The words before the elements: the header, and a record's bytes.
+inline Word ArrayHeaderWords(const Word *array) {
+  return IsRecordArray(array) ? 2 : 1;
+}
+// Where the elements are.
+inline unsigned char *ArrayElements(Word *array) {
+  return reinterpret_cast<unsigned char *>(array + ArrayHeaderWords(array));
+}
+inline const unsigned char *ArrayElements(const Word *array) {
+  return reinterpret_cast<const unsigned char *>(
+      array + ArrayHeaderWords(array));
+}
+// The words of the whole array, its header words and its elements, which
+// the elements' last word pads.
 inline Word ArrayWords(const Word *array) {
-  return ArrayWordsOfHeader(array[0]);
+  Word bytes{ArraySize(array) * ArrayElementBytes(array)};
+  return ArrayHeaderWords(array) + (bytes + sizeof(Word) - 1) / sizeof(Word);
 }
 inline Word ArrayHeader(Word size, Word code) {
   return size | code << kArrayWidthShift;
@@ -81,7 +103,8 @@ inline Word ArrayWidthOfKind(uint8_t kind) {
   }
 }
 
-// Element `i` of an array of any width, as a word, zero-extended.
+// Element `i` of an array of any width but records', as a word,
+// zero-extended.
 inline Word LoadElement(const Word *array, Word i) {
   const auto *bytes{reinterpret_cast<const unsigned char *>(array + 1)};
   switch (ArrayWidthCode(array)) {

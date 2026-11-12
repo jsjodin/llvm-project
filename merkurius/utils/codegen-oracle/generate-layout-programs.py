@@ -19,7 +19,16 @@ allocated twin and with another value, and tests a value's constructor,
 taking it apart. The modules are det and print only, so that their output
 is the comparison.
 
-Usage: generate-layout-programs.py [--seed N] [--count N] DIR
+With --arrays, a quarter of the types are of one constructor of two to
+four fields that are not lists, tuples or the type itself, which flat
+records are when their fields are flat (docs/INPROGRESS.md, Flat records),
+and main also puts each type's values in arrays, which hold records inline:
+it sets an element and reads one, in monomorphic code and in polymorphic
+code, which boxes and unboxes a record by its type_info, copies, fills and
+resizes the array, and writes, unifies and compares arrays. A read comes
+before the array is passed to an `in` argument, which shares it.
+
+Usage: generate-layout-programs.py [--seed N] [--count N] [--arrays] DIR
 """
 
 import argparse
@@ -144,6 +153,17 @@ poly_order(X, Y, !IO) :-
 :- func poly_nested(T) = T.
 poly_nested(X) = poly_last(poly_last([[X]], [X]), poly_unbox(poly_box(X))).
 """
+# With --arrays: an element read and set in code polymorphic in its type.
+ARRAY_CODE = """\
+:- func poly_elem(array(T), int) = T.
+:- mode poly_elem(array_ui, in) = out is det.
+poly_elem(A, I) = A ^ elem(I).
+
+:- pred poly_set(int::in, T::in, array(T)::array_di, array(T)::array_uo)
+    is det.
+poly_set(I, X, !A) :-
+    array.set(I, X, !A).
+"""
 POLYMORPHIC_ROUTES = [
     "poly_id(%s)",
     "poly_second(1.5, %s)",
@@ -156,8 +176,9 @@ POLYMORPHIC_ROUTES = [
 
 
 class Generator:
-    def __init__(self, rng):
+    def __init__(self, rng, arrays=False):
         self.rng = rng
+        self.arrays = arrays
         self.types = []
         self.helpers = {}  # key -> (field, code)
         self.values = []  # the functions that make the values
@@ -194,9 +215,15 @@ class Generator:
 
     def make_type(self, index):
         rng = self.rng
-        kind = rng.choices(["enum", "notag", "cells"], [15, 15, 70])[0]
+        kind = rng.choices(["enum", "notag", "cells", "record"],
+                           [15, 15, 70, 33 if self.arrays else 0])[0]
         t = Type(index, kind)
-        if kind == "enum":
+        if kind == "record":
+            t.kind = "cells"
+            t.constructors.append(
+                ("r%d" % index, [self.field_type(t, False, 1)
+                                 for _ in range(rng.randint(2, 4))]))
+        elif kind == "enum":
             for j in range(rng.randint(1, 9)):
                 t.constructors.append(("k%d_%d" % (index, j), []))
         elif kind == "notag":
@@ -427,6 +454,46 @@ class Generator:
                      "io.write_string(\"not %s\", !IO)\n    )" % (
                          d, pattern, ",\n        ".join(then), name))
         goals.append("io.nl(!IO)")
+        if self.arrays:
+            goals += self.array_tests(t, names)
+        return goals
+
+    def array_tests(self, t, names):
+        """Arrays of the type's values, from the allocated ones, with the
+        static ones put in."""
+        rng = self.rng
+        goals = []
+        n = len(names)
+        a, s, p = self.var("AR"), self.var("AS"), self.var("AP")
+        e, f, c = self.var("E"), self.var("F"), self.var("AC")
+        r, z, o = self.var("AZ"), self.var("AF"), self.var("AO")
+        goals.append("%s = array([%s])" % (a, ", ".join(d for _, d in names)))
+        goals.append("%s = %s ^ elem(%d) := %s" % (
+            s, a, rng.randrange(n), rng.choice(names)[0]))
+        goals.append("poly_set(%d, %s, %s, %s)" % (
+            rng.randrange(n), rng.choice(names)[1], s, p))
+        goals.append("%s = %s ^ elem(%d)" % (e, p, rng.randrange(n)))
+        goals.append(self.show(("type", t), e))
+        goals.append("io.nl(!IO)")
+        goals.append("%s = poly_elem(%s, %d)" % (f, p, rng.randrange(n)))
+        goals.append(self.show(("type", t), f))
+        goals.append("io.nl(!IO)")
+        goals.append("array.copy(%s, %s)" % (p, c))
+        goals.append("array.resize(%d, %s, %s, %s)" % (
+            n + rng.randint(-1, 2), rng.choice(names)[0], c, r))
+        goals.append("array.fill(%s, array.init(%d, %s), %s)" % (
+            rng.choice(names)[1], rng.randint(0, 3), names[0][0], z))
+        goals.append("%s = array([%s])" % (o, ", ".join(s for s, _ in names)))
+        goals.append("io.write_line(%s, !IO)" % p)
+        goals.append("poly_write(%s, !IO)" % r)
+        goals.append("io.write_line(%s, !IO)" % z)
+        goals.append("( if %s = %s then io.write_string(\"eq\", !IO) "
+                     "else io.write_string(\"ne\", !IO) )" % (p, o))
+        goals.append("( if poly_same(%s, %s) then io.write_string(\"eq\", !IO) "
+                     "else io.write_string(\"ne\", !IO) )" % (p, r))
+        goals.append("poly_order(%s, %s, !IO)" % (p, o))
+        goals.append("poly_order(%s, %s, !IO)" % (r, p))
+        goals.append("io.nl(!IO)")
         return goals
 
     def module(self, name):
@@ -439,7 +506,8 @@ class Generator:
             ":- import_module io.\n",
             ":- pred main(io::di, io::uo) is det.\n",
             ":- implementation.\n",
-            ":- import_module char, float, int, int16, int8, list, uint32, uint8.\n\n",
+            ":- import_module %schar, float, int, int16, int8, list, uint32, uint8.\n\n"
+            % ("array, " if self.arrays else ""),
         ]
         for t in self.types:
             parts.append(self.declaration(t) + "\n")
@@ -456,6 +524,8 @@ class Generator:
             ":- pred run(int::in, io::di, io::uo) is det.\n"
             "run(N, !IO) :-\n    " + ",\n    ".join(goals) + ".\n")
         parts.append(POLYMORPHIC_CODE + "\n")
+        if self.arrays:
+            parts.append(ARRAY_CODE + "\n")
         parts += [b + "\n" for b in bodies]
         parts += [h + "\n" for h in self.helpers.values()]
         parts += [v + "\n" for v in self.values]
@@ -469,6 +539,8 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--count", type=int, default=20)
+    parser.add_argument("--arrays", action="store_true",
+                        help="also put the values in arrays")
     parser.add_argument("dir")
     args = parser.parse_args()
     os.makedirs(args.dir, exist_ok=True)
@@ -476,7 +548,7 @@ def main():
         rng = random.Random(args.seed * 100003 + i)
         name = "layouts_%d_%d" % (args.seed, i)
         with open(os.path.join(args.dir, name + ".m"), "w") as f:
-            f.write(Generator(rng).module(name))
+            f.write(Generator(rng, args.arrays).module(name))
 
 
 if __name__ == "__main__":
