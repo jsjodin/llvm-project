@@ -4285,12 +4285,15 @@ void AddDeviceEntryCheck(llvm::Function &function, llvm::GlobalVariable &stack,
   builder.CreateUnreachable();
 }
 
-// Drops what the optimizer inferred of a function, or of a call, that a call
-// of merk_device_stack_overflow in it, or below it, makes false: that it
-// touches no memory, does not synchronize, returns, frees nothing, and the
-// AMDGPU attributor's "amdgpu-no-" attributes, which say what the kernel
-// need not set up for it, as flat scratch, which the device runtime's report
-// of the overflow uses. The device's link infers them again.
+// Drops what the optimizer inferred of a function, or of a call, that a stack
+// check in it, or below it, makes false, as the checks come after the
+// optimizer: that it touches no memory, does not synchronize, returns, frees
+// nothing, and the AMDGPU attributor's "amdgpu-no-" attributes, which say what
+// the kernel need not set up for it, as flat scratch, which the device
+// runtime's report of the overflow uses. The host's merk_stack_limit_passed
+// may yield to other processes, or end the program; the device's
+// merk_device_stack_overflow ends it. The device's link infers the
+// "amdgpu-no-" attributes again.
 template <typename T> void ForgetInferred(T &holder) {
   for (llvm::Attribute::AttrKind kind :
       {llvm::Attribute::Memory, llvm::Attribute::NoSync,
@@ -4529,6 +4532,15 @@ void AddStackChecks(llvm::Module &module) {
       AddEntryCheck(*node.function, *limit, passed);
     }
   }
+  llvm::SmallVector<llvm::Function *> checked;
+  for (llvm::User *user : passed.getCallee()->users()) {
+    if (auto *call{llvm::dyn_cast<llvm::CallBase>(user)}) {
+      checked.push_back(call->getFunction());
+    }
+  }
+  llvm::sort(checked);
+  checked.erase(std::unique(checked.begin(), checked.end()), checked.end());
+  ForgetInferredAbove(checked);
   if (limit->use_empty()) {
     limit->eraseFromParent();
   }
