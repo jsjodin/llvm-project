@@ -3567,6 +3567,44 @@ compile copied a library descriptor without those its fields name
 `std::exit`, whose handlers freed host memory that a running kernel read,
 so the GPU faulted.
 
+**(p2) done 2026-11-11: loops across a process's teams.**
+- *The directive:* `%$omp distribute parallel do` on a `do` loop, in a GPU
+  kind's code or a predicate of the module that it calls. The driver passes
+  `-fprocess-loops` to the kernels' compile when the program is compiled
+  with `-fopenmp`, which reads the directives without OpenMP; without
+  `-fopenmp` they are comments and the process runs its loops itself. On
+  the host, as in a kind spawned there, it is a parallel do. check-gpu-code
+  reports any other directive in a GPU kind's code, the loop outside such
+  code, and the loop in a target region, as not yet implemented: there it
+  would be OpenMP's, under `target teams`. Reductions are not yet
+  implemented (`process-loops-errors.m`).
+- *The compile:* each loop's body is outlined, numbered, and called from
+  `merk_process_loop` by its number with the counter and the loop's words
+  (`kProcessLoopWords`, 32), which the process writes into its control
+  block (`merk_device_loop_values`) before `merk_device_process_loop`. The
+  host's registration says which kinds run loops (`loops`, a `'0'`/`'1'`
+  string by kind number).
+- *The runtime:* a spawn of a kind with loops reserves as its worker teams
+  every team of the module's kernel whose slots are all free, other than
+  its own, and fails, saying so, if there is none (`ReserveWorkers`). The
+  reserved slots record the process's slot, the team's number among the
+  workers and how many; the process's wave makes its control block in its
+  arena and sets them working. The waves of a working team take
+  iterations in turn (a team's threads a block of consecutive ones), and a
+  barrier between the process and its workers (`ProcessArrive`,
+  `WorkerArrive`) starts and ends each loop. When the process ends its
+  workers set their slots reserved again before it tells the host, which
+  then sets them idle. Every lane of a wave now stays in `merk_place`, so
+  that a worker team's whole wave works; lane 0 alone runs a process.
+- *Tests:* `process-loops.m` (the compile, and runs at the host, parallel
+  and sequential) and `process-loops-gpu.test`: loops over arrays of one
+  to a million elements, a loop through a predicate, a negative step,
+  floats, an empty loop, an echo beside the worker, a second worker that
+  finds no team, and the arena's memory freed.
+- *Still open:* the kernel takes the first pair of compute units
+  (Temporary in `Ready`), so a worker has few teams; the percentage of
+  units decided below replaces it.
+
 **Open after (p1).**
 - *Which units the processes' kernel takes,* as it holds every team slot
   of them. **Decided 2026-11-11:** a percentage of the available compute

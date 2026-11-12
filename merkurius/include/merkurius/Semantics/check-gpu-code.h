@@ -23,6 +23,10 @@
 //   calls, make only flat values, so that a GPU process allocates nothing
 //   but arrays. A target region's code may make terms, which go when the
 //   region ends.
+// - A loop under distribute parallel do, which a GPU process runs across its
+//   teams (docs/INPROGRESS.md, GPU processes that run loops), is in a GPU
+//   process kind's code, or a procedure of the module that it calls; in a
+//   target region, OpenMP's distribute parallel do is not implemented.
 // Each is an error that names the type, at the goal. A procedure of another
 // module is checked by the values it gives. It runs on the bodies that
 // determinism analysis builds.
