@@ -105,6 +105,38 @@ A step of the GPU process starts no kernel, which counts most where steps
 are short. The others time their steps from the host, a target region's
 start included.
 
+## Sparse tiles
+
+`life-sparse.m` steps only the tiles where life is, in one GPU process
+(`docs/INPROGRESS.md`, sparse tiles on one place). The world is
+`LIFE_WORLD` cells square (8192), dead beyond its edge, in tiles of
+`LIFE_TILE` cells square (64, a power of two that divides the world), and
+starts from a soup of side `LIFE_SOUP` (256) at its centre, as `life.m` and
+`life.c` do with `LIFE_SOUP`, which give the same population and checksum
+for the same world and `LIFE_STEPS` (1000).
+
+- **The pool** holds `LIFE_CAPACITY` tiles' cells (the world's tiles, at
+  most 8192, and the dead tile), `uint8`, in two arrays that swap after
+  each step. Tile 0 is the dead tile, all zero, which stands in for a
+  missing neighbour, so the step never branches on one.
+- **The tiles' fields** are an array each: the place in the world, nine
+  neighbours (the middle one the tile itself, so that a neighbouring cell's
+  tile comes from its row and column shifted by the tile's log), the live
+  cells and live edges after the last step, and the steps it has been
+  quiet. A directory gives the tile at each place of the world.
+- **A step** is a loop under `distribute` over the active tiles, a team
+  for each, around a loop under `parallel do` over the tile's cells, which
+  reduces its live cells and the bits of its live edges and corners.
+- **The bookkeeping,** on the process's lane after each step, ends a tile
+  that has had no live cell, and no live edge of a neighbour facing it, for
+  four steps, and starts one beyond each live edge or corner that faces no
+  tile; a loop across the teams zeroes the new tiles' cells.
+
+The output is the population, the checksum, the most active tiles at once
+and at the end, and the steps' times, with the bookkeeping's part;
+`LIFE_TRACE=1` prints each step's tiles and time, for a chart. The first
+argument `host` spawns the process at the host.
+
 ## Tests
 
 `test/Benchmarks/life.test` runs `life.m` sequentially and on the host's
@@ -112,5 +144,8 @@ threads, at -O0 and -O2; `life-gpu.test` on the GPU, checking that the
 kernels are SPMD and that no step copies the arrays; `life-c-gpu.test` the C
 program with both cell types; `life-two.test` and `life-two-gpu.test` the two
 nodes, with even and odd splits; `life-process-gpu.test` the GPU process,
-in parallel and on the process's own lane, and with `uint8` cells. All check the population and checksum, which
-come from an independent program in Python.
+in parallel and on the process's own lane, and with `uint8` cells;
+`life-sparse.test` the sparse program at the host and `life-sparse-gpu.test`
+on the GPU. All check the population and checksum, which come from an
+independent program in Python, or from the dense programs for the sparse
+one.
