@@ -3590,7 +3590,10 @@ so the GPU faulted.
   reserved slots record the process's slot, the team's number among the
   workers and how many; the process's wave makes its control block in its
   arena and sets them working. The waves of a working team take
-  iterations in turn (a team's threads a block of consecutive ones), and a
+  iterations in rounds (a team's threads a block of consecutive ones, the
+  teams apart by all of their threads), with a barrier across the team
+  after each round (d2, 2026-11-11), so that its waves stay together, as
+  the device runtime's loops do for stencils, and a
   barrier between the process and its workers (`ProcessArrive`,
   `WorkerArrive`) starts and ends each loop. When the process ends its
   workers set their slots reserved again before it tells the host, which
