@@ -3607,6 +3607,34 @@ so the GPU faulted.
 - The kernel took the first pair of compute units then, so a worker had
   few teams; the percentage below replaced it.
 
+**(d3) done 2026-11-11: reductions in loops across a process's teams.**
+- *The compile:* a reduction's value before the loop goes into a word of
+  the control block's results (`merk_device_loop_results`), and
+  `merk_device_process_loop` takes the number of reductions, at most 8
+  (`kProcessLoopReductions`); after the loop the results' words are the
+  reductions' values. Beside `merk_process_loop`, which now also takes
+  the thread's partial results, loading each reduction's value from them
+  and storing the body's next value back, the compile makes
+  `merk_process_loop_start`, which sets them to the operators'
+  identities, and `merk_process_loop_reduce`, which combines two sets by
+  the operators; both switch on the loop's number. The identities and
+  combiners are those of the target regions' `omp.declare_reduction`
+  (`ReductionIdentity`, `ReductionCombine`).
+- *The runtime:* each worker thread keeps its partials on its stack. After
+  its last round a team combines them: in each wave by exchanging them
+  with the lane half a wave, then a quarter ... away (`__gpu_shuffle_idx`),
+  then the waves', by the team's first thread, from the team's local memory
+  (`wavePartials`), into the team's words after the control block. The
+  process, after the barrier that ends the loop, combines the teams' words,
+  in team order, into the results. Floating-point sums so depend on the
+  number of teams, as a target region's do on its launch.
+- *Tests:* `process-loop-reductions.m` (the compile, and runs at the host,
+  parallel and sequential) and `process-loop-reductions-gpu.test`: a sum
+  from a value other than the identity, a minimum and a maximum in one
+  loop, floats, an exclusive or, a count beside an array updated in place,
+  a product, a maximum of floats and a loop with no iterations, of one to a
+  million iterations.
+
 **Open after (p1).**
 - *Which units the processes' kernel takes,* as it holds every team slot
   of them. **Decided 2026-11-11:** a percentage of the available compute

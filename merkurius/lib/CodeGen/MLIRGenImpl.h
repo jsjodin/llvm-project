@@ -616,6 +616,10 @@ private:
   // The module's omp.declare_reduction for the operator on `type`, an
   // integer or a float, by value, made the first time, as Flang's ReductionProcessor makes
   // and names them.
+  mlir::Value ReductionIdentity(
+      ReductionOp op, mlir::Type type, mlir::Location loc);
+  mlir::Value ReductionCombine(
+      ReductionOp op, mlir::Value a, mlir::Value b, mlir::Location loc);
   mlir::omp::DeclareReductionOp DeclareReduction(
       ReductionOp, mlir::Type type, mlir::Location);
   // The directive's leaves with their clauses; none after reporting a
@@ -658,17 +662,28 @@ private:
   // parallel do (docs/INPROGRESS.md, GPU processes that run loops): in a
   // device's compile of the kinds, each loop's call of the runtime, and the
   // body procedure that merk_process_loop calls for an iteration, by the
-  // loop's number, with the counter at `counter` among its inputs and the
-  // others from the loop's words.
+  // loop's number, with the counter at `counter` among its inputs, each
+  // reduction's value at its `input` from the thread's partial results, and
+  // the others from the loop's words; the body's `output` result is the
+  // reduction's next partial result.
+  struct ProcessLoopReduction {
+    unsigned input;
+    unsigned output;
+    ReductionOp op;
+    mlir::Type type;
+  };
   struct ProcessLoopCase {
     std::string body;
     llvm::SmallVector<mlir::Type> inputs;
     llvm::SmallVector<mlir::Type> results;
     unsigned counter;
+    llvm::SmallVector<ProcessLoopReduction> reductions;
   };
   llvm::SmallVector<ProcessLoopCase> processLoops_;
   void ProcessLoop(const ParallelLoop &, const ProcedureBody &, mlir::Location);
   void GenerateProcessLoops();
+  void ProcessLoopIteration(const ProcessLoopCase &loop, mlir::Block *entry,
+      mlir::Type generic, mlir::Location loc);
   // Whether a kind's code, or a procedure of the module that it calls, has
   // a loop under distribute parallel do, for which the kind takes teams.
   bool KindRunsLoops(const parser::ProcessDecl &);
