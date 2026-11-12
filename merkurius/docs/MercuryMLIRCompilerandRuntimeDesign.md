@@ -4589,6 +4589,50 @@ rather than one after another on the process's lane, did not change it; the
 combine's code does 214 scratch accesses, its partial results being in
 arrays whose addresses reach the generated combine as integers.
 
+The team combine, 2026-11-12, on 232e9ac212a1 with its changes, not
+committed. Its partial results reach the generated combine as pointers, and
+it handles all 8 words, so that the indices are constants: 20 scratch
+accesses, against 214. That first gave wrong sums, from an Attributor
+miscompile that 232e9ac212a1 fixes (docs/INPROGRESS.md, GPU experiments).
+Dot at 1024 elements, 1000 runs, µs from the fastest, three alternating
+rounds, with the combine cut short at each step (the variants that skip work
+give wrong sums):
+
+| Combine | Dot |
+| --- | ---: |
+| before the loops left the kinds' registers | 6.6, 6.7, 6.6 |
+| 75e58a86b854's loops (c28370a011ce) | 27.5, 28.6, 25.9 |
+| pointers, constant indices | 13.5, 12.0, 11.8 |
+| returning at once | 6.4, 6.5, 6.4 |
+| the wave's lanes only | 5.1, 4.5, 6.7 |
+| and the waves', to the team's barrier | 5.1, 6.2, 6.8 |
+| and the first thread adding the waves' | 10.9, 10.0, 11.2 |
+| and the team's store and count | 11.1, 12.8, 11.4 |
+| all but the last team's own combine | 13.5, 13.1, 12.5 |
+| all, the count relaxed between fences | 12.4, 11.3, 13.9 |
+
+The first wave combining the waves' in parallel, rather than the first
+thread one after another, gave 12.1, so the step between the third and
+fourth variants is not that loop alone. Even returning at once, Dot takes
+6.4 µs at 100% of the units, 2.6 at 50% and 2.3 at 25%, while Copy stays at
+2.1 to 2.2: a loop with reductions has a cost that grows with the number of
+teams outside the combine, not yet found. Copy, Mul, Add and Triad took 2.2
+to 2.5 µs throughout.
+
+Against `bandwidth.c` (README, Compared with C), the same clang, 2^25
+elements, five alternating rounds, the median MB/s:
+
+| Kernel | C | GPU process | GPU process, c28370a011ce |
+| --- | ---: | ---: | ---: |
+| Copy | 440,463 | 494,083 | 485,609 |
+| Mul | 388,031 | 389,307 | 391,100 |
+| Add | 86,763 | 427,708 | 428,035 |
+| Triad | 63,600 | 421,749 | 424,560 |
+| Dot | 526,052 | 484,767 | 477,201 |
+
+Dot is 8% below C. At this size a run of Dot takes 1.1 ms, of which the
+combine is under 1%: the difference is in the loop.
+
 ### Idle waves of GPU processes' kernels
 
 `process-loops.m`'s worker run without `-fopenmp`, so its process runs its
