@@ -658,14 +658,18 @@ private:
   void GenerateProcessStarts();
   merk::ProcOp GenerateProcessStart(const parser::ProcessDecl &);
   bool RegisterProcessImages();
-  // The loops that GPU processes run across their teams, under distribute
-  // parallel do (docs/INPROGRESS.md, GPU processes that run loops): in a
-  // device's compile of the kinds, each loop's call of the runtime, and the
-  // body procedure that merk_process_loop calls for an iteration, by the
+  // The loops that GPU processes run across their teams (docs/INPROGRESS.md,
+  // GPU processes that run loops): in a device's compile of the kinds, each
+  // loop's call of the runtime, and the body procedure that
+  // merk_process_loop, or merk_team_loop, calls for an iteration, by the
   // loop's number, with the counter at `counter` among its inputs, each
   // reduction's value at its `input` from the thread's partial results, and
   // the others from the loop's words; the body's `output` result is the
-  // reduction's next partial result.
+  // reduction's next partial result. A loop under distribute parallel do
+  // runs across the threads of the process's teams; under distribute, across
+  // its teams, on each team's first wave; and under parallel do in the body
+  // of a distribute loop, across the threads of the team.
+  enum class ProcessLoopKind { Threads, Teams, Team };
   struct ProcessLoopReduction {
     unsigned input;
     unsigned output;
@@ -678,9 +682,18 @@ private:
     llvm::SmallVector<mlir::Type> results;
     unsigned counter;
     llvm::SmallVector<ProcessLoopReduction> reductions;
+    ProcessLoopKind kind;
   };
   llvm::SmallVector<ProcessLoopCase> processLoops_;
-  void ProcessLoop(const ParallelLoop &, const ProcedureBody &, mlir::Location);
+  void ProcessLoop(const ParallelLoop &, ProcessLoopKind, const ProcedureBody &,
+      mlir::Location);
+  // The bodies of the module that the bodies of GPU processes' distribute
+  // loops reach, whose parallel do loops run across a team's threads.
+  llvm::DenseSet<const ProcedureBody *> teamBodies_;
+  void CollectTeamBodies();
+  void CalledBodies(const Body &goal,
+      llvm::SmallVectorImpl<const ProcedureBody *> &called,
+      llvm::SmallVectorImpl<const Body *> *distributes);
   void GenerateProcessLoops();
   void ProcessLoopShare(const ProcessLoopCase &loop, mlir::Block *entry,
       mlir::Type generic, mlir::Location loc);
@@ -688,7 +701,8 @@ private:
       const ProcessLoopCase &loop, mlir::Location loc);
   static bool IsReductionInput(const ProcessLoopCase &loop, std::size_t index);
   // Whether a kind's code, or a procedure of the module that it calls, has
-  // a loop under distribute parallel do, for which the kind takes teams.
+  // a loop under distribute parallel do or distribute, for which the kind
+  // takes teams.
   bool KindRunsLoops(const parser::ProcessDecl &);
   // The target region that code is generated in now, if any.
   mlir::omp::TargetOp EnclosingTarget();

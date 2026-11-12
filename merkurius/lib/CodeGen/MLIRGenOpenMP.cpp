@@ -764,9 +764,14 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
       llvm::omp::Directive::OMPD_target_teams_distribute_parallel_do};
   // A loop that a GPU process runs across its teams (docs/INPROGRESS.md, GPU
   // processes that run loops), which check-gpu-code allows only in a GPU
-  // kind's code: on the host, as in a kind spawned there, a parallel do.
+  // kind's code: on the host, as in a kind spawned there, a parallel do. In
+  // a device's compile of GPU processes, a parallel do is in the body of a
+  // distribute loop (Omp), and runs across a team's threads.
   bool processLoop{
-      directive.id == llvm::omp::Directive::OMPD_distribute_parallel_do};
+      directive.id == llvm::omp::Directive::OMPD_distribute_parallel_do ||
+      directive.id == llvm::omp::Directive::OMPD_distribute};
+  bool teamLoop{target_.options().processKernels &&
+      directive.id == llvm::omp::Directive::OMPD_parallel_do};
   if (directive.id != llvm::omp::Directive::OMPD_parallel_do && !offloaded &&
       !processLoop) {
     NotYet(at, "the " + name + " directive");
@@ -997,9 +1002,13 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
     }
     reduction.output = *output;
   }
-  if (processLoop && target_.options().processKernels) {
+  if ((processLoop || teamLoop) && target_.options().processKernels) {
     ProcessLoop({goals, trip, call, loop, *loopBody, bodyCall, bodyProcedure,
                     reductions, false, false, false, at},
+        teamLoop ? ProcessLoopKind::Team
+            : directive.id == llvm::omp::Directive::OMPD_distribute
+            ? ProcessLoopKind::Teams
+            : ProcessLoopKind::Threads,
         body, Location(goal.tokens));
     return;
   }
@@ -1539,12 +1548,16 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
   const parser::OmpDirective &directive{*goal.directive};
   parser::CharBlock at{Where(goal.tokens)};
   // GPU processes' kernels are compiled without OpenMP: of the directives,
-  // they run only the loops across their teams (-fprocess-loops), and
-  // check-gpu-code reports any other in what the kinds reach. The module's
-  // other procedures, which the kernels' compile leaves out of the image
-  // (Lowering's FilterKernelProcs), run the goal as it is.
+  // they run only the loops across their teams (-fprocess-loops), and the
+  // parallel do loops in the bodies of distribute loops, across a team's
+  // threads; check-gpu-code reports any other in what the kinds reach. The
+  // module's other procedures, which the kernels' compile leaves out of the
+  // image (Lowering's FilterKernelProcs), run the goal as it is.
   if (target_.options().processKernels &&
-      directive.id != llvm::omp::Directive::OMPD_distribute_parallel_do) {
+      directive.id != llvm::omp::Directive::OMPD_distribute_parallel_do &&
+      directive.id != llvm::omp::Directive::OMPD_distribute &&
+      (directive.id != llvm::omp::Directive::OMPD_parallel_do ||
+          !teamBodies_.contains(&body))) {
     Goal(*goal.goals.front(), body);
     return;
   }
