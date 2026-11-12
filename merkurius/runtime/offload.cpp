@@ -389,8 +389,9 @@ void FreeRegionArenas(std::uint64_t region) {
   }
 }
 
-std::size_t ArrayBytes(std::uint64_t size) {
-  return sizeof(std::uint64_t) * (1 + size);
+// The bytes of an array, from its header (array.h).
+std::size_t ArrayBytes(std::uint64_t header) {
+  return sizeof(std::uint64_t) * ArrayWordsOfHeader(header);
 }
 
 // Chunks of host memory that a device reads and writes directly, for a
@@ -616,12 +617,12 @@ unsigned HandleOpcode(void *raw, unsigned) {
     return rpc::RPC_SUCCESS;
   case rpcGiveArray:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
-      // In a fragment, as a message is.
-      std::uint64_t size{buffer->data[1]};
+      // In a fragment, as a message is. The device sends its header.
+      std::uint64_t header{buffer->data[1]};
       Fragment fragment;
-      void *copy{fragment.Allocate(ArrayBytes(size))};
+      void *copy{fragment.Allocate(ArrayBytes(header))};
       std::memcpy(copy, reinterpret_cast<const void *>(buffer->data[0]),
-          ArrayBytes(size));
+          ArrayBytes(header));
       FreePinnedChunks(reinterpret_cast<PinnedChunk *>(buffer->data[2]));
       buffer->data[0] = reinterpret_cast<std::uint64_t>(copy);
     });

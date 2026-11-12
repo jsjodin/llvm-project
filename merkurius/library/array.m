@@ -462,8 +462,8 @@
 :- import_module int.
 :- import_module require.
 
-% Temporary (chunk 1 step 6, docs/INPROGRESS.md): only generate, its folds
-% and the foldl family are compiled; the predicates code generation builds
+% Temporary (chunk 1 step 6, docs/INPROGRESS.md): only generate, its folds,
+% map, to_list and the foldl family are compiled; the predicates code generation builds
 % in are called through it, and the others are reported as not yet
 % implemented where they are called. Step 6 (d) compiles the rest.
 
@@ -475,6 +475,56 @@ generate(Size, Func) = Array :-
     else
         init(Size, Func(0), Array0),
         generate_from(1, Size, Func, Array0, Array)
+    ).
+
+to_list(Array, List) :-
+    to_list_before(Array, size(Array), [], List).
+
+to_list(Array) = List :-
+    to_list(Array, List).
+
+    % The elements before element I, in order, then List0.
+    %
+:- pred to_list_before(array(T)::in, int::in, list(T)::in, list(T)::out)
+    is det.
+
+to_list_before(Array, I, List0, List) :-
+    ( if I =< 0 then
+        List = List0
+    else
+        to_list_before(Array, I - 1, [Array ^ unsafe_elem(I - 1) | List0],
+            List)
+    ).
+
+map(Pred, Array0, Array) :-
+    Size = size(Array0),
+    ( if Size = 0 then
+        make_empty_array(Array)
+    else
+        Pred(Array0 ^ unsafe_elem(0), First),
+        init(Size, First, Array1),
+        map_from(1, Size, Pred, Array0, Array1, Array)
+    ).
+
+map(Func, Array0) = Array :-
+    map(apply_func(Func), Array0, Array).
+
+:- pred apply_func((func(T1) = T2)::in, T1::in, T2::out) is det.
+
+apply_func(Func, X, Func(X)).
+
+    % Element I of the new array is Pred's of element I of Array0, from I on.
+    %
+:- pred map_from(int::in, int::in, pred(T1, T2)::in(pred(in, out) is det),
+    array(T1)::in, array(T2)::array_di, array(T2)::array_uo) is det.
+
+map_from(I, Size, Pred, Array0, !Array) :-
+    ( if I >= Size then
+        true
+    else
+        Pred(Array0 ^ unsafe_elem(I), X),
+        unsafe_set(I, X, !Array),
+        map_from(I + 1, Size, Pred, Array0, !Array)
     ).
 
 :- pred generate_from(int::in, int::in, (func(int) = T)::in,

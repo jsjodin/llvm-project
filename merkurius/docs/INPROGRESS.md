@@ -564,7 +564,9 @@ standard library):
 - **Encoding.** A value is walked by its type_info, as the copy is, into
   items of 8 bytes, little-endian: an int, of any size, or a char as its
   value, a float as its bits, a string as its length and then its bytes,
-  padded to 8, an array as its length and then its elements, and a
+  padded to 8, an array as its length and then its elements, or, for a
+  narrow array ((s2) narrow array elements), its elements' bytes, padded
+  to 8, and a
   constructor, a tuple's too, as its functor number and then its arguments.
   So no value takes less than an item, which bounds an array's length by
   the bytes left. No addresses, no word size, no tag layout. Done in step 2
@@ -605,8 +607,9 @@ device is the first slice's sender, so the formats are made for it now:
   what specialized device code can write: items of fixed size, with no
   varints. The runtime's encoder, driven by type_infos, and the compiler's
   specialized one must give the same bytes, which a test compares.
-- **Arrays of numbers are one run.** An `array(float)` encodes as its
-  length and then its elements as they are in memory, on the little-endian
+- **Arrays of numbers are one run.** An `array(float)`, or an
+  `array(uint8)`, encodes as its length and then its elements as they are
+  in memory, on the little-endian
   machines we target, x86-64 and AMD and NVIDIA GPUs, so encoding and
   decoding it is one copy. The benchmarks' messages are such arrays, and
   later a payload in device memory goes to the NIC by RDMA with no copy at
@@ -3705,6 +3708,66 @@ cells a team steps.
   one tile to 400, more than the GPU has teams; the errors in
   `process-loops-errors.m`.
 
+**(s2) done 2026-11-12: narrow array elements,** for the demo's tiles of
+`uint8` cells (A demo, step 3), which had been a word each.
+- *The layout* (`runtime/array.h`): an array's first word is its header,
+  the size in the low 56 bits and the elements' width in the top byte.
+  Width 0 is a word each, every type's but these, so a word array's header
+  is its size, and its layout is as before. Widths 1, 2 and 3 are 1, 2 and
+  4 bytes each, for `int8` and `uint8`, `int16` and `uint16`, and `int32`,
+  `uint32`, `char` and types of constants only, as C holds them. The
+  elements take whole words, the last padded with zeros.
+- *Signedness is not recorded.* As a word, a narrow integer is
+  zero-extended wherever it is one (`ToBits`), so a narrow element read as
+  a word is the word that boxing it gives, and the element's type, which
+  every reader that needs its value has, a type_info or a known type, says
+  how to extend it.
+- *Polymorphic code* has only the pointer, so the width is in the array:
+  - A get or set of a type variable's elements branches on the header's
+    width, in `merk.array_load` and `merk.array_store`, which lowering adds
+    to the module, always inlined.
+  - An array made for a type variable's elements, `merk.array_new` and
+    `merk.array_from_list`, takes the type_info of what the variable stands
+    for (`width of %ti`), and the runtime's `merk_array_width` reads the
+    width from its descriptor's kind.
+  - Another module's abstract type is treated as a type variable, since
+    lowering does not see its layout, but its descriptor may say it is an
+    enumeration.
+  - The width of a known type follows the descriptors' kinds, the runtime's
+    rule, so the two cannot disagree: a notag of an `int8`, an `i8` to
+    LLVM, is a word, as its descriptor is a notag's.
+- *Everything that copies an array* copies its words, as the header says:
+  the collector, which follows no narrow element; messages' copies, local
+  and to and from a device, whose rings carry the header; target regions'
+  maps, over `merk.array_words`; and the device's copies to the host.
+- *On the wire* a narrow array is its length and then its elements' bytes,
+  padded to 8, as a string's are, so that it is one run, as arrays of numbers
+  are meant to be (The wire format, first version, below). Each character
+  must be a code point and each constant one of its type's.
+- *Also needed:* arrays of enumerations may now cross into target regions;
+  `array.map` and `array.to_list` are compiled.
+- *Rejected:*
+  - *The width from a type_info at every access* in polymorphic code: every
+    get and set would need the type_info, and the runtime's copies, which
+    have none for a root array, could not size an array.
+  - *A second header word* for the width: two words for every array, and
+    the word arrays' layout would change for nothing.
+  - *Signedness in the header:* nothing needs it (above).
+  - *One byte for enumerations:* a type of more than 256 constants would
+    need a second rule; four bytes hold any, and `uint8` is there for cells.
+  - *One item per element on the wire,* as the first version had: a `uint8`
+    array would take eight times its bytes, and not be one copy.
+- *Tests:* `narrow-arrays.m` (every narrow type, written, unified and
+  compared, through the library's polymorphic code and the test's own, kept
+  by the collector at every allocation, with mmc's output);
+  `omp-target-narrow-arrays.m` and its GPU run, which checks the mapped
+  sizes; `process-narrow-arrays.m` and its GPU run, arrays of 0 to 70
+  elements both ways; `Dialect/Merk/arrays.mlir`; the encodings in
+  `encode-checks.m` and `EncodeTest.cpp`.
+- *Found meanwhile:* mmc reorders a conjunction so that a call that would
+  clobber a unique array comes after the array's other uses; merkc does not,
+  and reports a misleading "has inst free" error. To be fixed next.
+
 **(d4) measured 2026-11-11: Bandwidth's kernels in a GPU process.**
 `benchmarks/bandwidth/bandwidth-process.m` runs the five kernels across a
 process's teams; the numbers are in the design document, Measurements,
@@ -4295,8 +4358,9 @@ beat, as a decomposition fixed in advance computes every tile.
   loops, sequential builds too. Done 2026-11-12 (GPU processes that run
   loops, (s1)).
 - (s2) Narrow array elements. Tests for each element type, on the host and
-  the GPU, sent and mapped. Then dense Life in a GPU process with `uint8`
-  cells, measured against `life.c`'s `uint8_t`.
+  the GPU, sent and mapped. Done 2026-11-12 ((s2) narrow array elements,
+  below). Then dense Life in a GPU process with `uint8` cells, measured
+  against `life.c`'s `uint8_t`.
 - (s3) Flat records' steps 1 to 3, after the user's two decisions.
 - (s4) The `LIFE_SOUP` setting in `life.m` and `life.c`, for the dense check
   and the bar.

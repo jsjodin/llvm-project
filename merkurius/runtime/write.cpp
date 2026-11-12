@@ -14,9 +14,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include <array>
+#include "array.h"
 #include "descriptor.h"
 #include "walk.h"
+#include <array>
 #include <cinttypes>
 #include <cmath>
 #include <cstdarg>
@@ -444,11 +445,12 @@ void WriteTyped(Out &out, Word value, const Type &type, int context) {
     const Word *array{reinterpret_cast<const Word *>(value)};
     Word element{(Word{0} << kTagBits) | kVariableTag};
     out.Put("array([");
-    for (Word i{0}; i < array[0]; ++i) {
+    for (Word i{0}; i < ArraySize(array); ++i) {
       if (i != 0) {
         out.Put(", ");
       }
-      WriteValue(out, array[1 + i], element, &type.environment, kArgumentPriority);
+      WriteValue(out, LoadElement(array, i), element, &type.environment,
+          kArgumentPriority);
     }
     out.Put("])");
     return;

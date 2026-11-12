@@ -29,6 +29,10 @@
 % OUTPUT-NEXT:"": 0000000000000000
 % OUTPUT-NEXT:[1, 2]: 01000000000000000100000000000000010000000000000002000000000000000000000000000000
 % OUTPUT-NEXT:array([1.5]): 0100000000000000000000000000f83f
+% OUTPUT-NEXT:array([1u8, 255u8, 7u8]): 030000000000000001ff070000000000
+% OUTPUT-NEXT:array([-2i16, 3i16]): 0200000000000000feff030000000000
+% OUTPUT-NEXT:array(['a', 'é']): 020000000000000061000000e9000000
+% OUTPUT-NEXT:array([blue, red]): 02000000000000000200000000000000
 % OUTPUT-NEXT:{1, "a"}: 0000000000000000010000000000000001000000000000006100000000000000
 % OUTPUT-NEXT:blue: 0200000000000000
 % OUTPUT-NEXT:yes(unit): 01000000000000000000000000000000
@@ -37,7 +41,7 @@
 % OUTPUT-NEXT:round trips through a type_info: 3000 checked, 0 differ
 % OUTPUT-NEXT:pairs of maybe lists and tuples: 3000 checked, 0 differ
 % OUTPUT-NEXT:a list of 100000 terms: 1 checked, 0 differ
-% OUTPUT-NEXT:truncations: 0 of 8072 decoded
+% OUTPUT-NEXT:truncations: 0 of 9168 decoded
 % OUTPUT-NEXT:an extra item: 0 of 200 decoded
 % OUTPUT-NEXT:changed bytes: 20000 decoded or rejected, none crashed
 % OUTPUT-NEXT:closure: a closure cannot be sent to another node yet
@@ -48,6 +52,10 @@
 % OUTPUT-NEXT:int8 range: an integer is out of its type's range
 % OUTPUT-NEXT:uint16 range: an integer is out of its type's range
 % OUTPUT-NEXT:char range: a character is not a code point
+% OUTPUT-NEXT:narrow padding: an array's padding is not zeros
+% OUTPUT-NEXT:narrow length: an array is longer than the bytes left
+% OUTPUT-NEXT:narrow char range: a character is not a code point
+% OUTPUT-NEXT:narrow enum number: a functor's number is not one of its type's
 % OUTPUT-NEXT:NUL in a string: a string has a NUL
 % OUTPUT-NEXT:padding: a string's padding is not zeros
 % OUTPUT-NEXT:empty: the bytes end within a value
@@ -170,7 +178,7 @@ next(Bound, N, S0, S) :-
 % Terms with every kind of value a message can hold: integers of each size,
 % floats, strings, an ill-formed one too, characters, an enum, a dummy, a
 % notag of a float and one of a term, tuples of one and of two, lists,
-% arrays, polymorphic types, and more constructors with arguments than
+% arrays, narrow ones too, polymorphic types, and more constructors with arguments than
 % there are tags, so that the last tag is shared and those cells have
 % secondary tags.
 
@@ -191,6 +199,7 @@ next(Bound, N, S0, S) :-
     ;       temp(celsius)
     ;       wide(int16, int32, int64, uint, uint8, uint16, uint32, uint64)
     ;       one({string})
+    ;       narrow(array(uint8), array(int16), array(char), array(colour))
     ;       nothing(unit).
 
 :- type wrapped ---> wrapped(t).
@@ -202,7 +211,7 @@ next(Bound, N, S0, S) :-
 
 :- pred gen(int::in, t::out, seed::in, seed::out) is det.
 gen(Depth, T, !S) :-
-    next(( if Depth =< 0 then 7 else 17 ), K, !S),
+    next(( if Depth =< 0 then 7 else 18 ), K, !S),
     ( if K = 0 then
         T = leaf
     else if K = 1 then
@@ -262,6 +271,14 @@ gen(Depth, T, !S) :-
         )
     else if K = 15 then
         T = one({"single"})
+    else if K = 16 then
+        next(20, N, !S),
+        T = narrow(
+            array.generate(N, (func(I) = uint8.cast_from_int(I * 41 + N))),
+            array.generate(N mod 5, (func(I) = int16.cast_from_int(I - 2))),
+            array.generate(N mod 3, (func(I) = det_index0(['a', 'λ', '😀'], I))),
+            array.generate(N mod 4, (func(I) = det_index0([red, green, blue,
+                red], I))))
     else
         T = nothing(unit)
     ).
@@ -294,6 +311,10 @@ check_golden(!IO) :-
     golden("\"\"", "", !IO),
     golden("[1, 2]", [1, 2], !IO),
     golden("array([1.5])", array([1.5]), !IO),
+    golden("array([1u8, 255u8, 7u8])", array([1u8, 255u8, 7u8]), !IO),
+    golden("array([-2i16, 3i16])", array([-2i16, 3i16]), !IO),
+    golden("array(['a', 'é'])", array(['a', 'é']), !IO),
+    golden("array([blue, red])", array([blue, red]), !IO),
     golden("{1, \"a\"}", {1, "a"}, !IO),
     golden("blue", blue, !IO),
     golden("yes(unit)", yes(unit), !IO),
@@ -453,11 +474,18 @@ check_hostile(Terms, !IO) :-
         remove_error_prefix(encode(Closure)) ++ "\n", !IO),
     rejected("huge string", "", item(1 << 40) ++ item(0), !IO),
     rejected("huge array", array([1]), item(1 << 40) ++ item(0), !IO),
-    rejected("functor number", leaf, item(17), !IO),
+    rejected("functor number", leaf, item(18), !IO),
     rejected("enum number", red, item(3), !IO),
     rejected("int8 range", 0i8, item(128), !IO),
     rejected("uint16 range", 0u16, item(65536), !IO),
     rejected("char range", 'a', item(0x110000), !IO),
+    rejected("narrow padding", array([1u8]), item(1) ++ "0100000000000009",
+        !IO),
+    rejected("narrow length", array([1u8]), item(9) ++ item(0), !IO),
+    rejected("narrow char range", array(['a']),
+        item(1) ++ "0000110000000000", !IO),
+    rejected("narrow enum number", array([red]),
+        item(1) ++ "0300000000000000", !IO),
     rejected("NUL in a string", "", item(2) ++ "6100000000000000", !IO),
     rejected("padding", "", item(1) ++ "6101000000000000", !IO),
     rejected("empty", 0, "", !IO),

@@ -15,7 +15,10 @@
 //   sign-extended; a float as its bits;
 // - a string as its length in bytes, then its bytes, with zeros to a multiple
 //   of 8;
-// - an array as its length, then its elements;
+// - an array as its length, then its elements; one of int8 to uint32,
+//   characters or a type of constants only, whose elements memory holds
+//   in 1, 2 or 4 bytes (array.h), as those bytes, little-endian, with
+//   zeros to a multiple of 8;
 // - a value of a type of constructors, a tuple's too, as its functor's number
 //   in the order declared, then its arguments.
 //
@@ -37,6 +40,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "encode.h"
+#include "array.h"
 #include "sha256.h"
 #include "walk.h"
 #include <cstring>
@@ -83,10 +87,15 @@ public:
 
   void Text(const char *text, std::size_t bytes) {
     Item(bytes);
-    std::size_t padded{(bytes + 7) & ~std::size_t{7}};
+    Bytes(text, bytes);
+  }
+
+  // Bytes, then zeros to a multiple of 8.
+  void Bytes(const void *bytes, std::size_t count) {
+    std::size_t padded{(count + 7) & ~std::size_t{7}};
     std::uint8_t *at{Reserve(padded)};
-    std::memcpy(at, text, bytes);
-    std::memset(at + bytes, 0, padded - bytes);
+    std::memcpy(at, bytes, count);
+    std::memset(at + count, 0, padded - count);
   }
 
   // Words that are the same on the wire.
@@ -157,14 +166,19 @@ void Writer::EncodeTyped(Word value, const Type &type) {
     return Text(text, std::strlen(text));
   }
   case Array: {
+    // A narrow array's elements are their bytes, as in memory (array.h).
     const Word *array{reinterpret_cast<const Word *>(value)};
-    Item(array[0]);
-    if (array[0] != 0 &&
-        SameInMemory(Resolve(kElement, &type.environment).ctor)) {
-      Words(array + 1, array[0]);
+    Word size{ArraySize(array)};
+    Item(size);
+    if (!IsWordArray(array)) {
+      Bytes(array + 1, size * ElementBytes(ArrayWidthCode(array)));
       return;
     }
-    for (Word i{0}; i < array[0] && !error; ++i) {
+    if (size != 0 && SameInMemory(Resolve(kElement, &type.environment).ctor)) {
+      Words(array + 1, size);
+      return;
+    }
+    for (Word i{0}; i < size && !error; ++i) {
       Encode(array[1 + i], kElement, &type.environment);
     }
     return;
@@ -293,6 +307,8 @@ private:
   }
 
   bool DecodeString(Word &value);
+  bool DecodeNarrow(
+      const TypeCtor *element, Word *array, Word size, Word code, Word &value);
   bool DecodeTerm(const Type &type, Word &value);
 
   const std::uint8_t *next_;
@@ -324,6 +340,39 @@ bool Reader::DecodeString(Word &value) {
   next_ += padded;
   left_ -= padded;
   value = reinterpret_cast<Word>(text);
+  return true;
+}
+
+// A narrow array's elements, `size` of the width's code, from their bytes
+// and padding, which the caller has checked are there, into `array`, whose
+// header is made; each character must be a code point and each enumeration's
+// constant one of its type's.
+bool Reader::DecodeNarrow(
+    const TypeCtor *element, Word *array, Word size, Word code, Word &value) {
+  std::size_t bytes{static_cast<std::size_t>(size * ElementBytes(code))};
+  std::size_t padded{(bytes + 7) & ~std::size_t{7}};
+  for (std::size_t i{bytes}; i < padded; ++i) {
+    if (next_[i] != 0) {
+      return Fail("an array's padding is not zeros");
+    }
+  }
+  std::memcpy(array + 1, next_, padded);
+  next_ += padded;
+  left_ -= padded;
+  // Any bits are an integer of their width.
+  if (element->kind != Char && element->kind != Enum) {
+    value = reinterpret_cast<Word>(array);
+    return true;
+  }
+  Word most{element->kind == Char ? Word{0x10ffff} : element->functorCount - 1};
+  for (Word i{0}; i < size; ++i) {
+    if (LoadElement(array, i) > most) {
+      return Fail(element->kind == Char
+              ? "a character is not a code point"
+              : "a functor's number is not one of its type's");
+    }
+  }
+  value = reinterpret_cast<Word>(array);
   return true;
 }
 
@@ -362,14 +411,24 @@ bool Reader::DecodeTyped(const Type &type, Word &value) {
     if (!Item(size)) {
       return false;
     }
-    // Each element takes an item at least.
-    if (size > left_ / 8) {
+    // As wide as code generation makes an array of the element type. Each
+    // element takes an item at least, or a narrow one its bytes.
+    const TypeCtor *element{Resolve(kElement, &type.environment).ctor};
+    Word code{ArrayWidthOfKind(element->kind)};
+    if (size > left_ / ElementBytes(code)) {
+      return Fail("an array is longer than the bytes left");
+    }
+    Word words{ElementWords(size, code)};
+    if (sizeof(Word) * words > left_) {
       return Fail("an array is longer than the bytes left");
     }
     auto *array{
-        static_cast<Word *>(fragment_.Allocate(sizeof(Word) * (1 + size)))};
-    array[0] = size;
-    if (size != 0 && SameInMemory(Resolve(kElement, &type.environment).ctor)) {
+        static_cast<Word *>(fragment_.Allocate(sizeof(Word) * (1 + words)))};
+    array[0] = ArrayHeader(size, code);
+    if (code != kArrayWords) {
+      return DecodeNarrow(element, array, size, code, value);
+    }
+    if (size != 0 && SameInMemory(element)) {
       std::memcpy(array + 1, next_, sizeof(Word) * size);
       next_ += sizeof(Word) * size;
       left_ -= sizeof(Word) * size;

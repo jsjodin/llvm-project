@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "roots.h"
+#include "array.h"
 #include "descriptor.h"
 #include "fragment.h"
 #include "heap.h"
@@ -787,7 +788,7 @@ void Collector::ForwardString(Word *slot) {
   *slot = reinterpret_cast<Word>(to);
 }
 
-// `type` is null for an array of words that are not pointers.
+// `type` is null for an array of numbers.
 void Collector::ForwardArray(Word *slot, const Type *type) {
   Word value{*slot};
   FromChunk *chunk{FindFrom(value)};
@@ -800,11 +801,13 @@ void Collector::ForwardArray(Word *slot, const Type *type) {
     *slot = reinterpret_cast<Word>(to);
     return;
   }
-  Word size{array[0]};
-  to = CopyOut(chunk, array, 1 + size, sizeof(Word) * (1 + size));
+  Word size{ArraySize(array)};
+  Word words{ArrayWords(array)};
+  to = CopyOut(chunk, array, words, sizeof(Word) * words);
   Forward(chunk, array, to);
   *slot = reinterpret_cast<Word>(to);
-  if (type && size != 0) {
+  // Narrow elements are numbers (array.h).
+  if (type && size != 0 && IsWordArray(to)) {
     const Environment *kept{KeepEnvironment(type->environment)};
     Word element{(Word{0} << kTagBits) | kVariableTag};
     Push({to + 1, nullptr, element, kept, size});

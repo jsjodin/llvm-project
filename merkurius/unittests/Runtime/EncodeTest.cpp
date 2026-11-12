@@ -17,8 +17,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "encode.h"
-#include "sha256.h"
+#include "array.h"
 #include "gtest/gtest.h"
+#include "sha256.h"
 #include <cstdint>
 #include <cstring>
 #include <random>
@@ -179,8 +180,19 @@ const Word kArrayOfIntCell[2]{
 const Word kArrayOfCharCell[2]{
     reinterpret_cast<Word>(&kArray), reinterpret_cast<Word>(&kChar)};
 
+const TypeCtor kInt8{
+    Int8, 0, 0, 0, "", "int8", nullptr, nullptr, nullptr, {}, nullptr, nullptr};
+const TypeCtor kUint16{Uint16, 0, 0, 0, "", "uint16", nullptr, nullptr, nullptr,
+    {}, nullptr, nullptr};
+const Word kArrayOfInt8Cell[2]{
+    reinterpret_cast<Word>(&kArray), reinterpret_cast<Word>(&kInt8)};
+const Word kArrayOfUint16Cell[2]{
+    reinterpret_cast<Word>(&kArray), reinterpret_cast<Word>(&kUint16)};
+
 Word ArrayOfInt() { return reinterpret_cast<Word>(kArrayOfIntCell) + 1; }
 Word ArrayOfChar() { return reinterpret_cast<Word>(kArrayOfCharCell) + 1; }
+Word ArrayOfInt8() { return reinterpret_cast<Word>(kArrayOfInt8Cell) + 1; }
+Word ArrayOfUint16() { return reinterpret_cast<Word>(kArrayOfUint16Cell) + 1; }
 
 Word IntType() { return reinterpret_cast<Word>(&kInt); }
 Word StringType() { return reinterpret_cast<Word>(&kString); }
@@ -265,6 +277,64 @@ TEST(EncodeTest, ArrayOfIntRoundTrip) {
   for (Word i{0}; i <= 1000; ++i) {
     EXPECT_EQ(decoded[i], array[i]);
   }
+}
+
+// A narrow array (array.h) is on the wire as it is in memory: its length,
+// then its elements' bytes, with zeros to a multiple of 8.
+TEST(EncodeTest, ArrayOfInt8ExactBytes) {
+  // Header: 3 elements, 1 byte each; then -1, 127, -128 and padding.
+  const Word array[2]{ArrayHeader(3, kArrayBytes1), 0x807fff};
+  EXPECT_EQ(EncodeHex(reinterpret_cast<Word>(array), ArrayOfInt8()),
+      "0300000000000000"
+      "ff7f800000000000");
+}
+
+TEST(EncodeTest, ArrayOfInt8Decodes) {
+  std::uint8_t bytes[16]{3, 0, 0, 0, 0, 0, 0, 0, 0xff, 0x7f, 0x80};
+  Fragment fragment;
+  Word value;
+  ASSERT_EQ(
+      Decode(bytes, sizeof bytes, ArrayOfInt8(), fragment, value), nullptr);
+  const Word *array{reinterpret_cast<const Word *>(value)};
+  EXPECT_EQ(array[0], ArrayHeader(3, kArrayBytes1));
+  EXPECT_EQ(array[1], Word{0x807fff});
+}
+
+TEST(EncodeTest, ArrayOfUint16RoundTrip) {
+  // 13 elements take 4 words after the header, the last half padding.
+  constexpr Word kSize{13};
+  Word array[1 + 4]{};
+  array[0] = ArrayHeader(kSize, kArrayBytes2);
+  for (Word i{0}; i < kSize; ++i) {
+    StoreElement(array, i, i * 5003 + 1);
+  }
+  Encoded encoded;
+  ASSERT_EQ(
+      Encode(reinterpret_cast<Word>(array), ArrayOfUint16(), encoded), nullptr);
+  EXPECT_EQ(encoded.size, 8u * (1 + 4));
+  Fragment fragment;
+  Word value;
+  ASSERT_EQ(
+      Decode(encoded.bytes, encoded.size, ArrayOfUint16(), fragment, value),
+      nullptr);
+  std::free(encoded.bytes);
+  const Word *decoded{reinterpret_cast<const Word *>(value)};
+  for (Word i{0}; i < 1 + 4; ++i) {
+    EXPECT_EQ(decoded[i], array[i]);
+  }
+}
+
+// The padding must be zeros, so that a value has one encoding, and the
+// bytes must be there.
+TEST(EncodeTest, ArrayOfInt8IsChecked) {
+  std::uint8_t bytes[16]{3, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 0, 0, 0, 0, 9};
+  Fragment fragment;
+  Word value;
+  EXPECT_STREQ(Decode(bytes, sizeof bytes, ArrayOfInt8(), fragment, value),
+      "an array's padding is not zeros");
+  std::uint8_t longer[16]{9};
+  EXPECT_STREQ(Decode(longer, sizeof longer, ArrayOfInt8(), fragment, value),
+      "an array is longer than the bytes left");
 }
 
 // An array of characters is read an element at a time, to check each.
