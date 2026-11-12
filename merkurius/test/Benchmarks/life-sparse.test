@@ -1,0 +1,67 @@
+Game of Life on sparse tiles (benchmarks/life/life-sparse.m), its process
+spawned at the host, on small worlds: tiles start where life reaches them
+and end where it dies out, and the population and checksum are those of
+the dense programs, life.m and life.c, for the same world and soup
+(life.test), as Life is exact. The worlds cover tiles of 4 to 64 cells,
+soups from none to the whole world, a side that is not a power of two,
+gliders that reach the world's edge, and the pool running out.
+
+Sequential, at -O0 and -O2, and with the loops on the host's threads at -O2.
+The -O0 build has no --offload-arch: AMDGPU's code generation at -O0 stops
+on its musttail calls in divergent control flow (design document, "LLVM
+bugs to report").
+REQUIRES: amdgpu-registered-target, libomp
+RUN: merkc -O0 -fdo-loops -fprocess-declarations %libomp-flags %S/../../benchmarks/life/life-sparse.m -o %t0
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/life/life-sparse.m -o %t2
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/life/life-sparse.m -o %t.omp
+
+RUN: %libomp-env LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t0 host | FileCheck %s --check-prefix=A
+RUN: %libomp-env LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t2 host | FileCheck %s --check-prefix=A
+RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t.omp host | FileCheck %s --check-prefix=A
+A: Game of Life, Mercury, GPU process, sparse tiles
+A-NEXT: World: 256 x 256 cells, tiles of 16 x 16, 256 in the pool
+A-NEXT: Soup: 64 x 64 cells at the centre
+A-NEXT: Steps: 50
+A-NEXT: Population: 562
+A-NEXT: Checksum: 17668223
+A-NEXT: Active tiles: 36 at most, 32 at the end
+
+RUN: %libomp-env LIFE_WORLD=128 LIFE_TILE=8 LIFE_SOUP=64 LIFE_STEPS=2000 %t2 host | FileCheck %s --check-prefix=EDGE
+RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_WORLD=128 LIFE_TILE=8 LIFE_SOUP=64 LIFE_STEPS=2000 %t.omp host | FileCheck %s --check-prefix=EDGE
+EDGE: Population: 747
+EDGE-NEXT: Checksum: 7031763
+
+RUN: %libomp-env LIFE_WORLD=200 LIFE_TILE=8 LIFE_SOUP=37 LIFE_STEPS=120 %t0 host | FileCheck %s --check-prefix=ODD
+RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_WORLD=200 LIFE_TILE=8 LIFE_SOUP=37 LIFE_STEPS=120 %t.omp host | FileCheck %s --check-prefix=ODD
+ODD: Population: 157
+ODD-NEXT: Checksum: 2963654
+
+RUN: %libomp-env LIFE_WORLD=256 LIFE_TILE=8 LIFE_SOUP=256 LIFE_STEPS=100 %t2 host | FileCheck %s --check-prefix=WHOLE
+WHOLE: Population: 4947
+WHOLE-NEXT: Checksum: 158368224
+WHOLE-NEXT: Active tiles: 1024 at most, 856 at the end
+
+RUN: %libomp-env LIFE_WORLD=64 LIFE_TILE=4 LIFE_SOUP=30 LIFE_STEPS=1000 %t2 host | FileCheck %s --check-prefix=SMALL
+SMALL: Population: 34
+SMALL-NEXT: Checksum: 82077
+
+RUN: %libomp-env LIFE_WORLD=512 LIFE_TILE=64 LIFE_SOUP=128 LIFE_STEPS=400 %t.omp host | FileCheck %s --check-prefix=WIDE
+WIDE: Population: 1899
+WIDE-NEXT: Checksum: 265191136
+
+RUN: %libomp-env LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=0 LIFE_STEPS=10 %t2 host | FileCheck %s --check-prefix=EMPTY
+EMPTY: Population: 0
+EMPTY-NEXT: Checksum: 0
+EMPTY-NEXT: Active tiles: 0 at most, 0 at the end
+
+Each step's line, for a chart.
+RUN: %libomp-env LIFE_TRACE=1 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t2 host | FileCheck %s --check-prefix=TRACE
+TRACE: Steps: 50
+TRACE-NEXT: step 0: {{[0-9]+}} tiles, {{[0-9.]+}} s, bookkeeping {{[0-9.]+}} s
+TRACE: step 49: 32 tiles,
+TRACE-NEXT: Population: 562
+
+RUN: %libomp-env LIFE_WORLD=256 LIFE_TILE=8 LIFE_SOUP=256 LIFE_STEPS=10 LIFE_CAPACITY=100 not %t2 host | FileCheck %s --check-prefix=FULL
+FULL: The pool ran out of tiles: raise LIFE_CAPACITY.
+RUN: %libomp-env LIFE_TILE=6 not %t2 host | FileCheck %s --check-prefix=USAGE
+USAGE: LIFE_TILE must be a power of two of at least 4 that divides LIFE_WORLD, LIFE_SOUP from 0 to LIFE_WORLD, LIFE_STEPS at least 2, and LIFE_CAPACITY at least 2.
