@@ -68,11 +68,14 @@ main(!IO) :-
 % The module has OpenMP's attributes, and the goal is an omp.target, a
 % generic kernel, whose map entries are its inputs, by copy, and its
 % outputs. The first input is the slot that the host gives the region, which
-% the region passes to the device before it makes a cell.
+% the region passes to the device before it makes a cell. Before it, the
+% host checks that GPU processes leave the default device units for it.
 % MERK: omp.is_gpu = false, omp.is_target_device = false, omp.target_triples = [], omp.version = #omp.version<version = 52>
 % MERK-LABEL: merk.proc private @omp_target.compute_6_0(
 % MERK-SAME: %[[N:arg0]]: i64, %[[D:arg1]]: i64, %[[X:arg2]]: f64
-% MERK: %[[SLOT:[0-9]+]] = merk.foreign_call @merk_region_enter() : () -> i64
+% MERK: %[[DEFAULT:[^ ]+]] = arith.constant -1 : i64
+% MERK-NEXT: merk.foreign_call @merk_check_region_units(%[[DEFAULT]]) : (i64) -> ()
+% MERK-NEXT: %[[SLOT:[0-9]+]] = merk.foreign_call @merk_region_enter() : () -> i64
 % MERK-NEXT: llvm.store %[[SLOT]], %[[SLOTS:[0-9]+]] : i64, !llvm.ptr
 % MERK-NEXT: %[[SLOTM:[0-9]+]] = omp.map.info var_ptr(%[[SLOTS]] : !llvm.ptr, i64) map_clauses(to) capture(ByCopy) name("region_slot")
 % MERK: llvm.store %[[N]], %[[NS:[0-9]+]] : i64, !llvm.ptr

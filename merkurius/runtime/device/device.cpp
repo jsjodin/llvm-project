@@ -201,6 +201,8 @@ template <typename T> using Local = __attribute__((address_space(3))) T;
 // that each wave of the team runs, by the wave's place in the team, which
 // the wave sets as the process starts.
 constexpr uint32_t kMostPlaceWaves{kPlaceTeamThreads / 32};
+// The most sleeps of an idle wave of merk_place between looks at its slot.
+constexpr uint32_t kMostPlaceSleeps{64};
 [[clang::loader_uninitialized]] Local<Arena *> placeArenas[kMostPlaceWaves];
 
 // A process's control block, in its arena, through which it runs its loops
@@ -745,9 +747,18 @@ void WorkerArrive(ProcessControl *control) {
   __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
 }
 
+// A word of the table, which is in host memory, read by the wave's first
+// active lane alone, for the whole wave: a read by every lane of every wave
+// of a kernel on all of a GPU's units, each polling, slowed a process ten
+// times (docs/INPROGRESS.md, Open after (p1)).
 uint64_t LoadSlotWord(uint64_t *word) {
-  return __gpu_read_first_lane_u64(__gpu_lane_mask(),
-      __scoped_atomic_load_n(word, __ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM));
+  uint64_t mask{__gpu_lane_mask()};
+  uint64_t value{0};
+  if (__gpu_is_first_in_lane(mask)) {
+    value =
+        __scoped_atomic_load_n(word, __ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
+  }
+  return __gpu_read_first_lane_u64(mask, value);
 }
 
 // Lane 0 of a wave whose slot the host has set running: the process, which
@@ -872,8 +883,18 @@ extern "C" void merk_device_place(PlaceTable *table) {
     return;
   }
   PlaceSlot *slot{PlaceSlots(table) + wave};
+  // A wave whose slot stays as it is sleeps twice as long before each look,
+  // up to kMostPlaceSleeps sleeps of about 3.5 us: every wave of a kernel on
+  // all of a GPU's units looking at the table in host memory every sleep
+  // slowed a process ten times (docs/INPROGRESS.md, Open after (p1)).
+  uint64_t seen{kPlaceIdle};
+  uint32_t sleeps{1};
   for (;;) {
     uint64_t state{LoadSlotWord(&slot->state)};
+    if (state != seen) {
+      seen = state;
+      sleeps = 1;
+    }
     if (state == kPlaceRunning) {
       if (__gpu_lane_id() == 0) {
         RunProcess(table, slot, wave, inTeam);
@@ -887,7 +908,12 @@ extern "C" void merk_device_place(PlaceTable *table) {
     if (state == kPlaceIdle && LoadSlotWord(&table->end)) {
       return;
     }
-    __builtin_amdgcn_s_sleep(127);
+    for (uint32_t i{0}; i < sleeps; ++i) {
+      __builtin_amdgcn_s_sleep(127);
+    }
+    if (sleeps < kMostPlaceSleeps) {
+      sleeps *= 2;
+    }
   }
 }
 

@@ -3601,9 +3601,8 @@ so the GPU faulted.
   to a million elements, a loop through a predicate, a negative step,
   floats, an empty loop, an echo beside the worker, a second worker that
   finds no team, and the arena's memory freed.
-- *Still open:* the kernel takes the first pair of compute units
-  (Temporary in `Ready`), so a worker has few teams; the percentage of
-  units decided below replaces it.
+- The kernel took the first pair of compute units then, so a worker had
+  few teams; the percentage below replaced it.
 
 **Open after (p1).**
 - *Which units the processes' kernel takes,* as it holds every team slot
@@ -3613,8 +3612,45 @@ so the GPU faulted.
   easiest for the user"), set by the environment or by the program before
   its first spawn on the GPU, with the rest for target regions and other
   kernels; a target region launched while GPU processes hold all the units
-  fails, saying why, rather than hangs. With (p2); until then the kernel
-  takes the first pair.
+  fails, saying why, rather than hangs. **Done 2026-11-11:**
+  - `process.set_gpu_units(gpu(N), Percent, !IO)`, beside spawn rather than
+    an argument of it, as the units are the kernel's, which only the spawn
+    that launches it could use, and a phase may want its own: it applies to
+    the GPU's next kernel, so a program calls it before its first spawn
+    there or between kernels, also while the last kernel is ending, as it
+    is when a monitor says that kernel's last process ended. While a
+    kernel runs processes, for the host, or for a share that is no
+    percentage, it is a software error. `MERK_GPU_PROCESS_UNITS` sets the
+    default, 100. (The user chose this over an optional argument of spawn,
+    2026-11-11.)
+  - The kernel takes the lowest pairs of the GPU's usable units, the
+    percentage of them rounded up (`compute-units.h`, `KeepShare`). Each
+    launch makes a queue with that mask if the GPU's latest queue has
+    other units; the reaper destroys an old queue once no kernel on it is
+    left. One queue a GPU is in use at a time, apart from a kernel that is
+    ending, so KFD's queue slots are not at risk.
+  - Before a target region the host calls `merk_check_region_units` with
+    the region's device, or -1 for OpenMP's default: on a GPU whose
+    running processes' kernel holds every usable unit, the region would
+    never start, and it is a software error. A spawn that launches the
+    kernel while regions hold units still fails as before, its teams not
+    starting.
+  - *Idle waves back off:* with the kernel on all of the units, the waves
+    that wait for processes, each reading its slot in host memory every
+    3.5 µs, slowed a running process tenfold (`process-loops-gpu`'s
+    sequential run took over 120 s). The wave's first lane alone reads the
+    slot, and an idle wave doubles its sleep up to about 225 µs, resetting
+    when its slot changes; the run takes 2.3 s (design document,
+    Measurements, Idle waves of GPU processes' kernels).
+  - *Scratch:* with a 16 KiB stack, a kernel on one pair of units has a
+    team held back, as before, but on 20 or 40 units all its teams started;
+    why is not known. `process-teams-gpu.test` keeps the held case at 1%.
+  - Tests: `compute-units.test` (the shares), `process-places-gpu.test`
+    (phases alternating 100% and 50%, a change while a kernel runs, for
+    the host, of 0, a bad `MERK_GPU_PROCESS_UNITS`, and the slot-filling
+    case at 1%, one pair), `omp-target-region-rings-gpu.test` (regions
+    beside a kernel at 50%, and the error at 100%), and
+    `region-arena-beside-process.m`, which calls `set_gpu_units`.
 - **Decided 2026-11-11: spawning names the kind,** as
   `spawn(adder(Reply), Mailbox, !IO)` and
   `spawn(gpu(0), adder(Reply), Mailbox, !IO)`, one name for both, the place
