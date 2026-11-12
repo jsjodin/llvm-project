@@ -4061,7 +4061,10 @@ its reference is in C or Fortran.
    can reach, read after the kernel ends.
 3. Sparse tiles on one place: tiles start and end, one GPU process, which
    steps its tiles with loops across its teams (GPU processes that run
-   loops: cooperative kernels, above).
+   loops: cooperative kernels, above). First, dense, done 2026-11-12:
+   `benchmarks/life/life-process.m`, Life's steps as loops across a GPU
+   process's teams, 20% faster than `life.c` with cells as wide at 4096²
+   and 26% at 1024² (design document, Measurements, Dense stencils).
 4. The Mandelbrot zoom with stealing between several places.
 5. Several places with a directory, growing, shrinking and moving tiles, on one
    GPU at first (below).
