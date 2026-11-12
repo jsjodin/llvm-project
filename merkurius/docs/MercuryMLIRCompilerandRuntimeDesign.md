@@ -4633,6 +4633,24 @@ elements, five alternating rounds, the median MB/s:
 Dot is 8% below C. At this size a run of Dot takes 1.1 ms, of which the
 combine is under 1%: the difference is in the loop.
 
+The same at 2^28 elements, 2 GB arrays, 20 runs a kernel, three alternating
+rounds, the median MB/s, with the target regions of `bandwidth.m` too; the
+GPU process's arena 8.6 GB (`run.sh`'s sizing):
+
+| Kernel | C | GPU process | Target regions |
+| --- | ---: | ---: | ---: |
+| Copy | 386,444 | 435,536 | 268,985 |
+| Mul | 383,335 | 315,069 | 269,776 |
+| Add | 78,420 | 378,987 | 302,070 |
+| Triad | 83,212 | 377,415 | 302,918 |
+| Dot | 564,379 | 548,995 | 472,818 |
+
+Dot is 2.7% below C: its fixed costs spread over a run of 8 ms. Mul, Add
+and Triad in the GPU process are 10 to 19% below their 2^25 numbers, where
+C's Mul is not; a thread goes round 6,500 times rather than 800, each round
+ending with the team's barrier, and the arrays start where the arena puts
+them (Dense stencils, on elements not on 256 bytes). Not yet told apart.
+
 ### Idle waves of GPU processes' kernels
 
 `process-loops.m`'s worker run without `-fopenmp`, so its process runs its
