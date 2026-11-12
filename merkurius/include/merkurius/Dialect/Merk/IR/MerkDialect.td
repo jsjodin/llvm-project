@@ -63,6 +63,20 @@ def Merk_TermType : TypeDef<Merk_Dialect, "Term"> {
   let assemblyFormat = "`<` $name `>`";
 }
 
+// A value of a flat record's type by value (docs/INPROGRESS.md, Flat
+// records, step 1): an LLVM struct of its fields, a nested record inline,
+// which lowering makes of a !merk.term<name> whose type has one constructor
+// of scalars and records. The !merk.term of the same name is its cell,
+// which polymorphic code, the runtime and other cells see.
+def Merk_RecordType : TypeDef<Merk_Dialect, "Record"> {
+  let mnemonic = "record";
+  let summary = "a flat record by value";
+  let parameters = (ins StringRefParameter<"the type">:$name);
+  let assemblyFormat = "`<` $name `>`";
+}
+
+def Merk_TermOrRecord : AnyTypeOf<[Merk_TermType, Merk_RecordType]>;
+
 // A value of a type variable: one word that polymorphic code passes without
 // looking inside it (design document, "Type representation").
 def Merk_WordType : TypeDef<Merk_Dialect, "Word"> {
