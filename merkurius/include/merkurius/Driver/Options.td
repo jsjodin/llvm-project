@@ -169,6 +169,10 @@ def fembed_offload_object_EQ : Joined<["-"], "fembed-offload-object=">,
 def fprocess_kernels : Flag<["-"], "fprocess-kernels">,
   HelpText<"Compile a kernel for each process kind that runs on a GPU, for "
            "the device of -triple, without OpenMP">;
+def fprocess_loops : Flag<["-"], "fprocess-loops">,
+  HelpText<"With -fprocess-kernels, read %$omp directives, for the loops that "
+           "GPU processes run across teams (distribute parallel do), which "
+           "the driver passes when the program is compiled with -fopenmp">;
 def fembed_process_image_EQ : Joined<["-"], "fembed-process-image=">,
   MetaVarName<"<file>">,
   HelpText<"Embed the image of the module's GPU process kinds <file> in the "

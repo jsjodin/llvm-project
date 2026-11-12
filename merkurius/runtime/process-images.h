@@ -32,10 +32,17 @@ struct ProcessImage {
   // The bytes of stack a lane that its kernel's calls take outside any
   // recursion, if its stack is not fixed, or 0 (MLIRGenProcesses.cpp).
   std::uint64_t frames;
+  // For each kind, in the same order, '1' if it runs loops across teams
+  // (docs/INPROGRESS.md, GPU processes that run loops), so that it takes
+  // worker teams, else '0'.
+  const char *loops;
 };
 
 // The number of the kind in the image, or -1 if it has none of that name.
 int KindNumber(const ProcessImage &image, const char *kind);
+
+// Whether the kind with the number runs loops across teams.
+bool KindRunsLoops(const ProcessImage &image, int number);
 
 // The image of `module`'s kinds for `gpu`, or null if it registered none.
 const ProcessImage *FindProcessImage(const char *module, const char *gpu);

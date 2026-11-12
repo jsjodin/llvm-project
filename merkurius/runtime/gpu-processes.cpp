@@ -119,14 +119,17 @@ struct RunningProcess {
 };
 
 // A launch of a module's kernel on a GPU: its table, in host memory, the
-// process in each slot, and how many processes it runs, of which the last
-// ends the kernel. Once the kernel has ended,
-// the reaper frees the table.
+// process in each slot, for each slot of a worker team the slot of its
+// process plus one, or 0 (place.h), the slots of each team, and how many
+// processes it runs, of which the last ends the kernel. Once the kernel has
+// ended, the reaper frees the table.
 struct Place {
   const char *module;
   int gpu;
   PlaceTable *table;
   RunningProcess **processes;
+  std::uint64_t *owners;
+  std::uint64_t teamSlots;
   std::uint64_t running;
   bool ending;
   Place *next;
@@ -194,6 +197,7 @@ void Reap(RunningProcess *process) {
 void ReapPlace(Place *place) {
   DeviceFreeHost(place->gpu, place->table);
   std::free(place->processes);
+  std::free(place->owners);
   std::free(place);
 }
 
@@ -501,7 +505,11 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
       static_cast<RunningProcess **>(Malloc(slots * sizeof(RunningProcess *)))};
   std::memset(
       static_cast<void *>(processes), 0, slots * sizeof(RunningProcess *));
-  *place = {image.module, gpu.number, table, processes, 0, false, places};
+  auto *owners{
+      static_cast<std::uint64_t *>(Malloc(slots * sizeof(std::uint64_t)))};
+  std::memset(static_cast<void *>(owners), 0, slots * sizeof(std::uint64_t));
+  *place = {image.module, gpu.number, table, processes, owners,
+      kPlaceTeamThreads / lanes, 0, false, places};
   size.numGroups.x = teams;
   bool cooperative{true};
   const char *stackError{nullptr};
@@ -523,6 +531,7 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
           &size, properties, 1, arguments, sizes)}) {
     DeviceFreeHost(gpu.number, table);
     std::free(processes);
+    std::free(owners);
     std::free(place);
     return Error("could not launch the module %s's processes' kernel on GPU "
                  "%lld: %s%s%s",
@@ -566,11 +575,57 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   return nullptr;
 }
 
+// Whether no process runs in the slot and no process has it as a worker's.
+bool Free(const Place &place, std::uint64_t slot) {
+  return !place.processes[slot] && place.owners[slot] == 0;
+}
+
+// Reserves as worker teams for the process in `slot` every team of the
+// kernel whose slots are all free, other than the process's own, and gives
+// how many (place.h). With the lock held.
+std::uint64_t ReserveWorkers(Place &place, std::uint64_t slot) {
+  std::uint64_t teams{place.table->slots / place.teamSlots};
+  std::uint64_t own{slot / place.teamSlots};
+  std::uint64_t workers{0};
+  for (std::uint64_t team{0}; team < teams; ++team) {
+    std::uint64_t first{team * place.teamSlots};
+    bool free{team != own};
+    for (std::uint64_t i{first}; free && i < first + place.teamSlots; ++i) {
+      free = Free(place, i);
+    }
+    if (!free) {
+      continue;
+    }
+    for (std::uint64_t i{first}; i < first + place.teamSlots; ++i) {
+      place.owners[i] = slot + 1;
+    }
+    ++workers;
+  }
+  std::uint64_t worker{0};
+  for (std::uint64_t i{0}; i < place.table->slots; ++i) {
+    if (place.owners[i] != slot + 1) {
+      continue;
+    }
+    PlaceSlot &reserved{PlaceSlots(place.table)[i]};
+    reserved.owner = slot;
+    reserved.worker = worker;
+    reserved.workers = workers;
+    reserved.control = 0;
+    __atomic_store_n(&reserved.state, kPlaceReserved, __ATOMIC_RELEASE);
+    if ((i + 1) % place.teamSlots == 0) {
+      ++worker;
+    }
+  }
+  return workers;
+}
+
 // The kernel and a free slot of it for a process of the module's kind on
-// the GPU, which it takes for `process`, or the text of the error. With the
+// the GPU, which it takes for `process`, with the free teams as its workers
+// if the kind runs loops across teams, or the text of the error. With the
 // lock held.
-const char *TakeSlot(const Gpu &gpu, const LoadedImage &image,
-    RunningProcess *process, std::uint64_t &slot) {
+const char *TakeSlot(const Gpu &gpu, const LoadedImage &image, const char *kind,
+    bool loops, RunningProcess *process, std::uint64_t &slot,
+    std::uint64_t &workers) {
   GpuPlaces &gpuPlace{gpuPlaces[gpu.number]};
   while (gpuPlace.launching) {
     pthread_cond_wait(&launchedCondition, &lock);
@@ -588,8 +643,24 @@ const char *TakeSlot(const Gpu &gpu, const LoadedImage &image,
     }
     place = gpuPlace.current;
   }
+  workers = 0;
   for (slot = 0; slot < place->table->slots; ++slot) {
-    if (!place->processes[slot]) {
+    if (Free(*place, slot)) {
+      if (loops) {
+        workers = ReserveWorkers(*place, slot);
+        if (workers == 0) {
+          char *text{static_cast<char *>(Malloc(512))};
+          std::snprintf(text, 512,
+              "GPU %d has no team for the loops of the process kind %s: the "
+              "module %s's kernel there has %llu teams, and none is free of "
+              "processes, which a kind that runs loops across teams takes as "
+              "its workers",
+              gpu.number, kind, image.module,
+              static_cast<unsigned long long>(
+                  place->table->slots / place->teamSlots));
+          return text;
+        }
+      }
       place->processes[slot] = process;
       process->place = place;
       ++place->running;
@@ -620,6 +691,15 @@ void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
         slot < place->table->slots) {
       process = place->processes[slot];
       place->processes[slot] = nullptr;
+      // Its worker teams, which have set their slots reserved again before
+      // it ended, are free for others.
+      for (std::uint64_t i{0}; i < place->table->slots; ++i) {
+        if (place->owners[i] == slot + 1) {
+          place->owners[i] = 0;
+          __atomic_store_n(
+              &PlaceSlots(place->table)[i].state, kPlaceIdle, __ATOMIC_RELEASE);
+        }
+      }
       if (process && --place->running == 0 && !place->ending) {
         EndPlace(place);
       }
@@ -697,6 +777,7 @@ extern "C" const char *merk_gpu_process_spawn(std::uint64_t typeInfo,
         "", "", "");
   }
   std::uint64_t slot{0};
+  std::uint64_t workers{0};
   int kindNumber{-1};
   pthread_mutex_lock(&lock);
   LoadedImage *image{nullptr};
@@ -713,7 +794,8 @@ extern "C" const char *merk_gpu_process_spawn(std::uint64_t typeInfo,
     error = Ready(*gpu);
   }
   if (!error) {
-    error = TakeSlot(*gpu, *image, process, slot);
+    error = TakeSlot(*gpu, *image, kind,
+        KindRunsLoops(*image->image, kindNumber), process, slot, workers);
   }
   pthread_mutex_unlock(&lock);
   if (error) {
@@ -736,6 +818,7 @@ extern "C" const char *merk_gpu_process_spawn(std::uint64_t typeInfo,
   placeSlot.kind = static_cast<std::uint64_t>(kindNumber);
   placeSlot.arena = reinterpret_cast<std::uint64_t>(process->arena);
   placeSlot.words = reinterpret_cast<std::uint64_t>(process->words);
+  placeSlot.workers = workers;
   __atomic_store_n(&placeSlot.state, kPlaceRunning, __ATOMIC_RELEASE);
   *placeAndSlot = h[2];
   *generation = h[3];

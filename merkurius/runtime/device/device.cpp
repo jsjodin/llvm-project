@@ -97,8 +97,11 @@ using merkurius::runtime::kBumpWords;
 using merkurius::runtime::kChunkBytes;
 using merkurius::runtime::kNoRegionSlot;
 using merkurius::runtime::kPlaceIdle;
+using merkurius::runtime::kPlaceReserved;
 using merkurius::runtime::kPlaceRunning;
 using merkurius::runtime::kPlaceTeamThreads;
+using merkurius::runtime::kPlaceWorking;
+using merkurius::runtime::kProcessLoopWords;
 using merkurius::runtime::kRegionRingSlots;
 using merkurius::runtime::kRegionSlotClearing;
 using merkurius::runtime::kRegionSlots;
@@ -199,6 +202,31 @@ template <typename T> using Local = __attribute__((address_space(3))) T;
 // the wave sets as the process starts.
 constexpr uint32_t kMostPlaceWaves{kPlaceTeamThreads / 32};
 [[clang::loader_uninitialized]] Local<Arena *> placeArenas[kMostPlaceWaves];
+
+// A process's control block, in its arena, through which it runs its loops
+// across its worker teams (place.h): the counts of the barrier that the
+// process's wave and its worker teams cross together, how many cross it, the
+// loop that runs, its first counter, its step and its trip count, and the
+// words its body takes; whether the process has ended; and the process's
+// arena, which the workers bump the cells of the loops' bodies from.
+struct ProcessControl {
+  int64_t arrived;
+  int64_t rounds;
+  int64_t crossing;
+  uint64_t loop;
+  int64_t first;
+  int64_t step;
+  int64_t count;
+  uint64_t end;
+  Arena *arena;
+  uint64_t values[kProcessLoopWords];
+};
+
+// The control block of the process that each wave of the team runs, by the
+// wave's place in the team, or null for one without worker teams, and for a
+// worker team's waves.
+[[clang::loader_uninitialized]] Local<ProcessControl *>
+    placeControls[kMostPlaceWaves];
 
 } // namespace
 
@@ -688,58 +716,213 @@ extern "C" [[noreturn]] void merk_device_stack_overflow(void) {
 // processes (MLIRGenProcesses.cpp).
 extern "C" void merk_process_dispatch(uint64_t kind, uint64_t words);
 
+// An iteration of the module's loop with the number, which runs across a GPU
+// process's teams, with its counter and the address of the words its body
+// takes (MLIRGenProcesses.cpp, GenerateProcessLoops).
+extern "C" void merk_process_loop(
+    uint64_t loop, int64_t counter, uint64_t values);
+
+namespace {
+
+// The process's wave arrives at its control block's barrier and waits there
+// for its worker teams: its writes before are seen by every worker thread
+// after, and theirs by it.
+void ProcessArrive(ProcessControl *control) {
+  __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+  ArriveAndWait(&control->arrived, &control->rounds, control->crossing);
+  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
+}
+
+// A worker team arrives at the barrier, as merk_device_grid_barrier's teams
+// do: every thread of the team calls it.
+void WorkerArrive(ProcessControl *control) {
+  __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+  __gpu_sync_threads();
+  if (__gpu_thread_id_x() == 0) {
+    ArriveAndWait(&control->arrived, &control->rounds, control->crossing);
+  }
+  __gpu_sync_threads();
+  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
+}
+
+uint64_t LoadSlotWord(uint64_t *word) {
+  return __gpu_read_first_lane_u64(__gpu_lane_mask(),
+      __scoped_atomic_load_n(word, __ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM));
+}
+
+// Lane 0 of a wave whose slot the host has set running: the process, which
+// starts its worker teams first if it has any, and ends them after.
+void RunProcess(
+    PlaceTable *table, PlaceSlot *slot, uint64_t wave, uint32_t inTeam) {
+  uint64_t kind{__scoped_atomic_load_n(
+      &slot->kind, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
+  uint64_t words{__scoped_atomic_load_n(
+      &slot->words, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
+  uint64_t workers{__scoped_atomic_load_n(
+      &slot->workers, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
+  // The arena is in the device's memory, which only the device writes
+  // while the kernel runs, so the wave clears it rather than the host.
+  auto *arena{reinterpret_cast<Arena *>(__scoped_atomic_load_n(
+      &slot->arena, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM))};
+  auto *clear{reinterpret_cast<uint64_t *>(arena)};
+  for (uint64_t i{0}; i < kArenaClearWords; ++i) {
+    clear[i] = 0;
+  }
+  placeArenas[inTeam] = arena;
+  ProcessControl *control{nullptr};
+  if (workers > 0) {
+    control = static_cast<ProcessControl *>(
+        Allocate(&arena->bump, sizeof(ProcessControl)));
+    control->arrived = 0;
+    control->rounds = 0;
+    control->crossing = static_cast<int64_t>(workers) + 1;
+    control->end = 0;
+    control->arena = arena;
+    __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+    uint64_t slots{__scoped_atomic_load_n(
+        &table->slots, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
+    for (uint64_t i{0}; i < slots; ++i) {
+      PlaceSlot *other{PlaceSlots(table) + i};
+      if (__scoped_atomic_load_n(&other->state, __ATOMIC_ACQUIRE,
+              __MEMORY_SCOPE_SYSTEM) == kPlaceReserved &&
+          __scoped_atomic_load_n(
+              &other->owner, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM) == wave) {
+        __scoped_atomic_store_n(&other->control,
+            reinterpret_cast<uint64_t>(control), __ATOMIC_RELAXED,
+            __MEMORY_SCOPE_SYSTEM);
+        __scoped_atomic_store_n(&other->state, kPlaceWorking, __ATOMIC_RELEASE,
+            __MEMORY_SCOPE_SYSTEM);
+      }
+    }
+  }
+  placeControls[inTeam] = control;
+  merk_process_dispatch(kind, words);
+  if (control) {
+    // The workers see the end, set their slots reserved again, and cross
+    // once more, after which none reads the control block, which goes with
+    // the arena.
+    __scoped_atomic_store_n(
+        &control->end, 1, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
+    ProcessArrive(control);
+    ProcessArrive(control);
+    placeControls[inTeam] = nullptr;
+  }
+  __scoped_atomic_store_n(
+      &slot->state, kPlaceIdle, __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+  ProcessEnded(table, wave);
+}
+
+// Every thread of a wave whose slot its process has set working: the team
+// runs the process's loops with its other worker teams, each thread taking
+// iterations a team's threads apart, from its own in its team's block, until
+// the process ends.
+void Work(PlaceSlot *slot, uint32_t inTeam) {
+  auto *control{
+      reinterpret_cast<ProcessControl *>(LoadSlotWord(&slot->control))};
+  uint64_t worker{LoadSlotWord(&slot->worker)};
+  uint64_t workers{LoadSlotWord(&slot->workers)};
+  placeArenas[inTeam] = control->arena;
+  placeControls[inTeam] = nullptr;
+  int64_t threads{static_cast<int64_t>(__gpu_num_threads_x())};
+  int64_t stride{static_cast<int64_t>(workers) * threads};
+  int64_t start{static_cast<int64_t>(worker) * threads +
+      static_cast<int64_t>(__gpu_thread_id_x())};
+  for (;;) {
+    WorkerArrive(control);
+    if (__scoped_atomic_load_n(
+            &control->end, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)) {
+      break;
+    }
+    uint64_t loop{control->loop};
+    int64_t first{control->first};
+    int64_t step{control->step};
+    int64_t count{control->count};
+    auto values{reinterpret_cast<uint64_t>(control->values)};
+    for (int64_t i{start}; i < count; i += stride) {
+      merk_process_loop(loop, first + i * step, values);
+    }
+    WorkerArrive(control);
+  }
+  if (__gpu_lane_id() == 0) {
+    __scoped_atomic_store_n(
+        &slot->state, kPlaceReserved, __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+  }
+  WorkerArrive(control);
+}
+
+} // namespace
+
 // Each wave of the kernel of a GPU's processes, merk_place (place.h): lane 0
-// polls the wave's slot of the table, sleeping, runs each process the host
-// starts there, and returns once the table's end is set while the slot is
-// idle. The other lanes return at once. The table is in host memory, which
-// the host writes while the kernel runs, so it is read at system scope.
+// polls the wave's slot of the table, sleeping, and runs each process that
+// the host starts there, while the wave's other lanes wait for it; the whole
+// wave works when its team is a process's worker team; and it returns once
+// the table's end is set while the slot is idle. The table is in host memory,
+// which the host writes while the kernel runs, so it is read at system scope.
 // Each team first counts itself started, which the host waits for.
 extern "C" void merk_device_place(PlaceTable *table) {
   if (__gpu_thread_id_x() == 0) {
     __scoped_atomic_fetch_add(
         &table->started, 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
   }
-  if (__gpu_lane_id() != 0) {
-    return;
-  }
   uint32_t inTeam{__gpu_thread_id_x() / __gpu_num_lanes()};
   uint64_t wave{static_cast<uint64_t>(__gpu_block_id_x()) *
           (__gpu_num_threads_x() / __gpu_num_lanes()) +
       inTeam};
-  if (inTeam >= kMostPlaceWaves ||
-      wave >= __scoped_atomic_load_n(
-                  &table->slots, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)) {
+  if (inTeam >= kMostPlaceWaves || wave >= LoadSlotWord(&table->slots)) {
     return;
   }
   PlaceSlot *slot{PlaceSlots(table) + wave};
   for (;;) {
-    if (__scoped_atomic_load_n(&slot->state, __ATOMIC_ACQUIRE,
-            __MEMORY_SCOPE_SYSTEM) != kPlaceRunning) {
-      if (__scoped_atomic_load_n(
-              &table->end, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)) {
-        return;
+    uint64_t state{LoadSlotWord(&slot->state)};
+    if (state == kPlaceRunning) {
+      if (__gpu_lane_id() == 0) {
+        RunProcess(table, slot, wave, inTeam);
       }
-      __builtin_amdgcn_s_sleep(127);
       continue;
     }
-    uint64_t kind{__scoped_atomic_load_n(
-        &slot->kind, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
-    uint64_t words{__scoped_atomic_load_n(
-        &slot->words, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
-    // The arena is in the device's memory, which only the device writes
-    // while the kernel runs, so the wave clears it rather than the host.
-    auto *arena{reinterpret_cast<Arena *>(__scoped_atomic_load_n(
-        &slot->arena, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM))};
-    auto *clear{reinterpret_cast<uint64_t *>(arena)};
-    for (uint64_t i{0}; i < kArenaClearWords; ++i) {
-      clear[i] = 0;
+    if (state == kPlaceWorking) {
+      Work(slot, inTeam);
+      continue;
     }
-    placeArenas[inTeam] = arena;
-    merk_process_dispatch(kind, words);
-    __scoped_atomic_store_n(
-        &slot->state, kPlaceIdle, __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
-    ProcessEnded(table, wave);
+    if (state == kPlaceIdle && LoadSlotWord(&table->end)) {
+      return;
+    }
+    __builtin_amdgcn_s_sleep(127);
   }
+}
+
+// The words of the loop that the process is about to run across its worker
+// teams (MLIRGenProcesses.cpp, ProcessLoop), in its control block.
+extern "C" uint64_t *merk_device_loop_values(void) {
+  ProcessControl *control{
+      placeControls[__gpu_thread_id_x() / __gpu_num_lanes()]};
+  if (!control) {
+    Fail(1,
+        "a loop under distribute parallel do in the body of another, or "
+        "in a GPU process without worker teams");
+  }
+  return control->values;
+}
+
+// Runs the loop with the number across the process's worker teams, from the
+// first counter by the step, `count` times, with the words that
+// merk_device_loop_values gave: the workers start when the process's wave
+// arrives at the barrier, and it returns when they arrive again, done.
+extern "C" void merk_device_process_loop(
+    uint64_t loop, int64_t first, int64_t step, int64_t count) {
+  ProcessControl *control{
+      placeControls[__gpu_thread_id_x() / __gpu_num_lanes()]};
+  if (!control) {
+    Fail(1,
+        "a loop under distribute parallel do in the body of another, or "
+        "in a GPU process without worker teams");
+  }
+  control->loop = loop;
+  control->first = first;
+  control->step = step;
+  control->count = count;
+  ProcessArrive(control);
+  ProcessArrive(control);
 }
 
 // At the start of any other region that a module with team mailboxes runs.
