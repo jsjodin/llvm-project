@@ -754,6 +754,42 @@ static bool MergeTypeInfos(llvm::Instruction *merge, TypeInfosOf &infos,
 
 // The type_infos each value of the function has in some bundle, and a phi or
 // select of values that have the same ones.
+// Every list of type_infos the function's bundles give each value. The
+// optimizer merges equal values that had type_infos of their own, as two
+// words of the same float made through two typeclass_infos, so a value can
+// have several, of which one may not be available where another is.
+static llvm::DenseMap<const llvm::Value *,
+    llvm::SmallVector<llvm::SmallVector<llvm::Value *, 2>, 1>>
+AllTypeInfos(llvm::Function &function) {
+  llvm::DenseMap<const llvm::Value *,
+      llvm::SmallVector<llvm::SmallVector<llvm::Value *, 2>, 1>>
+      all;
+  for (llvm::Instruction &instruction : llvm::instructions(function)) {
+    auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)};
+    auto deopt{call ? call->getOperandBundle(llvm::LLVMContext::OB_deopt)
+                    : std::nullopt};
+    if (!deopt) {
+      continue;
+    }
+    ForEachEntry(deopt->Inputs,
+        [&](llvm::Constant *, llvm::Value *value,
+            llvm::ArrayRef<llvm::Use> typeInfos) {
+          if (typeInfos.empty()) {
+            return;
+          }
+          llvm::SmallVector<llvm::Value *, 2> list;
+          for (const llvm::Use &info : typeInfos) {
+            list.push_back(info.get());
+          }
+          auto &lists{all[CellOf(value)]};
+          if (!llvm::is_contained(lists, list)) {
+            lists.push_back(std::move(list));
+          }
+        });
+  }
+  return all;
+}
+
 static TypeInfosOf GatherTypeInfos(
     llvm::Function &function, llvm::DominatorTree &dominators, TypeInfosOf &made) {
   TypeInfosOf infos{made};
@@ -847,6 +883,7 @@ static void ListLiveRoots(llvm::Function &function, KnownTypes &known) {
     }
     llvm::DominatorTree dominators{function};
     TypeInfosOf infos{GatherTypeInfos(function, dominators, made)};
+    auto alternatives{AllTypeInfos(function)};
     for (llvm::BasicBlock &block : function) {
       ValueSet live{LiveOut(block, liveIn)};
       for (llvm::Instruction &instruction :
@@ -888,13 +925,23 @@ static void ListLiveRoots(llvm::Function &function, KnownTypes &known) {
               continue;
             }
             llvm::SmallVector<llvm::Value *, 2> given;
+            auto available{[&](llvm::ArrayRef<llvm::Value *> list) {
+              return llvm::all_of(list, [&](llvm::Value *info) {
+                auto *defined{llvm::dyn_cast<llvm::Instruction>(info)};
+                return !defined || dominators.dominates(defined, call);
+              });
+            }};
             if (auto it{infos.find(CellOf(value))};
-                it != infos.end() &&
-                llvm::all_of(it->second, [&](llvm::Value *info) {
-                  auto *defined{llvm::dyn_cast<llvm::Instruction>(info)};
-                  return !defined || dominators.dominates(defined, call);
-                })) {
+                it != infos.end() && available(it->second)) {
               given = it->second;
+            } else if (auto all{alternatives.find(CellOf(value))};
+                all != alternatives.end()) {
+              for (const auto &list : all->second) {
+                if (available(list)) {
+                  given = list;
+                  break;
+                }
+              }
             }
             if (given.empty() && IsPolymorphicIndex(*function.getParent(), type)) {
               std::string text;
