@@ -4529,7 +4529,34 @@ beat, as a decomposition fixed in advance computes every tile.
   independent one in Python, agree (`Benchmarks/life.test`, and the GPU
   runs in `life-gpu.test` and `life-c-gpu.test`).
 - (s5) `life-sparse.m`: the world, tiles starting and ending, checked
-  against the dense programs.
+  against the dense programs. Done 2026-11-12, as designed above, with:
+  - *Nine neighbours,* the middle one the tile itself, so that the cell at
+    row R and column C, each from -1 to T, is in neighbour
+    `((R >> Log) + 1) * 3 + (C >> Log) + 1`, with no branch.
+  - *The soup's tiles* start with every edge live, so that the first
+    bookkeeping starts the ring around them.
+  - *New tiles' cells* are zeroed in the cells the next step reads, a loop
+    across the teams, only when tiles started; the step writes all of an
+    active tile's cells in the other array.
+  - *The pool running out* stops the steps and is reported, rather than
+    giving wrong cells.
+  - *No compiler feature was missing.* The -O0 build with
+    `--offload-arch` hits the known AMDGPU "failed to annotate CFG" bug on
+    musttail calls in divergent control flow, so the -O0 test builds
+    without it, as `process-records.m` does.
+  - *Checked* against `life.c` on 22 worlds at the host (tiles of 4 to 64,
+    soups from none to the whole world, a side of 200, gliders that reach
+    the edge, up to 3000 steps), sequential and with the loops on the
+    host's threads, and on the GPU at 256², 200², 2048² and the default
+    8192²: all the same (`Benchmarks/life-sparse.test`,
+    `life-sparse-gpu.test`).
+  - *First timings, not yet measurements* (s6 measures): at the default
+    world, about 45 active tiles, a step takes 72 µs on average against
+    dense `life.c`'s 2.0 ms with `uint8_t` cells; but 47 µs of it is the
+    bookkeeping on the process's one lane, about 1 µs a tile, a chain of
+    dependent loads from global memory. The design's fallback (above,
+    bookkeeping) applies: decide each tile's fate in parallel, across the
+    teams, and leave the lane only the tiles that start or end.
 - (s6) `life-sparse.c`, the C reference. Measurements against it and
   against dense C, with the active tiles over time.
 
