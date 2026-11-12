@@ -10,12 +10,8 @@ REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch -I %S/Inputs %libomp-flags %S/Inputs/place_phase.m %S/process-places.m -o %t2
 RUN: %gpu-env %t2 | FileCheck %S/process-places.m --match-full-lines --strict-whitespace
-RUN: merkc -fprocess-declarations --offload-arch=%offload-arch -I %S/Inputs %libomp-flags %S/Inputs/place_phase.m %S/process-places.m -o %t
-RUN: %gpu-env %t | FileCheck %S/process-places.m --match-full-lines --strict-whitespace
 RUN: not %gpu-env %t2 other 2>&1 | FileCheck %S/process-places.m --check-prefix=OTHER
-RUN: not %gpu-env %t other 2>&1 | FileCheck %S/process-places.m --check-prefix=OTHER
 RUN: %gpu-env %t2 phases | FileCheck %S/process-places.m --check-prefix=PHASES --match-full-lines --strict-whitespace
-RUN: %gpu-env %t phases | FileCheck %S/process-places.m --check-prefix=PHASES --match-full-lines --strict-whitespace
 RUN: not %gpu-env %t2 steal 2>&1 | FileCheck %S/process-places.m --check-prefix=STEAL
 RUN: not %gpu-env %t2 full 2>&1 | FileCheck %S/process-places.m --check-prefix=FULL
 

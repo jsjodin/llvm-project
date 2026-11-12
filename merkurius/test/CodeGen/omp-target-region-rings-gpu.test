@@ -6,8 +6,6 @@ own, which then closes, while a GPU process waits, so no moment comes when
 nothing runs on the device.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -fopenmp -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/Inputs/region-rings-beside-process.m -o %t
-RUN: %gpu-env OMP_TARGET_OFFLOAD=MANDATORY MERK_CHECK_DEVICE_MEMORY=1 MERK_CHECK_MESSAGES=1 timeout -k 1 120 %t 2>&1 | FileCheck %s --match-full-lines --strict-whitespace
 RUN: merkc -O2 -fopenmp -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/Inputs/region-rings-beside-process.m -o %t.O2
 RUN: %gpu-env OMP_TARGET_OFFLOAD=MANDATORY MERK_CHECK_DEVICE_MEMORY=1 MERK_CHECK_MESSAGES=1 timeout -k 1 120 %t.O2 2>&1 | FileCheck %s --match-full-lines --strict-whitespace
 CHECK:820

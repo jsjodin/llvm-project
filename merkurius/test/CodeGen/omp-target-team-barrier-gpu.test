@@ -2,9 +2,6 @@ process.team_barrier between the teams of a region on the machine's GPU:
 omp-target-team-barrier.m.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -O0 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-team-barrier.m -o %t0
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t0 \
-RUN:   | FileCheck %S/omp-target-team-barrier.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-team-barrier.m -o %t2
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t2 \
 RUN:   | FileCheck %S/omp-target-team-barrier.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

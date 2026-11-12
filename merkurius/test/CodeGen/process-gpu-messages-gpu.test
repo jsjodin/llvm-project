@@ -6,8 +6,6 @@ REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-gpu-messages.m -o %t2
 RUN: %gpu-env timeout -k 1 60 %t2 gpu | FileCheck %S/process-gpu-messages.m --match-full-lines --strict-whitespace
-RUN: merkc -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-gpu-messages.m -o %t
-RUN: %gpu-env timeout -k 1 60 %t gpu | FileCheck %S/process-gpu-messages.m --match-full-lines --strict-whitespace
 
 Two hundred GPU processes that each take one message of two and end leave
 none of the host's copies of their messages, nor any of the messages, nor

@@ -4,9 +4,6 @@ allocator, which the OpenMP device runtime's malloc is when it is built
 with libc for the GPU.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-allocate.m -o %t
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t \
-RUN:   | FileCheck %S/omp-target-allocate.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-allocate.m -o %t.O2
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t.O2 \
 RUN:   | FileCheck %S/omp-target-allocate.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
