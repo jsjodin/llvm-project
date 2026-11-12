@@ -266,6 +266,19 @@
     % host, which is not a GPU, it is a software error.
 :- pred set_gpu_units(place::in, int::in, io::di, io::uo) is det.
 
+    % How many of a GPU's processes' kernel's teams a process kind that runs
+    % loops across teams takes as its workers when it is spawned there:
+    % every team that no process holds, the default, or with share(K), of
+    % those, the first up to a K'th of the kernel's teams, at least one, so
+    % that K such processes can run loops at once. A spawn that finds no
+    % free team fails, saying so. It applies to the spawns there from now
+    % on, whenever it is set. At the host, whose loops run on its threads,
+    % it does nothing. share(K) for K below 1 is a software error.
+:- type worker_teams
+    --->    all_free
+    ;       share(int).
+:- pred set_worker_teams(place::in, worker_teams::in, io::di, io::uo) is det.
+
     % For the expansion of process declarations (design document, "Processes
     % and mailboxes"), not for programs. A GPU process's kernel takes its
     % arguments as words: an int, a float or a character as one, and a
@@ -416,6 +429,8 @@ extern MR_Integer merk_node_lookup(MR_Integer high, MR_Integer low,
     MR_Integer *place_slot, MR_Integer *generation, MR_Integer *secret);
 extern MR_Integer merk_gpu_count(void);
 extern const char *merk_gpu_set_units(MR_Integer gpu, MR_Integer percent);
+extern const char *merk_gpu_set_worker_teams(MR_Integer gpu,
+    MR_Integer share);
 extern const char *merk_gpu_process_spawn(MR_Word type_info, MR_Integer gpu,
     MR_String module, MR_String kind, MR_ArrayPtr words,
     MR_Integer *place_slot, MR_Integer *generation, MR_Integer *secret);
@@ -588,6 +603,41 @@ set_gpu_units(Place, Percent, !IO) :-
     [will_not_call_mercury, promise_pure, thread_safe],
 "
     const char *error = merk_gpu_set_units(GPU, Percent);
+    Error = (MR_String) (error ? error : \"\");
+").
+
+set_worker_teams(Place, Teams, !IO) :-
+    (
+        Teams = all_free,
+        Share = 0
+    ;
+        Teams = share(Share),
+        ( if Share < 1 then
+            error(string.format("process.set_worker_teams: share(%d): a " ++
+                "share is of at least 1", [i(Share)]))
+        else
+            true
+        )
+    ),
+    (
+        Place = host
+    ;
+        Place = gpu(GPU),
+        set_worker_share(GPU, Share, Error, !IO),
+        ( if Error = "" then
+            true
+        else
+            error("process.set_worker_teams: " ++ Error)
+        )
+    ).
+
+:- pred set_worker_share(int::in, int::in, string::out, io::di, io::uo)
+    is det.
+:- pragma foreign_proc("C",
+    set_worker_share(GPU::in, Share::in, Error::out, _IO0::di, _IO::uo),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    const char *error = merk_gpu_set_worker_teams(GPU, Share);
     Error = (MR_String) (error ? error : \"\");
 ").
 
