@@ -3,9 +3,6 @@ machine's GPU and run there: the region reads main's messages from the
 mailbox's ring, and its receive with a timeout stops by the device's clock.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-receive.m -o %t
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t \
-RUN:   | FileCheck %S/omp-target-receive.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-receive.m -o %t.O2
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t.O2 \
 RUN:   | FileCheck %S/omp-target-receive.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

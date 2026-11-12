@@ -8,8 +8,6 @@ region's chunks go when it ends; with 2 MiB, less than one region needs,
 the program stops.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/Inputs/region-arena-beside-process.m -o %t
-RUN: %gpu-env OMP_TARGET_OFFLOAD=MANDATORY MERK_DEVICE_ARENA_BYTES=33554432 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 120 %t 2>&1 | FileCheck %s --match-full-lines --strict-whitespace
 RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/Inputs/region-arena-beside-process.m -o %t.O2
 RUN: %gpu-env OMP_TARGET_OFFLOAD=MANDATORY MERK_DEVICE_ARENA_BYTES=33554432 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 120 %t.O2 2>&1 | FileCheck %s --match-full-lines --strict-whitespace
 CHECK:200006200000

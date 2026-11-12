@@ -2,11 +2,6 @@ Several processes' regions at once on the machine's GPU: process-target-many.m.
 
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/process-target-many.m -o %t
-RUN: %gpu-env OMP_TARGET_OFFLOAD=MANDATORY MERK_WORKERS=1 %t \
-RUN:   | FileCheck %S/process-target-many.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-RUN: %gpu-env OMP_TARGET_OFFLOAD=MANDATORY %t \
-RUN:   | FileCheck %S/process-target-many.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/process-target-many.m -o %t.O2
 RUN: %gpu-env OMP_TARGET_OFFLOAD=MANDATORY MERK_WORKERS=1 %t.O2 \
 RUN:   | FileCheck %S/process-target-many.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

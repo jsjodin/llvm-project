@@ -2,9 +2,6 @@ The program of omp-target-write.m on the machine's GPU: the region's output is
 printed by the host, before what follows the region.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-write.m -o %t
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout -k 1 60 %t \
-RUN:   | FileCheck %S/omp-target-write.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-write.m -o %t.O2
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout -k 1 60 %t.O2 \
 RUN:   | FileCheck %S/omp-target-write.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

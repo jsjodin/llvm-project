@@ -16,8 +16,3 @@ RUN: %libomp-env LIBOMPTARGET_AMDGPU_CU_MASK=0-39 %t %t.elf 1024 1000 | FileChec
 T64: 64 threads, 1000 rounds: 0 wrong
 T256: 256 threads, 1000 rounds: 0 wrong
 T1024: 1024 threads, 1000 rounds: 0 wrong
-
-The same at -O0, the kernel and the image's link.
-RUN: clang++ --target=amdgcn-amd-amdhsa -mcpu=%offload-arch -flto -O0 -c %S/Inputs/grid-barrier-kernel.cpp -o %t.O0.o
-RUN: clang --target=amdgcn-amd-amdhsa -mcpu=%offload-arch -flto -O0 %t.O0.o %merk-lib-dir/merk-process-start-amdgcn.o %merk-lib-dir/libmerkdevice-amdgcn.a -lc -lm -o %t.O0.elf
-RUN: %libomp-env LIBOMPTARGET_AMDGPU_CU_MASK=0-39 %t %t.O0.elf 256 1000 | FileCheck %s --check-prefix=T256

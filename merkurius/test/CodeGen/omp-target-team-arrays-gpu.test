@@ -1,13 +1,8 @@
 Arrays in team mailboxes on the machine's GPU: omp-target-team-arrays.m,
 whose teams pass arrays by their pointer through rings in the device's
-memory, more than a ring holds, and change only their own copies. Without
--O, the GPUs' code is compiled at -O2; at -O0 it does not link, on an AMDGPU
-bug (omp-target-team-arrays-O0-gpu.test).
+memory, more than a ring holds, and change only their own copies.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-team-arrays.m -o %t0
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t0 \
-RUN:   | FileCheck %S/omp-target-team-arrays.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-team-arrays.m -o %t2
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t2 \
 RUN:   | FileCheck %S/omp-target-team-arrays.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

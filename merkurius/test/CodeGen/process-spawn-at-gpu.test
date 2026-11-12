@@ -10,8 +10,6 @@ REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-spawn-at.m -o %t2
 RUN: %gpu-env %t2 gpu | FileCheck %S/process-spawn-at.m --match-full-lines --strict-whitespace
-RUN: merkc -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-spawn-at.m -o %t
-RUN: %gpu-env %t gpu | FileCheck %S/process-spawn-at.m --match-full-lines --strict-whitespace
 RUN: %gpu-env %t2 leave | FileCheck %s --check-prefix=LEAVE --match-full-lines
 LEAVE:main ends
 

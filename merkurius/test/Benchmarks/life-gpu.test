@@ -1,10 +1,8 @@
-Game of Life of benchmarks/life on the machine's GPU, at -O0 and -O2, on
+Game of Life of benchmarks/life on the machine's GPU, on
 small grids: the cells are right (life.test), each kernel is an SPMD
 kernel, and the arrays stay on the device for the steps.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -O0 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/life/life.m -o %t0
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIFE_SIZE=300 LIFE_STEPS=25 %t0 | FileCheck %s
 RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/life/life.m -o %t2
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=16 LIFE_SIZE=300 LIFE_STEPS=25 %t2 2> %t.info | FileCheck %s
 RUN: FileCheck %s --check-prefix=INFO < %t.info

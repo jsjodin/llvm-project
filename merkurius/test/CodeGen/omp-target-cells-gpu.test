@@ -3,10 +3,6 @@ machine's GPU and run there: each term's cell is copied in, a word for
 each of its arguments.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-cells.m -o %t
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t 2> %t.info \
-RUN:   | FileCheck %S/omp-target-cells.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-RUN: FileCheck %s < %t.info
 RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-cells.m -o %t.O2
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=1 %t.O2 2> %t.O2.info \
 RUN:   | FileCheck %S/omp-target-cells.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

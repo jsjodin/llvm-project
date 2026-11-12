@@ -1856,7 +1856,7 @@ worker(!IO) :-
      as the first. Upstream fixed it in llvm/llvm-project#231611 and #239059,
      which we applied ahead of a rebase.
 3. Arrays between teams by their pointer. Implemented 2026-11-09
-   (`CodeGen/omp-target-team-arrays.m`, and its `-gpu.test` at -O0 and -O2;
+   (`CodeGen/omp-target-team-arrays.m`, and its `-gpu.test`;
    also right with 64 teams, by hand):
    - **On a device**, a team mailbox of arrays of one-word elements holds the
      arrays' pointers in its ring, as a mailbox of words holds words. Every team

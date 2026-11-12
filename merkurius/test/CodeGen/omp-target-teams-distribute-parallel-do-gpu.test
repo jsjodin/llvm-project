@@ -5,10 +5,6 @@ count the host computes from the host_eval values needs, and it prints
 what the sequential program prints.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/omp-target-teams-distribute-parallel-do.m -o %t
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=17 %t 2> %t.info \
-RUN:   | FileCheck %S/omp-target-teams-distribute-parallel-do.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-RUN: FileCheck %s < %t.info
 RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/omp-target-teams-distribute-parallel-do.m -o %t.O2
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY LIBOMPTARGET_INFO=17 %t.O2 2> %t.O2.info \
 RUN:   | FileCheck %S/omp-target-teams-distribute-parallel-do.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

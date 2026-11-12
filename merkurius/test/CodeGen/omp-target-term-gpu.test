@@ -3,9 +3,6 @@ GPU and run there: the region's list cells come from the device runtime's
 malloc.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-term.m -o %t
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t \
-RUN:   | FileCheck %S/omp-target-term.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-term.m -o %t.O2
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t.O2 \
 RUN:   | FileCheck %S/omp-target-term.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

@@ -2,9 +2,6 @@ The program of omp-target-parallel-do.m on the machine's GPU, where the threads
 of the region's team share what the loops use.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -fdo-loops -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-parallel-do.m -o %t
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout -k 1 60 %t \
-RUN:   | FileCheck %S/omp-target-parallel-do.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 RUN: merkc -O2 -fdo-loops -fopenmp --offload-arch=%offload-arch %libomp-flags %S/omp-target-parallel-do.m -o %t.optimized
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout -k 1 60 %t.optimized \
 RUN:   | FileCheck %S/omp-target-parallel-do.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

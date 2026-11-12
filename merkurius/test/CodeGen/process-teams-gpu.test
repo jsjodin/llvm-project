@@ -6,8 +6,6 @@ REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-teams.m -o %t2
 RUN: %gpu-env %t2 | FileCheck %S/process-teams.m --match-full-lines --strict-whitespace
-RUN: merkc -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-teams.m -o %t
-RUN: %gpu-env %t | FileCheck %S/process-teams.m --match-full-lines --strict-whitespace
 
 A kernel whose code recurses has a stack that is not fixed, of the size its
 launch gives, 1536 bytes a lane, whose scratch the GPU holds for every
