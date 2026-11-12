@@ -682,8 +682,11 @@ private:
   llvm::SmallVector<ProcessLoopCase> processLoops_;
   void ProcessLoop(const ParallelLoop &, const ProcedureBody &, mlir::Location);
   void GenerateProcessLoops();
-  void ProcessLoopIteration(const ProcessLoopCase &loop, mlir::Block *entry,
+  void ProcessLoopShare(const ProcessLoopCase &loop, mlir::Block *entry,
       mlir::Type generic, mlir::Location loc);
+  merk::ProcOp ProcessLoopRounds(
+      const ProcessLoopCase &loop, mlir::Location loc);
+  static bool IsReductionInput(const ProcessLoopCase &loop, std::size_t index);
   // Whether a kind's code, or a procedure of the module that it calls, has
   // a loop under distribute parallel do, for which the kind takes teams.
   bool KindRunsLoops(const parser::ProcessDecl &);

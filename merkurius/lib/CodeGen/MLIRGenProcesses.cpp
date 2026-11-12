@@ -440,13 +440,12 @@ void MerkGenerator::ProcessLoop(
 // processes run across their teams (ProcessLoop), each a switch over the
 // module's loops by their number. Every image of GPU processes has them, as
 // the runtime calls them, even with no loops.
-// - merk_process_loop(loop, counter, values, partials), which each thread of
-//   a process's worker teams calls for each of its iterations: the loop's
-//   body procedure, with the counter, each reduction's value from the
-//   thread's partial results, at `partials`, and the other values from the
-//   control block's words, at `values`. The body is det and pure, and gives
-//   the arrays it updated in place, whose results are dropped, and the
-//   reductions' next values, which become the thread's partial results.
+// - merk_process_loop(loop, start, rounds, stride, count, first, step,
+//   values, partials), which each thread of a process's worker teams calls
+//   once for each loop, for its share of the iterations: the loop's rounds
+//   (ProcessLoopRounds), with the values from the control block's words, at
+//   `values`, and the thread's partial results, at `partials`, which it
+//   stores back after the last round.
 // - merk_process_loop_start(loop, partials): the reductions' identities.
 // - merk_process_loop_reduce(loop, into, from): the partial results at
 //   `from` combined into those at `into`, by each reduction's operator.
@@ -466,7 +465,7 @@ void MerkGenerator::GenerateProcessLoops() {
                                     : "merk_process_loop_reduce"};
     llvm::SmallVector<mlir::Type> parameters(which == 1 ? 2
             : which == 2                                ? 3
-                                                        : 4,
+                                                        : 9,
         i64);
     auto proc{merk::ProcOp::create(builder_, loc, name,
         builder_.getFunctionType(parameters, {}), merk::Determinism::Det)};
@@ -489,7 +488,7 @@ void MerkGenerator::GenerateProcessLoops() {
         llvm::zip_equal(op.getCaseRegions(), processLoops_)) {
       builder_.setInsertionPointToStart(&region.emplaceBlock());
       if (which == 0) {
-        ProcessLoopIteration(loop, entry, generic, loc);
+        ProcessLoopShare(loop, entry, generic, loc);
       } else if (which == 1) {
         mlir::Value partials{mlir::LLVM::IntToPtrOp::create(
             builder_, loc, generic, entry->getArgument(1))};
@@ -521,38 +520,159 @@ void MerkGenerator::GenerateProcessLoops() {
   }
 }
 
-// An iteration of the loop, in merk_process_loop's case for it, whose
-// arguments `entry` has (GenerateProcessLoops).
-void MerkGenerator::ProcessLoopIteration(const ProcessLoopCase &loop,
+// A thread's share of the loop, in merk_process_loop's case for it, whose
+// arguments `entry` has (GenerateProcessLoops): the loop's words and the
+// thread's partial results loaded once, its rounds, and the partial results
+// stored back.
+void MerkGenerator::ProcessLoopShare(const ProcessLoopCase &loop,
     mlir::Block *entry, mlir::Type generic, mlir::Location loc) {
   mlir::Value values{mlir::LLVM::IntToPtrOp::create(
-      builder_, loc, generic, entry->getArgument(2))};
+      builder_, loc, generic, entry->getArgument(7))};
   mlir::Value partials{mlir::LLVM::IntToPtrOp::create(
-      builder_, loc, generic, entry->getArgument(3))};
-  llvm::SmallVector<mlir::Value> inputs;
+      builder_, loc, generic, entry->getArgument(8))};
+  // The rounds' arguments: the rounds, the first iteration, the stride, the
+  // count, the first counter and the step, then the body's inputs but the
+  // counter and the reductions' values, then those.
+  llvm::SmallVector<mlir::Value> arguments{entry->getArgument(2),
+      entry->getArgument(1), entry->getArgument(3), entry->getArgument(4),
+      entry->getArgument(5), entry->getArgument(6)};
   std::int32_t next{0};
   for (auto [index, type] : llvm::enumerate(loop.inputs)) {
-    if (index == loop.counter) {
-      inputs.push_back(entry->getArgument(1));
+    if (index == loop.counter || IsReductionInput(loop, index)) {
       continue;
     }
-    auto reduction{llvm::find_if(loop.reductions,
-        [&](const ProcessLoopReduction &r) { return r.input == index; })};
-    if (reduction != loop.reductions.end()) {
-      inputs.push_back(FromWordBits(builder_, loc, type,
-          LoadWord(builder_, loc, partials,
-              static_cast<std::int32_t>(reduction - loop.reductions.begin()))));
-      continue;
-    }
-    inputs.push_back(FromWordBits(
+    arguments.push_back(FromWordBits(
         builder_, loc, type, LoadWord(builder_, loc, values, next++)));
   }
-  auto call{
-      merk::CallOp::create(builder_, loc, loop.results, loop.body, inputs)};
   for (auto [index, reduction] : llvm::enumerate(loop.reductions)) {
-    StoreWord(builder_, loc, partials, static_cast<std::int32_t>(index),
-        WordBits(builder_, loc, call->getResult(reduction.output)));
+    arguments.push_back(FromWordBits(builder_, loc, reduction.type,
+        LoadWord(builder_, loc, partials, static_cast<std::int32_t>(index))));
   }
+  merk::ProcOp rounds{ProcessLoopRounds(loop, loc)};
+  auto call{merk::CallOp::create(builder_, loc,
+      rounds.getFunctionType().getResults(), rounds.getSymName(), arguments)};
+  for (auto [index, result] : llvm::enumerate(call.getResults())) {
+    StoreWord(builder_, loc, partials, static_cast<std::int32_t>(index),
+        WordBits(builder_, loc, result));
+  }
+}
+
+// Whether the body's input at `index` is a reduction's value.
+bool MerkGenerator::IsReductionInput(
+    const ProcessLoopCase &loop, std::size_t index) {
+  return llvm::any_of(loop.reductions,
+      [&](const ProcessLoopReduction &r) { return r.input == index; });
+}
+
+// The rounds of a thread's share of the loop, a procedure of their own that
+// calls itself for the next round, which becomes a loop:
+//
+//   rounds(Rounds, I, Stride, Count, First, Step, Values..., Partials...) =
+//     if Rounds > 0 then
+//       Next = (if I < Count then the body's reductions' next values, with
+//         the counter First + I * Step, else Partials),
+//       a barrier across the team,
+//       rounds(Rounds - 1, I + Stride, ..., Next...)
+//     else Partials
+//
+// Every thread of a team goes round as often, so all reach each barrier.
+merk::ProcOp MerkGenerator::ProcessLoopRounds(
+    const ProcessLoopCase &loop, mlir::Location loc) {
+  auto i64{builder_.getI64Type()};
+  llvm::SmallVector<mlir::Type> parameters(6, i64);
+  llvm::SmallVector<mlir::Type> results;
+  for (auto [index, type] : llvm::enumerate(loop.inputs)) {
+    if (index != loop.counter && !IsReductionInput(loop, index)) {
+      parameters.push_back(type);
+    }
+  }
+  for (const ProcessLoopReduction &reduction : loop.reductions) {
+    parameters.push_back(reduction.type);
+    results.push_back(reduction.type);
+  }
+  // A loop of the kind's code and of its variant for its words calls the
+  // same body, with the same rounds.
+  std::string name{loop.body + "$rounds"};
+  if (auto made{module_.lookupSymbol<merk::ProcOp>(name)}) {
+    return made;
+  }
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToEnd(module_.getBody());
+  auto proc{merk::ProcOp::create(builder_, loc, name,
+      builder_.getFunctionType(parameters, results), merk::Determinism::Det)};
+  proc.setPrivate();
+  mlir::Block *entry{proc.addEntryBlock()};
+  builder_.setInsertionPointToStart(entry);
+  mlir::Value remaining{entry->getArgument(0)};
+  mlir::Value i{entry->getArgument(1)};
+  mlir::Value stride{entry->getArgument(2)};
+  mlir::Value count{entry->getArgument(3)};
+  mlir::Value first{entry->getArgument(4)};
+  mlir::Value step{entry->getArgument(5)};
+  std::size_t words{parameters.size() - 6 - loop.reductions.size()};
+  auto values{entry->getArguments().slice(6, words)};
+  auto partials{entry->getArguments().slice(6 + words)};
+  mlir::Value zero{IntegerConstant(i64, 0, loc)};
+  auto more{merk::IteOp::create(builder_, loc, results)};
+  builder_.setInsertionPointToStart(&more.getCondition().emplaceBlock());
+  merk::GuardOp::create(builder_, loc,
+      mlir::arith::CmpIOp::create(
+          builder_, loc, mlir::arith::CmpIPredicate::sgt, remaining, zero));
+  merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  builder_.setInsertionPointToStart(&more.getThenRegion().emplaceBlock());
+  // This round's iteration, if the thread has one.
+  auto iteration{merk::IteOp::create(builder_, loc, results)};
+  {
+    mlir::OpBuilder::InsertionGuard roundGuard{builder_};
+    builder_.setInsertionPointToStart(&iteration.getCondition().emplaceBlock());
+    merk::GuardOp::create(builder_, loc,
+        mlir::arith::CmpIOp::create(
+            builder_, loc, mlir::arith::CmpIPredicate::slt, i, count));
+    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+    builder_.setInsertionPointToStart(
+        &iteration.getThenRegion().emplaceBlock());
+    llvm::SmallVector<mlir::Value> inputs;
+    std::size_t nextValue{0};
+    for (auto [index, type] : llvm::enumerate(loop.inputs)) {
+      if (index == loop.counter) {
+        inputs.push_back(mlir::arith::AddIOp::create(builder_, loc, first,
+            mlir::arith::MulIOp::create(builder_, loc, i, step)));
+        continue;
+      }
+      auto reduction{llvm::find_if(loop.reductions,
+          [&](const ProcessLoopReduction &r) { return r.input == index; })};
+      inputs.push_back(reduction != loop.reductions.end()
+              ? partials[reduction - loop.reductions.begin()]
+              : values[nextValue++]);
+    }
+    auto body{
+        merk::CallOp::create(builder_, loc, loop.results, loop.body, inputs)};
+    llvm::SmallVector<mlir::Value> next;
+    for (const ProcessLoopReduction &reduction : loop.reductions) {
+      next.push_back(body->getResult(reduction.output));
+    }
+    merk::YieldOp::create(builder_, loc, next);
+    builder_.setInsertionPointToStart(
+        &iteration.getElseRegion().emplaceBlock());
+    merk::YieldOp::create(builder_, loc, partials);
+  }
+  merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+      "merk_device_sync_threads", mlir::ValueRange{}, /*can_fail=*/false);
+  llvm::SmallVector<mlir::Value> arguments{
+      mlir::arith::SubIOp::create(
+          builder_, loc, remaining, IntegerConstant(i64, 1, loc)),
+      mlir::arith::AddIOp::create(builder_, loc, i, stride), stride, count,
+      first, step};
+  arguments.append(values.begin(), values.end());
+  arguments.append(
+      iteration.getResults().begin(), iteration.getResults().end());
+  auto again{merk::CallOp::create(builder_, loc, results, name, arguments)};
+  merk::YieldOp::create(builder_, loc, again.getResults());
+  builder_.setInsertionPointToStart(&more.getElseRegion().emplaceBlock());
+  merk::YieldOp::create(builder_, loc, partials);
+  builder_.setInsertionPointAfter(more);
+  merk::SucceedOp::create(builder_, loc, more.getResults());
+  return proc;
 }
 
 // Whether the kind's code, or a procedure of the module that it calls, has a

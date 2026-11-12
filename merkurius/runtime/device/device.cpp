@@ -224,10 +224,11 @@ struct ProcessControl {
   Arena *arena;
   uint64_t values[kProcessLoopWords];
   // The loop's reductions: how many, their values before the loop, which the
-  // process sets and which are their results after it, and each worker
-  // team's partial results, kProcessLoopReductions words a team, which
-  // follow the block.
+  // process sets and which are their results after it, how many worker
+  // teams have stored their partial results, and each team's partial
+  // results, kProcessLoopReductions words a team, which follow the block.
   uint64_t reductions;
+  uint64_t stored;
   uint64_t results[kProcessLoopReductions];
   uint64_t partials[];
 };
@@ -242,6 +243,10 @@ struct ProcessControl {
 // which the team's first thread combines.
 [[clang::loader_uninitialized]] Local<uint64_t>
     wavePartials[kMostPlaceWaves][kProcessLoopReductions];
+
+// Whether the worker team is the last to store its partial results of a
+// loop's reductions, which then combines all the teams'.
+[[clang::loader_uninitialized]] Local<uint32_t> lastToStore;
 
 } // namespace
 
@@ -668,6 +673,11 @@ void ArriveAndWait(int64_t *arrived, int64_t *rounds, int64_t teams) {
 
 } // namespace
 
+// A barrier across the threads of the team, which the rounds of a loop that
+// a GPU process runs across its teams end with (MLIRGenProcesses.cpp,
+// GenerateProcessLoops).
+extern "C" void merk_device_sync_threads(void) { __gpu_sync_threads(); }
+
 // process.team_barrier on a device, which a team's initial thread calls. Only
 // a region whose teams all run at once can wait like this, so one that calls
 // it waits for its teams to start (merk_device_teams_wait_all,
@@ -731,12 +741,17 @@ extern "C" [[noreturn]] void merk_device_stack_overflow(void) {
 // processes (MLIRGenProcesses.cpp).
 extern "C" void merk_process_dispatch(uint64_t kind, uint64_t words);
 
-// An iteration of the module's loop with the number, which runs across a GPU
-// process's teams, with its counter, the address of the words its body
-// takes and that of the thread's partial results of the loop's reductions,
-// which it updates (MLIRGenProcesses.cpp, GenerateProcessLoops).
-extern "C" void merk_process_loop(
-    uint64_t loop, int64_t counter, uint64_t values, uint64_t partials);
+// A thread's share of the module's loop with the number, which runs across a
+// GPU process's teams (MLIRGenProcesses.cpp, GenerateProcessLoops): `rounds`
+// rounds, the iteration `start` in the first and `stride` further in each
+// next, those below `count` with the counter `first` + iteration * `step`,
+// and merk_device_sync_threads after each round, with the words its body
+// takes at `values` and the thread's partial results of the loop's
+// reductions at `partials`, which it updates. Every thread of a team goes
+// round as often.
+extern "C" void merk_process_loop(uint64_t loop, int64_t start, int64_t rounds,
+    int64_t stride, int64_t count, int64_t first, int64_t step, uint64_t values,
+    uint64_t partials);
 
 // Sets the partial results at the address to the identities of the loop's
 // reductions.
@@ -786,7 +801,7 @@ uint64_t LoadSlotWord(uint64_t *word) {
 
 // Lane 0 of a wave whose slot the host has set running: the process, which
 // starts its worker teams first if it has any, and ends them after.
-void RunProcess(
+[[gnu::noinline]] void RunProcess(
     PlaceTable *table, PlaceSlot *slot, uint64_t wave, uint32_t inTeam) {
   uint64_t kind{__scoped_atomic_load_n(
       &slot->kind, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
@@ -847,16 +862,12 @@ void RunProcess(
   ProcessEnded(table, wave);
 }
 
-// Every thread of a wave whose slot its process has set working: the team
-// runs the process's loops with its other worker teams, each thread taking
-// iterations a team's threads apart, from its own in its team's block, until
-// the process ends.
-// The partial results of a loop's reductions of a worker team's threads,
-// combined: in each wave, by exchanging them across halves of the wave, then
-// the waves', by the team's first thread, into the team's words of the
-// control block, which the process combines after the loop.
-void CombineTeamPartials(ProcessControl *control, uint64_t loop,
-    uint64_t reductions, uint64_t *partials, uint64_t worker, uint32_t inTeam) {
+// The partial results of a loop's reductions of the team's threads, at
+// `partials`, combined into those of its first thread: in each wave, by
+// exchanging them across halves of the wave, then the waves', by the first
+// thread, through the team's local memory.
+void ReduceAcrossTeam(
+    uint64_t loop, uint64_t reductions, uint64_t *partials, uint32_t inTeam) {
   uint64_t mask{__gpu_lane_mask()};
   uint32_t lanes{__gpu_num_lanes()};
   uint32_t lane{__gpu_lane_id()};
@@ -883,13 +894,52 @@ void CombineTeamPartials(ProcessControl *control, uint64_t loop,
       }
       merk_process_loop_reduce(loop, partialsAt, otherAt);
     }
-    for (uint64_t r{0}; r < reductions; ++r) {
-      control->partials[worker * kProcessLoopReductions + r] = partials[r];
-    }
   }
 }
 
-void Work(PlaceSlot *slot, uint32_t inTeam) {
+// The partial results of a loop's reductions of a worker team's threads,
+// combined across the team and stored in the team's words of the control
+// block. The last team to store them then combines every team's, each of
+// its threads loading those of other teams, so that the loads overlap, into
+// the values before the loop: one after another on the process's lane, a
+// GPU of 160 teams took 26 µs a loop (design document, Measurements, Memory
+// bandwidth). The process reads them after the barrier that ends the loop.
+[[gnu::noinline]] void CombineTeamPartials(ProcessControl *control,
+    uint64_t loop, uint64_t reductions, uint64_t *partials, uint64_t worker,
+    uint64_t workers, uint32_t inTeam) {
+  ReduceAcrossTeam(loop, reductions, partials, inTeam);
+  if (__gpu_thread_id_x() == 0) {
+    for (uint64_t r{0}; r < reductions; ++r) {
+      control->partials[worker * kProcessLoopReductions + r] = partials[r];
+    }
+    lastToStore = __scoped_atomic_fetch_add(&control->stored, 1,
+                      __ATOMIC_ACQ_REL, __MEMORY_SCOPE_DEVICE) == workers - 1;
+  }
+  __gpu_sync_threads();
+  if (!lastToStore) {
+    return;
+  }
+  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE);
+  auto partialsAt{reinterpret_cast<uint64_t>(partials)};
+  merk_process_loop_start(loop, partialsAt);
+  uint64_t threads{__gpu_num_threads_x()};
+  for (uint64_t team{__gpu_thread_id_x()}; team < workers; team += threads) {
+    merk_process_loop_reduce(loop, partialsAt,
+        reinterpret_cast<uint64_t>(
+            control->partials + team * kProcessLoopReductions));
+  }
+  ReduceAcrossTeam(loop, reductions, partials, inTeam);
+  if (__gpu_thread_id_x() == 0) {
+    merk_process_loop_reduce(
+        loop, reinterpret_cast<uint64_t>(control->results), partialsAt);
+  }
+}
+
+// Every thread of a wave whose slot its process has set working: the team
+// runs the process's loops with its other worker teams, each thread taking
+// iterations a team's threads apart, from its own in its team's block, until
+// the process ends.
+[[gnu::noinline]] void Work(PlaceSlot *slot, uint32_t inTeam) {
   auto *control{
       reinterpret_cast<ProcessControl *>(LoadSlotWord(&slot->control))};
   uint64_t worker{LoadSlotWord(&slot->worker)};
@@ -921,17 +971,16 @@ void Work(PlaceSlot *slot, uint32_t inTeam) {
     // teams `stride` apart, with a barrier across the team after each round,
     // so that its waves stay together, as the device runtime's loops do for
     // stencils, whose waves read the same rows (design document, A barrier
-    // after each round). Every thread goes round as often as the team.
+    // after each round). Every thread goes round as often as the team. The
+    // loop's procedure runs the rounds, with its body inlined, so that only
+    // the loops' registers count in it (design document, Measurements,
+    // Memory bandwidth).
     int64_t rounds{count > base ? (count - base + stride - 1) / stride : 0};
-    for (int64_t round{0}; round < rounds; ++round) {
-      int64_t i{base + round * stride + thread};
-      if (i < count) {
-        merk_process_loop(loop, first + i * step, values, partialsAt);
-      }
-      __gpu_sync_threads();
-    }
+    merk_process_loop(loop, base + thread, rounds, stride, count, first, step,
+        values, partialsAt);
     if (reductions) {
-      CombineTeamPartials(control, loop, reductions, partials, worker, inTeam);
+      CombineTeamPartials(
+          control, loop, reductions, partials, worker, workers, inTeam);
     }
     WorkerArrive(control);
   }
@@ -1028,8 +1077,9 @@ extern "C" uint64_t *merk_device_loop_results(void) {
 // first counter by the step, `count` times, with the words that
 // merk_device_loop_values gave, and `reductions` reductions: the workers
 // start when the process's wave arrives at the barrier, and it returns when
-// they arrive again, done, after it has combined their teams' partial
-// results into those of merk_device_loop_results.
+// they arrive again, done, the last of them having combined their teams'
+// partial results into those of merk_device_loop_results
+// (CombineTeamPartials).
 extern "C" void merk_device_process_loop(uint64_t loop, int64_t first,
     int64_t step, int64_t count, uint64_t reductions) {
   ProcessControl *control{
@@ -1044,17 +1094,9 @@ extern "C" void merk_device_process_loop(uint64_t loop, int64_t first,
   control->step = step;
   control->count = count;
   control->reductions = reductions;
+  control->stored = 0;
   ProcessArrive(control);
   ProcessArrive(control);
-  if (reductions) {
-    uint64_t workers{static_cast<uint64_t>(control->crossing) - 1};
-    for (uint64_t worker{0}; worker < workers; ++worker) {
-      merk_process_loop_reduce(loop,
-          reinterpret_cast<uint64_t>(control->results),
-          reinterpret_cast<uint64_t>(
-              control->partials + worker * kProcessLoopReductions));
-    }
-  }
 }
 
 // At the start of any other region that a module with team mailboxes runs.

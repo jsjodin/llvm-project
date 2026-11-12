@@ -46,15 +46,18 @@
 % those that call them, touch no memory and need no flat scratch, no longer
 % holds: the report of an overflow writes its stack through flat addresses,
 % which faulted at 768 bytes a lane. The dispatch, which calls them, has no
-% attributes left; merk_process_loop, which runs no loop here, keeps its own.
+% inferred attributes left, only its own, convergent and noinline, as every
+% function of the compile is convergent and the kinds' code stays out of
+% line; merk_process_loop, which runs no loop here, keeps its own.
 % RUN: FileCheck %s --check-prefix=INFERRED < %t.ll
 % INFERRED: define internal fastcc {{.*}}@process_teams_recursive.fib_f1_0({{.*}}) unnamed_addr #[[FIB:[0-9]+]] {
 % INFERRED: define internal fastcc {{.*}}@process_teams_recursive.deep_f1_0({{.*}}) unnamed_addr #[[DEEP:[0-9]+]] {
-% INFERRED: define hidden void @merk_process_dispatch(i64 %0, i64 %1) local_unnamed_addr {
+% INFERRED: define hidden void @merk_process_dispatch(i64 %0, i64 %1) local_unnamed_addr #[[DISPATCH:[0-9]+]] {
 % INFERRED-NOT: attributes #[[FIB]] = {{.*}}memory(none)
 % INFERRED-NOT: attributes #[[FIB]] = {{.*}}amdgpu-no-
 % INFERRED-NOT: attributes #[[DEEP]] = {{.*}}memory(none)
 % INFERRED-NOT: attributes #[[DEEP]] = {{.*}}amdgpu-no-
+% INFERRED: attributes #[[DISPATCH]] = { convergent noinline }
 %
 % The adders recurse only by tail calls: no warning, no check.
 % RUN: merkc -fc1 -O2 -fprocess-declarations -fprocess-kernels -triple amdgpu10.30-amd-amdhsa -emit-llvm %s -o %t.adders.ll 2>&1 | count 0

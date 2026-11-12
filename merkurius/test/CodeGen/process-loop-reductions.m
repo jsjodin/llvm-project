@@ -16,8 +16,11 @@
 %
 % The device's compile stores the values before a loop in the words of its
 % results, and passes merk_device_process_loop the number of reductions;
-% merk_process_loop_start sets a thread's partial results to the operators'
-% identities, and merk_process_loop_reduce combines them.
+% merk_process_loop runs a thread's rounds of a loop, in a procedure of
+% their own that carries its partial results, ending each round with a
+% barrier across the team; merk_process_loop_start sets a thread's partial
+% results to the operators' identities, and merk_process_loop_reduce
+% combines them.
 %
 % REQUIRES: amdgpu-registered-target, libomp
 % RUN: merkc -fc1 -fprocess-loops -fdo-loops -fprocess-declarations -fprocess-kernels -triple amdgcn-amd-amdhsa -target-cpu gfx1030 -emit-merk %s -o - | FileCheck %s --check-prefix=DEVICE
@@ -133,9 +136,26 @@ print_result(V, !IO) :-
 % DEVICE:         merk.foreign_call @merk_device_process_loop(%c0_i64{{.*}}, %{{.*}}, %c1_i64{{.*}}, %{{.*}}, %c1_i64{{.*}}) : (i64, i64, i64, i64, i64) -> ()
 % DEVICE:         merk.foreign_call @merk_device_loop_results() : () -> !llvm.ptr
 % DEVICE:         merk.foreign_call @merk_device_process_loop(%c1_i64{{.*}}, %{{.*}}, %c1_i64{{.*}}, %{{.*}}, %c2_i64{{.*}})
-% DEVICE-LABEL: merk.proc @merk_process_loop(%arg0: i64, %arg1: i64, %arg2: i64, %arg3: i64) attributes {merk.process_root
-% DEVICE:         merk.call @process_loop_reductions.reducer__body_50_11_3_0(%arg1, %{{.*}}) : (i64, i64) -> i64
-% DEVICE:         merk.call @process_loop_reductions.reducer__body_54_11_5_0(%arg1, %{{.*}}, %{{.*}}) : (i64, i64, i64) -> (i64, i64)
+% DEVICE-LABEL: merk.proc @merk_process_loop(%arg0: i64, %arg1: i64, %arg2: i64, %arg3: i64, %arg4: i64, %arg5: i64, %arg6: i64, %arg7: i64, %arg8: i64) attributes {merk.process_root
+% DEVICE:         merk.call @[[SUM:process_loop_reductions.reducer__body_[0-9]+_11_3_0]]$rounds(%arg2, %arg1, %arg3, %arg4, %arg5, %arg6, %{{.*}}) : (i64, i64, i64, i64, i64, i64, i64) -> i64
+% DEVICE:         merk.call @[[MINMAX:process_loop_reductions.reducer__body_[0-9]+_11_5_0]]$rounds(%arg2, %arg1, %arg3, %arg4, %arg5, %arg6, %{{.*}}, %{{.*}}) : (i64, i64, i64, i64, i64, i64, i64, i64) -> (i64, i64)
+% DEVICE-LABEL: merk.proc private @process_loop_reductions.reducer__body_{{[0-9]+}}_11_5_0$rounds(
+% DEVICE:         merk.ite -> i64, i64 {
+% DEVICE:           arith.cmpi sgt, %arg0, %c0_i64
+% DEVICE:         } then {
+% DEVICE:           %[[NEXT:.*]]:2 = merk.ite -> i64, i64 {
+% DEVICE:             arith.cmpi slt, %arg1, %arg3
+% DEVICE:           } then {
+% DEVICE:             %[[TIMES:.*]] = arith.muli %arg1, %arg5
+% DEVICE:             %[[COUNTER:.*]] = arith.addi %arg4, %[[TIMES]]
+% DEVICE:             merk.call @[[MINMAX]](%[[COUNTER]], %arg6, %arg7)
+% DEVICE:           } else {
+% DEVICE:             merk.yield %arg6, %arg7
+% DEVICE:           }
+% DEVICE:           merk.foreign_call @merk_device_sync_threads()
+% DEVICE:           merk.call @[[MINMAX]]$rounds(%{{.*}}, %{{.*}}, %arg2, %arg3, %arg4, %arg5, %[[NEXT]]#0, %[[NEXT]]#1)
+% DEVICE:         } else {
+% DEVICE:           merk.yield %arg6, %arg7
 % DEVICE-LABEL: merk.proc @merk_process_loop_start(%arg0: i64, %arg1: i64) attributes {merk.process_root
 % DEVICE:         arith.constant 0 : i64
 % DEVICE:       }, {

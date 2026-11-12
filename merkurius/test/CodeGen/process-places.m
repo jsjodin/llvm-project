@@ -21,7 +21,7 @@
 % RUN: merkc -fc1 -fprocess-declarations -fprocess-kernels -triple amdgpu10.30-amd-amdhsa -emit-llvm -I %S/Inputs %s -o - | FileCheck %s --check-prefix=DISPATCH
 %
 % The module's kinds by their numbers, in the order of their declarations.
-% DISPATCH:define hidden void @merk_process_dispatch(i64 %0, i64 %1) {
+% DISPATCH:define hidden void @merk_process_dispatch(i64 %0, i64 %1) #{{[0-9]+}} {
 % DISPATCH-NEXT:  switch i64 %0, label %5 [
 % DISPATCH-NEXT:    i64 0, label %3
 % DISPATCH-NEXT:    i64 1, label %4
