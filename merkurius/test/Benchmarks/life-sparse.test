@@ -65,3 +65,19 @@ RUN: %libomp-env LIFE_WORLD=256 LIFE_TILE=8 LIFE_SOUP=256 LIFE_STEPS=10 LIFE_CAP
 FULL: The pool ran out of tiles: raise LIFE_CAPACITY.
 RUN: %libomp-env LIFE_TILE=6 not %t2 host | FileCheck %s --check-prefix=USAGE
 USAGE: LIFE_TILE must be a power of two of at least 4 that divides LIFE_WORLD, LIFE_SOUP from 0 to LIFE_WORLD, LIFE_STEPS at least 2, and LIFE_CAPACITY at least 2.
+
+The C version, life-sparse.c, its kernels on the host's threads, gives the
+same cells and tiles.
+RUN: clang -O2 -fopenmp --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/life/life-sparse.c -o %t.c
+RUN: %libomp-env LIFE_TILE=6 not %t.c | FileCheck %s --check-prefix=USAGE
+RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED OMP_NUM_THREADS=4 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t.c | FileCheck %s --check-prefix=C
+C: Game of Life, C, sparse tiles
+C: Population: 562
+C-NEXT: Checksum: 17668223
+C-NEXT: Active tiles: 36 at most, 32 at the end
+RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED OMP_NUM_THREADS=4 LIFE_WORLD=128 LIFE_TILE=8 LIFE_SOUP=64 LIFE_STEPS=2000 %t.c | FileCheck %s --check-prefix=EDGE
+RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED OMP_NUM_THREADS=4 LIFE_WORLD=200 LIFE_TILE=8 LIFE_SOUP=37 LIFE_STEPS=120 %t.c | FileCheck %s --check-prefix=ODD
+RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED OMP_NUM_THREADS=4 LIFE_WORLD=256 LIFE_TILE=8 LIFE_SOUP=256 LIFE_STEPS=100 %t.c | FileCheck %s --check-prefix=WHOLE
+RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED OMP_NUM_THREADS=4 LIFE_WORLD=64 LIFE_TILE=4 LIFE_SOUP=30 LIFE_STEPS=1000 %t.c | FileCheck %s --check-prefix=SMALL
+RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=0 LIFE_STEPS=10 %t.c | FileCheck %s --check-prefix=EMPTY
+RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED LIFE_WORLD=256 LIFE_TILE=8 LIFE_SOUP=256 LIFE_STEPS=10 LIFE_CAPACITY=100 not %t.c | FileCheck %s --check-prefix=FULL
