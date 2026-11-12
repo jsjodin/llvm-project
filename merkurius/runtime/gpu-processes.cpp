@@ -150,13 +150,16 @@ struct Place {
 // For each GPU, from its first spawn: the pairs of units that its queues may
 // use (compute-units.h), and how many units they may use; the percentage of
 // them that the program set for its processes' kernels, or 0 for the
-// default; the queue of its latest kernel, limited to that kernel's units,
-// or none; and the kernel that spawns use, unless it is ending.
+// default; the share of a kernel's teams that a kind with loops takes as its
+// workers, K for a K'th, or 0 for every free team; the queue of its latest
+// kernel, limited to that kernel's units, or none; and the kernel that
+// spawns use, unless it is ending.
 struct GpuPlaces {
   bool ready;
   UnitMask units;
   int usable;
   int percent;
+  std::int64_t share;
   ol_queue_handle_t queue;
   UnitMask queueUnits;
   Place *current;
@@ -687,14 +690,21 @@ bool Free(const Place &place, std::uint64_t slot) {
   return !place.processes[slot] && place.owners[slot] == 0;
 }
 
-// Reserves as worker teams for the process in `slot` every team of the
-// kernel whose slots are all free, other than the process's own, and gives
-// how many (place.h). With the lock held.
-std::uint64_t ReserveWorkers(Place &place, std::uint64_t slot) {
+// Reserves as worker teams for the process in `slot` the teams of the kernel
+// whose slots are all free, other than the process's own: every one, or with
+// a share of K, the first of them up to a K'th of the kernel's teams, at
+// least one; and gives how many (place.h). With the lock held.
+std::uint64_t ReserveWorkers(
+    Place &place, std::uint64_t slot, std::int64_t share) {
   std::uint64_t teams{place.table->slots / place.teamSlots};
   std::uint64_t own{slot / place.teamSlots};
+  std::uint64_t most{teams};
+  if (share > 0) {
+    most = teams / static_cast<std::uint64_t>(share);
+    most = most < 1 ? 1 : most;
+  }
   std::uint64_t workers{0};
-  for (std::uint64_t team{0}; team < teams; ++team) {
+  for (std::uint64_t team{0}; team < teams && workers < most; ++team) {
     std::uint64_t first{team * place.teamSlots};
     bool free{team != own};
     for (std::uint64_t i{first}; free && i < first + place.teamSlots; ++i) {
@@ -754,7 +764,7 @@ const char *TakeSlot(const Gpu &gpu, const LoadedImage &image, const char *kind,
   for (slot = 0; slot < place->table->slots; ++slot) {
     if (Free(*place, slot)) {
       if (loops) {
-        workers = ReserveWorkers(*place, slot);
+        workers = ReserveWorkers(*place, slot, gpuPlace.share);
         if (workers == 0) {
           char *text{static_cast<char *>(Malloc(512))};
           std::snprintf(text, 512,
@@ -873,6 +883,30 @@ extern "C" const char *merk_gpu_set_units(
     return text;
   }
   places.percent = static_cast<int>(percent);
+  pthread_mutex_unlock(&lock);
+  return nullptr;
+}
+
+// process.set_worker_teams: the share of a kernel's teams that each kind
+// with loops spawned on the GPU from now on takes as its workers, K for a
+// K'th, or 0 for every free team. It applies to later spawns, and may change
+// at any time; a negative share is the text of the error.
+extern "C" const char *merk_gpu_set_worker_teams(
+    std::int64_t number, std::int64_t share) {
+  if (number < 0 || number >= GpuCount()) {
+    char *text{static_cast<char *>(Malloc(128))};
+    std::snprintf(text, 128, "there is no GPU %lld for processes",
+        static_cast<long long>(number));
+    return text;
+  }
+  if (share < 0) {
+    char *text{static_cast<char *>(Malloc(128))};
+    std::snprintf(text, 128, "a share of %lld is not one of a positive number",
+        static_cast<long long>(share));
+    return text;
+  }
+  pthread_mutex_lock(&lock);
+  gpuPlaces[number].share = share;
   pthread_mutex_unlock(&lock);
   return nullptr;
 }

@@ -4603,6 +4603,100 @@ beat, as a decomposition fixed in advance computes every tile.
   parallel int arrays. First drafted that way on 2026-11-12, and rewritten
   at the user's direction with the features as steps to build.
 
+**Step 4, the Mandelbrot zoom with stealing between places: design.**
+Decided by the user 2026-11-12, from four questions:
+- *Places* are GPU processes on this machine's one GPU, each with a share
+  of the kernel's teams; the same program runs a place a GPU on the shared
+  machine in step 6.
+- *Tiles move by stealing:* each place starts a frame with a static share
+  of its tiles, and an idle place asks another for half of what it has
+  left. Measured against the static split alone and against a dispatcher
+  that hands out tiles.
+- *Messages go through the host,* as GPU processes' messages do today
+  (step 5 of GPU processes without `omp target`): a steal moves a batch of
+  tiles that take milliseconds, so 40 µs a message is small beside them.
+  The direct queue in the GPU's memory (5c, 5d) stays a step of its own.
+- *Doubles,* zooming to a width of about 10^-13, with the escape limit
+  rising frame by frame.
+
+*Why stealing here.* A pixel's iterations run from 1 to the limit, and near
+the set's boundary a tile's cost varies by orders of magnitude, from frame to
+frame and unpredictably. A split made in advance leaves the places with the
+cheap tiles waiting. No tile starts or ends, so balancing is tested alone.
+On one GPU, one kernel over a whole frame is balanced by the hardware's own
+scheduling of work groups, and places that split the GPU's teams can only
+come close to it: the dense programs are the bar for what stealing loses
+to that, and the static split for what it gains. Across GPUs, where no
+hardware balances, the gain is the point (step 6).
+
+*The zoom:*
+- `MANDEL_SIZE` pixels square a frame (2048), in tiles of `MANDEL_TILE`
+  square (128, a power of two that divides the size); `MANDEL_FRAMES`
+  frames (40).
+- Frame f's width is `3.0 * 0.5^f` (`MANDEL_RATIO`), centred on a point of
+  the boundary, (-0.743643887037151, 0.131825904205330), as written.
+- Pixel (px, py) of a frame is `c = (X0 + float(px - Size / 2) * Step,
+  Y0 + float(py - Size / 2) * Step)`, with `Step = Width / float(Size)`.
+- The escape limit of frame f is `256 + 64 * f` (`MANDEL_LIMIT`).
+- An iteration, in this order, so that every program computes the same
+  doubles: `X2 = X * X`, `Y2 = Y * Y`, escape if `X2 + Y2 > 4.0`, else
+  `Y := (2.0 * X) * Y + Cy`, `X := X2 - Y2 + Cx`. C is built with
+  `-ffp-contract=off`, as merkc does not fuse.
+- The output: each frame's total iterations, as a checksum, and its time;
+  the totals' sum; and for the places, each place's tiles and busy time per
+  frame, and the steals.
+
+*Checking:* an independent program in Python gives each frame's total for
+small sizes, and every program must give the same totals, exactly.
+
+*Programs:*
+- `mandel.c`, the C reference: a kernel a frame, `target teams distribute
+  parallel for` over the frame's pixels, `schedule(static, 1)` rows.
+- `mandel.m`, dense, one GPU process: a loop under `distribute parallel do`
+  over a frame's pixels a frame, all the kernel's teams.
+- `mandel-places.m`: a host coordinator and `MANDEL_PLACES` place processes
+  (4), each with a quarter of the teams. Per frame, the coordinator sends
+  each place its static share of the tiles, a contiguous range of the
+  frame's tiles by rows, as a split in advance would give it. A place steps
+  one tile at a time, a loop across its teams over the tile's pixels with a
+  reduction of its iterations, and between tiles takes any steal request
+  from its mailbox (a receive that does not wait). With none left, it asks
+  a victim, the next place round the ring that it has not asked this
+  frame, which answers with the back half of what it has left or with
+  none; after asking all, it reports idle. The coordinator ends the frame
+  when every place has reported its tiles' totals and is idle.
+  `MANDEL_POLICY` chooses `static` (no stealing), `steal`, or `pool`, where
+  the coordinator holds the frame's tiles and an idle place asks it for
+  `MANDEL_CHUNK` at a time.
+
+*Features to build,* each before the program step that uses it:
+- *A share of the teams for each place.* A spawn of a kind that runs loops
+  reserves every free team as its workers today, so a second such process
+  finds none. `set_worker_teams(Place, Teams, !IO)`, with `:- type
+  worker_teams ---> all_free ; share(int)`, beside `set_gpu_units`: with
+  `share(K)`, each kind with loops spawned there afterwards reserves at most
+  a K'th of the kernel's teams, at least one, and fails as now if none is
+  free. `all_free` is the default. A setting, not a spawn's argument, so
+  that the compiler's expansion of spawns does not change.
+- Messages between GPU processes through the host exist; a receive that
+  does not wait (`after(0)`) on a GPU is to check.
+
+*Steps,* each a commit:
+- (m1) `set_worker_teams`, with tests at the host and on the GPU: two kinds
+  with loops at once, each with half the teams, their loops' results right.
+  Done 2026-11-12 (design document, GPU processes, "The library"):
+  `process-worker-teams.m` runs 2 and 4 workers with `share(K)` at once,
+  each a loop with a reduction, asked together so that their loops overlap;
+  on the GPU a third worker under `share(2)` finds no team, and their
+  arenas are freed. The share counts the kernel's teams, so the first
+  worker takes a K'th and a later one may get a team fewer, as each
+  worker's own wave sits in a team that is then not free.
+- (m2) `mandel.c`, `mandel.m` and the Python check, measured.
+- (m3) `mandel-places.m` with the three policies, checked against the
+  dense totals, and measured: the time to finish the zoom, each policy
+  against the others and the dense programs, and how even the places'
+  busy times are.
+
 **What it needs.** It uses GPU processes, `spawn_<kind>_at`, flat messages and
 arrays, which exist. It also needs the place table and routing by place (GPU
 processes without `omp target`, steps 5b to 5d), flat records and packed
