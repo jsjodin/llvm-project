@@ -1811,8 +1811,9 @@ RegBankLegalizeRules::RegBankLegalizeRules(const GCNSubtarget &_ST,
   addRulesForIOpcs({amdgcn_s_memrealtime, amdgcn_s_memtime}, Standard)
       .Uni(S64, {{Sgpr64}, {IntrId}});
 
-  addRulesForIOpcs({amdgcn_groupstaticsize, amdgcn_pops_exiting_wave_id,
-                    amdgcn_reloc_constant, amdgcn_s_get_waveid_in_workgroup},
+  addRulesForIOpcs({amdgcn_groupstaticsize, amdgcn_callee_stack_size,
+                    amdgcn_pops_exiting_wave_id, amdgcn_reloc_constant,
+                    amdgcn_s_get_waveid_in_workgroup},
                    Standard)
       .Uni(S32, {{Sgpr32}, {IntrId}});
 

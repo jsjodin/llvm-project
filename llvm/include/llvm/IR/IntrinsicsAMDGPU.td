@@ -217,6 +217,16 @@ def int_amdgcn_groupstaticsize :
   ClangBuiltin<"__builtin_amdgcn_groupstaticsize">,
   DefaultAttrsIntrinsic<[llvm_i32_ty], [], [NoUndef<RetIndex>, IntrNoMem, IntrSpeculatable]>;
 
+// Returns the bytes of private segment, a lane's stack, that the calls of the
+// function that contains it may take below its own frame: the most that any
+// callee takes with its own callees, from the backend's resource usage. A
+// call back into the function's own call cycle, an indirect call and a call
+// of a function whose stack is not known take none. Code that knows the
+// stack pointer after the frame can check that the calls fit in the stack.
+def int_amdgcn_callee_stack_size :
+  ClangBuiltin<"__builtin_amdgcn_callee_stack_size">,
+  DefaultAttrsIntrinsic<[llvm_i32_ty], [], [NoUndef<RetIndex>, IntrNoMem, IntrSpeculatable]>;
+
 def int_amdgcn_dispatch_id :
   ClangBuiltin<"__builtin_amdgcn_dispatch_id">,
   DefaultAttrsIntrinsic<[llvm_i64_ty], [], [NoUndef<RetIndex>, IntrNoMem, IntrSpeculatable]>;

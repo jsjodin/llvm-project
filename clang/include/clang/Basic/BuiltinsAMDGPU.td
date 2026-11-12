@@ -159,6 +159,7 @@ def __builtin_amdgcn_s_dcache_inv : AMDGPUBuiltin<"void()">;
 def __builtin_amdgcn_buffer_wbinvl1 : AMDGPUBuiltin<"void()">;
 def __builtin_amdgcn_fence : AMDGPUBuiltin<"void(unsigned int, char const *, ...)">;
 def __builtin_amdgcn_groupstaticsize : AMDGPUBuiltin<"unsigned int()">;
+def __builtin_amdgcn_callee_stack_size : AMDGPUBuiltin<"unsigned int()">;
 def __builtin_amdgcn_wavefrontsize : AMDGPUBuiltin<"unsigned int()", [Const]>;
 
 def __builtin_amdgcn_atomic_inc32 : AMDGPUBuiltin<"uint32_t(uint32_t volatile *, uint32_t, unsigned int, char const *)">;

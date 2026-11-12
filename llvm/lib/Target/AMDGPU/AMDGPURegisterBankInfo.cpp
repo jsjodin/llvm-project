@@ -4982,6 +4982,7 @@ AMDGPURegisterBankInfo::getInstrMapping(const MachineInstr &MI) const {
     case Intrinsic::amdgcn_kernarg_segment_ptr:
     case Intrinsic::amdgcn_s_getpc:
     case Intrinsic::amdgcn_groupstaticsize:
+    case Intrinsic::amdgcn_callee_stack_size:
     case Intrinsic::amdgcn_reloc_constant:
     case Intrinsic::returnaddress: {
       unsigned Size = MRI.getType(MI.getOperand(0).getReg()).getSizeInBits();

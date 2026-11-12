@@ -19,6 +19,7 @@
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
 #include "SIMachineFunctionInfo.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
@@ -329,9 +330,41 @@ static void emitVGPRBlockComment(const MachineInstr *MI, const SIInstrInfo *TII,
   OS.emitRawComment(" transferring at most " + TransferredRegs);
 }
 
+void AMDGPUAsmPrinter::emitCalleeStackSize(const MachineInstr &MI) {
+  // The function's private segment size, its frame and its callees' most,
+  // less its frame, which is final once the frame is laid out. The symbol is
+  // defined after the function, and the assembler resolves it then.
+  MCSymbol *Size = RI.getSymbol(getSymbol(&MF->getFunction())->getName(),
+                                MCResourceInfo::RIK_PrivateSegSize, OutContext);
+  const MCExpr *Callees = MCBinaryExpr::createSub(
+      MCSymbolRefExpr::create(Size, OutContext),
+      MCConstantExpr::create(MF->getFrameInfo().getStackSize(), OutContext),
+      OutContext);
+  // Callees are emitted first, and the function's symbol is assigned before
+  // its body, so the value is known, unless callees are in other objects. A
+  // literal either way, as the pseudo's size says.
+  int64_t Value;
+  if (Callees->evaluateAsAbsolute(Value))
+    Callees = AMDGPUMCExpr::createLit(LitModifier::Lit, Value, OutContext);
+  const GCNSubtarget &STI = MF->getSubtarget<GCNSubtarget>();
+  MCInst Inst;
+  Inst.setOpcode(STI.getInstrInfo()->pseudoToMCOpcode(AMDGPU::S_MOV_B32));
+  MCOperand Dst;
+  AMDGPUMCInstLower Lower(OutContext, STI, *this);
+  Lower.lowerOperand(MI.getOperand(0), Dst);
+  Inst.addOperand(Dst);
+  Inst.addOperand(MCOperand::createExpr(Callees));
+  EmitToStreamer(*OutStreamer, Inst);
+}
+
 void AMDGPUAsmPrinter::emitInstruction(const MachineInstr *MI) {
   if (MI->isCall())
     collectCallEdge(*MI);
+
+  if (MI->getOpcode() == AMDGPU::SI_CALLEE_STACK_SIZE) {
+    emitCalleeStackSize(*MI);
+    return;
+  }
 
   // FIXME: Enable feature predicate checks once all the test pass.
   // AMDGPU_MC::verifyInstructionPredicates(MI->getOpcode(),

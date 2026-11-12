@@ -472,6 +472,19 @@ def GET_GROUPSTATICSIZE : SPseudoInstSI <(outs SReg_32:$sdst), (ins),
   [(set SReg_32:$sdst, (int_amdgcn_groupstaticsize))]>;
 } // End let usesCustomInserter = 1, SALU = 1
 
+// The stack that the function's calls may take below its frame, an
+// s_mov_b32 of an expression of its resource usage symbol, which the asm
+// printer emits once the frame is known (AMDGPUMCInstLower.cpp).
+def SI_CALLEE_STACK_SIZE : SPseudoInstSI <(outs SReg_32:$sdst), (ins),
+  [(set SReg_32:$sdst, (int_amdgcn_callee_stack_size))]> {
+  let Size = 8;
+  let hasSideEffects = 0;
+  let mayLoad = 0;
+  let mayStore = 0;
+  let isReMaterializable = 1;
+  let isAsCheapAsAMove = 1;
+}
+
 // Wrap an instruction by duplicating it, except for setting isTerminator.
 class WrapTerminatorInst<SOP_Pseudo base_inst> : SPseudoInstSI<
       base_inst.OutOperandList,
