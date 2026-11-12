@@ -169,7 +169,9 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
 }
 
 static bool parseLangArgs(LangOptions &opts, const InputArgList &args) {
-  opts.openMP = args.hasArg(OPT_fopenmp);
+  // GPU processes' kernels read the directives of the loops they run across
+  // teams, which their compile makes without OpenMP (-fprocess-loops).
+  opts.openMP = args.hasArg(OPT_fopenmp) || args.hasArg(OPT_fprocess_loops);
   opts.doLoops = args.hasArg(OPT_fdo_loops);
   opts.receiveGoal = args.hasArg(OPT_freceive_goal);
   opts.processDeclarations = args.hasArg(OPT_fprocess_declarations);
@@ -202,6 +204,10 @@ static bool parseCodeGenArgs(CodeGenOptions &opts, const InputArgList &args) {
   if (opts.processKernels && opts.openMP) {
     reportError("-fprocess-kernels compiles without OpenMP: it cannot be "
                 "given with -fopenmp");
+    return false;
+  }
+  if (args.hasArg(OPT_fprocess_loops) && !opts.processKernels) {
+    reportError("-fprocess-loops is given only with -fprocess-kernels");
     return false;
   }
   if (opts.processKernels && !llvm::Triple{opts.triple}.isAMDGPU()) {

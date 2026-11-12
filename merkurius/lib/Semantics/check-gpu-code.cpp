@@ -90,6 +90,7 @@ private:
   void CheckMessage(TokenRange where, const Type *message);
   void Call(const ProcedureBody &, const Body &, const Procedure *callee,
       bool process);
+  void CheckProcessLoops();
 
   const parser::TokenSequence &tokens_;
   const ModeChecking &modes_;
@@ -429,6 +430,75 @@ void GpuCodeChecker::Check(const parser::ParseTree &tree) {
     auto [body, process] = pending_.back();
     pending_.pop_back();
     Visit(*body, process);
+  }
+  CheckProcessLoops();
+}
+
+// The goals of a body under a directive, each with whether it is in a target
+// region.
+void FindDirectives(const Body &goal, bool inRegion,
+    llvm::SmallVectorImpl<std::pair<const Body *, bool>> &out) {
+  if (goal.kind == BodyKind::Scope && goal.directive) {
+    out.push_back({&goal, inRegion});
+    llvm::ArrayRef<llvm::omp::Directive> leaves{
+        llvm::omp::getLeafConstructsOrSelf(goal.directive->id)};
+    inRegion = inRegion ||
+        (!leaves.empty() && leaves.front() == llvm::omp::OMPD_target);
+  }
+  if (goal.lambda) {
+    FindDirectives(*goal.lambda, inRegion, out);
+  }
+  for (const SwitchCase &arm : goal.cases) {
+    FindDirectives(*arm.goal, inRegion, out);
+  }
+  for (const Body *inner : goal.goals) {
+    FindDirectives(*inner, inRegion, out);
+  }
+}
+
+// A loop under distribute parallel do runs across the teams of a GPU process
+// (docs/INPROGRESS.md, GPU processes that run loops): its code is that of a
+// process kind that runs on a GPU. In a target region it would be OpenMP's,
+// under target teams, which is not implemented. On the host,
+// as in a kind spawned there, it is a parallel do. A GPU process's code has
+// no other directive, as its kernel is compiled without OpenMP.
+void GpuCodeChecker::CheckProcessLoops() {
+  for (const ProcedureBody &body : determinism_.bodies()) {
+    if (!body.body) {
+      continue;
+    }
+    llvm::SmallVector<std::pair<const Body *, bool>> directives;
+    FindDirectives(*body.body, /*inRegion=*/false, directives);
+    for (auto [directive, inRegion] : directives) {
+      parser::CharBlock where{Source(directive->tokens)};
+      if (directive->directive->id != llvm::omp::OMPD_distribute_parallel_do) {
+        if (!inRegion && visited_.contains({&body, 1u}) &&
+            reported_.insert(where.begin()).second) {
+          messages_.Say(where,
+              "a process kind that runs on a GPU runs its loops across its "
+              "teams under distribute parallel do, and its code has no %s "
+              "directive"_err_en_US,
+              std::string{parser::EnumToString(directive->directive->id)});
+        }
+        continue;
+      }
+      if (!reported_.insert(where.begin()).second) {
+        continue;
+      }
+      if (inRegion || visited_.contains({&body, 0u})) {
+        // OpenMP's distribute parallel do under target teams, which differs.
+        messages_.Say(where,
+            "not yet implemented: a distribute parallel do loop in a target "
+            "region; in a GPU process's code it runs across the process's "
+            "teams"_err_en_US);
+      } else if (!visited_.contains({&body, 1u})) {
+        messages_.Say(where,
+            "a distribute parallel do loop runs across the teams of a GPU "
+            "process, so it must be in the code of a process kind declared "
+            "on gpu, or in a predicate of the module that such a kind "
+            "calls"_err_en_US);
+      }
+    }
   }
 }
 

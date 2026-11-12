@@ -33,10 +33,11 @@ TWO-NOT:  clang
 
 With -fopenmp too, the images come first, and the host's bitcode job of
 OpenMP's offload jobs embeds them. The kernels are still compiled without
-OpenMP.
+OpenMP, with -fprocess-loops, which runs the loops of GPU processes across
+their teams.
 RUN: merkc -### -fopenmp -fprocess-declarations --offload-arch=gfx1030 %S/Inputs/sumsq.m -o prog 2>&1 \
 RUN:   | FileCheck %s --check-prefix=OMP
-OMP:      "-fc1" "-emit-llvm-bc" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-fprocess-kernels" "-o" "[[KERNELS:[^"]*\.o]]" "{{[^"]*}}sumsq.m"{{$}}
+OMP:      "-fc1" "-emit-llvm-bc" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-fprocess-kernels" "-fprocess-loops" "-o" "[[KERNELS:[^"]*\.o]]" "{{[^"]*}}sumsq.m"{{$}}
 OMP-NEXT: "-mcpu=gfx1030" "-flto" "-O2" "[[KERNELS]]" {{.*}} "-o" "[[IMAGE:[^"]*\.elf]]"{{$}}
 OMP-NEXT: "-fc1" "-emit-llvm-bc" "-fopenmp" "-fprocess-declarations" "-fembed-process-image=gfx1030:[[IMAGE]]" "--offload-targets=amdgpu-amd-amdhsa" "-o" "{{[^"]*}}.bc" "{{[^"]*}}sumsq.m"{{$}}
 OMP-NEXT: "-fc1" "-emit-llvm-bc" "-fopenmp" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-fopenmp-is-target-device"

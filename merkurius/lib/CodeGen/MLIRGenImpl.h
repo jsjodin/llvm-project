@@ -654,6 +654,24 @@ private:
   void GenerateProcessStarts();
   merk::ProcOp GenerateProcessStart(const parser::ProcessDecl &);
   bool RegisterProcessImages();
+  // The loops that GPU processes run across their teams, under distribute
+  // parallel do (docs/INPROGRESS.md, GPU processes that run loops): in a
+  // device's compile of the kinds, each loop's call of the runtime, and the
+  // body procedure that merk_process_loop calls for an iteration, by the
+  // loop's number, with the counter at `counter` among its inputs and the
+  // others from the loop's words.
+  struct ProcessLoopCase {
+    std::string body;
+    llvm::SmallVector<mlir::Type> inputs;
+    llvm::SmallVector<mlir::Type> results;
+    unsigned counter;
+  };
+  llvm::SmallVector<ProcessLoopCase> processLoops_;
+  void ProcessLoop(const ParallelLoop &, const ProcedureBody &, mlir::Location);
+  void GenerateProcessLoops();
+  // Whether a kind's code, or a procedure of the module that it calls, has
+  // a loop under distribute parallel do, for which the kind takes teams.
+  bool KindRunsLoops(const parser::ProcessDecl &);
   // The target region that code is generated in now, if any.
   mlir::omp::TargetOp EnclosingTarget();
   // process.send(Mailbox, Message, !IO) in a target region: a call of the

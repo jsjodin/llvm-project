@@ -762,7 +762,13 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
   std::string name{parser::EnumToString(directive.id)};
   bool offloaded{directive.id ==
       llvm::omp::Directive::OMPD_target_teams_distribute_parallel_do};
-  if (directive.id != llvm::omp::Directive::OMPD_parallel_do && !offloaded) {
+  // A loop that a GPU process runs across its teams (docs/INPROGRESS.md, GPU
+  // processes that run loops), which check-gpu-code allows only in a GPU
+  // kind's code: on the host, as in a kind spawned there, a parallel do.
+  bool processLoop{
+      directive.id == llvm::omp::Directive::OMPD_distribute_parallel_do};
+  if (directive.id != llvm::omp::Directive::OMPD_parallel_do && !offloaded &&
+      !processLoop) {
     NotYet(at, "the " + name + " directive");
     return;
   }
@@ -991,9 +997,22 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
     }
     reduction.output = *output;
   }
+  if (processLoop && target_.options().processKernels) {
+    if (!reductions.empty()) {
+      NotYet(at,
+          "reductions in the loops that a GPU process runs across its "
+          "teams");
+      return;
+    }
+    ProcessLoop({goals, trip, call, loop, *loopBody, bodyCall, bodyProcedure,
+                    reductions, false, false, false, at},
+        body, Location(goal.tokens));
+    return;
+  }
   // The leaves around the loop's wrappers.
   bool teams{HasLeaf(*queue, llvm::omp::Directive::OMPD_teams)};
-  bool distribute{HasLeaf(*queue, llvm::omp::Directive::OMPD_distribute)};
+  bool distribute{
+      !processLoop && HasLeaf(*queue, llvm::omp::Directive::OMPD_distribute)};
   // Each reduction's variable is a slot of the procedure, holding First, or
   // the state variable's value before the loop, which the partial results
   // are combined with; after the loop, Last, or the state variable's value
@@ -1509,6 +1528,16 @@ bool MerkGenerator::LeafClauses(const omp::Leaf &leaf, parser::CharBlock at,
 void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
   const parser::OmpDirective &directive{*goal.directive};
   parser::CharBlock at{Where(goal.tokens)};
+  // GPU processes' kernels are compiled without OpenMP: of the directives,
+  // they run only the loops across their teams (-fprocess-loops), and
+  // check-gpu-code reports any other in what the kinds reach. The module's
+  // other procedures, which the kernels' compile leaves out of the image
+  // (Lowering's FilterKernelProcs), run the goal as it is.
+  if (target_.options().processKernels &&
+      directive.id != llvm::omp::Directive::OMPD_distribute_parallel_do) {
+    Goal(*goal.goals.front(), body);
+    return;
+  }
   if (llvm::any_of(llvm::omp::getLeafConstructsOrSelf(directive.id),
           [](llvm::omp::Directive leaf) {
             return llvm::omp::getDirectiveAssociation(leaf) ==

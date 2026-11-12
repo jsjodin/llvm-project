@@ -259,7 +259,12 @@ static std::vector<std::string> addProcessImageJobs(const InputArgList &args,
         temporaries.Name((stem + "-" + arch.arch + "-processes").str(), "o")};
     Job device{executable.str(), "-fc1", "-emit-llvm-bc"};
     addFrontendOptions(args, device, arch.triple, /*openMP=*/false);
-    device.insert(device.end(), {"-fprocess-kernels", "-o", kernels, input});
+    device.push_back("-fprocess-kernels");
+    // The loops that the kinds run across teams keep their directives.
+    if (args.hasArg(OPT_fopenmp)) {
+      device.push_back("-fprocess-loops");
+    }
+    device.insert(device.end(), {"-o", kernels, input});
     jobs.push_back(std::move(device));
     std::string image{
         temporaries.Name((stem + "-" + arch.arch + "-processes").str(), "elf")};

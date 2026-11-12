@@ -1637,6 +1637,7 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
   }
   RegisterMessageTypes();
   GenerateProcessStarts();
+  GenerateProcessLoops();
   if (!RegisterProcessImages()) {
     return nullptr;
   }
