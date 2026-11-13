@@ -8,7 +8,7 @@
 % spawn, which names process.spawn. A closure in a variable, not a kind
 % written out, runs at the host, and at a GPU is a software error. The program links LLVM's offload library, through which the
 % runtime finds the GPUs. At -O0 its image links too, as its branches are
-% uniform (Lowering.cpp, MakeProcessBranchesUniform).
+% uniform (Lowering.cpp, MarkProcessCodeSingleLane).
 %
 % REQUIRES: amdgpu-registered-target, libomp
 % RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
