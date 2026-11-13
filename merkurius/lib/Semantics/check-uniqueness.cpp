@@ -395,11 +395,20 @@ void UniquenessChecker::Walk(
     if (!Reached(goal->goals.front())) {
       break;
     }
+    const Body *negated{goal->goals.front()};
     Marks mostly{mostly_};
     bool committed{committed_};
-    Mark(live, before);
+    // Needed when it fails, such a value must not be clobbered in it, nor
+    // what it makes from it; a use that clobbers nothing, as a `ui`
+    // argument, leaves it unique, as in mmc. mmc does not catch an array's
+    // clobber there (see the design document's register).
+    for (BodyVar var : live) {
+      if (before.count(var) && Clobbers(negated, MadeFrom(negated, var))) {
+        MarkWhole(var);
+      }
+    }
     committed_ = true;
-    Walk(goal->goals.front(), live, false);
+    Walk(negated, live, false);
     committed_ = committed;
     mostly_ = std::move(mostly);
     bound_ = std::move(before);
