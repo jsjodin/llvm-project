@@ -45,6 +45,9 @@ using merkurius::runtime::BoxRecord;
 using merkurius::runtime::ElementBytes;
 using merkurius::runtime::IsRecord;
 using merkurius::runtime::IsRecordArray;
+using merkurius::runtime::kArrayBytes1;
+using merkurius::runtime::kArrayBytes2;
+using merkurius::runtime::kArrayBytes4;
 using merkurius::runtime::kArrayRecords;
 using merkurius::runtime::kArrayWords;
 using merkurius::runtime::LoadElement;
@@ -101,16 +104,45 @@ Word *Allocate(int64_t size, Word code, Word recordBytes = 0) {
   return array;
 }
 
-// Sets elements `lo` to `hi`, inclusive, to the word's bits.
+// Sets elements `lo` to `hi`, inclusive, to the word's bits, as many as the
+// width has. The width is read once: StoreElement for each element read the
+// header each time, a load from memory for every byte, which on a GPU
+// process's one lane made array.init of 3.6 KB of cells take 370 us, a third
+// of a step of Life on two places (design document, Measurements, "Life on
+// several places"). Each width's loop is a plain one of stores.
 void Fill(Word *array, int64_t lo, int64_t hi, Word element) {
-  if (ArrayWidthCode(array) == kArrayWords) {
-    for (int64_t i = lo; i <= hi; ++i) {
-      array[1 + i] = element;
+  if (lo > hi) {
+    return;
+  }
+  auto count{static_cast<Word>(hi - lo + 1)};
+  auto first{static_cast<Word>(lo)};
+  switch (ArrayWidthCode(array)) {
+  case kArrayBytes1:
+    __builtin_memset(reinterpret_cast<unsigned char *>(array + 1) + first,
+        static_cast<unsigned char>(element), count);
+    return;
+  case kArrayBytes2: {
+    auto *elements{reinterpret_cast<uint16_t *>(array + 1) + first};
+    auto value{static_cast<uint16_t>(element)};
+    for (Word i{0}; i < count; ++i) {
+      elements[i] = value;
     }
     return;
   }
-  for (int64_t i = lo; i <= hi; ++i) {
-    StoreElement(array, static_cast<Word>(i), element);
+  case kArrayBytes4: {
+    auto *elements{reinterpret_cast<uint32_t *>(array + 1) + first};
+    auto value{static_cast<uint32_t>(element)};
+    for (Word i{0}; i < count; ++i) {
+      elements[i] = value;
+    }
+    return;
+  }
+  default: {
+    Word *elements{array + 1 + first};
+    for (Word i{0}; i < count; ++i) {
+      elements[i] = element;
+    }
+  }
   }
 }
 
