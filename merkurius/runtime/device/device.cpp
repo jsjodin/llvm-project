@@ -93,6 +93,7 @@ int64_t Deadline(int64_t milliseconds) {
 } // namespace
 
 using merkurius::runtime::ArrayWords;
+using merkurius::runtime::CopyWords;
 using merkurius::runtime::DeviceRing;
 using merkurius::runtime::kArenaClearWords;
 using merkurius::runtime::kBumpWords;
@@ -1992,8 +1993,9 @@ extern "C" int merk_device_receive(
 // which the host frees its copy. From a team mailbox, the sender's array
 // itself (merk_device_send_array).
 // Temporary (docs/INPROGRESS.md, GPU processes without omp target, step 5,
-// "Flat records"): one lane copies word by word, until messages travel as
-// their bytes and a wave's lanes copy them together.
+// "Flat records"): one lane copies, a batch of words at a time (CopyWords),
+// until messages travel as their bytes and a wave's lanes copy them
+// together.
 extern "C" int merk_device_receive_array(
     const uint64_t *handle, int64_t milliseconds, uint64_t *message) {
   if (IsTeamHandle(handle)) {
@@ -2030,9 +2032,7 @@ extern "C" int merk_device_receive_array(
   uint64_t words{ArrayWords(copy)};
   auto *array{
       static_cast<uint64_t *>(merk_device_alloc(sizeof(uint64_t) * words))};
-  for (uint64_t i{0}; i < words; ++i) {
-    array[i] = copy[i];
-  }
+  CopyWords(array, copy, words);
   *message = reinterpret_cast<uint64_t>(array);
   Taken(entry);
   return 1;
@@ -2148,15 +2148,14 @@ namespace {
 // whose lines the device's L2 cache may hold unwritten while it runs, which
 // the device's fences do not write back.
 // Temporary (docs/INPROGRESS.md, GPU processes without omp target, step 5,
-// "Flat records"): one lane copies word by word, until messages travel as
-// their bytes and a wave's lanes copy them together.
+// "Flat records"): one lane copies, a batch of words at a time (CopyWords),
+// until messages travel as their bytes and a wave's lanes copy them
+// together.
 uint64_t *CopyToHost(const uint64_t *array, PinnedMemory &memory) {
   uint64_t words{ArrayWords(array)};
   auto *copy{
       static_cast<uint64_t *>(memory.Allocate(sizeof(uint64_t) * words))};
-  for (uint64_t i{0}; i < words; ++i) {
-    copy[i] = array[i];
-  }
+  CopyWords(copy, array, words);
   __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
   return copy;
 }
