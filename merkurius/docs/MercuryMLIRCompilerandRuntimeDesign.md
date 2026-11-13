@@ -3592,8 +3592,11 @@ above. This brings them back.
   worker teams make, a list of theirs; a message it receives is a group of
   blocks, freed together. All go when the process ends, and
   `merk_device_free` frees one before (INPROGRESS, Memory that a GPU
-  process gives back). `MERK_CHECK_PROCESS_MEMORY` reports the most that
-  a GPU process held at once.
+  process gives back), which `merk.free` calls in a GPU process's image:
+  a term's cell from its word without the tag, nothing for a constant's
+  word. Static cells and string literals are in the image's `merk_static`
+  section, which `merk_device_free` leaves alone. `MERK_CHECK_PROCESS_MEMORY`
+  reports the most that a GPU process held at once.
 - **A target region's code may make terms,** as code compiled from ordinary
   procedures does, in an arena that lives as long as the region. A region
   is a computation and ends; a GPU process is an actor and may live for
