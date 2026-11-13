@@ -5052,6 +5052,29 @@ and the change:
 | `life-places.m`, sequential | 1296 | 784 |
 | `work_stealing.m` | 912 | 496 |
 
+The step times hardly moved. 2026-11-13 at 391751dc676f, Firefox closed,
+`LIBOMPTARGET_AMDGPU_CU_MASK=0-39`, the default world of "Life on several
+places", the average step in microseconds, the median of 6 runs in two
+rounds, interleaved: the build as it is, against the same build with
+`"amdgpu-single-lane"` stripped from the image's bitcode, which turns off
+the reads and the inference but keeps the other two changes (1552 bytes a
+lane, so run with `MERK_GPU_PROCESS_STACK_BYTES=2304`).
+
+| Places | Stripped | As built |
+|---|---|---|
+| 1 | 228 | 215 |
+| 2 | 448 | 459 |
+| 4 | 713 | 702 |
+
+The rounds differed by up to 4% (2 places, stripped: 437 in the first,
+456 in the second), so only 1 place's 6% is clearly real; a place's step is
+mostly copies of messages over PCIe, RPCs and waiting for the other places
+("Life on several places"), which the registers do not change. Leaving a
+loaded value that is only stored in a vector register, so that a copy does
+not read each word into a scalar register and move it back, changed nothing
+(2 places: 461) and grew the stack to 848 bytes; not kept. The change is
+for the stack, which every wave of a GPU process's kernel reserves.
+
 ### Heap pointers in an address space of their own
 
 Measured on 2026-11-08, commit 559bb24685ad against 5df05bc20023, the commit
