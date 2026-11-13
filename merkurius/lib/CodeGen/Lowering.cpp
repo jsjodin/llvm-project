@@ -52,6 +52,7 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
+#include "mlir/Target/LLVMIR/LLVMTranslationInterface.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include <functional>
@@ -148,7 +149,9 @@ static bool VariableArity(llvm::StringRef constructor) {
 constexpr llvm::StringLiteral kTailOfOtherTypeAttrName{
     "merk.tail_of_other_type"};
 
-class Lowerer {
+// Lowering is its rewriter's listener, to note the root types of the values
+// that calls make (notifyOperationReplaced).
+class Lowerer : public mlir::RewriterBase::Listener {
 public:
   Lowerer(mlir::ModuleOp module, const TargetInfo &target,
       llvm::StringRef clang = {})
@@ -162,8 +165,16 @@ public:
     device_ = kernels_ ||
         (mlir::omp::isOpenMPModule(module) && offload &&
             offload.getIsTargetDevice());
+    rewriter_.setListener(this);
   }
   llvm::LogicalResult Lower();
+  // Notes on the call that makes a lowered op's result of a monomorphic root
+  // type what that type is (kResultTypesAttrName). The optimizer can keep
+  // such a value live past a safepoint where no bundle lists it, as when it
+  // sinks a call that only reads its bits after an allocation; the
+  // statepoint pass then has its type from the call.
+  void notifyOperationReplaced(
+      mlir::Operation *op, mlir::ValueRange values) override;
 
 private:
   // A pointer the collector will follow, or a word that may be one: its
@@ -1818,6 +1829,43 @@ std::optional<std::int64_t> Lowerer::MonomorphicRootIndex(mlir::Type type) {
     return std::nullopt;
   }
   return liveTypes_.try_emplace(type, liveTypes_.size()).first->second;
+}
+
+void Lowerer::notifyOperationReplaced(
+    mlir::Operation *op, mlir::ValueRange values) {
+  if (device_ || !mlir::isa_and_present<merk::MerkDialect>(op->getDialect())) {
+    return;
+  }
+  for (auto [result, value] : llvm::zip(op->getResults(), values)) {
+    std::optional<std::int64_t> index{
+        value ? MonomorphicRootIndex(result.getType()) : std::nullopt};
+    if (!index) {
+      continue;
+    }
+    mlir::Operation *made{value.getDefiningOp()};
+    while (auto cast{
+        mlir::dyn_cast_or_null<mlir::UnrealizedConversionCastOp>(made)}) {
+      if (cast->getNumOperands() != 1) {
+        break;
+      }
+      made = cast->getOperand(0).getDefiningOp();
+    }
+    std::int64_t position{0};
+    if (auto field{mlir::dyn_cast_or_null<mlir::LLVM::ExtractValueOp>(made)};
+        field && field.getPosition().size() == 1) {
+      position = field.getPosition()[0];
+      made = field.getContainer().getDefiningOp();
+    }
+    auto call{mlir::dyn_cast_or_null<mlir::LLVM::CallOp>(made)};
+    if (!call) {
+      continue;
+    }
+    std::string note{std::to_string(position) + ":" + std::to_string(*index)};
+    if (auto old{call->getAttrOfType<mlir::StringAttr>(kResultTypesAttrName)}) {
+      note = old.getValue().str() + " " + note;
+    }
+    call->setAttr(kResultTypesAttrName, rewriter_.getStringAttr(note));
+  }
 }
 
 void Lowerer::NoteFieldType(
@@ -5107,6 +5155,33 @@ llvm::LogicalResult LowerToLLVMDialect(
   return Lowerer{module, target, clang}.Lower();
 }
 
+namespace {
+
+// The merk dialect's attributes that reach LLVM IR: a call's results' root
+// types (kResultTypesAttrName) become the LLVM call's string attribute.
+class MerkTranslation : public mlir::LLVMTranslationDialectInterface {
+public:
+  using LLVMTranslationDialectInterface::LLVMTranslationDialectInterface;
+  llvm::LogicalResult amendOperation(mlir::Operation *,
+      llvm::ArrayRef<llvm::Instruction *> instructions,
+      mlir::NamedAttribute attribute,
+      mlir::LLVM::ModuleTranslation &) const override {
+    auto note{mlir::dyn_cast<mlir::StringAttr>(attribute.getValue())};
+    if (attribute.getName() != kResultTypesAttrName || !note) {
+      return llvm::success();
+    }
+    for (llvm::Instruction *instruction : instructions) {
+      if (auto *call{llvm::dyn_cast<llvm::CallBase>(instruction)}) {
+        call->addFnAttr(llvm::Attribute::get(
+            call->getContext(), kResultTypesAttrName, note.getValue()));
+      }
+    }
+    return llvm::success();
+  }
+};
+
+} // namespace
+
 std::unique_ptr<llvm::Module> TranslateToLLVMIR(mlir::ModuleOp module,
     llvm::LLVMContext &context, const TargetInfo &target) {
   // The fields' types (EmitRootTable), as named metadata, which the
@@ -5117,6 +5192,9 @@ std::unique_ptr<llvm::Module> TranslateToLLVMIR(mlir::ModuleOp module,
   mlir::registerBuiltinDialectTranslation(registry);
   mlir::registerLLVMDialectTranslation(registry);
   mlir::registerOpenMPDialectTranslation(registry);
+  registry.addExtension(+[](mlir::MLIRContext *, merk::MerkDialect *dialect) {
+    dialect->addInterfaces<MerkTranslation>();
+  });
   module.getContext()->appendDialectRegistry(registry);
   std::unique_ptr<llvm::Module> llvmModule{mlir::translateModuleToLLVMIR(
       module, context, module.getName().value_or("module"))};
