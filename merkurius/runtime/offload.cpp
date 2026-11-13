@@ -929,7 +929,30 @@ extern "C" void merk_check_teams(std::int64_t teams) {
 }
 
 // At start-up, before any region runs.
+// A program that ends by C's exit while a target region or a GPU process
+// runs, as a foreign_proc may end it, ends as ExitProgram ends it: without
+// the exit handlers registered before this one, liboffload's and
+// libomptarget's among them, which would free device memory that the
+// kernels still use. They fault on it, and the plugin then aborts the
+// program, so neither the status nor buffered output survived. Handlers run
+// in the reverse order of their registration, and each library registers
+// its teardown as it starts: libomptarget before main, liboffload when the
+// first GPU process looks for the GPUs (devices.cpp). So this is registered
+// after each; running it twice is harmless. glibc's on_exit, as atexit
+// gives no status.
+static void EndWhileRegionsRun(int status, void *) {
+  if (merkurius::runtime::RegionsRunning()) {
+    std::fflush(nullptr);
+    std::_Exit(status);
+  }
+}
+
+namespace merkurius::runtime {
+void EndExitWhileRegionsRun() { on_exit(EndWhileRegionsRun, nullptr); }
+} // namespace merkurius::runtime
+
 extern "C" void merk_offload_start(void) {
+  merkurius::runtime::EndExitWhileRegionsRun();
   if (const char *limit{std::getenv("MERK_DEVICE_ARENA_BYTES")}) {
     arenaLimit = std::strtoull(limit, nullptr, 10);
   }

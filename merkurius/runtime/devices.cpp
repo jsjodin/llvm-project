@@ -128,6 +128,8 @@ void FindGpus() {
       Fail("could not make a liboffload context for a GPU", result);
     }
   }
+  // After liboffload's teardown, which its start registered.
+  EndExitWhileRegionsRun();
   pthread_mutex_lock(&callbackLock);
   gpusFound = true;
   if (rpcCallback) {
