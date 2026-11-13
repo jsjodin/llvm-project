@@ -143,6 +143,11 @@ static bool VariableArity(llvm::StringRef constructor) {
       constructor.starts_with("func/");
 }
 
+// A call in tail position of a procedure of another type than its caller's,
+// on a target without the tail calling convention (CallCode).
+constexpr llvm::StringLiteral kTailOfOtherTypeAttrName{
+    "merk.tail_of_other_type"};
+
 class Lowerer {
 public:
   Lowerer(mlir::ModuleOp module, const TargetInfo &target,
@@ -3056,13 +3061,13 @@ mlir::Value Lowerer::CallCode(mlir::Operation *call, mlir::LLVM::LLVMFuncOp func
   // branch, it goes to the next branch. A call passing an environment in
   // the caller's frame needs the frame after the call. Without the tail
   // calling convention, as on an AMD GPU, LLVM takes a musttail call only
-  // between procedures of the same type; any other is an ordinary call,
-  // which uses the stack.
-  bool isTail{succeed && CanFail(caller.getSymName()) == canFail &&
+  // between procedures of the same type. A direct call of a procedure of
+  // another type is marked, and returns its results as a tail call does;
+  // UnifyTailCallTypes gives the procedures that such calls join one type
+  // and makes the calls musttail. Any other is an ordinary call, which uses
+  // the stack.
+  bool inTailPosition{succeed && CanFail(caller.getSymName()) == canFail &&
       fail_ == topFail_ &&
-      (cconv_ == mlir::LLVM::CConv::Tail ||
-          caller.getFunctionType() ==
-              (func ? func.getFunctionType() : funcType)) &&
       llvm::none_of(call->getOperands(), [](mlir::Value operand) {
         if (auto cast{operand.getDefiningOp<mlir::LLVM::AddrSpaceCastOp>()}) {
           operand = cast.getArg();
@@ -3070,6 +3075,10 @@ mlir::Value Lowerer::CallCode(mlir::Operation *call, mlir::LLVM::LLVMFuncOp func
         return operand.getDefiningOp<merk::EnvNewOp>() ||
             operand.getDefiningOp<mlir::LLVM::AllocaOp>();
       })};
+  bool sameType{cconv_ == mlir::LLVM::CConv::Tail ||
+      caller.getFunctionType() == (func ? func.getFunctionType() : funcType)};
+  bool mustTail{inTailPosition && sameType};
+  bool isTail{inTailPosition && (sameType || func)};
   // A callee's outputs in memory are where the caller's go, for a tail
   // call, whose caller has the same outputs, and otherwise in a slot.
   mlir::Value outputs;
@@ -3091,7 +3100,11 @@ mlir::Value Lowerer::CallCode(mlir::Operation *call, mlir::LLVM::LLVMFuncOp func
   mlir::Value result{
       llvmCall.getNumResults() ? llvmCall.getResult() : mlir::Value{}};
   if (isTail) {
-    llvmCall.setTailCallKind(mlir::LLVM::TailCallKind::MustTail);
+    if (mustTail) {
+      llvmCall.setTailCallKind(mlir::LLVM::TailCallKind::MustTail);
+    } else {
+      llvmCall->setAttr(kTailOfOtherTypeAttrName, rewriter_.getUnitAttr());
+    }
     rewriter_.setInsertionPoint(succeed);
     rewriter_.replaceOpWithNewOp<mlir::LLVM::ReturnOp>(
         succeed, result ? mlir::ValueRange{result} : mlir::ValueRange{});
@@ -4357,6 +4370,288 @@ static bool RejectOnDevice(
   return true;
 }
 
+// Whether `use` is one of `call`'s arguments, not the function it calls
+// through a pointer or an operand bundle's.
+bool IsArgument(mlir::LLVM::CallOp call, mlir::OpOperand &use) {
+  mlir::OperandRange arguments{call.getArgOperands()};
+  unsigned index{use.getOperandNumber()};
+  return !arguments.empty() && index >= arguments.getBeginOperandIndex() &&
+      index < arguments.getBeginOperandIndex() + arguments.size();
+}
+
+// The stack slot that `address` is in, through offsets and casts, if it is
+// in one.
+mlir::LLVM::AllocaOp SlotOf(mlir::Value address) {
+  while (true) {
+    mlir::Operation *op{address.getDefiningOp()};
+    if (auto alloca{mlir::dyn_cast_or_null<mlir::LLVM::AllocaOp>(op)}) {
+      return alloca;
+    }
+    if (auto gep{mlir::dyn_cast_or_null<mlir::LLVM::GEPOp>(op)}) {
+      address = gep.getBase();
+    } else if (auto cast{
+                   mlir::dyn_cast_or_null<mlir::LLVM::AddrSpaceCastOp>(op)}) {
+      address = cast.getArg();
+    } else {
+      return nullptr;
+    }
+  }
+}
+
+// Whether the address of one of `func`'s stack slots may outlive one of its
+// `tails`: it reaches a tail call, memory other than its stack slots, or
+// anything but loads, stores and other calls, through offsets and casts, as
+// when a process's entry passes its kind the mailbox it builds on the stack
+// (MLIRGenProcesses.cpp). An address stored in a stack slot, as a
+// continuation's environment holds the one it is nested in, goes where what
+// is loaded from that slot goes. Another call may take a slot, since a callee
+// keeps no pointer into its caller's frame once it returns, and it returns
+// before the tail call. Lowering sees allocations of the merk dialect, which
+// become stack slots later, so CallCode cannot tell.
+bool FrameEscapes(
+    mlir::LLVM::LLVMFuncOp func, llvm::ArrayRef<mlir::LLVM::CallOp> tails) {
+  llvm::SmallVector<mlir::Value> worklist;
+  func.walk([&](mlir::LLVM::AllocaOp alloca) {
+    worklist.push_back(alloca.getResult());
+  });
+  // The loads from each stack slot, and the slots that hold addresses of
+  // slots, whose loads are followed.
+  llvm::DenseMap<mlir::Operation *, llvm::SmallVector<mlir::Value>> loads;
+  func.walk([&](mlir::LLVM::LoadOp load) {
+    if (mlir::LLVM::AllocaOp slot{SlotOf(load.getAddr())}) {
+      loads[slot].push_back(load.getResult());
+    }
+  });
+  llvm::SmallPtrSet<mlir::Operation *, 8> holding;
+  llvm::DenseSet<mlir::Value> seen;
+  while (!worklist.empty()) {
+    mlir::Value address{worklist.pop_back_val()};
+    if (!seen.insert(address).second) {
+      continue;
+    }
+    for (mlir::OpOperand &use : address.getUses()) {
+      mlir::Operation *user{use.getOwner()};
+      if (mlir::isa<mlir::LLVM::AddrSpaceCastOp, mlir::LLVM::GEPOp>(user)) {
+        worklist.push_back(user->getResult(0));
+      } else if (mlir::isa<mlir::LLVM::LoadOp>(user)) {
+        continue;
+      } else if (auto store{mlir::dyn_cast<mlir::LLVM::StoreOp>(user)}) {
+        if (store.getAddr() == address) {
+          continue;
+        }
+        mlir::LLVM::AllocaOp slot{SlotOf(store.getAddr())};
+        if (!slot) {
+          return true;
+        }
+        if (holding.insert(slot).second) {
+          worklist.append(loads[slot]);
+        }
+      } else if (auto call{mlir::dyn_cast<mlir::LLVM::CallOp>(user)};
+          call && !llvm::is_contained(tails, call) && IsArgument(call, use)) {
+        continue;
+      } else {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// The tail calls of a function whose frame may outlive them become ordinary
+// calls, as a musttail call ends the caller's frame before the callee runs,
+// and so do those in a region of an operation, such as OpenMP's, which do
+// not end the function.
+void DropTailCallsFromEscapingFrames(mlir::ModuleOp module) {
+  for (auto func : module.getOps<mlir::LLVM::LLVMFuncOp>()) {
+    llvm::SmallVector<mlir::LLVM::CallOp> tails;
+    func.walk([&](mlir::LLVM::CallOp call) {
+      if (call.getTailCallKind() == mlir::LLVM::TailCallKind::MustTail ||
+          call->hasAttr(kTailOfOtherTypeAttrName)) {
+        tails.push_back(call);
+      }
+    });
+    bool escapes{!tails.empty() && FrameEscapes(func, tails)};
+    for (mlir::LLVM::CallOp call : tails) {
+      if (escapes || call->getParentOp() != func.getOperation()) {
+        call.setTailCallKind(mlir::LLVM::TailCallKind::None);
+        call->removeAttr(kTailOfOtherTypeAttrName);
+      }
+    }
+  }
+}
+
+// The representative of `n`'s group in the forest `parent`.
+unsigned FindGroup(llvm::SmallVectorImpl<unsigned> &parent, unsigned n) {
+  while (parent[n] != n) {
+    n = parent[n] = parent[parent[n]];
+  }
+  return n;
+}
+
+// On a target without the tail calling convention, as an AMD GPU, LLVM takes
+// a musttail call only between functions of one type, and Mercury relies on
+// tail calls between procedures (design document, "Calling convention"), as
+// a process's states that call each other last. So the functions that calls
+// marked by CallCode join, directly or through others, each a group, get one
+// type: for each parameter type, as many parameters as the function of the
+// group that has the most, in the order the types first appear, a function's
+// own in the order it has them, the rest poison at its calls. Then each
+// marked call is musttail, which AMDGPU makes a jump. The musttail calls
+// that CallCode made, between functions of one type, join groups too, so
+// that they stay so. Only groups of functions that are called directly and
+// not visible outside the module change, as a closure's entry is called
+// through a pointer and another module calls an exported procedure by its
+// type; a marked call in another group stays an ordinary call, which
+// WarnGpuRecursion reports if it may recurse. The result types of a marked
+// call and of its caller are one already, as the call's results are the
+// caller's.
+void UnifyTailCallTypes(mlir::ModuleOp module) {
+  llvm::SmallVector<mlir::LLVM::LLVMFuncOp> functions;
+  llvm::StringMap<unsigned> numbers;
+  for (auto func : module.getOps<mlir::LLVM::LLVMFuncOp>()) {
+    if (!func.isExternal()) {
+      numbers[func.getSymName()] = functions.size();
+      functions.push_back(func);
+    }
+  }
+  // Which functions may change type: those whose every use is a direct call
+  // and that only the module sees.
+  llvm::SmallVector<bool> changeable(functions.size());
+  for (auto [n, func] : llvm::enumerate(functions)) {
+    mlir::LLVM::Linkage linkage{func.getLinkage()};
+    changeable[n] = !func.isVarArg() &&
+        (linkage == mlir::LLVM::Linkage::Private ||
+            linkage == mlir::LLVM::Linkage::Internal);
+  }
+  if (std::optional<mlir::SymbolTable::UseRange> uses{
+          mlir::SymbolTable::getSymbolUses(module.getOperation())}) {
+    for (const mlir::SymbolTable::SymbolUse &use : *uses) {
+      auto known{numbers.find(use.getSymbolRef().getRootReference())};
+      if (known == numbers.end()) {
+        continue;
+      }
+      auto call{mlir::dyn_cast<mlir::LLVM::CallOp>(use.getUser())};
+      if (!call || call.getCallee() != known->first()) {
+        changeable[known->second] = false;
+      }
+    }
+  } else {
+    return;
+  }
+  // The groups, as a forest of each function's representative.
+  llvm::SmallVector<unsigned> parent(functions.size());
+  for (unsigned n = 0; n < parent.size(); ++n) {
+    parent[n] = n;
+  }
+  llvm::SmallVector<mlir::LLVM::CallOp> marked;
+  module.walk([&](mlir::LLVM::CallOp call) {
+    bool isMarked{call->hasAttr(kTailOfOtherTypeAttrName)};
+    if (isMarked) {
+      marked.push_back(call);
+    } else if (call.getTailCallKind() != mlir::LLVM::TailCallKind::MustTail) {
+      return;
+    }
+    auto caller{call->getParentOfType<mlir::LLVM::LLVMFuncOp>()};
+    std::optional<llvm::StringRef> callee{call.getCallee()};
+    auto from{numbers.find(caller.getSymName())};
+    auto to{callee ? numbers.find(*callee) : numbers.end()};
+    if (from == numbers.end() || to == numbers.end()) {
+      return;
+    }
+    mlir::LLVM::LLVMFuncOp target{functions[to->second]};
+    if (isMarked &&
+        (!changeable[from->second] || !changeable[to->second] ||
+            caller.getCConv() != target.getCConv() ||
+            caller.getFunctionType().getReturnType() !=
+                target.getFunctionType().getReturnType())) {
+      return;
+    }
+    parent[FindGroup(parent, from->second)] = FindGroup(parent, to->second);
+  });
+  llvm::MapVector<unsigned, llvm::SmallVector<unsigned>> groups;
+  for (unsigned n = 0; n < functions.size(); ++n) {
+    groups[FindGroup(parent, n)].push_back(n);
+  }
+  for (auto &[root, members] : groups) {
+    if (members.size() < 2 ||
+        llvm::any_of(members, [&](unsigned n) { return !changeable[n]; }) ||
+        llvm::all_of(members, [&](unsigned n) {
+          return functions[n].getFunctionType() ==
+              functions[members.front()].getFunctionType();
+        })) {
+      continue;
+    }
+    // The group's parameters: each type's first slot, and how many.
+    llvm::MapVector<mlir::Type, unsigned> most;
+    for (unsigned n : members) {
+      llvm::SmallDenseMap<mlir::Type, unsigned> count;
+      for (mlir::Type type : functions[n].getFunctionType().getParams()) {
+        unsigned &slots{most[type]};
+        slots = std::max(slots, ++count[type]);
+      }
+    }
+    llvm::SmallDenseMap<mlir::Type, unsigned> first;
+    llvm::SmallVector<mlir::Type> params;
+    for (auto [type, slots] : most) {
+      first[type] = params.size();
+      params.append(slots, type);
+    }
+    for (unsigned n : members) {
+      mlir::LLVM::LLVMFuncOp func{functions[n]};
+      mlir::LLVM::LLVMFunctionType old{func.getFunctionType()};
+      // Where each of its parameters goes among the group's.
+      llvm::SmallVector<unsigned> slot;
+      llvm::SmallDenseMap<mlir::Type, unsigned> count;
+      for (mlir::Type type : old.getParams()) {
+        slot.push_back(first[type] + count[type]++);
+      }
+      mlir::Block &entry{func.getBody().front()};
+      unsigned oldCount{entry.getNumArguments()};
+      for (mlir::Type type : params) {
+        entry.addArgument(type, func.getLoc());
+      }
+      for (unsigned i = 0; i < oldCount; ++i) {
+        entry.getArgument(i).replaceAllUsesWith(
+            entry.getArgument(oldCount + slot[i]));
+      }
+      entry.eraseArguments(0, oldCount);
+      func.setFunctionType(mlir::LLVM::LLVMFunctionType::get(
+          old.getReturnType(), params, false));
+      func.removeArgAttrsAttr();
+      // Its calls pass their arguments in its slots.
+      mlir::SymbolTable::UseRange uses{
+          *mlir::SymbolTable::getSymbolUses(func, module)};
+      for (const mlir::SymbolTable::SymbolUse &use : uses) {
+        auto call{mlir::cast<mlir::LLVM::CallOp>(use.getUser())};
+        mlir::OpBuilder builder{call};
+        llvm::SmallVector<mlir::Value> arguments(params.size());
+        for (auto [i, argument] : llvm::enumerate(call.getArgOperands())) {
+          arguments[slot[i]] = argument;
+        }
+        for (auto [i, type] : llvm::enumerate(params)) {
+          if (!arguments[i]) {
+            arguments[i] =
+                mlir::LLVM::PoisonOp::create(builder, call.getLoc(), type);
+          }
+        }
+        call.getCalleeOperandsMutable().assign(arguments);
+        call.removeArgAttrsAttr();
+      }
+    }
+  }
+  for (mlir::LLVM::CallOp call : marked) {
+    call->removeAttr(kTailOfOtherTypeAttrName);
+    auto caller{call->getParentOfType<mlir::LLVM::LLVMFuncOp>()};
+    std::optional<llvm::StringRef> callee{call.getCallee()};
+    auto to{callee ? numbers.find(*callee) : numbers.end()};
+    if (to != numbers.end() &&
+        functions[to->second].getFunctionType() == caller.getFunctionType() &&
+        functions[to->second].getCConv() == caller.getCConv()) {
+      call.setTailCallKind(mlir::LLVM::TailCallKind::MustTail);
+    }
+  }
+}
+
 llvm::LogicalResult Lowerer::Lower() {
   module_.getContext()->loadDialect<mlir::LLVM::LLVMDialect, mrt::MrtDialect>();
   // On a device nothing calls a descriptor's unify entry, since a generic
@@ -4590,6 +4885,12 @@ llvm::LogicalResult Lowerer::Lower() {
   if (mlir::failed(mlir::applyPartialConversion(
           module_.getOperation(), target, std::move(patterns)))) {
     return llvm::failure();
+  }
+  // Before omp-stack-to-shared, which frees shared memory before a musttail
+  // call.
+  DropTailCallsFromEscapingFrames(module_);
+  if (cconv_ != mlir::LLVM::CConv::Tail) {
+    UnifyTailCallTypes(module_);
   }
   if (mlir::omp::isOpenMPModule(module_) && mlir::failed(LowerOpenMP())) {
     return llvm::failure();
