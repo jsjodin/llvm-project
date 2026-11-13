@@ -1,0 +1,7 @@
+gpu-tail-calls.m's process at the machine's GPU, whose states, of different
+types, call each other last a million times (Lowering.cpp,
+UnifyTailCallTypes). With ordinary calls a GPU process's stack would not
+hold them.
+REQUIRES: amdgpu-gpu
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/gpu-tail-calls.m -o %t
+RUN: %gpu-env %t gpu | FileCheck %S/gpu-tail-calls.m --match-full-lines --strict-whitespace
