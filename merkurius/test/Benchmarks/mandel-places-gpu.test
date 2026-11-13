@@ -1,0 +1,33 @@
+mandel-places.m's zoom on the machine's GPU (docs/INPROGRESS.md, step 4 of
+the demo, (m3)): its places, GPU processes with a share of the kernel's
+teams each (process.set_worker_teams), give mandel.m's iterations
+(mandel-gpu.test) under every policy, with one to four places, on 64 pixels
+square in tiles of 8 for 12 frames, and on 512 in tiles of 32 for the whole
+zoom of 40 frames. Their states call each other last, which the GPU makes
+jumps (CodeGen/gpu-tail-calls.m): the compile warns of no recursion.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/mandel/mandel-places.m -o %t 2>&1 | FileCheck %s --check-prefix=QUIET --allow-empty
+QUIET-NOT: warning:
+RUN: %gpu-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=1 MANDEL_POLICY=static timeout -k 1 60 %t | FileCheck %s --check-prefix=SMALL
+RUN: %gpu-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=2 MANDEL_POLICY=static timeout -k 1 60 %t | FileCheck %s --check-prefix=SMALL
+RUN: %gpu-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 MANDEL_POLICY=static timeout -k 1 60 %t | FileCheck %s --check-prefix=SMALL
+RUN: %gpu-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=4 MANDEL_POLICY=static timeout -k 1 60 %t | FileCheck %s --check-prefix=SMALL
+RUN: %gpu-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=1 MANDEL_POLICY=steal timeout -k 1 60 %t | FileCheck %s --check-prefix=SMALL
+RUN: %gpu-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=2 MANDEL_POLICY=steal timeout -k 1 60 %t | FileCheck %s --check-prefix=SMALL
+RUN: %gpu-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 MANDEL_POLICY=steal timeout -k 1 60 %t | FileCheck %s --check-prefix=SMALL
+RUN: %gpu-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=4 MANDEL_POLICY=steal timeout -k 1 60 %t | FileCheck %s --check-prefix=SMALL
+RUN: %gpu-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=1 MANDEL_POLICY=pool timeout -k 1 60 %t | FileCheck %s --check-prefix=SMALL
+RUN: %gpu-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=2 MANDEL_POLICY=pool timeout -k 1 60 %t | FileCheck %s --check-prefix=SMALL
+RUN: %gpu-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 MANDEL_POLICY=pool timeout -k 1 60 %t | FileCheck %s --check-prefix=SMALL
+RUN: %gpu-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=4 MANDEL_POLICY=pool timeout -k 1 60 %t | FileCheck %s --check-prefix=SMALL
+RUN: %gpu-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=4 MANDEL_POLICY=pool MANDEL_CHUNK=1 timeout -k 1 60 %t | FileCheck %s --check-prefix=SMALL
+SMALL: Iterations: 10601425
+SMALL-NEXT: Checksum: 63198496
+
+RUN: %gpu-env MANDEL_SIZE=512 MANDEL_TILE=32 MANDEL_POLICY=static timeout -k 1 120 %t | FileCheck %s --check-prefix=ZOOM
+RUN: %gpu-env MANDEL_SIZE=512 MANDEL_TILE=32 MANDEL_POLICY=steal timeout -k 1 120 %t | FileCheck %s --check-prefix=ZOOM
+RUN: %gpu-env MANDEL_SIZE=512 MANDEL_TILE=32 MANDEL_POLICY=pool timeout -k 1 120 %t | FileCheck %s --check-prefix=ZOOM
+ZOOM: Frames: 40 of 512 x 512 pixels, tiles of 32 x 32
+ZOOM: Iterations: 8362906608
+ZOOM-NEXT: Checksum: 237665807406

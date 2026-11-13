@@ -35,9 +35,31 @@ advance. No tile starts or ends, so balancing is tested alone.
   reduction. Its time is the host's, from before the spawn to the last
   answer, as `mandel.c`'s covers its kernels' launches. The first argument
   `host` spawns the process at the host.
+- `mandel-places.m`: the zoom on `MANDEL_PLACES` places (4), GPU processes
+  on one GPU with a `MANDEL_PLACES`'th of the kernel's teams each
+  (`process.set_worker_teams`), and the host as the coordinator. A frame is
+  in tiles of `MANDEL_TILE` pixels square (128, a power of two that divides
+  the size). A place steps one tile at a time, a loop across its teams over
+  the tile's pixels, and between tiles answers any thief. `MANDEL_POLICY`
+  chooses how the tiles are shared:
+  - `static`: each place gets an equal, contiguous range of the frame's
+    tiles by rows, and nothing moves.
+  - `steal` (the default): the static ranges; a place that runs out asks
+    its neighbour round the ring, which gives it the back half of what it
+    has left, or passes the request on if it has fewer than two tiles left.
+  - `pool`: the host holds the frame's tiles, and a place that runs out asks
+    it for `MANDEL_CHUNK` (4).
+
+  Besides the iterations and checksum, it prints the tiles handed over,
+  each place's tiles and busy time by the device's clock, and the balance:
+  the busiest place's time over the average, 1 when the places are even.
 - `mandel.py`, independent, in Python, whose floats are doubles that it does
   not fuse either: the counts for small frames, which the tests check the
   programs against.
+
+`compare-places.sh` runs `mandel.m`, `mandel.c` and `mandel-places.m` under
+each policy in turns, checks that they give the same iterations, and prints
+each one's median time, rate, balance and tiles handed over.
 
 `compare-c.sh` runs `mandel.m` and `mandel.c` in turns, checks that they give
 the same iterations, and prints each one's median time and rate.
@@ -50,9 +72,29 @@ rounds of the whole zoom's time:
 | 2048² | 3.45 s, 38.8 Giterations/s | 3.57 s, 37.4 Giterations/s |
 | 1024² | 0.90 s, 37.0 Giterations/s | 0.98 s, 34.0 Giterations/s |
 
+`compare-places.sh`, the same day, the median of 5 rounds; four places,
+then the balance, the busiest place's busy time over the average, and the
+tiles handed over:
+
+| Frames, tiles | Mercury, dense | C, dense | Static | Steal | Pool |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2048², 128² | 3.45 s | 3.57 s | 4.28 s, 1.23 | 3.97 s, 1.04, 2362 | 3.94 s, 1.02, 10240 |
+| 2048², 64² | 3.45 s | 3.57 s | 4.77 s, 1.21 | 4.43 s, 1.02, 10005 | 4.49 s, 1.02, 40960 |
+| 1024², 128² | 0.90 s | 0.98 s | 1.11 s, 1.23 | 1.09 s, 1.11, 404 | 1.06 s, 1.02, 2560 |
+
+Stealing evens the places and saves 7% over the static split, but each
+tile's loop waits for its slowest pixel, so splitting the GPU costs 9%
+before any balance, and on one GPU the hardware's balancing of the dense
+programs wins (design document, Measurements, Uneven work).
+
 ## Tests
 
 `test/Benchmarks/mandel.test` runs `mandel.m` at the host, sequentially at
 -O0 and -O2 and on the host's threads, and `mandel.c` on the host's threads,
 against `mandel.py` on 64 pixels for 12 frames and 51 for 30;
 `mandel-gpu.test` both on the GPU, the whole zoom at 512 pixels too.
+`mandel-places.test` runs `mandel-places.m`'s places at the host under every
+policy, with one, three and four places, sequentially at -O0 and -O2 and on
+the host's threads, against `mandel.py`'s counts, and the static split's
+tiles; `mandel-places-gpu.test` every policy with one to four places on the
+GPU, and the whole zoom at 512 pixels.
