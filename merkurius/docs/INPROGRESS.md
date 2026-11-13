@@ -3733,7 +3733,10 @@ so the GPU faulted.
   string by kind number).
 - *The runtime:* a spawn of a kind with loops reserves as its worker teams
   every team of the module's kernel whose slots are all free, other than
-  its own, and fails, saying so, if there is none (`ReserveWorkers`). The
+  its own, and fails, saying so, if there is none (`ReserveWorkers`). Under
+  `set_worker_teams(Place, share(K))` it takes only the first of them up to
+  a K'th of the kernel's teams, at least one, so that K such processes run
+  loops at once (step 4 of the demo, (m1), 2026-11-12). The
   reserved slots record the process's slot, the team's number among the
   workers and how many; the process's wave makes its control block in its
   arena and sets them working. The waves of a working team take
