@@ -3584,6 +3584,16 @@ above. This brings them back.
     target regions since step 2a. Until flat records are values on
     the device, a message of several words still travels by its `type_info`
     copy (step 4e, above), marked Temporary.
+- **A GPU process's blocks** (2026-11-13, `runtime/device/device.cpp`,
+  `Block`): its cells and arrays come from LLVM libc's allocator on the
+  GPU, those of 1 MiB or more from a cache of large blocks that each GPU's
+  image keeps, as libc asks the host for those, rounded to 2 MiB. Each
+  block has a header before it, on the process's list, or for what its
+  worker teams make, a list of theirs; a message it receives is a group of
+  blocks, freed together. All go when the process ends, and
+  `merk_device_free` frees one before (INPROGRESS, Memory that a GPU
+  process gives back). `MERK_CHECK_PROCESS_MEMORY` reports the most that
+  a GPU process held at once.
 - **A target region's code may make terms,** as code compiled from ordinary
   procedures does, in an arena that lives as long as the region. A region
   is a computation and ends; a GPU process is an actor and may live for

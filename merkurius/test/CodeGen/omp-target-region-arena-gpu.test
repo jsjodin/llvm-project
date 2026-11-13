@@ -4,8 +4,9 @@ in the slot that the host gives it, which the host frees as the region ends
 GPU process waits while 40 regions run, each making about 3 MB of cells,
 some in the teams of a loop, so no moment comes when nothing runs on the
 device. With the arenas limited to 32 MiB, the regions run only if each
-region's chunks go when it ends; with 2 MiB, less than one region needs,
-the program stops.
+region's chunks go when it ends; with 1 MiB, less than one region needs,
+the program stops. The process takes none of the arenas' chunks: its cells
+are blocks of its own (runtime/device/device.cpp, Block).
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/Inputs/region-arena-beside-process.m -o %t.O2
@@ -14,5 +15,5 @@ CHECK:200006200000
 CHECK-NEXT:7
 CHECK-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
 
-RUN: not %gpu-env OMP_TARGET_OFFLOAD=MANDATORY MERK_DEVICE_ARENA_BYTES=2097152 timeout -k 1 120 %t.O2 2>&1 | FileCheck %s --check-prefix=FULL
+RUN: not %gpu-env OMP_TARGET_OFFLOAD=MANDATORY MERK_DEVICE_ARENA_BYTES=1048576 timeout -k 1 120 %t.O2 2>&1 | FileCheck %s --check-prefix=FULL
 FULL: Mercury runtime: the devices' arenas are full: see MERK_DEVICE_ARENA_BYTES
