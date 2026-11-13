@@ -4946,6 +4946,48 @@ each measurement less one round trip; microseconds a round, the median of
   thousand times what its block costs: `array.init` stores each element in
   turn (INPROGRESS, Memory that a GPU process gives back, "Open").
 
+### Life on several places
+
+`benchmarks/life/life-places.m` on the gfx1030 with
+`LIBOMPTARGET_AMDGPU_CU_MASK=0-39`, 2026-11-13, at 20354c788a89 with the two
+changes below, Firefox closed. The default world, 8192 cells square in tiles
+of 64, a soup of 256, 1000 steps (45 active tiles at most); the average step
+in microseconds, the median of 3 runs, which were within 3% of each other.
+`life-sparse.m`, one GPU process with no directory, is 39 µs.
+
+| Places | At 20354c788a89 | With both changes |
+|---|---|---|
+| 1 | 242 | 235 |
+| 2 | 1283 | 448 |
+| 4 | 1600 | 680 |
+
+A probe of the 2-place run, in a build with the probe and
+`MERK_GPU_PROCESS_STACK_BYTES` at 4096, so a little slower, splits a place's
+step (place 0, µs a step):
+
+| Part of the step | Before | After both |
+|---|---|---|
+| `array.init` of a halo, 3.6 KB (2 per step: in `send_halos` and `pack`) | 387 | 9.7 |
+| Copying messages into host memory, sends | 228 | 68-89 |
+| Copying messages out of host memory, receives | 282 | 51-62 |
+| The RPCs of a send and a receive, together | 74 | 72-77 |
+| The loops across the place's teams | | 36 |
+| Choosing the tiles a halo carries (`select`) | 40 | 36 |
+
+- `array.init` filled a narrow array by `StoreElement`, which read the
+  array's header for each element; from a GPU process's one lane each read
+  is a load from global memory that the next store waits on. Its fill now
+  reads the width once (`runtime/array.cpp`, `Fill`).
+- A GPU process copies a message to and from host memory on one lane, and
+  memcpy's loop waited for each word's load, a round trip over PCIe of about
+  0.4 µs. `CopyWords` (`runtime/copy.h`) has 32 loads in flight before their
+  stores. The copies stay on one lane until messages travel as their bytes
+  and a wave's lanes copy them (INPROGRESS, "Flat records").
+- What is left of a step at 2 places: about 140 µs of copies, 75 µs of
+  RPCs, the directory's round trip, which 1 place pays too, and waiting for
+  the other place. The next gains are the wave copying a message, and
+  agreeing every k steps (INPROGRESS, step 5, "Open").
+
 ### Heap pointers in an address space of their own
 
 Measured on 2026-11-08, commit 559bb24685ad against 5df05bc20023, the commit

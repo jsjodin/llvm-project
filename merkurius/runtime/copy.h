@@ -36,6 +36,35 @@ namespace merkurius::runtime {
 template <typename Memory>
 Word CopyTyped(Word value, const Type &type, Memory &memory);
 
+// Copies `words` words, as memcpy does. On a GPU, where one lane copies a
+// message between the device's memory and the host's, memcpy's loop waits
+// for each load before the next, and a load from host memory is a round trip
+// over the bus: about 0.4 us a word, which was 40% of a step of Life on two
+// places (design document, Measurements, "Life on several places"). Here a
+// batch of loads is in flight before any of their stores.
+inline void CopyWords(Word *to, const Word *from, Word words) {
+#if defined(__AMDGPU__) || defined(__NVPTX__)
+  constexpr Word kBatch{32};
+  Word i{0};
+  for (; i + kBatch <= words; i += kBatch) {
+    Word batch[kBatch];
+#pragma unroll
+    for (Word k{0}; k < kBatch; ++k) {
+      batch[k] = from[i + k];
+    }
+#pragma unroll
+    for (Word k{0}; k < kBatch; ++k) {
+      to[i + k] = batch[k];
+    }
+  }
+  for (; i < words; ++i) {
+    to[i] = from[i];
+  }
+#else
+  __builtin_memcpy(to, from, sizeof(Word) * words);
+#endif
+}
+
 // Whether a value of the type is its word in a copy.
 inline bool CopiedAsItIs(const TypeCtor *ctor) {
   switch (ctor->kind) {
@@ -248,7 +277,7 @@ Word CopyTyped(Word value, const Type &type, Memory &memory) {
     // array's word 1 (array.h).
     if (!IsWordArray(array) ||
         (size != 0 && CopiedAsItIs(Resolve(element, &type.environment).ctor))) {
-      __builtin_memcpy(copy + 1, array + 1, sizeof(Word) * (words - 1));
+      CopyWords(copy + 1, array + 1, words - 1);
       return reinterpret_cast<Word>(copy);
     }
     for (Word i{0}; i < size; ++i) {
