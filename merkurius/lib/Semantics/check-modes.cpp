@@ -1687,6 +1687,11 @@ private:
   unsigned promised_{0};
   // The head unifications of WithHeadUnifications.
   llvm::DenseSet<const Unify *> heads_;
+  // In the clause being checked, each head variable that a head unification
+  // gave to its argument, a variable free until then, and that argument,
+  // which stands for it from then on, as mmc renames such an argument to
+  // the head variable: the clause's final inst there is the argument's.
+  llvm::DenseMap<VarId, VarId> renamed_;
   // A single clause's unifications of the fresh variables that stand for
   // its head's arguments with them, at the start of its body.
   llvm::DenseSet<const Unify *> headTerms_;
@@ -1943,6 +1948,7 @@ ProcedureChecker::Result ProcedureChecker::CheckClause(
   goals_.assign(form_->goals, GoalModes{});
   befores_.assign(form_->goals, {});
   touched_.assign(form_->vars.size(), 0);
+  renamed_.clear();
   freed_.assign(form_->vars.size(), 0);
   locks_.assign(form_->vars.size(), Lock::None);
   last_ = Start(form_->tokens);
@@ -1959,7 +1965,8 @@ ProcedureChecker::Result ProcedureChecker::CheckClause(
   }
   std::vector<const Inst *> final;
   for (VarId var : form_->head) {
-    final.push_back(map[var]);
+    auto renamed{renamed_.find(var)};
+    final.push_back(map[renamed == renamed_.end() ? var : renamed->second]);
   }
   out.final = result_.arena_.SaveArray(llvm::ArrayRef<const Inst *>{final});
   for (std::size_t i{0}; i < goals_.size(); ++i) {
@@ -2895,9 +2902,19 @@ ProcedureChecker::Result ProcedureChecker::CheckVarUnify(
           {x, y});
     }
     // Both stay; a value used by both is shared, as one assigned to a
-    // variable not used again is not, since mmc deletes the assignment.
-    const Inst *value{
-        live[from] && live[to] ? insts_.Share(map[from]) : map[from]};
+    // variable not used again is not, since mmc deletes the assignment. A
+    // head variable given to its argument is not used again either, but
+    // through the argument, if sharing would lose its uniqueness, as with
+    // `ui`: its final inst is then the argument's (renamed_). mmc keeps
+    // them apart, so a multi-clause predicate's `ui` argument is ground in
+    // its clauses ("Unique-input modes", in the register).
+    const Inst *shared{insts_.Share(map[from])};
+    bool renames{modes.head && from == x && !renamed_.count(x) &&
+        !options_.mmcUniqueness && !ops_.Matches(shared, map[from], type)};
+    if (renames) {
+      renamed_[x] = y;
+    }
+    const Inst *value{live[from] && live[to] && !renames ? shared : map[from]};
     map[to] = value;
     map[from] = value;
     modes.unify = UnifyKind::Assign;
