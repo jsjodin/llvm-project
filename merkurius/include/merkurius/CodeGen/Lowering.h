@@ -41,6 +41,10 @@ void PruneSolutions(mlir::ModuleOp);
 // code"). LowerToLLVMDialect does this first.
 void OutlineNondeterminism(mlir::ModuleOp);
 
+// Puts a merk.free after the last use of each cell, array and string that
+// a GPU process's code makes or receives, where it can tell (Frees.cpp).
+void FreeAtLastUse(mlir::ModuleOp);
+
 // Puts a merk.live before each safepoint (Liveness.cpp).
 void MarkSafepoints(mlir::ModuleOp);
 

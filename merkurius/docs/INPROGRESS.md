@@ -4869,7 +4869,46 @@ process's lane:
 - (f3) The pass, with merk-level tests of where it frees, and a runtime
   test: a GPU process that receives a million messages, each with an
   array, and makes an array for each answer, in bounded memory, at the
-  host and on the GPU.
+  host and on the GPU. Done 2026-11-13: `lib/CodeGen/Frees.cpp`,
+  `FreeAtLastUse`, run by lowering in a compile of GPU process kinds,
+  before the terms are lowered; `-fdebug-dump-frees` prints the merk
+  module with its frees. As built, beside the design above:
+  - A procedure frees only blocks of its own, never an argument: its
+    caller frees that after the call, when the callee's summary says it
+    is not kept. So `di` arguments need no special case.
+  - A block that is stored in one cell and used nowhere else, as a
+    received message is in the `message(...)` cell that a receive makes,
+    or that is the result of a branch, has no name where its class dies.
+    It is freed through what holds it: a test of the functor it was stored
+    with, and a `merk.deconstruct` of its field, before the cell is freed.
+    Where parts of a branch disagree on what a functor's field holds,
+    nothing is freed through it.
+  - A term of a type whose one constructor has one field is that field,
+    with no cell (Lowering.cpp, Layouts): the pass takes it as the same
+    block as its field, as lowering does.
+  - A class whose last use is a tail call, as the next state of a process
+    is, is not freed there: the call would no longer end the procedure.
+    It waits for the process's end.
+  - A loop across the process's teams reads its values' words from a
+    buffer; such a store counts as a use until the loop's call, which
+    returns when the loop has ended. A free in a loop's body, of a
+    worker team's block, does nothing.
+  - A team mailbox shares an array or a term by its pointer, which freeing
+    cannot allow for: a GPU process's wave that sends or receives one
+    through a team mailbox now stops the program as not yet implemented
+    (`runtime/device/device.cpp`, `TeamBlockFromProcess`).
+  - What stays until the process ends: the results of library procedures
+    the module does not define, such as strings', blocks made in an
+    if-then-else's condition, and blocks that a branch makes and the code
+    after it cannot name.
+  - The runtime test sends 20000 messages, not a million: each round trip
+    goes through the host, about 80 µs, and a million would load the
+    display's GPU for over a minute. The bound does not depend on the
+    count. `test/CodeGen/process-bounded.m`: an echo that receives
+    `data(I, A)`, A of 1000 ints, and answers with a new array, held at
+    most 16760 bytes of blocks at once on the gfx1030 (2026-11-13); kept,
+    its messages and answers would hold over 300 MB. Merk-level tests:
+    `test/CodeGen/frees.mlir`.
 - (f4) Measurements, in the design document: a `malloc` and `free` of 4 KiB
   and of 4 MiB on the device, beside a message's time.
 

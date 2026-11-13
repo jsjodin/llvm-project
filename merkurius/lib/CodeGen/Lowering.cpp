@@ -4829,6 +4829,11 @@ llvm::LogicalResult Lowerer::Lower() {
   if (mlir::failed(Layouts()) || mlir::failed(MakeRecords())) {
     return llvm::failure();
   }
+  // A GPU process's values, which nothing collects, are freed at their last
+  // use; before the pass below, which knows nothing of merk.free.
+  if (kernels_) {
+    FreeAtLastUse(module_);
+  }
   LastCallModuloConstructor(module_, [this](mlir::Type type,
                                          merk::FunctorAttr functor) {
     const TermLayout *layout{LayoutOf(type)};
@@ -4853,17 +4858,17 @@ llvm::LogicalResult Lowerer::Lower() {
   } else {
     module_.walk([](merk::RootTypeOp note) { note.erase(); });
   }
-  if (mlir::failed(LowerTerms())) {
-    return llvm::failure();
-  }
-  // While the values still have their merk types, which say how to free
-  // them.
+  // Before the terms, while the values still have their merk types, which
+  // say how to free them.
   llvm::SmallVector<merk::FreeOp> frees;
   module_.walk([&](merk::FreeOp free) { frees.push_back(free); });
   for (merk::FreeOp free : frees) {
     if (mlir::failed(LowerFree(free))) {
       return llvm::failure();
     }
+  }
+  if (mlir::failed(LowerTerms())) {
+    return llvm::failure();
   }
   for (auto proc : llvm::make_early_inc_range(module_.getOps<merk::ProcOp>())) {
     LowerProc(proc);

@@ -20,21 +20,18 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
   opts.showHelp = args.hasArg(OPT_help);
   opts.showVersion = args.hasArg(OPT_version);
   // As in Flang, the last action option wins.
-  if (const llvm::opt::Arg *arg =
-          args.getLastArg(OPT_E, OPT_fdebug_dump_provenance,
-              OPT_fdebug_dump_tokens, OPT_fdebug_unparse_tokens,
-              OPT_fdebug_dump_terms, OPT_fdebug_dump_parse_tree_no_sema,
-              OPT_fdebug_unparse_exact,
-              OPT_fdebug_unparse_exact_minimal_layout,
-              OPT_fdebug_unparse_no_sema,
-              OPT_fdebug_unparse_parenthesized_no_sema,
-              OPT_fdebug_dump_semantic_form, OPT_fdebug_dump_nonlocals,
-              OPT_fdebug_dump_imports, OPT_fdebug_dump_resolved_names,
-              OPT_fdebug_dump_types, OPT_fdebug_dump_loops,
-              OPT_fdebug_dump_modes,
-              OPT_fdebug_dump_determinism, OPT_fdebug_dump_polymorphism,
-              OPT_emit_merk, OPT_emit_merk_bc, OPT_emit_mlir, OPT_emit_llvm, OPT_emit_llvm_bc, OPT_S,
-              OPT_emit_obj)) {
+  if (const llvm::opt::Arg *arg = args.getLastArg(OPT_E,
+          OPT_fdebug_dump_provenance, OPT_fdebug_dump_tokens,
+          OPT_fdebug_unparse_tokens, OPT_fdebug_dump_terms,
+          OPT_fdebug_dump_parse_tree_no_sema, OPT_fdebug_unparse_exact,
+          OPT_fdebug_unparse_exact_minimal_layout, OPT_fdebug_unparse_no_sema,
+          OPT_fdebug_unparse_parenthesized_no_sema,
+          OPT_fdebug_dump_semantic_form, OPT_fdebug_dump_nonlocals,
+          OPT_fdebug_dump_imports, OPT_fdebug_dump_resolved_names,
+          OPT_fdebug_dump_types, OPT_fdebug_dump_loops, OPT_fdebug_dump_modes,
+          OPT_fdebug_dump_determinism, OPT_fdebug_dump_polymorphism,
+          OPT_emit_merk, OPT_fdebug_dump_frees, OPT_emit_merk_bc, OPT_emit_mlir,
+          OPT_emit_llvm, OPT_emit_llvm_bc, OPT_S, OPT_emit_obj)) {
     switch (arg->getOption().getID()) {
     case OPT_E:
       opts.programAction = ActionKind::PrintPreprocessedInput;
@@ -86,6 +83,9 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
       break;
     case OPT_emit_merk:
       opts.programAction = ActionKind::EmitMerk;
+      break;
+    case OPT_fdebug_dump_frees:
+      opts.programAction = ActionKind::DebugDumpFrees;
       break;
     case OPT_emit_merk_bc:
       opts.programAction = ActionKind::EmitMerkBytecode;

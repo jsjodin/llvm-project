@@ -180,6 +180,9 @@ def fembed_process_image_EQ : Joined<["-"], "fembed-process-image=">,
 def x : Separate<["-"], "x">, MetaVarName<"<language>">,
   HelpText<"Read the input as <language>: mercury, mlir (text or bytecode) or "
            "ir (LLVM IR); by default from its extension">;
+def fdebug_dump_frees : Flag<["-"], "fdebug-dump-frees">,
+  HelpText<"Write the module in the merk dialect with the merk.free operations "
+           "that a compile of GPU process kinds adds">;
 def emit_merk : Flag<["-"], "emit-merk">,
   HelpText<"Write the module in the merk dialect">;
 def emit_merk_bc : Flag<["-"], "emit-merk-bc">,
