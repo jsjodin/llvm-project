@@ -5,10 +5,11 @@
 //
 // Frame f is MANDEL_SIZE pixels square (2048), of width 3 * 0.5^f, centred
 // on a point of the set's boundary, with an escape limit of 256 + 64 * f,
-// for MANDEL_FRAMES frames (40). Each pixel's iterations follow one order of
-// operations, without fused multiplies and adds (-ffp-contract=off, as
-// merkc does not fuse), so that every program and mandel.py give the same
-// counts. MANDEL_TRACE=1 prints each frame's line.
+// for MANDEL_FRAMES frames (40); MANDEL_CENTRE=x,y moves the centre, as for
+// the work-stealing example's (examples/work-stealing). Each pixel's iterations
+// follow one order of operations, without fused multiplies and adds
+// (-ffp-contract=off, as merkc does not fuse), so that every program and
+// mandel.py give the same counts. MANDEL_TRACE=1 prints each frame's line.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,8 +20,9 @@
 // The kernel is a separate function, as in mandel.m.
 #define KERNEL __attribute__((noinline)) static
 
-static const double X0 = -0.743643887037151;
-static const double Y0 = 0.131825904205330;
+// The centre unless MANDEL_CENTRE gives another.
+static const double kX0 = -0.743643887037151;
+static const double kY0 = 0.131825904205330;
 
 static long setting(const char *name, long fallback) {
   const char *s = getenv(name);
@@ -49,15 +51,16 @@ static inline int64_t escape(double cx, double cy, int64_t limit) {
 #pragma omp end declare target
 
 // A frame's iterations: its pixels' sum.
-KERNEL int64_t frame(int64_t size, double step, int64_t limit) {
+KERNEL int64_t frame(
+    double x0, double y0, int64_t size, double step, int64_t limit) {
   int64_t total = 0;
   int64_t half = size / 2;
 #pragma omp target teams distribute parallel for reduction(+ : total) \
     map(tofrom : total)
   for (int64_t k = 0; k < size * size; k++) {
     int64_t py = k / size, px = k % size;
-    double cx = X0 + (double)(px - half) * step;
-    double cy = Y0 + (double)(py - half) * step;
+    double cx = x0 + (double)(px - half) * step;
+    double cy = y0 + (double)(py - half) * step;
     total += escape(cx, cy, limit);
   }
   return total;
@@ -67,8 +70,20 @@ int main(void) {
   int64_t size = setting("MANDEL_SIZE", 2048);
   long frames = setting("MANDEL_FRAMES", 40);
   long trace = setting("MANDEL_TRACE", 0);
+  double x0 = kX0, y0 = kY0;
+  const char *centre = getenv("MANDEL_CENTRE");
+  char *end = NULL;
+  if (centre && *centre) {
+    x0 = strtod(centre, &end);
+    if (*end == ',')
+      y0 = strtod(end + 1, &end);
+  }
   if (size < 2 || frames < 1) {
     printf("MANDEL_SIZE must be at least 2 and MANDEL_FRAMES at least 1.\n");
+    return 1;
+  }
+  if (centre && *centre && *end != '\0') {
+    printf("MANDEL_CENTRE must be two numbers, x,y.\n");
     return 1;
   }
   printf("Mandelbrot zoom, C\n");
@@ -78,7 +93,7 @@ int main(void) {
   for (long f = 0; f < frames; f++) {
     int64_t limit = 256 + 64 * f;
     double t0 = now();
-    long iterations = frame(size, width / (double)size, limit);
+    long iterations = frame(x0, y0, size, width / (double)size, limit);
     double t1 = now();
     if (trace)
       printf("frame %ld: limit %ld, %ld iterations, %.6f s\n", f, (long)limit,

@@ -57,6 +57,9 @@ advance. No tile starts or ends, so balancing is tested alone.
   not fuse either: the counts for small frames, which the tests check the
   programs against.
 
+`MANDEL_CENTRE=x,y` moves the centre of `mandel.c` and `mandel.py`, which
+check the work-stealing example's zoom (`examples/work-stealing`) that way.
+
 `compare-places.sh` runs `mandel.m`, `mandel.c` and `mandel-places.m` under
 each policy in turns, checks that they give the same iterations, and prints
 each one's median time, rate, balance and tiles handed over.

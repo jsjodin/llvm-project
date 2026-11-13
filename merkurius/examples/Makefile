@@ -24,6 +24,7 @@ endif
 .DEFAULT_GOAL := help
 .PHONY: help all run-all dumps clean check-merkc \
 	gpu-to-gpu run-gpu-to-gpu gpu-to-gpu-cpu run-gpu-to-gpu-cpu \
+	work-stealing run-work-stealing run-work-stealing-no-steal \
 	$(PROGRAMS) $(addprefix run-,$(PROGRAMS)) $(addprefix merk-,$(PROGRAMS)) \
 	$(addprefix mlir-,$(PROGRAMS)) $(addprefix llvm-,$(PROGRAMS))
 
@@ -48,6 +49,11 @@ help:
 	@echo "  make run-gpu-to-gpu      Compile it and run both nodes on this machine"
 	@echo "  make run-gpu-to-gpu-cpu  The same with the GPU regions on the CPU"
 	@echo ""
+	@echo "Work stealing between GPU processes (work-stealing/README.md):"
+	@echo "  make work-stealing                Compile it for the GPU, at -O2"
+	@echo "  make run-work-stealing            Compile it and run it with stealing"
+	@echo "  make run-work-stealing-no-steal   The same with stealing off"
+	@echo ""
 	@echo "For all programs:"
 	@echo "  make all        Compile every program"
 	@echo "  make run-all    Compile and run every program"
@@ -63,6 +69,7 @@ help:
 	@echo "  MERKC=path      The compiler (now $(MERKC))"
 	@echo "  ARCH=name       The GPU's architecture (now $(ARCH))"
 	@echo "  PORT=N          The port node B listens on (now $(PORT))"
+	@echo "  WHERE=host      Run the work-stealing places on the CPU"
 
 check-merkc:
 	@command -v $(MERKC) > /dev/null || { \
@@ -131,6 +138,24 @@ run-gpu-to-gpu: $(BUILD)/gpu_to_gpu
 
 run-gpu-to-gpu-cpu: $(BUILD)/gpu_to_gpu_cpu
 	$(call run_two_nodes,)
+
+# Work stealing: one module, at -O2 whatever O is, as it compares times and
+# a GPU process's stack at -O0 is too big.
+WS_SOURCE := $(DEMO_DIR)work-stealing/work_stealing.m
+# `host` runs the places on the host's CPUs.
+WHERE ?=
+
+$(BUILD)/work_stealing: $(WS_SOURCE) | check-merkc $(BUILD)
+	@echo "merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=$(ARCH) work_stealing.m -o build/work_stealing"
+	@cd $(BUILD) && $(MERKC) -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=$(ARCH) $(LIBOMP_FLAGS) $< -o $@
+
+work-stealing: $(BUILD)/work_stealing
+
+run-work-stealing: $(BUILD)/work_stealing
+	@LD_LIBRARY_PATH="$(LIBOMP_PATH):$$LD_LIBRARY_PATH" $< $(WHERE)
+
+run-work-stealing-no-steal: $(BUILD)/work_stealing
+	@LD_LIBRARY_PATH="$(LIBOMP_PATH):$$LD_LIBRARY_PATH" $< no-steal $(WHERE)
 
 all: $(addprefix $(BUILD)/,$(PROGRAMS))
 

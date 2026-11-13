@@ -1,0 +1,32 @@
+The work-stealing example (examples/work-stealing) on the machine's GPU, its
+places GPU processes that share the GPU's teams. With and without stealing,
+with one to four places, it gives the iterations and checksum of mandel.py, with
+MANDEL_CENTRE set to the example's centre (work-stealing.test), on 64 pixels
+square in tiles of 8 for 12 frames, and of mandel.c, so set, for the whole
+zoom at 512 pixels in tiles of 32. No stack warning: its processes
+fit the default stack.
+REQUIRES: amdgpu-gpu
+
+The program is built afresh: the Makefile rebuilds it only when its source
+changes, not merkc or the runtime, and %t outlives a run.
+RUN: rm -rf %t
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 make -s -C %S/../../examples run-work-stealing MERKC=merkc BUILD=%t ARCH=%offload-arch "LIBOMP_FLAGS=%libomp-flags" 2>&1 | FileCheck %s --check-prefixes=STEAL4,SMALL,QUIET
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 make -s -C %S/../../examples run-work-stealing-no-steal MERKC=merkc BUILD=%t ARCH=%offload-arch "LIBOMP_FLAGS=%libomp-flags" 2>&1 | FileCheck %s --check-prefixes=STATIC4,SMALL,QUIET
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=1 %t/work_stealing 2>&1 | FileCheck %s --check-prefixes=SMALL,QUIET
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=2 %t/work_stealing 2>&1 | FileCheck %s --check-prefixes=SMALL,QUIET
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 %t/work_stealing 2>&1 | FileCheck %s --check-prefixes=SMALL,QUIET
+RUN: %libomp-env MANDEL_SIZE=512 MANDEL_TILE=32 %t/work_stealing 2>&1 | FileCheck %s --check-prefixes=ZOOM,QUIET
+RUN: %libomp-env MANDEL_SIZE=512 MANDEL_TILE=32 %t/work_stealing no-steal 2>&1 | FileCheck %s --check-prefixes=ZOOM,QUIET
+
+QUIET-NOT: {{[Ww]arning|stack}}
+STEAL4: Work stealing: 4 places, stealing on
+STATIC4: Work stealing: 4 places, stealing off
+SMALL: Iterations: 1569945
+SMALL-NEXT: Checksum: 7844946
+STATIC4-NEXT: Steals: 0
+STATIC4-NEXT: Place 0: 192 tiles, 0 steals
+STATIC4-NEXT: Place 1: 192 tiles, 0 steals
+STATIC4-NEXT: Place 2: 192 tiles, 0 steals
+STATIC4-NEXT: Place 3: 192 tiles, 0 steals
+ZOOM: Iterations: 7586687417
+ZOOM-NEXT: Checksum: 231769596101
