@@ -8455,6 +8455,37 @@ static SDValue lowerWaveShuffle(const SITargetLowering &TLI, SDNode *N,
   return DAG.getBitcast(VT, Result);
 }
 
+/// A lane op of a type that is not legal, such as i8 or v4i8, which type
+/// legalization cannot split or promote: done on the integers of its size, in
+/// 32 bits if it is narrower, and its result cast back.
+static SDValue lowerIllegalLaneOp(SDNode *N, SelectionDAG &DAG) {
+  EVT VT = N->getValueType(0);
+  unsigned Size = VT.getSizeInBits();
+  if (Size > 32 && Size % 32 != 0)
+    return SDValue();
+  SDLoc SL(N);
+  LLVMContext &Context = *DAG.getContext();
+  EVT IntVT = EVT::getIntegerVT(Context, Size);
+  EVT OpVT = Size <= 32 ? EVT(MVT::i32)
+                        : EVT::getVectorVT(Context, MVT::i32, Size / 32);
+  // The operands of the type are the values; the rest are lanes, controls
+  // and glue, which stay as they are.
+  SmallVector<SDValue, 8> Ops;
+  for (const SDValue &Op : N->op_values()) {
+    if (Op.getValueType() != VT) {
+      Ops.push_back(Op);
+      continue;
+    }
+    SDValue Int = DAG.getBitcast(IntVT, Op);
+    Ops.push_back(Size < 32 ? DAG.getNode(ISD::ANY_EXTEND, SL, MVT::i32, Int)
+                            : DAG.getBitcast(OpVT, Int));
+  }
+  SDValue LaneOp = DAG.getNode(ISD::INTRINSIC_WO_CHAIN, SL, OpVT, Ops);
+  SDValue Int = Size < 32 ? DAG.getNode(ISD::TRUNCATE, SL, IntVT, LaneOp)
+                          : DAG.getBitcast(IntVT, LaneOp);
+  return DAG.getBitcast(VT, Int);
+}
+
 void SITargetLowering::ReplaceNodeResults(SDNode *N,
                                           SmallVectorImpl<SDValue> &Results,
                                           SelectionDAG &DAG) const {
@@ -8477,6 +8508,23 @@ void SITargetLowering::ReplaceNodeResults(SDNode *N,
   case ISD::INTRINSIC_WO_CHAIN: {
     unsigned IID = N->getConstantOperandVal(0);
     switch (IID) {
+    case Intrinsic::amdgcn_readlane:
+    case Intrinsic::amdgcn_readfirstlane:
+    case Intrinsic::amdgcn_writelane:
+    case Intrinsic::amdgcn_permlane16:
+    case Intrinsic::amdgcn_permlanex16:
+    case Intrinsic::amdgcn_permlane64:
+    case Intrinsic::amdgcn_set_inactive:
+    case Intrinsic::amdgcn_set_inactive_chain_arg:
+    case Intrinsic::amdgcn_mov_dpp8:
+    case Intrinsic::amdgcn_update_dpp:
+    case Intrinsic::amdgcn_permlane_bcast:
+    case Intrinsic::amdgcn_permlane_up:
+    case Intrinsic::amdgcn_permlane_down:
+    case Intrinsic::amdgcn_permlane_xor:
+      if (SDValue Res = lowerIllegalLaneOp(N, DAG))
+        Results.push_back(Res);
+      return;
     case Intrinsic::amdgcn_wave_reduce_min:
     case Intrinsic::amdgcn_wave_reduce_umin:
     case Intrinsic::amdgcn_wave_reduce_max:
