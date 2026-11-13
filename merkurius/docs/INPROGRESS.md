@@ -4708,6 +4708,19 @@ small sizes, and every program must give the same totals, exactly.
   dense totals, and measured: the time to finish the zoom, each policy
   against the others and the dense programs, and how even the places'
   busy times are.
+  Done 2026-11-12 (`benchmarks/mandel`, design document, Measurements,
+  Uneven work): every policy, with one to four places, gives the dense
+  totals at the host and on the GPU (`Benchmarks/mandel-places.test`,
+  `mandel-places-gpu.test`), and `compare-places.sh` measures them against
+  the dense programs. The places' states call each other last with
+  different arguments, which needed tail calls between types on the GPU
+  (757f82d18450). Measured at 2048² in 128² tiles: static 4.28 s, balance
+  1.23; steal 3.97 s, 1.04; pool 3.94 s, 1.02; dense `mandel.m` 3.45 s.
+  Stealing evens the places and saves 7%, but splitting the GPU costs 9%
+  before any balance, as each tile's loop waits for its slowest pixel, so
+  the hardware's balancing of the dense programs wins on one GPU. Open: a
+  place's teams taking the next tile while the last one ends, or larger
+  tiles split for a thief, before stealing across GPUs (step 6).
 
 **What it needs.** It uses GPU processes, `spawn_<kind>_at`, flat messages and
 arrays, which exist. It also needs the place table and routing by place (GPU

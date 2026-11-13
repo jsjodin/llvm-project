@@ -4370,7 +4370,7 @@ ways, the host's bookkeeping and the zeroing kernel.
 ### Uneven work
 
 **A deep Mandelbrot zoom,** 2026-11-12, on 88484930b646 with `benchmarks/mandel`,
-not committed (docs/INPROGRESS.md, step 4 of the demo, (m2)), on compute
+committed as 2b7515c39b85 (docs/INPROGRESS.md, step 4 of the demo, (m2)), on compute
 units 0-39: `mandel.m`, each frame a loop across all a GPU process's teams,
 against `mandel.c`, a kernel a frame, both doubles without fused multiplies
 and adds; 40 frames, the width halving from 3 to 5.5e-12, escape limits from
@@ -4391,6 +4391,43 @@ each round spreads a few rows over every team; in C, the hardware starts a
 work group as a compute unit frees. Either way no part of the GPU is left
 with the costly region alone. It is the bar for the places of
 `mandel-places.m`, which split the teams.
+
+**Places that balance the zoom's tiles,** 2026-11-12, on ac2371997431 with
+`mandel-places.m`, not committed (docs/INPROGRESS.md, step 4 of the demo,
+(m3)), on compute units 0-39: four places, GPU processes with a quarter of
+the kernel's teams each, the host as the coordinator, a tile a loop across
+a place's teams; the same zoom; `compare-places.sh`, 5 rounds in turn of
+the two dense programs and the three policies, the median. All gave the same
+iterations. Balance is the busiest place's busy time, by the device's
+clock, over the average; handed, the tiles moved over the zoom, of 10240 at
+2048² in 128² tiles, 40960 in 64², 2560 at 1024².
+
+| Frames, tiles | Mercury, dense | C, dense | Static | Steal | Pool |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2048², 128² | 3.45 s | 3.57 s | 4.28 s, 1.23 | 3.97 s, 1.04, 2362 handed | 3.94 s, 1.02, 10240 handed |
+| 2048², 64² | 3.45 s | 3.57 s | 4.77 s, 1.21 | 4.43 s, 1.02, 10005 handed | 4.49 s, 1.02, 40960 handed |
+| 1024², 128² | 0.90 s | 0.98 s | 1.11 s, 1.23 | 1.09 s, 1.11, 404 handed | 1.06 s, 1.02, 2560 handed |
+
+- **Stealing evens the places.** Under the static split the two places of
+  the lower rows, nearer the set's interior, are busy 4.0 and 4.2 s, the
+  upper two 2.6 and 2.8 s (2048², 128²). Stealing brings them within 3.6 to
+  3.9 s, and the zoom takes 7% less time. At 1024² a place starts a frame
+  with 16 tiles, so the back halves it gives are coarse, and the balance is
+  1.11. The pool, whose coordinator is the host on the same machine, is as
+  good or slightly better on one GPU; stealing needs no coordinator, which
+  matters across GPUs (step 6).
+- **Splitting costs 9%, before any balance.** Balanced, the places are busy
+  3.72 s on average under steal, against the dense process's 3.45 s for the
+  whole GPU. Each tile is a loop of its own that waits for its slowest
+  pixel, then a barrier between the place and its workers, while dense
+  frames have one such end a frame. 64² tiles, four times as many ends,
+  cost 0.5 s more. The coordination, the zoom's time less the busiest
+  place's, is about 0.1 s over 40 frames.
+- **So on one GPU the hardware's balancing wins:** the best policy is 14%
+  behind the dense programs, which the GPU balances as work groups free.
+  The places' loops would end less often with larger tiles that a place
+  splits when a thief comes, or with a place's teams taking the next tile
+  while the last one's slowest pixels finish.
 
 ### Message latency
 
