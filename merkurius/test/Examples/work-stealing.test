@@ -1,0 +1,48 @@
+The work-stealing example (examples/work-stealing) with its places at the
+host. With and without stealing, it gives mandel.py's iterations and checksum,
+with MANDEL_CENTRE set to the example's centre, on 64 pixels square in tiles
+of 8 for 12 frames, and on 96 in tiles of 32 for 20, whose frames are not a
+power of two tiles across.
+Without stealing, three places keep their shares of a frame's 64 tiles, 21, 21
+and 22, and one place alone has no one to steal from. Through the Makefile, at
+-O2, and sequentially at -O0, without --offload-arch, as mandel.test's.
+REQUIRES: amdgpu-registered-target, libomp
+
+The program is built afresh: the Makefile rebuilds it only when its source
+changes, not merkc or the runtime, and %t outlives a run.
+RUN: rm -rf %t
+RUN: env MANDEL_CENTRE=-1.393781680564294,0.127954072006025 MANDEL_SIZE=64 MANDEL_FRAMES=12 %python %S/../../benchmarks/mandel/mandel.py | FileCheck %s --check-prefix=SMALL
+RUN: env MANDEL_CENTRE=-1.393781680564294,0.127954072006025 MANDEL_SIZE=96 MANDEL_FRAMES=20 %python %S/../../benchmarks/mandel/mandel.py | FileCheck %s --check-prefix=WIDE
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 make -s -C %S/../../examples run-work-stealing MERKC=merkc BUILD=%t WHERE=host "LIBOMP_FLAGS=%libomp-flags" | FileCheck %s --check-prefixes=STEAL3,SMALL
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 make -s -C %S/../../examples run-work-stealing-no-steal MERKC=merkc BUILD=%t WHERE=host "LIBOMP_FLAGS=%libomp-flags" | FileCheck %s --check-prefixes=STATIC3,SMALL
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=1 %t/work_stealing host | FileCheck %s --check-prefixes=ONE,SMALL
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=96 MANDEL_TILE=32 MANDEL_FRAMES=20 %t/work_stealing host | FileCheck %s --check-prefix=WIDE
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=96 MANDEL_TILE=32 MANDEL_FRAMES=20 %t/work_stealing no-steal host | FileCheck %s --check-prefix=WIDE
+
+RUN: merkc -O0 -fdo-loops -fprocess-declarations %libomp-flags %S/../../examples/work-stealing/work_stealing.m -o %t/work_stealing0
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=4 %t/work_stealing0 host | FileCheck %s --check-prefix=SMALL
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 %t/work_stealing0 no-steal host | FileCheck %s --check-prefixes=STATIC3,SMALL
+
+STEAL3: Work stealing: 3 places, stealing on
+STEAL3-NEXT: Frames: 12 of 64 x 64 pixels, tiles of 8 x 8
+STATIC3: Work stealing: 3 places, stealing off
+ONE: Work stealing: 1 places, stealing on
+SMALL: Iterations: 1569945
+SMALL-NEXT: Checksum: 7844946
+STEAL3-NEXT: Steals: {{[1-9][0-9]*}}
+STATIC3-NEXT: Steals: 0
+STATIC3-NEXT: Place 0: 252 tiles, 0 steals
+STATIC3-NEXT: Place 1: 252 tiles, 0 steals
+STATIC3-NEXT: Place 2: 264 tiles, 0 steals
+ONE-NEXT: Steals: 0
+ONE-NEXT: Place 0: 768 tiles, 0 steals
+STEAL3: Time: {{[0-9.]+}} s
+STATIC3: Time: {{[0-9.]+}} s
+ONE: Time: {{[0-9.]+}} s
+
+WIDE: Iterations: 19256413
+WIDE-NEXT: Checksum: 316140839
+
+RUN: %libomp-env MANDEL_TILE=12 not %t/work_stealing host | FileCheck %s --check-prefix=USAGE
+RUN: %libomp-env MANDEL_PLACES=0 not %t/work_stealing host | FileCheck %s --check-prefix=USAGE
+USAGE: MANDEL_TILE must divide MANDEL_SIZE, and MANDEL_FRAMES and MANDEL_PLACES be at least 1.

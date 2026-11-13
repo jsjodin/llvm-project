@@ -4,8 +4,9 @@ their output on small frames (docs/INPROGRESS.md, step 4 of the demo).
 
 Python's floats are IEEE doubles and it fuses no multiply and add, so it
 computes the same iterations as the programs, which follow the same order of
-operations. MANDEL_SIZE, MANDEL_FRAMES and MANDEL_TRACE as theirs; it prints
-the lines that they print but the times.
+operations. MANDEL_SIZE, MANDEL_FRAMES, MANDEL_TRACE and MANDEL_CENTRE as
+mandel.c's; it prints the lines that they print but the times. MANDEL_CENTRE
+"x,y" moves the centre, as for the work-stealing example's.
 """
 import os
 
@@ -37,6 +38,8 @@ def main():
     size = setting("MANDEL_SIZE", 2048)
     frames = setting("MANDEL_FRAMES", 40)
     trace = setting("MANDEL_TRACE", 0)
+    centre = os.environ.get("MANDEL_CENTRE", "")
+    x0, y0 = (float(v) for v in centre.split(",")) if centre else (X0, Y0)
     width = 3.0
     total = checksum = 0
     for f in range(frames):
@@ -44,9 +47,9 @@ def main():
         limit = 256 + 64 * f
         frame = 0
         for py in range(size):
-            cy = Y0 + float(py - size // 2) * step
+            cy = y0 + float(py - size // 2) * step
             for px in range(size):
-                cx = X0 + float(px - size // 2) * step
+                cx = x0 + float(px - size // 2) * step
                 frame += escape(cx, cy, limit)
         if trace:
             print(f"frame {f}: limit {limit}, {frame} iterations")
