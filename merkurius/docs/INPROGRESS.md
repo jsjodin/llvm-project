@@ -4966,7 +4966,7 @@ process's lane:
     of multi-clause predicates, which became ground (the register).
   - Temporary: the places' calls take 1824 bytes of stack a lane, more than
     a GPU process's 1536, and 2560 without `-fopenmp`, so the GPU test sets
-    `MERK_GPU_PROCESS_STACK_BYTES`. It goes once their frames fit, which the
+    `MERK_GPU_PROCESS_STACK_BYTES`; with p3's moves, over 2048, so 2304. It goes once their frames fit, which the
     work on scalar code is to address (the user, 2026-11-13). 2048 is above
     the 1792 bytes that the gfx1030 keeps bound to a queue (GPU processes
     that run loops, "How large a stack can be").
@@ -4982,7 +4982,38 @@ process's lane:
     places", which has what is left).
 - (p3) Moving tiles: the directory moves tiles from a place with more than
   its share to one with fewer, between steps, the tile's cells as a
-  message. Checked as p2.
+  message. Checked as p2. Done 2026-11-13. The user chose, 2026-11-13: the
+  directory decides the moves, as it already reads every place's summary
+  each step, so a move costs no round trip, where an idle place that asks
+  to steal would add one, and no place is idle with every-step agreement;
+  and a move takes a tile next to the receiver's if the donor has one, so
+  that regions stay together and halos small. As built:
+  - After each step but the last, while the place with the most tiles has
+    more than its share, the total rounded up over the places, and the one
+    with the fewest has less, the directory moves a tile from the one to
+    the other, up to `LIFE_MOVES` a step (4; 0 for fixed owners). Only
+    tiles from before the step move, by position, so the moves are the
+    same in every run, whatever order messages come in; a tile moves at
+    most once a step.
+  - A move is a change of the map like any other, a tile with an owner
+    given another. On the map, the old owner sends each new owner
+    `moved(From, Step, Cells)`, each tile's position and its T^2 cells,
+    before it lets them go; the new owner makes each its own, from its
+    ghost if it has one, and copies the cells across its teams. The cells
+    may come before the map, as halos may, so the tile becomes its own
+    then, and the map's change finds it so.
+  - A place's halos wait until its moved tiles have come, as they read
+    them; the moves go out on the map, unconditionally, so no place waits
+    on another's halos.
+  - No move after the last step: the outcome reads the live cells that a
+    step counts, which a moved tile has not had counted.
+  - Found on the way: merkc made every value used after a negation
+    `mostly_unique` inside it, so `A ^ unsafe_elem(I) \= 0` with
+    `A::array_ui` was an error (56864ff63891); and mmc misses an array's
+    clobber in a negation (the register).
+  - Moves on the default world: 15 at 2 places; on a 128-cell world whose
+    gliders reach the edge, 509 to 734 in 2000 steps at 2 to 7 places, as
+    tiles start and end throughout. Whether moving pays is p4's.
 - (p4) Measurements against `life-sparse.m` on one place: what the
   agreement and the halos cost each step, and the active tiles of each
   place over time.

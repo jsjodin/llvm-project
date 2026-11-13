@@ -1,33 +1,42 @@
 Game of Life on sparse tiles run by several places with a directory
 (benchmarks/life/life-places.m) on the machine's GPU: each place is a GPU
-process with a share of the GPU's teams. The population, checksum and
+process with a share of the GPU's teams, and the directory moves tiles
+between them. The population, checksum, tiles moved and
 active tiles are life-sparse.m's for the same world, for any number of
 places (life-places.test), with the default world too, 8192 cells square, a
 soup of 256 and 1000 steps. What the places held is all freed when they
 end, and a place whose pool runs out ends the program with status 1.
 
-Temporary (step 5 p2, docs/INPROGRESS.md): the places' calls take 1824
-bytes of stack a lane, more than GPU processes' 1536, and 2560 without
--fopenmp, so the runs give them more. This goes once their frames fit.
+Temporary (step 5 p2, docs/INPROGRESS.md): the places' calls take over
+2048 bytes of stack a lane, more than GPU processes' 1536, and up to 2560
+without -fopenmp, so the runs give them more. This goes once their frames
+fit.
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/life/life-places.m -o %t
-RUN: %gpu-env MERK_GPU_PROCESS_STACK_BYTES=2048 LIFE_PLACES=2 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 timeout -k 1 60 %t | FileCheck %s --check-prefix=A
+RUN: %gpu-env MERK_GPU_PROCESS_STACK_BYTES=2304 LIFE_PLACES=2 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 timeout -k 1 60 %t | FileCheck %s --check-prefix=A
 A: Population: 562
 A-NEXT: Checksum: 17668223
 A-NEXT: Active tiles: 36 at most, 32 at the end
-RUN: %gpu-env MERK_GPU_PROCESS_STACK_BYTES=2048 LIFE_PLACES=3 LIFE_WORLD=200 LIFE_TILE=8 LIFE_SOUP=37 LIFE_STEPS=120 timeout -k 1 60 %t | FileCheck %s --check-prefix=ODD
+A-NEXT: Tiles moved: 3
+RUN: %gpu-env MERK_GPU_PROCESS_STACK_BYTES=2304 LIFE_PLACES=3 LIFE_WORLD=200 LIFE_TILE=8 LIFE_SOUP=37 LIFE_STEPS=120 timeout -k 1 60 %t | FileCheck %s --check-prefix=ODD
 ODD: Population: 157
 ODD-NEXT: Checksum: 2963654
-RUN: %gpu-env MERK_GPU_PROCESS_STACK_BYTES=2048 LIFE_PLACES=4 LIFE_WORLD=256 LIFE_TILE=8 LIFE_SOUP=256 LIFE_STEPS=100 timeout -k 1 60 %t | FileCheck %s --check-prefix=WHOLE
+ODD-NEXT: Active tiles: {{.*}}
+ODD-NEXT: Tiles moved: 30
+RUN: %gpu-env MERK_GPU_PROCESS_STACK_BYTES=2304 LIFE_PLACES=4 LIFE_WORLD=256 LIFE_TILE=8 LIFE_SOUP=256 LIFE_STEPS=100 timeout -k 1 60 %t | FileCheck %s --check-prefix=WHOLE
 WHOLE: Population: 4947
 WHOLE-NEXT: Checksum: 158368224
-RUN: %gpu-env MERK_GPU_PROCESS_STACK_BYTES=2048 MERK_CHECK_DEVICE_MEMORY=1 LIFE_PLACES=2 timeout -k 1 120 %t 2>&1 | FileCheck %s --check-prefix=DEFAULT
+WHOLE-NEXT: Active tiles: 1024 at most, 856 at the end
+WHOLE-NEXT: Tiles moved: 161
+RUN: %gpu-env MERK_GPU_PROCESS_STACK_BYTES=2304 MERK_CHECK_DEVICE_MEMORY=1 LIFE_PLACES=2 timeout -k 1 120 %t 2>&1 | FileCheck %s --check-prefix=DEFAULT
 DEFAULT: World: 8192 x 8192 cells, tiles of 64 x 64, 8192 in each place's pool
 DEFAULT: Population: 3719
 DEFAULT-NEXT: Checksum: 124925383998
+DEFAULT-NEXT: Active tiles: 45 at most, 43 at the end
+DEFAULT-NEXT: Tiles moved: 15
 DEFAULT: Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
-RUN: %gpu-env MERK_GPU_PROCESS_STACK_BYTES=2048 MERK_CHECK_DEVICE_MEMORY=1 LIFE_PLACES=2 LIFE_WORLD=256 LIFE_TILE=8 LIFE_SOUP=256 LIFE_STEPS=10 LIFE_CAPACITY=100 not timeout -k 1 60 %t 2>&1 | FileCheck %s --check-prefix=FULL
+RUN: %gpu-env MERK_GPU_PROCESS_STACK_BYTES=2304 MERK_CHECK_DEVICE_MEMORY=1 LIFE_PLACES=2 LIFE_WORLD=256 LIFE_TILE=8 LIFE_SOUP=256 LIFE_STEPS=10 LIFE_CAPACITY=100 not timeout -k 1 60 %t 2>&1 | FileCheck %s --check-prefix=FULL
 FULL: A place's pool ran out of tiles: raise LIFE_CAPACITY.
 FULL-NEXT: Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
 
