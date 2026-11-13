@@ -208,6 +208,26 @@ module @frees attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
     merk.succeed
   }
 
+  // A part that fails gives the result nothing: the other part's new
+  // block is the result's.
+  // CHECK-LABEL: merk.proc @frees.fails_1_0
+  // CHECK: %[[R:.*]] = merk.switch
+  // CHECK: merk.fail
+  // CHECK: merk.array_size %[[R]]
+  // CHECK-NEXT: merk.free %[[R]] : !merk.array<i64>
+  // CHECK-NEXT: merk.succeed
+  merk.proc @frees.fails_1_0(%arg0: i64) -> i64 attributes {determinism = #merk.determinism<semidet>} {
+    %0 = merk.constant 0 : i64
+    %1 = merk.switch %arg0 : i64 -> !merk.array<i64> cases [[0], [1]] {
+      %3 = merk.array_new %arg0, %0 : i64 -> <i64>
+      merk.yield %3 : !merk.array<i64>
+    }, {
+      merk.fail
+    }
+    %2 = merk.array_size %1 : <i64>
+    merk.succeed %2 : i64
+  }
+
   // A term of a type whose one constructor has one field is that field,
   // with no cell: the array is freed once.
   // CHECK-LABEL: merk.proc @frees.wrapped_1_0
