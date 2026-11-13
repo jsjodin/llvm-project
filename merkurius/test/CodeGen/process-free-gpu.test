@@ -1,0 +1,15 @@
+process-free.m's freer spawned on the machine's GPU: each 1.6 MB array is
+freed after its answer, and the next comes from the cache of large blocks,
+so the most the process held at once is one array, rounded to 2 MiB, with a
+few small blocks, not four. Freeing the string literal, which is in the
+image's merk_static section, leaves it alone.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-free.m -o %t2
+RUN: %gpu-env timeout -k 1 60 %t2 gpu | FileCheck %S/process-free.m --match-full-lines --strict-whitespace
+RUN: %gpu-env MERK_CHECK_PROCESS_MEMORY=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %s --match-full-lines
+CHECK:10: right
+CHECK-NEXT:200000: right
+CHECK-NEXT:200000: right
+CHECK-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+CHECK-NEXT:Mercury runtime: a GPU process held at most {{209[0-9][0-9][0-9][0-9]}} bytes of blocks at once

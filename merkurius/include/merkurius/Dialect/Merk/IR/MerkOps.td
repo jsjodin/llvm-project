@@ -825,6 +825,25 @@ def Merk_CheckIndexOp : Merk_Op<"check_index"> {
   let assemblyFormat = "$array `[` $index `]` `,` $what attr-dict `:` type($array)";
 }
 
+def Merk_FreeOp : Merk_Op<"free"> {
+  let summary = "free a GPU process's cell, array or string at its last use";
+  let description = [{
+    Gives back the memory of a value that nothing uses after this: a term's
+    cell, an array or a string, which a GPU process made or received
+    (docs/INPROGRESS.md, Memory that a GPU process gives back). Freeing a
+    value of a received message frees all of the message. A constant's word
+    and a static cell are left alone, and on the host, which has a
+    collector, and in a target region, whose arena goes as it ends, it does
+    nothing.
+
+    ```mlir
+    merk.free %a : !merk.array<i64>
+    ```
+  }];
+  let arguments = (ins AnyType:$value);
+  let assemblyFormat = "$value attr-dict `:` type($value)";
+}
+
 def Merk_YieldOp : Merk_Op<"yield", [
     Pure, ParentOneOf<["IteOp", "SwitchOp", "NotOp", "AggregateOp"]>,
     ReturnLike, Terminator
