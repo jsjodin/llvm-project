@@ -4927,7 +4927,56 @@ process's lane:
   2026-11-13.
 - (p2) `life-places.m` with fixed owners: the directory places new tiles but
   never moves them. Checked against `life-sparse.m` at 1, 2 and 4 places,
-  at the host and on the GPU.
+  at the host and on the GPU. Done 2026-11-13:
+  `benchmarks/life/life-places.m`, `test/Benchmarks/life-places.test` (1 to
+  7 places, -O0 and -O2, sequential and on the host's threads, a
+  collection at every allocation, a pool that runs out) and
+  `life-places-gpu.test` (the default world, no device memory left). As
+  built, beside the design above:
+  - *The directory decides every tile's fate,* from a summary of each
+    place's tiles after the step: position, whether dead, live edges and
+    corners. The design had each place decide and send `changes(s, Ended,
+    Wanted)`. But a tile ends only if no neighbour's live edge faces it,
+    and a neighbour's edges are known to its owner alone until its halo
+    comes, which is after the decision. Deciding at the directory needs no
+    second exchange.
+  - *Halos carry their tiles' positions,* 4 bytes before each tile's 4T - 4
+    border cells. The design ordered the cells by the positions that both
+    places know from their maps. But a place may get a neighbour's halo
+    before the directory's map, and a GPU process takes its messages in the
+    order they come, so the receiver could not yet know the order. A halo
+    that comes first starts the ghosts it needs.
+  - *A ready handshake:* the directory sends each place every place's
+    mailbox, `peer(J, Mailbox)`, which the place keeps in an array of
+    mailboxes (the design document, Messages and memory on the device), and
+    waits for each place's `ready` before the first map, so that no halo
+    reaches a place before it knows its peers.
+  - *A new tile goes to the first place that asked,* by place number. The
+    design gave it to the asker if it had room, else to the place with the
+    most room; a place whose pool is full reports it, and the program ends
+    with status 1. Placing by room comes with p3's moves.
+  - Messages are of a fixed part and one block: `map(Step, Changes)`, each
+    change `Position << 8 \/ Owner`; `summary(Place, Step, Trouble,
+    Tiles)`; `halo(Place, Step, Cells)`.
+  - Found on the way, each fixed in its own commit: a pointer into an array
+    that the statepoint rewrite kept across a collection, at -O2 with two
+    places (design document, "Roots that only the optimizer makes"); C's
+    `exit` while GPU processes ran, which faulted their kernels (design
+    document, the program's end while a region runs); and `ui` arguments
+    of multi-clause predicates, which became ground (the register).
+  - Temporary: the places' calls take 1824 bytes of stack a lane, more than
+    a GPU process's 1536, and 2560 without `-fopenmp`, so the GPU test sets
+    `MERK_GPU_PROCESS_STACK_BYTES`. It goes once their frames fit, which the
+    work on scalar code is to address (the user, 2026-11-13). 2048 is above
+    the 1792 bytes that the gfx1030 keeps bound to a queue (GPU processes
+    that run loops, "How large a stack can be").
+  - First numbers, 2026-11-13, gfx1030 on compute units 0-39, the default
+    world (45 tiles at most), median of 3 runs of the average step:
+    `life-sparse.m` 38 µs, `life-sparse.c` 60 µs, `life-places.m` 236 µs
+    with 1 place, 1157 µs with 2 and 1423 µs with 4. One place's cost is
+    the directory's round trip. Two places' 900 µs more is far more than a
+    halo's 26-40 µs, and 4 places barely add to it, which points to a
+    fixed wait each step: to find before p3.
 - (p3) Moving tiles: the directory moves tiles from a place with more than
   its share to one with fewer, between steps, the tile's cells as a
   message. Checked as p2.
