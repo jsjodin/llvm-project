@@ -115,6 +115,7 @@ phases(Count, N, Me, Downs, !IO) :-
         % The adder's kernel is ending, which a change allows.
         set_gpu_units(gpu(0), 50, !IO),
         spawn(gpu(0), doubler(Me), D, !IO),
+        monitor(D, Downs, id, _, !IO),
         send(D, Added, !IO),
         answer(Me, Doubled, !IO),
         ended(Downs, _, !IO),
