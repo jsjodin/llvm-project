@@ -4261,8 +4261,14 @@ before them under `target data`, two rounds, in GB/s, 2026-11-11 at
 - **Off by 8, Mercury is 17% below C** on Copy, but aligned it is level
   with C (below), so the misalignment costs Mercury's loop more than C's;
   why is not known. Its Dot is above C's off by 8, 476 against 437.
-- **Not changed yet.** Aligning a large array's elements would pad it before
-  its size word and map it from the padding, and every allocation of an
+- **On the device, aligned** (2026-11-13): a GPU process's array, or a
+  target region's, of 4 KiB or more is made with its header words just below
+  256 bytes, so its elements start on them, at a cost of at most 248 bytes
+  (`runtime/array.cpp`, `AllocateArrayBytes`; Memory bandwidth, below, for
+  what it gains). A copy of a message's array that a GPU process receives is
+  not aligned yet.
+- **On the host, not changed yet.** Aligning a large array's elements would
+  pad it before its size word and map it from the padding, and every allocation of an
   array on the host would have to pad, the heap's, a message's and a
   collection's copies, or a map would copy another object's bytes. In-place
   slices (`docs/INPROGRESS.md`, Split and join) bear on how arrays are laid
@@ -4798,6 +4804,26 @@ elements, five alternating rounds, the median MB/s:
 
 Dot is 8% below C. At this size a run of Dot takes 1.1 ms, of which the
 combine is under 1%: the difference is in the loop.
+
+A GPU process's large arrays with their elements on 256 bytes
+(`merk_device_alloc_aligned`, "Where an array's elements start", above),
+2026-11-13, on fb0c92e1a521 with the change, `-O2`, compute units 0-39,
+2^25 elements, three alternating rounds, the median of each kernel's best of
+100, GB/s:
+
+| Kernel | Before | Aligned |
+| --- | ---: | ---: |
+| Copy | 484 | 537, +11% |
+| Mul | 388 | 455, +17% |
+| Add | 428 | 462, +8% |
+| Triad | 425 | 472, +11% |
+| Dot | 487 | 495, +2% |
+
+Copy is level with C's 531 (target regions with elements at 0, above).
+`life-process.m` and `life-process8.m`, at 4096² for 100 steps and 1024² for
+200, the same rounds, did not change (within 0.5%), with the same cells: a
+stencil reads a cell's neighbours from the cache, and those at x-1 and x+1
+are 8 bytes off however a row starts.
 
 The same at 2^28 elements, 2 GB arrays, 20 runs a kernel, three alternating
 rounds, the median MB/s, with the target regions of `bandwidth.m` too; the
