@@ -3,14 +3,17 @@
 % that owns some of the tiles (docs/INPROGRESS.md, step 5 of the demo,
 % several places with a directory). Its population, checksum and active
 % tiles are life-sparse.m's for the same world and steps, for any number of
-% places. Tiles have fixed owners: the directory places each new tile and
-% never moves it.
+% places. The directory places each new tile, and moves tiles from a
+% place with more than its share to one with fewer.
 %
 % - The directory is the program's main, on the host. It holds the world
 %   map, the place that owns each tile position or none, and alone changes
 %   it. The soup's tiles go round the places by rows; a new tile goes to the
 %   place whose tile asked for it, the first by place number if several
-%   did.
+%   did. After each step but the last, while a place has more than its
+%   share of the tiles and another fewer, it moves a tile of the one to the
+%   other, one next to the other's tiles if it has one, up to LIFE_MOVES a
+%   step.
 % - A place keeps life-sparse.m's pool, directory and neighbour links, with
 %   two kinds of tile in its pool: its own, which it steps, and ghosts, a
 %   copy of each tile that another place owns next to one of its own, never
@@ -25,28 +28,33 @@
 % 3. The directory decides every tile's fate, as life-sparse.m's `decide`
 %    does, from all the places' summaries, and sends every place the
 %    changes to the map.
-% 4. Each place applies them: it ends its tiles that end, starts the new
-%    ones given to it, all dead, and drops the ghosts it no longer needs.
-%    It then sends each place that owns a tile next to one of its own a
-%    halo: the border cells of each of its tiles next to that place's, each
-%    after its position.
-% 5. It takes a halo from each such place, which may come before the map,
+% 4. Each place applies them: it sends each place that it moves tiles to
+%    their cells, ends its tiles that end or move, starts the new ones
+%    given to it, all dead, and those moved to it, from their ghosts if it
+%    has them, and drops the ghosts it no longer needs.
+% 5. Once the cells of the tiles moved to it have come, it sends each
+%    place that owns a tile next to one of its own a halo: the border cells
+%    of each of its tiles next to that place's, each after its position.
+% 6. It takes a halo from each such place, which may come before the map,
 %    and copies its cells into the ghosts, starting a ghost for a tile it
 %    has none of.
 %
 % The directory decides, rather than each place, since a place's tile ends
 % only if no neighbour's live edge faces it after the step, and a
 % neighbour's edges are known to its owner alone until its halo comes.
-% Halos carry their tiles' positions, since a place may get a neighbour's
-% halo before the directory's map, and a GPU process takes its messages in
-% the order they come.
+% Halos and moved tiles carry their tiles' positions, since a place may get
+% them before the directory's map, and a GPU process takes its messages in
+% the order they come. A place's halos wait for the tiles moved to it, as
+% they are among the tiles that the halos read; no move comes after the
+% last step, as the outcome reads the live cells that a step counts.
 %
 % LIFE_WORLD, LIFE_TILE, LIFE_SOUP, LIFE_STEPS and LIFE_CAPACITY are
 % life-sparse.m's, LIFE_CAPACITY for each place's pool; LIFE_PLACES, 2 by
-% default, is the number of places. Built with -fprocess-declarations,
-% -fdo-loops and --offload-arch, and -fopenmp for the loops to run across
-% each place's teams. The first argument `host` spawns the places at the
-% host, for tests. See README.md.
+% default, is the number of places, and LIFE_MOVES, 4 by default, the most
+% tiles the directory moves a step, 0 for fixed owners. Built with
+% -fprocess-declarations, -fdo-loops and --offload-arch, and -fopenmp for
+% the loops to run across each place's teams. The first argument `host`
+% spawns the places at the host, for tests. See README.md.
 
 :- module life_places.
 :- interface.
@@ -71,13 +79,18 @@
     % - map(Step, Changes): the changes to the world map after Step, or the
     %   tiles at the start for step -1, each Position << 8 \/ Owner, Owner
     %   the place's number plus one, or 0 for a tile that ends;
+    %   A change that gives a tile with an owner another moves it;
     % - halo(Place, Step, Cells): from that place, after Step, for each of
     %   its tiles next to the receiver's: the tile's position in 4 bytes,
-    %   least significant first, then its 4T - 4 border cells (ring/3).
+    %   least significant first, then its 4T - 4 border cells (ring/3);
+    % - moved(Place, Step, Cells): from that place, after Step, each tile
+    %   that the map moves from it to the receiver: its position, as in a
+    %   halo, then its T^2 cells.
 :- type to_place
     --->    peer(int, mailbox(to_place))
     ;       map(int32, array(int32))
-    ;       halo(int, int32, array(uint8)).
+    ;       halo(int, int32, array(uint8))
+    ;       moved(int, int32, array(uint8)).
 
     % What the directory receives:
     % - ready(Place): the place has all its peers;
@@ -102,6 +115,7 @@ main(!IO) :-
     setting("LIFE_SOUP", 256, Soup, !IO),
     setting("LIFE_STEPS", 1000, Steps, !IO),
     setting("LIFE_PLACES", 2, N, !IO),
+    setting("LIFE_MOVES", 4, MostMoves, !IO),
     Log = log2(Tile, 0),
     Side = ( if Tile > 0 then World / Tile else 0 ),
     setting("LIFE_CAPACITY", int.min(Side * Side, 8192) + 1, Capacity, !IO),
@@ -112,7 +126,8 @@ main(!IO) :-
         Soup >= 0, Soup =< World,
         Steps >= 2,
         Capacity >= 2,
-        N >= 1, N =< 32
+        N >= 1, N =< 32,
+        MostMoves >= 0
     then
         header(World, Tile, Capacity, Soup, Steps, N, !IO),
         G = geometry(Tile, Log, Side, World),
@@ -122,12 +137,13 @@ main(!IO) :-
             Capacity), 0 .. N - 1, Places, !IO),
         list.foldl(introduce(Places), Places, !IO),
         readies(Me, N, !IO),
-        directory(G, Soup, Steps, N, Places, Me, !IO)
+        directory(G, Soup, Steps, N, MostMoves, Places, Me, !IO)
     else
         io.write_string("LIFE_TILE must be a power of two of at least 4 " ++
             "that divides LIFE_WORLD, with fewer than 2^21 tiles, " ++
             "LIFE_SOUP from 0 to LIFE_WORLD, LIFE_STEPS at least 2, " ++
-            "LIFE_CAPACITY at least 2, and LIFE_PLACES from 1 to 32.\n", !IO),
+            "LIFE_CAPACITY at least 2, LIFE_PLACES from 1 to 32, and " ++
+            "LIFE_MOVES at least 0.\n", !IO),
         io.set_exit_status(1, !IO)
     ).
 
@@ -182,10 +198,11 @@ quiet_steps = 4.
 
     % Places the soup's tiles and those around them, then runs the steps:
     % each step's summaries, the changes, and their time; then the outcome.
-:- pred directory(geometry::in, int::in, int::in, int::in,
+    % It moves at most MostMoves tiles a step.
+:- pred directory(geometry::in, int::in, int::in, int::in, int::in,
     list(mailbox(to_place))::in, mailbox(to_directory)::in,
     io::di, io::uo) is det.
-directory(G, Soup, Steps, N, Places, Me, !IO) :-
+directory(G, Soup, Steps, N, MostMoves, Places, Me, !IO) :-
     Side = G ^ side,
     Log = G ^ log,
     array.init(Side * Side, 0, Owner0),
@@ -207,13 +224,13 @@ directory(G, Soup, Steps, N, Places, Me, !IO) :-
     now(T0, !IO),
     array.init(Steps, 0.0, Times0),
     array.init(Steps, 0, Counts0),
-    steps(G, 0, Steps, N, Places, Me, list.length(Changes0), 0, Peak, 0,
-        Trouble0, T0, Owner, _, Quiet, _, EdgeAt, _, Times0, Times,
-        Counts0, Counts, !IO),
+    steps(G, 0, Steps, N, MostMoves, Places, Me, list.length(Changes0), 0,
+        Peak, 0, Moved, 0, Trouble0, T0, Owner, _, Quiet, _, EdgeAt, _,
+        Times0, Times, Counts0, Counts, !IO),
     outcomes(Me, N, 0, Population, 0, Checksum, Trouble0, Trouble, !IO),
     ( if Trouble = 0 then
         results(Steps, Times, Population, Checksum, Peak,
-            Counts ^ elem(Steps - 1), !IO)
+            Counts ^ elem(Steps - 1), Moved, !IO)
     else if Trouble = 1 then
         io.write_string("A place's pool ran out of tiles: " ++
             "raise LIFE_CAPACITY.\n", !IO),
@@ -271,17 +288,18 @@ grow_all(G, [C | Cs], !Owner, !New) :-
     grow_all(G, Cs, !Owner, !New).
 
     % Steps from S to Steps: each step's summaries, every tile's fate from
-    % them, and the changes to every place. Count is the tiles in the world.
-:- pred steps(geometry::in, int::in, int::in, int::in,
+    % them, the tiles it moves, and the changes to every place. Count is the
+    % tiles in the world, and Moved the tiles moved so far.
+:- pred steps(geometry::in, int::in, int::in, int::in, int::in,
     list(mailbox(to_place))::in, mailbox(to_directory)::in, int::in,
-    int::in, int::out, int::in, int::out, float::in,
+    int::in, int::out, int::in, int::out, int::in, int::out, float::in,
     array(int)::array_di, array(int)::array_uo,
     array(int)::array_di, array(int)::array_uo,
     array(int)::array_di, array(int)::array_uo,
     array(float)::array_di, array(float)::array_uo,
     array(int)::array_di, array(int)::array_uo, io::di, io::uo) is det.
-steps(G, S, Steps, N, Places, Me, Count, !Peak, !Trouble, T0, !Owner,
-        !Quiet, !EdgeAt, !Times, !Counts, !IO) :-
+steps(G, S, Steps, N, MostMoves, Places, Me, Count, !Peak, !Moved,
+        !Trouble, T0, !Owner, !Quiet, !EdgeAt, !Times, !Counts, !IO) :-
     ( if S >= Steps then
         true
     else
@@ -292,15 +310,31 @@ steps(G, S, Steps, N, Places, Me, Count, !Peak, !Trouble, T0, !Owner,
         decide(G, Tiles, !.Owner, !.EdgeAt, !Quiet, [], Ended, [], Wanted),
         end_tiles(Ended, !Owner),
         want(list.reverse(Wanted), !Owner, !Quiet, [], New),
-        Changes = list.map(ended, Ended) ++ list.reverse(New),
+        % None after the last step: a moved tile's live cells are counted
+        % by the step after its move, and the outcome reads them.
+        ( if S < Steps - 1 then
+            % By position, so that the moves do not depend on the order in
+            % which a place's tiles came to it.
+            owned(!.Owner, Tiles, [], Kept0),
+            Kept = list.sort(Kept0),
+            count_owners(!.Owner, Kept ++ list.map(new_place, New),
+                array.init(N + 1, 0), Load),
+            balance(G, N, MostMoves, Kept, Load, !Owner, [], Moves)
+        else
+            Moves = []
+        ),
+        !:Moved = !.Moved + list.length(Moves),
+        Changes = list.map(ended, Ended) ++ list.reverse(New) ++
+            list.reverse(Moves),
         broadcast(Places, map(int32.cast_from_int(S), changes(Changes)), !IO),
         now(T1, !IO),
         Count1 = Count - list.length(Ended) + list.length(New),
         !Times ^ elem(S) := T1 - T0,
         !Counts ^ elem(S) := Count1,
         !:Peak = int.max(!.Peak, Count1),
-        steps(G, S + 1, Steps, N, Places, Me, Count1, !Peak, !Trouble, T1,
-            !Owner, !Quiet, !EdgeAt, !Times, !Counts, !IO)
+        steps(G, S + 1, Steps, N, MostMoves, Places, Me, Count1, !Peak,
+            !Moved, !Trouble, T1, !Owner, !Quiet, !EdgeAt, !Times, !Counts,
+            !IO)
     ).
 
     % The summaries of step S from Left places, each with its place.
@@ -443,6 +477,122 @@ want([{There, Asker} | Wanted], !Owner, !Quiet, !New) :-
     ),
     want(Wanted, !Owner, !Quiet, !New).
 
+    % The positions of the tiles that still have an owner, the last first.
+:- pred owned(array(int)::array_ui, list(int)::in, list(int)::in,
+    list(int)::out) is det.
+owned(_, [], !Kept).
+owned(Owner, [Tile | Tiles], !Kept) :-
+    P = tile_place(Tile),
+    ( if Owner ^ unsafe_elem(P) \= 0 then
+        !:Kept = [P | !.Kept]
+    else
+        true
+    ),
+    owned(Owner, Tiles, !Kept).
+
+:- func new_place(int) = int.
+new_place(C) = C >> 8.
+
+    % Each place's tiles among those at the positions, by its number.
+:- pred count_owners(array(int)::array_ui, list(int)::in,
+    array(int)::array_di, array(int)::array_uo) is det.
+count_owners(_, [], !Load).
+count_owners(Owner, [P | Ps], !Load) :-
+    O = Owner ^ elem(P),
+    !Load ^ elem(O) := !.Load ^ elem(O) + 1,
+    count_owners(Owner, Ps, !Load).
+
+    % At most Left moves, each of a tile from the place with the most tiles
+    % to the place with the fewest while the one has more than its share of
+    % the world's tiles and the other fewer: a tile of the one next to a
+    % tile of the other if it has one, so that the places' tiles stay
+    % together and their halos small, else its first. Kept are the tiles
+    % that may move, those that were there before the step's new ones, by
+    % position, and Load each place's tiles, numbered from 1. Moves has
+    % their changes, the last first; a tile moves at most once a step.
+:- pred balance(geometry::in, int::in, int::in, list(int)::in,
+    array(int)::array_di, array(int)::array_di, array(int)::array_uo,
+    list(int)::in, list(int)::out) is det.
+balance(G, N, Left, Kept, Load, !Owner, !Moves) :-
+    most_and_fewest(N, Load, 1, 1, Most, 1, Fewest, 0, Total),
+    Share = (Total + N - 1) / N,
+    ( if
+        Left > 0,
+        Load ^ elem(Most) > Share,
+        Load ^ elem(Fewest) < Share,
+        choose(G, !.Owner, Most, Fewest, Kept, !.Moves, P)
+    then
+        !Owner ^ elem(P) := Fewest,
+        Load1 = Load ^ elem(Most) := Load ^ elem(Most) - 1,
+        Load2 = Load1 ^ elem(Fewest) := Load1 ^ elem(Fewest) + 1,
+        balance(G, N, Left - 1, Kept, Load2, !Owner, [(P << 8) \/ Fewest |
+            !.Moves], !:Moves)
+    else
+        true
+    ).
+
+    % The places with the most and the fewest tiles, the first of each by
+    % number, and the tiles in all, from place J on.
+:- pred most_and_fewest(int::in, array(int)::array_ui, int::in, int::in,
+    int::out, int::in, int::out, int::in, int::out) is det.
+most_and_fewest(N, Load, J, !Most, !Fewest, !Total) :-
+    ( if J > N then
+        true
+    else
+        L = Load ^ elem(J),
+        ( if L > Load ^ elem(!.Most) then !:Most = J else true ),
+        ( if L < Load ^ elem(!.Fewest) then !:Fewest = J else true ),
+        !:Total = !.Total + L,
+        most_and_fewest(N, Load, J + 1, !Most, !Fewest, !Total)
+    ).
+
+    % The tile of place From to move to place To: the first of the kept
+    % tiles next to one of To's, else the first, that has not moved this
+    % step.
+:- pred choose(geometry::in, array(int)::array_ui, int::in, int::in,
+    list(int)::in, list(int)::in, int::out) is semidet.
+choose(G, Owner, From, To, Kept, Moves, P) :-
+    ( if first_movable(G, Owner, From, To, Kept, Moves, Q) then
+        P = Q
+    else
+        first_movable(G, Owner, From, 0, Kept, Moves, P)
+    ).
+
+    % The first of the tiles that is place From's, has not moved this step,
+    % and, unless To is 0, is next to one of place To's.
+:- pred first_movable(geometry::in, array(int)::array_ui, int::in, int::in,
+    list(int)::in, list(int)::in, int::out) is semidet.
+first_movable(G, Owner, From, To, [Q | Qs], Moves, P) :-
+    ( if
+        Owner ^ unsafe_elem(Q) = From,
+        not moved(Q, Moves),
+        ( if To = 0 then true else next_to(G, Owner, To, Q, 0) )
+    then
+        P = Q
+    else
+        first_movable(G, Owner, From, To, Qs, Moves, P)
+    ).
+
+    % Whether one of the changes moves the tile at P.
+:- pred moved(int::in, list(int)::in) is semidet.
+moved(P, [C | Cs]) :-
+    ( C >> 8 = P ; moved(P, Cs) ).
+
+    % Whether a tile next to position P, from direction D on, is place To's.
+:- pred next_to(geometry::in, array(int)::array_ui, int::in, int::in,
+    int::in) is semidet.
+next_to(G, Owner, To, P, D) :-
+    D =< 8,
+    ( if
+        D \= 4,
+        beside(G, P, D, There),
+        Owner ^ unsafe_elem(There) = To
+    then
+        true
+    else
+        next_to(G, Owner, To, P, D + 1)
+    ).
+
 :- func changes(list(int)) = array(int32).
 changes(Changes) = array(list.map(int32.cast_from_int, Changes)).
 
@@ -514,14 +664,14 @@ place(Directory, Me, N, World, Log, Soup, Steps, Capacity, Self, !IO) :-
     ),
     From = (World - Soup) / 2,
     W = site(Me, Self, From, Soup),
-    agree(G, W, Peers, -1, CellsA0, CellsA, Dir0, Dir1, Owner0, Owner1, Pos0, Pos1,
-        Nb0, Nb1, Live0, Live1, Actives0, Actives1, 0, NActive1, Ghosts0,
-        Ghosts1, 0, NGhost1, Free1, Free2, Capacity - 1, NFree1, 0, Trouble1,
-        !IO),
-    run(G, W, Peers, Directory, 0, Steps, CellsA, CellsB, Final, Dir1, _, Owner1, _,
-        Pos1, Pos, Nb1, _, Live1, Live, Edges, _, Actives1, Actives, NActive1,
-        NActive, Ghosts1, _, NGhost1, _, Free2, _, NFree1, _, Trouble1,
-        Trouble, !IO),
+    agree(G, W, Peers, -1, CellsA0, CellsA, Dir0, Dir1, Owner0, Owner1,
+        Pos0, Pos1, Nb0, Nb1, Live0, Live1, Actives0, Actives1, 0, NActive1,
+        Ghosts0, Ghosts1, 0, NGhost1, Free1, Free2, Capacity - 1, NFree1, 0,
+        Trouble1, !IO),
+    run(G, W, Peers, Directory, 0, Steps, CellsA, CellsB, Final, Dir1, _,
+        Owner1, _, Pos1, Pos, Nb1, _, Live1, Live, Edges, _, Actives1,
+        Actives, NActive1, NActive, Ghosts1, _, NGhost1, _, Free2, _, NFree1,
+        _, Trouble1, Trouble, !IO),
     count(G, NActive, Actives, Pos, Live, Final, Population, Checksum),
     send(Directory, outcome(Me, Population, Checksum, Trouble), !IO).
 
@@ -569,9 +719,9 @@ peers(Self, Left, !Peers, !IO) :-
     array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
     array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
     int::in, int::out, io::di, io::uo) is det.
-run(G, W, Peers, Directory, S, Steps, Cur, Next0, Final, !Dir, !Owner, !Pos, !Nb,
-        !Live, !Edges, !Actives, !NActive, !Ghosts, !NGhost, !Free, !NFree,
-        !Trouble, !IO) :-
+run(G, W, Peers, Directory, S, Steps, Cur, Next0, Final, !Dir, !Owner, !Pos,
+        !Nb, !Live, !Edges, !Actives, !NActive, !Ghosts, !NGhost, !Free,
+        !NFree, !Trouble, !IO) :-
     ( if S >= Steps then
         Final = Cur
     else
@@ -583,9 +733,9 @@ run(G, W, Peers, Directory, S, Steps, Cur, Next0, Final, !Dir, !Owner, !Pos, !Nb
         agree(G, W, Peers, S, Next1, Next, !Dir, !Owner, !Pos, !Nb, !Live,
             !Actives, !NActive, !Ghosts, !NGhost, !Free, !NFree, !Trouble,
             !IO),
-        run(G, W, Peers, Directory, S + 1, Steps, Next, Cur, Final, !Dir, !Owner,
-            !Pos, !Nb, !Live, !Edges, !Actives, !NActive, !Ghosts, !NGhost,
-            !Free, !NFree, !Trouble, !IO)
+        run(G, W, Peers, Directory, S + 1, Steps, Next, Cur, Final, !Dir,
+            !Owner, !Pos, !Nb, !Live, !Edges, !Actives, !NActive, !Ghosts,
+            !NGhost, !Free, !NFree, !Trouble, !IO)
     ).
 
     % Each of the place's tiles, as the directory reads it.
@@ -625,16 +775,20 @@ summary(NActive, Actives, Pos, Live, Edges) = Summary :-
     array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
     array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
     int::in, int::out, io::di, io::uo) is det.
-agree(G, W, Peers, S, !Cells, !Dir, !Owner, !Pos, !Nb, !Live, !Actives, !NActive,
-        !Ghosts, !NGhost, !Free, !NFree, !Trouble, !IO) :-
-    take(G, W, Peers, S, 0, 0, 0, !Cells, !Dir, !Owner, !Pos, !Nb, !Live, !Actives,
-        !NActive, !Ghosts, !NGhost, !Free, !NFree, !Trouble, !IO).
+agree(G, W, Peers, S, !Cells, !Dir, !Owner, !Pos, !Nb, !Live, !Actives,
+        !NActive, !Ghosts, !NGhost, !Free, !NFree, !Trouble, !IO) :-
+    take(G, W, Peers, S, 0, 0, 0, 0, 0, 0, !Cells, !Dir, !Owner, !Pos, !Nb,
+        !Live, !Actives, !NActive, !Ghosts, !NGhost, !Free, !NFree, !Trouble,
+        !IO).
 
-    % Takes the agreement's messages until it has the map and a halo from
-    % each place in Expected, which the map says. Got says which places'
-    % halos have come.
+    % Takes the agreement's messages until it has the map, the tiles moved
+    % to it from each place in Moves, and a halo from each place in
+    % Expected, both of which the map says. Got and GotMoves say which
+    % places' halos and moved tiles have come, and Sent whether its own
+    % halos have gone, which waits for the moved tiles, as they are among
+    % the tiles that its halos read.
 :- pred take(geometry::in, site::in, array(mailbox(to_place))::in,
-    int::in, int::in, int::in, int::in,
+    int::in, int::in, int::in, int::in, int::in, int::in, int::in,
     array(uint8)::array_di, array(uint8)::array_uo,
     array(int32)::array_di, array(int32)::array_uo,
     array(int32)::array_di, array(int32)::array_uo,
@@ -645,11 +799,17 @@ agree(G, W, Peers, S, !Cells, !Dir, !Owner, !Pos, !Nb, !Live, !Actives, !NActive
     array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
     array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
     int::in, int::out, io::di, io::uo) is det.
-take(G, W, Peers, S, GotMap, Got, Expected, !Cells, !Dir, !Owner, !Pos, !Nb, !Live,
-        !Actives, !NActive, !Ghosts, !NGhost, !Free, !NFree, !Trouble,
-        !IO) :-
-    ( if GotMap = 1, Got /\ Expected = Expected then
-        ( if Got = Expected then
+take(G, W, Peers, S, GotMap, Got, Expected, Moves, GotMoves, Sent, !Cells,
+        !Dir, !Owner, !Pos, !Nb, !Live, !Actives, !NActive, !Ghosts, !NGhost,
+        !Free, !NFree, !Trouble, !IO) :-
+    ( if GotMap = 1, Sent = 0, GotMoves /\ Moves = Moves then
+        send_halos(G, W, Peers, S, 0, Expected, !.Cells, !.NActive,
+            !.Actives, !.Pos, !.Owner, !IO),
+        take(G, W, Peers, S, GotMap, Got, Expected, Moves, GotMoves, 1,
+            !Cells, !Dir, !Owner, !Pos, !Nb, !Live, !Actives, !NActive,
+            !Ghosts, !NGhost, !Free, !NFree, !Trouble, !IO)
+    else if GotMap = 1, Sent = 1, Got /\ Expected = Expected then
+        ( if Got = Expected, GotMoves = Moves then
             true
         else
             !:Trouble = 2
@@ -661,16 +821,17 @@ take(G, W, Peers, S, GotMap, Got, Expected, !Cells, !Dir, !Owner, !Pos, !Nb, !Li
             int32.to_int(Step) = S,
             GotMap = 0
         then
+            moves(W ^ me + 1, Changes, !.Owner, Moves1, Out),
+            send_moves(G, W, Peers, S, 0, Out, Changes, !.Cells, !.Dir,
+                !.Owner, !IO),
             apply_map(G, W, S, Changes, !Cells, !Dir, !Owner, !Pos, !Nb,
                 !Live, !Actives, !NActive, !Ghosts, !NGhost, !Free, !NFree,
                 !Trouble),
             Expected1 = expected(G, W ^ me, !.NActive, !.Actives, !.Pos,
                 !.Owner),
-            send_halos(G, W, Peers, S, 0, Expected1, !.Cells, !.NActive, !.Actives,
-                !.Pos, !.Owner, !IO),
-            take(G, W, Peers, S, 1, Got, Expected1, !Cells, !Dir, !Owner, !Pos,
-                !Nb, !Live, !Actives, !NActive, !Ghosts, !NGhost, !Free,
-                !NFree, !Trouble, !IO)
+            take(G, W, Peers, S, 1, Got, Expected1, Moves1, GotMoves, Sent,
+                !Cells, !Dir, !Owner, !Pos, !Nb, !Live, !Actives, !NActive,
+                !Ghosts, !NGhost, !Free, !NFree, !Trouble, !IO)
         else if
             R = message(halo(From, Step, Halo)),
             int32.to_int(Step) = S,
@@ -678,14 +839,239 @@ take(G, W, Peers, S, GotMap, Got, Expected, !Cells, !Dir, !Owner, !Pos, !Nb, !Li
         then
             apply_halo(G, Halo, !Cells, !Dir, !Pos, !Nb, !Ghosts, !NGhost,
                 !Free, !NFree, !Trouble),
-            take(G, W, Peers, S, GotMap, Got \/ (1 << From), Expected, !Cells,
-                !Dir, !Owner, !Pos, !Nb, !Live, !Actives, !NActive, !Ghosts,
-                !NGhost, !Free, !NFree, !Trouble, !IO)
+            take(G, W, Peers, S, GotMap, Got \/ (1 << From), Expected, Moves,
+                GotMoves, Sent, !Cells, !Dir, !Owner, !Pos, !Nb, !Live,
+                !Actives, !NActive, !Ghosts, !NGhost, !Free, !NFree,
+                !Trouble, !IO)
+        else if
+            R = message(moved(From, Step, Tiles)),
+            int32.to_int(Step) = S,
+            GotMoves /\ (1 << From) = 0
+        then
+            apply_moved(G, Tiles, !Cells, !Dir, !Pos, !Nb, !Live, !Actives,
+                !NActive, !Ghosts, !NGhost, !Free, !NFree, !Trouble),
+            take(G, W, Peers, S, GotMap, Got, Expected, Moves,
+                GotMoves \/ (1 << From), Sent, !Cells, !Dir, !Owner, !Pos,
+                !Nb, !Live, !Actives, !NActive, !Ghosts, !NGhost, !Free,
+                !NFree, !Trouble, !IO)
         else
             % A message out of turn; the place goes on, and the directory
             % reports it at the end.
             !:Trouble = 2
         )
+    ).
+
+    % The tiles that the map's changes move: In has a bit for each place
+    % that moves tiles to place Mine, Out one for each that Mine moves tiles
+    % to. A change moves a tile when the tile had an owner and the change
+    % gives it another; Owner is the map before the changes.
+:- pred moves(int::in, array(int32)::in, array(int32)::array_ui, int::out,
+    int::out) is det.
+moves(Mine, Changes, Owner, In, Out) :-
+    ( for(K, 0, array.size(Changes) - 1), fromto(0, I0, I1, In),
+        fromto(0, O0, O1, Out) do
+        C = int32.to_int(Changes ^ unsafe_elem(K)),
+        To = C /\ 0xff,
+        Was = int32.to_int(Owner ^ unsafe_elem(C >> 8)),
+        ( if Was \= 0, To \= 0, To \= Was, To = Mine then
+            I1 = I0 \/ (1 << (Was - 1)),
+            O1 = O0
+        else if Was \= 0, To \= 0, To \= Was, Was = Mine then
+            I1 = I0,
+            O1 = O0 \/ (1 << (To - 1))
+        else
+            I1 = I0,
+            O1 = O0
+        )
+    ).
+
+    % From place Q on, to each in Out: the place's tiles that the changes
+    % move to Q, whole, before the place lets them go.
+:- pred send_moves(geometry::in, site::in, array(mailbox(to_place))::in,
+    int::in, int::in, int::in, array(int32)::in, array(uint8)::array_ui,
+    array(int32)::array_ui, array(int32)::array_ui, io::di, io::uo) is det.
+send_moves(G, W, Peers, S, Q, Out, Changes, Cells, Dir, Owner, !IO) :-
+    ( if Q >= array.size(Peers) then
+        true
+    else
+        ( if Out /\ (1 << Q) \= 0 then
+            moved_to(W ^ me + 1, Q + 1, Changes, Owner, Dir, K, Selected),
+            Tiles = pack_whole(G, K, Selected, Cells),
+            send(Peers ^ elem(Q), moved(W ^ me, int32.cast_from_int(S), Tiles),
+                !IO)
+        else
+            true
+        ),
+        send_moves(G, W, Peers, S, Q + 1, Out, Changes, Cells, Dir, Owner,
+            !IO)
+    ).
+
+    % The K changes that move a tile of place Mine to place To: each tile's
+    % position, then its place in the pool, in turn.
+:- pred moved_to(int::in, int::in, array(int32)::in, array(int32)::array_ui,
+    array(int32)::array_ui, int::out, array(int32)::array_uo) is det.
+moved_to(Mine, To, Changes, Owner, Dir, K, Selected) :-
+    NChanges = array.size(Changes),
+    array.init(int.max(2 * NChanges, 1), 0i32, Selected0),
+    ( for(J, 0, NChanges - 1), fromto(Selected0, S0, S1, Selected),
+        fromto(0, K0, K1, K) do
+        C = int32.to_int(Changes ^ unsafe_elem(J)),
+        P = C >> 8,
+        ( if
+            C /\ 0xff = To,
+            int32.to_int(Owner ^ unsafe_elem(P)) = Mine
+        then
+            S2 = S0 ^ unsafe_elem(2 * K0) := int32.cast_from_int(P),
+            S1 = S2 ^ unsafe_elem(2 * K0 + 1) := Dir ^ unsafe_elem(P),
+            K1 = K0 + 1
+        else
+            S1 = S0,
+            K1 = K0
+        )
+    ).
+
+    % The K selected tiles, across the teams: each one's position in 4
+    % bytes, least significant first, then all its cells.
+:- func pack_whole(geometry, int, array(int32), array(uint8)) = array(uint8).
+:- mode pack_whole(in, in, array_ui, array_ui) = array_uo is det.
+pack_whole(G, K, Selected, Cells) = Tiles :-
+    Bytes = 4 + G ^ tile * G ^ tile,
+    array.init(K * Bytes, 0u8, Tiles0),
+    %$omp distribute
+    ( for(J, 0, K - 1), fromto(Tiles0, T0, T1, Tiles) do
+        P = int32.to_int(Selected ^ unsafe_elem(2 * J)),
+        I = int32.to_int(Selected ^ unsafe_elem(2 * J + 1)),
+        Base = J * Bytes,
+        T2 = T0 ^ unsafe_elem(Base) := uint8.cast_from_int(P /\ 0xff),
+        T3 = T2 ^ unsafe_elem(Base + 1) :=
+            uint8.cast_from_int((P >> 8) /\ 0xff),
+        T4 = T3 ^ unsafe_elem(Base + 2) :=
+            uint8.cast_from_int((P >> 16) /\ 0xff),
+        T5 = T4 ^ unsafe_elem(Base + 3) :=
+            uint8.cast_from_int((P >> 24) /\ 0xff),
+        pack_cells(G, I, Cells, Base + 4, T5, T1)
+    ).
+
+:- pred pack_cells(geometry::in, int::in, array(uint8)::array_ui, int::in,
+    array(uint8)::array_di, array(uint8)::array_uo) is det.
+pack_cells(G, I, Cells, Base, !Tiles) :-
+    T = G ^ tile,
+    Log = G ^ log,
+    %$omp parallel do
+    ( for(K, 0, T * T - 1) do
+        !Tiles ^ unsafe_elem(Base + K) :=
+            Cells ^ unsafe_elem((I << (2 * Log)) + K)
+    ).
+
+    % Tiles moved to the place, whole: each becomes its own, from a ghost if
+    % it has one, or as it already is if its map came first, and its cells
+    % are the message's.
+:- pred apply_moved(geometry::in, array(uint8)::in,
+    array(uint8)::array_di, array(uint8)::array_uo,
+    array(int32)::array_di, array(int32)::array_uo,
+    array(int32)::array_di, array(int32)::array_uo,
+    array(int32)::array_di, array(int32)::array_uo,
+    array(int32)::array_di, array(int32)::array_uo,
+    array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
+    array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
+    array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
+    int::in, int::out) is det.
+apply_moved(G, Tiles, !Cells, !Dir, !Pos, !Nb, !Live, !Actives, !NActive,
+        !Ghosts, !NGhost, !Free, !NFree, !Trouble) :-
+    Bytes = 4 + G ^ tile * G ^ tile,
+    K = array.size(Tiles) / Bytes,
+    array.init(int.max(K, 1), 0i32, Slots0),
+    ( for(J, 0, K - 1), fromto(Slots0, S0, S1, Slots),
+        fromto(!.Dir, D0, D1, !:Dir), fromto(!.Pos, P0, P1, !:Pos),
+        fromto(!.Nb, N0, N1, !:Nb), fromto(!.Live, L0, L1, !:Live),
+        fromto(!.Actives, A0, A1, !:Actives),
+        fromto(!.NActive, C0, C1, !:NActive),
+        fromto(!.Ghosts, G0, G1, !:Ghosts),
+        fromto(!.NGhost, H0, H1, !:NGhost), fromto(!.Free, F0, F1, !:Free),
+        fromto(!.NFree, R0, R1, !:NFree),
+        fromto(!.Trouble, T0, T1, !:Trouble) do
+        Base = J * Bytes,
+        P = uint8.to_int(Tiles ^ unsafe_elem(Base)) \/
+            (uint8.to_int(Tiles ^ unsafe_elem(Base + 1)) << 8) \/
+            (uint8.to_int(Tiles ^ unsafe_elem(Base + 2)) << 16) \/
+            (uint8.to_int(Tiles ^ unsafe_elem(Base + 3)) << 24),
+        own(G, P, I, D0, D1, P0, P1, N0, N1, L0, L1, A0, A1, C0, C1, G0, G1,
+            H0, H1, F0, F1, R0, R1, T0, T1),
+        S1 = S0 ^ unsafe_elem(J) := int32.cast_from_int(I)
+    ),
+    copy_whole(G, K, Slots, Tiles, !Cells).
+
+    % The K moved tiles' cells into their places in the pool, across the
+    % teams; a tile that the pool had no room for is left out.
+:- pred copy_whole(geometry::in, int::in, array(int32)::array_ui,
+    array(uint8)::in, array(uint8)::array_di, array(uint8)::array_uo) is det.
+copy_whole(G, K, Slots, Tiles, !Cells) :-
+    Bytes = 4 + G ^ tile * G ^ tile,
+    %$omp distribute
+    ( for(J, 0, K - 1) do
+        I = int32.to_int(Slots ^ unsafe_elem(J)),
+        ( if I \= 0 then
+            copy_cells(G, I, Tiles, J * Bytes + 4, !Cells)
+        else
+            true
+        )
+    ).
+
+:- pred copy_cells(geometry::in, int::in, array(uint8)::in, int::in,
+    array(uint8)::array_di, array(uint8)::array_uo) is det.
+copy_cells(G, I, Tiles, Base, !Cells) :-
+    T = G ^ tile,
+    Log = G ^ log,
+    %$omp parallel do
+    ( for(K, 0, T * T - 1) do
+        !Cells ^ unsafe_elem((I << (2 * Log)) + K) :=
+            Tiles ^ unsafe_elem(Base + K)
+    ).
+
+    % The tile at position P made the place's own, I: started if the place
+    % has none there, its ghost if it has one, which leaves the ghosts, or
+    % as it is if it is already its own; with no live cells counted, as the
+    % next step counts them. I = 0, the dead tile, if the pool has no room.
+:- pred own(geometry::in, int::in, int::out,
+    array(int32)::array_di, array(int32)::array_uo,
+    array(int32)::array_di, array(int32)::array_uo,
+    array(int32)::array_di, array(int32)::array_uo,
+    array(int32)::array_di, array(int32)::array_uo,
+    array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
+    array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
+    array(int32)::array_di, array(int32)::array_uo, int::in, int::out,
+    int::in, int::out) is det.
+own(G, P, I, !Dir, !Pos, !Nb, !Live, !Actives, !NActive, !Ghosts, !NGhost,
+        !Free, !NFree, !Trouble) :-
+    Found = int32.to_int(!.Dir ^ unsafe_elem(P)),
+    ( if Found = 0 then
+        start(G, P, I, !Dir, !Pos, !Nb, !Actives, !NActive, !Free, !NFree,
+            !Trouble),
+        !Live ^ unsafe_elem(I) := 0i32
+    else
+        I = Found,
+        J = index_of(!.Ghosts, !.NGhost, I, 0),
+        ( if J >= 0 then
+            !:NGhost = !.NGhost - 1,
+            !Ghosts ^ unsafe_elem(J) := !.Ghosts ^ unsafe_elem(!.NGhost),
+            !Actives ^ unsafe_elem(!.NActive) := int32.cast_from_int(I),
+            !:NActive = !.NActive + 1,
+            !Live ^ unsafe_elem(I) := 0i32
+        else
+            true
+        )
+    ).
+
+    % The index of I among the first N of List from J on, or -1.
+:- func index_of(array(int32), int, int, int) = int.
+:- mode index_of(array_ui, in, in, in) = out is det.
+index_of(List, N, I, J) =
+    ( if J >= N then
+        -1
+    else if int32.to_int(List ^ unsafe_elem(J)) = I then
+        J
+    else
+        index_of(List, N, I, J + 1)
     ).
 
     % The directory's changes after step S: the owners in the place's copy
@@ -719,17 +1105,18 @@ apply_map(G, W, S, Changes, !Cells, !Dir, !Owner, !Pos, !Nb, !Live,
     ( for(K, 0, NChanges - 1), fromto(!.Dir, D0, D1, !:Dir),
         fromto(!.Pos, P0, P1, !:Pos), fromto(!.Nb, N0, N1, !:Nb),
         fromto(!.Live, L0, L1, !:Live), fromto(!.Actives, A0, A1, !:Actives),
-        fromto(!.NActive, C0, C1, !:NActive), fromto(!.Free, F0, F1, !:Free),
+        fromto(!.NActive, C0, C1, !:NActive),
+        fromto(!.Ghosts, G0, G1, !:Ghosts),
+        fromto(!.NGhost, H0, H1, !:NGhost), fromto(!.Free, F0, F1, !:Free),
         fromto(!.NFree, R0, R1, !:NFree),
         fromto(!.Trouble, T0, T1, !:Trouble) do
         C = int32.to_int(Changes ^ unsafe_elem(K)),
         ( if C /\ 0xff = Mine then
-            start(G, C >> 8, I, D0, D1, P0, P1, N0, N1, A0, A1, C0, C1, F0,
-                F1, R0, R1, T0, T1),
-            L1 = L0 ^ unsafe_elem(I) := 0i32
+            own(G, C >> 8, _, D0, D1, P0, P1, N0, N1, L0, L1, A0, A1, C0, C1,
+                G0, G1, H0, H1, F0, F1, R0, R1, T0, T1)
         else
-            D1 = D0, P1 = P0, N1 = N0, L1 = L0, A1 = A0, C1 = C0, F1 = F0,
-            R1 = R0, T1 = T0
+            D1 = D0, P1 = P0, N1 = N0, L1 = L0, A1 = A0, C1 = C0, G1 = G0,
+            H1 = H0, F1 = F0, R1 = R0, T1 = T0
         )
     ),
     ( if S < 0 then
@@ -1332,8 +1719,8 @@ tile_checksum(G, I, P, Cells, Sum) :-
     % The time of each step but the first, as min, max and average, as the
     % directory sees it, from one map to the next; and the active tiles.
 :- pred results(int::in, array(float)::in, int::in, int::in, int::in,
-    int::in, io::di, io::uo) is det.
-results(Steps, Times, Population, Checksum, Peak, Final, !IO) :-
+    int::in, int::in, io::di, io::uo) is det.
+results(Steps, Times, Population, Checksum, Peak, Final, Moved, !IO) :-
     ( for(S, 1, Steps - 1),
         fromto(Times ^ elem(1), Min0, Min1, Min),
         fromto(Times ^ elem(1), Max0, Max1, Max),
@@ -1342,20 +1729,21 @@ results(Steps, Times, Population, Checksum, Peak, Final, !IO) :-
         Max1 = float.max(Max0, Times ^ elem(S)),
         Sum1 = Sum0 + Times ^ elem(S)
     ),
-    write_results(Population, Checksum, Peak, Final, Min, Max,
+    write_results(Population, Checksum, Peak, Final, Moved, Min, Max,
         Sum / float(Steps - 1), !IO).
 
-:- pred write_results(int::in, int::in, int::in, int::in, float::in,
-    float::in, float::in, io::di, io::uo) is det.
+:- pred write_results(int::in, int::in, int::in, int::in, int::in,
+    float::in, float::in, float::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
-    write_results(Population::in, Checksum::in, Peak::in, Final::in, Min::in,
-        Max::in, Average::in, _IO0::di, _IO::uo),
+    write_results(Population::in, Checksum::in, Peak::in, Final::in,
+        Moved::in, Min::in, Max::in, Average::in, _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure],
 "
     printf(\"Population: %ld\\n\", (long) Population);
     printf(\"Checksum: %ld\\n\", (long) Checksum);
     printf(\"Active tiles: %ld at most, %ld at the end\\n\", (long) Peak,
         (long) Final);
+    printf(\"Tiles moved: %ld\\n\", (long) Moved);
     printf(\"%-12s%-12s%-12s\\n\", \"Min (sec)\", \"Max\", \"Average\");
     printf(\"%-12.6f%-12.6f%-12.6f\\n\", Min, Max, Average);
 ").

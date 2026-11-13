@@ -176,15 +176,20 @@ document, Measurements, Dense stencils).
 `life-places.m` runs the sparse world of `life-sparse.m` on several places
 of one GPU, each a GPU process with a share of the GPU's teams, with a
 directory on the host (`docs/INPROGRESS.md`, step 5 of the demo).
-`LIFE_PLACES` (2, at most 32) is the number of places; the other settings
-are `life-sparse.m`'s, `LIFE_CAPACITY` for each place's pool. Its
+`LIFE_PLACES` (2, at most 32) is the number of places, and `LIFE_MOVES`
+(4) the most tiles the directory moves a step, 0 for fixed owners; the
+other settings are `life-sparse.m`'s, `LIFE_CAPACITY` for each place's pool. Its
 population, checksum and active tiles are `life-sparse.m`'s for the same
 world, for any number of places.
 
 - **The directory** is the program's main. It holds the world map, which
   place owns each tile position, and alone changes it. The soup's tiles go
   round the places by rows. A new tile goes to the place whose tile asked
-  for it, the first by place number if several did. Tiles do not move yet.
+  for it, the first by place number if several did. After each step but
+  the last, while a place has more than its share of the world's tiles and
+  another fewer, it moves a tile of the one to the other, the first by
+  position next to the other's tiles, so that each place's tiles stay
+  together and its halos small, or else its first.
 - **A place** keeps `life-sparse.m`'s pool and neighbour links, with its
   own tiles, which it steps, and ghosts: copies of the tiles that other
   places own next to its own, which it never steps. A cell at a tile's
@@ -193,23 +198,29 @@ world, for any number of places.
 - **A step:** each place steps its own tiles and sends the directory a
   summary of them, each tile's position, whether it is dead, and its live
   edges. The directory decides every tile's fate from all the summaries and
-  sends every place the changes to the map. Each place applies them and
-  sends each neighbouring place a halo, the border cells of its tiles next
-  to that place's, each after its position. The places copy the halos into
-  their ghosts, starting a ghost where they have none.
+  sends every place the changes to the map. Each place applies them: it
+  sends the tiles it moves to their new places, whole, and makes those
+  moved to it its own, from its ghosts of them if it has them. Once its
+  moved tiles have come, it sends each neighbouring place a halo, the
+  border cells of its tiles next to that place's, each after its position.
+  The places copy the halos into their ghosts, starting a ghost where they
+  have none.
 - **Before the first step,** the directory sends each place every place's
   mailbox, which it keeps in an array, and waits until each is ready.
 
 The directory decides, rather than each place, as a tile ends only if no
 neighbour's live edge faces it, and a neighbour's edges are known to its
-owner alone until its halo comes. Halos carry their tiles' positions, as a
-place may get a neighbour's halo before the directory's map.
+owner alone until its halo comes. Halos and moved tiles carry their tiles'
+positions, as a place may get them before the directory's map. A place's
+halos wait for the tiles moved to it, which they read. No tile moves after
+the last step, as the outcome reads the live cells that a step counts.
 
-It prints `life-sparse.m`'s output. The first argument `host` spawns the
-places at the host. On the GPU, the places' calls take 1824 bytes of stack
-a lane, more than a GPU process's 1536, so they need
-`MERK_GPU_PROCESS_STACK_BYTES=2048`, and 2560 without `-fopenmp`, until
-their frames shrink.
+It prints how many tiles moved, after `life-sparse.m`'s output.
+
+The first argument `host` spawns the places at the host. On the GPU, the
+places' calls take over 2048 bytes of stack a lane, more than a GPU
+process's 1536, so they need `MERK_GPU_PROCESS_STACK_BYTES=2304`, and 2560
+without `-fopenmp`, until their frames shrink.
 
 ## Tests
 

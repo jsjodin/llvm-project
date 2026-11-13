@@ -1,7 +1,8 @@
 Game of Life on sparse tiles run by several places with a directory
 (benchmarks/life/life-places.m), its places spawned at the host: each
 place steps its own tiles and reads its neighbours' borders from halos, and
-the directory decides every tile's fate. The population, checksum and
+the directory decides every tile's fate and moves tiles from a place with
+more than its share to one with fewer. The population, checksum and
 active tiles are life-sparse.m's for the same world, for any number of
 places (life-sparse.test), as Life is exact: the worlds cover tiles of 4 to
 64 cells, soups from none to the whole world, a side that is not a power of
@@ -14,10 +15,10 @@ RUN: merkc -O0 -fdo-loops -fprocess-declarations %libomp-flags %S/../../benchmar
 RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/life/life-places.m -o %t2
 RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/life/life-places.m -o %t.omp
 
-RUN: %libomp-env LIFE_PLACES=2 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t0 host | FileCheck %s --check-prefix=A
+RUN: %libomp-env LIFE_PLACES=2 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t0 host | FileCheck %s --check-prefixes=A,A2
 RUN: %libomp-env LIFE_PLACES=1 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t2 host | FileCheck %s --check-prefix=A1
-RUN: %libomp-env LIFE_PLACES=2 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t2 host | FileCheck %s --check-prefix=A
-RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_PLACES=3 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t.omp host | FileCheck %s --check-prefix=A
+RUN: %libomp-env LIFE_PLACES=2 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t2 host | FileCheck %s --check-prefixes=A,A2
+RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_PLACES=3 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t.omp host | FileCheck %s --check-prefixes=A,A3
 A1: Game of Life, Mercury, GPU processes, sparse tiles, 1 places
 A: Game of Life, Mercury, GPU processes, sparse tiles, {{[23]}} places
 A-NEXT: World: 256 x 256 cells, tiles of 16 x 16, 256 in each place's pool
@@ -26,21 +27,35 @@ A-NEXT: Steps: 50
 A-NEXT: Population: 562
 A-NEXT: Checksum: 17668223
 A-NEXT: Active tiles: 36 at most, 32 at the end
+A2-NEXT: Tiles moved: 3
+A3-NEXT: Tiles moved: 13
 A1: Population: 562
 A1-NEXT: Checksum: 17668223
 A1-NEXT: Active tiles: 36 at most, 32 at the end
+A1-NEXT: Tiles moved: 0
 
 Every allocation collects, at -O2, where LLVM keeps pointers into arrays
 across a collection (design document, "Roots that only the optimizer
 makes").
 RUN: %libomp-env MERK_GC_EVERY_ALLOC=1 LIFE_PLACES=2 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t2 host | FileCheck %s --check-prefix=A
 
-RUN: %libomp-env LIFE_PLACES=2 LIFE_WORLD=128 LIFE_TILE=8 LIFE_SOUP=64 LIFE_STEPS=2000 %t0 host | FileCheck %s --check-prefix=EDGE
-RUN: %libomp-env LIFE_PLACES=4 LIFE_WORLD=128 LIFE_TILE=8 LIFE_SOUP=64 LIFE_STEPS=2000 %t2 host | FileCheck %s --check-prefix=EDGE
-RUN: %libomp-env LIFE_PLACES=7 LIFE_WORLD=128 LIFE_TILE=8 LIFE_SOUP=64 LIFE_STEPS=2000 %t2 host | FileCheck %s --check-prefix=EDGE
+Gliders that reach the edge make tiles start and end throughout, so tiles
+move all the time; the moves are the same in every run, as the directory
+chooses them by position. LIFE_MOVES=0 keeps the owners fixed.
+RUN: %libomp-env LIFE_PLACES=2 LIFE_WORLD=128 LIFE_TILE=8 LIFE_SOUP=64 LIFE_STEPS=2000 %t0 host | FileCheck %s --check-prefixes=EDGE,EDGE2
+RUN: %libomp-env LIFE_PLACES=4 LIFE_WORLD=128 LIFE_TILE=8 LIFE_SOUP=64 LIFE_STEPS=2000 %t2 host | FileCheck %s --check-prefixes=EDGE,EDGE4
+RUN: %libomp-env LIFE_PLACES=7 LIFE_WORLD=128 LIFE_TILE=8 LIFE_SOUP=64 LIFE_STEPS=2000 %t2 host | FileCheck %s --check-prefixes=EDGE,EDGE7
+RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_PLACES=4 LIFE_WORLD=128 LIFE_TILE=8 LIFE_SOUP=64 LIFE_STEPS=2000 %t.omp host | FileCheck %s --check-prefixes=EDGE,EDGE4
+RUN: %libomp-env LIFE_PLACES=4 LIFE_MOVES=0 LIFE_WORLD=128 LIFE_TILE=8 LIFE_SOUP=64 LIFE_STEPS=2000 %t2 host | FileCheck %s --check-prefixes=EDGE,FIXED
+RUN: %libomp-env LIFE_PLACES=4 LIFE_MOVES=1 LIFE_WORLD=128 LIFE_TILE=8 LIFE_SOUP=64 LIFE_STEPS=2000 %t2 host | FileCheck %s --check-prefixes=EDGE,ONE
 EDGE: Population: 747
 EDGE-NEXT: Checksum: 7031763
 EDGE-NEXT: Active tiles: 182 at most, 165 at the end
+EDGE2-NEXT: Tiles moved: 509
+EDGE4-NEXT: Tiles moved: 710
+EDGE7-NEXT: Tiles moved: 734
+FIXED-NEXT: Tiles moved: 0
+ONE-NEXT: Tiles moved: 609
 
 RUN: %libomp-env LIFE_PLACES=3 LIFE_WORLD=200 LIFE_TILE=8 LIFE_SOUP=37 LIFE_STEPS=120 %t0 host | FileCheck %s --check-prefix=ODD
 RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_PLACES=2 LIFE_WORLD=200 LIFE_TILE=8 LIFE_SOUP=37 LIFE_STEPS=120 %t.omp host | FileCheck %s --check-prefix=ODD
@@ -51,6 +66,7 @@ RUN: %libomp-env LIFE_PLACES=3 LIFE_WORLD=256 LIFE_TILE=8 LIFE_SOUP=256 LIFE_STE
 WHOLE: Population: 4947
 WHOLE-NEXT: Checksum: 158368224
 WHOLE-NEXT: Active tiles: 1024 at most, 856 at the end
+WHOLE-NEXT: Tiles moved: 143
 
 RUN: %libomp-env LIFE_PLACES=4 LIFE_WORLD=64 LIFE_TILE=4 LIFE_SOUP=30 LIFE_STEPS=1000 %t2 host | FileCheck %s --check-prefix=SMALL
 SMALL: Population: 34
@@ -71,4 +87,5 @@ RUN: %libomp-env LIFE_PLACES=2 LIFE_WORLD=256 LIFE_TILE=8 LIFE_SOUP=256 LIFE_STE
 FULL: A place's pool ran out of tiles: raise LIFE_CAPACITY.
 
 RUN: %libomp-env LIFE_PLACES=33 not %t2 host | FileCheck %s --check-prefix=USAGE
-USAGE: LIFE_TILE must be a power of two of at least 4 that divides LIFE_WORLD, with fewer than 2^21 tiles, LIFE_SOUP from 0 to LIFE_WORLD, LIFE_STEPS at least 2, LIFE_CAPACITY at least 2, and LIFE_PLACES from 1 to 32.
+RUN: %libomp-env LIFE_MOVES=-1 not %t2 host | FileCheck %s --check-prefix=USAGE
+USAGE: LIFE_TILE must be a power of two of at least 4 that divides LIFE_WORLD, with fewer than 2^21 tiles, LIFE_SOUP from 0 to LIFE_WORLD, LIFE_STEPS at least 2, LIFE_CAPACITY at least 2, LIFE_PLACES from 1 to 32, and LIFE_MOVES at least 0.
