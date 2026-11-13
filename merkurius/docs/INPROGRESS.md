@@ -4974,9 +4974,12 @@ process's lane:
     world (45 tiles at most), median of 3 runs of the average step:
     `life-sparse.m` 38 µs, `life-sparse.c` 60 µs, `life-places.m` 236 µs
     with 1 place, 1157 µs with 2 and 1423 µs with 4. One place's cost is
-    the directory's round trip. Two places' 900 µs more is far more than a
-    halo's 26-40 µs, and 4 places barely add to it, which points to a
-    fixed wait each step: to find before p3.
+    the directory's round trip. Two places' 900 µs more was not a wait but
+    the places' one lane: `array.init` of a byte array read the array's
+    header for each byte, and the messages' copies to and from host memory
+    waited for each word's load. With both fixed, 448 µs with 2 places and
+    680 µs with 4 (design document, Measurements, "Life on several
+    places", which has what is left).
 - (p3) Moving tiles: the directory moves tiles from a place with more than
   its share to one with fewer, between steps, the tile's cells as a
   message. Checked as p2.
