@@ -153,6 +153,10 @@ void Block(std::int64_t deadline);
 bool ProgramEnding();
 // offload.cpp: whether a target region is running.
 bool RegionsRunning();
+// offload.cpp: makes a program that ends by C's exit, while a region or a
+// GPU process runs, end as ExitProgram ends it. Called after each offload
+// library has started, as each registers its teardown then.
+void EndExitWhileRegionsRun();
 // With MERK_CHECK_PINNED, MERK_CHECK_MESSAGES or MERK_CHECK_DEVICE_MEMORY,
 // reports at the program's normal end what of the messages and the devices'
 // memory is still allocated, and with MERK_CHECK_PROCESS_MEMORY the most

@@ -1,0 +1,10 @@
+process-exit-running.m on the machine's GPU: the program ends by C's exit
+while a GPU process, or a target region, still waits on the GPU, and ends
+with its status and its output, with no fault from the kernel.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-exit-running.m -o %t2
+RUN: %gpu-env sh -c 'timeout -k 1 60 %t2 gpu 2>&1; echo "exit status $?"' | FileCheck %s --match-full-lines --strict-whitespace
+RUN: %gpu-env sh -c 'timeout -k 1 60 %t2 region 2>&1; echo "exit status $?"' | FileCheck %s --match-full-lines --strict-whitespace
+CHECK:the waiter started: 1
+CHECK-NEXT:exit status 3
