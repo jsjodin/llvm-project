@@ -5010,12 +5010,25 @@ bitcode before the link. Scratch accesses are those of the whole image.
 
 In `life-places.m`'s directory agreement, `agree`, its own frame went from
 752 to 448 bytes and the place's, `merk_process_place`, from 560 to 320. What
-is left of `agree`'s frame is mostly the 78 callee-saved vector registers
-it saves (it uses 220), many holding constants made once at the entry and
+was left of `agree`'s frame was mostly the 78 callee-saved vector registers
+it saved (it used 220), many holding constants made once at the entry and
 kept across its 51 calls rather than made again where used, and its
 arguments past those that registers carry. The work-stealing example's
 scratch accesses did not fall: its frames shrank, but it saves more
 registers. The step times are still to be taken.
+
+The constants were MachineLICM's: it hoisted each `v_mov_b32` of a constant
+out of the loops of `agree`, which make calls, so the constant lived across
+them in a callee-saved vector register. AMDGPU's `SIInstrInfo::shouldHoist`
+now leaves a vector register's value that is as cheap as a move, and
+rematerializable, in a loop that makes calls, where it costs an instruction
+an iteration (`test/CodeGen/AMDGPU/machine-licm-vgpr-call-loop.ll`); a loop
+without calls still has it hoisted. With it, `merk_place` went from 1376 to
+1056 bytes a lane in `life-places.m` with the loops in the image, and
+`agree`'s frame from 448 to 240, its vector registers from 220 to 118: the
+same as turning MachineLICM off altogether. Of AMDGPU's lit tests, three
+changed, each to the constant made in the loop and fewer saved registers.
+A change to send upstream.
 
 ### Heap pointers in an address space of their own
 

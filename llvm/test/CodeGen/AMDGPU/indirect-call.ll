@@ -327,7 +327,6 @@ define void @test_indirect_call_vgpr_ptr_arg(ptr %fptr) #0 {
 ; GCN-NEXT:    s_mov_b64 s[38:39], s[6:7]
 ; GCN-NEXT:    s_mov_b64 s[48:49], s[4:5]
 ; GCN-NEXT:    s_mov_b64 s[54:55], exec
-; GCN-NEXT:    v_mov_b32_e32 v2, 0x7b
 ; GCN-NEXT:  .LBB3_1: ; =>This Inner Loop Header: Depth=1
 ; GCN-NEXT:    v_readfirstlane_b32 s16, v0
 ; GCN-NEXT:    v_readfirstlane_b32 s17, v1
@@ -341,11 +340,10 @@ define void @test_indirect_call_vgpr_ptr_arg(ptr %fptr) #0 {
 ; GCN-NEXT:    s_mov_b32 s13, s52
 ; GCN-NEXT:    s_mov_b32 s14, s51
 ; GCN-NEXT:    s_mov_b32 s15, s50
-; GCN-NEXT:    v_mov_b32_e32 v0, v2
+; GCN-NEXT:    v_mov_b32_e32 v0, 0x7b
 ; GCN-NEXT:    s_swappc_b64 s[30:31], s[16:17]
 ; GCN-NEXT:    ; implicit-def: $vgpr0_vgpr1
 ; GCN-NEXT:    ; implicit-def: $vgpr31
-; GCN-NEXT:    ; implicit-def: $vgpr2
 ; GCN-NEXT:    s_xor_b64 exec, exec, s[64:65]
 ; GCN-NEXT:    s_cbranch_execnz .LBB3_1
 ; GCN-NEXT:  ; %bb.2:
