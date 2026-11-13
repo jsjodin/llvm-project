@@ -44,7 +44,11 @@ constexpr uint64_t kChunkBytes{uint64_t{1} << 20};
 // that the host clears when no region is running.
 constexpr uint64_t kBumpWords{2};
 constexpr uint64_t kRingCacheSlots{64};
-constexpr uint64_t kArenaClearWords{kBumpWords + kRingCacheSlots};
+// After them, a GPU process's lists of the blocks it holds, and the bytes it
+// holds and the most it has held (device/device.cpp, Block).
+constexpr uint64_t kBlockListWords{4};
+constexpr uint64_t kArenaClearWords{
+    kBumpWords + kRingCacheSlots + kBlockListWords};
 
 // How many regions may run at once, all told. Each running region has a
 // slot, which the host gives it as it starts and takes back as it ends. A

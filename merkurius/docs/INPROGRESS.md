@@ -4722,6 +4722,168 @@ small sizes, and every program must give the same totals, exactly.
   place's teams taking the next tile while the last one ends, or larger
   tiles split for a thief, before stealing across GPUs (step 6).
 
+**Step 5, several places with a directory: design.** Proposed 2026-11-13.
+The user, 2026-11-13: the directory is a host process, and the places and
+the directory agree on the tiles after every step, which can be made less
+frequent later; a GPU process's memory is given back by freeing values at
+their last use, (a) below.
+
+Step 3's world, run by several places on one GPU, each a GPU process with
+a share of the GPU's teams (`set_worker_teams`, step 4), each owning some
+of the tiles. The program is `benchmarks/life/life-places.m`; its
+population and checksum after each run must equal `life-sparse.m`'s for
+the same world and steps, for any number of places.
+
+*The directory,* a host process, holds the world map: for each tile
+position, the place that owns it, or none. It alone changes the map. It
+gives a new tile to the place that asked for it if that place has room,
+else to the place with the most room; the soup's tiles go round the places
+in rows at the start.
+
+*A place* keeps step 3's pool, directory and neighbour links, with two
+kinds of pool tile:
+- *its own,* which it steps, as `life-sparse.m` does;
+- *ghosts:* a copy of each neighbouring tile that another place owns,
+  never stepped, whose edge cells arrive each step. A cell at a tile's edge
+  reads a ghost through the neighbour links as it reads its own tiles, so
+  the step does not change.
+It also keeps a copy of the world map, which the directory's answers keep
+up to date, so that it knows which place owns each neighbour.
+
+*A step, s to s + 1, for each place:*
+1. Step its own tiles, with the ghosts holding step s's edges.
+2. Decide each tile's fate, as `decide` does: tiles to end, and missing
+   tiles that life reaches.
+3. Send the directory `changes(s, Ended, Wanted)`, the positions of its
+   tiles that end and of the missing ones it wants, as one block.
+4. Send each neighbouring place `halo(s + 1, Cells)`: the border cells, 4T
+   of them, of each of its tiles next to that place's tiles. They are in
+   the order of the tiles' positions, which both places know from their
+   copies of the map, so the message holds cells alone.
+5. Wait for the directory's `map(s + 1, Changes)`, the changes to the map
+   from every place's step, and apply them: start the new tiles given to
+   it, end its ended tiles, add and drop ghosts.
+6. Wait for a `halo(s + 1, ...)` from each neighbouring place and copy its
+   cells into the ghosts.
+
+Messages are of a fixed part and one block (done 2026-11-13, 078c2cbf13ef:
+the user chose it over arrays of flat records, flat records' step 2b). A halo goes
+from a GPU process to another through the host's memory today, about 40 µs;
+the directory's round trip costs about as much. Both are the price of the
+every-step agreement that the user chose to start with.
+
+*Features to build first:*
+- *Memory that a GPU process gives back* (below), which the user chose
+  2026-11-13 over (b), a receive into an array the process gives: (a) is
+  general, where (b) would serve only programs written around buffers.
+- *Copies of a ghost's cells into the pool* from a received array: a loop
+  across the place's teams, as `zero` is.
+
+**Memory that a GPU process gives back: design.** Agreed in outline
+2026-11-13. A GPU process's arena only grows: the host gives it chunks,
+and they go when the process ends (`runtime/device/device.cpp`,
+`merk_device_alloc`). Every array it makes, every cell, as a message it
+builds, and every message it receives stays, even the `message(...)` cell
+of each receive. A place that lives for thousands of steps would grow
+without bound. GPU processes make only flat values (design document,
+Messages and memory on the device), which share nothing but the arrays in
+a block message's last field, so the compiler can find where each value
+dies, without the general analysis of Mazur's thesis.
+
+*The allocator.*
+- *Small blocks,* under 1 MiB, from LLVM libc's allocator on the GPU
+  (`libc/src/__support/GPU/allocator.cpp`): slabs of 2 MiB, a block found
+  by a random walk over a slab's bitfield with atomics alone, and `free`
+  finds the slab by rounding the pointer down to 2 MiB. Following the
+  user's preference for libc on the GPU.
+- *Large blocks,* of half a slab or more, libc asks the host for over RPC,
+  rounded up to 2 MiB, and gives back the same way: two round trips to the
+  host a block. So the runtime keeps freed large blocks itself, by size, on
+  a list for each GPU, and reuses one before it asks libc, up to a cap on
+  the bytes it keeps (the user, 2026-11-13: "makes sense if we keep track
+  of the big ones ourselves"). A place that receives a halo of the same
+  size every step then allocates it once.
+- *Each process's blocks* are on a list of its own, through a header
+  before each block, and the list's blocks go when the process ends, as
+  its arena does now: what the compiler does not free, such as a pool that
+  lives as long as the process, is not lost.
+- *A received message is one block,* copied by its type_info into a block
+  of the message's whole size, so that freeing it frees its arrays too.
+- *Static cells* of ground terms, which lowering makes, and string
+  literals, go into a section of their own on the device, which `free`
+  recognizes by its `__start_` and `__stop_` symbols and leaves alone, as
+  it does a constant's tagged word.
+- The runtime's own structures, mailbox handles, rings and team tables,
+  stay in the arena.
+
+*The compiler: values freed at their last use,* a pass on the merk
+dialect, after MLIRGen, on the procedures of GPU kinds that run on their
+process's lane:
+- *Owned values:* what the procedure allocates (`merk.construct` of a
+  cell that is not static, `merk.array_new`, an array's copy), what it
+  receives, its `di` arguments, and a call's result that the callee's
+  summary says is fresh. An `ite`'s or a `switch`'s result is owned when
+  each branch gives an owned value or a constant.
+- *Classes of values that live and die together,* by union-find: a field
+  taken from a cell joins the cell's class, as does an array stored into
+  a cell, `merk.array_set`'s result its array's, and a call's result the
+  arguments that the callee's summary says it may return.
+- *A class escapes* if one of its values is returned, passed in a tail
+  call, as a place's pool is to its next state, or passed to a callee
+  whose summary says it keeps or returns that argument, or to a foreign
+  call other than a send, which copies. A class that escapes is not
+  freed: the process's end frees it.
+- *Summaries,* for each procedure of the module, by a fixpoint: which
+  arguments its results may be, and whether its results are fresh.
+  Library procedures that GPU code calls are foreign or lowered in place,
+  with known summaries.
+- *Where:* in each region, after the last op that uses a value of the
+  class, nested regions counting as uses; where the last use is a branch,
+  in each branch after its own last use, or at its start. The owned values
+  of the class that are visible there are freed, each once on each path.
+- Loops across a process's teams are left out at first: what their bodies
+  make is a team's, and freed when the process ends (to do after f3).
+
+*Steps of (a),* each a commit:
+- (f1) The runtime: GPU processes' blocks from libc's allocator and the
+  cache of large ones, each process's list, received messages as one
+  block, `merk_device_free`. `MERK_CHECK_DEVICE_MEMORY` reports the bytes
+  a program's processes left and the most they held at once. Nothing is
+  freed before a process ends yet, so every test stays as it is. Done
+  2026-11-13: `runtime/device/device.cpp`, `Block`, `NewBlock`,
+  `merk_device_free`; the report is `MERK_CHECK_PROCESS_MEMORY`'s, since
+  a process's blocks all go as it ends; test `process-blocks.m`. Two tests
+  of target regions beside a GPU process changed: the process no longer
+  takes a chunk of the arenas.
+- (f2) `merk.free` and its lowering on the device: the cell's pointer
+  from its tagged word, a constant's word left alone; static cells and
+  string literals in their section.
+- (f3) The pass, with merk-level tests of where it frees, and a runtime
+  test: a GPU process that receives a million messages, each with an
+  array, and makes an array for each answer, in bounded memory, at the
+  host and on the GPU.
+- (f4) Measurements, in the design document: a `malloc` and `free` of 4 KiB
+  and of 4 MiB on the device, beside a message's time.
+
+*Steps,* each a commit:
+- (p1) Memory that a GPU process gives back, f1 to f4 above.
+- (p2) `life-places.m` with fixed owners: the directory places new tiles but
+  never moves them. Checked against `life-sparse.m` at 1, 2 and 4 places,
+  at the host and on the GPU.
+- (p3) Moving tiles: the directory moves tiles from a place with more than
+  its share to one with fewer, between steps, the tile's cells as a
+  message. Checked as p2.
+- (p4) Measurements against `life-sparse.m` on one place: what the
+  agreement and the halos cost each step, and the active tiles of each
+  place over time.
+
+*Open.*
+- Every-step agreement costs a round trip to the host each step. Life moves
+  at most one cell a step, so a tile asked for k steps ahead lets places
+  agree every k steps (the user's second option, 2026-11-13); later.
+- Moving tiles to balance, and stealing (step 4), are the same move; which
+  one asks for it, the directory or an idle place, is open until p3.
+
 **What it needs.** It uses GPU processes, `spawn_<kind>_at`, flat messages and
 arrays, which exist. It also needs the place table and routing by place (GPU
 processes without `omp target`, steps 5b to 5d), flat records and packed
@@ -4782,7 +4944,13 @@ eight GPUs that others use too, of which 3 or 4 are ours (the user,
   104 CUs × 32 slots × 64 lanes there, about 690 bytes a lane, against 1792
   on the gfx1030, so today's 992 would hold teams back. Raising the limit
   from the runtime before ROCr starts, 1 KiB a lane being 208 MiB of a
-  die's 64 GB, is the other half; both to measure there.
+  die's 64 GB, is the other half; both to measure there. But tried
+  2026-11-13 on the gfx1030: the work-stealing example, 992 bytes fixed
+  and a dynamic stack over the whole GPU, ran with the limit at 1 MB, so
+  the variable does not decide whether teams start, and the reading above
+  is unconfirmed. On the gfx90a, first look for held-back teams
+  (`process-teams-gpu.test`, the example); the change to the runtime was
+  reverted.
 - *The size of a tile:* large enough that a step's kernel and messages are worth
   their cost, and small enough to follow the front closely. To measure.
 - *The chemistry:* a real mechanism, such as hydrogen and air's, or a synthetic

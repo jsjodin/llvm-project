@@ -15,11 +15,13 @@ CHECK-NEXT:Mercury runtime: 0 messages are neither read nor freed
 CHECK-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
 
 When main ends while the GPU process still waits, the end's check waits ten
-seconds for it, and then only the process's own ring and the chunk of its
-table of rings are left: the regions' rings went as each region ended.
+seconds for it, and then only the process's own ring is left: the regions'
+rings went as each region ended, and the process's table of rings is in
+blocks of its own (runtime/device/device.cpp, Block), not in the arena's
+chunks.
 RUN: %gpu-env MERK_GPU_PROCESS_UNITS=50 OMP_TARGET_OFFLOAD=MANDATORY MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 120 %t.O2 leave 2>&1 | FileCheck %s --check-prefix=LEAVE --match-full-lines --strict-whitespace
 LEAVE:820
-LEAVE-NEXT:Mercury runtime: 1 chunks of the devices' arenas and 1 rings are allocated
+LEAVE-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 1 rings are allocated
 
 With every unit for the process's kernel, the default, the first region
 could never start, as the kernel holds every team slot of its units, so it

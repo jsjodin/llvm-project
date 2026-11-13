@@ -28,6 +28,7 @@
 #include "../place.h"
 #include "../rpc-opcodes.h"
 #include <gpuintrin.h>
+#include <stdlib.h>
 #include <time.h>
 
 // The OpenMP device runtime's client, which the plugin points at the host's
@@ -169,12 +170,22 @@ struct RingEntry {
 
 struct TeamTable;
 
+struct Block;
+
+// A GPU process's arena also has the blocks that it holds (Block): those
+// its own wave made, which it may free, and those its worker teams made in
+// its loops, freed when it ends; and the bytes they take, and the most they
+// took at once, which the host reports (MERK_CHECK_PROCESS_MEMORY).
 struct Arena {
   Bump bump;
   RingEntry *rings[kRingCacheSlots];
+  Block *blocks;
+  Block *teamBlocks;
+  uint64_t held;
+  uint64_t peak;
 };
 static_assert(sizeof(Arena) == kArenaClearWords * sizeof(uint64_t));
-Arena arena{{nullptr, 0, 0}, {}};
+Arena arena{{nullptr, 0, 0}, {}, nullptr, nullptr, 0, 0};
 
 // In a region's image, by the slot of each region that runs (device-ring.h):
 // where its cells are bumped from, its teams' table if it is a target teams
@@ -276,6 +287,10 @@ struct TeamLoop {
 // works for one.
 [[clang::loader_uninitialized]] Local<uint32_t> teamMains[kMostPlaceWaves];
 
+// By the wave's place in the team, whether it runs a process, whose blocks
+// it may free (Block), rather than working for one.
+[[clang::loader_uninitialized]] Local<uint32_t> processWaves[kMostPlaceWaves];
+
 } // namespace
 
 // Whether this is a GPU process's image, whose start object defines it as
@@ -298,13 +313,15 @@ Arena *CurrentArena() {
   return placeArenas[__gpu_thread_id_x() / __gpu_num_lanes()];
 }
 
-// Tells the host that the process of the slot has ended (rpcProcessEnded).
-void ProcessEnded(PlaceTable *table, uint64_t slot) {
+// Tells the host that the process of the slot has ended, and the most
+// bytes of blocks it held at once (rpcProcessEnded).
+void ProcessEnded(PlaceTable *table, uint64_t slot, uint64_t peak) {
   rpc::Client::Port port{__llvm_rpc_client.open<rpcProcessEnded>()};
   port.send([&](rpc::Buffer *buffer, uint32_t) {
     buffer->data[0] = static_cast<uint64_t>(DeviceNumber());
     buffer->data[1] = reinterpret_cast<uint64_t>(table);
     buffer->data[2] = slot;
+    buffer->data[3] = peak;
   });
   port.recv([](rpc::Buffer *, uint32_t) {});
 }
@@ -432,22 +449,230 @@ extern "C" void merk_device_shared_free(void *pointer, uint64_t bytes) {
   __kmpc_free_shared(pointer, bytes);
 }
 
+namespace {
+
+// A block of a GPU process's memory (docs/INPROGRESS.md, Memory that a GPU
+// process gives back): its header, just before the bytes it gives, which
+// start on 16 bytes, or on 256 after an array's header words. The process's
+// own blocks are on a list, through `next` and `prev`, that only its wave
+// changes, so that it can free one; its worker teams' are on a list of their
+// own, through `next` alone, which their lanes push onto together, and go
+// when the process ends. A message the process receives is a group of
+// blocks, its first block their leader, on the list, and the rest after it
+// through `member`, so that freeing any of them frees the message.
+struct Block {
+  Block *next;
+  Block *prev;
+  // What the allocator gave, and how many bytes.
+  void *raw;
+  uint64_t bytes;
+  Block *leader;
+  Block *member;
+};
+static_assert(sizeof(Block) % 16 == 0);
+
+// A worker team's block, which only the process's end frees.
+Block *const kTeamBlock{reinterpret_cast<Block *>(uintptr_t{1})};
+
+Block *BlockOf(void *bytes) {
+  return reinterpret_cast<Block *>(
+      reinterpret_cast<uintptr_t>(bytes) - sizeof(Block));
+}
+
+// Blocks of at least half of one of libc's slabs, which libc asks the host
+// for over RPC, rounded up to 2 MiB, and gives back the same way. The image
+// keeps such blocks that processes have freed, by their size, up to
+// kLargeCacheBytes, and reuses them before it asks libc. A GPU has an
+// image of its own, so each GPU has its cache.
+constexpr uint64_t kLargeBytes{uint64_t{1} << 20};
+constexpr uint64_t kLargeRound{uint64_t{2} << 20};
+constexpr uint64_t kLargeCacheBytes{uint64_t{512} << 20};
+
+struct LargeBlock {
+  LargeBlock *next;
+  uint64_t bytes;
+};
+
+struct LargeCache {
+  uint32_t lock;
+  uint64_t bytes;
+  LargeBlock *first;
+};
+LargeCache largeCache{0, 0, nullptr};
+
+// Runs `use` with the cache's lock held. A lane that holds the lock runs
+// `use` and lets go inside the loop, so that lanes of one wave that wait for
+// it do not keep it from going on.
+template <typename Use> void WithLargeCache(Use use) {
+  for (;;) {
+    if (__atomic_exchange_n(&largeCache.lock, 1, __ATOMIC_ACQUIRE) == 0) {
+      use();
+      __atomic_store_n(&largeCache.lock, 0, __ATOMIC_RELEASE);
+      return;
+    }
+    __builtin_amdgcn_s_sleep(1);
+  }
+}
+
+[[noreturn]] void OutOfDeviceMemory(uint64_t bytes);
+
+// `bytes` from libc's allocator or the cache, and in `given` how many it
+// gave.
+void *RawAllocate(uint64_t bytes, uint64_t &given) {
+  if (bytes < kLargeBytes) {
+    given = bytes;
+    void *raw{malloc(bytes)};
+    if (!raw) {
+      OutOfDeviceMemory(bytes);
+    }
+    return raw;
+  }
+  given = (bytes + kLargeRound - 1) & ~(kLargeRound - 1);
+  LargeBlock *found{nullptr};
+  WithLargeCache([&]() {
+    for (LargeBlock **at{&largeCache.first}; *at; at = &(*at)->next) {
+      if ((*at)->bytes == given) {
+        found = *at;
+        *at = found->next;
+        largeCache.bytes -= given;
+        return;
+      }
+    }
+  });
+  if (found) {
+    return found;
+  }
+  void *raw{malloc(given)};
+  if (!raw) {
+    OutOfDeviceMemory(given);
+  }
+  return raw;
+}
+
+// Gives back what RawAllocate gave: a large block to the cache, unless it
+// is full.
+void RawFree(void *raw, uint64_t bytes) {
+  if (bytes < kLargeBytes) {
+    free(raw);
+    return;
+  }
+  bool kept{false};
+  WithLargeCache([&]() {
+    if (largeCache.bytes + bytes <= kLargeCacheBytes) {
+      auto *block{static_cast<LargeBlock *>(raw)};
+      block->bytes = bytes;
+      block->next = largeCache.first;
+      largeCache.first = block;
+      largeCache.bytes += bytes;
+      kept = true;
+    }
+  });
+  if (!kept) {
+    free(raw);
+  }
+}
+
+// A block of `bytes` for what runs on the wave, whose bytes start on 256
+// bytes after `before` bytes, or on 16 if `before` is 0; in `leader`'s
+// group if it is not null.
+void *NewBlock(Arena *arena, uint64_t bytes, uint64_t before, Block *leader) {
+  constexpr uint64_t kAlign{256};
+  uint64_t given{0};
+  void *raw{RawAllocate(sizeof(Block) + bytes + (before ? kAlign : 0), given)};
+  uintptr_t start{reinterpret_cast<uintptr_t>(raw) + sizeof(Block)};
+  if (before) {
+    start += (kAlign - (start + before) % kAlign) % kAlign;
+  }
+  Block *block{BlockOf(reinterpret_cast<void *>(start))};
+  block->raw = raw;
+  block->bytes = given;
+  uint64_t held{__atomic_add_fetch(&arena->held, given, __ATOMIC_RELAXED)};
+  __atomic_fetch_max(&arena->peak, held, __ATOMIC_RELAXED);
+  if (!processWaves[__gpu_thread_id_x() / __gpu_num_lanes()]) {
+    block->prev = kTeamBlock;
+    block->leader = block;
+    block->member = nullptr;
+    Block *first{__atomic_load_n(&arena->teamBlocks, __ATOMIC_RELAXED)};
+    do {
+      block->next = first;
+    } while (!__atomic_compare_exchange_n(&arena->teamBlocks, &first, block,
+        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+    return reinterpret_cast<void *>(start);
+  }
+  if (leader) {
+    block->leader = leader;
+    block->member = leader->member;
+    leader->member = block;
+    block->next = nullptr;
+    block->prev = nullptr;
+    return reinterpret_cast<void *>(start);
+  }
+  block->leader = block;
+  block->member = nullptr;
+  block->prev = nullptr;
+  block->next = arena->blocks;
+  if (arena->blocks) {
+    arena->blocks->prev = block;
+  }
+  arena->blocks = block;
+  return reinterpret_cast<void *>(start);
+}
+
+// Gives back a block and the rest of its group, which are on no list.
+void FreeGroup(Arena *arena, Block *leader) {
+  for (Block *block{leader}; block;) {
+    Block *member{block->member};
+    __atomic_sub_fetch(&arena->held, block->bytes, __ATOMIC_RELAXED);
+    RawFree(block->raw, block->bytes);
+    block = member;
+  }
+}
+
+// As the process ends: every block it holds.
+void FreeProcessBlocks(Arena *arena) {
+  for (Block *leader{arena->blocks}; leader;) {
+    Block *next{leader->next};
+    FreeGroup(arena, leader);
+    leader = next;
+  }
+  for (Block *block{arena->teamBlocks}; block;) {
+    Block *next{block->next};
+    FreeGroup(arena, block);
+    block = next;
+  }
+  arena->blocks = nullptr;
+  arena->teamBlocks = nullptr;
+}
+
+// Whether what runs on the wave makes blocks rather than bumping cells: a
+// GPU process, or a worker team of one.
+bool MakesBlocks() {
+  return merk_device_process_image &&
+      placeArenas[__gpu_thread_id_x() / __gpu_num_lanes()];
+}
+
+} // namespace
+
 // A cell, or an array, on the device (docs/INPROGRESS.md, The device's side
-// of the first slice, step 6): bumped from the chunks of the region that
-// runs, or of the GPU process, with an atomic add. The lanes of a team's
-// first wave that run a distribute loop's body all run the same code with
-// the same values, so they make one cell between them, which their first
-// active lane bumps: each its own would leave the lanes' arrays apart, and
-// a loop across the team's threads would update only one of them.
+// of the first slice, step 6): a block of a GPU process's (Block), or bumped
+// from the chunks of the region that runs, with an atomic add. The lanes of
+// a team's first wave that run a distribute loop's body all run the same
+// code with the same values, so they make one cell between them, which their
+// first active lane makes: each its own would leave the lanes' arrays apart,
+// and a loop across the team's threads would update only one of them.
 extern "C" void *merk_device_alloc(uint64_t bytes) {
   if (merk_device_process_image &&
       teamMains[__gpu_thread_id_x() / __gpu_num_lanes()]) {
     uint64_t mask{__gpu_lane_mask()};
     uint64_t cell{0};
     if (__gpu_is_first_in_lane(mask)) {
-      cell = reinterpret_cast<uint64_t>(Allocate(CurrentBump(), bytes));
+      cell = reinterpret_cast<uint64_t>(
+          NewBlock(CurrentArena(), bytes, 0, nullptr));
     }
     return reinterpret_cast<void *>(__gpu_read_first_lane_u64(mask, cell));
+  }
+  if (MakesBlocks()) {
+    return NewBlock(CurrentArena(), bytes, 0, nullptr);
   }
   return Allocate(CurrentBump(), bytes);
 }
@@ -459,10 +684,49 @@ extern "C" void *merk_device_alloc(uint64_t bytes) {
 // takes those more and starts where its elements will be aligned.
 extern "C" void *merk_device_alloc_aligned(uint64_t bytes, uint64_t before) {
   constexpr uint64_t kAlign{256};
+  if (merk_device_process_image &&
+      teamMains[__gpu_thread_id_x() / __gpu_num_lanes()]) {
+    uint64_t mask{__gpu_lane_mask()};
+    uint64_t cell{0};
+    if (__gpu_is_first_in_lane(mask)) {
+      cell = reinterpret_cast<uint64_t>(
+          NewBlock(CurrentArena(), bytes, before, nullptr));
+    }
+    return reinterpret_cast<void *>(__gpu_read_first_lane_u64(mask, cell));
+  }
+  if (MakesBlocks()) {
+    return NewBlock(CurrentArena(), bytes, before, nullptr);
+  }
   auto cell{reinterpret_cast<uint64_t>(
-      merk_device_alloc(bytes + kAlign - sizeof(uint64_t)))};
+      Allocate(CurrentBump(), bytes + kAlign - sizeof(uint64_t)))};
   return reinterpret_cast<void *>(
       cell + ((kAlign - (cell + before) % kAlign) % kAlign));
+}
+
+// Frees a cell or an array that a GPU process made or received, with the
+// rest of its message if it is part of one (Block). In a region, and for a
+// worker team's block, it does nothing: their memory goes when the region
+// or the process ends.
+extern "C" void merk_device_free(void *bytes) {
+  if (!bytes || !MakesBlocks() ||
+      !processWaves[__gpu_thread_id_x() / __gpu_num_lanes()]) {
+    return;
+  }
+  Block *block{BlockOf(bytes)};
+  if (block->prev == kTeamBlock) {
+    return;
+  }
+  Arena *arena{CurrentArena()};
+  Block *leader{block->leader};
+  if (leader->prev) {
+    leader->prev->next = leader->next;
+  } else {
+    arena->blocks = leader->next;
+  }
+  if (leader->next) {
+    leader->next->prev = leader->prev;
+  }
+  FreeGroup(arena, leader);
 }
 
 namespace {
@@ -528,6 +792,17 @@ struct Text {
     return Append(reversed);
   }
 };
+
+// libc's allocator, or the host behind it, has no block of `bytes` for a
+// GPU process.
+[[noreturn]] void OutOfDeviceMemory(uint64_t bytes) {
+  Fail(2,
+      Text{}
+          .Append("a GPU process could not allocate ")
+          .Append(static_cast<int64_t>(bytes))
+          .Append(" bytes of the device's memory")
+          .characters);
+}
 
 // Team mailboxes (docs/INPROGRESS.md, Processes as teams, step 2): in a
 // target teams region, each team has a mailbox for each message type, made
@@ -884,6 +1159,7 @@ uint64_t LoadSlotWord(uint64_t *word) {
   }
   placeArenas[inTeam] = arena;
   teamMains[inTeam] = 0;
+  processWaves[inTeam] = 1;
   ProcessControl *control{nullptr};
   if (workers > 0) {
     control = static_cast<ProcessControl *>(Allocate(&arena->bump,
@@ -923,9 +1199,14 @@ uint64_t LoadSlotWord(uint64_t *word) {
     ProcessArrive(control);
     placeControls[inTeam] = nullptr;
   }
+  // What the process holds goes, as its arena does, once its workers have
+  // stopped making blocks.
+  uint64_t peak{arena->peak};
+  FreeProcessBlocks(arena);
+  processWaves[inTeam] = 0;
   __scoped_atomic_store_n(
       &slot->state, kPlaceIdle, __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
-  ProcessEnded(table, wave);
+  ProcessEnded(table, wave, peak);
 }
 
 // The partial results of a loop's reductions of the wave's lanes, at
@@ -1095,6 +1376,7 @@ void Distribute(uint64_t loop, int64_t first, int64_t step, int64_t count,
   placeArenas[inTeam] = control->arena;
   placeControls[inTeam] = nullptr;
   teamMains[inTeam] = 0;
+  processWaves[inTeam] = 0;
   int64_t threads{static_cast<int64_t>(__gpu_num_threads_x())};
   int64_t stride{static_cast<int64_t>(workers) * threads};
   int64_t base{static_cast<int64_t>(worker) * threads};
@@ -1755,10 +2037,23 @@ using merkurius::runtime::Resolve;
   }
 }
 
-// Where the device's copy of a message it receives goes: its arena.
+// Where the device's copy of a message it receives goes: its arena, or in a
+// GPU process's wave, a group of blocks (Block), so that freeing the
+// message frees all of it.
 struct ArenaMemory {
   static constexpr bool kOtherImage{true};
-  void *Allocate(uint64_t bytes) { return merk_device_alloc(bytes); }
+  Block *leader{nullptr};
+  void *Allocate(uint64_t bytes) {
+    if (!MakesBlocks() ||
+        !processWaves[__gpu_thread_id_x() / __gpu_num_lanes()]) {
+      return merk_device_alloc(bytes);
+    }
+    void *cell{NewBlock(CurrentArena(), bytes, 0, leader)};
+    if (!leader) {
+      leader = BlockOf(cell);
+    }
+    return cell;
+  }
   [[gnu::always_inline]] void CheckStack() { CheckCopyStack(); }
   [[noreturn]] void Fail(const char *message, const char *detail) {
     CopyFailed(message, detail);
