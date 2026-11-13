@@ -155,7 +155,8 @@ bool ProgramEnding();
 bool RegionsRunning();
 // With MERK_CHECK_PINNED, MERK_CHECK_MESSAGES or MERK_CHECK_DEVICE_MEMORY,
 // reports at the program's normal end what of the messages and the devices'
-// memory is still allocated (offload.cpp).
+// memory is still allocated, and with MERK_CHECK_PROCESS_MEMORY the most
+// that a GPU process held at once (offload.cpp).
 void CheckFreedAtEnd();
 // mailbox.cpp: how many queued messages neither a process read nor a
 // mailbox freed, and are in no open mailbox.

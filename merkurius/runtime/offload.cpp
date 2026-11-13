@@ -75,6 +75,9 @@ namespace merkurius::runtime {
 void FreeRing(int device, DeviceRing *ring);
 // A GPU process has ended (rpcProcessEnded, gpu-processes.cpp).
 void PlaceProcessEnded(int device, std::uint64_t table, std::uint64_t slot);
+// The most bytes of blocks that a GPU process held at once, of all those
+// that have ended, which MERK_CHECK_PROCESS_MEMORY reports.
+std::atomic<std::uint64_t> processPeakBytes{0};
 } // namespace merkurius::runtime
 extern "C" [[noreturn]] void merk_uncaught_exception(const char *exception);
 
@@ -563,6 +566,10 @@ unsigned HandleOpcode(void *raw, unsigned) {
     ReportDeviceFailure(port);
   case rpcProcessEnded:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      std::uint64_t peak{buffer->data[3]};
+      std::uint64_t seen{processPeakBytes.load()};
+      while (peak > seen && !processPeakBytes.compare_exchange_weak(seen, peak))
+        ;
       PlaceProcessEnded(
           static_cast<int>(buffer->data[0]), buffer->data[1], buffer->data[2]);
     });
@@ -739,7 +746,9 @@ bool RegionsRunning() {
 // that were queued neither a process read nor a mailbox freed, leaving out
 // those still in open mailboxes, as their processes may still run; and with
 // MERK_CHECK_DEVICE_MEMORY, how many chunks of the devices' arenas and how
-// many mailboxes' rings are still allocated.
+// many mailboxes' rings are still allocated; with MERK_CHECK_PROCESS_MEMORY,
+// the most bytes of blocks that a GPU process held at once
+// (device/device.cpp, Block).
 namespace merkurius::runtime {
 static bool Set(const char *name) {
   const char *value{std::getenv(name)};
@@ -749,7 +758,8 @@ static bool Set(const char *name) {
 void CheckFreedAtEnd() {
   bool pinned{Set("MERK_CHECK_PINNED")}, messages{Set("MERK_CHECK_MESSAGES")};
   bool device{Set("MERK_CHECK_DEVICE_MEMORY")};
-  if (!pinned && !messages && !device) {
+  bool process{Set("MERK_CHECK_PROCESS_MEMORY")};
+  if (!pinned && !messages && !device && !process) {
     return;
   }
   for (int i{0}; i < 10000 && RegionsRunning(); ++i) {
@@ -783,6 +793,12 @@ void CheckFreedAtEnd() {
         "are allocated\n",
         static_cast<unsigned long long>(chunks),
         static_cast<unsigned long long>(ringsLeft));
+  }
+  if (process) {
+    std::fprintf(stderr,
+        "Mercury runtime: a GPU process held at most %llu bytes of blocks at "
+        "once\n",
+        static_cast<unsigned long long>(processPeakBytes.load()));
   }
 }
 } // namespace merkurius::runtime
