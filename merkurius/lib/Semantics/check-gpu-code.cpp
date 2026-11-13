@@ -82,8 +82,11 @@ private:
         tokens_.tokens[range.last].spelling.end()};
   }
   // Why a value of the type is not flat, or none if it is. A type variable
-  // is flat here: the type it stands for is checked where it is known.
-  std::optional<std::string> NotFlat(const Type &);
+  // is flat here: the type it stands for is checked where it is known. An
+  // array of mailboxes is flat as a value the code makes, which keeps the
+  // handles it was given, but not as a `message`, which a copy could not
+  // take whole.
+  std::optional<std::string> NotFlat(const Type &, bool message = false);
   // Why a value of the type is not of a fixed size and flat, or none.
   std::optional<std::string> NotFixed(
       const Type &, llvm::SmallVectorImpl<const Type *> &enclosing);
@@ -193,18 +196,22 @@ std::optional<std::string> GpuCodeChecker::NotFixed(
   return why;
 }
 
-std::optional<std::string> GpuCodeChecker::NotFlat(const Type &type) {
+std::optional<std::string> GpuCodeChecker::NotFlat(
+    const Type &type, bool message) {
   if (IsString(type)) {
     return std::nullopt;
   }
   // What a receive gives: a whole message, or a timeout.
   if (IsNamed(type, "process", "received")) {
-    return NotFlat(*type.arguments.front());
+    return NotFlat(*type.arguments.front(), message);
   }
   if (IsNamed(type, "array", "array")) {
     const Type &element{*type.arguments.front()};
     if (element.kind == TypeKind::Variable || IsScalar(element) ||
         IsEnumeration(element)) {
+      return std::nullopt;
+    }
+    if (!message && IsNamed(element, "process", "mailbox")) {
       return std::nullopt;
     }
     // Temporary (docs/INPROGRESS.md, GPU processes without omp target, step
@@ -292,7 +299,7 @@ void GpuCodeChecker::CheckMessage(TokenRange where, const Type *message) {
   if (!message) {
     return;
   }
-  if (std::optional<std::string> why{NotFlat(*message)};
+  if (std::optional<std::string> why{NotFlat(*message, true)};
       why && reported_.insert(Source(where).begin()).second) {
     messages_.Say(Source(where),
         "a message that code running on a GPU sends or receives must be flat, but this one is of type %s: %s"_err_en_US,

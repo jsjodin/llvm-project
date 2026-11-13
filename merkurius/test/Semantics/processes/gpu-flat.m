@@ -5,7 +5,8 @@
 % mailbox, a record or tagged union of flat fields that is not recursive, a
 % tuple of them, and, as a whole value, a string or an array of scalars or
 % enumerations, or a value of a type whose constructors' fields are flat
-% and of a fixed size but for each one's last, which may be such a block. A GPU process may make none other, in its kind's code and in
+% and of a fixed size but for each one's last, which may be such a block. A GPU process may make none other, but for an array of mailboxes, which
+% keeps its peers' handles but is no message, in its kind's code and in
 % the procedures of the module that it calls; a target region may, and its
 % messages are flat. A kind that runs on the host is not checked. Each
 % error names the type and why it is not flat.
@@ -82,6 +83,23 @@ block_kind(Out, Self, !IO) :-
     else
         send(Out, text(pos(1, 2.0), "no block"), !IO)
     ).
+
+    % An array of mailboxes, as a value a GPU process makes: no error. As a
+    % message it is not flat.
+:- process peers_kind(int) receives mailbox(int) on gpu.
+peers_kind(N, Self, !IO) :-
+    receive(Self, any, infinity, R, !IO),
+    ( if R = message(M) then
+        array.init(N, M, Peers),
+        send(Peers ^ elem(0), N, !IO)
+    else
+        true
+    ).
+
+:- process mailboxes_kind receives array(mailbox(int)) on gpu.
+% CHECK: gpu-flat.m:[[@LINE-1]]:4: error: a message that code running on a GPU sends or receives must be flat, but this one is of type array.array(process.mailbox(int)): array.array(process.mailbox(int))'s elements are not scalars or enumerations
+mailboxes_kind(Self, !IO) :-
+    receive(Self, any, infinity, _, !IO).
 
     % Messages that are not flat.
 :- process named_kind receives named on gpu.
