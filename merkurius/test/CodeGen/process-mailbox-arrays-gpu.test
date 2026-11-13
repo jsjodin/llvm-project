@@ -1,0 +1,10 @@
+process-mailbox-arrays.m's ring of nodes on the machine's GPU: each keeps
+its peers' mailboxes in an array it makes and passes a token round the ring
+three times, and what the nodes had is all freed when they end.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-mailbox-arrays.m -o %t2
+RUN: %gpu-env timeout -k 1 60 %t2 gpu | FileCheck %S/process-mailbox-arrays.m --match-full-lines --strict-whitespace
+RUN: %gpu-env MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %s --match-full-lines
+CHECK:node 4: 27
+CHECK-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
