@@ -3597,6 +3597,20 @@ above. This brings them back.
   word. Static cells and string literals are in the image's `merk_static`
   section, which `merk_device_free` leaves alone. `MERK_CHECK_PROCESS_MEMORY`
   reports the most that a GPU process held at once.
+- **Freeing a GPU process's values at their last use** (2026-11-13,
+  `lib/CodeGen/Frees.cpp`): a pass on the merk dialect, in a compile of
+  GPU process kinds, sorts a procedure's cells, arrays, strings and words
+  into classes that live and die together, by union-find, and frees each
+  class's new blocks after its last use, in each branch where that is an
+  if-then-else or a switch, and never between a tail call and its return.
+  A class is freed only when everything in it is the procedure's own: not
+  an argument, returned, or given to a call that may keep it. Summaries of
+  the module's procedures, found by iterating to a fixed point, say which
+  arguments a result may be or hold, whether it is a new block, and which
+  arguments a procedure keeps. A block held by one cell alone, as a
+  received message is by its `message(...)`, is freed through the cell.
+  A process that answers many messages holds a bounded number of blocks
+  (INPROGRESS, Memory that a GPU process gives back, f3).
 - **A target region's code may make terms,** as code compiled from ordinary
   procedures does, in an arena that lives as long as the region. A region
   is a computation and ends; a GPU process is an actor and may live for

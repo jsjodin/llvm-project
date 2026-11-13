@@ -1669,6 +1669,17 @@ bool IsTeamHandle(const uint64_t *handle) {
   return handle[2] >> 48 == kTeamsPlace;
 }
 
+// A team mailbox shares an array or a term by its pointer, which a GPU
+// process's code would free at its last use (Frees.cpp): the process's wave
+// may send and receive only words through one.
+void TeamBlockFromProcess() {
+  if (MakesBlocks() && processWaves[__gpu_thread_id_x() / __gpu_num_lanes()]) {
+    Fail(1,
+        "arrays and terms sent or received through team mailboxes in GPU "
+        "processes");
+  }
+}
+
 int64_t TeamOf(const uint64_t *handle) {
   return static_cast<int64_t>(handle[2] & ((uint64_t{1} << 48) - 1));
 }
@@ -1986,6 +1997,7 @@ extern "C" int merk_device_receive(
 extern "C" int merk_device_receive_array(
     const uint64_t *handle, int64_t milliseconds, uint64_t *message) {
   if (IsTeamHandle(handle)) {
+    TeamBlockFromProcess();
     return TeamReceive(handle, milliseconds, message);
   }
   RingEntry *entry{nullptr};
@@ -2184,6 +2196,7 @@ extern "C" uint64_t *merk_device_give_array(uint64_t *array, int64_t number) {
 extern "C" void merk_device_send_array(
     const uint64_t *handle, uint64_t key, const uint64_t *array) {
   if (IsTeamHandle(handle)) {
+    TeamBlockFromProcess();
     TeamSend(handle, reinterpret_cast<uint64_t>(array));
     return;
   }
@@ -2209,6 +2222,7 @@ extern "C" void merk_device_send_array(
 extern "C" void merk_device_send_term(const uint64_t *handle, uint64_t key,
     uint64_t message, const void *typeInfo) {
   if (IsTeamHandle(handle)) {
+    TeamBlockFromProcess();
     TeamSend(handle, message);
     return;
   }
@@ -2239,6 +2253,7 @@ extern "C" void merk_device_send_term(const uint64_t *handle, uint64_t key,
 extern "C" int merk_device_receive_term(const uint64_t *handle,
     int64_t milliseconds, const void *typeInfo, uint64_t *message) {
   if (IsTeamHandle(handle)) {
+    TeamBlockFromProcess();
     return TeamReceive(handle, milliseconds, message);
   }
   RingEntry *entry{nullptr};
