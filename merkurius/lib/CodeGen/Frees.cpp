@@ -172,6 +172,20 @@ bool ContainsCall(mlir::Operation *op) {
       .wasInterrupted();
 }
 
+// What a part of an if-then-else or a switch gives its op's results: its
+// yield, or null if it fails, as a merk.fail ends it. `other` is set when it
+// ends otherwise, as nondeterministic code may.
+merk::YieldOp YieldOf(mlir::Region *branch, bool &other) {
+  mlir::Operation *terminator{branch->front().getTerminator()};
+  if (auto yield{mlir::dyn_cast_or_null<merk::YieldOp>(terminator)}) {
+    return yield;
+  }
+  if (!mlir::isa_and_present<merk::FailOp>(terminator)) {
+    other = true;
+  }
+  return {};
+}
+
 // One procedure's classes, and where they are freed.
 class Analysis {
 public:
@@ -331,11 +345,14 @@ void Analysis::VisitBranches(
     if (!MayHold(result.getType())) {
       continue;
     }
-    bool fresh{true}, same{true}, any{false}, allStatic{true};
+    bool fresh{true}, same{true}, any{false}, allStatic{true}, other{false};
     mlir::Value outer;
     llvm::SmallVector<mlir::Value> made;
     for (mlir::Region *branch : branches) {
-      auto yield{mlir::cast<merk::YieldOp>(branch->front().getTerminator())};
+      merk::YieldOp yield{YieldOf(branch, other)};
+      if (!yield) {
+        continue;
+      }
       mlir::Value yielded{yield.getValues()[index]};
       if (!Tracked(yielded)) {
         fresh = same = false;
@@ -370,7 +387,9 @@ void Analysis::VisitBranches(
         outer = id;
       }
     }
-    if (!any) {
+    if (other) {
+      Track(result, Origin::Unknown);
+    } else if (!any) {
       Track(result, Origin::Pending);
     } else if (allStatic) {
       Track(result, Origin::Static);
@@ -386,8 +405,9 @@ void Analysis::VisitBranches(
       Track(result, Origin::Alias);
     }
     for (mlir::Region *branch : branches) {
-      auto yield{mlir::cast<merk::YieldOp>(branch->front().getTerminator())};
-      Join(result, yield.getValues()[index]);
+      if (merk::YieldOp yield{YieldOf(branch, other)}) {
+        Join(result, yield.getValues()[index]);
+      }
     }
   }
 }
@@ -483,15 +503,15 @@ void Analysis::VisitStore(mlir::LLVM::StoreOp store) {
 void Analysis::Visit(mlir::Operation *op) {
   if (auto ite{mlir::dyn_cast<merk::IteOp>(op)}) {
     VisitBlock(ite.getCondition().front());
-    auto yield{
-        mlir::cast<merk::YieldOp>(ite.getCondition().front().getTerminator())};
+    bool other{false};
+    merk::YieldOp yield{YieldOf(&ite.getCondition(), other)};
     mlir::Block &then{ite.getThenRegion().front()};
-    for (auto [value, argument] :
-        llvm::zip(yield.getValues(), then.getArguments())) {
+    for (auto [index, argument] : llvm::enumerate(then.getArguments())) {
       if (!MayHold(argument.getType())) {
         continue;
       }
-      if (Tracked(value)) {
+      mlir::Value value{yield ? yield.getValues()[index] : mlir::Value{}};
+      if (value && Tracked(value)) {
         Track(argument,
             OriginOf(value) == Origin::Static ? Origin::Static : Origin::Alias);
         Join(argument, value);
@@ -831,7 +851,14 @@ Shape Analysis::ShapeOf(mlir::Value value) const {
     }
   }
   for (mlir::Region *branch : branches) {
-    auto yield{mlir::cast<merk::YieldOp>(branch->front().getTerminator())};
+    bool other{false};
+    merk::YieldOp yield{YieldOf(branch, other)};
+    if (other) {
+      return std::nullopt;
+    }
+    if (!yield) {
+      continue;
+    }
     mlir::Value yielded{yield.getValues()[index]};
     mlir::Value id{
         OriginOf(yielded) == Origin::Static ? yielded : IdOf(yielded)};
