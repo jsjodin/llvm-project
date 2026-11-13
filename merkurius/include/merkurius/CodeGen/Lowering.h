@@ -159,20 +159,22 @@ void AddStackChecks(llvm::Module &);
 // than let the stack overflow (runtime/gpu-processes.cpp, SetStackLimit).
 void AddDeviceStackChecks(llvm::Module &);
 
-// Makes the branches of a GPU process image's code that runs on its
-// process's lane, which merk_process_dispatch reaches and no loop does, take
-// lane 0's condition, by llvm.amdgcn.readfirstlane. After the optimizer, so
-// that its branches are covered too and the intrinsic's calls do not change
-// what it inlines.
+// Marks "amdgpu-single-lane" the functions of a GPU process image that run on
+// its process's lane: those that merk_process_dispatch reaches and no loop
+// does. After the optimizer, so that the calls are those that stay.
 // A process runs on lane 0 of its wave while the others wait (runtime/device,
-// RunProcess), so its branches are uniform, but LLVM takes a function's
-// arguments and calls' results to differ by lane. As divergent branches, the
-// backend would have to structure them, and it cannot when one way ends in a
-// musttail call, as a process's states that call each other last do: a wave
-// cannot jump with some of its lanes. The loops' code, which every thread of
-// the worker teams runs, and anything a loop also reaches, keeps its
-// branches.
-void MakeProcessBranchesUniform(llvm::Module &);
+// RunProcess), so all its values are the same in every active lane, but LLVM
+// takes a function's arguments, loads through flat pointers and calls'
+// results to differ by lane. AMDGPU's code generation reads them from the
+// first active lane in a function so marked (AMDGPUSingleLane.cpp), after
+// LTO has inlined the device runtime into it, so that its values are in
+// scalar registers, which spill to lanes of vector registers rather than to
+// scratch, and its branches are uniform. As divergent branches, the backend
+// would have to structure them, and it cannot when one way ends in a musttail
+// call, as a process's states that call each other last do: a wave cannot
+// jump with some of its lanes. The loops' code, which every thread of the
+// worker teams runs, and anything a loop also reaches, is not marked.
+void MarkProcessCodeSingleLane(llvm::Module &);
 
 // Warns of each call in a GPU process image's code of the module that may
 // recurse and is not a tail call, after lowering to the LLVM dialect, where

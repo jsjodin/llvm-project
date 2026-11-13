@@ -32,6 +32,8 @@
 ; GCN-O0-NEXT:        Dominator Tree Construction
 ; GCN-O0-NEXT:        Basic Alias Analysis (stateless AA impl)
 ; GCN-O0-NEXT:        Function Alias Analysis Results
+; GCN-O0-NEXT:    FunctionPass Manager
+; GCN-O0-NEXT:      AMDGPU Single Lane
 ; GCN-O0-NEXT:    Externalize enqueued block runtime handles
 ; GCN-O0-NEXT:    AMDGPU lowering of execution synchronization
 ; GCN-O0-NEXT:    AMDGPU Software lowering of LDS
@@ -195,6 +197,8 @@
 ; GCN-O1-NEXT:        Dominator Tree Construction
 ; GCN-O1-NEXT:        Basic Alias Analysis (stateless AA impl)
 ; GCN-O1-NEXT:        Function Alias Analysis Results
+; GCN-O1-NEXT:    FunctionPass Manager
+; GCN-O1-NEXT:      AMDGPU Single Lane
 ; GCN-O1-NEXT:    Externalize enqueued block runtime handles
 ; GCN-O1-NEXT:    AMDGPU lowering of execution synchronization
 ; GCN-O1-NEXT:    AMDGPU Software lowering of LDS
@@ -488,6 +492,8 @@
 ; GCN-O1-OPTS-NEXT:        Dominator Tree Construction
 ; GCN-O1-OPTS-NEXT:        Basic Alias Analysis (stateless AA impl)
 ; GCN-O1-OPTS-NEXT:        Function Alias Analysis Results
+; GCN-O1-OPTS-NEXT:    FunctionPass Manager
+; GCN-O1-OPTS-NEXT:      AMDGPU Single Lane
 ; GCN-O1-OPTS-NEXT:    Externalize enqueued block runtime handles
 ; GCN-O1-OPTS-NEXT:    AMDGPU lowering of execution synchronization
 ; GCN-O1-OPTS-NEXT:    AMDGPU Software lowering of LDS
@@ -811,6 +817,8 @@
 ; GCN-O2-NEXT:        Dominator Tree Construction
 ; GCN-O2-NEXT:        Basic Alias Analysis (stateless AA impl)
 ; GCN-O2-NEXT:        Function Alias Analysis Results
+; GCN-O2-NEXT:    FunctionPass Manager
+; GCN-O2-NEXT:      AMDGPU Single Lane
 ; GCN-O2-NEXT:    Externalize enqueued block runtime handles
 ; GCN-O2-NEXT:    AMDGPU lowering of execution synchronization
 ; GCN-O2-NEXT:    AMDGPU Software lowering of LDS
@@ -1138,6 +1146,8 @@
 ; GCN-O3-NEXT:        Dominator Tree Construction
 ; GCN-O3-NEXT:        Basic Alias Analysis (stateless AA impl)
 ; GCN-O3-NEXT:        Function Alias Analysis Results
+; GCN-O3-NEXT:    FunctionPass Manager
+; GCN-O3-NEXT:      AMDGPU Single Lane
 ; GCN-O3-NEXT:    Externalize enqueued block runtime handles
 ; GCN-O3-NEXT:    AMDGPU lowering of execution synchronization
 ; GCN-O3-NEXT:    AMDGPU Software lowering of LDS

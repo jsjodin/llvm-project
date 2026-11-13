@@ -3498,6 +3498,11 @@ The AMDGPU backend supports the following LLVM IR attributes.
   - Disable forward progress mode for wave priority (enabled by default).
 
     Relevant for GFX10+.
+* - "amdgpu-single-lane"
+  - Indicates that the function only ever runs with exactly one lane of its wave active, as code that one lane runs while the others wait.
+    Every value of the function is then uniform, so the backend reads the values that are divergent at their sources (arguments, results of calls and atomics, loads through flat and private pointers) from the first active lane with `llvm.amdgcn.readfirstlane`, after inlining, so that what is computed from them is kept in SGPRs and its branches are uniform.
+    The behavior is undefined if the function runs with more than one active lane.
+    Not valid on kernels, where it is ignored.
 :::
 
 ## Calling Conventions

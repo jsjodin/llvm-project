@@ -5902,55 +5902,15 @@ llvm::SmallPtrSet<llvm::Function *, 32> Reached(
   return reached;
 }
 
-// `value` as lane 0 of the wave has it, which LLVM knows is the same in
-// every lane.
-llvm::Value *FirstLane(llvm::IRBuilder<> &builder, llvm::Value *value) {
-  // readfirstlane takes 32 and 64 bits: a narrower integer, such as a
-  // branch's i1 or a switch on an integer that the optimizer narrowed, goes
-  // through the next of them up, in pieces of 64 bits if it is wider.
-  auto *type{llvm::cast<llvm::IntegerType>(value->getType())};
-  unsigned width{type->getBitWidth()};
-  if (width == 32 || width == 64) {
-    return builder.CreateIntrinsic(
-        llvm::Intrinsic::amdgcn_readfirstlane, {type}, {value});
-  }
-  if (width < 64) {
-    llvm::Type *word{width < 32 ? builder.getInt32Ty() : builder.getInt64Ty()};
-    return builder.CreateTrunc(
-        builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_readfirstlane, {word},
-            {builder.CreateZExt(value, word)}),
-        type);
-  }
-  llvm::Value *result{llvm::ConstantInt::get(type, 0)};
-  for (unsigned low{0}; low < width; low += 64) {
-    llvm::Value *piece{builder.CreateTrunc(
-        builder.CreateLShr(value, low), builder.getInt64Ty())};
-    piece = builder.CreateIntrinsic(
-        llvm::Intrinsic::amdgcn_readfirstlane, {builder.getInt64Ty()}, {piece});
-    result = builder.CreateOr(
-        result, builder.CreateShl(builder.CreateZExt(piece, type), low));
-  }
-  return result;
-}
-
-void MakeProcessBranchesUniform(llvm::Module &module) {
+void MarkProcessCodeSingleLane(llvm::Module &module) {
   llvm::SmallPtrSet<llvm::Function *, 32> process{
       Reached(module, {"merk_process_dispatch"})};
   llvm::SmallPtrSet<llvm::Function *, 32> loops{Reached(module,
       {"merk_process_loop", "merk_process_loop_start",
           "merk_process_loop_reduce", "merk_team_loop"})};
   for (llvm::Function *function : process) {
-    if (loops.contains(function)) {
-      continue;
-    }
-    for (llvm::BasicBlock &block : *function) {
-      llvm::Instruction *terminator{block.getTerminator()};
-      llvm::IRBuilder<> builder{terminator};
-      if (auto *branch{llvm::dyn_cast<llvm::CondBrInst>(terminator)}) {
-        branch->setCondition(FirstLane(builder, branch->getCondition()));
-      } else if (auto *choice{llvm::dyn_cast<llvm::SwitchInst>(terminator)}) {
-        choice->setCondition(FirstLane(builder, choice->getCondition()));
-      }
+    if (!loops.contains(function)) {
+      function->addFnAttr("amdgpu-single-lane");
     }
   }
 }

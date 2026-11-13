@@ -48,7 +48,9 @@
 % which faulted at 768 bytes a lane. The dispatch, which calls them, has no
 % inferred attributes left, only its own, convergent and noinline, as every
 % function of the compile is convergent and the kinds' code stays out of
-% line; merk_process_loop, which runs no loop here, keeps its own.
+% line, and amdgpu-single-lane, as it runs on its process's lane alone
+% (Lowering.cpp, MarkProcessCodeSingleLane); merk_process_loop, which runs no
+% loop here, keeps its own.
 % RUN: FileCheck %s --check-prefix=INFERRED < %t.ll
 % INFERRED: define internal fastcc {{.*}}@process_teams_recursive.fib_f1_0({{.*}}) unnamed_addr #[[FIB:[0-9]+]] {
 % INFERRED: define internal fastcc {{.*}}@process_teams_recursive.deep_f1_0({{.*}}) unnamed_addr #[[DEEP:[0-9]+]] {
@@ -57,7 +59,7 @@
 % INFERRED-NOT: attributes #[[FIB]] = {{.*}}amdgpu-no-
 % INFERRED-NOT: attributes #[[DEEP]] = {{.*}}memory(none)
 % INFERRED-NOT: attributes #[[DEEP]] = {{.*}}amdgpu-no-
-% INFERRED: attributes #[[DISPATCH]] = { convergent noinline }
+% INFERRED: attributes #[[DISPATCH]] = { convergent noinline "amdgpu-single-lane" }
 %
 % The adders recurse only by tail calls: no warning, no check.
 % RUN: merkc -fc1 -O2 -fprocess-declarations -fprocess-kernels -triple amdgpu10.30-amd-amdhsa -emit-llvm %s -o %t.adders.ll 2>&1 | count 0

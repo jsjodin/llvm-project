@@ -562,6 +562,7 @@ extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeAMDGPUTarget() {
   initializeAMDGPUPreloadKernArgPrologLegacyPass(*PR);
   initializeAMDGPUWaitSGPRHazardsLegacyPass(*PR);
   initializeAMDGPUPreloadKernelArgumentsLegacyPass(*PR);
+  initializeAMDGPUSingleLaneLegacyPass(*PR);
   initializeAMDGPUUniformIntrinsicCombineLegacyPass(*PR);
   initializeSIPostRA16BitMovFoldingLegacyPass(*PR);
 }
@@ -1396,6 +1397,11 @@ void AMDGPUPassConfig::addIRPasses() {
   addPass(createAMDGPUAlwaysInlinePass());
   addPass(createAlwaysInlinerLegacyPass());
 
+  // After inlining, so that what single-lane functions inline is read from
+  // their lane too, and before what reads uniformity.
+  if (TM.getTargetTriple().isAMDGCN())
+    addPass(createAMDGPUSingleLaneLegacyPass());
+
   // Handle uses of OpenCL image2d_t, image3d_t and sampler_t arguments.
   if (TM.getTargetTriple().getArch() == Triple::r600)
     addPass(createR600OpenCLImageTypeLoweringPass());
@@ -2200,6 +2206,13 @@ void AMDGPUCodeGenPassBuilder::addIRPasses(PassManagerWrapper &PMW) {
 
   addModulePass(AMDGPUAlwaysInlinePass(), PMW);
   addModulePass(AlwaysInlinerPass(), PMW);
+
+  // After inlining, so that what single-lane functions inline is read from
+  // their lane too, and before what reads uniformity.
+  if (TM.getTargetTriple().isAMDGCN()) {
+    addFunctionPass(AMDGPUSingleLanePass(), PMW);
+    flushFPMsToMPM(PMW);
+  }
 
   addModulePass(AMDGPUExportKernelRuntimeHandlesPass(), PMW);
 

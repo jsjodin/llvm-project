@@ -243,7 +243,7 @@ static std::string libraryDirectory(llvm::StringRef executable) {
 // divergent control flow ("failed to annotate CFG"), which code generation
 // makes of a tail call between procedures of the same type (design document,
 // LLVM bugs to report), but not in a process's code, whose branches are
-// uniform (Lowering.cpp, MakeProcessBranchesUniform). The host's compile of
+// uniform (Lowering.cpp, MarkProcessCodeSingleLane). The host's compile of
 // `input` embeds each image with the options that come back. A module without
 // such kinds gets an image without kernels, which its host compile leaves out.
 static std::vector<std::string> addProcessImageJobs(const InputArgList &args,

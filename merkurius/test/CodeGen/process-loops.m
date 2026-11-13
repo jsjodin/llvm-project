@@ -178,8 +178,11 @@ print_answer(R, !IO) :-
 
 % HOST: llvm.mlir.global internal constant @process_loops.merk_process_image.loops("10\00")
 
-% LLVM-DAG: define hidden void @merk_process_dispatch({{.*}}) #[[OUT:[0-9]+]]
-% LLVM-DAG: define hidden void @merk_process_loop({{.*}}) #[[OUT]]
+% Dispatch runs on its process's lane alone, and merk_process_loop on every
+% lane of the worker teams (Lowering.cpp, MarkProcessCodeSingleLane).
+% LLVM-DAG: define hidden void @merk_process_dispatch({{.*}}) #[[DISPATCH:[0-9]+]]
+% LLVM-DAG: define hidden void @merk_process_loop({{.*}}) #[[OUT:[0-9]+]]
 % LLVM-DAG: declare void @merk_device_sync_threads() #[[CONVERGENT:[0-9]+]]
 % LLVM-DAG: attributes #[[CONVERGENT]] = { convergent }
+% LLVM-DAG: attributes #[[DISPATCH]] = { convergent noinline "amdgpu-single-lane" }
 % LLVM-DAG: attributes #[[OUT]] = { convergent noinline }
