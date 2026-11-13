@@ -81,31 +81,32 @@ main(!IO) :-
     ).
 
 % The start takes the address of the process's words: the kind's integer and
-% float, and each mailbox's handle as five words, which it puts in a cell on
-% its stack.
-% KERNEL0:define internal void @merk_process_summer(i64 %0) #{{[0-9]+}} {
-% KERNEL0-NEXT:  %2 = inttoptr i64 %0 to ptr
-% KERNEL0-NEXT:  %3 = getelementptr i64, ptr %2, i32 0
-% KERNEL0-NEXT:  %4 = load i64, ptr %3, align 8
-% KERNEL0-NEXT:  %5 = getelementptr i64, ptr %2, i32 1
-% KERNEL0-NEXT:  %6 = load i64, ptr %5, align 8
-% KERNEL0-NEXT:  %7 = bitcast i64 %6 to double
-% KERNEL0-NEXT:  %8 = alloca [5 x i64], i64 1, align 8, addrspace(5)
-% KERNEL0-NEXT:  %9 = addrspacecast ptr addrspace(5) %8 to ptr
-% KERNEL0:  %25 = alloca [5 x i64], i64 1, align 8, addrspace(5)
-% KERNEL0:  %40 = getelementptr i64, ptr %2, i32 11
-% KERNEL0:  call void @process_kernels.summer_6_0(i64 %4, double %7, ptr %9, ptr %26)
+% float, and each mailbox's handle as five words, which it puts in a cell of
+% the process's arena, so that its call of the kind is a tail call. The start
+% then has the kind's type, the address in its first parameter, and dispatch
+% passes poison for the rest.
+% KERNEL0:define internal void @merk_process_summer(i64 %0, double %1, ptr %2, ptr %3) #{{[0-9]+}} {
+% KERNEL0-NEXT:  %5 = inttoptr i64 %0 to ptr
+% KERNEL0-NEXT:  %6 = getelementptr i64, ptr %5, i32 0
+% KERNEL0-NEXT:  %7 = load i64, ptr %6, align 8
+% KERNEL0-NEXT:  %8 = getelementptr i64, ptr %5, i32 1
+% KERNEL0-NEXT:  %9 = load i64, ptr %8, align 8
+% KERNEL0-NEXT:  %10 = bitcast i64 %9 to double
+% KERNEL0-NEXT:  %11 = call ptr @merk_device_alloc(i64 40)
+% KERNEL0:  %27 = call ptr @merk_device_alloc(i64 40)
+% KERNEL0:  %41 = getelementptr i64, ptr %5, i32 11
+% KERNEL0:  musttail call void @process_kernels.summer_6_0(i64 %7, double %10, ptr %11, ptr %27)
 % KERNEL0-NEXT:  ret void
 % KERNEL0-NEXT:}
-% KERNEL0-EMPTY:
-% KERNEL0-NEXT:; Function Attrs: convergent noinline
+% KERNEL0:; Function Attrs: convergent noinline
 % KERNEL0-NEXT:define hidden void @merk_process_dispatch(i64 %0, i64 %1) #{{[0-9]+}} {
-% KERNEL0-NEXT:  switch i64 %0, label %4 [
-% KERNEL0-NEXT:    i64 0, label %3
+% KERNEL0-NEXT:  %3 = call i64 @llvm.amdgcn.readfirstlane.i64(i64 %0)
+% KERNEL0-NEXT:  switch i64 %3, label %5 [
+% KERNEL0-NEXT:    i64 0, label %4
 % KERNEL0-NEXT:  ]
 % KERNEL0-EMPTY:
-% KERNEL0-NEXT:3:                                                ; preds = %2
-% KERNEL0-NEXT:  call void @merk_process_summer(i64 %1)
+% KERNEL0-NEXT:4:                                                ; preds = %2
+% KERNEL0-NEXT:  call void @merk_process_summer(i64 %1, double poison, ptr poison, ptr poison)
 % KERNEL0-NEXT:  ret void
 % KERNEL2:define hidden void @merk_process_dispatch(i64 %0, i64 %1) local_unnamed_addr #{{[0-9]+}} {
 

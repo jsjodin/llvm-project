@@ -8,10 +8,11 @@
 % type's parameters as many as the procedure with the most, the rest poison
 % at their calls, and the calls are musttail. A procedure the interface
 % exports keeps its type, which other modules call it by, so its call stays
-% an ordinary one, which the recursion warning reports. So does the call of
-% the kind from the process's entry, which passes it the mailbox it builds
-% in its own frame, which a tail call would end. The program runs its kind
-% at the host here, and at the GPU in gpu-tail-calls-gpu.test.
+% an ordinary one, which the recursion warning reports. The process's
+% start builds the kind's mailboxes in the process's arena, not its own
+% frame, so its call of the kind is a tail call too, the start joins the
+% kind's type, and dispatch passes poison for the rest. The program runs its
+% kind at the host here, and at the GPU in gpu-tail-calls-gpu.test.
 %
 % mmc has no process module to run it with, so the output is written by
 % hand.
@@ -24,8 +25,8 @@
 % RUN: %libomp-env %t host | FileCheck %s --match-full-lines --strict-whitespace
 %
 % Only the exported procedure's pair of calls is reported.
-% DEVICE: gpu-tail-calls.m:98:9: warning: this call may recurse, and it is not a tail call
-% DEVICE-NEXT: gpu-tail-calls.m:105:5: warning: this call may recurse
+% DEVICE: gpu-tail-calls.m:99:9: warning: this call may recurse, and it is not a tail call
+% DEVICE-NEXT: gpu-tail-calls.m:106:5: warning: this call may recurse
 % DEVICE-NOT: warning:
 %
 % The exported procedure keeps its type, and so its partner its own.
@@ -42,9 +43,9 @@
 % DEVICE-LABEL: define internal void @gpu_tail_calls.odd_{{[0-9_]+}}(ptr %0, i64 %1, i64 %2, double %3, i32 %4)
 % DEVICE: musttail call void @gpu_tail_calls.even_{{[0-9_]+}}(ptr %0, i64 %{{[0-9]+}}, i64 %{{[0-9]+}}, double poison, i32 poison)
 %
-% DEVICE-LABEL: define internal void @merk_process_states(i64 %0)
-% DEVICE-NOT: musttail
-% DEVICE: call void @gpu_tail_calls.states_{{[0-9_]+}}(ptr %{{[0-9]+}}, ptr %{{[0-9]+}})
+% DEVICE-LABEL: define internal void @merk_process_states(ptr %0, ptr %1, i64 %2)
+% DEVICE: call ptr @merk_device_alloc(i64 40)
+% DEVICE: musttail call void @gpu_tail_calls.states_{{[0-9_]+}}(ptr %{{[0-9]+}}, ptr %{{[0-9]+}}, i64 poison)
 % DEVICE-NEXT: ret void
 
 % CHECK:1000000
