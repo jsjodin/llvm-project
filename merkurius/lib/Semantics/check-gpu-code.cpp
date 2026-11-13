@@ -88,6 +88,8 @@ private:
   std::optional<std::string> NotFixed(
       const Type &, llvm::SmallVectorImpl<const Type *> &enclosing);
   bool IsEnumeration(const Type &);
+  std::optional<std::string> NotFixedHeader(const Type &);
+  bool IsBlock(const Type &);
 
   // A body of the module's that runs on a GPU, in the context.
   void Visit(const ProcedureBody &, Context);
@@ -211,8 +213,56 @@ std::optional<std::string> GpuCodeChecker::NotFlat(const Type &type) {
     return std::string{TypeToString(type)} +
         "'s elements are not scalars or enumerations";
   }
+  if (std::optional<std::string> why{NotFixedHeader(type)}; !why) {
+    return std::nullopt;
+  }
   llvm::SmallVector<const Type *, 4> enclosing;
   return NotFixed(type, enclosing);
+}
+
+// Whether a whole value is a fixed part followed by one block: a type with
+// constructors, each of whose fields is of a fixed size and flat but for its
+// last, which may be a string or an array of scalars or enumerations, as
+// `edges(int, array(uint8))`. Why not, or none.
+std::optional<std::string> GpuCodeChecker::NotFixedHeader(const Type &type) {
+  if (type.kind != TypeKind::Named || HasVariable(type)) {
+    return "not a type with constructors";
+  }
+  std::vector<ConstructorTypes> constructors;
+  if (!constructors_.Constructors(&type, constructors)) {
+    return "not a type with constructors";
+  }
+  llvm::SmallVector<const Type *, 4> enclosing{&type};
+  for (const ConstructorTypes &constructor : constructors) {
+    for (std::size_t i{0}; i < constructor.arguments.size(); ++i) {
+      const Type &field{*constructor.arguments[i]};
+      // An existentially quantified variable of the constructor, as
+      // NotFixed finds.
+      if (HasVariable(field)) {
+        return std::string{TypeToString(type)} +
+            " has an existentially typed constructor";
+      }
+      if (i + 1 == constructor.arguments.size() && IsBlock(field)) {
+        continue;
+      }
+      if (auto why{NotFixed(field, enclosing)}) {
+        return why;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+// A string, or an array of scalars or enumerations: one block.
+bool GpuCodeChecker::IsBlock(const Type &type) {
+  if (IsString(type)) {
+    return true;
+  }
+  if (!IsNamed(type, "array", "array")) {
+    return false;
+  }
+  const Type &element{*type.arguments.front()};
+  return IsScalar(element) || IsEnumeration(element);
 }
 
 void GpuCodeChecker::CheckValue(

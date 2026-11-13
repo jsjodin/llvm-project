@@ -1,0 +1,11 @@
+process-block-messages.m's doubler and summer spawned on the machine's GPU:
+two hundred messages of a header and an array from the host to one, each
+answered through the other, and a string after them, read right at the host.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-block-messages.m -o %t2
+RUN: %gpu-env timeout -k 1 60 %t2 gpu | FileCheck %S/process-block-messages.m --match-full-lines --strict-whitespace
+RUN: %gpu-env MERK_CHECK_PINNED=1 timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %s --match-full-lines
+CHECK:0 wrong of 200
+CHECK-NEXT:42 a string after the arrays
+CHECK-NEXT:Mercury runtime: 0 chunks of host memory for devices' messages are allocated
