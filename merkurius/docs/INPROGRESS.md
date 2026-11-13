@@ -4910,10 +4910,21 @@ process's lane:
     its messages and answers would hold over 300 MB. Merk-level tests:
     `test/CodeGen/frees.mlir`.
 - (f4) Measurements, in the design document: a `malloc` and `free` of 4 KiB
-  and of 4 MiB on the device, beside a message's time.
+  and of 4 MiB on the device, beside a message's time. Done 2026-11-13: `benchmarks/frees`;
+  results in the design document, Measurements, "A GPU process's blocks".
+  A 4 KiB block costs 4.0 µs against libc's 3.1 µs, a 4 MiB block from the
+  cache 2.0 µs against libc's 61 µs, a message's round trip 26 µs.
+
+*Open,* from f4's measurements:
+- `array.init` in a GPU process fills from its one lane: 2.6 ms for 4 MiB.
+  The process's wave has 32 lanes, or its worker teams could fill it.
+- A small block costs 1 µs more than libc's `malloc` and `free`, in
+  dependent loads and stores from one lane. Free lists of the process's
+  own, by size, would take neither libc's atomics nor the list's.
 
 *Steps,* each a commit:
-- (p1) Memory that a GPU process gives back, f1 to f4 above.
+- (p1) Memory that a GPU process gives back, f1 to f4 above. Done
+  2026-11-13.
 - (p2) `life-places.m` with fixed owners: the directory places new tiles but
   never moves them. Checked against `life-sparse.m` at 1, 2 and 4 places,
   at the host and on the GPU.

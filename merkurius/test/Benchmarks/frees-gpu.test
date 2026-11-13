@@ -1,0 +1,17 @@
+The benchmark of a GPU process's blocks on the machine's GPU, on few
+rounds: each measurement runs and reports its time.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/frees/frees.m -o %t
+RUN: %gpu-env %t gpu ping 100 | FileCheck %s --check-prefix=PING
+RUN: %gpu-env %t gpu alloc 1000 4096 | FileCheck %s --check-prefix=ALLOC
+RUN: %gpu-env %t gpu malloc 1000 4096 | FileCheck %s --check-prefix=MALLOC
+RUN: %gpu-env %t gpu alloc 10 4194304 | FileCheck %s --check-prefix=LARGE
+RUN: %gpu-env %t gpu cold-alloc 4 4194304 | FileCheck %s --check-prefix=COLD
+RUN: %gpu-env %t gpu array 1000 512 | FileCheck %s --check-prefix=ARRAY
+PING: ping 100 rounds of 0: {{.*}} us a round
+ALLOC: alloc 1000 rounds of 4096: {{.*}} us a round
+MALLOC: malloc 1000 rounds of 4096: {{.*}} us a round
+LARGE: alloc 10 rounds of 4194304: {{.*}} us a round
+COLD: cold-alloc 4 rounds of 4194304: {{.*}} us a round
+ARRAY: array 1000 rounds of 512: {{.*}} us a round
