@@ -373,6 +373,25 @@ char *BaseOf(const Safepoint &safepoint, const Location &location,
   return stackPointer;
 }
 
+// The slot of a pair's derived pointer when that pointer is into the cell of
+// a base in another slot, and is only to be updated: as an array's elements,
+// which LLVM computes once before a loop and carries round it. The type says
+// nothing about such a pointer, which is not where the cell starts, so it
+// moves by its offset from its base (VisitInterior). Null for any other pair.
+Word *InteriorSlot(const Safepoint &safepoint, char *stackPointer,
+    std::int64_t bits, const Location &base, const Location &derived,
+    Word *&baseSlot) {
+  if (bits != kUpdateOnly || base.kind != Indirect ||
+      derived.kind != Indirect) {
+    return nullptr;
+  }
+  auto *slot{reinterpret_cast<Word *>(
+      BaseOf(safepoint, derived, stackPointer) + derived.offset)};
+  baseSlot = reinterpret_cast<Word *>(
+      BaseOf(safepoint, base, stackPointer) + base.offset);
+  return slot == baseSlot ? nullptr : slot;
+}
+
 template <typename Visit>
 void VisitFrame(const Safepoint &safepoint, char *stackPointer, Visit visit) {
   const Record *record{safepoint.record};
@@ -436,6 +455,10 @@ void VisitFrame(const Safepoint &safepoint, char *stackPointer, Visit visit) {
         derived.kind == ConstantIndex) {
       continue;
     }
+    if (Word *base;
+        InteriorSlot(safepoint, stackPointer, bits, gc[2 * i], derived, base)) {
+      continue;
+    }
     if (derived.kind != Indirect) {
       Bad("a root that is not in a stack slot", derived.kind);
     }
@@ -447,6 +470,37 @@ void VisitFrame(const Safepoint &safepoint, char *stackPointer, Visit visit) {
       Word term{*slot + tag};
       visit(&term, type, infos, count);
       *slot = term - tag;
+    }
+  }
+}
+
+// Each interior pointer of a frame (InteriorSlot) once, with its base's slot.
+// Two pairs may name the same slot.
+template <typename Visit>
+void VisitInterior(
+    const Safepoint &safepoint, char *stackPointer, Visit visit) {
+  const Location *locations{safepoint.record->locations};
+  std::int64_t deopt{ConstantOf(safepoint, locations[2])};
+  const Location *state{locations + 3};
+  std::int64_t pairs{ConstantOf(safepoint, state[0]) & 0xffffffff};
+  const Location *types{state + 1};
+  const Location *gc{state + deopt};
+  for (std::int64_t i{0}; i < pairs; ++i) {
+    Word *base;
+    Word *slot{InteriorSlot(safepoint, stackPointer,
+        ConstantOf(safepoint, types[i]), gc[2 * i], gc[2 * i + 1], base)};
+    if (!slot) {
+      continue;
+    }
+    bool seen{false};
+    for (std::int64_t j{0}; j < i && !seen; ++j) {
+      Word *other;
+      seen =
+          InteriorSlot(safepoint, stackPointer, ConstantOf(safepoint, types[j]),
+              gc[2 * j], gc[2 * j + 1], other) == slot;
+    }
+    if (!seen) {
+      visit(slot, base);
     }
   }
 }
@@ -1164,6 +1218,11 @@ bool CollectIfDue(void *frame) {
     return false;
   }
   Collector collector{process};
+  // An interior pointer holds its offset from its base while the base moves.
+  VisitFrames(frame, [&](const Safepoint &safepoint, char *stack) {
+    VisitInterior(
+        safepoint, stack, [](Word *slot, const Word *base) { *slot -= *base; });
+  });
   VisitFrames(frame, [&](const Safepoint &safepoint, char *stack) {
     if (safepoint.stackSize != ~std::uint64_t{0}) {
       collector.CountStack(safepoint.stackSize);
@@ -1184,6 +1243,11 @@ bool CollectIfDue(void *frame) {
             collector.UpdateOnly(slot);
           }
         });
+  });
+  // After the bases, typed or update-only, have moved.
+  VisitFrames(frame, [&](const Safepoint &safepoint, char *stack) {
+    VisitInterior(
+        safepoint, stack, [](Word *slot, const Word *base) { *slot += *base; });
   });
   collector.Finish();
   return true;
