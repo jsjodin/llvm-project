@@ -100,12 +100,11 @@ main(!IO) :-
 % KERNEL0-NEXT:}
 % KERNEL0:; Function Attrs: convergent noinline
 % KERNEL0-NEXT:define hidden void @merk_process_dispatch(i64 %0, i64 %1) #{{[0-9]+}} {
-% KERNEL0-NEXT:  %3 = call i64 @llvm.amdgcn.readfirstlane.i64(i64 %0)
-% KERNEL0-NEXT:  switch i64 %3, label %5 [
-% KERNEL0-NEXT:    i64 0, label %4
+% KERNEL0-NEXT:  switch i64 %0, label %4 [
+% KERNEL0-NEXT:    i64 0, label %3
 % KERNEL0-NEXT:  ]
 % KERNEL0-EMPTY:
-% KERNEL0-NEXT:4:                                                ; preds = %2
+% KERNEL0-NEXT:3:                                                ; preds = %2
 % KERNEL0-NEXT:  call void @merk_process_summer(i64 %1, double poison, ptr poison, ptr poison)
 % KERNEL0-NEXT:  ret void
 % KERNEL2:define hidden void @merk_process_dispatch(i64 %0, i64 %1) local_unnamed_addr #{{[0-9]+}} {

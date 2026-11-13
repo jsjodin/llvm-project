@@ -67,6 +67,7 @@ add_llvm_target(AMDGPUCodeGen
   AMDGPUHWEvents.cpp
   AMDGPUInsertDelayAlu.cpp
   AMDGPUInstCombineIntrinsic.cpp
+  AMDGPUSingleLane.cpp
   AMDGPUUniformIntrinsicCombine.cpp
   AMDGPUInstrInfo.cpp
   AMDGPUInstructionSelector.cpp
