@@ -3524,7 +3524,9 @@ above. This brings them back.
   regions alike: a fixed-size value of scalars, enumerations and mailboxes,
   such as `add(int) ; get(mailbox(int))`; or one block of variable size, an
   array of scalars, a multi-dimensional array or a view of one, or a
-  string; or a shared array's handle (below). No message holds a pointer,
+  string; or a fixed part followed by one such block, as
+  `edges(int, array(uint8))`; or a shared array's handle (below). No
+  message holds a pointer,
   so any sender writes it where the receiver reads it, as bytes, and the
   receiver reads it in place. A message type of another kind in a GPU
   kind's or a region's `send` or `receive` is an error at compile time.
@@ -3557,7 +3559,11 @@ above. This brings them back.
   enumeration, a mailbox, a value of a type with constructors that is not
   recursive, has no existentially typed constructor and whose fields are
   such values, or a tuple of them; or, as a whole value only, a string or
-  an array of scalars or enumerations. `received(T)` is flat when `T` is. A
+  an array of scalars or enumerations, or a value of a type whose
+  constructors' fields are such values of a fixed size but for each one's
+  last, which may be a string or such an array (2026-11-13, for step 5 of
+  the demo's halos: `test/CodeGen/process-block-messages.m`, at the host
+  and on the GPU). `received(T)` is flat when `T` is. A
   type variable passes, as GPU kinds are monomorphic. An abstract or
   foreign type is not flat, as its representation is unknown here.
   - The messages: of a GPU kind's own mailbox, at its declaration; of each
