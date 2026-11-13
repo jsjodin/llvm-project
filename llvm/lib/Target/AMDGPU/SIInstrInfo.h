@@ -298,6 +298,9 @@ public:
 
   bool isIgnorableUse(const MachineInstr &MI, unsigned OpIdx) const override;
 
+  bool shouldHoist(const MachineInstr &MI,
+                   const MachineLoop *FromLoop) const override;
+
   bool isSafeToSink(MachineInstr &MI, MachineBasicBlock *SuccToSinkTo,
                     MachineCycleInfo *CI) const override;
 

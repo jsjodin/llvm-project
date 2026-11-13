@@ -26,6 +26,7 @@
 #include "llvm/CodeGen/MachineCycleAnalysis.h"
 #include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
+#include "llvm/CodeGen/MachineLoopInfo.h"
 #include "llvm/CodeGen/MachineScheduler.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
 #include "llvm/CodeGen/ScheduleDAG.h"
@@ -295,6 +296,26 @@ bool SIInstrInfo::resultDependsOnExec(const MachineInstr &MI) const {
   }
 
   return false;
+}
+
+/// A VGPR value as cheap as a move, such as a constant, stays in a loop that
+/// makes calls: hoisted, it would live across the calls, in a callee-saved
+/// VGPR that the function saves and restores a lane at a time in scratch, or
+/// spilled; made again in the loop, it costs one instruction an iteration.
+bool SIInstrInfo::shouldHoist(const MachineInstr &MI,
+                              const MachineLoop *FromLoop) const {
+  if (MI.getNumDefs() != 1 || !MI.getOperand(0).isReg() ||
+      !MI.getOperand(0).getReg().isVirtual() || !isAsCheapAsAMove(MI) ||
+      !isReMaterializable(MI))
+    return true;
+  const MachineRegisterInfo &MRI = MI.getMF()->getRegInfo();
+  if (!RI.hasVectorRegisters(MRI.getRegClass(MI.getOperand(0).getReg())))
+    return true;
+  for (const MachineBasicBlock *MBB : FromLoop->blocks())
+    for (const MachineInstr &LoopMI : *MBB)
+      if (LoopMI.isCall())
+        return false;
+  return true;
 }
 
 bool SIInstrInfo::isIgnorableUse(const MachineInstr &MI, unsigned OpIdx) const {
