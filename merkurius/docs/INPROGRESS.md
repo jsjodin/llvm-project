@@ -4766,6 +4766,23 @@ eight GPUs that others use too, of which 3 or 4 are ours (the user,
   processes, or queues each limited to some of the compute units by ROCr's
   `hsa_amd_queue_cu_set_mask`, as "virtual GPUs". Untried. This GPU drives the
   display, so it starts small.
+- *A GPU process's values in scalar registers* (noted 2026-11-12). A
+  process runs on lane 0 alone and its branches are uniform
+  (`MakeProcessBranchesUniform`), but its values live in vector registers,
+  each spilled to scratch a lane at a time: of the work-stealing example's
+  992 bytes of stack a lane, `working`'s frame is 576, of which 556 are
+  spill slots, with 2095 scratch accesses in the function. Values in scalar
+  registers spill to lanes of a vector register, 32 or 64 a register,
+  without scratch, so the frames would shrink to their real slots, and
+  scalar code is cheaper too. Ways: pass a process's procedures' arguments
+  `inreg` and mark their values uniform, or a uniformity analysis that knows
+  a process's code runs on one lane. It matters most on gfx90a: ROCr keeps
+  scratch bound to a queue only up to `HSA_SCRATCH_SINGLE_LIMIT`, 140 MiB,
+  over every wave slot of the GPU (scratch can hold teams back, above),
+  104 CUs × 32 slots × 64 lanes there, about 690 bytes a lane, against 1792
+  on the gfx1030, so today's 992 would hold teams back. Raising the limit
+  from the runtime before ROCr starts, 1 KiB a lane being 208 MiB of a
+  die's 64 GB, is the other half; both to measure there.
 - *The size of a tile:* large enough that a step's kernel and messages are worth
   their cost, and small enough to follow the front closely. To measure.
 - *The chemistry:* a real mechanism, such as hydrogen and air's, or a synthetic

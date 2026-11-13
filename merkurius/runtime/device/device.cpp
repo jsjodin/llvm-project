@@ -848,7 +848,11 @@ uint64_t LoadSlotWord(uint64_t *word) {
 }
 
 // Lane 0 of a wave whose slot the host has set running: the process, which
-// starts its worker teams first if it has any, and ends them after.
+// starts its worker teams first if it has any, and ends them after. Only
+// lane 0 runs a process's code, which merk_process_dispatch calls, so the
+// compiler makes its branches uniform by taking their conditions from the
+// first active lane (Lowering.cpp, MakeProcessBranchesUniform): a process
+// must never run on more than one lane of a wave.
 [[gnu::noinline]] void RunProcess(
     PlaceTable *table, PlaceSlot *slot, uint64_t wave, uint32_t inTeam) {
   uint64_t kind{__scoped_atomic_load_n(

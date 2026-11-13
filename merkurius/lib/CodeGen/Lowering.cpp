@@ -4922,18 +4922,25 @@ llvm::LogicalResult Lowerer::Lower() {
 // team (MLIRGenProcesses.cpp, ProcessLoopRounds), which an optimization must
 // not move into a branch, and LLVM takes the attribute away from a function
 // that calls nothing convergent. The kinds' code, which merk_process_dispatch
-// starts, and the loops, which merk_process_loop and merk_team_loop run,
-// stay out of line, so that the registers of each count only while it runs
-// and not in the kernel's other code, as they would inlined into it: a
-// loop's waves are
-// then not limited by the most that the kinds' code needs (design document,
-// Measurements, Memory bandwidth).
+// starts, the kinds' starts, and the loops, which merk_process_loop and
+// merk_team_loop run, stay out of line, so that the registers of each count
+// only while it runs and not in the kernel's other code, as they would inlined
+// into it: a loop's waves are then not limited by the most that the kinds' code
+// needs (design document, Measurements, Memory bandwidth).
 void Lowerer::MarkKernelFunctions() {
   for (auto func : module_.getOps<mlir::LLVM::LLVMFuncOp>()) {
     func.setConvergent(true);
-    if (func.getSymName() == "merk_process_dispatch" ||
-        func.getSymName() == "merk_process_loop" ||
-        func.getSymName() == "merk_team_loop") {
+    llvm::StringRef name{func.getSymName()};
+    if (name == "merk_process_dispatch" || name == "merk_process_loop" ||
+        name == "merk_team_loop") {
+      func.setNoInline(true);
+    } else if (name.starts_with("merk_process_") &&
+        name != "merk_process_loop_start" &&
+        name != "merk_process_loop_reduce") {
+      // A kind's start (MLIRGenProcesses.cpp, GenerateProcessStart), whose
+      // call of the kind is a tail call: inlined into merk_process_dispatch,
+      // whose type the runtime fixes, the call would be an ordinary one, and
+      // dispatch's frame would stay below the process's for all its life.
       func.setNoInline(true);
     }
   }
@@ -5686,6 +5693,85 @@ void WarnGpuRecursion(mlir::ModuleOp module) {
              "takes more of the stack of a GPU process, which is limited "
              "(MERK_GPU_PROCESS_STACK_BYTES): a recursion deeper than it has "
              "room for ends the program";
+    }
+  }
+}
+
+// The functions of `module` that `roots` reach through direct calls, the
+// only calls in a GPU process image, which has no closures.
+llvm::SmallPtrSet<llvm::Function *, 32> Reached(
+    llvm::Module &module, llvm::ArrayRef<llvm::StringRef> roots) {
+  llvm::SmallPtrSet<llvm::Function *, 32> reached;
+  llvm::SmallVector<llvm::Function *> pending;
+  for (llvm::StringRef name : roots) {
+    if (llvm::Function *root{module.getFunction(name)};
+        root && reached.insert(root).second) {
+      pending.push_back(root);
+    }
+  }
+  while (!pending.empty()) {
+    llvm::Function *function{pending.pop_back_val()};
+    for (llvm::Instruction &instruction : llvm::instructions(*function)) {
+      if (auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)}) {
+        if (llvm::Function *callee{call->getCalledFunction()}; callee &&
+            !callee->isDeclaration() && reached.insert(callee).second) {
+          pending.push_back(callee);
+        }
+      }
+    }
+  }
+  return reached;
+}
+
+// `value` as lane 0 of the wave has it, which LLVM knows is the same in
+// every lane.
+llvm::Value *FirstLane(llvm::IRBuilder<> &builder, llvm::Value *value) {
+  // readfirstlane takes 32 and 64 bits: a narrower integer, such as a
+  // branch's i1 or a switch on an integer that the optimizer narrowed, goes
+  // through the next of them up, in pieces of 64 bits if it is wider.
+  auto *type{llvm::cast<llvm::IntegerType>(value->getType())};
+  unsigned width{type->getBitWidth()};
+  if (width == 32 || width == 64) {
+    return builder.CreateIntrinsic(
+        llvm::Intrinsic::amdgcn_readfirstlane, {type}, {value});
+  }
+  if (width < 64) {
+    llvm::Type *word{width < 32 ? builder.getInt32Ty() : builder.getInt64Ty()};
+    return builder.CreateTrunc(
+        builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_readfirstlane, {word},
+            {builder.CreateZExt(value, word)}),
+        type);
+  }
+  llvm::Value *result{llvm::ConstantInt::get(type, 0)};
+  for (unsigned low{0}; low < width; low += 64) {
+    llvm::Value *piece{builder.CreateTrunc(
+        builder.CreateLShr(value, low), builder.getInt64Ty())};
+    piece = builder.CreateIntrinsic(
+        llvm::Intrinsic::amdgcn_readfirstlane, {builder.getInt64Ty()}, {piece});
+    result = builder.CreateOr(
+        result, builder.CreateShl(builder.CreateZExt(piece, type), low));
+  }
+  return result;
+}
+
+void MakeProcessBranchesUniform(llvm::Module &module) {
+  llvm::SmallPtrSet<llvm::Function *, 32> process{
+      Reached(module, {"merk_process_dispatch"})};
+  llvm::SmallPtrSet<llvm::Function *, 32> loops{Reached(module,
+      {"merk_process_loop", "merk_process_loop_start",
+          "merk_process_loop_reduce", "merk_team_loop"})};
+  for (llvm::Function *function : process) {
+    if (loops.contains(function)) {
+      continue;
+    }
+    for (llvm::BasicBlock &block : *function) {
+      llvm::Instruction *terminator{block.getTerminator()};
+      llvm::IRBuilder<> builder{terminator};
+      if (auto *branch{llvm::dyn_cast<llvm::CondBrInst>(terminator)}) {
+        branch->setCondition(FirstLane(builder, branch->getCondition()));
+      } else if (auto *choice{llvm::dyn_cast<llvm::SwitchInst>(terminator)}) {
+        choice->setCondition(FirstLane(builder, choice->getCondition()));
+      }
     }
   }
 }
