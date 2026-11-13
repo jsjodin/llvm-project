@@ -22,12 +22,13 @@
 %
 % The module's kinds by their numbers, in the order of their declarations.
 % DISPATCH:define hidden void @merk_process_dispatch(i64 %0, i64 %1) #{{[0-9]+}} {
-% DISPATCH-NEXT:  switch i64 %0, label %5 [
-% DISPATCH-NEXT:    i64 0, label %3
-% DISPATCH-NEXT:    i64 1, label %4
+% DISPATCH-NEXT:  %3 = call i64 @llvm.amdgcn.readfirstlane.i64(i64 %0)
+% DISPATCH-NEXT:  switch i64 %3, label %6 [
+% DISPATCH-NEXT:    i64 0, label %4
+% DISPATCH-NEXT:    i64 1, label %5
 % DISPATCH-NEXT:  ]
-% DISPATCH:  call void @merk_process_adder(i64 %1)
-% DISPATCH:  call void @merk_process_waiter(i64 %1)
+% DISPATCH:  call void @merk_process_adder(ptr poison, ptr poison, i64 %1)
+% DISPATCH:  call void @merk_process_waiter(ptr poison, i64 %1)
 :- module process_places.
 :- interface.
 :- import_module io.

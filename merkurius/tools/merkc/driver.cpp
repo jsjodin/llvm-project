@@ -242,9 +242,10 @@ static std::string libraryDirectory(llvm::StringRef executable) {
 // not well tested at -O0. At -O0 and -O1 it fails on a musttail call in
 // divergent control flow ("failed to annotate CFG"), which code generation
 // makes of a tail call between procedures of the same type (design document,
-// LLVM bugs to report). The host's compile of `input` embeds each
-// image with the options that come back. A module without such kinds gets
-// an image without kernels, which its host compile leaves out.
+// LLVM bugs to report), but not in a process's code, whose branches are
+// uniform (Lowering.cpp, MakeProcessBranchesUniform). The host's compile of
+// `input` embeds each image with the options that come back. A module without
+// such kinds gets an image without kernels, which its host compile leaves out.
 static std::vector<std::string> addProcessImageJobs(const InputArgList &args,
     llvm::StringRef executable, const std::string &input,
     const std::vector<OffloadArch> &archs, std::vector<Job> &jobs,

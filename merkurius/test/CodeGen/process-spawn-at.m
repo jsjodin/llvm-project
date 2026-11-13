@@ -7,14 +7,16 @@
 % on the host, or a GPU that does not exist, is a software error at the
 % spawn, which names process.spawn. A closure in a variable, not a kind
 % written out, runs at the host, and at a GPU is a software error. The program links LLVM's offload library, through which the
-% runtime finds the GPUs. At -O0 the image's link fails on an AMDGPU bug
-% (process-spawn-at-O0.m).
+% runtime finds the GPUs. At -O0 its image links too, as its branches are
+% uniform (Lowering.cpp, MakeProcessBranchesUniform).
 %
 % REQUIRES: amdgpu-registered-target, libomp
 % RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 | FileCheck %s --match-full-lines --strict-whitespace
 % RUN: merkc -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t
 % RUN: %libomp-env %t | FileCheck %s --match-full-lines --strict-whitespace
+% RUN: merkc -O0 -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t0
+% RUN: %libomp-env %t0 | FileCheck %s --match-full-lines --strict-whitespace
 % RUN: not %libomp-env %t2 host-kind 2>&1 | FileCheck %s --check-prefix=HOST-KIND
 % RUN: not %libomp-env %t2 no-gpu 2>&1 | FileCheck %s --check-prefix=NO-GPU
 % RUN: %libomp-env %t2 closure-host | FileCheck %s --check-prefix=CLOSURE-HOST --match-full-lines

@@ -1102,6 +1102,9 @@ bool CodeGenAction::Emit(llvm::Module &llvmModule,
   bool readBack{llvmModule.getModuleFlag(kIRPreparedFlag) != nullptr};
   if (!readBack) {
     codegen::OptimizeLLVMIR(llvmModule, target);
+    if (target.options().processKernels) {
+      codegen::MakeProcessBranchesUniform(llvmModule);
+    }
     codegen::AddStackChecks(llvmModule);
     if (target.options().processKernels) {
       codegen::AddDeviceStackChecks(llvmModule);

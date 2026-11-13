@@ -157,9 +157,12 @@ void MerkGenerator::GenerateProcessStarts() {
 // mailbox's handle, and calls the kind's predicate. In the first version,
 // the arguments are integers, floats, characters and mailboxes, a word
 // each but a mailbox, whose handle is five words, and the kind is not
-// polymorphic (decision D3). The start puts a mailbox's handle in a cell on
-// its stack: the predicate returns before the start does, and a handle that
-// it sends is copied. Null for a kind it cannot start, which it reported.
+// polymorphic (decision D3). The start puts a mailbox's handle in a cell of
+// the process's arena (merk_device_alloc), which goes when the process does,
+// not in its own frame: then its call of the predicate is a tail call
+// (Lowering.cpp, DropTailCallsFromEscapingFrames), and the start's frame is
+// not below the process's for all its life. A handle that the process sends
+// is copied. Null for a kind it cannot start, which it reported.
 merk::ProcOp MerkGenerator::GenerateProcessStart(
     const parser::ProcessDecl &decl) {
   parser::CharBlock at{Where(decl.tokens)};
@@ -214,8 +217,16 @@ merk::ProcOp MerkGenerator::GenerateProcessStart(
   builder_.setInsertionPointToStart(entry);
   auto generic{mlir::LLVM::LLVMPointerType::get(
       &context_, target_.addressSpaces().generic)};
-  auto stack{mlir::LLVM::LLVMPointerType::get(
-      &context_, target_.addressSpaces().private_)};
+  // The device runtime's allocation in the process's arena, as lowering
+  // declares it for a device's cells.
+  auto alloc{module_.lookupSymbol<mlir::LLVM::LLVMFuncOp>("merk_device_alloc")};
+  if (!alloc) {
+    mlir::OpBuilder::InsertionGuard declare{builder_};
+    builder_.setInsertionPointToEnd(module_.getBody());
+    alloc = mlir::LLVM::LLVMFuncOp::create(builder_, loc, "merk_device_alloc",
+        mlir::LLVM::LLVMFunctionType::get(generic, {i64}));
+    alloc.setNoUnwind(true);
+  }
   mlir::Value words{mlir::LLVM::IntToPtrOp::create(
       builder_, loc, generic, entry->getArgument(0))};
   std::int32_t next{0};
@@ -240,12 +251,9 @@ merk::ProcOp MerkGenerator::GenerateProcessStart(
           mlir::arith::BitcastOp::create(builder_, loc, floating, value));
       continue;
     }
-    auto cellType{mlir::LLVM::LLVMArrayType::get(i64, kMailboxWords)};
-    mlir::Value cell{mlir::LLVM::AllocaOp::create(
-        builder_, loc, stack, cellType, IntegerConstant(i64, 1, loc))};
-    if (stack != generic) {
-      cell = mlir::LLVM::AddrSpaceCastOp::create(builder_, loc, generic, cell);
-    }
+    mlir::Value cell{mlir::LLVM::CallOp::create(builder_, loc, alloc,
+        mlir::ValueRange{IntegerConstant(i64, 8 * kMailboxWords, loc)})
+            .getResult()};
     for (std::int32_t i{0}; i < static_cast<std::int32_t>(kMailboxWords); ++i) {
       mlir::Value address{mlir::LLVM::GEPOp::create(builder_, loc, generic, i64,
           cell, llvm::ArrayRef<mlir::LLVM::GEPArg>{i})};
