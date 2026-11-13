@@ -72,6 +72,9 @@ enum class ActionKind {
   DebugDumpPolymorphism,
   // -emit-merk: generate the module's merk operations and write them.
   EmitMerk,
+  // -fdebug-dump-frees: the same, with the frees that a compile of GPU
+  // process kinds adds (Frees.cpp).
+  DebugDumpFrees,
   // -emit-merk-bc: the same, as MLIR bytecode, with what a later pass needs:
   // the form of the library that a device's compile copies procedures from.
   EmitMerkBytecode,

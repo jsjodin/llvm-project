@@ -1,9 +1,8 @@
 process-blocks.m's makers spawned on the machine's GPU: arrays of up to
 3.2 MB, from the image's cache of large blocks once an earlier maker has
-freed one, and each maker's blocks freed as it ends. The most that one
-maker held is the last maker's two large arrays, each rounded up to 4 MiB,
-with a few small blocks: nothing is freed before its process ends yet
-(docs/INPROGRESS.md, Memory that a GPU process gives back, f3).
+freed one. Each array is freed after its last use (Frees.cpp), so the most
+that a maker holds at once is its largest array, rounded up to 4 MiB, with
+a few small blocks.
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-blocks.m -o %t2
@@ -11,4 +10,4 @@ RUN: %gpu-env timeout -k 1 60 %t2 gpu | FileCheck %S/process-blocks.m --match-fu
 RUN: %gpu-env MERK_CHECK_PROCESS_MEMORY=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %s --match-full-lines
 CHECK:300000: right
 CHECK-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
-CHECK-NEXT:Mercury runtime: a GPU process held at most {{838[89][0-9][0-9][0-9]}} bytes of blocks at once
+CHECK-NEXT:Mercury runtime: a GPU process held at most {{419[0-9][0-9][0-9][0-9]}} bytes of blocks at once

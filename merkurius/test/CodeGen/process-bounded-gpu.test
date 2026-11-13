@@ -1,0 +1,10 @@
+process-bounded.m's echo spawned on the machine's GPU. Kept, its 20000
+messages and answers would hold more than 300 MB; freed after their last
+use, the most it holds at once is a few blocks of about 8 KB each, less
+than 100000 bytes, however many messages there are.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-bounded.m -o %t2
+RUN: %gpu-env MERK_CHECK_PROCESS_MEMORY=1 timeout -k 1 120 %t2 gpu 2>&1 | FileCheck %s --match-full-lines
+CHECK:20000 messages, 0 wrong
+CHECK-NEXT:Mercury runtime: a GPU process held at most {{[1-9][0-9]?[0-9]?[0-9]?[0-9]}} bytes of blocks at once

@@ -993,7 +993,10 @@ bool CodeGenAction::Lower(
   if (!os) {
     return false;
   }
-  if (kind_ == ActionKind::EmitMerk) {
+  if (kind_ == ActionKind::DebugDumpFrees) {
+    codegen::FreeAtLastUse(module);
+  }
+  if (kind_ == ActionKind::EmitMerk || kind_ == ActionKind::DebugDumpFrees) {
     // Notes for a later pass, which only clutter what is read.
     module.walk([](merk::RootTypeOp op) { op.erase(); });
     // Printed without its roots' type_infos: it can be compiled again, for a

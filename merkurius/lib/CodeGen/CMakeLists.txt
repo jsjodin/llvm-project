@@ -11,6 +11,7 @@ add_merkurius_library(MerkuriusCodeGen
   MLIRGenTypeInfo.cpp
   MLIRGenUnify.cpp
   LastCall.cpp
+  Frees.cpp
   Liveness.cpp
   Statepoints.cpp
   Outlining.cpp
