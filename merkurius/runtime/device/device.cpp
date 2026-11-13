@@ -98,6 +98,7 @@ using merkurius::runtime::DeviceRing;
 using merkurius::runtime::kArenaClearWords;
 using merkurius::runtime::kBumpWords;
 using merkurius::runtime::kChunkBytes;
+using merkurius::runtime::kFailNumbers;
 using merkurius::runtime::kNoRegionSlot;
 using merkurius::runtime::kPlaceIdle;
 using merkurius::runtime::kPlaceReserved;
@@ -747,13 +748,19 @@ namespace {
 
 // Reports an error that ends the program, as the host reports the same:
 // `kind` is 0 for an uncaught exception, 1 for a feature not yet
-// implemented and 2 for a limit of the runtime (rpc-opcodes.h), and the text
-// is `text` followed by `detail`, which the host joins, so that no buffer on
-// the stack holds them. The host ends the program, so this does not return.
-[[noreturn]] void Fail(
-    uint64_t kind, const char *text, const char *detail = "") {
+// implemented and 2 for a limit of the runtime (rpc-opcodes.h). With no
+// `numbers`, the text is `format` followed by `detail`, which the host
+// joins; with numbers, at most kFailNumbers, the host replaces each %d of
+// `format` by the next of them and %s by `detail`. The host builds the text,
+// so that no buffer on the stack of a GPU process holds it, and ends the
+// program, so this does not return.
+template <typename... Numbers>
+[[noreturn]] void FailWith(
+    uint64_t kind, const char *format, const char *detail, Numbers... numbers) {
+  static_assert(sizeof...(Numbers) <= kFailNumbers,
+      "the numbers fit in the words of an RPC buffer");
   uint64_t size{0};
-  while (text[size]) {
+  while (format[size]) {
     ++size;
   }
   uint64_t detailSize{0};
@@ -761,8 +768,13 @@ namespace {
     ++detailSize;
   }
   rpc::Client::Port port{__llvm_rpc_client.open<rpcFail>()};
-  port.send([&](rpc::Buffer *buffer, uint32_t) { buffer->data[0] = kind; });
-  port.send_n(text, size + 1);
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    buffer->data[0] = kind;
+    buffer->data[1] = sizeof...(Numbers);
+    uint32_t next{2};
+    ((buffer->data[next++] = static_cast<uint64_t>(numbers)), ...);
+  });
+  port.send_n(format, size + 1);
   port.send_n(detail, detailSize + 1);
   port.recv([](rpc::Buffer *, uint32_t) {});
   // The host ends the program rather than answer, so the wave never gets
@@ -773,49 +785,18 @@ namespace {
   __builtin_amdgcn_endpgm();
 }
 
-// Text for Fail, built without a C library: each Append adds to the end.
-struct Text {
-  char characters[160];
-  uint64_t size{0};
-
-  Text &Append(const char *text) {
-    for (; *text && size + 1 < sizeof characters; ++text) {
-      characters[size++] = *text;
-    }
-    characters[size] = '\0';
-    return *this;
-  }
-
-  Text &Append(int64_t value) {
-    char digits[24];
-    int count{0};
-    uint64_t magnitude{value < 0 ? 0 - static_cast<uint64_t>(value)
-                                 : static_cast<uint64_t>(value)};
-    do {
-      digits[count++] = static_cast<char>('0' + magnitude % 10);
-      magnitude /= 10;
-    } while (magnitude != 0);
-    if (value < 0) {
-      digits[count++] = '-';
-    }
-    char reversed[24];
-    for (int i{0}; i < count; ++i) {
-      reversed[i] = digits[count - 1 - i];
-    }
-    reversed[count] = '\0';
-    return Append(reversed);
-  }
-};
+// An error whose text is `text` followed by `detail`, as FailWith.
+[[noreturn]] void Fail(
+    uint64_t kind, const char *text, const char *detail = "") {
+  FailWith(kind, text, detail);
+}
 
 // libc's allocator, or the host behind it, has no block of `bytes` for a
 // GPU process.
 [[noreturn]] void OutOfDeviceMemory(uint64_t bytes) {
-  Fail(2,
-      Text{}
-          .Append("a GPU process could not allocate ")
-          .Append(static_cast<int64_t>(bytes))
-          .Append(" bytes of the device's memory")
-          .characters);
+  FailWith(2,
+      "a GPU process could not allocate %d bytes of the device's memory", "",
+      static_cast<int64_t>(bytes));
 }
 
 // Team mailboxes (docs/INPROGRESS.md, Processes as teams, step 2): in a
@@ -975,15 +956,12 @@ extern "C" void merk_device_teams_wait_all(void) {
       uint32_t none{0};
       if (__atomic_compare_exchange_n(&table->reporting, &none, 1, false,
               __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
-        Fail(2, Text{}
-                    .Append("target teams: only ")
-                    .Append(started)
-                    .Append(" of the ")
-                    .Append(table->teams)
-                    .Append(" teams ran at once on the device, and the teams "
-                            "of a region with team mailboxes must all run at "
-                            "once")
-                    .characters);
+        FailWith(2,
+            "target teams: only %d of the %d teams ran at once on the device, "
+            "and the teams of a region with team mailboxes must all run at "
+            "once",
+            "", static_cast<int64_t>(started),
+            static_cast<int64_t>(table->teams));
       }
       // The host ends the program for the team that reports.
       for (;;) {
@@ -1691,13 +1669,10 @@ int64_t TeamOf(const uint64_t *handle) {
 TeamTable *TableOf(const uint64_t *handle, const char *what) {
   TeamTable *table{currentTeams};
   if (!table || table->id != handle[3]) {
-    Fail(0, Text{}
-                .Append("Software Error: ")
-                .Append(what)
-                .Append(": the mailbox of team ")
-                .Append(TeamOf(handle))
-                .Append(" is not of this target teams region")
-                .characters);
+    FailWith(0,
+        "Software Error: %s: the mailbox of team %d is not of this target "
+        "teams region",
+        what, static_cast<int64_t>(TeamOf(handle)));
   }
   return table;
 }
@@ -1782,12 +1757,10 @@ int TeamReceive(const uint64_t *handle, int64_t milliseconds,
   TableOf(handle, "receive");
   int64_t team{TeamOf(handle)};
   if (team != __gpu_block_id_x()) {
-    Fail(0, Text{}
-                .Append("Software Error: receive: team ")
-                .Append(static_cast<int64_t>(__gpu_block_id_x()))
-                .Append(" received from the mailbox of team ")
-                .Append(team)
-                .characters);
+    FailWith(0,
+        "Software Error: receive: team %d received from the mailbox of team "
+        "%d",
+        "", static_cast<int64_t>(__gpu_block_id_x()), team);
   }
   auto *ring{reinterpret_cast<TeamRing *>(handle[4])};
   if (TeamTake(ring, message)) {
@@ -1818,12 +1791,10 @@ extern "C" uint64_t *merk_device_team_mailbox(int64_t team, uint64_t key) {
     Fail(1, "team_mailbox on a device outside a target teams region");
   }
   if (team < 0 || team >= table->teams) {
-    Fail(0, Text{}
-                .Append("Software Error: team_mailbox: the team number, ")
-                .Append(team)
-                .Append(", is not from 0 to ")
-                .Append(table->teams - 1)
-                .characters);
+    FailWith(0,
+        "Software Error: team_mailbox: the team number, %d, is not from 0 to "
+        "%d",
+        "", team, static_cast<int64_t>(table->teams - 1));
   }
   TeamRing *ring{TeamRingOf(table, team, key)};
   auto *handle{static_cast<uint64_t *>(merk_device_alloc(5 * sizeof(uint64_t)))};
