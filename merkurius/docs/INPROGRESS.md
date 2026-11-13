@@ -5073,17 +5073,15 @@ eight GPUs that others use too, of which 3 or 4 are ours (the user,
   2026-11-13: a process's code is marked `"amdgpu-single-lane"` and AMDGPU's
   code generation keeps its values in scalar registers (design document,
   calling convention, "A GPU process's code runs on one lane"; Measurements,
-  "GPU processes' stacks"), so `life-places.m`'s places fit in 1376 bytes a
-  lane and the work-stealing example in 912. Open:
-  - What is left of the frames is mostly callee-saved vector registers,
-    many holding constants made once at a function's entry and kept across
-    its calls. Making them again where used, or fewer callee-saved
-    registers in a process's code, would shrink the frames further.
+  "GPU processes' stacks"), and with constants kept in loops that make
+  calls, the device runtime's process-only functions marked, and error texts
+  built on the host, `life-places.m`'s places fit in 784 bytes a lane and the
+  work-stealing example in 496. Open:
   - gfx90a: ROCr keeps scratch bound to a queue only up to
     `HSA_SCRATCH_SINGLE_LIMIT`, 140 MiB, over every wave slot of the GPU
     (scratch can hold teams back, above), 104 CUs × 32 slots × 64 lanes
-    there, about 690 bytes a lane, against 1792 on the gfx1030, so 912 or
-    1376 may hold teams back. Raising the limit from the runtime before ROCr
+    there, about 690 bytes a lane, against 1792 on the gfx1030, so the
+    places' 784 may hold teams back, though the example's 496 should not. Raising the limit from the runtime before ROCr
     starts, 1 KiB a lane being 208 MiB of a die's 64 GB, is the other half.
     But tried 2026-11-13 on the gfx1030: the work-stealing example, 992
     bytes fixed and a dynamic stack over the whole GPU, ran with the limit

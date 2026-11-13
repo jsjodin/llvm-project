@@ -26,6 +26,7 @@
 #include "process.h"
 #include "rpc-opcodes.h"
 #include "shared/rpc.h"
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -521,15 +522,65 @@ DeviceRing *NewRing(int device) {
   return ring;
 }
 
+// `text` followed by `detail`, of the sizes given, in a block of Malloc's.
+char *Join(const char *text, std::uint64_t size, const char *detail,
+    std::uint64_t detailSize) {
+  auto *joined{static_cast<char *>(Malloc(size + detailSize + 1))};
+  std::memcpy(joined, text, size);
+  std::memcpy(joined + size, detail, detailSize);
+  joined[size + detailSize] = '\0';
+  return joined;
+}
+
+// A device's error text (rpc-opcodes.h, rpcFail): `format` with each %d
+// replaced by the next of the `count` numbers and %s by `detail`, in a block
+// of Malloc's. A %d past the numbers stays as it is.
+char *Format(const char *format, const char *detail,
+    const std::int64_t *numbers, std::uint64_t count) {
+  // At most 20 characters a number, and the detail for each %s.
+  std::uint64_t size{std::strlen(format) + 1};
+  for (const char *c{format}; *c; ++c) {
+    if (c[0] == '%' && c[1] == 's') {
+      size += std::strlen(detail);
+    }
+  }
+  size += 20 * count;
+  auto *text{static_cast<char *>(Malloc(size))};
+  char *end{text};
+  std::uint64_t next{0};
+  for (const char *c{format}; *c; ++c) {
+    if (c[0] == '%' && c[1] == 'd' && next < count) {
+      end += std::snprintf(end, size - (end - text), "%lld",
+          static_cast<long long>(numbers[next++]));
+      ++c;
+    } else if (c[0] == '%' && c[1] == 's') {
+      std::uint64_t length{std::strlen(detail)};
+      std::memcpy(end, detail, length);
+      end += length;
+      ++c;
+    } else {
+      *end++ = *c;
+    }
+  }
+  *end = '\0';
+  return text;
+}
+
 // An error on a device, reported for its first lane that has one, as the
 // host reports the same. A region is running, so the program ends at once
 // (ExitProgram), with the kernel, and the device gets no answer.
 [[noreturn]] void ReportDeviceFailure(rpc::Server::Port &port) {
   std::uint64_t kinds[64]{};
+  std::uint64_t counts[64]{};
+  std::int64_t numbers[64][kFailNumbers]{};
   std::uint64_t sizes[64]{};
   void *texts[64]{};
   port.recv([&](rpc::Buffer *buffer, std::uint32_t lane) {
     kinds[lane] = buffer->data[0];
+    counts[lane] = std::min<std::uint64_t>(buffer->data[1], kFailNumbers);
+    for (std::uint64_t i{0}; i < counts[lane]; ++i) {
+      numbers[lane][i] = static_cast<std::int64_t>(buffer->data[2 + i]);
+    }
   });
   port.recv_n(texts, sizes, [](std::uint64_t size) { return Malloc(size + 1); });
   // What follows the text, which the device sends apart (device.cpp, Fail).
@@ -541,11 +592,12 @@ DeviceRing *NewRing(int device) {
     if (!texts[lane]) {
       continue;
     }
-    auto *text{
-        static_cast<char *>(Malloc(sizes[lane] + detailSizes[lane] + 1))};
-    std::memcpy(text, texts[lane], sizes[lane]);
-    std::memcpy(text + sizes[lane], details[lane], detailSizes[lane]);
-    text[sizes[lane] + detailSizes[lane]] = '\0';
+    char *text{counts[lane] == 0
+            ? Join(static_cast<const char *>(texts[lane]), sizes[lane],
+                  static_cast<const char *>(details[lane]), detailSizes[lane])
+            : Format(static_cast<const char *>(texts[lane]),
+                  static_cast<const char *>(details[lane]), numbers[lane],
+                  counts[lane])};
     if (kinds[lane] == 0) {
       merk_uncaught_exception(text);
     }

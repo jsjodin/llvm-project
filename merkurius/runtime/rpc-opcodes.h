@@ -94,7 +94,16 @@ constexpr uint32_t rpcSendTerm{RpcOpcode(9)};
 // the ring's head, after which the host frees the copy.
 constexpr uint32_t rpcTakeTerm{RpcOpcode(11)};
 
+// An error that ends the program (device.cpp, FailWith): the buffer's words
+// are its kind, how many numbers it has, and the numbers, then the device
+// sends a format and a detail. With no numbers the text is the format
+// followed by the detail; with numbers, each %d of the format is the next
+// number and %s the detail. The host ends the program and does not answer.
 constexpr uint32_t rpcFail{RpcOpcode(10)};
+
+// The most numbers an error's text takes: the buffer's words after its kind
+// and their count.
+constexpr uint64_t kFailNumbers{6};
 
 // How long the teams of a region with team mailboxes wait for another of
 // them to start before the region is reported, which a team asks once it

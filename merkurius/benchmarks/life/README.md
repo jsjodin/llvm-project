@@ -218,7 +218,7 @@ the last step, as the outcome reads the live cells that a step counts.
 It prints how many tiles moved, after `life-sparse.m`'s output.
 
 The first argument `host` spawns the places at the host. On the GPU, the
-places' calls take 1376 bytes of stack a lane, and 1296 without
+places' calls take 784 bytes of stack a lane, with or without
 `-fopenmp`, within a GPU process's 1536.
 
 ## Tests
