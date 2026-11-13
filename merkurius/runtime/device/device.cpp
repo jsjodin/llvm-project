@@ -703,13 +703,26 @@ extern "C" void *merk_device_alloc_aligned(uint64_t bytes, uint64_t before) {
       cell + ((kAlign - (cell + before) % kAlign) % kAlign));
 }
 
-// Frees a cell or an array that a GPU process made or received, with the
-// rest of its message if it is part of one (Block). In a region, and for a
-// worker team's block, it does nothing: their memory goes when the region
-// or the process ends.
+// The section of static cells and strings that lowering makes on a device
+// (Lowering.cpp, kStaticSection), by the symbols that the linker defines
+// for it, or null if the image has none.
+extern "C"
+    [[gnu::weak, gnu::visibility("hidden")]] const char __start_merk_static[];
+extern "C"
+    [[gnu::weak, gnu::visibility("hidden")]] const char __stop_merk_static[];
+
+// Frees a cell, an array or a string that a GPU process made or received,
+// with the rest of its message if it is part of one (Block). A static cell
+// or string, and in a region, and for a worker team's block, it leaves
+// alone: their memory goes when the image, the region or the process does.
 extern "C" void merk_device_free(void *bytes) {
   if (!bytes || !MakesBlocks() ||
       !processWaves[__gpu_thread_id_x() / __gpu_num_lanes()]) {
+    return;
+  }
+  auto address{reinterpret_cast<uintptr_t>(bytes)};
+  if (address >= reinterpret_cast<uintptr_t>(__start_merk_static) &&
+      address < reinterpret_cast<uintptr_t>(__stop_merk_static)) {
     return;
   }
   Block *block{BlockOf(bytes)};

@@ -4857,7 +4857,15 @@ process's lane:
   takes a chunk of the arenas.
 - (f2) `merk.free` and its lowering on the device: the cell's pointer
   from its tagged word, a constant's word left alone; static cells and
-  string literals in their section.
+  string literals in their section. Done 2026-11-13: `merk.free` is lowered
+  after the terms, while its value keeps its merk type, which says how:
+  an array's or a string's pointer, a term's word without its tag, null
+  for a constant's word; an enumeration's term and a record by value are
+  not freed. Only a GPU process's compile frees; elsewhere the operation
+  goes. The section is `merk_static`, which `merk_device_free` finds by
+  `__start_merk_static` and `__stop_merk_static`. Tests:
+  `test/Dialect/Merk/free.mlir`, and `test/CodeGen/process-free.m`, where
+  a foreign_proc frees, until the pass does.
 - (f3) The pass, with merk-level tests of where it frees, and a runtime
   test: a GPU process that receives a million messages, each with an
   array, and makes an array for each answer, in bounded memory, at the

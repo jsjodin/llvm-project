@@ -121,6 +121,11 @@ struct TermLayout {
   }
 };
 
+// In a GPU process's image, the section of static cells and strings, which
+// merk_device_free leaves alone, as it finds by the section's __start_ and
+// __stop_ symbols (runtime/device/device.cpp).
+constexpr llvm::StringLiteral kStaticSection{"merk_static"};
+
 constexpr unsigned kTagBits{3};
 constexpr unsigned kTags{1u << kTagBits};
 
@@ -320,6 +325,11 @@ private:
   // Lowers mrt's operations to the LLVM dialect's.
   void LowerMrt();
   void LowerAlloc(mrt::AllocOp);
+  llvm::LogicalResult LowerFree(merk::FreeOp);
+  // A call of merk_device_free with the cell, array or string of `value`,
+  // the lowered value of a merk value of the type, unless it is a constant.
+  llvm::LogicalResult FreeValue(
+      mlir::Value value, mlir::Type type, mlir::Operation *op);
   // The thread's heap pointer and limit (runtime/heap.h).
   // A switch on a word: `to` by their values, or else to `otherwise`.
   void SwitchOn(mlir::Value value,
@@ -1024,6 +1034,9 @@ mlir::LLVM::GlobalOp Lowerer::StaticCell(const TermLayout::Functor &functor,
       "merk.term." + std::to_string(staticCells_.size() - 1), mlir::Attribute{},
       /*alignment=*/8);
   cell.setUnnamedAddr(mlir::LLVM::UnnamedAddr::Global);
+  if (kernels_) {
+    cell.setSection(kStaticSection);
+  }
   rewriter_.createBlock(&cell.getInitializerRegion());
   mlir::Value init{mlir::LLVM::ZeroOp::create(rewriter_, loc, cellType)};
   for (auto [i, value] : llvm::enumerate(values)) {
@@ -2864,6 +2877,9 @@ mlir::LLVM::GlobalOp Lowerer::StringGlobal(llvm::StringRef value, mlir::Location
         "merk.str." + std::to_string(strings_.size() - 1),
         rewriter_.getStringAttr(bytes));
     global.setUnnamedAddr(mlir::LLVM::UnnamedAddr::Global);
+    if (kernels_) {
+      global.setSection(kStaticSection);
+    }
   }
   return global;
 }
@@ -4269,6 +4285,77 @@ mlir::LLVM::LLVMFuncOp Lowerer::HeapAddressFunc() {
   return func;
 }
 
+// merk.free: only a GPU process's compile frees, by merk_device_free; the
+// host's collector and a target region's arena need nothing.
+llvm::LogicalResult Lowerer::LowerFree(merk::FreeOp free) {
+  rewriter_.setInsertionPoint(free);
+  if (kernels_ &&
+      mlir::failed(FreeValue(LoweredValue(free.getValue(), free.getLoc()),
+          free.getValue().getType(), free))) {
+    return llvm::failure();
+  }
+  rewriter_.eraseOp(free);
+  return llvm::success();
+}
+
+llvm::LogicalResult Lowerer::FreeValue(
+    mlir::Value value, mlir::Type type, mlir::Operation *op) {
+  mlir::Location loc{op->getLoc()};
+  auto i64{rewriter_.getI64Type()};
+  auto heap{HeapPointer()};
+  mlir::Value cell;
+  if (mlir::isa<merk::ArrayType, merk::StringType>(type)) {
+    cell = value;
+  } else if (mlir::isa<merk::RecordType>(type)) {
+    // A record by value holds no pointer.
+    return llvm::success();
+  } else if (mlir::isa<merk::TermType>(type)) {
+    const TermLayout *layout{LayoutOf(type)};
+    if (!layout) {
+      return op->emitOpError("frees a term of a type with no merk.type_def");
+    }
+    if (layout->kind == TermLayout::Kind::Enum) {
+      return llvm::success();
+    }
+    if (layout->kind == TermLayout::Kind::NoTag) {
+      // The term is its one field.
+      return FreeValue(value, layout->functors.front().fields.front(), op);
+    }
+    // The cell, from the term's word without its tag, or null for a
+    // constant's word.
+    mlir::Value word{
+        mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, value)};
+    mlir::Value constant;
+    for (const TermLayout::Functor &functor : layout->functors) {
+      if (functor.arity != 0) {
+        continue;
+      }
+      mlir::Value is{WordsEqual(word,
+          mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, functor.value),
+          loc)};
+      constant = constant
+          ? mlir::LLVM::OrOp::create(rewriter_, loc, constant, is).getResult()
+          : is;
+    }
+    mlir::Value untagged{mlir::LLVM::AndOp::create(rewriter_, loc, word,
+        mlir::LLVM::ConstantOp::create(
+            rewriter_, loc, i64, ~static_cast<std::int64_t>(kTags - 1)))};
+    if (constant) {
+      untagged = mlir::LLVM::SelectOp::create(rewriter_, loc, constant,
+          mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 0), untagged);
+    }
+    cell = mlir::LLVM::IntToPtrOp::create(rewriter_, loc, heap, untagged);
+  } else {
+    return op->emitOpError("frees a value of type ")
+        << type << ", which has no cell, array or string";
+  }
+  mlir::LLVM::CallOp::create(rewriter_, loc,
+      RuntimeFunc("merk_device_free",
+          mlir::LLVM::LLVMVoidType::get(module_.getContext()), {heap}),
+      mlir::ValueRange{cell});
+  return llvm::success();
+}
+
 // An allocation bumps the heap's pointer if the cell fits before its limit,
 // and otherwise calls the runtime (runtime/heap.h). On an OpenMP device,
 // which has no heap of ours, it calls the device's runtime, which takes the
@@ -4768,6 +4855,15 @@ llvm::LogicalResult Lowerer::Lower() {
   }
   if (mlir::failed(LowerTerms())) {
     return llvm::failure();
+  }
+  // While the values still have their merk types, which say how to free
+  // them.
+  llvm::SmallVector<merk::FreeOp> frees;
+  module_.walk([&](merk::FreeOp free) { frees.push_back(free); });
+  for (merk::FreeOp free : frees) {
+    if (mlir::failed(LowerFree(free))) {
+      return llvm::failure();
+    }
   }
   for (auto proc : llvm::make_early_inc_range(module_.getOps<merk::ProcOp>())) {
     LowerProc(proc);
