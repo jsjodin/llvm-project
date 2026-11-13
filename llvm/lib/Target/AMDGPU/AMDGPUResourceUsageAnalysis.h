@@ -45,6 +45,9 @@ public:
     bool HasIndirectCall = false;
     bool HasNonChainIndirectCall = false;
     SmallVector<const Function *, 16> Callees;
+    // The callees that are called other than by a tail call. A tail call's
+    // callee runs in place of the caller's frame, not below it.
+    SmallPtrSet<const Function *, 16> NonTailCallees;
   };
 
   SIFunctionResourceInfo

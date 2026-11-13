@@ -354,9 +354,12 @@ void MCResourceInfo::gatherResourceInfo(
   SetMaxReg(MaxNamedBarrierSym, FRI.NumNamedBarrier, RIK_NumNamedBarrier);
 
   {
-    // The expression for private segment size should be: FRI.PrivateSegmentSize
-    // + max(FRI.Callees, FRI.CalleeSegmentSize)
+    // The expression for private segment size should be:
+    // max(FRI.PrivateSegmentSize + max(non-tail callees,
+    // FRI.CalleeSegmentSize), tail callees), as a tail call's callee runs in
+    // place of the caller's frame.
     SmallVector<const MCExpr *, 8> ArgExprs;
+    SmallVector<const MCExpr *, 8> TailExprs;
     MCSymbol *Sym = getSymbol(FnSym->getName(), RIK_PrivateSegSize, OutContext);
     if (FRI.CalleeSegmentSize) {
       LLVM_DEBUG(dbgs() << "MCResUse:   " << Sym->getName() << ": Adding "
@@ -381,9 +384,12 @@ void MCResourceInfo::gatherResourceInfo(
         if (!CalleeValSym->isVariable() ||
             !AMDGPUMCExpr::isSymbolUsedInExpression(
                 Sym, CalleeValSym->getVariableValue())) {
+          bool IsTail = !FRI.NonTailCallees.contains(Callee);
           LLVM_DEBUG(dbgs() << "MCResUse:   " << Sym->getName() << ": Adding "
-                            << CalleeValSym->getName() << " as callee\n");
-          ArgExprs.push_back(MCSymbolRefExpr::create(CalleeValSym, OutContext));
+                            << CalleeValSym->getName()
+                            << (IsTail ? " as tail callee\n" : " as callee\n"));
+          (IsTail ? TailExprs : ArgExprs)
+              .push_back(MCSymbolRefExpr::create(CalleeValSym, OutContext));
         }
       }
     }
@@ -397,6 +403,10 @@ void MCResourceInfo::gatherResourceInfo(
           AMDGPUMCExpr::createMax(ArgExprs, OutContext);
       localConstExpr =
           MCBinaryExpr::createAdd(localConstExpr, transitiveExpr, OutContext);
+    }
+    if (!TailExprs.empty()) {
+      TailExprs.push_back(localConstExpr);
+      localConstExpr = AMDGPUMCExpr::createMax(TailExprs, OutContext);
     }
     Sym->setVariableValue(localConstExpr);
   }

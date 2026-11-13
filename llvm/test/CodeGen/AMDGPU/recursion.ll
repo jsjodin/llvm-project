@@ -22,7 +22,8 @@ define void @tail_recursive() {
   ret void
 }
 
-; CHECK: .set .Lcalls_tail_recursive.private_seg_size, 0+max(.Ltail_recursive.private_seg_size)
+; A tail call's callee replaces the caller's frame rather than nesting below it.
+; CHECK: .set .Lcalls_tail_recursive.private_seg_size, max(.Ltail_recursive.private_seg_size, 0)
 define void @calls_tail_recursive() norecurse {
   tail call void @tail_recursive()
   ret void

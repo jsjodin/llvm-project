@@ -249,8 +249,11 @@ AMDGPUResourceUsageAnalysisImpl::analyzeResourceUsage(
           return F == &MF.getFunction();
         };
 
-        if (Callee && !isSameFunction(MF, Callee))
+        if (Callee && !isSameFunction(MF, Callee)) {
           Info.Callees.push_back(Callee);
+          if (!MI.isReturn())
+            Info.NonTailCallees.insert(Callee);
+        }
 
         bool IsIndirect = !Callee || Callee->isDeclaration();
         Info.HasIndirectCall |= IsIndirect;
