@@ -452,6 +452,19 @@ extern "C" void *merk_device_alloc(uint64_t bytes) {
   return Allocate(CurrentBump(), bytes);
 }
 
+// The same for a large array, whose elements start `before` bytes into it,
+// after its header words: they start on 256 bytes, which streaming loads and
+// stores want (design document, Measurements, "Where an array's elements
+// start"), at a cost of at most 248 bytes. A cell is 8-byte aligned, so it
+// takes those more and starts where its elements will be aligned.
+extern "C" void *merk_device_alloc_aligned(uint64_t bytes, uint64_t before) {
+  constexpr uint64_t kAlign{256};
+  auto cell{reinterpret_cast<uint64_t>(
+      merk_device_alloc(bytes + kAlign - sizeof(uint64_t)))};
+  return reinterpret_cast<void *>(
+      cell + ((kAlign - (cell + before) % kAlign) % kAlign));
+}
+
 namespace {
 
 // Reports an error that ends the program, as the host reports the same:

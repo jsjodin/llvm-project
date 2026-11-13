@@ -130,8 +130,9 @@ MERK_DEVICE_ARENA_BYTES=2147483648 ./process
 VGPRs and so runs a quarter of the waves; with the kernel capped at 128 they
 were within 14%, and Copy faster. A loop costs about 2 µs, a target region
 about 16. The numbers are in the design document, Measurements, "Memory
-bandwidth". `test/Benchmarks/bandwidth-process-gpu.test` runs it on small
-arrays.
+bandwidth". Since 2026-11-13 the process's arrays have their elements on
+256 bytes, which made Copy 11% faster, 537 GB/s on half the units, level with
+C. `test/Benchmarks/bandwidth-process-gpu.test` runs it on small arrays.
 
 ## Differences from BabelStream
 

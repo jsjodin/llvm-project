@@ -23,6 +23,7 @@
 // The device has no heap of ours: its arrays are in its arena, as its
 // cells are (device/device.cpp).
 extern "C" void *merk_device_alloc(uint64_t bytes);
+extern "C" void *merk_device_alloc_aligned(uint64_t bytes, uint64_t before);
 #else
 #include "heap.h"
 #include <cinttypes>
@@ -36,6 +37,7 @@ using merkurius::runtime::ArrayCodeOf;
 using merkurius::runtime::ArrayElementBytes;
 using merkurius::runtime::ArrayElements;
 using merkurius::runtime::ArrayHeader;
+using merkurius::runtime::ArrayHeaderWords;
 using merkurius::runtime::ArraySize;
 using merkurius::runtime::ArrayWidthCode;
 using merkurius::runtime::ArrayWords;
@@ -63,6 +65,22 @@ void *AllocateBytes(Word bytes) {
 #endif
 }
 
+// The bytes of an array, of `headers` header words. On the device a large
+// array's elements start on 256 bytes (device/device.cpp,
+// merk_device_alloc_aligned); a small one's would waste too much of its
+// cell.
+void *AllocateArrayBytes(Word bytes, Word headers) {
+#ifdef __AMDGPU__
+  constexpr Word kAlignFrom{4096};
+  if (bytes >= kAlignFrom) {
+    return merk_device_alloc_aligned(bytes, sizeof(Word) * headers);
+  }
+#else
+  (void)headers;
+#endif
+  return AllocateBytes(bytes);
+}
+
 // An array of `size` elements of the width's code, of `recordBytes` each
 // for records, whose last word, which the elements may not fill, is 0, so
 // that an array's bytes depend only on its elements.
@@ -71,7 +89,8 @@ Word *Allocate(int64_t size, Word code, Word recordBytes = 0) {
   Word bytes{static_cast<Word>(size) *
       (code == kArrayRecords ? recordBytes : ElementBytes(code))};
   Word words{headers + (bytes + sizeof(Word) - 1) / sizeof(Word)};
-  auto *array{static_cast<Word *>(AllocateBytes(sizeof(Word) * words))};
+  auto *array{
+      static_cast<Word *>(AllocateArrayBytes(sizeof(Word) * words, headers))};
   array[0] = ArrayHeader(static_cast<Word>(size), code);
   if (code == kArrayRecords) {
     array[1] = recordBytes;
@@ -170,7 +189,8 @@ extern "C" Word *merk_array_new_bytes(
 
 extern "C" Word *merk_array_copy(const Word *array) {
   Word words{ArrayWords(array)};
-  auto *copy{static_cast<Word *>(AllocateBytes(sizeof(Word) * words))};
+  auto *copy{static_cast<Word *>(
+      AllocateArrayBytes(sizeof(Word) * words, ArrayHeaderWords(array)))};
   __builtin_memcpy(copy, array, sizeof(Word) * words);
   return copy;
 }
