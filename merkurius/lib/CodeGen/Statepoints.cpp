@@ -403,6 +403,54 @@ static void RecordTypes(llvm::Function &function, KnownTypes &known) {
       worklist.push_back(&argument);
     }
   }
+  // A call's results', from its note (Lowering, notifyOperationReplaced): a
+  // result that no bundle lists, which the optimizer kept live past a
+  // safepoint, as when it sank a call that only reads its bits after an
+  // allocation. A result of a call that returns several is the pointer that
+  // FlattenResults made of its field.
+  for (llvm::Instruction &instruction : llvm::instructions(function)) {
+    auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)};
+    if (!call || !call->hasFnAttr(kResultTypesAttrName)) {
+      continue;
+    }
+    llvm::SmallVector<llvm::StringRef> entries;
+    call->getFnAttr(kResultTypesAttrName)
+        .getValueAsString()
+        .split(entries, ' ');
+    for (llvm::StringRef entry : entries) {
+      auto [position, index]{entry.split(':')};
+      unsigned field{0};
+      std::int64_t number{0};
+      if (position.getAsInteger(10, field) || index.getAsInteger(10, number)) {
+        continue;
+      }
+      llvm::Constant *type{llvm::ConstantInt::getSigned(
+          llvm::Type::getInt64Ty(function.getContext()), number)};
+      auto record{[&](const llvm::Value *value) {
+        if (IsHeapPointer(value->getType()) &&
+            known.insert({value, type}).second) {
+          worklist.push_back(value);
+        }
+      }};
+      if (!call->getType()->isStructTy()) {
+        record(call);
+        continue;
+      }
+      for (const llvm::User *user : call->users()) {
+        auto *extract{llvm::dyn_cast<llvm::ExtractValueInst>(user)};
+        if (!extract || extract->getNumIndices() != 1 ||
+            extract->getIndices()[0] != field) {
+          continue;
+        }
+        record(extract);
+        for (const llvm::User *pointer : extract->users()) {
+          if (llvm::isa<llvm::IntToPtrInst>(pointer)) {
+            record(pointer);
+          }
+        }
+      }
+    }
+  }
   for (llvm::Instruction &instruction : llvm::instructions(function)) {
     auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)};
     auto deopt{call ? call->getOperandBundle(llvm::LLVMContext::OB_deopt)
@@ -1423,6 +1471,11 @@ void DropRootTypeNotes(llvm::Module &module) {
   for (llvm::Function &function : module) {
     for (llvm::Argument &argument : function.args()) {
       function.removeParamAttr(argument.getArgNo(), kRootTypeAttrName);
+    }
+    for (llvm::Instruction &instruction : llvm::instructions(function)) {
+      if (auto *call{llvm::dyn_cast<llvm::CallBase>(&instruction)}) {
+        call->removeFnAttr(kResultTypesAttrName);
+      }
     }
   }
   if (llvm::NamedMDNode * node{module.getNamedMetadata(kFieldTypes)}) {
