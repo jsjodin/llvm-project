@@ -107,6 +107,11 @@ inline constexpr llvm::StringLiteral kRootTable{"merk.root_types"};
 // A procedure's argument's root type, an index in kRootTable, as a string
 // attribute of the argument (Statepoints, RecordTypes).
 inline constexpr llvm::StringLiteral kRootTypeAttrName{"merk.root_type"};
+// The root types of a call's results, as a string attribute of the call:
+// "position:index" for each result of a monomorphic root type, its position
+// in the struct the call returns, or 0 for a call that returns it alone
+// (Lowering, Lowerer::notifyOperationReplaced; Statepoints, RecordTypes).
+inline constexpr llvm::StringLiteral kResultTypesAttrName{"merk.result_types"};
 // Named metadata of (cell's root type, offset of a field from the tagged
 // pointer, the field's root type), for a pointer loaded from a field that the
 // optimizer keeps live past a safepoint (Statepoints, FindType).
