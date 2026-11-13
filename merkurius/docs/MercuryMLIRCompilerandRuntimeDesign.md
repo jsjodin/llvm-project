@@ -3573,7 +3573,15 @@ above. This brings them back.
     the module that it calls, makes, but for `io.state`, `any`, a receive's
     selector, which code generation removes, and what a send or receive
     passes, which is checked as a message. A procedure of another module is
-    checked by what it gives back.
+    checked by what it gives back. An array of mailboxes is such a value
+    too, though no message: it holds handles, each a cell of the message
+    that brought it or of the process's words, and the code keeps it to
+    send to its peers by their numbers, as the places of step 5 of the demo
+    do (2026-11-13, `test/CodeGen/process-mailbox-arrays.m`, a ring of
+    processes, at the host and on the GPU). Freeing at the last use leaves
+    alone the messages whose handles such an array holds, as storing a
+    value in an array joins it to the array's class (Memory that a GPU
+    process gives back), and frees the array alone.
   - Each problem is reported once, at the goal, naming the type and why:
     "recursive", "a higher-order type", "has no fixed size, which only a
     whole message may have", and so on. Tests:
