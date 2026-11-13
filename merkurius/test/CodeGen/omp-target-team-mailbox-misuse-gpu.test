@@ -1,0 +1,11 @@
+Misuses of team mailboxes on the machine's GPU end the program with a
+Software Error that gives the teams' numbers, which the host puts into the
+device's text (device.cpp, FailWith; offload.cpp, Format), so that no buffer
+on the device's stack holds it.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/Inputs/omp-target-team-mailbox-misuse.m -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY not timeout -k 1 60 %t range 2>&1 | FileCheck %s --check-prefix=RANGE
+RANGE: Software Error: team_mailbox: the team number, 5, is not from 0 to 1
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY not timeout -k 1 60 %t other 2>&1 | FileCheck %s --check-prefix=OTHER
+OTHER: Software Error: receive: team 1 received from the mailbox of team 0

@@ -5036,6 +5036,22 @@ them, which took `merk_place` from 1056 to 912 bytes a lane: `CopyTyped`'s
 frame went from 208 to 96 bytes and `merk_device_send_term`'s from 112 to
 96.
 
+The deepest call then ended in an error's report: the device built an
+error's text in a buffer of 160 characters on the stack (`Text`), 176 bytes
+a lane of `OutOfDeviceMemory`'s frame, which every process's stack had to
+leave room for, though the report ends the program. The device now sends a
+constant format, up to six numbers in the RPC buffer's words, and a detail,
+and the host puts the numbers at the format's `%d` and the detail at its
+`%s` (`runtime/device/device.cpp`, `FailWith`; `runtime/offload.cpp`,
+`Format`). With all three changes, 2026-11-13 at the commit before this one
+and the change:
+
+| Program | `"amdgpu-single-lane"` | And the three |
+|---|---|---|
+| `life-places.m`, loops in the image (`-fopenmp`) | 1376 | 784 |
+| `life-places.m`, sequential | 1296 | 784 |
+| `work_stealing.m` | 912 | 496 |
+
 ### Heap pointers in an address space of their own
 
 Measured on 2026-11-08, commit 559bb24685ad against 5df05bc20023, the commit
