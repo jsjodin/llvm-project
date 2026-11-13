@@ -4897,6 +4897,42 @@ process tenfold. An idle wave now doubles its sleep up to 64 `s_sleep 127`
 between looks, and resets when its slot changes, so a spawn waits for its
 wave at most about 225 µs.
 
+### A GPU process's blocks
+
+`benchmarks/frees`, on the gfx1030 with `LIBOMPTARGET_AMDGPU_CU_MASK=0-39`,
+2026-11-13, at 209a84465edc (the change to `Frees.cpp` after it touches no
+code the benchmark runs), Firefox closed. One GPU process; the host times
+each measurement less one round trip; microseconds a round, the median of
+3 runs, which were within 3% of each other.
+
+| Each round | µs |
+|---|---|
+| A message to the process and its answer, through the host | 26.2 |
+| 4 KiB block, `merk_device_alloc` and `merk_device_free` | 3.97 |
+| 4 KiB, libc's `malloc` and `free` alone | 3.07 |
+| 4 MiB block, from the cache of large blocks after the first | 2.03 |
+| 4 MiB, libc alone, which asks the host for each | 61.2 |
+| 4 MiB, a size no cache has: libc's `malloc`, then into the cache | 46.7 |
+| 4 MiB, a size no cache has, libc alone | 65.3 |
+| `array.init` of 512 ints, freed at its last use | 6.86 |
+| `array.init` of 524288 ints (4 MiB) | 2597 |
+
+- A small block costs about a seventh of a message's round trip: a
+  process that makes a few arrays for each message spends little of its
+  time on them. libc's own `malloc` and `free` cost 2 to 3 µs from one lane,
+  in the latency of its atomics on global memory.
+- The runtime's path adds about 1 µs to libc's, at any size: of that,
+  about 0.15 µs are the atomics that count the bytes a process holds (a run
+  without them gave 3.80 µs), and the rest is the chain of dependent loads
+  and stores of the block's header, the process's arena and its list, from
+  one lane.
+- The cache of large blocks makes a 4 MiB block 30 times cheaper than
+  libc's, which asks the host for each; it is cheaper than a small block,
+  since it takes no atomics but its lock's.
+- Filling a 4 MiB array from the process's one lane takes 2.6 ms, a
+  thousand times what its block costs: `array.init` stores each element in
+  turn (INPROGRESS, Memory that a GPU process gives back, "Open").
+
 ### Heap pointers in an address space of their own
 
 Measured on 2026-11-08, commit 559bb24685ad against 5df05bc20023, the commit
