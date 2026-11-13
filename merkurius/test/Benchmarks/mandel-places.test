@@ -1,0 +1,50 @@
+mandel-places.m's zoom with its places spawned at the host (docs/INPROGRESS.md,
+step 4 of the demo, (m3)): every policy, with one, three and four places,
+gives the iterations and checksum of mandel.py, as mandel.m does
+(mandel.test), on 64 pixels square in tiles of 8 for 12 frames and on 96 in
+tiles of 32 for 20, whose frames are not a power of two tiles across. The
+static split gives each place its rows' share and hands nothing over; three
+places share a frame's 64 tiles as 21, 21 and 22. Sequential, at -O0 and
+-O2, and with the tiles' loops on the host's threads at -O2. The -O0 build
+has no --offload-arch, as mandel.test's.
+REQUIRES: amdgpu-registered-target, libomp
+RUN: merkc -O0 -fdo-loops -fprocess-declarations %libomp-flags %S/../../benchmarks/mandel/mandel-places.m -o %t0
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/mandel/mandel-places.m -o %t2
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/mandel/mandel-places.m -o %t.omp
+
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 %t0 host | FileCheck %s --check-prefixes=STEAL3,SMALL
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 MANDEL_POLICY=pool %t0 host | FileCheck %s --check-prefixes=SMALL
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 MANDEL_POLICY=static %t2 host | FileCheck %s --check-prefixes=STATIC3,SMALL
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=4 %t2 host | FileCheck %s --check-prefixes=SMALL
+
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=1 MANDEL_POLICY=static %t.omp host | FileCheck %s --check-prefixes=STATIC1,SMALL
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 MANDEL_POLICY=static %t.omp host | FileCheck %s --check-prefixes=STATIC3,SMALL
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=1 %t.omp host | FileCheck %s --check-prefixes=SMALL
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 %t.omp host | FileCheck %s --check-prefixes=STEAL3,SMALL
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=4 %t.omp host | FileCheck %s --check-prefixes=SMALL
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=1 MANDEL_POLICY=pool %t.omp host | FileCheck %s --check-prefixes=SMALL
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=4 MANDEL_POLICY=pool MANDEL_CHUNK=1 %t.omp host | FileCheck %s --check-prefixes=SMALL
+STEAL3: Mandelbrot zoom, Mercury, 3 places, steal
+STEAL3-NEXT: Frames: 12 of 64 x 64 pixels, tiles of 8 x 8
+SMALL: Iterations: 10601425
+SMALL-NEXT: Checksum: 63198496
+STATIC1: Tiles handed: 0
+STATIC1-NEXT: Place 0: 768 tiles
+STATIC1-NEXT: Balance: 1.000
+STATIC3: Tiles handed: 0
+STATIC3-NEXT: Place 0: 252 tiles
+STATIC3-NEXT: Place 1: 252 tiles
+STATIC3-NEXT: Place 2: 264 tiles
+
+RUN: env MANDEL_SIZE=96 MANDEL_FRAMES=20 %python %S/../../benchmarks/mandel/mandel.py | FileCheck %s --check-prefix=WIDE
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=96 MANDEL_TILE=32 MANDEL_FRAMES=20 MANDEL_POLICY=static %t.omp host | FileCheck %s --check-prefix=WIDE
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=96 MANDEL_TILE=32 MANDEL_FRAMES=20 %t.omp host | FileCheck %s --check-prefix=WIDE
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=96 MANDEL_TILE=32 MANDEL_FRAMES=20 MANDEL_POLICY=pool %t.omp host | FileCheck %s --check-prefix=WIDE
+WIDE: Iterations: 40558981
+WIDE-NEXT: Checksum: 439270775
+
+RUN: %libomp-env MANDEL_TILE=12 not %t2 host | FileCheck %s --check-prefix=USAGE
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=128 not %t2 host | FileCheck %s --check-prefix=USAGE
+RUN: %libomp-env MANDEL_PLACES=0 not %t2 host | FileCheck %s --check-prefix=USAGE
+RUN: %libomp-env MANDEL_POLICY=random not %t2 host | FileCheck %s --check-prefix=USAGE
+USAGE: MANDEL_TILE must be a power of two that divides MANDEL_SIZE, MANDEL_FRAMES, MANDEL_PLACES and MANDEL_CHUNK at least 1, and MANDEL_POLICY static, steal or pool.
