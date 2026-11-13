@@ -23,8 +23,7 @@
 ; GCN-O0-NEXT: expand-variadics
 ; GCN-O0-NEXT: amdgpu-always-inline
 ; GCN-O0-NEXT: always-inline
-; GCN-O0-NEXT: function
-; GCN-O0-NEXT:   amdgpu-single-lane
+; GCN-O0-NEXT: amdgpu-single-lane
 ; GCN-O0-NEXT: amdgpu-export-kernel-runtime-handles
 ; GCN-O0-NEXT: amdgpu-lower-exec-sync
 ; GCN-O0-NEXT: amdgpu-sw-lower-lds
@@ -127,8 +126,7 @@
 ; GCN-O2-NEXT: expand-variadics
 ; GCN-O2-NEXT: amdgpu-always-inline
 ; GCN-O2-NEXT: always-inline
-; GCN-O2-NEXT: function
-; GCN-O2-NEXT:   amdgpu-single-lane
+; GCN-O2-NEXT: amdgpu-single-lane
 ; GCN-O2-NEXT: amdgpu-export-kernel-runtime-handles
 ; GCN-O2-NEXT: amdgpu-lower-exec-sync
 ; GCN-O2-NEXT: amdgpu-sw-lower-lds
@@ -317,8 +315,7 @@
 ; GCN-O3-NEXT: expand-variadics
 ; GCN-O3-NEXT: amdgpu-always-inline
 ; GCN-O3-NEXT: always-inline
-; GCN-O3-NEXT: function
-; GCN-O3-NEXT:   amdgpu-single-lane
+; GCN-O3-NEXT: amdgpu-single-lane
 ; GCN-O3-NEXT: amdgpu-export-kernel-runtime-handles
 ; GCN-O3-NEXT: amdgpu-lower-exec-sync
 ; GCN-O3-NEXT: amdgpu-sw-lower-lds

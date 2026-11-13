@@ -2209,10 +2209,8 @@ void AMDGPUCodeGenPassBuilder::addIRPasses(PassManagerWrapper &PMW) {
 
   // After inlining, so that what single-lane functions inline is read from
   // their lane too, and before what reads uniformity.
-  if (TM.getTargetTriple().isAMDGCN()) {
-    addFunctionPass(AMDGPUSingleLanePass(), PMW);
-    flushFPMsToMPM(PMW);
-  }
+  if (TM.getTargetTriple().isAMDGCN())
+    addModulePass(AMDGPUSingleLanePass(), PMW);
 
   addModulePass(AMDGPUExportKernelRuntimeHandlesPass(), PMW);
 

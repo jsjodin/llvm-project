@@ -19,7 +19,9 @@
 ///
 /// Code that the function inlines runs with the one lane too, so the pass
 /// runs after inlining, on what the function holds then. A function with the
-/// attribute inlined into one without it simply loses the reads.
+/// attribute inlined into one without it simply loses the reads. A local
+/// function that only functions with the attribute call runs with their one
+/// lane, so the pass gives it the attribute first.
 ///
 /// The pass runs at every optimization level, optnone functions included: a
 /// frontend may need the branches uniform, as a musttail call cannot be
@@ -29,6 +31,7 @@
 
 #include "AMDGPU.h"
 #include "Utils/AMDGPUBaseInfo.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
@@ -106,14 +109,65 @@ bool runSingleLane(Function &F, const TargetTransformInfo &TTI) {
   return Changed;
 }
 
-class AMDGPUSingleLaneLegacy : public FunctionPass {
+/// Whether every use of \p F is a direct call of it.
+bool onlyCalled(const Function &F) {
+  return all_of(F.uses(), [](const Use &U) {
+    const auto *Call = dyn_cast<CallBase>(U.getUser());
+    return Call && Call->isCallee(&U);
+  });
+}
+
+/// Marks "amdgpu-single-lane" each function of the module that only marked
+/// functions call: a local function whose every use is a direct call, as
+/// the device runtime is once LTO has internalized it. Optimistically, so
+/// that functions that call each other are marked when nothing else does.
+bool inferSingleLane(Module &M) {
+  SmallSetVector<Function *, 16> Candidates;
+  for (Function &F : M)
+    if (!F.isDeclaration() && F.hasLocalLinkage() &&
+        !F.hasFnAttribute("amdgpu-single-lane") &&
+        !AMDGPU::isEntryFunctionCC(F.getCallingConv()) && !F.use_empty() &&
+        onlyCalled(F))
+      Candidates.insert(&F);
+  auto IsSingleLane = [&Candidates](const Function *F) {
+    return F->hasFnAttribute("amdgpu-single-lane") || Candidates.contains(F);
+  };
+  // Against the whole of the current set, so that a function that calls
+  // itself counts as single-lane while it is a candidate.
+  for (bool Removed = true; Removed;) {
+    SmallVector<Function *, 16> Out;
+    for (Function *F : Candidates)
+      if (!all_of(F->users(), [&](const User *U) {
+            return IsSingleLane(cast<CallBase>(U)->getFunction());
+          }))
+        Out.push_back(F);
+    Removed = !Out.empty();
+    for (Function *F : Out)
+      Candidates.remove(F);
+  }
+  for (Function *F : Candidates)
+    F->addFnAttr("amdgpu-single-lane");
+  return !Candidates.empty();
+}
+
+bool runSingleLane(Module &M,
+                   function_ref<const TargetTransformInfo &(Function &)> TTI) {
+  bool Changed = inferSingleLane(M);
+  for (Function &F : M)
+    if (!F.isDeclaration())
+      Changed |= runSingleLane(F, TTI(F));
+  return Changed;
+}
+
+class AMDGPUSingleLaneLegacy : public ModulePass {
 public:
   static char ID;
-  AMDGPUSingleLaneLegacy() : FunctionPass(ID) {}
+  AMDGPUSingleLaneLegacy() : ModulePass(ID) {}
 
-  bool runOnFunction(Function &F) override {
-    return runSingleLane(
-        F, getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F));
+  bool runOnModule(Module &M) override {
+    return runSingleLane(M, [this](Function &F) -> const TargetTransformInfo & {
+      return getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
+    });
   }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
@@ -126,9 +180,13 @@ public:
 
 } // namespace
 
-PreservedAnalyses AMDGPUSingleLanePass::run(Function &F,
-                                            FunctionAnalysisManager &AM) {
-  if (!runSingleLane(F, AM.getResult<TargetIRAnalysis>(F)))
+PreservedAnalyses AMDGPUSingleLanePass::run(Module &M,
+                                            ModuleAnalysisManager &AM) {
+  FunctionAnalysisManager &FAM =
+      AM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
+  if (!runSingleLane(M, [&FAM](Function &F) -> const TargetTransformInfo & {
+        return FAM.getResult<TargetIRAnalysis>(F);
+      }))
     return PreservedAnalyses::all();
   PreservedAnalyses PA;
   PA.preserveSet<CFGAnalyses>();
@@ -144,6 +202,6 @@ INITIALIZE_PASS_DEPENDENCY(TargetTransformInfoWrapperPass)
 INITIALIZE_PASS_END(AMDGPUSingleLaneLegacy, DEBUG_TYPE, "AMDGPU Single Lane",
                     false, false)
 
-FunctionPass *llvm::createAMDGPUSingleLaneLegacyPass() {
+ModulePass *llvm::createAMDGPUSingleLaneLegacyPass() {
   return new AMDGPUSingleLaneLegacy();
 }

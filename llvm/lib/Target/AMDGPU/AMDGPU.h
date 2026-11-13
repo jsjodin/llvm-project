@@ -653,11 +653,11 @@ extern char &AMDGPURewriteAGPRCopyMFMALegacyID;
 
 void initializeAMDGPUSingleLaneLegacyPass(PassRegistry &);
 extern char &AMDGPUSingleLaneLegacyPassID;
-FunctionPass *createAMDGPUSingleLaneLegacyPass();
+ModulePass *createAMDGPUSingleLaneLegacyPass();
 
 struct AMDGPUSingleLanePass
     : public RequiredPassInfoMixin<AMDGPUSingleLanePass> {
-  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
 };
 
 void initializeAMDGPUUniformIntrinsicCombineLegacyPass(PassRegistry &);
