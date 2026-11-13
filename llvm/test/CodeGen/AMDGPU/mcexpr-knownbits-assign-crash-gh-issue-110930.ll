@@ -111,7 +111,7 @@ define void @HU_Start() {
 ; CHECK: .set .LP_SpawnPlayer.num_vgpr, max(43, .LG_PlayerReborn.num_vgpr, .LP_SetThingPosition.num_vgpr, .LP_SetupPsprites.num_vgpr, .LHU_Start.num_vgpr)
 ; CHECK: .set .LP_SpawnPlayer.num_agpr, max(0, .LG_PlayerReborn.num_agpr, .LP_SetThingPosition.num_agpr, .LP_SetupPsprites.num_agpr, .LHU_Start.num_agpr)
 ; CHECK: .set .LP_SpawnPlayer.numbered_sgpr, max(84, .LG_PlayerReborn.numbered_sgpr, .LP_SetThingPosition.numbered_sgpr, .LP_SetupPsprites.numbered_sgpr, .LHU_Start.numbered_sgpr)
-; CHECK: .set .LP_SpawnPlayer.private_seg_size, 16+max(.LG_PlayerReborn.private_seg_size, .LP_SetThingPosition.private_seg_size, .LP_SetupPsprites.private_seg_size, .LHU_Start.private_seg_size)
+; CHECK: .set .LP_SpawnPlayer.private_seg_size, max(.LHU_Start.private_seg_size, 16+max(.LG_PlayerReborn.private_seg_size, .LP_SetThingPosition.private_seg_size, .LP_SetupPsprites.private_seg_size))
 ; CHECK: .set .LP_SpawnPlayer.uses_vcc, or(1, .LG_PlayerReborn.uses_vcc, .LP_SetThingPosition.uses_vcc, .LP_SetupPsprites.uses_vcc, .LHU_Start.uses_vcc)
 ; CHECK: .set .LP_SpawnPlayer.uses_flat_scratch, or(0, .LG_PlayerReborn.uses_flat_scratch, .LP_SetThingPosition.uses_flat_scratch, .LP_SetupPsprites.uses_flat_scratch, .LHU_Start.uses_flat_scratch)
 ; CHECK: .set .LP_SpawnPlayer.has_dyn_sized_stack, or(0, .LG_PlayerReborn.has_dyn_sized_stack, .LP_SetThingPosition.has_dyn_sized_stack, .LP_SetupPsprites.has_dyn_sized_stack, .LHU_Start.has_dyn_sized_stack)
