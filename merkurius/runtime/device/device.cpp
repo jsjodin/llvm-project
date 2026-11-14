@@ -92,6 +92,7 @@ int64_t Deadline(int64_t milliseconds) {
 
 } // namespace
 
+using merkurius::runtime::ArrayHeaderWords;
 using merkurius::runtime::ArrayWords;
 using merkurius::runtime::CopyWords;
 using merkurius::runtime::DeviceRing;
@@ -107,6 +108,7 @@ using merkurius::runtime::kPlaceTeamThreads;
 using merkurius::runtime::kPlaceWorking;
 using merkurius::runtime::kProcessLoopReductions;
 using merkurius::runtime::kProcessLoopWords;
+using merkurius::runtime::kProcessQueueSlots;
 using merkurius::runtime::kRegionRingSlots;
 using merkurius::runtime::kRegionSlotClearing;
 using merkurius::runtime::kRegionSlots;
@@ -121,6 +123,8 @@ using merkurius::runtime::kTeamsPlace;
 using merkurius::runtime::PlaceSlot;
 using merkurius::runtime::PlaceSlots;
 using merkurius::runtime::PlaceTable;
+using merkurius::runtime::ProcessQueue;
+using merkurius::runtime::ProcessQueueSlot;
 using merkurius::runtime::RegionSlotGeneration;
 using merkurius::runtime::RegionSlotNumber;
 using merkurius::runtime::rpcAttach;
@@ -130,6 +134,7 @@ using merkurius::runtime::rpcFail;
 using merkurius::runtime::rpcGiveArray;
 using merkurius::runtime::rpcPinnedChunk;
 using merkurius::runtime::rpcProcessEnded;
+using merkurius::runtime::rpcRoute;
 using merkurius::runtime::rpcSend;
 using merkurius::runtime::rpcSendTerm;
 using merkurius::runtime::rpcTakeArray;
@@ -179,6 +184,8 @@ struct Block;
 // its own wave made, which it may free, and those its worker teams made in
 // its loops, freed when it ends; and the bytes they take, and the most they
 // took at once, which the host reports (MERK_CHECK_PROCESS_MEMORY).
+struct Route;
+
 struct Arena {
   Bump bump;
   RingEntry *rings[kRingCacheSlots];
@@ -186,9 +193,10 @@ struct Arena {
   Block *teamBlocks;
   uint64_t held;
   uint64_t peak;
+  Route *routes;
 };
 static_assert(sizeof(Arena) == kArenaClearWords * sizeof(uint64_t));
-Arena arena{{nullptr, 0, 0}, {}, nullptr, nullptr, 0, 0};
+Arena arena{{nullptr, 0, 0}, {}, nullptr, nullptr, 0, 0, nullptr};
 
 // In a region's image, by the slot of each region that runs (device-ring.h):
 // where its cells are bumped from, its teams' table if it is a target teams
@@ -220,6 +228,31 @@ constexpr uint32_t kMostPlaceWaves{kPlaceTeamThreads / 32};
 // The most sleeps of an idle wave of merk_place between looks at its slot.
 constexpr uint32_t kMostPlaceSleeps{64};
 [[clang::loader_uninitialized]] Local<Arena *> placeArenas[kMostPlaceWaves];
+
+// In the same kernel, the queue of the process that each wave of the team
+// runs, by the wave's place in the team (place.h, ProcessQueue), which the
+// wave sets as the process starts; and the kernel's table, which every wave
+// sets as the kernel starts, the same for all.
+[[clang::loader_uninitialized]] Local<ProcessQueue *>
+    placeQueues[kMostPlaceWaves];
+PlaceTable *placeTable{nullptr};
+// Whether the kernel counts its blocks of messages (PlaceTable's `check`).
+uint32_t countBlocks{0};
+
+// Counts blocks of messages that no process holds, if the kernel does.
+void CountBlocks(int64_t change) {
+  if (countBlocks) {
+    __scoped_atomic_fetch_add(
+        &__atomic_load_n(&placeTable, __ATOMIC_RELAXED)->blocks, change,
+        __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
+  }
+}
+
+// A kernel's queues' making, and a process's opening and closing of its own
+// (Messages between the processes of a kernel, below).
+void MakeQueue(PlaceTable *table, uint64_t wave);
+ProcessQueue *OpenQueue(PlaceTable *table, PlaceSlot *slot, uint64_t wave);
+void CloseQueue(ProcessQueue *queue);
 
 // A process's control block, in its arena, through which it runs its loops
 // across its worker teams (place.h): the counts of the barrier that the
@@ -1154,6 +1187,8 @@ uint64_t LoadSlotWord(uint64_t *word) {
   placeArenas[inTeam] = arena;
   teamMains[inTeam] = 0;
   processWaves[inTeam] = 1;
+  ProcessQueue *queue{OpenQueue(table, slot, wave)};
+  placeQueues[inTeam] = queue;
   ProcessControl *control{nullptr};
   if (workers > 0) {
     control = static_cast<ProcessControl *>(Allocate(&arena->bump,
@@ -1193,6 +1228,10 @@ uint64_t LoadSlotWord(uint64_t *word) {
     ProcessArrive(control);
     placeControls[inTeam] = nullptr;
   }
+  // Messages sent to it that it did not take go, before what it holds,
+  // once no sender is in flight.
+  CloseQueue(queue);
+  placeQueues[inTeam] = nullptr;
   // What the process holds goes, as its arena does, once its workers have
   // stopped making blocks.
   uint64_t peak{arena->peak};
@@ -1430,15 +1469,26 @@ void Distribute(uint64_t loop, int64_t first, int64_t step, int64_t count,
 // which the host writes while the kernel runs, so it is read at system scope.
 // Each team first counts itself started, which the host waits for.
 extern "C" void merk_device_place(PlaceTable *table) {
-  if (__gpu_thread_id_x() == 0) {
-    __scoped_atomic_fetch_add(
-        &table->started, 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
-  }
   uint32_t inTeam{__gpu_thread_id_x() / __gpu_num_lanes()};
   uint64_t wave{static_cast<uint64_t>(__gpu_block_id_x()) *
           (__gpu_num_threads_x() / __gpu_num_lanes()) +
       inTeam};
-  if (inTeam >= kMostPlaceWaves || wave >= LoadSlotWord(&table->slots)) {
+  bool hasSlot{inTeam < kMostPlaceWaves && wave < LoadSlotWord(&table->slots)};
+  if (hasSlot && __gpu_lane_id() == 0) {
+    __atomic_store_n(&placeTable, table, __ATOMIC_RELAXED);
+    __atomic_store_n(&countBlocks,
+        static_cast<uint32_t>(__scoped_atomic_load_n(
+            &table->check, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)),
+        __ATOMIC_RELAXED);
+    placeQueues[inTeam] = nullptr;
+    MakeQueue(table, wave);
+  }
+  __gpu_sync_threads();
+  if (__gpu_thread_id_x() == 0) {
+    __scoped_atomic_fetch_add(
+        &table->started, 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+  }
+  if (!hasSlot) {
     return;
   }
   PlaceSlot *slot{PlaceSlots(table) + wave};
@@ -1698,12 +1748,11 @@ void TeamSend(const uint64_t *handle, uint64_t message) {
   }
 }
 
-// Takes the spilled message of the position from the slot's list, if its
-// sender has put it there. Senders only push onto the list, so a spill that
-// is not the first stays where it is while the receiver unlinks it.
-bool TakeSpill(TeamRing *ring, uint64_t index, uint64_t position,
-    uint64_t *message) {
-  TeamSpill **list{&ring->spills[index]};
+// Takes the spilled message of the position from a slot's list, if its
+// sender has put it there, and gives it, or null. Senders only push onto the
+// list, so a spill that is not the first stays where it is while the
+// receiver unlinks it.
+TeamSpill *TakeSpill(TeamSpill **list, uint64_t position) {
   TeamSpill *first{__atomic_load_n(list, __ATOMIC_ACQUIRE)};
   TeamSpill *before{nullptr};
   TeamSpill *spill{first};
@@ -1712,23 +1761,22 @@ bool TakeSpill(TeamRing *ring, uint64_t index, uint64_t position,
     spill = spill->next;
   }
   if (!spill) {
-    return false;
+    return nullptr;
   }
-  *message = spill->message;
   if (before) {
     before->next = spill->next;
-    return true;
+    return spill;
   }
   if (__atomic_compare_exchange_n(list, &first, spill->next, false,
           __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
-    return true;
+    return spill;
   }
   // Senders pushed in front of it: it has a spill before it now.
   for (before = __atomic_load_n(list, __ATOMIC_ACQUIRE);
        before->next != spill; before = before->next) {
   }
   before->next = spill->next;
-  return true;
+  return spill;
 }
 
 // One look at a team mailbox's ring: whether the message of the next
@@ -1742,7 +1790,9 @@ bool TeamTake(TeamRing *ring, uint64_t *message) {
   uint64_t sequence{__atomic_load_n(&slot.sequence, __ATOMIC_ACQUIRE)};
   if (sequence == position + 1) {
     *message = slot.message;
-  } else if (!TakeSpill(ring, index, position, message)) {
+  } else if (TeamSpill * spill{TakeSpill(&ring->spills[index], position)}) {
+    *message = spill->message;
+  } else {
     return false;
   }
   __atomic_store_n(&ring->head, position + 1, __ATOMIC_RELAXED);
@@ -1807,6 +1857,17 @@ extern "C" uint64_t *merk_device_team_mailbox(int64_t team, uint64_t key) {
   return handle;
 }
 
+namespace {
+
+// Messages between the processes of a kernel through their queues
+// (DirectSend and DirectReceive, below).
+bool DirectSendWord(const uint64_t *handle, uint64_t message);
+template <typename FromHost>
+int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
+    const void *typeInfo, uint64_t *message, FromHost fromHost);
+
+} // namespace
+
 // Sends a one-word message to the mailbox whose handle is the cell of five
 // words at `handle`. The host queues it, or sends it on to another node,
 // encoding it by the type_info that a module registered under `key`, a
@@ -1818,6 +1879,9 @@ extern "C" void merk_device_send(
     const uint64_t *handle, uint64_t key, uint64_t message) {
   if (IsTeamHandle(handle)) {
     TeamSend(handle, message);
+    return;
+  }
+  if (DirectSendWord(handle, message)) {
     return;
   }
   rpc::Client::Port port{__llvm_rpc_client.open<rpcSend>()};
@@ -1902,8 +1966,9 @@ RingEntry *RingOf(const uint64_t *handle, uint64_t kind) {
 // host found as the device attached its ring, or marked in the ring's tail
 // as it closed it: an error, as on the host (process.receive).
 [[noreturn]] void ClosedMailbox() {
-  Fail(0, "Software Error: receive: the mailbox is closed or another "
-          "node's");
+  Fail(0,
+      "Software Error: receive: the mailbox is closed or another "
+      "node's");
 }
 
 // Asks the host for the messages that did not fit in the ring.
@@ -1966,6 +2031,18 @@ extern "C" int merk_device_receive(
   if (IsTeamHandle(handle)) {
     return TeamReceive(handle, milliseconds, message);
   }
+  int direct{DirectReceive(handle, kRingOfWords, milliseconds, nullptr, message,
+      [&](uint64_t *found) {
+        RingEntry *entry{nullptr};
+        if (!Look(handle, kRingOfWords, entry, found)) {
+          return false;
+        }
+        Taken(entry);
+        return true;
+      })};
+  if (direct >= 0) {
+    return direct;
+  }
   RingEntry *entry{nullptr};
   if (!Wait(milliseconds,
           [&]() { return Look(handle, kRingOfWords, entry, message); })) {
@@ -1985,19 +2062,13 @@ extern "C" int merk_device_receive(
 // "Flat records"): one lane copies, a batch of words at a time (CopyWords),
 // until messages travel as their bytes and a wave's lanes copy them
 // together.
-extern "C" int merk_device_receive_array(
-    const uint64_t *handle, int64_t milliseconds, uint64_t *message) {
-  if (IsTeamHandle(handle)) {
-    TeamBlockFromProcess();
-    return TeamReceive(handle, milliseconds, message);
-  }
-  RingEntry *entry{nullptr};
-  // The slot is the array's header (array.h).
-  uint64_t header{0};
-  if (!Wait(milliseconds,
-          [&]() { return Look(handle, kRingOfArrays, entry, &header); })) {
-    return 0;
-  }
+namespace {
+
+// The oldest message of a mailbox of arrays, which its ring, `entry`, has
+// shown: copied by the host into host memory (rpcTakeArray), and from there
+// into an array of the device's; or false if the mailbox closed meanwhile.
+bool TakeArrayFromHost(
+    const uint64_t *handle, RingEntry *entry, uint64_t *message) {
   bool found{false};
   const uint64_t *copy{nullptr};
   {
@@ -2014,7 +2085,7 @@ extern "C" int merk_device_receive_array(
   }
   // A mailbox that closed meanwhile has no message.
   if (!found) {
-    return 0;
+    return false;
   }
   // The host wrote the copy before it answered.
   __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
@@ -2024,7 +2095,34 @@ extern "C" int merk_device_receive_array(
   CopyWords(array, copy, words);
   *message = reinterpret_cast<uint64_t>(array);
   Taken(entry);
-  return 1;
+  return true;
+}
+
+} // namespace
+
+extern "C" int merk_device_receive_array(
+    const uint64_t *handle, int64_t milliseconds, uint64_t *message) {
+  if (IsTeamHandle(handle)) {
+    TeamBlockFromProcess();
+    return TeamReceive(handle, milliseconds, message);
+  }
+  // The slot is the array's header (array.h).
+  uint64_t header{0};
+  int direct{DirectReceive(handle, kRingOfArrays, milliseconds, nullptr,
+      message, [&](uint64_t *found) {
+        RingEntry *entry{nullptr};
+        return Look(handle, kRingOfArrays, entry, &header) &&
+            TakeArrayFromHost(handle, entry, found);
+      })};
+  if (direct >= 0) {
+    return direct;
+  }
+  RingEntry *entry{nullptr};
+  if (!Wait(milliseconds,
+          [&]() { return Look(handle, kRingOfArrays, entry, &header); })) {
+    return 0;
+  }
+  return TakeArrayFromHost(handle, entry, message) ? 1 : 0;
 }
 
 namespace {
@@ -2132,6 +2230,409 @@ private:
 
 namespace {
 
+// Messages between the processes of a kernel (docs/INPROGRESS.md, Messages
+// between GPU processes on one GPU): a GPU process sends to the mailbox of
+// another process of its kernel through that process's queue in the
+// device's memory (place.h, ProcessQueue), with no call of the host but the
+// first, which asks for the route. The queue's fields are read and written
+// at the device's scope, as only the device uses them.
+
+constexpr int kDevice{__MEMORY_SCOPE_DEVICE};
+
+// Whether the wave runs a GPU process, which may send and receive directly.
+bool InProcess() {
+  return merk_device_process_image &&
+      processWaves[__gpu_thread_id_x() / __gpu_num_lanes()];
+}
+
+// The process's route to a mailbox, which the host gave at its first send
+// to it (rpcRoute), on a list in its arena that goes with it: the queue of
+// the mailbox's process and the incarnation it wants there, or no queue,
+// for a send through the host. For its own mailbox, which it receives from,
+// whether the host's ring has the next turn when both have a message.
+struct Route {
+  uint64_t handle[5];
+  ProcessQueue *queue;
+  uint64_t incarnation;
+  uint64_t hostFirst;
+  Route *next;
+};
+
+Route *RouteOf(const uint64_t *handle) {
+  Arena *own{CurrentArena()};
+  for (Route *route{own->routes}; route; route = route->next) {
+    if (route->handle[0] == handle[0] && route->handle[1] == handle[1] &&
+        route->handle[2] == handle[2] && route->handle[3] == handle[3] &&
+        route->handle[4] == handle[4]) {
+      return route;
+    }
+  }
+  ProcessQueue *queue{nullptr};
+  uint64_t incarnation{0};
+  {
+    rpc::Client::Port port{__llvm_rpc_client.open<rpcRoute>()};
+    port.send([&](rpc::Buffer *buffer, uint32_t) {
+      for (int i{0}; i < 5; ++i) {
+        buffer->data[i] = handle[i];
+      }
+      buffer->data[5] = static_cast<uint64_t>(DeviceNumber());
+      buffer->data[6] = reinterpret_cast<uint64_t>(
+          __atomic_load_n(&placeTable, __ATOMIC_RELAXED));
+    });
+    port.recv([&](rpc::Buffer *buffer, uint32_t) {
+      queue = reinterpret_cast<ProcessQueue *>(buffer->data[0]);
+      incarnation = buffer->data[1];
+    });
+  }
+  auto *route{static_cast<Route *>(merk_device_alloc(sizeof(Route)))};
+  for (int i{0}; i < 5; ++i) {
+    route->handle[i] = handle[i];
+  }
+  route->queue = queue;
+  route->incarnation = incarnation;
+  route->hostFirst = 0;
+  route->next = own->routes;
+  own->routes = route;
+  return route;
+}
+
+// A block of `bytes` that no process holds, from the GPU's heap, whose
+// bytes start on 256 bytes after `before` bytes, or on 16 if `before` is 0,
+// in `leader`'s group if it is not null, as NewBlock makes for a process:
+// the group of a message on its way, which its receiver takes as its own
+// (Adopt), or which goes if no one does (FreeDetached).
+void *NewDetachedBlock(uint64_t bytes, uint64_t before, Block *leader) {
+  constexpr uint64_t kAlign{256};
+  uint64_t given{0};
+  void *raw{RawAllocate(sizeof(Block) + bytes + (before ? kAlign : 0), given)};
+  uintptr_t start{reinterpret_cast<uintptr_t>(raw) + sizeof(Block)};
+  if (before) {
+    start += (kAlign - (start + before) % kAlign) % kAlign;
+  }
+  Block *block{BlockOf(reinterpret_cast<void *>(start))};
+  block->raw = raw;
+  block->bytes = given;
+  block->next = nullptr;
+  block->prev = nullptr;
+  CountBlocks(1);
+  if (leader) {
+    block->leader = leader;
+    block->member = leader->member;
+    leader->member = block;
+  } else {
+    block->leader = block;
+    block->member = nullptr;
+  }
+  return reinterpret_cast<void *>(start);
+}
+
+void FreeDetached(Block *leader) {
+  for (Block *block{leader}; block;) {
+    Block *member{block->member};
+    RawFree(block->raw, block->bytes);
+    CountBlocks(-1);
+    block = member;
+  }
+}
+
+// The receiving process takes a message's group as its own: on its list,
+// its bytes counted as its.
+void Adopt(Block *leader) {
+  Arena *own{CurrentArena()};
+  uint64_t bytes{0};
+  for (Block *block{leader}; block; block = block->member) {
+    bytes += block->bytes;
+    CountBlocks(-1);
+  }
+  uint64_t held{__atomic_add_fetch(&own->held, bytes, __ATOMIC_RELAXED)};
+  __atomic_fetch_max(&own->peak, held, __ATOMIC_RELAXED);
+  leader->prev = nullptr;
+  leader->next = own->blocks;
+  if (own->blocks) {
+    own->blocks->prev = leader;
+  }
+  own->blocks = leader;
+}
+
+// Where a copy of a term for a queue goes: a group that no process holds.
+struct DetachedMemory {
+  static constexpr bool kOtherImage{false};
+  Block *leader{nullptr};
+  void *Allocate(uint64_t bytes) {
+    void *cell{NewDetachedBlock(bytes, 0, leader)};
+    if (!leader) {
+      leader = BlockOf(cell);
+    }
+    return cell;
+  }
+  [[gnu::always_inline]] void CheckStack() { CheckCopyStack(); }
+  [[noreturn]] void Fail(const char *message, const char *detail) {
+    CopyFailed(message, detail);
+  }
+};
+
+// A queue's message, as its slot holds it: a word; an array in a group of
+// its own; or a block whose word is a term, the leader of the term's group.
+uint64_t ArrayForQueue(const uint64_t *array) {
+  uint64_t words{ArrayWords(array)};
+  auto *copy{static_cast<uint64_t *>(NewDetachedBlock(sizeof(uint64_t) * words,
+      sizeof(uint64_t) * ArrayHeaderWords(array), nullptr))};
+  CopyWords(copy, array, words);
+  return reinterpret_cast<uint64_t>(copy);
+}
+
+uint64_t TermForQueue(uint64_t message, const void *typeInfo) {
+  DetachedMemory memory;
+  auto *envelope{static_cast<uint64_t *>(memory.Allocate(sizeof(uint64_t)))};
+  *envelope = merkurius::runtime::CopyTyped(message,
+      merkurius::runtime::Resolve(
+          reinterpret_cast<uint64_t>(typeInfo), nullptr),
+      memory);
+  return reinterpret_cast<uint64_t>(envelope);
+}
+
+// Frees a queue's message that no one will receive.
+void Discard(uint64_t kind, uint64_t message) {
+  if (kind != kRingOfWords) {
+    FreeDetached(BlockOf(reinterpret_cast<void *>(message))->leader);
+  }
+}
+
+// The message as the receiver gets it, its group now the receiver's.
+uint64_t Deliver(uint64_t kind, uint64_t message) {
+  if (kind == kRingOfWords) {
+    return message;
+  }
+  Block *leader{BlockOf(reinterpret_cast<void *>(message))->leader};
+  if (kind == kRingOfArrays) {
+    Adopt(leader);
+    return message;
+  }
+  uint64_t term{*reinterpret_cast<uint64_t *>(message)};
+  // A term with no cells needs no group, and its block goes now.
+  if (!leader->member) {
+    RawFree(leader->raw, leader->bytes);
+    CountBlocks(-1);
+  } else {
+    Adopt(leader);
+  }
+  return term;
+}
+
+// Counts a sender into the queue if the process it wants runs there: 1; 0
+// if that process has ended; -1 if it has not yet started. With the queue's
+// closing (CloseQueue), sequentially consistent: either the sender sees it
+// closed, or the closing process sees the sender in flight and waits.
+int EnterQueue(ProcessQueue *queue, uint64_t incarnation) {
+  __scoped_atomic_fetch_add(&queue->senders, 1, __ATOMIC_SEQ_CST, kDevice);
+  uint64_t now{
+      __scoped_atomic_load_n(&queue->incarnation, __ATOMIC_SEQ_CST, kDevice)};
+  uint64_t closed{
+      __scoped_atomic_load_n(&queue->closed, __ATOMIC_SEQ_CST, kDevice)};
+  if (now == incarnation && !closed) {
+    return 1;
+  }
+  __scoped_atomic_fetch_sub(&queue->senders, 1, __ATOMIC_RELEASE, kDevice);
+  return now < incarnation ? -1 : 0;
+}
+
+// Puts a message in the queue at the next position, in its slot, or spilled
+// to the slot's list if the slot still holds the message of a lap before:
+// a send never waits (Processes as teams, step 2). A spill is from the
+// GPU's heap, which the receiver frees.
+void Put(ProcessQueue *queue, uint64_t message) {
+  uint64_t position{
+      __scoped_atomic_fetch_add(&queue->tail, 1, __ATOMIC_RELAXED, kDevice)};
+  uint64_t index{position % kProcessQueueSlots};
+  ProcessQueueSlot &slot{queue->slots[index]};
+  if (__scoped_atomic_load_n(&slot.sequence, __ATOMIC_ACQUIRE, kDevice) ==
+      position) {
+    __scoped_atomic_store_n(&slot.message, message, __ATOMIC_RELAXED, kDevice);
+    __scoped_atomic_store_n(
+        &slot.sequence, position + 1, __ATOMIC_RELEASE, kDevice);
+    return;
+  }
+  uint64_t given{0};
+  auto *spill{static_cast<TeamSpill *>(RawAllocate(sizeof(TeamSpill), given))};
+  CountBlocks(1);
+  spill->position = position;
+  spill->message = message;
+  auto **list{reinterpret_cast<TeamSpill **>(&queue->spills[index])};
+  spill->next = __scoped_atomic_load_n(list, __ATOMIC_RELAXED, kDevice);
+  while (!__scoped_atomic_compare_exchange_n(list, &spill->next, spill, true,
+      __ATOMIC_RELEASE, __ATOMIC_RELAXED, kDevice)) {
+  }
+}
+
+// One look at the process's own queue: whether the message of the next
+// position has arrived, in its slot or spilled, which it takes.
+bool TakeQueued(ProcessQueue *queue, uint64_t *message) {
+  uint64_t position{
+      __scoped_atomic_load_n(&queue->head, __ATOMIC_RELAXED, kDevice)};
+  uint64_t index{position % kProcessQueueSlots};
+  ProcessQueueSlot &slot{queue->slots[index]};
+  if (__scoped_atomic_load_n(&slot.sequence, __ATOMIC_ACQUIRE, kDevice) ==
+      position + 1) {
+    *message = __scoped_atomic_load_n(&slot.message, __ATOMIC_RELAXED, kDevice);
+    __scoped_atomic_store_n(&slot.sequence, position + kProcessQueueSlots,
+        __ATOMIC_RELEASE, kDevice);
+  } else if (TeamSpill *
+      spill{TakeSpill(
+          reinterpret_cast<TeamSpill **>(&queue->spills[index]), position)}) {
+    *message = spill->message;
+    RawFree(spill, sizeof(TeamSpill));
+    CountBlocks(-1);
+  } else {
+    return false;
+  }
+  __scoped_atomic_store_n(
+      &queue->head, position + 1, __ATOMIC_RELAXED, kDevice);
+  return true;
+}
+
+// Sends through the queue of the mailbox's process if it is one of this
+// kernel's: true, or false for a send through the host. `make` copies the
+// message for the queue, before the sender counts itself in, so that a
+// process that ends does not wait for a copy.
+template <typename Make>
+bool DirectSend(const uint64_t *handle, uint64_t kind, Make make) {
+  if (!InProcess()) {
+    return false;
+  }
+  Route *route{RouteOf(handle)};
+  ProcessQueue *queue{route->queue};
+  if (!queue) {
+    return false;
+  }
+  uint64_t message{make()};
+  for (;;) {
+    int entered{EnterQueue(queue, route->incarnation)};
+    if (entered > 0) {
+      break;
+    }
+    // A message to a mailbox that has closed goes nowhere.
+    if (entered == 0) {
+      Discard(kind, message);
+      return true;
+    }
+    // Its process is about to start: the host has set its slot running.
+    __builtin_amdgcn_s_sleep(8);
+  }
+  __scoped_atomic_store_n(&queue->kind, kind, __ATOMIC_RELAXED, kDevice);
+  Put(queue, message);
+  __scoped_atomic_fetch_sub(&queue->senders, 1, __ATOMIC_RELEASE, kDevice);
+  return true;
+}
+
+bool DirectSendWord(const uint64_t *handle, uint64_t message) {
+  return DirectSend(handle, kRingOfWords, [&]() { return message; });
+}
+
+// Takes the oldest message of the process's own mailbox from its queue or
+// from the ring that the host fills, waiting until `milliseconds` pass, or
+// forever if it is negative: 1 with the message, or 0; or -1 if the wave
+// runs no process, or the mailbox is not its own, for a receive through the
+// host alone. `fromHost` takes the ring's oldest message if it has one. The
+// queue is looked at every poll, about a microsecond apart, and the ring
+// every eighth, about as often as a receive through the host alone looks;
+// when both have messages they take turns. Once the host has closed the
+// mailbox, a look at the ring finds it so, and the receive fails
+// (ClosedMailbox).
+template <typename FromHost>
+int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
+    const void *typeInfo, uint64_t *message, FromHost fromHost) {
+  if (!InProcess()) {
+    return -1;
+  }
+  ProcessQueue *own{placeQueues[__gpu_thread_id_x() / __gpu_num_lanes()]};
+  Route *route{RouteOf(handle)};
+  if (!own || route->queue != own) {
+    return -1;
+  }
+  RingEntry *entry{RingOf(handle, kind)};
+  if (!entry) {
+    ClosedMailbox();
+  }
+  int64_t deadline{Deadline(milliseconds)};
+  for (uint32_t look{0};; ++look) {
+    bool hostLook{look % 8 == 0};
+    if (hostLook &&
+        __atomic_load_n(&entry->ring->tail, __ATOMIC_ACQUIRE) == kRingClosed) {
+      ClosedMailbox();
+    }
+    if (hostLook && route->hostFirst && fromHost(message)) {
+      route->hostFirst = 0;
+      return 1;
+    }
+    uint64_t queued{0};
+    if (TakeQueued(own, &queued)) {
+      *message = Deliver(kind, queued);
+      route->hostFirst = 1;
+      return 1;
+    }
+    if (hostLook && !route->hostFirst && fromHost(message)) {
+      return 1;
+    }
+    if (milliseconds >= 0 && Now() >= deadline) {
+      return 0;
+    }
+    __builtin_amdgcn_s_sleep(16);
+  }
+}
+
+// As a kernel starts, each wave whose slot the table has: its queue,
+// empty, before its team counts itself started, so that no sender sees it
+// unmade.
+void MakeQueue(PlaceTable *table, uint64_t wave) {
+  auto *queue{reinterpret_cast<ProcessQueue *>(__scoped_atomic_load_n(
+                  &table->queues, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)) +
+      wave};
+  queue->incarnation = 0;
+  queue->closed = 1;
+  queue->senders = 0;
+  queue->kind = kRingOfWords;
+  queue->tail = 0;
+  queue->head = 0;
+  for (uint64_t i{0}; i < kProcessQueueSlots; ++i) {
+    queue->slots[i].sequence = i;
+    queue->slots[i].message = 0;
+    queue->spills[i] = 0;
+  }
+  __scoped_atomic_thread_fence(__ATOMIC_RELEASE, kDevice);
+}
+
+// As the process of the slot starts: its queue opens, for its incarnation.
+ProcessQueue *OpenQueue(PlaceTable *table, PlaceSlot *slot, uint64_t wave) {
+  auto *queue{reinterpret_cast<ProcessQueue *>(__scoped_atomic_load_n(
+                  &table->queues, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)) +
+      wave};
+  uint64_t incarnation{__scoped_atomic_load_n(
+      &slot->incarnation, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
+  __scoped_atomic_store_n(&queue->closed, 0, __ATOMIC_RELAXED, kDevice);
+  __scoped_atomic_store_n(
+      &queue->incarnation, incarnation, __ATOMIC_SEQ_CST, kDevice);
+  return queue;
+}
+
+// As the process ends: its queue closes, and once no sender is in flight,
+// what it still holds goes. The next process of the slot finds it empty.
+void CloseQueue(ProcessQueue *queue) {
+  __scoped_atomic_store_n(&queue->closed, 1, __ATOMIC_SEQ_CST, kDevice);
+  while (
+      __scoped_atomic_load_n(&queue->senders, __ATOMIC_SEQ_CST, kDevice) != 0) {
+    __builtin_amdgcn_s_sleep(1);
+  }
+  uint64_t kind{
+      __scoped_atomic_load_n(&queue->kind, __ATOMIC_RELAXED, kDevice)};
+  for (uint64_t message{0}; TakeQueued(queue, &message);) {
+    Discard(kind, message);
+  }
+}
+
+} // namespace
+
+namespace {
+
 // The array, copied into host memory, which the host reads once the device
 // has passed it the copy: not read by the host from the device's memory,
 // whose lines the device's L2 cache may hold unwritten while it runs, which
@@ -2188,6 +2689,10 @@ extern "C" void merk_device_send_array(
     TeamSend(handle, reinterpret_cast<uint64_t>(array));
     return;
   }
+  if (DirectSend(
+          handle, kRingOfArrays, [&]() { return ArrayForQueue(array); })) {
+    return;
+  }
   PinnedMemory memory;
   uint64_t *copy{CopyToHost(array, memory)};
   rpc::Client::Port port{__llvm_rpc_client.open<rpcSendTerm>()};
@@ -2214,6 +2719,10 @@ extern "C" void merk_device_send_term(const uint64_t *handle, uint64_t key,
     TeamSend(handle, message);
     return;
   }
+  if (DirectSend(handle, kRingOfTerms,
+          [&]() { return TermForQueue(message, typeInfo); })) {
+    return;
+  }
   PinnedMemory memory;
   uint64_t copy{CopyTyped(
       message, Resolve(reinterpret_cast<uint64_t>(typeInfo), nullptr), memory)};
@@ -2238,18 +2747,14 @@ extern "C" void merk_device_send_term(const uint64_t *handle, uint64_t key,
 // ring's head, after which the host frees its copy. A mailbox that closed
 // meanwhile has no message. From a team mailbox, the sender's message
 // itself.
-extern "C" int merk_device_receive_term(const uint64_t *handle,
-    int64_t milliseconds, const void *typeInfo, uint64_t *message) {
-  if (IsTeamHandle(handle)) {
-    TeamBlockFromProcess();
-    return TeamReceive(handle, milliseconds, message);
-  }
-  RingEntry *entry{nullptr};
-  uint64_t present{0};
-  if (!Wait(milliseconds,
-          [&]() { return Look(handle, kRingOfTerms, entry, &present); })) {
-    return 0;
-  }
+namespace {
+
+// The oldest message of a mailbox of terms, which its ring, `entry`, has
+// shown: copied by the host into host memory (rpcTakeTerm), and from there
+// into the device's memory by its type_info; or false if the mailbox closed
+// meanwhile.
+bool TakeTermFromHost(const uint64_t *handle, RingEntry *entry,
+    const void *typeInfo, uint64_t *message) {
   bool found{false};
   uint64_t copy{0};
   {
@@ -2265,7 +2770,7 @@ extern "C" int merk_device_receive_term(const uint64_t *handle,
     });
   }
   if (!found) {
-    return 0;
+    return false;
   }
   // The host wrote the copy before it answered.
   __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
@@ -2273,5 +2778,31 @@ extern "C" int merk_device_receive_term(const uint64_t *handle,
   *message = CopyTyped(
       copy, Resolve(reinterpret_cast<uint64_t>(typeInfo), nullptr), memory);
   Taken(entry);
-  return 1;
+  return true;
+}
+
+} // namespace
+
+extern "C" int merk_device_receive_term(const uint64_t *handle,
+    int64_t milliseconds, const void *typeInfo, uint64_t *message) {
+  if (IsTeamHandle(handle)) {
+    TeamBlockFromProcess();
+    return TeamReceive(handle, milliseconds, message);
+  }
+  uint64_t present{0};
+  int direct{DirectReceive(handle, kRingOfTerms, milliseconds, typeInfo,
+      message, [&](uint64_t *found) {
+        RingEntry *entry{nullptr};
+        return Look(handle, kRingOfTerms, entry, &present) &&
+            TakeTermFromHost(handle, entry, typeInfo, found);
+      })};
+  if (direct >= 0) {
+    return direct;
+  }
+  RingEntry *entry{nullptr};
+  if (!Wait(milliseconds,
+          [&]() { return Look(handle, kRingOfTerms, entry, &present); })) {
+    return 0;
+  }
+  return TakeTermFromHost(handle, entry, typeInfo, message) ? 1 : 0;
 }
