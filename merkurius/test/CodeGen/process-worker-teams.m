@@ -14,10 +14,10 @@
 % hand.
 %
 % REQUIRES: amdgpu-registered-target, libomp
-% RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
+% RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 host 2 | FileCheck %s --match-full-lines --strict-whitespace --check-prefix=TWO
 % RUN: %libomp-env %t2 host 4 | FileCheck %s --match-full-lines --strict-whitespace --check-prefix=FOUR
-% RUN: merkc -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t
+% RUN: merkc -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t
 % RUN: %libomp-env %t host 2 | FileCheck %s --match-full-lines --strict-whitespace --check-prefix=TWO
 % RUN: not %libomp-env %t2 host 0 2>&1 | FileCheck %s --check-prefix=ZERO
 

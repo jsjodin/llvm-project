@@ -12,7 +12,7 @@
 % hand: each line is the weighted sum below, worked out for the array.
 %
 % REQUIRES: amdgpu-registered-target, libomp
-% RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
+% RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 host | FileCheck %s --match-full-lines --strict-whitespace
 
 :- module process_bulk.
