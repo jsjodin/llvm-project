@@ -785,6 +785,8 @@ static void Close(Mailbox *mailbox) {
   // it ends.
   if (mailbox->ring) {
     TrimRing(mailbox);
+    // A device that receives from it now fails, as the host does.
+    __atomic_store_n(&mailbox->ring->tail, kRingClosed, __ATOMIC_RELEASE);
     if (mailbox->ringUsers == 0) {
       ReleaseRingCopy(mailbox);
       mailbox->freeRing(mailbox->ringDevice, mailbox->ring);

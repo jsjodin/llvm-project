@@ -1,0 +1,6 @@
+process-closed-receive.m's waiter on the machine's GPU: its receive from
+its mailbox, which the main process has closed, is an error, as at the host.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-closed-receive.m -o %t2
+RUN: %gpu-env not timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %S/process-closed-receive.m
