@@ -121,3 +121,11 @@ only the teams touch them), a trial build ran it in 1.33 µs at 2 teams and
 allocations wait on the same kind of atomics. The host's NUMA node did not
 matter: driving GPU 0 from the cores of its own node, 4, or of node 12, on
 the other socket, gave the same times.
+
+With the barrier's counters at device scope (`ArriveAndWait` in
+`runtime/device/device.cpp`, 2026-11-14), one run: `library` 1.21, 1.28,
+1.38 and 1.43 µs at 2, 4, 16 and 64 teams, 1.2 to 1.5 times gfx1030's;
+`central` and `tree` as before, as their mailboxes are not changed yet.
+These benchmarks are timed by the host, so the device clock's error
+(design document, Measurements, "Barriers between teams") did not touch
+them.
