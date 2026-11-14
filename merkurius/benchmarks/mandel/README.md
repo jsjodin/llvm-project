@@ -90,6 +90,32 @@ tile's loop waits for its slowest pixel, so splitting the GPU costs 9%
 before any balance, and on one GPU the hardware's balancing of the dense
 programs wins (design document, Measurements, Uneven work).
 
+### On gfx90a
+
+2026-11-14, one die of an AMD Instinct MI250 (gfx90a, all 104 compute
+units), GPU 1, the host's threads on the other socket
+(`numactl --cpunodebind=8-15`), the build of 693f7c3053d4,
+`compare-places.sh`, 40 frames, the median of 5 rounds; four places, then
+the balance and the tiles handed over:
+
+| Frames, tiles | Mercury, dense | C, dense | Static | Steal | Pool |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2048², 128² | 0.497 s, 269 Gi/s | 0.371 s, 361 Gi/s | 10.4 s, 1.04 | 11.9 s, 1.04, 14 | 12.8 s, 1.03, 10240 |
+| 2048², 64² | 0.495 s, 271 Gi/s | 0.371 s, 361 Gi/s | 40.7 s, 1.05 | 45.8 s, 1.09, 661 | 48.9 s, 1.02, 40960 |
+| 1024², 128² | 0.215 s, 155 Gi/s | 0.115 s, 290 Gi/s | 3.05 s, 1.04 | 3.98 s, 1.04, 0 | 3.63 s, 1.02, 2560 |
+
+- **The dense programs are 4 to 7 times as fast as on gfx1030,** on 104 units against
+  40, but Mercury's GPU process now trails C, by 1.34 times at 2048² and
+  1.87 at 1024², where on gfx1030 it led.
+- **The places are 14 to 100 times slower than the dense programs,** where
+  on gfx1030 they were 1.2 to 1.4: about 1 ms a tile at 64², against 0.1
+  on gfx1030, and the more tiles, the slower. Each tile's results are an
+  array that one lane makes and that goes as a message, and on gfx90a a
+  GPU's array messages move at about 100 MB/s (`benchmarks/array-messages`,
+  "On gfx90a"): a fixed cost a tile, not the iterations, sets the time.
+  Device-scope atomics did not change array messages' speed in a trial;
+  where the time goes is to measure.
+
 ## Tests
 
 `test/Benchmarks/mandel.test` runs `mandel.m` at the host, sequentially at

@@ -134,6 +134,53 @@ bandwidth". Since 2026-11-13 the process's arrays have their elements on
 256 bytes, which made Copy 11% faster, 537 GB/s on half the units, level with
 C. `test/Benchmarks/bandwidth-process-gpu.test` runs it on small arrays.
 
+## On gfx90a
+
+On one die of an AMD Instinct MI250 (gfx90a, 104 compute units, 64 GB of
+HBM2e, rated at 1.6 TB/s a die) and two AMD EPYC 7713 (128 cores in 16 NUMA
+nodes), with the default sizes, on 2026-11-14 at 693f7c3053d4, each from one
+run of `run.sh` on a GPU that `utils/gpu/with-gpus.py` chose, all its compute
+units, in MB/s:
+
+| Kernel | Sequential | OpenMP, host (64 threads) | OpenMP, GPU | GPU process |
+| --- | --- | --- | --- | --- |
+| Copy | 26,701 | 145,275 | 597,522 | 762,860 |
+| Mul | 25,845 | 139,869 | 603,492 | 710,786 |
+| Add | 28,871 | 162,048 | 690,629 | 893,237 |
+| Triad | 29,142 | 165,287 | 671,485 | 891,891 |
+| Dot | 18,950 | 200,680 | 642,747 | 709,171 |
+
+- **The host's arrays need their pages spread.** The host column is 64
+  threads on the first socket's cores (`OMP_PROC_BIND=close`,
+  `OMP_PLACES=cores`) under `numactl --interleave=0-7`. Without the
+  interleave the same threads moved 30,000 to 33,000 MB/s: `array.init`
+  fills each array on the main thread, so its pages are all on that
+  thread's NUMA node, and the loops get one node's bandwidth. With 128
+  threads on both sockets and `--interleave=all`, 210,000 to 313,000 MB/s.
+  Filling a large array in parallel, so that each thread first touches the
+  pages it later works on, would fix it without `numactl`.
+- **A GPU process is faster than a target region here,** 1.10 to 1.33
+  times, where on gfx1030 it was level or slower: its kernels have the
+  elements on 256 bytes (In a GPU process), and the region's arrays do not.
+  Its times vary more, Copy 0.70 to 1.91 ms against 0.90 to 0.98 for the
+  region.
+
+Mercury against C (`compare-c.sh "" "" 7`), the median of 7 rounds and its
+range, in MB/s:
+
+| Kernel | Mercury | C |
+| --- | --- | --- |
+| Copy | 601,884 (599,602 to 609,207) | 1,150,878 (1,142,996 to 1,155,116) |
+| Mul | 603,601 (601,224 to 610,116) | 1,150,106 (1,149,001 to 1,156,613) |
+| Add | 685,837 (681,413 to 705,331) | 161,837 (154,108 to 265,319) |
+| Triad | 675,514 (667,753 to 692,729) | 157,536 (151,255 to 285,784) |
+| Dot | 647,399 (632,617 to 660,550) | 1,212,295 (1,195,977 to 1,270,196) |
+
+C's Copy, Mul and Dot reach 72 to 76% of the rated 1.6 TB/s, and Mercury's
+region 52 to 53% of C's, against 59 to 80% on gfx1030: the elements' 8
+bytes past the block's start cost more here than the quarter measured on
+gfx1030, which is to measure. C's Add and Triad are slow as on gfx1030.
+
 ## Differences from BabelStream
 
 - One program for every build: BabelStream's OpenMP model chooses between
