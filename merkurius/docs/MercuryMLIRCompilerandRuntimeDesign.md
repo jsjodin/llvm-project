@@ -3290,7 +3290,16 @@ also compiled for the device, allocating in the arena. The wire format is
 
 - **A send** copies the array into host memory (`rpcPinnedChunk`), and
   `rpcSendTerm` gives the host the copy, which the send copies into the
-  message's fragment or encodes.
+  message's fragment or encodes. The host keeps the chunks of host memory
+  that it frees, for the next message of their device and size, as
+  allocating one took about 85 µs from 8 KiB. On a GPU whose waves have 64
+  lanes, gfx9's, an array of 8 KiB or more (`rpcDmaBytes`,
+  `MERK_GPU_DMA_BYTES`) goes by its address instead
+  (`rpcSendArrayFromDevice`): the device's release at system scope writes
+  it back from the L2, and the host copies it out of the device's memory
+  with `olMemcpy`, 512 KiB at a time, and sends that. On gfx90a it raised
+  a send within a node from 100 to 170 MB/s to 1.6 to 3.5 GB/s
+  (benchmarks/array-messages, "On gfx90a").
 - **A receive** is the ring giving the size, `rpcTakeArray` copying the message
   into host memory that the device reads, and the device copying that into an
   array in its arena. The device decides the place, so the arena's accounting
@@ -3306,7 +3315,12 @@ also compiled for the device, allocating in the arena. The wire format is
   invalidated. The copy was faster: a send from a GPU within a node reached
   about 1.2 GB/s. One lane copying word by word is slower, until messages
   travel as their bytes and a wave's lanes copy them together
-  (docs/INPROGRESS.md, GPU processes without omp target, step 5).
+  (docs/INPROGRESS.md, GPU processes without omp target, step 5). A copy
+  out of the device's memory came back for gfx9's sends, above, whose
+  release at system scope writes back the L2 (`buffer_wbl2`). A copy into
+  it is not yet tried: gfx90a's acquire invalidates no L2 lines of the
+  device's own memory (AMDGPUUsage, Memory Model GFX90A), so whether the
+  copy engine's writes reach the lines it holds is to find.
 - **Copied and encoded as blocks.** An array of scalars is copied into a
   message with one `memcpy`. An array of `int`, `uint` or `float` (64-bit
   ones) is encoded and decoded as one, its bytes on the wire being its bytes in

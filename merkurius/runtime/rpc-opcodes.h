@@ -126,6 +126,20 @@ constexpr uint32_t rpcProcessEnded{RpcOpcode(13)};
 // or 0, for a send through the host.
 constexpr uint32_t rpcRoute{RpcOpcode(14)};
 
+// From how many bytes the device's send of an array through the host goes
+// by the host's copy from the device's memory (rpcSendArrayFromDevice): the
+// buffer's word is the lanes of the device's waves, and the host answers
+// with the bytes, or ~0 for never.
+constexpr uint32_t rpcDmaBytes{RpcOpcode(15)};
+
+// A send of an array in the device's memory, which the device has written
+// back with a release at system scope: the buffer's words are the handle's
+// five, the message type's key, the array and the device's number. The host
+// copies it by the device's copy engine into its memory, sends that, and
+// answers once it has queued it. Only for a GPU whose release at system
+// scope writes the device's memory back from its L2, as gfx90a's does.
+constexpr uint32_t rpcSendArrayFromDevice{RpcOpcode(16)};
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_RPC_OPCODES_H_
