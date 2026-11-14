@@ -1169,6 +1169,25 @@ void WorkerArrive(ProcessControl *control) {
 // active lane alone, for the whole wave: a read by every lane of every wave
 // of a kernel on all of a GPU's units, each polling, slowed a process ten
 // times (docs/INPROGRESS.md, Open after (p1)).
+// The same, relaxed: for a poll, which takes an acquire only once the word
+// has changed. On gfx90a every acquire at system scope invalidates the
+// whole of the GPU's L2 (buffer_invl2), and the idle waves of a kernel of a
+// GPU's processes, 1248 on a gfx90a GCD, each polling two words with one,
+// kept the L2 empty for the processes that ran: a send to the queue of a
+// process of the kernel took 28 us, as each load of it went to memory, and
+// 9 us with the poll relaxed (docs/INPROGRESS.md, Direct sends between the
+// GPUs of a node, step 4). The table is in host memory, which a relaxed load
+// at system scope reads fresh.
+uint64_t PollSlotWord(uint64_t *word) {
+  uint64_t mask{__gpu_lane_mask()};
+  uint64_t value{0};
+  if (__gpu_is_first_in_lane(mask)) {
+    value =
+        __scoped_atomic_load_n(word, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
+  }
+  return __gpu_read_first_lane_u64(mask, value);
+}
+
 uint64_t LoadSlotWord(uint64_t *word) {
   uint64_t mask{__gpu_lane_mask()};
   uint64_t value{0};
@@ -1657,10 +1676,14 @@ extern "C" void merk_device_place(PlaceTable *table) {
   uint64_t seen{kPlaceIdle};
   uint32_t sleeps{1};
   for (;;) {
-    uint64_t state{LoadSlotWord(&slot->state)};
+    uint64_t state{PollSlotWord(&slot->state)};
     if (state != seen) {
       seen = state;
       sleeps = 1;
+    }
+    // What the host wrote before it set the slot running or working.
+    if (state != kPlaceIdle) {
+      __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
     }
     if (state == kPlaceRunning) {
       if (__gpu_lane_id() == 0) {
@@ -1672,7 +1695,8 @@ extern "C" void merk_device_place(PlaceTable *table) {
       Work(slot, inTeam);
       continue;
     }
-    if (state == kPlaceIdle && LoadSlotWord(&table->end)) {
+    if (state == kPlaceIdle && PollSlotWord(&table->end)) {
+      __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
       return;
     }
     for (uint32_t i{0}; i < sleeps; ++i) {
@@ -2149,17 +2173,21 @@ bool Look(
   if (!entry) {
     ClosedMailbox();
   }
+  // The ring is in host memory, which a relaxed load reads fresh: a look
+  // that finds nothing takes no acquire, which on gfx90a would invalidate
+  // the GPU's L2 (PollSlotWord).
   DeviceRing *ring{entry->ring};
-  uint64_t tail{__atomic_load_n(&ring->tail, __ATOMIC_ACQUIRE)};
+  uint64_t tail{__atomic_load_n(&ring->tail, __ATOMIC_RELAXED)};
   if (tail == kRingClosed) {
     ClosedMailbox();
   }
   if (entry->head == tail) {
     // What waits outside the ring is in it after the drain, so that a
     // receive with no time to wait still finds it.
-    if (!__atomic_load_n(&ring->spilled, __ATOMIC_ACQUIRE)) {
+    if (!__atomic_load_n(&ring->spilled, __ATOMIC_RELAXED)) {
       return false;
     }
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
     Drain(handle);
     tail = __atomic_load_n(&ring->tail, __ATOMIC_ACQUIRE);
     if (tail == kRingClosed) {
@@ -2169,6 +2197,7 @@ bool Look(
       return false;
     }
   }
+  __atomic_thread_fence(__ATOMIC_ACQUIRE);
   *value = __atomic_load_n(
       &ring->slots[entry->head % kRingSlots], __ATOMIC_RELAXED);
   return true;
@@ -2826,7 +2855,7 @@ int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
   for (uint32_t look{0};; ++look) {
     bool hostLook{look % 8 == 0};
     if (hostLook &&
-        __atomic_load_n(&entry->ring->tail, __ATOMIC_ACQUIRE) == kRingClosed) {
+        __atomic_load_n(&entry->ring->tail, __ATOMIC_RELAXED) == kRingClosed) {
       ClosedMailbox();
     }
     if (hostLook && route->hostFirst && fromHost(message)) {
