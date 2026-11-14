@@ -5201,6 +5201,46 @@ checksum in every run, the same as before.
   rounds, 3 to 4 at little work, where the copies count; before, 4.6 to 19
   times.
 
+**With arrays moved at their last use.** 2026-11-13 at df3b04728e91, where a
+send that is its arrays' last use gives their blocks to the receiver
+rather than copying them (merk.foreign_call's `moves`; INPROGRESS,
+Messages between GPU processes on one GPU, step 2). Same machine, settings
+and sweep, Firefox closed. Rounds were within 6% of each other, but for
+the shortest frames, of 4096 words and little work (pipeline 10%, HIP up
+to 35% of 13 µs). Every configuration gave one checksum in every run.
+
+| Words | Rounds | Feedback | Pipeline | Copied | Single | HIP |
+|---|---|---|---|---|---|---|
+| 4096 | 16 | none | 45 | 87 | 68 | 13.0 |
+| 4096 | 16 | 1 | 145 | 222 | 70 | 12.6 |
+| 4096 | 256 | none | 56 | 97 | 87 | 30.3 |
+| 4096 | 4096 | none | 334 | 357 | 379 | 319 |
+| 4096 | 4096 | 1 | 456 | 533 | 380 | 319 |
+| 65536 | 16 | none | 259 | 907 | 573 | 28 |
+| 65536 | 16 | 1 | 654 | 1861 | 572 | 28 |
+| 65536 | 256 | none | 442 | 1055 | 806 | 267 |
+| 65536 | 4096 | none | 4848 | 5030 | 4590 | 3896 |
+| 65536 | 4096 | 1 | 6840 | 8115 | 4592 | 3908 |
+| 1048576 | 16 | none | 3705 | 16003 | 8595 | 285 |
+| 1048576 | 16 | 1 | 8757 | 35116 | 8558 | 288 |
+| 1048576 | 256 | none | 6431 | 20255 | 12429 | 3847 |
+| 1048576 | 4096 | none | 75413 | 84750 | 72900 | 61062 |
+| 1048576 | 4096 | 1 | 106085 | 133910 | 72948 | 61055 |
+
+- **The pipeline now beats one process** when a stage's work is small or
+  middling, by up to 2.3 times (259 against 573 µs at 2^16 words and 16
+  rounds; 3.7 against 8.6 ms at 2^20): its three stages overlap, and a
+  frame's hop costs about a queue's slot. Moving made it 1.9 to 4.3 times
+  faster than copying at little work. At 4096 rounds, when the work fills
+  the GPU either way, it is within 6% of one process.
+- **Against HIP** it is 1.2 times at much work and 1.7 times at 256 rounds,
+  but still 3 to 13 times at little: each stage makes its frame's new array
+  with `array.init`, which fills it from the process's one lane, as the
+  single process's three fills are most of its time (step 3).
+- **Feedback with one frame in flight** costs 1.0 to 2.1 times one process,
+  against 1.4 to 4.1 with copies: what is left is the stages run one after
+  another, each on a third of the teams.
+
 ### GPU processes' stacks
 
 2026-11-13, at bddf7bd56f9a with the change that marks a GPU process's code
