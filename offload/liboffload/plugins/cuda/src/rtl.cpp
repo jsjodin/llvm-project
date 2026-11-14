@@ -627,6 +627,9 @@ struct CUDADeviceTy : public GenericDeviceTy {
       Res = cuMemAllocManaged(&DevicePtr, Size, CU_MEM_ATTACH_GLOBAL);
       MemAlloc = (void *)DevicePtr;
       break;
+    case OL_ALLOC_TYPE_DEVICE_FINE_GRAINED:
+      return Plugin::error(ErrorCode::UNSUPPORTED,
+                           "fine-grained device memory is not supported");
     default:
       llvm_unreachable("unexpected allocation type");
     }
@@ -661,6 +664,7 @@ struct CUDADeviceTy : public GenericDeviceTy {
     switch (Kind) {
     case OL_ALLOC_TYPE_DEVICE:
     case OL_ALLOC_TYPE_MANAGED:
+    case OL_ALLOC_TYPE_DEVICE_FINE_GRAINED:
       Res = cuMemFree((CUdeviceptr)TgtPtr);
       break;
     case OL_ALLOC_TYPE_HOST:

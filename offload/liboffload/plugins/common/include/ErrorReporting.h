@@ -67,6 +67,8 @@ class ErrorReporter {
       return "managed memory";
     default:
       break;
+    case OL_ALLOC_TYPE_DEVICE_FINE_GRAINED:
+      return "fine-grained device memory";
     }
     llvm_unreachable("Unknown target alloc kind");
   }

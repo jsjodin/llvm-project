@@ -23,6 +23,8 @@ static const char *allocKindToStr(int32_t Kind) {
     return "HOST";
   case OL_ALLOC_TYPE_MANAGED:
     return "SHARED";
+  case OL_ALLOC_TYPE_DEVICE_FINE_GRAINED:
+    return "DEVICE_FINE";
   default:
     llvm_unreachable("unexpected allocation type");
   }
