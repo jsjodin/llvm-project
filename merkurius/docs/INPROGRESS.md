@@ -5016,9 +5016,22 @@ process's lane:
     tiles start and end throughout. Whether moving pays is p4's.
 - (p4) Measurements against `life-sparse.m` on one place: what the
   agreement and the halos cost each step, and the active tiles of each
-  place over time.
+  place over time. Done 2026-11-13 (design document, Measurements, "What
+  places agree on, and what it costs"): the agreement costs more than the
+  step and grows with the tiles, as the place walks its tiles on its one
+  lane several times a step, each tile a chain of loads; moving tiles
+  balances them but does not pay yet, and gives places more neighbours.
 
 *Open.*
+- A place's walks of its tiles on its one lane (`summary`, `end_own`,
+  `drop_ghosts`, `expected`, `select`, `apply_halo`'s), 0.3 to 1.3 µs a
+  tile each (p4). `expected` as a `distribute` loop took 459 µs to 45 at
+  346 tiles. How to run them on many lanes is to decide: `distribute` loops
+  in the program, each a loop across the teams; or a loop that runs across
+  the lanes of the process's own wave, with reductions, which process code
+  has no directive for (a `parallel do` must be in a `distribute`).
+- The directory moves tiles by their counts alone; the halos that a move
+  makes cost more than the balance saves (p4).
 - Every-step agreement costs a round trip to the host each step. Life moves
   at most one cell a step, so a tile asked for k steps ahead lets places
   agree every k steps (the user's second option, 2026-11-13); later.
