@@ -116,6 +116,11 @@ inline constexpr llvm::StringLiteral kRootTypeAttrName{"merk.root_type"};
 // in the struct the call returns, or 0 for a call that returns it alone
 // (Lowering, Lowerer::notifyOperationReplaced; Statepoints, RecordTypes).
 inline constexpr llvm::StringLiteral kResultTypesAttrName{"merk.result_types"};
+// Metadata on an inttoptr that makes a word of a scalar's bits, an integer or
+// a float in a polymorphic word: never a pointer, so a root the collector
+// ignores, wherever the optimizer kept it live (Lowering, OptimizeLLVMIR;
+// Statepoints, FindType).
+inline constexpr llvm::StringLiteral kScalarWord{"merk.scalar_word"};
 // Named metadata of (cell's root type, offset of a field from the tagged
 // pointer, the field's root type), for a pointer loaded from a field that the
 // optimizer keeps live past a safepoint (Statepoints, FindType).

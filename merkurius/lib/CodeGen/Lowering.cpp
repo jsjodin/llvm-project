@@ -6080,12 +6080,20 @@ void OptimizeLLVMIR(llvm::Module &module, const TargetInfo &target) {
           ? builder.buildO0DefaultPipeline(level)
           : builder.buildPerModuleDefaultPipeline(level)};
   passes.run(module, modules);
+  // A word of a scalar's bits, which the statepoint rewrite must know is no
+  // pointer: the optimizer may have merged two calls on the same bits, and
+  // so kept one live past safepoints whose bundles do not list it.
   if (llvm::Function *toWord{module.getFunction(kWordOfBits)}) {
     for (llvm::User *user : llvm::make_early_inc_range(toWord->users())) {
       auto *call{llvm::cast<llvm::CallInst>(user)};
       llvm::IRBuilder<> builder{call};
-      call->replaceAllUsesWith(
-          builder.CreateIntToPtr(call->getArgOperand(0), call->getType()));
+      llvm::Value *word{
+          builder.CreateIntToPtr(call->getArgOperand(0), call->getType())};
+      if (auto *made{llvm::dyn_cast<llvm::Instruction>(word)}) {
+        made->setMetadata(
+            kScalarWord, llvm::MDNode::get(module.getContext(), {}));
+      }
+      call->replaceAllUsesWith(word);
       call->eraseFromParent();
     }
     toWord->eraseFromParent();

@@ -636,6 +636,15 @@ static const llvm::Value *RoundTripped(const llvm::Value *value) {
   return IsHeapPointer(pointer->getType()) ? pointer : nullptr;
 }
 
+// Whether a value is a word of a scalar's bits, an integer or a float in a
+// polymorphic word (Lowering, OptimizeLLVMIR): never a pointer, so never a
+// root, though the optimizer may have kept it live past safepoints whose
+// bundles do not list it, by merging the words of the same bits.
+static bool IsScalarWord(const llvm::Value *value) {
+  auto *made{llvm::dyn_cast<llvm::IntToPtrInst>(value)};
+  return made && made->hasMetadata(kScalarWord);
+}
+
 // What the bundles said of a value the rewrite made, from what it was made of.
 // `seen` has the values already followed, by this search and those that
 // asked for the type of a cell a pointer was loaded from.
@@ -649,6 +658,11 @@ static llvm::Constant *FindType(const llvm::Value *root, KnownTypes &known,
     }
     if (llvm::Constant *type{known.lookup(value)}) {
       return type;
+    }
+    // A word of a scalar's bits, which the collector ignores.
+    if (IsScalarWord(value)) {
+      return llvm::ConstantInt::getSigned(
+          llvm::Type::getInt64Ty(value->getContext()), -1);
     }
     // A pointer loaded from a field of a cell of a known type.
     if (auto *load{llvm::dyn_cast<llvm::LoadInst>(value)}) {
@@ -701,7 +715,7 @@ static bool IsLiveRoot(llvm::Value *value) {
   return IsHeapPointer(value->getType()) &&
       (llvm::isa<llvm::Instruction>(value) ||
           llvm::isa<llvm::Argument>(value)) &&
-      !IsFromStaticData(value);
+      !IsFromStaticData(value) && !IsScalarWord(value);
 }
 
 // Applies an instruction to what is live before it, from what is after it.
