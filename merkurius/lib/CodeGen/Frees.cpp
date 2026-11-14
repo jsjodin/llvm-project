@@ -144,6 +144,19 @@ bool IsLoopCall(llvm::StringRef callee) {
       callee == "merk_device_team_loop";
 }
 
+// Whether the cast is of an array to the pointer that only sends of it as
+// the whole message are given.
+bool SendsArray(mlir::UnrealizedConversionCastOp cast) {
+  if (cast->getNumOperands() != 1 || cast->getNumResults() != 1 ||
+      !mlir::isa<merk::ArrayType>(cast->getOperand(0).getType())) {
+    return false;
+  }
+  return llvm::all_of(cast->getResult(0).getUsers(), [](mlir::Operation *user) {
+    auto call{mlir::dyn_cast<merk::ForeignCallOp>(user)};
+    return call && call.getCallee() == "merk_device_send_array";
+  });
+}
+
 // Whether `op`, followed only by the terminators of its regions, ends the
 // procedure: a call there is a tail call. A condition's yield goes on to
 // the then part.
@@ -640,6 +653,22 @@ void Analysis::Visit(mlir::Operation *op) {
                                                                 : Origin::Alias,
           IdOf(value));
       Join(word, value);
+    }
+    return;
+  }
+  if (auto cast{mlir::dyn_cast<mlir::UnrealizedConversionCastOp>(op)};
+      cast && SendsArray(cast)) {
+    // The pointer that a send of an array as the whole message is given,
+    // the array's block (MLIRGenOpenMP.cpp, SendInTarget): the send, which
+    // copies it, is a use of the array.
+    mlir::Value array{cast->getOperand(0)}, pointer{cast->getResult(0)};
+    if (Tracked(array)) {
+      Origin origin{OriginOf(array)};
+      Track(pointer,
+          origin == Origin::Static || origin == Origin::Pending ? origin
+                                                                : Origin::Alias,
+          IdOf(array));
+      Join(pointer, array);
     }
     return;
   }
