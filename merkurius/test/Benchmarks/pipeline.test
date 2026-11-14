@@ -1,0 +1,39 @@
+A pipeline of three processes (benchmarks/pipeline/pipeline.m), spawned at
+the host: each passes each frame on in a message, and with feedback the
+sink sends each frame's checksum back to the source, which mixes it into a
+later frame. The three stages in one process (PIPE_MODE=single) give the
+same checksums, as does pipeline.hip on the GPU (pipeline-gpu.test), whose
+values these are: a sum of the cells' bits, which no order changes.
+
+Sequential, at -O0 and -O2, and with the loops on the host's threads.
+The -O0 build has no --offload-arch, as life-sparse.test's.
+REQUIRES: amdgpu-registered-target, libomp
+RUN: merkc -O0 -fdo-loops -fprocess-declarations %libomp-flags %S/../../benchmarks/pipeline/pipeline.m -o %t0
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/pipeline/pipeline.m -o %t2
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/pipeline/pipeline.m -o %t.omp
+
+RUN: %libomp-env PIPE_WORDS=1000 PIPE_WORK=8 PIPE_FRAMES=20 %t0 host | FileCheck %s --check-prefix=PLAIN --match-full-lines
+RUN: %libomp-env PIPE_WORDS=1000 PIPE_WORK=8 PIPE_FRAMES=20 PIPE_MODE=single %t2 host | FileCheck %s --check-prefix=SINGLE --match-full-lines
+RUN: %libomp-env OMP_NUM_THREADS=4 PIPE_WORDS=1000 PIPE_WORK=8 PIPE_FRAMES=20 %t.omp host | FileCheck %s --check-prefix=PLAIN --match-full-lines
+PLAIN: Pipeline, Mercury, three GPU processes
+PLAIN-NEXT: Frames: 20 of 1000 words, 8 rounds a stage
+PLAIN-NEXT: Feedback: none
+PLAIN-NEXT: Checksum: 4088faaca8b9af86
+PLAIN-NEXT: Time a frame: {{[0-9.]+}} us
+SINGLE: Pipeline, Mercury, one GPU process
+SINGLE: Checksum: 4088faaca8b9af86
+
+RUN: %libomp-env PIPE_WORDS=1000 PIPE_WORK=8 PIPE_FRAMES=20 PIPE_FEEDBACK=2 %t2 host | FileCheck %s --check-prefix=FEEDBACK --match-full-lines
+RUN: %libomp-env PIPE_WORDS=1000 PIPE_WORK=8 PIPE_FRAMES=20 PIPE_FEEDBACK=2 PIPE_MODE=single %t0 host | FileCheck %s --check-prefix=FEEDBACK --match-full-lines
+RUN: %libomp-env OMP_NUM_THREADS=4 PIPE_WORDS=1000 PIPE_WORK=8 PIPE_FRAMES=20 PIPE_FEEDBACK=2 %t.omp host | FileCheck %s --check-prefix=FEEDBACK --match-full-lines
+FEEDBACK: Feedback: 2 frames in flight
+FEEDBACK-NEXT: Checksum: 2b3d2f6845b98c56
+
+No work, an odd frame, and more frames in flight than frames.
+RUN: %libomp-env PIPE_WORDS=777 PIPE_WORK=0 PIPE_FRAMES=5 PIPE_FEEDBACK=3 %t0 host | FileCheck %s --check-prefix=ODD --match-full-lines
+RUN: %libomp-env PIPE_WORDS=777 PIPE_WORK=0 PIPE_FRAMES=5 PIPE_FEEDBACK=3 PIPE_MODE=single %t2 host | FileCheck %s --check-prefix=ODD --match-full-lines
+ODD: Checksum: 9391810624e3ad0d
+
+RUN: %libomp-env PIPE_MODE=both not %t2 host | FileCheck %s --check-prefix=USAGE
+RUN: %libomp-env PIPE_FRAMES=1 not %t2 host | FileCheck %s --check-prefix=USAGE
+USAGE: PIPE_WORDS must be at least 1, PIPE_WORK and PIPE_FEEDBACK at least 0, PIPE_FRAMES at least 2, and PIPE_MODE pipeline or single.
