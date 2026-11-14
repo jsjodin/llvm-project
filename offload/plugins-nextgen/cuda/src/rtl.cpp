@@ -630,6 +630,9 @@ struct CUDADeviceTy : public GenericDeviceTy {
       Res = cuMemAllocManaged(&DevicePtr, Size, CU_MEM_ATTACH_GLOBAL);
       MemAlloc = (void *)DevicePtr;
       break;
+    case TARGET_ALLOC_DEVICE_FINE:
+      return Plugin::error(ErrorCode::UNSUPPORTED,
+                           "fine-grained device memory is not supported");
     }
 
     if (auto Err = Plugin::check(Res, "error in cuMemAlloc[Host|Managed]: %s"))
@@ -663,6 +666,7 @@ struct CUDADeviceTy : public GenericDeviceTy {
     case TARGET_ALLOC_DEFAULT:
     case TARGET_ALLOC_DEVICE:
     case TARGET_ALLOC_SHARED:
+    case TARGET_ALLOC_DEVICE_FINE:
       Res = cuMemFree((CUdeviceptr)TgtPtr);
       break;
     case TARGET_ALLOC_HOST:

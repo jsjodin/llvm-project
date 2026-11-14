@@ -23,6 +23,8 @@ static const char *allocKindToStr(int32_t Kind) {
     return "HOST";
   case TARGET_ALLOC_SHARED:
     return "SHARED";
+  case TARGET_ALLOC_DEVICE_FINE:
+    return "DEVICE_FINE";
   default:
     return "DEFAULT";
   }

@@ -236,6 +236,7 @@ struct GenELF64DeviceTy : public GenericDeviceTy {
     case TARGET_ALLOC_DEVICE:
     case TARGET_ALLOC_HOST:
     case TARGET_ALLOC_SHARED:
+    case TARGET_ALLOC_DEVICE_FINE:
       MemAlloc = std::malloc(Size);
       break;
     }

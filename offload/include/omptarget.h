@@ -109,7 +109,11 @@ enum TargetAllocTy : int32_t {
   TARGET_ALLOC_HOST,
   TARGET_ALLOC_SHARED,
   TARGET_ALLOC_DEFAULT,
-  TARGET_ALLOC_LAST = TARGET_ALLOC_DEFAULT
+  /// Device memory that is fine-grained: coherent with the host and other
+  /// devices without a cache flush, so a word another agent writes in it is
+  /// seen by a kernel that polls it (AMDGPU only).
+  TARGET_ALLOC_DEVICE_FINE,
+  TARGET_ALLOC_LAST = TARGET_ALLOC_DEVICE_FINE
 };
 
 struct DeviceTy;

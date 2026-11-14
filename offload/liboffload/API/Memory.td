@@ -15,7 +15,8 @@ def ol_alloc_type_t : Enum {
   let etors = [
     Etor<"HOST", "Host allocation">,
     Etor<"DEVICE", "Device allocation">,
-    Etor<"MANAGED", "Managed allocation">
+    Etor<"MANAGED", "Managed allocation">,
+    Etor<"DEVICE_FINE_GRAINED", "Device allocation that is coherent with the host and other devices without a cache flush (AMDGPU only)">
   ];
 }
 
@@ -43,7 +44,7 @@ def olMemAlloc : Function {
   let params = [
     Param<"ol_context_handle_t", "Context", "handle of the context", PARAM_IN>,
     Param<"ol_device_handle_t", "Device", "handle of the device to allocate on", PARAM_IN>,
-    Param<"ol_alloc_type_t", "Type", "type of the allocation. Must be either `OL_ALLOC_TYPE_DEVICE` or `OL_ALLOC_TYPE_MANAGED`", PARAM_IN>,
+    Param<"ol_alloc_type_t", "Type", "type of the allocation. Must be `OL_ALLOC_TYPE_DEVICE`, `OL_ALLOC_TYPE_MANAGED` or `OL_ALLOC_TYPE_DEVICE_FINE_GRAINED`", PARAM_IN>,
     Param<"size_t", "Size", "size of the allocation in bytes", PARAM_IN>,
     Param<"void**", "AllocationOut", "output for the allocated pointer", PARAM_OUT>
   ];
@@ -91,7 +92,7 @@ def olMemAllocAligned : Function {
   let params = [
     Param<"ol_context_handle_t", "Context", "handle of the context", PARAM_IN>,
     Param<"ol_device_handle_t", "Device", "handle of the device to allocate on", PARAM_IN>,
-    Param<"ol_alloc_type_t", "Type", "type of the allocation. Must be either `OL_ALLOC_TYPE_DEVICE` or `OL_ALLOC_TYPE_MANAGED`", PARAM_IN>,
+    Param<"ol_alloc_type_t", "Type", "type of the allocation. Must be `OL_ALLOC_TYPE_DEVICE`, `OL_ALLOC_TYPE_MANAGED` or `OL_ALLOC_TYPE_DEVICE_FINE_GRAINED`", PARAM_IN>,
     Param<"size_t", "Size", "size of the allocation in bytes", PARAM_IN>,
     Param<"size_t", "Alignment",
                "alignment of the allocation in bytes. Must be non-zero and a power of two",

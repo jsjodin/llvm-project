@@ -3421,6 +3421,10 @@ struct AMDGPUDeviceTy : public GenericDeviceTy, AMDGenericDeviceTy {
     case TARGET_ALLOC_SHARED:
       MemoryPool = &HostDevice.getFineGrainedMemoryPool();
       break;
+    case TARGET_ALLOC_DEVICE_FINE:
+      if (!FineGrainedMemoryPools.empty())
+        MemoryPool = FineGrainedMemoryPools[0];
+      break;
     }
 
     if (!MemoryPool)
@@ -5432,6 +5436,11 @@ Expected<void *> AMDGPUDeviceTy::allocate(size_t Size, void *,
     break;
   case TARGET_ALLOC_SHARED:
     MemoryPool = &HostDevice.getFineGrainedMemoryPool();
+    break;
+  case TARGET_ALLOC_DEVICE_FINE:
+    // The device's own fine-grained pool, if it has one.
+    if (!FineGrainedMemoryPools.empty())
+      MemoryPool = FineGrainedMemoryPools[0];
     break;
   }
 

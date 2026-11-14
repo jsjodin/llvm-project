@@ -909,6 +909,8 @@ TargetAllocTy convertOlToPluginAllocTy(ol_alloc_type_t Type) {
     return TARGET_ALLOC_DEVICE;
   case OL_ALLOC_TYPE_HOST:
     return TARGET_ALLOC_HOST;
+  case OL_ALLOC_TYPE_DEVICE_FINE_GRAINED:
+    return TARGET_ALLOC_DEVICE_FINE;
   case OL_ALLOC_TYPE_MANAGED:
   default:
     return TARGET_ALLOC_SHARED;
@@ -921,6 +923,8 @@ ol_alloc_type_t convertPluginToOlAllocTy(TargetAllocTy Kind) {
     return OL_ALLOC_TYPE_HOST;
   case TARGET_ALLOC_SHARED:
     return OL_ALLOC_TYPE_MANAGED;
+  case TARGET_ALLOC_DEVICE_FINE:
+    return OL_ALLOC_TYPE_DEVICE_FINE_GRAINED;
   case TARGET_ALLOC_DEVICE:
   case TARGET_ALLOC_DEFAULT:
     return OL_ALLOC_TYPE_DEVICE;

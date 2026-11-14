@@ -68,6 +68,8 @@ class ErrorReporter {
     case TARGET_ALLOC_SHARED:
       return "managed memory";
       break;
+    case TARGET_ALLOC_DEVICE_FINE:
+      return "fine-grained device memory";
     }
     llvm_unreachable("Unknown target alloc kind");
   }
