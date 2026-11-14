@@ -3298,12 +3298,16 @@ also compiled for the device, allocating in the arena. The wire format is
   (`rpcSendArrayFromDevice`): the device's release at system scope writes
   it back from the L2, and the host copies it out of the device's memory
   with `olMemcpy`, 512 KiB at a time, and sends that. On gfx90a it raised
-  a send within a node from 100 to 170 MB/s to 1.6 to 3.5 GB/s
-  (benchmarks/array-messages, "On gfx90a").
+  a send within a node from 130 to 170 MB/s to 2.4 to 3.8 GB/s from 2^16
+  words (benchmarks/array-messages, "On gfx90a").
 - **A receive** is the ring giving the size, `rpcTakeArray` copying the message
   into host memory that the device reads, and the device copying that into an
   array in its arena. The device decides the place, so the arena's accounting
-  stays on one side.
+  stays on one side. On gfx9, from the same 8 KiB as a send, the device makes
+  the array first and gives the host its address (`rpcTakeArrayInto`), the
+  host copies the message straight into it with `olMemcpy`, and the device
+  makes an acquire at system scope: on gfx90a a receive within a node went
+  from about 115 MB/s to 3.1 to 7.0 GB/s.
 - **Rejected: copying into or out of the device's memory while it runs**
   (`omp_target_memcpy`, `olMemcpy`), as both did until 2026-11-10. The
   arena is coarse-grained memory, whose lines the device's L2 cache keeps
@@ -3315,12 +3319,14 @@ also compiled for the device, allocating in the arena. The wire format is
   invalidated. The copy was faster: a send from a GPU within a node reached
   about 1.2 GB/s. One lane copying word by word is slower, until messages
   travel as their bytes and a wave's lanes copy them together
-  (docs/INPROGRESS.md, GPU processes without omp target, step 5). A copy
-  out of the device's memory came back for gfx9's sends, above, whose
-  release at system scope writes back the L2 (`buffer_wbl2`). A copy into
-  it is not yet tried: gfx90a's acquire invalidates no L2 lines of the
-  device's own memory (AMDGPUUsage, Memory Model GFX90A), so whether the
-  copy engine's writes reach the lines it holds is to find.
+  (docs/INPROGRESS.md, GPU processes without omp target, step 5). Both came
+  back for arrays of 8 KiB and more on gfx9: a copy out of the device's
+  memory, as its release at system scope writes back the L2
+  (`buffer_wbl2`), and a copy into it, as a probe found the copy engine's
+  writes reaching the L2 of a running gfx90a kernel, though its acquire
+  invalidates no L2 lines of the device's own memory (AMDGPUUsage, Memory
+  Model GFX90A; INPROGRESS, Messages between GPU processes on one GPU,
+  step 4).
 - **Copied and encoded as blocks.** An array of scalars is copied into a
   message with one `memcpy`. An array of `int`, `uint` or `float` (64-bit
   ones) is encoded and decoded as one, its bytes on the wire being its bytes in
