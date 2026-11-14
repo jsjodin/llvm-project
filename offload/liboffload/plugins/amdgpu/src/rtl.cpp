@@ -3260,6 +3260,20 @@ struct AMDGPUDeviceTy : public GenericDeviceTy, AMDGenericDeviceTy {
 
   /// The compute units that the device's queues use: those of
   /// LIBOMPTARGET_AMDGPU_CU_MASK, or of the queues that ROCr creates.
+  /// A peer's kernels reach this device's memory if ROCr lets the peer's
+  /// agent access its coarse-grained pool and, if it has one, its
+  /// fine-grained pool; allocate() then grants the access to each allocation.
+  bool canPeerAccessMemory(GenericDeviceTy &Peer) override {
+    if (&Peer == this)
+      return true;
+    hsa_agent_t PeerAgent = static_cast<AMDGPUDeviceTy &>(Peer).getAgent();
+    if (CoarseGrainedMemoryPools.empty() ||
+        !CoarseGrainedMemoryPools[0]->canAccess(PeerAgent))
+      return false;
+    return FineGrainedMemoryPools.empty() ||
+           FineGrainedMemoryPools[0]->canAccess(PeerAgent);
+  }
+
   Expected<SmallVector<uint32_t>> getComputeUnitMask() override {
     if (QueueComputeUnitMask.empty())
       return Plugin::error(ErrorCode::UNSUPPORTED,

@@ -937,6 +937,11 @@ struct GenericDeviceTy : public DeviceAllocatorTy {
                          "known");
   }
 
+  /// Whether a kernel on \p Peer, a device of the same plugin, can read and
+  /// write this device's memory directly: its device memory, and its
+  /// fine-grained device memory if it has any. False unless the plugin knows.
+  virtual bool canPeerAccessMemory(GenericDeviceTy &Peer) { return false; }
+
   /// Invokes any global constructors on the device if present and is required
   /// by the target.
   virtual Error callGlobalConstructors(GenericPluginTy &Plugin,

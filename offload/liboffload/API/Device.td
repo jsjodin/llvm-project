@@ -166,6 +166,20 @@ def olGetDeviceComputeUnitMask : Function {
   ];
 }
 
+def olGetDevicePeerAccess : Function {
+  let desc = "Queries whether a kernel on one device can read and write another device's memory directly.";
+  let details = [
+    "`CanAccess` is set if a kernel on `Peer` can read and write the memory that `olMemAlloc` gives on `Device`, of `OL_ALLOC_TYPE_DEVICE`, and of `OL_ALLOC_TYPE_DEVICE_FINE_GRAINED` if `Device` has it. Each allocation gives that access as it is made.",
+    "A device always reaches its own memory. Devices of different platforms, and the host device, never reach another's memory this way."
+  ];
+  let params = [
+    Param<"ol_device_handle_t", "Device", "handle of the device whose memory is accessed", PARAM_IN>,
+    Param<"ol_device_handle_t", "Peer", "handle of the device whose kernels access it", PARAM_IN>,
+    Param<"bool*", "CanAccess", "whether they can", PARAM_OUT>
+  ];
+  let returns = [];
+}
+
 def olGetDeviceInfo : Function {
   let desc = "Queries the given property of the device.";
   let details = [];
