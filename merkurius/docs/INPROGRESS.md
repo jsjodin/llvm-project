@@ -5197,6 +5197,44 @@ with tiles of 64, after a place's walks of its tiles run on many lanes
 (Open, in the demo's section): its agreement grows by 1.3 µs a tile
 against 3.5 µs of work.
 
+## A pipeline of processes
+
+Proposed by the user 2026-11-13, after the shallow water showcase: "a
+streaming example like a pipeline of processes, with maybe some feedback
+... Is this something that might be faster, or are we simply going to run
+into the same thing?" A pipeline has no global step: each stage waits only
+for its input, and with frames in flight a message's latency is hidden
+behind the frames behind it, so what decides it is a stage's work a frame
+against a message's cost. The user chose a microbenchmark first.
+
+**Done 2026-11-13:** `benchmarks/pipeline` (`pipeline.m`, `pipeline.hip`,
+`sweep.sh`), `test/Benchmarks/pipeline.test` and `pipeline-gpu.test`.
+Results in the design document, Measurements, "A pipeline of GPU
+processes": on one GPU the pipeline loses to one process by 2 to 26 times,
+as a message between GPU processes goes through the host, copied by one
+lane at each end, about 200 MB/s; one process loses to HIP by up to 31
+times at little work, from `array.init`'s one-lane fills. Building it found
+and fixed two bugs, each its own commit: foreign C in GPU processes
+compiled with OpenMP's globalization (fe89f6ebbf0f), and words of scalars'
+bits taken as collector roots (80a26a741615).
+
+*Open:*
+- A send within a GPU into a queue in its memory, and a unique array that
+  moves by its pointer (Processes as teams, and messages within a GPU;
+  GPU processes without `omp target`, steps 5c and 5d). This is what a
+  pipeline on one GPU needs.
+- `array.init` in a GPU process fills from its one lane (Open after f4, in
+  the demo's section): 2.9 ms for 8 MiB.
+- Copying a message's block from one lane, 32 loads in flight: the whole
+  wave, or the worker teams, for a large block.
+- A GPU process kind takes no records as arguments: `pipeline.m` passes its
+  four settings as integers.
+- At the host, feedback with 2 frames in flight made a frame of 1000 words
+  2.4 ms against 0.43 without, and 0.27 in one process: a wake-up of a
+  waiting receive, to look into.
+- With one process and much work, the GPU process is 1.2 times HIP: its
+  loop of rounds, to compare instruction by instruction.
+
 ## Topology: GPUs, NUMA domains and NICs within a node
 
 Proposed 2026-11-09; nothing is built, and it is not agreed. Real numbers wait for

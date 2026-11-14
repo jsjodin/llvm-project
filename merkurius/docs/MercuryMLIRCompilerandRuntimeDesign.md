@@ -5110,6 +5110,59 @@ on the 8192-cell world, where the GPU is full.
   on the GPU, is 32 to 45 µs, the host's in HIP 37 to 48 and in C 54 to 76,
   which includes OpenMP's copies to and from the device.
 
+### A pipeline of GPU processes
+
+`benchmarks/pipeline`: three GPU processes on one GPU, each with a third of
+its teams, passing frames of floats on in messages, against the same three
+stages in one GPU process with all the teams, and against HIP's three
+kernels a frame in one stream (INPROGRESS, A pipeline of processes). On the
+gfx1030 with 40 compute units, 2026-11-13 at 80a26a741615 with the
+benchmark, Firefox closed; 40 frames, the median of 3 rounds taking turns,
+µs a frame. Rounds were within 6% of each other but one at 2^20 words (20%).
+Every configuration gave one checksum in every run.
+
+| Words | Rounds | Feedback | Pipeline | Single | HIP |
+|---|---|---|---|---|---|
+| 4096 | 16 | none | 612 | 72 | 12.6 |
+| 4096 | 16 | 1 | 1410 | 73 | 12.6 |
+| 4096 | 4096 | none | 801 | 381 | 319 |
+| 4096 | 4096 | 1 | 1738 | 381 | 319 |
+| 65536 | 16 | none | 6329 | 594 | 28 |
+| 65536 | 256 | none | 6481 | 830 | 267 |
+| 65536 | 4096 | none | 8682 | 4615 | 3911 |
+| 65536 | 4096 | 1 | 21028 | 4613 | 3897 |
+| 1048576 | 16 | none | 100546 | 8941 | 288 |
+| 1048576 | 256 | none | 98564 | 12809 | 3844 |
+| 1048576 | 4096 | none | 146610 | 73148 | 60965 |
+| 1048576 | 4096 | 1 | 334364 | 73145 | 60942 |
+
+With no work a stage (`PIPE_WORK=0`): 2^17 words, pipeline 12620, single
+1125, HIP 17.5; 2^20 words, 84422, 8780 and 53.
+
+- **The pipeline loses everywhere, by 2 to 26 times against one process.**
+  Its frame's time is the middle process's: a message in, a frame made, a
+  message out. A message between two GPU processes on one GPU goes through
+  the host's memory, copied by the sender's one lane and again by the
+  receiver's, with 32 loads in flight (Life on several places): about 200
+  MB/s a hop, 40 ms for a frame of 8 MiB. Even at 4096 rounds, when a
+  stage's work is 20 ms, the messages double the time.
+- **Feedback with one frame in flight more than doubles it,** as the
+  source waits for each frame's round trip through all three processes and
+  back: the messages' latency is then all on the path, as in the stencil's
+  agreement. HIP's feedback, through the stream's order, costs nothing.
+- **One process is 1.2 times HIP when the work is large,** and up to 31
+  times when it is small: each frame makes three arrays, and `array.init`
+  fills each from the process's one lane, 2.9 ms for 8 MiB (INPROGRESS, A
+  demo: a stencil whose active region moves, Open after f4), against HIP's buffers made once. With no
+  work, the fills are nearly all of the single process's 8.8 ms a frame.
+- **What a pipeline needs on one GPU** is what INPROGRESS's Processes as
+  teams has proposed and not yet built: a send within a GPU into a queue in
+  its memory (steps 5c and 5d), and a unique array that moves by its pointer
+  rather than its bytes. A token between teams through device memory took
+  0.2 to 0.5 µs a hop (the probe of 2026-11-09, above); a frame's
+  hop would then cost about that, and the pipeline would approach the
+  single process. Between GPUs, a frame would cost a peer copy.
+
 ### GPU processes' stacks
 
 2026-11-13, at bddf7bd56f9a with the change that marks a GPU process's code
