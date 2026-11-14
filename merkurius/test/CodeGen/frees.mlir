@@ -4,7 +4,8 @@
 // returned, or given to a foreign call that may keep it, nor what a tail
 // call is given. A received message, in its message(...) cell, is freed
 // through the cell. A callee's summary says whether its result is a new
-// block, and whether it keeps an argument.
+// block, and whether it keeps an argument. An array sent as a whole
+// message is freed after the send.
 //
 // RUN: merkc -fc1 -fdebug-dump-frees %s -o - | FileCheck %s
 
@@ -242,6 +243,22 @@ module @frees attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
     %2 = merk.construct #merk.functor<"wrap", 1>(%1 : !merk.array<i64>) -> !merk.term<"frees.wrap">
     %3 = merk.deconstruct #merk.functor<"wrap", 1> %2 : !merk.term<"frees.wrap"> -> !merk.array<i64>
     %4 = merk.array_size %3 : <i64>
+    merk.succeed
+  }
+
+  // An array sent as the whole message, through its pointer, is freed after
+  // the send, which copies it.
+  // CHECK-LABEL: merk.proc @frees.sends_1_0
+  // CHECK: %[[A:.*]] = merk.array_new
+  // CHECK-NEXT: %[[P:.*]] = builtin.unrealized_conversion_cast %[[A]]
+  // CHECK-NEXT: merk.foreign_call @merk_device_send_array(%arg0, %{{.*}}, %[[P]])
+  // CHECK-NEXT: merk.free %[[A]] : !merk.array<i64>
+  // CHECK-NEXT: merk.succeed
+  merk.proc @frees.sends_1_0(%arg0: !merk.term<"frees.msg">, %arg1: i64) attributes {determinism = #merk.determinism<det>} {
+    %0 = merk.constant 0 : i64
+    %1 = merk.array_new %arg1, %0 : i64 -> <i64>
+    %2 = builtin.unrealized_conversion_cast %1 : !merk.array<i64> to !llvm.ptr
+    merk.foreign_call @merk_device_send_array(%arg0, %0, %2) : (!merk.term<"frees.msg">, i64, !llvm.ptr) -> ()
     merk.succeed
   }
 
