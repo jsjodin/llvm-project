@@ -24,6 +24,12 @@
 // cells are (device/device.cpp).
 extern "C" void *merk_device_alloc(uint64_t bytes);
 extern "C" void *merk_device_alloc_aligned(uint64_t bytes, uint64_t before);
+// A GPU process's worker teams fill or copy many words for it, or false
+// (device/device.cpp, Bulk).
+extern "C" bool merk_device_bulk_fill(
+    uint64_t *to, uint64_t word, uint64_t words);
+extern "C" bool merk_device_bulk_copy(
+    uint64_t *to, const uint64_t *from, uint64_t words);
 #else
 #include "heap.h"
 #include <cinttypes>
@@ -104,18 +110,69 @@ Word *Allocate(int64_t size, Word code, Word recordBytes = 0) {
   return array;
 }
 
+// Copies `bytes` bytes, as memcpy does, the whole words of them by a GPU
+// process's worker teams if it has them and they are many (Bulk), when both
+// start on a word.
+void CopyBytes(void *to, const void *from, Word bytes) {
+#ifdef __AMDGPU__
+  Word words{bytes / sizeof(Word)};
+  if (reinterpret_cast<uintptr_t>(to) % sizeof(Word) == 0 &&
+      reinterpret_cast<uintptr_t>(from) % sizeof(Word) == 0 &&
+      merk_device_bulk_copy(
+          static_cast<Word *>(to), static_cast<const Word *>(from), words)) {
+    to = static_cast<Word *>(to) + words;
+    from = static_cast<const Word *>(from) + words;
+    bytes -= sizeof(Word) * words;
+  }
+#endif
+  __builtin_memcpy(to, from, bytes);
+}
+
+// The word whose bytes are the element's, as many times as fit: a word of
+// elements of the width's code, all `element`.
+Word Repeated(Word code, Word element) {
+  switch (code) {
+  case kArrayBytes1:
+    return (element & 0xff) * Word{0x0101010101010101};
+  case kArrayBytes2:
+    return (element & 0xffff) * Word{0x0001000100010001};
+  case kArrayBytes4:
+    return (element & 0xffffffff) * Word{0x0000000100000001};
+  default:
+    return element;
+  }
+}
+
 // Sets elements `lo` to `hi`, inclusive, to the word's bits, as many as the
-// width has. The width is read once: StoreElement for each element read the
-// header each time, a load from memory for every byte, which on a GPU
-// process's one lane made array.init of 3.6 KB of cells take 370 us, a third
-// of a step of Life on two places (design document, Measurements, "Life on
-// several places"). Each width's loop is a plain one of stores.
+// width has. A GPU process with worker teams has them fill the whole words
+// of many elements that start on a word (Bulk). The width is read once:
+// StoreElement for each element read the header each time, a load from memory
+// for every byte, which on a GPU process's one lane made array.init of 3.6 KB
+// of cells take 370 us, a third of a step of Life on two places (design
+// document, Measurements, "Life on several places"). Each width's loop is a
+// plain one of stores.
 void Fill(Word *array, int64_t lo, int64_t hi, Word element) {
   if (lo > hi) {
     return;
   }
   auto count{static_cast<Word>(hi - lo + 1)};
   auto first{static_cast<Word>(lo)};
+#ifdef __AMDGPU__
+  {
+    Word code{ArrayWidthCode(array)};
+    Word width{ElementBytes(code)};
+    Word perWord{sizeof(Word) / width};
+    if ((first * width) % sizeof(Word) == 0 &&
+        merk_device_bulk_fill(array + 1 + first * width / sizeof(Word),
+            Repeated(code, element), count / perWord)) {
+      first += count / perWord * perWord;
+      count -= count / perWord * perWord;
+      if (count == 0) {
+        return;
+      }
+    }
+  }
+#endif
   switch (ArrayWidthCode(array)) {
   case kArrayBytes1:
     __builtin_memset(reinterpret_cast<unsigned char *>(array + 1) + first,
@@ -223,7 +280,7 @@ extern "C" Word *merk_array_copy(const Word *array) {
   Word words{ArrayWords(array)};
   auto *copy{static_cast<Word *>(
       AllocateArrayBytes(sizeof(Word) * words, ArrayHeaderWords(array)))};
-  __builtin_memcpy(copy, array, sizeof(Word) * words);
+  CopyBytes(copy, array, sizeof(Word) * words);
   return copy;
 }
 
@@ -235,7 +292,7 @@ extern "C" Word *merk_array_resize(
   Word code{ArrayWidthCode(array)};
   int64_t kept{old < size ? old : size};
   Word *resized{Allocate(size, code)};
-  __builtin_memcpy(ArrayElements(resized), ArrayElements(array),
+  CopyBytes(ArrayElements(resized), ArrayElements(array),
       static_cast<uint64_t>(kept) * ElementBytes(code));
   Fill(resized, kept, size - 1, init);
   return resized;
@@ -249,7 +306,7 @@ extern "C" Word *merk_array_resize_bytes(
   auto old{static_cast<int64_t>(ArraySize(array))};
   int64_t kept{old < size ? old : size};
   Word *resized{Allocate(size, kArrayRecords, bytes)};
-  __builtin_memcpy(ArrayElements(resized), ArrayElements(array),
+  CopyBytes(ArrayElements(resized), ArrayElements(array),
       static_cast<uint64_t>(kept) * bytes);
   FillBytes(resized, kept, size - 1, element);
   return resized;
@@ -355,7 +412,7 @@ extern "C" Word *merk_array_resize_typed(
   auto old{static_cast<int64_t>(ArraySize(array))};
   int64_t kept{old < size ? old : size};
   Word *resized{Allocate(size, kArrayRecords, bytes)};
-  __builtin_memcpy(ArrayElements(resized), ArrayElements(array),
+  CopyBytes(ArrayElements(resized), ArrayElements(array),
       static_cast<uint64_t>(kept) * bytes);
   FillUnboxed(resized, kept, size - 1, init, type);
   return resized;

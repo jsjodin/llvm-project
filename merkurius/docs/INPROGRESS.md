@@ -5393,7 +5393,30 @@ as every process of a GPU allocates from that GPU's heap.
      6% of it at much; against HIP, 1.2 to 1.7 times, but 3 to 13 times at
      little work, where `array.init`'s one-lane fills are left (step 3).
 3. Copies by the wave's lanes or the worker teams, for a send that is not
-   the last use, and the same for `array.init`.
+   the last use, and the same for `array.init`. Built 2026-11-13, by the
+   worker teams. As built:
+   - *A loop of the runtime's own.* A process with worker teams has them
+     fill or copy from 64 KiB up (device/device.cpp, `Bulk`): its lane
+     puts what to do in the control block under a loop number no compiled
+     loop has, and crosses the workers' barrier twice, as for a loop. The
+     barrier's fences are at system scope, so copies to and from host
+     memory go the same way.
+   - *What uses it:* `array.init`, `fill` and resize's fills of elements
+     that start on a word, the whole words of 1, 2 and 4 byte elements
+     (array.cpp, `Fill`, `Repeated`); `array.copy` and resize's copies
+     (`CopyBytes`); and every message copy, which goes through copy.h's
+     `CopyWords`: a send that copies, to a queue or to the host, and a
+     receive from the host. A process without worker teams, a worker
+     team's own code and a target region keep the lane's loop.
+   - *The wave's lanes* are not used: the process runs on one lane, and
+     the others can join it only through a whole-wave call, which AMDGPU
+     does not yet allow in a compute kernel (the paused option 2).
+   - *Tested* by `process-bulk.m`, every width and a fill that starts
+     within a word; breaking the workers' loop on purpose changed every
+     large array's sum, so each case goes through them.
+   - One run each, not a measurement: the pipeline at 2^20 words and 16
+     rounds went from 3.7 ms to 569 µs a frame, one process from 8.6 ms
+     to 452 µs; at 2^16, 259 to 70 µs and 573 to 75.
 
 ## Topology: GPUs, NUMA domains and NICs within a node
 
