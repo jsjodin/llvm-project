@@ -42,9 +42,11 @@ target_include_directories(merkrt PRIVATE ${LLVM_MAIN_SRC_DIR}/../libc)
 # bitcode for any AMD GPU, which the driver links into the device image
 # beside the OpenMP device runtime, and into GPU processes' images. It is
 # compiled by this build's Clang, as the OpenMP device runtime is.
-if (TARGET clang AND TARGET llvm-ar AND "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
+if (TARGET clang AND TARGET llvm-ar AND TARGET llvm-as AND
+    "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
   set(merk_device_bc ${CMAKE_CURRENT_BINARY_DIR}/device-amdgcn.bc)
   set(merk_device_array_bc ${CMAKE_CURRENT_BINARY_DIR}/device-array-amdgcn.bc)
+  set(merk_device_wave_bc ${CMAKE_CURRENT_BINARY_DIR}/device-wave-amdgcn.bc)
   set(merk_device_lib ${LLVM_LIBRARY_OUTPUT_INTDIR}/libmerkdevice-amdgcn.a)
   add_custom_command(OUTPUT ${merk_device_bc}
     COMMAND $<TARGET_FILE:clang> --target=amdgcn-amd-amdhsa -nogpulib -O2
@@ -68,11 +70,19 @@ if (TARGET clang AND TARGET llvm-ar AND "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
       ${CMAKE_CURRENT_SOURCE_DIR}/array.h ${CMAKE_CURRENT_SOURCE_DIR}/walk.h
       ${CMAKE_CURRENT_SOURCE_DIR}/descriptor.h
     COMMENT "Building the Merkurius device runtime's arrays for AMD GPUs")
+  # Copies and fills by every lane of a wave, whole-wave functions, which
+  # Clang cannot write (device/wave.ll).
+  add_custom_command(OUTPUT ${merk_device_wave_bc}
+    COMMAND $<TARGET_FILE:llvm-as> ${CMAKE_CURRENT_SOURCE_DIR}/device/wave.ll
+      -o ${merk_device_wave_bc}
+    DEPENDS llvm-as ${CMAKE_CURRENT_SOURCE_DIR}/device/wave.ll
+    COMMENT "Assembling the Merkurius device runtime's wave copies")
   add_custom_command(OUTPUT ${merk_device_lib}
     COMMAND ${CMAKE_COMMAND} -E remove -f ${merk_device_lib}
     COMMAND $<TARGET_FILE:llvm-ar> rcs ${merk_device_lib} ${merk_device_bc}
-      ${merk_device_array_bc}
-    DEPENDS llvm-ar ${merk_device_bc} ${merk_device_array_bc})
+      ${merk_device_array_bc} ${merk_device_wave_bc}
+    DEPENDS llvm-ar ${merk_device_bc} ${merk_device_array_bc}
+      ${merk_device_wave_bc})
   # merk-process-start-amdgcn.o, the object that each image of GPU process
   # kinds starts with (device/process-start.cpp): not in the archive, so
   # that LTO exports what it defines. It is bitcode, named as an object so
