@@ -91,6 +91,14 @@ if (TARGET clang AND TARGET llvm-ar AND "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
   add_custom_target(merkdevice ALL
     DEPENDS ${merk_device_lib} ${merk_process_start_bc})
   set_target_properties(merkdevice PROPERTIES FOLDER "Merkurius/Runtime")
+  # The device runtime includes libc's headers for AMD GPUs (time.h,
+  # stdint.h), which the amdgcn-amd-amdhsa runtimes build installs where
+  # Clang finds them. Without them it compiles against the host's headers,
+  # and fails. The runtimes' targets are made after this directory, so test
+  # the list of runtime targets rather than the target.
+  if ("amdgcn-amd-amdhsa" IN_LIST LLVM_RUNTIME_TARGETS)
+    add_dependencies(merkdevice runtimes-amdgcn-amd-amdhsa)
+  endif()
   install(FILES ${merk_device_lib} ${merk_process_start_bc}
     DESTINATION lib${LLVM_LIBDIR_SUFFIX}
     COMPONENT merkrt)
