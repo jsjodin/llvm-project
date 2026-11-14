@@ -117,6 +117,10 @@ ol_result_t olSyncQueue(ol_queue_handle_t queue) __attribute__((weak));
 // Queues limited to some compute units, for GPU processes (compute-units.h).
 ol_result_t olGetDeviceComputeUnitMask(ol_device_handle_t device,
     std::size_t words, std::uint32_t *mask) __attribute__((weak));
+// Whether a kernel on `peer` reaches `device`'s memory, for direct sends
+// between GPUs (this fork's).
+ol_result_t olGetDevicePeerAccess(ol_device_handle_t device,
+    ol_device_handle_t peer, bool *canAccess) __attribute__((weak));
 ol_result_t olCreateQueueWithComputeUnitMask(ol_context_handle_t context,
     ol_device_handle_t device, const std::uint32_t *mask, std::size_t words,
     ol_queue_handle_t *queue) __attribute__((weak));

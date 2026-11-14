@@ -125,12 +125,15 @@ struct RunningProcess {
   void *arena;
   std::uint64_t *words;
   Place *place;
-  // Its slot of the kernel, its incarnation there (place.h), and its queue,
-  // in the device's memory; and the next on the list of routes, from its
-  // spawn, once its handle is made, until it ends (PlaceRoute).
+  // Its slot of the kernel, its incarnation (place.h), and its queue, in the
+  // device's memory, and its peer queue, in the device's fine-grained
+  // memory, or 0 without the peer path (PeerQueue); and the next on the list
+  // of routes, from its spawn, once its handle is made, until it ends
+  // (PlaceRoute).
   std::uint64_t slot;
   std::uint64_t incarnation;
   std::uint64_t queue;
+  std::uint64_t peerQueue;
   RunningProcess *nextRoute;
   Process *record;
   std::int64_t handle[kHandleWords];
@@ -153,10 +156,10 @@ struct Place {
   ol_queue_handle_t queue;
   bool allUnits;
   PlaceTable *table;
-  // The slots' queues, in the device's memory, and how many processes each
-  // slot has started (place.h, ProcessQueue).
+  // The slots' queues, in the device's memory (place.h, ProcessQueue), and
+  // their peer queues, a block of the GPU's, or none (PeerBlock).
   void *queues;
-  std::uint64_t *incarnations;
+  struct PeerBlock *peerBlock;
   RunningProcess **processes;
   std::uint64_t *owners;
   std::uint64_t teamSlots;
@@ -186,6 +189,43 @@ struct GpuPlaces {
   bool launching;
 };
 GpuPlaces gpuPlaces[kMostGpus];
+
+// Direct sends between the GPUs of a node (docs/INPROGRESS.md, Direct sends
+// between the GPUs of a node), with MERK_GPU_PEER=1; without it, every send
+// to another GPU's process goes through the host, as before.
+//
+// THIS MEMORY IS NEVER FREED BEFORE THE PROGRAM ENDS, on purpose (place.h,
+// PeerQueue): a sender on another GPU may hold the address of a peer queue
+// after its kernel has ended, and a receiver may return a copy to a send
+// pool long after its sender ended. What a GPU keeps is bounded: its send
+// pool and return ring, made at its first kernel with the peer path, and as
+// many blocks of peer queues as it ever ran kernels at once, each of the
+// most slots it took, which later kernels take again.
+//
+// A block of peer queues, for a kernel's slots, and the next free one of its
+// GPU.
+struct PeerBlock {
+  void *queues;
+  std::uint64_t slots;
+  PeerBlock *next;
+};
+
+// For each GPU, from its first kernel with the peer path: whether its peer
+// memory was tried, and made; its send pool, its return ring, and its free
+// blocks of peer queues. Under `lock`.
+struct GpuPeer {
+  bool tried;
+  bool ready;
+  void *sendPool;
+  std::uint64_t sendPoolBytes;
+  void *returns;
+  PeerBlock *free;
+};
+GpuPeer gpuPeers[kMostGpus];
+
+// The incarnation of the last GPU process started, of any GPU and kernel
+// (place.h, PlaceSlot). Under `lock`.
+std::uint64_t processIncarnations{0};
 
 // The running processes that a GPU process may send to directly
 // (PlaceRoute), with a lock of their own: the plugin's RPC server asks for a
@@ -222,6 +262,141 @@ const char *Details(ol_result_t result) {
   return result && result->details ? result->details : "failed";
 }
 
+// Whether the program asked for direct sends between GPUs: MERK_GPU_PEER=1,
+// read once for each GPU, as its peer memory is made (ReadyPeer). Off by
+// default until the device's side of them is done (docs/INPROGRESS.md,
+// Direct sends between the GPUs of a node, step 4): until then the device
+// sends through the host whatever route the host gives.
+bool PeerWanted() {
+  const char *text{std::getenv("MERK_GPU_PEER")};
+  return text && std::strcmp(text, "1") == 0;
+}
+
+// The bytes of a GPU's send pool: MERK_GPU_SEND_POOL_BYTES, or 64 MiB.
+constexpr std::uint64_t kSendPoolBytes{std::uint64_t{64} << 20};
+
+std::uint64_t SendPoolBytes() {
+  if (const char *text{std::getenv("MERK_GPU_SEND_POOL_BYTES")}) {
+    char *end{nullptr};
+    unsigned long long bytes{std::strtoull(text, &end, 10)};
+    if (end != text && *end == '\0' && bytes >= kSendPoolHeaderBytes * 2) {
+      return bytes;
+    }
+  }
+  return kSendPoolBytes;
+}
+
+// Zeroed host memory of `bytes`, a multiple of 64, aligned as a cache line,
+// for the image of a PeerQueue or ReturnRing; or null.
+void *ZeroedAligned(std::size_t bytes) {
+  void *memory{std::aligned_alloc(64, bytes)};
+  if (memory) {
+    std::memset(memory, 0, bytes);
+  }
+  return memory;
+}
+
+// Copies `bytes` of zeros to the device's memory at `to`: whether it could.
+bool ZeroDevice(int device, void *to, std::size_t bytes) {
+  void *zeros{std::calloc(1, bytes)};
+  bool copied{zeros && CopyToDevice(device, to, zeros, bytes)};
+  std::free(zeros);
+  return copied;
+}
+
+// The GPU's send pool and return ring, made the first time a kernel of it
+// has the peer path; if they cannot be, the GPU's processes send to other
+// GPUs through the host, and no route to them is direct. Kept until the
+// program ends (GpuPeer). With the lock held.
+bool ReadyPeer(const Gpu &gpu) {
+  GpuPeer &peer{gpuPeers[gpu.number]};
+  if (peer.tried) {
+    return peer.ready;
+  }
+  peer.tried = true;
+  if (!PeerWanted()) {
+    return false;
+  }
+  auto *returns{static_cast<ReturnRing *>(
+      DeviceAllocateFine(gpu.number, sizeof(ReturnRing)))};
+  if (!returns) {
+    return false;
+  }
+  auto *ring{static_cast<ReturnRing *>(ZeroedAligned(sizeof(ReturnRing)))};
+  for (std::uint64_t i{0}; ring && i < kReturnRingSlots; ++i) {
+    ring->slots[i].sequence = i;
+  }
+  bool made{ring && CopyToDevice(gpu.number, returns, ring, sizeof *ring)};
+  std::free(ring);
+  std::uint64_t bytes{SendPoolBytes()};
+  void *pool{made ? DeviceAllocate(gpu.number, bytes) : nullptr};
+  if (!pool || !ZeroDevice(gpu.number, pool, kSendPoolHeaderBytes)) {
+    if (pool) {
+      DeviceFree(gpu.number, pool);
+    }
+    DeviceFree(gpu.number, returns);
+    return false;
+  }
+  peer.sendPool = pool;
+  peer.sendPoolBytes = bytes;
+  peer.returns = returns;
+  peer.ready = true;
+  return true;
+}
+
+// A block of peer queues for a kernel of `slots` slots on the GPU: a free
+// one of at least that many, or a new one, made empty (place.h, PeerQueue);
+// or null without the peer path, or if it cannot be made, when the kernel's
+// processes take no direct route from other GPUs. With the lock held.
+PeerBlock *TakePeerBlock(const Gpu &gpu, std::uint64_t slots) {
+  if (!ReadyPeer(gpu)) {
+    return nullptr;
+  }
+  GpuPeer &peer{gpuPeers[gpu.number]};
+  for (PeerBlock **at{&peer.free}; *at; at = &(*at)->next) {
+    if ((*at)->slots >= slots) {
+      PeerBlock *block{*at};
+      *at = block->next;
+      block->next = nullptr;
+      return block;
+    }
+  }
+  std::size_t bytes{slots * sizeof(PeerQueue)};
+  void *queues{DeviceAllocateFine(gpu.number, bytes)};
+  auto *empty{static_cast<PeerQueue *>(ZeroedAligned(bytes))};
+  if (!queues || !empty) {
+    if (queues) {
+      DeviceFree(gpu.number, queues);
+    }
+    std::free(empty);
+    return nullptr;
+  }
+  for (std::uint64_t q{0}; q < slots; ++q) {
+    empty[q].closed = 1;
+    for (std::uint64_t i{0}; i < kPeerQueueSlots; ++i) {
+      empty[q].slots[i].sequence = i;
+    }
+  }
+  bool copied{CopyToDevice(gpu.number, queues, empty, bytes)};
+  std::free(empty);
+  if (!copied) {
+    DeviceFree(gpu.number, queues);
+    return nullptr;
+  }
+  auto *block{static_cast<PeerBlock *>(Malloc(sizeof(PeerBlock)))};
+  *block = {queues, slots, nullptr};
+  return block;
+}
+
+// Puts an ended kernel's block of peer queues back on its GPU's list, for
+// the GPU's next kernel: never freed (GpuPeer). With the lock held.
+void ReturnPeerBlock(int gpu, PeerBlock *block) {
+  if (block) {
+    block->next = gpuPeers[gpu].free;
+    gpuPeers[gpu].free = block;
+  }
+}
+
 // Ends the kernel, whose processes have all ended: its idle waves return.
 // With the lock held.
 void EndPlace(Place *place) {
@@ -249,7 +424,9 @@ void ReapPlace(Place *place) {
   __atomic_add_fetch(&endedPlaceBlocks, place->table->blocks, __ATOMIC_RELAXED);
   DeviceFreeHost(place->gpu, place->table);
   DeviceFree(place->gpu, place->queues);
-  std::free(place->incarnations);
+  pthread_mutex_lock(&lock);
+  ReturnPeerBlock(place->gpu, place->peerBlock);
+  pthread_mutex_unlock(&lock);
   std::free(place->processes);
   std::free(place->owners);
   std::free(place);
@@ -676,10 +853,14 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   table->queues = reinterpret_cast<std::uint64_t>(queues);
   table->check = CheckingDeviceMemory();
   table->bulkBytes = BulkBytes(gpu);
-  auto *incarnations{
-      static_cast<std::uint64_t *>(Malloc(slots * sizeof(std::uint64_t)))};
-  std::memset(
-      static_cast<void *>(incarnations), 0, slots * sizeof(std::uint64_t));
+  PeerBlock *peerBlock{TakePeerBlock(gpu, slots)};
+  if (peerBlock) {
+    const GpuPeer &peer{gpuPeers[gpu.number]};
+    table->peerQueues = reinterpret_cast<std::uint64_t>(peerBlock->queues);
+    table->sendPool = reinterpret_cast<std::uint64_t>(peer.sendPool);
+    table->sendPoolBytes = peer.sendPoolBytes;
+    table->returns = reinterpret_cast<std::uint64_t>(peer.returns);
+  }
   auto *place{static_cast<Place *>(Malloc(sizeof(Place)))};
   auto *processes{
       static_cast<RunningProcess **>(Malloc(slots * sizeof(RunningProcess *)))};
@@ -689,7 +870,7 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
       static_cast<std::uint64_t *>(Malloc(slots * sizeof(std::uint64_t)))};
   std::memset(static_cast<void *>(owners), 0, slots * sizeof(std::uint64_t));
   *place = {image.module, gpu.number, queue, allUnits, table, queues,
-      incarnations, processes, owners, kPlaceTeamThreads / lanes, 0, false,
+      peerBlock, processes, owners, kPlaceTeamThreads / lanes, 0, false,
       places};
   size.numGroups.x = teams;
   bool cooperative{true};
@@ -698,7 +879,7 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   if (!stack) {
     DeviceFreeHost(gpu.number, table);
     DeviceFree(gpu.number, queues);
-    std::free(incarnations);
+    ReturnPeerBlock(gpu.number, peerBlock);
     std::free(processes);
     std::free(owners);
     std::free(place);
@@ -715,7 +896,7 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
           queue, gpu.device, kernel, &size, properties, 1, arguments, sizes)}) {
     DeviceFreeHost(gpu.number, table);
     DeviceFree(gpu.number, queues);
-    std::free(incarnations);
+    ReturnPeerBlock(gpu.number, peerBlock);
     std::free(processes);
     std::free(owners);
     std::free(place);
@@ -856,9 +1037,13 @@ const char *TakeSlot(const Gpu &gpu, const LoadedImage &image, const char *kind,
       place->processes[slot] = process;
       process->place = place;
       process->slot = slot;
-      process->incarnation = ++place->incarnations[slot];
+      process->incarnation = ++processIncarnations;
       process->queue = reinterpret_cast<std::uint64_t>(place->queues) +
           slot * sizeof(ProcessQueue);
+      process->peerQueue = place->peerBlock
+          ? reinterpret_cast<std::uint64_t>(place->peerBlock->queues) +
+              slot * sizeof(PeerQueue)
+          : 0;
       ++place->running;
       return nullptr;
     }
@@ -949,30 +1134,70 @@ std::int64_t PlaceMessageBlocks() {
   return blocks;
 }
 
+// Whether kernels on GPUs `a` and `b` of this node can each reach the
+// other's memory, so that a process on either sends directly to one on the
+// other (olGetDevicePeerAccess), asked once a pair: 0 not asked, 1 yes, 2
+// no. Under routesLock.
+std::uint8_t peerPairs[kMostGpus][kMostGpus];
+
+bool PeerPair(int a, int b) {
+  if (a < 0 || b < 0 || a >= kMostGpus || b >= kMostGpus || a == b) {
+    return false;
+  }
+  std::uint8_t &known{peerPairs[a < b ? a : b][a < b ? b : a]};
+  if (known == 0) {
+    const Gpu *ga{GpuOf(a)};
+    const Gpu *gb{GpuOf(b)};
+    bool ab{false};
+    bool ba{false};
+    bool both{ga && gb && olGetDevicePeerAccess &&
+        olGetDevicePeerAccess(ga->device, gb->device, &ab) == nullptr &&
+        olGetDevicePeerAccess(gb->device, ga->device, &ba) == nullptr &&
+        ab && ba};
+    known = both ? 1 : 2;
+  }
+  return known == 1;
+}
+
 // The route from a process of the kernel whose table is `table`, on the
-// device, to the mailbox of the handle (rpcRoute): the queue of the
-// mailbox's process, if it is a running process of the same kernel, in
-// `incarnation` the process's incarnation; or 0, for a send through the
-// host. A process's mailbox is made at its spawn, so a sender that asks
-// after it has the handle finds it, and keeps one route for its life.
+// device, to the mailbox of the handle (rpcRoute):
+// - the queue of the mailbox's process, if it is a running process of the
+//   same kernel, with its incarnation in `incarnation`;
+// - or else, with the peer path (MERK_GPU_PEER=1), if the process runs on
+//   another GPU of this node whose memory and the sender's GPU's each reach
+//   the other's, and both GPUs have their peer memory, 0 and the process's
+//   peer queue in `peerQueue`, with its incarnation (place.h, PeerQueue);
+// - or 0, for a send through the host.
+// A process's mailbox is made at its spawn, so a sender that asks after it
+// has the handle finds it, and keeps one route for its life.
 std::uint64_t PlaceRoute(const std::uint64_t *handle, int device,
-    std::uint64_t table, std::uint64_t *incarnation) {
+    std::uint64_t table, std::uint64_t *incarnation,
+    std::uint64_t *peerQueue) {
   std::uint64_t queue{0};
   *incarnation = 0;
+  *peerQueue = 0;
   pthread_mutex_lock(&routesLock);
   for (const RunningProcess *process{routes}; process;
       process = process->nextRoute) {
-    bool same{process->gpu == device &&
-        reinterpret_cast<std::uint64_t>(process->place->table) == table};
+    bool same{true};
     for (int i{0}; i < kHandleWords; ++i) {
       same =
           same && static_cast<std::uint64_t>(process->handle[i]) == handle[i];
     }
-    if (same) {
+    if (!same) {
+      continue;
+    }
+    if (process->gpu == device &&
+        reinterpret_cast<std::uint64_t>(process->place->table) == table) {
       queue = process->queue;
       *incarnation = process->incarnation;
-      break;
+    } else if (process->peerQueue != 0 && process->gpu != device &&
+        reinterpret_cast<const PlaceTable *>(table)->peerQueues != 0 &&
+        PeerPair(process->gpu, device)) {
+      *peerQueue = process->peerQueue;
+      *incarnation = process->incarnation;
     }
+    break;
   }
   pthread_mutex_unlock(&routesLock);
   return queue;
