@@ -5886,7 +5886,59 @@ queue's slots are laid out. 512 B costs the same as 8 B.
      through fine-grained words, and got stuck with ordinary device memory,
      as the probes found.
 3. The host's side: per-GPU send pools, peer-queue tables and return lists;
-   `PlaceRoute` answers peer; `MERK_GPU_PEER`.
+   `PlaceRoute` answers peer; `MERK_GPU_PEER`. *Done 2026-11-14, behind
+   `MERK_GPU_PEER=1`, off by default; the device ignores the routes until
+   step 4, so every message still goes through the host:*
+   - *Peer queues* (place.h, `PeerQueue`): one per slot, in the receiving
+     GPU's fine-grained memory, 64 entries of the message, its bytes and
+     `returnTo`, the sending GPU's return ring. A full queue makes the
+     sender wait; there is no spill list on another GPU.
+   - *A send pool per GPU,* 64 MiB of ordinary device memory
+     (`MERK_GPU_SEND_POOL_BYTES`). The host clears its first 4 KiB
+     (`kSendPoolHeaderBytes`) for step 4's allocator. *A return ring per
+     GPU,* 4096 entries in fine-grained memory.
+   - The new `PlaceTable` fields `peerQueues`, `sendPool`,
+     `sendPoolBytes` and `returns` give them to the kernel; they are 0
+     without the peer path.
+   - *Incarnations are counted across the program,* not per kernel, so
+     they grow in a peer queue from kernel to kernel.
+   - *`PlaceRoute`* answers a process on another GPU of this node with its
+     peer queue and incarnation, in words 2 and 3 of the RPC's reply, which
+     the device does not read yet. That needs both GPUs to have their peer
+     memory, and each GPU's kernels to reach the other's memory, which
+     liboffload's new `olGetDevicePeerAccess` says (the AMDGPU plugin asks
+     ROCr whether the peer's agent may access the device's coarse- and
+     fine-grained pools). The answer is kept for each pair.
+   - Checked on r11, ROCR GPUs 1,3, with a trace not kept: with
+     `MERK_GPU_PEER=1`, gpu-pairs' relay on GPU 0 got the peer queue of the
+     relay on GPU 1, and all 54 rows were right. A later kernel on GPU 0
+     took back the block an ended one had left, and a second was made only
+     while two kernels overlapped. The lit suite passes with and without
+     `MERK_GPU_PEER=1`; with it, every test with GPU processes makes and
+     reuses peer memory, though a test sees one GPU and gets no peer route.
+
+   **What is leaked, on purpose.** None of this memory is freed before the
+   program ends (option 1 of the two considered, 2026-11-14). A sender on
+   another GPU keeps a peer queue's address for its life and may send after
+   the receiver, and its kernel, have ended; the queue must still be there
+   to say it is closed, and its incarnation must keep growing so that a
+   stale sender drops its message, as a send to an ended process does in
+   Erlang and in DirectSend. A receiver may also return a copy to a send
+   pool after the sender ended. What a GPU keeps:
+   - its send pool (64 MiB by default) and return ring (64 KiB), from its
+     first kernel with the peer path;
+   - a block of peer queues for each kernel it ever ran at the same time
+     as another, each of the most slots such a kernel had. A block is
+     2240 bytes a slot, and a kernel has a slot for each wave: 1248 slots
+     on a gfx90a GCD, so about 2.7 MiB of fine-grained memory a block.
+     An ended kernel's block goes on the GPU's free list, and the GPU's
+     next kernel with no more slots takes it again, so the memory is
+     bounded by the most kernels that ran at once, not by how many ran.
+
+   The other option, freeing a block once its kernel has ended and no
+   living process holds a route to it, which the host could count since
+   every route goes through `PlaceRoute`, is left until the memory
+   matters.
 4. The device's side: the peer route kind, sending into the pool and the
    peer queue, the peer queue in `DirectReceive`, pulling and returning.
    Words and arrays first, then terms by `type_info`.

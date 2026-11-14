@@ -77,7 +77,7 @@ void FreeRing(int device, DeviceRing *ring);
 // A GPU process has ended (rpcProcessEnded, gpu-processes.cpp).
 void PlaceProcessEnded(int device, std::uint64_t table, std::uint64_t slot);
 std::uint64_t PlaceRoute(const std::uint64_t *handle, int device,
-    std::uint64_t table, std::uint64_t *incarnation);
+    std::uint64_t table, std::uint64_t *incarnation, std::uint64_t *peerQueue);
 std::int64_t PlaceMessageBlocks();
 // The most bytes of blocks that a GPU process held at once, of all those
 // that have ended, which MERK_CHECK_PROCESS_MEMORY reports.
@@ -789,12 +789,20 @@ unsigned HandleOpcode(void *raw, unsigned) {
     });
     return rpc::RPC_SUCCESS;
   case rpcRoute:
+    // Words 0 and 1: the queue of a process of the same kernel and its
+    // incarnation. Words 2 and 3: with the peer path, a process's peer queue
+    // on another GPU and its incarnation (place.h, PeerQueue), which the
+    // device does not use yet, sending through the host.
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
       std::uint64_t incarnation{0};
+      std::uint64_t peerQueue{0};
       std::uint64_t queue{PlaceRoute(buffer->data,
-          static_cast<int>(buffer->data[5]), buffer->data[6], &incarnation)};
+          static_cast<int>(buffer->data[5]), buffer->data[6], &incarnation,
+          &peerQueue)};
       buffer->data[0] = queue;
-      buffer->data[1] = incarnation;
+      buffer->data[1] = queue ? incarnation : 0;
+      buffer->data[2] = peerQueue;
+      buffer->data[3] = peerQueue ? incarnation : 0;
     });
     return rpc::RPC_SUCCESS;
   case rpcSend:

@@ -65,9 +65,11 @@ constexpr uint32_t kPlaceTeamThreads{256};
 // process with worker teams, how many it has. For a slot of a worker team,
 // the slot of its process, the team's number among the process's workers,
 // how many there are, and the address of the process's control block, in
-// the device's memory, which the process's wave sets. And how many
-// processes the host has started in the slot, this one included, which the
-// process's wave stores in the slot's queue as it starts (ProcessQueue).
+// the device's memory, which the process's wave sets. And the process's
+// incarnation, which the process's wave stores in the slot's queues as it
+// starts (ProcessQueue, PeerQueue): a number the host gives each GPU process
+// it starts, counted across the program, so that it grows in a slot from
+// process to process, and in a peer queue from kernel to kernel.
 struct PlaceSlot {
   uint64_t state;
   uint64_t kind;
@@ -90,6 +92,15 @@ struct PlaceSlot {
 // holds, and their queues' spills, which the program's end reports.
 // `bulkBytes` is the size from which a process's worker teams fill and copy
 // its memory for it (device.cpp, Bulk), which the host chooses for the GPU.
+//
+// For direct sends between the GPUs of a node (docs/INPROGRESS.md, Direct
+// sends between the GPUs of a node), with MERK_GPU_PEER=1: `peerQueues`, the
+// address of the slots' peer queues, in the GPU's fine-grained memory
+// (PeerQueue); `sendPool` and `sendPoolBytes`, the GPU's send pool, in its
+// ordinary memory, from which its processes' copies of messages to other
+// GPUs come; and `returns`, the GPU's return ring, in its fine-grained memory
+// (ReturnRing). All are the GPU's, not the kernel's, and outlive it (see
+// PeerQueue). Without the peer path they are 0.
 struct PlaceTable {
   uint64_t end;
   uint64_t slots;
@@ -98,6 +109,10 @@ struct PlaceTable {
   uint64_t check;
   int64_t blocks;
   uint64_t bulkBytes;
+  uint64_t peerQueues;
+  uint64_t sendPool;
+  uint64_t sendPoolBytes;
+  uint64_t returns;
 };
 
 // The queue through which the process of a slot receives from the other
@@ -132,6 +147,78 @@ struct ProcessQueue {
   alignas(64) ProcessQueueSlot slots[kProcessQueueSlots];
   uint64_t spills[kProcessQueueSlots];
 };
+
+// The queue through which the process of a slot receives from processes on
+// the node's other GPUs (docs/INPROGRESS.md, Direct sends between the GPUs
+// of a node, points 2 to 4). It is in the receiving GPU's fine-grained
+// memory, as a word that a peer writes in ordinary memory is never seen by a
+// poller there, and its atomics are at system scope. Its ring, `incarnation`,
+// `closed` and `senders` work as ProcessQueue's, but a full slot makes the
+// sender wait, as it has no spill list on another GPU. A slot holds the
+// message, as the local queue's does: for a message other than a word, the
+// address of the sender's copy, in the sending GPU's send pool, which the
+// receiver loads from; how many bytes the copy has; and `returnTo`, the
+// sending GPU's return ring, onto which the receiver puts the copy's address
+// when it is done with it, or closes with it still queued.
+//
+// The memory is NEVER FREED BEFORE THE PROGRAM ENDS. A sender on another
+// GPU keeps its route, the queue's address, for its life, and may send after
+// the receiving process, and its kernel, have ended; the queue must still be
+// there to say it is closed. So a kernel's peer queues are a block of the
+// GPU's, which goes back on the GPU's list as the kernel ends, closed, and
+// the GPU's next kernel with no more slots takes it again (gpu-processes.cpp,
+// PeerBlock). A GPU keeps as many blocks as it ever had kernels at once,
+// each of the largest number of slots it took. The incarnation grows across
+// kernels, so a stale sender finds a later one and drops its message, as a
+// send to an ended process does (DirectSend); the device must never set a
+// peer queue's incarnation back, nor clear a reused one. The host makes a
+// new block empty, as MakeQueue makes a local queue: incarnation 0, closed,
+// no senders, each slot's sequence its index.
+constexpr uint64_t kPeerQueueSlots{64};
+
+struct PeerQueueSlot {
+  uint64_t sequence;
+  uint64_t message;
+  uint64_t bytes;
+  uint64_t returnTo;
+};
+
+struct PeerQueue {
+  alignas(64) uint64_t incarnation;
+  uint64_t closed;
+  uint64_t senders;
+  uint64_t kind;
+  alignas(64) uint64_t tail;
+  alignas(64) uint64_t head;
+  alignas(64) PeerQueueSlot slots[kPeerQueueSlots];
+};
+
+// A GPU's return ring, in its fine-grained memory, for the program's life:
+// receivers on other GPUs put on it the addresses of the copies, in the
+// GPU's send pool, that they are done with, and the GPU's senders take them
+// off and free them. A ring of slots as a queue's, many writers and the
+// GPU's senders as readers; a writer that finds it full waits.
+constexpr uint64_t kReturnRingSlots{4096};
+
+// The first bytes of a GPU's send pool, which the host clears as it makes
+// the pool, before any kernel uses it: the device's allocator of the pool
+// keeps its state there (docs/INPROGRESS.md, Direct sends between the GPUs
+// of a node, step 4).
+constexpr uint64_t kSendPoolHeaderBytes{4096};
+
+struct ReturnRingSlot {
+  uint64_t sequence;
+  uint64_t address;
+};
+
+struct ReturnRing {
+  alignas(64) uint64_t tail;
+  alignas(64) uint64_t head;
+  alignas(64) ReturnRingSlot slots[kReturnRingSlots];
+};
+
+static_assert(sizeof(PeerQueue) % 64 == 0 && sizeof(ReturnRing) % 64 == 0,
+    "the host makes their images in memory aligned as cache lines");
 
 inline PlaceSlot *PlaceSlots(PlaceTable *table) {
   return reinterpret_cast<PlaceSlot *>(table + 1);
