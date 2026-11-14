@@ -105,6 +105,11 @@ struct LoadedImage {
 };
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+// The images loaded, with a lock of their own, which `lock` is never taken
+// inside: loading an image takes the plugin's RPC server's lock, which the
+// server holds while it runs our opcodes, some of which take `lock`
+// (rpcProcessEnded).
+pthread_mutex_t loadLock = PTHREAD_MUTEX_INITIALIZER;
 LoadedImage *loaded{nullptr};
 
 struct Place;
@@ -319,7 +324,7 @@ void PlaceDone(void *data) {
 }
 
 // The module's image on the GPU, loaded the first time, or the text of the
-// error. With the lock held.
+// error (Load, below). With loadLock held.
 std::uint64_t ProcessStackBytes(const char *&error);
 
 // Sets the stack that the image's kernel is launched with, a lane, in its
@@ -987,9 +992,11 @@ extern "C" const char *merk_gpu_process_spawn(std::uint64_t typeInfo,
   std::uint64_t slot{0};
   std::uint64_t workers{0};
   int kindNumber{-1};
-  pthread_mutex_lock(&lock);
   LoadedImage *image{nullptr};
+  pthread_mutex_lock(&loadLock);
   const char *error{Load(module, *gpu, image)};
+  pthread_mutex_unlock(&loadLock);
+  pthread_mutex_lock(&lock);
   if (!error) {
     kindNumber = KindNumber(*image->image, kind);
     if (kindNumber < 0) {
