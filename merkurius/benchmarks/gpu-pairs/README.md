@@ -38,6 +38,23 @@ utils/gpu/with-gpus.py --gpus A,B -- benchmarks/gpu-pairs/run.sh [build-dir] [of
 GPU 0 and GPU 1 of the program are A and B. If only one GPU is visible,
 `A-B` is left out.
 
+## The hardware alone: peer.hip
+
+`peer.hip` is a HIP program that probes what two GPUs give each other with
+no Merkurius in it. Its modes, listed at the top of the file, are:
+
+- `bw`: bandwidth by the copy engine, by kernel stores into the peer, and by
+  kernel loads from the peer.
+- `lat`: latency of a flag between running kernels.
+- `coh`: whether data a peer stored into this GPU's memory is seen after an
+  acquire.
+- `pull`, `pullbw`, `poll` and `push`: the four experiments of the design
+  (docs/INPROGRESS.md, Direct sends between the GPUs of a node, Results of
+  the experiments).
+
+It is built by hand, as its header says. It has no lit test, as it needs
+two GPUs.
+
 ## On gfx90a
 
 Measured on r11 (8 MI250 GCDs, all linked by xGMI) on 2026-11-14 at

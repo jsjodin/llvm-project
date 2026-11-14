@@ -5764,7 +5764,7 @@ may differ by pair.
   or 5 µs within one, if the receiver's loads reach the link's speed.
 - Large arrays go from about 1 GB/s to tens of GB/s.
 
-### Experiments first, with HIP probes (scratchpad `peer.hip` grows these)
+### Experiments first, with HIP probes (benchmarks/gpu-pairs/peer.hip)
 
 1. **Pull coherence with reuse.** A writes a buffer in its own coarse-grained
    memory, releases at system scope, and posts a fine-grained flag. B loads
@@ -5780,7 +5780,7 @@ may differ by pair.
 
 ### Results of the experiments (2026-11-14)
 
-Run on r11 with `peer.hip`, on ROCR GPUs 1,3 (two packages) and 2,3 (one
+Run on r11 with benchmarks/gpu-pairs/peer.hip, on ROCR GPUs 1,3 (two packages) and 2,3 (one
 package), host threads on the other socket. Device times use the 25 MHz
 clock.
 
