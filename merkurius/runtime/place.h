@@ -88,6 +88,8 @@ struct PlaceSlot {
 // MERK_CHECK_DEVICE_MEMORY, `check` is set, and the device counts in
 // `blocks` the blocks of messages between its processes that no process
 // holds, and their queues' spills, which the program's end reports.
+// `bulkBytes` is the size from which a process's worker teams fill and copy
+// its memory for it (device.cpp, Bulk), which the host chooses for the GPU.
 struct PlaceTable {
   uint64_t end;
   uint64_t slots;
@@ -95,6 +97,7 @@ struct PlaceTable {
   uint64_t queues;
   uint64_t check;
   int64_t blocks;
+  uint64_t bulkBytes;
 };
 
 // The queue through which the process of a slot receives from the other
