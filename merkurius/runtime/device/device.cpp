@@ -70,10 +70,9 @@ int DeviceNumber() {
   return omp_get_device_num ? omp_get_device_num() : 0;
 }
 
-// Nanoseconds by libc's steady clock. libc takes its frequency to be
-// 100 MHz unless the loader sets __llvm_libc_clock_freq, which the offload
-// plugin does not: right from gfx9 on, and too slow by up to four times
-// before.
+// Nanoseconds by libc's steady clock, whose frequency the offload plugin
+// gives libc when it loads the image (setupLibcClock): libc would take it to
+// be 100 MHz, but gfx90a's ticks at 25 MHz.
 int64_t Now() {
   timespec time;
   clock_gettime(CLOCK_MONOTONIC, &time);
@@ -1012,16 +1011,28 @@ namespace {
 // One team's arrival at a barrier of `teams` teams, whose counts are
 // `arrived` and `rounds`: the last team to arrive ends the round, and the
 // others wait until it has, which costs about one atomic round trip a team.
+// The teams are all on this GPU, so its atomics are at device scope: at
+// system scope, as plain __atomic_* are, gfx90a writes back the whole L2 at
+// each release and invalidates it at each acquire, every poll included,
+// which made a barrier of a GPU process's hundreds of worker teams take
+// hundreds of microseconds (benchmarks/team-barrier, "On gfx90a"). What the
+// host is to see after it goes there by a release at system scope of its
+// own, as a message's does.
 void ArriveAndWait(int64_t *arrived, int64_t *rounds, int64_t teams) {
   // Read before arriving: the round cannot end before this team arrives.
-  int64_t round{__atomic_load_n(rounds, __ATOMIC_ACQUIRE)};
-  if (__atomic_add_fetch(arrived, 1, __ATOMIC_ACQ_REL) == teams) {
+  int64_t round{
+      __scoped_atomic_load_n(rounds, __ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE)};
+  if (__scoped_atomic_add_fetch(
+          arrived, 1, __ATOMIC_ACQ_REL, __MEMORY_SCOPE_DEVICE) == teams) {
     // No team arrives in the next round until it sees this one end.
-    __atomic_store_n(arrived, 0, __ATOMIC_RELAXED);
-    __atomic_add_fetch(rounds, 1, __ATOMIC_RELEASE);
+    __scoped_atomic_store_n(
+        arrived, 0, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+    __scoped_atomic_add_fetch(
+        rounds, 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
     return;
   }
-  while (__atomic_load_n(rounds, __ATOMIC_ACQUIRE) == round) {
+  while (__scoped_atomic_load_n(
+             rounds, __ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE) == round) {
     __builtin_amdgcn_s_sleep(1);
   }
 }
@@ -1128,23 +1139,24 @@ namespace {
 
 // The process's wave arrives at its control block's barrier and waits there
 // for its worker teams: its writes before are seen by every worker thread
-// after, and theirs by it.
+// after, and theirs by it. They are all on this GPU, so at device scope
+// (ArriveAndWait).
 void ProcessArrive(ProcessControl *control) {
-  __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+  __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
   ArriveAndWait(&control->arrived, &control->rounds, control->crossing);
-  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
+  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE);
 }
 
 // A worker team arrives at the barrier, as merk_device_grid_barrier's teams
 // do: every thread of the team calls it.
 void WorkerArrive(ProcessControl *control) {
-  __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+  __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
   __gpu_sync_threads();
   if (__gpu_thread_id_x() == 0) {
     ArriveAndWait(&control->arrived, &control->rounds, control->crossing);
   }
   __gpu_sync_threads();
-  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
+  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE);
 }
 
 // A word of the table, which is in host memory, read by the wave's first
@@ -1468,6 +1480,11 @@ bool Bulk(uint64_t what, uint64_t *to, uint64_t fromOrWord, uint64_t words) {
   control->values[2] = fromOrWord;
   ProcessArrive(control);
   ProcessArrive(control);
+  // A copy may be into host memory, a message's for the host: the workers'
+  // words are the process's to publish, at system scope, as its own are.
+  if (what == kBulkCopy) {
+    __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+  }
   return true;
 }
 
