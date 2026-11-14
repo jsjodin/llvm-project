@@ -6,10 +6,14 @@ default is ten seconds, so that a region on a GPU that other programs fill
 waits for them; this one is known to have too many, so it sets a second
 (MERK_TEAMS_STALL_MILLISECONDS), not to hold the GPU from the tests beside
 it for longer, whose teams would not start meanwhile.
+
+The program runs on one of the GPU's compute units
+(LIBOMPTARGET_AMDGPU_CU_MASK=0), which holds tens of teams at once, so that
+2000 are too many on any GPU: a whole gfx90a holds them all.
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fopenmp --offload-arch=%offload-arch %libomp-flags %S/Inputs/omp-target-teams-too-many.m -o %t
-RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_TEAMS_STALL_MILLISECONDS=1000 not %t > %t.out 2> %t.err
+RUN: %libomp-env LIBOMPTARGET_AMDGPU_CU_MASK=0 OMP_TARGET_OFFLOAD=MANDATORY MERK_TEAMS_STALL_MILLISECONDS=1000 not %t > %t.out 2> %t.err
 RUN: FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace < %t.out
 RUN: FileCheck %s --check-prefix=ERROR --match-full-lines --strict-whitespace < %t.err
 
