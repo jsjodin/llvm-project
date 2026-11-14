@@ -5112,6 +5112,82 @@ eight GPUs that others use too, of which 3 or 4 are ours (the user,
   two colliding galaxies, which need rebalancing; or a service of matrix
   multiplications of mixed sizes, measured against rocBLAS.
 
+## A showcase with more work per tile: shallow water
+
+Proposed and decided by the user 2026-11-13, after step 5's p4 (A demo: a
+stencil whose active region moves): Life's tile is about 0.65 µs of a GPU's
+time a step, against a place's 200 to 450 µs of agreement a step, so
+distributing it cannot pay. The user: "Are there other sparse computations
+with more computation that might be a better showcase?" Chosen: the shallow
+water equations with wetting and drying, whose wet region moves over a dry
+bed as Life's live region does, with 20 to 50 times the work a cell.
+
+**The model.** The 2D shallow water equations (Saint-Venant), in depth `h`
+and momenta `hu`, `hv`, over an analytic bed `b`:
+- *A first-order Godunov finite-volume scheme,* an HLL Riemann solver at
+  each face, with hydrostatic reconstruction (Audusse et al. 2004) so that a
+  lake at rest stays at rest and the depth stays non-negative at the
+  shoreline; explicit Euler in time; no friction.
+- *Cells of side 1 m,* g = 9.81. A cell at most `1e-6` m deep is dry: its
+  momenta are zero, and it is not wet. The time step is 0.45 over the
+  largest `|u| + |v| + 2 sqrt(g h)` of the wet cells, after each step for
+  the next.
+- *The bed* is a paraboloid bowl, `b = D0 (r^2 / R^2 - 1)`, `D0` 10 m,
+  `R` 0.45 of the world, at the world's centre, computed at each cell's
+  centre wherever needed rather than stored.
+- *Two cases* (`SWE_CASE`): 0, a column of water 5 m deep with a flat top,
+  of radius a sixteenth of the world, a fifth of the world east of the
+  centre, which collapses and sloshes across the bowl, the showcase; 1,
+  Thacker's oscillating paraboloid (1981), whose exact solution has a
+  moving shoreline, with A = 0.4, for correctness: the programs print the
+  relative L1 error of the depth against it.
+
+**Tiles,** as Life's (Sparse tiles on one place): the pool, the directory,
+nine neighbours a tile, a dry dead tile 0, fates decided after each step. A
+wet cell on a tile's edge or corner starts the tile beyond it; a tile with
+no wet cell and no wet edge facing it for 4 steps ends, and what water it
+held, under `1e-6` m a cell, goes with it. A cell reads its four
+neighbours, through the neighbour table. The tiles at the start are those
+over the wet region's bounding square, with all their edges wet, so the
+tiles around them start too.
+
+**Three programs,** in `benchmarks/swe/`, as Life's sparse ones:
+- `swe-sparse.m`, one GPU process, its step a `distribute` over the active
+  tiles with a `parallel do` over each tile's cells, which reduces the
+  tile's wet cells, wet edges and largest speed;
+- `swe-sparse.c`, C with OpenMP offload, a kernel a step and the
+  bookkeeping on the host, as `life-sparse.c`;
+- `swe-sparse.hip`, the same in HIP, the bar a GPU programmer would set.
+
+**Bit-identical results.** The three, at the host or on a GPU, give the same
+bits: every operation in the same order, no contraction into fused
+multiply-adds (`-ffp-contract=off` for C and HIP; merkc emits none),
+correctly rounded division and square root (LLVM's, on AMDGPU too), and the
+time step from a maximum, which no order changes. They print the simulated
+time, the wet cells, and a checksum, the sum modulo 2^64 over the active
+cells of `(bits(h) + 3 bits(hu) + 5 bits(hv)) (2 g + 1)`, `g` the cell's
+index in the world and `bits` a double's plus `0.0`, so that `-0.0` counts
+as `0.0`; the volume and the error, sums whose order differs, to 6 and 4
+digits. An exclusive or of the bits was the first checksum, but the bowl's
+symmetry cancelled pairs of cells in it. Mercury's `float.max(X, Y)` is `X >= Y ? X : Y` and `min` is
+`X =< Y ? X : Y`; the C and HIP programs write them so.
+
+**Settings:** `SWE_WORLD` (2048 cells square), `SWE_TILE` (32, a power of
+two that divides it), `SWE_STEPS` (1000), `SWE_CASE` (0), `SWE_CAPACITY`
+(the tiles of the pool), `SWE_TRACE` (each step's line).
+
+**Done 2026-11-13:** the three programs, `compare-swe.sh`, and tests at the
+host and on the GPU (`test/Benchmarks/swe-sparse*.test`). They agree bit
+for bit, at the host and on the gfx1030. Building `swe-sparse.m` found that
+a GPU process's foreign C was compiled with OpenMP's globalization, whose
+`__kmpc_alloc_shared` its image lacks; fixed first, in its own commit
+(`DeviceLibrary.cpp`, CUDA mode for process images). An untimed run at the
+default size, with Firefox open: Mercury 477 µs a step, C 486, HIP 447, at
+most 472 tiles.
+
+**Then:** the work a tile a step against Life's, timed with Firefox
+closed, and the places version, as `life-places.m`.
+
 ## Topology: GPUs, NUMA domains and NICs within a node
 
 Proposed 2026-11-09; nothing is built, and it is not agreed. Real numbers wait for
