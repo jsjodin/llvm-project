@@ -7,13 +7,14 @@
 #   run.sh [build-dir] [offload-arch]
 #
 # build-dir is the Merkurius build, ../../../../build-merk by default;
-# offload-arch is the GPU's, such as gfx1030, and without it the GPU's
-# measurements are left out. ARRAY_MESSAGES_MIB sets the mebibytes that each
-# measurement moves, 64 by default.
+# offload-arch is the GPU's, this machine's by default, as amdgpu-arch finds
+# it, and without one the GPU's measurements are left out.
+# ARRAY_MESSAGES_MIB sets the mebibytes that each measurement moves, 64 by
+# default.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 build="$(cd "${1:-$here/../../../../build-merk}" && pwd)"
-arch="${2:-}"
+arch="${2:-$("$build/bin/amdgpu-arch" 2>/dev/null | head -n1)}"
 mib="${ARRAY_MESSAGES_MIB:-64}"
 out="${ARRAY_MESSAGES_OUT:-$(mktemp -d)}"
 # libomp is built in the runtimes' tree, not installed into lib.
