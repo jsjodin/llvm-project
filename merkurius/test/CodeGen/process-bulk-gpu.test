@@ -1,0 +1,8 @@
+process-bulk.m's kinds on the machine's GPU, where the worker teams of the
+kind that runs a loop fill and copy its large arrays for it, the same as the
+host's: the arrays it makes, the one from the host, and the one that its send
+copies to the other process. None of the messages, nor their blocks, is left.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-bulk.m -o %t2
+RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %S/process-bulk.m --check-prefixes=CHECK,FREED --match-full-lines --strict-whitespace
