@@ -1435,6 +1435,48 @@ keeps the control path, as the design document has it: it opens a route between
 a sender's place and a mailbox, registers memory and exchanges keys, closes it,
 and tells the mailbox's monitors when a peer has gone.
 
+**Large messages: push, and who frees.** Discussed with the user
+2026-11-13; agreed in outline, not built. A rendezvous can push, the
+sender's teams storing into a buffer at the receiver, or pull, the
+receiver's teams reading from the sender's memory. The question that
+decides it is who frees which memory, and when.
+
+- **Push is the default.** The receiver grants buffers ahead of time, from a
+  pool for each route handed out by credits, so a large send needs no
+  request round trip. The sender frees its own copy once its flush
+  completes. The receiver frees the delivered block into its own allocator.
+  Each side frees only its own memory, so a GPU process's allocator stays
+  private: per-process free lists, one lane, no atomics (Memory that a
+  GPU process gives back, f1 to f4).
+- **Pull is an option the route table may pick,** for instance a very large
+  message to a receiver that would otherwise sit idle. The sender does not
+  know when the receiver has copied the bytes, so the receiver's credit for
+  a pulled message carries the buffer's address. The sender frees the buffer
+  when it next polls its credits, as MPI's rendezvous does. The buffer is
+  then held for the whole round trip, which bounding the frames in flight
+  limits (A pipeline of processes).
+- **Failure.** If a receiver dies before it pulls, the sender frees its
+  pending pulls to that receiver on the monitor's `down`. If a sender dies
+  while a receiver pulls from it, the danger is worse: all GPU processes
+  share one OS process, so the runtime would reclaim the dead process's
+  memory at once, and the receiver would read reused memory or fault. The
+  runtime keeps a dead process's exported buffers until every pull from them
+  has ended or been cancelled. With push, a dead sender leaves at most a
+  half-written slot, which the receiver discards; a dead receiver's pool goes
+  with it.
+- **Rejected: the receiver frees the sender's block on the other GPU.** Peer
+  atomics make it possible over xGMI and PCIe. But the allocator's metadata
+  would then need cross-GPU atomics, which every local allocation would pay
+  for, and a process's memory would no longer be its own, which the bound on
+  a GPU process's blocks relies on.
+- **Counted shared arrays across GPUs** (shared_array, designed, not built)
+  raise the same question: dropping the last reference from another GPU.
+  The owner frees: the count's decrement is a remote atomic, and when it
+  reaches zero a message tells the owning GPU, which frees into its own
+  allocator.
+- **Whichever side copies, the worker teams do it,** not one lane (A
+  pipeline of processes, Open).
+
 **Backends,** by the route table's hops, with what can run here:
 
 1. *The host's queue,* within a place's host process. Built.
