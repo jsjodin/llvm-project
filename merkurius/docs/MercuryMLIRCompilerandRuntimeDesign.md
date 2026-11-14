@@ -5405,13 +5405,17 @@ At 2^16 words (200 frames, 63 µs a frame) each process's send took 16 to
 barrier between a GPU process and its worker teams at device scope and the
 device's clock right ("Barriers between teams"); the same sweep, 40
 frames, the median of 3 rounds, µs a frame, beside gfx1030's last table.
-Every configuration gave one checksum in every run.
+Every configuration gave one checksum in every run. The rows of 4096 words
+are from a later run, the same way, where the worker teams fill and copy
+from 2 KiB on gfx9 rather than 64 KiB (INPROGRESS, Messages between GPU
+processes on one GPU, step 3); before it, they were 260 and 269, 544 and
+270, and 309 and 404 µs, pipeline and single.
 
 | Words | Rounds | Feedback | Pipeline | Single | HIP | gfx1030 pipeline | gfx1030 single |
 |---|---|---|---|---|---|---|---|
-| 4096 | 16 | none | 260 | 269 | 9.1 | 46 | 69 |
-| 4096 | 16 | 1 | 544 | 270 | 9.1 | | |
-| 4096 | 4096 | none | 309 | 404 | 114 | 333 | 380 |
+| 4096 | 16 | none | 126 | 99 | 9.1 | 46 | 69 |
+| 4096 | 16 | 1 | 357 | 101 | 9.2 | | |
+| 4096 | 4096 | none | 173 | 237 | 114 | 333 | 380 |
 | 65536 | 16 | none | 158 | 127 | 9.8 | 73 | 67 |
 | 65536 | 16 | 1 | 371 | 127 | 9.9 | 159 | 67 |
 | 65536 | 256 | none | 174 | 144 | 23.6 | 319 | 308 |
@@ -5426,12 +5430,13 @@ Every configuration gave one checksum in every run.
 - **Where the work is large, gfx90a is 10 to 16 times gfx1030,** and one
   process 1.4 times HIP at 2^20 words and 4096 rounds, against 1.06 on
   gfx1030.
-- **Small frames have a floor of 130 to 280 µs a frame,** against HIP's 9
-  to 41, and at 4096 and 65536 words 2 to 4 times gfx1030's: one process's frame makes three
+- **Small frames have a floor of 100 to 280 µs a frame,** against HIP's 9
+  to 41, and at 4096 and 65536 words 1.4 to 2.7 times gfx1030's: one process's frame makes three
   arrays and runs four loops, and what its lane does between them, and
   each crossing of the barrier with all its worker teams, cost more here
-  (A GPU process's blocks). At 4096 words, below the bulk fills' 64 KiB,
-  the lane fills the arrays itself.
+  (A GPU process's blocks). At 4096 words the lane filled the arrays
+  itself, below the bulk fills' 64 KiB, until they went from 2 KiB on
+  gfx9: one process 269 to 99 µs, the pipeline 260 to 126.
 - **Before the barrier went to device scope,** each frame took 8 to 16 ms
   without feedback, whatever its size and work: every crossing of the barrier by a GPU
   process and its hundreds of worker teams wrote back and invalidated the

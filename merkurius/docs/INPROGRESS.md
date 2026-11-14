@@ -5406,7 +5406,12 @@ as every process of a GPU allocates from that GPU's heap.
    the last use, and the same for `array.init`. Built 2026-11-13, by the
    worker teams. As built:
    - *A loop of the runtime's own.* A process with worker teams has them
-     fill or copy from 64 KiB up (device/device.cpp, `Bulk`): its lane
+     fill or copy from a size the host chooses for the GPU (gpu-processes.cpp,
+     `BulkBytes`; device/device.cpp, `Bulk`), 64 KiB, or 2 KiB on gfx9,
+     where a lane fills about 16 ns a word and reads host memory a round
+     trip a word, so that from about 200 words the workers' barrier costs
+     less (2026-11-14, gfx90a: a fill of 4096 words 71 µs before, 14 µs
+     after); `MERK_GPU_BULK_BYTES` replaces it. Its lane
      puts what to do in the control block under a loop number no compiled
      loop has, and crosses the workers' barrier twice, as for a loop. The
      barrier's fences are at system scope, so copies to and from host
