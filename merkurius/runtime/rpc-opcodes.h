@@ -126,10 +126,11 @@ constexpr uint32_t rpcProcessEnded{RpcOpcode(13)};
 // or 0, for a send through the host.
 constexpr uint32_t rpcRoute{RpcOpcode(14)};
 
-// From how many bytes the device's send of an array through the host goes
-// by the host's copy from the device's memory (rpcSendArrayFromDevice): the
-// buffer's word is the lanes of the device's waves, and the host answers
-// with the bytes, or ~0 for never.
+// From how many bytes an array that the device sends or receives through
+// the host goes by the host's copy from or into the device's memory
+// (rpcSendArrayFromDevice, rpcTakeArrayInto): the buffer's word is the
+// lanes of the device's waves, and the host answers with the bytes, or ~0
+// for never.
 constexpr uint32_t rpcDmaBytes{RpcOpcode(15)};
 
 // A send of an array in the device's memory, which the device has written
@@ -139,6 +140,14 @@ constexpr uint32_t rpcDmaBytes{RpcOpcode(15)};
 // answers once it has queued it. Only for a GPU whose release at system
 // scope writes the device's memory back from its L2, as gfx90a's does.
 constexpr uint32_t rpcSendArrayFromDevice{RpcOpcode(16)};
+
+// As rpcTakeArray, but the host copies the message by the device's copy
+// engine straight into an array of the device's, which the device made of
+// the size its ring gave: the buffer's words are the handle's five, the
+// array, the device's number and the array's bytes. The host answers with
+// whether it found the message. Only for a GPU whose copy engine's writes
+// to its memory reach a running kernel after an acquire, as gfx90a's do.
+constexpr uint32_t rpcTakeArrayInto{RpcOpcode(17)};
 
 } // namespace merkurius::runtime
 

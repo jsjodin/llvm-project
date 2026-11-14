@@ -100,56 +100,56 @@ What they show:
 7713 (128 cores) as the host, its threads on the other socket than the
 GPU's (`numactl --cpunodebind=8-15`). MB/s, the median of three runs; every
 message arrived, of the right size, in every run. `cpu-local` at 16 words
-was too fast for the clock (–). The build sends arrays of 8 KiB and more
-from the GPU by the copy engine, and keeps the host memory of messages for
-the next (docs/INPROGRESS.md, Messages between GPU processes on one GPU,
-step 4); "before" is the build of 693f7c3053d4, where the GPU's one lane
-copied every array to and from host memory, a word at a time.
+was too fast for the clock (–). The build sends and receives arrays of 8
+KiB and more on the GPU by the copy engine, and keeps the host memory of
+messages for the next (docs/INPROGRESS.md, Messages between GPU processes
+on one GPU, step 4); "before" is the build of 693f7c3053d4, where the GPU's
+one lane copied every array to and from host memory, a word at a time.
 
 `to`, from node 1:
 
 | Words | `memcpy` | `gpu-local` | `cpu-local` | `gpu` | `cpu` | `gpu-local` before | `gpu` before |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 0.7 | 0.3 | 54 | 0.2 | 1.3 | 0.3 | 0.2 |
-| 16 | 13 | 3.1 | – | 2.8 | 20 | 3.1 | 2.6 |
-| 256 | 191 | 48 | 5393 | 41 | 266 | 47 | 40 |
-| 4096 | 2067 | 785 | 36583 | 576 | 1816 | 113 | 104 |
-| 65536 | 5275 | 3468 | 12004 | 1476 | 1644 | 158 | 130 |
-| 262144 | 18084 | 3102 | 16786 | 1520 | 2691 | 166 | 134 |
-| 1048576 | 9241 | 1602 | 8357 | 997 | 1971 | 146 | 141 |
+| 1 | 0.7 | 0.3 | 53 | 0.2 | 1.3 | 0.3 | 0.2 |
+| 16 | 13 | 3.1 | – | 2.7 | 20 | 3.1 | 2.6 |
+| 256 | 194 | 49 | 5300 | 41 | 264 | 47 | 40 |
+| 4096 | 2178 | 788 | 36906 | 579 | 1887 | 113 | 104 |
+| 65536 | 5300 | 3779 | 15908 | 1683 | 1759 | 158 | 130 |
+| 262144 | 19200 | 3569 | 15827 | 1790 | 2593 | 166 | 134 |
+| 1048576 | 18093 | 2414 | 5532 | 1777 | 1930 | 146 | 141 |
 
 `from`, to node 1:
 
 | Words | `memcpy` | `gpu-local` | `gpu` | `cpu` | `gpu-local` before | `gpu` before |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1 | 0.8 | 0.3 | 0.3 | 1.2 | 0.3 | 0.3 |
-| 16 | 13 | 3.8 | 3.9 | 19 | 3.6 | 3.6 |
-| 256 | 207 | 48 | 48 | 248 | 46 | 46 |
-| 4096 | 2582 | 110 | 110 | 1749 | 83 | 83 |
-| 65536 | 10894 | 128 | 128 | 3001 | 114 | 114 |
-| 262144 | 19991 | 130 | 126 | 2036 | 117 | 114 |
-| 1048576 | 23866 | 130 | 128 | 1807 | 118 | 114 |
+| 16 | 13 | 3.8 | 3.8 | 21 | 3.6 | 3.6 |
+| 256 | 206 | 48 | 48 | 260 | 46 | 46 |
+| 4096 | 2619 | 779 | 762 | 1729 | 83 | 83 |
+| 65536 | 11090 | 3113 | 2449 | 2126 | 114 | 114 |
+| 262144 | 19721 | 4551 | 2142 | 1684 | 117 | 114 |
+| 1048576 | 23941 | 7026 | 1403 | 1325 | 118 | 114 |
 
 Between two GPU regions on the one GPU, as below, `to` and `from`: 0.2 and
-0.2 at 1 word, 111 and 110 at 4096, 124 and 121 at 1048576 (before, 77 and
-77 at 4096, 88 and 66 at 1048576).
+0.2 at 1 word, 488 and 442 at 4096, 1861 and 1832 at 65536, 1054 and 790 at
+1048576 (before, 77 and 77 at 4096, 88 and 66 at 1048576).
 
 - **A send from the GPU goes by the copy engine from 8 KiB,** and within a
-  node reaches 1.6 to 3.5 GB/s from 2^14 words, from 100 to 170 MB/s,
-  faster than gfx1030's 1.2; between nodes 1.0 to 1.5 GB/s, half to nine
-  tenths of the CPU's. The device's release at system scope writes the
+  node reaches 2.4 to 3.8 GB/s from 2^16 words, from 130 to 170 MB/s,
+  faster than gfx1030's 1.2; between nodes about 1.7 to 1.8 GB/s, 0.7 to
+  1.0 times the CPU's. The device's release at system scope writes the
   array back from its L2, which gfx1030's does not, so gfx1030 keeps the
-  lane's copy. At 1024 words a send within a node takes 41 µs, from 75.
-- **A receive on the GPU is still the lane's copy,** 110 to 130 MB/s
-  against 10 GB/s on gfx1030, while `omp_target_memcpy` alone reaches 5 to
-  24 GB/s. Each of the lane's loads from host memory is uncached here,
-  about 1.4 µs with 32 in flight. Keeping the messages' host memory, which
-  cost about 85 µs to allocate from 8 KiB, raised it from 83 to 110 MB/s at
-  4096 words. It limits everything between two GPU regions, too.
+  lane's copy. At 1024 words a send within a node takes about 40 µs, from 75.
+- **So does a receive,** straight into the device's arena, which a probe
+  found safe on gfx90a: the copy engine's writes reach a running kernel's
+  L2, which gfx1030's left stale. Within a node it reaches 3.1 to 7.0 GB/s
+  from 2^16 words, a quarter to a third of `omp_target_memcpy` alone, from
+  114 to 118 MB/s; between nodes 1.4 to 2.4 GB/s, as fast as the CPU's or
+  faster. Below 8 KiB the lane still copies, as at 256 words.
 - **Small messages cost about 30 to 45 µs** from the GPU, against 20 to 25
   on gfx1030, as the RPC round trips beneath them are twice as slow
   (`benchmarks/pingpong`, "On gfx90a").
-- **The CPU's side is faster than on gfx1030,** between nodes 1.6 to 3.0
+- **The CPU's side is faster than on gfx1030,** between nodes 1.3 to 2.6
   GB/s for large arrays, and within a node up to 37 GB/s.
 
 ## Between two GPU regions

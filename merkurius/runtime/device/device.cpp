@@ -139,6 +139,7 @@ using merkurius::runtime::rpcSend;
 using merkurius::runtime::rpcSendArrayFromDevice;
 using merkurius::runtime::rpcSendTerm;
 using merkurius::runtime::rpcTakeArray;
+using merkurius::runtime::rpcTakeArrayInto;
 using merkurius::runtime::rpcTakeTerm;
 using merkurius::runtime::rpcTeamsStall;
 
@@ -2184,11 +2185,58 @@ extern "C" int merk_device_receive(
 // together.
 namespace {
 
+// From how many bytes an array that the device sends or receives through
+// the host goes by the host's copy engine, from or into the device's memory
+// (rpcDmaBytes), asked once; 0 before.
+uint64_t dmaBytes{0};
+
+uint64_t DmaBytes() {
+  uint64_t bytes{__atomic_load_n(&dmaBytes, __ATOMIC_RELAXED)};
+  if (bytes == 0) {
+    rpc::Client::Port port{__llvm_rpc_client.open<rpcDmaBytes>()};
+    port.send([](rpc::Buffer *buffer, uint32_t) {
+      buffer->data[0] = static_cast<uint64_t>(__builtin_amdgcn_wavefrontsize());
+    });
+    port.recv([&](rpc::Buffer *buffer, uint32_t) { bytes = buffer->data[0]; });
+    __atomic_store_n(&dmaBytes, bytes, __ATOMIC_RELAXED);
+  }
+  return bytes;
+}
+
 // The oldest message of a mailbox of arrays, which its ring, `entry`, has
-// shown: copied by the host into host memory (rpcTakeArray), and from there
-// into an array of the device's; or false if the mailbox closed meanwhile.
-bool TakeArrayFromHost(
-    const uint64_t *handle, RingEntry *entry, uint64_t *message) {
+// shown with its header, `header`: copied by the host into host memory
+// (rpcTakeArray), and from there into an array of the device's; or, from
+// DmaBytes up, by the host's copy engine straight into an array of the
+// device's (rpcTakeArrayInto). False if the mailbox closed meanwhile.
+bool TakeArrayFromHost(const uint64_t *handle, RingEntry *entry,
+    uint64_t header, uint64_t *message) {
+  uint64_t bytes{sizeof(uint64_t) * ArrayWords(&header)};
+  if (bytes >= DmaBytes()) {
+    auto *array{static_cast<uint64_t *>(merk_device_alloc(bytes))};
+    bool found{false};
+    rpc::Client::Port port{__llvm_rpc_client.open<rpcTakeArrayInto>()};
+    port.send([&](rpc::Buffer *buffer, uint32_t) {
+      for (int i{0}; i < 5; ++i) {
+        buffer->data[i] = handle[i];
+      }
+      buffer->data[5] = reinterpret_cast<uint64_t>(array);
+      buffer->data[6] = static_cast<uint64_t>(DeviceNumber());
+      buffer->data[7] = bytes;
+    });
+    port.recv([&](rpc::Buffer *buffer, uint32_t) {
+      found = buffer->data[0] != 0;
+    });
+    // A mailbox that closed meanwhile has no message, and the array stays
+    // in the arena unused.
+    if (!found) {
+      return false;
+    }
+    // The host's copy was done before it answered.
+    __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
+    *message = reinterpret_cast<uint64_t>(array);
+    Taken(entry);
+    return true;
+  }
   bool found{false};
   const uint64_t *copy{nullptr};
   {
@@ -2232,7 +2280,7 @@ extern "C" int merk_device_receive_array(
       message, [&](uint64_t *found) {
         RingEntry *entry{nullptr};
         return Look(handle, kRingOfArrays, entry, &header) &&
-            TakeArrayFromHost(handle, entry, found);
+            TakeArrayFromHost(handle, entry, header, found);
       })};
   if (direct >= 0) {
     return direct;
@@ -2242,7 +2290,7 @@ extern "C" int merk_device_receive_array(
           [&]() { return Look(handle, kRingOfArrays, entry, &header); })) {
     return 0;
   }
-  return TakeArrayFromHost(handle, entry, message) ? 1 : 0;
+  return TakeArrayFromHost(handle, entry, header, message) ? 1 : 0;
 }
 
 namespace {
@@ -2904,23 +2952,6 @@ extern "C" void merk_device_send_array_moving(
 }
 
 namespace {
-// From how many bytes an array goes by the host's copy engine from the
-// device's memory (rpcDmaBytes), asked once; 0 before.
-uint64_t dmaBytes{0};
-
-uint64_t DmaBytes() {
-  uint64_t bytes{__atomic_load_n(&dmaBytes, __ATOMIC_RELAXED)};
-  if (bytes == 0) {
-    rpc::Client::Port port{__llvm_rpc_client.open<rpcDmaBytes>()};
-    port.send([](rpc::Buffer *buffer, uint32_t) {
-      buffer->data[0] = static_cast<uint64_t>(__builtin_amdgcn_wavefrontsize());
-    });
-    port.recv([&](rpc::Buffer *buffer, uint32_t) { bytes = buffer->data[0]; });
-    __atomic_store_n(&dmaBytes, bytes, __ATOMIC_RELAXED);
-  }
-  return bytes;
-}
-
 void SendArrayThroughHost(
     const uint64_t *handle, uint64_t key, const uint64_t *array) {
   // A large array goes by the host's copy engine, from the device's memory

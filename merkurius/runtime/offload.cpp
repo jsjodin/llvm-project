@@ -493,13 +493,15 @@ void FreePinnedChunks(PinnedChunk *chunk) {
   }
 }
 
-// From how many bytes a device's send of an array goes by the host's copy
-// from the device's memory (rpcDmaBytes): MERK_GPU_DMA_BYTES, or for a
-// device whose waves have 64 lanes, which on AMD GPUs are gfx9's, whose
-// release at system scope writes back its L2's lines of the device's
-// memory, 8 KiB, where the copy engine's start costs less than the device's
-// one lane copying across the bus a word at a time; and never for others,
-// as gfx1030's L2 may hold the array's lines unwritten. The device gives its
+// From how many bytes an array that a device sends or receives goes by the
+// host's copy from or into the device's memory (rpcDmaBytes):
+// MERK_GPU_DMA_BYTES, or for a device whose waves have 64 lanes, which on
+// AMD GPUs are gfx9's, 8 KiB, where the copy engine's start costs less than
+// the device's one lane copying across the bus a word at a time; and never
+// for others. On gfx90a a release at system scope writes back the L2's
+// lines of the device's memory, and the copy engine's writes to it reach
+// the L2 (measured 2026-11-14 with a running kernel); gfx1030's L2 may hold
+// the array's lines unwritten, and held stale ones after such a copy. The device gives its
 // wave's lanes, since a program without GPU processes does not load
 // liboffload, which would name the GPU.
 std::uint64_t DmaBytes(std::uint64_t lanes) {
@@ -514,10 +516,10 @@ std::uint64_t DmaBytes(std::uint64_t lanes) {
   return lanes == 64 ? std::uint64_t{8} << 10 : ~std::uint64_t{0};
 }
 
-// The most bytes of one copy from a device: the AMDGPU plugin copies more,
-// from LIBOMPTARGET_AMDGPU_MAX_ASYNC_COPY_BYTES, 1 MiB, into host memory it
-// did not pin itself by another path, which on gfx90a waited until the
-// kernels of another process on the same GPU ended.
+// The most bytes of one copy from or to a device: the AMDGPU plugin copies
+// more, from LIBOMPTARGET_AMDGPU_MAX_ASYNC_COPY_BYTES, 1 MiB, with host
+// memory it did not pin itself by another path, which on gfx90a waited
+// until the kernels of another process on the same GPU ended.
 constexpr std::uint64_t kDmaPieceBytes{std::uint64_t{512} << 10};
 
 // rpcSendArrayFromDevice: the array's words, its size word first, copied
@@ -540,6 +542,31 @@ void SendArrayFromDevice(const std::uint64_t *handle, std::uint64_t key,
   }
   SendTo(handle, key, reinterpret_cast<std::uint64_t>(copy));
   FreePinnedChunks(chunk);
+}
+
+// rpcTakeArrayInto: where the message goes, the device's array, and its
+// bytes, for CopyArrayIntoDevice on the RPC server's thread.
+thread_local std::uint64_t *takeInto{nullptr};
+thread_local std::uint64_t takeBytes{0};
+
+// The mailbox's message, an array, copied by the device's copy engine into
+// the device's array, for merk_mailbox_copy_for_ring; nothing is held.
+std::uint64_t CopyArrayIntoDevice(
+    int device, std::uint64_t, std::uint64_t value, void **held) {
+  const auto *array{reinterpret_cast<const std::uint64_t *>(value)};
+  std::uint64_t bytes{sizeof(std::uint64_t) * ArrayWords(array)};
+  if (bytes != takeBytes) {
+    Fail("a device's array for a message is not the message's size");
+  }
+  for (std::uint64_t at{0}; at < bytes; at += kDmaPieceBytes) {
+    std::uint64_t n{bytes - at < kDmaPieceBytes ? bytes - at : kDmaPieceBytes};
+    if (!CopyToDevice(device, reinterpret_cast<char *>(takeInto) + at,
+            reinterpret_cast<const char *>(array) + at, n)) {
+      Fail("could not copy an array to a device");
+    }
+  }
+  *held = nullptr;
+  return reinterpret_cast<std::uint64_t>(takeInto);
 }
 
 // Where the host's copy of a message for a device goes (copy.h).
@@ -741,6 +768,17 @@ unsigned HandleOpcode(void *raw, unsigned) {
   case rpcDmaBytes:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
       buffer->data[0] = DmaBytes(buffer->data[0]);
+    });
+    return rpc::RPC_SUCCESS;
+  case rpcTakeArrayInto:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      const std::int64_t *h{
+          reinterpret_cast<const std::int64_t *>(buffer->data)};
+      takeInto = reinterpret_cast<std::uint64_t *>(buffer->data[5]);
+      takeBytes = buffer->data[7];
+      std::uint64_t copy{0};
+      buffer->data[0] = merk_mailbox_copy_for_ring(h[0], h[1], h[2], h[3],
+          h[4], CopyArrayIntoDevice, ReleaseForDevice, &copy);
     });
     return rpc::RPC_SUCCESS;
   case rpcSendArrayFromDevice:
