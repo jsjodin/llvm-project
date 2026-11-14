@@ -124,3 +124,36 @@ two machines would be but for the network. Microseconds a round:
 | GPU / CPU | 35.8, 34.3, 33.0, 36.5, 35.8 |
 | CPU / GPU | 33.7, 35.9, 37.7, 38.0, 37.4 |
 | CPU / CPU | 25.3, 25.6, 24.5, 25.3, 21.6 |
+
+### On gfx90a
+
+2026-11-14, one die of an AMD Instinct MI250 (gfx90a), two AMD EPYC 7713
+(128 cores) as the host, the build of 693f7c3053d4, the default spin, 10000
+rounds. Three runs with the host's threads on the other socket than the
+GPU's (GPU 1, whose NUMA node is 4, and `numactl --cpunodebind=8-15`), and
+one on the GPU's own socket (`--cpunodebind=0-7`); microseconds a round,
+beside gfx1030's ranges from above: the spin's runs, the two GPU regions'
+and, for the floors, the first results:
+
+| Name | Other socket | Own socket | gfx1030 |
+| --- | --- | --- | --- |
+| `cpu` | 22.3, 20.1, 16.1 | 19.5 | 21.9 to 25.7 |
+| `gpu` | 39.7, 37.4, 39.6 | 38.7 | 33.9 to 36.0 |
+| `gpu` with `partner-gpu` | 67.2, 64.4, 63.3 | 66.1 | 44.4 to 46.4 |
+| `cpu-local` | 2.9, 3.1, 3.2 | 3.0 | 6.8 to 6.9 |
+| `gpu-local` | 21.6, 21.3, 21.5 | 21.1 | 19.2 to 19.4 |
+| `tcp-floor` | 17.5, 17.3, 19.1 | 17.3 | 15.1 to 15.4 |
+| `condvar-floor` | 7.2, 6.9, 7.0 | 7.0 | 8.8 to 9.1 |
+| `rpc-floor` | 14.2, 14.3, 14.2 | 13.5 | 7.5 to 7.6 |
+
+- **The RPC floor is twice gfx1030's,** 14 µs against 7.5, and the GPU's
+  rounds pay it: `gpu-local` is 2 to 3 µs slower than on gfx1030, `gpu`
+  4, and `gpu` against node 2's region on the same GPU 20, as both ends
+  make RPCs. The device's side of a round trip takes the runtime's and
+  libc's atomics at system scope, which on gfx90a write back and
+  invalidate the L2 (`benchmarks/team-barrier`, "On gfx90a").
+- **The CPU's rounds are faster,** `cpu-local` 3 µs against 7: the EPYC's
+  threads hand a message over sooner than the Threadripper's.
+- **The socket made no difference here,** unlike a GPU process's round
+  trip, which is 1.6 times slower from the GPU's own socket (design
+  document, Measurements, "A GPU process's blocks").

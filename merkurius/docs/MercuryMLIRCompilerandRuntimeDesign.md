@@ -4274,6 +4274,17 @@ either way.
   diagnosed. Life's C program with 1-byte cells takes 0.258 ms, which narrow
   fields in flat records would give Mercury.
 
+On gfx90a, 2026-11-14 at 693f7c3053d4, one die of an AMD Instinct MI250,
+all 104 compute units, the same sizes, the median of five rounds' average
+step: Life, Mercury's target regions 0.857 ms against C's 0.441 (94%
+slower); the front, 1.684 ms against 1.129 (49% slower). The gap of 5 to
+6% on gfx1030 is far wider here. C's steps are 1.4 to 2 times as fast as
+on gfx1030, while Mercury's Life is slower (0.857 ms against 0.671) and its
+front 1.4 times as fast; that the runtime's loop and
+its barrier after each round use system-scope atomics, which on gfx90a
+write back and invalidate the L2 ("Barriers between teams"), is the first
+thing to check.
+
 `benchmarks/bandwidth`'s kernels, which reuse nothing, gained too. Against
 `bandwidth.c`, built by the same tree's clang, at 5192433284b7, Mercury and C
 taking turns, three rounds, the median of each kernel's best of 100, in MB/s,
@@ -4564,6 +4575,15 @@ the benchmark added. The runs differed by under 3% on the GPU:
 - **The host's teams are threads with condition variables,** so a hop costs a
   thread's wake-up. At 64 teams there are more threads than the machine's 48
   hardware threads, and a barrier takes milliseconds.
+- **On gfx90a every shape on the GPU is 2.5 to 30 times slower**
+  (`benchmarks/team-barrier`, "On gfx90a"; 64 teams: central 2383 to 3047,
+  tree 516 to 520, library 30 µs), from the runtime's atomics: `__atomic_*`
+  is at system scope, and on gfx90a a release at system scope writes back
+  the whole L2 (`buffer_wbl2`) and an acquire invalidates it
+  (`buffer_invl2`), each poll of a wait included. gfx1030 makes the same
+  code at either scope. The library's counters at device scope, in a trial
+  build, gave 1.43 µs at 64 teams. Which of the runtime's atomics may be at
+  device scope, those on memory that only the GPU touches, is to sort out.
 
 With `process.team_barrier` (`library`, Library code on the device, above)
 beside them, medians of three runs, 2026-11-10, at 6a90cadd2fac. The runs
@@ -4928,17 +4948,21 @@ code the benchmark runs), Firefox closed. One GPU process; the host times
 each measurement less one round trip; microseconds a round, the median of
 3 runs, which were within 3% of each other.
 
-| Each round | µs |
-|---|---|
-| A message to the process and its answer, through the host | 26.2 |
-| 4 KiB block, `merk_device_alloc` and `merk_device_free` | 3.97 |
-| 4 KiB, libc's `malloc` and `free` alone | 3.07 |
-| 4 MiB block, from the cache of large blocks after the first | 2.03 |
-| 4 MiB, libc alone, which asks the host for each | 61.2 |
-| 4 MiB, a size no cache has: libc's `malloc`, then into the cache | 46.7 |
-| 4 MiB, a size no cache has, libc alone | 65.3 |
-| `array.init` of 512 ints, freed at its last use | 6.86 |
-| `array.init` of 524288 ints (4 MiB) | 2597 |
+| Each round | gfx1030, µs | gfx90a, µs |
+|---|---|---|
+| A message to the process and its answer, through the host | 26.2 | 79.0 |
+| 4 KiB block, `merk_device_alloc` and `merk_device_free` | 3.97 | 11.2 |
+| 4 KiB, libc's `malloc` and `free` alone | 3.07 | 8.86 |
+| 4 MiB block, from the cache of large blocks after the first | 2.03 | 7.46 |
+| 4 MiB, libc alone, which asks the host for each | 61.2 | 74.5 |
+| 4 MiB, a size no cache has: libc's `malloc`, then into the cache | 46.7 | 58.3 |
+| 4 MiB, a size no cache has, libc alone | 65.3 | 86.5 |
+| `array.init` of 512 ints, freed at its last use | 6.86 | 20.1 |
+| `array.init` of 524288 ints (4 MiB) | 2597 | 8308 |
+
+The gfx90a column: one die of an AMD Instinct MI250, all 104 compute
+units, two AMD EPYC 7713, 2026-11-14 at 693f7c3053d4, the median of 6 (two
+runs of `run.sh` of 3 each).
 
 - A small block costs about a seventh of a message's round trip: a
   process that makes a few arrays for each message spends little of its
@@ -4955,6 +4979,17 @@ each measurement less one round trip; microseconds a round, the median of
 - Filling a 4 MiB array from the process's one lane takes 2.6 ms, a
   thousand times what its block costs: `array.init` stores each element in
   turn (INPROGRESS, Memory that a GPU process gives back, "Open").
+- **On gfx90a everything from one lane is about 3 times slower,** the
+  round trip too, except what the host does: the runtime's atomics are at
+  system scope, which on gfx90a write back the whole L2 at a release and
+  invalidate it at an acquire (Measurements, "Barriers between teams", and
+  `benchmarks/team-barrier`), and its global memory's latency is longer.
+  The round trip depends on the host's socket, and against what one would
+  expect: about 78 µs with the program's threads on the other socket's
+  cores than the GPU's, 120 to 130 µs on its own socket's (GPUs 0, 1, 2 and
+  4 tried, each on its own NUMA node's cores and on the other socket's, the
+  machine otherwise idle). Unbound, a run lands on either, which is the
+  spread of the medians' runs. Not understood yet.
 
 ### Life on several places
 
@@ -5114,6 +5149,26 @@ on the 8192-cell world, where the GPU is full.
   OpenMP offload on the small ones. Its bookkeeping, on the process's lane
   on the GPU, is 32 to 45 µs, the host's in HIP 37 to 48 and in C 54 to 76,
   which includes OpenMP's copies to and from the device.
+
+**On gfx90a.** 2026-11-14 at 693f7c3053d4, one die of an AMD Instinct
+MI250, GPU 3, all 104 compute units, the host's threads on the other
+socket; the same cases, 5 rounds, the median. All three gave the same
+checksum in every run.
+
+| World, tile | Active tiles, most | Mercury, GPU process | C, OpenMP | HIP | Mercury on gfx1030 |
+|---|---|---|---|---|---|
+| 2048, 32 | 472 | 245 (106) | 163 (79) | 108 (52) | 280 (45) |
+| 2048, 64 | 128 | 243 (94) | 168 (55) | 128 (40) | 351 (32) |
+| 8192, 64 | 520 | 331 (108) | 349 (80) | 286 (51) | 1387 (40) |
+
+- **The large world's step is 4 to 4.6 times faster than on gfx1030,** as
+  predicted from the gfx90a's full-rate doubles; Mercury is 1.16 times
+  HIP there and ahead of C.
+- **On the small worlds Mercury is 1.9 to 2.3 times HIP,** where it was
+  within 5%: its bookkeeping on the process's one lane grew from 32 to 45
+  µs to 94 to 108, two to three times, as everything a lane does on gfx90a
+  (A GPU process's blocks), while the work under it shrank.
+  The host's bookkeeping in HIP and C grew less, by 1.1 to 1.3 times.
 
 ### A pipeline of GPU processes
 
@@ -5314,6 +5369,38 @@ At 2^16 words (200 frames, 63 µs a frame) each process's send took 16 to
   523 µs of loops a frame, the source only `make`, 235, with the same
   share of the teams. The pipeline goes at its slowest process's pace, 566
   µs, the average being 484.
+
+**On gfx90a.** 2026-11-14 at 693f7c3053d4, one die of an AMD Instinct
+MI250, GPU 4, all 104 compute units, the host's threads on the other
+socket; the same sweep, 40 frames, the median of 3 rounds, µs a frame.
+Every configuration gave one checksum in every run.
+
+| Words | Rounds | Feedback | Pipeline | Single | HIP |
+|---|---|---|---|---|---|
+| 4096 | 16 | none | 1960 | 3574 | 9.0 |
+| 4096 | 16 | 1 | 6829 | 3701 | 9.1 |
+| 4096 | 256 | none | 2046 | 3871 | 15.2 |
+| 4096 | 4096 | none | 2000 | 3878 | 114 |
+| 4096 | 4096 | 1 | 6742 | 3853 | 114 |
+| 65536 | 16 | none | 2125 | 2377 | 9.6 |
+| 65536 | 256 | none | 2114 | 2362 | 23.6 |
+| 65536 | 4096 | none | 2126 | 2719 | 245 |
+| 65536 | 4096 | 1 | 5954 | 2464 | 245 |
+| 1048576 | 16 | none | 2555 | 2456 | 40.9 |
+| 1048576 | 16 | 1 | 6881 | 2576 | 40.7 |
+| 1048576 | 256 | none | 2648 | 2525 | 195 |
+| 1048576 | 4096 | none | 3004 | 4013 | 2835 |
+| 1048576 | 4096 | 1 | 8089 | 3780 | 2835 |
+
+- **HIP is 1.4 to 21 times faster than on gfx1030; Mercury's processes
+  take 2 to 4 ms a frame whatever its size and work,** so up to 50 times
+  gfx1030's on small frames (the single process at 4096 words, 3.6 ms
+  against 69 µs), and faster only where the work was most of it (2^20
+  words, 4096 rounds: 4.0 ms against 64.7). A fixed
+  cost of milliseconds a frame is what the barriers between teams cost on
+  gfx90a with the runtime's system-scope atomics (64 teams: 2.4 to 3 ms
+  for `central`, "Barriers between teams"), which a GPU process's loops
+  and worker teams take; not yet measured apart.
 - **Each hop costs 25 to 35 µs** of fixed work, which matters at small
   frames. Not yet timed inside; likely most of it is blocks: a moving send
   makes two small ones (the message's envelope and its copied cell) and
