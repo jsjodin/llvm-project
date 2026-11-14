@@ -8,15 +8,16 @@
 #   sweep.sh [build-dir] [offload-arch] [rounds]
 #
 # build-dir is the Merkurius build, ../../../../build-merk by default;
-# offload-arch is gfx1030 by default; rounds 3 by default. ROCM_PATH is
-# /opt/rocm by default. PIPE_SIZES, PIPE_WORKS and PIPE_FEEDBACKS are the
-# lists to sweep ("4096 65536 1048576", "16 256 4096", "0 1"); PIPE_FRAMES
-# (40) passes through. On a machine that others share, run it through
-# utils/gpu/with-gpus.py.
+# offload-arch is this machine's GPU by default, as amdgpu-arch finds it;
+# rounds 3 by default. ROCM_PATH is /opt/rocm by default. PIPE_SIZES,
+# PIPE_WORKS and PIPE_FEEDBACKS are the lists to sweep ("4096 65536
+# 1048576", "16 256 4096", "0 1"); PIPE_FRAMES (40) passes through. On a
+# machine that others share, run it through utils/gpu/with-gpus.py.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 build="$(cd "${1:-$here/../../../../build-merk}" && pwd)"
-arch="${2:-gfx1030}"
+arch="${2:-$("$build/bin/amdgpu-arch" 2>/dev/null | head -n1)}"
+[[ -n "$arch" ]] || { echo "$0: found no GPU; give its offload-arch" >&2; exit 1; }
 rounds="${3:-3}"
 rocm="${ROCM_PATH:-/opt/rocm}"
 out="${PIPE_OUT:-$(mktemp -d)}"
@@ -26,9 +27,14 @@ flags=()
 for d in "${libs[@]}"; do flags+=("-L$d"); done
 export LD_LIBRARY_PATH="$(IFS=:; echo "${libs[*]}")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PIPE_FRAMES="${PIPE_FRAMES:-40}"
-# The GPU processes' and HIP's queues on the same compute units.
-export LIBOMPTARGET_AMDGPU_CU_MASK="${LIBOMPTARGET_AMDGPU_CU_MASK:-0-39}"
-export HSA_CU_MASK="${HSA_CU_MASK:-0:$LIBOMPTARGET_AMDGPU_CU_MASK}"
+# The GPU processes' and HIP's queues on the same compute units: those that
+# LIBOMPTARGET_AMDGPU_CU_MASK gives, else half of the GPU's if it drives a
+# display, else all of them, as the tests' (utils/lit/gpu_info.py).
+mask="${LIBOMPTARGET_AMDGPU_CU_MASK-$(python3 -I "$here/../../utils/lit/gpu_info.py" unit-mask)}"
+if [[ -n "$mask" ]]; then
+  export LIBOMPTARGET_AMDGPU_CU_MASK="$mask"
+  export HSA_CU_MASK="${HSA_CU_MASK:-0:$mask}"
+fi
 
 "$build/bin/merkc" -O2 -fopenmp -fdo-loops -fprocess-declarations \
   --offload-arch="$arch" "${flags[@]}" "$here/pipeline.m" -o "$out/mercury"

@@ -5,11 +5,13 @@
 #   run.sh [build-dir] [offload-arch]
 #
 # build-dir is the Merkurius build, ../../../../build-merk by default;
-# offload-arch is the GPU's, gfx1030 by default.
+# offload-arch is the GPU's, this machine's by default, as amdgpu-arch finds
+# it.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 build="$(cd "${1:-$here/../../../../build-merk}" && pwd)"
-arch="${2:-gfx1030}"
+arch="${2:-$("$build/bin/amdgpu-arch" 2>/dev/null | head -n1)}"
+[[ -n "$arch" ]] || { echo "$0: found no GPU; give its offload-arch" >&2; exit 1; }
 out="$(mktemp -d)"
 # libomp is built in the runtimes' tree, not installed into lib.
 omp="$build/runtimes/runtimes-bins/openmp/runtime/src"
