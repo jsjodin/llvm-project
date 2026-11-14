@@ -69,3 +69,14 @@ What it shows:
 - For comparison, HIP probes on the same pairs measured 38 to 150 GB/s
   between the GPUs, and about 1.2 µs one way for a flag between running
   kernels.
+
+**With the wave's lanes copying** (docs/INPROGRESS.md, Direct sends between
+the GPUs of a node, step 0), measured the same day on GPUs 1,3. `A` is
+unchanged, within 5%. `A-B`'s stream of 2^20 words gave 658 MB/s against
+846 before, within the spread across pairs before the change (846 to 1480
+MB/s); `A-B` does not copy within a GPU.
+
+| Chain | Mode | 1 word | 4096 words | 65536 words | 2^20 words |
+| --- | --- | --- | --- | --- | --- |
+| `A-A` | ping | 164 µs | 174 µs, 189 MB/s | 847 µs, 619 MB/s | 17.0 ms, 494 MB/s |
+| `A-A` | stream | | 186 MB/s | 764 MB/s | 652 MB/s |

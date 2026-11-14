@@ -1551,14 +1551,51 @@ bool Bulk(uint64_t what, uint64_t *to, uint64_t fromOrWord, uint64_t words) {
 // words, which its worker teams do if it has them and there are enough
 // (Bulk): true, or false for the caller's own loop. The arrays (array.cpp)
 // and the copies of messages (copy.h, CopyWords) call them.
+// By every lane of the wave (device/wave.ll): the caller must be the wave's
+// only active lane.
+extern "C" void merk_device_wave_copy(
+    uint64_t *to, const uint64_t *from, uint64_t words);
+extern "C" void merk_device_wave_fill(
+    uint64_t *to, uint64_t word, uint64_t words);
+
+// The fewest words that the wave's lanes copy or fill for a lane that runs
+// alone, as a GPU process's does: below, the lane's own loop, which needs no
+// registers kept on the stack. A copy by the lane alone moved 30 to 40 MB/s
+// on gfx90a, by the wave 1.6 to 2.3 GB/s (docs/INPROGRESS.md, Direct sends
+// between the GPUs of a node, Results of the experiments).
+constexpr uint64_t kWaveWords{32};
+
+// Whether the calling lane is its wave's only active one, so that the
+// wave's other lanes can work for it, whatever the code it runs.
+bool AloneInWave() {
+  return __builtin_popcountll(__builtin_amdgcn_read_exec()) == 1;
+}
+
+// Fills or copies by the process's worker teams if it has them and the words
+// are many (Bulk), or else by every lane of the caller's wave if the caller
+// runs alone in it: true, or false for the caller's own loop.
 extern "C" bool merk_device_bulk_fill(
     uint64_t *to, uint64_t word, uint64_t words) {
-  return Bulk(kBulkFill, to, word, words);
+  if (Bulk(kBulkFill, to, word, words)) {
+    return true;
+  }
+  if (words < kWaveWords || !AloneInWave()) {
+    return false;
+  }
+  merk_device_wave_fill(to, word, words);
+  return true;
 }
 
 extern "C" bool merk_device_bulk_copy(
     uint64_t *to, const uint64_t *from, uint64_t words) {
-  return Bulk(kBulkCopy, to, reinterpret_cast<uint64_t>(from), words);
+  if (Bulk(kBulkCopy, to, reinterpret_cast<uint64_t>(from), words)) {
+    return true;
+  }
+  if (words < kWaveWords || !AloneInWave()) {
+    return false;
+  }
+  merk_device_wave_copy(to, from, words);
+  return true;
 }
 
 // Each wave of the kernel of a GPU's processes, merk_place (place.h): lane 0
