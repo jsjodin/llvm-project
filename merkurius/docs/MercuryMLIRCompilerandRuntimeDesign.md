@@ -4993,6 +4993,75 @@ step (place 0, µs a step):
   the other place. The next gains are the wave copying a message, and
   agreeing every k steps (INPROGRESS, step 5, "Open").
 
+### What places agree on, and what it costs
+
+Step 5's p4 (INPROGRESS, "A demo: a stencil whose active region moves"):
+`life-places.m` against `life-sparse.m`, on the gfx1030 with
+`LIBOMPTARGET_AMDGPU_CU_MASK=0-39`, 2026-11-13 at 402305729130, Firefox
+closed; the average step in microseconds, the median of 3 runs, which were
+within 7% of each other. The default world, with the default soup of 256 (45
+active tiles at most) and a soup of 1024 (376); `LIFE_MOVES` 4, and 0 for
+fixed owners.
+
+| | Soup 256 | Soup 1024 |
+|---|---|---|
+| `life-sparse.m` | 39 | 177 |
+| 1 place | 219 | 1040 |
+| 2 places, moves | 460 | 2651 |
+| 2 places, fixed owners | 452 | 2595 |
+| 4 places, moves | 708 | 3317 |
+| 4 places, fixed owners | 670 | 3196 |
+
+On a 128-cell world (`LIFE_WORLD=128 LIFE_SOUP=128 LIFE_STEPS=2000`, 4
+tiles, 4 places), 524 with moves and 254 without.
+
+A build with a clock read around each part of a place's step
+(`__builtin_readsteadycounter`) and of the directory's splits them, µs a
+step, place 0 (the others alike):
+
+| Part | Soup 256, 1 place | Soup 256, 2 places | Soup 1024, 1 place | Soup 1024, 4 places |
+|---|---|---|---|---|
+| Its tiles | 38 | 19 | 346 | 87 |
+| The step, across the teams | 25 | 23 | 139 | 134 |
+| The summary, built | 14 | 8 | 110 | 40 |
+| The summary, sent | 50 | 55 | 92 | 66 |
+| Waiting for the map | 58 | 73 | 108 | 468 |
+| The map applied (`apply_map`, `moves`) | 19 | 34 | 122 | 285 |
+| The halos' places (`expected`) | 51 | 27 | 459 | 122 |
+| The halos, chosen, packed and sent | 0 | 132 | 0 | 1335 |
+| Waiting for the halos | 0 | 87 | 0 | 689 |
+| The halos applied | 0 | 19 | 0 | 230 |
+
+The directory's own work is small: 9 to 13 µs deciding and 4 to 12 µs
+sending the maps at soup 256, 57 and up to 232 at 1024; the rest of its step
+is waiting for the summaries.
+
+- **The agreement costs more than the step, and grows with the tiles.** At 1
+  place there are no halos, and still 1 place is 5.6 times `life-sparse.m`
+  at soup 256 and 5.9 times at 1024. Besides the summary's and the map's
+  round trip, the place walks its tiles on its one lane several times a
+  step: `summary`, `apply_map`'s `end_own` and `drop_ghosts`, `expected`,
+  and, for each place it sends a halo to, `select`. Each tile's walk is a
+  chain of loads from global memory that the one lane waits on, 0.1 to 0.15
+  µs each: `expected` reads `Actives`, `Pos` and 8 of `Owner`, 1.3 µs a
+  tile. Computing a tile's row and column once rather than for each
+  direction changed nothing (459 to 444): it is the loads, not the
+  divisions. `expected` as a `distribute` loop across the teams, each tile's
+  places into an array that the lane then ORs, took it from 459 to 45 µs,
+  and 1 place at soup 1024 from 1040 to 611 µs (219 to 176 at soup 256).
+- **Moving tiles balances them, but does not pay yet.** With moves, the
+  places' tiles stay within 1 of each other (4 places, soup 256: 10, 11, 11,
+  11 at the end, against 16, 6, 9, 12 with fixed owners; soup 1024: 94, 94,
+  93, 94 against 111, 81, 81, 102). But the step across the teams is a
+  small part of a place's step, so a balanced one gains little, and moving
+  gives each place more neighbours to trade halos with: on the 128-cell
+  world, moves spread 4 tiles over 4 places, each with 3 neighbours rather
+  than 1, and doubled the step. The directory balances tiles; the halos it
+  makes are what cost.
+- **More places are slower,** as the places share one GPU here: each place
+  adds its own summary, halos and waits. Several GPUs, one place each, are
+  what places are for; on one GPU they show the protocol's costs.
+
 ### GPU processes' stacks
 
 2026-11-13, at bddf7bd56f9a with the change that marks a GPU process's code
