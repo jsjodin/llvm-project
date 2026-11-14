@@ -105,6 +105,25 @@ A step of the GPU process starts no kernel, which counts most where steps
 are short. The others time their steps from the host, a target region's
 start included.
 
+On gfx90a, 2026-11-14 at 693f7c3053d4, one die of an AMD Instinct MI250,
+GPU 1, all 104 compute units, the host's threads on the other socket, the
+median of 5 rounds:
+
+| Program | 4096², 100 steps | 1024², 200 steps |
+| --- | ---: | ---: |
+| Mercury, target regions | 20.5 Gcells/s | 2.56 Gcells/s |
+| Mercury, GPU process | 15.5 Gcells/s | 3.88 Gcells/s |
+| Mercury, GPU process, `uint8` cells | 14.7 Gcells/s | 4.11 Gcells/s |
+| C, `int64_t` cells | 38.7 Gcells/s | 23.6 Gcells/s |
+| C, `uint8_t` cells | 57.8 Gcells/s | 28.0 Gcells/s |
+
+C gains on gfx90a and Mercury does not: Mercury is 1.9 to 5 times
+slower than C at 4096² and 7 to 10 at 1024², where its steps take 290 to
+450 µs against C's 40 to 46. A fixed cost a step of a few hundred µs, as
+the barriers between teams cost on gfx90a with system-scope atomics
+(design document, Measurements, "Barriers between teams"), would give
+this; not yet measured.
+
 ## Sparse tiles
 
 `life-sparse.m` steps only the tiles where life is, in one GPU process
@@ -170,6 +189,24 @@ median over 5 rounds of each program's average step:
 The GPU process starts no kernel and copies nothing. With 64² tiles, a
 third of its step is the bookkeeping, against nearly half of C's (design
 document, Measurements, Dense stencils).
+
+On gfx90a, 2026-11-14 at 693f7c3053d4, GPU 1, all 104 compute units, the
+same soup and steps, the median over 5 rounds, the bookkeeping's part in
+brackets:
+
+| World, tile | Active tiles, most | Mercury, GPU process | C, sparse | C, dense |
+| --- | ---: | ---: | ---: | ---: |
+| 8192², 64² | 45 | 575 µs (227) | 84 µs (34) | 1068 µs |
+| 8192², 32² | 126 | 594 µs (338) | 77 µs (34) | 1068 µs |
+| 8192², 128² | 21 | 1021 µs (222) | 143 µs (35) | 1068 µs |
+| 2048², 64² | 57 | 612 µs (257) | 79 µs (29) | 87 µs |
+
+The GPU process, the fastest on gfx1030, is 7 to 8 times slower than C's
+sparse program here and 17 times its own gfx1030 step, while C's is as
+fast or faster. Its bookkeeping, on the process's one lane, is 220 to 340
+µs, and its loops the rest; both are what gfx90a's slow lane and barriers
+would make (design document, Measurements, "A GPU process's blocks" and
+"Barriers between teams").
 
 ## Several places
 

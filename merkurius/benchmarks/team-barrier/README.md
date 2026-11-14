@@ -85,3 +85,39 @@ shape (`process.team_barrier`), three runs, none with a wrong message:
 
 The library's barrier, a counter in the runtime, takes 1 µs or less on the GPU
 at every number of teams, 30 times faster than the tree at 64.
+
+### On gfx90a
+
+2026-11-14, one die of an AMD Instinct MI250 (gfx90a, 104 compute units),
+two AMD EPYC 7713 (128 cores), the build of 693f7c3053d4, three runs of
+`run.sh` with the default rounds, µs a barrier:
+
+| Shape | Teams | GPU | Host's teams |
+| --- | ---: | --- | --- |
+| `central` | 2 | 9.61, 9.38, 9.55 | 1.39, 1.25, 1.37 |
+| `central` | 4 | 17.12, 16.81, 17.22 | 5.11, 7.94, 8.43 |
+| `central` | 16 | 177.12, 180.13, 179.95 | 166.68, 162.23, 164.48 |
+| `central` | 64 | 2382.50, 2843.87, 3046.95 | 4080.46, 4129.22, 4111.21 |
+| `tree` | 2 | 9.40, 9.60, 9.22 | 1.37, 1.38, 1.41 |
+| `tree` | 4 | 19.80, 19.50, 19.25 | 4.85, 7.86, 8.30 |
+| `tree` | 16 | 88.13, 87.91, 87.49 | 69.38, 114.92, 91.96 |
+| `tree` | 64 | 520.47, 515.55, 518.86 | 1389.26, 1362.26, 1347.69 |
+| `library` | 2 | 2.14, 2.38, 2.43 | 0.27, 0.25, 0.26 |
+| `library` | 4 | 2.62, 2.74, 2.62 | 1.06, 1.06, 1.03 |
+| `library` | 16 | 7.62, 7.55, 7.73 | 13.42, 10.20, 8.99 |
+| `library` | 64 | 30.36, 30.91, 31.03 | 57.46, 59.68, 57.52 |
+
+The host's teams are about as on the other machine. On the GPU every shape
+is slower than on gfx1030, by 2.5 to 3 times at 2 teams and by 18 to 30
+times at 64: `library` 30 µs against 1.0, `tree` 520 against 29. The cause
+is the device runtime's atomics, which are `__atomic_*` and so at system
+scope. On gfx90a, whose L2 is not coherent with the host, a release at
+system scope writes back the whole L2 (`buffer_wbl2`) and an acquire
+invalidates it (`buffer_invl2`), each poll of a wait included; on gfx1030
+the code is the same at either scope. With `library`'s counters at device
+scope (`__scoped_atomic_*` with `__MEMORY_SCOPE_DEVICE`, which is right, as
+only the teams touch them), a trial build ran it in 1.33 µs at 2 teams and
+1.43 at 64. The other shapes go through team mailboxes, whose rings and
+allocations wait on the same kind of atomics. The host's NUMA node did not
+matter: driving GPU 0 from the cores of its own node, 4, or of node 12, on
+the other socket, gave the same times.
