@@ -5466,16 +5466,33 @@ as every process of a GPU allocates from that GPU's heap.
      that it did not pin by `hsa_amd_memory_lock`, and that copy waited, for
      a minute in the benchmark, until another process's kernel on the same
      GPU ended. Not found why.
+   - *A receive by the copy engine* (`rpcTakeArrayInto`): from the same
+     size, the device makes the array in its arena, of the size its ring
+     gave, and gives the host its address; the host copies the message
+     into it with `olMemcpy`, 512 KiB at a time, and answers, and the
+     device makes an acquire at system scope. A gfx90a acquire invalidates
+     no L2 lines of the device's own memory (AMDGPUUsage, Memory Model
+     GFX90A), so a probe (2026-11-14, HIP) checked first that the copy
+     engine's writes reach a running kernel: a kernel held a buffer of VRAM
+     in its L2, by reading it or writing it back, the copy engine
+     overwrote it, and after an acquire at system scope, or one at device
+     scope, which invalidates only the L1, no word of 4 KiB to 8 MiB was
+     stale in 200 rounds; without an acquire the L1 served stale words.
+     gfx1030 read stale cells after such a copy (design document, Arrays
+     of scalars, "Rejected"), and keeps the lane's copy. Tested by
+     `omp-target-receive-arrays-reused.m`: forty regions take arrays of 8
+     to 512 KiB into arena memory that the regions before them wrote, every
+     element checked.
    - *Measured* (benchmarks/array-messages, "On gfx90a"): a send from the
-     GPU within a node 1.6 to 3.5 GB/s from 2^14 words, from 100 to 170
-     MB/s; to another node 1.0 to 1.5 GB/s, half to nine tenths of the
-     CPU's.
-   - *Open:* receives still go by the lane, 110 to 130 MB/s, and so does
-     everything between two GPU regions. The same by the copy engine into
-     the device's memory needs the device to see it: an acquire at system
-     scope on gfx90a invalidates no L2 lines of its own memory (AMDGPUUsage,
-     Memory Model GFX90A), so whether the copy engine's writes reach them
-     is to find; failing that, a wave or the worker teams copying.
+     GPU within a node 2.4 to 3.8 GB/s from 2^16 words, from 130 to 170
+     MB/s, and a receive 3.1 to 7.0 GB/s, from about 115; between nodes
+     1.4 to 2.4 GB/s each way, about the CPU's; between two GPU regions on
+     the one GPU 0.8 to 1.9 GB/s from 2^16 words, from 66 to 88 MB/s.
+   - *Open:* below 8 KiB, and on gfx1030 at every size, the lane copies,
+     until messages travel as their bytes and a wave's lanes copy them
+     (GPU processes without omp target, step 5, "Flat records"). Between
+     GPU regions the host's encoding and TCP are now the limit, as between
+     a GPU and a CPU.
 
 ## Topology: GPUs, NUMA domains and NICs within a node
 
