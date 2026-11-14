@@ -5148,10 +5148,17 @@ Expected<uint32_t> AMDGPUKernelTy::getCooperativeGroupsPerComputeUnit(
         std::min(WavesPerSIMD, getTotalNumVGPRs(Kind, IsWave32) / VGPRs);
   }
 
-  // Before gfx10, each wave's SGPRs come from the SIMD's file too.
+  // Before gfx10, each wave's SGPRs come from the SIMD's file too, with 16
+  // more for the trap handler, which ROCm always installs, as LLVM's
+  // occupancy counts them (TRAP_NUM_SGPRS). Without them a gfx90a kernel of
+  // 104 SGPRs was counted 7 waves a SIMD, and ran 6. Where there is no trap
+  // handler this counts a wave fewer than fit, which a cooperative launch
+  // can afford, rather than more.
   if (Version.Major < 10 && KernelInfo.SGPRCount != Invalid) {
+    constexpr uint32_t TrapHandlerSGPRs = 16;
     uint32_t SGPRs =
-        alignTo(std::max(KernelInfo.SGPRCount, 1u), getSGPRAllocGranule(Kind));
+        alignTo(std::max(KernelInfo.SGPRCount, 1u), getSGPRAllocGranule(Kind)) +
+        TrapHandlerSGPRs;
     WavesPerSIMD = std::min(WavesPerSIMD, getTotalNumSGPRs(Kind) / SGPRs);
   }
 
