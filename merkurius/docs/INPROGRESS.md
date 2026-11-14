@@ -5868,7 +5868,23 @@ queue's slots are laid out. 512 B costs the same as 8 B.
      at 2^20 words. Stream at 2^20 words went from 87 to 652 MB/s. `A-A` now
      moves arrays about as fast as `A-B`, both bound by the host's path.
 1. The experiments above. *Done 2026-11-14* (Results of the experiments).
-2. Fine-grained device memory in the plugin (point 5).
+2. Fine-grained device memory in the plugin (point 5). *Done 2026-11-14:*
+   - The plugin interface has a new allocation kind,
+     `TARGET_ALLOC_DEVICE_FINE`, and liboffload's `ol_alloc_type_t` has
+     `OL_ALLOC_TYPE_DEVICE_FINE_GRAINED`. The AMDGPU plugin serves it from
+     the GPU's own fine-grained pool, and gives access to every GPU that can
+     reach that pool, as it does for device memory. Without such a pool the
+     allocation fails.
+   - Fine-grained device memory is not kept by the plugin's memory manager.
+     The host plugin uses `malloc` for it, as for every kind; the CUDA
+     plugin refuses it.
+   - In the runtime, `DeviceAllocateFine` (devices.h) returns null where
+     the GPU has none. `DeviceFree` frees it.
+   - test/Runtime/fine-memory-gpu.test runs a kernel's system-scope atomics
+     on it, on one GPU. By hand, the same program on ROCR GPUs 2,3 and 1,7
+     played 10000 round trips of ping-pong between kernels on the two GPUs
+     through fine-grained words, and got stuck with ordinary device memory,
+     as the probes found.
 3. The host's side: per-GPU send pools, peer-queue tables and return lists;
    `PlaceRoute` answers peer; `MERK_GPU_PEER`.
 4. The device's side: the peer route kind, sending into the pool and the

@@ -43,6 +43,13 @@ namespace merkurius::runtime {
 void *DeviceAllocate(int device, std::size_t bytes);
 void DeviceFree(int device, void *memory);
 
+// `bytes` of the device's memory that is fine-grained, so that a word that
+// another GPU or the host writes in it is seen by a kernel polling it, or
+// null where the GPU has no such memory or is an OpenMP device. DeviceFree
+// frees it. Kept for words that signal (docs/INPROGRESS.md, Direct sends
+// between the GPUs of a node, point 5); payloads go in DeviceAllocate's.
+void *DeviceAllocateFine(int device, std::size_t bytes);
+
 // `bytes` of host memory that the device reads and writes directly, or null.
 void *DeviceAllocateHost(int device, std::size_t bytes);
 void DeviceFreeHost(int device, void *memory);
