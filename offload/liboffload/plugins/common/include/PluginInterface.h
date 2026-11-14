@@ -907,6 +907,10 @@ struct GenericDeviceTy : public DeviceAllocatorTy {
   // up to the target to override this using the shouldSetupRPCServer function.
   Error setupRPCServer(GenericPluginTy &Plugin, DeviceImageTy &Image);
 
+  /// Give the image's libc on the device the frequency of the device's steady
+  /// clock, if the image has libc's clock.
+  Error setupLibcClock(GenericPluginTy &Plugin, DeviceImageTy &Image);
+
   /// Synchronize the current thread with the pending operations on the
   /// __tgt_async_info structure. If ReleaseQueue is false, then the
   // underlying queue will not be released. In this case, additional

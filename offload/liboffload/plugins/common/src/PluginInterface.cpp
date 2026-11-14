@@ -279,6 +279,9 @@ GenericDeviceTy::loadBinary(GenericPluginTy &Plugin, StringRef InputTgtImage,
   if (auto Err = setupRPCServer(Plugin, *Image))
     return std::move(Err);
 
+  if (auto Err = setupLibcClock(Plugin, *Image))
+    return std::move(Err);
+
   // Call any global constructors present on the device.
   if (auto Err = callGlobalConstructors(Plugin, *Image))
     return std::move(Err);
@@ -312,6 +315,21 @@ Error GenericDeviceTy::setupRPCServer(GenericPluginTy &Plugin,
   RPCServer = &Server;
   ODBG(OLDT_Init) << "Running an RPC server on device " << getDeviceId();
   return Plugin::success();
+}
+
+Error GenericDeviceTy::setupLibcClock(GenericPluginTy &Plugin,
+                                      DeviceImageTy &Image) {
+  // libc on AMDGPU takes its steady clock to tick at 100 MHz unless the
+  // loader sets __llvm_libc_clock_freq, but the frequency differs between
+  // devices: gfx90a's ticks at 25 MHz, so clock_gettime ran four times slow.
+  constexpr const char *Name = "__llvm_libc_clock_freq";
+  GenericGlobalHandlerTy &Handler = Plugin.getGlobalHandler();
+  uint64_t Frequency = getClockFrequency();
+  if (Frequency == 0 || !Handler.isSymbolInImage(*this, Image, Name))
+    return Plugin::success();
+
+  GlobalTy Global(Name, sizeof(uint64_t), &Frequency);
+  return Handler.writeGlobalToDevice(*this, Image, Global);
 }
 
 Error PinnedAllocationMapTy::insertEntry(void *HstPtr, void *DevAccessiblePtr,
