@@ -1,0 +1,7 @@
+process-foreign-locals.m's worker spawned on the machine's GPU: its foreign
+code's locals whose addresses are taken are on its threads' stacks, in the
+process's code and in a loop under parallel do in a distribute loop's body.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-foreign-locals.m -o %t2
+RUN: %gpu-env %t2 gpu | FileCheck %S/process-foreign-locals.m --match-full-lines --strict-whitespace

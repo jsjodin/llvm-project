@@ -606,9 +606,13 @@ bool ForeignCompiler::Available(const llvm::GlobalValue &value) {
       function && function->isIntrinsic()) {
     return true;
   }
-  if (name.starts_with("merk_device_") || name.starts_with("merk_array_") ||
-      name.starts_with("omp_") || name.starts_with("__kmpc_")) {
+  if (name.starts_with("merk_device_") || name.starts_with("merk_array_")) {
     return true;
+  }
+  // OpenMP's device runtime is in an offload image, not a GPU process's,
+  // whose start object defines only omp_get_device_num.
+  if (name.starts_with("omp_") || name.starts_with("__kmpc_")) {
+    return !TargetInfo::ProcessKernels(module_) || name == "omp_get_device_num";
   }
   if (!available_) {
     LoadAvailable();
@@ -684,7 +688,11 @@ static std::string DeviceGPU(const TargetInfo &target) {
 // the host's headers, for the device's GPU. The
 // device's image has libc and libm for the GPU, whose functions the code calls
 // as the host's headers declare them: not clang's wrappers for the GPU, whose
-// maths functions are ROCm's.
+// maths functions are ROCm's. A GPU process's image has no OpenMP device
+// runtime, so its code is compiled in CUDA mode, where a local whose address
+// is taken stays on the thread's stack: in the default mode clang moves it to
+// memory from __kmpc_alloc_shared, for a parallel region that the function
+// might start, which the image does not have. Foreign code starts none.
 std::vector<std::string> ForeignCompiler::DeviceOptions() const {
   std::vector<std::string> options{"-fopenmp",
       "--offload-arch=" + DeviceGPU(target_), "--offload-device-only", "-nogpulib", "-nogpuinc",
@@ -692,6 +700,9 @@ std::vector<std::string> ForeignCompiler::DeviceOptions() const {
       "-mcode-object-version=" +
           std::to_string(target_.options().codeObjectVersion / 100),
       "-DMERK_DEVICE"};
+  if (TargetInfo::ProcessKernels(module_)) {
+    options.push_back("-fopenmp-cuda-mode");
+  }
   return options;
 }
 
