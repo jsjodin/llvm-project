@@ -27,8 +27,8 @@ config.excludes = ["Inputs", "CMakeLists.txt"]
 
 # MERK_HEAP_CHUNK_BYTES makes every program's heap chunks that size
 # (runtime/heap.cpp): MERK_HEAP_CHUNK_BYTES=64 llvm-lit runs every program
-# with nearly every allocation on the slow path. MERK_GPU_PEER=1 gives GPU
-# processes the routes of direct sends between GPUs (runtime/gpu-processes.cpp,
+# with nearly every allocation on the slow path. MERK_GPU_PEER=1 makes GPU
+# processes send directly to those on other GPUs (runtime/gpu-processes.cpp,
 # PeerWanted). ROCR_VISIBLE_DEVICES and HIP_VISIBLE_DEVICES choose the GPUs
 # the tests may use, as utils/gpu/with-gpus.py sets them: on a machine that
 # others share, a test must not reach the GPUs they use.

@@ -119,11 +119,21 @@ using merkurius::runtime::kRingOfTerms;
 using merkurius::runtime::kRingOfWords;
 using merkurius::runtime::kRingSlots;
 using merkurius::runtime::kTeamsPlace;
+using merkurius::runtime::PeerQueue;
+using merkurius::runtime::PeerQueueSlot;
 using merkurius::runtime::PlaceSlot;
 using merkurius::runtime::PlaceSlots;
 using merkurius::runtime::PlaceTable;
 using merkurius::runtime::ProcessQueue;
 using merkurius::runtime::ProcessQueueSlot;
+using merkurius::runtime::ReturnRing;
+using merkurius::runtime::ReturnRingSlot;
+using merkurius::runtime::RingSlots;
+using merkurius::runtime::SendPool;
+using merkurius::runtime::SendPoolClearBytes;
+using merkurius::runtime::kPeerQueueSlots;
+using merkurius::runtime::kSendPoolBlock;
+using merkurius::runtime::kSendPoolOrders;
 using merkurius::runtime::RegionSlotGeneration;
 using merkurius::runtime::RegionSlotNumber;
 using merkurius::runtime::rpcAttach;
@@ -243,6 +253,15 @@ uint32_t countBlocks{0};
 // From how many bytes a process's worker teams fill and copy for it
 // (PlaceTable's `bulkBytes`, Bulk).
 uint64_t bulkBytes{~uint64_t{0}};
+// For direct sends between GPUs, the peer queue of the process that each
+// wave of the team runs, or null (place.h, PeerQueue); and the GPU's send
+// pool, its bytes, and its return ring, the same for every kernel of the
+// GPU, or null (PlaceTable's `sendPool`, `sendPoolBytes` and `returns`).
+[[clang::loader_uninitialized]] Local<PeerQueue *>
+    placePeerQueues[kMostPlaceWaves];
+SendPool *sendPool{nullptr};
+uint64_t sendPoolBytes{0};
+ReturnRing *returnRing{nullptr};
 
 // Counts blocks of messages that no process holds, if the kernel does.
 void CountBlocks(int64_t change) {
@@ -258,6 +277,8 @@ void CountBlocks(int64_t change) {
 void MakeQueue(PlaceTable *table, uint64_t wave);
 ProcessQueue *OpenQueue(PlaceTable *table, PlaceSlot *slot, uint64_t wave);
 void CloseQueue(ProcessQueue *queue);
+PeerQueue *OpenPeerQueue(PlaceTable *table, PlaceSlot *slot, uint64_t wave);
+void ClosePeerQueue(PeerQueue *queue);
 
 // A process's control block, in its arena, through which it runs its loops
 // across its worker teams (place.h): the counts of the barrier that the
@@ -1243,6 +1264,8 @@ uint64_t LoadSlotWord(uint64_t *word) {
   processWaves[inTeam] = 1;
   ProcessQueue *queue{OpenQueue(table, slot, wave)};
   placeQueues[inTeam] = queue;
+  PeerQueue *peerQueue{OpenPeerQueue(table, slot, wave)};
+  placePeerQueues[inTeam] = peerQueue;
   ProcessControl *control{nullptr};
   if (workers > 0) {
     control = static_cast<ProcessControl *>(Allocate(&arena->bump,
@@ -1283,7 +1306,12 @@ uint64_t LoadSlotWord(uint64_t *word) {
     placeControls[inTeam] = nullptr;
   }
   // Messages sent to it that it did not take go, before what it holds,
-  // once no sender is in flight.
+  // once no sender is in flight; those from other GPUs go back to their
+  // senders' pools.
+  if (peerQueue) {
+    ClosePeerQueue(peerQueue);
+    placePeerQueues[inTeam] = nullptr;
+  }
   CloseQueue(queue);
   placeQueues[inTeam] = nullptr;
   // What the process holds goes, as its arena does, once its workers have
@@ -1657,7 +1685,20 @@ extern "C" void merk_device_place(PlaceTable *table) {
         __scoped_atomic_load_n(
             &table->bulkBytes, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM),
         __ATOMIC_RELAXED);
+    __atomic_store_n(&sendPool,
+        reinterpret_cast<SendPool *>(__scoped_atomic_load_n(
+            &table->sendPool, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)),
+        __ATOMIC_RELAXED);
+    __atomic_store_n(&sendPoolBytes,
+        __scoped_atomic_load_n(
+            &table->sendPoolBytes, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM),
+        __ATOMIC_RELAXED);
+    __atomic_store_n(&returnRing,
+        reinterpret_cast<ReturnRing *>(__scoped_atomic_load_n(
+            &table->returns, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)),
+        __ATOMIC_RELAXED);
     placeQueues[inTeam] = nullptr;
+    placePeerQueues[inTeam] = nullptr;
     MakeQueue(table, wave);
   }
   __gpu_sync_threads();
@@ -2481,14 +2522,19 @@ bool InProcess() {
 
 // The process's route to a mailbox, which the host gave at its first send
 // to it (rpcRoute), on a list in its arena that goes with it: the queue of
-// the mailbox's process and the incarnation it wants there, or no queue,
-// for a send through the host. For its own mailbox, which it receives from,
-// whether the host's ring has the next turn when both have a message.
+// the mailbox's process if it is of this kernel, or its peer queue if it
+// runs on another GPU that this one reaches (place.h, PeerQueue), with the
+// incarnation it wants there; or neither, for a send through the host. For
+// its own mailbox, which it receives from, whether the host's ring has the
+// next turn when it and a queue both have a message, and whether the peer
+// queue has the next turn before the local one.
 struct Route {
   uint64_t handle[5];
   ProcessQueue *queue;
+  PeerQueue *peer;
   uint64_t incarnation;
   uint64_t hostFirst;
+  uint64_t peerFirst;
   Route *next;
 };
 
@@ -2502,6 +2548,7 @@ Route *RouteOf(const uint64_t *handle) {
     }
   }
   ProcessQueue *queue{nullptr};
+  PeerQueue *peer{nullptr};
   uint64_t incarnation{0};
   {
     rpc::Client::Port port{__llvm_rpc_client.open<rpcRoute>()};
@@ -2515,7 +2562,8 @@ Route *RouteOf(const uint64_t *handle) {
     });
     port.recv([&](rpc::Buffer *buffer, uint32_t) {
       queue = reinterpret_cast<ProcessQueue *>(buffer->data[0]);
-      incarnation = buffer->data[1];
+      peer = reinterpret_cast<PeerQueue *>(buffer->data[2]);
+      incarnation = queue ? buffer->data[1] : buffer->data[3];
     });
   }
   auto *route{static_cast<Route *>(merk_device_alloc(sizeof(Route)))};
@@ -2523,8 +2571,10 @@ Route *RouteOf(const uint64_t *handle) {
     route->handle[i] = handle[i];
   }
   route->queue = queue;
+  route->peer = queue ? nullptr : peer;
   route->incarnation = incarnation;
   route->hostFirst = 0;
+  route->peerFirst = 0;
   route->next = own->routes;
   own->routes = route;
   return route;
@@ -2788,19 +2838,472 @@ bool TakeQueued(ProcessQueue *queue, uint64_t *message) {
   return true;
 }
 
-// Sends through the queue of the mailbox's process if it is one of this
-// kernel's: true, or false for a send through the host. `make` copies the
-// message for the queue, before the sender counts itself in, so that a
-// process that ends does not wait for a copy.
-template <typename Make>
-bool DirectSend(const uint64_t *handle, uint64_t kind, Make make) {
-  if (!InProcess()) {
+// Direct sends between the GPUs of a node (docs/INPROGRESS.md, Direct
+// sends between the GPUs of a node): a process sends to one on another GPU
+// that the host gave it a peer route to by copying the message into its
+// GPU's send pool and putting it in the receiver's peer queue, in the
+// receiver's fine-grained memory (place.h, PeerQueue). The receiver copies
+// it into its own memory and puts the copy's block on the sending GPU's
+// return ring, from which a sender of that GPU frees it into the pool. A
+// word goes in the queue's slot itself. The peer queue's words are read and
+// written at system scope: the sender's release writes its copy back from
+// its L2, and the receiver's acquire drops the stale lines of peer memory
+// from its own, both needed (Results of the experiments, 1).
+
+constexpr int kSystem{__MEMORY_SCOPE_SYSTEM};
+
+// The send pool (place.h, SendPool): a buddy allocator over the pool's
+// data, from blocks of kSendPoolBlock bytes, 2^kPoolLeastOrder, up. A block
+// in use starts with its order and the next block of the same copy, which
+// a term's copy chains (PoolMemory); a free one, with the links of its
+// order's free list. The state byte of each kSendPoolBlock bytes is its
+// order plus one where a free block starts, and 0 elsewhere, so that a
+// freed block finds whether its buddy is free, and joins it.
+constexpr uint64_t kPoolLeastOrder{10};
+static_assert(uint64_t{1} << kPoolLeastOrder == kSendPoolBlock);
+
+struct PoolBlock {
+  uint64_t order;
+  PoolBlock *chain;
+};
+
+struct FreePoolBlock {
+  FreePoolBlock *next;
+  FreePoolBlock *prev;
+};
+
+uint8_t *PoolStates(SendPool *pool) {
+  return reinterpret_cast<uint8_t *>(pool + 1);
+}
+
+void PushFree(SendPool *pool, uint64_t offset, uint64_t order) {
+  auto *block{reinterpret_cast<FreePoolBlock *>(pool->data + offset)};
+  auto *head{reinterpret_cast<FreePoolBlock *>(pool->free[order])};
+  block->next = head;
+  block->prev = nullptr;
+  if (head) {
+    head->prev = block;
+  }
+  pool->free[order] = reinterpret_cast<uint64_t>(block);
+  PoolStates(pool)[offset >> kPoolLeastOrder] = static_cast<uint8_t>(order + 1);
+}
+
+void UnlinkFree(SendPool *pool, FreePoolBlock *block, uint64_t order) {
+  if (block->prev) {
+    block->prev->next = block->next;
+  } else {
+    pool->free[order] = reinterpret_cast<uint64_t>(block->next);
+  }
+  if (block->next) {
+    block->next->prev = block->prev;
+  }
+  PoolStates(pool)[(reinterpret_cast<uint64_t>(block) - pool->data) >>
+      kPoolLeastOrder] = 0;
+}
+
+// The first sender of the GPU makes the pool's free lists: its data, after
+// the state bytes, as the largest blocks that fit, each on a multiple of
+// its size from the data's start, as a buddy's address needs.
+void ReadyPool(SendPool *pool, uint64_t poolBytes) {
+  auto base{reinterpret_cast<uint64_t>(pool)};
+  uint64_t data{(base + SendPoolClearBytes(poolBytes) + kSendPoolBlock - 1) &
+      ~(kSendPoolBlock - 1)};
+  uint64_t bytes{(base + poolBytes - data) & ~(kSendPoolBlock - 1)};
+  pool->data = data;
+  pool->dataBytes = bytes;
+  uint64_t offset{0};
+  for (uint64_t order{63 - static_cast<uint64_t>(__builtin_clzll(bytes))};
+      order >= kPoolLeastOrder; --order) {
+    if (offset + (uint64_t{1} << order) <= bytes) {
+      PushFree(pool, offset, order);
+      offset += uint64_t{1} << order;
+    }
+  }
+  pool->ready = 1;
+}
+
+// Frees a block into the pool, joined with its buddy while that is free.
+void PoolFree(SendPool *pool, PoolBlock *block) {
+  uint64_t order{block->order};
+  uint64_t offset{reinterpret_cast<uint64_t>(block) - pool->data};
+  while (order + 1 < kSendPoolOrders) {
+    uint64_t size{uint64_t{1} << order};
+    uint64_t buddy{offset ^ size};
+    if (buddy + size > pool->dataBytes ||
+        PoolStates(pool)[buddy >> kPoolLeastOrder] != order + 1) {
+      break;
+    }
+    UnlinkFree(
+        pool, reinterpret_cast<FreePoolBlock *>(pool->data + buddy), order);
+    offset &= ~size;
+    ++order;
+  }
+  PushFree(pool, offset, order);
+}
+
+// A copy's blocks, the first and those chained to it.
+void FreeCopy(SendPool *pool, PoolBlock *block) {
+  while (block) {
+    PoolBlock *chain{block->chain};
+    PoolFree(pool, block);
+    block = chain;
+  }
+}
+
+// Only the pool's GPU takes its lock, so the device's scope does.
+void LockPool(SendPool *pool) {
+  for (;;) {
+    uint64_t unlocked{0};
+    if (__scoped_atomic_compare_exchange_n(&pool->lock, &unlocked, 1, false,
+            __ATOMIC_ACQUIRE, __ATOMIC_RELAXED, kDevice)) {
+      return;
+    }
+    __builtin_amdgcn_s_sleep(2);
+  }
+}
+
+void UnlockPool(SendPool *pool) {
+  __scoped_atomic_store_n(&pool->lock, 0, __ATOMIC_RELEASE, kDevice);
+}
+
+// Frees the copies that receivers have put on the GPU's return ring. With
+// the pool's lock held, so one sender reads the ring at a time.
+void TakeReturns(SendPool *pool, ReturnRing *ring) {
+  uint64_t slots{__scoped_atomic_load_n(&ring->slots, __ATOMIC_RELAXED, kSystem)};
+  for (;;) {
+    uint64_t head{
+        __scoped_atomic_load_n(&ring->head, __ATOMIC_RELAXED, kSystem)};
+    ReturnRingSlot &slot{RingSlots(ring)[head % slots]};
+    if (__scoped_atomic_load_n(&slot.sequence, __ATOMIC_RELAXED, kSystem) !=
+        head + 1) {
+      return;
+    }
+    __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, kSystem);
+    uint64_t address{
+        __scoped_atomic_load_n(&slot.address, __ATOMIC_RELAXED, kSystem)};
+    __scoped_atomic_store_n(
+        &slot.sequence, head + slots, __ATOMIC_RELEASE, kSystem);
+    __scoped_atomic_store_n(&ring->head, head + 1, __ATOMIC_RELAXED, kSystem);
+    FreeCopy(pool, reinterpret_cast<PoolBlock *>(address));
+  }
+}
+
+// A block of the pool with `bytes` after its header, taking back what
+// receivers have returned first. If the pool has none, the sender waits for
+// receivers to return copies: its messages are in flight, and none goes
+// through the host instead, which would break their order. A message larger
+// than the pool can hold ends the program.
+PoolBlock *PoolAllocate(uint64_t bytes) {
+  SendPool *pool{__atomic_load_n(&sendPool, __ATOMIC_RELAXED)};
+  uint64_t need{bytes + sizeof(PoolBlock)};
+  uint64_t order{
+      64 - static_cast<uint64_t>(__builtin_clzll(need - 1))};
+  order = order < kPoolLeastOrder ? kPoolLeastOrder : order;
+  for (;;) {
+    LockPool(pool);
+    if (!pool->ready) {
+      ReadyPool(pool, __atomic_load_n(&sendPoolBytes, __ATOMIC_RELAXED));
+    }
+    if (order >= kSendPoolOrders || (uint64_t{1} << order) > pool->dataBytes) {
+      UnlockPool(pool);
+      FailWith(2,
+          "a GPU process sent a message of %d bytes to another GPU, more "
+          "than its GPU's send pool of %d bytes can hold "
+          "(MERK_GPU_SEND_POOL_BYTES)",
+          "", static_cast<int64_t>(bytes),
+          static_cast<int64_t>(
+              __atomic_load_n(&sendPoolBytes, __ATOMIC_RELAXED)));
+    }
+    TakeReturns(pool, __atomic_load_n(&returnRing, __ATOMIC_RELAXED));
+    uint64_t found{order};
+    while (found < kSendPoolOrders && !pool->free[found]) {
+      ++found;
+    }
+    if (found < kSendPoolOrders) {
+      auto *free{reinterpret_cast<FreePoolBlock *>(pool->free[found])};
+      UnlinkFree(pool, free, found);
+      uint64_t offset{reinterpret_cast<uint64_t>(free) - pool->data};
+      while (found > order) {
+        --found;
+        PushFree(pool, offset + (uint64_t{1} << found), found);
+      }
+      auto *block{reinterpret_cast<PoolBlock *>(free)};
+      block->order = order;
+      block->chain = nullptr;
+      UnlockPool(pool);
+      return block;
+    }
+    UnlockPool(pool);
+    __builtin_amdgcn_s_sleep(64);
+  }
+}
+
+// Frees a copy that no one will receive, sent to a process that had ended.
+void DiscardCopy(PoolBlock *copy) {
+  if (copy) {
+    SendPool *pool{__atomic_load_n(&sendPool, __ATOMIC_RELAXED)};
+    LockPool(pool);
+    FreeCopy(pool, copy);
+    UnlockPool(pool);
+  }
+}
+
+// Where a copy of a term for another GPU goes: blocks of the send pool,
+// chained to the first, from which its cells are cut. The receiver's code
+// is of another image, as another GPU loads its own.
+constexpr uint64_t kPoolChunkBytes{4096 - sizeof(PoolBlock)};
+
+struct PoolMemory {
+  static constexpr bool kOtherImage{true};
+  PoolBlock *first{nullptr};
+  char *next{nullptr};
+  char *limit{nullptr};
+  void *Allocate(uint64_t bytes) {
+    bytes = (bytes + 7) & ~uint64_t{7};
+    if (static_cast<uint64_t>(limit - next) < bytes) {
+      PoolBlock *block{
+          PoolAllocate(bytes > kPoolChunkBytes ? bytes : kPoolChunkBytes)};
+      if (first) {
+        block->chain = first->chain;
+        first->chain = block;
+      } else {
+        first = block;
+      }
+      next = reinterpret_cast<char *>(block + 1);
+      limit = reinterpret_cast<char *>(block) + (uint64_t{1} << block->order);
+    }
+    void *cell{next};
+    next += bytes;
+    return cell;
+  }
+  [[gnu::always_inline]] void CheckStack() { CheckCopyStack(); }
+  [[noreturn]] void Fail(const char *message, const char *detail) {
+    CopyFailed(message, detail);
+  }
+};
+
+// A message as a peer queue's slot holds it: the message, and the block of
+// the send pool that holds its copy, or null.
+struct PeerCopy {
+  uint64_t message;
+  PoolBlock *copy;
+};
+
+PeerCopy ArrayToPool(const uint64_t *array) {
+  uint64_t words{ArrayWords(array)};
+  PoolBlock *block{PoolAllocate(sizeof(uint64_t) * words)};
+  auto *copy{reinterpret_cast<uint64_t *>(block + 1)};
+  CopyWords(copy, array, words);
+  return {reinterpret_cast<uint64_t>(copy), block};
+}
+
+PeerCopy TermToPool(uint64_t message, const void *typeInfo) {
+  PoolMemory memory;
+  uint64_t copy{merkurius::runtime::CopyTyped(message,
+      merkurius::runtime::Resolve(reinterpret_cast<uint64_t>(typeInfo), nullptr),
+      memory)};
+  return {copy, memory.first};
+}
+
+// Counts a sender into the peer queue if the process it wants runs there:
+// 1; 0 if that process has ended; -1 if it has not yet started. With the
+// queue's closing (ClosePeerQueue), sequentially consistent, as EnterQueue.
+int EnterPeerQueue(PeerQueue *queue, uint64_t incarnation) {
+  __scoped_atomic_fetch_add(&queue->senders, 1, __ATOMIC_SEQ_CST, kSystem);
+  uint64_t state{
+      __scoped_atomic_load_n(&queue->state, __ATOMIC_SEQ_CST, kSystem)};
+  if (state == (incarnation << 1 | 1)) {
+    return 1;
+  }
+  __scoped_atomic_fetch_sub(&queue->senders, 1, __ATOMIC_RELEASE, kSystem);
+  return (state >> 1) < incarnation ? -1 : 0;
+}
+
+// Puts a message in the peer queue at the next position, waiting while its
+// slot still holds the message of a lap before. The release at system scope
+// writes the sender's copy back from its L2 before the receiver sees the
+// slot. The sender writes the slot only once it has seen it free, which
+// the receiver frees after it has read it.
+void PutPeer(PeerQueue *queue, uint64_t message, PoolBlock *copy) {
+  uint64_t position{
+      __scoped_atomic_fetch_add(&queue->tail, 1, __ATOMIC_RELAXED, kSystem)};
+  PeerQueueSlot &slot{queue->slots[position % kPeerQueueSlots]};
+  while (__scoped_atomic_load_n(&slot.sequence, __ATOMIC_RELAXED, kSystem) !=
+      position) {
+    __builtin_amdgcn_s_sleep(8);
+  }
+  __scoped_atomic_store_n(&slot.message, message, __ATOMIC_RELAXED, kSystem);
+  __scoped_atomic_store_n(&slot.copy, reinterpret_cast<uint64_t>(copy),
+      __ATOMIC_RELAXED, kSystem);
+  __scoped_atomic_store_n(&slot.returnTo,
+      copy ? reinterpret_cast<uint64_t>(
+                 __atomic_load_n(&returnRing, __ATOMIC_RELAXED))
+           : 0,
+      __ATOMIC_RELAXED, kSystem);
+  __scoped_atomic_store_n(
+      &slot.sequence, position + 1, __ATOMIC_RELEASE, kSystem);
+}
+
+// Sends to the process of a peer route. A message to a process that has
+// ended goes nowhere, and its copy back into the pool.
+template <typename MakePeer>
+void PeerSend(Route *route, MakePeer makePeer) {
+  PeerQueue *queue{route->peer};
+  PeerCopy copy{makePeer()};
+  for (;;) {
+    int entered{EnterPeerQueue(queue, route->incarnation)};
+    if (entered > 0) {
+      break;
+    }
+    if (entered == 0) {
+      DiscardCopy(copy.copy);
+      return;
+    }
+    __builtin_amdgcn_s_sleep(8);
+  }
+  PutPeer(queue, copy.message, copy.copy);
+  __scoped_atomic_fetch_sub(&queue->senders, 1, __ATOMIC_RELEASE, kSystem);
+}
+
+// Puts a copy that a receiver is done with on its GPU's return ring. The
+// ring has a slot for each block its pool can hold, so it is never full;
+// every GPU's pool has the same bytes, so the receiver's own says how many.
+// The release orders the receiver's loads of the copy before the sender
+// can free it.
+void ReturnCopy(ReturnRing *ring, uint64_t copy) {
+  uint64_t slots{merkurius::runtime::ReturnRingSlots(
+      __atomic_load_n(&sendPoolBytes, __ATOMIC_RELAXED))};
+  uint64_t position{
+      __scoped_atomic_fetch_add(&ring->tail, 1, __ATOMIC_RELAXED, kSystem)};
+  ReturnRingSlot &slot{RingSlots(ring)[position % slots]};
+  while (__scoped_atomic_load_n(&slot.sequence, __ATOMIC_RELAXED, kSystem) !=
+      position) {
+    __builtin_amdgcn_s_sleep(8);
+  }
+  __scoped_atomic_store_n(&slot.address, copy, __ATOMIC_RELAXED, kSystem);
+  __scoped_atomic_store_n(
+      &slot.sequence, position + 1, __ATOMIC_RELEASE, kSystem);
+}
+
+// One look at the process's peer queue: whether the message of the next
+// position has arrived, which it takes, with the copy to return and where.
+// The poll is a relaxed load, and only a message there costs an acquire at
+// system scope, which drops stale lines of peer memory from the L2 (Results
+// of the experiments, 1 and 3).
+bool TakePeer(PeerQueue *queue, uint64_t *message, uint64_t *copy,
+    uint64_t *returnTo) {
+  uint64_t head{__scoped_atomic_load_n(&queue->head, __ATOMIC_RELAXED, kDevice)};
+  PeerQueueSlot &slot{queue->slots[head % kPeerQueueSlots]};
+  if (__scoped_atomic_load_n(&slot.sequence, __ATOMIC_RELAXED, kSystem) !=
+      head + 1) {
     return false;
+  }
+  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, kSystem);
+  *message = __scoped_atomic_load_n(&slot.message, __ATOMIC_RELAXED, kSystem);
+  *copy = __scoped_atomic_load_n(&slot.copy, __ATOMIC_RELAXED, kSystem);
+  *returnTo =
+      __scoped_atomic_load_n(&slot.returnTo, __ATOMIC_RELAXED, kSystem);
+  __scoped_atomic_store_n(&slot.sequence, head + kPeerQueueSlots,
+      __ATOMIC_RELEASE, kSystem);
+  __scoped_atomic_store_n(&queue->head, head + 1, __ATOMIC_RELAXED, kDevice);
+  return true;
+}
+
+// The message from a peer queue as the receiver gets it, copied into its
+// own memory, and the sender's copy returned: an array as the host's ring
+// gives one (TakeArrayFromHost), a term by its type_info into the arena.
+uint64_t DeliverPeer(uint64_t kind, uint64_t message, uint64_t copy,
+    uint64_t returnTo, const void *typeInfo) {
+  uint64_t result{message};
+  if (kind == kRingOfArrays) {
+    auto *from{reinterpret_cast<const uint64_t *>(message)};
+    uint64_t words{ArrayWords(from)};
+    auto *array{
+        static_cast<uint64_t *>(merk_device_alloc(sizeof(uint64_t) * words))};
+    CopyWords(array, from, words);
+    result = reinterpret_cast<uint64_t>(array);
+  } else if (kind == kRingOfTerms) {
+    ArenaMemory memory;
+    result = merkurius::runtime::CopyTyped(message,
+        merkurius::runtime::Resolve(
+            reinterpret_cast<uint64_t>(typeInfo), nullptr),
+        memory);
+  }
+  if (copy) {
+    ReturnCopy(reinterpret_cast<ReturnRing *>(returnTo), copy);
+  }
+  return result;
+}
+
+// As the process of the slot starts: its peer queue opens, for its
+// incarnation, if the kernel has peer queues. The queue is not cleared:
+// the last process of the slot, of this kernel or an earlier one, left it
+// empty as it closed.
+PeerQueue *OpenPeerQueue(PlaceTable *table, PlaceSlot *slot, uint64_t wave) {
+  uint64_t queues{__scoped_atomic_load_n(
+      &table->peerQueues, __ATOMIC_RELAXED, kSystem)};
+  if (!queues) {
+    return nullptr;
+  }
+  auto *queue{reinterpret_cast<PeerQueue *>(queues) + wave};
+  uint64_t incarnation{
+      __scoped_atomic_load_n(&slot->incarnation, __ATOMIC_RELAXED, kSystem)};
+  __scoped_atomic_store_n(
+      &queue->state, incarnation << 1 | 1, __ATOMIC_SEQ_CST, kSystem);
+  return queue;
+}
+
+// As the process ends: its peer queue closes, and what it holds goes back
+// to the senders' pools, while senders in flight finish, as a full slot
+// makes one wait for the receiver, and once they have.
+void ClosePeerQueue(PeerQueue *queue) {
+  __scoped_atomic_fetch_and(&queue->state, ~uint64_t{1}, __ATOMIC_SEQ_CST,
+      kSystem);
+  auto drain{[&]() {
+    uint64_t message{0};
+    uint64_t copy{0};
+    uint64_t returnTo{0};
+    while (TakePeer(queue, &message, &copy, &returnTo)) {
+      if (copy) {
+        ReturnCopy(reinterpret_cast<ReturnRing *>(returnTo), copy);
+      }
+    }
+  }};
+  for (;;) {
+    drain();
+    if (__scoped_atomic_load_n(&queue->senders, __ATOMIC_SEQ_CST, kSystem) ==
+        0) {
+      break;
+    }
+    __builtin_amdgcn_s_sleep(1);
+  }
+  drain();
+}
+
+// How a send went: through the host, through the queue of a process of the
+// kernel, or through a peer queue to another GPU.
+enum class Sent { kHost, kLocal, kPeer };
+
+// Sends through the queue of the mailbox's process if it is one of this
+// kernel's, or its peer queue if it runs on another GPU that the host gave
+// a route to, or else says to send through the host. `make` copies the
+// message for the queue, and `makePeer` into the send pool for the peer
+// queue, before the sender counts itself in, so that a process that ends
+// does not wait for a copy.
+template <typename Make, typename MakePeer>
+Sent DirectSend(
+    const uint64_t *handle, uint64_t kind, Make make, MakePeer makePeer) {
+  if (!InProcess()) {
+    return Sent::kHost;
   }
   Route *route{RouteOf(handle)};
   ProcessQueue *queue{route->queue};
   if (!queue) {
-    return false;
+    if (route->peer) {
+      PeerSend(route, makePeer);
+      return Sent::kPeer;
+    }
+    return Sent::kHost;
   }
   uint64_t message{make()};
   for (;;) {
@@ -2811,7 +3314,7 @@ bool DirectSend(const uint64_t *handle, uint64_t kind, Make make) {
     // A message to a mailbox that has closed goes nowhere.
     if (entered == 0) {
       Discard(kind, message);
-      return true;
+      return Sent::kLocal;
     }
     // Its process is about to start: the host has set its slot running.
     __builtin_amdgcn_s_sleep(8);
@@ -2819,11 +3322,12 @@ bool DirectSend(const uint64_t *handle, uint64_t kind, Make make) {
   __scoped_atomic_store_n(&queue->kind, kind, __ATOMIC_RELAXED, kDevice);
   Put(queue, message);
   __scoped_atomic_fetch_sub(&queue->senders, 1, __ATOMIC_RELEASE, kDevice);
-  return true;
+  return Sent::kLocal;
 }
 
 bool DirectSendWord(const uint64_t *handle, uint64_t message) {
-  return DirectSend(handle, kRingOfWords, [&]() { return message; });
+  return DirectSend(handle, kRingOfWords, [&]() { return message; },
+             [&]() { return PeerCopy{message, nullptr}; }) != Sent::kHost;
 }
 
 // Takes the oldest message of the process's own mailbox from its queue or
@@ -2843,10 +3347,24 @@ int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
     return -1;
   }
   ProcessQueue *own{placeQueues[__gpu_thread_id_x() / __gpu_num_lanes()]};
+  PeerQueue *peer{placePeerQueues[__gpu_thread_id_x() / __gpu_num_lanes()]};
   Route *route{RouteOf(handle)};
   if (!own || route->queue != own) {
     return -1;
   }
+  // One look at the peer queue, if the process has one.
+  auto fromPeer{[&]() {
+    uint64_t queued{0};
+    uint64_t copy{0};
+    uint64_t returnTo{0};
+    if (!peer || !TakePeer(peer, &queued, &copy, &returnTo)) {
+      return false;
+    }
+    *message = DeliverPeer(kind, queued, copy, returnTo, typeInfo);
+    route->hostFirst = 1;
+    route->peerFirst = 0;
+    return true;
+  }};
   RingEntry *entry{RingOf(handle, kind)};
   if (!entry) {
     ClosedMailbox();
@@ -2862,10 +3380,18 @@ int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
       route->hostFirst = 0;
       return 1;
     }
+    bool peerFirst{route->peerFirst != 0};
+    if (peerFirst && fromPeer()) {
+      return 1;
+    }
     uint64_t queued{0};
     if (TakeQueued(own, &queued)) {
       *message = Deliver(kind, queued);
       route->hostFirst = 1;
+      route->peerFirst = 1;
+      return 1;
+    }
+    if (!peerFirst && fromPeer()) {
       return 1;
     }
     if (hostLook && !route->hostFirst && fromHost(message)) {
@@ -2991,13 +3517,20 @@ void SendArray(const uint64_t *handle, uint64_t key, const uint64_t *array) {
     TeamSend(handle, reinterpret_cast<uint64_t>(array));
     return;
   }
-  if (DirectSend(handle, kRingOfArrays, [&]() {
+  Sent sent{DirectSend(
+      handle, kRingOfArrays,
+      [&]() {
         return kMoves ? MovedArrayForQueue(array) : ArrayForQueue(array);
-      })) {
+      },
+      [&]() { return ArrayToPool(array); })};
+  if (sent == Sent::kLocal) {
     return;
   }
-  SendArrayThroughHost(handle, key, array);
-  // Through the host, a moved array is copied, and goes once it is.
+  if (sent == Sent::kHost) {
+    SendArrayThroughHost(handle, key, array);
+  }
+  // Through the host or to another GPU, a moved array is copied, and goes
+  // once it is.
   if (kMoves && Movable(array)) {
     merk_device_free(const_cast<uint64_t *>(array));
   }
@@ -3070,8 +3603,21 @@ void SendTerm(const uint64_t *handle, uint64_t key, uint64_t message,
   }
   uint64_t (*forQueue)(uint64_t, const void *){
       kMoves ? TermForQueue<MovingMemory> : TermForQueue<DetachedMemory>};
-  if (DirectSend(handle, kRingOfTerms,
-          [&]() { return forQueue(message, typeInfo); })) {
+  Sent sent{DirectSend(
+      handle, kRingOfTerms, [&]() { return forQueue(message, typeInfo); },
+      [&]() {
+        if (!kMoves) {
+          return TermToPool(message, typeInfo);
+        }
+        // The moved arrays are copied from the group that they now are
+        // in, which goes once they are, as through the host.
+        auto *envelope{reinterpret_cast<uint64_t *>(
+            TermForQueue<MovingMemory>(message, typeInfo))};
+        PeerCopy copy{TermToPool(*envelope, typeInfo)};
+        FreeDetached(BlockOf(envelope)->leader);
+        return copy;
+      })};
+  if (sent != Sent::kHost) {
     return;
   }
   if (!kMoves || !InProcess()) {
