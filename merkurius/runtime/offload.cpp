@@ -791,8 +791,8 @@ unsigned HandleOpcode(void *raw, unsigned) {
   case rpcRoute:
     // Words 0 and 1: the queue of a process of the same kernel and its
     // incarnation. Words 2 and 3: with the peer path, a process's peer queue
-    // on another GPU and its incarnation (place.h, PeerQueue), which the
-    // device does not use yet, sending through the host.
+    // on another GPU and its incarnation (place.h, PeerQueue), through
+    // which the device then sends directly (device/device.cpp, PeerSend).
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
       std::uint64_t incarnation{0};
       std::uint64_t peerQueue{0};

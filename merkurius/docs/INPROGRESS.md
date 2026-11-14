@@ -5887,16 +5887,16 @@ queue's slots are laid out. 512 B costs the same as 8 B.
      as the probes found.
 3. The host's side: per-GPU send pools, peer-queue tables and return lists;
    `PlaceRoute` answers peer; `MERK_GPU_PEER`. *Done 2026-11-14, behind
-   `MERK_GPU_PEER=1`, off by default; the device ignores the routes until
-   step 4, so every message still goes through the host:*
+   `MERK_GPU_PEER=1`, off by default. As step 4 left them:*
    - *Peer queues* (place.h, `PeerQueue`): one per slot, in the receiving
-     GPU's fine-grained memory, 64 entries of the message, its bytes and
-     `returnTo`, the sending GPU's return ring. A full queue makes the
-     sender wait; there is no spill list on another GPU.
+     GPU's fine-grained memory, 64 entries of the message, the copy to
+     give back and `returnTo`, the sending GPU's return ring. A full queue
+     makes the sender wait; there is no spill list on another GPU.
    - *A send pool per GPU,* 64 MiB of ordinary device memory
-     (`MERK_GPU_SEND_POOL_BYTES`). The host clears its first 4 KiB
-     (`kSendPoolHeaderBytes`) for step 4's allocator. *A return ring per
-     GPU,* 4096 entries in fine-grained memory.
+     (`MERK_GPU_SEND_POOL_BYTES`, from 1 MiB). The host clears its header
+     and state bytes (`SendPoolClearBytes`), 64 KiB for 64 MiB, for step
+     4's allocator. *A return ring per GPU,* in fine-grained memory, with
+     an entry for each 1 KiB of the pool, 65536 (1 MiB) for 64 MiB.
    - The new `PlaceTable` fields `peerQueues`, `sendPool`,
      `sendPoolBytes` and `returns` give them to the kernel; they are 0
      without the peer path.
@@ -5925,7 +5925,7 @@ queue's slots are laid out. 512 B costs the same as 8 B.
    stale sender drops its message, as a send to an ended process does in
    Erlang and in DirectSend. A receiver may also return a copy to a send
    pool after the sender ended. What a GPU keeps:
-   - its send pool (64 MiB by default) and return ring (64 KiB), from its
+   - its send pool (64 MiB by default) and return ring (1 MiB), from its
      first kernel with the peer path;
    - a block of peer queues for each kernel it ever ran at the same time
      as another, each of the most slots such a kernel had. A block is
@@ -5941,7 +5941,107 @@ queue's slots are laid out. 512 B costs the same as 8 B.
    matters.
 4. The device's side: the peer route kind, sending into the pool and the
    peer queue, the peer queue in `DirectReceive`, pulling and returning.
-   Words and arrays first, then terms by `type_info`.
+   Words and arrays first, then terms by `type_info`. *Done 2026-11-14, for all three
+   kinds, behind `MERK_GPU_PEER=1`* (device/device.cpp, from "Direct sends
+   between the GPUs of a node"):
+   - *Routes.* `RouteOf` reads the peer queue and incarnation from words 2
+     and 3 of the RPC's reply. `DirectSend` sends through the local queue,
+     the peer queue (`PeerSend`) or says to go through the host. A
+     mailbox's route is fixed for the sender's life, so its order holds.
+   - *Sending.* A word goes in the peer queue's slot. An array is copied
+     into a block of the send pool (`ArrayToPool`), and a term by its
+     `type_info` into chained blocks of it (`PoolMemory`), as for a copy
+     to the host: the receiver's code is of another image. A send that
+     moves its message copies it and frees the original, as through the
+     host. The sender counts itself in (`EnterPeerQueue`), waits while the
+     slot is full, and its release at system scope writes its copy back
+     from its L2 before the slot shows it (`PutPeer`).
+   - *The pool's allocator* is a buddy allocator from 1 KiB blocks, with a
+     state byte per block and a spin lock at the device's scope, since only
+     the pool's GPU allocates and frees. The first sender makes the free
+     lists. Each allocation first frees what receivers have returned. A
+     sender whose pool has no block waits for returns. A message larger
+     than the pool can hold ends the program with an error naming
+     `MERK_GPU_SEND_POOL_BYTES`.
+   - *Receiving.* `DirectReceive` looks at the peer queue every poll, with
+     a relaxed load, and takes turns with the local queue. A message there
+     costs an acquire at system scope. An array is copied into a new array
+     (the wave's lanes do it, or the worker teams), and a term by its
+     `type_info` into the arena, as from the host. The receiver then puts
+     the sender's block on the sending GPU's return ring.
+   - *The return ring has a slot for every block the pool can hold,* so a
+     receiver never waits on it. That matters: a receiver waiting for a
+     sender GPU that no longer sends would never be woken. All GPUs' pools
+     have the same size, so a receiver sizes the ring by its own.
+   - *Closing.* `ClosePeerQueue` takes what is queued, and gives each copy
+     back, until no sender is in flight. A sender waiting on a full slot
+     thus gets through, and finds the queue closed. A sender that finds the
+     process ended frees its copy into its own pool (`DiscardCopy`).
+   - *The queue's state is one word,* the incarnation shifted left with 1
+     while the process runs. With `closed` and `incarnation` as two words, as
+     the local queue has them, a stale sender could slip in between the
+     two stores of the next process's `OpenQueue` and reach it. The local
+     queue keeps that small window (Open, below).
+
+   Checked on r11 (ROCR GPUs 1,3, and 2,3 for words and terms), by hand,
+   with programs not kept: every word, array and term arrived right, in
+   chains of relays alternating between the GPUs, in ping and stream. With
+   `MERK_CHECK_DEVICE_MEMORY=1` no block was left, through these cases, at
+   the default pool and at 1 MiB with 8 KiB and 128 KiB arrays: a source
+   that ends before its sink takes its arrays; 3000 arrays sent to a sink
+   that had ended, more than the pool holds; a sink that ends with arrays
+   queued and its source waiting on a full queue; then 3000 arrays through
+   a live sink. The lit suite passes with and without `MERK_GPU_PEER=1`.
+
+   **The idle waves' polls emptied the L2.** Measuring a hop showed a
+   word send to the queue of a process of the same kernel taking 28 µs, the
+   route's lookup in a list of two 10 µs. Every idle wave of a kernel, 1248
+   on a gfx90a GCD, polled its slot and the table's `end` with acquires at
+   system scope, each of which invalidates the whole L2 on gfx90a (memory
+   note on system-scope atomics). They now poll relaxed, and take the
+   acquire only once the slot changes (`PollSlotWord`). A look at the
+   host's ring does the same. The table and the rings are in host memory,
+   which a relaxed load reads fresh. The send fell to about 9 µs. This
+   speeds up every GPU process, not just the peer path.
+
+   Measured on ROCR GPUs 1,3, the host threads on the other socket, with
+   chains of 8 relays: host, then GPU 0 and GPU 1 alternating (`AB*4`), or
+   all on GPU 0 (`AA*4`), then the host. µs per message.
+
+   | Chain, message | Ping, through the host | Ping, direct | Stream, through the host | Stream, direct |
+   | --- | --- | --- | --- | --- |
+   | `AB*4`, word | 404 | 182 | 66.5 | 51.7 |
+   | `AA*4`, word | 182 | 172 | 66.1 | 53.2 |
+   | `AB*4`, term of 6 words | 1363 | 858 | 200 | 127 |
+   | `AB*4`, array of 1 word | 887 | 442 | 160 | 100 |
+   | `AB*4`, array of 4096 words | 959 | 649 | 280 | 121 |
+   | `AB*4`, array of 65536 words | 2225 | 3223 | 1545 | 577 |
+   | `AB*4`, array of 2^20 words | 34349 | 50092 | 28572 | 15912 |
+
+   A host to relay to host round trip costs about 85 µs, so a hop between
+   the GPUs costs about 14 µs for a word, against 45 µs through the host,
+   and the same as a hop within a GPU. Before the polls were relaxed, the
+   same chains took 576 µs a word ping direct and 1203 through the host.
+
+   What is left:
+   - *Large arrays are slower direct in ping,* 50 ms against 34 ms at 2^20
+     words: the sender copies the array into its pool with its wave, and
+     the receiver pulls it with its wave, about 0.8 GB/s (Results of the
+     experiments, 2). Stream is faster direct, as hops overlap. Step 6's
+     copy engine, or the receiver's worker teams, is needed before the
+     path is on by default, and an array the sender moves could go into
+     the pool without a copy.
+   - *Each array or term costs an acquire at system scope on each side*
+     (`TakePeer`, and `TakeReturns` when a copy came back) and a release on
+     each. A copy of 1 word costs about 50 µs a hop, against 14 µs for a
+     word. Small messages inline in the slot, as experiment 4 suggested,
+     would avoid the pull and the return.
+   - *A sender waits* while the receiver's queue is full or its pool has
+     no block. So two processes that each fill the other's queue, or the
+     other's GPU's pool, without receiving can deadlock, as a send through
+     the host never does. A term whose copy needs more blocks than the
+     pool holds, though each fits, waits forever.
+   - *The lock of the pool* serializes every sender of a GPU.
 5. Tests: a lit test with two GPUs visible (a `two-gpus` feature in
    lit.cfg.py), with order, closed mailboxes, a sender that ends before its
    messages are taken, and a full pool. Then benchmarks/gpu-pairs again.
@@ -5949,6 +6049,11 @@ queue's slots are laid out. 512 B costs the same as 8 B.
 
 **Open.**
 
+- The local queue's `OpenQueue` stores `closed` and then `incarnation`, so
+  a sender to the slot's previous process that looks between the two
+  stores finds the queue open at its incarnation and puts its message
+  there, for the new process. The peer queue keeps both in one word (step
+  4); the local queue could too.
 - Whether a process that only receives from peers should look at the host's
   ring less often.
 - The send pool's size, and whether it should grow on demand.
