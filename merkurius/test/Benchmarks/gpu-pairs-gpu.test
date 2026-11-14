@@ -1,0 +1,9 @@
+Arrays through relays, GPU processes that forward them
+(benchmarks/gpu-pairs/gpupairs.m), on 1 MiB a measurement: every array comes
+back with its size and last element, on one GPU, and on two when the test
+sees two.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/gpu-pairs/gpupairs.m -o %t
+RUN: %gpu-env timeout -k 1 300 %t 1 | awk '{ n++; if ($5 != $7) w++ } END { print n " rows, " w + 0 " wrong" }' | FileCheck %s --match-full-lines
+CHECK: {{36|54}} rows, 0 wrong

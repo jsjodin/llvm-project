@@ -5570,6 +5570,8 @@ Not claimed: RCCL's bandwidth for large collectives, tuned for these machines.
 
 1. **Direct paths.** Peer access between GPUs of a node, and sends from GPU memory
    to the NIC (GPU-direct RDMA), so a message need not go through host memory.
+   Between the GPUs of a node, designed in Direct sends between the GPUs of a
+   node.
 2. **A model.** Places (GPUs, NUMA domains, NICs), links with bandwidth and
    latency, and which NIC belongs to which GPU. On Linux,
    `/sys/class/kfd/kfd/topology/nodes/*/io_links` gives link types and weights.
@@ -5609,6 +5611,200 @@ Not claimed: RCCL's bandwidth for large collectives, tuned for these machines.
 - How a program sees the topology: not at all, as hints to spawn, or as places it
   can name.
 - Whether the model also covers nodes, where the network's topology matters.
+
+## Direct sends between the GPUs of a node
+
+Proposed 2026-11-14. Nothing is built, and it is not agreed. This section
+details step 1 of Topology (direct paths) for GPU processes on the GPUs of
+one node. Between nodes the same route is planned to end at a proxy for the
+NIC instead of at a queue on another GPU. That is later work, and is not
+designed here.
+
+**Today.** A GPU process's route (`rpcRoute`, `PlaceRoute` in
+gpu-processes.cpp) is direct only to a process of its own kernel. Any other
+send goes through the host: an RPC call, a copy into host memory, the host's
+queue, then a copy into the receiving GPU's ring. benchmarks/gpu-pairs
+measured this on r11 (gfx90a, 8 MI250 GCDs) on 2026-11-14:
+
+- One hop between GPUs costs about 80 µs at 1 word, and 0.7 to 1 GB/s for
+  large arrays. That is a host round trip's speed, because it is one.
+- One hop within a GPU costs about 65 µs at 1 word, then about 90 MB/s. A
+  relay with no worker teams copies the array for the queue with one lane.
+
+**What the hardware gives.** HIP probes on the same machine (2026-11-14,
+r11's GPUs in ROCR numbering):
+
+| Pair | Copy engine | Kernel stores into the peer | Kernel loads from the peer |
+| --- | --- | --- | --- |
+| 2,3, one package | 50 GB/s | 151 GB/s | 145 GB/s |
+| 1,3 and 1,2, two packages | 42 GB/s | 38 GB/s | 37.5 GB/s |
+| 1,7, two packages | 50 GB/s | 71 GB/s | 75 GB/s |
+
+These were measured at 32 to 128 MiB with all of the GPU's units. A flag
+between two running kernels takes 1.2 to 1.35 µs one way.
+
+The coherence rules found:
+
+- A word in the receiver's coarse-grained memory, written by a peer, is never
+  seen by a poller there. The writer's L2 keeps the store, because it caches
+  peer coarse-grained memory as non-coherent.
+- With the flag in fine-grained memory, data the peer wrote into the
+  receiver's coarse-grained memory (its heap) was all seen after an acquire,
+  at system or device scope. No stale words were found at 512 or 65536
+  words, whether the data was coarse- or fine-grained.
+
+So a payload can live in ordinary device memory, but every word that
+signals must be fine-grained.
+
+**Already in place.**
+
+- Device `malloc` memory and `DeviceAllocate`'s memory come from the plugin's
+  coarse-grained pool. The plugin's `allocate` already lets every GPU agent
+  that can reach that pool access it. So a GPU can load and store another
+  GPU's heap with no new mapping.
+- The plugin has no kind of allocation for fine-grained device memory.
+  `TARGET_ALLOC_HOST` and `TARGET_ALLOC_SHARED` are host memory. The pools
+  are there (`FineGrainedMemoryPools`).
+
+### The design
+
+**1. A third route kind.** A route is local (a process of this kernel),
+host, or *peer*: a process on another GPU of this node that this GPU can
+reach. `PlaceRoute` answers with the receiving process's peer queue and
+incarnation. The sender keeps the route for its life, as now, so one
+sender's messages to one mailbox all take one path, and their order holds. A
+mailbox has one type, so its messages are of one kind. That lets a route be
+chosen by kind: kinds the peer path does not carry yet keep going through
+the host for that mailbox, and order still holds. With `MERK_GPU_PEER=0`, or
+where the plugin finds no peer access, a peer route is a host route, as on
+gfx1030 with one GPU.
+
+**2. A peer queue for each process, separate from its local queue.** The
+local `ProcessQueue` stays as it is, with device-scope atomics, which are
+cheap. The peer queue has the same ring and the same senders, closed and
+incarnation protocol, but:
+
+- It is allocated in fine-grained memory on the receiver's GPU.
+- Its atomics and its sequence words are system scope.
+
+The receiver polls it with a relaxed load of the head slot's sequence. That
+avoids a system-scope acquire on every poll, which on gfx90a invalidates all
+of L2 (memory note on system-scope atomics). It takes an acquire only when a
+message is there. `DirectReceive` then has three sources: the local queue
+each poll, the peer queue each poll (one relaxed load), and the host's ring
+every eighth poll. As now, sources that both have messages take turns.
+
+**3. The receiver pulls the payload.** A message word stays what it is today
+in the local queue: the address of the sender's copy, which `make()` makes.
+For a peer route that copy is in a per-GPU *send pool* (point 4). The
+sender:
+
+1. makes its copy in the send pool;
+2. does a system-scope release, which writes its L2 back so that a peer's
+   loads see the copy;
+3. puts the address and the kind in the receiver's peer queue.
+
+The receiver, at its receive:
+
+1. allocates in its own heap, then loads the payload from the sender's pool,
+   which is what `Deliver` turns into its own block. It loads with its
+   worker teams (`Bulk`) when it has them, otherwise with the wave's lanes.
+2. puts the address back on the sender GPU's return list, a fine-grained
+   lock-free stack. The sender frees returned copies on its next send.
+
+Why pull, not push:
+
+- Device `malloc` cannot allocate on another GPU. With pull, allocation is
+  always local.
+- The payload needs no landing buffers to size in advance.
+- In-flight messages hold the sender's memory, as the local queue does now,
+  so flow control comes from the send pool's size.
+- Terms (`kRingOfTerms`) can later be copied by their `type_info` straight
+  from the sender's block, the copier reading over the link. There is no
+  extra format.
+
+Small arrays and words cost one link crossing for the post, about 1.2 µs,
+plus the receiver's loads. The return is off the critical path.
+
+**4. A send pool for each GPU, not each kernel.** A message can outlive its
+sender's process and kernel: a receiver may take it long after the sender
+ends. So the sender's copy cannot live in the sender kernel's heap or arena,
+which the host takes back when the kernel ends.
+
+- The host allocates the pool when the GPU first runs processes, keeps it
+  for the program's life, and frees it at exit. It is coarse-grained device
+  memory on the sender's GPU, which peers can reach.
+- A device-side allocator manages it, like the large-block cache.
+- The return list is in fine-grained memory beside it.
+- A sender whose pool is full frees what has been returned, and waits if
+  nothing has. It never falls back to the host, which would break order.
+- Peer queues likewise last the program, one table per GPU, indexed by
+  kernel slot and process slot and checked by incarnation. A sender never
+  writes into memory that a kernel's end has freed.
+
+**5. Memory kinds.** Add a kind of allocation to the plugin for fine-grained
+device memory: an `olMemAlloc` type in this fork, or an entry point of the
+runtime's own over the plugin's `FineGrainedMemoryPools`. It is needed for
+the peer queues and the return lists. Everything else stays coarse-grained.
+
+**6. Copy engine for large arrays, if pulling is too slow.** If a single
+wave pulls far below the link (experiment 2), the receiver asks the host to
+make the copy instead: one RPC, then `hsa_amd_memory_async_copy` from the
+sender's pool to the receiver's new block, about 42 to 50 GB/s. The host
+stays the control plane, and the data never passes through host memory.
+This is the same split as the copy engine used for array sends to the host,
+with a crossover chosen per GPU, likely about 1 MiB. Within a package,
+kernel loads (145 GB/s) beat the copy engine (50 GB/s), so the crossover
+may differ by pair.
+
+**What it should give.** Estimated from the probes, not measured:
+
+- A word or a small array goes from 80 µs a hop to a few µs.
+- A 512 KiB array goes from about 650 µs to about 15 µs across packages,
+  or 5 µs within one, if the receiver's loads reach the link's speed.
+- Large arrays go from about 1 GB/s to tens of GB/s.
+
+### Experiments first, with HIP probes (scratchpad `peer.hip` grows these)
+
+1. **Pull coherence with reuse.** A writes a buffer in its own coarse-grained
+   memory, releases at system scope, and posts a fine-grained flag. B loads
+   the buffer after an acquire. A reuses the same buffer each round, which
+   is the case where B's L2 may hold old lines of peer memory. Measure with
+   B's acquire at device scope and at system scope.
+2. **Pull bandwidth by one wave, one team and N teams,** from peer memory,
+   at 4 KiB to 8 MiB. This settles the crossover for point 6.
+3. **The cost of a relaxed system-scope poll of local fine-grained memory**
+   while the wave does other work, against today's ring poll.
+4. **Store bandwidth by the same units**, in case push for small messages
+   into a fine-grained inline area beats pull's dependent load.
+
+### Steps
+
+0. **Copy with the wave's lanes for the local queue.** This fixes `A-A`'s
+   90 MB/s. It is independent of the rest and helps the peer path too.
+1. The experiments above.
+2. Fine-grained device memory in the plugin (point 5).
+3. The host's side: per-GPU send pools, peer-queue tables and return lists;
+   `PlaceRoute` answers peer; `MERK_GPU_PEER`.
+4. The device's side: the peer route kind, sending into the pool and the
+   peer queue, the peer queue in `DirectReceive`, pulling and returning.
+   Words and arrays first, then terms by `type_info`.
+5. Tests: a lit test with two GPUs visible (a `two-gpus` feature in
+   lit.cfg.py), with order, closed mailboxes, a sender that ends before its
+   messages are taken, and a full pool. Then benchmarks/gpu-pairs again.
+6. The copy-engine path for large arrays, if experiment 2 calls for it.
+
+**Open.**
+
+- Whether a process that only receives from peers should look at the host's
+  ring less often.
+- The send pool's size, and whether it should grow on demand.
+- How processes whose GPUs have no link between them (Frontier's GPU pairs
+  with none) route: through the host, or relayed through a GPU that has
+  links to both. That belongs with the model of Topology, step 2.
+- How the user's note on nodes, a NIC on PCIe Gen4 ESM to one GPU, fits:
+  the route's end becomes a proxy that posts the NIC's operations, while
+  the GPUs keep the same send, queue and pool protocol.
 
 ## The receive goal: later
 
