@@ -5414,9 +5414,12 @@ as every process of a GPU allocates from that GPU's heap.
    - *Tested* by `process-bulk.m`, every width and a fill that starts
      within a word; breaking the workers' loop on purpose changed every
      large array's sum, so each case goes through them.
-   - One run each, not a measurement: the pipeline at 2^20 words and 16
-     rounds went from 3.7 ms to 569 µs a frame, one process from 8.6 ms
-     to 452 µs; at 2^16, 259 to 70 µs and 573 to 75.
+   - Measured (design document, Measurements, A pipeline of GPU processes,
+     With worker teams filling and copying): one process up to 19 times
+     faster, now 1.05 to 1.15 times HIP from 2^16 words at 256 rounds and
+     more; the pipeline up to 5.4 times faster, but 1.04 to 1.5 times one process
+     from 2^16 words up, not yet explained (each stage fills on a third
+     of the teams, which is likely a part).
 
 ## Topology: GPUs, NUMA domains and NICs within a node
 
