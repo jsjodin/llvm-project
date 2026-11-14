@@ -9,13 +9,15 @@
 #   compare-c.sh [build-dir] [offload-arch] [rounds]
 #
 # build-dir is the Merkurius build, ../../../../build-merk by default;
-# offload-arch is gfx1030 by default; rounds, each a run of all three, 5 by
-# default. LIFE_SIZE and LIFE_STEPS pass through. On a machine that others
-# share, run it through utils/gpu/with-gpus.py.
+# offload-arch is this machine's GPU by default, as amdgpu-arch finds it;
+# rounds, each a run of all three, 5 by default. LIFE_SIZE and LIFE_STEPS
+# pass through. On a machine that others share, run it through
+# utils/gpu/with-gpus.py.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 build="$(cd "${1:-$here/../../../../build-merk}" && pwd)"
-arch="${2:-gfx1030}"
+arch="${2:-$("$build/bin/amdgpu-arch" 2>/dev/null | head -n1)}"
+[[ -n "$arch" ]] || { echo "$0: found no GPU; give its offload-arch" >&2; exit 1; }
 rounds="${3:-5}"
 out="${LIFE_OUT:-$(mktemp -d)}"
 omp="$build/runtimes/runtimes-bins/openmp/runtime/src"

@@ -105,7 +105,9 @@ $(addprefix llvm-,$(PROGRAMS)): llvm-%: $(DEMO_DIR)%.m | check-merkc
 # GPU to GPU: two modules, and two nodes to run.
 GPU_DIR := $(DEMO_DIR)gpu-to-gpu/
 GPU_SOURCES := $(GPU_DIR)gpu_to_gpu.m $(GPU_DIR)demo_node.m
-ARCH ?= gfx1030
+# This machine's GPU, as amdgpu-arch beside merkc, or on the PATH, finds it.
+ARCH ?= $(firstword $(shell $(dir $(MERKC))amdgpu-arch 2>/dev/null || \
+          amdgpu-arch 2>/dev/null))
 PORT ?= 47100
 # Where libomp is in the build tree that merkc is in.
 LLVM_BUILD := $(abspath $(dir $(MERKC))..)

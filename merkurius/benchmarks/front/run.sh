@@ -5,14 +5,15 @@
 #   run.sh [build-dir] [offload-arch]
 #
 # build-dir is the Merkurius build, ../../../../build-merk by default;
-# offload-arch is the GPU's, such as gfx1030, and without it the GPU build
-# is left out. FRONT_SIZE, FRONT_STEPS and FRONT_SUBSTEPS pass through to
-# the program; OMP_NUM_THREADS sets the host's threads. On a machine that
-# others share, run it through utils/gpu/with-gpus.py.
+# offload-arch is the GPU's, this machine's by default, as amdgpu-arch finds
+# it, and without one the GPU build is left out. FRONT_SIZE, FRONT_STEPS and
+# FRONT_SUBSTEPS pass through to the program; OMP_NUM_THREADS sets the
+# host's threads. On a machine that others share, run it through
+# utils/gpu/with-gpus.py.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 build="$(cd "${1:-$here/../../../../build-merk}" && pwd)"
-arch="${2:-}"
+arch="${2:-$("$build/bin/amdgpu-arch" 2>/dev/null | head -n1)}"
 out="${FRONT_OUT:-$(mktemp -d)}"
 merkc="$build/bin/merkc"
 # libomp is built in the runtimes' tree, not installed into lib.
