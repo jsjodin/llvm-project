@@ -5163,6 +5163,44 @@ With no work a stage (`PIPE_WORK=0`): 2^17 words, pipeline 12620, single
   hop would then cost about that, and the pipeline would approach the
   single process. Between GPUs, a frame would cost a peer copy.
 
+**With the queue in the GPU's memory.** 2026-11-13 at 5ba30fd311b8, where a
+message between GPU processes on one GPU goes into the receiver's queue in
+the GPU's memory with no call of the host (INPROGRESS, Messages between GPU
+processes on one GPU, step 1). Same machine, settings and sweep, Firefox
+closed; rounds within 8% of each other. Every configuration gave one
+checksum in every run, the same as before.
+
+| Words | Rounds | Feedback | Pipeline | Before | Single | HIP |
+|---|---|---|---|---|---|---|
+| 4096 | 16 | none | 87 | 612 | 69 | 12.6 |
+| 4096 | 16 | 1 | 222 | 1410 | 70 | 12.7 |
+| 4096 | 256 | none | 97 | | 88 | 29.9 |
+| 4096 | 4096 | none | 357 | 801 | 379 | 319 |
+| 4096 | 4096 | 1 | 533 | 1738 | 379 | 319 |
+| 65536 | 16 | none | 907 | 6329 | 567 | 28 |
+| 65536 | 256 | none | 1055 | 6481 | 807 | 267 |
+| 65536 | 4096 | none | 5030 | 8682 | 4590 | 3906 |
+| 65536 | 4096 | 1 | 8115 | 21028 | 4592 | 3898 |
+| 1048576 | 16 | none | 16003 | 100546 | 8593 | 288 |
+| 1048576 | 256 | none | 20255 | 98564 | 12395 | 3844 |
+| 1048576 | 4096 | none | 84750 | 146610 | 72796 | 61004 |
+| 1048576 | 4096 | 1 | 133910 | 334364 | 72768 | 61045 |
+
+- **The pipeline is 1.7 to 7 times faster than before,** and within 1.1 to
+  1.9 times of one process without feedback; at 4096 words and 4096 rounds
+  it is faster than one process (357 against 379 µs), its first win.
+- **What is left is the copies.** An array still travels as a copy into a
+  detached block, made by the sender's one lane, so a frame of 8 MiB costs
+  milliseconds a hop (16 ms against the single process's 8.6 at 2^20 words
+  and 16 rounds). Moving the array at its last use, by its pointer
+  (step 2), takes that away; copies that remain, and `array.init`, then
+  need many lanes (step 3).
+- **Feedback with one frame in flight** lets no stage overlap another, and
+  each stage has a third of the GPU's teams, so the pipeline can be up to
+  three times one process there, plus the hops: 1.4 to 1.8 times at 4096
+  rounds, 3 to 4 at little work, where the copies count; before, 4.6 to 19
+  times.
+
 ### GPU processes' stacks
 
 2026-11-13, at bddf7bd56f9a with the change that marks a GPU process's code
