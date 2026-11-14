@@ -3537,7 +3537,10 @@ SDValue SITargetLowering::LowerFormalArguments(
   SIMachineFunctionInfo *Info = MF.getInfo<SIMachineFunctionInfo>();
   bool IsError = false;
 
-  if (Subtarget->isAmdHsaOS() && AMDGPU::isGraphics(CallConv)) {
+  // A whole-wave function is allowed on HSA too: a compute function calls it
+  // (llvm.amdgcn.call.whole.wave) to run code on every lane of its wave.
+  if (Subtarget->isAmdHsaOS() && AMDGPU::isGraphics(CallConv) &&
+      CallConv != CallingConv::AMDGPU_Gfx_WholeWave) {
     DAG.getContext()->diagnose(DiagnosticInfoUnsupported(
         Fn, "unsupported non-compute shaders with HSA", DL.getDebugLoc()));
     IsError = true;

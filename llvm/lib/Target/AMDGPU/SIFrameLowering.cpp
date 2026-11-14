@@ -2031,8 +2031,14 @@ void SIFrameLowering::determineCalleeSaves(MachineFunction &MF,
   if (MFI->isWholeWaveFunction()) {
     // In practice, all the VGPRs are WWM registers, and we will need to save at
     // least their inactive lanes. Add them to WWMReservedRegs.
-    assert(!NeedExecCopyReservedReg &&
-           "Whole wave functions can use the reg mapped for their i1 argument");
+    //
+    // WWM spills, which the fast register allocator makes at -O0 (SGPRs
+    // spilled to lanes of a VGPR), need a register for a copy of EXEC. The
+    // register mapped for the i1 argument, the caller's EXEC, could serve, as
+    // EXEC is all ones in the body; until that is done one is reserved as for
+    // any other function (determinePrologEpilogSGPRSaves), which is only
+    // redundant, as the i1 argument's register is live to the return and is
+    // not chosen.
 
     unsigned NumArchVGPRs = ST.getAddressableNumArchVGPRs();
     for (MCRegister Reg :
