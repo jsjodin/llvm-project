@@ -417,12 +417,51 @@ constexpr std::uint64_t kPinnedChunkBytes{4096};
 // How many such chunks are allocated, for MERK_CHECK_PINNED.
 std::atomic<std::int64_t> pinnedChunks{0};
 
+// Freed chunks, kept for the next message of their device and size, as
+// allocating host memory that a device may use costs tens of microseconds
+// from 8 KiB (the offload plugin's memory manager keeps smaller ones), which
+// was most of a GPU's send of an array of 1024 words on gfx90a. A chunk's
+// size is a power of two from kPinnedChunkBytes, its class the power; each
+// device keeps up to kPinnedPoolBytes of them.
+constexpr int kPinnedClasses{48};
+constexpr std::uint64_t kPinnedPoolBytes{std::uint64_t{64} << 20};
+
+struct PinnedPool {
+  PinnedChunk *free[kPinnedClasses];
+  std::uint64_t bytes;
+};
+
+PinnedPool pinnedPools[kMostGpus];
+pthread_mutex_t pinnedPoolLock = PTHREAD_MUTEX_INITIALIZER;
+
+int PinnedClass(std::uint64_t size) {
+  int power{0};
+  while ((std::uint64_t{1} << power) < size) {
+    ++power;
+  }
+  return power;
+}
+
 PinnedChunk *NewPinnedChunk(int device, std::uint64_t bytes) {
   std::uint64_t size{sizeof(PinnedChunk) + bytes};
   size = size < kPinnedChunkBytes ? kPinnedChunkBytes : size;
-  auto *chunk{static_cast<PinnedChunk *>(DeviceAllocateHost(device, size))};
+  int power{PinnedClass(size)};
+  size = std::uint64_t{1} << power;
+  PinnedChunk *chunk{nullptr};
+  if (device >= 0 && device < kMostGpus && power < kPinnedClasses) {
+    pthread_mutex_lock(&pinnedPoolLock);
+    PinnedPool &pool{pinnedPools[device]};
+    if ((chunk = pool.free[power])) {
+      pool.free[power] = chunk->next;
+      pool.bytes -= size;
+    }
+    pthread_mutex_unlock(&pinnedPoolLock);
+  }
   if (!chunk) {
-    Fail("out of host memory for a device's message");
+    chunk = static_cast<PinnedChunk *>(DeviceAllocateHost(device, size));
+    if (!chunk) {
+      Fail("out of host memory for a device's message");
+    }
   }
   *chunk = {nullptr, static_cast<std::uint64_t>(device), size};
   pinnedChunks.fetch_add(1);
@@ -433,7 +472,23 @@ void FreePinnedChunks(PinnedChunk *chunk) {
   while (chunk) {
     pinnedChunks.fetch_sub(1);
     PinnedChunk *next{chunk->next};
-    DeviceFreeHost(static_cast<int>(chunk->device), chunk);
+    int device{static_cast<int>(chunk->device)};
+    int power{PinnedClass(chunk->bytes)};
+    bool kept{false};
+    if (device >= 0 && device < kMostGpus && power < kPinnedClasses) {
+      pthread_mutex_lock(&pinnedPoolLock);
+      PinnedPool &pool{pinnedPools[device]};
+      if (pool.bytes + chunk->bytes <= kPinnedPoolBytes) {
+        chunk->next = pool.free[power];
+        pool.free[power] = chunk;
+        pool.bytes += chunk->bytes;
+        kept = true;
+      }
+      pthread_mutex_unlock(&pinnedPoolLock);
+    }
+    if (!kept) {
+      DeviceFreeHost(device, chunk);
+    }
     chunk = next;
   }
 }
