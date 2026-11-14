@@ -7,6 +7,10 @@
 % RUN: merkc -fdo-loops -fopenmp %libomp-flags %s -o %t && %libomp-env %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 -fdo-loops -fopenmp %libomp-flags %s -o %t.optimized && %libomp-env %t.optimized | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -fdo-loops %s -o %t.sequential && %t.sequential | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% On a GPU each function names it and its features, which the reductions'
+% shuffles take the wavefront's size from: 64 lanes on gfx90a, 32 on gfx1030.
+% RUN: merkc -fc1 -fdo-loops -fopenmp -fopenmp-is-target-device -triple amdgpu9.0a-amd-amdhsa -emit-llvm %s -o - | FileCheck %s --check-prefix=WAVE64
+% RUN: merkc -fc1 -fdo-loops -fopenmp -fopenmp-is-target-device -triple amdgpu10.30-amd-amdhsa -emit-llvm %s -o - | FileCheck %s --check-prefix=WAVE32
 % REQUIRES: amdgpu-registered-target, libomp
 
 :- module omp_target_parallel_do.
@@ -46,6 +50,11 @@ main(!IO) :-
     io.nl(!IO),
     io.write_int(InRegion, !IO),
     io.nl(!IO).
+
+% WAVE64: define internal void @_omp_reduction_inter_warp_copy_func({{.*}} #[[COPY:[0-9]+]]
+% WAVE64: attributes #[[COPY]] = { {{.*}}"target-cpu"="gfx90a" "target-features"="{{.*}}+wavefrontsize64{{.*}}" }
+% WAVE32: define internal void @_omp_reduction_inter_warp_copy_func({{.*}} #[[COPY:[0-9]+]]
+% WAVE32: attributes #[[COPY]] = { {{.*}}"target-cpu"="gfx1030" "target-features"="{{.*}}+wavefrontsize32{{.*}}" }
 
 % OUTPUT:300
 % OUTPUT-NEXT:14850

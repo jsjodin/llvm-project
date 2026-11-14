@@ -669,20 +669,6 @@ void ForeignCompiler::CheckNeeds(
   }
 }
 
-// The device's GPU, as its CPU names it or the triple's sub-architecture
-// does, as the driver gives it (amdgpu10.30-amd-amdhsa for gfx1030); empty if
-// neither does.
-static std::string DeviceGPU(const TargetInfo &target) {
-  if (!target.options().cpu.empty() ||
-      !target.triple().isAMDGCN() ||
-      target.triple().getSubArch() == llvm::Triple::NoSubArch) {
-    return target.options().cpu;
-  }
-  return llvm::AMDGPU::getArchNameAMDGCN(
-      llvm::AMDGPU::getGPUKindFromSubArch(target.triple().getSubArch()))
-      .str();
-}
-
 // clang's options for C that OpenMP compiles for the device, as clang
 // compiles a C file's declare target functions for an offloading target: with
 // the host's headers, for the device's GPU. The
@@ -695,8 +681,8 @@ static std::string DeviceGPU(const TargetInfo &target) {
 // might start, which the image does not have. Foreign code starts none.
 std::vector<std::string> ForeignCompiler::DeviceOptions() const {
   std::vector<std::string> options{"-fopenmp",
-      "--offload-arch=" + DeviceGPU(target_), "--offload-device-only", "-nogpulib", "-nogpuinc",
-      "-O" + std::to_string(target_.options().optimizationLevel),
+      "--offload-arch=" + target_.gpu(), "--offload-device-only", "-nogpulib",
+      "-nogpuinc", "-O" + std::to_string(target_.options().optimizationLevel),
       "-mcode-object-version=" +
           std::to_string(target_.options().codeObjectVersion / 100),
       "-DMERK_DEVICE"};
@@ -777,7 +763,7 @@ llvm::LogicalResult ForeignCompiler::Compile() {
     return llvm::success();
   }
   // clang would otherwise look for one on the machine.
-  if (DeviceGPU(target_).empty()) {
+  if (target_.gpu().empty()) {
     mlir::emitError(calls_.front().second.getLoc())
         << "compiling foreign code for "
         << (TargetInfo::ProcessKernels(module_) ? "a GPU process"

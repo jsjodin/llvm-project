@@ -64,6 +64,16 @@ public:
   llvm::TargetMachine &targetMachine() const { return *targetMachine_; }
   const TargetOptions &options() const { return options_; }
   const AddressSpaces &addressSpaces() const { return addressSpaces_; }
+  // An AMD GPU target's GPU, as -target-cpu names it or the triple's
+  // subarchitecture does (amdgpu9.0a-amd-amdhsa for gfx90a, as the driver
+  // gives it); empty for other targets, or if neither names one.
+  std::string gpu() const;
+  // The target features that each function carries in LLVM IR, as Clang
+  // gives them: for an AMD GPU, all of its GPU's (gpu()), such as
+  // +wavefrontsize64, then -target-feature's; empty if there are none.
+  // OpenMP's lowering reads them off the function that holds a target
+  // region, for the wavefront's size.
+  std::string functionFeatures() const;
 
   // The address spaces the data layout gives for allocas, globals and code.
   unsigned allocaAddressSpace() const {

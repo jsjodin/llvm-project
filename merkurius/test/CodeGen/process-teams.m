@@ -59,7 +59,7 @@
 % INFERRED-NOT: attributes #[[FIB]] = {{.*}}amdgpu-no-
 % INFERRED-NOT: attributes #[[DEEP]] = {{.*}}memory(none)
 % INFERRED-NOT: attributes #[[DEEP]] = {{.*}}amdgpu-no-
-% INFERRED: attributes #[[DISPATCH]] = { convergent noinline "amdgpu-single-lane" }
+% INFERRED: attributes #[[DISPATCH]] = { convergent noinline "amdgpu-single-lane" "target-cpu"="gfx1030" "target-features"="{{[^"]*}}" }
 %
 % The adders recurse only by tail calls: no warning, no check.
 % RUN: merkc -fc1 -O2 -fprocess-declarations -fprocess-kernels -triple amdgpu10.30-amd-amdhsa -emit-llvm %s -o %t.adders.ll 2>&1 | count 0

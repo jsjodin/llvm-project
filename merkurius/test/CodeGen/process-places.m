@@ -30,7 +30,7 @@
 % DISPATCH-NEXT:  ]
 % DISPATCH:  call void @merk_process_adder(ptr poison, ptr poison, i64 %1)
 % DISPATCH:  call void @merk_process_waiter(ptr poison, i64 %1)
-% DISPATCH:attributes #[[DISPATCH]] = { convergent noinline "amdgpu-single-lane" }
+% DISPATCH:attributes #[[DISPATCH]] = { convergent noinline "amdgpu-single-lane" "target-cpu"="gfx1030" "target-features"="{{[^"]*}}" }
 :- module process_places.
 :- interface.
 :- import_module io.

@@ -15,7 +15,9 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/Target/LLVMIR/Import.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/TargetParser/AMDGPUTargetParser.h"
 #include "llvm/TargetParser/Host.h"
 
 namespace merkurius::codegen {
@@ -147,6 +149,40 @@ std::unique_ptr<TargetInfo> TargetInfo::FromModule(
     }
   }
   return info;
+}
+
+std::string TargetInfo::gpu() const {
+  if (!triple_.isAMDGCN()) {
+    return {};
+  }
+  if (!options_.cpu.empty() || triple_.getSubArch() == llvm::Triple::NoSubArch) {
+    return options_.cpu;
+  }
+  return llvm::AMDGPU::getArchNameAMDGCN(
+      llvm::AMDGPU::getGPUKindFromSubArch(triple_.getSubArch()))
+      .str();
+}
+
+std::string TargetInfo::functionFeatures() const {
+  std::string features;
+  std::string gpuName{gpu()};
+  if (!gpuName.empty()) {
+    // In a sorted order, so that the IR is the same from run to run.
+    llvm::StringMap<bool> map;
+    llvm::AMDGPU::fillAMDGPUFeatureMap(gpuName, triple_, map);
+    std::vector<std::string> sorted;
+    for (const auto &entry : map) {
+      sorted.push_back((entry.second ? "+" : "-") + entry.first().str());
+    }
+    llvm::sort(sorted);
+    for (const std::string &feature : sorted) {
+      features += (features.empty() ? "" : ",") + feature;
+    }
+  }
+  if (!options_.features.empty()) {
+    features += (features.empty() ? "" : ",") + options_.features;
+  }
+  return features;
 }
 
 bool TargetInfo::ProcessKernels(mlir::ModuleOp module) {
