@@ -5062,6 +5062,54 @@ is waiting for the summaries.
   adds its own summary, halos and waits. Several GPUs, one place each, are
   what places are for; on one GPU they show the protocol's costs.
 
+### Shallow water on sparse tiles: the work a tile
+
+The showcase that followed p4 (INPROGRESS, "A showcase with more work per
+tile"): `benchmarks/swe/compare-swe.sh`, `swe-sparse.m` in one GPU process
+against `swe-sparse.c` (OpenMP offload) and `swe-sparse.hip`, on the gfx1030
+with 40 compute units (`LIBOMPTARGET_AMDGPU_CU_MASK=0-39` and
+`HSA_CU_MASK=0:0-39`), 2026-11-13 at 18c6579d3f13, Firefox closed. Case 0,
+1000 steps; the average step in microseconds, the median of the rounds (5,
+3, 3), which were within 2% of each other, and the bookkeeping's part of it.
+All three gave the same checksum in every run.
+
+| World, tile | Active tiles, most | Mercury, GPU process | C, OpenMP | HIP |
+|---|---|---|---|---|
+| 2048, 32 | 472 | 280 (45) | 311 (76) | 269 (48) |
+| 2048, 64 | 128 | 351 (32) | 382 (54) | 350 (37) |
+| 8192, 64 | 520 | 1387 (40) | 1368 (76) | 1316 (46) |
+
+The GPU's time a tile a step, from each step's time less its bookkeeping
+in the first round's traces: a least-squares slope against the active tiles
+on the 2048-cell world, and the average step at 440 to 460 tiles over 450
+on the 8192-cell world, where the GPU is full.
+
+| | Mercury | C | HIP |
+|---|---|---|---|
+| 2048, tiles of 32, slope | 0.73 | 0.66 | 0.64 |
+| 2048, tiles of 64, slope | 3.09 | 2.93 | 2.92 |
+| 8192, tiles of 64, at 450 tiles | 3.55 | 3.36 | 3.31 |
+
+- **A tile is 4.6 times Life's work, not 20 to 50.** Life's tile of 64
+  cells square is about 0.65 µs a step (p4); a shallow water tile of the
+  same size is 3 to 3.5. A cell is about 0.8 ns of the GPU's time, against
+  Life's 0.16: the gfx1030 runs double precision at a sixteenth of single's
+  rate, and a cell's work is mostly double divisions and square roots. A
+  GPU with full-rate doubles, as the gfx90a, shortens the step and so
+  weakens the case for distributing it.
+- **Distributing pays only on a large world.** On the 2048-cell world one
+  GPU's whole step, 280 to 350 µs, is less than one place's agreement a
+  step alone (200 to 450 µs at 1 place, p4). On the 8192-cell world a step
+  is 1.4 ms with 520 tiles, and a place's agreement grows with its tiles
+  by about 1.3 µs each (`expected`'s walk), against 3.5 µs of work: the
+  places version needs that world, and a place's walks of its tiles on
+  many lanes (INPROGRESS, A demo: a stencil whose active region moves,
+  Open).
+- **Mercury is within 5% of HIP** on every world, and ahead of C with
+  OpenMP offload on the small ones. Its bookkeeping, on the process's lane
+  on the GPU, is 32 to 45 µs, the host's in HIP 37 to 48 and in C 54 to 76,
+  which includes OpenMP's copies to and from the device.
+
 ### GPU processes' stacks
 
 2026-11-13, at bddf7bd56f9a with the change that marks a GPU process's code

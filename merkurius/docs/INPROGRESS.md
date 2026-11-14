@@ -5185,8 +5185,17 @@ a GPU process's foreign C was compiled with OpenMP's globalization, whose
 default size, with Firefox open: Mercury 477 µs a step, C 486, HIP 447, at
 most 472 tiles.
 
-**Then:** the work a tile a step against Life's, timed with Firefox
-closed, and the places version, as `life-places.m`.
+**Timed 2026-11-13** (design document, Measurements, "Shallow water on
+sparse tiles: the work a tile"): a tile of 64 cells square is 3 to 3.5 µs
+a step, 4.6 times Life's, not 20 to 50, as the gfx1030's doubles run at a
+sixteenth of single's rate. Mercury is within 5% of HIP. On the default
+world one GPU's step (280 µs) is below a place's agreement; on an 8192-cell
+world with tiles of 64 it is 1.4 ms with 520 tiles.
+
+**Then:** the places version, as `life-places.m`, on the 8192-cell world
+with tiles of 64, after a place's walks of its tiles run on many lanes
+(Open, in the demo's section): its agreement grows by 1.3 µs a tile
+against 3.5 µs of work.
 
 ## Topology: GPUs, NUMA domains and NICs within a node
 
