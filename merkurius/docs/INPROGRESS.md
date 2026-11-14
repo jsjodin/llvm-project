@@ -5101,7 +5101,12 @@ eight GPUs that others use too, of which 3 or 4 are ours (the user,
   command ends, so two of one user's runs never share a GPU. Every test,
   benchmark and demo run goes through it.
 - lit passes `ROCR_VISIBLE_DEVICES` and `HIP_VISIBLE_DEVICES` to the tests,
-  which it dropped before, and runs at most four `-gpu.test` files at once.
+  which it dropped before, and runs at most four `-gpu.test` files at once,
+  each on a GPU of its own where there are several, by setting
+  `ROCR_VISIBLE_DEVICES` for it, so that the test's GPU is its `gpu(0)`.
+  `%gpu-env` and `%hip-env` limit GPU processes to half of a GPU's compute
+  units if it drives a display, as gfx1030's 40 of 80, and do not limit
+  them otherwise, as on this machine (2026-11-14).
 - **Target IDs with features,** such as `gfx90a:xnack-`, are reported by the
   driver for now. The device's bitcode carries no target features, and the
   image's link gives LTO only the processor, so a feature would be dropped.
