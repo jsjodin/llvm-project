@@ -9,8 +9,8 @@ places share a frame's 64 tiles as 21, 21 and 22. Sequential, at -O0 and
 has no --offload-arch, as mandel.test's.
 REQUIRES: amdgpu-registered-target, libomp
 RUN: merkc -O0 -fdo-loops -fprocess-declarations %libomp-flags %S/../../benchmarks/mandel/mandel-places.m -o %t0
-RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/mandel/mandel-places.m -o %t2
-RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/mandel/mandel-places.m -o %t.omp
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %S/../../benchmarks/mandel/mandel-places.m -o %t2
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %S/../../benchmarks/mandel/mandel-places.m -o %t.omp
 
 RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 %t0 host | FileCheck %s --check-prefixes=STEAL3,SMALL
 RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 MANDEL_POLICY=pool %t0 host | FileCheck %s --check-prefixes=SMALL

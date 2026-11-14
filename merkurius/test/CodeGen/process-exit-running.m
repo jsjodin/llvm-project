@@ -12,9 +12,9 @@
 % hand.
 %
 % REQUIRES: amdgpu-registered-target, libomp
-% RUN: merkc -fopenmp -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t
+% RUN: merkc -fopenmp -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t
 % RUN: %libomp-env sh -c '%t host; echo "exit status $?"' | FileCheck %s --match-full-lines --strict-whitespace
-% RUN: merkc -O2 -fopenmp -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
+% RUN: merkc -O2 -fopenmp -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t2
 % RUN: %libomp-env sh -c '%t2 host; echo "exit status $?"' | FileCheck %s --match-full-lines --strict-whitespace
 % RUN: merkc -fprocess-declarations %s -o %t.sequential
 % RUN: sh -c '%t.sequential region; echo "exit status $?"' | FileCheck %s --match-full-lines --strict-whitespace

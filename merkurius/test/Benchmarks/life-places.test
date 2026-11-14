@@ -12,8 +12,8 @@ Sequential, at -O0 and -O2, and with the loops on the host's threads at -O2.
 The -O0 build has no --offload-arch, as life-sparse.test's has none.
 REQUIRES: amdgpu-registered-target, libomp
 RUN: merkc -O0 -fdo-loops -fprocess-declarations %libomp-flags %S/../../benchmarks/life/life-places.m -o %t0
-RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/life/life-places.m -o %t2
-RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/life/life-places.m -o %t.omp
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %S/../../benchmarks/life/life-places.m -o %t2
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %S/../../benchmarks/life/life-places.m -o %t.omp
 
 RUN: %libomp-env LIFE_PLACES=2 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t0 host | FileCheck %s --check-prefixes=A,A2
 RUN: %libomp-env LIFE_PLACES=1 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t2 host | FileCheck %s --check-prefix=A1

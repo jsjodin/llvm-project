@@ -47,6 +47,12 @@ llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
 import subprocess
 
 build_root = os.path.dirname(config.llvm_tools_dir)
+# %offload-archs is every GPU that the machines the tests run on have, so
+# that a test which builds a program and runs it gets an image for this
+# machine's GPU, whichever it is: the runtime picks the image by name. Add a
+# GPU here to test on a machine with it. First in the list, since lit
+# substitutes in order and %offload-arch is a prefix of it.
+config.substitutions.insert(0, ("%offload-archs", "gfx1030,gfx90a"))
 # %merk-lib-dir has the device runtime, libmerkdevice-amdgcn.a, and the start
 # object of GPU processes' images, for tests that link device code by hand.
 config.substitutions.append(("%merk-lib-dir", os.path.join(build_root, "lib")))
