@@ -1061,6 +1061,15 @@ Error olGetDeviceComputeUnitMask_impl(ol_device_handle_t Device,
   return Error::success();
 }
 
+Error olGetDevicePeerAccess_impl(ol_device_handle_t Device,
+                                 ol_device_handle_t Peer, bool *CanAccess) {
+  *CanAccess = Device == Peer ||
+               (Device->Device && Peer->Device &&
+                Device->Platform.Plugin == Peer->Platform.Plugin &&
+                Device->Device->canPeerAccessMemory(*Peer->Device));
+  return Error::success();
+}
+
 Error olCreateQueue_impl(ol_context_handle_t Context, ol_device_handle_t Device,
                          ol_queue_handle_t *Queue) {
   if (auto Err = Context->requireDevice(Device))
