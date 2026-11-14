@@ -89,6 +89,11 @@ struct DeviceRing {
   alignas(64) uint64_t slots[kRingSlots];
 };
 
+// The tail of the ring of a mailbox that has closed, which the host sets
+// as it closes it, so that the device, which reads the tail at each look,
+// sees it at no cost: a receive from it is then an error, as on the host.
+constexpr uint64_t kRingClosed{~uint64_t{0}};
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_DEVICE_RING_H_
