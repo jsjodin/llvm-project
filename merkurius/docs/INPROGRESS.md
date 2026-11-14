@@ -5435,6 +5435,47 @@ as every process of a GPU allocates from that GPU's heap.
      more; the pipeline up to 5.4 times faster, but 1.04 to 1.5 times one process
      from 2^16 words up, not yet explained (each stage fills on a third
      of the teams, which is likely a part).
+4. Fewer costs of an array through the host, 2026-11-14 on gfx90a, where
+   the array-messages benchmark found a GPU's arrays moving at 100 to 170
+   MB/s, against 1.2 to 10 GB/s on gfx1030 (benchmarks/array-messages,
+   "On gfx90a"). As built:
+   - *Why so slow:* the process's one lane copies the array between the
+     device's memory and host memory (copy.h, `CopyWords`, 32 loads in
+     flight), and on gfx90a each load from host memory is uncached, about
+     1.4 µs. A HIP probe: one lane 180 to 220 MB/s, one wave 400 to 860,
+     1024 lanes 6.5 to 9.8 GB/s, the copy engine 5 to 24 GB/s.
+   - *Deeper batches, not taken:* 48 or 60 loads in flight raised one lane
+     to 250 to 430 MB/s, but the runtime is one bitcode for every AMD GPU,
+     so the batch cannot be chosen by the GPU, and at 48 gfx1030's
+     mandel-places rose from 108 to 200 VGPRs, fewer of its teams running
+     at once. A one-line change in copy.h, `kBatch`.
+   - *Pinned chunks kept* (offload.cpp, `NewPinnedChunk`): allocating host
+     memory that the device reaches cost about 85 µs from 8 KiB, which the
+     offload plugin's memory manager does not keep, so a send of 1024 words
+     took 137 µs against 50 at 512. Freed chunks are now kept for their
+     device by size, powers of two, up to 64 MiB a device: 52 µs.
+   - *A send by the copy engine* (`rpcDmaBytes`, `rpcSendArrayFromDevice`):
+     from 8 KiB, the device's lane does a release at system scope, which on
+     gfx9 writes back the L2's lines of the device's memory (`buffer_wbl2`),
+     and gives the host the array's address; the host copies it out with
+     `olMemcpy` and sends it. The host chooses by the lanes of the device's
+     waves, which the device gives: 64, gfx9's, from 8 KiB, else never, as
+     gfx10's release does not write back its L2 (Arrays of scalars,
+     "Rejected"); `MERK_GPU_DMA_BYTES` replaces it. The host copies at most
+     512 KiB at a time: from 1 MiB the AMDGPU plugin copies into host memory
+     that it did not pin by `hsa_amd_memory_lock`, and that copy waited, for
+     a minute in the benchmark, until another process's kernel on the same
+     GPU ended. Not found why.
+   - *Measured* (benchmarks/array-messages, "On gfx90a"): a send from the
+     GPU within a node 1.6 to 3.5 GB/s from 2^14 words, from 100 to 170
+     MB/s; to another node 1.0 to 1.5 GB/s, half to nine tenths of the
+     CPU's.
+   - *Open:* receives still go by the lane, 110 to 130 MB/s, and so does
+     everything between two GPU regions. The same by the copy engine into
+     the device's memory needs the device to see it: an acquire at system
+     scope on gfx90a invalidates no L2 lines of its own memory (AMDGPUUsage,
+     Memory Model GFX90A), so whether the copy engine's writes reach them
+     is to find; failing that, a wave or the worker teams copying.
 
 ## Topology: GPUs, NUMA domains and NICs within a node
 

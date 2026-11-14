@@ -493,6 +493,55 @@ void FreePinnedChunks(PinnedChunk *chunk) {
   }
 }
 
+// From how many bytes a device's send of an array goes by the host's copy
+// from the device's memory (rpcDmaBytes): MERK_GPU_DMA_BYTES, or for a
+// device whose waves have 64 lanes, which on AMD GPUs are gfx9's, whose
+// release at system scope writes back its L2's lines of the device's
+// memory, 8 KiB, where the copy engine's start costs less than the device's
+// one lane copying across the bus a word at a time; and never for others,
+// as gfx1030's L2 may hold the array's lines unwritten. The device gives its
+// wave's lanes, since a program without GPU processes does not load
+// liboffload, which would name the GPU.
+std::uint64_t DmaBytes(std::uint64_t lanes) {
+  if (const char *text{std::getenv("MERK_GPU_DMA_BYTES")}) {
+    char *end{nullptr};
+    unsigned long long bytes{std::strtoull(text, &end, 10)};
+    if (end != text && *end == '\0') {
+      // The device takes 0 for not yet asked.
+      return bytes ? bytes : 1;
+    }
+  }
+  return lanes == 64 ? std::uint64_t{8} << 10 : ~std::uint64_t{0};
+}
+
+// The most bytes of one copy from a device: the AMDGPU plugin copies more,
+// from LIBOMPTARGET_AMDGPU_MAX_ASYNC_COPY_BYTES, 1 MiB, into host memory it
+// did not pin itself by another path, which on gfx90a waited until the
+// kernels of another process on the same GPU ended.
+constexpr std::uint64_t kDmaPieceBytes{std::uint64_t{512} << 10};
+
+// rpcSendArrayFromDevice: the array's words, its size word first, copied
+// from the device by its copy engine into a pinned chunk, and sent.
+void SendArrayFromDevice(const std::uint64_t *handle, std::uint64_t key,
+    const std::uint64_t *array, int device) {
+  std::uint64_t size{0};
+  if (!CopyFromDevice(device, &size, array, sizeof size)) {
+    Fail("could not copy an array from a device");
+  }
+  std::uint64_t bytes{sizeof(std::uint64_t) * ArrayWords(&size)};
+  PinnedChunk *chunk{NewPinnedChunk(device, bytes)};
+  auto *copy{reinterpret_cast<std::uint64_t *>(chunk + 1)};
+  for (std::uint64_t at{0}; at < bytes; at += kDmaPieceBytes) {
+    std::uint64_t n{bytes - at < kDmaPieceBytes ? bytes - at : kDmaPieceBytes};
+    if (!CopyFromDevice(device, reinterpret_cast<char *>(copy) + at,
+            reinterpret_cast<const char *>(array) + at, n)) {
+      Fail("could not copy an array from a device");
+    }
+  }
+  SendTo(handle, key, reinterpret_cast<std::uint64_t>(copy));
+  FreePinnedChunks(chunk);
+}
+
 // Where the host's copy of a message for a device goes (copy.h).
 class PinnedMemory {
 public:
@@ -687,6 +736,18 @@ unsigned HandleOpcode(void *raw, unsigned) {
   case rpcTeamsStall:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
       buffer->data[0] = teamsStallMilliseconds;
+    });
+    return rpc::RPC_SUCCESS;
+  case rpcDmaBytes:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      buffer->data[0] = DmaBytes(buffer->data[0]);
+    });
+    return rpc::RPC_SUCCESS;
+  case rpcSendArrayFromDevice:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      SendArrayFromDevice(buffer->data, buffer->data[5],
+          reinterpret_cast<const std::uint64_t *>(buffer->data[6]),
+          static_cast<int>(buffer->data[7]));
     });
     return rpc::RPC_SUCCESS;
   case rpcRoute:
