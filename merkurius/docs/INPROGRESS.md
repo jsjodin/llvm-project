@@ -5387,9 +5387,11 @@ as every process of a GPU allocates from that GPU's heap.
    - *A bug found first,* fixed as its own commit: an array sent as the
      whole message was never freed, as the pass took its pointer's cast for
      an escape (`process-send-array-free.m`).
-   - One run each, not a measurement: the pipeline at 2^16 words and 16
-     rounds went from 907 to 268 µs a frame, and at 2^20 from 16.0 to 3.7
-     ms, both now below one process's (567 µs, 8.6 ms).
+   - Measured (design document, Measurements, A pipeline of GPU processes,
+     With arrays moved at their last use): the pipeline now beats one
+     process by up to 2.3 times at small and middling work, and is within
+     6% of it at much; against HIP, 1.2 to 1.7 times, but 3 to 13 times at
+     little work, where `array.init`'s one-lane fills are left (step 3).
 3. Copies by the wave's lanes or the worker teams, for a send that is not
    the last use, and the same for `array.init`.
 
