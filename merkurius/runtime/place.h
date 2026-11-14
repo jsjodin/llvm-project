@@ -65,7 +65,9 @@ constexpr uint32_t kPlaceTeamThreads{256};
 // process with worker teams, how many it has. For a slot of a worker team,
 // the slot of its process, the team's number among the process's workers,
 // how many there are, and the address of the process's control block, in
-// the device's memory, which the process's wave sets.
+// the device's memory, which the process's wave sets. And how many
+// processes the host has started in the slot, this one included, which the
+// process's wave stores in the slot's queue as it starts (ProcessQueue).
 struct PlaceSlot {
   uint64_t state;
   uint64_t kind;
@@ -75,16 +77,57 @@ struct PlaceSlot {
   uint64_t worker;
   uint64_t workers;
   uint64_t control;
+  uint64_t incarnation;
 };
 
 // The table: whether the kernel is to end, how many slots follow it, one
 // for each of the kernel's waves, by their order in the launch, and how many
 // of the kernel's teams have started, which the host waits for, as a team
-// that is not resident at once with the others would never start.
+// that is not resident at once with the others would never start; and the
+// address of the slots' queues, in the device's memory (ProcessQueue). With
+// MERK_CHECK_DEVICE_MEMORY, `check` is set, and the device counts in
+// `blocks` the blocks of messages between its processes that no process
+// holds, and their queues' spills, which the program's end reports.
 struct PlaceTable {
   uint64_t end;
   uint64_t slots;
   uint64_t started;
+  uint64_t queues;
+  uint64_t check;
+  int64_t blocks;
+};
+
+// The queue through which the process of a slot receives from the other
+// processes of the kernel, with no call of the host (docs/INPROGRESS.md,
+// Messages between GPU processes on one GPU). The host allocates the
+// kernel's queues before it launches the kernel, and each wave makes its
+// own empty before its team counts itself started; they go with the kernel,
+// so a sender never touches freed memory. A queue is the team mailboxes'
+// ring (device.cpp): a sender takes a position with an atomic add on
+// `tail`, and a slot's sequence says which position it holds; a sender whose
+// slot is full spills to the slot's list.
+//
+// `incarnation` is the slot's process's (PlaceSlot), 0 before the first;
+// `closed` is set by the process as it ends; `senders` counts the senders
+// in flight, which the process waits for before it frees what the queue
+// still holds; and `kind` is the messages' (device-ring.h's kRingOf...),
+// which its senders set.
+constexpr uint64_t kProcessQueueSlots{64};
+
+struct ProcessQueueSlot {
+  uint64_t sequence;
+  uint64_t message;
+};
+
+struct ProcessQueue {
+  alignas(64) uint64_t incarnation;
+  uint64_t closed;
+  uint64_t senders;
+  uint64_t kind;
+  alignas(64) uint64_t tail;
+  alignas(64) uint64_t head;
+  alignas(64) ProcessQueueSlot slots[kProcessQueueSlots];
+  uint64_t spills[kProcessQueueSlots];
 };
 
 inline PlaceSlot *PlaceSlots(PlaceTable *table) {

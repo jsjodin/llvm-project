@@ -5277,6 +5277,98 @@ bits taken as collector roots (80a26a741615).
 - With one process and much work, the GPU process is 1.2 times HIP: its
   loop of rounds, to compare instruction by instruction.
 
+## Messages between GPU processes on one GPU
+
+Started 2026-11-13, after the pipeline benchmark (A pipeline of processes),
+as the first step of the peer-store backend (One message transport, with
+backends, backend 3), with sender and receiver on the same GPU, so that it
+can be built and tested here. It is steps 5c and 5d of GPU processes
+without `omp target` for this case only: the host's sends, and those of
+other GPUs and nodes, still go through the host.
+
+**Decided with the user 2026-11-13:** shared arrays wait. The pipeline needs
+a frame handed from one process to the next, not read by many; within a
+GPU a message's blocks can move from the sender's list to the receiver's,
+as every process of a GPU allocates from that GPU's heap.
+
+**Design.**
+- *A queue for each slot of the kernel.* A GPU process has one mailbox,
+  made at its spawn, and runs in a slot of its module's kernel (place.h).
+  The host allocates a queue for each slot in the device's memory with the
+  kernel's table, before the launch, and each wave makes its own queue
+  empty before its team counts itself started, so no sender sees one
+  unmade, and no host write meets a stale line of the device's cache
+  (design document, "The device's communication, as built").
+- *An incarnation for each slot.* The host counts the processes it starts
+  in each slot and writes the count into the slot before setting it
+  running; the process's wave stores it in its queue as it starts. A
+  sender that knows the incarnation it wants tells a receiver not started
+  yet (an older one in the queue: it waits) from one that has ended (a
+  newer one, or the queue closed: the message goes, as to a closed
+  mailbox).
+- *The route, asked once.* A GPU process's first send to a handle asks the
+  host (rpcRoute) whether the handle is the mailbox of a process of the
+  same kernel, and if so for its queue and incarnation; it keeps the answer
+  in its arena, as it keeps the rings it reads. The mailbox has its queue
+  from its spawn, before its handle exists, so a sender never sends to it
+  first through the host and then directly, and its messages stay in
+  order.
+- *The queue* is the team mailboxes' ring (Processes as teams, step 2): a
+  position from an atomic add on the tail, a slot's sequence as in
+  Vyukov's bounded queue, and a send that never waits, spilling to a list
+  for the slot when the slot is full. Spills come from the GPU's heap, so
+  the receiver frees them.
+- *Senders in flight.* A sender counts itself into the queue, checks the
+  incarnation and that the queue is open, sends, and counts itself out. A
+  process that ends closes its queue, waits until no sender is in flight,
+  and frees what the queue still holds, before it tells the host: the
+  queue's memory lives as long as the kernel, so a sender never touches
+  freed memory.
+- *Messages.* A word is the slot's message. An array or a term is copied
+  into a group of blocks that no process holds, from the GPU's heap, and
+  the slot holds the array, or a block whose first word is the term; the
+  receiver puts the group on its list, as its own (Memory that a GPU
+  process gives back). The copy is one lane's, for now, in the device's
+  memory rather than across PCIe.
+- *Two sources.* The receiver looks at its queue at every poll, and at its
+  ring from the host, which the host and other places' senders fill, every
+  eighth, about every 8 µs as before; when both have a message they take
+  turns. Messages from one sender keep their order, as each sender uses one
+  route; between senders there is no order to keep.
+- *A mailbox closed by another process.* Anyone with the handle may close
+  it. A receive from it is then an error, at the host and, since a fix made
+  while building this, on the GPU too: the host sets the ring's tail to
+  `kRingClosed`, which the device sees at its next look at the ring.
+
+*Steps,* each a commit:
+1. The queue, the route and direct sends of words, arrays and terms, with
+   tests of two and three processes on one GPU, ordering from one sender,
+   both sources at once, a full ring, and a receiver that ends while
+   others send. The pipeline benchmark measured again. Built 2026-11-13,
+   all but the measurements, which follow (place.h, `ProcessQueue`; device/device.cpp, "Messages between the
+   processes of a kernel"; gpu-processes.cpp, `PlaceRoute`;
+   `test/CodeGen/process-direct.m` and its `-gpu.test`). As built, beside
+   the design above:
+   - *The route has a lock of its own.* The plugin's RPC server answers
+     rpcRoute while holding its lock, and a spawn held the processes' lock
+     while loading an image, which takes the server's: the first version
+     deadlocked so (process-places' "other"). The same deadlock was there
+     before, between rpcProcessEnded and a load, and was fixed first, as a
+     commit of its own: images now load under a lock of their own.
+   - *A receive from a closed mailbox* on the GPU timed out, where the host
+     reports an error; fixed first too, as a commit of its own
+     (`process-closed-receive.m`).
+   - *Counted for tests.* With MERK_CHECK_DEVICE_MEMORY the kernel counts
+     its messages' blocks that no process holds, and the spills, in its
+     table, and the program's end reports how many are left: a leak left in
+     on purpose showed 900.
+   - *Receiving* polls the queue about every microsecond (`s_sleep 16`), and
+     the host's ring every eighth poll, as before.
+2. Moving at the last use: a send that is an array's last use (Frees.cpp)
+   moves its blocks instead of copying them.
+3. Copies by the wave's lanes or the worker teams, for a send that is not
+   the last use, and the same for `array.init`.
+
 ## Topology: GPUs, NUMA domains and NICs within a node
 
 Proposed 2026-11-09; nothing is built, and it is not agreed. Real numbers wait for

@@ -76,6 +76,9 @@ namespace merkurius::runtime {
 void FreeRing(int device, DeviceRing *ring);
 // A GPU process has ended (rpcProcessEnded, gpu-processes.cpp).
 void PlaceProcessEnded(int device, std::uint64_t table, std::uint64_t slot);
+std::uint64_t PlaceRoute(const std::uint64_t *handle, int device,
+    std::uint64_t table, std::uint64_t *incarnation);
+std::int64_t PlaceMessageBlocks();
 // The most bytes of blocks that a GPU process held at once, of all those
 // that have ended, which MERK_CHECK_PROCESS_MEMORY reports.
 std::atomic<std::uint64_t> processPeakBytes{0};
@@ -631,6 +634,15 @@ unsigned HandleOpcode(void *raw, unsigned) {
       buffer->data[0] = teamsStallMilliseconds;
     });
     return rpc::RPC_SUCCESS;
+  case rpcRoute:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      std::uint64_t incarnation{0};
+      std::uint64_t queue{PlaceRoute(buffer->data,
+          static_cast<int>(buffer->data[5]), buffer->data[6], &incarnation)};
+      buffer->data[0] = queue;
+      buffer->data[1] = incarnation;
+    });
+    return rpc::RPC_SUCCESS;
   case rpcSend:
     // The answer tells the device that the message is queued.
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
@@ -807,6 +819,8 @@ static bool Set(const char *name) {
   return value && *value;
 }
 
+bool CheckingDeviceMemory() { return Set("MERK_CHECK_DEVICE_MEMORY"); }
+
 void CheckFreedAtEnd() {
   bool pinned{Set("MERK_CHECK_PINNED")}, messages{Set("MERK_CHECK_MESSAGES")};
   bool device{Set("MERK_CHECK_DEVICE_MEMORY")};
@@ -851,6 +865,12 @@ void CheckFreedAtEnd() {
         "Mercury runtime: a GPU process held at most %llu bytes of blocks at "
         "once\n",
         static_cast<unsigned long long>(processPeakBytes.load()));
+  }
+  if (device) {
+    std::fprintf(stderr,
+        "Mercury runtime: %lld blocks of messages between GPU processes are "
+        "allocated\n",
+        static_cast<long long>(PlaceMessageBlocks()));
   }
 }
 } // namespace merkurius::runtime

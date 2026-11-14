@@ -118,6 +118,14 @@ constexpr uint32_t rpcTeamsStall{RpcOpcode(12)};
 // give another.
 constexpr uint32_t rpcProcessEnded{RpcOpcode(13)};
 
+// The route from a GPU process to a mailbox (docs/INPROGRESS.md, Messages
+// between GPU processes on one GPU): the buffer's words are the handle's
+// five, the device's number and the sender's kernel's table. The host
+// answers with the queue of the mailbox's process, if it is a process of
+// the same kernel, and the process's incarnation (place.h, ProcessQueue);
+// or 0, for a send through the host.
+constexpr uint32_t rpcRoute{RpcOpcode(14)};
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_RPC_OPCODES_H_

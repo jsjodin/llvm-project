@@ -81,6 +81,8 @@ extern "C" void merk_mailbox_close_ended(std::int64_t nodeHigh,
 namespace merkurius::runtime {
 void GpuProcessStarted();
 void GpuProcessEnded();
+// Whether MERK_CHECK_DEVICE_MEMORY is set (offload.cpp).
+bool CheckingDeviceMemory();
 void *NewProcessArena(int device);
 void FreeProcessArena(int device, void *arena);
 void FreeRing(int device, DeviceRing *ring);
@@ -123,6 +125,13 @@ struct RunningProcess {
   void *arena;
   std::uint64_t *words;
   Place *place;
+  // Its slot of the kernel, its incarnation there (place.h), and its queue,
+  // in the device's memory; and the next on the list of routes, from its
+  // spawn, once its handle is made, until it ends (PlaceRoute).
+  std::uint64_t slot;
+  std::uint64_t incarnation;
+  std::uint64_t queue;
+  RunningProcess *nextRoute;
   Process *record;
   std::int64_t handle[kHandleWords];
   DeviceRing *ring;
@@ -144,6 +153,10 @@ struct Place {
   ol_queue_handle_t queue;
   bool allUnits;
   PlaceTable *table;
+  // The slots' queues, in the device's memory, and how many processes each
+  // slot has started (place.h, ProcessQueue).
+  void *queues;
+  std::uint64_t *incarnations;
   RunningProcess **processes;
   std::uint64_t *owners;
   std::uint64_t teamSlots;
@@ -173,6 +186,17 @@ struct GpuPlaces {
   bool launching;
 };
 GpuPlaces gpuPlaces[kMostGpus];
+
+// The running processes that a GPU process may send to directly
+// (PlaceRoute), with a lock of their own: the plugin's RPC server asks for a
+// route while a spawn may hold `lock` across a call of liboffload, which
+// waits for the server.
+pthread_mutex_t routesLock = PTHREAD_MUTEX_INITIALIZER;
+RunningProcess *routes{nullptr};
+
+// The blocks of messages between GPU processes that the kernels the reaper
+// has freed left allocated (PlaceTable), with MERK_CHECK_DEVICE_MEMORY.
+std::int64_t endedPlaceBlocks{0};
 
 // Every kernel that has not ended, and those that have, for the reaper.
 Place *places{nullptr};
@@ -219,9 +243,13 @@ void Reap(RunningProcess *process) {
   GpuProcessEnded();
 }
 
-// Frees an ended kernel's table.
+// Frees an ended kernel's table and queues, keeping the count of its blocks
+// of messages that are still allocated (PlaceTable).
 void ReapPlace(Place *place) {
+  __atomic_add_fetch(&endedPlaceBlocks, place->table->blocks, __ATOMIC_RELAXED);
   DeviceFreeHost(place->gpu, place->table);
+  DeviceFree(place->gpu, place->queues);
+  std::free(place->incarnations);
   std::free(place->processes);
   std::free(place->owners);
   std::free(place);
@@ -616,6 +644,21 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   }
   std::memset(static_cast<void *>(table), 0, bytes);
   table->slots = slots;
+  // The device's memory, before the kernel runs, so that no line of the
+  // device's caches is stale; each wave makes its own queue empty.
+  void *queues{DeviceAllocate(gpu.number, slots * sizeof(ProcessQueue))};
+  if (!queues) {
+    DeviceFreeHost(gpu.number, table);
+    return Error("out of memory on GPU %s%lld for the queues of its "
+                 "processes%s%s%s",
+        "", gpu.number, "", "", "");
+  }
+  table->queues = reinterpret_cast<std::uint64_t>(queues);
+  table->check = CheckingDeviceMemory();
+  auto *incarnations{
+      static_cast<std::uint64_t *>(Malloc(slots * sizeof(std::uint64_t)))};
+  std::memset(
+      static_cast<void *>(incarnations), 0, slots * sizeof(std::uint64_t));
   auto *place{static_cast<Place *>(Malloc(sizeof(Place)))};
   auto *processes{
       static_cast<RunningProcess **>(Malloc(slots * sizeof(RunningProcess *)))};
@@ -624,15 +667,19 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   auto *owners{
       static_cast<std::uint64_t *>(Malloc(slots * sizeof(std::uint64_t)))};
   std::memset(static_cast<void *>(owners), 0, slots * sizeof(std::uint64_t));
-  *place = {image.module, gpu.number, queue, allUnits, table, processes, owners,
-      kPlaceTeamThreads / lanes, 0, false, places};
+  *place = {image.module, gpu.number, queue, allUnits, table, queues,
+      incarnations, processes, owners, kPlaceTeamThreads / lanes, 0, false,
+      places};
   size.numGroups.x = teams;
   bool cooperative{true};
   const char *stackError{nullptr};
   std::uint64_t stack{ProcessStackBytes(stackError)};
   if (!stack) {
     DeviceFreeHost(gpu.number, table);
+    DeviceFree(gpu.number, queues);
+    std::free(incarnations);
     std::free(processes);
+    std::free(owners);
     std::free(place);
     return stackError;
   }
@@ -646,6 +693,8 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   if (ol_result_t result{olLaunchKernel(
           queue, gpu.device, kernel, &size, properties, 1, arguments, sizes)}) {
     DeviceFreeHost(gpu.number, table);
+    DeviceFree(gpu.number, queues);
+    std::free(incarnations);
     std::free(processes);
     std::free(owners);
     std::free(place);
@@ -785,6 +834,10 @@ const char *TakeSlot(const Gpu &gpu, const LoadedImage &image, const char *kind,
       }
       place->processes[slot] = process;
       process->place = place;
+      process->slot = slot;
+      process->incarnation = ++place->incarnations[slot];
+      process->queue = reinterpret_cast<std::uint64_t>(place->queues) +
+          slot * sizeof(ProcessQueue);
       ++place->running;
       return nullptr;
     }
@@ -836,6 +889,16 @@ void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
         stderr);
     std::_Exit(1);
   }
+  // No sender is given its queue from now on: a send to its handle goes
+  // through the host, to its mailbox, which closes.
+  pthread_mutex_lock(&routesLock);
+  for (RunningProcess **link{&routes}; *link; link = &(*link)->nextRoute) {
+    if (*link == process) {
+      *link = process->nextRoute;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&routesLock);
   const std::int64_t *h{process->handle};
   merk_mailbox_close_ended(h[0], h[1], h[2], h[3], h[4], &process->ring,
       &process->ringDevice, &process->copy, &process->release);
@@ -847,6 +910,51 @@ void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
   ended = process;
   pthread_cond_signal(&endedCondition);
   pthread_mutex_unlock(&lock);
+}
+
+// With MERK_CHECK_DEVICE_MEMORY, once no GPU process runs: the blocks of
+// messages between GPU processes still allocated, in kernels that have
+// ended and those that run.
+std::int64_t PlaceMessageBlocks() {
+  std::int64_t blocks{__atomic_load_n(&endedPlaceBlocks, __ATOMIC_RELAXED)};
+  pthread_mutex_lock(&lock);
+  for (const Place *place{places}; place; place = place->next) {
+    blocks += __atomic_load_n(&place->table->blocks, __ATOMIC_ACQUIRE);
+  }
+  for (const Place *place{endedPlaces}; place; place = place->next) {
+    blocks += __atomic_load_n(&place->table->blocks, __ATOMIC_ACQUIRE);
+  }
+  pthread_mutex_unlock(&lock);
+  return blocks;
+}
+
+// The route from a process of the kernel whose table is `table`, on the
+// device, to the mailbox of the handle (rpcRoute): the queue of the
+// mailbox's process, if it is a running process of the same kernel, in
+// `incarnation` the process's incarnation; or 0, for a send through the
+// host. A process's mailbox is made at its spawn, so a sender that asks
+// after it has the handle finds it, and keeps one route for its life.
+std::uint64_t PlaceRoute(const std::uint64_t *handle, int device,
+    std::uint64_t table, std::uint64_t *incarnation) {
+  std::uint64_t queue{0};
+  *incarnation = 0;
+  pthread_mutex_lock(&routesLock);
+  for (const RunningProcess *process{routes}; process;
+      process = process->nextRoute) {
+    bool same{process->gpu == device &&
+        reinterpret_cast<std::uint64_t>(process->place->table) == table};
+    for (int i{0}; i < kHandleWords; ++i) {
+      same =
+          same && static_cast<std::uint64_t>(process->handle[i]) == handle[i];
+    }
+    if (same) {
+      queue = process->queue;
+      *incarnation = process->incarnation;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&routesLock);
+  return queue;
 }
 
 } // namespace merkurius::runtime
@@ -1034,6 +1142,11 @@ extern "C" const char *merk_gpu_process_spawn(std::uint64_t typeInfo,
   placeSlot.arena = reinterpret_cast<std::uint64_t>(process->arena);
   placeSlot.words = reinterpret_cast<std::uint64_t>(process->words);
   placeSlot.workers = workers;
+  placeSlot.incarnation = process->incarnation;
+  pthread_mutex_lock(&routesLock);
+  process->nextRoute = routes;
+  routes = process;
+  pthread_mutex_unlock(&routesLock);
   __atomic_store_n(&placeSlot.state, kPlaceRunning, __ATOMIC_RELEASE);
   *placeAndSlot = h[2];
   *generation = h[3];
