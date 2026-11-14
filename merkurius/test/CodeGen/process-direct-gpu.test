@@ -1,14 +1,16 @@
 process-direct.m's processes on the machine's GPU, where the sends between
 them go through the receivers' queues in the GPU's memory, with no call of
 the host (docs/INPROGRESS.md, Messages between GPU processes on one GPU):
-each sender's messages in order, beside the host's; arrays; a queue that
-spills; a receiver that ends while others send to it; and a closed mailbox.
+each sender's messages in order, beside the host's; arrays; terms whose
+arrays are copied and then moved; a queue that spills; a receiver that ends
+while others send to it; and a closed mailbox.
 None of the messages, nor their blocks, is left once the processes end.
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-direct.m -o %t2
 RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu order 2>&1 | FileCheck %S/process-direct.m --check-prefixes=ORDER,FREED --match-full-lines --strict-whitespace
 RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu arrays 2>&1 | FileCheck %S/process-direct.m --check-prefixes=ARRAYS,FREED --match-full-lines --strict-whitespace
+RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu terms 2>&1 | FileCheck %S/process-direct.m --check-prefixes=TERMS,FREED --match-full-lines --strict-whitespace
 RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu self 2>&1 | FileCheck %S/process-direct.m --check-prefixes=SELF,FREED --match-full-lines --strict-whitespace
 RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu quit 2>&1 | FileCheck %S/process-direct.m --check-prefixes=QUIT,FREED --match-full-lines --strict-whitespace
 RUN: %gpu-env not timeout -k 1 60 %t2 gpu closed 2>&1 | FileCheck %S/process-direct.m --check-prefix=CLOSED

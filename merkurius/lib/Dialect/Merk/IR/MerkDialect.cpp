@@ -210,6 +210,17 @@ static bool AreFields(mlir::TypeRange types, FunctorAttr functor) {
   });
 }
 
+// Only a GPU process's send of an array or a term moves its message.
+llvm::LogicalResult ForeignCallOp::verify() {
+  if (getMoves() && getCallee() != "merk_device_send_array" &&
+      getCallee() != "merk_device_send_term") {
+    return emitOpError("moves its inputs, which only a send of an array or "
+                       "a term does, not a call of @")
+        << getCallee();
+  }
+  return llvm::success();
+}
+
 llvm::LogicalResult ConstructOp::verify() {
   if (!AreFields(getArguments().getTypes(), getFunctor())) {
     return emitOpError("has ")

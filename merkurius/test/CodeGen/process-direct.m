@@ -10,6 +10,11 @@
 %   and finds each sender's in the order sent.
 % - "arrays": the same with arrays of 1 to 50 elements, each element the
 %   sender and the array's number, and two arrays from the host.
+% - "terms": three senders each send a collector 100 arrays of 1 to 50
+%   elements twice, in a term with the array's number: the first send copies
+%   the array, which is sent again, and the second, its last use, moves it
+%   (merk.foreign_call's `moves`). The collector checks each array and the
+%   order.
 % - "self": a process sends itself 200 words before it takes any, so that
 %   most of them spill from its queue's slots, and takes them in order.
 % - "quit": a process takes one word and ends, while three senders send it
@@ -27,6 +32,7 @@
 % RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 host order | FileCheck %s --check-prefix=ORDER --match-full-lines --strict-whitespace
 % RUN: %libomp-env %t2 host arrays | FileCheck %s --check-prefix=ARRAYS --match-full-lines --strict-whitespace
+% RUN: %libomp-env %t2 host terms | FileCheck %s --check-prefix=TERMS --match-full-lines --strict-whitespace
 % RUN: %libomp-env %t2 host self | FileCheck %s --check-prefix=SELF --match-full-lines --strict-whitespace
 % RUN: %libomp-env %t2 host quit | FileCheck %s --check-prefix=QUIT --match-full-lines --strict-whitespace
 % RUN: %libomp-env %t2 host closed 2>&1 | FileCheck %s --check-prefix=CLOSED
@@ -45,6 +51,9 @@
     --->    sent(int)
     ;       got(int, int)
     ;       timed_out(int, int).
+
+:- type tagged
+    --->    tagged(int, array(int)).
 
     % Sends To the words S * 1000000 + I for I from 1 to K, and then tells
     % Report.
@@ -125,6 +134,70 @@ send_arrays(S, I, K, To, !IO) :-
         send_arrays(S, I + 1, K, To, !IO)
     else
         true
+    ).
+
+    % Sends To K terms tagged(S * 1000000 + I, A) twice, A the I'th array of
+    % send_arrays, and then tells Report.
+:- process term_sender(int, int, mailbox(tagged), mailbox(report))
+    receives int on gpu.
+
+term_sender(S, K, To, Report, _, !IO) :-
+    send_terms(S, 1, K, To, !IO),
+    send(Report, sent(S), !IO).
+
+:- pred send_terms(int::in, int::in, int::in, mailbox(tagged)::in,
+    io::di, io::uo) is det.
+
+send_terms(S, I, K, To, !IO) :-
+    ( if I =< K then
+        V = S * 1000000 + I,
+        A = array.init(1 + I mod 50, V),
+        send(To, tagged(V, A), !IO),
+        send(To, tagged(V, A), !IO),
+        send_terms(S, I + 1, K, To, !IO)
+    else
+        true
+    ).
+
+    % Takes N terms of senders 0 to 2, and reports how many it took and how
+    % many were out of their sender's order or not as sent: each sender's
+    % numbers come twice each, in order.
+:- process term_collector(int, mailbox(report)) receives tagged on gpu.
+
+term_collector(N, Report, Self, !IO) :-
+    collect_terms(N, 0, 0, 0, 0, 0, Report, Self, !IO).
+
+:- pred collect_terms(int::in, int::in, int::in, int::in, int::in, int::in,
+    mailbox(report)::in, mailbox(tagged)::in, io::di, io::uo) is det.
+
+collect_terms(Left, Took, Wrong, L0, L1, L2, Report, Self, !IO) :-
+    ( if Left = 0 then
+        send(Report, got(Took, Wrong), !IO)
+    else
+        receive(Self, any, after(10000), R, !IO),
+        ( if R = message(tagged(V, A)) then
+            S = V / 1000000,
+            I = V mod 1000000,
+            Shape = ( if array.size(A) = 1 + I mod 50, all_are(A, V, 0)
+                then 0 else 1 ),
+            Last = ( if S = 0 then L0 else if S = 1 then L1 else L2 ),
+            % Two sends of each I: the second count is I itself.
+            Order = ( if I * 2 - 1 = Last + 1 then 0
+                else if I * 2 = Last + 1 then 0 else 1 ),
+            W = Wrong + Shape + Order,
+            ( if S = 0 then
+                collect_terms(Left - 1, Took + 1, W, Last + 1, L1, L2, Report,
+                    Self, !IO)
+            else if S = 1 then
+                collect_terms(Left - 1, Took + 1, W, L0, Last + 1, L2, Report,
+                    Self, !IO)
+            else
+                collect_terms(Left - 1, Took + 1, W, L0, L1, Last + 1, Report,
+                    Self, !IO)
+            )
+        else
+            send(Report, timed_out(Took, Wrong), !IO)
+        )
     ).
 
     % Takes N arrays of senders 0 to 2 and two of the host's, whose first
@@ -258,6 +331,12 @@ main(!IO) :-
             order(Place, Reports, !IO)
         else if Case = "arrays" then
             arrays(Place, Reports, !IO)
+        else if Case = "terms" then
+            spawn(Place, term_collector(600, Reports), C, !IO),
+            spawn(Place, term_sender(0, 100, C, Reports), _, !IO),
+            spawn(Place, term_sender(1, 100, C, Reports), _, !IO),
+            spawn(Place, term_sender(2, 100, C, Reports), _, !IO),
+            print_reports(4, Reports, !IO)
         else if Case = "self" then
             spawn(Place, selfie(200, Reports), _, !IO),
             print_reports(1, Reports, !IO)
@@ -370,6 +449,10 @@ sum_reports(N, Sent, Took, Wrong, Reports, !IO) :-
 % ARRAYS-NEXT:sent(1)
 % ARRAYS-NEXT:sent(2)
 % ARRAYS-NEXT:got(902, 0)
+% TERMS:sent(0)
+% TERMS-NEXT:sent(1)
+% TERMS-NEXT:sent(2)
+% TERMS-NEXT:got(600, 0)
 % SELF:got(200, 0)
 % QUIT:sent 5, took 2, wrong 0
 % FREED-NEXT:Mercury runtime: 0 messages are neither read nor freed

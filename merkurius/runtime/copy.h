@@ -20,8 +20,11 @@
 // and into host memory that a device reads (offload.cpp); a GPU copies
 // into its arena and into such host memory (device/device.cpp), so that a
 // message of any type that the host can copy crosses between them
-// (docs/INPROGRESS.md, GPU processes without omp target, step 4e). It uses
-// no library, so that it builds for the GPU.
+// (docs/INPROGRESS.md, GPU processes without omp target, step 4e). A
+// `Memory` may also have `Word *Move(const Word *array)`, which gives the
+// copy an array itself, as a send that moves its message does, or null for
+// a copy (device/device.cpp, MovingMemory). It uses no library, so that it
+// builds for the GPU.
 //
 //===----------------------------------------------------------------------===//
 
@@ -63,6 +66,16 @@ inline void CopyWords(Word *to, const Word *from, Word words) {
 #else
   __builtin_memcpy(to, from, sizeof(Word) * words);
 #endif
+}
+
+// The array itself, if `memory` moves it into the copy (Move), or null.
+template <typename Memory>
+auto MovedArray(Memory &memory, const Word *array, int)
+    -> decltype(memory.Move(array)) {
+  return memory.Move(array);
+}
+template <typename Memory> Word *MovedArray(Memory &, const Word *, long) {
+  return nullptr;
 }
 
 // Whether a value of the type is its word in a copy.
@@ -267,6 +280,9 @@ Word CopyTyped(Word value, const Type &type, Memory &memory) {
   }
   case Array: {
     const Word *array{reinterpret_cast<const Word *>(value)};
+    if (Word * moved{MovedArray(memory, array, 0)}) {
+      return reinterpret_cast<Word>(moved);
+    }
     Word size{ArraySize(array)};
     Word words{ArrayWords(array)};
     Word *copy{static_cast<Word *>(memory.Allocate(sizeof(Word) * words))};

@@ -32,6 +32,7 @@
 // RUN: not merkc -fc1 -emit-merk %t/solution-type.mlir 2>&1 | FileCheck %s --check-prefix=SOLUTION-TYPE
 // RUN: not merkc -fc1 -emit-merk %t/soft-ite-type.mlir 2>&1 | FileCheck %s --check-prefix=SOFT-ITE-TYPE
 // RUN: not merkc -fc1 -emit-merk %t/nondet-call-closure.mlir 2>&1 | FileCheck %s --check-prefix=NONDET-CALL-CLOSURE
+// RUN: not merkc -fc1 -emit-merk %t/moves.mlir 2>&1 | FileCheck %s --check-prefix=MOVES
 
 //--- outputs.mlir
 // OUTPUTS: outputs.mlir:[[@LINE+3]]:5: error: 'merk.succeed' op has 0 outputs, but its procedure has 1
@@ -374,5 +375,14 @@ module {
       merk.yield %go, %a : i1, i64
     }
     merk.succeed %r : i64
+  }
+}
+
+//--- moves.mlir
+// MOVES: moves.mlir:[[@LINE+3]]:5: error: 'merk.foreign_call' op moves its inputs, which only a send of an array or a term does, not a call of @merk_device_send
+module attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
+  merk.proc @p(%m: !merk.term<"process.mailbox(int)">, %k: i64) attributes {determinism = #merk.determinism<det>} {
+    merk.foreign_call @merk_device_send(%m, %k, %k) moves : (!merk.term<"process.mailbox(int)">, i64, i64) -> ()
+    merk.succeed
   }
 }

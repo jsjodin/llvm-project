@@ -5366,7 +5366,30 @@ as every process of a GPU allocates from that GPU's heap.
    - *Receiving* polls the queue about every microsecond (`s_sleep 16`), and
      the host's ring every eighth poll, as before.
 2. Moving at the last use: a send that is an array's last use (Frees.cpp)
-   moves its blocks instead of copying them.
+   moves its blocks instead of copying them. Built 2026-11-13. As built:
+   - *A move is plain in the MLIR* (decided with the user): the send's
+     `merk.foreign_call` has a `moves` unit attribute, which only a send of
+     an array or a term may have (the verifier), and lowering calls the
+     send's `_moving` function. A send followed by a `merk.free` could not
+     say it: once the block is the receiver's, a free after the send would
+     free what the receiver holds, and only the send knows the route.
+   - *Where FreeAtLastUse sets it:* at a send that is its class's last use,
+     when every array of the class freed there, by its own value or through
+     a cell, is one that the message holds by its construction. Those
+     arrays' frees go; the cells' stay, as cells are still copied. In any
+     other case the send copies, as before (`frees.mlir`, `sendsOther`).
+   - *At run time* an array that is a block of its own, on the sender's
+     list, leaves the list and joins the message's group (`Movable`,
+     `Detach`, `MovingMemory`, the copy's `Move` hook in copy.h); any other
+     array is copied, and the compiler never drops such an array's free.
+     Through the host, the array is copied and then freed. The receiver
+     needs nothing new: it frees the message's group, as it did a copy.
+   - *A bug found first,* fixed as its own commit: an array sent as the
+     whole message was never freed, as the pass took its pointer's cast for
+     an escape (`process-send-array-free.m`).
+   - One run each, not a measurement: the pipeline at 2^16 words and 16
+     rounds went from 907 to 268 µs a frame, and at 2^20 from 16.0 to 3.7
+     ms, both now below one process's (567 µs, 8.6 ms).
 3. Copies by the wave's lanes or the worker teams, for a send that is not
    the last use, and the same for `array.init`.
 

@@ -476,18 +476,29 @@ def Merk_ForeignCallOp : Merk_Op<"foreign_call"> {
     its first result is the foreign_proc's SUCCESS_INDICATOR, which the C
     function returns, and it stores the outputs through pointers.
 
+    With `moves`, a GPU process's send of an array or a term
+    (`merk_device_send_array`, `merk_device_send_term`) moves the message's
+    arrays to the receiver rather than copying them: it is their last use,
+    nothing frees them after it, and the sender's code must not use them
+    again (docs/INPROGRESS.md, Messages between GPU processes on one GPU,
+    step 2). FreeAtLastUse sets it, and lowering calls the send's `_moving`
+    function, which gives each array that is a block of its own to the
+    message, and copies any other.
+
     ```mlir
     %y = merk.foreign_call @merk_foreign_m__double_2_0(%x) : (i64) -> i64
     %ok = merk.foreign_call @merk_foreign_m__positive_1_0(%x) can_fail : (i64) -> i1
+    merk.foreign_call @merk_device_send_array(%m, %k, %p) moves : (!merk.term<"process.mailbox(array.array(float))">, i64, !llvm.ptr) -> ()
     ```
   }];
   let arguments = (ins FlatSymbolRefAttr:$callee, Variadic<AnyType>:$inputs,
-      UnitAttr:$can_fail);
+      UnitAttr:$can_fail, UnitAttr:$moves);
   let results = (outs Variadic<AnyType>:$outputs);
   let assemblyFormat = [{
-    $callee `(` $inputs `)` (`can_fail` $can_fail^)? attr-dict `:`
-    functional-type($inputs, $outputs)
+    $callee `(` $inputs `)` (`can_fail` $can_fail^)? (`moves` $moves^)?
+    attr-dict `:` functional-type($inputs, $outputs)
   }];
+  let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//
