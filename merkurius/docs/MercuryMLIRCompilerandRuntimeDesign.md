@@ -3792,7 +3792,11 @@ scheduler holds, and a region's later teams did not start for more than ten
 seconds, though the first had (the kernel logs "Runlist is getting
 oversubscribed"). Once, too, a queue could not be taken off the GPU in time and
 the driver reset it. So lit runs at most four `-gpu.test` files at once
-(`MERK_LIT_GPU_JOBS` changes it, `test/lit.cfg.py`). A program that shares a
+(`MERK_LIT_GPU_JOBS` changes it, `test/lit.cfg.py`), spread over the GPUs
+it sees, each test on one by `ROCR_VISIBLE_DEVICES`
+(`utils/lit/merkurius_lit.py`, `GpuShTest`): four on a machine with one GPU,
+one each on four of a machine with more. On gfx90a, four at once on one GPU
+still failed now and then. A program that shares a
 GPU with others can still be reported, which is the error's purpose. On the GPU it costs 1 µs or less at up to 64
 teams, against 29 µs for a tree of messages (Measurements, "Barriers between
 teams"). libc has nothing for teams to wait for each other.

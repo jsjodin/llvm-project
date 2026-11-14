@@ -1,11 +1,17 @@
 # -*- Python -*-
 
 import os
+import sys
 
 import lit.formats
 from lit.llvm import llvm_config
 
+# What lit's workers must import is in utils/lit/merkurius_lit.py.
+sys.path.insert(0, os.path.join(config.merkurius_src_root, "utils", "lit"))
+import merkurius_lit
+
 config.name = "Merkurius"
+# GpuShTest once the GPUs are known, below.
 config.test_format = lit.formats.ShTest()
 
 # Mercury sources, .test files for tests that need no source of their own,
@@ -83,6 +89,13 @@ if os.path.exists(amdgpu_arch):
         gpus = []
 # Programs with host parallel regions need only libomp, the "libomp"
 # feature.
+# The compute units that GPU processes take in the tests:
+# LIBOMPTARGET_AMDGPU_CU_MASK if the environment sets it, else half of the
+# GPU's if it drives a display, so that the display keeps the rest, as
+# gfx1030's 40 of 80, else all of them, as on a server's gfx90a.
+visible_gpus = merkurius_lit.visible_gpus() if gpus else []
+unit_mask = os.environ.get("LIBOMPTARGET_AMDGPU_CU_MASK",
+                           merkurius_lit.gpu_unit_mask(visible_gpus))
 if omp_dirs:
     config.available_features.add("libomp")
     config.substitutions.append(
@@ -91,13 +104,11 @@ if omp_dirs:
         ("%libomp-env", "env LD_LIBRARY_PATH=" + ":".join(omp_dirs)))
     # %gpu-env is %libomp-env for programs that spawn GPU processes, whose
     # kernel takes every compute unit that the offload plugin's queues may
-    # use (runtime/compute-units.h): LIBOMPTARGET_AMDGPU_CU_MASK limits them,
-    # to half of an 80-unit GPU unless the environment says otherwise, so
-    # that a GPU that drives the display keeps units for it.
+    # use (runtime/compute-units.h), limited to unit_mask's.
     config.substitutions.append(
         ("%gpu-env", "env LD_LIBRARY_PATH=" + ":".join(omp_dirs) +
-         " LIBOMPTARGET_AMDGPU_CU_MASK=" +
-         os.environ.get("LIBOMPTARGET_AMDGPU_CU_MASK", "0-39")))
+         ("" if unit_mask is None else
+          " LIBOMPTARGET_AMDGPU_CU_MASK=" + unit_mask)))
 if gpus and omp_dirs:
     config.available_features.add("amdgpu-gpu")
     config.substitutions.append(("%offload-arch", gpus[0]))
@@ -110,26 +121,33 @@ if gpus and os.path.exists(os.path.join(rocm_path, "lib", "libamdhip64.so")):
     config.available_features.add("hip")
     config.substitutions.append(("%rocm-path", rocm_path))
     config.substitutions.append(
-        ("%hip-env", "env HSA_CU_MASK=0:" +
-         os.environ.get("LIBOMPTARGET_AMDGPU_CU_MASK", "0-39")))
+        ("%hip-env",
+         "env" if unit_mask is None else "env HSA_CU_MASK=0:" + unit_mask))
 
 
-# The GPU tests, the -gpu.test files, run at most MERK_LIT_GPU_JOBS (4) at a
-# time. With one per lit worker, the GPU had more programs' queues than its
-# scheduler holds ("Runlist is getting oversubscribed" in the kernel's log),
-# so it took queues off the GPU in turns: a target teams region's later teams
-# then did not start for seconds and the region was reported, and once a
-# queue could not be taken off in time and the driver reset the GPU, which
-# also drives the display. lit pickles the group's function for its workers,
-# so it is in a module they import (utils/lit/merkurius_lit.py).
-import sys
-
-sys.path.insert(0, os.path.join(config.merkurius_src_root, "utils", "lit"))
-from merkurius_lit import gpu_parallelism_group
-
-config.parallelism_group = gpu_parallelism_group
-lit_config.parallelism_groups["merkurius-gpu"] = int(
-    os.environ.get("MERK_LIT_GPU_JOBS", "4"))
+# The GPU tests, the -gpu.test files, run at most MERK_LIT_GPU_JOBS at a
+# time, 4 unless the environment says otherwise, spread over the GPUs that
+# the tests see, each test on one (GpuShTest): as many on a GPU as fit
+# evenly, 4 on a machine with one GPU, one each on a machine with 4 or
+# more. With one per lit worker on one GPU, the GPU had more programs'
+# queues than its scheduler holds ("Runlist is getting oversubscribed" in
+# the kernel's log), so it took queues off the GPU in turns: a target teams
+# region's later teams then did not start for seconds and the region was
+# reported, and once a queue could not be taken off in time and the driver
+# reset the GPU, which also drives the display. On gfx90a four at once on
+# one GPU still failed now and then, kernels whose teams must all run at
+# once not getting them beside the others'.
+gpu_jobs = int(os.environ.get("MERK_LIT_GPU_JOBS", "4"))
+config.parallelism_group = merkurius_lit.gpu_parallelism_group
+if visible_gpus:
+    per_gpu = max(1, -(-gpu_jobs // len(visible_gpus)))
+    gpu_ids = [gpu["id"] for gpu in visible_gpus]
+    # More GPUs than jobs: use only as many GPUs as jobs.
+    gpu_ids = gpu_ids[:gpu_jobs] if len(gpu_ids) > gpu_jobs else gpu_ids
+    config.test_format = merkurius_lit.GpuShTest(
+        gpu_ids, per_gpu, os.path.join(config.test_exec_root, "gpu-slots"))
+    gpu_jobs = len(gpu_ids) * per_gpu
+lit_config.parallelism_groups["merkurius-gpu"] = gpu_jobs
 
 # The script that runs a command on free GPUs (utils/gpu/with-gpus.py).
 config.substitutions.append(
