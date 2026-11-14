@@ -1414,6 +1414,63 @@ void Distribute(uint64_t loop, int64_t first, int64_t step, int64_t count,
   }
 }
 
+// Large fills and copies of a GPU process's memory (docs/INPROGRESS.md,
+// Messages between GPU processes on one GPU, step 3), which its one lane
+// did at about 3 GB/s: array.init of a frame of 8 MiB took 2.9 ms (design
+// document, Measurements, A pipeline of GPU processes). A process with
+// worker teams has them do it, as a loop of the runtime's own across them,
+// from kBulkBytes up, where crossing their barrier twice costs less than
+// the lane's loop. The process lane's words are in the control block: what
+// to do, where to, from where or the word to fill with, and how many words.
+constexpr uint64_t kBulkLoop{~uint64_t{0}};
+constexpr uint64_t kBulkBytes{uint64_t{64} << 10};
+constexpr uint64_t kBulkFill{0};
+constexpr uint64_t kBulkCopy{1};
+
+// A worker thread's share of the process's fill or copy: words `stride`
+// apart from `start`, in rounds of the team's threads' consecutive words,
+// as a loop's iterations are (Work).
+void BulkShare(
+    const uint64_t *values, int64_t count, int64_t start, int64_t stride) {
+  auto *to{reinterpret_cast<uint64_t *>(values[1])};
+  if (values[0] == kBulkFill) {
+    uint64_t word{values[2]};
+    for (int64_t i{start}; i < count; i += stride) {
+      to[i] = word;
+    }
+    return;
+  }
+  const auto *from{reinterpret_cast<const uint64_t *>(values[2])};
+  for (int64_t i{start}; i < count; i += stride) {
+    to[i] = from[i];
+  }
+}
+
+// The process's worker teams fill or copy `words` words: true, or false if
+// the wave runs no process, the process has no worker teams, or there are
+// too few words, for the caller's own loop.
+bool Bulk(uint64_t what, uint64_t *to, uint64_t fromOrWord, uint64_t words) {
+  if (!merk_device_process_image || words * sizeof(uint64_t) < kBulkBytes) {
+    return false;
+  }
+  uint32_t inTeam{__gpu_thread_id_x() / __gpu_num_lanes()};
+  ProcessControl *control{
+      processWaves[inTeam] ? placeControls[inTeam] : nullptr};
+  if (!control) {
+    return false;
+  }
+  control->loop = kBulkLoop;
+  control->count = static_cast<int64_t>(words);
+  control->distribute = 0;
+  control->reductions = 0;
+  control->values[0] = what;
+  control->values[1] = reinterpret_cast<uint64_t>(to);
+  control->values[2] = fromOrWord;
+  ProcessArrive(control);
+  ProcessArrive(control);
+  return true;
+}
+
 // Every thread of a wave whose slot its process has set working: the team
 // runs the process's loops with its other worker teams, each thread taking
 // iterations a team's threads apart, from its own in its team's block, until
@@ -1443,6 +1500,11 @@ void Distribute(uint64_t loop, int64_t first, int64_t step, int64_t count,
     int64_t count{control->count};
     uint64_t reductions{control->reductions};
     auto values{reinterpret_cast<uint64_t>(control->values)};
+    if (loop == kBulkLoop) {
+      BulkShare(control->values, count, base + thread, stride);
+      WorkerArrive(control);
+      continue;
+    }
     if (control->distribute) {
       Distribute(loop, first, step, count, values, worker, workers, inTeam);
       WorkerArrive(control);
@@ -1477,6 +1539,20 @@ void Distribute(uint64_t loop, int64_t first, int64_t step, int64_t count,
 }
 
 } // namespace
+
+// A GPU process's fill of `words` words with `word`, or copy of `words`
+// words, which its worker teams do if it has them and there are enough
+// (Bulk): true, or false for the caller's own loop. The arrays (array.cpp)
+// and the copies of messages (copy.h, CopyWords) call them.
+extern "C" bool merk_device_bulk_fill(
+    uint64_t *to, uint64_t word, uint64_t words) {
+  return Bulk(kBulkFill, to, word, words);
+}
+
+extern "C" bool merk_device_bulk_copy(
+    uint64_t *to, const uint64_t *from, uint64_t words) {
+  return Bulk(kBulkCopy, to, reinterpret_cast<uint64_t>(from), words);
+}
 
 // Each wave of the kernel of a GPU's processes, merk_place (place.h): lane 0
 // polls the wave's slot of the table, sleeping, and runs each process that

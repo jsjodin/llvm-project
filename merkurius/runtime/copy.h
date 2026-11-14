@@ -39,13 +39,26 @@ namespace merkurius::runtime {
 template <typename Memory>
 Word CopyTyped(Word value, const Type &type, Memory &memory);
 
+#if defined(__AMDGPU__)
+// A GPU process's worker teams copy many words for it (device/device.cpp,
+// Bulk).
+extern "C" bool merk_device_bulk_copy(
+    uint64_t *to, const uint64_t *from, uint64_t words);
+#endif
+
 // Copies `words` words, as memcpy does. On a GPU, where one lane copies a
 // message between the device's memory and the host's, memcpy's loop waits
 // for each load before the next, and a load from host memory is a round trip
 // over the bus: about 0.4 us a word, which was 40% of a step of Life on two
 // places (design document, Measurements, "Life on several places"). Here a
-// batch of loads is in flight before any of their stores.
+// batch of loads is in flight before any of their stores. A GPU process
+// with worker teams has them copy many words (merk_device_bulk_copy).
 inline void CopyWords(Word *to, const Word *from, Word words) {
+#if defined(__AMDGPU__)
+  if (merk_device_bulk_copy(to, from, words)) {
+    return;
+  }
+#endif
 #if defined(__AMDGPU__) || defined(__NVPTX__)
   constexpr Word kBatch{32};
   Word i{0};
