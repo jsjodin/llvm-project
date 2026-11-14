@@ -112,6 +112,7 @@ using merkurius::runtime::kRegionSlotClearing;
 using merkurius::runtime::kRegionSlots;
 using merkurius::runtime::kRegionSlotWords;
 using merkurius::runtime::kRingCacheSlots;
+using merkurius::runtime::kRingClosed;
 using merkurius::runtime::kRingOfArrays;
 using merkurius::runtime::kRingOfTerms;
 using merkurius::runtime::kRingOfWords;
@@ -1897,6 +1898,14 @@ RingEntry *RingOf(const uint64_t *handle, uint64_t kind) {
   return entry;
 }
 
+// A receive from a mailbox that is closed, or another node's, which the
+// host found as the device attached its ring, or marked in the ring's tail
+// as it closed it: an error, as on the host (process.receive).
+[[noreturn]] void ClosedMailbox() {
+  Fail(0, "Software Error: receive: the mailbox is closed or another "
+          "node's");
+}
+
 // Asks the host for the messages that did not fit in the ring.
 void Drain(const uint64_t *handle) {
   rpc::Client::Port port{__llvm_rpc_client.open<rpcDrain>()};
@@ -1915,17 +1924,25 @@ bool Look(
     const uint64_t *handle, uint64_t kind, RingEntry *&entry, uint64_t *value) {
   entry = RingOf(handle, kind);
   if (!entry) {
-    return false;
+    ClosedMailbox();
   }
   DeviceRing *ring{entry->ring};
-  if (entry->head == __atomic_load_n(&ring->tail, __ATOMIC_ACQUIRE)) {
+  uint64_t tail{__atomic_load_n(&ring->tail, __ATOMIC_ACQUIRE)};
+  if (tail == kRingClosed) {
+    ClosedMailbox();
+  }
+  if (entry->head == tail) {
     // What waits outside the ring is in it after the drain, so that a
     // receive with no time to wait still finds it.
     if (!__atomic_load_n(&ring->spilled, __ATOMIC_ACQUIRE)) {
       return false;
     }
     Drain(handle);
-    if (entry->head == __atomic_load_n(&ring->tail, __ATOMIC_ACQUIRE)) {
+    tail = __atomic_load_n(&ring->tail, __ATOMIC_ACQUIRE);
+    if (tail == kRingClosed) {
+      ClosedMailbox();
+    }
+    if (entry->head == tail) {
       return false;
     }
   }
