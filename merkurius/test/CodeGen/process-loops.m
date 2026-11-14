@@ -184,5 +184,5 @@ print_answer(R, !IO) :-
 % LLVM-DAG: define hidden void @merk_process_loop({{.*}}) #[[OUT:[0-9]+]]
 % LLVM-DAG: declare void @merk_device_sync_threads() #[[CONVERGENT:[0-9]+]]
 % LLVM-DAG: attributes #[[CONVERGENT]] = { convergent }
-% LLVM-DAG: attributes #[[DISPATCH]] = { convergent noinline "amdgpu-single-lane" }
-% LLVM-DAG: attributes #[[OUT]] = { convergent noinline }
+% LLVM-DAG: attributes #[[DISPATCH]] = { convergent noinline "amdgpu-single-lane" "target-cpu"="gfx1030" "target-features"="{{[^"]*}}" }
+% LLVM-DAG: attributes #[[OUT]] = { convergent noinline "target-cpu"="gfx1030" "target-features"="{{[^"]*}}" }
