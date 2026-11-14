@@ -5302,6 +5302,28 @@ std::unique_ptr<llvm::Module> TranslateToLLVMIR(mlir::ModuleOp module,
     dialect->addInterfaces<MerkTranslation>();
   });
   module.getContext()->appendDialectRegistry(registry);
+  // On an AMD GPU each function names its GPU and the GPU's features, as
+  // Clang's do. OpenMP's lowering copies them to the kernels and outlined
+  // functions it makes, and sizes its reductions' shuffles by the
+  // wavefront's size among them: without +wavefrontsize64 it takes 32 lanes,
+  // and on a 64-lane GPU each wave's upper half is counted again.
+  if (std::string gpu{target.gpu()}; !gpu.empty()) {
+    mlir::MLIRContext *context{module.getContext()};
+    auto cpu{mlir::StringAttr::get(context, gpu)};
+    auto features{mlir::LLVM::TargetFeaturesAttr::get(
+        context, llvm::StringRef{target.functionFeatures()})};
+    for (auto function : module.getOps<mlir::LLVM::LLVMFuncOp>()) {
+      if (function.isExternal()) {
+        continue;
+      }
+      if (!function.getTargetCpuAttr()) {
+        function.setTargetCpuAttr(cpu);
+      }
+      if (!function.getTargetFeaturesAttr()) {
+        function.setTargetFeaturesAttr(features);
+      }
+    }
+  }
   std::unique_ptr<llvm::Module> llvmModule{mlir::translateModuleToLLVMIR(
       module, context, module.getName().value_or("module"))};
   if (llvmModule) {
