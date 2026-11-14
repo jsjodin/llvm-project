@@ -5344,8 +5344,9 @@ as every process of a GPU allocates from that GPU's heap.
 1. The queue, the route and direct sends of words, arrays and terms, with
    tests of two and three processes on one GPU, ordering from one sender,
    both sources at once, a full ring, and a receiver that ends while
-   others send. The pipeline benchmark measured again. Built 2026-11-13,
-   all but the measurements, which follow (place.h, `ProcessQueue`; device/device.cpp, "Messages between the
+   others send. The pipeline benchmark measured again. Done 2026-11-13:
+   the pipeline 1.7 to 7 times faster (design document, Measurements, A
+   pipeline of GPU processes, With the queue in the GPU's memory) (place.h, `ProcessQueue`; device/device.cpp, "Messages between the
    processes of a kernel"; gpu-processes.cpp, `PlaceRoute`;
    `test/CodeGen/process-direct.m` and its `-gpu.test`). As built, beside
    the design above:
