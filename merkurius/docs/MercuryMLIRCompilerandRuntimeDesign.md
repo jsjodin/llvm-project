@@ -5279,6 +5279,49 @@ configuration gave one checksum in every run.
 - **Against HIP** the pipeline is 1.04 to 1.23 times at 256 rounds and more,
   and 2.4 times at 2^20 words and 16 rounds, against 13 before.
 
+**Why the pipeline trails one process.** 2026-11-14 at bafae0ac2eee, a copy
+of `pipeline.m` with each process timing its steps by the device's clock
+(kept in `$CLAUDE_JOB_DIR`, not in the tree), 40 frames, µs a frame, one run
+each.
+
+| 2^20 words, 16 rounds | Wait, receive | array.init | Loops | Send or checksum | Total |
+|---|---|---|---|---|---|
+| Source (make) | 1 | 83 | 235 | 41 | 360 |
+| Middle (stage) | 15 | 46 | 444 | 22 | 527 |
+| Sink (stage, then checksum) | 15 | 27 | 312 | 212 | 566 |
+| One process, all teams | 1 | 50 | 324 | 85 | 452 |
+| One process, a third of the teams | 1 | 58 | 565 | 105 | 727 |
+
+At 2^16 words (200 frames, 63 µs a frame) each process's send took 16 to
+21 µs, its receive about 12, its array.init 10 to 13, and its loop 14 to
+22.
+
+- **The work is bound by memory, so splitting the GPU adds no throughput.**
+  One process on a third of the teams alone runs its loops 1.7 times
+  slower than on all of them, not 3 times. When the three run at once,
+  each stage's loop is 2.4 times slower again (the middle's stage 444 µs,
+  against 188 for one stage on a third of the teams alone). The three
+  processes' loops together, 1202 µs of their time a frame, are about 400
+  µs of the GPU's, the same as one process's 409. Overlap paid while a
+  stage's time was its lane's fills, which waited on latency; it does not
+  pay for loops that wait on memory.
+- **The stages are not even.** The sink runs a stage and the checksum,
+  523 µs of loops a frame, the source only `make`, 235, with the same
+  share of the teams. The pipeline goes at its slowest process's pace, 566
+  µs, the average being 484.
+- **Each hop costs 25 to 35 µs** of fixed work, which matters at small
+  frames. Not yet timed inside; likely most of it is blocks: a moving send
+  makes two small ones (the message's envelope and its copied cell) and
+  frees the sent cell, and the receiver later frees three, each through
+  libc's allocator on the GPU, which took 3 to 4 µs a block (A GPU
+  process's blocks, above).
+- **What follows.** On one GPU a pipeline of stages bound by memory can at
+  best match one process; it wins between GPUs, where each stage has its
+  own GPU's memory, which is the goal. On one GPU, teams shared by the
+  stages' work rather than evenly, and a message with fewer blocks, or a
+  process's own list of free small blocks, would take it nearer one
+  process.
+
 ### GPU processes' stacks
 
 2026-11-13, at bddf7bd56f9a with the change that marks a GPU process's code
