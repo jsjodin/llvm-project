@@ -125,8 +125,12 @@ With that barrier at device scope, 2026-11-14, GPU 6, the same settings:
   128², and 5.5 to 6.4 at 64²,** against 1.15 to 1.4 on gfx1030: what is
   left is a tile's fixed cost, about 0.2 ms on its place at 64² (40
   frames of 1024 tiles over four places), which the GPU's faster iterations leave in
-  view. A tile's results go as an array message, made and sent by a
-  place's one lane (`benchmarks/array-messages`, "On gfx90a").
+  view. No arrays travel: a tile is one loop across the place's worker
+  teams, whose sum the place keeps until it reports at the end, and the
+  places' messages are small terms, orders, tiles and steals. Where the
+  0.2 ms goes is not yet measured; the loop's start and end, each a
+  crossing of the barrier with the place's worker teams, and its
+  reduction are likely parts.
 - **The dense GPU process gained 1.2 times too,** and is 1.09 to 1.13
   times C. These are timed by the host.
 
