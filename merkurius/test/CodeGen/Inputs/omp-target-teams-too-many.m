@@ -1,6 +1,7 @@
 % For omp-target-teams-too-many-gpu.test: 2000 teams, more than run at once
-% on a GPU, first without team mailboxes, which runs, and then with them,
-% which is an error, as some teams would wait for teams that are not running.
+% on the one compute unit that the test gives it, first without team
+% mailboxes, which runs, and then with them, which is an error, as some teams
+% would wait for teams that are not running.
 
 :- module omp_target_teams_too_many.
 :- interface.

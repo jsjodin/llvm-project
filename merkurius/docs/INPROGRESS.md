@@ -4222,8 +4222,13 @@ differs from the plan:
   cooperative launch otherwise, saying why.
 - **Groups a compute unit holds,** by LLVM's limits, from
   `AMDGPUTargetParser`: waves a SIMD holds, VGPRs (with AGPRs on processors
-  with a unified register file), SGPRs before gfx10, 16 barriers for
-  groups of more than one wave, and LDS. A group's waves are taken to share
+  with a unified register file), SGPRs before gfx10, with the 16 a wave
+  that the trap handler takes (LLVM's `TRAP_NUM_SGPRS`; ROCm always
+  installs one), 16 barriers for groups of more than one wave, and LDS.
+  Without the trap handler's SGPRs (until 2026-11-14) a gfx90a kernel of 104
+  SGPRs was counted 7 groups a compute unit and ran 6, so its cooperative
+  launch never had all its teams; gfx1030, whose SGPRs do not limit waves,
+  never showed it. A group's waves are taken to share
   the SIMDs of one compute unit, which counts fewer than a work group
   processor holds, never more (one-wave groups: 16 a compute unit counted,
   32 fit).
