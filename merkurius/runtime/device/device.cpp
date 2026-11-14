@@ -128,6 +128,7 @@ using merkurius::runtime::RegionSlotGeneration;
 using merkurius::runtime::RegionSlotNumber;
 using merkurius::runtime::rpcAttach;
 using merkurius::runtime::rpcChunk;
+using merkurius::runtime::rpcDmaBytes;
 using merkurius::runtime::rpcDrain;
 using merkurius::runtime::rpcFail;
 using merkurius::runtime::rpcGiveArray;
@@ -135,6 +136,7 @@ using merkurius::runtime::rpcPinnedChunk;
 using merkurius::runtime::rpcProcessEnded;
 using merkurius::runtime::rpcRoute;
 using merkurius::runtime::rpcSend;
+using merkurius::runtime::rpcSendArrayFromDevice;
 using merkurius::runtime::rpcSendTerm;
 using merkurius::runtime::rpcTakeArray;
 using merkurius::runtime::rpcTakeTerm;
@@ -2902,8 +2904,41 @@ extern "C" void merk_device_send_array_moving(
 }
 
 namespace {
+// From how many bytes an array goes by the host's copy engine from the
+// device's memory (rpcDmaBytes), asked once; 0 before.
+uint64_t dmaBytes{0};
+
+uint64_t DmaBytes() {
+  uint64_t bytes{__atomic_load_n(&dmaBytes, __ATOMIC_RELAXED)};
+  if (bytes == 0) {
+    rpc::Client::Port port{__llvm_rpc_client.open<rpcDmaBytes>()};
+    port.send([](rpc::Buffer *buffer, uint32_t) {
+      buffer->data[0] = static_cast<uint64_t>(__builtin_amdgcn_wavefrontsize());
+    });
+    port.recv([&](rpc::Buffer *buffer, uint32_t) { bytes = buffer->data[0]; });
+    __atomic_store_n(&dmaBytes, bytes, __ATOMIC_RELAXED);
+  }
+  return bytes;
+}
+
 void SendArrayThroughHost(
     const uint64_t *handle, uint64_t key, const uint64_t *array) {
+  // A large array goes by the host's copy engine, from the device's memory
+  // as the release writes it back, rather than by this lane across the bus.
+  if (sizeof(uint64_t) * ArrayWords(array) >= DmaBytes()) {
+    __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+    rpc::Client::Port port{__llvm_rpc_client.open<rpcSendArrayFromDevice>()};
+    port.send([&](rpc::Buffer *buffer, uint32_t) {
+      for (int i{0}; i < 5; ++i) {
+        buffer->data[i] = handle[i];
+      }
+      buffer->data[5] = key;
+      buffer->data[6] = reinterpret_cast<uint64_t>(array);
+      buffer->data[7] = static_cast<uint64_t>(DeviceNumber());
+    });
+    port.recv([](rpc::Buffer *, uint32_t) {});
+    return;
+  }
   PinnedMemory memory;
   uint64_t *copy{CopyToHost(array, memory)};
   rpc::Client::Port port{__llvm_rpc_client.open<rpcSendTerm>()};
