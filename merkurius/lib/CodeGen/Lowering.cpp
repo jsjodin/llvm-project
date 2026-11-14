@@ -2779,7 +2779,8 @@ void Lowerer::LowerStringEqual(merk::StringEqualOp op) {
 }
 
 // A foreign_proc's C function returns its only output, or else stores its
-// outputs through pointers after its inputs.
+// outputs through pointers after its inputs. A send that moves its message
+// calls the send's _moving function (merk.foreign_call, `moves`).
 void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
   mlir::MLIRContext *context{call.getContext()};
   mlir::Location loc{call.getLoc()};
@@ -2792,7 +2793,11 @@ void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
   bool byPointer{canFail ? !outputs.empty() : outputs.size() > 1};
   mlir::Type flagType{rewriter_.getI32Type()};
   auto pointer{mlir::LLVM::LLVMPointerType::get(context)};
-  mlir::LLVM::LLVMFuncOp &func{funcs_[call.getCallee()]};
+  std::string callee{call.getCallee().str()};
+  if (call.getMoves()) {
+    callee += "_moving";
+  }
+  mlir::LLVM::LLVMFuncOp &func{funcs_[callee]};
   // C's MR_Word is an integer, so a word crosses as one.
   const llvm::SmallVector<bool> &wordInputs{foreignWords_[call]};
   auto i64{rewriter_.getI64Type()};
@@ -2812,7 +2817,7 @@ void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
                                   : mlir::LLVM::LLVMVoidType::get(context)};
     mlir::OpBuilder::InsertionGuard guard{rewriter_};
     rewriter_.setInsertionPointToEnd(module_.getBody());
-    func = mlir::LLVM::LLVMFuncOp::create(rewriter_, loc, call.getCallee(),
+    func = mlir::LLVM::LLVMFuncOp::create(rewriter_, loc, callee,
         mlir::LLVM::LLVMFunctionType::get(result, inputs));
   }
   rewriter_.setInsertionPoint(call);

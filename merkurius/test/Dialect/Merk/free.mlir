@@ -5,7 +5,9 @@
 // enumeration has no cell and is not freed. Static cells and strings go into
 // a section of their own in a GPU process's image, which merk_device_free
 // leaves alone.
-// On the host, which has a collector, it does nothing.
+// On the host, which has a collector, it does nothing. A send that moves
+// its message (merk.foreign_call's `moves`) calls the send's _moving
+// function.
 //
 // RUN: merkc -fc1 -emit-merk %s -o %t.1.mlir
 // RUN: FileCheck %s < %t.1.mlir
@@ -48,6 +50,20 @@ module @free attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
     merk.free %arg1 : !merk.string
     merk.free %arg2 : !merk.term<"list.list(int)">
     merk.free %arg3 : !merk.term<"free.colour">
+    merk.succeed
+  }
+
+  // A send that moves its message prints as it is parsed, and calls the
+  // send's _moving function in a GPU process's compile.
+  // CHECK-LABEL: merk.proc @free.move_3_0
+  // CHECK: merk.foreign_call @merk_device_send_array(%arg0, %arg1, %{{.*}}) moves : (!merk.term<"process.mailbox(array.array(int))">, i64, !llvm.ptr) -> ()
+  // GPU-LABEL: define {{.*}}@free.move_3_0(
+  // GPU: call void @merk_device_send_array_moving(
+  // GPU-NOT: merk_device_free
+  // GPU: ret void
+  merk.proc @free.move_3_0(%arg0: !merk.term<"process.mailbox(array.array(int))">, %arg1: i64, %arg2: !merk.array<i64>) attributes {determinism = #merk.determinism<det>} {
+    %0 = builtin.unrealized_conversion_cast %arg2 : !merk.array<i64> to !llvm.ptr
+    merk.foreign_call @merk_device_send_array(%arg0, %arg1, %0) moves : (!merk.term<"process.mailbox(array.array(int))">, i64, !llvm.ptr) -> ()
     merk.succeed
   }
 
