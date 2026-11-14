@@ -844,6 +844,10 @@ Error ContextAllocatorTy::free(void *TgtPtr, ol_alloc_type_t Kind) {
 
 MemoryManagerTy *PluginContextTy::getMemoryManagerFor(GenericDeviceTy &Device,
                                                       ol_alloc_type_t Kind) {
+  // Fine-grained device memory is for few, long-lived allocations, such as
+  // words that other agents write: not cached.
+  if (Kind == OL_ALLOC_TYPE_DEVICE_FINE_GRAINED)
+    return nullptr;
   return Kind == OL_ALLOC_TYPE_HOST ? getHostMemoryManager()
                                     : getDeviceMemoryManagerFor(Device, Kind);
 }

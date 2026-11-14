@@ -3416,6 +3416,10 @@ struct AMDGPUDeviceTy : public GenericDeviceTy, AMDGenericDeviceTy {
     case OL_ALLOC_TYPE_MANAGED:
       MemoryPool = &HostDevice.getFineGrainedMemoryPool();
       break;
+    case OL_ALLOC_TYPE_DEVICE_FINE_GRAINED:
+      if (!FineGrainedMemoryPools.empty())
+        MemoryPool = FineGrainedMemoryPools[0];
+      break;
     default:
       llvm_unreachable("unexpected allocation type");
     }
@@ -5442,6 +5446,11 @@ Expected<void *> AMDGPUDeviceTy::allocate(size_t Size, ol_alloc_type_t Kind,
     break;
   case OL_ALLOC_TYPE_MANAGED:
     MemoryPool = &HostDevice.getFineGrainedMemoryPool();
+    break;
+  case OL_ALLOC_TYPE_DEVICE_FINE_GRAINED:
+    // The device's own fine-grained pool, if it has one.
+    if (!FineGrainedMemoryPools.empty())
+      MemoryPool = FineGrainedMemoryPools[0];
     break;
   default:
     llvm_unreachable("unexpected allocation type");

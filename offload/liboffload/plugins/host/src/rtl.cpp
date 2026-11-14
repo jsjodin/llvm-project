@@ -232,6 +232,7 @@ struct GenELF64DeviceTy : public GenericDeviceTy {
     case OL_ALLOC_TYPE_DEVICE:
     case OL_ALLOC_TYPE_HOST:
     case OL_ALLOC_TYPE_MANAGED:
+    case OL_ALLOC_TYPE_DEVICE_FINE_GRAINED:
       MemAlloc = std::malloc(Size);
       break;
     default:
