@@ -264,22 +264,23 @@ const char *Details(ol_result_t result) {
 
 // Whether the program asked for direct sends between GPUs: MERK_GPU_PEER=1,
 // read once for each GPU, as its peer memory is made (ReadyPeer). Off by
-// default until the device's side of them is done (docs/INPROGRESS.md,
-// Direct sends between the GPUs of a node, step 4): until then the device
-// sends through the host whatever route the host gives.
+// default until they have a test with two GPUs, and large arrays a faster
+// path than one wave's loads (docs/INPROGRESS.md, Direct sends between the
+// GPUs of a node, steps 5 and 6).
 bool PeerWanted() {
   const char *text{std::getenv("MERK_GPU_PEER")};
   return text && std::strcmp(text, "1") == 0;
 }
 
-// The bytes of a GPU's send pool: MERK_GPU_SEND_POOL_BYTES, or 64 MiB.
+// The bytes of a GPU's send pool: MERK_GPU_SEND_POOL_BYTES, from 1 MiB, or
+// 64 MiB.
 constexpr std::uint64_t kSendPoolBytes{std::uint64_t{64} << 20};
 
 std::uint64_t SendPoolBytes() {
   if (const char *text{std::getenv("MERK_GPU_SEND_POOL_BYTES")}) {
     char *end{nullptr};
     unsigned long long bytes{std::strtoull(text, &end, 10)};
-    if (end != text && *end == '\0' && bytes >= kSendPoolHeaderBytes * 2) {
+    if (end != text && *end == '\0' && bytes >= std::uint64_t{1} << 20) {
       return bytes;
     }
   }
@@ -317,20 +318,26 @@ bool ReadyPeer(const Gpu &gpu) {
   if (!PeerWanted()) {
     return false;
   }
+  std::uint64_t bytes{SendPoolBytes()};
+  std::uint64_t slots{ReturnRingSlots(bytes)};
+  std::size_t ringBytes{sizeof(ReturnRing) + slots * sizeof(ReturnRingSlot)};
+  ringBytes = (ringBytes + 63) & ~std::size_t{63};
   auto *returns{static_cast<ReturnRing *>(
-      DeviceAllocateFine(gpu.number, sizeof(ReturnRing)))};
+      DeviceAllocateFine(gpu.number, ringBytes))};
   if (!returns) {
     return false;
   }
-  auto *ring{static_cast<ReturnRing *>(ZeroedAligned(sizeof(ReturnRing)))};
-  for (std::uint64_t i{0}; ring && i < kReturnRingSlots; ++i) {
-    ring->slots[i].sequence = i;
+  auto *ring{static_cast<ReturnRing *>(ZeroedAligned(ringBytes))};
+  if (ring) {
+    ring->slots = slots;
+    for (std::uint64_t i{0}; i < slots; ++i) {
+      RingSlots(ring)[i].sequence = i;
+    }
   }
-  bool made{ring && CopyToDevice(gpu.number, returns, ring, sizeof *ring)};
+  bool made{ring && CopyToDevice(gpu.number, returns, ring, ringBytes)};
   std::free(ring);
-  std::uint64_t bytes{SendPoolBytes()};
   void *pool{made ? DeviceAllocate(gpu.number, bytes) : nullptr};
-  if (!pool || !ZeroDevice(gpu.number, pool, kSendPoolHeaderBytes)) {
+  if (!pool || !ZeroDevice(gpu.number, pool, SendPoolClearBytes(bytes))) {
     if (pool) {
       DeviceFree(gpu.number, pool);
     }
@@ -372,7 +379,6 @@ PeerBlock *TakePeerBlock(const Gpu &gpu, std::uint64_t slots) {
     return nullptr;
   }
   for (std::uint64_t q{0}; q < slots; ++q) {
-    empty[q].closed = 1;
     for (std::uint64_t i{0}; i < kPeerQueueSlots; ++i) {
       empty[q].slots[i].sequence = i;
     }
