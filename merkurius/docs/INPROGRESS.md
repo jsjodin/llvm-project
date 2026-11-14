@@ -5778,11 +5778,96 @@ may differ by pair.
 4. **Store bandwidth by the same units**, in case push for small messages
    into a fine-grained inline area beats pull's dependent load.
 
+### Results of the experiments (2026-11-14)
+
+Run on r11 with `peer.hip`, on ROCR GPUs 1,3 (two packages) and 2,3 (one
+package), host threads on the other socket. Device times use the 25 MHz
+clock.
+
+**1. Pull coherence.** Of the six pairings of A's release and B's acquire,
+only a system-scope release by the sender with a system-scope acquire by the
+receiver read no stale words: 512 words for 2000 rounds and 65536 for 200, on
+both pairs. Every other pairing read stale words in essentially every round.
+The sender's L2 keeps its own coarse-grained lines until a system-scope
+release writes them back. The receiver's L2 keeps old lines of peer memory
+until a system-scope acquire drops them. So point 3 needs both, at system
+scope.
+
+**2. How fast few units pull.** GB/s copying from A's memory into B's, each
+copy after a system-scope acquire. The first figure is for GPUs 1,3; the
+figure in brackets is for 2,3.
+
+| Bytes | 1 lane | 1 wave | 1 team (4 waves) | 8 teams | 32 teams | 104 teams |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4 KiB | 0.03 | 0.69 (0.77) | 2.2 (2.4) | 2.2 | 1.1 | 0.4 |
+| 64 KiB | 0.03 | 0.77 (0.86) | 3.3 (3.5) | 15 (18) | 12 (16) | 5 |
+| 1 MiB | 0.03 | 0.80 (0.87) | 3.4 (3.6) | 25 (27) | 33 (77) | 28 (55) |
+| 4 MiB | 0.03 | 0.77 (0.87) | 3.5 (3.6) | 26 (29) | 36 (102) | 34 (97) |
+
+The same copies within B's memory: 1 lane 0.04, 1 wave 1.6 to 2.3, 1 team
+5.6 to 8.2, 32 teams 141 to 145.
+
+- One lane, which is how a process copies today, moves 30 to 40 MB/s.
+  A wave of 64 lanes is 25 to 55 times faster, which is what step 0 buys.
+- A wave cannot fill a link: 0.8 GB/s, against 38 to 150. A large pull
+  needs worker teams (8 or more) or the copy engine. Point 6 is therefore
+  required for processes with no workers, not an optional extra. With an
+  RPC of about 30 µs, the copy engine beats one wave above about 24 KiB and
+  one team above about 110 KiB.
+- The per-wave copy loop moves 8 bytes a lane with nothing unrolled. Wider
+  loads and more loads in flight may raise the wave's figures. Not tried.
+
+**3. Polls.** One lane polling, ns per poll: a coarse-grained device word
+with a device-scope acquire (today's local queue) 349; a fine-grained device
+word, relaxed 316, with a system-scope acquire 364; a host word 1430
+relaxed or acquire. A poll at system scope of local fine-grained memory
+costs what today's poll of the local queue costs, so point 2's peer queue
+can be looked at every poll. A system-scope acquire, although it emits
+`buffer_invl2`, cost no more. A kernel rereading 4 MiB of the GPU's memory
+fell from 4.4 TB/s to 3.1–3.2 TB/s with any device-memory poller beside it.
+It fell to 1.3 TB/s with a poller of host memory. Polling the host's ring
+less often matters more than the peer queue.
+
+**4. Push against pull, one wave each side,** one way, µs, with kernel
+launches amortized over 20000 rounds:
+
+| Bytes | Push, 1,3 | Pull, 1,3 | Push, 2,3 | Pull, 2,3 |
+| --- | --- | --- | --- | --- |
+| 8 | 1.74 | 1.95 | 1.66 | 1.84 |
+| 512 | 1.72 | 1.96 | 1.71 | 1.85 |
+| 4096 | 4.93 | 6.88 | 4.93 | 6.34 |
+| 32768 | 29.7 | 47.3 | 29.3 | 45.1 |
+
+Push is 0.2 µs faster for small messages and 30 to 40% faster at 4 to
+32 KiB. So the design changes: a message up to a few hundred bytes goes
+inline, pushed into the peer queue's slot, which is fine-grained memory on
+the receiver. Larger ones are pulled as in point 3, and the largest go by
+the copy engine (point 6). How large "inline" is will be set when the peer
+queue's slots are laid out. 512 B costs the same as 8 B.
+
 ### Steps
 
 0. **Copy with the wave's lanes for the local queue.** This fixes `A-A`'s
    90 MB/s. It is independent of the rest and helps the peer path too.
-1. The experiments above.
+   *Done 2026-11-14:*
+   - `merk_device_bulk_copy` and `merk_device_bulk_fill` hand the job to the
+     process's worker teams if it has them and the words are many (`Bulk`),
+     as before. Otherwise, from 32 words, if the caller is its wave's only
+     active lane, the whole wave does it (`device/wave.ll`). That covers a
+     process's lane and a target region's lane that copies a message.
+   - The functions are whole-wave functions (`amdgpu_gfx_whole_wave`, called
+     by `llvm.amdgcn.call.whole.wave`), written in IR because Clang has no
+     attribute for them. LLVM needed two changes for HSA (design document,
+     Bugs found in LLVM).
+   - A call keeps the inactive lanes of the registers the function uses on
+     the stack, 140 bytes a lane at most. `merk_place` in `life-places.m`
+     stayed at 928 bytes a lane for gfx1030, as the copy is not on its
+     deepest path.
+   - gpu-pairs on ROCR GPUs 1,3: `A-A` ping went from 391 µs to 174 µs at
+     4096 words, from 4.2 ms to 0.85 ms at 65536, and from 86 to 494 MB/s
+     at 2^20 words. Stream at 2^20 words went from 87 to 652 MB/s. `A-A` now
+     moves arrays about as fast as `A-B`, both bound by the host's path.
+1. The experiments above. *Done 2026-11-14* (Results of the experiments).
 2. Fine-grained device memory in the plugin (point 5).
 3. The host's side: per-GPU send pools, peer-queue tables and return lists;
    `PlaceRoute` answers peer; `MERK_GPU_PEER`.
