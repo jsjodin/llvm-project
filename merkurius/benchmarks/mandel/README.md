@@ -107,14 +107,28 @@ the balance and the tiles handed over:
 - **The dense programs are 4 to 7 times as fast as on gfx1030,** on 104 units against
   40, but Mercury's GPU process now trails C, by 1.34 times at 2048² and
   1.87 at 1024², where on gfx1030 it led.
-- **The places are 14 to 100 times slower than the dense programs,** where
-  on gfx1030 they were 1.2 to 1.4: about 1 ms a tile at 64², against 0.1
-  on gfx1030, and the more tiles, the slower. Each tile's results are an
-  array that one lane makes and that goes as a message, and on gfx90a a
-  GPU's array messages move at about 100 MB/s (`benchmarks/array-messages`,
-  "On gfx90a"): a fixed cost a tile, not the iterations, sets the time.
-  Device-scope atomics did not change array messages' speed in a trial;
-  where the time goes is to measure.
+- **The places were 14 to 100 times slower than the dense programs,**
+  where on gfx1030 they were 1.2 to 1.4. The cause was the barrier that a
+  GPU process crosses with its worker teams around each loop, at system
+  scope then, which on gfx90a writes back and invalidates the L2 at every
+  crossing (design document, Measurements, "Barriers between teams").
+
+With that barrier at device scope, 2026-11-14, GPU 6, the same settings:
+
+| Frames, tiles | Mercury, dense | C, dense | Static | Steal | Pool |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2048², 128² | 0.409 s, 327 Gi/s | 0.374 s, 358 Gi/s | 0.718 s, 1.15 | 0.680 s, 1.04, 744 | 0.759 s, 1.03, 10240 |
+| 2048², 64² | 0.409 s, 327 Gi/s | 0.373 s, 358 Gi/s | 2.48 s, 1.15 | 2.25 s, 1.02, 4067 | 2.61 s, 1.03, 40960 |
+| 1024², 128² | 0.132 s, 253 Gi/s | 0.117 s, 287 Gi/s | 0.210 s, 1.15 | 0.222 s, 1.10, 77 | 0.233 s, 1.04, 2560 |
+
+- **The places are now 1.6 to 1.9 times the dense GPU process at tiles of
+  128², and 5.5 to 6.4 at 64²,** against 1.15 to 1.4 on gfx1030: what is
+  left is a tile's fixed cost, about 0.2 ms on its place at 64² (40
+  frames of 1024 tiles over four places), which the GPU's faster iterations leave in
+  view. A tile's results go as an array message, made and sent by a
+  place's one lane (`benchmarks/array-messages`, "On gfx90a").
+- **The dense GPU process gained 1.2 times too,** and is 1.09 to 1.13
+  times C. These are timed by the host.
 
 ## Tests
 

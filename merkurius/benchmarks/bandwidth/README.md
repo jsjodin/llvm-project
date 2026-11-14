@@ -140,15 +140,16 @@ On one die of an AMD Instinct MI250 (gfx90a, 104 compute units, 64 GB of
 HBM2e, rated at 1.6 TB/s a die) and two AMD EPYC 7713 (128 cores in 16 NUMA
 nodes), with the default sizes, on 2026-11-14 at 693f7c3053d4, each from one
 run of `run.sh` on a GPU that `utils/gpu/with-gpus.py` chose, all its compute
-units, in MB/s:
+units, in MB/s. The GPU process's column is from a later run, with its
+barriers at device scope and the device's clock right (below):
 
 | Kernel | Sequential | OpenMP, host (64 threads) | OpenMP, GPU | GPU process |
 | --- | --- | --- | --- | --- |
-| Copy | 26,701 | 145,275 | 597,522 | 762,860 |
-| Mul | 25,845 | 139,869 | 603,492 | 710,786 |
-| Add | 28,871 | 162,048 | 690,629 | 893,237 |
-| Triad | 29,142 | 165,287 | 671,485 | 891,891 |
-| Dot | 18,950 | 200,680 | 642,747 | 709,171 |
+| Copy | 26,701 | 145,275 | 597,522 | 1,281,189 |
+| Mul | 25,845 | 139,869 | 603,492 | 1,254,370 |
+| Add | 28,871 | 162,048 | 690,629 | 1,157,849 |
+| Triad | 29,142 | 165,287 | 671,485 | 1,130,540 |
+| Dot | 18,950 | 200,680 | 642,747 | 1,330,470 |
 
 - **The host's arrays need their pages spread.** The host column is 64
   threads on the first socket's cores (`OMP_PROC_BIND=close`,
@@ -159,11 +160,17 @@ units, in MB/s:
   threads on both sockets and `--interleave=all`, 210,000 to 313,000 MB/s.
   Filling a large array in parallel, so that each thread first touches the
   pages it later works on, would fix it without `numactl`.
-- **A GPU process is faster than a target region here,** 1.10 to 1.33
-  times, where on gfx1030 it was level or slower: its kernels have the
-  elements on 256 bytes (In a GPU process), and the region's arrays do not.
-  Its times vary more, Copy 0.70 to 1.91 ms against 0.90 to 0.98 for the
-  region.
+- **A GPU process is faster than a target region here,** 1.7 to 2.1
+  times, and than C in Copy, Mul and Dot (1.11 to 1.13 times), where on
+  gfx1030 it was level or slower: its kernels have the elements on 256
+  bytes (In a GPU process), and the region's arrays do not. It reaches 71
+  to 83% of the rated 1.6 TB/s. That is with its barrier between its
+  worker teams at device scope (2026-11-14): at system scope, as before,
+  each loop's barrier wrote back and invalidated the L2. The first run's
+  GPU process numbers, 709,000 to 893,000 MB/s, were from the device's
+  clock, which libc took to tick at 100 MHz where gfx90a's ticks at 25:
+  they were four times too high, and the GPU process was then about a
+  quarter of the region's speed.
 
 Mercury against C (`compare-c.sh "" "" 7`), the median of 7 rounds and its
 range, in MB/s:
