@@ -19,9 +19,9 @@
 %
 % REQUIRES: amdgpu-registered-target, libomp
 % RUN: merkc -fc1 -O0 -fprocess-declarations -fprocess-kernels -triple amdgcn-amd-amdhsa -target-cpu gfx1030 -emit-llvm %s -o - 2>&1 | FileCheck %s --check-prefix=DEVICE
-% RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
+% RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 host | FileCheck %s --match-full-lines --strict-whitespace
-% RUN: merkc -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t
+% RUN: merkc -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t
 % RUN: %libomp-env %t host | FileCheck %s --match-full-lines --strict-whitespace
 %
 % Only the exported procedure's pair of calls is reported.

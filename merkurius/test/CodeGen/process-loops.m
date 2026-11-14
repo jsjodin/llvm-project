@@ -25,13 +25,13 @@
 % RUN: merkc -fc1 -fprocess-loops -fdo-loops -fprocess-declarations -fprocess-kernels -triple amdgcn-amd-amdhsa -target-cpu gfx1030 -emit-merk %s -o - | FileCheck %s --check-prefix=DEVICE
 % RUN: merkc -fc1 -fprocess-loops -fdo-loops -fprocess-declarations -fprocess-kernels -triple amdgcn-amd-amdhsa -target-cpu gfx1030 -emit-llvm %s -o - | FileCheck %s --check-prefix=LLVM
 % RUN: merkc -fc1 -fopenmp -fdo-loops -fprocess-declarations -emit-merk -triple x86_64-unknown-linux-gnu -fembed-process-image=gfx1030:%s %s -o - | FileCheck %s --check-prefix=HOST
-% RUN: merkc -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t
+% RUN: merkc -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t
 % RUN: %libomp-env %t host | FileCheck %s --match-full-lines --strict-whitespace
-% RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
+% RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 host | FileCheck %s --match-full-lines --strict-whitespace
-% RUN: merkc -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t.sequential
+% RUN: merkc -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t.sequential
 % RUN: %libomp-env %t.sequential host | FileCheck %s --match-full-lines --strict-whitespace
-% RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t.sequential2
+% RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t.sequential2
 % RUN: %libomp-env %t.sequential2 host | FileCheck %s --match-full-lines --strict-whitespace
 
 :- module process_loops.

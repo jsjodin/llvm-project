@@ -7,9 +7,9 @@ Sequential, at -O0 and -O2, and with the loops on the host's threads at
 -O2. The -O0 build has no --offload-arch, as life-sparse.test's.
 REQUIRES: amdgpu-registered-target, libomp
 RUN: merkc -O0 -fdo-loops -fprocess-declarations %libomp-flags %S/../../benchmarks/mandel/mandel.m -o %t0
-RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/mandel/mandel.m -o %t2
-RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/mandel/mandel.m -o %t.omp
-RUN: clang -O2 -ffp-contract=off -fopenmp --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/mandel/mandel.c -o %t.c
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %S/../../benchmarks/mandel/mandel.m -o %t2
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %S/../../benchmarks/mandel/mandel.m -o %t.omp
+RUN: clang -O2 -ffp-contract=off -fopenmp --offload-arch=%offload-archs %libomp-flags %S/../../benchmarks/mandel/mandel.c -o %t.c
 
 RUN: %libomp-env MANDEL_SIZE=64 MANDEL_FRAMES=12 %t0 host | FileCheck %s --check-prefixes=M,SMALL
 RUN: %libomp-env MANDEL_SIZE=64 MANDEL_FRAMES=12 %t2 host | FileCheck %s --check-prefixes=M,SMALL

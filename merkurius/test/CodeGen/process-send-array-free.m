@@ -10,7 +10,7 @@
 % hand.
 %
 % REQUIRES: amdgpu-registered-target, libomp
-% RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
+% RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 host | FileCheck %s --match-full-lines --strict-whitespace
 
 :- module process_send_array_free.

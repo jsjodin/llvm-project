@@ -9,10 +9,10 @@
 %
 % REQUIRES: amdgpu-registered-target, libomp
 % RUN: rm -rf %t.dir && mkdir %t.dir
-% RUN: merkc -fprocess-declarations --offload-arch=gfx1030 -save-temps=obj %libomp-flags %s -o %t.dir/p
+% RUN: merkc -fprocess-declarations --offload-arch=%offload-archs -save-temps=obj %libomp-flags %s -o %t.dir/p
 % RUN: %libomp-env %t.dir/p | FileCheck %s --match-full-lines --strict-whitespace
 % RUN: llvm-readelf --dyn-syms %t.dir/process-host-kinds-offload-gfx1030-processes.elf | not grep -E ' UND +[^ ]'
-% RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
+% RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 | FileCheck %s --match-full-lines --strict-whitespace
 
 :- module process_host_kinds_offload.

@@ -11,8 +11,8 @@ Sequential, at -O0 and -O2, and with the loops on the host's threads at -O2.
 The -O0 build has no --offload-arch, as life-sparse.test's.
 REQUIRES: amdgpu-registered-target, libomp
 RUN: merkc -O0 -fdo-loops -fprocess-declarations %libomp-flags %S/../../benchmarks/swe/swe-sparse.m -o %t0
-RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/swe/swe-sparse.m -o %t2
-RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/swe/swe-sparse.m -o %t.omp
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %S/../../benchmarks/swe/swe-sparse.m -o %t2
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %S/../../benchmarks/swe/swe-sparse.m -o %t.omp
 
 RUN: %libomp-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 %t2 host | FileCheck %s --check-prefix=THACKER --match-full-lines
 RUN: %libomp-env OMP_NUM_THREADS=4 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 %t.omp host | FileCheck %s --check-prefix=THACKER --match-full-lines
@@ -75,7 +75,7 @@ USAGE: SWE_TILE must be a power of two of at least 4 that divides SWE_WORLD, SWE
 
 The C version, swe-sparse.c, its kernels on the host's threads, and built
 for the host alone at -O0.
-RUN: clang -O2 -ffp-contract=off -fopenmp --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/swe/swe-sparse.c -lm -o %t.c
+RUN: clang -O2 -ffp-contract=off -fopenmp --offload-arch=%offload-archs %libomp-flags %S/../../benchmarks/swe/swe-sparse.c -lm -o %t.c
 RUN: clang -O0 %S/../../benchmarks/swe/swe-sparse.c -lm -o %t.c0
 RUN: %libomp-env SWE_TILE=6 not %t.c | FileCheck %s --check-prefix=USAGE
 RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED OMP_NUM_THREADS=4 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 %t.c | FileCheck %s --check-prefix=C --match-full-lines

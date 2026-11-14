@@ -15,7 +15,7 @@
 % REQUIRES: amdgpu-registered-target, libomp
 % RUN: merkc -fc1 -emit-llvm -fprocess-declarations %s -o %t.ll
 % RUN: FileCheck %s --check-prefix=LLVM < %t.ll
-% RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
+% RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 host | FileCheck %s --match-full-lines --strict-whitespace
 % RUN: merkc -fprocess-declarations %libomp-flags %s -o %t
 % RUN: %libomp-env %t host | FileCheck %s --match-full-lines --strict-whitespace

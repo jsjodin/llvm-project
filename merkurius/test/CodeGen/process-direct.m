@@ -29,14 +29,14 @@
 % where the sends between them are direct.
 %
 % REQUIRES: amdgpu-registered-target, libomp
-% RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
+% RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 host order | FileCheck %s --check-prefix=ORDER --match-full-lines --strict-whitespace
 % RUN: %libomp-env %t2 host arrays | FileCheck %s --check-prefix=ARRAYS --match-full-lines --strict-whitespace
 % RUN: %libomp-env %t2 host terms | FileCheck %s --check-prefix=TERMS --match-full-lines --strict-whitespace
 % RUN: %libomp-env %t2 host self | FileCheck %s --check-prefix=SELF --match-full-lines --strict-whitespace
 % RUN: %libomp-env %t2 host quit | FileCheck %s --check-prefix=QUIT --match-full-lines --strict-whitespace
 % RUN: %libomp-env %t2 host closed 2>&1 | FileCheck %s --check-prefix=CLOSED
-% RUN: merkc -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t
+% RUN: merkc -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t
 % RUN: %libomp-env %t host order | FileCheck %s --check-prefix=ORDER --match-full-lines --strict-whitespace
 % RUN: %libomp-env %t host arrays | FileCheck %s --check-prefix=ARRAYS --match-full-lines --strict-whitespace
 

@@ -17,9 +17,9 @@
 % RUN: grep -v -e '^; ModuleID' -e '^source_filename' %t.first.ll > %t.first
 % RUN: grep -v -e '^; ModuleID' -e '^source_filename' %t.again.ll > %t.again
 % RUN: diff %t.first %t.again
-% RUN: merkc -O2 -fopenmp --offload-arch=gfx1030 %libomp-flags %s -o %t2
+% RUN: merkc -O2 -fopenmp --offload-arch=%offload-archs %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 | FileCheck %s --match-full-lines --strict-whitespace
-% RUN: merkc -fopenmp --offload-arch=gfx1030 %libomp-flags %s -o %t0
+% RUN: merkc -fopenmp --offload-arch=%offload-archs %libomp-flags %s -o %t0
 % RUN: %libomp-env %t0 | FileCheck %s --match-full-lines --strict-whitespace
 
 :- module omp_offload_ir_once.

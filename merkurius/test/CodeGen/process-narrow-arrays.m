@@ -12,9 +12,9 @@
 % hand: each round's answers are checked against what the host computes.
 %
 % REQUIRES: amdgpu-registered-target, libomp
-% RUN: merkc -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t
+% RUN: merkc -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t
 % RUN: %libomp-env %t host | FileCheck %s --match-full-lines --strict-whitespace
-% RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
+% RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 host | FileCheck %s --match-full-lines --strict-whitespace
 % RUN: %libomp-env MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 %t host | FileCheck %s --match-full-lines --strict-whitespace
 

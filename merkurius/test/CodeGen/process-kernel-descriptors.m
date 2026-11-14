@@ -10,9 +10,9 @@
 %
 % REQUIRES: amdgpu-registered-target, libomp
 % RUN: merkc -fc1 -O0 -fprocess-declarations -fprocess-kernels -triple amdgpu10.30-amd-amdhsa -emit-llvm %s -o - | FileCheck %s --check-prefix=DEVICE
-% RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t2
+% RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 | FileCheck %s --match-full-lines --strict-whitespace
-% RUN: merkc -O0 -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %s -o %t
+% RUN: merkc -O0 -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t
 % RUN: %libomp-env %t | FileCheck %s --match-full-lines --strict-whitespace
 :- module process_kernel_descriptors.
 :- interface.
