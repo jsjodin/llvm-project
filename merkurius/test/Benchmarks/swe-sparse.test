@@ -1,0 +1,89 @@
+The shallow water equations on sparse tiles (benchmarks/swe/swe-sparse.m),
+the process spawned at the host, on small worlds: tiles start where the
+water reaches them and end where it leaves, and every output is
+swe-sparse.c's, bit for bit, as the programs do the same operations in the
+same order. The worlds cover both cases, tiles of 4 to 64 cells, tiles that
+end, and the pool running out. The outputs are swe-sparse.c's at the host;
+Thacker's case's error falls by half when the cells halve, against its
+exact solution (benchmarks/swe/README.md).
+
+Sequential, at -O0 and -O2, and with the loops on the host's threads at -O2.
+The -O0 build has no --offload-arch, as life-sparse.test's.
+REQUIRES: amdgpu-registered-target, libomp
+RUN: merkc -O0 -fdo-loops -fprocess-declarations %libomp-flags %S/../../benchmarks/swe/swe-sparse.m -o %t0
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/swe/swe-sparse.m -o %t2
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/swe/swe-sparse.m -o %t.omp
+
+RUN: %libomp-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 %t2 host | FileCheck %s --check-prefix=THACKER --match-full-lines
+RUN: %libomp-env OMP_NUM_THREADS=4 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 %t.omp host | FileCheck %s --check-prefix=THACKER --match-full-lines
+THACKER: Shallow water, Mercury, GPU process, sparse tiles
+THACKER-NEXT: World: 256 x 256 cells, tiles of 16 x 16, 256 in the pool
+THACKER-NEXT: Case: Thacker's bowl
+THACKER-NEXT: Steps: 400
+THACKER-NEXT: Time: 7.997360905 s
+THACKER-NEXT: Wet cells: 49660
+THACKER-NEXT: Volume: 2.084618e+05 m^3
+THACKER-NEXT: Checksum: e6c861bf059c0000
+THACKER-NEXT: Error: 1.4792e-02
+THACKER-NEXT: Active tiles: 256 at most, 224 at the end
+
+RUN: %libomp-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 %t2 host | FileCheck %s --check-prefix=COLUMN --match-full-lines
+RUN: %libomp-env OMP_NUM_THREADS=4 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 %t.omp host | FileCheck %s --check-prefix=COLUMN --match-full-lines
+COLUMN: Case: a column in a bowl
+COLUMN: Time: 11.566220527 s
+COLUMN-NEXT: Wet cells: 17858
+COLUMN-NEXT: Volume: 3.954128e+03 m^3
+COLUMN-NEXT: Checksum: 360200cbf94cd874
+COLUMN-NEXT: Active tiles: 90 at most, 90 at the end
+
+RUN: %libomp-env SWE_WORLD=64 SWE_TILE=4 SWE_STEPS=300 %t0 host | FileCheck %s --check-prefix=SMALL --match-full-lines
+RUN: %libomp-env SWE_WORLD=64 SWE_TILE=4 SWE_STEPS=300 %t2 host | FileCheck %s --check-prefix=SMALL --match-full-lines
+SMALL: Time: 11.598569422 s
+SMALL-NEXT: Wet cells: 942
+SMALL-NEXT: Volume: 2.516291e+02 m^3
+SMALL-NEXT: Checksum: e58d356e1769013a
+SMALL-NEXT: Active tiles: 84 at most, 84 at the end
+
+Tiles that end, behind the water.
+RUN: %libomp-env OMP_NUM_THREADS=4 SWE_WORLD=512 SWE_TILE=64 SWE_STEPS=200 %t.omp host | FileCheck %s --check-prefix=WIDE --match-full-lines
+WIDE: Time: 5.199906014 s
+WIDE-NEXT: Wet cells: 20080
+WIDE-NEXT: Volume: 1.577070e+04 m^3
+WIDE-NEXT: Checksum: 97402e154fb0bc0e
+WIDE-NEXT: Active tiles: 16 at most, 14 at the end
+
+RUN: %libomp-env SWE_WORLD=128 SWE_TILE=8 SWE_STEPS=600 SWE_CASE=1 %t0 host | FileCheck %s --check-prefix=LONG --match-full-lines
+LONG: Time: 13.313348074 s
+LONG-NEXT: Wet cells: 14496
+LONG-NEXT: Volume: 5.156887e+04 m^3
+LONG-NEXT: Checksum: 0de1b672ab840000
+LONG-NEXT: Error: 9.0091e-02
+LONG-NEXT: Active tiles: 256 at most, 244 at the end
+
+Each step's line, for a chart.
+RUN: %libomp-env SWE_TRACE=1 SWE_WORLD=64 SWE_TILE=4 SWE_STEPS=300 %t2 host | FileCheck %s --check-prefix=TRACE
+TRACE: Steps: 300
+TRACE-NEXT: step 0: {{[0-9]+}} tiles, {{[0-9.]+}} s, bookkeeping {{[0-9.]+}} s
+TRACE: step 299: 84 tiles,
+TRACE-NEXT: Time: 11.598569422 s
+
+RUN: %libomp-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CAPACITY=40 not %t2 host | FileCheck %s --check-prefix=FULL
+FULL: The pool ran out of tiles: raise SWE_CAPACITY.
+RUN: %libomp-env SWE_TILE=6 not %t2 host | FileCheck %s --check-prefix=USAGE
+RUN: %libomp-env SWE_CASE=2 not %t2 host | FileCheck %s --check-prefix=USAGE
+USAGE: SWE_TILE must be a power of two of at least 4 that divides SWE_WORLD, SWE_STEPS at least 2, SWE_CAPACITY at least 2, and SWE_CASE 0 or 1.
+
+The C version, swe-sparse.c, its kernels on the host's threads, and built
+for the host alone at -O0.
+RUN: clang -O2 -ffp-contract=off -fopenmp --offload-arch=gfx1030 %libomp-flags %S/../../benchmarks/swe/swe-sparse.c -lm -o %t.c
+RUN: clang -O0 %S/../../benchmarks/swe/swe-sparse.c -lm -o %t.c0
+RUN: %libomp-env SWE_TILE=6 not %t.c | FileCheck %s --check-prefix=USAGE
+RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED OMP_NUM_THREADS=4 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 %t.c | FileCheck %s --check-prefix=C --match-full-lines
+C: Shallow water, C, sparse tiles
+C: Checksum: e6c861bf059c0000
+C-NEXT: Error: 1.4792e-02
+C-NEXT: Active tiles: 256 at most, 224 at the end
+RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED OMP_NUM_THREADS=4 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 %t.c | FileCheck %s --check-prefix=COLUMN --match-full-lines
+RUN: env SWE_WORLD=64 SWE_TILE=4 SWE_STEPS=300 %t.c0 | FileCheck %s --check-prefix=SMALL --match-full-lines
+RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED OMP_NUM_THREADS=4 SWE_WORLD=512 SWE_TILE=64 SWE_STEPS=200 %t.c | FileCheck %s --check-prefix=WIDE --match-full-lines
+RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CAPACITY=40 not %t.c | FileCheck %s --check-prefix=FULL

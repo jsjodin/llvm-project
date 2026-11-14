@@ -1,0 +1,32 @@
+The C and HIP versions of the shallow water equations on sparse tiles
+(benchmarks/swe/swe-sparse.c and swe-sparse.hip), which compare-swe.sh runs
+against swe-sparse.m, on the machine's GPU: every output is swe-sparse.m's
+and swe-sparse.c's at the host, bit for bit (swe-sparse.test), the default
+world too (swe-sparse-gpu.test).
+REQUIRES: amdgpu-gpu, hip
+
+RUN: clang -O2 -ffp-contract=off -fopenmp --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/swe/swe-sparse.c -lm -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 timeout -k 1 60 %t | FileCheck %s --check-prefix=C --match-full-lines
+C: Shallow water, C, sparse tiles
+C-NEXT: World: 256 x 256 cells, tiles of 16 x 16, 256 in the pool
+C-NEXT: Case: Thacker's bowl
+C-NEXT: Steps: 400
+C-NEXT: Time: 7.997360905 s
+C-NEXT: Wet cells: 49660
+C-NEXT: Volume: 2.084618e+05 m^3
+C-NEXT: Checksum: e6c861bf059c0000
+C-NEXT: Error: 1.4792e-02
+C-NEXT: Active tiles: 256 at most, 224 at the end
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY SWE_WORLD=512 SWE_TILE=64 SWE_STEPS=200 timeout -k 1 60 %t | FileCheck %S/swe-sparse.test --check-prefix=WIDE --match-full-lines
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout -k 1 60 %t | FileCheck %S/swe-sparse-gpu.test --check-prefix=DEFAULT --match-full-lines
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CAPACITY=40 not timeout -k 1 60 %t | FileCheck %S/swe-sparse.test --check-prefix=FULL
+
+RUN: clang -x hip -O2 -ffp-contract=off --offload-arch=%offload-arch --rocm-path=%rocm-path %S/../../benchmarks/swe/swe-sparse.hip -L%rocm-path/lib -lamdhip64 -lm -Wl,-rpath,%rocm-path/lib -o %t.hip
+RUN: %hip-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 timeout -k 1 60 %t.hip | FileCheck %s --check-prefix=HIP --match-full-lines
+HIP: Shallow water, HIP, sparse tiles
+HIP: Checksum: e6c861bf059c0000
+HIP-NEXT: Error: 1.4792e-02
+HIP-NEXT: Active tiles: 256 at most, 224 at the end
+RUN: %hip-env SWE_WORLD=512 SWE_TILE=64 SWE_STEPS=200 timeout -k 1 60 %t.hip | FileCheck %S/swe-sparse.test --check-prefix=WIDE --match-full-lines
+RUN: %hip-env timeout -k 1 60 %t.hip | FileCheck %S/swe-sparse-gpu.test --check-prefix=DEFAULT --match-full-lines
+RUN: %hip-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CAPACITY=40 not timeout -k 1 60 %t.hip | FileCheck %S/swe-sparse.test --check-prefix=FULL

@@ -95,6 +95,17 @@ if omp_dirs:
 if gpus and omp_dirs:
     config.available_features.add("amdgpu-gpu")
     config.substitutions.append(("%offload-arch", gpus[0]))
+# HIP programs, the baselines of some benchmarks, need ROCm's HIP runtime,
+# from $ROCM_PATH or /opt/rocm: the "hip" feature, with %rocm-path for the
+# build and %hip-env to run, which limits HSA's queues to the compute units
+# that %gpu-env gives GPU processes, as HSA_CU_MASK.
+rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
+if gpus and os.path.exists(os.path.join(rocm_path, "lib", "libamdhip64.so")):
+    config.available_features.add("hip")
+    config.substitutions.append(("%rocm-path", rocm_path))
+    config.substitutions.append(
+        ("%hip-env", "env HSA_CU_MASK=0:" +
+         os.environ.get("LIBOMPTARGET_AMDGPU_CU_MASK", "0-39")))
 
 
 # The GPU tests, the -gpu.test files, run at most MERK_LIT_GPU_JOBS (4) at a
