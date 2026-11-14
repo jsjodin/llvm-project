@@ -477,6 +477,26 @@ const char *Ready(const Gpu &gpu) {
   return nullptr;
 }
 
+// The size from which a GPU process's worker teams fill and copy its memory
+// for it (device.cpp, Bulk): MERK_GPU_BULK_BYTES, or where crossing their
+// barrier twice costs less than the process's one lane doing it. On gfx9
+// (gfx90a, measured 2026-11-14) a lane fills about 16 ns a word and reads
+// host memory uncached, a word a round trip, so from 2 KiB; on gfx1030 it
+// filled at about 3 GB/s, so from 64 KiB.
+std::uint64_t BulkBytes(const Gpu &gpu) {
+  if (const char *text{std::getenv("MERK_GPU_BULK_BYTES")}) {
+    char *end{nullptr};
+    unsigned long long bytes{std::strtoull(text, &end, 10)};
+    if (end != text && *end == '\0') {
+      return bytes;
+    }
+  }
+  if (std::strncmp(gpu.name, "gfx9", 4) == 0) {
+    return std::uint64_t{2} << 10;
+  }
+  return std::uint64_t{64} << 10;
+}
+
 // The percentage of the GPU's units that its processes' kernels take: what
 // the program set, or MERK_GPU_PROCESS_UNITS, or 100; or 0, with the text of
 // the error.
@@ -655,6 +675,7 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   }
   table->queues = reinterpret_cast<std::uint64_t>(queues);
   table->check = CheckingDeviceMemory();
+  table->bulkBytes = BulkBytes(gpu);
   auto *incarnations{
       static_cast<std::uint64_t *>(Malloc(slots * sizeof(std::uint64_t)))};
   std::memset(

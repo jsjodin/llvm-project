@@ -237,6 +237,9 @@ constexpr uint32_t kMostPlaceSleeps{64};
 PlaceTable *placeTable{nullptr};
 // Whether the kernel counts its blocks of messages (PlaceTable's `check`).
 uint32_t countBlocks{0};
+// From how many bytes a process's worker teams fill and copy for it
+// (PlaceTable's `bulkBytes`, Bulk).
+uint64_t bulkBytes{~uint64_t{0}};
 
 // Counts blocks of messages that no process holds, if the kernel does.
 void CountBlocks(int64_t change) {
@@ -1414,11 +1417,11 @@ void Distribute(uint64_t loop, int64_t first, int64_t step, int64_t count,
 // did at about 3 GB/s: array.init of a frame of 8 MiB took 2.9 ms (design
 // document, Measurements, A pipeline of GPU processes). A process with
 // worker teams has them do it, as a loop of the runtime's own across them,
-// from kBulkBytes up, where crossing their barrier twice costs less than
-// the lane's loop. The process lane's words are in the control block: what
-// to do, where to, from where or the word to fill with, and how many words.
+// from bulkBytes up, where crossing their barrier twice costs less than
+// the lane's loop, which the host chooses for the GPU (PlaceTable). The
+// process lane's words are in the control block: what to do, where to, from
+// where or the word to fill with, and how many words.
 constexpr uint64_t kBulkLoop{~uint64_t{0}};
-constexpr uint64_t kBulkBytes{uint64_t{64} << 10};
 constexpr uint64_t kBulkFill{0};
 constexpr uint64_t kBulkCopy{1};
 
@@ -1445,7 +1448,8 @@ void BulkShare(
 // the wave runs no process, the process has no worker teams, or there are
 // too few words, for the caller's own loop.
 bool Bulk(uint64_t what, uint64_t *to, uint64_t fromOrWord, uint64_t words) {
-  if (!merk_device_process_image || words * sizeof(uint64_t) < kBulkBytes) {
+  if (!merk_device_process_image || words * sizeof(uint64_t) <
+          __atomic_load_n(&bulkBytes, __ATOMIC_RELAXED)) {
     return false;
   }
   uint32_t inTeam{__gpu_thread_id_x() / __gpu_num_lanes()};
@@ -1572,6 +1576,10 @@ extern "C" void merk_device_place(PlaceTable *table) {
     __atomic_store_n(&countBlocks,
         static_cast<uint32_t>(__scoped_atomic_load_n(
             &table->check, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)),
+        __ATOMIC_RELAXED);
+    __atomic_store_n(&bulkBytes,
+        __scoped_atomic_load_n(
+            &table->bulkBytes, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM),
         __ATOMIC_RELAXED);
     placeQueues[inTeam] = nullptr;
     MakeQueue(table, wave);
