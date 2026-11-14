@@ -5241,6 +5241,44 @@ to 35% of 13 µs). Every configuration gave one checksum in every run.
   against 1.4 to 4.1 with copies: what is left is the stages run one after
   another, each on a third of the teams.
 
+**With worker teams filling and copying.** 2026-11-14 at ad7d8f8a653c, where
+a GPU process with worker teams has them do its fills and copies of 64 KiB
+and more (INPROGRESS, Messages between GPU processes on one GPU, step 3).
+Same machine, settings and sweep, Firefox closed. Rounds were within 6% of
+each other but for five, by 11 to 25%: the shortest frames, the pipeline
+at 2^20 words and 16 rounds (16%), and one round of the single process at
+2^20 words and 4096 rounds (25%), which the median leaves out. Every
+configuration gave one checksum in every run.
+
+| Words | Rounds | Feedback | Pipeline | Moved | Single | Single before | HIP |
+|---|---|---|---|---|---|---|---|
+| 4096 | 16 | none | 46 | 45 | 69 | 68 | 12.5 |
+| 4096 | 4096 | none | 333 | 334 | 380 | 379 | 319 |
+| 65536 | 16 | none | 73 | 259 | 67 | 573 | 28 |
+| 65536 | 16 | 1 | 159 | 654 | 67 | 572 | 28 |
+| 65536 | 256 | none | 319 | 442 | 308 | 806 | 268 |
+| 65536 | 4096 | none | 4579 | 4848 | 4089 | 4590 | 3899 |
+| 65536 | 4096 | 1 | 6341 | 6840 | 4091 | 4592 | 3904 |
+| 1048576 | 16 | none | 687 | 3705 | 453 | 8595 | 289 |
+| 1048576 | 16 | 1 | 798 | 8757 | 453 | 8558 | 287 |
+| 1048576 | 256 | none | 4733 | 6431 | 4238 | 12429 | 3843 |
+| 1048576 | 4096 | none | 70699 | 75413 | 64783 | 72900 | 61278 |
+| 1048576 | 4096 | 1 | 98052 | 106085 | 64675 | 72948 | 61181 |
+
+- **One process gained most,** up to 19 times at 2^20 words and 16 rounds
+  (8.6 ms to 453 µs): its three array.inits a frame were nearly all of its
+  time. From 2^16 words it is now 1.05 to 1.15 times HIP at 256 rounds and
+  more, and 1.6 to 2.4 times at 16, where a frame's few µs of work leave the barriers
+  and the process's own steps in view.
+- **The pipeline gained up to 5.4 times,** 11 with feedback, but no longer beats one
+  process from 2^16 words up: 1.04 to 1.5 times it without feedback. Not
+  yet found why; a likely part is that each stage fills its frame on a
+  third of the teams, so a stage's fill is no shorter than the single
+  process's, while its barriers and hops are its own. At 4096 words, below the fills' 64 KiB,
+  it still beats one process (46 against 69 µs).
+- **Against HIP** the pipeline is 1.04 to 1.23 times at 256 rounds and more,
+  and 2.4 times at 2^20 words and 16 rounds, against 13 before.
+
 ### GPU processes' stacks
 
 2026-11-13, at bddf7bd56f9a with the change that marks a GPU process's code
