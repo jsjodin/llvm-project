@@ -19,6 +19,14 @@
 // a loop across the process's teams ends before the process goes on, so
 // neither keeps what it is given.
 //
+// A send of an array or a term that is the last use of its class moves the
+// message's arrays rather than copying them (merk.foreign_call's `moves`):
+// when every array of the class that would be freed after it is one that
+// the message holds, by its construction, the send is marked so and those
+// arrays are not freed, here or through the cells that hold them. The
+// cells are still copied and freed (docs/INPROGRESS.md, Messages between
+// GPU processes on one GPU, step 2).
+//
 // What is freed is each block that the class allocated: a construction, an
 // array's, a received message, which the runtime keeps as one group of
 // blocks, and a call's result that the callee's summary says is a new
@@ -241,6 +249,10 @@ private:
   bool Visible(mlir::Value, const Point &) const;
   void EmitFree(mlir::OpBuilder &, mlir::Location, mlir::Value, const Path &,
       unsigned step);
+  merk::ForeignCallOp SendAt(const Point &, mlir::Value cls);
+  llvm::DenseSet<mlir::Value> HeldBy(mlir::Value message) const;
+  bool Moves(merk::ForeignCallOp send, mlir::Value cls,
+      llvm::ArrayRef<mlir::Value> freed) const;
 
   merk::ProcOp proc_;
   const llvm::StringMap<Summary> &summaries_;
@@ -1057,6 +1069,84 @@ void Analysis::EmitFree(mlir::OpBuilder &builder, mlir::Location loc,
   merk::YieldOp::create(builder, loc, mlir::ValueRange{});
 }
 
+// Whether a path ends in an array, which a move gives the receiver.
+bool EndsInArray(const Path &path) {
+  const Step &last{path.back()};
+  return mlir::isa<merk::ArrayType>(last.fields[last.index]);
+}
+
+// The send of an array or a term after which the class is freed, whose
+// message is in the class, if the point is one.
+merk::ForeignCallOp Analysis::SendAt(const Point &point, mlir::Value cls) {
+  auto send{mlir::dyn_cast_or_null<merk::ForeignCallOp>(point.after)};
+  if (!send ||
+      (send.getCallee() != "merk_device_send_array" &&
+          send.getCallee() != "merk_device_send_term") ||
+      send.getInputs().size() < 3) {
+    return {};
+  }
+  mlir::Value message{send.getInputs()[2]};
+  if (!Tracked(message) || Find(message) != cls) {
+    return {};
+  }
+  return send;
+}
+
+// The blocks that the message holds for certain, by their values: its own,
+// and those its cells were constructed with, through their fields.
+llvm::DenseSet<mlir::Value> Analysis::HeldBy(mlir::Value message) const {
+  llvm::DenseSet<mlir::Value> held;
+  llvm::SmallVector<mlir::Value> work;
+  if (mlir::Value id{IdOf(message)}) {
+    work.push_back(id);
+  }
+  while (!work.empty()) {
+    mlir::Value block{work.pop_back_val()};
+    if (!held.insert(block).second) {
+      continue;
+    }
+    auto construct{block.getDefiningOp<merk::ConstructOp>()};
+    if (!construct) {
+      continue;
+    }
+    for (mlir::Value field : construct.getArguments()) {
+      if (mlir::Value id{Tracked(field) ? IdOf(field) : mlir::Value{}}) {
+        work.push_back(id);
+      }
+    }
+  }
+  return held;
+}
+
+// Whether the send moves its message's arrays: every array of the class
+// that is freed after it, by its own value or through a cell, is one that
+// the message holds, and there is one. The send copies an array that is
+// not a block of its own, and gives the receiver one that is, so none is
+// freed twice and none is left.
+bool Analysis::Moves(merk::ForeignCallOp send, mlir::Value cls,
+    llvm::ArrayRef<mlir::Value> freed) const {
+  llvm::DenseSet<mlir::Value> held{HeldBy(send.getInputs()[2])};
+  bool any{false};
+  for (mlir::Value value : freed) {
+    bool holds{held.contains(value)};
+    if (mlir::isa<merk::ArrayType>(value.getType())) {
+      if (!holds) {
+        return false;
+      }
+      any = true;
+    }
+    for (const Path &path : PathsOf(value)) {
+      if (EndsInArray(path)) {
+        if (!holds) {
+          return false;
+        }
+        any = true;
+      }
+    }
+  }
+  return any;
+}
+
 void Analysis::InsertFrees() {
   if (proc_.isExternal()) {
     return;
@@ -1111,8 +1201,20 @@ void Analysis::InsertFrees() {
         builder.setInsertionPointToStart(point.block);
       }
       mlir::Location loc{point.after ? point.after->getLoc() : proc_.getLoc()};
+      llvm::SmallVector<mlir::Value> freed;
       for (mlir::Value value : blocks[cls]) {
-        if (!Visible(value, point)) {
+        if (Visible(value, point)) {
+          freed.push_back(value);
+        }
+      }
+      bool moves{false};
+      if (merk::ForeignCallOp send{SendAt(point, cls)};
+          send && Moves(send, cls, freed)) {
+        send.setMoves(true);
+        moves = true;
+      }
+      for (mlir::Value value : freed) {
+        if (moves && mlir::isa<merk::ArrayType>(value.getType())) {
           continue;
         }
         // The deepest blocks first, then the cells that hold them.
@@ -1120,7 +1222,9 @@ void Analysis::InsertFrees() {
         llvm::stable_sort(paths,
             [](const Path &a, const Path &b) { return a.size() > b.size(); });
         for (const Path &path : paths) {
-          EmitFree(builder, loc, value, path, 0);
+          if (!(moves && EndsInArray(path))) {
+            EmitFree(builder, loc, value, path, 0);
+          }
         }
         merk::FreeOp::create(builder, loc, value);
       }

@@ -2388,6 +2388,60 @@ struct DetachedMemory {
   }
 };
 
+// Whether a GPU process's array is a block of its own that it may give to a
+// message: on its list, as a group of one, not a worker team's, nor static.
+// An array that a send that is its last use moves is so, or is copied
+// (Frees.cpp).
+bool Movable(const uint64_t *array) {
+  if (!InProcess()) {
+    return false;
+  }
+  auto address{reinterpret_cast<uintptr_t>(array)};
+  if (address >= reinterpret_cast<uintptr_t>(__start_merk_static) &&
+      address < reinterpret_cast<uintptr_t>(__stop_merk_static)) {
+    return false;
+  }
+  Block *block{BlockOf(const_cast<uint64_t *>(array))};
+  return block->prev != kTeamBlock && block->leader == block && !block->member;
+}
+
+// Takes a movable block off the process's list: no process holds it now,
+// as a group of one, or in `leader`'s group if it is not null.
+void Detach(Block *block, Block *leader) {
+  Arena *own{CurrentArena()};
+  if (block->prev) {
+    block->prev->next = block->next;
+  } else {
+    own->blocks = block->next;
+  }
+  if (block->next) {
+    block->next->prev = block->prev;
+  }
+  __atomic_sub_fetch(&own->held, block->bytes, __ATOMIC_RELAXED);
+  CountBlocks(1);
+  block->next = nullptr;
+  block->prev = nullptr;
+  if (leader) {
+    block->leader = leader;
+    block->member = leader->member;
+    leader->member = block;
+  }
+}
+
+// Where a send that moves its message puts it (merk.foreign_call's
+// `moves`): its cells copied into a group that no process holds, as
+// DetachedMemory, and its arrays that are blocks of their own given to
+// that group rather than copied.
+struct MovingMemory : DetachedMemory {
+  uint64_t *Move(const uint64_t *array) {
+    if (!leader || !Movable(array)) {
+      return nullptr;
+    }
+    Detach(BlockOf(const_cast<uint64_t *>(array)), leader);
+    return const_cast<uint64_t *>(array);
+  }
+};
+
 // A queue's message, as its slot holds it: a word; an array in a group of
 // its own; or a block whose word is a term, the leader of the term's group.
 uint64_t ArrayForQueue(const uint64_t *array) {
@@ -2398,8 +2452,18 @@ uint64_t ArrayForQueue(const uint64_t *array) {
   return reinterpret_cast<uint64_t>(copy);
 }
 
+// An array that a send moves, itself if it is movable, or a copy.
+uint64_t MovedArrayForQueue(const uint64_t *array) {
+  if (!Movable(array)) {
+    return ArrayForQueue(array);
+  }
+  Detach(BlockOf(const_cast<uint64_t *>(array)), nullptr);
+  return reinterpret_cast<uint64_t>(array);
+}
+
+template <typename Memory>
 uint64_t TermForQueue(uint64_t message, const void *typeInfo) {
-  DetachedMemory memory;
+  Memory memory;
   auto *envelope{static_cast<uint64_t *>(memory.Allocate(sizeof(uint64_t)))};
   *envelope = merkurius::runtime::CopyTyped(message,
       merkurius::runtime::Resolve(
@@ -2699,17 +2763,46 @@ extern "C" uint64_t *merk_device_give_array(uint64_t *array, int64_t number) {
 // the region can address it, in the arena or mapped for the region, and
 // neither team can update it in place, since a send makes the sender's
 // array shared and a receive gives a shared one.
-extern "C" void merk_device_send_array(
-    const uint64_t *handle, uint64_t key, const uint64_t *array) {
+namespace {
+void SendArrayThroughHost(
+    const uint64_t *handle, uint64_t key, const uint64_t *array);
+
+template <bool kMoves>
+void SendArray(const uint64_t *handle, uint64_t key, const uint64_t *array) {
   if (IsTeamHandle(handle)) {
     TeamBlockFromProcess();
     TeamSend(handle, reinterpret_cast<uint64_t>(array));
     return;
   }
-  if (DirectSend(
-          handle, kRingOfArrays, [&]() { return ArrayForQueue(array); })) {
+  if (DirectSend(handle, kRingOfArrays, [&]() {
+        return kMoves ? MovedArrayForQueue(array) : ArrayForQueue(array);
+      })) {
     return;
   }
+  SendArrayThroughHost(handle, key, array);
+  // Through the host, a moved array is copied, and goes once it is.
+  if (kMoves && Movable(array)) {
+    merk_device_free(const_cast<uint64_t *>(array));
+  }
+}
+} // namespace
+
+extern "C" void merk_device_send_array(
+    const uint64_t *handle, uint64_t key, const uint64_t *array) {
+  SendArray<false>(handle, key, array);
+}
+
+// The same for a send that is the array's last use, which moves it
+// (merk.foreign_call's `moves`): to a process of the kernel, the array's
+// block itself goes, if it is one of its own (Movable).
+extern "C" void merk_device_send_array_moving(
+    const uint64_t *handle, uint64_t key, const uint64_t *array) {
+  SendArray<true>(handle, key, array);
+}
+
+namespace {
+void SendArrayThroughHost(
+    const uint64_t *handle, uint64_t key, const uint64_t *array) {
   PinnedMemory memory;
   uint64_t *copy{CopyToHost(array, memory)};
   rpc::Client::Port port{__llvm_rpc_client.open<rpcSendTerm>()};
@@ -2723,23 +2816,61 @@ extern "C" void merk_device_send_array(
   });
   port.recv([](rpc::Buffer *, uint32_t) {});
 }
+} // namespace
 
 // Sends a message of any type that is not one word or an array of one-word
 // elements (docs/INPROGRESS.md, GPU processes without omp target, step 4e):
 // the device copies it by its type_info, `typeInfo`, into host memory, and
 // the host sends that copy, as merk_device_send sends a word, and frees it.
 // To a team mailbox, the message goes by its pointer, as an array does.
-extern "C" void merk_device_send_term(const uint64_t *handle, uint64_t key,
-    uint64_t message, const void *typeInfo) {
+namespace {
+void SendTermThroughHost(const uint64_t *handle, uint64_t key, uint64_t message,
+    const void *typeInfo);
+
+template <bool kMoves>
+void SendTerm(const uint64_t *handle, uint64_t key, uint64_t message,
+    const void *typeInfo) {
   if (IsTeamHandle(handle)) {
     TeamBlockFromProcess();
     TeamSend(handle, message);
     return;
   }
+  uint64_t (*forQueue)(uint64_t, const void *){
+      kMoves ? TermForQueue<MovingMemory> : TermForQueue<DetachedMemory>};
   if (DirectSend(handle, kRingOfTerms,
-          [&]() { return TermForQueue(message, typeInfo); })) {
+          [&]() { return forQueue(message, typeInfo); })) {
     return;
   }
+  if (!kMoves || !InProcess()) {
+    SendTermThroughHost(handle, key, message, typeInfo);
+    return;
+  }
+  // Through the host, the moved arrays are copied from the group that they
+  // now are in, which goes once they are.
+  auto *envelope{reinterpret_cast<uint64_t *>(
+      TermForQueue<MovingMemory>(message, typeInfo))};
+  SendTermThroughHost(handle, key, *envelope, typeInfo);
+  FreeDetached(BlockOf(envelope)->leader);
+}
+} // namespace
+
+extern "C" void merk_device_send_term(const uint64_t *handle, uint64_t key,
+    uint64_t message, const void *typeInfo) {
+  SendTerm<false>(handle, key, message, typeInfo);
+}
+
+// The same for a send that is the message's last use, which moves its
+// arrays (merk.foreign_call's `moves`): to a process of the kernel, each
+// array's block itself goes with the message, if it is one of its own
+// (Movable).
+extern "C" void merk_device_send_term_moving(const uint64_t *handle,
+    uint64_t key, uint64_t message, const void *typeInfo) {
+  SendTerm<true>(handle, key, message, typeInfo);
+}
+
+namespace {
+void SendTermThroughHost(const uint64_t *handle, uint64_t key, uint64_t message,
+    const void *typeInfo) {
   PinnedMemory memory;
   uint64_t copy{CopyTyped(
       message, Resolve(reinterpret_cast<uint64_t>(typeInfo), nullptr), memory)};
@@ -2756,6 +2887,7 @@ extern "C" void merk_device_send_term(const uint64_t *handle, uint64_t key,
   });
   port.recv([](rpc::Buffer *, uint32_t) {});
 }
+} // namespace
 
 // As merk_device_receive, for a mailbox of messages of any other type: the
 // ring says that a message is there, the host copies it into host memory
