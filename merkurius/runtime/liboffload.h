@@ -58,6 +58,8 @@ constexpr std::uint32_t kOlSymbolKindGlobalVariable{1};
 constexpr std::uint32_t kOlSymbolInfoGlobalVariableAddress{1};
 // ol_alloc_type_t
 constexpr std::uint32_t kOlAllocTypeDevice{1};
+// This fork's: device memory that is fine-grained (Memory.td).
+constexpr std::uint32_t kOlAllocTypeDeviceFineGrained{3};
 // ol_platform_backend_t
 constexpr std::uint32_t kOlPlatformBackendAmdgpu{2};
 // ol_kernel_launch_prop_type_t

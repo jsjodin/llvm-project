@@ -1,0 +1,15 @@
+Fine-grained device memory through liboffload (OL_ALLOC_TYPE_DEVICE_FINE_GRAINED,
+the AMDGPU plugin's TARGET_ALLOC_DEVICE_FINE): a kernel's system-scope atomics
+on a word of it, copied back, and the word freed (docs/INPROGRESS.md, Direct
+sends between the GPUs of a node, point 5). With two GPUs visible the program
+also plays ping-pong between kernels on the two, each polling a word of its
+own GPU's memory that the other writes, which ends with fine-grained words and
+gets stuck with ordinary ones; lit gives a test one GPU, so that is run by
+hand, as
+  utils/gpu/with-gpus.py --gpus A,B -- <the test's program> <image> 10000
+REQUIRES: amdgpu-gpu
+
+RUN: clang++ --target=amdgcn-amd-amdhsa -mcpu=%offload-arch -nogpulib -O2 %S/Inputs/fine-memory-kernel.cpp -o %t.elf
+RUN: clang++ -O2 -std=c++17 %S/Inputs/fine-memory-host.cpp %libomp-flags -lLLVMOffload -o %t
+RUN: %libomp-env %t %t.elf 100 | FileCheck %s
+CHECK: fine-grained counter: 204800 of 204800
