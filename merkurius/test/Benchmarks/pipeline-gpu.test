@@ -1,0 +1,25 @@
+A pipeline of three GPU processes (benchmarks/pipeline/pipeline.m) on the
+machine's GPU, each with a third of its teams, and the same stages in one
+GPU process, against pipeline.hip, the stages as kernels in one stream: all
+give pipeline.test's checksums, with and without feedback, and on frames
+of 2^20 words, 8 MiB, which a message carries whole.
+REQUIRES: amdgpu-gpu, hip
+
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/pipeline/pipeline.m -o %t
+RUN: %gpu-env PIPE_WORDS=1000 PIPE_WORK=8 PIPE_FRAMES=20 timeout -k 1 60 %t | FileCheck %S/pipeline.test --check-prefix=PLAIN --match-full-lines
+RUN: %gpu-env PIPE_WORDS=1000 PIPE_WORK=8 PIPE_FRAMES=20 PIPE_MODE=single timeout -k 1 60 %t | FileCheck %S/pipeline.test --check-prefix=SINGLE --match-full-lines
+RUN: %gpu-env PIPE_WORDS=1000 PIPE_WORK=8 PIPE_FRAMES=20 PIPE_FEEDBACK=2 timeout -k 1 60 %t | FileCheck %S/pipeline.test --check-prefix=FEEDBACK --match-full-lines
+RUN: %gpu-env PIPE_WORDS=777 PIPE_WORK=0 PIPE_FRAMES=5 PIPE_FEEDBACK=3 PIPE_MODE=single timeout -k 1 60 %t | FileCheck %S/pipeline.test --check-prefix=ODD --match-full-lines
+RUN: %gpu-env PIPE_WORDS=1048576 PIPE_WORK=4 PIPE_FRAMES=4 PIPE_FEEDBACK=1 timeout -k 1 60 %t | FileCheck %s --check-prefix=LARGE --match-full-lines
+RUN: %gpu-env PIPE_WORDS=1048576 PIPE_WORK=4 PIPE_FRAMES=4 PIPE_FEEDBACK=1 PIPE_MODE=single timeout -k 1 60 %t | FileCheck %s --check-prefix=LARGE --match-full-lines
+
+RUN: clang -x hip -O2 -ffp-contract=off --offload-arch=%offload-arch --rocm-path=%rocm-path %S/../../benchmarks/pipeline/pipeline.hip -L%rocm-path/lib -lamdhip64 -Wl,-rpath,%rocm-path/lib -o %t.hip
+RUN: %hip-env PIPE_WORDS=1000 PIPE_WORK=8 PIPE_FRAMES=20 timeout -k 1 60 %t.hip | FileCheck %s --check-prefix=HIP --match-full-lines
+RUN: %hip-env PIPE_WORDS=1000 PIPE_WORK=8 PIPE_FRAMES=20 PIPE_FEEDBACK=2 timeout -k 1 60 %t.hip | FileCheck %S/pipeline.test --check-prefix=FEEDBACK --match-full-lines
+RUN: %hip-env PIPE_WORDS=777 PIPE_WORK=0 PIPE_FRAMES=5 PIPE_FEEDBACK=3 timeout -k 1 60 %t.hip | FileCheck %S/pipeline.test --check-prefix=ODD --match-full-lines
+RUN: %hip-env PIPE_WORDS=1048576 PIPE_WORK=4 PIPE_FRAMES=4 PIPE_FEEDBACK=1 timeout -k 1 60 %t.hip | FileCheck %s --check-prefix=LARGE --match-full-lines
+HIP: Pipeline, HIP, kernels in one stream
+HIP-NEXT: Frames: 20 of 1000 words, 8 rounds a stage
+HIP-NEXT: Feedback: none
+HIP-NEXT: Checksum: 4088faaca8b9af86
+LARGE: Checksum: 2cf15499c6dc1000
