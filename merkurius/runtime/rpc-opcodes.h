@@ -149,6 +149,25 @@ constexpr uint32_t rpcSendArrayFromDevice{RpcOpcode(16)};
 // to its memory reach a running kernel after an acquire, as gfx90a's do.
 constexpr uint32_t rpcTakeArrayInto{RpcOpcode(17)};
 
+// A copy by a copy engine for a direct send between the GPUs of a node
+// (docs/INPROGRESS.md, Direct sends between the GPUs of a node, step 6):
+// the buffer's words are where to, where from, the bytes, the asking
+// device's number, and the return ring of the GPU whose memory the copy is
+// from (place.h, ReturnRing), or 0 if it is the asking device's. The copy
+// goes into the asking device's memory. The host answers once it is done,
+// with 1, or 0 if it could not make it. The asking device writes back what
+// the copy reads before it asks, with a release at system scope, and takes
+// an acquire before it reads what the copy wrote. Only for a GPU whose
+// copy engine's writes to its memory reach a running kernel after an
+// acquire, as gfx90a's do.
+constexpr uint32_t rpcCopyPeer{RpcOpcode(18)};
+
+// From how many bytes an array sent directly to another GPU of the node is
+// copied into the send pool, and out of it, by the copy engine
+// (rpcCopyPeer): the buffer's word is the lanes of the device's waves, and
+// the host answers with the bytes, or ~0 for never.
+constexpr uint32_t rpcPeerDmaBytes{RpcOpcode(19)};
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_RPC_OPCODES_H_

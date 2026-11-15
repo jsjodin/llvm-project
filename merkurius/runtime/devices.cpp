@@ -235,6 +235,15 @@ bool CopyFromDevice(int device, void *to, const void *from, std::size_t bytes) {
       olMemcpy(nullptr, to, nullptr, from, gpu->device, bytes) == nullptr;
 }
 
+bool CopyBetweenDevices(int toDevice, void *to, int fromDevice,
+    const void *from, std::size_t bytes) {
+  const Gpu *toGpu{GpuOf(toDevice)};
+  const Gpu *fromGpu{GpuOf(fromDevice)};
+  return toGpu && fromGpu &&
+      olMemcpy(nullptr, to, toGpu->device, from, fromGpu->device, bytes) ==
+      nullptr;
+}
+
 void RegisterRpcCallback(unsigned (*callback)(void *port, unsigned lanes)) {
   if (__tgt_register_rpc_callback) {
     __tgt_register_rpc_callback(callback);
