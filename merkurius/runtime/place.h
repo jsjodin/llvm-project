@@ -131,11 +131,15 @@ struct PlaceTable {
 // `tail`, and a slot's sequence says which position it holds; a sender whose
 // slot is full spills to the slot's list.
 //
-// `incarnation` is the slot's process's (PlaceSlot), 0 before the first;
-// `closed` is set by the process as it ends; `senders` counts the senders
-// in flight, which the process waits for before it frees what the queue
-// still holds; and `kind` is the messages' (device-ring.h's kRingOf...),
-// which its senders set.
+// `state` is the incarnation of the slot's last process (PlaceSlot), 0
+// before the first, shifted left by one, with 1 while it runs: one word, so
+// that a sender to an ended process never sees the next one's incarnation
+// with the old openness, nor its own incarnation open again, as with two
+// words it could between the stores of OpenQueue, and put its message in
+// the next process's queue. `senders` counts the senders in flight, which
+// the process waits for before it frees what the queue still holds; and
+// `kind` is the messages' (device-ring.h's kRingOf...), which its senders
+// set.
 constexpr uint64_t kProcessQueueSlots{64};
 
 struct ProcessQueueSlot {
@@ -144,8 +148,7 @@ struct ProcessQueueSlot {
 };
 
 struct ProcessQueue {
-  alignas(64) uint64_t incarnation;
-  uint64_t closed;
+  alignas(64) uint64_t state;
   uint64_t senders;
   uint64_t kind;
   alignas(64) uint64_t tail;
