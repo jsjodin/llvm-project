@@ -1526,14 +1526,19 @@ void BulkShare(
 // The process's worker teams fill or copy `words` words: true, or false if
 // the wave runs no process, the process has no worker teams, or there are
 // too few words, for the caller's own loop.
-bool Bulk(uint64_t what, uint64_t *to, uint64_t fromOrWord, uint64_t words) {
+// The control block of the process of this wave, which has worker teams to
+// fill or copy `words` words for it (Bulk); or null.
+ProcessControl *BulkControl(uint64_t words) {
   if (!merk_device_process_image || words * sizeof(uint64_t) <
           __atomic_load_n(&bulkBytes, __ATOMIC_RELAXED)) {
-    return false;
+    return nullptr;
   }
   uint32_t inTeam{__gpu_thread_id_x() / __gpu_num_lanes()};
-  ProcessControl *control{
-      processWaves[inTeam] ? placeControls[inTeam] : nullptr};
+  return processWaves[inTeam] ? placeControls[inTeam] : nullptr;
+}
+
+bool Bulk(uint64_t what, uint64_t *to, uint64_t fromOrWord, uint64_t words) {
+  ProcessControl *control{BulkControl(words)};
   if (!control) {
     return false;
   }
@@ -3103,20 +3108,38 @@ struct PeerCopy {
 };
 
 // From how many bytes an array goes into the send pool, and out of it, by
-// the copy engine (rpcPeerDmaBytes), asked once; 0 before.
+// the copy engine (rpcPeerDmaBytes), asked once; 0 before. And whether a
+// process's worker teams copy it instead when they would (BulkControl).
 uint64_t peerDmaBytes{0};
+bool peerWorkersFirst{false};
 
 uint64_t PeerDmaBytes() {
   uint64_t bytes{__atomic_load_n(&peerDmaBytes, __ATOMIC_RELAXED)};
   if (bytes == 0) {
+    bool workers{false};
     rpc::Client::Port port{__llvm_rpc_client.open<rpcPeerDmaBytes>()};
     port.send([](rpc::Buffer *buffer, uint32_t) {
       buffer->data[0] = static_cast<uint64_t>(__builtin_amdgcn_wavefrontsize());
     });
-    port.recv([&](rpc::Buffer *buffer, uint32_t) { bytes = buffer->data[0]; });
+    port.recv([&](rpc::Buffer *buffer, uint32_t) {
+      bytes = buffer->data[0];
+      workers = buffer->data[1] != 0;
+    });
+    __atomic_store_n(&peerWorkersFirst, workers, __ATOMIC_RELAXED);
     __atomic_store_n(&peerDmaBytes, bytes, __ATOMIC_RELAXED);
   }
   return bytes;
+}
+
+// Whether an array of `words` words goes into the send pool or out of it by
+// the copy engine: from PeerDmaBytes up, unless the process's worker teams
+// would copy it (step 6, worker teams first).
+bool PeerByEngine(uint64_t words) {
+  if (sizeof(uint64_t) * words < PeerDmaBytes()) {
+    return false;
+  }
+  return !(__atomic_load_n(&peerWorkersFirst, __ATOMIC_RELAXED) &&
+      BulkControl(words));
 }
 
 // Copies `bytes` from `from` to `to`, in this device's memory, by the copy
@@ -3152,7 +3175,7 @@ PeerCopy ArrayToPool(const uint64_t *array) {
   uint64_t bytes{sizeof(uint64_t) * words};
   PoolBlock *block{PoolAllocate(bytes)};
   auto *copy{reinterpret_cast<uint64_t *>(block + 1)};
-  if (bytes >= PeerDmaBytes()) {
+  if (PeerByEngine(words)) {
     CopyByEngine(copy, array, bytes, 0);
   } else {
     CopyWords(copy, array, words);
@@ -3289,8 +3312,11 @@ uint64_t DeliverPeer(uint64_t kind, uint64_t message, uint64_t copy,
     uint64_t bytes{sizeof(uint64_t) * words};
     auto *array{static_cast<uint64_t *>(merk_device_alloc(bytes))};
     // From PeerDmaBytes up, the copy engine pulls it, as one wave loads
-    // across the link at under 1 GB/s (step 6).
-    if (bytes >= PeerDmaBytes()) {
+    // across the link at under 1 GB/s, unless the process's worker teams
+    // do (step 6). The acquire at system scope that took the message
+    // dropped the L2's lines of the pool, and the workers' barrier their
+    // L1s'.
+    if (PeerByEngine(words)) {
       CopyByEngine(array, from, bytes, returnTo);
     } else {
       CopyWords(array, from, words);
