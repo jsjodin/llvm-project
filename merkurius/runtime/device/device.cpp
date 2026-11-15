@@ -131,6 +131,7 @@ using merkurius::runtime::ReturnRingSlot;
 using merkurius::runtime::RingSlots;
 using merkurius::runtime::SendPool;
 using merkurius::runtime::SendPoolClearBytes;
+using merkurius::runtime::kSendPoolQuickOrders;
 using merkurius::runtime::kPeerQueueSlots;
 using merkurius::runtime::kSendPoolBlock;
 using merkurius::runtime::kSendPoolOrders;
@@ -196,8 +197,13 @@ struct Block;
 
 // A GPU process's arena also has the blocks that it holds (Block): those
 // its own wave made, which it may free, and those its worker teams made in
-// its loops, freed when it ends; and the bytes they take, and the most they
-// took at once, which the host reports (MERK_CHECK_PROCESS_MEMORY).
+// its loops, freed when it ends; and the bytes they take, which the host
+// reports the most of (MERK_CHECK_PROCESS_MEMORY). Only the own wave counts
+// its own blocks, `held` and `peak`, without atomics, which cost it a round
+// trip each; the workers add theirs to `teamHeld`, with an atomic whose
+// result none waits for. As the workers' blocks stay until the process
+// ends, the most it held is at most `peak` and `teamHeld` together, which
+// it reports.
 struct Route;
 
 struct Arena {
@@ -207,12 +213,18 @@ struct Arena {
   Block *teamBlocks;
   uint64_t held;
   uint64_t peak;
+  uint64_t teamHeld;
   Route *routes;
   void *small[merkurius::runtime::kSmallClasses];
   uint64_t smallBytes;
+  uint64_t returnRing;
+  uint64_t returnCount;
+  uint64_t returnBytes;
+  uint64_t returns[merkurius::runtime::kReturnBatch];
 };
 static_assert(sizeof(Arena) == kArenaClearWords * sizeof(uint64_t));
-Arena arena{{nullptr, 0, 0}, {}, nullptr, nullptr, 0, 0, nullptr, {}, 0};
+Arena arena{{nullptr, 0, 0}, {}, nullptr, nullptr, 0, 0, 0, nullptr, {}, 0, 0,
+    0, 0, {}};
 
 // In a region's image, by the slot of each region that runs (device-ring.h):
 // where its cells are bumped from, its teams' table if it is a target teams
@@ -256,6 +268,11 @@ constexpr uint32_t kMostPlaceSleeps{64};
 struct Route;
 enum RouteUse { kRouteToReceive, kRouteToSend };
 [[clang::loader_uninitialized]] Local<Route *> lastRoutes[2][kMostPlaceWaves];
+
+// By wave of the team, whether its process holds copies to return
+// (HoldReturn), so that a send or a poll that finds none pays no load of
+// the arena.
+[[clang::loader_uninitialized]] Local<uint32_t> holdsReturns[kMostPlaceWaves];
 PlaceTable *placeTable{nullptr};
 // Whether the kernel counts its blocks of messages (PlaceTable's `check`).
 uint32_t countBlocks{0};
@@ -298,6 +315,7 @@ ProcessQueue *OpenQueue(PlaceTable *table, PlaceSlot *slot, uint64_t wave);
 void CloseQueue(ProcessQueue *queue);
 PeerQueue *OpenPeerQueue(PlaceTable *table, PlaceSlot *slot, uint64_t wave);
 void ClosePeerQueue(PeerQueue *queue);
+void FlushReturns();
 
 // A process's control block, in its arena, through which it runs its loops
 // across its worker teams (place.h): the counts of the barrier that the
@@ -656,7 +674,7 @@ void RawFree(void *raw, uint64_t bytes) {
 // A GPU process's cache of small blocks: libc's malloc and
 // free on the GPU cost some microseconds each, from one lane, and a process
 // that receives a message makes and frees blocks for it every time. A block
-// of a process's own wave, of up to 4 KiB, is a power of two from 64 bytes,
+// of a process's own wave, of up to 64 KiB, is a power of two from 64 bytes,
 // a class; a freed block whose size is a class goes on the arena's list for
 // it, up to kSmallCacheBytes in all, and a new one of that class is the
 // last freed. Worker teams make blocks at the same time as their process,
@@ -722,9 +740,7 @@ void FreeSmallCache(Arena *arena) {
 // A block of `bytes` for what runs on the wave, whose bytes start on 256
 // bytes after `before` bytes, or on 16 if `before` is 0; in `leader`'s
 // group if it is not null. The process's own wave takes it from its cache
-// of small blocks (SmallAllocate). Worker teams add to `held` as the
-// process does, so its updates are atomic, at the device's scope, as only
-// the device reads it.
+// of small blocks (SmallAllocate).
 void *NewBlock(Arena *arena, uint64_t bytes, uint64_t before, Block *leader) {
   constexpr uint64_t kAlign{256};
   uint64_t given{0};
@@ -739,11 +755,9 @@ void *NewBlock(Arena *arena, uint64_t bytes, uint64_t before, Block *leader) {
   Block *block{BlockOf(reinterpret_cast<void *>(start))};
   block->raw = raw;
   block->bytes = given;
-  uint64_t held{__scoped_atomic_add_fetch(
-      &arena->held, given, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE)};
-  __scoped_atomic_fetch_max(
-      &arena->peak, held, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
   if (!processWaves[__gpu_thread_id_x() / __gpu_num_lanes()]) {
+    __scoped_atomic_fetch_add(
+        &arena->teamHeld, given, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
     block->prev = kTeamBlock;
     block->leader = block;
     block->member = nullptr;
@@ -754,6 +768,8 @@ void *NewBlock(Arena *arena, uint64_t bytes, uint64_t before, Block *leader) {
         true, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
     return reinterpret_cast<void *>(start);
   }
+  arena->held += given;
+  arena->peak = arena->held > arena->peak ? arena->held : arena->peak;
   if (leader) {
     block->leader = leader;
     block->member = leader->member;
@@ -774,12 +790,14 @@ void *NewBlock(Arena *arena, uint64_t bytes, uint64_t before, Block *leader) {
 }
 
 // Gives back a block and the rest of its group, which are on no list. Only
-// the process's own wave frees blocks, to its cache.
+// the process's own wave frees blocks, to its cache; a worker's block goes
+// as the process ends, uncounted.
 void FreeGroup(Arena *arena, Block *leader) {
   for (Block *block{leader}; block;) {
     Block *member{block->member};
-    __scoped_atomic_sub_fetch(&arena->held, block->bytes, __ATOMIC_RELAXED,
-        __MEMORY_SCOPE_DEVICE);
+    if (block->prev != kTeamBlock) {
+      arena->held -= block->bytes;
+    }
     SmallFree(arena, block->raw, block->bytes);
     block = member;
   }
@@ -1343,6 +1361,7 @@ uint64_t LoadSlotWord(uint64_t *word) {
   processWaves[inTeam] = 1;
   lastRoutes[kRouteToReceive][inTeam] = nullptr;
   lastRoutes[kRouteToSend][inTeam] = nullptr;
+  holdsReturns[inTeam] = 0;
   ProcessQueue *queue{OpenQueue(table, slot, wave)};
   placeQueues[inTeam] = queue;
   PeerQueue *peerQueue{OpenPeerQueue(table, slot, wave)};
@@ -1389,6 +1408,7 @@ uint64_t LoadSlotWord(uint64_t *word) {
   // Messages sent to it that it did not take go, before what it holds,
   // once no sender is in flight; those from other GPUs go back to their
   // senders' pools.
+  FlushReturns();
   if (peerQueue) {
     ClosePeerQueue(peerQueue);
     placePeerQueues[inTeam] = nullptr;
@@ -1397,7 +1417,9 @@ uint64_t LoadSlotWord(uint64_t *word) {
   placeQueues[inTeam] = nullptr;
   // What the process holds goes, as its arena does, once its workers have
   // stopped making blocks.
-  uint64_t peak{arena->peak};
+  uint64_t peak{arena->peak +
+      __scoped_atomic_load_n(
+          &arena->teamHeld, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE)};
   FreeProcessBlocks(arena);
   processWaves[inTeam] = 0;
   __scoped_atomic_store_n(
@@ -2737,8 +2759,8 @@ void Adopt(Block *leader) {
     bytes += block->bytes;
     CountBlocks(-1);
   }
-  uint64_t held{__atomic_add_fetch(&own->held, bytes, __ATOMIC_RELAXED)};
-  __atomic_fetch_max(&own->peak, held, __ATOMIC_RELAXED);
+  own->held += bytes;
+  own->peak = own->held > own->peak ? own->held : own->peak;
   leader->prev = nullptr;
   leader->next = own->blocks;
   if (own->blocks) {
@@ -2793,7 +2815,7 @@ void Detach(Block *block, Block *leader) {
   if (block->next) {
     block->next->prev = block->prev;
   }
-  __atomic_sub_fetch(&own->held, block->bytes, __ATOMIC_RELAXED);
+  own->held -= block->bytes;
   CountBlocks(1);
   block->next = nullptr;
   block->prev = nullptr;
@@ -3024,6 +3046,15 @@ constexpr int kSystem{__MEMORY_SCOPE_SYSTEM};
 // order's free list. The state byte of each kSendPoolBlock bytes is its
 // order plus one where a free block starts, and 0 elsewhere, so that a
 // freed block finds whether its buddy is free, and joins it.
+//
+// A block of one of the kSendPoolQuickOrders smallest orders, which most
+// messages take, goes back instead on its order's quick list, as it is,
+// and the next block of that order is the last freed there: joining it
+// with its buddy and splitting the next one again cost the sender some
+// microseconds a message (docs/INPROGRESS.md, The cost of a message). A
+// block on a quick list keeps the state byte of a block in use, so no
+// buddy joins it. Only when the free lists have no block large enough do
+// the quick lists go back to them (FlushQuick), joined.
 constexpr uint64_t kPoolLeastOrder{10};
 static_assert(uint64_t{1} << kPoolLeastOrder == kSendPoolBlock);
 
@@ -3106,13 +3137,49 @@ void PoolFree(SendPool *pool, PoolBlock *block) {
   PushFree(pool, offset, order);
 }
 
-// A copy's blocks, the first and those chained to it.
+// A copy's blocks, the first and those chained to it: to the quick lists
+// when small.
 void FreeCopy(SendPool *pool, PoolBlock *block) {
   while (block) {
     PoolBlock *chain{block->chain};
-    PoolFree(pool, block);
+    uint64_t quick{block->order - kPoolLeastOrder};
+    if (quick < kSendPoolQuickOrders) {
+      block->chain = reinterpret_cast<PoolBlock *>(pool->quick[quick]);
+      pool->quick[quick] = reinterpret_cast<uint64_t>(block);
+    } else {
+      PoolFree(pool, block);
+    }
     block = chain;
   }
+}
+
+// A block of the quick list of `order`, or null.
+PoolBlock *TakeQuick(SendPool *pool, uint64_t order) {
+  uint64_t quick{order - kPoolLeastOrder};
+  if (quick >= kSendPoolQuickOrders || !pool->quick[quick]) {
+    return nullptr;
+  }
+  auto *block{reinterpret_cast<PoolBlock *>(pool->quick[quick])};
+  pool->quick[quick] = reinterpret_cast<uint64_t>(block->chain);
+  block->chain = nullptr;
+  return block;
+}
+
+// Every block of the quick lists back to the free lists, joined with their
+// buddies: whether there were any.
+bool FlushQuick(SendPool *pool) {
+  bool any{false};
+  for (uint64_t quick{0}; quick < kSendPoolQuickOrders; ++quick) {
+    for (auto *block{reinterpret_cast<PoolBlock *>(pool->quick[quick])};
+        block;) {
+      PoolBlock *chain{block->chain};
+      PoolFree(pool, block);
+      block = chain;
+      any = true;
+    }
+    pool->quick[quick] = 0;
+  }
+  return any;
 }
 
 // Only the pool's GPU takes its lock, so the device's scope does.
@@ -3131,33 +3198,41 @@ void UnlockPool(SendPool *pool) {
   __scoped_atomic_store_n(&pool->lock, 0, __ATOMIC_RELEASE, kDevice);
 }
 
-// Frees the copies that receivers have put on the GPU's return ring. With
-// the pool's lock held, so one sender reads the ring at a time.
-void TakeReturns(SendPool *pool, ReturnRing *ring) {
-  uint64_t slots{__scoped_atomic_load_n(&ring->slots, __ATOMIC_RELAXED, kSystem)};
-  for (;;) {
-    uint64_t head{
-        __scoped_atomic_load_n(&ring->head, __ATOMIC_RELAXED, kSystem)};
+// Frees the copies that receivers have put on the GPU's return ring: with
+// the pool's lock held, so one sender reads the ring at a time, and keeps
+// its head in the pool. Every GPU's pool has the same bytes, so the ring's
+// slots need no load. Whether it freed any.
+bool TakeReturns(SendPool *pool, ReturnRing *ring) {
+  uint64_t slots{merkurius::runtime::ReturnRingSlots(
+      __atomic_load_n(&sendPoolBytes, __ATOMIC_RELAXED))};
+  bool any{false};
+  for (uint64_t head{pool->returnHead};; ++head) {
     ReturnRingSlot &slot{RingSlots(ring)[head % slots]};
     if (__scoped_atomic_load_n(&slot.sequence, __ATOMIC_RELAXED, kSystem) !=
         head + 1) {
-      return;
+      pool->returnHead = head;
+      return any;
     }
     __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, kSystem);
     uint64_t address{
         __scoped_atomic_load_n(&slot.address, __ATOMIC_RELAXED, kSystem)};
     __scoped_atomic_store_n(
         &slot.sequence, head + slots, __ATOMIC_RELEASE, kSystem);
-    __scoped_atomic_store_n(&ring->head, head + 1, __ATOMIC_RELAXED, kSystem);
     FreeCopy(pool, reinterpret_cast<PoolBlock *>(address));
+    any = true;
   }
 }
 
-// A block of the pool with `bytes` after its header, taking back what
-// receivers have returned first. If the pool has none, the sender waits for
-// receivers to return copies: its messages are in flight, and none goes
-// through the host instead, which would break their order. A message larger
-// than the pool can hold ends the program.
+// A block of the pool with `bytes` after its header: the last freed of its
+// order on the quick list, or else, after taking back what receivers have
+// returned, from the quick list again or the free lists, and only then the
+// quick lists joined back into the free lists. The return ring is read only
+// when the quick list is empty: each look costs a load at the system's
+// scope, and an acquire there for each copy taken. If the pool has nothing
+// for it even then, the sender waits for receivers to return copies: its
+// messages are in flight, and none goes through the host instead, which
+// would break their order. A message larger than the pool can hold ends the
+// program.
 PoolBlock *PoolAllocate(uint64_t bytes) {
   SendPool *pool{__atomic_load_n(&sendPool, __ATOMIC_RELAXED)};
   uint64_t need{bytes + sizeof(PoolBlock)};
@@ -3179,26 +3254,37 @@ PoolBlock *PoolAllocate(uint64_t bytes) {
           static_cast<int64_t>(
               __atomic_load_n(&sendPoolBytes, __ATOMIC_RELAXED)));
     }
-    TakeReturns(pool, __atomic_load_n(&returnRing, __ATOMIC_RELAXED));
-    uint64_t found{order};
-    while (found < kSendPoolOrders && !pool->free[found]) {
-      ++found;
+    PoolBlock *block{TakeQuick(pool, order)};
+    if (!block &&
+        TakeReturns(pool, __atomic_load_n(&returnRing, __ATOMIC_RELAXED))) {
+      block = TakeQuick(pool, order);
     }
-    if (found < kSendPoolOrders) {
-      auto *free{reinterpret_cast<FreePoolBlock *>(pool->free[found])};
-      UnlinkFree(pool, free, found);
-      uint64_t offset{reinterpret_cast<uint64_t>(free) - pool->data};
-      while (found > order) {
-        --found;
-        PushFree(pool, offset + (uint64_t{1} << found), found);
+    for (bool flushed{false}; !block;) {
+      uint64_t found{order};
+      while (found < kSendPoolOrders && !pool->free[found]) {
+        ++found;
       }
-      auto *block{reinterpret_cast<PoolBlock *>(free)};
-      block->order = order;
-      block->chain = nullptr;
-      UnlockPool(pool);
-      return block;
+      if (found < kSendPoolOrders) {
+        auto *free{reinterpret_cast<FreePoolBlock *>(pool->free[found])};
+        UnlinkFree(pool, free, found);
+        uint64_t offset{reinterpret_cast<uint64_t>(free) - pool->data};
+        while (found > order) {
+          --found;
+          PushFree(pool, offset + (uint64_t{1} << found), found);
+        }
+        block = reinterpret_cast<PoolBlock *>(free);
+        block->order = order;
+        block->chain = nullptr;
+      } else if (flushed || !FlushQuick(pool)) {
+        break;
+      } else {
+        flushed = true;
+      }
     }
     UnlockPool(pool);
+    if (block) {
+      return block;
+    }
     __builtin_amdgcn_s_sleep(64);
   }
 }
@@ -3340,17 +3426,29 @@ PeerCopy TermToPool(uint64_t message, const void *typeInfo) {
 }
 
 // Counts a sender into the peer queue if the process it wants runs there:
-// 1; 0 if that process has ended; -1 if it has not yet started. With the
-// queue's closing (ClosePeerQueue), sequentially consistent, as EnterQueue.
+// 1; 0 if that process has ended; -1 if it has not yet started. One remote
+// add on the queue's state, which says which process runs (place.h,
+// PeerQueue); relaxed, as the closing receiver's clear of the same word
+// reads every count before it.
 int EnterPeerQueue(PeerQueue *queue, uint64_t incarnation) {
-  __scoped_atomic_fetch_add(&queue->senders, 1, __ATOMIC_SEQ_CST, kSystem);
   uint64_t state{
-      __scoped_atomic_load_n(&queue->state, __ATOMIC_SEQ_CST, kSystem)};
-  if (state == (incarnation << 1 | 1)) {
+      __scoped_atomic_fetch_add(&queue->state, 1, __ATOMIC_RELAXED, kSystem)};
+  uint64_t running{state >> merkurius::runtime::kPeerQueueOpenBit};
+  if (running == (incarnation << 1 | 1)) {
     return 1;
   }
-  __scoped_atomic_fetch_sub(&queue->senders, 1, __ATOMIC_RELEASE, kSystem);
-  return (state >> 1) < incarnation ? -1 : 0;
+  __scoped_atomic_fetch_add(
+      &queue->state, ~uint64_t{0}, __ATOMIC_RELAXED, kSystem);
+  return (running >> 1) < incarnation ? -1 : 0;
+}
+
+// The sender is done with the peer queue: its put before the closing
+// receiver's drain. The count goes down by an add of -1, as a subtract
+// has no atomic operation over PCIe, between GPUs without a link (see
+// FlushReturns).
+void LeavePeerQueue(PeerQueue *queue) {
+  __scoped_atomic_fetch_add(
+      &queue->state, ~uint64_t{0}, __ATOMIC_RELEASE, kSystem);
 }
 
 // Puts a message in the peer queue at the next position, waiting while its
@@ -3399,7 +3497,7 @@ void PeerSend(Route *route, MakePeer makePeer) {
     __builtin_amdgcn_s_sleep(8);
   }
   PutPeer(queue, copy.message, copy.copy);
-  __scoped_atomic_fetch_sub(&queue->senders, 1, __ATOMIC_RELEASE, kSystem);
+  LeavePeerQueue(queue);
   CountPeer(&PlaceTable::peerSends, 1);
 }
 
@@ -3422,6 +3520,118 @@ void ReturnCopy(ReturnRing *ring, uint64_t copy) {
   __scoped_atomic_store_n(&slot.address, copy, __ATOMIC_RELAXED, kSystem);
   __scoped_atomic_store_n(
       &slot.sequence, position + 1, __ATOMIC_RELEASE, kSystem);
+}
+
+// A process returns the small copies it has received in batches (Arena,
+// returns): each return costs a remote add on the ring's tail, a remote
+// load of the slot and a release at the system's scope, some 3 us from one
+// lane, which a batch pays about once (docs/INPROGRESS.md, The cost of a
+// message). It holds at most kReturnBatch copies, of one ring, of at most
+// kReturnHeldBytes of the sender's pool, and returns them once it holds
+// as many, or another ring's copy comes, or before it might wait: as a
+// poll finds nothing, as it sends, as a receive goes through the host, and
+// as it ends. A process that computes long after a receive keeps them
+// that long; the bound keeps what it holds of a pool of 64 MiB small.
+constexpr uint64_t kReturnHeldBytes{uint64_t{32} << 10};
+
+void FlushReturns() {
+  constexpr uint64_t kBatch{merkurius::runtime::kReturnBatch};
+  if (!holdsReturns[__gpu_thread_id_x() / __gpu_num_lanes()]) {
+    return;
+  }
+  holdsReturns[__gpu_thread_id_x() / __gpu_num_lanes()] = 0;
+  Arena *arena{CurrentArena()};
+  uint64_t count{arena->returnCount};
+  auto *ring{reinterpret_cast<ReturnRing *>(arena->returnRing)};
+  arena->returnCount = 0;
+  arena->returnBytes = 0;
+  // A process that sends after each receive, as a relay does, holds one.
+  if (count == 1) {
+    ReturnCopy(ring, arena->returns[0]);
+    return;
+  }
+  uint64_t slots{merkurius::runtime::ReturnRingSlots(
+      __atomic_load_n(&sendPoolBytes, __ATOMIC_RELAXED))};
+  // The loops run over the whole batch, unrolled, so that the copies and
+  // the slots' sequences stay in registers and their loads go out together,
+  // one round trip for all, rather than one each; a slot past the batch is
+  // only read.
+  uint64_t copies[kBatch];
+#pragma unroll
+  for (uint64_t i{0}; i < kBatch; ++i) {
+    copies[i] = arena->returns[i];
+  }
+  uint64_t position{
+      __scoped_atomic_fetch_add(&ring->tail, count, __ATOMIC_RELAXED, kSystem)};
+  // One division for the batch: a 64-bit one is a long sequence on the GPU.
+  uint64_t first{position % slots};
+  ReturnRingSlot *batch[kBatch];
+#pragma unroll
+  for (uint64_t i{0}; i < kBatch; ++i) {
+    uint64_t index{first + i};
+    batch[i] = &RingSlots(ring)[index < slots ? index : index - slots];
+  }
+  uint64_t sequences[kBatch];
+#pragma unroll
+  for (uint64_t i{0}; i < kBatch; ++i) {
+    sequences[i] =
+        __scoped_atomic_load_n(&batch[i]->sequence, __ATOMIC_RELAXED, kSystem);
+  }
+#pragma unroll
+  for (uint64_t i{0}; i < kBatch; ++i) {
+    if (i < count) {
+      ReturnRingSlot &slot{*batch[i]};
+      while (sequences[i] != position + i) {
+        __builtin_amdgcn_s_sleep(8);
+        sequences[i] =
+            __scoped_atomic_load_n(&slot.sequence, __ATOMIC_RELAXED, kSystem);
+      }
+      __scoped_atomic_store_n(
+          &slot.address, copies[i], __ATOMIC_RELAXED, kSystem);
+    }
+  }
+  // Orders the receiver's loads of the copies, and the addresses, before
+  // the slots fill.
+  __scoped_atomic_thread_fence(__ATOMIC_RELEASE, kSystem);
+#pragma unroll
+  for (uint64_t i{0}; i < kBatch; ++i) {
+    if (i < count) {
+      __scoped_atomic_store_n(&batch[i]->sequence, position + i + 1,
+          __ATOMIC_RELAXED, kSystem);
+    }
+  }
+  // One add of -1 a copy, not one of -count: the compiler makes adding a
+  // negative variable an atomic subtract, which PCIe has no operation for,
+  // and the table is in host memory, where the subtract was lost.
+  for (uint64_t i{0}; i < count; ++i) {
+    CountPeer(&PlaceTable::peerCopies, -1);
+  }
+}
+
+// Holds the copy of an array of `bytes` to return to `ring` with the
+// process's batch, or returns it now if it is large.
+void HoldReturn(ReturnRing *ring, uint64_t copy, uint64_t bytes) {
+  uint64_t need{bytes + 2 * sizeof(uint64_t)};
+  uint64_t block{need <= kSendPoolBlock
+          ? kSendPoolBlock
+          : uint64_t{1} << (64 - __builtin_clzll(need - 1))};
+  if (block > kReturnHeldBytes) {
+    ReturnCopy(ring, copy);
+    return;
+  }
+  Arena *arena{CurrentArena()};
+  if (arena->returnCount &&
+      (arena->returnRing != reinterpret_cast<uint64_t>(ring) ||
+          arena->returnBytes + block > kReturnHeldBytes)) {
+    FlushReturns();
+  }
+  arena->returnRing = reinterpret_cast<uint64_t>(ring);
+  arena->returns[arena->returnCount++] = copy;
+  holdsReturns[__gpu_thread_id_x() / __gpu_num_lanes()] = 1;
+  arena->returnBytes += block;
+  if (arena->returnCount == merkurius::runtime::kReturnBatch) {
+    FlushReturns();
+  }
 }
 
 // One look at the process's peer queue: whether the message of the next
@@ -3470,6 +3680,10 @@ uint64_t DeliverPeer(uint64_t kind, uint64_t message, uint64_t copy,
       CopyWords(array, from, words);
     }
     result = reinterpret_cast<uint64_t>(array);
+    if (copy) {
+      HoldReturn(reinterpret_cast<ReturnRing *>(returnTo), copy, bytes);
+      return result;
+    }
   } else if (kind == kRingOfTerms) {
     ArenaMemory memory;
     result = merkurius::runtime::CopyTyped(message,
@@ -3496,8 +3710,16 @@ PeerQueue *OpenPeerQueue(PlaceTable *table, PlaceSlot *slot, uint64_t wave) {
   auto *queue{reinterpret_cast<PeerQueue *>(queues) + wave};
   uint64_t incarnation{
       __scoped_atomic_load_n(&slot->incarnation, __ATOMIC_RELAXED, kSystem)};
-  __scoped_atomic_store_n(
-      &queue->state, incarnation << 1 | 1, __ATOMIC_SEQ_CST, kSystem);
+  // Stale senders may be counted in, for as long as they take to see the
+  // state and leave: their count stays.
+  uint64_t open{(incarnation << 1 | 1)
+      << merkurius::runtime::kPeerQueueOpenBit};
+  uint64_t state{
+      __scoped_atomic_load_n(&queue->state, __ATOMIC_RELAXED, kSystem)};
+  while (!__scoped_atomic_compare_exchange_n(&queue->state, &state,
+      open | (state & merkurius::runtime::kPeerQueueSenders), false,
+      __ATOMIC_RELEASE, __ATOMIC_RELAXED, kSystem)) {
+  }
   return queue;
 }
 
@@ -3505,8 +3727,8 @@ PeerQueue *OpenPeerQueue(PlaceTable *table, PlaceSlot *slot, uint64_t wave) {
 // to the senders' pools, while senders in flight finish, as a full slot
 // makes one wait for the receiver, and once they have.
 void ClosePeerQueue(PeerQueue *queue) {
-  __scoped_atomic_fetch_and(&queue->state, ~uint64_t{1}, __ATOMIC_SEQ_CST,
-      kSystem);
+  __scoped_atomic_fetch_and(&queue->state,
+      ~merkurius::runtime::kPeerQueueOpen, __ATOMIC_RELAXED, kSystem);
   auto drain{[&]() {
     uint64_t message{0};
     uint64_t copy{0};
@@ -3519,8 +3741,8 @@ void ClosePeerQueue(PeerQueue *queue) {
   }};
   for (;;) {
     drain();
-    if (__scoped_atomic_load_n(&queue->senders, __ATOMIC_SEQ_CST, kSystem) ==
-        0) {
+    if ((__scoped_atomic_load_n(&queue->state, __ATOMIC_ACQUIRE, kSystem) &
+            merkurius::runtime::kPeerQueueSenders) == 0) {
       break;
     }
     __builtin_amdgcn_s_sleep(1);
@@ -3544,6 +3766,7 @@ Sent DirectSend(
   if (!InProcess()) {
     return Sent::kHost;
   }
+  FlushReturns();
   Route *route{RouteOf(handle, kRouteToSend)};
   ProcessQueue *queue{route->queue};
   if (!queue) {
@@ -3602,6 +3825,7 @@ int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
   PeerQueue *peer{placePeerQueues[__gpu_thread_id_x() / __gpu_num_lanes()]};
   Route *route{RouteOf(handle, kRouteToReceive)};
   if (!own || route->queue != own) {
+    FlushReturns();
     return -1;
   }
   // One look at the peer queue, if the process has one.
@@ -3659,6 +3883,7 @@ int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
       route->looks = 0;
       return 1;
     }
+    FlushReturns();
     if (milliseconds >= 0 && Now() >= deadline) {
       route->looks = look + 1;
       return 0;

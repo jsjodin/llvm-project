@@ -6271,12 +6271,69 @@ on ROCR GPUs 4,6:
   Taking back returned copies only when the pool's free lists have none
   (the sender's look at the return ring is about 4 µs) made no difference
   to the stream, and was not kept.
-- Left: of the 17 µs an array of 1 word costs between GPUs, the sender's
-  allocation in the send pool takes about 6 (4 of them the return ring's
-  look), its put into the peer queue 4, and the receiver's return of the
-  copy 2; what remains of a word's 9 µs is some 10 to 15 loads from the
-  GPU's memory a message, each most of a microsecond, which only fewer
-  loads, or state in the team's local memory, would cut.
+- *The send pool, the return ring and the peer queue.* Of the 17 µs an
+  array of 1 word cost between GPUs, the counters put on the sender about
+  4 µs in the return ring's look before every allocation, 3 in joining
+  each freed block with its buddy and splitting the next, and 2 in
+  entering the peer queue; on the receiver, 3 in returning the copy and
+  most of the rest in its blocks. A stream to one sink is held to the
+  receiver's pace, so a second scratch program sends to two sinks in
+  turn, which leaves the sender the slower side.
+  - *Quick lists.* A freed block of the pool's 7 smallest orders, to 64
+    KiB, goes on its order's list as it is, and the next of that order is
+    the last freed; the lists go back to the buddies only when the free
+    lists have nothing large enough (`SendPool::quick`, `FlushQuick`).
+    The return ring is read only when the quick list is empty, and its
+    head and size need no loads (`SendPool::returnHead`).
+  - *Batched returns.* A receiver holds the copies of small arrays, up
+    to 8 of one ring and 32 KiB of the pool, and returns them with one add
+    on the ring's tail, the slots' loads together and one release
+    (`HoldReturn`, `FlushReturns`). It returns what it holds as a poll
+    finds nothing, as it sends, as a receive goes through the host and as
+    it ends, so it holds none while it waits; a process that computes
+    long after a receive holds them that long. One copy goes as before
+    (`ReturnCopy`), as a relay, which sends after each receive, holds
+    one. Two things made the first batches cost more than they saved: a
+    64-bit modulo for each slot, a long sequence on the GPU, and a loop
+    over the batch that kept it in scratch memory, which made every load
+    wait for the one before; the loops are now unrolled, with one modulo.
+  - *The peer queue's state in one word,* with the senders in flight
+    (place.h, `PeerQueue`): a sender counts itself in with one relaxed
+    add, which also says whether its process runs, where it took a
+    sequentially consistent add and a load, each a fence at system
+    scope. The closing receiver's clear of the open bit, on the same
+    word, reads every count before it.
+  - *Blocks.* The small-block cache now holds blocks to 64 KiB, and a
+    process's own wave counts the bytes it holds without atomics; its
+    worker teams count theirs apart (`Arena::teamHeld`), and the peak it
+    reports is its own and theirs together, as their blocks stay until it
+    ends.
+  - *No atomic subtract into host memory.* The batch first counted its
+    copies given back with one add of minus the count to the kernel's
+    table, in host memory; the compiler made that an atomic subtract,
+    which PCIe has no operation for, and every such count was lost
+    (gpu-link-two-gpus.test caught it). The runtime now only adds
+    constants there, and the peer queue's count goes down by adding -1,
+    in case a peer is reached over PCIe.
+
+  µs a message on ROCR GPUs 4,6, 2000 arrays, mean of three runs:
+
+  | Stream | Before | After |
+  | --- | --- | --- |
+  | One sink, 1 word (at the receiver) | 17.4 | 16.8 |
+  | One sink, 1024 words (at the receiver) | 27.2 | 22.5 |
+  | Two sinks, 1 word (at the sender) | 17.4 | 14.3 |
+  | Two sinks, 1024 words (at the sender) | 19.6 | 15.9 |
+
+  gpu-link, µs between arrays: `A>B` 1024 words 29.7 → 23.4, 4096 words
+  38.1 → 31.0, `A>Bx4` of 1 word 31.0 → 23.2, `A<>Bx4` 31.4 → 23.8.
+  gpu-pairs, up to 4096 words: `AB*4` 6 to 19% faster in every row, the
+  rest as fast or faster but for `A-B` stream of 16 words, 63.8 → 67.3
+  in one run of each; larger arrays vary between runs as before.
+- Left: the receiver, which a stream waits on, still spends some 16 µs
+  on an array of 1 word: its route, the local queue's miss, the peer
+  queue's slot, the array's block and copy over the link, and the
+  message's cell, each one to three loads of most of a microsecond.
 
 **The local queue's state in one word.** *Fixed 2026-11-15.* `OpenQueue`
 stored `closed` and then `incarnation`, and `EnterQueue` loaded
