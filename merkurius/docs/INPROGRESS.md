@@ -6030,7 +6030,7 @@ queue's slots are laid out. 512 B costs the same as 8 B.
      experiments, 2). Stream is faster direct, as hops overlap. Step 6's
      copy engine, or the receiver's worker teams, is needed before the
      path is on by default, and an array the sender moves could go into
-     the pool without a copy.
+     the pool without a copy. *Step 6 did the copy engine.*
    - *Each array or term costs an acquire at system scope on each side*
      (`TakePeer`, and `TakeReturns` when a copy came back) and a release on
      each. A copy of 1 word costs about 50 µs a hop, against 14 µs for a
@@ -6093,6 +6093,50 @@ queue's slots are laid out. 512 B costs the same as 8 B.
      introduces node 0 last, and 60 runs under lit passed. The test's
      program is also the GPU variant's, process-mailbox-arrays-gpu.test.
 6. The copy-engine path for large arrays, if experiment 2 calls for it.
+   *Done 2026-11-14* (experiment 2 called for it):
+   - *Both copies of a large array go by the copy engine,* from
+     `MERK_GPU_PEER_DMA_BYTES` up, 64 KiB by default on GPUs with 64-lane
+     waves, and never on others, as for `MERK_GPU_DMA_BYTES`. The sender's
+     copy into its pool (`ArrayToPool`), and the receiver's out of the
+     peer's pool into its new array (`DeliverPeer`), each ask the host by
+     one RPC, `rpcCopyPeer` (`CopyByEngine` in device.cpp). The host copies
+     with liboffload's `olMemcpy` between the two devices
+     (`CopyBetweenDevices`), which the AMDGPU plugin makes with
+     `hsa_amd_memory_async_copy`, and answers when it is done. The data
+     never passes through host memory.
+   - The device does a release at system scope before it asks, so the copy
+     engine reads what its L2 held, and an acquire after, as for
+     `rpcTakeArrayInto`: on gfx90a the copy engine's writes to a GPU's
+     memory are seen by its running kernel after an acquire.
+   - The receiver names the sender's GPU by the return ring in the slot,
+     which the host maps back (`PeerGpuOfReturns`), so the slot is
+     unchanged.
+   - Terms are still copied by the wave, by their `type_info`.
+   - *The threshold.* On ROCR GPUs 1,3, `AB*4` ping, µs per array, by the
+     wave and by the copy engine: 4096 words (32 KiB) 729 against 878,
+     16384 words (128 KiB) 1168 against 933. So 64 KiB. In stream the
+     crossover is higher, about 512 KiB, since the host's RPC server makes
+     one copy at a time where the waves of the relays overlap.
+   - *Measured* on ROCR GPUs 1,3 (benchmarks/gpu-pairs/README.md, Direct
+     sends), µs per array, through the host against direct:
+
+     | Chain, mode | 65536 words | 2^20 words |
+     | --- | --- | --- |
+     | `AB*4`, ping | 2430 → 1247 | 28511 → 7977 |
+     | `AB*4`, stream | 1639 → 478 | 29040 → 4749 |
+     | `A-B`, ping | 755 → 548 | 11898 → 7901 |
+
+     Step 5 had `AB*4` ping at 2^20 words at 51280 µs direct. The direct
+     path is now faster than the host's at every size measured, on both
+     pairs. The chains' large arrays are now limited by the host's legs at
+     their ends (`A`, about 1.3 GB/s), not by the hops between GPUs.
+   - test/Runtime/peer-sends-two-gpus.test runs its arrays by the wave,
+     by the copy engine at every size, and with the 1 MiB pool by the copy
+     engine.
+   - Left: the RPC server makes one copy at a time, for all GPUs; a
+     receiver with worker teams might pull faster within a package
+     (145 GB/s) than the copy engine (50 GB/s); an array the sender moves
+     is still copied into the pool.
 
 **Open.**
 

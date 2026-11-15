@@ -350,7 +350,8 @@ bool ReadyPeer(const Gpu &gpu) {
   }
   peer.sendPool = pool;
   peer.sendPoolBytes = bytes;
-  peer.returns = returns;
+  // Read by PeerGpuOfReturns on the RPC server's thread, without the lock.
+  __atomic_store_n(&peer.returns, returns, __ATOMIC_RELEASE);
   peer.ready = true;
   return true;
 }
@@ -1137,6 +1138,20 @@ void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
 // The messages that GPU processes put in peer queues, and the copies in send
 // pools not given back, of every kernel (PlaceTable), with
 // MERK_CHECK_DEVICE_MEMORY.
+// The GPU whose return ring is `returns`, for a copy out of its send pool
+// (rpcCopyPeer); -1 if no GPU's is. On the plugin's RPC server, without
+// the lock, which a spawn may hold while it waits for the server: a GPU's
+// ring is set once, before any kernel can know it.
+int PeerGpuOfReturns(std::uint64_t returns) {
+  for (int i{0}; i < kMostGpus; ++i) {
+    void *ring{__atomic_load_n(&gpuPeers[i].returns, __ATOMIC_ACQUIRE)};
+    if (ring && reinterpret_cast<std::uint64_t>(ring) == returns) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 void PlacePeerCounts(std::int64_t *sends, std::int64_t *copies) {
   pthread_mutex_lock(&lock);
   *sends = __atomic_load_n(&endedPeerSends, __ATOMIC_RELAXED);

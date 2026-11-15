@@ -59,6 +59,12 @@ void DeviceFreeHost(int device, void *memory);
 bool CopyToDevice(int device, void *to, const void *from, std::size_t bytes);
 bool CopyFromDevice(int device, void *to, const void *from, std::size_t bytes);
 
+// Copies `bytes` from the memory of device `fromDevice` to that of device
+// `toDevice`, which may be the same, by a copy engine; whether it did. For
+// GPUs of liboffload only.
+bool CopyBetweenDevices(int toDevice, void *to, int fromDevice,
+    const void *from, std::size_t bytes);
+
 // Registers the callback that serves our RPC opcodes on every device, before
 // libc's: it answers RPC_UNHANDLED_OPCODE for any other. It serves
 // libomptarget's devices, and liboffload's once it has found them.

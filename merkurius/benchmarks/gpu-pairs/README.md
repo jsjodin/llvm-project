@@ -112,36 +112,35 @@ MB/s); `A-B` does not copy within a GPU.
 
 ## Direct sends
 
-Measured on r11 on 2026-11-14 after step 5 of docs/INPROGRESS.md (Direct
+Measured on r11 on 2026-11-14 after step 6 of docs/INPROGRESS.md (Direct
 sends between the GPUs of a node), on ROCR GPUs 1,3 and 2,3, the host
 threads on the other socket. "Host" is without `MERK_GPU_PEER`, "direct"
-with `MERK_GPU_PEER=1`; both have the relaxed polls of step 4. µs per array,
+with `MERK_GPU_PEER=1`, where arrays from 64 KiB go into the send pool and
+out of it by the copy engine (`MERK_GPU_PEER_DMA_BYTES`). µs per array,
 GPUs 1,3. All 90 rows had every array right, for both pairs and both ways.
 
 | Chain | Mode | 1 word, host | direct | 4096 words, host | direct | 65536 words, host | direct | 2^20 words, host | direct |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `A` | ping | 88 | 88 | 123 | 119 | 755 | 586 | 8713 | 9149 |
-| `A-B` | ping | 163 | 112 | 211 | 173 | 897 | 893 | 10095 | 15072 |
-| `AB*4` | ping | 906 | 441 | 990 | 665 | 2440 | 3129 | 28593 | 51280 |
-| `AA*4` | ping | 339 | 338 | 407 | 390 | 1864 | 1488 | 27971 | 26120 |
-| `A-B` | stream | 86 | 67 | 110 | 91 | 461 | 368 | 5384 | 5380 |
-| `AB*4` | stream | 158 | 102 | 285 | 124 | 1762 | 572 | 26352 | 14926 |
-| `AA*4` | stream | 79 | 81 | 100 | 98 | 400 | 382 | 7816 | 7307 |
+| `A` | ping | 87 | 87 | 119 | 116 | 596 | 589 | 9133 | 9601 |
+| `A-B` | ping | 164 | 114 | 217 | 172 | 755 | 548 | 11898 | 7901 |
+| `AB*4` | ping | 920 | 457 | 992 | 671 | 2430 | 1247 | 28511 | 7977 |
+| `AA*4` | ping | 336 | 320 | 405 | 371 | 1788 | 1555 | 27464 | 27525 |
+| `A-B` | stream | 86 | 69 | 108 | 92 | 484 | 254 | 9486 | 3184 |
+| `AB*4` | stream | 159 | 103 | 280 | 128 | 1639 | 478 | 29040 | 4749 |
+| `AA*4` | stream | 75 | 73 | 99 | 97 | 418 | 380 | 8602 | 7582 |
 
 What it shows:
 
-- A hop between the GPUs costs about 50 µs for an array of 1 word directly
-  (`AB*4` less `A`, over 7), against 117 µs through the host, and 24 µs
-  against 75 in `A-B`. Within a GPU, a hop costs about 36 µs.
-- A stream between the GPUs is 1.5 to 3.2 times faster directly, as the
-  relays' hops overlap and none waits for the host.
-- In ping, arrays of 65536 words and more are slower directly: the sending
-  relay copies the array into its GPU's send pool with its wave, and the
-  receiving relay copies it from there with its wave, at about 0.8 GB/s,
-  where the host's path uses the copy engine for large arrays. Step 6 of
-  the design (the copy engine, or the receiver's worker teams) is for them.
-- GPUs 2,3, in one package, gave the direct path's figures to within 10%
-  of 1,3's, though their link is 4 times faster: the link is not what
-  limits the direct path yet, the costs of each message are. Through the
-  host, arrays of 2^20 words in `A-B` varied by up to 70% between the
-  pairs.
+- The direct path is faster than the host's at every size. A hop between
+  the GPUs costs about 50 µs for an array of 1 word directly (`AB*4` less
+  `A`, over 7), against 119 µs through the host.
+- `AB*4` streams arrays of 2^20 words at 1.77 GB/s directly, against
+  0.29 GB/s through the host. That is about the host's legs at the chain's
+  ends (`A`), which now limit it, not the hops between the GPUs.
+- Before step 6, the relays copied large arrays with one wave, and `AB*4`
+  ping at 2^20 words took 51 ms directly. Arrays of 32 KiB and less still
+  go by the wave, where the copy engine's RPC would cost more.
+- GPUs 2,3, in one package, were slower than 1,3 at 2^20 words directly
+  (`AB*4` ping 13.1 ms), though faster than through the host (29.1 ms);
+  this was not looked into.
+- `AA*4` stays on one GPU and does not use the direct path.
