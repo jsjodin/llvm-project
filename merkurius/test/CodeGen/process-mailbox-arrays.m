@@ -99,7 +99,10 @@ main(!IO) :-
     N = 5,
     new_mailbox(Host, !IO),
     list.map_foldl(spawn_node(Place, Host, N), 0 .. N - 1, Nodes, !IO),
-    list.foldl(introduce(Nodes), Nodes, !IO),
+    % Node 0 last: it starts the token once it has its peers, and a node
+    % that took the token among its peers would drop it (peers), so every
+    % other node's peers must be sent before node 0's.
+    list.foldl(introduce(Nodes), list.reverse(Nodes), !IO),
     list.map_foldl(seen(Host), Nodes, Sums, !IO),
     list.foldl(write_sum, list.sort(Sums), !IO).
 
