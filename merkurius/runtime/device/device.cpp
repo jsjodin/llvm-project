@@ -272,6 +272,16 @@ void CountBlocks(int64_t change) {
   }
 }
 
+// Counts in the kernel's table, if it counts its blocks, a message put in a
+// peer queue, or a copy in a send pool made or given back (PlaceTable).
+void CountPeer(int64_t PlaceTable::*field, int64_t change) {
+  if (countBlocks) {
+    __scoped_atomic_fetch_add(
+        &(__atomic_load_n(&placeTable, __ATOMIC_RELAXED)->*field), change,
+        __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
+  }
+}
+
 // A kernel's queues' making, and a process's opening and closing of its own
 // (Messages between the processes of a kernel, below).
 void MakeQueue(PlaceTable *table, uint64_t wave);
@@ -3041,6 +3051,7 @@ PoolBlock *PoolAllocate(uint64_t bytes) {
 // Frees a copy that no one will receive, sent to a process that had ended.
 void DiscardCopy(PoolBlock *copy) {
   if (copy) {
+    CountPeer(&PlaceTable::peerCopies, -1);
     SendPool *pool{__atomic_load_n(&sendPool, __ATOMIC_RELAXED)};
     LockPool(pool);
     FreeCopy(pool, copy);
@@ -3150,6 +3161,9 @@ template <typename MakePeer>
 void PeerSend(Route *route, MakePeer makePeer) {
   PeerQueue *queue{route->peer};
   PeerCopy copy{makePeer()};
+  if (copy.copy) {
+    CountPeer(&PlaceTable::peerCopies, 1);
+  }
   for (;;) {
     int entered{EnterPeerQueue(queue, route->incarnation)};
     if (entered > 0) {
@@ -3163,6 +3177,7 @@ void PeerSend(Route *route, MakePeer makePeer) {
   }
   PutPeer(queue, copy.message, copy.copy);
   __scoped_atomic_fetch_sub(&queue->senders, 1, __ATOMIC_RELEASE, kSystem);
+  CountPeer(&PlaceTable::peerSends, 1);
 }
 
 // Puts a copy that a receiver is done with on its GPU's return ring. The
@@ -3171,6 +3186,7 @@ void PeerSend(Route *route, MakePeer makePeer) {
 // The release orders the receiver's loads of the copy before the sender
 // can free it.
 void ReturnCopy(ReturnRing *ring, uint64_t copy) {
+  CountPeer(&PlaceTable::peerCopies, -1);
   uint64_t slots{merkurius::runtime::ReturnRingSlots(
       __atomic_load_n(&sendPoolBytes, __ATOMIC_RELAXED))};
   uint64_t position{

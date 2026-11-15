@@ -6,14 +6,17 @@
 %   A      host -> relay on GPU 0 -> host
 %   A-B    host -> relay on GPU 0 -> relay on GPU 1 -> host
 %   A-A    host -> relay on GPU 0 -> relay on GPU 0 -> host
+%   AB*4   host -> 8 relays, on GPU 0 and GPU 1 in turn -> host
+%   AA*4   host -> 8 relays on GPU 0 -> host
 %
 % so A-B less A is about one hop from a GPU to another, and A-A less A one
-% hop within a GPU, between processes of one kernel. In `ping` one array is
+% hop within a GPU, between processes of one kernel; AB*4 less A is 7 hops
+% between the GPUs, and AA*4 less A 7 within one. In `ping` one array is
 % in flight, for latency; in `stream` all of a measurement's are, for
 % bandwidth. Each measurement moves MIB mebibytes (the argument, 64 by
 % default), in 2 to 20000 arrays, 2000 at most for `ping`. Run with two
 % GPUs visible, as utils/gpu/with-gpus.py --gpus A,B gives; with one, A-B
-% is left out (README.md).
+% and AB*4 are left out (README.md).
 
 :- module gpupairs.
 :- interface.
@@ -58,7 +61,15 @@ main(!IO) :-
         else
             true
         ),
-        chain("A-A", [gpu(0), gpu(0)], Back, Mib, !IO)
+        chain("A-A", [gpu(0), gpu(0)], Back, Mib, !IO),
+        ( if Gpus >= 2 then
+            chain("AB*4", [gpu(0), gpu(1), gpu(0), gpu(1), gpu(0), gpu(1),
+                gpu(0), gpu(1)], Back, Mib, !IO)
+        else
+            true
+        ),
+        chain("AA*4", [gpu(0), gpu(0), gpu(0), gpu(0), gpu(0), gpu(0),
+            gpu(0), gpu(0)], Back, Mib, !IO)
     ).
 
     % Spawns the relays at Places, the last forwarding to Back, measures

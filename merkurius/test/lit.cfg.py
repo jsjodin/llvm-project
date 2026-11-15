@@ -148,6 +148,11 @@ if visible_gpus:
     config.test_format = merkurius_lit.GpuShTest(
         gpu_ids, per_gpu, os.path.join(config.test_exec_root, "gpu-slots"))
     gpu_jobs = len(gpu_ids) * per_gpu
+    # The -two-gpus.test files run on two of them (GpuShTest), with GPU
+    # processes on each sending directly to the other's where the GPUs
+    # reach each other's memory, as every pair of r11's does.
+    if len(gpu_ids) >= 2 and "amdgpu-gpu" in config.available_features:
+        config.available_features.add("two-gpus")
 lit_config.parallelism_groups["merkurius-gpu"] = gpu_jobs
 
 # The script that runs a command on free GPUs (utils/gpu/with-gpus.py).
