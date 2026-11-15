@@ -145,7 +145,7 @@ escape(CX, CY, Limit, N, X, Y) = Iterations :-
 :- pred now(float::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(T::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -156,7 +156,7 @@ escape(CX, CY, Limit, N, X, Y) = Iterations :-
 :- pred setting(string::in, int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     setting(Name::in, Default::in, Value::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     const char *s = getenv(Name);
     Value = s && *s ? (MR_Integer) strtol(s, NULL, 10) : Default;
@@ -166,7 +166,7 @@ escape(CX, CY, Limit, N, X, Y) = Iterations :-
 :- pred exit_failure(io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     exit_failure(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     fflush(stdout);
     exit(1);
@@ -175,9 +175,9 @@ escape(CX, CY, Limit, N, X, Y) = Iterations :-
 :- pred header(int::in, int::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     header(Frames::in, Size::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
-    printf(\"Mandelbrot zoom, Mercury, GPU process\\n\");
+    printf(\"Mandelbrot zoom, Merkurius, GPU process\\n\");
     printf(\"Frames: %ld of %ld x %ld pixels\\n\", (long) Frames, (long) Size,
         (long) Size);
 ").
@@ -186,7 +186,7 @@ escape(CX, CY, Limit, N, X, Y) = Iterations :-
     is det.
 :- pragma foreign_proc("C",
     trace_line(F::in, Limit::in, Iterations::in, Time::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"frame %ld: limit %ld, %ld iterations, %.6f s\\n\", (long) F,
         (long) Limit, (long) Iterations, Time);
@@ -197,7 +197,7 @@ escape(CX, CY, Limit, N, X, Y) = Iterations :-
 :- pred write_results(int::in, int::in, float::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     write_results(Total::in, Checksum::in, Time::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"Iterations: %ld\\n\", (long) Total);
     printf(\"Checksum: %ld\\n\", (long) Checksum);

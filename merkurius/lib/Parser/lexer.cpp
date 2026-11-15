@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// The rules are those of the Mercury 22.01 reference manual, section 2.4,
+// The rules are those of the 22.01 reference manual, section 2.4,
 // "Tokens". Where it says nothing, the current manual's Syntax chapter
 // fills the gap: comments, graphic names, ';' and the backquote. Where the
 // manual and mmc 22.01.9 differ, mmc is followed, so that programs compile
@@ -519,7 +519,7 @@ void Lexer::SkipEscape() {
     break;
   case 'e':
     ++at_;
-    Say(escape, at_, "'\\e' is not an escape in Mercury 22.01"_err_en_US);
+    Say(escape, at_, "'\\e' is not an escape"_err_en_US);
     return;
   case 'u':
   case 'U': {

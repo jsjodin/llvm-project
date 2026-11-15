@@ -51,5 +51,5 @@ unify_any(X, X).
 % OUTPUT-NEXT:['<<function>>', '<<function>>']
 % OUTPUT-NEXT:{1, '<<predicate>>'}
 % OUTPUT-EMPTY:
-% UNIFY:Mercury runtime: called unify/2 for `pred' type
-% COMPARE:Mercury runtime: called compare/3 for `pred' type
+% UNIFY:Merkurius runtime: called unify/2 for `pred' type
+% COMPARE:Merkurius runtime: called compare/3 for `pred' type

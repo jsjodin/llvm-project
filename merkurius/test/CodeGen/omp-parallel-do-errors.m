@@ -96,7 +96,7 @@ impure_body(N) :-
     ).
 
 :- impure pred poke(int::in) is det.
-:- pragma foreign_proc("C", poke(I::in), [will_not_call_mercury],
+:- pragma foreign_proc("C", poke(I::in), [will_not_call_merkurius],
     "(void) I;").
 
 schedule(N, !A) :-

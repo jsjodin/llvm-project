@@ -19,30 +19,30 @@
 
 :- pred pass_colour(colour::in, colour::out) is det.
 :- pragma foreign_proc("C", pass_colour(X::in, Y::out),
-    [will_not_call_mercury, promise_pure], "Y = X;").
+    [will_not_call_merkurius, promise_pure], "Y = X;").
 
 % A notag type of a float, in the word its C type is.
 :- pred pass_temp(temp::in, temp::out) is det.
 :- pragma foreign_proc("C", pass_temp(X::in, Y::out),
-    [will_not_call_mercury, promise_pure], "Y = X;").
+    [will_not_call_merkurius, promise_pure], "Y = X;").
 
 :- pred pass_tree(tree::in, tree::out) is det.
 :- pragma foreign_proc("C", pass_tree(X::in, Y::out),
-    [will_not_call_mercury, promise_pure], "Y = X;").
+    [will_not_call_merkurius, promise_pure], "Y = X;").
 
 :- pred pass_tuple({int, string}::in, {int, string}::out) is det.
 :- pragma foreign_proc("C", pass_tuple(X::in, Y::out),
-    [will_not_call_mercury, promise_pure], "Y = X;").
+    [will_not_call_merkurius, promise_pure], "Y = X;").
 
 % Several outputs, through pointers, and a test.
 :- pred both(tree::in, int::in, tree::out, int::out) is semidet.
 :- pragma foreign_proc("C", both(X::in, N::in, Y::out, M::out),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
     "Y = X; M = N + 1; SUCCESS_INDICATOR = N > 0;").
 
 :- pred pass_array(array(float)::array_ui, int::out) is det.
 :- pragma foreign_proc("C", pass_array(A::array_ui, N::out),
-    [will_not_call_mercury, promise_pure], "N = sizeof(A);").
+    [will_not_call_merkurius, promise_pure], "N = sizeof(A);").
 
 :- func total(tree) = int.
 total(leaf) = 0.

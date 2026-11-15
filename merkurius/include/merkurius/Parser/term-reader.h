@@ -35,7 +35,7 @@ struct ItemTerm {
   unsigned variables; // the number of distinct variables in the item
 };
 
-// What the reader reads besides Mercury's terms.
+// What the reader reads besides Merkurius's terms.
 struct ReaderOptions {
   // `do` as an infix operator, xfx with ';''s priority, for loops (design
   // document, "Loops"). mmc has no such operator.

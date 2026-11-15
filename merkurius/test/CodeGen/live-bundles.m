@@ -1,4 +1,4 @@
-% Each call of Mercury code and each allocation's slow path has a deopt bundle
+% Each call of Merkurius code and each allocation's slow path has a deopt bundle
 % of what is live across it, a type's index before each value
 % (docs/INPROGRESS.md, Statepoints and stack maps). A polymorphic root keeps
 % the type_info live. A value used only in the other branch is not live.

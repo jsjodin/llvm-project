@@ -39,11 +39,11 @@ def O : Joined<["-"], "O">, MetaVarName<"<level>">,
 def fopenmp : Flag<["-"], "fopenmp">,
   HelpText<"Read %$omp directives">;
 def fdo_loops : Flag<["-"], "fdo-loops">,
-  HelpText<"Read ( Iterators do Body ) loops, which are not Mercury">;
+  HelpText<"Read ( Iterators do Body ) loops, an extension of the language">;
 def freceive_goal : Flag<["-"], "freceive-goal">,
-  HelpText<"Read receive [Params] ( Arms ) goals, which are not Mercury">;
+  HelpText<"Read receive [Params] ( Arms ) goals, an extension of the language">;
 def fprocess_declarations : Flag<["-"], "fprocess-declarations">,
-  HelpText<"Read :- process declarations, which are not Mercury">;
+  HelpText<"Read :- process declarations, an extension of the language">;
 def Wunselected_message : Flag<["-"], "Wunselected-message">,
   HelpText<"Warn about a mailbox whose receive goals' arms leave out a "
            "constructor of its messages (the default)">;
@@ -178,7 +178,7 @@ def fembed_process_image_EQ : Joined<["-"], "fembed-process-image=">,
   HelpText<"Embed the image of the module's GPU process kinds <file> in the "
            "host's object file, and register it at start-up">;
 def x : Separate<["-"], "x">, MetaVarName<"<language>">,
-  HelpText<"Read the input as <language>: mercury, mlir (text or bytecode) or "
+  HelpText<"Read the input as <language>: merkurius, mlir (text or bytecode) or "
            "ir (LLVM IR); by default from its extension">;
 def fdebug_dump_frees : Flag<["-"], "fdebug-dump-frees">,
   HelpText<"Write the module in the merk dialect with the merk.free operations "

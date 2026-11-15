@@ -106,7 +106,7 @@ tile_sum(J, Sum) :-
 :- func bits(float) = int.
 :- pragma foreign_proc("C",
     bits(F::in) = (B::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     double y = F;
     memcpy(&B, &y, sizeof y);
@@ -115,7 +115,7 @@ tile_sum(J, Sum) :-
 :- pred now(float::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(T::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

@@ -18,7 +18,7 @@
 // Source file content is kept exactly as read, so that printing the tokens
 // of a file with their trivia gives back the file byte for byte. Unlike
 // Flang, line endings are not normalized and no final newline is added: a
-// carriage return is whitespace to Mercury. Source is UTF-8; a Unicode byte
+// carriage return is whitespace to Merkurius. Source is UTF-8; a Unicode byte
 // order mark is recognized and kept out of content().
 
 #include "merkurius/Common/reference.h"

@@ -132,7 +132,7 @@ poly_lookup(Node, Name, _, Result, !IO) :-
 :- func to_string_mailbox(mailbox(request)) = mailbox(string).
 :- pragma foreign_proc("C",
     to_string_mailbox(M::in) = (N::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     N = M;
 ").

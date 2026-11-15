@@ -25,7 +25,7 @@ RUN: %gpu-env MERK_GPU_PEER=1 MERK_GPU_PEER_DMA_BYTES=65536 MERK_GPU_SEND_POOL_B
 
 A message larger than the send pool can hold ends the program.
 RUN: not %gpu-env MERK_GPU_PEER=1 MERK_GPU_SEND_POOL_BYTES=1048576 timeout -k 1 300 %t 200000 2>&1 | FileCheck %s --check-prefix=LARGE
-LARGE: Mercury runtime: a GPU process sent a message of 1600008 bytes to another GPU, more than its GPU's send pool of 1048576 bytes can hold (MERK_GPU_SEND_POOL_BYTES)
+LARGE: Merkurius runtime: a GPU process sent a message of 1600008 bytes to another GPU, more than its GPU's send pool of 1048576 bytes can hold (MERK_GPU_SEND_POOL_BYTES)
 
 Through the host, the same.
 RUN: %gpu-env MERK_GPU_PEER=0 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 300 %t 2>&1 | FileCheck %s --check-prefixes=CHECK,HOST --match-full-lines
@@ -45,7 +45,7 @@ CHECK-NEXT:a sink took 5 and ended: 5
 CHECK-NEXT:its source sent: 500
 CHECK-NEXT:a flood sent: 3000
 CHECK-NEXT:a flood taken in order: 3000
-CHECK-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
-CHECK-NEXT:Mercury runtime: 0 blocks of messages between GPU processes are allocated
-PEER-NEXT:Mercury runtime: {{[1-9][0-9]*}} messages went directly between GPUs, and 0 of their copies were not given back
+CHECK-NEXT:Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+CHECK-NEXT:Merkurius runtime: 0 blocks of messages between GPU processes are allocated
+PEER-NEXT:Merkurius runtime: {{[1-9][0-9]*}} messages went directly between GPUs, and 0 of their copies were not given back
 HOST-NOT:went directly

@@ -98,7 +98,7 @@ std::atomic<std::uint64_t> safepointsChecked{0}, framesChecked{0}, rootsChecked{
 
 [[noreturn]] void Bad(const char *what, Word value) {
   std::fflush(stdout);
-  std::fprintf(stderr, "Mercury runtime: bad root: %s (%#llx)\n", what,
+  std::fprintf(stderr, "Merkurius runtime: bad root: %s (%#llx)\n", what,
       static_cast<unsigned long long>(value));
   std::abort();
 }
@@ -159,7 +159,7 @@ const RootTable *NextTable(const RootTable *table) {
 
 void Report() {
   std::fprintf(stderr,
-      "Mercury runtime: roots: %llu safepoints, %llu frames, %llu roots, "
+      "Merkurius runtime: roots: %llu safepoints, %llu frames, %llu roots, "
       "%llu environments, %llu slow paths not at a safepoint\n",
       static_cast<unsigned long long>(safepointsChecked.load()),
       static_cast<unsigned long long>(framesChecked.load()),

@@ -27,12 +27,12 @@
 % LLVM: ret void
 % LLVM-LABEL: define internal tailcc void @process_records.weigh_5_0(ptr addrspace(1) %0, ptr addrspace(1) %1, { { i32, i32 }, { i32, i32 }, double } %2) {
 %
-% Mercury has no process module, so the output is written by hand: each step
+% mmc has no process module, so the output is written by hand: each step
 % adds the velocity to the position, takes one from its y and halves the
 % mass.
 % CHECK:[message(particle(point(1i32, 2i32), point(3i32, 4i32), 64.0)), message(particle(point(10i32, 11i32), point(3i32, 1i32), 8.0)), message(particle(point(-4i32, -8i32), point(-1i32, -5i32), 2.0))]
 % CHECK-NEXT:message(particle(point(55i32, 110i32), point(0i32, 0i32), 55.0))
-% MESSAGES-NEXT:Mercury runtime: 0 messages are neither read nor freed
+% MESSAGES-NEXT:Merkurius runtime: 0 messages are neither read nor freed
 
 :- module process_records.
 :- interface.

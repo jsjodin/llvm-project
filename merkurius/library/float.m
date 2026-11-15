@@ -82,7 +82,7 @@ cast_from_uint32(N) = float(uint32.cast_to_int(N)).
 
 :- pragma foreign_proc("C",
     cast_from_uint64(N::in) = (F::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     F = (MR_Float) N;
 ").
@@ -91,7 +91,7 @@ cast_from_uint32(N) = float(uint32.cast_to_int(N)).
 % do on x86-64; X rounds to floor(X + 0.5).
 :- pragma foreign_proc("C",
     ceiling_to_int(F::in) = (N::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     MR_Float x = ceil(F);
     N = x >= -0x1p63 && x < 0x1p63 ? (MR_Integer) x : INTPTR_MIN;
@@ -99,7 +99,7 @@ cast_from_uint32(N) = float(uint32.cast_to_int(N)).
 
 :- pragma foreign_proc("C",
     floor_to_int(F::in) = (N::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     MR_Float x = floor(F);
     N = x >= -0x1p63 && x < 0x1p63 ? (MR_Integer) x : INTPTR_MIN;
@@ -107,7 +107,7 @@ cast_from_uint32(N) = float(uint32.cast_to_int(N)).
 
 :- pragma foreign_proc("C",
     round_to_int(F::in) = (N::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     MR_Float x = floor(F + 0.5);
     N = x >= -0x1p63 && x < 0x1p63 ? (MR_Integer) x : INTPTR_MIN;
@@ -115,7 +115,7 @@ cast_from_uint32(N) = float(uint32.cast_to_int(N)).
 
 :- pragma foreign_proc("C",
     truncate_to_int(F::in) = (N::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     MR_Float x = F;
     N = x >= -0x1p63 && x < 0x1p63 ? (MR_Integer) x : INTPTR_MIN;
@@ -126,21 +126,21 @@ cast_from_uint32(N) = float(uint32.cast_to_int(N)).
 % programs do.
 :- pragma foreign_proc("C",
     abs(X::in) = (A::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     A = fabs(X);
 ").
 
 :- pragma foreign_proc("C",
     max(X::in, Y::in) = (M::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     M = X >= Y ? X : Y;
 ").
 
 :- pragma foreign_proc("C",
     min(X::in, Y::in) = (M::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     M = X <= Y ? X : Y;
 ").
@@ -149,7 +149,7 @@ cast_from_uint32(N) = float(uint32.cast_to_int(N)).
 % programs round; a negative exponent is that of the reciprocal.
 :- pragma foreign_proc("C",
     pow(X::in, N::in) = (P::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     if (X == 0.0 && N < 0) {
         merk_uncaught_exception(\"domain_error(\\\"float.pow: zero base\\\")\");
@@ -168,105 +168,105 @@ cast_from_uint32(N) = float(uint32.cast_to_int(N)).
 
 :- pragma foreign_proc("C",
     is_infinite(X::in),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     SUCCESS_INDICATOR = isinf(X);
 ").
 
 :- pragma foreign_proc("C",
     is_inf(X::in),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     SUCCESS_INDICATOR = isinf(X);
 ").
 
 :- pragma foreign_proc("C",
     is_nan(X::in),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     SUCCESS_INDICATOR = isnan(X);
 ").
 
 :- pragma foreign_proc("C",
     is_nan_or_infinite(X::in),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     SUCCESS_INDICATOR = !isfinite(X);
 ").
 
 :- pragma foreign_proc("C",
     is_nan_or_inf(X::in),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     SUCCESS_INDICATOR = !isfinite(X);
 ").
 
 :- pragma foreign_proc("C",
     is_finite(X::in),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     SUCCESS_INDICATOR = isfinite(X);
 ").
 
 :- pragma foreign_proc("C",
     is_zero(X::in),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     SUCCESS_INDICATOR = X == 0.0;
 ").
 
 :- pragma foreign_proc("C",
     max = (F::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     F = DBL_MAX;
 ").
 
 :- pragma foreign_proc("C",
     min = (F::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     F = DBL_MIN;
 ").
 
 :- pragma foreign_proc("C",
     infinity = (F::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     F = INFINITY;
 ").
 
 :- pragma foreign_proc("C",
     epsilon = (F::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     F = DBL_EPSILON;
 ").
 
 :- pragma foreign_proc("C",
     radix = (N::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     N = FLT_RADIX;
 ").
 
 :- pragma foreign_proc("C",
     mantissa_digits = (N::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     N = DBL_MANT_DIG;
 ").
 
 :- pragma foreign_proc("C",
     min_exponent = (N::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     N = DBL_MIN_EXP;
 ").
 
 :- pragma foreign_proc("C",
     max_exponent = (N::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     N = DBL_MAX_EXP;
 ").

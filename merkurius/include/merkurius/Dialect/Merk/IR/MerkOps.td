@@ -902,7 +902,7 @@ def Merk_ThrowIfOp : Merk_Op<"throw_if"> {
   let description = [{
     Throws an exception if the flag is true, as the library's checks do,
     such as that of a division by zero. Until exceptions are implemented,
-    an exception is not caught: the program writes "Uncaught Mercury
+    an exception is not caught: the program writes "Uncaught Merkurius
     exception:" and the exception, as mmc writes it, to the standard error,
     and exits with status 1.
 

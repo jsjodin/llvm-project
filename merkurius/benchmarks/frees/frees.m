@@ -48,7 +48,7 @@ void merk_device_free(void *);
 :- pred blocks(int::in, int::in, int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     blocks(Kind::in, Rounds::in, Bytes::in, Sum::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     uint64_t sum = 0;
     for (MR_Integer i = 0; i < Rounds; ++i) {
@@ -175,7 +175,7 @@ round_trips(P, Me, N, !IO) :-
 :- pred now(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(Nanoseconds::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

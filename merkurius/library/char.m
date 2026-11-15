@@ -98,21 +98,21 @@
 
 :- pragma foreign_proc("C",
     to_int(Char::in) = (Code::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Code = (MR_Integer) Char;
 ").
 
 :- pragma foreign_proc("C",
     to_int(Char::in, Code::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Code = (MR_Integer) Char;
 ").
 
 :- pragma foreign_proc("C",
     to_int(Char::in, Code::in),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     SUCCESS_INDICATOR = ((MR_Integer) Char == Code);
 ").
@@ -122,7 +122,7 @@
     % "Where mmc and the manual disagree").
 :- pragma foreign_proc("C",
     to_int(Char::out, Code::in),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     uint32_t low = (uint32_t) Code;
     Char = (MR_Char) low;

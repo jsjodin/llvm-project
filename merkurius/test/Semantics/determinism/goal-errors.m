@@ -1,14 +1,14 @@
 % Determinism declarations that are not satisfied (reference manual,
 % "Determinism checking and inference"), each with the goals that make the
-% difference (Henderson, Somogyi and Conway, "Determinism analysis in the
-% Mercury compiler", 1996, section 5.3), as mmc finds them: calls that can
-% fail or succeed more than once, unifications that can fail, a switch
-% that does not cover a functor, or a case of it, disjunctions with more
-% than one disjunct with solutions, each conjunct, the condition of an
-% if-then-else and its two parts, a negation that can succeed, the goals
-% of a scope, and with no solutions declared, any goal that can succeed; a
-% lambda expression whose body is not as declared; and a function whose
-% primary mode is inferred to have more than one solution.
+% difference (Henderson, Somogyi and Conway, 1996, section 5.3), as mmc
+% finds them: calls that can fail or succeed more than once, unifications
+% that can fail, a switch that does not cover a functor, or a case of it,
+% disjunctions with more than one disjunct with solutions, each conjunct,
+% the condition of an if-then-else and its two parts, a negation that can
+% succeed, the goals of a scope, and with no solutions declared, any goal
+% that can succeed; a lambda expression whose body is not as declared; and
+% a function whose primary mode is inferred to have more than one
+% solution.
 %
 % RUN: not merkc -fc1 -fdebug-dump-determinism %s 2>&1 >/dev/null | FileCheck --implicit-check-not=error: --implicit-check-not=because: %s
 % RUN: %if mmc %{ %compare-switches --determinism %s %}

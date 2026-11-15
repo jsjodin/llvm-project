@@ -29,7 +29,7 @@ A recursion deeper than the stack has room for ends the program, rather
 than overflow it: the procedure checks the stack at its entry against the
 limit that the runtime set. A shallow one runs.
 RUN: not %gpu-env %t.recursive deep 2>&1 | FileCheck %s --check-prefix=DEEP
-DEEP: Mercury runtime: stack overflow in a GPU process: MERK_GPU_PROCESS_STACK_BYTES gives GPU processes more stack
+DEEP: Merkurius runtime: stack overflow in a GPU process: MERK_GPU_PROCESS_STACK_BYTES gives GPU processes more stack
 RUN: %gpu-env %t.recursive shallow | FileCheck %s --check-prefix=SHALLOW
 SHALLOW: 121
 

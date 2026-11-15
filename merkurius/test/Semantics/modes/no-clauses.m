@@ -29,4 +29,4 @@
 :- pred local is semidet.
 
 :- pragma foreign_proc("C", foreign(X::out),
-    [will_not_call_mercury, promise_pure], "X = 1;").
+    [will_not_call_merkurius, promise_pure], "X = 1;").

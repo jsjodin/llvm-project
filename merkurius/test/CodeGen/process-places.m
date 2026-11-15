@@ -171,7 +171,7 @@ spawn_waiters(Count, !IO) :-
 % PHASES-NEXT:23 normal 46 noproc
 % PHASES-NEXT:47 normal 94 noproc
 % OTHER:Software Error: process.spawn: GPU 0 runs processes of the module process_places, and a GPU runs one module's processes at a time: those of place_phase may start there once they have ended
-% STEAL:Mercury runtime: a process received from a mailbox of another process
+% STEAL:Merkurius runtime: a process received from a mailbox of another process
 % RUNNING:Software Error: process.set_gpu_units: GPU 0 runs processes of the module process_places: the units of its processes' kernels change between kernels, once its processes have all ended
 % HOST:Software Error: process.set_gpu_units: the host is not a GPU
 % PERCENT:Software Error: process.set_gpu_units: 0 is not a percentage from 1 to 100

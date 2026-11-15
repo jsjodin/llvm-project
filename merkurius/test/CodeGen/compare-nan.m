@@ -16,7 +16,7 @@
 % RUN: merkc -O2 %s -o %t2 && %t2 | FileCheck %s --check-prefix=KNOWN --match-full-lines
 % RUN: not env CASE=instance %t2 2>&1 | FileCheck %s --check-prefix=NAN
 
-% NAN: Uncaught Mercury exception:
+% NAN: Uncaught Merkurius exception:
 % NAN-NEXT: incomparable floats in compare/3
 
 :- module compare_nan.
@@ -51,7 +51,7 @@ nan(Z) = unchecked_quotient(Z, Z).
 :- pragma foreign_decl("C", "#include <stdlib.h>\n#include <string.h>").
 :- pred is_case(string::in) is semidet.
 :- pragma foreign_proc("C", is_case(Name::in),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
     "const char *value = getenv(\"CASE\");
      SUCCESS_INDICATOR = value != NULL && strcmp(value, Name) == 0;").
 

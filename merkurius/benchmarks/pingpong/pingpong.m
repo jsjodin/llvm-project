@@ -289,7 +289,7 @@ static void *run_echo(void *raw)
 :- pred now(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(Nanoseconds::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -300,7 +300,7 @@ static void *run_echo(void *raw)
 :- pragma foreign_proc("C",
     report(Where::in, Rounds::in, InOrder::in, Nanoseconds::in,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"%-10s %8ld rounds, %8ld in order, %10.2f us a round\\n\",
         Where, (long) Rounds, (long) InOrder,
@@ -311,7 +311,7 @@ static void *run_echo(void *raw)
 :- pred report_launch(int::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     report_launch(Nanoseconds::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"%-10s %10.2f us\\n\", \"launch\", Nanoseconds / 1000.0);
     fflush(stdout);
@@ -322,7 +322,7 @@ static void *run_echo(void *raw)
 :- pred start_echo(mailbox(T)::in, mailbox(T)::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     start_echo(In::in, Out::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     echo.in = (MR_Word *) In;
     echo.out = (MR_Word *) Out;
@@ -333,7 +333,7 @@ static void *run_echo(void *raw)
 :- pred join_echo(io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     join_echo(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     pthread_join(echo_thread, NULL);
 ").

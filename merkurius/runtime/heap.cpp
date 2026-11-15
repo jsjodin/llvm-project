@@ -15,7 +15,7 @@
 // path, and those of more than half a chunk have blocks of their own.
 //
 // A process's heap is collected from here, when the allocation comes from
-// Mercury code at a safepoint (roots.h). The rest of a full chunk is wasted.
+// Merkurius code at a safepoint (roots.h). The rest of a full chunk is wasted.
 //
 //===----------------------------------------------------------------------===//
 
@@ -50,7 +50,7 @@ std::size_t ReadChunkBytes() {
     if (*end != '\0' || value < 16) {
       std::fflush(stdout);
       std::fprintf(stderr,
-          "Mercury runtime: MERK_HEAP_CHUNK_BYTES=%s is not a number of at "
+          "Merkurius runtime: MERK_HEAP_CHUNK_BYTES=%s is not a number of at "
           "least 16\n",
           bytes);
       merkurius::runtime::ExitProgram(1);

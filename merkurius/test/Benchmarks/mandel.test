@@ -16,7 +16,7 @@ RUN: %libomp-env MANDEL_SIZE=64 MANDEL_FRAMES=12 %t2 host | FileCheck %s --check
 RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_FRAMES=12 %t.omp host | FileCheck %s --check-prefixes=M,SMALL
 RUN: %libomp-env OMP_TARGET_OFFLOAD=DISABLED OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_FRAMES=12 %t.c | FileCheck %s --check-prefixes=C,SMALL
 RUN: env MANDEL_SIZE=64 MANDEL_FRAMES=12 %python %S/../../benchmarks/mandel/mandel.py | FileCheck %s --check-prefix=SMALL
-M: Mandelbrot zoom, Mercury, GPU process
+M: Mandelbrot zoom, Merkurius, GPU process
 C: Mandelbrot zoom, C
 SMALL: Iterations: 10601425
 SMALL-NEXT: Checksum: 63198496

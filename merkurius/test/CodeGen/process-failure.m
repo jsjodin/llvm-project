@@ -101,12 +101,12 @@ zero = 0.
 % OUTPUT-NEXT:message(42)
 % OUTPUT-NOT:{{.}}
 
-% REPORTS-DAG:Uncaught Mercury exception:
+% REPORTS-DAG:Uncaught Merkurius exception:
 % REPORTS-DAG:domain_error("int.\'//\': division by zero")
-% REPORTS-DAG:Mercury runtime: stack overflow
+% REPORTS-DAG:Merkurius runtime: stack overflow
 
 % MAIN:before
 % MAIN-NOT:{{.}}
 
-% REPORT1:Uncaught Mercury exception:
+% REPORT1:Uncaught Merkurius exception:
 % REPORT1-NEXT:domain_error("int.\'//\': division by zero")

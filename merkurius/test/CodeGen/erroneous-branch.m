@@ -12,7 +12,7 @@
 :- import_module int.
 :- pragma foreign_decl("C", "#include <stdio.h>\n#include <stdlib.h>").
 :- pred stop is erroneous.
-:- pragma foreign_proc("C", stop, [will_not_call_mercury, promise_pure],
+:- pragma foreign_proc("C", stop, [will_not_call_merkurius, promise_pure],
     "puts(\"stopped\"); fflush(stdout); exit(3);").
 :- pred br(int::in, int::out) is det.
 br(X, Y) :- ( if X > 0 then Y = X else stop ).

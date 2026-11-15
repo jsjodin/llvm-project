@@ -25,10 +25,10 @@ for d in "${libs[@]}"; do flags+=("-L$d"); done
 export LD_LIBRARY_PATH="$(IFS=:; echo "${libs[*]}")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export OMP_TARGET_OFFLOAD=MANDATORY
 
-mercury=("$build/bin/merkc" -O2 -fopenmp -fdo-loops -fprocess-declarations
+merkurius=("$build/bin/merkc" -O2 -fopenmp -fdo-loops -fprocess-declarations
   --offload-arch="$arch" "${flags[@]}")
-"${mercury[@]}" "$here/mandel.m" -o "$out/dense"
-"${mercury[@]}" "$here/mandel-places.m" -o "$out/places"
+"${merkurius[@]}" "$here/mandel.m" -o "$out/dense"
+"${merkurius[@]}" "$here/mandel-places.m" -o "$out/places"
 "$build/bin/clang" -O2 -ffp-contract=off -fopenmp --offload-arch="$arch" \
   "${flags[@]}" "$here/mandel.c" -o "$out/c"
 
@@ -80,7 +80,7 @@ awk '
     printf "%-28s %10s %14s %8s %8s\n", "Program", "Time (sec)", "Giterations/s",
       "Balance", "Handed"
     split("dense c static steal pool", ps, " ")
-    split("Mercury, one GPU process;C, a kernel a frame;Places, static;" \
+    split("Merkurius, one GPU process;C, a kernel a frame;Places, static;" \
       "Places, steal;Places, pool", names, ";")
     for (i = 1; i <= 5; i++)
       printf "%-28s %10.4f %14.3f %8s %8s\n", names[i], median(time, ps[i]),

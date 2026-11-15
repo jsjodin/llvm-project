@@ -513,7 +513,7 @@ void StartReaper() {
   pthread_t thread;
   if (pthread_create(&thread, nullptr, Reaper, nullptr) != 0) {
     std::fflush(stdout);
-    std::fputs("Mercury runtime: could not start the thread that frees what "
+    std::fputs("Merkurius runtime: could not start the thread that frees what "
                "GPU processes had\n",
         stderr);
     ExitProgram(1);
@@ -921,7 +921,7 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   if (ol_result_t queued{olLaunchHostFunction(queue, PlaceDone, place)}) {
     std::fflush(stdout);
     std::fprintf(stderr,
-        "Mercury runtime: could not follow a GPU processes' kernel: %s\n",
+        "Merkurius runtime: could not follow a GPU processes' kernel: %s\n",
         Details(queued));
     ExitProgram(1);
   }
@@ -1104,7 +1104,7 @@ void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
   pthread_mutex_unlock(&lock);
   if (!process) {
     std::fflush(stdout);
-    std::fputs("Mercury runtime: a GPU told the host that a process ended "
+    std::fputs("Merkurius runtime: a GPU told the host that a process ended "
                "that it does not know\n",
         stderr);
     std::_Exit(1);

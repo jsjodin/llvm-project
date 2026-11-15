@@ -114,7 +114,7 @@ connect_retrying(Address, Tries, Connected, !IO) :-
 
 :- pred pause(io::di, io::uo) is det.
 :- pragma foreign_proc("C", pause(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     usleep(100000);
 ").

@@ -953,17 +953,16 @@ void ModeChecker::Run(const parser::ParseTree &tree) {
     if (symbol->kind == SymbolKind::Inst) {
       result_.instDefinitions_.push_back(symbol);
       if (ReservedInst(symbol->name)) {
-        // mmc: "the inst name `ground' is reserved for the Mercury
-        // implementation".
+        // As mmc reports it, without its name for the implementation.
         messages_.Say(symbol->source,
-            "the inst name %s is reserved for the Mercury implementation"_err_en_US,
+            "the inst name %s is reserved for the implementation"_err_en_US,
             symbol->name.str());
       }
       DefineInst(*symbol);
     } else if (symbol->kind == SymbolKind::Mode) {
       if (ReservedMode(symbol->name)) {
         messages_.Say(symbol->source,
-            "the mode name %s is reserved for the Mercury implementation"_err_en_US,
+            "the mode name %s is reserved for the implementation"_err_en_US,
             symbol->name.str());
       }
       DefineMode(*symbol);

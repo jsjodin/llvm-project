@@ -19,8 +19,8 @@ RUN: %libomp-env LIFE_PLACES=2 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STE
 RUN: %libomp-env LIFE_PLACES=1 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t2 host | FileCheck %s --check-prefix=A1
 RUN: %libomp-env LIFE_PLACES=2 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t2 host | FileCheck %s --check-prefixes=A,A2
 RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_PLACES=3 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t.omp host | FileCheck %s --check-prefixes=A,A3
-A1: Game of Life, Mercury, GPU processes, sparse tiles, 1 places
-A: Game of Life, Mercury, GPU processes, sparse tiles, {{[23]}} places
+A1: Game of Life, Merkurius, GPU processes, sparse tiles, 1 places
+A: Game of Life, Merkurius, GPU processes, sparse tiles, {{[23]}} places
 A-NEXT: World: 256 x 256 cells, tiles of 16 x 16, 256 in each place's pool
 A-NEXT: Soup: 64 x 64 cells at the centre
 A-NEXT: Steps: 50

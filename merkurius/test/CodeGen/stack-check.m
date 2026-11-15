@@ -68,4 +68,4 @@ leaf(N) = N + 1.
 % OUTPUT-NEXT:1000000
 % OUTPUT-NOT:{{.}}
 
-% ERROR:Mercury runtime: stack overflow
+% ERROR:Merkurius runtime: stack overflow

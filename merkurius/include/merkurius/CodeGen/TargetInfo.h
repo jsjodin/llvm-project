@@ -28,7 +28,7 @@
 
 namespace merkurius::codegen {
 
-// The target's numbers for the address spaces of Mercury code: the generic
+// The target's numbers for the address spaces of Merkurius code: the generic
 // one, which every pointer converts to, and those of global,
 // workgroup-shared, constant and per-thread private memory.
 struct AddressSpaces {

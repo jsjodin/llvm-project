@@ -1,4 +1,4 @@
-# Mercury tokens and builtin operators, for libFuzzer (-dict).
+# Merkurius tokens and builtin operators, for libFuzzer (-dict).
 "\x0A"
 "\x0A%$omp& "
 " "

@@ -24,7 +24,7 @@ bool CheckRootsEnabled();
 bool CollectsEveryAllocation();
 
 // From merk_alloc_slow: collects the running process's heap if it may be
-// collected and is due, and the allocation is from Mercury code at a safepoint,
+// collected and is due, and the allocation is from Merkurius code at a safepoint,
 // and whether it did. A C++ caller holds raw pointers, so the heap just grows.
 bool CollectIfDue(void *frame);
 

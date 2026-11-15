@@ -9,7 +9,7 @@
 % RUN:   | FileCheck --check-prefix=EOF %s
 
 p = "\e".
-% CHECK: errors.m:[[@LINE-1]]:6: error: '\e' is not an escape in Mercury 22.01
+% CHECK: errors.m:[[@LINE-1]]:6: error: '\e' is not an escape
 % CHECK-NEXT: p = "\e".
 % CHECK-NEXT: {{^}}       ^^{{$}}
 q = 2_e3.

@@ -59,7 +59,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Symbol &symbol) {
   if (!symbol.module.empty()) {
     os << symbol.module << '.';
   }
-  // A name that is not an identifier is quoted, as Mercury writes it.
+  // A name that is not an identifier is quoted, as Merkurius writes it.
   llvm::StringRef name{symbol.name};
   bool plain{!name.empty() && llvm::isLower(name.front()) &&
       llvm::all_of(name, [](char c) { return llvm::isAlnum(c) || c == '_'; })};

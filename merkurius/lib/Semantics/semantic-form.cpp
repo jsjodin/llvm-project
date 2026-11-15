@@ -14,7 +14,7 @@
 namespace merkurius::semantics {
 namespace {
 
-// A name as Mercury writes it: quoted unless it is a plain identifier, so
+// A name as Merkurius writes it: quoted unless it is a plain identifier, so
 // the character '0' and the integer 0 differ.
 void PrintName(llvm::raw_ostream &os, const parser::SymName &name) {
   for (llvm::StringRef qualifier : name.qualifiers) {

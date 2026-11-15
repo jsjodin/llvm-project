@@ -9,27 +9,27 @@
 #ifndef MERKURIUS_SEMANTICS_CHECK_DETERMINISM_H_
 #define MERKURIUS_SEMANTICS_CHECK_DETERMINISM_H_
 
-// Determinism analysis (design document, "Semantic analysis", pass 5). It
-// works on the body of each procedure that mode analysis checked, in the
-// form mmc gives it after mode analysis: one set of variables for the
-// procedure, its clauses the branches of a disjunction that bind the head
-// variables, HeadVar__N, its conjunctions in execution order, and each
-// unification of a bound X with f(Y1, ..., Yn) a deconstruction into
-// distinct new variables, each followed by a test of the new variable and
-// the argument it stands for if that was bound. Switch detection turns a
-// disjunction whose branches test a variable bound before it against
-// different functors into a switch (reference manual, "Determinism
-// checking and inference"; Henderson, Somogyi and Conway, "Determinism
-// analysis in the Mercury compiler", 1996, section 3), and common
-// subexpression elimination moves a deconstruction that every branch
-// makes out of the disjunction, so that the variables it binds may be
-// switched on (ibid., section 4). The determinism of each goal is then
-// inferred from its parts' (reference manual, "Determinism checking and
-// inference"; ibid., section 5.1), and a procedure's declared determinism
-// checked against its body's, with the goals that make the difference
-// (ibid., section 5.3). A committed choice call must be where only its
-// first solution is wanted (reference manual, "Committed choice
-// nondeterminism").
+// Determinism analysis (design document, "Semantic analysis", pass 5).
+// It works on the body of each procedure that mode analysis checked,
+// in the form mmc gives it after mode analysis: one set of variables
+// for the procedure, its clauses the branches of a disjunction that
+// bind the head variables, HeadVar__N, its conjunctions in execution
+// order, and each unification of a bound X with f(Y1, ..., Yn) a
+// deconstruction into distinct new variables, each followed by a test
+// of the new variable and the argument it stands for if that was
+// bound. Switch detection turns a disjunction whose branches test a
+// variable bound before it against different functors into a switch
+// (reference manual, "Determinism checking and inference"; Henderson,
+// Somogyi and Conway, 1996, section 3), and common subexpression
+// elimination moves a deconstruction that every branch makes out of
+// the disjunction, so that the variables it binds may be switched on
+// (ibid., section 4). The determinism of each goal is then inferred
+// from its parts' (reference manual, "Determinism checking and
+// inference"; ibid., section 5.1), and a procedure's declared
+// determinism checked against its body's, with the goals that make the
+// difference (ibid., section 5.3). A committed choice call must be
+// where only its first solution is wanted (reference manual,
+// "Committed choice nondeterminism").
 
 #include "merkurius/Parser/message.h"
 #include "merkurius/Parser/token.h"

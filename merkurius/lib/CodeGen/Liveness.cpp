@@ -50,7 +50,7 @@ bool Allocates(mlir::Operation *op) {
       merk::ArrayFromListOp, merk::ArrayResizeOp>(op);
 }
 
-// An operation that runs Mercury code, which can collect.
+// An operation that runs Merkurius code, which can collect.
 bool Calls(mlir::Operation *op) {
   return mlir::isa<merk::CallOp, merk::CallClosureOp, merk::CallMethodOp,
       merk::CallContOp, merk::UnifyWordOp, merk::CompareWordOp>(op);

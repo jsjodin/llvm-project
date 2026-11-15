@@ -133,7 +133,7 @@ std::int64_t Now() {
 
 [[noreturn]] void OutOfMemory() {
   std::fflush(stdout);
-  std::fprintf(stderr, "Mercury runtime: out of memory\n");
+  std::fprintf(stderr, "Merkurius runtime: out of memory\n");
   merkurius::runtime::ExitProgram(1);
 }
 
@@ -528,7 +528,7 @@ void GiveToBlockingThread(Process *process) {
   thread->nextIdle = nullptr;
   if (pthread_create(&id, &attributes, BlockingThreadBody, thread) != 0) {
     std::fflush(stdout);
-    std::fprintf(stderr, "Mercury runtime: no thread for a target region\n");
+    std::fprintf(stderr, "Merkurius runtime: no thread for a target region\n");
     merkurius::runtime::ExitProgram(1);
   }
   pthread_attr_destroy(&attributes);
@@ -556,7 +556,7 @@ int ReadMostWorkers() {
     if (*end != '\0' || value < 1) {
       std::fflush(stdout);
       std::fprintf(stderr,
-          "Mercury runtime: MERK_WORKERS=%s is not a positive number\n", text);
+          "Merkurius runtime: MERK_WORKERS=%s is not a positive number\n", text);
       merkurius::runtime::ExitProgram(1);
     }
     return static_cast<int>(value);
@@ -852,7 +852,7 @@ extern "C" void merk_stack_limit_passed(void) {
     return;
   }
   std::fflush(stdout);
-  std::fprintf(stderr, "Mercury runtime: stack overflow\n");
+  std::fprintf(stderr, "Merkurius runtime: stack overflow\n");
   EndAfterFailure("stack overflow");
   ExitProgram(1);
 }

@@ -21,7 +21,7 @@ both(Y, X, !IO) :- both2(X, Y, !IO).
 
 :- pred both2(A::in, B::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C", both2(X::in, Y::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure], "
+    [will_not_call_merkurius, promise_pure], "
     merk_write(TypeInfo_for_A, X, 2);
     merk_write(TypeInfo_for_B, Y, 2);
 ").

@@ -16,7 +16,7 @@ RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offloa
 
 RUN: %libomp-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 %t2 host | FileCheck %s --check-prefix=THACKER --match-full-lines
 RUN: %libomp-env OMP_NUM_THREADS=4 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 %t.omp host | FileCheck %s --check-prefix=THACKER --match-full-lines
-THACKER: Shallow water, Mercury, GPU process, sparse tiles
+THACKER: Shallow water, Merkurius, GPU process, sparse tiles
 THACKER-NEXT: World: 256 x 256 cells, tiles of 16 x 16, 256 in the pool
 THACKER-NEXT: Case: Thacker's bowl
 THACKER-NEXT: Steps: 400

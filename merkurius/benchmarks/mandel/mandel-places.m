@@ -472,7 +472,7 @@ results(Total, Checksum, Handed, PlaceTiles, Busy, Time, !IO) :-
 :- pred now(float::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(T::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -483,7 +483,7 @@ results(Total, Checksum, Handed, PlaceTiles, Busy, Time, !IO) :-
 :- pred setting(string::in, int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     setting(Name::in, Default::in, Value::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     const char *s = getenv(Name);
     Value = s && *s ? (MR_Integer) strtol(s, NULL, 10) : Default;
@@ -493,7 +493,7 @@ results(Total, Checksum, Handed, PlaceTiles, Busy, Time, !IO) :-
     is det.
 :- pragma foreign_proc("C",
     text_setting(Name::in, Default::in, Value::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     const char *s = getenv(Name);
     Value = s && *s ? (MR_String) s : Default;
@@ -503,7 +503,7 @@ results(Total, Checksum, Handed, PlaceTiles, Busy, Time, !IO) :-
 :- pred exit_failure(io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     exit_failure(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     fflush(stdout);
     exit(1);
@@ -514,9 +514,9 @@ results(Total, Checksum, Handed, PlaceTiles, Busy, Time, !IO) :-
 :- pragma foreign_proc("C",
     header(Policy::in, K::in, Frames::in, Size::in, Tile::in,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
-    printf(\"Mandelbrot zoom, Mercury, %ld places, %s\\n\", (long) K, Policy);
+    printf(\"Mandelbrot zoom, Merkurius, %ld places, %s\\n\", (long) K, Policy);
     printf(\"Frames: %ld of %ld x %ld pixels, tiles of %ld x %ld\\n\",
         (long) Frames, (long) Size, (long) Size, (long) Tile, (long) Tile);
 ").
@@ -524,7 +524,7 @@ results(Total, Checksum, Handed, PlaceTiles, Busy, Time, !IO) :-
 :- pred place_line(int::in, int::in, float::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     place_line(P::in, Tiles::in, Busy::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"Place %ld: %ld tiles, busy %.6f s\\n\", (long) P, (long) Tiles,
         Busy);
@@ -533,7 +533,7 @@ results(Total, Checksum, Handed, PlaceTiles, Busy, Time, !IO) :-
 :- pred write_results(float::in, int::in, float::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     write_results(Balance::in, Total::in, Time::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"Balance: %.3f\\n\", Balance);
     printf(\"%-12s%-14s\\n\", \"Time (sec)\", \"Giterations/s\");

@@ -306,7 +306,7 @@ results(Frames, Checksum, First, Last, !IO) :-
 :- func bits(float) = int.
 :- pragma foreign_proc("C",
     bits(F::in) = (B::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     double y = F + 0.0;
     memcpy(&B, &y, sizeof y);
@@ -315,7 +315,7 @@ results(Frames, Checksum, First, Last, !IO) :-
 :- pred now(float::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(T::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -326,7 +326,7 @@ results(Frames, Checksum, First, Last, !IO) :-
 :- pred setting(string::in, int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     setting(Name::in, Default::in, Value::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     const char *s = getenv(Name);
     Value = s && *s ? (MR_Integer) strtol(s, NULL, 10) : Default;
@@ -336,7 +336,7 @@ results(Frames, Checksum, First, Last, !IO) :-
 :- pred get_mode(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     get_mode(Mode::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     const char *s = getenv(\"PIPE_MODE\");
     Mode = !s || !*s || strcmp(s, \"pipeline\") == 0 ? 0
@@ -348,9 +348,9 @@ results(Frames, Checksum, First, Last, !IO) :-
 :- pragma foreign_proc("C",
     header(Words::in, Work::in, Frames::in, Feedback::in, Single::in,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
-    printf(\"Pipeline, Mercury, %s\\n\", Single ? \"one GPU process\" :
+    printf(\"Pipeline, Merkurius, %s\\n\", Single ? \"one GPU process\" :
         \"three GPU processes\");
     printf(\"Frames: %ld of %ld words, %ld rounds a stage\\n\",
         (long) Frames, (long) Words, (long) Work);
@@ -363,7 +363,7 @@ results(Frames, Checksum, First, Last, !IO) :-
 :- pred write_results(int::in, float::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     write_results(Checksum::in, Frame::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"Checksum: %016llx\\n\", (unsigned long long) Checksum);
     printf(\"Time a frame: %.1f us\\n\", Frame * 1.0e6);

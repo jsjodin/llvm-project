@@ -80,7 +80,7 @@
 % OUTPUT-NEXT:7.0 finite
 % OUTPUT-NOT:{{.}}
 
-% ERROR:Uncaught Mercury exception:
+% ERROR:Uncaught Merkurius exception:
 % ERROR-NEXT:domain_error("math.sqrt")
 % ERROR-NOT:{{.}}
 

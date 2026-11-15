@@ -29,7 +29,7 @@ equal(set(X), set(X)).
 
 :- some [T] pred r(T::out) is det.
 % CHECK: not-yet.m:[[@LINE-1]]:18: error: not yet implemented: code generation for foreign_procs with existential types
-:- pragma foreign_proc("C", r(X::out), [will_not_call_mercury, promise_pure], "X = 0;").
+:- pragma foreign_proc("C", r(X::out), [will_not_call_merkurius, promise_pure], "X = 0;").
 
 :- func w(int) = int.
 w(X) = pow(X, 3).

@@ -72,7 +72,7 @@ main(!IO) :-
 :- pred c_exit(int::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     c_exit(Status::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     exit((int) Status);
 ").

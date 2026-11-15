@@ -18,12 +18,12 @@
 % CHECK-DAG: merk.proc private @foreign_proc_polymorphic.id_2_0(%arg0: !merk.type_info, %arg1: !merk.word) -> !merk.word
 :- pred id(T::in, T::out) is det.
 :- pragma foreign_proc("C", id(X::in, Y::out),
-    [will_not_call_mercury, promise_pure], "Y = X;").
+    [will_not_call_merkurius, promise_pure], "Y = X;").
 
 % Several type variables, in any order, and several outputs.
 :- pred two(A::in, B::in, B::out, A::out) is det.
 :- pragma foreign_proc("C", two(X::in, Y::in, Z::out, W::out),
-    [will_not_call_mercury, promise_pure], "
+    [will_not_call_merkurius, promise_pure], "
     (void)TypeInfo_for_A;
     (void)TypeInfo_for_B;
     Z = Y;
@@ -34,56 +34,56 @@
 % arguments, which tells that they are the type_infos of those types.
 :- pred same_type(A::in, B::in) is semidet.
 :- pragma foreign_proc("C", same_type(_X::in, _Y::in),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
     "SUCCESS_INDICATOR = (TypeInfo_for_A == TypeInfo_for_B);").
 
 % A type variable only within a type, as a function's result, by any name.
 :- func f(list(Elem)) = list(Elem).
 :- pragma foreign_proc("C", f(L::in) = (R::out),
-    [will_not_call_mercury, promise_pure], "R = L; (void)TypeInfo_for_Elem;").
+    [will_not_call_merkurius, promise_pure], "R = L; (void)TypeInfo_for_Elem;").
 
 :- pred semi(T::in, T::out) is semidet.
 :- pragma foreign_proc("C", semi(X::in, Y::out),
-    [will_not_call_mercury, promise_pure], "Y = X; SUCCESS_INDICATOR = MR_TRUE;").
+    [will_not_call_merkurius, promise_pure], "Y = X; SUCCESS_INDICATOR = MR_TRUE;").
 
 :- pred unused(int::in, T::in, int::out) is det.
 :- pragma foreign_proc("C", unused(I::in, _X::in, O::out),
-    [will_not_call_mercury, promise_pure], "O = I + 1;").
+    [will_not_call_merkurius, promise_pure], "O = I + 1;").
 
 :- type box(T) ---> box(T).
 :- pred b(box(T)::in, T::in, box(T)::out) is det.
 :- pragma foreign_proc("C", b(X::in, _Y::in, Z::out),
-    [will_not_call_mercury, promise_pure], "Z = X;").
+    [will_not_call_merkurius, promise_pure], "Z = X;").
 
 % Two modes.
 :- pred m(T, T).
 :- mode m(in, out) is det.
 :- mode m(out, in) is det.
 :- pragma foreign_proc("C", m(X::in, Y::out),
-    [will_not_call_mercury, promise_pure], "Y = X;").
+    [will_not_call_merkurius, promise_pure], "Y = X;").
 :- pragma foreign_proc("C", m(X::out, Y::in),
-    [will_not_call_mercury, promise_pure], "X = Y;").
+    [will_not_call_merkurius, promise_pure], "X = Y;").
 
 % The manual's conversions of a word (C data passing conventions), for values
 % that the code knows the types of.
 :- pred float_of(T::in, float::out) is det.
 :- pragma foreign_proc("C", float_of(X::in, F::out),
-    [will_not_call_mercury, promise_pure], "F = MR_word_to_float(X);").
+    [will_not_call_merkurius, promise_pure], "F = MR_word_to_float(X);").
 :- pred of_float(float::in, T::out) is det.
 :- pragma foreign_proc("C", of_float(F::in, X::out),
-    [will_not_call_mercury, promise_pure], "X = MR_float_to_word(F);").
+    [will_not_call_merkurius, promise_pure], "X = MR_float_to_word(F);").
 :- pred int64_of(T::in, int64::out) is det.
 :- pragma foreign_proc("C", int64_of(X::in, I::out),
-    [will_not_call_mercury, promise_pure], "I = MR_word_to_int64(X);").
+    [will_not_call_merkurius, promise_pure], "I = MR_word_to_int64(X);").
 :- pred of_int64(int64::in, T::out) is det.
 :- pragma foreign_proc("C", of_int64(I::in, X::out),
-    [will_not_call_mercury, promise_pure], "X = MR_int64_to_word(I);").
+    [will_not_call_merkurius, promise_pure], "X = MR_int64_to_word(I);").
 :- pred uint64_of(T::in, uint64::out) is det.
 :- pragma foreign_proc("C", uint64_of(X::in, I::out),
-    [will_not_call_mercury, promise_pure], "I = MR_word_to_uint64(X);").
+    [will_not_call_merkurius, promise_pure], "I = MR_word_to_uint64(X);").
 :- pred of_uint64(uint64::in, T::out) is det.
 :- pragma foreign_proc("C", of_uint64(I::in, X::out),
-    [will_not_call_mercury, promise_pure], "X = MR_uint64_to_word(I);").
+    [will_not_call_merkurius, promise_pure], "X = MR_uint64_to_word(I);").
 
 % Called from polymorphic code, with its own type_info passed on.
 :- pred via(T::in, io::di, io::uo) is det.
