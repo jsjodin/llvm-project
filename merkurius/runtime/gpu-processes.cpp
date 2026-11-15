@@ -429,13 +429,24 @@ void Reap(RunningProcess *process) {
   GpuProcessEnded();
 }
 
-// Frees an ended kernel's table and queues, keeping the count of its blocks
-// of messages that are still allocated (PlaceTable).
-void ReapPlace(Place *place) {
+// Keeps an ended kernel's counts of its blocks of messages that are still
+// allocated and of its direct sends between GPUs (PlaceTable), as the
+// reaper takes it off the list of ended kernels, under the lock: the counts
+// (PlaceMessageBlocks, PlacePeerCounts) read the lists and these sums under
+// it, and a kernel that was on neither was not counted, as at the end of a
+// program whose last kernel the reaper was taking, which reported a
+// flood's copies as -3000 not given back. The kernel has ended, so its
+// counts are final.
+void CountEndedPlace(const Place *place) {
   __atomic_add_fetch(&endedPlaceBlocks, place->table->blocks, __ATOMIC_RELAXED);
   __atomic_add_fetch(&endedPeerSends, place->table->peerSends, __ATOMIC_RELAXED);
   __atomic_add_fetch(
       &endedPeerCopies, place->table->peerCopies, __ATOMIC_RELAXED);
+}
+
+// Frees an ended kernel's table and queues, once its counts are kept
+// (CountEndedPlace).
+void ReapPlace(Place *place) {
   DeviceFreeHost(place->gpu, place->table);
   DeviceFree(place->gpu, place->queues);
   pthread_mutex_lock(&lock);
@@ -483,6 +494,9 @@ void *Reaper(void *) {
     ended = nullptr;
     Place *placeList{endedPlaces};
     endedPlaces = nullptr;
+    for (const Place *place{placeList}; place; place = place->next) {
+      CountEndedPlace(place);
+    }
     pthread_mutex_unlock(&lock);
     while (list) {
       RunningProcess *next{list->next};
@@ -1167,8 +1181,8 @@ void PlacePeerCounts(std::int64_t *sends, std::int64_t *copies) {
 }
 
 std::int64_t PlaceMessageBlocks() {
-  std::int64_t blocks{__atomic_load_n(&endedPlaceBlocks, __ATOMIC_RELAXED)};
   pthread_mutex_lock(&lock);
+  std::int64_t blocks{__atomic_load_n(&endedPlaceBlocks, __ATOMIC_RELAXED)};
   for (const Place *place{places}; place; place = place->next) {
     blocks += __atomic_load_n(&place->table->blocks, __ATOMIC_ACQUIRE);
   }

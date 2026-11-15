@@ -52,7 +52,7 @@ constexpr uint64_t kBlockListWords{5};
 // (device/device.cpp, Route).
 constexpr uint64_t kRouteListWords{1};
 // After them, a GPU process's cache of the small blocks it has freed, by
-// their size, and how many bytes it holds (device/device.cpp, SmallAllocate).
+// their size, and how many bytes it holds (device/device.cpp, NewOwnBlock).
 constexpr uint64_t kSmallClasses{11};
 constexpr uint64_t kSmallCacheWords{kSmallClasses + 1};
 // After them, the copies from other GPUs' send pools that a GPU process

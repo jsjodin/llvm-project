@@ -169,5 +169,8 @@ all 90 rows had every array right in each.
 - Workers first nearly halve `AB*4`'s stream of 2^20 words against the copy
   engine's time, 2.6 GB/s against 1.4.
 - `AA*4` gains in both, since workers also copy within a GPU.
-- The copy engine was faster only at `A-B` ping of 262144 words (813
-  against 1321).
+- In this run the copy engine was faster at `A-B` ping of 262144 words
+  (813 against 1321), but three more runs of the engine (1336 to 1457 µs)
+  and two of workers (1133 and 1399) did not repeat it. From 262144 words
+  runs of one mode differ by 20 to 40%, so compare them over several
+  runs.
