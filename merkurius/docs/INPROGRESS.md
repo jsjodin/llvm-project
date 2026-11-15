@@ -6239,11 +6239,44 @@ on ROCR GPUs 4,6:
 
   gpu-link, µs between arrays of 1 word: `A>B` 33 → 26, `A>A` 52 → 20;
   gpu-pairs, `AB*4` ping of 1 word 465 → 374, every row as fast or faster.
-- Left: an array of 1 word costs about 16 µs more than a word between GPUs
-  (the send pool, the copies, the return ring); what remains of the 9 µs is
-  some 10 to 15 loads from the GPU's memory a message, each most of a
-  microsecond, which only fewer loads, or state in the team's local
-  memory, would cut.
+- *The array's block at the receiver.* An array of 1 word cost about 16
+  µs more than a word between GPUs. The same counters in the send pool's
+  path and `DeliverPeer` (msgcost scratch build) put the most of it in the
+  receiver's new block for the array: libc's `malloc` on the GPU, 5–7 µs
+  from one lane, and its `free` 1.5–2.5 µs when the process lets the array
+  go. A GPU process now keeps a cache of the small blocks its own wave has
+  freed, in its arena (`SmallAllocate`, `SmallFree`): a power of two from 64 bytes to 4
+  KiB, up to 1 MiB in all, the last freed of its size taken first. Worker
+  teams, which make blocks at the same time as their process, still go to
+  libc; the process's end gives the cache back. The receiver's block went
+  from 6.7 µs to 1.4. `held` and `peak` are now atomic at the device's
+  scope only.
+
+  A stream of 2000 arrays on ROCR GPUs 4,6, µs a message at the receiver:
+
+  | Stream | Before | After |
+  | --- | --- | --- |
+  | Two GPUs, 1 word | 25.0 | 16.8 |
+  | Two GPUs, 1024 words | 32.4 | 26.6 |
+  | One GPU, 1 word | 19.4 | 16.3 |
+  | One GPU, 1024 words | 19.2 | 16.0 |
+
+  gpu-link, µs between arrays, `A>B`: 1 word 26 → 17, 1024 words 41 → 28,
+  4096 words 50 → 37; `A>A` of 1 word 20 → 17. gpu-pairs: every row of
+  up to 4096 words as fast or faster (`A-A` ping of 1 word 116 → 94,
+  `AB*4` ping 376 → 319); the rows of larger arrays, which still take
+  their blocks from libc, varied as much between two runs of the old
+  runtime as against the new.
+
+  Taking back returned copies only when the pool's free lists have none
+  (the sender's look at the return ring is about 4 µs) made no difference
+  to the stream, and was not kept.
+- Left: of the 17 µs an array of 1 word costs between GPUs, the sender's
+  allocation in the send pool takes about 6 (4 of them the return ring's
+  look), its put into the peer queue 4, and the receiver's return of the
+  copy 2; what remains of a word's 9 µs is some 10 to 15 loads from the
+  GPU's memory a message, each most of a microsecond, which only fewer
+  loads, or state in the team's local memory, would cut.
 
 **The local queue's state in one word.** *Fixed 2026-11-15.* `OpenQueue`
 stored `closed` and then `incarnation`, and `EnterQueue` loaded
