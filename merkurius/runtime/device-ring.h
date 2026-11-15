@@ -44,18 +44,24 @@ constexpr uint64_t kChunkBytes{uint64_t{1} << 20};
 // that the host clears when no region is running.
 constexpr uint64_t kBumpWords{2};
 constexpr uint64_t kRingCacheSlots{64};
-// After them, a GPU process's lists of the blocks it holds, and the bytes it
-// holds and the most it has held (device/device.cpp, Block).
-constexpr uint64_t kBlockListWords{4};
+// After them, a GPU process's lists of the blocks it holds, the bytes its
+// own wave holds and the most it has held, and the bytes of its worker
+// teams' blocks (device/device.cpp, Block).
+constexpr uint64_t kBlockListWords{5};
 // After them, a GPU process's routes to the mailboxes it has sent to
 // (device/device.cpp, Route).
 constexpr uint64_t kRouteListWords{1};
 // After them, a GPU process's cache of the small blocks it has freed, by
 // their size, and how many bytes it holds (device/device.cpp, SmallAllocate).
-constexpr uint64_t kSmallClasses{7};
+constexpr uint64_t kSmallClasses{11};
 constexpr uint64_t kSmallCacheWords{kSmallClasses + 1};
+// After them, the copies from other GPUs' send pools that a GPU process
+// has received and not yet returned, of one return ring
+// (device/device.cpp, HoldReturn).
+constexpr uint64_t kReturnBatch{8};
+constexpr uint64_t kReturnBatchWords{kReturnBatch + 3};
 constexpr uint64_t kArenaClearWords{kBumpWords + kRingCacheSlots +
-    kBlockListWords + kRouteListWords + kSmallCacheWords};
+    kBlockListWords + kRouteListWords + kSmallCacheWords + kReturnBatchWords};
 
 // How many regions may run at once, all told. Each running region has a
 // slot, which the host gives it as it starts and takes back as it ends. A
