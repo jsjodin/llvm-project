@@ -1,0 +1,15 @@
+Arrays streamed from GPU processes on one GPU straight to GPU processes on
+another (benchmarks/gpu-link/link.m), on 1 MiB a measurement, with
+MERK_GPU_PEER=1: every array reaches its sink with its size and last
+element, in all 5 cases, and the messages went directly. Built with
+-fopenmp, the sources and sinks have 8 worker teams each (`workers 8`).
+REQUIRES: two-gpus
+
+RUN: merkc -O2 -fprocess-declarations -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/gpu-link/link.m -o %t
+RUN: %gpu-env MERK_GPU_PEER=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 300 %t 1 2> %t.err | awk '{ n++; if ($4 != $6) w++ } END { print n " rows, " w + 0 " wrong" }' | FileCheck %s --match-full-lines
+RUN: FileCheck %s --check-prefix=DIRECT < %t.err
+RUN: merkc -O2 -fprocess-declarations -fdo-loops -fopenmp --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/gpu-link/link.m -o %t.omp
+RUN: %gpu-env MERK_GPU_PEER=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 300 %t.omp 1 workers 8 2> %t.omp.err | awk '{ n++; if ($4 != $6) w++ } END { print n " rows, " w + 0 " wrong" }' | FileCheck %s --match-full-lines
+RUN: FileCheck %s --check-prefix=DIRECT < %t.omp.err
+CHECK: 35 rows, 0 wrong
+DIRECT: Mercury runtime: {{[1-9][0-9]*}} messages went directly between GPUs, and 0 of their copies were not given back

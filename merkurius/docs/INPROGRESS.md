@@ -6186,6 +6186,24 @@ queue's slots are laid out. 512 B costs the same as 8 B.
      exception above; the 2,3 and 1,3 pairs, busy with others' jobs, were
      not measured.
 
+8. The link alone. *Measured 2026-11-15* (benchmarks/gpu-link): sources on
+   one GPU stream arrays to sinks on another, timed on the sinks' clocks,
+   with no host on the way. On ROCR GPUs 4,6 (two packages; HIP's probes
+   gave 38–42 GB/s between packages):
+   - One direction, 8 MiB arrays: 36 GB/s, by the copy engine or by
+     workers, about the link.
+   - Both directions: the copy engine stays at 28–37 GB/s in all, however
+     many pairs, because the host's RPC server makes one copy at a time
+     for all GPUs. With 8 workers per process, `A<>B` gives 69 GB/s.
+   - Within a GPU: 3–5 GB/s by a process's wave, 85 GB/s by its workers.
+   - *Small messages cost 33–55 µs each*, even an array of 1 word, within
+     a GPU as between two, against 1.2 µs of flag latency between GPUs. So
+     a pair sends about 30000 messages a second, which the processes' own
+     send and receive cost, not the link.
+   - Left: why a message costs 33 µs (the next step); the copy engine for
+     both directions (concurrent copies in the RPC server, or a server per
+     GPU), if processes without workers are to get the link both ways.
+
 **The local queue's state in one word.** *Fixed 2026-11-15.* `OpenQueue`
 stored `closed` and then `incarnation`, and `EnterQueue` loaded
 `incarnation` and then `closed`. A sender to the slot's previous process
