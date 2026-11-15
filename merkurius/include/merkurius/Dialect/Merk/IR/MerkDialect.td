@@ -20,11 +20,11 @@ include "mlir/IR/OpBase.td"
 
 def Merk_Dialect : Dialect {
   let name = "merk";
-  let summary = "Mercury procedures, terms and control";
+  let summary = "Merkurius procedures, terms and control";
   let description = [{
-    The merk dialect carries Mercury's semantics: procedures with their
+    The merk dialect carries Merkurius's semantics: procedures with their
     determinism, calls, terms by constructor, switches and the other
-    goals. Its types are Mercury types, not layouts; layout is chosen when
+    goals. Its types are Merkurius types, not layouts; layout is chosen when
     it is lowered. Arithmetic on primitive values is the arith dialect's.
   }];
   let cppNamespace = "::merkurius::merk";
@@ -33,20 +33,20 @@ def Merk_Dialect : Dialect {
   let useDefaultTypePrinterParser = 1;
 }
 
-// A Mercury string: in C, MR_String, a pointer to UTF-8 ending in a NUL
+// A Merkurius string: in C, MR_String, a pointer to UTF-8 ending in a NUL
 // (reference manual, "C data passing conventions").
 def Merk_StringType : TypeDef<Merk_Dialect, "String"> {
   let mnemonic = "string";
-  let summary = "a Mercury string";
+  let summary = "a Merkurius string";
 }
 
-// A Mercury array, array(T): a pointer to its size, a word, followed by its
+// A Merkurius array, array(T): a pointer to its size, a word, followed by its
 // elements, a word each, so that one layout serves every element type and
 // the elements are the contiguous buffer an OpenMP map maps (design
 // document, "Type representation").
 def Merk_ArrayType : TypeDef<Merk_Dialect, "Array"> {
   let mnemonic = "array";
-  let summary = "a Mercury array";
+  let summary = "a Merkurius array";
   let parameters = (ins "mlir::Type":$element);
   let assemblyFormat = "`<` $element `>`";
 }
@@ -160,7 +160,7 @@ def Merk_FunctorAttr : AttrDef<Merk_Dialect, "Functor"> {
 }
 
 // A procedure's determinism (reference manual, "Determinism categories").
-def Merk_Determinism : I32EnumAttr<"Determinism", "a Mercury determinism", [
+def Merk_Determinism : I32EnumAttr<"Determinism", "a Merkurius determinism", [
   I32EnumAttrCase<"Det", 0, "det">,
   I32EnumAttrCase<"Semidet", 1, "semidet">,
   I32EnumAttrCase<"Multi", 2, "multi">,
@@ -177,7 +177,7 @@ def Merk_Determinism : I32EnumAttr<"Determinism", "a Mercury determinism", [
 def Merk_DeterminismAttr : EnumAttr<Merk_Dialect, Merk_Determinism,
     "determinism">;
 
-// The target's numbers for the address spaces that Mercury code uses: the
+// The target's numbers for the address spaces that Merkurius code uses: the
 // generic one, which every pointer converts to, and those of global,
 // workgroup-shared, constant and per-thread private memory. On a CPU target
 // they are all 0. With the triple and the data layout, it is what the
@@ -185,7 +185,7 @@ def Merk_DeterminismAttr : EnumAttr<Merk_Dialect, Merk_Determinism,
 // back from its text needs nothing else.
 def Merk_AddressSpacesAttr : AttrDef<Merk_Dialect, "AddressSpaces"> {
   let mnemonic = "address_spaces";
-  let summary = "the target's address spaces for Mercury code";
+  let summary = "the target's address spaces for Merkurius code";
   let parameters = (ins "unsigned":$generic, "unsigned":$global,
       "unsigned":$shared, "unsigned":$constant, "unsigned":$private_);
   let assemblyFormat = [{

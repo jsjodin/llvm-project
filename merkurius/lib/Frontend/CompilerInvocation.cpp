@@ -119,8 +119,8 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
   }
   if (const llvm::opt::Arg *arg = args.getLastArg(OPT_x)) {
     llvm::StringRef value{arg->getValue()};
-    if (value == "mercury") {
-      opts.inputLanguage = InputLanguage::Mercury;
+    if (value == "merkurius") {
+      opts.inputLanguage = InputLanguage::Merkurius;
     } else if (value == "mlir") {
       opts.inputLanguage = InputLanguage::MLIR;
     } else if (value == "ir") {

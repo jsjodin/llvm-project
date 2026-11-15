@@ -26,13 +26,13 @@ export LD_LIBRARY_PATH="$(IFS=:; echo "${libs[*]}")${LD_LIBRARY_PATH:+:$LD_LIBRA
 export OMP_TARGET_OFFLOAD=MANDATORY
 
 "$build/bin/merkc" -O2 -fopenmp -fdo-loops --offload-arch="$arch" "${flags[@]}" \
-  "$here/front.m" -o "$out/mercury"
+  "$here/front.m" -o "$out/merkurius"
 "$build/bin/clang" -O2 -fopenmp --offload-arch="$arch" "${flags[@]}" \
   "$here/front.c" -o "$out/c"
 
 : > "$out/results"
 for ((r = 1; r <= rounds; r++)); do
-  for prog in mercury c; do
+  for prog in merkurius c; do
     "$out/$prog" > "$out/$prog.$r"
     awk -v prog="$prog" -v r="$r" '
       /^Burnt cells:/ { burnt = $3 }
@@ -66,6 +66,6 @@ awk '
   END {
     if (bad) { print "the programs gave different cells"; exit 1 }
     printf "%-10s %12s %16s\n", "Program", "Gcells/sec", "Average (sec)"
-    printf "%-10s %12.3f %16.6f\n", "Mercury", median(rate, "mercury"), median(avg, "mercury")
+    printf "%-10s %12.3f %16.6f\n", "Merkurius", median(rate, "merkurius"), median(avg, "merkurius")
     printf "%-10s %12.3f %16.6f\n", "C", median(rate, "c"), median(avg, "c")
   }' "$out/results"

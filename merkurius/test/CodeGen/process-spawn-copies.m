@@ -15,7 +15,7 @@
 :- func address(list(int)) = int.
 :- pragma foreign_proc("C",
     address(L::in) = (A::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
     "A = (MR_Integer) L;").
 
 :- func make(int) = list(int).

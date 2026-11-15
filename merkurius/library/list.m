@@ -1,6 +1,6 @@
 % The standard library module list, with the declarations of the library
 % reference manual (22.01), less those that need modules not stubbed yet
-% and the less common ones (README.md), all implemented in Mercury.
+% and the less common ones (README.md), all implemented in Merkurius.
 
 :- module list.
 :- interface.

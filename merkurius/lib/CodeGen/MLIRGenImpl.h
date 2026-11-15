@@ -89,7 +89,7 @@ bool HasShape(llvm::ArrayRef<mlir::Value> in, llvm::ArrayRef<BodyVar> out,
 // below polymorphism analysis's kExistentialVar on.
 inline constexpr unsigned kCellExistential{1u << 29};
 
-// A Mercury type as code generation represents it: an MLIR type, or none
+// A Merkurius type as code generation represents it: an MLIR type, or none
 // for a type with no values to pass, such as io.state.
 struct Represented {
   mlir::Type type;

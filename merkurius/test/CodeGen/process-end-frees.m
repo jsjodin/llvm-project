@@ -18,7 +18,7 @@
 :- pred peak_megabytes(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     peak_megabytes(M::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     struct rusage usage;
     getrusage(RUSAGE_SELF, &usage);

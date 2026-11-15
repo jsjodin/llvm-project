@@ -67,14 +67,14 @@ static void merk_domain_error(const char *what)
 
 :- pragma foreign_proc("C",
     pi = (P::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     P = 3.14159265358979323846;
 ").
 
 :- pragma foreign_proc("C",
     e = (E::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     E = 2.7182818284590452354;
 ").
@@ -82,35 +82,35 @@ static void merk_domain_error(const char *what)
 % round(X) is floor(X + 0.5): a fraction of 0.5 rounds up.
 :- pragma foreign_proc("C",
     ceiling(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = ceil(X);
 ").
 
 :- pragma foreign_proc("C",
     floor(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = floor(X);
 ").
 
 :- pragma foreign_proc("C",
     round(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = floor(X + 0.5);
 ").
 
 :- pragma foreign_proc("C",
     truncate(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = trunc(X);
 ").
 
 :- pragma foreign_proc("C",
     sqrt(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     if (X < 0.0) {
         merk_domain_error(\"math.sqrt\");
@@ -120,14 +120,14 @@ static void merk_domain_error(const char *what)
 
 :- pragma foreign_proc("C",
     unchecked_sqrt(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = sqrt(X);
 ").
 
 :- pragma foreign_proc("C",
     pow(X::in, P::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     if (X < 0.0 || (X == 0.0 && P <= 0.0)) {
         merk_domain_error(\"math.pow\");
@@ -137,14 +137,14 @@ static void merk_domain_error(const char *what)
 
 :- pragma foreign_proc("C",
     unchecked_pow(X::in, P::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = pow(X, P);
 ").
 
 :- pragma foreign_proc("C",
     ln(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     if (X <= 0.0) {
         merk_domain_error(\"math.ln\");
@@ -154,14 +154,14 @@ static void merk_domain_error(const char *what)
 
 :- pragma foreign_proc("C",
     unchecked_ln(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = log(X);
 ").
 
 :- pragma foreign_proc("C",
     log10(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     if (X <= 0.0) {
         merk_domain_error(\"math.log10\");
@@ -171,14 +171,14 @@ static void merk_domain_error(const char *what)
 
 :- pragma foreign_proc("C",
     unchecked_log10(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = log10(X);
 ").
 
 :- pragma foreign_proc("C",
     log2(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     if (X <= 0.0) {
         merk_domain_error(\"math.log2\");
@@ -188,14 +188,14 @@ static void merk_domain_error(const char *what)
 
 :- pragma foreign_proc("C",
     unchecked_log2(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = log2(X);
 ").
 
 :- pragma foreign_proc("C",
     log(B::in, X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     if (X <= 0.0 || B <= 0.0 || B == 1.0) {
         merk_domain_error(\"math.log\");
@@ -205,14 +205,14 @@ static void merk_domain_error(const char *what)
 
 :- pragma foreign_proc("C",
     unchecked_log(B::in, X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = log(X) / log(B);
 ").
 
 :- pragma foreign_proc("C",
     asin(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     if (X < -1.0 || X > 1.0) {
         merk_domain_error(\"math.asin\");
@@ -222,14 +222,14 @@ static void merk_domain_error(const char *what)
 
 :- pragma foreign_proc("C",
     unchecked_asin(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = asin(X);
 ").
 
 :- pragma foreign_proc("C",
     acos(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     if (X < -1.0 || X > 1.0) {
         merk_domain_error(\"math.acos\");
@@ -239,84 +239,84 @@ static void merk_domain_error(const char *what)
 
 :- pragma foreign_proc("C",
     unchecked_acos(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = acos(X);
 ").
 
 :- pragma foreign_proc("C",
     exp(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = exp(X);
 ").
 
 :- pragma foreign_proc("C",
     sin(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = sin(X);
 ").
 
 :- pragma foreign_proc("C",
     cos(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = cos(X);
 ").
 
 :- pragma foreign_proc("C",
     tan(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = tan(X);
 ").
 
 :- pragma foreign_proc("C",
     atan(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = atan(X);
 ").
 
 :- pragma foreign_proc("C",
     sinh(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = sinh(X);
 ").
 
 :- pragma foreign_proc("C",
     cosh(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = cosh(X);
 ").
 
 :- pragma foreign_proc("C",
     tanh(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Y = tanh(X);
 ").
 
 :- pragma foreign_proc("C",
     atan2(Y::in, X::in) = (A::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     A = atan2(Y, X);
 ").
 
 :- pragma foreign_proc("C",
     have_fma,
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     SUCCESS_INDICATOR = MR_TRUE;
 ").
 
 :- pragma foreign_proc("C",
     fma(X::in, Y::in, Z::in) = (F::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     F = fma(X, Y, Z);
 ").

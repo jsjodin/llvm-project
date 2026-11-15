@@ -22,6 +22,6 @@ main(!IO) :-
     io.write_string("in a team\n", !IO),
     io.write_int(N, !IO),
     io.nl(!IO).
-% CHECK:Uncaught Mercury exception:
+% CHECK:Uncaught Merkurius exception:
 % CHECK-NEXT:Software Error: target teams: the number of teams, 0, is not from 1 to 2147483647
 % CHECK-NOT:{{.}}

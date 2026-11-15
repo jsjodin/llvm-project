@@ -18,7 +18,7 @@ RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offloa
 RUN: %libomp-env LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t0 host | FileCheck %s --check-prefix=A
 RUN: %libomp-env LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t2 host | FileCheck %s --check-prefix=A
 RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_WORLD=256 LIFE_TILE=16 LIFE_SOUP=64 LIFE_STEPS=50 %t.omp host | FileCheck %s --check-prefix=A
-A: Game of Life, Mercury, GPU process, sparse tiles
+A: Game of Life, Merkurius, GPU process, sparse tiles
 A-NEXT: World: 256 x 256 cells, tiles of 16 x 16, 256 in the pool
 A-NEXT: Soup: 64 x 64 cells at the centre
 A-NEXT: Steps: 50

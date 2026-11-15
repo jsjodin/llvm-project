@@ -25,7 +25,7 @@
 % RUN: merkc -O2 %s -o %t2 && %python %S/Inputs/two-nodes.py %t2 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 %
 % OUTPUT:pingpong:
-% OUTPUT-NEXT:client exited with 0: "Uncaught Mercury exception:\nSoftware Error: receive: the mailbox is closed or another node's\n"
+% OUTPUT-NEXT:client exited with 0: "Uncaught Merkurius exception:\nSoftware Error: receive: the mailbox is closed or another node's\n"
 % OUTPUT-NEXT:client: connected
 % OUTPUT-NEXT:client: the server is another node: yes
 % OUTPUT-NEXT:client: connect to nonsense: not an address of the form host:port: nonsense
@@ -121,7 +121,7 @@ extern MR_Integer merk_node_connection_count(void);
 :- pred connection_count(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     connection_count(Count::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Count = merk_node_connection_count();
 ").

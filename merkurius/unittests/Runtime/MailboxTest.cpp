@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 //
 // The runtime's mailboxes (runtime/mailbox.cpp) under threads, which a
-// Mercury program of one process cannot reach yet: a receive that blocks
+// Merkurius program of one process cannot reach yet: a receive that blocks
 // and is woken by a send or a close from another thread, timeouts, many
 // senders at once, a selective scan while messages arrive, and a receive
 // over several mailboxes, as a selector waits on them. The

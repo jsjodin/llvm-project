@@ -73,7 +73,7 @@ sd(X, 1.5, X, X, X, X) :- X > 0.
 br(X, Y) :- ( if X > 0 then mk(X, Y) else throw_it ).
 :- pragma foreign_decl("C", "#include <stdlib.h>").
 :- pred throw_it is erroneous.
-:- pragma foreign_proc("C", throw_it, [will_not_call_mercury, promise_pure], "abort();").
+:- pragma foreign_proc("C", throw_it, [will_not_call_merkurius, promise_pure], "abort();").
 % A superclass of what was given, a method's constraint at a given type.
 :- some [T] pred bigd(int::in, T::out) is det => big(T).
 bigd(X, X).

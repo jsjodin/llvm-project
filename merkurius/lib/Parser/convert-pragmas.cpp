@@ -33,9 +33,22 @@ std::string SnakeName(std::string_view camel) {
   return snake;
 }
 
-// The enumerator of E, which has N of them, whose snake case name is `name`.
+// The names of foreign code attributes as mmc writes them, and ours.
+constexpr std::pair<llvm::StringLiteral, llvm::StringLiteral> mmcNames[]{
+    {"may_call_mercury", "may_call_merkurius"},
+    {"will_not_call_mercury", "will_not_call_merkurius"},
+    {"can_pass_as_mercury_type", "can_pass_as_merkurius_type"},
+};
+
+// The enumerator of E, which has N of them, whose snake case name is `name`,
+// or whose name is written as mmc writes it.
 template <typename E, std::size_t N>
 std::optional<E> FromSnakeName(llvm::StringRef name) {
+  for (const auto &[mmc, ours] : mmcNames) {
+    if (name == mmc) {
+      name = ours;
+    }
+  }
   for (std::size_t j{0}; j < N; ++j) {
     E e{static_cast<E>(j)};
     if (SnakeName(EnumToString(e)) == name) {
@@ -246,8 +259,8 @@ struct AttributeGroup {
 };
 
 constexpr AttributeGroup exclusiveAttributes[]{
-    {ForeignProcAttribute::MayCallMercury,
-        ForeignProcAttribute::WillNotCallMercury},
+    {ForeignProcAttribute::MayCallMerkurius,
+        ForeignProcAttribute::WillNotCallMerkurius},
     {ForeignProcAttribute::PromisePure, ForeignProcAttribute::PromiseSemipure},
     {ForeignProcAttribute::ThreadSafe, ForeignProcAttribute::MaybeThreadSafe},
     {ForeignProcAttribute::Terminates,
@@ -693,7 +706,7 @@ std::optional<Item> PragmaRule::Convert(
         ConvertOptional(expect("a list of assertions",
                             listOf(EnumNameRule<ForeignTypeAssertion,
                                 ForeignTypeAssertion_enumSize>{
-                                "'can_pass_as_mercury_type', "
+                                "'can_pass_as_merkurius_type', "
                                 "'word_aligned_pointer' or 'stable'"})),
             args[3], assertions, state)};
     const TypeAttributes *attributes{nullptr};

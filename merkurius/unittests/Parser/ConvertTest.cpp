@@ -1162,13 +1162,13 @@ TEST(ConvertTest, Pragmas) {
   EXPECT_EQ(PragmaKind("foreign_import_module(\"C\", m)"),
       "ForeignImportModulePragma");
   EXPECT_EQ(Compact(":- pragma foreign_proc(\"C\", f(X::in) = (Y::out), "
-                    "[promise_pure, will_not_call_mercury], \"Y = X;\").\n"),
+                    "[promise_pure, will_not_call_merkurius], \"Y = X;\").\n"),
       "ForeignProcPragma\n| language: C\n| kind: Function\n| name: SymName f\n"
       "| arguments:\n| | ForeignProcArg\n| | | var: Variable X\n"
       "| | | mode: NamedMode\n| | | | name: SymName in\n"
       "| result: ForeignProcArg\n| | var: Variable Y\n"
       "| | mode: NamedMode\n| | | name: SymName out\n"
-      "| attributes:\n| | PromisePure\n| | WillNotCallMercury\n"
+      "| attributes:\n| | PromisePure\n| | WillNotCallMerkurius\n"
       "| code: ForeignCode\n| | includeFile: false\n| | text: Y = X;\n");
   EXPECT_EQ(Compact(":- pragma memo(f(in) = out, [allow_reset, "
                     "specified([value, output], hidden_arg_addr), "
@@ -1187,6 +1187,18 @@ TEST(ConvertTest, Pragmas) {
       "| parameters:\n| | T\n| descriptor: Object\n| assertions:\n"
       "| | Stable\n| attributes: TypeAttributes\n"
       "| | equality: SymName eq\n| | abstractNoncanonical: false\n");
+  // mmc's names of the attributes and the assertion are ours.
+  EXPECT_EQ(Compact(":- pragma foreign_type(\"C\", t, \"long\", "
+                    "[can_pass_as_mercury_type]).\n"),
+      "ForeignTypePragma\n| language: C\n| name: SymName t\n"
+      "| descriptor: long\n| assertions:\n| | CanPassAsMerkuriusType\n");
+  EXPECT_EQ(Compact(":- pragma foreign_proc(\"C\", p, [promise_pure, "
+                    "will_not_call_mercury, will_not_call_merkurius], "
+                    "\"\").\n"),
+      "ForeignProcPragma\n| language: C\n| kind: Predicate\n"
+      "| name: SymName p\n| attributes:\n| | PromisePure\n"
+      "| | WillNotCallMerkurius\n| | WillNotCallMerkurius\n"
+      "| code: ForeignCode\n| | includeFile: false\n| | text: \n");
   EXPECT_EQ(Compact(":- pragma foreign_export_enum(\"C\", t/0, "
                     "[prefix(\"T_\"), uppercase], [a - \"A\"]).\n"),
       "ForeignExportEnumPragma\n| language: C\n| type: NameAndArity t/0\n"
@@ -1241,9 +1253,13 @@ TEST(ConvertTest, PragmaErrors) {
         "'\"Fortran\"'"});
   EXPECT_EQ(messages("foreign_proc(\"C\", p, [foo], \"\")"),
       V{"expected a foreign_proc attribute, but found 'foo'"});
+  EXPECT_EQ(messages("foreign_proc(\"C\", p, [will_not_call_merkurius, "
+                     "may_call_merkurius], \"\")"),
+      V{"the attributes 'will_not_call_merkurius' and 'may_call_merkurius' "
+        "conflict"});
   EXPECT_EQ(messages("foreign_proc(\"C\", p, [will_not_call_mercury, "
-                     "may_call_mercury], \"\")"),
-      V{"the attributes 'will_not_call_mercury' and 'may_call_mercury' "
+                     "may_call_merkurius], \"\")"),
+      V{"the attributes 'will_not_call_merkurius' and 'may_call_merkurius' "
         "conflict"});
   EXPECT_EQ(messages("foreign_proc(\"C\", f(X::in) = Y, [], \"\")"),
       V{"expected 'Var::Mode', but found 'Y'"});
@@ -1284,7 +1300,7 @@ TEST(ConvertTest, Directives) {
                      "  %$omp&  nowait collapse(2)\n  q.\n"),
       V{});
   EXPECT_EQ(messages("p :-\n  %$omp parallel for\n  q.\n"),
-      V{"'parallel for' is C's form of the OpenMP directive; Mercury uses "
+      V{"'parallel for' is C's form of the OpenMP directive; Merkurius uses "
         "Fortran's, 'parallel do'"});
   EXPECT_EQ(messages("p :-\n  %$omp do lastprivate\n  q.\n"), V{});
   EXPECT_EQ(messages("p :-\n  %$omp do upper(1, 2)\n  q.\n"),

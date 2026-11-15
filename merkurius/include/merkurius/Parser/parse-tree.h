@@ -1365,7 +1365,7 @@ struct OmpDirective {
 };
 
 // Loops (design document, "Loops"), read with -fdo-loops: Schimpf's
-// logical loops ("Logical Loops", ICLP 2002), adapted to Mercury.
+// logical loops ("Logical Loops", ICLP 2002), adapted to Merkurius.
 ENUM_CLASS(LoopIteratorKind, For, Foreach, Count, Fromto)
 
 // for(I, Lo, Hi), for(I, Lo, Hi, Step), foreach(X, List), count(I, Lo, Hi)
@@ -1997,8 +1997,9 @@ struct ForeignProcArg {
 };
 
 // The attributes of a foreign_proc (reference manual, "Foreign code
-// attributes").
-ENUM_CLASS(ForeignProcAttribute, MayCallMercury, WillNotCallMercury,
+// attributes"). may_call_merkurius and will_not_call_merkurius may also be
+// written as mmc writes them, may_call_mercury and will_not_call_mercury.
+ENUM_CLASS(ForeignProcAttribute, MayCallMerkurius, WillNotCallMerkurius,
     PromisePure, PromiseSemipure, ThreadSafe, NotThreadSafe, MaybeThreadSafe,
     TabledForIo, Terminates, DoesNotTerminate, WillNotThrowException,
     MayModifyTrail, WillNotModifyTrail, MayCallMmTabled, WillNotCallMmTabled,
@@ -2028,7 +2029,9 @@ struct ForeignProcPragma {
   }
 };
 
-ENUM_CLASS(ForeignTypeAssertion, CanPassAsMercuryType, WordAlignedPointer,
+// can_pass_as_merkurius_type may also be written as mmc writes it,
+// can_pass_as_mercury_type.
+ENUM_CLASS(ForeignTypeAssertion, CanPassAsMerkuriusType, WordAlignedPointer,
     Stable)
 
 // :- pragma foreign_type("Lang", t(T), "Descriptor", [Assertions]) where

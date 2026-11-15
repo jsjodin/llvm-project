@@ -65,7 +65,7 @@ test(N, !IO) :-
 :- pred half(int::in, int::out) is semidet.
 :- pragma foreign_proc("C",
     half(X::in, Y::out),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     SUCCESS_INDICATOR = X % 2 == 0;
     Y = X / 2;
@@ -74,5 +74,5 @@ test(N, !IO) :-
 :- pred positive(int::in) is semidet.
 :- pragma foreign_proc("C",
     positive(X::in),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "SUCCESS_INDICATOR = X > 0 ? MR_TRUE : MR_FALSE;").

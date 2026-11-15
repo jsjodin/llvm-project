@@ -179,7 +179,7 @@ prints, active tiles too.
 give the same cells and that the sparse ones have the same tiles, and
 prints each one's median average step and bookkeeping. The first round
 writes both sparse programs' steps, with their active tiles, to
-`mercury.trace` and `c.trace`, for a chart.
+`merkurius.trace` and `c.trace`, for a chart.
 
 2026-11-12, gfx1030, on compute units 0-39, a soup of 256², 1000 steps, the
 median over 5 rounds of each program's average step:

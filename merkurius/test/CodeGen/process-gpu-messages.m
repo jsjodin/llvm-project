@@ -175,4 +175,4 @@ run(Place, !IO) :-
 % CHECK-NEXT:message(pinged(100))
 % CHECK-NEXT:message(summed(5050))
 % MANY:20300
-% MESSAGES-NEXT:Mercury runtime: 0 messages are neither read nor freed
+% MESSAGES-NEXT:Merkurius runtime: 0 messages are neither read nor freed

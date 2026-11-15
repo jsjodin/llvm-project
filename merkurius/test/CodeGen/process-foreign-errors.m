@@ -31,11 +31,11 @@ int omp_get_device_num(void);
 
 :- func thread(int) = int.
 :- pragma foreign_proc("C", thread(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
     "Y = X + omp_get_thread_num();").
 % CHECK: process-foreign-errors.m:[[#@LINE-3]]:4: error: cannot call process_foreign_errors.thread_f1_0 in a GPU process yet: its foreign code calls omp_get_thread_num, which is not on the device
 
 :- func device(int) = int.
 :- pragma foreign_proc("C", device(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
     "Y = X + omp_get_device_num();").

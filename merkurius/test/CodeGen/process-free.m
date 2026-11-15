@@ -33,7 +33,7 @@ void merk_device_free(void *);
 :- pred free_array(array(int)::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     free_array(A::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
 #ifdef __AMDGPU__
     merk_device_free((void *)A);
@@ -43,7 +43,7 @@ void merk_device_free(void *);
 :- pred free_string(string::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     free_string(S::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
 #ifdef __AMDGPU__
     merk_device_free(S);

@@ -76,17 +76,17 @@ run(N, E, !IO) :-
 % OUTPUT-0-NEXT:after
 % OUTPUT:before
 % OUTPUT-NOT:{{.}}
-% ERROR-1:Uncaught Mercury exception:
+% ERROR-1:Uncaught Merkurius exception:
 % ERROR-1-NEXT:Software Error: function `list.det_head'/1: Unexpected: empty list
-% ERROR-2:Uncaught Mercury exception:
+% ERROR-2:Uncaught Merkurius exception:
 % ERROR-2-NEXT:Software Error: function `list.det_tail'/1: Unexpected: empty list
-% ERROR-3:Uncaught Mercury exception:
+% ERROR-3:Uncaught Merkurius exception:
 % ERROR-3-NEXT:Software Error: predicate `list.det_index0'/3: Unexpected: index out of range
-% ERROR-4:Uncaught Mercury exception:
+% ERROR-4:Uncaught Merkurius exception:
 % ERROR-4-NEXT:Software Error: predicate `list.det_index0'/3: Unexpected: index out of range
-% ERROR-5:Uncaught Mercury exception:
+% ERROR-5:Uncaught Merkurius exception:
 % ERROR-5-NEXT:Software Error: predicate `list.det_last'/2: Unexpected: empty list
-% ERROR-6:Uncaught Mercury exception:
+% ERROR-6:Uncaught Merkurius exception:
 % ERROR-6-NEXT:Software Error: predicate `list.det_last'/2: Unexpected: empty list
-% ERROR-7:Uncaught Mercury exception:
+% ERROR-7:Uncaught Merkurius exception:
 % ERROR-7-NEXT:Software Error: list.m: predicate `list.take_upto'/3: Unexpected: index is negative

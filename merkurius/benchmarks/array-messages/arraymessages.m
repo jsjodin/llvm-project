@@ -299,7 +299,7 @@ measure_from(Where, Remote, Commands, To, From, Words, Rounds, !IO) :-
 :- pred now(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(Nanoseconds::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -311,7 +311,7 @@ measure_from(Where, Remote, Commands, To, From, Words, Rounds, !IO) :-
 :- pragma foreign_proc("C",
     report(Where::in, Direction::in, Words::in, Rounds::in, Right::in,
         Nanoseconds::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"%-10s %-5s %8ld words %6ld messages %6ld right %10.1f MB/s %12.2f us each\\n\",
         Where, Direction, (long) Words, (long) Rounds, (long) Right,

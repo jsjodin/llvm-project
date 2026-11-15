@@ -142,7 +142,7 @@ enum RootKind : std::int64_t {
   kRootBits,
 };
 
-// Gives Mercury code statepoints, after the optimizer (Statepoints.cpp).
+// Gives Merkurius code statepoints, after the optimizer (Statepoints.cpp).
 void RewriteForCollector(llvm::Module &, const TargetInfo &);
 // Removes what lowering tells RewriteForCollector of roots' types, the
 // arguments' attributes and the fields' table, from IR that is printed.

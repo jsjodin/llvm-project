@@ -37,7 +37,7 @@
 # inputs, and corpus-large, artifacts-large and fuzz-large.log for the
 # large ones. The large inputs have a corpus of their own, so that they do
 # not slow the loading of the small one; it starts as a copy of the small
-# one. Both are seeded with the Mercury files in the tests. Inputs that
+# one. Both are seeded with the Merkurius files in the tests. Inputs that
 # crash are written as crash-* in the artifacts directories; add them to
 # test/Parser/Inputs/fuzz once fixed. Those that take more than 10 seconds
 # are written as slow-unit-* and listed at the end, but do not fail the
@@ -123,7 +123,7 @@ fuzz() {
   shift 4
   LOG[$name]=$log
   setsid ./merkurius-term-fuzzer "$corpus" -artifact_prefix="$artifacts/" \
-    -fork="$JOBS" -dict="$MERKURIUS_DIR/utils/fuzz/mercury.dict" "$@" \
+    -fork="$JOBS" -dict="$MERKURIUS_DIR/utils/fuzz/merkurius.dict" "$@" \
     > "$log" 2>&1 &
   pid=$!
   # A corpus is loaded when the first job reports, as "#N: ... job: 1".

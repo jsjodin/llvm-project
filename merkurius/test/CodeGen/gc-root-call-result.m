@@ -26,7 +26,7 @@
 :- func bits(array(T)) = int.
 :- pragma foreign_proc("C",
     bits(A::in) = (B::out),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     B = (MR_Integer) (((unsigned long) A) & 7);
 ").

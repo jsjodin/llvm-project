@@ -24,7 +24,7 @@
 namespace merkurius::runtime {
 
 struct ProcessImage {
-  const char *module; // the module's name, as Mercury writes it
+  const char *module; // the module's name, as Merkurius writes it
   const char *gpu; // the GPU it is for, as --offload-arch names it: gfx1030
   const void *image;
   std::uint64_t bytes;

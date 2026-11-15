@@ -25,5 +25,5 @@ RUN: not %gpu-env MERK_GPU_PROCESS_UNITS=1 %t2 full 2>&1 | FileCheck %S/process-
 The waves that a process has run are free again, and what it had is freed.
 RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 %t2 phases 2>&1 | FileCheck %s --check-prefix=FREED --match-full-lines
 FREED:11 normal 22 noproc
-FREED:Mercury runtime: 0 messages are neither read nor freed
-FREED:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+FREED:Merkurius runtime: 0 messages are neither read nor freed
+FREED:Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated

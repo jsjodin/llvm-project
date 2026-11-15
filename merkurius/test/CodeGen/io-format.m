@@ -29,5 +29,5 @@ main(!IO) :-
 % CHECK-NEXT:left    |   right|
 % CHECK-NEXT:no conversions
 % CHECK-NEXT:one two
-% CHECK-NEXT:Uncaught Mercury exception:
+% CHECK-NEXT:Uncaught Merkurius exception:
 % CHECK-NEXT:Software Error: string.format: The second conversion specifier, which uses specifier character `d', is missing its input.

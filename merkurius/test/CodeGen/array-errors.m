@@ -67,58 +67,58 @@
 % OUTPUT:before
 % OUTPUT-NOT:{{.}}
 
-% ERROR-1:Uncaught Mercury exception:
+% ERROR-1:Uncaught Merkurius exception:
 % ERROR-1-NEXT:index_out_of_bounds("array.lookup: index 4 not in range [0, 3]")
 % ERROR-1-NOT:{{.}}
-% ERROR-2:Uncaught Mercury exception:
+% ERROR-2:Uncaught Merkurius exception:
 % ERROR-2-NEXT:index_out_of_bounds("array.lookup: index -1 not in range [0, 3]")
 % ERROR-2-NOT:{{.}}
-% ERROR-3:Uncaught Mercury exception:
+% ERROR-3:Uncaught Merkurius exception:
 % ERROR-3-NEXT:index_out_of_bounds("array.set: index 4 not in range [0, 3]")
 % ERROR-3-NOT:{{.}}
-% ERROR-4:Uncaught Mercury exception:
+% ERROR-4:Uncaught Merkurius exception:
 % ERROR-4-NEXT:index_out_of_bounds("array.set: index 9 not in range [0, 3]")
 % ERROR-4-NOT:{{.}}
-% ERROR-5:Uncaught Mercury exception:
+% ERROR-5:Uncaught Merkurius exception:
 % ERROR-5-NEXT:index_out_of_bounds("first argument of array.swap: index 5 not in range [0, 3]")
 % ERROR-5-NOT:{{.}}
-% ERROR-6:Uncaught Mercury exception:
+% ERROR-6:Uncaught Merkurius exception:
 % ERROR-6-NEXT:index_out_of_bounds("second argument of array.swap: index 6 not in range [0, 3]")
 % ERROR-6-NOT:{{.}}
-% ERROR-7:Uncaught Mercury exception:
+% ERROR-7:Uncaught Merkurius exception:
 % ERROR-7-NEXT:Software Error: predicate `array.fill_range'/5: Unexpected: empty range
 % ERROR-7-NOT:{{.}}
-% ERROR-8:Uncaught Mercury exception:
+% ERROR-8:Uncaught Merkurius exception:
 % ERROR-8-NEXT:index_out_of_bounds("second argument of fill_range: index -1 not in range [0, 3]")
 % ERROR-8-NOT:{{.}}
-% ERROR-9:Uncaught Mercury exception:
+% ERROR-9:Uncaught Merkurius exception:
 % ERROR-9-NEXT:index_out_of_bounds("third argument of fill_range: index 9 not in range [0, 3]")
 % ERROR-9-NOT:{{.}}
-% ERROR-10:Uncaught Mercury exception:
+% ERROR-10:Uncaught Merkurius exception:
 % ERROR-10-NEXT:Software Error: predicate `array.init'/3: Unexpected: negative size
 % ERROR-10-NOT:{{.}}
-% ERROR-11:Uncaught Mercury exception:
+% ERROR-11:Uncaught Merkurius exception:
 % ERROR-11-NEXT:Software Error: predicate `array.resize'/4: Unexpected: cannot resize to a negative size
 % ERROR-11-NOT:{{.}}
-% ERROR-12:Uncaught Mercury exception:
+% ERROR-12:Uncaught Merkurius exception:
 % ERROR-12-NEXT:Software Error: predicate `array.shrink'/3: Unexpected: cannot shrink to a larger size
 % ERROR-12-NOT:{{.}}
-% ERROR-13:Uncaught Mercury exception:
+% ERROR-13:Uncaught Merkurius exception:
 % ERROR-13-NEXT:Software Error: predicate `array.shrink'/3: Unexpected: cannot shrink to a negative size
 % ERROR-13-NOT:{{.}}
-% ERROR-14:Uncaught Mercury exception:
+% ERROR-14:Uncaught Merkurius exception:
 % ERROR-14-NEXT:index_out_of_bounds("array.set: index 14 not in range [0, 3]")
 % ERROR-14-NOT:{{.}}
-% ERROR-15:Uncaught Mercury exception:
+% ERROR-15:Uncaught Merkurius exception:
 % ERROR-15-NEXT:index_out_of_bounds("array.lookup: index 0 not in range [0, -1]")
 % ERROR-15-NOT:{{.}}
-% ERROR-16:Uncaught Mercury exception:
+% ERROR-16:Uncaught Merkurius exception:
 % ERROR-16-NEXT:Software Error: function `array.generate'/2: Unexpected: negative size
 % ERROR-16-NOT:{{.}}
-% ERROR-17:Uncaught Mercury exception:
+% ERROR-17:Uncaught Merkurius exception:
 % ERROR-17-NEXT:Software Error: predicate `array.generate_foldl'/5: Unexpected: negative size
 % ERROR-17-NOT:{{.}}
-% ERROR-18:Uncaught Mercury exception:
+% ERROR-18:Uncaught Merkurius exception:
 % ERROR-18-NEXT:Software Error: predicate `array.generate_foldl2'/7: Unexpected: negative size
 % ERROR-18-NOT:{{.}}
 

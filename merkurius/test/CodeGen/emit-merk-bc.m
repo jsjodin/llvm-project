@@ -39,7 +39,7 @@ twice(L) = L ++ L.
 add_all(N, L) = list.map((func(X) = X + N), L).
 
 :- pragma foreign_proc("C", plus_one(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe], "Y = X + 1;").
+    [will_not_call_merkurius, promise_pure, thread_safe], "Y = X + 1;").
 
 % LLVM-DAG: define {{.*}}@emit_merk_bc.twice_f1_0(
 % LLVM-DAG: define {{.*}}@emit_merk_bc.add_all_f2_0(

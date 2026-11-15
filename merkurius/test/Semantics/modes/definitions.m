@@ -10,9 +10,9 @@
 :- interface.
 
 :- inst ground == bound(a).
-% CHECK: [[@LINE-1]]:9: error: the inst name ground is reserved for the Mercury implementation
+% CHECK: [[@LINE-1]]:9: error: the inst name ground is reserved for the implementation
 :- mode (>>) == in.
-% CHECK: [[@LINE-1]]:10: error: the mode name >> is reserved for the Mercury implementation
+% CHECK: [[@LINE-1]]:10: error: the mode name >> is reserved for the implementation
 :- inst bad(I) == bound(f(J)).
 % CHECK: [[@LINE-1]]:9: error: inst parameter J is not a parameter of the inst bad/1
 :- mode badm(I) == J >> I.

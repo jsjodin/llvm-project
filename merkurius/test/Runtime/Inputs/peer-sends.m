@@ -177,6 +177,6 @@ main(!IO) :-
 :- pragma foreign_decl("C", "#include <time.h>").
 :- pred sleep_ms(int::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C", sleep_ms(Ms::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "struct timespec ts = {Ms / 1000, (Ms % 1000) * 1000000L};
 nanosleep(&ts, 0);").

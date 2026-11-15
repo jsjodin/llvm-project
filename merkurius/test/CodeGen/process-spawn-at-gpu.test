@@ -17,7 +17,7 @@ The runtime that stops the program while a GPU process runs leaves the
 offload library to the process's end: its destructors would free the host
 memory that the GPU's kernel reads, and the GPU would fault.
 RUN: not %gpu-env %t2 closures 2>&1 | FileCheck %s --check-prefix=CLOSURES
-CLOSURES: Mercury runtime: called unify/2 for `pred' type
+CLOSURES: Merkurius runtime: called unify/2 for `pred' type
 CLOSURES-NOT: memory access fault
 
 RUN: merkc -O2 -fprocess-declarations --offload-arch=gfx906 %libomp-flags %S/process-spawn-at.m -o %t.other
@@ -27,8 +27,8 @@ OTHER: Software Error: process.spawn: the module process_spawn_at has no image o
 The messages that the GPU process took from its ring are freed, and so are
 its arena and its mailbox's ring when it ends.
 RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 %t2 gpu 2>&1 | FileCheck %s --check-prefix=MESSAGES --match-full-lines
-MESSAGES:Mercury runtime: 0 messages are neither read nor freed
-MESSAGES-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+MESSAGES:Merkurius runtime: 0 messages are neither read nor freed
+MESSAGES-NEXT:Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated
 
 The GPU's processes run on the first pair of compute units that its queues
 may use, on a queue limited to them (runtime/compute-units.h), which
@@ -38,4 +38,4 @@ processors, which enables units in pairs, the offload plugin's error when it
 starts.
 RUN: %gpu-env LIBOMPTARGET_AMDGPU_CU_MASK=4-7 %t2 gpu | FileCheck %S/process-spawn-at.m --match-full-lines --strict-whitespace
 RUN: not %gpu-env LIBOMPTARGET_AMDGPU_CU_MASK=0 %t2 gpu 2>&1 | FileCheck %s --check-prefix=NOPAIR
-NOPAIR: {{Software Error: process.spawn: GPU 0 has no pair of compute units for processes, units 2N and 2N\+1|Mercury runtime: could not list liboffload's devices: .* enables compute units in pairs}}
+NOPAIR: {{Software Error: process.spawn: GPU 0 has no pair of compute units for processes, units 2N and 2N\+1|Merkurius runtime: could not list liboffload's devices: .* enables compute units in pairs}}

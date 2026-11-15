@@ -9,7 +9,7 @@
 #ifndef MERKURIUS_PARSER_TOKEN_H_
 #define MERKURIUS_PARSER_TOKEN_H_
 
-// Tokens of a Mercury source file. Each token records the trivia before it
+// Tokens of a Merkurius source file. Each token records the trivia before it
 // (whitespace, comments and line number directives) and its spelling, both
 // as ranges of the file's text. The trivia and spelling of consecutive
 // tokens are adjacent, and the eof token holds whatever follows the last

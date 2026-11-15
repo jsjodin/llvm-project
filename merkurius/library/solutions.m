@@ -4,7 +4,7 @@
 % README.md. unsorted_aggregate/4, unsorted_aggregate2/6 and do_while/4
 % have no clauses: code generation makes each of their procedures from
 % merk.aggregate (design document, Lowering, "Collecting solutions"). The
-% others are written in Mercury on them.
+% others are written in Merkurius on them.
 
 :- module solutions.
 :- interface.

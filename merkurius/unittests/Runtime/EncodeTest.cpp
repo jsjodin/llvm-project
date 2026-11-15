@@ -12,7 +12,7 @@
 // bytes that must be rejected or decode to what encodes to them again, and
 // fingerprints computed independently from the description that encode.cpp
 // gives. test/CodeGen/encode-checks.m tests the format on the descriptors of
-// a Mercury program.
+// a Merkurius program.
 //
 //===----------------------------------------------------------------------===//
 

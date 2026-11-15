@@ -14,4 +14,4 @@ CHECK: 90 rows, 0 wrong
 RUN: merkc -O2 -fprocess-declarations -fdo-loops -fopenmp --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/gpu-pairs/gpupairs.m -o %t.omp
 RUN: %gpu-env MERK_GPU_PEER=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 300 %t.omp 1 workers 8 2> %t.err | awk '{ n++; if ($5 != $7) w++ } END { print n " rows, " w + 0 " wrong" }' | FileCheck %s --match-full-lines
 RUN: FileCheck %s --check-prefix=DIRECT < %t.err
-DIRECT: Mercury runtime: {{[1-9][0-9]*}} messages went directly between GPUs, and 0 of their copies were not given back
+DIRECT: Merkurius runtime: {{[1-9][0-9]*}} messages went directly between GPUs, and 0 of their copies were not given back

@@ -1,4 +1,4 @@
-Game of Life of benchmarks/life, the demo's reference in Mercury, on small
+Game of Life of benchmarks/life, the demo's reference in Merkurius, on small
 grids, so that it keeps building and giving the right cells: sequentially,
 and on the host's threads, where OpenMP runs its target regions when there
 is no device, each at -O0 and -O2, the whole grid alive at the start or a
@@ -22,7 +22,7 @@ RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_SIZE=300 LIFE_STEPS=25 %t.host2 | FileCh
 RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_SIZE=300 LIFE_STEPS=25 LIFE_SOUP=100 %t.host2 | FileCheck %s --check-prefix=SOUP100
 REQUIRES: libomp
 
-SMALL: Game of Life, Mercury
+SMALL: Game of Life, Merkurius
 SMALL-NEXT: Grid: 64 x 64 cells, 8 bytes a cell
 SMALL-NEXT: Steps: 10
 SMALL-NEXT: Population: 847

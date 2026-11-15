@@ -8,7 +8,7 @@
 //
 // A fuzz target for the lexer, the term reader, the converter, the
 // unparser and the semantic passes. For any input, in each configuration
-// (plain Mercury, with OpenMP directives, and with OpenMP directives,
+// (the plain language, with OpenMP directives, and with OpenMP directives,
 // -fdo-loops and -freceive-goal), it checks that none of them crashes; that the tokens, and
 // the parse tree, unparse to
 // the input byte for byte; that the exact unparser finds every token
@@ -57,7 +57,7 @@ namespace {
 // frames larger and the fuzzer runs on the main thread.
 constexpr unsigned maxDepth{1000};
 
-// What the lexer and the reader accept beyond Mercury.
+// What the lexer and the reader accept beyond the plain language.
 struct Config {
   bool openMP;
   bool doLoops;

@@ -26,7 +26,7 @@ extern int omp_get_num_threads(void) __attribute__((weak));
 :- func team_size(int) = int.
 :- pragma foreign_proc("C",
     team_size(I::in) = (T::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     (void) I;
     T = omp_get_num_threads ? omp_get_num_threads() : 1;
@@ -58,7 +58,7 @@ sender(Reply, _, !IO) :-
 :- pragma foreign_decl("C", "#include <time.h>").
 :- pragma foreign_proc("C",
     now(T::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     struct timespec s;
     clock_gettime(CLOCK_MONOTONIC, &s);

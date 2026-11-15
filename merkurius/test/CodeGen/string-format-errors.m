@@ -111,33 +111,33 @@ run(N, !IO) :-
 % OUTPUT-0-NEXT:after
 % OUTPUT:before
 % OUTPUT-NOT:{{.}}
-% ERROR-1:Uncaught Mercury exception:
+% ERROR-1:Uncaught Merkurius exception:
 % ERROR-1-NEXT:Software Error: string.format: The first conversion specifier uses the unknown specifier character `h'.
-% ERROR-2:Uncaught Mercury exception:
+% ERROR-2:Uncaught Merkurius exception:
 % ERROR-2-NEXT:Software Error: string.format: The second conversion specifier, which uses specifier character `d', is missing its input.
-% ERROR-3:Uncaught Mercury exception:
+% ERROR-3:Uncaught Merkurius exception:
 % ERROR-3-NEXT:Software Error: string.format: There is no first conversion specifier, but there are 2 inputs.
-% ERROR-4:Uncaught Mercury exception:
+% ERROR-4:Uncaught Merkurius exception:
 % ERROR-4-NEXT:Software Error: string.format: There is no second conversion specifier, but there is an extra input.
-% ERROR-5:Uncaught Mercury exception:
+% ERROR-5:Uncaught Merkurius exception:
 % ERROR-5-NEXT:Software Error: string.format: There is no third conversion specifier, but there are 2 extra inputs.
-% ERROR-6:Uncaught Mercury exception:
+% ERROR-6:Uncaught Merkurius exception:
 % ERROR-6-NEXT:Software Error: string.format: The first conversion specifier is missing, along with its input.
-% ERROR-7:Uncaught Mercury exception:
+% ERROR-7:Uncaught Merkurius exception:
 % ERROR-7-NEXT:Software Error: string.format: The first conversion specifier is missing.
-% ERROR-8:Uncaught Mercury exception:
+% ERROR-8:Uncaught Merkurius exception:
 % ERROR-8-NEXT:Software Error: string.format: The first conversion specifier is missing, and there are 1 extra inputs.
-% ERROR-9:Uncaught Mercury exception:
+% ERROR-9:Uncaught Merkurius exception:
 % ERROR-9-NEXT:Software Error: string.format: The first conversion specifier uses the specifier character `i', but the corresponding input is an 8-bit unsigned integer. The specifiers applicable to uint8s are %o, %x, %X, %u, and %p.
-% ERROR-10:Uncaught Mercury exception:
+% ERROR-10:Uncaught Merkurius exception:
 % ERROR-10-NEXT:Software Error: string.format: The first conversion specifier uses the specifier character `d', but the corresponding input is a float. The specifiers applicable to floats are %f, %e, %E, %g and %G.
-% ERROR-11:Uncaught Mercury exception:
+% ERROR-11:Uncaught Merkurius exception:
 % ERROR-11-NEXT:Software Error: string.format: The first conversion specifier uses the specifier character `c', but the corresponding input is a string. The only specifier applicable to strings is %s.
-% ERROR-12:Uncaught Mercury exception:
+% ERROR-12:Uncaught Merkurius exception:
 % ERROR-12-NEXT:Software Error: string.format: The first conversion specifier uses the specifier character `s', but the corresponding input is a character. The only specifier applicable to characters is %c.
-% ERROR-13:Uncaught Mercury exception:
+% ERROR-13:Uncaught Merkurius exception:
 % ERROR-13-NEXT:Software Error: string.format: The first conversion specifier says the width is a runtime input, but the next input is a string, not an integer.
-% ERROR-14:Uncaught Mercury exception:
+% ERROR-14:Uncaught Merkurius exception:
 % ERROR-14-NEXT:Software Error: string.format: The first conversion specifier says the precision is a runtime input, but there is no next input.
-% ERROR-15:Uncaught Mercury exception:
+% ERROR-15:Uncaught Merkurius exception:
 % ERROR-15-NEXT:Software Error: string.format: The 11th conversion specifier uses the specifier character `s', but the corresponding input is an integer. The specifiers applicable to ints are %d, %i, %o, %x, %X, %u, and %p.

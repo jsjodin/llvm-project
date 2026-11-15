@@ -37,7 +37,7 @@ if [[ -n "$mask" ]]; then
 fi
 
 "$build/bin/merkc" -O2 -fopenmp -fdo-loops -fprocess-declarations \
-  --offload-arch="$arch" "${flags[@]}" "$here/pipeline.m" -o "$out/mercury"
+  --offload-arch="$arch" "${flags[@]}" "$here/pipeline.m" -o "$out/merkurius"
 "$build/bin/clang" -x hip -O2 -ffp-contract=off --offload-arch="$arch" \
   --rocm-path="$rocm" "$here/pipeline.hip" -L"$rocm/lib" -lamdhip64 \
   -Wl,-rpath,"$rocm/lib" -o "$out/hip"
@@ -48,7 +48,7 @@ for ((r = 1; r <= rounds; r++)); do
     for work in ${PIPE_WORKS:-16 256 4096}; do
       for feedback in ${PIPE_FEEDBACKS:-0 1}; do
         for mode in pipeline single hip; do
-          prog="$out/mercury"
+          prog="$out/merkurius"
           [[ $mode == hip ]] && prog="$out/hip"
           PIPE_WORDS=$words PIPE_WORK=$work PIPE_FEEDBACK=$feedback \
             PIPE_MODE=$mode "$prog" > "$out/last"

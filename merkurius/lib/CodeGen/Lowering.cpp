@@ -4629,7 +4629,7 @@ unsigned FindGroup(llvm::SmallVectorImpl<unsigned> &parent, unsigned n) {
 }
 
 // On a target without the tail calling convention, as an AMD GPU, LLVM takes
-// a musttail call only between functions of one type, and Mercury relies on
+// a musttail call only between functions of one type, and Merkurius relies on
 // tail calls between procedures (design document, "Calling convention"), as
 // a process's states that call each other last. So the functions that calls
 // marked by CallCode join, directly or through others, each a group, get one

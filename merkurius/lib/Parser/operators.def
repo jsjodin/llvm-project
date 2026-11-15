@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// The builtin operators of the Mercury 22.01 reference manual, section 2.6,
+// The builtin operators of the 22.01 reference manual, section 2.6,
 // in its order, with the current manual's priorities, where a higher priority
 // binds more tightly. Each priority is 1500 minus the 22.01 manual's; the
 // current manual uses the same numbers for all of these operators. Its two

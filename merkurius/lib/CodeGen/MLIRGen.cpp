@@ -102,7 +102,7 @@ std::optional<llvm::APInt> IntegerValue(
   return value;
 }
 
-// The C type of a Mercury type's values (reference manual, "C data passing
+// The C type of a Merkurius type's values (reference manual, "C data passing
 // conventions"): a tuple is an MR_Tuple, a type without its own is an MR_Word,
 // and an array is an MR_ArrayPtr, as mmc passes it.
 static std::string CType(const semantics::Type &type) {

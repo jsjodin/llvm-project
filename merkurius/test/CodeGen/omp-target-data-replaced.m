@@ -21,7 +21,7 @@ replace(A, array.copy(A)).
 main(!IO) :-
     some [!A] (
         array.init(4, 1, !:A),
-        % CHECK: Uncaught Mercury exception:
+        % CHECK: Uncaught Merkurius exception:
         % CHECK-NEXT: Software Error: target data: the array A was replaced in the region, not updated in place
         %$omp target data map(tofrom: A)
         replace(!A),

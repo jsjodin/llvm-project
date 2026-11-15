@@ -100,23 +100,23 @@ surrogate = char.det_from_int(0xd800).
 % OUTPUT-0-NEXT:after
 % OUTPUT:before
 % OUTPUT-NOT:{{.}}
-% ERROR-1:Uncaught Mercury exception:
+% ERROR-1:Uncaught Merkurius exception:
 % ERROR-1-NEXT:Software Error: predicate `string.det_index'/3: Unexpected: index out of range
-% ERROR-2:Uncaught Mercury exception:
+% ERROR-2:Uncaught Merkurius exception:
 % ERROR-2-NEXT:Software Error: function `string.det_base_string_to_int'/2: Unexpected: conversion failed
-% ERROR-3:Uncaught Mercury exception:
+% ERROR-3:Uncaught Merkurius exception:
 % ERROR-3-NEXT:Software Error: function `string.det_to_float'/1: Unexpected: conversion failed.
-% ERROR-4:Uncaught Mercury exception:
+% ERROR-4:Uncaught Merkurius exception:
 % ERROR-4-NEXT:Software Error: predicate `string.from_char_list'/2: Unexpected: null character or surrogate code point in list
-% ERROR-5:Uncaught Mercury exception:
+% ERROR-5:Uncaught Merkurius exception:
 % ERROR-5-NEXT:Software Error: predicate `string.from_char_list'/2: Unexpected: null character or surrogate code point in list
-% ERROR-6:Uncaught Mercury exception:
+% ERROR-6:Uncaught Merkurius exception:
 % ERROR-6-NEXT:Software Error: predicate `string.from_char_list'/2: Unexpected: null character or surrogate code point in list
-% ERROR-7:Uncaught Mercury exception:
+% ERROR-7:Uncaught Merkurius exception:
 % ERROR-7-NEXT:Software Error: predicate `string.from_char_list'/2: Unexpected: null character or surrogate code point in list
-% ERROR-8:Uncaught Mercury exception:
+% ERROR-8:Uncaught Merkurius exception:
 % ERROR-8-NEXT:Software Error: predicate `string.first_char_str_out'/3: Unexpected: null character
-% ERROR-9:Uncaught Mercury exception:
+% ERROR-9:Uncaught Merkurius exception:
 % ERROR-9-NEXT:Software Error: predicate `string.first_char_str_out'/3: Unexpected: surrogate code point
-% ERROR-10:Uncaught Mercury exception:
+% ERROR-10:Uncaught Merkurius exception:
 % ERROR-10-NEXT:Software Error: predicate `string.from_char_list'/2: Unexpected: null character or surrogate code point in list

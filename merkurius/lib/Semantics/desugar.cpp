@@ -55,7 +55,7 @@ TokenRange GoalTokens(const parser::DcgGoal &goal) {
   return std::visit([](const auto *x) { return x->tokens; }, goal);
 }
 
-// The hidden state variable of a DCG rule. A Mercury variable's name starts
+// The hidden state variable of a DCG rule. A Merkurius variable's name starts
 // with a capital letter or _, so this one cannot be named in the source.
 constexpr llvm::StringLiteral dcg{"dcg"};
 

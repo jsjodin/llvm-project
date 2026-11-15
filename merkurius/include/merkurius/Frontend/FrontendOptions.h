@@ -93,7 +93,7 @@ enum class ActionKind {
 // What the input is, from -x or else its extension.
 enum class InputLanguage {
   FromExtension,
-  Mercury,
+  Merkurius,
   MLIR,
   // LLVM IR or bitcode, as the host's offload compile reads it back to
   // embed the device code (-x ir, as in Clang and Flang).

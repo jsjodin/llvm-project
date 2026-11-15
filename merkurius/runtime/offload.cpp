@@ -96,14 +96,14 @@ using namespace merkurius::runtime;
 // a kernel that is itself waiting for the server.
 [[noreturn]] void Fail(const char *message, std::uint64_t key) {
   std::fflush(stdout);
-  std::fprintf(stderr, "Mercury runtime: %s%016llx\n", message,
+  std::fprintf(stderr, "Merkurius runtime: %s%016llx\n", message,
       static_cast<unsigned long long>(key));
   std::_Exit(1);
 }
 
 [[noreturn]] void Fail(const char *message) {
   std::fflush(stdout);
-  std::fprintf(stderr, "Mercury runtime: %s\n", message);
+  std::fprintf(stderr, "Merkurius runtime: %s\n", message);
   std::_Exit(1);
 }
 
@@ -637,7 +637,7 @@ public:
   // On the plugin's server thread, where exit would hang.
   [[noreturn]] void Fail(const char *message, const char *detail) {
     std::fflush(stdout);
-    std::fprintf(stderr, "Mercury runtime: %s%s\n", message, detail);
+    std::fprintf(stderr, "Merkurius runtime: %s%s\n", message, detail);
     std::_Exit(1);
   }
 
@@ -1048,13 +1048,13 @@ void CheckFreedAtEnd() {
   std::fflush(stdout);
   if (pinned) {
     std::fprintf(stderr,
-        "Mercury runtime: %lld chunks of host memory for devices' messages "
+        "Merkurius runtime: %lld chunks of host memory for devices' messages "
         "are allocated\n",
         static_cast<long long>(pinnedChunks.load()));
   }
   if (messages) {
     std::fprintf(stderr,
-        "Mercury runtime: %lld messages are neither read nor freed\n",
+        "Merkurius runtime: %lld messages are neither read nor freed\n",
         static_cast<long long>(HeldMessages()));
   }
   if (device) {
@@ -1068,20 +1068,20 @@ void CheckFreedAtEnd() {
     std::uint64_t ringsLeft{ringCount};
     pthread_mutex_unlock(&ringsLock);
     std::fprintf(stderr,
-        "Mercury runtime: %llu chunks of the devices' arenas and %llu rings "
+        "Merkurius runtime: %llu chunks of the devices' arenas and %llu rings "
         "are allocated\n",
         static_cast<unsigned long long>(chunks),
         static_cast<unsigned long long>(ringsLeft));
   }
   if (process) {
     std::fprintf(stderr,
-        "Mercury runtime: a GPU process held at most %llu bytes of blocks at "
+        "Merkurius runtime: a GPU process held at most %llu bytes of blocks at "
         "once\n",
         static_cast<unsigned long long>(processPeakBytes.load()));
   }
   if (device) {
     std::fprintf(stderr,
-        "Mercury runtime: %lld blocks of messages between GPU processes are "
+        "Merkurius runtime: %lld blocks of messages between GPU processes are "
         "allocated\n",
         static_cast<long long>(PlaceMessageBlocks()));
     // Only a program whose processes sent directly between GPUs.
@@ -1090,7 +1090,7 @@ void CheckFreedAtEnd() {
     PlacePeerCounts(&sends, &copies);
     if (sends != 0 || copies != 0) {
       std::fprintf(stderr,
-          "Mercury runtime: %lld messages went directly between GPUs, and "
+          "Merkurius runtime: %lld messages went directly between GPUs, and "
           "%lld of their copies were not given back\n",
           static_cast<long long>(sends), static_cast<long long>(copies));
     }
@@ -1256,7 +1256,7 @@ extern "C" void merk_offload_start(void) {
     unsigned long long milliseconds{std::strtoull(stall, &end, 10)};
     if (end == stall || *end != '\0' || milliseconds == 0) {
       std::fprintf(stderr,
-          "Mercury runtime: MERK_TEAMS_STALL_MILLISECONDS is not a positive "
+          "Merkurius runtime: MERK_TEAMS_STALL_MILLISECONDS is not a positive "
           "number of milliseconds: %s\n",
           stall);
       merkurius::runtime::ExitProgram(1);

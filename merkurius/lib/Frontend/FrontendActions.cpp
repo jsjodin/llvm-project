@@ -905,7 +905,7 @@ static InputLanguage Language(
   if (extension == ".ll" || extension == ".bc") {
     return InputLanguage::LLVMIR;
   }
-  return InputLanguage::Mercury;
+  return InputLanguage::Merkurius;
 }
 
 bool CodeGenAction::executeAction() {
@@ -927,7 +927,7 @@ bool CodeGenAction::executeAction() {
   case InputLanguage::LLVMIR:
     return LowerLLVMIR();
   case InputLanguage::FromExtension:
-  case InputLanguage::Mercury:
+  case InputLanguage::Merkurius:
     break;
   }
   Resolved r;

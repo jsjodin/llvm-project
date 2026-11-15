@@ -319,7 +319,7 @@ const OmpDirective *DirectiveConverter::Convert() {
   CharBlock name{At(0).spelling.begin(), At(at - 1).spelling.end()};
   if (!llvm::to_underlying(llvm::omp::getDirectiveLanguages(id) &
           llvm::omp::SourceLanguage::Fortran)) {
-    // Mercury follows Fortran: parallel do, not parallel for.
+    // Merkurius follows Fortran: parallel do, not parallel for.
     std::string fortran{spelling};
     if (llvm::StringRef{fortran}.ends_with("for")) {
       fortran.replace(fortran.size() - 3, 3, "do");
@@ -328,11 +328,11 @@ const OmpDirective *DirectiveConverter::Convert() {
         llvm::omp::getOpenMPDirectiveKind(fortran) !=
             llvm::omp::Directive::OMPD_unknown) {
       outer_.messages.Say(name,
-          "'%s' is C's form of the OpenMP directive; Mercury uses Fortran's, '%s'"_err_en_US,
+          "'%s' is C's form of the OpenMP directive; Merkurius uses Fortran's, '%s'"_err_en_US,
           spelling, fortran);
     } else {
       outer_.messages.Say(name,
-          "'%s' is an OpenMP directive of C only; Mercury uses Fortran's directives"_err_en_US,
+          "'%s' is an OpenMP directive of C only; Merkurius uses Fortran's directives"_err_en_US,
           spelling);
     }
     return nullptr;

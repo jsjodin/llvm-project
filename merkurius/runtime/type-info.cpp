@@ -86,7 +86,7 @@ extern "C" std::int32_t merk_compare_type_infos(Word x, Word y) {
 // program as mmc's does, which names a function's type pred too.
 extern "C" [[noreturn]] void merk_higher_order_called(std::int32_t compare) {
   std::fflush(stdout);
-  std::fprintf(stderr, "Mercury runtime: called %s for `pred' type\n",
+  std::fprintf(stderr, "Merkurius runtime: called %s for `pred' type\n",
       compare ? "compare/3" : "unify/2");
   merkurius::runtime::ExitProgram(1);
 }

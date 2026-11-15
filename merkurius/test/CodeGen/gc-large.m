@@ -20,7 +20,7 @@
 :- pred address(array(T)::array_ui, int::out) is det.
 :- pragma foreign_proc("C",
     address(Array::array_ui, Address::out),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     Address = (MR_Integer) Array;
 ").

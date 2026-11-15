@@ -92,4 +92,4 @@ main(!IO) :-
 % OUTPUT-NEXT:100
 % OUTPUT-NOT:{{.}}
 
-% BAD:Mercury runtime: MERK_WORKERS=0 is not a positive number
+% BAD:Merkurius runtime: MERK_WORKERS=0 is not a positive number

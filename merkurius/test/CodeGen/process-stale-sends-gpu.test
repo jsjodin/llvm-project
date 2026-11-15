@@ -7,6 +7,6 @@ REQUIRES: amdgpu-gpu
 RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-stale-sends.m -o %t
 RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 120 %t gpu 300 20000 2>&1 | FileCheck %s --match-full-lines
 CHECK:rounds 300, stale words got 0, in 0 rounds
-CHECK-NEXT:Mercury runtime: 0 messages are neither read nor freed
-CHECK-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
-CHECK-NEXT:Mercury runtime: 0 blocks of messages between GPU processes are allocated
+CHECK-NEXT:Merkurius runtime: 0 messages are neither read nor freed
+CHECK-NEXT:Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+CHECK-NEXT:Merkurius runtime: 0 blocks of messages between GPU processes are allocated

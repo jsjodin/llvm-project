@@ -59,7 +59,7 @@ static void printJob(llvm::raw_ostream &os, const Job &job) {
   os << '\n';
 }
 
-static bool isMercurySource(llvm::StringRef input) {
+static bool isMerkuriusSource(llvm::StringRef input) {
   return input == "-" || llvm::sys::path::extension(input) == ".m";
 }
 
@@ -350,7 +350,7 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
   llvm::StringRef output{args.getLastArgValue(OPT_o)};
   unsigned sources{0};
   for (const std::string &input : inputs) {
-    sources += isMercurySource(input);
+    sources += isMerkuriusSource(input);
   }
   if (!output.empty() && !link && sources > 1) {
     reportError("cannot specify -o when generating multiple output files");
@@ -374,8 +374,8 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
       objects.push_back(input);
       continue;
     }
-    if (!isMercurySource(input)) {
-      reportError("'" + input + "' is not a Mercury source file (.m)");
+    if (!isMerkuriusSource(input)) {
+      reportError("'" + input + "' is not a Merkurius source file (.m)");
       ok = false;
       continue;
     }

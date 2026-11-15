@@ -34,10 +34,10 @@ DEFAULT: Population: 3719
 DEFAULT-NEXT: Checksum: 124925383998
 DEFAULT-NEXT: Active tiles: 45 at most, 43 at the end
 DEFAULT-NEXT: Tiles moved: 15
-DEFAULT: Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+DEFAULT: Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated
 RUN: %gpu-env MERK_CHECK_DEVICE_MEMORY=1 LIFE_PLACES=2 LIFE_WORLD=256 LIFE_TILE=8 LIFE_SOUP=256 LIFE_STEPS=10 LIFE_CAPACITY=100 not timeout -k 1 60 %t 2>&1 | FileCheck %s --check-prefix=FULL
 FULL: A place's pool ran out of tiles: raise LIFE_CAPACITY.
-FULL-NEXT: Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+FULL-NEXT: Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated
 
 Without -fopenmp each place runs the loops on its own lane.
 RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/life/life-places.m -o %t.sequential

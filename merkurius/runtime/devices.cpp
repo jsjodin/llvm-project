@@ -44,7 +44,7 @@ bool gpusFound{false};
 
 [[noreturn]] void Fail(const char *what, ol_result_t result) {
   std::fflush(stdout);
-  std::fprintf(stderr, "Mercury runtime: %s: %s\n", what,
+  std::fprintf(stderr, "Merkurius runtime: %s: %s\n", what,
       result && result->details ? result->details : "failed");
   ExitProgram(1);
 }

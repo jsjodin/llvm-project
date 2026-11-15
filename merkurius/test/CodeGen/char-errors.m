@@ -30,17 +30,17 @@
 % OUTPUT-0-NEXT:651535Z
 % OUTPUT-0-NEXT:after
 % OUTPUT:before
-% ERROR-1:Uncaught Mercury exception:
+% ERROR-1:Uncaught Merkurius exception:
 % ERROR-1-NEXT:Software Error: predicate `char.det_from_int'/2: Unexpected: conversion failed
-% ERROR-2:Uncaught Mercury exception:
+% ERROR-2:Uncaught Merkurius exception:
 % ERROR-2-NEXT:Software Error: function `char.det_hex_digit_to_int'/1: char.hex_digit_to_int failed
-% ERROR-3:Uncaught Mercury exception:
+% ERROR-3:Uncaught Merkurius exception:
 % ERROR-3-NEXT:Software Error: predicate `char.base_digit_to_int'/3: base is not in the range 2 .. 36
-% ERROR-4:Uncaught Mercury exception:
+% ERROR-4:Uncaught Merkurius exception:
 % ERROR-4-NEXT:Software Error: predicate `char.is_base_digit'/2: invalid base
-% ERROR-5:Uncaught Mercury exception:
+% ERROR-5:Uncaught Merkurius exception:
 % ERROR-5-NEXT:Software Error: function `char.det_base_int_to_digit'/2: char.base_int_to_digit failed
-% ERROR-6:Uncaught Mercury exception:
+% ERROR-6:Uncaught Merkurius exception:
 % ERROR-6-NEXT:Software Error: predicate `char.base_int_to_digit'/3: invalid base
 
 :- module char_errors.

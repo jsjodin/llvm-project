@@ -133,7 +133,7 @@
 % Strings are UTF-8 ending in a NUL, as in mmc's C grades, and indices
 % count bytes. A byte that is not part of a well-formed sequence reads as
 % U+FFFD, one for each such byte. What works on bytes is in C, in
-% runtime/string.cpp; the rest is written in Mercury on it. The behaviour
+% runtime/string.cpp; the rest is written in Merkurius on it. The behaviour
 % where the manual leaves it open is mmc's, found by running its programs.
 
 :- pragma foreign_decl("C", local, "
@@ -184,7 +184,7 @@ extern MR_String merk_format_text(MR_ConstString flags, MR_Integer width,
 :- func bytes(string) = int.
 :- pragma foreign_proc("C",
     bytes(S::in) = (N::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     N = (MR_Integer) strlen(S);
 ").
@@ -194,7 +194,7 @@ extern MR_String merk_format_text(MR_ConstString flags, MR_Integer width,
 :- pred decode(string::in, int::in, char::out, int::out) is det.
 :- pragma foreign_proc("C",
     decode(S::in, Offset::in, C::out, Next::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     C = merk_string_decode(S, Offset, &Next);
 ").
@@ -203,7 +203,7 @@ extern MR_String merk_format_text(MR_ConstString flags, MR_Integer width,
 :- func previous(string, int) = int.
 :- pragma foreign_proc("C",
     previous(S::in, Offset::in) = (Start::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Start = merk_string_previous(S, Offset);
 ").
@@ -213,7 +213,7 @@ extern MR_String merk_format_text(MR_ConstString flags, MR_Integer width,
 :- func char_bytes(char) = int.
 :- pragma foreign_proc("C",
     char_bytes(C::in) = (N::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     N = merk_char_bytes(C);
 ").
@@ -222,7 +222,7 @@ extern MR_String merk_format_text(MR_ConstString flags, MR_Integer width,
 :- pred new_string(int::in, string::uo) is det.
 :- pragma foreign_proc("C",
     new_string(Bytes::in, S::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_string_new(Bytes);
 ").
@@ -231,7 +231,7 @@ extern MR_String merk_format_text(MR_ConstString flags, MR_Integer width,
 :- pred put_char(char::in, int::in, int::out, string::di, string::uo) is det.
 :- pragma foreign_proc("C",
     put_char(C::in, Offset::in, Next::out, S0::di, S::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Next = merk_string_put(S0, Offset, C);
     S = S0;
@@ -242,7 +242,7 @@ extern MR_String merk_format_text(MR_ConstString flags, MR_Integer width,
     is det.
 :- pragma foreign_proc("C",
     put_string(From::in, Offset::in, Next::out, S0::di, S::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Next = merk_string_put_string(S0, Offset, From);
     S = S0;
@@ -253,7 +253,7 @@ extern MR_String merk_format_text(MR_ConstString flags, MR_Integer width,
 :- mode bytes_between(in, in, in) = uo is det.
 :- pragma foreign_proc("C",
     bytes_between(S::in, Start::in, End::in) = (R::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     R = merk_string_between(S, Start, End);
 ").
@@ -262,7 +262,7 @@ extern MR_String merk_format_text(MR_ConstString flags, MR_Integer width,
 :- pred at(string::in, int::in, string::in) is semidet.
 :- pragma foreign_proc("C",
     at(S::in, Offset::in, Pattern::in),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     SUCCESS_INDICATOR = merk_string_at(S, Offset, Pattern);
 ").
@@ -270,7 +270,7 @@ extern MR_String merk_format_text(MR_ConstString flags, MR_Integer width,
 :- pred same(string::in, string::in) is semidet.
 :- pragma foreign_proc("C",
     same(A::in, B::in),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     SUCCESS_INDICATOR = strcmp(A, B) == 0;
 ").
@@ -278,7 +278,7 @@ extern MR_String merk_format_text(MR_ConstString flags, MR_Integer width,
 :- pred is_space(char::in) is semidet.
 :- pragma foreign_proc("C",
     is_space(C::in),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     SUCCESS_INDICATOR = merk_char_is_whitespace(C);
 ").
@@ -430,7 +430,7 @@ index(S, I, C) :-
 :- mode unsafe_promise_unique_char(in) = uo is det.
 :- pragma foreign_proc("C",
     unsafe_promise_unique_char(C0::in) = (C::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     C = C0;
 ").
@@ -453,13 +453,13 @@ length(S) = N :-
 
 :- pragma foreign_proc("C",
     length(S::in, N::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     N = (MR_Integer) strlen(S);
 ").
 :- pragma foreign_proc("C",
     length(S::ui, N::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     N = (MR_Integer) strlen(S);
 ").
@@ -469,7 +469,7 @@ count_codepoints(S) = N :-
 
 :- pragma foreign_proc("C",
     count_codepoints(S::in, N::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     N = merk_string_count_codepoints(S);
 ").
@@ -495,7 +495,7 @@ contains_char_from(S, C, Offset, End) :-
 
 :- pragma foreign_proc("C",
     sub_string_search(S::in, Pattern::in, I::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     I = merk_string_search(S, Pattern);
     SUCCESS_INDICATOR = I >= 0;
@@ -546,7 +546,7 @@ split_at_boundary(S, Offset, End, Split) :-
 :- mode append_bytes(in, in) = uo is det.
 :- pragma foreign_proc("C",
     append_bytes(A::in, B::in) = (S::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_string_append(A, B);
 ").
@@ -797,7 +797,7 @@ to_lower(S::in, Lower::in) :-
 :- mode changed_case(in, in) = uo is det.
 :- pragma foreign_proc("C",
     changed_case(S::in, Upper::in) = (R::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     R = merk_string_case(S, Upper);
 ").
@@ -831,7 +831,7 @@ rstrip(S) = stripped(S, 0, 1).
 :- func stripped(string, int, int) = string.
 :- pragma foreign_proc("C",
     stripped(S::in, Leading::in, Trailing::in) = (R::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     R = merk_string_strip(S, Leading, Trailing);
 ").
@@ -841,7 +841,7 @@ replace_all(S, Pattern, Replacement) = R :-
 
 :- pragma foreign_proc("C",
     replace_all(S::in, Pattern::in, Replacement::in, R::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     R = merk_string_replace_all(S, Pattern, Replacement);
 ").
@@ -940,7 +940,7 @@ fold_multi(P, S, Offset, End, !A) :-
 
 :- pragma foreign_proc("C",
     to_int(S::in, I::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     I = 0;
     SUCCESS_INDICATOR = merk_string_to_int(S, &I);
@@ -956,7 +956,7 @@ det_to_int(S) = I :-
 
 :- pragma foreign_proc("C",
     to_float(S::in, F::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     double value = 0.0;
     SUCCESS_INDICATOR = merk_string_to_float(S, &value);
@@ -988,7 +988,7 @@ int_to_string(I) = S :-
 
 :- pragma foreign_proc("C",
     int_to_string(I::in, S::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_string_from_int(I);
 ").
@@ -1000,7 +1000,7 @@ float_to_string(F) = S :-
 
 :- pragma foreign_proc("C",
     float_to_string(F::in, S::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_string_from_float(F);
 ").
@@ -1014,7 +1014,7 @@ from_float(F) = float_to_string(F).
 % buffer.
 :- pragma foreign_proc("C",
     string(X::in) = (S::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_string_of(TypeInfo_for_T, X);
 ").
@@ -1160,7 +1160,7 @@ digits(Format, Offset, Value0, Value, Next) :-
 :- pred digit_at(string::in, int::in, int::out) is semidet.
 :- pragma foreign_proc("C",
     digit_at(S::in, Offset::in, Digit::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Digit = S[Offset] - '0';
     SUCCESS_INDICATOR = S[Offset] >= '0' && S[Offset] <= '9';
@@ -1282,7 +1282,7 @@ convert(N, C, Flags, Width, Precision, Arg) = Part :-
 :- func format_int(string, int, int, char, int) = string.
 :- pragma foreign_proc("C",
     format_int(Flags::in, Width::in, Precision::in, C::in, I::in) = (S::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_format_integer(Flags, Width, Precision, C, I, 64);
 ").
@@ -1290,7 +1290,7 @@ convert(N, C, Flags, Width, Precision, Arg) = Part :-
 :- func format_int8(string, int, int, char, int8) = string.
 :- pragma foreign_proc("C",
     format_int8(Flags::in, Width::in, Precision::in, C::in, I::in) = (S::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_format_integer(Flags, Width, Precision, C, I, 8);
 ").
@@ -1299,7 +1299,7 @@ convert(N, C, Flags, Width, Precision, Arg) = Part :-
 :- pragma foreign_proc("C",
     format_int16(Flags::in, Width::in, Precision::in, C::in, I::in)
         = (S::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_format_integer(Flags, Width, Precision, C, I, 16);
 ").
@@ -1308,7 +1308,7 @@ convert(N, C, Flags, Width, Precision, Arg) = Part :-
 :- pragma foreign_proc("C",
     format_int32(Flags::in, Width::in, Precision::in, C::in, I::in)
         = (S::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_format_integer(Flags, Width, Precision, C, I, 32);
 ").
@@ -1317,7 +1317,7 @@ convert(N, C, Flags, Width, Precision, Arg) = Part :-
 :- pragma foreign_proc("C",
     format_int64(Flags::in, Width::in, Precision::in, C::in, I::in)
         = (S::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_format_integer(Flags, Width, Precision, C, I, 64);
 ").
@@ -1325,7 +1325,7 @@ convert(N, C, Flags, Width, Precision, Arg) = Part :-
 :- func format_uint(string, int, int, char, uint) = string.
 :- pragma foreign_proc("C",
     format_uint(Flags::in, Width::in, Precision::in, C::in, U::in) = (S::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_format_integer(Flags, Width, Precision, C, (int64_t) U, 64);
 ").
@@ -1334,7 +1334,7 @@ convert(N, C, Flags, Width, Precision, Arg) = Part :-
 :- pragma foreign_proc("C",
     format_uint8(Flags::in, Width::in, Precision::in, C::in, U::in)
         = (S::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_format_integer(Flags, Width, Precision, C, U, 8);
 ").
@@ -1343,7 +1343,7 @@ convert(N, C, Flags, Width, Precision, Arg) = Part :-
 :- pragma foreign_proc("C",
     format_uint16(Flags::in, Width::in, Precision::in, C::in, U::in)
         = (S::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_format_integer(Flags, Width, Precision, C, U, 16);
 ").
@@ -1352,7 +1352,7 @@ convert(N, C, Flags, Width, Precision, Arg) = Part :-
 :- pragma foreign_proc("C",
     format_uint32(Flags::in, Width::in, Precision::in, C::in, U::in)
         = (S::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_format_integer(Flags, Width, Precision, C, U, 32);
 ").
@@ -1361,7 +1361,7 @@ convert(N, C, Flags, Width, Precision, Arg) = Part :-
 :- pragma foreign_proc("C",
     format_uint64(Flags::in, Width::in, Precision::in, C::in, U::in)
         = (S::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_format_integer(Flags, Width, Precision, C, (int64_t) U, 64);
 ").
@@ -1370,7 +1370,7 @@ convert(N, C, Flags, Width, Precision, Arg) = Part :-
 :- pragma foreign_proc("C",
     format_float(Flags::in, Width::in, Precision::in, C::in, F::in)
         = (S::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_format_float_conversion(Flags, Width, Precision, C, F);
 ").
@@ -1378,7 +1378,7 @@ convert(N, C, Flags, Width, Precision, Arg) = Part :-
 :- func format_text(string, int, int, string) = string.
 :- pragma foreign_proc("C",
     format_text(Flags::in, Width::in, Precision::in, Text::in) = (S::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     S = merk_format_text(Flags, Width, Precision, Text);
 ").

@@ -9,7 +9,7 @@
 #ifndef MERKURIUS_PARSER_UNPARSE_H_
 #define MERKURIUS_PARSER_UNPARSE_H_
 
-// The unparser: prints a parse tree back as Mercury source.
+// The unparser: prints a parse tree back as Merkurius source.
 
 #include "merkurius/Parser/parse-tree.h"
 #include "merkurius/Parser/token.h"

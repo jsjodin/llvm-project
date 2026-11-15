@@ -139,6 +139,6 @@ main(!IO) :-
 % CHECK-NEXT:-559993
 % CHECK-NEXT:9876419663211
 % CHECK-NEXT:9876419663211
-% FREED-NEXT:Mercury runtime: 0 messages are neither read nor freed
-% FREED-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
-% FREED-NEXT:Mercury runtime: 0 blocks of messages between GPU processes are allocated
+% FREED-NEXT:Merkurius runtime: 0 messages are neither read nor freed
+% FREED-NEXT:Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+% FREED-NEXT:Merkurius runtime: 0 blocks of messages between GPU processes are allocated

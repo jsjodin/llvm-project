@@ -96,26 +96,26 @@ run(N, !IO) :-
 % OUTPUT-0-NEXT:after
 % OUTPUT:before
 % OUTPUT-EMPTY:
-% ERROR-1:Uncaught Mercury exception:
+% ERROR-1:Uncaught Merkurius exception:
 % ERROR-1-NEXT:Software Error: boom
-% ERROR-2:Uncaught Mercury exception:
+% ERROR-2:Uncaught Merkurius exception:
 % ERROR-2-NEXT:Software Error: pred p/1: boom
-% ERROR-3:Uncaught Mercury exception:
+% ERROR-3:Uncaught Merkurius exception:
 % ERROR-3-NEXT:Software Error: pred p/1: boom
-% ERROR-4:Uncaught Mercury exception:
+% ERROR-4:Uncaught Merkurius exception:
 % ERROR-4-NEXT:Software Error: mod: Sorry, not implemented: what
-% ERROR-5:Uncaught Mercury exception:
+% ERROR-5:Uncaught Merkurius exception:
 % ERROR-5-NEXT:Software Error: mod: pred p/1: Sorry, not implemented: what
-% ERROR-6:Uncaught Mercury exception:
+% ERROR-6:Uncaught Merkurius exception:
 % ERROR-6-NEXT:Software Error: mod: Unexpected: what
-% ERROR-7:Uncaught Mercury exception:
+% ERROR-7:Uncaught Merkurius exception:
 % ERROR-7-NEXT:Software Error: mod: pred p/1: Unexpected: what
-% ERROR-8:Uncaught Mercury exception:
+% ERROR-8:Uncaught Merkurius exception:
 % ERROR-8-NEXT:Software Error: req msg
-% ERROR-9:Uncaught Mercury exception:
+% ERROR-9:Uncaught Merkurius exception:
 % ERROR-9-NEXT:Software Error: mod: pred p/1: Unexpected: expect msg
-% ERROR-10:Uncaught Mercury exception:
+% ERROR-10:Uncaught Merkurius exception:
 % ERROR-10-NEXT:Software Error: mod: Unexpected: not msg
-% ERROR-11:Uncaught Mercury exception:
+% ERROR-11:Uncaught Merkurius exception:
 % ERROR-11-NEXT:Software Error: line1
 % ERROR-11-NEXT:line2

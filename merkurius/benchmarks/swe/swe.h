@@ -27,7 +27,7 @@ enum { QUIET_STEPS = 4, ALL_EDGES = 0x1ef, ENDS = 0x200 };
 SWE_CONST double G = 9.81, DRY = 1.0e-6, D0 = 10.0, COLUMN = 5.0,
                  COURANT = 0.45, A = 0.4;
 
-// Mercury's float.max and float.min.
+// Merkurius's float.max and float.min.
 SWE_FN double maxf(double x, double y) { return x >= y ? x : y; }
 SWE_FN double minf(double x, double y) { return x <= y ? x : y; }
 

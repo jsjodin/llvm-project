@@ -21,8 +21,8 @@ RUN: not merkc -E -o %t %S/Inputs/sumsq.m %S/Inputs/sumsq.m 2>&1 \
 RUN:   | FileCheck %s --check-prefix=MULTI-O
 MULTI-O: merkc: error: cannot specify -o when generating multiple output files
 
-RUN: not merkc -E %s 2>&1 | FileCheck %s --check-prefix=NOT-MERCURY
-NOT-MERCURY: merkc: error: '{{.*}}errors.test' is not a Mercury source file (.m)
+RUN: not merkc -E %s 2>&1 | FileCheck %s --check-prefix=NOT-MERKURIUS
+NOT-MERKURIUS: merkc: error: '{{.*}}errors.test' is not a Merkurius source file (.m)
 
 RUN: not merkc -E %t.does-not-exist.m 2>&1 | FileCheck %s --check-prefix=NO-FILE
 NO-FILE: merkc: error: cannot open input file '{{.*}}does-not-exist.m':

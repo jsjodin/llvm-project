@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// After the optimizer, gives Mercury code statepoints and stack maps, with each
+// After the optimizer, gives Merkurius code statepoints and stack maps, with each
 // root's type (docs/INPROGRESS.md, Statepoints and stack maps).
 //
 //===----------------------------------------------------------------------===//
@@ -332,7 +332,7 @@ static void MarkLeaves(llvm::Function &function) {
       if (call->getCallingConv() == llvm::CallingConv::Tail) {
         std::string text;
         llvm::raw_string_ostream os{text};
-        os << "a call of Mercury code in " << function.getName()
+        os << "a call of Merkurius code in " << function.getName()
            << " has no list of what is live across it:" << *call;
         llvm::report_fatal_error(llvm::StringRef{text});
       }
@@ -920,7 +920,7 @@ static TypeInfosOf GatherTypeInfos(
 }
 
 // Lists at a safepoint what is live there and its bundle does not have: the
-// optimizer can keep a value alive for longer than the Mercury code did, and
+// optimizer can keep a value alive for longer than the Merkurius code did, and
 // the rewrite would then make a root that nothing describes. Its type_infos
 // are found here, while each is still one SSA value, and listing them makes
 // the rewrite relocate them. That can make one live at an earlier safepoint.
@@ -1406,10 +1406,10 @@ static void EncodeRootTypes(StatepointRoots &roots) {
   }
 }
 
-// Mercury's calling convention, or Mercury code inlined into another's, as
+// Merkurius's calling convention, or Merkurius code inlined into another's, as
 // main's is into the C function merk_main. An OpenMP region's outlined function
 // holds only calls marked as in the region.
-static bool IsMercuryCode(llvm::Function &function) {
+static bool IsMerkuriusCode(llvm::Function &function) {
   if (function.getCallingConv() == llvm::CallingConv::Tail) {
     return true;
   }
@@ -1431,7 +1431,7 @@ static bool IsMercuryCode(llvm::Function &function) {
 // function: its calls marked as in the region lose their bundles. Code
 // generation would make a stack map record of a call with a deopt bundle
 // in any function, and the collector would take the frame, which has no
-// frame pointer of its own, for Mercury's; without it the walk of a
+// frame pointer of its own, for Merkurius's; without it the walk of a
 // worker's stack ends at the region's procedure.
 static void StripRegionBundles(llvm::Function &function) {
   for (llvm::Instruction &instruction :
@@ -1478,7 +1478,7 @@ static void RemoveDeadCode(llvm::Function &function) {
   }
 }
 
-// Mercury code gets statepoints, here, after the optimizer, which handles them
+// Merkurius code gets statepoints, here, after the optimizer, which handles them
 // badly. Code an OpenMP region outlined is not rewritten: nothing collects
 // during a region. A device has no collector.
 void DropRootTypeNotes(llvm::Module &module) {
@@ -1520,7 +1520,7 @@ void RewriteForCollector(llvm::Module &module, const TargetInfo &target) {
   KnownTypes known;
   bool any{false};
   for (llvm::Function &function : module) {
-    if (!function.isDeclaration() && IsMercuryCode(function)) {
+    if (!function.isDeclaration() && IsMerkuriusCode(function)) {
       function.setGC("statepoint-example");
       function.addFnAttr("frame-pointer", "all");
       // The collector reads from .eh_frame where the frame keeps its return

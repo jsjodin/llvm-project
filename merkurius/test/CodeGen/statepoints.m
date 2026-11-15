@@ -1,4 +1,4 @@
-% Mercury code gets statepoints and a stack map after the optimizer. Each root
+% Merkurius code gets statepoints and a stack map after the optimizer. Each root
 % has a type's index in the stack map, or -1 for one the collector can ignore
 % (docs/INPROGRESS.md, Statepoints and stack maps).
 %

@@ -7,7 +7,7 @@
 %   with the originals, by unification and by compare; in monomorphic
 %   code and through type_infos in polymorphic code.
 % - No sharing: after a send, the sender's array, string and cells are
-%   overwritten in place by foreign_procs, which no Mercury program can
+%   overwritten in place by foreign_procs, which no Merkurius program can
 %   do; the received message must still have the old values.
 % - A model: a pseudo-random sequence of sends, receives with and without
 %   selectors, closes, new mailboxes and sends to stale handles, each
@@ -225,7 +225,7 @@ repeat(N, Xs, Acc) =
 :- pred heap_string(string::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     heap_string(S::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     char *s = malloc(6);
     memcpy(s, \"hello\", 6);
@@ -235,7 +235,7 @@ repeat(N, Xs, Acc) =
 :- pred overwrite_string(string::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     overwrite_string(S::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     ((char *) S)[0] = 'J';
 ").
@@ -244,7 +244,7 @@ repeat(N, Xs, Acc) =
 :- pred overwrite_array(array(int)::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     overwrite_array(A::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     ((MR_Integer *) A)[1] = 99;
 ").
@@ -253,7 +253,7 @@ repeat(N, Xs, Acc) =
 :- pred overwrite_cell(cell::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     overwrite_cell(C::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     ((MR_Integer *) C)[0] = 99;
 ").

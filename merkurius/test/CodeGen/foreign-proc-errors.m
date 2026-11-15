@@ -1,5 +1,5 @@
 % clang's errors in a foreign_proc's C code are reported at their lines in
-% the Mercury source, through #line directives.
+% the Merkurius source, through #line directives.
 %
 % RUN: not merkc -fc1 -emit-obj %s -o %t.o 2>&1 | FileCheck %s
 
@@ -9,7 +9,7 @@
 :- implementation.
 :- pragma foreign_proc("C",
     p(X::in, Y::out),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     Y = X +
         undeclared;

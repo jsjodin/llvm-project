@@ -59,7 +59,7 @@ using namespace merkurius::runtime;
 
 [[noreturn]] void Fail(const char *message, const char *detail) {
   std::fflush(stdout);
-  std::fprintf(stderr, "Mercury runtime: %s%s\n", message, detail);
+  std::fprintf(stderr, "Merkurius runtime: %s%s\n", message, detail);
   merkurius::runtime::ExitProgram(1);
 }
 
@@ -483,7 +483,7 @@ void FillRing(Mailbox *mailbox) {
       // This can be on the plugin's server thread, where exit would hang.
       std::fflush(stdout);
       std::fprintf(stderr,
-          "Mercury runtime: a monitor's message to a mailbox a device "
+          "Merkurius runtime: a monitor's message to a mailbox a device "
           "receives from is not supported yet\n");
       std::_Exit(1);
     }
@@ -1178,7 +1178,7 @@ extern "C" DeviceRing *merk_mailbox_attach(MERK_HANDLE_PARAMETERS,
       // where exit would hang.
       std::fflush(stdout);
       std::fprintf(stderr,
-          "Mercury runtime: two devices receive from one mailbox, which is "
+          "Merkurius runtime: two devices receive from one mailbox, which is "
           "not supported yet\n");
       std::_Exit(1);
     }
@@ -1228,7 +1228,7 @@ extern "C" bool merk_mailbox_copy_for_ring(MERK_HANDLE_PARAMETERS,
       if (!mailbox->head) {
         // On the plugin's server thread, where exit would hang.
         std::fflush(stdout);
-        std::fputs("Mercury runtime: a device took a message that is not in "
+        std::fputs("Merkurius runtime: a device took a message that is not in "
                    "its mailbox\n",
             stderr);
         std::_Exit(1);

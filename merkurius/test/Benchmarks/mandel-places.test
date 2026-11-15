@@ -24,7 +24,7 @@ RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12
 RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=4 %t.omp host | FileCheck %s --check-prefixes=SMALL
 RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=1 MANDEL_POLICY=pool %t.omp host | FileCheck %s --check-prefixes=SMALL
 RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=4 MANDEL_POLICY=pool MANDEL_CHUNK=1 %t.omp host | FileCheck %s --check-prefixes=SMALL
-STEAL3: Mandelbrot zoom, Mercury, 3 places, steal
+STEAL3: Mandelbrot zoom, Merkurius, 3 places, steal
 STEAL3-NEXT: Frames: 12 of 64 x 64 pixels, tiles of 8 x 8
 SMALL: Iterations: 10601425
 SMALL-NEXT: Checksum: 63198496

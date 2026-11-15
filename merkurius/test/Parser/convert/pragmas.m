@@ -36,14 +36,14 @@
 % CHECK-NEXT: | | | | includeFile: false
 % CHECK-NEXT: | | | | text: int pragmas_helper(int x) { return x; }
 
-:- pragma foreign_type("C", handle, "void *", [can_pass_as_mercury_type]).
+:- pragma foreign_type("C", handle, "void *", [can_pass_as_merkurius_type]).
 % CHECK:      | | ForeignTypePragma
 % CHECK-NEXT: | | | language: C
 % CHECK-NEXT: | | | name: SymName handle
 % CHECK-NEXT: | | | parameters:
 % CHECK-NEXT: | | | descriptor: void *
 % CHECK-NEXT: | | | assertions:
-% CHECK-NEXT: | | | | CanPassAsMercuryType
+% CHECK-NEXT: | | | | CanPassAsMerkuriusType
 % CHECK-NEXT: | | | attributes: none
 
 :- pragma foreign_enum("C", colour/0, [red - "1", green - "2", blue - "3"]).
@@ -70,7 +70,7 @@
 
 :- pragma foreign_proc("C",
     sin(X::in) = (Sin::out),
-    [promise_pure, will_not_call_mercury, thread_safe],
+    [promise_pure, will_not_call_merkurius, thread_safe],
 "
     Sin = sin(X);
 ").
@@ -91,7 +91,7 @@
 % CHECK-NEXT: | | | | | arguments:
 % CHECK-NEXT: | | | attributes:
 % CHECK-NEXT: | | | | PromisePure
-% CHECK-NEXT: | | | | WillNotCallMercury
+% CHECK-NEXT: | | | | WillNotCallMerkurius
 % CHECK-NEXT: | | | | ThreadSafe
 % CHECK-NEXT: | | | code: ForeignCode
 % CHECK-NEXT: | | | | includeFile: false

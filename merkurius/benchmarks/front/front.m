@@ -1,4 +1,4 @@
-% A reacting front on one GPU, dense: the reference in Mercury for the demo
+% A reacting front on one GPU, dense: the reference in Merkurius for the demo
 % of a stencil whose active region moves (docs/INPROGRESS.md), beside
 % front.c, the same program in C. Heat diffuses between cells, and where a
 % cell is hot enough, its fuel burns, in a stiff system of two reactions,
@@ -225,7 +225,7 @@ results(N, Steps, Times, Burnt, Heat, Fuel, !IO) :-
 :- pred setting(string::in, int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     setting(Name::in, Default::in, Value::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     const char *s = getenv(Name);
     Value = s && *s ? (MR_Integer) strtol(s, NULL, 10) : Default;
@@ -234,7 +234,7 @@ results(N, Steps, Times, Burnt, Heat, Fuel, !IO) :-
 :- pred exit_failure(io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     exit_failure(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     fflush(stdout);
     exit(1);
@@ -243,7 +243,7 @@ results(N, Steps, Times, Burnt, Heat, Fuel, !IO) :-
 :- pred now(float::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(T::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -253,9 +253,9 @@ results(N, Steps, Times, Burnt, Heat, Fuel, !IO) :-
 :- pred header(int::in, int::in, int::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     header(N::in, Steps::in, Substeps::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
-    printf(\"Reacting front, Mercury\\n\");
+    printf(\"Reacting front, Merkurius\\n\");
     printf(\"Grid: %ld x %ld cells\\n\", (long) N, (long) N);
     printf(\"Steps: %ld, of %ld substeps where a cell burns\\n\",
         (long) Steps, (long) Substeps);
@@ -266,7 +266,7 @@ results(N, Steps, Times, Burnt, Heat, Fuel, !IO) :-
 :- pragma foreign_proc("C",
     write_results(Burnt::in, Heat::in, Fuel::in, Rate::in, Min::in, Max::in,
         Average::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"Burnt cells: %ld\\n\", (long) Burnt);
     printf(\"Heat: %.15e\\n\", Heat);

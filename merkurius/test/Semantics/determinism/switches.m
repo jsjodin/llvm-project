@@ -1,14 +1,14 @@
 % Switch detection and common subexpression elimination (Henderson,
-% Somogyi and Conway, "Determinism analysis in the Mercury compiler", 1996,
-% sections 3 and 4; reference manual, "Switches"), as mmc does them: a
-% disjunction whose disjuncts test a variable against different functors,
-% through aliases, after other unifications, in `some` scopes, or split at
-% a disjunction, is a switch, which can fail if the variable's inst allows
-% a functor without a case; a partial switch has the other disjuncts after
-% it; the clauses of a predicate are a disjunction on the head variables;
-% a test that every disjunct makes with the same functor is moved out of
-% the disjunction, and its arguments may then be switched on; and mmc's
-% choices between variables.
+% Somogyi and Conway, 1996, sections 3 and 4; reference manual,
+% "Switches"), as mmc does them: a disjunction whose disjuncts test a
+% variable against different functors, through aliases, after other
+% unifications, in `some` scopes, or split at a disjunction, is a switch,
+% which can fail if the variable's inst allows a functor without a case; a
+% partial switch has the other disjuncts after it; the clauses of a
+% predicate are a disjunction on the head variables; a test that every
+% disjunct makes with the same functor is moved out of the disjunction,
+% and its arguments may then be switched on; and mmc's choices between
+% variables.
 %
 % RUN: merkc -fc1 -fdebug-dump-determinism %s | FileCheck %s
 % RUN: %if mmc %{ %compare-switches %s %}

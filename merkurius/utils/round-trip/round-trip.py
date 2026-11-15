@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Run the unparser's round-trip tests on Mercury files that convert
-without errors (docs/MercuryMLIRCompilerandRuntimeDesign.md, "Unparser and
+"""Run the unparser's round-trip tests on Merkurius files that convert
+without errors (design document, "Unparser and
 round-trip tests").
 
 2. Exact round trip: `merkc -fc1 -fdebug-unparse-exact` gives back the

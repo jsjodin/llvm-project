@@ -8,4 +8,4 @@ RUN: %gpu-env timeout -k 1 60 %t2 gpu | FileCheck %S/process-gpu-arrays.m --matc
 RUN: %gpu-env MERK_CHECK_PINNED=1 timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %s --match-full-lines
 CHECK:0 wrong of 300
 CHECK-NEXT:0 wrong of 100
-CHECK-NEXT:Mercury runtime: 0 chunks of host memory for devices' messages are allocated
+CHECK-NEXT:Merkurius runtime: 0 chunks of host memory for devices' messages are allocated

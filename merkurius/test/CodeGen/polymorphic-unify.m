@@ -62,7 +62,7 @@ yn(no_, !IO) :- io.write_string("n ", !IO).
 :- pragma foreign_decl("C", "#include <string.h>").
 :- func dup(string) = string.
 :- pragma foreign_proc("C", dup(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure], "Y = strdup(X);").
+    [will_not_call_merkurius, promise_pure], "Y = strdup(X);").
 
 :- func nan(float) = float.
 nan(Z) = unchecked_quotient(Z, Z).

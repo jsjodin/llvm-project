@@ -1,7 +1,7 @@
 // A C model of three heap cell layouts for Merkurius (docs/INPROGRESS.md,
 // D1), compiled once per layout with -DLAYOUT_A, -DLAYOUT_B or -DLAYOUT_C:
 //
-//   A  headerless cells, as Melbourne Mercury's; a cell's layout comes from
+//   A  headerless cells, as mmc's; a cell's layout comes from
 //      its type, so copying is type-directed, with forwarding marks in a
 //      side bitmap.
 //   B  one header word before each cell: size, pointer map, constructor;

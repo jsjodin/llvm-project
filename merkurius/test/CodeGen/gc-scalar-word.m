@@ -54,4 +54,4 @@ add2(X, X + 2, !IO).
 
 :- pred get(int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C", get(X::in, Y::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure], "Y = X + 1;").
+    [will_not_call_merkurius, promise_pure], "Y = X + 1;").

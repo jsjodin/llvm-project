@@ -13,12 +13,12 @@
 :- pragma foreign_proc("C",
 % CHECK: foreign-proc-modes.m:[[@LINE-1]]:4: error: this foreign_proc is for a mode pred foreign_proc_modes.p/2 does not have
     p(X::out, Y::in),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "X = Y;").
 
 :- pragma foreign_proc("C",
     p(X::in, Y::out),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "Y = X;").
 
 % mmc: "duplicate `:- pragma foreign_proc' declaration for this mode of
@@ -27,5 +27,5 @@
 % CHECK: foreign-proc-modes.m:[[@LINE-1]]:4: error: pred foreign_proc_modes.p/2 has two foreign_procs for C in this mode
 % CHECK: foreign-proc-modes.m:[[#@LINE-9]]:4: because: the other foreign_proc is here
     p(X::in, Y::out),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "Y = X;").

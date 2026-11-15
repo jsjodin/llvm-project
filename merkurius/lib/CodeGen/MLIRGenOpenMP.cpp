@@ -728,7 +728,7 @@ static bool HasLeaf(const omp::ConstructQueue &queue, llvm::omp::Directive id) {
       queue, [&](const omp::Leaf &leaf) { return leaf.id == id; });
 }
 
-// The operator of a reduction clause by Mercury's name: +, *, min and
+// The operator of a reduction clause by Merkurius's name: +, *, min and
 // max, of ints and floats, and /\, \/ and xor, of ints.
 static std::optional<ReductionOp> ReductionOpOf(llvm::StringRef name) {
   return llvm::StringSwitch<std::optional<ReductionOp>>(name)

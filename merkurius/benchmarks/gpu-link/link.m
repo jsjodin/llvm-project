@@ -280,7 +280,7 @@ finish(started(_, Report, Place), Ended, !IO) :-
 :- pred now(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(Nanoseconds::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -292,7 +292,7 @@ finish(started(_, Report, Place), Ended, !IO) :-
 :- pragma foreign_proc("C",
     report(Case::in, Words::in, Arrays::in, Right::in, DeviceRate::in,
         HostRate::in, UsEach::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"%-7s %8ld words %6ld arrays %6ld right %10.1f device MB/s %10.1f host MB/s %10.2f us each\\n\",
         Case, (long) Words, (long) Arrays, (long) Right, DeviceRate,

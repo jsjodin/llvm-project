@@ -186,7 +186,7 @@ results(N, Steps, T, Population, Checksum, !IO) :-
 :- pred now(float::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(T::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -197,7 +197,7 @@ results(N, Steps, T, Population, Checksum, !IO) :-
 :- pred setting(string::in, int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     setting(Name::in, Default::in, Value::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     const char *s = getenv(Name);
     Value = s && *s ? (MR_Integer) strtol(s, NULL, 10) : Default;
@@ -207,7 +207,7 @@ results(N, Steps, T, Population, Checksum, !IO) :-
 :- pred exit_failure(io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     exit_failure(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     fflush(stdout);
     exit(1);
@@ -216,9 +216,9 @@ results(N, Steps, T, Population, Checksum, !IO) :-
 :- pred header(int::in, int::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     header(N::in, Steps::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
-    printf(\"Game of Life, Mercury, GPU process\\n\");
+    printf(\"Game of Life, Merkurius, GPU process\\n\");
     printf(\"Grid: %ld x %ld cells, %ld bytes a cell\\n\", (long) N, (long) N,
         (long) sizeof(MR_Integer));
     printf(\"Steps: %ld\\n\", (long) Steps);
@@ -229,7 +229,7 @@ results(N, Steps, T, Population, Checksum, !IO) :-
 :- pragma foreign_proc("C",
     write_results(Population::in, Checksum::in, Rate::in, Min::in, Max::in,
         Average::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"Population: %ld\\n\", (long) Population);
     printf(\"Checksum: %ld\\n\", (long) Checksum);

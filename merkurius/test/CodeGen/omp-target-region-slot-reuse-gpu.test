@@ -8,4 +8,4 @@ RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 120 %t2 2>&1 \
 RUN:   | FileCheck %s --match-full-lines --strict-whitespace
 CHECK:300 of 300 rounds were right
-CHECK-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+CHECK-NEXT:Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated

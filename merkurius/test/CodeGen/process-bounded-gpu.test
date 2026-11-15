@@ -7,4 +7,4 @@ REQUIRES: amdgpu-gpu
 RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-bounded.m -o %t2
 RUN: %gpu-env MERK_CHECK_PROCESS_MEMORY=1 timeout -k 1 120 %t2 gpu 2>&1 | FileCheck %s --match-full-lines
 CHECK:20000 messages, 0 wrong
-CHECK-NEXT:Mercury runtime: a GPU process held at most {{[1-9][0-9]?[0-9]?[0-9]?[0-9]}} bytes of blocks at once
+CHECK-NEXT:Merkurius runtime: a GPU process held at most {{[1-9][0-9]?[0-9]?[0-9]?[0-9]}} bytes of blocks at once

@@ -13,7 +13,7 @@ RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offloa
 RUN: %gpu-env OMP_TARGET_OFFLOAD=MANDATORY MERK_DEVICE_ARENA_BYTES=33554432 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 120 %t.O2 2>&1 | FileCheck %s --match-full-lines --strict-whitespace
 CHECK:200006200000
 CHECK-NEXT:7
-CHECK-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+CHECK-NEXT:Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated
 
 RUN: not %gpu-env OMP_TARGET_OFFLOAD=MANDATORY MERK_DEVICE_ARENA_BYTES=1048576 timeout -k 1 120 %t.O2 2>&1 | FileCheck %s --check-prefix=FULL
-FULL: Mercury runtime: the devices' arenas are full: see MERK_DEVICE_ARENA_BYTES
+FULL: Merkurius runtime: the devices' arenas are full: see MERK_DEVICE_ARENA_BYTES

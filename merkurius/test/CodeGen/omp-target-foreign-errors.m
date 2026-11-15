@@ -35,5 +35,5 @@ compute(N, X) :-
 
 :- func pid(int) = int.
 :- pragma foreign_proc("C", pid(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe], "Y = X + getpid();").
+    [will_not_call_merkurius, promise_pure, thread_safe], "Y = X + getpid();").
 % CHECK-DAG: omp-target-foreign-errors.m:[[#@LINE-2]]:4: error: cannot call omp_target_foreign_errors.pid_f1_0 on an OpenMP device yet: its foreign code calls getpid, which is not on the device

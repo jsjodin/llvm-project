@@ -286,7 +286,7 @@ stats(From, To, T, !Min, !Max, !Total) :-
 :- pred now(float::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(T::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -297,7 +297,7 @@ stats(From, To, T, !Min, !Max, !Total) :-
 :- pred setting(string::in, int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     setting(Name::in, Default::in, Value::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     const char *s = getenv(Name);
     Value = s && *s ? (MR_Integer) strtol(s, NULL, 10) : Default;
@@ -307,7 +307,7 @@ stats(From, To, T, !Min, !Max, !Total) :-
 :- pred exit_failure(io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     exit_failure(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     fflush(stdout);
     exit(1);
@@ -316,7 +316,7 @@ stats(From, To, T, !Min, !Max, !Total) :-
 :- pred header(int::in, int::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     header(N::in, Times::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     double mb = 1.0e-6 * 8.0 * (double) N;
     printf(\"Merkurius memory bandwidth benchmark, GPU process\\n\");
@@ -329,7 +329,7 @@ stats(From, To, T, !Min, !Max, !Total) :-
 :- pred table_header(io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     table_header(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"%-12s%-12s%-12s%-12s%-12s\\n\",
         \"Function\", \"MBytes/sec\", \"Min (sec)\", \"Max\", \"Average\");
@@ -340,7 +340,7 @@ stats(From, To, T, !Min, !Max, !Total) :-
 :- pragma foreign_proc("C",
     write_row(Name::in, MBytes::in, Min::in, Max::in, Average::in,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"%-12s%-12.3f%-12.5f%-12.5f%-12.5f\\n\",
         Name, MBytes, Min, Max, Average);
@@ -349,7 +349,7 @@ stats(From, To, T, !Min, !Max, !Total) :-
 :- pred validation_array(string::in, float::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     validation_array(Name::in, Err::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"Validation failed on %s[]. Average error %g\\n\", Name, Err);
 ").
@@ -357,7 +357,7 @@ stats(From, To, T, !Min, !Max, !Total) :-
 :- pred validation_sum(float::in, float::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     validation_sum(Sum::in, Gold::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"Validation failed on sum. Error %g\\nSum was %.17g but should be %.17g\\n\",
         (Sum - Gold) / Gold, Sum, Gold);

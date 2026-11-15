@@ -55,14 +55,14 @@ id_score(X) = X.
 :- pred now(int::out, io::di, io::uo) is det.
 :- pragma foreign_decl("C", "#include <time.h>\n#include <stdlib.h>\n#include <stdio.h>").
 :- pragma foreign_proc("C", now(T::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     T = (MR_Integer) time(NULL);
 ").
 
 :- pred setting(string::in, int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C", setting(Name::in, Default::in, V::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     const char *value = getenv(Name);
     V = value && *value ? (MR_Integer) atoll(value) : Default;
@@ -70,7 +70,7 @@ id_score(X) = X.
 
 :- pred die(string::in, int::in, int::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C", die(What::in, A::in, B::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     fflush(stdout);
     fprintf(stderr, \"STRESS FAILED: %s: %lld %lld\\n\", What, (long long) A,
@@ -89,7 +89,7 @@ __attribute__((noinline)) MR_Integer stress_address(MR_Word w)
 
 :- pred address(list(int)::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C", address(L::in, A::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     A = stress_address((MR_Word) L);
 ").

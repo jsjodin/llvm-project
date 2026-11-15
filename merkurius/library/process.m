@@ -1,5 +1,5 @@
 % Processes and mailboxes, a Merkurius extension with no counterpart in the
-% Mercury library (design document, Language extensions, "Processes and
+% Merkurius library (design document, Language extensions, "Processes and
 % mailboxes"). A process is spawned with a mailbox it owns; only a mailbox's
 % owner receives from it, and it closes when its owner ends. The program
 % ends when main does. A mailbox is
@@ -524,7 +524,7 @@ receive(Mailbox, Selector, Timeout, Result, !IO) :-
 
 :- pragma foreign_proc("C",
     any(M::in, N::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     N = M;
     SUCCESS_INDICATOR = MR_TRUE;
@@ -557,7 +557,7 @@ no_gpu_words = gpu_words([]).
 :- func float_bits(float) = int.
 :- pragma foreign_proc("C",
     float_bits(X::in) = (Bits::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Bits = (MR_Integer) MR_float_to_word(X);
 ").
@@ -600,7 +600,7 @@ set_gpu_units(Place, Percent, !IO) :-
 :- pred set_units(int::in, int::in, string::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     set_units(GPU::in, Percent::in, Error::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     const char *error = merk_gpu_set_units(GPU, Percent);
     Error = (MR_String) (error ? error : \"\");
@@ -635,7 +635,7 @@ set_worker_teams(Place, Teams, !IO) :-
     is det.
 :- pragma foreign_proc("C",
     set_worker_share(GPU::in, Share::in, Error::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     const char *error = merk_gpu_set_worker_teams(GPU, Share);
     Error = (MR_String) (error ? error : \"\");
@@ -644,7 +644,7 @@ set_worker_teams(Place, Teams, !IO) :-
 :- pred gpu_count(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     gpu_count(Count::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Count = merk_gpu_count();
 ").
@@ -656,7 +656,7 @@ set_worker_teams(Place, Teams, !IO) :-
     launch_kernel(_Witness::in, GPU::in, Module::in, Kind::in, Words::in,
         PlaceSlot::out, Generation::out, Secret::out, Error::out,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     const char *error = merk_gpu_process_spawn(TypeInfo_for_M, GPU, Module,
         Kind, Words, &PlaceSlot, &Generation, &Secret);
@@ -950,7 +950,7 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
     % linked with its runtime, which a weak reference finds.
 :- pragma foreign_proc("C",
     team_number(Number::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
 #ifdef __AMDGPU__
     Number = __gpu_block_id_x();
@@ -961,7 +961,7 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
 
 :- pragma foreign_proc("C",
     number_of_teams(Number::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
 #ifdef __AMDGPU__
     Number = __gpu_num_blocks_x();
@@ -972,7 +972,7 @@ scan(Mailbox, Selector, Deadline, Position, Result, !IO) :-
 
 :- pragma foreign_proc("C",
     team_barrier(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
 #ifdef __AMDGPU__
     merk_device_team_barrier();
@@ -1000,7 +1000,7 @@ team_mailbox(Team, Mailbox, !IO) :-
 :- pragma foreign_proc("C",
     team_slot(Team::in, _Witness::in, Teams::out, PlaceSlot::out,
         Generation::out, Secret::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     PlaceSlot = 0;
     Generation = 0;
@@ -1012,7 +1012,7 @@ team_mailbox(Team, Mailbox, !IO) :-
 :- pred node_id(int::out, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     node_id(High::out, Low::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_node(&High, &Low);
 ").
@@ -1024,7 +1024,7 @@ team_mailbox(Team, Mailbox, !IO) :-
 :- pragma foreign_proc("C",
     new_slot(_Witness::in, PlaceSlot::out, Generation::out, Secret::out,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_mailbox_new(TypeInfo_for_M, &PlaceSlot, &Generation, &Secret);
 ").
@@ -1036,7 +1036,7 @@ team_mailbox(Team, Mailbox, !IO) :-
     start_process(Bytes::in, Body::in(pred(in, di, uo) is det), Mailbox::in,
         High::in, Low::in, PlaceSlot::in, Generation::in, Secret::in,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_process_spawn(Bytes, (MR_Word) Body, (MR_Word) Mailbox, High, Low,
         PlaceSlot, Generation, Secret);
@@ -1047,7 +1047,7 @@ team_mailbox(Team, Mailbox, !IO) :-
 :- pragma foreign_proc("C",
     close_slot(High::in, Low::in, PlaceSlot::in, Generation::in, Secret::in,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_mailbox_close(High, Low, PlaceSlot, Generation, Secret);
 ").
@@ -1057,7 +1057,7 @@ team_mailbox(Team, Mailbox, !IO) :-
 :- pragma foreign_proc("C",
     send_message(High::in, Low::in, PlaceSlot::in, Generation::in,
         Secret::in, Message::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_mailbox_send(High, Low, PlaceSlot, Generation, Secret,
         TypeInfo_for_M, Message);
@@ -1067,7 +1067,7 @@ team_mailbox(Team, Mailbox, !IO) :-
 :- pred deadline(int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     deadline(Milliseconds::in, Deadline::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Deadline = merk_mailbox_deadline(Milliseconds);
 ").
@@ -1080,7 +1080,7 @@ team_mailbox(Team, Mailbox, !IO) :-
     wait_message(High::in, Low::in, PlaceSlot::in, Generation::in,
         Secret::in, Position::in, Deadline::in, Arrived::out,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Arrived = merk_mailbox_wait(High, Low, PlaceSlot, Generation, Secret,
         Position, Deadline);
@@ -1093,7 +1093,7 @@ team_mailbox(Team, Mailbox, !IO) :-
 :- pragma foreign_proc("C",
     poll(High::in, Low::in, PlaceSlot::in, Generation::in, Secret::in,
         Position::in, Stamp::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Stamp = merk_mailbox_poll(High, Low, PlaceSlot, Generation, Secret,
         Position);
@@ -1103,7 +1103,7 @@ team_mailbox(Team, Mailbox, !IO) :-
 :- pred last_stamp(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     last_stamp(Stamp::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Stamp = merk_mailbox_last_stamp();
 ").
@@ -1112,7 +1112,7 @@ team_mailbox(Team, Mailbox, !IO) :-
 :- pred arrivals(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     arrivals(Count::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Count = merk_mailbox_arrivals();
 ").
@@ -1122,7 +1122,7 @@ team_mailbox(Team, Mailbox, !IO) :-
 :- pred wait_arrival(int::in, int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     wait_arrival(Seen::in, Deadline::in, Arrived::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Arrived = merk_mailbox_wait_arrival(Seen, Deadline);
 ").
@@ -1158,7 +1158,7 @@ message_at(High, Low, PlaceSlot, Generation, Secret, Position, Message, !IO) :-
     read_message(High::in, Low::in, PlaceSlot::in, Generation::in, Secret::in,
         Position::in, Kind::out, Value::out, Function::out, Monitor::out,
         Text::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     const char *text;
     MR_Word function;
@@ -1174,7 +1174,7 @@ message_at(High, Low, PlaceSlot, Generation, Secret, Position, Message, !IO) :-
 :- pragma foreign_proc("C",
     resolve_message(High::in, Low::in, PlaceSlot::in, Generation::in,
         Secret::in, Position::in, Message::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_mailbox_resolve(High, Low, PlaceSlot, Generation, Secret, Position,
         TypeInfo_for_M, Message);
@@ -1188,7 +1188,7 @@ message_at(High, Low, PlaceSlot, Generation, Secret, Position, Message, !IO) :-
         TargetGeneration::in, TargetSecret::in, High::in, Low::in,
         PlaceSlot::in, Generation::in, Secret::in, Function::in, Id::out,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     (void)TypeInfo_for_M;
     Id = merk_monitor_new(TargetHigh, TargetLow, TargetPlaceSlot,
@@ -1199,7 +1199,7 @@ message_at(High, Low, PlaceSlot, Generation, Secret, Position, Message, !IO) :-
 :- pred remove_monitor(int::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     remove_monitor(Id::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_monitor_remove(Id);
 ").
@@ -1209,7 +1209,7 @@ message_at(High, Low, PlaceSlot, Generation, Secret, Position, Message, !IO) :-
 :- pragma foreign_proc("C",
     remove_message(High::in, Low::in, PlaceSlot::in, Generation::in,
         Secret::in, Position::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_mailbox_remove(High, Low, PlaceSlot, Generation, Secret, Position);
 ").
@@ -1221,7 +1221,7 @@ message_at(High, Low, PlaceSlot, Generation, Secret, Position, Message, !IO) :-
 :- pragma foreign_proc("C",
     register_slot(High::in, Low::in, PlaceSlot::in, Generation::in,
         Secret::in, Name::in, Status::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Status = merk_mailbox_register(High, Low, PlaceSlot, Generation, Secret,
         Name);
@@ -1230,7 +1230,7 @@ message_at(High, Low, PlaceSlot, Generation, Secret, Position, Message, !IO) :-
 :- pred unregister_name(string::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     unregister_name(Name::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_mailbox_unregister(Name);
 ").
@@ -1242,7 +1242,7 @@ message_at(High, Low, PlaceSlot, Generation, Secret, Position, Message, !IO) :-
 :- pragma foreign_proc("C",
     lookup_name(Name::in, _Witness::in, Status::out, PlaceSlot::out,
         Generation::out, Secret::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     PlaceSlot = 0;
     Generation = 0;
@@ -1260,7 +1260,7 @@ message_at(High, Low, PlaceSlot, Generation, Secret, Position, Message, !IO) :-
     lookup_remote(High::in, Low::in, Name::in, _Witness::in, Milliseconds::in,
         Status::out, PlaceSlot::out, Generation::out, Secret::out,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     PlaceSlot = 0;
     Generation = 0;
@@ -1274,7 +1274,7 @@ message_at(High, Low, PlaceSlot, Generation, Secret, Position, Message, !IO) :-
 :- pragma foreign_proc("C",
     listen_on(Address::in, Status::out, Port::out, Error::out,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     const char *error = \"\";
     Port = 0;
@@ -1287,7 +1287,7 @@ message_at(High, Low, PlaceSlot, Generation, Secret, Position, Message, !IO) :-
 :- pragma foreign_proc("C",
     connect_to(Address::in, Status::out, High::out, Low::out, Error::out,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     const char *error = \"\";
     High = 0;

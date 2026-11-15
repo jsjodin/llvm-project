@@ -215,7 +215,7 @@ receive_all(From, Words, Rounds, !Right, !IO) :-
 :- pred now(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(Nanoseconds::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -227,7 +227,7 @@ receive_all(From, Words, Rounds, !Right, !IO) :-
 :- pragma foreign_proc("C",
     report(Chain::in, Mode::in, Words::in, Rounds::in, Right::in,
         Nanoseconds::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"%-5s %-6s %8ld words %6ld arrays %6ld right %10.1f MB/s %12.2f us each\\n\",
         Chain, Mode, (long) Words, (long) Rounds, (long) Right,

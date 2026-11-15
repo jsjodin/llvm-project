@@ -181,7 +181,7 @@ TEST(LexerTest, EscapeErrors) {
   AllSources all;
   Lexed lexed{Lex(all, "\"\\e\" \"\\q\" \"\\x41\" \"\\U00110000\" \"open")};
   EXPECT_EQ(lexed.MessageTexts(),
-      (Strings{"'\\e' is not an escape in Mercury 22.01",
+      (Strings{"'\\e' is not an escape",
           "invalid escape sequence",
           "missing '\\' to end the hexadecimal escape",
           "a Unicode escape may not exceed \\U0010FFFF",

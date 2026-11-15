@@ -2,7 +2,7 @@
 // is measured against: the same grid, start, kernels, maps, timing, check
 // and output, statement for statement where C allows it. See README.md.
 //
-// CELL is the type of a cell: int64_t by default, as wide as Mercury's int,
+// CELL is the type of a cell: int64_t by default, as wide as Merkurius's int,
 // to compare like with like, and uint8_t (-DCELL=uint8_t) as C would
 // usually have it, to show what the wider cells cost.
 #include <stdint.h>

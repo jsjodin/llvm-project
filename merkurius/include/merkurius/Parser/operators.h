@@ -9,7 +9,7 @@
 #ifndef MERKURIUS_PARSER_OPERATORS_H_
 #define MERKURIUS_PARSER_OPERATORS_H_
 
-// Mercury's builtin operators (reference manual, "Builtin operators"), with
+// Merkurius's builtin operators (reference manual, "Builtin operators"), with
 // the current manual's numbering: a higher priority binds more tightly. In a
 // specifier, 'f' is the operator; an 'x' argument must have a strictly higher
 // priority than the operator, and a 'y' argument a higher or equal one.

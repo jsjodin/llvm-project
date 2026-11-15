@@ -47,7 +47,7 @@ void merk_not_implemented(const char *what) __attribute__((noreturn));
 
 :- pragma foreign_proc("C",
     software_error(A::in, B::in, C::in, D::in, E::in),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     static const char prefix[] = \"Software Error: \";
     const char *parts[] = {A, B, C, D, E};
@@ -107,13 +107,13 @@ expect_not(Goal, Module, Pred, Message) :-
 % until then these say they are not implemented.
 :- pragma foreign_proc("C",
     report_lookup_error(_Message::in, _Key::in),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_not_implemented(\"require.report_lookup_error/2\");
 ").
 :- pragma foreign_proc("C",
     report_lookup_error(_Message::in, _Key::in, _Value::unused),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_not_implemented(\"require.report_lookup_error/3\");
 ").

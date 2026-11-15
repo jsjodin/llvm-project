@@ -1,5 +1,5 @@
 % life-process.m with cells of one byte, uint8, as life.c's -DCELL=uint8_t
-% has them (runtime/array.h), to show what Mercury's 8-byte cells cost a GPU
+% has them (runtime/array.h), to show what Merkurius's 8-byte cells cost a GPU
 % process. Otherwise the same: life.m's Game of Life run by a GPU process
 % across its worker teams, each
 % kernel a do loop under %$omp distribute parallel do (docs/INPROGRESS.md,
@@ -189,7 +189,7 @@ results(N, Steps, T, Population, Checksum, !IO) :-
 :- pred now(float::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(T::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -200,7 +200,7 @@ results(N, Steps, T, Population, Checksum, !IO) :-
 :- pred setting(string::in, int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     setting(Name::in, Default::in, Value::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     const char *s = getenv(Name);
     Value = s && *s ? (MR_Integer) strtol(s, NULL, 10) : Default;
@@ -210,7 +210,7 @@ results(N, Steps, T, Population, Checksum, !IO) :-
 :- pred exit_failure(io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     exit_failure(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     fflush(stdout);
     exit(1);
@@ -219,9 +219,9 @@ results(N, Steps, T, Population, Checksum, !IO) :-
 :- pred header(int::in, int::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     header(N::in, Steps::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
-    printf(\"Game of Life, Mercury, GPU process, uint8\\n\");
+    printf(\"Game of Life, Merkurius, GPU process, uint8\\n\");
     printf(\"Grid: %ld x %ld cells, 1 byte a cell\\n\", (long) N, (long) N);
     printf(\"Steps: %ld\\n\", (long) Steps);
 ").
@@ -231,7 +231,7 @@ results(N, Steps, T, Population, Checksum, !IO) :-
 :- pragma foreign_proc("C",
     write_results(Population::in, Checksum::in, Rate::in, Min::in, Max::in,
         Average::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"Population: %ld\\n\", (long) Population);
     printf(\"Checksum: %ld\\n\", (long) Checksum);

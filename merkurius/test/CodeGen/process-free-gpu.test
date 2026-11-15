@@ -11,5 +11,5 @@ RUN: %gpu-env MERK_CHECK_PROCESS_MEMORY=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 
 CHECK:10: right
 CHECK-NEXT:200000: right
 CHECK-NEXT:200000: right
-CHECK-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
-CHECK-NEXT:Mercury runtime: a GPU process held at most {{209[0-9][0-9][0-9][0-9]}} bytes of blocks at once
+CHECK-NEXT:Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+CHECK-NEXT:Merkurius runtime: a GPU process held at most {{209[0-9][0-9][0-9][0-9]}} bytes of blocks at once
