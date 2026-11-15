@@ -6044,7 +6044,54 @@ queue's slots are laid out. 512 B costs the same as 8 B.
    - *The lock of the pool* serializes every sender of a GPU.
 5. Tests: a lit test with two GPUs visible (a `two-gpus` feature in
    lit.cfg.py), with order, closed mailboxes, a sender that ends before its
-   messages are taken, and a full pool. Then benchmarks/gpu-pairs again.
+   messages are taken, and a full pool. Then benchmarks/gpu-pairs again. *Done
+   2026-11-14:*
+   - *Tests of two GPUs.* A test whose file ends in `-two-gpus.test` takes
+     two of the slots that lit gives its GPU tests, of different GPUs, and
+     sees both (utils/lit/merkurius_lit.py, GpuShTest). It waits while it
+     cannot have both, holding neither, so two such tests never each hold
+     one. The `two-gpus` feature says that lit has two GPUs to give.
+     test/Utils/two-gpus-two-gpus.test checks that such a test sees two.
+   - *What went directly.* With `MERK_CHECK_DEVICE_MEMORY`, the device
+     counts the messages it puts in peer queues, and the copies in send
+     pools not given back. The count goes up as a copy is made and down as
+     it comes back or is dropped. The program's end reports both, summed
+     over every kernel, if any message went directly: "N messages went
+     directly between GPUs, and M of their copies were not given back".
+   - *test/Runtime/peer-sends-two-gpus.test* (Inputs/peer-sends.m), run
+     with the peer path at the default pool, at a 1 MiB pool with arrays of
+     128 KiB, and through the host. It checks:
+     - order for words, terms and arrays from GPU 1 to GPU 0;
+     - a sink with a source on each GPU, through its local and peer queues;
+     - a source that ends before its sink takes its arrays;
+     - 3000 arrays to a sink that had ended;
+     - a sink that ends with arrays queued, its source waiting on a full
+       queue;
+     - then a flood of 3000 arrays.
+     It checks that messages went directly, and that every copy came back.
+     A message larger than the pool ends the program. Each RUN line sets
+     `MERK_GPU_PEER` itself, since lit passes it through for runs of the
+     whole suite with it.
+   - *gpu-pairs* has two more chains of 8 relays, `AB*4` alternating
+     between the GPUs and `AA*4` on one, as `A-B` alone is mostly the
+     host's legs. test/Benchmarks/gpu-pairs-two-gpus.test runs it on two
+     GPUs with the peer path. benchmarks/gpu-pairs/README.md, Direct sends,
+     has the figures. On ROCR GPUs 1,3:
+     - an array of 1 word costs about 50 µs a hop between the GPUs
+       directly, against 117 through the host;
+     - streams between them are 1.5 to 3.2 times faster;
+     - large arrays in ping are slower, as in step 4;
+     - GPUs 2,3, one package, gave the same figures.
+   - A test that failed about 1 run in 20 under lit, whatever
+     `MERK_GPU_PEER` was, came up while running the whole suite:
+     test/CodeGen/process-mailbox-arrays.m. Its ring of nodes takes
+     exactly N messages for their peers, and drops any other. The host
+     introduced node 0 first, and node 0 starts the token once it has its
+     peers, so a node that the host had not yet finished introducing could
+     take the token among its peers and drop it, and the ring stopped. A
+     copy that reported the drop showed it, on token 3. The host now
+     introduces node 0 last, and 60 runs under lit passed. The test's
+     program is also the GPU variant's, process-mailbox-arrays-gpu.test.
 6. The copy-engine path for large arrays, if experiment 2 calls for it.
 
 **Open.**

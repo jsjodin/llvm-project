@@ -1,0 +1,5 @@
+A -two-gpus.test file sees two different GPUs, which lit takes for it
+(utils/lit/merkurius_lit.py, GpuShTest).
+REQUIRES: two-gpus
+RUN: %python -c "import os; g = os.environ['ROCR_VISIBLE_DEVICES'].split(','); assert len(g) == 2 and g[0] != g[1], g; print('two GPUs')" | FileCheck %s
+CHECK: two GPUs

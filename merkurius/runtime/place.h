@@ -100,7 +100,11 @@ struct PlaceSlot {
 // ordinary memory, from which its processes' copies of messages to other
 // GPUs come; and `returns`, the GPU's return ring, in its fine-grained memory
 // (ReturnRing). All are the GPU's, not the kernel's, and outlive it (see
-// PeerQueue). Without the peer path they are 0.
+// PeerQueue). Without the peer path they are 0. With MERK_CHECK_DEVICE_MEMORY,
+// the device counts in `peerSends` the messages its processes put in peer
+// queues, and in `peerCopies` the copies in send pools they made, less those
+// they gave back or dropped, which the program's end reports summed over
+// every kernel: a copy made by one kernel goes back in another's count.
 struct PlaceTable {
   uint64_t end;
   uint64_t slots;
@@ -113,6 +117,8 @@ struct PlaceTable {
   uint64_t sendPool;
   uint64_t sendPoolBytes;
   uint64_t returns;
+  int64_t peerSends;
+  int64_t peerCopies;
 };
 
 // The queue through which the process of a slot receives from the other

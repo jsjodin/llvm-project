@@ -79,6 +79,7 @@ void PlaceProcessEnded(int device, std::uint64_t table, std::uint64_t slot);
 std::uint64_t PlaceRoute(const std::uint64_t *handle, int device,
     std::uint64_t table, std::uint64_t *incarnation, std::uint64_t *peerQueue);
 std::int64_t PlaceMessageBlocks();
+void PlacePeerCounts(std::int64_t *sends, std::int64_t *copies);
 // The most bytes of blocks that a GPU process held at once, of all those
 // that have ended, which MERK_CHECK_PROCESS_MEMORY reports.
 std::atomic<std::uint64_t> processPeakBytes{0};
@@ -1033,6 +1034,16 @@ void CheckFreedAtEnd() {
         "Mercury runtime: %lld blocks of messages between GPU processes are "
         "allocated\n",
         static_cast<long long>(PlaceMessageBlocks()));
+    // Only a program whose processes sent directly between GPUs.
+    std::int64_t sends{0};
+    std::int64_t copies{0};
+    PlacePeerCounts(&sends, &copies);
+    if (sends != 0 || copies != 0) {
+      std::fprintf(stderr,
+          "Mercury runtime: %lld messages went directly between GPUs, and "
+          "%lld of their copies were not given back\n",
+          static_cast<long long>(sends), static_cast<long long>(copies));
+    }
   }
 }
 } // namespace merkurius::runtime

@@ -1,0 +1,9 @@
+Arrays through relays (benchmarks/gpu-pairs/gpupairs.m) on two GPUs, the
+relays sending directly to those of the other GPU (MERK_GPU_PEER=1), on
+1 MiB a measurement: every array comes back with its size and last element,
+in all 5 chains.
+REQUIRES: two-gpus
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/gpu-pairs/gpupairs.m -o %t
+RUN: %gpu-env MERK_GPU_PEER=1 timeout -k 1 300 %t 1 | awk '{ n++; if ($5 != $7) w++ } END { print n " rows, " w + 0 " wrong" }' | FileCheck %s --match-full-lines
+CHECK: 90 rows, 0 wrong
