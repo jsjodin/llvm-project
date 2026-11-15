@@ -5329,7 +5329,9 @@ as every process of a GPU allocates from that GPU's heap.
   for the slot when the slot is full. Spills come from the GPU's heap, so
   the receiver frees them.
 - *Senders in flight.* A sender counts itself into the queue, checks the
-  incarnation and that the queue is open, sends, and counts itself out. A
+  incarnation and that the queue is open, sends, and counts itself out.
+  The incarnation and openness are one word, `state` (*fixed 2026-11-15*,
+  below). A
   process that ends closes its queue, waits until no sender is in flight,
   and frees what the queue still holds, before it tells the host: the
   queue's memory lives as long as the kernel, so a sender never touches
@@ -5979,9 +5981,9 @@ queue's slots are laid out. 512 B costs the same as 8 B.
      process ended frees its copy into its own pool (`DiscardCopy`).
    - *The queue's state is one word,* the incarnation shifted left with 1
      while the process runs. With `closed` and `incarnation` as two words, as
-     the local queue has them, a stale sender could slip in between the
+     the local queue had them, a stale sender could slip in between the
      two stores of the next process's `OpenQueue` and reach it. The local
-     queue keeps that small window (Open, below).
+     queue had that window until 2026-11-15 (below, after step 7).
 
    Checked on r11 (ROCR GPUs 1,3, and 2,3 for words and terms), by hand,
    with programs not kept: every word, array and term arrived right, in
@@ -6184,13 +6186,33 @@ queue's slots are laid out. 512 B costs the same as 8 B.
      exception above; the 2,3 and 1,3 pairs, busy with others' jobs, were
      not measured.
 
+**The local queue's state in one word.** *Fixed 2026-11-15.* `OpenQueue`
+stored `closed` and then `incarnation`, and `EnterQueue` loaded
+`incarnation` and then `closed`. A sender to the slot's previous process
+that loaded the old incarnation before the second store, and `closed`
+after the first, found the queue open at its incarnation and put its
+message there, for the next process; it also set the queue's `kind` to
+its own messages'. Only the slot's next process after the sender's target
+can get such a message: every later one has a newer incarnation, which
+the sender rejects.
+- *Not rare.* test/CodeGen/process-stale-sends.m starts, each round, a
+  target that ends, a sender that keeps sending to it, and then a fresh
+  process in the target's slot, to which nobody sends. On gfx90a, with the
+  two words, about one round in ten gave the fresh process a word (426 of
+  4000 rounds, on ROCR GPUs 5 and 7; 69 of 300 in the test); with a sleep
+  between the stores, every round. With the fix, 0 in 4000, with or
+  without the sleep.
+- *The fix,* as the peer queue's (step 4): `ProcessQueue::state` is the
+  incarnation shifted left with 1 while the process runs. `OpenQueue`
+  stores it once, `CloseQueue` clears the bit, and a sender wants exactly
+  `incarnation << 1 | 1`.
+- *A stale sender looks first.* `EnterQueue` loads `state` before it
+  counts itself in: if its process has ended, which is final, it leaves
+  `senders` alone, which the slot's later processes wait on as they close.
+  Measured, this did not change the test's time.
+
 **Open.**
 
-- The local queue's `OpenQueue` stores `closed` and then `incarnation`, so
-  a sender to the slot's previous process that looks between the two
-  stores finds the queue open at its incarnation and puts its message
-  there, for the new process. The peer queue keeps both in one word (step
-  4); the local queue could too.
 - Whether a process that only receives from peers should look at the host's
   ring less often.
 - The send pool's size, and whether it should grow on demand.
