@@ -170,7 +170,7 @@ void *DeviceAllocate(int device, std::size_t bytes) {
 }
 
 void *DeviceAllocateFine(int device, std::size_t bytes) {
-  const Gpu *gpu{OpenMPDevice(device) ? nullptr : GpuOf(device)};
+  const Gpu *gpu{GpuOf(device)};
   void *memory{nullptr};
   if (!gpu ||
       olMemAlloc(gpu->context, gpu->device, kOlAllocTypeDeviceFineGrained,
@@ -178,6 +178,12 @@ void *DeviceAllocateFine(int device, std::size_t bytes) {
     return nullptr;
   }
   return memory;
+}
+
+void DeviceFreeFine(int device, void *memory) {
+  if (const Gpu *gpu{GpuOf(device)}) {
+    olMemFree(gpu->context, memory);
+  }
 }
 
 void DeviceFree(int device, void *memory) {

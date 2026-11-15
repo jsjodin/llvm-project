@@ -536,6 +536,14 @@ std::uint64_t PeerDmaBytes(std::uint64_t lanes) {
   return lanes == 64 ? std::uint64_t{64} << 10 : ~std::uint64_t{0};
 }
 
+// Whether a GPU process's worker teams copy an array sent directly to
+// another GPU, where they would copy it (device.cpp, Bulk), rather than the
+// copy engine (rpcPeerDmaBytes): unless MERK_GPU_PEER_WORKERS is 0.
+bool PeerWorkersFirst() {
+  const char *text{std::getenv("MERK_GPU_PEER_WORKERS")};
+  return !(text && std::strcmp(text, "0") == 0);
+}
+
 // rpcCopyPeer: a copy into the asking device's memory, from its own or from
 // the send pool of the GPU of the return ring `returns`; whether it made it.
 bool CopyPeer(std::uint64_t to, std::uint64_t from, std::uint64_t bytes,
@@ -803,6 +811,7 @@ unsigned HandleOpcode(void *raw, unsigned) {
   case rpcPeerDmaBytes:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
       buffer->data[0] = PeerDmaBytes(buffer->data[0]);
+      buffer->data[1] = PeerWorkersFirst();
     });
     return rpc::RPC_SUCCESS;
   case rpcCopyPeer:
