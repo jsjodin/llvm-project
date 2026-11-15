@@ -46,13 +46,38 @@ extern "C" bool merk_device_bulk_copy(
     uint64_t *to, const uint64_t *from, uint64_t words);
 #endif
 
+#if defined(__AMDGPU__) || defined(__NVPTX__)
+// Copies kPiece words from `i` on if as many are left, with every load in
+// flight before the first store (CopyWords).
+template <Word kPiece>
+inline void CopyPiece(Word *to, const Word *from, Word words, Word &i) {
+  if (words - i < kPiece) {
+    return;
+  }
+  Word batch[kPiece];
+#pragma unroll
+  for (Word k{0}; k < kPiece; ++k) {
+    batch[k] = from[i + k];
+  }
+#pragma unroll
+  for (Word k{0}; k < kPiece; ++k) {
+    to[i + k] = batch[k];
+  }
+  i += kPiece;
+}
+#endif
+
 // Copies `words` words, as memcpy does. On a GPU, where one lane copies a
 // message between the device's memory and the host's, memcpy's loop waits
 // for each load before the next, and a load from host memory is a round trip
 // over the bus: about 0.4 us a word, which was 40% of a step of Life on two
 // places (design document, Measurements, "Life on several places"). Here a
-// batch of loads is in flight before any of their stores. A GPU process
-// with worker teams has them copy many words (merk_device_bulk_copy).
+// batch of loads is in flight before any of their stores. The words after
+// the last whole batch go in pieces of 16, 8, 4, 2 and 1, each in flight
+// together: most messages are a few words, and one load after another cost
+// an array of 13 words 6 us between GPUs (docs/INPROGRESS.md, The cost of a
+// message). A GPU process with worker teams has them copy many words
+// (merk_device_bulk_copy).
 inline void CopyWords(Word *to, const Word *from, Word words) {
 #if defined(__AMDGPU__)
   if (merk_device_bulk_copy(to, from, words)) {
@@ -73,9 +98,11 @@ inline void CopyWords(Word *to, const Word *from, Word words) {
       to[i + k] = batch[k];
     }
   }
-  for (; i < words; ++i) {
-    to[i] = from[i];
-  }
+  CopyPiece<16>(to, from, words, i);
+  CopyPiece<8>(to, from, words, i);
+  CopyPiece<4>(to, from, words, i);
+  CopyPiece<2>(to, from, words, i);
+  CopyPiece<1>(to, from, words, i);
 #else
   __builtin_memcpy(to, from, sizeof(Word) * words);
 #endif

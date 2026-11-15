@@ -6177,14 +6177,17 @@ queue's slots are laid out. 512 B costs the same as 8 B.
      | `AB*4`, stream | 6782 | 6117 | 3266 |
      | `A-B`, ping | 6720 | 6044 | 4163 |
 
-     Workers first is faster from 16384 words in every chain but one:
-     `A-B` ping at 262144 words, 1321 against the engine's 813.
+     Workers first is faster from 16384 words in every chain. One run had
+     the engine faster at `A-B` ping of 262144 words, 813 against 1321;
+     three more of the engine (1336 to 1457) and two of workers (1133 and
+     1399) on 2026-11-15 did not repeat it. From 262144 words one run of a
+     mode can be 20 to 40% off another, so a single run there decides
+     nothing.
    - test/Benchmarks/gpu-pairs-two-gpus.test also builds gpupairs.m with
      `-fopenmp` and runs it with `workers 8`, checking that its messages
      went directly.
-   - Left: 8 worker teams a relay was the only share measured; the
-     exception above; the 2,3 and 1,3 pairs, busy with others' jobs, were
-     not measured.
+   - Left: 8 worker teams a relay was the only share measured; the 2,3
+     and 1,3 pairs, busy with others' jobs, were not measured.
 
 8. The link alone. *Measured 2026-11-15* (benchmarks/gpu-link): sources on
    one GPU stream arrays to sinks on another, timed on the sinks' clocks,
@@ -6245,7 +6248,7 @@ on ROCR GPUs 4,6:
   receiver's new block for the array: libc's `malloc` on the GPU, 5–7 µs
   from one lane, and its `free` 1.5–2.5 µs when the process lets the array
   go. A GPU process now keeps a cache of the small blocks its own wave has
-  freed, in its arena (`SmallAllocate`, `SmallFree`): a power of two from 64 bytes to 4
+  freed, in its arena (`SmallAllocate`, now `NewOwnBlock`, and `SmallFree`): a power of two from 64 bytes to 4
   KiB, up to 1 MiB in all, the last freed of its size taken first. Worker
   teams, which make blocks at the same time as their process, still go to
   libc; the process's end gives the cache back. The receiver's block went
@@ -6330,10 +6333,92 @@ on ROCR GPUs 4,6:
   gpu-pairs, up to 4096 words: `AB*4` 6 to 19% faster in every row, the
   rest as fast or faster but for `A-B` stream of 16 words, 63.8 → 67.3
   in one run of each; larger arrays vary between runs as before.
-- Left: the receiver, which a stream waits on, still spends some 16 µs
-  on an array of 1 word: its route, the local queue's miss, the peer
-  queue's slot, the array's block and copy over the link, and the
-  message's cell, each one to three loads of most of a microsecond.
+- *The receiver.* A stream to one sink waits on the receiver, which
+  spent some 16 µs on an array of 1 word between GPUs. Counters in
+  `merk_device_receive_array`, `DirectReceive`, `DeliverPeer` and the
+  allocator (recv scratch build, not kept) found it never waiting for a
+  message: about 2.7 µs making the array's block, 1.4 copying the array
+  across the link, 1.7 holding the copy to return, 1 looking at its own
+  queue before the peer queue, 1.2 finding its route, and between
+  receives 3 freeing the array and the receive's result cell. Each was a
+  chain of loads, one after another, of most of a microsecond each.
+  - *Small arrays in the slot.* An array of at most 12 words, header
+    included (`kPeerInlineWords`), goes in the peer queue's slot itself,
+    now 128 bytes, one line of the L2, with `kPeerInline` for its
+    message: the receiver copies it from its own memory, and neither GPU's
+    send pool, nor a return, takes part. The receiver frees the slot after
+    reading it (`TakePeer` takes it, `FreePeerSlot` gives it back); other
+    messages free it first, as before. A kernel's peer queues take 8 KiB
+    a slot, where they took 2.
+  - *Short copies in flight together.* `CopyWords` kept 32 loads in
+    flight, but copied the words after the last 32 one at a time, each
+    load waiting for the one before: most messages. They now go in
+    pieces of 16, 8, 4, 2 and 1, each piece's loads together (copy.h,
+    `CopyPiece`). An array of 13 words across the link took 6.6 µs to
+    copy. Conditional loads in one unrolled loop were slower; the compiler
+    waited at each branch.
+  - *The process's own blocks in two round trips.* `NewOwnBlock` (which
+    replaces `SmallAllocate` for the process's own wave) loads the cache's
+    head, its byte count, `held`, `peak` and the block list's head before
+    any store, and the cached block's link after them; `merk_device_free`
+    loads the block's words and the arena's together, and a group of one
+    block, most messages, takes a path of its own.
+  - *The queues' heads in the team's memory.* Only the receiver reads
+    its queue's and its peer queue's `head`, so the wave keeps both in
+    the team's local memory (`queueHeads`, `peerHeads`), loaded as the
+    process starts, and stores the queues' own as they move. A look at
+    the local queue loads the slot and the spill lists' heads together,
+    so an empty queue is one round trip.
+  - *An acquire at system scope only for a copy in the send pool.* On
+    gfx90a an acquire at system scope invalidates all of the L2, so every
+    load of the receiver's own memory after `TakePeer`, the arena's for
+    the array it makes among them, went to memory. A sender's writes
+    into the receiver's memory go through the receiver's L2, and are seen
+    after an acquire at the device's scope (Results of the experiments,
+    1), so only a message with a copy in the sender's pool, which the
+    receiver reads across the link, takes one at system scope. Freeing the
+    slot is a release at the device's scope: the receiver wrote nothing
+    that a sender reads.
+
+  A stream of 20000 arrays on ROCR GPUs 4,6 (recv scratch program), µs a
+  message at the receiver, after each change: 1 element 16.4, 15.1
+  (slot), 14.4 (copies), 12.6 (blocks), 11.5 (heads), 10.9 (acquire); 12
+  elements, through the pool, 19.5, 17.7 (copies), 15.6, 14.5, 14.1.
+
+  The benchmarks of the previous item, the old runtime and the new
+  measured the same afternoon:
+
+  | Stream | Before | After |
+  | --- | --- | --- |
+  | One sink, 1 word (at the receiver) | 17.0 | 11.3 |
+  | One sink, 1024 words (at the receiver) | 22.8 | 19.9 |
+  | Two sinks, 1 word (at the sender) | 13.8 | 9.8 |
+  | Two sinks, 1024 words (at the sender) | 15.8 | 15.5 |
+
+  gpu-link, µs between arrays of 1 word: `A>B` 17.0 → 11.8, `A>Bx4` 22.9
+  → 13.3, `A<>Bx4` 23.4 → 13.6, `A>A` 15.8 → 14.6; `A>A` of 1024 words
+  15.1 → 11.2. gpu-pairs: `AB*4` ping of 1 word 298 → 212, `A-B` stream of
+  16 words 66.5 → 51.3. Rows of 65536 words and more seemed slower in
+  some runs; the two runtimes' gpu-pairs run in turn, three times each,
+  were as fast at 16384 to 262144 words, and at 2^20 the new one's runs
+  fell in the old one's spread.
+- *The reaper's count of an ended kernel.* A full run of the tests
+  failed once in three in peer-sends-two-gpus.test: "3559 messages went
+  directly between GPUs, and -3000 of their copies were not given
+  back". The reaper took the ended kernels off their list under the lock,
+  but added their counts to the ended kernels' sums only after it had
+  reaped the processes, without it; the program's end, which waits for
+  the processes, could count in between, and miss the flood's sending
+  kernel and its 3000 copies. With the reaper made to sleep in that
+  window, the old runtime lost the counts every time. The reaper now adds
+  them as it takes the kernels (`CountEndedPlace`), and
+  `PlaceMessageBlocks` reads its sum under the lock as well.
+- Left: the receive's result cell, `message(A)`, allocated and freed
+  for each message even when the program only takes it apart; the
+  route's check, about 1 µs; and on one GPU, a receiver frees the
+  sender's blocks into its own cache, which fills, while the sender's
+  empties and goes to libc for each block (`A-A` and the one-GPU
+  streams gained least).
 
 **The local queue's state in one word.** *Fixed 2026-11-15.* `OpenQueue`
 stored `closed` and then `incarnation`, and `EnterQueue` loaded

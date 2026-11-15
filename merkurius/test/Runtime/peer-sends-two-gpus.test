@@ -19,6 +19,12 @@ RUN: %gpu-env MERK_GPU_PEER=1 MERK_GPU_PEER_DMA_BYTES=1048576 MERK_CHECK_DEVICE_
 The same by the copy engine.
 RUN: %gpu-env MERK_GPU_PEER=1 MERK_GPU_PEER_DMA_BYTES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 300 %t 2>&1 | FileCheck %s --check-prefixes=CHECK,PEER --match-full-lines
 
+Arrays of 11 elements, 12 words with the header, the most that go in the
+peer queue's slot itself (place.h, kPeerInlineWords), and of 12, the
+fewest that go through the send pool.
+RUN: %gpu-env MERK_GPU_PEER=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 300 %t 11 2>&1 | FileCheck %s --check-prefixes=CHECK,PEER --match-full-lines
+RUN: %gpu-env MERK_GPU_PEER=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 300 %t 12 2>&1 | FileCheck %s --check-prefixes=CHECK,PEER --match-full-lines
+
 A send pool of 1 MiB holds 7 copies of 128 KiB at once, so the senders
 wait for their copies to come back; the copy engine makes and takes them.
 RUN: %gpu-env MERK_GPU_PEER=1 MERK_GPU_PEER_DMA_BYTES=65536 MERK_GPU_SEND_POOL_BYTES=1048576 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 300 %t 16384 2>&1 | FileCheck %s --check-prefixes=CHECK,PEER --match-full-lines
