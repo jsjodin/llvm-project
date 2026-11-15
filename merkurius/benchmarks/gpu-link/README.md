@@ -104,7 +104,7 @@ What it shows:
   managed about 30000 messages a second. The flag latency between GPUs is
   about 1.2 µs (peer.hip), so this cost was in the processes' own send and
   receive, not in the link. After the changes in docs/INPROGRESS.md (The
-  cost of a message), an array of 1 word takes 26 µs between GPUs and 20
+  cost of a message), an array of 1 word takes 17 µs between GPUs and 17
   within one, and a word 9 and 11.
 - Through the host, large arrays manage 2–9 GB/s, and small ones cost
   50–90 µs.

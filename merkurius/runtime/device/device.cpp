@@ -208,9 +208,11 @@ struct Arena {
   uint64_t held;
   uint64_t peak;
   Route *routes;
+  void *small[merkurius::runtime::kSmallClasses];
+  uint64_t smallBytes;
 };
 static_assert(sizeof(Arena) == kArenaClearWords * sizeof(uint64_t));
-Arena arena{{nullptr, 0, 0}, {}, nullptr, nullptr, 0, 0, nullptr};
+Arena arena{{nullptr, 0, 0}, {}, nullptr, nullptr, 0, 0, nullptr, {}, 0};
 
 // In a region's image, by the slot of each region that runs (device-ring.h):
 // where its cells are bumped from, its teams' table if it is a target teams
@@ -651,13 +653,85 @@ void RawFree(void *raw, uint64_t bytes) {
   }
 }
 
+// A GPU process's cache of small blocks: libc's malloc and
+// free on the GPU cost some microseconds each, from one lane, and a process
+// that receives a message makes and frees blocks for it every time. A block
+// of a process's own wave, of up to 4 KiB, is a power of two from 64 bytes,
+// a class; a freed block whose size is a class goes on the arena's list for
+// it, up to kSmallCacheBytes in all, and a new one of that class is the
+// last freed. Worker teams make blocks at the same time as their process,
+// from libc. The process's end gives the cache back to libc.
+constexpr uint64_t kSmallLeastOrder{6};
+constexpr uint64_t kSmallCacheBytes{uint64_t{1} << 20};
+
+// The class of a block of `bytes`, or kSmallClasses if it is larger.
+uint64_t SmallClass(uint64_t bytes) {
+  uint64_t order{
+      bytes <= 1 ? 0 : 64 - static_cast<uint64_t>(__builtin_clzll(bytes - 1))};
+  order = order < kSmallLeastOrder ? kSmallLeastOrder : order;
+  uint64_t index{order - kSmallLeastOrder};
+  return index < merkurius::runtime::kSmallClasses
+      ? index
+      : merkurius::runtime::kSmallClasses;
+}
+
+// `bytes` for the process's own wave, from its cache or libc, rounded up to
+// the class; in `given` how many.
+void *SmallAllocate(Arena *arena, uint64_t bytes, uint64_t &given) {
+  uint64_t index{SmallClass(bytes)};
+  if (index == merkurius::runtime::kSmallClasses) {
+    return RawAllocate(bytes, given);
+  }
+  given = uint64_t{1} << (index + kSmallLeastOrder);
+  if (void *raw{arena->small[index]}) {
+    arena->small[index] = *static_cast<void **>(raw);
+    arena->smallBytes -= given;
+    return raw;
+  }
+  return RawAllocate(given, given);
+}
+
+// Gives back a block of the process's own wave: to the cache if its size
+// is a class and the cache has room, or to libc.
+void SmallFree(Arena *arena, void *raw, uint64_t bytes) {
+  uint64_t index{SmallClass(bytes)};
+  if (index < merkurius::runtime::kSmallClasses &&
+      bytes == uint64_t{1} << (index + kSmallLeastOrder) &&
+      arena->smallBytes + bytes <= kSmallCacheBytes) {
+    *static_cast<void **>(raw) = arena->small[index];
+    arena->small[index] = raw;
+    arena->smallBytes += bytes;
+    return;
+  }
+  RawFree(raw, bytes);
+}
+
+// As the process ends: the cache, to libc.
+void FreeSmallCache(Arena *arena) {
+  for (uint64_t index{0}; index < merkurius::runtime::kSmallClasses; ++index) {
+    for (void *raw{arena->small[index]}; raw;) {
+      void *next{*static_cast<void **>(raw)};
+      RawFree(raw, uint64_t{1} << (index + kSmallLeastOrder));
+      raw = next;
+    }
+    arena->small[index] = nullptr;
+  }
+  arena->smallBytes = 0;
+}
+
 // A block of `bytes` for what runs on the wave, whose bytes start on 256
 // bytes after `before` bytes, or on 16 if `before` is 0; in `leader`'s
-// group if it is not null.
+// group if it is not null. The process's own wave takes it from its cache
+// of small blocks (SmallAllocate). Worker teams add to `held` as the
+// process does, so its updates are atomic, at the device's scope, as only
+// the device reads it.
 void *NewBlock(Arena *arena, uint64_t bytes, uint64_t before, Block *leader) {
   constexpr uint64_t kAlign{256};
   uint64_t given{0};
-  void *raw{RawAllocate(sizeof(Block) + bytes + (before ? kAlign : 0), given)};
+  uint64_t asked{sizeof(Block) + bytes + (before ? kAlign : 0)};
+  void *raw{processWaves[__gpu_thread_id_x() / __gpu_num_lanes()]
+          ? SmallAllocate(arena, asked, given)
+          : RawAllocate(asked, given)};
   uintptr_t start{reinterpret_cast<uintptr_t>(raw) + sizeof(Block)};
   if (before) {
     start += (kAlign - (start + before) % kAlign) % kAlign;
@@ -665,8 +739,10 @@ void *NewBlock(Arena *arena, uint64_t bytes, uint64_t before, Block *leader) {
   Block *block{BlockOf(reinterpret_cast<void *>(start))};
   block->raw = raw;
   block->bytes = given;
-  uint64_t held{__atomic_add_fetch(&arena->held, given, __ATOMIC_RELAXED)};
-  __atomic_fetch_max(&arena->peak, held, __ATOMIC_RELAXED);
+  uint64_t held{__scoped_atomic_add_fetch(
+      &arena->held, given, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE)};
+  __scoped_atomic_fetch_max(
+      &arena->peak, held, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
   if (!processWaves[__gpu_thread_id_x() / __gpu_num_lanes()]) {
     block->prev = kTeamBlock;
     block->leader = block;
@@ -697,12 +773,14 @@ void *NewBlock(Arena *arena, uint64_t bytes, uint64_t before, Block *leader) {
   return reinterpret_cast<void *>(start);
 }
 
-// Gives back a block and the rest of its group, which are on no list.
+// Gives back a block and the rest of its group, which are on no list. Only
+// the process's own wave frees blocks, to its cache.
 void FreeGroup(Arena *arena, Block *leader) {
   for (Block *block{leader}; block;) {
     Block *member{block->member};
-    __atomic_sub_fetch(&arena->held, block->bytes, __ATOMIC_RELAXED);
-    RawFree(block->raw, block->bytes);
+    __scoped_atomic_sub_fetch(&arena->held, block->bytes, __ATOMIC_RELAXED,
+        __MEMORY_SCOPE_DEVICE);
+    SmallFree(arena, block->raw, block->bytes);
     block = member;
   }
 }
@@ -721,6 +799,7 @@ void FreeProcessBlocks(Arena *arena) {
   }
   arena->blocks = nullptr;
   arena->teamBlocks = nullptr;
+  FreeSmallCache(arena);
 }
 
 // Whether what runs on the wave makes blocks rather than bumping cells: a
