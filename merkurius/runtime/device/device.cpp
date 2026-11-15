@@ -150,6 +150,8 @@ using merkurius::runtime::rpcSendArrayFromDevice;
 using merkurius::runtime::rpcSendTerm;
 using merkurius::runtime::rpcTakeArray;
 using merkurius::runtime::rpcTakeArrayInto;
+using merkurius::runtime::rpcCopyPeer;
+using merkurius::runtime::rpcPeerDmaBytes;
 using merkurius::runtime::rpcTakeTerm;
 using merkurius::runtime::rpcTeamsStall;
 
@@ -3083,11 +3085,61 @@ struct PeerCopy {
   PoolBlock *copy;
 };
 
+// From how many bytes an array goes into the send pool, and out of it, by
+// the copy engine (rpcPeerDmaBytes), asked once; 0 before.
+uint64_t peerDmaBytes{0};
+
+uint64_t PeerDmaBytes() {
+  uint64_t bytes{__atomic_load_n(&peerDmaBytes, __ATOMIC_RELAXED)};
+  if (bytes == 0) {
+    rpc::Client::Port port{__llvm_rpc_client.open<rpcPeerDmaBytes>()};
+    port.send([](rpc::Buffer *buffer, uint32_t) {
+      buffer->data[0] = static_cast<uint64_t>(__builtin_amdgcn_wavefrontsize());
+    });
+    port.recv([&](rpc::Buffer *buffer, uint32_t) { bytes = buffer->data[0]; });
+    __atomic_store_n(&peerDmaBytes, bytes, __ATOMIC_RELAXED);
+  }
+  return bytes;
+}
+
+// Copies `bytes` from `from` to `to`, in this device's memory, by the copy
+// engine that the host drives (rpcCopyPeer): `from` is in this device's
+// memory if `returns` is 0, and otherwise in the send pool of the GPU whose
+// return ring it is. What this device wrote to `from` is written back
+// first, and what the copy wrote is seen after.
+void CopyByEngine(void *to, const void *from, uint64_t bytes, uint64_t returns) {
+  __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+  uint64_t made{0};
+  rpc::Client::Port port{__llvm_rpc_client.open<rpcCopyPeer>()};
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    buffer->data[0] = reinterpret_cast<uint64_t>(to);
+    buffer->data[1] = reinterpret_cast<uint64_t>(from);
+    buffer->data[2] = bytes;
+    buffer->data[3] = static_cast<uint64_t>(DeviceNumber());
+    buffer->data[4] = returns;
+  });
+  port.recv([&](rpc::Buffer *buffer, uint32_t) { made = buffer->data[0]; });
+  if (!made) {
+    Fail(2, "could not copy an array between GPUs by the copy engine");
+  }
+  // The host's copy was done before it answered.
+  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
+}
+
+// The sender's copy in its GPU's send pool; from PeerDmaBytes up, the copy
+// engine makes it, as one wave copies far below what the GPU's memory
+// gives (docs/INPROGRESS.md, Direct sends between the GPUs of a node,
+// step 6).
 PeerCopy ArrayToPool(const uint64_t *array) {
   uint64_t words{ArrayWords(array)};
-  PoolBlock *block{PoolAllocate(sizeof(uint64_t) * words)};
+  uint64_t bytes{sizeof(uint64_t) * words};
+  PoolBlock *block{PoolAllocate(bytes)};
   auto *copy{reinterpret_cast<uint64_t *>(block + 1)};
-  CopyWords(copy, array, words);
+  if (bytes >= PeerDmaBytes()) {
+    CopyByEngine(copy, array, bytes, 0);
+  } else {
+    CopyWords(copy, array, words);
+  }
   return {reinterpret_cast<uint64_t>(copy), block};
 }
 
@@ -3217,9 +3269,15 @@ uint64_t DeliverPeer(uint64_t kind, uint64_t message, uint64_t copy,
   if (kind == kRingOfArrays) {
     auto *from{reinterpret_cast<const uint64_t *>(message)};
     uint64_t words{ArrayWords(from)};
-    auto *array{
-        static_cast<uint64_t *>(merk_device_alloc(sizeof(uint64_t) * words))};
-    CopyWords(array, from, words);
+    uint64_t bytes{sizeof(uint64_t) * words};
+    auto *array{static_cast<uint64_t *>(merk_device_alloc(bytes))};
+    // From PeerDmaBytes up, the copy engine pulls it, as one wave loads
+    // across the link at under 1 GB/s (step 6).
+    if (bytes >= PeerDmaBytes()) {
+      CopyByEngine(array, from, bytes, returnTo);
+    } else {
+      CopyWords(array, from, words);
+    }
     result = reinterpret_cast<uint64_t>(array);
   } else if (kind == kRingOfTerms) {
     ArenaMemory memory;

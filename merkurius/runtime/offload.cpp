@@ -80,6 +80,7 @@ std::uint64_t PlaceRoute(const std::uint64_t *handle, int device,
     std::uint64_t table, std::uint64_t *incarnation, std::uint64_t *peerQueue);
 std::int64_t PlaceMessageBlocks();
 void PlacePeerCounts(std::int64_t *sends, std::int64_t *copies);
+int PeerGpuOfReturns(std::uint64_t returns);
 // The most bytes of blocks that a GPU process held at once, of all those
 // that have ended, which MERK_CHECK_PROCESS_MEMORY reports.
 std::atomic<std::uint64_t> processPeakBytes{0};
@@ -517,6 +518,34 @@ std::uint64_t DmaBytes(std::uint64_t lanes) {
   return lanes == 64 ? std::uint64_t{8} << 10 : ~std::uint64_t{0};
 }
 
+// From how many bytes an array sent directly to another GPU of the node goes
+// into the send pool, and out of it, by the copy engine (rpcPeerDmaBytes):
+// MERK_GPU_PEER_DMA_BYTES, or for a device whose waves have 64 lanes, as
+// for DmaBytes, 64 KiB, where one RPC and the copy engine's start cost less
+// than the wave's copy across the link in ping, measured on gfx90a between
+// packages (docs/INPROGRESS.md, Direct sends between the GPUs of a node,
+// step 6); and never for others.
+std::uint64_t PeerDmaBytes(std::uint64_t lanes) {
+  if (const char *text{std::getenv("MERK_GPU_PEER_DMA_BYTES")}) {
+    char *end{nullptr};
+    unsigned long long bytes{std::strtoull(text, &end, 10)};
+    if (end != text && *end == '\0') {
+      return bytes ? bytes : 1;
+    }
+  }
+  return lanes == 64 ? std::uint64_t{64} << 10 : ~std::uint64_t{0};
+}
+
+// rpcCopyPeer: a copy into the asking device's memory, from its own or from
+// the send pool of the GPU of the return ring `returns`; whether it made it.
+bool CopyPeer(std::uint64_t to, std::uint64_t from, std::uint64_t bytes,
+    int device, std::uint64_t returns) {
+  int fromDevice{returns ? PeerGpuOfReturns(returns) : device};
+  return fromDevice >= 0 &&
+      CopyBetweenDevices(device, reinterpret_cast<void *>(to), fromDevice,
+          reinterpret_cast<const void *>(from), bytes);
+}
+
 // The most bytes of one copy from or to a device: the AMDGPU plugin copies
 // more, from LIBOMPTARGET_AMDGPU_MAX_ASYNC_COPY_BYTES, 1 MiB, with host
 // memory it did not pin itself by another path, which on gfx90a waited
@@ -769,6 +798,18 @@ unsigned HandleOpcode(void *raw, unsigned) {
   case rpcDmaBytes:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
       buffer->data[0] = DmaBytes(buffer->data[0]);
+    });
+    return rpc::RPC_SUCCESS;
+  case rpcPeerDmaBytes:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      buffer->data[0] = PeerDmaBytes(buffer->data[0]);
+    });
+    return rpc::RPC_SUCCESS;
+  case rpcCopyPeer:
+    port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {
+      buffer->data[0] = CopyPeer(buffer->data[0], buffer->data[1],
+          buffer->data[2], static_cast<int>(buffer->data[3]),
+          buffer->data[4]);
     });
     return rpc::RPC_SUCCESS;
   case rpcTakeArrayInto:
