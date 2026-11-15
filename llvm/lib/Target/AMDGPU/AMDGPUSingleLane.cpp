@@ -61,18 +61,43 @@ bool onlyReturned(const Value *V) {
   return all_of(V->users(), [](const User *U) { return isa<ReturnInst>(U); });
 }
 
+/// Adds to \p Parts the extractions of the parts of the aggregate \p V,
+/// following it through the phis, selects, freezes and insertions that carry
+/// it, which are as divergent as it is: tail recursion elimination makes an
+/// aggregate argument a phi in the loop it makes, and its parts are then
+/// extracted from the phi.
+void findParts(Value *V, SmallPtrSetImpl<Value *> &Seen,
+               SmallVectorImpl<ExtractValueInst *> &Parts) {
+  if (!Seen.insert(V).second)
+    return;
+  for (User *U : V->users()) {
+    if (auto *Part = dyn_cast<ExtractValueInst>(U))
+      Parts.push_back(Part);
+    else if (isa<PHINode, SelectInst, FreezeInst>(U) &&
+             U->getType()->isAggregateType())
+      findParts(U, Seen, Parts);
+    else if (auto *Insert = dyn_cast<InsertValueInst>(U);
+             Insert && Insert->getAggregateOperand() == V)
+      findParts(Insert, Seen, Parts);
+  }
+}
+
 /// Replaces the uses of \p V by its value in the first active lane, read at
 /// \p Where. An aggregate's parts are read where they are extracted.
 bool readFirstLane(Value *V, BasicBlock::iterator Where) {
   if (V->use_empty() || onlyReturned(V))
     return false;
+  // A part that two sources' aggregates reach is read once.
+  if (V->hasOneUser())
+    if (auto *Read = dyn_cast<IntrinsicInst>(*V->user_begin());
+        Read && Read->getIntrinsicID() == Intrinsic::amdgcn_readfirstlane)
+      return false;
   Type *Ty = V->getType();
   if (Ty->isAggregateType()) {
     bool Changed = false;
+    SmallPtrSet<Value *, 8> Seen;
     SmallVector<ExtractValueInst *, 4> Parts;
-    for (User *U : V->users())
-      if (auto *Part = dyn_cast<ExtractValueInst>(U))
-        Parts.push_back(Part);
+    findParts(V, Seen, Parts);
     for (ExtractValueInst *Part : Parts)
       Changed |= readFirstLane(Part, std::next(Part->getIterator()));
     return Changed;

@@ -118,6 +118,52 @@ exit:
   ret i32 %old
 }
 
+; An aggregate argument carried by a phi, as tail recursion elimination
+; leaves it: its parts are read where they are extracted from the phi, so the
+; branch to unreachable is uniform, and the musttail exit is not in divergent
+; control flow, which the CFG structurizer cannot handle (llc stopped with
+; "failed to annotate CFG").
+; ISA-LABEL: through_phi:
+; ISA-NOT:     exec
+; ISA:         s_setpc_b64
+define void @through_phi(i64 %n, { i64, i64 } %s) "amdgpu-single-lane" {
+; CHECK-LABEL: define void @through_phi(
+; CHECK-SAME: i64 [[N:%.*]], { i64, i64 } [[S:%.*]]) #[[ATTR0]] {
+; CHECK-NEXT:  [[ENTRY:.*]]:
+; CHECK-NEXT:    [[TMP0:%.*]] = call i64 @llvm.amdgcn.readfirstlane.i64(i64 [[N]])
+; CHECK-NEXT:    br label %[[LOOP:.*]]
+; CHECK:       [[LOOP]]:
+; CHECK-NEXT:    [[AGG:%.*]] = phi { i64, i64 } [ [[S]], %[[ENTRY]] ]
+; CHECK-NEXT:    [[I:%.*]] = extractvalue { i64, i64 } [[AGG]], 1
+; CHECK-NEXT:    [[TMP1:%.*]] = call i64 @llvm.amdgcn.readfirstlane.i64(i64 [[I]])
+; CHECK-NEXT:    [[NEG:%.*]] = icmp slt i64 [[TMP1]], 0
+; CHECK-NEXT:    br i1 [[NEG]], label %[[CHECK:.*]], label %[[EXIT:.*]]
+; CHECK:       [[CHECK]]:
+; CHECK-NEXT:    [[IN:%.*]] = icmp ult i64 [[TMP1]], [[TMP0]]
+; CHECK-NEXT:    br i1 [[IN]], label %[[EXIT]], label %[[TRAP:.*]]
+; CHECK:       [[TRAP]]:
+; CHECK-NEXT:    unreachable
+; CHECK:       [[EXIT]]:
+; CHECK-NEXT:    musttail call void @through_phi(i64 [[TMP0]], { i64, i64 } [[AGG]])
+; CHECK-NEXT:    ret void
+;
+entry:
+  br label %loop
+loop:
+  %agg = phi { i64, i64 } [ %s, %entry ]
+  %i = extractvalue { i64, i64 } %agg, 1
+  %neg = icmp slt i64 %i, 0
+  br i1 %neg, label %check, label %exit
+check:
+  %in = icmp ult i64 %i, %n
+  br i1 %in, label %exit, label %trap
+trap:
+  unreachable
+exit:
+  musttail call void @through_phi(i64 %n, { i64, i64 } %agg)
+  ret void
+}
+
 ; A global load, which is uniform for uniform addresses, and a function
 ; without the attribute, are left as they are.
 define i32 @unmarked(ptr %p, ptr addrspace(1) %g) {
