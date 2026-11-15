@@ -115,7 +115,7 @@ constexpr std::size_t kReaderStackBytes{std::size_t{64} << 20};
 
 [[noreturn]] void Fail(const char *message, const char *detail) {
   std::fflush(stdout);
-  std::fprintf(stderr, "Mercury runtime: %s%s\n", message, detail);
+  std::fprintf(stderr, "Merkurius runtime: %s%s\n", message, detail);
   merkurius::runtime::ExitProgram(1);
 }
 
@@ -997,7 +997,7 @@ void *Accept(void *argument) {
   return nullptr;
 }
 
-// "what: detail" on the calling thread's heap, for Mercury.
+// "what: detail" on the calling thread's heap, for Merkurius.
 const char *HeapText(const char *what, const char *detail) {
   std::size_t a{std::strlen(what)};
   std::size_t b{std::strlen(detail)};

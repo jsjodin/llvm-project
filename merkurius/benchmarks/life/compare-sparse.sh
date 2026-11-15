@@ -12,7 +12,7 @@
 # rounds, each a run of all three, 5 by default. LIFE_WORLD (8192),
 # LIFE_TILE (64), LIFE_SOUP (256) and LIFE_STEPS (1000) pass through; the
 # dense program gets LIFE_WORLD as LIFE_SIZE. The first round's sparse runs
-# also write each step's active tiles and time to $out/mercury.trace and
+# also write each step's active tiles and time to $out/merkurius.trace and
 # $out/c.trace, for a chart. On a machine that others share, run it through
 # utils/gpu/with-gpus.py.
 set -euo pipefail
@@ -33,7 +33,7 @@ export LIFE_SOUP="${LIFE_SOUP:-256}"
 export LIFE_STEPS="${LIFE_STEPS:-1000}"
 
 "$build/bin/merkc" -O2 -fopenmp -fdo-loops -fprocess-declarations \
-  --offload-arch="$arch" "${flags[@]}" "$here/life-sparse.m" -o "$out/mercury"
+  --offload-arch="$arch" "${flags[@]}" "$here/life-sparse.m" -o "$out/merkurius"
 "$build/bin/clang" -O2 -fopenmp --offload-arch="$arch" "${flags[@]}" \
   "$here/life-sparse.c" -o "$out/c"
 "$build/bin/clang" -O2 -fopenmp --offload-arch="$arch" -DCELL=uint8_t \
@@ -41,7 +41,7 @@ export LIFE_STEPS="${LIFE_STEPS:-1000}"
 
 : > "$out/results"
 for ((r = 1; r <= rounds; r++)); do
-  for prog in mercury c dense; do
+  for prog in merkurius c dense; do
     if [[ $prog == dense ]]; then
       LIFE_SIZE="$LIFE_WORLD" "$out/$prog" > "$out/$prog.$r"
     elif ((r == 1)); then
@@ -84,14 +84,14 @@ awk '
     m = 0
     for (c in cells) m++
     if (m != 1) { print "the programs gave different cells"; exit 1 }
-    if (peak["mercury"] != peak["c"] || last["mercury"] != last["c"]) {
+    if (peak["merkurius"] != peak["c"] || last["merkurius"] != last["c"]) {
       print "the sparse programs had different tiles"; exit 1
     }
     printf "Active tiles: %s at most, %s at the end\n", peak["c"], last["c"]
     printf "%-34s %14s %16s\n", "Program", "Average (sec)", "Bookkeeping"
-    split("mercury c dense", ps, " ")
-    split("Mercury (GPU process, sparse);C (sparse);C (dense, uint8_t)", names, ";")
+    split("merkurius c dense", ps, " ")
+    split("Merkurius (GPU process, sparse);C (sparse);C (dense, uint8_t)", names, ";")
     for (i = 1; i <= 3; i++)
       printf "%-34s %14.6f %16.6f\n", names[i], median(avg, ps[i]), median(keep, ps[i])
   }' "$out/results"
-echo "Traces: $out/mercury.trace, $out/c.trace" >&2
+echo "Traces: $out/merkurius.trace, $out/c.trace" >&2

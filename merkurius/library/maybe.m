@@ -1,5 +1,5 @@
 % The standard library module maybe, with the declarations of the library
-% reference manual (22.01), all implemented in Mercury.
+% reference manual (22.01), all implemented in Merkurius.
 
 :- module maybe.
 :- interface.

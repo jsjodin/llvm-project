@@ -14,7 +14,7 @@ config.name = "Merkurius"
 # GpuShTest once the GPUs are known, below.
 config.test_format = lit.formats.ShTest()
 
-# Mercury sources, .test files for tests that need no source of their own,
+# Merkurius sources, .test files for tests that need no source of their own,
 # and MLIR modules in the merk dialect.
 config.suffixes = [".m", ".test", ".mlir"]
 
@@ -182,7 +182,7 @@ config.substitutions.append(
     )
 )
 
-# Tests that compare our term reader with Mercury's need mmc, from $MMC or
+# Tests that compare our term reader with mmc's need mmc, from $MMC or
 # the PATH; without it they are unsupported.
 import shutil
 

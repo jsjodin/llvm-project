@@ -765,7 +765,7 @@ results(Steps, Times, Counts, Population, Checksum, Peak, !IO) :-
 :- pred now(float::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(T::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -776,7 +776,7 @@ results(Steps, Times, Counts, Population, Checksum, Peak, !IO) :-
 :- pred setting(string::in, int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     setting(Name::in, Default::in, Value::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     const char *s = getenv(Name);
     Value = s && *s ? (MR_Integer) strtol(s, NULL, 10) : Default;
@@ -786,7 +786,7 @@ results(Steps, Times, Counts, Population, Checksum, Peak, !IO) :-
 :- pred exit_failure(io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     exit_failure(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     fflush(stdout);
     exit(1);
@@ -797,9 +797,9 @@ results(Steps, Times, Counts, Population, Checksum, Peak, !IO) :-
 :- pragma foreign_proc("C",
     header(World::in, Tile::in, Capacity::in, Soup::in, Steps::in,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
-    printf(\"Game of Life, Mercury, GPU process, sparse tiles\\n\");
+    printf(\"Game of Life, Merkurius, GPU process, sparse tiles\\n\");
     printf(\"World: %ld x %ld cells, tiles of %ld x %ld, %ld in the pool\\n\",
         (long) World, (long) World, (long) Tile, (long) Tile,
         (long) Capacity - 1);
@@ -812,7 +812,7 @@ results(Steps, Times, Counts, Population, Checksum, Peak, !IO) :-
     is det.
 :- pragma foreign_proc("C",
     trace_line(S::in, Active::in, Time::in, Keep::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"step %ld: %ld tiles, %.6f s, bookkeeping %.6f s\\n\", (long) S,
         (long) Active, Time, Keep);
@@ -823,7 +823,7 @@ results(Steps, Times, Counts, Population, Checksum, Peak, !IO) :-
 :- pragma foreign_proc("C",
     write_results(Population::in, Checksum::in, Peak::in, Final::in, Min::in,
         Max::in, Average::in, Keep::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"Population: %ld\\n\", (long) Population);
     printf(\"Checksum: %ld\\n\", (long) Checksum);

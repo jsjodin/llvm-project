@@ -87,7 +87,7 @@ void ForEachExistential(
 // the number it has, since types share their parts; at most `limit`.
 std::size_t TreeSize(const Type &, std::size_t limit);
 
-// Prints a type as Mercury writes it, module-qualified, as mmc's messages
+// Prints a type as Merkurius writes it, module-qualified, as mmc's messages
 // do: list.list(int), {int, string}, pred(int), (func(int) = int), and
 // the primitive char as character. A
 // variable is printed by `name`, or as T<number> without one. TypeToString

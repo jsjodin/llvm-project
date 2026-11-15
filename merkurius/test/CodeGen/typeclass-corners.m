@@ -93,7 +93,7 @@ marked(X, Y, !IO) :-
 :- instance sub(float, int) where [ func(other/2) is c_other ].
 :- func c_other(float, int) = int.
 :- pragma foreign_proc("C", c_other(A::in, B::in) = (R::out),
-    [will_not_call_mercury, promise_pure], "R = (MR_Integer) A * 10 + B;").
+    [will_not_call_merkurius, promise_pure], "R = (MR_Integer) A * 10 + B;").
 :- func use(X, Y) = int <= sub(X, Y).
 use(X, Y) = other(X, Y) + comb(Y, X).
 

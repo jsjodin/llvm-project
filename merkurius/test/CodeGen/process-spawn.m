@@ -150,5 +150,5 @@ run(Reply, !IO) :-
 % OUTPUT-NOT:{{.}}
 
 % NOTHING-NOT:{{.}}
-% OWNER:Mercury runtime: a process received from a mailbox of another process
-% OVERFLOW:Mercury runtime: stack overflow
+% OWNER:Merkurius runtime: a process received from a mailbox of another process
+% OVERFLOW:Merkurius runtime: stack overflow

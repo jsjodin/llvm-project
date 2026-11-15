@@ -20,4 +20,4 @@ defined_by_dcg --> [].
 defined_func(N) = N + 1.
 
 :- pragma foreign_proc("C", defined_foreign(N::in) = (M::out),
-    [will_not_call_mercury, promise_pure, thread_safe], "M = N * 2;").
+    [will_not_call_merkurius, promise_pure, thread_safe], "M = N * 2;").

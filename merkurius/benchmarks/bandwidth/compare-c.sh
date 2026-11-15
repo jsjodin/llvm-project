@@ -24,13 +24,13 @@ export LD_LIBRARY_PATH="$(IFS=:; echo "${libs[*]}")${LD_LIBRARY_PATH:+:$LD_LIBRA
 export OMP_TARGET_OFFLOAD=MANDATORY
 
 "$build/bin/merkc" -O2 -fopenmp -fdo-loops --offload-arch="$arch" "${flags[@]}" \
-  "$here/bandwidth.m" -o "$out/mercury"
+  "$here/bandwidth.m" -o "$out/merkurius"
 "$build/bin/clang" -O2 -fopenmp --offload-arch="$arch" "${flags[@]}" \
   "$here/bandwidth.c" -lm -o "$out/c"
 
 : > "$out/results"
 for ((r = 1; r <= rounds; r++)); do
-  for lang in mercury c; do
+  for lang in merkurius c; do
     "$out/$lang" | awk -v lang="$lang" -v r="$r" \
       '$1 ~ /^(Copy|Mul|Add|Triad|Dot)$/ { print lang, r, $1, $2 }' >> "$out/results"
   done
@@ -60,11 +60,11 @@ awk '
     return sprintf("%.0f-%.0f", lo, hi)
   }
   END {
-    printf "%-7s %16s %16s\n", "Kernel", "Mercury", "C"
+    printf "%-7s %16s %16s\n", "Kernel", "Merkurius", "C"
     split("Copy Mul Add Triad Dot", ks, " ")
     for (i = 1; i <= 5; i++) {
       k = ks[i]
-      printf "%-7s %16.0f %16.0f\n", k, median("mercury", k), median("c", k)
-      printf "%-7s %16s %16s\n", "", range("mercury", k), range("c", k)
+      printf "%-7s %16.0f %16.0f\n", k, median("merkurius", k), median("c", k)
+      printf "%-7s %16s %16s\n", "", range("merkurius", k), range("c", k)
     }
   }' "$out/results"

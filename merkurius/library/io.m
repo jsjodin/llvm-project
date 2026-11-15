@@ -177,14 +177,14 @@ error_message(io_error(Message), Message).
 
 :- pragma foreign_proc("C",
     set_exit_status(Status::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_set_exit_status(Status);
 ").
 
 :- pragma foreign_proc("C",
     flush_output(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     fflush(stdout);
 ").
@@ -209,7 +209,7 @@ read_line_as_string(Result, !IO) :-
 :- pred read_line_code(int::out, string::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     read_line_code(Code::out, Line::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Line = (MR_String) \"\";
     Code = merk_read_line(&Line);
@@ -244,7 +244,7 @@ arguments_before(Index, Arguments0, Arguments, !IO) :-
 :- pred argument_count(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     argument_count(Count::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Count = merk_argument_count();
 ").
@@ -252,42 +252,42 @@ arguments_before(Index, Arguments0, Arguments, !IO) :-
 :- pred argument(int::in, string::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     argument(Index::in, Argument::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     Argument = merk_argument(Index);
 ").
 
 :- pragma foreign_proc("C",
     write_string(S::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     fputs(S, stdout);
 ").
 
 :- pragma foreign_proc("C",
     nl(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     putc('\\n', stdout);
 ").
 
 :- pragma foreign_proc("C",
     write_int(N::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     printf(\"%\" PRIdPTR, N);
 ").
 
 :- pragma foreign_proc("C",
     write_uint(N::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     printf(\"%\" PRIuPTR, N);
 ").
 
 :- pragma foreign_proc("C",
     write_uint64(N::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     printf(\"%\" PRIu64, N);
 ").
@@ -315,7 +315,7 @@ write_uint32(N, !IO) :- write_uint(uint32.cast_to_uint(N), !IO).
 % A character is written in UTF-8.
 :- pragma foreign_proc("C",
     write_char(C::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     uint32_t c = (uint32_t) C;
     if (c < 0x80) {
@@ -340,7 +340,7 @@ write_uint32(N, !IO) :- write_uint(uint32.cast_to_uint(N), !IO).
 % exponent.
 :- pragma foreign_proc("C",
     write_float(F::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_write_float(F);
 ").
@@ -350,25 +350,25 @@ write_uint32(N, !IO) :- write_uint(uint32.cast_to_uint(N), !IO).
 % newline.
 :- pragma foreign_proc("C",
     write(X::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_write(TypeInfo_for_T, X, 0);
 ").
 :- pragma foreign_proc("C",
     print(X::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_write(TypeInfo_for_T, X, 1);
 ").
 :- pragma foreign_proc("C",
     write_line(X::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_write(TypeInfo_for_T, X, 2);
 ").
 :- pragma foreign_proc("C",
     print_line(X::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     merk_write(TypeInfo_for_T, X, 3);
 ").

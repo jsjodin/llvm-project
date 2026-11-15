@@ -1,18 +1,18 @@
 % The determinism of goals (reference manual, "Determinism checking and
-% inference"; Henderson, Somogyi and Conway, "Determinism analysis in the
-% Mercury compiler", 1996, section 5.1), as mmc infers it: of calls, by
-% their callees' declarations, of higher-order calls by their insts, and of
-% function applications, a call in an implied mode being able to fail by
-% its test; of unifications, a deconstruction being det if
-% its variable's inst, a switch or a deconstruction before, through an
-% assignment, gives its functor; of conjunctions, disjunctions, switches,
-% if-then-elses, the else part not counting if the condition cannot fail,
-% negations and scopes; and a goal with more than one solution but no
-% outputs, but not an impure one, has at most one, the innermost such
-% goal. A declaration that is looser than the inferred determinism has a
-% warning. Inference of undeclared determinisms is in inference.m,
-% committed choice in committed.m, determinism casts in casts.m and
-% requirements in requires.m.
+% inference"; Henderson, Somogyi and Conway, 1996, section 5.1), as mmc
+% infers it: of calls, by their callees' declarations, of higher-order
+% calls by their insts, and of function applications, a call in an
+% implied mode being able to fail by its test; of unifications, a
+% deconstruction being det if its variable's inst, a switch or a
+% deconstruction before, through an assignment, gives its functor; of
+% conjunctions, disjunctions, switches, if-then-elses, the else part not
+% counting if the condition cannot fail, negations and scopes; and a
+% goal with more than one solution but no outputs, but not an impure
+% one, has at most one, the innermost such goal. A declaration that is
+% looser than the inferred determinism has a warning. Inference of
+% undeclared determinisms is in inference.m, committed choice in
+% committed.m, determinism casts in casts.m and requirements in
+% requires.m.
 %
 % RUN: merkc -fc1 -fdebug-dump-determinism %s 2>%t.err | FileCheck %s
 % RUN: FileCheck --check-prefix=WARN --implicit-check-not=warning: --implicit-check-not=error: %s < %t.err

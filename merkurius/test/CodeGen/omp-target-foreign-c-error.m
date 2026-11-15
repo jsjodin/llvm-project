@@ -21,7 +21,7 @@ main(!IO) :-
 
 :- func twice(int) = int.
 :- pragma foreign_proc("C", twice(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
 #ifdef __AMDGPU__
     Y = no_such_variable;

@@ -30,7 +30,7 @@ pthread_mutex_t imagesLock = PTHREAD_MUTEX_INITIALIZER;
 [[noreturn]] void Fail(
     const char *message, const char *module, const char *gpu) {
   std::fflush(stdout);
-  std::fprintf(stderr, "Mercury runtime: %s%s for %s\n", message, module, gpu);
+  std::fprintf(stderr, "Merkurius runtime: %s%s for %s\n", message, module, gpu);
   std::_Exit(1);
 }
 

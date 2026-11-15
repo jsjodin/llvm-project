@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// The C main of every Mercury program (design document, "Runtime system").
+// The C main of every Merkurius program (design document, "Runtime system").
 // The compiler gives the main module's main(di, uo) a C entry, merk_main;
 // this starts the runtime, saving the environment that the run time
 // conditions of trace goals test (trace.cpp) and the command line, which

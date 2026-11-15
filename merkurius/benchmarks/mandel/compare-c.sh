@@ -26,13 +26,13 @@ export LD_LIBRARY_PATH="$(IFS=:; echo "${libs[*]}")${LD_LIBRARY_PATH:+:$LD_LIBRA
 export OMP_TARGET_OFFLOAD=MANDATORY
 
 "$build/bin/merkc" -O2 -fopenmp -fdo-loops -fprocess-declarations \
-  --offload-arch="$arch" "${flags[@]}" "$here/mandel.m" -o "$out/mercury"
+  --offload-arch="$arch" "${flags[@]}" "$here/mandel.m" -o "$out/merkurius"
 "$build/bin/clang" -O2 -ffp-contract=off -fopenmp --offload-arch="$arch" \
   "${flags[@]}" "$here/mandel.c" -o "$out/c"
 
 : > "$out/results"
 for ((r = 1; r <= rounds; r++)); do
-  for prog in mercury c; do
+  for prog in merkurius c; do
     "$out/$prog" > "$out/$prog.$r"
     awk -v prog="$prog" '
       /^Iterations:/ { total = $2 }
@@ -62,8 +62,8 @@ awk '
     for (c in cells) m++
     if (m != 1) { print "the programs gave different iterations"; exit 1 }
     printf "%-26s %12s %16s\n", "Program", "Time (sec)", "Giterations/s"
-    split("mercury c", ps, " ")
-    split("Mercury (GPU process);C (kernel a frame)", names, ";")
+    split("merkurius c", ps, " ")
+    split("Merkurius (GPU process);C (kernel a frame)", names, ";")
     for (i = 1; i <= 2; i++)
       printf "%-26s %12.4f %16.3f\n", names[i], median(time, ps[i]), median(rate, ps[i])
   }' "$out/results"

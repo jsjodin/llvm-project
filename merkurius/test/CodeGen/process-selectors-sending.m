@@ -1,5 +1,5 @@
 % A receive over a selector takes the oldest message while another thread
-% sends. A C thread, which no Mercury program can start yet, sends 1, 2,
+% sends. A C thread, which no Merkurius program can start yet, sends 1, 2,
 % 3, ... to two mailboxes in turn while main receives over a selector of
 % both, so it must see them in order. The cases look at the mailboxes one
 % at a time, so 1 can arrive in the first after it was looked at, and 2 in
@@ -94,7 +94,7 @@ static void *send_alternately(void *raw)
     io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     start_sender(A::in, B::in, Count::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     // The words, as a collection moves the cells.
     for (int i = 0; i < 5; ++i) {
@@ -111,7 +111,7 @@ static void *send_alternately(void *raw)
 :- pred join_sender(io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     join_sender(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     pthread_join(sender, NULL);
 ").

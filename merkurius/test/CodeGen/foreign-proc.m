@@ -59,23 +59,23 @@ main(!IO) :-
 :- pred succ(int::in, int::out) is det.
 :- pragma foreign_proc("C",
     succ(X::in, Y::out),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "Y = X + 1;").
 
 :- pred divide(int::in, int::in, int::out, int::out) is det.
 :- pragma foreign_proc("C",
     divide(A::in, B::in, Q::out, R::out),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "Q = A / B; R = A % B;").
 
 :- func length(string) = int.
 :- pragma foreign_proc("C",
     length(S::in) = (N::out),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "N = (MR_Integer) strlen(S);").
 
 :- pred show(int::in, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     show(N::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "printf(\"%ld \", (long) N);").

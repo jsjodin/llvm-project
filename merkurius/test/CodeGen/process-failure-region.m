@@ -43,5 +43,5 @@ main(!IO) :-
 
 % NOTHING-NOT:{{.}}
 
-% REPORT:Uncaught Mercury exception:
+% REPORT:Uncaught Merkurius exception:
 % REPORT-NEXT:domain_error("int.\'//\': division by zero")

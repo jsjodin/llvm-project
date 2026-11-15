@@ -31,7 +31,7 @@ export LD_LIBRARY_PATH="$(IFS=:; echo "${libs[*]}")${LD_LIBRARY_PATH:+:$LD_LIBRA
 export OMP_TARGET_OFFLOAD=MANDATORY
 
 "$build/bin/merkc" -O2 -fopenmp -fdo-loops -fprocess-declarations \
-  --offload-arch="$arch" "${flags[@]}" "$here/swe-sparse.m" -o "$out/mercury"
+  --offload-arch="$arch" "${flags[@]}" "$here/swe-sparse.m" -o "$out/merkurius"
 "$build/bin/clang" -O2 -ffp-contract=off -fopenmp --offload-arch="$arch" \
   "${flags[@]}" "$here/swe-sparse.c" -lm -o "$out/c"
 "$build/bin/clang" -x hip -O2 -ffp-contract=off --offload-arch="$arch" \
@@ -40,7 +40,7 @@ export OMP_TARGET_OFFLOAD=MANDATORY
 
 : > "$out/results"
 for ((r = 1; r <= rounds; r++)); do
-  for prog in mercury c hip; do
+  for prog in merkurius c hip; do
     if ((r == 1)); then
       SWE_TRACE=1 "$out/$prog" > "$out/$prog.$r"
       grep '^step ' "$out/$prog.$r" > "$out/$prog.trace"
@@ -82,9 +82,9 @@ awk '
     split(last, f, "/")
     printf "Time %s s, %s wet cells, checksum %s, tiles %s at most, %s at the end\n", f[1], f[2], f[3], f[4], f[5]
     printf "%-30s %14s %16s\n", "Program", "Average (sec)", "Bookkeeping"
-    split("mercury c hip", ps, " ")
-    split("Mercury (GPU process);C (OpenMP offload);HIP", names, ";")
+    split("merkurius c hip", ps, " ")
+    split("Merkurius (GPU process);C (OpenMP offload);HIP", names, ";")
     for (i = 1; i <= 3; i++)
       printf "%-30s %14.6f %16.6f\n", names[i], median(avg, ps[i]), median(keep, ps[i])
   }' "$out/results"
-echo "Traces: $out/mercury.trace, $out/c.trace, $out/hip.trace" >&2
+echo "Traces: $out/merkurius.trace, $out/c.trace, $out/hip.trace" >&2

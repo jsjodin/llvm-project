@@ -25,7 +25,7 @@ inline void *Malloc(std::size_t bytes) {
   void *block{std::malloc(bytes)};
   if (!block) {
     std::fflush(stdout);
-    std::fputs("Mercury runtime: out of memory\n", stderr);
+    std::fputs("Merkurius runtime: out of memory\n", stderr);
     std::exit(1);
   }
   return block;
@@ -97,7 +97,7 @@ public:
   // A value that a copy into the fragment cannot copy (copy.h).
   [[noreturn]] void Fail(const char *message, const char *detail) {
     std::fflush(stdout);
-    std::fprintf(stderr, "Mercury runtime: %s%s\n", message, detail);
+    std::fprintf(stderr, "Merkurius runtime: %s%s\n", message, detail);
     std::exit(1);
   }
 

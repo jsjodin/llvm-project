@@ -203,7 +203,7 @@ namespace merkurius::runtime {
 [[noreturn]] static void NoSwitch() {
   std::fflush(stdout);
   std::fprintf(stderr,
-      "Mercury runtime: switching stacks is not implemented on this "
+      "Merkurius runtime: switching stacks is not implemented on this "
       "architecture\n");
   std::exit(1);
 }

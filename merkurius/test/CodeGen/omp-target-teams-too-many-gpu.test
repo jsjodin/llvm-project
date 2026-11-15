@@ -19,9 +19,9 @@ RUN: FileCheck %s --check-prefix=ERROR --match-full-lines --strict-whitespace < 
 
 OUTPUT:teams without team mailboxes: 2000
 OUTPUT-NOT:{{.}}
-ERROR:Mercury runtime: target teams: only {{[1-9][0-9]*}} of the 2000 teams ran at once on the device, and the teams of a region with team mailboxes must all run at once
+ERROR:Merkurius runtime: target teams: only {{[1-9][0-9]*}} of the 2000 teams ran at once on the device, and the teams of a region with team mailboxes must all run at once
 ERROR-NOT:{{.}}
 
 A stall time that is not a positive number is an error at start-up.
 RUN: %libomp-env MERK_TEAMS_STALL_MILLISECONDS=soon not %t 2>&1 | FileCheck %s --check-prefix=BAD
-BAD:Mercury runtime: MERK_TEAMS_STALL_MILLISECONDS is not a positive number of milliseconds: soon
+BAD:Merkurius runtime: MERK_TEAMS_STALL_MILLISECONDS is not a positive number of milliseconds: soon

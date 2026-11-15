@@ -455,7 +455,7 @@ sum_reports(N, Sent, Took, Wrong, Reports, !IO) :-
 % TERMS-NEXT:got(600, 0)
 % SELF:got(200, 0)
 % QUIT:sent 5, took 2, wrong 0
-% FREED-NEXT:Mercury runtime: 0 messages are neither read nor freed
-% FREED-NEXT:Mercury runtime: 0 chunks of the devices' arenas and 0 rings are allocated
-% FREED-NEXT:Mercury runtime: 0 blocks of messages between GPU processes are allocated
+% FREED-NEXT:Merkurius runtime: 0 messages are neither read nor freed
+% FREED-NEXT:Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+% FREED-NEXT:Merkurius runtime: 0 blocks of messages between GPU processes are allocated
 % CLOSED:Software Error: receive: the mailbox is closed or another node's

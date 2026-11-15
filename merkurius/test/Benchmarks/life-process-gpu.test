@@ -11,7 +11,7 @@ Without -fopenmp the process runs the loops on its own lane.
 RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/life/life-process.m -o %t.sequential
 RUN: %gpu-env LIFE_SIZE=300 LIFE_STEPS=25 %t.sequential | FileCheck %s
 
-CHECK: Game of Life, Mercury, GPU process
+CHECK: Game of Life, Merkurius, GPU process
 CHECK-NEXT: Grid: 300 x 300 cells, 8 bytes a cell
 CHECK-NEXT: Steps: 25
 CHECK-NEXT: Population: 9339
@@ -21,7 +21,7 @@ CHECK-NEXT: Gcells/sec    Min (sec)   Max         Average
 The cells of one byte, uint8 (runtime/array.h).
 RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/life/life-process8.m -o %t.u8
 RUN: %gpu-env LIFE_SIZE=300 LIFE_STEPS=25 %t.u8 | FileCheck %s --check-prefix=U8
-U8: Game of Life, Mercury, GPU process, uint8
+U8: Game of Life, Merkurius, GPU process, uint8
 U8-NEXT: Grid: 300 x 300 cells, 1 byte a cell
 U8-NEXT: Steps: 25
 U8-NEXT: Population: 9339

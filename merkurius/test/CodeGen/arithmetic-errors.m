@@ -15,7 +15,7 @@
 % OUTPUT:before
 % OUTPUT-NOT:{{.}}
 
-% ERROR:Uncaught Mercury exception:
+% ERROR:Uncaught Merkurius exception:
 % ERROR-NEXT:domain_error("int.\'//\': division by zero")
 % ERROR-NOT:{{.}}
 

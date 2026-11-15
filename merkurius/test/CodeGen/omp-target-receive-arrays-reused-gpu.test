@@ -8,4 +8,4 @@ RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout -k 1 120 %t.O2 \
 RUN:   | FileCheck %S/omp-target-receive-arrays-reused.m --match-full-lines --strict-whitespace
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_CHECK_MESSAGES=1 timeout -k 1 120 %t.O2 2>&1 \
 RUN:   | FileCheck %s --check-prefix=MESSAGES --match-full-lines
-MESSAGES:Mercury runtime: 0 messages are neither read nor freed
+MESSAGES:Merkurius runtime: 0 messages are neither read nor freed

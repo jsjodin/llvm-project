@@ -45,11 +45,11 @@ compute(N, X) :-
 
 :- func plus_one(int) = int.
 :- pragma foreign_proc("C", plus_one(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe], "Y = X + 1;").
+    [will_not_call_merkurius, promise_pure, thread_safe], "Y = X + 1;").
 
 :- func hello(int) = int.
 :- pragma foreign_proc("C", hello(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     printf(""hello %d\\n"", (int) X);
     fflush(stdout);
@@ -58,15 +58,15 @@ compute(N, X) :-
 
 :- func my_sin(float) = float.
 :- pragma foreign_proc("C", my_sin(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe], "Y = sin(X);").
+    [will_not_call_merkurius, promise_pure, thread_safe], "Y = sin(X);").
 
 :- func hypotenuse(float, float) = float.
 :- pragma foreign_proc("C", hypotenuse(X::in, Z::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe], "Y = hypot(X, Z);").
+    [will_not_call_merkurius, promise_pure, thread_safe], "Y = hypot(X, Z);").
 
 :- func pid(int) = int.
 :- pragma foreign_proc("C", pid(X::in) = (Y::out),
-    [will_not_call_mercury, promise_pure, thread_safe], "Y = X + host_pid();").
+    [will_not_call_merkurius, promise_pure, thread_safe], "Y = X + host_pid();").
 
 % DEVICE-DAG: define internal i64 @merk_foreign_omp__target__foreign_Dplus__one__f1__0(
 % DEVICE-DAG: define internal i64 @merk_foreign_omp__target__foreign_Dhello__f1__0(

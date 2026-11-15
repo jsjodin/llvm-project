@@ -25,7 +25,7 @@ r(A, _, B) :-
 :- pred c(int::in, int::(free >> free), int::out) is det.
 :- pragma foreign_proc("C",
     c(N::in, _U::(free >> free), M::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     M = N * 3;
 ").

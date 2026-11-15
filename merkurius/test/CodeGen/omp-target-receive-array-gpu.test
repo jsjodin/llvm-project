@@ -12,4 +12,4 @@ each with its mailbox's lock held, so that no thread without a process reads
 it.
 RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY MERK_CHECK_MESSAGES=1 timeout -k 1 60 %t.O2 2>&1 \
 RUN:   | FileCheck %s --check-prefix=MESSAGES --match-full-lines
-MESSAGES:Mercury runtime: 0 messages are neither read nor freed
+MESSAGES:Merkurius runtime: 0 messages are neither read nor freed

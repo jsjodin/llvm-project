@@ -29,7 +29,7 @@ endif
 	$(addprefix mlir-,$(PROGRAMS)) $(addprefix llvm-,$(PROGRAMS))
 
 help:
-	@echo "Merkurius demo: Mercury compiled through MLIR and LLVM"
+	@echo "Merkurius demo: compiled through MLIR and LLVM"
 	@echo ""
 	@echo "Programs: $(PROGRAMS)"
 	@echo "  hello      Hello, world: a string and a foreign_proc call into C"
@@ -40,7 +40,7 @@ help:
 	@echo "For each program P:"
 	@echo "  make P          Compile P.m to the executable build/P"
 	@echo "  make run-P      Compile P and run it"
-	@echo "  make merk-P     Print the merk dialect: Mercury procedures in MLIR"
+	@echo "  make merk-P     Print the merk dialect: Merkurius procedures in MLIR"
 	@echo "  make mlir-P     Print the MLIR LLVM dialect that merk is lowered to"
 	@echo "  make llvm-P     Print the LLVM IR, with the C library code linked in"
 	@echo ""

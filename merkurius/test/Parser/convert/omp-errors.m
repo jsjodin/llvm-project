@@ -36,7 +36,7 @@
 c_spelling :-
     %$omp parallel for
     true.
-% CHECK: omp-errors.m:[[@LINE-2]]:11: error: 'parallel for' is C's form of the OpenMP directive; Mercury uses Fortran's, 'parallel do'
+% CHECK: omp-errors.m:[[@LINE-2]]:11: error: 'parallel for' is C's form of the OpenMP directive; Merkurius uses Fortran's, 'parallel do'
 
 end_directive :-
     %$omp end parallel

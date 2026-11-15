@@ -18,7 +18,7 @@
 
 :- pred now(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C", now(T::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
@@ -27,7 +27,7 @@
 
 :- pred resident_kib(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C", resident_kib(K::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     long pages = 0, resident = 0;
     FILE *f = fopen(\"/proc/self/statm\", \"r\");

@@ -1,4 +1,4 @@
-The reacting front of benchmarks/front, the demo's reference in Mercury, on
+The reacting front of benchmarks/front, the demo's reference in Merkurius, on
 small grids, so that it keeps building and giving the right cells:
 sequentially, and on the host's threads, where OpenMP runs its target
 regions when there is no device, each at -O0 and -O2. The values are from
@@ -18,7 +18,7 @@ RUN: %libomp-env OMP_NUM_THREADS=4 FRONT_SIZE=256 FRONT_STEPS=100 %t.host2 | Fil
 RUN: %libomp-env OMP_NUM_THREADS=4 FRONT_SIZE=101 FRONT_STEPS=150 FRONT_SUBSTEPS=20 %t.host2 | FileCheck %s --check-prefix=ODD
 REQUIRES: libomp
 
-SQUARE: Reacting front, Mercury
+SQUARE: Reacting front, Merkurius
 SQUARE-NEXT: Grid: 256 x 256 cells
 SQUARE-NEXT: Steps: 100, of 100 substeps where a cell burns
 SQUARE-NEXT: Burnt cells: 13329

@@ -1,5 +1,5 @@
 # The unparser's round-trip tests 2, 3 and 4 (design document, "Unparser
-# and round-trip tests") on the Mercury files in the tests that convert
+# and round-trip tests") on the Merkurius files in the tests that convert
 # without errors: unparsing exactly gives back the file and reports nothing,
 # the canonical layout is its own canonical layout, and the canonical and
 # parenthesized forms have the file's parse tree. Files with errors are

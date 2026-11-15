@@ -978,7 +978,7 @@ results(Steps, Times, Counts, Case, Time, Wet, Volume, Checksum, Error,
 :- func bits(float) = int.
 :- pragma foreign_proc("C",
     bits(F::in) = (B::out),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     double y = F + 0.0;
     memcpy(&B, &y, sizeof y);
@@ -987,7 +987,7 @@ results(Steps, Times, Counts, Case, Time, Wet, Volume, Checksum, Error,
 :- pred now(float::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(T::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -998,7 +998,7 @@ results(Steps, Times, Counts, Case, Time, Wet, Volume, Checksum, Error,
 :- pred setting(string::in, int::in, int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     setting(Name::in, Default::in, Value::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     const char *s = getenv(Name);
     Value = s && *s ? (MR_Integer) strtol(s, NULL, 10) : Default;
@@ -1008,7 +1008,7 @@ results(Steps, Times, Counts, Case, Time, Wet, Volume, Checksum, Error,
 :- pred exit_failure(io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     exit_failure(_IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     fflush(stdout);
     exit(1);
@@ -1019,9 +1019,9 @@ results(Steps, Times, Counts, Case, Time, Wet, Volume, Checksum, Error,
 :- pragma foreign_proc("C",
     header(World::in, Tile::in, Capacity::in, Case::in, Steps::in,
         _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
-    printf(\"Shallow water, Mercury, GPU process, sparse tiles\\n\");
+    printf(\"Shallow water, Merkurius, GPU process, sparse tiles\\n\");
     printf(\"World: %ld x %ld cells, tiles of %ld x %ld, %ld in the pool\\n\",
         (long) World, (long) World, (long) Tile, (long) Tile,
         (long) Capacity - 1);
@@ -1034,7 +1034,7 @@ results(Steps, Times, Counts, Case, Time, Wet, Volume, Checksum, Error,
     is det.
 :- pragma foreign_proc("C",
     trace_line(S::in, Active::in, Time::in, Keep::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"step %ld: %ld tiles, %.6f s, bookkeeping %.6f s\\n\", (long) S,
         (long) Active, Time, Keep);
@@ -1047,7 +1047,7 @@ results(Steps, Times, Counts, Case, Time, Wet, Volume, Checksum, Error,
     write_results(Case::in, Time::in, Wet::in, Volume::in, Checksum::in,
         Error::in, Peak::in, Final::in, Min::in, Max::in, Average::in,
         Keep::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"Time: %.9f s\\n\", Time);
     printf(\"Wet cells: %ld\\n\", (long) Wet);

@@ -228,7 +228,7 @@ add_up(Box, !Sum, !Count, !IO) :-
 :- pred now(int::out, io::di, io::uo) is det.
 :- pragma foreign_proc("C",
     now(Nanoseconds::out, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -240,7 +240,7 @@ add_up(Box, !Sum, !Count, !IO) :-
 :- pragma foreign_proc("C",
     report(Shape::in, Teams::in, Rounds::in, Reported::in, Wrong::in,
         Nanoseconds::in, _IO0::di, _IO::uo),
-    [will_not_call_mercury, promise_pure],
+    [will_not_call_merkurius, promise_pure],
 "
     printf(\"%-8s %5ld teams %8ld rounds, %5ld reported, %ld wrong, \"
         \"%10.2f us a barrier\\n\",

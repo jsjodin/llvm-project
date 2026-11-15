@@ -1,6 +1,6 @@
 % The target is recorded on the module (TargetInfo): the triple, the data
 % layout, in LLVM's form and DLTI's, the CPU, the optimization level and the
-% address spaces of Mercury code, which are all 0 on a CPU. Read back from
+% address spaces of Merkurius code, which are all 0 on a CPU. Read back from
 % its text, a module lowers for the target it records, with no -triple.
 %
 % RUN: merkc -fc1 -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=X86

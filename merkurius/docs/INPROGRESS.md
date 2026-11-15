@@ -1928,7 +1928,7 @@ worker(!IO) :-
      waits, with `s_sleep`, until the count is the number of teams. Teams that
      fit start within microseconds. If no more have started for the stall
      time, ten seconds or `MERK_TEAMS_STALL_MILLISECONDS`, one team reports
-     "Mercury runtime: target teams: only M of the N teams ran at once on the
+     "Merkurius runtime: target teams: only M of the N teams ran at once on the
      device, …" and the program ends. (A second from each team's start at
      first, which a full test run broke: design document.)
    - **Only regions with team mailboxes wait.** Code uses them if it calls

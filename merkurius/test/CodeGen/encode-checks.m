@@ -124,7 +124,7 @@ static int digit_of(char c) {
 :- func encode(T) = string.
 :- pragma foreign_proc("C",
     encode(X::in) = (Hex::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     unsigned char *bytes;
     int64_t size;
@@ -144,7 +144,7 @@ static int digit_of(char c) {
 :- pred decode(string::in, T::out, string::out) is det.
 :- pragma foreign_proc("C",
     decode(Hex::in, X::out, Error::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     int64_t size = strlen(Hex) / 2;
     unsigned char *bytes = malloc(size + 1);
@@ -164,7 +164,7 @@ static int digit_of(char c) {
 :- func fingerprint(T) = string.
 :- pragma foreign_proc("C",
     fingerprint(_X::in) = (Hex::out),
-    [will_not_call_mercury, promise_pure, thread_safe],
+    [will_not_call_merkurius, promise_pure, thread_safe],
 "
     unsigned char fingerprint[16];
     merk_fingerprint(TypeInfo_for_T, fingerprint);

@@ -19,7 +19,7 @@ RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_SIZE=300 LIFE_STEPS=25 %python %S/../../
 RUN: %libomp-env OMP_NUM_THREADS=4 LIFE_SIZE=301 LIFE_STEPS=17 %python %S/../../benchmarks/life/pair.py %t.host2 | FileCheck %s --check-prefix=ODD
 REQUIRES: libomp
 
-EVEN: Game of Life, Mercury, two nodes
+EVEN: Game of Life, Merkurius, two nodes
 EVEN-NEXT: Grid: 300 x 300 cells, 8 bytes a cell
 EVEN-NEXT: Steps: 25
 EVEN-NEXT: Population: 9339
