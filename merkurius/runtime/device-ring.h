@@ -50,8 +50,12 @@ constexpr uint64_t kBlockListWords{4};
 // After them, a GPU process's routes to the mailboxes it has sent to
 // (device/device.cpp, Route).
 constexpr uint64_t kRouteListWords{1};
-constexpr uint64_t kArenaClearWords{
-    kBumpWords + kRingCacheSlots + kBlockListWords + kRouteListWords};
+// After them, a GPU process's cache of the small blocks it has freed, by
+// their size, and how many bytes it holds (device/device.cpp, SmallAllocate).
+constexpr uint64_t kSmallClasses{7};
+constexpr uint64_t kSmallCacheWords{kSmallClasses + 1};
+constexpr uint64_t kArenaClearWords{kBumpWords + kRingCacheSlots +
+    kBlockListWords + kRouteListWords + kSmallCacheWords};
 
 // How many regions may run at once, all told. Each running region has a
 // slot, which the host gives it as it starts and takes back as it ends. A
