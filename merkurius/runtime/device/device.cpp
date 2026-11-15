@@ -132,6 +132,8 @@ using merkurius::runtime::RingSlots;
 using merkurius::runtime::SendPool;
 using merkurius::runtime::SendPoolClearBytes;
 using merkurius::runtime::kSendPoolQuickOrders;
+using merkurius::runtime::kPeerInline;
+using merkurius::runtime::kPeerInlineWords;
 using merkurius::runtime::kPeerQueueSlots;
 using merkurius::runtime::kSendPoolBlock;
 using merkurius::runtime::kSendPoolOrders;
@@ -285,6 +287,13 @@ uint64_t bulkBytes{~uint64_t{0}};
 // GPU, or null (PlaceTable's `sendPool`, `sendPoolBytes` and `returns`).
 [[clang::loader_uninitialized]] Local<PeerQueue *>
     placePeerQueues[kMostPlaceWaves];
+// By wave of the team, the `head` of its process's queue and of its peer
+// queue, which only the process reads, kept here as it moves so that a
+// look at either queue pays no load for it (docs/INPROGRESS.md, The cost of
+// a message); the queues' own words, which the next process of the slot
+// starts from, are stored as they move too.
+[[clang::loader_uninitialized]] Local<uint64_t> queueHeads[kMostPlaceWaves];
+[[clang::loader_uninitialized]] Local<uint64_t> peerHeads[kMostPlaceWaves];
 SendPool *sendPool{nullptr};
 uint64_t sendPoolBytes{0};
 ReturnRing *returnRing{nullptr};
@@ -693,22 +702,6 @@ uint64_t SmallClass(uint64_t bytes) {
       : merkurius::runtime::kSmallClasses;
 }
 
-// `bytes` for the process's own wave, from its cache or libc, rounded up to
-// the class; in `given` how many.
-void *SmallAllocate(Arena *arena, uint64_t bytes, uint64_t &given) {
-  uint64_t index{SmallClass(bytes)};
-  if (index == merkurius::runtime::kSmallClasses) {
-    return RawAllocate(bytes, given);
-  }
-  given = uint64_t{1} << (index + kSmallLeastOrder);
-  if (void *raw{arena->small[index]}) {
-    arena->small[index] = *static_cast<void **>(raw);
-    arena->smallBytes -= given;
-    return raw;
-  }
-  return RawAllocate(given, given);
-}
-
 // Gives back a block of the process's own wave: to the cache if its size
 // is a class and the cache has room, or to libc.
 void SmallFree(Arena *arena, void *raw, uint64_t bytes) {
@@ -737,17 +730,29 @@ void FreeSmallCache(Arena *arena) {
   arena->smallBytes = 0;
 }
 
-// A block of `bytes` for what runs on the wave, whose bytes start on 256
-// bytes after `before` bytes, or on 16 if `before` is 0; in `leader`'s
-// group if it is not null. The process's own wave takes it from its cache
-// of small blocks (SmallAllocate).
-void *NewBlock(Arena *arena, uint64_t bytes, uint64_t before, Block *leader) {
+// NewBlock for the process's own wave, from its cache. Every word of the
+// arena that it needs is loaded before its first store, so that the loads
+// are in flight together, and the cached block's link after them: two round
+// trips to the GPU's memory, where one after another took about five
+// (docs/INPROGRESS.md, The cost of a message).
+void *NewOwnBlock(Arena *arena, uint64_t asked, uint64_t before, Block *leader) {
   constexpr uint64_t kAlign{256};
+  uint64_t index{SmallClass(asked)};
+  bool small{index < merkurius::runtime::kSmallClasses};
+  void *raw{small ? arena->small[index] : nullptr};
+  uint64_t smallBytes{arena->smallBytes};
+  uint64_t held{arena->held};
+  uint64_t peak{arena->peak};
+  Block *first{leader ? nullptr : arena->blocks};
   uint64_t given{0};
-  uint64_t asked{sizeof(Block) + bytes + (before ? kAlign : 0)};
-  void *raw{processWaves[__gpu_thread_id_x() / __gpu_num_lanes()]
-          ? SmallAllocate(arena, asked, given)
-          : RawAllocate(asked, given)};
+  if (raw) {
+    given = uint64_t{1} << (index + kSmallLeastOrder);
+    arena->small[index] = *static_cast<void **>(raw);
+    arena->smallBytes = smallBytes - given;
+  } else {
+    raw = RawAllocate(
+        small ? uint64_t{1} << (index + kSmallLeastOrder) : asked, given);
+  }
   uintptr_t start{reinterpret_cast<uintptr_t>(raw) + sizeof(Block)};
   if (before) {
     start += (kAlign - (start + before) % kAlign) % kAlign;
@@ -755,21 +760,9 @@ void *NewBlock(Arena *arena, uint64_t bytes, uint64_t before, Block *leader) {
   Block *block{BlockOf(reinterpret_cast<void *>(start))};
   block->raw = raw;
   block->bytes = given;
-  if (!processWaves[__gpu_thread_id_x() / __gpu_num_lanes()]) {
-    __scoped_atomic_fetch_add(
-        &arena->teamHeld, given, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
-    block->prev = kTeamBlock;
-    block->leader = block;
-    block->member = nullptr;
-    Block *first{__atomic_load_n(&arena->teamBlocks, __ATOMIC_RELAXED)};
-    do {
-      block->next = first;
-    } while (!__atomic_compare_exchange_n(&arena->teamBlocks, &first, block,
-        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
-    return reinterpret_cast<void *>(start);
-  }
-  arena->held += given;
-  arena->peak = arena->held > arena->peak ? arena->held : arena->peak;
+  held += given;
+  arena->held = held;
+  arena->peak = held > peak ? held : peak;
   if (leader) {
     block->leader = leader;
     block->member = leader->member;
@@ -781,11 +774,44 @@ void *NewBlock(Arena *arena, uint64_t bytes, uint64_t before, Block *leader) {
   block->leader = block;
   block->member = nullptr;
   block->prev = nullptr;
-  block->next = arena->blocks;
-  if (arena->blocks) {
-    arena->blocks->prev = block;
+  block->next = first;
+  if (first) {
+    first->prev = block;
   }
   arena->blocks = block;
+  return reinterpret_cast<void *>(start);
+}
+
+// A block of `bytes` for what runs on the wave, whose bytes start on 256
+// bytes after `before` bytes, or on 16 if `before` is 0; in `leader`'s
+// group if it is not null. The process's own wave takes it from its cache
+// of small blocks (NewOwnBlock); a worker team's block goes on the arena's
+// list of them, which only the process's end frees.
+void *NewBlock(Arena *arena, uint64_t bytes, uint64_t before, Block *leader) {
+  constexpr uint64_t kAlign{256};
+  uint64_t given{0};
+  uint64_t asked{sizeof(Block) + bytes + (before ? kAlign : 0)};
+  if (processWaves[__gpu_thread_id_x() / __gpu_num_lanes()]) {
+    return NewOwnBlock(arena, asked, before, leader);
+  }
+  void *raw{RawAllocate(asked, given)};
+  uintptr_t start{reinterpret_cast<uintptr_t>(raw) + sizeof(Block)};
+  if (before) {
+    start += (kAlign - (start + before) % kAlign) % kAlign;
+  }
+  Block *block{BlockOf(reinterpret_cast<void *>(start))};
+  block->raw = raw;
+  block->bytes = given;
+  __scoped_atomic_fetch_add(
+      &arena->teamHeld, given, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+  block->prev = kTeamBlock;
+  block->leader = block;
+  block->member = nullptr;
+  Block *first{__atomic_load_n(&arena->teamBlocks, __ATOMIC_RELAXED)};
+  do {
+    block->next = first;
+  } while (!__atomic_compare_exchange_n(&arena->teamBlocks, &first, block,
+      true, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
   return reinterpret_cast<void *>(start);
 }
 
@@ -901,21 +927,53 @@ extern "C" void merk_device_free(void *bytes) {
       address < reinterpret_cast<uintptr_t>(__stop_merk_static)) {
     return;
   }
+  // The block's words and the arena's go out together before any store, and
+  // the cache's head after them, as NewOwnBlock loads them: most messages
+  // are one block.
   Block *block{BlockOf(bytes)};
-  if (block->prev == kTeamBlock) {
+  Block *prev{block->prev};
+  Block *next{block->next};
+  Block *leader{block->leader};
+  Block *member{block->member};
+  void *raw{block->raw};
+  uint64_t given{block->bytes};
+  Arena *arena{CurrentArena()};
+  uint64_t held{arena->held};
+  uint64_t smallBytes{arena->smallBytes};
+  if (prev == kTeamBlock) {
     return;
   }
-  Arena *arena{CurrentArena()};
-  Block *leader{block->leader};
-  if (leader->prev) {
-    leader->prev->next = leader->next;
+  if (leader != block || member) {
+    if (leader->prev) {
+      leader->prev->next = leader->next;
+    } else {
+      arena->blocks = leader->next;
+    }
+    if (leader->next) {
+      leader->next->prev = leader->prev;
+    }
+    FreeGroup(arena, leader);
+    return;
+  }
+  if (prev) {
+    prev->next = next;
   } else {
-    arena->blocks = leader->next;
+    arena->blocks = next;
   }
-  if (leader->next) {
-    leader->next->prev = leader->prev;
+  if (next) {
+    next->prev = prev;
   }
-  FreeGroup(arena, leader);
+  arena->held = held - given;
+  uint64_t index{SmallClass(given)};
+  if (index < merkurius::runtime::kSmallClasses &&
+      given == uint64_t{1} << (index + kSmallLeastOrder) &&
+      smallBytes + given <= kSmallCacheBytes) {
+    *static_cast<void **>(raw) = arena->small[index];
+    arena->small[index] = raw;
+    arena->smallBytes = smallBytes + given;
+    return;
+  }
+  RawFree(raw, given);
 }
 
 namespace {
@@ -3003,16 +3061,24 @@ TeamSpill *TakeOwnSpill(
   return spill;
 }
 
+// The slot's sequence and the spill lists' heads are loaded together, so
+// that an empty queue costs one round trip.
 bool TakeQueued(ProcessQueue *queue, uint64_t *message) {
-  uint64_t position{
-      __scoped_atomic_load_n(&queue->head, __ATOMIC_RELAXED, kDevice)};
+  uint64_t position{queueHeads[__gpu_thread_id_x() / __gpu_num_lanes()]};
   uint64_t index{position % kProcessQueueSlots};
   ProcessQueueSlot &slot{queue->slots[index]};
-  if (__scoped_atomic_load_n(&slot.sequence, __ATOMIC_ACQUIRE, kDevice) ==
-      position + 1) {
+  uint64_t sequence{
+      __scoped_atomic_load_n(&slot.sequence, __ATOMIC_RELAXED, kDevice)};
+  uint64_t taken{queue->taken[index]};
+  uint64_t spilled{
+      __scoped_atomic_load_n(&queue->spills[index], __ATOMIC_RELAXED, kDevice)};
+  if (sequence == position + 1) {
+    __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, kDevice);
     *message = __scoped_atomic_load_n(&slot.message, __ATOMIC_RELAXED, kDevice);
     __scoped_atomic_store_n(&slot.sequence, position + kProcessQueueSlots,
         __ATOMIC_RELEASE, kDevice);
+  } else if (!taken && !spilled) {
+    return false;
   } else if (TeamSpill * spill{TakeOwnSpill(queue, index, position)}) {
     *message = spill->message;
     RawFree(spill, sizeof(TeamSpill));
@@ -3020,6 +3086,7 @@ bool TakeQueued(ProcessQueue *queue, uint64_t *message) {
   } else {
     return false;
   }
+  queueHeads[__gpu_thread_id_x() / __gpu_num_lanes()] = position + 1;
   __scoped_atomic_store_n(
       &queue->head, position + 1, __ATOMIC_RELAXED, kDevice);
   return true;
@@ -3335,10 +3402,12 @@ struct PoolMemory {
 };
 
 // A message as a peer queue's slot holds it: the message, and the block of
-// the send pool that holds its copy, or null.
+// the send pool that holds its copy, or null; or for a small array,
+// kPeerInline and the array, whose words go in the slot (PutPeer).
 struct PeerCopy {
   uint64_t message;
   PoolBlock *copy;
+  const uint64_t *words{nullptr};
 };
 
 // From how many bytes an array goes into the send pool, and out of it, by
@@ -3406,6 +3475,9 @@ void CopyByEngine(void *to, const void *from, uint64_t bytes, uint64_t returns) 
 // step 6).
 PeerCopy ArrayToPool(const uint64_t *array) {
   uint64_t words{ArrayWords(array)};
+  if (words <= kPeerInlineWords) {
+    return {kPeerInline, nullptr, array};
+  }
   uint64_t bytes{sizeof(uint64_t) * words};
   PoolBlock *block{PoolAllocate(bytes)};
   auto *copy{reinterpret_cast<uint64_t *>(block + 1)};
@@ -3455,14 +3527,24 @@ void LeavePeerQueue(PeerQueue *queue) {
 // slot still holds the message of a lap before. The release at system scope
 // writes the sender's copy back from its L2 before the receiver sees the
 // slot. The sender writes the slot only once it has seen it free, which
-// the receiver frees after it has read it.
-void PutPeer(PeerQueue *queue, uint64_t message, PoolBlock *copy) {
+// the receiver frees after it has read it. A small array's words go in the
+// slot, across the link, as stores that do not wait for each other.
+void PutPeer(PeerQueue *queue, const PeerCopy &peerCopy) {
+  uint64_t message{peerCopy.message};
+  PoolBlock *copy{peerCopy.copy};
   uint64_t position{
       __scoped_atomic_fetch_add(&queue->tail, 1, __ATOMIC_RELAXED, kSystem)};
   PeerQueueSlot &slot{queue->slots[position % kPeerQueueSlots]};
   while (__scoped_atomic_load_n(&slot.sequence, __ATOMIC_RELAXED, kSystem) !=
       position) {
     __builtin_amdgcn_s_sleep(8);
+  }
+  if (const uint64_t *words{peerCopy.words}) {
+    uint64_t count{ArrayWords(words)};
+    for (uint64_t i{0}; i < count; ++i) {
+      __scoped_atomic_store_n(
+          &slot.words[i], words[i], __ATOMIC_RELAXED, kSystem);
+    }
   }
   __scoped_atomic_store_n(&slot.message, message, __ATOMIC_RELAXED, kSystem);
   __scoped_atomic_store_n(&slot.copy, reinterpret_cast<uint64_t>(copy),
@@ -3496,7 +3578,7 @@ void PeerSend(Route *route, MakePeer makePeer) {
     }
     __builtin_amdgcn_s_sleep(8);
   }
-  PutPeer(queue, copy.message, copy.copy);
+  PutPeer(queue, copy);
   LeavePeerQueue(queue);
   CountPeer(&PlaceTable::peerSends, 1);
 }
@@ -3636,36 +3718,60 @@ void HoldReturn(ReturnRing *ring, uint64_t copy, uint64_t bytes) {
 
 // One look at the process's peer queue: whether the message of the next
 // position has arrived, which it takes, with the copy to return and where.
-// The poll is a relaxed load, and only a message there costs an acquire at
-// system scope, which drops stale lines of peer memory from the L2 (Results
-// of the experiments, 1 and 3).
-bool TakePeer(PeerQueue *queue, uint64_t *message, uint64_t *copy,
+// The slot stays the receiver's until it frees it (FreePeerSlot), so that
+// a small array's words can be read out of it first.
+//
+// The poll is a relaxed load. A message there costs an acquire at the
+// device's scope, which orders the reads of the slot after it: the
+// sender's writes into this GPU's memory go through this GPU's L2, and are
+// seen so (Results of the experiments, 1). Only a message with a copy in
+// the sender's send pool, which the receiver reads across the link, costs
+// an acquire at system scope, which drops stale lines of peer memory from
+// the L2 (ibid., 1 and 3); on gfx90a that drops all of the L2, and the
+// receiver's next loads of its own memory, its arena's for the array it
+// makes, each went to memory (docs/INPROGRESS.md, The cost of a message).
+PeerQueueSlot *TakePeer(PeerQueue *queue, uint64_t *message, uint64_t *copy,
     uint64_t *returnTo) {
-  uint64_t head{__scoped_atomic_load_n(&queue->head, __ATOMIC_RELAXED, kDevice)};
+  uint64_t head{peerHeads[__gpu_thread_id_x() / __gpu_num_lanes()]};
   PeerQueueSlot &slot{queue->slots[head % kPeerQueueSlots]};
   if (__scoped_atomic_load_n(&slot.sequence, __ATOMIC_RELAXED, kSystem) !=
       head + 1) {
-    return false;
+    return nullptr;
   }
-  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, kSystem);
+  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, kDevice);
   *message = __scoped_atomic_load_n(&slot.message, __ATOMIC_RELAXED, kSystem);
   *copy = __scoped_atomic_load_n(&slot.copy, __ATOMIC_RELAXED, kSystem);
   *returnTo =
       __scoped_atomic_load_n(&slot.returnTo, __ATOMIC_RELAXED, kSystem);
-  __scoped_atomic_store_n(&slot.sequence, head + kPeerQueueSlots,
-      __ATOMIC_RELEASE, kSystem);
+  if (*copy) {
+    __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, kSystem);
+  }
+  return &slot;
+}
+
+// Gives the slot that TakePeer took back to the senders. The release orders
+// the receiver's reads of it before a sender's next writes; at the device's
+// scope, as the receiver wrote nothing a sender reads, and the slot is in
+// this GPU's memory, whose L2 the sender's reads go through.
+void FreePeerSlot(PeerQueue *queue, PeerQueueSlot *slot) {
+  uint64_t head{peerHeads[__gpu_thread_id_x() / __gpu_num_lanes()]};
+  __scoped_atomic_store_n(&slot->sequence, head + kPeerQueueSlots,
+      __ATOMIC_RELEASE, kDevice);
+  peerHeads[__gpu_thread_id_x() / __gpu_num_lanes()] = head + 1;
   __scoped_atomic_store_n(&queue->head, head + 1, __ATOMIC_RELAXED, kDevice);
-  return true;
 }
 
 // The message from a peer queue as the receiver gets it, copied into its
 // own memory, and the sender's copy returned: an array as the host's ring
-// gives one (TakeArrayFromHost), a term by its type_info into the arena.
+// gives one (TakeArrayFromHost), from the slot if it is small, a term by
+// its type_info into the arena.
 uint64_t DeliverPeer(uint64_t kind, uint64_t message, uint64_t copy,
-    uint64_t returnTo, const void *typeInfo) {
+    uint64_t returnTo, const void *typeInfo, const PeerQueueSlot *slot) {
   uint64_t result{message};
   if (kind == kRingOfArrays) {
-    auto *from{reinterpret_cast<const uint64_t *>(message)};
+    auto *from{message == kPeerInline
+            ? slot->words
+            : reinterpret_cast<const uint64_t *>(message)};
     uint64_t words{ArrayWords(from)};
     uint64_t bytes{sizeof(uint64_t) * words};
     auto *array{static_cast<uint64_t *>(merk_device_alloc(bytes))};
@@ -3708,6 +3814,8 @@ PeerQueue *OpenPeerQueue(PlaceTable *table, PlaceSlot *slot, uint64_t wave) {
     return nullptr;
   }
   auto *queue{reinterpret_cast<PeerQueue *>(queues) + wave};
+  peerHeads[__gpu_thread_id_x() / __gpu_num_lanes()] =
+      __scoped_atomic_load_n(&queue->head, __ATOMIC_RELAXED, kDevice);
   uint64_t incarnation{
       __scoped_atomic_load_n(&slot->incarnation, __ATOMIC_RELAXED, kSystem)};
   // Stale senders may be counted in, for as long as they take to see the
@@ -3733,7 +3841,9 @@ void ClosePeerQueue(PeerQueue *queue) {
     uint64_t message{0};
     uint64_t copy{0};
     uint64_t returnTo{0};
-    while (TakePeer(queue, &message, &copy, &returnTo)) {
+    while (PeerQueueSlot *slot{
+        TakePeer(queue, &message, &copy, &returnTo)}) {
+      FreePeerSlot(queue, slot);
       if (copy) {
         ReturnCopy(reinterpret_cast<ReturnRing *>(returnTo), copy);
       }
@@ -3833,10 +3943,20 @@ int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
     uint64_t queued{0};
     uint64_t copy{0};
     uint64_t returnTo{0};
-    if (!peer || !TakePeer(peer, &queued, &copy, &returnTo)) {
+    PeerQueueSlot *slot{
+        peer ? TakePeer(peer, &queued, &copy, &returnTo) : nullptr};
+    if (!slot) {
       return false;
     }
-    *message = DeliverPeer(kind, queued, copy, returnTo, typeInfo);
+    // Only a small array is read from the slot; the rest free it first.
+    bool inSlot{kind == kRingOfArrays && queued == kPeerInline};
+    if (!inSlot) {
+      FreePeerSlot(peer, slot);
+    }
+    *message = DeliverPeer(kind, queued, copy, returnTo, typeInfo, slot);
+    if (inSlot) {
+      FreePeerSlot(peer, slot);
+    }
     route->hostFirst = 1;
     route->peerFirst = 0;
     return true;
@@ -3921,6 +4041,8 @@ ProcessQueue *OpenQueue(PlaceTable *table, PlaceSlot *slot, uint64_t wave) {
       wave};
   uint64_t incarnation{__scoped_atomic_load_n(
       &slot->incarnation, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
+  queueHeads[__gpu_thread_id_x() / __gpu_num_lanes()] =
+      __scoped_atomic_load_n(&queue->head, __ATOMIC_RELAXED, kDevice);
   __scoped_atomic_store_n(
       &queue->state, incarnation << 1 | 1, __ATOMIC_SEQ_CST, kDevice);
   return queue;

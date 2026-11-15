@@ -178,14 +178,18 @@ struct ProcessQueue {
 // consistent atomics for, each a fence at system scope. A full slot makes the
 // sender wait, as it has no spill list on another GPU; the closing receiver
 // takes what is queued while it waits for the senders in flight. A slot
-// holds the message: a word itself; for an array, the address of the
-// sender's copy, in the sending GPU's send pool, which the receiver copies
-// from; for a term, the term as the sender copied it there, which the
+// holds the message: a word itself; for an array of at most
+// kPeerInlineWords words, header included, kPeerInline, and the array's
+// words in `words`, in the receiver's memory, so that neither GPU's send
+// pool takes part (docs/INPROGRESS.md, The cost of a message); for a larger
+// array, the address of the sender's copy, in the sending GPU's send pool,
+// which the receiver copies from; for a term, the term as the sender copied it there, which the
 // receiver copies by its type_info. `copy` is the sender's block in its
 // pool that holds the copy, or 0 for a word or a term with no cells, and
 // `returnTo` the sending GPU's return ring, onto which the receiver puts
 // `copy` when it is done with it, or closes with it still queued. The
-// receiver knows the messages' kind, as a mailbox's are of one.
+// receiver knows the messages' kind, as a mailbox's are of one. A slot is
+// one line of the L2, 128 bytes.
 //
 // The memory is NEVER FREED BEFORE THE PROGRAM ENDS. A sender on another
 // GPU keeps its route, the queue's address, for its life, and may send after
@@ -204,18 +208,23 @@ constexpr uint64_t kPeerQueueOpenBit{24};
 constexpr uint64_t kPeerQueueOpen{uint64_t{1} << kPeerQueueOpenBit};
 constexpr uint64_t kPeerQueueSenders{kPeerQueueOpen - 1};
 
-struct PeerQueueSlot {
+constexpr uint64_t kPeerInlineWords{12};
+constexpr uint64_t kPeerInline{1};
+
+struct alignas(128) PeerQueueSlot {
   uint64_t sequence;
   uint64_t message;
   uint64_t copy;
   uint64_t returnTo;
+  uint64_t words[kPeerInlineWords];
 };
+static_assert(sizeof(PeerQueueSlot) == 128);
 
 struct PeerQueue {
   alignas(64) uint64_t state;
   alignas(64) uint64_t tail;
   alignas(64) uint64_t head;
-  alignas(64) PeerQueueSlot slots[kPeerQueueSlots];
+  PeerQueueSlot slots[kPeerQueueSlots];
 };
 
 // A GPU's send pool, in its ordinary memory, for the program's life: the
