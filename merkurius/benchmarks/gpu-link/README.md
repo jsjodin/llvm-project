@@ -100,9 +100,11 @@ What it shows:
 - **Within a GPU,** a process without workers copies with its one wave,
   3–5 GB/s. Workers reach 85 GB/s.
 - **Small messages cost 33–55 µs each, wherever they go.** Even an array
-  of 1 word takes 33 µs between GPUs, and 52 µs within one, so a pair
-  manages about 30000 messages a second. The flag latency between GPUs is
-  about 1.2 µs (peer.hip), so this cost is in the processes' own send and
-  receive, not in the link. Not looked into yet.
+  of 1 word took 33 µs between GPUs, and 52 µs within one, so a pair
+  managed about 30000 messages a second. The flag latency between GPUs is
+  about 1.2 µs (peer.hip), so this cost was in the processes' own send and
+  receive, not in the link. After the changes in docs/INPROGRESS.md (The
+  cost of a message), an array of 1 word takes 26 µs between GPUs and 20
+  within one, and a word 9 and 11.
 - Through the host, large arrays manage 2–9 GB/s, and small ones cost
   50–90 µs.

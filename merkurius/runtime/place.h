@@ -139,7 +139,10 @@ struct PlaceTable {
 // the next process's queue. `senders` counts the senders in flight, which
 // the process waits for before it frees what the queue still holds; and
 // `kind` is the messages' (device-ring.h's kRingOf...), which its senders
-// set.
+// set. A slot's spills are a stack that senders push on (`spills`); the
+// receiver moves them, a whole stack at a time, to its own list for the
+// slot (`taken`, to `takenLast`), in the order of positions, so that taking
+// one never walks a long list when a sender runs far ahead.
 constexpr uint64_t kProcessQueueSlots{64};
 
 struct ProcessQueueSlot {
@@ -155,6 +158,8 @@ struct ProcessQueue {
   alignas(64) uint64_t head;
   alignas(64) ProcessQueueSlot slots[kProcessQueueSlots];
   uint64_t spills[kProcessQueueSlots];
+  uint64_t taken[kProcessQueueSlots];
+  uint64_t takenLast[kProcessQueueSlots];
 };
 
 // The queue through which the process of a slot receives from processes on

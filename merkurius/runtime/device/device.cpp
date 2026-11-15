@@ -249,6 +249,11 @@ constexpr uint32_t kMostPlaceSleeps{64};
 // sets as the kernel starts, the same for all.
 [[clang::loader_uninitialized]] Local<ProcessQueue *>
     placeQueues[kMostPlaceWaves];
+// The route that each wave's process last took to send, and to receive
+// (RouteOf), by the wave's place in the team; null as the process starts.
+struct Route;
+enum RouteUse { kRouteToReceive, kRouteToSend };
+[[clang::loader_uninitialized]] Local<Route *> lastRoutes[2][kMostPlaceWaves];
 PlaceTable *placeTable{nullptr};
 // Whether the kernel counts its blocks of messages (PlaceTable's `check`).
 uint32_t countBlocks{0};
@@ -1274,6 +1279,8 @@ uint64_t LoadSlotWord(uint64_t *word) {
   placeArenas[inTeam] = arena;
   teamMains[inTeam] = 0;
   processWaves[inTeam] = 1;
+  lastRoutes[kRouteToReceive][inTeam] = nullptr;
+  lastRoutes[kRouteToSend][inTeam] = nullptr;
   ProcessQueue *queue{OpenQueue(table, slot, wave)};
   placeQueues[inTeam] = queue;
   PeerQueue *peerQueue{OpenPeerQueue(table, slot, wave)};
@@ -2224,12 +2231,15 @@ void Drain(const uint64_t *handle) {
 
 // One look at the ring, with no call of the host unless messages wait
 // outside it: whether it has a message, whose slot is then in `value`, and
-// the ring's entry. The message stays until Taken.
+// the ring's entry, found once: a caller that already has it passes it in
+// `entry`, and null otherwise. The message stays until Taken.
 bool Look(
     const uint64_t *handle, uint64_t kind, RingEntry *&entry, uint64_t *value) {
-  entry = RingOf(handle, kind);
   if (!entry) {
-    ClosedMailbox();
+    entry = RingOf(handle, kind);
+    if (!entry) {
+      ClosedMailbox();
+    }
   }
   // The ring is in host memory, which a relaxed load reads fresh: a look
   // that finds nothing takes no acquire, which on gfx90a would invalidate
@@ -2277,8 +2287,7 @@ extern "C" int merk_device_receive(
     return TeamReceive(handle, milliseconds, message);
   }
   int direct{DirectReceive(handle, kRingOfWords, milliseconds, nullptr, message,
-      [&](uint64_t *found) {
-        RingEntry *entry{nullptr};
+      [&](RingEntry *&entry, uint64_t *found) {
         if (!Look(handle, kRingOfWords, entry, found)) {
           return false;
         }
@@ -2401,8 +2410,7 @@ extern "C" int merk_device_receive_array(
   // The slot is the array's header (array.h).
   uint64_t header{0};
   int direct{DirectReceive(handle, kRingOfArrays, milliseconds, nullptr,
-      message, [&](uint64_t *found) {
-        RingEntry *entry{nullptr};
+      message, [&](RingEntry *&entry, uint64_t *found) {
         return Look(handle, kRingOfArrays, entry, &header) &&
             TakeArrayFromHost(handle, entry, header, found);
       })};
@@ -2544,7 +2552,10 @@ bool InProcess() {
 // incarnation it wants there; or neither, for a send through the host. For
 // its own mailbox, which it receives from, whether the host's ring has the
 // next turn when it and a queue both have a message, and whether the peer
-// queue has the next turn before the local one.
+// queue has the next turn before the local one; the entry of its ring
+// (RingOf), once a receive has found it; and how many times receives from
+// it have polled, so that the host's ring gets every eighth poll across
+// receives, not the first of each.
 struct Route {
   uint64_t handle[5];
   ProcessQueue *queue;
@@ -2552,15 +2563,31 @@ struct Route {
   uint64_t incarnation;
   uint64_t hostFirst;
   uint64_t peerFirst;
+  RingEntry *entry;
+  uint64_t looks;
   Route *next;
 };
 
-Route *RouteOf(const uint64_t *handle) {
+bool RouteIs(const Route *route, const uint64_t *handle) {
+  return route->handle[0] == handle[0] && route->handle[1] == handle[1] &&
+      route->handle[2] == handle[2] && route->handle[3] == handle[3] &&
+      route->handle[4] == handle[4];
+}
+
+// The process's route to the mailbox, for a send or a receive. The last
+// route for each is kept in the team's local memory: a process mostly
+// receives from its own mailbox and sends to the same one again, and each
+// step down the list is a load from the GPU's memory, most of a microsecond
+// from one lane.
+Route *RouteOf(const uint64_t *handle, RouteUse use) {
+  Route *&last{lastRoutes[use][__gpu_thread_id_x() / __gpu_num_lanes()]};
+  if (last && RouteIs(last, handle)) {
+    return last;
+  }
   Arena *own{CurrentArena()};
   for (Route *route{own->routes}; route; route = route->next) {
-    if (route->handle[0] == handle[0] && route->handle[1] == handle[1] &&
-        route->handle[2] == handle[2] && route->handle[3] == handle[3] &&
-        route->handle[4] == handle[4]) {
+    if (RouteIs(route, handle)) {
+      last = route;
       return route;
     }
   }
@@ -2592,8 +2619,11 @@ Route *RouteOf(const uint64_t *handle) {
   route->incarnation = incarnation;
   route->hostFirst = 0;
   route->peerFirst = 0;
+  route->entry = nullptr;
+  route->looks = 0;
   route->next = own->routes;
   own->routes = route;
+  last = route;
   return route;
 }
 
@@ -2836,6 +2866,59 @@ void Put(ProcessQueue *queue, uint64_t message) {
 
 // One look at the process's own queue: whether the message of the next
 // position has arrived, in its slot or spilled, which it takes.
+// The spill of `position` from the slot `index` of the receiver's own
+// queue, or null if it is not there yet. The receiver's list for the slot
+// holds what it has moved from the senders' stack, in the order of
+// positions; it moves the stack when the list does not start with the
+// position. Senders that took positions in one order may push in another,
+// so a moved spill goes in its place, at the end almost always.
+TeamSpill *TakeOwnSpill(
+    ProcessQueue *queue, uint64_t index, uint64_t position) {
+  auto *&first{reinterpret_cast<TeamSpill *&>(queue->taken[index])};
+  auto *&last{reinterpret_cast<TeamSpill *&>(queue->takenLast[index])};
+  auto **stack{reinterpret_cast<TeamSpill **>(&queue->spills[index])};
+  if ((!first || first->position != position) &&
+      __scoped_atomic_load_n(stack, __ATOMIC_RELAXED, kDevice)) {
+    TeamSpill *pushed{
+        __scoped_atomic_exchange_n(stack, nullptr, __ATOMIC_ACQUIRE, kDevice)};
+    // The stack has the last push first.
+    TeamSpill *moved{nullptr};
+    while (pushed) {
+      TeamSpill *next{pushed->next};
+      pushed->next = moved;
+      moved = pushed;
+      pushed = next;
+    }
+    while (moved) {
+      TeamSpill *next{moved->next};
+      moved->next = nullptr;
+      if (!first) {
+        first = last = moved;
+      } else if (moved->position > last->position) {
+        last->next = moved;
+        last = moved;
+      } else {
+        TeamSpill **at{&first};
+        while ((*at)->position < moved->position) {
+          at = &(*at)->next;
+        }
+        moved->next = *at;
+        *at = moved;
+      }
+      moved = next;
+    }
+  }
+  if (!first || first->position != position) {
+    return nullptr;
+  }
+  TeamSpill *spill{first};
+  first = spill->next;
+  if (!first) {
+    last = nullptr;
+  }
+  return spill;
+}
+
 bool TakeQueued(ProcessQueue *queue, uint64_t *message) {
   uint64_t position{
       __scoped_atomic_load_n(&queue->head, __ATOMIC_RELAXED, kDevice)};
@@ -2846,9 +2929,7 @@ bool TakeQueued(ProcessQueue *queue, uint64_t *message) {
     *message = __scoped_atomic_load_n(&slot.message, __ATOMIC_RELAXED, kDevice);
     __scoped_atomic_store_n(&slot.sequence, position + kProcessQueueSlots,
         __ATOMIC_RELEASE, kDevice);
-  } else if (TeamSpill *
-      spill{TakeSpill(
-          reinterpret_cast<TeamSpill **>(&queue->spills[index]), position)}) {
+  } else if (TeamSpill * spill{TakeOwnSpill(queue, index, position)}) {
     *message = spill->message;
     RawFree(spill, sizeof(TeamSpill));
     CountBlocks(-1);
@@ -3401,7 +3482,7 @@ Sent DirectSend(
   if (!InProcess()) {
     return Sent::kHost;
   }
-  Route *route{RouteOf(handle)};
+  Route *route{RouteOf(handle, kRouteToSend)};
   ProcessQueue *queue{route->queue};
   if (!queue) {
     if (route->peer) {
@@ -3442,9 +3523,13 @@ bool DirectSendWord(const uint64_t *handle, uint64_t message) {
 // host alone. `fromHost` takes the ring's oldest message if it has one. The
 // queue is looked at every poll, about a microsecond apart, and the ring
 // every eighth, about as often as a receive through the host alone looks;
-// when both have messages they take turns. Once the host has closed the
-// mailbox, a look at the ring finds it so, and the receive fails
-// (ClosedMailbox).
+// when both have messages they take turns. The polls are counted across
+// receives (Route::looks): each look at the ring reads host memory, a few
+// microseconds, which a receive that finds its message in the queue at once
+// should not pay every time. After a message from the ring, the next
+// receive looks at the ring first, as a process that the host feeds would
+// otherwise wait up to eight polls for each message. Once the host has closed the mailbox, a look
+// at the ring finds it so, and the receive fails (ClosedMailbox).
 template <typename FromHost>
 int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
     const void *typeInfo, uint64_t *message, FromHost fromHost) {
@@ -3453,7 +3538,7 @@ int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
   }
   ProcessQueue *own{placeQueues[__gpu_thread_id_x() / __gpu_num_lanes()]};
   PeerQueue *peer{placePeerQueues[__gpu_thread_id_x() / __gpu_num_lanes()]};
-  Route *route{RouteOf(handle)};
+  Route *route{RouteOf(handle, kRouteToReceive)};
   if (!own || route->queue != own) {
     return -1;
   }
@@ -3470,23 +3555,30 @@ int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
     route->peerFirst = 0;
     return true;
   }};
-  RingEntry *entry{RingOf(handle, kind)};
-  if (!entry) {
-    ClosedMailbox();
+  if (!route->entry) {
+    route->entry = RingOf(handle, kind);
+    if (!route->entry) {
+      ClosedMailbox();
+    }
   }
+  RingEntry *&entry{route->entry};
   int64_t deadline{Deadline(milliseconds)};
-  for (uint32_t look{0};; ++look) {
+  for (uint64_t look{route->looks};; ++look) {
     bool hostLook{look % 8 == 0};
-    if (hostLook &&
+    // A look at the ring finds it closed; one that comes after the queue
+    // this poll needs its own check, which reads the same word.
+    if (hostLook && !route->hostFirst &&
         __atomic_load_n(&entry->ring->tail, __ATOMIC_RELAXED) == kRingClosed) {
       ClosedMailbox();
     }
-    if (hostLook && route->hostFirst && fromHost(message)) {
+    if (hostLook && route->hostFirst && fromHost(entry, message)) {
       route->hostFirst = 0;
+      route->looks = 0;
       return 1;
     }
     bool peerFirst{route->peerFirst != 0};
     if (peerFirst && fromPeer()) {
+      route->looks = look + 1;
       return 1;
     }
     uint64_t queued{0};
@@ -3494,15 +3586,19 @@ int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
       *message = Deliver(kind, queued);
       route->hostFirst = 1;
       route->peerFirst = 1;
+      route->looks = look + 1;
       return 1;
     }
     if (!peerFirst && fromPeer()) {
+      route->looks = look + 1;
       return 1;
     }
-    if (hostLook && !route->hostFirst && fromHost(message)) {
+    if (hostLook && !route->hostFirst && fromHost(entry, message)) {
+      route->looks = 0;
       return 1;
     }
     if (milliseconds >= 0 && Now() >= deadline) {
+      route->looks = look + 1;
       return 0;
     }
     __builtin_amdgcn_s_sleep(16);
@@ -3525,6 +3621,8 @@ void MakeQueue(PlaceTable *table, uint64_t wave) {
     queue->slots[i].sequence = i;
     queue->slots[i].message = 0;
     queue->spills[i] = 0;
+    queue->taken[i] = 0;
+    queue->takenLast[i] = 0;
   }
   __scoped_atomic_thread_fence(__ATOMIC_RELEASE, kDevice);
 }
@@ -3823,8 +3921,7 @@ extern "C" int merk_device_receive_term(const uint64_t *handle,
   }
   uint64_t present{0};
   int direct{DirectReceive(handle, kRingOfTerms, milliseconds, typeInfo,
-      message, [&](uint64_t *found) {
-        RingEntry *entry{nullptr};
+      message, [&](RingEntry *&entry, uint64_t *found) {
         return Look(handle, kRingOfTerms, entry, &present) &&
             TakeTermFromHost(handle, entry, typeInfo, found);
       })};
