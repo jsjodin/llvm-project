@@ -237,6 +237,10 @@ RunningProcess *routes{nullptr};
 // The blocks of messages between GPU processes that the kernels the reaper
 // has freed left allocated (PlaceTable), with MERK_CHECK_DEVICE_MEMORY.
 std::int64_t endedPlaceBlocks{0};
+// The same for their messages put in peer queues, and copies in send pools
+// not given back (PlaceTable's `peerSends` and `peerCopies`).
+std::int64_t endedPeerSends{0};
+std::int64_t endedPeerCopies{0};
 
 // Every kernel that has not ended, and those that have, for the reaper.
 Place *places{nullptr};
@@ -428,6 +432,9 @@ void Reap(RunningProcess *process) {
 // of messages that are still allocated (PlaceTable).
 void ReapPlace(Place *place) {
   __atomic_add_fetch(&endedPlaceBlocks, place->table->blocks, __ATOMIC_RELAXED);
+  __atomic_add_fetch(&endedPeerSends, place->table->peerSends, __ATOMIC_RELAXED);
+  __atomic_add_fetch(
+      &endedPeerCopies, place->table->peerCopies, __ATOMIC_RELAXED);
   DeviceFreeHost(place->gpu, place->table);
   DeviceFree(place->gpu, place->queues);
   pthread_mutex_lock(&lock);
@@ -1127,6 +1134,23 @@ void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
 // With MERK_CHECK_DEVICE_MEMORY, once no GPU process runs: the blocks of
 // messages between GPU processes still allocated, in kernels that have
 // ended and those that run.
+// The messages that GPU processes put in peer queues, and the copies in send
+// pools not given back, of every kernel (PlaceTable), with
+// MERK_CHECK_DEVICE_MEMORY.
+void PlacePeerCounts(std::int64_t *sends, std::int64_t *copies) {
+  pthread_mutex_lock(&lock);
+  *sends = __atomic_load_n(&endedPeerSends, __ATOMIC_RELAXED);
+  *copies = __atomic_load_n(&endedPeerCopies, __ATOMIC_RELAXED);
+  const Place *lists[]{places, endedPlaces};
+  for (const Place *list : lists) {
+    for (const Place *place{list}; place; place = place->next) {
+      *sends += __atomic_load_n(&place->table->peerSends, __ATOMIC_ACQUIRE);
+      *copies += __atomic_load_n(&place->table->peerCopies, __ATOMIC_ACQUIRE);
+    }
+  }
+  pthread_mutex_unlock(&lock);
+}
+
 std::int64_t PlaceMessageBlocks() {
   std::int64_t blocks{__atomic_load_n(&endedPlaceBlocks, __ATOMIC_RELAXED)};
   pthread_mutex_lock(&lock);
