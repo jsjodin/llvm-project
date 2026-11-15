@@ -2770,18 +2770,23 @@ uint64_t Deliver(uint64_t kind, uint64_t message) {
 // Counts a sender into the queue if the process it wants runs there: 1; 0
 // if that process has ended; -1 if it has not yet started. With the queue's
 // closing (CloseQueue), sequentially consistent: either the sender sees it
-// closed, or the closing process sees the sender in flight and waits.
+// closed, or the closing process sees the sender in flight and waits. A
+// sender first looks without counting itself: a process that has ended
+// never runs again, so a stale sender, which may send many times, leaves
+// `senders` alone, which the slot's later processes wait on as they close.
 int EnterQueue(ProcessQueue *queue, uint64_t incarnation) {
-  __scoped_atomic_fetch_add(&queue->senders, 1, __ATOMIC_SEQ_CST, kDevice);
-  uint64_t now{
-      __scoped_atomic_load_n(&queue->incarnation, __ATOMIC_SEQ_CST, kDevice)};
-  uint64_t closed{
-      __scoped_atomic_load_n(&queue->closed, __ATOMIC_SEQ_CST, kDevice)};
-  if (now == incarnation && !closed) {
-    return 1;
+  uint64_t want{incarnation << 1 | 1};
+  uint64_t state{
+      __scoped_atomic_load_n(&queue->state, __ATOMIC_RELAXED, kDevice)};
+  if (state == want) {
+    __scoped_atomic_fetch_add(&queue->senders, 1, __ATOMIC_SEQ_CST, kDevice);
+    state = __scoped_atomic_load_n(&queue->state, __ATOMIC_SEQ_CST, kDevice);
+    if (state == want) {
+      return 1;
+    }
+    __scoped_atomic_fetch_sub(&queue->senders, 1, __ATOMIC_RELEASE, kDevice);
   }
-  __scoped_atomic_fetch_sub(&queue->senders, 1, __ATOMIC_RELEASE, kDevice);
-  return now < incarnation ? -1 : 0;
+  return (state >> 1) < incarnation ? -1 : 0;
 }
 
 // Puts a message in the queue at the next position, in its slot, or spilled
@@ -3494,8 +3499,7 @@ void MakeQueue(PlaceTable *table, uint64_t wave) {
   auto *queue{reinterpret_cast<ProcessQueue *>(__scoped_atomic_load_n(
                   &table->queues, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)) +
       wave};
-  queue->incarnation = 0;
-  queue->closed = 1;
+  queue->state = 0;
   queue->senders = 0;
   queue->kind = kRingOfWords;
   queue->tail = 0;
@@ -3515,16 +3519,16 @@ ProcessQueue *OpenQueue(PlaceTable *table, PlaceSlot *slot, uint64_t wave) {
       wave};
   uint64_t incarnation{__scoped_atomic_load_n(
       &slot->incarnation, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
-  __scoped_atomic_store_n(&queue->closed, 0, __ATOMIC_RELAXED, kDevice);
   __scoped_atomic_store_n(
-      &queue->incarnation, incarnation, __ATOMIC_SEQ_CST, kDevice);
+      &queue->state, incarnation << 1 | 1, __ATOMIC_SEQ_CST, kDevice);
   return queue;
 }
 
 // As the process ends: its queue closes, and once no sender is in flight,
 // what it still holds goes. The next process of the slot finds it empty.
 void CloseQueue(ProcessQueue *queue) {
-  __scoped_atomic_store_n(&queue->closed, 1, __ATOMIC_SEQ_CST, kDevice);
+  __scoped_atomic_fetch_and(
+      &queue->state, ~uint64_t{1}, __ATOMIC_SEQ_CST, kDevice);
   while (
       __scoped_atomic_load_n(&queue->senders, __ATOMIC_SEQ_CST, kDevice) != 0) {
     __builtin_amdgcn_s_sleep(1);
