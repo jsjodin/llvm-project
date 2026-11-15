@@ -1941,6 +1941,14 @@ extern "C" uint64_t *merk_device_loop_results(void) {
   return control->results;
 }
 
+// How many worker teams the calling process has, 0 for none: for a program
+// to report what its share of the GPU came to.
+extern "C" int64_t merk_device_worker_teams(void) {
+  ProcessControl *control{
+      placeControls[__gpu_thread_id_x() / __gpu_num_lanes()]};
+  return control ? control->crossing - 1 : 0;
+}
+
 // Runs the loop with the number across the process's worker teams, from the
 // first counter by the step, `count` times, with the words that
 // merk_device_loop_values gave, and `reductions` reductions: the workers
