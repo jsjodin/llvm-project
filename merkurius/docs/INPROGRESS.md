@@ -6200,9 +6200,50 @@ queue's slots are laid out. 512 B costs the same as 8 B.
      a GPU as between two, against 1.2 µs of flag latency between GPUs. So
      a pair sends about 30000 messages a second, which the processes' own
      send and receive cost, not the link.
-   - Left: why a message costs 33 µs (the next step); the copy engine for
-     both directions (concurrent copies in the RPC server, or a server per
+   - Left: why a message costs 33 µs (*see The cost of a message,
+     below*); the copy engine for both directions (concurrent copies in the RPC server, or a server per
      GPU), if processes without workers are to get the link both ways.
+
+**The cost of a message.** *2026-11-15.* gpu-link (step 8) found 33–55
+µs a message, even of 1 word, within a GPU as between two. Measured with
+counters of the GPU's steady clock in DirectSend and DirectReceive (a
+scratch build, not kept), a stream of words from one process to another
+on ROCR GPUs 4,6:
+- *A look at the host's ring on every receive,* about 6 µs: after each
+  message from the queue the ring had the next turn, at the first poll of
+  the next receive, and a look reads host memory three times (the closed
+  check, the tail again, and `spilled`). Polls are now counted across
+  receives (`Route::looks`), so the ring gets every eighth poll, not the
+  first of each receive. After a message from the ring the next receive
+  looks there first, or a process that the host feeds would wait up to
+  eight polls a message (gpu-pairs' `A` got 11 µs slower until it did).
+  The poll that looks at the ring after the queue still checks the closed
+  mailbox; one that looks first lets the look find it.
+- *Pointer chases,* each most of a microsecond from one lane: `RouteOf`
+  about 3 µs, `RingOf` 1.5. A route now keeps its ring's entry, which
+  `Look` takes from its caller, and each wave keeps the route it last took
+  to send and to receive in the team's local memory (`lastRoutes`).
+- *The spill walk.* A sender far ahead of its receiver spills, and the
+  receiver walked the slot's stack, oldest at the bottom, for each message:
+  a stream of 20000 words cost 59 µs a message, 21 for 2000. The receiver
+  now moves a slot's stack, a whole stack at a time, to a list of its own
+  in the order of positions (`ProcessQueue::taken`, `TakeOwnSpill`).
+
+  Words, µs a message at the receiver, before and after:
+
+  | Stream | Before | After |
+  | --- | --- | --- |
+  | One GPU, 2000 words | 20.9 | 11.4 |
+  | One GPU, 20000 words | 59.0 | 11.2 |
+  | Two GPUs | 17.3 | 9.4 |
+
+  gpu-link, µs between arrays of 1 word: `A>B` 33 → 26, `A>A` 52 → 20;
+  gpu-pairs, `AB*4` ping of 1 word 465 → 374, every row as fast or faster.
+- Left: an array of 1 word costs about 16 µs more than a word between GPUs
+  (the send pool, the copies, the return ring); what remains of the 9 µs is
+  some 10 to 15 loads from the GPU's memory a message, each most of a
+  microsecond, which only fewer loads, or state in the team's local
+  memory, would cut.
 
 **The local queue's state in one word.** *Fixed 2026-11-15.* `OpenQueue`
 stored `closed` and then `incarnation`, and `EnterQueue` loaded
