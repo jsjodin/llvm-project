@@ -166,12 +166,17 @@ struct ProcessQueue {
 // the node's other GPUs (docs/INPROGRESS.md, Direct sends between the GPUs
 // of a node, points 2 to 4). It is in the receiving GPU's fine-grained
 // memory, as a word that a peer writes in ordinary memory is never seen by a
-// poller there, and its atomics are at system scope. Its ring and `senders`
-// work as ProcessQueue's, but `state` is the incarnation of the slot's last
-// process shifted left by one, with 1 while it runs: one word, so that a
-// sender never sees a new incarnation with the old process's openness, nor
-// the old one open. A full slot makes the sender wait, as it has no spill
-// list on another GPU; the closing receiver
+// poller there, and its atomics are at system scope. Its ring works as
+// ProcessQueue's, but `state` is one word for the incarnation of the slot's
+// last process, whether it runs, and the senders in flight: the
+// incarnation shifted left by kPeerQueueOpenBit + 1, kPeerQueueOpen while
+// it runs, and the count below. A sender counts itself in with one add,
+// which also says whether the process it wants runs; it never sees a new
+// incarnation with the old process's openness, nor the old one open; and
+// as the closing receiver clears the bit on the same word, it counts every
+// sender that saw the queue open, which two words needed sequentially
+// consistent atomics for, each a fence at system scope. A full slot makes the
+// sender wait, as it has no spill list on another GPU; the closing receiver
 // takes what is queued while it waits for the senders in flight. A slot
 // holds the message: a word itself; for an array, the address of the
 // sender's copy, in the sending GPU's send pool, which the receiver copies
@@ -193,8 +198,11 @@ struct ProcessQueue {
 // kernels, so a stale sender finds a later one and drops its message, as a
 // send to an ended process does (DirectSend); the device must never set a
 // peer queue's incarnation back, nor clear a reused one. The host makes a
-// new block empty: state 0, no senders, each slot's sequence its index.
+// new block empty: state 0, each slot's sequence its index.
 constexpr uint64_t kPeerQueueSlots{64};
+constexpr uint64_t kPeerQueueOpenBit{24};
+constexpr uint64_t kPeerQueueOpen{uint64_t{1} << kPeerQueueOpenBit};
+constexpr uint64_t kPeerQueueSenders{kPeerQueueOpen - 1};
 
 struct PeerQueueSlot {
   uint64_t sequence;
@@ -205,7 +213,6 @@ struct PeerQueueSlot {
 
 struct PeerQueue {
   alignas(64) uint64_t state;
-  uint64_t senders;
   alignas(64) uint64_t tail;
   alignas(64) uint64_t head;
   alignas(64) PeerQueueSlot slots[kPeerQueueSlots];
@@ -219,9 +226,12 @@ struct PeerQueue {
 // SendPool, then a byte for each kSendPoolBlock bytes of the pool, which say
 // which blocks are free; the host clears both (SendPoolClearBytes), and the
 // first sender to allocate makes the rest (`ready`). Only the pool's GPU
-// allocates and frees, under `lock`, at the device's scope.
+// allocates and frees, under `lock`, at the device's scope. Freed blocks of
+// the smallest orders wait on lists of their own, unjoined (`quick`), and
+// `returnHead` is the return ring's next position to take.
 constexpr uint64_t kSendPoolBlock{1024};
 constexpr uint64_t kSendPoolOrders{48};
+constexpr uint64_t kSendPoolQuickOrders{7};
 
 struct SendPool {
   uint64_t lock;
@@ -229,6 +239,8 @@ struct SendPool {
   uint64_t data;
   uint64_t dataBytes;
   uint64_t free[kSendPoolOrders];
+  uint64_t quick[kSendPoolQuickOrders];
+  uint64_t returnHead;
 };
 
 constexpr uint64_t SendPoolClearBytes(uint64_t poolBytes) {
@@ -239,9 +251,10 @@ constexpr uint64_t SendPoolClearBytes(uint64_t poolBytes) {
 // receivers on other GPUs put on it the blocks of the GPU's send pool that
 // they are done with, and the GPU's senders take them off and free them. A
 // ring of slots as a queue's, many writers and the GPU's senders as its
-// reader, one at a time under the pool's lock. It has a slot for each
-// block the pool could hold, so a writer never finds it full
-// (ReturnRingSlots), and `slots` slots follow it.
+// reader, one at a time under the pool's lock, which keeps the ring's head
+// in the pool (SendPool::returnHead). It has a slot for each block the pool
+// could hold, so a writer never finds it full (ReturnRingSlots), and
+// `slots` slots follow it.
 struct ReturnRingSlot {
   uint64_t sequence;
   uint64_t address;
@@ -249,7 +262,6 @@ struct ReturnRingSlot {
 
 struct ReturnRing {
   alignas(64) uint64_t tail;
-  alignas(64) uint64_t head;
   alignas(64) uint64_t slots;
 };
 
