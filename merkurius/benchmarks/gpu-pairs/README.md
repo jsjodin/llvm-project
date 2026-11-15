@@ -144,3 +144,30 @@ What it shows:
   (`AB*4` ping 13.1 ms), though faster than through the host (29.1 ms);
   this was not looked into.
 - `AA*4` stays on one GPU and does not use the direct path.
+
+## With worker teams
+
+`GPU_PAIRS_WORKERS=K` gives each relay K worker teams (`share(K)`), and
+builds with `-fopenmp`, which they need. From 64 KiB a relay's workers
+copy its arrays into its send pool and out of the peer's, instead of the
+copy engine (docs/INPROGRESS.md, Direct sends between the GPUs of a node,
+step 7). Measured on r11 on 2026-11-15 on ROCR GPUs 4,6 with
+`MERK_GPU_PEER=1`: "plain" without workers, "engine" with 8 workers but
+`MERK_GPU_PEER_WORKERS=0`, "workers" with 8 workers first. µs per array;
+all 90 rows had every array right in each.
+
+| Chain | Mode | 65536 words, plain | engine | workers | 2^20 words, plain | engine | workers |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `A` | ping | 568 | 577 | 481 | 7998 | 9568 | 7976 |
+| `A-B` | ping | 591 | 415 | 319 | 6720 | 6044 | 4163 |
+| `AB*4` | ping | 1210 | 1247 | 845 | 9226 | 10660 | 7413 |
+| `AA*4` | ping | 1458 | 573 | 514 | 28221 | 7353 | 4688 |
+| `A-B` | stream | 220 | 252 | 186 | 3727 | 3616 | 2526 |
+| `AB*4` | stream | 513 | 509 | 237 | 6782 | 6117 | 3266 |
+| `AA*4` | stream | 374 | 253 | 214 | 8131 | 4665 | 2825 |
+
+- Workers first nearly halve `AB*4`'s stream of 2^20 words against the copy
+  engine's time, 2.6 GB/s against 1.4.
+- `AA*4` gains in both, since workers also copy within a GPU.
+- The copy engine was faster only at `A-B` ping of 262144 words (813
+  against 1321).

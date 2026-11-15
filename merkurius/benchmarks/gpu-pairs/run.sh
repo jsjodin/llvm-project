@@ -7,7 +7,8 @@
 # build-dir is the Merkurius build, ../../../../build-merk by default;
 # offload-arch is the GPU's, this machine's by default, as amdgpu-arch finds
 # it. GPU_PAIRS_MIB sets the mebibytes that each measurement moves, 64 by
-# default.
+# default. GPU_PAIRS_WORKERS=K gives each relay worker teams, up to a K'th
+# of its GPU's kernel's teams (gpupairs.m, wrelay).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 build="$(cd "${1:-$here/../../../../build-merk}" && pwd)"
@@ -22,6 +23,9 @@ flags=()
 for d in "${libs[@]}"; do flags+=("-L$d"); done
 export LD_LIBRARY_PATH="$(IFS=:; echo "${libs[*]}")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-"$build/bin/merkc" -O2 -fprocess-declarations --offload-arch="$arch" \
+# Relays with worker teams need OpenMP's loops, and so -fopenmp only then.
+omp_flags=(-fdo-loops)
+[[ -n "${GPU_PAIRS_WORKERS:-}" ]] && omp_flags+=(-fopenmp)
+"$build/bin/merkc" -O2 "${omp_flags[@]}" -fprocess-declarations --offload-arch="$arch" \
   "${flags[@]}" "$here/gpupairs.m" -o "$out/gpupairs"
-"$out/gpupairs" "$mib"
+"$out/gpupairs" "$mib" ${GPU_PAIRS_WORKERS:+workers "$GPU_PAIRS_WORKERS"}

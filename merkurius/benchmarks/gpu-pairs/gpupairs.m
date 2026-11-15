@@ -44,40 +44,86 @@ relay(To, Self, !IO) :-
         R = timeout
     ).
 
+    % As relay, but a kind with a loop, so each relay has worker teams,
+    % which copy its arrays into and out of messages (runtime/device,
+    % Bulk). The loop sums the array, and runs only for an array whose
+    % first element is negative, which the benchmark never sends.
+:- process wrelay(mailbox(array(int))) receives array(int) on gpu.
+
+wrelay(To, Self, !IO) :-
+    receive(Self, any, infinity, R, !IO),
+    (
+        R = message(A),
+        Size = array.size(A),
+        ( if Size > 0, A ^ elem(0) < 0 then
+            %$omp distribute parallel do reduction((+) : Sum)
+            ( for(I, 0, Size - 1), fromto(0, S0, S1, Sum) do
+                S1 = S0 + A ^ elem(I)
+            ),
+            send(To, array.init(1, Sum), !IO)
+        else
+            send(To, A, !IO)
+        ),
+        ( if Size > 0 then
+            wrelay(To, Self, !IO)
+        else
+            true
+        )
+    ;
+        R = timeout
+    ).
+
 :- func sizes = list(int).
 sizes = [1, 16, 256, 1024, 4096, 16384, 65536, 262144, 1048576].
 
 main(!IO) :-
     io.command_line_arguments(Args, !IO),
-    ( if Args = [M], string.to_int(M, Mib0) then Mib = Mib0 else Mib = 64 ),
+    ( if Args = [M | _], string.to_int(M, Mib0) then Mib = Mib0 else Mib = 64 ),
+    % "workers K": relays with worker teams, each taking up to a K'th of its
+    % GPU's kernel's teams.
+    ( if Args = [_, "workers", KText], string.to_int(KText, K) then
+        Workers = K
+    else
+        Workers = 0
+    ),
     gpus(Gpus, !IO),
+    ( if Workers > 0 then
+        set_worker_teams(gpu(0), share(Workers), !IO),
+        ( if Gpus >= 2 then
+            set_worker_teams(gpu(1), share(Workers), !IO)
+        else
+            true
+        )
+    else
+        true
+    ),
     ( if Gpus < 1 then
         io.write_string("gpupairs: no GPU\n", !IO)
     else
         new_mailbox(Back, !IO),
-        chain("A", [gpu(0)], Back, Mib, !IO),
+        chain(Workers, "A", [gpu(0)], Back, Mib, !IO),
         ( if Gpus >= 2 then
-            chain("A-B", [gpu(0), gpu(1)], Back, Mib, !IO)
+            chain(Workers, "A-B", [gpu(0), gpu(1)], Back, Mib, !IO)
         else
             true
         ),
-        chain("A-A", [gpu(0), gpu(0)], Back, Mib, !IO),
+        chain(Workers, "A-A", [gpu(0), gpu(0)], Back, Mib, !IO),
         ( if Gpus >= 2 then
-            chain("AB*4", [gpu(0), gpu(1), gpu(0), gpu(1), gpu(0), gpu(1),
-                gpu(0), gpu(1)], Back, Mib, !IO)
+            chain(Workers, "AB*4", [gpu(0), gpu(1), gpu(0), gpu(1), gpu(0),
+                gpu(1), gpu(0), gpu(1)], Back, Mib, !IO)
         else
             true
         ),
-        chain("AA*4", [gpu(0), gpu(0), gpu(0), gpu(0), gpu(0), gpu(0),
-            gpu(0), gpu(0)], Back, Mib, !IO)
+        chain(Workers, "AA*4", [gpu(0), gpu(0), gpu(0), gpu(0), gpu(0),
+            gpu(0), gpu(0), gpu(0)], Back, Mib, !IO)
     ).
 
     % Spawns the relays at Places, the last forwarding to Back, measures
     % every size both ways, and ends the relays.
-:- pred chain(string::in, list(place)::in, mailbox(array(int))::in, int::in,
-    io::di, io::uo) is det.
-chain(Name, Places, Back, Mib, !IO) :-
-    spawn_chain(list.reverse(Places), Back, First, !IO),
+:- pred chain(int::in, string::in, list(place)::in, mailbox(array(int))::in,
+    int::in, io::di, io::uo) is det.
+chain(Workers, Name, Places, Back, Mib, !IO) :-
+    spawn_chain(Workers, list.reverse(Places), Back, First, !IO),
     % The first round trip starts the kernels.
     send(First, array.init(1, 1), !IO),
     receive(Back, any, after(60000), _, !IO),
@@ -86,12 +132,16 @@ chain(Name, Places, Back, Mib, !IO) :-
     send(First, array.init(0, 0), !IO),
     receive(Back, any, after(60000), _, !IO).
 
-:- pred spawn_chain(list(place)::in, mailbox(array(int))::in,
+:- pred spawn_chain(int::in, list(place)::in, mailbox(array(int))::in,
     mailbox(array(int))::out, io::di, io::uo) is det.
-spawn_chain([], To, To, !IO).
-spawn_chain([Place | Places], To, First, !IO) :-
-    spawn(Place, relay(To), Relay, !IO),
-    spawn_chain(Places, Relay, First, !IO).
+spawn_chain(_, [], To, To, !IO).
+spawn_chain(Workers, [Place | Places], To, First, !IO) :-
+    ( if Workers > 0 then
+        spawn(Place, wrelay(To), Relay, !IO)
+    else
+        spawn(Place, relay(To), Relay, !IO)
+    ),
+    spawn_chain(Workers, Places, Relay, First, !IO).
 
 :- pred measure(string::in, string::in, mailbox(array(int))::in,
     mailbox(array(int))::in, int::in, int::in, io::di, io::uo) is det.

@@ -345,7 +345,7 @@ bool ReadyPeer(const Gpu &gpu) {
     if (pool) {
       DeviceFree(gpu.number, pool);
     }
-    DeviceFree(gpu.number, returns);
+    DeviceFreeFine(gpu.number, returns);
     return false;
   }
   peer.sendPool = pool;
@@ -378,7 +378,7 @@ PeerBlock *TakePeerBlock(const Gpu &gpu, std::uint64_t slots) {
   auto *empty{static_cast<PeerQueue *>(ZeroedAligned(bytes))};
   if (!queues || !empty) {
     if (queues) {
-      DeviceFree(gpu.number, queues);
+      DeviceFreeFine(gpu.number, queues);
     }
     std::free(empty);
     return nullptr;
@@ -391,7 +391,7 @@ PeerBlock *TakePeerBlock(const Gpu &gpu, std::uint64_t slots) {
   bool copied{CopyToDevice(gpu.number, queues, empty, bytes)};
   std::free(empty);
   if (!copied) {
-    DeviceFree(gpu.number, queues);
+    DeviceFreeFine(gpu.number, queues);
     return nullptr;
   }
   auto *block{static_cast<PeerBlock *>(Malloc(sizeof(PeerBlock)))};

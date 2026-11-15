@@ -165,7 +165,8 @@ constexpr uint32_t rpcCopyPeer{RpcOpcode(18)};
 // From how many bytes an array sent directly to another GPU of the node is
 // copied into the send pool, and out of it, by the copy engine
 // (rpcCopyPeer): the buffer's word is the lanes of the device's waves, and
-// the host answers with the bytes, or ~0 for never.
+// the host answers with the bytes, or ~0 for never, and whether a process
+// with worker teams has them copy it instead.
 constexpr uint32_t rpcPeerDmaBytes{RpcOpcode(19)};
 
 } // namespace merkurius::runtime

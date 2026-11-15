@@ -6135,8 +6135,54 @@ queue's slots are laid out. 512 B costs the same as 8 B.
      engine.
    - Left: the RPC server makes one copy at a time, for all GPUs; a
      receiver with worker teams might pull faster within a package
-     (145 GB/s) than the copy engine (50 GB/s); an array the sender moves
-     is still copied into the pool.
+     (145 GB/s) than the copy engine (50 GB/s) (*step 7*); an array the
+     sender moves is still copied into the pool.
+7. Worker teams copy large arrays between GPUs. *Done 2026-11-15:*
+   - *The peer path in OpenMP programs.* A process kind gets worker teams
+     only if it has OpenMP loops, so only in a program built with
+     `-fopenmp`, and such a program takes its GPUs from libomptarget:
+     devices.cpp calls libomptarget for each device OpenMP numbers, and
+     liboffload for the others (step 3 of GPU processes). Fine-grained
+     memory, which libomptarget has no call for, was refused on OpenMP's
+     devices, since `DeviceFree` would have given it to `omp_target_free`.
+     So no GPU got peer memory, and every send between GPUs went through
+     the host (`AB*4` ping of 1 word 922 µs, the host's figure).
+     `DeviceAllocateFine` now always allocates through liboffload, which
+     the runtime starts in every program with GPUs, and
+     `DeviceFreeFine` frees through it. Both plugins run on one HSA
+     runtime in the process, so the memory is the same to kernels that
+     either launches, and each plugin lets every GPU agent reach what it
+     allocates. Coarse-grained memory, the send pool included, stays
+     libomptarget's on OpenMP's devices; `CopyBetweenDevices` already used
+     liboffload's GPUs, which have OpenMP's numbers.
+   - *Workers before the copy engine.* From `MERK_GPU_PEER_DMA_BYTES` up,
+     a process whose worker teams would take the copy (`BulkControl`,
+     from `bulkBytes`, 2 KiB on gfx9) gives it to them instead of the copy
+     engine (`PeerByEngine` in device.cpp), for both the copy into the
+     pool and the one out of the peer's. The workers pull straight from
+     the other GPU's memory. The system acquire in `TakePeer` drops the
+     L2's lines, and the workers' barrier their L1s.
+     `MERK_GPU_PEER_WORKERS=0` turns it off (the host answers it with
+     `rpcPeerDmaBytes`).
+   - *Measured* on ROCR GPUs 4,6 (benchmarks/gpu-pairs/README.md, With
+     worker teams), `GPU_PAIRS_WORKERS=8`, µs per array, 2^20 words:
+     relays without workers, with workers and the copy engine, and with
+     workers first:
+
+     | Chain, mode | no workers | engine | workers |
+     | --- | --- | --- | --- |
+     | `AB*4`, ping | 9226 | 10660 | 7413 |
+     | `AB*4`, stream | 6782 | 6117 | 3266 |
+     | `A-B`, ping | 6720 | 6044 | 4163 |
+
+     Workers first is faster from 16384 words in every chain but one:
+     `A-B` ping at 262144 words, 1321 against the engine's 813.
+   - test/Benchmarks/gpu-pairs-two-gpus.test also builds gpupairs.m with
+     `-fopenmp` and runs it with `workers 8`, checking that its messages
+     went directly.
+   - Left: 8 worker teams a relay was the only share measured; the
+     exception above; the 2,3 and 1,3 pairs, busy with others' jobs, were
+     not measured.
 
 **Open.**
 
