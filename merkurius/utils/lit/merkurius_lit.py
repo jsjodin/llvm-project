@@ -13,7 +13,7 @@ import time
 
 import lit.formats
 
-from gpu_info import gpu_unit_mask, visible_gpus  # noqa: F401, for lit.cfg.py
+from gpu_info import gpu_unit_mask, one_unit_mask, visible_gpus  # noqa: F401, for lit.cfg.py
 
 
 def gpus_of(test):

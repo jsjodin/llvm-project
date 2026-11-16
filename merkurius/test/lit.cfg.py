@@ -113,6 +113,12 @@ if omp_dirs:
 if gpus and omp_dirs:
     config.available_features.add("amdgpu-gpu")
     config.substitutions.append(("%offload-arch", gpus[0]))
+    # %one-unit-mask is the fewest compute units that a test can give the
+    # offload plugin's queues (LIBOMPTARGET_AMDGPU_CU_MASK) on every GPU it
+    # may run on: one, or a pair on a processor with work group processors,
+    # which enables units in pairs.
+    config.substitutions.append(
+        ("%one-unit-mask", merkurius_lit.one_unit_mask(visible_gpus)))
 # HIP programs, the baselines of some benchmarks, need ROCm's HIP runtime,
 # from $ROCM_PATH or /opt/rocm: the "hip" feature, with %rocm-path for the
 # build and %hip-env to run, which limits HSA's queues to the compute units
