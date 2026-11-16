@@ -74,6 +74,16 @@ let Visibility = [FC1Option] in {
 def library_dir : Separate<["-"], "library-dir">, MetaVarName<"<dir>">,
   HelpText<"The directory of the standard library's modules; by default "
            "lib/merkurius beside the directory of merkc">;
+def device_module_dir : Separate<["-"], "device-module-dir">,
+  MetaVarName<"<dir>">,
+  HelpText<"In a device's compile, a directory of the program's other "
+           "modules as merk bytecode, <module>.merkbc, to copy the "
+           "procedures the device's code reaches from, as from the "
+           "library's">;
+def fno_copy_device_procedures : Flag<["-"], "fno-copy-device-procedures">,
+  HelpText<"In a device's compile, leave the other modules' procedures that "
+           "the device's code reaches as declarations; for writing a "
+           "module's merk bytecode for the other modules' device compiles">;
 def fno_infer_types : Flag<["-"], "fno-infer-types">,
   HelpText<"Report each predicate or function without a type declaration, "
            "as mmc does without --infer-types; its type is still inferred">;

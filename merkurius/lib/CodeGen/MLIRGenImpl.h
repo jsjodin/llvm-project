@@ -136,20 +136,20 @@ public:
       const parser::ParseTree &tree, const parser::TokenSequence &tokens,
       const parser::AllSources &sources,
       const semantics::NameResolution &resolution,
-      semantics::TypeChecking &types,
-      semantics::ModeChecking &modes,
+      semantics::TypeChecking &types, semantics::ModeChecking &modes,
       const semantics::DeterminismChecking &determinism,
       const semantics::PolymorphismAnalysis &polymorphism,
       const semantics::LoopTranslation &loops, const TargetInfo &target,
       parser::Messages &messages, const GenerationOptions &options)
-      : context_{context}, builder_{&context}, moduleName_{module},
-        tree_{tree}, tokens_{tokens}, sources_{sources},
-        resolution_{resolution}, types_{types},
-        modes_{modes}, determinism_{determinism}, loops_{loops},
+      : context_{context}, builder_{&context}, moduleName_{module}, tree_{tree},
+        tokens_{tokens}, sources_{sources}, resolution_{resolution},
+        types_{types}, modes_{modes}, determinism_{determinism}, loops_{loops},
         target_{target}, messages_{messages},
         stubUnimplemented_{options.stubUnimplemented},
         mmcUniqueness_{options.mmcUniqueness}, traceFlags_{options.traceFlags},
-        deviceLibraryDirectory_{options.deviceLibraryDirectory} {
+        deviceLibraryDirectory_{options.deviceLibraryDirectory},
+        deviceModuleDirectories_{options.deviceModuleDirectories},
+        copyDeviceProcedures_{options.copyDeviceProcedures} {
     for (const semantics::ProcedurePolymorphism &procedure :
         polymorphism.procedures()) {
       polymorphism_[procedure.body] = &procedure;
@@ -862,6 +862,9 @@ private:
   // --trace-flag=.
   std::vector<std::string> traceFlags_;
   std::string deviceLibraryDirectory_;
+  // -device-module-dir and -fno-copy-device-procedures.
+  std::vector<std::string> deviceModuleDirectories_;
+  bool copyDeviceProcedures_{true};
   // Whether a procedure's body is being generated, and the first construct
   // of it not handled yet, with -fstub-unimplemented.
   bool inBody_{false};

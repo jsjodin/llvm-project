@@ -3753,9 +3753,34 @@ follows the calls from its target regions:
   its `type_info` argument.
 - **Not copied:** the module's own procedures, and `array`'s under
   `-fmmc-uniqueness`, whose procedures are numbered by `array.m` rather than
-  the sound stub. A procedure of another module of the program is not compiled
-  for a device yet (`omp-target-other-module.m`); its bytecode could come from
-  the build driver.
+  the sound stub.
+
+**The program's other modules** (built 2026-11-16). GPU code may call the
+procedures of the program's other modules as it calls the library's: a
+physics module called by a GPU process kind of the main one, say. Given
+several sources and GPU code, the driver first writes, for each GPU and for
+each kind of device compile the program has (GPU processes' kernels, target
+regions), every source's `merk` module as bytecode, `<module>.merkbc`, in a
+temporary directory: compiled as that device compile compiles it, so the
+copies are what the module's own device compile would make. Each device
+compile then searches those directories (`-device-module-dir`) before the
+library's.
+- **Order does not matter.** The bytecode is written without copying other
+  modules' procedures (`-fno-copy-device-procedures`), so no module waits for
+  another's. The device compile follows the copies' calls across modules:
+  where a copy calls a procedure that its own module only declares, as a
+  helper module calling `float`, the declaration is replaced by the
+  definition, as the module's own declarations are.
+- **Found by name.** A module's bytecode is named after its source, as the
+  module loader finds sources, so a source must be named after its module.
+- **Each source compiled on its own** (`-c` in separate runs) still has no
+  directory, and a call of another module's procedure from GPU code is an
+  error at the device's compile (`omp-target-other-module.m`).
+- **Tests:** `Driver/device-modules.test` for the jobs;
+  `process-other-module.m` and its `-gpu.test` for a GPU process and a target
+  region calling another module's procedures, which call a procedure that
+  module's interface leaves out, recursion, the library, and make values of
+  that module's type.
 
 **Errors come at compile time, at the call.** Each copy records the procedure
 that first reached it and where. What cannot run on a device is reported with

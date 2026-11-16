@@ -960,7 +960,8 @@ bool CodeGenAction::executeAction() {
       *a.determinism, *polymorphism, a.loops, *target, r.messages,
       {ci.getFrontendOpts().stubUnimplemented,
           ci.getFrontendOpts().mmcUniqueness, ci.getFrontendOpts().traceFlags,
-          deviceLibrary});
+          deviceLibrary, ci.getFrontendOpts().deviceModuleDirectories,
+          ci.getFrontendOpts().copyDeviceProcedures});
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   if (!module || r.messages.AnyFatalError()) {
     return false;
