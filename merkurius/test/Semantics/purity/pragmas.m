@@ -14,7 +14,7 @@
 
 main(0).
 :- impure pred ip(int::in) is det.
-:- pragma foreign_proc("C", ip(X::in), [will_not_call_merkurius], "(void) X;").
+:- pragma foreign_proc("C", ip(X::in), [will_not_call_mercury], "(void) X;").
 :- pred pure_promised_semipure is det.
 % CHECK: [[@LINE-1]]:9: error: pred pragmas.pure_promised_semipure/0 is declared pure, but promised semipure
 :- pragma promise_semipure(pure_promised_semipure/0).
