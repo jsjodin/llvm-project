@@ -14,15 +14,15 @@
 
 main(0).
 :- impure pred ip(int::in) is det.
-:- pragma foreign_proc("C", ip(X::in), [will_not_call_merkurius], "(void) X;").
+:- pragma foreign_proc("C", ip(X::in), [will_not_call_mercury], "(void) X;").
 :- semipure pred sp(int::out) is det.
-:- pragma foreign_proc("C", sp(X::out), [will_not_call_merkurius, promise_semipure], "X = 0;").
+:- pragma foreign_proc("C", sp(X::out), [will_not_call_mercury, promise_semipure], "X = 0;").
 :- impure func ifn(int) = int.
-:- pragma foreign_proc("C", ifn(X::in) = (Y::out), [will_not_call_merkurius], "Y = X;").
+:- pragma foreign_proc("C", ifn(X::in) = (Y::out), [will_not_call_mercury], "Y = X;").
 :- pred pp(int::in) is det.
 pp(_).
 :- semipure pred ssp(string::out) is det.
-:- pragma foreign_proc("C", ssp(X::out), [will_not_call_merkurius, promise_semipure], "X = (MR_String) \"\";").
+:- pragma foreign_proc("C", ssp(X::out), [will_not_call_mercury, promise_semipure], "X = (MR_String) \"\";").
 
 :- typeclass c(T) where [impure pred im(T::in) is det].
 :- instance c(int) where [pred(im/1) is ip].
