@@ -105,6 +105,20 @@ searching(!IO) :-
     det_index1(L, 5, D5), show(D5, !IO),
     ( if nth_member_search([5, 6, 7, 6], 6, NM) then show(NM, !IO) else true ),
     yes_no((pred) is semidet :- nth_member_search(L, 9, _), !IO),
+    ( if index0_of_first_occurrence([5, 6, 7, 6], 6, F0) then
+        show(F0, !IO)
+    else
+        true
+    ),
+    yes_no((pred) is semidet :- index0_of_first_occurrence(L, 9, _), !IO),
+    ( if index1_of_first_occurrence([5, 6, 7, 6], 6, F1) then
+        show(F1, !IO)
+    else
+        true
+    ),
+    yes_no((pred) is semidet :- index1_of_first_occurrence(L, 9, _), !IO),
+    show(det_index0_of_first_occurrence([5, 6, 7, 6], 7) : int, !IO),
+    show(det_index1_of_first_occurrence([5, 6, 7, 6], 7) : int, !IO),
     ( if last(L, La) then show(La, !IO) else true ),
     yes_no((pred) is semidet :- last([] : list(int), _), !IO),
     show(det_last(L) : int, !IO),
@@ -350,6 +364,12 @@ nondet_firsts(!IO) :-
 % OUTPUT-NEXT:5
 % OUTPUT-NEXT:2
 % OUTPUT-NEXT:no
+% OUTPUT-NEXT:1
+% OUTPUT-NEXT:no
+% OUTPUT-NEXT:2
+% OUTPUT-NEXT:no
+% OUTPUT-NEXT:2
+% OUTPUT-NEXT:3
 % OUTPUT-NEXT:5
 % OUTPUT-NEXT:no
 % OUTPUT-NEXT:5

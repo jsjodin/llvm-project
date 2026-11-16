@@ -49,6 +49,10 @@
 :- func det_index1(list(T), int) = T.
 :- pred det_index1(list(T)::in, int::in, T::out) is det.
 :- pred nth_member_search(list(T)::in, T::in, int::out) is semidet.
+:- pred index0_of_first_occurrence(list(T)::in, T::in, int::out) is semidet.
+:- pred index1_of_first_occurrence(list(T)::in, T::in, int::out) is semidet.
+:- func det_index0_of_first_occurrence(list(T), T) = int.
+:- func det_index1_of_first_occurrence(list(T), T) = int.
 :- pred reverse(list(T), list(T)).
 :- mode reverse(in, out) is det.
 :- mode reverse(out, in) is det.
@@ -351,6 +355,28 @@ det_index1(L, N, X) :-
 
 nth_member_search(L, X, N) :-
     nth_member_search_from(L, X, 1, N).
+
+index0_of_first_occurrence(L, X, N) :-
+    nth_member_search_from(L, X, 0, N).
+
+index1_of_first_occurrence(L, X, N) :-
+    nth_member_search_from(L, X, 1, N).
+
+det_index0_of_first_occurrence(L, X) = N :-
+    ( if nth_member_search_from(L, X, 0, N0) then
+        N = N0
+    else
+        unexpected("function `list.det_index0_of_first_occurrence'/2",
+            "item not found")
+    ).
+
+det_index1_of_first_occurrence(L, X) = N :-
+    ( if nth_member_search_from(L, X, 1, N0) then
+        N = N0
+    else
+        unexpected("function `list.det_index1_of_first_occurrence'/2",
+            "item not found")
+    ).
 
 :- pred nth_member_search_from(list(T)::in, T::in, int::in, int::out)
     is semidet.
