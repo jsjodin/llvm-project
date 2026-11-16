@@ -4540,14 +4540,15 @@ mlir::LLVM::AllocaOp SlotOf(mlir::Value address) {
 
 // Whether the address of one of `func`'s stack slots may outlive one of its
 // `tails`: it reaches a tail call, memory other than its stack slots, or
-// anything but loads, stores and other calls, through offsets and casts, as
-// when a process's entry passes its kind the mailbox it builds on the stack
-// (MLIRGenProcesses.cpp). An address stored in a stack slot, as a
-// continuation's environment holds the one it is nested in, goes where what
-// is loaded from that slot goes. Another call may take a slot, since a callee
-// keeps no pointer into its caller's frame once it returns, and it returns
-// before the tail call. Lowering sees allocations of the merk dialect, which
-// become stack slots later, so CallCode cannot tell.
+// anything but loads, stores, memsets, copies and other calls, through
+// offsets and casts, as when a process's entry passes its kind the mailbox
+// it builds on the stack (MLIRGenProcesses.cpp). An address stored in a
+// stack slot, as a continuation's environment holds the one it is nested
+// in, goes where what is loaded from that slot goes. Another call may take a
+// slot, since a callee keeps no pointer into its caller's frame once it
+// returns, and it returns before the tail call. Lowering sees allocations of
+// the merk dialect, which become stack slots later, so CallCode cannot
+// tell.
 bool FrameEscapes(
     mlir::LLVM::LLVMFuncOp func, llvm::ArrayRef<mlir::LLVM::CallOp> tails) {
   llvm::SmallVector<mlir::Value> worklist;
@@ -4573,7 +4574,10 @@ bool FrameEscapes(
       mlir::Operation *user{use.getOwner()};
       if (mlir::isa<mlir::LLVM::AddrSpaceCastOp, mlir::LLVM::GEPOp>(user)) {
         worklist.push_back(user->getResult(0));
-      } else if (mlir::isa<mlir::LLVM::LoadOp>(user)) {
+      } else if (mlir::isa<mlir::LLVM::LoadOp, mlir::LLVM::MemsetOp,
+                     mlir::LLVM::MemcpyOp, mlir::LLVM::MemmoveOp>(user)) {
+        // These read or write the slot's bytes, as a record's slot is
+        // zeroed for its padding (RecordSlot), not its address.
         continue;
       } else if (auto store{mlir::dyn_cast<mlir::LLVM::StoreOp>(user)}) {
         if (store.getAddr() == address) {
