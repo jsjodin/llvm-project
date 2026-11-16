@@ -133,6 +133,8 @@ static bool parseFrontendArgs(FrontendOptions &opts, const InputArgList &args) {
   opts.outputFile = args.getLastArgValue(OPT_o).str();
   opts.searchDirectories = args.getAllArgValues(OPT_I);
   opts.libraryDirectory = args.getLastArgValue(OPT_library_dir).str();
+  opts.deviceModuleDirectories = args.getAllArgValues(OPT_device_module_dir);
+  opts.copyDeviceProcedures = !args.hasArg(OPT_fno_copy_device_procedures);
   opts.inferTypes = !args.hasArg(OPT_fno_infer_types);
   if (const llvm::opt::Arg *arg =
           args.getLastArg(OPT_ftype_inference_iteration_limit_EQ)) {
