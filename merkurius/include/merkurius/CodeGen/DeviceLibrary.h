@@ -14,9 +14,11 @@
 // reach from the library's modules, as their merk bytecode has them.
 
 #include "merkurius/CodeGen/TargetInfo.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/StringRef.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
-#include "llvm/ADT/StringRef.h"
+#include <string>
 
 namespace merkurius::codegen {
 
@@ -40,15 +42,18 @@ inline constexpr llvm::StringLiteral kDeviceForeignBitcodeAttrName{
 llvm::StringRef DevicePlace(mlir::ModuleOp module);
 
 // Copies into `module`, a device's merk module, each procedure of another
-// module that its target regions or kernels reach, from
-// `directory`/<module>.merkbc, with what the copies refer to: the procedures
-// they call, transitively, and the descriptors and constructors of their types.
-// Without `array`, the array module's procedures are left out, as when the
-// module was checked against array.m rather than the sound stub that the
-// library's are numbered by. A procedure that is still not defined is reported
-// at the call, with the chain of calls from the region or the kernel.
-llvm::LogicalResult CopyDeviceLibrary(
-    mlir::ModuleOp module, llvm::StringRef directory, bool array);
+// module that its target regions or kernels reach, from <module>.merkbc in
+// the first of `moduleDirectories` that has it, the program's other modules,
+// or else in `libraryDirectory`, the library's; with what the copies refer
+// to: the procedures they call, transitively, in any of those modules, and
+// the descriptors and constructors of their types. Without `array`, the
+// library's array module's procedures are left out, as when the module was
+// checked against array.m rather than the sound stub that the library's are
+// numbered by. A procedure that is still not defined is reported at the call,
+// with the chain of calls from the region or the kernel.
+llvm::LogicalResult CopyDeviceLibrary(mlir::ModuleOp module,
+    llvm::ArrayRef<std::string> moduleDirectories,
+    llvm::StringRef libraryDirectory, bool array);
 
 // Compiles for the device, with `clang`, the C functions of the foreign_procs
 // that a device's module calls, its own and the library's, and only those, as

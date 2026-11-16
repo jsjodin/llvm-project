@@ -63,9 +63,11 @@ struct LibraryModule {
 
 class Copier {
 public:
-  Copier(mlir::ModuleOp module, llvm::StringRef directory, bool array)
-      : module_{module}, symbols_{module}, directory_{directory},
-        array_{array} {}
+  Copier(mlir::ModuleOp module, llvm::ArrayRef<std::string> moduleDirectories,
+      llvm::StringRef libraryDirectory, bool array)
+      : module_{module}, symbols_{module},
+        moduleDirectories_{moduleDirectories.begin(), moduleDirectories.end()},
+        directory_{libraryDirectory}, array_{array} {}
 
   llvm::LogicalResult Copy();
 
@@ -94,6 +96,8 @@ private:
 
   mlir::ModuleOp module_;
   mlir::SymbolTable symbols_;
+  // The program's other modules' directories, then the library's.
+  std::vector<std::string> moduleDirectories_;
   std::string directory_;
   bool array_;
   bool failed_{false};
@@ -117,17 +121,31 @@ bool Copier::Own(llvm::StringRef symbol) {
       symbol[name->size()] == '.';
 }
 
-// The library module `name`'s bytecode, or null if the directory has none or
-// it is left out.
+// The module `name`'s bytecode, one of the program's or else the library's,
+// or null if no directory has it or it is left out.
 LibraryModule *Copier::Load(llvm::StringRef name) {
   if (auto it{loaded_.find(name)}; it != loaded_.end()) {
     return it->second.get();
   }
   std::unique_ptr<LibraryModule> &entry{loaded_[name]};
-  llvm::SmallString<256> path{directory_};
-  llvm::sys::path::append(path, name + ".merkbc");
-  if ((name == "array" && !array_) || !llvm::sys::fs::exists(path)) {
-    return nullptr;
+  llvm::SmallString<256> path;
+  for (const std::string &directory : moduleDirectories_) {
+    path = directory;
+    llvm::sys::path::append(path, name + ".merkbc");
+    if (llvm::sys::fs::exists(path)) {
+      break;
+    }
+    path.clear();
+  }
+  if (path.empty()) {
+    if (directory_.empty() || (name == "array" && !array_)) {
+      return nullptr;
+    }
+    path = directory_;
+    llvm::sys::path::append(path, name + ".merkbc");
+    if (!llvm::sys::fs::exists(path)) {
+      return nullptr;
+    }
   }
   mlir::ParserConfig config{module_.getContext()};
   mlir::OwningOpRef<mlir::ModuleOp> library{
@@ -236,6 +254,14 @@ void Copier::FollowSymbol(mlir::FlatSymbolRefAttr ref, mlir::Operation *user,
   symbols_.insert(copy, module_.getBody()->end());
   mlir::SymbolTable::setSymbolVisibility(
       copy, mlir::SymbolTable::Visibility::Private);
+  // The source module's declaration of a third module's procedure, as when
+  // a copy of one of the program's modules calls the library: replaced by
+  // that module's definition, as the module's own declarations are.
+  if (auto proc{mlir::dyn_cast<merk::ProcOp>(copy)};
+      proc && proc.isExternal()) {
+    Replace(proc, user);
+    return;
+  }
   copied_.push_back({copy, source});
   if (auto proc{mlir::dyn_cast<merk::ProcOp>(copy)}) {
     Reached(copy, user);
@@ -511,16 +537,17 @@ llvm::LogicalResult Copier::Copy() {
 
 } // namespace
 
-llvm::LogicalResult CopyDeviceLibrary(
-    mlir::ModuleOp module, llvm::StringRef directory, bool array) {
-  if (directory.empty()) {
+llvm::LogicalResult CopyDeviceLibrary(mlir::ModuleOp module,
+    llvm::ArrayRef<std::string> moduleDirectories,
+    llvm::StringRef libraryDirectory, bool array) {
+  if (libraryDirectory.empty() && moduleDirectories.empty()) {
     return llvm::success();
   }
   module.getContext()
       ->loadDialect<merk::MerkDialect, mlir::arith::ArithDialect,
           mlir::DLTIDialect, mlir::LLVM::LLVMDialect,
           mlir::omp::OpenMPDialect>();
-  return Copier{module, directory, array}.Copy();
+  return Copier{module, moduleDirectories, libraryDirectory, array}.Copy();
 }
 
 std::string ForeignFunctionGuard(llvm::StringRef name) {

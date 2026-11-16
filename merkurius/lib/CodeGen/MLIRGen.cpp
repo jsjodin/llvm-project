@@ -1642,12 +1642,15 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
   if (!RegisterProcessImages()) {
     return nullptr;
   }
-  // The library's procedures that the regions and kernels reach, before
-  // what follows their calls; not after an error, which may have left out
-  // one of the module's own.
-  if (target_.options().IsDevice() && !messages_.AnyFatalError() &&
-      mlir::failed(CopyDeviceLibrary(
-          module_, deviceLibraryDirectory_, !mmcUniqueness_))) {
+  // The library's procedures and the program's other modules' that the
+  // regions and kernels reach, before what follows their calls; not after
+  // an error, which may have left out one of the module's own, nor when the
+  // module is being written for the other modules' device compiles, which
+  // copy from it (-fno-copy-device-procedures).
+  if (target_.options().IsDevice() && copyDeviceProcedures_ &&
+      !messages_.AnyFatalError() &&
+      mlir::failed(CopyDeviceLibrary(module_, deviceModuleDirectories_,
+          deviceLibraryDirectory_, !mmcUniqueness_))) {
     return nullptr;
   }
   // Calls given known closures call clones of their callees, before what

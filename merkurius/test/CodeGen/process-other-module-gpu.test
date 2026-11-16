@@ -1,0 +1,9 @@
+process-other-module.m on the machine's GPU: its GPU process and its target
+region call another module's procedures, which the device compiles copied
+from that module's merk bytecode. The processes' kernel takes half of the
+GPU's units (MERK_GPU_PROCESS_UNITS), so that the region has the rest.
+Nothing is left over.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fprocess-declarations --offload-arch=%offload-arch -I %S/Inputs %libomp-flags %S/Inputs/device_helpers.m %S/process-other-module.m -o %t
+RUN: %gpu-env MERK_GPU_PROCESS_UNITS=50 OMP_TARGET_OFFLOAD=MANDATORY MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t gpu 2>&1 | FileCheck %S/process-other-module.m --check-prefixes=CHECK,FREED --match-full-lines --strict-whitespace

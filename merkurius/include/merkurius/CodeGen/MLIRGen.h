@@ -60,6 +60,12 @@ struct GenerationOptions {
   // bytecode, to copy the procedures its target regions reach from
   // (CopyDeviceLibrary); empty for none.
   std::string deviceLibraryDirectory;
+  // In a device's compile, where the program's other modules are as merk
+  // bytecode (-device-module-dir), searched before the library's.
+  std::vector<std::string> deviceModuleDirectories;
+  // Whether a device's compile copies other modules' procedures at all
+  // (-fno-copy-device-procedures turns it off).
+  bool copyDeviceProcedures{true};
 };
 
 // The merk module for `module`'s procedures, with the target recorded on

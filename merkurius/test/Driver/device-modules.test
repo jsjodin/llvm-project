@@ -1,0 +1,38 @@
+With several sources and GPU code, the driver first writes each source's
+merk module as merk bytecode, for each GPU and each kind of device compile
+the program has, as that compile makes it but without copying other
+modules' procedures (-fno-copy-device-procedures). Each device compile then
+copies what its code reaches of the other modules from them
+(-device-module-dir), as it copies the library's.
+
+RUN: merkc -### -fprocess-declarations --offload-arch=gfx1030 -O2 %S/Inputs/sumsq.m %S/Inputs/empty-main.m -o prog 2>&1 \
+RUN:   | FileCheck %s
+CHECK:      "-fc1" "-emit-merk-bc" "-fno-copy-device-procedures" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-O2" "-fprocess-kernels" "-o" "[[DIR:[^"]*merk-modules-gfx1030-processes[^"]*]]/sumsq.merkbc" "{{[^"]*}}sumsq.m"{{$}}
+CHECK-NEXT: "-fc1" "-emit-merk-bc" "-fno-copy-device-procedures" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-O2" "-fprocess-kernels" "-o" "[[DIR]]/empty-main.merkbc" "{{[^"]*}}empty-main.m"{{$}}
+CHECK-NEXT: "-fc1" "-emit-llvm-bc" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-O2" "-fprocess-kernels" "-device-module-dir" "[[DIR]]" "-o" "{{[^"]*}}sumsq-gfx1030-processes-{{[^"]*}}.o" "{{[^"]*}}sumsq.m"{{$}}
+CHECK:      "-fc1" "-emit-llvm-bc" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-O2" "-fprocess-kernels" "-device-module-dir" "[[DIR]]" "-o" "{{[^"]*}}empty-main-gfx1030-processes-{{[^"]*}}.o" "{{[^"]*}}empty-main.m"{{$}}
+
+With OpenMP as well, target regions' compiles get a directory of their own,
+written as an OpenMP device compile makes the modules; and each GPU has its
+own.
+
+RUN: merkc -### -fopenmp -fprocess-declarations --offload-arch=gfx1030,gfx90a %S/Inputs/sumsq.m %S/Inputs/empty-main.m -o prog 2>&1 \
+RUN:   | FileCheck %s --check-prefix=OMP
+OMP:      "-fc1" "-emit-merk-bc" "-fno-copy-device-procedures" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-fprocess-kernels" "-fprocess-loops" "-o" "[[P1030:[^"]*merk-modules-gfx1030-processes[^"]*]]/sumsq.merkbc" "{{[^"]*}}sumsq.m"{{$}}
+OMP-NEXT: "-fc1" "-emit-merk-bc" "-fno-copy-device-procedures" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-fprocess-kernels" "-fprocess-loops" "-o" "[[P1030]]/empty-main.merkbc" "{{[^"]*}}empty-main.m"{{$}}
+OMP-NEXT: "-fc1" "-emit-merk-bc" "-fno-copy-device-procedures" "-fopenmp" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-fopenmp-is-target-device" "-o" "[[O1030:[^"]*merk-modules-gfx1030[^"]*]]/sumsq.merkbc" "{{[^"]*}}sumsq.m"{{$}}
+OMP-NEXT: "-fc1" "-emit-merk-bc" "-fno-copy-device-procedures" "-fopenmp" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-fopenmp-is-target-device" "-o" "[[O1030]]/empty-main.merkbc" "{{[^"]*}}empty-main.m"{{$}}
+OMP-NEXT: "-fc1" "-emit-merk-bc" {{.*}} "-triple" "amdgpu9.0a-amd-amdhsa" "-fprocess-kernels" "-fprocess-loops" "-o" "[[P90A:[^"]*merk-modules-gfx90a-processes[^"]*]]/sumsq.merkbc" "{{[^"]*}}sumsq.m"{{$}}
+OMP:      "-fc1" "-emit-merk-bc" {{.*}} "-triple" "amdgpu9.0a-amd-amdhsa" "-fopenmp-is-target-device" "-o" "[[O90A:[^"]*merk-modules-gfx90a[^"]*]]/empty-main.merkbc" "{{[^"]*}}empty-main.m"{{$}}
+OMP:      "-fc1" "-emit-llvm-bc" {{.*}} "-triple" "amdgpu10.30-amd-amdhsa" "-fprocess-kernels" "-fprocess-loops" "-device-module-dir" "[[P1030]]" "-o"
+OMP:      "-fc1" "-emit-llvm-bc" {{.*}} "-triple" "amdgpu9.0a-amd-amdhsa" "-fprocess-kernels" "-fprocess-loops" "-device-module-dir" "[[P90A]]" "-o"
+OMP:      "-fc1" "-emit-llvm-bc" {{.*}} "-triple" "amdgpu10.30-amd-amdhsa" "-device-module-dir" "[[O1030]]" "-fopenmp-is-target-device"
+OMP:      "-fc1" "-emit-llvm-bc" {{.*}} "-triple" "amdgpu9.0a-amd-amdhsa" "-device-module-dir" "[[O90A]]" "-fopenmp-is-target-device"
+
+One source, or no GPU code, needs none.
+
+RUN: merkc -### -fopenmp -fprocess-declarations --offload-arch=gfx1030 %S/Inputs/sumsq.m -o prog 2>&1 \
+RUN:   | FileCheck %s --check-prefix=NONE --implicit-check-not=-emit-merk-bc --implicit-check-not=-device-module-dir
+RUN: merkc -### -fopenmp -fprocess-declarations %S/Inputs/sumsq.m %S/Inputs/empty-main.m -o prog 2>&1 \
+RUN:   | FileCheck %s --check-prefix=NONE --implicit-check-not=-emit-merk-bc --implicit-check-not=-device-module-dir
+NONE: "-fc1"

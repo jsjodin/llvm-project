@@ -112,6 +112,12 @@ struct FrontendOptions {
   std::vector<std::string> searchDirectories; // -I
   // -library-dir, or lib/merkurius beside the executable's directory.
   std::string libraryDirectory;
+  // -device-module-dir: in a device's compile, where the program's other
+  // modules are as merk bytecode.
+  std::vector<std::string> deviceModuleDirectories;
+  // -fno-copy-device-procedures turns off copying other modules'
+  // procedures into a device's compile.
+  bool copyDeviceProcedures{true};
   bool inferTypes{true}; // -fno-infer-types turns it off
   unsigned typeInferenceIterationLimit{60}; // -ftype-inference-iteration-limit=
   bool inferModes{false}; // -finfer-modes

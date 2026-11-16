@@ -202,9 +202,34 @@ public:
     return removed_.back();
   }
 
+  // A new directory's name, from `stem`, or empty after reporting an error.
+  std::string Directory(llvm::StringRef stem) {
+    llvm::SmallString<128> name;
+    if (keep_) {
+      name = dir_;
+      llvm::sys::path::append(name, stem);
+      if (std::error_code error{llvm::sys::fs::create_directories(name)}) {
+        reportError(
+            "cannot create " + name.str().str() + ": " + error.message());
+        return "";
+      }
+      return name.str().str();
+    }
+    if (std::error_code error{
+            llvm::sys::fs::createUniqueDirectory(stem, name)}) {
+      reportError("cannot create a temporary directory: " + error.message());
+      return "";
+    }
+    directories_.push_back(name.str().str());
+    return directories_.back();
+  }
+
   void Remove() {
     for (const std::string &name : removed_) {
       llvm::sys::fs::remove(name);
+    }
+    for (const std::string &name : directories_) {
+      llvm::sys::fs::remove_directories(name);
     }
   }
 
@@ -212,6 +237,7 @@ private:
   bool keep_{false};
   std::string dir_;
   std::vector<std::string> removed_;
+  std::vector<std::string> directories_;
 };
 } // namespace
 
@@ -231,6 +257,18 @@ static std::string libraryDirectory(llvm::StringRef executable) {
   return dir.str().str();
 }
 
+// The options of a device's compile of the kernels of a source's GPU process
+// kinds, without OpenMP.
+static void addProcessKernelOptions(
+    const InputArgList &args, Job &job, llvm::StringRef triple) {
+  addFrontendOptions(args, job, triple, /*openMP=*/false);
+  job.push_back("-fprocess-kernels");
+  // The loops that the kinds run across teams keep their directives.
+  if (args.hasArg(OPT_fopenmp)) {
+    job.push_back("-fprocess-loops");
+  }
+}
+
 // The jobs that make the image of `input`'s process kinds that run on a GPU,
 // for each of `archs` (docs/INPROGRESS.md, GPU processes without omp target,
 // step 4b): the kernels' bitcode, compiled without OpenMP; and the image, a
@@ -248,7 +286,8 @@ static std::string libraryDirectory(llvm::StringRef executable) {
 // such kinds gets an image without kernels, which its host compile leaves out.
 static std::vector<std::string> addProcessImageJobs(const InputArgList &args,
     llvm::StringRef executable, const std::string &input,
-    const std::vector<OffloadArch> &archs, std::vector<Job> &jobs,
+    const std::vector<OffloadArch> &archs,
+    const std::vector<std::string> &moduleDirs, std::vector<Job> &jobs,
     TemporaryFiles &temporaries) {
   llvm::StringRef stem{llvm::sys::path::stem(input)};
   std::string libraryDir{libraryDirectory(executable)};
@@ -259,11 +298,10 @@ static std::vector<std::string> addProcessImageJobs(const InputArgList &args,
     std::string kernels{
         temporaries.Name((stem + "-" + arch.arch + "-processes").str(), "o")};
     Job device{executable.str(), "-fc1", "-emit-llvm-bc"};
-    addFrontendOptions(args, device, arch.triple, /*openMP=*/false);
-    device.push_back("-fprocess-kernels");
-    // The loops that the kinds run across teams keep their directives.
-    if (args.hasArg(OPT_fopenmp)) {
-      device.push_back("-fprocess-loops");
+    addProcessKernelOptions(args, device, arch.triple);
+    if (!moduleDirs.empty()) {
+      device.insert(device.end(),
+          {"-device-module-dir", moduleDirs[&arch - archs.data()]});
     }
     device.insert(device.end(), {"-o", kernels, input});
     jobs.push_back(std::move(device));
@@ -282,6 +320,56 @@ static std::vector<std::string> addProcessImageJobs(const InputArgList &args,
   return embeds;
 }
 
+// The jobs that write, for each of `archs`, every Merkurius source's merk
+// module as merk bytecode, <module>.merkbc, in a directory of its own for
+// each kind of device compile that the program has: of GPU processes'
+// kernels, in `processDirs`, and of target regions, in `offloadDirs`, one
+// directory for each GPU in order. Each is written as that device compile
+// makes the module, without copying the other modules' procedures, which
+// the device compiles copy from these (-device-module-dir), so that the
+// modules may be written in any order. A module is found by its name, so a
+// source must be named after its module, as the module loader finds them.
+// False after reporting an error.
+static bool addDeviceModuleJobs(const InputArgList &args,
+    llvm::StringRef executable, const std::vector<std::string> &inputs,
+    const std::vector<OffloadArch> &archs, bool processImages, bool offload,
+    std::vector<std::string> &processDirs,
+    std::vector<std::string> &offloadDirs, std::vector<Job> &jobs,
+    TemporaryFiles &temporaries) {
+  for (const OffloadArch &arch : archs) {
+    for (bool processes : {true, false}) {
+      if (processes ? !processImages : !offload) {
+        continue;
+      }
+      std::string dir{temporaries.Directory(
+          "merk-modules-" + arch.arch + (processes ? "-processes" : ""))};
+      if (dir.empty()) {
+        return false;
+      }
+      (processes ? processDirs : offloadDirs).push_back(dir);
+      for (const std::string &input : inputs) {
+        if (!isMerkuriusSource(input) || input == "-") {
+          continue;
+        }
+        Job job{executable.str(), "-fc1", "-emit-merk-bc",
+            "-fno-copy-device-procedures"};
+        if (processes) {
+          addProcessKernelOptions(args, job, arch.triple);
+        } else {
+          addFrontendOptions(args, job, arch.triple);
+          job.push_back("-fopenmp-is-target-device");
+        }
+        llvm::SmallString<256> output{dir};
+        llvm::sys::path::append(
+            output, llvm::sys::path::stem(input) + ".merkbc");
+        job.insert(job.end(), {"-o", output.str().str(), input});
+        jobs.push_back(std::move(job));
+      }
+    }
+  }
+  return true;
+}
+
 // The jobs that compile `input` to the object file `object` with its target
 // regions offloaded to `archs`, as Flang's are: the host's bitcode, with its
 // offload entries and the options in `hostOptions`; each GPU's, which
@@ -291,7 +379,8 @@ static std::vector<std::string> addProcessImageJobs(const InputArgList &args,
 static void addOffloadJobs(const InputArgList &args, llvm::StringRef executable,
     const std::string &input, const std::string &object,
     const std::vector<OffloadArch> &archs,
-    const std::vector<std::string> &hostOptions, std::vector<Job> &jobs,
+    const std::vector<std::string> &hostOptions,
+    const std::vector<std::string> &moduleDirs, std::vector<Job> &jobs,
     TemporaryFiles &temporaries) {
   llvm::StringRef stem{llvm::sys::path::stem(input)};
   std::string offloadTargets{"--offload-targets=" +
@@ -313,6 +402,10 @@ static void addOffloadJobs(const InputArgList &args, llvm::StringRef executable,
         temporaries.Name((stem + "-" + arch.arch).str(), "bc")};
     Job device{executable.str(), "-fc1", "-emit-llvm-bc"};
     addFrontendOptions(args, device, arch.triple);
+    if (!moduleDirs.empty()) {
+      device.insert(device.end(),
+          {"-device-module-dir", moduleDirs[&arch - archs.data()]});
+    }
     device.insert(device.end(),
         {"-fopenmp-is-target-device", "-fopenmp-host-ir-file-path",
             hostBitcode, "-o", deviceBitcode, input});
@@ -367,6 +460,16 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
   }
   bool processImages{
       !archs.empty() && !preprocess && args.hasArg(OPT_fprocess_declarations)};
+  // With several sources, each one's device code may call the others'
+  // procedures, which its device compile copies from their merk bytecode,
+  // as it copies the library's: for each GPU, every source's merk module
+  // as its device compile makes it, before any device compile reads them.
+  std::vector<std::string> processModuleDirs, offloadModuleDirs;
+  if (sources > 1 && (processImages || offload) &&
+      !addDeviceModuleJobs(args, executable, inputs, archs, processImages,
+          offload, processModuleDirs, offloadModuleDirs, jobs, temporaries)) {
+    return false;
+  }
   bool ok{true};
   std::vector<std::string> objects;
   for (const std::string &input : inputs) {
@@ -382,7 +485,7 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
     std::vector<std::string> hostOptions;
     if (processImages) {
       hostOptions = addProcessImageJobs(
-          args, executable, input, archs, jobs, temporaries);
+          args, executable, input, archs, processModuleDirs, jobs, temporaries);
     }
     if (offload) {
       std::string object{link ? temporaries.Name(
@@ -393,8 +496,8 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
       if (link) {
         objects.push_back(object);
       }
-      addOffloadJobs(args, executable, input, object, archs, hostOptions, jobs,
-          temporaries);
+      addOffloadJobs(args, executable, input, object, archs, hostOptions,
+          offloadModuleDirs, jobs, temporaries);
       continue;
     }
     Job job{executable.str(), "-fc1"};
