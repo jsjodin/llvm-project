@@ -1,9 +1,11 @@
 % The list module's det_ predicates and functions, and take_upto with a
 % negative count, throw the library's exceptions, with mmc's messages:
 % det_index1 reports as det_index0, and the functions det_index0 and
-% det_last as their predicates, as in mmc. Nothing catches them yet, so
-% the program writes the exception to the standard error and exits with
-% status 1. which/1 picks the case. The output and messages are mmc's.
+% det_last as their predicates, as in mmc, and the functions
+% det_index0_of_first_occurrence and det_index1_of_first_occurrence as
+% themselves. Nothing catches them yet, so the program writes the exception
+% to the standard error and exits with status 1. which/1 picks the case.
+% The output and messages are mmc's.
 %
 % RUN: merkc %s -o %t.0 && %t.0 | FileCheck %s --check-prefix=OUTPUT-0 --match-full-lines --strict-whitespace
 % RUN: merkc -O2 %s -o %t.0.O2 && %t.0.O2 | FileCheck %s --check-prefix=OUTPUT-0 --match-full-lines --strict-whitespace
@@ -28,6 +30,12 @@
 % RUN: sed 's/^which(0)\./which(7)./' %s > %t.7.m && merkc %t.7.m -o %t.7
 % RUN: not %t.7 2> %t.7.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: FileCheck %s --check-prefix=ERROR-7 --match-full-lines --strict-whitespace < %t.7.err
+% RUN: sed 's/^which(0)\./which(8)./' %s > %t.8.m && merkc %t.8.m -o %t.8
+% RUN: not %t.8 2> %t.8.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: FileCheck %s --check-prefix=ERROR-8 --match-full-lines --strict-whitespace < %t.8.err
+% RUN: sed 's/^which(0)\./which(9)./' %s > %t.9.m && merkc %t.9.m -o %t.9
+% RUN: not %t.9 2> %t.9.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: FileCheck %s --check-prefix=ERROR-9 --match-full-lines --strict-whitespace < %t.9.err
 
 :- module list_errors.
 :- interface.
@@ -67,8 +75,12 @@ run(N, E, !IO) :-
     else if N = 6 then
         det_last(E, Y),
         io.write_int(Y, !IO)
-    else
+    else if N = 7 then
         io.write(take_upto(-1, [1]) : list(int), !IO)
+    else if N = 8 then
+        io.write_int(det_index0_of_first_occurrence([1, 2], 3), !IO)
+    else
+        io.write_int(det_index1_of_first_occurrence([1, 2], 3), !IO)
     ).
 
 % OUTPUT-0:before
@@ -90,3 +102,7 @@ run(N, E, !IO) :-
 % ERROR-6-NEXT:Software Error: predicate `list.det_last'/2: Unexpected: empty list
 % ERROR-7:Uncaught Merkurius exception:
 % ERROR-7-NEXT:Software Error: list.m: predicate `list.take_upto'/3: Unexpected: index is negative
+% ERROR-8:Uncaught Merkurius exception:
+% ERROR-8-NEXT:Software Error: function `list.det_index0_of_first_occurrence'/2: Unexpected: item not found
+% ERROR-9:Uncaught Merkurius exception:
+% ERROR-9-NEXT:Software Error: function `list.det_index1_of_first_occurrence'/2: Unexpected: item not found
