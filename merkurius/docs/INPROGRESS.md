@@ -3090,8 +3090,8 @@ the process asks the host to launch. The first version has neither.
        records keep equal bytes, and names what is wrong with a record:
        its padding, a character or an enumeration.
      - *Messages* of arrays of records between host processes are copied
-       by their `type_info`s, as one block; a GPU kind still rejects them
-       as messages, until 2b.
+       by their `type_info`s, as one block; a GPU kind rejected them as
+       messages until 2b.
      - *Not built:* `array.sort`, `binary_search`, `foldr` and the others
        of `array.m` without clauses are not yet implemented for any element
        type, records included.
@@ -3110,6 +3110,21 @@ the process asks the host to launch. The first version has neither.
        modules (seed 503), 110 with arrays of records, all print what mmc's
        print at -O0 and -O2, and the same with the collector at every
        allocation; so do the 460 modules of the earlier layout batches.
+
+     **Step 2b, first part, built 2026-11-16** (design document, Messages
+     and memory on the device), for the Monte Carlo port's particle
+     vaults and batches (merkurius-mc, M2.5 and M3): GPU processes make
+     and use arrays of flat records, and send and receive them, alone or as
+     a message's last field. The runtime needed nothing: the copies that
+     the host and the device share already moved such an array as one
+     block. The checker asks lowering's rule, from the type's constructors.
+     Found on the way: a procedure that made, filled or resized an array of
+     records lost all its tail calls, as the memset that zeroes the
+     record's slot for its padding was taken for an escape of the slot
+     (`CodeGen/record-array-tail-calls.m`), a commit of its own.
+     *Not built yet:* a record message, and a target region's map of a
+     record, as their bytes rather than as a cell copied by its
+     `type_info`; they wait for a program that needs the speed.
 
      **Decided by the user, 2026-11-12:** (a), inline on the host as on
      the GPU; and a fixed size as a library type, `fixed(T, n8)`, whose
@@ -4574,6 +4589,8 @@ beat, as a decomposition fixed in advance computes every tile.
   `fixed(T, n8)`). Steps 1 and 2a done 2026-11-12. The user, 2026-11-12:
   defer 2b and start the tiled Life, since the tiles' records can be
   separate arrays (below); 2b and 3 wait for a program that needs them.
+  2b's arrays of records in GPU processes built 2026-11-16, for the Monte
+  Carlo port; records as messages of their bytes, and 3, still wait.
 - (s4) The `LIFE_SOUP` setting in `life.m` and `life.c`, for the dense check
   and the bar. Done 2026-11-12: a soup of side `LIFE_SOUP`, the whole grid
   by default, from `(LIFE_SIZE - LIFE_SOUP) / 2` in rows and columns, each
