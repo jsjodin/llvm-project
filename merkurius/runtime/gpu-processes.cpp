@@ -59,6 +59,7 @@
 #include "place.h"
 #include "process-images.h"
 #include "process.h"
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -768,26 +769,38 @@ std::uint64_t MonotonicMilliseconds() {
       static_cast<std::uint64_t>(now.tv_nsec) / 1000000;
 }
 
+// How long the teams of a processes' kernel of which some have started wait
+// for another to start before the kernel is launched again with as many as
+// had (Launch). Teams with room start within microseconds of each other.
+constexpr std::uint64_t kTeamsShrinkMilliseconds{200};
+
 // Waits for the teams of the kernel to start, as a team's slots wait for
 // processes only once it runs, and teams that cannot all be resident at once
 // never do: the GPU holds a team back until another ends, which none does.
-// The plugin counts how many fit by their registers and local memory, but
-// not by their scratch, which the GPU may not hold for all of them. Each
-// team that starts restarts the wait; whether they all started.
-bool TeamsStarted(const PlaceTable *table, std::uint64_t teams) {
+// The plugin counts how many fit by their registers and local memory, as if
+// the compute units were the kernel's alone, but other programs' waves, as
+// a desktop's on the GPU that drives the display, may hold some of the
+// room, and the GPU may not hold the scratch of all of them. Gives how many
+// started: all of them; or as many as had once kTeamsShrinkMilliseconds
+// passed without another starting; or none, if none started within the
+// stall time (MERK_TEAMS_STALL_MILLISECONDS), as on a GPU that another
+// program's kernels fill, which may end.
+std::uint64_t TeamsStarted(const PlaceTable *table, std::uint64_t teams) {
   std::uint64_t stall{TeamsStallMilliseconds()};
+  std::uint64_t shrink{std::min(stall, kTeamsShrinkMilliseconds)};
   std::uint64_t seen{0};
-  std::uint64_t deadline{MonotonicMilliseconds() + stall};
+  std::uint64_t since{MonotonicMilliseconds()};
   for (;;) {
     std::uint64_t started{__atomic_load_n(&table->started, __ATOMIC_ACQUIRE)};
     if (started >= teams) {
-      return true;
+      return teams;
     }
+    std::uint64_t now{MonotonicMilliseconds()};
     if (started != seen) {
       seen = started;
-      deadline = MonotonicMilliseconds() + stall;
-    } else if (MonotonicMilliseconds() >= deadline) {
-      return false;
+      since = now;
+    } else if (now - since >= (seen ? shrink : stall)) {
+      return seen;
     }
     timespec pause{0, 100000};
     nanosleep(&pause, nullptr);
@@ -823,10 +836,14 @@ std::uint64_t ProcessStackBytes(const char *&error) {
 }
 
 // Launches the module's kernel on the GPU, with a slot for each of its
-// waves, and makes it the kernel that spawns use once its teams have all
-// started; or gives the text of the error. With the lock held, which it
-// lets go while it waits for the teams.
-const char *Launch(const Gpu &gpu, const LoadedImage &image) {
+// waves, as many teams as the GPU holds at once, at most `most` unless it is
+// 0, and makes it the kernel that spawns use once its teams have all
+// started; or gives the text of the error. If only some started, it ends
+// the kernel and gives in `fewer` how many, with which to launch it again.
+// With the lock held, which it lets go while it waits for the teams.
+const char *Launch(const Gpu &gpu, const LoadedImage &image, std::uint32_t most,
+    std::uint32_t &fewer) {
+  fewer = 0;
   GpuPlaces &gpuPlace{gpuPlaces[gpu.number]};
   ol_queue_handle_t queue;
   bool allUnits{false};
@@ -852,6 +869,9 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
           gpu.device, kOlDeviceInfoNumLanes, sizeof lanes, &lanes)}) {
     return Error("could not ask for GPU %s%lld's wave size: %s%s%s", "",
         gpu.number, Details(result), "", "");
+  }
+  if (most != 0 && teams > most) {
+    teams = most;
   }
   if (teams == 0 || lanes == 0 || kPlaceTeamThreads % lanes != 0) {
     return Error("GPU %s%lld cannot run the module %s's processes: their "
@@ -945,23 +965,33 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image) {
   // queue (PlaceDone), which takes the lock.
   gpuPlace.launching = true;
   pthread_mutex_unlock(&lock);
-  bool started{TeamsStarted(table, teams)};
+  std::uint64_t started{TeamsStarted(table, teams)};
   pthread_mutex_lock(&lock);
   gpuPlace.launching = false;
   pthread_cond_broadcast(&launchedCondition);
-  if (!started) {
+  if (started < teams) {
     // Its waves that run return, after which the others start and return
-    // too, and the reaper frees the table.
+    // too, and the reaper frees the table. The kernel launched again on the
+    // queue starts after it.
     EndPlace(place);
-    std::uint64_t started{__atomic_load_n(&table->started, __ATOMIC_ACQUIRE)};
+    if (started > 0) {
+      // Said, as fewer teams may make a program slower, as a benchmark's.
+      fewer = static_cast<std::uint32_t>(started);
+      std::fflush(stdout);
+      std::fprintf(stderr,
+          "Merkurius runtime: GPU %d started %u of the %u teams of the module "
+          "%s's processes' kernel, which must all run at once; launching it "
+          "again with %u\n",
+          gpu.number, fewer, teams, image.module, fewer);
+      return nullptr;
+    }
     char *text{static_cast<char *>(Malloc(512))};
     std::snprintf(text, 512,
-        "GPU %d started %llu of the %u teams of the module %s's processes' "
-        "kernel, which must all run at once, and no other within %llu ms "
-        "(MERK_TEAMS_STALL_MILLISECONDS): the GPU may not hold their scratch "
-        "for all of them, as for a kernel with a dynamic stack",
-        gpu.number, static_cast<unsigned long long>(started), teams,
-        image.module,
+        "GPU %d started none of the %u teams of the module %s's processes' "
+        "kernel within %llu ms (MERK_TEAMS_STALL_MILLISECONDS): other "
+        "programs' kernels may fill it, or it may not hold the scratch of one "
+        "team, as for a kernel with a large dynamic stack",
+        gpu.number, teams, image.module,
         static_cast<unsigned long long>(TeamsStallMilliseconds()));
     return text;
   }
@@ -1039,8 +1069,18 @@ const char *TakeSlot(const Gpu &gpu, const LoadedImage &image, const char *kind,
         "", gpu.number, place->module, image.module, "");
   }
   if (!place || place->ending) {
-    if (const char *error{Launch(gpu, image)}) {
-      return error;
+    // Again with as many teams as started, until they all do: each time
+    // fewer.
+    std::uint32_t most{0};
+    for (;;) {
+      std::uint32_t fewer;
+      if (const char *error{Launch(gpu, image, most, fewer)}) {
+        return error;
+      }
+      if (fewer == 0) {
+        break;
+      }
+      most = fewer;
     }
     place = gpuPlace.current;
   }
