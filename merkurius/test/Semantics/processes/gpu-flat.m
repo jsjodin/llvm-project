@@ -3,9 +3,14 @@
 % the device"; docs/INPROGRESS.md, GPU processes without omp target, step
 % 5a). A flat value's bytes say all of it: a scalar, an enumeration, a
 % mailbox, a record or tagged union of flat fields that is not recursive, a
-% tuple of them, and, as a whole value, a string or an array of scalars or
-% enumerations, or a value of a type whose constructors' fields are flat
-% and of a fixed size but for each one's last, which may be such a block. A GPU process may make none other, but for an array of mailboxes, which
+% tuple of them, and, as a whole value, a string or an array of scalars,
+% enumerations or flat records, or a value of a type whose constructors'
+% fields are flat and of a fixed size but for each one's last, which may be
+% such a block. A flat record, as an array holds it inline, is a type of one
+% constructor of two or more fields, of no type parameters, each a scalar,
+% an enumeration, a notag of one, or such a record (lib/CodeGen/Records.h;
+% docs/INPROGRESS.md, Flat records, step 2b). A GPU process may make none
+% other, but for an array of mailboxes, which
 % keeps its peers' handles but is no message, in its kind's code and in
 % the procedures of the module that it calls; a target region may, and its
 % messages are flat. A kind that runs on the host is not checked. Each
@@ -19,7 +24,7 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module array, int, list, process, univ.
+:- import_module array, int, int8, list, process, uint16, univ.
 
 :- type colour
     --->    red
@@ -62,6 +67,27 @@
 :- type block_inside
     --->    block_inside(int, with_block).
 
+    % Flat records, which arrays hold inline: one of a record, an
+    % enumeration, a narrow integer and a notag.
+:- type cell
+    --->    cell(pos, colour, int8, count).
+:- type count
+    --->    count(uint16).
+:- type cells
+    --->    cells(int, array(cell)).
+
+    % Not flat records: of two constructors, of a type parameter, with a
+    % mailbox, and of one field.
+:- type either
+    --->    either_int(int)
+    ;       either_two(int, float).
+:- type pair(T)
+    --->    pair(T, T).
+:- type addressed
+    --->    addressed(mailbox(int), int).
+:- type count_only
+    --->    count_only(int).
+
     % Flat messages, as whole values: no error.
 :- process good_kind receives good on gpu.
 good_kind(Self, !IO) :-
@@ -84,6 +110,45 @@ block_kind(Out, Self, !IO) :-
         send(Out, text(pos(1, 2.0), "no block"), !IO)
     ).
 
+    % Arrays of flat records, alone and after a fixed part, as messages and
+    % as values it makes: no error.
+:- process cells_kind(mailbox(array(cell))) receives cells on gpu.
+cells_kind(Out, Self, !IO) :-
+    receive(Self, any, infinity, R, !IO),
+    ( if R = message(cells(N, A)) then
+        array.init(N, cell(pos(1, 2.0), red, 3i8, count(4u16)), B0),
+        array.set(0, A ^ elem(0), B0, B),
+        send(Out, B, !IO)
+    else
+        true
+    ).
+
+    % Arrays of types that are not flat records.
+:- process eithers_kind receives array(either) on gpu.
+% CHECK: gpu-flat.m:[[@LINE-1]]:4: error: a message that code running on a GPU sends or receives must be flat, but this one is of type array.array(gpu_flat.either): array.array(gpu_flat.either)'s elements are not scalars, enumerations or flat records
+eithers_kind(Self, !IO) :-
+    receive(Self, any, infinity, _, !IO).
+
+:- process pairs_kind receives array(pair(int)) on gpu.
+% CHECK: gpu-flat.m:[[@LINE-1]]:4: error: a message that code running on a GPU sends or receives must be flat, but this one is of type array.array(gpu_flat.pair(int)): array.array(gpu_flat.pair(int))'s elements are not scalars, enumerations or flat records
+pairs_kind(Self, !IO) :-
+    receive(Self, any, infinity, _, !IO).
+
+:- process addressed_kind receives array(addressed) on gpu.
+% CHECK: gpu-flat.m:[[@LINE-1]]:4: error: a message that code running on a GPU sends or receives must be flat, but this one is of type array.array(gpu_flat.addressed): array.array(gpu_flat.addressed)'s elements are not scalars, enumerations or flat records
+addressed_kind(Self, !IO) :-
+    receive(Self, any, infinity, _, !IO).
+
+:- process counts_kind receives array(count_only) on gpu.
+% CHECK: gpu-flat.m:[[@LINE-1]]:4: error: a message that code running on a GPU sends or receives must be flat, but this one is of type array.array(gpu_flat.count_only): array.array(gpu_flat.count_only)'s elements are not scalars, enumerations or flat records
+counts_kind(Self, !IO) :-
+    receive(Self, any, infinity, _, !IO).
+
+:- process tuples_kind receives array({int, float}) on gpu.
+% CHECK: gpu-flat.m:[[@LINE-1]]:4: error: a message that code running on a GPU sends or receives must be flat, but this one is of type array.array({int, float}): array.array({int, float})'s elements are not scalars, enumerations or flat records
+tuples_kind(Self, !IO) :-
+    receive(Self, any, infinity, _, !IO).
+
     % An array of mailboxes, as a value a GPU process makes: no error. As a
     % message it is not flat.
 :- process peers_kind(int) receives mailbox(int) on gpu.
@@ -97,7 +162,7 @@ peers_kind(N, Self, !IO) :-
     ).
 
 :- process mailboxes_kind receives array(mailbox(int)) on gpu.
-% CHECK: gpu-flat.m:[[@LINE-1]]:4: error: a message that code running on a GPU sends or receives must be flat, but this one is of type array.array(process.mailbox(int)): array.array(process.mailbox(int))'s elements are not scalars or enumerations
+% CHECK: gpu-flat.m:[[@LINE-1]]:4: error: a message that code running on a GPU sends or receives must be flat, but this one is of type array.array(process.mailbox(int)): array.array(process.mailbox(int))'s elements are not scalars, enumerations or flat records
 mailboxes_kind(Self, !IO) :-
     receive(Self, any, infinity, _, !IO).
 
@@ -138,7 +203,7 @@ closure_kind(Self, !IO) :-
     receive(Self, any, infinity, _, !IO).
 
 :- process strings_kind receives array(string) on gpu.
-% CHECK: gpu-flat.m:[[@LINE-1]]:4: error: a message that code running on a GPU sends or receives must be flat, but this one is of type array.array(string): array.array(string)'s elements are not scalars or enumerations
+% CHECK: gpu-flat.m:[[@LINE-1]]:4: error: a message that code running on a GPU sends or receives must be flat, but this one is of type array.array(string): array.array(string)'s elements are not scalars, enumerations or flat records
 strings_kind(Self, !IO) :-
     receive(Self, any, infinity, _, !IO).
 

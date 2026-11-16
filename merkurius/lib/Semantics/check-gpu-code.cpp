@@ -91,6 +91,12 @@ private:
   std::optional<std::string> NotFixed(
       const Type &, llvm::SmallVectorImpl<const Type *> &enclosing);
   bool IsEnumeration(const Type &);
+  // Whether an array of the type holds its values inline, as flat records,
+  // by code generation's rule (lib/CodeGen/Records.h); `path` has the types
+  // whose fields are being checked.
+  bool IsRecord(const Type &, llvm::SmallVectorImpl<const Type *> &path);
+  bool IsRecordField(const Type &, llvm::SmallVectorImpl<const Type *> &path);
+  bool IsInlineElement(const Type &);
   std::optional<std::string> NotFixedHeader(const Type &);
   bool IsBlock(const Type &);
 
@@ -134,6 +140,82 @@ bool GpuCodeChecker::IsEnumeration(const Type &type) {
     }
   }
   return true;
+}
+
+// A type of one constructor of two or more fields, none existentially
+// typed, of no type parameters, whose constructors are seen here, each
+// field a scalar, an enumeration, a notag of one of those, or such a record:
+// as RecordRule::IsRecord decides from the type's merk.type_def, whose
+// fields are its declaration's, so a type with parameters is none.
+bool GpuCodeChecker::IsRecord(
+    const Type &type, llvm::SmallVectorImpl<const Type *> &path) {
+  if (type.kind != TypeKind::Named || !type.arguments.empty() ||
+      IsScalar(type) || IsString(type)) {
+    return false;
+  }
+  for (const Type *outer : path) {
+    if (outer->constructor == type.constructor) {
+      return false;
+    }
+  }
+  std::vector<ConstructorTypes> constructors;
+  if (!constructors_.Constructors(&type, constructors) ||
+      constructors.size() != 1 || constructors.front().arguments.size() < 2) {
+    return false;
+  }
+  path.push_back(&type);
+  bool record{llvm::all_of(constructors.front().arguments,
+      [&](const Type *field) { return IsRecordField(*field, path); })};
+  path.pop_back();
+  return record;
+}
+
+bool GpuCodeChecker::IsRecordField(
+    const Type &field, llvm::SmallVectorImpl<const Type *> &path) {
+  if (HasVariable(field)) {
+    return false;
+  }
+  if (IsScalar(field)) {
+    return true;
+  }
+  if (field.kind != TypeKind::Named || !field.arguments.empty() ||
+      IsString(field)) {
+    return false;
+  }
+  std::vector<ConstructorTypes> constructors;
+  if (!constructors_.Constructors(&field, constructors)) {
+    return false;
+  }
+  if (llvm::all_of(constructors, [](const ConstructorTypes &constructor) {
+        return constructor.arguments.empty();
+      })) {
+    return true;
+  }
+  // A notag: its argument, a number or a word, not a record's cell.
+  if (constructors.size() == 1 && constructors.front().arguments.size() == 1) {
+    for (const Type *outer : path) {
+      if (outer->constructor == field.constructor) {
+        return false;
+      }
+    }
+    path.push_back(&field);
+    const Type &argument{*constructors.front().arguments.front()};
+    bool flat{
+        IsRecordField(argument, path) && !IsRecord(argument, path)};
+    path.pop_back();
+    return flat;
+  }
+  return IsRecord(field, path);
+}
+
+// An array's element that it holds as a scalar, in a word or narrower, or
+// inline as a flat record.
+bool GpuCodeChecker::IsInlineElement(const Type &element) {
+  if (IsScalar(element) || IsEnumeration(element)) {
+    return true;
+  }
+  llvm::SmallVector<const Type *, 4> path;
+  return IsRecord(element, path);
 }
 
 std::optional<std::string> GpuCodeChecker::NotFixed(
@@ -207,18 +289,14 @@ std::optional<std::string> GpuCodeChecker::NotFlat(
   }
   if (IsNamed(type, "array", "array")) {
     const Type &element{*type.arguments.front()};
-    if (element.kind == TypeKind::Variable || IsScalar(element) ||
-        IsEnumeration(element)) {
+    if (element.kind == TypeKind::Variable || IsInlineElement(element)) {
       return std::nullopt;
     }
     if (!message && IsNamed(element, "process", "mailbox")) {
       return std::nullopt;
     }
-    // Temporary (docs/INPROGRESS.md, GPU processes without omp target, step
-    // 5, "Flat records", step 2b): arrays of flat records, inline since 2a,
-    // as messages.
     return std::string{TypeToString(type)} +
-        "'s elements are not scalars or enumerations";
+        "'s elements are not scalars, enumerations or flat records";
   }
   if (std::optional<std::string> why{NotFixedHeader(type)}; !why) {
     return std::nullopt;
@@ -260,7 +338,7 @@ std::optional<std::string> GpuCodeChecker::NotFixedHeader(const Type &type) {
   return std::nullopt;
 }
 
-// A string, or an array of scalars or enumerations: one block.
+// A string, or an array of scalars, enumerations or flat records: one block.
 bool GpuCodeChecker::IsBlock(const Type &type) {
   if (IsString(type)) {
     return true;
@@ -268,8 +346,7 @@ bool GpuCodeChecker::IsBlock(const Type &type) {
   if (!IsNamed(type, "array", "array")) {
     return false;
   }
-  const Type &element{*type.arguments.front()};
-  return IsScalar(element) || IsEnumeration(element);
+  return IsInlineElement(*type.arguments.front());
 }
 
 void GpuCodeChecker::CheckValue(
