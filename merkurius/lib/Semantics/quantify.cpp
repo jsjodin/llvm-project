@@ -89,6 +89,20 @@ llvm::SmallVector<VarId, 8> LoopVars(const Loop &loop) {
 }
 
 // The quantifier at the top of an if-then-else's condition, if any.
+// A trace goal's variables, the first and last versions of the state
+// variables its io(!IO) and state(M, !S) parameters bring into scope, join
+// its body to the state outside it, so they occur outside the body: in an
+// if-then-else in the body, IO!0 and the merged version are then the same
+// variables in both branches, not renamed apart.
+Set TraceOutside(const Scope &scope, const Set &outside) {
+  if (scope.kind != ScopeKind::Trace) {
+    return outside;
+  }
+  Set out{outside};
+  Add(out, scope.vars);
+  return out;
+}
+
 const Scope *ConditionScope(const IfThenElse &ite) {
   const auto *scope{std::get_if<const Scope *>(&ite.condition)};
   return scope && (*scope)->kind == ScopeKind::Some ? *scope : nullptr;
@@ -333,6 +347,9 @@ void Quantifier::Collect(const Goal &goal) {
           },
           [&](const Scope *scope) {
             CollectInto(scope->goal, all, direct);
+            if (scope->kind == ScopeKind::Trace) {
+              AddBoth(all, direct, scope->vars);
+            }
             if (scope->kind == ScopeKind::Some) {
               for (VarId var : scope->vars) {
                 if (Has(all, var)) {
@@ -481,7 +498,7 @@ void Quantifier::Capture(const Goal &goal, const Set &outside) {
               Capture(scope->goal, Without(outside, scope->vars));
               free |= Without(free_[GoalNumber(scope->goal)], scope->vars);
             } else {
-              CaptureInto(scope->goal, outside, free);
+              CaptureInto(scope->goal, TraceOutside(*scope, outside), free);
             }
           },
           [&](const Try *t) {
@@ -682,7 +699,7 @@ Goal Quantifier::Rebuild(const Goal &goal, const Set &outside) {
             if (scope->kind != ScopeKind::Some) {
               return Make<Scope>(scope->tokens, scope->number, scope->kind,
                   scope->origin, SaveMapped(scope->vars),
-                  Rebuild(scope->goal, outside));
+                  Rebuild(scope->goal, TraceOutside(*scope, outside)));
             }
             Local some{map_, locals_++};
             active_.insert(some.id);
