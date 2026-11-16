@@ -3,7 +3,9 @@
 % the term deconstructed by the field's constructor, tested first when the
 % type has others, and for an update constructed again with the new value
 % in the field's place. Of one constructor and of several, polymorphic, by
-% state variables and nested. The output is mmc's for the same program.
+% state variables and nested. With the result bound too, as in
+% `X ^ f = Y ^ f`, an access is a test of the field or the updated term.
+% The output is mmc's for the same program.
 %
 % RUN: merkc -fc1 -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MERK
 % RUN: merkc -O0 %s -o %t0 && %t0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
@@ -86,7 +88,24 @@ main(!IO) :-
     N1 = N0 ^ inner ^ x := 99,
     show(N1, !IO),
     N2 = N1 ^ tag := no,
-    show(N2 ^ tag, !IO).
+    show(N2 ^ tag, !IO),
+    % With the result bound: a test.
+    ( if P0 ^ label = P1 ^ label then show("same label", !IO)
+    else show("other label", !IO) ),
+    ( if P0 ^ label = P2 ^ label then show("same label", !IO)
+    else show("other label", !IO) ),
+    ( if circle(2.5) ^ radius = circle(2.5) ^ radius then
+        show("same radius", !IO)
+    else
+        show("other radius", !IO)
+    ),
+    ( if empty ^ radius = circle(1.0) ^ radius then show("same radius", !IO)
+    else show("no radius", !IO) ),
+    ( if B0 ^ contents = "s" then show("s", !IO) else show("not s", !IO) ),
+    ( if (P0 ^ x := 10) = P1 then show("same point", !IO)
+    else show("other point", !IO) ),
+    ( if (P0 ^ x := 11) = P1 then show("same point", !IO)
+    else show("other point", !IO) ).
 
 % MERK-LABEL: merk.proc private @field_access.area_f1_0(%arg0: !merk.term<"field_access.shape">) -> i64
 % MERK-NEXT: %[[T1:.*]] = merk.has_functor #merk.functor<"rect", 2> %arg0 : !merk.term<"field_access.shape">
@@ -119,4 +138,11 @@ main(!IO) :-
 % OUTPUT-NEXT:"p"
 % OUTPUT-NEXT:nested(point(99, 2, "p", 0.5), yes(3))
 % OUTPUT-NEXT:no
+% OUTPUT-NEXT:"same label"
+% OUTPUT-NEXT:"other label"
+% OUTPUT-NEXT:"same radius"
+% OUTPUT-NEXT:"no radius"
+% OUTPUT-NEXT:"s"
+% OUTPUT-NEXT:"same point"
+% OUTPUT-NEXT:"other point"
 % OUTPUT-EMPTY:
