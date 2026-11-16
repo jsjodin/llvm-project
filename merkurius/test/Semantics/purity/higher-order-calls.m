@@ -16,11 +16,11 @@
 
 main(0).
 :- impure pred ip(int::in) is det.
-:- pragma foreign_proc("C", ip(X::in), [will_not_call_merkurius], "(void) X;").
+:- pragma foreign_proc("C", ip(X::in), [will_not_call_mercury], "(void) X;").
 :- semipure pred sp(int::out) is det.
-:- pragma foreign_proc("C", sp(X::out), [will_not_call_merkurius, promise_semipure], "X = 0;").
+:- pragma foreign_proc("C", sp(X::out), [will_not_call_mercury, promise_semipure], "X = 0;").
 :- impure func ifn(int) = int.
-:- pragma foreign_proc("C", ifn(X::in) = (Y::out), [will_not_call_merkurius], "Y = X;").
+:- pragma foreign_proc("C", ifn(X::in) = (Y::out), [will_not_call_mercury], "Y = X;").
 :- pred pp(int::in) is det.
 pp(_).
 

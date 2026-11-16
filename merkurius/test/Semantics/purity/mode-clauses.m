@@ -16,7 +16,7 @@
 
 main(0).
 :- impure pred ip(int::in) is det.
-:- pragma foreign_proc("C", ip(X::in), [will_not_call_merkurius], "(void) X;").
+:- pragma foreign_proc("C", ip(X::in), [will_not_call_mercury], "(void) X;").
 
 :- pred plain(list(int), list(int)).
 % CHECK: [[@LINE-1]]:9: error: pred mode_clauses.plain/2 is impure, so it must be declared `impure' or promised pure
