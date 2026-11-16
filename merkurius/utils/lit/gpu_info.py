@@ -36,14 +36,17 @@ def visible_gpus():
     order: the KFD topology's nodes that have a GPU, those that
     ROCR_VISIBLE_DEVICES names if it is set, as utils/gpu/with-gpus.py sets
     it to numbers. Each is a dict: "id", the number that
-    ROCR_VISIBLE_DEVICES takes, "units", its compute units, and "display",
-    whether it drives a display."""
+    ROCR_VISIBLE_DEVICES takes, "units", its compute units, "display",
+    whether it drives a display, and "pairs", whether its queues take
+    compute units in pairs: a processor with work group processors, gfx10
+    and later, whose CU masks enable units 2N and 2N+1 together."""
     nodes = glob.glob("/sys/class/kfd/kfd/topology/nodes/*")
     nodes.sort(key=lambda node: int(os.path.basename(node)))
     gpus = []
     for node in nodes:
         props = _properties(node)
-        if props.get("gfx_target_version", "0") == "0":
+        version = int(props.get("gfx_target_version", "0"))
+        if version == 0:
             continue
         simds = int(props.get("simd_count", "0"))
         per_unit = int(props.get("simd_per_cu", "1")) or 1
@@ -51,6 +54,8 @@ def visible_gpus():
             "id": str(len(gpus)),
             "units": simds // per_unit,
             "display": _drives_display(props.get("drm_render_minor")),
+            # gfx_target_version is major * 10000 + minor * 100 + stepping.
+            "pairs": version >= 100000,
         })
     chosen = os.environ.get("ROCR_VISIBLE_DEVICES")
     if chosen is not None:
@@ -84,6 +89,13 @@ def gpu_unit_mask(gpus):
         return None
     units = min(gpu["units"] for gpu in gpus)
     return "0-%d" % (max(units // 2, 2) - 1)
+
+
+def one_unit_mask(gpus):
+    """The smallest LIBOMPTARGET_AMDGPU_CU_MASK that every one of `gpus`
+    takes: one compute unit, "0", or the first pair, "0-1", if any of them
+    takes units in pairs."""
+    return "0-1" if any(gpu["pairs"] for gpu in gpus) else "0"
 
 
 if __name__ == "__main__":
