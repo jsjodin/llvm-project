@@ -3593,9 +3593,9 @@ above. This brings them back.
   enumeration, a mailbox, a value of a type with constructors that is not
   recursive, has no existentially typed constructor and whose fields are
   such values, or a tuple of them; or, as a whole value only, a string or
-  an array of scalars or enumerations, or a value of a type whose
-  constructors' fields are such values of a fixed size but for each one's
-  last, which may be a string or such an array (2026-11-13, for step 5 of
+  an array of scalars, enumerations or flat records, or a value of a type
+  whose constructors' fields are such values of a fixed size but for each
+  one's last, which may be a string or such an array (2026-11-13, for step 5 of
   the demo's halos: `test/CodeGen/process-block-messages.m`, at the host
   and on the GPU). `received(T)` is flat when `T` is. A
   type variable passes, as GPU kinds are monomorphic. An abstract or
@@ -3621,11 +3621,21 @@ above. This brings them back.
     whole message may have", and so on. Tests:
     `test/Semantics/processes/gpu-flat.m` and the region cases in
     `omp-target-send-errors.m`.
-  - Fields that are arrays of a fixed size wait for flat records' step 3,
-    and arrays of flat records as messages for step 2b; they cross into
-    target regions since step 2a. Until flat records are values on
-    the device, a message of several words still travels by its `type_info`
-    copy (step 4e, above), marked Temporary.
+  - Arrays of flat records (step 2b, 2026-11-16): a GPU process makes,
+    reads, sets, fills and resizes them in place, and sends and receives
+    them, alone or as a message's last field, copied by their `type_info`s
+    as one block, the header's two words and the records' bytes
+    (`runtime/copy.h`). The checker decides what is a flat record by
+    lowering's rule (`lib/CodeGen/Records.h`), from the type's
+    constructors: one constructor of two or more fields, of no type
+    parameters, each a scalar, an enumeration, a notag of one, or such a
+    record. A tuple is none for this, nor an array of one, which is safe,
+    as it is rejected. `CodeGen/process-record-arrays.m` and its GPU run,
+    and `Semantics/processes/gpu-flat.m`.
+  - Fields that are arrays of a fixed size wait for flat records' step 3.
+    A record message, and a target region's map of a record, still travel
+    by their `type_info` copies (step 4e, above), as a cell, marked
+    Temporary, until a program needs them as their bytes.
 - **A GPU process's blocks** (2026-11-13, `runtime/device/device.cpp`,
   `Block`): its cells and arrays come from LLVM libc's allocator on the
   GPU, those of 1 MiB or more from a cache of large blocks that each GPU's

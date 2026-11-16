@@ -1,18 +1,22 @@
-% Arrays of flat records between the host and a process kind: a mover takes
-% arrays of 0 to 40 cells, which hold them inline (runtime/array.h), and
-% answers each with an array it makes, each cell moved, in reverse order. On
-% the host, messages are copied by their type_infos (runtime/copy.h), which
-% copy an array of records as one block, its header's two words and its
-% records' bytes. A kind that runs on a GPU takes such messages with step 2b
-% (docs/INPROGRESS.md, Flat records).
+% Arrays of flat records between the host and process kinds that run on a
+% GPU (docs/INPROGRESS.md, Flat records, step 2b). A mover takes arrays of 0
+% to 40 cells, which hold them inline (runtime/array.h), and answers each
+% with an array it makes, each cell moved, in reverse order. A filler takes
+% `batch(Fill, Cells)`, a fixed part followed by an array of records, and
+% answers with an array it makes of Cells, then Fill twice, set, filled and
+% resized in place, and each cell warmed where it is. Messages are copied
+% by their type_infos (runtime/copy.h), which copy an array of records as
+% one block, its header's two words and its records' bytes. The kinds run
+% at the host here, and on the GPU in process-record-arrays-gpu.test.
+% The -O0 build has no --offload-arch, as process-records.m's.
 %
 % mmc has no process module to run it with, so the output is written by
 % hand: each round's answer is checked against what the host computes.
 %
-% REQUIRES: libomp
+% REQUIRES: amdgpu-registered-target, libomp
 % RUN: merkc -fprocess-declarations %libomp-flags %s -o %t
 % RUN: %libomp-env %t host | FileCheck %s --match-full-lines --strict-whitespace
-% RUN: merkc -O2 -fprocess-declarations %libomp-flags %s -o %t2
+% RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 host | FileCheck %s --match-full-lines --strict-whitespace
 % RUN: %libomp-env MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 %t host 2>/dev/null | FileCheck %s --match-full-lines --strict-whitespace
 % RUN: %libomp-env MERK_GC_EVERY_ALLOC=1 MERK_CHECK_ROOTS=1 %t2 host 2>/dev/null | FileCheck %s --match-full-lines --strict-whitespace
@@ -39,9 +43,7 @@
             ).
 
     % Answers each array until an empty one, which it answers too.
-    % Temporary (flat records step 2b, docs/INPROGRESS.md): runs on the host
-    % only; 2b declares it `on gpu`, with a GPU run of its own.
-:- process mover(mailbox(array(cell))) receives array(cell).
+:- process mover(mailbox(array(cell))) receives array(cell) on gpu.
 
 mover(Reply, Self, !IO) :-
     receive(Self, any, infinity, R, !IO),
@@ -53,6 +55,58 @@ mover(Reply, Self, !IO) :-
         else
             true
         )
+    else
+        true
+    ).
+
+:- type batch ---> batch(fill :: cell, cells :: array(cell)).
+
+    % Answers each batch until one of no cells, which it answers too.
+:- process filler(mailbox(array(cell))) receives batch on gpu.
+
+filler(Reply, Self, !IO) :-
+    receive(Self, any, infinity, R, !IO),
+    ( if R = message(batch(Fill, A)) then
+        N = array.size(A),
+        send(Reply, filled(Fill, A), !IO),
+        ( if N > 0 then
+            filler(Reply, Self, !IO)
+        else
+            true
+        )
+    else
+        true
+    ).
+
+    % The cells, then Fill twice, each warmed by its index.
+:- func filled(cell, array(cell)) = array(cell).
+filled(Fill, A) = B :-
+    N = array.size(A),
+    array.init(N, still, B0),
+    copy_cells(0, A, B0, B1),
+    array.resize(N + 1, Fill, B1, B2),
+    array.fill(Fill, B2, B3),
+    copy_cells(0, A, B3, B4),
+    array.resize(N + 2, Fill, B4, B5),
+    warm(0, B5, B).
+
+:- pred copy_cells(int::in, array(cell)::in,
+    array(cell)::array_di, array(cell)::array_uo) is det.
+copy_cells(I, A, !B) :-
+    ( if I < array.size(A) then
+        array.lookup(A, I, C),
+        array.set(I, C, !B),
+        copy_cells(I + 1, A, !B)
+    else
+        true
+    ).
+
+:- pred warm(int::in, array(cell)::array_di, array(cell)::array_uo) is det.
+warm(I, !B) :-
+    ( if I < array.size(!.B) then
+        array.lookup(!.B, I, C),
+        array.set(I, C ^ heat := C ^ heat + float(I), !B),
+        warm(I + 1, !B)
     else
         true
     ).
@@ -105,7 +159,43 @@ main(!IO) :-
         io.write_string("empty not answered\n", !IO)
     ),
     io.write_int(Wrong, !IO),
-    io.write_string(" wrong of 40\n", !IO).
+    io.write_string(" wrong of 40\n", !IO),
+    spawn(Place, filler(Reply), F, !IO),
+    batches(F, Reply, 1, 40, 0, Wrong2, !IO),
+    send(F, batch(still, round(0)), !IO),
+    receive(Reply, any, after(10000), Last2, !IO),
+    ( if Last2 = message(L2) then
+        io.print_line(L2, !IO)
+    else
+        io.write_string("no batch answered\n", !IO)
+    ),
+    io.write_int(Wrong2, !IO),
+    io.write_string(" batches wrong of 40\n", !IO).
+
+    % Sends batches N .. Max and checks the answers.
+:- pred batches(mailbox(batch)::in, mailbox(array(cell))::in, int::in,
+    int::in, int::in, int::out, io::di, io::uo) is det.
+
+batches(F, Reply, N, Max, !Wrong, !IO) :-
+    ( if N =< Max then
+        A = round(N),
+        Fill = element(N + 1, N),
+        send(F, batch(Fill, A), !IO),
+        receive(Reply, any, after(10000), R, !IO),
+        ( if
+            R = message(B),
+            B = filled(Fill, A)
+        then
+            true
+        else
+            !:Wrong = !.Wrong + 1,
+            io.format("batch %d: ", [i(N)], !IO),
+            io.print_line(R, !IO)
+        ),
+        batches(F, Reply, N + 1, Max, !Wrong, !IO)
+    else
+        true
+    ).
 
     % Sends rounds N .. Max and checks the answers.
 :- pred rounds(mailbox(array(cell))::in, mailbox(array(cell))::in, int::in,
@@ -133,3 +223,5 @@ rounds(M, Reply, N, Max, !Wrong, !IO) :-
 
 % CHECK:empty answered
 % CHECK-NEXT:0 wrong of 40
+% CHECK-NEXT:array([cell(point(0i32, 0i32), 0u8, red, 0.0), cell(point(0i32, 0i32), 0u8, red, 1.0)])
+% CHECK-NEXT:0 batches wrong of 40

@@ -1,0 +1,15 @@
+process-record-arrays.m's mover and filler spawned on the machine's GPU
+(docs/INPROGRESS.md, Flat records, step 2b): arrays of flat records, alone
+and after a fixed part, sent to and from GPU processes, and made, set,
+filled and resized there, with none of the host's copies of the messages,
+nor the messages, nor the arenas left.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-record-arrays.m -o %t2
+RUN: %gpu-env timeout -k 1 60 %t2 gpu | FileCheck %S/process-record-arrays.m --match-full-lines --strict-whitespace
+RUN: %gpu-env MERK_CHECK_PINNED=1 MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %s --match-full-lines --strict-whitespace
+
+CHECK:0 batches wrong of 40
+CHECK-NEXT:Merkurius runtime: 0 chunks of host memory for devices' messages are allocated
+CHECK-NEXT:Merkurius runtime: 0 messages are neither read nor freed
+CHECK-NEXT:Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated
