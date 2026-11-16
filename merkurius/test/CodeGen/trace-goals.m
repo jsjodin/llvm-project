@@ -5,8 +5,9 @@
 % whose condition asks the runtime whether each environment variable
 % existed when the program started, whatever its value, even empty. Its io
 % state has no value to pass. One whose goal has more than one solution
-% is in merk.commit. The output is mmc's for the same program, with and
-% without --trace-flag=off.
+% is in merk.commit. A branched goal in a trace goal, of which some branches
+% leave the io state as it was, joins the branches' io states. The output
+% is mmc's for the same program, with and without --trace-flag=off.
 %
 % RUN: merkc -fc1 -emit-merk -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=MERK
 % RUN: merkc -O0 %s -o %t0 && env -u TRACE_GOALS_UNSET TRACE_GOALS_SET= %t0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
@@ -18,7 +19,7 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module int, list, solutions.
+:- import_module int, list, maybe, solutions.
 
 :- pred two(int::out) is multi.
 two(10).
@@ -51,6 +52,30 @@ first(X) :-
 % MERK-LABEL: merk.proc private @trace_goals.first_1_0(
 % MERK: merk.commit {
 % MERK: merk.nondet_call @trace_goals.two_1_0()
+
+    % Branches that leave the io state as it was.
+:- pred branches(int::in) is det.
+branches(X) :-
+    trace [io(!IO)] (
+        ( if X < 3 then
+            io.write_string("small ", !IO),
+            io.write_int(X, !IO),
+            io.nl(!IO)
+        else
+            true
+        )
+    ),
+    M = ( if X = 2 then yes(X) else no ),
+    trace [io(!IO)] (
+        (
+            M = yes(Y),
+            io.write_string("yes ", !IO),
+            io.write_int(Y, !IO),
+            io.nl(!IO)
+        ;
+            M = no
+        )
+    ).
 
     % In a semidet procedure, after a test.
 :- pred positive(int::in) is semidet.
@@ -130,6 +155,9 @@ main(!IO) :-
     io.write_int(double(21), !IO),
     io.nl(!IO),
     first(1),
+    branches(2),
+    branches(5),
+    branches(7),
     ( if positive(3) then io.write_string("yes\n", !IO) else true ),
     ( if positive(-3) then
         io.write_string("yes\n", !IO)
@@ -152,6 +180,8 @@ main(!IO) :-
 % OUTPUT:double 21
 % OUTPUT-NEXT:42
 % OUTPUT-NEXT:first 11
+% OUTPUT-NEXT:small 2
+% OUTPUT-NEXT:yes 2
 % OUTPUT-NEXT:positive 3
 % OUTPUT-NEXT:yes
 % OUTPUT-NEXT:no
