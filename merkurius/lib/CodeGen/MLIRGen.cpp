@@ -1006,6 +1006,41 @@ mlir::Value MerkGenerator::Constant(const Body &goal, const ProcedureBody &body)
       }
       break;
     }
+  } else if (functor.kind == semantics::FunctorKind::ImplementationLiteral) {
+    // $file, $line, $module and $pred, as mmc gives them: the source file,
+    // the line, the module's name, and the predicate's or function's kind,
+    // qualified name and arity, a function's without its result, that of
+    // the clause's own predicate within a lambda too. $grade names a grade
+    // of mmc's, which Merkurius has no equivalent of.
+    llvm::StringRef name{functor.implementation->name};
+    const semantics::Symbol *symbol{
+        body.procedure ? body.procedure->symbol : nullptr};
+    if (name == "file" || name == "line") {
+      if (auto provenance{sources_.GetProvenanceRange(Where(goal.tokens))}) {
+        if (auto pos{sources_.GetSourcePosition(provenance->start())}) {
+          if (name == "line" && mlirType.isInteger()) {
+            value = builder_.getIntegerAttr(mlirType, pos->line);
+          } else if (name == "file" && mlir::isa<merk::StringType>(mlirType)) {
+            value = mlir::StringAttr::get(*pos->path, mlirType);
+          }
+        }
+      }
+    } else if (name == "module" && symbol &&
+        mlir::isa<merk::StringType>(mlirType)) {
+      value = mlir::StringAttr::get(symbol->module, mlirType);
+    } else if (name == "pred" && symbol &&
+        mlir::isa<merk::StringType>(mlirType)) {
+      std::string text{symbol->kind == semantics::SymbolKind::Function
+              ? "function `"
+              : "predicate `"};
+      text += (symbol->module + "." + symbol->name + "'/").str();
+      text += std::to_string(symbol->arity);
+      value = mlir::StringAttr::get(text, mlirType);
+    }
+    if (!value) {
+      NotYet(Where(goal.tokens), "$" + name.str());
+      return nullptr;
+    }
   } else if (functor.kind == semantics::FunctorKind::Name &&
       mlirType.isInteger(32) && type->constructor->name == "character") {
     // A character constant is its code point.

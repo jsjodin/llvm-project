@@ -381,7 +381,9 @@ mlir::Value MerkGenerator::IntegerShift(mlir::Value value, mlir::Value amount,
 // (reference manual, "Field selection"): the term is deconstructed by the
 // field's constructor, which fails if it has another, and for an update
 // constructed again, with the new value in the field's place and the term's
-// other fields as they were.
+// other fields as they were. With the result bound too, as in
+// `X ^ f = Y ^ f`, the access is a test: the field, or the updated term,
+// must equal it.
 void MerkGenerator::FieldAccess(const Body &goal, const Procedure &callee,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
   const semantics::Symbol &symbol{*callee.symbol};
@@ -402,10 +404,11 @@ void MerkGenerator::FieldAccess(const Body &goal, const Procedure &callee,
   mlir::Value term{ValueOf(arguments[0])};
   mlir::Value value{update ? ValueOf(arguments[1]) : mlir::Value{}};
   BodyVar result{arguments.back()};
-  if (!term || (update && !value) || ValueOf(result)) {
+  if (!term || (update && !value)) {
     NotYet(at, "this mode of a field access");
     return;
   }
+  mlir::Value bound{ValueOf(result)};
   llvm::StringRef name{constructor->name->name};
   const semantics::ConstructorTypes *types{ConstructorOf(type, name, arity)};
   HiddenFields hidden;
@@ -428,15 +431,22 @@ void MerkGenerator::FieldAccess(const Body &goal, const Procedure &callee,
   for (auto [field, argument] : llvm::zip(cell, ArgumentsOf(type, *types))) {
     NoteRoot(field, argument);
   }
+  mlir::Value out;
   if (!update) {
-    values_[result] = cell[index];
+    out = cell[index];
+  } else {
+    llvm::SmallVector<mlir::Value> updated{cell};
+    updated[index] = value;
+    out = merk::ConstructOp::create(builder_, loc,
+        mlir::cast<merk::TermType>(Represent(body.vars[result].type)->type),
+        functor, updated);
+  }
+  if (!bound) {
+    values_[result] = out;
     return;
   }
-  llvm::SmallVector<mlir::Value> updated{cell};
-  updated[index] = value;
-  values_[result] = merk::ConstructOp::create(builder_, loc,
-      mlir::cast<merk::TermType>(Represent(body.vars[result].type)->type),
-      functor, updated);
+  equalAt_ = at;
+  Equal(out, bound, body.vars[result].type, loc);
 }
 
 bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
