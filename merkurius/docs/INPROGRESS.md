@@ -3567,7 +3567,9 @@ one kernel for a GPU's processes.
   (`PlaceTable::started`), and the launch waits for them as a target
   region's teams wait for each other (`MERK_TEAMS_STALL_MILLISECONDS`): a
   spawn that launches a kernel whose teams do not all start fails, naming
-  the counts (`process-teams-gpu.test`).
+  the counts (`process-teams-gpu.test`). Since 2026-11-16 it launches the
+  kernel again with as many teams as started, and fails only if none start
+  (design document, GPU processes).
 - *The stack is checked* (2026-11-11). A GPU's stack overflows silently,
   and a kernel's fixed frames take part of it (`process-gpu-messages`'
   took 1056 bytes, more than its 1 KiB). So:
