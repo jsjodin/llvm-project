@@ -96,6 +96,8 @@
     list(X)::in, list(X)::out) is det.
 :- pred split_list(int::in, list(T)::in, list(T)::out, list(T)::out)
     is semidet.
+:- pred det_split_list(int::in, list(T)::in, list(T)::out, list(T)::out)
+    is det.
 :- pred last(list(T)::in, T::out) is semidet.
 :- func det_last(list(T)) = T.
 :- pred det_last(list(T)::in, T::out) is det.
@@ -647,6 +649,14 @@ split_list(N, L, Start, End) :-
         L = [X | Xs],
         Start = [X | Start1],
         split_list(N - 1, Xs, Start1, End)
+    ).
+
+det_split_list(N, L, Start, End) :-
+    ( if split_list(N, L, Start0, End0) then
+        Start = Start0,
+        End = End0
+    else
+        unexpected("predicate `list.det_split_list'/4", "index out of range")
     ).
 
 last([X | Xs], Last) :-
