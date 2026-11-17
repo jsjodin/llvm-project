@@ -142,7 +142,7 @@ main(!IO) :-
 % DEVICE-LLVM-LABEL: define internal i64 @omp_target.sum_4_0(
 % DEVICE-LLVM: musttail call i64 @omp_target.sum_4_0(
 % DEVICE-LLVM-LABEL: define weak_odr protected amdgpu_kernel void @__omp_offloading_{{[0-9a-f]+}}_{{[0-9a-f]+}}_omp_target.compute_6_0_l{{[0-9]+}}(
-% DEVICE-LLVM: call void @llvm.trap()
+% DEVICE-LLVM: call void @merk_device_uncaught_exception(ptr @merk.str.{{[0-9]+}})
 % DEVICE-LLVM-NOT: merk_uncaught_exception
 % DEVICE-LLVM-DAG: !{i32 1, !"amdhsa_code_object_version", i32 600}
 % DEVICE-LLVM-DAG: !{i32 8, !"PIC Level", i32 2}
