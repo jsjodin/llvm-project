@@ -6311,6 +6311,142 @@ void AddStackChecks(llvm::Module &module) {
   }
 }
 
+namespace {
+
+// Whether a stack slot holds only zeros: every use, through casts, is a
+// lifetime marker, a memset of 0 from its start, or a read by the runtime's
+// call that makes an array from it; and a memset covers `bytes`.
+bool OnlyZeroed(llvm::AllocaInst &slot, std::uint64_t bytes) {
+  bool zeroed{false};
+  llvm::SmallVector<llvm::Value *> pointers{&slot};
+  while (!pointers.empty()) {
+    llvm::Value *pointer{pointers.pop_back_val()};
+    for (llvm::User *user : pointer->users()) {
+      if (llvm::isa<llvm::AddrSpaceCastInst>(user)) {
+        pointers.push_back(user);
+      } else if (auto *intrinsic{llvm::dyn_cast<llvm::IntrinsicInst>(user)};
+          intrinsic && intrinsic->isLifetimeStartOrEnd()) {
+      } else if (auto *memset{llvm::dyn_cast<llvm::MemSetInst>(user)}) {
+        auto *value{llvm::dyn_cast<llvm::ConstantInt>(memset->getValue())};
+        auto *length{llvm::dyn_cast<llvm::ConstantInt>(memset->getLength())};
+        if (memset->getDest() != pointer || !value || !value->isZero() ||
+            memset->isVolatile()) {
+          return false;
+        }
+        zeroed |= length && length->getZExtValue() >= bytes;
+      } else if (auto *call{llvm::dyn_cast<llvm::CallBase>(user)};
+          call && call->getCalledFunction() &&
+          (call->getCalledFunction()->getName() == "merk_array_new_bytes" ||
+              call->getCalledFunction()->getName() ==
+                  "merk_array_resize_bytes")) {
+        // Only as the element, which the runtime only reads.
+        unsigned element{call->getCalledFunction()->getName() ==
+                    "merk_array_new_bytes"
+                ? 1u
+                : 2u};
+        for (unsigned i{0}; i < call->arg_size(); ++i) {
+          if (call->getArgOperand(i) == pointer && i != element) {
+            return false;
+          }
+        }
+      } else {
+        return false;
+      }
+    }
+  }
+  return zeroed;
+}
+
+// The constant of `bytes` zeros that zero elements share, in the constant
+// address space of an AMD GPU.
+llvm::Constant *ZeroRecord(llvm::Module &module, std::uint64_t bytes,
+    llvm::Type *pointer) {
+  std::string name{"merk.zero_record." + std::to_string(bytes)};
+  llvm::GlobalVariable *global{module.getNamedGlobal(name)};
+  if (!global) {
+    auto *type{llvm::ArrayType::get(
+        llvm::Type::getInt8Ty(module.getContext()), bytes)};
+    unsigned space{
+        llvm::Triple{module.getTargetTriple()}.isAMDGPU() ? 4u : 0u};
+    global = new llvm::GlobalVariable(module, type, /*isConstant=*/true,
+        llvm::GlobalValue::PrivateLinkage, llvm::Constant::getNullValue(type),
+        name, nullptr, llvm::GlobalValue::NotThreadLocal, space);
+    global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    global->setAlignment(llvm::Align(16));
+  }
+  return llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(global, pointer);
+}
+
+// The element of an array of records that array.init or array.resize fills
+// with, when it is all zeros, as an empty record such as a particle with
+// nothing set: from a constant shared by all, rather than a stack slot that
+// each call zeroes. Lowering puts each element in a slot of its own
+// (RecordSlot) and cannot know it is constant, as it may come from another
+// module's function, which only inlining shows. On an AMD GPU the slots also
+// do not share their stack: LICM hoists each slot's cast to a generic
+// pointer out of the loop that uses it, and stack coloring leaves a slot
+// alone that is used outside its lifetime, so a GPU process that made
+// arrays of particles in seven places took 1088 bytes a lane for them.
+void UseZeroRecords(llvm::Module &module) {
+  llvm::SmallPtrSet<llvm::AllocaInst *, 8> slots;
+  for (llvm::StringRef name :
+      {"merk_array_new_bytes", "merk_array_resize_bytes"}) {
+    llvm::Function *make{module.getFunction(name)};
+    if (!make) {
+      continue;
+    }
+    unsigned element{name == "merk_array_new_bytes" ? 1u : 2u};
+    for (llvm::User *user : make->users()) {
+      auto *call{llvm::dyn_cast<llvm::CallBase>(user)};
+      if (!call || call->getCalledFunction() != make) {
+        continue;
+      }
+      auto *slot{llvm::dyn_cast<llvm::AllocaInst>(
+          call->getArgOperand(element)->stripPointerCasts())};
+      auto *bytes{llvm::dyn_cast<llvm::ConstantInt>(
+          call->getArgOperand(element + 1))};
+      if (!slot || !bytes || !OnlyZeroed(*slot, bytes->getZExtValue())) {
+        continue;
+      }
+      call->setArgOperand(element,
+          ZeroRecord(module, bytes->getZExtValue(),
+              call->getArgOperand(element)->getType()));
+      slots.insert(slot);
+    }
+  }
+  // A slot no call reads is only written: its memsets, markers and casts go
+  // with it.
+  for (llvm::AllocaInst *slot : slots) {
+    llvm::SmallVector<llvm::Instruction *> dead;
+    llvm::SmallVector<llvm::Instruction *> pointers{slot};
+    bool read{false};
+    for (std::size_t i{0}; i < pointers.size() && !read; ++i) {
+      for (llvm::User *user : pointers[i]->users()) {
+        auto *instruction{llvm::cast<llvm::Instruction>(user)};
+        if (llvm::isa<llvm::AddrSpaceCastInst>(instruction)) {
+          pointers.push_back(instruction);
+        } else if (llvm::isa<llvm::CallBase>(instruction) &&
+            !llvm::isa<llvm::IntrinsicInst>(instruction)) {
+          read = true;
+        } else {
+          dead.push_back(instruction);
+        }
+      }
+    }
+    if (read) {
+      continue;
+    }
+    for (llvm::Instruction *instruction : dead) {
+      instruction->eraseFromParent();
+    }
+    for (llvm::Instruction *pointer : llvm::reverse(pointers)) {
+      pointer->eraseFromParent();
+    }
+  }
+}
+
+} // namespace
+
 void OptimizeLLVMIR(llvm::Module &module, const TargetInfo &target) {
   llvm::LoopAnalysisManager loops;
   llvm::FunctionAnalysisManager functions;
@@ -6346,6 +6482,9 @@ void OptimizeLLVMIR(llvm::Module &module, const TargetInfo &target) {
           ? builder.buildO0DefaultPipeline(level)
           : builder.buildPerModuleDefaultPipeline(level)};
   passes.run(module, modules);
+  if (level != llvm::OptimizationLevel::O0) {
+    UseZeroRecords(module);
+  }
   // A word of a scalar's bits, which the statepoint rewrite must know is no
   // pointer: the optimizer may have merged two calls on the same bits, and
   // so kept one live past safepoints whose bundles do not list it.
