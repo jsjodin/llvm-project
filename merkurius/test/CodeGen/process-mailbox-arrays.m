@@ -12,17 +12,32 @@
 % hand: node J sees the tokens J, J + N and J + 2N, or N, 2N and 3N for
 % node 0.
 %
+% A mailbox is a word in an array, as process.mailbox's cell, though its
+% type is abstract here, so an element is read and written in place, not
+% by the array's width with a branch for records (Lowering.cpp,
+% ArrayWidth), whose room the frames of a GPU process's procedures kept,
+% pushing a Monte Carlo place's stack over its limit (2026-11-17).
+%
 % REQUIRES: amdgpu-registered-target, libomp
 % RUN: merkc -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t
 % RUN: %libomp-env %t host | FileCheck %s --match-full-lines --strict-whitespace
 % RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t2
 % RUN: %libomp-env %t2 host | FileCheck %s --match-full-lines --strict-whitespace
+% RUN: merkc -fc1 -emit-llvm -fprocess-declarations %s -o - | FileCheck %s --check-prefix=IR
 
 % CHECK:node 0: 30
 % CHECK-NEXT:node 1: 18
 % CHECK-NEXT:node 2: 21
 % CHECK-NEXT:node 3: 24
 % CHECK-NEXT:node 4: 27
+
+% IR-LABEL: define internal tailcc void @process_mailbox_arrays.node_7_0(
+% IR-NOT: {{_record\(|merk\.array_(load|store)}}
+% IR-LABEL: define internal tailcc ptr addrspace(1) @process_mailbox_arrays.peers_6_0(
+% IR-NOT: {{_record\(|merk\.array_(load|store)}}
+% IR-LABEL: define internal tailcc i64 @process_mailbox_arrays.tokens_10_0(
+% IR-NOT: {{_record\(|merk\.array_(load|store)}}
+% IR: {{^}}}
 
 :- module process_mailbox_arrays.
 :- interface.
