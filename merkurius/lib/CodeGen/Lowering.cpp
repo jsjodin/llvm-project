@@ -3922,8 +3922,16 @@ std::optional<std::int64_t> Lowerer::ArrayWidth(mlir::Type element) const {
   if (mlir::isa<merk::WordType>(element)) {
     return std::nullopt;
   }
-  if (mlir::isa<merk::TermType>(element)) {
+  if (auto term{mlir::dyn_cast<merk::TermType>(element)}) {
     const TermLayout *layout{LayoutOf(element)};
+    // A mailbox is process.mailbox's cell, a word, though its type is
+    // abstract outside the library (MLIRGenOpenMP.cpp, FlatCell). Without
+    // this, every element of an array of mailboxes, as a place's peers,
+    // would be read and written by the header's width, with a branch for
+    // records whose code a GPU process's frame keeps room for.
+    if (!layout && term.getName().starts_with("process.mailbox(")) {
+      return 0;
+    }
     if (!layout) {
       return std::nullopt;
     }
