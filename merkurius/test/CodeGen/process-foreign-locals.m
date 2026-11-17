@@ -21,8 +21,10 @@
 % RUN: merkc -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t0
 % RUN: %libomp-env %t0 host | FileCheck %s --match-full-lines --strict-whitespace
 
-% The locals are on the thread's stack, in the private address space.
-% DEVICE: %ts.{{.*}} = alloca %struct.timespec, align 8, addrspace(5)
+% The locals are on the thread's stack, in the private address space. The
+% struct prints as its literal type, { i64, i64 }, when the module has a
+% flat union of that shape, such as place.
+% DEVICE: %ts.{{.*}} = alloca {{%struct.timespec|. i64, i64 .}}, align 8, addrspace(5)
 % DEVICE: call i32 @clock_gettime(
 % DEVICE: %B.{{.*}} = alloca i64, align 8, addrspace(5)
 

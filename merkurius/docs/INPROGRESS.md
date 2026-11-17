@@ -3126,6 +3126,66 @@ the process asks the host to launch. The first version has neither.
      record, as their bytes rather than as a cell copied by its
      `type_info`; they wait for a program that needs the speed.
 
+     **Flat unions, step 1's design, 2026-11-16** (the user chose them
+     over unboxed returns, 2026-11-16). The Monte Carlo port's
+     `qs_mesh.crossing` returns `transit(Cell, Facet)`, `escape_crossing`
+     or `reflect_crossing`; its caller, in another module, switches on it.
+     Each `transit` was a cell: on the gfx1030, a 64-byte arena block made
+     and freed for each segment, 70% of tracking (merkurius-mc E1.1). LLVM
+     inlines the arena but cannot remove the pair: the pointer carries a
+     tag, and the free does the arena's bookkeeping.
+     - *Which types:* two or more constructors, at least one with fields,
+       no hidden fields, not exported abstractly, every field flat (as a
+       record's), and at most `kMaxUnionFields` (8) fields over all the
+       constructors. `RecordRule::IsUnion` decides from the
+       `merk.type_def`s, so every module that sees the constructors decides
+       alike, as for records. A union is not a flat field, so a record holds
+       no union, and no union holds one.
+     - *The value:* `!merk.record<"name">`, as a record's, an LLVM struct:
+       the constructor's number in the type's order as an `i64`, then every
+       constructor's fields in turn, each as a record holds it. A
+       constructor's slots are its own, not shared with the others', so no
+       field is reinterpreted; LLVM drops the slots nothing reads.
+     - *Where:* in MakeRecords, as records. Every value of a union's term
+       type becomes a value, boxed into its cell where a word or a cell is
+       wanted: the places records are boxed, and an array's element, as
+       unions are not inline in arrays. Boxing is a `merk.switch` on the
+       value with one case for each constructor, each of which constructs
+       the cell; unboxing, a switch on the cell. Liveness, the safepoints,
+       FreeAtLastUse and last call modulo constructors skip a record's
+       value already, as it holds no pointer.
+     - *Lowered:* a construction inserts the number and its fields into a
+       zero struct; a deconstruction extracts its slots; a test of a
+       functor compares the number; a switch becomes a switch on the
+       number, with the constructors' numbers as its cases.
+     - *Unchanged:* the runtime, the descriptors (a union's has no
+       `kFlat`), messages, maps and arrays, which see the cell.
+     - *Later, when a program needs them:* unions inline in arrays and
+       records, which want C's layout, slots shared between constructors.
+     - *Rejected:* unboxed returns (a procedure whose every return
+       constructs gets a worker returning the fields, as GHC's CPR): any
+       type, but returned values only, and across modules only where the
+       callee's body is copied, on the device, until interface files carry
+       bodies. An allocator LLVM can remove: the tag in the pointer's low
+       bits and the arena's free keep the pointer escaping, and the host's
+       collector would need the same.
+
+     **Flat unions, step 1, built 2026-11-16** (design document, Type
+     representation, and Lowering, "Records"). As designed above, with:
+     - *The place's figure of merit,* from the port's sources unchanged:
+       6.36e6 segments a second with the crossing's cell, 2.02e7 with it a
+       value, the same as the port's version with an unboxed crossing
+       (design document, Measurements, "Flat unions in a GPU process").
+     - *`maybe(int)`* is a union, as are other instances of the library's
+       types whose fields come out flat; `map_maybe` of one boxes it at the
+       casts to and from the polymorphic type.
+     - *Tests:* `CodeGen/flat-unions.m`: returned in memory when too large
+       for registers, a switch on the number, no cell in the procedures
+       that make and switch on one, and the boundaries where it is boxed (a
+       list, an array, `io.write`, a closure, `solutions`, unify, compare,
+       `list.sort`, `map_maybe`), against mmc's output, with the collector
+       at every allocation.
+
      **Decided by the user, 2026-11-12:** (a), inline on the host as on
      the GPU; and a fixed size as a library type, `fixed(T, n8)`, whose
      size is an ordinary type the library declares, so that the type
@@ -3149,7 +3209,8 @@ the process asks the host to launch. The first version has neither.
        or tuples, which have a size but no indexing by a variable. Wanted
        first: an example from the user's OpenMP codes, to choose by.
      - **Records of several constructors** (tagged unions, as messages
-       already may be) inside arrays: later, if a program needs them.
+       already may be) inside arrays: later, if a program needs them. By
+       value in code: flat unions, step 1, above.
      - **Arrays whose length is known only at run time,** in records
        (discussed 2026-11-10). An array of scalars or enumerations is flat
        today only as a whole message; a record or tuple with an array field,
