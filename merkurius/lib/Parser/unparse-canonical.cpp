@@ -863,6 +863,11 @@ bool CanonicalUnparser::BeforeChild(const N &n, const Child &c) {
 template <typename N>
 bool CanonicalUnparser::IsOperatorTerm(
     const N &n, llvm::ArrayRef<Child> children) const {
+  // A name is not, even a qualified one of several tokens, as a.f, or one
+  // whose functor is an operator, as a.(X > Y), whose tokens are a.(.
+  if constexpr (std::is_same_v<N, SymName>) {
+    return false;
+  }
   std::uint32_t first{n.tokens.first}, last{n.tokens.last};
   if (first >= last || tokens_[first].kind == TokenKind::Directive) {
     return false;
