@@ -1729,6 +1729,12 @@ void Lowerer::LowerProc(merk::ProcOp proc) {
   if (mlir::Attribute declare{proc->getDiscardableAttr("omp.declare_target")}) {
     func->setDiscardableAttr("omp.declare_target", declare);
   }
+  // A predicate's or function's inline or no_inline pragma.
+  if (proc->hasAttr(kInlineAttrName)) {
+    func.setAlwaysInline(true);
+  } else if (proc->hasAttr(kNoInlineAttrName)) {
+    func.setNoInline(true);
+  }
   // The procedure that starts a module's GPU processes, which the device's
   // runtime calls from C++ (device.cpp).
   if (proc->hasAttr(kProcessRootAttrName)) {
