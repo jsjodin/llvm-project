@@ -1,0 +1,18 @@
+process-atomics.m's tallier spawned on the machine's GPU (docs/INPROGRESS.md,
+Atomic updates of array elements): its loops run across every team of its
+module's kernel that no process uses, and their atomic updates and captures
+are the device's atomicrmw, from loops of one to a million iterations.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-atomics.m -o %t2
+RUN: %gpu-env %t2 gpu | FileCheck %S/process-atomics.m --match-full-lines --strict-whitespace
+
+Without -fopenmp the directives are comments, and the tallier runs its loops
+itself, one iteration after another.
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-atomics.m -o %t.sequential
+RUN: %gpu-env %t.sequential gpu | FileCheck %S/process-atomics.m --match-full-lines --strict-whitespace
+
+What the loops' bodies made goes with the tallier's arena when it ends.
+RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 %t2 gpu 2>&1 | FileCheck %s --check-prefix=FREED
+FREED: Merkurius runtime: 0 messages are neither read nor freed
+FREED-NEXT: Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated

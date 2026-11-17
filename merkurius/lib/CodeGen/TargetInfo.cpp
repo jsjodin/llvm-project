@@ -222,10 +222,13 @@ void TargetInfo::Record(mlir::ModuleOp module) const {
   if (options_.processKernels) {
     module->setAttr(kProcessKernels, builder.getUnitAttr());
   }
+  // The omp dialect, whose atomic operations a compile without OpenMP has
+  // too: GPU processes' kernels, whose loops' bodies may hold them, and
+  // which its translation makes atomicrmw, with no runtime call.
+  context->loadDialect<mlir::omp::OpenMPDialect>();
   // OpenMP's: the omp dialect's offload attributes, as Clang and Flang set
   // them, which its translation to LLVM IR reads.
   if (options_.openMP) {
-    context->loadDialect<mlir::omp::OpenMPDialect>();
     llvm::SmallVector<llvm::Triple> targets;
     for (const std::string &target : options_.openMPTargets) {
       targets.emplace_back(target);

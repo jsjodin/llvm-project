@@ -1,0 +1,7 @@
+omp-target-atomic.m on the machine's GPU (docs/INPROGRESS.md, Atomic updates
+of array elements): each loop's kernel updates the arrays mapped tofrom with
+the device's atomicrmw, across all of its teams' threads.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/omp-target-atomic.m -o %t.O2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t.O2 | FileCheck %S/omp-target-atomic.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

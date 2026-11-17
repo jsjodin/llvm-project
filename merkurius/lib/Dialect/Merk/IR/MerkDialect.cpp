@@ -133,6 +133,15 @@ llvm::LogicalResult ArraySetOp::verify() {
   return VerifyElement(*this, getArray(), getElement().getType(), "element");
 }
 
+llvm::LogicalResult ArrayElementRefOp::verify() {
+  mlir::Type element{
+      mlir::cast<ArrayType>(getArray().getType()).getElement()};
+  if (!element.isInteger(64) && !element.isF64()) {
+    return emitOpError("needs an array of ints or floats");
+  }
+  return mlir::success();
+}
+
 llvm::LogicalResult ArrayFillOp::verify() {
   return VerifyElement(*this, getArray(), getElement().getType(), "element");
 }

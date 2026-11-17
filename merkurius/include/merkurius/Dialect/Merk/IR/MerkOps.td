@@ -759,6 +759,23 @@ def Merk_ArraySetOp : Merk_Op<"array_set", [
   let hasVerifier = 1;
 }
 
+def Merk_ArrayElementRefOp : Merk_Op<"array_element_ref"> {
+  let summary = "the address of an array's element, for an atomic operation";
+  let description = [{
+    The address of element `index` of an array of words, of ints or floats,
+    which an OpenMP atomic operation updates in place (`%$omp atomic`,
+    docs/INPROGRESS.md, Atomic updates of array elements). It is a generic
+    pointer: on the host, the heap pointer cast out of the collector's
+    address space, used before any safepoint.
+  }];
+  let arguments = (ins Merk_ArrayType:$array, I64:$index);
+  let results = (outs AnyType:$address);
+  let assemblyFormat = [{
+    $array `[` $index `]` attr-dict `:` type($array) `->` type($address)
+  }];
+  let hasVerifier = 1;
+}
+
 def Merk_ArrayFillOp : Merk_Op<"array_fill", [
     AllTypesMatch<["array", "result"]>
   ]> {

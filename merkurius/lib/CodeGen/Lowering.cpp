@@ -421,6 +421,7 @@ private:
     return operands.empty() ? mlir::Value{} : operands.front();
   }
   void LowerArray(mlir::Operation *);
+  void LowerArrayElementRef(merk::ArrayElementRefOp);
   // The struct of the records an array operation's array holds inline, or
   // null (docs/INPROGRESS.md, Flat records, step 2).
   mlir::LLVM::LLVMStructType ArrayRecord(mlir::Operation *op) const;
@@ -4021,6 +4022,23 @@ void Lowerer::PolymorphicStore(mlir::Operation *op, mlir::Value array,
   rewriter_.setInsertionPointToStart(join);
 }
 
+// The element's address, of an array of words, as a generic pointer: the
+// host's heap pointer is cast out of the collector's address space, as no
+// safepoint comes before the atomic operation that uses it.
+void Lowerer::LowerArrayElementRef(merk::ArrayElementRefOp op) {
+  mlir::Location loc{op->getLoc()};
+  rewriter_.setInsertionPoint(op);
+  // The operands, not the accessors: the array may be lowered already.
+  mlir::Value address{ElementAddress(LoweredValue(op->getOperand(0), loc),
+      op->getOperand(1), 0, loc)};
+  auto generic{mlir::LLVM::LLVMPointerType::get(op->getContext())};
+  if (address.getType() != generic) {
+    address =
+        mlir::LLVM::AddrSpaceCastOp::create(rewriter_, loc, generic, address);
+  }
+  rewriter_.replaceOp(op, address);
+}
+
 void Lowerer::LowerArray(mlir::Operation *op) {
   mlir::Location loc{op->getLoc()};
   rewriter_.setInsertionPoint(op);
@@ -4907,7 +4925,7 @@ llvm::LogicalResult Lowerer::Lower() {
             merk::ArrayFillOp, merk::ArrayCopyOp, merk::ArrayFromListOp,
             merk::ArrayResizeOp, merk::ArrayWordsOp, merk::ContRefOp,
             merk::EnvNewOp, merk::EnvGetOp, merk::EnvSetOp, merk::HoleOp,
-            merk::RefStoreOp>(op)) {
+            merk::RefStoreOp, merk::ArrayElementRefOp>(op)) {
       ops.push_back(op);
     }
   });
@@ -4970,6 +4988,8 @@ llvm::LogicalResult Lowerer::Lower() {
           hole, Convert(hole.getType()));
     } else if (auto store{mlir::dyn_cast<merk::RefStoreOp>(op)}) {
       LowerRefStore(store);
+    } else if (auto ref{mlir::dyn_cast<merk::ArrayElementRefOp>(op)}) {
+      LowerArrayElementRef(ref);
     } else if (!mlir::isa<merk::CallOp>(op)) {
       LowerArray(op);
     } else {
