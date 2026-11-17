@@ -17,21 +17,7 @@ namespace merkurius::parser {
 
 namespace {
 
-// An enumerator's name in snake case: TabledForIo is tabled_for_io.
-std::string SnakeName(std::string_view camel) {
-  std::string snake;
-  for (char ch : camel) {
-    if (ch >= 'A' && ch <= 'Z') {
-      if (!snake.empty()) {
-        snake += '_';
-      }
-      snake += static_cast<char>(ch - 'A' + 'a');
-    } else {
-      snake += ch;
-    }
-  }
-  return snake;
-}
+using common::SnakeName;
 
 // The names of foreign code attributes as mmc writes them, and ours.
 constexpr std::pair<llvm::StringLiteral, llvm::StringLiteral> mmcNames[]{

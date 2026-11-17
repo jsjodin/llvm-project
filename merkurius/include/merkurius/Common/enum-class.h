@@ -25,8 +25,26 @@
 
 #include <array>
 #include <functional>
+#include <string>
 #include <string_view>
 namespace merkurius::common {
+
+// An enumerator's name in snake case, as a pragma or attribute writes it:
+// TabledForIo is tabled_for_io.
+inline std::string SnakeName(std::string_view camel) {
+  std::string snake;
+  for (char ch : camel) {
+    if (ch >= 'A' && ch <= 'Z') {
+      if (!snake.empty()) {
+        snake += '_';
+      }
+      snake += static_cast<char>(ch - 'A' + 'a');
+    } else {
+      snake += ch;
+    }
+  }
+  return snake;
+}
 
 constexpr std::size_t CountEnumNames(const char *p) {
   std::size_t n{0};
