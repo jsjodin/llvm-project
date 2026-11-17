@@ -40,7 +40,8 @@ typedef struct hsa_amd_memory_pool_s {
 typedef enum hsa_amd_memory_pool_global_flag_s {
   HSA_AMD_MEMORY_POOL_GLOBAL_FLAG_KERNARG_INIT = 1,
   HSA_AMD_MEMORY_POOL_GLOBAL_FLAG_FINE_GRAINED = 2,
-  HSA_AMD_MEMORY_POOL_GLOBAL_FLAG_COARSE_GRAINED = 4
+  HSA_AMD_MEMORY_POOL_GLOBAL_FLAG_COARSE_GRAINED = 4,
+  HSA_AMD_MEMORY_POOL_GLOBAL_FLAG_EXTENDED_SCOPE_FINE_GRAINED = 8
 } hsa_amd_memory_pool_global_flag_t;
 
 typedef enum {
