@@ -40,8 +40,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* An exception nothing catches, until exceptions can be caught: the
+   runtime's report, which a GPU's runtime has under its own name. */
+#ifdef __AMDGPU__
+void merk_device_uncaught_exception(const char *exception)
+    __attribute__((noreturn));
+#define merk_uncaught_exception merk_device_uncaught_exception
+#else
 void merk_uncaught_exception(const char *exception)
     __attribute__((noreturn));
+#endif
 void merk_not_implemented(const char *what) __attribute__((noreturn));
 ").
 
