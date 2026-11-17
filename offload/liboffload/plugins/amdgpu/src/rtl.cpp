@@ -493,6 +493,16 @@ struct AMDGPUMemoryPoolTy {
     return (GlobalFlags & HSA_AMD_MEMORY_POOL_GLOBAL_FLAG_FINE_GRAINED);
   }
 
+  /// Indicate if it is extended-scope fine-grained memory, whose updates
+  /// act as system-scope atomics: what ROCr gives a discrete GPU's
+  /// fine-grained device memory, without the fine-grained flag. Valid only
+  /// for global.
+  bool isExtendedScopeFineGrained() const {
+    assert(isGlobal() && "Not global memory");
+    return (GlobalFlags &
+            HSA_AMD_MEMORY_POOL_GLOBAL_FLAG_EXTENDED_SCOPE_FINE_GRAINED);
+  }
+
   /// Indicate if it is coarse-grained memory. Valid only for global.
   bool isCoarseGrained() const {
     assert(isGlobal() && "Not global memory");
@@ -2623,11 +2633,25 @@ struct AMDGenericDeviceTy {
         FineGrainedMemoryPools.push_back(MemoryPool);
         if (MemoryPool->supportsKernelArgs())
           ArgsMemoryPools.push_back(MemoryPool);
+      } else if (MemoryPool->isExtendedScopeFineGrained()) {
+        ExtendedFineGrainedMemoryPools.push_back(MemoryPool);
       } else if (MemoryPool->isCoarseGrained()) {
         CoarseGrainedMemoryPools.push_back(MemoryPool);
       }
     }
     return Plugin::success();
+  }
+
+  /// The agent's own fine-grained pool for device memory that other agents'
+  /// writes reach without a cache flush: a fine-grained one, or else an
+  /// extended-scope one, which is what ROCr gives a discrete GPU. Null if
+  /// it has neither.
+  AMDGPUMemoryPoolTy *getDeviceFineGrainedMemoryPool() const {
+    if (!FineGrainedMemoryPools.empty())
+      return FineGrainedMemoryPools[0];
+    if (!ExtendedFineGrainedMemoryPools.empty())
+      return ExtendedFineGrainedMemoryPools[0];
+    return nullptr;
   }
 
   /// Destroy all memory pools.
@@ -2637,6 +2661,7 @@ struct AMDGenericDeviceTy {
 
     AllMemoryPools.clear();
     FineGrainedMemoryPools.clear();
+    ExtendedFineGrainedMemoryPools.clear();
     CoarseGrainedMemoryPools.clear();
     ArgsMemoryPools.clear();
 
@@ -2655,6 +2680,10 @@ protected:
 
   /// Array of fine-grained memory pools available to the host agents.
   llvm::SmallVector<AMDGPUMemoryPoolTy *> FineGrainedMemoryPools;
+
+  /// Array of extended-scope fine-grained memory pools without the
+  /// fine-grained flag (isExtendedScopeFineGrained).
+  llvm::SmallVector<AMDGPUMemoryPoolTy *> ExtendedFineGrainedMemoryPools;
 
   /// Array of coarse-grained memory pools available to the host agents.
   llvm::SmallVector<AMDGPUMemoryPoolTy *> CoarseGrainedMemoryPools;
@@ -3270,8 +3299,8 @@ struct AMDGPUDeviceTy : public GenericDeviceTy, AMDGenericDeviceTy {
     if (CoarseGrainedMemoryPools.empty() ||
         !CoarseGrainedMemoryPools[0]->canAccess(PeerAgent))
       return false;
-    return FineGrainedMemoryPools.empty() ||
-           FineGrainedMemoryPools[0]->canAccess(PeerAgent);
+    AMDGPUMemoryPoolTy *Fine = getDeviceFineGrainedMemoryPool();
+    return !Fine || Fine->canAccess(PeerAgent);
   }
 
   Expected<SmallVector<uint32_t>> getComputeUnitMask() override {
@@ -3431,8 +3460,7 @@ struct AMDGPUDeviceTy : public GenericDeviceTy, AMDGenericDeviceTy {
       MemoryPool = &HostDevice.getFineGrainedMemoryPool();
       break;
     case OL_ALLOC_TYPE_DEVICE_FINE_GRAINED:
-      if (!FineGrainedMemoryPools.empty())
-        MemoryPool = FineGrainedMemoryPools[0];
+      MemoryPool = getDeviceFineGrainedMemoryPool();
       break;
     default:
       llvm_unreachable("unexpected allocation type");
@@ -4126,6 +4154,8 @@ struct AMDGPUDeviceTy : public GenericDeviceTy, AMDGenericDeviceTy {
       if (Pool->isGlobal()) {
         if (Pool->isFineGrained())
           TmpStr2 += "Fine Grained ";
+        if (Pool->isExtendedScopeFineGrained())
+          TmpStr2 += "Extended Scope Fine Grained ";
         if (Pool->isCoarseGrained())
           TmpStr2 += "Coarse Grained ";
         if (Pool->supportsKernelArgs())
@@ -5463,8 +5493,7 @@ Expected<void *> AMDGPUDeviceTy::allocate(size_t Size, ol_alloc_type_t Kind,
     break;
   case OL_ALLOC_TYPE_DEVICE_FINE_GRAINED:
     // The device's own fine-grained pool, if it has one.
-    if (!FineGrainedMemoryPools.empty())
-      MemoryPool = FineGrainedMemoryPools[0];
+    MemoryPool = getDeviceFineGrainedMemoryPool();
     break;
   default:
     llvm_unreachable("unexpected allocation type");
