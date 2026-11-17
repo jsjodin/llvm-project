@@ -650,6 +650,10 @@ void GpuCodeChecker::CheckProcessLoops() {
       std::string name{parser::EnumToString(id)};
       bool distribute{id == llvm::omp::OMPD_distribute_parallel_do ||
           id == llvm::omp::OMPD_distribute};
+      // An atomic update is the same wherever it runs.
+      if (id == llvm::omp::OMPD_atomic) {
+        continue;
+      }
       if (!distribute && id != llvm::omp::OMPD_parallel_do) {
         if (!inRegion && (process || team || thread) &&
             reported_.insert(where.begin()).second) {

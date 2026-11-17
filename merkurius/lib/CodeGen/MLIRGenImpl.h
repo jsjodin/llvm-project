@@ -578,6 +578,9 @@ private:
   // omp.loop_nest, with omp.target, omp.teams and omp.distribute for the
   // latter, whose body calls the loop's body procedure.
   void OmpLoop(const Body &, const ProcedureBody &);
+  // The atomic directive on an update of an array's element
+  // (MLIRGenAtomic.cpp).
+  void OmpAtomic(const Body &, const ProcedureBody &);
   // The leaves of a loop's directive around its omp.loop_nest, in the current
   // block, which is in the target region if it is offloaded.
   void GenerateParallelLoop(const ParallelLoop &, const ProcedureBody &,

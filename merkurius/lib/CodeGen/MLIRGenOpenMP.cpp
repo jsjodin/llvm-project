@@ -1561,6 +1561,12 @@ bool MerkGenerator::LeafClauses(const omp::Leaf &leaf, parser::CharBlock at,
 void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
   const parser::OmpDirective &directive{*goal.directive};
   parser::CharBlock at{Where(goal.tokens)};
+  // An atomic update is atomic wherever it runs, as OpenMP's orphaned
+  // atomic is, in GPU processes' kernels too.
+  if (directive.id == llvm::omp::Directive::OMPD_atomic) {
+    OmpAtomic(goal, body);
+    return;
+  }
   // GPU processes' kernels are compiled without OpenMP: of the directives,
   // they run only the loops across their teams (-fprocess-loops), and the
   // parallel do loops in the bodies of distribute loops, across a team's
