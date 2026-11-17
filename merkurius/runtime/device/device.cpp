@@ -1100,6 +1100,26 @@ struct TeamTable {
 
 } // namespace
 
+// An uncaught exception in device code, which code generation calls where
+// the host's code calls merk_uncaught_exception (exception.cpp): the host
+// prints it, as that does, and ends the program. Code
+// generation calls these rather than trap, as FailWith ends rather than
+// trap: a call of llvm.trap would make every function above it in the call
+// graph, up to a GPU process kernel, not norecurse, and so give the kernel
+// a dynamic stack.
+extern "C" [[noreturn]] void merk_device_uncaught_exception(
+    const char *exception) {
+  Fail(0, exception);
+}
+
+// The library's index_out_of_bounds exception, as merk_index_out_of_bounds
+// (array.cpp).
+extern "C" [[noreturn]] void merk_device_index_out_of_bounds(
+    const char *what, int64_t index, int64_t max) {
+  FailWith(0, "index_out_of_bounds(\"%s: index %d not in range [0, %d]\")",
+      what, index, max);
+}
+
 // At the start of each team of a target teams region, after
 // merk_device_region_enter: finds the region's table in its slot, or makes
 // it, and makes it the team's. Its id is the one the host chose, which its

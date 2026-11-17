@@ -97,7 +97,7 @@ done:
 
 ; Copies `words` words from `from` to `to` by every lane of the caller's
 ; wave. The caller must be the wave's only active lane.
-define hidden void @merk_device_wave_copy(ptr %to, ptr %from, i64 %words) {
+define hidden void @merk_device_wave_copy(ptr %to, ptr %from, i64 %words) #1 {
   %lanes32 = call i32 @llvm.amdgcn.wavefrontsize()
   %lanes = zext i32 %lanes32 to i64
   call void (ptr, ...) @llvm.amdgcn.call.whole.wave.isVoid.p0(ptr @wave_copy,
@@ -107,7 +107,7 @@ define hidden void @merk_device_wave_copy(ptr %to, ptr %from, i64 %words) {
 
 ; Stores `word` in `words` words from `to` by every lane of the caller's
 ; wave. The caller must be the wave's only active lane.
-define hidden void @merk_device_wave_fill(ptr %to, i64 %word, i64 %words) {
+define hidden void @merk_device_wave_fill(ptr %to, i64 %word, i64 %words) #1 {
   %lanes32 = call i32 @llvm.amdgcn.wavefrontsize()
   %lanes = zext i32 %lanes32 to i64
   call void (ptr, ...) @llvm.amdgcn.call.whole.wave.isVoid.p0(ptr @wave_fill,
@@ -122,4 +122,12 @@ declare void @llvm.amdgcn.call.whole.wave.isVoid.p0(ptr, ...)
 
 ; No AGPRs: a whole-wave function keeps the inactive lanes of the VGPRs it
 ; uses, not of AGPRs, which at -O0 held a spilled VGPR on gfx90a.
-attributes #0 = { "amdgpu-agpr-alloc"="0" }
+;
+; Norecurse, said here since the whole-wave call intrinsic is not
+; nocallback, so LLVM cannot find it: a function that calls one not
+; norecurse is not norecurse either, and a GPU process kernel above it gets
+; a dynamic stack (AMDGPUResourceUsageAnalysis), whose scratch can keep some
+; of its teams from starting. The entries are not inlined, so that no
+; caller holds the intrinsic's call.
+attributes #0 = { norecurse "amdgpu-agpr-alloc"="0" }
+attributes #1 = { noinline norecurse }
