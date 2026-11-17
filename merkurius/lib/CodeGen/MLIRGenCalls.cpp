@@ -75,6 +75,7 @@ merk::ProcOp MerkGenerator::ProcFor(const Procedure &procedure,
       types, *merkDeterminism, HiddenOutputs(procedure))};
   if (proc) {
     procs_[&procedure] = proc;
+    MarkInlining(proc, procedure);
   }
   return proc;
 }
@@ -483,6 +484,7 @@ merk::ProcOp MerkGenerator::WordProcFor(const ProcedureBody &body) {
           llvm::SmallVector<mlir::Type>(outputs, merk::WordType::get(&context_))),
       *merkDeterminism)};
   proc.setPrivate();
+  MarkInlining(proc, procedure);
   wordProcs_[&procedure] = proc;
   pendingCopies_.push_back(&body);
   return proc;

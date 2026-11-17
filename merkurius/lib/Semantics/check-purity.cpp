@@ -462,8 +462,10 @@ void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
   }
   // The promises of the pragmas, by predicate or function. Every pragma
   // that names a predicate or function, a promise or not, names one of
-  // this module's, declared or with its type inferred.
+  // this module's, declared or with its type inferred, and none is both
+  // inline and no_inline.
   llvm::DenseMap<const Symbol *, Purity> promised;
+  llvm::DenseMap<const Symbol *, parser::PredPragmaKind> inlining;
   for (const parser::Item &item : tree.items) {
     const auto *pragma{std::get_if<const parser::PredPragma *>(&item)};
     if (!pragma) {
@@ -477,29 +479,29 @@ void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
     const parser::PredNameArity &pred{*(*pragma)->pred};
     llvm::StringRef name{pred.nameArity->name->name};
     unsigned arity{pred.nameArity->arity};
-    bool found{false};
     std::string arities;
-    for (const Symbol *symbol : own.Lookup(name)) {
-      if (symbol->kind != SymbolKind::Predicate &&
-          symbol->kind != SymbolKind::Function) {
-        continue;
-      }
-      parser::PredOrFunc kind{symbol->kind == SymbolKind::Function
-              ? parser::PredOrFunc::Function
-              : parser::PredOrFunc::Predicate};
-      if (pred.kind && *pred.kind != kind) {
-        continue;
-      }
-      if (symbol->arity != arity) {
-        arities += (arities.empty() ? "" : ", ") + std::to_string(symbol->arity);
-        continue;
-      }
+    llvm::SmallVector<const Symbol *, 1> targets{
+        PragmaTargets(own, pred, &arities)};
+    for (const Symbol *symbol : targets) {
       if (promises) {
         promised[symbol] = promise;
       }
-      found = true;
+      parser::PredPragmaKind kind{(*pragma)->kind};
+      if (kind != parser::PredPragmaKind::Inline &&
+          kind != parser::PredPragmaKind::NoInline) {
+        continue;
+      }
+      auto [at, added]{inlining.try_emplace(symbol, kind)};
+      if (!added && at->second != kind) {
+        // mmc: "`:- pragma no_inline' declaration conflicts with previous
+        // inline pragma for `p'/2".
+        messages_.Say(Source((*pragma)->tokens),
+            "`:- pragma %s' for %s conflicts with the earlier %s pragma"_err_en_US,
+            common::SnakeName(parser::EnumToString(kind)), Text(*symbol),
+            common::SnakeName(parser::EnumToString(at->second)));
+      }
     }
-    if (!found) {
+    if (targets.empty()) {
       // mmc: "`:- pragma promise_pure' declaration for `f2'/2 without
       // corresponding `:- pred' or `:- func' declaration".
       messages_.Say(Source((*pragma)->tokens),

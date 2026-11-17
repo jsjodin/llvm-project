@@ -46,6 +46,12 @@ inline constexpr llvm::StringLiteral kForeignCodeAttrName{"merk.foreign_code"};
 // processes): what it reaches is what the image keeps of the module.
 inline constexpr llvm::StringLiteral kProcessRootAttrName{"merk.process_root"};
 
+// The attributes of a procedure whose predicate or function has an inline
+// or a no_inline pragma, which lowering makes the LLVM function's
+// alwaysinline or noinline: merkc has no inliner of its own.
+inline constexpr llvm::StringLiteral kInlineAttrName{"merk.inline"};
+inline constexpr llvm::StringLiteral kNoInlineAttrName{"merk.no_inline"};
+
 // What code generation is asked for besides the module.
 struct GenerationOptions {
   // -fstub-unimplemented: see GenerateMerk.
