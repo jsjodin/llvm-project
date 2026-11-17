@@ -704,6 +704,10 @@ private:
   // loops reach, whose parallel do loops run across a team's threads.
   llvm::DenseSet<const ProcedureBody *> teamBodies_;
   void CollectTeamBodies();
+  // The module's inline and no_inline pragmas (inlining_), and the mark of
+  // a procedure of a predicate or function that has one.
+  void CollectInlining();
+  void MarkInlining(merk::ProcOp, const Procedure &);
   void CalledBodies(const Body &goal,
       llvm::SmallVectorImpl<const ProcedureBody *> &called,
       llvm::SmallVectorImpl<const Body *> *distributes);
@@ -815,6 +819,7 @@ private:
       polymorphism_;
   mlir::ModuleOp module_;
   llvm::DenseMap<const Procedure *, merk::ProcOp> procs_;
+  llvm::DenseMap<const semantics::Symbol *, parser::PredPragmaKind> inlining_;
   // The types of the module's merk.type_defs, by name, null for one that
   // cannot be represented; and their unify procedures.
   llvm::StringMap<const semantics::Type *> terms_;

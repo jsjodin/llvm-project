@@ -71,4 +71,31 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Symbol &symbol) {
   return os << '/' << symbol.arity;
 }
 
+llvm::SmallVector<const Symbol *, 1> PragmaTargets(const ModuleSymbols &own,
+    const parser::PredNameArity &pred, std::string *arities) {
+  llvm::SmallVector<const Symbol *, 1> targets;
+  unsigned arity{pred.nameArity->arity};
+  for (const Symbol *symbol : own.Lookup(pred.nameArity->name->name)) {
+    if (symbol->kind != SymbolKind::Predicate &&
+        symbol->kind != SymbolKind::Function) {
+      continue;
+    }
+    parser::PredOrFunc kind{symbol->kind == SymbolKind::Function
+            ? parser::PredOrFunc::Function
+            : parser::PredOrFunc::Predicate};
+    if (pred.kind && *pred.kind != kind) {
+      continue;
+    }
+    if (symbol->arity != arity) {
+      if (arities) {
+        *arities +=
+            (arities->empty() ? "" : ", ") + std::to_string(symbol->arity);
+      }
+      continue;
+    }
+    targets.push_back(symbol);
+  }
+  return targets;
+}
+
 } // namespace merkurius::semantics

@@ -1552,6 +1552,32 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
   merk::SucceedOp::create(builder_, Location(at), results);
 }
 
+void MerkGenerator::CollectInlining() {
+  for (const parser::Item &item : tree_.items) {
+    const auto *pragma{std::get_if<const parser::PredPragma *>(&item)};
+    if (!pragma ||
+        ((*pragma)->kind != parser::PredPragmaKind::Inline &&
+            (*pragma)->kind != parser::PredPragmaKind::NoInline)) {
+      continue;
+    }
+    for (const semantics::Symbol *symbol :
+        semantics::PragmaTargets(resolution_.module(), *(*pragma)->pred)) {
+      inlining_.try_emplace(symbol, (*pragma)->kind);
+    }
+  }
+}
+
+void MerkGenerator::MarkInlining(merk::ProcOp proc, const Procedure &procedure) {
+  auto found{inlining_.find(procedure.symbol)};
+  if (found == inlining_.end()) {
+    return;
+  }
+  proc->setAttr(found->second == parser::PredPragmaKind::Inline
+          ? kInlineAttrName
+          : kNoInlineAttrName,
+      builder_.getUnitAttr());
+}
+
 mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
   context_.loadDialect<merk::MerkDialect, mlir::arith::ArithDialect>();
   mlir::OwningOpRef<mlir::ModuleOp> owned{
@@ -1560,6 +1586,7 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
   target_.Record(module_);
   CollectGpuKinds();
   CollectTeamBodies();
+  CollectInlining();
   bool interface{false};
   for (const parser::Item &item : tree_.items) {
     if (const auto *section{std::get_if<const parser::SectionDecl *>(&item)}) {

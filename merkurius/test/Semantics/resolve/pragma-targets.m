@@ -3,7 +3,8 @@
 % (reference manual, "Pragmas"): a name the module does not have, or an
 % arity or kind it does not have, is an error. Before 2026-11-17 only the
 % purity promises were checked, and no_inline of an arity that did not
-% exist was accepted silently.
+% exist was accepted silently. A predicate or function is not both inline
+% and no_inline.
 %
 % RUN: not merkc -fc1 -fdebug-dump-types %s 2>&1 >/dev/null | FileCheck --implicit-check-not=error: --implicit-check-not=warning: %s
 % RUN: %if mmc %{ %compare-types --error-lines %s %}
@@ -29,6 +30,8 @@ inferred(X, X).
 :- pragma inline(p/2).
 :- pragma inline(inferred/2).
 :- pragma no_inline(f/1).
+:- pragma no_inline(p/2).
+% CHECK: [[@LINE-1]]:4: error: `:- pragma no_inline' for pred pragma_targets.p/2 conflicts with the earlier inline pragma
 :- pragma inline(p/3).
 % CHECK: [[@LINE-1]]:4: error: `:- pragma inline' names p/3, which this module does not declare; its arity is 2
 :- pragma no_inline(p/3).

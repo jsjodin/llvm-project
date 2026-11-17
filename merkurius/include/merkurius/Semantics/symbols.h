@@ -94,5 +94,11 @@ private:
   llvm::StringMap<std::vector<const Symbol *>> byName_;
 };
 
+// The predicates and functions of the module that a pragma such as
+// no_inline(p/2) names, by name, arity and, if it says, kind; and in
+// `arities` those of the name and kind whose arity differs, for an error.
+llvm::SmallVector<const Symbol *, 1> PragmaTargets(const ModuleSymbols &,
+    const parser::PredNameArity &, std::string *arities = nullptr);
+
 } // namespace merkurius::semantics
 #endif // MERKURIUS_SEMANTICS_SYMBOLS_H_
