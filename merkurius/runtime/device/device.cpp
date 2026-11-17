@@ -1689,6 +1689,11 @@ void Distribute(uint64_t loop, int64_t first, int64_t step, int64_t count,
 constexpr uint64_t kBulkLoop{~uint64_t{0}};
 constexpr uint64_t kBulkFill{0};
 constexpr uint64_t kBulkCopy{1};
+// A fill with a record of whole words, values[3] of them at values[2]: an
+// array of records' init or resize (array.cpp, FillBytes), which the lane
+// did record by record, at some tens of MB/s: array.init of 163,840
+// particles of 15 words took 94% of a Monte Carlo transport pass's time.
+constexpr uint64_t kBulkFillRecord{2};
 
 // A worker thread's share of the process's fill or copy: words `stride`
 // apart from `start`, in rounds of the team's threads' consecutive words,
@@ -1704,6 +1709,19 @@ void BulkShare(
     return;
   }
   const auto *from{reinterpret_cast<const uint64_t *>(values[2])};
+  if (values[0] == kBulkFillRecord) {
+    // Word i is the record's word i % words, kept as a remainder that
+    // each step advances, rather than divided for each word.
+    auto words{static_cast<int64_t>(values[3])};
+    int64_t at{start % words};
+    int64_t step{stride % words};
+    for (int64_t i{start}; i < count; i += stride) {
+      to[i] = from[at];
+      at += step;
+      at -= at >= words ? words : 0;
+    }
+    return;
+  }
   for (int64_t i{start}; i < count; i += stride) {
     to[i] = from[i];
   }
@@ -1723,7 +1741,8 @@ ProcessControl *BulkControl(uint64_t words) {
   return processWaves[inTeam] ? placeControls[inTeam] : nullptr;
 }
 
-bool Bulk(uint64_t what, uint64_t *to, uint64_t fromOrWord, uint64_t words) {
+bool Bulk(uint64_t what, uint64_t *to, uint64_t fromOrWord, uint64_t words,
+    uint64_t recordWords = 0) {
   ProcessControl *control{BulkControl(words)};
   if (!control) {
     return false;
@@ -1735,6 +1754,7 @@ bool Bulk(uint64_t what, uint64_t *to, uint64_t fromOrWord, uint64_t words) {
   control->values[0] = what;
   control->values[1] = reinterpret_cast<uint64_t>(to);
   control->values[2] = fromOrWord;
+  control->values[3] = recordWords;
   ProcessArrive(control);
   ProcessArrive(control);
   // A copy may be into host memory, a message's for the host: the workers'
@@ -1851,6 +1871,16 @@ extern "C" bool merk_device_bulk_fill(
   }
   merk_device_wave_fill(to, word, words);
   return true;
+}
+
+// Fills `words` words with copies of a record of `recordWords` words, by
+// the process's worker teams if it has them and the words are many (Bulk):
+// true, or false for the caller's own loop.
+extern "C" bool merk_device_bulk_fill_record(uint64_t *to,
+    const uint64_t *record, uint64_t recordWords, uint64_t words) {
+  return recordWords != 0 &&
+      Bulk(kBulkFillRecord, to, reinterpret_cast<uint64_t>(record), words,
+          recordWords);
 }
 
 extern "C" bool merk_device_bulk_copy(

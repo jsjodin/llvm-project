@@ -30,6 +30,8 @@ extern "C" bool merk_device_bulk_fill(
     uint64_t *to, uint64_t word, uint64_t words);
 extern "C" bool merk_device_bulk_copy(
     uint64_t *to, const uint64_t *from, uint64_t words);
+extern "C" bool merk_device_bulk_fill_record(uint64_t *to,
+    const uint64_t *record, uint64_t recordWords, uint64_t words);
 #else
 #include "heap.h"
 #include <cinttypes>
@@ -204,10 +206,27 @@ void Fill(Word *array, int64_t lo, int64_t hi, Word element) {
 }
 
 // Sets elements `lo` to `hi`, inclusive, of an array of records, to the
-// element's bytes, which may be element `lo - 1`'s.
+// element's bytes, which may be element `lo - 1`'s. A GPU process with
+// worker teams has them fill many records of whole words (Bulk), from the
+// copy in element `lo`, since the element may be on the process's stack,
+// which another wave cannot read.
 void FillBytes(Word *array, int64_t lo, int64_t hi, const void *element) {
   Word bytes{array[1]};
   unsigned char *elements{ArrayElements(array)};
+#ifdef __AMDGPU__
+  if (lo < hi && bytes % sizeof(Word) == 0) {
+    unsigned char *first{elements + bytes * static_cast<Word>(lo)};
+    __builtin_memcpy(first, element, bytes);
+    if (merk_device_bulk_fill_record(
+            reinterpret_cast<Word *>(first + bytes),
+            reinterpret_cast<const Word *>(first), bytes / sizeof(Word),
+            bytes / sizeof(Word) * static_cast<Word>(hi - lo))) {
+      return;
+    }
+    ++lo;
+    element = first;
+  }
+#endif
   for (int64_t i = lo; i <= hi; ++i) {
     __builtin_memcpy(elements + bytes * static_cast<Word>(i), element, bytes);
   }
