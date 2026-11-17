@@ -239,7 +239,10 @@ private:
       return it == layouts_.end() ? mlir::Type{HeapPointer()} : it->second.type;
     }
     if (auto record{mlir::dyn_cast<merk::RecordType>(type)}) {
-      return records_.find(record.getName())->second;
+      if (auto it{records_.find(record.getName())}; it != records_.end()) {
+        return it->second;
+      }
+      return unions_.find(record.getName())->second.type;
     }
     return type;
   }
@@ -274,18 +277,31 @@ private:
   mlir::LLVM::LLVMStructType RecordStruct(
       llvm::StringRef name, const llvm::StringSet<> &chosen);
   merk::FunctorAttr RecordFunctor(llvm::StringRef name) const;
-  void BoxOperands(mlir::Operation *, bool atDefinition = false);
+  void BoxOperands(
+      mlir::Operation *, bool atDefinition = false, bool unionsOnly = false);
   void LowerRecordOp(mlir::Operation *, merk::RecordType);
+  // Flat unions (docs/INPROGRESS.md, Flat records, flat unions): their
+  // structs, boxing and unboxing them, and their operations.
+  void UnionStruct(llvm::StringRef name);
+  bool IsUnion(mlir::Type type) const {
+    auto record{mlir::dyn_cast<merk::RecordType>(type)};
+    return record && unions_.contains(record.getName());
+  }
+  mlir::Value BoxUnion(mlir::Value value, mlir::Location);
+  mlir::Value UnboxUnion(mlir::Value term, mlir::Location);
+  void LowerUnionOp(mlir::Operation *, merk::RecordType);
   mlir::Value ToFieldStorage(
       mlir::Value value, mlir::Type storage, mlir::Location loc);
   llvm::SmallVector<mlir::Type> RecordsOf(mlir::TypeRange) const;
-  void UnboxResults(mlir::Operation *);
+  void UnboxResults(mlir::Operation *, bool unionsOnly = false);
   // Makes every value of a record's term a merk.record, boxing it into its
   // cell where a word or a cell is wanted, and unboxing it back.
   llvm::LogicalResult MakeRecords();
   mlir::Type RecordOf(mlir::Type type) const {
     auto term{mlir::dyn_cast<merk::TermType>(type)};
-    if (!term || !records_.contains(term.getName())) {
+    if (!term ||
+        !(records_.contains(term.getName()) ||
+            unions_.contains(term.getName()))) {
       return type;
     }
     return merk::RecordType::get(type.getContext(), term.getName());
@@ -565,6 +581,13 @@ private:
   // before Layouts erases them.
   std::optional<RecordRule> recordRule_;
   llvm::StringMap<mlir::LLVM::LLVMStructType> records_;
+  // A flat union's struct: its constructor's number, then each
+  // constructor's fields in turn, from `first[i]` for constructor i.
+  struct UnionLayout {
+    mlir::LLVM::LLVMStructType type;
+    llvm::SmallVector<unsigned> first;
+  };
+  llvm::StringMap<UnionLayout> unions_;
   // A record's layout as a switch on it sees it, which has one case.
   llvm::StringMap<TermLayout> recordLayouts_;
   llvm::DenseMap<mlir::Operation *, const TermLayout *> termSwitches_;
@@ -732,6 +755,30 @@ void Lowerer::ChooseRecords() {
   for (auto &entry : chosen) {
     RecordStruct(entry.getKey(), chosen);
   }
+  for (auto &entry : layouts_) {
+    if (recordRule_->IsUnion(entry.getKey())) {
+      UnionStruct(entry.getKey());
+    }
+  }
+}
+
+// A union's fields are as a record holds them, a record's struct inline;
+// no union is a field (Records.h).
+void Lowerer::UnionStruct(llvm::StringRef name) {
+  UnionLayout &layout{unions_[name]};
+  llvm::SmallVector<mlir::Type> slots{rewriter_.getI64Type()};
+  for (const TermLayout::Functor &functor :
+      layouts_.find(name)->second.functors) {
+    layout.first.push_back(slots.size());
+    for (mlir::Type field : functor.fields) {
+      auto term{mlir::dyn_cast<merk::TermType>(field)};
+      auto record{term ? records_.find(term.getName()) : records_.end()};
+      slots.push_back(record != records_.end() ? mlir::Type{record->second}
+                                               : FieldStorage(field));
+    }
+  }
+  layout.type =
+      mlir::LLVM::LLVMStructType::getLiteral(module_.getContext(), slots);
 }
 
 // A flat field's type in a record's struct, as C holds it: an enumeration
@@ -786,6 +833,9 @@ merk::FunctorAttr Lowerer::RecordFunctor(llvm::StringRef name) const {
 // The record's cell, with its nested records' cells in it, each made by
 // merk.construct, so that safepoints see them.
 mlir::Value Lowerer::Box(mlir::Value record, mlir::Location loc) {
+  if (IsUnion(record.getType())) {
+    return BoxUnion(record, loc);
+  }
   llvm::StringRef name{
       mlir::cast<merk::RecordType>(record.getType()).getName()};
   merk::FunctorAttr functor{RecordFunctor(name)};
@@ -802,6 +852,9 @@ mlir::Value Lowerer::Box(mlir::Value record, mlir::Location loc) {
 
 mlir::Value Lowerer::Unbox(mlir::Value term, mlir::Location loc) {
   llvm::StringRef name{mlir::cast<merk::TermType>(term.getType()).getName()};
+  if (unions_.contains(name)) {
+    return UnboxUnion(term, loc);
+  }
   merk::FunctorAttr functor{RecordFunctor(name)};
   const TermLayout::Functor &layout{
       layouts_.find(name)->second.functors.front()};
@@ -817,13 +870,87 @@ mlir::Value Lowerer::Unbox(mlir::Value term, mlir::Location loc) {
       merk::RecordType::get(module_.getContext(), name), functor, fields);
 }
 
+// A union's cell, by a switch on its value with a case for each
+// constructor, each of which constructs the cell, a record field's cell in
+// it, so that safepoints see them.
+mlir::Value Lowerer::BoxUnion(mlir::Value value, mlir::Location loc) {
+  mlir::MLIRContext *context{module_.getContext()};
+  llvm::StringRef name{mlir::cast<merk::RecordType>(value.getType()).getName()};
+  const TermLayout &layout{layouts_.find(name)->second};
+  auto term{merk::TermType::get(context, name)};
+  llvm::SmallVector<merk::FunctorAttr> functors;
+  llvm::SmallVector<mlir::Attribute> cases;
+  for (const TermLayout::Functor &functor : layout.functors) {
+    functors.push_back(
+        merk::FunctorAttr::get(context, functor.name, functor.arity));
+    cases.push_back(rewriter_.getArrayAttr({functors.back()}));
+  }
+  auto switchOp{merk::SwitchOp::create(rewriter_, loc, mlir::TypeRange{term},
+      value, rewriter_.getArrayAttr(cases), /*canFail=*/false)};
+  mlir::OpBuilder::InsertionGuard guard{rewriter_};
+  for (auto [i, functor] : llvm::enumerate(layout.functors)) {
+    rewriter_.createBlock(&switchOp.getCaseRegions()[i]);
+    llvm::SmallVector<mlir::Value> fields;
+    if (functor.arity != 0) {
+      auto parts{merk::DeconstructOp::create(
+          rewriter_, loc, RecordsOf(functor.fields), value, functors[i])};
+      for (mlir::Value field : parts.getFields()) {
+        fields.push_back(mlir::isa<merk::RecordType>(field.getType())
+                ? Box(field, loc)
+                : field);
+      }
+    }
+    mlir::Value cell{
+        merk::ConstructOp::create(rewriter_, loc, term, functors[i], fields)};
+    merk::YieldOp::create(rewriter_, loc, mlir::ValueRange{cell});
+  }
+  return switchOp.getResult(0);
+}
+
+// A union's value, by a switch on its cell.
+mlir::Value Lowerer::UnboxUnion(mlir::Value term, mlir::Location loc) {
+  mlir::MLIRContext *context{module_.getContext()};
+  llvm::StringRef name{mlir::cast<merk::TermType>(term.getType()).getName()};
+  const TermLayout &layout{layouts_.find(name)->second};
+  auto record{merk::RecordType::get(context, name)};
+  llvm::SmallVector<merk::FunctorAttr> functors;
+  llvm::SmallVector<mlir::Attribute> cases;
+  for (const TermLayout::Functor &functor : layout.functors) {
+    functors.push_back(
+        merk::FunctorAttr::get(context, functor.name, functor.arity));
+    cases.push_back(rewriter_.getArrayAttr({functors.back()}));
+  }
+  auto switchOp{merk::SwitchOp::create(rewriter_, loc, mlir::TypeRange{record},
+      term, rewriter_.getArrayAttr(cases), /*canFail=*/false)};
+  mlir::OpBuilder::InsertionGuard guard{rewriter_};
+  for (auto [i, functor] : llvm::enumerate(layout.functors)) {
+    rewriter_.createBlock(&switchOp.getCaseRegions()[i]);
+    llvm::SmallVector<mlir::Value> fields;
+    if (functor.arity != 0) {
+      auto parts{merk::DeconstructOp::create(
+          rewriter_, loc, mlir::TypeRange{functor.fields}, term, functors[i])};
+      for (mlir::Value field : parts.getFields()) {
+        fields.push_back(RecordOf(field.getType()) != field.getType()
+                ? Unbox(field, loc)
+                : field);
+      }
+    }
+    mlir::Value value{
+        merk::ConstructOp::create(rewriter_, loc, record, functors[i], fields)};
+    merk::YieldOp::create(rewriter_, loc, mlir::ValueRange{value});
+  }
+  return switchOp.getResult(0);
+}
+
 // The operation's operands that are records, boxed before it, or where
 // each is defined: a cast to a pointer for a target region's map takes the
 // cell out of what liveness follows, so no allocation may come between it
 // and the region, as none does between MLIRGen's casts and the region.
-void Lowerer::BoxOperands(mlir::Operation *op, bool atDefinition) {
+void Lowerer::BoxOperands(
+    mlir::Operation *op, bool atDefinition, bool unionsOnly) {
   for (mlir::OpOperand &operand : op->getOpOperands()) {
-    if (mlir::isa<merk::RecordType>(operand.get().getType())) {
+    if (unionsOnly ? IsUnion(operand.get().getType())
+                   : mlir::isa<merk::RecordType>(operand.get().getType())) {
       if (atDefinition) {
         rewriter_.setInsertionPointAfterValue(operand.get());
       } else {
@@ -835,11 +962,11 @@ void Lowerer::BoxOperands(mlir::Operation *op, bool atDefinition) {
 }
 
 // The operation's results that are records, given as cells and unboxed.
-void Lowerer::UnboxResults(mlir::Operation *op) {
+void Lowerer::UnboxResults(mlir::Operation *op, bool unionsOnly) {
   rewriter_.setInsertionPointAfter(op);
   for (mlir::OpResult result : op->getResults()) {
     auto record{mlir::dyn_cast<merk::RecordType>(result.getType())};
-    if (!record) {
+    if (!record || (unionsOnly && !IsUnion(record))) {
       continue;
     }
     result.setType(merk::TermType::get(module_.getContext(), record.getName()));
@@ -859,7 +986,7 @@ llvm::SmallVector<mlir::Type> Lowerer::RecordsOf(mlir::TypeRange types) const {
 
 llvm::LogicalResult Lowerer::MakeRecords() {
   ChooseRecords();
-  if (records_.empty()) {
+  if (records_.empty() && unions_.empty()) {
     return llvm::success();
   }
   module_.walk([&](mlir::Operation *op) {
@@ -905,6 +1032,11 @@ llvm::LogicalResult Lowerer::MakeRecords() {
       }
     } else if (mlir::isa<merk::ToWordOp>(op)) {
       BoxOperands(op);
+    } else if (mlir::isa<merk::ArrayNewOp, merk::ArrayGetOp, merk::ArraySetOp,
+                   merk::ArrayFillOp, merk::ArrayResizeOp>(op)) {
+      // An array holds a union's cells, where a record's are inline.
+      BoxOperands(op, /*atDefinition=*/false, /*unionsOnly=*/true);
+      UnboxResults(op, /*unionsOnly=*/true);
     } else if (mlir::isa<merk::FromWordOp>(op)) {
       UnboxResults(op);
     } else if (mlir::isa<merk::ForeignCallOp>(op)) {
@@ -1125,6 +1257,80 @@ void Lowerer::LowerRecordOp(mlir::Operation *op, merk::RecordType record) {
   rewriter_.replaceOp(op, fields);
 }
 
+// A constructor's number in its type's order, a union's tag.
+static std::int64_t ConstructorNumber(
+    const TermLayout &layout, merk::FunctorAttr functor) {
+  return layout.Find(functor) - layout.functors.data();
+}
+
+// An operation on a union by value: a construction inserts its
+// constructor's number and fields into a zero struct, a deconstruction
+// extracts its constructor's slots, a test of a functor compares the
+// number, and a switch becomes a switch on the number.
+void Lowerer::LowerUnionOp(mlir::Operation *op, merk::RecordType record) {
+  mlir::Location loc{op->getLoc()};
+  const UnionLayout &layout{unions_.find(record.getName())->second};
+  const TermLayout &term{layouts_.find(record.getName())->second};
+  auto i64{rewriter_.getI64Type()};
+  if (auto switchOp{mlir::dyn_cast<merk::SwitchOp>(op)}) {
+    mlir::Value tag{mlir::LLVM::ExtractValueOp::create(rewriter_, loc,
+        LoweredValue(switchOp.getValue(), loc),
+        llvm::ArrayRef<std::int64_t>{0})};
+    llvm::SmallVector<mlir::Attribute> cases;
+    for (mlir::Attribute c : switchOp.getCases()) {
+      llvm::SmallVector<mlir::Attribute> numbers;
+      for (mlir::Attribute functor : mlir::cast<mlir::ArrayAttr>(c)) {
+        numbers.push_back(rewriter_.getI64IntegerAttr(
+            ConstructorNumber(term, mlir::cast<merk::FunctorAttr>(functor))));
+      }
+      cases.push_back(rewriter_.getArrayAttr(numbers));
+    }
+    switchOp.getValueMutable().assign(tag);
+    switchOp.setCasesAttr(rewriter_.getArrayAttr(cases));
+    return;
+  }
+  if (auto test{mlir::dyn_cast<merk::HasFunctorOp>(op)}) {
+    mlir::Value tag{mlir::LLVM::ExtractValueOp::create(rewriter_, loc,
+        LoweredValue(test.getTerm(), loc), llvm::ArrayRef<std::int64_t>{0})};
+    mlir::Value wanted{mlir::LLVM::ConstantOp::create(
+        rewriter_, loc, i64, ConstructorNumber(term, test.getFunctor()))};
+    rewriter_.replaceOp(op, WordsEqual(tag, wanted, loc));
+    return;
+  }
+  if (auto construct{mlir::dyn_cast<merk::ConstructOp>(op)}) {
+    std::int64_t n{ConstructorNumber(term, construct.getFunctor())};
+    mlir::Value value{mlir::LLVM::ZeroOp::create(rewriter_, loc, layout.type)};
+    value = mlir::LLVM::InsertValueOp::create(rewriter_, loc, value,
+        mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, n),
+        llvm::ArrayRef<std::int64_t>{0});
+    for (auto [i, argument] : llvm::enumerate(construct.getArguments())) {
+      std::int64_t slot{layout.first[n] + static_cast<std::int64_t>(i)};
+      value = mlir::LLVM::InsertValueOp::create(rewriter_, loc, value,
+          ToFieldStorage(
+              LoweredValue(argument, loc), layout.type.getBody()[slot], loc),
+          llvm::ArrayRef<std::int64_t>{slot});
+    }
+    rewriter_.replaceOp(op, value);
+    return;
+  }
+  auto deconstruct{mlir::cast<merk::DeconstructOp>(op)};
+  std::int64_t n{ConstructorNumber(term, deconstruct.getFunctor())};
+  mlir::Value value{LoweredValue(deconstruct.getTerm(), loc)};
+  llvm::SmallVector<mlir::Value> fields;
+  for (auto [i, result] : llvm::enumerate(deconstruct.getFields())) {
+    std::int64_t slot{layout.first[n] + static_cast<std::int64_t>(i)};
+    mlir::Value field{mlir::LLVM::ExtractValueOp::create(
+        rewriter_, loc, value, llvm::ArrayRef<std::int64_t>{slot})};
+    mlir::Type wanted{Convert(result.getType())};
+    if (field.getType() != wanted) {
+      // An enumeration's 4 bytes, zero-extended into its word.
+      field = mlir::LLVM::ZExtOp::create(rewriter_, loc, wanted, field);
+    }
+    fields.push_back(field);
+  }
+  rewriter_.replaceOp(op, fields);
+}
+
 llvm::LogicalResult Lowerer::LowerTerms() {
   auto ptr{HeapPointer()};
   auto i64{rewriter_.getI64Type()};
@@ -1147,7 +1353,11 @@ llvm::LogicalResult Lowerer::LowerTerms() {
     mlir::Location loc{op->getLoc()};
     rewriter_.setInsertionPoint(op);
     if (auto record{mlir::dyn_cast<merk::RecordType>(type)}) {
-      LowerRecordOp(op, record);
+      if (unions_.contains(record.getName())) {
+        LowerUnionOp(op, record);
+      } else {
+        LowerRecordOp(op, record);
+      }
       continue;
     }
     const TermLayout *layout{LayoutOf(type)};

@@ -17,6 +17,12 @@
 // reads only a module's merk.type_defs, so every module that sees a type's
 // constructors decides alike, and MLIRGen and lowering agree; the runtime
 // agrees through the descriptors' flags (runtime/record.h).
+//
+// Which are flat unions, values by LLVM struct in code but cells in arrays
+// and to the runtime (docs/INPROGRESS.md, Flat records, flat unions): two
+// or more constructors, at least one with fields, no hidden fields, not
+// exported abstractly, every field flat, and at most kMaxUnionFields fields
+// over all the constructors. A union is not a flat field.
 
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
@@ -24,11 +30,16 @@
 
 namespace merkurius::codegen {
 
+// The fields a flat union may have over all its constructors, each of which
+// has its own slots in the union's struct.
+constexpr unsigned kMaxUnionFields{8};
+
 class RecordRule {
 public:
   // Reads the module's merk.type_defs, which lowering erases after.
   explicit RecordRule(mlir::ModuleOp module);
   bool IsRecord(llvm::StringRef name) const;
+  bool IsUnion(llvm::StringRef name) const;
   // Whether a value of the type can be a record's field.
   bool IsFlatField(mlir::Type field) const;
 

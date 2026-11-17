@@ -33,8 +33,9 @@ module @terms attributes {llvm.target_triple = "x86_64-unknown-linux-gnu"} {
   merk.type_def "list.list(int)" [#merk.constructor<"[]">, #merk.constructor<"[|]"(i64, !merk.term<"list.list(int)">)>]
   merk.type_def "terms.secret" [#merk.constructor<"secret"(i64, i64)>] abstract
   // Eight constructors with arguments and a constant: tags 1 to 6, and 7
-  // shared by g and h, with secondary tags 0 and 1.
-  merk.type_def "terms.many" [#merk.constructor<"z">, #merk.constructor<"a"(i64)>, #merk.constructor<"b"(i64)>, #merk.constructor<"c"(i64)>, #merk.constructor<"d"(i64)>, #merk.constructor<"e"(i64)>, #merk.constructor<"f"(i64)>, #merk.constructor<"g"(i64)>, #merk.constructor<"h"(i64)>]
+  // shared by g and h, with secondary tags 0 and 1. b's list keeps it a
+  // type of cells, not a flat union.
+  merk.type_def "terms.many" [#merk.constructor<"z">, #merk.constructor<"a"(i64)>, #merk.constructor<"b"(!merk.term<"list.list(int)">)>, #merk.constructor<"c"(i64)>, #merk.constructor<"d"(i64)>, #merk.constructor<"e"(i64)>, #merk.constructor<"f"(i64)>, #merk.constructor<"g"(i64)>, #merk.constructor<"h"(i64)>]
 
   // CHECK-LABEL: merk.proc @terms.cons_3_0(%arg0: i64, %arg1: !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
   // CHECK-NEXT: %[[L:.*]] = merk.construct #merk.functor<"[|]", 2>(%arg0, %arg1 : i64, !merk.term<"list.list(int)">) -> !merk.term<"list.list(int)">
