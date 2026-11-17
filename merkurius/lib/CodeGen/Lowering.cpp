@@ -3342,15 +3342,14 @@ void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
       if (auto throwIf{mlir::dyn_cast<merk::ThrowIfOp>(op)}) {
         next = SplitAfter(throwIf);
         mlir::Block *raise{rewriter_.createBlock(next)};
-        if (device_) {
-          // A device has no runtime to report it yet: the kernel traps.
-          mlir::LLVM::Trap::create(rewriter_, loc);
-        } else {
-          mlir::Value exception{mlir::LLVM::AddressOfOp::create(rewriter_,
-              loc, StringGlobal(throwIf.getException(), loc))};
-          mlir::LLVM::CallOp::create(
-              rewriter_, loc, ThrowFunc(), mlir::ValueRange{exception});
-        }
+        // On a device too, the runtime reports it (device.cpp) rather than
+        // the code trap: llvm.trap is not nocallback, so it would keep the
+        // functions above it from being norecurse, and give a GPU process
+        // kernel that calls one a dynamic stack.
+        mlir::Value exception{mlir::LLVM::AddressOfOp::create(
+            rewriter_, loc, StringGlobal(throwIf.getException(), loc))};
+        mlir::LLVM::CallOp::create(
+            rewriter_, loc, ThrowFunc(), mlir::ValueRange{exception});
         mlir::LLVM::UnreachableOp::create(rewriter_, loc);
         rewriter_.setInsertionPoint(throwIf);
         rewriter_.replaceOpWithNewOp<mlir::LLVM::CondBrOp>(
@@ -3368,21 +3367,19 @@ void Lowerer::Flatten(mlir::Block *block, mlir::Block *fail) {
         mlir::Value in{mlir::LLVM::ICmpOp::create(
             rewriter_, loc, mlir::LLVM::ICmpPredicate::ult, index, size)};
         mlir::Block *raise{rewriter_.createBlock(next)};
-        if (device_) {
-          mlir::LLVM::Trap::create(rewriter_, loc);
-        } else {
-          auto ptr{mlir::LLVM::LLVMPointerType::get(rewriter_.getContext())};
-          auto i64{rewriter_.getI64Type()};
-          mlir::Value what{mlir::LLVM::AddressOfOp::create(
-              rewriter_, loc, StringGlobal(check.getWhat(), loc))};
-          mlir::Value max{mlir::LLVM::SubOp::create(rewriter_, loc, size,
-              mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 1))};
-          mlir::LLVM::CallOp::create(rewriter_, loc,
-              RuntimeFunc("merk_index_out_of_bounds",
-                  mlir::LLVM::LLVMVoidType::get(rewriter_.getContext()),
-                  {ptr, i64, i64}, /*noreturn=*/true),
-              mlir::ValueRange{what, index, max});
-        }
+        // On a device too, as a throw (above).
+        auto ptr{mlir::LLVM::LLVMPointerType::get(rewriter_.getContext())};
+        auto i64{rewriter_.getI64Type()};
+        mlir::Value what{mlir::LLVM::AddressOfOp::create(
+            rewriter_, loc, StringGlobal(check.getWhat(), loc))};
+        mlir::Value max{mlir::LLVM::SubOp::create(rewriter_, loc, size,
+            mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 1))};
+        mlir::LLVM::CallOp::create(rewriter_, loc,
+            RuntimeFunc(device_ ? "merk_device_index_out_of_bounds"
+                                : "merk_index_out_of_bounds",
+                mlir::LLVM::LLVMVoidType::get(rewriter_.getContext()),
+                {ptr, i64, i64}, /*noreturn=*/true),
+            mlir::ValueRange{what, index, max});
         mlir::LLVM::UnreachableOp::create(rewriter_, loc);
         rewriter_.setInsertionPoint(check);
         rewriter_.replaceOpWithNewOp<mlir::LLVM::CondBrOp>(
@@ -4226,8 +4223,10 @@ mlir::LLVM::LLVMFuncOp Lowerer::ThrowFunc() {
     mlir::OpBuilder::InsertionGuard guard{rewriter_};
     rewriter_.setInsertionPointToEnd(module_.getBody());
     mlir::MLIRContext *context{module_.getContext()};
+    // A device's runtime has its own (device.cpp).
     throw_ = mlir::LLVM::LLVMFuncOp::create(rewriter_, module_.getLoc(),
-        kThrowSymbol,
+        device_ ? llvm::StringRef{"merk_device_uncaught_exception"}
+                : llvm::StringRef{kThrowSymbol},
         mlir::LLVM::LLVMFunctionType::get(mlir::LLVM::LLVMVoidType::get(context),
             {mlir::LLVM::LLVMPointerType::get(context)}));
     throw_.setNoUnwind(true);
