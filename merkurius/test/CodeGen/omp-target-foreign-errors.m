@@ -14,7 +14,7 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module float, int, math.
+:- import_module float, int.
 :- pragma foreign_decl("C", "#include <unistd.h>").
 
 main(!IO) :-
@@ -29,9 +29,19 @@ main(!IO) :-
 
 compute(N, X) :-
     N = pid(1),
-    X = math.sqrt(2.25).
-% CHECK-DAG: math.m:{{[0-9]+}}:{{[0-9]+}}: error: cannot call math.sqrt_f1_0 on an OpenMP device yet: its foreign code calls merk_uncaught_exception, which is not on the device
-% CHECK-DAG: omp-target-foreign-errors.m:[[#@LINE-2]]:9: note: called by omp_target_foreign_errors.compute_2_0 here: math.sqrt_f1_0
+    X = checked(2.25).
+% CHECK-DAG: omp-target-foreign-errors.m:[[#@LINE+4]]:4: error: cannot call omp_target_foreign_errors.checked_f1_0 on an OpenMP device yet: its foreign code calls merk_uncaught_exception, which is not on the device
+
+    % The host's runtime, called by its own name, not the device's.
+:- func checked(float) = float.
+:- pragma foreign_proc("C", checked(X::in) = (Y::out),
+    [will_not_call_merkurius, promise_pure, thread_safe], "
+    extern void merk_uncaught_exception(const char *);
+    if (X < 0.0) {
+        merk_uncaught_exception(\"negative\");
+    }
+    Y = X;
+").
 
 :- func pid(int) = int.
 :- pragma foreign_proc("C", pid(X::in) = (Y::out),

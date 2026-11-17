@@ -3826,8 +3826,11 @@ frontend prints MLIR's notes, without MLIR's own note of the operation.
   (`merk_device_`, `merk_array_`), OpenMP's, or defined in the GPU's `libc.bc`
   or `libm.bc` beside clang, which the device's image links. Anything else is
   an error at the `foreign_proc`, "its foreign code calls X, which is not on the
-  device", with the chain of calls: `math.sqrt` needs `merk_uncaught_exception`,
-  `io.write` needs `merk_write`. C that does not compile for the device gets
+  device", with the chain of calls: `io.write` needs `merk_write`. The
+  library's exceptions in C, `require`'s software errors and the domain
+  errors of `float` and `math`, call `merk_uncaught_exception`, which is
+  `merk_device_uncaught_exception` under `__AMDGPU__` (2026-11-16), so a
+  GPU's code reports them as `merk.throw_if`'s failed checks. C that does not compile for the device gets
   clang's errors and "<module>'s foreign code does not compile for the device".
 
 **What moved out of the compiler.** `io.write_string`, `write_int` and `nl` need
