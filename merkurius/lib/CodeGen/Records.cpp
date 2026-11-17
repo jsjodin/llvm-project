@@ -29,6 +29,28 @@ bool RecordRule::IsRecord(llvm::StringRef name) const {
   return IsRecord(name, path);
 }
 
+bool RecordRule::IsUnion(llvm::StringRef name) const {
+  auto it{defs_.find(name)};
+  if (it == defs_.end() || it->second.abstract) {
+    return false;
+  }
+  const Def &def{it->second};
+  if (def.constructors.size() < 2 ||
+      llvm::any_of(def.hidden, [](unsigned hidden) { return hidden != 0; })) {
+    return false;
+  }
+  std::size_t fields{0};
+  for (const llvm::SmallVector<mlir::Type> &constructor : def.constructors) {
+    fields += constructor.size();
+    for (mlir::Type field : constructor) {
+      if (!IsFlatField(field)) {
+        return false;
+      }
+    }
+  }
+  return fields != 0 && fields <= kMaxUnionFields;
+}
+
 bool RecordRule::IsFlatField(mlir::Type field) const {
   llvm::StringSet<> path;
   return IsFlatField(field, path);

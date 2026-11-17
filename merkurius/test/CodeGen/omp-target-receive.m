@@ -10,8 +10,8 @@
 % mailbox's ring in host-pinned memory, sleeping between looks, until
 % the timeout passes by the device's clock; on the host, it is merkrt's,
 % which waits as receive does. A procedure in the host's compile receives
-% as on the host. message(N) is a cell, which on the device comes from
-% merk_device_alloc.
+% as on the host. received(int) is a flat union, so message(N) is a value,
+% with no cell from merk_device_alloc.
 %
 % mmc has no process module to run it with, so the output is written by
 % hand.
@@ -79,11 +79,13 @@ main(!IO) :-
 % MERK-NEXT: }
 % MERK: omp.terminator
 
-% The device's sum polls too, and makes message(N) with merk_device_alloc.
+% The device's sum polls too, and makes message(N) as a value.
 % DEVICE-LABEL: define internal i64 @omp_target_receive.sum_5_0(
+% DEVICE-NOT: merk_device_alloc
 % DEVICE: call i32 @merk_device_receive(ptr %{{.*}}, i64 %{{.*}}, ptr %{{.*}})
-% DEVICE: call ptr @merk_device_alloc(i64 8)
+% DEVICE-NOT: merk_device_alloc
 % DEVICE-NOT: process.receive
+% DEVICE: {{^}$}}
 
 :- pred sum(mailbox(int)::in, int::in, int::out, io::di, io::uo) is det.
 sum(In, !Sum, !IO) :-
