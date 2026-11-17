@@ -6,6 +6,7 @@ add_merkurius_library(MerkuriusCodeGen
   MLIRGenBuiltins.cpp
   MLIRGenCalls.cpp
   MLIRGenControl.cpp
+  MLIRGenAtomic.cpp
   MLIRGenOpenMP.cpp
   MLIRGenProcesses.cpp
   MLIRGenTypeInfo.cpp
