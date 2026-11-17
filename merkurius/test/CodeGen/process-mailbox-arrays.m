@@ -1,9 +1,12 @@
 % An array of mailboxes in a GPU process's code (design document, Messages
 % and memory on the device): each of a ring of nodes keeps every node's
 % mailbox, which the host sends it one at a time, as peer(J, Mailbox), in an
-% array it makes, and passes a token on to the next node by it, round the
-% ring three times; each node then tells the host the sum of the tokens it
-% saw. Such an array is a value the process makes, not a message: it holds
+% array it makes, and tells the host it is ready; once every node is, the
+% host starts a token, which each node passes on to the next by the array,
+% round the ring three times; each node then tells the host the sum of the
+% tokens it saw. The host waits for every node before it starts the token:
+% messages keep their order only between a pair of processes, so a token
+% from node 0 may reach a node before the host's last peer message. Such an array is a value the process makes, not a message: it holds
 % the handles it was given, which stay in the messages that brought them.
 % The nodes run at the host here, and on the GPU in
 % process-mailbox-arrays-gpu.test.
@@ -51,20 +54,19 @@
     ;       token(int).
 
 :- type to_host
-    --->    seen(int, int).
+    --->    ready(int)
+    ;       seen(int, int).
 
-    % Node J of N: its peers, then Rounds tokens.
+    % Node J of N: its peers, then Rounds tokens, node 0's first from the
+    % host, token(0), which it does not count.
 :- process node(mailbox(to_host), int, int, int) receives to_node on gpu.
 
 node(Host, J, N, Rounds, Self, !IO) :-
     array.init(N, Self, Peers0),
     peers(Self, N, Peers0, Peers, !IO),
-    ( if J = 0 then
-        send(Peers ^ elem(1 mod N), token(1), !IO)
-    else
-        true
-    ),
-    tokens(Self, Peers, J, N, N * Rounds, Rounds, 0, Sum, !IO),
+    send(Host, ready(J), !IO),
+    Taken = ( if J = 0 then Rounds + 1 else Rounds ),
+    tokens(Self, Peers, J, N, N * Rounds, Taken, 0, Sum, !IO),
     send(Host, seen(J, Sum), !IO).
 
     % The N nodes' mailboxes, by their numbers.
@@ -114,10 +116,13 @@ main(!IO) :-
     N = 5,
     new_mailbox(Host, !IO),
     list.map_foldl(spawn_node(Place, Host, N), 0 .. N - 1, Nodes, !IO),
-    % Node 0 last: it starts the token once it has its peers, and a node
-    % that took the token among its peers would drop it (peers), so every
-    % other node's peers must be sent before node 0's.
-    list.foldl(introduce(Nodes), list.reverse(Nodes), !IO),
+    list.foldl(introduce(Nodes), Nodes, !IO),
+    list.foldl(await_ready(Host), Nodes, !IO),
+    ( if Nodes = [First | _] then
+        send(First, token(0), !IO)
+    else
+        true
+    ),
     list.map_foldl(seen(Host), Nodes, Sums, !IO),
     list.foldl(write_sum, list.sort(Sums), !IO).
 
@@ -144,6 +149,17 @@ number(K, [X | Xs]) = [{K, X} | number(K + 1, Xs)].
 
 send_peer(Node, {K, M}, !IO) :-
     send(Node, peer(K, M), !IO).
+
+:- pred await_ready(mailbox(to_host)::in, mailbox(to_node)::in,
+    io::di, io::uo) is det.
+
+await_ready(Host, _, !IO) :-
+    receive(Host, any, after(60000), R, !IO),
+    ( if R = message(ready(_)) then
+        true
+    else
+        io.write_string("a node did not get its peers\n", !IO)
+    ).
 
 :- pred seen(mailbox(to_host)::in, mailbox(to_node)::in, {int, int}::out,
     io::di, io::uo) is det.
