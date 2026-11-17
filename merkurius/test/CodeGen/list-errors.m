@@ -4,7 +4,9 @@
 % det_last as their predicates, as in mmc, and the functions
 % det_index0_of_first_occurrence and det_index1_of_first_occurrence as
 % themselves. Nothing catches them yet, so the program writes the exception
-% to the standard error and exits with status 1. which/1 picks the case.
+% to the standard error and exits with status 1. which/1 picks the case;
+% det_split_list fails a count beyond the list's length and a negative one
+% alike.
 % The output and messages are mmc's.
 %
 % RUN: merkc %s -o %t.0 && %t.0 | FileCheck %s --check-prefix=OUTPUT-0 --match-full-lines --strict-whitespace
@@ -36,6 +38,12 @@
 % RUN: sed 's/^which(0)\./which(9)./' %s > %t.9.m && merkc %t.9.m -o %t.9
 % RUN: not %t.9 2> %t.9.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: FileCheck %s --check-prefix=ERROR-9 --match-full-lines --strict-whitespace < %t.9.err
+% RUN: sed 's/^which(0)\./which(10)./' %s > %t.10.m && merkc %t.10.m -o %t.10
+% RUN: not %t.10 2> %t.10.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: FileCheck %s --check-prefix=ERROR-10 --match-full-lines --strict-whitespace < %t.10.err
+% RUN: sed 's/^which(0)\./which(11)./' %s > %t.11.m && merkc %t.11.m -o %t.11
+% RUN: not %t.11 2> %t.11.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: FileCheck %s --check-prefix=ERROR-10 --match-full-lines --strict-whitespace < %t.11.err
 
 :- module list_errors.
 :- interface.
@@ -60,6 +68,8 @@ run(N, E, !IO) :-
         io.write_int(det_index1([1, 2], 2), !IO),
         io.write_int(det_last([1, 2, 3]), !IO),
         io.write(take_upto(0, [1]) : list(int), !IO),
+        det_split_list(1, [1, 2, 3], S1, S2),
+        io.write({S1, S2}, !IO),
         io.write_string("\nafter\n", !IO)
     else if N = 1 then
         io.write_int(det_head(E), !IO)
@@ -79,12 +89,15 @@ run(N, E, !IO) :-
         io.write(take_upto(-1, [1]) : list(int), !IO)
     else if N = 8 then
         io.write_int(det_index0_of_first_occurrence([1, 2], 3), !IO)
-    else
+    else if N = 9 then
         io.write_int(det_index1_of_first_occurrence([1, 2], 3), !IO)
+    else
+        det_split_list(( if N = 10 then 4 else -1 ), [1, 2, 3], S1, S2),
+        io.write({S1, S2}, !IO)
     ).
 
 % OUTPUT-0:before
-% OUTPUT-0-NEXT:1[2]23[]
+% OUTPUT-0-NEXT:1[2]23[]{[1], [2, 3]}
 % OUTPUT-0-NEXT:after
 % OUTPUT:before
 % OUTPUT-NOT:{{.}}
@@ -106,3 +119,5 @@ run(N, E, !IO) :-
 % ERROR-8-NEXT:Software Error: function `list.det_index0_of_first_occurrence'/2: Unexpected: item not found
 % ERROR-9:Uncaught Merkurius exception:
 % ERROR-9-NEXT:Software Error: function `list.det_index1_of_first_occurrence'/2: Unexpected: item not found
+% ERROR-10:Uncaught Merkurius exception:
+% ERROR-10-NEXT:Software Error: predicate `list.det_split_list'/4: Unexpected: index out of range
