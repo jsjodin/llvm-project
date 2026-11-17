@@ -460,15 +460,17 @@ void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
       }
     }
   }
-  // The promises of the pragmas, by predicate or function.
+  // The promises of the pragmas, by predicate or function. Every pragma
+  // that names a predicate or function, a promise or not, names one of
+  // this module's, declared or with its type inferred.
   llvm::DenseMap<const Symbol *, Purity> promised;
   for (const parser::Item &item : tree.items) {
     const auto *pragma{std::get_if<const parser::PredPragma *>(&item)};
-    if (!pragma ||
-        ((*pragma)->kind != parser::PredPragmaKind::PromisePure &&
-            (*pragma)->kind != parser::PredPragmaKind::PromiseSemipure)) {
+    if (!pragma) {
       continue;
     }
+    bool promises{(*pragma)->kind == parser::PredPragmaKind::PromisePure ||
+        (*pragma)->kind == parser::PredPragmaKind::PromiseSemipure};
     Purity promise{(*pragma)->kind == parser::PredPragmaKind::PromisePure
             ? Purity::Pure
             : Purity::Semipure};
@@ -492,15 +494,18 @@ void PurityChecker::CheckPredicates(const parser::ParseTree &tree) {
         arities += (arities.empty() ? "" : ", ") + std::to_string(symbol->arity);
         continue;
       }
-      promised[symbol] = promise;
+      if (promises) {
+        promised[symbol] = promise;
+      }
       found = true;
     }
     if (!found) {
       // mmc: "`:- pragma promise_pure' declaration for `f2'/2 without
       // corresponding `:- pred' or `:- func' declaration".
       messages_.Say(Source((*pragma)->tokens),
-          "`:- pragma promise_%s' names %s/%u, which this module does not declare%s"_err_en_US,
-          promise == Purity::Pure ? "pure" : "semipure", name.str(), arity,
+          "`:- pragma %s' names %s/%u, which this module does not declare%s"_err_en_US,
+          common::SnakeName(parser::EnumToString((*pragma)->kind)),
+          name.str(), arity,
           arities.empty() ? "" : "; its arity is " + arities);
     }
   }
