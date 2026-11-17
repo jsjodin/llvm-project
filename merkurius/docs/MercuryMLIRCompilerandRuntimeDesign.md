@@ -5507,6 +5507,24 @@ processes on one GPU, step 3); before it, they were 260 and 269, 544 and
   L2. The first run on gfx90a reported 2 to 4 ms, from the device's clock,
   which libc took to tick at 100 MHz where gfx90a's ticks at 25.
 
+### Record fills of a GPU process
+
+2026-11-16, at 4b52c14a590b with this change, on the gfx1030 with
+LIBOMPTARGET_AMDGPU_CU_MASK=0-39 (40 units, 39 worker teams): the Monte Carlo
+transport port's place (merkurius-mc, mc-transport/bench/e11.m) on P1 with
+16^3 cells and 40,960 particles, one cycle. Each pass of the cycle makes its
+extras vault, array.init of 4N particles of 15 words. The lane filled it
+record by record (array.cpp, FillBytes), at some tens of MB/s:
+
+| | the cycle's 50 passes | their loops | the rest |
+|---|---|---|---|
+| record by record | 1.511 s | 0.163 s | 1.348 s |
+| by the worker teams (Bulk) | 0.169 s | 0.164 s | 0.005 s |
+
+The figure of merit, segments a second of tracking, over two cycles, rose from
+1.8e6 to 2.0e7. The loops alone ran at about 2.1e7 throughout: the place
+was slow only in its fills. Every count was qs-cpu's in both.
+
 ### GPU processes' stacks
 
 2026-11-13, at bddf7bd56f9a with the change that marks a GPU process's code
