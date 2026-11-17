@@ -505,6 +505,64 @@ void VisitInterior(
   }
 }
 
+// The slot that pair `i` moves itself (VisitFrame), or null: none for a pair
+// that is ignored, constant, or interior.
+Word *MovedSlot(
+    const Safepoint &safepoint, char *stackPointer, std::int64_t i) {
+  const Location *locations{safepoint.record->locations};
+  std::int64_t deopt{ConstantOf(safepoint, locations[2])};
+  const Location *state{locations + 3};
+  std::int64_t bits{ConstantOf(safepoint, state[1 + i])};
+  const Location *gc{state + deopt};
+  const Location &derived{gc[2 * i + 1]};
+  Word *base;
+  if (bits == kIgnored || derived.kind != Indirect ||
+      InteriorSlot(safepoint, stackPointer, bits, gc[2 * i], derived, base)) {
+    return nullptr;
+  }
+  return reinterpret_cast<Word *>(
+      BaseOf(safepoint, derived, stackPointer) + derived.offset);
+}
+
+// Each base slot of an interior pointer (InteriorSlot) that no pair of its
+// own moves, once. The statepoint rewrite relocates a base only where code
+// after the safepoint uses it, so at the last safepoint before a store
+// through the interior pointer the base may be named only as that pointer's
+// base: the code after it reads the cell from another slot, a root listed in
+// the bundle. The interior pointer moves by its offset from the base, so the
+// base must move too, or the pointer keeps the old cell's address.
+template <typename Visit>
+void VisitLoneBases(
+    const Safepoint &safepoint, char *stackPointer, Visit visit) {
+  const Location *locations{safepoint.record->locations};
+  std::int64_t deopt{ConstantOf(safepoint, locations[2])};
+  const Location *state{locations + 3};
+  std::int64_t pairs{ConstantOf(safepoint, state[0]) & 0xffffffff};
+  const Location *types{state + 1};
+  const Location *gc{state + deopt};
+  for (std::int64_t i{0}; i < pairs; ++i) {
+    Word *base;
+    if (!InteriorSlot(safepoint, stackPointer, ConstantOf(safepoint, types[i]),
+            gc[2 * i], gc[2 * i + 1], base)) {
+      continue;
+    }
+    bool done{false};
+    for (std::int64_t j{0}; j < pairs && !done; ++j) {
+      done = MovedSlot(safepoint, stackPointer, j) == base;
+    }
+    for (std::int64_t j{0}; j < i && !done; ++j) {
+      Word *other;
+      done = InteriorSlot(safepoint, stackPointer,
+                  ConstantOf(safepoint, types[j]), gc[2 * j], gc[2 * j + 1],
+                  other) &&
+          other == base;
+    }
+    if (!done) {
+      visit(base);
+    }
+  }
+}
+
 // The frames from that of merk_alloc_slow, or false if its caller is not at a
 // safepoint. `visit` takes each frame's safepoint and stack pointer.
 template <typename Visit>
@@ -1243,6 +1301,8 @@ bool CollectIfDue(void *frame) {
             collector.UpdateOnly(slot);
           }
         });
+    VisitLoneBases(
+        safepoint, stack, [&](Word *slot) { collector.UpdateOnly(slot); });
   });
   // After the bases, typed or update-only, have moved.
   VisitFrames(frame, [&](const Safepoint &safepoint, char *stack) {
