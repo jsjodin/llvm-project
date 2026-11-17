@@ -1,0 +1,6 @@
+process-endless.m's echo on the machine's GPU: it answers, and the program
+ends while the echo waits for another number.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-endless.m -o %t2
+RUN: %gpu-env %t2 | FileCheck %S/process-endless.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

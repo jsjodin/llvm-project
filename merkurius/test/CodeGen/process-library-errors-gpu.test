@@ -1,0 +1,10 @@
+process-library-errors.m's calls in a GPU process on the machine's GPU: the
+library's software and domain errors are reported as the host reports them,
+and end the program.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-library-errors.m -o %t2
+RUN: %gpu-env %t2 gpu ok | FileCheck %S/process-library-errors.m --check-prefix=OK --match-full-lines --strict-whitespace
+RUN: not %gpu-env %t2 gpu unexpected 2>&1 | FileCheck %S/process-library-errors.m --check-prefix=UNEXPECTED --match-full-lines --strict-whitespace
+RUN: not %gpu-env %t2 gpu sqrt 2>&1 | FileCheck %S/process-library-errors.m --check-prefix=SQRT --match-full-lines --strict-whitespace
+RUN: not %gpu-env %t2 gpu pow 2>&1 | FileCheck %S/process-library-errors.m --check-prefix=POW --match-full-lines --strict-whitespace
