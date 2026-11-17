@@ -2,7 +2,9 @@
 % teams do for it (runtime/device/device.cpp, Bulk; docs/INPROGRESS.md,
 % Messages between GPU processes on one GPU, step 3): array.init, fill,
 % copy and resize of arrays of 1, 2, 4 and 8 bytes an element, of sizes that
-% end within a word, a resize's fill that starts within one, an array from
+% end within a word, a resize's fill that starts within one, array.init and
+% resize of an array of flat records of three words, which a team's threads
+% do not divide, an array from
 % the host, and an array that a send copies, as it is sent again, to a
 % process of the same kernel. The kind runs a loop, so that it has worker
 % teams. Each array's weighted sum is the same at the host, here, and on
@@ -20,7 +22,8 @@
 :- import_module io.
 :- pred main(io::di, io::uo) is det.
 :- implementation.
-:- import_module array, int, int16, int32, int8, list, process, string.
+:- import_module array, float, int, int16, int32, int8, list, process,
+    string.
 
     % The sum of each element's integer times 1 + its index mod 7.
 :- func sum8(array(int8), int, int) = int.
@@ -42,6 +45,20 @@ sum32(A, I, S) = ( if I < array.size(A) then
 sum64(A, I, S) = ( if I < array.size(A) then
     sum64(A, I + 1, S + array.lookup(A, I) * (1 + I mod 7))
     else S ).
+
+:- type rec
+    --->    rec(int, float, int).
+
+    % The same for records: the first field times 1 + the index mod 7, the
+    % second's double as an integer, and the third times 1 + the index mod 5.
+:- func sumr(array(rec), int, int) = int.
+sumr(A, I, S) = ( if I < array.size(A) then
+    sumr(A, I + 1, S + weigh(array.lookup(A, I), I))
+    else S ).
+
+:- func weigh(rec, int) = int.
+weigh(rec(X, Y, Z), I) =
+    X * (1 + I mod 7) + float.truncate_to_int(2.0 * Y) + Z * (1 + I mod 5).
 
 :- process bulk(mailbox(int), mailbox(array(int))) receives array(int)
     on gpu.
@@ -72,6 +89,10 @@ bulk(Report, Summer, Self, !IO) :-
     array.set(77, 5, B64, C64),
     send(Report, sum64(A64, 0, 0), !IO),
     send(Report, sum64(C64, 0, 0), !IO),
+    array.init(30001, rec(3, 0.5, -2), Ra),
+    send(Report, sumr(Ra, 0, 0), !IO),
+    array.resize(40003, rec(-1, 2.0, 7), array.copy(Ra), Rb),
+    send(Report, sumr(Rb, 0, 0), !IO),
     receive(Self, any, after(10000), R, !IO),
     ( if R = message(H) then
         send(Report, sum64(H, 0, 0), !IO)
@@ -126,7 +147,7 @@ main(!IO) :-
     spawn(Place, summer(Sums), S, !IO),
     spawn(Place, bulk(Reports, S), B, !IO),
     send(B, array.init(20001, -7), !IO),
-    print_reports(9, Reports, !IO),
+    print_reports(11, Reports, !IO),
     print_reports(2, Sums, !IO).
 % CHECK:8127
 % CHECK-NEXT:-1200027
@@ -136,6 +157,8 @@ main(!IO) :-
 % CHECK-NEXT:8400070000
 % CHECK-NEXT:9876419663211
 % CHECK-NEXT:9876296206427
+% CHECK-NEXT:210002
+% CHECK-NEXT:420039
 % CHECK-NEXT:-559993
 % CHECK-NEXT:9876419663211
 % CHECK-NEXT:9876419663211
