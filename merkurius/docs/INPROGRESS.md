@@ -3493,7 +3493,7 @@ and a launch, 15 to 40 µs, every loop.
     barrier after each round does for OpenMP's loops (Dense stencils).
     Reductions: each thread's partial result, combined in the team, then
     across teams after the barrier that ends the loop, by the process.
-  - *The directive:* `%$omp distribute parallel do`, without `target teams`,
+  - *The directive:* `%$omp teams distribute parallel do`, without `target teams`,
     as the process's kernel is the teams; a loop under another directive in
     a process's predicate is reported. Its checks are a parallel loop's.
   - *Memory:* the control block and the values' blocks are in the process's
@@ -3835,7 +3835,7 @@ compile copied a library descriptor without those its fields name
 so the GPU faulted.
 
 **(p2) done 2026-11-11: loops across a process's teams.**
-- *The directive:* `%$omp distribute parallel do` on a `do` loop, in a GPU
+- *The directive:* `%$omp teams distribute parallel do` on a `do` loop, in a GPU
   kind's code or a predicate of the module that it calls. The driver passes
   `-fprocess-loops` to the kernels' compile when the program is compiled
   with `-fopenmp`, which reads the directives without OpenMP; without
@@ -3908,7 +3908,7 @@ so the GPU faulted.
 **(s1) done 2026-11-12: loops across a team's threads, in the bodies of
 distribute loops,** for the demo's sparse tiles (A demo, step 3), whose
 cells a team steps.
-- *The language:* `%$omp distribute` before a loop in a GPU process's code
+- *The language:* `%$omp teams distribute` before a loop in a GPU process's code
   runs its iterations across the process's worker teams, a team's first
   wave running each iteration's body. A loop under `%$omp parallel do` in
   that body, or in a predicate of the module that it calls, runs across the
@@ -4139,6 +4139,38 @@ that is a positive integer, now have code generation:
   `process-schedule-errors.m`, `omp-schedule.m` and `-gpu.test`, and
   `omp-parallel-do-errors.m`. UTS's push loop with it: design document,
   Measurements, "UTS on one GPU".
+
+**(s4) done 2026-11-18: `teams distribute parallel do` and `teams
+distribute`.** Decided by the user: a loop across a GPU process's teams is
+written with `teams`, and `distribute` without it is an error, as OpenMP
+binds `distribute` to the teams region around it. Each loop is a teams
+region of its own, with no code outside the loop, so it means what
+`distribute parallel do` meant here: the league is the process's worker
+teams, and the process's code between loops runs once, on its lane. The
+same spelling now reads the same in a process and in a target region
+(`target teams distribute parallel do`).
+- `parser::IsProcessTeamsLoop` names the two forms, for check-gpu-code and
+  code generation. On the host, as in a kind spawned there, they are
+  parallel do loops, with no teams or distribute wrapper.
+- check-gpu-code reports `distribute parallel do` and `distribute` outside
+  a target region, naming the teams form; in a target region they stay
+  code generation's not yet implemented.
+- Rejected: *a standalone `teams` region in a process,* whose code every
+  team's initial thread would run, once a team: a process's sends,
+  receives and output, and its arrays updated in place, would happen once
+  a team, or race. It is reported, as any other directive in a process's
+  code is. *Keeping `distribute parallel do` as a synonym,* two spellings
+  of one loop, and one that OpenMP readers would take for a loop of an
+  enclosing teams region.
+- Not yet, each reported: `num_teams`, which would run a loop on fewer of
+  the process's worker teams (small rounds pay per team: UTS's T3L, design
+  document, Measurements, "UTS on one GPU"), and needs the barrier's count
+  of teams set for each loop; and `thread_limit`, which could only leave
+  threads of a team idle, as the kernel's teams have 256.
+- Tests: `CodeGen/process-loops-errors.m` (the bare forms and a `teams`
+  region in a process), `process-teams-clauses-errors.m`, and every
+  process loop test, the benchmarks and the examples in the new spelling;
+  merkurius-uts's `src/uts_expand.m` and merkurius-mc's `src/place.m` too.
 
 **GPU experiments, 2026-11-11 night: what limits a GPU process's loops.**
 Kept for the multi-GPU machine (8× gfx90a), where the numbers will differ:
@@ -4628,7 +4660,7 @@ allocates as it goes.
 
 *The step: a team for each tile, its threads over the tile's cells.*
 ```
-%$omp distribute
+%$omp teams distribute
 ( for(J, 0, Active - 1) do
     Tile = Actives ^ elem(J),
     %$omp parallel do reduction((+) : Live) reduction(\/ : Edges)

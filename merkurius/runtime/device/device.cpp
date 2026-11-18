@@ -1976,8 +1976,8 @@ extern "C" uint64_t *merk_device_loop_values(void) {
       placeControls[__gpu_thread_id_x() / __gpu_num_lanes()]};
   if (!control) {
     Fail(1,
-        "a loop under distribute parallel do or distribute in the body of "
-        "another loop, or in a GPU process without worker teams");
+        "a loop under teams distribute parallel do or teams distribute in the "
+        "body of another loop, or in a GPU process without worker teams");
   }
   return control->values;
 }
@@ -1989,8 +1989,8 @@ extern "C" uint64_t *merk_device_loop_results(void) {
       placeControls[__gpu_thread_id_x() / __gpu_num_lanes()]};
   if (!control) {
     Fail(1,
-        "a loop under distribute parallel do or distribute in the body of "
-        "another loop, or in a GPU process without worker teams");
+        "a loop under teams distribute parallel do or teams distribute in the "
+        "body of another loop, or in a GPU process without worker teams");
   }
   return control->results;
 }
@@ -2016,8 +2016,8 @@ extern "C" void merk_device_process_loop(uint64_t loop, int64_t first,
       placeControls[__gpu_thread_id_x() / __gpu_num_lanes()]};
   if (!control) {
     Fail(1,
-        "a loop under distribute parallel do or distribute in the body of "
-        "another loop, or in a GPU process without worker teams");
+        "a loop under teams distribute parallel do or teams distribute in the "
+        "body of another loop, or in a GPU process without worker teams");
   }
   control->loop = loop;
   control->first = first;
@@ -2040,8 +2040,8 @@ extern "C" void merk_device_process_distribute(
       placeControls[__gpu_thread_id_x() / __gpu_num_lanes()]};
   if (!control) {
     Fail(1,
-        "a loop under distribute parallel do or distribute in the body of "
-        "another loop, or in a GPU process without worker teams");
+        "a loop under teams distribute parallel do or teams distribute in the "
+        "body of another loop, or in a GPU process without worker teams");
   }
   control->loop = loop;
   control->first = first;
@@ -2063,7 +2063,7 @@ void CheckTeamMain() {
       !teamMains[__gpu_thread_id_x() / __gpu_num_lanes()]) {
     Fail(1,
         "a loop under parallel do in a GPU process's code outside the body "
-        "of a distribute loop");
+        "of a teams distribute loop");
   }
 }
 

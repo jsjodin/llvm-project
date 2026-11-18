@@ -1,10 +1,10 @@
 % bandwidth.m's five kernels, run by a GPU process across its worker teams,
-% each a do loop under %$omp distribute parallel do (docs/INPROGRESS.md, GPU
-% processes that run loops), rather than a target region each. The process
-% makes the arrays in its arena, times each kernel on the device, and sends
-% the times and what the check needs to the host, which checks them and
-% prints the table as bandwidth.m does. The averages of the arrays' errors
-% are loops with reductions too, so that the check runs across the teams.
+% each a do loop under %$omp teams distribute parallel do (docs/INPROGRESS.md,
+% GPU processes that run loops), rather than a target region each. The process
+% makes the arrays in its arena, times each kernel on the device, and sends the
+% times and what the check needs to the host, which checks them and prints the
+% table as bandwidth.m does. The averages of the arrays' errors are loops with
+% reductions too, so that the check runs across the teams.
 %
 %   Copy    C = A
 %   Mul     B = Scalar * C
@@ -114,7 +114,7 @@ init(N, !:A, !:B, !:C) :-
     array.init(N, 0.0, !:A),
     array.init(N, 0.0, !:B),
     array.init(N, 0.0, !:C),
-    %$omp distribute parallel do
+    %$omp teams distribute parallel do
     ( for(I, 0, N - 1) do
         !A ^ unsafe_elem(I) := start_a,
         !B ^ unsafe_elem(I) := start_b,
@@ -127,7 +127,7 @@ init(N, !:A, !:B, !:C) :-
 :- pred copy(int::in, array(float)::array_ui,
     array(float)::array_di, array(float)::array_uo) is det.
 copy(N, A, !C) :-
-    %$omp distribute parallel do
+    %$omp teams distribute parallel do
     ( for(I, 0, N - 1) do
         !C ^ unsafe_elem(I) := A ^ unsafe_elem(I)
     ).
@@ -135,7 +135,7 @@ copy(N, A, !C) :-
 :- pred mul(int::in, array(float)::array_ui,
     array(float)::array_di, array(float)::array_uo) is det.
 mul(N, C, !B) :-
-    %$omp distribute parallel do
+    %$omp teams distribute parallel do
     ( for(I, 0, N - 1) do
         !B ^ unsafe_elem(I) := scalar * C ^ unsafe_elem(I)
     ).
@@ -143,7 +143,7 @@ mul(N, C, !B) :-
 :- pred add(int::in, array(float)::array_ui, array(float)::array_ui,
     array(float)::array_di, array(float)::array_uo) is det.
 add(N, A, B, !C) :-
-    %$omp distribute parallel do
+    %$omp teams distribute parallel do
     ( for(I, 0, N - 1) do
         !C ^ unsafe_elem(I) := A ^ unsafe_elem(I) + B ^ unsafe_elem(I)
     ).
@@ -151,7 +151,7 @@ add(N, A, B, !C) :-
 :- pred triad(int::in, array(float)::array_ui, array(float)::array_ui,
     array(float)::array_di, array(float)::array_uo) is det.
 triad(N, B, C, !A) :-
-    %$omp distribute parallel do
+    %$omp teams distribute parallel do
     ( for(I, 0, N - 1) do
         !A ^ unsafe_elem(I) := B ^ unsafe_elem(I) + scalar * C ^ unsafe_elem(I)
     ).
@@ -159,7 +159,7 @@ triad(N, B, C, !A) :-
 :- func dot(int, array(float), array(float)) = float.
 :- mode dot(in, array_ui, array_ui) = out is det.
 dot(N, A, B) = Sum :-
-    %$omp distribute parallel do reduction((+) : Sum)
+    %$omp teams distribute parallel do reduction((+) : Sum)
     ( for(I, 0, N - 1), fromto(0.0, S0, S1, Sum) do
         S1 = S0 + A ^ unsafe_elem(I) * B ^ unsafe_elem(I)
     ).
@@ -237,7 +237,7 @@ gold(K, A0, A, B0, B, C0, C) :-
 :- func error(int, array(float), float) = float.
 :- mode error(in, array_ui, in) = out is det.
 error(N, X, Gold) = Sum / float(N) :-
-    %$omp distribute parallel do reduction((+) : Sum)
+    %$omp teams distribute parallel do reduction((+) : Sum)
     ( for(I, 0, N - 1), fromto(0.0, S0, S1, Sum) do
         S1 = S0 + float.abs(X ^ unsafe_elem(I) - Gold)
     ).

@@ -407,7 +407,7 @@ run(G, S, Steps, Fastest, !Time, Cur, Next0, Final, !Dir, !Pos, !Nb, !Wet,
     array(uint16)::array_di, array(uint16)::array_uo,
     array(float)::array_di, array(float)::array_uo) is det.
 step(G, DT, NActive, Actives, Pos, Nb, Cur, !Next, !Wet, !Edges, !Speed) :-
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, NActive - 1) do
         I = int32.to_int(Actives ^ unsafe_elem(J)),
         P = int32.to_int(Pos ^ unsafe_elem(I)),
@@ -526,7 +526,7 @@ bit(DY, DX) = ( if DY = 0, DX = 0 then 0 else 1 << ((DY + 1) * 3 + DX + 1) ).
     is det.
 decide(G, NActive, Actives, Pos, Nb, Wet, Edges, Speed, !Quiet, !Fate,
         Pending, Fastest) :-
-    %$omp distribute parallel do reduction((+) : Pending)
+    %$omp teams distribute parallel do reduction((+) : Pending)
     %$omp& reduction(max : Fastest)
     ( for(J, 0, NActive - 1), fromto(0, P0, P1, Pending),
         fromto(0.0, S0, S1, Fastest) do
@@ -555,7 +555,7 @@ decide(G, NActive, Actives, Pos, Nb, Wet, Edges, Speed, !Quiet, !Fate,
 :- func fastest(int, array(int32), array(float)) = float.
 :- mode fastest(in, array_ui, array_ui) = out is det.
 fastest(NActive, Actives, Speed) = Fastest :-
-    %$omp distribute parallel do reduction(max : Fastest)
+    %$omp teams distribute parallel do reduction(max : Fastest)
     ( for(J, 0, NActive - 1), fromto(0.0, S0, S1, Fastest) do
         S1 = float.max(S0,
             Speed ^ unsafe_elem(int32.to_int(Actives ^ unsafe_elem(J))))
@@ -809,7 +809,7 @@ first_tiles(G, Y, YLast, XFirst, XLast, !Dir, !Pos, !Nb, !Quiet, !Actives,
     array(int32)::array_ui, array(float)::array_di, array(float)::array_uo,
     array(float)::array_di, array(float)::array_uo) is det.
 init(G, NActive, Actives, Pos, !Cur, !Speed) :-
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, NActive - 1) do
         I = int32.to_int(Actives ^ unsafe_elem(J)),
         init_tile(G, I, int32.to_int(Pos ^ unsafe_elem(I)), !Cur, Fastest),
@@ -841,7 +841,7 @@ init_tile(G, I, P, !Cur, Fastest) :-
 :- pred zero(geometry::in, int::in, int::in, array(int32)::array_ui,
     array(float)::array_di, array(float)::array_uo) is det.
 zero(G, First, NActive, Actives, !Cells) :-
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, First, NActive - 1) do
         I = int32.to_int(Actives ^ unsafe_elem(J)),
         zero_tile(G, I, !Cells)
@@ -870,7 +870,7 @@ count(G, Time, NActive, Actives, Pos, Wet, Cells, WetCells, Checksum, Volume,
     array.init(int.max(NActive, 1), 0.0, Volumes0),
     array.init(int.max(NActive, 1), 0.0, Errors0),
     array.init(int.max(NActive, 1), 0.0, Exacts0),
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, NActive - 1), fromto(Sums0, S0, S1, Sums),
         fromto(Volumes0, V0, V1, Volumes), fromto(Errors0, E0, E1, Errors),
         fromto(Exacts0, X0, X1, Exacts) do

@@ -1,14 +1,13 @@
-% life-process.m with cells of one byte, uint8, as life.c's -DCELL=uint8_t
-% has them (runtime/array.h), to show what Merkurius's 8-byte cells cost a GPU
+% life-process.m with cells of one byte, uint8, as life.c's -DCELL=uint8_t has
+% them (runtime/array.h), to show what Merkurius's 8-byte cells cost a GPU
 % process. Otherwise the same: life.m's Game of Life run by a GPU process
-% across its worker teams, each
-% kernel a do loop under %$omp distribute parallel do (docs/INPROGRESS.md,
-% GPU processes that run loops), rather than a target region each: the
-% first program of the demo of a stencil whose active region moves that a
-% process runs, dense, before its tiles do. The process makes the two grids
-% in its arena, times each step on the device, counts the live cells across
-% the teams, and sends the times and the count to the host, which prints
-% them as life.m does.
+% across its worker teams, each kernel a do loop under %$omp teams distribute
+% parallel do (docs/INPROGRESS.md, GPU processes that run loops), rather than a
+% target region each: the first program of the demo of a stencil whose active
+% region moves that a process runs, dense, before its tiles do. The process
+% makes the two grids in its arena, times each step on the device, counts the
+% live cells across the teams, and sends the times and the count to the host,
+% which prints them as life.m does.
 %
 % Built with -fprocess-declarations and --offload-arch, and -fopenmp for the
 % loops to run across the teams; without -fopenmp the process runs them on
@@ -92,7 +91,7 @@ alive(K) = V :-
 :- pred init(int::in, array(uint8)::array_di, array(uint8)::array_uo) is det.
 init(N, !A) :-
     W = N + 2,
-    %$omp distribute parallel do
+    %$omp teams distribute parallel do
     ( for(K, 0, N * N - 1) do
         C = (unchecked_quotient(K, N) + 1) * W + unchecked_rem(K, N) + 1,
         !A ^ unsafe_elem(C) := alive(K)
@@ -104,7 +103,7 @@ init(N, !A) :-
     array(uint8)::array_di, array(uint8)::array_uo) is det.
 step(N, A, !B) :-
     W = N + 2,
-    %$omp distribute parallel do
+    %$omp teams distribute parallel do
     ( for(K, 0, N * N - 1) do
         C = (unchecked_quotient(K, N) + 1) * W + unchecked_rem(K, N) + 1,
         Count =
@@ -147,7 +146,7 @@ run(S, Steps, N, Cur, Next0, Final, !T, !IO) :-
 :- pred count(int::in, array(uint8)::array_ui, int::out, int::out) is det.
 count(N, A, Population, Checksum) :-
     W = N + 2,
-    %$omp distribute parallel do reduction((+) : Population, Checksum)
+    %$omp teams distribute parallel do reduction((+) : Population, Checksum)
     ( for(K, 0, N * N - 1),
         fromto(0, P0, P1, Population), fromto(0, S0, S1, Checksum) do
         C = (unchecked_quotient(K, N) + 1) * W + unchecked_rem(K, N) + 1,

@@ -410,7 +410,7 @@ tile(Size, Log, Step, Limit, T, Total) :-
     Top = unchecked_quotient(T, PerRow) << Log,
     Left = unchecked_rem(T, PerRow) << Log,
     Half = Size / 2,
-    %$omp distribute parallel do reduction((+) : Total)
+    %$omp teams distribute parallel do reduction((+) : Total)
     ( for(K, 0, Side * Side - 1), fromto(0, S0, S1, Total) do
         PY = Top + (K >> Log),
         PX = Left + (K /\ (Side - 1)),

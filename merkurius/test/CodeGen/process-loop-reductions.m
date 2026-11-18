@@ -49,40 +49,40 @@
 reducer(Reply, Self, !IO) :-
     receive(Self, any, infinity, R, !IO),
     ( if R = message(N), N > 0 then
-        %$omp distribute parallel do reduction((+) : Sum)
+        %$omp teams distribute parallel do reduction((+) : Sum)
         ( for(I, 1, N), fromto(10, S0, S1, Sum) do
             S1 = S0 + I
         ),
-        %$omp distribute parallel do reduction(min : Lo) reduction(max : Hi)
+        %$omp teams distribute parallel do reduction(min : Lo) reduction(max : Hi)
         ( for(I, 1, N), fromto(max_int, Lo0, Lo1, Lo),
             fromto(min_int, Hi0, Hi1, Hi) do
             V = (I * 7919) mod 100003,
             Lo1 = int.min(Lo0, V),
             Hi1 = int.max(Hi0, V)
         ),
-        %$omp distribute parallel do reduction((+) : F)
+        %$omp teams distribute parallel do reduction((+) : F)
         ( for(I, 1, N), fromto(0.0, F0, F1, F) do
             F1 = F0 + float(I) * 0.5
         ),
-        %$omp distribute parallel do reduction(xor : X)
+        %$omp teams distribute parallel do reduction(xor : X)
         ( for(I, 1, N), fromto(0, X0, X1, X) do
             X1 = xor(X0, I * 3)
         ),
         array.init(N, 0, A0),
-        %$omp distribute parallel do reduction((+) : Evens)
+        %$omp teams distribute parallel do reduction((+) : Evens)
         ( for(I, 0, N - 1), fromto(A0, A1, A2, A), fromto(0, E0, E1, Evens) do
             array.set(I, I * I, A1, A2),
             E1 = ( if I mod 2 = 0 then E0 + 1 else E0 )
         ),
-        %$omp distribute parallel do reduction((*) : P)
+        %$omp teams distribute parallel do reduction((*) : P)
         ( for(I, 1, int.min(N, 20)), fromto(1, P0, P1, P) do
             P1 = P0 * I
         ),
-        %$omp distribute parallel do reduction(max : G)
+        %$omp teams distribute parallel do reduction(max : G)
         ( for(I, 1, N), fromto(-1.0, G0, G1, G) do
             G1 = float.max(G0, float(I mod 17) * 1.5)
         ),
-        %$omp distribute parallel do reduction((+) : Z)
+        %$omp teams distribute parallel do reduction((+) : Z)
         ( for(I, 1, 0), fromto(42, Z0, Z1, Z) do
             Z1 = Z0 + I
         ),

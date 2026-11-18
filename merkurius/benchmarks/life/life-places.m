@@ -937,7 +937,7 @@ moved_to(Mine, To, Changes, Owner, Dir, K, Selected) :-
 pack_whole(G, K, Selected, Cells) = Tiles :-
     Bytes = 4 + G ^ tile * G ^ tile,
     array.init(K * Bytes, 0u8, Tiles0),
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, K - 1), fromto(Tiles0, T0, T1, Tiles) do
         P = int32.to_int(Selected ^ unsafe_elem(2 * J)),
         I = int32.to_int(Selected ^ unsafe_elem(2 * J + 1)),
@@ -1007,7 +1007,7 @@ apply_moved(G, Tiles, !Cells, !Dir, !Pos, !Nb, !Live, !Actives, !NActive,
     array(uint8)::in, array(uint8)::array_di, array(uint8)::array_uo) is det.
 copy_whole(G, K, Slots, Tiles, !Cells) :-
     Bytes = 4 + G ^ tile * G ^ tile,
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, K - 1) do
         I = int32.to_int(Slots ^ unsafe_elem(J)),
         ( if I \= 0 then
@@ -1295,7 +1295,7 @@ select(G, Q, NActive, Actives, Pos, Owner, K, Selected) :-
 pack(G, K, Selected, Pos, Cells) = Halo :-
     Bytes = 4 * G ^ tile,
     array.init(K * Bytes, 0u8, Halo0),
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, K - 1), fromto(Halo0, H0, H1, Halo) do
         I = int32.to_int(Selected ^ unsafe_elem(J)),
         P = int32.to_int(Pos ^ unsafe_elem(I)),
@@ -1380,7 +1380,7 @@ apply_halo(G, Halo, !Cells, !Dir, !Pos, !Nb, !Ghosts, !NGhost, !Free,
     array(uint8)::in, array(uint8)::array_di, array(uint8)::array_uo) is det.
 copy(G, K, Slots, Halo, !Cells) :-
     Bytes = 4 * G ^ tile,
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, K - 1) do
         I = int32.to_int(Slots ^ unsafe_elem(J)),
         ( if I \= 0 then
@@ -1439,7 +1439,7 @@ start(G, Place, I, !Dir, !Pos, !Nb, !List, !NList, !Free, !NFree,
     array(int32)::array_di, array(int32)::array_uo,
     array(uint16)::array_di, array(uint16)::array_uo) is det.
 step(G, NActive, Actives, Nb, Cur, !Next, !Live, !Edges) :-
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, NActive - 1) do
         I = int32.to_int(Actives ^ unsafe_elem(J)),
         step_tile(G, I, Nb, Cur, !Next, Live, Edges),
@@ -1572,7 +1572,7 @@ alive(K) = V :-
     array(int32)::array_ui, array(uint8)::array_di, array(uint8)::array_uo)
     is det.
 init(G, From, Soup, NActive, Actives, Pos, !Cur) :-
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, NActive - 1) do
         I = int32.to_int(Actives ^ unsafe_elem(J)),
         init_tile(G, From, Soup, I, int32.to_int(Pos ^ unsafe_elem(I)), !Cur)
@@ -1607,7 +1607,7 @@ init_tile(G, From, Soup, I, P, !Cur) :-
 :- pred zero(geometry::in, int::in, int::in, array(int32)::array_ui,
     array(uint8)::array_di, array(uint8)::array_uo) is det.
 zero(G, First, NActive, Actives, !Cells) :-
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, First, NActive - 1) do
         I = int32.to_int(Actives ^ unsafe_elem(J)),
         zero_tile(G, I, !Cells)
@@ -1632,7 +1632,7 @@ zero_tile(G, I, !Cells) :-
     int::out, int::out) is det.
 count(G, NActive, Actives, Pos, Live, Cells, Population, Checksum) :-
     array.init(int.max(NActive, 1), 0, Sums0),
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, NActive - 1), fromto(Sums0, S0, S1, Sums) do
         I = int32.to_int(Actives ^ unsafe_elem(J)),
         tile_checksum(G, I, int32.to_int(Pos ^ unsafe_elem(I)), Cells, Sum),

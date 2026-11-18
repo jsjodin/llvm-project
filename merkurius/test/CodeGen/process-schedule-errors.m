@@ -31,7 +31,7 @@ worker(Reply, Self, !IO) :-
 dynamic(N, A) :-
     C = N / 4 + 1,
     array.init(N, 0, A0),
-    %$omp distribute parallel do schedule(dynamic, C)
+    %$omp teams distribute parallel do schedule(dynamic, C)
 % CHECK: process-schedule-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for a chunk size that is a variable in a loop across a GPU process's teams
 % HOST:    omp.wsloop schedule(dynamic = %{{.*}} : i64) {
     ( for(I, 0, N - 1), fromto(A0, A1, A2, A) do
@@ -41,7 +41,7 @@ dynamic(N, A) :-
 :- pred static(int::in, array(int)::array_di, array(int)::array_uo) is det.
 
 static(N, A, B) :-
-    %$omp distribute parallel do schedule(static, 4)
+    %$omp teams distribute parallel do schedule(static, 4)
 % CHECK: process-schedule-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for schedule(static) with a chunk size in a loop across a GPU process's teams
 % HOST:    omp.wsloop schedule(static = %{{.*}} : i64) {
     ( for(I, 0, N - 1), fromto(A, B1, B2, B) do

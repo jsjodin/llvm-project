@@ -3064,10 +3064,11 @@ limits until they are lifted. Handles are flat values, so they are mapped into t
 - **Only the sequential part sends and receives.** `io` threads through the
   sequential part of the region, its initial thread in a generic kernel, and
   there `send` and `receive` work as on the CPU. The iterations of a
-  `distribute parallel do` have no `io`, so they cannot. This is wanted: a
-  receive in an iteration depends on forward progress between teams, which
-  GPUs do not guarantee beyond the teams that fit at once, so a team could
-  wait for a message that only a team not yet running would send.
+  `teams distribute parallel do` have no `io`, so they cannot. This is
+  wanted: a receive in an iteration depends on forward progress between
+  teams, which GPUs do not guarantee beyond the teams that fit at once, so
+  a team could wait for a message that only a team not yet running would
+  send.
 - **Loops produce messages as values.** An iteration's messages are its
   results, in an array or a reduction into an outbox, which the sequential
   part then sends. Messages are batched, as their latency asks (Latency,

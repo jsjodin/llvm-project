@@ -53,22 +53,22 @@ worker(Reply, Self, !IO) :-
     ( if R = message(A), array.size(A) > 0 then
         N = array.size(A),
         array.init(N, 0, D0),
-        %$omp distribute parallel do
+        %$omp teams distribute parallel do
         ( for(I, 0, N - 1), fromto(D0, D1, D2, D) do
             array.set(I, array.lookup(A, I) * 2, D1, D2)
         ),
         add_previous(A, D, E),
         array.init(N, 0, C0),
-        %$omp distribute parallel do
+        %$omp teams distribute parallel do
         ( for(I, N - 1, 0, -1), fromto(C0, C1, C2, C) do
             array.set(I, N - I, C1, C2)
         ),
         array.init(N, 1.0, F0),
-        %$omp distribute parallel do
+        %$omp teams distribute parallel do
         ( for(I, 0, N - 1), fromto(F0, F1, F2, F) do
             array.set(I, float(I) * 0.5, F1, F2)
         ),
-        %$omp distribute parallel do
+        %$omp teams distribute parallel do
         ( for(I, 1, 0), fromto(C, G1, G2, G) do
             array.set(I, -1, G1, G2)
         ),
@@ -87,7 +87,7 @@ worker(Reply, Self, !IO) :-
 add_previous(A, D, E) :-
     N = array.size(A),
     array.init(N, 0, E0),
-    %$omp distribute parallel do
+    %$omp teams distribute parallel do
     ( for(I, 0, N - 1), fromto(E0, E1, E2, E) do
         Previous = ( if I > 0 then array.lookup(A, I - 1) else 0 ),
         array.set(I, array.lookup(D, I) + Previous, E1, E2)

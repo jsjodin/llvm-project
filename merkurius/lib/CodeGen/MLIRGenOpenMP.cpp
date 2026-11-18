@@ -784,9 +784,7 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
   // kind's code: on the host, as in a kind spawned there, a parallel do. In
   // a device's compile of GPU processes, a parallel do is in the body of a
   // distribute loop (Omp), and runs across a team's threads.
-  bool processLoop{
-      directive.id == llvm::omp::Directive::OMPD_distribute_parallel_do ||
-      directive.id == llvm::omp::Directive::OMPD_distribute};
+  bool processLoop{parser::IsProcessTeamsLoop(directive.id)};
   bool teamLoop{target_.options().processKernels &&
       directive.id == llvm::omp::Directive::OMPD_parallel_do};
   if (directive.id != llvm::omp::Directive::OMPD_parallel_do && !offloaded &&
@@ -1034,14 +1032,15 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
     ProcessLoop({goals, trip, call, loop, *loopBody, bodyCall, bodyProcedure,
                     reductions, false, false, false, at, *schedule},
         teamLoop ? ProcessLoopKind::Team
-            : directive.id == llvm::omp::Directive::OMPD_distribute
+            : directive.id == llvm::omp::Directive::OMPD_teams_distribute
             ? ProcessLoopKind::Teams
             : ProcessLoopKind::Threads,
         body, Location(goal.tokens));
     return;
   }
-  // The leaves around the loop's wrappers.
-  bool teams{HasLeaf(*queue, llvm::omp::Directive::OMPD_teams)};
+  // The leaves around the loop's wrappers. On the host, a loop across a
+  // GPU process's teams is a parallel do, with no teams or distribute.
+  bool teams{!processLoop && HasLeaf(*queue, llvm::omp::Directive::OMPD_teams)};
   bool distribute{
       !processLoop && HasLeaf(*queue, llvm::omp::Directive::OMPD_distribute)};
   // Each reduction's variable is a slot of the procedure, holding First, or
@@ -1599,8 +1598,7 @@ void MerkGenerator::Omp(const Body &goal, const ProcedureBody &body) {
   // module's other procedures, which the kernels' compile leaves out of the
   // image (Lowering's FilterKernelProcs), run the goal as it is.
   if (target_.options().processKernels &&
-      directive.id != llvm::omp::Directive::OMPD_distribute_parallel_do &&
-      directive.id != llvm::omp::Directive::OMPD_distribute &&
+      !parser::IsProcessTeamsLoop(directive.id) &&
       (directive.id != llvm::omp::Directive::OMPD_parallel_do ||
           !teamBodies_.contains(&body))) {
     Goal(*goal.goals.front(), body);

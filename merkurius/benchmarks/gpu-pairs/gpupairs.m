@@ -56,7 +56,7 @@ wrelay(To, Self, !IO) :-
         R = message(A),
         Size = array.size(A),
         ( if Size > 0, A ^ elem(0) < 0 then
-            %$omp distribute parallel do reduction((+) : Sum)
+            %$omp teams distribute parallel do reduction((+) : Sum)
             ( for(I, 0, Size - 1), fromto(0, S0, S1, Sum) do
                 S1 = S0 + A ^ elem(I)
             ),

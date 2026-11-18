@@ -250,7 +250,7 @@ whole(S, F, Sum0, First0, Sum, First, !Ring, !IO) :-
 make(S, F, Mix, !Cells) :-
     N = S ^ words,
     Work = S ^ work,
-    %$omp distribute parallel do
+    %$omp teams distribute parallel do
     ( for(I, 0, N - 1) do
         X0 = float((F * N + I + Mix) /\ 1023) * 0.001,
         !Cells ^ unsafe_elem(I) := rounds(Work, 0.9999999, 0.0000001, X0)
@@ -263,7 +263,7 @@ make(S, F, Mix, !Cells) :-
 stage(S, A, B, In, !Out) :-
     N = S ^ words,
     Work = S ^ work,
-    %$omp distribute parallel do
+    %$omp teams distribute parallel do
     ( for(I, 0, N - 1) do
         !Out ^ unsafe_elem(I) :=
             rounds(Work, A, B, In ^ unsafe_elem(I))
@@ -280,7 +280,7 @@ rounds(Work, A, B, X0) = X :-
 :- func checksum(int, array(float)) = int.
 :- mode checksum(in, in) = out is det.
 checksum(N, Cells) = Sum :-
-    %$omp distribute parallel do reduction((+) : Sum)
+    %$omp teams distribute parallel do reduction((+) : Sum)
     ( for(I, 0, N - 1), fromto(0, S0, S1, Sum) do
         S1 = S0 + bits(Cells ^ unsafe_elem(I)) * (2 * I + 1)
     ).
