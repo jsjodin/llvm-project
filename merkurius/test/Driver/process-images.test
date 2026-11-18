@@ -21,6 +21,17 @@ CHECK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "--target=amdgcn-amd-amdhsa" "-mcpu=gfx
 CHECK-NEXT: "-fc1" "-emit-obj" "-fprocess-declarations" "-O2" "-fembed-process-image=gfx1030:[[IMAGE]]" "-o" "[[OBJECT:[^"]*sumsq-[^"]*\.o]]" "{{[^"]*}}sumsq.m"{{$}}
 CHECK-NEXT: "{{[^"]*}}clang{{(\.exe)?}}" "-o" "prog" "[[OBJECT]]" "-L{{[^"]*}}lib" "-no-pie" "-lmerkstd" "-lmerkrt" "-lLLVMOffload" "-lm"{{$}}
 
+With -save-temps the image's link runs again, writing its assembly, which lld
+names <stem>-<arch>-processes.lto.s, beside the image
+(utils/gpu/gpu-registers.py reads it). Without it there is one link.
+RUN: merkc -### -fprocess-declarations --offload-arch=gfx90a -save-temps=obj %S/Inputs/sumsq.m -o %t/prog 2>&1 \
+RUN:   | FileCheck %s --check-prefix=TEMPS -DDIR=%t
+TEMPS:      "-mcpu=gfx90a" "-flto" "-O2" "[[DIR]]/sumsq-gfx90a-processes.o" {{.*}} "-o" "[[DIR]]/sumsq-gfx90a-processes.elf"{{$}}
+TEMPS-NEXT: "-mcpu=gfx90a" "-flto" "-O2" "[[DIR]]/sumsq-gfx90a-processes.o" {{.*}} "-o" "[[DIR]]/sumsq-gfx90a-processes" "-Wl,--lto-emit-asm"{{$}}
+RUN: merkc -### -fprocess-declarations --offload-arch=gfx90a %S/Inputs/sumsq.m -o prog 2>&1 \
+RUN:   | FileCheck %s --check-prefix=NO-TEMPS
+NO-TEMPS-NOT: --lto-emit-asm
+
 Two GPUs give an image each. With -c, the host's compile writes the object.
 RUN: merkc -### -fprocess-declarations --offload-arch=gfx1030,gfx90a -c %S/Inputs/sumsq.m 2>&1 \
 RUN:   | FileCheck %s --check-prefix=TWO
