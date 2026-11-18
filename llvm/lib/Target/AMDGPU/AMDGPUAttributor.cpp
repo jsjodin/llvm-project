@@ -105,6 +105,10 @@ intrinsicToAttrMask(Intrinsic::ID ID, bool &NonKernelOnly, bool &NeedsImplicit,
                                                     : QUEUE_PTR;
   case Intrinsic::amdgcn_wwm:
   case Intrinsic::amdgcn_strict_wwm:
+  // A whole-wave call runs its callee on every lane. The callee, of a
+  // graphics calling convention, is passed no implicit arguments (see
+  // SITargetLowering::LowerCall), so the call needs no other.
+  case Intrinsic::amdgcn_call_whole_wave:
     return WHOLE_WAVE_MODE;
   case Intrinsic::trap:
   case Intrinsic::debugtrap:
@@ -129,6 +133,16 @@ static bool isDSAddress(const Constant *C) {
     return false;
   unsigned AS = GV->getAddressSpace();
   return AS == AMDGPUAS::LOCAL_ADDRESS || AS == AMDGPUAS::REGION_ADDRESS;
+}
+
+/// The function that \p CB runs if it is a call of
+/// llvm.amdgcn.call.whole.wave, its first operand, which must be a function;
+/// otherwise null. Such a call runs only that function, so what the caller
+/// needs follows from what the callee needs, as for a direct call.
+static Function *getWholeWaveCallee(const CallBase &CB) {
+  if (CB.getIntrinsicID() != Intrinsic::amdgcn_call_whole_wave)
+    return nullptr;
+  return dyn_cast<Function>(CB.getArgOperand(0)->stripPointerCasts());
 }
 
 /// Returns true if sanitizer attributes are present on a function.
@@ -1367,6 +1381,19 @@ struct AAAMDGPUMinAGPRAlloc
       switch (CB.getIntrinsicID()) {
       case Intrinsic::not_intrinsic:
         break;
+      case Intrinsic::amdgcn_call_whole_wave: {
+        // As a direct call of its callee.
+        Function *Callee = getWholeWaveCallee(CB);
+        if (!Callee)
+          return false;
+        const AAAMDGPUMinAGPRAlloc *CalleeInfo =
+            A.getAAFor<AAAMDGPUMinAGPRAlloc>(
+                *this, IRPosition::function(*Callee), DepClassTy::REQUIRED);
+        if (!CalleeInfo || !CalleeInfo->isValidState())
+          return false;
+        Maximum.takeAssumedMaximum(CalleeInfo->getAssumed());
+        return true;
+      }
       case Intrinsic::write_register:
       case Intrinsic::read_register:
       case Intrinsic::read_volatile_register: {
@@ -1483,6 +1510,13 @@ struct AAAMDGPUNoLDSDMA : public StateWrapper<BooleanState, AbstractAttribute> {
       // operation.
       if (isa<InlineAsm>(CB.getCalledOperand()))
         return false;
+
+      // A whole-wave call issues what its callee issues.
+      if (Function *Callee = getWholeWaveCallee(CB)) {
+        const AAAMDGPUNoLDSDMA *CalleeInfo = A.getAAFor<AAAMDGPUNoLDSDMA>(
+            *this, IRPosition::function(*Callee), DepClassTy::REQUIRED);
+        return CalleeInfo && CalleeInfo->getAssumed();
+      }
 
       Intrinsic::ID IID = CB.getIntrinsicID();
       if (IID != Intrinsic::not_intrinsic) {

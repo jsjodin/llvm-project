@@ -5628,16 +5628,27 @@ needs and the waves a SIMD:
    kernel-resource-usage remarks, beside a HIP file's for comparison. Then
    lit checks that pin the benchmarks' occupancy, so that a regression
    fails a test, not a run.
-2. *Budget.* merkc sets `"amdgpu-waves-per-eu"` and
-   `"amdgpu-agpr-alloc"="0,0"` on every function of a process image, the
-   runtime's device library likewise; an occupancy target with a default
+2. *Budget.* `"amdgpu-waves-per-eu"` on the process image's kernel, which
+   the attributor carries to every function it calls, with AGPRs then
+   limited by the attribute of step 5; an occupancy target with a default
    a GPU and a flag. Timed on gfx90a against HIP.
 3. *Less demand.* Team-uniform values where LLVM sees them uniform (SGPRs);
    32-bit index arithmetic where ranges allow; cold runtime paths kept out
    of line from hot loops.
 4. *Structure,* if 1 to 3 fall short: team workers a kernel of their own
    with their own budget, apart from the process lane's control code.
-5. The attributor bug, upstream, with a test; not on the critical path.
+5. The attributor bug. *Fixed 2026-11-18* (`AMDGPUAttributor.cpp`,
+   `test/CodeGen/AMDGPU/amdgpu-attributor-call-whole-wave.ll`), and on the
+   critical path after all: under a wave cap a function with
+   `"amdgpu-agpr-alloc"="0"` gets no AGPRs (`getMaxNumVectorRegs`), but one
+   with no attribute keeps half the budget for them. So the cap of step 2
+   needs every function to have it, with no `"0,0"` forced by merkc (an
+   `llc` run of the image's IR with a cap of 4 waves and `"0"` on every
+   function: 128 VGPRs, no AGPRs, 4 waves). The whole-wave call had also
+   cost the chain every `amdgpu-no-*` implicit argument. It now counts as a
+   call of its callee for AGPRs and LDS DMA, and as whole-wave mode with no
+   implicit arguments otherwise, since a whole-wave callee is passed none.
+   An upstream candidate.
 
 ## A pipeline of processes
 
