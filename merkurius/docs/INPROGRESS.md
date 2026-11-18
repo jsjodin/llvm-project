@@ -5621,6 +5621,39 @@ needs and the waves a SIMD:
 | HIP `step` | 128 / 0 | 4 | 128 | 8 |
 | C (OpenMP) `step` | 210 / 0 | 2 | | |
 
+**Corrected 2026-11-18 (step 3's first look).** Two of these numbers
+misled:
+- HIP's 128 is a cap, not its need. With no `__launch_bounds__`, HIP
+  assumes blocks of 1024 threads, which allows 128 VGPRs, and spills 133
+  and reloads 145 times to fit. With `__launch_bounds__(256)`, as
+  Mercury's teams, its `step` takes 188 on gfx90a (200 on gfx1030), with
+  no spills.
+- `gpu-registers.py` counted the callee-saved VGPRs that a function, not
+  a kernel, saves on entry as spills. `merk_team_loop`'s "46/90" were all
+  saves, once a call. It now counts them apart, as Saved.
+
+What `step`'s body needs, alone in `merk_team_loop` (`llc` with the other
+bodies cut out, the scheduler's register pressure):
+
+| `step`, gfx90a | Peak pressure | VGPRs given | In-loop spills at 4 waves |
+|---|---:|---:|---:|
+| Mercury | 206 | 248 | 418 |
+| HIP, `__launch_bounds__(256)` | 195, 182 after rematerializing | 188 | 278 |
+
+- Uncapped, Mercury's body has no spills. 248 rather than 206 is the
+  calling convention: the allocator keeps to the registers a callee need
+  not save, which are spread up to v255, so the count is the highest
+  used, not the most live. At 2 waves, gfx90a's default, it makes no
+  difference.
+- Mercury's demand is 6 to 13% above HIP's. HIP's arithmetic is the
+  same within 10% (fmul 339 against 327, fdiv 73 against 65).
+- Under a cap Mercury spills 1.5 times what HIP does. Passing the team
+  loop's team-uniform arguments in SGPRs (`inreg` on the definition)
+  takes the 418 to 382, but adds 24 spills uncapped. Not kept.
+- So the gap to HIP is not the program's demand. It is what a persistent
+  kernel costs: a function's calling convention, and one allocation
+  for all bodies.
+
 **The plan, in order:**
 1. *Measure.* Done 2026-11-18. `utils/gpu/gpu-registers.py`: for a program and one or more
    GPUs, each image's kernels and functions with their VGPRs, AGPRs,
@@ -5648,7 +5681,9 @@ needs and the waves a SIMD:
      at the cap that adds none. To do: time 2, 3 and 4 on gfx90a.
 3. *Less demand.* Team-uniform values where LLVM sees them uniform (SGPRs);
    32-bit index arithmetic where ranges allow; cold runtime paths kept out
-   of line from hot loops.
+   of line from hot loops. *Looked at 2026-11-18* (above): demand is
+   within 13% of HIP's, and `inreg` arguments save 9% of spills under a
+   cap. Small gains, so step 4 matters more than thought.
 4. *Structure,* if 1 to 3 fall short: team workers a kernel of their own
    with their own budget, apart from the process lane's control code.
 5. The attributor bug. *Fixed 2026-11-18* (`AMDGPUAttributor.cpp`,
