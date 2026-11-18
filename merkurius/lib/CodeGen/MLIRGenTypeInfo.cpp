@@ -393,12 +393,34 @@ mlir::ArrayAttr MerkGenerator::FunctorsAttr(
 }
 
 void MerkGenerator::EnsureRootDescriptors(const semantics::Type *type) {
-  if (type->kind == semantics::TypeKind::Variable || !CanDescribe(*type) ||
-      !EnsureDescriptor(*type, parser::CharBlock{})) {
+  llvm::StringSet<> seen;
+  EnsureRootDescriptors(type, seen);
+}
+
+void MerkGenerator::EnsureRootDescriptors(
+    const semantics::Type *type, llvm::StringSet<> &seen) {
+  if (type->kind == semantics::TypeKind::Variable ||
+      !seen.insert(semantics::TypeToString(*type)).second ||
+      !CanDescribe(*type) || !EnsureDescriptor(*type, parser::CharBlock{})) {
     return;
   }
   for (const semantics::Type *argument : TypeParts(*type)) {
-    EnsureRootDescriptors(argument);
+    EnsureRootDescriptors(argument, seen);
+  }
+  // A deconstruction gives every field of a cell, though no variable may
+  // have one that the goal leaves unused, so the fields' types are roots'
+  // too: a field of an array of records of another module's type, which
+  // nothing else here names, would have no descriptor.
+  if (type->kind != semantics::TypeKind::Named) {
+    return;
+  }
+  if (const std::vector<semantics::ConstructorTypes> *constructors{
+          modes_.ops().ConstructorsOf(type)}) {
+    for (const semantics::ConstructorTypes &constructor : *constructors) {
+      for (const semantics::Type *field : ArgumentsOf(type, constructor)) {
+        EnsureRootDescriptors(field, seen);
+      }
+    }
   }
 }
 
