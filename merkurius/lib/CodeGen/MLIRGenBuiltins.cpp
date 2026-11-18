@@ -379,6 +379,49 @@ mlir::Value MerkGenerator::IntegerShift(mlir::Value value, mlir::Value amount,
       : mlir::Value{arith::ShRSIOp::create(builder_, loc, value, amount)};
 }
 
+// A rotation of an unsigned fixed-width integer by an amount of type uint
+// (library reference, "uint8" and the others): the bits shifted out at one
+// end come back at the other. An amount of the width or more is an error,
+// unless the rotation is unchecked; then it is taken modulo the width.
+// LLVM turns the two shifts and the or into a funnel shift, one rotate
+// instruction where the target has one.
+mlir::Value MerkGenerator::IntegerRotate(mlir::Value value, mlir::Value amount,
+    llvm::StringRef module, llvm::StringRef name, bool left, bool checked,
+    mlir::Location loc) {
+  namespace arith = mlir::arith;
+  auto type{mlir::cast<mlir::IntegerType>(value.getType())};
+  unsigned bits{type.getWidth()};
+  auto amountType{mlir::cast<mlir::IntegerType>(amount.getType())};
+  if (checked) {
+    mlir::Value out{arith::CmpIOp::create(builder_, loc,
+        arith::CmpIPredicate::uge, amount,
+        IntegerConstant(amountType, bits, loc))};
+    // mmc: "function `uint32.rotate_left'/2: rotate amount exceeds 31 bits".
+    merk::ThrowIfOp::create(builder_, loc, out,
+        ("Software Error: function `" + module + "." + name +
+            "'/2: rotate amount exceeds " + llvm::Twine(bits - 1) + " bits")
+            .str());
+  }
+  if (amountType.getWidth() > bits) {
+    amount = arith::TruncIOp::create(builder_, loc, type, amount);
+  } else if (amountType.getWidth() < bits) {
+    amount = arith::ExtUIOp::create(builder_, loc, type, amount);
+  }
+  mlir::Value mask{IntegerConstant(type, bits - 1, loc)};
+  amount = arith::AndIOp::create(builder_, loc, amount, mask);
+  mlir::Value back{arith::AndIOp::create(builder_, loc,
+      arith::SubIOp::create(
+          builder_, loc, IntegerConstant(type, 0, loc), amount),
+      mask)};
+  mlir::Value toward{left
+          ? mlir::Value{arith::ShLIOp::create(builder_, loc, value, amount)}
+          : mlir::Value{arith::ShRUIOp::create(builder_, loc, value, amount)}};
+  mlir::Value around{left
+          ? mlir::Value{arith::ShRUIOp::create(builder_, loc, value, back)}
+          : mlir::Value{arith::ShLIOp::create(builder_, loc, value, back)}};
+  return arith::OrIOp::create(builder_, loc, toward, around);
+}
+
 // "Field access functions are implemented directly as unifications"
 // (reference manual, "Field selection"): the term is deconstructed by the
 // field's constructor, which fails if it has another, and for an update
@@ -738,6 +781,14 @@ bool MerkGenerator::Builtin(const Body &goal, const Procedure &callee,
     } else if (name == "unchecked_right_shift") {
       result = IntegerShift(in[0], in[1], module, "", /*left=*/false,
           /*checked=*/false, loc);
+    } else if (isUnsigned &&
+        (name == "rotate_left" || name == "rotate_right" ||
+            name == "unchecked_rotate_left" ||
+            name == "unchecked_rotate_right")) {
+      llvm::StringRef rotation{name};
+      bool checked{!rotation.consume_front("unchecked_")};
+      result = IntegerRotate(in[0], in[1], module, name,
+          /*left=*/rotation == "rotate_left", checked, loc);
     } else if (name == "/\\") {
       result = arith::AndIOp::create(builder_, loc, in[0], in[1]);
     } else if (name == "\\/") {
