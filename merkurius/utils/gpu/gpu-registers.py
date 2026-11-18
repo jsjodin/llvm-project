@@ -28,7 +28,10 @@ counts (.L<function>.num_vgpr and so on, which are the most of the
 function's and its callees'), and each kernel's occupancy expression, copied
 into a symbol of its own. A function's own registers are the first operand
 of its count's max(). Spills and reloads are counted from the backend's
-comments on them, statically: where they are in loops is not weighed.
+comments on them, statically: where they are in loops is not weighed. A
+function that is not a kernel saves the callee-saved registers it uses,
+which the backend marks as spills too: those stored in its entry block and
+loaded back in a block that returns are counted apart, as Saved, once each.
 --json prints the same as JSON, for tests.
 """
 
@@ -111,6 +114,36 @@ def build_c(args, source, work):
 
 SPILL = re.compile(r";.*\b(Folded )?Spill\b")
 RELOAD = re.compile(r";.*\b(Folded )?Reload\b")
+REGISTER = re.compile(r"\b([va])(?:(\d+)\b|\[(\d+):\d+\])")
+
+
+def is_spill(line):
+    """Whether `line` is a spill, rather than a reload: a store the backend
+    marks as one, or a copy of a VGPR into an AGPR, which it marks
+    "Reload Reuse" either way."""
+    if re.match(r"\s*v_accvgpr_write", line):
+        return True
+    return bool(SPILL.search(line))
+
+
+def callee_saved(line):
+    """Whether the vector register that the spill or reload on `line` keeps
+    is one that a function must keep for its caller: v40-v47, v56-v63 and so
+    on in eights, and a32 up (SIRegisterInfo.td's CSR). It is the first
+    register named, but the VGPR that a v_accvgpr_write copies."""
+    instruction = line.split(";")[0].split(None, 1)
+    if len(instruction) < 2:
+        return False
+    found = list(REGISTER.finditer(instruction[1]))
+    if not found:
+        return False
+    m = found[0]
+    if instruction[0].startswith("v_accvgpr_write") and len(found) > 1:
+        m = found[1]
+    n = int(m.group(2) if m.group(2) is not None else m.group(3))
+    if m.group(1) == "a":
+        return n >= 32
+    return n >= 40 and (n - 40) % 16 < 8
 
 
 def parse_assembly(path):
@@ -128,9 +161,15 @@ def parse_assembly(path):
                 current = m.group(1)
                 if current not in functions:
                     functions[current] = {"kernel": False, "spills": 0,
-                                          "reloads": 0, "bytes": 0,
+                                          "reloads": 0, "saves": 0,
+                                          "restores": 0, "bytes": 0,
                                           "occupancy_expr": None}
                     order.append(current)
+                # Whether a block has begun after the entry's, and the
+                # reloads of callee-saved registers since the block began,
+                # which are restores if the block returns.
+                in_entry = True
+                restores = 0
                 continue
             m = re.match(r"\s*\.set\s+(\S+)\.num_vgpr,\s*(.*)$", line)
             if m:
@@ -144,10 +183,25 @@ def parse_assembly(path):
             if current is None:
                 continue
             info = functions[current]
-            if SPILL.search(line):
-                info["spills"] += 1
-            elif RELOAD.search(line):
-                info["reloads"] += 1
+            if re.match(r"\.LBB\S*:", line):
+                in_entry = False
+                info["reloads"] += restores
+                restores = 0
+            elif re.match(r"\s*s_setpc_b64\b", line):
+                info["restores"] += restores
+                restores = 0
+            if not (SPILL.search(line) or RELOAD.search(line)):
+                pass
+            elif is_spill(line):
+                if in_entry and callee_saved(line):
+                    info["saves"] += 1
+                else:
+                    info["spills"] += 1
+            else:
+                if callee_saved(line):
+                    restores += 1
+                else:
+                    info["reloads"] += 1
             m = re.match(r"; codeLenInByte = (\d+)", line)
             if m:
                 info["bytes"] = int(m.group(1))
@@ -158,8 +212,14 @@ def parse_assembly(path):
             if re.match(r"\s*\.amdhsa_kernel\s", line):
                 info["kernel"] = True
     for name in order:
-        functions[name]["own_vgpr"] = own.get(
-            name, own.get(".L" + name))
+        info = functions[name]
+        info["own_vgpr"] = own.get(name, own.get(".L" + name))
+        # A kernel keeps nothing for a caller: its spills are all spills.
+        if info["kernel"]:
+            info["spills"] += info["saves"]
+            info["reloads"] += info["restores"]
+            info["saves"] = 0
+        del info["restores"]
     return order, functions
 
 
@@ -256,15 +316,15 @@ def report(args, kind, arch, cpu, path, order, functions):
               (short(names[n], 44), number(f["vgpr"]), number(f["agpr"]),
                number(f["sgpr"]), number(f["scratch"]),
                number(f["occupancy"]), f["spills"], f["reloads"]))
-    print("%-44s %6s %6s %6s %8s %7s %7s %7s" %
+    print("%-44s %6s %6s %6s %8s %7s %7s %6s %7s" %
           ("Function", "VGPR", "Own", "AGPR", "Scratch", "Spills", "Reloads",
-           "Bytes"))
+           "Saved", "Bytes"))
     for n in others:
         f = functions[n]
-        print("%-44s %6s %6s %6s %8s %7d %7d %7d" %
+        print("%-44s %6s %6s %6s %8s %7d %7d %6d %7d" %
               (short(names[n], 44), number(f["vgpr"]), number(f["own_vgpr"]),
                number(f["agpr"]), number(f["scratch"]), f["spills"],
-               f["reloads"], f["bytes"]))
+               f["reloads"], f["saves"], f["bytes"]))
     print()
 
 
