@@ -255,6 +255,12 @@ template <typename T> using Local = __attribute__((address_space(3))) T;
 // that each wave of the team runs, by the wave's place in the team, which
 // the wave sets as the process starts.
 constexpr uint32_t kMostPlaceWaves{kPlaceTeamThreads / 32};
+// The threads of a team of merk_place, which has exactly kPlaceTeamThreads
+// (process-start.cpp). Its code uses this, not __gpu_num_threads_x(), which
+// loads the dispatch's sizes from the kernel's implicit arguments. The
+// plugin keeps those in host memory, so each load crosses the bus: one in
+// the reduction of a process's loop took 2.5 µs of its 3.4 on the gfx1030.
+constexpr uint32_t kTeamThreads{kPlaceTeamThreads};
 // The most sleeps of an idle wave of merk_place between looks at its slot.
 constexpr uint32_t kMostPlaceSleeps{64};
 [[clang::loader_uninitialized]] Local<Arena *> placeArenas[kMostPlaceWaves];
@@ -1542,7 +1548,7 @@ void ReduceAcrossTeam(uint64_t loop, uint64_t *partials, uint32_t inTeam) {
   }
   __gpu_sync_threads();
   if (__gpu_thread_id_x() < lanes) {
-    if (lane < __gpu_num_threads_x() / lanes) {
+    if (lane < kTeamThreads / lanes) {
       for (uint32_t r{0}; r < kProcessLoopReductions; ++r) {
         partials[r] = wavePartials[lane][r];
       }
@@ -1583,7 +1589,7 @@ void ReduceAcrossTeam(uint64_t loop, uint64_t *partials, uint32_t inTeam) {
   }
   __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE);
   merk_process_loop_start(loop, partials);
-  uint64_t threads{__gpu_num_threads_x()};
+  uint64_t threads{kTeamThreads};
   for (uint64_t team{__gpu_thread_id_x()}; team < workers; team += threads) {
     merk_process_loop_reduce(
         loop, partials, control->partials + team * kProcessLoopReductions);
@@ -1613,7 +1619,7 @@ uint64_t *TeamWords(Local<uint64_t> *words) { return (uint64_t *)words; }
   if (reductions) {
     merk_process_loop_start(loop, partials);
   }
-  int64_t threads{static_cast<int64_t>(__gpu_num_threads_x())};
+  int64_t threads{kTeamThreads};
   int64_t rounds{count > 0 ? (count + threads - 1) / threads : 0};
   merk_team_loop(loop, static_cast<int64_t>(__gpu_thread_id_x()), rounds,
       threads, count, first, step,
@@ -1762,7 +1768,7 @@ bool Bulk(uint64_t what, uint64_t *to, uint64_t fromOrWord, uint64_t words,
   placeControls[inTeam] = nullptr;
   teamMains[inTeam] = 0;
   processWaves[inTeam] = 0;
-  int64_t threads{static_cast<int64_t>(__gpu_num_threads_x())};
+  int64_t threads{kTeamThreads};
   int64_t stride{static_cast<int64_t>(workers) * threads};
   int64_t base{static_cast<int64_t>(worker) * threads};
   int64_t thread{static_cast<int64_t>(__gpu_thread_id_x())};
@@ -1892,7 +1898,7 @@ extern "C" bool merk_device_bulk_copy(
 extern "C" void merk_device_place(PlaceTable *table) {
   uint32_t inTeam{__gpu_thread_id_x() / __gpu_num_lanes()};
   uint64_t wave{static_cast<uint64_t>(__gpu_block_id_x()) *
-          (__gpu_num_threads_x() / __gpu_num_lanes()) +
+          (kTeamThreads / __gpu_num_lanes()) +
       inTeam};
   bool hasSlot{inTeam < kMostPlaceWaves && wave < LoadSlotWord(&table->slots)};
   if (hasSlot && __gpu_lane_id() == 0) {
