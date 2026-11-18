@@ -47,7 +47,7 @@ saxpy(A, X, !Y) :-
     ( for(I, 0, N - 1) do
         !Y ^ unsafe_elem(I) := A * X ^ unsafe_elem(I) + !.Y ^ unsafe_elem(I)
     ).
-% MERK-LABEL: merk.proc private @omp_parallel_do.saxpy_4_0(%arg0: f64, %arg1: !merk.array<f64>, %arg2: !merk.array<f64>) -> !merk.array<f64>
+% MERK-LABEL: merk.proc private @omp_parallel_do.saxpy_4_0(%arg0: f64, %arg1: !merk.array<f64>, %arg2: !merk.array<f64> {merk.clobbered}) -> !merk.array<f64>
 % MERK-NEXT:    %[[SIZE:.*]] = merk.array_size %arg1
 % MERK:    %[[TEAM:.*]] = merk.foreign_call @merk_parallel_enter() : () -> i32
 % MERK-NEXT:    omp.parallel num_threads(%[[TEAM]] : i32) {

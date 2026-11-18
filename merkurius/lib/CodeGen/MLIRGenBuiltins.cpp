@@ -241,10 +241,11 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
         CompareInts(
             arith::CmpIPredicate::slt, n, IntegerConstant(i64, 0, loc), loc),
         SoftwareError("resize", 4, "cannot resize to a negative size"));
-    return GiveOutputs(out,
-        {merk::ArrayResizeOp::create(builder_, loc, array.getType(), array, n,
-            element,
-            ArgumentElementTypeInfo(arguments, body, loc, goal.tokens))});
+    auto resize{merk::ArrayResizeOp::create(builder_, loc, array.getType(),
+        array, n, element,
+        ArgumentElementTypeInfo(arguments, body, loc, goal.tokens))};
+    MarkClobbers(resize, callee.modes[function ? 0 : 2]);
+    return GiveOutputs(out, {resize});
   }
   // shrink(N, !A) and shrink(A, N).
   if (name == "shrink" && HasShape(in, out, 2, 1)) {
@@ -256,9 +257,10 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
         CompareInts(
             arith::CmpIPredicate::slt, n, IntegerConstant(i64, 0, loc), loc),
         SoftwareError("shrink", 3, "cannot shrink to a negative size"));
-    return GiveOutputs(out,
-        {merk::ArrayResizeOp::create(builder_, loc, array.getType(), array, n,
-            mlir::Value{}, mlir::Value{})});
+    auto resize{merk::ArrayResizeOp::create(builder_, loc, array.getType(),
+        array, n, mlir::Value{}, mlir::Value{})};
+    MarkClobbers(resize, callee.modes[function ? 0 : 1]);
+    return GiveOutputs(out, {resize});
   }
   return CompiledArrayCall(goal, symbol);
 }
