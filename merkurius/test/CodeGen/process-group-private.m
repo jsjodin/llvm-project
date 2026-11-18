@@ -5,6 +5,9 @@
 % one loop across the team's threads and reads it back reversed by
 % another; one of 20000 ints does not fit in a team's local memory, so it
 % is in the process's memory instead (fallback(default_mem), the default).
+% It does so twice, the second time with array.unsafe_noinit, whose array
+% is not filled, as fill writes every element, and answers the sum only if
+% both agree.
 %
 % mmc has no process module to run it with, so the output is written by
 % hand (process-group-private-gpu.test runs it).
@@ -14,7 +17,10 @@
 % RUN: merkc -fc1 -fprocess-loops -fopenmp-version=61 -fdo-loops -fprocess-declarations -fprocess-kernels -triple amdgcn-amd-amdhsa -target-cpu gfx1030 -emit-merk %s -o - | FileCheck %s --check-prefix=MERK
 % MERK-LABEL: merk.proc private @process_group_private.tiles__body_{{[0-9_]+}}(
 % MERK-NEXT: merk.foreign_call @merk_device_group_begin() : () -> ()
-% MERK: merk.array_new %{{.*}} {merk.group_private = 1 : i32} -> <i64>
+% MERK: merk.array_new %{{.*}}, %{{.*}} : i64 {merk.group_private = 1 : i32} -> <i64>
+% MERK-LABEL: merk.proc private @process_group_private.tiles_noinit__body_{{[0-9_]+}}(
+% MERK-NEXT: merk.foreign_call @merk_device_group_begin() : () -> ()
+% MERK: merk.array_new %{{[[:alnum:]]+}} {merk.group_private = 1 : i32} -> <i64>
 %
 % FreeAtLastUse frees no group-private array, nor fill's result, the same
 % array updated in place, which the runtime frees at the iteration's end.
@@ -34,6 +40,9 @@
 % LLVM-NEXT: call void @merk_device_group_begin()
 % LLVM: call void @merk_device_group_next(i32 1)
 % LLVM-NEXT: call ptr @merk_array_new(
+% LLVM-LABEL: define internal ptr @process_group_private.tiles_noinit__body_{{[0-9_]+}}(
+% LLVM: call void @merk_device_group_next(i32 1)
+% LLVM-NEXT: call ptr @merk_array_alloc(
 %
 % On the host, as in a kind spawned there, the clause changes nothing.
 % RUN: merkc -fc1 -fopenmp -fopenmp-version=61 -fdo-loops -fprocess-declarations -triple x86_64-unknown-linux-gnu -emit-merk %s -o - | FileCheck %s --check-prefix=HOST
@@ -55,10 +64,14 @@ worker(Reply, Self, !IO) :-
         Tiles = 50,
         array.init(Tiles * T, 0, Out0),
         tiles(Tiles, T, Out0, Out),
-        ( for(I, 0, Tiles * T - 1), fromto(0, S0, S1, Sum) do
-            S1 = S0 + Out ^ unsafe_elem(I)
+        array.init(Tiles * T, 0, Again0),
+        tiles_noinit(Tiles, T, Again0, Again),
+        ( for(I, 0, Tiles * T - 1), fromto(0, S0, S1, Sum),
+            fromto(0, A0, A1, SumAgain) do
+            S1 = S0 + Out ^ unsafe_elem(I),
+            A1 = A0 + Again ^ unsafe_elem(I)
         ),
-        send(Reply, Sum, !IO),
+        send(Reply, ( if Sum = SumAgain then Sum else -1 ), !IO),
         worker(Reply, Self, !IO)
     else
         true
@@ -72,6 +85,16 @@ tiles(Tiles, T, !Out) :-
     %$omp teams distribute dyn_groupprivate(G0)
     ( for(J, 0, Tiles - 1) do
         array.init(T, 0, G0),
+        fill(J, T, G0, G),
+        reverse_into(J, T, G, !Out)
+    ).
+
+:- pred tiles_noinit(int::in, int::in, array(int)::array_di,
+    array(int)::array_uo) is det.
+tiles_noinit(Tiles, T, !Out) :-
+    %$omp teams distribute dyn_groupprivate(G0)
+    ( for(J, 0, Tiles - 1) do
+        array.unsafe_noinit(T, G0),
         fill(J, T, G0, G),
         reverse_into(J, T, G, !Out)
     ).

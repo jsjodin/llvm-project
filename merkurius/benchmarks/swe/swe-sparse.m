@@ -516,8 +516,10 @@ step_faces(G, DT, NActive, Actives, Pos, Nb, Cur, !Next, !Wet, !Edges,
     ( for(J, 0, NActive - 1) do
         I = int32.to_int(Actives ^ unsafe_elem(J)),
         P = int32.to_int(Pos ^ unsafe_elem(I)),
-        array.init(4 * Count, 0.0, Faces0),
-        array.init(3 * TT, 0.0, Diffs0),
+        % Not filled: x_faces and y_faces write every face, and x_diffs
+        % every difference, before any is read.
+        array.unsafe_noinit(4 * Count, Faces0),
+        array.unsafe_noinit(3 * TT, Diffs0),
         x_faces(G, I, P, Nb, Cur, Faces0, Faces1),
         x_diffs(G, Faces1, Diffs0, Diffs),
         y_faces(G, I, P, Nb, Cur, Faces1, Faces),

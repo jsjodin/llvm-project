@@ -544,7 +544,7 @@ void MerkGenerator::MarkGroupPrivateArrays() {
       });
       if (!found) {
         Error(loop.at,
-            "%s is not an array that the loop's body makes with array.init"_err_en_US,
+            "%s is not an array that the loop's body makes with array.init or array.unsafe_noinit"_err_en_US,
             name);
       }
     }
@@ -1629,8 +1629,9 @@ std::optional<omp::ConstructQueue> MerkGenerator::Decompose(
 }
 
 // OpenMP 6.1's dyn_groupprivate([modifiers :] A, ...), where each A is an
-// array that the loop's body makes with array.init (docs/INPROGRESS.md, GPU
-// processes that run loops, (s5)), rather than OpenMP's size in bytes. The
+// array that the loop's body makes with array.init or array.unsafe_noinit
+// (docs/INPROGRESS.md, GPU processes that run loops, (s5)), rather than
+// OpenMP's size in bytes. The
 // modifiers: fallback(default_mem), the default, or fallback(abort); and
 // cgroup, the only access group there is.
 bool MerkGenerator::GroupPrivateClause(const omp::ConstructQueue &queue,
@@ -1695,7 +1696,7 @@ bool MerkGenerator::GroupPrivateClause(const omp::ConstructQueue &queue,
         const auto *variable{std::get_if<const parser::Variable *>(&argument)};
         if (!variable) {
           Error(at,
-              "a dyn_groupprivate clause names arrays that the loop's body makes with array.init"_err_en_US);
+              "a dyn_groupprivate clause names arrays that the loop's body makes with array.init or array.unsafe_noinit"_err_en_US);
           return false;
         }
         if (llvm::is_contained(clause.names, (*variable)->name)) {
@@ -1708,7 +1709,7 @@ bool MerkGenerator::GroupPrivateClause(const omp::ConstructQueue &queue,
       }
       if (clause.names.empty()) {
         Error(at,
-            "a dyn_groupprivate clause names arrays that the loop's body makes with array.init"_err_en_US);
+            "a dyn_groupprivate clause names arrays that the loop's body makes with array.init or array.unsafe_noinit"_err_en_US);
         return false;
       }
       result = std::move(clause);

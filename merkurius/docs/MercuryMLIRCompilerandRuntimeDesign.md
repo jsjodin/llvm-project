@@ -5456,6 +5456,27 @@ binary, two runs within 4 µs; average step, µs:
   Mercury's `step` is now 5% faster than HIP's, by its bookkeeping; its
   `step_faces` is 10% slower than HIP's, 36 µs, about the code
   differences and Mercury's own above.
+- **`array.unsafe_noinit`, 2026-11-18,** after 267d3b96cb53 with the
+  change that adds it (a Merkurius extension, `library/array.m`):
+  `step_faces` makes `Faces` and `Diffs` with it, as every element is
+  written before it is read. `compare-swe.sh`, 3 rounds: 390 µs (27)
+  against HIP's 374 (50), from 412; the same checksum. Single runs, two
+  rounds each, to find where the fill's 22 µs went:
+
+  | `step_faces`, group-private arrays | µs |
+  |---|---:|
+  | `array.init`, as before | 412–413 |
+  | `array.init`, elements 256-byte aligned, as large arrays' in global memory | 411–412 |
+  | `array.init`, the team's hand-off kept, its stores skipped | 407 |
+  | `array.unsafe_noinit` | 390–392 |
+
+  The arrays' alignment costs nothing: their elements start on 8 bytes in
+  local memory, after a 16-byte-aligned header, and `ds_write_b64` needs no
+  more; aligned to 256 they took the same time, so the runtime keeps 16 and
+  its 248 bytes an array. Of the fill, about 17 µs is the hand-off from the
+  first wave to the team's threads, two barriers an array, two arrays a
+  tile, and 6 µs the stores; HIP's fill, by its threads already running,
+  cost 2 µs (above).
 - Not measured: an odd `HSA_CU_MASK` such as `0:0-38` on the gfx1030
   (80 compute units) runs on more units than it names, as the mask is
   taken by whole WGPs; a run of fewer teams needs fewer blocks, not a

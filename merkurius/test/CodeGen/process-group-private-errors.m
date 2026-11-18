@@ -48,7 +48,7 @@ worker(Reply, Self, !IO) :-
 
 :- pred unmade(int::in, array(int)::array_di, array(int)::array_uo) is det.
 unmade(N, !A) :-
-% DEVICE: :[[@LINE+1]]:5: error: X is not an array that the loop's body makes with array.init
+% DEVICE: :[[@LINE+1]]:5: error: X is not an array that the loop's body makes with array.init or array.unsafe_noinit
     %$omp teams distribute dyn_groupprivate(G, X)
     ( for(I, 0, N - 1) do
         array.init(4, I, G),
@@ -58,7 +58,7 @@ unmade(N, !A) :-
 :- pred not_variable(int::in, array(int)::array_di, array(int)::array_uo)
     is det.
 not_variable(N, !A) :-
-% CHECK: :[[@LINE+1]]:5: error: a dyn_groupprivate clause names arrays that the loop's body makes with array.init
+% CHECK: :[[@LINE+1]]:5: error: a dyn_groupprivate clause names arrays that the loop's body makes with array.init or array.unsafe_noinit
     %$omp teams distribute dyn_groupprivate(64)
     ( for(I, 0, N - 1) do
         !A ^ unsafe_elem(I) := I

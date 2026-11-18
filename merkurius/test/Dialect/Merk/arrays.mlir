@@ -92,7 +92,7 @@ module @arrays attributes {llvm.target_triple = "x86_64-unknown-linux-gnu", merk
 // LLVM-NEXT: %[[P:.*]] = inttoptr i64 %[[W]] to ptr addrspace(1)
 // LLVM-NEXT: call ptr addrspace(1) @merk_array_new(i64 %0, ptr addrspace(1) %[[P]], i64 0)
 // LLVM-NEXT: call void @merk_gc_poll()
-// LLVM-NEXT: call ptr addrspace(1) @merk_array_new(i64 %0, ptr addrspace(1) null, i64 3)
+// LLVM-NEXT: call ptr addrspace(1) @merk_array_alloc(i64 %0, i64 3, i64 0)
 // The index is checked against the size, the header's low 56 bits, as
 // unsigned.
 // LLVM-LABEL: define tailcc { i64, double } @arrays.get_3_0(ptr addrspace(1) %0, i64 %1)
@@ -126,7 +126,7 @@ module @arrays attributes {llvm.target_triple = "x86_64-unknown-linux-gnu", merk
 // LLVM: call ptr addrspace(1) @merk_array_new_typed(i64 %1, ptr addrspace(1) %2, ptr %{{.*}})
 // LLVM: call ptr addrspace(1) @merk_array_from_list_typed(ptr addrspace(1) %3, i64 1, ptr %{{.*}})
 // LLVM: %[[W:.*]] = call i64 @merk_array_words(ptr addrspace(1) %{{.*}})
-// LLVM: call ptr addrspace(1) @merk_array_new(i64 %[[W]], ptr addrspace(1) null, i64 1)
+// LLVM: call ptr addrspace(1) @merk_array_alloc(i64 %[[W]], i64 1, i64 0)
 // LLVM: %[[E:.*]] = getelementptr i64, ptr addrspace(1) %[[B:.*]], i32 1
 // LLVM-NEXT: %[[AT:.*]] = getelementptr i8, ptr addrspace(1) %[[E]], i64 %1
 // LLVM-NEXT: %[[X:.*]] = load i8, ptr addrspace(1) %[[AT]]

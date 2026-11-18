@@ -468,6 +468,8 @@ private:
   // none for one whose arrays' headers alone say: a type variable's, and
   // another module's abstract type's, whose layout this module does not see.
   std::optional<std::int64_t> ArrayWidth(mlir::Type element) const;
+  // runtime/array.h's kArrayRecords, the code of an array of records inline.
+  static constexpr std::int64_t kArrayRecordsCode{4};
   // The width's code an array operation makes its array with, for an
   // element type whose width lowering knows, or a word's for an empty array
   // with no `typeInfo`; the runtime makes one of a type_info's elements.
@@ -4324,7 +4326,18 @@ void Lowerer::LowerArray(mlir::Operation *op) {
         fallback && kernels_) {
       GroupPrivateNext(fallback, loc);
     }
-    if (record) {
+    if (!init && !(typeInfo && !ElementWidth(op) && !record)) {
+      // array.unsafe_noinit's, or an empty array's: its elements not set.
+      result = CallRuntime("merk_array_alloc", ptr,
+          {make->getOperand(0),
+              record ? mlir::Value{mlir::LLVM::ConstantOp::create(
+                           rewriter_, loc, i64, kArrayRecordsCode)}
+                     : MadeArrayWidth(op, typeInfo, loc),
+              record ? recordBytes
+                     : mlir::Value{mlir::LLVM::ConstantOp::create(
+                           rewriter_, loc, i64, 0)}},
+          loc);
+    } else if (record) {
       result = CallRuntime("merk_array_new_bytes", ptr,
           {make->getOperand(0), RecordSlot(op, init, record, loc), recordBytes},
           loc);
