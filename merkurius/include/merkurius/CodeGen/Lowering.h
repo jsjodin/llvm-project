@@ -43,7 +43,9 @@ void OutlineNondeterminism(mlir::ModuleOp);
 
 // Puts a merk.free after the last use of each cell, array and string that
 // a GPU process's code makes or receives, where it can tell (Frees.cpp).
-void FreeAtLastUse(mlir::ModuleOp);
+// False, after reporting it, if a group-private array may outlive its
+// iteration of its loop.
+bool FreeAtLastUse(mlir::ModuleOp);
 
 // Puts a merk.live before each safepoint (Liveness.cpp).
 void MarkSafepoints(mlir::ModuleOp);
@@ -95,9 +97,10 @@ bool CompileForeignCode(llvm::StringRef clang, llvm::StringRef code,
 bool LinkForeignCode(llvm::Module &, mlir::ModuleOp, const TargetInfo &,
     llvm::StringRef clang, std::string &error);
 
-// In a compile of GPU processes, hides every symbol the module defines, so
-// that their image, a shared object, exports only what its start object
-// does, its kernel among them, and LTO may internalize the rest
+// In a compile of GPU processes, hides every symbol the module defines but
+// the protected ones that the host reads, so that their image, a shared
+// object, exports only those and what its start object does, its kernel
+// among them, and LTO may internalize the rest
 // (docs/INPROGRESS.md, GPU processes without omp target, step 4b).
 void HideModuleSymbols(llvm::Module &);
 

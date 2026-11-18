@@ -105,6 +105,10 @@ struct LoadedImage {
   ol_program_handle_t program;
   const ProcessImage *image;
   LoadedImage *next;
+  // Whether the image's code makes group-private arrays, as its
+  // merk_device_group_private says (Lowering.cpp), for which its kernel is
+  // launched with dynamic local memory (GroupBytes).
+  bool groupPrivate;
 };
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -640,8 +644,22 @@ const char *Load(const char *module, const Gpu &gpu, LoadedImage *&entry) {
     olDestroyProgram(program);
     return error;
   }
+  // Whether the image's code makes group-private arrays: lowering defines
+  // merk_device_group_private as 1 over the device runtime's weak 0.
+  std::int32_t groupPrivate{0};
+  if (olGetSymbol(program, "merk_device_group_private",
+          kOlSymbolKindGlobalVariable, &symbol) ||
+      olGetSymbolInfo(symbol, kOlSymbolInfoGlobalVariableAddress,
+          sizeof address, &address) ||
+      olMemcpy(nullptr, &groupPrivate, nullptr, address, gpu.device,
+          sizeof groupPrivate)) {
+    olDestroyProgram(program);
+    return Error("could not read whether the module %s's image on GPU %lld "
+                 "has group-private arrays%s%s%s",
+        module, gpu.number, "", "", "");
+  }
   entry = static_cast<LoadedImage *>(Malloc(sizeof(LoadedImage)));
-  *entry = {module, gpu.number, program, image, loaded};
+  *entry = {module, gpu.number, program, image, loaded, groupPrivate != 0};
   loaded = entry;
   return nullptr;
 }
@@ -835,6 +853,39 @@ std::uint64_t ProcessStackBytes(const char *&error) {
   return bytes;
 }
 
+// The most dynamic local memory a team that keeps the kernel's count of
+// teams, `teams`, on the queue, for an image whose code makes group-private
+// arrays (docs/INPROGRESS.md, GPU processes that run loops, (s5)): a team's
+// local memory costs nothing that does not lower its occupancy, which its
+// registers usually set. In steps of 256 bytes, at most what a team may
+// have.
+std::size_t GroupBytes(const Gpu &gpu, ol_queue_handle_t queue,
+    ol_symbol_handle_t kernel, ol_kernel_launch_size_args_t size,
+    std::uint32_t teams) {
+  constexpr std::size_t kStep{256};
+  std::uint64_t most{0};
+  if (olGetDeviceInfo(
+          gpu.device, kOlDeviceInfoWorkGroupLocalMemSize, sizeof most, &most)) {
+    return 0;
+  }
+  // The steps from 0 to `low` keep the count; past `high`, none does.
+  std::size_t low{0};
+  std::size_t high{most / kStep};
+  while (low < high) {
+    std::size_t middle{(low + high + 1) / 2};
+    size.dynSharedMemory = middle * kStep;
+    std::uint32_t count{0};
+    if (!olGetKernelMaxCooperativeGroupCountOnQueue(
+            queue, kernel, &size, &count) &&
+        count >= teams) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return low * kStep;
+}
+
 // Launches the module's kernel on the GPU, with a slot for each of its
 // waves, as many teams as the GPU holds at once, at most `most` unless it is
 // 0, and makes it the kernel that spawns use once its teams have all
@@ -901,6 +952,10 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image, std::uint32_t most,
   table->queues = reinterpret_cast<std::uint64_t>(queues);
   table->check = CheckingDeviceMemory();
   table->bulkBytes = BulkBytes(gpu);
+  if (image.groupPrivate) {
+    size.dynSharedMemory = GroupBytes(gpu, queue, kernel, size, teams);
+    table->groupBytes = size.dynSharedMemory;
+  }
   PeerBlock *peerBlock{TakePeerBlock(gpu, slots)};
   if (peerBlock) {
     const GpuPeer &peer{gpuPeers[gpu.number]};

@@ -359,6 +359,16 @@ public:
 
   void Run();
   Summary Summarize();
+  // Whether the value's block may outlive the procedure: kept, given back
+  // by it, or joined with what the pass knows nothing of.
+  bool Escapes(mlir::Value);
+  // Whether the value is a group-private array, or one that updating it
+  // gave, which the runtime frees and no callee takes.
+  bool IsGroupPrivate(mlir::Value value) const {
+    mlir::Value id{IdOf(value)};
+    mlir::Operation *made{id ? id.getDefiningOp() : nullptr};
+    return made && made->hasAttr(kGroupPrivateAttrName);
+  }
   void InsertFrees(const Components &);
   bool IsOwned(unsigned index) const;
   // Whether the value is always a whole block, never a part of one: owned
@@ -713,6 +723,7 @@ llvm::SmallVector<llvm::SmallVector<unsigned, 2>> Analysis::HandOver(
     bool given{llvm::all_of(result.classArgs, [&](unsigned arg) {
       llvm::SmallVector<mlir::Value> blocks;
       return arg < owned->second.size() && owned->second[arg] &&
+          !IsGroupPrivate(call.getInputs()[arg]) &&
           WholeBlocks(call.getInputs()[arg], blocks) &&
           arg < summary.kept.size() && !summary.kept[arg];
     })};
@@ -892,9 +903,12 @@ void Analysis::Visit(mlir::Operation *op) {
   }
   if (mlir::isa<merk::ArrayNewOp, merk::ArrayCopyOp, merk::ArrayResizeOp>(op)) {
     // A new block, which holds the elements it is given; a copy's or a
-    // resize's array is only read.
+    // resize's array is only read. A group-private array is the runtime's
+    // to free, at its iteration's end, as a static one is nobody's.
     mlir::Value array{op->getResult(0)};
-    Track(array, Origin::Alloc, array);
+    Track(array,
+        op->hasAttr(kGroupPrivateAttrName) ? Origin::Static : Origin::Alloc,
+        array);
     bool copies{!mlir::isa<merk::ArrayNewOp>(op)};
     for (auto [index, operand] : llvm::enumerate(op->getOperands())) {
       if (!(copies && index == 0)) {
@@ -1012,6 +1026,41 @@ void Analysis::Visit(mlir::Operation *op) {
   }
   EscapeOperands(op);
   UnknownResults(op);
+}
+
+bool Analysis::Escapes(mlir::Value value) {
+  if (!Tracked(value)) {
+    return true;
+  }
+  // Its class, and those of the blocks that callees gave back in place of
+  // one of them.
+  llvm::DenseSet<mlir::Value> classes{Find(value)};
+  for (bool grew{true}; grew;) {
+    grew = false;
+    for (auto [successor, input] : replaces_) {
+      if (Tracked(input) && classes.contains(Find(input))) {
+        grew |= classes.insert(Find(successor)).second;
+      }
+    }
+  }
+  for (mlir::Value escaping : escaping_) {
+    if (classes.contains(Find(escaping))) {
+      return true;
+    }
+  }
+  for (mlir::Value other : values_) {
+    if (OriginOf(other) == Origin::Unknown && classes.contains(Find(other))) {
+      return true;
+    }
+  }
+  bool escapes{false};
+  proc_.walk([&](merk::SucceedOp succeed) {
+    for (mlir::Value output : succeed.getOutputs()) {
+      escapes |= MayHold(output.getType()) &&
+          (!Tracked(output) || classes.contains(Find(output)));
+    }
+  });
+  return escapes;
 }
 
 Summary Analysis::Summarize() {
@@ -2031,7 +2080,7 @@ bool ClearOwnedInputs(llvm::ArrayRef<merk::ProcOp> procs,
   return any;
 }
 
-void FreeAtLastUse(mlir::ModuleOp module) {
+bool FreeAtLastUse(mlir::ModuleOp module) {
   llvm::SmallVector<merk::ProcOp> procs{
       llvm::to_vector(module.getOps<merk::ProcOp>())};
   llvm::StringSet<> noTag;
@@ -2058,11 +2107,25 @@ void FreeAtLastUse(mlir::ModuleOp module) {
     }
   }
   Components components{ComponentFinder{procs}.Find()};
+  bool escaped{false};
   for (merk::ProcOp proc : procs) {
     Analysis analysis{proc, summaries, noTag, owned};
     analysis.Run();
+    // A group-private array, and each that updating it gives, goes at the
+    // end of its iteration of the loop, and so must not outlive the loop's
+    // body (docs/INPROGRESS.md, GPU processes that run loops, (s5)).
+    proc.walk([&](merk::ArrayNewOp made) {
+      if (made->hasAttr(kGroupPrivateAttrName) &&
+          analysis.Escapes(made.getResult())) {
+        made.emitError("a group-private array must not outlive its "
+                       "iteration of the loop, but the loop's body may give "
+                       "it, or an array updated from it, on");
+        escaped = true;
+      }
+    });
     analysis.InsertFrees(components);
   }
+  return !escaped;
 }
 
 } // namespace merkurius::codegen

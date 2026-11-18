@@ -24,10 +24,16 @@
 % - SWE_CASE 0: a column of water collapses and sloshes across the bowl;
 %   1: Thacker's oscillating paraboloid, whose exact solution has a moving
 %   shoreline, and the program prints the relative L1 error of the depth.
+% - SWE_KERNEL 2: each face's flux is computed once, into arrays of the
+%   tile's faces in the team's local memory (step_faces), as
+%   swe-sparse.hip's kernel 2; otherwise, as by default, each cell computes
+%   the fluxes at its four faces (step).
 %
 % A step is a loop under distribute over the active tiles, a team for each,
 % with a loop under parallel do over its cells across the team's threads,
 % which reduces its wet cells, its wet edges' bits and its largest speed.
+% Under SWE_KERNEL=2, loops over the tile's faces come first, whose fluxes
+% are in group-private arrays (dyn_groupprivate, OpenMP 6.1).
 % After it, the bookkeeping, as life-sparse.m's, which also finds the next
 % step's dt. A wet cell on a tile's edge or corner starts the tile beyond
 % it; a tile with no wet cell and no wet edge facing it for quiet_steps
@@ -44,9 +50,9 @@
 % each step's line.
 %
 % Built with -fprocess-declarations, -fdo-loops and --offload-arch, and
-% -fopenmp for the loops to run across the teams; without -fopenmp the
-% process runs them on its own lane. The first argument `host` spawns the
-% process at the host, for tests. See README.md.
+% -fopenmp -fopenmp-version=61 for the loops to run across the teams;
+% without -fopenmp the process runs them on its own lane. The first
+% argument `host` spawns the process at the host, for tests. See README.md.
 
 :- module swe_sparse.
 :- interface.
@@ -70,7 +76,8 @@
                 log :: int,
                 side :: int,
                 world :: int,
-                case :: int
+                case :: int,
+                kernel :: int
             ).
 
 main(!IO) :-
@@ -80,6 +87,7 @@ main(!IO) :-
     setting("SWE_TILE", 32, Tile, !IO),
     setting("SWE_STEPS", 1000, Steps, !IO),
     setting("SWE_CASE", 0, Case, !IO),
+    setting("SWE_KERNEL", 0, Kernel, !IO),
     Log = log2(Tile, 0),
     Side = ( if Tile > 0 then World / Tile else 0 ),
     setting("SWE_CAPACITY", int.min(Side * Side, 4096) + 1, Capacity, !IO),
@@ -96,7 +104,7 @@ main(!IO) :-
         new_mailbox(CountsBox, !IO),
         new_mailbox(OutcomeBox, !IO),
         spawn(Place, swe(TimesBox, CountsBox, OutcomeBox, World, Log, Case,
-            Steps, Capacity), _, !IO),
+            Kernel, Steps, Capacity), _, !IO),
         receive(TimesBox, any, after(600000), R1, !IO),
         receive(CountsBox, any, after(600000), R2, !IO),
         receive(OutcomeBox, any, after(600000), R3, !IO),
@@ -262,13 +270,13 @@ speed(H, HU, HV) = S :-
     % Steps the world Steps times and sends the host the times, the active
     % tiles after each step, and the outcome.
 :- process swe(mailbox(array(float)), mailbox(array(int)), mailbox(outcome),
-    int, int, int, int, int) receives int on gpu.
+    int, int, int, int, int, int) receives int on gpu.
 
-swe(TimesBox, CountsBox, OutcomeBox, World, Log, Case, Steps, Capacity,
+swe(TimesBox, CountsBox, OutcomeBox, World, Log, Case, Kernel, Steps, Capacity,
         _Self, !IO) :-
     T = 1 << Log,
     Side = World >> Log,
-    G = geometry(T, Log, Side, World, Case),
+    G = geometry(T, Log, Side, World, Case, Kernel),
     array.init(Capacity * 3 * T * T, 0.0, Cur0),
     array.init(Capacity * 3 * T * T, 0.0, Next),
     array.init(Side * Side, 0i32, Dir0),
@@ -362,8 +370,13 @@ run(G, S, Steps, Fastest, !Time, Cur, Next0, Final, !Dir, !Pos, !Nb, !Wet,
     else
         now(T0, !IO),
         DT = unchecked_quotient(courant, float.max(Fastest, dry)),
-        step(G, DT, !.NActive, !.Actives, !.Pos, !.Nb, Cur, Next0, Next,
-            !Wet, !Edges, !Speed),
+        ( if G ^ kernel = 2 then
+            step_faces(G, DT, !.NActive, !.Actives, !.Pos, !.Nb, Cur, Next0,
+                Next, !Wet, !Edges, !Speed)
+        else
+            step(G, DT, !.NActive, !.Actives, !.Pos, !.Nb, Cur, Next0, Next,
+                !Wet, !Edges, !Speed)
+        ),
         now(T1, !IO),
         !:Time = !.Time + DT,
         decide(G, !.NActive, !.Actives, !.Pos, !.Nb, !.Wet, !.Edges, !.Speed,
@@ -459,6 +472,187 @@ step_tile(G, DT, I, P, Nb, Cur, !Next, Wet, Edges, Fastest) :-
         NH0 = H - DT * ((FEM - FWM) + (FSM - FNM)),
         NHU0 = HU - DT * (((FEN + FEPL) - (FWN + FWPR)) + (FSA - FNA)),
         NHV0 = HV - DT * ((FEA - FWA) + ((FSN + FSPL) - (FNN + FNPR))),
+        NH = float.max(NH0, 0.0),
+        ( if NH =< dry then
+            NHU = 0.0,
+            NHV = 0.0
+        else
+            NHU = NHU0,
+            NHV = NHV0
+        ),
+        Next1 = !.Next ^ unsafe_elem(Cells + K) := NH,
+        Next2 = Next1 ^ unsafe_elem(Cells + TT + K) := NHU,
+        !:Next = Next2 ^ unsafe_elem(Cells + 2 * TT + K) := NHV,
+        ( if NH > dry then
+            W1 = W0 + 1,
+            E1 = E0 \/ edge_bits(R, C, M)
+        else
+            W1 = W0,
+            E1 = E0
+        ),
+        S1 = float.max(S0, speed(NH, NHU, NHV))
+    ).
+
+    % The same step as step, with each face's flux computed once (SWE_KERNEL
+    % 2, as swe-sparse.hip's step_faces): a tile's fluxes across x, into
+    % Faces, and their differences at each cell, into Diffs; then its
+    % fluxes across y, into Faces again; then its cells from both. Faces
+    % and Diffs are group private, in the team's local memory for the
+    % tile: 4 T (T + 1) and 3 T^2 floats, 58 KiB for tiles of 32. The
+    % operations are step_tile's, in its order, so the bits are the same.
+    %
+:- pred step_faces(geometry::in, float::in, int::in, array(int32)::array_ui,
+    array(int32)::array_ui, array(int32)::array_ui, array(float)::array_ui,
+    array(float)::array_di, array(float)::array_uo,
+    array(int32)::array_di, array(int32)::array_uo,
+    array(uint16)::array_di, array(uint16)::array_uo,
+    array(float)::array_di, array(float)::array_uo) is det.
+step_faces(G, DT, NActive, Actives, Pos, Nb, Cur, !Next, !Wet, !Edges,
+        !Speed) :-
+    T = G ^ tile,
+    Count = T * (T + 1),
+    TT = T * T,
+    %$omp teams distribute dyn_groupprivate(Faces0, Diffs0)
+    ( for(J, 0, NActive - 1) do
+        I = int32.to_int(Actives ^ unsafe_elem(J)),
+        P = int32.to_int(Pos ^ unsafe_elem(I)),
+        array.init(4 * Count, 0.0, Faces0),
+        array.init(3 * TT, 0.0, Diffs0),
+        x_faces(G, I, P, Nb, Cur, Faces0, Faces1),
+        x_diffs(G, Faces1, Diffs0, Diffs),
+        y_faces(G, I, P, Nb, Cur, Faces1, Faces),
+        faces_tile(G, DT, I, Nb, Cur, Faces, Diffs, !Next, Wet, Edges,
+            Fastest),
+        !Wet ^ unsafe_elem(I) := int32.cast_from_int(Wet),
+        !Edges ^ unsafe_elem(I) := uint16.cast_from_int(Edges),
+        !Speed ^ unsafe_elem(I) := Fastest
+    ).
+
+    % The fluxes across x of tile I, at place P: face F of row R is between
+    % columns F mod (T + 1) - 1 and F mod (T + 1).
+    %
+:- pred x_faces(geometry::in, int::in, int::in, array(int32)::array_ui,
+    array(float)::array_ui, array(float)::array_di, array(float)::array_uo)
+    is det.
+x_faces(G, I, P, Nb, Cur, !Faces) :-
+    T = G ^ tile,
+    Log = G ^ log,
+    N = G ^ world,
+    M = T - 1,
+    TT = T * T,
+    Base = I * 9,
+    Count = T * (T + 1),
+    Top = (P / G ^ side) << Log,
+    Left = (P mod G ^ side) << Log,
+    %$omp parallel do
+    ( for(F, 0, Count - 1) do
+        R = F / (T + 1),
+        C = F mod (T + 1),
+        cell(Log, M, TT, Base, Nb, Cur, R, C - 1, HL, HUL, HVL),
+        cell(Log, M, TT, Base, Nb, Cur, R, C, HR, HUR, HVR),
+        hll(HL, HUL, HVL, bed(Top + R, Left + C - 1, N), HR, HUR, HVR,
+            bed(Top + R, Left + C, N), FM, FN, FA, PL, PR),
+        store_flux(Count, F, FM, FN, FA, PL, PR, !Faces)
+    ).
+
+    % The fluxes across y of tile I, at place P: face F of column
+    % F /\ (T - 1) is between rows F >> log - 1 and F >> log.
+    %
+:- pred y_faces(geometry::in, int::in, int::in, array(int32)::array_ui,
+    array(float)::array_ui, array(float)::array_di, array(float)::array_uo)
+    is det.
+y_faces(G, I, P, Nb, Cur, !Faces) :-
+    T = G ^ tile,
+    Log = G ^ log,
+    N = G ^ world,
+    M = T - 1,
+    TT = T * T,
+    Base = I * 9,
+    Count = T * (T + 1),
+    Top = (P / G ^ side) << Log,
+    Left = (P mod G ^ side) << Log,
+    %$omp parallel do
+    ( for(F, 0, Count - 1) do
+        R = F >> Log,
+        C = F /\ M,
+        % Across y the normal momentum is hv.
+        cell(Log, M, TT, Base, Nb, Cur, R - 1, C, HL, HUL, HVL),
+        cell(Log, M, TT, Base, Nb, Cur, R, C, HR, HUR, HVR),
+        hll(HL, HVL, HUL, bed(Top + R - 1, Left + C, N), HR, HVR, HUR,
+            bed(Top + R, Left + C, N), FM, FN, FA, PL, PR),
+        store_flux(Count, F, FM, FN, FA, PL, PR, !Faces)
+    ).
+
+    % Face F's flux in Faces, of Count faces: its mass, its momentum along
+    % the face, and its normal momentum with each side's pressure term.
+    %
+:- pred store_flux(int::in, int::in, float::in, float::in, float::in,
+    float::in, float::in, array(float)::array_di, array(float)::array_uo)
+    is det.
+:- pragma inline(store_flux/9).
+store_flux(Count, F, FM, FN, FA, PL, PR, !Faces) :-
+    !Faces ^ unsafe_elem(F) := FM,
+    !Faces ^ unsafe_elem(Count + F) := FA,
+    !Faces ^ unsafe_elem(2 * Count + F) := FN + PL,
+    !Faces ^ unsafe_elem(3 * Count + F) := FN + PR.
+
+    % Each cell's differences of its fluxes across x, east less west: its
+    % mass's, its normal momentum's with the pressure terms, and its
+    % momentum along the faces.
+    %
+:- pred x_diffs(geometry::in, array(float)::array_ui,
+    array(float)::array_di, array(float)::array_uo) is det.
+x_diffs(G, Faces, !Diffs) :-
+    T = G ^ tile,
+    Log = G ^ log,
+    M = T - 1,
+    TT = T * T,
+    Count = T * (T + 1),
+    %$omp parallel do
+    ( for(K, 0, TT - 1) do
+        W = (K >> Log) * (T + 1) + (K /\ M),
+        DM = Faces ^ unsafe_elem(W + 1) - Faces ^ unsafe_elem(W),
+        DN = Faces ^ unsafe_elem(2 * Count + W + 1) -
+            Faces ^ unsafe_elem(3 * Count + W),
+        DA = Faces ^ unsafe_elem(Count + W + 1) -
+            Faces ^ unsafe_elem(Count + W),
+        Diffs1 = !.Diffs ^ unsafe_elem(K) := DM,
+        Diffs2 = Diffs1 ^ unsafe_elem(TT + K) := DN,
+        !:Diffs = Diffs2 ^ unsafe_elem(2 * TT + K) := DA
+    ).
+
+    % Tile I's cells from its fluxes across x' differences and its fluxes
+    % across y, across the team's threads, as step_tile's.
+    %
+:- pred faces_tile(geometry::in, float::in, int::in, array(int32)::array_ui,
+    array(float)::array_ui, array(float)::array_ui, array(float)::array_ui,
+    array(float)::array_di, array(float)::array_uo,
+    int::out, int::out, float::out) is det.
+faces_tile(G, DT, I, Nb, Cur, Faces, Diffs, !Next, Wet, Edges, Fastest) :-
+    T = G ^ tile,
+    Log = G ^ log,
+    M = T - 1,
+    TT = T * T,
+    Base = I * 9,
+    Cells = I * 3 * TT,
+    Count = T * (T + 1),
+    %$omp parallel do reduction((+) : Wet) reduction(\/ : Edges)
+    %$omp& reduction(max : Fastest)
+    ( for(K, 0, TT - 1), fromto(0, W0, W1, Wet), fromto(0, E0, E1, Edges),
+        fromto(0.0, S0, S1, Fastest) do
+        R = K >> Log,
+        C = K /\ M,
+        Up = K,
+        Down = K + T,
+        cell(Log, M, TT, Base, Nb, Cur, R, C, H, HU, HV),
+        NH0 = H - DT * (Diffs ^ unsafe_elem(K) +
+            (Faces ^ unsafe_elem(Down) - Faces ^ unsafe_elem(Up))),
+        NHU0 = HU - DT * (Diffs ^ unsafe_elem(TT + K) +
+            (Faces ^ unsafe_elem(Count + Down) -
+                Faces ^ unsafe_elem(Count + Up))),
+        NHV0 = HV - DT * (Diffs ^ unsafe_elem(2 * TT + K) +
+            (Faces ^ unsafe_elem(2 * Count + Down) -
+                Faces ^ unsafe_elem(3 * Count + Up))),
         NH = float.max(NH0, 0.0),
         ( if NH =< dry then
             NHU = 0.0,

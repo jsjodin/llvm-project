@@ -52,6 +52,15 @@ inline constexpr llvm::StringLiteral kProcessRootAttrName{"merk.process_root"};
 inline constexpr llvm::StringLiteral kInlineAttrName{"merk.inline"};
 inline constexpr llvm::StringLiteral kNoInlineAttrName{"merk.no_inline"};
 
+// The attribute of a merk.array_new whose array is group private, in its
+// team's local memory for an iteration of a teams distribute loop in a GPU
+// process (docs/INPROGRESS.md, GPU processes that run loops, (s5)): its
+// fallback, runtime/place.h's kGroupDefaultMem or kGroupAbort, as an i32.
+// Lowering asks the runtime for it so (merk_device_group_next), and
+// FreeAtLastUse never frees it, and checks that it does not escape.
+inline constexpr llvm::StringLiteral kGroupPrivateAttrName{
+    "merk.group_private"};
+
 // What code generation is asked for besides the module.
 struct GenerationOptions {
   // -fstub-unimplemented: see GenerateMerk.

@@ -11,8 +11,9 @@
 # build-dir is the Merkurius build, ../../../../build-merk by default;
 # offload-arch is this machine's GPU by default, as amdgpu-arch finds it;
 # rounds, each a run of all three, 5 by default. ROCM_PATH is /opt/rocm by
-# default. SWE_WORLD, SWE_TILE, SWE_STEPS, SWE_CASE and SWE_CAPACITY pass
-# through. The first round's runs also write each step's active tiles and
+# default. SWE_WORLD, SWE_TILE, SWE_STEPS, SWE_CASE, SWE_CAPACITY and
+# SWE_KERNEL pass through; SWE_KERNEL=2 picks step_faces in the Mercury and
+# HIP programs. The first round's runs also write each step's active tiles and
 # time to $out/<program>.trace, for a chart. On a machine that others share,
 # run it through utils/gpu/with-gpus.py.
 set -euo pipefail
@@ -30,8 +31,9 @@ for d in "${libs[@]}"; do flags+=("-L$d"); done
 export LD_LIBRARY_PATH="$(IFS=:; echo "${libs[*]}")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export OMP_TARGET_OFFLOAD=MANDATORY
 
-"$build/bin/merkc" -O2 -fopenmp -fdo-loops -fprocess-declarations \
-  --offload-arch="$arch" "${flags[@]}" "$here/swe-sparse.m" -o "$out/merkurius"
+"$build/bin/merkc" -O2 -fopenmp -fopenmp-version=61 -fdo-loops \
+  -fprocess-declarations --offload-arch="$arch" "${flags[@]}" \
+  "$here/swe-sparse.m" -o "$out/merkurius"
 "$build/bin/clang" -O2 -ffp-contract=off -fopenmp --offload-arch="$arch" \
   "${flags[@]}" "$here/swe-sparse.c" -lm -o "$out/c"
 "$build/bin/clang" -x hip -O2 -ffp-contract=off --offload-arch="$arch" \
