@@ -1333,7 +1333,8 @@ extern "C" void merk_process_dispatch(uint64_t kind, uint64_t words);
 // and merk_device_sync_threads after each round, with the words its body
 // takes at `values` and the thread's partial results of the loop's
 // reductions at `partials`, which it updates. Every thread of a team goes
-// round as often.
+// round as often. A loop under schedule(dynamic) takes its iterations from
+// the word after its words instead, with no barrier.
 extern "C" void merk_process_loop(uint64_t loop, int64_t start, int64_t rounds,
     int64_t stride, int64_t count, int64_t first, int64_t step, uint64_t values,
     uint64_t partials);
@@ -1816,7 +1817,9 @@ bool Bulk(uint64_t what, uint64_t *to, uint64_t fromOrWord, uint64_t words,
     // after each round). Every thread goes round as often as the team. The
     // loop's procedure runs the rounds, with its body inlined, so that only
     // the loops' registers count in it (design document, Measurements,
-    // Memory bandwidth).
+    // Memory bandwidth). A loop under schedule(dynamic) ignores the rounds:
+    // its threads claim their iterations from a word after its words, with
+    // no barrier (MLIRGenProcesses.cpp, ProcessLoopClaims).
     int64_t rounds{count > base ? (count - base + stride - 1) / stride : 0};
     merk_process_loop(loop, base + thread, rounds, stride, count, first, step,
         values, partialsAt);

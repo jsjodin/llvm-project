@@ -1,0 +1,7 @@
+omp-schedule.m on the machine's GPU: its target regions' loops under
+schedule(dynamic), with and without a chunk size, as OpenMP's device
+runtime deals them out, across all of their teams' threads.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops --offload-arch=%offload-arch %libomp-flags %S/omp-schedule.m -o %t.O2
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY %t.O2 | FileCheck %S/omp-schedule.m --check-prefix=OUTPUT --match-full-lines --strict-whitespace

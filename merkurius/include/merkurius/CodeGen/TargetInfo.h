@@ -117,13 +117,15 @@ public:
     bool shared{false};
   };
   ResultRegisters Results() const;
-  // The address space of the element addresses that atomic updates of
-  // arrays use: the runtime makes every array in its heaps, never on the
-  // stack. On AMDGPU the global one, as the backend combines a wave's
-  // atomic operations on one element into one only on global pointers,
-  // not on generic ones, which may be on the stack, where each lane's
-  // memory differs; generic elsewhere.
-  unsigned AtomicElementAddressSpace() const;
+  // The address space of the pointers that atomic operations on the
+  // runtime's memory use, which is never on the stack: the elements of
+  // arrays, which the runtime makes in its heaps, and the word a GPU
+  // process's dynamic loop claims its iterations from, in the process's
+  // control block. On AMDGPU the global one, as the backend combines a
+  // wave's atomic operations on one address into one only on global
+  // pointers, not on generic ones, which may be on the stack, where each
+  // lane's memory differs; generic elsewhere.
+  unsigned AtomicAddressSpace() const;
   // `value`, which every thread of a GPU's wave reads the same from
   // memory, marked as uniform for the target, so that what it addresses
   // stays in scalar registers: on AMDGPU read from the wave's first lane;
