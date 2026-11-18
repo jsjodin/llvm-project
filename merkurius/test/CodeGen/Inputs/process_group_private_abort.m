@@ -57,7 +57,7 @@ reverse_into(J, T, G, !Out) :-
 main(!IO) :-
     new_mailbox(Me, !IO),
     spawn(gpu(0), worker(Me), W, !IO),
-    list.foldl(run(Me, W), [16, 300, 5000, 20000], !IO),
+    list.foldl(run(Me, W), [16, 300, 1000, 20000], !IO),
     send(W, 0, !IO).
 
 :- pred run(mailbox(int)::in, mailbox(int)::in, int::in, io::di, io::uo)

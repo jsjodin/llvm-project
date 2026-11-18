@@ -12,6 +12,7 @@
 // The options that choose the target (TargetInfo) and the optimization
 // level.
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,10 @@ struct TargetOptions {
   // which the host's compile embeds and registers.
   bool processKernels{false};
   std::vector<std::string> processImages;
+  // -fgpu-process-waves=: the waves a SIMD that the kernel of GPU processes
+  // is built for, 0 for the backend's choice; unset for the GPU's default
+  // (docs/INPROGRESS.md, Register pressure in GPU processes).
+  std::optional<unsigned> processWaves;
 
   // Whether the compile is for a device: OpenMP's device compile or GPU
   // processes'.

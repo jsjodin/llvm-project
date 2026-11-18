@@ -62,7 +62,8 @@ constexpr uint32_t kProcessLoopReductions{8};
 constexpr uint32_t kGroupDefaultMem{1};
 constexpr uint32_t kGroupAbort{2};
 
-// The threads of each of the kernel's teams.
+// The threads of each of the kernel's teams (MLIRGenProcesses.cpp's
+// kPlaceTeamThreads).
 constexpr uint32_t kPlaceTeamThreads{256};
 
 // A wave's slot: its state, and the process's kind, by its number in the
