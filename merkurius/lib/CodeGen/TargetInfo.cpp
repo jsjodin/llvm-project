@@ -259,7 +259,7 @@ void TargetInfo::AddModuleFlags(llvm::Module &module) const {
 // (X0 to X7; D0 to D7) and RetCC_AMDGPU_Func (VGPR0 to VGPR31, two to a
 // 64-bit value). Elsewhere, two of each, as RISC-V's a0 and a1 and fa0 and
 // fa1, the fewest of LLVM's targets.
-unsigned TargetInfo::AtomicElementAddressSpace() const {
+unsigned TargetInfo::AtomicAddressSpace() const {
   return triple_.isAMDGPU() ? addressSpaces_.global : addressSpaces_.generic;
 }
 

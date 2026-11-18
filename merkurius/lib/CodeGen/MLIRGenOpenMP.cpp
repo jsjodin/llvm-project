@@ -686,6 +686,9 @@ static bool IsOmpLoopClauseHandled(
   if (id == llvm::omp::OMPC_device) {
     return leaf == llvm::omp::OMPD_target;
   }
+  if (id == llvm::omp::OMPC_schedule) {
+    return leaf == llvm::omp::OMPD_do; // ScheduleOf
+  }
   return id == llvm::omp::OMPC_reduction &&
       (leaf == llvm::omp::OMPD_do || leaf == llvm::omp::OMPD_teams);
 }
@@ -824,6 +827,17 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
     if (!LeafClauses(leaf, at, IsOmpLoopClauseHandled)) {
       return;
     }
+  }
+  std::optional<LoopSchedule> schedule{
+      ScheduleOf(*queue, body, at, Location(goal.tokens))};
+  if (!schedule) {
+    return;
+  }
+  // A chunk size that is a variable would be one of the target region's
+  // values, which nothing maps yet.
+  if (offloaded && schedule->chunkValue) {
+    NotYet(at, "a chunk size that is a variable in a target region");
+    return;
   }
   // Its form: a for, and fromtos that do not end it; a loop has at most
   // one for.
@@ -1018,7 +1032,7 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
   }
   if ((processLoop || teamLoop) && target_.options().processKernels) {
     ProcessLoop({goals, trip, call, loop, *loopBody, bodyCall, bodyProcedure,
-                    reductions, false, false, false, at},
+                    reductions, false, false, false, at, *schedule},
         teamLoop ? ProcessLoopKind::Team
             : directive.id == llvm::omp::Directive::OMPD_distribute
             ? ProcessLoopKind::Teams
@@ -1066,7 +1080,7 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
     updated.push_back({reduction.slot, reduction.type, reduction.value->name});
   }
   ParallelLoop parallelLoop{goals, trip, call, loop, *loopBody, bodyCall,
-      bodyProcedure, reductions, teams, distribute, offloaded, at};
+      bodyProcedure, reductions, teams, distribute, offloaded, at, *schedule};
   if (!offloaded) {
     GenerateParallelLoop(parallelLoop, body, loc);
     if (failed_) {
@@ -1259,13 +1273,24 @@ void MerkGenerator::GenerateParallelLoop(const ParallelLoop &loop,
   }
   {
     mlir::OpBuilder::InsertionGuard guard{builder_};
+    // The schedule, as Flang's ClauseProcessor gives it, with its chunk size
+    // made before the loop wrappers, whose regions hold only the next.
+    mlir::omp::WsloopOperands operands;
+    if (loop.schedule.kind != LoopSchedule::Kind::None) {
+      operands.scheduleKind = mlir::omp::ClauseScheduleKindAttr::get(&context_,
+          loop.schedule.kind == LoopSchedule::Kind::Static
+              ? mlir::omp::ClauseScheduleKind::Static
+              : mlir::omp::ClauseScheduleKind::Dynamic);
+      operands.scheduleChunk = loop.schedule.chunk
+          ? IntegerConstant(i64, *loop.schedule.chunk, loc)
+          : loop.schedule.chunkValue;
+    }
     if (loop.distribute) {
       auto op{mlir::omp::DistributeOp::create(
           builder_, loc, mlir::omp::DistributeOperands{})};
       op.setComposite(true);
       builder_.createBlock(&op.getRegion());
     }
-    mlir::omp::WsloopOperands operands;
     AddReductions(operands, loop.reductions, originals, loc);
     auto wsloop{mlir::omp::WsloopOp::create(builder_, loc, operands)};
     if (loop.distribute) {
@@ -1743,7 +1768,12 @@ std::optional<mlir::Value> MerkGenerator::IntegerClause(const omp::Leaf &leaf,
     Error(at, "%s"_err_en_US, "the " + name + " clause takes one " + what.str());
     return std::nullopt;
   }
-  const parser::DataTerm &number{clause->arguments.front()};
+  return IntegerTerm(clause->arguments.front(), what, body, at, loc);
+}
+
+std::optional<mlir::Value> MerkGenerator::IntegerTerm(
+    const parser::DataTerm &number, llvm::StringRef what,
+    const ProcedureBody &body, parser::CharBlock at, mlir::Location loc) {
   if (const auto *literal{std::get_if<const parser::Literal *>(&number)}) {
     std::int64_t value;
     if ((*literal)->kind == parser::LiteralKind::Integer &&
@@ -1773,6 +1803,82 @@ std::optional<mlir::Value> MerkGenerator::IntegerClause(const omp::Leaf &leaf,
   }
   NotYet(at, "a " + what.str() + " that is not an integer or a variable");
   return std::nullopt;
+}
+
+// The do leaf's schedule clause: static or dynamic, which omp.wsloop takes
+// as Flang's ClauseProcessor gives them, and a chunk size that is a positive
+// integer or an integer variable bound before the directive. The other
+// kinds and the modifiers have no code generation yet.
+std::optional<LoopSchedule> MerkGenerator::ScheduleOf(
+    const omp::ConstructQueue &queue, const ProcedureBody &body,
+    parser::CharBlock at, mlir::Location loc) {
+  using namespace parser::literals;
+  const parser::OmpScheduleClause *clause{nullptr};
+  for (const omp::Leaf &leaf : queue) {
+    if (leaf.id != llvm::omp::OMPD_do) {
+      continue;
+    }
+    for (const parser::OmpClause *c : leaf.clauses) {
+      const auto *schedule{std::get_if<const parser::OmpScheduleClause *>(c)};
+      if (!schedule) {
+        continue;
+      }
+      if (clause) {
+        Error(at, "a directive can have only one %s clause"_err_en_US,
+            "schedule");
+        return std::nullopt;
+      }
+      clause = *schedule;
+    }
+  }
+  LoopSchedule schedule;
+  if (!clause) {
+    return schedule;
+  }
+  if (!clause->modifiers.empty()) {
+    NotYet(at, "modifiers of the schedule clause");
+    return std::nullopt;
+  }
+  switch (clause->kind) {
+  case parser::OmpScheduleKind::Static:
+    schedule.kind = LoopSchedule::Kind::Static;
+    break;
+  case parser::OmpScheduleKind::Dynamic:
+    schedule.kind = LoopSchedule::Kind::Dynamic;
+    break;
+  case parser::OmpScheduleKind::Guided:
+    NotYet(at, "the guided schedule");
+    return std::nullopt;
+  case parser::OmpScheduleKind::Auto:
+    NotYet(at, "the auto schedule");
+    return std::nullopt;
+  case parser::OmpScheduleKind::Runtime:
+    NotYet(at, "the runtime schedule");
+    return std::nullopt;
+  }
+  if (!clause->chunk) {
+    return schedule;
+  }
+  if (const auto *literal{
+          std::get_if<const parser::Literal *>(&*clause->chunk)}) {
+    std::int64_t value;
+    if ((*literal)->kind != parser::LiteralKind::Integer ||
+        (*literal)->text.getAsInteger(10, value) || value <= 0) {
+      Error(at,
+          "the chunk size of the schedule clause must be a positive "
+          "integer"_err_en_US);
+      return std::nullopt;
+    }
+    schedule.chunk = value;
+    return schedule;
+  }
+  std::optional<mlir::Value> value{
+      IntegerTerm(*clause->chunk, "chunk size", body, at, loc)};
+  if (!value) {
+    return std::nullopt;
+  }
+  schedule.chunkValue = *value;
+  return schedule;
 }
 
 // An array is mapped as ClangIR maps a pointer's section, p[0:n]: by its own

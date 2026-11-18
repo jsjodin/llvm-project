@@ -5802,6 +5802,43 @@ The monomorphic program's text grew from 298 KB to 318 KB, and its stack maps fr
 94 KB to 107 KB, with 0.6 KB of root table. nrev has few live values at its safepoints,
 so as before this says little about code with many calls.
 
+### UTS on one GPU
+
+2026-11-18, the unbalanced tree search of the merkurius-uts repository on
+the gfx1030 at 40 of its 80 compute units, quiet machine, `bench/gpu1.sh`,
+five runs, median million nodes a second. S4 is the Merkurius place: each
+round two loops under `distribute parallel do`, one counting each node's
+children with an atomic capture, one pushing the children, a SHA-1 each.
+S2 is the HIP baseline, the same two kernels with a readback between. S1 is
+the reference `uts-omp` on 48 host threads. Each change below took S4 from
+the row before; the HIP and host numbers did not change.
+
+| Change, llvm-project commit | T1L, best K | T1L, K = 65536 | T3L | G2 |
+|---|---:|---:|---:|---:|
+| Before, `2052307d5f1c` | 831 | 628 | 288 | 753 |
+| A wave's atomic updates of one element made one, `5c3181eb39cf` | 1058 *(probe)* | | | |
+| The SHA-1 inlined, then `schedule(dynamic)` on the push loop | **1406** | **961** | **286** | **962** |
+| S2, HIP | 1457 | 708 | 148 | 614 |
+| S1, host, 48 threads | 225 | | 254 | 243 |
+
+- The atomic capture was a generic pointer, and the loop's values came
+  through memory, so each lane did its own atomic add on the one counter:
+  the counting loop took twice HIP's time (44 ms against 22 ms of a T1L run
+  at K = 1M, timed with probes in a copy of both programs).
+- The SHA-1 was called, not inlined, as its other caller made it too big to
+  inline into both. On AMDGPU a call waits for the stores before it
+  (`s_waitcnt vmcnt(0)`), so each child's stores could not overlap the next
+  one's hash: 10 ms of the push loop's 68. UTS's `compress` now has
+  `pragma inline`, as the HIP baseline's is `inline`.
+- The barrier after each round made a team wait for its slowest wave: a
+  node has from none to many children. `schedule(dynamic)` (Loops, GPU
+  processes that run loops, docs/INPROGRESS.md (s3)) has none: 7.5 ms of
+  the push loop's 59, and a little more on the other trees.
+
+S4 is now 3.5% behind S2 on T1L, 1.6 times it on G2 and 1.9 times on the
+narrow T3L, where S2's readback each round dominates. Against the host's
+48 threads, S4 is 6.2 times on T1L, 4.0 on G2 and 1.1 on T3L.
+
 ### The collector
 
 Measured 2026-11-08 at commit d1d4d913b2f8, -O2, one process pinned to one core

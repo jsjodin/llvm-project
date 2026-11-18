@@ -24,6 +24,14 @@
 :- pred fails(int::in) is semidet.
 :- pred impure_body(int::in) is det.
 :- pred schedule(int::in, array(int)::array_di, array(int)::array_uo) is det.
+:- pred schedule_modifier(int::in, array(int)::array_di, array(int)::array_uo)
+    is det.
+:- pred schedule_chunk(int::in, array(int)::array_di, array(int)::array_uo)
+    is det.
+:- pred schedule_twice(int::in, array(int)::array_di, array(int)::array_uo)
+    is det.
+:- pred schedule_target(int::in, int::in, array(int)::array_di,
+    array(int)::array_uo) is det.
 :- pred threads(int::in, array(int)::array_di, array(int)::array_uo) is det.
 :- pred if_parallel(int::in, array(int)::array_di, array(int)::array_uo) is det.
 :- pred mapped(int::in, array(int)::array_di, array(int)::array_uo) is det.
@@ -99,9 +107,32 @@ impure_body(N) :-
 :- pragma foreign_proc("C", poke(I::in), [will_not_call_merkurius],
     "(void) I;").
 
+% Of the schedule clause, static and dynamic have code generation, with a
+% chunk size that is a positive integer, or a variable bound before the
+% directive outside a target region.
 schedule(N, !A) :-
-    %$omp parallel do schedule(static)
-% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for the schedule clause of the do directive
+    %$omp parallel do schedule(guided)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for the guided schedule
+    ( for(I, 0, N) do !A ^ elem(I) := I ).
+
+schedule_modifier(N, !A) :-
+    %$omp parallel do schedule(monotonic: dynamic)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for modifiers of the schedule clause
+    ( for(I, 0, N) do !A ^ elem(I) := I ).
+
+schedule_chunk(N, !A) :-
+    %$omp parallel do schedule(dynamic, 0)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: the chunk size of the schedule clause must be a positive integer
+    ( for(I, 0, N) do !A ^ elem(I) := I ).
+
+schedule_twice(N, !A) :-
+    %$omp parallel do schedule(static) schedule(dynamic)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: a directive can have only one schedule clause
+    ( for(I, 0, N) do !A ^ elem(I) := I ).
+
+schedule_target(N, C, !A) :-
+    %$omp target teams distribute parallel do schedule(dynamic, C)
+% CHECK: omp-parallel-do-errors.m:[[@LINE-1]]:5: error: not yet implemented: code generation for a chunk size that is a variable in a target region
     ( for(I, 0, N) do !A ^ elem(I) := I ).
 
 threads(N, !A) :-
