@@ -86,6 +86,8 @@ merk::ProcOp MerkGenerator::NewProc(llvm::StringRef name, parser::CharBlock at,
     merk::Determinism determinism, llvm::ArrayRef<mlir::Type> hiddenOutputs) {
   llvm::SmallVector<mlir::Type> inputs{hidden};
   llvm::SmallVector<mlir::Type> outputs{hiddenOutputs};
+  // The inputs that the procedure clobbers, which FreeAtLastUse may free.
+  llvm::SmallVector<unsigned> clobbered;
   for (auto [mode, type] : llvm::zip(modes, types)) {
     std::optional<Represented> represented{Represent(type)};
     if (!represented) {
@@ -93,7 +95,14 @@ merk::ProcOp MerkGenerator::NewProc(llvm::StringRef name, parser::CharBlock at,
       return nullptr;
     }
     if (!represented->dummy && !IsUnused(mode)) {
-      (IsOutput(mode) ? outputs : inputs).push_back(represented->type);
+      if (IsOutput(mode)) {
+        outputs.push_back(represented->type);
+      } else {
+        if (IsClobbered(mode)) {
+          clobbered.push_back(inputs.size());
+        }
+        inputs.push_back(represented->type);
+      }
     }
   }
   mlir::OpBuilder::InsertionGuard guard{builder_};
@@ -101,6 +110,9 @@ merk::ProcOp MerkGenerator::NewProc(llvm::StringRef name, parser::CharBlock at,
   auto proc{merk::ProcOp::create(builder_, Location(at), name,
       builder_.getFunctionType(inputs, outputs), determinism)};
   proc.setPrivate();
+  for (unsigned index : clobbered) {
+    proc.setArgAttr(index, "merk.clobbered", builder_.getUnitAttr());
+  }
   return proc;
 }
 

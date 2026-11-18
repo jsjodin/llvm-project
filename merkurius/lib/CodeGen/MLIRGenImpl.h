@@ -349,6 +349,26 @@ private:
     return modes_.ops().IsFree(mode.initial) &&
         modes_.ops().IsFree(mode.final);
   }
+  // An argument that the call clobbers, as of mode di: its caller does not
+  // use it again (Overton, 3.2.3). Mostly clobbered, as of mdi, is not, as
+  // backtracking may still use it.
+  bool IsClobbered(const semantics::ArgMode &mode) {
+    const semantics::Inst *final{mode.final};
+    while (final->kind == semantics::InstKind::Defined) {
+      final = modes_.insts().Expand(final);
+    }
+    return (final->kind == semantics::InstKind::Ground ||
+               final->kind == semantics::InstKind::Any) &&
+        final->uniqueness == semantics::Uniqueness::Clobbered;
+  }
+  // Marks a resize whose array the call clobbers, as array.resize's
+  // array_di does, so that a GPU process frees the old array after it
+  // (FreeAtLastUse).
+  void MarkClobbers(merk::ArrayResizeOp resize, const semantics::ArgMode &mode) {
+    if (IsClobbered(mode)) {
+      resize->setAttr("merk.clobbers", builder_.getUnitAttr());
+    }
+  }
   // The procedure's merk.proc, declared if it is not defined yet; null
   // after reporting the reason if it cannot be.
   bool Defined(const Procedure &) const;
