@@ -132,7 +132,9 @@ were within 14%, and Copy faster. A loop costs about 2 µs, a target region
 about 16. The numbers are in the design document, Measurements, "Memory
 bandwidth". Since 2026-11-13 the process's arrays have their elements on
 256 bytes, which made Copy 11% faster, 537 GB/s on half the units, level with
-C. `test/Benchmarks/bandwidth-process-gpu.test` runs it on small arrays.
+C. By 2026-11-18 the lane's batched message copy had taken the kernel to 149
+VGPRs and Copy to 375 GB/s; with smaller batches it takes 76 and Copy is 545.
+`test/Benchmarks/bandwidth-process-gpu.test` runs it on small arrays.
 
 ## On gfx90a
 
