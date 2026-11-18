@@ -4062,6 +4062,52 @@ process's teams; the numbers are in the design document, Measurements,
   memory, and each loop generated twice, for the kind's procedure and its
   `$words` variant.
 
+**(d5) measured 2026-11-18, not kept: a VGPR budget for `merk_place`.**
+Since loops under `parallel do` in distribute loops (739cbea065ae), the
+kernel's count adds up along a chain of calls: `Work`, the distribute
+body (`merk_process_loop`), `TeamShare` and the inner loop
+(`merk_team_loop`). AMDGPU always allocates registers across calls (IPRA),
+and with registers to spare a caller keeps its values above everything its
+callees use, rather than in callee-saved registers, which cost a save.
+On the gfx1030, at 58440501d51d:
+- `merk_place` took 225 VGPRs in `life-sparse.m` and `life-places.m`, 248
+  in `swe-sparse.m` and 226 in UTS's place. In Life, `merk_team_loop` alone
+  is 98, `TeamShare` 100, `merk_process_loop` 182 and `Work` 225. In UTS,
+  whose loops have no inner loop, `merk_process_loop`'s 182 is the same
+  stacking over its calls, not the inlined `pow` and `log`.
+- Not the no-callee-saved-registers rule: taking `norecurse` off the three
+  callees, which turns it off for them, changed nothing. Turning IPRA off
+  (`-mllvm -enable-ipra=false` at the device link) gave 138.
+- A budget does it: `"amdgpu-waves-per-eu"="8"` on every function gave 128,
+  with the spills in `Work` around its calls, once a loop, and none new in
+  the loops; 10 waves gave 96, with spills in `merk_process_loop`, once a
+  tile.
+- Tried: the AMDGPU attributor turning a kernel's `amdgpu-num-vgpr` into
+  the waves per EU it leaves room for, for each GPU, and giving them to the
+  callees (a kernel's `amdgpu-num-vgpr` reaches no callee today), with
+  `amdgpu_num_vgpr(128)` on `merk_place`. The kernels took 120 to 128 VGPRs
+  with 0 to 4 spills, and every suite passed.
+- Slower overall: the host launches as many teams as fit
+  (`olGetKernelMaxCooperativeGroupCountOnQueue`), so the place had twice
+  the teams, and small rounds cost more with more teams (d4's cross-team
+  step) and with the spills on the process's path. The scripts, 5 rounds,
+  CUs 0-39, without and with the budget:
+
+| Benchmark | No budget | 128 VGPRs |
+|---|---:|---:|
+| `life-sparse.m` step, bookkeeping | 36 µs, 13 | 44 µs, 22 |
+| `life-places.m`, 1 / 2 / 4 places | 199 / 286 / 353 µs | 203 / 296 / 355 µs |
+| `swe-sparse.m` step | 472 µs | 466 µs |
+| Bandwidth, GPU process | Copy 543 GB/s | 541, the rest the same |
+| UTS T1L / T3L / G2, K = 262144, 3 runs | 791 / 280 / 742 M nodes/s | 811 / 205 / 694 |
+
+- So the registers do not limit these programs; the number of teams may,
+  in both directions. *Open:* time a few workloads with fewer teams (the
+  `most` of `Launch` in `runtime/gpu-processes.cpp`, or
+  `MERK_GPU_PROCESS_UNITS`), and if they differ, choose the teams for the
+  work rather than by what fits. The attributor change could still go
+  upstream on its own; the patch and its test were kept outside the tree.
+
 **GPU experiments, 2026-11-11 night: what limits a GPU process's loops.**
 Kept for the multi-GPU machine (8× gfx90a), where the numbers will differ:
 wave64, a unified register file of 512 VGPRs and AGPRs a lane, 110 compute
