@@ -5249,6 +5249,29 @@ is waiting for the summaries.
   adds its own summary, halos and waits. Several GPUs, one place each, are
   what places are for; on one GPU they show the protocol's costs.
 
+**Again, 2026-11-17** at df5d90f09362, the same settings and machine,
+Firefox closed, the median of 3 interleaved runs, within 4% of each other;
+the populations and checksums `life-sparse.m`'s. Since p4: the queue
+between GPU processes of one GPU, relaxed polls of idle waves (INPROGRESS,
+Direct sends between the GPUs of a node, step 4), scalar registers and
+single-lane code, flat unions, frees at last use.
+
+| | Soup 256 | Soup 1024 |
+|---|---|---|
+| `life-sparse.m` | 37 | 169 |
+| 1 place | 199 | 1039 |
+| 2 places, moves | 290 | 1374 |
+| 2 places, fixed owners | 279 | 1373 |
+| 4 places, moves | 341 | 1372 |
+| 4 places, fixed owners | 310 | 1430 |
+
+- Several places are 1.6 to 2.4 times faster than at p4 (4 places at soup
+  1024: 3317 to 1372 µs), as their messages no longer go through the host
+  and polls no longer empty the L2.
+- One place is unchanged, still 5.4 to 6.1 times `life-sparse.m`: its step
+  is its walks of its tiles on its one lane, which nothing since has
+  touched.
+
 ### Shallow water on sparse tiles: the work a tile
 
 The showcase that followed p4 (INPROGRESS, "A showcase with more work per
@@ -5296,6 +5319,25 @@ on the 8192-cell world, where the GPU is full.
   OpenMP offload on the small ones. Its bookkeeping, on the process's lane
   on the GPU, is 32 to 45 µs, the host's in HIP 37 to 48 and in C 54 to 76,
   which includes OpenMP's copies to and from the device.
+
+**Again, 2026-11-17** at df5d90f09362, the same cases, rounds and masks,
+Firefox closed; the same checksums. Average step, µs (bookkeeping):
+
+| World, tile | Mercury, GPU process | C, OpenMP | HIP |
+|---|---|---|---|
+| 2048, 32 | 474 (36) | 485 (76) | 446 (48) |
+| 2048, 64 | 548 (22) | 559 (52) | 535 (39) |
+| 8192, 64 | 2674 (36) | 2528 (70) | 2465 (48) |
+
+All three are 1.6 to 1.9 times their times above, the GPU's work alone:
+the bookkeeping is unchanged. Not the compiler: `swe-sparse.hip` built by
+ROCm 7.2's own clang takes the same 2.464 ms at 8192 as ours does. Most
+likely the earlier runs had the whole GPU, 80 units, though they set the
+masks: HIP at 8192 takes 6.00 ms on 20 units and 2.47 on 40, so about
+1.2 to 1.3 ms on 80, the earlier 1.32. An unmasked run, which would
+settle it, is not safe on this GPU, which drives the display. Each time
+all three programs had the same units, so the comparison holds: Mercury
+stays within 4 to 8% of HIP and ahead of C on the small worlds.
 
 **On gfx90a.** 2026-11-14, one die of an AMD Instinct MI250, GPU 7, all
 104 compute units, the host's threads on the other socket, with the GPU
