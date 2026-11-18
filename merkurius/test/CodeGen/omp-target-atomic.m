@@ -5,7 +5,8 @@
 % on the GPU. A count of each digit, a sum of halves in a predicate the loop
 % calls, and the odd numbers appended at the indices a capture takes. Run on
 % the host's threads, the program prints what the sequential program
-% prints; omp-target-atomic-gpu.test runs it on the GPU.
+% prints; omp-target-atomic-gpu.test runs it on the GPU. On the GPU the
+% updates are on global pointers, which the backend combines across a wave.
 %
 % RUN: merkc -fc1 -fopenmp -fdo-loops --offload-targets=amdgpu-amd-amdhsa -emit-llvm-bc -triple x86_64-unknown-linux-gnu %s -o %t.host.bc
 % RUN: merkc -fc1 -fopenmp -fdo-loops -fopenmp-is-target-device -fopenmp-host-ir-file-path %t.host.bc -triple amdgpu10.30-amd-amdhsa -emit-merk %s | FileCheck %s --check-prefix=DEVICE-MERK
@@ -79,14 +80,14 @@ sum_odds(V, J, S) =
 
 % The loops' bodies, which the kernels call.
 % DEVICE-MERK:       merk.proc private @omp_target_atomic.main__body_
-% DEVICE-MERK:         omp.atomic.update %{{.*}} : !llvm.ptr {
+% DEVICE-MERK:         omp.atomic.update %{{.*}} : !llvm.ptr<1> {
 % DEVICE-MERK:       merk.proc private @omp_target_atomic.main__body_
 % DEVICE-MERK:       merk.proc private @omp_target_atomic.main__body_
 % DEVICE-MERK:         omp.atomic.capture {
 % DEVICE-MERK-LABEL: merk.proc {{.*}}@omp_target_atomic.add_half_3_0(
-% DEVICE-MERK:         omp.atomic.update %{{.*}} : !llvm.ptr {
+% DEVICE-MERK:         omp.atomic.update %{{.*}} : !llvm.ptr<1> {
 %
-% DEVICE: atomicrmw add ptr %{{.*}}, i64 1 monotonic
-% DEVICE: atomicrmw add ptr %{{.*}}, i64 1 monotonic
+% DEVICE: atomicrmw add ptr addrspace(1) %{{.*}}, i64 1 monotonic
+% DEVICE: atomicrmw add ptr addrspace(1) %{{.*}}, i64 1 monotonic
 % DEVICE-LABEL: define {{.*}} @omp_target_atomic.add_half_3_0(
-% DEVICE: atomicrmw fadd ptr %{{.*}}, double 5.000000e-01 monotonic
+% DEVICE: atomicrmw fadd ptr addrspace(1) %{{.*}}, double 5.000000e-01 monotonic

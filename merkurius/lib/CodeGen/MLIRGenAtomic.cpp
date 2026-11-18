@@ -329,7 +329,10 @@ void MerkGenerator::OmpAtomic(const Body &goal, const ProcedureBody &body) {
   if (!writeName.starts_with("unsafe")) {
     merk::CheckIndexOp::create(builder_, loc, array, at_, "array.set");
   }
-  auto ptr{mlir::LLVM::LLVMPointerType::get(&context_)};
+  // In the target's address space for them: on AMDGPU a generic pointer
+  // made a loop of UTS that counts into one element twice as long as HIP's.
+  auto ptr{mlir::LLVM::LLVMPointerType::get(
+      &context_, target_.AtomicElementAddressSpace())};
   mlir::Value address{
       merk::ArrayElementRefOp::create(builder_, loc, ptr, array, at_)};
   mlir::Value slot;
