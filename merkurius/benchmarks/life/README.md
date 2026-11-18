@@ -261,6 +261,23 @@ the last step, as the outcome reads the live cells that a step counts.
 
 It prints how many tiles moved, after `life-sparse.m`'s output.
 
+`compare-places.sh [build-dir] [offload-arch] [rounds]` builds
+`life-sparse.m` and `life-places.m` at -O2 with `-fopenmp`, runs
+`life-sparse.m` and `life-places.m` on each number of places in
+`LIFE_PLACES_LIST` (1, 2 and 4) with each `LIFE_MOVES_LIST` (4) in turn for
+each round, checks that they give the same cells, and prints each one's
+median average step and tiles moved.
+
+2026-11-18, gfx1030, on compute units 0-39, the default world and soup,
+1000 steps, the median over 5 rounds of each one's average step:
+
+| Program | Average step | Tiles moved |
+| --- | ---: | ---: |
+| `life-sparse.m` | 37 µs | |
+| 1 place | 199 µs | 0 |
+| 2 places | 284 µs | 15 |
+| 4 places | 349 µs | 23 |
+
 The first argument `host` spawns the places at the host. On the GPU, the
 places' calls take 784 bytes of stack a lane, with or without
 `-fopenmp`, within a GPU process's 1536.

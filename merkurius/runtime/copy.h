@@ -72,12 +72,17 @@ inline void CopyPiece(Word *to, const Word *from, Word words, Word &i) {
 // for each load before the next, and a load from host memory is a round trip
 // over the bus: about 0.4 us a word, which was 40% of a step of Life on two
 // places (design document, Measurements, "Life on several places"). Here a
-// batch of loads is in flight before any of their stores. The words after
-// the last whole batch go in pieces of 16, 8, 4, 2 and 1, each in flight
+// batch of 8 loads is in flight before any of their stores, and the words
+// after the last whole batch go in pieces of 4, 2 and 1, each in flight
 // together: most messages are a few words, and one load after another cost
 // an array of 13 words 6 us between GPUs (docs/INPROGRESS.md, The cost of a
-// message). A GPU process with worker teams has them copy many words
-// (merk_device_bulk_copy).
+// message). Many words go to the process's worker teams, or, from 16 words,
+// to the lanes of a lone lane's wave, a word a lane (merk_device_bulk_copy).
+// Not more at once on the lane: every loaded word takes vector registers
+// until its store, and the copy is inlined into CopyTyped, on the path of
+// every GPU process that sends; a batch of 32 and pieces from 16 took
+// CopyTyped to 136 VGPRs, and the processes' one kernel with it, where its
+// loops want few (design document, Measurements, "Memory bandwidth").
 inline void CopyWords(Word *to, const Word *from, Word words) {
 #if defined(__AMDGPU__)
   if (merk_device_bulk_copy(to, from, words)) {
@@ -85,7 +90,7 @@ inline void CopyWords(Word *to, const Word *from, Word words) {
   }
 #endif
 #if defined(__AMDGPU__) || defined(__NVPTX__)
-  constexpr Word kBatch{32};
+  constexpr Word kBatch{8};
   Word i{0};
   for (; i + kBatch <= words; i += kBatch) {
     Word batch[kBatch];
@@ -98,8 +103,6 @@ inline void CopyWords(Word *to, const Word *from, Word words) {
       to[i + k] = batch[k];
     }
   }
-  CopyPiece<16>(to, from, words, i);
-  CopyPiece<8>(to, from, words, i);
   CopyPiece<4>(to, from, words, i);
   CopyPiece<2>(to, from, words, i);
   CopyPiece<1>(to, from, words, i);

@@ -5067,6 +5067,30 @@ C's Mul is not; a thread goes round 6,500 times rather than 800, each round
 ending with the team's barrier, and the arrays start where the arena puts
 them (Dense stencils, on elements not on 256 bytes). Not yet told apart.
 
+The lane's copy in batches of 8 words rather than 32 (`runtime/copy.h`,
+`CopyWords`), 2026-11-18, on 2052307d5f1c with the change, `-O2`, compute
+units 0-39, 2^25 elements, three alternating rounds, the median MB/s. The
+copy is inlined into `CopyTyped`, which took 136 VGPRs with batches of 32
+and pieces from 16; AMDGPU allocates registers across calls, so the
+processes' kernel, `merk_place`, took 149 VGPRs and ran at most 6 waves a
+SIMD. With batches of 8 it takes 76:
+
+| Kernel | Batches of 32 | Batches of 8 |
+| --- | ---: | ---: |
+| Copy | 375,077 | 544,671, +45% |
+| Mul | 361,062 | 449,626, +25% |
+| Add | 463,246 | 453,837, -2% |
+| Triad | 451,648 | 469,884, +4% |
+| Dot | 448,814 | 487,320, +9% |
+
+Copy and Mul are back to their numbers of 2026-11-13 (above), which the
+batches of 32 (2026-11-13) and the pieces of 16 (2026-11-15) had cost.
+`life-sparse.m`, `life-places.m` and `swe-sparse.m` (`compare-sparse.sh`,
+`compare-places.sh`, `compare-swe.sh`, 5 rounds) did not change, within 3%:
+their kernels take 225 and 248 VGPRs with either copy, set by their loops
+under `parallel do` inside distribute loops (`Work`, `merk_process_loop`,
+`TeamShare`, `merk_team_loop`, each a caller over its callee's registers).
+
 ### Idle waves of GPU processes' kernels
 
 `process-loops.m`'s worker run without `-fopenmp`, so its process runs its
