@@ -4241,9 +4241,13 @@ is an array of faces made in the `teams distribute` body, filled by one
   full.
 - *Measured* (design document, Measurements, "Shallow water on sparse
   tiles"): `swe-sparse.m`'s `step_faces` (`SWE_KERNEL=2`) is 4% faster
-  than its `step`, HIP's 16%; 438 µs against HIP's 380. Open: the
-  remaining 40 µs, and arrays that need no fill, as `Faces` and `Diffs`,
-  whose every element is written before it is read.
+  than its `step`, HIP's 16%; 438 µs against HIP's 380. Then `Distribute`
+  took iterations from a counter rather than dealing them: 412 µs against
+  HIP's 376, `step` 428 against 452. Open: the 36 µs left, about half the
+  code differences (fill, flat pointers, `Diffs` in local memory, team
+  loops' starts) and half Mercury's own (team-loop calls, 248 VGPRs); and
+  arrays that need no fill, as `Faces` and `Diffs`, whose every element is
+  written before it is read.
 - Tests: `CodeGen/process-group-private.m`, `-errors.m`, `-gpu.test`, and
   `Benchmarks/swe-sparse*.test` under `SWE_KERNEL=2`.
 
