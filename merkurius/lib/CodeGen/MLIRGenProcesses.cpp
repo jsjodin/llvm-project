@@ -368,7 +368,7 @@ void MerkGenerator::ProcessLoop(const ParallelLoop &loop, ProcessLoopKind kind,
     return;
   }
   if (kind == ProcessLoopKind::Teams && !entry.reductions.empty()) {
-    NotYet(loop.at, "reductions of distribute loops in GPU processes");
+    NotYet(loop.at, "reductions of teams distribute loops in GPU processes");
     return;
   }
   if (entry.reductions.size() > kProcessLoopReductions) {
@@ -874,9 +874,7 @@ bool MerkGenerator::KindRunsLoops(const parser::ProcessDecl &decl) {
     while (!goals.empty()) {
       const Body *goal{goals.pop_back_val()};
       if (goal->kind == BodyKind::Scope && goal->directive &&
-          (goal->directive->id ==
-                  llvm::omp::Directive::OMPD_distribute_parallel_do ||
-              goal->directive->id == llvm::omp::Directive::OMPD_distribute)) {
+          parser::IsProcessTeamsLoop(goal->directive->id)) {
         return true;
       }
       if ((goal->kind == BodyKind::Call ||
@@ -911,7 +909,7 @@ void MerkGenerator::CalledBodies(const Body &goal,
   while (!goals.empty()) {
     const Body *g{goals.pop_back_val()};
     if (distributes && g->kind == BodyKind::Scope && g->directive &&
-        g->directive->id == llvm::omp::Directive::OMPD_distribute) {
+        g->directive->id == llvm::omp::Directive::OMPD_teams_distribute) {
       distributes->push_back(g);
       continue;
     }

@@ -111,7 +111,7 @@ start, and a stream from elements not on 256 bytes is up to a quarter slower
 ## In a GPU process
 
 `bandwidth-process.m` runs the same kernels, with the same check and table,
-in a GPU process: each kernel is a do loop under `%$omp distribute parallel
+in a GPU process: each kernel is a do loop under `%$omp teams distribute parallel
 do`, which the process runs across its worker teams, and Dot and the check's
 average errors are loops with reductions. The process makes the arrays in
 its arena and times each kernel with libc's clock on the device; it sends the

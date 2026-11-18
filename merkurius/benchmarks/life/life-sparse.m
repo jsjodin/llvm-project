@@ -266,7 +266,7 @@ run(G, S, Steps, Cur, Next0, Final, !Dir, !Pos, !Nb, !Live, !Edges, !Quiet,
     array(int32)::array_di, array(int32)::array_uo,
     array(uint16)::array_di, array(uint16)::array_uo) is det.
 step(G, NActive, Actives, Nb, Cur, !Next, !Live, !Edges) :-
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, NActive - 1) do
         I = int32.to_int(Actives ^ unsafe_elem(J)),
         step_tile(G, I, Nb, Cur, !Next, Live, Edges),
@@ -353,7 +353,7 @@ bit(DY, DX) = ( if DY = 0, DX = 0 then 0 else 1 << ((DY + 1) * 3 + DX + 1) ).
     array(uint16)::array_ui, array(uint8)::array_di, array(uint8)::array_uo,
     array(uint16)::array_di, array(uint16)::array_uo, int::out) is det.
 decide(G, NActive, Actives, Pos, Nb, Live, Edges, !Quiet, !Fate, Pending) :-
-    %$omp distribute parallel do reduction((+) : Pending)
+    %$omp teams distribute parallel do reduction((+) : Pending)
     ( for(J, 0, NActive - 1), fromto(0, P0, P1, Pending) do
         I = int32.to_int(Actives ^ unsafe_elem(J)),
         Base = I * 9,
@@ -631,7 +631,7 @@ alive(K) = V :-
     array(int32)::array_ui, array(uint8)::array_di, array(uint8)::array_uo)
     is det.
 init(G, From, Soup, NActive, Actives, Pos, !Cur) :-
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, NActive - 1) do
         I = int32.to_int(Actives ^ unsafe_elem(J)),
         init_tile(G, From, Soup, I, int32.to_int(Pos ^ unsafe_elem(I)), !Cur)
@@ -666,7 +666,7 @@ init_tile(G, From, Soup, I, P, !Cur) :-
 :- pred zero(geometry::in, int::in, int::in, array(int32)::array_ui,
     array(uint8)::array_di, array(uint8)::array_uo) is det.
 zero(G, First, NActive, Actives, !Cells) :-
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, First, NActive - 1) do
         I = int32.to_int(Actives ^ unsafe_elem(J)),
         zero_tile(G, I, !Cells)
@@ -691,7 +691,7 @@ zero_tile(G, I, !Cells) :-
     int::out, int::out) is det.
 count(G, NActive, Actives, Pos, Live, Cells, Population, Checksum) :-
     array.init(int.max(NActive, 1), 0, Sums0),
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, NActive - 1), fromto(Sums0, S0, S1, Sums) do
         I = int32.to_int(Actives ^ unsafe_elem(J)),
         tile_checksum(G, I, int32.to_int(Pos ^ unsafe_elem(I)), Cells, Sum),

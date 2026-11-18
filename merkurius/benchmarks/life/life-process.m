@@ -1,10 +1,10 @@
 % life.m's Game of Life run by a GPU process across its worker teams, each
-% kernel a do loop under %$omp distribute parallel do (docs/INPROGRESS.md,
-% GPU processes that run loops), rather than a target region each: the
-% first program of the demo of a stencil whose active region moves that a
-% process runs, dense, before its tiles do. The process makes the two grids
-% in its arena, times each step on the device, counts the live cells across
-% the teams, and sends the times and the count to the host, which prints
+% kernel a do loop under %$omp teams distribute parallel do
+% (docs/INPROGRESS.md, GPU processes that run loops), rather than a target
+% region each: the first program of the demo of a stencil whose active region
+% moves that a process runs, dense, before its tiles do. The process makes the
+% two grids in its arena, times each step on the device, counts the live cells
+% across the teams, and sends the times and the count to the host, which prints
 % them as life.m does.
 %
 % Built with -fprocess-declarations and --offload-arch, and -fopenmp for the
@@ -89,7 +89,7 @@ alive(K) = V :-
 :- pred init(int::in, array(int)::array_di, array(int)::array_uo) is det.
 init(N, !A) :-
     W = N + 2,
-    %$omp distribute parallel do
+    %$omp teams distribute parallel do
     ( for(K, 0, N * N - 1) do
         C = (unchecked_quotient(K, N) + 1) * W + unchecked_rem(K, N) + 1,
         !A ^ unsafe_elem(C) := alive(K)
@@ -101,7 +101,7 @@ init(N, !A) :-
     array(int)::array_di, array(int)::array_uo) is det.
 step(N, A, !B) :-
     W = N + 2,
-    %$omp distribute parallel do
+    %$omp teams distribute parallel do
     ( for(K, 0, N * N - 1) do
         C = (unchecked_quotient(K, N) + 1) * W + unchecked_rem(K, N) + 1,
         Count =
@@ -144,7 +144,7 @@ run(S, Steps, N, Cur, Next0, Final, !T, !IO) :-
 :- pred count(int::in, array(int)::array_ui, int::out, int::out) is det.
 count(N, A, Population, Checksum) :-
     W = N + 2,
-    %$omp distribute parallel do reduction((+) : Population, Checksum)
+    %$omp teams distribute parallel do reduction((+) : Population, Checksum)
     ( for(K, 0, N * N - 1),
         fromto(0, P0, P1, Population), fromto(0, S0, S1, Checksum) do
         C = (unchecked_quotient(K, N) + 1) * W + unchecked_rem(K, N) + 1,

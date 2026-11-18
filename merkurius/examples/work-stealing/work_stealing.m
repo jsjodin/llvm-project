@@ -369,7 +369,7 @@ tile_iterations(Size, Tile, F, T) = Total :-
     PerRow = Size / Tile,
     Top = (T / PerRow) * Tile,
     Left = (T mod PerRow) * Tile,
-    %$omp distribute parallel do reduction((+) : Total)
+    %$omp teams distribute parallel do reduction((+) : Total)
     ( for(K, 0, Tile * Tile - 1), fromto(0, S0, S1, Total) do
         % The unchecked operations skip the test for a zero Tile, which
         % main has made.

@@ -88,7 +88,7 @@ tiler(Reply, Self, !IO) :-
 % DEVICE-NOT:     merk_device_loop_results
 % DEVICE:         merk.foreign_call @merk_device_process_distribute(%c0_i64{{.*}}, %{{.*}}, %c1_i64{{.*}}, %{{.*}}) : (i64, i64, i64, i64) -> ()
 fill(T, S, !Cells, !Sums) :-
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, T - 1) do
         fill_tile(J, S, !Cells, Sum),
         !Sums ^ unsafe_elem(J) := Sum
@@ -116,7 +116,7 @@ fill_tile(J, S, !Cells, Sum) :-
 :- pred update(int::in, int::in, array(int)::array_di, array(int)::array_uo)
     is det.
 update(T, S, !Updated) :-
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, T - 1) do
         !Updated ^ unsafe_elem(J) := !.Updated ^ unsafe_elem(J) * 3 + J,
         %$omp parallel do reduction(min : Lo) reduction(max : Hi) reduction((+) : Half)
@@ -141,7 +141,7 @@ update(T, S, !Updated) :-
 :- pred make(int::in, int::in, array(int)::array_di, array(int)::array_uo)
     is det.
 make(T, S, !Made) :-
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, T - 1) do
         array.init(S, J, Tile0),
         %$omp parallel do
@@ -161,7 +161,7 @@ make(T, S, !Made) :-
     %
 :- pred weigh(int::in, array(int)::array_ui, int::out) is det.
 weigh(N, Cells, Sum) :-
-    %$omp distribute parallel do reduction((+) : Sum)
+    %$omp teams distribute parallel do reduction((+) : Sum)
     ( for(I, 0, N - 1), fromto(0, P0, P1, Sum) do
         P1 = P0 + Cells ^ unsafe_elem(I) * (I + 1)
     ).

@@ -83,7 +83,7 @@ scheduler(Reply, Self, !IO) :-
 % HOST-LABEL:   merk.proc private @process_schedule.uneven_4_0(
 % HOST:           omp.wsloop schedule(dynamic) reduction(
 uneven(N, Work, Counters, Count) :-
-    %$omp distribute parallel do schedule(dynamic) reduction((+) : Work)
+    %$omp teams distribute parallel do schedule(dynamic) reduction((+) : Work)
     %$omp& reduction((+) : Counters) reduction((+) : Count)
     ( for(I, 0, N - 1), fromto(0, W0, W1, Work),
         fromto(0, C0, C1, Counters), fromto(0, K0, K1, Count) do
@@ -101,7 +101,7 @@ uneven(N, Work, Counters, Count) :-
 % HOST:           %[[CHUNK:.*]] = arith.constant 3 : i64
 % HOST:           omp.wsloop schedule(dynamic = %[[CHUNK]] : i64) {
 squares(N, !Squares) :-
-    %$omp distribute parallel do schedule(dynamic, 3)
+    %$omp teams distribute parallel do schedule(dynamic, 3)
     ( for(I, 0, N - 1), fromto(!.Squares, S0, S1, !:Squares) do
         S1 = S0 ^ unsafe_elem(I) := (I mod 1009) * (I mod 1009)
     ).
@@ -112,7 +112,7 @@ squares(N, !Squares) :-
 :- pred tiles(int::in, array(int)::array_di, array(int)::array_uo,
     array(int)::array_di, array(int)::array_uo) is det.
 tiles(T, !Cells, !Sums) :-
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, T - 1) do
         tile(J, !Cells, Sum),
         !Sums ^ unsafe_elem(J) := Sum
@@ -139,7 +139,7 @@ tile(J, !Cells, Sum) :-
 % HOST-LABEL:   merk.proc private @process_schedule.static_sum_2_0(
 % HOST:           omp.wsloop schedule(static) reduction(
 static_sum(N, Sum) :-
-    %$omp distribute parallel do schedule(static) reduction((+) : Sum)
+    %$omp teams distribute parallel do schedule(static) reduction((+) : Sum)
     ( for(I, 0, N - 1), fromto(0, P0, P1, Sum) do
         P1 = P0 + I * 3
     ).
