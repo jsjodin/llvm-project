@@ -1832,8 +1832,9 @@ extern "C" void merk_device_wave_fill(
 // alone, as a GPU process's does: below, the lane's own loop, which needs no
 // registers kept on the stack. A copy by the lane alone moved 30 to 40 MB/s
 // on gfx90a, by the wave 1.6 to 2.3 GB/s (docs/INPROGRESS.md, Direct sends
-// between the GPUs of a node, Results of the experiments).
-constexpr uint64_t kWaveWords{32};
+// between the GPUs of a node, Results of the experiments). 16, two of the
+// lane's batches of 8 (CopyWords), which are kept small for the registers.
+constexpr uint64_t kWaveWords{16};
 
 // Whether the calling lane is its wave's only active one, so that the
 // wave's other lanes can work for it, whatever the code it runs.
