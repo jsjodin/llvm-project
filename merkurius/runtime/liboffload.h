@@ -110,9 +110,6 @@ ol_result_t olLaunchKernel(ol_queue_handle_t queue, ol_device_handle_t device,
     ol_symbol_handle_t kernel, const ol_kernel_launch_size_args_t *size,
     const void *properties, std::size_t count, void **arguments,
     const std::size_t *sizes) __attribute__((weak));
-ol_result_t olGetKernelMaxCooperativeGroupCount(ol_device_handle_t device,
-    ol_symbol_handle_t kernel, const ol_kernel_launch_size_args_t *size,
-    std::uint32_t *count) __attribute__((weak));
 ol_result_t olSyncQueue(ol_queue_handle_t queue) __attribute__((weak));
 // Queues limited to some compute units, for GPU processes (compute-units.h).
 ol_result_t olGetDeviceComputeUnitMask(ol_device_handle_t device,
