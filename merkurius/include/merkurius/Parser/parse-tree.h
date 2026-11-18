@@ -1364,6 +1364,17 @@ struct OmpDirective {
   }
 };
 
+// Whether the directive runs a loop across a GPU process's worker teams:
+// teams distribute parallel do, across their threads, or teams distribute,
+// on their first waves (design document, GPU processes). Each is a teams
+// region of its own, with no code outside the loop, so no code runs once a
+// team, which a process's code, with its messages and arrays updated in
+// place, could not.
+inline bool IsProcessTeamsLoop(llvm::omp::Directive id) {
+  return id == llvm::omp::Directive::OMPD_teams_distribute_parallel_do ||
+      id == llvm::omp::Directive::OMPD_teams_distribute;
+}
+
 // Loops (design document, "Loops"), read with -fdo-loops: Schimpf's
 // logical loops ("Logical Loops", ICLP 2002), adapted to Merkurius.
 ENUM_CLASS(LoopIteratorKind, For, Foreach, Count, Fromto)

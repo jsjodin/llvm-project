@@ -45,7 +45,7 @@
 worker(Reply, Self, !IO) :-
     receive(Self, any, infinity, R, !IO),
     ( if R = message(N), N > 0 then
-        %$omp distribute parallel do reduction((+) : Sum)
+        %$omp teams distribute parallel do reduction((+) : Sum)
         ( for(I, 1, N), fromto(0, S0, S1, Sum) do
             S1 = S0 + I * I
         ),

@@ -46,20 +46,20 @@ tallier(Reply, Self, !IO) :-
     receive(Self, any, infinity, R, !IO),
     ( if R = message(N), N > 0 then
         array.init(10, 0, H0),
-        %$omp distribute parallel do
+        %$omp teams distribute parallel do
         ( for(I, 0, N - 1), fromto(H0, H1, H2, H) do
             K = I mod 10,
             %$omp atomic
             H2 = H1 ^ elem(K) := H1 ^ elem(K) + 1
         ),
         array.init(4, 0.0, F0),
-        %$omp distribute parallel do
+        %$omp teams distribute parallel do
         ( for(I, 0, N - 1), fromto(F0, F1, F2, F) do
             add_half(I mod 4, F1, F2)
         ),
         array.init(1, 0, C0),
         array.init(N / 2 + 1, -1, V0),
-        %$omp distribute parallel do
+        %$omp teams distribute parallel do
         ( for(I, 0, N - 1), fromto(C0, C1, C2, C), fromto(V0, V1, V2, V) do
             ( if I mod 2 = 1 then
                 %$omp atomic capture
@@ -72,13 +72,13 @@ tallier(Reply, Self, !IO) :-
         ),
         Count = C ^ elem(0),
         array.init(N, 0, S0),
-        %$omp distribute parallel do
+        %$omp teams distribute parallel do
         ( for(J, 0, Count - 1), fromto(S0, S1, S2, S) do
             X = V ^ elem(J),
             %$omp atomic
             S2 = S1 ^ elem(X) := S1 ^ elem(X) + 1
         ),
-        %$omp distribute parallel do reduction((+) : Wrong)
+        %$omp teams distribute parallel do reduction((+) : Wrong)
         ( for(I, 0, N - 1), fromto(0, W0, W1, Wrong) do
             W1 = ( if S ^ elem(I) = I mod 2 then W0 else W0 + 1 )
         ),

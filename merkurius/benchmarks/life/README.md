@@ -81,7 +81,7 @@ fix to the runtime is next for; this is not yet a measurement of the design.
 ## In a GPU process
 
 `life-process.m` runs the same steps in a GPU process, each a loop across
-the process's teams under `%$omp distribute parallel do`, rather than a
+the process's teams under `%$omp teams distribute parallel do`, rather than a
 target region each (`docs/INPROGRESS.md`, GPU processes that run loops).
 The process makes both grids in its arena, times each step by the device's
 clock, counts the live cells with a loop of two reductions, and sends the

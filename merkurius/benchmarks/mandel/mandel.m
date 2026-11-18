@@ -107,7 +107,7 @@ frames(F, Frames, Size, Width, !Totals, !Times, !IO) :-
 :- pred frame(int::in, float::in, int::in, int::out) is det.
 frame(Size, Step, Limit, Total) :-
     Half = Size / 2,
-    %$omp distribute parallel do reduction((+) : Total)
+    %$omp teams distribute parallel do reduction((+) : Total)
     ( for(K, 0, Size * Size - 1), fromto(0, S0, S1, Total) do
         PY = unchecked_quotient(K, Size),
         PX = unchecked_rem(K, Size),

@@ -437,16 +437,16 @@ void GpuCodeChecker::Call(const ProcedureBody &body, const Body &goal,
 }
 
 // The context of a GPU process's code under the loop directive, which its
-// calls run in: a distribute loop's body on a team's first wave, and a
-// parallel do's or a distribute parallel do's across a team's threads.
+// calls run in: a teams distribute loop's body on a team's first wave, and a
+// parallel do's or a teams distribute parallel do's across a team's threads.
 static Context InnerContext(Context context, llvm::omp::Directive id) {
   if (context == Context::Region) {
     return context;
   }
-  if (id == llvm::omp::OMPD_distribute) {
+  if (id == llvm::omp::OMPD_teams_distribute) {
     return Context::Team;
   }
-  if (id == llvm::omp::OMPD_distribute_parallel_do ||
+  if (id == llvm::omp::OMPD_teams_distribute_parallel_do ||
       id == llvm::omp::OMPD_parallel_do) {
     return Context::Thread;
   }
@@ -625,14 +625,18 @@ void FindDirectives(const Body &goal, bool inRegion,
 }
 
 // The loops of a GPU process (docs/INPROGRESS.md, GPU processes that run
-// loops): under distribute parallel do, a loop runs across the process's
-// teams' threads; under distribute, across its teams, a worker team's first
-// wave running an iteration's body, in which a loop under parallel do runs
-// across the team's threads. Their code is that of a process kind that runs
-// on a GPU. In a target region a distribute loop would be OpenMP's, under
-// target teams, which is not implemented. On the host, as in a kind spawned
-// there, distribute loops are parallel do loops. A GPU process's code has no
-// other directive, as its kernel is compiled without OpenMP.
+// loops): under teams distribute parallel do, a loop runs across the
+// process's teams' threads; under teams distribute, across its teams, a
+// worker team's first wave running an iteration's body, in which a loop
+// under parallel do runs across the team's threads. Their code is that of a
+// process kind that runs on a GPU. In a target region they would be
+// OpenMP's, which is not implemented. On the host, as in a kind spawned
+// there, they are parallel do loops. A GPU process's code has no other
+// directive, as its kernel is compiled without OpenMP: no teams region of
+// its own, whose code every team would run, sending its messages and
+// updating its arrays once a team. OpenMP binds distribute to the teams
+// region around it, so distribute alone, outside a target region, is an
+// error that names the teams form.
 void GpuCodeChecker::CheckProcessLoops() {
   for (const ProcedureBody &body : determinism_.bodies()) {
     if (!body.body) {
@@ -648,10 +652,20 @@ void GpuCodeChecker::CheckProcessLoops() {
       parser::CharBlock where{Source(directive->tokens)};
       llvm::omp::Directive id{directive->directive->id};
       std::string name{parser::EnumToString(id)};
-      bool distribute{id == llvm::omp::OMPD_distribute_parallel_do ||
-          id == llvm::omp::OMPD_distribute};
+      bool distribute{parser::IsProcessTeamsLoop(id)};
       // An atomic update is the same wherever it runs.
       if (id == llvm::omp::OMPD_atomic) {
+        continue;
+      }
+      if (!inRegion &&
+          (id == llvm::omp::OMPD_distribute_parallel_do ||
+              id == llvm::omp::OMPD_distribute)) {
+        if (reported_.insert(where.begin()).second) {
+          messages_.Say(where,
+              "a %s loop must be in a teams region; a loop across a GPU "
+              "process's teams is written teams %s"_err_en_US,
+              name, name);
+        }
         continue;
       }
       if (!distribute && id != llvm::omp::OMPD_parallel_do) {
@@ -659,9 +673,9 @@ void GpuCodeChecker::CheckProcessLoops() {
             reported_.insert(where.begin()).second) {
           messages_.Say(where,
               "a process kind that runs on a GPU runs its loops across its "
-              "teams under distribute parallel do, or under distribute with "
-              "parallel do loops in their bodies, and its code has no %s "
-              "directive"_err_en_US,
+              "teams under teams distribute parallel do, or under teams "
+              "distribute with parallel do loops in their bodies, and its "
+              "code has no %s directive"_err_en_US,
               name);
         }
         continue;
@@ -675,7 +689,7 @@ void GpuCodeChecker::CheckProcessLoops() {
         if (process) {
           messages_.Say(where,
               "a parallel do loop in a GPU process's code runs across a "
-              "team's threads, so it must be in the body of a distribute "
+              "team's threads, so it must be in the body of a teams distribute "
               "loop, or in a predicate of the module that such a body "
               "calls"_err_en_US);
         } else {

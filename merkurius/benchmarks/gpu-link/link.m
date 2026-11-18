@@ -115,7 +115,7 @@ take(Self, Words, Count, !Right, !IO) :-
 wsource(Words, Count, To, Self, !IO) :-
     ( if Words < 0 then
         A = array.init(Count, Words),
-        %$omp distribute parallel do reduction((+) : Sum)
+        %$omp teams distribute parallel do reduction((+) : Sum)
         ( for(I, 0, Count - 1), fromto(0, S0, S1, Sum) do
             S1 = S0 + A ^ elem(I)
         ),
@@ -129,7 +129,7 @@ wsource(Words, Count, To, Self, !IO) :-
 wsink(Words, Count, Report, Self, !IO) :-
     ( if Words < 0 then
         A = array.init(Count, Words),
-        %$omp distribute parallel do reduction((+) : Sum)
+        %$omp teams distribute parallel do reduction((+) : Sum)
         ( for(I, 0, Count - 1), fromto(0, S0, S1, Sum) do
             S1 = S0 + A ^ elem(I)
         ),

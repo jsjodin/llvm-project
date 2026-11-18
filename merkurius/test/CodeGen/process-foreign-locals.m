@@ -87,7 +87,7 @@ worker(Reply, Self, !IO) :-
     %
 :- pred sums(int::in, array(int)::array_di, array(int)::array_uo) is det.
 sums(T, !Sums) :-
-    %$omp distribute
+    %$omp teams distribute
     ( for(J, 0, T - 1) do
         tile_sum(J, Sum),
         !Sums ^ unsafe_elem(J) := Sum

@@ -66,7 +66,7 @@ weigh(rec(X, Y, Z), I) =
 bulk(Report, Summer, Self, !IO) :-
     % A loop, so that the kind has worker teams.
     array.init(64, 0, Z0),
-    %$omp distribute parallel do
+    %$omp teams distribute parallel do
     ( for(I, 0, 63), fromto(Z0, Z1, Z2, Z) do
         array.set(I, I, Z1, Z2)
     ),
