@@ -5053,6 +5053,47 @@ process's lane:
   dependent loads and stores from one lane. Free lists of the process's
   own, by size, would take neither libc's atomics nor the list's.
 
+*Open: tests of what the pass frees* (agreed 2026-11-17, after the
+Quicksilver port; to follow once its E1.3 is recorded, before its M4,
+which adds message traffic). Every leak and double free that the pass
+fixed on 2026-11-17 (design document, "Frees on each path" and "A
+procedure frees what it takes by mode `di`") was found by Quicksilver at
+scale, none by a test: the tests check shapes chosen in advance, simpler
+than a program's, and pass with those bugs; life-places' double free
+showed only because its check counts rings. Steps, each a commit, and
+each bug they find fixed in a commit of its own first:
+- (t1) Runtime checks, in one commit with their tests:
+  - A bound: `MERK_PROCESS_MEMORY_LIMIT=<bytes>` stops a process that holds
+    more, so a test runs a pattern for many rounds under a tight bound, and
+    one block leaked a round goes over it. Deterministic, and FileCheck
+    needs no comparison of peaks between runs.
+  - Wrong frees: a magic word in `Block`'s header, marked when freed, so
+    `merk_device_free` stops at a double free, a block not on the
+    process's list, and a free of a message group's member that is not
+    its whole group's. At the process's end, the blocks still live beside
+    `teamHeld` can be reported.
+  - Host runs under valgrind: a GPU process kind run at the host frees as
+    on the GPU, and valgrind finds double and invalid frees there
+    (installed 2026-11-17).
+- (t2) A matrix of patterns, each run many rounds under the bound, at the
+  host and on the GPU, at -O0 and -O2, as inlining changes the shapes (the
+  leak of a receive kept out of line showed only out of line):
+  - receives: inline; in a `no_inline` callee; in a callee that returns
+    the message on one path and drops it on others; a message kept in a
+    backlog and handled later;
+  - sends: moved at the last use; copied, the original used after; arrays
+    in messages; batches built in a buffer and flushed;
+  - calls: recursive, non-recursive and mutually recursive tail calls;
+    chains of `di` handovers; two arrays swapped each round; a resize in a
+    loop; results that hold a received message;
+  - processes: state machines of several states, as Quicksilver's place,
+    and exchanges between places, as life-places' and E1.3's.
+- (t3) A small E1.3 as a test in merkurius-mc: 8³ cells, 4 cycles, 2
+  places, under the bound, the closest a test comes to a program.
+- Rejected: a static checker that every block is freed at most once on
+  each path: a second implementation of the pass's reasoning, where the
+  runtime's checks find the same bugs for less.
+
 *Steps,* each a commit:
 - (p1) Memory that a GPU process gives back, f1 to f4 above. Done
   2026-11-13.
