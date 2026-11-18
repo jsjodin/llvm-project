@@ -5577,6 +5577,68 @@ with tiles of 64, after a place's walks of its tiles run on many lanes
 (Open, in the demo's section): its agreement grows by 1.3 µs a tile
 against 3.5 µs of work.
 
+## Register pressure in GPU processes
+
+Decided by the user 2026-11-18, after `benchmarks/swe-muscl`: Mercury
+needs to be 1.5 to 2 times faster on gfx90a, where full-rate doubles leave
+the kernels' overheads exposed (on gfx1030 Mercury's `step` is within 1%
+of HIP's, and on gfx90a first order was 1.6 times HIP). The user: "I think
+we're going to need some comprehensive approach to dealing with register
+pressure. The whack-a-mole approach seems to come up short every time."
+
+**What gfx90a builds of `swe-muscl.m` show** (static, 2026-11-18, no runs):
+- `merk_place` takes 254 VGPRs and 36 AGPRs, so 1 wave a SIMD. HIP's
+  `step` takes 128 VGPRs with 292 bytes of spills: 4 waves.
+- Every `parallel do` body is inlined into `merk_team_loop` and every
+  distribute body into `merk_process_loop`. A persistent kernel's
+  registers are the most any of its paths needs, so the heaviest body sets
+  them for all, and cold runtime code shares its allocation.
+- Nothing sets a budget: `merk_place` says only a flat work-group size of
+  256, one wave a SIMD in wave64, so the backend may use 512 registers a
+  lane.
+- AGPRs: `"amdgpu-agpr-alloc"="0"` is a minimum, not a limit, so even with
+  it on every function the backend parks values in AGPRs, which share
+  gfx90a's register file. `"0,0"` forbids them. Separately, the AMDGPU
+  attributor does not look through `llvm.amdgcn.call.whole.wave` (no
+  `nocallback`), so `merk_place` and everything between it and
+  `wave_copy`/`wave_fill` get no AGPR attribute at all; an upstream bug,
+  harmless while `"0"` is no limit.
+- With AGPRs forbidden and waves per EU set on every function: 2 waves at
+  254 VGPRs, 3 at 168, 4 at 128, 5 at 96. Spills and reloads in
+  `merk_team_loop` and `merk_process_loop` grow from 148 and 214 to 522
+  and 553 at 4 waves. Which side wins is to be timed on gfx90a.
+- Suspected, not verified: Mercury's 64-bit `int` doubles every index's
+  registers, and team-uniform values that reach bodies through an
+  environment LLVM cannot prove uniform live in VGPRs, where HIP's kernel
+  arguments sit in SGPRs.
+
+**First numbers from the script** (2026-11-18, static), the most a lane
+needs and the waves a SIMD:
+
+| `swe-muscl` `step` | gfx90a VGPR/AGPR | waves | gfx1030 VGPR | waves |
+|---|---:|---:|---:|---:|
+| Mercury `merk_place` | 254 / 36 | 1 | 253 | 4 |
+| HIP `step` | 128 / 0 | 4 | 128 | 8 |
+| C (OpenMP) `step` | 210 / 0 | 2 | | |
+
+**The plan, in order:**
+1. *Measure.* Done 2026-11-18, the script; lit checks to come. `utils/gpu/gpu-registers.py`: for a program and one or more
+   GPUs, each image's kernels and functions with their VGPRs, AGPRs,
+   SGPRs, scratch, spills and occupancy, from the backend's
+   kernel-resource-usage remarks, beside a HIP file's for comparison. Then
+   lit checks that pin the benchmarks' occupancy, so that a regression
+   fails a test, not a run.
+2. *Budget.* merkc sets `"amdgpu-waves-per-eu"` and
+   `"amdgpu-agpr-alloc"="0,0"` on every function of a process image, the
+   runtime's device library likewise; an occupancy target with a default
+   a GPU and a flag. Timed on gfx90a against HIP.
+3. *Less demand.* Team-uniform values where LLVM sees them uniform (SGPRs);
+   32-bit index arithmetic where ranges allow; cold runtime paths kept out
+   of line from hot loops.
+4. *Structure,* if 1 to 3 fall short: team workers a kernel of their own
+   with their own budget, apart from the process lane's control code.
+5. The attributor bug, upstream, with a test; not on the critical path.
+
 ## A pipeline of processes
 
 Proposed by the user 2026-11-13, after the shallow water showcase: "a

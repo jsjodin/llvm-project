@@ -189,6 +189,9 @@ public:
     return true;
   }
 
+  // Whether the files are kept (-save-temps).
+  bool Kept() const { return keep_; }
+
   // A file's name, from `stem` and `suffix`.
   std::string Name(llvm::StringRef stem, llvm::StringRef suffix) {
     llvm::SmallString<128> name;
@@ -318,7 +321,16 @@ static std::vector<std::string> addProcessImageJobs(const InputArgList &args,
     link.insert(link.end(),
         {kernels, libraryDir + "/merk-process-start-amdgcn.o",
             libraryDir + "/libmerkdevice-amdgcn.a", "-lc", "-lm", "-o", image});
-    jobs.push_back(std::move(link));
+    jobs.push_back(link);
+    // With -save-temps, the image's assembly too, which shows each
+    // function's registers, stack and spills (utils/gpu/gpu-registers.py):
+    // the same link, which lld writes as assembly to the name it is given
+    // and .lto.s, here <stem>-<arch>-processes.lto.s beside the image.
+    if (temporaries.Kept()) {
+      link.back() = llvm::StringRef{image}.drop_back(4).str();
+      link.push_back("-Wl,--lto-emit-asm");
+      jobs.push_back(std::move(link));
+    }
     embeds.push_back("-fembed-process-image=" + arch.arch + ":" + image);
   }
   return embeds;
