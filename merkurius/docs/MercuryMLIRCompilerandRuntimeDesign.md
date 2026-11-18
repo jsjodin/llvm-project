@@ -5557,6 +5557,26 @@ events. All three programs gave the same checksum in every run.
   cost more than the 2 fluxes saved a cell. Mercury's `step_faces` is 13%
   behind HIP's on kernel work (1377 against 1216 µs), as with first order.
 
+Register budgets (INPROGRESS, Register pressure in GPU processes, step 2):
+the same, 2026-11-18 after a424a2694886 with `merk_place` made by merkc,
+Firefox closed, 5 rounds, by `MERKC_FLAGS=-fgpu-process-waves=<n>`. The
+uncapped kernel takes 253 VGPRs, 4 waves a SIMD; 6 waves give 160, 8
+give 128, with more spills.
+
+| Kernel | Uncapped | 6 waves | 8 waves | HIP |
+|---|---:|---:|---:|---:|
+| `step` | 1113 (27) | 1184 (28) | 1142 (34) | 1112 (48) |
+| `step_faces` | 1404 (28) | 1401 (28) | 1327 (34) | 1266 (51) |
+
+- **`step` loses under a cap**: 6% at 6 waves and 3% at 8. Its spills
+  cost more than the waves gain.
+- **`step_faces` gains 5% at 8 waves**, from 11% behind HIP to 5%. Its
+  barriers leave waves idle, which more waves hide.
+- **The bookkeeping costs 6 µs more at 8 waves**: the runtime's own code
+  is capped with the rest.
+- So no cap is right for every program, and the gfx1030 has none by
+  default.
+
 ### A pipeline of GPU processes
 
 `benchmarks/pipeline`: three GPU processes on one GPU, each with a third of

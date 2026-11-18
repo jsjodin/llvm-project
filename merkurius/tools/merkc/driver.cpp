@@ -266,6 +266,9 @@ static void addProcessKernelOptions(
     const InputArgList &args, Job &job, llvm::StringRef triple) {
   addFrontendOptions(args, job, triple, /*openMP=*/false);
   job.push_back("-fprocess-kernels");
+  if (const llvm::opt::Arg *arg = args.getLastArg(OPT_fgpu_process_waves_EQ)) {
+    job.push_back(arg->getAsString(args));
+  }
   // The loops that the kinds run across teams keep their directives, of
   // the host's OpenMP version, as a dyn_groupprivate clause needs 6.1.
   if (args.hasArg(OPT_fopenmp)) {

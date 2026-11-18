@@ -208,6 +208,16 @@ static bool parseCodeGenArgs(CodeGenOptions &opts, const InputArgList &args) {
                 "given with -fopenmp");
     return false;
   }
+  if (const llvm::opt::Arg *arg = args.getLastArg(OPT_fgpu_process_waves_EQ)) {
+    unsigned waves{0};
+    if (llvm::StringRef{arg->getValue()}.getAsInteger(10, waves) ||
+        waves > 32) {
+      reportError("-fgpu-process-waves=" + std::string{arg->getValue()} +
+          ": expected the waves a SIMD, from 0 to 32");
+      return false;
+    }
+    opts.processWaves = waves;
+  }
   if (args.hasArg(OPT_fprocess_loops) && !opts.processKernels) {
     reportError("-fprocess-loops is given only with -fprocess-kernels");
     return false;
