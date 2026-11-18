@@ -171,6 +171,21 @@ config.substitutions.append(
     )
 )
 
+# The static report of GPU code's registers (utils/gpu/gpu-registers.py), of
+# this build.
+config.substitutions.append(
+    (
+        "%gpu-registers",
+        "%s -I %s --build %s"
+        % (
+            config.python_executable,
+            os.path.join(config.merkurius_src_root, "utils", "gpu",
+                         "gpu-registers.py"),
+            os.path.dirname(config.llvm_tools_dir),
+        ),
+    )
+)
+
 # The unparser's round-trip tests 2, 3 and 4.
 config.substitutions.append(
     (

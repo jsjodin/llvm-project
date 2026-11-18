@@ -5622,12 +5622,13 @@ needs and the waves a SIMD:
 | C (OpenMP) `step` | 210 / 0 | 2 | | |
 
 **The plan, in order:**
-1. *Measure.* Done 2026-11-18, the script; lit checks to come. `utils/gpu/gpu-registers.py`: for a program and one or more
+1. *Measure.* Done 2026-11-18. `utils/gpu/gpu-registers.py`: for a program and one or more
    GPUs, each image's kernels and functions with their VGPRs, AGPRs,
    SGPRs, scratch, spills and occupancy, from the backend's
    kernel-resource-usage remarks, beside a HIP file's for comparison. Then
    lit checks that pin the benchmarks' occupancy, so that a regression
-   fails a test, not a run.
+   fails a test, not a run: `test/Benchmarks/swe-muscl-registers.test`,
+   by the report's table through `%gpu-registers`, without a GPU.
 2. *Budget.* `"amdgpu-waves-per-eu"` on the process image's kernel, which
    the attributor carries to every function it calls, with AGPRs then
    limited by the attribute of step 5; an occupancy target with a default
@@ -5644,8 +5645,7 @@ needs and the waves a SIMD:
      second order): caps of 6 and 8 waves make `step` slower and
      `step_faces` faster at 8.
    - So spills can cost more than occupancy gains, and the default stays
-     at the cap that adds none. To do: time 2, 3 and 4 on gfx90a, and pin
-     occupancy in lit by `gpu-registers.py --json` (step 1).
+     at the cap that adds none. To do: time 2, 3 and 4 on gfx90a.
 3. *Less demand.* Team-uniform values where LLVM sees them uniform (SGPRs);
    32-bit index arithmetic where ranges allow; cold runtime paths kept out
    of line from hot loops.
