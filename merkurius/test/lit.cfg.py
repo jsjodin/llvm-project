@@ -60,9 +60,6 @@ build_root = os.path.dirname(config.llvm_tools_dir)
 # GPU here to test on a machine with it. First in the list, since lit
 # substitutes in order and %offload-arch is a prefix of it.
 config.substitutions.insert(0, ("%offload-archs", "gfx1030,gfx90a"))
-# %merk-lib-dir has the device runtime, libmerkdevice-amdgcn.a, and the start
-# object of GPU processes' images, for tests that link device code by hand.
-config.substitutions.append(("%merk-lib-dir", os.path.join(build_root, "lib")))
 omp_dirs = []
 for library in ["libomp.so", "libomptarget.so"]:
     candidates = [os.path.join(build_root, "lib")]
