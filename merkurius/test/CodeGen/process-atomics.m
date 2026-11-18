@@ -9,7 +9,10 @@
 % second loop of atomic updates makes, against one for each odd number,
 % counted by a reduction. The program runs the kind at the host here, where
 % the loops are parallel do loops, or sequential without -fopenmp, and at
-% the GPU in process-atomics-gpu.test.
+% the GPU in process-atomics-gpu.test. On an AMD GPU the updates are on
+% global pointers, which the backend combines across a wave, and the loops'
+% values are read from the wave's first lane, so that an array's address is
+% known to be the same in every lane.
 %
 % mmc has no process module to run it with, so the output is written by
 % hand.
@@ -132,7 +135,9 @@ print_result(V, !IO) :-
 % CHECK-NEXT:1000000: 100000 100000 250000 250000 500000 0
 
 % DEVICE-LABEL: merk.proc private @process_atomics.add_half_3_0(
-% DEVICE:         omp.atomic.update %{{.*}} : !llvm.ptr {
+% DEVICE:         omp.atomic.update %{{.*}} : !llvm.ptr<1> {
 % DEVICE:         arith.addf
 % LLVM-LABEL: define {{.*}} @process_atomics.add_half_3_0(
-% LLVM:         atomicrmw fadd ptr %{{.*}}, double 5.000000e-01 monotonic
+% LLVM:         atomicrmw fadd ptr addrspace(1) %{{.*}}, double 5.000000e-01 monotonic
+% LLVM-LABEL: define {{.*}} @merk_process_loop(
+% LLVM:         call i64 @llvm.amdgcn.readfirstlane.i64(

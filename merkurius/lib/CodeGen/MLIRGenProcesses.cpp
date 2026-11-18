@@ -582,13 +582,19 @@ void MerkGenerator::ProcessLoopShare(const ProcessLoopCase &loop,
   llvm::SmallVector<mlir::Value> arguments{entry->getArgument(2),
       entry->getArgument(1), entry->getArgument(3), entry->getArgument(4),
       entry->getArgument(5), entry->getArgument(6)};
+  // Every thread reads the same words, but through memory, so each is
+  // marked uniform for the target: an array the loop updates atomically
+  // then has its address in scalar registers, and the backend can combine
+  // a wave's operations on one element (TargetInfo's
+  // AtomicElementAddressSpace).
   std::int32_t next{0};
   for (auto [index, type] : llvm::enumerate(loop.inputs)) {
     if (index == loop.counter || IsReductionInput(loop, index)) {
       continue;
     }
-    arguments.push_back(FromWordBits(
-        builder_, loc, type, LoadWord(builder_, loc, values, next++)));
+    mlir::Value word{
+        target_.Uniform(builder_, loc, LoadWord(builder_, loc, values, next++))};
+    arguments.push_back(FromWordBits(builder_, loc, type, word));
   }
   for (auto [index, reduction] : llvm::enumerate(loop.reductions)) {
     arguments.push_back(FromWordBits(builder_, loc, reduction.type,

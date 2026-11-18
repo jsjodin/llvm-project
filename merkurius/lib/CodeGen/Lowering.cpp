@@ -4243,19 +4243,21 @@ void Lowerer::PolymorphicStore(mlir::Operation *op, mlir::Value array,
   rewriter_.setInsertionPointToStart(join);
 }
 
-// The element's address, of an array of words, as a generic pointer: the
-// host's heap pointer is cast out of the collector's address space, as no
-// safepoint comes before the atomic operation that uses it.
+// The element's address, of an array of words, as a pointer of the
+// reference's type: the host's heap pointer is cast out of the collector's
+// address space, as no safepoint comes before the atomic operation that
+// uses it, and into the target's address space for atomic elements
+// (TargetInfo's AtomicElementAddressSpace).
 void Lowerer::LowerArrayElementRef(merk::ArrayElementRefOp op) {
   mlir::Location loc{op->getLoc()};
   rewriter_.setInsertionPoint(op);
   // The operands, not the accessors: the array may be lowered already.
   mlir::Value address{ElementAddress(LoweredValue(op->getOperand(0), loc),
       op->getOperand(1), 0, loc)};
-  auto generic{mlir::LLVM::LLVMPointerType::get(op->getContext())};
-  if (address.getType() != generic) {
+  mlir::Type type{op->getResult(0).getType()};
+  if (address.getType() != type) {
     address =
-        mlir::LLVM::AddrSpaceCastOp::create(rewriter_, loc, generic, address);
+        mlir::LLVM::AddrSpaceCastOp::create(rewriter_, loc, type, address);
   }
   rewriter_.replaceOp(op, address);
 }

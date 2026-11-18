@@ -117,6 +117,19 @@ public:
     bool shared{false};
   };
   ResultRegisters Results() const;
+  // The address space of the element addresses that atomic updates of
+  // arrays use: the runtime makes every array in its heaps, never on the
+  // stack. On AMDGPU the global one, as the backend combines a wave's
+  // atomic operations on one element into one only on global pointers,
+  // not on generic ones, which may be on the stack, where each lane's
+  // memory differs; generic elsewhere.
+  unsigned AtomicElementAddressSpace() const;
+  // `value`, which every thread of a GPU's wave reads the same from
+  // memory, marked as uniform for the target, so that what it addresses
+  // stays in scalar registers: on AMDGPU read from the wave's first lane;
+  // unchanged elsewhere.
+  mlir::Value Uniform(
+      mlir::OpBuilder &, mlir::Location, mlir::Value value) const;
   // The target's module flags: on AMDGPU, the code object version, and the
   // PIC level, which Flang's device compile gives with -pic-level 2.
   void AddModuleFlags(llvm::Module &) const;
