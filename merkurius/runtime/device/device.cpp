@@ -47,6 +47,14 @@ extern "C" int omp_get_device_num(void) __attribute__((weak));
 extern "C" [[gnu::visibility("protected"), gnu::weak]] int merk_device_number{
     -1};
 
+// Whether the image's code makes group-private arrays, which the host reads
+// when it loads a GPU process image, to launch its kernel with dynamic local
+// memory for them (gpu-processes.cpp, GroupBytes): lowering defines it as 1
+// in a module that has them (docs/INPROGRESS.md, GPU processes that run
+// loops, (s5)).
+extern "C" [[gnu::visibility("protected"), gnu::weak]] int
+    merk_device_group_private{0};
+
 // The stack, a lane, that the image's kernel was launched with, which its
 // recursion checks (process-start.cpp, which defines it for a GPU process's
 // image). In a region's image nothing sets it, and there is no limit.
@@ -99,6 +107,7 @@ using merkurius::runtime::kArenaClearWords;
 using merkurius::runtime::kBumpWords;
 using merkurius::runtime::kChunkBytes;
 using merkurius::runtime::kFailNumbers;
+using merkurius::runtime::kGroupAbort;
 using merkurius::runtime::kNoRegionSlot;
 using merkurius::runtime::kPlaceIdle;
 using merkurius::runtime::kPlaceReserved;
@@ -287,6 +296,9 @@ uint32_t countBlocks{0};
 // From how many bytes a process's worker teams fill and copy for it
 // (PlaceTable's `bulkBytes`, Bulk).
 uint64_t bulkBytes{~uint64_t{0}};
+// Each team's local memory for its group-private arrays (PlaceTable's
+// `groupBytes`, GroupAllocate).
+uint64_t groupBytes{0};
 // For direct sends between GPUs, the peer queue of the process that each
 // wave of the team runs, or null (place.h, PeerQueue); and the GPU's send
 // pool, its bytes, and its return ring, the same for every kernel of the
@@ -390,6 +402,9 @@ struct TeamLoop {
   uint64_t end;
 };
 [[clang::loader_uninitialized]] Local<TeamLoop> teamLoop;
+// The runtime's own loop in `teamLoop.loop`, a fill (TeamMainFill), where a
+// loop's is its number in the module (MLIRGenProcesses.cpp).
+constexpr uint64_t kTeamFillLoop{~uint64_t{0}};
 [[clang::loader_uninitialized]] Local<uint64_t> teamValues[kProcessLoopWords];
 [[clang::loader_uninitialized]] Local<uint64_t>
     teamResults[kProcessLoopReductions];
@@ -405,7 +420,28 @@ struct TeamLoop {
 // it may free (Block), rather than working for one.
 [[clang::loader_uninitialized]] Local<uint32_t> processWaves[kMostPlaceWaves];
 
+// A worker team's group-private arrays (docs/INPROGRESS.md, GPU processes
+// that run loops, (s5)), which its first wave makes in a distribute loop's
+// body, each iteration's gone at the next's start: the bytes of the team's
+// local memory they take; the blocks of those that did not fit, in the
+// process's memory instead; and how the next array the wave makes is
+// group private, if it is (merk_device_group_next).
+struct GroupSpill {
+  GroupSpill *next;
+  void *raw;
+  uint64_t bytes;
+  uint64_t unused;
+};
+static_assert(sizeof(GroupSpill) % 16 == 0);
+[[clang::loader_uninitialized]] Local<uint64_t> groupUsed;
+[[clang::loader_uninitialized]] Local<GroupSpill *> groupSpills;
+[[clang::loader_uninitialized]] Local<uint32_t> groupNext;
+
 } // namespace
+
+// The team's dynamic local memory, after its static local memory, of
+// groupBytes bytes: the kernel's launch sizes it.
+extern "C" alignas(16) __gpu_local uint64_t merk_group_memory[];
 
 // Whether this is a GPU process's image, whose start object defines it as
 // 1 (process-start.cpp). In a region's image it stays 0, and the compiler
@@ -629,6 +665,7 @@ template <typename Use> void WithLargeCache(Use use) {
 }
 
 [[noreturn]] void OutOfDeviceMemory(uint64_t bytes);
+[[noreturn]] void GroupTooBig(uint64_t bytes, uint64_t left);
 
 // `bytes` from libc's allocator or the cache, and in `given` how many it
 // gave.
@@ -861,6 +898,70 @@ bool MakesBlocks() {
 
 } // namespace
 
+namespace {
+
+// A group-private array's `bytes` (merk_device_group_next), for a worker
+// team's first wave's first active lane: from the team's local memory, on
+// 16 bytes, or, if they do not fit, under fallback(abort) the program's end
+// and otherwise a block of the process's memory that the next iteration's
+// start frees. An array's elements in local memory need no more alignment
+// than that; a block of the fallback loses the 256 bytes of a large array's
+// (merk_device_alloc_aligned).
+void *GroupAllocate(uint64_t bytes) {
+  uint32_t fallback{groupNext};
+  groupNext = 0;
+  uint64_t start{(groupUsed + 15) & ~uint64_t{15}};
+  if (start <= groupBytes && bytes <= groupBytes - start) {
+    groupUsed = start + bytes;
+    return (void *)(reinterpret_cast<__gpu_local char *>(merk_group_memory) +
+        start);
+  }
+  if (fallback == kGroupAbort) {
+    GroupTooBig(bytes, start <= groupBytes ? groupBytes - start : 0);
+  }
+  uint64_t given{0};
+  auto *spill{static_cast<GroupSpill *>(
+      RawAllocate(sizeof(GroupSpill) + bytes, given))};
+  spill->next = groupSpills;
+  spill->raw = spill;
+  spill->bytes = given;
+  groupSpills = spill;
+  return spill + 1;
+}
+
+// The end of an iteration's group-private arrays, at the next one's start
+// and after the loop, for the first active lane of the team's first wave.
+void GroupRelease() {
+  for (GroupSpill *spill{groupSpills}; spill;) {
+    GroupSpill *next{spill->next};
+    RawFree(spill->raw, spill->bytes);
+    spill = next;
+  }
+  groupSpills = nullptr;
+  groupUsed = 0;
+  groupNext = 0;
+}
+
+} // namespace
+
+// The next array that the wave makes is group private, with OpenMP's
+// fallback `fallback` (kGroupDefaultMem or kGroupAbort): lowering calls it
+// just before the runtime's merk_array_new (Lowering.cpp). Only a worker
+// team's first wave, running a distribute loop's body, makes them.
+extern "C" void merk_device_group_next(uint32_t fallback) {
+  if (__gpu_is_first_in_lane(__gpu_lane_mask())) {
+    groupNext = fallback;
+  }
+}
+
+// The start of an iteration of a distribute loop whose body makes
+// group-private arrays: the last iteration's go (GroupRelease).
+extern "C" void merk_device_group_begin(void) {
+  if (__gpu_is_first_in_lane(__gpu_lane_mask())) {
+    GroupRelease();
+  }
+}
+
 // A cell, or an array, on the device (docs/INPROGRESS.md, The device's side
 // of the first slice, step 6): a block of a GPU process's (Block), or bumped
 // from the chunks of the region that runs, with an atomic add. The lanes of
@@ -874,8 +975,9 @@ extern "C" void *merk_device_alloc(uint64_t bytes) {
     uint64_t mask{__gpu_lane_mask()};
     uint64_t cell{0};
     if (__gpu_is_first_in_lane(mask)) {
-      cell = reinterpret_cast<uint64_t>(
-          NewBlock(CurrentArena(), bytes, 0, nullptr));
+      cell = reinterpret_cast<uint64_t>(groupNext
+              ? GroupAllocate(bytes)
+              : NewBlock(CurrentArena(), bytes, 0, nullptr));
     }
     return reinterpret_cast<void *>(__gpu_read_first_lane_u64(mask, cell));
   }
@@ -897,8 +999,9 @@ extern "C" void *merk_device_alloc_aligned(uint64_t bytes, uint64_t before) {
     uint64_t mask{__gpu_lane_mask()};
     uint64_t cell{0};
     if (__gpu_is_first_in_lane(mask)) {
-      cell = reinterpret_cast<uint64_t>(
-          NewBlock(CurrentArena(), bytes, before, nullptr));
+      cell = reinterpret_cast<uint64_t>(groupNext
+              ? GroupAllocate(bytes)
+              : NewBlock(CurrentArena(), bytes, before, nullptr));
     }
     return reinterpret_cast<void *>(__gpu_read_first_lane_u64(mask, cell));
   }
@@ -1027,6 +1130,15 @@ template <typename... Numbers>
 [[noreturn]] void Fail(
     uint64_t kind, const char *text, const char *detail = "") {
   FailWith(kind, text, detail);
+}
+
+// A group-private array of `bytes` under fallback(abort), where its team's
+// local memory has `left`.
+[[noreturn]] void GroupTooBig(uint64_t bytes, uint64_t left) {
+  FailWith(2,
+      "a group-private array of %d bytes does not fit in the %d bytes of "
+      "local memory left to its team, and its fallback is abort",
+      "", static_cast<int64_t>(bytes), static_cast<int64_t>(left));
 }
 
 // libc's allocator, or the host behind it, has no block of `bytes` for a
@@ -1585,6 +1697,16 @@ uint64_t *TeamWords(Local<uint64_t> *words) { return (uint64_t *)words; }
   int64_t first{teamLoop.first};
   int64_t step{teamLoop.step};
   int64_t count{teamLoop.count};
+  // The runtime's own loop, a fill (TeamMainFill): `count` words from
+  // `first` on, each `step`.
+  if (loop == kTeamFillLoop) {
+    auto *to{reinterpret_cast<uint64_t *>(first)};
+    for (int64_t i = __gpu_thread_id_x(); i < count; i += kTeamThreads) {
+      to[i] = static_cast<uint64_t>(step);
+    }
+    __gpu_sync_threads();
+    return;
+  }
   uint64_t reductions{teamLoop.reductions};
   uint64_t partials[kProcessLoopReductions];
   if (reductions) {
@@ -1623,6 +1745,9 @@ void Distribute(uint64_t loop, int64_t first, int64_t step, int64_t count,
     merk_process_loop(
         loop, start, rounds, stride, count, first, step, values, 0);
     teamMains[0] = 0;
+    if (__gpu_is_first_in_lane(__gpu_lane_mask())) {
+      GroupRelease();
+    }
     if (__gpu_lane_id() == 0) {
       teamLoop.end = 1;
     }
@@ -1825,9 +1950,51 @@ bool AloneInWave() {
 // Fills or copies by the process's worker teams if it has them and the words
 // are many (Bulk), or else by every lane of the caller's wave if the caller
 // runs alone in it: true, or false for the caller's own loop.
+// Fills `words` words for a worker team's first wave, in a distribute
+// loop's body, whose lanes all run the same code, as an array.init of a
+// group-private array does (docs/INPROGRESS.md, GPU processes that run
+// loops, (s5)): by every thread of the team, as a loop across them, from
+// a team's threads' worth of words, else by the wave's lanes; rather than
+// every lane all of them. A group-private array of Faces and Diffs in
+// swe-sparse.m, 7296 words, cost 4 us a tile filled by the wave alone, a
+// tenth of the step (design document, Measurements, "Shallow water on
+// sparse tiles"). Only with all the wave's lanes active; true if it filled.
+bool TeamMainFill(uint64_t *to, uint64_t word, uint64_t words) {
+  uint32_t inTeam{__gpu_thread_id_x() / __gpu_num_lanes()};
+  if (!merk_device_process_image || !teamMains[inTeam]) {
+    return false;
+  }
+  uint64_t mask{__gpu_lane_mask()};
+  uint32_t lanes{__gpu_num_lanes()};
+  if (mask != (lanes == 64 ? ~uint64_t{0} : (uint64_t{1} << lanes) - 1)) {
+    return false;
+  }
+  if (words >= kTeamThreads) {
+    if (__gpu_is_first_in_lane(mask)) {
+      teamLoop.loop = kTeamFillLoop;
+      teamLoop.first = static_cast<int64_t>(reinterpret_cast<uintptr_t>(to));
+      teamLoop.step = static_cast<int64_t>(word);
+      teamLoop.count = static_cast<int64_t>(words);
+      teamLoop.reductions = 0;
+      teamLoop.end = 0;
+    }
+    teamMains[inTeam] = 0;
+    __gpu_sync_threads();
+    TeamShare(inTeam);
+    teamMains[inTeam] = 1;
+    return true;
+  }
+  for (uint64_t i{__gpu_lane_id()}; i < words; i += lanes) {
+    to[i] = word;
+  }
+  __scoped_atomic_thread_fence(__ATOMIC_ACQ_REL, __MEMORY_SCOPE_WVFRNT);
+  __gpu_sync_lane(mask);
+  return true;
+}
+
 extern "C" bool merk_device_bulk_fill(
     uint64_t *to, uint64_t word, uint64_t words) {
-  if (Bulk(kBulkFill, to, word, words)) {
+  if (Bulk(kBulkFill, to, word, words) || TeamMainFill(to, word, words)) {
     return true;
   }
   if (words < kWaveWords || !AloneInWave()) {
@@ -1882,6 +2049,15 @@ extern "C" void merk_device_place(PlaceTable *table) {
         __scoped_atomic_load_n(
             &table->bulkBytes, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM),
         __ATOMIC_RELAXED);
+    __atomic_store_n(&groupBytes,
+        __scoped_atomic_load_n(
+            &table->groupBytes, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM),
+        __ATOMIC_RELAXED);
+    if (inTeam == 0) {
+      groupUsed = 0;
+      groupSpills = nullptr;
+      groupNext = 0;
+    }
     __atomic_store_n(&sendPool,
         reinterpret_cast<SendPool *>(__scoped_atomic_load_n(
             &table->sendPool, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)),

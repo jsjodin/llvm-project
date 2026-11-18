@@ -101,9 +101,13 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
             IntegerConstant(i64, 0, loc), loc),
         SoftwareError("init", 3, "negative size"));
     auto type{merk::ArrayType::get(&context_, in[1].getType())};
-    return GiveOutputs(out,
-        {merk::ArrayNewOp::create(builder_, loc, type, in[0], in[1],
-            ElementTypeInfo(body.vars[out[0]].type, type, loc, goal.tokens))});
+    auto made{merk::ArrayNewOp::create(builder_, loc, type, in[0], in[1],
+        ElementTypeInfo(body.vars[out[0]].type, type, loc, goal.tokens))};
+    // By its variable, for a dyn_groupprivate clause that names it.
+    if (target_.options().processKernels) {
+      arrayInits_[made] = body.vars[out[0]].name;
+    }
+    return GiveOutputs(out, {made});
   }
   // array(L), from_list(L, A) and from_reverse_list(L).
   bool reversed{name == "from_reverse_list"};

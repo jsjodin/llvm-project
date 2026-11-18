@@ -994,8 +994,8 @@ bool CodeGenAction::Lower(
   if (!os) {
     return false;
   }
-  if (kind_ == ActionKind::DebugDumpFrees) {
-    codegen::FreeAtLastUse(module);
+  if (kind_ == ActionKind::DebugDumpFrees && !codegen::FreeAtLastUse(module)) {
+    return false;
   }
   if (kind_ == ActionKind::EmitMerk || kind_ == ActionKind::DebugDumpFrees) {
     // Notes for a later pass, which only clutter what is read.

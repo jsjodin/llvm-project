@@ -5386,6 +5386,35 @@ median of the step's kernel by HIP's events, in µs (range within 1 µs).
   `teams distribute` body, filled and read by two `parallel do` loops, and
   dead after it, which is the array to place in a team's local memory.
 
+**Group-private arrays in Mercury, 2026-11-18,** after a861f123c2fb with
+the change that adds them (INPROGRESS, GPU processes that run loops, (s5)),
+the same world, tiles and mask, Firefox closed; `compare-swe.sh`, 3 rounds,
+the median, which were within 2%. `SWE_KERNEL=2` runs `swe-sparse.m`'s
+`step_faces`, whose `Faces` and `Diffs`, 58 KB a tile, are group private,
+and `swe-sparse.hip`'s. All gave the same checksum. Average step, µs
+(bookkeeping):
+
+| Kernel | Mercury, GPU process | HIP |
+|---|---:|---:|
+| `step` | 457 (27) | 453 (51) |
+| `step_faces` | 438 (29) | 380 (54) |
+
+- **Mercury gains 4%, HIP 16%.** The launch gave each team 64256 bytes
+  of local memory, the compute unit's 64 KiB less the kernel's own 1200
+  bytes rounded up, as its 145 VGPRs already hold it to one team a unit;
+  both arrays fit.
+- **Zero-filling the arrays cost 46 µs** when the team's first wave did it
+  alone, 7296 words a tile: 464 µs, against 418 with the fill skipped (an
+  experiment; the program writes every element before it reads it). The
+  team's threads now fill an array of a team's threads' worth of words or
+  more, as a loop across them: 437 to 438 µs.
+- **The rest, about 40 µs, is not yet explained.** Candidates: the three
+  more loops across the team's threads a tile, each a barrier and its
+  words through local memory; the arrays reached through generic pointers,
+  whose loads wait on both of a wave's counters, where HIP's `__shared__`
+  are `ds_read`s; and the fill's own barrier, which HIP does not have, as
+  its shared memory is not initialized.
+
 **On gfx90a.** 2026-11-14, one die of an AMD Instinct MI250, GPU 7, all
 104 compute units, the host's threads on the other socket, with the GPU
 process's barriers at device scope and the device's clock right ("Barriers

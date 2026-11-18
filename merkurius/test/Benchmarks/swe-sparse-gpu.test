@@ -6,7 +6,7 @@ bookkeeping. Every output is swe-sparse.c's at the host, bit for bit
 32, where the water covers 472 tiles after 1000 steps.
 REQUIRES: amdgpu-gpu
 
-RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/swe/swe-sparse.m -o %t
+RUN: merkc -O2 -fopenmp -fopenmp-version=61 -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/swe/swe-sparse.m -o %t
 RUN: %gpu-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 timeout -k 1 60 %t | FileCheck %S/swe-sparse.test --check-prefix=THACKER --match-full-lines
 RUN: %gpu-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 timeout -k 1 60 %t | FileCheck %S/swe-sparse.test --check-prefix=COLUMN --match-full-lines
 RUN: %gpu-env SWE_WORLD=512 SWE_TILE=64 SWE_STEPS=200 timeout -k 1 60 %t | FileCheck %S/swe-sparse.test --check-prefix=WIDE --match-full-lines
@@ -18,6 +18,15 @@ DEFAULT-NEXT: Wet cells: 428060
 DEFAULT-NEXT: Volume: 2.524112e+05 m^3
 DEFAULT-NEXT: Checksum: 55015ede6d1e4270
 DEFAULT-NEXT: Active tiles: 472 at most, 472 at the end
+
+Under SWE_KERNEL=2 each face's flux is computed once, into group-private
+arrays in each team's local memory, the same bits. Tiles of 64 take more
+than a team's local memory, and their arrays are in the process's memory.
+RUN: %gpu-env SWE_KERNEL=2 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 timeout -k 1 60 %t | FileCheck %S/swe-sparse.test --check-prefix=THACKER --match-full-lines
+RUN: %gpu-env SWE_KERNEL=2 SWE_WORLD=512 SWE_TILE=64 SWE_STEPS=200 timeout -k 1 60 %t | FileCheck %S/swe-sparse.test --check-prefix=WIDE --match-full-lines
+RUN: %gpu-env SWE_KERNEL=2 SWE_WORLD=64 SWE_TILE=4 SWE_STEPS=300 timeout -k 1 60 %t | FileCheck %S/swe-sparse.test --check-prefix=SMALL --match-full-lines
+RUN: %gpu-env SWE_KERNEL=2 timeout -k 1 60 %t | FileCheck %s --check-prefix=DEFAULT --match-full-lines
+
 RUN: %gpu-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CAPACITY=40 not timeout -k 1 60 %t | FileCheck %S/swe-sparse.test --check-prefix=FULL
 
 Without -fopenmp the process runs the loops on its own lane.

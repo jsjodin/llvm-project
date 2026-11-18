@@ -4172,6 +4172,81 @@ same spelling now reads the same in a process and in a target region
   process loop test, the benchmarks and the examples in the new spelling;
   merkurius-uts's `src/uts_expand.m` and merkurius-mc's `src/place.m` too.
 
+**(s5) done 2026-11-18: group-private arrays in a `teams distribute`
+body.** The design document's "Group-private arrays" for GPU processes,
+the first use of a team's local memory (LDS on AMD GPUs) by a program.
+The case: `swe-sparse.hip`'s `step_faces`, each face's flux once, through
+shared memory, 20% faster than each cell computing its four (design
+document, Measurements, "Shallow water on sparse tiles"). In Mercury that
+is an array of faces made in the `teams distribute` body, filled by one
+`parallel do`, read by the next, and dead after the iteration.
+- *Syntax, decided by the user:* the clause names the array.
+  `%$omp teams distribute dyn_groupprivate([Modifiers :] A, ...)`, where
+  each `A` is the array that an `array.init` in the loop's body makes.
+  The modifiers are OpenMP 6.1's: `fallback(default_mem)`, the default,
+  `fallback(abort)`, and `cgroup`, the only access group. As in Flang, the
+  clause needs `-fopenmp-version=61`.
+- *Meaning:* each iteration's `A` is in the team's local memory and goes
+  at the iteration's end. One that does not fit is in the process's
+  memory instead, also gone at the iteration's end, or with
+  `fallback(abort)` the program ends naming the sizes. On the host, as in
+  a kind spawned there, the clause changes nothing.
+- *The check:* `A`, and every array that updating it gives, reaches none
+  of the body's results, by the summaries of Frees.cpp, which follow a
+  call such as `step_tile(..., Faces0, Faces1, !Next)` that threads both
+  arrays. What the pass cannot follow is an error too, naming the array.
+  A send copies its message, and a loop across the team's threads ends
+  within the iteration, so neither is an escape.
+- *Code generation:* `array.init` in a loop's body notes its variable's
+  name on its `merk.array_new`; the loop marks that operation group
+  private, with its fallback, and calls `merk_device_group_begin` first
+  in the body; one that the body does not make is an error. Lowering
+  calls `merk_device_group_next` before the runtime's `merk_array_new`,
+  so that every kind of array (words, records, typed) takes the next
+  allocation from the team's block, and defines
+  `merk_device_group_private` in the image.
+- *The runtime:* a kernel launched once has its local memory fixed at the
+  launch. For an image that defines `merk_device_group_private`, the
+  launch asks for the most dynamic local memory that keeps the kernel's
+  team count, which costs no occupancy, by asking
+  `olGetKernelMaxCooperativeGroupCountOnQueue` with sizes, and gives it to
+  the device in `PlaceTable::groupBytes`, which each team copies at its
+  start rather than read host memory again. A team bumps its block, the
+  image's dynamic local memory, from its start each iteration; blocks of
+  the fallback are freed at the next iteration's start and after the
+  loop. `merk_device_free` already leaves a worker team's arrays alone.
+- *Rejected:* *OpenMP's byte size,* `dyn_groupprivate(Bytes)` with a
+  library predicate taking an array from the block: the program counts
+  bytes, the array's header too, and a size cannot change a kernel that is
+  already running. *A library predicate alone,* with no clause: the
+  request is hidden in the body, and an error anywhere else. *Always
+  reserving the free local memory:* it would keep other kernels, such as
+  target regions, from the compute units' local memory for no use. *A
+  check by data flow within the body alone:* a call that threads the array
+  with another of its type cannot be told apart from one that returns it.
+- *Not yet, each reported:* target regions, where Flang lowers the clause
+  to `omp.target`'s `dyn_groupprivate` for the OMPIRBuilder; `teams
+  distribute parallel do`, whose threads would each make one;
+  `fallback(null)`, as an array cannot be absent; an `A` not made by
+  `array.init` in the body itself.
+- *As built:* the escape check also follows the blocks that a callee
+  gives back in place of an owned input, and a group-private array is
+  never handed to a callee as owned, so `fill(G0, G)` neither frees `G`
+  nor hides it from the check. The device runtime defines
+  `merk_device_group_private` as a weak 0, which lowering's 1 overrides,
+  protected so that `HideModuleSymbols` keeps it for the host. The driver
+  now passes `-fopenmp-version` to the processes' compile too.
+  `array.init` in a distribute body is filled by the team's threads, from
+  256 words, else by the first wave's lanes, rather than by each lane in
+  full.
+- *Measured* (design document, Measurements, "Shallow water on sparse
+  tiles"): `swe-sparse.m`'s `step_faces` (`SWE_KERNEL=2`) is 4% faster
+  than its `step`, HIP's 16%; 438 µs against HIP's 380. Open: the
+  remaining 40 µs, and arrays that need no fill, as `Faces` and `Diffs`,
+  whose every element is written before it is read.
+- Tests: `CodeGen/process-group-private.m`, `-errors.m`, `-gpu.test`, and
+  `Benchmarks/swe-sparse*.test` under `SWE_KERNEL=2`.
+
 **GPU experiments, 2026-11-11 night: what limits a GPU process's loops.**
 Kept for the multi-GPU machine (8× gfx90a), where the numbers will differ:
 wave64, a unified register file of 512 VGPRs and AGPRs a lane, 110 compute

@@ -54,7 +54,11 @@ squared, at most 4096, plus the dry tile).
   the active tiles, a team each, with a loop under `parallel do` over the
   tile's cells across the team's threads, which reduces its wet cells, its
   wet edges and its largest speed. The process's lane does the bookkeeping,
-  as `life-sparse.m`'s.
+  as `life-sparse.m`'s. `SWE_KERNEL=2` steps a tile as `swe-sparse.hip`'s
+  `step_faces` does: each face's flux once, into arrays of the tile's faces
+  that its `teams distribute` loop names in a `dyn_groupprivate` clause,
+  which are in the team's local memory if they fit (OpenMP 6.1, so
+  `-fopenmp-version=61`). It gives the same bits.
 - `swe-sparse.c`, C with OpenMP offload: a kernel a step, the bookkeeping on
   the host, as `life-sparse.c`.
 - `swe-sparse.hip`, HIP: the same kernels and bookkeeping, a block of 256
@@ -92,8 +96,8 @@ python3 -I merkurius/utils/gpu/with-gpus.py --count 1 -- \
 `ROCM_PATH` is `/opt/rocm` by default. By hand:
 
 ```sh
-merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=gfx1030 \
-  $LIBS swe-sparse.m -o swe-m
+merkc -O2 -fopenmp -fopenmp-version=61 -fdo-loops -fprocess-declarations \
+  --offload-arch=gfx1030 $LIBS swe-sparse.m -o swe-m
 clang -O2 -ffp-contract=off -fopenmp --offload-arch=gfx1030 $LIBS \
   swe-sparse.c -lm -o swe-c
 clang -x hip -O2 -ffp-contract=off --offload-arch=gfx1030 \
