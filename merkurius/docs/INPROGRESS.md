@@ -5002,7 +5002,9 @@ process's lane:
   module with its frees. As built, beside the design above:
   - A procedure frees only blocks of its own, never an argument: its
     caller frees that after the call, when the callee's summary says it
-    is not kept. So `di` arguments need no special case.
+    is not kept. So `di` arguments need no special case. (Replaced
+    2026-11-17: a callee frees what it owns by `di`, design document,
+    "A procedure frees what it takes by mode `di`".)
   - A block that is stored in one cell and used nowhere else, as a
     received message is in the `message(...)` cell that a receive makes,
     or that is the result of a branch, has no name where its class dies.
@@ -5015,7 +5017,9 @@ process's lane:
     block as its field, as lowering does.
   - A class whose last use is a tail call, as the next state of a process
     is, is not freed there: the call would no longer end the procedure.
-    It waits for the process's end.
+    It waits for the process's end. (Narrowed 2026-11-17 to tail calls
+    that may come back to the procedure, with frees placed on each path:
+    design document, "Frees on each path".)
   - A loop across the process's teams reads its values' words from a
     buffer; such a store counts as a use until the loop's call, which
     returns when the loop has ended. A free in a loop's body, of a

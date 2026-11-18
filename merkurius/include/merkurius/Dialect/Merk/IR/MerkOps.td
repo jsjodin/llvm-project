@@ -31,7 +31,9 @@ def Merk_ProcOp : Merk_Op<"proc", [
     A procedure, with its determinism. Its arguments are its inputs and its
     results its outputs; arguments of types that have no values, such as
     `io.state`, are left out. One without a body is defined in another
-    module.
+    module. An input that the procedure clobbers, as of mode `di`, has the
+    argument attribute `merk.clobbered`: its caller does not use it again,
+    so a GPU process's procedure may free it (FreeAtLastUse).
 
     ```mlir
     merk.proc @hello.main_2_0() attributes {determinism = #merk.determinism<det>} {
@@ -826,7 +828,10 @@ def Merk_ArrayResizeOp : Merk_Op<"array_resize", [
   let summary = "a new array of a size, with an array's elements";
   let description = [{
     A new array of `size` elements: as many of the array's as fit, and then
-    `init`; without `init`, `size` is no greater than the array's.
+    `init`; without `init`, `size` is no greater than the array's. With the
+    attribute `merk.clobbers`, the array is not used again, as
+    `array.resize`'s `array_di` says, and a GPU process may free it after
+    (FreeAtLastUse).
   }];
   let arguments = (ins Merk_ArrayType:$array, I64:$size, Optional<AnyType>:$init,
       Optional<Merk_TypeInfoType>:$element_type_info);

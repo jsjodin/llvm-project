@@ -12,7 +12,7 @@
 % MERK-LABEL: merk.proc @arrays.main_2_0()
 % MERK: merk.throw_if %{{.*}}, "Software Error: predicate `array.init'/3: Unexpected: negative size"
 % MERK-NEXT: merk.array_new %{{.*}}, %{{.*}} : i64 -> <i64>
-% MERK-LABEL: merk.proc private @arrays.squares_3_0(%arg0: i64, %arg1: !merk.array<i64>) -> !merk.array<i64>
+% MERK-LABEL: merk.proc private @arrays.squares_3_0(%arg0: i64, %arg1: !merk.array<i64> {merk.clobbered}) -> !merk.array<i64>
 % MERK: merk.check_index %arg1[%arg0], "array.set" : <i64>
 % MERK-NEXT: merk.array_set %arg1[%arg0], %{{.*}} : <i64>, i64
 % MERK-LABEL: merk.proc private @arrays.show_4_0(%arg0: !merk.array<i64>, %arg1: i64)

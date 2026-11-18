@@ -3663,16 +3663,78 @@ above. This brings them back.
   `lib/CodeGen/Frees.cpp`): a pass on the merk dialect, in a compile of
   GPU process kinds, sorts a procedure's cells, arrays, strings and words
   into classes that live and die together, by union-find, and frees each
-  class's new blocks after its last use, in each branch where that is an
-  if-then-else or a switch, and never between a tail call and its return.
+  class's new blocks after their last use on each path (below), and never
+  between a tail call that may come back to the procedure and its return.
   A class is freed only when everything in it is the procedure's own: not
-  an argument, returned, or given to a call that may keep it. Summaries of
+  an argument, or given to a call that may keep it; one that is returned
+  is kept on the paths that return it. Summaries of
   the module's procedures, found by iterating to a fixed point, say which
   arguments a result may be or hold, whether it is a new block, and which
   arguments a procedure keeps. A block held by one cell alone, as a
-  received message is by its `message(...)`, is freed through the cell.
+  received message is by its `message(...)`, is freed through the cell,
+  and so is one that a callee's new result holds, as its summary says.
   A process that answers many messages holds a bounded number of blocks
   (INPROGRESS, Memory that a GPU process gives back, f3).
+- **A procedure frees what it takes by mode `di`** (2026-11-17, the same
+  pass). MLIRGen marks such an input `merk.clobbered`; it is owned when
+  every call of the procedure gives it a whole block of the caller's own,
+  never a part of another. Then the callee takes it, always: it frees it
+  on the paths that do not give it back, and its callers never free it.
+  Every call is in the module: a device's compile copies what it calls of
+  other modules and calls nothing it has not compiled.
+  - Why: a tracking pass makes the next pass's array and gives it to a tail
+    call of itself, and a class whose last use is a tail call is not freed
+    by its caller. Each pass's array stayed until the process ended, 1.9 GB
+    a cycle for Quicksilver's 32³ problem on one place, which ran out of
+    the GPU's memory in five cycles.
+  - Whole blocks: a value is whole when it is a new or static block, an
+    owned argument, an update in place of a whole one, every part's of a
+    branch, or a result that its callee's summary says is whole, given
+    whole inputs. Recursion is taken at the greatest fixed point, as a
+    result is only what its other paths give. A received message's array
+    is part of the message's group of blocks: freeing it would free the
+    message's other parts.
+  - A result that the callee gives back in owned inputs' place is the
+    caller's to free, not the inputs: the callee returned one of them, or
+    freed them and returned a new block. It may stand for several, as a
+    procedure that swaps two arrays each round gives back either. A
+    procedure that gives such a result back itself gives it back in place
+    of its own inputs that the callee took, so its callers have it too.
+  - A resize that clobbers its array (`merk.clobbers`, from
+    `array.resize`'s and `array.shrink`'s `array_di`) frees the old one
+    right after it, when it is a whole block of the procedure's own; its
+    class does not free it again on the paths through the resize.
+  - Rejected: freeing `di` arguments in every callee whatever its callers
+    pass, which frees a message's other parts with one of its arrays;
+    leaving `di` arguments to the caller, as the pass did first, which
+    leaks every block that a tail call is given; and leaving an owned
+    input to the caller when a result may be it, which freed it twice
+    when the callee had freed it on another path.
+- **Frees on each path** (2026-11-17, the same pass). Where a block is
+  freed is found for each block alone, by where values come from rather
+  than by its class: a part, a construction or an update holds what its
+  operands hold, a branch's result what its yields hold, a call's result
+  the inputs that the callee's summary names. On each path the block is
+  freed after its last use there, unless what the path gives on may hold
+  it: the procedure's result, or a branch's result that a later operation
+  uses. A tail call of a procedure that does not call back (the call
+  graph's strongly connected components) is no loop, and the caller frees
+  after it at the cost of one frame.
+  - Why: Quicksilver on two places leaked about 50 MB a cycle at 16³, and
+    ran out of the GPU's 16 GB in the first cycle at 32³. Classes join
+    every path's values: a place that returns a driver's message on one
+    path kept every batch message that it received on the others, and a
+    branch whose result held the message joined it with the recursive
+    call's result, so its last use was the tail call. A message received
+    in a procedure kept out of line (`pragma no_inline`) left its group
+    behind, as the caller freed only the `message(...)` cell, and a
+    backlog's copies given to a last call that does not loop stayed too.
+    With these, a place's memory is flat across cycles: 82 MB at one place
+    and 44 MB at two at 16³, and 1.6 GB of the GPU at 32³ for ten cycles
+    at either.
+  - Rejected: placing by class, which frees nothing on any path when one
+    path returns a block; and freeing after every tail call, which keeps a
+    frame for each round of a process's loop.
 - **A target region's code may make terms,** as code compiled from ordinary
   procedures does, in an arena that lives as long as the region. A region
   is a computation and ends; a GPU process is an actor and may live for

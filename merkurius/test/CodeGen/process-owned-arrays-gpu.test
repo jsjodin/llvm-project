@@ -1,0 +1,15 @@
+process-owned-arrays.m's worker spawned on the machine's GPU. Each pass's
+1.6 MB vault is freed by the pass that takes it, and each array that grow
+outgrows by the resize, so the most that the worker holds at once is
+grow's last array and the one it grows from, rounded up to the cache of
+large blocks' sizes, with a few small blocks: 10 MB. Without the passes'
+frees it held 47 MB, the sixteen vaults; without the resizes', 14 MB.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-owned-arrays.m -o %t2
+RUN: %gpu-env timeout -k 1 60 %t2 gpu | FileCheck %S/process-owned-arrays.m --match-full-lines --strict-whitespace
+RUN: %gpu-env MERK_CHECK_PROCESS_MEMORY=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %s --match-full-lines
+CHECK:27200000
+CHECK-NEXT:79999800000
+CHECK-NEXT:Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated
+CHECK-NEXT:Merkurius runtime: a GPU process held at most {{104[0-9][0-9][0-9][0-9][0-9]}} bytes of blocks at once
