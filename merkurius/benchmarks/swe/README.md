@@ -59,7 +59,13 @@ squared, at most 4096, plus the dry tile).
   the host, as `life-sparse.c`.
 - `swe-sparse.hip`, HIP: the same kernels and bookkeeping, a block of 256
   threads a tile, its reductions in shared memory; the bar a GPU programmer
-  would set.
+  would set. `SWE_KERNEL` picks its step's kernel: 0, the default, the same
+  work as the others; 1, `step_staged`, the tile and a cell around it
+  loaded into shared memory first; 2, `step_faces`, each face's flux
+  computed once, through shared memory, rather than by both its cells (at
+  most 32 cells square a tile). A tile too big for 64 KB of shared memory
+  takes the default. All give the same bits. It also prints the step's
+  kernel time alone, by HIP's events.
 
 The C and HIP programs share the scheme and the host's bookkeeping in
 `swe.h`. All three, on the host or a GPU, give the same bits: every
