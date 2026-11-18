@@ -382,10 +382,29 @@ void MerkGenerator::ProcessLoop(const ParallelLoop &loop, ProcessLoopKind kind,
         "take the counter as an int");
     return;
   }
-  if (words.size() > kProcessLoopWords) {
+  // Under schedule(dynamic), the threads claim iterations from the word
+  // after the loop's words, which the process sets to 0 before each run.
+  if (loop.schedule.kind == LoopSchedule::Kind::Dynamic) {
+    if (loop.schedule.chunkValue) {
+      NotYet(loop.at,
+          "a chunk size that is a variable in a loop across a GPU "
+          "process's teams");
+      return;
+    }
+    entry.claimChunk = loop.schedule.chunk.value_or(1);
+    entry.claims = static_cast<unsigned>(words.size());
+  } else if (loop.schedule.chunk || loop.schedule.chunkValue) {
     NotYet(loop.at,
-        "loops across a GPU process's teams whose body takes "
-        "more than 32 values besides the counter");
+        "schedule(static) with a chunk size in a loop across a GPU "
+        "process's teams");
+    return;
+  }
+  unsigned most{kProcessLoopWords - (entry.claimChunk ? 1 : 0)};
+  if (words.size() > most) {
+    NotYet(loop.at,
+        "loops across a GPU process's teams whose body takes more than " +
+            std::to_string(most) + " values besides the counter" +
+            (entry.claimChunk ? " under schedule(dynamic)" : ""));
     return;
   }
   for (mlir::Type result : proc.getFunctionType().getResults()) {
@@ -395,7 +414,7 @@ void MerkGenerator::ProcessLoop(const ParallelLoop &loop, ProcessLoopKind kind,
   auto generic{mlir::LLVM::LLVMPointerType::get(
       &context_, target_.addressSpaces().generic)};
   bool team{kind == ProcessLoopKind::Team};
-  if (!words.empty()) {
+  if (!words.empty() || entry.claimChunk) {
     mlir::Value values{
         merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{generic},
             team ? "merk_device_team_values" : "merk_device_loop_values",
@@ -410,6 +429,10 @@ void MerkGenerator::ProcessLoop(const ParallelLoop &loop, ProcessLoopKind kind,
               llvm::ArrayRef<mlir::LLVM::GEPArg>{
                   static_cast<std::int32_t>(index)})};
       mlir::LLVM::StoreOp::create(builder_, loc, word, address);
+    }
+    if (entry.claimChunk) {
+      StoreWord(builder_, loc, values, static_cast<std::int32_t>(entry.claims),
+          IntegerConstant(i64, 0, loc));
     }
   }
   // The reductions' values before the loop, which the runtime combines with
@@ -586,7 +609,7 @@ void MerkGenerator::ProcessLoopShare(const ProcessLoopCase &loop,
   // marked uniform for the target: an array the loop updates atomically
   // then has its address in scalar registers, and the backend can combine
   // a wave's operations on one element (TargetInfo's
-  // AtomicElementAddressSpace).
+  // AtomicAddressSpace).
   std::int32_t next{0};
   for (auto [index, type] : llvm::enumerate(loop.inputs)) {
     if (index == loop.counter || IsReductionInput(loop, index)) {
@@ -600,7 +623,21 @@ void MerkGenerator::ProcessLoopShare(const ProcessLoopCase &loop,
     arguments.push_back(FromWordBits(builder_, loc, reduction.type,
         LoadWord(builder_, loc, partials, static_cast<std::int32_t>(index))));
   }
-  merk::ProcOp rounds{ProcessLoopRounds(loop, loc)};
+  // Under schedule(dynamic), the rounds take the address of the word the
+  // threads claim iterations from instead of their number: the same in
+  // every thread, so that the backend can combine a wave's claims.
+  merk::ProcOp rounds;
+  if (loop.claimChunk) {
+    auto i64{builder_.getI64Type()};
+    arguments[0] = target_.Uniform(builder_, loc,
+        mlir::arith::AddIOp::create(builder_, loc, entry->getArgument(7),
+            IntegerConstant(i64,
+                static_cast<std::int64_t>(loop.claims) * target_.WordBits() / 8,
+                loc)));
+    rounds = ProcessLoopClaims(loop, loc);
+  } else {
+    rounds = ProcessLoopRounds(loop, /*chunk=*/false, loc);
+  }
   auto call{merk::CallOp::create(builder_, loc,
       rounds.getFunctionType().getResults(), rounds.getSymName(), arguments)};
   for (auto [index, result] : llvm::enumerate(call.getResults())) {
@@ -628,9 +665,11 @@ bool MerkGenerator::IsReductionInput(
 //     else Partials
 //
 // Every thread of a team goes round as often, so all reach each barrier. A
-// distribute loop's rounds, which a team's first wave runs alone, have none.
+// distribute loop's rounds, which a team's first wave runs alone, have none,
+// nor do a chunk's (`chunk`), the iterations that a thread claimed under
+// schedule(dynamic) (ProcessLoopClaims), which it runs with a stride of 1.
 merk::ProcOp MerkGenerator::ProcessLoopRounds(
-    const ProcessLoopCase &loop, mlir::Location loc) {
+    const ProcessLoopCase &loop, bool chunk, mlir::Location loc) {
   auto i64{builder_.getI64Type()};
   llvm::SmallVector<mlir::Type> parameters(6, i64);
   llvm::SmallVector<mlir::Type> results;
@@ -645,7 +684,7 @@ merk::ProcOp MerkGenerator::ProcessLoopRounds(
   }
   // A loop of the kind's code and of its variant for its words calls the
   // same body, with the same rounds.
-  std::string name{loop.body + "$rounds"};
+  std::string name{loop.body + (chunk ? "$chunk" : "$rounds")};
   if (auto made{module_.lookupSymbol<merk::ProcOp>(name)}) {
     return made;
   }
@@ -709,7 +748,7 @@ merk::ProcOp MerkGenerator::ProcessLoopRounds(
         &iteration.getElseRegion().emplaceBlock());
     merk::YieldOp::create(builder_, loc, partials);
   }
-  if (loop.kind != ProcessLoopKind::Teams) {
+  if (loop.kind != ProcessLoopKind::Teams && !chunk) {
     merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
         "merk_device_sync_threads", mlir::ValueRange{}, /*can_fail=*/false);
   }
@@ -722,6 +761,88 @@ merk::ProcOp MerkGenerator::ProcessLoopRounds(
   arguments.append(
       iteration.getResults().begin(), iteration.getResults().end());
   auto again{merk::CallOp::create(builder_, loc, results, name, arguments)};
+  merk::YieldOp::create(builder_, loc, again.getResults());
+  builder_.setInsertionPointToStart(&more.getElseRegion().emplaceBlock());
+  merk::YieldOp::create(builder_, loc, partials);
+  builder_.setInsertionPointAfter(more);
+  merk::SucceedOp::create(builder_, loc, more.getResults());
+  return proc;
+}
+
+// A thread's share of a loop under schedule(dynamic), a procedure of its own
+// that calls itself for the next claim, which becomes a loop:
+//
+//   claims(Claims, _, _, Count, First, Step, Values..., Partials...) =
+//     J = the word at Claims, atomically increased by Chunk,
+//     if J < Count then
+//       claims(Claims, ..., chunk(Chunk, J, 1, Count, First, Step,
+//         Values..., Partials...))
+//     else Partials
+//
+// with the rounds of a chunk (ProcessLoopRounds), which have no barrier: a
+// thread goes on as soon as its iterations end, which suits a loop whose
+// iterations take uneven times, as UTS's that push each node's children.
+// The word is the one after the loop's words, which the process set to 0
+// (ProcessLoop): in its control block, or in the team's local memory for a
+// loop under parallel do in a distribute loop's body. Every thread of a wave
+// claims from the same word, so the backend makes their claims one atomic
+// operation, which gives the wave's lanes consecutive iterations, as the
+// static schedule's rounds do.
+merk::ProcOp MerkGenerator::ProcessLoopClaims(
+    const ProcessLoopCase &loop, mlir::Location loc) {
+  merk::ProcOp chunk{ProcessLoopRounds(loop, /*chunk=*/true, loc)};
+  mlir::FunctionType type{chunk.getFunctionType()};
+  std::string name{loop.body + "$claims"};
+  if (auto made{module_.lookupSymbol<merk::ProcOp>(name)}) {
+    return made;
+  }
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToEnd(module_.getBody());
+  auto proc{merk::ProcOp::create(
+      builder_, loc, name, type, merk::Determinism::Det)};
+  proc.setPrivate();
+  mlir::Block *entry{proc.addEntryBlock()};
+  builder_.setInsertionPointToStart(entry);
+  auto i64{builder_.getI64Type()};
+  mlir::Value claims{entry->getArgument(0)};
+  mlir::Value count{entry->getArgument(3)};
+  std::size_t words{type.getNumInputs() - 6 - loop.reductions.size()};
+  auto values{entry->getArguments().slice(6, words)};
+  auto partials{entry->getArguments().slice(6 + words)};
+  // The word's address: generic, then in the address space it is in.
+  bool team{loop.kind == ProcessLoopKind::Team};
+  mlir::Value address{mlir::LLVM::IntToPtrOp::create(builder_, loc,
+      mlir::LLVM::LLVMPointerType::get(
+          &context_, target_.addressSpaces().generic),
+      claims)};
+  unsigned space{
+      team ? target_.addressSpaces().shared : target_.AtomicAddressSpace()};
+  if (space != target_.addressSpaces().generic) {
+    address = mlir::LLVM::AddrSpaceCastOp::create(builder_, loc,
+        mlir::LLVM::LLVMPointerType::get(&context_, space), address);
+  }
+  mlir::Value size{IntegerConstant(i64, loop.claimChunk, loc)};
+  mlir::Value j{mlir::LLVM::AtomicRMWOp::create(builder_, loc,
+      mlir::LLVM::AtomicBinOp::add, address, size,
+      mlir::LLVM::AtomicOrdering::monotonic, team ? "workgroup" : "agent")};
+  auto more{merk::IteOp::create(builder_, loc, type.getResults())};
+  builder_.setInsertionPointToStart(&more.getCondition().emplaceBlock());
+  merk::GuardOp::create(builder_, loc,
+      mlir::arith::CmpIOp::create(
+          builder_, loc, mlir::arith::CmpIPredicate::slt, j, count));
+  merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  builder_.setInsertionPointToStart(&more.getThenRegion().emplaceBlock());
+  llvm::SmallVector<mlir::Value> arguments{
+      size, j, IntegerConstant(i64, 1, loc), count, entry->getArgument(4),
+      entry->getArgument(5)};
+  arguments.append(values.begin(), values.end());
+  arguments.append(partials.begin(), partials.end());
+  auto ran{merk::CallOp::create(builder_, loc, type.getResults(),
+      chunk.getSymName(), arguments)};
+  llvm::SmallVector<mlir::Value> next{entry->getArguments().take_front(6)};
+  next.append(values.begin(), values.end());
+  next.append(ran.getResults().begin(), ran.getResults().end());
+  auto again{merk::CallOp::create(builder_, loc, type.getResults(), name, next)};
   merk::YieldOp::create(builder_, loc, again.getResults());
   builder_.setInsertionPointToStart(&more.getElseRegion().emplaceBlock());
   merk::YieldOp::create(builder_, loc, partials);

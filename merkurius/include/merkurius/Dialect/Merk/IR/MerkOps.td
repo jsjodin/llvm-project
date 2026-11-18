@@ -767,8 +767,8 @@ def Merk_ArrayElementRefOp : Merk_Op<"array_element_ref"> {
     The address of element `index` of an array of words, of ints or floats,
     which an OpenMP atomic operation updates in place (`%$omp atomic`,
     docs/INPROGRESS.md, Atomic updates of array elements). It is a generic
-    pointer, or in the target's address space for atomic elements
-    (TargetInfo::AtomicElementAddressSpace): on the host, the heap pointer
+    pointer, or in the target's address space for atomic operations
+    (TargetInfo::AtomicAddressSpace): on the host, the heap pointer
     cast out of the collector's address space, used before any safepoint.
   }];
   let arguments = (ins Merk_ArrayType:$array, I64:$index);

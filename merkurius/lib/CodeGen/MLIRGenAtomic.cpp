@@ -332,7 +332,7 @@ void MerkGenerator::OmpAtomic(const Body &goal, const ProcedureBody &body) {
   // In the target's address space for them: on AMDGPU a generic pointer
   // made a loop of UTS that counts into one element twice as long as HIP's.
   auto ptr{mlir::LLVM::LLVMPointerType::get(
-      &context_, target_.AtomicElementAddressSpace())};
+      &context_, target_.AtomicAddressSpace())};
   mlir::Value address{
       merk::ArrayElementRefOp::create(builder_, loc, ptr, array, at_)};
   mlir::Value slot;

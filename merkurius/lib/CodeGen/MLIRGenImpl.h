@@ -110,6 +110,16 @@ struct LoopReduction {
   mlir::Value slot{};
 };
 
+// A do directive's schedule clause: none, static or dynamic, with the chunk
+// size, if it gives one, as a constant or as the value of a variable bound
+// before the directive.
+struct LoopSchedule {
+  enum class Kind { None, Static, Dynamic };
+  Kind kind{Kind::None};
+  std::optional<std::int64_t> chunk;
+  mlir::Value chunkValue{};
+};
+
 // What OmpLoop found out about a parallel loop, for generating it.
 struct ParallelLoop {
   llvm::ArrayRef<const Body *> goals; // the bounds' goals, the trip test, the call
@@ -124,6 +134,7 @@ struct ParallelLoop {
   bool distribute;
   bool offloaded;
   parser::CharBlock at;
+  LoopSchedule schedule{};
 };
 
 // In typeInfos_, a type that a goal gave, of TypeKind::Existential, by its
@@ -645,6 +656,15 @@ private:
   std::optional<mlir::Value> IntegerClause(const omp::Leaf &, llvm::omp::Clause id,
       llvm::StringRef what, const ProcedureBody &, parser::CharBlock at,
       mlir::Location);
+  // The value of an integer clause's argument (IntegerClause), or nothing
+  // after an error.
+  std::optional<mlir::Value> IntegerTerm(const parser::DataTerm &,
+      llvm::StringRef what, const ProcedureBody &, parser::CharBlock at,
+      mlir::Location);
+  // The do leaf's schedule clause, of a directive whose leaves are
+  // `queue`; nothing after an error.
+  std::optional<LoopSchedule> ScheduleOf(const omp::ConstructQueue &queue,
+      const ProcedureBody &, parser::CharBlock at, mlir::Location);
   // A target teams region, whose teams each run the goal (docs/INPROGRESS.md,
   // Processes as teams).
   void TargetTeams(const Body &, const ProcedureBody &,
@@ -720,6 +740,11 @@ private:
     unsigned counter;
     llvm::SmallVector<ProcessLoopReduction> reductions;
     ProcessLoopKind kind;
+    // Under schedule(dynamic), how many iterations a thread claims at a
+    // time, from the word after the loop's words, `claims`; 0 for the
+    // static schedule.
+    std::int64_t claimChunk{0};
+    unsigned claims{0};
   };
   llvm::SmallVector<ProcessLoopCase> processLoops_;
   void ProcessLoop(const ParallelLoop &, ProcessLoopKind, const ProcedureBody &,
@@ -739,6 +764,8 @@ private:
   void ProcessLoopShare(const ProcessLoopCase &loop, mlir::Block *entry,
       mlir::Type generic, mlir::Location loc);
   merk::ProcOp ProcessLoopRounds(
+      const ProcessLoopCase &loop, bool chunk, mlir::Location loc);
+  merk::ProcOp ProcessLoopClaims(
       const ProcessLoopCase &loop, mlir::Location loc);
   static bool IsReductionInput(const ProcessLoopCase &loop, std::size_t index);
   // Whether a kind's code, or a procedure of the module that it calls, has

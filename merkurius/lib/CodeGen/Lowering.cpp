@@ -4246,8 +4246,8 @@ void Lowerer::PolymorphicStore(mlir::Operation *op, mlir::Value array,
 // The element's address, of an array of words, as a pointer of the
 // reference's type: the host's heap pointer is cast out of the collector's
 // address space, as no safepoint comes before the atomic operation that
-// uses it, and into the target's address space for atomic elements
-// (TargetInfo's AtomicElementAddressSpace).
+// uses it, and into the target's address space for atomic operations
+// (TargetInfo's AtomicAddressSpace).
 void Lowerer::LowerArrayElementRef(merk::ArrayElementRefOp op) {
   mlir::Location loc{op->getLoc()};
   rewriter_.setInsertionPoint(op);

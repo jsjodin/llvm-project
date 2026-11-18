@@ -4108,6 +4108,38 @@ On the gfx1030, at 58440501d51d:
   work rather than by what fits. The attributor change could still go
   upstream on its own; the patch and its test were kept outside the tree.
 
+**(s3) done 2026-11-18: `schedule(dynamic)`.** The barrier after each
+round (d2) suits a loop whose iterations take the same time, but in UTS's
+loop that pushes each node's children a team waited at every round for its
+slowest wave. `schedule(static)` and `schedule(dynamic)`, with a chunk size
+that is a positive integer, now have code generation:
+- On the host, and in target regions, omp.wsloop takes the schedule, as
+  Flang's `ClauseProcessor` gives it; outside target regions the chunk size
+  may also be a variable bound before the directive.
+- In a GPU process, a loop under `schedule(dynamic)` takes the word after
+  its words, which the process sets to 0 before each run, in the control
+  block, or in the team's local memory for a loop across a team's threads.
+  Each thread claims a chunk from it with an atomic add (`$claims`, in
+  `ProcessLoopClaims`) and runs it with a stride of 1 (`$chunk`, the
+  rounds without the barrier), until the claims pass the count. The word's
+  address is read from the wave's first lane (`TargetInfo::Uniform`) and is
+  global (`TargetInfo::AtomicAddressSpace`), so the backend makes a wave's
+  claims one atomic add and gives its lanes consecutive iterations, as the
+  static rounds do. The runtime is unchanged: `Work` still passes the
+  rounds, which a dynamic loop ignores.
+- Rejected: taking the barrier out of every loop, which (d2) measured at
+  8 to 17% even for a stream and 26% for a stencil; `nowait` for it, which
+  in OpenMP means no barrier at the end, which these loops need; a claims
+  word of the runtime's own in `ProcessControl`, which would need a flag
+  for the loop's kind of schedule in `merk_process_loop` as well.
+- Not yet, each reported: guided, auto and runtime; the modifiers; in a GPU
+  process, a chunk size that is a variable, and `schedule(static)` with a
+  chunk size; in a target region, a chunk size that is a variable.
+- Tests: `CodeGen/process-schedule.m` and `-gpu.test`,
+  `process-schedule-errors.m`, `omp-schedule.m` and `-gpu.test`, and
+  `omp-parallel-do-errors.m`. UTS's push loop with it: design document,
+  Measurements, "UTS on one GPU".
+
 **GPU experiments, 2026-11-11 night: what limits a GPU process's loops.**
 Kept for the multi-GPU machine (8× gfx90a), where the numbers will differ:
 wave64, a unified register file of 512 VGPRs and AGPRs a lane, 110 compute
