@@ -437,6 +437,11 @@ private:
     return operands.empty() ? mlir::Value{} : operands.front();
   }
   void LowerArray(mlir::Operation *);
+  // Before the runtime's allocation of a group-private array: tells the
+  // runtime that the next array is one (merk_device_group_next), and marks
+  // the image as having them (merk_device_group_private).
+  void GroupPrivateNext(mlir::IntegerAttr fallback, mlir::Location);
+  bool groupPrivate_{false};
   void LowerArrayElementRef(merk::ArrayElementRefOp);
   // The struct of the records an array operation's array holds inline, or
   // null (docs/INPROGRESS.md, Flat records, step 2).
@@ -4106,6 +4111,27 @@ mlir::Value Lowerer::CallRuntime(llvm::StringRef name, mlir::Type result,
       .getResult();
 }
 
+void Lowerer::GroupPrivateNext(mlir::IntegerAttr fallback, mlir::Location loc) {
+  auto i32{rewriter_.getI32Type()};
+  mlir::LLVM::CallOp::create(rewriter_, loc,
+      RuntimeFunc("merk_device_group_next",
+          mlir::LLVM::LLVMVoidType::get(rewriter_.getContext()), {i32}),
+      mlir::ValueRange{mlir::LLVM::ConstantOp::create(
+          rewriter_, loc, i32, static_cast<std::int32_t>(fallback.getInt()))});
+  if (groupPrivate_) {
+    return;
+  }
+  groupPrivate_ = true;
+  // Over the device runtime's weak 0, which the host reads (device.cpp).
+  mlir::OpBuilder::InsertionGuard guard{rewriter_};
+  rewriter_.setInsertionPointToStart(module_.getBody());
+  auto global{mlir::LLVM::GlobalOp::create(rewriter_, loc, i32,
+      /*isConstant=*/false, mlir::LLVM::Linkage::External,
+      "merk_device_group_private", rewriter_.getI32IntegerAttr(1),
+      /*alignment=*/4)};
+  global.setVisibility_(mlir::LLVM::Visibility::Protected);
+}
+
 // An array operation's initial element as a word. An absent one: any word.
 mlir::Value Lowerer::InitialElement(mlir::Value init, mlir::Location loc) {
   return init ? ToWord(init, loc)
@@ -4293,6 +4319,11 @@ void Lowerer::LowerArray(mlir::Operation *op) {
     // The operands by their groups, which lowering may have retyped.
     mlir::Value init{OptionalOperand(make, 1)};
     mlir::Value typeInfo{OptionalOperand(make, 2)};
+    if (auto fallback{
+            make->getAttrOfType<mlir::IntegerAttr>(kGroupPrivateAttrName)};
+        fallback && kernels_) {
+      GroupPrivateNext(fallback, loc);
+    }
     if (record) {
       result = CallRuntime("merk_array_new_bytes", ptr,
           {make->getOperand(0), RecordSlot(op, init, record, loc), recordBytes},
@@ -5083,8 +5114,8 @@ llvm::LogicalResult Lowerer::Lower() {
   }
   // A GPU process's values, which nothing collects, are freed at their last
   // use; before the pass below, which knows nothing of merk.free.
-  if (kernels_) {
-    FreeAtLastUse(module_);
+  if (kernels_ && !FreeAtLastUse(module_)) {
+    return llvm::failure();
   }
   LastCallModuloConstructor(module_, [this](mlir::Type type,
                                          merk::FunctorAttr functor) {
@@ -5745,7 +5776,9 @@ bool LinkForeignCode(llvm::Module &module, mlir::ModuleOp mlirModule,
 
 void HideModuleSymbols(llvm::Module &module) {
   for (llvm::GlobalValue &value : module.global_values()) {
-    if (value.isDeclaration() || value.hasLocalLinkage()) {
+    // A protected one is for the host, as merk_device_group_private is.
+    if (value.isDeclaration() || value.hasLocalLinkage() ||
+        value.hasProtectedVisibility()) {
       continue;
     }
     value.setVisibility(llvm::GlobalValue::HiddenVisibility);

@@ -371,6 +371,10 @@ void MerkGenerator::ProcessLoop(const ParallelLoop &loop, ProcessLoopKind kind,
     NotYet(loop.at, "reductions of teams distribute loops in GPU processes");
     return;
   }
+  if (loop.groupPrivate) {
+    groupPrivateLoops_.push_back(
+        {proc.getSymName().str(), *loop.groupPrivate, loop.at});
+  }
   if (entry.reductions.size() > kProcessLoopReductions) {
     NotYet(loop.at,
         "loops across a GPU process's teams with more than 8 reductions");

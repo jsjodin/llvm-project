@@ -120,6 +120,18 @@ struct LoopSchedule {
   mlir::Value chunkValue{};
 };
 
+// A dyn_groupprivate clause of a teams distribute loop in a GPU process:
+// the arrays it names, which the loop's body makes, and its fallback, the
+// runtime's merk_device_group_next way (docs/INPROGRESS.md, GPU processes
+// that run loops, (s5)).
+struct GroupPrivate {
+  // runtime/place.h's kGroupDefaultMem and kGroupAbort.
+  static constexpr unsigned kDefaultMem{1};
+  static constexpr unsigned kAbort{2};
+  llvm::SmallVector<llvm::StringRef> names;
+  unsigned fallback{kDefaultMem};
+};
+
 // What OmpLoop found out about a parallel loop, for generating it.
 struct ParallelLoop {
   llvm::ArrayRef<const Body *> goals; // the bounds' goals, the trip test, the call
@@ -135,6 +147,7 @@ struct ParallelLoop {
   bool offloaded;
   parser::CharBlock at;
   LoopSchedule schedule{};
+  std::optional<GroupPrivate> groupPrivate{};
 };
 
 // In typeInfos_, a type that a goal gave, of TypeKind::Existential, by its
@@ -747,6 +760,25 @@ private:
     unsigned claims{0};
   };
   llvm::SmallVector<ProcessLoopCase> processLoops_;
+  // The dyn_groupprivate clauses of the module's teams distribute loops in
+  // GPU processes, by the loop's body procedure, which may be generated
+  // after the loop; and the variable that each array.init gives, for them
+  // (MarkGroupPrivateArrays).
+  struct GroupPrivateLoop {
+    std::string body;
+    GroupPrivate clause;
+    parser::CharBlock at;
+  };
+  llvm::SmallVector<GroupPrivateLoop> groupPrivateLoops_;
+  llvm::DenseMap<mlir::Operation *, std::string> arrayInits_;
+  // Marks each array that a dyn_groupprivate clause names, made by
+  // array.init in its loop's body, as group private, and makes each such
+  // body start by ending its last iteration's (merk_device_group_begin).
+  void MarkGroupPrivateArrays();
+  // The dyn_groupprivate clause of a loop's leaves, if it has one, checked;
+  // false after an error.
+  bool GroupPrivateClause(const omp::ConstructQueue &, parser::CharBlock at,
+      std::optional<GroupPrivate> &);
   void ProcessLoop(const ParallelLoop &, ProcessLoopKind, const ProcedureBody &,
       mlir::Location);
   // The bodies of the module that the bodies of GPU processes' distribute

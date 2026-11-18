@@ -56,6 +56,12 @@ constexpr uint32_t kProcessLoopWords{32};
 // kProcessLoopReductions).
 constexpr uint32_t kProcessLoopReductions{8};
 
+// merk_device_group_next's ways for a group-private array that does not fit
+// in its team's local memory, OpenMP's fallback(default_mem), to the
+// process's memory, and fallback(abort) (MLIRGenImpl.h's GroupPrivate).
+constexpr uint32_t kGroupDefaultMem{1};
+constexpr uint32_t kGroupAbort{2};
+
 // The threads of each of the kernel's teams.
 constexpr uint32_t kPlaceTeamThreads{256};
 
@@ -92,6 +98,10 @@ struct PlaceSlot {
 // holds, and their queues' spills, which the program's end reports.
 // `bulkBytes` is the size from which a process's worker teams fill and copy
 // its memory for it (device.cpp, Bulk), which the host chooses for the GPU.
+// `groupBytes` is each team's dynamic local memory, for its group-private
+// arrays (docs/INPROGRESS.md, GPU processes that run loops, (s5)): the
+// most that keeps the kernel's team count, for an image that has them, or
+// 0.
 //
 // For direct sends between the GPUs of a node (docs/INPROGRESS.md, Direct
 // sends between the GPUs of a node), with MERK_GPU_PEER=1: `peerQueues`, the
@@ -119,6 +129,7 @@ struct PlaceTable {
   uint64_t returns;
   int64_t peerSends;
   int64_t peerCopies;
+  uint64_t groupBytes;
 };
 
 // The queue through which the process of a slot receives from the other

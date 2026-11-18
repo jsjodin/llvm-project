@@ -46,6 +46,7 @@ constexpr std::uint32_t kOlDeviceInfoPlatform{1};
 constexpr std::uint32_t kOlDeviceInfoName{2};
 constexpr std::uint32_t kOlDeviceInfoUid{4};
 constexpr std::uint32_t kOlDeviceInfoNumComputeUnits{12};
+constexpr std::uint32_t kOlDeviceInfoWorkGroupLocalMemSize{18};
 constexpr std::uint32_t kOlDeviceInfoNumLanes{19};
 // ol_platform_info_t
 constexpr std::uint32_t kOlPlatformInfoBackend{3};

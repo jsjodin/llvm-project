@@ -12,7 +12,7 @@ The -O0 build has no --offload-arch, as life-sparse.test's.
 REQUIRES: amdgpu-registered-target, libomp
 RUN: merkc -O0 -fdo-loops -fprocess-declarations %libomp-flags %S/../../benchmarks/swe/swe-sparse.m -o %t0
 RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %S/../../benchmarks/swe/swe-sparse.m -o %t2
-RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %S/../../benchmarks/swe/swe-sparse.m -o %t.omp
+RUN: merkc -O2 -fopenmp -fopenmp-version=61 -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %S/../../benchmarks/swe/swe-sparse.m -o %t.omp
 
 RUN: %libomp-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 %t2 host | FileCheck %s --check-prefix=THACKER --match-full-lines
 RUN: %libomp-env OMP_NUM_THREADS=4 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 %t.omp host | FileCheck %s --check-prefix=THACKER --match-full-lines
@@ -29,6 +29,8 @@ THACKER-NEXT: Active tiles: 256 at most, 224 at the end
 
 RUN: %libomp-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 %t2 host | FileCheck %s --check-prefix=COLUMN --match-full-lines
 RUN: %libomp-env OMP_NUM_THREADS=4 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 %t.omp host | FileCheck %s --check-prefix=COLUMN --match-full-lines
+RUN: %libomp-env SWE_KERNEL=2 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 %t2 host | FileCheck %s --check-prefix=COLUMN --match-full-lines
+RUN: %libomp-env OMP_NUM_THREADS=4 SWE_KERNEL=2 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 %t.omp host | FileCheck %s --check-prefix=COLUMN --match-full-lines
 COLUMN: Case: a column in a bowl
 COLUMN: Time: 11.566220527 s
 COLUMN-NEXT: Wet cells: 17858

@@ -525,6 +525,36 @@ static bool WaitsForTeams(mlir::Operation *op, mlir::ModuleOp module,
   return result.wasInterrupted();
 }
 
+void MerkGenerator::MarkGroupPrivateArrays() {
+  using namespace parser::literals;
+  for (const GroupPrivateLoop &loop : groupPrivateLoops_) {
+    auto proc{module_.lookupSymbol<merk::ProcOp>(loop.body)};
+    if (!proc || proc.isExternal()) {
+      continue;
+    }
+    for (llvm::StringRef name : loop.clause.names) {
+      bool found{false};
+      proc.walk([&](merk::ArrayNewOp made) {
+        auto init{arrayInits_.find(made)};
+        if (init != arrayInits_.end() && init->second == name) {
+          made->setAttr(kGroupPrivateAttrName,
+              builder_.getI32IntegerAttr(loop.clause.fallback));
+          found = true;
+        }
+      });
+      if (!found) {
+        Error(loop.at,
+            "%s is not an array that the loop's body makes with array.init"_err_en_US,
+            name);
+      }
+    }
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.setInsertionPointToStart(&proc.getBody().front());
+    merk::ForeignCallOp::create(builder_, proc.getLoc(), mlir::TypeRange{},
+        "merk_device_group_begin", mlir::ValueRange{}, /*can_fail=*/false);
+  }
+}
+
 void MerkGenerator::MarkRegionsForTeamMailboxes() {
   if (!target_.options().openMPIsTargetDevice) {
     return;
@@ -693,6 +723,15 @@ static bool IsOmpLoopClauseHandled(
       (leaf == llvm::omp::OMPD_do || leaf == llvm::omp::OMPD_teams);
 }
 
+// The same for a teams distribute loop in a GPU process, whose teams leaf
+// may have a dyn_groupprivate clause (GroupPrivateClause).
+static bool IsProcessDistributeClauseHandled(
+    llvm::omp::Directive leaf, llvm::omp::Clause id, bool synthesized) {
+  return (!synthesized && id == llvm::omp::OMPC_dyn_groupprivate &&
+             leaf == llvm::omp::OMPD_teams) ||
+      IsOmpLoopClauseHandled(leaf, id, synthesized);
+}
+
 static bool IsTargetClauseHandled(
     llvm::omp::Directive, llvm::omp::Clause id, bool) {
   return id == llvm::omp::OMPC_device;
@@ -821,9 +860,24 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
   if (!queue) {
     return;
   }
+  // A teams distribute loop in a GPU process may name group-private arrays,
+  // which on the host, as in a kind spawned there, are ordinary ones.
+  bool distributeLoop{processLoop &&
+      directive.id == llvm::omp::Directive::OMPD_teams_distribute};
   for (const omp::Leaf &leaf : *queue) {
-    if (!LeafClauses(leaf, at, IsOmpLoopClauseHandled)) {
+    if (!LeafClauses(leaf, at,
+            distributeLoop ? IsProcessDistributeClauseHandled
+                           : IsOmpLoopClauseHandled)) {
       return;
+    }
+  }
+  std::optional<GroupPrivate> groupPrivate;
+  if (distributeLoop) {
+    if (!GroupPrivateClause(*queue, at, groupPrivate)) {
+      return;
+    }
+    if (!target_.options().processKernels) {
+      groupPrivate.reset();
     }
   }
   std::optional<LoopSchedule> schedule{
@@ -1029,8 +1083,9 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
     reduction.output = *output;
   }
   if ((processLoop || teamLoop) && target_.options().processKernels) {
-    ProcessLoop({goals, trip, call, loop, *loopBody, bodyCall, bodyProcedure,
-                    reductions, false, false, false, at, *schedule},
+    ProcessLoop(
+        {goals, trip, call, loop, *loopBody, bodyCall, bodyProcedure,
+            reductions, false, false, false, at, *schedule, groupPrivate},
         teamLoop ? ProcessLoopKind::Team
             : directive.id == llvm::omp::Directive::OMPD_teams_distribute
             ? ProcessLoopKind::Teams
@@ -1549,12 +1604,117 @@ std::optional<omp::ConstructQueue> MerkGenerator::Decompose(
                   omp::ClauseId(*decomposition.misplaced))
                   .str()
             : "a"};
+    // A clause of a later OpenMP than the compile's names the version that
+    // has it, as Flang's dyn_groupprivate needs -fopenmp-version=61.
+    std::string later;
+    if (decomposition.misplaced) {
+      for (llvm::omp::Version openMP : llvm::omp::getOpenMPVersions()) {
+        unsigned version{openMP.value()};
+        if (version > target_.options().openMPVersion &&
+            !omp::Decompose(version, directive, counter).queue.empty()) {
+          later = " before OpenMP " + std::to_string(version / 10) + "." +
+              std::to_string(version % 10) +
+              " (-fopenmp-version=" + std::to_string(version) + ")";
+          break;
+        }
+      }
+    }
     Error(at, "%s"_err_en_US,
         "the " + clause + " clause is not allowed on the " +
-            std::string{parser::EnumToString(directive.id)} + " directive");
+            std::string{parser::EnumToString(directive.id)} + " directive" +
+            later);
     return std::nullopt;
   }
   return std::move(decomposition.queue);
+}
+
+// OpenMP 6.1's dyn_groupprivate([modifiers :] A, ...), where each A is an
+// array that the loop's body makes with array.init (docs/INPROGRESS.md, GPU
+// processes that run loops, (s5)), rather than OpenMP's size in bytes. The
+// modifiers: fallback(default_mem), the default, or fallback(abort); and
+// cgroup, the only access group there is.
+bool MerkGenerator::GroupPrivateClause(const omp::ConstructQueue &queue,
+    parser::CharBlock at, std::optional<GroupPrivate> &result) {
+  using namespace parser::literals;
+  for (const omp::Leaf &leaf : queue) {
+    for (const parser::OmpClause *c : leaf.clauses) {
+      const auto *generic{std::get_if<const parser::OmpGenericClause *>(c)};
+      if (!generic || (*generic)->id != llvm::omp::OMPC_dyn_groupprivate) {
+        continue;
+      }
+      if (result) {
+        Error(at,
+            "a directive can have only one dyn_groupprivate clause"_err_en_US);
+        return false;
+      }
+      GroupPrivate clause;
+      bool fallback{false};
+      for (const parser::DataTerm &modifier : (*generic)->modifiers) {
+        const auto *functor{
+            std::get_if<const parser::FunctorData *>(&modifier)};
+        llvm::StringRef name{functor && (*functor)->name->qualifiers.empty()
+                ? (*functor)->name->name
+                : ""};
+        if (name == "cgroup" && (*functor)->arguments.empty()) {
+          continue;
+        }
+        const parser::FunctorData *argument{nullptr};
+        if (name == "fallback" && (*functor)->arguments.size() == 1) {
+          if (const auto *a{std::get_if<const parser::FunctorData *>(
+                  &(*functor)->arguments.front())};
+              a && (*a)->arguments.empty() && (*a)->name->qualifiers.empty()) {
+            argument = *a;
+          }
+        }
+        if (!argument) {
+          Error(at,
+              "the modifiers of a dyn_groupprivate clause are fallback(default_mem), fallback(abort) and cgroup"_err_en_US);
+          return false;
+        }
+        if (fallback) {
+          Error(at,
+              "a dyn_groupprivate clause can have only one fallback modifier"_err_en_US);
+          return false;
+        }
+        fallback = true;
+        if (argument->name->name == "default_mem") {
+          clause.fallback = GroupPrivate::kDefaultMem;
+        } else if (argument->name->name == "abort") {
+          clause.fallback = GroupPrivate::kAbort;
+        } else if (argument->name->name == "null") {
+          // An array cannot be absent.
+          NotYet(at, "fallback(null) in a dyn_groupprivate clause");
+          return false;
+        } else {
+          Error(at,
+              "the modifiers of a dyn_groupprivate clause are fallback(default_mem), fallback(abort) and cgroup"_err_en_US);
+          return false;
+        }
+      }
+      for (const parser::DataTerm &argument : (*generic)->arguments) {
+        const auto *variable{std::get_if<const parser::Variable *>(&argument)};
+        if (!variable) {
+          Error(at,
+              "a dyn_groupprivate clause names arrays that the loop's body makes with array.init"_err_en_US);
+          return false;
+        }
+        if (llvm::is_contained(clause.names, (*variable)->name)) {
+          Error(at,
+              "%s is named twice in the dyn_groupprivate clause"_err_en_US,
+              (*variable)->name);
+          return false;
+        }
+        clause.names.push_back((*variable)->name);
+      }
+      if (clause.names.empty()) {
+        Error(at,
+            "a dyn_groupprivate clause names arrays that the loop's body makes with array.init"_err_en_US);
+        return false;
+      }
+      result = std::move(clause);
+    }
+  }
+  return true;
 }
 
 bool MerkGenerator::LeafClauses(const omp::Leaf &leaf, parser::CharBlock at,
