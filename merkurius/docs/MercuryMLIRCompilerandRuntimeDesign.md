@@ -5415,6 +5415,52 @@ and `swe-sparse.hip`'s. All gave the same checksum. Average step, µs
   are `ds_read`s; and the fill's own barrier, which HIP does not have, as
   its shared memory is not initialized.
 
+**Where the rest went, 2026-11-18,** same setup. A copy of `swe-sparse.hip`
+(kept outside the tree) gave `step_faces` Mercury's ways one at a time:
+the local memory reserved whole, so a block a compute unit as Mercury's
+one team; the arrays through flat pointers; the zero-fill and its barrier;
+`Diffs` in local memory by a loop of its own; a barrier and words through
+local memory before each loop, as a team loop's start; and a persistent
+grid of 39 blocks, as the process's 39 worker teams, its tiles dealt
+`blockIdx.x` apart, as `Distribute` did, or taken from a counter. One
+binary, two runs within 4 µs; average step, µs:
+
+| HIP `step_faces` with | µs |
+|---|---:|
+| nothing (HIP's own) | 375 |
+| a block a compute unit | 382 |
+| and Mercury's four code differences | 397 |
+| a block a unit, persistent, tiles dealt | 405 |
+| and the code differences: Mercury's shape | 419 |
+| a block a unit, persistent, tiles taken | 383 |
+| and the code differences | 396 |
+
+- **Dealing the tiles cost 23 µs:** 472 tiles over 39 teams is 13 for
+  some and 12 for the rest, and tiles' times differ. Taken from a counter,
+  the persistent grid is as fast as HIP's own launch.
+- **Mercury's four code differences cost 15 µs together,** none more
+  than 6 alone. Mercury's shape in HIP, 419 µs, left 19 µs of 438 to
+  Mercury's code itself: the calls through `merk_team_loop`, and 248
+  VGPRs in `merk_place` against `step_faces`' 108.
+- **`Distribute` now takes iterations from a counter in the process's
+  control block,** one at a time, as OpenMP leaves the schedule to the
+  implementation without `dist_schedule`, and a distribute loop has no
+  reductions whose order could change. `compare-swe.sh`, 3 rounds, the
+  same checksums:
+
+| Kernel | Mercury, dealt | Mercury, taken | HIP |
+|---|---:|---:|---:|
+| `step` | 457 (27) | 428 (27) | 452 (50) |
+| `step_faces` | 438 (29) | 412 (28) | 376 (51) |
+
+  Mercury's `step` is now 5% faster than HIP's, by its bookkeeping; its
+  `step_faces` is 10% slower than HIP's, 36 µs, about the code
+  differences and Mercury's own above.
+- Not measured: an odd `HSA_CU_MASK` such as `0:0-38` on the gfx1030
+  (80 compute units) runs on more units than it names, as the mask is
+  taken by whole WGPs; a run of fewer teams needs fewer blocks, not a
+  narrower mask.
+
 **On gfx90a.** 2026-11-14, one die of an AMD Instinct MI250, GPU 7, all
 104 compute units, the host's threads on the other socket, with the GPU
 process's barriers at device scope and the device's clock right ("Barriers

@@ -362,6 +362,9 @@ struct ProcessControl {
   uint64_t distribute;
   uint64_t end;
   Arena *arena;
+  // A distribute loop's iterations that worker teams have taken, each the
+  // next as it ends its last (Distribute).
+  int64_t taken;
   uint64_t values[kProcessLoopWords];
   // The loop's reductions: how many, their values before the loop, which the
   // process sets and which are their results after it, how many worker
@@ -1745,22 +1748,40 @@ uint64_t *TeamWords(Local<uint64_t> *words) { return (uint64_t *)words; }
 }
 
 // Every thread of a worker team, for a distribute loop: the team's first
-// wave runs the bodies of the team's iterations, `workers` apart from
-// `worker`, all its lanes the same, and its other waves wait for the loops
+// wave runs the bodies of the iterations that it takes, one at a time, the
+// next not yet taken by any team, all its lanes the same, and its other
+// waves wait for the loops
 // that the bodies run across the team's threads, until the first wave says
 // that its iterations have ended. The first wave is told by a value that the
 // compiler knows is the same in all its lanes, so that whole waves take each
 // branch, and none crosses the other's barriers.
-void Distribute(uint64_t loop, int64_t first, int64_t step, int64_t count,
-    uint64_t values, uint64_t worker, uint64_t workers, uint32_t inTeam) {
+//
+// Taken rather than dealt `workers` apart, as iterations' times differ, and
+// teams' counts too where the count is not a multiple of theirs: 472 tiles
+// of swe-sparse.m's step_faces, 13 for some of 39 teams and 12 for the rest,
+// took 438 us a step dealt, 23 us more than taken in a HIP copy of it
+// (design document, Measurements, "Shallow water on sparse tiles"). OpenMP
+// leaves the schedule to the implementation without dist_schedule, and a
+// distribute loop here has no reductions, whose order could differ.
+void Distribute(ProcessControl *control, uint64_t loop, int64_t first,
+    int64_t step, int64_t count, uint64_t values, uint32_t inTeam) {
   uint32_t wave{__gpu_read_first_lane_u32(__gpu_lane_mask(), inTeam)};
   if (wave == 0) {
     teamMains[0] = 1;
-    auto start{static_cast<int64_t>(worker)};
-    auto stride{static_cast<int64_t>(workers)};
-    int64_t rounds{count > start ? (count - start + stride - 1) / stride : 0};
-    merk_process_loop(
-        loop, start, rounds, stride, count, first, step, values, 0);
+    uint64_t mask{__gpu_lane_mask()};
+    for (;;) {
+      int64_t taken{0};
+      if (__gpu_is_first_in_lane(mask)) {
+        taken = __scoped_atomic_fetch_add(
+            &control->taken, 1, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+      }
+      taken = static_cast<int64_t>(
+          __gpu_read_first_lane_u64(mask, static_cast<uint64_t>(taken)));
+      if (taken >= count) {
+        break;
+      }
+      merk_process_loop(loop, taken, 1, 1, count, first, step, values, 0);
+    }
     teamMains[0] = 0;
     if (__gpu_is_first_in_lane(__gpu_lane_mask())) {
       GroupRelease();
@@ -1903,7 +1924,7 @@ bool Bulk(uint64_t what, uint64_t *to, uint64_t fromOrWord, uint64_t words,
       continue;
     }
     if (control->distribute) {
-      Distribute(loop, first, step, count, values, worker, workers, inTeam);
+      Distribute(control, loop, first, step, count, values, inTeam);
       WorkerArrive(control);
       continue;
     }
@@ -2218,6 +2239,7 @@ extern "C" void merk_device_process_distribute(
   control->step = step;
   control->count = count;
   control->distribute = 1;
+  control->taken = 0;
   control->reductions = 0;
   control->stored = 0;
   ProcessArrive(control);
