@@ -1,0 +1,39 @@
+The C and HIP versions of the shallow water equations on sparse tiles by
+second-order MUSCL-Hancock with HLLC fluxes (benchmarks/swe-muscl/swe-muscl.c
+and swe-muscl.hip), which compare-swe-muscl.sh runs against swe-muscl.m, on
+the machine's GPU: every output is swe-muscl.m's and swe-muscl.c's at the
+host, bit for bit (swe-muscl.test), the default world too
+(swe-muscl-gpu.test).
+REQUIRES: amdgpu-gpu, hip
+
+RUN: clang -O2 -ffp-contract=off -fopenmp --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/swe-muscl/swe-muscl.c -lm -o %t
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 timeout -k 1 60 %t | FileCheck %s --check-prefix=C --match-full-lines
+C: Shallow water, C, sparse tiles
+C-NEXT: World: 256 x 256 cells, tiles of 16 x 16, 256 in the pool
+C-NEXT: Case: Thacker's bowl
+C-NEXT: Steps: 400
+C-NEXT: Time: 7.987527250 s
+C-NEXT: Wet cells: 51288
+C-NEXT: Volume: 2.084618e+05 m^3
+C-NEXT: Checksum: a8e71e7e56280000
+C-NEXT: Error: 1.3960e-03
+C-NEXT: Active tiles: 256 at most, 232 at the end
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY SWE_WORLD=512 SWE_TILE=64 SWE_STEPS=200 timeout -k 1 60 %t | FileCheck %S/swe-muscl.test --check-prefix=WIDE --match-full-lines
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY timeout -k 1 60 %t | FileCheck %S/swe-muscl-gpu.test --check-prefix=DEFAULT --match-full-lines
+RUN: %libomp-env OMP_TARGET_OFFLOAD=MANDATORY SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CAPACITY=40 not timeout -k 1 60 %t | FileCheck %S/swe-muscl.test --check-prefix=FULL
+
+RUN: clang -x hip -O2 -ffp-contract=off --offload-arch=%offload-arch --rocm-path=%rocm-path %S/../../benchmarks/swe-muscl/swe-muscl.hip -L%rocm-path/lib -lamdhip64 -lm -Wl,-rpath,%rocm-path/lib -o %t.hip
+RUN: %hip-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 timeout -k 1 60 %t.hip | FileCheck %s --check-prefix=HIP --match-full-lines
+HIP: Shallow water, HIP, sparse tiles
+HIP: Checksum: a8e71e7e56280000
+HIP-NEXT: Error: 1.3960e-03
+HIP-NEXT: Active tiles: 256 at most, 232 at the end
+RUN: %hip-env SWE_WORLD=512 SWE_TILE=64 SWE_STEPS=200 timeout -k 1 60 %t.hip | FileCheck %S/swe-muscl.test --check-prefix=WIDE --match-full-lines
+RUN: %hip-env timeout -k 1 60 %t.hip | FileCheck %S/swe-muscl-gpu.test --check-prefix=DEFAULT --match-full-lines
+RUN: %hip-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CAPACITY=40 not timeout -k 1 60 %t.hip | FileCheck %S/swe-muscl.test --check-prefix=FULL
+
+The HIP program's kernel that uses shared memory (SWE_KERNEL, README.md)
+gives the same bits.
+RUN: %hip-env SWE_KERNEL=2 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 timeout -k 1 60 %t.hip | FileCheck %s --check-prefixes=HIP,FACES --match-full-lines
+RUN: %hip-env SWE_KERNEL=2 timeout -k 1 60 %t.hip | FileCheck %S/swe-muscl-gpu.test --check-prefix=DEFAULT --match-full-lines
+FACES: Kernel (faces): {{.*}}
