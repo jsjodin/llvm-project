@@ -5818,7 +5818,8 @@ the row before; the HIP and host numbers did not change.
 |---|---:|---:|---:|---:|
 | Before, `2052307d5f1c` | 831 | 628 | 288 | 753 |
 | A wave's atomic updates of one element made one, `5c3181eb39cf` | 1058 *(probe)* | | | |
-| The SHA-1 inlined, then `schedule(dynamic)` on the push loop | **1406** | **961** | **286** | **962** |
+| The SHA-1 inlined, then `schedule(dynamic)` on the push loop | 1406 | 961 | 286 | 962 |
+| The team's size a constant in `merk_place`'s code, after `350493a307f8` | **1397** *(K = 256K)* | | **351** | **1110** |
 | S2, HIP | 1457 | 708 | 148 | 614 |
 | S1, host, 48 threads | 225 | | 254 | 243 |
 
@@ -5835,6 +5836,18 @@ the row before; the HIP and host numbers did not change.
   node has from none to many children. `schedule(dynamic)` (Loops, GPU
   processes that run loops, docs/INPROGRESS.md (s3)) has none: 7.5 ms of
   the push loop's 59, and a little more on the other trees.
+- The runtime's code in `merk_place` read the team's size with
+  `__gpu_num_threads_x()`. That loads the dispatch's sizes from the
+  kernel's implicit arguments, which the plugin keeps in host memory, so
+  each read crossed the bus. Timed with clock reads in the kernel on T3L,
+  one such read made the reduction of a loop across a team take 3.4 µs, of
+  which the read was 2.5 µs; the team's size is fixed (`kPlaceTeamThreads`),
+  so the code now uses the constant. T3L gained 23% and G2 16%, against
+  S2r (merkurius-uts K6, every round in one HIP kernel) 0.65 and 0.92 times
+  from 0.53 and 0.80. Before the change, the other T3L costs a round, in
+  µs: a reducing loop's body 3.5, the store of its team's result and the
+  count 0.5, the last team's combine of all teams 1.6, and the wait at the
+  barrier after each loop 3.5 to 4 for the slowest team.
 
 S4 is now 3.5% behind S2 on T1L, 1.6 times it on G2 and 1.9 times on the
 narrow T3L, where S2's readback each round dominates. Against the host's
