@@ -4453,6 +4453,12 @@ for (e). Its cost is to measure with (d).
   65,536,000, so the test sees a barrier that does not hold. `%merk-lib-dir`
   is the build's lib directory, for linking device code by hand;
   `runtime/liboffload.h` declares cooperative launch and `olSyncQueue`.
+- **Removed 2026-11-18,** with its test: no generated code called it. The
+  loops that shipped (`bf6f8562948b`) cross the process's own barrier in
+  its control block (`ProcessArrive`, `WorkerArrive`), whose count of
+  crossing teams is a word there, and the process-loop GPU tests cover it.
+  The grid barrier read the kernel's team count from the dispatch at each
+  crossing, which reads host memory.
 
 **Open.**
 - *Which teams a loop uses:* all the kernel's, or fewer for a small loop.

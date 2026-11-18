@@ -1282,37 +1282,6 @@ extern "C" void merk_device_team_barrier(void) {
   ArriveAndWait(&table->arrived, &table->rounds, table->teams);
 }
 
-// A barrier across all the threads of all the teams of a cooperative kernel,
-// a GPU process's (docs/INPROGRESS.md, GPU processes that run loops, (c)).
-// Its counts are in device memory, zero when the kernel starts, one pair for
-// each launch. Every thread of every team calls it, and every thread's writes
-// before it are seen by every thread after it. The teams must all be
-// resident at once, which a cooperative launch promises; there is no time
-// limit, as a GPU process's other teams wait at it while its first team
-// waits for a message.
-struct MerkGridBarrier {
-  int64_t arrived;
-  int64_t rounds;
-};
-
-extern "C" void merk_device_grid_barrier(MerkGridBarrier *barrier) {
-  // Each thread's writes are made visible to the device before its team's
-  // barrier, so that thread 0's arrival publishes the team's.
-  __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
-  __gpu_sync_threads();
-  if (__gpu_thread_id_x() == 0 && __gpu_thread_id_y() == 0 &&
-      __gpu_thread_id_z() == 0) {
-    int64_t teams{static_cast<int64_t>(__gpu_num_blocks_x()) *
-        __gpu_num_blocks_y() * __gpu_num_blocks_z()};
-    if (teams > 1) {
-      ArriveAndWait(&barrier->arrived, &barrier->rounds, teams);
-    }
-  }
-  __gpu_sync_threads();
-  // And each thread sees the other teams' writes after it.
-  __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE);
-}
-
 // At the end of each team of a target teams region: nothing to do on a
 // device, whose next region sets the team's table again.
 extern "C" void merk_device_teams_leave(void) {}
@@ -1373,8 +1342,10 @@ void ProcessArrive(ProcessControl *control) {
   __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE);
 }
 
-// A worker team arrives at the barrier, as merk_device_grid_barrier's teams
-// do: every thread of the team calls it.
+// A worker team arrives at the barrier: every thread of the team calls it.
+// Each thread's writes are made visible to the device before the team's
+// barrier, so that thread 0's arrival publishes the team's, and each thread
+// sees the others' writes after it.
 void WorkerArrive(ProcessControl *control) {
   __scoped_atomic_thread_fence(__ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
   __gpu_sync_threads();
