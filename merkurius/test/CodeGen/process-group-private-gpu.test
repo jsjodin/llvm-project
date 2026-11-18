@@ -8,10 +8,12 @@ RUN: merkc -O2 -fopenmp -fopenmp-version=61 -fdo-loops -fprocess-declarations --
 RUN: %gpu-env %t | FileCheck %S/process-group-private.m --match-full-lines --strict-whitespace
 
 Under fallback(abort), the arrays that fit are made in local memory, which
-5000 ints does, and the one that does not ends the program, naming the
+1000 ints does, and the one that does not ends the program, naming the
 sizes. The launch gives each team the most local memory that keeps the
-kernel's team count, so the size left depends on the kernel.
+kernel's team count, so the size left depends on the kernel: a quarter of a
+compute unit's 64 KiB on gfx90a under -fgpu-process-waves=4, and half on
+gfx1030, where this kernel takes 9 waves a SIMD.
 RUN: merkc -O2 -fopenmp -fopenmp-version=61 -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/Inputs/process_group_private_abort.m -o %t.abort
 RUN: not %gpu-env %t.abort 2>&1 | FileCheck %s --check-prefix=ABORT
-ABORT: 5000: 16357229125000
+ABORT: 1000: 621445825000
 ABORT-NEXT: Merkurius runtime: a group-private array of 160008 bytes does not fit in the {{[0-9]+}} bytes of local memory left to its team, and its fallback is abort

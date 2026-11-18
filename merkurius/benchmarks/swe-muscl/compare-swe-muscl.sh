@@ -14,7 +14,7 @@
 # rounds, each a run of all three, 5 by default. ROCM_PATH is /opt/rocm by
 # default. SWE_WORLD, SWE_TILE, SWE_STEPS, SWE_CASE, SWE_CAPACITY and
 # SWE_KERNEL pass through; SWE_KERNEL=2 picks step_faces in the Mercury and
-# HIP programs. The first round's runs also write each step's active tiles and
+# HIP programs. MERKC_FLAGS adds to merkc's, such as -fgpu-process-waves=8. The first round's runs also write each step's active tiles and
 # time to $out/<program>.trace, for a chart. On a machine that others share,
 # run it through utils/gpu/with-gpus.py.
 set -euo pipefail
@@ -34,7 +34,7 @@ export OMP_TARGET_OFFLOAD=MANDATORY
 
 "$build/bin/merkc" -O2 -fopenmp -fopenmp-version=61 -fdo-loops \
   -fprocess-declarations --offload-arch="$arch" "${flags[@]}" \
-  "$here/swe-muscl.m" -o "$out/merkurius"
+  ${MERKC_FLAGS:-} "$here/swe-muscl.m" -o "$out/merkurius"
 "$build/bin/clang" -O2 -ffp-contract=off -fopenmp --offload-arch="$arch" \
   "${flags[@]}" "$here/swe-muscl.c" -lm -o "$out/c"
 "$build/bin/clang" -x hip -O2 -ffp-contract=off --offload-arch="$arch" \

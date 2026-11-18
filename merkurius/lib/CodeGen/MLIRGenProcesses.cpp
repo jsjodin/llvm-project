@@ -10,9 +10,9 @@
 // omp target, step 4b, and GPU processes that run loops, one kernel for a
 // GPU's processes). The device's compile of them (-fprocess-kernels) makes a
 // start for each, which calls the kind's predicate, and
-// merk_process_dispatch, which starts a kind by its number. The image's one
-// kernel, merk_place, comes from its start object (process-start.cpp): each
-// of its waves runs a process, which it starts by merk_process_dispatch. The
+// merk_process_dispatch, which starts a kind by its number, and the image's
+// one kernel, merk_place, with the registers it may take: each of its waves
+// runs a process, which it starts by merk_process_dispatch. The
 // host's compile embeds the image, one for each GPU, and registers it with
 // the runtime at start-up, with the kinds' names in the order that numbers
 // them.
@@ -43,7 +43,73 @@ constexpr unsigned kProcessLoopWords{32};
 // The most reductions of such a loop: runtime/place.h's
 // kProcessLoopReductions.
 constexpr unsigned kProcessLoopReductions{8};
+// The threads of each team of the kernel: runtime/place.h's
+// kPlaceTeamThreads.
+constexpr unsigned kPlaceTeamThreads{256};
+
+// The waves a SIMD that the kernel of GPU processes is built for on `gpu`
+// when -fgpu-process-waves= does not say, 0 for the backend's choice
+// (docs/INPROGRESS.md, Register pressure in GPU processes). A kernel's
+// registers are the most that any of its code needs, its heaviest loop's
+// body's, and with none set a team of 256 threads lets the backend take a
+// whole SIMD's for each lane.
+unsigned DefaultProcessWaves(llvm::StringRef gpu) {
+  // On gfx90a the backend otherwise takes AGPRs beyond a SIMD's half of the
+  // registers, one wave a SIMD. Two keep the half's 256 VGPRs, so it spills
+  // little more; more waves spill much more, as on gfx1030, where caps cost
+  // swe-muscl's step time (design document, Measurements, Shallow water,
+  // second order). Temporary (register pressure step 2,
+  // docs/INPROGRESS.md): until 3 and 4 are timed on gfx90a.
+  if (gpu.starts_with("gfx90a")) {
+    return 2;
+  }
+  return 0;
+}
 } // namespace
+
+// The image's one kernel, merk_place(table), whose waves run its processes
+// (runtime/place.h, device.cpp's merk_device_place), launched by the host's
+// runtime in teams of kPlaceTeamThreads threads. It is the compile's, not
+// the start object's, so that its attributes, which the backend's attributor
+// carries to every function it calls, bound each lane's registers for the
+// waves a SIMD that the program asks for or the GPU takes by default.
+void MerkGenerator::GeneratePlaceKernel() {
+  mlir::Location loc{builder_.getUnknownLoc()};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToEnd(module_.getBody());
+  auto pointer{mlir::LLVM::LLVMPointerType::get(&context_)};
+  auto voidType{mlir::LLVM::LLVMVoidType::get(&context_)};
+  auto type{mlir::LLVM::LLVMFunctionType::get(voidType, {pointer})};
+  auto place{module_.lookupSymbol<mlir::LLVM::LLVMFuncOp>("merk_device_place")};
+  if (!place) {
+    place = mlir::LLVM::LLVMFuncOp::create(
+        builder_, loc, "merk_device_place", type);
+    place.setConvergent(true);
+  }
+  auto kernel{
+      mlir::LLVM::LLVMFuncOp::create(builder_, loc, "merk_place", type)};
+  kernel.setCConv(mlir::LLVM::cconv::CConv::AMDGPU_KERNEL);
+  kernel.setVisibility_(mlir::LLVM::Visibility::Protected);
+  kernel.setConvergent(true);
+  kernel.setNoUnwind(true);
+  unsigned waves{target_.options().processWaves.value_or(
+      DefaultProcessWaves(target_.gpu()))};
+  llvm::SmallVector<mlir::Attribute> passthrough{builder_.getArrayAttr(
+      {builder_.getStringAttr("amdgpu-flat-work-group-size"),
+          builder_.getStringAttr(std::to_string(kPlaceTeamThreads) + "," +
+              std::to_string(kPlaceTeamThreads))})};
+  if (waves) {
+    passthrough.push_back(
+        builder_.getArrayAttr({builder_.getStringAttr("amdgpu-waves-per-eu"),
+            builder_.getStringAttr(std::to_string(waves))}));
+  }
+  kernel.setPassthroughAttr(builder_.getArrayAttr(passthrough));
+  mlir::Block *entry{kernel.addEntryBlock(builder_)};
+  builder_.setInsertionPointToStart(entry);
+  mlir::LLVM::CallOp::create(
+      builder_, loc, place, mlir::ValueRange{entry->getArgument(0)});
+  mlir::LLVM::ReturnOp::create(builder_, loc, mlir::ValueRange{});
+}
 
 void MerkGenerator::CollectGpuKinds() {
   for (const parser::Item &item : tree_.items) {
@@ -109,6 +175,7 @@ void MerkGenerator::GenerateProcessStarts() {
   if (!target_.options().processKernels) {
     return;
   }
+  GeneratePlaceKernel();
   llvm::SmallVector<merk::ProcOp> starts;
   for (const parser::ProcessDecl *decl : gpuKinds_) {
     starts.push_back(GenerateProcessStart(*decl));

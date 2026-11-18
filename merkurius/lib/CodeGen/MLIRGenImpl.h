@@ -726,6 +726,7 @@ private:
   void CollectGpuKinds();
   const semantics::Procedure *KindProcedure(const parser::ProcessDecl &);
   void GenerateProcessStarts();
+  void GeneratePlaceKernel();
   merk::ProcOp GenerateProcessStart(const parser::ProcessDecl &);
   bool RegisterProcessImages();
   // The loops that GPU processes run across their teams (docs/INPROGRESS.md,

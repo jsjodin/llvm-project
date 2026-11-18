@@ -5632,6 +5632,20 @@ needs and the waves a SIMD:
    the attributor carries to every function it calls, with AGPRs then
    limited by the attribute of step 5; an occupancy target with a default
    a GPU and a flag. Timed on gfx90a against HIP.
+   *Done 2026-11-18, but for the timing on gfx90a.* merkc makes
+   `merk_place` (`MLIRGenProcesses.cpp`, `GeneratePlaceKernel`) instead of
+   the start object, with the waves of `-fgpu-process-waves=`, or else the
+   GPU's default: 2 on gfx90a, none elsewhere.
+   - Static on gfx90a for swe-muscl: 2 waves keep 254 VGPRs and drop the
+     36 AGPRs, so occupancy doubles. `merk_team_loop` spills 74/74
+     against 46/90. 3 and 4 waves give 168 and 128 VGPRs, with spills 2–3
+     times as many.
+   - Timed on the gfx1030 (design document, Measurements, Shallow water,
+     second order): caps of 6 and 8 waves make `step` slower and
+     `step_faces` faster at 8.
+   - So spills can cost more than occupancy gains, and the default stays
+     at the cap that adds none. To do: time 2, 3 and 4 on gfx90a, and pin
+     occupancy in lit by `gpu-registers.py --json` (step 1).
 3. *Less demand.* Team-uniform values where LLVM sees them uniform (SGPRs);
    32-bit index arithmetic where ranges allow; cold runtime paths kept out
    of line from hot loops.

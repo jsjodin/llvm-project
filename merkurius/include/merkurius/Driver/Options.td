@@ -63,6 +63,11 @@ def trace_flag_EQ : Joined<["--"], "trace-flag=">, MetaVarName<"<name>">,
 def I : JoinedOrSeparate<["-"], "I">, MetaVarName<"<dir>">,
   HelpText<"Add <dir> to the directories searched for imported modules">;
 
+def fgpu_process_waves_EQ : Joined<["-"], "fgpu-process-waves=">,
+  MetaVarName<"<n>">,
+  HelpText<"Build the kernel of GPU processes for <n> waves a SIMD, which "
+           "bounds the registers of each lane of its code; 0 leaves them to "
+           "the backend. By default, the GPU's choice">;
 } // let Visibility = [DefaultVis, FC1Option]
 
 //===----------------------------------------------------------------------===//
