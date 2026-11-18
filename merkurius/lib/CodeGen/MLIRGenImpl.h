@@ -282,6 +282,9 @@ private:
   mlir::Value IntegerShift(mlir::Value value, mlir::Value amount,
       llvm::StringRef module, llvm::StringRef what, bool left, bool checked,
       mlir::Location);
+  mlir::Value IntegerRotate(mlir::Value value, mlir::Value amount,
+      llvm::StringRef module, llvm::StringRef name, bool left, bool checked,
+      mlir::Location);
   // Comparison in the standard ordering (reference manual, "The standard
   // ordering"), as unification: compare.T for a term type, made the first
   // time, one procedure for arrays, and the value of a comparison, null after
