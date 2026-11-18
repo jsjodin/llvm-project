@@ -5473,10 +5473,17 @@ binary, two runs within 4 µs; average step, µs:
   The arrays' alignment costs nothing: their elements start on 8 bytes in
   local memory, after a 16-byte-aligned header, and `ds_write_b64` needs no
   more; aligned to 256 they took the same time, so the runtime keeps 16 and
-  its 248 bytes an array. Of the fill, about 17 µs is the hand-off from the
-  first wave to the team's threads, two barriers an array, two arrays a
-  tile, and 6 µs the stores; HIP's fill, by its threads already running,
-  cost 2 µs (above).
+  its 248 bytes an array. Of the fill's 22 µs, 6 are its stores; HIP's
+  fill, by its threads already running, cost 2 µs (above). The rest is not
+  the hand-off to the team's threads: doing both arrays' fills by one
+  hand-off rather than one each (a queue in local memory, flushed before
+  the arrays' first use, which merkc placed) took 411 µs against 412, and
+  was not kept. With the fill skipped where it starts (`TeamMainFill`),
+  `array.init` still took 403 µs against `unsafe_noinit`'s 390: the 12 µs
+  are spent before the fill, by `merk_array_new`, 15 KB of code with what
+  it inlines, run by one wave twice a tile, and by the larger body around
+  it (`merk_process_loop` 28.9 KB against 27.0, 32 bytes more stack a
+  lane). Which of those is not measured.
 - Not measured: an odd `HSA_CU_MASK` such as `0:0-38` on the gfx1030
   (80 compute units) runs on more units than it names, as the mask is
   taken by whole WGPs; a run of fewer teams needs fewer blocks, not a

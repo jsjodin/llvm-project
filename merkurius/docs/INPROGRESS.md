@@ -4247,11 +4247,14 @@ is an array of faces made in the `teams distribute` body, filled by one
   code differences (fill, flat pointers, `Diffs` in local memory, team
   loops' starts) and half Mercury's own (team-loop calls, 248 VGPRs).
   Then `array.unsafe_noinit` (library/array.m), which `Faces` and `Diffs`
-  now use: 390 µs against HIP's 374. A fill's cost is mostly its hand-off
-  to the team, not its stores nor the arrays' alignment. Open: a fill of
-  several group-private arrays by one hand-off; and an analysis that
-  proves an array written before it is read, so that `array.init` skips
-  its fill without the program asking.
+  now use: 390 µs against HIP's 374. A fill's cost is neither its stores
+  (6 µs) nor the arrays' alignment nor its hand-off to the team: one
+  hand-off for both arrays saved 1 µs and was not kept (design document,
+  Measurements, "Shallow water on sparse tiles"). About 12 µs of it is
+  before the fill starts, in `merk_array_new`'s path. Open: why that path
+  costs 0.5 µs a call on a team's wave (its 15 KB of code, or the body's
+  size); and an analysis that proves an array written before it is read,
+  so that `array.init` skips its fill without the program asking.
 - Tests: `CodeGen/process-group-private.m`, `-errors.m`, `-gpu.test`, and
   `Benchmarks/swe-sparse*.test` under `SWE_KERNEL=2`.
 
