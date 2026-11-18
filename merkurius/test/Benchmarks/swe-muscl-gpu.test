@@ -1,0 +1,35 @@
+The shallow water equations on sparse tiles by second-order MUSCL-Hancock
+with HLLC fluxes (benchmarks/swe-muscl/swe-muscl.m) in a GPU process on the
+machine's GPU: a team steps each active tile, its threads over the tile's
+cells, and the process's lane does the bookkeeping. Every output is
+swe-muscl.c's at the host, bit for bit (swe-muscl.test), the default world
+too, 2048 cells square in tiles of 32, where the water covers 484 tiles
+after 1000 steps.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fopenmp-version=61 -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/swe-muscl/swe-muscl.m -o %t
+RUN: %gpu-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 timeout -k 1 60 %t | FileCheck %S/swe-muscl.test --check-prefix=THACKER --match-full-lines
+RUN: %gpu-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 timeout -k 1 60 %t | FileCheck %S/swe-muscl.test --check-prefix=COLUMN --match-full-lines
+RUN: %gpu-env SWE_WORLD=512 SWE_TILE=64 SWE_STEPS=200 timeout -k 1 60 %t | FileCheck %S/swe-muscl.test --check-prefix=WIDE --match-full-lines
+RUN: %gpu-env SWE_WORLD=64 SWE_TILE=4 SWE_STEPS=300 timeout -k 1 60 %t | FileCheck %S/swe-muscl.test --check-prefix=SMALL --match-full-lines
+RUN: %gpu-env timeout -k 1 60 %t | FileCheck %s --check-prefix=DEFAULT --match-full-lines
+DEFAULT: World: 2048 x 2048 cells, tiles of 32 x 32, 4096 in the pool
+DEFAULT: Time: 22.673386473 s
+DEFAULT-NEXT: Wet cells: 444584
+DEFAULT-NEXT: Volume: 2.524112e+05 m^3
+DEFAULT-NEXT: Checksum: 7e6ebd06a6e0a7a6
+DEFAULT-NEXT: Active tiles: 484 at most, 484 at the end
+
+Under SWE_KERNEL=2 each face's flux is computed once, into group-private
+arrays in each team's local memory, the same bits. Tiles of 64 take more
+than a team's local memory, and their arrays are in the process's memory.
+RUN: %gpu-env SWE_KERNEL=2 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 timeout -k 1 60 %t | FileCheck %S/swe-muscl.test --check-prefix=THACKER --match-full-lines
+RUN: %gpu-env SWE_KERNEL=2 SWE_WORLD=512 SWE_TILE=64 SWE_STEPS=200 timeout -k 1 60 %t | FileCheck %S/swe-muscl.test --check-prefix=WIDE --match-full-lines
+RUN: %gpu-env SWE_KERNEL=2 SWE_WORLD=64 SWE_TILE=4 SWE_STEPS=300 timeout -k 1 60 %t | FileCheck %S/swe-muscl.test --check-prefix=SMALL --match-full-lines
+RUN: %gpu-env SWE_KERNEL=2 timeout -k 1 60 %t | FileCheck %s --check-prefix=DEFAULT --match-full-lines
+
+RUN: %gpu-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CAPACITY=40 not timeout -k 1 60 %t | FileCheck %S/swe-muscl.test --check-prefix=FULL
+
+Without -fopenmp the process runs the loops on its own lane.
+RUN: merkc -O2 -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/swe-muscl/swe-muscl.m -o %t.sequential
+RUN: %gpu-env SWE_WORLD=64 SWE_TILE=4 SWE_STEPS=300 timeout -k 1 60 %t.sequential | FileCheck %S/swe-muscl.test --check-prefix=SMALL --match-full-lines

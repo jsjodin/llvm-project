@@ -8,6 +8,9 @@ so distributing it cannot pay. Here water sloshes across a dry bowl and
 only the tiles where it is are stepped, as `life-sparse.m` steps only the
 tiles where life is.
 
+`benchmarks/swe-muscl` is the same with a second-order scheme, MUSCL-Hancock
+with HLLC fluxes, of several times the work a cell.
+
 ## What it does
 
 The 2D shallow water equations, in depth `h` and momenta `hu` and `hv`,

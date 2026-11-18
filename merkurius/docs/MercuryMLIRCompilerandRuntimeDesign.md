@@ -5526,6 +5526,37 @@ same checksum in every run.
   clock, which libc took to tick at 100 MHz where gfx90a's ticks at 25:
   four times too short, with the barriers then at system scope.
 
+### Shallow water, second order
+
+`benchmarks/swe-muscl`: `benchmarks/swe` with second-order MUSCL-Hancock
+and HLLC fluxes in place of first-order HLL (its README). A cell's step
+reads 13 cells and makes 5 predictions of a cell's faces. Thacker's error
+is 7.6 to 13.6 times smaller than first order's at 128 to 1024 cells, and
+falls 2.3 to 2.5 times when the cells halve.
+
+`compare-swe-muscl.sh`, the gfx1030 with 40 compute units, 2026-11-18
+after 3f8f8dbe60e4, Firefox closed. Case 0, 2048 cells in tiles of 32,
+1000 steps, 484 tiles at most. The average step in µs, the median of 3
+rounds, with the bookkeeping's part in brackets, and HIP's kernel by its
+events. All three programs gave the same checksum in every run.
+
+| Kernel | Mercury, GPU process | C, OpenMP | HIP | HIP's kernel |
+|---|---:|---:|---:|---:|
+| `step` | 1118 (28) | 1144 (77) | 1110 (48) | 1050 |
+| `step_faces` | 1405 (28) | — | 1267 (51) | 1204 |
+
+- **On `step`, Mercury is within 1% of HIP for the whole step, and 2.6% for
+  the kernel work** (1090 against 1062 µs without bookkeeping). With first
+  order the kernel work was even, and the step 4% faster than HIP's
+  (Shallow water on sparse tiles). The step is 2.6 times first order's
+  (428 µs), so the fixed costs of a tile weigh less.
+- **`step_faces` doesn't pay here, in either program.** It computes each
+  flux once, but its last loop predicts each cell's faces again for the
+  bed's source, so a cell still makes 5 predictions. The predictions are
+  most of the work, and the extra loops, barriers and local memory traffic
+  cost more than the 2 fluxes saved a cell. Mercury's `step_faces` is 13%
+  behind HIP's on kernel work (1377 against 1216 µs), as with first order.
+
 ### A pipeline of GPU processes
 
 `benchmarks/pipeline`: three GPU processes on one GPU, each with a third of
