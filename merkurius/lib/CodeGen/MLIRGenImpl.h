@@ -373,6 +373,7 @@ private:
   bool NoteRoot(mlir::Value value, const semantics::Type *type);
   // Makes the descriptors a root's type needs for the runtime to name it.
   void EnsureRootDescriptors(const semantics::Type *);
+  void EnsureRootDescriptors(const semantics::Type *, llvm::StringSet<> &seen);
   // X = c, for a literal or a character c; null after reporting a constant
   // not handled.
   mlir::Value Constant(const Body &, const ProcedureBody &);
