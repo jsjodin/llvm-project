@@ -30,3 +30,12 @@ HIP-NEXT: Active tiles: 256 at most, 224 at the end
 RUN: %hip-env SWE_WORLD=512 SWE_TILE=64 SWE_STEPS=200 timeout -k 1 60 %t.hip | FileCheck %S/swe-sparse.test --check-prefix=WIDE --match-full-lines
 RUN: %hip-env timeout -k 1 60 %t.hip | FileCheck %S/swe-sparse-gpu.test --check-prefix=DEFAULT --match-full-lines
 RUN: %hip-env SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CAPACITY=40 not timeout -k 1 60 %t.hip | FileCheck %S/swe-sparse.test --check-prefix=FULL
+
+The HIP program's kernels that use shared memory (SWE_KERNEL, README.md)
+give the same bits.
+RUN: %hip-env SWE_KERNEL=1 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 timeout -k 1 60 %t.hip | FileCheck %s --check-prefixes=HIP,STAGED --match-full-lines
+RUN: %hip-env SWE_KERNEL=2 SWE_WORLD=256 SWE_TILE=16 SWE_STEPS=400 SWE_CASE=1 timeout -k 1 60 %t.hip | FileCheck %s --check-prefixes=HIP,FACES --match-full-lines
+RUN: %hip-env SWE_KERNEL=1 timeout -k 1 60 %t.hip | FileCheck %S/swe-sparse-gpu.test --check-prefix=DEFAULT --match-full-lines
+RUN: %hip-env SWE_KERNEL=2 timeout -k 1 60 %t.hip | FileCheck %S/swe-sparse-gpu.test --check-prefix=DEFAULT --match-full-lines
+STAGED: Kernel (staged): {{.*}}
+FACES: Kernel (faces): {{.*}}

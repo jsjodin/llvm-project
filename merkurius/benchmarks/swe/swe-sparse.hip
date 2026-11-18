@@ -95,6 +95,55 @@ __device__ static inline void cell_at(const double *cur, const int32_t *n,
   *hv = cur[at + 2 * tt];
 }
 
+__device__ static inline void finish_cell(int64_t log, int64_t i, int64_t r,
+    int64_t c, double nh, double nhu, double nhv, double *next, int32_t *wet,
+    int *edges, double *fastest);
+
+// The cell at row r and column c of tile i, at row y and column x of the
+// world, after a step of dt from its state and its four neighbours', into
+// next; and its part of the tile's wet cells, wet edges and largest speed.
+__device__ static inline void update(int64_t log, int64_t size, double dt,
+    int64_t i, int64_t r, int64_t c, int64_t y, int64_t x, double h, double hu,
+    double hv, double hw, double huw, double hvw, double he, double hue,
+    double hve, double hn, double hun, double hvn, double hs, double hus,
+    double hvs, double *next, int32_t *wet, int *edges, double *fastest) {
+  double b = bed(y, x, size);
+  double bw = bed(y, x - 1, size), be = bed(y, x + 1, size);
+  double bn = bed(y - 1, x, size), bs = bed(y + 1, x, size);
+  // Across x the normal momentum is hu; across y, hv.
+  struct flux fw = hll(hw, huw, hvw, bw, h, hu, hv, b);
+  struct flux fe = hll(h, hu, hv, b, he, hue, hve, be);
+  struct flux fn = hll(hn, hvn, hun, bn, h, hv, hu, b);
+  struct flux fs = hll(h, hv, hu, b, hs, hvs, hus, bs);
+  double nh = h - dt * ((fe.m - fw.m) + (fs.m - fn.m));
+  double nhu = hu - dt * (((fe.n + fe.pl) - (fw.n + fw.pr)) + (fs.a - fn.a));
+  double nhv = hv - dt * ((fe.a - fw.a) + ((fs.n + fs.pl) - (fn.n + fn.pr)));
+  finish_cell(log, i, r, c, nh, nhu, nhv, next, wet, edges, fastest);
+}
+
+// The cell at row r and column c of tile i after a step, nh, nhu and nhv,
+// dried if it is too shallow, into next; and its part of the tile's wet
+// cells, wet edges and largest speed.
+__device__ static inline void finish_cell(int64_t log, int64_t i, int64_t r,
+    int64_t c, double nh, double nhu, double nhv, double *next, int32_t *wet,
+    int *edges, double *fastest) {
+  int64_t t = (int64_t)1 << log, m = t - 1, tt = t * t;
+  int64_t k = (r << log) + c;
+  nh = maxf(nh, 0.0);
+  if (nh <= DRY) {
+    nhu = 0.0;
+    nhv = 0.0;
+  }
+  next[i * 3 * tt + k] = nh;
+  next[i * 3 * tt + tt + k] = nhu;
+  next[i * 3 * tt + 2 * tt + k] = nhv;
+  if (nh > DRY) {
+    ++*wet;
+    *edges |= edge_bits(r, c, m);
+  }
+  *fastest = maxf(*fastest, speed(nh, nhu, nhv));
+}
+
 // One step of dt: next's cells of the active tiles from cur's, and each
 // one's wet cells, wet edges and largest speed, by its slot; a block for
 // each tile.
@@ -111,37 +160,148 @@ __global__ static void step(int64_t log, int64_t side, int64_t size, double dt,
   double fastest = 0.0;
   for (int64_t k = threadIdx.x; k < tt; k += THREADS) {
     int64_t r = k >> log, c = k & m;
-    int64_t y = top + r, x = left + c;
     double h, hu, hv, hw, huw, hvw, he, hue, hve, hn, hun, hvn, hs, hus, hvs;
     cell_at(cur, n, log, r, c, &h, &hu, &hv);
     cell_at(cur, n, log, r, c - 1, &hw, &huw, &hvw);
     cell_at(cur, n, log, r, c + 1, &he, &hue, &hve);
     cell_at(cur, n, log, r - 1, c, &hn, &hun, &hvn);
     cell_at(cur, n, log, r + 1, c, &hs, &hus, &hvs);
-    double b = bed(y, x, size);
-    double bw = bed(y, x - 1, size), be = bed(y, x + 1, size);
-    double bn = bed(y - 1, x, size), bs = bed(y + 1, x, size);
-    // Across x the normal momentum is hu; across y, hv.
-    struct flux fw = hll(hw, huw, hvw, bw, h, hu, hv, b);
-    struct flux fe = hll(h, hu, hv, b, he, hue, hve, be);
-    struct flux fn = hll(hn, hvn, hun, bn, h, hv, hu, b);
-    struct flux fs = hll(h, hv, hu, b, hs, hvs, hus, bs);
-    double nh = h - dt * ((fe.m - fw.m) + (fs.m - fn.m));
-    double nhu = hu - dt * (((fe.n + fe.pl) - (fw.n + fw.pr)) + (fs.a - fn.a));
-    double nhv = hv - dt * ((fe.a - fw.a) + ((fs.n + fs.pl) - (fn.n + fn.pr)));
-    nh = maxf(nh, 0.0);
-    if (nh <= DRY) {
-      nhu = 0.0;
-      nhv = 0.0;
+    update(log, size, dt, i, r, c, top + r, left + c, h, hu, hv, hw, huw, hvw,
+        he, hue, hve, hn, hun, hvn, hs, hus, hvs, next, &wet, &edges, &fastest);
+  }
+  reduce(&wet, &edges, &fastest);
+  if (threadIdx.x == 0) {
+    slot_wet[j] = wet;
+    slot_edges[j] = (uint16_t)edges;
+    slot_speed[j] = fastest;
+  }
+}
+
+// The bytes of shared memory that step_staged takes for tiles of side t:
+// the tile and a cell around it, three doubles each.
+static int64_t staged_bytes(int64_t t) { return 3 * (t + 2) * (t + 2) * 8; }
+
+// step, with each tile and a cell around it first loaded into shared memory,
+// once, through its neighbours, so that every cell's five reads are the
+// block's: the bar for a tile kept in fast memory (LDS on AMD GPUs). The
+// same operations in the same order, so the same bits.
+__global__ static void step_staged(int64_t log, int64_t side, int64_t size,
+    double dt, const int32_t *actives, const int32_t *pos,
+    const int32_t *slot_nb, const double *cur, double *next, int32_t *slot_wet,
+    uint16_t *slot_edges, double *slot_speed) {
+  extern __shared__ double staged[];
+  int64_t t = (int64_t)1 << log, m = t - 1, tt = t * t;
+  int64_t j = blockIdx.x, i = actives[j], p = pos[i];
+  int64_t top = (p / side) << log, left = (p % side) << log;
+  const int32_t *n = slot_nb + j * 9;
+  int s = (int)t + 2, ss = s * s;
+  double *sh = staged, *shu = staged + ss, *shv = staged + 2 * ss;
+  for (int k = threadIdx.x; k < ss; k += THREADS)
+    cell_at(cur, n, log, k / s - 1, k % s - 1, &sh[k], &shu[k], &shv[k]);
+  __syncthreads();
+  int32_t wet = 0;
+  int edges = 0;
+  double fastest = 0.0;
+  for (int64_t k = threadIdx.x; k < tt; k += THREADS) {
+    int64_t r = k >> log, c = k & m;
+    int at = (int)(r + 1) * s + (int)c + 1;
+    update(log, size, dt, i, r, c, top + r, left + c, sh[at], shu[at], shv[at],
+        sh[at - 1], shu[at - 1], shv[at - 1], sh[at + 1], shu[at + 1],
+        shv[at + 1], sh[at - s], shu[at - s], shv[at - s], sh[at + s],
+        shu[at + s], shv[at + s], next, &wet, &edges, &fastest);
+  }
+  reduce(&wet, &edges, &fastest);
+  if (threadIdx.x == 0) {
+    slot_wet[j] = wet;
+    slot_edges[j] = (uint16_t)edges;
+    slot_speed[j] = fastest;
+  }
+}
+
+// The most cells of a tile a thread of step_faces updates, and the bytes of
+// shared memory it takes for tiles of side t: four doubles for each face
+// across x, which the faces across y then reuse.
+enum { FACE_CELLS = 4 };
+static int64_t faces_bytes(int64_t t) { return 4 * t * (t + 1) * 8; }
+
+// The flux through each face between cells l and r of a tile, by
+// hydrostatic reconstruction's HLL (hll), into four words of shared memory
+// at f, each `count` apart: its mass, its along and its normal flux with
+// the left's and with the right's pressure correction, which are what the
+// cells either side take, in the order they take them.
+__device__ static inline void store_flux(
+    double *faces, int count, int f, struct flux x) {
+  faces[f] = x.m;
+  faces[count + f] = x.a;
+  faces[2 * count + f] = x.n + x.pl;
+  faces[3 * count + f] = x.n + x.pr;
+}
+
+// step, with each face's flux computed once rather than by both its cells,
+// through shared memory: first the faces across x, whose differences each
+// thread keeps for its cells, then those across y. The same operations in
+// the same order, so the same bits. Each thread has at most FACE_CELLS
+// cells, so tiles have at most 32 x 32 of them.
+__global__ static void step_faces(int64_t log, int64_t side, int64_t size,
+    double dt, const int32_t *actives, const int32_t *pos,
+    const int32_t *slot_nb, const double *cur, double *next, int32_t *slot_wet,
+    uint16_t *slot_edges, double *slot_speed) {
+  extern __shared__ double faces[];
+  int64_t t = (int64_t)1 << log, m = t - 1, tt = t * t;
+  int64_t j = blockIdx.x, i = actives[j], p = pos[i];
+  int64_t top = (p / side) << log, left = (p % side) << log;
+  const int32_t *n = slot_nb + j * 9;
+  int count = (int)(t * (t + 1));
+  // Across x: face f of row r is between columns f - 1 and f.
+  for (int f = threadIdx.x; f < count; f += THREADS) {
+    int64_t r = f / (t + 1), c = f % (t + 1);
+    double hl, nl, al, hr, nr, ar;
+    cell_at(cur, n, log, r, c - 1, &hl, &nl, &al);
+    cell_at(cur, n, log, r, c, &hr, &nr, &ar);
+    store_flux(faces, count, f,
+        hll(hl, nl, al, bed(top + r, left + c - 1, size), hr, nr, ar,
+            bed(top + r, left + c, size)));
+  }
+  __syncthreads();
+  double dm[FACE_CELLS], dn[FACE_CELLS], da[FACE_CELLS];
+  for (int q = 0; q < FACE_CELLS; q++) {
+    int64_t k = threadIdx.x + q * THREADS;
+    if (k < tt) {
+      int w = (int)((k >> log) * (t + 1) + (k & m));
+      dm[q] = faces[w + 1] - faces[w];
+      dn[q] = faces[2 * count + w + 1] - faces[3 * count + w];
+      da[q] = faces[count + w + 1] - faces[count + w];
     }
-    next[i * 3 * tt + k] = nh;
-    next[i * 3 * tt + tt + k] = nhu;
-    next[i * 3 * tt + 2 * tt + k] = nhv;
-    if (nh > DRY) {
-      wet++;
-      edges |= edge_bits(r, c, m);
+  }
+  __syncthreads();
+  // Across y: face f of column c is between rows f / t - 1 and f / t.
+  for (int f = threadIdx.x; f < count; f += THREADS) {
+    int64_t r = f >> log, c = f & m;
+    double hl, nl, al, hr, nr, ar;
+    cell_at(cur, n, log, r - 1, c, &hl, &al, &nl);
+    cell_at(cur, n, log, r, c, &hr, &ar, &nr);
+    store_flux(faces, count, f,
+        hll(hl, nl, al, bed(top + r - 1, left + c, size), hr, nr, ar,
+            bed(top + r, left + c, size)));
+  }
+  __syncthreads();
+  int32_t wet = 0;
+  int edges = 0;
+  double fastest = 0.0;
+  for (int q = 0; q < FACE_CELLS; q++) {
+    int64_t k = threadIdx.x + q * THREADS;
+    if (k < tt) {
+      int64_t r = k >> log, c = k & m;
+      int up = (int)k, down = (int)(k + t);
+      double h, hu, hv;
+      cell_at(cur, n, log, r, c, &h, &hu, &hv);
+      double nh = h - dt * (dm[q] + (faces[down] - faces[up]));
+      double nhu =
+          hu - dt * (dn[q] + (faces[count + down] - faces[count + up]));
+      double nhv =
+          hv - dt * (da[q] + (faces[2 * count + down] - faces[3 * count + up]));
+      finish_cell(log, i, r, c, nh, nhu, nhv, next, &wet, &edges, &fastest);
     }
-    fastest = maxf(fastest, speed(nh, nhu, nhv));
   }
   reduce(&wet, &edges, &fastest);
   if (threadIdx.x == 0) {
@@ -178,6 +338,12 @@ int main(void) {
   int64_t capacity =
       setting("SWE_CAPACITY", (side * side < 4096 ? side * side : 4096) + 1);
   long trace = setting("SWE_TRACE", 0);
+  // The step's kernel: 0 step; 1 step_staged and 2 step_faces where their
+  // tiles fit in the shared memory a block may have, otherwise step.
+  long choice = setting("SWE_KERNEL", 0);
+  int staged = choice == 1 && staged_bytes(tile) <= 65536;
+  int faced = choice == 2 && tile * tile <= FACE_CELLS * THREADS &&
+      faces_bytes(tile) <= 65536;
   if (tile < 4 || ((int64_t)1 << log) != tile || size < tile ||
       size % tile != 0 || steps < 2 || capacity < 2 || kase < 0 || kase > 1)
     return fail("SWE_TILE must be a power of two of at least 4 that divides "
@@ -210,7 +376,7 @@ int main(void) {
   w.slot_edges = (uint16_t *)calloc(capacity, sizeof(uint16_t));
   w.slot_speed = (double *)calloc(capacity, sizeof(double));
   double *final = (double *)malloc(cells * sizeof(double));
-  double *times = (double *)calloc(2 * steps, sizeof(double));
+  double *times = (double *)calloc(3 * steps, sizeof(double));
   long *counts = (long *)calloc(steps, sizeof(long));
   if (!w.dir || !w.pos || !w.nb || !w.wet || !w.edges || !w.quiet ||
       !w.actives || !w.free || !w.fate || !w.slot_nb || !w.slot_wet ||
@@ -283,14 +449,29 @@ int main(void) {
 
   double *cur = a, *next = b, time = 0.0;
   long done = 0;
+  hipEvent_t began, ended;
+  check(hipEventCreate(&began), "hipEventCreate");
+  check(hipEventCreate(&ended), "hipEventCreate");
   for (long s = 0; s < steps && !w.overflow; s++) {
     double t0 = now();
     int64_t n = w.nactive;
     double dt = COURANT / maxf(fastest, DRY);
-    step<<<n, THREADS>>>(log, side, size, dt, d_actives, d_pos, d_nb, cur, next,
-        d_wet, d_edges, d_speed);
+    check(hipEventRecord(began), "hipEventRecord");
+    if (faced)
+      step_faces<<<n, THREADS, faces_bytes(tile)>>>(log, side, size, dt,
+          d_actives, d_pos, d_nb, cur, next, d_wet, d_edges, d_speed);
+    else if (staged)
+      step_staged<<<n, THREADS, staged_bytes(tile)>>>(log, side, size, dt,
+          d_actives, d_pos, d_nb, cur, next, d_wet, d_edges, d_speed);
+    else
+      step<<<n, THREADS>>>(log, side, size, dt, d_actives, d_pos, d_nb, cur,
+          next, d_wet, d_edges, d_speed);
+    check(hipEventRecord(ended), "hipEventRecord");
     check(hipDeviceSynchronize(), "step");
     double t1 = now();
+    float ms = 0.0f;
+    check(hipEventElapsedTime(&ms, began, ended), "hipEventElapsedTime");
+    times[2 * steps + s] = 1.0e-3 * (double)ms;
     time = time + dt;
     check(hipMemcpy(
               w.slot_wet, d_wet, n * sizeof(int32_t), hipMemcpyDeviceToHost),
@@ -370,12 +551,13 @@ int main(void) {
       printf("step %ld: %ld tiles, %.6f s, bookkeeping %.6f s\n", s, counts[s],
           times[s], times[steps + s]);
   // Each step but the first, which includes loading the kernels.
-  double min = times[1], max = times[1], sum = 0.0, keep = 0.0;
+  double min = times[1], max = times[1], sum = 0.0, keep = 0.0, kernel = 0.0;
   for (long s = 1; s < steps; s++) {
     min = times[s] < min ? times[s] : min;
     max = times[s] > max ? times[s] : max;
     sum += times[s];
     keep += times[steps + s];
+    kernel += times[2 * steps + s];
   }
   printf("Time: %.9f s\n", time);
   printf("Wet cells: %ld\n", wet);
@@ -388,6 +570,14 @@ int main(void) {
       "%-12s%-12s%-12s%-14s\n", "Min (sec)", "Max", "Average", "Bookkeeping");
   printf("%-12.6f%-12.6f%-12.6f%-14.6f\n", min, max, sum / (double)(steps - 1),
       keep / (double)(steps - 1));
+  // The step's kernel alone, by HIP's events, on average.
+  printf("Kernel (%s): %.6f s\n",
+      faced        ? "faces"
+          : staged ? "staged"
+                   : "step",
+      kernel / (double)(steps - 1));
+  check(hipEventDestroy(began), "hipEventDestroy");
+  check(hipEventDestroy(ended), "hipEventDestroy");
   check(hipFree(a), "hipFree");
   check(hipFree(b), "hipFree");
   check(hipFree(d_actives), "hipFree");

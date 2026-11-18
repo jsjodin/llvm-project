@@ -5364,6 +5364,28 @@ settle it, is not safe on this GPU, which drives the display. Each time
 all three programs had the same units, so the comparison holds: Mercury
 stays within 4 to 8% of HIP and ahead of C on the small worlds.
 
+**Shared memory in HIP, 2026-11-18,** after 3e0b1311408a, the 2048-cell
+world with tiles of 32, the same mask, Firefox closed, five runs each, the
+median of the step's kernel by HIP's events, in µs (range within 1 µs).
+`SWE_KERNEL` picks `swe-sparse.hip`'s kernel. All gave the same checksum.
+
+| Kernel | Kernel | Average step |
+|---|---:|---:|
+| `step`, each cell's five reads from global memory | 390 | 451 |
+| `step_staged`, the tile and a cell around it in shared memory first | 387 | 449 |
+| `step_faces`, each face's flux once, through shared memory | 313 | 374 |
+
+- **Staging the tile gains nothing.** The step is bound by double
+  divisions and square roots at a sixteenth of single's rate, and the
+  caches already serve a cell's neighbours.
+- **Sharing the faces gains 20%.** Each cell computed its four faces'
+  fluxes, so every face was computed twice; once is half the HLL work, and
+  20% of the kernel, as the rest (a cell's speed, the bed, the reads) stays.
+- For the compiler (INPROGRESS, "Group-private arrays"): `step_faces` is
+  what a Mercury program would write as an array of faces made in the
+  `teams distribute` body, filled and read by two `parallel do` loops, and
+  dead after it, which is the array to place in a team's local memory.
+
 **On gfx90a.** 2026-11-14, one die of an AMD Instinct MI250, GPU 7, all
 104 compute units, the host's threads on the other socket, with the GPU
 process's barriers at device scope and the device's clock right ("Barriers
