@@ -286,6 +286,13 @@ extern "C" Word *merk_array_new(int64_t size, Word init, Word code) {
   return array;
 }
 
+// An array of `size` elements of the width's code, of `recordBytes` each
+// for records, which are not set: array.unsafe_noinit's, whose elements
+// hold no pointers, and an empty array's.
+extern "C" Word *merk_array_alloc(int64_t size, Word code, Word recordBytes) {
+  return Allocate(size, code, recordBytes);
+}
+
 // An array of `size` records of `bytes` each, each a copy of the element's
 // bytes, for code that knows the record's type.
 extern "C" Word *merk_array_new_bytes(

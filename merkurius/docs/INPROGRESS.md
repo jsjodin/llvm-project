@@ -4245,9 +4245,13 @@ is an array of faces made in the `teams distribute` body, filled by one
   took iterations from a counter rather than dealing them: 412 µs against
   HIP's 376, `step` 428 against 452. Open: the 36 µs left, about half the
   code differences (fill, flat pointers, `Diffs` in local memory, team
-  loops' starts) and half Mercury's own (team-loop calls, 248 VGPRs); and
-  arrays that need no fill, as `Faces` and `Diffs`, whose every element is
-  written before it is read.
+  loops' starts) and half Mercury's own (team-loop calls, 248 VGPRs).
+  Then `array.unsafe_noinit` (library/array.m), which `Faces` and `Diffs`
+  now use: 390 µs against HIP's 374. A fill's cost is mostly its hand-off
+  to the team, not its stores nor the arrays' alignment. Open: a fill of
+  several group-private arrays by one hand-off; and an analysis that
+  proves an array written before it is read, so that `array.init` skips
+  its fill without the program asking.
 - Tests: `CodeGen/process-group-private.m`, `-errors.m`, `-gpu.test`, and
   `Benchmarks/swe-sparse*.test` under `SWE_KERNEL=2`.
 

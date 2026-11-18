@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "MLIRGenImpl.h"
+#include "Records.h"
 
 namespace merkurius::codegen::mlirgen {
 
@@ -104,6 +105,42 @@ bool MerkGenerator::ArrayBuiltin(const Body &goal, const Procedure &callee,
     auto made{merk::ArrayNewOp::create(builder_, loc, type, in[0], in[1],
         ElementTypeInfo(body.vars[out[0]].type, type, loc, goal.tokens))};
     // By its variable, for a dyn_groupprivate clause that names it.
+    if (target_.options().processKernels) {
+      arrayInits_[made] = body.vars[out[0]].name;
+    }
+    return GiveOutputs(out, {made});
+  }
+  // A Merkurius extension: an array whose elements are not set, of a type
+  // without pointers, so that neither the collector nor a copy of a message
+  // ever reads garbage as one (library/array.m).
+  if (name == "unsafe_noinit" && HasShape(in, out, 1, 1)) {
+    std::optional<Represented> array{Represent(body.vars[out[0]].type)};
+    if (!array) {
+      return LibraryCallNotYet(goal, symbol);
+    }
+    auto type{mlir::cast<merk::ArrayType>(array->type)};
+    // A type variable's, which may stand for any type.
+    if (mlir::isa<merk::WordType>(type.getElement())) {
+      Error(Where(goal.tokens),
+          "array.unsafe_noinit makes arrays whose elements hold no pointers, "
+          "so their type must be known, not a type variable"_err_en_US);
+      return true;
+    }
+    if (!RecordRule{module_}.IsFlatField(type.getElement())) {
+      Error(Where(goal.tokens),
+          "array.unsafe_noinit makes arrays whose elements hold no pointers: "
+          "ints, uints, floats, chars, enumerations and records of them, "
+          "not the elements of %s"_err_en_US,
+          semantics::TypeToString(*body.vars[out[0]].type));
+      return true;
+    }
+    merk::ThrowIfOp::create(builder_, loc,
+        CompareInts(arith::CmpIPredicate::slt, in[0],
+            IntegerConstant(i64, 0, loc), loc),
+        SoftwareError("unsafe_noinit", 2, "negative size"));
+    auto made{
+        merk::ArrayNewOp::create(builder_, loc, type, in[0], mlir::Value{},
+            ElementTypeInfo(body.vars[out[0]].type, type, loc, goal.tokens))};
     if (target_.options().processKernels) {
       arrayInits_[made] = body.vars[out[0]].name;
     }

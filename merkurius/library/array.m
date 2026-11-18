@@ -43,6 +43,17 @@
 :- func init(int, T) = array(T).
 :- mode init(in, in) = array_uo is det.
 
+    % A Merkurius extension, not in Mercury's library: an array of N
+    % elements whose values are whatever its memory held, for code that
+    % writes every element before it reads it, so that no fill is paid
+    % for. Reading an element before it is written is undefined, as an
+    % unsafe_elem out of the bounds is. The elements must hold no
+    % pointers: ints, uints, floats, chars, enumerations, and records of
+    % them; any other type is an error at compile time.
+    %
+:- pred unsafe_noinit(int::in, array(T)::array_uo) is det.
+:- func unsafe_noinit(int::in) = (array(T)::array_uo) is det.
+
 :- func array(list(T)) = array(T).
 :- mode array(in) = array_uo is det.
 

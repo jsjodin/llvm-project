@@ -72,7 +72,10 @@ code point.
 the foldl family, `foldl` to `foldl5`, in Mercury, with mmc's messages.
 Code generation builds in the predicates that make, read and update an
 array, and reports the others as not yet implemented where they are
-called. The library compiles the sound stub (below), not `array.m`, since
+called. `unsafe_noinit`, a Merkurius extension, makes an array whose
+elements are not set, of a type without pointers, for code that writes
+every element before it reads one. The library compiles the sound stub
+(below), not `array.m`, since
 calls name a procedure by its mode number, which the stub's added modes
 change; so a program checked with `-fmmc-uniqueness` cannot call them.
 `float.m` implements its
