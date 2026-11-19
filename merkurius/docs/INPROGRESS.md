@@ -5896,7 +5896,71 @@ All give the same 252 steps and checksum.
   predicates become unreachable, and merkc rejects their `teams
   distribute` loops as outside any GPU process kind. Unreachable
   predicates should be warned about, not rejected; a specializer would
-  hit the same error.
+  hit the same error. Fixed in c6dbcc1a1e14: the check reports such a
+  loop only in a predicate that an entry point reaches.
+
+**SERGHEI without friction, 2026-11-19.** Its own configuration,
+`-DSERGHEI_FRICTION_MODEL=OFF`, cannot show what removing friction gains
+it. All three friction models are compiled out, but `Solvers.h` still
+reads their `gamma` and `hbeta`, unset. On the 2048² dam break (gfx1030)
+that build ends with a NaN volume after 254 steps, against 252 steps and
+1.443898750e6 m³ by default. Its 23.3 ms a step, against 47.3 ms, times
+a NaN solution and means nothing. A fair comparison needs that one bug
+fixed, as a patch kept beside the unmodified checkout.
+(`SERGHEI_VARIANT=nofriction SERGHEI_CMAKE_FLAGS=-DSERGHEI_FRICTION_MODEL=OFF
+scripts/build-serghei.sh` builds the broken variant.)
+
+**Our other benchmarks, 2026-11-19 (compiler at c6dbcc1a1e14).** Little
+to gain there:
+- *swe-sparse, swe-muscl, life-sparse, life-places* are specialized by
+  hand already. The tile's side is passed as its log2, so each cell's
+  index is a shift or a mask. They divide by spawn parameters only once
+  a tile, and test the case and kernel outside the cell loops.
+- *mandel and work_stealing* divide by parameters a few times, in no
+  hot inner loop.
+- *The MC transport and UTS workers* get their problems by message, not
+  at the spawn. Values that arrive later cannot be specialized on, and
+  each message may differ.
+- *Static check of the MC transport:* E1.1's place, with the run-wide
+  constants that its tracking reads substituted by hand: 230 groups,
+  20 isotopes, 9 reactions, and the energy table's last index.
+  `gpu-registers.py --program`, gfx90a and gfx1030:
+
+  | `place` image | gfx1030 | gfx90a |
+  |---|---|---|
+  | `merk_place` VGPRs, waves | 256, 4: unchanged | 256, 2: unchanged |
+  | its spills, reloads | 5, 6: unchanged | 5, 11: unchanged |
+  | `place.track` | identical | identical |
+  | `merk_process_loop` spills | 38 to 6 | 24: unchanged |
+  | code | 1.5 kB smaller | 0.4 kB smaller |
+
+  The constants only feed index arithmetic and a bisection's bound,
+  which are cheap already. The pressure is in the collision and segment
+  code, which hold the kernel at 256 VGPRs. The run-wide values that
+  matter are in the cross-section and mesh tables.
+- *What could pay there* is the friction pattern: whole paths a run
+  never takes. E1.1, one place with reflecting walls, never leaves its
+  domain, never escapes and has no moving source. But mesh and problem
+  data decide those, not spawn arguments. Getting them means making
+  each option a spawn parameter with a guard in the source. Not tried.
+
+So the case for spawn-time specialization rests on ports of existing
+codes written the plain way, such as SERGHEI's `K / N` and its friction,
+and on letting Mercury code be written plainly. It does not rest on
+speeding up our own benchmarks.
+
+**Validity and safety, for the design:**
+- A spawn argument cannot change and the code is pure, so a version
+  computes what the general one would for its value. That holds only
+  if the runtime picks it on exact equality: floats compared by their
+  bits, not IEEE `==`, so a version for 0.0 never runs for -0.0 and a
+  NaN matches nothing.
+- Constants can make a version worse: unrolling or scheduling can raise
+  registers. (At 3 waves on the gfx90a, copy B's `merk_process_loop`
+  spills 20 values, A's none, though B does strictly less work.) After code generation the compiler keeps a version only
+  if, for each kernel, its occupancy is no lower, and its spills and
+  stack no larger, than the general version's. Otherwise that value
+  takes the general image.
 
 ### Others mentioned
 
