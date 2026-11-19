@@ -1,6 +1,9 @@
 % process-group-private.m's program under fallback(abort), with an array of
 % 20000 ints, which does not fit in a team's local memory
-% (process-group-private-gpu.test).
+% (process-group-private-gpu.test). The group-private array is
+% array.unsafe_noinit's, whose allocation the first wave's other lanes
+% passed before the failing lane had ended the program: they took null and
+% wrote to it, and the GPU faulted before the error was printed.
 
 :- module process_group_private_abort.
 :- interface.
@@ -27,13 +30,13 @@ worker(Reply, Self, !IO) :-
     ).
 
     % Each tile's T elements, through a group-private array G: filled in
-    % order, and read back reversed.
+    % order, every element, and read back reversed.
 :- pred tiles(int::in, int::in, array(int)::array_di, array(int)::array_uo)
     is det.
 tiles(Tiles, T, !Out) :-
     %$omp teams distribute dyn_groupprivate(fallback(abort): G0)
     ( for(J, 0, Tiles - 1) do
-        array.init(T, 0, G0),
+        array.unsafe_noinit(T, G0),
         fill(J, T, G0, G),
         reverse_into(J, T, G, !Out)
     ).
