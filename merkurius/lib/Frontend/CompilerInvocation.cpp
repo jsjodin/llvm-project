@@ -218,6 +218,7 @@ static bool parseCodeGenArgs(CodeGenOptions &opts, const InputArgList &args) {
     }
     opts.processWaves = waves;
   }
+  opts.processNoCalleeSaved = args.hasArg(OPT_fgpu_process_no_callee_saved);
   if (args.hasArg(OPT_fprocess_loops) && !opts.processKernels) {
     reportError("-fprocess-loops is given only with -fprocess-kernels");
     return false;

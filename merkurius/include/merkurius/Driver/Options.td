@@ -68,6 +68,9 @@ def fgpu_process_waves_EQ : Joined<["-"], "fgpu-process-waves=">,
   HelpText<"Build the kernel of GPU processes for <n> waves a SIMD, which "
            "bounds the registers of each lane of its code; 0 leaves them to "
            "the backend. By default, the GPU's choice">;
+def fgpu_process_no_callee_saved : Flag<["-"], "fgpu-process-no-callee-saved">,
+  HelpText<"Compile the code of GPU processes with no callee-saved "
+           "registers, so that each call keeps only what its caller needs">;
 } // let Visibility = [DefaultVis, FC1Option]
 
 //===----------------------------------------------------------------------===//

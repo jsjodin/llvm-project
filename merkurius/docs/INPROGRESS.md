@@ -5686,6 +5686,75 @@ bodies cut out, the scheduler's register pressure):
    cap. Small gains, so step 4 matters more than thought.
 4. *Structure,* if 1 to 3 fall short: team workers a kernel of their own
    with their own budget, apart from the process lane's control code.
+   *Measured first, 2026-11-18:* `step`'s body alone, all through the same
+   `llc` for gfx90a. VGPRs uncapped; spills and reloads in the body at 3
+   and 4 waves (callee-saved saves not counted):
+
+   | `step` body | VGPRs | 3 waves | 4 waves |
+   |---|---:|---:|---:|
+   | `merk_team_loop` now | 248 | 138 | 418 |
+   | its arguments in SGPRs (`inreg`) | 248 | | 382 |
+   | no callee-saved registers | 212 | 98 | 402 |
+   | both | 201 | 98 | 372 |
+   | as a kernel | 201 | 96 | 370 |
+   | HIP's `step` (64-bit indices) | 203 | 177 | 349 |
+
+   - So Mercury's body needs what HIP's does. Its extra registers are all
+     the function's calling convention: callee-saved registers the
+     allocator steps around, and team-uniform arguments in VGPRs.
+   - HIP's 188 with the full clang compile against 203 through `llc` is
+     a difference of tools, not of code.
+   - A kernel of its own isn't needed for this. Two attributes on
+     `merk_team_loop` (and `merk_process_loop`) give the same: `inreg` on
+     its team-uniform parameters, and no callee-saved registers. LLVM has
+     `"no_callee_saved_registers"` for X86 only. A prototype for AMDGPU
+     (the callee's save list and the call's mask) gave the rows above.
+   - 32-bit indices are apart from this: HIP's `step` with them takes 168
+     VGPRs, from 188, and 3 waves on gfx90a (2 on 64-bit), no spills.
+
+   *No callee-saved registers, 2026-11-18,* behind
+   `-fgpu-process-no-callee-saved` (off by default):
+   - **AMDGPU honours `"no_callee_saved_registers"`** (`SIRegisterInfo`,
+     both instruction selectors). Such a function keeps only its return
+     address and the stack's pointers, s30-s34. An ordinary function does
+     not tail call one, since it would have to keep its own registers
+     after.
+   - **The whole chain needs it.** An ordinary caller of such a function
+     saves all its own callee-saved registers, about 380 on gfx90a. So the
+     AMDGPU attributor gives it, from a kernel that has it, to each local
+     function that only functions with it call
+     (`propagateNoCalleeSavedRegisters`). merkc puts it on `merk_place`.
+   - **IPRA reported a callee's frame pointer as clobbered.** A function
+     that only tail calls one with a frame saved its own s33. Without a
+     lane of a VGPR to put it in, that crashed in frame lowering. Fixed in
+     `SIFrameLowering::getCalleeSaves`: the return address, the stack
+     pointer, and the frame and base pointers if the function has them,
+     count as kept. The fix had two bugs of its own, both found by GPU
+     tests:
+     - Super-registers such as s[28:31] counted as kept as well
+       (process-bulk faulted).
+     - So did s33 and s34 without a frame, where they are ordinary
+       registers that `amdgpu_gfx_whole_wave` does not keep (life-sparse
+       hung).
+   - **Static, swe-muscl on gfx90a:**
+     - `merk_team_loop` gains a little: at 3 waves 77/73 spills and
+       reloads, from 81/75 and 64 saved registers.
+     - `merk_process_loop` loses: 295/562 from 266/424 and 21 saved, and
+       `merk_process_swe` likewise. Each of their calls of a heavy runtime
+       function, such as a copy or `merk_array_new`, now clobbers nearly
+       every register, so they spill around it.
+     - The `step`-only measurement above doesn't carry over to the image,
+       since `merk_team_loop` holds every loop body and its heaviest
+       decides.
+   - **Timed on the gfx1030** (design doc, Measurements, "Shallow water,
+     second order"): `step_faces` 3% faster uncapped, `step` under 1%,
+     nothing at 8 waves. The gfx90a timing is still to do.
+   - **Still open in step 4:**
+     - `inreg` on the team-uniform parameters of `merk_team_loop` and
+       `merk_process_loop`.
+     - Keeping callee-saved registers in the runtime's heavy, cold
+       functions, so that the process side doesn't lose.
+     - Whether to make it the default, after the gfx90a timing.
 5. The attributor bug. *Fixed 2026-11-18* (`AMDGPUAttributor.cpp`,
    `test/CodeGen/AMDGPU/amdgpu-attributor-call-whole-wave.ll`), and on the
    critical path after all: under a wave cap a function with
