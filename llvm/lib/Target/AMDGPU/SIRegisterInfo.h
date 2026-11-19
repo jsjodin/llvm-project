@@ -109,6 +109,18 @@ public:
   const MCPhysReg *getCalleeSavedRegsViaCopy(const MachineFunction *MF) const;
   const uint32_t *getCallPreservedMask(const MachineFunction &MF,
                                        CallingConv::ID) const override;
+
+  /// Whether \p F keeps no register for its caller: it has
+  /// "no_callee_saved_registers", as on X86, and the C or fast calling
+  /// convention. On a kernel the attribute is for the functions under it.
+  static bool hasNoCalleeSavedRegisters(const Function &F);
+
+  /// The registers that call \p CB, of calling convention \p CC, keeps:
+  /// only the return address and the stack's pointers if its callee has no
+  /// callee-saved registers.
+  const uint32_t *getCallPreservedMask(const MachineFunction &MF,
+                                       CallingConv::ID CC,
+                                       const CallBase *CB) const;
   const uint32_t *getNoPreservedMask() const override;
 
   // Functions with the amdgpu_cs_chain or amdgpu_cs_chain_preserve calling

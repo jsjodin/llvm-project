@@ -138,6 +138,11 @@ def CSR_AMDGPU_CS_ChainPreserve : CalleeSavedRegs<
 
 def CSR_AMDGPU_NoRegs : CalleeSavedRegs<(add)>;
 
+// A function with "no_callee_saved_registers": only its return address
+// (s30-s31), stack pointer (s32), frame pointer (s33) and base pointer (s34)
+// are kept for its caller.
+def CSR_AMDGPU_NoCalleeSaved : CalleeSavedRegs<(sequence "SGPR%u", 30, 34)>;
+
 // Calling convention for leaf functions
 def CC_AMDGPU_Func : CallingConv<[
   CCIfByVal<CCPassByVal<4, 4>>,
