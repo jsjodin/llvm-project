@@ -903,12 +903,19 @@ bool MakesBlocks() {
 
 namespace {
 
+// The bytes of the team's local memory that its group-private arrays have
+// left.
+uint64_t GroupLeft() {
+  uint64_t start{(groupUsed + 15) & ~uint64_t{15}};
+  return start <= groupBytes ? groupBytes - start : 0;
+}
+
 // A group-private array's `bytes` (merk_device_group_next), for a worker
 // team's first wave's first active lane: from the team's local memory, on
-// 16 bytes, or, if they do not fit, under fallback(abort) the program's end
-// and otherwise a block of the process's memory that the next iteration's
-// start frees. An array's elements in local memory need no more alignment
-// than that; a block of the fallback loses the 256 bytes of a large array's
+// 16 bytes, or, if they do not fit, under fallback(abort) null, and
+// otherwise a block of the process's memory that the next iteration's start
+// frees. An array's elements in local memory need no more alignment than
+// that; a block of the fallback loses the 256 bytes of a large array's
 // (merk_device_alloc_aligned).
 void *GroupAllocate(uint64_t bytes) {
   uint32_t fallback{groupNext};
@@ -920,7 +927,7 @@ void *GroupAllocate(uint64_t bytes) {
         start);
   }
   if (fallback == kGroupAbort) {
-    GroupTooBig(bytes, start <= groupBytes ? groupBytes - start : 0);
+    return nullptr;
   }
   uint64_t given{0};
   auto *spill{static_cast<GroupSpill *>(
@@ -965,6 +972,35 @@ extern "C" void merk_device_group_begin(void) {
   }
 }
 
+namespace {
+
+// A cell or an array of `bytes`, its elements `before` bytes in, for the
+// lanes of a team's first wave that run a distribute loop's body: its first
+// active lane makes it, and the rest take its address. A group-private array
+// that does not fit under fallback(abort) ends the program, which the whole
+// wave asks for after the branch: a lane that failed within it would never
+// rejoin the rest, so they could go on first and read another lane's null.
+void *TeamMainAllocate(uint64_t bytes, uint64_t before) {
+  uint64_t mask{__gpu_lane_mask()};
+  uint64_t cell{0};
+  uint32_t tooBig{0};
+  if (__gpu_is_first_in_lane(mask)) {
+    if (groupNext) {
+      cell = reinterpret_cast<uint64_t>(GroupAllocate(bytes));
+      tooBig = cell == 0;
+    } else {
+      cell = reinterpret_cast<uint64_t>(
+          NewBlock(CurrentArena(), bytes, before, nullptr));
+    }
+  }
+  if (__gpu_read_first_lane_u32(mask, tooBig)) {
+    GroupTooBig(bytes, GroupLeft());
+  }
+  return reinterpret_cast<void *>(__gpu_read_first_lane_u64(mask, cell));
+}
+
+} // namespace
+
 // A cell, or an array, on the device (docs/INPROGRESS.md, The device's side
 // of the first slice, step 6): a block of a GPU process's (Block), or bumped
 // from the chunks of the region that runs, with an atomic add. The lanes of
@@ -975,14 +1011,7 @@ extern "C" void merk_device_group_begin(void) {
 extern "C" void *merk_device_alloc(uint64_t bytes) {
   if (merk_device_process_image &&
       teamMains[__gpu_thread_id_x() / __gpu_num_lanes()]) {
-    uint64_t mask{__gpu_lane_mask()};
-    uint64_t cell{0};
-    if (__gpu_is_first_in_lane(mask)) {
-      cell = reinterpret_cast<uint64_t>(groupNext
-              ? GroupAllocate(bytes)
-              : NewBlock(CurrentArena(), bytes, 0, nullptr));
-    }
-    return reinterpret_cast<void *>(__gpu_read_first_lane_u64(mask, cell));
+    return TeamMainAllocate(bytes, 0);
   }
   if (MakesBlocks()) {
     return NewBlock(CurrentArena(), bytes, 0, nullptr);
@@ -999,14 +1028,7 @@ extern "C" void *merk_device_alloc_aligned(uint64_t bytes, uint64_t before) {
   constexpr uint64_t kAlign{256};
   if (merk_device_process_image &&
       teamMains[__gpu_thread_id_x() / __gpu_num_lanes()]) {
-    uint64_t mask{__gpu_lane_mask()};
-    uint64_t cell{0};
-    if (__gpu_is_first_in_lane(mask)) {
-      cell = reinterpret_cast<uint64_t>(groupNext
-              ? GroupAllocate(bytes)
-              : NewBlock(CurrentArena(), bytes, before, nullptr));
-    }
-    return reinterpret_cast<void *>(__gpu_read_first_lane_u64(mask, cell));
+    return TeamMainAllocate(bytes, before);
   }
   if (MakesBlocks()) {
     return NewBlock(CurrentArena(), bytes, before, nullptr);
