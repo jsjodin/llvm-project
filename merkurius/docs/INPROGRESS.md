@@ -5717,6 +5717,181 @@ wave's size, which it already knows, that is all the cost model needs.
 - *Requiring a 2D loop nest.* The benchmarks write one loop over K, so
   that form is accepted.
 
+## Optimizations that Mercury's semantics allow
+
+Asked by the user 2026-11-19: which optimizations does Merkurius make
+possible that programs generally don't do by hand? Not those that
+compilers do, which LLVM covers. Loop transformations wait.
+
+**What Merkurius knows that a C++, HIP or Kokkos compiler doesn't:**
+- every predicate is pure, by the language;
+- an array read in a loop cannot change during it (`array_ui`);
+- programs never see an array's layout: elements are reached only through
+  `elem` and `unsafe_elem`, never by pointer arithmetic;
+- a GPU process's parameters are fixed when it is spawned.
+
+Each item below is something an expert sometimes does by hand at a high
+cost, and a C++ compiler cannot do because it cannot prove it safe. The
+first, each shared call once a tile, has its own section above. The
+user's three picks follow in detail, then the others.
+
+**The order proposed:** spawn-time specialization first, as it is cheap,
+targets register pressure (Register pressure in GPU processes) and can be
+measured statically. Then skipping quiescent tiles, which shares
+machinery with each shared call once a tile. Then the layout, after a
+hand-made experiment. Nothing is decided; each waits for the user.
+
+### Skipping quiescent tiles, derived by the compiler
+
+**The case.** The SERGHEI-SWE port's kernel 3 skips the tiles away from
+water, by hand (merkurius-serghei-swe, README "Skipping dry tiles"):
+- a tile runs a step if it or one of its four neighbours held anything
+  after the last step or the one before;
+- the step before is there so that a tile that has just emptied writes
+  zeros into its increments and into the buffer it reads after the swap;
+- the update reports each tile's wetness and time step, and one loop over
+  the tiles picks the next step's tiles.
+
+It gives the same bits as running every tile. SERGHEI doesn't skip, nor
+do most stencil codes: the rule and its proof are the hard part.
+
+**Measured 2026-11-19** on the gfx1030 at half its CUs, against kernel 2:
+- planar bowl 1024²: 1.10 times, 53% of tiles run;
+- radial bowl 1024²: 1.33 times, 32% of tiles run;
+- valley flood 2048²: 1.15 times, 47% of tiles run;
+- dam break: no gain, since every tile is wet.
+
+The gain is smaller than the share skipped because the solver already
+skips a face with both cells dry (`face`, as SERGHEI's): a dry tile costs
+about a fifth of a wet one, only its loads and stores. Codes whose idle
+cells cost as much as busy ones gain more: Life-like codes, and the sparse
+tiles of A demo: a stencil whose active region moves.
+
+**What the compiler would prove,** from pure code alone:
+- *A quiescent value:* the state of a cell that the update leaves
+  unchanged with quiescent neighbours. For the port, all-zero cells: `face`
+  of two cells with h = 0 returns zeros, and `cell` of a zero cell with
+  zero increments returns zeros. The compiler finds this by evaluating the
+  pure predicates on the candidate value, with constant folding, or the
+  user names the value.
+- *The neighbourhood:* the offsets the loop's calls read (as in each
+  shared call once a tile), which give the tiles a tile depends on.
+- *The buffers:* which arrays a step reads and writes, so it can add the
+  step that writes the quiescent value into each as a tile goes idle.
+  The port needs it for the increments `D` and the swapped cell buffers.
+
+**What it would generate:** kernel 3's bookkeeping: a flag a tile from
+the update, the dilation by the neighbourhood, the extra step, and the
+loops' skip tests. A reduction over cells splits per tile and skips idle
+ones, exactly for `min` and `max`.
+
+**Syntax, for the user to decide:** a directive on the step's loops
+naming the quiescent value, or none, with the compiler finding it. A
+loop it cannot prove is an error that says why.
+
+**Effort:** moderate. It shares the matching of offsets and the tiling
+with each shared call once a tile, so it comes after that.
+
+### The compiler choosing the array layout
+
+**The idea.** As programs never see an array's layout, the compiler and
+runtime may store it differently. For a 2D field: in bricks, each tile's
+cells contiguous and row-major within it. For a sparse field: only the
+tiles in use, through a table.
+
+**Why it pays:**
+- a tile's loads become contiguous and fill cache lines;
+- copying a tile into local memory, or sending its edge, becomes one
+  block;
+- storage follows the active area, which kernel 3 and the sparse tiles
+  already track.
+
+Stencil research libraries report large gains from brick layouts, but
+whole applications are rarely rewritten for them: every index
+computation changes. For Merkurius none of the program's text changes.
+
+**What it touches:**
+- the array runtime (`runtime/array.cpp`) and lowering of `elem`,
+  `unsafe_elem` and their updates;
+- `array.init`, bulk fills and copies (`copy.h`);
+- messages, which copy arrays, and the host's view of them;
+- foreign code that takes an array, which expects row-major: the layout
+  changes back at that boundary, or such arrays keep it.
+
+**How a layout is chosen:** from the loops that use the array (a 2D
+index from `K / N`, tiles of the shared-call or skipping transformations),
+or by a directive. One layout an array, chosen where it is made.
+
+**First an experiment:** the port's kernel 2 with a hand-bricked layout
+for `Cur`, `D` and `Z`, against the row-major one. It says whether the
+gain is worth the work before any compiler change.
+
+**Effort:** large: every array operation in lowering and the runtime.
+
+### Spawn-time specialization of GPU processes
+
+**The idea.** A process's parameters are fixed when it is spawned, but
+the image is compiled before. Compile versions of a process for some
+parameter values, and pick one at the spawn. In the port:
+- Manning's n = 0, which the dam break and bowls use, removes the
+  friction code from the solver, the most register-hungry part of `roe`;
+- N a power of two turns `K / N` and `K mod N` into shifts and masks;
+- the case, the kernel and the tile's side remove whole branches.
+
+C++ codes sometimes do this with templates, each combination written out
+by hand. A C++ compiler cannot, as the values are known only at run time.
+
+**Why it matters here:** register pressure in GPU processes is open on
+the gfx90a (Register pressure in GPU processes): one persistent kernel's
+occupancy is that of its heaviest loop. Fewer branches and live values
+can mean more waves without spills.
+
+**How:**
+- *Which parameters:* those the process's loops test or divide by,
+  marked by a directive or found by the compiler; a few values each,
+  such as zero, one, or a power of two.
+- *The versions:* the existing specializer (The specializer: known
+  closures and dictionaries) clones the process with the value
+  substituted, and LLVM folds the rest.
+- *The pick:* at `spawn`, the runtime tests the arguments and launches the
+  matching image, or the general one.
+- *The cost:* images grow with each version, and the choice must stay
+  small: a version is made only where it removes code or registers.
+
+**First a static test, with no runs:** the port's image with friction
+removed by hand, against the current one, through
+`utils/gpu/gpu-registers.py` for the gfx90a and gfx1030: VGPRs, spills
+and occupancy of each kernel.
+
+**Effort:** small to moderate.
+
+### Others mentioned
+
+**Recomputing arrays defined by pure functions instead of loading them.**
+An array that `array.init` builds from a pure function of its index, and
+that is never changed afterwards, could be recomputed where it is used.
+The port's bed `Z` in the valley flood and the bowls is one: on a
+memory-bound stencil, a load a cell becomes a few flops. Programs rarely
+do it by hand, as the formula is then written twice, and a C++ compiler
+cannot prove the array still holds the function's values. The gain is
+small and the cost low, but it needs a cost check: some functions are
+dearer than a load.
+
+**Halos and overlap derived from the source, for several GPUs.** Purity
+makes it legal to compute a tile's boundary cells first, send them, and
+then compute its interior while the messages travel. With quiescent
+tiles skipped, the halos of idle tiles need not be sent at all. Experts
+write the overlap by hand; skipping idle halos is rare. On the route to
+messages between GPUs of different hosts, it waits for several machines,
+as The halo exchange does.
+
+**Deferred: temporal blocking,** several steps a tile while it is in
+cache or local memory, as the user asked loop transformations to wait.
+Purity makes it legal trivially, and it pays on stencils with a fixed
+step, such as Life or heat. It does not apply to SERGHEI's scheme, whose
+step's length is a reduction over the whole world, known only after the
+step before.
+
 ## Register pressure in GPU processes
 
 Decided by the user 2026-11-18, after `benchmarks/swe-muscl`: Mercury
