@@ -1722,6 +1722,50 @@ AAAMDGPUClusterDims::createForPosition(const IRPosition &IRP, Attributor &A) {
   llvm_unreachable("AAAMDGPUClusterDims is only valid for function position");
 }
 
+/// Gives "no_callee_saved_registers" to the functions that only kernels with
+/// it reach: each local function whose every use is a direct call from a
+/// kernel or function with it. A kernel keeps nothing for a caller, so with
+/// it on a kernel the functions under it keep nothing for each other either,
+/// and IPRA's masks have each call keep what its caller needs across it.
+static bool propagateNoCalleeSavedRegisters(Module &M) {
+  const StringRef Attr = "no_callee_saved_registers";
+  SmallPtrSet<Function *, 32> Candidates;
+  for (Function &F : M) {
+    CallingConv::ID CC = F.getCallingConv();
+    if (F.isDeclaration() || !F.hasLocalLinkage() ||
+        (CC != CallingConv::C && CC != CallingConv::Fast) ||
+        F.hasFnAttribute(Attr))
+      continue;
+    bool DirectCallsOnly = all_of(F.uses(), [](const Use &U) {
+      const auto *CB = dyn_cast<CallBase>(U.getUser());
+      return CB && CB->isCallee(&U);
+    });
+    if (DirectCallsOnly && !F.use_empty())
+      Candidates.insert(&F);
+  }
+  // A candidate stays one while every caller is a candidate or has the
+  // attribute; dropping one may drop those it calls.
+  auto HasOrMayGet = [&](const Function *F) {
+    return F->hasFnAttribute(Attr) || Candidates.contains(F);
+  };
+  bool Dropped = true;
+  while (Dropped) {
+    Dropped = false;
+    for (Function *F : SmallVector<Function *>(Candidates.begin(),
+                                               Candidates.end())) {
+      if (all_of(F->users(), [&](const User *U) {
+            return HasOrMayGet(cast<CallBase>(U)->getFunction());
+          }))
+        continue;
+      Candidates.erase(F);
+      Dropped = true;
+    }
+  }
+  for (Function *F : Candidates)
+    F->addFnAttr(Attr);
+  return !Candidates.empty();
+}
+
 static bool runImpl(SetVector<Function *> &Functions, bool IsModulePass,
                     bool DeleteFns, Module &M, AnalysisGetter &AG,
                     TargetMachine &TM, AMDGPUAttributorOptions Options,
@@ -1816,7 +1860,10 @@ static bool runImpl(SetVector<Function *> &Functions, bool IsModulePass,
     }
   }
 
-  return A.run() == ChangeStatus::CHANGED;
+  bool Changed = A.run() == ChangeStatus::CHANGED;
+  if (IsModulePass)
+    Changed |= propagateNoCalleeSavedRegisters(M);
+  return Changed;
 }
 } // namespace
 

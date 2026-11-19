@@ -1211,6 +1211,13 @@ bool AMDGPUCallLowering::isEligibleForTailCallOptimization(
   if (!CallerPreserved)
     return false;
 
+  // A callee with no callee-saved registers would clobber the caller's.
+  if (Info.CB && Info.CB->hasFnAttr("no_callee_saved_registers") &&
+      !SIRegisterInfo::hasNoCalleeSavedRegisters(CallerF)) {
+    LLVM_DEBUG(dbgs() << "... Callee keeps no registers for the caller.\n");
+    return false;
+  }
+
   if (!AMDGPU::mayTailCallThisCC(CalleeCC)) {
     LLVM_DEBUG(dbgs() << "... Calling convention cannot be tail called.\n");
     return false;
@@ -1400,7 +1407,7 @@ bool AMDGPUCallLowering::lowerTailCall(
   }
 
   // Tell the call which registers are clobbered.
-  const uint32_t *Mask = TRI->getCallPreservedMask(MF, CalleeCC);
+  const uint32_t *Mask = TRI->getCallPreservedMask(MF, CalleeCC, Info.CB);
   MIB.addRegMask(Mask);
 
   // FPDiff is the byte offset of the call's argument area from the callee's.
@@ -1674,7 +1681,7 @@ bool AMDGPUCallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
     return false;
 
   // Tell the call which registers are clobbered.
-  const uint32_t *Mask = TRI->getCallPreservedMask(MF, Info.CallConv);
+  const uint32_t *Mask = TRI->getCallPreservedMask(MF, Info.CallConv, Info.CB);
   MIB.addRegMask(Mask);
 
   SmallVector<CCValAssign, 16> ArgLocs;

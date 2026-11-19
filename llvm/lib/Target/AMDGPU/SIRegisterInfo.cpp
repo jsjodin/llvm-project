@@ -396,10 +396,22 @@ void SIRegisterInfo::reserveRegisterTuples(BitVector &Reserved,
     Reserved.set(*R);
 }
 
+bool SIRegisterInfo::hasNoCalleeSavedRegisters(const Function &F) {
+  CallingConv::ID CC = F.getCallingConv();
+  return (CC == CallingConv::C || CC == CallingConv::Fast) &&
+         F.hasFnAttribute("no_callee_saved_registers");
+}
+
 // Forced to be here by one .inc
 const MCPhysReg *SIRegisterInfo::getCalleeSavedRegs(
   const MachineFunction *MF) const {
+  // Dummy to not crash RegisterClassInfo.
+  static const MCPhysReg NoCalleeSavedReg = AMDGPU::NoRegister;
   CallingConv::ID CC = MF->getFunction().getCallingConv();
+  // On a kernel, which has no caller, the attribute is for the functions
+  // under it (AMDGPUAttributor.cpp, propagateNoCalleeSavedRegisters).
+  if (hasNoCalleeSavedRegisters(MF->getFunction()))
+    return CSR_AMDGPU_NoCalleeSaved_SaveList;
   switch (CC) {
   case CallingConv::C:
   case CallingConv::Fast:
@@ -412,11 +424,8 @@ const MCPhysReg *SIRegisterInfo::getCalleeSavedRegs(
                                : CSR_AMDGPU_SI_Gfx_SaveList;
   case CallingConv::AMDGPU_CS_ChainPreserve:
     return CSR_AMDGPU_CS_ChainPreserve_SaveList;
-  default: {
-    // Dummy to not crash RegisterClassInfo.
-    static const MCPhysReg NoCalleeSavedReg = AMDGPU::NoRegister;
+  default:
     return &NoCalleeSavedReg;
-  }
   }
 }
 
@@ -445,6 +454,16 @@ const uint32_t *SIRegisterInfo::getCallPreservedMask(const MachineFunction &MF,
   default:
     return nullptr;
   }
+}
+
+const uint32_t *
+SIRegisterInfo::getCallPreservedMask(const MachineFunction &MF,
+                                     CallingConv::ID CC,
+                                     const CallBase *CB) const {
+  if ((CC == CallingConv::C || CC == CallingConv::Fast) && CB &&
+      CB->hasFnAttr("no_callee_saved_registers"))
+    return CSR_AMDGPU_NoCalleeSaved_RegMask;
+  return getCallPreservedMask(MF, CC);
 }
 
 const uint32_t *SIRegisterInfo::getNoPreservedMask() const {
