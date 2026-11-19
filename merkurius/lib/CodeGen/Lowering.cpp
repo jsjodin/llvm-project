@@ -5374,12 +5374,34 @@ llvm::LogicalResult Lowerer::Lower() {
 // only while it runs and not in the kernel's other code, as they would inlined
 // into it: a loop's waves are then not limited by the most that the kinds' code
 // needs (design document, Measurements, Memory bandwidth).
+//
+// Their parameters that are the same in every thread of the team that calls
+// them (device.cpp, merk_process_loop's and merk_team_loop's calls) are
+// inreg, in SGPRs, so that they take no VGPRs: all but the thread's start and
+// its partial results (MLIRGenProcesses.cpp, GenerateProcessLoops). The
+// runtime's declarations can't say so in C++; its calls take the attribute
+// from the definition, which LTO links in.
+static void MarkTeamUniformParameters(mlir::LLVM::LLVMFuncOp func) {
+  constexpr unsigned kStart{1};
+  constexpr unsigned kPartials{8};
+  for (unsigned i{0}; i < func.getNumArguments(); ++i) {
+    if (i != kStart && i != kPartials) {
+      func.setArgAttr(i, mlir::LLVM::LLVMDialect::getInRegAttrName(),
+          mlir::UnitAttr::get(func.getContext()));
+    }
+  }
+}
+
 void Lowerer::MarkKernelFunctions() {
   for (auto func : module_.getOps<mlir::LLVM::LLVMFuncOp>()) {
     func.setConvergent(true);
     llvm::StringRef name{func.getSymName()};
-    if (name == "merk_process_dispatch" || name == "merk_process_loop" ||
-        name == "merk_team_loop") {
+    if (name == "merk_process_loop" || name == "merk_team_loop") {
+      func.setNoInline(true);
+      if (!func.isExternal()) {
+        MarkTeamUniformParameters(func);
+      }
+    } else if (name == "merk_process_dispatch") {
       func.setNoInline(true);
     } else if (name.starts_with("merk_process_") &&
         name != "merk_process_loop_start" &&

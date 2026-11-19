@@ -4,7 +4,9 @@
 % the GPU's default, which bound each lane's registers in all the code it
 % calls. 0 leaves them to the backend. -fgpu-process-no-callee-saved gives
 % it, and so every function that only it reaches, no callee-saved registers.
-% An image of a module with no kinds that run on a GPU has it too.
+% An image of a module with no kinds that run on a GPU has it too. The
+% loops' procedures take their team-uniform parameters in SGPRs (inreg): all
+% but the thread's start and its partial results.
 %
 % REQUIRES: amdgpu-registered-target
 % RUN: merkc -fc1 -fprocess-declarations -fprocess-kernels -triple amdgpu9.0a-amd-amdhsa -emit-llvm %s -o - \
@@ -25,6 +27,8 @@
 % CHECK: define protected amdgpu_kernel void @merk_place(ptr %0) #[[ATTRS:[0-9]+]] {
 % CHECK-NEXT: call void @merk_device_place(ptr %0)
 % CHECK-NEXT: ret void
+% CHECK: define hidden void @merk_process_loop(i64 inreg %0, i64 %1, i64 inreg %2, i64 inreg %3, i64 inreg %4, i64 inreg %5, i64 inreg %6, i64 inreg %7, i64 %8)
+% CHECK: define hidden void @merk_team_loop(i64 inreg %0, i64 %1, i64 inreg %2, i64 inreg %3, i64 inreg %4, i64 inreg %5, i64 inreg %6, i64 inreg %7, i64 %8)
 % CHECK: attributes #[[ATTRS]] = {
 % CHECK-SAME: convergent
 % CHECK-SAME: "amdgpu-flat-work-group-size"="256,256"

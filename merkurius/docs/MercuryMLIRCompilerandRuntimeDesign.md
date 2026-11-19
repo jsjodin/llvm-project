@@ -5591,6 +5591,17 @@ rounds, by `MERKC_FLAGS=-fgpu-process-no-callee-saved` (docs/INPROGRESS.md,
 - **Nothing at 8 waves**: the cap's 128 VGPRs bind before the saved
   registers do.
 
+With the loops' team-uniform parameters in SGPRs (`inreg`), the same day
+and machine, uncommitted on 2b5a81e2cd4a:
+
+| Kernel | Default | No callee-saved | 8 waves | HIP |
+|---|---:|---:|---:|---:|
+| `step` | 1124 (28) | 1107 (28) | 1148 (34) | 1113 (48) |
+| `step_faces` | 1405 (29) | 1362 (29) | 1332 (33) | 1267 (51) |
+
+No change from without it: on the gfx1030 its fewer spills under a cap
+don't show.
+
 ### A pipeline of GPU processes
 
 `benchmarks/pipeline`: three GPU processes on one GPU, each with a third of
