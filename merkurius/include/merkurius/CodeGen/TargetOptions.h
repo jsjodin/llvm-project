@@ -56,6 +56,9 @@ struct TargetOptions {
   // is built for, 0 for the backend's choice; unset for the GPU's default
   // (docs/INPROGRESS.md, Register pressure in GPU processes).
   std::optional<unsigned> processWaves;
+  // -fgpu-process-no-callee-saved: the kernel of GPU processes, and so every
+  // function only it reaches, keeps no callee-saved registers.
+  bool processNoCalleeSaved{false};
 
   // Whether the compile is for a device: OpenMP's device compile or GPU
   // processes'.

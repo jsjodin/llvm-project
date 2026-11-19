@@ -103,6 +103,12 @@ void MerkGenerator::GeneratePlaceKernel() {
         builder_.getArrayAttr({builder_.getStringAttr("amdgpu-waves-per-eu"),
             builder_.getStringAttr(std::to_string(waves))}));
   }
+  // The AMDGPU attributor gives it to every function only the kernel
+  // reaches (propagateNoCalleeSavedRegisters).
+  if (target_.options().processNoCalleeSaved) {
+    passthrough.push_back(
+        builder_.getStringAttr("no_callee_saved_registers"));
+  }
   kernel.setPassthroughAttr(builder_.getArrayAttr(passthrough));
   mlir::Block *entry{kernel.addEntryBlock(builder_)};
   builder_.setInsertionPointToStart(entry);

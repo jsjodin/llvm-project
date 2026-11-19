@@ -5577,6 +5577,20 @@ give 128, with more spills.
 - So no cap is right for every program, and the gfx1030 has none by
   default.
 
+No callee-saved registers in the code of GPU processes, 2026-11-18 after
+754e85b354f8 with the uncommitted AMDGPU support, Firefox closed, 5
+rounds, by `MERKC_FLAGS=-fgpu-process-no-callee-saved` (docs/INPROGRESS.md,
+"Register pressure in GPU processes", step 4):
+
+| Kernel | Default | No callee-saved | 8 waves | 8 waves, none saved | HIP |
+|---|---:|---:|---:|---:|---:|
+| `step` | 1114 (27) | 1106 (28) | 1143 (34) | 1147 (34) | 1112 (48) |
+| `step_faces` | 1405 (27) | 1362 (29) | 1328 (34) | 1330 (34) | 1267 (51) |
+
+- **`step_faces` gains 3% uncapped**, `step` under 1%.
+- **Nothing at 8 waves**: the cap's 128 VGPRs bind before the saved
+  registers do.
+
 ### A pipeline of GPU processes
 
 `benchmarks/pipeline`: three GPU processes on one GPU, each with a third of
