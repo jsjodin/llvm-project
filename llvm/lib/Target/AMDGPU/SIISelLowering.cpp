@@ -4459,7 +4459,12 @@ SDValue SITargetLowering::LowerCall(CallLoweringInfo &CLI,
   }
 
   if (IsTailCall) {
-    IsTailCall = isEligibleForTailCallOptimization(Callee, CallConv, IsVarArg,
+    // A callee with no callee-saved registers would clobber the caller's.
+    bool PreservesLess =
+        CLI.CB && CLI.CB->hasFnAttr("no_callee_saved_registers") &&
+        !SIRegisterInfo::hasNoCalleeSavedRegisters(MF.getFunction());
+    IsTailCall = !PreservesLess &&
+                 isEligibleForTailCallOptimization(Callee, CallConv, IsVarArg,
                                                    Outs, OutVals, Ins, DAG);
     if (!IsTailCall &&
         ((CLI.CB && CLI.CB->isMustTailCall()) || IsChainCallConv)) {
@@ -4735,7 +4740,7 @@ SDValue SITargetLowering::LowerCall(CallLoweringInfo &CLI,
     Ops.push_back(DAG.getRegister(Reg, Val.getValueType()));
 
   // Add a register mask operand representing the call-preserved registers.
-  const uint32_t *Mask = TRI->getCallPreservedMask(MF, CallConv);
+  const uint32_t *Mask = TRI->getCallPreservedMask(MF, CallConv, CLI.CB);
   assert(Mask && "Missing call preserved mask for calling convention");
   Ops.push_back(DAG.getRegisterMask(Mask));
 
