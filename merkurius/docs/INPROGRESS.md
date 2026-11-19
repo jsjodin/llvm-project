@@ -5749,12 +5749,35 @@ bodies cut out, the scheduler's register pressure):
    - **Timed on the gfx1030** (design doc, Measurements, "Shallow water,
      second order"): `step_faces` 3% faster uncapped, `step` under 1%,
      nothing at 8 waves. The gfx90a timing is still to do.
+
+   *`inreg`, 2026-11-18:* merkc gives it to the team-uniform parameters of
+   `merk_team_loop` and `merk_process_loop`, all but the thread's start and
+   its partial results (`Lowering.cpp`, `MarkTeamUniformParameters`). The
+   runtime's calls take it from the definition.
+   - **An AMDGPU bug on the way:** at -O0 the waterfall loop around a call
+     with a divergent `inreg` argument read a copy of it before the copy
+     was made (machine verifier: defs don't dominate uses). The copy is now
+     hoisted out of the call sequence (`SIInstrInfo.cpp`,
+     `hoistScalarOpDefs`). A value that differs between lanes is always
+     safe this way: the call runs once for each distinct value.
+   - **Static, swe-muscl on gfx90a** (spills/reloads, saved):
+
+     | Function | Waves | Before | `inreg` | Also no callee-saved |
+     |---|---:|---:|---:|---:|
+     | `merk_team_loop` | 3 | 81/75, 64 | 65/63, 64 | 61/61, 0 |
+     | `merk_team_loop` | 4 | 199/227, 48 | 189/253, 48 | 189/255, 2 |
+     | `merk_process_loop` | 3 | 266/424, 21 | 265/444, 17 | 299/519, 0 |
+
+     Uncapped, nothing changes with it alone (248 VGPRs); with no
+     callee-saved registers `merk_team_loop` takes 210, from 216. No
+     variant reaches gfx90a's third wave (168) without a cap.
+   - **Timed on the gfx1030:** no change, uncapped or at 8 waves (design
+     doc, Measurements, "Shallow water, second order").
    - **Still open in step 4:**
-     - `inreg` on the team-uniform parameters of `merk_team_loop` and
-       `merk_process_loop`.
      - Keeping callee-saved registers in the runtime's heavy, cold
        functions, so that the process side doesn't lose.
-     - Whether to make it the default, after the gfx90a timing.
+     - Whether to make no callee-saved registers the default, after the
+       gfx90a timing.
 5. The attributor bug. *Fixed 2026-11-18* (`AMDGPUAttributor.cpp`,
    `test/CodeGen/AMDGPU/amdgpu-attributor-call-whole-wave.ll`), and on the
    critical path after all: under a wave cap a function with
