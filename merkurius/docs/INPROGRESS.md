@@ -5865,6 +5865,39 @@ and occupancy of each kernel.
 
 **Effort:** small to moderate.
 
+**Measured 2026-11-19,** by hand-specialized copies of the port (compiler
+at e8949bc8960e, gfx1030 at half its CUs, 2048² dam break, median of 3,
+Firefox closed, `MERK_SOURCE=... scripts/time-port.sh gfx1030 0 2048 3`):
+
+| Copy | Kernel 2, tiles of 64 | Its fluxes | Kernel 0 |
+|---|---:|---:|---:|
+| A: as it is | 10.17 ms | 8.47 ms | 16.68 ms |
+| B: spawn constants substituted | 9.92 ms | 8.53 ms | 16.45 ms |
+| C: B, friction removed | 8.52 ms | 7.10 ms | 13.70 ms |
+
+All give the same 252 steps and checksum.
+- *Constants alone gain 2.4%,* nearly all in the update: N = 2048 turns
+  its 64-bit `K / N`, a long sequence on AMDGPU, into a shift.
+- *Removing the friction gains 16% on kernel 2 and 18% on kernel 0.*
+  SERGHEI gets this from a compile-time flag (SERGHEI_FRICTION_MODEL).
+- *Substituting n = 0 does not remove the friction.* In IEEE arithmetic
+  `x * 0.0 / h` is not folded to 0, so LLVM keeps the code. With n = 0
+  the friction term is a signed zero: `BB + BF` is `BB` except that
+  `-0.0 + 0.0` is `+0.0`. So dropping it needs either a proof that the
+  sign of zero cannot matter downstream, or a guard in the source,
+  `( if R = 0.0 then BF = 0.0 else ... )`, which specialization then
+  removes for free. The guard is the simple route: the program states
+  the fast path, the compiler makes it cost nothing.
+- *Registers, statically* (`gpu-registers.py`): on the gfx90a the loop
+  code needs 246 VGPRs in A, 210 in B and 179 in C. Occupancy does not
+  change, as the place kernel is held to its waves' budget either way.
+  At 4 waves its spills fall from 29 to 20 to 12.
+- *Found:* with the kernel number substituted, the other kernels'
+  predicates become unreachable, and merkc rejects their `teams
+  distribute` loops as outside any GPU process kind. Unreachable
+  predicates should be warned about, not rejected; a specializer would
+  hit the same error.
+
 ### Others mentioned
 
 **Recomputing arrays defined by pure functions instead of loading them.**
