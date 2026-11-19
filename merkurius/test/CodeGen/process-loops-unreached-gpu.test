@@ -1,0 +1,7 @@
+process-loops-unreached.m's squares spawned on the machine's GPU: the
+predicates that nothing reaches, with their loops across the teams, are
+compiled into its image too, and the branch that can succeed runs.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-loops-unreached.m -o %t
+RUN: %gpu-env %t gpu | FileCheck %S/process-loops-unreached.m --match-full-lines --strict-whitespace

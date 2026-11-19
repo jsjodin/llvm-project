@@ -107,6 +107,7 @@ private:
   void CheckMessage(TokenRange where, const Type *message);
   void Call(
       const ProcedureBody &, const Body &, const Procedure *callee, Context);
+  void FindLive();
   void CheckProcessLoops();
   bool Visited(const ProcedureBody &body, Context context) const {
     return visited_.contains({&body, static_cast<unsigned>(context)});
@@ -127,6 +128,8 @@ private:
   llvm::DenseSet<const char *> reported_;
   // The mailboxes of the GPU kinds' processes themselves, by body.
   llvm::DenseSet<std::pair<const ProcedureBody *, BodyVar>> selves_;
+  // The bodies that the module's entry points reach (FindLive).
+  llvm::DenseSet<const ProcedureBody *> live_;
 };
 
 bool GpuCodeChecker::IsEnumeration(const Type &type) {
@@ -599,7 +602,55 @@ void GpuCodeChecker::Check(const parser::ParseTree &tree) {
     pending_.pop_back();
     Visit(*body, context);
   }
+  FindLive();
   CheckProcessLoops();
+}
+
+// The procedures that a goal calls, or makes a closure of.
+static void FindCallees(
+    const Body &goal, llvm::SmallVectorImpl<const Procedure *> &out) {
+  if (goal.modes && goal.modes->callee) {
+    out.push_back(goal.modes->callee);
+  }
+  if (goal.lambda) {
+    FindCallees(*goal.lambda, out);
+  }
+  for (const SwitchCase &arm : goal.cases) {
+    FindCallees(*arm.goal, out);
+  }
+  for (const Body *inner : goal.goals) {
+    FindCallees(*inner, out);
+  }
+}
+
+// The bodies that the module's entry points reach by calls and closures:
+// its exported procedures, main among them, and its instance methods,
+// which dictionaries call. A call that mode analysis replaced with fail,
+// as in a branch whose condition cannot succeed, reaches nothing.
+void GpuCodeChecker::FindLive() {
+  llvm::SmallVector<const ProcedureBody *> work;
+  for (const ProcedureBody &body : determinism_.bodies()) {
+    if ((body.method || !body.procedure ||
+            body.procedure->symbol->exported) &&
+        live_.insert(&body).second) {
+      work.push_back(&body);
+    }
+  }
+  llvm::SmallVector<const Procedure *> callees;
+  while (!work.empty()) {
+    const ProcedureBody *body{work.pop_back_val()};
+    if (!body->body) {
+      continue;
+    }
+    callees.clear();
+    FindCallees(*body->body, callees);
+    for (const Procedure *callee : callees) {
+      const ProcedureBody *called{determinism_.BodyOf(*callee)};
+      if (called && live_.insert(called).second) {
+        work.push_back(called);
+      }
+    }
+  }
 }
 
 // The goals of a body under a directive, each with whether it is in a target
@@ -636,7 +687,9 @@ void FindDirectives(const Body &goal, bool inRegion,
 // its own, whose code every team would run, sending its messages and
 // updating its arrays once a team. OpenMP binds distribute to the teams
 // region around it, so distribute alone, outside a target region, is an
-// error that names the teams form.
+// error that names the teams form. A loop across a GPU process's teams in
+// a predicate that no entry point reaches is not reported: specializing a
+// program on its constants leaves such predicates.
 void GpuCodeChecker::CheckProcessLoops() {
   for (const ProcedureBody &body : determinism_.bodies()) {
     if (!body.body) {
@@ -714,7 +767,7 @@ void GpuCodeChecker::CheckProcessLoops() {
             "a %s loop runs across the teams of a GPU process, so it cannot "
             "be in the body of another loop"_err_en_US,
             name);
-      } else if (!process) {
+      } else if (!process && live_.contains(&body)) {
         messages_.Say(where,
             "a %s loop runs across the teams of a GPU process, so it must be "
             "in the code of a process kind declared on gpu, or in a "
