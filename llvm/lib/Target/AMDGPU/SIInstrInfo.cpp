@@ -8442,6 +8442,52 @@ Register SIInstrInfo::buildVGPR32FromLo16(MachineBasicBlock &MBB,
   return Dst;
 }
 
+// Moves the instructions between \p Start and the call \p MI that compute its
+// scalar operands \p ScalarOps, and those they need, to before \p Start. The
+// waterfall loop reads the operands in its first block, before the moved call
+// sequence; instruction selection at -O0 may leave a copy that makes one, from
+// a subregister of a VGPR, after ADJCALLSTACKUP.
+static void hoistScalarOpDefs(MachineBasicBlock &MBB,
+                              MachineBasicBlock::iterator Start,
+                              MachineInstr &MI,
+                              ArrayRef<MachineOperand *> ScalarOps) {
+  MachineRegisterInfo &MRI = MBB.getParent()->getRegInfo();
+  SmallPtrSet<const MachineInstr *, 16> InRange;
+  for (MachineBasicBlock::iterator I = Start; &*I != &MI; ++I)
+    InRange.insert(&*I);
+  SmallPtrSet<const MachineInstr *, 8> Hoist;
+  SmallVector<Register, 8> Worklist;
+  for (const MachineOperand *MO : ScalarOps)
+    Worklist.push_back(MO->getReg());
+  while (!Worklist.empty()) {
+    Register Reg = Worklist.pop_back_val();
+    if (!Reg.isVirtual())
+      continue;
+    MachineInstr *Def = MRI.getUniqueVRegDef(Reg);
+    if (!Def || !InRange.contains(Def) || Hoist.contains(Def))
+      continue;
+    // Only plain arithmetic on virtual registers can move.
+    if (Def->mayLoadOrStore() || Def->hasUnmodeledSideEffects() ||
+        Def->isCall() || Def->isPHI())
+      return;
+    for (const MachineOperand &Op : Def->operands()) {
+      if (!Op.isReg() || !Op.getReg())
+        continue;
+      if (Op.getReg().isPhysical() && !(Op.isUse() && Op.isImplicit() &&
+                                        Op.getReg() == AMDGPU::EXEC))
+        return;
+      if (Op.isUse())
+        Worklist.push_back(Op.getReg());
+    }
+    Hoist.insert(Def);
+  }
+  for (MachineBasicBlock::iterator I = Start; &*I != &MI;) {
+    MachineInstr &Inst = *I++;
+    if (Hoist.contains(&Inst))
+      MBB.splice(Start, &MBB, Inst.getIterator());
+  }
+}
+
 void SIInstrInfo::createWaterFallForSiCall(MachineInstr *MI,
                                            MachineDominatorTree *MDT,
                                            ArrayRef<MachineOperand *> ScalarOps,
@@ -8459,6 +8505,8 @@ void SIInstrInfo::createWaterFallForSiCall(MachineInstr *MI,
   MachineBasicBlock::iterator End(MI);
   while (End->getOpcode() != AMDGPU::ADJCALLSTACKDOWN)
     ++End;
+
+  hoistScalarOpDefs(MBB, Start, *MI, ScalarOps);
 
   // Also include following copies of the return value
   ++End;
