@@ -35,6 +35,8 @@ public:
 
   void determineCalleeSaves(MachineFunction &MF, BitVector &SavedRegs,
                             RegScavenger *RS = nullptr) const override;
+  void getCalleeSaves(const MachineFunction &MF,
+                      BitVector &SavedRegs) const override;
   void determineCalleeSavesSGPR(MachineFunction &MF, BitVector &SavedRegs,
                                 RegScavenger *RS = nullptr) const;
   void determinePrologEpilogSGPRSaves(MachineFunction &MF, BitVector &SavedRegs,

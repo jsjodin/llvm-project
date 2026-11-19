@@ -2022,6 +2022,35 @@ void SIFrameLowering::determineCalleeSaves(MachineFunction &MF,
     SavedVGPRs.reset(Reg.first);
 }
 
+// What a function keeps for its caller, for IPRA: its callee-saved registers,
+// and what frame lowering saves apart from them: the return address and the
+// stack pointer, which every function that is not an entry restores before it
+// returns, and its frame and base pointers if it has them. Otherwise a call's
+// clobbers, from IPRA, include the frame pointer of a callee with a frame, and
+// a function that tail calls it saves its own, which it need not; without a
+// lane of a VGPR to save the frame pointer in, it cannot. Without a frame, s33
+// and s34 are ordinary registers, which a calling convention such as
+// amdgpu_gfx_whole_wave's may not keep.
+void SIFrameLowering::getCalleeSaves(const MachineFunction &MF,
+                                     BitVector &SavedRegs) const {
+  TargetFrameLowering::getCalleeSaves(MF, SavedRegs);
+  const SIMachineFunctionInfo *MFI = MF.getInfo<SIMachineFunctionInfo>();
+  if (MFI->isEntryFunction())
+    return;
+  const SIRegisterInfo *TRI = MF.getSubtarget<GCNSubtarget>().getRegisterInfo();
+  SmallVector<MCRegister, 4> Kept = {MFI->getStackPtrOffsetReg(),
+                                     TRI->getReturnAddressReg(MF)};
+  if (hasFP(MF))
+    Kept.push_back(MFI->getFrameOffsetReg());
+  if (TRI->hasBasePointer(MF))
+    Kept.push_back(TRI->getBaseRegister());
+  // Not their super-registers, such as s[28:31], whose other halves it may
+  // clobber.
+  for (MCRegister Reg : Kept)
+    for (MCPhysReg SubReg : TRI->subregs_inclusive(Reg))
+      SavedRegs.set(SubReg);
+}
+
 void SIFrameLowering::determineCalleeSavesSGPR(MachineFunction &MF,
                                                BitVector &SavedRegs,
                                                RegScavenger *RS) const {

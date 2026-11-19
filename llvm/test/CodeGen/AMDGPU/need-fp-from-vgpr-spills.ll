@@ -101,22 +101,14 @@ define internal fastcc void @csr_vgpr_spill_fp_tailcall_callee() #0 {
 ; CHECK-LABEL: csr_vgpr_spill_fp_tailcall_callee:
 ; CHECK:       ; %bb.0: ; %bb
 ; CHECK-NEXT:    s_waitcnt vmcnt(0) expcnt(0) lgkmcnt(0)
-; CHECK-NEXT:    s_xor_saveexec_b64 s[16:17], -1
-; CHECK-NEXT:    buffer_store_dword v1, off, s[0:3], s32 offset:4 ; 4-byte Folded Spill
-; CHECK-NEXT:    s_mov_b64 exec, s[16:17]
 ; CHECK-NEXT:    buffer_store_dword v40, off, s[0:3], s32 ; 4-byte Folded Spill
-; CHECK-NEXT:    v_writelane_b32 v1, s33, 0
 ; CHECK-NEXT:    ;;#ASMSTART
 ; CHECK-NEXT:    ; clobber csr v40
 ; CHECK-NEXT:    ;;#ASMEND
 ; CHECK-NEXT:    s_getpc_b64 s[16:17]
 ; CHECK-NEXT:    s_add_u32 s16, s16, callee_has_fp@rel32@lo+4
 ; CHECK-NEXT:    s_addc_u32 s17, s17, callee_has_fp@rel32@hi+12
-; CHECK-NEXT:    v_readlane_b32 s33, v1, 0
 ; CHECK-NEXT:    buffer_load_dword v40, off, s[0:3], s32 ; 4-byte Folded Reload
-; CHECK-NEXT:    s_xor_saveexec_b64 s[18:19], -1
-; CHECK-NEXT:    buffer_load_dword v1, off, s[0:3], s32 offset:4 ; 4-byte Folded Reload
-; CHECK-NEXT:    s_mov_b64 exec, s[18:19]
 ; CHECK-NEXT:    s_setpc_b64 s[16:17]
 bb:
   call void asm sideeffect "; clobber csr v40", "~{v40}"()
