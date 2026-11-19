@@ -5577,6 +5577,146 @@ with tiles of 64, after a place's walks of its tiles run on many lanes
 (Open, in the demo's section): its agreement grows by 1.3 µs a tile
 against 3.5 µs of work.
 
+## Each shared call once a tile, by the compiler
+
+Asked for by the user 2026-11-19, after the SERGHEI-SWE port
+(merkurius-serghei-swe, README "Results"). Designed the same day.
+**Implementation waits for the gfx90a numbers from r11**, which say
+whether kernel 2's gain holds there.
+
+**The case.** A stencil written the natural way: each cell, in one
+iteration of a parallel loop, calls a pure predicate for each of its
+faces. Each face is then solved twice, once for each of its cells. The
+port's kernel 0 is written so. Its kernel 2 is the same scheme written by
+hand as an expert would:
+- the world in tiles of T x T cells, a team each;
+- the team solves each of its tile's faces once, into a group-private
+  array (s5, "group-private arrays");
+- then each cell adds its increments from that array.
+
+It gives the same bits and is 1.64 times faster on the 2048² dam break on
+the gfx1030 (fluxes 15.0 to 8.5 ms). The aim is to compile kernel 0's
+source into kernel 2's code.
+
+**What the measurements say matters,** and so what the transformation
+must get right:
+- *Solving each face once.* That is the gain.
+- *Enough calls a tile to fill the team.* Tiles of 8 (144 faces for 256
+  threads) took 28.5 ms, slower than kernel 0.
+- *Not local memory.* The faces of tiles of 32 and 64 (99 and 390 KiB) do
+  not fit in it and live in the process's memory, mostly in cache. They
+  beat tiles of 16, whose faces fit.
+
+**The showcase,** under the baseline policy (unmodified code first, then
+the technique ported back):
+- SERGHEI already solves each face once, in separate kernels for x and y
+  faces with whole-world arrays between them and the update. Against it,
+  the transformation fuses the face kernels with the update through a
+  tile's buffer.
+- The comparison: kernel 0's source with no change, or one directive,
+  against SERGHEI restructured by hand with Kokkos team scratch. Both
+  are timed, and both diffs are counted.
+- *Why Mercury can do this and a C++ compiler generally cannot:* the
+  shared calls must be shown to be the same computation. That needs the
+  predicate pure and its inputs unchanged during the loop. In Mercury
+  both are guaranteed: purity by the language, and the arrays read in the
+  loop are `array_ui`. Only the indices are left to match.
+
+**Step 1: a directive names the shared call.**
+- *Syntax, for the user to decide.* Recommended:
+  `%$merk share(face) tile(32)` on the loop's `teams distribute parallel
+  do`, naming the predicate and, optionally, the tile's side. A new
+  `%$merk` sentinel keeps it apart from OpenMP's.
+  - Alternatives: an OpenMP-style clause on the loop's own directive
+    (`%$omp ... share(face)`), which reads as if OpenMP had it; or a
+    module-level `:- pragma share(face/19)`, which is far from the loop it
+    changes.
+- *Without the directive nothing changes.* With it, a loop the
+  transformation cannot apply to is an error that says why, never a
+  silent fallback.
+
+**What the loop must look like.**
+- A loop over K of a 2D world, row-major (`J = K / N`, `I = K - J * N`,
+  as the port writes it), or a nest over J and I.
+- Calls of the named predicate whose cell arguments are reads of arrays
+  at K plus a constant offset in (J, I): `Cur ^ unsafe_elem(K + 1)`,
+  `K - N`, and so on. Other arguments must not depend on K.
+- *Pairs.* Two calls are one face if their argument lists are equal
+  after shifting one by the offset between them. Kernel 0's east face in
+  cell K, `face(K, K+1)`, is its west face in cell K+1, `face(K, K+1)`
+  again; the first uses the outputs for the left cell, the second those
+  for the right.
+- *Guards.* The guard of each call (`I < N - 1` for east, `I > 0` for
+  west) must give the same set of faces after the shift, so that every
+  face solved is used and none is missing. A wall face, which a guard
+  removes, gets the else branch's values.
+- *Order.* The cell's use of the outputs keeps its source order, so its
+  sums are the same expressions: `DH = (ME0 + MS0) + (PW0 + PN0)` reads
+  the same values from the buffer. The results are bit-identical.
+
+**The transformation,** into kernel 2's shape, from constructs that
+exist:
+- A `teams distribute` over tiles with `dyn_groupprivate` of the faces
+  buffer: 6 outputs a face, T(T+1) faces across x and as many across y.
+- A `parallel do` over the tile's faces, one face an iteration, writing
+  the outputs.
+- A second `parallel do` over the tile's cells, which reads them.
+- A face on a tile's edge is solved by both its tiles: 2/T of the work
+  twice. Rejected: exchanging edge faces between teams, which needs a
+  synchronization between teams during the loop.
+- *Reductions:* a `min` or `max` splits into one a tile and one over the
+  tiles, exactly, as kernel 2's `smallest`. A `+` would change the order
+  of its sum, so it is an error unless a later `reassoc` modifier allows
+  it.
+
+**Where it runs.**
+- *Step 1: on the checked program, before MLIRGen.* It rewrites the loop
+  into what kernel 2 is written as, so the rest of the compiler needs no
+  change, and the result can be checked against the hand-written
+  kernel 2, bit for bit and in time.
+- *Later, perhaps:* an MLIR pass on the loop's `omp` and `merk` ops, if
+  other front-end forms need it.
+
+**The tile's side,** when `tile` is not given, from a cost model in this
+order:
+1. a tile's calls at least fill the team: 2T(T+1) ≥ 256 threads;
+2. the duplicated edge work, about 2/T, small;
+3. the buffer in local memory if a T that satisfies 1 and 2 allows it.
+
+The runtime still places the buffer at launch and falls back to the
+process's memory, as now.
+
+**TargetInfo** gains `GroupMemoryBytes()`, a team's addressable local
+memory, from LLVM's AMDGPU subtarget: 64 KiB on gfx90a and gfx1030,
+160 KiB on gfx950. With the team's threads (kPlaceTeamThreads) and the
+wave's size, which it already knows, that is all the cost model needs.
+
+**Tests.**
+- Lit tests of the rewrite and of each error: unmatched guards, a K-
+  dependent argument, a `+` reduction, an impure callee.
+- Runtime tests at -O0 and -O2, at the host and on the GPU, where the
+  directive's loop must give the same checksum as the loop without it.
+- The port: kernel 0's source with the directive against kernel 2, for
+  bits and time.
+
+**Steps.**
+1. The directive, the matching, the rewrite and the tests; the port's
+   kernel 0 with the directive must match kernel 2.
+2. No directive: the compiler finds pure calls shared between iterations
+   and applies the transformation where the cost model says it pays,
+   reporting what it did and why not (a remark flag).
+3. Wider: 3D worlds, several shared calls, faces beyond the nearest
+   neighbours, and skipping idle tiles (the port's kernel 3) by the same
+   means.
+
+**Rejected:**
+- *Local memory as the goal.* The measurements show the computation
+  once, and the team's occupancy, matter more.
+- *A schedule language as Halide's.* One directive covers the case, and
+  Mercury's purity lets the compiler do the rest.
+- *Requiring a 2D loop nest.* The benchmarks write one loop over K, so
+  that form is accepted.
+
 ## Register pressure in GPU processes
 
 Decided by the user 2026-11-18, after `benchmarks/swe-muscl`: Mercury
