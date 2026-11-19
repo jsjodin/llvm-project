@@ -69,12 +69,12 @@ def library_flags(build):
     return ["-L" + d for d in dirs]
 
 
-def build_mercury(args, source, work):
+def build_mercury(args, sources, work):
     out = os.path.join(work, "prog")
     command = [os.path.join(args.build, "bin", "merkc")]
     command += args.merkc_flags.split()
     command += ["--offload-arch=" + ",".join(args.arch), "-save-temps=obj"]
-    command += library_flags(args.build) + [source, "-o", out]
+    command += library_flags(args.build) + sources + ["-o", out]
     run(command, cwd=work)
     images = []
     for path in sorted(glob.glob(os.path.join(work, "*-processes.lto.s"))):
@@ -350,13 +350,23 @@ def main():
     parser.add_argument("--json", action="store_true",
                         help="print JSON, every function, instead of tables")
     parser.add_argument("--keep", help="build in this directory and keep it")
+    parser.add_argument("--program", action="store_true",
+                        help="build the Mercury sources together, as one "
+                             "program's modules, instead of one program each")
     args = parser.parse_args()
     args.arch = args.arch or ["gfx90a"]
     args.build = os.path.abspath(args.build)
 
+    sources = [os.path.abspath(s) for s in args.sources]
+    if args.program:
+        if not all(s.endswith(".m") for s in sources):
+            sys.exit("gpu-registers: --program takes only Mercury sources")
+        units = [sources]
+    else:
+        units = [[s] for s in sources]
     results = []
-    for source in args.sources:
-        source = os.path.abspath(source)
+    for unit in units:
+        source = unit[-1]
         if args.keep:
             work = os.path.join(os.path.abspath(args.keep),
                                 os.path.basename(source) + ".d")
@@ -365,7 +375,7 @@ def main():
             work = tempfile.mkdtemp(prefix="gpu-registers-")
         try:
             if source.endswith(".m"):
-                images = build_mercury(args, source, work)
+                images = build_mercury(args, unit, work)
             elif source.endswith(".hip"):
                 images = build_hip(args, source, work)
             elif source.endswith(".c"):
