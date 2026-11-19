@@ -2,8 +2,9 @@
 % (docs/INPROGRESS.md, Register pressure in GPU processes): teams of 256
 % threads, and the waves a SIMD that -fgpu-process-waves= gives, or else
 % the GPU's default, which bound each lane's registers in all the code it
-% calls. 0 leaves them to the backend. An image of a module with no kinds
-% that run on a GPU has it too.
+% calls. 0 leaves them to the backend. -fgpu-process-no-callee-saved gives
+% it, and so every function that only it reaches, no callee-saved registers.
+% An image of a module with no kinds that run on a GPU has it too.
 %
 % REQUIRES: amdgpu-registered-target
 % RUN: merkc -fc1 -fprocess-declarations -fprocess-kernels -triple amdgpu9.0a-amd-amdhsa -emit-llvm %s -o - \
@@ -11,12 +12,14 @@
 % RUN: merkc -fc1 -fprocess-declarations -fprocess-kernels -triple amdgpu10.30-amd-amdhsa -emit-llvm %s -o - \
 % RUN:   | FileCheck %s --check-prefixes=CHECK,NONE
 % RUN: merkc -fc1 -fprocess-declarations -fprocess-kernels -triple amdgpu10.30-amd-amdhsa -fgpu-process-waves=8 -emit-llvm %s -o - \
-% RUN:   | FileCheck %s --check-prefixes=CHECK,W8
+% RUN:   | FileCheck %s --check-prefixes=CHECK,W8,KEEPS
+% RUN: merkc -fc1 -fprocess-declarations -fprocess-kernels -triple amdgpu10.30-amd-amdhsa -fgpu-process-waves=8 -fgpu-process-no-callee-saved -emit-llvm %s -o - \
+% RUN:   | FileCheck %s --check-prefixes=CHECK,W8,NCS
 % RUN: merkc -fc1 -fprocess-declarations -fprocess-kernels -triple amdgpu9.0a-amd-amdhsa -fgpu-process-waves=0 -emit-llvm %s -o - \
 % RUN:   | FileCheck %s --check-prefixes=CHECK,NONE
 % RUN: not merkc -fc1 -fprocess-declarations -fprocess-kernels -triple amdgpu9.0a-amd-amdhsa -fgpu-process-waves=33 -emit-llvm %s -o /dev/null 2>&1 \
 % RUN:   | FileCheck %s --check-prefix=ERROR
-% RUN: merkc -### -fprocess-declarations --offload-arch=gfx1030 -fgpu-process-waves=6 %s -o prog 2>&1 \
+% RUN: merkc -### -fprocess-declarations --offload-arch=gfx1030 -fgpu-process-waves=6 -fgpu-process-no-callee-saved %s -o prog 2>&1 \
 % RUN:   | FileCheck %s --check-prefix=DRIVER
 
 % CHECK: define protected amdgpu_kernel void @merk_place(ptr %0) #[[ATTRS:[0-9]+]] {
@@ -28,11 +31,13 @@
 % W2-SAME: "amdgpu-waves-per-eu"="2"
 % W8-SAME: "amdgpu-waves-per-eu"="8"
 % NONE-NOT: "amdgpu-waves-per-eu"
+% NCS-SAME: "no_callee_saved_registers"
+% KEEPS-NOT: "no_callee_saved_registers"
 % CHECK-SAME: }
 
 % ERROR: error: -fgpu-process-waves=33: expected the waves a SIMD, from 0 to 32
 
-% DRIVER: "-triple" "amdgpu10.30-amd-amdhsa"{{.*}} "-fprocess-kernels" "-fgpu-process-waves=6"
+% DRIVER: "-triple" "amdgpu10.30-amd-amdhsa"{{.*}} "-fprocess-kernels" "-fgpu-process-waves=6" "-fgpu-process-no-callee-saved"
 
 :- module process_place_kernel.
 :- interface.

@@ -269,6 +269,9 @@ static void addProcessKernelOptions(
   if (const llvm::opt::Arg *arg = args.getLastArg(OPT_fgpu_process_waves_EQ)) {
     job.push_back(arg->getAsString(args));
   }
+  if (args.hasArg(OPT_fgpu_process_no_callee_saved)) {
+    job.push_back("-fgpu-process-no-callee-saved");
+  }
   // The loops that the kinds run across teams keep their directives, of
   // the host's OpenMP version, as a dyn_groupprivate clause needs 6.1.
   if (args.hasArg(OPT_fopenmp)) {
