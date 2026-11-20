@@ -572,3 +572,43 @@ scratch; here it's small. To test that, grow this microbenchmark's
 `merk_team_loop`, for example with swe-muscl's face loops as further
 cases that never run, and see whether the rounds slow down (instruction
 cache, or spills on entry).
+
+### 3h. The cost is merk_team_loop's callee-saved registers
+
+The 3g microbenchmark's loops went into a copy of swe-muscl.m (scratch, not
+in git), as a further GPU process that `main` runs under `SWE_BENCH=1`. The
+module's loops all share one `merk_team_loop`, so the microbenchmark's
+loops run inside swe-muscl's 63 KB function, and swe-muscl's own loops
+never run. Both builds run two teams per CU, and the arrays fit in LDS.
+
+| µs per tile, tiles of 16 | `merk_team_loop` | fill (5 rounds) | one store (3) | diffs, LDS (1) | diffs, global (1) |
+|---|---|---|---|---|---|
+| microbenchmark alone | 2.7 KB, 40 VGPRs, 96 B scratch | 2.02 | 1.58 | 2.29 | 3.03 |
+| inside swe-muscl | 63 KB, 248 VGPRs, 304 B scratch | 21.1 | 18.0 | 20.5 | 22.9 |
+| inside swe-muscl, `-fgpu-process-no-callee-saved` | 61 KB, 197 VGPRs, 112 B scratch | 2.35 | 1.97 | 2.64 | 3.34 |
+
+- **Inside swe-muscl, every team loop costs about 18 µs more,** whatever
+  its rounds. That is paid on each call of `merk_team_loop`, whose
+  prologue saves 50 VGPRs to scratch (`buffer_store_dword`) and 37 SGPRs
+  into lanes, and whose epilogue restores them. It explains 3f's
+  `x_diffs`, 19.6 µs at 2 waves and 5.3 at 1, nearly all of it outside
+  the work.
+- **Without callee-saved registers, nearly all of it goes:** within
+  0.3 µs a loop of the microbenchmark alone.
+
+swe-muscl itself, `compare-swe-muscl.sh` 3 rounds, GPU 4, same checksum
+(this is item 4's first configuration):
+
+| ms a step | Mercury, default | Mercury, no callee-saved | C | HIP |
+|---|---|---|---|---|
+| `step` (k1) | 0.304 | **0.232** (1.31×) | 0.235 | 0.311 |
+| `step_faces` (k2) | 0.555 | **0.394** (1.41×) | 0.234 | 0.252 |
+
+- **Kernel 1 now beats HIP** (0.232 against 0.311 ms) and ties C with
+  OpenMP offload.
+- **Kernel 2 is still 1.56× HIP.** What's left includes the malloc
+  fallback for `Faces0` at 2 waves (3b, 28 µs a tile), about 2 µs a team
+  loop (3g), and `x_diffs` as a loop of its own.
+- **By item 4's rule this is a clear gain,** so 4745adb and 2b5a81e stay.
+  The flag is a candidate for the gfx90a's default. The rest of item 4
+  (with 3 waves, and `merk_process_loop`'s side) still has to run.
