@@ -5962,6 +5962,67 @@ speeding up our own benchmarks.
   stack no larger, than the general version's. Otherwise that value
   takes the general image.
 
+### The array's size apart, alignment and `noalias` from uniqueness
+
+Asked by the user 2026-11-19 and 2026-11-20: would an array that is two
+values, its elements' pointer (allocated aligned) and its size as a
+separate scalar, let LLVM optimize loops better? And what does LLVM gain
+from knowing more about arrays? Tried by editing merkc's MLIR in the LLVM
+dialect by hand, then compiling it with merkc's own `-O2` (`merkc -fc1
+-emit-llvm -O2 -x mlir`). Reading MLIR back first needed 4b3a3937cb62.
+Built at 4b3a3937cb62. The files are kept in the job's
+`tmp/fatptr/`.
+
+**Today:** the size costs nothing in a loop. A `for` loop evaluates its
+bound once, so the header is read once before the loop. On the host,
+`scale` (bound `array.size(A)`) and `scale_n` (bound passed in) compile
+to the same vectorized loop. On the GPU (gfx90a, a GPU process), the
+loop's setup function reads the header once and the bound reaches the
+teams in an SGPR.
+
+**Host, three hand edits:**
+
+| Edit | Effect on the IR |
+|---|---|
+| The size as its own value | None. |
+| `llvm.assume` that the elements are 256-byte aligned | Vector loads and stores `align 32`/`16` instead of `align 8`. Same instructions; aligned and unaligned loads cost the same on current x86. |
+| `noalias` on `axpy`'s two arrays | The runtime overlap check and its scalar fallback are gone; the loop is unrolled to 4 vector loads a round. |
+
+**GPU, `noalias` (gfx1030):**
+- `update3.m`, shaped as SWE's update: three fields of `Next` from `Cur`
+  and `D`, each field a load, an add and a store. Scope tags added by hand
+  to the loads and stores of `merk_process_loop`. LLVM then issues all six
+  loads of a round before the first add, against two in flight before,
+  and the three stores together. Time per round, 3 × 4M doubles an
+  array, 200 rounds: 0.646 and 0.647 ms before, 0.644, 0.644 and
+  0.643 ms after. That is noise: the loop moves 302 MB a round, about
+  470 GB/s, roughly 90% of the gfx1030's peak. Enough waves are in
+  flight to hide latency.
+- The SWE port: `llvm.noalias` on the 15 pointer arguments that its loop
+  bodies store through, all `array_di` arrays in the source. 74 scope
+  tags reach the device IR, but the assembly and the binary are
+  byte-for-byte the same as without them, so nothing was timed. The
+  port's loops already load everything before they store (`cell` reads a
+  cell's `Cur`, `D` and `Z` before the three stores to `Next`), and each
+  round ends at a barrier. There is nothing left for `noalias` to
+  reorder.
+
+**Conclusions:**
+- Splitting the size from the array buys LLVM nothing. Its other gains
+  (the size's invariance stated, alignment for all sizes, views) would
+  have to justify it. Its costs: arrays inside other data grow from 8 to
+  16 bytes, used sizes take SGPRs (the MC `merk_place` kernel is at 106
+  of them on the gfx1030), and the runtime still needs a header.
+- Alignment knowledge changes only the alignment attribute on the host.
+  Large device arrays are already 256-byte aligned in memory, which is
+  what coalescing needs.
+- `noalias` follows from uniqueness without changing the representation.
+  An `array_di` parameter cannot be any other array its predicate gets.
+  It pays on the host (no overlap check) and on GPU loops that interleave
+  loads and stores when latency limits them. It does not speed up
+  SERGHEI's port. **Proposed:** Lowering marks `array_di` parameters
+  `noalias`. It is cheap and valid; it waits for the user.
+
 ### Others mentioned
 
 **Recomputing arrays defined by pure functions instead of loading them.**
