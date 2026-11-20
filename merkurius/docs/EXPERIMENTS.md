@@ -11,7 +11,8 @@ Setup:
   from it.
 - `merkurius-serghei-swe` at 4712169.
 - SERGHEI at 2728883, built by `scripts/build-serghei.sh gfx90a`.
-- One MI250X die (GPU 4) through `with-gpus.py --gpus 4`. Another user's jobs
+- One MI250 die, 104 CUs (GPU 4; r11's GPUs are MI250s, not MI250Xs as
+  2e and 3's commit messages say) through `with-gpus.py --gpus 4`. Another user's jobs
   were on GPUs 0–3, and 4–7 were idle.
 
 ### 1. SERGHEI dam break: faces-once on the gfx90a
@@ -715,3 +716,53 @@ names its output folders to the second. Both sizes, end to end, at
 
 Quicksilver's figure at 10 cycles is within 3% of its figure at 100.
 Logs: `results/E1.1/20261120-090946-16` and `-091106-32`.
+
+### 6. UTS E1.2 and E1.3: the place (S4) against HIP (S2) and resident HIP (S2r)
+
+```
+scripts/build_uts.sh; scripts/build_place.sh; scripts/build_hip.sh
+GPUS=4 UNITS=0-103 bench/gpu1.sh place|hip|hip-resident "65536 262144 1048576" T1L T3L G2
+```
+
+merkurius-uts at 99ecaef. The reference UTS is 722e896, which
+`build_uts.sh` clones. One whole die (104 CUs) of GPU 4, 5 runs a tree
+and K, medians in millions of nodes a second. Every tree's size matches
+the reference's.
+
+| Mnodes/s | K | S4 place | S2 HIP | S2r resident HIP | S4/S2 | S4/S2r |
+|---|---|---|---|---|---|---|
+| T1L | 65536 | 505.2 | 452.1 | 571.9 | 1.12 | 0.88 |
+| | 262144 | 1165.8 | 1068.2 | 1348.4 | 1.09 | 0.86 |
+| | 1048576 | 1594.1 | 1555.2 | 1778.1 | 1.03 | 0.90 |
+| T3L | 65536 | 130.6 | 109.0 | 194.1 | 1.20 | 0.67 |
+| | 262144 | 130.7 | 108.7 | 193.5 | 1.20 | 0.68 |
+| | 1048576 | 130.5 | 109.3 | 195.2 | 1.19 | 0.67 |
+| G2 | 65536 | 399.9 | 326.8 | 480.8 | 1.22 | 0.83 |
+| | 262144 | 442.5 | 369.6 | 520.2 | 1.20 | 0.85 |
+| | 1048576 | 442.0 | 370.1 | 520.8 | 1.19 | 0.85 |
+
+- **The place beats the HIP baseline everywhere,** by 3 to 22%, and
+  loses to resident HIP everywhere, by 10 to 33%.
+- **Against resident HIP, closer than on the gfx1030,** which used half
+  the card: T3L 0.67 against 0.53, G2 0.85 against 0.80.
+- **T3L is the place's worst case,** at 0.67 of resident HIP, whatever K.
+  T3L is the deep binomial tree, with little work per round.
+- **Spreads are within 3%,** except T1L at K = 65536 (up to 6%).
+
+How the run went:
+- **The list's `UNITS=0-109` doesn't fit r11.** Its GPUs are MI250s,
+  104 CUs a die, not MI250Xs with 110. With 0-109, the place's runtime
+  refuses the CU mask ("a compute unit past the last, of 104"), and
+  resident HIP launches 330 blocks for 110 CUs, which aren't all
+  resident ("give fewer with -G"). Plain HIP ran, as `HSA_CU_MASK`
+  ignores CUs that don't exist; its numbers at 0-109 are within 3% of
+  those above. The list now says `UNITS=0-103`.
+- **`gpu1.sh` would have run on GPU 0:** it called `with-gpus.py --count
+  1`, which picks the first free GPU. It now takes `GPUS`, passed as
+  `--gpus`. Its retry, for a GPU still held by the run before, now also
+  matches `--gpus`'s "GPU 4 is in use", which cost one T3L run. That case
+  was rerun.
+
+Logs: `merkurius-uts/uts/results/S4/20261120-092201` and, for T3L at
+262144, `S4/20261120-092635`; `S2r/20261120-092327`; `S2/20261120-092446`
+(not in git).

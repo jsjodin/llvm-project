@@ -78,12 +78,13 @@ or later. Everything runs on one die unless noted. Set first:
      scripts/build_uts.sh      # clones the reference UTS into reference/
      scripts/build_place.sh; scripts/build_hip.sh
      for s in place hip hip-resident; do
-       UNITS=0-109 bench/gpu1.sh $s "65536 262144 1048576" T1L T3L G2
+       GPUS=4 UNITS=0-103 bench/gpu1.sh $s "65536 262144 1048576" T1L T3L G2
      done
 
    bench/gpu1.sh reads the trees' parameters from reference/, which
-   build_uts.sh makes. gpu1.sh calls with-gpus.py itself. UNITS=0-109 is a whole MI250X die
-   (110 CUs). gfx1030 at half the card: S4/S2r 0.53 on T3L, 0.80 on G2.
+   build_uts.sh makes. gpu1.sh calls with-gpus.py itself, on GPUS
+   (not GPU 0). UNITS=0-103 is a whole die: r11's are MI250s, 104 CUs each,
+   not MI250X (0-109 fails). gfx1030 at half the card: S4/S2r 0.53 on T3L, 0.80 on G2.
 
 
 7. MC gate E0.3: stealing against replication. Multi-die; M4 waits on it.
