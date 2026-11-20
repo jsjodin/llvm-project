@@ -660,3 +660,43 @@ To pass the flag, merkurius-serghei-swe's compare scripts now take
 Logs: `merkurius-serghei-swe/results/dambreak-gfx90a-2048-20261120-083323`
 and `results/valley-gfx90a-2048-20261120-083323`; swe-muscl's in this
 session's scratchpad, ncs.log.
+
+### 5. MC E1.1 on the gfx90a: the place against Quicksilver
+
+```
+OMPI_CXX=amdclang++ scripts/build_quicksilver.sh hip
+QS_ENV="HSA_XNACK=1" GPU_WRAP="$W --gpus 4 --" bench/e11.sh 16 10   # and 32
+```
+
+merkurius-mc at 5b6e93e. Quicksilver is LLNL's at eb68bb8 with the P4
+patch, built for gfx90a as `bin/qs-hip`. The problem is P1 (CTS2),
+10 particles a cell, one rank, on GPU 4. Figures of merit are segments
+per second of tracking. Each is a single run.
+
+| E1.1 | 16³ | 32³ |
+|---|---|---|
+| Place (Mercury GPU process), default | 1.462e7 | 3.516e7 |
+| Place, `-fgpu-process-no-callee-saved` | 1.435e7 | 3.417e7 |
+| Quicksilver (qs-hip, `HSA_XNACK=1`) | 1.288e6 | 3.606e6 |
+| **Place / Quicksilver** | **11.4×** | **9.75×** |
+
+- **The place is about 10× Quicksilver's HIP build on the gfx90a,**
+  against 4.77× on the gfx1030, where qs-hip was no speed reference. All
+  of Quicksilver's checks pass: absorption, fission and scatter ratios,
+  no particles lost, and homogeneous fluence.
+- **Quicksilver runs 100 cycles, not 10.** `-N 10` doesn't override
+  `nSteps: 100` in `problems/P1_cts2.inp`. Its figure is still an average
+  over cycles, but a 32³ run takes about 14 minutes, at 8.3 s of tracking
+  a cycle.
+- **Without callee-saved registers the place is 2 to 3% slower,** within
+  what one run each can tell. The place's tracking runs in the process
+  itself, not in team loops, which is where item 4 gained.
+- **`e11.sh` raced with `with-gpus.py`:** started right after the place,
+  Quicksilver found GPU 4 still held by the place's exiting process
+  ("GPU 4 is in use"). `set -e` then ended the script before its summary.
+  This happened in both 16³ runs. The 16³ Quicksilver figure above is
+  from a separate run of the same command line.
+
+Logs: `merkurius-mc/mc-transport/results/E1.1/20261120-0839-16`,
+`-0841-32`, `-0857-16` and `-0859-32` (not in git); Quicksilver at 16³
+in this session's scratchpad, qs16.log.
