@@ -115,8 +115,71 @@ were within 0.3% of round 1.
   3's whole step was 5.26 ms against kernel 2's 6.18 ms.
 
 Open:
-- Where kernel 3's 31 ms a step goes.
+- ~~Where kernel 3's 31 ms a step goes.~~ Found, see 2c.
 - Why kernels 2 and 3 lose to kernel 0 on the gfx90a (item 1).
 
 Logs: `merkurius-serghei-swe/results/port-gfx90a-3-2048-*` and
 `results/valley-nofma-gfx90a-2048-20261120-061636` (not in git).
+
+### 2c. Kernel 3's lost time: a GPU malloc for every tile
+
+Scratch copies of the port, timed with `MERK_SOURCE=<copy> scripts/time-port.sh
+gfx90a 3 <N> 1` (builds at -O2), one each on GPUs 4–7. The copies are in the
+session scratchpad, not in git.
+
+**Where:** with the step's timer moved to after `update_tiles`, it covered
+32.58 of the 32.61 ms. So `update_tiles` takes about 31.4 ms a step, and
+`activate` about 0.03 ms.
+
+**Not the reductions:** at 1024², with the wet flag's integer `max` changed
+to a float `max`, a step took 7.60 ms, against 7.78 ms for the original.
+With that reduction removed, every tile ran and a step took 16.6 ms. The
+cost grows with the number of tiles that run.
+
+**Cause:** `tile_update`'s inner `parallel do` calls `cell(P, ...)`, so its
+body captures the parameter record `P`: 11 words, 88 bytes. merkc boxes the
+record with `merk_device_alloc` to pass it to the team loop, once per tile.
+`tile_faces` and `tile_cells` pass scalars and don't allocate. The `-O2` IR
+keeps the call. In a worker team's first wave, `merk_device_alloc` goes to
+`NewBlock` (runtime/device/device.cpp), whose costs are:
+- **GPU malloc:** libc's `malloc` on the GPU, through `RawAllocate`, which
+  the runtime's own comment puts at some microseconds each. All the teams
+  call it at once.
+- **One shared list:** every block is pushed onto it with a compare-and-swap.
+- **Never freed:** `merk_device_free` does nothing for a team block until the
+  process ends. That's about 1770 blocks a step at 2048², about 13 million in
+  a run of 7270 steps.
+
+Kernel 2's flat `update` also boxes `P`, but once per step, in the
+process's own wave, from its cache of small blocks.
+
+**Check (copy E):** `cell` takes `n`, `dx` and `hmin` as scalars inside
+`tile_update`. That's a measurement copy only, not a fix. Its tile_update
+has no allocation in the IR. Steps and checksums are the same as the
+original's.
+
+| Valley flood, step (ms) | 1024² | 2048² |
+|---|---|---|
+| Kernel 0 | | 1.105 |
+| Kernel 2, tiles of 32 | 0.730 | 2.187 |
+| Kernel 3, original | 7.775 | 32.409 |
+| Kernel 3, copy E | **0.603** | **1.564** |
+
+- **Kernel 3 works on the gfx90a without the allocation:** it is 1.21× faster
+  than kernel 2 at 1024² and 1.40× at 2048², against 1.15× at 2048² on the
+  gfx1030.
+- **It still loses to kernel 0:** 1.564 ms against 1.105 ms at 2048². That's
+  item 1's question about the tiled kernels.
+
+Fixes to choose from (not done):
+1. **merkc:** pass a record that fits in the loop's words (32) by value, as
+   scalars, instead of boxing it. That removes the allocation for any
+   loop that captures a small record.
+2. **Runtime:** make a team's first-wave cells cheap and reclaimed. For
+   example, bump them from the team's own region and reset it each
+   iteration, as group-private arrays are. That also stops the growth of
+   memory for the process's lifetime.
+
+Both are worth doing. 1 removes the cost here, and 2 covers the cases 1
+can't, such as a record too large for the loop's words, or a cell that's
+really made in the body.
