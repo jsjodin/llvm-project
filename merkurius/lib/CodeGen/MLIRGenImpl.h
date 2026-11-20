@@ -801,6 +801,9 @@ private:
   merk::ProcOp ProcessLoopClaims(
       const ProcessLoopCase &loop, mlir::Location loc);
   static bool IsReductionInput(const ProcessLoopCase &loop, std::size_t index);
+  // The constructor of a flat record of scalars, which a loop's body takes
+  // in a word for each field rather than in one word, its boxed cell.
+  std::optional<merk::ConstructorAttr> LoopRecord(mlir::Type);
   // Whether a kind's code, or a procedure of the module that it calls, has
   // a loop under distribute parallel do or distribute, for which the kind
   // takes teams.

@@ -183,3 +183,62 @@ Fixes to choose from (not done):
 Both are worth doing. 1 removes the cost here, and 2 covers the cases 1
 can't, such as a record too large for the loop's words, or a cell that's
 really made in the body.
+
+### 2d. Fix 1: merkc passes a flat record a word for each field
+
+merkc now splits a flat record that a loop in a GPU process takes into one
+word per field, for every kind of loop (`LoopRecord`,
+lib/CodeGen/MLIRGenProcesses.cpp). It takes the record apart with
+`merk.deconstruct` before the loop's words, and the rounds make it again
+with `merk.construct` for each call of the body. A flat record here has
+one constructor, no hidden fields, and at least two fields that are all
+integers or floats. Lowering keeps such records by value, so neither side
+makes a cell. Other records still go as one boxed word. In the port's
+`-O2` process IR, all six 88-byte boxings of `P` are gone. Test:
+`test/CodeGen/process-loop-records.m` and `-gpu.test`.
+
+A/B on GPU 4: the unchanged port built by the previous and the new code
+generator, alternating, 3 rounds each (kernel 3 old: 1 round), 2048²,
+median ms a step. Every pair gave the same checksum.
+
+| Case and kernel | Before | After | After / before |
+|---|---|---|---|
+| Dam break, kernel 0 | 1.742 | 1.723 | 0.99 |
+| Dam break, kernel 2, tiles of 32 | 2.859 | 3.154 | **1.10** |
+| Dam break, kernel 2, tiles of 64 | 3.029 | 3.017 | 1.00 |
+| Valley, kernel 0 | 1.104 | 1.098 | 0.99 |
+| Valley, kernel 2, tiles of 32 | 2.202 | 2.219 | 1.01 |
+| Valley, kernel 3, tiles of 32 | 30.597 | **1.569** | 0.05 |
+
+- **Kernel 3 is fixed:** it is now 1.40× faster than kernel 2 on the valley,
+  with the same steps and checksum. That matches the hand-edited copy E
+  (1.564 ms).
+- **The dam break's kernel 2 with tiles of 32 is 10% slower, but the fix
+  doesn't cause it.** Copy E only changes `tile_update`'s source, and the
+  previous compiler builds it the same way. Built that way, E was just as
+  slow: 3.07 ms against 2.87 for the original (4 runs each). That loop's
+  generated code is almost the same before and after: `merk_process_loop`'s
+  IR differs by 18 `readfirstlane` calls and one alloc/free pair. Splitting
+  records only for team loops didn't help either (3.115 ms).
+- **What it is:** every loop body of the module is inlined into one function,
+  `merk_process_loop`. Changing kernel 3's code shifts the register
+  allocation and layout of kernel 2's code, which runs at about 10% different
+  speeds with tiles of 32 and 16. Kernel 2 with tiles of 16, whose faces fit
+  in LDS, was also slower: 3.78 against 4.40 ms, with more spread. The
+  alignment experiment's ±1.5% (2026-11-20, gfx1030) looks like the same
+  kind of effect.
+
+Open, found on the way:
+- **Fragile code generation:** the loops of a module share one function, so
+  any change to one loop can move another's speed by 10%. Each loop's
+  cases could be kept apart, for example by not inlining a loop's rounds
+  into `merk_process_loop`'s switch. Not tried.
+- **Group-private fallback:** a group-private array that doesn't fit in LDS
+  falls back to libc's GPU malloc and free, once per iteration
+  (`GroupAllocate`, runtime/device/device.cpp). Kernel 2's face array is
+  101 KB with tiles of 32 and 400 KB with tiles of 64, against 64 KB of
+  LDS, so it pays that every tile in every step. That could be part of why
+  kernel 2 loses to kernel 0 on the gfx90a (item 1).
+- **Fix 2 (runtime) is still open:** a team's first wave that really makes a
+  cell in a distribute body still goes to the GPU's malloc and keeps the
+  block until the process ends.

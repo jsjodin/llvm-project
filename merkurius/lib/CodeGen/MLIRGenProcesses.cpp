@@ -429,6 +429,14 @@ void MerkGenerator::ProcessLoop(const ParallelLoop &loop, ProcessLoopKind kind,
           reduction->output, reduction->op, reduction->type});
       before.push_back(ValueOf(loop.call->arguments[k]));
       reduced.push_back(reduction);
+    } else if (std::optional<merk::ConstructorAttr> record{
+                   LoopRecord(represented->type)}) {
+      // A flat record, in a word for each field (LoopRecord).
+      auto fields{merk::DeconstructOp::create(builder_, loc,
+          record->getFields(), ValueOf(loop.call->arguments[k]),
+          merk::FunctorAttr::get(&context_, record->getName(),
+              static_cast<unsigned>(record->getFields().size())))};
+      words.append(fields.getResults().begin(), fields.getResults().end());
     } else {
       words.push_back(ValueOf(loop.call->arguments[k]));
     }
@@ -692,6 +700,17 @@ void MerkGenerator::ProcessLoopShare(const ProcessLoopCase &loop,
     if (index == loop.counter || IsReductionInput(loop, index)) {
       continue;
     }
+    // A flat record's fields, a word each (ProcessLoop), which the rounds
+    // take as they take scalars, making the record for each call of the
+    // body (ProcessLoopRounds).
+    if (std::optional<merk::ConstructorAttr> record{LoopRecord(type)}) {
+      for (mlir::Type field : record->getFields()) {
+        mlir::Value word{target_.Uniform(
+            builder_, loc, LoadWord(builder_, loc, values, next++))};
+        arguments.push_back(FromWordBits(builder_, loc, field, word));
+      }
+      continue;
+    }
     mlir::Value word{
         target_.Uniform(builder_, loc, LoadWord(builder_, loc, values, next++))};
     arguments.push_back(FromWordBits(builder_, loc, type, word));
@@ -723,6 +742,42 @@ void MerkGenerator::ProcessLoopShare(const ProcessLoopCase &loop,
   }
 }
 
+// A type of one constructor, with no hidden fields, of two or more fields
+// that are all integers or floats: a flat record, which lowering keeps by
+// value (Records.h), so a loop's body takes it in a word for each field
+// and taking it apart and making it again costs no cell. As one word, the
+// record is boxed in a cell for each run of the loop: under parallel do in
+// a distribute loop's body, the team's first wave made it with the GPU's
+// malloc in every iteration of the distribute loop, and freed it only as
+// the process ended, 31 ms of a 32.6 ms step of SERGHEI's valley flood
+// (docs/EXPERIMENTS.md, 2c).
+std::optional<merk::ConstructorAttr> MerkGenerator::LoopRecord(
+    mlir::Type type) {
+  auto term{mlir::dyn_cast<merk::TermType>(type)};
+  if (!term) {
+    return std::nullopt;
+  }
+  for (auto def : module_.getOps<merk::TypeDefOp>()) {
+    if (def.getName() != term.getName()) {
+      continue;
+    }
+    if (def.getConstructors().size() != 1) {
+      return std::nullopt;
+    }
+    auto constructor{
+        mlir::cast<merk::ConstructorAttr>(def.getConstructors()[0])};
+    llvm::ArrayRef<mlir::Type> fields{constructor.getFields()};
+    if (constructor.getHidden() != 0 || fields.size() < 2 ||
+        !llvm::all_of(fields, [](mlir::Type field) {
+          return mlir::isa<mlir::IntegerType, mlir::FloatType>(field);
+        })) {
+      return std::nullopt;
+    }
+    return constructor;
+  }
+  return std::nullopt;
+}
+
 // Whether the body's input at `index` is a reduction's value.
 bool MerkGenerator::IsReductionInput(
     const ProcessLoopCase &loop, std::size_t index) {
@@ -751,7 +806,12 @@ merk::ProcOp MerkGenerator::ProcessLoopRounds(
   llvm::SmallVector<mlir::Type> parameters(6, i64);
   llvm::SmallVector<mlir::Type> results;
   for (auto [index, type] : llvm::enumerate(loop.inputs)) {
-    if (index != loop.counter && !IsReductionInput(loop, index)) {
+    if (index == loop.counter || IsReductionInput(loop, index)) {
+      continue;
+    }
+    if (std::optional<merk::ConstructorAttr> record{LoopRecord(type)}) {
+      parameters.append(record->getFields().begin(), record->getFields().end());
+    } else {
       parameters.push_back(type);
     }
   }
@@ -810,9 +870,21 @@ merk::ProcOp MerkGenerator::ProcessLoopRounds(
       }
       auto reduction{llvm::find_if(loop.reductions,
           [&](const ProcessLoopReduction &r) { return r.input == index; })};
-      inputs.push_back(reduction != loop.reductions.end()
-              ? partials[reduction - loop.reductions.begin()]
-              : values[nextValue++]);
+      if (reduction != loop.reductions.end()) {
+        inputs.push_back(partials[reduction - loop.reductions.begin()]);
+        continue;
+      }
+      // A flat record, from its fields (ProcessLoopShare).
+      if (std::optional<merk::ConstructorAttr> record{LoopRecord(type)}) {
+        std::size_t fields{record->getFields().size()};
+        inputs.push_back(merk::ConstructOp::create(builder_, loc, type,
+            merk::FunctorAttr::get(
+                &context_, record->getName(), static_cast<unsigned>(fields)),
+            values.slice(nextValue, fields)));
+        nextValue += fields;
+        continue;
+      }
+      inputs.push_back(values[nextValue++]);
     }
     auto body{
         merk::CallOp::create(builder_, loc, loop.results, loop.body, inputs)};
