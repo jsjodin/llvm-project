@@ -368,3 +368,48 @@ Open:
 - **Choosing the budget:** when a module's group-private arrays need more
   than the occupancy-preserving share, the runtime could size dynamic LDS
   for them and give up occupancy, as HIP's launch does.
+
+### 3c. Where step_faces' time goes, phase by phase, against HIP's
+
+Scratch copies of swe-muscl.m and swe-muscl.hip (not in git) read the
+GPU's steady counter (`__builtin_readsteadycounter`, 25 MHz on the gfx90a)
+in each tile of `step_faces`, between its phases. Mercury reads it in the
+distribute body, by the team's first wave, between the team loops; HIP
+reads it in every thread after each `__syncthreads`, and thread 0 adds the
+times up. Both runs are at the defaults (2048², tiles of 32, 1000 steps,
+253,090 tile-steps), on GPU 4, with the usual checksum. Two runs of each
+agree within 1%.
+
+| µs per tile | Mercury, 2 waves | Mercury, 1 wave | HIP (1 block a CU) | Mercury 1 wave / HIP |
+|---|---|---|---|---|
+| Group-private arrays (`GroupAllocate`) | 27.9 | 6.8 | | |
+| `x_faces` (1056 faces) | 89.8 | 61.6 | 24.7 | 2.5× |
+| `x_diffs` | 19.8 | 6.1 | 0.7 | 8.4× |
+| `y_faces` (1056 faces) | 74.2 | 52.6 | 23.5 | 2.2× |
+| `faces_tile` (1024 cells) | 56.1 | 32.5 | 11.4 | 2.8× |
+| **Total** | **268** | **160** | **60** | **2.7×** |
+| Whole step, ms (host) | 0.571 | 0.583 | 0.252 | |
+
+- **No single phase explains the gap.** The arithmetic-heavy phases,
+  the two face loops and the cell update, each take 2.2 to 2.8× HIP's
+  time at the same occupancy. Together they are 92% of the 1-wave tile.
+- **At 2 waves, the malloc fallback costs 28 µs a tile** (3b), 10% of the
+  tile, and two teams on each CU make every phase about 1.5× slower than at
+  1 wave. The step's time stays the same, because twice as many tiles run
+  at once.
+- **`x_diffs` is a team loop where HIP has none:** 6 to 20 µs, against
+  0.7 µs for HIP's loads into registers.
+- **The two programs have the same structure.** HIP's `step_faces` also
+  walks its 1056 faces in 5 rounds of 256 threads, with the same
+  `faces_at` and `hllc` calls, and a barrier after each phase.
+
+Differences that could account for the 2.2 to 2.8×, none tested yet:
+- **Registers:** HIP's `step_faces` has 120 VGPRs and no scratch.
+  Mercury's process kernel has 248 VGPRs and 768 bytes of scratch a lane,
+  for all the module's loops in one `merk_process_loop` (2d).
+- **Barriers:** Mercury's team loops have a barrier after every round
+  (`merk_device_sync_threads` in `ProcessLoopRounds`), 5 per face loop.
+  HIP has one after the loop. INPROGRESS.md (d2) measured the per-round
+  barrier as a gain of 8 to 17% on light loops; this body is heavy.
+- **Calls:** each round calls the body, and the rounds are recursion turned
+  into a loop. HIP's loop body is inlined into the kernel.
