@@ -43,6 +43,21 @@
 //                           (stored into the receiver's fine-grained memory)
 //                           or pulled (stored in the sender's own memory and
 //                           loaded by the receiver)
+//   peer slot A B [messages] [words]
+//                           experiment 5: the device runtime's inline peer
+//                           send (PutPeer, TakePeer) alone. A wave on A puts
+//                           messages of `words` words into slots in B's
+//                           fine-grained memory, and publishes each by a
+//                           store of the slot's sequence: relaxed with no
+//                           wait (a control, to show the check can fail),
+//                           a release at device scope, and at system scope
+//                           (buffer_wbl2), each with A's L2 clean, with 64
+//                           lines of A's own memory dirtied before each
+//                           message, and with other teams on A writing 32
+//                           MiB of its memory over and over meanwhile, as a
+//                           place's other processes would. A
+//                           wave on B takes each after an acquire at device
+//                           scope and checks every word. Device-timed on A.
 #include <hip/hip_runtime.h>
 #include <hip/hip_ext.h>
 #include <chrono>
@@ -646,6 +661,139 @@ static void Push(int a, int b) {
   }
 }
 
+// Experiment 5 (peer slot). The slots, in B's fine-grained memory, as
+// place.h's PeerQueueSlot: a sequence and the message's words.
+constexpr int kSlots = 16;
+constexpr int kSlotWords = 64;
+struct Slot { unsigned long sequence; unsigned long words[kSlotWords]; };
+
+__device__ unsigned long Word(long i, long k) {
+  return (unsigned long)i * 0x9E3779B97F4A7C15ul + (unsigned long)k;
+}
+
+// mode: 0 relaxed, no wait; 1 release at device scope; 2 at system scope.
+__global__ void SlotSender(Slot *slots, long messages, long words, int mode,
+                           unsigned long *dirty, int lines,
+                           unsigned long long *ticks) {
+  if (threadIdx.x != 0) return;
+  unsigned long long t0 = __builtin_readsteadycounter();
+  for (long i = 0; i < messages; ++i) {
+    for (int l = 0; l < lines; ++l) dirty[l * 16] = i;
+    Slot &slot = slots[i % kSlots];
+    while (__scoped_atomic_load_n(&slot.sequence, __ATOMIC_RELAXED,
+                                  __MEMORY_SCOPE_SYSTEM) != (unsigned long)i)
+      __builtin_amdgcn_s_sleep(1);
+    for (long k = 0; k < words; ++k)
+      __scoped_atomic_store_n(&slot.words[k], Word(i, k), __ATOMIC_RELAXED,
+                              __MEMORY_SCOPE_SYSTEM);
+    if (mode == 0)
+      __scoped_atomic_store_n(&slot.sequence, i + 1, __ATOMIC_RELAXED,
+                              __MEMORY_SCOPE_SYSTEM);
+    else if (mode == 1)
+      __scoped_atomic_store_n(&slot.sequence, i + 1, __ATOMIC_RELEASE,
+                              __MEMORY_SCOPE_DEVICE);
+    else
+      __scoped_atomic_store_n(&slot.sequence, i + 1, __ATOMIC_RELEASE,
+                              __MEMORY_SCOPE_SYSTEM);
+  }
+  *ticks = __builtin_readsteadycounter() - t0;
+}
+
+// Other teams on A, writing `words` of A's memory over and over until
+// *stop.
+__global__ void SlotNoise(unsigned long *buffer, long words, long *stop) {
+  long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
+  long step = (long)gridDim.x * blockDim.x;
+  for (unsigned long r = 1;; ++r) {
+    for (long k = i; k < words; k += step) buffer[k] = r;
+    if (__scoped_atomic_load_n(stop, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM))
+      return;
+  }
+}
+
+__global__ void SlotReceiver(Slot *slots, long messages, long words,
+                             unsigned long long *bad) {
+  if (threadIdx.x != 0) return;
+  unsigned long long wrong = 0;
+  for (long i = 0; i < messages; ++i) {
+    Slot &slot = slots[i % kSlots];
+    while (__scoped_atomic_load_n(&slot.sequence, __ATOMIC_RELAXED,
+                                  __MEMORY_SCOPE_SYSTEM) != (unsigned long)i + 1)
+      ;
+    __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE);
+    for (long k = 0; k < words; ++k)
+      if (__scoped_atomic_load_n(&slot.words[k], __ATOMIC_RELAXED,
+                                 __MEMORY_SCOPE_SYSTEM) != Word(i, k))
+        ++wrong;
+    __scoped_atomic_store_n(&slot.sequence, i + kSlots, __ATOMIC_RELEASE,
+                            __MEMORY_SCOPE_DEVICE);
+  }
+  *bad = wrong;
+}
+
+static void Slots(int a, int b, long messages, long words) {
+  if (words < 1 || words > kSlotWords) {
+    std::fprintf(stderr, "words: 1 to %d\n", kSlotWords); std::exit(2);
+  }
+  Peers(a, b);
+  Slot *slots; unsigned long long *bad, *ticks; unsigned long *dirty;
+  CHECK(hipSetDevice(b));
+  CHECK(hipExtMallocWithFlags((void **)&slots, sizeof(Slot) * kSlots,
+                              hipDeviceMallocFinegrained));
+  CHECK(hipMalloc((void **)&bad, 8));
+  CHECK(hipSetDevice(a));
+  CHECK(hipMalloc((void **)&ticks, 8));
+  CHECK(hipMalloc((void **)&dirty, 64 * 128));
+  const long noiseWords = (32l << 20) / 8;
+  unsigned long *noise; long *stop;
+  CHECK(hipMalloc((void **)&noise, noiseWords * 8));
+  // In host memory, which the host sets as the kernels run: a copy on the
+  // null stream would wait for SlotNoise, which waits for it.
+  CHECK(hipHostMalloc((void **)&stop, 64, hipHostMallocCoherent));
+  hipStream_t sa, sb, sn;
+  CHECK(hipSetDevice(a)); CHECK(hipStreamCreate(&sa)); CHECK(hipStreamCreate(&sn));
+  CHECK(hipSetDevice(b)); CHECK(hipStreamCreate(&sb));
+  std::printf("%ld messages of %ld words, A=%d B=%d\n", messages, words, a, b);
+  std::printf("%-36s %12s %12s\n", "publish", "us a message", "wrong words");
+  const char *names[3] = {"relaxed, no wait", "release, device scope",
+                          "release, system scope"};
+  for (int load = 0; load < 3; ++load)
+    for (int mode = 0; mode < 3; ++mode) {
+      int lines = load == 1 ? 64 : 0;
+      if (load == 2) {
+        CHECK(hipSetDevice(a));
+        __atomic_store_n(stop, 0, __ATOMIC_SEQ_CST);
+        hipLaunchKernelGGL(SlotNoise, dim3(96), dim3(256), 0, sn, noise,
+                           noiseWords, stop);
+      }
+      Slot init[kSlots];
+      std::memset(init, 0, sizeof init);
+      for (int i = 0; i < kSlots; ++i) init[i].sequence = i;
+      CHECK(hipSetDevice(b));
+      CHECK(hipMemcpy(slots, init, sizeof init, hipMemcpyHostToDevice));
+      hipLaunchKernelGGL(SlotReceiver, dim3(1), dim3(64), 0, sb, slots,
+                         messages, words, bad);
+      CHECK(hipSetDevice(a));
+      hipLaunchKernelGGL(SlotSender, dim3(1), dim3(64), 0, sa, slots, messages,
+                         words, mode, dirty, lines, ticks);
+      CHECK(hipStreamSynchronize(sa));
+      CHECK(hipSetDevice(b)); CHECK(hipStreamSynchronize(sb));
+      if (load == 2) {
+        CHECK(hipSetDevice(a));
+        __atomic_store_n(stop, 1, __ATOMIC_SEQ_CST);
+        CHECK(hipStreamSynchronize(sn));
+      }
+      unsigned long long t = 0, w = 0;
+      CHECK(hipSetDevice(a)); CHECK(hipMemcpy(&t, ticks, 8, hipMemcpyDeviceToHost));
+      CHECK(hipSetDevice(b)); CHECK(hipMemcpy(&w, bad, 8, hipMemcpyDeviceToHost));
+      char name[64];
+      std::snprintf(name, sizeof name, "%s%s", names[mode],
+                    load == 1 ? ", 64 lines" : load == 2 ? ", other teams" : "");
+      // The steady counter ticks at 25 MHz on gfx90a.
+      std::printf("%-36s %12.3f %12llu\n", name, t * 0.04 / messages, w);
+    }
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) { std::fprintf(stderr, "usage: see the file\n"); return 2; }
   if (!std::strcmp(argv[1], "info")) { Info(); return 0; }
@@ -665,5 +813,8 @@ int main(int argc, char **argv) {
   else if (!std::strcmp(argv[1], "pullbw")) PullBandwidth(a, b);
   else if (!std::strcmp(argv[1], "poll")) Poll(a, b);
   else if (!std::strcmp(argv[1], "push")) Push(a, b);
+  else if (!std::strcmp(argv[1], "slot"))
+    Slots(a, b, argc > 4 ? std::atol(argv[4]) : 1000000,
+          argc > 5 ? std::atol(argv[5]) : 4);
   return 0;
 }
