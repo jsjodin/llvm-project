@@ -281,3 +281,41 @@ across rounds is at most 1.8%.
 
 Logs: `merkurius-serghei-swe/results/dambreak-gfx90a-2048-20261120-072716`
 and `results/valley-gfx90a-2048-20261120-072719` (not in git).
+
+### 3. Register budget on swe-muscl: waves 2, 3 and 4
+
+```
+MERKC_FLAGS=-fgpu-process-waves=$w SWE_KERNEL=$k \
+  ./compare-swe-muscl.sh $B gfx90a 5          # w 2 3 4, k 1 2, GPU 4
+```
+
+swe-muscl at its defaults: a 2048² world, tiles of 32, 1000 steps, at
+most 484 tiles. 5 rounds each, Mercury, C (OpenMP offload) and HIP
+taking turns. Every program gave the same checksum, 7e6ebd06a6e0a7a6.
+Times are the average step in ms; the C and HIP programs don't depend on
+the waves, so their times are the same in every run, within 1%.
+
+| Waves | Mercury `step` (k1) | Mercury `step_faces` (k2) | C | HIP k1 | HIP k2 |
+|---|---|---|---|---|---|
+| 2 (today's default) | **0.304** | **0.556** | 0.228 | 0.310 | 0.250 |
+| 3 | 0.361 | 0.745 | 0.228 | 0.310 | 0.248 |
+| 4 | 0.573 | 0.757 | 0.227 | 0.310 | 0.248 |
+
+- **2 waves is best for both kernels,** by 19% to 88%. The default stays,
+  and by the rule in experiments.txt, ca8b002 (`inreg`) doesn't stay: it
+  was only to be kept if 3 or 4 waves beat 2.
+- **Kernel 1 matches HIP's kernel 1** (0.304 against 0.310 ms). Mercury's
+  bookkeeping, 0.078 ms a step, is included; HIP's is 0.053.
+- **C with OpenMP offload is the fastest program** at 0.228 ms. Mercury's
+  best is 1.33× slower than it, and HIP's best (k2) 1.09× slower.
+- **Mercury's kernel 2 is 2.2× slower than HIP's kernel 2,** and slower
+  than Mercury's own kernel 1: the same pattern as the SERGHEI port's
+  tiled kernel 2 (items 1, 2e). step_faces' group-private arrays are
+  4 × 32 × 33 and 3 × 32 × 32 doubles, 58 KB together. If the team's
+  share of LDS is less than that, they fall back to the GPU's malloc in
+  every tile (2d, "group-private fallback"). Not checked yet.
+- **The goal, Mercury 1.5 to 2× faster than today on the gfx90a, isn't
+  reached by the register budget:** more waves only make it slower.
+
+Logs: the per-run traces went to /tmp (deleted); the summary is in this
+session's scratchpad, waves.log.
