@@ -5718,12 +5718,19 @@ GPU, in strips of rows the same way. ms a step:
 - **The port scales; SERGHEI as built here doesn't.** On 4 GPUs the port
   is 2.0 times its one-GPU step on the dam break, and 1.55 times on the
   valley once balanced. SERGHEI's fluxes scale (1.14 to 0.38 ms), but its
-  halo trade goes from 0.19 to 2.7 ms a step: every array is managed
-  memory, and r11's MPI (Ubuntu's Open MPI 4.1.2) is not ROCm-aware, so the
-  halo pages migrate to the host and back each step. **Most of the 4.5 to
-  8 times is that, not the port's code**; a ROCm-aware MPI with device
-  buffers, as SERGHEI is run on machines like Frontier, is the fair point
-  and is still to be measured.
+  halo trade goes from 0.19 to 2.7 ms a step, and the halo pages migrate
+  to the host and back each step. Two causes:
+  - **SERGHEI's own design:** every array, its halo buffers among them, is
+    managed memory (`Kokkos::SharedSpace`, src/define.h), and it computes
+    a mass balance with MPI reductions every step, for its output. That is
+    the code as published, and the convenient path in Kokkos.
+  - **The setup:** r11's MPI (Ubuntu's Open MPI 4.1.2) is not ROCm-aware.
+
+  So the 4.5 to 8 times is the published code against the port, as the
+  baseline policy has it, with the setup's share not yet separated. Still
+  to be measured: SERGHEI with the port's technique applied back, device
+  arrays and halo buffers with a ROCm-aware MPI, as it is run on machines
+  like Frontier. The port's own scaling stands either way.
 - **Through the host, the port's 4 GPUs take 1.43 ms (dam break) and 1.39
   (valley),** against 0.87 and 0.84 directly: direct messages between GPUs
   are worth 1.6 times.
