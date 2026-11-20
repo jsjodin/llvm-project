@@ -906,3 +906,35 @@ alone, between waves on ROCR 4 and 5:
   which the AMDGPU plugin takes from the GPU's fine-grained memory pool
   (offload/plugins-nextgen/amdgpu/src/rtl.cpp), as
   `hipDeviceMallocFinegrained` does.
+
+### H3. Inline peer sends with a device-scope release: no change in an idle place or in the strips
+
+After H2, `PutPeer` and `LeavePeerQueue` release at the device's scope
+when the message has no copy in the sender's send pool (runtime/device,
+`PeerRelease`). A device-scope fence goes before their store and add,
+which stay relaxed at system scope. That drops only `buffer_wbl2` (clang
+for gfx90a). Messages with a copy keep the system scope.
+
+Same runs as before, ROCR 4–7, `MERK_GPU_PEER=1`:
+
+| | Before | After |
+| --- | --- | --- |
+| rounds.m, 2 processes, 2 floats | 43.8 µs | 42.1 µs |
+| rounds.m, star of 4, 2 floats | 84.0 | 84.2 |
+| rounds.m, 2 processes, 12,289 floats | 244 | 241.5 |
+| rounds.m, stream, sender per message | 13.1 | 13.1 |
+| serghei-swe-gpus.m, dam break 2048², 4 GPUs, step | 0.869 ms | 0.870 ms |
+| serghei-swe-gpus.m, valley 2048², 4 GPUs, step | 0.845 | 0.837 |
+
+The checksums are unchanged.
+
+- **No gain here.** In rounds.m the place's L2 is nearly clean, so the
+  writeback cost little (H2, clean L2). H1's 2.8 µs in `PutPeer` was then
+  mostly the wait for the remote stores to complete, which both scopes
+  pay.
+- **In the strips,** only the time steps' messages are inline: two or
+  three per strip per step. Saving up to about 2 µs on each is under 1% of
+  a step. The rows go through the send pool, and still need the
+  writeback.
+- **The gain is there when a busy place sends many small messages:**
+  about 2 µs a message in H2 with other teams writing.
