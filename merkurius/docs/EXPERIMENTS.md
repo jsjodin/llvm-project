@@ -521,3 +521,54 @@ within 2%. The probe itself makes the phases up to 25% slower (`x_diffs`
 Open: why a round of a few flat accesses to LDS takes about a
 microsecond in a team loop. A microbenchmark would show it: a team loop
 over a group-private array, against the same loads in HIP, flat and `ds_`.
+
+### 3g. LDS microbenchmark: rounds are cheap, a team loop costs ~1.5 µs
+
+Scratch programs (not in git): a Mercury process and a HIP twin. Each tile
+runs four loops across a team of 256 threads, timed by the steady counter:
+- **fill:** `G[k] := k`, into LDS;
+- **one store:** `D[k] := 0`, into LDS;
+- **diffs:** `x_diffs`' body, LDS to LDS;
+- **diffs, global:** the same body on global arrays.
+
+The HIP twin comes in four builds: `ds_` or flat addressing (pointers
+hidden behind an empty `asm`), each with HIP's own loops or with
+Mercury's rounds (a guarded iteration and a `__syncthreads` in each round).
+
+**Not a kernel setting.** `merk_place`'s descriptor matches HIP's apart
+from scratch, with no tgsplit and the same mode bits. rocm-smi shows both
+at 1700 MHz throughout a long run.
+
+**The first run, with tiles of 32, wasn't a fair comparison.** The
+microbenchmark's kernel has 185 VGPRs (`-fgpu-process-waves=1` only caps
+them), so two teams fit per CU. Each team got 31 KB of LDS, so `G`
+(33.8 KB) fell back to global memory, and two tiles shared each CU where
+HIP ran one.
+
+**At matched occupancy:** tiles of 16, 1760 of them, two teams per CU.
+Every array fits in Mercury's 31,232 bytes, and HIP asks for 31,232 bytes
+of dynamic LDS. Two runs each, alternating, within 1%:
+
+| µs per tile | fill (5 rounds) | one store (3) | diffs, LDS (1) | diffs, global (1) |
+|---|---|---|---|---|
+| Mercury | 2.01 | 1.58 | 2.30 | 3.04 |
+| HIP, `ds_`, Mercury's rounds | 0.35 | 0.22 | 0.33 | 2.00 |
+| HIP, flat, Mercury's rounds | 0.48 | 0.31 | 0.56 | 1.97 |
+| HIP, `ds_`, its own loops | 0.29 | 0.19 | 0.39 | 2.02 |
+
+- **Mercury adds 1.1 to 1.7 µs to each team loop,** whether it has 1
+  round or 5. So the rounds are cheap, and the cost is per loop: the
+  first wave writing the loop's words, the start, the join, and the calls
+  into `merk_team_loop`. 3f timed start and join from inside at under
+  2 µs.
+- **Flat costs HIP 0.1 to 0.2 µs a loop here,** and Mercury's round
+  structure about as much.
+
+**This contradicts 3f.** There, swe-muscl's `x_diffs` spent 5.3 µs in 4
+rounds at one team per CU, with its arrays in LDS. Here a round costs
+next to nothing. The obvious difference is the code around the loop: in
+swe-muscl, `merk_team_loop` is 60 KB, with 248 VGPRs and 304 bytes of
+scratch; here it's small. To test that, grow this microbenchmark's
+`merk_team_loop`, for example with swe-muscl's face loops as further
+cases that never run, and see whether the rounds slow down (instruction
+cache, or spills on entry).
