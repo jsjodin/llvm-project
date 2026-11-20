@@ -1,0 +1,109 @@
+Experiments to run on r11 (gfx90a), in order of priority. Listed 2026-11-20.
+
+Assumes r11 has the same layout as the local machine:
+~/git/merkurius/{llvm-project,build-merk,merkurius-serghei-swe,merkurius-mc,
+merkurius-uts}, with build-merk built from merkurius/spills at 55c261059e38
+or later. Everything runs on one die unless noted. Set first:
+
+  W="python3 -I $HOME/git/merkurius/llvm-project/merkurius/utils/gpu/with-gpus.py --count 1 --"
+  B=$HOME/git/merkurius/build-merk
+
+
+1. SERGHEI dam break: does faces-once's gain hold on the gfx90a?
+   The implementation of "Each shared call once a tile, by the compiler"
+   (INPROGRESS.md) waits for this.
+
+     cd ~/git/merkurius/merkurius-serghei-swe
+     scripts/build-serghei.sh gfx90a
+     $W scripts/compare-dambreak.sh gfx90a 2048 5
+
+   On the gfx1030 kernel 2 was 1.64x kernel 0, bit-identical to SERGHEI.
+   Look at kernel 2 against kernel 0, and the port against SERGHEI. The
+   scripts set HSA_XNACK=1 themselves.
+
+
+2. SERGHEI valley flood, the case for kernel 3 (active tiles).
+
+     $W scripts/compare-valley.sh gfx90a 2048 3
+
+   On the gfx1030 at 2048: kernel 3 was 1.15x kernel 2.
+
+
+3. Register budget: waves 2, 3 and 4 on swe-muscl.
+   Sets the gfx90a default ("Register pressure in GPU processes", step 2).
+   Also decides whether to keep ca8b002 (inreg): keep it if 3 or 4 waves
+   beat 2.
+
+     cd ~/git/merkurius/llvm-project/merkurius/benchmarks/swe-muscl
+     for w in 2 3 4; do
+       for k in 1 2; do
+         echo "== waves $w kernel $k"
+         MERKC_FLAGS=-fgpu-process-waves=$w SWE_KERNEL=$k $W ./compare-swe-muscl.sh $B gfx90a 5
+       done
+     done 2>&1 | tee ~/waves.log
+
+   Today's gfx90a default is 2. Kernel 1 is step, kernel 2 step_faces.
+   HIP's time is printed beside each. The goal: Mercury 1.5 to 2 times
+   faster than now on gfx90a.
+
+
+4. No callee-saved registers (-fgpu-process-no-callee-saved).
+   Decides whether to keep 4745adb and 2b5a81e.
+
+     for f in "-fgpu-process-no-callee-saved" "-fgpu-process-no-callee-saved -fgpu-process-waves=3"; do
+       for k in 1 2; do
+         echo "== $f kernel $k"
+         MERKC_FLAGS="$f" SWE_KERNEL=$k $W ./compare-swe-muscl.sh $B gfx90a 5
+       done
+     done 2>&1 | tee ~/ncs.log
+
+   Compare with the same waves in 3. Static prediction: merk_team_loop
+   gains a little, merk_process_loop loses. Keep only for a clear gain;
+   the commits are costly to carry.
+
+
+5. MC E1.1 on the gfx90a: the place against Quicksilver.
+
+     cd ~/git/merkurius/merkurius-mc/mc-transport
+     OMPI_CXX=amdclang++ scripts/build_quicksilver.sh hip   # if bin/qs-hip is missing
+     QS_ENV="HSA_XNACK=1" GPU_WRAP="$W" bench/e11.sh 16 10
+     QS_ENV="HSA_XNACK=1" GPU_WRAP="$W" bench/e11.sh 32 10
+
+   The gfx1030 gave 4.77x qs-hip, but qs-hip is no speed reference there.
+
+
+6. UTS E1.2 and E1.3 on the gfx90a: S4 against S2 and S2r.
+
+     cd ~/git/merkurius/merkurius-uts/uts
+     scripts/build_place.sh; scripts/build_hip.sh
+     for s in place hip hip-resident; do
+       UNITS=0-109 bench/gpu1.sh $s "65536 262144 1048576" T1L T3L G2
+     done
+
+   gpu1.sh calls with-gpus.py itself. UNITS=0-109 is a whole MI250X die
+   (110 CUs). gfx1030 at half the card: S4/S2r 0.53 on T3L, 0.80 on G2.
+
+
+7. MC gate E0.3: stealing against replication. Multi-die; M4 waits on it.
+
+     cd ~/git/merkurius/merkurius-mc/mc-transport
+     scripts/run_s1.sh e01 && scripts/summarize_s1.py   # E0.1: which HSA_XNACK
+     XNACK=<winner> PROBLEMS="P1 P2 P4" DIE_SETS="0 0,1 0,1,2,3 0,1,2,3,4,5,6,7" scripts/run_s1.sh scaling
+     scripts/summarize_s1.py
+
+   Uses 8 dies: only when r11 is quiet. Put the two dies of a package
+   together in DIE_SETS (rocm-smi --showtopo). The headroom is computed
+   offline from the per-cycle timers.
+
+
+8. Optional: spawn-time specialization on the gfx90a.
+   Needs the hand-specialized copies a.m, b.m and c.m, which are only on
+   the local machine (the job's tmp/spec/): copy them over first.
+
+     cd ~/git/merkurius/merkurius-serghei-swe
+     for c in a b c; do
+       MERK_SOURCE=~/spec/$c.m $W scripts/time-port.sh gfx90a 0 2048 3
+     done
+
+   Statically, copy B spills 20 values in merk_process_loop at 3 waves on
+   the gfx90a; this shows whether that costs time.
