@@ -75,12 +75,14 @@ or later. Everything runs on one die unless noted. Set first:
 6. UTS E1.2 and E1.3 on the gfx90a: S4 against S2 and S2r.
 
      cd ~/git/merkurius/merkurius-uts/uts
+     scripts/build_uts.sh      # clones the reference UTS into reference/
      scripts/build_place.sh; scripts/build_hip.sh
      for s in place hip hip-resident; do
        UNITS=0-109 bench/gpu1.sh $s "65536 262144 1048576" T1L T3L G2
      done
 
-   gpu1.sh calls with-gpus.py itself. UNITS=0-109 is a whole MI250X die
+   bench/gpu1.sh reads the trees' parameters from reference/, which
+   build_uts.sh makes. gpu1.sh calls with-gpus.py itself. UNITS=0-109 is a whole MI250X die
    (110 CUs). gfx1030 at half the card: S4/S2r 0.53 on T3L, 0.80 on G2.
 
 
