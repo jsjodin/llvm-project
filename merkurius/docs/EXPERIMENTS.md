@@ -700,3 +700,18 @@ per second of tracking. Each is a single run.
 Logs: `merkurius-mc/mc-transport/results/E1.1/20261120-0839-16`,
 `-0841-32`, `-0857-16` and `-0859-32` (not in git); Quicksilver at 16³
 in this session's scratchpad, qs16.log.
+
+**After fixing `e11.sh`** (merkurius-mc): Quicksilver now runs from a copy
+of P1's input with `nSteps` set to the script's cycles. The script waits
+for the wrapper to accept a command before starting Quicksilver, and
+names its output folders to the second. Both sizes, end to end, at
+10 cycles each:
+
+| E1.1, 10 cycles each | 16³ | 32³ |
+|---|---|---|
+| Place, default | 1.457e7 | 3.491e7 |
+| Quicksilver | 1.262e6 | 3.701e6 |
+| **Place / Quicksilver** | **11.55×** | **9.43×** |
+
+Quicksilver's figure at 10 cycles is within 3% of its figure at 100.
+Logs: `results/E1.1/20261120-090946-16` and `-091106-32`.
