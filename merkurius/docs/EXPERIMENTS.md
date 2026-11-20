@@ -319,3 +319,52 @@ the waves, so their times are the same in every run, within 1%.
 
 Logs: the per-run traces went to /tmp (deleted); the summary is in this
 session's scratchpad, waves.log.
+
+### 3b. Do step_faces' group-private arrays fit in LDS? Not at 2 waves
+
+A team's share of LDS for group-private arrays is `GroupBytes`
+(runtime/gpu-processes.cpp): the most dynamic LDS that keeps the
+kernel's occupancy. swe-muscl's kernel has 248 VGPRs, so 2 waves a SIMD;
+a team of 256 threads is 4 waves of 64, so two teams share a CU's 64 KB.
+A temporary probe in `GroupAllocate` (reverted) printed what the runtime
+chose, and the first array that didn't fit:
+
+| Build | Team's LDS budget | step_faces `Faces0` (33,800 B) | `Diffs0` (24,584 B) |
+|---|---|---|---|
+| swe-muscl, 2 waves (default) | 31,232 B | malloc'd in every tile | in LDS |
+| swe-muscl, 1 wave | 64,000 B | in LDS | in LDS |
+| SERGHEI port, kernel 2, tiles of 32 (101,384 B) | 31,232 B | malloc'd in every tile | |
+
+So at the default, every tile of `step_faces`, and of the port's kernel 2,
+pays the GPU's malloc and free for its faces, and keeps them in global
+memory.
+
+But that isn't most of kernel 2's gap to HIP (item 3: 0.556 against 0.250 ms):
+
+| swe-muscl, ms a step (3 rounds, GPU 4) | 1 wave | 2 waves (item 3) |
+|---|---|---|
+| Mercury `step` (k1) | 0.364 | 0.304 |
+| Mercury `step_faces` (k2) | 0.550 | 0.556 |
+| HIP `step_faces` | 0.250 | 0.250 |
+
+- **Occupancy costs `step` 20% at 1 wave.** If `step_faces` lost the same,
+  fitting its arrays in LDS gained about 17%.
+- **HIP's `step_faces` runs at the same occupancy as Mercury's 1-wave
+  build.** It asks for the 33.8 KB of faces in dynamic LDS, one block a CU,
+  so 1 wave a SIMD. Even then, with nothing malloc'd, Mercury's is 2.2×
+  slower.
+- **HIP keeps each thread's differences in registers** (4 cells a thread,
+  `dm`/`dn`/`da`). Mercury keeps them in a second group-private array,
+  `Diffs0`, with a team loop and its barriers to write and read them.
+
+Open:
+- **Where the rest of the 2.2× goes.** Candidates: `Diffs0` in LDS against
+  registers, and the per-tile team loops (`x_faces`, `x_diffs`, ...)
+  with their barriers against HIP's one kernel body. A probe of the
+  per-phase times would tell.
+- **Fallback cost:** a team could keep its fallback block from one tile to
+  the next instead of a malloc and free each time. That's cheap to try,
+  and helps whenever an array doesn't fit.
+- **Choosing the budget:** when a module's group-private arrays need more
+  than the occupancy-preserving share, the runtime could size dynamic LDS
+  for them and give up occupancy, as HIP's launch does.
