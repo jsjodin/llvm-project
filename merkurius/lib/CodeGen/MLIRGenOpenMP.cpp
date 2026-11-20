@@ -1107,8 +1107,18 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
   bool evaluated{
       kernel.hostEvalBounds && !target_.options().openMPIsTargetDevice};
   // The loop's goals, before the region too, for First, which is one of
-  // them, and for the host_eval values.
+  // them, and for the host_eval values. The region makes them again
+  // (GenerateParallelLoop), so what they bound here is forgotten once
+  // First and the host_eval values are taken (forgetBounds): else a goal
+  // made again would test a variable that it binds, such as a field of a
+  // record, against the value from here, and its failure would be a branch
+  // out of the region before the loop.
+  llvm::SmallVector<BodyVar> boundsBound;
   if (!reductions.empty() || evaluated) {
+    llvm::DenseSet<BodyVar> before;
+    for (const auto &entry : values_) {
+      before.insert(entry.first);
+    }
     for (const Body *g : goals) {
       if (g != trip && g != call) {
         Goal(*g, body);
@@ -1117,7 +1127,17 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
     if (failed_) {
       return;
     }
+    for (const auto &entry : values_) {
+      if (!before.contains(entry.first)) {
+        boundsBound.push_back(entry.first);
+      }
+    }
   }
+  auto forgetBounds{[&]() {
+    for (BodyVar var : boundsBound) {
+      values_.erase(var);
+    }
+  }};
   llvm::SmallVector<UpdatedSlot> updated;
   // On a device, a loop that is not a kernel of its own starts from one thread
   // of a region, whose stack the team's other threads cannot read.
@@ -1136,6 +1156,7 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
   ParallelLoop parallelLoop{goals, trip, call, loop, *loopBody, bodyCall,
       bodyProcedure, reductions, teams, distribute, offloaded, at, *schedule};
   if (!offloaded) {
+    forgetBounds();
     GenerateParallelLoop(parallelLoop, body, loc);
     if (failed_) {
       return;
@@ -1159,6 +1180,7 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
         ValueOf(loop->step > 0 ? big : small),
         IntegerConstant(builder_.getI64Type(), loop->step, loc)};
   }
+  forgetBounds();
   std::optional<mlir::Value> device{IntegerClause(queue->front(),
       llvm::omp::OMPC_device, "device number", body, at, loc)};
   if (!device) {
