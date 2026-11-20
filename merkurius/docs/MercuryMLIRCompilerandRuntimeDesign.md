@@ -2244,7 +2244,7 @@ The unparser's exact, canonical and fully parenthesized modes (Front end, Unpars
 
   The link is Clang's, with `-fopenmp --offload-arch=` and the `-O` given, which runs `clang-linker-wrapper`, which compiles the GPUs' code at that `-O`, or at `-O2` without one, as Clang's and Flang's links do: it extracts the device bitcode, links it with `libompdevice` and compiles it for each GPU, adds the code that registers it with the offload runtime, and links the host with `libomp` and `libomptarget`. `-L` adds library directories for the link, such as those of the OpenMP runtime when it is not beside Clang. `-v` is passed on to the link, so that Clang shows its own jobs, such as the linker wrapper's for the GPUs' code, as Flang's `-v` does. With `-c` the jobs stop after step 4; `-E` has no offload jobs; `-S` and GPUs other than AMD's are not supported yet. The link adds Merkurius's device runtime, `libmerkdevice-amdgcn.a` beside `libmerkrt.a`, bitcode for any AMD GPU that this build's Clang compiles from `runtime/device`, with `-Xoffload-linker-amdgcn-amd-amdhsa`, so that the linker wrapper links it into the device image beside `libompdevice` (Send and receive in a target region, As implemented). Not yet done, as Flang does: linking the device libraries (`-mlink-builtin-bitcode` with ROCm's `ocml` and the rest), which device code that calls maths will need, and `-flto=full` for the device compile.
 - **Images of GPU process kinds** (docs/INPROGRESS.md, GPU processes without `omp target`, step 4b). With `-fprocess-declarations --offload-arch=`, each source first gets, for each GPU:
-  1. device `-fc1 -emit-llvm-bc -fprocess-kernels`, for the GPU's triple and without OpenMP, which compiles a start `merk_process_<kind>` for each kind marked `on gpu`, which loads the kind's arguments from the process's words and calls its predicate, and `merk_process_dispatch`, which starts a kind by its number, its place among the module's kinds marked `on gpu`; it keeps only what `merk_process_dispatch` reaches, and hides it all; its bitcode is named `.o`, so that Clang hands it to the linker as it is;
+  1. device `-fc1 -emit-llvm-bc -fprocess-kernels`, for the GPU's triple and without OpenMP, with the GPU's defaults for its kernel's registers unless the program's options say otherwise (`-fgpu-process-waves=2 -fgpu-process-no-callee-saved` on gfx90a, none elsewhere; `defaultProcessWaves` and `defaultProcessNoCalleeSaved` in `tools/merkc/driver.cpp`, as Clang's driver gives a GPU's defaults to `-cc1`; Measurements, Shallow water, second order), which compiles a start `merk_process_<kind>` for each kind marked `on gpu`, which loads the kind's arguments from the process's words and calls its predicate, and `merk_process_dispatch`, which starts a kind by its number, its place among the module's kinds marked `on gpu`; it keeps only what `merk_process_dispatch` reaches, and hides it all; its bitcode is named `.o`, so that Clang hands it to the linker as it is;
   2. `clang --target=amdgcn-amd-amdhsa -mcpu=<gpu> -flto -O2`, which links the image, a shared object, from it, `merk-process-start-amdgcn.o` (the start object, which defines the image's one kernel, `merk_place`, and libc's RPC client and `merk_device_number`, so that LTO exports them), `libmerkdevice-amdgcn.a`, and libc and libm for the GPU, which Clang finds beside itself. It optimizes at the `-O` given, or else at `-O2`, as the linker wrapper does for OpenMP's device code: AMDGPU's code generation is not well tested at `-O0`, and fails at `-O0` and `-O1` on a `musttail` call in divergent control flow (LLVM bugs to report, below).
 
   The host's compile, the object's or with `-fopenmp` the host bitcode's, gets `-fembed-process-image=<gpu>:<image>` for each, and embeds the image of a module that has such kinds as a constant, which a constructor registers with the runtime (`merk_register_process_image`), with the names of its kinds in the order that numbers them. The link is the host's alone without `-fopenmp`, and adds `-lLLVMOffload`, through which the runtime launches the kernels (step 4c). A module without such kinds gets an image without kernels, which its host compile leaves out.
@@ -4341,14 +4341,17 @@ The speed tests' numbers, so that a change can be held against them. How each
 is run, and what is learned from it, is in its README in `benchmarks/`
 (`pingpong`, `array-messages`, `bandwidth`, `team-barrier`).
 
-All were taken on one machine: an AMD Ryzen Threadripper PRO 5965WX (24 cores,
+Most were taken on one machine: an AMD Ryzen Threadripper PRO 5965WX (24 cores,
 48 threads) and an AMD Radeon RX 6950 XT (gfx1030) on PCIe, with the programs at
 -O2. "Between nodes" means two processes over TCP on loopback, so no real
 network is in these numbers, and "GPU / GPU" means two processes sharing that
 one GPU. Runs between nodes vary from one to the next, by up to a third before
 the spin, so only differences of several microseconds mean anything. Each table
 gives the date and the commit of the tree it was measured on; a later change
-may have moved its numbers.
+may have moved its numbers. Those marked "On gfx90a" are from one die of an
+AMD Instinct MI250, 104 compute units, in a shared machine of eight such dies
+and 128 host cores; each says which die, and other users' jobs may have run
+on the others.
 
 ### Target regions
 
@@ -5602,6 +5605,99 @@ and machine, uncommitted on 2b5a81e2cd4a:
 No change from without it: on the gfx1030 its fewer spills under a cap
 don't show.
 
+**On gfx90a.** 2026-11-20 at 987ff6231755, GPU 4, the same case, 5
+rounds, the median; µs a step. Every program gave the same checksum.
+(docs/EXPERIMENTS.md, 3 to 4.)
+
+| Kernel | 2 waves | 3 waves | 4 waves | 2 waves, no callee-saved | 3 waves, no callee-saved | C, OpenMP | HIP |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `step` | 304 | 361 | 573 | **231** | 323 | 228 | 310 |
+| `step_faces` | 556 | 745 | 757 | **394** | 645 | — | 250 |
+
+- **2 waves is best, by 19 to 88%.** Uncapped, the backend takes AGPRs
+  beyond a SIMD's half of the registers, one wave a SIMD; 2 waves keep the
+  half's 256 VGPRs. More waves only add spills.
+- **Without callee-saved registers `step` is 24% faster and `step_faces`
+  29%.** `step` then beats HIP and ties C. Every team loop of a module runs
+  in one `merk_team_loop`, 63 KB in swe-muscl, whose prologue saved 50
+  VGPRs to scratch and 37 SGPRs into lanes, and whose epilogue restored
+  them: about 18 µs a team loop. A microbenchmark's team loops, run inside
+  swe-muscl's `merk_team_loop`, took 21.1 µs a tile for 5 rounds of filling
+  an array in LDS, against 2.0 alone and 2.35 without callee-saved
+  registers. Both 2 waves and no callee-saved registers are gfx90a's
+  defaults, chosen by the driver since 37fadfa451a3; on the gfx1030 neither
+  helps (above).
+- **`step_faces` is still 1.56 times HIP's.** Timed by phase on the device
+  (the steady counter), before the change above:
+  - At 2 waves a team's share of LDS is 31,232 bytes, so `Faces0`
+    (33,800 B) goes to the GPU's malloc and free in every tile, 28 µs of a
+    268 µs tile. At 1 wave it fits, but `step` loses 20%; HIP's asks for
+    its faces in dynamic LDS, one block a CU.
+  - The barrier after each round costs 1 to 3%. Neither registers (248
+    VGPRs against HIP's 120), nor spills, nor flat addressing explains the
+    rest: loop by loop the code is HIP's size, and flat addressing costs HIP
+    7% when forced on it.
+  - `x_diffs` is a team loop of its own, where HIP keeps the differences in
+    registers.
+
+  What is left to try is in docs/INPROGRESS.md, From the gfx90a runs.
+
+### SERGHEI's shallow water, ported
+
+The merkurius-serghei-swe repository ports SERGHEI's shallow-water solver
+(SERGHEI-SWE, Kokkos, here with its HIP backend) to Mercury, in one GPU
+process. Kernel 0 computes each face's solver twice, once for each cell;
+kernel 2 computes each face once a tile, into a group-private array; kernel
+3 is kernel 2 on the tiles that are wet only. Two cases at 2048²: a circular
+dam break for 8 s (252 steps) and a valley flood for 600 s, where 12.6% of
+the cells start wet.
+
+**On gfx90a.** 2026-11-20 at f08750271e46 with `-fgpu-process-no-callee-saved`,
+today's default, SERGHEI at 2728883; the dam break on GPU 6, 5 rounds, the
+valley on GPU 2, 3 rounds, SERGHEI and the port taking turns; the median ms a
+step. SERGHEI's time is its `swe.solve` timer, which leaves out its volume sum
+each step and its output: its best case. (docs/EXPERIMENTS.md, 1 to 2e and 4.)
+
+| 2048², ms a step | Dam break | vs SERGHEI | Valley | vs SERGHEI |
+|---|---:|---:|---:|---:|
+| SERGHEI (Kokkos, HIP), `swe.solve` | 2.594 | 1.00× | 1.992 *(no FMA)* | 1.00× |
+| SERGHEI, whole run | 15.565 | | 2.972 | |
+| Port, kernel 0 | **1.732** | **1.50×** | **1.094** | **1.82×** |
+| Port, kernel 2, tiles of 32 | 2.839 | 0.91× | 2.012 | 0.99× |
+| Port, kernel 2, tiles of 64 | 2.976 | 0.87× | | |
+| Port, kernel 3, tiles of 32 | | | 1.413 | 1.41× |
+
+- **Same results:** every run of a case ends at the same volume. On the
+  valley the port takes 7270 steps and SERGHEI 7182, from a cube root that
+  differs by an ulp, so the times are per step.
+- **SERGHEI's default build stalls on the valley:** its time step goes to
+  exactly 0 at 470.27 s, and it runs on without moving. Its build without
+  FMA (`-ffp-contract=off`) finishes, so it is the baseline there. Not
+  reported upstream yet.
+- **SERGHEI's whole run** is 9 times kernel 0's step on the dam break and
+  2.7 times on the valley: every array is managed memory
+  (`Kokkos::SharedSpace`).
+- **Faces-once reverses:** on the gfx1030 kernel 2 was 1.64 times faster
+  than kernel 0; here kernel 0 is the port's fastest, and both tiled
+  kernels lose to it (docs/INPROGRESS.md, Each shared call once a tile,
+  paused).
+- **Kernel 3 took 30.6 ms a step before f08750271e46.** Its cell update
+  captured an 88-byte record of parameters, which merkc boxed once a tile
+  to pass to the team loop; a worker team's first wave got the box from
+  the GPU's malloc, onto one list by compare-and-swap, freed only when the
+  process ends, about 13 million blocks a run. merkc now passes a flat
+  record to a process loop a word per field (docs/INPROGRESS.md, GPU
+  processes that run loops), and kernel 3 went to 1.57 ms.
+- **The kernels share their code, so they move each other.** That change
+  made kernel 2 with tiles of 32 10% slower on the dam break, though its
+  own code hardly changed: every loop body of a module is inlined into one
+  `merk_process_loop`, and the team loops into one `merk_team_loop`.
+  Without callee-saved registers it came back (2.84 ms against 3.15).
+- **No callee-saved registers** made the tiled kernels 3 to 10% faster and
+  left kernel 0, which has no team loops, as it was.
+
+### A pipeline of GPU processes
+
 ### A pipeline of GPU processes
 
 `benchmarks/pipeline`: three GPU processes on one GPU, each with a third of
@@ -5893,6 +5989,31 @@ module from its caller.
 The same as a version of the port that returned the cell and facet as two
 integers instead (2.03e7), and every count was the same in all three.
 
+### Monte Carlo transport against Quicksilver
+
+2026-11-20 at 987ff6231755, on gfx90a, GPU 4: the place of merkurius-mc's
+port (`bench/e11.sh`, E1.1) against LLNL's Quicksilver at eb68bb8 with the P4
+patch, built for gfx90a with HIP (`qs-hip`, run with `HSA_XNACK=1`). P1
+(CTS2), 10 particles a cell, one rank, 10 cycles; segments a second of
+tracking, one run each. (docs/EXPERIMENTS.md, 5.)
+
+| E1.1 | 16³ | 32³ |
+|---|---:|---:|
+| The place, a Mercury GPU process | 1.457e7 | 3.491e7 |
+| Quicksilver, HIP | 1.262e6 | 3.701e6 |
+| **Place / Quicksilver** | **11.6×** | **9.4×** |
+
+- **About 10 times Quicksilver's HIP build,** against 4.77 times on the
+  gfx1030. Quicksilver's checks all pass: absorption, fission and scatter
+  ratios, no particles lost, and homogeneous fluence.
+- **Without callee-saved registers, now gfx90a's default, the place was 2
+  to 3% slower** (1.435e7 and 3.417e7, against 1.462e7 and 3.516e7 in a
+  run the same morning), within what one run each can tell: its tracking
+  runs in the process itself, not in team loops. Not rerun with the
+  default.
+
+### GPU processes' stacks
+
 ### GPU processes' stacks
 
 2026-11-13, at bddf7bd56f9a with the change that marks a GPU process's code
@@ -6067,6 +6188,30 @@ the row before; the HIP and host numbers did not change.
 S4 is now 3.5% behind S2 on T1L, 1.6 times it on G2 and 1.9 times on the
 narrow T3L, where S2's readback each round dominates. Against the host's
 48 threads, S4 is 6.2 times on T1L, 4.0 on G2 and 1.1 on T3L.
+
+**On gfx90a.** 2026-11-20 at 987ff6231755, merkurius-uts at 99ecaef, all 104
+compute units of GPU 4, five runs, median million nodes a second; every
+tree's size matches the reference's. S2r is resident HIP, every round in one
+kernel. Before no callee-saved registers became gfx90a's default; not rerun
+with it. (docs/EXPERIMENTS.md, 6.)
+
+| Tree, K | S4, place | S2, HIP | S2r, resident HIP | S4 / S2 | S4 / S2r |
+|---|---:|---:|---:|---:|---:|
+| T1L, 65536 | 505 | 452 | 572 | 1.12 | 0.88 |
+| T1L, 262144 | 1166 | 1068 | 1348 | 1.09 | 0.86 |
+| T1L, 1048576 | 1594 | 1555 | 1778 | 1.03 | 0.90 |
+| T3L, 262144 | 131 | 109 | 194 | 1.20 | 0.68 |
+| G2, 262144 | 443 | 370 | 520 | 1.20 | 0.85 |
+
+- **The place beats the HIP baseline everywhere,** by 3 to 22%, and loses
+  to resident HIP everywhere, by 10 to 33%. T3L doesn't change with K;
+  G2 is 10% slower at K = 65536 (400).
+- **Against resident HIP, about as on the gfx1030,** which ran on half the
+  card after the team size's change: T3L 0.67 against 0.65 there, G2 0.85
+  against 0.92. (EXPERIMENTS.md compares with the gfx1030's figures from
+  before that change, 0.53 and 0.80.)
+- **T3L, the deep binomial tree with little work a round,** stays the
+  place's worst case.
 
 ### The collector
 
