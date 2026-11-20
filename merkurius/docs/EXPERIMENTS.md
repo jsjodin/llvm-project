@@ -242,3 +242,42 @@ Open, found on the way:
 - **Fix 2 (runtime) is still open:** a team's first wave that really makes a
   cell in a distribute body still goes to the GPU's malloc and keeps the
   block until the process ends.
+
+### 2e. SERGHEI against the port, alternating, after fix 1
+
+```
+scripts/compare-dambreak.sh gfx90a 2048 5                         # GPU 4
+SERGHEI_VARIANT=nofma scripts/compare-valley.sh gfx90a 2048 3     # GPU 6
+```
+
+In each round SERGHEI and the port took turns on one GPU. The port was
+built by merkc with fix 1 (2d). The dam break ran on GPU 4 and the valley
+on GPU 6, at the same time, on different packages. The baseline is
+SERGHEI's default build for the dam break, and its no-FMA build for the
+valley, whose default build stalls (item 2). Times are medians; the spread
+across rounds is at most 1.8%.
+
+| 2048², ms a step | Dam break (252 steps) | vs SERGHEI | Valley (7182 / 7270 steps) | vs SERGHEI |
+|---|---|---|---|---|
+| SERGHEI (Kokkos, HIP), `swe.solve` | 2.598 | 1.00× | 1.999 | 1.00× |
+| SERGHEI, whole run | 15.565 | | 2.972 | |
+| Port, kernel 0 | **1.731** | **1.50×** | **1.099** | **1.82×** |
+| Port, kernel 2, tiles of 32 | 3.153 | 0.82× | 2.203 | 0.91× |
+| Port, kernel 2, tiles of 64 | 3.061 | 0.85× | | |
+| Port, kernel 3, tiles of 32 | | | 1.565 | 1.28× |
+
+- **Same results:** all runs of a case end at the same volume. On the
+  valley the port takes 7270 steps and SERGHEI-nofma 7182, so the times are
+  compared per step.
+- **The comparison is against SERGHEI's best case:** `swe.solve` leaves out
+  its volume sum each step and its output. Its whole run per step, with
+  managed memory (`Kokkos::SharedSpace` for every array, src/define.h),
+  is 9.0× kernel 0's on the dam break and 2.7× on the valley.
+- **Kernel 0 is the port's best case on the gfx90a.** The tiled kernels lose
+  to it. Kernel 3 beats SERGHEI on the valley, but not kernel 0.
+- **Agrees with the earlier, separate runs** (items 1 and 2b, the A/B in
+  2d) within 2.5%. SERGHEI-nofma on the valley was 2.3% faster here than
+  in 2b (1.999 against 2.046 ms), with that run on a different GPU.
+
+Logs: `merkurius-serghei-swe/results/dambreak-gfx90a-2048-20261120-072716`
+and `results/valley-gfx90a-2048-20261120-072719` (not in git).
