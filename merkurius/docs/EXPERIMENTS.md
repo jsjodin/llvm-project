@@ -612,3 +612,51 @@ swe-muscl itself, `compare-swe-muscl.sh` 3 rounds, GPU 4, same checksum
 - **By item 4's rule this is a clear gain,** so 4745adb and 2b5a81e stay.
   The flag is a candidate for the gfx90a's default. The rest of item 4
   (with 3 waves, and `merk_process_loop`'s side) still has to run.
+
+### 4. No callee-saved registers (-fgpu-process-no-callee-saved)
+
+**swe-muscl** (`compare-swe-muscl.sh` 5 rounds, GPU 4, same checksum). The
+columns without the flag are item 3's:
+
+| ms a step | 2 waves | 2 waves, no callee-saved | 3 waves | 3 waves, no callee-saved |
+|---|---|---|---|---|
+| `step` (k1) | 0.304 | **0.231** | 0.361 | 0.323 |
+| `step_faces` (k2) | 0.556 | **0.394** | 0.745 | 0.645 |
+| C | 0.228 | 0.235 | 0.228 | 0.241 |
+| HIP (k1 / k2) | 0.310 / 0.250 | 0.311 / 0.249 | 0.310 / 0.248 | 0.311 / 0.251 |
+
+**The SERGHEI port** with the flag, against 2e's runs without it. Dam
+break: 5 rounds on GPU 6. Valley: 3 rounds on GPU 2, against
+SERGHEI-nofma. Both ran at the same time and give 2e's volumes.
+SERGHEI's own times are within 0.4% of 2e's.
+
+| 2048², ms a step | Dam break, 2e | with the flag | vs SERGHEI | Valley, 2e | with the flag | vs SERGHEI |
+|---|---|---|---|---|---|---|
+| SERGHEI, `swe.solve` | 2.598 | 2.594 | 1.00× | 1.999 | 1.992 | 1.00× |
+| Port, kernel 0 | 1.731 | 1.732 | 1.50× | 1.099 | 1.094 | 1.82× |
+| Port, kernel 2, tiles of 32 | 3.153 | **2.839** | 0.91× | 2.203 | **2.012** | 0.99× |
+| Port, kernel 2, tiles of 64 | 3.061 | **2.976** | 0.87× | | | |
+| Port, kernel 3, tiles of 32 | | | | 1.565 | **1.413** | 1.41× |
+
+- **A clear gain wherever there are team loops:** swe-muscl's kernels
+  24 and 29% faster at 2 waves, the port's tiled kernels 3 to 10%.
+  Kernel 0, which has no team loops, doesn't change. By the list's rule,
+  4745adb and 2b5a81e stay.
+- **2 waves stays the default.** At 3 waves the flag helps too, 11 to
+  13%, but still loses to 2 waves.
+- **The flag should be the gfx90a's default:** nothing measured here
+  gets slower. Kernel 0 and SERGHEI's other loops run in
+  `merk_process_loop`, which the flag also compiles without callee-saved
+  registers, and kernel 0 stays the same.
+- **The port's tiled kernels still lose to kernel 0,** and kernel 2 to
+  SERGHEI on the dam break. The flag takes the dam break's kernel 2 with
+  tiles of 32 back to where it was before fix 1 (2.86, 2d). That fits
+  2d's suspicion that fix 1's slowdown there was a side effect of the
+  shared function's code.
+
+To pass the flag, merkurius-serghei-swe's compare scripts now take
+`MERKC_FLAGS`, as swe-muscl's does (uncommitted there).
+
+Logs: `merkurius-serghei-swe/results/dambreak-gfx90a-2048-20261120-083323`
+and `results/valley-gfx90a-2048-20261120-083323`; swe-muscl's in this
+session's scratchpad, ncs.log.
