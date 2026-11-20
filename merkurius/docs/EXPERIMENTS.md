@@ -2,7 +2,11 @@
 
 Results of the runs listed in `experiments.txt`, as they come in. Each entry
 says what was run, on what, and what it shows. A result moves to
-`INPROGRESS.md` once it leads to an action.
+`INPROGRESS.md` once it leads to an action. Its numbers go to the design
+document's Measurements, or to the INPROGRESS entry of a design still open:
+the r11 runs of 2026-11-20 are there (Shallow water, second order; SERGHEI's
+shallow water, ported; Monte Carlo transport against Quicksilver; UTS on one
+GPU; and in INPROGRESS, Direct sends and GPU processes that run loops).
 
 ## r11 (gfx90a), 2026-11-20
 
