@@ -3773,21 +3773,43 @@ int EnterPeerQueue(PeerQueue *queue, uint64_t incarnation) {
   return (running >> 1) < incarnation ? -1 : 0;
 }
 
+// The release before a sender's store or add that a receiver on another GPU
+// acquires. A message with a copy in the sender's send pool needs it at
+// system scope, which writes the copy back from the sender's L2 before the
+// receiver reads it across the link. An inline message needs only the
+// device's scope: every word of it, and of its slot, goes by stores into
+// the receiver's fine-grained memory, which the sender's L2 does not hold,
+// so once the stores are done (the wait both scopes make) the receiver
+// sees them. On gfx90a the system scope adds buffer_wbl2, which writes back
+// all the L2's dirty lines: about 2 us a message while a place's other
+// processes write (docs/EXPERIMENTS.md, H1 and H2). The store or add that
+// follows stays at system scope.
+void PeerRelease(bool inlinePut) {
+  if (inlinePut) {
+    __scoped_atomic_thread_fence(__ATOMIC_RELEASE, kDevice);
+  } else {
+    __scoped_atomic_thread_fence(__ATOMIC_RELEASE, kSystem);
+  }
+}
+
 // The sender is done with the peer queue: its put before the closing
 // receiver's drain. The count goes down by an add of -1, as a subtract
 // has no atomic operation over PCIe, between GPUs without a link (see
-// FlushReturns).
-void LeavePeerQueue(PeerQueue *queue) {
+// FlushReturns). After an inline put, the release is at the device's
+// scope, as PutPeer's is (PeerRelease).
+void LeavePeerQueue(PeerQueue *queue, bool inlinePut) {
+  PeerRelease(inlinePut);
   __scoped_atomic_fetch_add(
-      &queue->state, ~uint64_t{0}, __ATOMIC_RELEASE, kSystem);
+      &queue->state, ~uint64_t{0}, __ATOMIC_RELAXED, kSystem);
 }
 
 // Puts a message in the peer queue at the next position, waiting while its
-// slot still holds the message of a lap before. The release at system scope
-// writes the sender's copy back from its L2 before the receiver sees the
-// slot. The sender writes the slot only once it has seen it free, which
-// the receiver frees after it has read it. A small array's words go in the
-// slot, across the link, as stores that do not wait for each other.
+// slot still holds the message of a lap before. The release (PeerRelease)
+// writes the sender's copy back from its L2, if it has one, before the
+// receiver sees the slot. The sender writes the slot only once it has seen
+// it free, which the receiver frees after it has read it. A small array's
+// words go in the slot, across the link, as stores that do not wait for
+// each other.
 void PutPeer(PeerQueue *queue, const PeerCopy &peerCopy) {
   uint64_t message{peerCopy.message};
   PoolBlock *copy{peerCopy.copy};
@@ -3813,8 +3835,9 @@ void PutPeer(PeerQueue *queue, const PeerCopy &peerCopy) {
                  __atomic_load_n(&returnRing, __ATOMIC_RELAXED))
            : 0,
       __ATOMIC_RELAXED, kSystem);
+  PeerRelease(copy == nullptr);
   __scoped_atomic_store_n(
-      &slot.sequence, position + 1, __ATOMIC_RELEASE, kSystem);
+      &slot.sequence, position + 1, __ATOMIC_RELAXED, kSystem);
 }
 
 // Sends to the process of a peer route. A message to a process that has
@@ -3838,7 +3861,7 @@ void PeerSend(Route *route, MakePeer makePeer) {
     __builtin_amdgcn_s_sleep(8);
   }
   PutPeer(queue, copy);
-  LeavePeerQueue(queue);
+  LeavePeerQueue(queue, copy.copy == nullptr);
   CountPeer(&PlaceTable::peerSends, 1);
 }
 
