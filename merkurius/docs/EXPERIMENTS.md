@@ -413,3 +413,30 @@ Differences that could account for the 2.2 to 2.8×, none tested yet:
   barrier as a gain of 8 to 17% on light loops; this body is heavy.
 - **Calls:** each round calls the body, and the rounds are recursion turned
   into a loop. HIP's loop body is inlined into the kernel.
+
+### 3d. Without the per-round barrier: no gain
+
+A temporary switch in `ProcessLoopRounds` (reverted) made merkc keep a
+team loop's barrier only after its last round, not after every round.
+The 3c phase-timed build ran with and without it, two runs each, on GPU 4.
+Every run gave the usual checksum.
+
+| µs per tile | 2 waves, per round | 2 waves, last only | 1 wave, per round | 1 wave, last only |
+|---|---|---|---|---|
+| Group-private arrays | 27.8 | 28.6 | 7.1 | 6.3 |
+| `x_faces` | 89.7 | 87.0 | 63.1 | 62.9 |
+| `x_diffs` | 19.8 | 24.0 | 6.1 | 5.4 |
+| `y_faces` | 74.1 | 69.4 | 52.0 | 49.6 |
+| `faces_tile` | 56.3 | 56.5 | 33.0 | 31.9 |
+| Whole step, ms (host) | 0.571 | 0.564 | 0.588 | 0.571 |
+
+- **The barriers cost 1 to 3% of the step,** within the noise of a phase
+  or two. They aren't the 2.7× gap to HIP (3c), so the per-round barrier
+  stays, as INPROGRESS.md (d2) found it a gain on light loops.
+- **One run of the 1-wave build without the barriers printed nothing.**
+  Its output wasn't kept. 31 more runs of the variants without the barriers
+  all passed, so it may be the switch, or a flake like gpu-pairs'.
+  Not followed up, since the switch was reverted.
+
+Left from 3c: registers and scratch (248 VGPRs and 768 B against HIP's
+120 and none), and the body called from the rounds rather than inlined.
