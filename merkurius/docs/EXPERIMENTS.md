@@ -841,3 +841,68 @@ What it shows:
 - **Polling isn't the problem:** a look every 2.2 µs adds about 1.1 µs
   on average. Each look still pays for `Now()`, needed only for a finite
   timeout, and every 8th pays 2.9 µs for the host ring.
+
+### H2. The inline peer send's release: system scope isn't needed, and costs 2 µs under load
+
+```
+clang -x hip -O2 --offload-arch=gfx90a --rocm-path=/opt/rocm \
+  benchmarks/gpu-pairs/peer.hip -L/opt/rocm/lib -lamdhip64 -lstdc++ \
+  -Wl,-rpath,/opt/rocm/lib -o peer
+ROCR_VISIBLE_DEVICES=4,5 ./peer slot 0 1 1000000 4     # and 32 words
+```
+
+H1 found 2.8 µs in `PutPeer`'s stores and its release at system scope.
+On gfx90a a release at system scope and one at device scope differ only by
+`buffer_wbl2`, which writes back the L2's dirty lines. Both wait for the
+stores to complete (`s_waitcnt vmcnt(0)`, from clang for gfx90a). An inline
+message's words, and its slot's fields, all go by stores into the
+receiver's fine-grained memory. The peer queues are there
+(runtime/gpu-processes.cpp, RunningProcess). Nothing of the sender's own
+memory is read.
+
+peer.hip's new `slot` mode (experiment 5) is `PutPeer` and `TakePeer`
+alone, between waves on ROCR 4 and 5:
+- A wave on A puts messages into 16 slots in B's fine-grained memory, and
+  publishes each by a store of the slot's sequence. The store is relaxed
+  with no wait (a control), a release at device scope, or at system scope.
+- A wave on B takes each after an acquire at device scope, as `TakePeer`
+  does, checks every word, and frees the slot.
+- A's L2 is clean, or the sender dirties 64 lines of A's memory before each
+  message, or 96 other teams on A write 32 MiB over and over meanwhile, as a
+  place's other processes would.
+- Device-timed on A, 1M messages each.
+
+| µs a message, wrong words | 4 words | 32 words |
+| --- | --- | --- |
+| Relaxed, no wait | 1.436, 0 | 8.037, **1** |
+| Release, device scope | 1.417, 0 | 7.475, 0 |
+| Release, system scope | 1.341, 0 | 7.798, 0 |
+| Relaxed, no wait, 64 lines dirtied | 2.925, 0 | 7.640, 0 |
+| Release, device scope, 64 lines | 3.362, 0 | 7.903, 0 |
+| Release, system scope, 64 lines | 3.412, 0 | 7.070, 0 |
+| Relaxed, no wait, other teams | 3.368, 0 | 7.572, 0 |
+| Release, device scope, other teams | 4.181, 0 | 8.058, 0 |
+| Release, system scope, other teams | **6.259**, 0 | **9.770**, 0 |
+
+- **The device scope is enough for an inline message.** Over 6M messages
+  it let no wrong word through. The relaxed control did, twice, so the
+  check can catch reordering. The sender's stores to the receiver's
+  fine-grained memory aren't held in its L2. Once they're complete, the
+  receiver sees them.
+- **The writeback costs what the L2 holds dirty.** With a clean L2, or 64
+  lines, the scopes cost the same. With other teams writing, system scope
+  costs 2.1 µs more at 4 words and 1.7 at 32. That matches H1's 2.8 µs
+  inside a place, where the process's own arena and the other processes
+  dirty the L2.
+- **Only inline messages qualify.** A message with a copy in the sender's
+  send pool, in its own memory, needs the writeback, so the receiver's
+  loads across the link see the copy (H1; INPROGRESS.md, Direct sends,
+  step 3). So does `LeavePeerQueue`'s release, which follows the put: with
+  the put at device scope, it would pay the writeback instead, unless it
+  goes to device scope too for inline messages.
+- **The runtime's peer queues are the same kind of memory:**
+  `DeviceAllocateFine` (runtime/devices.cpp) calls `olMemAlloc` with
+  `kOlAllocTypeDeviceFineGrained`. That maps to `TARGET_ALLOC_DEVICE_FINE`,
+  which the AMDGPU plugin takes from the GPU's fine-grained memory pool
+  (offload/plugins-nextgen/amdgpu/src/rtl.cpp), as
+  `hipDeviceMallocFinegrained` does.
