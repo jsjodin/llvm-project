@@ -1,0 +1,12 @@
+process-loop-records.m's scaler spawned on the machine's GPU: params goes to
+its loops a word for each field, from one tile to more tiles than the GPU
+has teams, and the nested record still in one word.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-loop-records.m -o %t2
+RUN: %gpu-env %t2 gpu | FileCheck %S/process-loop-records.m --match-full-lines --strict-whitespace
+
+What the loops' bodies made goes with the scaler's arena when it ends.
+RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 %t2 gpu 2>&1 | FileCheck %s --check-prefix=FREED
+FREED: Merkurius runtime: 0 messages are neither read nor freed
+FREED-NEXT: Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated
