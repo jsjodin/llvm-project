@@ -51,6 +51,166 @@ We will build a clean-room Mercury compiler on MLIR and LLVM, adding OpenMP-styl
 | Distribution | Designed now, built in M6 | Handle and wire formats are hard to change later |
 | Wire format | Self-describing and pointer-free, after Erlang's external term format; constructors by type and functor number | Portable, validated on receipt, no atom table |
 
+## The language
+
+Merkurius compiles Mercury, as the 22.01 reference manual defines it, through
+MLIR and LLVM, and extends it with Erlang-style processes with typed
+mailboxes that run on the host and on GPUs, Schimpf-style logical loops that
+mean their translation into recursion, OpenMP directives on those loops and
+goals as promises the programmer makes, and opt-in open types for
+Prolog-style variables. A program that uses none of the extensions is plain
+Mercury, and pays nothing for them (Overview and goals, "pay only for what
+you use"). This section is the map; each part has its own section.
+
+### The base: Mercury 22.01
+
+- **The definition** is the 22.01 reference manual and the library
+  reference manual, implemented clean-room (Clean-room rules). Where mmc and
+  the manual disagree, each case and the choice made are recorded (Front
+  end, "Where mmc and the manual disagree"); mmc's undocumented forms that
+  programs rely on are accepted.
+- **Left out for now:** tabling, trailing and solver types. Partially
+  instantiated data comes back only as open types (below). The debugger,
+  the deep profiler, the Java and C# back ends and binary compatibility
+  with Melbourne Mercury are tools, not the language, and are left out too
+  (Overview and goals, non-goals).
+- **No grades.** One build serves every program: garbage collection,
+  processes and parallelism are not compile-time variants of the language
+  (Driver, "No grades").
+- **The standard library** is reimplemented from the library reference
+  manual (Standard library, compatibility and testing).
+
+### The extensions, by how far they leave Mercury
+
+Each extension that changes the syntax is behind an option, without which a
+file reads exactly as mmc reads it. The extensions fall into three tiers:
+
+| Tier | Extension | Relation to Mercury | Section |
+|---|---|---|---|
+| **Annotations** | OpenMP directives, `%$omp` comment lines before a goal | mmc ignores them. The sequential meaning is the specification, and each OpenMP test also runs without `-fopenmp` against the same output | Parallel loop annotations; Target regions |
+| **Library** | The `process` module: `mailbox(M)`, `spawn`, `send`, `receive` with selectors and timeouts, monitors, request and reply, places and nodes; `array.unsafe_noinit` | Ordinary Mercury interfaces. With stub bodies, `process` passes mmc 22.01.9's type, mode and determinism checks | Processes and mailboxes |
+| **New syntax and rules** | Loops, `( Iterators do Body )` (`-fdo-loops`); the `receive` goal (`-freceive-goal`); process declarations, `:- process Kind(Types) receives Types [on gpu]` (`-fprocess-declarations`); the sendability rule; the check of code that runs on a GPU; open types | Real changes. A loop and a process declaration mean their expansion into ordinary predicates, which mmc accepts when written by hand; the rules are checks mmc does not make | Loops; Processes and mailboxes; Sendability; Target regions; Open terms |
+
+**OpenMP directives.** A directive is a promise, as in OpenMP and as
+Mercury's own `promise_*` goals are: the iterations of a loop are
+independent and write disjoint elements of a threaded array, and a
+reduction's operator is associative. The compiler checks what it can see: a
+loop's body is `det`, pure, threads no `io` and allocates nothing, or the
+directive is an error, never a silent sequential fallback. Supported so far:
+- `parallel do`, with `schedule`, `reduction` and `collapse`; `atomic`
+  updates and captures of array elements;
+- `target` and `target teams distribute parallel do`, with `device`,
+  `num_teams`, `thread_limit` and `map`, including array sections; the map
+  types come from the variables' modes, so a `map` clause is only needed to
+  override them;
+- `target data`, keeping arrays on the device across the target regions of
+  a goal;
+- `teams distribute` and `teams distribute parallel do` inside a GPU
+  process, with `dyn_groupprivate` (OpenMP 6.1) for group-private arrays,
+  where they run across the process's worker teams instead of starting a
+  kernel.
+
+**Loops** are Schimpf's logical loops from ECLiPSe (ICLP 2002), with the
+iterators `for`, `foreach`, `fromto` and `count`. A loop means its
+translation into a pair of recursive predicates, typed in the clause around
+it, whose modes and determinism are inferred as for any predicate without
+declarations. So the extension adds no semantics of its own, and no proof
+obligations: the tests check that mmc accepts the translations, written by
+hand, with the same signatures. A loop is also where a loop directive
+attaches.
+
+**Processes.** A process kind is a predicate run as a process, with its own
+heap, receiving from its own typed mailboxes. Its declaration is its
+contract: what it is spawned with and what it receives. `on gpu` makes it a
+kind that can run on a GPU, and `spawn(Place, Kind(Args), Mailbox, !IO)`
+starts it at `host` or `gpu(N)`. Send never blocks and deep-copies the
+message; receive is selective, takes the oldest matching message across the
+mailboxes of a selector, as Erlang's does, and returns `message(R)` or
+`timeout`. Processes on different nodes find each other through a
+registry, and on different GPUs of a node send to each other directly
+(for now behind `MERK_GPU_PEER=1`; docs/INPROGRESS.md, Direct sends between
+the GPUs of a node).
+
+### What the extensions add to the type system
+
+- **Typed mailboxes.** A `mailbox(M)` accepts messages of one protocol type
+  `M`, a discriminated union. An unknown message is impossible by typing,
+  and a receive loop declared `det` must handle every constructor, or the
+  switch on the message is a compile error.
+- **Generic processes.** A router forwards payloads of any type in an
+  existential envelope, `some [T] envelope(mailbox(T), T)`: the sender and
+  the receiver know `T`, the router only that the two halves match, and
+  sending the payload elsewhere is a type error (Generic processes and
+  dispatchers).
+- **Sendability.** A value may be sent unless its identity matters: the
+  `io` state, stores and mutable references, and foreign types without a
+  copy hook. The compiler infers it per type, as Rust infers `Send`, and a
+  `mailbox(M)` can only be made where `M` is sendable, so a polymorphic or
+  existential send needs no constraint of its own (Sendability).
+- **Code that runs on a GPU.** What a GPU kind or a target region reaches
+  is checked: every value and message is flat (scalars, enumerations,
+  mailboxes, non-recursive records of flat fields, and whole arrays and
+  strings), the code is monomorphic after specialization, with no generic
+  unification or unknown closure call left, and it makes no heap value but
+  arrays. A violation names the value and its type. So a GPU process needs
+  no collector, and a message between GPUs is a flat copy (Distribution
+  and wire format, GPU processes; Target regions).
+- **Open types,** designed, not built yet (docs/INPROGRESS.md, chunk 1).
+  `open(T)` has `T`'s constructors, but any argument may be an unbound
+  variable, with Mercury's existing `any` inst and full unification; only
+  code that uses it pays. `closed(T)` comes with it (docs/INPROGRESS.md,
+  Open types: `closed(T)`).
+
+Not part of the type system, though they look like it: flat records and
+flat unions are representations that the compiler chooses, by value with no
+cell, and no program sees them except through speed (Lowering and code
+generation, "Type representation").
+
+### An example
+
+A kind that runs on a GPU, squaring an array across its worker teams, and a
+main that spawns it on the host or the GPU (`test/CodeGen/process-loops-unreached.m`
+has the whole program; built with `-fopenmp -fdo-loops -fprocess-declarations`):
+
+```mercury
+:- process squares(mailbox(int)) receives int on gpu.
+
+squares(Reply, Self, !IO) :-
+    receive(Self, any, infinity, R, !IO),
+    ( if R = message(N) then
+        array.init(N, 0, A0),
+        square_all(N, A0, A),
+        send(Reply, array.lookup(A, N - 1), !IO)
+    else
+        true
+    ).
+
+:- pred square_all(int::in, array(int)::array_di, array(int)::array_uo) is det.
+square_all(N, !A) :-
+    %$omp teams distribute parallel do
+    ( for(I, 0, N - 1), fromto(!.A, A1, A2, !:A) do
+        array.unsafe_set(I, I * I, A1, A2)
+    ).
+
+main(!IO) :-
+    io.command_line_arguments(Args, !IO),
+    Place = ( if Args = ["host"] then host else gpu(0) ),
+    new_mailbox(Reply, !IO),
+    spawn(Place, squares(Reply), Squares, !IO),
+    send(Squares, 1000, !IO),
+    receive(Reply, any, after(60000), R, !IO),
+    ( if R = message(Last) then
+        io.format("last square: %d\n", [i(Last)], !IO)
+    else
+        io.write_string("no answer\n", !IO)
+    ).
+```
+
+The same source runs with the kind on the host or on the GPU. Without the
+directive the loop runs sequentially in the process; on the GPU it runs
+across the teams of the persistent kernel that holds the process, and the
+array, unique, is updated in place.
+
 ## Clean-room rules: what we use from Melbourne Mercury
 
 Our compiler and runtime are written without reading Melbourne Mercury's source code. Its compiler is GPL-2, and not reading it is what lets our code use Apache 2.0 with the LLVM exception. The rule covers every directory of source code in the repository, including the LGPL-2 runtime and library. Nothing in this design may depend on how Melbourne implements something, only on what its documents say and on what its compiler produces when we run it. The code mmc generates from our own programs is output, not source, and may be read.
@@ -5750,8 +5910,6 @@ GPU, in strips of rows the same way. ms a step:
 
 ### A pipeline of GPU processes
 
-### A pipeline of GPU processes
-
 `benchmarks/pipeline`: three GPU processes on one GPU, each with a third of
 its teams, passing frames of floats on in messages, against the same three
 stages in one GPU process with all the teams, and against HIP's three
@@ -6063,8 +6221,6 @@ tracking, one run each. (docs/EXPERIMENTS.md, 5.)
   run the same morning), within what one run each can tell: its tracking
   runs in the process itself, not in team loops. Not rerun with the
   default.
-
-### GPU processes' stacks
 
 ### GPU processes' stacks
 
