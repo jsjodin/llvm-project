@@ -70,7 +70,11 @@ def fgpu_process_waves_EQ : Joined<["-"], "fgpu-process-waves=">,
            "the backend. By default, the GPU's choice">;
 def fgpu_process_no_callee_saved : Flag<["-"], "fgpu-process-no-callee-saved">,
   HelpText<"Compile the code of GPU processes with no callee-saved "
-           "registers, so that each call keeps only what its caller needs">;
+           "registers, so that each call keeps only what its caller needs. "
+           "By default on gfx90a">;
+def fgpu_process_callee_saved : Flag<["-"], "fgpu-process-callee-saved">,
+  HelpText<"Compile the code of GPU processes with the calling "
+           "convention's callee-saved registers, the default but on gfx90a">;
 } // let Visibility = [DefaultVis, FC1Option]
 
 //===----------------------------------------------------------------------===//
