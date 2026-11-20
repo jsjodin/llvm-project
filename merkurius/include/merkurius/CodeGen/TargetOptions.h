@@ -53,11 +53,13 @@ struct TargetOptions {
   bool processKernels{false};
   std::vector<std::string> processImages;
   // -fgpu-process-waves=: the waves a SIMD that the kernel of GPU processes
-  // is built for, 0 for the backend's choice; unset for the GPU's default
-  // (docs/INPROGRESS.md, Register pressure in GPU processes).
-  std::optional<unsigned> processWaves;
-  // -fgpu-process-no-callee-saved: the kernel of GPU processes, and so every
-  // function only it reaches, keeps no callee-saved registers.
+  // is built for, 0 for the backend's choice (docs/INPROGRESS.md, Register
+  // pressure in GPU processes). The driver gives the GPU's default.
+  unsigned processWaves{0};
+  // -fgpu-process-no-callee-saved, or -fgpu-process-callee-saved, the last
+  // given: whether the kernel of GPU processes, and so every function only
+  // it reaches, keeps no callee-saved registers. The driver gives the GPU's
+  // default.
   bool processNoCalleeSaved{false};
 
   // Whether the compile is for a device: OpenMP's device compile or GPU

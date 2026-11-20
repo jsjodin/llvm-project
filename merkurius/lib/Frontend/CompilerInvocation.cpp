@@ -218,7 +218,11 @@ static bool parseCodeGenArgs(CodeGenOptions &opts, const InputArgList &args) {
     }
     opts.processWaves = waves;
   }
-  opts.processNoCalleeSaved = args.hasArg(OPT_fgpu_process_no_callee_saved);
+  if (const llvm::opt::Arg *arg = args.getLastArg(
+          OPT_fgpu_process_no_callee_saved, OPT_fgpu_process_callee_saved)) {
+    opts.processNoCalleeSaved =
+        arg->getOption().matches(OPT_fgpu_process_no_callee_saved);
+  }
   if (args.hasArg(OPT_fprocess_loops) && !opts.processKernels) {
     reportError("-fprocess-loops is given only with -fprocess-kernels");
     return false;

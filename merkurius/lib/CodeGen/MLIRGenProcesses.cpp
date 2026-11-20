@@ -47,24 +47,6 @@ constexpr unsigned kProcessLoopReductions{8};
 // kPlaceTeamThreads.
 constexpr unsigned kPlaceTeamThreads{256};
 
-// The waves a SIMD that the kernel of GPU processes is built for on `gpu`
-// when -fgpu-process-waves= does not say, 0 for the backend's choice
-// (docs/INPROGRESS.md, Register pressure in GPU processes). A kernel's
-// registers are the most that any of its code needs, its heaviest loop's
-// body's, and with none set a team of 256 threads lets the backend take a
-// whole SIMD's for each lane.
-unsigned DefaultProcessWaves(llvm::StringRef gpu) {
-  // On gfx90a the backend otherwise takes AGPRs beyond a SIMD's half of the
-  // registers, one wave a SIMD. Two keep the half's 256 VGPRs, so it spills
-  // little more; more waves spill much more, as on gfx1030, where caps cost
-  // swe-muscl's step time (design document, Measurements, Shallow water,
-  // second order). Temporary (register pressure step 2,
-  // docs/INPROGRESS.md): until 3 and 4 are timed on gfx90a.
-  if (gpu.starts_with("gfx90a")) {
-    return 2;
-  }
-  return 0;
-}
 } // namespace
 
 // The image's one kernel, merk_place(table), whose waves run its processes
@@ -72,7 +54,8 @@ unsigned DefaultProcessWaves(llvm::StringRef gpu) {
 // runtime in teams of kPlaceTeamThreads threads. It is the compile's, not
 // the start object's, so that its attributes, which the backend's attributor
 // carries to every function it calls, bound each lane's registers for the
-// waves a SIMD that the program asks for or the GPU takes by default.
+// waves a SIMD that the options give, which the driver chooses for the GPU
+// unless the program asks.
 void MerkGenerator::GeneratePlaceKernel() {
   mlir::Location loc{builder_.getUnknownLoc()};
   mlir::OpBuilder::InsertionGuard guard{builder_};
@@ -92,8 +75,7 @@ void MerkGenerator::GeneratePlaceKernel() {
   kernel.setVisibility_(mlir::LLVM::Visibility::Protected);
   kernel.setConvergent(true);
   kernel.setNoUnwind(true);
-  unsigned waves{target_.options().processWaves.value_or(
-      DefaultProcessWaves(target_.gpu()))};
+  unsigned waves{target_.options().processWaves};
   llvm::SmallVector<mlir::Attribute> passthrough{builder_.getArrayAttr(
       {builder_.getStringAttr("amdgpu-flat-work-group-size"),
           builder_.getStringAttr(std::to_string(kPlaceTeamThreads) + "," +

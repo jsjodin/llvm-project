@@ -6164,10 +6164,12 @@ bodies cut out, the scheduler's register pressure):
    the attributor carries to every function it calls, with AGPRs then
    limited by the attribute of step 5; an occupancy target with a default
    a GPU and a flag. Timed on gfx90a against HIP.
-   *Done 2026-11-18, but for the timing on gfx90a.* merkc makes
+   *Done 2026-11-18; timed on gfx90a 2026-11-20.* merkc makes
    `merk_place` (`MLIRGenProcesses.cpp`, `GeneratePlaceKernel`) instead of
-   the start object, with the waves of `-fgpu-process-waves=`, or else the
-   GPU's default: 2 on gfx90a, none elsewhere.
+   the start object, with the waves of `-fgpu-process-waves=`. The driver
+   gives the GPU's default, as Clang's driver gives a GPU's defaults to
+   `-cc1` (`tools/merkc/driver.cpp`, `defaultProcessWaves`): 2 on gfx90a,
+   none elsewhere.
    - Static on gfx90a for swe-muscl: 2 waves keep 254 VGPRs and drop the
      36 AGPRs, so occupancy doubles. `merk_team_loop` spills 74/74
      against 46/90. 3 and 4 waves give 168 and 128 VGPRs, with spills 2–3
@@ -6176,7 +6178,9 @@ bodies cut out, the scheduler's register pressure):
      second order): caps of 6 and 8 waves make `step` slower and
      `step_faces` faster at 8.
    - So spills can cost more than occupancy gains, and the default stays
-     at the cap that adds none. To do: time 2, 3 and 4 on gfx90a.
+     at the cap that adds none.
+   - Timed on gfx90a (EXPERIMENTS.md, 3): 2 waves is best for both of
+     swe-muscl's kernels, by 19 to 88%, so the default stays 2.
 3. *Less demand.* Team-uniform values where LLVM sees them uniform (SGPRs);
    32-bit index arithmetic where ranges allow; cold runtime paths kept out
    of line from hot loops. *Looked at 2026-11-18* (above): demand is
@@ -6211,7 +6215,9 @@ bodies cut out, the scheduler's register pressure):
      VGPRs, from 188, and 3 waves on gfx90a (2 on 64-bit), no spills.
 
    *No callee-saved registers, 2026-11-18,* behind
-   `-fgpu-process-no-callee-saved` (off by default):
+   `-fgpu-process-no-callee-saved`, and `-fgpu-process-callee-saved` to
+   keep them; the default on gfx90a since 2026-11-20, given by the driver
+   (`defaultProcessNoCalleeSaved`):
    - **AMDGPU honours `"no_callee_saved_registers"`** (`SIRegisterInfo`,
      both instruction selectors). Such a function keeps only its return
      address and the stack's pointers, s30-s34. An ordinary function does
@@ -6274,8 +6280,11 @@ bodies cut out, the scheduler's register pressure):
    - **Still open in step 4:**
      - Keeping callee-saved registers in the runtime's heavy, cold
        functions, so that the process side doesn't lose.
-     - Whether to make no callee-saved registers the default, after the
-       gfx90a timing.
+     - ~~Whether to make no callee-saved registers the default, after the
+       gfx90a timing.~~ Done 2026-11-20, on gfx90a only: swe-muscl's kernels
+       24 and 29% faster, the SERGHEI port's tiled kernels 3 to 10%, and
+       nothing measured slower (EXPERIMENTS.md, 3h and 4). gfx1030 keeps
+       them, where they changed nothing.
 5. The attributor bug. *Fixed 2026-11-18* (`AMDGPUAttributor.cpp`,
    `test/CodeGen/AMDGPU/amdgpu-attributor-call-whole-wave.ll`), and on the
    critical path after all: under a wave cap a function with

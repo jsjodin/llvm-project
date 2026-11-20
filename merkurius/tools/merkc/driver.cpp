@@ -119,6 +119,7 @@ namespace {
 struct OffloadArch {
   std::string arch;
   std::string triple;
+  llvm::AMDGPU::GPUKind kind{llvm::AMDGPU::GK_NONE};
 };
 } // namespace
 
@@ -159,7 +160,7 @@ static bool getOffloadArchs(
     }
     llvm::Triple triple{kOffloadTargetAMDGPU};
     triple.setArch(triple.getArch(), llvm::AMDGPU::getSubArch(kind));
-    archs.push_back({value, triple.str()});
+    archs.push_back({value, triple.str(), kind});
   }
   return true;
 }
@@ -260,16 +261,49 @@ static std::string libraryDirectory(llvm::StringRef executable) {
   return dir.str().str();
 }
 
+// The waves a SIMD that the kernel of GPU processes is built for on `gpu`
+// when -fgpu-process-waves= does not say, 0 for the backend's choice
+// (docs/INPROGRESS.md, Register pressure in GPU processes), as Clang's
+// driver chooses a GPU's defaults and gives them to -cc1
+// (clang/lib/Driver/ToolChains/AMDGPU.cpp). A kernel's registers are the most
+// that any of its code needs, its heaviest loop's body's, and with none set a
+// team of 256 threads lets the backend take a whole SIMD's for each lane. On
+// gfx90a it then takes AGPRs beyond a SIMD's half of the registers, one wave
+// a SIMD. Two keep the half's 256 VGPRs; 3 and 4 make swe-muscl 19 to 88%
+// slower than 2 (docs/EXPERIMENTS.md, 3). On gfx1030 caps cost swe-muscl's
+// step time (design document, Measurements, Shallow water, second order).
+static unsigned defaultProcessWaves(llvm::AMDGPU::GPUKind gpu) {
+  return gpu == llvm::AMDGPU::GK_GFX90A ? 2 : 0;
+}
+
+// Whether the kernel of GPU processes keeps no callee-saved registers on
+// `gpu` when neither -fgpu-process-no-callee-saved nor
+// -fgpu-process-callee-saved says. Each call of a function such as
+// merk_team_loop otherwise saves and restores the registers its callers may
+// keep: about 18 us a team loop in swe-muscl on gfx90a, where without them
+// its kernels are 24 and 29% faster and nothing measured is slower
+// (docs/EXPERIMENTS.md, 3h and 4). On gfx1030 it changed nothing; other GPUs
+// are not measured.
+static bool defaultProcessNoCalleeSaved(llvm::AMDGPU::GPUKind gpu) {
+  return gpu == llvm::AMDGPU::GK_GFX90A;
+}
+
 // The options of a device's compile of the kernels of a source's GPU process
-// kinds, without OpenMP.
+// kinds, without OpenMP, for `arch`: the program's -fgpu-process-* options,
+// or else the GPU's defaults.
 static void addProcessKernelOptions(
-    const InputArgList &args, Job &job, llvm::StringRef triple) {
-  addFrontendOptions(args, job, triple, /*openMP=*/false);
+    const InputArgList &args, Job &job, const OffloadArch &arch) {
+  addFrontendOptions(args, job, arch.triple, /*openMP=*/false);
   job.push_back("-fprocess-kernels");
   if (const llvm::opt::Arg *arg = args.getLastArg(OPT_fgpu_process_waves_EQ)) {
     job.push_back(arg->getAsString(args));
+  } else if (unsigned waves{defaultProcessWaves(arch.kind)}) {
+    job.push_back("-fgpu-process-waves=" + std::to_string(waves));
   }
-  if (args.hasArg(OPT_fgpu_process_no_callee_saved)) {
+  if (const llvm::opt::Arg *arg = args.getLastArg(
+          OPT_fgpu_process_no_callee_saved, OPT_fgpu_process_callee_saved)) {
+    job.push_back(arg->getAsString(args));
+  } else if (defaultProcessNoCalleeSaved(arch.kind)) {
     job.push_back("-fgpu-process-no-callee-saved");
   }
   // The loops that the kinds run across teams keep their directives, of
@@ -311,7 +345,7 @@ static std::vector<std::string> addProcessImageJobs(const InputArgList &args,
     std::string kernels{
         temporaries.Name((stem + "-" + arch.arch + "-processes").str(), "o")};
     Job device{executable.str(), "-fc1", "-emit-llvm-bc"};
-    addProcessKernelOptions(args, device, arch.triple);
+    addProcessKernelOptions(args, device, arch);
     if (!moduleDirs.empty()) {
       device.insert(device.end(),
           {"-device-module-dir", moduleDirs[&arch - archs.data()]});
@@ -376,7 +410,7 @@ static bool addDeviceModuleJobs(const InputArgList &args,
         Job job{executable.str(), "-fc1", "-emit-merk-bc",
             "-fno-copy-device-procedures"};
         if (processes) {
-          addProcessKernelOptions(args, job, arch.triple);
+          addProcessKernelOptions(args, job, arch);
         } else {
           addFrontendOptions(args, job, arch.triple);
           job.push_back("-fopenmp-is-target-device");
