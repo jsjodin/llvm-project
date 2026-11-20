@@ -51,3 +51,72 @@ Open:
 
 Logs: `merkurius-serghei-swe/results/dambreak-gfx90a-2048-20261120-055751`
 (not in git).
+
+### 2. SERGHEI valley flood: stopped, SERGHEI stalls
+
+```
+scripts/compare-valley.sh gfx90a 2048 3
+```
+
+Valley flood, 2048², 600 s; 527,864 of the cells (12.6%) start wet. No
+numbers yet: the first run, SERGHEI's (default build, with FMA), never
+finished, so the run was stopped.
+
+- **SERGHEI's time step went to exactly 0** between iterations 6000 and
+  7000. Simulated time froze at 470.269601950454 s.
+- **The first 6000 steps were normal:** dt fell steadily from 0.089 s to
+  0.064 s.
+- **It then ran 125,000 more iterations** without moving, about 5 minutes
+  in all, and was killed.
+- **The port didn't run:** the script runs SERGHEI first.
+- **Not checked yet:** why SERGHEI's step hits 0 here. On the gfx1030 the port
+  matched SERGHEI's no-FMA build (`SERGHEI_VARIANT=nofma`), and the two
+  builds take different steps on this case.
+
+Logs: `merkurius-serghei-swe/results/valley-gfx90a-2048-20261120-060800`
+(not in git).
+
+### 2b. Valley flood: the port alone, and SERGHEI without FMA
+
+```
+MERK_CONFIGS="SWE_KERNEL=0;SWE_KERNEL=2 SWE_TILE=32;SWE_KERNEL=3 SWE_TILE=32" \
+  scripts/time-port.sh gfx90a 3 2048 3                             # GPU 4
+SERGHEI_VARIANT=nofma SERGHEI_CMAKE_FLAGS=-DCMAKE_CXX_FLAGS=-ffp-contract=off \
+  scripts/build-serghei.sh gfx90a
+HSA_XNACK=1 build/gfx90a-nofma/bin/serghei build/valley-2048/ <out>/ 1   # GPU 6
+```
+
+These runs took the place of item 2's script. The port ran alone, and SERGHEI
+without FMA ran once on another package. The port run was stopped after round
+2's kernel 2, because each kernel-3 run took 4 minutes. The times below are
+from round 1. Round 2 gave the same steps and checksum, and kernels 0 and 2
+were within 0.3% of round 1.
+
+| Program | Steps | ms per step | Fluxes only | vs SERGHEI-nofma |
+|---|---|---|---|---|
+| SERGHEI-nofma, `swe.solve` | 7182 | 2.046 | | 1.00× |
+| SERGHEI-nofma, whole run | 7182 | 3.056 | | |
+| Port, kernel 0 | 7270 | 1.105 | 0.796 | 1.85× |
+| Port, kernel 2, tiles of 32 | 7270 | 2.187 | 1.858 | 0.94× |
+| Port, kernel 3, tiles of 32 | 7270 | **32.409** | 1.167 | 0.06× |
+
+- **SERGHEI without FMA finishes:** it reaches 600 s in 7182 steps, at the
+  same volume as the port, 1.265744941e+08 m³. Its default build stalls at
+  470 s (item 2), so FMA rounding is the likely trigger.
+- **Steps differ by 1.2%:** the port takes 7270 steps and SERGHEI-nofma 7182.
+  That's the cube-root ulp difference already known from the gfx1030, so the
+  times are compared per step.
+- **Kernel 0 beats SERGHEI-nofma's best case by 1.85×.**
+- **Kernel 2 again loses to kernel 0,** by 1.98× here, as in the dam break.
+- **Kernel 3 is broken on the gfx90a:** its fluxes take 1.167 ms a step,
+  which is 37% less than kernel 2's, over 43.2% of the 4096 tiles. But its
+  whole step takes 32.4 ms. The other 31 ms is spent outside the fluxes,
+  probably in the bookkeeping for the active tiles. On the gfx1030, kernel
+  3's whole step was 5.26 ms against kernel 2's 6.18 ms.
+
+Open:
+- Where kernel 3's 31 ms a step goes.
+- Why kernels 2 and 3 lose to kernel 0 on the gfx90a (item 1).
+
+Logs: `merkurius-serghei-swe/results/port-gfx90a-3-2048-*` and
+`results/valley-nofma-gfx90a-2048-20261120-061636` (not in git).
