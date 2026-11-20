@@ -6007,6 +6007,29 @@ teams in an SGPR.
   round ends at a barrier. There is nothing left for `noalias` to
   reorder.
 
+**Every device array aligned (gfx1030, 2026-11-20, at 4b3a3937cb62):**
+the device runtime aligns an array's elements to 256 bytes only from
+4 KiB (`AllocateArrayBytes`, `runtime/array.cpp`). A variant archive with
+the threshold at 0 was built outside the tree, and each benchmark that
+makes small device arrays was built against both. Two rounds, taking
+turns. Dense Life, front, bandwidth and SWE make only large arrays, which
+are aligned already, so they were left out.
+
+| Benchmark | Aligned from 4 KiB (today) | All aligned |
+|---|---|---|
+| `frees`, `array.init` of 8 / 64 / 256 words (µs a round, medians) | 1.77 / 2.09 / 2.43 | 1.71 / 2.03 / 2.44 |
+| MC E1.1, 16³, 10 cycles (segments/s) | 1.851–1.870e7 | 1.865–1.866e7 |
+| Sparse Life, 8192², average step | 28 µs | 28–29 µs |
+| UTS T1L, K 262144 (M nodes/s, round 1 / round 2) | 1396.6 / 1397.7 | 1404.1 / 1403.2 |
+| UTS T3L | 349.8 / 350.2 | 345.1 / 343.5 |
+| UTS G2 | 1108.8 / 1110.9 | 1094.0 / 1094.9 |
+
+`frees`, MC and sparse Life are the same within noise. UTS T3L and G2
+lose about 1.5% in both rounds, with tight ranges: UTS makes many small
+arrays, and each aligned one takes up to 248 bytes more, in memory and
+in the cache. Today's threshold stays. The files are in the job's
+`tmp/align/`.
+
 **Conclusions:**
 - Splitting the size from the array buys LLVM nothing. Its other gains
   (the size's invariance stated, alignment for all sizes, views) would
@@ -6015,7 +6038,9 @@ teams in an SGPR.
   of them on the gfx1030), and the runtime still needs a header.
 - Alignment knowledge changes only the alignment attribute on the host.
   Large device arrays are already 256-byte aligned in memory, which is
-  what coalescing needs.
+  what coalescing needs. Aligning small ones too gains nothing and costs
+  UTS about 1.5%, so alignment for all sizes is no reason to split the
+  size out either.
 - `noalias` follows from uniqueness without changing the representation.
   An `array_di` parameter cannot be any other array its predicate gets.
   It pays on the host (no overlap check) and on GPU loops that interleave
