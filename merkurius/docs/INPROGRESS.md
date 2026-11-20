@@ -5581,8 +5581,12 @@ against 3.5 µs of work.
 
 Asked for by the user 2026-11-19, after the SERGHEI-SWE port
 (merkurius-serghei-swe, README "Results"). Designed the same day.
-**Implementation waits for the gfx90a numbers from r11**, which say
-whether kernel 2's gain holds there.
+**Paused 2026-11-20:** on the gfx90a, kernel 2's gain reverses. Kernel 0
+is about 1.6 times faster than kernel 2, and kernel 3 also loses to it
+(EXPERIMENTS.md, 1, 2e and 4). Part of that is the runtime's, not the
+scheme's: kernel 2's faces fall back to the GPU's malloc in every tile,
+and its team loops cost more than HIP's (From the gfx90a runs, below).
+Revisit once those are fixed.
 
 **The case.** A stencil written the natural way: each cell, in one
 iteration of a parallel loop, calls a pure predicate for each of its
@@ -6030,6 +6034,16 @@ arrays, and each aligned one takes up to 248 bytes more, in memory and
 in the cache. Today's threshold stays. The files are in the job's
 `tmp/align/`.
 
+The SERGHEI port, run afterwards the same way (1024², kernels 2 and 3,
+two rounds), went the other way: about 1.5% faster with every array
+aligned, in both rounds (valley kernel 2 1.563 and 1.568 ms a step
+against 1.538 and 1.540; dam break kernel 3 2.940 and 2.939 against 2.884
+and 2.882). Its arrays are all 4 KiB or more at that size, so none moved.
+But the two builds' GPU assembly differs by about 16,000 lines: the
+runtime's allocation path without the size test changes the code of the
+whole image. So both this and UTS's loss are probably the effect of all
+loops sharing one function (EXPERIMENTS.md, 2d), not alignment.
+
 **Conclusions:**
 - Splitting the size from the array buys LLVM nothing. Its other gains
   (the size's invariance stated, alignment for all sizes, views) would
@@ -6297,6 +6311,63 @@ bodies cut out, the scheduler's register pressure):
    call of its callee for AGPRs and LDS DMA, and as whole-wave mode with no
    implicit arguments otherwise, since a whole-wave callee is passed none.
    An upstream candidate.
+
+## From the gfx90a runs (2026-11-20)
+
+What the runs of `experiments.txt` on r11 leave to do, in the order
+proposed. The measurements are in EXPERIMENTS.md, by item. Done from them
+already: flat records passed to process loops a word per field (2d,
+f08750271e46), inline peer sends released at the device's scope (H2,
+46ec1d0c8074), and no callee-saved registers as gfx90a's default, chosen in
+the driver (3h and 4, 37fadfa451a3). Nothing below is decided; each waits
+for the user.
+
+1. **A team keeps its group-private fallback block** (3b, 3c). A
+   group-private array that doesn't fit in the team's share of LDS goes to
+   the GPU's malloc and free in every iteration (`GroupAllocate`,
+   runtime/device/device.cpp). At 2 waves the share is 31,232 bytes, so
+   swe-muscl's `Faces0` (33,800 B) and the SERGHEI port's kernel 2 faces
+   (101 KB with tiles of 32) fall back in every tile: 28 µs of a 268 µs
+   tile. Keeping the block from one iteration to the next, while it is big
+   enough, removes the malloc. Cheap.
+2. **Fix 2: a team's first-wave cells from a region reset each iteration**
+   (2c, 2d). A cell that a team's first wave makes in a distribute body
+   still goes to the GPU's malloc through `NewBlock`, onto one shared list
+   by compare-and-swap, and is never freed before the process ends. Fix 1
+   took the case that was found (a captured record) off that path, but not
+   a cell really made in the body, or a record too large for the loop's
+   words. A bump region of the team's own, reset each iteration as
+   group-private arrays are, would make them cheap and stop the growth.
+3. **Each loop's code apart** (2d, and the alignment experiment above).
+   Every loop body of a module is inlined into one `merk_process_loop`, and
+   each team loop into one `merk_team_loop`, so a change to one loop moves
+   another's speed by up to 10%, and a kernel's registers are its heaviest
+   loop's. Keeping each loop's rounds out of the shared switch would make
+   measurements trustworthy and let each loop have its own registers. A
+   design change, the largest of these.
+4. **Giving up occupancy for LDS** (3b). When a module's group-private
+   arrays need more than the occupancy-preserving share, the runtime could
+   size dynamic LDS for them, as HIP's launch does. At 1 wave swe-muscl's
+   `step_faces` keeps its arrays in LDS, but `step` loses 20%, so it is a
+   choice per kernel, and 3 makes it one per loop.
+5. **swe-muscl's `step_faces` against HIP's** (3c to 3h). After 4745adb and
+   2b5a81e it is 0.394 ms a step against HIP's 0.252, 1.56 times. Left: the
+   fallback (1), about 2 µs a team loop, and `x_diffs` as a team loop of its
+   own where HIP keeps the differences in registers.
+6. **Revisit faces-once** (Each shared call once a tile, above) after 1 to
+   5.
+
+Waiting on decisions or runs:
+- **ca8b002** (`inreg` for the loops' team-uniform parameters): by the
+  list's rule it goes, since 2 waves beat 3 and 4 (EXPERIMENTS.md, 3). The
+  user waits for a run of swe-muscl at 2 waves without callee-saved
+  registers, with and without it.
+- **Still to run on r11:** the MC gate E0.3 (`experiments.txt`, 7; 8
+  dies, when r11 is quiet) and the spawn-time specialization copies (8,
+  merkurius-serghei-swe `spec/`).
+- **SERGHEI's default build stalls on the valley flood** at 2048² on the
+  gfx90a: its time step goes to 0 at 470 s (EXPERIMENTS.md, 2). The no-FMA
+  build finishes. Possibly worth reporting upstream.
 
 ## A pipeline of processes
 
