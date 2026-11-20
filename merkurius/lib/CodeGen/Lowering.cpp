@@ -2125,6 +2125,12 @@ std::int64_t Lowerer::RootTypeIndex(
 }
 
 void Lowerer::EmitRootTable() {
+  // A module read back from -emit-mlir has its table already, and none of
+  // the merk types that this one would be made of: an empty table beside it
+  // would leave the functions' root type indices pointing past its end.
+  if (module_.lookupSymbol(kRootTable)) {
+    return;
+  }
   if (!fieldTypes_.empty()) {
     llvm::SmallVector<std::int64_t> entries;
     for (auto [cell, offset, field] : fieldTypes_) {
