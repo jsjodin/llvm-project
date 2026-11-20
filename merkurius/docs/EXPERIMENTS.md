@@ -483,3 +483,41 @@ more code. They're stalls, or time outside the loop bodies:
   nothing from Mercury's persistent `merk_place` kernel (it does for HIP).
   A probe would have to read them on the device, or time a team loop's
   start, rounds and join separately.
+
+### 3f. A team loop's start, rounds and join
+
+A temporary probe in the device runtime (reverted) timed each team loop
+from `merk_device_team_loop`, in the first wave's first lane:
+- **start:** the barrier that wakes the other waves;
+- **rounds:** the first wave's `merk_team_loop`;
+- **reduce:** the reductions across the team;
+- **join:** the last barrier.
+
+The probe ran on the 3c phase-timed build, two runs each, which agree
+within 2%. The probe itself makes the phases up to 25% slower (`x_diffs`
+6.1 → 8.6 µs a tile at 1 wave).
+
+| µs per call | 1 wave: start | rounds | reduce | join | 2 waves: start | rounds | reduce | join |
+|---|---|---|---|---|---|---|---|---|
+| `x_faces` (loop 3) | 0.05 | 60.2 | 0.1 | 0.7 | 0.05 | 82.5 | 0.1 | 1.7 |
+| `y_faces` (loop 4) | 0.05 | 53.5 | 0.1 | 0.7 | 0.05 | 71.8 | 0.1 | 1.5 |
+| `x_diffs` (loop 5) | 0.05 | 5.3 | 0.1 | 0.5 | 0.07 | 19.6 | 0.1 | 1.7 |
+| `faces_tile` (loop 6) | 0.06 | 30.2 | 5.6 | 1.1 | 0.10 | 47.6 | 7.7 | 1.2 |
+
+- **Starting and joining a team loop costs under 2 µs.** The guess in 3e,
+  about 5 µs a loop, is wrong: the time is in the rounds.
+- **At 1 wave every group-private array is in LDS.** A second probe
+  counted 400,079 arrays that fit and none that fell back. At 2 waves,
+  half fell back (199,988 fit, 200,195 malloc'd: `Faces0` each time).
+- **`x_diffs`' rounds are slow even in LDS.** At 1 wave, 4 rounds take
+  5.3 µs, about 1.3 µs a round. Each round of its code is 4 flat loads,
+  3 adds, 3 flat stores, an `s_waitcnt lgkmcnt(0)` and a barrier. HIP's
+  four loads into registers take 0.7 µs in all, or 1.2 µs with every
+  access forced flat (3e). Without the per-round barrier, it's still
+  5.4 µs (3d).
+- **`faces_tile`'s reductions take 5.6 µs** at 1 wave (`ReduceAcrossTeam`,
+  3 reductions). HIP's `reduce` is inside its 11.4 µs.
+
+Open: why a round of a few flat accesses to LDS takes about a
+microsecond in a team loop. A microbenchmark would show it: a team loop
+over a group-private array, against the same loads in HIP, flat and `ds_`.
