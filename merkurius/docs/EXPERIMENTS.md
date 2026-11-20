@@ -440,3 +440,46 @@ Every run gave the usual checksum.
 
 Left from 3c: registers and scratch (248 VGPRs and 768 B against HIP's
 120 and none), and the body called from the rounds rather than inlined.
+
+### 3e. Registers, scratch and code: not the gap either
+
+From the assembly of swe-muscl's process code, `-save-temps`, at the
+default 2 waves:
+
+| Function | VGPRs | Scratch, B a lane | Code |
+|---|---|---|---|
+| `merk_team_loop` (every loop under parallel do in a distribute body) | 248 | 304 | 60 KB |
+| `merk_process_loop` | 248 | 576 | 39 KB |
+| HIP `step_faces` | 120 | 0 | |
+
+- **The bodies are inlined** into `merk_team_loop`: its only calls are
+  to `merk_device_uncaught_exception` and `memcpy`.
+- **Loop by loop, the code is HIP's size.** Matched by their
+  `v_div_scale_f64`s (60 in a face loop, 26 in the cell update):
+
+  | Loop | Mercury instructions | HIP instructions | Mercury spill ops |
+  |---|---|---|---|
+  | face loop | 1698 | 1720 (`x_faces`) | 0 |
+  | face loop | 1821 | 1410 (`y_faces`) | 50 |
+  | cell update | 965 | 905 (`faces_tile`) | 0 |
+
+  Spills are in one face loop and in one small loop. Both face loops are
+  2.2 to 2.5× HIP's time (3c), with or without spills.
+- **Every array access is flat** in Mercury (`flat_load`, `flat_store`):
+  global arrays and the group-private ones in LDS alike. HIP uses `global_*`
+  and `ds_*`. Forcing flat on HIP's `step_faces`, by hiding its pointers
+  behind an empty `asm`, keeps it at 120 VGPRs and costs it 7%
+  (0.251 → 0.266 ms a step; `x_diffs` 0.7 → 1.2 µs a tile). Flat is a
+  small part of the gap, and not what raises Mercury's VGPRs.
+
+So the same instructions take 2.5× as long. They aren't spills or a lot
+more code. They're stalls, or time outside the loop bodies:
+- **A fixed cost per team loop** is likely: `x_diffs`, a few loads a
+  thread, takes 6.1 µs a tile at 1 wave against HIP's 0.7. That suggests
+  roughly 5 µs to start and end each team loop (the first wave writing its
+  words, the other waves noticing, the join), about 20 µs of the 4 loops'
+  100 µs gap.
+- **The rest** needs the hardware's counters, but rocprofv3 records
+  nothing from Mercury's persistent `merk_place` kernel (it does for HIP).
+  A probe would have to read them on the device, or time a team loop's
+  start, rounds and join separately.
