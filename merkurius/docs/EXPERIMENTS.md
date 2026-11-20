@@ -766,3 +766,78 @@ How the run went:
 Logs: `merkurius-uts/uts/results/S4/20261120-092201` and, for T3L at
 262144, `S4/20261120-092635`; `S2r/20261120-092327`; `S2/20261120-092446`
 (not in git).
+
+### H1. A message between GPUs, profiled
+
+Not from experiments.txt. It comes from the halo comparison:
+merkurius-serghei-swe's port on several GPUs (its docs/INPROGRESS.md). Its
+strips spend 0.25–0.30 ms a step waiting in rounds of small messages. A
+message cost about 13 µs at each end (merkurius/rounds.m there).
+
+Setup:
+- runtime/device/device.cpp with probes, restored afterwards. Each wave
+  adds `__builtin_readsteadycounter()` ticks (40 ns) per phase into a
+  global array, which the process reads through `merk_device_prof` and
+  sends to the host.
+- Two GPU processes on ROCR 4 and 5, `MERK_GPU_PEER=1`, arrays of 2 floats,
+  which go inline in the peer queue's slot.
+- 2000 messages after 200 to warm up. Stream: process 1 sends and 0
+  receives. Ping-pong: each sends after it receives.
+- Scratch: scratchpad sendprof/ (prof.m, device.cpp.prof).
+
+Stream, µs a message. The sender takes 15.5 µs a message in all, the
+receiver 15.8.
+
+| Sender | µs | Receiver | µs |
+| --- | --- | --- | --- |
+| `merk_device_send_array` | 10.78 | `merk_device_receive_array` | 8.73 |
+| – `RouteOf`, the cached route | 1.52 | – `TakePeer`, the slot's flag and fields | 0.70 |
+| – `ArrayToPool`, inline: no copy | 0.70 | – `DeliverPeer`: alloc, copy 2 words | 3.34 |
+| – `EnterPeerQueue`, remote add | 1.00 | – `FreePeerSlot` | 0.49 |
+| – `PutPeer`: tail add, then load of the slot's sequence | 2.74 | – the host ring, every 8th look (2.91 a look) | 0.36 |
+| – `PutPeer`: stores, release at system scope | 2.81 | – `TakeQueued`, the local queue | 0.33 |
+| – `LeavePeerQueue`, remote add | 0.35 | – not probed (`RouteOf`, set-up) | 3.5 |
+| – rest | 1.66 | | |
+| Outside: `array.init`, free, the loop | 4.7 | Outside: free of the array, the loop | 7.0 |
+
+The receiver found each message on its first look, so none of its time is
+waiting.
+
+Ping-pong: a round takes 52.2 µs. Each process sends in 9.7 µs. A receive
+takes 30.9 µs, waiting included: 7.7 looks, each about 2.2 µs. A look is:
+- `TakePeer`, 0.37 µs;
+- `TakeQueued`, 0.33;
+- `Now()` for the deadline, 0.33;
+- `s_sleep(16)`, 0.77;
+- every 8th look, the host ring at 2.9.
+
+So a message one way costs about 26 µs: the sender's 9.7 and Mercury's
+allocation, about 1.2 for the flag, about 1.1 for the poll to see it, and
+the receiver's delivery and allocation.
+
+What it shows:
+- **No single cause:** a dozen steps of 0.3–3.3 µs each, at each end.
+  They are mostly dependent loads and remote atomics, at 0.5–1 µs each.
+  The link's own 1.2 µs is a small part.
+- **The sender's biggest costs:**
+  - The system-scope release before the slot fills, 2.8 µs. On gfx90a
+    that writes back the L2 (gfx90a-system-scope-atomics). For an inline
+    message every word goes by stores into the receiver's memory. If
+    those don't stay in the sender's L2 (peer memory's MTYPE), then a wait
+    for the stores to complete should order them. That needs checking with
+    peer.hip first.
+  - Four remote operations per send: enter, the tail add, the slot's
+    sequence, leave. That's 4.1 µs. A sender could keep credits: slots it
+    knows are free, from an occasional read of the queue's head. That
+    would skip the sequence load. Entering and leaving count senders for
+    the receiver's close, and might fold into the tail add.
+  - The cached route, 1.5 µs: `RouteIs` compares 5 handle words through
+    dependent loads. The last route's key could be compared in LDS, or
+    one word first.
+- **The receiver's biggest costs:** `DeliverPeer`'s 3.3 µs for 2 words
+  (`merk_device_alloc` and the copy), and 3.5 µs that weren't probed.
+- **Mercury's own allocation** of each array, and its free, cost 4.7–7.0
+  µs a message at each end, outside the runtime's send and receive.
+- **Polling isn't the problem:** a look every 2.2 µs adds about 1.1 µs
+  on average. Each look still pays for `Now()`, needed only for a finite
+  timeout, and every 8th pays 2.9 µs for the host ring.
