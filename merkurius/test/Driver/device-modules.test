@@ -22,10 +22,10 @@ OMP:      "-fc1" "-emit-merk-bc" "-fno-copy-device-procedures" "-fprocess-declar
 OMP-NEXT: "-fc1" "-emit-merk-bc" "-fno-copy-device-procedures" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-fprocess-kernels" "-fprocess-loops" "-o" "[[P1030]]/empty-main.merkbc" "{{[^"]*}}empty-main.m"{{$}}
 OMP-NEXT: "-fc1" "-emit-merk-bc" "-fno-copy-device-procedures" "-fopenmp" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-fopenmp-is-target-device" "-o" "[[O1030:[^"]*merk-modules-gfx1030[^"]*]]/sumsq.merkbc" "{{[^"]*}}sumsq.m"{{$}}
 OMP-NEXT: "-fc1" "-emit-merk-bc" "-fno-copy-device-procedures" "-fopenmp" "-fprocess-declarations" "-triple" "amdgpu10.30-amd-amdhsa" "-fopenmp-is-target-device" "-o" "[[O1030]]/empty-main.merkbc" "{{[^"]*}}empty-main.m"{{$}}
-OMP-NEXT: "-fc1" "-emit-merk-bc" {{.*}} "-triple" "amdgpu9.0a-amd-amdhsa" "-fprocess-kernels" "-fprocess-loops" "-o" "[[P90A:[^"]*merk-modules-gfx90a-processes[^"]*]]/sumsq.merkbc" "{{[^"]*}}sumsq.m"{{$}}
+OMP-NEXT: "-fc1" "-emit-merk-bc" {{.*}} "-triple" "amdgpu9.0a-amd-amdhsa" "-fprocess-kernels" "-fgpu-process-waves=2" "-fgpu-process-no-callee-saved" "-fprocess-loops" "-o" "[[P90A:[^"]*merk-modules-gfx90a-processes[^"]*]]/sumsq.merkbc" "{{[^"]*}}sumsq.m"{{$}}
 OMP:      "-fc1" "-emit-merk-bc" {{.*}} "-triple" "amdgpu9.0a-amd-amdhsa" "-fopenmp-is-target-device" "-o" "[[O90A:[^"]*merk-modules-gfx90a[^"]*]]/empty-main.merkbc" "{{[^"]*}}empty-main.m"{{$}}
 OMP:      "-fc1" "-emit-llvm-bc" {{.*}} "-triple" "amdgpu10.30-amd-amdhsa" "-fprocess-kernels" "-fprocess-loops" "-device-module-dir" "[[P1030]]" "-o"
-OMP:      "-fc1" "-emit-llvm-bc" {{.*}} "-triple" "amdgpu9.0a-amd-amdhsa" "-fprocess-kernels" "-fprocess-loops" "-device-module-dir" "[[P90A]]" "-o"
+OMP:      "-fc1" "-emit-llvm-bc" {{.*}} "-triple" "amdgpu9.0a-amd-amdhsa" "-fprocess-kernels" "-fgpu-process-waves=2" "-fgpu-process-no-callee-saved" "-fprocess-loops" "-device-module-dir" "[[P90A]]" "-o"
 OMP:      "-fc1" "-emit-llvm-bc" {{.*}} "-triple" "amdgpu10.30-amd-amdhsa" "-device-module-dir" "[[O1030]]" "-fopenmp-is-target-device"
 OMP:      "-fc1" "-emit-llvm-bc" {{.*}} "-triple" "amdgpu9.0a-amd-amdhsa" "-device-module-dir" "[[O90A]]" "-fopenmp-is-target-device"
 
