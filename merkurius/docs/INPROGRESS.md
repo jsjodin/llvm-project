@@ -3851,6 +3851,16 @@ so the GPU faulted.
   block (`merk_device_loop_values`) before `merk_device_process_loop`. The
   host's registration says which kinds run loops (`loops`, a `'0'`/`'1'`
   string by kind number).
+  - A flat record that a loop takes (one constructor, no hidden fields, at
+    least two fields, all integers or floats) goes a word per field
+    (2026-11-20, f08750271e46, `LoopRecord`, for every kind of loop): it is
+    taken apart before the loop's words and made again for each call of
+    the body, so neither side makes a cell. Other records still go as one
+    boxed word. Boxed once a tile in a worker team's first wave, an 88-byte
+    record cost the SERGHEI port's kernel 3 a GPU malloc a tile, never
+    freed until the process ended: 30.6 ms a step, now 1.57 (design
+    document, Measurements, SERGHEI's shallow water, ported).
+    (`process-loop-records.m`.)
 - *The runtime:* a spawn of a kind with loops reserves as its worker teams
   every team of the module's kernel whose slots are all free, other than
   its own, and fails, saying so, if there is none (`ReserveWorkers`). Under
@@ -7499,6 +7509,24 @@ on ROCR GPUs 4,6:
     receiver reads across the link, takes one at system scope. Freeing the
     slot is a release at the device's scope: the receiver wrote nothing
     that a sender reads.
+  - *A release at the device's scope for an inline message* (2026-11-20,
+    46ec1d0c8074; EXPERIMENTS.md, H1 to H3). Profiled on gfx90a, a message
+    one way costs about 26 µs, a dozen steps of 0.3 to 3.3 µs at each end,
+    mostly dependent loads and remote atomics; Mercury's own allocation and
+    free of each array add 4.7 to 7.0 µs at each end. `PutPeer`'s stores
+    and system-scope release took 2.8 µs. A message whose words all go
+    inline in the slot writes only the receiver's fine-grained memory,
+    which the sender's L2 doesn't hold, so a release at the device's scope
+    orders it: peer.hip's `slot` mode let no wrong word through in 6M
+    messages, where a relaxed control did. The writeback (`buffer_wbl2`)
+    costs what the L2 holds dirty: 2.1 µs a message with other teams
+    writing, nothing with a clean L2. `PutPeer` and `LeavePeerQueue` now
+    release at the device's scope for such messages (`PeerRelease`);
+    messages with a copy in the send pool keep the system scope. rounds.m
+    and the SERGHEI port's strips didn't change (43.8 → 42.1 µs a round;
+    0.869 → 0.870 ms a step), as their L2s are nearly clean or their rows
+    go through the pool. Left from H1: credits to skip the slot's sequence
+    load, and the cached route's 1.5 µs.
 
   A stream of 20000 arrays on ROCR GPUs 4,6 (recv scratch program), µs a
   message at the receiver, after each change: 1 element 16.4, 15.1
