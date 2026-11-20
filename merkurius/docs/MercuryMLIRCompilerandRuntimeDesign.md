@@ -5696,6 +5696,51 @@ each step and its output: its best case. (docs/EXPERIMENTS.md, 1 to 2e and 4.)
 - **No callee-saved registers** made the tiled kernels 3 to 10% faster and
   left kernel 0, which has no team loops, as it was.
 
+**On several GPUs.** 2026-11-20, r11, ROCR 4–7 (two MI250s), before
+46ec1d0c8074; one run each (merkurius-serghei-swe, docs/INPROGRESS.md).
+The port's kernel 0 runs a strip of rows on each GPU, one GPU process each
+(`serghei-swe-gpus.m`), with `MERK_GPU_PEER=1`: each step's time steps go
+through strip 0 and the ghost rows to the neighbours, all as messages
+between the GPUs, directly. SERGHEI runs `mpirun -np R`, a rank on each
+GPU, in strips of rows the same way. ms a step:
+
+| 2048² | GPUs | SERGHEI, `swe.solve` | of it, `swe.halo.mpi` | Port, step | Port vs SERGHEI |
+|---|---:|---:|---:|---:|---:|
+| Dam break | 1 | 2.536 | 0 | 1.741 | 1.46× |
+| | 2 | 5.295 | 2.116 | 1.167 | 4.54× |
+| | 4 | 5.670 | 2.700 | 0.867 | 6.54× |
+| Valley *(SERGHEI without FMA)* | 1 | 1.947 | 0 | 1.100 | 1.77× |
+| | 2 | 5.515 | 2.140 | 1.006 | 5.48× |
+| | 4 | 5.759 | 2.729 | 0.844 | 6.82× |
+| | 4, fixed split, tuned | | | 0.739 | 7.79× |
+| | 4, rebalanced as it runs | | | **0.711** | **8.10×** |
+
+- **The port scales; SERGHEI as built here doesn't.** On 4 GPUs the port
+  is 2.0 times its one-GPU step on the dam break, and 1.55 times on the
+  valley once balanced. SERGHEI's fluxes scale (1.14 to 0.38 ms), but its
+  halo trade goes from 0.19 to 2.7 ms a step: every array is managed
+  memory, and r11's MPI (Ubuntu's Open MPI 4.1.2) is not ROCm-aware, so the
+  halo pages migrate to the host and back each step. **Most of the 4.5 to
+  8 times is that, not the port's code**; a ROCm-aware MPI with device
+  buffers, as SERGHEI is run on machines like Frontier, is the fair point
+  and is still to be measured.
+- **Through the host, the port's 4 GPUs take 1.43 ms (dam break) and 1.39
+  (valley),** against 0.87 and 0.84 directly: direct messages between GPUs
+  are worth 1.6 times.
+- **The valley's equal strips are unbalanced:** the reservoir's strip has
+  three times the fluxes of the dry south's. A split fixed from measured
+  times gains 1.15 times. Rebalancing as it runs
+  (`serghei-swe-rebalance.m`), every 20 to 100 steps, gains 1.19 times, 4%
+  more than the best fixed split, and starts from equal strips. Strip 0
+  decides from each strip's fluxes and update times, which come to it as
+  messages, and a boundary's rows change owner as messages between the
+  GPUs: the balancing runs inside the running kernels, with no host in it.
+  On the dam break, already balanced, it costs 1.5%.
+- **What is left is the exchange:** 0.27 to 0.30 ms of every strip's step
+  is waiting in the two rounds of small messages a step, about 13 µs of
+  each process's time a message at each end (docs/INPROGRESS.md, Direct
+  sends, the release at the device's scope).
+
 ### A pipeline of GPU processes
 
 ### A pipeline of GPU processes
