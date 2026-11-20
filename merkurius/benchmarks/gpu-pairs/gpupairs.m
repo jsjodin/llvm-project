@@ -119,29 +119,62 @@ main(!IO) :-
     ).
 
     % Spawns the relays at Places, the last forwarding to Back, measures
-    % every size both ways, and ends the relays.
+    % every size both ways, and ends the relays. It waits until they all
+    % have ended, so the next chain finds their slots and worker teams free:
+    % the empty array coming back says only that the last relay forwarded
+    % it, and the GPU tells the host that each relay ended apart from that.
+    % With `workers 8`, AA*4's 8 relays take all of GPU 0's teams, and a
+    % spawn of one failed while AB*4's relays there had not ended yet.
 :- pred chain(int::in, string::in, list(place)::in, mailbox(array(int))::in,
     int::in, io::di, io::uo) is det.
 chain(Workers, Name, Places, Back, Mib, !IO) :-
-    spawn_chain(Workers, list.reverse(Places), Back, First, !IO),
+    spawn_chain(Workers, list.reverse(Places), Back, First, [], Relays, !IO),
     % The first round trip starts the kernels.
     send(First, array.init(1, 1), !IO),
     receive(Back, any, after(60000), _, !IO),
     list.foldl(measure(Name, "ping", First, Back, Mib), sizes, !IO),
     list.foldl(measure(Name, "stream", First, Back, Mib), sizes, !IO),
     send(First, array.init(0, 0), !IO),
-    receive(Back, any, after(60000), _, !IO).
+    receive(Back, any, after(60000), _, !IO),
+    new_mailbox(Downs, !IO),
+    list.foldl(watch(Downs), Relays, !IO),
+    downs(Downs, list.length(Relays), !IO),
+    close_mailbox(Downs, !IO).
 
+    % Spawns the relays, the last of Places first, each forwarding to the
+    % one spawned before it, and adds them to Relays.
 :- pred spawn_chain(int::in, list(place)::in, mailbox(array(int))::in,
-    mailbox(array(int))::out, io::di, io::uo) is det.
-spawn_chain(_, [], To, To, !IO).
-spawn_chain(Workers, [Place | Places], To, First, !IO) :-
+    mailbox(array(int))::out, list(mailbox(array(int)))::in,
+    list(mailbox(array(int)))::out, io::di, io::uo) is det.
+spawn_chain(_, [], To, To, !Relays, !IO).
+spawn_chain(Workers, [Place | Places], To, First, !Relays, !IO) :-
     ( if Workers > 0 then
         spawn(Place, wrelay(To), Relay, !IO)
     else
         spawn(Place, relay(To), Relay, !IO)
     ),
-    spawn_chain(Workers, Places, Relay, First, !IO).
+    spawn_chain(Workers, Places, Relay, First, [Relay | !.Relays], !:Relays,
+        !IO).
+
+    % Watches a relay: Downs gets a message when it has ended.
+:- pred watch(mailbox(int)::in, mailbox(array(int))::in, io::di, io::uo)
+    is det.
+watch(Downs, Relay, !IO) :-
+    monitor(Relay, Downs, (func(_) = 0), _, !IO).
+
+    % Takes Count messages from Downs.
+:- pred downs(mailbox(int)::in, int::in, io::di, io::uo) is det.
+downs(Downs, Count, !IO) :-
+    ( if Count > 0 then
+        receive(Downs, any, after(60000), R, !IO),
+        ( if R = message(_) then
+            downs(Downs, Count - 1, !IO)
+        else
+            io.write_string("gpupairs: a relay did not end\n", !IO)
+        )
+    else
+        true
+    ).
 
 :- pred measure(string::in, string::in, mailbox(array(int))::in,
     mailbox(array(int))::in, int::in, int::in, io::di, io::uo) is det.
