@@ -13,6 +13,7 @@
 
 #include "mlir/Dialect/OpenMP/Transforms/Passes.h"
 
+#include "mlir/Dialect/LLVMIR/LLVMCallOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMConversionOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMMemoryOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMModuleOps.h"

@@ -2992,7 +2992,7 @@ rest of the world only through its host.
 **The transport is LLVM libc's GPU RPC** (`libc/shared/rpc.h`): a `Client` on
 the device and a `Server` on the host exchange fixed-size buffers through
 ports in pinned host memory, with an opcode header, and the offload plugins
-already run its server (`offload/plugins-nextgen/common/src/RPC.cpp`). It
+already run its server (`offload/liboffload/plugins/common/src/RPC.cpp`). It
 builds for amdgpu, so it covers gfx1030. A host thread bridges its server to
 the CPU scheduler's mailboxes. Rejected: a transport of our own, which would
 redo libc's handling of lanes, ports and memory ordering; and one heap shared
@@ -3620,7 +3620,7 @@ network are still to be tried.
 
 With the CPU as the offload target, everything above runs on one machine,
 for tests and for debugging. libomptarget has a host plugin
-(`offload/plugins-nextgen/host`) that runs target regions on the CPU as on a
+(`offload/liboffload/plugins/host`) that runs target regions on the CPU as on a
 device, which Clang and Flang use with
 `-fopenmp-targets=x86_64-unknown-linux-gnu`:
 

@@ -906,9 +906,9 @@ alone, between waves on ROCR 4 and 5:
   goes to device scope too for inline messages.
 - **The runtime's peer queues are the same kind of memory:**
   `DeviceAllocateFine` (runtime/devices.cpp) calls `olMemAlloc` with
-  `kOlAllocTypeDeviceFineGrained`. That maps to `TARGET_ALLOC_DEVICE_FINE`,
-  which the AMDGPU plugin takes from the GPU's fine-grained memory pool
-  (offload/plugins-nextgen/amdgpu/src/rtl.cpp), as
+  `kOlAllocTypeDeviceFineGrained`, which the AMDGPU plugin takes from the
+  GPU's fine-grained memory pool (offload/liboffload/plugins/amdgpu/src/rtl.cpp;
+  `TARGET_ALLOC_DEVICE_FINE` before the plugins took liboffload's kinds), as
   `hipDeviceMallocFinegrained` does.
 
 ### H3. Inline peer sends with a device-scope release: no change in an idle place or in the strips
