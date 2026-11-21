@@ -470,6 +470,9 @@ private:
     if (modes.unify == UnifyKind::Call) {
       out.entry = Before(unify.number);
     }
+    if (modes.unify == UnifyKind::GetStructure) {
+      out.canFail = modes.canFail;
+    }
     if (const Lambda *lambda{unify.functor.lambda}) {
       out.lambda = Whole(lambda->body);
       for (VarId var : lambda->arguments) {
@@ -1815,11 +1818,22 @@ private:
   // variables used outside the goal, as mmc's quantification finds them
   // after switch detection: in a branch, those of its parent; in a
   // conjunct, those and the other conjuncts'.
+  // A variable of an open type, or closed(T), used outside counts too, as
+  // the goal may bind it, or variables in it, differently in each solution
+  // (docs/INPROGRESS.md, Open types).
   bool HasOutputs(const Body *goal, const std::set<BodyVar> &before,
       const std::set<BodyVar> &outside) {
     return llvm::any_of(Vars(goal), [&](BodyVar var) {
-      return !before.count(var) && outside.count(var);
+      return outside.count(var) &&
+          (!before.count(var) || MayBeBound(body_.vars[var].type));
     });
+  }
+
+  bool MayBeBound(const Type *type) const {
+    const TypeContext &types{types_.types()};
+    return type && type->kind == TypeKind::Named && types.open() &&
+        (type->constructor == types.open() ||
+            type->constructor == types.closed());
   }
 
   // A callee's determinism, declared or inferred; none for one whose modes
@@ -2042,6 +2056,12 @@ private:
           Impure(*goal->modes->callee->symbol)};
     case UnifyKind::Test:
       return {{true, Solutions::One}};
+    // Binding an existing variable of an open type may fail, as it may be
+    // bound already (design document, "Open terms", Checking rules).
+    case UnifyKind::Unify:
+      return {{true, Solutions::One}};
+    case UnifyKind::GetStructure:
+      return {{goal->canFail, Solutions::One}};
     case UnifyKind::Deconstruct: {
       // In a case of a switch on its variable, as in mmc, which knows its
       // functor there, or after a deconstruction of it with the same

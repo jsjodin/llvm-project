@@ -896,6 +896,18 @@ void MerkGenerator::GoalBody(const Body &goal, const ProcedureBody &body) {
       LambdaClosure(goal, body);
       return;
     }
+    // Temporary (open types step 4, docs/INPROGRESS.md): code generation
+    // for open terms, merk.open_unify and get_structure, replaces this.
+    if (goal.unify == UnifyKind::GetStructure ||
+        goal.unify == UnifyKind::Unify ||
+        (goal.modes && !goal.modes->fresh.empty()) ||
+        (body.vars[goal.left].type &&
+            body.vars[goal.left].type->kind == semantics::TypeKind::Named &&
+            types_.types().open() &&
+            body.vars[goal.left].type->constructor == types_.types().open())) {
+      NotYet(Where(goal.tokens), "unifications of open terms");
+      return;
+    }
     if (!goal.isVar && goal.unify == UnifyKind::Construct && goal.modes &&
         goal.modes->callee &&
         body.vars[goal.left].type->kind == semantics::TypeKind::HigherOrder) {

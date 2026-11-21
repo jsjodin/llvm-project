@@ -1558,6 +1558,8 @@ private:
     // The goals, by number, that wait for no variable and that a goal with
     // insts not reached woke; they are not retried at the end, as in mmc.
     std::set<unsigned> kept{};
+    // Variables made fresh since the last goal ran, before the next.
+    std::vector<VarId> fresh{};
   };
   std::vector<const Inst *> WaitSnapshot(
       const Goal &, const Result &error, const InstMap &);
@@ -1568,6 +1570,14 @@ private:
   VarId FirstWaitedVar(const Waiting &);
   void WakeAll(ConjunctionRun &);
   Result CheckUnify(const Unify &, const Goal &, InstMap &, const Live &);
+  // Open types (docs/INPROGRESS.md, Open types).
+  bool CanBeFresh(VarId) const;
+  bool MentionsOpen(const Type *) const;
+  Result GetStructure(const Unify &, const Goal &, const InstFunctor &,
+      bool closed, InstMap &, const Live &);
+  std::optional<VarId> FreshVariable(const ConjunctionRun &);
+  // By goal number, the variables made fresh before it runs.
+  std::vector<std::vector<VarId>> fresh_;
   Result CheckVarUnify(const Unify &, const Goal &, InstMap &, const Live &);
   Result CheckCall(const Goal &, const Symbol &, llvm::ArrayRef<VarId>,
       bool function, InstMap &, GoalModes &, const Live &);
@@ -1946,6 +1956,7 @@ ProcedureChecker::Result ProcedureChecker::CheckClause(
   procedure_ = &procedure;
   goals_.assign(form_->goals, GoalModes{});
   befores_.assign(form_->goals, {});
+  fresh_.assign(form_->goals, {});
   touched_.assign(form_->vars.size(), 0);
   renamed_.clear();
   freed_.assign(form_->vars.size(), 0);
@@ -1971,6 +1982,8 @@ ProcedureChecker::Result ProcedureChecker::CheckClause(
   for (std::size_t i{0}; i < goals_.size(); ++i) {
     goals_[i].before =
         result_.arena_.SaveArray(llvm::ArrayRef<const Inst *>{befores_[i]});
+    goals_[i].fresh =
+        result_.arena_.SaveArray(llvm::ArrayRef<VarId>{fresh_[i]});
   }
   out.goals = result_.arena_.SaveArray(llvm::ArrayRef<GoalModes>{goals_});
   return Ok();
@@ -2245,6 +2258,8 @@ void ProcedureChecker::Flatten(const Goal &goal, std::vector<Goal> &out) {
 // outside.
 ProcedureChecker::Result ProcedureChecker::Check(
     const Goal &goal, InstMap &map, const Live &live) {
+  // The goal's last check is the one that counts.
+  fresh_[NumberOf(goal)].clear();
   Result r{CheckLocked(goal, map, live)};
   if (r.outcome == Outcome::Ok &&
       llvm::any_of(
@@ -2707,6 +2722,9 @@ ProcedureChecker::Result ProcedureChecker::RunWaitingGoal(
   }
   state.map = std::move(trial);
   state.order.push_back(goal);
+  std::vector<VarId> &fresh{fresh_[NumberOf(goal)]};
+  fresh.insert(fresh.begin(), state.fresh.begin(), state.fresh.end());
+  state.fresh.clear();
   // After a goal that cannot succeed, nothing is reached, and every
   // goal's mode is right (Overton, 3.1.4).
   if (llvm::any_of(state.map,
@@ -2791,6 +2809,15 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
         }
       }
       state.waiting = std::move(still);
+      continue;
+    } else if (std::optional<VarId> var{FreshVariable(state)}) {
+      // No goal can run: a variable of an open type that one waits for
+      // becomes a fresh unbound variable, and the goals that wait for it
+      // are woken (design document, "Open terms", Checking rules).
+      map[*var] = insts_.Any();
+      state.fresh.push_back(*var);
+      ++touched_[*var];
+      WakeChanged(state);
       continue;
     } else {
       break;
@@ -2947,8 +2974,115 @@ ProcedureChecker::Result ProcedureChecker::CheckVarUnify(
   }
   map[x] = unified;
   map[y] = unified;
-  modes.unify = UnifyKind::Test;
+  // Of a type with open terms in it, a full unification; of a solver type,
+  // a test, as before.
+  modes.unify = MentionsOpen(type) && (ops_.HasAny(a, type) || ops_.HasAny(b, type))
+      ? UnifyKind::Unify
+      : UnifyKind::Test;
   return Ok();
+}
+
+// Whether a variable can be made a fresh unbound variable: whether it has
+// an open type, or is closed(T), which is a variable or a box inside an open
+// term (docs/INPROGRESS.md, Open types).
+bool ProcedureChecker::CanBeFresh(VarId var) const {
+  const Type *type{TypeOf(var)};
+  const TypeContext &types{types_.types()};
+  return type && type->kind == TypeKind::Named && types.open() &&
+      (type->constructor == types.open() ||
+          type->constructor == types.closed());
+}
+
+// Whether a type has open(_) or closed(_) in it.
+bool ProcedureChecker::MentionsOpen(const Type *type) const {
+  const TypeContext &types{types_.types()};
+  if (!type || !types.open()) {
+    return false;
+  }
+  if (type->kind == TypeKind::Named &&
+      (type->constructor == types.open() ||
+          type->constructor == types.closed())) {
+    return true;
+  }
+  return llvm::any_of(type->arguments,
+             [&](const Type *t) { return MentionsOpen(t); }) ||
+      (type->result && MentionsOpen(type->result));
+}
+
+// X = f(Y1, ..., Yn) with X `any`, of an open type: the WAM's get_structure
+// (design document, "Open terms", Operations). If X is an unbound variable,
+// it is bound to a new cell, whose free arguments become fresh variables;
+// if it is bound to f, the free arguments are assigned its fields and the
+// others unified with them. A free argument is then `any`, unless its type
+// is ground: closed(T)'s own argument, which is ground, or a ground value
+// that the open twin of a constructor takes where it has an open one,
+// which must be ground for the unification to succeed. X is then bound to
+// f, with its arguments' insts.
+ProcedureChecker::Result ProcedureChecker::GetStructure(const Unify &unify,
+    const Goal &goal, const InstFunctor &functor, bool closed, InstMap &map,
+    const Live &live) {
+  GoalModes &modes{goals_[unify.number]};
+  // The type whose constructors X may have: T for open(T).
+  const Type *type{TypeOf(unify.left)};
+  if (type->constructor == types_.types().open()) {
+    type = type->arguments.front();
+  }
+  const std::vector<ConstructorTypes> *constructors{
+      ops_.ConstructorsOf(type)};
+  modes.canFail = !constructors || constructors->size() != 1;
+  std::vector<const Inst *> after;
+  for (VarId var : unify.arguments) {
+    const Inst *inst{map[var]};
+    if (ops_.IsFree(inst)) {
+      bool open{CanBeFresh(var) && !closed};
+      modes.canFail |= !open && !closed;
+      inst = open ? insts_.Any() : insts_.Ground();
+    } else {
+      modes.canFail = true;
+    }
+    map[var] = live[var] ? insts_.Share(inst) : inst;
+    after.push_back(map[var]);
+    ++touched_[var];
+  }
+  map[unify.left] = insts_.Bound(Uniqueness::Shared, {{functor, after}});
+  modes.unify = UnifyKind::GetStructure;
+  modes.functor = functor;
+  last_ = Start(unify.tokens);
+  return Ok();
+}
+
+// When no goal of a conjunction can run, the variable to make a fresh
+// unbound variable: a free one of an open type that a waiting goal waits
+// for, the first goal's first, and one that no waiting construction would
+// make if it can, so that a hole is the variable rather than the term
+// around it (design document, "Open terms", Checking rules).
+std::optional<VarId> ProcedureChecker::FreshVariable(
+    const ConjunctionRun &state) {
+  std::set<VarId> made;
+  for (const Waiting &w : state.waiting) {
+    if (const auto *unify{std::get_if<const Unify *>(&w.goal)};
+        unify && !(*unify)->isVar) {
+      made.insert((*unify)->left);
+    }
+  }
+  for (bool avoid : {true, false}) {
+    for (const Waiting &w : state.waiting) {
+      if (w.error.never) {
+        continue;
+      }
+      llvm::ArrayRef<VarId> vars{w.error.waits};
+      if (vars.empty()) {
+        vars = form_->nonlocals[NumberOf(w.goal)];
+      }
+      for (VarId var : vars) {
+        if (ops_.IsFree(state.map[var]) && CanBeFresh(var) &&
+            !(avoid && made.count(var))) {
+          return var;
+        }
+      }
+    }
+  }
+  return std::nullopt;
 }
 
 ProcedureChecker::Result ProcedureChecker::CheckUnify(
@@ -3038,6 +3172,23 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
     arguments.push_back(map[var]);
   }
   const Inst *a{map[x]};
+  bool closed{symbol && symbol->kind == SymbolKind::Constructor &&
+      types_.types().closed() &&
+      symbol->owner == types_.types().closed()};
+  if (!ops_.IsFree(a) && a->kind == InstKind::Any && type &&
+      (CanBeFresh(x) || closed)) {
+    return GetStructure(unify, goal, functor, closed, map, live);
+  }
+  if (ops_.IsFree(a) && closed && !unify.arguments.empty() &&
+      !ops_.IsGround(arguments.front(), TypeOf(unify.arguments.front()))) {
+    // closed(T) holds a ground value (docs/INPROGRESS.md, Open types).
+    VarId var{unify.arguments.front()};
+    return Error(goal,
+        "mode error in the unification of " + Name(x) + " and " +
+            TermText(*form_, unify) + ": closed(T) holds a ground value, but " +
+            Name(var) + " has inst " + InstText(arguments.front()),
+        {var});
+  }
   if (ops_.IsFree(a)) {
     // A construction. An argument with free parts that is used again
     // would be aliased to the new term's, which mode analysis does not
@@ -3072,6 +3223,25 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
               InstText(a) + ", and " + TermText(*form_, unify) +
               " has inst " + InstText(term),
           std::move(waits));
+    }
+    // A free argument of an open type, not used again, is a hole: a fresh
+    // unbound variable, made before the construction (docs/INPROGRESS.md,
+    // Open types).
+    bool holes{false};
+    for (std::size_t i{0}; i < unify.arguments.size(); ++i) {
+      VarId var{unify.arguments[i]};
+      if (ops_.IsFree(arguments[i]) && CanBeFresh(var)) {
+        if (!llvm::is_contained(fresh_[unify.number], var)) {
+          fresh_[unify.number].push_back(var);
+        }
+        arguments[i] = insts_.Any();
+        shared[i] = insts_.Any();
+        map[var] = insts_.Any();
+        holes = true;
+      }
+    }
+    if (holes) {
+      term = insts_.Bound(Uniqueness::Unique, {{functor, shared}});
     }
     for (std::size_t i{0}; i < unify.arguments.size(); ++i) {
       // An argument is now part of the term, which wakes the goals that
@@ -4134,6 +4304,9 @@ public:
   void Dump(const Goal &goal, unsigned depth) {
     const GoalModes &g{modes_.goals[NumberOf(goal)]};
     std::string indent(2 * depth, ' ');
+    for (VarId var : g.fresh) {
+      os_ << indent << "    fresh " << VarName(form_, var) << '\n';
+    }
     common::visit(
         common::visitors{
             [&](const Conj *) {

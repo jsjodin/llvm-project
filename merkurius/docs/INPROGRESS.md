@@ -7843,12 +7843,38 @@ the `type_info` back to the open layout (below).
      program's own module of that name. Tests: `Semantics/types/open/`,
      the design document's examples with their types and twins, and the
      errors.
-   - (b) Mode analysis: an open value's inst is `any`, passed with `ia`
-     and `oa`; the unification kinds of the design document's tables
-     (construction, deconstruction, `get_structure`, full unification);
-     a fresh variable when no goal can run, `free` not matching `any`;
-     the `promise_pure` rule for negated contexts; binding an existing
-     variable `semidet`; `closed(T)`'s argument `ground`.
+   - (b) Done 2026-11-21: mode and determinism analysis.
+     - Two new `UnifyKind`s: `GetStructure`, X = f(...) with X `any` of an
+       open type or `closed(T)`; and `Unify`, X = Y of a type mentioning
+       `open` with an `any` part on either side. A solver type's
+       unification of two `any` values stays a `Test`, as before.
+     - A get_structure's free arguments become `any`, or `ground` for
+       `closed/1`'s own argument and a twin's ground argument. X becomes
+       `bound(f(...))`. It is `det` only if the type has one functor and
+       every argument is free and open (`GoalModes::canFail`).
+     - Fresh variables, in `GoalModes::fresh` and printed as `fresh V`.
+       When a conjunction is stuck, it makes fresh a free open variable
+       that a waiting goal waits for, avoiding one a waiting construction
+       would make, so the hole is chosen rather than the list around it.
+       A construction's free open argument that is not used again is made
+       fresh too, as in `fill(bundle(closed(...), _))`.
+     - `closed(X)` with X not ground is a mode error.
+     - **Not in the design document:** determinism analysis normally
+       treats a goal that binds no variable used outside as having one
+       solution. A goal that uses an open variable from outside now counts
+       as binding one, as it may bind that variable differently in each
+       solution. Without this, `( X = [] ; X = [_ | _] )` with X `ia` was
+       `semidet` instead of `nondet`. get_structure is never a switch.
+     - Already there: `free` does not match `any`, and the `promise_pure`
+       rule for negated contexts.
+     - Codegen reports the new kinds, fresh variables and unifications of
+       open-typed variables as not yet implemented (Temporary, step 4).
+     - **For step 4:** an implied mode against an `any` value, such as
+       `Hole = to_open(Tail)`, whose result mode is `out`, is a
+       `GoalModes::implied` call whose test must be a full unification.
+       So must a test, or a deconstruction's argument test, whose insts
+       have `any` parts.
+     - Tests: `Semantics/modes/open/` and `CodeGen/open-types-not-yet.m`.
    - (c) The other checks: an open value never `unique`; a parallel loop
      body may not bind a nonlocal open variable; a device compile reports
      open values.
