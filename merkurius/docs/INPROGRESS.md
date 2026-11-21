@@ -6099,6 +6099,85 @@ step, such as Life or heat. It does not apply to SERGHEI's scheme, whose
 step's length is a reduction over the whole world, known only after the
 step before.
 
+## Inlining across modules on the host
+
+Asked for by the user 2026-11-21, after the SERGHEI port's solver moved
+into a module of its own, `swe_solver.m`, shared by its three versions.
+The design is the design document's (Optimizations, "`pragma inline`";
+Modules and interface files, "Optimization section"). No step schedules
+it yet; this is that piece.
+
+**Why.** A host compile sees only its own module's bodies. In
+`serghei-swe.m`, every use of the solver module is now a call: 60 call
+sites, among them 30 calls of `tol12`, a constant, and 5 of `face`, which
+is marked `pragma inline`, in the flux loops. The bits are the same. GPU
+code is not affected: a device compile copies the other modules'
+procedures from their bytecode (design document, GPU processes, "The
+program's other modules"), and every function of the port's process image
+kept its registers and size, on the gfx1030 and the gfx90a. So a program
+pays on the host, and only there, for being split into modules, which
+goes against "hand-written C is the bar": a C program would put these in
+a header as `static inline`.
+
+**What exists.**
+- Within a module, `pragma inline` is LLVM's `alwaysinline`, and LLVM
+  inlines small procedures on its own at -O2.
+- A device compile copies what its code reaches from the other modules'
+  `merk` bytecode (`CopyDeviceLibrary`, `-device-module-dir`), before the
+  specializer and lowering. The driver writes that bytecode when it is
+  given several sources in one run.
+- There are no interface files yet. The module loader reads an imported
+  module's interface section from its source, so an importer has the
+  declarations but not the bodies.
+
+**The plan, in two steps.**
+1. **Copy on the host as on the device.** When one run compiles several
+   sources, the driver writes each module's bytecode for the host as it
+   does for each GPU. Each host compile then copies from the other modules
+   the bodies of the procedures it calls that the design says travel:
+   - those marked `pragma inline`;
+   - polymorphic ones, and ones with higher-order arguments, for the
+     specializer;
+   - small ones, such as `g = 9.81`.
+
+   A copy is the module's code for the inliner only. The symbol stays the
+   defining module's, so a copy is LLVM's `available_externally`, or it is
+   internal if that does not work for `tailcc` and `musttail` calls (to
+   find out). Copied before `SpecializeKnownClosures`, a body reaches the
+   specializer as it does in its own module. This serves every program
+   built in one run, which is every benchmark and test.
+2. **Bodies in interface files.** Once interface files exist, their
+   optimization section carries the same bodies, so that separate `-c`
+   compiles and a library without its source get them too. The choice of
+   bodies and where they are copied in stay the same; only the bodies'
+   source changes from the bytecode to the interface file.
+
+**Rejected:** LTO on the host. It would inline everything everywhere, but
+only in LLVM, after the specializer: a closure or dictionary is by then
+loads and an indirect call (design document, `pragma inline`, rejected
+alternatives). It also makes each link a whole-program compile.
+
+**To decide.**
+- What "small" is: a size in the semantic form's goals, or LLVM's own
+  choice on a copy whose body is given to it, `pragma inline` aside.
+- Whether `-O0` copies anything. The design says `pragma inline` holds at
+  every level, so `-O0` copies the marked bodies at least.
+- Each source compiled on its own (`-c`) has no bytecode to copy from
+  until step 2. It keeps the call there, where a GPU process's device
+  compile reports an error, since the device cannot call across images.
+
+**Tests.**
+- A CodeGen test of two modules: an importer's host IR keeps no call to
+  the other module's `pragma inline` procedure, its constant or its small
+  function, and keeps one to a large unmarked procedure. It runs, with
+  OUTPUT checks from mmc.
+- A polymorphic procedure, and one with a higher-order argument, from
+  another module, cloned for the importer's types and closure.
+- The design document's comparison: the same program in one module and
+  in two, the same host code. The SERGHEI port in host mode is one such
+  pair, against `serghei-swe.m` before the split (64eee93 in
+  merkurius-serghei-swe).
+
 ## Register pressure in GPU processes
 
 Decided by the user 2026-11-18, after `benchmarks/swe-muscl`: Mercury
@@ -6354,12 +6433,7 @@ for the user.
    another's speed by up to 10%, and a kernel's registers are its heaviest
    loop's. Keeping each loop's rounds out of the shared switch would make
    measurements trustworthy and let each loop have its own registers. A
-   design change, the largest of these. Another case (2026-11-21): the
-   SERGHEI port with vec3 records does the same arithmetic as with floats
-   once record phis are split (Upstream candidates, below), only in another
-   order within blocks, and `merk_process_loop` needs 230 VGPRs on the
-   gfx1030 against 193 (145 against 125 on gfx90a). The kernel's waves and
-   spills are the same.
+   design change, the largest of these.
 4. **Giving up occupancy for LDS** (3b). When a module's group-private
    arrays need more than the occupancy-preserving share, the runtime could
    size dynamic LDS for them, as HIP's launch does. At 1 wave swe-muscl's
@@ -6371,6 +6445,23 @@ for the user.
    own where HIP keeps the differences in registers.
 6. **Revisit faces-once** (Each shared call once a tile, above) after 1 to
    5.
+7. **An index add that LLVM splits into a pointer per plane** (2026-11-21).
+   The SERGHEI port's flux loops read a cell's three planes through a
+   helper, `cell_at(Cur, Z, NN, K + 1)`, whose reads are
+   `Cur ^ unsafe_elem(NN + (K + 1))`. `K + 1` is shared, so the outer add
+   has one use, and InstCombine rewrites the GEP of a single-use add into
+   two GEPs (`InstructionCombining.cpp`, "Try to replace ADD + GEP with GEP
+   + GEP"). LICM then hoists `Cur + 8 NN` and `Cur + 16 NN`, and the same
+   for D, out of the loop. Written out, `NN + K + 1` is `(NN + K) + 1`, and
+   the neighbours share `NN + K`. Every other instruction is the same, yet
+   the flux loop needs 232 VGPRs on the gfx1030 against 151 (130 against
+   99 on gfx90a). The port now writes the helper as `cell_at(..., K, D)`,
+   reading `NN + K + D`, and its code is the scalar code's to the register.
+   Left to find: why loop-invariant base pointers, which are uniform, cost
+   so many VGPRs in process code, rather than SGPRs. Until then, a natural
+   way of writing an index can cost a GPU process a third of its registers.
+   Running LLVM's always-inliner before the pipeline does not help: the
+   split is in the caller, after inlining.
 
 Waiting on decisions or runs:
 - **ca8b002** (`inreg` for the loops' team-uniform parameters): by the
