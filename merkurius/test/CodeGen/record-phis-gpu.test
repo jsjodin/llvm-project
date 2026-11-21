@@ -1,0 +1,11 @@
+record-phis.m's solver spawned on the machine's GPU, where its records
+through branches are split into their fields (lib/CodeGen/RecordPhis.h).
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/record-phis.m -o %t2
+RUN: %gpu-env MERK_CHECK_MESSAGES=1 timeout -k 1 60 %t2 gpu 2>&1 | FileCheck %s --match-full-lines --strict-whitespace
+
+CHECK:17.0000 2.0000
+CHECK-NEXT:6.0000 0.0000
+CHECK-NEXT:5.7500 2.2500
+CHECK-NEXT:vec3(2.0, 1.0, -0.5)
