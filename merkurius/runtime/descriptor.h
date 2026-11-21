@@ -77,11 +77,17 @@ enum Kind : uint8_t {
   Tuple,
   // A higher-order type's, named pred or func, for any number of arguments.
   Closure,
+  // open(T)'s, whose values have T's open layout (open.h).
+  Open,
 };
 
 // A TypeCtor's flags: a term type's whose values are flat records, or flat
-// fields of them, as the compiler chose them (record.h).
+// fields of them, as the compiler chose them (record.h); a type's whose open
+// layout is its ordinary one if its arguments' are; and closed(T)'s, a notag
+// whose open layout is a box (open.h).
 constexpr uint8_t kFlat{1};
+constexpr uint8_t kOpenSame{2};
+constexpr uint8_t kClosed{4};
 
 // byTag's marks, for a tag whose word is a constant, and for one that
 // constructors share.

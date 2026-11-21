@@ -17,6 +17,7 @@ add_library(merkrt STATIC
   main.cpp
   node.cpp
   offload.cpp
+  open.cpp
   process-images.cpp
   read.cpp
   sha256.cpp

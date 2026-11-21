@@ -403,6 +403,7 @@ private:
   merk::SucceedOp TailSucceed(mlir::Operation *call,
       llvm::SmallVectorImpl<mlir::Operation *> &between);
   llvm::LogicalResult LowerTypeCtors();
+  bool OpenSame(mlir::Type, llvm::StringSet<> &assumed);
   mlir::LLVM::GlobalOp RttiTable(mlir::Type, mlir::Location,
       llvm::function_ref<mlir::Value(mlir::Value)> make);
   mlir::LLVM::GlobalOp I16Table(
@@ -2551,8 +2552,10 @@ void Lowerer::LowerClosureWord(merk::ClosureWordOp op) {
       op, Convert(op.getType()), address, 8);
 }
 
-// runtime/descriptor.h's kFlat.
+// runtime/descriptor.h's kFlat, kOpenSame and kClosed.
 constexpr std::int64_t kFlatDescriptor{1};
+constexpr std::int64_t kOpenSameDescriptor{2};
+constexpr std::int64_t kClosedDescriptor{4};
 
 // The descriptors' kinds, as runtime/write.cpp reads them: a term's is its
 // layout's.
@@ -2560,7 +2563,7 @@ static std::optional<unsigned> DescriptorKind(llvm::StringRef kind) {
   static constexpr llvm::StringLiteral kinds[]{"int", "uint", "int8", "int16",
       "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float", "char",
       "string", "array", "dummy", "void", "enum", "notag", "cells", "tuple",
-      "closure"};
+      "closure", "open"};
   for (auto [i, name] : llvm::enumerate(kinds)) {
     if (kind == name) {
       return i;
@@ -2669,6 +2672,48 @@ mlir::Value Lowerer::FieldTypeValue(mlir::Attribute type,
       base, llvm::ArrayRef<mlir::LLVM::GEPArg>{1});
 }
 
+// Whether a field's or a term's type has the same open layout as ordinary
+// layout, if the type parameters' do (runtime/open.h, kOpenSame): a type
+// parameter's word, or a term whose layout is a pointer to cells that keep
+// their tags, with no hidden fields, whose fields' types do. A type is
+// assumed to while its own fields are checked, so a recursive type does.
+// Not an enum, whose constants are shifted, nor a raw field, which is boxed
+// or shifted, nor closed(T), which is boxed, nor a type whose layout this
+// module does not see. Answering no for a type whose layouts coincide only
+// makes to_open copy it.
+bool Lowerer::OpenSame(mlir::Type type, llvm::StringSet<> &assumed) {
+  if (mlir::isa<merk::WordType>(type)) {
+    return true;
+  }
+  auto term{mlir::dyn_cast<merk::TermType>(type)};
+  if (!term) {
+    return false;
+  }
+  llvm::StringRef name{term.getName()};
+  if (name.starts_with("open.closed(")) {
+    return false;
+  }
+  if (!assumed.insert(name).second) {
+    return true;
+  }
+  auto it{layouts_.find(name)};
+  if (it == layouts_.end() || it->second.kind == TermLayout::Kind::Enum) {
+    return false;
+  }
+  for (const TermLayout::Functor &functor : it->second.functors) {
+    if (functor.hidden != 0 ||
+        (functor.arity != 0 && functor.tag == kTags - 1)) {
+      return false;
+    }
+    for (mlir::Type field : functor.fields) {
+      if (!OpenSame(field, assumed)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 llvm::LogicalResult Lowerer::LowerTypeCtors() {
   mlir::MLIRContext *context{module_.getContext()};
   auto ptr{mlir::LLVM::LLVMPointerType::get(context)};
@@ -2719,6 +2764,17 @@ llvm::LogicalResult Lowerer::LowerTypeCtors() {
       if (recordRule_->IsFlatField(*op.getTerm())) {
         flags |= kFlatDescriptor;
       }
+    }
+    // The open layout (runtime/open.h): closed(T)'s is a box, and a type's
+    // may be its ordinary one.
+    bool closed{op.getConstructor() == "open.closed/1"};
+    if (closed) {
+      flags |= kClosedDescriptor;
+    }
+    llvm::StringSet<> assumed;
+    if (!closed && (kindName == "dummy" ||
+                       (op.getTerm() && OpenSame(*op.getTerm(), assumed)))) {
+      flags |= kOpenSameDescriptor;
     }
     mlir::LLVM::GlobalOp moduleName{StringGlobal(op.getModule(), loc)};
     mlir::LLVM::GlobalOp name{StringGlobal(op.getName(), loc)};

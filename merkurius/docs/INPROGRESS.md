@@ -7894,9 +7894,29 @@ the `type_info` back to the open layout (below).
      - Tests: `Semantics/processes/gpu-open.m`,
        `CodeGen/omp-parallel-do-open.m`, and `mk` in
        `Semantics/modes/open/open-mode-errors.m`.
-2. **Open layouts** from the descriptors (D3): tag 7 the variable tag,
-   raw fields boxed, static boxes for small ints, enums re-encoded,
-   `OpenSame`, and `Closed` for `closed(T)`'s box.
+2. **Open layouts.** Done 2026-11-21. The rule is in the design document,
+   Lowering, "Open layouts".
+   - **Runtime,** `runtime/open.h` and `open.cpp`: tag 7 as the variable
+     tag; `OpenEncodingOf`, a kind's encoding; `OpenTagOf`, a functor's
+     open tags; `CellTag`, the tag rule for any number of tags; and
+     `StaticIntBox`, for −128 to 1023. Tests: `unittests/Runtime/OpenTest.cpp`.
+   - **Descriptors:** lowering sets `kOpenSame` (2), and `kClosed` (4) on
+     `open.closed/1`'s, and `runtime/descriptor.h` has the kind `Open` for
+     `open.open/1`, which nothing emits until step 4 makes `type_info`s of
+     open types. `open` joins MLIRGen's uncompiled library, marked
+     Temporary, so a program's `closed(T)` gets a linkonce descriptor.
+     Test: `CodeGen/open-descriptors.m`, which also runs `closed(T)`.
+   - **Changed from the plan:**
+     - Characters and integers of 32 bits or fewer are shifted, not
+       boxed. They always fit, so it costs no allocation and adds no second
+       encoding of a type.
+     - `closed(T)` is a flag on a notag descriptor, not a new kind. Outside
+       `open(_)` it is a notag, so the ordinary walkers (write, copy, trace,
+       encode) need no new case.
+   - **For step 4:** the compiler's own open `TermLayout`, made when there
+     is code that uses it. Its tags must be `CellTag(..., 7)`'s, the
+     runtime's rule; a lowering test against `OpenTest`'s cases keeps the
+     two in step.
 3. **The runtime:** variable cells, `deref` and `bind`, and the trail,
    marked and undone by backtracking through continuations.
 4. **Code generation:** `merk.open_unify`, `get_structure`, `to_open`,
