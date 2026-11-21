@@ -30,7 +30,9 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
+#include <optional>
 #include <string>
+#include <utility>
 
 namespace merkurius::semantics {
 
@@ -214,6 +216,66 @@ parser::CharBlock NameSource(
     const parser::TokenSequence &tokens, const parser::SymName &name) {
   return parser::CharBlock{tokens.tokens[name.tokens.first].spelling.begin(),
       tokens.tokens[name.tokens.last].spelling.end()};
+}
+
+// The pragma that `item` is, if it is one that may not be in the interface
+// section, and its tokens. The reference manual says so only of
+// foreign_export_enum ("Using Mercury enumerations in foreign code"); mmc
+// reports each of these as "`:- pragma inline' declaration in module
+// interface", and accepts there the termination pragmas, obsolete,
+// type_spec, foreign_type, foreign_import_module and source_file (design
+// document, "Where mmc and the manual disagree").
+std::optional<std::pair<std::string, parser::TokenRange>>
+ImplementationOnlyPragma(const parser::Item &item) {
+  using Result = std::optional<std::pair<std::string, parser::TokenRange>>;
+  return common::visit(
+      common::visitors{
+          [](const parser::PredPragma *pragma) -> Result {
+            switch (pragma->kind) {
+            case parser::PredPragmaKind::Terminates:
+            case parser::PredPragmaKind::DoesNotTerminate:
+            case parser::PredPragmaKind::CheckTermination:
+              return std::nullopt;
+            default:
+              return std::pair{
+                  common::SnakeName(parser::EnumToString(pragma->kind)),
+                  pragma->tokens};
+            }
+          },
+          [](const parser::TablingPragma *pragma) -> Result {
+            return std::pair{
+                common::SnakeName(parser::EnumToString(pragma->method)),
+                pragma->tokens};
+          },
+          [](const parser::FactTablePragma *pragma) -> Result {
+            return std::pair{std::string{"fact_table"}, pragma->tokens};
+          },
+          [](const parser::RequireFeatureSetPragma *pragma) -> Result {
+            return std::pair{std::string{"require_feature_set"},
+                pragma->tokens};
+          },
+          [](const parser::ForeignDeclPragma *pragma) -> Result {
+            return std::pair{std::string{"foreign_decl"}, pragma->tokens};
+          },
+          [](const parser::ForeignCodePragma *pragma) -> Result {
+            return std::pair{std::string{"foreign_code"}, pragma->tokens};
+          },
+          [](const parser::ForeignProcPragma *pragma) -> Result {
+            return std::pair{std::string{"foreign_proc"}, pragma->tokens};
+          },
+          [](const parser::ForeignEnumPragma *pragma) -> Result {
+            return std::pair{std::string{"foreign_enum"}, pragma->tokens};
+          },
+          [](const parser::ForeignExportEnumPragma *pragma) -> Result {
+            return std::pair{std::string{"foreign_export_enum"},
+                pragma->tokens};
+          },
+          [](const parser::ForeignExportPragma *pragma) -> Result {
+            return std::pair{std::string{"foreign_export"}, pragma->tokens};
+          },
+          [](const auto *) -> Result { return std::nullopt; },
+      },
+      item);
 }
 
 bool IsTypeDefinition(const Declaration &declaration) {
@@ -1124,6 +1186,16 @@ void Resolver::Run(const parser::ParseTree &tree,
     } else {
       ResolveItem(item, inInterface ? interface : implementation,
           inInterface ? &implementation : nullptr, true, tokens);
+      if (auto pragma{inInterface ? ImplementationOnlyPragma(item)
+                                  : std::nullopt}) {
+        // mmc: "Error: `:- pragma inline' declaration in module interface."
+        messages_.Say(
+            parser::CharBlock{
+                tokens.tokens[pragma->second.first].spelling.begin(),
+                tokens.tokens[pragma->second.last].spelling.end()},
+            "`:- pragma %s' may not be in the interface section"_err_en_US,
+            pragma->first);
+      }
       if (const auto *decl{std::get_if<const parser::InstanceDecl *>(&item)}) {
         result_.instances_.push_back({*decl, &tokens, true, inInterface});
       } else if (const auto *decl{
