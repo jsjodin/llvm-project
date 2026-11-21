@@ -6,7 +6,8 @@
 % type becomes a fresh unbound variable when no goal can run, the hole
 % rather than the term around it, or when a construction takes it and it is
 % not used again. A disjunction that may bind an open nonlocal keeps its
-% solutions. closed(T)'s argument is ground.
+% solutions. closed(T)'s argument is ground. An open term is never unique,
+% nor is what it holds.
 %
 % RUN: merkc -fc1 -fopen-types -fdebug-dump-modes %s 2>&1 | FileCheck --implicit-check-not=error --implicit-check-not=warning %s
 % RUN: merkc -fc1 -fopen-types -fdebug-dump-determinism %s 2>&1 | FileCheck --check-prefix=DET --implicit-check-not=error --implicit-check-not=warning %s
@@ -33,7 +34,7 @@ make_open([X | Xs], [X | R], T) :-
 % CHECK-NEXT:     final: HeadVar__1 ground, HeadVar__2 any, HeadVar__3 any
 % CHECK:          call pred open_modes.make_open/3 mode 0: make_open(Xs, R, T)
 % CHECK:          construct V_3 = '[|]'(X, R)
-% CHECK:          final: HeadVar__1 ground, HeadVar__2 unique('[|]'(ground, any)), HeadVar__3 any
+% CHECK:          final: HeadVar__1 ground, HeadVar__2 bound('[|]'(ground, any)), HeadVar__3 any
 % DET: pred open_modes.main/2 mode 0: main(di, uo) is det, inferred det
 % DET: pred open_modes.make_open/3 mode 0: make_open(in, oa, oa) is det, inferred det
 
@@ -59,7 +60,7 @@ append_dl(A - B, B - C, A - C).
 % CHECK-NEXT:     getstructure HeadVar__1 = -(A, B)
 % CHECK-NEXT:     getstructure HeadVar__2 = -(B, C)
 % CHECK-NEXT:     construct HeadVar__3 = -(A, C)
-% CHECK-NEXT:     final: HeadVar__1 bound('-'(any, any)), HeadVar__2 bound('-'(any, any)), HeadVar__3 unique('-'(any, any))
+% CHECK-NEXT:     final: HeadVar__1 bound('-'(any, any)), HeadVar__2 bound('-'(any, any)), HeadVar__3 bound('-'(any, any))
 % DET: pred open_modes.append_dl/3 mode 0: append_dl(ia, ia, oa) is semidet, inferred semidet
 % DET-NEXT: getstructure HeadVar__1 = pair.-/2(A, B) [det]
 % DET-NEXT: getstructure HeadVar__2 = pair.-/2(B, C) [semidet]
@@ -112,6 +113,7 @@ fill(bundle(closed(big(1, 2)), _)).
 % CHECK:          construct V_1 = closed(V_2)
 % CHECK-NEXT:     fresh V_5
 % CHECK-NEXT:     construct HeadVar__1 = bundle(V_1, V_5)
+% CHECK-NEXT:     final: HeadVar__1 bound(bundle(bound(closed(bound(big(bound(1), bound(2))))), any))
 % DET: pred open_modes.fill/1 mode 0: fill(oa) is det, inferred det
 
     % A get_structure of closed/1 gives its ground argument, and cannot

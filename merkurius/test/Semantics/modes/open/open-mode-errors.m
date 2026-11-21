@@ -3,7 +3,7 @@
 % of a type with several functors; closed(T) holds a ground value; a
 % condition that may bind an open nonlocal needs a purity promise; and
 % free does not match any, so a branch may not leave free what another
-% binds.
+% binds; and an open term is never unique.
 %
 % RUN: not merkc -fc1 -fopen-types -fdebug-dump-determinism %s 2>&1 | FileCheck --implicit-check-not=error: %s
 
@@ -36,3 +36,8 @@ merge(N, X) :- ( if N > 0 then X = to_open(1) else true ).
 % CHECK: [[@LINE-1]]:52: error: in the clause for merge(in, oa): mode mismatch in the if-then-else: X is ground in some branches but not others
 % CHECK: [[@LINE-2]]:32: because: in this branch, X has inst ground
 % CHECK: [[@LINE-3]]:52: because: in this branch, X has inst free
+
+    % An open term is never unique.
+:- pred mk(open(list(int))::uo) is det.
+mk([_]).
+% CHECK: [[@LINE-1]]:4: error: in the clause for mk(uo): mode error: argument 1, HeadVar__1, had the wrong inst: its final inst is bound('[|]'(any, bound([]))), but unique is expected

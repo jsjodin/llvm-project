@@ -2968,8 +2968,9 @@ ProcedureChecker::Result ProcedureChecker::CheckVarUnify(
             " cannot succeed: " + Name(x) + " has inst " + InstText(a) +
             ", and " + Name(y) + " has inst " + InstText(b));
   }
-  // Two references used after are shared (Overton, definition 3.2.19).
-  if (live[x] && live[y]) {
+  // Two references used after are shared (Overton, definition 3.2.19),
+  // and an open term always is.
+  if ((live[x] && live[y]) || MentionsOpen(type)) {
     unified = insts_.Share(unified);
   }
   map[x] = unified;
@@ -3242,6 +3243,11 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
     }
     if (holes) {
       term = insts_.Bound(Uniqueness::Unique, {{functor, shared}});
+    }
+    // An open term is never unique, as the trail may refer to its cells
+    // (design document, "Open terms", Checking rules).
+    if (CanBeFresh(x)) {
+      term = insts_.Share(term);
     }
     for (std::size_t i{0}; i < unify.arguments.size(); ++i) {
       // An argument is now part of the term, which wakes the goals that

@@ -27,6 +27,39 @@ bool IsNamed(const Type &type, llvm::StringRef module, llvm::StringRef name) {
       type.constructor->name == name;
 }
 
+// Whether a type has a type of the module open in it: open(T), or
+// closed(T), which inside an open term may be an unbound variable.
+bool MentionsOpen(const Type &type) {
+  if (IsNamed(type, "open", "open") || IsNamed(type, "open", "closed")) {
+    return true;
+  }
+  return llvm::any_of(type.arguments,
+             [](const Type *t) { return MentionsOpen(*t); }) ||
+      (type.result && MentionsOpen(*type.result));
+}
+
+// The first variable of a goal, not counting the goals in it, whose type
+// has open terms in it; none if none does.
+std::optional<BodyVar> OpenVariable(const ProcedureBody &body, const Body &goal) {
+  llvm::SmallVector<BodyVar, 8> vars;
+  if (goal.kind == BodyKind::Unify) {
+    vars.push_back(goal.left);
+    if (goal.isVar) {
+      vars.push_back(goal.var);
+    }
+  }
+  if (goal.kind == BodyKind::HOCall) {
+    vars.push_back(goal.closure);
+  }
+  vars.append(goal.arguments.begin(), goal.arguments.end());
+  for (BodyVar var : vars) {
+    if (const Type *type{body.vars[var].type}; type && MentionsOpen(*type)) {
+      return var;
+    }
+  }
+  return std::nullopt;
+}
+
 // A primitive type whose values are one scalar.
 bool IsScalar(const Type &type) {
   if (type.kind != TypeKind::Named || !type.constructor->module.empty()) {
@@ -459,6 +492,17 @@ static Context InnerContext(Context context, llvm::omp::Directive id) {
 void GpuCodeChecker::Walk(
     const ProcedureBody &body, const Body &goal, Context context) {
   bool process{context != Context::Region};
+  // Open terms are host-only (docs/INPROGRESS.md, Open types): a device
+  // has no trail, and its messages are flat.
+  if (goal.kind == BodyKind::Unify || goal.kind == BodyKind::Call ||
+      goal.kind == BodyKind::HOCall) {
+    if (std::optional<BodyVar> var{OpenVariable(body, goal)};
+        var && reported_.insert(Source(goal.tokens).begin()).second) {
+      messages_.Say(Source(goal.tokens),
+          "open terms are host-only, so code that runs on a GPU may not use a value of type %s"_err_en_US,
+          TypeToString(*body.vars[*var].type));
+    }
+  }
   switch (goal.kind) {
   case BodyKind::Unify:
     if (goal.unify == UnifyKind::Call) {

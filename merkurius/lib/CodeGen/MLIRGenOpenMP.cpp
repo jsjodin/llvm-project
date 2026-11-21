@@ -753,6 +753,69 @@ static bool IsNamedType(const semantics::Type &type, llvm::StringRef module,
       type.constructor->module == module && type.constructor->name == name;
 }
 
+// Whether a type has a type of the module open in it: open(T), or
+// closed(T), which inside an open term may be an unbound variable.
+static bool MentionsOpen(const semantics::Type &type) {
+  if (IsNamedType(type, "open", "open") ||
+      IsNamedType(type, "open", "closed")) {
+    return true;
+  }
+  return llvm::any_of(type.arguments,
+             [](const semantics::Type *t) { return MentionsOpen(*t); }) ||
+      (type.result && MentionsOpen(*type.result));
+}
+
+static bool IsFromOpen(const Body &goal) {
+  const semantics::Symbol *callee{goal.modes && goal.modes->callee
+          ? goal.modes->callee->symbol
+          : nullptr};
+  return callee && callee->module == "open" && callee->name == "from_open" &&
+      callee->arity == 2;
+}
+
+// The first goal in `goal` that uses `var` other than as the open term that
+// open.from_open reads, which is all that cannot bind it; null if none. A
+// call may bind it, and so may a term made from it, wherever it goes.
+static const Body *UseOtherThanReading(const Body &goal, BodyVar var) {
+  switch (goal.kind) {
+  case BodyKind::Call:
+  case BodyKind::Unify: {
+    if (IsFromOpen(goal) && goal.kind == BodyKind::Call) {
+      return goal.arguments.size() > 1 && goal.arguments[1] == var ? &goal
+                                                                   : nullptr;
+    }
+    bool used{llvm::is_contained(goal.arguments, var) ||
+        (goal.kind == BodyKind::Unify &&
+            (goal.left == var || (goal.isVar && goal.var == var)))};
+    if (used) {
+      return &goal;
+    }
+    return goal.lambda ? UseOtherThanReading(*goal.lambda, var) : nullptr;
+  }
+  case BodyKind::HOCall:
+    return goal.closure == var || llvm::is_contained(goal.arguments, var)
+        ? &goal
+        : nullptr;
+  case BodyKind::Switch:
+    if (goal.switchVar == var) {
+      return &goal;
+    }
+    for (const semantics::SwitchCase &arm : goal.cases) {
+      if (const Body *use{UseOtherThanReading(*arm.goal, var)}) {
+        return use;
+      }
+    }
+    return nullptr;
+  default:
+    for (const Body *g : goal.goals) {
+      if (const Body *use{UseOtherThanReading(*g, var)}) {
+        return use;
+      }
+    }
+    return nullptr;
+  }
+}
+
 // The type of a value a loop carries, at the call of its loop procedure.
 static const semantics::Type *ThreadedType(const ProcedureBody &body,
     const Body &call, const semantics::TranslatedLoop::Threaded &value) {
@@ -957,6 +1020,24 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
   if (signature && signature->purity != parser::Purity::Pure) {
     Error(at, "the body of a parallel do loop must be pure"_err_en_US);
     return;
+  }
+  // An open value that the iterations share may only be read, by
+  // from_open: the trail is the process's, and two iterations binding one
+  // variable would race (design document, "Open terms", Checking rules).
+  if (const ProcedureBody *inner{determinism_.BodyOf(bodyProcedure)};
+      inner && inner->body) {
+    for (BodyVar var : inner->head) {
+      const semantics::Type *type{inner->vars[var].type};
+      if (!type || !MentionsOpen(*type)) {
+        continue;
+      }
+      if (const Body *use{UseOtherThanReading(*inner->body, var)}) {
+        Error(Where(use->tokens),
+            "the body of a parallel do loop may only read an open value that its iterations share, with from_open, since another use may bind it, but this uses %s"_err_en_US,
+            inner->vars[var].name);
+        return;
+      }
+    }
   }
   // The reductions: each value the loop carries that a reduction clause
   // names, by its name, or the one scalar it carries, for a clause that

@@ -7875,9 +7875,25 @@ the `type_info` back to the open layout (below).
        So must a test, or a deconstruction's argument test, whose insts
        have `any` parts.
      - Tests: `Semantics/modes/open/` and `CodeGen/open-types-not-yet.m`.
-   - (c) The other checks: an open value never `unique`; a parallel loop
-     body may not bind a nonlocal open variable; a device compile reports
-     open values.
+   - (c) Done 2026-11-21: the other checks.
+     - **Never unique:** a construction of an open-typed or `closed(T)`
+       variable is shared, deeply, and so is a full unification's result.
+       So an open term given to a `uo` argument is a mode error. There is
+       no structure reuse pass yet; when one comes, it must skip open
+       cells.
+     - **Parallel loops:** a `parallel do` body may use an open value its
+       iterations share only as `from_open`'s first argument. Any other use
+       is an error: a get_structure, a call, or a term made from it, since
+       each may bind it. The check is in `MLIRGenOpenMP.cpp`, beside the
+       other `parallel do` checks, on the body procedure's head variables.
+       It is conservative: a callee that only reads is still rejected.
+     - **GPU code:** the GPU code checker reports any goal using a value
+       whose type has `open(T)` or `closed(T)` in it, in a GPU process
+       kind's code, in what that code calls, and in target regions. This
+       catches it in the host compile, before a device compile.
+     - Tests: `Semantics/processes/gpu-open.m`,
+       `CodeGen/omp-parallel-do-open.m`, and `mk` in
+       `Semantics/modes/open/open-mode-errors.m`.
 2. **Open layouts** from the descriptors (D3): tag 7 the variable tag,
    raw fields boxed, static boxes for small ints, enums re-encoded,
    `OpenSame`, and `Closed` for `closed(T)`'s box.
