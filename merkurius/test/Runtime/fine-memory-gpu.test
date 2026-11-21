@@ -1,5 +1,5 @@
 Fine-grained device memory through liboffload (OL_ALLOC_TYPE_DEVICE_FINE_GRAINED,
-the AMDGPU plugin's TARGET_ALLOC_DEVICE_FINE): a kernel's system-scope atomics
+served by the AMDGPU plugin's fine-grained pool): a kernel's system-scope atomics
 on a word of it, copied back, and the word freed (docs/INPROGRESS.md, Direct
 sends between the GPUs of a node, point 5). With two GPUs visible the program
 also plays ping-pong between kernels on the two, each polling a word of its
