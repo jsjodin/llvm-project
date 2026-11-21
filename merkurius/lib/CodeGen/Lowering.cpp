@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "merkurius/CodeGen/Lowering.h"
+#include "RecordPhis.h"
 #include "Records.h"
 #include "merkurius/CodeGen/DeviceLibrary.h"
 #include "merkurius/CodeGen/MLIRGen.h"
@@ -6562,6 +6563,12 @@ void OptimizeLLVMIR(llvm::Module &module, const TargetInfo &target) {
           module.getNamedGlobal(kRootTable)}) {
     llvm::appendToUsed(module, {table});
   }
+  // Records through branches split into their fields after each InstCombine,
+  // which the passes after it then see (RecordPhis.h).
+  builder.registerPeepholeEPCallback(
+      [](llvm::FunctionPassManager &functionPasses, llvm::OptimizationLevel) {
+        functionPasses.addPass(ScalarizeRecordPhisPass{});
+      });
   llvm::ModulePassManager passes{level == llvm::OptimizationLevel::O0
           ? builder.buildO0DefaultPipeline(level)
           : builder.buildPerModuleDefaultPipeline(level)};

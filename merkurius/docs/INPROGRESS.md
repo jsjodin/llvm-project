@@ -6354,7 +6354,12 @@ for the user.
    another's speed by up to 10%, and a kernel's registers are its heaviest
    loop's. Keeping each loop's rounds out of the shared switch would make
    measurements trustworthy and let each loop have its own registers. A
-   design change, the largest of these.
+   design change, the largest of these. Another case (2026-11-21): the
+   SERGHEI port with vec3 records does the same arithmetic as with floats
+   once record phis are split (Upstream candidates, below), only in another
+   order within blocks, and `merk_process_loop` needs 230 VGPRs on the
+   gfx1030 against 193 (145 against 125 on gfx90a). The kernel's waves and
+   spills are the same.
 4. **Giving up occupancy for LDS** (3b). When a module's group-private
    arrays need more than the occupancy-preserving share, the runtime could
    size dynamic LDS for them, as HIP's launch does. At 1 wave swe-muscl's
@@ -6378,6 +6383,48 @@ Waiting on decisions or runs:
 - **SERGHEI's default build stalls on the valley flood** at 2048² on the
   gfx90a: its time step goes to 0 at 470 s (EXPERIMENTS.md, 2). The no-FMA
   build finishes. Possibly worth reporting upstream.
+
+### Upstream candidates
+
+Changes to LLVM that are ours and could go upstream, each with its tests.
+None is submitted yet.
+- **AMDGPU's `"no_callee_saved_registers"`** (4745adb2328b), with IPRA's
+  frame registers (51f98dc49257) and the attributor's propagation of the
+  attribute.
+- **`inreg` operands out of the waterfall loop** (440bb8c828f1).
+- **The attributor's whole-wave calls** (step 5 of Register pressure in GPU
+  processes, above).
+- **Record phis split into their fields** (2026-11-21,
+  `lib/CodeGen/RecordPhis.cpp`, `ScalarizeRecordPhisPass`). LLVM keeps a
+  phi or select of a struct of scalars whole. On a GPU the inliner makes
+  them wherever a procedure that returns a struct has several ends. Every
+  field then stays live, read or not, and no pass sees a field's value
+  through it. The SERGHEI port with vec3 records had 31 such phis and 2
+  selects. What LLVM has:
+  - InstCombine's `foldPHIArgInsertValueInstructionIntoPHI`, which needs
+    every incoming value to be a one-use `insertvalue` of the same index.
+    So it does nothing for a constant (`zeroinitializer`) or a phi passed
+    through, the port's cases.
+  - Scalarizer's φs and selects, which are for vectors and structs of
+    matching vectors only.
+  - AMDGPU CodeGenPrepare's splitting of large vector φs, for the same
+    reason as ours.
+
+  The way in is probably to widen InstCombine's fold to constants and
+  phis, or to give Scalarizer structs of scalars; the pass is that, done
+  whole. LLVM's frontend advice (`docs/Frontend/PerformanceTips.md`) is to
+  make no aggregate values at all, which a struct return makes impossible.
+  *Before proposing it:* measure it beyond Merkurius, for upstream will ask
+  whether other frontends gain:
+  - Clang and Flang code at -O2/-O3 for x86 and AMDGPU, with an `opt`
+    build of the pass, counting aggregate phis left after the pipeline
+    (llvm-test-suite, SPEC if we have it, and HIP codes that return small
+    structs, such as complex numbers or `float3` helpers).
+  - Rust, Swift and Julia return small structs by value more than C does,
+    so they may have more.
+  - Expectation: less on CPUs. x86's ABI returns records of more than 16
+    bytes in memory, which SROA splits already, and CPUs have fewer
+    registers to lose. A GPU returns larger structs in registers.
 
 ## A pipeline of processes
 
