@@ -100,7 +100,18 @@ struct ClauseTypes {
   const MethodDefinition *method{nullptr};
   // Whether the clause has a type error, or is ambiguous.
   bool typeError{false};
+  // By goal number, if any is, whether a unification's functor is the open
+  // twin of its constructor, and which of its arguments take a ground value
+  // where the twin expects an open one: OpenTwin's encoding. Empty if the
+  // clause has no open twin (docs/INPROGRESS.md, Open types).
+  llvm::ArrayRef<std::uint64_t> openTwins{};
 };
+
+// A unification's open-twin word: 0 if it is not a twin; else bit 0, and
+// bit j + 1 if argument j takes a ground value.
+inline std::uint64_t OpenTwin(std::uint64_t coerced) {
+  return 1 | (coerced << 1);
+}
 
 class TypeChecking {
 public:

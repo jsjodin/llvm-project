@@ -152,6 +152,9 @@ struct LangOptions {
   // operators, for process declarations (design document, "Processes and
   // mailboxes").
   bool processDeclarations{false};
+  // -fopen-types: allow the library module open, whose open(T) values may
+  // hold unbound variables (design document, "Open terms").
+  bool openTypes{false};
 };
 
 } // namespace merkurius::frontend

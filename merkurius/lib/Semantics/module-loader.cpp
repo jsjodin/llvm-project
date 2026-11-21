@@ -52,9 +52,10 @@ std::string Directory(const parser::SourceFile &file) {
 
 ModuleLoader::ModuleLoader(parser::AllSources &sources,
     std::string libraryDirectory, parser::Messages &messages, bool sound,
-    parser::ReaderOptions readerOptions)
+    parser::ReaderOptions readerOptions, bool openTypes)
     : sources_{sources}, libraryDirectory_{std::move(libraryDirectory)},
-      messages_{messages}, sound_{sound}, readerOptions_{readerOptions} {}
+      messages_{messages}, sound_{sound}, readerOptions_{readerOptions},
+      openTypes_{openTypes} {}
 
 ModuleLoader::~ModuleLoader() = default;
 
@@ -124,6 +125,15 @@ const ModuleInterface *ModuleLoader::Load(
     messages_.Say(where,
         "cannot find module %s: there is no %s in %s"_err_en_US, name.str(),
         fileName, llvm::join(path, ", "));
+    loaded_[name] = nullptr;
+    return nullptr;
+  }
+  // Open types are an extension (design document, "Open terms"); a
+  // program's own module named open is not the library's.
+  if (name == "open" && !openTypes_ && !libraryDirectory_.empty() &&
+      llvm::sys::path::parent_path(*found) == libraryDirectory_) {
+    messages_.Say(where,
+        "the module open, of open types, needs -fopen-types"_err_en_US);
     loaded_[name] = nullptr;
     return nullptr;
   }

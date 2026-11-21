@@ -16,6 +16,14 @@
 namespace merkurius::semantics {
 
 const Type *TypeContext::Intern(const Type &type) {
+  if (open_ && type.kind == TypeKind::Named && type.constructor == open_ &&
+      type.arguments.size() == 1) {
+    const Type *argument{type.arguments.front()};
+    if (argument->kind == TypeKind::Named &&
+        (argument->constructor == open_ || argument->constructor == closed_)) {
+      return argument;
+    }
+  }
   std::vector<std::uintptr_t> key{static_cast<std::uintptr_t>(type.kind),
       type.var, reinterpret_cast<std::uintptr_t>(type.constructor),
       static_cast<std::uintptr_t>(type.predOrFunc),
@@ -36,6 +44,10 @@ const Type *TypeContext::Intern(const Type &type) {
 
 const Type *TypeContext::Variable(unsigned var) {
   return Intern(Type{TypeKind::Variable, var, nullptr, {}, {}, {}, nullptr});
+}
+
+const Type *TypeContext::Open(const Type *type) {
+  return Named(*open_, {type});
 }
 
 const Type *TypeContext::Named(

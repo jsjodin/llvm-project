@@ -58,9 +58,11 @@ public:
   // modules whose manual's declarations work around mmc's unique modes.
   // Each file is read with `readerOptions`, the importing compile's, so
   // that an imported module may use the extensions it may, such as loops.
+  // The library's module open, of open types, loads only with `openTypes`
+  // (-fopen-types).
   ModuleLoader(parser::AllSources &sources, std::string libraryDirectory,
       parser::Messages &messages, bool sound = false,
-      parser::ReaderOptions readerOptions = {});
+      parser::ReaderOptions readerOptions = {}, bool openTypes = false);
   ~ModuleLoader();
 
   // The interface of the module named `name`, loaded once, with the
@@ -97,6 +99,7 @@ private:
   parser::Messages &messages_;
   bool sound_;
   parser::ReaderOptions readerOptions_;
+  bool openTypes_;
   std::vector<std::unique_ptr<File>> files_;
   llvm::StringMap<ModuleInterface *> loaded_;
   std::vector<const ModuleInterface *> order_;

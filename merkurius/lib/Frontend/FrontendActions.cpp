@@ -279,7 +279,8 @@ bool DebugDumpImportsAction::executeAction() {
       parser::TermReader::defaultMaxDepth, ReaderOptionsOf(ci))};
   semantics::ModuleLoader loader{ci.getAllSources(),
       ci.getFrontendOpts().libraryDirectory, messages,
-      !ci.getFrontendOpts().mmcUniqueness, ReaderOptionsOf(ci)};
+      !ci.getFrontendOpts().mmcUniqueness, ReaderOptionsOf(ci),
+      ci.getLangOpts().openTypes};
   llvm::StringRef directory{
       llvm::sys::path::parent_path(getSourceFile().path())};
   semantics::ModuleLoader::Imports imports{
@@ -335,7 +336,8 @@ void Resolve(CompilerInstance &ci, parser::SourceFile &file,
   r.form = &semantics::Desugar(*r.tree, r.tokens, r.semanticArena, r.messages);
   r.loader = std::make_unique<semantics::ModuleLoader>(ci.getAllSources(),
       ci.getFrontendOpts().libraryDirectory, r.messages,
-      !ci.getFrontendOpts().mmcUniqueness, ReaderOptionsOf(ci));
+      !ci.getFrontendOpts().mmcUniqueness, ReaderOptionsOf(ci),
+      ci.getLangOpts().openTypes);
   llvm::StringRef directory{llvm::sys::path::parent_path(file.path())};
   r.loader->LoadImports(
       *r.tree, r.tokens, directory.empty() ? "." : directory);
@@ -507,6 +509,17 @@ bool DebugDumpTypesAction::executeAction() {
           *os << *symbol;
         } else {
           *os << "char constant";
+        }
+        // The open twin of a constructor, and the arguments that take a
+        // ground value (docs/INPROGRESS.md, Open types).
+        if (goal < clause.openTwins.size() && clause.openTwins[goal]) {
+          *os << ", open";
+          std::uint64_t coerced{clause.openTwins[goal] >> 1};
+          for (unsigned j{0}; coerced; ++j, coerced >>= 1) {
+            if (coerced & 1) {
+              *os << ", argument " << j + 1 << " ground";
+            }
+          }
         }
         *os << '\n';
       }

@@ -195,6 +195,14 @@ struct Assignment {
   // The existential constraints of the goals' callees, on the types that
   // the calls give their existential variables, which the clause assumes.
   std::vector<const ClassConstraint *> given;
+  // By goal number, whether the unification's functor is the open twin of
+  // its constructor, and which arguments then take a ground value where
+  // the twin expects an open one: OpenTwin's encoding (check-types.h).
+  std::vector<std::uint64_t> twins;
+  // The number of twins, which the second pass keeps as few of as it can,
+  // once each variable that can be open is (docs/INPROGRESS.md, Open
+  // types).
+  unsigned openCost{0};
 };
 
 bool Same(const ClassConstraint &x, const ClassConstraint &y) {
@@ -554,6 +562,17 @@ private:
   std::vector<const parser::SymName *> names_; // by goal number
   unsigned goal_{0}; // the goal whose options are tried
   bool tooMany_{false};
+  // Open types (docs/INPROGRESS.md, Open types): whether the module open is
+  // loaded, and whether a clause is being checked again with the open
+  // twins of its constructors, as it did not type-check without them.
+  bool openLoaded_{false};
+  bool twins_{false};
+  ClauseTypes CheckClauseOnce(const ClauseForm &, bool inferring,
+      const MethodDefinition *method);
+  void AddTwins(const Unify &, const Symbol &candidate,
+      std::vector<std::function<bool(Assignment &)>> &options);
+  bool ContainsOpen(const Type *) const;
+  void KeepMostOpen(const ClauseForm &);
   // The clause has a type error, or a name that is undefined; an ambiguity
   // or unresolved polymorphism may then be only its consequence, and is
   // not reported.
@@ -613,6 +632,13 @@ const Type *TypeChecker::Convert(
             }
             if (found.empty()) {
               return types_.Named(error_, {}); // undefined, and reported
+            }
+            if (found.front()->kind == TypeKind::Named &&
+                found.front()->constructor == types_.closed() &&
+                types_.closed() &&
+                ContainsOpen(found.front()->arguments.front())) {
+              messages_->Say(Source(named->name->tokens),
+                  "closed(T) holds a ground value, so its argument may not have an open type in it"_err_en_US);
             }
             if (found.size() > 1) {
               std::string list;
@@ -3005,6 +3031,11 @@ void TypeChecker::CheckFunctor(const Unify &unify, const parser::SymName &name) 
           Apply(a, *candidate, *sig, unify.arguments, VarType(unify.left));
     });
   }
+  if (twins_ && !constructing) {
+    for (const Symbol *candidate : name.candidates) {
+      AddTwins(unify, *candidate, options);
+    }
+  }
   if (IsCharConstant(name, unify.arguments.size())) {
     options.push_back([&](Assignment &a) {
       return UnifyTypes(a, VarType(unify.left), Primitive("character"));
@@ -3069,6 +3100,123 @@ void TypeChecker::CheckFunctor(const Unify &unify, const parser::SymName &name) 
       }
     }
   });
+}
+
+// The options of the open twin of `candidate`, a constructor of a type
+// t(A1, ..., An) with arguments S1, ..., Sk: (S1', ..., Sk') -> open(t(...)),
+// where S' is open(S), or S if it is closed(U), which stays closed. An
+// argument whose S' is open may also take a ground S instead, an option of
+// its own; so a twin of m such arguments has 2^m options, and only the
+// first `maxCoercedArguments` of them may take a ground value. Existentially
+// typed constructors and closed/1 have no twin, nor does a construction
+// that does not give every argument.
+void TypeChecker::AddTwins(const Unify &unify, const Symbol &candidate,
+    std::vector<std::function<bool(Assignment &)>> &options) {
+  constexpr unsigned maxCoercedArguments{6};
+  if (candidate.kind != SymbolKind::Constructor ||
+      (candidate.owner == types_.closed())) {
+    return;
+  }
+  const Signature *sig{SignatureOf(candidate)};
+  if (!sig || sig->existentials > 0 || !sig->constraints.empty() ||
+      sig->arguments.size() != unify.arguments.size() + 1) {
+    return;
+  }
+  std::uint64_t openable{0};
+  unsigned coercible{0};
+  for (std::size_t j{0}; j + 1 < sig->arguments.size(); ++j) {
+    const Type *argument{sig->arguments[j]};
+    if (!(argument->kind == TypeKind::Named &&
+            argument->constructor == types_.closed())) {
+      openable |= std::uint64_t{1} << j;
+      if (coercible < maxCoercedArguments) {
+        ++coercible;
+      }
+    }
+  }
+  // The arguments that may take a ground value: the first `coercible` of
+  // the openable ones.
+  std::uint64_t mayCoerce{0};
+  for (unsigned j{0}, n{0}; j < 64 && n < coercible; ++j) {
+    if (openable & (std::uint64_t{1} << j)) {
+      mayCoerce |= std::uint64_t{1} << j;
+      ++n;
+    }
+  }
+  // Each subset of mayCoerce, enumerated.
+  std::uint64_t coerced{0};
+  do {
+    options.push_back([&, sig, coerced, openable](Assignment &a) {
+      a.symbols[unify.number] = &candidate;
+      a.twins[unify.number] = OpenTwin(coerced);
+      ++a.openCost;
+      llvm::SmallVector<const Type *, 4> types{Instantiate(a, *sig)};
+      for (std::size_t j{0}; j < unify.arguments.size(); ++j) {
+        std::uint64_t bit{std::uint64_t{1} << j};
+        const Type *expected{
+            (openable & bit) && !(coerced & bit) ? types_.Open(types[j])
+                                                 : types[j]};
+        if (!UnifyTypes(a, VarType(unify.arguments[j]), expected)) {
+          return false;
+        }
+      }
+      return UnifyTypes(a, VarType(unify.left), types_.Open(types.back()));
+    });
+    coerced = (coerced - mayCoerce) & mayCoerce;
+  } while (coerced != 0);
+}
+
+// Of the second pass's assignments, those in which each variable that can
+// be open is: whose set of variables of an open type no other assignment's
+// set strictly contains; and of them, those with the fewest twins. So in
+// D1 = [1, 2 | H1] - H1, the hole H1 is open, through the twins of the list's
+// cells, rather than ground in ground cells that the pair's twin takes, as
+// mode analysis needs a hole to be open to leave it unbound.
+void TypeChecker::KeepMostOpen(const ClauseForm &clause) {
+  std::vector<llvm::SmallVector<bool, 16>> open;
+  for (Assignment &a : assignments_) {
+    llvm::SmallVector<bool, 16> vars;
+    for (std::size_t var{0}; var < clause.vars.size(); ++var) {
+      const Type *type{Resolve(a, VarType(static_cast<VarId>(var)))};
+      vars.push_back(
+          type->kind == TypeKind::Named && type->constructor == types_.open());
+    }
+    open.push_back(std::move(vars));
+  }
+  auto contains{[](llvm::ArrayRef<bool> x, llvm::ArrayRef<bool> y) {
+    bool strict{false};
+    for (std::size_t j{0}; j < x.size(); ++j) {
+      if (y[j] && !x[j]) {
+        return false;
+      }
+      strict |= x[j] && !y[j];
+    }
+    return strict;
+  }};
+  std::vector<Assignment> kept;
+  unsigned least{~0u};
+  for (std::size_t i{0}; i < assignments_.size(); ++i) {
+    bool dominated{false};
+    for (std::size_t j{0}; j < assignments_.size() && !dominated; ++j) {
+      dominated = j != i && contains(open[j], open[i]);
+    }
+    if (!dominated) {
+      least = std::min(least, assignments_[i].openCost);
+      kept.push_back(std::move(assignments_[i]));
+    }
+  }
+  llvm::erase_if(kept, [&](const Assignment &a) { return a.openCost != least; });
+  assignments_ = std::move(kept);
+}
+
+// Whether the type has open(_) in it.
+bool TypeChecker::ContainsOpen(const Type *type) const {
+  if (type->kind == TypeKind::Named && type->constructor == types_.open()) {
+    return true;
+  }
+  return llvm::any_of(type->arguments,
+             [&](const Type *t) { return ContainsOpen(t); }) ||
+      (type->result && ContainsOpen(type->result));
 }
 
 void TypeChecker::CheckCall(const Call &call) {
@@ -3359,8 +3507,62 @@ const Symbol *TypeChecker::Definition(const ClauseForm &clause) const {
   return nullptr;
 }
 
+// Where the first error of `messages` is, in the source; null if none is
+// located in it.
+static const char *FirstError(const parser::Messages &messages) {
+  const char *first{nullptr};
+  for (const parser::Message &message : messages.messages()) {
+    if (const parser::CharBlock * at{message.GetCharBlock()};
+        at && message.IsFatal() && (!first || at->begin() < first)) {
+      first = at->begin();
+    }
+  }
+  return first;
+}
+
+// A clause is checked as it is, and only if that fails, and the module open
+// is loaded, again with the open twins of its constructors, keeping those
+// in which each variable that can be open is, and the fewest twins
+// (docs/INPROGRESS.md, Open types): so ground code is typed as before, and a
+// clause pays for the second pass only if it needs an open value. If both
+// fail, the second's errors are reported if its first comes later in the
+// clause, as the twins then took the first pass's first error away, and
+// otherwise the first's.
 ClauseTypes TypeChecker::CheckClause(const ClauseForm &clause, bool inferring,
     const MethodDefinition *method) {
+  if (!openLoaded_) {
+    return CheckClauseOnce(clause, inferring, method);
+  }
+  parser::Messages first;
+  parser::Messages *messages{messages_};
+  messages_ = &first;
+  ClauseTypes types{CheckClauseOnce(clause, inferring, method)};
+  messages_ = messages;
+  if (!failed_) {
+    messages_->Annex(std::move(first));
+    return types;
+  }
+  parser::Messages second;
+  messages_ = &second;
+  twins_ = true;
+  ClauseTypes open{CheckClauseOnce(clause, inferring, method)};
+  twins_ = false;
+  messages_ = messages;
+  if (failed_) {
+    const char *firstAt{FirstError(first)}, *secondAt{FirstError(second)};
+    if (firstAt && secondAt && secondAt > firstAt) {
+      messages_->Annex(std::move(second));
+      return open;
+    }
+    messages_->Annex(std::move(first));
+    return types;
+  }
+  messages_->Annex(std::move(second));
+  return open;
+}
+
+ClauseTypes TypeChecker::CheckClauseOnce(const ClauseForm &clause,
+    bool inferring, const MethodDefinition *method) {
   clause_ = &clause;
   tooMany_ = false;
   failed_ = false;
@@ -3392,6 +3594,7 @@ ClauseTypes TypeChecker::CheckClause(const ClauseForm &clause, bool inferring,
   Assignment initial;
   initial.bindings.resize(names.next);
   initial.symbols.resize(clause.goals);
+  initial.twins.resize(clause.goals);
   const void *existentialKey{method ? static_cast<const void *>(method)
                                       : static_cast<const void *>(definition)};
   if (sig && !inferring) {
@@ -3430,6 +3633,9 @@ ClauseTypes TypeChecker::CheckClause(const ClauseForm &clause, bool inferring,
   CheckGoal(clause.body);
   for (Assignment &a : assignments_) {
     Improve(a);
+  }
+  if (twins_ && !failed_) {
+    KeepMostOpen(clause);
   }
   if (!coerces_.empty() && assignments_.size() > 1) {
     // Assignments whose coerces cannot convert are dropped, if others are
@@ -3478,10 +3684,22 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
   parser::Message *ambiguity{nullptr};
   for (unsigned goal{0}; goal < clause.goals; ++goal) {
     llvm::SmallVector<const Symbol *, 2> choices;
+    bool twinOrNot{false};
     for (const Assignment &a : assignments_) {
       if (!llvm::is_contained(choices, a.symbols[goal])) {
         choices.push_back(a.symbols[goal]);
       }
+      twinOrNot |= a.twins[goal] != chosen.twins[goal];
+    }
+    if (twinOrNot && choices.size() == 1 && names_[goal] && !failed_) {
+      if (!ambiguity) {
+        ambiguity = &messages_->Say(Source(clause.tokens),
+            "ambiguous overloading causes type ambiguity"_err_en_US);
+      }
+      ambiguity->Attach(Source(names_[goal]->tokens),
+          "%s may be open or not, or take open or ground arguments"_because_en_US,
+          Source(names_[goal]->tokens).ToString());
+      continue;
     }
     if (choices.size() < 2 || !names_[goal] || failed_) {
       continue;
@@ -3584,6 +3802,10 @@ ClauseTypes TypeChecker::Finish(const ClauseForm &clause,
   types.constraints =
       result_.arena_.SaveArray(llvm::ArrayRef<GoalConstraint>{proofs});
   types.typeError = failed_ || ambiguity;
+  if (llvm::any_of(chosen.twins, [](std::uint64_t t) { return t != 0; })) {
+    types.openTwins = result_.arena_.SaveArray(
+        llvm::ArrayRef<std::uint64_t>{chosen.twins});
+  }
   bool coerceFailed{false};
   if (sig && !ambiguity && !failed_) {
     for (const Unify *unify : coerces_) {
@@ -4212,6 +4434,23 @@ void TypeChecker::ComputeSuperclasses(const ModuleSymbols &symbols) {
 }
 
 void TypeChecker::Run(const SemanticForm &form) {
+  if (const ModuleSymbols * open{resolution_.Module("open")}) {
+    const Symbol *openType{nullptr}, *closedType{nullptr};
+    for (const Symbol *symbol : open->Lookup("open")) {
+      if (symbol->kind == SymbolKind::Type && symbol->arity == 1) {
+        openType = symbol;
+      }
+    }
+    for (const Symbol *symbol : open->Lookup("closed")) {
+      if (symbol->kind == SymbolKind::Type && symbol->arity == 1) {
+        closedType = symbol;
+      }
+    }
+    if (openType && closedType) {
+      types_.SetOpenTypes(openType, closedType);
+      openLoaded_ = true;
+    }
+  }
   CheckTypeclasses();
   CheckInstances();
   CheckTypeDefinitions();

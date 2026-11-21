@@ -59,6 +59,19 @@ public:
       llvm::ArrayRef<const Type *> arguments, const Type *result);
   const Type *Existential(unsigned number, llvm::StringRef name);
 
+  // The library's open/1 and closed/1, if the module open is loaded
+  // (design document, "Open terms"). Every type made after this is
+  // normalized: open(open(S)) is open(S), and open(closed(U)) is
+  // closed(U), as a closed part stays closed under open(_).
+  void SetOpenTypes(const Symbol *open, const Symbol *closed) {
+    open_ = open;
+    closed_ = closed;
+  }
+  const Symbol *open() const { return open_; }
+  const Symbol *closed() const { return closed_; }
+  // open(type), normalized.
+  const Type *Open(const Type *);
+
   // The type with each variable replaced by `replace`'s type for it.
   const Type *Substitute(
       const Type *, llvm::function_ref<const Type *(unsigned)> replace);
@@ -76,6 +89,8 @@ private:
 
   common::Arena arena_;
   std::map<std::vector<std::uintptr_t>, const Type *> interned_;
+  const Symbol *open_{nullptr};
+  const Symbol *closed_{nullptr};
 };
 
 // Calls `f` once on each variable of the type, in the order they occur.

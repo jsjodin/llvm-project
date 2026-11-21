@@ -409,7 +409,9 @@ later. In this order, each its own commit or commits:
    "Trace goals"). Next: `try` and `atomic` goals.
 3. **Open types,** `open(T)` and `closed(T)` (below): the `any` inst,
    variable cells and the trail. After nondeterminism, as backtracking
-   undoes a binding through the trail.
+   undoes a binding through the trail. Started 2026-11-21, ahead of item
+   2's `try` and `atomic` goals, by the user's decision: open types are
+   central to the language's design.
 4. **Exceptions,** `throw` and `catch` with `invoke` and landing pads
    (design document, Lowering, "Exceptions"), which also undo through the
    trail.
@@ -7768,7 +7770,106 @@ Under the first rule a hole in a pattern is a mode error, as a lambda that
 captures a variable that is not ground is, so nothing compiles now that
 the second rule would change.
 
-## Open types: `closed(T)`
+## Open types: `open(T)` and `closed(T)`
+
+Decided by the user 2026-11-21: open types are built now, ahead of `try`
+and `atomic` goals, behind `-fopen-types`, with `closed(T)` (below). The
+language, layout and runtime are the design document's (Language
+extensions, "Open terms"; Lowering, "Open layouts"; Runtime system,
+"Support for open terms"). They run on the host only: a device compile
+reports an open value, as GPU code makes no heap terms of its own (design
+document, GPU processes).
+
+**Where the names live.** `open(T)`, `closed(T)`, `to_open`, `from_open`,
+`unify_oc`, `var` and `nonvar` are in a library module, `open`, as
+`mailbox` is in `process`: a program imports it, and importing it without
+`-fopen-types` is an error. No syntax is new, so the flag gates the type
+checker's and mode analysis's rules for `open(_)`, and the module.
+
+**How the type checker decides that a construction is open.**
+`open(T)` has `T`'s constructors, so each constructor `c` of a type
+`t(A1, ..., An)` with arguments `S1, ..., Sk` gets an open twin of type
+`(S1', ..., Sk') -> open(t(A1, ..., An))`, where `S'` is `open(S)`, or
+`closed(U)` unchanged when `S` is `closed(U)`. `open(open(S))` is
+`open(S)`. In a twin's arguments, a ground `S` is accepted where `open(S)`
+is expected, as the design document has it; elsewhere `to_open` converts.
+Every construction could then type-check both ways: `X = [1, 2],
+io.write(X)` has `list(int)` and `open(list(int))`. The rule: **a clause
+uses twins only if it does not type-check without them, and then as few
+as it can.** The checker checks a clause as now; only if that fails, and
+the module imports `open`, it checks the clause again with the twins and
+the coercions as candidates. Of its assignments it keeps those in which
+**each variable that can be open is**: whose set of open variables no
+other's strictly contains. Of those it keeps the fewest twins. Two left
+that differ are an ambiguity, reported as now.
+- *Why each variable that can be open is, before the fewest twins:* in
+  `D1 = [1, 2 | H1] - H1`, the fewest twins, only the pair's, would take
+  `[1, 2 | H1]` and `H1` as ground values. Mode analysis needs the hole
+  `H1` open to leave it unbound, which the twins of the list's cells give.
+  Fewest coerced arguments first ties there instead: the literals in one
+  assignment, the list and `H1` in the other.
+- *If both passes fail,* the second's errors are reported if its first
+  comes later in the clause, as the twins then took away the first pass's
+  first error, such as "no declaration of `[|]/2` fits" for an open list;
+  otherwise the first's.
+- *A limit:* only the first 6 openable arguments of a twin may take a
+  ground value, as each such argument doubles the twin's options.
+- *Why:* ground code is typed exactly as before, and pays nothing; a
+  clause pays for the second pass only if it needs an open value, which
+  a declared `ia`/`oa` argument, an `open(_)` type or a call of the
+  module's predicates forces.
+- *Rejected: twins as candidates in every clause.* Every construction
+  doubles the assignments, and a ground clause is ambiguous unless ground
+  is preferred anyway.
+- *Rejected: `open(T)` as a supertype of `T`, by `coerce`.* The layouts
+  differ, so a coercion that is free for subtypes would copy, and `coerce`
+  is for subtypes the manual defines.
+
+**`closed(T)` holds no open value.** A written type with `open(_)` inside
+`closed(_)` is an error. In polymorphic code, where `T` can be `open(U)`
+only at the call, mode analysis makes `closed(T)`'s argument `ground` even
+under `open(_)`, so no unbound variable gets in, and the walkers follow
+the `type_info` back to the open layout (below).
+
+**Steps,** each its own commit or commits:
+1. **The front end.**
+   - (a) Done 2026-11-21: `-fopen-types`, the `open` library module
+     (declarations only), and the type checker: open twins, the coercion of
+     ground arguments, the second pass, `open(open(S))` as `open(S)` and
+     `open(closed(U))` as `closed(U)` (in `TypeContext`), and `closed(T)`
+     with an open type in its argument rejected. `ClauseTypes::openTwins`
+     records each twin and its ground arguments, and `-fdebug-dump-types`
+     prints them. Only the library's `open.m` needs the flag, not a
+     program's own module of that name. Tests: `Semantics/types/open/`,
+     the design document's examples with their types and twins, and the
+     errors.
+   - (b) Mode analysis: an open value's inst is `any`, passed with `ia`
+     and `oa`; the unification kinds of the design document's tables
+     (construction, deconstruction, `get_structure`, full unification);
+     a fresh variable when no goal can run, `free` not matching `any`;
+     the `promise_pure` rule for negated contexts; binding an existing
+     variable `semidet`; `closed(T)`'s argument `ground`.
+   - (c) The other checks: an open value never `unique`; a parallel loop
+     body may not bind a nonlocal open variable; a device compile reports
+     open values.
+2. **Open layouts** from the descriptors (D3): tag 7 the variable tag,
+   raw fields boxed, static boxes for small ints, enums re-encoded,
+   `OpenSame`, and `Closed` for `closed(T)`'s box.
+3. **The runtime:** variable cells, `deref` and `bind`, and the trail,
+   marked and undone by backtracking through continuations.
+4. **Code generation:** `merk.open_unify`, `get_structure`, `to_open`,
+   `from_open`, `unify_oc`, `var` and `nonvar`; a unify procedure per open
+   type and a generic one.
+5. **The collector:** variable cells, trail entries as roots, chains
+   shortened as it copies, and `bind`'s barrier, the remembered set's.
+6. **Messages and printing:** `copy_term` semantics for an open message,
+   and `io.write` printing `_1`, `_2`.
+7. **Tests and a measurement:** difference lists, a type inferencer by
+   unification, and E5's list built through holes, compiled, against E5's
+   C model.
+
+### `closed(T)`
+
 
 Decided 2026-11-04: `closed(T)` comes with open types, not after them. It
 lets a type say which parts are open, where `open(T)` alone is deep: every

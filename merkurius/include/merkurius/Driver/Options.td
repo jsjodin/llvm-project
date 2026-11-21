@@ -44,6 +44,9 @@ def freceive_goal : Flag<["-"], "freceive-goal">,
   HelpText<"Read receive [Params] ( Arms ) goals, an extension of the language">;
 def fprocess_declarations : Flag<["-"], "fprocess-declarations">,
   HelpText<"Read :- process declarations, an extension of the language">;
+def fopen_types : Flag<["-"], "fopen-types">,
+  HelpText<"Allow open(T) types, whose values may hold unbound variables, "
+           "an extension of the language">;
 def Wunselected_message : Flag<["-"], "Wunselected-message">,
   HelpText<"Warn about a mailbox whose receive goals' arms leave out a "
            "constructor of its messages (the default)">;
