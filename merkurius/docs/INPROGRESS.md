@@ -7865,6 +7865,14 @@ the `type_info` back to the open layout (below).
        as binding one, as it may bind that variable differently in each
        solution. Without this, `( X = [] ; X = [_ | _] )` with X `ia` was
        `semidet` instead of `nondet`. get_structure is never a switch.
+       - Decided by the variable's inst, since step 4(a): one whose inst
+         has `any` in it before some goal (`BodyVarInfo::any`). Step 1
+         looked only at the outermost type constructor, which missed
+         `list(open(int))` and a type variable that is `open(U)` at the
+         call. A type test that recursed would still miss the latter, and
+         would make ground polymorphic disjunctions nondet. Variables that
+         switch detection makes take the flag from the insts of what they
+         hold.
      - Already there: `free` does not match `any`, and the `promise_pure`
        rule for negated contexts.
      - Codegen reports the new kinds, fresh variables and unifications of
@@ -7985,8 +7993,8 @@ the `type_info` back to the open layout (below).
          analysis put it. Determinism analysis copies `GoalModes::fresh` into
          `Body::fresh`, renamed to the body's variables, for every kind of
          goal, and keeps it when it rebuilds a disjunction into a switch.
-       - Trail marks, in procedures where a variable's type mentions
-         `open` or `closed` (Temporary, part (d)): a semidet if-then-else
+       - Trail marks, in procedures where a variable's inst has `any` in it
+         or its type mentions `open` or `closed` (Temporary, part (d)): a semidet if-then-else
          marks before its condition, releases at the then part, and undoes
          and releases at the else part. A disjunction undoes before each
          later branch and releases at the last. A soft if-then-else undoes
@@ -7998,6 +8006,10 @@ the `type_info` back to the open layout (below).
          on the heap would be a safepoint. It is made at the procedure's
          start for a ground T, after T's `type_info` for a variable T.
          Static `type_info`s no longer count as allocating in `Liveness`.
+     - **One open-type test, in `TypeContext`:** `IsOpen`, `IsClosed`,
+       `IsOpenOrClosed` and `MentionsOpen`, which mode and determinism
+       analysis, the GPU checker, `MLIRGenOpen.cpp` and the `parallel do`
+       check all call. There were five copies, and one had drifted.
      - **Bugs fixed on the way:**
        - Mode analysis made a nonlocal fresh inside a negation, then again
          outside it, so the two uses were different variables. Only the

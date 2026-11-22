@@ -21,37 +21,26 @@
 namespace merkurius::codegen::mlirgen {
 
 bool MerkGenerator::IsOpenType(const semantics::Type *type) {
-  const semantics::TypeContext &types{types_.types()};
-  return type && type->kind == semantics::TypeKind::Named && types.open() &&
-      type->constructor == types.open();
+  return types_.types().IsOpen(type);
 }
 
 bool MerkGenerator::IsClosedType(const semantics::Type *type) {
-  const semantics::TypeContext &types{types_.types()};
-  return type && type->kind == semantics::TypeKind::Named && types.closed() &&
-      type->constructor == types.closed();
+  return types_.types().IsClosed(type);
 }
 
 bool MerkGenerator::MentionsOpenType(const semantics::Type *type) {
-  if (!type || !types_.types().open()) {
-    return false;
-  }
-  if (IsOpenType(type) || IsClosedType(type)) {
-    return true;
-  }
-  return llvm::any_of(type->arguments,
-             [&](const semantics::Type *t) { return MentionsOpenType(t); }) ||
-      (type->result && MentionsOpenType(type->result));
+  return types_.types().MentionsOpen(type);
 }
 
-// Temporary (open types step 4(d), docs/INPROGRESS.md): by the types of
-// the procedure's variables, rather than by the goals with an `any`
-// nonlocal, which mode analysis can record.
+// Temporary (open types step 4(d), docs/INPROGRESS.md): by the procedure's
+// variables, rather than by the goals with an `any` nonlocal. A variable
+// whose inst has `any` in it may be bound, whatever its type says, such as
+// one of a type variable that is open(U) at the call.
 bool MerkGenerator::Trails(const ProcedureBody &body) {
   auto [it, inserted]{trails_.try_emplace(&body, false)};
   if (inserted) {
     it->second = llvm::any_of(body.vars, [&](const semantics::BodyVarInfo &v) {
-      return MentionsOpenType(v.type);
+      return v.any || MentionsOpenType(v.type);
     });
   }
   return it->second;

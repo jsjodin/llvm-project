@@ -184,7 +184,7 @@ Unparsed ConvertAndUnparse(llvm::StringRef text, Config config) {
           tokens, *checking, *modes, messages, !earlier)};
   merkurius::semantics::CheckUniqueness(tokens, *modes, *determinism, messages);
   merkurius::semantics::CheckGpuCode(expanded, tokens, *modes, *determinism,
-      modes->constructors(), messages);
+      modes->constructors(), checking->types(), messages);
   merkurius::semantics::AnalysePolymorphism(*checking, *modes, *determinism);
   return result;
 }

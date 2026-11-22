@@ -753,18 +753,6 @@ static bool IsNamedType(const semantics::Type &type, llvm::StringRef module,
       type.constructor->module == module && type.constructor->name == name;
 }
 
-// Whether a type has a type of the module open in it: open(T), or
-// closed(T), which inside an open term may be an unbound variable.
-static bool MentionsOpen(const semantics::Type &type) {
-  if (IsNamedType(type, "open", "open") ||
-      IsNamedType(type, "open", "closed")) {
-    return true;
-  }
-  return llvm::any_of(type.arguments,
-             [](const semantics::Type *t) { return MentionsOpen(*t); }) ||
-      (type.result && MentionsOpen(*type.result));
-}
-
 static bool IsFromOpen(const Body &goal) {
   const semantics::Symbol *callee{goal.modes && goal.modes->callee
           ? goal.modes->callee->symbol
@@ -1028,7 +1016,7 @@ void MerkGenerator::OmpLoop(const Body &goal, const ProcedureBody &body) {
       inner && inner->body) {
     for (BodyVar var : inner->head) {
       const semantics::Type *type{inner->vars[var].type};
-      if (!type || !MentionsOpen(*type)) {
+      if (!types_.types().MentionsOpen(type)) {
         continue;
       }
       if (const Body *use{UseOtherThanReading(*inner->body, var)}) {

@@ -27,20 +27,10 @@ bool IsNamed(const Type &type, llvm::StringRef module, llvm::StringRef name) {
       type.constructor->name == name;
 }
 
-// Whether a type has a type of the module open in it: open(T), or
-// closed(T), which inside an open term may be an unbound variable.
-bool MentionsOpen(const Type &type) {
-  if (IsNamed(type, "open", "open") || IsNamed(type, "open", "closed")) {
-    return true;
-  }
-  return llvm::any_of(type.arguments,
-             [](const Type *t) { return MentionsOpen(*t); }) ||
-      (type.result && MentionsOpen(*type.result));
-}
-
 // The first variable of a goal, not counting the goals in it, whose type
 // has open terms in it; none if none does.
-std::optional<BodyVar> OpenVariable(const ProcedureBody &body, const Body &goal) {
+std::optional<BodyVar> OpenVariable(
+    const TypeContext &types, const ProcedureBody &body, const Body &goal) {
   llvm::SmallVector<BodyVar, 8> vars;
   if (goal.kind == BodyKind::Unify) {
     vars.push_back(goal.left);
@@ -53,7 +43,7 @@ std::optional<BodyVar> OpenVariable(const ProcedureBody &body, const Body &goal)
   }
   vars.append(goal.arguments.begin(), goal.arguments.end());
   for (BodyVar var : vars) {
-    if (const Type *type{body.vars[var].type}; type && MentionsOpen(*type)) {
+    if (types.MentionsOpen(body.vars[var].type)) {
       return var;
     }
   }
@@ -103,9 +93,9 @@ class GpuCodeChecker {
 public:
   GpuCodeChecker(const parser::TokenSequence &tokens, const ModeChecking &modes,
       const DeterminismChecking &determinism, InstTypes &constructors,
-      parser::Messages &messages)
+      const TypeContext &types, parser::Messages &messages)
       : tokens_{tokens}, modes_{modes}, determinism_{determinism},
-        constructors_{constructors}, messages_{messages} {}
+        constructors_{constructors}, types_{types}, messages_{messages} {}
 
   void Check(const parser::ParseTree &tree);
 
@@ -150,6 +140,7 @@ private:
   const ModeChecking &modes_;
   const DeterminismChecking &determinism_;
   InstTypes &constructors_;
+  const TypeContext &types_;
   parser::Messages &messages_;
   // By body, the contexts it was visited in.
   llvm::DenseSet<std::pair<const ProcedureBody *, unsigned>> visited_;
@@ -496,7 +487,7 @@ void GpuCodeChecker::Walk(
   // has no trail, and its messages are flat.
   if (goal.kind == BodyKind::Unify || goal.kind == BodyKind::Call ||
       goal.kind == BodyKind::HOCall) {
-    if (std::optional<BodyVar> var{OpenVariable(body, goal)};
+    if (std::optional<BodyVar> var{OpenVariable(types_, body, goal)};
         var && reported_.insert(Source(goal.tokens).begin()).second) {
       messages_.Say(Source(goal.tokens),
           "open terms are host-only, so code that runs on a GPU may not use a value of type %s"_err_en_US,
@@ -827,9 +818,9 @@ void GpuCodeChecker::CheckProcessLoops() {
 void CheckGpuCode(const parser::ParseTree &tree,
     const parser::TokenSequence &tokens, const ModeChecking &modes,
     const DeterminismChecking &determinism, InstTypes &constructors,
-    parser::Messages &messages) {
-  GpuCodeChecker{tokens, modes, determinism, constructors, messages}.Check(
-      tree);
+    const TypeContext &types, parser::Messages &messages) {
+  GpuCodeChecker{tokens, modes, determinism, constructors, types, messages}
+      .Check(tree);
 }
 
 } // namespace merkurius::semantics

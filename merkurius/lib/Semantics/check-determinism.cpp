@@ -254,6 +254,7 @@ private:
   // variables that mode analysis makes just before it, of any kind of goal.
   const Body *Goal(const semantics::Goal &goal) {
     unsigned number{std::visit([](const auto *g) { return g->number; }, goal)};
+    NoteAny(number);
     const Body *out{Unfresh(goal)};
     const GoalModes &modes{clause_->goals[number]};
     if (modes.fresh.empty()) {
@@ -465,6 +466,20 @@ private:
         goal);
   }
 
+  // Marks the goal's nonlocals whose insts before it have `any` in them.
+  void NoteAny(unsigned number) {
+    const ClauseForm &form{*clause_->clause->clause};
+    const GoalModes &modes{clause_->goals[number]};
+    for (std::size_t i{0};
+         i < form.nonlocals[number].size() && i < modes.before.size(); ++i) {
+      BodyVarInfo &info{out_.vars[map_[form.nonlocals[number][i]]]};
+      if (!info.any && modes.before[i] &&
+          ops_.HasAny(modes.before[i], info.type)) {
+        info.any = true;
+      }
+    }
+  }
+
   std::vector<BodyVar> Fresh(const GoalModes &modes) {
     std::vector<BodyVar> fresh;
     for (VarId var : modes.fresh) {
@@ -532,6 +547,10 @@ private:
         continue;
       }
       BodyVar fresh{NewVar({}, TypeOf(argument))};
+      // It holds the field, which may have `any` parts as the argument may.
+      out_.vars[fresh].any = out_.vars[argument].any ||
+          (fields && i < fields->size() &&
+              ops_.HasAny((*fields)[i], TypeOf(argument)));
       Body test{BodyKind::Unify, tokens, &modes};
       test.source = &unify;
       test.unify = UnifyKind::Test;
@@ -1203,6 +1222,8 @@ private:
       Entry entry{disj->entry};
       for (std::size_t i{0}; i < first->arguments.size(); ++i) {
         BodyVar fresh{NewVar(body_.vars[first->arguments[i]].type)};
+        body_.vars[fresh].any = body_.vars[first->arguments[i]].any ||
+            ops_.HasAny((*parts)[i], body_.vars[fresh].type);
         pulled.arguments.push_back(fresh);
         entry.emplace_back(fresh, (*parts)[i]);
       }
@@ -1858,22 +1879,15 @@ private:
   // variables used outside the goal, as mmc's quantification finds them
   // after switch detection: in a branch, those of its parent; in a
   // conjunct, those and the other conjuncts'.
-  // A variable of an open type, or closed(T), used outside counts too, as
-  // the goal may bind it, or variables in it, differently in each solution
-  // (docs/INPROGRESS.md, Open types).
+  // A bound variable used outside counts too if its inst has `any` in it,
+  // as the goal may bind variables in it differently in each solution: at
+  // any depth of its type, and through a type variable that is open(U) at
+  // the call (docs/INPROGRESS.md, Open types).
   bool HasOutputs(const Body *goal, const std::set<BodyVar> &before,
       const std::set<BodyVar> &outside) {
     return llvm::any_of(Vars(goal), [&](BodyVar var) {
-      return outside.count(var) &&
-          (!before.count(var) || MayBeBound(body_.vars[var].type));
+      return outside.count(var) && (!before.count(var) || body_.vars[var].any);
     });
-  }
-
-  bool MayBeBound(const Type *type) const {
-    const TypeContext &types{types_.types()};
-    return type && type->kind == TypeKind::Named && types.open() &&
-        (type->constructor == types.open() ||
-            type->constructor == types.closed());
   }
 
   // A callee's determinism, declared or inferred; none for one whose modes

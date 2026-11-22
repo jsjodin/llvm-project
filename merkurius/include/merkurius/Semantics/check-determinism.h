@@ -56,6 +56,10 @@ struct BodyVarInfo {
   // or V_N for the others.
   std::string name;
   const Type *type;
+  // Whether its inst has `any` in it before some goal: a goal may then bind
+  // variables in it, of an open type at any depth, or of a type variable
+  // that is open(U) at the call (docs/INPROGRESS.md, Open types).
+  bool any{false};
 };
 
 ENUM_CLASS(BodyKind, Unify, Call, HOCall, Conj, Disj, Switch, IfThenElse,

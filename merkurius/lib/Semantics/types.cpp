@@ -50,6 +50,26 @@ const Type *TypeContext::Open(const Type *type) {
   return Named(*open_, {type});
 }
 
+bool TypeContext::IsOpen(const Type *type) const {
+  return open_ && type && type->kind == TypeKind::Named &&
+      type->constructor == open_;
+}
+
+bool TypeContext::IsClosed(const Type *type) const {
+  return closed_ && type && type->kind == TypeKind::Named &&
+      type->constructor == closed_;
+}
+
+bool TypeContext::MentionsOpen(const Type *type) const {
+  if (!open_ || !type) {
+    return false;
+  }
+  return IsOpenOrClosed(type) ||
+      llvm::any_of(
+          type->arguments, [&](const Type *t) { return MentionsOpen(t); }) ||
+      MentionsOpen(type->result);
+}
+
 const Type *TypeContext::Named(
     const Symbol &constructor, llvm::ArrayRef<const Type *> arguments) {
   return Intern(

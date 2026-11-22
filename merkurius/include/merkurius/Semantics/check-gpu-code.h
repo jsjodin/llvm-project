@@ -42,7 +42,7 @@ namespace merkurius::semantics {
 
 void CheckGpuCode(const parser::ParseTree &, const parser::TokenSequence &,
     const ModeChecking &, const DeterminismChecking &, InstTypes &constructors,
-    parser::Messages &);
+    const TypeContext &, parser::Messages &);
 
 } // namespace merkurius::semantics
 

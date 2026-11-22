@@ -50,3 +50,24 @@ mk([_]).
 unclose(closed(L), L).
 % CHECK: [[@LINE-2]]:9: error: the determinism declaration of unclose(ia, out) is not satisfied: it is declared det, but inferred semidet
 % CHECK: [[@LINE-2]]:9: because: the unification of HeadVar__1 and closed/1 can fail
+
+    % A disjunction that may bind variables inside a nonlocal keeps its
+    % solutions: by the nonlocal's inst, which has `any` in it, whatever the
+    % depth of the open type, or through a type variable that may be
+    % open(U) at the call.
+:- pred bind(list(open(int))::ia, int::in) is semidet.
+bind(L, N) :- L = [Z], Z = to_open(N).
+:- pred nested(list(open(int))::ia) is semidet.
+nested(L) :- promise_pure ( ( bind(L, 1) ; bind(L, 2) ), bind(L, 2) ).
+% CHECK: [[@LINE-2]]:9: error: the determinism declaration of nested(ia) is not satisfied: it is declared semidet, but inferred nondet
+% CHECK: [[@LINE-2]]:31: because: the disjunction has more than one disjunct with solutions
+:- pred hoisted(list(open(int))::ia) is semidet.
+hoisted(L) :- promise_pure (
+    ( L = [Z], Z = to_open(1) ; L = [Z], Z = to_open(2) ),
+    L = [W], W = to_open(2) ).
+% CHECK: [[@LINE-4]]:9: error: the determinism declaration of hoisted(ia) is not satisfied: it is declared semidet, but inferred nondet
+% CHECK: [[@LINE-3]]:7: because: the disjunction has more than one disjunct with solutions
+:- pred poly(T::ia, pred(T, int)::in(pred(ia, in) is semidet)) is semidet.
+poly(X, R) :- promise_pure ( ( R(X, 1) ; R(X, 2) ), R(X, 2) ).
+% CHECK: [[@LINE-2]]:9: error: the determinism declaration of poly(ia, in((pred(ia, in) is semidet))) is not satisfied: it is declared semidet, but inferred nondet
+% CHECK: [[@LINE-2]]:32: because: the disjunction has more than one disjunct with solutions

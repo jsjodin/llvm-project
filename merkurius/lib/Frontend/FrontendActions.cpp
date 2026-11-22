@@ -770,7 +770,7 @@ Analysed Analyse(CompilerInstance &ci, Resolved &r) {
   semantics::CheckUniqueness(
       r.tokens, *modes, *determinism, r.messages, frontend.mmcUniqueness);
   semantics::CheckGpuCode(*r.tree, r.tokens, *modes, *determinism,
-      modes->constructors(), r.messages);
+      modes->constructors(), types->types(), r.messages);
   return {std::move(types), std::move(modes), std::move(determinism),
       std::move(translation)};
 }

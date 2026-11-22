@@ -2995,27 +2995,12 @@ ProcedureChecker::Result ProcedureChecker::CheckVarUnify(
 // an open type, or is closed(T), which is a variable or a box inside an open
 // term (docs/INPROGRESS.md, Open types).
 bool ProcedureChecker::CanBeFresh(VarId var) const {
-  const Type *type{TypeOf(var)};
-  const TypeContext &types{types_.types()};
-  return type && type->kind == TypeKind::Named && types.open() &&
-      (type->constructor == types.open() ||
-          type->constructor == types.closed());
+  return types_.types().IsOpenOrClosed(TypeOf(var));
 }
 
 // Whether a type has open(_) or closed(_) in it.
 bool ProcedureChecker::MentionsOpen(const Type *type) const {
-  const TypeContext &types{types_.types()};
-  if (!type || !types.open()) {
-    return false;
-  }
-  if (type->kind == TypeKind::Named &&
-      (type->constructor == types.open() ||
-          type->constructor == types.closed())) {
-    return true;
-  }
-  return llvm::any_of(type->arguments,
-             [&](const Type *t) { return MentionsOpen(t); }) ||
-      (type->result && MentionsOpen(type->result));
+  return types_.types().MentionsOpen(type);
 }
 
 // X = f(Y1, ..., Yn) with X `any`, of an open type: the WAM's get_structure

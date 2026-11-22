@@ -69,6 +69,15 @@ public:
   }
   const Symbol *open() const { return open_; }
   const Symbol *closed() const { return closed_; }
+  // Whether a type is open(T), or closed(T), whose value inside an open
+  // term may be an unbound variable too; and whether either is anywhere in
+  // a type. The one place these are decided, for every pass.
+  bool IsOpen(const Type *) const;
+  bool IsClosed(const Type *) const;
+  bool IsOpenOrClosed(const Type *type) const {
+    return IsOpen(type) || IsClosed(type);
+  }
+  bool MentionsOpen(const Type *) const;
   // open(type), normalized.
   const Type *Open(const Type *);
 

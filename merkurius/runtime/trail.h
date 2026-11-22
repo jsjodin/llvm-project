@@ -18,6 +18,13 @@
 // heap: null until the process's first open choice point, allocated then
 // (merk_open_trail_mark), and freed when the process ends.
 //
+// A parallel loop's team thread runs no process, so an iteration's choice
+// point on it allocates a trail that nothing frees. The thread keeps it, as
+// it keeps its heap chunks (heap.cpp, Chunk). That is one trail for each
+// thread of the pool, reused by later regions and empty between them, since
+// releasing the last mark empties it. No collection runs in a parallel
+// region, so the collector never sees it live.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef MERKURIUS_RUNTIME_TRAIL_H_
