@@ -97,6 +97,14 @@ bool DownFromPeer(Word peerHigh, Word peerLow, std::uint64_t id,
 void PeerDown(Word peerHigh, Word peerLow);
 void StopForPeer(const Handle &target);
 
+// node.cpp, for the fault injector (faults.cpp). Peers are numbered from 1
+// in the order this node first connected to them. The numbers of those with
+// a current connection that is not silenced, up to `capacity`.
+std::uint64_t LivePeers(std::uint64_t *numbers, std::uint64_t capacity);
+// Silences every connection to the peer, as a partition would, until the
+// ticks lose them: false if it has none.
+bool Partition(std::uint64_t number);
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_NODE_H_

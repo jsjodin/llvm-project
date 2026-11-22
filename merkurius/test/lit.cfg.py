@@ -186,6 +186,19 @@ config.substitutions.append(
     )
 )
 
+# The harness that kills nodes (utils/faults/kill-nodes.py).
+config.substitutions.append(
+    (
+        "%kill-nodes",
+        "%s -I %s"
+        % (
+            config.python_executable,
+            os.path.join(config.merkurius_src_root, "utils", "faults",
+                         "kill-nodes.py"),
+        ),
+    )
+)
+
 # The unparser's round-trip tests 2, 3 and 4.
 config.substitutions.append(
     (

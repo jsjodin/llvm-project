@@ -8,6 +8,7 @@ add_library(merkrt STATIC
   devices.cpp
   encode.cpp
   exception.cpp
+  faults.cpp
   frame-info.cpp
   gpu-processes.cpp
   heap.cpp

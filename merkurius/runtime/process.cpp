@@ -473,6 +473,9 @@ Process *TakeLocal() {
 // schedulerLock is held until this has switched away, and NewProcess is
 // called with it.
 [[noreturn]] void Finish(Process *self) {
+  if (self->faultEntry) {
+    FaultsEnded(self);
+  }
   FreeChunks(self->chunks);
   self->chunks = nullptr;
   FreeChunks(self->spareChunks);
@@ -821,7 +824,11 @@ void ExitProgram(int status) {
 
 bool ProgramEnding() { return stopping.load(); }
 
-void RequestStop(Process *process) {
+void RequestStop(Process *process, DownKind kind) {
+  std::int64_t none{0};
+  __atomic_compare_exchange_n(&process->stopKind, &none,
+      static_cast<std::int64_t>(kind), false, __ATOMIC_RELAXED,
+      __ATOMIC_RELAXED);
   __atomic_store_n(&process->stopRequested, true, __ATOMIC_RELEASE);
   pthread_mutex_lock(&process->waitLock);
   Wake(process);
@@ -848,7 +855,9 @@ void CheckStop() {
   }
   // As a failure: nothing to unwind.
   CloseMailboxesOf(self);
-  FireMonitorsOf(self, kDownKilled);
+  auto kind{static_cast<DownKind>(
+      __atomic_load_n(&self->stopKind, __ATOMIC_RELAXED))};
+  FireMonitorsOf(self, kind, kind == kDownFailed ? "injected" : "");
   Finish(self);
 }
 
@@ -893,6 +902,8 @@ extern "C" void merk_process_run_main(void (*entry)(void)) {
   }
   thisWorker = &workerTable[0];
   thisWorker->stackLimit = &merk_stack_limit;
+  // After the workers, whose checks a fault makes fail.
+  StartFaults();
   firstProcess.stackLimit = firstProcess.stack->limit;
   firstProcess.context = NewContext(*firstProcess.stack, MainBody,
       reinterpret_cast<void *>(entry));

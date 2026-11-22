@@ -105,9 +105,13 @@ struct Process {
   // The trail of its open terms' bindings, while it does not run; null
   // until its first open choice point (trail.h).
   MerkTrail *trail{nullptr};
-  // Whether process.stop has asked it to end: read and written atomically,
-  // as another thread sets it (RequestStop).
+  // Whether process.stop or the fault injector has asked it to end, and
+  // with which reason, 0 until then: read and written atomically, as another
+  // thread sets them (RequestStop).
   bool stopRequested{false};
+  std::int64_t stopKind{0};
+  // Its entry in the fault injector's list (faults.cpp), or null.
+  void *faultEntry{nullptr};
 };
 
 // Guards the timers, and a stack freed until its process has switched away.
@@ -155,19 +159,46 @@ void Wake(Process *);
 // process that process.stop has asked to end ends here instead.
 void Block(std::int64_t deadline);
 
+// Why a process ended, as monitors see it: process.m's down_reason, whose
+// constructors are in this order from 1.
+enum DownKind : std::int64_t {
+  kDownNormal = 1,
+  kDownNoProcess = 2,
+  // An uncaught exception or a stack overflow, with the report's text.
+  kDownFailed = 3,
+  // Ended from outside, by process.stop. The fault injector's is
+  // kDownFailed, with the text "injected".
+  kDownKilled = 4,
+  // Another process of its GPU kernel failed.
+  kDownKernelEnded = 5,
+  // The connection to its node was lost.
+  kDownNoConnection = 6,
+};
+
 // process.stop of a process of this host, with the lock of a mailbox it owns
-// held, so that it has not ended: asks it to end, with the reason killed. A
+// held, so that it has not ended, or the fault injector's, with the process
+// on its list, which Finish takes it from: asks it to end, with the reason
+// killed. A
 // running process ends at its next stack check, which this makes fail, or
 // its next send, receive or spawn; a blocked one is woken, and ends in
 // Block; one waiting for a worker ends at its first check. Inside a parallel or
 // target region it ends after the region, and a foreign call or a send finishes
-// first, as neither checks.
-void RequestStop(Process *);
+// first, as neither checks. The fault injector asks with kDownFailed, whose
+// text is "injected"; the first request's reason is the one.
+void RequestStop(Process *, DownKind kind = kDownKilled);
 // Ends the running process if process.stop has asked it to and it may end
 // here; the first process's end ends the program, as its failure does. Also
 // called at the start of a send, a receive and a spawn, so that a stopped
 // process affects no other where no stack check comes first.
 void CheckStop();
+
+// faults.cpp: whether MERK_FAULTS is set, once the runtime has started;
+// then each spawn tells the injector, and Finish too for a process it
+// listed.
+extern bool faultsOn;
+void StartFaults();
+void FaultsSpawned(Process *, std::uint64_t messageType);
+void FaultsEnded(Process *);
 
 // Ends the program with this status. A target region or GPU process still
 // running must not have libomptarget or liboffload torn down under it, so
@@ -198,21 +229,6 @@ std::int64_t HeldMessages();
 // thread that runs no process, in `main`, or in a target or parallel region,
 // which cannot be abandoned on their own.
 void EndAfterFailure(const char *reason);
-
-// Why a process ended, as monitors see it: process.m's down_reason, whose
-// constructors are in this order from 1.
-enum DownKind : std::int64_t {
-  kDownNormal = 1,
-  kDownNoProcess = 2,
-  // An uncaught exception or a stack overflow, with the report's text.
-  kDownFailed = 3,
-  // Ended from outside, by process.stop.
-  kDownKilled = 4,
-  // Another process of its GPU kernel failed.
-  kDownKernelEnded = 5,
-  // The connection to its node was lost.
-  kDownNoConnection = 6,
-};
 
 // mailbox.cpp: tells those who monitor a process that has closed its
 // mailboxes that it ended, for `kind`, with `text` for kDownFailed.

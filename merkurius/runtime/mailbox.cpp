@@ -939,6 +939,9 @@ extern "C" void merk_process_spawn(std::int64_t stackBytes, Word closure,
   Mailbox *mailbox{Find(MERK_HANDLE)};
   Disown(mailbox);
   Own(mailbox, child);
+  if (faultsOn) {
+    FaultsSpawned(child, mailbox->messageType);
+  }
   Unlock(mailbox);
   Start(child);
 }

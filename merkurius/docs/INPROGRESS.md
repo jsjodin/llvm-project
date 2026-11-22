@@ -8033,7 +8033,12 @@ Sketched for a later stage:
    step 1's `stop` compared a handle's node with itself, as the handle's
    parameters hide the node's own id, so another node's process was never
    reported as unsupported.
-3. **The injector,** in the runtime and a harness, with replay.
+3. **The injector,** in the runtime and a harness, with replay. Done
+   2026-11-22 (design document, Exceptions, links and monitors). A
+   process's kind is its spawn mailbox's message type, as the runtime keeps
+   no name for a process. A partition silences a connection until the
+   ticks lose it, so it ends in the fence; one that heals is not possible
+   with refusing a lost node's id. `kernel` waits for step 4.
 4. **D1 at host places, then GPU places:** the stop flag at polls, a
    kernel's processes ended together, `kernel_ended`.
 5. **A watcher on a GPU** (10).

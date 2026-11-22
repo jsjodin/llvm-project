@@ -37,6 +37,8 @@ the user's ~/.merkurius.cookie.
   numbers to; the driver kills the server with SIGKILL meanwhile.
 - three: two such servers, b and c, and a client connected to both; the
   driver kills b with SIGKILL.
+- partition: that server, and a client whose fault injector silences its
+  connection to the server; the schedule is shown without its times.
 
 The output is each node's, prefixed with its role, apart from the ports.
 """
@@ -303,6 +305,23 @@ def three():
         print("c: " + line)
 
 
+def partition():
+    print("partition:")
+    server = start("server")
+    port = port_of(server, "server")
+    path = os.path.join(HOME, "partition.schedule")
+    # The seed's first fault comes at 836 ms, once the client is set up.
+    environment = dict(ENVIRONMENT, MERK_FAULTS=(
+        "seed=1 mtbf=1000 partition count=1 log=" + path))
+    client = start("partitioned", port, environment=environment)
+    for line in finish(client, "client"):
+        print("client: " + line)
+    stop(server)
+    with open(path) as file:
+        for line in file:
+            print("schedule: " + re.sub(r"^[0-9]+ ", "MS ", line.rstrip("\n")))
+
+
 SCENARIOS = {
     "pingpong": pingpong,
     "stall": stall,
@@ -314,6 +333,7 @@ SCENARIOS = {
     "fence": fence,
     "in-flight": in_flight,
     "three": three,
+    "partition": partition,
 }
 
 try:

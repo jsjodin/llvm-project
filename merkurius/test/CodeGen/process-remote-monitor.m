@@ -22,9 +22,13 @@
 % - three: a client watches a process on each of two servers, and the
 %   driver kills one. Only that one's monitor says noconnection; the other
 %   server still answers, and its process is stopped from the client.
+% - partition: the client runs with the fault injector's partitions
+%   (MERK_FAULTS, docs/INPROGRESS.md, Failure, step 3), which silence its
+%   connection to the server. The ticks lose it, the client's monitor says
+%   noconnection, and the fence refuses a new connection.
 %
-% RUN: merkc -O0 %s -o %t0 && %python %S/Inputs/two-nodes.py %t0 monitors fence in-flight three | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% RUN: merkc -O2 %s -o %t2 && %python %S/Inputs/two-nodes.py %t2 monitors fence in-flight three | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O0 %s -o %t0 && %python %S/Inputs/two-nodes.py %t0 monitors fence in-flight three partition | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: merkc -O2 %s -o %t2 && %python %S/Inputs/two-nodes.py %t2 monitors fence in-flight three partition | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 %
 % Every message is read or freed, on both nodes, downs from the other node
 % among them.
@@ -69,6 +73,11 @@
 % OUTPUT-NEXT:b: killed
 % OUTPUT-NEXT:c: listening
 % OUTPUT-NEXT:c: quitting
+% OUTPUT-NEXT:partition:
+% OUTPUT-NEXT:client: hanging: noconnection
+% OUTPUT-NEXT:client: connect again: 127.0.0.1:PORT: the node was lost before, and is not connected to again: it must start again
+% OUTPUT-NEXT:schedule: # seed=1
+% OUTPUT-NEXT:schedule: MS partition 1
 % OUTPUT-NOT:{{.}}
 %
 % MESSAGES:monitors:
@@ -113,6 +122,8 @@ main(!IO) :-
         fenced(Port, !IO)
     else if Arguments = ["in-flight", Port] then
         in_flight(Port, !IO)
+    else if Arguments = ["partitioned", Port] then
+        partitioned(Port, !IO)
     else if Arguments = ["three", PortB, PortC] then
         three(PortB, PortC, !IO)
     else
@@ -364,6 +375,29 @@ follow(Selector, Expected, Last, !InOrder, Next, !IO) :-
 
 yes_no(yes) = "yes".
 yes_no(no) = "no".
+
+    % A watch across a connection that the injector silences.
+    %
+:- pred partitioned(string::in, io::di, io::uo) is det.
+
+partitioned(Port, !IO) :-
+    connect("127.0.0.1:" ++ Port, Connected, !IO),
+    ( if Connected = ok(Server) then
+        lookup(Server, "commands", after(10000), Found, !IO),
+        ( if Found = ok(Commands) then
+            new_target(Commands, Hanging, !IO),
+            new_mailbox(Downs, !IO),
+            watch(Hanging, Downs, !IO),
+            show_down("hanging", Downs, !IO),
+            connect("127.0.0.1:" ++ Port, Again, !IO),
+            show_connect(Port, Again, !IO),
+            close_mailbox(Downs, !IO)
+        else
+            io.write_string("no lookup\n", !IO)
+        )
+    else
+        io.write_string("no connection\n", !IO)
+    ).
 
     % Two servers, of which the driver kills the first.
     %

@@ -203,6 +203,10 @@ struct Connection {
   // Nanoseconds on the monotonic clock, read and written atomically.
   std::int64_t lastHeard;
   std::int64_t lastSent;
+  // The fault injector's partition (faults.cpp): nothing more is written,
+  // and what is read is dropped and not heard, so that the ticks lose it.
+  // Read and written atomically.
+  bool silenced;
 };
 
 // A lookup waiting for its answer.
@@ -231,6 +235,17 @@ struct Lost {
   Word low;
 };
 Lost *lostNodes{nullptr};
+// Every node this one has connected to, in the order of their first
+// connections, under `lock`; for the fault injector, whose schedule names a
+// peer by its number, as ids are new in each run.
+struct Peer {
+  Peer *next;
+  Word high;
+  Word low;
+  std::uint64_t number;
+};
+Peer *peers{nullptr};
+std::uint64_t peerCount{0};
 std::uint64_t requests{0};
 Pending *pendings{nullptr};
 std::int64_t tickTime{60 * std::int64_t{1000000000}};
@@ -538,6 +553,10 @@ bool WriteLocked(Connection *c, std::uint32_t kind, const void *head,
     std::size_t headBytes, const void *body, std::size_t bodyBytes) {
   if (!c->writable) {
     return false;
+  }
+  if (__atomic_load_n(&c->silenced, __ATOMIC_RELAXED)) {
+    // Lost in the partition.
+    return true;
   }
   std::uint8_t header[kHeaderBytes];
   Put32(header, static_cast<std::uint32_t>(headBytes + bodyBytes));
@@ -950,6 +969,9 @@ void Read(Connection *c) {
     if (!complete) {
       break;
     }
+    if (__atomic_load_n(&c->silenced, __ATOMIC_RELAXED)) {
+      continue;
+    }
     __atomic_store_n(&c->lastHeard, Now(), __ATOMIC_RELAXED);
     bool valid{false};
     switch (kind) {
@@ -1080,6 +1102,7 @@ Connection *Register(int socket, Word peerHigh, Word peerLow) {
   c->socket = socket;
   c->lastHeard = Now();
   c->lastSent = c->lastHeard;
+  c->silenced = false;
   pthread_mutex_lock(&lock);
   if (IsLost(peerHigh, peerLow)) {
     pthread_mutex_unlock(&lock);
@@ -1091,6 +1114,15 @@ Connection *Register(int socket, Word peerHigh, Word peerLow) {
   }
   c->next = connections;
   __atomic_store_n(&connections, c, __ATOMIC_RELEASE);
+  bool known{false};
+  for (Peer *p{peers}; p && !known; p = p->next) {
+    known = p->high == peerHigh && p->low == peerLow;
+  }
+  if (!known) {
+    auto *peer{static_cast<Peer *>(Malloc(sizeof(Peer)))};
+    *peer = {peers, peerHigh, peerLow, ++peerCount};
+    peers = peer;
+  }
   pthread_mutex_unlock(&lock);
   if (Decides(peerHigh, peerLow)) {
     Decide(c);
@@ -1256,6 +1288,38 @@ void SendStopToPeer(const Handle &target) {
   PutHandle(head, target);
   SendToPeer(
       target.nodeHigh, target.nodeLow, kStop, head, sizeof head, nullptr, 0);
+}
+
+std::uint64_t LivePeers(std::uint64_t *numbers, std::uint64_t capacity) {
+  pthread_once(&once, Initialize);
+  pthread_mutex_lock(&lock);
+  std::uint64_t count{0};
+  for (Peer *p{peers}; p && count < capacity; p = p->next) {
+    Connection *c{CurrentOf(p->high, p->low)};
+    if (c && !__atomic_load_n(&c->silenced, __ATOMIC_RELAXED)) {
+      numbers[count++] = p->number;
+    }
+  }
+  pthread_mutex_unlock(&lock);
+  return count;
+}
+
+bool Partition(std::uint64_t number) {
+  pthread_once(&once, Initialize);
+  pthread_mutex_lock(&lock);
+  Peer *peer{peers};
+  while (peer && peer->number != number) {
+    peer = peer->next;
+  }
+  bool silenced{false};
+  for (Connection *c{First()}; peer && c; c = c->next) {
+    if (IsPeer(c, peer->high, peer->low) && !c->done) {
+      __atomic_store_n(&c->silenced, true, __ATOMIC_RELAXED);
+      silenced = true;
+    }
+  }
+  pthread_mutex_unlock(&lock);
+  return silenced;
 }
 
 } // namespace merkurius::runtime

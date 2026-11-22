@@ -1,0 +1,22 @@
+utils/faults/kill-nodes.py, the fault injector's harness (docs/INPROGRESS.md,
+Failure, step 3), with nodes that are sleeps: a seeded schedule kills two of
+three nodes and is written, a replay kills the same nodes at the same
+times, and a node that it did not kill and that fails fails the run.
+
+RUN: %kill-nodes --seed 4 --mtbf 0.2 --count 2 --log %t.schedule -- "sleep 2" "sleep 2" "sleep 2" | FileCheck %s --check-prefix=ENDED
+ENDED-DAG: node {{[0-2]}}: killed
+ENDED-DAG: node {{[0-2]}}: killed
+ENDED-DAG: node {{[0-2]}}: exited with 0
+RUN: FileCheck %s --check-prefix=SCHEDULE < %t.schedule
+SCHEDULE: # seed=4
+SCHEDULE-NEXT: {{[0-9]+}} kill {{[0-2]}}
+SCHEDULE-NEXT: {{[0-9]+}} kill {{[0-2]}}
+SCHEDULE-NOT: {{.}}
+
+RUN: %kill-nodes --replay %t.schedule --log %t.replayed -- "sleep 2" "sleep 2" "sleep 2" > /dev/null
+RUN: tail -n +2 %t.schedule > %t.expected
+RUN: %python -c "import sys; a = [l.split() for l in open(sys.argv[1])]; b = [l.split() for l in open(sys.argv[2])]; sys.exit(not (len(a) == len(b) and all(x[2] == y[2] and abs(int(x[0]) - int(y[0])) <= 50 for x, y in zip(a, b))))" %t.expected %t.replayed
+
+RUN: not %kill-nodes --seed 1 --mtbf 60 -- "true" "false" | FileCheck %s --check-prefix=FAILED
+FAILED: node 0: exited with 0
+FAILED-NEXT: node 1: exited with 1
