@@ -27,10 +27,28 @@ bool IsNamed(const Type &type, llvm::StringRef module, llvm::StringRef name) {
       type.constructor->name == name;
 }
 
+// Whether a type has open terms in it other than as `reported`, the message
+// type of the process kind whose body this is, if its declaration was
+// reported.
+bool MentionsOpenElsewhere(
+    const TypeContext &types, const Type *type, const Type *reported) {
+  if (!type || type == reported) {
+    return false;
+  }
+  return types.IsOpenOrClosed(type) ||
+      llvm::any_of(type->arguments,
+          [&](const Type *t) {
+            return MentionsOpenElsewhere(types, t, reported);
+          }) ||
+      MentionsOpenElsewhere(types, type->result, reported);
+}
+
 // The first variable of a goal, not counting the goals in it, whose type
-// has open terms in it; none if none does.
-std::optional<BodyVar> OpenVariable(
-    const TypeContext &types, const ProcedureBody &body, const Body &goal) {
+// has open terms in it; none if none does. A kind's message type that its
+// declaration was reported for does not count, so that its receives do not
+// repeat the error.
+std::optional<BodyVar> OpenVariable(const TypeContext &types,
+    const ProcedureBody &body, const Body &goal, const Type *reported) {
   llvm::SmallVector<BodyVar, 8> vars;
   if (goal.kind == BodyKind::Unify) {
     vars.push_back(goal.left);
@@ -43,7 +61,7 @@ std::optional<BodyVar> OpenVariable(
   }
   vars.append(goal.arguments.begin(), goal.arguments.end());
   for (BodyVar var : vars) {
-    if (types.MentionsOpen(body.vars[var].type)) {
+    if (MentionsOpenElsewhere(types, body.vars[var].type, reported)) {
       return var;
     }
   }
@@ -128,6 +146,10 @@ private:
   void Walk(const ProcedureBody &, const Body &, Context);
   void CheckValue(const ProcedureBody &, const Body &, BodyVar);
   void CheckMessage(TokenRange where, const Type *message);
+  // A GPU process kind's declared message type: open terms are host-only,
+  // and otherwise it must be flat.
+  void CheckKindMessage(
+      const ProcedureBody &, TokenRange where, const Type *message);
   void Call(
       const ProcedureBody &, const Body &, const Procedure *callee, Context);
   void FindLive();
@@ -150,6 +172,9 @@ private:
   // Where a message was reported, so that a goal reached twice, as in the
   // bodies of two modes of one procedure, is reported once.
   llvm::DenseSet<const char *> reported_;
+  // By a GPU process kind's body, its declared message type, if it has open
+  // terms in it, which was reported at the declaration.
+  llvm::DenseMap<const ProcedureBody *, const Type *> openMessages_;
   // The mailboxes of the GPU kinds' processes themselves, by body.
   llvm::DenseSet<std::pair<const ProcedureBody *, BodyVar>> selves_;
   // The bodies that the module's entry points reach (FindLive).
@@ -411,6 +436,20 @@ void GpuCodeChecker::CheckMessage(TokenRange where, const Type *message) {
   }
 }
 
+void GpuCodeChecker::CheckKindMessage(
+    const ProcedureBody &body, TokenRange where, const Type *message) {
+  if (!types_.MentionsOpen(message)) {
+    CheckMessage(where, message);
+    return;
+  }
+  openMessages_[&body] = message;
+  if (reported_.insert(Source(where).begin()).second) {
+    messages_.Say(Source(where),
+        "open terms are host-only, so a process kind that runs on a GPU may not receive messages of type %s"_err_en_US,
+        TypeToString(*message));
+  }
+}
+
 void GpuCodeChecker::Call(const ProcedureBody &body, const Body &goal,
     const Procedure *callee, Context context) {
   bool process{context != Context::Region};
@@ -487,7 +526,8 @@ void GpuCodeChecker::Walk(
   // has no trail, and its messages are flat.
   if (goal.kind == BodyKind::Unify || goal.kind == BodyKind::Call ||
       goal.kind == BodyKind::HOCall) {
-    if (std::optional<BodyVar> var{OpenVariable(types_, body, goal)};
+    if (std::optional<BodyVar> var{
+            OpenVariable(types_, body, goal, openMessages_.lookup(&body))};
         var && reported_.insert(Source(goal.tokens).begin()).second) {
       messages_.Say(Source(goal.tokens),
           "open terms are host-only, so code that runs on a GPU may not use a value of type %s"_err_en_US,
@@ -614,7 +654,7 @@ void GpuCodeChecker::Check(const parser::ParseTree &tree) {
           BodyVar self{body->head[body->head.size() - 3]};
           const Type *type{body->vars[self].type};
           if (type && IsNamed(*type, "process", "mailbox")) {
-            CheckMessage((*decl)->tokens, type->arguments.front());
+            CheckKindMessage(*body, (*decl)->tokens, type->arguments.front());
             selves_.insert({body, self});
           }
         }
