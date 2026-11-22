@@ -17,6 +17,7 @@
 #include "array.h"
 #include "descriptor.h"
 #include "heap.h"
+#include "process.h"
 #include "record.h"
 #include "walk.h"
 #include <array>
@@ -477,6 +478,15 @@ void WriteTyped(Out &out, Word value, const Type &type, int context) {
   case Void:
     // Nothing has a value of this type.
     std::abort();
+  case Open:
+    // Temporary (open types step 6, docs/INPROGRESS.md): printing walks the
+    // open layout and numbers unbound variables. Until then, a clear stop
+    // rather than WriteTerm on a descriptor that has no functors.
+    std::fflush(stdout);
+    std::fputs("Merkurius runtime: printing an open term is not supported "
+               "yet\n",
+        stderr);
+    ExitProgram(1);
   default:
     return WriteTerm(out, value, type, context);
   }

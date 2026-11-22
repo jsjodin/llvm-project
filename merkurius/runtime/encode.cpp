@@ -192,6 +192,10 @@ void Writer::EncodeTyped(Word value, const Type &type) {
   case Closure:
     error = "a closure cannot be sent to another node yet";
     return;
+  case Open:
+    // Temporary (open types step 6, docs/INPROGRESS.md).
+    error = "an open term cannot be sent to another node yet";
+    return;
   case Void:
     // Nothing has a value of this type.
     std::abort();
