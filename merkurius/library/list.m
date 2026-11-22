@@ -74,6 +74,10 @@
 :- pred replace(list(T), T, T, list(T)).
 :- mode replace(in, in, in, in) is semidet.
 :- mode replace(in, in, in, out) is nondet.
+    % The list with its N'th element, from 1, replaced; fails if there is
+    % none.
+:- pred replace_nth(list(T)::in, int::in, T::in, list(T)::out) is semidet.
+:- pred det_replace_nth(list(T)::in, int::in, T::in, list(T)::out) is det.
     % Lo .. Hi = [Lo, Lo + 1, ..., Hi] if Lo =< Hi, and [] otherwise.
 :- func int .. int = list(int).
 :- func series(T, pred(T), func(T) = T) = list(T).
@@ -346,6 +350,35 @@ det_index0(L, N, X) :-
         X = X0
     else
         unexpected("predicate `list.det_index0'/3", "index out of range")
+    ).
+
+replace_nth(Xs, N, R, L) :-
+    N > 0,
+    replace_nth_from(Xs, N, R, L).
+
+:- pred replace_nth_from(list(T)::in, int::in, T::in, list(T)::out)
+    is semidet.
+
+replace_nth_from([X | Xs], N, R, L) :-
+    ( if N > 1 then
+        replace_nth_from(Xs, N - 1, R, L0),
+        L = [X | L0]
+    else
+        L = [R | Xs]
+    ).
+
+% mmc's messages.
+det_replace_nth(Xs, N, R, L) :-
+    ( if N > 0 then
+        ( if replace_nth_from(Xs, N, R, L0) then
+            L = L0
+        else
+            unexpected("predicate `list.det_replace_nth'/4",
+                "Cannot replace element whose index position is past the end of the list")
+        )
+    else
+        unexpected("predicate `list.det_replace_nth'/4",
+            "Cannot replace element whose index position is less than 1.")
     ).
 
 det_index1(L, N) = X :-

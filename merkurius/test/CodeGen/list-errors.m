@@ -6,7 +6,8 @@
 % themselves. Nothing catches them yet, so the program writes the exception
 % to the standard error and exits with status 1. which/1 picks the case;
 % det_split_list fails a count beyond the list's length and a negative one
-% alike.
+% alike, and det_replace_nth a position past the end and one below 1 each
+% with its own message.
 % The output and messages are mmc's.
 %
 % RUN: merkc %s -o %t.0 && %t.0 | FileCheck %s --check-prefix=OUTPUT-0 --match-full-lines --strict-whitespace
@@ -44,6 +45,12 @@
 % RUN: sed 's/^which(0)\./which(11)./' %s > %t.11.m && merkc %t.11.m -o %t.11
 % RUN: not %t.11 2> %t.11.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: FileCheck %s --check-prefix=ERROR-10 --match-full-lines --strict-whitespace < %t.11.err
+% RUN: sed 's/^which(0)\./which(12)./' %s > %t.12.m && merkc %t.12.m -o %t.12
+% RUN: not %t.12 2> %t.12.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: FileCheck %s --check-prefix=ERROR-12 --match-full-lines --strict-whitespace < %t.12.err
+% RUN: sed 's/^which(0)\./which(13)./' %s > %t.13.m && merkc %t.13.m -o %t.13
+% RUN: not %t.13 2> %t.13.err | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: FileCheck %s --check-prefix=ERROR-13 --match-full-lines --strict-whitespace < %t.13.err
 
 :- module list_errors.
 :- interface.
@@ -91,9 +98,12 @@ run(N, E, !IO) :-
         io.write_int(det_index0_of_first_occurrence([1, 2], 3), !IO)
     else if N = 9 then
         io.write_int(det_index1_of_first_occurrence([1, 2], 3), !IO)
-    else
+    else if N =< 11 then
         det_split_list(( if N = 10 then 4 else -1 ), [1, 2, 3], S1, S2),
         io.write({S1, S2}, !IO)
+    else
+        det_replace_nth([1, 2, 3], ( if N = 12 then 4 else 0 ), 9, R),
+        io.write(R, !IO)
     ).
 
 % OUTPUT-0:before
@@ -121,3 +131,7 @@ run(N, E, !IO) :-
 % ERROR-9-NEXT:Software Error: function `list.det_index1_of_first_occurrence'/2: Unexpected: item not found
 % ERROR-10:Uncaught Merkurius exception:
 % ERROR-10-NEXT:Software Error: predicate `list.det_split_list'/4: Unexpected: index out of range
+% ERROR-12:Uncaught Merkurius exception:
+% ERROR-12-NEXT:Software Error: predicate `list.det_replace_nth'/4: Unexpected: Cannot replace element whose index position is past the end of the list
+% ERROR-13:Uncaught Merkurius exception:
+% ERROR-13-NEXT:Software Error: predicate `list.det_replace_nth'/4: Unexpected: Cannot replace element whose index position is less than 1.

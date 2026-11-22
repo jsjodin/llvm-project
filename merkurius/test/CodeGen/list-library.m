@@ -282,6 +282,10 @@ nondet_firsts(!IO) :-
     ( if delete([1, 2, 3], D2, D3), D2 > 1 then show({D2, D3}, !IO) else true ),
     ( if delete(D4, 0, [1, 2]), D4 = [_, _, 0] then show(D4, !IO) else true ),
     ( if replace([1, 2, 1], 1, 9, R1), R1 = [1 | _] then show(R1, !IO) else true ),
+    ( if replace_nth([1, 2, 3], 2, 9, RN1) then show(RN1, !IO) else true ),
+    yes_no((pred) is semidet :- replace_nth([1, 2, 3], 4, 9, _), !IO),
+    yes_no((pred) is semidet :- replace_nth([1, 2, 3], 0, 9, _), !IO),
+    det_replace_nth([1, 2, 3], 3, 9, RN2), show(RN2, !IO),
     ( if map((pred(X::in, Y::out) is nondet :- (Y = X ; Y = X * 10)), [1, 2], MN), MN = [_, 20] then
         show(MN, !IO)
     else
@@ -482,6 +486,10 @@ nondet_firsts(!IO) :-
 % OUTPUT-NEXT:[1, 2]
 % OUTPUT-NEXT:{2, [1, 3]}
 % OUTPUT-NEXT:[1, 2, 0]
+% OUTPUT-NEXT:[1, 2, 9]
+% OUTPUT-NEXT:[1, 9, 3]
+% OUTPUT-NEXT:no
+% OUTPUT-NEXT:no
 % OUTPUT-NEXT:[1, 2, 9]
 % OUTPUT-NEXT:[1, 20]
 % OUTPUT-NEXT:[1, 2]
