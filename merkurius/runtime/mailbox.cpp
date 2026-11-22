@@ -1347,7 +1347,17 @@ extern "C" void merk_mailbox_region_ended(std::uint64_t region) {
 // monitor from its list, then looks for it by id, which a demonitor that holds
 // the shard's lock and has found the monitor makes it wait for, so that the
 // target's record stays valid for the demonitor.
+//
+// Across nodes (docs/INPROGRESS.md, Failure, step 2), a monitor of another
+// node's process is Remote: it has no target here, and that node keeps a
+// Proxy for it on the target's list, which sends a `down` frame back when the
+// target ends. A Proxy is also in a second table by the watcher's node and
+// its id there, for that node's `demonitor`. When a node is lost, its Remote
+// monitors fire with noconnection and its Proxies go. Nothing else is locked
+// while a proxies' shard is.
 namespace merkurius::runtime {
+enum class MonitorRole : std::uint8_t { Local, Remote, Proxy };
+
 struct Monitor {
   std::uint64_t id;
   Process *target;
@@ -1360,6 +1370,13 @@ struct Monitor {
   // Whether it is on the target's list.
   bool linked;
   Monitor *nextInShard;
+  MonitorRole role;
+  // Remote: the target's node; Proxy: the watcher's node, and the watcher's
+  // id for the monitor there, and the next in the proxies' table.
+  Word peerHigh;
+  Word peerLow;
+  std::uint64_t peerId;
+  Monitor *nextProxy;
 };
 } // namespace merkurius::runtime
 
@@ -1370,6 +1387,8 @@ struct MonitorShard {
 };
 constexpr std::uint64_t kMonitorShards{256};
 MonitorShard monitorShards[kMonitorShards];
+// The Proxies, by the watcher's id, which is the watcher's node's.
+MonitorShard proxyShards[kMonitorShards];
 std::atomic<std::uint64_t> nextMonitor{1};
 pthread_once_t monitorsOnce = PTHREAD_ONCE_INIT;
 
@@ -1377,6 +1396,50 @@ void InitializeMonitors() {
   for (MonitorShard &shard : monitorShards) {
     pthread_mutex_init(&shard.lock, nullptr);
   }
+  for (MonitorShard &shard : proxyShards) {
+    pthread_mutex_init(&shard.lock, nullptr);
+  }
+}
+
+MonitorShard &ProxyShardOf(std::uint64_t peerId) {
+  return proxyShards[peerId & (kMonitorShards - 1)];
+}
+
+// Takes the proxy for the peer's monitor from the proxies' table: its id,
+// read under the lock, as the target's end may free it once it is unlocked;
+// 0 if it is not there.
+std::uint64_t TakeProxy(Word peerHigh, Word peerLow, std::uint64_t peerId) {
+  MonitorShard &shard{ProxyShardOf(peerId)};
+  pthread_mutex_lock(&shard.lock);
+  std::uint64_t id{0};
+  for (Monitor **link{&shard.first}; *link; link = &(*link)->nextProxy) {
+    Monitor *m{*link};
+    if (m->peerId == peerId && m->peerHigh == peerHigh &&
+        m->peerLow == peerLow) {
+      *link = m->nextProxy;
+      id = m->id;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&shard.lock);
+  return id;
+}
+
+// Takes the proxy, which the caller owns, from the proxies' table: false if
+// it is not there, as the peer's demonitor or its loss has taken it.
+bool UnlistProxy(Monitor *proxy) {
+  MonitorShard &shard{ProxyShardOf(proxy->peerId)};
+  pthread_mutex_lock(&shard.lock);
+  bool found{false};
+  for (Monitor **link{&shard.first}; *link; link = &(*link)->nextProxy) {
+    if (*link == proxy) {
+      *link = proxy->nextProxy;
+      found = true;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&shard.lock);
+  return found;
 }
 
 MonitorShard &ShardOf(std::uint64_t id) {
@@ -1393,6 +1456,63 @@ Monitor *Unhash(MonitorShard &shard, std::uint64_t id) {
     }
   }
   return nullptr;
+}
+
+void Hash(Monitor *monitor) {
+  MonitorShard &shard{ShardOf(monitor->id)};
+  pthread_mutex_lock(&shard.lock);
+  monitor->nextInShard = shard.first;
+  shard.first = monitor;
+  pthread_mutex_unlock(&shard.lock);
+}
+
+// Takes the monitor from the table and from its target's list, if it is
+// there and a proxy exactly if `proxy`: it, for the caller to free, or null.
+Monitor *Remove(std::uint64_t id, bool proxy = false) {
+  MonitorShard &shard{ShardOf(id)};
+  pthread_mutex_lock(&shard.lock);
+  Monitor *monitor{nullptr};
+  for (Monitor *m{shard.first}; m; m = m->nextInShard) {
+    if (m->id == id) {
+      monitor = (m->role == MonitorRole::Proxy) == proxy ? m : nullptr;
+      break;
+    }
+  }
+  if (monitor) {
+    Unhash(shard, id);
+  }
+  if (monitor && monitor->target) {
+    Process *target{monitor->target};
+    pthread_mutex_lock(&target->waitLock);
+    if (monitor->linked) {
+      if (monitor->previous) {
+        monitor->previous->next = monitor->next;
+      } else {
+        target->firstMonitor = monitor->next;
+      }
+      if (monitor->next) {
+        monitor->next->previous = monitor->previous;
+      }
+      monitor->linked = false;
+    }
+    pthread_mutex_unlock(&target->waitLock);
+  }
+  pthread_mutex_unlock(&shard.lock);
+  return monitor;
+}
+
+// Puts the monitor on the target's list, with the target's mailbox's lock
+// held, which keeps it the owner's.
+void Link(Monitor *monitor, Process *owner) {
+  pthread_mutex_lock(&owner->waitLock);
+  monitor->target = owner;
+  monitor->next = owner->firstMonitor;
+  if (owner->firstMonitor) {
+    owner->firstMonitor->previous = monitor;
+  }
+  owner->firstMonitor = monitor;
+  monitor->linked = true;
+  pthread_mutex_unlock(&owner->waitLock);
 }
 
 bool IsHere(const Handle &handle) {
@@ -1454,7 +1574,13 @@ void FireMonitorsOf(Process *process, DownKind kind, const char *text) {
     pthread_mutex_lock(&shard.lock);
     Monitor *mine{Unhash(shard, id)};
     pthread_mutex_unlock(&shard.lock);
-    if (mine) {
+    if (mine && mine->role == MonitorRole::Proxy) {
+      if (UnlistProxy(mine)) {
+        SendDownToPeer(mine->peerHigh, mine->peerLow, mine->peerId, kind,
+            kind == kDownFailed ? text : "");
+      }
+      std::free(mine);
+    } else if (mine) {
       DeliverDown(mine->watcher, mine->function, mine->chunks, id, kind,
           kind == kDownFailed ? text : "");
       std::free(mine);
@@ -1467,7 +1593,9 @@ void FireMonitorsOf(Process *process, DownKind kind, const char *text) {
 // which a closed mailbox says, the message is queued at once. The function
 // is applied by the watcher's mailbox's owner, so it is copied if that is
 // another process. A mailbox changes owner only when it is made, by spawn,
-// before anything can watch through it.
+// before anything can watch through it. A target of another node is watched
+// through that node; one of a node this one is not connected to gives
+// noconnection at once, as in Erlang.
 extern "C" std::int64_t merk_monitor_new(std::int64_t targetHigh,
     std::int64_t targetLow, std::int64_t targetPlaceAndSlot,
     std::int64_t targetGeneration, std::int64_t targetSecret,
@@ -1478,8 +1606,12 @@ extern "C" std::int64_t merk_monitor_new(std::int64_t targetHigh,
       static_cast<Word>(targetPlaceAndSlot), targetGeneration,
       static_cast<Word>(targetSecret)};
   Handle watcher{MERK_HANDLE};
-  if (!IsHere(target) || !IsHere(watcher)) {
-    Fail("a monitor across nodes or places is not supported yet", "");
+  bool remote{!IsThisNode(target.nodeHigh, target.nodeLow)};
+  if (target.placeAndSlot >> kPlaceShift != 0 || !IsHere(watcher)) {
+    // Temporary (docs/INPROGRESS.md, Failure, step 4): the GPU watcher.
+    Fail("a monitor of a GPU process, or into another node's mailbox, is not "
+         "supported yet",
+        "");
   }
   // Always, as the monitor outlives the collections of who made it.
   Fragment fragment;
@@ -1487,36 +1619,37 @@ extern "C" std::int64_t merk_monitor_new(std::int64_t targetHigh,
   std::uint64_t id{nextMonitor.fetch_add(1, std::memory_order_relaxed)};
   auto *monitor{static_cast<Monitor *>(Malloc(sizeof(Monitor)))};
   *monitor = {id, nullptr, watcher, function, fragment.Take(), nullptr, nullptr,
-      false, nullptr};
-  MonitorShard &shard{ShardOf(id)};
-  pthread_mutex_lock(&shard.lock);
-  monitor->nextInShard = shard.first;
-  shard.first = monitor;
-  pthread_mutex_unlock(&shard.lock);
+      false, nullptr, remote ? MonitorRole::Remote : MonitorRole::Local,
+      remote ? target.nodeHigh : 0, remote ? target.nodeLow : 0, 0, nullptr};
+  // In the table before the frame is sent, so that a loss of the connection
+  // after it fires the monitor.
+  Hash(monitor);
+  if (remote) {
+    if (!SendMonitorToPeer(target.nodeHigh, target.nodeLow, id, target)) {
+      // Not connected; or lost meanwhile, when the loss may have fired it.
+      Monitor *mine{Remove(id)};
+
+      if (mine) {
+        DeliverDown(mine->watcher, mine->function, mine->chunks, id,
+            kDownNoConnection, "");
+        std::free(mine);
+      }
+    }
+    return static_cast<std::int64_t>(id);
+  }
   if (Mailbox *mailbox{Find(target)}) {
     Process *owner{mailbox->owner};
     if (!owner) {
       Fail("a mailbox of no process cannot be monitored", "");
     }
     // The mailbox's lock keeps it the owner's, so the owner has not ended.
-    pthread_mutex_lock(&owner->waitLock);
-    monitor->target = owner;
-    monitor->next = owner->firstMonitor;
-    if (owner->firstMonitor) {
-      owner->firstMonitor->previous = monitor;
-    }
-    owner->firstMonitor = monitor;
-    monitor->linked = true;
-    pthread_mutex_unlock(&owner->waitLock);
+    Link(monitor, owner);
     Unlock(mailbox);
     return static_cast<std::int64_t>(id);
   }
-  pthread_mutex_lock(&shard.lock);
-  Unhash(shard, id);
-  pthread_mutex_unlock(&shard.lock);
-  ChunkLink *chunks{monitor->chunks};
-  std::free(monitor);
-  DeliverDown(watcher, function, chunks, id, kDownNoProcess, "");
+  Monitor *mine{Remove(id)};
+  DeliverDown(watcher, function, mine->chunks, id, kDownNoProcess, "");
+  std::free(mine);
   return static_cast<std::int64_t>(id);
 }
 
@@ -1526,15 +1659,15 @@ extern "C" std::int64_t merk_monitor_new(std::int64_t targetHigh,
 extern "C" void merk_mailbox_stop_owner(MERK_HANDLE_PARAMETERS) {
   pthread_once(&once, InitializeCondition);
   Handle handle{MERK_HANDLE};
-  pthread_once(&nodeOnce, ChooseNode);
-  if (handle.nodeHigh != nodeHigh || handle.nodeLow != nodeLow) {
-    // Temporary (docs/INPROGRESS.md, Failure, step 2): a stop frame.
-    Fail("stopping a process of another node is not supported yet", "");
-  }
   if (handle.placeAndSlot >> kPlaceShift != 0) {
     // Temporary (docs/INPROGRESS.md, Failure, step 4): the stop flag that
     // a GPU process reads at its polls.
     Fail("stopping a GPU process is not supported yet", "");
+  }
+  if (!IsThisNode(handle.nodeHigh, handle.nodeLow)) {
+    // Dropped if this node is not connected to it, as a send is.
+    SendStopToPeer(handle);
+    return;
   }
   Mailbox *mailbox{Find(handle)};
   if (!mailbox) {
@@ -1557,30 +1690,163 @@ extern "C" void merk_mailbox_stop_owner(MERK_HANDLE_PARAMETERS) {
 }
 
 // Stops watching. A message already queued stays, as with Erlang's demonitor
-// without its flush option.
+// without its flush option. For a target of another node, that node is told.
 extern "C" void merk_monitor_remove(std::int64_t id) {
   pthread_once(&monitorsOnce, InitializeMonitors);
-  MonitorShard &shard{ShardOf(static_cast<std::uint64_t>(id))};
-  pthread_mutex_lock(&shard.lock);
-  if (Monitor *monitor{Unhash(shard, static_cast<std::uint64_t>(id))}) {
-    Process *target{monitor->target};
-    pthread_mutex_lock(&target->waitLock);
-    if (monitor->linked) {
-      if (monitor->previous) {
-        monitor->previous->next = monitor->next;
-      } else {
-        target->firstMonitor = monitor->next;
-      }
-      if (monitor->next) {
-        monitor->next->previous = monitor->previous;
-      }
+  Monitor *monitor{Remove(static_cast<std::uint64_t>(id))};
+  if (!monitor) {
+    return;
+  }
+  if (monitor->role == MonitorRole::Remote) {
+    SendDemonitorToPeer(monitor->peerHigh, monitor->peerLow, monitor->id);
+  }
+  FreeChunks(monitor->chunks);
+  std::free(monitor);
+}
+
+namespace merkurius::runtime {
+void MonitorForPeer(
+    Word peerHigh, Word peerLow, std::uint64_t peerId, const Handle &target) {
+  pthread_once(&once, InitializeCondition);
+  pthread_once(&monitorsOnce, InitializeMonitors);
+  Mailbox *mailbox{Find(target)};
+  Process *owner{mailbox ? mailbox->owner : nullptr};
+  if (!owner) {
+    if (mailbox) {
+      Unlock(mailbox);
     }
-    pthread_mutex_unlock(&target->waitLock);
-    FreeChunks(monitor->chunks);
-    std::free(monitor);
+    SendDownToPeer(peerHigh, peerLow, peerId, kDownNoProcess, "");
+    return;
+  }
+  std::uint64_t id{nextMonitor.fetch_add(1, std::memory_order_relaxed)};
+  auto *proxy{static_cast<Monitor *>(Malloc(sizeof(Monitor)))};
+  *proxy = {id, nullptr, Handle{}, 0, nullptr, nullptr, nullptr, false, nullptr,
+      MonitorRole::Proxy, peerHigh, peerLow, peerId, nullptr};
+  MonitorShard &proxies{ProxyShardOf(peerId)};
+  pthread_mutex_lock(&proxies.lock);
+  proxy->nextProxy = proxies.first;
+  proxies.first = proxy;
+  pthread_mutex_unlock(&proxies.lock);
+  Hash(proxy);
+  Link(proxy, owner);
+  Unlock(mailbox);
+}
+
+void DemonitorForPeer(Word peerHigh, Word peerLow, std::uint64_t peerId) {
+  pthread_once(&monitorsOnce, InitializeMonitors);
+  // Not there once its target has ended: its down is on the way.
+  if (std::uint64_t id{TakeProxy(peerHigh, peerLow, peerId)}) {
+    // The target's end may take it first, and free it.
+    Monitor *mine{Remove(id, true)};
+
+    if (mine) {
+      std::free(mine);
+    }
+  }
+}
+
+bool DownFromPeer(Word peerHigh, Word peerLow, std::uint64_t id,
+    std::int64_t kind, const char *text) {
+  pthread_once(&monitorsOnce, InitializeMonitors);
+  MonitorShard &shard{ShardOf(id)};
+  pthread_mutex_lock(&shard.lock);
+  Monitor *monitor{nullptr};
+  for (Monitor *m{shard.first}; m; m = m->nextInShard) {
+    if (m->id == id) {
+      monitor = m;
+      break;
+    }
+  }
+  bool ours{monitor && monitor->role == MonitorRole::Remote &&
+      monitor->peerHigh == peerHigh && monitor->peerLow == peerLow};
+  if (ours) {
+    Unhash(shard, id);
   }
   pthread_mutex_unlock(&shard.lock);
+  if (!ours) {
+    // Removed by a demonitor that crossed the down, or not the peer's.
+    return !monitor || monitor->role != MonitorRole::Remote;
+  }
+  DeliverDown(
+      monitor->watcher, monitor->function, monitor->chunks, id, kind, text);
+  std::free(monitor);
+  return true;
 }
+
+void PeerDown(Word peerHigh, Word peerLow) {
+  pthread_once(&monitorsOnce, InitializeMonitors);
+  // Its proxies have nobody to tell.
+  for (MonitorShard &proxies : proxyShards) {
+    for (;;) {
+      std::uint64_t id{0};
+      pthread_mutex_lock(&proxies.lock);
+      for (Monitor **link{&proxies.first}; *link; link = &(*link)->nextProxy) {
+        Monitor *m{*link};
+        if (m->peerHigh == peerHigh && m->peerLow == peerLow) {
+          *link = m->nextProxy;
+          id = m->id;
+          break;
+        }
+      }
+      pthread_mutex_unlock(&proxies.lock);
+      if (id == 0) {
+        break;
+      }
+      Monitor *mine{Remove(id, true)};
+
+      if (mine) {
+        std::free(mine);
+      }
+    }
+  }
+  // Its targets' monitors fire.
+  for (MonitorShard &shard : monitorShards) {
+    Monitor *lost{nullptr};
+    pthread_mutex_lock(&shard.lock);
+    for (Monitor **link{&shard.first}; *link;) {
+      Monitor *m{*link};
+      if (m->role == MonitorRole::Remote && m->peerHigh == peerHigh &&
+          m->peerLow == peerLow) {
+        *link = m->nextInShard;
+        m->nextInShard = lost;
+        lost = m;
+      } else {
+        link = &m->nextInShard;
+      }
+    }
+    pthread_mutex_unlock(&shard.lock);
+    while (lost) {
+      Monitor *next{lost->nextInShard};
+      DeliverDown(lost->watcher, lost->function, lost->chunks, lost->id,
+          kDownNoConnection, "");
+      std::free(lost);
+      lost = next;
+    }
+  }
+}
+
+void StopForPeer(const Handle &target) {
+  pthread_once(&once, InitializeCondition);
+  Mailbox *mailbox{Find(target)};
+  if (!mailbox) {
+    return;
+  }
+  Process *owner{mailbox->owner};
+  bool gpu{owner && !owner->stack};
+  if (owner && !gpu) {
+    RequestStop(owner);
+  }
+  Unlock(mailbox);
+  if (gpu) {
+    // Temporary (docs/INPROGRESS.md, Failure, step 4): the stop flag a GPU
+    // process reads at its polls. Not this node's end, as another asked.
+    std::fflush(stdout);
+    std::fprintf(stderr,
+        "Merkurius runtime: another node stopped a GPU "
+        "process, which is not supported yet, and ignored\n");
+  }
+}
+} // namespace merkurius::runtime
 
 // The message at `position`, which merk_mailbox_wait has found there: 0 and
 // its value, or, for what a monitor left, its kind, the function that makes

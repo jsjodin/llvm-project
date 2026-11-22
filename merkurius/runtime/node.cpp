@@ -14,6 +14,16 @@
 // messages to remote mailboxes, and ticks that find a peer that has gone
 // silent.
 //
+// Monitors and stops cross nodes as frames (docs/INPROGRESS.md, Failure,
+// step 2): `monitor` with the watcher's id for it and the target's handle,
+// `demonitor` with that id, `down` with it, the reason and its text, and
+// `stop` with a handle. When the last connection to a node is lost, the
+// node is down: its targets' monitors fire with noconnection, and it is
+// fenced, as Erlang's `dist_auto_connect once`: a connection from or to its
+// id is refused from then on, so a node that was only cut off cannot come
+// back after its processes were taken for dead, and must start again, with
+// a new id. A connection replaced by a newer one is not a loss.
+//
 // Each connection has a reader thread, which routes each message it reads
 // as a local send would queue it. A sender encodes in its own thread and
 // writes the frame under the connection's write lock, so a full socket
@@ -97,10 +107,14 @@ enum Kind : std::uint32_t {
   kLookup = 4,
   kFound = 5,
   kTick = 6,
+  kMonitor = 7,
+  kDemonitor = 8,
+  kDown = 9,
+  kStop = 10,
 };
 
-// 0 had no cookie; 1 has the challenges.
-constexpr std::uint32_t kVersion{1};
+// 0 had no cookie; 1 has the challenges; 2 has monitors and stops.
+constexpr std::uint32_t kVersion{2};
 constexpr std::size_t kChallengeBytes{32};
 constexpr std::size_t kHelloBytes{24 + kChallengeBytes};
 // What an answer's HMAC covers first, so that it is for nothing else.
@@ -110,6 +124,8 @@ constexpr std::size_t kHeaderBytes{8};
 constexpr std::size_t kHandleBytes{40};
 constexpr std::size_t kFoundBytes{16 + kHandleBytes};
 constexpr std::size_t kLookupHeadBytes{8 + kFingerprintBytes + 8};
+constexpr std::size_t kMonitorBytes{8 + kHandleBytes};
+constexpr std::size_t kDownHeadBytes{24};
 // A reader thread decodes values nested up to kMaxDecodeDepth deep.
 constexpr std::size_t kReaderStackBytes{std::size_t{64} << 20};
 
@@ -208,6 +224,13 @@ pthread_once_t once = PTHREAD_ONCE_INIT;
 // Every connection ever made, newest first; the head is read atomically.
 Connection *connections{nullptr};
 std::uint64_t decisions{0};
+// The nodes that are down, under `lock`.
+struct Lost {
+  Lost *next;
+  Word high;
+  Word low;
+};
+Lost *lostNodes{nullptr};
 std::uint64_t requests{0};
 Pending *pendings{nullptr};
 std::int64_t tickTime{60 * std::int64_t{1000000000}};
@@ -408,6 +431,16 @@ bool Decides(Word peerHigh, Word peerLow) {
 }
 
 Connection *First() { return __atomic_load_n(&connections, __ATOMIC_ACQUIRE); }
+
+// Whether the node is down. Called with the lock held.
+bool IsLost(Word high, Word low) {
+  for (Lost *l{lostNodes}; l; l = l->next) {
+    if (l->high == high && l->low == low) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // Called with the lock held.
 Connection *CurrentOf(Word high, Word low) {
@@ -681,7 +714,19 @@ void Finish(Connection *c) {
   c->current = false;
   __atomic_store_n(&c->done, true, __ATOMIC_RELEASE);
   pthread_cond_broadcast(&changed);
+  // The node is down once no connection to it is left; under the lock, so
+  // that no connection to it is registered meanwhile.
+  bool down{!IsLost(c->peerHigh, c->peerLow) &&
+      !OtherOf(nullptr, c->peerHigh, c->peerLow, false)};
+  if (down) {
+    auto *lost{static_cast<Lost *>(Malloc(sizeof(Lost)))};
+    *lost = {lostNodes, c->peerHigh, c->peerLow};
+    lostNodes = lost;
+  }
   pthread_mutex_unlock(&lock);
+  if (down) {
+    PeerDown(c->peerHigh, c->peerLow);
+  }
 }
 
 // `up` on the other node: c becomes current, unless a later decision has.
@@ -805,6 +850,71 @@ bool Found(Connection *c, const std::uint8_t *frame, std::size_t size) {
   return true;
 }
 
+// Frames about monitors keep their order with the messages: a `down` comes
+// after what the target sent before it ended.
+bool MonitorFrame(Connection *c, const std::uint8_t *frame, std::size_t size) {
+  if (size != kMonitorBytes) {
+    return false;
+  }
+  Handle target{GetHandle(frame + 8)};
+  if (!IsThisNode(target.nodeHigh, target.nodeLow)) {
+    return false;
+  }
+  WaitForOthers(c);
+  MonitorForPeer(c->peerHigh, c->peerLow, Get64(frame), target);
+  return true;
+}
+
+bool DemonitorFrame(
+    Connection *c, const std::uint8_t *frame, std::size_t size) {
+  if (size != 8) {
+    return false;
+  }
+  WaitForOthers(c);
+  DemonitorForPeer(c->peerHigh, c->peerLow, Get64(frame));
+  return true;
+}
+
+bool DownFrame(Connection *c, const std::uint8_t *frame, std::size_t size) {
+  if (size < kDownHeadBytes) {
+    return false;
+  }
+  std::uint64_t kind{Get64(frame + 8)};
+  std::uint64_t length{Get64(frame + 16)};
+  std::size_t left{size - kDownHeadBytes};
+  // noconnection is never the peer's to say.
+  if (kind < std::uint64_t{kDownNormal} ||
+      kind > std::uint64_t{kDownKernelEnded} || length > left ||
+      (length + 7) / 8 * 8 != left) {
+    return false;
+  }
+  const std::uint8_t *text{frame + kDownHeadBytes};
+  if (std::memchr(text, '\0', length)) {
+    return false;
+  }
+  auto *copy{static_cast<char *>(Malloc(length + 1))};
+  std::memcpy(copy, text, length);
+  copy[length] = '\0';
+  WaitForOthers(c);
+  bool valid{DownFromPeer(c->peerHigh, c->peerLow, Get64(frame),
+      static_cast<std::int64_t>(kind), copy)};
+  std::free(copy);
+  return valid;
+}
+
+bool StopFrame(Connection *c, const std::uint8_t *frame, std::size_t size) {
+  if (size != kHandleBytes) {
+    return false;
+  }
+  Handle target{GetHandle(frame)};
+  if (!IsThisNode(target.nodeHigh, target.nodeLow)) {
+    return false;
+  }
+  WaitForOthers(c);
+  StopForPeer(target);
+  return true;
+}
+
 // Reads frames until the connection ends, or a frame is not one the peer
 // may send, which ends it too.
 void Read(Connection *c) {
@@ -860,6 +970,18 @@ void Read(Connection *c) {
       break;
     case kTick:
       valid = size == 0;
+      break;
+    case kMonitor:
+      valid = MonitorFrame(c, buffer, size);
+      break;
+    case kDemonitor:
+      valid = DemonitorFrame(c, buffer, size);
+      break;
+    case kDown:
+      valid = DownFrame(c, buffer, size);
+      break;
+    case kStop:
+      valid = StopFrame(c, buffer, size);
       break;
     }
     if (!valid) {
@@ -941,7 +1063,7 @@ const char *Handshake(int socket, Word &peerHigh, Word &peerLow) {
 }
 
 // Publishes a connection whose handshake is done, and on the deciding node
-// decides on it.
+// decides on it; null, with the socket closed, for a node that is down.
 Connection *Register(int socket, Word peerHigh, Word peerLow) {
   auto *c{static_cast<Connection *>(Malloc(sizeof(Connection)))};
   c->peerHigh = peerHigh;
@@ -959,6 +1081,14 @@ Connection *Register(int socket, Word peerHigh, Word peerLow) {
   c->lastHeard = Now();
   c->lastSent = c->lastHeard;
   pthread_mutex_lock(&lock);
+  if (IsLost(peerHigh, peerLow)) {
+    pthread_mutex_unlock(&lock);
+    pthread_mutex_destroy(&c->writeLock);
+    pthread_mutex_destroy(&c->socketLock);
+    std::free(c);
+    close(socket);
+    return nullptr;
+  }
   c->next = connections;
   __atomic_store_n(&connections, c, __ATOMIC_RELEASE);
   pthread_mutex_unlock(&lock);
@@ -976,7 +1106,9 @@ void *Join(void *argument) {
     close(socket);
     return nullptr;
   }
-  Read(Register(socket, peerHigh, peerLow));
+  if (Connection * c{Register(socket, peerHigh, peerLow)}) {
+    Read(c);
+  }
   return nullptr;
 }
 
@@ -1080,6 +1212,52 @@ Delivery Route(
       : Delivery::Dropped;
 }
 
+bool SendMonitorToPeer(
+    Word peerHigh, Word peerLow, std::uint64_t id, const Handle &target) {
+  pthread_once(&once, Initialize);
+  std::uint8_t head[kMonitorBytes];
+  Put64(head, id);
+  PutHandle(head + 8, target);
+  return SendToPeer(peerHigh, peerLow, kMonitor, head, sizeof head, nullptr, 0);
+}
+
+void SendDemonitorToPeer(Word peerHigh, Word peerLow, std::uint64_t id) {
+  pthread_once(&once, Initialize);
+  std::uint8_t head[8];
+  Put64(head, id);
+  // Lost or not, the monitor is gone here.
+  SendToPeer(peerHigh, peerLow, kDemonitor, head, sizeof head, nullptr, 0);
+}
+
+void SendDownToPeer(Word peerHigh, Word peerLow, std::uint64_t peerId,
+    std::int64_t kind, const char *text) {
+  pthread_once(&once, Initialize);
+  std::size_t length{std::strlen(text)};
+  std::size_t padded{(length + 7) / 8 * 8};
+  if (padded > 0xFFFF0000u) {
+    length = 0;
+    padded = 0;
+  }
+  std::uint8_t head[kDownHeadBytes];
+  Put64(head, peerId);
+  Put64(head + 8, static_cast<std::uint64_t>(kind));
+  Put64(head + 16, length);
+  auto *body{static_cast<std::uint8_t *>(Malloc(padded + 1))};
+  std::memset(body, 0, padded + 1);
+  std::memcpy(body, text, length);
+  // A peer that is lost fires the monitor itself, with noconnection.
+  SendToPeer(peerHigh, peerLow, kDown, head, sizeof head, body, padded);
+  std::free(body);
+}
+
+void SendStopToPeer(const Handle &target) {
+  pthread_once(&once, Initialize);
+  std::uint8_t head[kHandleBytes];
+  PutHandle(head, target);
+  SendToPeer(
+      target.nodeHigh, target.nodeLow, kStop, head, sizeof head, nullptr, 0);
+}
+
 } // namespace merkurius::runtime
 
 // Listens on "host:port", where port 0 picks a free one: 0 and the port, or
@@ -1166,6 +1344,12 @@ static std::int64_t ConnectNode(const char *address,
     return 1;
   }
   Connection *c{Register(connected, peerHigh, peerLow)};
+  if (!c) {
+    *error = HeapText(address,
+        "the node was lost before, and is not connected to again: it must "
+        "start again");
+    return 1;
+  }
   StartThread(Reader, c);
   // The other node decides; wait for a current connection to it, this one
   // or one that replaced it.

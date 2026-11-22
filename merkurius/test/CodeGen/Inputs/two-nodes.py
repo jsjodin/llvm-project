@@ -28,6 +28,15 @@ the user's ~/.merkurius.cookie.
   and exchanges with it from a target region, which may run on a GPU.
 - both-regions: first-slice with the partner answering from a target
   region too, so two GPUs, or one used by two processes, exchange messages.
+- monitors: process-remote-monitor.m's server, and a client that watches
+  and stops its processes, and sees it quit.
+- fence: that server, and a client that watches its process; the driver
+  stops the server with SIGSTOP until the client has seen the loss, and
+  then lets it run, and the client tries to connect to it again.
+- in-flight: that server, and a client that a process of it streams
+  numbers to; the driver kills the server with SIGKILL meanwhile.
+- three: two such servers, b and c, and a client connected to both; the
+  driver kills b with SIGKILL.
 
 The output is each node's, prefixed with its role, apart from the ports.
 """
@@ -223,6 +232,77 @@ def both_regions():
         print("partner: " + line)
 
 
+def monitors():
+    print("monitors:")
+    server = start("server")
+    port = port_of(server, "server")
+    client = start("client", port)
+    for line in finish(client, "client"):
+        print("client: " + line)
+    print("server: listening")
+    for line in finish(server, "server"):
+        print("server: " + line)
+
+
+def fence():
+    print("fence:")
+    server = start("server")
+    port = port_of(server, "server")
+    client = start("fenced", port)
+    print("client: " + client.stdout.readline().rstrip("\n"))
+    server.send_signal(signal.SIGSTOP)
+    os.waitpid(server.pid, os.WUNTRACED)
+    client.stdin.write("go\n")
+    client.stdin.flush()
+    print("client: " + client.stdout.readline().rstrip("\n"))
+    server.send_signal(signal.SIGCONT)
+    client.stdin.write("go\n")
+    client.stdin.flush()
+    lines = finish(client, "client")
+    server.stdin.write("done\n")
+    server.stdin.flush()
+    for line in lines:
+        print("client: " + line)
+    print("server: listening")
+    for line in finish(server, "server"):
+        print("server: " + line)
+
+
+def in_flight():
+    print("in-flight:")
+    server = start("server")
+    port = port_of(server, "server")
+    client = start("in-flight", port)
+    print("client: " + client.stdout.readline().rstrip("\n"))
+    server.kill()
+    server.communicate()
+    for line in finish(client, "client"):
+        print("client: " + line)
+    print("server: killed" if server.returncode == -signal.SIGKILL else
+          f"server: exited with {server.returncode}")
+
+
+def three():
+    print("three:")
+    b = start("server")
+    port_b = port_of(b, "b")
+    c = start("server")
+    port_c = port_of(c, "c")
+    client = start("three", port_b, port_c)
+    print("client: " + client.stdout.readline().rstrip("\n"))
+    b.kill()
+    b.communicate()
+    client.stdin.write("go\n")
+    client.stdin.flush()
+    for line in finish(client, "client"):
+        print("client: " + line)
+    print("b: killed" if b.returncode == -signal.SIGKILL else
+          f"b: exited with {b.returncode}")
+    print("c: listening")
+    for line in finish(c, "c"):
+        print("c: " + line)
+
+
 SCENARIOS = {
     "pingpong": pingpong,
     "stall": stall,
@@ -230,6 +310,10 @@ SCENARIOS = {
     "cookie": cookie,
     "first-slice": first_slice,
     "both-regions": both_regions,
+    "monitors": monitors,
+    "fence": fence,
+    "in-flight": in_flight,
+    "three": three,
 }
 
 try:

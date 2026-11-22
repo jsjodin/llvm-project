@@ -73,6 +73,30 @@ std::int64_t LookupForPeer(const char *name,
 Delivery Route(
     const Handle &handle, const std::uint8_t *bytes, std::size_t size);
 
+// Monitors and stops across nodes (docs/INPROGRESS.md, Failure, step 2).
+// node.cpp sends the frames: false if this node is not connected to the
+// peer, or the frame could not be written.
+bool SendMonitorToPeer(
+    Word peerHigh, Word peerLow, std::uint64_t id, const Handle &target);
+void SendDemonitorToPeer(Word peerHigh, Word peerLow, std::uint64_t id);
+void SendDownToPeer(Word peerHigh, Word peerLow, std::uint64_t peerId,
+    std::int64_t kind, const char *text);
+void SendStopToPeer(const Handle &target);
+
+// mailbox.cpp, from a connection's reader. The peer's monitor, by its id
+// there, of a mailbox's owner here: a proxy, or `down` noproc at once.
+void MonitorForPeer(
+    Word peerHigh, Word peerLow, std::uint64_t peerId, const Handle &target);
+void DemonitorForPeer(Word peerHigh, Word peerLow, std::uint64_t peerId);
+// The peer's `down` for this node's monitor: false if the monitor is not
+// one of that peer's targets, so the frame is not one it may send.
+bool DownFromPeer(Word peerHigh, Word peerLow, std::uint64_t id,
+    std::int64_t kind, const char *text);
+// The last connection to the peer is lost: its targets' monitors fire with
+// noconnection, and its proxies go.
+void PeerDown(Word peerHigh, Word peerLow);
+void StopForPeer(const Handle &target);
+
 } // namespace merkurius::runtime
 
 #endif // MERKURIUS_RUNTIME_NODE_H_

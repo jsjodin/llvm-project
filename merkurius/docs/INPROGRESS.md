@@ -832,8 +832,9 @@ left open (design document, Processes and scheduler).
 
 - A compile option that leaves out what only preemption needs, for programs
   that do not spawn.
-- A monitor across nodes or places reports that it is not supported yet
-  (Failure: monitors across nodes and places, and recovery in place).
+- A monitor of a GPU process reports that it is not supported yet
+  (Failure: monitors across nodes and places, and recovery in place, step
+  4); monitors across nodes are done (step 2).
 - A send to another node holds its worker while its socket is full.
 - Regions on several devices at once need a machine with two GPUs to run.
 - About 2 µs of the cost of a receive with a timeout remains, with several
@@ -8026,7 +8027,12 @@ Sketched for a later stage:
    monitor's message that is a constant was counted as held for ever.
 2. **Monitors across nodes and the fence,** tested with two and three nodes
    on localhost, including a connection lost while messages are in flight.
-   Answers the design document's open question about delivery.
+   Done 2026-11-22 (design document, Exceptions, links and monitors, and
+   Remote mailboxes, sendability and failure, which answers the open
+   question about delivery). `stop` crosses nodes too. Found on the way:
+   step 1's `stop` compared a handle's node with itself, as the handle's
+   parameters hide the node's own id, so another node's process was never
+   reported as unsupported.
 3. **The injector,** in the runtime and a harness, with replay.
 4. **D1 at host places, then GPU places:** the stop flag at polls, a
    kernel's processes ended together, `kernel_ended`.

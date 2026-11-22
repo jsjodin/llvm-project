@@ -19,9 +19,8 @@
 % takes the first message in the queue that any clause matches. It leaves
 % the others queued in order, and waits until the timeout for one to arrive.
 %
-% Temporary (chunk 2, docs/INPROGRESS.md): monitors and request and reply are
-% to come. A receive that waits with infinity for a message nobody can send
-% waits forever.
+% A receive that waits with infinity for a message nobody can send waits
+% forever.
 %
 % Nodes connect over TCP (runtime/node.cpp), after Erlang's distribution: a
 % node listens on an address, another connects to it, and then each can
@@ -30,7 +29,10 @@
 % mailbox's (design document, Wire format). A send to a node this one is not
 % connected to, or whose connection is lost, is dropped, as one to a closed
 % mailbox is. Two nodes connect only if both know the same cookie, which
-% is never sent (runtime/node.cpp).
+% is never sent (runtime/node.cpp). Monitors and stop work across nodes; a
+% node whose last connection is lost is down, which monitors of its
+% processes see as noconnection, and it is never connected to again, as
+% Erlang's `dist_auto_connect once` (docs/INPROGRESS.md, Failure).
 
 :- module process.
 :- interface.
@@ -74,8 +76,9 @@
     % mailbox are dropped, and a receive from it is a run-time error.
     % Watches the process that owns the target mailbox: when it ends, or
     % at once if it has ended, the function makes a message from a
-    % down_info, which goes to the watcher's mailbox. Across nodes it is
-    % not supported yet.
+    % down_info, which goes to the watcher's mailbox. The target may be
+    % another node's, and is noconnection at once if this node is not
+    % connected to it; the watcher must be this node's.
 :- type monitor_ref.
 
     % Why a watched process ended, Erlang's reasons for a monitor's DOWN
@@ -112,10 +115,11 @@
     % Ends the process that owns the mailbox, with the reason killed, as
     % Erlang's exit(Pid, kill) does: at once if it is blocked, else at its
     % next check, as preemption's, or its next send, receive or spawn; after
-    % a parallel or target region, a foreign call or a send it is in. Its mailboxes close and its monitors
-    % fire, as at any end. A process that has ended is left alone, and the
-    % main process's stop ends the program. A process of a GPU or another
-    % node is not supported yet.
+    % a parallel or target region, a foreign call or a send it is in. Its
+    % mailboxes close and its monitors fire, as at any end. A process that
+    % has ended is left alone, and the main process's stop ends the program.
+    % Another node's process is stopped there, and nothing happens if this
+    % node is not connected to it. A GPU process is not supported yet.
 :- pred stop(mailbox(T)::in, io::di, io::uo) is det.
 
     % Sends a request made by applying the function to a new mailbox for
@@ -132,8 +136,8 @@
 
     % Sends a request and waits for its reply, for the timeout to pass, or
     % for the process that owns the server's mailbox to end, whichever
-    % comes first. A reply that comes later goes nowhere. The server's
-    % mailbox must be on this node, as a monitor's must, for now.
+    % comes first. A reply that comes later goes nowhere. The server may be
+    % another node's, and is down(noconnection) if the connection is lost.
 :- pred request(mailbox(Req)::in, (func(mailbox(Rep)) = Req)::in,
     timeout::in, reply(Rep)::out, io::di, io::uo) is det.
 
