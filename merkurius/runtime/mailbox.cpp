@@ -918,6 +918,7 @@ void CloseMailboxesOf(Process *process) {
 // heap, which is an error if the closure captured what cannot be copied.
 extern "C" void merk_process_spawn(std::int64_t stackBytes, Word closure,
     Word argument, MERK_HANDLE_PARAMETERS) {
+  CheckStop();
   if (!CurrentProcess()) {
     Fail("spawn is not available on a thread that runs no process", "");
   }
@@ -947,6 +948,7 @@ extern "C" void merk_process_spawn(std::int64_t stackBytes, Word closure,
 // to another node's mailbox is encoded, and routed to its connection.
 extern "C" void merk_mailbox_send(
     MERK_HANDLE_PARAMETERS, Word typeInfo, Word value) {
+  CheckStop();
   pthread_once(&once, InitializeCondition);
   Handle handle{MERK_HANDLE};
   if (!IsThisNode(handle.nodeHigh, handle.nodeLow)) {
@@ -984,6 +986,7 @@ extern "C" std::int64_t merk_mailbox_deadline(std::int64_t milliseconds) {
 // first, or -1 if the mailbox is closed or not this node's host's.
 extern "C" std::int64_t merk_mailbox_wait(
     MERK_HANDLE_PARAMETERS, std::int64_t position, std::int64_t deadline) {
+  CheckStop();
   pthread_once(&once, InitializeCondition);
   bool suspends{CanSuspend()};
   std::int64_t spinEnd{suspends ? 0 : SpinEnd(deadline)};
@@ -1040,6 +1043,7 @@ extern "C" std::int64_t merk_mailbox_wait(
 // there yet, or -1 if it is closed or not this node's host's.
 extern "C" std::int64_t merk_mailbox_poll(
     MERK_HANDLE_PARAMETERS, std::int64_t position) {
+  CheckStop();
   pthread_once(&once, InitializeCondition);
   Mailbox *mailbox{Find(MERK_HANDLE)};
   if (!mailbox) {
@@ -1077,6 +1081,7 @@ extern "C" std::int64_t merk_mailbox_last_stamp(void) {
 // read, 0 if the deadline passes first.
 extern "C" std::int64_t merk_mailbox_wait_arrival(
     std::int64_t seen, std::int64_t deadline) {
+  CheckStop();
   pthread_once(&once, InitializeCondition);
   ArrivalCounts &counts{MyCounts()};
   if (CanSuspend()) {
@@ -1359,10 +1364,6 @@ struct Monitor {
 } // namespace merkurius::runtime
 
 namespace {
-constexpr std::int64_t kDownNormal{1};
-constexpr std::int64_t kDownNoProcess{2};
-constexpr std::int64_t kDownFailed{3};
-
 struct MonitorShard {
   pthread_mutex_t lock;
   Monitor *first;
@@ -1432,7 +1433,7 @@ void DeliverDown(const Handle &watcher, Word function, ChunkLink *functionChunks
 } // namespace
 
 namespace merkurius::runtime {
-void FireMonitorsOf(Process *process, const char *reason) {
+void FireMonitorsOf(Process *process, DownKind kind, const char *text) {
   pthread_once(&monitorsOnce, InitializeMonitors);
   for (;;) {
     pthread_mutex_lock(&process->waitLock);
@@ -1454,8 +1455,8 @@ void FireMonitorsOf(Process *process, const char *reason) {
     Monitor *mine{Unhash(shard, id)};
     pthread_mutex_unlock(&shard.lock);
     if (mine) {
-      DeliverDown(mine->watcher, mine->function, mine->chunks, id,
-          reason ? kDownFailed : kDownNormal, reason ? reason : "");
+      DeliverDown(mine->watcher, mine->function, mine->chunks, id, kind,
+          kind == kDownFailed ? text : "");
       std::free(mine);
     }
   }
@@ -1517,6 +1518,42 @@ extern "C" std::int64_t merk_monitor_new(std::int64_t targetHigh,
   std::free(monitor);
   DeliverDown(watcher, function, chunks, id, kDownNoProcess, "");
   return static_cast<std::int64_t>(id);
+}
+
+// process.stop: ends the process that owns the mailbox, with the reason
+// killed (RequestStop). A closed mailbox's process has ended already, and
+// nothing happens.
+extern "C" void merk_mailbox_stop_owner(MERK_HANDLE_PARAMETERS) {
+  pthread_once(&once, InitializeCondition);
+  Handle handle{MERK_HANDLE};
+  pthread_once(&nodeOnce, ChooseNode);
+  if (handle.nodeHigh != nodeHigh || handle.nodeLow != nodeLow) {
+    // Temporary (docs/INPROGRESS.md, Failure, step 2): a stop frame.
+    Fail("stopping a process of another node is not supported yet", "");
+  }
+  if (handle.placeAndSlot >> kPlaceShift != 0) {
+    // Temporary (docs/INPROGRESS.md, Failure, step 4): the stop flag that
+    // a GPU process reads at its polls.
+    Fail("stopping a GPU process is not supported yet", "");
+  }
+  Mailbox *mailbox{Find(handle)};
+  if (!mailbox) {
+    return;
+  }
+  Process *owner{mailbox->owner};
+  if (!owner || !owner->stack) {
+    Unlock(mailbox);
+    // A GPU process's record, which owns its mailboxes on the host.
+    // Temporary (docs/INPROGRESS.md, Failure, step 4).
+    Fail(owner ? "stopping a GPU process is not supported yet"
+               : "a mailbox of no process cannot be stopped",
+        "");
+  }
+  RequestStop(owner);
+  Unlock(mailbox);
+  if (owner == CurrentProcess()) {
+    CheckStop();
+  }
 }
 
 // Stops watching. A message already queued stays, as with Erlang's demonitor

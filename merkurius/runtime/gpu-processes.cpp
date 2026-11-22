@@ -1231,7 +1231,7 @@ void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
   const std::int64_t *h{process->handle};
   merk_mailbox_close_ended(h[0], h[1], h[2], h[3], h[4], &process->ring,
       &process->ringDevice, &process->copy, &process->release);
-  FireMonitorsOf(process->record, nullptr);
+  FireMonitorsOf(process->record, kDownNormal);
   std::free(process->record);
   process->record = nullptr;
   pthread_mutex_lock(&lock);

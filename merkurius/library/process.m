@@ -77,7 +77,25 @@
     % down_info, which goes to the watcher's mailbox. Across nodes it is
     % not supported yet.
 :- type monitor_ref.
-:- type down_reason.
+
+    % Why a watched process ended, Erlang's reasons for a monitor's DOWN
+    % message but for kernel_ended (docs/INPROGRESS.md, Failure).
+:- type down_reason
+    --->    normal
+            % It had ended already, or the mailbox had closed.
+    ;       noproc
+            % An uncaught exception or a stack overflow, as the report of
+            % the failure says it. Temporary (chunk 2 step 6,
+            % docs/INPROGRESS.md): text, until exceptions can be caught and
+            % a reason can carry the exception.
+    ;       failed(string)
+            % Ended from outside, by stop.
+    ;       killed
+            % Another process of its GPU kernel failed, which ends them all.
+    ;       kernel_ended
+            % The connection to its node was lost; it may still run.
+    ;       noconnection.
+
 :- type down_info
     --->    down_info(monitor_ref, down_reason).
 :- pred monitor(mailbox(T)::in, mailbox(M)::in, (func(down_info) = M)::in,
@@ -88,11 +106,17 @@
 
 :- func reason(down_info) = down_reason.
 
-    % "normal", "noproc" for a process that had ended already, or what
-    % ended it, as the report of the failure says it. Temporary (chunk 2
-    % step 6, docs/INPROGRESS.md): text, until exceptions can be caught
-    % and a reason can carry the exception.
+    % The reason's name, or for failed its text.
 :- func reason_text(down_reason) = string.
+
+    % Ends the process that owns the mailbox, with the reason killed, as
+    % Erlang's exit(Pid, kill) does: at once if it is blocked, else at its
+    % next check, as preemption's, or its next send, receive or spawn; after
+    % a parallel or target region, a foreign call or a send it is in. Its mailboxes close and its monitors
+    % fire, as at any end. A process that has ended is left alone, and the
+    % main process's stop ends the program. A process of a GPU or another
+    % node is not supported yet.
+:- pred stop(mailbox(T)::in, io::di, io::uo) is det.
 
     % Sends a request made by applying the function to a new mailbox for
     % the reply, which it returns, for the caller to add to its selector
@@ -337,11 +361,6 @@
 :- type monitor_ref
     --->    monitor_ref(int).
 
-:- type down_reason
-    --->    normal
-    ;       no_process
-    ;       failed(string).
-
     % The node's 128-bit id.
 :- type node
     --->    node(int, int).
@@ -384,6 +403,8 @@ extern void merk_process_spawn(MR_Integer stack_bytes, MR_Word closure,
     MR_Word argument, MR_Integer node_high, MR_Integer node_low,
     MR_Integer place_slot, MR_Integer generation, MR_Integer secret);
 extern void merk_mailbox_close(MR_Integer node_high, MR_Integer node_low,
+    MR_Integer place_slot, MR_Integer generation, MR_Integer secret);
+extern void merk_mailbox_stop_owner(MR_Integer node_high, MR_Integer node_low,
     MR_Integer place_slot, MR_Integer generation, MR_Integer secret);
 extern void merk_mailbox_send(MR_Integer node_high, MR_Integer node_low,
     MR_Integer place_slot, MR_Integer generation, MR_Integer secret,
@@ -454,8 +475,24 @@ demonitor(monitor_ref(Id), !IO) :-
 reason(down_info(_, Reason)) = Reason.
 
 reason_text(normal) = "normal".
-reason_text(no_process) = "noproc".
+reason_text(noproc) = "noproc".
 reason_text(failed(Text)) = Text.
+reason_text(killed) = "killed".
+reason_text(kernel_ended) = "kernel_ended".
+reason_text(noconnection) = "noconnection".
+
+stop(mailbox(High, Low, PlaceSlot, Generation, Secret), !IO) :-
+    stop_owner(High, Low, PlaceSlot, Generation, Secret, !IO).
+
+:- pred stop_owner(int::in, int::in, int::in, int::in, int::in,
+    io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    stop_owner(High::in, Low::in, PlaceSlot::in, Generation::in, Secret::in,
+        _IO0::di, _IO::uo),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    merk_mailbox_stop_owner(High, Low, PlaceSlot, Generation, Secret);
+").
 
 send_request(Server, MakeRequest, ReplyTo, !IO) :-
     new_mailbox(ReplyTo, !IO),
@@ -1160,16 +1197,28 @@ message_at(High, Low, PlaceSlot, Generation, Secret, Position, Message, !IO) :-
     ( if Kind = 0 then
         Message = Value
     else
-        ( if Kind = 1 then
-            Reason = normal
-        else if Kind = 2 then
-            Reason = no_process
-        else
-            Reason = failed(Text)
-        ),
+        Reason = down_reason(Kind, Text),
         Message = Function(down_info(monitor_ref(Monitor), Reason)),
         resolve_message(High, Low, PlaceSlot, Generation, Secret, Position,
             Message, !IO)
+    ).
+
+    % The runtime's DownKind, process.h.
+:- func down_reason(int, string) = down_reason.
+
+down_reason(Kind, Text) =
+    ( if Kind = 1 then
+        normal
+    else if Kind = 2 then
+        noproc
+    else if Kind = 4 then
+        killed
+    else if Kind = 5 then
+        kernel_ended
+    else if Kind = 6 then
+        noconnection
+    else
+        failed(Text)
     ).
 
 :- pred read_message(int::in, int::in, int::in, int::in, int::in, int::in,

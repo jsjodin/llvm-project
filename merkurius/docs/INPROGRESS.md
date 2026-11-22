@@ -7771,8 +7771,12 @@ the sender rejects.
 
 ## Failure: monitors across nodes and places, and recovery in place
 
-Proposed 2026-11-22, from a discussion with the user; not agreed, nothing
-built. The aim is a computation that goes on while processes, GPU kernels,
+Proposed 2026-11-22, from a discussion with the user, and agreed the same
+day with the recommendations below: the fence refuses a down node, the
+reasons are typed, `stop` comes in step 1, and D3 is an experiment in the
+Monte Carlo plan. The demos are programs of their own, not options of the
+existing benchmarks, so that those keep measuring with no bookkeeping. The
+aim is a computation that goes on while processes, GPU kernels,
 nodes and connections fail at random, and whose answer is bit for bit the
 answer of a run without failures.
 
@@ -7809,13 +7813,13 @@ ending the program; and ending a process from outside.
 
 **1. The contract, Erlang's.** Messages between a pair of processes arrive
 in order. When a connection is lost, messages in flight may be lost, but
-every monitor across it fires with the reason `node_down`. Either a message
+every monitor across it fires with the reason `noconnection`. Either a message
 arrives or its watcher is told. A target's `down` is sent after its last
 messages on the same connection, as a process closes its mailboxes before
 it tells its monitors. So after a `down`, nothing more comes from that
 process, which makes merging results simple.
 
-**2. `node_down` does not mean dead: the fence.** A partitioned node may go
+**2. `noconnection` does not mean dead: the fence.** A partitioned node may go
 on running and reconnect, and its old processes may still send results that
 a coordinator has given to others. Two ways out:
 - *Refuse the node once it is down* (recommended). After a node's `down`,
@@ -7827,7 +7831,7 @@ a coordinator has given to others. Two ways out:
   messages from an older epoch. It lets a node rejoin without restarting,
   but every message carries and checks the epoch, and a process on the
   rejoined node does not know that its peers count it as dead.
-- Either way, the cut-off node sees `node_down` for its peers too, and a
+- Either way, the cut-off node sees `noconnection` for its peers too, and a
   program's supervisor may end it. Neither removes the duplicates that
   backup execution makes on purpose (5).
 
@@ -7840,8 +7844,14 @@ Recovery has to tell the cases apart:
     ;       failed(string)      % an uncaught exception or a stack overflow
     ;       killed              % ended from outside, (4)
     ;       kernel_ended        % another process of its GPU kernel failed
-    ;       node_down.          % the connection to its node was lost
+    ;       noconnection.       % the connection to its node was lost
 ```
+The names are Erlang's for a monitor's `DOWN` message, but for
+`kernel_ended`, which Erlang has no case for, and `failed`, where Erlang
+gives any term, as `{badarith, Stack}`; the text becomes the exception once
+exceptions can be caught. Erlang's `shutdown` and `{shutdown, Term}`, an
+orderly stop that a process may see and tidy up after, come with
+supervisors.
 `kernel_ended` keeps a supervisor from blaming the wrong process: a trap
 ends a whole kernel, so the GPU processes in it end together. A recovery
 policy treats the kernel as the unit that fails.
@@ -7897,9 +7907,9 @@ process. ROCr also aborts on a GPU memory fault unless a handler for
   and whose resets log the user out; on the gfx90a system, with the user's
   leave;
 - *if the device does not recover,* a real GPU fault ends the node's OS
-  process, which other nodes see as `node_down` and recover from. The design
-  works either way, and the demos inject clean ends with a fault's reason
-  (8), testing real traps apart.
+  process, which other nodes see as `noconnection` and recover from. The
+  design works either way, and the demos inject clean ends with a fault's
+  reason (8), testing real traps apart.
 
 **8. The fault injector,** outside what the program supervises, seeded, its
 schedule written to a file that a later run replays exactly:
@@ -7915,7 +7925,7 @@ schedule written to a file that a later run replays exactly:
 `demonitor` frames to the target's node, which keeps a proxy on the
 target's list and sends a `down` frame, with the reason, when it ends. The
 watcher's node keeps the function and fires every monitor across a lost
-connection with `node_down`. The function is applied by the receiver as
+connection with `noconnection`. The function is applied by the receiver as
 now. A remote target that has already ended gives `noproc`.
 
 **10. A watcher on a GPU.** A `down` for a mailbox a device receives from
@@ -7927,8 +7937,9 @@ ending process. The result must be flat, as every message to a GPU is.
 
 ### The demos, simplest first
 
-- **D1, Mandelbrot tiles on one node** (`benchmarks/mandel/mandel-places.m`,
-  extended). Tiles have no state, and the checksum is deterministic already.
+- **D1, Mandelbrot tiles on one node,** a new program beside
+  `benchmarks/mandel/mandel-places.m`, whose plain run it is measured
+  against. Tiles have no state, and the checksum is deterministic already.
   The host, the coordinator, monitors its places, keeps what each was given
   and has reported, and gives a dead place's tiles back out. First with
   places at the host, then GPU places with injected ends, then a whole
@@ -8008,6 +8019,11 @@ Sketched for a later stage:
 ### Steps
 
 1. **Typed `down_reason`, and `process.stop` on the host,** with tests.
+   Done 2026-11-22 (design document, Exceptions, links and monitors). A
+   stack check comes only at a cycle's procedures and in loops, so a stop
+   is also checked at the start of a send, a receive and a spawn: a stopped
+   process then affects no other. Found on the way, fixed first: a
+   monitor's message that is a constant was counted as held for ever.
 2. **Monitors across nodes and the fence,** tested with two and three nodes
    on localhost, including a connection lost while messages are in flight.
    Answers the design document's open question about delivery.
@@ -8025,13 +8041,9 @@ Sketched for a later stage:
 11. **GPU-to-GPU fault tolerance** (Later, above), once GPUs message each
     other directly.
 
-**Open, for the user:**
-- The fence: refusing a down node (recommended) or epochs.
-- Typed reasons as above, or kept abstract with tests such as
-  `is_node_down`.
-- Whether `stop` is in the first step or waits for D1.
-- Where D3 goes: an experiment in MC-transport-plan.md, with these steps
-  as its milestones.
+**Decided 2026-11-22:** refusing a down node, not epochs; typed reasons;
+`stop` in step 1; D3 in MC-transport-plan.md, with these steps as its
+milestones; separate programs for the demos.
 
 ## The receive goal: later
 

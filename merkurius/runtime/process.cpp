@@ -545,7 +545,7 @@ void ProcessBody(void *argument) {
   auto *self{static_cast<Process *>(argument)};
   CallClosure(self->closure, self->argument);
   CloseMailboxesOf(self);
-  FireMonitorsOf(self, nullptr);
+  FireMonitorsOf(self, kDownNormal);
   Finish(self);
 }
 
@@ -641,16 +641,22 @@ void Pin() {
 
 void Unpin() {
   Process *self{current};
-  if (!self || --self->pinned != 0 || !self->moved) {
+  if (!self || --self->pinned != 0) {
     return;
   }
-  self->moved = false;
-  BlockingThread *thread{thisBlocking};
-  RunProcess(nullptr);
-  enqueueAfterSwitch = self;
-  SwitchContext(self->context, thread->context);
-  // It is back on a worker.
-  AfterSwitch();
+  if (self->moved) {
+    self->moved = false;
+    BlockingThread *thread{thisBlocking};
+    RunProcess(nullptr);
+    enqueueAfterSwitch = self;
+    SwitchContext(self->context, thread->context);
+    // It is back on a worker.
+    AfterSwitch();
+  }
+  // A stop asked for during the region ends it at the next check.
+  if (__atomic_load_n(&self->stopRequested, __ATOMIC_ACQUIRE)) {
+    merk_stack_limit = kPreempted;
+  }
 }
 
 void RunProcess(Process *next) {
@@ -667,6 +673,9 @@ void RunProcess(Process *next) {
   merk_stack_limit = next ? next->stackLimit : nullptr;
   merk_trail = next ? next->trail : nullptr;
   current = next;
+  if (next && __atomic_load_n(&next->stopRequested, __ATOMIC_ACQUIRE)) {
+    merk_stack_limit = kPreempted;
+  }
 }
 
 Process *NewGpuProcessRecord() {
@@ -700,6 +709,17 @@ Process *NewProcess(
   return process;
 }
 
+// Makes the process each worker runs fail its next stack check.
+static void PreemptWorkers() {
+  int started{workers.load(std::memory_order_acquire)};
+  for (int i{0}; i < started; ++i) {
+    if (char **limit{
+            __atomic_load_n(&workerTable[i].stackLimit, __ATOMIC_ACQUIRE)}) {
+      __atomic_store_n(limit, kPreempted, __ATOMIC_RELAXED);
+    }
+  }
+}
+
 // Runs while the program has more than one process: fires timers even when
 // every worker is busy, and if a process waits for a worker, makes the
 // running ones yield at their next check.
@@ -712,13 +732,7 @@ static void *Ticker(void *) {
     }
     FireTimers();
     if (runnable.load() > 0) {
-      int started{workers.load(std::memory_order_acquire)};
-      for (int i{0}; i < started; ++i) {
-        if (char **limit{__atomic_load_n(
-                &workerTable[i].stackLimit, __ATOMIC_ACQUIRE)}) {
-          __atomic_store_n(limit, kPreempted, __ATOMIC_RELAXED);
-        }
-      }
+      PreemptWorkers();
     }
   }
 }
@@ -771,6 +785,11 @@ void Wake(Process *process) {
 
 void Block(std::int64_t deadline) {
   Process *self{current};
+  if (__atomic_load_n(&self->stopRequested, __ATOMIC_ACQUIRE) &&
+      self->pinned == 0) {
+    pthread_mutex_unlock(&self->waitLock);
+    CheckStop();
+  }
   self->waiting = true;
   self->deadline = deadline;
   // First, as a process this one just woke is on the local queue: while the
@@ -788,6 +807,7 @@ void Block(std::int64_t deadline) {
   SwitchContext(self->context, next ? next->context : workerContext);
   // It may be on another thread now.
   AfterSwitch();
+  CheckStop();
 }
 
 void ExitProgram(int status) {
@@ -801,6 +821,37 @@ void ExitProgram(int status) {
 
 bool ProgramEnding() { return stopping.load(); }
 
+void RequestStop(Process *process) {
+  __atomic_store_n(&process->stopRequested, true, __ATOMIC_RELEASE);
+  pthread_mutex_lock(&process->waitLock);
+  Wake(process);
+  pthread_mutex_unlock(&process->waitLock);
+  // It may be running: its worker is not known without a lock, and a stop is
+  // rare, so every running process checks, and the others yield, as at a
+  // tick.
+  PreemptWorkers();
+}
+
+void CheckStop() {
+  Process *self{current};
+  if (!self || !__atomic_load_n(&self->stopRequested, __ATOMIC_ACQUIRE)) {
+    return;
+  }
+  if (self == &firstProcess) {
+    std::fflush(stdout);
+    std::fprintf(stderr, "Merkurius runtime: the main process was stopped\n");
+    ExitProgram(1);
+  }
+  // Unpin makes the next check after the region fail.
+  if (self->pinned != 0 || (omp_get_level && omp_get_level() > 0)) {
+    return;
+  }
+  // As a failure: nothing to unwind.
+  CloseMailboxesOf(self);
+  FireMonitorsOf(self, kDownKilled);
+  Finish(self);
+}
+
 void EndAfterFailure(const char *reason) {
   Process *self{current};
   if (!self || self == &firstProcess || self->pinned != 0 ||
@@ -809,7 +860,7 @@ void EndAfterFailure(const char *reason) {
   }
   // Nothing to unwind: its stack and heap go as a whole, from any depth.
   CloseMailboxesOf(self);
-  FireMonitorsOf(self, reason);
+  FireMonitorsOf(self, kDownFailed, reason);
   Finish(self);
 }
 
@@ -860,6 +911,7 @@ extern "C" void merk_stack_limit_passed(void) {
   if (merk_stack_limit == kPreempted) {
     Process *process{CurrentProcess()};
     merk_stack_limit = process ? process->stack->limit : nullptr;
+    CheckStop();
     Yield();
     return;
   }
