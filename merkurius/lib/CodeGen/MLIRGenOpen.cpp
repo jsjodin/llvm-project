@@ -12,7 +12,9 @@
 // type_info (runtime/open.h): full unification calls merk_open_unify, a
 // fresh variable is merk_open_new_var's cell, and a procedure that can bind
 // open variables marks the trail at each goal that catches failure
-// (MLIRGenControl.cpp).
+// (MLIRGenControl.cpp). Constructions, deconstructions and get_structure
+// are inline, on cells of open.open(T), a type_def of T's constructors with
+// every field a word, which lowering lays out as T's open layout.
 //
 //===----------------------------------------------------------------------===//
 
@@ -93,18 +95,336 @@ bool MerkGenerator::IsOpenUnify(const Body &goal, const ProcedureBody &body) {
           IsOpenType(body.vars[goal.left].type));
 }
 
-void MerkGenerator::OpenUnify(const Body &goal, const ProcedureBody &body) {
+std::optional<merk::TermType> MerkGenerator::OpenTermType(
+    const semantics::Type *open) {
+  std::string name{semantics::TypeToString(*open)};
+  auto term{merk::TermType::get(&context_, name)};
+  if (auto it{terms_.find(name)}; it != terms_.end()) {
+    return it->second ? std::make_optional(term) : std::nullopt;
+  }
+  const semantics::Type *type{open->arguments.front()};
+  const std::vector<semantics::ConstructorTypes> *constructors{
+      modes_.ops().ConstructorsOf(type)};
+  if (!constructors || name.front() == '<') {
+    terms_[name] = nullptr;
+    return std::nullopt;
+  }
+  terms_[name] = open;
+  auto word{merk::WordType::get(&context_)};
+  llvm::SmallVector<mlir::Attribute> attributes;
+  for (const semantics::ConstructorTypes &constructor : *constructors) {
+    llvm::SmallVector<mlir::Type> fields(constructor.arguments.size(), word);
+    attributes.push_back(merk::ConstructorAttr::get(
+        &context_, constructor.functor.name, fields, 0));
+  }
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToStart(module_.getBody());
+  for (mlir::Operation &op : *module_.getBody()) {
+    if (!mlir::isa<merk::TypeDefOp>(op)) {
+      break;
+    }
+    builder_.setInsertionPointAfter(&op);
+  }
+  merk::TypeDefOp::create(builder_, builder_.getUnknownLoc(), name,
+      builder_.getArrayAttr(attributes), /*abstract=*/false, /*open=*/true);
+  return term;
+}
+
+// Temporary (open types step 4(d), docs/INPROGRESS.md): deref, bind and
+// to_open are runtime calls, rather than inline code for deref and bind and
+// a static box for a small int.
+mlir::Value MerkGenerator::OpenDeref(
+    mlir::Value word, const semantics::Type *open, mlir::Location loc) {
+  auto type{merk::WordType::get(&context_)};
+  return NotedOpenWord(
+      merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{type},
+          "merk_open_deref", mlir::ValueRange{Coerce(word, type, loc)},
+          /*can_fail=*/false)
+          .getResult(0),
+      open);
+}
+
+mlir::Value MerkGenerator::NotedOpenWord(
+    mlir::Value value, const semantics::Type *type) {
+  if (!value || failed_ || target_.options().IsDevice()) {
+    return value;
+  }
+  // As AnnotateRoots does, a root it cannot describe is left without a
+  // note, which Liveness reports.
+  if (!annotated_.contains(value) &&
+      NoteOpenRoot(
+          value, IsClosedType(type) ? type : type->arguments.front())) {
+    annotated_.insert(value);
+  }
+  return value;
+}
+
+mlir::Value MerkGenerator::ToOpenWord(mlir::Value value,
+    const semantics::Type *type, mlir::Location loc, parser::CharBlock at) {
+  auto word{merk::WordType::get(&context_)};
+  if (IsOpenType(type)) {
+    return Coerce(value, word, loc);
+  }
+  mlir::Value info{TypeInfoOfType(type, loc, at)};
+  if (!info) {
+    failed_ = true;
+    return nullptr;
+  }
+  return NotedOpenWord(
+      merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{word},
+          "merk_open_to_open", mlir::ValueRange{info, Coerce(value, word, loc)},
+          /*can_fail=*/false)
+          .getResult(0),
+      types_.types().Open(type));
+}
+
+mlir::Value MerkGenerator::FromOpenWord(mlir::Value value,
+    const semantics::Type *type, mlir::Location loc, parser::CharBlock at) {
+  auto word{merk::WordType::get(&context_)};
+  std::optional<Represented> represented{Represent(type)};
+  mlir::Value info{TypeInfoOfType(type, loc, at)};
+  if (!info || !represented) {
+    failed_ = true;
+    return nullptr;
+  }
+  auto call{merk::ForeignCallOp::create(builder_, loc,
+      mlir::TypeRange{builder_.getI1Type(), word}, "merk_open_from_open",
+      mlir::ValueRange{info, Coerce(value, word, loc)}, /*can_fail=*/true)};
+  merk::GuardOp::create(builder_, loc, call.getResult(0));
+  mlir::Value result{Coerce(call.getResult(1), represented->type, loc)};
+  if (!target_.options().IsDevice() && NoteRoot(result, type)) {
+    annotated_.insert(result);
+  }
+  return result;
+}
+
+std::optional<llvm::SmallVector<mlir::Value>> MerkGenerator::OpenArguments(
+    const Body &goal, const ProcedureBody &body) {
   parser::CharBlock at{Where(goal.tokens)};
-  const semantics::Type *type{body.vars[goal.left].type};
-  // Temporary (open types step 4(b), docs/INPROGRESS.md): constructions and
-  // get_structure in the open layout.
-  if (goal.unify == UnifyKind::GetStructure) {
-    NotYet(at, "get_structure on open terms");
+  mlir::Location loc{Location(goal.tokens)};
+  auto word{merk::WordType::get(&context_)};
+  llvm::SmallVector<mlir::Value> words;
+  for (BodyVar argument : goal.arguments) {
+    mlir::Value value{ValueOf(argument)};
+    if (!value) {
+      // A free open argument of a get_structure's new cell.
+      value = NotedOpenWord(
+          merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{word},
+              "merk_open_new_var", mlir::ValueRange{}, /*can_fail=*/false)
+              .getResult(0),
+          body.vars[argument].type);
+    } else {
+      value = ToOpenWord(value, body.vars[argument].type, loc, at);
+      if (!value) {
+        return std::nullopt;
+      }
+    }
+    words.push_back(value);
+  }
+  return words;
+}
+
+std::optional<llvm::SmallVector<mlir::Value>> MerkGenerator::OpenRead(
+    const Body &goal, const ProcedureBody &body, mlir::Value deref,
+    merk::TermType term, bool test) {
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  auto word{merk::WordType::get(&context_)};
+  unsigned arity{static_cast<unsigned>(goal.arguments.size())};
+  auto functor{merk::FunctorAttr::get(&context_, goal.functor.name, arity)};
+  mlir::Value cell{Coerce(deref, term, loc)};
+  const std::vector<semantics::ConstructorTypes> *constructors{
+      modes_.ops().ConstructorsOf(
+          body.vars[goal.left].type->arguments.front())};
+  if (test && constructors && constructors->size() > 1) {
+    merk::GuardOp::create(builder_, loc,
+        merk::HasFunctorOp::create(builder_, loc, cell, functor));
+  }
+  llvm::SmallVector<mlir::Value> results;
+  if (arity == 0) {
+    return results;
+  }
+  auto fields{merk::DeconstructOp::create(builder_, loc,
+      llvm::SmallVector<mlir::Type>(arity, word), cell, functor)};
+  for (auto [argument, field] : llvm::zip(goal.arguments, fields.getFields())) {
+    const semantics::Type *type{body.vars[argument].type};
+    const semantics::Type *open{
+        IsOpenType(type) ? type : types_.types().Open(type)};
+    if (!NotedOpenWord(field, open)) {
+      return std::nullopt;
+    }
+    mlir::Value value{ValueOf(argument)};
+    if (!value) {
+      value = IsOpenType(type) ? field : FromOpenWord(field, type, loc, at);
+      if (!value) {
+        return std::nullopt;
+      }
+      results.push_back(value);
+      continue;
+    }
+    // A bound argument is unified with its field.
+    mlir::Value openWord{ToOpenWord(value, type, loc, at)};
+    if (!openWord) {
+      return std::nullopt;
+    }
+    OpenEqual(field, openWord, open, loc);
+  }
+  return results;
+}
+
+// X = f(Y1, ..., Yn) with X `any`: if X is an unbound variable, it is bound
+// to a new cell, whose free arguments are new variables; a free argument of
+// a ground type has no value then, and the unification fails. Otherwise X
+// is read as a deconstruction or a test is (design document, "Open
+// terms", Operations).
+void MerkGenerator::OpenGetStructure(
+    const Body &goal, const ProcedureBody &body, merk::TermType term) {
+  mlir::Location loc{Location(goal.tokens)};
+  auto word{merk::WordType::get(&context_)};
+  auto i64{builder_.getI64Type()};
+  unsigned arity{static_cast<unsigned>(goal.arguments.size())};
+  auto functor{merk::FunctorAttr::get(&context_, goal.functor.name, arity)};
+  mlir::Value deref{
+      OpenDeref(ValueOf(goal.left), body.vars[goal.left].type, loc)};
+  if (!deref) {
     return;
   }
+  llvm::SmallVector<BodyVar> free;
+  llvm::SmallVector<mlir::Type> types;
+  bool groundFree{false};
+  for (BodyVar argument : goal.arguments) {
+    if (!ValueOf(argument)) {
+      const semantics::Type *type{body.vars[argument].type};
+      std::optional<Represented> represented{Represent(type)};
+      if (!represented) {
+        failed_ = true;
+        return;
+      }
+      free.push_back(argument);
+      types.push_back(represented->type);
+      groundFree |= !IsOpenType(type);
+    }
+  }
+  // A variable's primary tag, in every open layout (runtime/open.h).
+  constexpr std::int64_t kVariableTag{7};
+  auto tag{mlir::arith::AndIOp::create(builder_, loc, Coerce(deref, i64, loc),
+      mlir::arith::ConstantIntOp::create(builder_, loc, i64, kVariableTag))};
+  mlir::Value unbound{mlir::arith::CmpIOp::create(builder_, loc,
+      mlir::arith::CmpIPredicate::eq, tag,
+      mlir::arith::ConstantIntOp::create(builder_, loc, i64, kVariableTag))};
+  auto ite{merk::IteOp::create(builder_, loc, types)};
+  {
+    mlir::OpBuilder::InsertionGuard guard{builder_};
+    builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
+    merk::GuardOp::create(builder_, loc, unbound);
+    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+    builder_.setInsertionPointToStart(&ite.getThenRegion().emplaceBlock());
+    if (groundFree) {
+      merk::FailOp::create(builder_, loc);
+    } else {
+      std::optional<llvm::SmallVector<mlir::Value>> words{
+          OpenArguments(goal, body)};
+      if (!words) {
+        return;
+      }
+      mlir::Value cell{
+          merk::ConstructOp::create(builder_, loc, term, functor, *words)};
+      merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+          "merk_open_bind", mlir::ValueRange{deref, Coerce(cell, word, loc)},
+          /*can_fail=*/false);
+      llvm::SmallVector<mlir::Value> made;
+      for (auto [argument, value] : llvm::zip(goal.arguments, *words)) {
+        if (llvm::is_contained(free, argument)) {
+          made.push_back(value);
+        }
+      }
+      merk::YieldOp::create(builder_, loc, made);
+    }
+    builder_.setInsertionPointToStart(&ite.getElseRegion().emplaceBlock());
+    std::optional<llvm::SmallVector<mlir::Value>> read{
+        OpenRead(goal, body, deref, term, /*test=*/true)};
+    if (!read) {
+      return;
+    }
+    merk::YieldOp::create(builder_, loc, *read);
+  }
+  for (auto [argument, value] : llvm::zip(free, ite.getResults())) {
+    values_[argument] = value;
+  }
+}
+
+void MerkGenerator::OpenUnify(const Body &goal, const ProcedureBody &body) {
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  const semantics::Type *type{body.vars[goal.left].type};
   if (!goal.isVar) {
-    NotYet(at, "constructions and deconstructions of open terms");
-    return;
+    if (!IsOpenType(type)) {
+      // Temporary (open types step 4(c), docs/INPROGRESS.md).
+      NotYet(at, "closed(T) values that may be unbound");
+      return;
+    }
+    unsigned arity{static_cast<unsigned>(goal.arguments.size())};
+    std::optional<merk::TermType> term{OpenTermType(type)};
+    if (!term ||
+        !ConstructorOf(type->arguments.front(), goal.functor.name, arity)) {
+      NotYet(at, "this unification of an open term");
+      return;
+    }
+    for (BodyVar argument : goal.arguments) {
+      if (!ValueOf(argument) && IsClosedType(body.vars[argument].type)) {
+        // Temporary (open types step 4(c), docs/INPROGRESS.md).
+        NotYet(at, "closed(T) values that may be unbound");
+        return;
+      }
+    }
+    if (ReportOpenShapes(goal, {goal.left}, body, false)) {
+      return;
+    }
+    switch (goal.unify) {
+    case UnifyKind::Construct: {
+      for (BodyVar argument : goal.arguments) {
+        if (!ValueOf(argument)) {
+          NotYet(at, "an open term with free arguments");
+          return;
+        }
+      }
+      std::optional<llvm::SmallVector<mlir::Value>> words{
+          OpenArguments(goal, body)};
+      if (!words) {
+        return;
+      }
+      values_[goal.left] = Coerce(
+          merk::ConstructOp::create(builder_, loc, *term,
+              merk::FunctorAttr::get(&context_, goal.functor.name, arity),
+              *words),
+          merk::WordType::get(&context_), loc);
+      return;
+    }
+    case UnifyKind::GetStructure:
+      OpenGetStructure(goal, body, *term);
+      return;
+    default: {
+      // A deconstruction or a test of a bound X, whose word may still be a
+      // bound variable's reference.
+      mlir::Value deref{OpenDeref(ValueOf(goal.left), type, loc)};
+      if (!deref) {
+        return;
+      }
+      std::optional<llvm::SmallVector<mlir::Value>> read{OpenRead(goal, body,
+          deref, *term,
+          !goal.switchTest && (goal.canFail || goal.unify == UnifyKind::Test))};
+      if (!read) {
+        return;
+      }
+      unsigned i{0};
+      for (BodyVar argument : goal.arguments) {
+        if (!ValueOf(argument)) {
+          values_[argument] = (*read)[i++];
+        }
+      }
+      return;
+    }
+    }
   }
   // Full unification. A closed(T) that may be unbound is a box or a
   // variable, which its ordinary word is not, outside open(T).
@@ -260,9 +580,18 @@ void MerkGenerator::OpenEqual(mlir::Value x, mlir::Value y,
 // none. It is made where T's type_info is: at the procedure's start for a
 // ground T, after T's type_info for a type variable.
 bool MerkGenerator::NoteOpenRoot(
-    mlir::Value value, const semantics::Type *type) {
-  const semantics::Type *argument{type->arguments.front()};
+    mlir::Value value, const semantics::Type *argument) {
   mlir::Location loc{value.getLoc()};
+  auto proc{mlir::dyn_cast<merk::ProcOp>(builder_.getBlock()->getParentOp())};
+  if (!proc) {
+    proc = builder_.getBlock()->getParentOp()->getParentOfType<merk::ProcOp>();
+  }
+  if (mlir::Value info{openTypeInfos_.lookup({proc, argument})}) {
+    merk::RootTypeOp::create(builder_, loc, value, info);
+    return true;
+  }
+  // Named by open(T0): open(closed(U)) is closed(U) as a type.
+  const semantics::Type *type{types_.types().Open(types_.types().Variable(0))};
   mlir::OpBuilder::InsertPoint here{builder_.saveInsertionPoint()};
   mlir::OpBuilder::InsertionGuard guard{builder_};
   llvm::SmallVector<unsigned> variables;
@@ -281,11 +610,6 @@ bool MerkGenerator::NoteOpenRoot(
       builder_.setInsertionPointToStart(argumentInfo.getParentBlock());
     }
   } else if (CollectTypeVariables(argument, variables) && variables.empty()) {
-    auto proc{mlir::dyn_cast<merk::ProcOp>(builder_.getBlock()->getParentOp())};
-    if (!proc) {
-      proc =
-          builder_.getBlock()->getParentOp()->getParentOfType<merk::ProcOp>();
-    }
     builder_.setInsertionPointToStart(&proc.getBody().front());
     argumentInfo = TypeInfoOfType(argument, loc, {}, true);
     if (!argumentInfo) {
@@ -308,6 +632,7 @@ bool MerkGenerator::NoteOpenRoot(
       mlir::TypeRange{infoType}, "merk_open_type_info",
       mlir::ValueRange{descriptor, argumentInfo}, /*can_fail=*/false)
                        .getResult(0)};
+  openTypeInfos_[{proc, argument}] = info;
   builder_.restoreInsertionPoint(here);
   merk::RootTypeOp::create(builder_, loc, value, info);
   return true;

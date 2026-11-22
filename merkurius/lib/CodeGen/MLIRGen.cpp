@@ -309,7 +309,7 @@ std::optional<Represented> MerkGenerator::RepresentTerm(
       abstractTypes_.contains(type->constructor)};
   merk::TypeDefOp::create(builder_,
       abstract ? Location(type->constructor->source) : builder_.getUnknownLoc(),
-      name, builder_.getArrayAttr(attributes), abstract);
+      name, builder_.getArrayAttr(attributes), abstract, /*open=*/false);
   return Represented{term};
 }
 
@@ -799,7 +799,7 @@ bool MerkGenerator::NoteRoot(mlir::Value value, const semantics::Type *type) {
     return true;
   }
   if (IsOpenType(type)) {
-    return NoteOpenRoot(value, type);
+    return NoteOpenRoot(value, type->arguments.front());
   }
   llvm::SmallVector<unsigned> variables;
   if (!CollectTypeVariables(type, variables)) {
@@ -1440,6 +1440,7 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
   // A value of an earlier procedure may have been erased, and a new one made
   // at its address.
   annotated_.clear();
+  openTypeInfos_.clear();
   typeInfos_.clear();
   dictionaries_.clear();
   givenVars_.clear();

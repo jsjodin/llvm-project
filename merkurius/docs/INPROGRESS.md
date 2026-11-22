@@ -7931,7 +7931,8 @@ the `type_info` back to the open layout (below).
    - **For step 4:** the compiler's own open `TermLayout`, made when there
      is code that uses it. Its tags must be `CellTag(..., 7)`'s, the
      runtime's rule; a lowering test against `OpenTest`'s cases keeps the
-     two in step.
+     two in step. Done in step 4(b): `CodeGen/open-construct.m` passes
+     compiled cells to the runtime and back.
 3. **The runtime.** Done 2026-11-21, in `runtime/open.h` and `open.cpp`,
    with the trail in `trail.h`.
    - **Variables:** `merk_open_new_var` makes a one-word cell on the
@@ -8043,9 +8044,8 @@ the `type_info` back to the open layout (below).
        compare structurally, with the wrong equality and no sign. A
        descriptor flag for user-defined equality, which `GroundEqual` and
        `OpenUnify` check, would do.
-     - **Still not done, each reported as not yet implemented:** constructions
-       and get_structure on open terms (b), and `closed(T)` values that may
-       be unbound (c). A polymorphic `open(T)` whose T is not a type variable
+     - **Still not done, each reported as not yet implemented:** `closed(T)`
+       values that may be unbound (c). A polymorphic `open(T)` whose T is not a type variable
        nor ground, such as `open(list(T))`, gets no note (step 5).
      - Tests: `CodeGen/open-terms.m` (round trips of each kind of value,
        unification, fresh variables, undoing on disjunction, condition and
@@ -8053,9 +8053,42 @@ the `type_info` back to the open layout (below).
        `CodeGen/open-types-not-yet.m`, `not_fill` in
        `Semantics/modes/open/open-modes.m`, and the trail tests in
        `unittests/Runtime/OpenTest.cpp`.
-   - (b) Constructions and inline get_structure, with the compiler's own open
-     `TermLayout` (seven tags; see step 2's note), and descriptor tables for
-     them.
+   - (b) Done 2026-11-21: constructions, deconstructions, tests and
+     get_structure, inline (`lib/CodeGen/MLIRGenOpen.cpp`).
+     - **The compiler's open layout:** each open type used has a
+       `merk.type_def` of its own, `open.open(T)`, marked `open`, with T's
+       constructors and every field a word. Lowering lays it out with tags
+       0 to 6 (`CellTag(..., 7)`'s rule) and shifts an enumeration's
+       constants; a notag is its argument, as in `OpenEncodingOf`. The
+       existing `merk.construct`, `merk.deconstruct` and `merk.has_functor`
+       lowering then works on open cells, static cells included. No
+       descriptor tables were needed: the runtime derives the layout from
+       the ordinary descriptor.
+     - **Arguments:** an open argument is its word. A ground one, a twin's
+       coerced argument or a `closed(U)`, goes through `to_open`, which
+       boxes a `closed(U)`. A free ground argument that a read takes out of
+       a field goes through `from_open`, and fails if the field is not
+       ground.
+     - **get_structure** derefs X and tests for tag 7. An unbound X is
+       bound to a new cell whose free arguments are new variables, or the
+       goal fails if one of them is ground. A bound X is read: its functor
+       tested, free arguments given their fields, bound ones unified with
+       them by `merk_open_unify`. Deconstructions and tests deref X first,
+       since its word may be a bound variable's reference.
+     - **Notes for the collector:** each intermediate open word is noted
+       with open(T)'s `type_info`, made once per procedure and T. A
+       `closed(U)` box's note is open(closed(U))'s, which the runtime
+       makes, although as a type open(closed(U)) is closed(U).
+     - **Temporary, for (d):** deref, bind and `to_open` of a scalar are
+       runtime calls. Inline deref and bind, and a static box for a small
+       int, would save a call per field.
+     - **Found on the way:** the type checker gives tuples no open twin, so
+       `open({int, string})` cannot be built: `{3, "s"}` there is a type
+       error. Step 1(a) should add tuple twins.
+     - Tests: `CodeGen/open-construct.m` (constructions with holes, read and
+       write modes, undoing, and the tags of types where the open layout
+       shares a tag the ordinary one does not, against the runtime's
+       `to_open` and `from_open` both ways), `CodeGen/open-types-not-yet.m`.
    - (c) `closed(T)` values that may be unbound: a box or a variable's
      reference, so each such variable has its own representation and
      conversions.

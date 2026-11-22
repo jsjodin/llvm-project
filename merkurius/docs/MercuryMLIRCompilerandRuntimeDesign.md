@@ -2226,6 +2226,8 @@ Two choices were made against the alternatives. Tag 0 goes to a constructor when
 - **A notag type** other than `closed(T)` has its argument's encoding, and a dummy type keeps 0.
 - **Arrays, closures, `type_info`s and `typeclass_info`s** are not held by open terms yet.
 
+Compiled code makes and reads open cells inline (2026-11-21). Code generation gives each open type it uses a `merk.type_def` of its own, `open.open(T)`, marked `open`, with T's constructors and every field a word, and lowering lays it out by the rule above, so the ordinary construction, deconstruction and functor test lower to open cells unchanged. A `get_structure` derefs its term and tests for tag 7: an unbound variable is bound to a new cell, and a bound term is read.
+
 A descriptor marked `kOpenSame` has an open layout equal to its ordinary one if its arguments' are, as with `tree ---> leaf ; node(tree, tree)` or `list(T)`; `list(tree)` then needs no copy in `to_open`, and `list(int)` does. Lowering marks a type whose layout is cells that keep their tags, without hidden fields, whose fields are type parameters or such types, a recursive type assumed to while its fields are checked; a type it cannot see is not marked, which only makes `to_open` copy. The ordinary layout never gives up a tag, so ground code is compiled exactly as before.
 
 ### 2. Calling convention

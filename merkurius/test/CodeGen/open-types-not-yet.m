@@ -1,14 +1,16 @@
 % Code generation does not do all of open terms yet (docs/INPROGRESS.md,
-% Open types, step 4): a construction of an open term and a get_structure
-% wait for step 4(b), and a closed(T) value that may be unbound, as a fresh
-% variable or in a full unification, for step 4(c). An open term that holds
+% Open types, step 4): a closed(T) value that may be unbound, as a fresh
+% variable, in a full unification or as an argument a get_structure or a
+% deconstruction takes out of an open term, waits for step 4(c). An open
+% term that holds
 % an array, a higher-order value or an existentially typed constructor,
 % which the runtime's walkers stop on, is reported where open's predicates
 % or a full unification would walk it; a closed(U) holding one only where
 % it is unified, as to_open and from_open share its box. A message with open
 % terms in it waits for step 6, which copies it. Each is reported as not
-% yet implemented. Full unification, fresh variables and calls of open's
-% predicates are generated (open-terms.m).
+% yet implemented. Full unification, fresh variables, calls of open's
+% predicates (open-terms.m), constructions and get_structure
+% (open-construct.m) are generated.
 %
 % RUN: not merkc -fc1 -fopen-types -emit-merk %s -o /dev/null 2>&1 \
 % RUN:   | FileCheck --implicit-check-not=error: %s
@@ -25,10 +27,13 @@
 :- implementation.
 
 make([_ | _]).
-% CHECK: [[@LINE-1]]:6: error: not yet implemented: code generation for constructions and deconstructions of open terms
 
 get([X | _], X).
-% CHECK: [[@LINE-1]]:5: error: not yet implemented: code generation for get_structure on open terms
+
+:- type bundle ---> bundle(closed(list(int)), int).
+:- pred closed_field(open(bundle)::ia, open(int)::oa) is semidet.
+closed_field(bundle(_, N), N).
+% CHECK: [[@LINE-1]]:14: error: not yet implemented: code generation for closed(T) values that may be unbound
 
 same_closed(X, X).
 % CHECK: [[@LINE-1]]:16: error: not yet implemented: code generation for closed(T) values that may be unbound

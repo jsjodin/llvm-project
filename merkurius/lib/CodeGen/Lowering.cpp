@@ -665,6 +665,11 @@ llvm::LogicalResult Lowerer::Layouts() {
       (constructor.getFields().empty() ? constants : cells) += 1;
     }
     layout.constants = constants != 0;
+    // An open layout leaves primary tag 7 to variables (runtime/open.h,
+    // CellTag with kOpenTags), and shifts an enumeration's constants, as
+    // OpenEncodingOf does for the descriptor kinds Enum and Dummy.
+    bool open{def.getOpen()};
+    unsigned tags{open ? kTags - 1 : kTags};
     if (cells == 0) {
       layout.kind = TermLayout::Kind::Enum;
       layout.type = word;
@@ -680,7 +685,7 @@ llvm::LogicalResult Lowerer::Layouts() {
     // Tag 0 is the constants', if there are any; when the constructors
     // with arguments need more tags than are left, the last is shared.
     unsigned first{layout.constants ? 1u : 0u};
-    unsigned available{kTags - first};
+    unsigned available{tags - first};
     unsigned constant{0}, cell{0};
     for (auto constructor :
         def.getConstructors().getAsRange<merk::ConstructorAttr>()) {
@@ -694,14 +699,14 @@ llvm::LogicalResult Lowerer::Layouts() {
           constructor.getFields().take_front(functor.hidden),
           [](mlir::Type type) { return mlir::isa<merk::TypeInfoType>(type); }));
       if (functor.arity == 0) {
-        functor.value = layout.kind == TermLayout::Kind::Enum
+        functor.value = layout.kind == TermLayout::Kind::Enum && !open
             ? constant
             : static_cast<std::int64_t>(constant) << kTagBits;
         ++constant;
       } else if (cells <= available || cell + 1 < available) {
         functor.tag = first + cell++;
       } else {
-        functor.tag = kTags - 1;
+        functor.tag = tags - 1;
         functor.secondary = cell++ - (available - 1);
         layout.shared = functor.tag;
       }

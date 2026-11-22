@@ -629,6 +629,37 @@ private:
   bool IsClosedType(const semantics::Type *);
   bool MentionsOpenType(const semantics::Type *);
   bool MentionsClosedType(const semantics::Type *);
+  // The term type of open(T)'s cells, `open.open(T)`, whose type_def is
+  // T's constructors with every field a word, which lowering lays out as
+  // the open layout; none if T has no constructors this module sees.
+  std::optional<merk::TermType> OpenTermType(const semantics::Type *open);
+  // The value an open word of the type refers to, past bound variables.
+  mlir::Value OpenDeref(
+      mlir::Value word, const semantics::Type *open, mlir::Location);
+  // An open term's word, with its note for the collector, as a body
+  // variable's has (AnnotateRoots): of open(U), or of closed(U), whose word
+  // in an open term is a box or a variable's reference, not U's word, as
+  // open(closed(U)) is closed(U). Null if that failed.
+  mlir::Value NotedOpenWord(mlir::Value, const semantics::Type *);
+  // A value of type U as an open(U)'s word: itself if U is open, else
+  // to_open's; null if code generation has failed.
+  mlir::Value ToOpenWord(
+      mlir::Value, const semantics::Type *, mlir::Location, parser::CharBlock);
+  // An open(U)'s word as a ground U, failing if it is not ground.
+  mlir::Value FromOpenWord(mlir::Value word, const semantics::Type *,
+      mlir::Location, parser::CharBlock);
+  // X = f(...) with X dereferenced and bound: its functor tested if
+  // `test`, each free argument given its field, and each bound one unified
+  // with it. The free arguments' values, by their order; none on failure.
+  std::optional<llvm::SmallVector<mlir::Value>> OpenRead(const Body &goal,
+      const ProcedureBody &body, mlir::Value deref, merk::TermType term,
+      bool test);
+  // The open words of a construction's arguments, a free one a new
+  // variable; none on failure.
+  std::optional<llvm::SmallVector<mlir::Value>> OpenArguments(
+      const Body &goal, const ProcedureBody &body);
+  void OpenGetStructure(
+      const Body &goal, const ProcedureBody &body, merk::TermType term);
   // What the runtime's open walkers cannot hold yet in the open part of a
   // type: arrays, higher-order values and existentially typed constructors,
   // or none. With `closedToo`, inside closed(U) too, which only unification
@@ -666,7 +697,13 @@ private:
       mlir::Value x, mlir::Value y, const semantics::Type *, mlir::Location);
   mlir::Value OpenCompare(mlir::Location);
   // An open(T) word's note as a garbage collector root (NoteRoot).
-  bool NoteOpenRoot(mlir::Value, const semantics::Type *);
+  // Notes an open term's word of T's open layout, T being closed(U) for a
+  // box, with open(T)'s type_info.
+  bool NoteOpenRoot(mlir::Value, const semantics::Type *argument);
+  // open(T)'s type_infos made in each procedure, by T.
+  llvm::DenseMap<std::pair<mlir::Operation *, const semantics::Type *>,
+      mlir::Value>
+      openTypeInfos_;
   llvm::DenseMap<const ProcedureBody *, bool> trails_;
   // A goal with an OpenMP directive (design document, "Target regions").
   void Omp(const Body &, const ProcedureBody &);

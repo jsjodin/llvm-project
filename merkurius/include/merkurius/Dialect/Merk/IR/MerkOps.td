@@ -521,16 +521,25 @@ def Merk_TypeDefOp : Merk_Op<"type_def", [HasParent<"mlir::ModuleOp">]> {
     abstractly, which other modules pass as a pointer, so its layout must
     be one that passes as a pointer does: a pointer or a word.
 
+    `open` marks the open layout of a type T, named `open.open(T)`, whose
+    fields are all words (design document, Lowering, "Open layouts"):
+    primary tag 7 is a variable's, so its constructors with arguments have
+    tags 0 to 6, and an enumeration's constants are shifted past the tag.
+
     ```mlir
     merk.type_def "list.list(int)" [#merk.constructor<"[]">,
         #merk.constructor<"[|]"(i64, !merk.term<"list.list(int)">)>]
     merk.type_def "secret.box(T0)" [#merk.constructor<"box"(!merk.word, i64)>] abstract
+    merk.type_def "open.open(list.list(int))" [#merk.constructor<"[]">,
+        #merk.constructor<"[|]"(!merk.word, !merk.word)>] open
     ```
   }];
   let arguments = (ins StrAttr:$name,
       TypedArrayAttrBase<Merk_ConstructorAttr, "constructors">:$constructors,
-      UnitAttr:$abstract);
-  let assemblyFormat = "$name $constructors (`abstract` $abstract^)? attr-dict";
+      UnitAttr:$abstract, UnitAttr:$open);
+  let assemblyFormat = [{
+    $name $constructors (`abstract` $abstract^)? (`open` $open^)? attr-dict
+  }];
 }
 
 def Merk_ConstructOp : Merk_Op<"construct", [Pure]> {
