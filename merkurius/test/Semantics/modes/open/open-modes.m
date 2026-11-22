@@ -167,3 +167,29 @@ not_fill(N) :-
 % CHECK:          fresh D
 % CHECK-NOT:      fresh
 % CHECK:          final:
+
+    % A ground argument of a get_structure waits for a goal to bind it, so
+    % the 1 is constructed first and unified with X's head, which binds an
+    % unbound head, rather than taken out of the head and tested. Only when
+    % nothing binds it is it taken out of its field, which fails if that is
+    % unbound; closed(T)'s argument likewise.
+:- pred head_one(open(list(int))::ia) is semidet.
+head_one([1 | _]).
+% CHECK-LABEL: pred open_modes.head_one/1 mode 0: head_one(ia) is semidet
+% CHECK-NEXT:     clause at
+% CHECK-NEXT:       construct V_1 = 1
+% CHECK-NEXT:       getstructure HeadVar__1 = '[|]'(V_1, V_2)
+% CHECK-NEXT:       final: HeadVar__1 bound('[|]'(bound(1), any))
+:- pred head_out(open(list(int))::ia, int::out) is semidet.
+head_out([H | _], H).
+% CHECK-LABEL: pred open_modes.head_out/2 mode 0: head_out(ia, out) is semidet
+% CHECK-NEXT:     clause at
+% CHECK-NEXT:       getstructure HeadVar__1 = '[|]'(H, V_2)
+% CHECK-NEXT:       final: HeadVar__1 bound('[|]'(ground, any)), H ground
+:- pred closed_in(open(bundle)::ia, big::in) is semidet.
+closed_in(bundle(closed(L), _), L).
+% CHECK-LABEL: pred open_modes.closed_in/2 mode 0: closed_in(ia, in) is semidet
+% CHECK-NEXT:     clause at
+% CHECK-NEXT:       getstructure HeadVar__1 = bundle(V_1, V_3)
+% CHECK-NEXT:       getstructure V_1 = closed(L)
+% CHECK-NEXT:       final:

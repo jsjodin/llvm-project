@@ -7852,6 +7852,12 @@ the `type_info` back to the open layout (below).
        `closed/1`'s own argument and a twin's ground argument. X becomes
        `bound(f(...))`. It is `det` only if the type has one functor and
        every argument is free and open (`GoalModes::canFail`).
+     - **Fixed in step 4(b):** a free argument of a ground type, a twin's
+       ground argument or `closed/1`'s, waits for a goal of the
+       conjunction to bind it. It is taken out of its field, failing if that
+       is unbound, only when no goal can run otherwise. Before, in
+       `X = [1 | _]` the head was taken out of X and then tested against 1,
+       so an unbound head failed rather than being bound to 1.
      - Fresh variables, in `GoalModes::fresh` and printed as `fresh V`.
        When a conjunction is stuck, it makes fresh a free open variable
        that a waiting goal waits for, avoiding one a waiting construction

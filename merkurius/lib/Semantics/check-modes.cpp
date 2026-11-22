@@ -1564,6 +1564,11 @@ private:
     // the conjunction around it makes fresh, not this one: a negation or
     // a condition cannot bind them, nor one branch of a disjunction alone.
     std::set<VarId> outside{};
+    // Whether a get_structure may take a free argument of a ground type out
+    // of its field, as a last resort (GetStructure), and whether that was
+    // tried since the last goal ran.
+    bool groundOutputs{false};
+    bool triedGroundOutputs{false};
   };
   std::vector<const Inst *> WaitSnapshot(
       const Goal &, const Result &error, const InstMap &);
@@ -1686,6 +1691,10 @@ private:
   // By variable, how often a construction put it in a term, or an
   // assignment aliased it.
   std::vector<unsigned> touched_;
+  // Whether a get_structure may take a free argument of a ground type out
+  // of its field now, rather than wait for a goal to bind it: always outside
+  // a conjunction, and in one only when no goal can run otherwise.
+  bool groundOutputs_{true};
   // How often a goal that used each variable ran, which wakes only the
   // goals that would clobber it.
   std::vector<unsigned> freed_;
@@ -2827,11 +2836,29 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
       ++touched_[*var];
       WakeChanged(state);
       continue;
+    } else if (!state.triedGroundOutputs && !state.waiting.empty()) {
+      // Still none: a get_structure may take a ground argument out of its
+      // field, which fails if that is unbound.
+      state.groundOutputs = true;
+      state.triedGroundOutputs = true;
+      std::vector<Waiting> still;
+      for (Waiting &w : state.waiting) {
+        if (state.kept.count(NumberOf(w.goal))) {
+          still.push_back(std::move(w));
+        } else {
+          state.agenda.push_back(w.goal);
+        }
+      }
+      state.waiting = std::move(still);
+      continue;
     } else {
       break;
     }
     unsigned unreachables{unreachables_};
+    bool groundOutputs{groundOutputs_};
+    groundOutputs_ = state.groundOutputs;
     Result r{RunWaitingGoal(goal, state)};
+    groundOutputs_ = groundOutputs;
     if (r.outcome == Outcome::Unsupported) {
       return r;
     }
@@ -2841,6 +2868,8 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
       continue;
     }
     progress = true;
+    state.groundOutputs = false;
+    state.triedGroundOutputs = false;
     // A goal that would clobber a variable this one used may now find it
     // not used again, as in mmc, even if its inst is the same.
     for (VarId var : form_->nonlocals[NumberOf(goal)]) {
@@ -3013,6 +3042,11 @@ bool ProcedureChecker::MentionsOpen(const Type *type) const {
 // which must be ground for the unification to succeed. Either can fail: an
 // unbound X has no ground value to give it, and closed(T) may be unbound
 // inside an open term. X is then bound to f, with its arguments' insts.
+//
+// Such an argument waits for a goal of the conjunction to bind it, and is
+// taken out of the field only when no goal can run otherwise. So in
+// X = [1 | _] the 1 is constructed first, and unified with X's head, which
+// binds it if it is unbound, rather than taken out of the head and tested.
 ProcedureChecker::Result ProcedureChecker::GetStructure(const Unify &unify,
     const Goal &goal, const InstFunctor &functor, bool closed, InstMap &map,
     const Live &live) {
@@ -3025,6 +3059,17 @@ ProcedureChecker::Result ProcedureChecker::GetStructure(const Unify &unify,
   const std::vector<ConstructorTypes> *constructors{
       ops_.ConstructorsOf(type)};
   modes.canFail = !constructors || constructors->size() != 1;
+  if (!groundOutputs_) {
+    for (VarId var : unify.arguments) {
+      if (ops_.IsFree(map[var]) && (closed || !CanBeFresh(var))) {
+        return Error(goal,
+            "mode error in the unification of " + Name(unify.left) + " and " +
+                TermText(*form_, unify) + ": " + Name(var) +
+                " is free and of a ground type",
+            {var});
+      }
+    }
+  }
   std::vector<const Inst *> after;
   for (VarId var : unify.arguments) {
     const Inst *inst{map[var]};
@@ -3036,7 +3081,8 @@ ProcedureChecker::Result ProcedureChecker::GetStructure(const Unify &unify,
       modes.canFail = true;
     }
     map[var] = live[var] ? insts_.Share(inst) : inst;
-    after.push_back(map[var]);
+    // An open term is shared, and so is all of it.
+    after.push_back(insts_.Share(map[var]));
     ++touched_[var];
   }
   map[unify.left] = insts_.Bound(Uniqueness::Shared, {{functor, after}});
