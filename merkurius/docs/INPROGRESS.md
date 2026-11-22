@@ -8018,6 +8018,25 @@ the `type_info` back to the open layout (below).
        - MLIRGen never cleared its set of noted values between procedures.
          A value erased in one procedure could share its address with a new
          block argument, which then got no note.
+     - **Reported at compile time where the type is concrete;** through a
+       type variable the runtime still stops, with a message:
+       - An open term that holds an array, a higher-order value or an
+         existentially typed constructor, which the walkers stop on: at
+         calls of `open`'s predicates and at full unifications. Inside
+         `closed(U)` only at a unification, since `to_open` and `from_open`
+         share the box (`OpenShapeNotYet`).
+       - A call of the module `process` with an argument whose type has
+         open terms in it, until step 6 copies messages
+         (`ReportOpenMessages`). Printing one stops at run time with a
+         message, and so does encoding one for another node.
+     - **For when user-defined equality is implemented:** code generation
+       refuses those types today, so no value of one reaches the open
+       walkers. Then the walkers must call the type's own unify entry for
+       a `closed(U)` box and for anything they reach through a type
+       variable, as `open(list(T))` with T such a type would. Otherwise they
+       compare structurally, with the wrong equality and no sign. A
+       descriptor flag for user-defined equality, which `GroundEqual` and
+       `OpenUnify` check, would do.
      - **Still not done, each reported as not yet implemented:** constructions
        and get_structure on open terms (b), and `closed(T)` values that may
        be unbound (c). A polymorphic `open(T)` whose T is not a type variable

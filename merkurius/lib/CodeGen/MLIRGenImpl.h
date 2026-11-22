@@ -629,6 +629,21 @@ private:
   bool IsClosedType(const semantics::Type *);
   bool MentionsOpenType(const semantics::Type *);
   bool MentionsClosedType(const semantics::Type *);
+  // What the runtime's open walkers cannot hold yet in the open part of a
+  // type: arrays, higher-order values and existentially typed constructors,
+  // or none. With `closedToo`, inside closed(U) too, which only unification
+  // walks.
+  std::optional<std::string> OpenShapeNotYet(const semantics::Type *,
+      bool inOpen, bool closedToo,
+      llvm::SmallPtrSetImpl<const semantics::Type *> &seen);
+  // Reports the first of a call's arguments whose type has such a shape;
+  // whether one has.
+  bool ReportOpenShapes(const Body &goal, llvm::ArrayRef<BodyVar> arguments,
+      const ProcedureBody &body, bool closedToo);
+  // A call of the module process whose argument's type has open terms in
+  // it: messages are not copied with open terms yet; whether it is one.
+  bool ReportOpenMessages(const semantics::Procedure &callee, const Body &goal,
+      llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body);
   // Whether the procedure can bind open variables, so that its goals that
   // catch failure mark the trail: whether a variable of its has a type that
   // mentions open(T) or closed(T).

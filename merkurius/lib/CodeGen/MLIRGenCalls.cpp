@@ -177,6 +177,16 @@ void MerkGenerator::PassDictionary(const semantics::Dictionary &dictionary,
 
 void MerkGenerator::Called(const Body &goal, const Procedure &callee,
     llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body) {
+  if (ReportOpenMessages(callee, goal, arguments, body)) {
+    return;
+  }
+  // open's predicates call the runtime's walkers; unify_oc unifies, and so
+  // walks closed(U) too.
+  if (callee.symbol->module == "open" &&
+      ReportOpenShapes(
+          goal, arguments, body, callee.symbol->name == "unify_oc")) {
+    return;
+  }
   if (Builtin(goal, callee, arguments, body)) {
     return;
   }

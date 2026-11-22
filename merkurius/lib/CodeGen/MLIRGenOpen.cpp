@@ -113,6 +113,9 @@ void MerkGenerator::OpenUnify(const Body &goal, const ProcedureBody &body) {
     NotYet(at, "closed(T) values that may be unbound");
     return;
   }
+  if (ReportOpenShapes(goal, {goal.left, goal.var}, body, true)) {
+    return;
+  }
   Test(goal, ValueOf(goal.left), ValueOf(goal.var), type);
 }
 
@@ -121,6 +124,118 @@ bool MerkGenerator::MentionsClosedType(const semantics::Type *type) {
       (IsClosedType(type) ||
           llvm::any_of(type->arguments,
               [&](const semantics::Type *t) { return MentionsClosedType(t); }));
+}
+
+std::optional<std::string> MerkGenerator::OpenShapeNotYet(
+    const semantics::Type *type, bool inOpen, bool closedToo,
+    llvm::SmallPtrSetImpl<const semantics::Type *> &seen) {
+  if (!type || !seen.insert(type).second) {
+    return std::nullopt;
+  }
+  if (IsOpenType(type)) {
+    return OpenShapeNotYet(type->arguments.front(), true, closedToo, seen);
+  }
+  if (IsClosedType(type)) {
+    // A box that to_open and from_open share, and only unification walks.
+    if (inOpen && !closedToo) {
+      return std::nullopt;
+    }
+    return OpenShapeNotYet(type->arguments.front(), inOpen, closedToo, seen);
+  }
+  if (!inOpen) {
+    // Outside open(_), only the open parts within count.
+    for (const semantics::Type *argument : type->arguments) {
+      if (std::optional<std::string> why{
+              OpenShapeNotYet(argument, false, closedToo, seen)}) {
+        return why;
+      }
+    }
+    return OpenShapeNotYet(type->result, false, closedToo, seen);
+  }
+  switch (type->kind) {
+  case semantics::TypeKind::HigherOrder:
+    return "higher-order values";
+  case semantics::TypeKind::Variable:
+  case semantics::TypeKind::Existential:
+    return std::nullopt; // the runtime's check, where it is known
+  default:
+    break;
+  }
+  if (type->kind == semantics::TypeKind::Named &&
+      type->constructor->module == "array" &&
+      type->constructor->name == "array") {
+    return "arrays";
+  }
+  if (type->kind == semantics::TypeKind::Tuple) {
+    for (const semantics::Type *element : type->arguments) {
+      if (std::optional<std::string> why{
+              OpenShapeNotYet(element, true, closedToo, seen)}) {
+        return why;
+      }
+    }
+    return std::nullopt;
+  }
+  const std::vector<semantics::ConstructorTypes> *constructors{
+      modes_.ops().ConstructorsOf(type)};
+  if (!constructors) {
+    return std::nullopt; // a primitive or abstract type, by its descriptor
+  }
+  for (const semantics::ConstructorTypes &constructor : *constructors) {
+    const semantics::Signature *signature{
+        constructor.symbol ? types_.SignatureOf(*constructor.symbol) : nullptr};
+    if (signature && signature->existentials != 0) {
+      return "existentially typed constructors";
+    }
+    for (const semantics::Type *field : ArgumentsOf(type, constructor)) {
+      if (std::optional<std::string> why{
+              OpenShapeNotYet(field, true, closedToo, seen)}) {
+        return why;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+bool MerkGenerator::ReportOpenShapes(const Body &goal,
+    llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body,
+    bool closedToo) {
+  for (BodyVar var : arguments) {
+    const semantics::Type *type{body.vars[var].type};
+    if (!MentionsOpenType(type)) {
+      continue;
+    }
+    llvm::SmallPtrSet<const semantics::Type *, 8> seen;
+    if (std::optional<std::string> why{
+            OpenShapeNotYet(type, false, closedToo, seen)}) {
+      // Temporary (open types step 4, docs/INPROGRESS.md): the runtime's
+      // walkers stop on these; the compiler reports them where it can.
+      NotYet(Where(goal.tokens),
+          "open terms that hold " + *why + ", as values of type " +
+              semantics::TypeToString(*type) + " can");
+      return true;
+    }
+  }
+  return false;
+}
+
+bool MerkGenerator::ReportOpenMessages(const semantics::Procedure &callee,
+    const Body &goal, llvm::ArrayRef<BodyVar> arguments,
+    const ProcedureBody &body) {
+  if (callee.symbol->module != "process") {
+    return false;
+  }
+  for (BodyVar var : arguments) {
+    const semantics::Type *type{body.vars[var].type};
+    if (MentionsOpenType(type)) {
+      // Temporary (open types step 6, docs/INPROGRESS.md): a message is
+      // copied as copy_term does then.
+      NotYet(Where(goal.tokens),
+          "messages with open terms in them, such as values of type " +
+              semantics::TypeToString(*type));
+      return true;
+    }
+  }
+  return false;
 }
 
 void MerkGenerator::OpenEqual(mlir::Value x, mlir::Value y,
