@@ -3025,8 +3025,9 @@ bool ProcedureChecker::MentionsOpen(const Type *type) const {
 // others unified with them. A free argument is then `any`, unless its type
 // is ground: closed(T)'s own argument, which is ground, or a ground value
 // that the open twin of a constructor takes where it has an open one,
-// which must be ground for the unification to succeed. X is then bound to
-// f, with its arguments' insts.
+// which must be ground for the unification to succeed. Either can fail: an
+// unbound X has no ground value to give it, and closed(T) may be unbound
+// inside an open term. X is then bound to f, with its arguments' insts.
 ProcedureChecker::Result ProcedureChecker::GetStructure(const Unify &unify,
     const Goal &goal, const InstFunctor &functor, bool closed, InstMap &map,
     const Live &live) {
@@ -3044,7 +3045,7 @@ ProcedureChecker::Result ProcedureChecker::GetStructure(const Unify &unify,
     const Inst *inst{map[var]};
     if (ops_.IsFree(inst)) {
       bool open{CanBeFresh(var) && !closed};
-      modes.canFail |= !open && !closed;
+      modes.canFail |= !open;
       inst = open ? insts_.Any() : insts_.Ground();
     } else {
       modes.canFail = true;

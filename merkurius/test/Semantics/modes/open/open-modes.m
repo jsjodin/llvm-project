@@ -1,7 +1,7 @@
 % Mode and determinism analysis of open terms (design document, "Open
 % terms"; docs/INPROGRESS.md, Open types), on the design document's
 % examples. X = f(...) with X `any` is a get_structure, det for a type of
-% one functor whose arguments are all free, and semidet otherwise; X = Y of
+% one functor whose arguments are all free and open, and semidet otherwise; X = Y of
 % two open values is a full unification, semidet. A free variable of an open
 % type becomes a fresh unbound variable when no goal can run, the hole
 % rather than the term around it, or when a construction takes it and it is
@@ -116,14 +116,15 @@ fill(bundle(closed(big(1, 2)), _)).
 % CHECK-NEXT:     final: HeadVar__1 bound(bundle(bound(closed(bound(big(bound(1), bound(2))))), any))
 % DET: pred open_modes.fill/1 mode 0: fill(oa) is det, inferred det
 
-    % A get_structure of closed/1 gives its ground argument, and cannot
-    % fail if its argument is free.
-:- pred unclose(closed(list(int))::ia, list(int)::out) is det.
+    % A get_structure of closed/1 gives its ground argument. It can fail
+    % even if that argument is free: a closed(T) inside an open term may be
+    % an unbound variable, which has no ground value to give.
+:- pred unclose(closed(list(int))::ia, list(int)::out) is semidet.
 unclose(closed(L), L).
-% CHECK-LABEL: pred open_modes.unclose/2 mode 0: unclose(ia, out) is det
+% CHECK-LABEL: pred open_modes.unclose/2 mode 0: unclose(ia, out) is semidet
 % CHECK:          getstructure HeadVar__1 = closed(L)
 % CHECK-NEXT:     final: HeadVar__1 bound(closed(ground)), L ground
-% DET: pred open_modes.unclose/2 mode 0: unclose(ia, out) is det, inferred det
+% DET: pred open_modes.unclose/2 mode 0: unclose(ia, out) is semidet, inferred semidet
 
     % A get_structure in each disjunct is no switch: X may be unbound, and
     % then each disjunct binds it.

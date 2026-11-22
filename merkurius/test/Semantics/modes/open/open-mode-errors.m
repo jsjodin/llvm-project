@@ -1,6 +1,7 @@
 % Mode and determinism errors of open terms (docs/INPROGRESS.md, Open
 % types): binding an existing variable may fail, and so may a get_structure
-% of a type with several functors; closed(T) holds a ground value; a
+% of a type with several functors, and of closed(T), which may be unbound;
+% closed(T) holds a ground value; a
 % condition that may bind an open nonlocal needs a purity promise; and
 % free does not match any, so a branch may not leave free what another
 % binds; and an open term is never unique.
@@ -41,3 +42,11 @@ merge(N, X) :- ( if N > 0 then X = to_open(1) else true ).
 :- pred mk(open(list(int))::uo) is det.
 mk([_]).
 % CHECK: [[@LINE-1]]:4: error: in the clause for mk(uo): mode error: argument 1, HeadVar__1, had the wrong inst: its final inst is bound('[|]'(any, bound([]))), but unique is expected
+
+    % closed(T) inside an open term may be unbound, so taking its argument
+    % may fail: C below is still a fresh variable when unclose runs.
+:- type bundle ---> bundle(closed(list(int)), int).
+:- pred unclose(closed(list(int))::ia, list(int)::out) is det.
+unclose(closed(L), L).
+% CHECK: [[@LINE-2]]:9: error: the determinism declaration of unclose(ia, out) is not satisfied: it is declared det, but inferred semidet
+% CHECK: [[@LINE-2]]:9: because: the unification of HeadVar__1 and closed/1 can fail
