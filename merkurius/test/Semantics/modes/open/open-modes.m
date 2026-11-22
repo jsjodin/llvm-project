@@ -195,3 +195,23 @@ closed_in(bundle(closed(L), _), L).
 % CHECK-NEXT:       getstructure HeadVar__1 = bundle(V_1, V_3)
 % CHECK-NEXT:       getstructure V_1 = closed(L)
 % CHECK-NEXT:       final:
+
+    % A term already bound, built here with holes: its head is any, so a
+    % ground argument is the same get_structure, which binds the hole, as
+    % 9 does here, or takes a ground value out of it, rather than a
+    % deconstruction that tests the hole's word. The functor is known, so
+    % only the argument can fail.
+:- pred bound_head(int::out) is det.
+bound_head(N) :-
+    promise_pure (
+        L = [A, A, _] : open(list(int)),
+        ( if L = [9 | _] then N = 1 else N = 2 )
+    ).
+% CHECK-LABEL: pred open_modes.bound_head/1 mode 0: bound_head(out) is det
+% CHECK:          construct L = '[|]'(A, V_{{[0-9]+}})
+% CHECK-NEXT:     if-then-else
+% CHECK-NEXT:       if
+% CHECK-NEXT:         construct V_[[NINE:[0-9]+]] = 9
+% CHECK-NEXT:         getstructure L = '[|]'(V_[[NINE]], V_{{[0-9]+}})
+% DET-LABEL: pred open_modes.bound_head/1 mode 0
+% DET:      getstructure L = list.[|]/2(V_{{[0-9]+}}, V_{{[0-9]+}}) [semidet]

@@ -1638,7 +1638,7 @@ private:
   // Open types (docs/INPROGRESS.md, Open types).
   bool CanBeFresh(VarId) const;
   bool MentionsOpen(const Type *) const;
-  Result GetStructure(const Unify &, const Goal &, const InstFunctor &,
+  Result GetStructure(const Unify &, const Goal &, const InstFunctor &, bool,
       bool closed, InstMap &, const Live &);
   std::optional<VarId> FreshVariable(const ConjunctionRun &);
   // By goal number, the variables made fresh before it runs.
@@ -3122,9 +3122,13 @@ bool ProcedureChecker::MentionsOpen(const Type *type) const {
 // taken out of the field only when no goal can run otherwise. So in
 // X = [1 | _] the 1 is constructed first, and unified with X's head, which
 // binds it if it is unbound, rather than taken out of the head and tested.
+//
+// X may also be bound already, with a part that is not ground where the
+// argument's type is, as A in `L = [A, A, _], L = [9 | _]`: the same, but
+// X is known to have the functor when `known` says so.
 ProcedureChecker::Result ProcedureChecker::GetStructure(const Unify &unify,
-    const Goal &goal, const InstFunctor &functor, bool closed, InstMap &map,
-    const Live &live) {
+    const Goal &goal, const InstFunctor &functor, bool known, bool closed,
+    InstMap &map, const Live &live) {
   GoalModes &modes{goals_[unify.number]};
   // The type whose constructors X may have: T for open(T).
   const Type *type{TypeOf(unify.left)};
@@ -3133,7 +3137,7 @@ ProcedureChecker::Result ProcedureChecker::GetStructure(const Unify &unify,
   }
   const std::vector<ConstructorTypes> *constructors{
       ops_.ConstructorsOf(type)};
-  modes.canFail = !constructors || constructors->size() != 1;
+  modes.canFail = !known && (!constructors || constructors->size() != 1);
   if (!groundOutputs_) {
     for (VarId var : unify.arguments) {
       if (ops_.IsFree(map[var]) && (closed || !CanBeFresh(var))) {
@@ -3294,7 +3298,7 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
       symbol->owner == types_.types().closed()};
   if (!ops_.IsFree(a) && a->kind == InstKind::Any && type &&
       (CanBeFresh(x) || closed)) {
-    return GetStructure(unify, goal, functor, closed, map, live);
+    return GetStructure(unify, goal, functor, false, closed, map, live);
   }
   if (ops_.IsFree(a) && closed && !unify.arguments.empty() &&
       !ops_.IsGround(arguments.front(), TypeOf(unify.arguments.front()))) {
@@ -3383,6 +3387,24 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
     modes.dead = !live[x];
     last_ = Start(unify.tokens);
     return Ok();
+  }
+  // X bound, with a part that is not ground where the argument's type is:
+  // the part may be an unbound variable, which a bound argument binds and
+  // which cannot give a free one a ground value. That is get_structure, not
+  // a test of the part's word.
+  if (type && CanBeFresh(x) && a->kind == InstKind::Bound) {
+    if (std::optional<std::vector<const Inst *>> parts{
+            ops_.Arguments(a, functor, type)}) {
+      for (std::size_t i{0}; i < parts->size(); ++i) {
+        VarId var{unify.arguments[i]};
+        if (!CanBeFresh(var) && !ops_.IsGround((*parts)[i], TypeOf(var))) {
+          bool known{a->functors.size() == 1 &&
+              a->functors.front().functor.name == functor.name &&
+              a->functors.front().functor.arity == functor.arity};
+          return GetStructure(unify, goal, functor, known, closed, map, live);
+        }
+      }
+    }
   }
   // A deconstruction, or a test if the arguments are bound too. X keeps
   // its uniqueness; a part that both X and its variable use after is
