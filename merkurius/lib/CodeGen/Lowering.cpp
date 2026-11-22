@@ -3137,7 +3137,9 @@ bool Lowerer::LowerOpenCall(merk::ForeignCallOp call) {
 
 // merk_open_deref: the chain from a word, followed while it is a variable's
 // reference, tag 7, to a bound one, until a value or an unbound variable,
-// whose cell refers to itself.
+// whose cell refers to itself. One step is inline, which is all of a chain
+// of a variable bound to a value; the runtime follows a longer one. With no
+// loop, the code has no loop check (AddLoopChecks).
 void Lowerer::LowerOpenDeref(merk::ForeignCallOp call, mlir::Value word) {
   mlir::Location loc{call.getLoc()};
   auto i64{rewriter_.getI64Type()};
@@ -3147,32 +3149,50 @@ void Lowerer::LowerOpenDeref(merk::ForeignCallOp call, mlir::Value word) {
   mlir::Value result{after->addArgument(heap, loc)};
   rewriter_.replaceAllUsesWith(call.getResult(0), result);
   rewriter_.eraseOp(call);
-  mlir::Block *head{rewriter_.createBlock(after, {heap}, {loc})};
   mlir::Block *follow{rewriter_.createBlock(after)};
+  mlir::Block *step{rewriter_.createBlock(after)};
+  mlir::Block *slow{rewriter_.createBlock(after)};
   rewriter_.setInsertionPointToEnd(before);
-  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{word}, head);
-  rewriter_.setInsertionPointToStart(head);
-  mlir::Value current{head->getArgument(0)};
   mlir::Value tag{mlir::LLVM::AndOp::create(rewriter_, loc,
-      mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, current),
+      mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, word),
       mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, kTags - 1))};
   mlir::Value variable{
       mlir::LLVM::ICmpOp::create(rewriter_, loc, mlir::LLVM::ICmpPredicate::eq,
           tag, mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, kTags - 1))};
   mlir::LLVM::CondBrOp::create(rewriter_, loc, variable, follow,
-      mlir::ValueRange{}, after, mlir::ValueRange{current},
+      mlir::ValueRange{}, after, mlir::ValueRange{word},
       std::make_pair(1u, 2000u));
   rewriter_.setInsertionPointToStart(follow);
   mlir::Value next{mlir::LLVM::LoadOp::create(rewriter_, loc, heap,
       mlir::LLVM::GEPOp::create(rewriter_, loc, heap, rewriter_.getI8Type(),
-          current,
+          word,
           llvm::ArrayRef<mlir::LLVM::GEPArg>{
               -static_cast<std::int32_t>(kTags - 1)}),
       8)};
   mlir::Value unbound{mlir::LLVM::ICmpOp::create(
-      rewriter_, loc, mlir::LLVM::ICmpPredicate::eq, next, current)};
+      rewriter_, loc, mlir::LLVM::ICmpPredicate::eq, next, word)};
   mlir::LLVM::CondBrOp::create(rewriter_, loc, unbound, after,
-      mlir::ValueRange{current}, head, mlir::ValueRange{next});
+      mlir::ValueRange{word}, step, mlir::ValueRange{});
+  rewriter_.setInsertionPointToStart(step);
+  mlir::Value nextTag{mlir::LLVM::AndOp::create(rewriter_, loc,
+      mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, next),
+      mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, kTags - 1))};
+  mlir::Value chained{mlir::LLVM::ICmpOp::create(rewriter_, loc,
+      mlir::LLVM::ICmpPredicate::eq, nextTag,
+      mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, kTags - 1))};
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, chained, slow,
+      mlir::ValueRange{}, after, mlir::ValueRange{next},
+      std::make_pair(1u, 2000u));
+  rewriter_.setInsertionPointToStart(slow);
+  mlir::Value followed{mlir::LLVM::CallOp::create(rewriter_, loc,
+      RuntimeFunc("merk_open_deref", i64, {i64}),
+      mlir::ValueRange{
+          mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, next)})
+                           .getResult()};
+  mlir::LLVM::BrOp::create(rewriter_, loc,
+      mlir::ValueRange{
+          mlir::LLVM::IntToPtrOp::create(rewriter_, loc, heap, followed)},
+      after);
 }
 
 // merk_open_bind: the variable's cell is overwritten, and the runtime is

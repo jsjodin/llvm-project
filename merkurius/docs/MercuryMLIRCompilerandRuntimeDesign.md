@@ -6493,6 +6493,7 @@ condition is live, and one heap chunk holds the run, so its page faults, about
 | Step 4(c), commit fd63a79895be | 0.78 | 0.65 | 65 |
 | Step 4(d) part 1, uncommitted on fd63a79895be | 0.28 | 0.15 | 15 |
 | Step 4(d) part 2, uncommitted on 6f258218e85f | 0.19 | 0.07 | 7 |
+| Step 4(d) part 3, uncommitted on da37055728d7 | 0.17 | 0.055 | 5.5 |
 
 The spread between runs was under 5%.
 
@@ -6508,9 +6509,33 @@ The spread between runs was under 5%.
   inline: 130 instructions an element are left, against 1057 at step 4(c).
   At 0.07 s the user time is near what one run can resolve; the elapsed time
   is mostly the chunk's page faults.
+- Part 3's deref is loop-free, without the stack-limit check that the loop's
+  back edge had: 110 instructions an element.
 - E5's C model took 11 ns an element for the same shape with every binding
   trailed, on another machine and for 10^6 elements; step 7 compares the two
   properly.
+
+### Unification of open terms
+
+Measured 2026-11-22, -O2, pinned to one core of the machine above, five runs
+each, median seconds (`benchmarks/open-unify`). Two lists of 100,000 ints are
+built through holes, one with a hole every 100th element, unified, and the
+first summed, 100 times. One heap chunk holds the run, as in `open-holes`.
+Instructions are callgrind's, for 10 rounds, per element of a round.
+
+| Compiler | Elapsed | User | Instructions an element | Of them, unification |
+| --- | --- | --- | --- | --- |
+| Step 4(d) part 2, commit da37055728d7 | 1.97 | 1.22 | 1867 | about 1600 |
+| Step 4(d) part 3, uncommitted on da37055728d7 | 0.38 | 0.13 | 275 | 82 |
+
+- **The walker spent most of its time remembering.** Against cyclic terms it
+  counts cells, and past 16,384 it puts every pair it meets in a table: 58% of
+  the instructions here.
+- **The type's unify procedure needs no table.** Brent's method finds a cycle
+  along last fields with one saved pair, and depth bounds the rest. It
+  dereferences and compares an element inline, and the tail is a tail call.
+- Building the two lists is now most of the time: 140 instructions an element
+  of a round, for two elements.
 
 ## Target applications
 

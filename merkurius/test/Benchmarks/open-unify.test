@@ -1,0 +1,6 @@
+The open-unify benchmark on a small input: two open lists, one with holes,
+unified and summed, with one heap chunk for the run, as run.sh gives it.
+
+RUN: merkc -O2 -fopen-types %S/../../benchmarks/open-unify/open-unify.m -o %t
+RUN: env MERK_HEAP_CHUNK_BYTES=16777216 %t 1000 10 | FileCheck %s
+CHECK: 1000 elements 10 rounds sum 5005000

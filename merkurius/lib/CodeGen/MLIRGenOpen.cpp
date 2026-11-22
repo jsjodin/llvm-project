@@ -9,10 +9,11 @@
 // Open terms (design document, Language extensions, "Open terms";
 // docs/INPROGRESS.md, Open types, step 4). A value of open(T) is a word of
 // T's open layout, which the runtime's generic walkers take with T's
-// type_info (runtime/open.h): full unification calls merk_open_unify, a
-// fresh variable is merk_open_new_var's cell, and a procedure that can bind
-// open variables marks the trail at each goal that catches failure
-// (MLIRGenControl.cpp). Constructions, deconstructions and get_structure
+// type_info (runtime/open.h): full unification of a ground T with known
+// constructors calls T's own unify procedure (OpenUnifyProc), and of any
+// other T merk_open_unify, a fresh variable is merk_open_new_var's cell,
+// and a goal that may bind an older variable marks the trail where it can
+// fail (MLIRGenControl.cpp). Constructions, deconstructions and get_structure
 // are inline, on cells of open.open(T), a type_def of T's constructors with
 // every field a word, which lowering lays out as T's open layout.
 //
@@ -27,6 +28,22 @@ namespace {
 // bits, past which a Shifted value is (runtime/open.h).
 constexpr std::int64_t kOpenVariableTag{7};
 constexpr std::int64_t kOpenTagBits{3};
+// Past this many levels of fields other than the last, a type's unify
+// procedure gives the rest of the term to the runtime's walker, which
+// remembers the cells it has been at (OpenUnifyProc).
+constexpr std::int64_t kOpenDepthBeforeWalker{1 << 14};
+
+bool HasTypeVariables(const semantics::Type *type) {
+  if (!type) {
+    return false;
+  }
+  if (type->kind == semantics::TypeKind::Variable ||
+      type->kind == semantics::TypeKind::Existential) {
+    return true;
+  }
+  return llvm::any_of(type->arguments, HasTypeVariables) ||
+      HasTypeVariables(type->result);
+}
 } // namespace
 
 bool MerkGenerator::IsOpenType(const semantics::Type *type) {
@@ -847,19 +864,304 @@ bool MerkGenerator::ReportOpenMessages(const semantics::Procedure &callee,
 
 void MerkGenerator::OpenEqual(mlir::Value x, mlir::Value y,
     const semantics::Type *semantic, mlir::Location loc) {
-  mlir::Value info{TypeInfoOfType(
-      IsClosedType(semantic) ? semantic : semantic->arguments.front(), loc,
-      equalAt_)};
+  auto word{merk::WordType::get(&context_)};
+  OpenUnifyWords(
+      Coerce(x, word, loc), Coerce(y, word, loc), semantic, nullptr, loc);
+}
+
+bool MerkGenerator::OpenUnifyWords(mlir::Value x, mlir::Value y,
+    const semantics::Type *type, const OpenWalk *walk, mlir::Location loc) {
+  auto word{merk::WordType::get(&context_)};
+  auto i64{builder_.getI64Type()};
+  type = OpenUnifiedAs(type);
+  std::optional<ScalarEncoding> scalar{OpenScalar(type)};
+  if (scalar && scalar->kind != ScalarEncoding::Kind::ClosedBox) {
+    const semantics::Type *open{types_.types().Open(type)};
+    mlir::Value a{OpenDeref(x, open, loc)};
+    mlir::Value b{OpenDeref(y, open, loc)};
+    mlir::Operation *outer{OpenUnifyUnlessBound(a, b, loc)};
+    if (scalar->kind == ScalarEncoding::Kind::Shifted) {
+      merk::FailOp::create(builder_, loc); // unequal words
+    } else {
+      // Boxes of equal values: a float's as == has it, a string's by its
+      // characters.
+      mlir::Type represented{Represent(type)->type};
+      llvm::SmallVector<mlir::Value, 2> values;
+      for (mlir::Value box : {a, b}) {
+        mlir::Value value{Coerce(
+            merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{word},
+                "merk_open_unbox", mlir::ValueRange{box}, /*can_fail=*/false)
+                .getResult(0),
+            represented, loc)};
+        if (!target_.options().IsDevice() && NoteRoot(value, type)) {
+          annotated_.insert(value);
+        }
+        values.push_back(value);
+      }
+      Equal(values[0], values[1], type, loc);
+      merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+    }
+    builder_.setInsertionPointAfter(outer);
+    return !failed_;
+  }
+  if (!scalar) {
+    if (merk::ProcOp proc{OpenUnifyProc(type)}) {
+      OpenWalk start;
+      if (!walk) {
+        mlir::Value zero{IntegerConstant(i64, 0, loc)};
+        start = {zero, zero, zero, IntegerConstant(i64, 1, loc), zero};
+        walk = &start;
+      }
+      merk::CallOp::create(builder_, loc, mlir::TypeRange{}, proc.getSymName(),
+          mlir::ValueRange{x, y, walk->savedX, walk->savedY, walk->steps,
+              walk->limit, walk->depth});
+      return true;
+    }
+  }
+  // A closed(U)'s box holds a ground U, which the walker compares; the
+  // occurs check, unify_oc's, is the walker's too.
+  mlir::Value info{TypeInfoOfType(type, loc, equalAt_)};
   if (!info) {
     failed_ = true;
-    return;
+    return false;
   }
-  auto word{merk::WordType::get(&context_)};
   auto call{merk::ForeignCallOp::create(builder_, loc,
       mlir::TypeRange{builder_.getI1Type()}, "merk_open_unify",
-      mlir::ValueRange{info, Coerce(x, word, loc), Coerce(y, word, loc)},
-      /*can_fail=*/true)};
+      mlir::ValueRange{info, x, y}, /*can_fail=*/true)};
   merk::GuardOp::create(builder_, loc, call.getResult(0));
+  return true;
+}
+
+// A type whose open word is another's, as the runtime's encoding
+// AsArgument has it: open(U)'s is U's, and a notag's, with one constructor
+// of one argument, is its argument's. A type's unify procedure is never
+// one of these, so a pair of words is not met again at once along a walk.
+const semantics::Type *MerkGenerator::OpenUnifiedAs(
+    const semantics::Type *type) {
+  for (;;) {
+    if (IsOpenType(type)) {
+      type = type->arguments.front();
+      continue;
+    }
+    if (IsClosedType(type) || HasTypeVariables(type)) {
+      return type;
+    }
+    const std::vector<semantics::ConstructorTypes> *constructors{
+        modes_.ops().ConstructorsOf(type)};
+    if (!constructors || constructors->size() != 1 ||
+        constructors->front().arguments.size() != 1) {
+      return type;
+    }
+    llvm::SmallVector<const semantics::Type *> arguments{
+        ArgumentsOf(type, constructors->front())};
+    if (HasTypeVariables(arguments.front())) {
+      return type; // existentially typed: the walker's
+    }
+    type = arguments.front();
+  }
+}
+
+// The procedure's arguments are the two words and the walk's state
+// (OpenWalk). A pair of cells met again in the walk along last fields is
+// one being unified already, whose other fields have been, as the walker's
+// remembered pairs are: Brent's cycle detection finds it, with the pair
+// saved at each power of two of steps. Other fields are unified one level
+// deeper, each with a walk of its own, and past kOpenDepthBeforeWalker
+// levels the walker takes the rest, so that a cycle through them ends too.
+// The saved pair is two integers, no roots: unification makes no cells, so
+// no collection happens in it.
+merk::ProcOp MerkGenerator::OpenUnifyProc(const semantics::Type *type) {
+  std::string name{"unify_open." + semantics::TypeToString(*type)};
+  if (auto it{unifyProcs_.find(name)}; it != unifyProcs_.end()) {
+    return it->second;
+  }
+  unifyProcs_[name] = nullptr;
+  if (target_.options().IsDevice() || HasTypeVariables(type)) {
+    return nullptr;
+  }
+  const semantics::Type *open{types_.types().Open(type)};
+  std::optional<merk::TermType> term{OpenTermType(open)};
+  const std::vector<semantics::ConstructorTypes> *constructors{
+      modes_.ops().ConstructorsOf(type)};
+  if (!term || !constructors || constructors->empty()) {
+    return nullptr;
+  }
+  llvm::SmallVector<llvm::SmallVector<const semantics::Type *>> arguments;
+  for (const semantics::ConstructorTypes &constructor : *constructors) {
+    arguments.push_back(ArgumentsOf(type, constructor));
+    if (llvm::any_of(arguments.back(), HasTypeVariables)) {
+      return nullptr; // an existentially typed constructor
+    }
+  }
+  mlir::Location loc{builder_.getUnknownLoc()};
+  auto word{merk::WordType::get(&context_)};
+  auto i64{builder_.getI64Type()};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToEnd(module_.getBody());
+  auto proc{merk::ProcOp::create(builder_, loc, name,
+      builder_.getFunctionType({word, word, i64, i64, i64, i64, i64}, {}),
+      merk::Determinism::Semidet)};
+  proc.setPrivate();
+  // Recorded first, for the calls of it on its terms' arguments.
+  unifyProcs_[name] = proc;
+  mlir::Block *entry{proc.addEntryBlock()};
+  builder_.setInsertionPointToStart(entry);
+  auto saved{std::move(typeInfos_)};
+  typeInfos_.clear();
+  OpenWalk walk{entry->getArgument(2), entry->getArgument(3),
+      entry->getArgument(4), entry->getArgument(5), entry->getArgument(6)};
+  mlir::Value a{OpenDeref(entry->getArgument(0), open, loc)};
+  mlir::Value b{OpenDeref(entry->getArgument(1), open, loc)};
+  mlir::Operation *outer{OpenUnifyUnlessBound(a, b, loc)};
+  if (OpenUnifyCells(a, b, type, *term, *constructors, arguments, walk, loc)) {
+    builder_.setInsertionPointAfter(outer);
+    merk::SucceedOp::create(builder_, loc, mlir::ValueRange{});
+  }
+  typeInfos_ = std::move(saved);
+  return proc;
+}
+
+bool MerkGenerator::OpenUnifyCells(mlir::Value a, mlir::Value b,
+    const semantics::Type *type, merk::TermType term,
+    llvm::ArrayRef<semantics::ConstructorTypes> constructors,
+    llvm::ArrayRef<llvm::SmallVector<const semantics::Type *>> arguments,
+    const OpenWalk &walk, mlir::Location loc) {
+  auto word{merk::WordType::get(&context_)};
+  auto i64{builder_.getI64Type()};
+  mlir::Value x{Coerce(a, i64, loc)};
+  mlir::Value y{Coerce(b, i64, loc)};
+  // Too deep: the walker unifies the rest.
+  auto deep{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
+  merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  builder_.setInsertionPointToStart(&deep.getCondition().emplaceBlock());
+  merk::GuardOp::create(builder_, loc,
+      CompareInts(mlir::arith::CmpIPredicate::sgt, walk.depth,
+          IntegerConstant(i64, kOpenDepthBeforeWalker, loc), loc));
+  merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  builder_.setInsertionPointToStart(&deep.getThenRegion().emplaceBlock());
+  mlir::Value info{TypeInfoOfType(type, loc, equalAt_)};
+  if (!info) {
+    failed_ = true;
+    return false;
+  }
+  merk::GuardOp::create(builder_, loc,
+      merk::ForeignCallOp::create(builder_, loc,
+          mlir::TypeRange{builder_.getI1Type()}, "merk_open_unify",
+          mlir::ValueRange{info, a, b}, /*can_fail=*/true)
+          .getResult(0));
+  merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  builder_.setInsertionPointToStart(&deep.getElseRegion().emplaceBlock());
+  // The saved pair met again: a cycle, unified already.
+  auto again{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
+  merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  builder_.setInsertionPointToStart(&again.getCondition().emplaceBlock());
+  merk::GuardOp::create(builder_, loc,
+      mlir::arith::AndIOp::create(builder_, loc,
+          CompareInts(mlir::arith::CmpIPredicate::eq, x, walk.savedX, loc),
+          CompareInts(mlir::arith::CmpIPredicate::eq, y, walk.savedY, loc)));
+  merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  builder_.setInsertionPointToStart(&again.getThenRegion().emplaceBlock());
+  merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  builder_.setInsertionPointToStart(&again.getElseRegion().emplaceBlock());
+  // This pair is saved, and the limit doubled, when the steps reach it.
+  mlir::Value steps{mlir::arith::AddIOp::create(
+      builder_, loc, walk.steps, IntegerConstant(i64, 1, loc))};
+  mlir::Value save{
+      CompareInts(mlir::arith::CmpIPredicate::eq, steps, walk.limit, loc)};
+  mlir::Value zero{IntegerConstant(i64, 0, loc)};
+  OpenWalk last{
+      mlir::arith::SelectOp::create(builder_, loc, save, x, walk.savedX),
+      mlir::arith::SelectOp::create(builder_, loc, save, y, walk.savedY),
+      mlir::arith::SelectOp::create(builder_, loc, save, zero, steps),
+      mlir::arith::SelectOp::create(builder_, loc, save,
+          mlir::arith::ShLIOp::create(
+              builder_, loc, walk.limit, IntegerConstant(i64, 1, loc)),
+          walk.limit),
+      walk.depth};
+  OpenWalk deeper{zero, zero, zero, IntegerConstant(i64, 1, loc),
+      mlir::arith::AddIOp::create(
+          builder_, loc, walk.depth, IntegerConstant(i64, 1, loc))};
+  llvm::SmallVector<mlir::Attribute> cases;
+  for (const semantics::ConstructorTypes &constructor : constructors) {
+    cases.push_back(builder_.getArrayAttr({merk::FunctorAttr::get(
+        &context_, constructor.functor.name, constructor.functor.arity)}));
+  }
+  mlir::Value p{Coerce(a, term, loc)};
+  mlir::Value q{Coerce(b, term, loc)};
+  auto op{merk::SwitchOp::create(builder_, loc, mlir::TypeRange{}, p,
+      builder_.getArrayAttr(cases), /*canFail=*/false)};
+  merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  for (auto [region, attribute, fieldTypes] :
+      llvm::zip(op.getCaseRegions(), cases, arguments)) {
+    builder_.setInsertionPointToStart(&region.emplaceBlock());
+    auto functor{mlir::cast<merk::FunctorAttr>(
+        mlir::cast<mlir::ArrayAttr>(attribute)[0])};
+    if (constructors.size() > 1) {
+      merk::GuardOp::create(
+          builder_, loc, merk::HasFunctorOp::create(builder_, loc, q, functor));
+    }
+    if (!fieldTypes.empty()) {
+      llvm::SmallVector<mlir::Type> fields(fieldTypes.size(), word);
+      auto ps{merk::DeconstructOp::create(builder_, loc, fields, p, functor)};
+      auto qs{merk::DeconstructOp::create(builder_, loc, fields, q, functor)};
+      for (auto [i, fieldType] : llvm::enumerate(fieldTypes)) {
+        mlir::Value f{ps.getFields()[i]};
+        mlir::Value g{qs.getFields()[i]};
+        const semantics::Type *fieldOpen{
+            IsOpenType(fieldType) ? fieldType : types_.types().Open(fieldType)};
+        NotedOpenWord(f, fieldOpen);
+        NotedOpenWord(g, fieldOpen);
+        bool isLast{i + 1 == fieldTypes.size()};
+        if (!OpenUnifyWords(f, g, fieldType, isLast ? &last : &deeper, loc)) {
+          return false;
+        }
+      }
+    }
+    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  }
+  return true;
+}
+
+mlir::Operation *MerkGenerator::OpenUnifyUnlessBound(
+    mlir::Value a, mlir::Value b, mlir::Location loc) {
+  auto i64{builder_.getI64Type()};
+  // a == b, a unbound and b unbound, in turn, each in the last's else.
+  std::array<mlir::Value, 3> tests{
+      CompareInts(mlir::arith::CmpIPredicate::eq, Coerce(a, i64, loc),
+          Coerce(b, i64, loc), loc),
+      IsOpenVariable(a, loc), IsOpenVariable(b, loc)};
+  mlir::Operation *outer{nullptr};
+  for (unsigned i{0}; i < tests.size(); ++i) {
+    auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
+    if (!outer) {
+      outer = ite;
+    } else {
+      merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+    }
+    builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
+    merk::GuardOp::create(builder_, loc, tests[i]);
+    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+    builder_.setInsertionPointToStart(&ite.getThenRegion().emplaceBlock());
+    if (i != 0) {
+      mlir::Value variable{i == 1 ? a : b};
+      mlir::Value value{i == 1 ? b : a};
+      merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+          "merk_open_bind", mlir::ValueRange{variable, value},
+          /*can_fail=*/false);
+    }
+    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+    builder_.setInsertionPointToStart(&ite.getElseRegion().emplaceBlock());
+  }
+  return outer;
+}
+
+mlir::Value MerkGenerator::IsOpenVariable(
+    mlir::Value word, mlir::Location loc) {
+  auto i64{builder_.getI64Type()};
+  mlir::Value tag{mlir::arith::AndIOp::create(builder_, loc,
+      Coerce(word, i64, loc), IntegerConstant(i64, kOpenVariableTag, loc))};
+  return CompareInts(mlir::arith::CmpIPredicate::eq, tag,
+      IntegerConstant(i64, kOpenVariableTag, loc), loc);
 }
 
 // An open(T)'s word is described by open(T)'s type_info, as a type

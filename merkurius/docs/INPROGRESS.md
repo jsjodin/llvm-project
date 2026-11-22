@@ -8183,8 +8183,50 @@ the `type_info` back to the open layout (below).
          when there is no trail or no room in its marks.
        - Test: `CodeGen/open-trail-marks.m`, where marks go and where they
          do not, and 1000 marks live at once.
-     - **Part 3: a unify procedure per open type,** beside the generic
-       walker.
+     - **Part 3, done 2026-11-22: a unify procedure per open type,** beside
+       the generic walker. `benchmarks/open-unify`: 1.22 s of user time to
+       0.13 s, and the unification itself from about 1600 instructions an
+       element to 82.
+       - `X = Y` on a ground open type calls `unify_open.<type>(x, y,
+         walk...)`, semidet (`OpenUnifyProc`, `MLIRGenOpen.cpp`). It
+         dereferences both words, binds an unbound side to the other, and
+         switches on the functor. A scalar field is unified inline: a
+         Shifted one by its word, a Boxed one by its boxes' values. A field
+         of a type with known constructors calls that type's procedure, the
+         last by a tail call. Any other field, closed(U), and every type with
+         type variables in it go to the walker, as before.
+       - **Cycles:** unification without the occurs check makes cyclic
+         terms, which must still unify in finite time. Along last fields,
+         Brent's method finds a pair of cells met again: the procedure
+         passes on the pair saved at each power of two of steps, and a pair
+         met again is one being unified already, so it succeeds, as the
+         walker's remembered pairs do. Other fields go one level deeper with
+         a walk of their own, and past 16384 levels the walker takes the
+         rest. An endless run has either endless depth or an endless loop at
+         one level, so it ends either way.
+       - **Notags are their argument,** as the runtime's encoding
+         AsArgument is (`OpenUnifiedAs`): open(U), and a type of one
+         constructor of one argument. A notag's procedure would pass its
+         argument's procedure the pair it just saved, which Brent's check
+         takes for a cycle; `wrap` in the test caught it.
+       - **Rejected: counting cells and handing the rest to the walker
+         after 16384,** as the walker itself does. Past that count the
+         walker remembers every pair in its table, which was 58% of the
+         instructions on a list of 300,000 elements.
+       - Deref is loop-free (`Lowering.cpp`): one step inline, which is all
+         of a variable bound to a value, and the runtime for a longer chain.
+         The loop's back edge had a stack-limit check at every step, four an
+         element in the unification. `open-holes` went from 134 to 110
+         instructions an element.
+       - **Found, not fixed: `from_open` is pure, but its answer changes
+         when a hole is bound,** as `var/1`'s does, which is impure. Mode
+         analysis makes a fresh variable only when no goal can run, as mmc
+         does for solver types, so in `holes(1, N, A), full(1, N, B),
+         same(A, B), from_open(A, G)` it runs `from_open` before `full`
+         and `same`, and it fails. Waits for a decision.
+       - Test: `CodeGen/open-unify.m`, every field encoding, holes, undo,
+         cyclic lists and a cycle through another field, polymorphic code,
+         and lists of 200,000 at -O0.
 5. **The collector:** variable cells, trail entries as roots, chains
    shortened as it copies, and `bind`'s barrier, the remembered set's.
 6. **Messages and printing:** `copy_term` semantics for an open message,

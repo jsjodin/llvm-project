@@ -728,10 +728,44 @@ private:
   void OpenUnify(const Body &, const ProcedureBody &);
   // Whether the unification is one of an open term's.
   bool IsOpenUnify(const Body &, const ProcedureBody &);
-  // The unification and comparison of open(T)'s values by the runtime's
-  // generic walkers, given T.
+  // The unification of two values of open(T) or closed(T), the type.
   void OpenEqual(
       mlir::Value x, mlir::Value y, const semantics::Type *, mlir::Location);
+  // A type's unify procedure's walk: the pair of cells saved, as integers,
+  // the steps since and the steps at which the next is saved, along last
+  // fields, and the levels of other fields (OpenUnifyProc).
+  struct OpenWalk {
+    mlir::Value savedX, savedY, steps, limit, depth;
+  };
+  // Unifies two words of the type's open layout, the type being open(U),
+  // closed(U) or U itself: inline for a scalar, by the type's own procedure
+  // (OpenUnifyProc) for one of known constructors, continuing `walk` or
+  // starting one if it is null, and by the runtime's generic walker for any
+  // other. False after an error.
+  bool OpenUnifyWords(mlir::Value x, mlir::Value y, const semantics::Type *,
+      const OpenWalk *walk, mlir::Location);
+  // The type whose open layout's words a type's are, past open(_) and
+  // notags (OpenUnifyProc).
+  const semantics::Type *OpenUnifiedAs(const semantics::Type *);
+  // A ground type's procedure unifying two words of its open layout, made
+  // once: unify_open.<type>(x, y, walk...), semidet. Null if the type has no
+  // known constructors, or type variables in it or in its constructors'
+  // arguments, which the runtime's walker takes.
+  merk::ProcOp OpenUnifyProc(const semantics::Type *);
+  // In a type's unify procedure, two dereferenced words that are cells of
+  // the type, neither the other.
+  bool OpenUnifyCells(mlir::Value a, mlir::Value b, const semantics::Type *,
+      merk::TermType, llvm::ArrayRef<semantics::ConstructorTypes>,
+      llvm::ArrayRef<llvm::SmallVector<const semantics::Type *>> arguments,
+      const OpenWalk &, mlir::Location);
+  // Starts the unification of two dereferenced open words: done if they
+  // are the same, and either that is an unbound variable bound to the
+  // other. Leaves the builder where neither is, a block to end, and gives
+  // the outermost op, after which the code that follows goes.
+  mlir::Operation *OpenUnifyUnlessBound(
+      mlir::Value a, mlir::Value b, mlir::Location);
+  // Whether a dereferenced open word is an unbound variable.
+  mlir::Value IsOpenVariable(mlir::Value word, mlir::Location);
   mlir::Value OpenCompare(mlir::Location);
   // An open(T) word's note as a garbage collector root (NoteRoot).
   // Notes an open term's word of T's open layout, T being closed(U) for a
