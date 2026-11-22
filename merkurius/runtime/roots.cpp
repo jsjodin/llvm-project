@@ -653,8 +653,9 @@ private:
   FromChunk *FindFrom(Word address);
   bool Forwarded(FromChunk *, const Word *cell, Word *&to) const;
   void Forward(FromChunk *, Word *cell, Word *to);
-  Word *ToSpace(std::size_t words);
-  Word *CopyOut(
+  __attribute__((always_inline)) Word *ToSpace(std::size_t words);
+  __attribute__((noinline)) void NewToChunk(std::size_t bytes);
+  __attribute__((always_inline)) Word *CopyOut(
       FromChunk *chunk, const Word *from, std::size_t words, std::size_t bytes);
   void *Keep(std::size_t bytes);
   const Environment *KeepEnvironment(const Environment &);
@@ -669,6 +670,7 @@ private:
   bool Trailed(const FromChunk *chunk, const Word *cell) const;
   Word *CopyBox(Word *slot);
   void ForwardCell(Word *slot, const Type &type);
+  bool LoopsOnLast(const Functor *functor, const Type &type);
   void ForwardClosure(Word *slot);
   void ForwardString(Word *slot);
   void ForwardArray(Word *slot, const Type *type);
@@ -689,6 +691,8 @@ private:
   char *keepNext_{nullptr};
   char *keepLimit_{nullptr};
   const Environment *lastEnvironment_{nullptr};
+  // The chunk FindFrom found last, which the next cell is most often in.
+  FromChunk *lastFrom_{nullptr};
 };
 
 int Collector::CompareChunks(const void *a, const void *b) {
@@ -751,6 +755,9 @@ bool Collector::Trailed(const FromChunk *chunk, const Word *cell) const {
 
 Collector::FromChunk *Collector::FindFrom(Word address) {
   const char *at{reinterpret_cast<const char *>(address)};
+  if (lastFrom_ && at >= lastFrom_->begin && at < lastFrom_->end) {
+    return lastFrom_;
+  }
   std::size_t low{0}, high{chunkCount_};
   while (low < high) {
     std::size_t middle{low + (high - low) / 2};
@@ -759,7 +766,8 @@ Collector::FromChunk *Collector::FindFrom(Word address) {
     } else if (at >= chunks_[middle].end) {
       low = middle + 1;
     } else {
-      return &chunks_[middle];
+      lastFrom_ = &chunks_[middle];
+      return lastFrom_;
     }
   }
   return nullptr;
@@ -792,27 +800,51 @@ Word *Collector::CopyOut(
     return const_cast<Word *>(from);
   }
   Word *to{ToSpace(words)};
-  std::memcpy(to, from, bytes);
+  // A cell of one or two words, as a list's is: a call of memcpy, or a
+  // loop the compiler vectorizes, costs more than the words.
+  if (bytes == 2 * sizeof(Word)) {
+    to[0] = from[0];
+    to[1] = from[1];
+  } else if (bytes == sizeof(Word)) {
+    to[0] = from[0];
+  } else {
+    std::memcpy(to, from, bytes);
+  }
   return to;
 }
 
 Word *Collector::ToSpace(std::size_t words) {
   std::size_t bytes{words * sizeof(Word)};
   liveBytes_ += bytes;
-  if (static_cast<std::size_t>(toLimit_ - toNext_) < bytes) {
-    std::size_t size{bytes > toChunkBytes_ ? bytes : toChunkBytes_};
-    if (toChunkBytes_ < kMostToChunkBytes) {
-      toChunkBytes_ *= 2;
-    }
-    auto *chunk{static_cast<ChunkLink *>(Malloc(sizeof(ChunkLink) + size))};
-    *chunk = {toChunks_, size, nullptr, false};
-    toChunks_ = chunk;
-    toNext_ = reinterpret_cast<char *>(chunk + 1);
-    toLimit_ = toNext_ + size;
+  if (__builtin_expect(
+          static_cast<std::size_t>(toLimit_ - toNext_) < bytes, 0)) {
+    NewToChunk(bytes);
   }
   auto *cell{reinterpret_cast<Word *>(toNext_)};
   toNext_ += bytes;
   return cell;
+}
+
+// A to-space chunk with room for `bytes`.
+void Collector::NewToChunk(std::size_t bytes) {
+  std::size_t size{bytes > toChunkBytes_ ? bytes : toChunkBytes_};
+  if (toChunkBytes_ < kMostToChunkBytes) {
+    toChunkBytes_ *= 2;
+  }
+  // A spare chunk is as good, and bigger than asked for only when the heap's
+  // chunks are, as MERK_HEAP_CHUNK_BYTES may make them.
+  ChunkLink *chunk{nullptr};
+  if (process_->spareChunks && process_->spareChunks->bytes >= size) {
+    size = process_->spareChunks->bytes;
+    chunk = TakeSpareChunk(process_, size);
+  }
+  if (!chunk) {
+    chunk = static_cast<ChunkLink *>(Malloc(sizeof(ChunkLink) + size));
+  }
+  *chunk = {toChunks_, size, nullptr, false};
+  toChunks_ = chunk;
+  toNext_ = reinterpret_cast<char *>(chunk + 1);
+  toLimit_ = toNext_ + size;
 }
 
 // Memory for the rest of the collection.
@@ -1051,68 +1083,119 @@ void Collector::ForwardClosure(Word *slot) {
   }
 }
 
+// Whether a type's words hold no pointer the collector follows, as
+// ForwardValue's default case has them.
+bool HoldsNoPointer(const TypeCtor *ctor) {
+  switch (ctor->kind) {
+  case String:
+  case Array:
+  case Closure:
+  case NoTag:
+  case Tuple:
+  case Cells:
+  case Void:
+  case Open:
+    return false;
+  default:
+    return true;
+  }
+}
+
+// Whether a cell of the functor is done once its last field is: whether
+// that field has the cell's own type, as a list's tail has, and the others
+// hold no pointers, as a list(int)'s head. ForwardCell then goes on with
+// the last field in a loop, which costs a long list no pending work.
+bool Collector::LoopsOnLast(const Functor *functor, const Type &type) {
+  unsigned arity{functor->arity};
+  if (arity == 0 || functor->hidden != 0 ||
+      !IsSameType(functor->fields[arity - 1], type)) {
+    return false;
+  }
+  for (unsigned i{0}; i + 1 < arity; ++i) {
+    if (!HoldsNoPointer(Resolve(functor->fields[i], &type.environment).ctor)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void Collector::ForwardCell(Word *slot, const Type &type) {
   const TypeCtor *ctor{type.ctor};
-  Word value{*slot};
-  const Functor *functor{nullptr};
-  unsigned tag{0};
   if (ctor->kind == NoTag ||
       (ctor->kind == Tuple && ctor->functors[0].arity == 1)) {
     // The value is its only field.
     Trace(slot, ctor->functors[0].fields[0], KeepEnvironment(type.environment));
     return;
   }
-  if (ctor->kind == Tuple) {
-    functor = &ctor->functors[0];
-    tag = functor->tag;
-  } else {
-    tag = static_cast<unsigned>(value & kTagMask);
-    if (ctor->byTag[tag] == kConstantTag) {
-      if (FindFrom(value & ~kTagMask)) {
-        Bad("a constant that points into the heap", value);
+  // The functor LoopsOnLast was last asked about, and its answer.
+  const Functor *asked{nullptr};
+  bool loops{false};
+  for (;;) {
+    Word value{*slot};
+    const Functor *functor{nullptr};
+    unsigned tag{0};
+    if (ctor->kind == Tuple) {
+      functor = &ctor->functors[0];
+      tag = functor->tag;
+    } else {
+      tag = static_cast<unsigned>(value & kTagMask);
+      if (ctor->byTag[tag] == kConstantTag) {
+        if (FindFrom(value & ~kTagMask)) {
+          Bad("a constant that points into the heap", value);
+        }
+        return;
       }
+    }
+    FromChunk *chunk{FindFrom(value - tag)};
+    if (!chunk) {
+      return; // Null, in a hole not yet filled, or a static cell.
+    }
+    auto *cell{reinterpret_cast<Word *>(value - tag)};
+    Word *to;
+    if (Forwarded(chunk, cell, to)) {
+      *slot = reinterpret_cast<Word>(to) + tag;
       return;
     }
-  }
-  FromChunk *chunk{FindFrom(value - tag)};
-  if (!chunk) {
-    return; // Null, in a hole not yet filled, or a static cell.
-  }
-  auto *cell{reinterpret_cast<Word *>(value - tag)};
-  Word *to;
-  if (Forwarded(chunk, cell, to)) {
-    *slot = reinterpret_cast<Word>(to) + tag;
-    return;
-  }
-  unsigned before;
-  if (ctor->kind == Tuple) {
-    before = 0;
-  } else {
-    std::uint16_t index{ctor->byTag[tag]};
-    if (index == kSharedTag) {
-      functor = &ctor->functors[ctor->shared[cell[0]]];
-      before = 1 + functor->hidden;
+    unsigned before;
+    if (ctor->kind == Tuple) {
+      before = 0;
     } else {
-      functor = &ctor->functors[index];
-      before = functor->hidden;
+      std::uint16_t index{ctor->byTag[tag]};
+      if (index == kSharedTag) {
+        functor = &ctor->functors[ctor->shared[cell[0]]];
+        before = 1 + functor->hidden;
+      } else {
+        functor = &ctor->functors[index];
+        before = functor->hidden;
+      }
     }
-  }
-  unsigned arity{functor->arity};
-  to = CopyOut(chunk, cell, before + arity, sizeof(Word) * (before + arity));
-  Forward(chunk, cell, to);
-  *slot = reinterpret_cast<Word>(to) + tag;
-  Word *fields{to + before};
-  unsigned hidden{functor->hidden};
-  Word *hiddenTo{fields - hidden};
-  for (unsigned i{0}; i < hidden; ++i) {
-    hiddenTo[i] = i < functor->hiddenTypeInfos
-        ? ForwardTypeInfo(hiddenTo[i])
-        : ForwardDictionary(hiddenTo[i]);
-  }
-  if (arity != 0) {
+    unsigned arity{functor->arity};
+    to = CopyOut(chunk, cell, before + arity, sizeof(Word) * (before + arity));
+    Forward(chunk, cell, to);
+    *slot = reinterpret_cast<Word>(to) + tag;
+    if (arity == 0) {
+      return;
+    }
+    Word *fields{to + before};
+    if (functor != asked) {
+      asked = functor;
+      loops = ctor->kind != Tuple && LoopsOnLast(functor, type);
+    }
+    if (loops) {
+      slot = &fields[arity - 1];
+      continue;
+    }
+    unsigned hidden{functor->hidden};
+    Word *hiddenTo{fields - hidden};
+    for (unsigned i{0}; i < hidden; ++i) {
+      hiddenTo[i] = i < functor->hiddenTypeInfos
+          ? ForwardTypeInfo(hiddenTo[i])
+          : ForwardDictionary(hiddenTo[i]);
+    }
     Environment environment{type.environment.arguments,
         type.environment.parent, hidden != 0 ? hiddenTo : nullptr};
     Push({fields, functor->fields, 0, KeepEnvironment(environment), arity});
+    return;
   }
 }
 
@@ -1382,15 +1465,30 @@ bool Collector::KeepLarge(ChunkLink *chunk) {
 void Collector::Finish() {
   ChunkLink *kept{toChunks_};
   bool poison{CollectsEveryAllocation()};
+  // Enough allocation to pay for the next collection's work, as well as for
+  // what the heap has: it copies what is live and walks the whole stack.
+  std::size_t due{2 * liveBytes_ > kFirstCollectBytes ? 2 * liveBytes_
+                                                      : kFirstCollectBytes};
+  std::size_t collectAt{
+      kStackFactor * stackBytes_ > due ? kStackFactor * stackBytes_ : due};
+  std::size_t spareSize{HeapChunkBytes()};
   for (ChunkLink *chunk{process_->chunks}; chunk;) {
     ChunkLink *next{chunk->next};
     if (chunk->pinned || KeepLarge(chunk)) {
       chunk->next = kept;
       kept = chunk;
+    } else if (poison) {
+      std::memset(chunk + 1, 0xdb, chunk->bytes);
+      std::free(chunk);
+    } else if (!chunk->large && chunk->bytes == spareSize &&
+        process_->spareBytes + spareSize <= collectAt + liveBytes_) {
+      // As much as the allocations before the next collection take, and
+      // its to-space, for what is live now.
+      chunk->next = process_->spareChunks;
+      chunk->sibling = nullptr;
+      process_->spareChunks = chunk;
+      process_->spareBytes += spareSize;
     } else {
-      if (poison) {
-        std::memset(chunk + 1, 0xdb, chunk->bytes);
-      }
       std::free(chunk);
     }
     chunk = next;
@@ -1409,12 +1507,7 @@ void Collector::Finish() {
   }
   merk_heap = poison ? MerkHeap{nullptr, nullptr} : MerkHeap{toNext_, toLimit_};
   process_->allocatedBytes = 0;
-  // Enough allocation to pay for the next collection's work, as well as for
-  // what the heap has: it copies what is live and walks the whole stack.
-  std::size_t due{2 * liveBytes_ > kFirstCollectBytes ? 2 * liveBytes_
-                                                      : kFirstCollectBytes};
-  process_->collectAtBytes =
-      kStackFactor * stackBytes_ > due ? kStackFactor * stackBytes_ : due;
+  process_->collectAtBytes = collectAt;
 }
 
 std::atomic<int> rootsState{-1};

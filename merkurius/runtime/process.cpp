@@ -475,6 +475,9 @@ Process *TakeLocal() {
 [[noreturn]] void Finish(Process *self) {
   FreeChunks(self->chunks);
   self->chunks = nullptr;
+  FreeChunks(self->spareChunks);
+  self->spareChunks = nullptr;
+  self->spareBytes = 0;
   pthread_mutex_lock(&schedulerLock);
   Process *next{TakeLocal()};
   RunProcess(next);

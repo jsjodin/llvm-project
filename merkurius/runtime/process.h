@@ -67,6 +67,11 @@ struct Process {
   // The chunks of its heap and of the messages it has read, which go when it
   // ends. Only the running process changes them, once it is running.
   ChunkLink *chunks{nullptr};
+  // Chunks of the heap's usual size that its last collections freed, and
+  // their bytes: its next allocations and to-spaces take them, so that their
+  // pages are not given back to the system and faulted in again.
+  ChunkLink *spareChunks{nullptr};
+  std::size_t spareBytes{0};
   // Bytes added to `chunks` since its last collection, and how many start the
   // next, or 0 for the first size.
   std::size_t allocatedBytes{0};

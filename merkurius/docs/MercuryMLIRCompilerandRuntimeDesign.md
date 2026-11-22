@@ -6481,6 +6481,34 @@ The deep stack now runs faster than with no collection (4.58), for 55 MB more
 at its peak, and the others do not change. The factor of 4 is a round number, not
 tuned. Frames whose size the stack map does not give are not counted.
 
+**Cheaper copying** (2026-11-22, uncommitted on commit a7f4e9f8b568, same
+method; docs/INPROGRESS.md, "Copying made cheaper"). A cell whose other
+fields hold no pointers is copied along its last field in a loop, a cell
+of two words is copied inline, the chunk lookup tries the last chunk first,
+and freed chunks are reused instead of going back to the system. The first
+three programs are `benchmarks/gc`, written again from the descriptions
+above, since those programs were not kept, so their times are not
+comparable with the tables above.
+
+| Program | Before | Peak | After | Peak |
+| --- | --- | --- | --- | --- |
+| nrev, 3001 × 500 | 3.76 | 7 MB | 2.94 | 7 MB |
+| Garbage under 300,000 frames | 1.98 | 64 MB | 1.94 | 64 MB |
+| Garbage with a live list of 128 MB | 15.93 | 512 MB | 4.10 | 512 MB |
+| `open-holes`, ground (`ground-holes.m`), 10^6 × 200 | 2.78 | 52 MB | 0.79 | 65 MB |
+| `open-holes`, through holes, 10^6 × 200 | 1.96 | 95 MB | 1.37 | 97 MB |
+| `open-unify`, 10^5 × 100 | 0.36 | 27 MB | 0.28 | 24 MB |
+
+- **A live list is copied four times faster.** About 96 instructions a cell
+  remain, against 510, in a loop with no calls.
+- **Page faults were most of what was left.** glibc mapped each 1 MB chunk
+  on its own, or gave the top of its heap back when a collection freed the
+  chunks there, so the next chunks were faulted in again: 400,000 faults
+  and 0.6 s of system time in `ground-holes`, then 16,000 and 0.02 s once
+  `main` set malloc's thresholds. Spare chunks then save the open program
+  12% more, for 12 MB more peak in the ground one.
+- The deep stack does not change: its collections walk frames, not cells.
+
 ### Open terms built through holes
 
 Measured 2026-11-22, -O2, pinned to one core of the machine above, five runs
@@ -6535,6 +6563,8 @@ the run one heap chunk of 4 GB, whose page faults are system time.
 | Model, through holes, trailed | 0.847 | | | 4.2 |
 | Merkurius, ground, front to back (`ground-holes.m`) | 2.78 | 2.71 | 0.44 | 13.6, 2.2 without collection |
 | Merkurius, through holes, trailed (`open-holes.m`) | 1.98 | 1.77 | 1.16 | 8.9, 5.8 without collection |
+| The same, ground, after cheaper copying (The collector) | 0.79 | 0.76 | | 3.8 |
+| The same, through holes, after cheaper copying | 1.37 | 1.34 | | 6.7 |
 
 - **The code is where E5 put it.** Without collections, the open program
   takes 1.37 times the trailed model and the ground program 1.40 times the
@@ -6549,6 +6579,10 @@ the run one heap chunk of 4 GB, whose page faults are system time.
   search of the chunks, a `memcpy` call, a mark, and a push and a pop of
   its fields with a kept environment, and each field is resolved against
   its type again. That is the ground collector's cost, not open types'.
+- **After cheaper copying** (The collector, the last two rows), with
+  collections the ground program takes 2.4 times the model's front-to-back
+  build, and the open one 1.6 times the trailed model. The collector's
+  share is 0.32 and 0.18 seconds.
 
 ### Unification of open terms
 

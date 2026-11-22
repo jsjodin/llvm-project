@@ -38,6 +38,14 @@ void *merk_alloc_slow(std::int64_t bytes);
 }
 
 namespace merkurius::runtime {
+struct ChunkLink;
+struct Process;
+
+// The size of the heap's chunks, as MERK_HEAP_CHUNK_BYTES may set it.
+std::size_t HeapChunkBytes();
+
+// A spare chunk of `bytes` of the process's (Process::spareChunks), or null.
+ChunkLink *TakeSpareChunk(Process *process, std::size_t bytes);
 // `bytes` on the heap, a multiple of the word, as mrt.alloc allocates them.
 inline void *Allocate(std::size_t bytes) {
   char *next{merk_heap.next};

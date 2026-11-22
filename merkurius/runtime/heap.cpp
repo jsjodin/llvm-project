@@ -69,8 +69,15 @@ std::atomic<std::size_t> chunkBytes{0};
 char *Chunk(std::size_t bytes, bool large = false) {
   // malloc aligns to at least a word, which the primary tags need. A thread
   // that runs no process keeps its chunks.
-  auto *chunk{static_cast<merkurius::runtime::ChunkLink *>(
-      merkurius::runtime::Malloc(sizeof(merkurius::runtime::ChunkLink) + bytes))};
+  merkurius::runtime::ChunkLink *chunk{large
+          ? nullptr
+          : merkurius::runtime::TakeSpareChunk(
+                merkurius::runtime::CurrentProcess(), bytes)};
+  if (!chunk) {
+    chunk =
+        static_cast<merkurius::runtime::ChunkLink *>(merkurius::runtime::Malloc(
+            sizeof(merkurius::runtime::ChunkLink) + bytes));
+  }
   chunk->next = nullptr;
   chunk->bytes = bytes;
   chunk->sibling = nullptr;
@@ -85,6 +92,28 @@ char *Chunk(std::size_t bytes, bool large = false) {
   return reinterpret_cast<char *>(chunk + 1);
 }
 } // namespace
+
+namespace merkurius::runtime {
+std::size_t HeapChunkBytes() {
+  std::size_t chunkSize{chunkBytes.load(std::memory_order_relaxed)};
+  if (chunkSize == 0) {
+    chunkSize = ReadChunkBytes();
+    chunkBytes.store(chunkSize, std::memory_order_relaxed);
+  }
+  return chunkSize;
+}
+
+ChunkLink *TakeSpareChunk(Process *process, std::size_t bytes) {
+  if (!process || !process->spareChunks ||
+      process->spareChunks->bytes != bytes) {
+    return nullptr;
+  }
+  ChunkLink *chunk{process->spareChunks};
+  process->spareChunks = chunk->next;
+  process->spareBytes -= bytes;
+  return chunk;
+}
+} // namespace merkurius::runtime
 
 // A safepoint before the runtime allocates an array, as the runtime's own
 // allocations only grow the heap. The walk starts at this frame, which must
@@ -113,11 +142,7 @@ extern "C" void *merk_alloc_slow(std::int64_t bytes) {
       return cell;
     }
   }
-  std::size_t chunkSize{chunkBytes.load(std::memory_order_relaxed)};
-  if (chunkSize == 0) {
-    chunkSize = ReadChunkBytes();
-    chunkBytes.store(chunkSize, std::memory_order_relaxed);
-  }
+  std::size_t chunkSize{merkurius::runtime::HeapChunkBytes()};
   std::size_t large{chunkSize / 2 < kLargeBytes ? chunkSize / 2 : kLargeBytes};
   if (size > large) {
     return Chunk(size, true);

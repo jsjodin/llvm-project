@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <malloc.h>
 
 extern "C" void merk_main(void);
 extern "C" void merk_save_environment(void);
@@ -54,6 +55,14 @@ static void EndWithMain(void) {
 }
 
 int main(int argc, char **argv) {
+  // The heap's chunks come from malloc, and each collection frees a
+  // from-space and takes a to-space. glibc would map each chunk of a
+  // megabyte on its own, or give the top of its heap back to the system
+  // when the chunks there are freed: either way the next chunks' pages are
+  // faulted in again, which took more time than the collections' copying.
+  // Chunks come from its heap, which keeps what is freed at its top.
+  mallopt(M_MMAP_THRESHOLD, 32 << 20);
+  mallopt(M_TRIM_THRESHOLD, 64 << 20);
   argumentCount = argc;
   arguments = argv;
   merk_save_environment();

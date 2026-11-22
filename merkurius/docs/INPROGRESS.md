@@ -1152,6 +1152,28 @@ The collector and the barrier, agreed 2026-11-08, each step its own commit:
     recursion, as `foo(T)` holding `foo(list(T))`, can still lengthen the chain.
   - A monitor's function is always copied into chunks of the monitor's, as it
     outlives the collections of the process that made it.
+- **Copying made cheaper, 2026-11-22,** after open types step 7 found the
+  collector copying a list cell for about 510 instructions (design document,
+  Measurements, "The collector"):
+  - A cell whose last field has its own type and whose other fields hold no
+    pointers, as a `list(int)`'s, is copied along that field in a loop, with
+    no pending work, kept environment or `Resolve` per cell. Other cells
+    keep the pending stack, so a deep left-leaning tree still cannot
+    overflow the C stack.
+  - `FindFrom` tries the chunk it found last first. A cell of one or two
+    words is copied inline rather than by `memcpy`.
+  - Freed chunks of the heap's usual size are kept as the process's spares,
+    up to what the next collection's allocations and to-space take, and
+    reused. `main` sets malloc's mmap threshold to 32 MB and trim threshold
+    to 64 MB. Without that, glibc mapped each 1 MB chunk on its own or gave
+    the top of its heap back after each collection, and the page faults took
+    more time than the copying had.
+  - About 96 instructions a list cell remain, in one loop with no calls.
+    Rejected: a tail loop for any cell, pushing its other fields. A list of
+    pointers would then keep a pending entry for every cell of its spine.
+  - `CodeGen/gc-loops.m` covers each path; `benchmarks/gc` has programs
+    for the three cases the 2026-11-08 timings had, whose programs were
+    not kept.
 - **Step 2, deferred 2026-11-08.** Generations lose no correctness by waiting,
   and arrays, used destructively, stay put once large objects do. Timing will
   say when they are worth building. Barrier-needing features added before
