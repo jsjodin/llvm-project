@@ -26,6 +26,16 @@
 // a copy (device/device.cpp, MovingMemory). It uses no library, so that it
 // builds for the GPU.
 //
+// An open term (design document, Runtime system, "Support for open terms")
+// is copied as copy_term copies it, on the host only: a `Memory` with
+// `WordMap *OpenCopies()`, a map that lasts for the whole message, as the
+// fragment's does. Bound variables are copied as their values, and each
+// unbound variable becomes one new variable, however many times the message
+// holds it, as the map gives the first copy again. The map also has each
+// cell copied, so that a cyclic term's copy ends, and a cell the term shares
+// is copied once. A copy for a GPU has no map, and refuses an open term,
+// which a GPU's messages, being flat, cannot hold.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef MERKURIUS_RUNTIME_COPY_H_
@@ -33,6 +43,10 @@
 
 #include "array.h"
 #include "walk.h"
+#if !defined(__AMDGPU__) && !defined(__NVPTX__)
+#include "open.h"
+#include "word-map.h"
+#endif
 
 namespace merkurius::runtime {
 
@@ -294,6 +308,155 @@ template <typename Memory> Word CopyClosure(Word value, Memory &memory) {
   return reinterpret_cast<Word>(copy);
 }
 
+#if !defined(__AMDGPU__) && !defined(__NVPTX__)
+// The map of an open term's copy (OpenCopies), or null if `memory` has none.
+template <typename Memory>
+auto OpenCopiesOf(Memory &memory, int) -> decltype(memory.OpenCopies()) {
+  return memory.OpenCopies();
+}
+template <typename Memory> WordMap *OpenCopiesOf(Memory &, long) {
+  return nullptr;
+}
+
+// A one-word box of `word`, as a Boxed or ClosedBox open value is.
+template <typename Memory> Word CopyBox(Word word, Memory &memory) {
+  auto *box{static_cast<Word *>(memory.Allocate(sizeof(Word)))};
+  *box = word;
+  return reinterpret_cast<Word>(box);
+}
+
+// A value of `type` in its open layout (open.h), into `copies`' copy. A
+// field of the term's own type is copied in the loop, as CopyTerm does.
+template <typename Memory>
+Word CopyOpen(Word value, const Type &type, WordMap &copies, Memory &memory) {
+  Word result{0};
+  Word *slot{&result};
+  for (;;) {
+    memory.CheckStack();
+    // A bound variable is its value.
+    while (IsVariableReference(value)) {
+      Word next{*reinterpret_cast<const Word *>(value - kOpenVariableTag)};
+      if (next == value) {
+        break;
+      }
+      value = next;
+    }
+    bool inserted;
+    if (IsVariableReference(value)) {
+      Word *copy{copies.Insert(value, 0, inserted)};
+      if (inserted) {
+        auto *cell{static_cast<Word *>(memory.Allocate(sizeof(Word)))};
+        *cell = reinterpret_cast<Word>(cell) | kOpenVariableTag;
+        *copy = *cell;
+      }
+      *slot = *copy;
+      return result;
+    }
+    const TypeCtor *ctor{type.ctor};
+    switch (ctor->kind) {
+    case Int8:
+    case Int16:
+    case Int32:
+    case Uint8:
+    case Uint16:
+    case Uint32:
+    case Char:
+    case Enum:
+    case Dummy:
+    case Void:
+      *slot = value; // Shifted, or the same word in both layouts.
+      return result;
+    case Int:
+    case Uint:
+    case Int64:
+    case Uint64:
+    case Float:
+      *slot = CopyBox(*reinterpret_cast<const Word *>(value), memory);
+      return result;
+    case String:
+      *slot = CopyBox(
+          CopyTyped(*reinterpret_cast<const Word *>(value), type, memory),
+          memory);
+      return result;
+    case Open:
+      *slot = CopyOpen(value,
+          Resolve(type.environment.arguments[0], type.environment.parent),
+          copies, memory);
+      return result;
+    case NoTag:
+      if ((ctor->flags & kClosed) != 0) {
+        // A box of T's ordinary word.
+        *slot =
+            CopyBox(CopyValue(*reinterpret_cast<const Word *>(value),
+                        ctor->functors[0].fields[0], &type.environment, memory),
+                memory);
+        return result;
+      }
+      *slot = CopyOpen(value,
+          Resolve(ctor->functors[0].fields[0], &type.environment), copies,
+          memory);
+      return result;
+    case Tuple:
+      if (ctor->functors[0].arity == 1) {
+        *slot = CopyOpen(value,
+            Resolve(ctor->functors[0].fields[0], &type.environment), copies,
+            memory);
+        return result;
+      }
+      break;
+    case Cells:
+      break;
+    default:
+      memory.Fail(
+          "an open term of a type open terms cannot hold: ", ctor->name);
+    }
+    if (IsOpenConstant(ctor, value)) {
+      *slot = value;
+      return result;
+    }
+    if (Word * copied{copies.Find(value)}) {
+      *slot = *copied; // Shared, or a cycle.
+      return result;
+    }
+    unsigned tag{static_cast<unsigned>(value & kTagMask)};
+    const Word *from{reinterpret_cast<const Word *>(value - tag)};
+    unsigned before;
+    const Functor *functor{OpenCellFunctor(ctor, tag, from, before)};
+    if (!functor || functor->hidden != 0) {
+      memory.Fail(
+          "an open term with a constructor it cannot have: ", ctor->name);
+    }
+    unsigned arity{functor->arity};
+    auto *cell{
+        static_cast<Word *>(memory.Allocate(sizeof(Word) * (before + arity)))};
+    for (unsigned i{0}; i < before; ++i) {
+      cell[i] = from[i];
+    }
+    Word copy{reinterpret_cast<Word>(cell) + tag};
+    // Before the fields, which may lead back to it.
+    copies.Insert(value, copy, inserted);
+    *slot = copy;
+    if (arity == 0) {
+      return result;
+    }
+    const Word *fields{from + before};
+    Word *to{cell + before};
+    for (unsigned i{0}; i + 1 < arity; ++i) {
+      to[i] = CopyOpen(fields[i],
+          Resolve(functor->fields[i], &type.environment), copies, memory);
+    }
+    Word last{functor->fields[arity - 1]};
+    if (!IsSameType(last, type) || ctor->kind == Tuple) {
+      to[arity - 1] = CopyOpen(
+          fields[arity - 1], Resolve(last, &type.environment), copies, memory);
+      return result;
+    }
+    value = fields[arity - 1];
+    slot = &to[arity - 1];
+  }
+}
+#endif
+
 template <typename Memory>
 Word CopyTyped(Word value, const Type &type, Memory &memory) {
   // Inlined here, as the device's check measures this frame's callees.
@@ -357,6 +520,16 @@ Word CopyTyped(Word value, const Type &type, Memory &memory) {
     // Nothing has a value of this type. A trap would make every kernel that
     // copies have a stack that is not fixed (device/device.cpp, Fail).
     memory.Fail("a value of a type that has none: ", type.ctor->name);
+  case Open: {
+#if !defined(__AMDGPU__) && !defined(__NVPTX__)
+    if (WordMap * copies{OpenCopiesOf(memory, 0)}) {
+      return CopyOpen(value,
+          Resolve(type.environment.arguments[0], type.environment.parent),
+          *copies, memory);
+    }
+#endif
+    memory.Fail("cannot copy an open term between the host and a GPU", "");
+  }
   }
   memory.Fail("cannot send a value of type ", type.ctor->name);
 }

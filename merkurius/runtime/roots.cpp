@@ -1136,56 +1136,6 @@ Word *Collector::CopyBox(Word *slot) {
   return to;
 }
 
-// A Cells or Tuple type's functor in the open layout, which is not a
-// constant, by the tag of the cell's pointer, and the words before its
-// fields. The layout is the ordinary one when that leaves tag 7 unused,
-// which an unused tag's kConstantTag says; otherwise it is the rule with 7
-// tags (open.h, CellTag), found by trying the type's functors, as only a type
-// of more than 6 constructors with arguments has such a layout.
-const Functor *OpenCellFunctor(
-    const TypeCtor *ctor, unsigned tag, const Word *cell, unsigned &before) {
-  if (ctor->kind == Tuple) {
-    before = 0;
-    return &ctor->functors[0];
-  }
-  if (ctor->byTag[kOpenTags] == kConstantTag) {
-    std::uint16_t index{ctor->byTag[tag]};
-    if (index == kSharedTag) {
-      before = 1;
-      return &ctor->functors[ctor->shared[cell[0]]];
-    }
-    if (index >= ctor->functorCount) {
-      Bad("an open term's tag no constructor of the type has", tag);
-    }
-    before = 0;
-    return &ctor->functors[index];
-  }
-  bool constants{false};
-  unsigned cells{0};
-  for (std::uint32_t i{0}; i < ctor->functorCount; ++i) {
-    const Functor &functor{ctor->functors[i]};
-    if (functor.arity == 0 && functor.hidden == 0) {
-      constants = true;
-    } else {
-      ++cells;
-    }
-  }
-  unsigned k{0};
-  for (std::uint32_t i{0}; i < ctor->functorCount; ++i) {
-    const Functor &functor{ctor->functors[i]};
-    if (functor.arity == 0 && functor.hidden == 0) {
-      continue;
-    }
-    OpenTag open{CellTag(constants, cells, k++, kOpenTags)};
-    if (open.tag == tag &&
-        (open.secondary < 0 || static_cast<Word>(open.secondary) == cell[0])) {
-      before = open.secondary < 0 ? 0 : 1;
-      return &functor;
-    }
-  }
-  Bad("an open term's tag no constructor of the type has", tag);
-}
-
 // A value of `type` in its open layout (open.h): a variable reference, or
 // the type's encoding of a value.
 void Collector::ForwardOpen(Word *slot, Type type) {
@@ -1270,7 +1220,7 @@ void Collector::ForwardOpen(Word *slot, Type type) {
       Bad("an open term of a type open terms cannot hold", value);
     }
     unsigned tag{static_cast<unsigned>(value & kTagMask)};
-    if (ctor->kind == Cells && tag == 0 && ctor->byTag[0] == kConstantTag) {
+    if (IsOpenConstant(ctor, value)) {
       return; // A constant, the same word in both layouts.
     }
     FromChunk *chunk{FindFrom(value - tag)};
@@ -1285,6 +1235,9 @@ void Collector::ForwardOpen(Word *slot, Type type) {
     }
     unsigned before;
     const Functor *functor{OpenCellFunctor(ctor, tag, cell, before)};
+    if (!functor) {
+      Bad("an open term's tag no constructor of the type has", value);
+    }
     if (functor->hidden != 0) {
       Bad("an open term of an existentially typed constructor", value);
     }

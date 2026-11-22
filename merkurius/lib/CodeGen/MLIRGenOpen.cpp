@@ -848,13 +848,20 @@ bool MerkGenerator::ReportOpenMessages(const semantics::Procedure &callee,
   if (callee.symbol->module != "process") {
     return false;
   }
+  // These read no message, or copy it as copy_term does (open.send).
+  llvm::StringRef name{callee.symbol->name};
+  if (name == "new_mailbox" || name == "send" || name == "send_any" ||
+      name == "close_mailbox" || name.starts_with("spawn")) {
+    return false;
+  }
   for (BodyVar var : arguments) {
     const semantics::Type *type{body.vars[var].type};
     if (MentionsOpenType(type)) {
-      // Temporary (open types step 6, docs/INPROGRESS.md): a message is
-      // copied as copy_term does then.
+      // A receive gives a ground message, which one sent by open.send is
+      // not.
       NotYet(Where(goal.tokens),
-          "messages with open terms in them, such as values of type " +
+          "receiving messages with open terms in them but by open.receive, "
+          "such as values of type " +
               semantics::TypeToString(*type));
       return true;
     }

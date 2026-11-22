@@ -15,6 +15,7 @@
 #ifndef MERKURIUS_RUNTIME_FRAGMENT_H_
 #define MERKURIUS_RUNTIME_FRAGMENT_H_
 
+#include "word-map.h"
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -61,12 +62,16 @@ inline void FreeChunks(ChunkLink *chunks) {
 // left its mailbox and what is still used of it has been copied.
 class Fragment {
 public:
-  // Its chunks, which it no longer owns.
+  // Its chunks, which it no longer owns. The copy it was for is over.
   ChunkLink *Take() {
     ChunkLink *chunks{chunks_};
     chunks_ = nullptr;
+    openCopies_.Free();
     return chunks;
   }
+
+  // The map of an open term's copy, for the whole message (copy.h).
+  WordMap *OpenCopies() { return &openCopies_; }
 
   void *Allocate(std::size_t bytes) {
     bytes = (bytes + 7) & ~std::size_t{7};
@@ -108,6 +113,7 @@ private:
   static constexpr std::size_t kFirstChunkBytes{256};
   static constexpr std::size_t kMostChunkBytes{4096};
   std::size_t chunkBytes_{kFirstChunkBytes};
+  WordMap openCopies_;
   char *next_{nullptr};
   char *limit_{nullptr};
   ChunkLink *chunks_{nullptr};

@@ -703,7 +703,8 @@ private:
   bool ReportOpenShapes(const Body &goal, llvm::ArrayRef<BodyVar> arguments,
       const ProcedureBody &body, bool closedToo);
   // A call of the module process whose argument's type has open terms in
-  // it: messages are not copied with open terms yet; whether it is one.
+  // it and that receives a message, which open.receive must; whether it is
+  // one.
   bool ReportOpenMessages(const semantics::Procedure &callee, const Body &goal,
       llvm::ArrayRef<BodyVar> arguments, const ProcedureBody &body);
   // Whether the procedure can bind open variables, so that its goals that

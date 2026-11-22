@@ -8035,7 +8035,9 @@ the `type_info` back to the open layout (below).
        - A call of the module `process` with an argument whose type has
          open terms in it, until step 6 copies messages
          (`ReportOpenMessages`). Printing one stops at run time with a
-         message, and so does encoding one for another node.
+         message, and so does encoding one for another node. *Step 6
+         copies and prints them; only a receive by `process` is still
+         reported, and encoding still stops.*
      - **For when user-defined equality is implemented:** code generation
        refuses those types today, so no value of one reaches the open
        walkers. Then the walkers must call the type's own unify entry for
@@ -8290,7 +8292,50 @@ the `type_info` back to the open layout (below).
      every runtime test of open terms also run that way. The benchmarks
      no longer give the heap one chunk for the whole run.
 6. **Messages and printing:** `copy_term` semantics for an open message,
-   and `io.write` printing `_1`, `_2`.
+   and `io.write` printing `_1`, `_2`. Done 2026-11-22.
+   - **Decided 2026-11-22: impure predicates in `open`** for terms with
+     holes: `open.write`, `open.string` and `open.send`, which take `ia`,
+     and a pure `open.receive`, which gives `oa`. What is printed or sent
+     changes when a variable is bound, as `from_open`'s result does.
+     `io.write` and `process.send` keep `in`, and take ground open terms.
+     - Rejected: an `ia` mode on `io.write` and `process.send`. Purity
+       belongs to a predicate, not a mode, so the observation would be
+       pure, unlike `from_open`.
+     - Rejected: an impure write but a pure send. The sender's later
+       bindings do not reach the copy, which tells when the send ran.
+   - **Receiving.** `process.receive` gives its message `ground`, so a
+     call of it, or of `request` or the selectors, whose message type has
+     open terms in it is reported as not yet implemented
+     (`ReportOpenMessages`). `open.receive` takes the oldest message with
+     no selector. A selector with an `ia` mode would lift this.
+   - **Copy** (`runtime/copy.h`, `CopyOpen`), on the host only. It walks
+     T's open layout with the collector's dispatch (`OpenCellFunctor`, now
+     in `open.h`). A map that lasts for the whole message
+     (`Fragment::OpenCopies`, `runtime/word-map.h`) gives each unbound
+     variable one new variable, however often the message holds it. It
+     also gives each copied cell, so that a cycle ends and a shared cell
+     is copied once. Bound variables are copied as their values, and
+     `closed(T)`'s box is copied by the ordinary copy. A copy for a GPU has
+     no map and stops with a message; encoding for another node still
+     stops too.
+   - **Printing** (`runtime/write.cpp`, `WriteOpen`). It numbers unbound
+     variables `_1`, `_2` in the order it meets them, with one numbering
+     for the whole call, so a variable has one number in every open value
+     of a tuple. A cell already on the path from the root prints as
+     `...`. A notag's word is its argument's, so an unbound `open(wrap)`
+     prints as `wrap(_1)`, which is all it can become.
+   - **Found, fixed: `L = [A, A, _], L = [9 | _]` failed.** With `L`
+     bound, mode analysis deconstructed it and tested the hole's word
+     against 9. A deconstruction whose argument has a ground type where
+     the part is not ground is now a get_structure, which binds the hole.
+     With the functor known, only the argument can fail
+     (`Semantics/modes/open/open-modes.m`, `bound_head`).
+   - Tests: `CodeGen/open-write.m` and `CodeGen/open-message.m`, at -O2
+     and -O0 and with a collection at every allocation. The message test
+     has the same variable twice in a message, cycles, every field
+     encoding, and a round trip through a child process. Both ran clean
+     under valgrind. The 134 programs without open types compile to the
+     same assembly.
 7. **Tests and a measurement:** difference lists, a type inferencer by
    unification, and E5's list built through holes, compiled, against E5's
    C model.

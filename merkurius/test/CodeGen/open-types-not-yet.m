@@ -6,9 +6,10 @@
 % an array, a higher-order value or an existentially typed constructor,
 % which the runtime's walkers stop on, is reported where open's predicates
 % or a full unification would walk it; a closed(U) holding one only where
-% it is unified, as to_open and from_open share its box. A message with open
-% terms in it waits for step 6, which copies it. Each is reported as not
-% yet implemented. Full unification, fresh variables, calls of open's
+% it is unified, as to_open and from_open share its box. A receive of a message
+% with open terms in it by process.receive, which gives a ground message,
+% is reported: open.receive gives it. Each is reported as not yet
+% implemented. Full unification, fresh variables, calls of open's
 % predicates (open-terms.m), constructions and get_structure
 % (open-construct.m) and closed(T) holes (open-closed.m) are generated.
 %
@@ -81,6 +82,6 @@ closed_shared(to_open(holder(closed(array([1]))))).
 closed_unified(X, X).
 % CHECK: [[@LINE-1]]:19: error: not yet implemented: code generation for open terms that hold arrays, as values of type open.open(open_types_not_yet.holder) can
 
-:- pred sends(mailbox(open(list(int)))::in, io::di, io::uo) is det.
-sends(M, !IO) :- send(M, to_open([1]), !IO).
-% CHECK: [[@LINE-1]]:18: error: not yet implemented: code generation for messages with open terms in them, such as values of type process.mailbox(open.open(list.list(int)))
+:- pred receives(mailbox(open(list(int)))::in, io::di, io::uo) is det.
+receives(M, !IO) :- process.receive(M, any, after(0), _, !IO).
+% CHECK: [[@LINE-1]]:21: error: not yet implemented: code generation for receiving messages with open terms in them but by open.receive, such as values of type process.mailbox(open.open(list.list(int)))

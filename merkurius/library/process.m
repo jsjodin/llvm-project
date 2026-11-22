@@ -117,6 +117,10 @@
 
 :- pred send(mailbox(M)::in, M::in, io::di, io::uo) is det.
 
+    % For open.send (library/open.m), which sends a message with unbound
+    % variables in it.
+:- impure pred send_any(mailbox(M)::in, M::ia, io::di, io::uo) is det.
+
     % What a receive gets: a message, or timeout if none arrives in time.
 :- type received(R)
     --->    message(R)
@@ -517,6 +521,10 @@ close_mailbox(mailbox(High, Low, PlaceSlot, Generation, Secret), !IO) :-
 
 send(mailbox(High, Low, PlaceSlot, Generation, Secret), Message, !IO) :-
     send_message(High, Low, PlaceSlot, Generation, Secret, Message, !IO).
+
+send_any(mailbox(High, Low, PlaceSlot, Generation, Secret), Message, !IO) :-
+    impure send_any_message(High, Low, PlaceSlot, Generation, Secret, Message,
+        !IO).
 
 receive(Mailbox, Selector, Timeout, Result, !IO) :-
     deadline(milliseconds(Timeout), Deadline, !IO),
@@ -1058,6 +1066,19 @@ team_mailbox(Team, Mailbox, !IO) :-
     send_message(High::in, Low::in, PlaceSlot::in, Generation::in,
         Secret::in, Message::in, _IO0::di, _IO::uo),
     [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    merk_mailbox_send(High, Low, PlaceSlot, Generation, Secret,
+        TypeInfo_for_M, Message);
+").
+
+    % send_message's copy reads the message's bindings when it runs, so
+    % this one is impure (open.send).
+:- impure pred send_any_message(int::in, int::in, int::in, int::in, int::in,
+    M::ia, io::di, io::uo) is det.
+:- pragma foreign_proc("C",
+    send_any_message(High::in, Low::in, PlaceSlot::in, Generation::in,
+        Secret::in, Message::ia, _IO0::di, _IO::uo),
+    [will_not_call_merkurius, thread_safe],
 "
     merk_mailbox_send(High, Low, PlaceSlot, Generation, Secret,
         TypeInfo_for_M, Message);

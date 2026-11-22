@@ -12,14 +12,23 @@
 // they are: here, as in the manual and in what a term's context allows, the
 // lower.
 //
+// An open term (design document, Runtime system, "Support for open terms")
+// is written in its open layout, as from_open would give it, with each
+// unbound variable as _1, _2 and so on, numbered in the order the write
+// meets them, the same variable with the same number. A cell already on
+// the path from the term's root, as a cyclic term has, is written as ...,
+// so that the write ends.
+//
 //===----------------------------------------------------------------------===//
 
 #include "array.h"
 #include "descriptor.h"
 #include "heap.h"
+#include "open.h"
 #include "process.h"
 #include "record.h"
 #include "walk.h"
+#include "word-map.h"
 #include <array>
 #include <cinttypes>
 #include <cmath>
@@ -281,7 +290,101 @@ void PutChar(Out &out, std::uint32_t c, bool quoted) {
   out.Put('\'');
 }
 
-void WriteValue(Out &out, Word value, Word type, const Environment *environment, int context);
+// A write of an open term: its variables' numbers, and the cells on its
+// path, kept in `path` and, in order, in `stack`.
+struct OpenWrite {
+  WordMap variables;
+  Word next{1};
+  WordMap path;
+  Word *stack{nullptr};
+  std::size_t depth{0};
+  std::size_t capacity{0};
+
+  // Whether the cell was not on the path, which it is now.
+  bool Enter(Word cell) {
+    bool inserted;
+    path.Insert(cell, 1, inserted);
+    if (!inserted) {
+      return false;
+    }
+    if (depth == capacity) {
+      capacity = capacity ? 2 * capacity : 64;
+      stack = static_cast<Word *>(std::realloc(stack, capacity * sizeof(Word)));
+      if (!stack) {
+        std::abort();
+      }
+    }
+    stack[depth++] = cell;
+    return true;
+  }
+  // The cells entered after the path was `to` deep leave it.
+  void LeaveTo(std::size_t to) {
+    while (depth > to) {
+      path.Erase(stack[--depth]);
+    }
+  }
+  void Free() {
+    variables.Free();
+    path.Free();
+    std::free(stack);
+  }
+};
+
+// The open state of the io.write call under way (merk_write,
+// merk_string_of): one numbering of variables for its every open(T) value.
+thread_local OpenWrite *callWrite{nullptr};
+
+// An open word with its chain of bound variables followed.
+Word Deref(Word value) {
+  while (IsVariableReference(value)) {
+    Word next{*reinterpret_cast<const Word *>(value - kOpenVariableTag)};
+    if (next == value) {
+      break;
+    }
+    value = next;
+  }
+  return value;
+}
+
+void WriteVariable(Out &out, Word variable, OpenWrite &open) {
+  bool inserted;
+  Word *number{open.variables.Insert(variable, open.next, inserted)};
+  if (inserted) {
+    ++open.next;
+  }
+  out.Printf("_%" PRIu64, *number);
+}
+
+// The functor of an open word of a NoTag, Tuple or Cells type, which deref
+// gave and is not a variable, as FunctorOf gives an ordinary one's.
+const Functor *OpenFunctorOf(
+    Word &value, const TypeCtor *ctor, const Word *&fields) {
+  if (ctor->kind == NoTag ||
+      (ctor->kind == Tuple && ctor->functors[0].arity == 1)) {
+    fields = &value;
+    return &ctor->functors[0];
+  }
+  if (IsOpenConstant(ctor, value)) {
+    fields = nullptr;
+    return &ctor->functors[ctor->constants[value >> kTagBits]];
+  }
+  unsigned tag{static_cast<unsigned>(value & kTagMask)};
+  const Word *cell{reinterpret_cast<const Word *>(value - tag)};
+  unsigned before;
+  const Functor *functor{OpenCellFunctor(ctor, tag, cell, before)};
+  if (!functor || functor->hidden != 0) {
+    std::fflush(stdout);
+    std::fputs("Merkurius runtime: an open term with a constructor it cannot "
+               "have\n",
+        stderr);
+    std::abort();
+  }
+  fields = cell + before;
+  return functor;
+}
+
+void WriteValue(Out &out, Word value, Word type, const Environment *environment,
+    int context, OpenWrite *open = nullptr);
 
 void *AllocateCell(Word bytes) { return Allocate(bytes); }
 
@@ -295,19 +398,29 @@ Word ElementWord(
   return BoxRecord(Resolve(element, &environment),
       ArrayElements(array) + array[1] * i, AllocateCell);
 }
-void WriteTyped(Out &out, Word value, const Type &type, int context);
+void WriteTyped(Out &out, Word value, const Type &type, int context,
+    OpenWrite *open = nullptr);
 
-void WriteList(Out &out, const Functor *functor, const Word *fields, const Type &type) {
+// In an open term, a tail that is an unbound variable is written after |,
+// and one whose cell is on the path as ....
+void WriteList(Out &out, const Functor *functor, const Word *fields,
+    const Type &type, OpenWrite *open) {
   out.Put('[');
   for (;;) {
-    WriteValue(out, fields[0], functor->fields[0], &type.environment, kArgumentPriority);
-    Word tail{fields[1]};
+    WriteValue(out, fields[0], functor->fields[0], &type.environment,
+        kArgumentPriority, open);
+    Word tail{open ? Deref(fields[1]) : fields[1]};
     Word tailType{functor->fields[1]};
-    if (IsSameType(tailType, type)) {
+    if (IsSameType(tailType, type) && !(open && IsVariableReference(tail))) {
       const Word *tailFields{nullptr};
-      const Functor *next{FunctorOf(tail, type.ctor, tailFields)};
+      const Functor *next{open ? OpenFunctorOf(tail, type.ctor, tailFields)
+                               : FunctorOf(tail, type.ctor, tailFields)};
       std::string_view name{next->name};
       if (name == "[|]" && next->arity == 2) {
+        if (open && !open->Enter(tail)) {
+          out.Put(" | ...");
+          break;
+        }
         out.Put(", ");
         functor = next;
         fields = tailFields;
@@ -318,15 +431,37 @@ void WriteList(Out &out, const Functor *functor, const Word *fields, const Type 
       }
     }
     out.Put(" | ");
-    WriteValue(out, tail, tailType, &type.environment, kAnyPriority);
+    WriteValue(out, tail, tailType, &type.environment, kAnyPriority, open);
     break;
   }
   out.Put(']');
 }
 
-void WriteTerm(Out &out, Word term, const Type &type, int context) {
+void WriteTermFields(Out &out, Word term, const Functor *functor,
+    const Word *fields, const Type &type, int context, OpenWrite *open);
+
+// In an open term, a cell on the path is written as ..., and the cells the
+// term enters leave the path after it.
+void WriteTerm(Out &out, Word term, const Type &type, int context,
+    OpenWrite *open = nullptr) {
   const Word *fields{nullptr};
-  const Functor *functor{FunctorOf(term, type.ctor, fields)};
+  const Functor *functor{open ? OpenFunctorOf(term, type.ctor, fields)
+                              : FunctorOf(term, type.ctor, fields)};
+  if (!open || !fields || fields == &term) {
+    WriteTermFields(out, term, functor, fields, type, context, open);
+    return;
+  }
+  std::size_t depth{open->depth};
+  if (!open->Enter(term)) {
+    out.Put("...");
+    return;
+  }
+  WriteTermFields(out, term, functor, fields, type, context, open);
+  open->LeaveTo(depth);
+}
+
+void WriteTermFields(Out &out, Word term, const Functor *functor,
+    const Word *fields, const Type &type, int context, OpenWrite *open) {
   std::string_view name{functor->name};
   unsigned arity{functor->arity};
   Environment existential{type.environment.arguments,
@@ -344,13 +479,14 @@ void WriteTerm(Out &out, Word term, const Type &type, int context) {
     return;
   }
   if (name == "[|]" && arity == 2) {
-    WriteList(out, functor, fields, type);
+    WriteList(out, functor, fields, type, open);
     return;
   }
   if (name == "{}") {
     if (arity == 1) {
       out.Put("{ ");
-      WriteValue(out, fields[0], functor->fields[0], environment, kAnyPriority);
+      WriteValue(
+          out, fields[0], functor->fields[0], environment, kAnyPriority, open);
       out.Put(" }");
       return;
     }
@@ -359,7 +495,8 @@ void WriteTerm(Out &out, Word term, const Type &type, int context) {
       if (i != 0) {
         out.Put(", ");
       }
-      WriteValue(out, fields[i], functor->fields[i], environment, kArgumentPriority);
+      WriteValue(out, fields[i], functor->fields[i], environment,
+          kArgumentPriority, open);
     }
     out.Put('}');
     return;
@@ -374,16 +511,18 @@ void WriteTerm(Out &out, Word term, const Type &type, int context) {
       out.Put(name);
       out.Put(' ');
       WriteValue(out, fields[0], functor->fields[0], environment,
-          op->specifier == FY ? priority : priority - 1);
+          op->specifier == FY ? priority : priority - 1, open);
     } else if (op->specifier == FXY) {
       out.Put(name);
       out.Put(' ');
-      WriteValue(out, fields[0], functor->fields[0], environment, priority - 1);
+      WriteValue(
+          out, fields[0], functor->fields[0], environment, priority - 1, open);
       out.Put(' ');
-      WriteValue(out, fields[1], functor->fields[1], environment, priority);
+      WriteValue(
+          out, fields[1], functor->fields[1], environment, priority, open);
     } else {
       WriteValue(out, fields[0], functor->fields[0], environment,
-          op->specifier == YFX ? priority : priority - 1);
+          op->specifier == YFX ? priority : priority - 1, open);
       if (name == ",") {
         out.Put(", ");
       } else {
@@ -392,7 +531,7 @@ void WriteTerm(Out &out, Word term, const Type &type, int context) {
         out.Put(' ');
       }
       WriteValue(out, fields[1], functor->fields[1], environment,
-          op->specifier == XFY ? priority : priority - 1);
+          op->specifier == XFY ? priority : priority - 1, open);
     }
     if (parentheses) {
       out.Put(')');
@@ -405,7 +544,8 @@ void WriteTerm(Out &out, Word term, const Type &type, int context) {
     if (i != 0) {
       out.Put(", ");
     }
-    WriteValue(out, fields[i], functor->fields[i], environment, kArgumentPriority);
+    WriteValue(out, fields[i], functor->fields[i], environment,
+        kArgumentPriority, open);
   }
   out.Put(')');
 }
@@ -420,7 +560,72 @@ void WriteInteger(Out &out, Word value, unsigned bits, bool isSigned, const char
   }
 }
 
-void WriteTyped(Out &out, Word value, const Type &type, int context) {
+// An open word: a variable, or its value decoded from its type's open
+// encoding (open.h).
+void WriteOpen(
+    Out &out, Word value, const Type &type, int context, OpenWrite &open) {
+  const TypeCtor *ctor{type.ctor};
+  // A notag's word is its argument's, so an unbound one is the constructor
+  // around an unbound argument, which it can only be bound to.
+  if ((ctor->kind == NoTag && (ctor->flags & kClosed) == 0) ||
+      (ctor->kind == Tuple && ctor->functors[0].arity == 1)) {
+    return WriteTerm(out, value, type, context, &open);
+  }
+  value = Deref(value);
+  if (IsVariableReference(value)) {
+    WriteVariable(out, value, open);
+    return;
+  }
+  switch (ctor->kind) {
+  case Int8:
+  case Int16:
+  case Int32:
+  case Uint8:
+  case Uint16:
+  case Uint32:
+  case Char:
+  case Enum:
+    // Shifted past the tag, and zero-extended, as WriteInteger takes it.
+    return WriteTyped(out, value >> kTagBits, type, context);
+  case Int:
+  case Uint:
+  case Int64:
+  case Uint64:
+  case Float:
+  case String:
+    return WriteTyped(
+        out, *reinterpret_cast<const Word *>(value), type, context);
+  case Dummy:
+  case Void:
+    return WriteTyped(out, value, type, context);
+  case Open:
+    return WriteOpen(out, value,
+        Resolve(type.environment.arguments[0], type.environment.parent),
+        context, open);
+  case NoTag:
+    if ((ctor->flags & kClosed) != 0) {
+      // A box of T's ordinary word, which closed(T)'s ordinary value is.
+      return WriteTerm(
+          out, *reinterpret_cast<const Word *>(value), type, context);
+    }
+    return WriteTerm(out, value, type, context, &open);
+  case Tuple:
+  case Cells:
+    return WriteTerm(out, value, type, context, &open);
+  default:
+    std::fflush(stdout);
+    std::fputs("Merkurius runtime: an open term of a type open terms cannot "
+               "hold\n",
+        stderr);
+    std::abort();
+  }
+}
+
+void WriteTyped(
+    Out &out, Word value, const Type &type, int context, OpenWrite *open) {
+  if (open) {
+    return WriteOpen(out, value, type, context, *open);
+  }
   switch (type.ctor->kind) {
   case Int:
     return WriteInteger(out, value, 64, true, "");
@@ -479,22 +684,19 @@ void WriteTyped(Out &out, Word value, const Type &type, int context) {
     // Nothing has a value of this type.
     std::abort();
   case Open:
-    // Temporary (open types step 6, docs/INPROGRESS.md): printing walks the
-    // open layout and numbers unbound variables. Until then, a clear stop
-    // rather than WriteTerm on a descriptor that has no functors.
-    std::fflush(stdout);
-    std::fputs("Merkurius runtime: printing an open term is not supported "
-               "yet\n",
-        stderr);
-    ExitProgram(1);
+    // T's open layout, numbered as the call's other open values are.
+    return WriteOpen(out, value,
+        Resolve(type.environment.arguments[0], type.environment.parent),
+        context, *callWrite);
   default:
     return WriteTerm(out, value, type, context);
   }
 }
 
-void WriteValue(Out &out, Word value, Word type, const Environment *environment, int context) {
+void WriteValue(Out &out, Word value, Word type, const Environment *environment,
+    int context, OpenWrite *open) {
   Type resolved{Resolve(type, environment)};
-  WriteTyped(out, value, resolved, context);
+  WriteTyped(out, value, resolved, context, open);
 }
 
 // merk_write's flags, as io.m passes them.
@@ -534,6 +736,8 @@ extern "C" void merk_write_float(double number) {
 // and their _line forms.
 extern "C" void merk_write(Word typeInfo, Word value, Word flags) {
   Out out{stdout};
+  OpenWrite write;
+  callWrite = &write;
   Type type{Resolve(typeInfo, nullptr)};
   if ((flags & kPrint) != 0 && type.ctor->kind == String) {
     out.Put(reinterpret_cast<const char *>(value));
@@ -545,11 +749,17 @@ extern "C" void merk_write(Word typeInfo, Word value, Word flags) {
   if ((flags & kLine) != 0) {
     out.Put('\n');
   }
+  callWrite = nullptr;
+  write.Free();
 }
 
 // string.string: what io.write writes, as a string.
 extern "C" char *merk_string_of(Word typeInfo, Word value) {
   Out out;
+  OpenWrite write;
+  callWrite = &write;
   WriteTyped(out, value, Resolve(typeInfo, nullptr), kAnyPriority);
+  callWrite = nullptr;
+  write.Free();
   return out.Take();
 }
