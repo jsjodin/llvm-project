@@ -108,3 +108,18 @@ main(!IO) :-
 % CHECK:        [[@LINE-4]]:9 [1, 2] -> constructor list.'[]'/0{{$}}
 % CHECK-NEXT:   [[@LINE-5]]:9 [1, 2] -> constructor list.'[|]'/2{{$}}
 % CHECK-NEXT:   [[@LINE-6]]:9 [1, 2] -> constructor list.'[|]'/2{{$}}
+
+    % A tuple has open twins too, its elements open or taking a ground
+    % value; a tuple of one is its element.
+:- pred tuple_hole(open({int, list(int)})::oa) is det.
+tuple_hole(T) :-
+    T = {N, [2 | H]},
+    N = 1,
+    H = [].
+% CHECK:      clause at [[@LINE-4]]:1 of pred open_types.tuple_hole/1: pred open_types.tuple_hole(open.open({int, list.list(int)}))
+% CHECK-NEXT:   T: open.open({int, list.list(int)})
+% CHECK-NEXT:   N: int
+% CHECK-NEXT:   H: open.open(list.list(int))
+:- pred one(open({list(int)})::oa) is det.
+one({[_]}).
+% CHECK:      clause at [[@LINE-1]]:1 of pred open_types.one/1: pred open_types.one(open.open({list.list(int)}))

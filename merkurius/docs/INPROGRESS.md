@@ -8082,9 +8082,11 @@ the `type_info` back to the open layout (below).
      - **Temporary, for (d):** deref, bind and `to_open` of a scalar are
        runtime calls. Inline deref and bind, and a static box for a small
        int, would save a call per field.
-     - **Found on the way:** the type checker gives tuples no open twin, so
-       `open({int, string})` cannot be built: `{3, "s"}` there is a type
-       error. Step 1(a) should add tuple twins.
+     - **Found on the way, fixed after it:** the type checker gave tuples
+       no open twin, so `open({int, string})` could not be built: `{3, "s"}`
+       there was a type error. A tuple of n elements now has twins
+       (S1', ..., Sn') -> open({T1, ..., Tn}), each Ti a new type variable
+       and Si' open(Ti) or Ti, as a constructor's (`AddTupleTwins`).
      - Tests: `CodeGen/open-construct.m` (constructions with holes, read and
        write modes, undoing, and the tags of types where the open layout
        shares a tag the ordinary one does not, against the runtime's

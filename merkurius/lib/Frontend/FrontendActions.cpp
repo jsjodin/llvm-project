@@ -509,7 +509,10 @@ bool DebugDumpTypesAction::executeAction() {
         if (const semantics::Symbol *symbol{clause.symbols[goal]}) {
           *os << *symbol;
         } else {
-          *os << "char constant";
+          // A tuple named {} is the open twin of a tuple.
+          *os << (goal < clause.openTwins.size() && clause.openTwins[goal]
+                  ? "tuple"
+                  : "char constant");
         }
         // The open twin of a constructor, and the arguments that take a
         // ground value (docs/INPROGRESS.md, Open types).

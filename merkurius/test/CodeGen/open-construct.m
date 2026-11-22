@@ -6,7 +6,7 @@
 % read by the runtime's from_open, and those to_open makes by compiled
 % code, so the two layouts must agree: `many` and `eight` share a tag in
 % the open layout where the ordinary one has a tag of their own or a
-% different shared one. A get_structure binds an unbound variable to a new
+% different shared one. Tuples have open twins too. A get_structure binds an unbound variable to a new
 % cell (write mode), or reads a bound one (read mode), and what it binds
 % is undone on failure. mmc has no open types, so the outputs are checked
 % by hand: each line says what it shows.
@@ -159,6 +159,20 @@ each(P, [X | Xs], !IO) :- P(X, !IO), each(P, Xs, !IO).
 :- pred others(open(wrap)::oa, open(pt)::oa, open(bundle)::oa) is det.
 others(wrap([1, 2]), pt(3, blue, "s"), bundle(closed([4]), 2.5, 'x')).
 
+:- pred tuples(open({int, colour, string})::oa,
+    open({int, list(int)})::oa, open({list(int)})::oa) is det.
+tuples({3, blue, "s"}, {1, [2 | _]}, {[1 | _]}).
+
+:- pred test_tuples(io::di, io::uo) is det.
+test_tuples(!IO) :-
+    tuples(T3, T2, T1),
+    show(T3, !IO), show(T2, !IO), show(T1, !IO),
+    promise_pure ( if T3 = {_, C, _}, T2 = {_, [_, 3]}, T1 = {[_]} then
+        show(C, !IO), show(T2, !IO), show(T1, !IO)
+    else
+        io.write_string("no\n", !IO)
+    ).
+
 :- pred read_others(open(wrap)::ia, open(pt)::ia, io::di, io::uo) is det.
 read_others(W, P, !IO) :-
     promise_pure ( if W = wrap([_, X]), P = pt(_, C, S) then
@@ -184,7 +198,8 @@ main(!IO) :-
     each(w_eight, REs, !IO), io.nl(!IO),
     others(W, P, Bu), show(W, !IO), show(P, !IO), show(Bu, !IO),
     read_others(W, P, !IO),
-    read_others(to_open(wrap([5, 6])), to_open(pt(7, green, "t")), !IO).
+    read_others(to_open(wrap([5, 6])), to_open(pt(7, green, "t")), !IO),
+    test_tuples(!IO).
 
 % Constructions: a ground one, and ones with holes.
 % OUTPUT:[1, 2, 3]
@@ -241,3 +256,10 @@ main(!IO) :-
 % OUTPUT-NEXT:6
 % OUTPUT-NEXT:green
 % OUTPUT-NEXT:"t"
+% Tuples, and a tuple of one, which is its element; then holes filled.
+% OUTPUT-NEXT:{3, blue, "s"}
+% OUTPUT-NEXT:open
+% OUTPUT-NEXT:open
+% OUTPUT-NEXT:blue
+% OUTPUT-NEXT:{1, [2, 3]}
+% OUTPUT-NEXT:{ [1] }

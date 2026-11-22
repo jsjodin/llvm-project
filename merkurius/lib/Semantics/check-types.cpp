@@ -569,6 +569,8 @@ private:
   bool twins_{false};
   ClauseTypes CheckClauseOnce(const ClauseForm &, bool inferring,
       const MethodDefinition *method);
+  void AddTupleTwins(
+      const Unify &, std::vector<std::function<bool(Assignment &)>> &options);
   void AddTwins(const Unify &, const Symbol &candidate,
       std::vector<std::function<bool(Assignment &)>> &options);
   bool ContainsOpen(const Type *) const;
@@ -2937,6 +2939,21 @@ void TypeChecker::CheckUnify(const Unify &unify) {
       return;
     }
     type = types_.Tuple(arguments);
+    if (twins_) {
+      // The tuple, or one of its open twins.
+      std::vector<std::function<bool(Assignment &)>> options{
+          [&, type](Assignment &a) {
+            return UnifyTypes(a, VarType(unify.left), type);
+          }};
+      AddTupleTwins(unify, options);
+      Extend(options, [&, type](const Assignment &a) {
+        messages_->Say(Source(unify.tokens),
+            "type error: `%s' has type %s, but must have type %s here"_err_en_US,
+            Source(unify.tokens).ToString(), TypeText(a, type),
+            TypeText(a, VarType(unify.left)));
+      });
+      return;
+    }
     break;
   case FunctorKind::Literal: {
     llvm::StringRef text{functor.literal->text};
@@ -3049,6 +3066,9 @@ void TypeChecker::CheckFunctor(const Unify &unify, const parser::SymName &name) 
       }
       return UnifyTypes(a, VarType(unify.left), types_.Tuple(arguments));
     });
+    if (twins_) {
+      AddTupleTwins(unify, options);
+    }
   }
   if (options.empty()) {
     failed_ = true;
@@ -3161,6 +3181,44 @@ void TypeChecker::AddTwins(const Unify &unify, const Symbol &candidate,
         }
       }
       return UnifyTypes(a, VarType(unify.left), types_.Open(types.back()));
+    });
+    coerced = (coerced - mayCoerce) & mayCoerce;
+  } while (coerced != 0);
+}
+
+// The open twins of a tuple of n elements, as a constructor's (AddTwins):
+// (S1', ..., Sn') -> open({T1, ..., Tn}), each Ti a new type variable and
+// Si' open(Ti), or Ti for an element that takes a ground value, of the
+// first `maxCoercedArguments`.
+void TypeChecker::AddTupleTwins(const Unify &unify,
+    std::vector<std::function<bool(Assignment &)>> &options) {
+  constexpr unsigned maxCoercedArguments{6};
+  unsigned n{static_cast<unsigned>(unify.arguments.size())};
+  if (n == 0) {
+    return;
+  }
+  std::uint64_t mayCoerce{
+      (std::uint64_t{1} << std::min(n, maxCoercedArguments)) - 1};
+  std::uint64_t coerced{0};
+  do {
+    options.push_back([&, coerced](Assignment &a) {
+      a.symbols[unify.number] = nullptr;
+      a.twins[unify.number] = OpenTwin(coerced);
+      ++a.openCost;
+      unsigned offset(a.bindings.size());
+      a.bindings.resize(offset + unify.arguments.size());
+      llvm::SmallVector<const Type *, 4> elements;
+      for (std::size_t j{0}; j < unify.arguments.size(); ++j) {
+        const Type *element{types_.Variable(offset + j)};
+        elements.push_back(element);
+        const Type *expected{
+            coerced & (std::uint64_t{1} << j) ? element : types_.Open(element)};
+        if (!UnifyTypes(a, VarType(unify.arguments[j]), expected)) {
+          return false;
+        }
+      }
+      return UnifyTypes(
+          a, VarType(unify.left), types_.Open(types_.Tuple(elements)));
     });
     coerced = (coerced - mayCoerce) & mayCoerce;
   } while (coerced != 0);
