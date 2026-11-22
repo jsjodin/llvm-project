@@ -515,7 +515,7 @@ bool DebugDumpTypesAction::executeAction() {
                   : "char constant");
         }
         // The open twin of a constructor, and the arguments that take a
-        // ground value (docs/INPROGRESS.md, Open types).
+        // ground value (design document, "Open terms as built").
         if (goal < clause.openTwins.size() && clause.openTwins[goal]) {
           *os << ", open";
           std::uint64_t coerced{clause.openTwins[goal] >> 1};

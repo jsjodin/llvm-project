@@ -274,8 +274,8 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
       llvm::zip(arguments, callee.modes, types)) {
     if (!IsClosedType(type) && ClosedOpen(body, argument) &&
         OpenParameter(mode, body.vars[argument].type)) {
-      // Temporary (open types step 4(c), docs/INPROGRESS.md): code at a type
-      // variable reads closed(U) through its type_info, as U's word, which
+      // Temporary (docs/INPROGRESS.md, Open types: what is left): code at a
+      // type variable reads closed(U) through its type_info, as U's word, which
       // an unbound one has not.
       NotYet(at,
           "passing a closed(T) value that may be unbound where the "
@@ -284,7 +284,7 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
     }
   }
   if (openClosed && isMethod) {
-    // Temporary (open types step 4(c), docs/INPROGRESS.md).
+    // Temporary (docs/INPROGRESS.md, Open types: what is left).
     NotYet(at, "methods with closed(T) arguments that may be unbound");
     return;
   }
@@ -1223,7 +1223,7 @@ void MerkGenerator::HigherOrderCall(const Body &goal, const ProcedureBody &body)
   }
   for (auto [argument, mode] : llvm::zip(goal.arguments, modes)) {
     if (OpenParameter(mode, body.vars[argument].type)) {
-      // Temporary (open types step 4(c), docs/INPROGRESS.md): a closure's
+      // Temporary (docs/INPROGRESS.md, Open types: what is left): a closure's
       // entry would need to know which of its parameters take open words.
       NotYet(at,
           "higher-order calls with closed(T) arguments that may be "

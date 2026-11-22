@@ -38,7 +38,7 @@ install(FILES ${sound_array} DESTINATION lib/merkurius/sound
 # of the build.
 set(compiled_modules io float math require pair maybe list solutions
   process string char array open)
-# Open types are for the host only (docs/INPROGRESS.md, Open types), and
+# Open types are for the host only (design document, "Open terms as built"), and
 # their module needs the flag.
 set(host_only_modules open)
 set(compiled_objects)

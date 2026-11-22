@@ -6,11 +6,10 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Open terms (design document, Language extensions, "Open terms";
-// docs/INPROGRESS.md, Open types, step 4). A value of open(T) is a word of
-// T's open layout, which the runtime's generic walkers take with T's
-// type_info (runtime/open.h): full unification of a ground T with known
-// constructors calls T's own unify procedure (OpenUnifyProc), and of any
+// Open terms (design document, Language extensions, "Open terms"). A value of
+// open(T) is a word of T's open layout, which the runtime's generic walkers
+// take with T's type_info (runtime/open.h): full unification of a ground T with
+// known constructors calls T's own unify procedure (OpenUnifyProc), and of any
 // other T merk_open_unify, a fresh variable is merk_open_new_var's cell,
 // and a goal that may bind an older variable marks the trail where it can
 // fail (MLIRGenControl.cpp). Constructions, deconstructions and get_structure
@@ -831,7 +830,7 @@ bool MerkGenerator::ReportOpenShapes(const Body &goal,
     llvm::SmallPtrSet<const semantics::Type *, 8> seen;
     if (std::optional<std::string> why{
             OpenShapeNotYet(type, false, closedToo, seen)}) {
-      // Temporary (open types step 4, docs/INPROGRESS.md): the runtime's
+      // Temporary (docs/INPROGRESS.md, Open types: what is left): the runtime's
       // walkers stop on these; the compiler reports them where it can.
       NotYet(Where(goal.tokens),
           "open terms that hold " + *why + ", as values of type " +

@@ -68,8 +68,8 @@ struct Procedure {
 // free constructs, and with X bound deconstructs, or tests if f's
 // arguments are bound too; X = Y with one side free assigns, and with
 // neither tests. A function application or a field access is a call.
-// Of open terms (docs/INPROGRESS.md, Open types): X = f(...) with X `any`
-// is the WAM's get_structure, which binds X if it is an unbound variable
+// Of open terms (design document, "Open terms as built"): X = f(...) with X
+// `any` is the WAM's get_structure, which binds X if it is an unbound variable
 // and takes it apart if not; X = Y with neither free and one with an `any`
 // part is a full unification, which may bind variables on either side.
 ENUM_CLASS(UnifyKind, Construct, Deconstruct, Assign, Test, Call,
@@ -107,7 +107,7 @@ struct GoalModes {
   // Variables of open types made fresh unbound variables just before the
   // goal runs: a free argument of a construction not used again, or, when
   // no goal of a conjunction could run, one that a waiting goal waited for
-  // (docs/INPROGRESS.md, Open types).
+  // (design document, "Open terms as built").
   llvm::ArrayRef<VarId> fresh{};
   // The insts of the goal's nonlocal variables before it ran, in the
   // order of the clause's nonlocals for it; empty for a goal not run.

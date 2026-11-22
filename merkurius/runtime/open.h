@@ -7,11 +7,11 @@
 //===----------------------------------------------------------------------===//
 //
 // The open layout of a type, which values of open(T) have (design document,
-// Lowering, "Open layouts"; docs/INPROGRESS.md, Open types, step 2). It is a
-// fixed function of the type's ordinary descriptor, so that the runtime can
-// derive it for a type whose module never mentions open, which polymorphic
-// code can receive (decision D3). Ground code never uses any of this, and a
-// program that does not use open types links none of it.
+// Lowering, "Open layouts"). It is a fixed function of the type's ordinary
+// descriptor, so that the runtime can derive it for a type whose module never
+// mentions open, which polymorphic code can receive (decision D3). Ground code
+// never uses any of this, and a program that does not use open types links none
+// of it.
 //
 // In the open layout every word is a tagged word, and primary tag 7 is a
 // reference to a variable cell in every type, so that deref and bind need no
@@ -41,7 +41,7 @@
 #include "descriptor.h"
 
 // Variable cells, deref and bind, and the trail (design document, Runtime
-// system, "Support for open terms"; docs/INPROGRESS.md, Open types, step 3).
+// system, "Support for open terms").
 // An unbound variable is a one-word cell of the process's heap that refers
 // to itself, tagged kOpenVariableTag; fields and registers hold references to
 // it, and binding overwrites it, so a reference to a bound variable leads, by

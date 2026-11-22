@@ -7,12 +7,11 @@
 //===----------------------------------------------------------------------===//
 //
 // The value trail of a process (design document, Runtime system, "Support
-// for open terms"; docs/INPROGRESS.md, Open types, step 3): the (address,
-// old word) of each binding of a variable cell made while a choice point or
-// try goal that can bind open terms is live, so that backtracking into it, or
-// catching an exception there, can undo them. open.cpp's routines use it;
-// the scheduler only swaps and frees it, so that a program without open
-// terms links none of them.
+// for open terms"): the (address, old word) of each binding of a variable cell
+// made while a choice point or try goal that can bind open terms is live, so
+// that backtracking into it, or catching an exception there, can undo them.
+// open.cpp's routines use it; the scheduler only swaps and frees it, so that a
+// program without open terms links none of them.
 //
 // merk_trail is the trail of the process the thread runs, as merk_heap is its
 // heap: null until the process's first open choice point, allocated then

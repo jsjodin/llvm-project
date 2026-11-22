@@ -1,12 +1,12 @@
-% closed(T) values that may be unbound (docs/INPROGRESS.md, Open types,
-% step 4(c)). A closed(T) variable whose inst may have `any` in it holds
-% closed(T)'s open word, a box or a variable's reference, and so does a
-% parameter whose mode has `any` in it; a ground one holds T's word, at no
-% cost. Values are boxed where they meet an open word and unboxed where they
-% must be T's: at calls, at the exit, and in ordinary terms. So a hole of
-% type closed(T) can be taken out of an open term, passed around, filled
-% elsewhere, and unified with another. mmc has no open types, so the
-% outputs are checked by hand: each line says what it shows.
+% closed(T) values that may be unbound (design document, "Open terms as built").
+% A closed(T) variable whose inst may have `any` in it holds closed(T)'s open
+% word, a box or a variable's reference, and so does a parameter whose mode has
+% `any` in it; a ground one holds T's word, at no cost. Values are boxed where
+% they meet an open word and unboxed where they must be T's: at calls, at the
+% exit, and in ordinary terms. So a hole of type closed(T) can be taken out of
+% an open term, passed around, filled elsewhere, and unified with another. mmc
+% has no open types, so the outputs are checked by hand: each line says what it
+% shows.
 %
 % RUN: merkc -fopen-types %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -fopen-types -O0 %s -o %t.O0 && %t.O0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace

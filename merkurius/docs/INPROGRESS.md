@@ -222,7 +222,7 @@ only the narrow types and floats generate code for them.
   faster collector, but more code per type, and the copy, printing and
   `from_open` need the tables anyway. It can be added beside them later.
 
-*What open types need from this* (see "Open types", below):
+*What open types need from this* (design document, "Open terms as built"):
 
 - **One variable tag for every type.** `deref` and `bind` must not need a
   `type_info`, so tag 7 is the variable tag in every open layout. A type
@@ -407,11 +407,11 @@ later. In this order, each its own commit or commits:
    but for their `state(M, !S)` parameters, which wait for mutables
    (design document, Mode analysis, Determinism analysis and Lowering,
    "Trace goals"). Next: `try` and `atomic` goals.
-3. **Open types,** `open(T)` and `closed(T)` (below): the `any` inst,
-   variable cells and the trail. After nondeterminism, as backtracking
-   undoes a binding through the trail. Started 2026-11-21, ahead of item
-   2's `try` and `atomic` goals, by the user's decision: open types are
-   central to the language's design.
+3. **Open types,** `open(T)` and `closed(T)`: the `any` inst, variable
+   cells and the trail. Built 2026-11-21 and 2026-11-22, ahead of item 2's
+   `try` and `atomic` goals, by the user's decision: open types are central
+   to the language's design (design document, "Open terms as built"; what
+   is left, below).
 4. **Exceptions,** `throw` and `catch` with `invoke` and landing pads
    (design document, Lowering, "Exceptions"), which also undo through the
    trail.
@@ -1130,8 +1130,8 @@ The collector and the barrier, agreed 2026-11-08, each step its own commit:
    -O2, or at every N-th with `MERK_GC_EVERY_ALLOC=N`, for programs too long for
    the first.
 2. A nursery and an older generation, the remembered set, and the barrier on
-   `merk.ref_store` and `array_set`. `bind` does not exist until open types do,
-   and will use the same barrier.
+   `merk.ref_store` and `array_set`. Open types' `bind` will use the same
+   barrier (Open types: what is left).
 3. The large object space, built 2026-11-08 ahead of step 2: an allocation with
    a block of its own is marked where it is, traced in place, and freed if
    unreached, so its address does not change. Then timing, with a call-heavy
@@ -7777,7 +7777,7 @@ Guards, `select(Box, Pattern), Guard -> Goal`, a pure `semidet` goal run in
 the selector's predicate after the pattern matches (design document,
 "Guards, a later extension").
 
-With open types (Open types: `closed(T)`): each pattern variable's role by
+With open types (design document, "Open terms"): each pattern variable's role by
 its inst at the goal, which is Erlang's rule, instead of by where it
 occurs. A ground variable is a test inside the selector, as now. Any
 other, new, free or a hole, gets a fresh copy inside the selector, which
@@ -7792,637 +7792,46 @@ Under the first rule a hole in a pattern is a mode error, as a lambda that
 captures a variable that is not ground is, so nothing compiles now that
 the second rule would change.
 
-## Open types: `open(T)` and `closed(T)`
+## Open types: what is left
 
-Decided by the user 2026-11-21: open types are built now, ahead of `try`
-and `atomic` goals, behind `-fopen-types`, with `closed(T)` (below). The
-language, layout and runtime are the design document's (Language
-extensions, "Open terms"; Lowering, "Open layouts"; Runtime system,
-"Support for open terms"). They run on the host only: a device compile
-reports an open value, as GPU code makes no heap terms of its own (design
-document, GPU processes).
+Open types are built (design document, Language extensions, "Open terms as
+built"), behind `-fopen-types` and on the host only. These remain, each
+reported as not yet implemented where the compiler meets it:
 
-**Where the names live.** `open(T)`, `closed(T)`, `to_open`, `from_open`,
-`unify_oc`, `var` and `nonvar` are in a library module, `open`, as
-`mailbox` is in `process`: a program imports it, and importing it without
-`-fopen-types` is an error. No syntax is new, so the flag gates the type
-checker's and mode analysis's rules for `open(_)`, and the module.
-
-**How the type checker decides that a construction is open.**
-`open(T)` has `T`'s constructors, so each constructor `c` of a type
-`t(A1, ..., An)` with arguments `S1, ..., Sk` gets an open twin of type
-`(S1', ..., Sk') -> open(t(A1, ..., An))`, where `S'` is `open(S)`, or
-`closed(U)` unchanged when `S` is `closed(U)`. `open(open(S))` is
-`open(S)`. In a twin's arguments, a ground `S` is accepted where `open(S)`
-is expected, as the design document has it; elsewhere `to_open` converts.
-Every construction could then type-check both ways: `X = [1, 2],
-io.write(X)` has `list(int)` and `open(list(int))`. The rule: **a clause
-uses twins only if it does not type-check without them, and then as few
-as it can.** The checker checks a clause as now; only if that fails, and
-the module imports `open`, it checks the clause again with the twins and
-the coercions as candidates. Of its assignments it keeps those in which
-**each variable that can be open is**: whose set of open variables no
-other's strictly contains. Of those it keeps the fewest twins. Two left
-that differ are an ambiguity, reported as now.
-- *Why each variable that can be open is, before the fewest twins:* in
-  `D1 = [1, 2 | H1] - H1`, the fewest twins, only the pair's, would take
-  `[1, 2 | H1]` and `H1` as ground values. Mode analysis needs the hole
-  `H1` open to leave it unbound, which the twins of the list's cells give.
-  Fewest coerced arguments first ties there instead: the literals in one
-  assignment, the list and `H1` in the other.
-- *If both passes fail,* the second's errors are reported if its first
-  comes later in the clause, as the twins then took away the first pass's
-  first error, such as "no declaration of `[|]/2` fits" for an open list;
-  otherwise the first's.
-- *A limit:* only the first 6 openable arguments of a twin may take a
-  ground value, as each such argument doubles the twin's options.
-- *Why:* ground code is typed exactly as before, and pays nothing; a
-  clause pays for the second pass only if it needs an open value, which
-  a declared `ia`/`oa` argument, an `open(_)` type or a call of the
-  module's predicates forces.
-- *Rejected: twins as candidates in every clause.* Every construction
-  doubles the assignments, and a ground clause is ambiguous unless ground
-  is preferred anyway.
-- *Rejected: `open(T)` as a supertype of `T`, by `coerce`.* The layouts
-  differ, so a coercion that is free for subtypes would copy, and `coerce`
-  is for subtypes the manual defines.
-
-**`closed(T)` holds no open value.** A written type with `open(_)` inside
-`closed(_)` is an error. In polymorphic code, where `T` can be `open(U)`
-only at the call, mode analysis makes `closed(T)`'s argument `ground` even
-under `open(_)`, so no unbound variable gets in, and the walkers follow
-the `type_info` back to the open layout (below).
-
-**Steps,** each its own commit or commits:
-1. **The front end.**
-   - (a) Done 2026-11-21: `-fopen-types`, the `open` library module
-     (declarations only), and the type checker: open twins, the coercion of
-     ground arguments, the second pass, `open(open(S))` as `open(S)` and
-     `open(closed(U))` as `closed(U)` (in `TypeContext`), and `closed(T)`
-     with an open type in its argument rejected. `ClauseTypes::openTwins`
-     records each twin and its ground arguments, and `-fdebug-dump-types`
-     prints them. Only the library's `open.m` needs the flag, not a
-     program's own module of that name. Tests: `Semantics/types/open/`,
-     the design document's examples with their types and twins, and the
-     errors.
-   - (b) Done 2026-11-21: mode and determinism analysis.
-     - Two new `UnifyKind`s: `GetStructure`, X = f(...) with X `any` of an
-       open type or `closed(T)`; and `Unify`, X = Y of a type mentioning
-       `open` with an `any` part on either side. A solver type's
-       unification of two `any` values stays a `Test`, as before.
-     - A get_structure's free arguments become `any`, or `ground` for
-       `closed/1`'s own argument and a twin's ground argument. X becomes
-       `bound(f(...))`. It is `det` only if the type has one functor and
-       every argument is free and open (`GoalModes::canFail`).
-     - **Fixed in step 4(b):** a free argument of a ground type, a twin's
-       ground argument or `closed/1`'s, waits for a goal of the
-       conjunction to bind it. It is taken out of its field, failing if that
-       is unbound, only when no goal can run otherwise. Before, in
-       `X = [1 | _]` the head was taken out of X and then tested against 1,
-       so an unbound head failed rather than being bound to 1.
-     - Fresh variables, in `GoalModes::fresh` and printed as `fresh V`.
-       When a conjunction is stuck, it makes fresh a free open variable
-       that a waiting goal waits for, avoiding one a waiting construction
-       would make, so the hole is chosen rather than the list around it.
-       A construction's free open argument that is not used again is made
-       fresh too, as in `fill(bundle(closed(...), _))`.
-     - `closed(X)` with X not ground is a mode error.
-     - **Not in the design document:** determinism analysis normally
-       treats a goal that binds no variable used outside as having one
-       solution. A goal that uses an open variable from outside now counts
-       as binding one, as it may bind that variable differently in each
-       solution. Without this, `( X = [] ; X = [_ | _] )` with X `ia` was
-       `semidet` instead of `nondet`. get_structure is never a switch.
-       - Decided by the variable's inst, since step 4(a): one whose inst
-         has `any` in it before some goal (`BodyVarInfo::any`). Step 1
-         looked only at the outermost type constructor, which missed
-         `list(open(int))` and a type variable that is `open(U)` at the
-         call. A type test that recursed would still miss the latter, and
-         would make ground polymorphic disjunctions nondet. Variables that
-         switch detection makes take the flag from the insts of what they
-         hold.
-     - Already there: `free` does not match `any`, and the `promise_pure`
-       rule for negated contexts.
-     - Codegen reports the new kinds, fresh variables and unifications of
-       open-typed variables as not yet implemented (Temporary, step 4).
-     - **For step 4:** an implied mode against an `any` value, such as
-       `Hole = to_open(Tail)`, whose result mode is `out`, is a
-       `GoalModes::implied` call whose test must be a full unification.
-       So must a test, or a deconstruction's argument test, whose insts
-       have `any` parts.
-     - Tests: `Semantics/modes/open/` and `CodeGen/open-types-not-yet.m`.
-   - (c) Done 2026-11-21: the other checks.
-     - **Never unique:** a construction of an open-typed or `closed(T)`
-       variable is shared, deeply, and so is a full unification's result.
-       So an open term given to a `uo` argument is a mode error. There is
-       no structure reuse pass yet; when one comes, it must skip open
-       cells.
-     - **Parallel loops:** a `parallel do` body may use an open value its
-       iterations share only as `from_open`'s first argument. Any other use
-       is an error: a get_structure, a call, or a term made from it, since
-       each may bind it. The check is in `MLIRGenOpenMP.cpp`, beside the
-       other `parallel do` checks, on the body procedure's head variables.
-       It is conservative: a callee that only reads is still rejected.
-     - **GPU code:** the GPU code checker reports any goal using a value
-       whose type has `open(T)` or `closed(T)` in it, in a GPU process
-       kind's code, in what that code calls, and in target regions. This
-       catches it in the host compile, before a device compile.
-     - Tests: `Semantics/processes/gpu-open.m`,
-       `CodeGen/omp-parallel-do-open.m`, and `mk` in
-       `Semantics/modes/open/open-mode-errors.m`.
-2. **Open layouts.** Done 2026-11-21. The rule is in the design document,
-   Lowering, "Open layouts".
-   - **Runtime,** `runtime/open.h` and `open.cpp`: tag 7 as the variable
-     tag; `OpenEncodingOf`, a kind's encoding; `OpenTagOf`, a functor's
-     open tags; `CellTag`, the tag rule for any number of tags; and
-     `StaticIntBox`, for −128 to 1023. Tests: `unittests/Runtime/OpenTest.cpp`.
-   - **Descriptors:** lowering sets `kOpenSame` (2), and `kClosed` (4) on
-     `open.closed/1`'s, and `runtime/descriptor.h` has the kind `Open` for
-     `open.open/1`, which nothing emits until step 4 makes `type_info`s of
-     open types. Step 4 compiles the `open` module, which defines both
-     descriptors; until then it was in MLIRGen's uncompiled library, so a
-     program's `closed(T)` got a linkonce one.
-     Test: `CodeGen/open-descriptors.m`, which also runs `closed(T)`.
-   - **Changed from the plan:**
-     - Characters and integers of 32 bits or fewer are shifted, not
-       boxed. They always fit, so it costs no allocation and adds no second
-       encoding of a type.
-     - `closed(T)` is a flag on a notag descriptor, not a new kind. Outside
-       `open(_)` it is a notag, so the ordinary walkers (write, copy, trace,
-       encode) need no new case.
-   - **For step 4:** the compiler's own open `TermLayout`, made when there
-     is code that uses it. Its tags must be `CellTag(..., 7)`'s, the
-     runtime's rule; a lowering test against `OpenTest`'s cases keeps the
-     two in step. Done in step 4(b): `CodeGen/open-construct.m` passes
-     compiled cells to the runtime and back.
-3. **The runtime.** Done 2026-11-21, in `runtime/open.h` and `open.cpp`,
-   with the trail in `trail.h`.
-   - **Variables:** `merk_open_new_var` makes a one-word cell on the
-     process's heap that refers to itself, tag 7. `merk_open_deref` follows
-     a chain to a value or an unbound variable. `merk_open_bind` overwrites
-     an unbound variable's cell. Binding a variable to itself is the
-     caller's to avoid, as unify does.
-   - **The trail:** one per process, a growable `malloc`ed array of
-     (address, old word). `merk_trail` is thread-local and swapped in
-     `RunProcess` as `merk_heap` is, one more word per switch. It is
-     allocated at the process's first mark and freed when the process
-     ends. A binding is trailed only while a mark is live, at the cost of
-     one load and compare. There is no age test, as E5 found trailing every
-     binding within noise.
-   - **Changed in step 4: the marks are a stack.** `merk_open_trail_mark`
-     pushes the trail's top and returns the mark's index; `undo(mark)` undoes
-     to that mark's top, and `release(mark)` pops it and every mark above
-     it, so releasing twice does nothing. `merk_open_trail_marks()` gives the
-     depth, which a commit saves and releases to. Step 3 had a count of live
-     marks, which could not release the marks a commit skipped.
-   - **The protocol, for step 4:** a goal that catches failure and may bind
-     an open variable brings its own mark: `merk_open_trail_mark` before it.
-     That is a disjunction, an if-then-else's condition, a negation, a
-     `try`, and a nondet call's choice point.
-     - `merk_open_trail_undo(mark)` before each retry, or after a failed
-       condition or a negation's goal.
-     - `merk_open_trail_release(mark)` when it is gone: at its last
-       alternative, after a commit, or at its end. When no mark is live, the
-       trail is emptied.
-     - Mode analysis says which goals need marks: those with an `any`
-       nonlocal. A failure that no such goal catches leaves its bindings,
-       which nothing can observe.
-   - **The collector refuses open terms until step 5** (Temporary):
-     `ForwardValue` aborts on the kind `Open`, which it used to leave as "a
-     word that is not a pointer", unmoved. A collection with trail entries
-     aborts too, since their addresses would go stale. So step 4's tests run
-     in heaps that do not collect, or step 5 comes before programs that do.
-   - Tests: `unittests/Runtime/OpenTest.cpp`, which covers new variables,
-     chains, undoing to a mark, nested marks, a trail of 100,000 entries,
-     and a trail for each process.
-4. **Code generation,** in four parts:
-   - (a) Done 2026-11-21: the runtime's generic walkers and what calls them.
-     - **Walkers,** in `runtime/open.cpp`, driven by T's `type_info`:
-       `merk_open_unify` and `merk_open_unify_oc` (full unification, with
-       and without the occurs check), `merk_open_to_open`,
-       `merk_open_from_open` (fails on an unbound variable, and returns the
-       value itself when both layouts are the same and it has no variable
-       cell), `merk_open_is_var`.
-       - A unification or occurs check that walks more than 2^14 cells
-         remembers the pairs it has seen, so cyclic terms end.
-       - `from_open` copies a shared cell once, and copies a list's spine
-         in a loop, not by recursion.
-       - The runtime has no C++ library: these use a small `malloc`ed hash
-         table and arrays, not std containers or LLVM's ADT, which would
-         bring in `operator new` and `libLLVMSupport`.
-     - **The library:** `library/open.m` is compiled now (host only, with
-       `-fopen-types`). Its predicates are `foreign_proc("C")` calls of the
-       walkers. `var` and `nonvar` are impure.
-     - **Code generation** (`lib/CodeGen/MLIRGenOpen.cpp`):
-       - A value of `open(T)` is a `!merk.word` in T's open layout.
-       - A full unification (`UnifyKind::Unify`) is a `merk_open_unify`
-         call and a guard. A comparison that reaches an open type stops the
-         program (`merk_open_compared`).
-       - A fresh variable is `merk_open_new_var`'s cell, made where mode
-         analysis put it. Determinism analysis copies `GoalModes::fresh` into
-         `Body::fresh`, renamed to the body's variables, for every kind of
-         goal, and keeps it when it rebuilds a disjunction into a switch.
-       - Trail marks, in procedures where a variable's inst has `any` in it
-         or its type mentions `open` or `closed` (Temporary, part (d)): a semidet if-then-else
-         marks before its condition, releases at the then part, and undoes
-         and releases at the else part. A disjunction undoes before each
-         later branch and releases at the last. A soft if-then-else undoes
-         and releases at the else part. A negation undoes and releases on
-         both paths. A commit saves `merk_open_trail_marks()` and releases
-         to it after the solution.
-       - The collector's note for an open word is `open(T)`'s `type_info`,
-         a cell that `merk_open_type_info` keeps for each T, since making it
-         on the heap would be a safepoint. It is made at the procedure's
-         start for a ground T, after T's `type_info` for a variable T.
-         Static `type_info`s no longer count as allocating in `Liveness`.
-     - **One open-type test, in `TypeContext`:** `IsOpen`, `IsClosed`,
-       `IsOpenOrClosed` and `MentionsOpen`, which mode and determinism
-       analysis, the GPU checker, `MLIRGenOpen.cpp` and the `parallel do`
-       check all call. There were five copies, and one had drifted.
-     - **Bugs fixed on the way:**
-       - Mode analysis made a nonlocal fresh inside a negation, then again
-         outside it, so the two uses were different variables. Only the
-         clause body's conjunction may make its nonlocals fresh; a nested
-         one leaves them to the conjunction around it.
-       - MLIRGen never cleared its set of noted values between procedures.
-         A value erased in one procedure could share its address with a new
-         block argument, which then got no note.
-     - **Reported at compile time where the type is concrete;** through a
-       type variable the runtime still stops, with a message:
-       - An open term that holds an array, a higher-order value or an
-         existentially typed constructor, which the walkers stop on: at
-         calls of `open`'s predicates and at full unifications. Inside
-         `closed(U)` only at a unification, since `to_open` and `from_open`
-         share the box (`OpenShapeNotYet`).
-       - A call of the module `process` with an argument whose type has
-         open terms in it, until step 6 copies messages
-         (`ReportOpenMessages`). Printing one stops at run time with a
-         message, and so does encoding one for another node. *Step 6
-         copies and prints them; only a receive by `process` is still
-         reported, and encoding still stops.*
-     - **For when user-defined equality is implemented:** code generation
-       refuses those types today, so no value of one reaches the open
-       walkers. Then the walkers must call the type's own unify entry for
-       a `closed(U)` box and for anything they reach through a type
-       variable, as `open(list(T))` with T such a type would. Otherwise they
-       compare structurally, with the wrong equality and no sign. A
-       descriptor flag for user-defined equality, which `GroundEqual` and
-       `OpenUnify` check, would do.
-     - **Still not done, each reported as not yet implemented:** a
-       polymorphic `open(T)` whose T is not a type variable nor ground,
-       such as `open(list(T))`, gets no note (step 5). `closed(T)` values
-       that may be unbound came in (c).
-     - Tests: `CodeGen/open-terms.m` (round trips of each kind of value,
-       unification, fresh variables, undoing on disjunction, condition and
-       negation, and that a collection refuses an open term),
-       `CodeGen/open-types-not-yet.m`, `not_fill` in
-       `Semantics/modes/open/open-modes.m`, and the trail tests in
-       `unittests/Runtime/OpenTest.cpp`.
-   - (b) Done 2026-11-21: constructions, deconstructions, tests and
-     get_structure, inline (`lib/CodeGen/MLIRGenOpen.cpp`).
-     - **The compiler's open layout:** each open type used has a
-       `merk.type_def` of its own, `open.open(T)`, marked `open`, with T's
-       constructors and every field a word. Lowering lays it out with tags
-       0 to 6 (`CellTag(..., 7)`'s rule) and shifts an enumeration's
-       constants; a notag is its argument, as in `OpenEncodingOf`. The
-       existing `merk.construct`, `merk.deconstruct` and `merk.has_functor`
-       lowering then works on open cells, static cells included. No
-       descriptor tables were needed: the runtime derives the layout from
-       the ordinary descriptor.
-     - **Arguments:** an open argument is its word. A ground one, a twin's
-       coerced argument or a `closed(U)`, goes through `to_open`, which
-       boxes a `closed(U)`. A free ground argument that a read takes out of
-       a field goes through `from_open`, and fails if the field is not
-       ground.
-     - **get_structure** derefs X and tests for tag 7. An unbound X is
-       bound to a new cell whose free arguments are new variables, or the
-       goal fails if one of them is ground. A bound X is read: its functor
-       tested, free arguments given their fields, bound ones unified with
-       them by `merk_open_unify`. Deconstructions and tests deref X first,
-       since its word may be a bound variable's reference.
-     - **Notes for the collector:** each intermediate open word is noted
-       with open(T)'s `type_info`, made once per procedure and T. A
-       `closed(U)` box's note is open(closed(U))'s, which the runtime
-       makes, although as a type open(closed(U)) is closed(U).
-     - **Temporary, for (d), done in (d):** deref, bind and `to_open` of a
-       scalar were runtime calls.
-     - **Found on the way, fixed after it:** the type checker gave tuples
-       no open twin, so `open({int, string})` could not be built: `{3, "s"}`
-       there was a type error. A tuple of n elements now has twins
-       (S1', ..., Sn') -> open({T1, ..., Tn}), each Ti a new type variable
-       and Si' open(Ti) or Ti, as a constructor's (`AddTupleTwins`).
-     - Tests: `CodeGen/open-construct.m` (constructions with holes, read and
-       write modes, undoing, and the tags of types where the open layout
-       shares a tag the ordinary one does not, against the runtime's
-       `to_open` and `from_open` both ways), `CodeGen/open-types-not-yet.m`.
-   - (c) Done 2026-11-22: `closed(T)` values that may be unbound.
-     - **Two representations:** a `closed(T)` variable whose inst has
-       `any` in it before some goal (`BodyVarInfo::any`), or one given an
-       open word, holds closed(T)'s open word: a box, or a variable's
-       reference. A ground one keeps T's word, at no cost. A parameter
-       whose mode has `any` in it takes the open word (`OpenParameter`).
-     - **Conversions** (`ClosedAs`): after each atomic goal, a ground value
-       of such a variable is boxed. At calls and at the exit, a value is
-       boxed or unboxed to the parameter's representation. Unboxing is
-       `merk_open_closed_value`, which stops the program if the value is
-       still unbound; mode analysis means that cannot happen.
-     - **Goals** (`ClosedUnify`): `X = closed(Y)` with X bound unboxes X.
-       As a get_structure, an unbound X is bound to a box of Y, or the goal
-       fails if Y is free. `X = Y` is `merk_open_unify` with closed(T)'s
-       `type_info`. A free `closed(U)` argument of a get_structure or a read
-       takes the field's word, so a hole can be taken out of an open term,
-       passed around and filled elsewhere.
-     - **Ordinary types with closed parts** unify by their own unify entry.
-       An ordinary term holds a `closed(U)` as U's word, which is ground
-       there.
-     - **Temporary, each reported as not yet implemented:**
-       - an ordinary term built from a `closed(T)` that may be unbound,
-         which would need the term to hold its open word (constructions
-         now record their entry insts for this);
-       - passing one where the callee has a type variable, whose code reads
-         `closed(U)` through its `type_info` as U's word;
-       - higher-order calls, and methods, with such arguments, since a
-         closure's entry would need to know which parameters take open
-         words.
-     - Tests: `CodeGen/open-closed.m` (holes filled in place and
-       elsewhere, two holes unified, oa outputs, ground values at ia
-       parameters, a filled hole in ordinary and open terms, and a pair
-       with open and closed parts), `CodeGen/open-types-not-yet.m`.
-   - (d) Speed, in three parts, measured with `benchmarks/open-holes`
-     (design document, "Measurements", "Open terms built through holes").
-     - **Part 1, done 2026-11-22: inline code.** 0.65 s of user time to
-       0.15 s.
-       - A ground T's open(T) `type_info`, for the collector's notes, is a
-         static `merk.type_info`; only a type variable's T still asks the
-         runtime (`merk_open_type_info`, under a lock). It was 46% of the
-         benchmark's instructions, made at every procedure entry.
-       - Lowering expands `merk_open_deref`, `merk_open_bind`,
-         `merk_open_new_var`, `merk_open_box` and `merk_open_unbox` inline on
-         the host (`Lowering.cpp`, `LowerOpenCall`), each with the runtime
-         function as its slow path. Bind reads the thread's trail through a
-         stand-in like the heap's (`merk.trail_address`, expanded after the
-         optimizer, and taken again in loops) and calls the runtime only when
-         a mark is live. A new variable and a box are bump allocations; the
-         runtime's own allocations never collect, so the slow paths are not
-         safepoints.
-       - `to_open` and `from_open` of scalars are inline (`OpenScalar`): an
-         enumeration, a narrow integer or a character is shifted past the
-         tag, an int, float or string is boxed, a `closed(U)` is boxed. Other
-         types still go through the walkers, which copy.
-       - Not done: a static box for a small int. A compile-time constant's
-         box is a static cell already, and an int made at run time costs a
-         bump allocation, so the table's branch would save little.
-       - Code that does not use open types is unchanged: 134 programs, the
-         benchmarks and the CodeGen tests without open types, give the same
-         assembly at -O2 before step 4(c) and after this.
-     - **Found on the way:** a commit leaves its goal's marks live when the
-       procedure that commits has no open variable, though a callee's choice
-       point marked: `first(X) :- promise_equivalent_solutions [X] gen(X)`,
-       with `gen` nondet over a local open term, leaves a mark per call, so
-       every later binding is trailed and a collection refuses the trail.
-       Fixed 2026-11-22: with -fopen-types (`GenerationOptions::openTypes`)
-       every commit on the host releases its goal's marks, whatever the
-       procedure's variables. Lowering inlines `merk_open_trail_marks` and
-       `merk_open_trail_release`, so a commit costs two loads of the trail
-       when it has nothing to release. A module compiled without
-       -fopen-types still does not release, which matters only if it
-       commits to a callee that marks: open types are behind the flag
-       until then. Test: `CodeGen/open-commit-marks.m`.
-     - **Part 2, done 2026-11-22: marks only around goals that may bind a
-       variable older than them.** 0.13 s of user time to 0.07 s, and 1057
-       instructions an element at the start of (d) to 130.
-       - A disjunction, an if-then-else's condition or a negation's goal
-         takes a mark only if it names a variable that is bound before it
-         and whose type mentions open types or whose inst has `any` in it
-         somewhere (`BindsOlder`, `MLIRGenOpen.cpp`). What a goal binds of
-         its own variables is unreachable once it has failed. Commits keep
-         their rule: always, with -fopen-types.
-       - **Rejected: a flag on `Body` from the insts before each goal,** set
-         where determinism analysis builds bodies. Switch detection and cse
-         rebuild conjunctions and disjunctions without copying them, so the
-         flag was lost and a disjunction's binding went unundone
-         (`open-terms.m` caught it). Code generation knows which variables
-         are bound before a goal anyway, from its values.
-       - Lowering takes a mark inline too, with the runtime as the slow path
-         when there is no trail or no room in its marks.
-       - Test: `CodeGen/open-trail-marks.m`, where marks go and where they
-         do not, and 1000 marks live at once.
-     - **Part 3, done 2026-11-22: a unify procedure per open type,** beside
-       the generic walker. `benchmarks/open-unify`: 1.22 s of user time to
-       0.13 s, and the unification itself from about 1600 instructions an
-       element to 82.
-       - `X = Y` on a ground open type calls `unify_open.<type>(x, y,
-         walk...)`, semidet (`OpenUnifyProc`, `MLIRGenOpen.cpp`). It
-         dereferences both words, binds an unbound side to the other, and
-         switches on the functor. A scalar field is unified inline: a
-         Shifted one by its word, a Boxed one by its boxes' values. A field
-         of a type with known constructors calls that type's procedure, the
-         last by a tail call. Any other field, closed(U), and every type with
-         type variables in it go to the walker, as before.
-       - **Cycles:** unification without the occurs check makes cyclic
-         terms, which must still unify in finite time. Along last fields,
-         Brent's method finds a pair of cells met again: the procedure
-         passes on the pair saved at each power of two of steps, and a pair
-         met again is one being unified already, so it succeeds, as the
-         walker's remembered pairs do. Other fields go one level deeper with
-         a walk of their own, and past 16384 levels the walker takes the
-         rest. An endless run has either endless depth or an endless loop at
-         one level, so it ends either way.
-       - **Notags are their argument,** as the runtime's encoding
-         AsArgument is (`OpenUnifiedAs`): open(U), and a type of one
-         constructor of one argument. A notag's procedure would pass its
-         argument's procedure the pair it just saved, which Brent's check
-         takes for a cycle; `wrap` in the test caught it.
-       - **Rejected: counting cells and handing the rest to the walker
-         after 16384,** as the walker itself does. Past that count the
-         walker remembers every pair in its table, which was 58% of the
-         instructions on a list of 300,000 elements.
-       - Deref is loop-free (`Lowering.cpp`): one step inline, which is all
-         of a variable bound to a value, and the runtime for a longer chain.
-         The loop's back edge had a stack-limit check at every step, four an
-         element in the unification. `open-holes` went from 134 to 110
-         instructions an element.
-       - **Fixed 2026-11-22: `from_open` is impure,** as `var/1` is. It
-         can fail on a term with a hole and succeed once the hole is bound.
-         Pure, mode analysis was free to run it before the goals that bind
-         the holes: in `holes(1, N, A), full(1, N, B), same(A, B),
-         from_open(A, G)` it ran `from_open` before `full`, and it failed.
-         Making it impure needed mode analysis to keep impure goals in
-         place, which it did not: no goal moves across one now (reference
-         manual, "Impurity"). The goals waiting before it run first, with
-         fresh variables if need be, or they are a mode error with mmc's
-         note at the impure goal. Tests: `Semantics/modes/impure-barrier.m`,
-         `Semantics/purity/open-from-open.m`, and `late` in
-         `CodeGen/open-unify.m`.
-       - Test: `CodeGen/open-unify.m`, every field encoding, holes, undo,
-         cyclic lists and a cycle through another field, polymorphic code,
-         and lists of 200,000 at -O0.
-5. **The collector:** variable cells, trail entries as roots, chains
-   shortened as it copies, and `bind`'s barrier, the remembered set's.
-   Done 2026-11-22, but for the barrier:
-   - **Open layouts:** the collector traces an open(T) value by T's open
-     layout (`runtime/roots.cpp`, `ForwardOpen`): boxes, closed(T)'s box of
-     T's ordinary word, notags as their argument, and cells by the open
-     tags. It reads those from the descriptor itself, so that a program
-     without open terms links none of `open.cpp`. They are the ordinary
-     tags when those leave tag 7 unused, which `byTag[7]` says; otherwise
-     the rule with 7 tags is tried against each functor, which only a type
-     of more than 6 constructors with arguments needs.
-   - **Variable cells:** an unbound one is copied and refers to its new
-     self. A reference to a bound one is replaced by its binding, which
-     shortens the chain, unless the binding is on the trail: undoing it
-     must find the references still going through the cell, so such a
-     cell is copied with its binding. A bitmap per chunk marks the trailed
-     cells, made only when the trail has entries.
-   - **Trail entries** are updated after every root, as the roots reach
-     every live variable cell. An entry whose cell nothing reached is
-     dead: it is pointed at a scratch word in the new heap, so that the
-     marks, which are trail tops, stay as they are. Rejected: removing
-     dead entries, which would renumber the marks.
-   - **Not done: `bind`'s barrier.** The heap is not generational yet, so
-     there is no remembered set to record old cells bound to young values.
-     It comes with generations, with array `set`'s barrier.
-   - **Kept type_infos:** a polymorphic open(list(T)) live across a
-     safepoint had no type_info to describe it, as making list(T)'s on the
-     heap is a safepoint itself; it did not compile ("a garbage collector
-     root ... whose type_infos are not known"). The runtime now keeps a
-     type_info for each type, made from its arguments' kept ones, and
-     code generation builds one argument at a time with foreign calls,
-     which are no safepoints (`merk_kept_type_info_begin`). It also fixed
-     `merk_open_type_info`, which kept a cell that pointed at T's
-     type_info as given, a cell on the heap when the caller made one,
-     which a collection moves.
-   - **Found, fixed: -O2 code passed `bind` a variable from before a
-     collection** (`CodeGen/open-construct.m`, collecting at every
-     allocation). The runtime's slow paths took and returned words as
-     integers, and the optimizer, which runs before statepoints are made,
-     merged the bind's ptrtoint with the tag test's before an allocation,
-     and passed the integer through a phi of PRE's. They take and return
-     heap pointers now (`Lowering.cpp`), and `Statepoints.cpp` reads a
-     root's bits again at each use that needs its address
-     (`ReadAtUses`), lifting an integer phi of reads to a phi of the
-     pointers. A comparison or a tag needs only bits a move keeps, so
-     those stay. 3 of the 134 programs without open types change, by a
-     spill or a reload each.
-   - **Found, fixed: a list of open terms written out was "too ambiguous"**
-     past about 10 elements: each cell's twin may take a ground head, which
-     doubles the second pass's assignments for each one. The type checker
-     now prunes, as it goes, the assignments that `KeepMostOpen` would drop
-     at the end (`PruneFinished`), over the variables whose goals have all
-     been checked (`Semantics/types/open/open-long-lists.m`).
-   - Tests: `CodeGen/open-gc.m`, collecting at every allocation, and
-     every runtime test of open terms also run that way. The benchmarks
-     no longer give the heap one chunk for the whole run.
-6. **Messages and printing:** `copy_term` semantics for an open message,
-   and `io.write` printing `_1`, `_2`. Done 2026-11-22.
-   - **Decided 2026-11-22: impure predicates in `open`** for terms with
-     holes: `open.write`, `open.string` and `open.send`, which take `ia`,
-     and a pure `open.receive`, which gives `oa`. What is printed or sent
-     changes when a variable is bound, as `from_open`'s result does.
-     `io.write` and `process.send` keep `in`, and take ground open terms.
-     - Rejected: an `ia` mode on `io.write` and `process.send`. Purity
-       belongs to a predicate, not a mode, so the observation would be
-       pure, unlike `from_open`.
-     - Rejected: an impure write but a pure send. The sender's later
-       bindings do not reach the copy, which tells when the send ran.
-   - **Receiving.** `process.receive` gives its message `ground`, so a
-     call of it, or of `request` or the selectors, whose message type has
-     open terms in it is reported as not yet implemented
-     (`ReportOpenMessages`). `open.receive` takes the oldest message with
-     no selector. A selector with an `ia` mode would lift this.
-   - **Copy** (`runtime/copy.h`, `CopyOpen`), on the host only. It walks
-     T's open layout with the collector's dispatch (`OpenCellFunctor`, now
-     in `open.h`). A map that lasts for the whole message
-     (`Fragment::OpenCopies`, `runtime/word-map.h`) gives each unbound
-     variable one new variable, however often the message holds it. It
-     also gives each copied cell, so that a cycle ends and a shared cell
-     is copied once. Bound variables are copied as their values, and
-     `closed(T)`'s box is copied by the ordinary copy. A copy for a GPU has
-     no map and stops with a message; encoding for another node still
-     stops too.
-   - **Printing** (`runtime/write.cpp`, `WriteOpen`). It numbers unbound
-     variables `_1`, `_2` in the order it meets them, with one numbering
-     for the whole call, so a variable has one number in every open value
-     of a tuple. A cell already on the path from the root prints as
-     `...`. A notag's word is its argument's, so an unbound `open(wrap)`
-     prints as `wrap(_1)`, which is all it can become.
-   - **Found, fixed: `L = [A, A, _], L = [9 | _]` failed.** With `L`
-     bound, mode analysis deconstructed it and tested the hole's word
-     against 9. A deconstruction whose argument has a ground type where
-     the part is not ground is now a get_structure, which binds the hole.
-     With the functor known, only the argument can fail
-     (`Semantics/modes/open/open-modes.m`, `bound_head`).
-   - Tests: `CodeGen/open-write.m` and `CodeGen/open-message.m`, at -O2
-     and -O0 and with a collection at every allocation. The message test
-     has the same variable twice in a message, cycles, every field
-     encoding, and a round trip through a child process. Both ran clean
-     under valgrind. The 134 programs without open types compile to the
-     same assembly.
-7. **Tests and a measurement:** difference lists, a type inferencer by
-   unification, and E5's list built through holes, compiled, against E5's
-   C model. Done 2026-11-22.
-   - `CodeGen/open-dlist.m`: the design document's two difference-list
-     examples, run, a tree flattened in order through a hole passed down,
-     and a queue that adds at its end. A second close of a hole fails.
-   - `CodeGen/open-infer.m`: a type inferencer for a small functional
-     language, by unification with the occurs check, with let-polymorphism
-     by inferring a let-bound name's definition again at each use. Its
-     environment's bindings are never holes, so the conditions that test
-     them are in `promise_pure` scopes.
-   - **E5's program was not kept,** so its rows were rebuilt from its
-     description (`experiments/open-holes`). `ground-holes.m` is the
-     ground counterpart, built front to back by last call modulo
-     constructor.
-   - **Result** (design document, Measurements, "Open terms built through
-     holes"). Without collections the compiled code is 1.4 times the
-     model, open and ground alike, and building through holes costs 2.6
-     times the ground build, against E5's 2.3. With collections both are
-     far slower: the collector copies the list still being built, at about
-     510 instructions a ground cell, and takes 2.27 of the ground program's
-     2.71 seconds.
-
-### `closed(T)`
-
-
-Decided 2026-11-04: `closed(T)` comes with open types, not after them. It
-lets a type say which parts are open, where `open(T)` alone is deep: every
-argument at every depth becomes open, so filling a hole with a large ground
-value means `to_open` on all of it, a copy if it has raw fields, and
-`from_open` copying it back.
-
-```mercury
-:- type bundle ---> bundle(closed(big), closed(big), closed(big)).
-
-    % open(bundle): a field may be unbound, but once bound holds a ground big.
-Hole = closed(Chunk)    % one small box holding the pointer; Chunk is not touched
-```
-
-`closed(T)` is a library type, `:- type closed(T) ---> closed(T).`, so
-outside `open(_)` it is a notag type: `T`'s word, at no cost. Under `open(_)`:
-
-| Where | What changes |
-| --- | --- |
-| Type checker | `closed(T)`'s argument under `open(_)` stays `T` |
-| Mode analysis | That argument is `ground`, under inst `any` |
-| Open layout | A one-word box of `T`'s word, with no descent into `T` |
-| Descriptors | The constructor's kind is `Closed`; no other field is needed |
-| `to_open`, `from_open` | Add or remove the box; the value is shared |
-| Unification | Both bound: `T`'s ordinary unify; the occurs check stops there |
-| Collector, message copy, printing | The walker changes to the ordinary layout there |
-
-Ground code, the heap and the trail do not change. A bound hole is a write
-into an older cell, so it needs the remembered set, as every `bind` does.
-
-- **`closed(open(U))`** cannot be ruled out in polymorphic code. The mode rule
-  covers it, since a value with unbound variables is not `ground`, and the
-  walker follows the `type_info`, back to the open layout.
-- **A unique value put in `closed(T)` becomes shared,** so it can no longer be
-  updated in place.
-- **A message still copies the value:** `closed(T)` saves the copies inside a
-  process. A hole cannot be filled from another process either, since open
-  values are sent as `copy_term` does, so the process holding the hole binds it.
-- **Not for building in order.** `foo(bundle(X, Y, Z)) :- recv(X), recv(Y),
-  recv(Z).` needs neither: mode analysis constructs the bundle after the
-  receives (checked with merkc and mmc), and values arriving in any order
-  fit an ordinary term of `maybe`s. `closed(T)` is for a term that something
-  must hold while it is still incomplete.
+1. **`closed(T)` values that may be unbound** cannot yet be:
+   - put in an ordinary term, which would need the term to hold the open
+     word (constructions record their entry insts for this);
+   - passed where the callee has a type variable, whose code reads
+     `closed(U)` through its `type_info` as U's word;
+   - passed in a higher-order call or a method call, since a closure's
+     entry would need to know which parameters take open words.
+2. **Open terms holding an array, a higher-order value or an existentially
+   typed constructor,** which the runtime's walkers stop on. Through a type
+   variable the runtime stops with a message.
+3. **Receiving by `process`.** `process.receive`, `request` and the
+   selectors give their message `ground`, so a message type with open terms
+   in it is reported; `open.receive` takes the oldest message with no
+   selector. A selector with an `ia` mode would lift this, with the receive
+   goal's rule by insts (The receive goal: later).
+4. **Encoding an open term for another node,** and copying one for a GPU,
+   which stop with a message.
+5. **`bind`'s barrier,** with generations: the remembered set records old
+   cells bound to young values, with array `set`'s barrier (Garbage
+   collection, step 2).
+6. **User-defined equality.** Code generation refuses those types today,
+   so no value of one reaches the open walkers. Then the walkers must call
+   the type's own unify entry for a `closed(U)` box and for anything they
+   reach through a type variable, as `open(list(T))` with T such a type
+   would; otherwise they compare structurally, with the wrong equality. A
+   descriptor flag for user-defined equality, which `GroundEqual` and
+   `OpenUnify` check, would do.
+7. **The runtime's open layout tables** are made on a type's first use on
+   each thread (`LayoutOf`, `runtime/open.cpp`). The compiler's own open
+   layouts could give the descriptors these tables.
+8. **The flag.** A module compiled without `-fopen-types` does not release
+   trail marks at its commits, which matters only if it commits to a
+   callee that marks. Before the flag goes, every commit on the host must
+   release, at two loads of the trail each.
+9. **Later, not planned:** an inst for "known unbound", which would make a
+   first binding `det`, and tagged small integers inside the open layout
+   (design document, "Open terms", option 2).

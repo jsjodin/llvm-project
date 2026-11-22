@@ -522,7 +522,7 @@ static Context InnerContext(Context context, llvm::omp::Directive id) {
 void GpuCodeChecker::Walk(
     const ProcedureBody &body, const Body &goal, Context context) {
   bool process{context != Context::Region};
-  // Open terms are host-only (docs/INPROGRESS.md, Open types): a device
+  // Open terms are host-only (design document, "Open terms as built"): a device
   // has no trail, and its messages are flat.
   if (goal.kind == BodyKind::Unify || goal.kind == BodyKind::Call ||
       goal.kind == BodyKind::HOCall) {

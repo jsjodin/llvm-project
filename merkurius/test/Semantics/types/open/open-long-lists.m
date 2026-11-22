@@ -1,4 +1,4 @@
-% Lists of open terms written out (docs/INPROGRESS.md, Open types): each
+% Lists of open terms written out (design document, "Open terms as built"): each
 % cell's twin may take a ground head, so each element doubles the second
 % pass's assignments. Those of finished variables, whose goals have all
 % been checked, are pruned as they come, as the end would keep the most

@@ -201,8 +201,8 @@ struct Assignment {
   // the twin expects an open one: OpenTwin's encoding (check-types.h).
   std::vector<std::uint64_t> twins;
   // The number of twins, which the second pass keeps as few of as it can,
-  // once each variable that can be open is (docs/INPROGRESS.md, Open
-  // types).
+  // once each variable that can be open is (design document, "Open terms as
+  // built").
   unsigned openCost{0};
 };
 
@@ -563,8 +563,8 @@ private:
   std::vector<const parser::SymName *> names_; // by goal number
   unsigned goal_{0}; // the goal whose options are tried
   bool tooMany_{false};
-  // Open types (docs/INPROGRESS.md, Open types): whether the module open is
-  // loaded, and whether a clause is being checked again with the open
+  // Open types (design document, "Open terms as built"): whether the module
+  // open is loaded, and whether a clause is being checked again with the open
   // twins of its constructors, as it did not type-check without them.
   bool openLoaded_{false};
   bool twins_{false};
@@ -3759,8 +3759,8 @@ static const char *FirstError(const parser::Messages &messages) {
 // A clause is checked as it is, and only if that fails, and the module open
 // is loaded, again with the open twins of its constructors, keeping those
 // in which each variable that can be open is, and the fewest twins
-// (docs/INPROGRESS.md, Open types): so ground code is typed as before, and a
-// clause pays for the second pass only if it needs an open value. If both
+// (design document, "Open terms as built"): so ground code is typed as before,
+// and a clause pays for the second pass only if it needs an open value. If both
 // fail, the second's errors are reported if its first comes later in the
 // clause, as the twins then took the first pass's first error away, and
 // otherwise the first's.

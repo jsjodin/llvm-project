@@ -508,7 +508,7 @@ private:
       out.arguments.push_back(map_[var]);
     }
     // A construction's, for code generation to see which closed(T)
-    // arguments may be unbound (docs/INPROGRESS.md, Open types, step 4(c)).
+    // arguments may be unbound (design document, "Open terms as built").
     if (modes.unify == UnifyKind::Call || modes.unify == UnifyKind::Construct) {
       out.entry = Before(unify.number);
     }
@@ -1884,7 +1884,7 @@ private:
   // A bound variable used outside counts too if its inst has `any` in it,
   // as the goal may bind variables in it differently in each solution: at
   // any depth of its type, and through a type variable that is open(U) at
-  // the call (docs/INPROGRESS.md, Open types).
+  // the call (design document, "Open terms as built").
   bool HasOutputs(const Body *goal, const std::set<BodyVar> &before,
       const std::set<BodyVar> &outside) {
     return llvm::any_of(Vars(goal), [&](BodyVar var) {

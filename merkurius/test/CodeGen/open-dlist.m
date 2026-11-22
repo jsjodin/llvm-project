@@ -1,10 +1,10 @@
-% Difference lists with open terms (docs/INPROGRESS.md, Open types, step
-% 7), run: the design document's two examples ("Open terms", Example and
-% Example: appending difference lists), a tree flattened in order through
-% a hole passed down, and a queue that adds at its end through its hole.
-% Closing a hole twice fails the second time. mmc rejects building a
-% difference list (design document, E4), so the outputs are checked by
-% hand: each line says what it shows.
+% Difference lists with open terms (design document, "Open terms as built"),
+% run: the design document's two examples ("Open terms", Example and Example:
+% appending difference lists), a tree flattened in order through a hole passed
+% down, and a queue that adds at its end through its hole. Closing a hole twice
+% fails the second time. mmc rejects building a difference list (design
+% document, E4), so the outputs are checked by hand: each line says what it
+% shows.
 %
 % RUN: merkc -fopen-types %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines
 % RUN: merkc -fopen-types -O0 %s -o %t.O0 && %t.O0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines

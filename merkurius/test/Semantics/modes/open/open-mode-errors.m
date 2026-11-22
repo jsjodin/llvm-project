@@ -1,10 +1,9 @@
-% Mode and determinism errors of open terms (docs/INPROGRESS.md, Open
-% types): binding an existing variable may fail, and so may a get_structure
-% of a type with several functors, and of closed(T), which may be unbound;
-% closed(T) holds a ground value; a
-% condition that may bind an open nonlocal needs a purity promise; and
-% free does not match any, so a branch may not leave free what another
-% binds; and an open term is never unique.
+% Mode and determinism errors of open terms (design document, "Open terms as
+% built"): binding an existing variable may fail, and so may a get_structure of
+% a type with several functors, and of closed(T), which may be unbound;
+% closed(T) holds a ground value; a condition that may bind an open nonlocal
+% needs a purity promise; and free does not match any, so a branch may not leave
+% free what another binds; and an open term is never unique.
 %
 % RUN: not merkc -fc1 -fopen-types -fdebug-dump-determinism %s 2>&1 | FileCheck --implicit-check-not=error: %s
 

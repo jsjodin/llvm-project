@@ -19,7 +19,7 @@ or by hand:
     ./open-holes 100000 100
 
 The heap collects as it fills, moving the open terms and the trail's
-entries (docs/INPROGRESS.md, Open types, step 5). Measurements before step
+entries (design document, "Open terms as built"). Measurements before step
 5 gave the run one heap chunk instead, whose page faults were in the
 elapsed time.
 

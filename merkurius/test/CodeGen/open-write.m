@@ -1,4 +1,4 @@
-% open.write of open terms (docs/INPROGRESS.md, Open types, step 6): an
+% open.write of open terms (design document, "Open terms as built"): an
 % open term is written as from_open would give it, with each unbound variable
 % as _1, _2 and so on, numbered in the order the write meets them, one
 % numbering for the whole call: the same variable has the same number,

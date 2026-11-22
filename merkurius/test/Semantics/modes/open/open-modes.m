@@ -1,5 +1,5 @@
 % Mode and determinism analysis of open terms (design document, "Open
-% terms"; docs/INPROGRESS.md, Open types), on the design document's
+% terms"), on the design document's
 % examples. X = f(...) with X `any` is a get_structure, det for a type of
 % one functor whose arguments are all free and open, and semidet otherwise; X = Y of
 % two open values is a full unification, semidet. A free variable of an open

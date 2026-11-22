@@ -1,4 +1,4 @@
-% The collector and open terms (docs/INPROGRESS.md, Open types, step 5),
+% The collector and open terms (design document, "Open terms as built"),
 % with a collection at every allocation. Open terms are traced in their
 % open layout: boxes, closed(T)'s boxes and a type whose open layout shares
 % another tag than its ordinary one. Unbound variable cells are copied; a

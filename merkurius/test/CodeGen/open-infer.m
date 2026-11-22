@@ -1,12 +1,11 @@
-% A type inferencer by unification (docs/INPROGRESS.md, Open types, step
-% 7): the types of a small functional language are open terms, whose holes
-% are type variables, bound by unification with the occurs check
-% (unify_oc). A let-bound name is polymorphic: each use infers its
-% definition again, with new holes. A type error is a failure: a clash, an
-% occurs check, or a lambda-bound name used at two types. The inferred
-% types are written with their holes as _1, _2 (open.write), and a ground
-% one is taken out by from_open. mmc has no open types, so the outputs are
-% checked by hand: each line says what it shows.
+% A type inferencer by unification (design document, "Open terms as built"): the
+% types of a small functional language are open terms, whose holes are type
+% variables, bound by unification with the occurs check (unify_oc). A let-bound
+% name is polymorphic: each use infers its definition again, with new holes. A
+% type error is a failure: a clash, an occurs check, or a lambda-bound name used
+% at two types. The inferred types are written with their holes as _1, _2
+% (open.write), and a ground one is taken out by from_open. mmc has no open
+% types, so the outputs are checked by hand: each line says what it shows.
 %
 % RUN: merkc -fopen-types %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines
 % RUN: merkc -fopen-types -O0 %s -o %t.O0 && %t.O0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines

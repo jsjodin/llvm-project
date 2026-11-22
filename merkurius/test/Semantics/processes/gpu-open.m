@@ -1,4 +1,4 @@
-% Open terms are host-only (docs/INPROGRESS.md, Open types, step 1(c)):
+% Open terms are host-only (design document, "Open terms as built"):
 % code that runs on a GPU, a process kind's that runs on a GPU, what it
 % calls, and a target region, may not use a value whose type has open(T) or
 % closed(T) in it. A kind that runs on the host may. A GPU kind declared to

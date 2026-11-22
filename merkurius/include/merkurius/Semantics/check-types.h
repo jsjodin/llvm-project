@@ -103,7 +103,7 @@ struct ClauseTypes {
   // By goal number, if any is, whether a unification's functor is the open
   // twin of its constructor, and which of its arguments take a ground value
   // where the twin expects an open one: OpenTwin's encoding. Empty if the
-  // clause has no open twin (docs/INPROGRESS.md, Open types).
+  // clause has no open twin (design document, "Open terms as built").
   llvm::ArrayRef<std::uint64_t> openTwins{};
 };
 

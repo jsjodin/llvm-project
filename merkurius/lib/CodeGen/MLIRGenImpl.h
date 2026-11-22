@@ -662,11 +662,11 @@ private:
       const Body &goal, const ProcedureBody &body);
   void OpenGetStructure(
       const Body &goal, const ProcedureBody &body, merk::TermType term);
-  // closed(T) values that may be unbound (docs/INPROGRESS.md, Open types,
-  // step 4(c)). Such a variable holds closed(T)'s open word, a box or a
-  // variable's reference, rather than T's word: one whose inst has `any` in
-  // it before some goal, a head variable whose mode does, or one this
-  // procedure's code has given an open word.
+  // closed(T) values that may be unbound (design document, "Open terms as
+  // built"). Such a variable holds closed(T)'s open word, a box or a variable's
+  // reference, rather than T's word: one whose inst has `any` in it before some
+  // goal, a head variable whose mode does, or one this procedure's code has
+  // given an open word.
   bool ClosedOpen(const ProcedureBody &, BodyVar);
   // How a type's values are encoded in the open layout when code
   // generation inlines to_open and from_open, as runtime/open.h's

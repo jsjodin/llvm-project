@@ -1635,7 +1635,7 @@ private:
   VarId FirstWaitedVar(const Waiting &);
   void WakeAll(ConjunctionRun &);
   Result CheckUnify(const Unify &, const Goal &, InstMap &, const Live &);
-  // Open types (docs/INPROGRESS.md, Open types).
+  // Open types (design document, "Open terms as built").
   bool CanBeFresh(VarId) const;
   bool MentionsOpen(const Type *) const;
   Result GetStructure(const Unify &, const Goal &, const InstFunctor &, bool,
@@ -3097,7 +3097,7 @@ ProcedureChecker::Result ProcedureChecker::CheckVarUnify(
 
 // Whether a variable can be made a fresh unbound variable: whether it has
 // an open type, or is closed(T), which is a variable or a box inside an open
-// term (docs/INPROGRESS.md, Open types).
+// term (design document, "Open terms as built").
 bool ProcedureChecker::CanBeFresh(VarId var) const {
   return types_.types().IsOpenOrClosed(TypeOf(var));
 }
@@ -3302,7 +3302,7 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
   }
   if (ops_.IsFree(a) && closed && !unify.arguments.empty() &&
       !ops_.IsGround(arguments.front(), TypeOf(unify.arguments.front()))) {
-    // closed(T) holds a ground value (docs/INPROGRESS.md, Open types).
+    // closed(T) holds a ground value (design document, "Open terms as built").
     VarId var{unify.arguments.front()};
     return Error(goal,
         "mode error in the unification of " + Name(x) + " and " +
@@ -3346,8 +3346,8 @@ ProcedureChecker::Result ProcedureChecker::CheckUnify(
           std::move(waits));
     }
     // A free argument of an open type, not used again, is a hole: a fresh
-    // unbound variable, made before the construction (docs/INPROGRESS.md,
-    // Open types).
+    // unbound variable, made before the construction (design document, "Open
+    // terms as built").
     bool holes{false};
     for (std::size_t i{0}; i < unify.arguments.size(); ++i) {
       VarId var{unify.arguments[i]};

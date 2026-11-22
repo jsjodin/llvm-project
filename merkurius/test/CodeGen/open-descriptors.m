@@ -1,12 +1,11 @@
-% The descriptors' marks for the open layout (runtime/open.h;
-% docs/INPROGRESS.md, Open types, step 2): kOpenSame (2) on a type whose
-% open layout is its ordinary one if its parameters' are, and kClosed (4) on
-% closed(T)'s, whose open layout is a box. tree, a tuple, wrap(T) and a type
-% of seven constructors with arguments keep their layouts; itree's int field
-% is boxed, an enum's constants are shifted, and a type of eight
-% constructors with arguments gives up tag 7 to variables, so theirs change.
-% Outside open(_), closed(T) is a notag type: T's word, which io.write and a
-% deconstruction see as usual.
+% The descriptors' marks for the open layout (runtime/open.h): kOpenSame (2)
+% on a type whose open layout is its ordinary one if its parameters' are, and
+% kClosed (4) on closed(T)'s, whose open layout is a box. tree, a tuple,
+% wrap(T) and a type of seven constructors with arguments keep their layouts;
+% itree's int field is boxed, an enum's constants are shifted, and a type of
+% eight constructors with arguments gives up tag 7 to variables, so theirs
+% change. Outside open(_), closed(T) is a notag type: T's word, which io.write
+% and a deconstruction see as usual.
 %
 % RUN: merkc -fc1 -fopen-types -emit-llvm -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=LLVM
 % RUN: merkc -fc1 -fopen-types -emit-llvm -triple x86_64-unknown-linux-gnu %S/../../library/open.m | FileCheck %s --check-prefix=LIBRARY

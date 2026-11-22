@@ -1,5 +1,5 @@
-% Errors of open types (docs/INPROGRESS.md, Open types): closed(T) may not
-% hold an open type, at any depth; a clause that fails both with and without
+% Errors of open types (design document, "Open terms as built"): closed(T) may
+% not hold an open type, at any depth; a clause that fails both with and without
 % the open twins reports the second pass's errors when they come later in
 % the clause, as the twins removed the first pass's first error; and the
 % library module open needs -fopen-types.

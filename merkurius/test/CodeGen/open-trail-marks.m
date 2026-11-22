@@ -1,5 +1,5 @@
 % Trail marks only around goals that may bind a variable older than them
-% (docs/INPROGRESS.md, Open types, step 4(d)): one that names a variable
+% (design document, "Open terms as built"): one that names a variable
 % bound before it whose type mentions open types, or whose inst has `any`
 % in it. A condition on ints in a procedure on open terms takes none, nor
 % does a disjunction of tests; a condition or a negation on an open

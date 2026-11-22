@@ -348,7 +348,7 @@ struct OpenLayout {
 };
 
 // Made on a type's first use on the thread, as a table the compiler made would
-// be (Temporary (open types step 4(b), docs/INPROGRESS.md): the compiler's
+// be (Temporary (docs/INPROGRESS.md, Open types: what is left): the compiler's
 // own open layouts can give the descriptors these tables).
 const OpenLayout &LayoutOf(const TypeCtor *ctor) {
   thread_local Table *layouts{nullptr};

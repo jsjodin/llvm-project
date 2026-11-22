@@ -1,10 +1,10 @@
-% A unify procedure per open type (docs/INPROGRESS.md, Open types, step
-% 4(d) part 3): X = Y on a ground open type calls unify_open.<type>, which
-% dereferences, binds an unbound side to the other, and unifies each field
-% inline for a scalar or by its type's procedure, the last by a tail call. A
-% notag is its argument, so wrap has none. A cycle along last fields is
-% found by Brent's method; one through other fields goes past the depth
-% bound to the runtime's walker, which polymorphic code calls too.
+% A unify procedure per open type (design document, "Open terms as built"): X =
+% Y on a ground open type calls unify_open.<type>, which dereferences, binds an
+% unbound side to the other, and unifies each field inline for a scalar or by
+% its type's procedure, the last by a tail call. A notag is its argument, so
+% wrap has none. A cycle along last fields is found by Brent's method; one
+% through other fields goes past the depth bound to the runtime's walker, which
+% polymorphic code calls too.
 %
 % RUN: merkc -fc1 -fopen-types -emit-merk %s -o - | FileCheck %s
 % RUN: merkc -fopen-types %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines

@@ -1,5 +1,5 @@
 % Constructions and get_structure on open terms, compiled inline in the
-% open layout (docs/INPROGRESS.md, Open types, step 4(b)). Each open type
+% open layout (design document, "Open terms as built"). Each open type
 % has a merk.type_def of its own, open.open(T), whose fields are all words;
 % lowering lays it out with tags 0 to 6, tag 7 being a variable's, and
 % shifts an enumeration's constants. The cells the compiled code makes are

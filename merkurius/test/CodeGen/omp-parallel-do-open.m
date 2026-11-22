@@ -1,8 +1,7 @@
 % A parallel do loop's body may only read, with from_open, an open value
-% that its iterations share (design document, "Open terms", Checking rules;
-% docs/INPROGRESS.md, Open types, step 1(c)): the trail is the process's,
-% and two iterations binding one variable would race. A get_structure may
-% bind it, and so may a call, or a term made from it.
+% that its iterations share (design document, "Open terms", Checking rules): the
+% trail is the process's, and two iterations binding one variable would race. A
+% get_structure may bind it, and so may a call, or a term made from it.
 %
 % RUN: not merkc -fc1 -fopen-types -fopenmp -fdo-loops -emit-merk %s -o /dev/null 2>&1 \
 % RUN:   | FileCheck --implicit-check-not=error: %s

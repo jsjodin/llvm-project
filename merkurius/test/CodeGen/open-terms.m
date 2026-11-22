@@ -1,9 +1,9 @@
-% Open terms by the runtime's generic walkers (runtime/open.h;
-% docs/INPROGRESS.md, Open types, step 4(a)): to_open and from_open of each
-% kind of value, full unification through =, unify_oc, fresh variables that
-% a stuck conjunction makes, var and nonvar, and the trail undoing what a
-% failed disjunct, if-then-else condition or negation bound. mmc has no open
-% types, so the outputs are checked by hand: each line says what it shows.
+% Open terms by the runtime's generic walkers (runtime/open.h): to_open and
+% from_open of each kind of value, full unification through =, unify_oc, fresh
+% variables that a stuck conjunction makes, var and nonvar, and the trail
+% undoing what a failed disjunct, if-then-else condition or negation bound. mmc
+% has no open types, so the outputs are checked by hand: each line says what it
+% shows.
 %
 % Each also runs with a collection at every allocation (step 5).
 %

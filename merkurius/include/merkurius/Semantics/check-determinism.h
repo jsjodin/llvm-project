@@ -58,7 +58,7 @@ struct BodyVarInfo {
   const Type *type;
   // Whether its inst has `any` in it before some goal: a goal may then bind
   // variables in it, of an open type at any depth, or of a type variable
-  // that is open(U) at the call (docs/INPROGRESS.md, Open types).
+  // that is open(U) at the call (design document, "Open terms as built").
   bool any{false};
 };
 

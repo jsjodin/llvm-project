@@ -1,14 +1,14 @@
-% Messages with open terms in them (docs/INPROGRESS.md, Open types, step
-% 6), sent by open.send and received by open.receive. A message is copied
-% as copy_term copies a term: bound variables as their values, and each
-% unbound variable as one new variable, however often the message holds
-% it, so that binding it in one place of the copy binds every place. The
-% sender's variables stay its own: neither side's later bindings reach the
-% other. A cyclic message is copied with its cycle, and a ground open term
-% sent by process.send is received too. mmc has no open types, so the
-% outputs are checked by hand: each line says what it shows. A hole is
-% bound by unifying the term around it, as in R = message([5 | _]): X = 5
-% would make X an int, taken out of its field, which fails while unbound.
+% Messages with open terms in them (design document, "Open terms as built"),
+% sent by open.send and received by open.receive. A message is copied as
+% copy_term copies a term: bound variables as their values, and each unbound
+% variable as one new variable, however often the message holds it, so that
+% binding it in one place of the copy binds every place. The sender's variables
+% stay its own: neither side's later bindings reach the other. A cyclic message
+% is copied with its cycle, and a ground open term sent by process.send is
+% received too. mmc has no open types, so the outputs are checked by hand: each
+% line says what it shows. A hole is bound by unifying the term around it, as in
+% R = message([5 | _]): X = 5 would make X an int, taken out of its field, which
+% fails while unbound.
 %
 % RUN: merkc -fopen-types %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines
 % RUN: merkc -fopen-types -O0 %s -o %t.O0 && %t.O0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines

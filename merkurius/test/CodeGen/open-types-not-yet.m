@@ -1,9 +1,8 @@
-% Code generation does not do all of open terms yet (docs/INPROGRESS.md,
-% Open types, step 4). A closed(T) value that may be unbound holds its open
-% word (open-closed.m), except where the callee reads it at a type
-% variable, through a closure, or in an ordinary term, which holds T's word.
-% An open term that holds
-% an array, a higher-order value or an existentially typed constructor,
+% Code generation does not do all of open terms yet (design document, "Open
+% terms as built"). A closed(T) value that may be unbound holds its open word
+% (open-closed.m), except where the callee reads it at a type variable, through
+% a closure, or in an ordinary term, which holds T's word. An open term that
+% holds an array, a higher-order value or an existentially typed constructor,
 % which the runtime's walkers stop on, is reported where open's predicates
 % or a full unification would walk it; a closed(U) holding one only where
 % it is unified, as to_open and from_open share its box. A receive of a message

@@ -1,11 +1,10 @@
-% Open types (design document, "Open terms"; docs/INPROGRESS.md, Open
-% types): a clause that does not type-check as it is is checked again with
-% the open twins of its constructors, open(T) having T's constructors with
-% open arguments. Each variable that can be open is, and then the fewest
-% twins are used, so that a hole is open; an argument takes a ground value
-% only where its type forces it. A clause that type-checks as it is, as
-% main's, is typed as before. closed(T) stays closed under open(_), and
-% open(open(T)) is open(T). The examples are the design document's.
+% Open types (design document, "Open terms"): a clause that does not type-check
+% as it is is checked again with the open twins of its constructors, open(T)
+% having T's constructors with open arguments. Each variable that can be open
+% is, and then the fewest twins are used, so that a hole is open; an argument
+% takes a ground value only where its type forces it. A clause that type-checks
+% as it is, as main's, is typed as before. closed(T) stays closed under open(_),
+% and open(open(T)) is open(T). The examples are the design document's.
 %
 % RUN: merkc -fc1 -fopen-types -fdebug-dump-types %s 2>&1 | FileCheck --implicit-check-not=error --implicit-check-not=warning %s
 
