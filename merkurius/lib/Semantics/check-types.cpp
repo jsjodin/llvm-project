@@ -32,6 +32,7 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include <functional>
+#include <map>
 #include <set>
 
 namespace merkurius::semantics {
@@ -575,6 +576,16 @@ private:
       std::vector<std::function<bool(Assignment &)>> &options);
   bool ContainsOpen(const Type *) const;
   void KeepMostOpen(const ClauseForm &);
+  // The second pass's pruning as it goes (PruneFinished): by variable, how
+  // many of the atomic goals that have it as a nonlocal are still to be
+  // checked, and whether something else constrains its type too.
+  std::vector<unsigned> pending_;
+  std::vector<bool> pinned_;
+  void CountPending(const Goal &);
+  void AddPending(unsigned number);
+  void PinNonlocals(unsigned number);
+  void Checked(unsigned number);
+  void PruneFinished(std::vector<Assignment> &);
   // The clause has a type error, or a name that is undefined; an ambiguity
   // or unresolved polymorphism may then be only its consequence, and is
   // not reported.
@@ -1310,6 +1321,7 @@ void TypeChecker::Extend(llvm::ArrayRef<Option> options,
     report(assignments_.front());
     return;
   }
+  PruneFinished(extended);
   if (extended.size() > maxAssignments) {
     if (!tooMany_) {
       messages_->Say(Source(clause_->tokens),
@@ -3267,6 +3279,163 @@ void TypeChecker::KeepMostOpen(const ClauseForm &clause) {
   assignments_ = std::move(kept);
 }
 
+// The atomic goals' nonlocals, counted for PruneFinished; those of goals
+// that constrain types themselves, a try's io and catch_any, a loop's
+// iterators, an atomic goal's states and a trace's io, are pinned.
+void TypeChecker::CountPending(const Goal &goal) {
+  common::visit(
+      common::visitors{
+          [&](const Conj *conj) {
+            for (const Goal &g : conj->goals) {
+              CountPending(g);
+            }
+          },
+          [&](const Disj *disj) {
+            for (const Goal &g : disj->goals) {
+              CountPending(g);
+            }
+          },
+          [&](const IfThenElse *ite) {
+            CountPending(ite->condition);
+            CountPending(ite->then);
+            CountPending(ite->otherwise);
+          },
+          [&](const Not *negation) { CountPending(negation->goal); },
+          [&](const Unify *unify) {
+            AddPending(unify->number);
+            if (unify->functor.lambda) {
+              CountPending(unify->functor.lambda->body);
+            }
+          },
+          [&](const Call *call) { AddPending(call->number); },
+          [&](const HOCall *call) { AddPending(call->number); },
+          [&](const Scope *scope) {
+            if (scope->kind == ScopeKind::Trace) {
+              PinNonlocals(scope->number);
+            }
+            CountPending(scope->goal);
+          },
+          [&](const Try *t) {
+            PinNonlocals(t->number);
+            CountPending(t->goal);
+            CountPending(t->then);
+            if (t->otherwise) {
+              CountPending(*t->otherwise);
+            }
+            for (const Catch &c : t->catches) {
+              CountPending(c.pattern);
+              CountPending(c.goal);
+            }
+            if (t->catchAny) {
+              CountPending(t->catchAny->goal);
+            }
+          },
+          [&](const Atomic *atomic) {
+            PinNonlocals(atomic->number);
+            for (const AtomicAlternative &alternative : atomic->alternatives) {
+              CountPending(alternative.goal);
+            }
+          },
+          [&](const Loop *loop) {
+            PinNonlocals(loop->number);
+            CountPending(loop->body);
+          },
+      },
+      goal);
+}
+
+void TypeChecker::AddPending(unsigned number) {
+  for (VarId var : clause_->nonlocals[number]) {
+    ++pending_[var];
+  }
+}
+
+void TypeChecker::PinNonlocals(unsigned number) {
+  for (VarId var : clause_->nonlocals[number]) {
+    pinned_[var] = true;
+  }
+}
+
+void TypeChecker::Checked(unsigned number) {
+  if (pending_.empty()) {
+    return;
+  }
+  for (VarId var : clause_->nonlocals[number]) {
+    if (pending_[var] != 0) {
+      --pending_[var];
+    }
+  }
+}
+
+// The second pass's assignments, pruned as KeepMostOpen would at the end:
+// a variable whose goals have all been checked is finished, as nothing
+// can change its type; two assignments that agree on the types of the
+// others, and want no constraints, have the same futures, so one whose
+// open finished variables the other's strictly contain makes it lose to
+// the other at the end. Without it, the twins' options, one more for each
+// argument that may take a ground value, multiply along a list written out
+// as [_, _, ...], over the limit of assignments (CodeGen/open-gc.m).
+void TypeChecker::PruneFinished(std::vector<Assignment> &assignments) {
+  // Below this, KeepMostOpen at the end does it as cheaply.
+  constexpr std::size_t pruneAbove{32};
+  if (pending_.empty() || assignments.size() <= pruneAbove) {
+    return;
+  }
+  llvm::SmallVector<VarId, 16> finished, others;
+  for (std::size_t var{0}; var < pending_.size(); ++var) {
+    bool done{pending_[var] == 0 && !pinned_[var]};
+    (done ? finished : others).push_back(static_cast<VarId>(var));
+  }
+  if (finished.empty()) {
+    return;
+  }
+  std::size_t n{assignments.size()};
+  std::vector<llvm::SmallVector<bool, 16>> open(n);
+  std::map<std::vector<const Type *>, std::vector<std::size_t>> groups;
+  for (std::size_t i{0}; i < n; ++i) {
+    const Assignment &a{assignments[i]};
+    if (!a.wanted.empty() || !a.given.empty()) {
+      continue;
+    }
+    std::vector<const Type *> key;
+    for (VarId var : others) {
+      key.push_back(Resolve(a, VarType(var)));
+    }
+    for (VarId var : finished) {
+      const Type *type{Resolve(a, VarType(var))};
+      open[i].push_back(
+          type->kind == TypeKind::Named && type->constructor == types_.open());
+    }
+    groups[std::move(key)].push_back(i);
+  }
+  std::vector<bool> dominated(n, false);
+  for (auto &[key, members] : groups) {
+    for (std::size_t i : members) {
+      for (std::size_t j : members) {
+        if (i == j || dominated[j]) {
+          continue;
+        }
+        bool contains{true}, strict{false};
+        for (std::size_t k{0}; k < finished.size() && contains; ++k) {
+          contains = !open[i][k] || open[j][k];
+          strict |= open[j][k] && !open[i][k];
+        }
+        if (contains && strict) {
+          dominated[i] = true;
+          break;
+        }
+      }
+    }
+  }
+  std::vector<Assignment> kept;
+  for (std::size_t i{0}; i < n; ++i) {
+    if (!dominated[i]) {
+      kept.push_back(std::move(assignments[i]));
+    }
+  }
+  assignments = std::move(kept);
+}
+
 // Whether the type has open(_) in it.
 bool TypeChecker::ContainsOpen(const Type *type) const {
   if (type->kind == TypeKind::Named && type->constructor == types_.open()) {
@@ -3498,9 +3667,18 @@ void TypeChecker::CheckGoal(const Goal &goal) {
             CheckGoal(ite->otherwise);
           },
           [&](const Not *negation) { CheckGoal(negation->goal); },
-          [&](const Unify *unify) { CheckUnify(*unify); },
-          [&](const Call *call) { CheckCall(*call); },
-          [&](const HOCall *call) { CheckHOCall(*call); },
+          [&](const Unify *unify) {
+            CheckUnify(*unify);
+            Checked(unify->number);
+          },
+          [&](const Call *call) {
+            CheckCall(*call);
+            Checked(call->number);
+          },
+          [&](const HOCall *call) {
+            CheckHOCall(*call);
+            Checked(call->number);
+          },
           [&](const Scope *scope) {
             if (scope->kind == ScopeKind::Trace) {
               TraceIo(*scope);
@@ -3668,6 +3846,16 @@ ClauseTypes TypeChecker::CheckClauseOnce(const ClauseForm &clause,
   }
   assignments_ = {std::move(initial)};
   names_.assign(clause.goals, nullptr);
+  pending_.clear();
+  pinned_.clear();
+  if (twins_ && clause.nonlocals.size() == clause.goals) {
+    pending_.assign(clause.vars.size(), 0);
+    pinned_.assign(clause.vars.size(), false);
+    for (VarId var : clause.head) {
+      pinned_[var] = true;
+    }
+    CountPending(clause.body);
+  }
   if (sig) {
     for (std::size_t j{0}; j < clause.head.size() && j < sig->arguments.size();
          ++j) {
