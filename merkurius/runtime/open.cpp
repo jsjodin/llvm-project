@@ -7,6 +7,101 @@
 //===----------------------------------------------------------------------===//
 
 #include "open.h"
+#include "heap.h"
+#include "trail.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+namespace merkurius::runtime {
+
+namespace {
+Word *CellOf(Word reference) {
+  return reinterpret_cast<Word *>(reference & ~kTagMask);
+}
+
+// The trail, allocated on its first use.
+MerkTrail &Trail() {
+  if (!merk_trail) {
+    merk_trail = static_cast<MerkTrail *>(std::calloc(1, sizeof(MerkTrail)));
+    if (!merk_trail) {
+      std::fputs("merk: out of memory for the trail\n", stderr);
+      std::abort();
+    }
+  }
+  return *merk_trail;
+}
+
+[[gnu::noinline]] void Grow(MerkTrail &trail) {
+  std::uint64_t capacity{trail.capacity ? 2 * trail.capacity : 1024};
+  auto *entries{static_cast<MerkTrailEntry *>(
+      std::realloc(trail.entries, capacity * sizeof(MerkTrailEntry)))};
+  if (!entries) {
+    std::fputs("merk: out of memory for the trail\n", stderr);
+    std::abort();
+  }
+  trail.entries = entries;
+  trail.capacity = capacity;
+}
+} // namespace
+
+} // namespace merkurius::runtime
+
+using namespace merkurius::runtime;
+
+extern "C" {
+uint64_t merk_open_new_var(void) {
+  auto *cell{static_cast<Word *>(Allocate(sizeof(Word)))};
+  Word reference{reinterpret_cast<Word>(cell) | kOpenVariableTag};
+  *cell = reference;
+  return reference;
+}
+
+uint64_t merk_open_deref(uint64_t word) {
+  while (IsVariableReference(word)) {
+    Word next{*CellOf(word)};
+    if (next == word) {
+      break;
+    }
+    word = next;
+  }
+  return word;
+}
+
+void merk_open_bind(uint64_t variable, uint64_t value) {
+  Word *cell{CellOf(variable)};
+  MerkTrail *trail{merk_trail};
+  if (trail && trail->live != 0) {
+    if (trail->top == trail->capacity) {
+      Grow(*trail);
+    }
+    trail->entries[trail->top++] = {cell, *cell};
+  }
+  *cell = value;
+}
+
+uint64_t merk_open_trail_mark(void) {
+  MerkTrail &trail{Trail()};
+  ++trail.live;
+  return trail.top;
+}
+
+void merk_open_trail_undo(uint64_t mark) {
+  MerkTrail &trail{*merk_trail};
+  while (trail.top > mark) {
+    MerkTrailEntry &entry{trail.entries[--trail.top]};
+    *entry.address = entry.old;
+  }
+}
+
+void merk_open_trail_release(uint64_t mark) {
+  MerkTrail &trail{*merk_trail};
+  if (--trail.live == 0) {
+    trail.top = 0;
+  }
+  (void)mark;
+}
+}
 
 namespace merkurius::runtime {
 

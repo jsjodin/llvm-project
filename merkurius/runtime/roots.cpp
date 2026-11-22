@@ -674,6 +674,13 @@ int Collector::CompareChunks(const void *a, const void *b) {
 }
 
 void Collector::Prepare() {
+  // Temporary (open types step 5, docs/INPROGRESS.md): the collector does
+  // not move variable cells or the trail's addresses yet, so a collection
+  // with bindings on the trail would leave its entries stale.
+  if (merk_trail && merk_trail->top != 0) {
+    Bad("open terms' trail entries, which cannot be collected yet",
+        merk_trail->top);
+  }
   for (ChunkLink *chunk{process_->chunks}; chunk; chunk = chunk->next) {
     chunkCount_ += !chunk->pinned;
   }
@@ -901,6 +908,10 @@ void Collector::ForwardValue(Word *slot, const Type &type) {
       Bad("a value of the type void that points into the heap", *slot);
     }
     return;
+  case Open:
+    // Temporary (open types step 5, docs/INPROGRESS.md): the collector
+    // walks open layouts and variable cells then.
+    Bad("an open term, which cannot be collected yet", *slot);
   default:
     return; // A word that is not a pointer.
   }

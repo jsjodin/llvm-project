@@ -40,10 +40,44 @@
 
 #include "descriptor.h"
 
+// Variable cells, deref and bind, and the trail (design document, Runtime
+// system, "Support for open terms"; docs/INPROGRESS.md, Open types, step 3).
+// An unbound variable is a one-word cell of the process's heap that refers
+// to itself, tagged kOpenVariableTag; fields and registers hold references to
+// it, and binding overwrites it, so a reference to a bound variable leads, by
+// a chain, to its value. Binding never writes into a constructor's cell, so
+// a cell shared with ground code is never changed. Code generation calls
+// these, or inlines them, for open terms (step 4).
+extern "C" {
+// A new unbound variable: its tagged reference.
+uint64_t merk_open_new_var(void);
+// The end of the chain from a word: a value, or an unbound variable's
+// reference.
+uint64_t merk_open_deref(uint64_t word);
+// Binds an unbound variable, `variable` being its reference as deref gives
+// it, to `value`, which must not be that reference, trailing the binding if
+// an open choice point or try goal is live.
+void merk_open_bind(uint64_t variable, uint64_t value);
+// An open choice point or try goal begins: the trail's top, to undo to.
+uint64_t merk_open_trail_mark(void);
+// Backtracking into it: the bindings since `mark` are undone, latest first.
+void merk_open_trail_undo(uint64_t mark);
+// It is gone, by its last alternative, a commit or its end: when no other
+// is live, the trail is emptied.
+void merk_open_trail_release(uint64_t mark);
+}
+
 namespace merkurius::runtime {
 
 // A variable cell's references' primary tag, in every open layout.
 constexpr Word kOpenVariableTag{7};
+
+// Whether a word is a reference to a variable cell, bound or not.
+inline bool IsVariableReference(Word word) {
+  return (word & kTagMask) == kOpenVariableTag;
+}
+// Whether a word that deref gave is an unbound variable.
+inline bool IsUnbound(Word word) { return IsVariableReference(word); }
 // The tags an open layout's functors may have: 0 to 6.
 constexpr unsigned kOpenTags{7};
 

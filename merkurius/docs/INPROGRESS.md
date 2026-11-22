@@ -7917,8 +7917,40 @@ the `type_info` back to the open layout (below).
      is code that uses it. Its tags must be `CellTag(..., 7)`'s, the
      runtime's rule; a lowering test against `OpenTest`'s cases keeps the
      two in step.
-3. **The runtime:** variable cells, `deref` and `bind`, and the trail,
-   marked and undone by backtracking through continuations.
+3. **The runtime.** Done 2026-11-21, in `runtime/open.h` and `open.cpp`,
+   with the trail in `trail.h`.
+   - **Variables:** `merk_open_new_var` makes a one-word cell on the
+     process's heap that refers to itself, tag 7. `merk_open_deref` follows
+     a chain to a value or an unbound variable. `merk_open_bind` overwrites
+     an unbound variable's cell. Binding a variable to itself is the
+     caller's to avoid, as unify does.
+   - **The trail:** one per process, a growable `malloc`ed array of
+     (address, old word). `merk_trail` is thread-local and swapped in
+     `RunProcess` as `merk_heap` is, one more word per switch. It is
+     allocated at the process's first mark and freed when the process
+     ends. A binding is trailed only while `live` is nonzero, at the cost of
+     one load and compare. There is no age test, as E5 found trailing every
+     binding within noise.
+   - **The protocol, for step 4:** a goal that catches failure and may bind
+     an open variable brings its own mark: `merk_open_trail_mark` before it.
+     That is a disjunction, an if-then-else's condition, a negation, a
+     `try`, and a nondet call's choice point.
+     - `merk_open_trail_undo(mark)` before each retry, or after a failed
+       condition or a negation's goal.
+     - `merk_open_trail_release(mark)` when it is gone: at its last
+       alternative, after a commit, or at its end. When no mark is live, the
+       trail is emptied.
+     - Mode analysis says which goals need marks: those with an `any`
+       nonlocal. A failure that no such goal catches leaves its bindings,
+       which nothing can observe.
+   - **The collector refuses open terms until step 5** (Temporary):
+     `ForwardValue` aborts on the kind `Open`, which it used to leave as "a
+     word that is not a pointer", unmoved. A collection with trail entries
+     aborts too, since their addresses would go stale. So step 4's tests run
+     in heaps that do not collect, or step 5 comes before programs that do.
+   - Tests: `unittests/Runtime/OpenTest.cpp`, which covers new variables,
+     chains, undoing to a mark, nested marks, a trail of 100,000 entries,
+     and a trail for each process.
 4. **Code generation:** `merk.open_unify`, `get_structure`, `to_open`,
    `from_open`, `unify_oc`, `var` and `nonvar`; a unify procedure per open
    type and a generic one.

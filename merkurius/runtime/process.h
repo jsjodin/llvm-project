@@ -36,6 +36,7 @@
 
 #include "heap.h"
 #include "stack.h"
+#include "trail.h"
 #include <cstddef>
 #include <cstdint>
 #include <pthread.h>
@@ -96,6 +97,9 @@ struct Process {
   // How many target regions it is in, during which it stays on its thread,
   // to which libomp ties them, and blocks the thread.
   int pinned{0};
+  // The trail of its open terms' bindings, while it does not run; null
+  // until its first open choice point (trail.h).
+  MerkTrail *trail{nullptr};
 };
 
 // Guards the timers, and a stack freed until its process has switched away.

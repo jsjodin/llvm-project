@@ -19,6 +19,8 @@
 extern "C" {
 // Constant-initialized, as merk_heap is.
 thread_local char *merk_stack_limit{nullptr};
+// Constant-initialized, as merk_heap is.
+thread_local MerkTrail *merk_trail{nullptr};
 }
 
 // libomp ties a parallel region to its thread. Weak, as a program without
@@ -476,6 +478,7 @@ Process *TakeLocal() {
   pthread_mutex_lock(&schedulerLock);
   Process *next{TakeLocal()};
   RunProcess(next);
+  FreeTrail(self->trail);
   FreeStack(self->stack);
   std::free(self);
   unlockAfterSwitch = &schedulerLock;
@@ -651,9 +654,15 @@ void RunProcess(Process *next) {
   if (current) {
     current->heap = merk_heap;
     current->stackLimit = merk_stack_limit;
+    current->trail = merk_trail;
+  } else {
+    // A thread's own trail, from before it ran a process, has no live
+    // choice point here, between goals.
+    FreeTrail(merk_trail);
   }
   merk_heap = next ? next->heap : MerkHeap{nullptr, nullptr};
   merk_stack_limit = next ? next->stackLimit : nullptr;
+  merk_trail = next ? next->trail : nullptr;
   current = next;
 }
 
