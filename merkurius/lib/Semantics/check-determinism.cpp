@@ -507,7 +507,9 @@ private:
     for (VarId var : unify.arguments) {
       out.arguments.push_back(map_[var]);
     }
-    if (modes.unify == UnifyKind::Call) {
+    // A construction's, for code generation to see which closed(T)
+    // arguments may be unbound (docs/INPROGRESS.md, Open types, step 4(c)).
+    if (modes.unify == UnifyKind::Call || modes.unify == UnifyKind::Construct) {
       out.entry = Before(unify.number);
     }
     if (modes.unify == UnifyKind::GetStructure) {

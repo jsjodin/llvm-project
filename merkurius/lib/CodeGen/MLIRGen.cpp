@@ -801,6 +801,10 @@ bool MerkGenerator::NoteRoot(mlir::Value value, const semantics::Type *type) {
   if (IsOpenType(type)) {
     return NoteOpenRoot(value, type->arguments.front());
   }
+  // A closed(T) that may be unbound, as its open word (ClosedOpen).
+  if (IsClosedType(type) && mlir::isa<merk::WordType>(value.getType())) {
+    return NoteOpenRoot(value, type);
+  }
   llvm::SmallVector<unsigned> variables;
   if (!CollectTypeVariables(type, variables)) {
     return false;
@@ -841,6 +845,11 @@ void MerkGenerator::Goal(const Body &goal, const ProcedureBody &body) {
   // Before as well, as a goal that ends the body leaves no place after it.
   AnnotateRoots(body);
   GoalBody(goal, body);
+  if (!failed_ && !Terminated() &&
+      (goal.kind == BodyKind::Unify || goal.kind == BodyKind::Call ||
+          goal.kind == BodyKind::HOCall)) {
+    NoteClosedValues(goal, body);
+  }
   AnnotateRoots(body);
 }
 
@@ -1441,6 +1450,7 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
   // at its address.
   annotated_.clear();
   openTypeInfos_.clear();
+  closedWords_.clear();
   typeInfos_.clear();
   dictionaries_.clear();
   givenVars_.clear();
@@ -1479,12 +1489,20 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
     }
   }
   llvm::SmallVector<BodyVar> wordOutputs;
+  // The outputs that the procedure gives as closed(T)'s open words.
+  llvm::DenseSet<BodyVar> openOutputs;
   for (auto [var, mode, type] : llvm::zip(body.head, procedure.modes, types)) {
     if (words && IsOutput(mode)) {
       wordOutputs.push_back(var);
     }
     if (Represent(type)->dummy || IsUnused(mode)) {
       continue;
+    }
+    if (OpenParameter(mode, body.vars[var].type)) {
+      closedWords_.insert(var);
+      if (IsOutput(mode)) {
+        openOutputs.insert(var);
+      }
     }
     if (IsOutput(mode)) {
       outputs.push_back(var);
@@ -1562,7 +1580,12 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
       results.push_back(merk::ToWordOp::create(builder_, Location(at), declared,
           IntegerConstant(builder_.getI64Type(), 0, Location(at))));
     } else {
-      results.push_back(Coerce(ValueOf(var), declared, Location(at)));
+      mlir::Value value{ValueOf(var)};
+      if (IsClosedType(body.vars[var].type)) {
+        value = ClosedAs(value, openOutputs.contains(var), body.vars[var].type,
+            Location(at), at);
+      }
+      results.push_back(Coerce(value, declared, Location(at)));
     }
   }
   if (llvm::is_contained(results, mlir::Value{})) {

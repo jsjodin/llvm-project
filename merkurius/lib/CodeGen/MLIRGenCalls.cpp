@@ -94,14 +94,18 @@ merk::ProcOp MerkGenerator::NewProc(llvm::StringRef name, parser::CharBlock at,
       NotYet(at, "values of type " + semantics::TypeToString(*type));
       return nullptr;
     }
+    // A closed(T) that may be unbound passes as its open word.
+    mlir::Type passed{OpenParameter(mode, type)
+            ? mlir::Type{merk::WordType::get(&context_)}
+            : represented->type};
     if (!represented->dummy && !IsUnused(mode)) {
       if (IsOutput(mode)) {
-        outputs.push_back(represented->type);
+        outputs.push_back(passed);
       } else {
         if (IsClobbered(mode)) {
           clobbered.push_back(inputs.size());
         }
-        inputs.push_back(represented->type);
+        inputs.push_back(passed);
       }
     }
   }
@@ -261,8 +265,31 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
       outputVars.push_back(argument);
     }
   }
+  // Arguments passed as closed(T)'s open words (OpenParameter).
+  bool openClosed{false};
+  for (auto [mode, type] : llvm::zip(callee.modes, types)) {
+    openClosed |= OpenParameter(mode, type);
+  }
+  for (auto [argument, mode, type] :
+      llvm::zip(arguments, callee.modes, types)) {
+    if (!IsClosedType(type) && ClosedOpen(body, argument) &&
+        OpenParameter(mode, body.vars[argument].type)) {
+      // Temporary (open types step 4(c), docs/INPROGRESS.md): code at a type
+      // variable reads closed(U) through its type_info, as U's word, which
+      // an unbound one has not.
+      NotYet(at,
+          "passing a closed(T) value that may be unbound where the "
+          "callee has a type variable");
+      return;
+    }
+  }
+  if (openClosed && isMethod) {
+    // Temporary (open types step 4(c), docs/INPROGRESS.md).
+    NotYet(at, "methods with closed(T) arguments that may be unbound");
+    return;
+  }
   const ProcedureBody *copyable{nullptr};
-  if (wordOutputs_ && !isMethod && hiddenOutputs.empty() &&
+  if (wordOutputs_ && !isMethod && hiddenOutputs.empty() && !openClosed &&
       !(goal.modes && goal.modes->implied) &&
       llvm::equal(outputVars, *wordOutputs_)) {
     copyable = CopyableBody(callee);
@@ -329,7 +356,11 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
   // None for a value with no bits at a type variable's place, whose word
   // comes back unused.
   llvm::SmallVector<std::optional<BodyVar>> outputs;
+  llvm::DenseSet<BodyVar> openOutputs;
   for (auto [argument, mode, type] : llvm::zip(arguments, callee.modes, types)) {
+    // By the callee's type: at a type variable, a closed(U) is U's word, as
+    // the code there reads it through closed(U)'s type_info.
+    bool open{OpenParameter(mode, type)};
     std::optional<Represented> actual{Represent(body.vars[argument].type)};
     if (!actual) {
       NotYet(at, "values of type " +
@@ -342,10 +373,24 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
     }
     if (IsOutput(mode)) {
       outputs.push_back(dummy ? std::nullopt : std::make_optional(argument));
+      if (open) {
+        openOutputs.insert(argument);
+      }
     } else if (dummy) {
       inputs.push_back(merk::ToWordOp::create(builder_, loc,
           merk::WordType::get(&context_),
           IntegerConstant(builder_.getI64Type(), 0, loc)));
+    } else if (IsClosedType(body.vars[argument].type)) {
+      mlir::Value value{
+          ClosedAs(ValueOf(argument), open, body.vars[argument].type, loc, at)};
+      if (!value) {
+        failed_ = true;
+        return;
+      }
+      inputs.push_back(Coerce(value,
+          open ? mlir::Type{merk::WordType::get(&context_)}
+               : Represent(type)->type,
+          loc));
     } else {
       inputs.push_back(Coerce(ValueOf(argument), Represent(type)->type, loc));
     }
@@ -450,8 +495,9 @@ void MerkGenerator::Called(const Body &goal, const Procedure &callee,
     if (!var) {
       continue;
     }
-    values_[*var] =
-        Coerce(result, Represent(body.vars[*var].type)->type, loc);
+    values_[*var] = openOutputs.contains(*var)
+        ? result
+        : Coerce(result, Represent(body.vars[*var].type)->type, loc);
   }
 }
 
@@ -1175,6 +1221,16 @@ void MerkGenerator::HigherOrderCall(const Body &goal, const ProcedureBody &body)
             " closures");
     return;
   }
+  for (auto [argument, mode] : llvm::zip(goal.arguments, modes)) {
+    if (OpenParameter(mode, body.vars[argument].type)) {
+      // Temporary (open types step 4(c), docs/INPROGRESS.md): a closure's
+      // entry would need to know which of its parameters take open words.
+      NotYet(at,
+          "higher-order calls with closed(T) arguments that may be "
+          "unbound");
+      return;
+    }
+  }
   // Every argument is a word, one of a type with no values the word 0.
   auto word{merk::WordType::get(&context_)};
   llvm::SmallVector<mlir::Value> inputs;
@@ -1193,6 +1249,14 @@ void MerkGenerator::HigherOrderCall(const Body &goal, const ProcedureBody &body)
       if (mlir::Value value{ValueOf(argument)}; value && !represented->dummy) {
         bound.push_back({argument, value});
       }
+    } else if (!represented->dummy && !IsUnused(mode) && IsClosedType(type)) {
+      // A closure's entry takes T's word.
+      mlir::Value value{ClosedAs(ValueOf(argument), false, type, loc, at)};
+      if (!value) {
+        failed_ = true;
+        return;
+      }
+      inputs.push_back(Coerce(value, word, loc));
     } else {
       inputs.push_back(represented->dummy || IsUnused(mode)
               ? ZeroWord(loc)

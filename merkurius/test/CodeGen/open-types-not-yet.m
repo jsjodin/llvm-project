@@ -1,8 +1,8 @@
 % Code generation does not do all of open terms yet (docs/INPROGRESS.md,
-% Open types, step 4): a closed(T) value that may be unbound, as a fresh
-% variable, in a full unification or as an argument a get_structure or a
-% deconstruction takes out of an open term, waits for step 4(c). An open
-% term that holds
+% Open types, step 4). A closed(T) value that may be unbound holds its open
+% word (open-closed.m), except where the callee reads it at a type
+% variable, through a closure, or in an ordinary term, which holds T's word.
+% An open term that holds
 % an array, a higher-order value or an existentially typed constructor,
 % which the runtime's walkers stop on, is reported where open's predicates
 % or a full unification would walk it; a closed(U) holding one only where
@@ -10,7 +10,7 @@
 % terms in it waits for step 6, which copies it. Each is reported as not
 % yet implemented. Full unification, fresh variables, calls of open's
 % predicates (open-terms.m), constructions and get_structure
-% (open-construct.m) are generated.
+% (open-construct.m) and closed(T) holes (open-closed.m) are generated.
 %
 % RUN: not merkc -fc1 -fopen-types -emit-merk %s -o /dev/null 2>&1 \
 % RUN:   | FileCheck --implicit-check-not=error: %s
@@ -33,13 +33,26 @@ get([X | _], X).
 :- type bundle ---> bundle(closed(list(int)), int).
 :- pred closed_field(open(bundle)::ia, open(int)::oa) is semidet.
 closed_field(bundle(_, N), N).
-% CHECK: [[@LINE-1]]:14: error: not yet implemented: code generation for closed(T) values that may be unbound
 
 same_closed(X, X).
-% CHECK: [[@LINE-1]]:16: error: not yet implemented: code generation for closed(T) values that may be unbound
 
 fresh_closed(X) :- hold(X), hold(X).
-% CHECK: [[@LINE-1]]:20: error: not yet implemented: code generation for closed(T) values that may be unbound
+
+:- pred poly(T::ia) is det.
+poly(_).
+:- pred to_poly(closed(int)::ia) is det.
+to_poly(X) :- poly(X).
+% CHECK: [[@LINE-1]]:15: error: not yet implemented: code generation for passing a closed(T) value that may be unbound where the callee has a type variable
+
+:- pred in_list(closed(int)::ia, list(closed(int))::oa) is det.
+in_list(X, [X]).
+% CHECK: [[@LINE-1]]:12: error: not yet implemented: code generation for terms of type list.list(open.closed(int)) holding closed(T) values that may be unbound
+
+:- pred through(pred(closed(int)), closed(int)).
+:- mode through(pred(ia) is det, ia) is det.
+through(P, X) :- P(X).
+% CHECK: [[@LINE-1]]:18: error: not yet implemented: code generation for higher-order calls with closed(T) arguments that may be unbound
+
 
 hold(_).
 

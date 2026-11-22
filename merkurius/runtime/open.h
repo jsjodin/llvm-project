@@ -54,6 +54,11 @@ uint64_t merk_open_new_var(void);
 // The end of the chain from a word: a value, or an unbound variable's
 // reference.
 uint64_t merk_open_deref(uint64_t word);
+// A closed(T)'s open word (a box, or a reference to a variable bound to one)
+// as T's ordinary word. Code generation calls it where a closed(T) value
+// that may have been unbound must be ground, as mode analysis has checked;
+// one still unbound stops the program.
+uint64_t merk_open_closed_value(uint64_t word);
 // Binds an unbound variable, `variable` being its reference as deref gives
 // it, to `value`, which must not be that reference, trailing the binding if
 // an open choice point or try goal is live.

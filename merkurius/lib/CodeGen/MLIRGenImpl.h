@@ -628,7 +628,6 @@ private:
   bool IsOpenType(const semantics::Type *);
   bool IsClosedType(const semantics::Type *);
   bool MentionsOpenType(const semantics::Type *);
-  bool MentionsClosedType(const semantics::Type *);
   // The term type of open(T)'s cells, `open.open(T)`, whose type_def is
   // T's constructors with every field a word, which lowering lays out as
   // the open layout; none if T has no constructors this module sees.
@@ -660,6 +659,25 @@ private:
       const Body &goal, const ProcedureBody &body);
   void OpenGetStructure(
       const Body &goal, const ProcedureBody &body, merk::TermType term);
+  // closed(T) values that may be unbound (docs/INPROGRESS.md, Open types,
+  // step 4(c)). Such a variable holds closed(T)'s open word, a box or a
+  // variable's reference, rather than T's word: one whose inst has `any` in
+  // it before some goal, a head variable whose mode does, or one this
+  // procedure's code has given an open word.
+  bool ClosedOpen(const ProcedureBody &, BodyVar);
+  // Whether a parameter takes an argument of this type as an open word: a
+  // closed(T) whose mode has `any` in it.
+  bool OpenParameter(const semantics::ArgMode &, const semantics::Type *);
+  // A closed(T) value as its open word if `open`, boxing T's word, or else as
+  // T's word, unboxing it (merk_open_closed_value).
+  mlir::Value ClosedAs(mlir::Value, bool open, const semantics::Type *closed,
+      mlir::Location, parser::CharBlock);
+  // After a goal: each closed(T) variable it bound in the representation
+  // ClosedOpen gives it.
+  void NoteClosedValues(const Body &goal, const ProcedureBody &body);
+  // X = closed(Y), X = Y, or a test, with X a closed(T) that holds an open
+  // word.
+  void ClosedUnify(const Body &goal, const ProcedureBody &body);
   // What the runtime's open walkers cannot hold yet in the open part of a
   // type: arrays, higher-order values and existentially typed constructors,
   // or none. With `closedToo`, inside closed(U) too, which only unification
@@ -704,6 +722,9 @@ private:
   llvm::DenseMap<std::pair<mlir::Operation *, const semantics::Type *>,
       mlir::Value>
       openTypeInfos_;
+  // This procedure's closed(T) variables given open words, and its head
+  // variables whose modes have `any` in them (ClosedOpen).
+  llvm::DenseSet<BodyVar> closedWords_;
   llvm::DenseMap<const ProcedureBody *, bool> trails_;
   // A goal with an OpenMP directive (design document, "Target regions").
   void Omp(const Body &, const ProcedureBody &);

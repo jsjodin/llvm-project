@@ -77,9 +77,7 @@ void MerkGenerator::FreshVariables(
   mlir::Location loc{Location(goal.tokens)};
   for (BodyVar var : goal.fresh) {
     if (IsClosedType(body.vars[var].type)) {
-      // Temporary (open types step 4(c), docs/INPROGRESS.md).
-      NotYet(Where(goal.tokens), "closed(T) values that may be unbound");
-      return;
+      closedWords_.insert(var);
     }
     values_[var] = merk::ForeignCallOp::create(builder_, loc,
         mlir::TypeRange{merk::WordType::get(&context_)}, "merk_open_new_var",
@@ -89,10 +87,172 @@ void MerkGenerator::FreshVariables(
 }
 
 bool MerkGenerator::IsOpenUnify(const Body &goal, const ProcedureBody &body) {
-  return goal.unify == UnifyKind::GetStructure ||
-      goal.unify == UnifyKind::Unify ||
-      (!goal.isVar && goal.unify != UnifyKind::Call &&
-          IsOpenType(body.vars[goal.left].type));
+  if (goal.unify == UnifyKind::GetStructure || goal.unify == UnifyKind::Unify) {
+    return true;
+  }
+  if (goal.unify == UnifyKind::Call || goal.unify == UnifyKind::Assign) {
+    return false;
+  }
+  if (!goal.isVar && IsOpenType(body.vars[goal.left].type)) {
+    return true;
+  }
+  // A deconstruction or test of a closed(T) that holds an open word; its
+  // construction is T's, which NoteClosedValues boxes.
+  if (!IsClosedType(body.vars[goal.left].type) ||
+      goal.unify == UnifyKind::Construct) {
+    return false;
+  }
+  return mlir::isa_and_nonnull<merk::WordType>(
+             ValueOf(goal.left) ? ValueOf(goal.left).getType() : nullptr) ||
+      (goal.isVar && ValueOf(goal.var) &&
+          mlir::isa<merk::WordType>(ValueOf(goal.var).getType()));
+}
+
+bool MerkGenerator::ClosedOpen(const ProcedureBody &body, BodyVar var) {
+  return IsClosedType(body.vars[var].type) &&
+      (body.vars[var].any || closedWords_.contains(var));
+}
+
+bool MerkGenerator::OpenParameter(
+    const semantics::ArgMode &mode, const semantics::Type *type) {
+  return IsClosedType(type) &&
+      ((mode.initial && modes_.ops().HasAny(mode.initial, type)) ||
+          (mode.final && modes_.ops().HasAny(mode.final, type)));
+}
+
+mlir::Value MerkGenerator::ClosedAs(mlir::Value value, bool open,
+    const semantics::Type *closed, mlir::Location loc, parser::CharBlock at) {
+  if (!value || open == mlir::isa<merk::WordType>(value.getType())) {
+    return value;
+  }
+  if (open) {
+    return ToOpenWord(value, closed, loc, at);
+  }
+  auto word{merk::WordType::get(&context_)};
+  mlir::Value ground{
+      merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{word},
+          "merk_open_closed_value", mlir::ValueRange{value}, /*can_fail=*/false)
+          .getResult(0)};
+  return Coerce(ground, Represent(closed)->type, loc);
+}
+
+void MerkGenerator::NoteClosedValues(
+    const Body &goal, const ProcedureBody &body) {
+  mlir::Location loc{Location(goal.tokens)};
+  parser::CharBlock at{Where(goal.tokens)};
+  llvm::SmallVector<BodyVar> vars{goal.arguments.begin(), goal.arguments.end()};
+  if (goal.kind == BodyKind::Unify) {
+    vars.push_back(goal.left);
+    if (goal.isVar) {
+      vars.push_back(goal.var);
+    }
+  }
+  for (BodyVar var : vars) {
+    mlir::Value value{ValueOf(var)};
+    if (!value || !IsClosedType(body.vars[var].type)) {
+      continue;
+    }
+    if (mlir::isa<merk::WordType>(value.getType())) {
+      closedWords_.insert(var);
+    } else if (ClosedOpen(body, var)) {
+      values_[var] = ClosedAs(value, true, body.vars[var].type, loc, at);
+    }
+  }
+}
+
+// X with closed(T)'s open word: X = closed(Y) is a deconstruction or a test
+// of the box, or a get_structure, which binds an unbound X to a box of Y's
+// word; X = Y is merk_open_unify with closed(T)'s type_info.
+void MerkGenerator::ClosedUnify(const Body &goal, const ProcedureBody &body) {
+  parser::CharBlock at{Where(goal.tokens)};
+  mlir::Location loc{Location(goal.tokens)};
+  const semantics::Type *type{body.vars[goal.left].type};
+  const semantics::Type *argument{type->arguments.front()};
+  auto word{merk::WordType::get(&context_)};
+  auto i64{builder_.getI64Type()};
+  if (goal.isVar) {
+    mlir::Value info{TypeInfoOfType(type, loc, at)};
+    mlir::Value x{ClosedAs(ValueOf(goal.left), true, type, loc, at)};
+    mlir::Value y{ClosedAs(ValueOf(goal.var), true, type, loc, at)};
+    if (!info || !x || !y) {
+      failed_ = true;
+      return;
+    }
+    auto call{merk::ForeignCallOp::create(builder_, loc,
+        mlir::TypeRange{builder_.getI1Type()}, "merk_open_unify",
+        mlir::ValueRange{info, x, y}, /*can_fail=*/true)};
+    merk::GuardOp::create(builder_, loc, call.getResult(0));
+    return;
+  }
+  BodyVar inner{goal.arguments.front()};
+  mlir::Value given{ValueOf(inner)};
+  std::optional<Represented> represented{Represent(argument)};
+  if (!represented) {
+    failed_ = true;
+    return;
+  }
+  if (goal.unify != UnifyKind::GetStructure) {
+    // X is bound: its box's word is Y's, or is tested against it.
+    mlir::Value value{Coerce(ClosedAs(ValueOf(goal.left), false, type, loc, at),
+        represented->type, loc)};
+    if (given) {
+      Test(goal, value, given, argument);
+    } else {
+      values_[inner] = value;
+    }
+    return;
+  }
+  mlir::Value deref{OpenDeref(ValueOf(goal.left), type, loc)};
+  if (!deref) {
+    return;
+  }
+  // A variable's primary tag, in every open layout (runtime/open.h).
+  constexpr std::int64_t kVariableTag{7};
+  auto tag{mlir::arith::AndIOp::create(builder_, loc, Coerce(deref, i64, loc),
+      mlir::arith::ConstantIntOp::create(builder_, loc, i64, kVariableTag))};
+  mlir::Value unbound{mlir::arith::CmpIOp::create(builder_, loc,
+      mlir::arith::CmpIPredicate::eq, tag,
+      mlir::arith::ConstantIntOp::create(builder_, loc, i64, kVariableTag))};
+  llvm::SmallVector<mlir::Type> results;
+  if (!given) {
+    results.push_back(represented->type);
+  }
+  auto ite{merk::IteOp::create(builder_, loc, results)};
+  mlir::OpBuilder::InsertionGuard guard{builder_};
+  builder_.setInsertionPointToStart(&ite.getCondition().emplaceBlock());
+  merk::GuardOp::create(builder_, loc, unbound);
+  merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  builder_.setInsertionPointToStart(&ite.getThenRegion().emplaceBlock());
+  if (!given) {
+    // An unbound X has no ground value to give Y (design document, "Open
+    // terms", Operations).
+    merk::FailOp::create(builder_, loc);
+  } else {
+    mlir::Value box{
+        ToOpenWord(Coerce(given, Represent(type)->type, loc), type, loc, at)};
+    if (!box) {
+      return;
+    }
+    merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{},
+        "merk_open_bind", mlir::ValueRange{deref, box}, /*can_fail=*/false);
+    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  }
+  builder_.setInsertionPointToStart(&ite.getElseRegion().emplaceBlock());
+  mlir::Value value{Coerce(
+      merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{word},
+          "merk_open_closed_value", mlir::ValueRange{deref}, /*can_fail=*/false)
+          .getResult(0),
+      represented->type, loc)};
+  if (given) {
+    Test(goal, value, given, argument);
+    merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
+  } else {
+    merk::YieldOp::create(builder_, loc, mlir::ValueRange{value});
+  }
+  builder_.setInsertionPointAfter(ite);
+  if (!given) {
+    values_[inner] = ite.getResult(0);
+  }
 }
 
 std::optional<merk::TermType> MerkGenerator::OpenTermType(
@@ -162,7 +322,9 @@ mlir::Value MerkGenerator::NotedOpenWord(
 mlir::Value MerkGenerator::ToOpenWord(mlir::Value value,
     const semantics::Type *type, mlir::Location loc, parser::CharBlock at) {
   auto word{merk::WordType::get(&context_)};
-  if (IsOpenType(type)) {
+  // A closed(T) that may be unbound holds its open word already (ClosedOpen).
+  if (IsOpenType(type) ||
+      (IsClosedType(type) && mlir::isa<merk::WordType>(value.getType()))) {
     return Coerce(value, word, loc);
   }
   mlir::Value info{TypeInfoOfType(type, loc, at)};
@@ -255,7 +417,9 @@ std::optional<llvm::SmallVector<mlir::Value>> MerkGenerator::OpenRead(
     }
     mlir::Value value{ValueOf(argument)};
     if (!value) {
-      value = IsOpenType(type) ? field : FromOpenWord(field, type, loc, at);
+      value = IsOpenType(type) || IsClosedType(type)
+          ? field
+          : FromOpenWord(field, type, loc, at);
       if (!value) {
         return std::nullopt;
       }
@@ -301,8 +465,10 @@ void MerkGenerator::OpenGetStructure(
         return;
       }
       free.push_back(argument);
-      types.push_back(represented->type);
-      groundFree |= !IsOpenType(type);
+      bool closed{IsClosedType(type)};
+      types.push_back(closed ? mlir::Type{merk::WordType::get(&context_)}
+                             : represented->type);
+      groundFree |= !IsOpenType(type) && !closed;
     }
   }
   // A variable's primary tag, in every open layout (runtime/open.h).
@@ -357,25 +523,17 @@ void MerkGenerator::OpenUnify(const Body &goal, const ProcedureBody &body) {
   parser::CharBlock at{Where(goal.tokens)};
   mlir::Location loc{Location(goal.tokens)};
   const semantics::Type *type{body.vars[goal.left].type};
+  if (IsClosedType(type)) {
+    ClosedUnify(goal, body);
+    return;
+  }
   if (!goal.isVar) {
-    if (!IsOpenType(type)) {
-      // Temporary (open types step 4(c), docs/INPROGRESS.md).
-      NotYet(at, "closed(T) values that may be unbound");
-      return;
-    }
     unsigned arity{static_cast<unsigned>(goal.arguments.size())};
     std::optional<merk::TermType> term{OpenTermType(type)};
     if (!term ||
         !ConstructorOf(type->arguments.front(), goal.functor.name, arity)) {
       NotYet(at, "this unification of an open term");
       return;
-    }
-    for (BodyVar argument : goal.arguments) {
-      if (!ValueOf(argument) && IsClosedType(body.vars[argument].type)) {
-        // Temporary (open types step 4(c), docs/INPROGRESS.md).
-        NotYet(at, "closed(T) values that may be unbound");
-        return;
-      }
     }
     if (ReportOpenShapes(goal, {goal.left}, body, false)) {
       return;
@@ -426,24 +584,13 @@ void MerkGenerator::OpenUnify(const Body &goal, const ProcedureBody &body) {
     }
     }
   }
-  // Full unification. A closed(T) that may be unbound is a box or a
-  // variable, which its ordinary word is not, outside open(T).
-  if (!IsOpenType(type) && MentionsClosedType(type)) {
-    // Temporary (open types step 4(c), docs/INPROGRESS.md).
-    NotYet(at, "closed(T) values that may be unbound");
-    return;
-  }
+  // Full unification. An ordinary type holds a closed(U) part as U's word,
+  // never unbound (ClosedAs), so its own unify entry does, even with open
+  // parts.
   if (ReportOpenShapes(goal, {goal.left, goal.var}, body, true)) {
     return;
   }
   Test(goal, ValueOf(goal.left), ValueOf(goal.var), type);
-}
-
-bool MerkGenerator::MentionsClosedType(const semantics::Type *type) {
-  return type &&
-      (IsClosedType(type) ||
-          llvm::any_of(type->arguments,
-              [&](const semantics::Type *t) { return MentionsClosedType(t); }));
 }
 
 std::optional<std::string> MerkGenerator::OpenShapeNotYet(
@@ -560,7 +707,9 @@ bool MerkGenerator::ReportOpenMessages(const semantics::Procedure &callee,
 
 void MerkGenerator::OpenEqual(mlir::Value x, mlir::Value y,
     const semantics::Type *semantic, mlir::Location loc) {
-  mlir::Value info{TypeInfoOfType(semantic->arguments.front(), loc, equalAt_)};
+  mlir::Value info{TypeInfoOfType(
+      IsClosedType(semantic) ? semantic : semantic->arguments.front(), loc,
+      equalAt_)};
   if (!info) {
     failed_ = true;
     return;

@@ -85,6 +85,18 @@ uint64_t merk_open_deref(uint64_t word) {
   return word;
 }
 
+uint64_t merk_open_closed_value(uint64_t word) {
+  Word value{merk_open_deref(word)};
+  if (IsUnbound(value)) {
+    std::fflush(stdout);
+    std::fputs("Merkurius runtime: a closed(T) value is unbound where it must "
+               "be ground\n",
+        stderr);
+    ExitProgram(1);
+  }
+  return *reinterpret_cast<const Word *>(value); // a box, tag 0
+}
+
 void merk_open_bind(uint64_t variable, uint64_t value) {
   Word *cell{CellOf(variable)};
   // Its caller dereferences it first. A variable bound already would have

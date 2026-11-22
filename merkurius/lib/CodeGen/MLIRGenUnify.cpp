@@ -83,6 +83,21 @@ void MerkGenerator::TermUnify(const Body &goal, const ProcedureBody &body) {
       if (!hidden.types.empty()) {
         value = Coerce(value, (*cell)[arguments.size()], loc);
       }
+      // An ordinary term holds a closed(T) as T's word, so one that may be
+      // unbound here would need the term to hold its open word.
+      if (IsClosedType(body.vars[argument].type)) {
+        for (const auto &[var, inst] : goal.entry) {
+          if (var == argument && inst &&
+              modes_.ops().HasAny(inst, body.vars[argument].type)) {
+            NotYet(at,
+                "terms of type " +
+                    semantics::TypeToString(*body.vars[goal.left].type) +
+                    " holding closed(T) values that may be unbound");
+            return;
+          }
+        }
+        value = ClosedAs(value, false, body.vars[argument].type, loc, at);
+      }
       arguments.push_back(value);
     }
     values_[goal.left] =

@@ -8044,9 +8044,10 @@ the `type_info` back to the open layout (below).
        compare structurally, with the wrong equality and no sign. A
        descriptor flag for user-defined equality, which `GroundEqual` and
        `OpenUnify` check, would do.
-     - **Still not done, each reported as not yet implemented:** `closed(T)`
-       values that may be unbound (c). A polymorphic `open(T)` whose T is not a type variable
-       nor ground, such as `open(list(T))`, gets no note (step 5).
+     - **Still not done, each reported as not yet implemented:** a
+       polymorphic `open(T)` whose T is not a type variable nor ground,
+       such as `open(list(T))`, gets no note (step 5). `closed(T)` values
+       that may be unbound came in (c).
      - Tests: `CodeGen/open-terms.m` (round trips of each kind of value,
        unification, fresh variables, undoing on disjunction, condition and
        negation, and that a collection refuses an open term),
@@ -8091,9 +8092,39 @@ the `type_info` back to the open layout (below).
        write modes, undoing, and the tags of types where the open layout
        shares a tag the ordinary one does not, against the runtime's
        `to_open` and `from_open` both ways), `CodeGen/open-types-not-yet.m`.
-   - (c) `closed(T)` values that may be unbound: a box or a variable's
-     reference, so each such variable has its own representation and
-     conversions.
+   - (c) Done 2026-11-22: `closed(T)` values that may be unbound.
+     - **Two representations:** a `closed(T)` variable whose inst has
+       `any` in it before some goal (`BodyVarInfo::any`), or one given an
+       open word, holds closed(T)'s open word: a box, or a variable's
+       reference. A ground one keeps T's word, at no cost. A parameter
+       whose mode has `any` in it takes the open word (`OpenParameter`).
+     - **Conversions** (`ClosedAs`): after each atomic goal, a ground value
+       of such a variable is boxed. At calls and at the exit, a value is
+       boxed or unboxed to the parameter's representation. Unboxing is
+       `merk_open_closed_value`, which stops the program if the value is
+       still unbound; mode analysis means that cannot happen.
+     - **Goals** (`ClosedUnify`): `X = closed(Y)` with X bound unboxes X.
+       As a get_structure, an unbound X is bound to a box of Y, or the goal
+       fails if Y is free. `X = Y` is `merk_open_unify` with closed(T)'s
+       `type_info`. A free `closed(U)` argument of a get_structure or a read
+       takes the field's word, so a hole can be taken out of an open term,
+       passed around and filled elsewhere.
+     - **Ordinary types with closed parts** unify by their own unify entry.
+       An ordinary term holds a `closed(U)` as U's word, which is ground
+       there.
+     - **Temporary, each reported as not yet implemented:**
+       - an ordinary term built from a `closed(T)` that may be unbound,
+         which would need the term to hold its open word (constructions
+         now record their entry insts for this);
+       - passing one where the callee has a type variable, whose code reads
+         `closed(U)` through its `type_info` as U's word;
+       - higher-order calls, and methods, with such arguments, since a
+         closure's entry would need to know which parameters take open
+         words.
+     - Tests: `CodeGen/open-closed.m` (holes filled in place and
+       elsewhere, two holes unified, oa outputs, ground values at ia
+       parameters, a filled hole in ordinary and open terms, and a pair
+       with open and closed parts), `CodeGen/open-types-not-yet.m`.
    - (d) A unify procedure per open type, beside the generic walker, and
      marks only around goals with an `any` nonlocal, which mode analysis
      can record, rather than in every procedure whose variables' types

@@ -132,9 +132,9 @@ struct Body {
   // For a determinism cast, its kind and the variables it lists.
   std::optional<parser::PromiseSolutionsKind> promise;
   std::vector<BodyVar> promised;
-  // For a disjunction, a switch, a determinism cast, a call and a
-  // function application: the insts before it of the variables bound
-  // outside it that it uses.
+  // For a disjunction, a switch, a determinism cast, a call, a function
+  // application and a construction: the insts before it of the variables
+  // bound outside it that it uses.
   std::vector<std::pair<BodyVar, const Inst *>> entry;
   // For a switch: its variable, whether it can fail because its cases
   // leave out functors the variable may have, and its cases, by functor.
