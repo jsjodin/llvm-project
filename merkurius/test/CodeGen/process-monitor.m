@@ -2,7 +2,9 @@
 % normal end and its failure reach a mailbox through the watcher's function
 % into its message type, on the receiver's side; a process already ended gives
 % the message at once; one monitor per process end; demonitor stops it; a
-% message for a closed mailbox goes nowhere. The refs tell monitors apart.
+% message for a closed mailbox goes nowhere. The refs tell monitors apart. A
+% function whose result is a constant, as reason's, has no cells to give the
+% reader, and the message is still counted once.
 %
 % RUN: merkc -O0 %s -o %t.0 && %t.0 2>/dev/null | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -O2 %s -o %t.2 && %t.2 2>/dev/null | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
@@ -103,7 +105,27 @@ main(!IO) :-
     close_mailbox(Gone, !IO),
     send(Quiet, 0, !IO),
     send(Events, value(2), !IO),
-    show(Events, !IO).
+    show(Events, !IO),
+
+    % A message that is a constant, the reason itself, and a request to a
+    % process that has ended, whose monitor's message is the reason too.
+    new_mailbox(Reasons, !IO),
+    spawn(stopper, Constant, !IO),
+    monitor(Constant, Reasons, reason, _, !IO),
+    send(Constant, 0, !IO),
+    receive(Reasons, any, after(10000), GotReason, !IO),
+    ( if GotReason = message(Reason) then
+        io.write_string("constant: " ++ reason_text(Reason) ++ "\n", !IO)
+    else
+        io.write_string("nothing\n", !IO)
+    ),
+    request(Constant, (func(_ : mailbox(int)) = 1), after(10000), Reply, !IO),
+    ( if Reply = down(Down) then
+        io.write_string("request: " ++ reason_text(Down) ++ "\n", !IO)
+    else
+        io.write_string("a reply\n", !IO)
+    ),
+    close_mailbox(Reasons, !IO).
 
 % OUTPUT:1
 % OUTPUT-NEXT:normal end: normal
@@ -113,4 +135,6 @@ main(!IO) :-
 % OUTPUT-NEXT:different refs
 % OUTPUT-NEXT:kept: normal
 % OUTPUT-NEXT:2
+% OUTPUT-NEXT:constant: normal
+% OUTPUT-NEXT:request: noproc
 % OUTPUT-NOT:{{.}}

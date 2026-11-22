@@ -1589,9 +1589,12 @@ extern "C" void merk_mailbox_resolve(MERK_HANDLE_PARAMETERS,
     message->chunks = fragment.Take();
     // Still in the mailbox, and read again before it is removed. The read
     // gave the reader what the monitor left, so these chunks are counted
-    // as held until they are given too.
-    CountHeld(1);
-    GiveToReader(message);
+    // as held until they are given too. A value with no cells, such as a
+    // constant, has none.
+    if (message->chunks) {
+      CountHeld(1);
+      GiveToReader(message);
+    }
   } else {
     // The mailbox closed, and dropped the message.
     FreeChunks(fragment.Take());
