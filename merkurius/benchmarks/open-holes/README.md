@@ -16,10 +16,16 @@ condition is live; the sum dereferences each tail and unboxes each int.
 or by hand:
 
     merkc -O2 -fopen-types open-holes.m -o open-holes
-    MERK_HEAP_CHUNK_BYTES=500000000 ./open-holes 100000 100
+    ./open-holes 100000 100
 
-Until the collector can move open terms and the trail's entries (docs/
-INPROGRESS.md, Open types, step 5), a collection while a binding is trailed
-stops the program, so `run.sh` gives the run one heap chunk big enough for
-all of it. Its page faults are in the elapsed time; the user time is the
-code's.
+The heap collects as it fills, moving the open terms and the trail's
+entries (docs/INPROGRESS.md, Open types, step 5). Measurements before step
+5 gave the run one heap chunk instead, whose page faults were in the
+elapsed time.
+
+`compare-c.sh` runs the program against E5's C model, rebuilt in
+`experiments/open-holes`, and against `ground-holes.m`, the same list as a
+ground `list(int)` built front to back by last call modulo constructor, at
+E5's size, 1,000,000 elements 200 times, on one pinned core:
+
+    compare-c.sh [build-dir] [N] [R] [core]

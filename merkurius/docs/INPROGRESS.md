@@ -8338,7 +8338,26 @@ the `type_info` back to the open layout (below).
      same assembly.
 7. **Tests and a measurement:** difference lists, a type inferencer by
    unification, and E5's list built through holes, compiled, against E5's
-   C model.
+   C model. Done 2026-11-22.
+   - `CodeGen/open-dlist.m`: the design document's two difference-list
+     examples, run, a tree flattened in order through a hole passed down,
+     and a queue that adds at its end. A second close of a hole fails.
+   - `CodeGen/open-infer.m`: a type inferencer for a small functional
+     language, by unification with the occurs check, with let-polymorphism
+     by inferring a let-bound name's definition again at each use. Its
+     environment's bindings are never holes, so the conditions that test
+     them are in `promise_pure` scopes.
+   - **E5's program was not kept,** so its rows were rebuilt from its
+     description (`experiments/open-holes`). `ground-holes.m` is the
+     ground counterpart, built front to back by last call modulo
+     constructor.
+   - **Result** (design document, Measurements, "Open terms built through
+     holes"). Without collections the compiled code is 1.4 times the
+     model, open and ground alike, and building through holes costs 2.6
+     times the ground build, against E5's 2.3. With collections both are
+     far slower: the collector copies the list still being built, at about
+     510 instructions a ground cell, and takes 2.27 of the ground program's
+     2.71 seconds.
 
 ### `closed(T)`
 

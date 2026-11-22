@@ -16,10 +16,9 @@ cells remembered every pair of cells in a table, against cyclic terms.
 or by hand:
 
     merkc -O2 -fopen-types open-unify.m -o open-unify
-    MERK_HEAP_CHUNK_BYTES=1000000000 ./open-unify 100000 100
+    ./open-unify 100000 100
 
-Until the collector can move open terms and the trail's entries (docs/
-INPROGRESS.md, Open types, step 5), a collection while a binding is trailed
-stops the program, so `run.sh` gives the run one heap chunk big enough for
-all of it. Its page faults are in the elapsed time; the user time is the
-code's.
+The heap collects as it fills, moving the open terms and the trail's
+entries (docs/INPROGRESS.md, Open types, step 5). Measurements before step
+5 gave the run one heap chunk instead, whose page faults were in the
+elapsed time.

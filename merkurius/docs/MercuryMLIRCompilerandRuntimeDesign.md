@@ -6517,6 +6517,39 @@ The spread between runs was under 5%.
   trailed, on another machine and for 10^6 elements; step 7 compares the two
   properly.
 
+**Against E5's C model** (open types step 7). Measured 2026-11-22 on commit
+71e9b0c1d70e, -O2, pinned to one core of the machine above, five runs each,
+median seconds (`benchmarks/open-holes/compare-c.sh`). E5's size: a list of
+1,000,000 ints built and summed 200 times, 2 × 10^8 elements. E5's program
+was not kept, so its rows were rebuilt from its description
+(`experiments/open-holes`), compiled by the build's clang at `-O2
+-march=native`. The model's arena is reset each round; the compiled programs
+run on a heap that the collector copies as it fills. "No collection" gives
+the run one heap chunk of 4 GB, whose page faults are system time.
+
+| Program | Elapsed | User | No collection, user | ns per element, user |
+| --- | --- | --- | --- | --- |
+| Model, ground, back to front | 0.293 | | | 1.5 |
+| Model, ground, front to back by destination passing | 0.315 | | | 1.6 |
+| Model, through holes | 0.739 | | | 3.7 |
+| Model, through holes, trailed | 0.847 | | | 4.2 |
+| Merkurius, ground, front to back (`ground-holes.m`) | 2.78 | 2.71 | 0.44 | 13.6, 2.2 without collection |
+| Merkurius, through holes, trailed (`open-holes.m`) | 1.98 | 1.77 | 1.16 | 8.9, 5.8 without collection |
+
+- **The code is where E5 put it.** Without collections, the open program
+  takes 1.37 times the trailed model and the ground program 1.40 times the
+  ground model. Building through holes costs 2.6 times the ground build in
+  both, against E5's 2.3. The open program's code is 108 instructions an
+  element (callgrind), the deref, bind, box and trail inline.
+- **The collector is most of the time,** and more for the ground list than
+  the open one: 2.27 of the ground program's 2.71 seconds, and 0.61 of the
+  open program's 1.77. Each collection copies the list still being built.
+  For the ground list, callgrind counts about 510 instructions a copied cell
+  (10 rounds: 18 collections, 4.76 million cells). Each cell has a binary
+  search of the chunks, a `memcpy` call, a mark, and a push and a pop of
+  its fields with a kept environment, and each field is resolved against
+  its type again. That is the ground collector's cost, not open types'.
+
 ### Unification of open terms
 
 Measured 2026-11-22, -O2, pinned to one core of the machine above, five runs
