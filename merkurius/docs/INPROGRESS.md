@@ -832,7 +832,8 @@ left open (design document, Processes and scheduler).
 
 - A compile option that leaves out what only preemption needs, for programs
   that do not spawn.
-- A monitor across nodes or places reports that it is not supported yet.
+- A monitor across nodes or places reports that it is not supported yet
+  (Failure: monitors across nodes and places, and recovery in place).
 - A send to another node holds its worker while its socket is full.
 - Regions on several devices at once need a machine with two GPUs to run.
 - About 2 µs of the cost of a receive with a timeout remains, with several
@@ -7767,6 +7768,270 @@ the sender rejects.
 - How the user's note on nodes, a NIC on PCIe Gen4 ESM to one GPU, fits:
   the route's end becomes a proxy that posts the NIC's operations, while
   the GPUs keep the same send, queue and pool protocol.
+
+## Failure: monitors across nodes and places, and recovery in place
+
+Proposed 2026-11-22, from a discussion with the user; not agreed, nothing
+built. The aim is a computation that goes on while processes, GPU kernels,
+nodes and connections fail at random, and whose answer is bit for bit the
+answer of a run without failures.
+
+**Why.** In MPI a failed rank usually ends the whole job. ULFM, MPI's fault
+tolerance proposal, is not in the standard most codes use, so the usual
+answer is to checkpoint the whole job and restart it, which costs more as
+jobs grow and failures become routine. Monitors allow recovery in place: a
+coordinator that sees a place's `down` gives its work to others. Mercury's
+determinism makes the recomputed work identical, given random numbers keyed
+by the work (a particle, a tile), not by who computes it.
+
+**What exists** (design document, Exceptions, links and monitors):
+- Monitors on one node, with typed `down` messages into a mailbox the
+  watcher chooses. Monitoring an ended process gives `down` at once.
+- Monitors of GPU processes (2026-11-11): each has a record on the host,
+  never run, which owns its mailbox, so `monitor` and `demonitor` are host
+  operations. A GPU process's end reaches the host through
+  `rpcProcessEnded`, which it needs anyway, so monitors cost the device
+  nothing.
+- Nodes over TCP (Remote handles and TCP): per-pair order, ticks after
+  Erlang's (`MERK_TICK_TIME`, 60 s), and a node id chosen at random each
+  run, so a restarted node is a new node.
+- Receives with a timeout, on the host and on a GPU.
+- Links left out, as two monitors give the same; supervisors as library
+  code over monitors.
+
+**What is missing:** monitors across nodes, and with a watcher on a GPU,
+which report "not supported yet" (Before the collector); the delivery
+contract, an open question in the design document (Distribution, "Remote
+mailboxes, sendability and failure"); reporting a GPU fault instead of
+ending the program; and ending a process from outside.
+
+### The design
+
+**1. The contract, Erlang's.** Messages between a pair of processes arrive
+in order. When a connection is lost, messages in flight may be lost, but
+every monitor across it fires with the reason `node_down`. Either a message
+arrives or its watcher is told. A target's `down` is sent after its last
+messages on the same connection, as a process closes its mailboxes before
+it tells its monitors. So after a `down`, nothing more comes from that
+process, which makes merging results simple.
+
+**2. `node_down` does not mean dead: the fence.** A partitioned node may go
+on running and reconnect, and its old processes may still send results that
+a coordinator has given to others. Two ways out:
+- *Refuse the node once it is down* (recommended). After a node's `down`,
+  this node refuses connections from that node id. The cut-off node must
+  restart, which gives it a new id, a new incarnation. It is Erlang's
+  `dist_auto_connect once`, made for this partition problem. One table of
+  fenced ids, checked in the handshake, and nothing per message.
+- *An epoch per connection,* in the handles' generation numbers, dropping
+  messages from an older epoch. It lets a node rejoin without restarting,
+  but every message carries and checks the epoch, and a process on the
+  rejoined node does not know that its peers count it as dead.
+- Either way, the cut-off node sees `node_down` for its peers too, and a
+  program's supervisor may end it. Neither removes the duplicates that
+  backup execution makes on purpose (5).
+
+**3. Typed reasons.** `down_reason` is abstract today, with `reason_text`.
+Recovery has to tell the cases apart:
+```mercury
+:- type down_reason
+    --->    normal
+    ;       noproc              % the target had already ended
+    ;       failed(string)      % an uncaught exception or a stack overflow
+    ;       killed              % ended from outside, (4)
+    ;       kernel_ended        % another process of its GPU kernel failed
+    ;       node_down.          % the connection to its node was lost
+```
+`kernel_ended` keeps a supervisor from blaming the wrong process: a trap
+ends a whole kernel, so the GPU processes in it end together. A recovery
+policy treats the kernel as the unit that fails.
+
+**4. Ending a process from outside: `process.stop(Mailbox, !IO)`.** It ends
+the process owning the mailbox with the reason `killed`, as Erlang's
+`exit(Pid, kill)` does. That is safe because a process's stack and heap go
+as a whole, with nothing shared left half changed.
+- *On the host:* a flag the process reads where preemption already checks,
+  as lowering the heap limit forces the slow path. It waits until the join
+  inside a parallel region, until the return of a foreign call, and until
+  the end of a send, which is all or nothing.
+- *On a GPU:* a flag in device-visible memory, read at each poll of a
+  mailbox. A process in a long loop between polls sees it only if the
+  compiler adds a sampled check at the loop's back edge (6). A forced end
+  ends the whole kernel, with `kernel_ended` for the others. Whether a
+  kernel can be ended without ending the OS process is a probe (7).
+- With backup execution (5) stopping is rarely needed for the answer, only
+  to get GPU slots back, so it can be slow.
+
+**5. Slow or dead: do not decide.** A slow process and a dead one look the
+same from outside (Chandra and Toueg: every failure detector is unreliable).
+So correctness does not depend on telling them apart:
+- *Results are keyed* by their unit of work (a tile, a batch, a cycle), and
+  the coordinator keeps the first and drops the rest. Then a late result
+  after a reassignment is harmless.
+- *Backup execution,* as MapReduce's backup tasks: when a unit is late, give
+  a copy to another place and take whichever answer comes first. Failures
+  and stragglers then take one path, and a slow GPU is one more imbalance.
+- *The protocol is the heartbeat.* Steal requests, halos and results already
+  flow, and the protocol knows when one is late better than a generic
+  heartbeat does.
+
+**6. Heartbeats, later and only if needed.** A beat slot per GPU process,
+written at a poll if 250 ms have passed by the device's constant clock
+(`s_memrealtime`, `__builtin_readsteadycounter`), and read by a host thread.
+Estimated at about 1% of a poll; to be measured before it goes in. A beat
+says "polled recently", not "healthy", so a long loop between polls needs a
+sampled back-edge check, the one place this could cost in tight loops. The
+same check reads the stop flag (4). Between nodes, the ticks exist already.
+
+**7. GPU faults.** A trap or memory fault calls the queue's error callback,
+`AMDGPUQueueTy::callbackError` in the fork's plugin, which drains the RPC
+work the device pushed first, reports, and then `FATAL_MESSAGE` ends the OS
+process. ROCr also aborts on a GPU memory fault unless a handler for
+`HSA_AMD_GPU_MEMORY_FAULT_EVENT` is registered. To recover:
+- the callback reports to the Merkurius runtime, through a hook, instead of
+  ending the program; the runtime marks the queue dead and fires
+  `kernel_ended` for every GPU process of that kernel, and the next kernel
+  gets a new queue;
+- *probes first:* whether the device stays usable after one queue's trap,
+  and after a memory fault. Not on the gfx1030, which drives the display
+  and whose resets log the user out; on the gfx90a system, with the user's
+  leave;
+- *if the device does not recover,* a real GPU fault ends the node's OS
+  process, which other nodes see as `node_down` and recover from. The design
+  works either way, and the demos inject clean ends with a fault's reason
+  (8), testing real traps apart.
+
+**8. The fault injector,** outside what the program supervises, seeded, its
+schedule written to a file that a later run replays exactly:
+- *in the runtime,* enabled by `MERK_FAULTS` (a seed, the mean time between
+  failures, the kinds): a thread that, at exponentially distributed times,
+  ends a random process of a named kind (`failed("injected")`), ends a GPU
+  kernel's processes together (`kernel_ended`, through their stop flags,
+  not a real trap), or drops a connection and refuses its frames for a time
+  (a partition, which tests the fence);
+- *in a harness script,* `kill -9` of a whole node's OS process.
+
+**9. Monitors across nodes,** in `runtime/node.cpp`: `monitor` and
+`demonitor` frames to the target's node, which keeps a proxy on the
+target's list and sends a `down` frame, with the reason, when it ends. The
+watcher's node keeps the function and fires every monitor across a lost
+connection with `node_down`. The function is applied by the receiver as
+now. A remote target that has already ended gives `noproc`.
+
+**10. A watcher on a GPU.** A `down` for a mailbox a device receives from
+goes through the host's ring to the device, as any host-to-GPU message.
+The host applies the function first, since device code cannot run a host
+closure. That costs nothing of what made applying it in the ending process
+wrong (Monitors as implemented): the host's runtime thread is not the
+ending process. The result must be flat, as every message to a GPU is.
+
+### The demos, simplest first
+
+- **D1, Mandelbrot tiles on one node** (`benchmarks/mandel/mandel-places.m`,
+  extended). Tiles have no state, and the checksum is deterministic already.
+  The host, the coordinator, monitors its places, keeps what each was given
+  and has reported, and gives a dead place's tiles back out. First with
+  places at the host, then GPU places with injected ends, then a whole
+  kernel's end. It tests monitors, the coordinator and the injector alone.
+- **D2, several nodes on this machine.** Three or four nodes as OS
+  processes over TCP on localhost, with `kill -9` and dropped connections.
+  The partition case tests the fence, where duplicates would otherwise
+  appear. It needs no other machines; the gfx90a system's 8 GPUs give real
+  places later.
+- **D3, Monte Carlo transport** (merkurius-mc, a new experiment in its
+  plan). Particles cross domains during a cycle, so re-tracking a dead
+  place's particles would send some twice. The unit of recovery is the
+  cycle: each place's starting census is mirrored on a buddy place, and on a
+  failure everyone rolls back to the cycle's start and runs it again, with
+  the dead domain reassigned. At most one cycle is lost. The counts are
+  integers and identical whoever tracks which particle. The scalar flux is a
+  float sum, which depends on the order of the adds; identical only with
+  fixed-point tallies or a fixed order of reduction.
+- **Later, UTS:** a stolen subtree lost with its thief must be recomputed
+  from its root, which needs a record of steals not yet answered.
+
+**What to measure,** in the design document's Measurements:
+- *the check that matters most:* the answer equals the failure-free run's;
+- time to solution against the failure rate, from none up to aggressive;
+- recovery latency, from the failure to the work being given out again;
+- work recomputed;
+- the cost of the bookkeeping with no failures, which should be near zero.
+
+**The baseline: checkpoint and restart,** as MPI codes do it: on a failure
+the job stops, restarts and loses everything since its last checkpoint.
+Modelled, with Young's interval, √(2 × checkpoint cost × MTBF), and Daly's
+correction at high rates, from measured parts: this program's own restart
+(start-up, GPU initialisation, loading images) and the time to write and
+read its state. The result is a curve: restarting costs more and more as
+failures get frequent, while recovery in place should stay nearly flat.
+ULFM in Open MPI 5 is the stronger comparison, if a reviewer asks.
+
+**Prior work to check before any claim of novelty:** Erlang/OTP
+supervision; ULFM; Charm++'s double in-memory checkpoints on buddy
+processors (the buddy census of D3 is theirs); MapReduce backup tasks; Spark
+and Ray lineage reconstruction; Legion's resilience work. What may be new:
+typed monitors over GPU processes in persistent kernels, and an answer
+identical by construction.
+
+### Later: when GPUs message each other directly
+
+Once GPU processes send to each other through rings in peer memory (Direct
+sends between the GPUs of a node; One message transport, with backends),
+the host is out of the data path, and failure needs more than monitors.
+Sketched for a later stage:
+- *The host keeps the control path.* It opens and closes routes and owns
+  the monitors, so a fault still reaches it first (7), and it tells the
+  surviving GPU processes with `down` messages into their device mailboxes
+  (10).
+- *A route's state word* in device memory, which the host sets to closed
+  when either end dies. Every wait on a peer, for a credit, a slot or a
+  collective's flag, also reads it, so a survivor never spins forever on a
+  dead peer. That is the fence between GPUs. A collective then ends with an
+  error instead of hanging, which RCCL's device API, with only a timeout,
+  does not give.
+- *Memory outlives its writers.* A dead kernel's rings stay mapped until
+  every peer route to them is closed, so a late write lands in memory
+  nobody reads, not in reused memory. A slot's sequence word is written
+  last, so a sender dying mid-write leaves a slot the receiver discards.
+  This is the rule already set for pulls (Large messages: push, and who
+  frees).
+- *Between hosts,* revoking the dead node's memory registrations makes its
+  NIC's late RDMA writes fail, a hardware fence in place of the
+  connection's.
+- *Stealing by atomics on a peer's queue:* a thief that dies takes the
+  items it stole. The victim keeps a record of steals not yet answered and
+  gives them back out on the thief's `down`, as a coordinator does for a
+  dead place.
+- *Detection:* peers notice a late halo or result first, and report to the
+  host's directory, which decides (5).
+
+### Steps
+
+1. **Typed `down_reason`, and `process.stop` on the host,** with tests.
+2. **Monitors across nodes and the fence,** tested with two and three nodes
+   on localhost, including a connection lost while messages are in flight.
+   Answers the design document's open question about delivery.
+3. **The injector,** in the runtime and a harness, with replay.
+4. **D1 at host places, then GPU places:** the stop flag at polls, a
+   kernel's processes ended together, `kernel_ended`.
+5. **A watcher on a GPU** (10).
+6. **D2,** several nodes, partitions.
+7. **GPU fault probes and the plugin's hook** (7), on the gfx90a system,
+   with the user's leave.
+8. **D3** in merkurius-mc.
+9. **Heartbeats and back-edge checks** (6), only if D1 to D3 need them;
+   measure their cost first.
+10. **The baseline model,** with its measured parts, and the curves.
+11. **GPU-to-GPU fault tolerance** (Later, above), once GPUs message each
+    other directly.
+
+**Open, for the user:**
+- The fence: refusing a down node (recommended) or epochs.
+- Typed reasons as above, or kept abstract with tests such as
+  `is_node_down`.
+- Whether `stop` is in the first step or waits for D1.
+- Where D3 goes: an experiment in MC-transport-plan.md, with these steps
+  as its milestones.
 
 ## The receive goal: later
 
