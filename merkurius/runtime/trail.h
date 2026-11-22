@@ -30,6 +30,7 @@
 #ifndef MERKURIUS_RUNTIME_TRAIL_H_
 #define MERKURIUS_RUNTIME_TRAIL_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 
@@ -54,6 +55,10 @@ struct MerkTrail {
 
 extern thread_local MerkTrail *merk_trail;
 }
+
+// Code generation's inline bind reads the live marks there
+// (lib/CodeGen/Lowering.cpp, kTrailLiveOffset).
+static_assert(offsetof(MerkTrail, live) == 32);
 
 namespace merkurius::runtime {
 inline void FreeTrail(MerkTrail *trail) {

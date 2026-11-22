@@ -8080,9 +8080,8 @@ the `type_info` back to the open layout (below).
        with open(T)'s `type_info`, made once per procedure and T. A
        `closed(U)` box's note is open(closed(U))'s, which the runtime
        makes, although as a type open(closed(U)) is closed(U).
-     - **Temporary, for (d):** deref, bind and `to_open` of a scalar are
-       runtime calls. Inline deref and bind, and a static box for a small
-       int, would save a call per field.
+     - **Temporary, for (d), done in (d):** deref, bind and `to_open` of a
+       scalar were runtime calls.
      - **Found on the way, fixed after it:** the type checker gave tuples
        no open twin, so `open({int, string})` could not be built: `{3, "s"}`
        there was a type error. A tuple of n elements now has twins
@@ -8125,10 +8124,45 @@ the `type_info` back to the open layout (below).
        elsewhere, two holes unified, oa outputs, ground values at ia
        parameters, a filled hole in ordinary and open terms, and a pair
        with open and closed parts), `CodeGen/open-types-not-yet.m`.
-   - (d) A unify procedure per open type, beside the generic walker, and
-     marks only around goals with an `any` nonlocal, which mode analysis
-     can record, rather than in every procedure whose variables' types
-     mention open types.
+   - (d) Speed, in three parts, measured with `benchmarks/open-holes`
+     (design document, "Measurements", "Open terms built through holes").
+     - **Part 1, done 2026-11-22: inline code.** 0.65 s of user time to
+       0.15 s.
+       - A ground T's open(T) `type_info`, for the collector's notes, is a
+         static `merk.type_info`; only a type variable's T still asks the
+         runtime (`merk_open_type_info`, under a lock). It was 46% of the
+         benchmark's instructions, made at every procedure entry.
+       - Lowering expands `merk_open_deref`, `merk_open_bind`,
+         `merk_open_new_var`, `merk_open_box` and `merk_open_unbox` inline on
+         the host (`Lowering.cpp`, `LowerOpenCall`), each with the runtime
+         function as its slow path. Bind reads the thread's trail through a
+         stand-in like the heap's (`merk.trail_address`, expanded after the
+         optimizer, and taken again in loops) and calls the runtime only when
+         a mark is live. A new variable and a box are bump allocations; the
+         runtime's own allocations never collect, so the slow paths are not
+         safepoints.
+       - `to_open` and `from_open` of scalars are inline (`OpenScalar`): an
+         enumeration, a narrow integer or a character is shifted past the
+         tag, an int, float or string is boxed, a `closed(U)` is boxed. Other
+         types still go through the walkers, which copy.
+       - Not done: a static box for a small int. A compile-time constant's
+         box is a static cell already, and an int made at run time costs a
+         bump allocation, so the table's branch would save little.
+       - Code that does not use open types is unchanged: 134 programs, the
+         benchmarks and the CodeGen tests without open types, give the same
+         assembly at -O2 before step 4(c) and after this.
+     - **Found on the way:** a commit leaves its goal's marks live when the
+       procedure that commits has no open variable, though a callee's choice
+       point marked: `first(X) :- promise_equivalent_solutions [X] gen(X)`,
+       with `gen` nondet over a local open term, leaves a mark per call, so
+       every later binding is trailed and a collection refuses the trail.
+       Fixed next, on its own.
+     - **Part 2: marks only around goals with an `any` nonlocal,** from the
+       insts before the goal, rather than in every procedure whose variables'
+       types mention open types. A commit releases marks whenever open types
+       are in use, since its callees' choice points may have marked.
+     - **Part 3: a unify procedure per open type,** beside the generic
+       walker.
 5. **The collector:** variable cells, trail entries as roots, chains
    shortened as it copies, and `bind`'s barrier, the remembered set's.
 6. **Messages and printing:** `copy_term` semantics for an open message,

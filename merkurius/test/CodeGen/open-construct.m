@@ -6,7 +6,8 @@
 % read by the runtime's from_open, and those to_open makes by compiled
 % code, so the two layouts must agree: `many` and `eight` share a tag in
 % the open layout where the ordinary one has a tag of their own or a
-% different shared one. Tuples have open twins too. A get_structure binds an unbound variable to a new
+% different shared one. Scalars are converted inline (step 4(d)): shifted
+% narrow integers and characters, boxed words. Tuples have open twins too. A get_structure binds an unbound variable to a new
 % cell (write mode), or reads a bound one (read mode), and what it binds
 % is undone on failure. mmc has no open types, so the outputs are checked
 % by hand: each line says what it shows.
@@ -36,6 +37,9 @@
 :- type eight ---> p0(int) ; p1(int) ; p2(int) ; p3(int) ; p4(int)
     ; p5(int) ; p6(int) ; p7(int).
 :- type wrap ---> wrap(list(int)).
+:- type na ---> na(int8, uint8, int16, uint16, int32, uint32).
+:- type nb ---> nb(int64, uint64, uint, int, float, character).
+:- type nc ---> nc(string, int).
 :- type pt ---> pt(int, colour, string).
 :- type bundle ---> bundle(closed(list(int)), float, character).
 
@@ -181,7 +185,46 @@ read_others(W, P, !IO) :-
         io.write_string("no\n", !IO)
     ).
 
+    % Each scalar kind, at the edges of its range, built inline.
+:- pred mk_nums(open(na)::oa, open(nb)::oa, open(nc)::oa) is det.
+mk_nums(na(-128i8, 255u8, -32768i16, 65535u16, -2147483648i32, 4294967295u32),
+    nb(-9223372036854775807i64, 18446744073709551615u64, 7u, -1, -0.5, 'z'),
+    nc("", 1)).
+
+    % Read into variables of ground types, by compiled code.
+:- pred get_a(open(na)::ia, int8::out, uint8::out, int16::out, uint16::out,
+    int32::out, uint32::out) is semidet.
+get_a(na(A, B, C, D, E, F), A, B, C, D, E, F).
+:- pred get_b(open(nb)::ia, int64::out, uint64::out, uint::out, int::out,
+    float::out, character::out) is semidet.
+get_b(nb(A, B, C, D, E, F), A, B, C, D, E, F).
+:- pred get_c(open(nc)::ia, string::out, int::out) is semidet.
+get_c(nc(A, B), A, B).
+
+:- pred read_nums(open(na)::ia, open(nb)::ia, open(nc)::ia,
+    io::di, io::uo) is det.
+read_nums(Na, Nb, Nc, !IO) :-
+    promise_pure ( if get_a(Na, A, B, C, D, E, F) then
+        io.write({A, B, C, D, E, F}, !IO), io.nl(!IO)
+    else
+        io.write_string("no\n", !IO)
+    ),
+    promise_pure ( if get_b(Nb, G, H, I, J, K, L) then
+        io.write({G, H, I, J, K, L}, !IO), io.nl(!IO)
+    else
+        io.write_string("no\n", !IO)
+    ),
+    promise_pure ( if get_c(Nc, M, N) then
+        io.write({M, N}, !IO), io.nl(!IO)
+    else
+        io.write_string("no\n", !IO)
+    ).
+
 main(!IO) :-
+    mk_nums(Na, Nb, Nc), show(Na, !IO), show(Nb, !IO), show(Nc, !IO),
+    read_nums(Na, Nb, Nc, !IO),
+    read_nums(to_open(na(1i8, 2u8, 3i16, 4u16, 5i32, 6u32)),
+        to_open(nb(7i64, 8u64, 9u, 10, 11.5, 'a')), to_open(nc("b", 12)), !IO),
     mk1(A), show(A, !IO),
     mk2(B), show(B, !IO),
     mk3(C), show(C, !IO),
@@ -201,8 +244,19 @@ main(!IO) :-
     read_others(to_open(wrap([5, 6])), to_open(pt(7, green, "t")), !IO),
     test_tuples(!IO).
 
+% Scalars built inline, read by from_open, then by compiled code; to_open's
+% read by compiled code.
+% OUTPUT:na(-128i8, 255u8, -32768i16, 65535u16, -2147483648i32, 4294967295u32)
+% OUTPUT-NEXT:nb(-9223372036854775807i64, 18446744073709551615u64, 7u, -1, -0.5, 'z')
+% OUTPUT-NEXT:nc("", 1)
+% OUTPUT-NEXT:{-128i8, 255u8, -32768i16, 65535u16, -2147483648i32, 4294967295u32}
+% OUTPUT-NEXT:{-9223372036854775807i64, 18446744073709551615u64, 7u, -1, -0.5, 'z'}
+% OUTPUT-NEXT:{"", 1}
+% OUTPUT-NEXT:{1i8, 2u8, 3i16, 4u16, 5i32, 6u32}
+% OUTPUT-NEXT:{7i64, 8u64, 9u, 10, 11.5, 'a'}
+% OUTPUT-NEXT:{"b", 12}
 % Constructions: a ground one, and ones with holes.
-% OUTPUT:[1, 2, 3]
+% OUTPUT-NEXT:[1, 2, 3]
 % OUTPUT-NEXT:open
 % OUTPUT-NEXT:open
 % OUTPUT-NEXT:open

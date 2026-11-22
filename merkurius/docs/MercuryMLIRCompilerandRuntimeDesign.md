@@ -6479,6 +6479,35 @@ The deep stack now runs faster than with no collection (4.58), for 55 MB more
 at its peak, and the others do not change. The factor of 4 is a round number, not
 tuned. Frames whose size the stack map does not give are not counted.
 
+### Open terms built through holes
+
+Measured 2026-11-22, -O2, pinned to one core of the machine above, five runs
+each, median seconds (`benchmarks/open-holes`). A list of 100,000 ints is built
+front to back through a hole bound at every step and summed as an open term,
+100 times: 10 million elements. Every binding is trailed, since the round's
+condition is live, and one heap chunk holds the run, so its page faults, about
+0.13 s, are in the elapsed time.
+
+| Compiler | Elapsed | User | ns per element, user |
+| --- | --- | --- | --- |
+| Step 4(c), commit fd63a79895be | 0.78 | 0.65 | 65 |
+| Step 4(d) part 1, uncommitted on fd63a79895be | 0.28 | 0.15 | 15 |
+
+The spread between runs was under 5%.
+
+- **Most of the old time was not the term's.** Each procedure entry asked the
+  runtime for open(int)'s `type_info`, under a lock, to describe its roots:
+  46% of the instructions. A ground T's is static now.
+- **`to_open` and `from_open` of an int went through the generic walkers**,
+  27% of the instructions; a box and an unbox are inline now. Deref, bind and
+  new variables are inline too, each with the runtime as its slow path.
+- **What is left is trail marks** at `build`'s `I > N`, an if-then-else with no
+  open variable in its condition, about 40% of the instructions that remain:
+  step 4(d)'s marks per goal remove them.
+- E5's C model took 11 ns an element for the same shape with every binding
+  trailed, on another machine and for 10^6 elements; step 7 compares the two
+  properly.
+
 ## Target applications
 
 Recorded on 2026-11-05. This is judgement, not a result: the only performance evidence so far is the bandwidth benchmark, whose program is no simpler than its C version (`benchmarks/bandwidth/README.md`). That the code is simpler has still to be shown on a program with real logic in it.

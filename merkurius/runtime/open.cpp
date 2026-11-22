@@ -74,6 +74,16 @@ uint64_t merk_open_new_var(void) {
   return reference;
 }
 
+uint64_t merk_open_box(uint64_t word) {
+  auto *cell{static_cast<Word *>(Allocate(sizeof(Word)))};
+  *cell = word;
+  return reinterpret_cast<Word>(cell);
+}
+
+uint64_t merk_open_unbox(uint64_t box) {
+  return *reinterpret_cast<const Word *>(box);
+}
+
 uint64_t merk_open_deref(uint64_t word) {
   while (IsVariableReference(word)) {
     Word next{*CellOf(word)};

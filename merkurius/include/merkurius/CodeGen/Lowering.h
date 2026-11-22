@@ -189,9 +189,9 @@ void MarkProcessCodeSingleLane(llvm::Module &);
 // tail calls are known: a GPU process's stack is small.
 void WarnGpuRecursion(mlir::ModuleOp);
 
-// Replaces the optimizer's stand-in for the address of the thread's heap,
-// which keeps a process that moves to another thread from using the old
-// thread's heap, with the thread-local address.
+// Replaces the optimizer's stand-ins for the addresses of the thread's heap
+// and trail, which keep a process that moves to another thread from using
+// the old thread's, with the thread-local addresses.
 void ExpandHeapAddresses(llvm::Module &);
 
 // Embeds each offload binary in the host module's .llvm.offloading section,

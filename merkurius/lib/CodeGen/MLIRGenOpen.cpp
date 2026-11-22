@@ -22,6 +22,13 @@
 
 namespace merkurius::codegen::mlirgen {
 
+namespace {
+// A variable's primary tag in every open layout, and the primary tag's
+// bits, past which a Shifted value is (runtime/open.h).
+constexpr std::int64_t kOpenVariableTag{7};
+constexpr std::int64_t kOpenTagBits{3};
+} // namespace
+
 bool MerkGenerator::IsOpenType(const semantics::Type *type) {
   return types_.types().IsOpen(type);
 }
@@ -206,13 +213,13 @@ void MerkGenerator::ClosedUnify(const Body &goal, const ProcedureBody &body) {
   if (!deref) {
     return;
   }
-  // A variable's primary tag, in every open layout (runtime/open.h).
-  constexpr std::int64_t kVariableTag{7};
   auto tag{mlir::arith::AndIOp::create(builder_, loc, Coerce(deref, i64, loc),
-      mlir::arith::ConstantIntOp::create(builder_, loc, i64, kVariableTag))};
+      mlir::arith::ConstantIntOp::create(
+          builder_, loc, i64, kOpenVariableTag))};
   mlir::Value unbound{mlir::arith::CmpIOp::create(builder_, loc,
       mlir::arith::CmpIPredicate::eq, tag,
-      mlir::arith::ConstantIntOp::create(builder_, loc, i64, kVariableTag))};
+      mlir::arith::ConstantIntOp::create(
+          builder_, loc, i64, kOpenVariableTag))};
   llvm::SmallVector<mlir::Type> results;
   if (!given) {
     results.push_back(represented->type);
@@ -290,9 +297,8 @@ std::optional<merk::TermType> MerkGenerator::OpenTermType(
   return term;
 }
 
-// Temporary (open types step 4(d), docs/INPROGRESS.md): deref, bind and
-// to_open are runtime calls, rather than inline code for deref and bind and
-// a static box for a small int.
+// Deref, bind, new variables and boxes are runtime calls here, which
+// lowering inlines on the host (Lowering.cpp, LowerOpenCall).
 mlir::Value MerkGenerator::OpenDeref(
     mlir::Value word, const semantics::Type *open, mlir::Location loc) {
   auto type{merk::WordType::get(&context_)};
@@ -327,6 +333,30 @@ mlir::Value MerkGenerator::ToOpenWord(mlir::Value value,
       (IsClosedType(type) && mlir::isa<merk::WordType>(value.getType()))) {
     return Coerce(value, word, loc);
   }
+  if (std::optional<ScalarEncoding> scalar{OpenScalar(type)}) {
+    auto i64{builder_.getI64Type()};
+    mlir::Value open;
+    if (scalar->kind == ScalarEncoding::Kind::Shifted) {
+      // Its bits, zero-extended, past the primary tag.
+      mlir::Value bits{Coerce(Coerce(value, word, loc), i64, loc)};
+      if (scalar->bits != 0) {
+        bits = mlir::arith::AndIOp::create(builder_, loc, bits,
+            mlir::arith::ConstantIntOp::create(builder_, loc, i64,
+                static_cast<std::int64_t>(
+                    (std::uint64_t{1} << scalar->bits) - 1)));
+      }
+      open = Coerce(mlir::arith::ShLIOp::create(builder_, loc, bits,
+                        mlir::arith::ConstantIntOp::create(
+                            builder_, loc, i64, kOpenTagBits)),
+          word, loc);
+    } else {
+      open = merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{word},
+          "merk_open_box", mlir::ValueRange{Coerce(value, word, loc)},
+          /*can_fail=*/false)
+                 .getResult(0);
+    }
+    return NotedOpenWord(open, types_.types().Open(type));
+  }
   mlir::Value info{TypeInfoOfType(type, loc, at)};
   if (!info) {
     failed_ = true;
@@ -340,20 +370,92 @@ mlir::Value MerkGenerator::ToOpenWord(mlir::Value value,
       types_.types().Open(type));
 }
 
+std::optional<MerkGenerator::ScalarEncoding> MerkGenerator::OpenScalar(
+    const semantics::Type *type) {
+  using Kind = ScalarEncoding::Kind;
+  if (IsClosedType(type)) {
+    return ScalarEncoding{Kind::ClosedBox};
+  }
+  if (type->kind != semantics::TypeKind::Named) {
+    return std::nullopt;
+  }
+  llvm::StringRef name{type->constructor->name};
+  if (type->constructor->module.empty()) {
+    if (name == "int" || name == "uint" || name == "int64" ||
+        name == "uint64" || name == "float" || name == "string") {
+      return ScalarEncoding{Kind::Boxed};
+    }
+    if (name == "int8" || name == "uint8") {
+      return ScalarEncoding{Kind::Shifted, 8};
+    }
+    if (name == "int16" || name == "uint16") {
+      return ScalarEncoding{Kind::Shifted, 16};
+    }
+    if (name == "int32" || name == "uint32" || name == "character") {
+      return ScalarEncoding{Kind::Shifted, 32};
+    }
+    return std::nullopt;
+  }
+  // An enumeration, whose ordinary word is its constant's number; one of a
+  // single constant is a dummy, 0 in both layouts, as a shift of 0 is.
+  const std::vector<semantics::ConstructorTypes> *constructors{
+      modes_.ops().ConstructorsOf(type)};
+  if (constructors && !constructors->empty() &&
+      llvm::all_of(*constructors, [](const semantics::ConstructorTypes &c) {
+        return c.arguments.empty();
+      })) {
+    return ScalarEncoding{Kind::Shifted, 0};
+  }
+  return std::nullopt;
+}
+
 mlir::Value MerkGenerator::FromOpenWord(mlir::Value value,
     const semantics::Type *type, mlir::Location loc, parser::CharBlock at) {
   auto word{merk::WordType::get(&context_)};
   std::optional<Represented> represented{Represent(type)};
-  mlir::Value info{TypeInfoOfType(type, loc, at)};
-  if (!info || !represented) {
+  if (!represented) {
     failed_ = true;
     return nullptr;
   }
-  auto call{merk::ForeignCallOp::create(builder_, loc,
-      mlir::TypeRange{builder_.getI1Type(), word}, "merk_open_from_open",
-      mlir::ValueRange{info, Coerce(value, word, loc)}, /*can_fail=*/true)};
-  merk::GuardOp::create(builder_, loc, call.getResult(0));
-  mlir::Value result{Coerce(call.getResult(1), represented->type, loc)};
+  mlir::Value result;
+  if (std::optional<ScalarEncoding> scalar{OpenScalar(type)}) {
+    // Fails if it is an unbound variable, tag 7, which no value has.
+    auto i64{builder_.getI64Type()};
+    mlir::Value deref{OpenDeref(value, types_.types().Open(type), loc)};
+    if (!deref) {
+      return nullptr;
+    }
+    mlir::Value bits{Coerce(deref, i64, loc)};
+    mlir::Value tag{mlir::arith::AndIOp::create(builder_, loc, bits,
+        mlir::arith::ConstantIntOp::create(
+            builder_, loc, i64, kOpenVariableTag))};
+    merk::GuardOp::create(builder_, loc,
+        mlir::arith::CmpIOp::create(builder_, loc,
+            mlir::arith::CmpIPredicate::ne, tag,
+            mlir::arith::ConstantIntOp::create(
+                builder_, loc, i64, kOpenVariableTag)));
+    mlir::Value ordinary{scalar->kind == ScalarEncoding::Kind::Shifted
+            ? Coerce(mlir::arith::ShRUIOp::create(builder_, loc, bits,
+                         mlir::arith::ConstantIntOp::create(
+                             builder_, loc, i64, kOpenTagBits)),
+                  word, loc)
+            : merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{word},
+                  "merk_open_unbox", mlir::ValueRange{deref},
+                  /*can_fail=*/false)
+                  .getResult(0)};
+    result = Coerce(ordinary, represented->type, loc);
+  } else {
+    mlir::Value info{TypeInfoOfType(type, loc, at)};
+    if (!info) {
+      failed_ = true;
+      return nullptr;
+    }
+    auto call{merk::ForeignCallOp::create(builder_, loc,
+        mlir::TypeRange{builder_.getI1Type(), word}, "merk_open_from_open",
+        mlir::ValueRange{info, Coerce(value, word, loc)}, /*can_fail=*/true)};
+    merk::GuardOp::create(builder_, loc, call.getResult(0));
+    result = Coerce(call.getResult(1), represented->type, loc);
+  }
   if (!target_.options().IsDevice() && NoteRoot(result, type)) {
     annotated_.insert(result);
   }
@@ -471,13 +573,13 @@ void MerkGenerator::OpenGetStructure(
       groundFree |= !IsOpenType(type) && !closed;
     }
   }
-  // A variable's primary tag, in every open layout (runtime/open.h).
-  constexpr std::int64_t kVariableTag{7};
   auto tag{mlir::arith::AndIOp::create(builder_, loc, Coerce(deref, i64, loc),
-      mlir::arith::ConstantIntOp::create(builder_, loc, i64, kVariableTag))};
+      mlir::arith::ConstantIntOp::create(
+          builder_, loc, i64, kOpenVariableTag))};
   mlir::Value unbound{mlir::arith::CmpIOp::create(builder_, loc,
       mlir::arith::CmpIPredicate::eq, tag,
-      mlir::arith::ConstantIntOp::create(builder_, loc, i64, kVariableTag))};
+      mlir::arith::ConstantIntOp::create(
+          builder_, loc, i64, kOpenVariableTag))};
   auto ite{merk::IteOp::create(builder_, loc, types)};
   {
     mlir::OpBuilder::InsertionGuard guard{builder_};
@@ -775,12 +877,21 @@ bool MerkGenerator::NoteOpenRoot(
     return false;
   }
   auto infoType{merk::TypeInfoType::get(&context_)};
-  mlir::Value descriptor{merk::TypeInfoOp::create(
-      builder_, loc, infoType, *constructor, mlir::ValueRange{})};
-  mlir::Value info{merk::ForeignCallOp::create(builder_, loc,
-      mlir::TypeRange{infoType}, "merk_open_type_info",
-      mlir::ValueRange{descriptor, argumentInfo}, /*can_fail=*/false)
-                       .getResult(0)};
+  mlir::Value info;
+  if (argument->kind != semantics::TypeKind::Variable) {
+    // A ground T's is static, as T's is, so it allocates nothing.
+    info = merk::TypeInfoOp::create(
+        builder_, loc, infoType, *constructor, mlir::ValueRange{argumentInfo});
+  } else {
+    // A type variable's T is known only at run time; a type_info made on
+    // the heap would be a safepoint, which a note cannot be.
+    mlir::Value descriptor{merk::TypeInfoOp::create(
+        builder_, loc, infoType, *constructor, mlir::ValueRange{})};
+    info = merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{infoType},
+        "merk_open_type_info", mlir::ValueRange{descriptor, argumentInfo},
+        /*can_fail=*/false)
+               .getResult(0);
+  }
   openTypeInfos_[{proc, argument}] = info;
   builder_.restoreInsertionPoint(here);
   merk::RootTypeOp::create(builder_, loc, value, info);

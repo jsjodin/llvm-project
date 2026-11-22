@@ -49,8 +49,13 @@
 // a cell shared with ground code is never changed. Code generation calls
 // these, or inlines them, for open terms (step 4).
 extern "C" {
-// A new unbound variable: its tagged reference.
+// A new unbound variable: its tagged reference. Code generation inlines it,
+// and deref, bind, box and unbox, with these as the slow paths
+// (lib/CodeGen/Lowering.cpp, LowerOpenCall).
 uint64_t merk_open_new_var(void);
+// A one-word box of a word, as a Boxed or ClosedBox value is; and its word.
+uint64_t merk_open_box(uint64_t word);
+uint64_t merk_open_unbox(uint64_t box);
 // The end of the chain from a word: a value, or an unbound variable's
 // reference.
 uint64_t merk_open_deref(uint64_t word);

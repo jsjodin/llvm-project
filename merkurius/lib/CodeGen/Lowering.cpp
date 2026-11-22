@@ -67,6 +67,9 @@ namespace {
 // The runtime's function that reports an uncaught exception and exits.
 constexpr llvm::StringLiteral kThrowSymbol{"merk_uncaught_exception"};
 constexpr llvm::StringLiteral kHeapAddressSymbol{"merk.heap_address"};
+constexpr llvm::StringLiteral kTrailAddressSymbol{"merk.trail_address"};
+// Where MerkTrail keeps the number of live marks (runtime/trail.h).
+constexpr std::int32_t kTrailLiveOffset{32};
 constexpr unsigned kHeapAddressSpace{1};
 
 // Whether a procedure of this determinism returns a success flag (design
@@ -427,6 +430,13 @@ private:
   void LowerCompareTypeInfo(merk::CompareTypeInfoOp);
   void LowerStringEqual(merk::StringEqualOp);
   void LowerForeignCall(merk::ForeignCallOp);
+  // The open terms' runtime calls that have an inline fast path, on the
+  // host: false for any other call.
+  bool LowerOpenCall(merk::ForeignCallOp);
+  void LowerOpenDeref(merk::ForeignCallOp, mlir::Value word);
+  void LowerOpenBind(
+      merk::ForeignCallOp, mlir::Value variable, mlir::Value value);
+  void LowerOpenCell(merk::ForeignCallOp, mlir::Value word);
   void LowerEntry(merk::EntryOp);
   void LowerConstructors();
   mlir::Value CallRuntime(llvm::StringRef name, mlir::Type result,
@@ -541,6 +551,10 @@ private:
   mlir::LLVM::GlobalOp StringGlobal(llvm::StringRef, mlir::Location);
   mlir::LLVM::LLVMFuncOp ThrowFunc();
   mlir::LLVM::LLVMFuncOp HeapAddressFunc();
+  mlir::LLVM::LLVMFuncOp TrailAddressFunc();
+  // A stand-in for the address of a thread-local variable of the runtime,
+  // which ExpandHeapAddresses replaces.
+  mlir::LLVM::LLVMFuncOp ThreadAddressFunc(llvm::StringRef symbol);
   bool CanFail(llvm::StringRef proc) const { return canFail_.contains(proc); }
   // Whether a procedure's outputs, after its success flag if it can fail,
   // need more registers than the target returns results in, so that it
@@ -3073,7 +3087,199 @@ void Lowerer::LowerStringEqual(merk::StringEqualOp op) {
 // A foreign_proc's C function returns its only output, or else stores its
 // outputs through pointers after its inputs. A send that moves its message
 // calls the send's _moving function (merk.foreign_call, `moves`).
+bool Lowerer::LowerOpenCall(merk::ForeignCallOp call) {
+  llvm::StringRef name{call.getCallee()};
+  if (device_ ||
+      !llvm::is_contained(
+          llvm::ArrayRef<llvm::StringRef>{"merk_open_deref", "merk_open_bind",
+              "merk_open_new_var", "merk_open_box", "merk_open_unbox"},
+          name)) {
+    return false;
+  }
+  mlir::Location loc{call.getLoc()};
+  rewriter_.setInsertionPoint(call);
+  llvm::SmallVector<mlir::Value> inputs;
+  for (mlir::Value input : call.getInputs()) {
+    inputs.push_back(LoweredValue(input, loc));
+  }
+  if (name == "merk_open_deref") {
+    LowerOpenDeref(call, inputs[0]);
+  } else if (name == "merk_open_bind") {
+    LowerOpenBind(call, inputs[0], inputs[1]);
+  } else if (name == "merk_open_unbox") {
+    // A box's word, at its address: its tag is 0.
+    auto i64{rewriter_.getI64Type()};
+    mlir::Value bits{
+        mlir::LLVM::LoadOp::create(rewriter_, loc, i64, inputs[0], 8)};
+    rewriter_.replaceOp(call,
+        mlir::LLVM::IntToPtrOp::create(rewriter_, loc, HeapPointer(), bits)
+            .getResult());
+  } else {
+    LowerOpenCell(call, inputs.empty() ? mlir::Value{} : inputs[0]);
+  }
+  return true;
+}
+
+// merk_open_deref: the chain from a word, followed while it is a variable's
+// reference, tag 7, to a bound one, until a value or an unbound variable,
+// whose cell refers to itself.
+void Lowerer::LowerOpenDeref(merk::ForeignCallOp call, mlir::Value word) {
+  mlir::Location loc{call.getLoc()};
+  auto i64{rewriter_.getI64Type()};
+  auto heap{HeapPointer()};
+  mlir::Block *before{call->getBlock()};
+  mlir::Block *after{rewriter_.splitBlock(before, call->getIterator())};
+  mlir::Value result{after->addArgument(heap, loc)};
+  rewriter_.replaceAllUsesWith(call.getResult(0), result);
+  rewriter_.eraseOp(call);
+  mlir::Block *head{rewriter_.createBlock(after, {heap}, {loc})};
+  mlir::Block *follow{rewriter_.createBlock(after)};
+  rewriter_.setInsertionPointToEnd(before);
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{word}, head);
+  rewriter_.setInsertionPointToStart(head);
+  mlir::Value current{head->getArgument(0)};
+  mlir::Value tag{mlir::LLVM::AndOp::create(rewriter_, loc,
+      mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, current),
+      mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, kTags - 1))};
+  mlir::Value variable{
+      mlir::LLVM::ICmpOp::create(rewriter_, loc, mlir::LLVM::ICmpPredicate::eq,
+          tag, mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, kTags - 1))};
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, variable, follow,
+      mlir::ValueRange{}, after, mlir::ValueRange{current},
+      std::make_pair(1u, 2000u));
+  rewriter_.setInsertionPointToStart(follow);
+  mlir::Value next{mlir::LLVM::LoadOp::create(rewriter_, loc, heap,
+      mlir::LLVM::GEPOp::create(rewriter_, loc, heap, rewriter_.getI8Type(),
+          current,
+          llvm::ArrayRef<mlir::LLVM::GEPArg>{
+              -static_cast<std::int32_t>(kTags - 1)}),
+      8)};
+  mlir::Value unbound{mlir::LLVM::ICmpOp::create(
+      rewriter_, loc, mlir::LLVM::ICmpPredicate::eq, next, current)};
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, unbound, after,
+      mlir::ValueRange{current}, head, mlir::ValueRange{next});
+}
+
+// merk_open_bind: the variable's cell is overwritten, and the runtime is
+// called only to trail it, when an open choice point or try goal is live.
+void Lowerer::LowerOpenBind(
+    merk::ForeignCallOp call, mlir::Value variable, mlir::Value value) {
+  mlir::Location loc{call.getLoc()};
+  auto i64{rewriter_.getI64Type()};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  auto heap{HeapPointer()};
+  mlir::Block *before{call->getBlock()};
+  mlir::Block *after{rewriter_.splitBlock(before, call->getIterator())};
+  rewriter_.eraseOp(call);
+  mlir::Block *check{rewriter_.createBlock(after)};
+  mlir::Block *store{rewriter_.createBlock(after)};
+  mlir::Block *slow{rewriter_.createBlock(after)};
+  rewriter_.setInsertionPointToEnd(before);
+  mlir::Value trail{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr,
+      mlir::LLVM::CallOp::create(
+          rewriter_, loc, TrailAddressFunc(), mlir::ValueRange{})
+          .getResult(),
+      8)};
+  mlir::Value none{
+      mlir::LLVM::ICmpOp::create(rewriter_, loc, mlir::LLVM::ICmpPredicate::eq,
+          trail, mlir::LLVM::ZeroOp::create(rewriter_, loc, ptr))};
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, none, store, mlir::ValueRange{},
+      check, mlir::ValueRange{});
+  rewriter_.setInsertionPointToStart(check);
+  mlir::Value live{mlir::LLVM::LoadOp::create(rewriter_, loc, i64,
+      mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(),
+          trail, llvm::ArrayRef<mlir::LLVM::GEPArg>{kTrailLiveOffset}),
+      8)};
+  mlir::Value untrailed{
+      mlir::LLVM::ICmpOp::create(rewriter_, loc, mlir::LLVM::ICmpPredicate::eq,
+          live, mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 0))};
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, untrailed, store,
+      mlir::ValueRange{}, slow, mlir::ValueRange{});
+  rewriter_.setInsertionPointToStart(store);
+  mlir::LLVM::StoreOp::create(rewriter_, loc, value,
+      mlir::LLVM::GEPOp::create(rewriter_, loc, heap, rewriter_.getI8Type(),
+          variable,
+          llvm::ArrayRef<mlir::LLVM::GEPArg>{
+              -static_cast<std::int32_t>(kTags - 1)}),
+      8);
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{}, after);
+  rewriter_.setInsertionPointToStart(slow);
+  auto void_{mlir::LLVM::LLVMVoidType::get(module_.getContext())};
+  mlir::LLVM::CallOp::create(rewriter_, loc,
+      RuntimeFunc("merk_open_bind", void_, {i64, i64}),
+      mlir::ValueRange{
+          mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, variable),
+          mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, value)});
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{}, after);
+}
+
+// merk_open_new_var and merk_open_box: a one-word cell from the thread's
+// heap, as an allocation's fast path, which refers to itself, tagged 7, or
+// holds the word. The runtime makes it when the chunk is full; its own
+// allocations never collect, so neither call is a safepoint.
+void Lowerer::LowerOpenCell(merk::ForeignCallOp call, mlir::Value word) {
+  mlir::Location loc{call.getLoc()};
+  auto i64{rewriter_.getI64Type()};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  auto heap{HeapPointer()};
+  std::string name{call.getCallee().str()};
+  mlir::Block *before{call->getBlock()};
+  mlir::Block *after{rewriter_.splitBlock(before, call->getIterator())};
+  mlir::Value result{after->addArgument(heap, loc)};
+  rewriter_.replaceAllUsesWith(call.getResult(0), result);
+  rewriter_.eraseOp(call);
+  mlir::Block *fast{rewriter_.createBlock(after)};
+  mlir::Block *slow{rewriter_.createBlock(after)};
+  rewriter_.setInsertionPointToEnd(before);
+  auto heapType{
+      mlir::LLVM::LLVMStructType::getLiteral(module_.getContext(), {ptr, ptr})};
+  mlir::Value state{mlir::LLVM::CallOp::create(
+      rewriter_, loc, HeapAddressFunc(), mlir::ValueRange{})
+                        .getResult()};
+  mlir::Value next{mlir::LLVM::LoadOp::create(rewriter_, loc, heap, state, 8)};
+  mlir::Value end{mlir::LLVM::GEPOp::create(rewriter_, loc, heap,
+      rewriter_.getI8Type(), next, llvm::ArrayRef<mlir::LLVM::GEPArg>{8})};
+  mlir::Value limit{mlir::LLVM::LoadOp::create(rewriter_, loc, heap,
+      mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, heapType, state,
+          llvm::ArrayRef<mlir::LLVM::GEPArg>{0, 1}),
+      8)};
+  mlir::Value fits{mlir::LLVM::ICmpOp::create(
+      rewriter_, loc, mlir::LLVM::ICmpPredicate::ule, end, limit)};
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, fits, fast, mlir::ValueRange{},
+      slow, mlir::ValueRange{}, std::make_pair(2000u, 1u));
+  rewriter_.setInsertionPointToStart(fast);
+  mlir::LLVM::StoreOp::create(rewriter_, loc, end, state, 8);
+  mlir::Value cell{next};
+  if (!word) {
+    cell = mlir::LLVM::GEPOp::create(rewriter_, loc, heap,
+        rewriter_.getI8Type(), next,
+        llvm::ArrayRef<mlir::LLVM::GEPArg>{
+            static_cast<std::int32_t>(kTags - 1)});
+    word = cell;
+  }
+  mlir::LLVM::StoreOp::create(rewriter_, loc, word, next, 8);
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{cell}, after);
+  rewriter_.setInsertionPointToStart(slow);
+  llvm::SmallVector<mlir::Type> types;
+  llvm::SmallVector<mlir::Value> arguments;
+  if (name == "merk_open_box") {
+    types.push_back(i64);
+    arguments.push_back(
+        mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, word));
+  }
+  mlir::Value made{mlir::LLVM::CallOp::create(
+      rewriter_, loc, RuntimeFunc(name, i64, types), arguments)
+                       .getResult()};
+  mlir::LLVM::BrOp::create(rewriter_, loc,
+      mlir::ValueRange{
+          mlir::LLVM::IntToPtrOp::create(rewriter_, loc, heap, made)},
+      after);
+}
+
 void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
+  if (LowerOpenCall(call)) {
+    return;
+  }
   mlir::MLIRContext *context{call.getContext()};
   mlir::Location loc{call.getLoc()};
   llvm::SmallVector<mlir::Type> outputs{Convert(call.getOutputs().getTypes())};
@@ -4630,8 +4836,17 @@ void Lowerer::LowerConstructors() {
 // to another thread does. llvm.threadlocal.address would be merged across
 // such calls. ExpandHeapAddresses replaces it after the optimizer.
 mlir::LLVM::LLVMFuncOp Lowerer::HeapAddressFunc() {
+  return ThreadAddressFunc(kHeapAddressSymbol);
+}
+
+// The address of the thread's trail pointer (runtime/trail.h), as the heap's.
+mlir::LLVM::LLVMFuncOp Lowerer::TrailAddressFunc() {
+  return ThreadAddressFunc(kTrailAddressSymbol);
+}
+
+mlir::LLVM::LLVMFuncOp Lowerer::ThreadAddressFunc(llvm::StringRef symbol) {
   auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
-  mlir::LLVM::LLVMFuncOp func{RuntimeFunc(kHeapAddressSymbol, ptr, {})};
+  mlir::LLVM::LLVMFuncOp func{RuntimeFunc(symbol, ptr, {})};
   func.setMemoryEffectsAttr(mlir::LLVM::MemoryEffectsAttr::get(
       module_.getContext(),
       {/*other=*/mlir::LLVM::ModRefInfo::NoModRef,
@@ -6208,7 +6423,7 @@ void ForgetInferredAbove(llvm::ArrayRef<llvm::Function *> checked) {
 
 // Each loop that LLVM made looks at the limit too, on every iteration.
 void AddLoopChecks(llvm::Function &function, llvm::GlobalVariable &limit,
-    llvm::FunctionCallee passed, llvm::Function *marker) {
+    llvm::FunctionCallee passed, llvm::ArrayRef<llvm::Function *> markers) {
   llvm::DominatorTree dominators{function};
   llvm::LoopInfo loops{dominators};
   struct LoopBlocks {
@@ -6229,8 +6444,10 @@ void AddLoopChecks(llvm::Function &function, llvm::GlobalVariable &limit,
         other.blocks.insert(rest);
       }
     }
-    if (marker) {
-      TakeHeapAddressAgain(function, marker, loop.blocks, *rest);
+    for (llvm::Function *marker : markers) {
+      if (marker) {
+        TakeHeapAddressAgain(function, marker, loop.blocks, *rest);
+      }
     }
   }
 }
@@ -6374,25 +6591,35 @@ void AddDeviceStackChecks(llvm::Module &module) {
   ForgetInferredAbove(checked);
 }
 
-void ExpandHeapAddresses(llvm::Module &module) {
-  llvm::Function *marker{module.getFunction(kHeapAddressSymbol)};
+namespace {
+void ExpandThreadAddresses(llvm::Module &module, llvm::StringRef symbol,
+    llvm::StringRef name, llvm::Type *type) {
+  llvm::Function *marker{module.getFunction(symbol)};
   if (!marker) {
     return;
   }
-  llvm::LLVMContext &context{module.getContext()};
-  llvm::PointerType *pointer{llvm::PointerType::getUnqual(context)};
-  auto *heap{llvm::cast<llvm::GlobalVariable>(module.getOrInsertGlobal(
-      "merk_heap", llvm::StructType::get(context, {pointer, pointer})))};
-  heap->setThreadLocalMode(llvm::GlobalValue::GeneralDynamicTLSModel);
-  heap->setAlignment(llvm::Align(8));
+  auto *variable{
+      llvm::cast<llvm::GlobalVariable>(module.getOrInsertGlobal(name, type))};
+  variable->setThreadLocalMode(llvm::GlobalValue::GeneralDynamicTLSModel);
+  variable->setAlignment(llvm::Align(8));
   while (!marker->use_empty()) {
     auto *call{llvm::cast<llvm::CallInst>(marker->user_back())};
     llvm::IRBuilder<> builder{call};
-    llvm::Value *address{CurrentThreadAddress(builder, *heap)};
+    llvm::Value *address{CurrentThreadAddress(builder, *variable)};
     call->replaceAllUsesWith(address);
     call->eraseFromParent();
   }
   marker->eraseFromParent();
+}
+} // namespace
+
+void ExpandHeapAddresses(llvm::Module &module) {
+  llvm::LLVMContext &context{module.getContext()};
+  llvm::PointerType *pointer{llvm::PointerType::getUnqual(context)};
+  ExpandThreadAddresses(module, kHeapAddressSymbol, "merk_heap",
+      llvm::StructType::get(context, {pointer, pointer}));
+  // The trail of open terms' bindings (runtime/trail.h), for an inline bind.
+  ExpandThreadAddresses(module, kTrailAddressSymbol, "merk_trail", pointer);
 }
 
 void AddStackChecks(llvm::Module &module) {
@@ -6436,9 +6663,10 @@ void AddStackChecks(llvm::Module &module) {
   limit->setAlignment(llvm::Align(8));
   llvm::FunctionCallee passed{module.getOrInsertFunction("merk_stack_limit_passed",
       llvm::FunctionType::get(llvm::Type::getVoidTy(module.getContext()), false))};
-  llvm::Function *marker{module.getFunction(kHeapAddressSymbol)};
+  llvm::Function *markers[]{module.getFunction(kHeapAddressSymbol),
+      module.getFunction(kTrailAddressSymbol)};
   for (const CallNode &node : nodes) {
-    AddLoopChecks(*node.function, *limit, passed, marker);
+    AddLoopChecks(*node.function, *limit, passed, markers);
     if (NeedsCheck(node, nodes)) {
       AddEntryCheck(*node.function, *limit, passed);
     }

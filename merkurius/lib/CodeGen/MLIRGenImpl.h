@@ -665,6 +665,16 @@ private:
   // it before some goal, a head variable whose mode does, or one this
   // procedure's code has given an open word.
   bool ClosedOpen(const ProcedureBody &, BodyVar);
+  // How a type's values are encoded in the open layout when code
+  // generation inlines to_open and from_open, as runtime/open.h's
+  // OpenEncodingOf has it: Shifted with the bits it keeps (0 for all of an
+  // enumeration's), Boxed, or ClosedBox; nullopt for a type the runtime's
+  // walkers convert.
+  struct ScalarEncoding {
+    enum class Kind { Shifted, Boxed, ClosedBox } kind;
+    unsigned bits{0};
+  };
+  std::optional<ScalarEncoding> OpenScalar(const semantics::Type *);
   // Whether a parameter takes an argument of this type as an open word: a
   // closed(T) whose mode has `any` in it.
   bool OpenParameter(const semantics::ArgMode &, const semantics::Type *);
