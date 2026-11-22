@@ -173,12 +173,13 @@ public:
       const semantics::PolymorphismAnalysis &polymorphism,
       const semantics::LoopTranslation &loops, const TargetInfo &target,
       parser::Messages &messages, const GenerationOptions &options)
-      : context_{context}, builder_{&context}, moduleName_{module}, tree_{tree},
-        tokens_{tokens}, sources_{sources}, resolution_{resolution},
-        types_{types}, modes_{modes}, determinism_{determinism}, loops_{loops},
-        target_{target}, messages_{messages},
-        stubUnimplemented_{options.stubUnimplemented},
+      : context_{context}, builder_{&context},
+        moduleName_{module}, tree_{tree}, tokens_{tokens}, sources_{sources},
+        resolution_{resolution}, types_{types}, modes_{modes},
+        determinism_{determinism}, loops_{loops}, target_{target},
+        messages_{messages}, stubUnimplemented_{options.stubUnimplemented},
         mmcUniqueness_{options.mmcUniqueness}, traceFlags_{options.traceFlags},
+        openTypes_{options.openTypes},
         deviceLibraryDirectory_{options.deviceLibraryDirectory},
         deviceModuleDirectories_{options.deviceModuleDirectories},
         copyDeviceProcedures_{options.copyDeviceProcedures} {
@@ -1077,6 +1078,7 @@ private:
   bool mmcUniqueness_{false};
   // --trace-flag=.
   std::vector<std::string> traceFlags_;
+  bool openTypes_{false};
   std::string deviceLibraryDirectory_;
   // -device-module-dir and -fno-copy-device-procedures.
   std::vector<std::string> deviceModuleDirectories_;

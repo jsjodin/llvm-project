@@ -68,7 +68,9 @@ namespace {
 constexpr llvm::StringLiteral kThrowSymbol{"merk_uncaught_exception"};
 constexpr llvm::StringLiteral kHeapAddressSymbol{"merk.heap_address"};
 constexpr llvm::StringLiteral kTrailAddressSymbol{"merk.trail_address"};
-// Where MerkTrail keeps the number of live marks (runtime/trail.h).
+// Where MerkTrail keeps the entries in use and the number of live marks
+// (runtime/trail.h).
+constexpr std::int32_t kTrailTopOffset{8};
 constexpr std::int32_t kTrailLiveOffset{32};
 constexpr unsigned kHeapAddressSpace{1};
 
@@ -437,6 +439,8 @@ private:
   void LowerOpenBind(
       merk::ForeignCallOp, mlir::Value variable, mlir::Value value);
   void LowerOpenCell(merk::ForeignCallOp, mlir::Value word);
+  void LowerTrailMarks(merk::ForeignCallOp);
+  void LowerTrailRelease(merk::ForeignCallOp, mlir::Value mark);
   void LowerEntry(merk::EntryOp);
   void LowerConstructors();
   mlir::Value CallRuntime(llvm::StringRef name, mlir::Type result,
@@ -3092,7 +3096,8 @@ bool Lowerer::LowerOpenCall(merk::ForeignCallOp call) {
   if (device_ ||
       !llvm::is_contained(
           llvm::ArrayRef<llvm::StringRef>{"merk_open_deref", "merk_open_bind",
-              "merk_open_new_var", "merk_open_box", "merk_open_unbox"},
+              "merk_open_new_var", "merk_open_box", "merk_open_unbox",
+              "merk_open_trail_marks", "merk_open_trail_release"},
           name)) {
     return false;
   }
@@ -3106,6 +3111,10 @@ bool Lowerer::LowerOpenCall(merk::ForeignCallOp call) {
     LowerOpenDeref(call, inputs[0]);
   } else if (name == "merk_open_bind") {
     LowerOpenBind(call, inputs[0], inputs[1]);
+  } else if (name == "merk_open_trail_marks") {
+    LowerTrailMarks(call);
+  } else if (name == "merk_open_trail_release") {
+    LowerTrailRelease(call, inputs[0]);
   } else if (name == "merk_open_unbox") {
     // A box's word, at its address: its tag is 0.
     auto i64{rewriter_.getI64Type()};
@@ -3210,6 +3219,86 @@ void Lowerer::LowerOpenBind(
       mlir::ValueRange{
           mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, variable),
           mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, value)});
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{}, after);
+}
+
+// merk_open_trail_marks: the live marks, 0 if the thread has no trail.
+void Lowerer::LowerTrailMarks(merk::ForeignCallOp call) {
+  mlir::Location loc{call.getLoc()};
+  auto i64{rewriter_.getI64Type()};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  mlir::Block *before{call->getBlock()};
+  mlir::Block *after{rewriter_.splitBlock(before, call->getIterator())};
+  mlir::Value result{after->addArgument(i64, loc)};
+  rewriter_.replaceAllUsesWith(call.getResult(0), result);
+  rewriter_.eraseOp(call);
+  mlir::Block *some{rewriter_.createBlock(after)};
+  rewriter_.setInsertionPointToEnd(before);
+  mlir::Value trail{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr,
+      mlir::LLVM::CallOp::create(
+          rewriter_, loc, TrailAddressFunc(), mlir::ValueRange{})
+          .getResult(),
+      8)};
+  mlir::Value none{
+      mlir::LLVM::ICmpOp::create(rewriter_, loc, mlir::LLVM::ICmpPredicate::eq,
+          trail, mlir::LLVM::ZeroOp::create(rewriter_, loc, ptr))};
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, none, after,
+      mlir::ValueRange{mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 0)},
+      some, mlir::ValueRange{});
+  rewriter_.setInsertionPointToStart(some);
+  mlir::Value live{mlir::LLVM::LoadOp::create(rewriter_, loc, i64,
+      mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(),
+          trail, llvm::ArrayRef<mlir::LLVM::GEPArg>{kTrailLiveOffset}),
+      8)};
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{live}, after);
+}
+
+// merk_open_trail_release: the marks from `mark` on are gone, and the trail
+// is emptied with the last; nothing if fewer are live.
+void Lowerer::LowerTrailRelease(merk::ForeignCallOp call, mlir::Value mark) {
+  mlir::Location loc{call.getLoc()};
+  auto i64{rewriter_.getI64Type()};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  mlir::Block *before{call->getBlock()};
+  mlir::Block *after{rewriter_.splitBlock(before, call->getIterator())};
+  rewriter_.eraseOp(call);
+  mlir::Block *check{rewriter_.createBlock(after)};
+  mlir::Block *release{rewriter_.createBlock(after)};
+  mlir::Block *empty{rewriter_.createBlock(after)};
+  rewriter_.setInsertionPointToEnd(before);
+  mlir::Value trail{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr,
+      mlir::LLVM::CallOp::create(
+          rewriter_, loc, TrailAddressFunc(), mlir::ValueRange{})
+          .getResult(),
+      8)};
+  mlir::Value none{
+      mlir::LLVM::ICmpOp::create(rewriter_, loc, mlir::LLVM::ICmpPredicate::eq,
+          trail, mlir::LLVM::ZeroOp::create(rewriter_, loc, ptr))};
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, none, after, mlir::ValueRange{},
+      check, mlir::ValueRange{});
+  rewriter_.setInsertionPointToStart(check);
+  mlir::Value liveAddress{
+      mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(),
+          trail, llvm::ArrayRef<mlir::LLVM::GEPArg>{kTrailLiveOffset})};
+  mlir::Value live{
+      mlir::LLVM::LoadOp::create(rewriter_, loc, i64, liveAddress, 8)};
+  mlir::Value more{mlir::LLVM::ICmpOp::create(
+      rewriter_, loc, mlir::LLVM::ICmpPredicate::ugt, live, mark)};
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, more, release,
+      mlir::ValueRange{}, after, mlir::ValueRange{});
+  rewriter_.setInsertionPointToStart(release);
+  mlir::LLVM::StoreOp::create(rewriter_, loc, mark, liveAddress, 8);
+  mlir::Value last{
+      mlir::LLVM::ICmpOp::create(rewriter_, loc, mlir::LLVM::ICmpPredicate::eq,
+          mark, mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 0))};
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, last, empty, mlir::ValueRange{},
+      after, mlir::ValueRange{});
+  rewriter_.setInsertionPointToStart(empty);
+  mlir::LLVM::StoreOp::create(rewriter_, loc,
+      mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 0),
+      mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, rewriter_.getI8Type(),
+          trail, llvm::ArrayRef<mlir::LLVM::GEPArg>{kTrailTopOffset}),
+      8);
   mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{}, after);
 }
 

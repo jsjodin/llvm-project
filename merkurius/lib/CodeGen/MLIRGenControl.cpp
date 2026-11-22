@@ -376,8 +376,13 @@ bool MerkGenerator::NeedsCommit(const Body &goal, const ProcedureBody &body) {
 void MerkGenerator::Commit(const Body &goal, const ProcedureBody &body) {
   mlir::Location loc{Location(goal.tokens)};
   Values before{values_};
-  // After the first solution no choice point in the goal is live.
-  mlir::Value marks{Trails(body) ? TrailMarks(loc) : mlir::Value{}};
+  // After the first solution no choice point in the goal is live. Those of
+  // its callees may have marked the trail, even if this procedure binds no
+  // open variable itself, so with open types every commit releases them.
+  mlir::Value marks{
+      Trails(body) || (openTypes_ && !target_.options().IsDevice())
+          ? TrailMarks(loc)
+          : mlir::Value{}};
   auto commit{merk::CommitOp::create(builder_, loc, mlir::TypeRange{})};
   std::vector<BodyVar> bound;
   llvm::SmallVector<mlir::Type> types;

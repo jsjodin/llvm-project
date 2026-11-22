@@ -81,6 +81,10 @@ struct GenerationOptions {
   // Whether a device's compile copies other modules' procedures at all
   // (-fno-copy-device-procedures turns it off).
   bool copyDeviceProcedures{true};
+  // -fopen-types: the program may bind open terms' variables, so a commit
+  // releases the trail marks its goal's choice points left, wherever they
+  // were made.
+  bool openTypes{false};
 };
 
 // The merk module for `module`'s procedures, with the target recorded on

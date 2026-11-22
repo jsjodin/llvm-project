@@ -56,8 +56,10 @@ struct MerkTrail {
 extern thread_local MerkTrail *merk_trail;
 }
 
-// Code generation's inline bind reads the live marks there
-// (lib/CodeGen/Lowering.cpp, kTrailLiveOffset).
+// Code generation's inline bind and release read the entries in use and the
+// live marks there (lib/CodeGen/Lowering.cpp, kTrailTopOffset and
+// kTrailLiveOffset).
+static_assert(offsetof(MerkTrail, top) == 8);
 static_assert(offsetof(MerkTrail, live) == 32);
 
 namespace merkurius::runtime {

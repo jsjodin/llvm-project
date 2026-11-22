@@ -981,7 +981,8 @@ bool CodeGenAction::executeAction() {
       {ci.getFrontendOpts().stubUnimplemented,
           ci.getFrontendOpts().mmcUniqueness, ci.getFrontendOpts().traceFlags,
           deviceLibrary, ci.getFrontendOpts().deviceModuleDirectories,
-          ci.getFrontendOpts().copyDeviceProcedures});
+          ci.getFrontendOpts().copyDeviceProcedures,
+          ci.getLangOpts().openTypes});
   r.messages.Emit(llvm::errs(), ci.getAllSources());
   if (!module || r.messages.AnyFatalError()) {
     return false;

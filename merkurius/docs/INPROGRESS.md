@@ -8156,11 +8156,18 @@ the `type_info` back to the open layout (below).
        point marked: `first(X) :- promise_equivalent_solutions [X] gen(X)`,
        with `gen` nondet over a local open term, leaves a mark per call, so
        every later binding is trailed and a collection refuses the trail.
-       Fixed next, on its own.
+       Fixed 2026-11-22: with -fopen-types (`GenerationOptions::openTypes`)
+       every commit on the host releases its goal's marks, whatever the
+       procedure's variables. Lowering inlines `merk_open_trail_marks` and
+       `merk_open_trail_release`, so a commit costs two loads of the trail
+       when it has nothing to release. A module compiled without
+       -fopen-types still does not release, which matters only if it
+       commits to a callee that marks: open types are behind the flag
+       until then. Test: `CodeGen/open-commit-marks.m`.
      - **Part 2: marks only around goals with an `any` nonlocal,** from the
        insts before the goal, rather than in every procedure whose variables'
-       types mention open types. A commit releases marks whenever open types
-       are in use, since its callees' choice points may have marked.
+       types mention open types. Commits already release whenever open types
+       are in use.
      - **Part 3: a unify procedure per open type,** beside the generic
        walker.
 5. **The collector:** variable cells, trail entries as roots, chains
