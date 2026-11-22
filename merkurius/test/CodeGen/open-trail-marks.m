@@ -10,6 +10,10 @@
 % RUN: merkc -fc1 -fopen-types -emit-merk %s -o - | FileCheck %s
 % RUN: merkc -fopen-types %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines
 % RUN: merkc -fopen-types -O0 %s -o %t.O0 && %t.O0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines
+% With a collection at every allocation (step 5), which found -O2 code
+% passing a variable to bind as an integer from before a collection:
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.O0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines
 
 % CHECK-LABEL: merk.proc {{.*}}@open_trail_marks.build_3_0(
 % CHECK-NOT: merk_open_trail_mark

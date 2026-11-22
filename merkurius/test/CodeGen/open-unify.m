@@ -7,8 +7,8 @@
 % bound to the runtime's walker, which polymorphic code calls too.
 %
 % RUN: merkc -fc1 -fopen-types -emit-merk %s -o - | FileCheck %s
-% RUN: merkc -fopen-types %s -o %t && env MERK_HEAP_CHUNK_BYTES=134217728 %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines
-% RUN: merkc -fopen-types -O0 %s -o %t.O0 && env MERK_HEAP_CHUNK_BYTES=134217728 %t.O0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines
+% RUN: merkc -fopen-types %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines
+% RUN: merkc -fopen-types -O0 %s -o %t.O0 && %t.O0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines
 
 % CHECK-LABEL: merk.proc {{.*}}@open_unify.eq_2_0(
 % CHECK: merk_open_unify

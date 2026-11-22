@@ -15,6 +15,10 @@
 % RUN: merkc -fc1 -fopen-types -emit-merk %s -o - | FileCheck %s --check-prefix=MERK
 % RUN: merkc -fopen-types %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -fopen-types -O0 %s -o %t.O0 && %t.O0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% With a collection at every allocation (step 5), which found -O2 code
+% passing a variable to bind as an integer from before a collection:
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.O0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 
 % MERK-DAG: merk.type_def "open.open(open_construct.eight)" [#merk.constructor<"p0"(!merk.word)>, {{.*}}] open
 % MERK-DAG: merk.type_def "open.open(list.list(int))" [#merk.constructor<"[]">, #merk.constructor<"[|]"(!merk.word, !merk.word)>] open

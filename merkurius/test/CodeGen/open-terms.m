@@ -5,13 +5,12 @@
 % failed disjunct, if-then-else condition or negation bound. mmc has no open
 % types, so the outputs are checked by hand: each line says what it shows.
 %
-% A collection that meets an open term stops the program with a message,
-% until step 5 teaches the collector open layouts.
+% Each also runs with a collection at every allocation (step 5).
 %
 % RUN: merkc -fopen-types %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -fopen-types -O0 %s -o %t.O0 && %t.O0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
-% RUN: not --crash env MERK_GC_EVERY_ALLOC=1 %t 2>&1 | FileCheck %s --check-prefix=COLLECT
-% COLLECT: Merkurius runtime: bad root: an open term, which cannot be collected yet ({{.*}})
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
+% RUN: env MERK_GC_EVERY_ALLOC=1 %t.O0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 
 :- module open_terms.
 :- interface.

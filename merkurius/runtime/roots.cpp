@@ -12,7 +12,9 @@
 #include "fragment.h"
 #include "frame-info.h"
 #include "heap.h"
+#include "open.h"
 #include "process.h"
+#include "trail.h"
 #include "walk.h"
 #include <atomic>
 #include <cstdint>
@@ -595,6 +597,18 @@ bool VisitFrames(void *frame, Visit visit) {
 // A copying collection of a process's heap. Cells have no header, so what is
 // reached is copied by its type, a forwarding address is left in the first
 // word of the old cell, and a side bitmap says which old words hold one.
+//
+// Open terms (design document, Runtime system, "Support for open terms") are
+// traced in their open layout, by open(T)'s T (open.h), which the collector
+// reads from the descriptors itself, so that a program without open terms
+// links none of open.cpp. A variable cell is a one-word cell: an unbound one
+// is copied and refers to its new self; a reference to a bound one is
+// replaced by its binding, which shortens the chain, unless the binding is on
+// the trail, since undoing it must find the references still going through
+// the cell. Such a cell is copied with its binding. The trail's entries are
+// updated last, as the typed roots reach every live variable cell: an entry
+// whose cell nothing reached is dead, and is pointed at a scratch word, so
+// that the marks, which are the trail's tops, stay as they are.
 class Collector {
 public:
   explicit Collector(Process *process) : process_{process} { Prepare(); }
@@ -602,6 +616,7 @@ public:
   void Root(Word *slot, std::int64_t type, const Safepoint &safepoint,
       const Word *infos, std::int64_t count);
   void UpdateOnly(Word *slot);
+  void UpdateTrail();
   void Drain();
   void Finish();
   // A frame of this many bytes was walked.
@@ -614,6 +629,9 @@ private:
     char *end;
     std::uint64_t *marks;
     bool large;
+    // Which words are variable cells whose bindings are on the trail; null
+    // if none are.
+    std::uint64_t *trailed;
   };
   // What is left to do of a cell in to-space: its fields, each of its type in
   // `types`, or all of `single`'s for an array.
@@ -623,6 +641,8 @@ private:
     Word single;
     const Environment *environment;
     std::uint64_t count;
+    // Whether the fields have their types' open layouts.
+    bool open{false};
   };
   struct Block {
     Block *next;
@@ -642,8 +662,12 @@ private:
 
   Word ForwardTypeInfo(Word info);
   Word ForwardDictionary(Word dictionary);
-  void Trace(Word *slot, Word type, const Environment *environment);
+  void Trace(
+      Word *slot, Word type, const Environment *environment, bool open = false);
   void ForwardValue(Word *slot, const Type &type);
+  void ForwardOpen(Word *slot, Type type);
+  bool Trailed(const FromChunk *chunk, const Word *cell) const;
+  Word *CopyBox(Word *slot);
   void ForwardCell(Word *slot, const Type &type);
   void ForwardClosure(Word *slot);
   void ForwardString(Word *slot);
@@ -674,13 +698,6 @@ int Collector::CompareChunks(const void *a, const void *b) {
 }
 
 void Collector::Prepare() {
-  // Temporary (open types step 5, docs/INPROGRESS.md): the collector does
-  // not move variable cells or the trail's addresses yet, so a collection
-  // with bindings on the trail would leave its entries stale.
-  if (merk_trail && merk_trail->top != 0) {
-    Bad("open terms' trail entries, which cannot be collected yet",
-        merk_trail->top);
-  }
   for (ChunkLink *chunk{process_->chunks}; chunk; chunk = chunk->next) {
     chunkCount_ += !chunk->pinned;
   }
@@ -697,9 +714,39 @@ void Collector::Prepare() {
     if (!marks) {
       Bad("no memory for a collection's marks", chunk->bytes);
     }
-    chunks_[i++] = {begin, begin + chunk->bytes, marks, chunk->large};
+    chunks_[i++] = {begin, begin + chunk->bytes, marks, chunk->large, nullptr};
   }
   std::qsort(chunks_, chunkCount_, sizeof(FromChunk), CompareChunks);
+  // The collection runs in its process, whose trail merk_trail is.
+  MerkTrail *trail{merk_trail};
+  for (std::uint64_t k{0}; trail && k < trail->top; ++k) {
+    Word *cell{trail->entries[k].address};
+    FromChunk *from{FindFrom(reinterpret_cast<Word>(cell))};
+    if (!from) {
+      continue;
+    }
+    if (!from->trailed) {
+      from->trailed = static_cast<std::uint64_t *>(std::calloc(
+          (from->end - from->begin) / 512 + 1, sizeof(std::uint64_t)));
+      if (!from->trailed) {
+        Bad("no memory for a collection's trail marks", trail->top);
+      }
+    }
+    std::size_t index{
+        static_cast<std::size_t>(reinterpret_cast<char *>(cell) - from->begin) /
+        sizeof(Word)};
+    from->trailed[index / 64] |= std::uint64_t{1} << (index % 64);
+  }
+}
+
+bool Collector::Trailed(const FromChunk *chunk, const Word *cell) const {
+  if (!chunk->trailed) {
+    return false;
+  }
+  std::size_t index{static_cast<std::size_t>(
+                        reinterpret_cast<const char *>(cell) - chunk->begin) /
+      sizeof(Word)};
+  return (chunk->trailed[index / 64] >> (index % 64) & 1) != 0;
 }
 
 Collector::FromChunk *Collector::FindFrom(Word address) {
@@ -858,7 +905,8 @@ Word Collector::ForwardDictionary(Word dictionary) {
   return reinterpret_cast<Word>(to);
 }
 
-void Collector::Trace(Word *slot, Word type, const Environment *environment) {
+void Collector::Trace(
+    Word *slot, Word type, const Environment *environment, bool open) {
   Type resolved{Resolve(type, environment)};
   // A field whose type's arguments are all type parameters, as a list's tail
   // has, is resolved here. Otherwise each cell would add to the chain of
@@ -883,7 +931,11 @@ void Collector::Trace(Word *slot, Word type, const Environment *environment) {
       resolved.environment = {flat, environment->parent};
     }
   }
-  ForwardValue(slot, resolved);
+  if (open) {
+    ForwardOpen(slot, resolved);
+  } else {
+    ForwardValue(slot, resolved);
+  }
 }
 
 void Collector::ForwardValue(Word *slot, const Type &type) {
@@ -909,9 +961,10 @@ void Collector::ForwardValue(Word *slot, const Type &type) {
     }
     return;
   case Open:
-    // Temporary (open types step 5, docs/INPROGRESS.md): the collector
-    // walks open layouts and variable cells then.
-    Bad("an open term, which cannot be collected yet", *slot);
+    // T's open layout.
+    ForwardOpen(
+        slot, Resolve(type.environment.arguments[0], type.environment.parent));
+    return;
   default:
     return; // A word that is not a pointer.
   }
@@ -1063,12 +1116,199 @@ void Collector::ForwardCell(Word *slot, const Type &type) {
   }
 }
 
+// A one-word box, as an open layout's Boxed and ClosedBox values are: its
+// copy, or null if it is static or already copied, when its word is done.
+Word *Collector::CopyBox(Word *slot) {
+  Word value{*slot};
+  FromChunk *chunk{FindFrom(value)};
+  if (!chunk) {
+    return nullptr; // A static box, as small ints' are.
+  }
+  auto *box{reinterpret_cast<Word *>(value)};
+  Word *to;
+  if (Forwarded(chunk, box, to)) {
+    *slot = reinterpret_cast<Word>(to);
+    return nullptr;
+  }
+  to = CopyOut(chunk, box, 1, sizeof(Word));
+  Forward(chunk, box, to);
+  *slot = reinterpret_cast<Word>(to);
+  return to;
+}
+
+// A Cells or Tuple type's functor in the open layout, which is not a
+// constant, by the tag of the cell's pointer, and the words before its
+// fields. The layout is the ordinary one when that leaves tag 7 unused,
+// which an unused tag's kConstantTag says; otherwise it is the rule with 7
+// tags (open.h, CellTag), found by trying the type's functors, as only a type
+// of more than 6 constructors with arguments has such a layout.
+const Functor *OpenCellFunctor(
+    const TypeCtor *ctor, unsigned tag, const Word *cell, unsigned &before) {
+  if (ctor->kind == Tuple) {
+    before = 0;
+    return &ctor->functors[0];
+  }
+  if (ctor->byTag[kOpenTags] == kConstantTag) {
+    std::uint16_t index{ctor->byTag[tag]};
+    if (index == kSharedTag) {
+      before = 1;
+      return &ctor->functors[ctor->shared[cell[0]]];
+    }
+    if (index >= ctor->functorCount) {
+      Bad("an open term's tag no constructor of the type has", tag);
+    }
+    before = 0;
+    return &ctor->functors[index];
+  }
+  bool constants{false};
+  unsigned cells{0};
+  for (std::uint32_t i{0}; i < ctor->functorCount; ++i) {
+    const Functor &functor{ctor->functors[i]};
+    if (functor.arity == 0 && functor.hidden == 0) {
+      constants = true;
+    } else {
+      ++cells;
+    }
+  }
+  unsigned k{0};
+  for (std::uint32_t i{0}; i < ctor->functorCount; ++i) {
+    const Functor &functor{ctor->functors[i]};
+    if (functor.arity == 0 && functor.hidden == 0) {
+      continue;
+    }
+    OpenTag open{CellTag(constants, cells, k++, kOpenTags)};
+    if (open.tag == tag &&
+        (open.secondary < 0 || static_cast<Word>(open.secondary) == cell[0])) {
+      before = open.secondary < 0 ? 0 : 1;
+      return &functor;
+    }
+  }
+  Bad("an open term's tag no constructor of the type has", tag);
+}
+
+// A value of `type` in its open layout (open.h): a variable reference, or
+// the type's encoding of a value.
+void Collector::ForwardOpen(Word *slot, Type type) {
+  for (;;) {
+    Word value{*slot};
+    if (IsVariableReference(value)) {
+      auto *cell{reinterpret_cast<Word *>(value - kOpenVariableTag)};
+      FromChunk *chunk{FindFrom(value - kOpenVariableTag)};
+      if (!chunk) {
+        Bad("a variable cell outside the heap", value);
+      }
+      Word *to;
+      if (Forwarded(chunk, cell, to)) {
+        *slot = reinterpret_cast<Word>(to) | kOpenVariableTag;
+        return;
+      }
+      Word binding{*cell};
+      if (binding != value && !Trailed(chunk, cell)) {
+        *slot = binding; // The chain is one cell shorter.
+        continue;
+      }
+      to = CopyOut(chunk, cell, 1, sizeof(Word));
+      Forward(chunk, cell, to);
+      *slot = reinterpret_cast<Word>(to) | kOpenVariableTag;
+      if (binding == value) {
+        *to = *slot; // Unbound: it refers to its new self.
+        return;
+      }
+      slot = to; // Its binding, of the same type.
+      continue;
+    }
+    const TypeCtor *ctor{type.ctor};
+    switch (ctor->kind) {
+    case Int8:
+    case Int16:
+    case Int32:
+    case Uint8:
+    case Uint16:
+    case Uint32:
+    case Char:
+    case Enum:
+    case Dummy:
+    case Void:
+      return; // Shifted, or the same word in both layouts.
+    case Int:
+    case Uint:
+    case Int64:
+    case Uint64:
+    case Float:
+      CopyBox(slot);
+      return;
+    case String:
+      if (Word * box{CopyBox(slot)}) {
+        ForwardString(box);
+      }
+      return;
+    case Open:
+      type = Resolve(type.environment.arguments[0], type.environment.parent);
+      continue;
+    case NoTag:
+      if ((ctor->flags & kClosed) != 0) {
+        // A box of T's ordinary word.
+        if (Word * box{CopyBox(slot)}) {
+          Trace(box, ctor->functors[0].fields[0],
+              KeepEnvironment(type.environment));
+        }
+        return;
+      }
+      type = Resolve(
+          ctor->functors[0].fields[0], KeepEnvironment(type.environment));
+      continue;
+    case Tuple:
+      if (ctor->functors[0].arity == 1) {
+        type = Resolve(
+            ctor->functors[0].fields[0], KeepEnvironment(type.environment));
+        continue;
+      }
+      break;
+    case Cells:
+      break;
+    default:
+      Bad("an open term of a type open terms cannot hold", value);
+    }
+    unsigned tag{static_cast<unsigned>(value & kTagMask)};
+    if (ctor->kind == Cells && tag == 0 && ctor->byTag[0] == kConstantTag) {
+      return; // A constant, the same word in both layouts.
+    }
+    FromChunk *chunk{FindFrom(value - tag)};
+    if (!chunk) {
+      return; // A static cell.
+    }
+    auto *cell{reinterpret_cast<Word *>(value - tag)};
+    Word *to;
+    if (Forwarded(chunk, cell, to)) {
+      *slot = reinterpret_cast<Word>(to) + tag;
+      return;
+    }
+    unsigned before;
+    const Functor *functor{OpenCellFunctor(ctor, tag, cell, before)};
+    if (functor->hidden != 0) {
+      Bad("an open term of an existentially typed constructor", value);
+    }
+    unsigned arity{functor->arity};
+    to = CopyOut(chunk, cell, before + arity, sizeof(Word) * (before + arity));
+    Forward(chunk, cell, to);
+    *slot = reinterpret_cast<Word>(to) + tag;
+    if (arity != 0) {
+      Push({to + before, functor->fields, 0,
+          KeepEnvironment(
+              {type.environment.arguments, type.environment.parent, nullptr}),
+          arity, true});
+    }
+    return;
+  }
+}
+
 void Collector::Drain() {
   while (pendingCount_ != 0) {
     Pending &top{pending_[pendingCount_ - 1]};
     Word *slot{top.to};
     Word type{top.types ? *top.types : top.single};
     const Environment *environment{top.environment};
+    bool open{top.open};
     if (--top.count == 0) {
       // Before the last field, so that a long list takes no more room.
       --pendingCount_;
@@ -1079,7 +1319,7 @@ void Collector::Drain() {
       }
     }
     if (type != kCaptureTypeInfo && type != kCaptureTypeclassInfo) {
-      Trace(slot, type, environment);
+      Trace(slot, type, environment, open);
     }
   }
 }
@@ -1149,6 +1389,36 @@ void Collector::UpdateOnly(Word *slot) {
   *slot = reinterpret_cast<Word>(to) + (value & kTagMask);
 }
 
+// After every root, as they reach every live variable cell.
+void Collector::UpdateTrail() {
+  MerkTrail *trail{merk_trail};
+  Word *scratch{nullptr};
+  for (std::uint64_t k{0}; trail && k < trail->top; ++k) {
+    MerkTrailEntry &entry{trail->entries[k]};
+    Word *cell{reinterpret_cast<Word *>(entry.address)};
+    FromChunk *chunk{FindFrom(reinterpret_cast<Word>(cell))};
+    if (!chunk) {
+      continue;
+    }
+    Word *to;
+    if (Forwarded(chunk, cell, to)) {
+      // Its old word was its reference to itself.
+      entry.address = reinterpret_cast<std::uint64_t *>(to);
+      entry.old = reinterpret_cast<Word>(to) | kOpenVariableTag;
+      continue;
+    }
+    // Nothing refers to it, so undoing its binding need not be seen. The
+    // scratch word is in the process's heap until the next collection, which
+    // gives such entries a new one.
+    if (!scratch) {
+      scratch = ToSpace(1);
+      *scratch = 0;
+    }
+    entry.address = reinterpret_cast<std::uint64_t *>(scratch);
+    entry.old = 0;
+  }
+}
+
 // Whether a chunk is a large object that was reached, which its first word's
 // mark says, as it holds the one object.
 bool Collector::KeepLarge(ChunkLink *chunk) {
@@ -1175,6 +1445,7 @@ void Collector::Finish() {
   process_->chunks = kept;
   for (std::size_t i{0}; i < chunkCount_; ++i) {
     std::free(chunks_[i].marks);
+    std::free(chunks_[i].trailed);
   }
   std::free(chunks_);
   std::free(pending_);
@@ -1320,6 +1591,7 @@ bool CollectIfDue(void *frame) {
     VisitInterior(
         safepoint, stack, [](Word *slot, const Word *base) { *slot += *base; });
   });
+  collector.UpdateTrail();
   collector.Finish();
   return true;
 }

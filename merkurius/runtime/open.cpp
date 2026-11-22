@@ -832,10 +832,92 @@ bool HasNoVariableCell(const Type &type, Word value) {
   }
 }
 
-// open(T)'s type_infos, by T's type_info and open/1's descriptor
-// (merk_open_type_info): constant-initialized, as merk_heap is.
+// Kept type_infos (merk_open_type_info, merk_kept_type_info_begin): cells
+// that last as long as the program, one for each type, whose arguments are
+// kept or static too, so that the collector, which leaves cells outside the
+// heap as they are, never needs to follow one. A type is keyed by a chain:
+// its descriptor, then a node for each argument, by the node before and the
+// argument's kept type_info, then the cell, by the last node and 0. A node
+// is the address of its record, tagged 1, so that it is never a descriptor,
+// whose tag is 0. Constant-initialized, as merk_heap is.
 pthread_mutex_t typeInfoLock = PTHREAD_MUTEX_INITIALIZER;
 Table typeInfoCells;
+
+struct KeptNode {
+  Word before; // a node, or the descriptor
+  Word argument;
+  const TypeCtor *ctor;
+  Word count;
+};
+
+// The node after `key` for an argument's kept type_info.
+Word KeptNodeAfter(Word key, Word argument) {
+  auto [slot, inserted]{typeInfoCells.Insert(key, argument, 0)};
+  if (inserted) {
+    auto *node{static_cast<KeptNode *>(std::malloc(sizeof(KeptNode)))};
+    if (!node) {
+      OutOfMemory();
+    }
+    bool first{(key & kTagMask) == 0};
+    const KeptNode *previous{
+        first ? nullptr : reinterpret_cast<const KeptNode *>(key - 1)};
+    *node = {key, argument,
+        first ? reinterpret_cast<const TypeCtor *>(key) : previous->ctor,
+        first ? 1 : previous->count + 1};
+    slot->value = reinterpret_cast<Word>(node) + 1;
+  }
+  return slot->value;
+}
+
+// The kept cell of the chain that ends at `key`: a descriptor, kept as it
+// is when it has no arguments, or a node.
+Word KeptCell(Word key) {
+  if ((key & kTagMask) == 0) {
+    return key;
+  }
+  auto [slot, inserted]{typeInfoCells.Insert(key, 0, 0)};
+  if (inserted) {
+    const auto *last{reinterpret_cast<const KeptNode *>(key - 1)};
+    // A tuple's or closure's cell has the number of its arguments in word 1.
+    bool counted{last->ctor->kind == Tuple || last->ctor->kind == Closure};
+    Word before{counted ? Word{2} : Word{1}};
+    auto *cell{static_cast<Word *>(
+        std::malloc((before + last->count) * sizeof(Word)))};
+    if (!cell) {
+      OutOfMemory();
+    }
+    cell[0] = reinterpret_cast<Word>(last->ctor);
+    if (counted) {
+      cell[1] = last->count;
+    }
+    for (const KeptNode *node{last}; node; node = (node->before & kTagMask) == 0
+             ? nullptr
+             : reinterpret_cast<const KeptNode *>(node->before - 1)) {
+      cell[before + node->count - 1] = node->argument;
+    }
+    slot->value = reinterpret_cast<Word>(cell) + 1;
+  }
+  return slot->value;
+}
+
+// A type_info as a kept one: a descriptor as it is, a cell as the kept cell
+// of its type, made of its arguments' kept type_infos, so that one made on
+// the heap, which a collection moves, can be in a kept one.
+Word KeepTypeInfo(Word info) {
+  if ((info & kTagMask) != 1) {
+    return info;
+  }
+  const auto *cell{reinterpret_cast<const Word *>(info - 1)};
+  const auto *ctor{reinterpret_cast<const TypeCtor *>(cell[0])};
+  bool counted{ctor->kind == Tuple || ctor->kind == Closure};
+  Word count{counted ? cell[1] : ctor->arity};
+  const Word *arguments{cell + (counted ? 2 : 1)};
+  Word key{cell[0]};
+  for (Word i{0}; i < count; ++i) {
+    key = KeptNodeAfter(key, KeepTypeInfo(arguments[i]));
+  }
+  return KeptCell(key);
+}
 
 // from_open's copy: the copy of each cell of the open term copied so far,
 // by the cell's word, or kCopying while its fields are being copied, so
@@ -985,17 +1067,23 @@ int32_t merk_open_from_open(uint64_t typeInfo, uint64_t value, uint64_t *out) {
 
 uint64_t merk_open_type_info(uint64_t descriptor, uint64_t argument) {
   pthread_mutex_lock(&typeInfoLock);
-  auto [slot, inserted]{typeInfoCells.Insert(argument, descriptor, 0)};
-  if (inserted) {
-    auto *cell{static_cast<Word *>(std::malloc(2 * sizeof(Word)))};
-    if (!cell) {
-      OutOfMemory();
-    }
-    cell[0] = descriptor;
-    cell[1] = argument;
-    slot->value = reinterpret_cast<Word>(cell) + 1;
-  }
-  Word info{slot->value};
+  Word info{KeptCell(KeptNodeAfter(descriptor, KeepTypeInfo(argument)))};
+  pthread_mutex_unlock(&typeInfoLock);
+  return info;
+}
+
+uint64_t merk_kept_type_info_begin(uint64_t descriptor) { return descriptor; }
+
+uint64_t merk_kept_type_info_argument(uint64_t key, uint64_t argument) {
+  pthread_mutex_lock(&typeInfoLock);
+  Word node{KeptNodeAfter(key, KeepTypeInfo(argument))};
+  pthread_mutex_unlock(&typeInfoLock);
+  return node;
+}
+
+uint64_t merk_kept_type_info_end(uint64_t key) {
+  pthread_mutex_lock(&typeInfoLock);
+  Word info{KeptCell(key)};
   pthread_mutex_unlock(&typeInfoLock);
   return info;
 }

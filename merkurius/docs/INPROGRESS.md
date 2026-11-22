@@ -8235,6 +8235,60 @@ the `type_info` back to the open layout (below).
          and lists of 200,000 at -O0.
 5. **The collector:** variable cells, trail entries as roots, chains
    shortened as it copies, and `bind`'s barrier, the remembered set's.
+   Done 2026-11-22, but for the barrier:
+   - **Open layouts:** the collector traces an open(T) value by T's open
+     layout (`runtime/roots.cpp`, `ForwardOpen`): boxes, closed(T)'s box of
+     T's ordinary word, notags as their argument, and cells by the open
+     tags. It reads those from the descriptor itself, so that a program
+     without open terms links none of `open.cpp`. They are the ordinary
+     tags when those leave tag 7 unused, which `byTag[7]` says; otherwise
+     the rule with 7 tags is tried against each functor, which only a type
+     of more than 6 constructors with arguments needs.
+   - **Variable cells:** an unbound one is copied and refers to its new
+     self. A reference to a bound one is replaced by its binding, which
+     shortens the chain, unless the binding is on the trail: undoing it
+     must find the references still going through the cell, so such a
+     cell is copied with its binding. A bitmap per chunk marks the trailed
+     cells, made only when the trail has entries.
+   - **Trail entries** are updated after every root, as the roots reach
+     every live variable cell. An entry whose cell nothing reached is
+     dead: it is pointed at a scratch word in the new heap, so that the
+     marks, which are trail tops, stay as they are. Rejected: removing
+     dead entries, which would renumber the marks.
+   - **Not done: `bind`'s barrier.** The heap is not generational yet, so
+     there is no remembered set to record old cells bound to young values.
+     It comes with generations, with array `set`'s barrier.
+   - **Kept type_infos:** a polymorphic open(list(T)) live across a
+     safepoint had no type_info to describe it, as making list(T)'s on the
+     heap is a safepoint itself; it did not compile ("a garbage collector
+     root ... whose type_infos are not known"). The runtime now keeps a
+     type_info for each type, made from its arguments' kept ones, and
+     code generation builds one argument at a time with foreign calls,
+     which are no safepoints (`merk_kept_type_info_begin`). It also fixed
+     `merk_open_type_info`, which kept a cell that pointed at T's
+     type_info as given, a cell on the heap when the caller made one,
+     which a collection moves.
+   - **Found, fixed: -O2 code passed `bind` a variable from before a
+     collection** (`CodeGen/open-construct.m`, collecting at every
+     allocation). The runtime's slow paths took and returned words as
+     integers, and the optimizer, which runs before statepoints are made,
+     merged the bind's ptrtoint with the tag test's before an allocation,
+     and passed the integer through a phi of PRE's. They take and return
+     heap pointers now (`Lowering.cpp`), and `Statepoints.cpp` reads a
+     root's bits again at each use that needs its address
+     (`ReadAtUses`), lifting an integer phi of reads to a phi of the
+     pointers. A comparison or a tag needs only bits a move keeps, so
+     those stay. 3 of the 134 programs without open types change, by a
+     spill or a reload each.
+   - **Found, fixed: a list of open terms written out was "too ambiguous"**
+     past about 10 elements: each cell's twin may take a ground head, which
+     doubles the second pass's assignments for each one. The type checker
+     now prunes, as it goes, the assignments that `KeepMostOpen` would drop
+     at the end (`PruneFinished`), over the variables whose goals have all
+     been checked (`Semantics/types/open/open-long-lists.m`).
+   - Tests: `CodeGen/open-gc.m`, collecting at every allocation, and
+     every runtime test of open terms also run that way. The benchmarks
+     no longer give the heap one chunk for the whole run.
 6. **Messages and printing:** `copy_term` semantics for an open message,
    and `io.write` printing `_1`, `_2`.
 7. **Tests and a measurement:** difference lists, a type inferencer by

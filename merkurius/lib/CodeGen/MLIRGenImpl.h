@@ -771,6 +771,8 @@ private:
   // Notes an open term's word of T's open layout, T being closed(U) for a
   // box, with open(T)'s type_info.
   bool NoteOpenRoot(mlir::Value, const semantics::Type *argument);
+  mlir::Value KeptTypeInfo(const semantics::Type *, mlir::Location);
+  mlir::Value VariableTypeInfo(unsigned var);
   // open(T)'s type_infos made in each procedure, by T.
   llvm::DenseMap<std::pair<mlir::Operation *, const semantics::Type *>,
       mlir::Value>

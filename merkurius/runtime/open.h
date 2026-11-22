@@ -106,7 +106,17 @@ int32_t merk_open_is_var(uint64_t value);
 // open(T)'s type_info, given open/1's descriptor and T's type_info: a cell
 // that lasts as long as the program, one for each T, which code generation
 // takes without a safepoint to describe a root (lib/CodeGen/MLIRGenOpen.cpp).
+// T's type_info is kept too, as merk_kept_type_info_argument keeps it, so
+// that a collection that moves the one it was given leaves it whole.
 uint64_t merk_open_type_info(uint64_t descriptor, uint64_t argument);
+// A type_info that lasts as long as the program, of a type whose arguments'
+// type_infos code generation has at run time: begun with its descriptor,
+// given each argument's type_info in turn, and ended. It allocates nothing
+// on the heap, so it is no safepoint, as merk_open_type_info is not; an
+// argument's type_info made on the heap is copied into a kept one.
+uint64_t merk_kept_type_info_begin(uint64_t descriptor);
+uint64_t merk_kept_type_info_argument(uint64_t key, uint64_t argument);
+uint64_t merk_kept_type_info_end(uint64_t key);
 // A comparison of open terms, which have no order, reached through a type
 // variable: it stops the program.
 [[noreturn]] void merk_open_compared(void);

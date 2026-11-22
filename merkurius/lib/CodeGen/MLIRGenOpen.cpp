@@ -1187,11 +1187,9 @@ bool MerkGenerator::NoteOpenRoot(
   mlir::OpBuilder::InsertionGuard guard{builder_};
   llvm::SmallVector<unsigned> variables;
   mlir::Value argumentInfo;
+  bool ground{false};
   if (argument->kind == semantics::TypeKind::Variable) {
-    argumentInfo = typeInfos_.lookup(argument->var);
-    if (!argumentInfo) {
-      argumentInfo = givenInfos_.lookup(argument->var);
-    }
+    argumentInfo = VariableTypeInfo(argument->var);
     if (!argumentInfo) {
       return false;
     }
@@ -1206,11 +1204,37 @@ bool MerkGenerator::NoteOpenRoot(
     if (!argumentInfo) {
       return false;
     }
+    ground = true;
   } else {
-    // Temporary (open types step 5, docs/INPROGRESS.md): T's type_info
-    // would be a cell made on the heap, a safepoint too. Liveness reports
-    // the root whose type it does not know.
-    return false;
+    // T has type variables under a constructor, as list(T1) has: its
+    // type_info is a kept one, made after its variables' (KeptTypeInfo),
+    // which must be in one block.
+    mlir::Block *block{nullptr};
+    mlir::Operation *latest{nullptr};
+    for (unsigned var : variables) {
+      mlir::Value info{VariableTypeInfo(var)};
+      if (!info) {
+        return false;
+      }
+      mlir::Operation *def{info.getDefiningOp()};
+      mlir::Block *in{def ? def->getBlock() : info.getParentBlock()};
+      if (block && in != block) {
+        return false;
+      }
+      block = in;
+      if (def && (!latest || latest->isBeforeInBlock(def))) {
+        latest = def;
+      }
+    }
+    if (latest) {
+      builder_.setInsertionPointAfter(latest);
+    } else {
+      builder_.setInsertionPointToStart(block);
+    }
+    argumentInfo = KeptTypeInfo(argument, loc);
+    if (!argumentInfo) {
+      return false;
+    }
   }
   std::optional<std::string> constructor{TypeConstructorName(*type)};
   if (!constructor || !EnsureDescriptor(*type, {})) {
@@ -1218,13 +1242,13 @@ bool MerkGenerator::NoteOpenRoot(
   }
   auto infoType{merk::TypeInfoType::get(&context_)};
   mlir::Value info;
-  if (argument->kind != semantics::TypeKind::Variable) {
+  if (ground) {
     // A ground T's is static, as T's is, so it allocates nothing.
     info = merk::TypeInfoOp::create(
         builder_, loc, infoType, *constructor, mlir::ValueRange{argumentInfo});
   } else {
-    // A type variable's T is known only at run time; a type_info made on
-    // the heap would be a safepoint, which a note cannot be.
+    // A T with type variables is known only at run time; a type_info made
+    // on the heap would be a safepoint, which a note cannot be.
     mlir::Value descriptor{merk::TypeInfoOp::create(
         builder_, loc, infoType, *constructor, mlir::ValueRange{})};
     info = merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{infoType},
@@ -1236,6 +1260,61 @@ bool MerkGenerator::NoteOpenRoot(
   builder_.restoreInsertionPoint(here);
   merk::RootTypeOp::create(builder_, loc, value, info);
   return true;
+}
+
+// A type variable's type_info, from the procedure's type_infos or those an
+// existential constructor gave; null if neither has it.
+mlir::Value MerkGenerator::VariableTypeInfo(unsigned var) {
+  mlir::Value info{typeInfos_.lookup(var)};
+  return info ? info : givenInfos_.lookup(var);
+}
+
+// A type_info of a type with type variables that lasts as long as the
+// program (merk_kept_type_info_begin): the runtime makes it from its
+// arguments' type_infos, static ones for ground arguments, without a
+// safepoint, so that it can describe a root. Null for a type it cannot
+// name, which leaves the root to Liveness's report.
+mlir::Value MerkGenerator::KeptTypeInfo(
+    const semantics::Type *type, mlir::Location loc) {
+  if (type->kind == semantics::TypeKind::Variable) {
+    return VariableTypeInfo(type->var);
+  }
+  llvm::SmallVector<unsigned> variables;
+  if (!CollectTypeVariables(type, variables)) {
+    return {};
+  }
+  if (variables.empty()) {
+    return TypeInfoOfType(type, loc, {}, true);
+  }
+  if (type->kind != semantics::TypeKind::Named &&
+      type->kind != semantics::TypeKind::Tuple) {
+    return {};
+  }
+  std::optional<std::string> constructor{TypeConstructorName(*type)};
+  if (!constructor || !EnsureDescriptor(*type, {})) {
+    return {};
+  }
+  auto i64{builder_.getI64Type()};
+  auto infoType{merk::TypeInfoType::get(&context_)};
+  mlir::Value descriptor{merk::TypeInfoOp::create(
+      builder_, loc, infoType, *constructor, mlir::ValueRange{})};
+  mlir::Value key{merk::ForeignCallOp::create(builder_, loc,
+      mlir::TypeRange{i64}, "merk_kept_type_info_begin",
+      mlir::ValueRange{descriptor}, /*can_fail=*/false)
+                      .getResult(0)};
+  for (const semantics::Type *argument : type->arguments) {
+    mlir::Value info{KeptTypeInfo(argument, loc)};
+    if (!info) {
+      return {};
+    }
+    key = merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{i64},
+        "merk_kept_type_info_argument", mlir::ValueRange{key, info},
+        /*can_fail=*/false)
+              .getResult(0);
+  }
+  return merk::ForeignCallOp::create(builder_, loc, mlir::TypeRange{infoType},
+      "merk_kept_type_info_end", mlir::ValueRange{key}, /*can_fail=*/false)
+      .getResult(0);
 }
 
 // Open types have no order, which binding would change (design document,
