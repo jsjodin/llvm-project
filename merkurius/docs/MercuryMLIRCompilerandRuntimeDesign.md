@@ -1888,7 +1888,7 @@ The most common reason Prolog code uses difference lists, building a list in ord
 - `X = Y` on open values is full unification. It may bind variables on either side, including one variable to another, and fails on a constructor clash, so it is `semidet`. Construction into a variable that is still `free` stays `det`.
 - `X = f(Y1, ..., Yn)` with `X` an `any` value is the WAM's `get_structure`. If `X` is an unbound variable, it is bound to a new cell, and the arguments that are still free become fresh variables (write mode). If `X` is bound to `f`, the free arguments are assigned its fields, and the others are unified with them (read mode). It is `det` when the type has one functor and every argument is free and open, and `semidet` otherwise. `X = closed(Y)` is therefore `semidet`: an unbound `X` has no ground value to give `Y`. Only the arguments that are not free need full unification.
 - `to_open(X)` turns a ground `T` into an `open(T)`. It is free when the two types share a layout (Lowering) and copies otherwise.
-- `from_open(open(T)::ia, T::out) is semidet` fails if any variable is still unbound or the term is cyclic. It returns the term itself when the walk meets no variable cell, bound or unbound, and otherwise copies it into `T`'s layout.
+- `impure from_open(open(T)::ia, T::out) is semidet` fails if any variable is still unbound or the term is cyclic. It is impure, as `var/1` is: it can fail on a term with a hole and succeed once the hole is bound, so it must not run before the goals that bind them, and no goal moves across an impure one. A predicate around it promises purity, as `close` and `dl_to_list` below do with `:- pragma promise_pure`. It returns the term itself when the walk meets no variable cell, bound or unbound, and otherwise copies it into `T`'s layout.
 - Plain `=` omits the occurs check, as Prolog does; `unify_oc` performs it. `from_open` rejects the cyclic terms that can result, so ground code never sees one.
 - `var`, `nonvar` and term identity are non-logical and therefore `impure`. Open types have no `compare` and no hashing, because the order of terms with variables changes as they are bound.
 
@@ -1914,10 +1914,11 @@ make_open([X | Xs], [X | R], T) :-
     % Fill the hole with Tail and return the ground list.
 :- pred close(open(list(int))::ia, open(list(int))::ia,
     list(int)::in, list(int)::out) is semidet.
+:- pragma promise_pure(close/4).
 
 close(Front, Hole, Tail, List) :-
     Hole = to_open(Tail),
-    from_open(Front, List).
+    impure from_open(Front, List).
 
 main(!IO) :-
     make_open([1, 2, 3], Front, Hole),
@@ -1941,8 +1942,9 @@ append_dl(A - B, B - C, A - C).
 
     % Close the hole with [] and return an ordinary list.
 :- pred dl_to_list(dlist::ia, list(int)::out) is semidet.
+:- pragma promise_pure(dl_to_list/2).
 dl_to_list(F - [], L) :-
-    from_open(F, L).
+    impure from_open(F, L).
 
 :- pred test(list(int)::out) is semidet.
 test(L) :-

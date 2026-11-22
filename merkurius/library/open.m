@@ -29,7 +29,9 @@
 
     % The open term as a ground one, if no variable in it is unbound and it
     % is not cyclic; shared if it holds no variable cell, bound or not.
-:- pred from_open(open(T)::ia, T::out) is semidet.
+    % Impure, as var/1 is: it can fail and then succeed once a hole is
+    % bound, so a pure from_open could run before the goals that bind it.
+:- impure pred from_open(open(T)::ia, T::out) is semidet.
 
     % Unification with the occurs check, where = has none.
 :- pred unify_oc(open(T)::ia, open(T)::ia) is semidet.
@@ -60,7 +62,7 @@ extern int32_t merk_open_is_var(uint64_t);
 
 :- pragma foreign_proc("C",
     from_open(X::ia, Y::out),
-    [will_not_call_merkurius, promise_pure, thread_safe],
+    [will_not_call_merkurius, thread_safe],
 "
     uint64_t value = 0;
     SUCCESS_INDICATOR = merk_open_from_open(TypeInfo_for_T, X, &value);

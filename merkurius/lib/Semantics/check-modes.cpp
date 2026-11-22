@@ -35,6 +35,62 @@ llvm::ArrayRef<const Procedure *> ModeChecking::ProceduresOf(
 
 namespace {
 
+// Whether a goal is impure: it has an `impure' annotation in it, not inside
+// a purity promise, a trace goal or a lambda, whose impurity does not leak
+// (check-purity.cpp). Purity checking reports a missing annotation, so the
+// annotations are the impure goals.
+bool IsImpure(const Goal &goal) {
+  return common::visit(
+      common::visitors{
+          [](const Conj *x) { return llvm::any_of(x->goals, IsImpure); },
+          [](const Disj *x) { return llvm::any_of(x->goals, IsImpure); },
+          [](const IfThenElse *x) {
+            return IsImpure(x->condition) || IsImpure(x->then) ||
+                IsImpure(x->otherwise);
+          },
+          [](const Not *x) { return IsImpure(x->goal); },
+          [](const Scope *x) {
+            const auto *origin{std::get_if<parser::Goal>(&x->origin)};
+            switch (x->kind) {
+            case ScopeKind::Purity:
+              if (origin) {
+                if (const auto *annotated{
+                        std::get_if<const parser::PurityGoal *>(origin)}) {
+                  return (*annotated)->purity == parser::Purity::Impure;
+                }
+              }
+              return IsImpure(x->goal);
+            case ScopeKind::PromisePurity:
+              if (origin) {
+                if (const auto *promise{
+                        std::get_if<const parser::PromisePurity *>(origin)}) {
+                  return (*promise)->purity == parser::Purity::Impure;
+                }
+              }
+              return false;
+            case ScopeKind::Trace:
+              return false;
+            default:
+              return IsImpure(x->goal);
+            }
+          },
+          [](const Try *x) {
+            return IsImpure(x->goal) || IsImpure(x->then) ||
+                (x->otherwise && IsImpure(*x->otherwise)) ||
+                llvm::any_of(x->catches,
+                    [](const Catch &c) { return IsImpure(c.goal); }) ||
+                (x->catchAny && IsImpure(x->catchAny->goal));
+          },
+          [](const Atomic *x) {
+            return llvm::any_of(x->alternatives,
+                [](const AtomicAlternative &a) { return IsImpure(a.goal); });
+          },
+          [](const Loop *x) { return IsImpure(x->body); },
+          [](const auto *) { return false; },
+      },
+      goal);
+}
+
 // The reserved inst and mode names (reference manual, "Insts, modes, and
 // mode definitions").
 bool ReservedInst(llvm::StringRef name) {
@@ -2797,7 +2853,10 @@ void ProcedureChecker::WakeAll(ConjunctionRun &state) {
 // variables it changed are woken: they run next, in the order they
 // waited, before the other goals woken earlier, and one that still cannot
 // run waits again, after the others (Overton, 3.4). If goals are left
-// waiting, the error of the first is reported, as in mmc.
+// waiting, the error of the first is reported, as in mmc. No goal moves
+// across an impure one (reference manual, "Impurity"): before it, the
+// waiting goals run, with fresh variables if need be, as at the end, or
+// they are the error; and while it waits, no later goal starts.
 ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
     llvm::ArrayRef<Goal> goals, InstMap &map, const Live &live) {
   ConjunctionRun state{goals, live, map};
@@ -2808,12 +2867,18 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
   // When no goal is left to run, the waiting goals are all retried once,
   // since goals that ran may have left their variables unused, as in mmc.
   bool progress{false};
+  // The impure goal that waiting goals could not run before, if any.
+  std::optional<Goal> barrierGoal;
   while (true) {
     Goal goal;
+    bool barrier{!state.waiting.empty() &&
+        ((state.next < goals.size() && IsImpure(goals[state.next])) ||
+            llvm::any_of(state.waiting,
+                [](const Waiting &w) { return IsImpure(w.goal); }))};
     if (!state.agenda.empty()) {
       goal = state.agenda.front();
       state.agenda.pop_front();
-    } else if (state.next < goals.size()) {
+    } else if (state.next < goals.size() && !barrier) {
       goal = goals[state.next++];
     } else if (progress && !state.waiting.empty()) {
       progress = false;
@@ -2852,6 +2917,9 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
       state.waiting = std::move(still);
       continue;
     } else {
+      if (barrier && state.next < goals.size() && IsImpure(goals[state.next])) {
+        barrierGoal = goals[state.next];
+      }
       break;
     }
     unsigned unreachables{unreachables_};
@@ -2897,6 +2965,13 @@ ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
     })};
     Result r{
         (first != state.waiting.end() ? *first : state.waiting.front()).error};
+    if (barrierGoal) {
+      // mmc: "The goal could not be reordered, because it was followed by
+      // an impure goal. This is the location of the impure goal."
+      r.notes.emplace_back(Source(TokensOf(*barrierGoal)),
+          "the goal could not be reordered, because it was followed by this "
+          "impure goal");
+    }
     // The conjunction, as a goal of another, waits for what any of its
     // goals waits for.
     std::vector<VarId> waits;

@@ -8218,12 +8218,18 @@ the `type_info` back to the open layout (below).
          The loop's back edge had a stack-limit check at every step, four an
          element in the unification. `open-holes` went from 134 to 110
          instructions an element.
-       - **Found, not fixed: `from_open` is pure, but its answer changes
-         when a hole is bound,** as `var/1`'s does, which is impure. Mode
-         analysis makes a fresh variable only when no goal can run, as mmc
-         does for solver types, so in `holes(1, N, A), full(1, N, B),
-         same(A, B), from_open(A, G)` it runs `from_open` before `full`
-         and `same`, and it fails. Waits for a decision.
+       - **Fixed 2026-11-22: `from_open` is impure,** as `var/1` is. It
+         can fail on a term with a hole and succeed once the hole is bound.
+         Pure, mode analysis was free to run it before the goals that bind
+         the holes: in `holes(1, N, A), full(1, N, B), same(A, B),
+         from_open(A, G)` it ran `from_open` before `full`, and it failed.
+         Making it impure needed mode analysis to keep impure goals in
+         place, which it did not: no goal moves across one now (reference
+         manual, "Impurity"). The goals waiting before it run first, with
+         fresh variables if need be, or they are a mode error with mmc's
+         note at the impure goal. Tests: `Semantics/modes/impure-barrier.m`,
+         `Semantics/purity/open-from-open.m`, and `late` in
+         `CodeGen/open-unify.m`.
        - Test: `CodeGen/open-unify.m`, every field encoding, holes, undo,
          cyclic lists and a cycle through another field, polymorphic code,
          and lists of 200,000 at -O0.

@@ -32,10 +32,11 @@ make_open([X | Xs], [X | R], T) :-
 
 :- pred close(open(list(int))::ia, open(list(int))::ia,
     list(int)::in, list(int)::out) is semidet.
+:- pragma promise_pure(close/4).
 
 close(Front, Hole, Tail, List) :-
     Hole = to_open(Tail),
-    from_open(Front, List).
+    impure from_open(Front, List).
 % CHECK:      clause at [[@LINE-3]]:1 of pred open_types.close/4
 % CHECK-NEXT:   Front: open.open(list.list(int))
 % CHECK-NEXT:   Hole: open.open(list.list(int))
@@ -55,8 +56,9 @@ append_dl(A - B, B - C, A - C).
 % CHECK-NEXT:   [[@LINE-7]]:27 - -> constructor pair.'-'/2, open
 
 :- pred dl_to_list(dlist::ia, list(int)::out) is semidet.
+:- pragma promise_pure(dl_to_list/2).
 dl_to_list(F - [], L) :-
-    from_open(F, L).
+    impure from_open(F, L).
 % CHECK:      clause at [[@LINE-2]]:1 of pred open_types.dl_to_list/2
 % CHECK-NEXT:   F: open.open(list.list(int))
 % CHECK-NEXT:   L: list.list(int)

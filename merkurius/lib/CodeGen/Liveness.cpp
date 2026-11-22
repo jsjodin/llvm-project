@@ -14,12 +14,13 @@
 
 #include "merkurius/CodeGen/Lowering.h"
 #include "merkurius/Dialect/Merk/IR/MerkDialect.h"
-#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
-#include "mlir/IR/Builders.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
-#include "mlir/IR/Dominance.h"
 #include "llvm/Support/Regex.h"
+#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/Dominance.h"
 
 namespace merkurius::codegen {
 namespace {
@@ -177,8 +178,14 @@ void Marker::EraseUnusedTypeInfos() {
   for (auto &entry : infos_) {
     work.append(entry.second.begin(), entry.second.end());
   }
+  // A value can be on the list more than once, as two values' type_info or
+  // an op's operand twice; one whose op is erased is gone.
+  llvm::DenseSet<mlir::Value> erased;
   while (!work.empty()) {
     mlir::Value value{work.pop_back_val()};
+    if (erased.contains(value)) {
+      continue;
+    }
     mlir::Operation *def{value.getDefiningOp()};
     if (!def || !value.use_empty() ||
         !mlir::isa<merk::TypeInfoWordOp, merk::TypeclassInfoWordOp,
@@ -186,6 +193,7 @@ void Marker::EraseUnusedTypeInfos() {
       continue;
     }
     work.append(def->operand_begin(), def->operand_end());
+    erased.insert(def->result_begin(), def->result_end());
     def->erase();
   }
 }

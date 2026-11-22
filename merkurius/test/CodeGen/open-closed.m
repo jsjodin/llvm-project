@@ -25,7 +25,7 @@
 :- pred show(open(T)::ia, io::di, io::uo) is det.
 show(X, !IO) :-
     promise_pure (
-        if from_open(X, G) then io.write(G, !IO)
+        if impure from_open(X, G) then io.write(G, !IO)
         else io.write_string("open", !IO)
     ),
     io.nl(!IO).

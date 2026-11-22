@@ -46,7 +46,7 @@
 :- pred show(open(T)::ia, io::di, io::uo) is det.
 show(X, !IO) :-
     promise_pure (
-        if from_open(X, G) then io.write(G, !IO)
+        if impure from_open(X, G) then io.write(G, !IO)
         else io.write_string("open", !IO)
     ),
     io.nl(!IO).
@@ -91,7 +91,7 @@ test_b(B, !IO) :-
     % E is a fresh variable, which head_one binds to [1 | _] (write mode).
 :- pred test_e(io::di, io::uo) is det.
 test_e(!IO) :-
-    promise_pure ( if head_one(E), E = [_], from_open(E, G) then
+    promise_pure ( if head_one(E), E = [_], impure from_open(E, G) then
         io.write(G, !IO), io.nl(!IO)
     else
         io.write_string("no\n", !IO)

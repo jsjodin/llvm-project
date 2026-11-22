@@ -30,7 +30,7 @@
     % The value through to_open and from_open.
 :- pred round_trip(T::in, io::di, io::uo) is det.
 round_trip(X, !IO) :-
-    ( if from_open(to_open(X), Y) then
+    promise_pure ( if impure from_open(to_open(X), Y) then
         io.write(Y, !IO),
         ( if X = Y then io.write_string(" same", !IO) else io.write_string(" differs", !IO) )
     else
@@ -57,7 +57,7 @@ show(Name, X, !IO) :-
         io.write_string(Name, !IO),
         ( if impure var(X) then
             io.write_string(" is unbound\n", !IO)
-        else if from_open(X, L) then
+        else if impure from_open(X, L) then
             io.write_string(" = ", !IO), io.write(L, !IO), io.nl(!IO)
         else
             io.write_string(" is partly bound\n", !IO)
@@ -118,7 +118,7 @@ holes(!IO) :-
 
         % from_open fails on an unbound variable.
         show("E", E, !IO),
-        ( if from_open(E, _) then Closed = yes else Closed = no ),
+        ( if impure from_open(E, _) then Closed = yes else Closed = no ),
         say("from_open of an unbound variable", Closed, !IO)
     ).
 
@@ -151,7 +151,7 @@ main(!IO) :-
     O = to_open([1, 2]),
     pair(3, L),
     io.write(L, !IO),
-    ( if from_open(O, M) then io.write(M, !IO) else true ),
+    promise_pure ( if impure from_open(O, M) then io.write(M, !IO) else true ),
     io.nl(!IO).
 
 :- pred pair(int::in, list(int)::out) is det.

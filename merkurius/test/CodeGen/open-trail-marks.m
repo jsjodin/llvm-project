@@ -73,7 +73,7 @@ nest(N, L) :-
 :- pred show(open(list(int))::ia, io::di, io::uo) is det.
 show(X, !IO) :-
     promise_pure (
-        if from_open(X, G) then io.write(G, !IO)
+        if impure from_open(X, G) then io.write(G, !IO)
         else io.write_string("open", !IO)
     ),
     io.nl(!IO).
@@ -85,7 +85,7 @@ main(!IO) :-
         ( if not_empty(L3) then show(L3, !IO) else io.write_string("no\n", !IO) ),
         ( if small(L4, 2) then show(L4, !IO) else io.write_string("no\n", !IO) ),
         ( if one_or_two(L5) then show(L5, !IO) else io.write_string("no\n", !IO) ),
-        ( if nest(1000, L6), from_open(L6, G6) then
+        ( if nest(1000, L6), impure from_open(L6, G6) then
             io.write_int(list.foldl(plus, G6, 0), !IO), io.nl(!IO)
         else
             io.write_string("no\n", !IO)

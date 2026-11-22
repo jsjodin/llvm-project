@@ -42,9 +42,10 @@ make_open([X | Xs], [X | R], T) :-
     % implied mode of the call.
 :- pred close(open(list(int))::ia, open(list(int))::ia,
     list(int)::in, list(int)::out) is semidet.
+:- pragma promise_pure(close/4).
 close(Front, Hole, Tail, List) :-
     Hole = to_open(Tail),
-    from_open(Front, List).
+    impure from_open(Front, List).
 % CHECK-LABEL: pred open_modes.close/4 mode 0: close(ia, ia, in, out) is semidet
 % CHECK:          call func open.to_open/1 mode 0 implied: Hole = to_open(Tail)
 % CHECK-NEXT:     call pred open.from_open/2 mode 0: from_open(Front, List)
@@ -66,8 +67,9 @@ append_dl(A - B, B - C, A - C).
 % DET-NEXT: getstructure HeadVar__2 = pair.-/2(B, C) [semidet]
 
 :- pred dl_to_list(dlist::ia, list(int)::out) is semidet.
+:- pragma promise_pure(dl_to_list/2).
 dl_to_list(F - [], L) :-
-    from_open(F, L).
+    impure from_open(F, L).
 % CHECK-LABEL: pred open_modes.dl_to_list/2 mode 0: dl_to_list(ia, out) is semidet
 % CHECK-NEXT:   clause at
 % CHECK-NEXT:     getstructure HeadVar__1 = -(F, V_2)

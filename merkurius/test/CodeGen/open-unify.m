@@ -55,7 +55,8 @@ knot_eq(X, Y) :- X = Y.
 r(A, B, C, D, E, F) = wrap(rec(A, B, C, D, closed(E), F)).
 
 main(!IO) :-
-    fields(!IO), holes(!IO), undo(!IO), cyclic(!IO), poly(!IO), long(!IO).
+    fields(!IO), holes(!IO), undo(!IO), cyclic(!IO), poly(!IO), long(!IO),
+    late(!IO).
 
 :- pred fields(io::di, io::uo) is det.
 fields(!IO) :-
@@ -75,7 +76,7 @@ holes(!IO) :-
     promise_pure ( if
         H = wrap(rec(_, _, _, _, _, [_ | _])),
         rec_eq(H, R),
-        from_open(H, G)
+        impure from_open(H, G)
     then
         io.write(G, !IO), io.nl(!IO)
     else
@@ -156,6 +157,20 @@ long(!IO) :-
         io.write_string("long: no\n", !IO)
     ).
 
+    % Holes and Full are made fresh when no goal can run, after from_open
+    % could, but from_open is impure and stays after list_eq, which binds
+    % the holes.
+:- pred late(io::di, io::uo) is det.
+late(!IO) :-
+    promise_pure ( if
+        build(1, 5, 2, Holes), build(1, 5, 6, Full), list_eq(Holes, Full),
+        impure from_open(Holes, G)
+    then
+        io.write(G, !IO), io.nl(!IO)
+    else
+        io.write_string("late: no\n", !IO)
+    ).
+
 % OUTPUT:same record: yes
 % OUTPUT-NEXT:int8 differs: no
 % OUTPUT-NEXT:enum differs: no
@@ -171,3 +186,4 @@ long(!IO) :-
 % OUTPUT-NEXT:polymorphic: yes
 % OUTPUT-NEXT:polymorphic differs: no
 % OUTPUT-NEXT:20000100000
+% OUTPUT-NEXT:[1, 2, 3, 4, 5]
