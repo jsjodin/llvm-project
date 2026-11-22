@@ -12,6 +12,7 @@
 #include "trail.h"
 #include "walk.h"
 #include <algorithm>
+#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -86,6 +87,10 @@ uint64_t merk_open_deref(uint64_t word) {
 
 void merk_open_bind(uint64_t variable, uint64_t value) {
   Word *cell{CellOf(variable)};
+  // Its caller dereferences it first. A variable bound already would have
+  // its binding overwritten, and trailed, without a sign.
+  assert(IsVariableReference(variable) && *cell == variable &&
+      "merk_open_bind: not a dereferenced unbound variable");
   MerkTrail *trail{merk_trail};
   if (trail && trail->live != 0) {
     if (trail->top == trail->capacity) {
