@@ -75,7 +75,8 @@ extern "C" void merk_mailbox_region_ended(std::uint64_t region);
 namespace merkurius::runtime {
 void FreeRing(int device, DeviceRing *ring);
 // A GPU process has ended (rpcProcessEnded, gpu-processes.cpp).
-void PlaceProcessEnded(int device, std::uint64_t table, std::uint64_t slot);
+void PlaceProcessEnded(
+    int device, std::uint64_t table, std::uint64_t slot, bool stopped);
 std::uint64_t PlaceRoute(const std::uint64_t *handle, int device,
     std::uint64_t table, std::uint64_t *incarnation, std::uint64_t *peerQueue);
 std::int64_t PlaceMessageBlocks();
@@ -794,8 +795,8 @@ unsigned HandleOpcode(void *raw, unsigned) {
       std::uint64_t seen{processPeakBytes.load()};
       while (peak > seen && !processPeakBytes.compare_exchange_weak(seen, peak))
         ;
-      PlaceProcessEnded(
-          static_cast<int>(buffer->data[0]), buffer->data[1], buffer->data[2]);
+      PlaceProcessEnded(static_cast<int>(buffer->data[0]), buffer->data[1],
+          buffer->data[2], buffer->data[4] != 0);
     });
     return rpc::RPC_SUCCESS;
   case rpcTeamsStall:

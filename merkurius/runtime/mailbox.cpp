@@ -1611,7 +1611,7 @@ extern "C" std::int64_t merk_monitor_new(std::int64_t targetHigh,
   Handle watcher{MERK_HANDLE};
   bool remote{!IsThisNode(target.nodeHigh, target.nodeLow)};
   if (target.placeAndSlot >> kPlaceShift != 0 || !IsHere(watcher)) {
-    // Temporary (docs/INPROGRESS.md, Failure, step 4): the GPU watcher.
+    // Temporary (docs/INPROGRESS.md, Failure, step 5): a watcher on a GPU.
     Fail("a monitor of a GPU process, or into another node's mailbox, is not "
          "supported yet",
         "");
@@ -1663,9 +1663,12 @@ extern "C" void merk_mailbox_stop_owner(MERK_HANDLE_PARAMETERS) {
   pthread_once(&once, InitializeCondition);
   Handle handle{MERK_HANDLE};
   if (handle.placeAndSlot >> kPlaceShift != 0) {
-    // Temporary (docs/INPROGRESS.md, Failure, step 4): the stop flag that
-    // a GPU process reads at its polls.
-    Fail("stopping a GPU process is not supported yet", "");
+    // Temporary (docs/INPROGRESS.md, GPU processes without omp target, 5d):
+    // no handle names another place until handles are routed by place; a
+    // GPU process's names the host's.
+    Fail("stopping a process of a place other than the host is not "
+         "supported yet",
+        "");
   }
   if (!IsThisNode(handle.nodeHigh, handle.nodeLow)) {
     // Dropped if this node is not connected to it, as a send is.
@@ -1677,14 +1680,12 @@ extern "C" void merk_mailbox_stop_owner(MERK_HANDLE_PARAMETERS) {
     return;
   }
   Process *owner{mailbox->owner};
-  if (!owner || !owner->stack) {
+  if (!owner) {
     Unlock(mailbox);
-    // A GPU process's record, which owns its mailboxes on the host.
-    // Temporary (docs/INPROGRESS.md, Failure, step 4).
-    Fail(owner ? "stopping a GPU process is not supported yet"
-               : "a mailbox of no process cannot be stopped",
-        "");
+    Fail("a mailbox of no process cannot be stopped", "");
   }
+  // A GPU process's record, which owns its mailbox on the host, sets its
+  // slot's stop word.
   RequestStop(owner);
   Unlock(mailbox);
   if (owner == CurrentProcess()) {
@@ -1834,20 +1835,10 @@ void StopForPeer(const Handle &target) {
   if (!mailbox) {
     return;
   }
-  Process *owner{mailbox->owner};
-  bool gpu{owner && !owner->stack};
-  if (owner && !gpu) {
+  if (Process * owner{mailbox->owner}) {
     RequestStop(owner);
   }
   Unlock(mailbox);
-  if (gpu) {
-    // Temporary (docs/INPROGRESS.md, Failure, step 4): the stop flag a GPU
-    // process reads at its polls. Not this node's end, as another asked.
-    std::fflush(stdout);
-    std::fprintf(stderr,
-        "Merkurius runtime: another node stopped a GPU "
-        "process, which is not supported yet, and ignored\n");
-  }
 }
 } // namespace merkurius::runtime
 

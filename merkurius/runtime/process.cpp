@@ -825,6 +825,10 @@ void ExitProgram(int status) {
 bool ProgramEnding() { return stopping.load(); }
 
 void RequestStop(Process *process, DownKind kind) {
+  if (!process->stack) {
+    StopGpuProcess(process, kind);
+    return;
+  }
   std::int64_t none{0};
   __atomic_compare_exchange_n(&process->stopKind, &none,
       static_cast<std::int64_t>(kind), false, __ATOMIC_RELAXED,

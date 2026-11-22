@@ -1054,6 +1054,9 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image, std::uint32_t most,
   return nullptr;
 }
 
+// In a kernel's `owners`, a slot whose wave has ended (place.h, kPlaceDead).
+constexpr std::uint64_t kDeadSlot{~std::uint64_t{0}};
+
 // Whether no process runs in the slot and no process has it as a worker's.
 bool Free(const Place &place, std::uint64_t slot) {
   return !place.processes[slot] && place.owners[slot] == 0;
@@ -1187,7 +1190,8 @@ namespace merkurius::runtime {
 // On the plugin's thread, when the device tells the host that the process
 // of the slot has ended (rpcProcessEnded): its mailbox closes, the slot is
 // free for another, and the reaper frees the rest.
-void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
+void PlaceProcessEnded(
+    int, std::uint64_t table, std::uint64_t slot, bool stopped) {
   RunningProcess *process{nullptr};
   pthread_mutex_lock(&lock);
   for (Place *place{places}; place; place = place->next) {
@@ -1195,6 +1199,11 @@ void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
         slot < place->table->slots) {
       process = place->processes[slot];
       place->processes[slot] = nullptr;
+      // A stopped process's wave has ended, and its slot with it (place.h):
+      // no process takes it again.
+      if (stopped) {
+        place->owners[slot] = kDeadSlot;
+      }
       // Its worker teams, which have set their slots reserved again before
       // it ended, are free for others.
       for (std::uint64_t i{0}; i < place->table->slots; ++i) {
@@ -1231,7 +1240,17 @@ void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
   const std::int64_t *h{process->handle};
   merk_mailbox_close_ended(h[0], h[1], h[2], h[3], h[4], &process->ring,
       &process->ringDevice, &process->copy, &process->release);
-  FireMonitorsOf(process->record, kDownNormal);
+  Process *record{process->record};
+  if (record->faultEntry) {
+    FaultsEnded(record);
+  }
+  auto kind{stopped ? static_cast<DownKind>(
+                          __atomic_load_n(&record->stopKind, __ATOMIC_RELAXED))
+                    : kDownNormal};
+  FireMonitorsOf(record, kind, kind == kDownFailed ? "injected" : "");
+  pthread_mutex_lock(&lock);
+  record->gpuProcess = nullptr;
+  pthread_mutex_unlock(&lock);
   std::free(process->record);
   process->record = nullptr;
   pthread_mutex_lock(&lock);
@@ -1239,6 +1258,58 @@ void PlaceProcessEnded(int, std::uint64_t table, std::uint64_t slot) {
   ended = process;
   pthread_cond_signal(&endedCondition);
   pthread_mutex_unlock(&lock);
+}
+
+// With the lock held: a running process's stop, for the kind.
+void StopRunning(RunningProcess *process, DownKind kind) {
+  std::int64_t none{0};
+  __atomic_compare_exchange_n(&process->record->stopKind, &none,
+      static_cast<std::int64_t>(kind), false, __ATOMIC_RELAXED,
+      __ATOMIC_RELAXED);
+  __atomic_store_n(&process->record->stopRequested, true, __ATOMIC_RELAXED);
+  __atomic_store_n(&PlaceSlots(process->place->table)[process->slot].stop,
+      process->incarnation, __ATOMIC_RELEASE);
+}
+
+void StopGpuProcess(Process *record, DownKind kind) {
+  pthread_mutex_lock(&lock);
+  auto *process{static_cast<RunningProcess *>(record->gpuProcess)};
+  if (process && process->place->processes[process->slot] == process) {
+    StopRunning(process, kind);
+  }
+  pthread_mutex_unlock(&lock);
+}
+
+int LiveKernels(int *gpus, int capacity) {
+  pthread_mutex_lock(&lock);
+  int count{0};
+  for (int gpu{0}; gpu < kMostGpus && count < capacity; ++gpu) {
+    Place *place{gpuPlaces[gpu].current};
+    if (place && !place->ending && place->running > 0) {
+      gpus[count++] = gpu;
+    }
+  }
+  pthread_mutex_unlock(&lock);
+  return count;
+}
+
+bool EndKernel(int gpu) {
+  if (gpu < 0 || gpu >= kMostGpus) {
+    return false;
+  }
+  pthread_mutex_lock(&lock);
+  Place *place{gpuPlaces[gpu].current};
+  bool any{false};
+  if (place && !place->ending) {
+    for (std::uint64_t i{0}; i < place->table->slots; ++i) {
+      if (RunningProcess * process{place->processes[i]}) {
+        StopRunning(process, kDownKernelEnded);
+        any = true;
+      }
+    }
+  }
+  pthread_mutex_unlock(&lock);
+  return any;
 }
 
 // With MERK_CHECK_DEVICE_MEMORY, once no GPU process runs: the blocks of
@@ -1543,6 +1614,13 @@ extern "C" const char *merk_gpu_process_spawn(std::uint64_t typeInfo,
   placeSlot.words = reinterpret_cast<std::uint64_t>(process->words);
   placeSlot.workers = workers;
   placeSlot.incarnation = process->incarnation;
+  placeSlot.stop = 0;
+  pthread_mutex_lock(&lock);
+  process->record->gpuProcess = process;
+  pthread_mutex_unlock(&lock);
+  if (faultsOn) {
+    FaultsSpawned(process->record, typeInfo);
+  }
   pthread_mutex_lock(&routesLock);
   process->nextRoute = routes;
   routes = process;

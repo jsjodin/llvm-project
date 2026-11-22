@@ -22,6 +22,9 @@
 //   node, as a partition would. Nothing more is written to them, and what is
 //   read from them is dropped and not heard, so the ticks lose them within
 //   a few tick times, and both nodes fence each other.
+// - `kernel`: a fault may also end every process of a random GPU's kernel
+//   with the reason kernel_ended, as a trap would end them all, through
+//   their stop words (place.h): each ends at its next receive.
 // - `count=N`: no more than N faults.
 // - `log=PATH`: where the schedule is written, else to stderr.
 // - `replay=PATH`: injects a schedule written before, and nothing else.
@@ -31,14 +34,11 @@
 // has a line for each fault: its time in milliseconds since the runtime
 // started, and `fail` with the kind and the process's number among those of
 // its kind in the order they were spawned, from 1, or `partition` with the
-// peer's number in the order this node first connected to it. Replay
+// peer's number in the order this node first connected to it, or `kernel`
+// with the GPU's number. Replay
 // repeats the times and the targets, which name the same processes and
 // peers in a program that spawns and connects in the same order; it does
 // not repeat the threads' interleaving.
-//
-// Temporary (docs/INPROGRESS.md, Failure, step 4): `kernel`, which ends a
-// GPU kernel's processes together through their stop flags, is reported as
-// not supported yet.
 //
 //===----------------------------------------------------------------------===//
 
@@ -83,6 +83,7 @@ struct Settings {
   char kinds[kMostKinds][kNameBytes]{};
   int kindCount{0};
   bool partition{false};
+  bool kernel{false};
   std::uint64_t count{UINT64_MAX};
   char log[kNameBytes]{};
   char replay[kNameBytes]{};
@@ -182,8 +183,7 @@ void Setting(char *item) {
   } else if (std::strcmp(item, "partition") == 0 && !value) {
     settings.partition = true;
   } else if (std::strcmp(item, "kernel") == 0 && !value) {
-    Fail("MERK_FAULTS: ending a GPU kernel's processes is not supported yet",
-        "");
+    settings.kernel = true;
   } else if (std::strcmp(item, "log") == 0 && value && *value) {
     Copy(settings.log, value, "log");
   } else if (std::strcmp(item, "replay") == 0 && value && *value) {
@@ -282,18 +282,47 @@ bool PartitionOne(std::uint64_t &state, char (&line)[2 * kNameBytes]) {
   return true;
 }
 
+bool KernelOne(std::uint64_t &state, char (&line)[2 * kNameBytes]) {
+  int gpus[64];
+  int count{LiveKernels(gpus, 64)};
+  if (count == 0) {
+    return false;
+  }
+  int gpu{gpus[Below(state, static_cast<std::uint64_t>(count))]};
+  if (!EndKernel(gpu)) {
+    return false;
+  }
+  std::snprintf(line, sizeof line, "kernel %d", gpu);
+  return true;
+}
+
 void Inject() {
   std::uint64_t state{settings.seed};
   std::uint64_t injected{0};
   std::int64_t at{started};
-  int kinds{(settings.kindCount > 0 ? 1 : 0) + (settings.partition ? 1 : 0)};
+  // The kinds of fault turned on: fail, partition and kernel, in that order.
+  int kinds[3];
+  int kindCount{0};
+  if (settings.kindCount > 0) {
+    kinds[kindCount++] = 0;
+  }
+  if (settings.partition) {
+    kinds[kindCount++] = 1;
+  }
+  if (settings.kernel) {
+    kinds[kindCount++] = 2;
+  }
   while (injected < settings.count) {
     at += Wait(state);
     SleepUntil(at);
-    bool failing{
-        settings.kindCount > 0 && (kinds == 1 || Below(state, 2) == 0)};
+    int kind{kindCount == 1
+            ? kinds[0]
+            : kinds[Below(state, static_cast<std::uint64_t>(kindCount))]};
     char line[2 * kNameBytes];
-    if (failing ? FailOne(state, 0, 0, line) : PartitionOne(state, line)) {
+    bool done{kind == 0 ? FailOne(state, 0, 0, line)
+            : kind == 1 ? PartitionOne(state, line)
+                        : KernelOne(state, line)};
+    if (done) {
       Record(at, line);
       ++injected;
     }
@@ -318,12 +347,14 @@ void Replay() {
     int fields{std::sscanf(
         text, "%lld %15s %255s %llu", &milliseconds, what, name, &number)};
     bool partition{fields >= 3 && std::strcmp(what, "partition") == 0};
-    if (partition) {
+    bool kernel{fields >= 3 && std::strcmp(what, "kernel") == 0};
+    if (partition || kernel) {
       fields =
           std::sscanf(text, "%lld %15s %llu", &milliseconds, what, &number);
     }
-    if (!(partition ? fields == 3
-                    : fields == 4 && std::strcmp(what, "fail") == 0)) {
+    if (!(partition || kernel
+                ? fields == 3
+                : fields == 4 && std::strcmp(what, "fail") == 0)) {
       Fail("MERK_FAULTS: not a line of a schedule: ", text);
     }
     std::int64_t at{started + milliseconds * 1000000};
@@ -333,6 +364,9 @@ void Replay() {
     if (partition) {
       done = Partition(number);
       std::snprintf(line, sizeof line, "partition %llu", number);
+    } else if (kernel) {
+      done = EndKernel(static_cast<int>(number));
+      std::snprintf(line, sizeof line, "kernel %llu", number);
     } else {
       int kind{-1};
       for (int i{0}; i < settings.kindCount && kind < 0; ++i) {
@@ -411,8 +445,8 @@ void StartFaults() {
   }
   std::free(items);
   if (settings.replay[0]) {
-    if (settings.kindCount > 0 || settings.partition || settings.mtbf > 0 ||
-        settings.seeded) {
+    if (settings.kindCount > 0 || settings.partition || settings.kernel ||
+        settings.mtbf > 0 || settings.seeded) {
       Fail("MERK_FAULTS: replay takes no other settings but log", "");
     }
     KindsOfSchedule();
@@ -420,8 +454,10 @@ void StartFaults() {
     if (settings.mtbf == 0) {
       Fail("MERK_FAULTS: mtbf=MILLISECONDS is missing", "");
     }
-    if (settings.kindCount == 0 && !settings.partition) {
-      Fail("MERK_FAULTS: no faults to inject: fail=KINDS or partition", "");
+    if (settings.kindCount == 0 && !settings.partition && !settings.kernel) {
+      Fail("MERK_FAULTS: no faults to inject: fail=KINDS, partition or "
+           "kernel",
+          "");
     }
     if (!settings.seeded) {
       while (getrandom(&settings.seed, sizeof settings.seed, 0) !=

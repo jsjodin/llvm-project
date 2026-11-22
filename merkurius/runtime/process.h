@@ -112,6 +112,9 @@ struct Process {
   std::int64_t stopKind{0};
   // Its entry in the fault injector's list (faults.cpp), or null.
   void *faultEntry{nullptr};
+  // For a GPU process's record, its running process (gpu-processes.cpp),
+  // while it runs.
+  void *gpuProcess{nullptr};
 };
 
 // Guards the timers, and a stack freed until its process has switched away.
@@ -191,6 +194,17 @@ void RequestStop(Process *, DownKind kind = kDownKilled);
 // called at the start of a send, a receive and a spawn, so that a stopped
 // process affects no other where no stack check comes first.
 void CheckStop();
+
+// gpu-processes.cpp, for a GPU process's record, as RequestStop: sets its
+// slot's stop word (place.h), which the process reads in its receives.
+// Nothing happens if it has ended.
+void StopGpuProcess(Process *record, DownKind kind);
+// For the fault injector: the GPUs whose processes' kernel runs a process,
+// up to `capacity`; and ends every process of a GPU's kernel with
+// kernel_ended, as a trap would, through their stop words: false if none
+// runs.
+int LiveKernels(int *gpus, int capacity);
+bool EndKernel(int gpu);
 
 // faults.cpp: whether MERK_FAULTS is set, once the runtime has started;
 // then each spawn tells the injector, and Finish too for a process it

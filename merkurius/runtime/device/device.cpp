@@ -109,6 +109,10 @@ using merkurius::runtime::kChunkBytes;
 using merkurius::runtime::kFailNumbers;
 using merkurius::runtime::kGroupAbort;
 using merkurius::runtime::kNoRegionSlot;
+using merkurius::runtime::kPeerInline;
+using merkurius::runtime::kPeerInlineWords;
+using merkurius::runtime::kPeerQueueSlots;
+using merkurius::runtime::kPlaceDead;
 using merkurius::runtime::kPlaceIdle;
 using merkurius::runtime::kPlaceReserved;
 using merkurius::runtime::kPlaceRunning;
@@ -127,6 +131,9 @@ using merkurius::runtime::kRingOfArrays;
 using merkurius::runtime::kRingOfTerms;
 using merkurius::runtime::kRingOfWords;
 using merkurius::runtime::kRingSlots;
+using merkurius::runtime::kSendPoolBlock;
+using merkurius::runtime::kSendPoolOrders;
+using merkurius::runtime::kSendPoolQuickOrders;
 using merkurius::runtime::kTeamsPlace;
 using merkurius::runtime::PeerQueue;
 using merkurius::runtime::PeerQueueSlot;
@@ -135,25 +142,19 @@ using merkurius::runtime::PlaceSlots;
 using merkurius::runtime::PlaceTable;
 using merkurius::runtime::ProcessQueue;
 using merkurius::runtime::ProcessQueueSlot;
+using merkurius::runtime::RegionSlotGeneration;
+using merkurius::runtime::RegionSlotNumber;
 using merkurius::runtime::ReturnRing;
 using merkurius::runtime::ReturnRingSlot;
 using merkurius::runtime::RingSlots;
-using merkurius::runtime::SendPool;
-using merkurius::runtime::SendPoolClearBytes;
-using merkurius::runtime::kSendPoolQuickOrders;
-using merkurius::runtime::kPeerInline;
-using merkurius::runtime::kPeerInlineWords;
-using merkurius::runtime::kPeerQueueSlots;
-using merkurius::runtime::kSendPoolBlock;
-using merkurius::runtime::kSendPoolOrders;
-using merkurius::runtime::RegionSlotGeneration;
-using merkurius::runtime::RegionSlotNumber;
 using merkurius::runtime::rpcAttach;
 using merkurius::runtime::rpcChunk;
+using merkurius::runtime::rpcCopyPeer;
 using merkurius::runtime::rpcDmaBytes;
 using merkurius::runtime::rpcDrain;
 using merkurius::runtime::rpcFail;
 using merkurius::runtime::rpcGiveArray;
+using merkurius::runtime::rpcPeerDmaBytes;
 using merkurius::runtime::rpcPinnedChunk;
 using merkurius::runtime::rpcProcessEnded;
 using merkurius::runtime::rpcRoute;
@@ -162,10 +163,10 @@ using merkurius::runtime::rpcSendArrayFromDevice;
 using merkurius::runtime::rpcSendTerm;
 using merkurius::runtime::rpcTakeArray;
 using merkurius::runtime::rpcTakeArrayInto;
-using merkurius::runtime::rpcCopyPeer;
-using merkurius::runtime::rpcPeerDmaBytes;
 using merkurius::runtime::rpcTakeTerm;
 using merkurius::runtime::rpcTeamsStall;
+using merkurius::runtime::SendPool;
+using merkurius::runtime::SendPoolClearBytes;
 
 namespace {
 
@@ -423,6 +424,15 @@ constexpr uint64_t kTeamFillLoop{~uint64_t{0}};
 // it may free (Block), rather than working for one.
 [[clang::loader_uninitialized]] Local<uint32_t> processWaves[kMostPlaceWaves];
 
+// By the wave's place in the team, for its process, so that a stop can end
+// it from anywhere in its body (StopIfAsked): its slot, the slot's number,
+// its incarnation, and its receives since it last read its slot's `stop`.
+[[clang::loader_uninitialized]] Local<PlaceSlot *> placeSlots[kMostPlaceWaves];
+[[clang::loader_uninitialized]] Local<uint64_t> placeWaves[kMostPlaceWaves];
+[[clang::loader_uninitialized]] Local<uint64_t>
+    placeIncarnations[kMostPlaceWaves];
+[[clang::loader_uninitialized]] Local<uint32_t> stopReceives[kMostPlaceWaves];
+
 // A worker team's group-private arrays (docs/INPROGRESS.md, GPU processes
 // that run loops, (s5)), which its first wave makes in a distribute loop's
 // body, each iteration's gone at the next's start: the bytes of the team's
@@ -467,14 +477,17 @@ Arena *CurrentArena() {
 }
 
 // Tells the host that the process of the slot has ended, and the most
-// bytes of blocks it held at once (rpcProcessEnded).
-void ProcessEnded(PlaceTable *table, uint64_t slot, uint64_t peak) {
+// bytes of blocks it held at once, and whether it was stopped
+// (rpcProcessEnded).
+void ProcessEnded(
+    PlaceTable *table, uint64_t slot, uint64_t peak, bool stopped) {
   rpc::Client::Port port{__llvm_rpc_client.open<rpcProcessEnded>()};
   port.send([&](rpc::Buffer *buffer, uint32_t) {
     buffer->data[0] = static_cast<uint64_t>(DeviceNumber());
     buffer->data[1] = reinterpret_cast<uint64_t>(table);
     buffer->data[2] = slot;
     buffer->data[3] = peak;
+    buffer->data[4] = stopped ? 1 : 0;
   });
   port.recv([](rpc::Buffer *, uint32_t) {});
 }
@@ -1526,6 +1539,8 @@ uint64_t LoadSlotWord(uint64_t *word) {
   return __gpu_read_first_lane_u64(mask, value);
 }
 
+void EndProcess(PlaceTable *table, uint32_t inTeam, bool stopped);
+
 // Lane 0 of a wave whose slot the host has set running: the process, which
 // starts its worker teams first if it has any, and ends them after. Only
 // lane 0 runs a process's code, which merk_process_dispatch calls, so the
@@ -1604,7 +1619,27 @@ uint64_t LoadSlotWord(uint64_t *word) {
     }
   }
   placeControls[inTeam] = control;
+  placeSlots[inTeam] = slot;
+  placeWaves[inTeam] = wave;
+  placeIncarnations[inTeam] = __scoped_atomic_load_n(
+      &slot->incarnation, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
+  stopReceives[inTeam] = 0;
   merk_process_dispatch(kind, words);
+  EndProcess(table, inTeam, false);
+}
+
+// The end of the process of the wave at `inTeam` in its team, after its body
+// or from the middle of it: its worker teams stop, what it holds goes, and
+// the host is told. A stopped process's slot is dead (place.h), as its wave
+// does not go back to polling it.
+void EndProcess(PlaceTable *table, uint32_t inTeam, bool stopped) {
+  ProcessControl *control{placeControls[inTeam]};
+  ProcessQueue *queue{placeQueues[inTeam]};
+  PeerQueue *peerQueue{placePeerQueues[inTeam]};
+  Arena *arena{placeArenas[inTeam]};
+  PlaceSlot *slot{placeSlots[inTeam]};
+  uint64_t wave{placeWaves[inTeam]};
+  placeSlots[inTeam] = nullptr;
   if (control) {
     // The workers see the end, set their slots reserved again, and cross
     // once more, after which none reads the control block, which goes with
@@ -1632,9 +1667,38 @@ uint64_t LoadSlotWord(uint64_t *word) {
           &arena->teamHeld, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE)};
   FreeProcessBlocks(arena);
   processWaves[inTeam] = 0;
-  __scoped_atomic_store_n(
-      &slot->state, kPlaceIdle, __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
-  ProcessEnded(table, wave, peak);
+  __scoped_atomic_store_n(&slot->state, stopped ? kPlaceDead : kPlaceIdle,
+      __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+  ProcessEnded(table, wave, peak, stopped);
+}
+
+// How many receives a process makes between reads of its slot's `stop`,
+// other than those that find no message, which each read it: the slot is in
+// host memory, a read of a few microseconds, which a receive that finds its
+// message at once in the process's queue should not pay each time.
+constexpr uint32_t kStopReceives{64};
+
+// In a GPU process's receive: if a stop has asked it to end, it ends here,
+// as at the end of its body, and its wave ends with it. `waiting` for a
+// receive that has found no message.
+void StopIfAsked(bool waiting) {
+  uint32_t inTeam{__gpu_thread_id_x() / __gpu_num_lanes()};
+  if (!merk_device_process_image || !processWaves[inTeam]) {
+    return;
+  }
+  PlaceSlot *slot{placeSlots[inTeam]};
+  if (!slot || (!waiting && ++stopReceives[inTeam] < kStopReceives)) {
+    return;
+  }
+  stopReceives[inTeam] = 0;
+  if (__scoped_atomic_load_n(&slot->stop, __ATOMIC_RELAXED,
+          __MEMORY_SCOPE_SYSTEM) != placeIncarnations[inTeam]) {
+    return;
+  }
+  EndProcess(placeTable, inTeam, true);
+  // Every lane of the wave, those waiting for lane 0 in merk_device_place
+  // too, as the slot is dead.
+  __builtin_amdgcn_endpgm();
 }
 
 // The partial results of a loop's reductions of the wave's lanes, at
@@ -2566,10 +2630,12 @@ namespace {
 // if it is negative; whether it found one.
 template <typename Poll> bool Wait(int64_t milliseconds, Poll poll) {
   int64_t deadline{Deadline(milliseconds)};
+  StopIfAsked(false);
   for (;;) {
     if (poll()) {
       return true;
     }
+    StopIfAsked(true);
     if (milliseconds >= 0 && Now() >= deadline) {
       return false;
     }
@@ -4267,6 +4333,7 @@ int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
     }
   }
   RingEntry *&entry{route->entry};
+  StopIfAsked(false);
   int64_t deadline{Deadline(milliseconds)};
   for (uint64_t look{route->looks};; ++look) {
     bool hostLook{look % 8 == 0};
@@ -4301,6 +4368,10 @@ int DirectReceive(const uint64_t *handle, uint64_t kind, int64_t milliseconds,
     if (hostLook && !route->hostFirst && fromHost(entry, message)) {
       route->looks = 0;
       return 1;
+    }
+    // With the host's look, which reads host memory too.
+    if (hostLook) {
+      StopIfAsked(true);
     }
     FlushReturns();
     if (milliseconds >= 0 && Now() >= deadline) {

@@ -1,0 +1,31 @@
+mandel-recover.m's zoom with its places spawned at the host
+(docs/INPROGRESS.md, Failure, step 4, D1): with no faults, and with
+MERK_FAULTS failing places at random, whose chunks the coordinator gives
+back out to new places, it gives mandel-places.m's iterations and checksum
+(mandel-places.test) on 64 pixels square in tiles of 8 for 12 frames, with
+one, three and four places, chunks of 1 and 4, at -O0 and -O2, and with
+the tiles' loops on the host's threads. With no restarts, a lost place ends
+the run.
+REQUIRES: amdgpu-registered-target, libomp
+RUN: merkc -O0 -fdo-loops -fprocess-declarations %libomp-flags %S/../../benchmarks/mandel/mandel-recover.m -o %t0
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %S/../../benchmarks/mandel/mandel-recover.m -o %t.omp
+
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 %t0 host | FileCheck %s --check-prefixes=SMALL,NONE
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=3 MERK_CHECK_MESSAGES=1 MERK_FAULTS="seed=9 mtbf=2 fail=order count=30" %t0 host 2>&1 | FileCheck %s --check-prefixes=SMALL,FREED
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=1 %t.omp host | FileCheck %s --check-prefixes=SMALL,NONE
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=4 MERK_FAULTS="seed=1 mtbf=2 fail=order count=40" %t.omp host 2>/dev/null | FileCheck %s --check-prefix=SMALL
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=1 MERK_FAULTS="seed=2 mtbf=2 fail=order count=40" %t.omp host 2>/dev/null | FileCheck %s --check-prefix=SMALL
+RUN: %libomp-env OMP_NUM_THREADS=4 MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=12 MANDEL_PLACES=4 MANDEL_CHUNK=1 MERK_FAULTS="seed=3 mtbf=2 fail=order count=40" %t.omp host 2>/dev/null | FileCheck %s --check-prefix=SMALL
+SMALL: Iterations: 10601425
+SMALL-NEXT: Checksum: 63198496
+NONE-NEXT: Places lost: 0
+NONE-NEXT: Tiles given back: 0
+FREED: Merkurius runtime: 0 messages are neither read nor freed
+
+A place that is lost with no restarts left, at the first fault.
+RUN: %libomp-env MANDEL_SIZE=64 MANDEL_TILE=8 MANDEL_FRAMES=1000 MANDEL_PLACES=3 MANDEL_RESTARTS=0 MERK_FAULTS="seed=4 mtbf=2 fail=order count=1" not %t0 host 2>/dev/null | FileCheck %s --check-prefix=LOST
+LOST: Place {{[0-2]}} ended, injected, with no restarts left.
+
+RUN: %libomp-env MANDEL_TILE=12 not %t0 host | FileCheck %s --check-prefix=USAGE
+RUN: %libomp-env MANDEL_RESTARTS=-1 not %t0 host | FileCheck %s --check-prefix=USAGE
+USAGE: MANDEL_TILE must be a power of two that divides MANDEL_SIZE, MANDEL_FRAMES, MANDEL_PLACES and MANDEL_CHUNK at least 1, and MANDEL_RESTARTS at least 0.

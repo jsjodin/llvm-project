@@ -119,7 +119,11 @@
     % mailboxes close and its monitors fire, as at any end. A process that
     % has ended is left alone, and the main process's stop ends the program.
     % Another node's process is stopped there, and nothing happens if this
-    % node is not connected to it. A GPU process is not supported yet.
+    % node is not connected to it. A GPU process ends at its next receive,
+    % which reads its stop word, at once in a receive that finds no message
+    % and every 64th time in one that does; a loop between receives runs to
+    % its end. The wave it ran on ends with it, and no process runs in that
+    % slot again until the GPU's kernel ends.
 :- pred stop(mailbox(T)::in, io::di, io::uo) is det.
 
     % Sends a request made by applying the function to a new mailbox for

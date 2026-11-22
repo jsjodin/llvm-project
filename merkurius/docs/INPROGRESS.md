@@ -8040,7 +8040,52 @@ Sketched for a later stage:
    ticks lose it, so it ends in the fence; one that heals is not possible
    with refusing a lost node's id. `kernel` waits for step 4.
 4. **D1 at host places, then GPU places:** the stop flag at polls, a
-   kernel's processes ended together, `kernel_ended`.
+   kernel's processes ended together, `kernel_ended`. Built 2026-11-22;
+   tested at host places, and the GPU runs wait for the user's leave
+   (`CodeGen/process-stop-places-gpu.test`,
+   `Benchmarks/mandel-recover-gpu.test`, `compare-recover.sh`).
+   - *A GPU stop ends one process, not its kernel,* unlike (4) above.
+     `PlaceSlot` gains a stop word, which the host sets to the process's
+     incarnation, so that it never hits the slot's next process. The
+     process reads it in its receives: at once in each that finds no
+     message (`Wait`'s failed polls, `DirectReceive`'s looks at the host),
+     and every 64th time in one that finds its message, so that a receive
+     served from its queue in GPU memory does not pay a read of host
+     memory each time. If the word is its own, it ends there as at the end
+     of its body (`EndProcess`, shared with a normal end): its worker
+     teams stop, its blocks and queues go, and `rpcProcessEnded` says it
+     was stopped. Then `s_endpgm` ends its wave, as unwinding a GPU stack
+     is not possible, and the slot is dead (`kPlaceDead`): no process
+     runs there, and its team is no worker team, until the kernel ends.
+     The others run on, so no `kernel_ended` is needed for a stop. The
+     host fires the record's monitors with the stop's reason. A loop
+     between receives runs to its end; the back-edge check (6) waits for
+     a need.
+   - *`kernel_ended`,* the injector's `kernel`: every process of a random
+     GPU's kernel gets its stop word with that reason, as a trap would end
+     them all. The kernel ends when its last process does, and the next
+     spawn starts a new one with no dead slots.
+   - *Stops of GPU processes from other nodes* reach them as any stop;
+     the warning that ignored them is gone. A GPU process registers with
+     the injector at its spawn, by its message type, as a host process.
+   - *D1,* `benchmarks/mandel/mandel-recover.m`, mandel-places.m's pool
+     policy with a coordinator that keeps each place's chunk, monitors the
+     places, gives a dead place's chunk back out ahead of the tiles not yet
+     given, and starts a new place in its number, up to `MANDEL_RESTARTS`.
+     A place's reports carry its incarnation, and an ask its frame, so a
+     report from an ended place, or a late ask from a place started in the
+     middle of the previous frame, is dropped. At host places, 400 seeds
+     with faults every 2 ms on average, and five seeds of 24 frames of 256
+     pixels square with 68 to 85 places lost, each gave the plain run's
+     checksum; valgrind is clean, and no message is left.
+   - *Found on the way:* the first coordinator answered a late ask too,
+     which gave one place two chunks and lost the first: the frame never
+     ended. `list.det_replace_nth` and `replace_nth` were missing from the
+     library; they are mmc's.
+   - *Replay* misses some faults of a run with restarts: a fault names a
+     process by its number in spawn order, and a restarted place's spawn
+     comes at a time that differs between runs, so the process a fault
+     names may not exist yet at its time. As documented for step 3.
 5. **A watcher on a GPU** (10).
 6. **D2,** several nodes, partitions.
 7. **GPU fault probes and the plugin's hook** (7), on the gfx90a system,

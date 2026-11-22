@@ -1,0 +1,17 @@
+process-stop-places.m's cases on the machine's GPU (docs/INPROGRESS.md,
+Failure, step 4): a stop sets the process's slot's stop word, which the
+process reads in its receives, at once in those that find no message and
+every 64th in those that do; it ends there, as at the end of its body, and
+its wave and slot with it, and its monitors see the reason. "kernel" ends
+every process of the GPU's kernel together, as a trap would.
+None of the messages, nor their blocks, is left once the processes end.
+REQUIRES: amdgpu-gpu
+
+RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-stop-places.m -o %t2
+RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu waiter 2>&1 | FileCheck %S/process-stop-places.m --check-prefixes=WAITER,FREED --match-full-lines --strict-whitespace
+RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu poller 2>&1 | FileCheck %S/process-stop-places.m --check-prefixes=POLLER,FREED --match-full-lines --strict-whitespace
+RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu looper 2>&1 | FileCheck %S/process-stop-places.m --check-prefixes=LOOPER,FREED --match-full-lines --strict-whitespace
+RUN: %gpu-env MERK_CHECK_MESSAGES=1 MERK_CHECK_DEVICE_MEMORY=1 timeout -k 1 60 %t2 gpu again 2>&1 | FileCheck %S/process-stop-places.m --check-prefixes=AGAIN,FREED --match-full-lines --strict-whitespace
+RUN: %gpu-env MERK_FAULTS="seed=1 mtbf=50 fail=order count=1" timeout -k 1 60 %t2 gpu injected 2>/dev/null | FileCheck %S/process-stop-places.m --check-prefix=INJECTED --match-full-lines --strict-whitespace
+RUN: %gpu-env MERK_FAULTS="seed=1 mtbf=200 kernel count=1 log=%t.kernel" timeout -k 1 60 %t2 gpu kernel 2>/dev/null | FileCheck %S/process-stop-places.m --check-prefix=KERNEL --match-full-lines --strict-whitespace
+RUN: FileCheck %S/process-stop-places.m --check-prefix=KERNELLOG --match-full-lines < %t.kernel

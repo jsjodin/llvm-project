@@ -26,13 +26,11 @@
 %
 % Settings that are wrong.
 % RUN: not env MERK_FAULTS="mtbf=10" %t 2>&1 | FileCheck %s --check-prefix=NOTHING
-% NOTHING:Merkurius runtime: MERK_FAULTS: no faults to inject: fail=KINDS or partition
+% NOTHING:Merkurius runtime: MERK_FAULTS: no faults to inject: fail=KINDS, partition or kernel
 % RUN: not env MERK_FAULTS="fail=job" %t 2>&1 | FileCheck %s --check-prefix=NOMTBF
 % NOMTBF:Merkurius runtime: MERK_FAULTS: mtbf=MILLISECONDS is missing
 % RUN: not env MERK_FAULTS="mtbf=10 fail=job often" %t 2>&1 | FileCheck %s --check-prefix=UNKNOWN
 % UNKNOWN:Merkurius runtime: MERK_FAULTS: not a setting: often
-% RUN: not env MERK_FAULTS="mtbf=10 kernel" %t 2>&1 | FileCheck %s --check-prefix=KERNEL
-% KERNEL:Merkurius runtime: MERK_FAULTS: ending a GPU kernel's processes is not supported yet
 % RUN: not env MERK_FAULTS="replay=%t.schedule mtbf=10" %t 2>&1 | FileCheck %s --check-prefix=REPLAY
 % REPLAY:Merkurius runtime: MERK_FAULTS: replay takes no other settings but log
 

@@ -53,6 +53,14 @@ advance. No tile starts or ends, so balancing is tested alone.
   Besides the iterations and checksum, it prints the tiles handed over,
   each place's tiles and busy time by the device's clock, and the balance:
   the busiest place's time over the average, 1 when the places are even.
+- `mandel-recover.m`: `mandel-places.m`'s pool policy with places that may
+  end at any time (`docs/INPROGRESS.md`, Failure, D1). The coordinator
+  monitors its places and keeps the chunk each was given; when one ends,
+  its chunk goes back to the pool and a new place takes its number, up to
+  `MANDEL_RESTARTS` (1000). Places end by `process.stop` or `MERK_FAULTS`
+  (`fail=order`, or `kernel` on a GPU), and the iterations and checksum are
+  the plain run's whatever ends. It prints the places lost and the tiles
+  given back.
 - `mandel.py`, independent, in Python, whose floats are doubles that it does
   not fuse either: the counts for small frames, which the tests check the
   programs against.
@@ -63,6 +71,13 @@ check the work-stealing example's zoom (`examples/work-stealing`) that way.
 `compare-places.sh` runs `mandel.m`, `mandel.c` and `mandel-places.m` under
 each policy in turns, checks that they give the same iterations, and prints
 each one's median time, rate, balance and tiles handed over.
+
+`compare-recover.sh` runs `mandel-places.m` under the pool policy, then
+`mandel-recover.m` with no faults and with `MERK_FAULTS` failing places at
+the mean interval `MTBF_MS` (100), or ending whole kernels with
+`MANDEL_FAULTS=kernel`, in turns. It checks that they give the same
+iterations and checksum, and prints each one's median time, rate, places
+lost and tiles given back.
 
 `compare-c.sh` runs `mandel.m` and `mandel.c` in turns, checks that they give
 the same iterations, and prints each one's median time and rate.
