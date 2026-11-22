@@ -17,10 +17,9 @@ namespace merkurius::codegen::mlirgen {
 
 // Temporary (chunk 1 step 6, docs/INPROGRESS.md): the library's modules not
 // compiled yet, whose types' descriptors each module using them makes.
-// Temporary (open types steps 3 and 4, docs/INPROGRESS.md): open, whose
-// closed(T) a program can make, is not compiled until it has code.
-static constexpr llvm::StringLiteral kUncompiledLibrary[]{"bool", "builtin", "exception", "int", "int16", "int32", "int64", "int8",
-    "open", "uint", "uint16", "uint32", "uint64", "uint8", "univ"};
+static constexpr llvm::StringLiteral kUncompiledLibrary[]{"bool", "builtin",
+    "exception", "int", "int16", "int32", "int64", "int8", "uint", "uint16",
+    "uint32", "uint64", "uint8", "univ"};
 
 // A type's arguments in its type_info: a higher-order type's are its
 // arguments' types and then a function's result's, as polymorphism analysis
@@ -43,8 +42,7 @@ static bool HasVariableArity(const semantics::Type &type) {
 }
 
 // A type constructor's name in merk.type_info, with its arity.
-static std::optional<std::string> TypeConstructorName(
-    const semantics::Type &type) {
+std::optional<std::string> TypeConstructorName(const semantics::Type &type) {
   std::string arity{"/" + std::to_string(TypeParts(type).size())};
   if (type.kind == semantics::TypeKind::Tuple) {
     return "{}" + arity;
@@ -204,6 +202,10 @@ bool MerkGenerator::EnsureDescriptor(
   } else {
     module = type.constructor->module;
     name = type.constructor->name;
+    if (IsOpenType(&type)) {
+      // Its values have its argument's open layout (runtime/open.h).
+      kind = "open";
+    }
     if (module.empty()) {
       kind = name == "character" ? "char" : name;
     } else if (module == "array" && name == "array") {

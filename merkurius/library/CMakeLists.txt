@@ -37,7 +37,10 @@ install(FILES ${sound_array} DESTINATION lib/merkurius/sound
 # foreign_procs are compiled by clang, so it is built first when it is part
 # of the build.
 set(compiled_modules io float math require pair maybe list solutions
-  process string char array)
+  process string char array open)
+# Open types are for the host only (docs/INPROGRESS.md, Open types), and
+# their module needs the flag.
+set(host_only_modules open)
 set(compiled_objects)
 foreach(module ${compiled_modules})
   set(object ${CMAKE_CURRENT_BINARY_DIR}/${module}.o)
@@ -51,8 +54,12 @@ foreach(module ${compiled_modules})
   if(module STREQUAL "array")
     set(source ${sound_array})
   endif()
+  set(flags)
+  if(module STREQUAL "open")
+    set(flags -fopen-types)
+  endif()
   add_custom_command(OUTPUT ${object}
-    COMMAND merkc -c -O2 -fstub-unimplemented ${source} -o ${object}
+    COMMAND merkc -c -O2 -fstub-unimplemented ${flags} ${source} -o ${object}
     DEPENDS ${depends}
     COMMENT "Compiling the library module ${module}.m")
   list(APPEND compiled_objects ${object})
@@ -68,7 +75,9 @@ set_source_files_properties(${compiled_objects} PROPERTIES
 if("AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
   set(device_dir ${library_dir}/device)
   set(device_outputs)
-  foreach(module ${compiled_modules})
+  set(device_modules ${compiled_modules})
+  list(REMOVE_ITEM device_modules ${host_only_modules})
+  foreach(module ${device_modules})
     set(output ${device_dir}/${module}.merkbc)
     set(source ${library_dir}/${module}.m)
     if(module STREQUAL "array")

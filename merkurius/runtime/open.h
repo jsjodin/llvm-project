@@ -58,13 +58,48 @@ uint64_t merk_open_deref(uint64_t word);
 // it, to `value`, which must not be that reference, trailing the binding if
 // an open choice point or try goal is live.
 void merk_open_bind(uint64_t variable, uint64_t value);
-// An open choice point or try goal begins: the trail's top, to undo to.
+// An open choice point or try goal begins: its mark, its place among the
+// live ones, which remembers the trail's top.
 uint64_t merk_open_trail_mark(void);
-// Backtracking into it: the bindings since `mark` are undone, latest first.
+// Backtracking into it: the bindings since it began are undone, latest
+// first.
 void merk_open_trail_undo(uint64_t mark);
-// It is gone, by its last alternative, a commit or its end: when no other
-// is live, the trail is emptied.
+// It is gone, by its last alternative, its condition's success or its end,
+// and with it those that began after it and are still live, which a commit
+// or a soft cut has left: when no other is live, the trail is emptied. Of
+// one already gone, nothing.
 void merk_open_trail_release(uint64_t mark);
+// The mark the next choice point would get: what a commit releases to after
+// its goal's first solution, as every choice point in it is gone.
+uint64_t merk_open_trail_marks(void);
+
+// The generic walkers, by the type_info of T for open terms of type open(T):
+// what code generation calls for a type it has no code of its own for, and
+// for polymorphic code (design document, Runtime system, "Support for open
+// terms"). The type's encodings are open.h's; a value of a type open terms
+// cannot hold yet stops the program with a message.
+//
+// Full unification, binding variables on either side, without and with the
+// occurs check; 1 if it succeeds. Without it, a cyclic term may result,
+// which the walkers handle.
+int32_t merk_open_unify(uint64_t typeInfo, uint64_t a, uint64_t b);
+int32_t merk_open_unify_oc(uint64_t typeInfo, uint64_t a, uint64_t b);
+// A ground T as an open(T): the value itself where the two layouts are the
+// same, a copy otherwise.
+uint64_t merk_open_to_open(uint64_t typeInfo, uint64_t value);
+// An open(T) as a ground T, in *out: 0 if a variable in it is unbound or it
+// is cyclic. The value itself if it has no variable cell and the layouts are
+// the same, a copy otherwise, which copies a shared cell once.
+int32_t merk_open_from_open(uint64_t typeInfo, uint64_t value, uint64_t *out);
+// Whether the term is an unbound variable: var/1.
+int32_t merk_open_is_var(uint64_t value);
+// open(T)'s type_info, given open/1's descriptor and T's type_info: a cell
+// that lasts as long as the program, one for each T, which code generation
+// takes without a safepoint to describe a root (lib/CodeGen/MLIRGenOpen.cpp).
+uint64_t merk_open_type_info(uint64_t descriptor, uint64_t argument);
+// A comparison of open terms, which have no order, reached through a type
+// variable: it stops the program.
+[[noreturn]] void merk_open_compared(void);
 }
 
 namespace merkurius::runtime {

@@ -209,14 +209,24 @@ void MerkGenerator::NondetDisjunction(const Body &goal, const ProcedureBody &bod
   mlir::Location loc{Location(goal.tokens)};
   Values before{values_};
   merk::EachOp each{BeginEach(loc)};
+  // Each branch after the first undoes what the ones before it bound, and
+  // the last is the choice point's end.
+  mlir::Value mark{Trails(body) ? TrailMark(loc) : mlir::Value{}};
   auto disj{merk::DisjOp::create(
       builder_, loc, static_cast<unsigned>(goal.goals.size()))};
   llvm::SmallVector<Branch> branches;
   {
     mlir::OpBuilder::InsertionGuard guard{builder_};
-    for (auto [disjunct, region] : llvm::zip(goal.goals, disj.getBranches())) {
+    for (auto [i, disjunct, region] :
+        llvm::enumerate(goal.goals, disj.getBranches())) {
       values_ = before;
       builder_.setInsertionPointToStart(&region.emplaceBlock());
+      if (mark && i != 0) {
+        TrailUndo(mark, loc);
+        if (i + 1 == goal.goals.size()) {
+          TrailRelease(mark, loc);
+        }
+      }
       Goal(*disjunct, body);
       branches.push_back({builder_.getInsertionBlock(), values_, Terminated()});
     }
@@ -236,6 +246,10 @@ void MerkGenerator::SoftIte(const Body &goal, const ProcedureBody &body) {
   mlir::Location loc{Location(goal.tokens)};
   Values before{values_};
   merk::EachOp each{BeginEach(loc)};
+  // The else part undoes what a condition without solutions bound. The
+  // then part, which the condition's next solution reaches again, leaves
+  // the mark to what releases the marks after an earlier one.
+  mlir::Value mark{Trails(body) ? TrailMark(loc) : mlir::Value{}};
   auto ite{merk::SoftIteOp::create(builder_, loc)};
   llvm::SmallVector<Branch, 2> branches;
   {
@@ -275,6 +289,10 @@ void MerkGenerator::SoftIte(const Body &goal, const ProcedureBody &body) {
     branches.push_back({builder_.getInsertionBlock(), values_, Terminated()});
     values_ = before;
     builder_.setInsertionPointToStart(&ite.getElseRegion().emplaceBlock());
+    if (mark) {
+      TrailUndo(mark, loc);
+      TrailRelease(mark, loc);
+    }
     Goal(*goal.goals[2], body);
     branches.push_back({builder_.getInsertionBlock(), values_, Terminated()});
   }
@@ -358,6 +376,8 @@ bool MerkGenerator::NeedsCommit(const Body &goal, const ProcedureBody &body) {
 void MerkGenerator::Commit(const Body &goal, const ProcedureBody &body) {
   mlir::Location loc{Location(goal.tokens)};
   Values before{values_};
+  // After the first solution no choice point in the goal is live.
+  mlir::Value marks{Trails(body) ? TrailMarks(loc) : mlir::Value{}};
   auto commit{merk::CommitOp::create(builder_, loc, mlir::TypeRange{})};
   std::vector<BodyVar> bound;
   llvm::SmallVector<mlir::Type> types;
@@ -403,6 +423,8 @@ void MerkGenerator::Commit(const Body &goal, const ProcedureBody &body) {
   }
   if (!solves) {
     merk::FailOp::create(builder_, loc);
+  } else if (marks) {
+    TrailRelease(marks, loc);
   }
 }
 
@@ -428,6 +450,9 @@ void MerkGenerator::Ite(semantics::TokenRange tokens,
       (otherwiseGoal && Nondeterministic(*otherwiseGoal, body))) {
     each = BeginEach(loc);
   }
+  // The condition's success ends its choice point; its failure undoes what
+  // it bound.
+  mlir::Value mark{Trails(body) ? TrailMark(loc) : mlir::Value{}};
   auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
   llvm::SmallVector<Branch, 2> branches;
   {
@@ -456,13 +481,22 @@ void MerkGenerator::Ite(semantics::TokenRange tokens,
       // analysis replaced with fail: the then part is never reached, so
       // only the else part binds the variables after the if-then-else.
       merk::FailOp::create(builder_, loc);
-    } else if (thenPart) {
-      Goal(*thenPart, body);
+    } else {
+      if (mark) {
+        TrailRelease(mark, loc);
+      }
+      if (thenPart) {
+        Goal(*thenPart, body);
+      }
     }
     branches.push_back({builder_.getInsertionBlock(), values_, Terminated()});
     mlir::Block &otherwiseBlock{ite.getElseRegion().emplaceBlock()};
     values_ = before;
     builder_.setInsertionPointToStart(&otherwiseBlock);
+    if (mark) {
+      TrailUndo(mark, loc);
+      TrailRelease(mark, loc);
+    }
     otherwise();
     branches.push_back({builder_.getInsertionBlock(), values_, Terminated()});
     if (failed_) {
@@ -755,16 +789,26 @@ void MerkGenerator::Switch(const Body &goal, const ProcedureBody &body) {
 void MerkGenerator::Not(const Body &goal, const ProcedureBody &body) {
   mlir::Location loc{Location(goal.tokens)};
   Values before{values_};
+  // What the goal binds is undone whether it succeeds or fails.
+  mlir::Value mark{Trails(body) ? TrailMark(loc) : mlir::Value{}};
   auto op{merk::NotOp::create(builder_, loc)};
   {
     mlir::OpBuilder::InsertionGuard guard{builder_};
     builder_.setInsertionPointToStart(&op.getGoal().emplaceBlock());
     Goal(*goal.goals.front(), body);
     if (!Terminated()) {
+      if (mark) {
+        TrailUndo(mark, loc);
+        TrailRelease(mark, loc);
+      }
       merk::YieldOp::create(builder_, loc, mlir::ValueRange{});
     }
   }
   values_ = before;
+  if (mark) {
+    TrailUndo(mark, loc);
+    TrailRelease(mark, loc);
+  }
 }
 
 } // namespace merkurius::codegen::mlirgen

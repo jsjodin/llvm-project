@@ -4434,7 +4434,11 @@ void TypeChecker::ComputeSuperclasses(const ModuleSymbols &symbols) {
 }
 
 void TypeChecker::Run(const SemanticForm &form) {
-  if (const ModuleSymbols * open{resolution_.Module("open")}) {
+  const ModuleSymbols *open{resolution_.Module("open")};
+  if (options_.openTypes && resolution_.module().name() == "open") {
+    open = &resolution_.module();
+  }
+  if (open) {
     const Symbol *openType{nullptr}, *closedType{nullptr};
     for (const Symbol *symbol : open->Lookup("open")) {
       if (symbol->kind == SymbolKind::Type && symbol->arity == 1) {

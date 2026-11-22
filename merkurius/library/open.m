@@ -7,8 +7,8 @@
 % modes ia and oa. In a constructor's arguments, a ground U is accepted where
 % open(U) is expected; elsewhere to_open converts.
 %
-% Temporary (open types step 1, docs/INPROGRESS.md): declarations only, for
-% the type checker and mode analysis; steps 3 and 4 give them code.
+% The predicates call the runtime's generic walkers (runtime/open.h), by
+% T's type_info. Open terms are for the host only.
 
 :- module open.
 :- interface.
@@ -38,3 +38,52 @@
     % impure, as the answer changes when the variable is bound.
 :- impure pred var(open(T)::ia) is semidet.
 :- impure pred nonvar(open(T)::ia) is semidet.
+
+%---------------------------------------------------------------------------%
+
+:- implementation.
+
+:- pragma foreign_decl("C", local, "
+#include <stdint.h>
+extern uint64_t merk_open_to_open(uint64_t, uint64_t);
+extern int32_t merk_open_from_open(uint64_t, uint64_t, uint64_t *);
+extern int32_t merk_open_unify_oc(uint64_t, uint64_t, uint64_t);
+extern int32_t merk_open_is_var(uint64_t);
+").
+
+:- pragma foreign_proc("C",
+    to_open(X::in) = (Y::out),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    Y = merk_open_to_open(TypeInfo_for_T, X);
+").
+
+:- pragma foreign_proc("C",
+    from_open(X::ia, Y::out),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    uint64_t value = 0;
+    SUCCESS_INDICATOR = merk_open_from_open(TypeInfo_for_T, X, &value);
+    Y = (MR_Word) value;
+").
+
+:- pragma foreign_proc("C",
+    unify_oc(X::ia, Y::ia),
+    [will_not_call_merkurius, promise_pure, thread_safe],
+"
+    SUCCESS_INDICATOR = merk_open_unify_oc(TypeInfo_for_T, X, Y);
+").
+
+:- pragma foreign_proc("C",
+    var(X::ia),
+    [will_not_call_merkurius, thread_safe],
+"
+    SUCCESS_INDICATOR = merk_open_is_var(X);
+").
+
+:- pragma foreign_proc("C",
+    nonvar(X::ia),
+    [will_not_call_merkurius, thread_safe],
+"
+    SUCCESS_INDICATOR = !merk_open_is_var(X);
+").

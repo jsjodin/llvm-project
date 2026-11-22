@@ -54,6 +54,14 @@ using semantics::UnifyKind;
 
 namespace mlirgen {
 
+// A type constructor's name in merk.type_info, with its arity
+// (MLIRGenTypeInfo.cpp).
+std::optional<std::string> TypeConstructorName(const semantics::Type &);
+// The type variables of a type, in the order its name has them; false for a
+// type with one the runtime cannot name (MLIRGen.cpp).
+bool CollectTypeVariables(
+    const semantics::Type *, llvm::SmallVectorImpl<unsigned> &variables);
+
 // The only code point a UTF-8 string has.
 std::optional<llvm::UTF32> OnlyCodePoint(llvm::StringRef text);
 
@@ -615,6 +623,36 @@ private:
   mlir::Value IsOneOf(
       mlir::Value, llvm::ArrayRef<mlir::TypedAttr> constants, mlir::Location);
   void Not(const Body &, const ProcedureBody &);
+  // Open terms (MLIRGenOpen.cpp; design document, Language extensions,
+  // "Open terms"). open(T) and closed(T), by their constructors.
+  bool IsOpenType(const semantics::Type *);
+  bool IsClosedType(const semantics::Type *);
+  bool MentionsOpenType(const semantics::Type *);
+  bool MentionsClosedType(const semantics::Type *);
+  // Whether the procedure can bind open variables, so that its goals that
+  // catch failure mark the trail: whether a variable of its has a type that
+  // mentions open(T) or closed(T).
+  bool Trails(const ProcedureBody &);
+  // The trail's operations (runtime/open.h).
+  mlir::Value TrailMark(mlir::Location);
+  void TrailUndo(mlir::Value mark, mlir::Location);
+  void TrailRelease(mlir::Value mark, mlir::Location);
+  mlir::Value TrailMarks(mlir::Location);
+  // The goal's fresh variables, made unbound variable cells before it.
+  void FreshVariables(const Body &, const ProcedureBody &);
+  // A unification of an open term: X = Y, full unification, or a goal
+  // that code generation does not do yet, reported.
+  void OpenUnify(const Body &, const ProcedureBody &);
+  // Whether the unification is one of an open term's.
+  bool IsOpenUnify(const Body &, const ProcedureBody &);
+  // The unification and comparison of open(T)'s values by the runtime's
+  // generic walkers, given T.
+  void OpenEqual(
+      mlir::Value x, mlir::Value y, const semantics::Type *, mlir::Location);
+  mlir::Value OpenCompare(mlir::Location);
+  // An open(T) word's note as a garbage collector root (NoteRoot).
+  bool NoteOpenRoot(mlir::Value, const semantics::Type *);
+  llvm::DenseMap<const ProcedureBody *, bool> trails_;
   // A goal with an OpenMP directive (design document, "Target regions").
   void Omp(const Body &, const ProcedureBody &);
   // A trace goal, and its compile_time and run_time conditions.

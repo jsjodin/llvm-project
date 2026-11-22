@@ -35,7 +35,17 @@ bool IsRoot(mlir::Type type) {
 
 // An operation that makes a cell, which can start a collection. What it stores
 // is live while it does.
+// A type_info whose arguments are all static is a global, as lowering makes
+// it, and allocates nothing.
+bool IsStaticTypeInfo(mlir::Value value) {
+  auto info{value.getDefiningOp<merk::TypeInfoOp>()};
+  return info && llvm::all_of(info->getOperands(), IsStaticTypeInfo);
+}
+
 bool Allocates(mlir::Operation *op) {
+  if (auto info{mlir::dyn_cast<merk::TypeInfoOp>(op)}) {
+    return !IsStaticTypeInfo(info.getResult());
+  }
   // A record by value is no cell (docs/INPROGRESS.md, Flat records).
   if (auto construct{mlir::dyn_cast<merk::ConstructOp>(op)}) {
     return mlir::isa<merk::TermType>(construct.getType());

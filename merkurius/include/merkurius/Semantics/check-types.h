@@ -182,6 +182,9 @@ struct TypeCheckOptions {
   // At most this many passes of inference (mmc's
   // --type-inference-iteration-limit).
   unsigned inferenceIterationLimit{60};
+  // -fopen-types: the library's open module, compiled, has open(T) and
+  // closed(T) of its own.
+  bool openTypes{false};
 };
 
 // Checks the types of the module's clauses. The types of predicates and

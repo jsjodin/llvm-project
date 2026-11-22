@@ -7903,8 +7903,9 @@ the `type_info` back to the open layout (below).
    - **Descriptors:** lowering sets `kOpenSame` (2), and `kClosed` (4) on
      `open.closed/1`'s, and `runtime/descriptor.h` has the kind `Open` for
      `open.open/1`, which nothing emits until step 4 makes `type_info`s of
-     open types. `open` joins MLIRGen's uncompiled library, marked
-     Temporary, so a program's `closed(T)` gets a linkonce descriptor.
+     open types. Step 4 compiles the `open` module, which defines both
+     descriptors; until then it was in MLIRGen's uncompiled library, so a
+     program's `closed(T)` got a linkonce one.
      Test: `CodeGen/open-descriptors.m`, which also runs `closed(T)`.
    - **Changed from the plan:**
      - Characters and integers of 32 bits or fewer are shifted, not
@@ -7928,9 +7929,15 @@ the `type_info` back to the open layout (below).
      (address, old word). `merk_trail` is thread-local and swapped in
      `RunProcess` as `merk_heap` is, one more word per switch. It is
      allocated at the process's first mark and freed when the process
-     ends. A binding is trailed only while `live` is nonzero, at the cost of
+     ends. A binding is trailed only while a mark is live, at the cost of
      one load and compare. There is no age test, as E5 found trailing every
      binding within noise.
+   - **Changed in step 4: the marks are a stack.** `merk_open_trail_mark`
+     pushes the trail's top and returns the mark's index; `undo(mark)` undoes
+     to that mark's top, and `release(mark)` pops it and every mark above
+     it, so releasing twice does nothing. `merk_open_trail_marks()` gives the
+     depth, which a commit saves and releases to. Step 3 had a count of live
+     marks, which could not release the marks a commit skipped.
    - **The protocol, for step 4:** a goal that catches failure and may bind
      an open variable brings its own mark: `merk_open_trail_mark` before it.
      That is a disjunction, an if-then-else's condition, a negation, a
@@ -7951,9 +7958,74 @@ the `type_info` back to the open layout (below).
    - Tests: `unittests/Runtime/OpenTest.cpp`, which covers new variables,
      chains, undoing to a mark, nested marks, a trail of 100,000 entries,
      and a trail for each process.
-4. **Code generation:** `merk.open_unify`, `get_structure`, `to_open`,
-   `from_open`, `unify_oc`, `var` and `nonvar`; a unify procedure per open
-   type and a generic one.
+4. **Code generation,** in four parts:
+   - (a) Done 2026-11-21: the runtime's generic walkers and what calls them.
+     - **Walkers,** in `runtime/open.cpp`, driven by T's `type_info`:
+       `merk_open_unify` and `merk_open_unify_oc` (full unification, with
+       and without the occurs check), `merk_open_to_open`,
+       `merk_open_from_open` (fails on an unbound variable, and returns the
+       value itself when both layouts are the same and it has no variable
+       cell), `merk_open_is_var`.
+       - A unification or occurs check that walks more than 2^14 cells
+         remembers the pairs it has seen, so cyclic terms end.
+       - `from_open` copies a shared cell once, and copies a list's spine
+         in a loop, not by recursion.
+       - The runtime has no C++ library: these use a small `malloc`ed hash
+         table and arrays, not std containers or LLVM's ADT, which would
+         bring in `operator new` and `libLLVMSupport`.
+     - **The library:** `library/open.m` is compiled now (host only, with
+       `-fopen-types`). Its predicates are `foreign_proc("C")` calls of the
+       walkers. `var` and `nonvar` are impure.
+     - **Code generation** (`lib/CodeGen/MLIRGenOpen.cpp`):
+       - A value of `open(T)` is a `!merk.word` in T's open layout.
+       - A full unification (`UnifyKind::Unify`) is a `merk_open_unify`
+         call and a guard. A comparison that reaches an open type stops the
+         program (`merk_open_compared`).
+       - A fresh variable is `merk_open_new_var`'s cell, made where mode
+         analysis put it. Determinism analysis copies `GoalModes::fresh` into
+         `Body::fresh`, renamed to the body's variables, for every kind of
+         goal, and keeps it when it rebuilds a disjunction into a switch.
+       - Trail marks, in procedures where a variable's type mentions
+         `open` or `closed` (Temporary, part (d)): a semidet if-then-else
+         marks before its condition, releases at the then part, and undoes
+         and releases at the else part. A disjunction undoes before each
+         later branch and releases at the last. A soft if-then-else undoes
+         and releases at the else part. A negation undoes and releases on
+         both paths. A commit saves `merk_open_trail_marks()` and releases
+         to it after the solution.
+       - The collector's note for an open word is `open(T)`'s `type_info`,
+         a cell that `merk_open_type_info` keeps for each T, since making it
+         on the heap would be a safepoint. It is made at the procedure's
+         start for a ground T, after T's `type_info` for a variable T.
+         Static `type_info`s no longer count as allocating in `Liveness`.
+     - **Bugs fixed on the way:**
+       - Mode analysis made a nonlocal fresh inside a negation, then again
+         outside it, so the two uses were different variables. Only the
+         clause body's conjunction may make its nonlocals fresh; a nested
+         one leaves them to the conjunction around it.
+       - MLIRGen never cleared its set of noted values between procedures.
+         A value erased in one procedure could share its address with a new
+         block argument, which then got no note.
+     - **Still not done, each reported as not yet implemented:** constructions
+       and get_structure on open terms (b), and `closed(T)` values that may
+       be unbound (c). A polymorphic `open(T)` whose T is not a type variable
+       nor ground, such as `open(list(T))`, gets no note (step 5).
+     - Tests: `CodeGen/open-terms.m` (round trips of each kind of value,
+       unification, fresh variables, undoing on disjunction, condition and
+       negation, and that a collection refuses an open term),
+       `CodeGen/open-types-not-yet.m`, `not_fill` in
+       `Semantics/modes/open/open-modes.m`, and the trail tests in
+       `unittests/Runtime/OpenTest.cpp`.
+   - (b) Constructions and inline get_structure, with the compiler's own open
+     `TermLayout` (seven tags; see step 2's note), and descriptor tables for
+     them.
+   - (c) `closed(T)` values that may be unbound: a box or a variable's
+     reference, so each such variable has its own representation and
+     conversions.
+   - (d) A unify procedure per open type, beside the generic walker, and
+     marks only around goals with an `any` nonlocal, which mode analysis
+     can record, rather than in every procedure whose variables' types
+     mention open types.
 5. **The collector:** variable cells, trail entries as roots, chains
    shortened as it copies, and `bind`'s barrier, the remembered set's.
 6. **Messages and printing:** `copy_term` semantics for an open message,

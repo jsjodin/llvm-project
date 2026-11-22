@@ -21,7 +21,7 @@ bind(X, N) :-
     ( for(_, 1, N) do X = _ - _ ).
 % CHECK: omp-parallel-do-open.m:[[@LINE-1]]:27: error: the body of a parallel do loop may only read an open value that its iterations share, with from_open, since another use may bind it, but this uses X
 % The loop's body predicate is generated too, as any other is.
-% CHECK: omp-parallel-do-open.m:[[@LINE-3]]:27: error: not yet implemented: code generation for unifications of open terms
+% CHECK: omp-parallel-do-open.m:[[@LINE-3]]:27: error: not yet implemented: code generation for get_structure on open terms
 
 pass(X, N) :-
     %$omp parallel do

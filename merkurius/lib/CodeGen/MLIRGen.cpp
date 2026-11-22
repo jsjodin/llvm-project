@@ -222,6 +222,11 @@ std::optional<Represented> MerkGenerator::Represent(
     }
     return std::nullopt;
   }
+  // A value of open(T) is a word of T's open layout, which the runtime's
+  // walkers take with T's type_info (MLIRGenOpen.cpp).
+  if (IsOpenType(type)) {
+    return Represented{merk::WordType::get(&context_)};
+  }
   // The state of the world has no values to pass (design document,
   // "Calling convention").
   if (constructor.module == "io" && name == "state") {
@@ -726,7 +731,7 @@ mlir::Value MerkGenerator::Coerce(
 // The type variables of a type, in the order its name has them: a variable
 // once, and each occurrence of a type that a goal gave, which has its own.
 // False for a type with one the runtime cannot name.
-static bool CollectTypeVariables(
+bool CollectTypeVariables(
     const semantics::Type *type, llvm::SmallVectorImpl<unsigned> &variables) {
   switch (type->kind) {
   case semantics::TypeKind::Variable:
@@ -793,6 +798,9 @@ bool MerkGenerator::NoteRoot(mlir::Value value, const semantics::Type *type) {
           value.getType())) {
     return true;
   }
+  if (IsOpenType(type)) {
+    return NoteOpenRoot(value, type);
+  }
   llvm::SmallVector<unsigned> variables;
   if (!CollectTypeVariables(type, variables)) {
     return false;
@@ -842,6 +850,10 @@ void MerkGenerator::GoalBody(const Body &goal, const ProcedureBody &body) {
   }
   if (committing_ != &goal && NeedsCommit(goal, body)) {
     Commit(goal, body);
+    return;
+  }
+  FreshVariables(goal, body);
+  if (failed_) {
     return;
   }
   switch (goal.kind) {
@@ -896,16 +908,8 @@ void MerkGenerator::GoalBody(const Body &goal, const ProcedureBody &body) {
       LambdaClosure(goal, body);
       return;
     }
-    // Temporary (open types step 4, docs/INPROGRESS.md): code generation
-    // for open terms, merk.open_unify and get_structure, replaces this.
-    if (goal.unify == UnifyKind::GetStructure ||
-        goal.unify == UnifyKind::Unify ||
-        (goal.modes && !goal.modes->fresh.empty()) ||
-        (body.vars[goal.left].type &&
-            body.vars[goal.left].type->kind == semantics::TypeKind::Named &&
-            types_.types().open() &&
-            body.vars[goal.left].type->constructor == types_.types().open())) {
-      NotYet(Where(goal.tokens), "unifications of open terms");
+    if (IsOpenUnify(goal, body)) {
+      OpenUnify(goal, body);
       return;
     }
     if (!goal.isVar && goal.unify == UnifyKind::Construct && goal.modes &&
@@ -1433,6 +1437,9 @@ void MerkGenerator::GenerateBody(const ProcedureBody &body, bool words) {
     proc.setPublic();
   }
   values_.clear();
+  // A value of an earlier procedure may have been erased, and a new one made
+  // at its address.
+  annotated_.clear();
   typeInfos_.clear();
   dictionaries_.clear();
   givenVars_.clear();
@@ -1663,9 +1670,13 @@ mlir::OwningOpRef<mlir::ModuleOp> MerkGenerator::Generate() {
   // which may not see its constructors. One that cannot be made yet is left
   // to those that use it, which fail to link.
   for (const semantics::Symbol *symbol : resolution_.module().symbols()) {
+    // open(T), the open module's abstract type, which no module defines, is
+    // its module's too (runtime/open.h).
+    bool open{types_.types().open() == symbol};
     if (symbol->kind != semantics::SymbolKind::Type || !symbol->exported ||
-        !std::holds_alternative<const parser::DuTypeDefn *>(
-            symbol->declaration)) {
+        (!open &&
+            !std::holds_alternative<const parser::DuTypeDefn *>(
+                symbol->declaration))) {
       continue;
     }
     semantics::TypeContext &context{types_.types()};

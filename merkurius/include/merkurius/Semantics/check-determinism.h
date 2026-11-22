@@ -99,6 +99,9 @@ struct Body {
   // The arguments of a unification's functor, of a call, or of a
   // higher-order call, after its closure.
   std::vector<BodyVar> arguments;
+  // The variables of open types made fresh unbound variables just before
+  // it (GoalModes::fresh).
+  std::vector<BodyVar> fresh;
   const Call *call{nullptr};
   const HOCall *hoCall{nullptr};
   BodyVar closure{0};

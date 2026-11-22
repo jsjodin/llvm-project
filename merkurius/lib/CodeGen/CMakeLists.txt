@@ -11,6 +11,7 @@ add_merkurius_library(MerkuriusCodeGen
   MLIRGenProcesses.cpp
   MLIRGenTypeInfo.cpp
   MLIRGenUnify.cpp
+  MLIRGenOpen.cpp
   LastCall.cpp
   Frees.cpp
   Liveness.cpp

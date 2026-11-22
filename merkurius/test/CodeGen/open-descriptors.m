@@ -9,6 +9,7 @@
 % deconstruction see as usual.
 %
 % RUN: merkc -fc1 -fopen-types -emit-llvm -triple x86_64-unknown-linux-gnu %s | FileCheck %s --check-prefix=LLVM
+% RUN: merkc -fc1 -fopen-types -emit-llvm -triple x86_64-unknown-linux-gnu %S/../../library/open.m | FileCheck %s --check-prefix=LIBRARY
 % RUN: merkc -fopen-types %s -o %t && %t | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 % RUN: merkc -fopen-types -O0 %s -o %t.O0 && %t.O0 | FileCheck %s --check-prefix=OUTPUT --match-full-lines --strict-whitespace
 
@@ -36,7 +37,10 @@
 % LLVM-DAG: @"merk.type_ctor.open_descriptors.eight/0" = {{.*}} { i8 18, i8 0,
 % LLVM-DAG: @"merk.type_ctor.{}/2" = {{.*}} { i8 19, i8 2,
 % LLVM-DAG: @"merk.type_ctor.int/0" = {{.*}} { i8 0, i8 0,
-% LLVM-DAG: @"merk.type_ctor.open.closed/1" = {{.*}} { i8 17, i8 4,
+% closed(T)'s and open(T)'s are the open module's, open(T)'s of kind Open (21).
+% LLVM-DAG: @"merk.type_ctor.open.closed/1" = external constant
+% LIBRARY-DAG: @"merk.type_ctor.open.closed/1" = constant {{.*}} { i8 17, i8 4,
+% LIBRARY-DAG: @"merk.type_ctor.open.open/1" = constant {{.*}} { i8 21, i8 0,
 
 main(!IO) :-
     io.write(node(leaf, leaf), !IO), io.nl(!IO),

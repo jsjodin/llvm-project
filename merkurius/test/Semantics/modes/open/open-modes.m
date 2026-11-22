@@ -150,3 +150,19 @@ main(!IO) :-
         else
             io.write_string("hole already bound\n", !IO)
     ).
+
+    % The negation waits for D, and cannot make it fresh itself, as that
+    % would bind a nonlocal: D is made fresh outside it, once, and the
+    % negation and both uses see the same variable.
+:- pred hold(open(list(int))::ia) is det.
+hold(_).
+:- pred not_fill(int::out) is det.
+not_fill(N) :-
+    promise_pure ( if \+ D = to_open([7]) then N = 1 else N = 0 ),
+    hold(D),
+    hold(D).
+% CHECK-LABEL: pred open_modes.not_fill/1 mode 0: not_fill(out) is det
+% CHECK-NOT:      fresh
+% CHECK:          fresh D
+% CHECK-NOT:      fresh
+% CHECK:          final:

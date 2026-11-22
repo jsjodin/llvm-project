@@ -1560,6 +1560,10 @@ private:
     std::set<unsigned> kept{};
     // Variables made fresh since the last goal ran, before the next.
     std::vector<VarId> fresh{};
+    // The nonlocals of a conjunction other than the clause's body, which
+    // the conjunction around it makes fresh, not this one: a negation or
+    // a condition cannot bind them, nor one branch of a disjunction alone.
+    std::set<VarId> outside{};
   };
   std::vector<const Inst *> WaitSnapshot(
       const Goal &, const Result &error, const InstMap &);
@@ -2788,6 +2792,10 @@ void ProcedureChecker::WakeAll(ConjunctionRun &state) {
 ProcedureChecker::Result ProcedureChecker::Conjunction(const Goal &conj,
     llvm::ArrayRef<Goal> goals, InstMap &map, const Live &live) {
   ConjunctionRun state{goals, live, map};
+  if (conj != form_->body) {
+    state.outside.insert(form_->nonlocals[NumberOf(conj)].begin(),
+        form_->nonlocals[NumberOf(conj)].end());
+  }
   // When no goal is left to run, the waiting goals are all retried once,
   // since goals that ran may have left their variables unused, as in mmc.
   bool progress{false};
@@ -3056,7 +3064,8 @@ ProcedureChecker::Result ProcedureChecker::GetStructure(const Unify &unify,
 // unbound variable: a free one of an open type that a waiting goal waits
 // for, the first goal's first, and one that no waiting construction would
 // make if it can, so that a hole is the variable rather than the term
-// around it (design document, "Open terms", Checking rules).
+// around it (design document, "Open terms", Checking rules). Not one that
+// the conjunction around this one has (ConjunctionRun::outside).
 std::optional<VarId> ProcedureChecker::FreshVariable(
     const ConjunctionRun &state) {
   std::set<VarId> made;
@@ -3077,7 +3086,7 @@ std::optional<VarId> ProcedureChecker::FreshVariable(
       }
       for (VarId var : vars) {
         if (ops_.IsFree(state.map[var]) && CanBeFresh(var) &&
-            !(avoid && made.count(var))) {
+            !state.outside.count(var) && !(avoid && made.count(var))) {
           return var;
         }
       }

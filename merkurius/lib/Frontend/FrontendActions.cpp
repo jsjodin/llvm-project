@@ -463,6 +463,7 @@ bool DebugDumpTypesAction::executeAction() {
   options.inferTypes = ci.getFrontendOpts().inferTypes;
   options.inferenceIterationLimit =
       ci.getFrontendOpts().typeInferenceIterationLimit;
+  options.openTypes = ci.getLangOpts().openTypes;
   std::unique_ptr<semantics::TypeChecking> checking{semantics::CheckTypes(
       *r.form, *r.resolution, r.tokens, r.messages, options)};
   semantics::CheckPurity(
@@ -596,6 +597,7 @@ bool DebugDumpLoopsAction::executeAction() {
   semantics::TypeCheckOptions typeOptions;
   typeOptions.inferTypes = frontend.inferTypes;
   typeOptions.inferenceIterationLimit = frontend.typeInferenceIterationLimit;
+  typeOptions.openTypes = ci.getLangOpts().openTypes;
   std::unique_ptr<semantics::TypeChecking> types{semantics::CheckTypes(
       *r.form, *r.resolution, r.tokens, r.messages, typeOptions)};
   semantics::LoopPurities loops;
@@ -657,6 +659,7 @@ bool DebugDumpModesAction::executeAction() {
   semantics::TypeCheckOptions typeOptions;
   typeOptions.inferTypes = frontend.inferTypes;
   typeOptions.inferenceIterationLimit = frontend.typeInferenceIterationLimit;
+  typeOptions.openTypes = ci.getLangOpts().openTypes;
   std::unique_ptr<semantics::TypeChecking> types{semantics::CheckTypes(
       *r.form, *r.resolution, r.tokens, r.messages, typeOptions)};
   semantics::LoopPurities loops;
@@ -742,6 +745,7 @@ Analysed Analyse(CompilerInstance &ci, Resolved &r) {
   semantics::TypeCheckOptions typeOptions;
   typeOptions.inferTypes = frontend.inferTypes;
   typeOptions.inferenceIterationLimit = frontend.typeInferenceIterationLimit;
+  typeOptions.openTypes = ci.getLangOpts().openTypes;
   std::unique_ptr<semantics::TypeChecking> types{semantics::CheckTypes(
       *r.form, *r.resolution, r.tokens, r.messages, typeOptions)};
   semantics::LoopPurities loops;

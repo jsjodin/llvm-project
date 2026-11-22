@@ -37,10 +37,12 @@ struct MerkTrail {
   // The entries in use, and room for.
   std::uint64_t top;
   std::uint64_t capacity;
-  // The choice points and try goals that can bind open terms and are live:
-  // a binding is trailed only while there is one, and when the last goes the
-  // trail is emptied.
+  // The live choice points and try goals that can bind open terms, oldest
+  // first: the trail's top when each began. A binding is trailed only while
+  // there is one, and when the last goes the trail is emptied.
+  std::uint64_t *marks;
   std::uint64_t live;
+  std::uint64_t markCapacity;
 };
 
 extern thread_local MerkTrail *merk_trail;
@@ -50,6 +52,7 @@ namespace merkurius::runtime {
 inline void FreeTrail(MerkTrail *trail) {
   if (trail) {
     std::free(trail->entries);
+    std::free(trail->marks);
     std::free(trail);
   }
 }

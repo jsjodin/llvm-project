@@ -27,7 +27,8 @@ namespace {
 // The goals of a conjunction, or the goal itself.
 std::vector<const Body *> Conjuncts(const Body *goal) {
   // A true that keeps the variables of the goals it replaces is one.
-  if (goal->kind == BodyKind::Conj &&
+  // So is one that makes fresh variables before its goals.
+  if (goal->kind == BodyKind::Conj && goal->fresh.empty() &&
       !(goal->goals.empty() && !goal->failed.empty())) {
     return goal->goals;
   }
@@ -249,8 +250,24 @@ private:
     return New(Body{BodyKind::Conj, tokens});
   }
 
-  // A goal in mmc's form, or nullptr if mmc leaves it out.
+  // A goal in mmc's form, or nullptr if mmc leaves it out, with the fresh
+  // variables that mode analysis makes just before it, of any kind of goal.
   const Body *Goal(const semantics::Goal &goal) {
+    unsigned number{std::visit([](const auto *g) { return g->number; }, goal)};
+    const Body *out{Unfresh(goal)};
+    const GoalModes &modes{clause_->goals[number]};
+    if (modes.fresh.empty()) {
+      return out;
+    }
+    TokenRange tokens{
+        std::visit([](const auto *g) { return g->tokens; }, goal)};
+    Body fresh{out ? *out : Body{BodyKind::Conj, tokens, &modes}};
+    std::vector<BodyVar> made{Fresh(modes)};
+    fresh.fresh.insert(fresh.fresh.begin(), made.begin(), made.end());
+    return New(std::move(fresh));
+  }
+
+  const Body *Unfresh(const semantics::Goal &goal) {
     unsigned number{std::visit([](const auto *g) { return g->number; }, goal)};
     TokenRange tokens{std::visit([](const auto *g) { return g->tokens; }, goal)};
     const GoalModes &modes{clause_->goals[number]};
@@ -323,7 +340,7 @@ private:
               Body out{BodyKind::Disj, tokens, &modes};
               for (const semantics::Goal &branch : disj->goals) {
                 const Body *goal{Whole(branch)};
-                if (goal->kind == BodyKind::Disj) {
+                if (goal->kind == BodyKind::Disj && goal->fresh.empty()) {
                   llvm::append_range(out.goals, goal->goals);
                 } else {
                   out.goals.push_back(goal);
@@ -446,6 +463,14 @@ private:
             [&](const auto *) -> const Body * { return nullptr; },
         },
         goal);
+  }
+
+  std::vector<BodyVar> Fresh(const GoalModes &modes) {
+    std::vector<BodyVar> fresh;
+    for (VarId var : modes.fresh) {
+      fresh.push_back(map_[var]);
+    }
+    return fresh;
   }
 
   // A deconstruction binds new variables, and each argument that was
@@ -603,7 +628,21 @@ private:
   // variables of the goals it replaces, as it is.
   const Body *Rebuilt(
       const Body *goal, const std::vector<const Body *> &goals) {
-    return goal->goals.empty() ? goal : Conj(goal->tokens, goals);
+    return goal->goals.empty() ? goal
+                               : KeepFresh(goal, Conj(goal->tokens, goals));
+  }
+
+  // `out`, which replaces `goal`, with the fresh variables made before it.
+  const Body *KeepFresh(const Body *goal, const Body *out) {
+    if (goal->fresh.empty() ||
+        llvm::ArrayRef<BodyVar>{out->fresh}.take_front(goal->fresh.size()) ==
+            llvm::ArrayRef<BodyVar>{goal->fresh}) {
+      return out;
+    }
+    Body copy{*out};
+    copy.fresh.insert(
+        copy.fresh.begin(), goal->fresh.begin(), goal->fresh.end());
+    return New(std::move(copy));
   }
 
   // A copy of a compound goal with other goals.
@@ -619,7 +658,8 @@ private:
       if (goal->goals.empty()) {
         return goal;
       }
-      return Disjunction(goal->tokens, goal->goals, goal->entry);
+      return KeepFresh(
+          goal, Disjunction(goal->tokens, goal->goals, goal->entry));
     case BodyKind::Switch: {
       Body copy{*goal};
       for (SwitchCase &c : copy.cases) {

@@ -432,7 +432,9 @@ merk::ProcOp MerkGenerator::UnifyArrayProc() {
 void MerkGenerator::Equal(mlir::Value x, mlir::Value y,
     const semantics::Type *semantic, mlir::Location loc) {
   mlir::Type type{x.getType()};
-  if (mlir::isa<merk::WordType>(type) ||
+  if (IsOpenType(semantic)) {
+    OpenEqual(x, y, semantic, loc);
+  } else if (mlir::isa<merk::WordType>(type) ||
       semantic->kind == semantics::TypeKind::Variable) {
     mlir::Value info{typeInfos_.lookup(semantic->var)};
     if (!info) {
@@ -552,6 +554,9 @@ mlir::Value MerkGenerator::Compare(mlir::Value x, mlir::Value y,
   namespace arith = mlir::arith;
   mlir::Type type{x.getType()};
   mlir::Type result{*ComparisonType()};
+  if (IsOpenType(semantic)) {
+    return OpenCompare(loc);
+  }
   if (mlir::isa<merk::WordType>(type) ||
       semantic->kind == semantics::TypeKind::Variable) {
     mlir::Value info{typeInfos_.lookup(semantic->var)};

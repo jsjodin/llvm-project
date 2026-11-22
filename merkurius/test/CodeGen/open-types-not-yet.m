@@ -1,8 +1,9 @@
-% Code generation does not handle open terms yet (docs/INPROGRESS.md, Open
-% types, steps 2 to 4): a unification of an open-typed variable, a
-% get_structure, a full unification, a fresh variable, and a function call
-% whose result is open are reported as not yet implemented.
-% A procedure that only passes open values on, by calls, is generated.
+% Code generation does not do all of open terms yet (docs/INPROGRESS.md,
+% Open types, step 4): a construction of an open term and a get_structure
+% wait for step 4(b), and a closed(T) value that may be unbound, as a fresh
+% variable or in a full unification, for step 4(c). Each is reported as not
+% yet implemented. Full unification, fresh variables and calls of open's
+% predicates are generated (open-terms.m).
 %
 % RUN: not merkc -fc1 -fopen-types -emit-merk %s -o /dev/null 2>&1 \
 % RUN:   | FileCheck --implicit-check-not=error: %s
@@ -12,21 +13,24 @@
 :- import_module open, list.
 :- pred make(open(list(int))::oa) is det.
 :- pred get(open(list(int))::ia, open(int)::oa) is semidet.
-:- pred same(open(int)::ia, open(int)::ia) is semidet.
-:- pred wrap(list(int)::in, open(list(int))::oa) is det.
+:- pred same_closed(closed(int)::ia, closed(int)::ia) is semidet.
+:- pred fresh_closed(closed(int)::oa) is det.
 :- pred pass(open(list(int))::oa) is det.
+:- pred hold(closed(int)::ia) is det.
 :- implementation.
 
 make([_ | _]).
-% CHECK: [[@LINE-1]]:6: error: not yet implemented: code generation for unifications of open terms
+% CHECK: [[@LINE-1]]:6: error: not yet implemented: code generation for constructions and deconstructions of open terms
 
 get([X | _], X).
-% CHECK: [[@LINE-1]]:5: error: not yet implemented: code generation for unifications of open terms
+% CHECK: [[@LINE-1]]:5: error: not yet implemented: code generation for get_structure on open terms
 
-same(X, X).
-% CHECK: [[@LINE-1]]:9: error: not yet implemented: code generation for unifications of open terms
+same_closed(X, X).
+% CHECK: [[@LINE-1]]:16: error: not yet implemented: code generation for closed(T) values that may be unbound
 
-wrap(L, to_open(L)).
-% CHECK: [[@LINE-1]]:9: error: not yet implemented: code generation for unifications of open terms
+fresh_closed(X) :- hold(X), hold(X).
+% CHECK: [[@LINE-1]]:20: error: not yet implemented: code generation for closed(T) values that may be unbound
+
+hold(_).
 
 pass(X) :- make(X).
