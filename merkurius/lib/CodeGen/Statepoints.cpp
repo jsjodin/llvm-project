@@ -558,6 +558,153 @@ static void CastAtUses(llvm::Function &function) {
   }
 }
 
+// Whether an instruction takes a word's tag, its low 3 bits, which a move
+// keeps.
+static bool TakesTag(const llvm::User *user) {
+  auto *masking{llvm::dyn_cast<llvm::BinaryOperator>(user)};
+  if (!masking || masking->getOpcode() != llvm::Instruction::And) {
+    return false;
+  }
+  for (const llvm::Use &operand : masking->operands()) {
+    if (auto *mask{llvm::dyn_cast<llvm::ConstantInt>(operand.get())}) {
+      return mask->getValue().ule(7);
+    }
+  }
+  return false;
+}
+
+// The integer `last` is computed from a root's bits through `chain`: a clone
+// of it, and of what it is computed from in `chain`, before `place`.
+static llvm::Value *CloneBits(llvm::Instruction *last, llvm::Instruction *place,
+    const llvm::SetVector<llvm::Instruction *> &chain) {
+  llvm::Instruction *clone{last->clone()};
+  clone->insertBefore(place->getIterator());
+  for (llvm::Use &operand : clone->operands()) {
+    auto *parent{llvm::dyn_cast<llvm::Instruction>(operand.get())};
+    if (parent && chain.contains(parent)) {
+      operand.set(CloneBits(parent, clone, chain));
+    }
+  }
+  return clone;
+}
+
+// An integer phi of roots' bits, as GVN's PRE makes of the reads that meet
+// at a block, is a phi of the roots, read after it: the reads, which the
+// phi carries past safepoints, are then at their uses (ReadAtUses). Each
+// incoming value is a ptrtoint of a heap pointer, static or of a known type;
+// a phi of such phis is lifted when they are.
+static void LiftReadPhis(llvm::Function &function, KnownTypes &known) {
+  for (bool changed{true}; changed;) {
+    changed = false;
+    llvm::SmallVector<llvm::PHINode *> phis;
+    for (llvm::BasicBlock &block : function) {
+      for (llvm::PHINode &phi : block.phis()) {
+        if (phi.getType()->isIntegerTy(64)) {
+          phis.push_back(&phi);
+        }
+      }
+    }
+    for (llvm::PHINode *phi : phis) {
+      llvm::Type *heap{nullptr};
+      llvm::Constant *type{nullptr};
+      bool reads{true};
+      for (llvm::Value *incoming : phi->incoming_values()) {
+        auto *read{llvm::dyn_cast<llvm::PtrToIntOperator>(incoming)};
+        llvm::Value *pointer{read ? read->getPointerOperand() : nullptr};
+        if (!pointer || !IsHeapPointer(pointer->getType())) {
+          reads = false;
+          break;
+        }
+        heap = pointer->getType();
+        if (!llvm::isa<llvm::Constant>(pointer)) {
+          llvm::Constant *its{known.lookup(CellOf(pointer))};
+          if (!its) {
+            reads = false;
+            break;
+          }
+          type = type ? type : its;
+        }
+      }
+      if (!reads || !type) {
+        continue;
+      }
+      auto *pointers{llvm::PHINode::Create(
+          heap, phi->getNumIncomingValues(), "", phi->getIterator())};
+      for (unsigned i{0}; i < phi->getNumIncomingValues(); ++i) {
+        pointers->addIncoming(
+            llvm::cast<llvm::PtrToIntOperator>(phi->getIncomingValue(i))
+                ->getPointerOperand(),
+            phi->getIncomingBlock(i));
+      }
+      known.insert({pointers, type});
+      auto *read{new llvm::PtrToIntInst{pointers, phi->getType(), "",
+          phi->getParent()->getFirstInsertionPt()}};
+      phi->replaceAllUsesWith(read);
+      phi->eraseFromParent();
+      changed = true;
+    }
+  }
+}
+
+// A root's bits, a ptrtoint of a heap pointer the bundles list, are read
+// again at each use, with the integer arithmetic on them and a constant
+// that leads there. The optimizer merges the reads of one pointer, so one
+// before a safepoint serves a use after it, as a tag test's and a runtime
+// call's do (CodeGen/open-construct.m, at -O2, with a collection at every
+// allocation); the integer has the address from before the collection,
+// which the cell has left. Read at its use, it is read from the relocated
+// pointer. A phi's use is read at the end of the edge's block. A
+// comparison's stays, as ReadBitsEarly's do.
+static void ReadAtUses(llvm::Function &function, KnownTypes &known) {
+  LiftReadPhis(function, known);
+  llvm::SmallVector<llvm::PtrToIntInst *> reads;
+  for (llvm::Instruction &instruction : llvm::instructions(function)) {
+    auto *read{llvm::dyn_cast<llvm::PtrToIntInst>(&instruction)};
+    if (read && IsHeapPointer(read->getOperand(0)->getType()) &&
+        !llvm::isa<llvm::Constant>(read->getOperand(0)) &&
+        known.count(CellOf(read->getOperand(0)))) {
+      reads.push_back(read);
+    }
+  }
+  for (llvm::PtrToIntInst *read : reads) {
+    llvm::SetVector<llvm::Instruction *> chain;
+    chain.insert(read);
+    for (std::size_t i{0}; i < chain.size(); ++i) {
+      for (llvm::User *user : chain[i]->users()) {
+        auto *arithmetic{llvm::dyn_cast<llvm::BinaryOperator>(user)};
+        if (arithmetic && !TakesTag(arithmetic) &&
+            (llvm::isa<llvm::Constant>(arithmetic->getOperand(0)) ||
+                llvm::isa<llvm::Constant>(arithmetic->getOperand(1)))) {
+          chain.insert(arithmetic);
+        }
+      }
+    }
+    for (llvm::Instruction *link : chain) {
+      for (llvm::Use &use : llvm::make_early_inc_range(link->uses())) {
+        auto *user{llvm::cast<llvm::Instruction>(use.getUser())};
+        // A comparison, a switch or a tag needs only bits that a move
+        // keeps, tags and being non-null; a value that leaves the chain, as a
+        // call's argument, a pointer again, a store or a phi's, needs the
+        // address.
+        if (chain.contains(user) || TakesTag(user) ||
+            llvm::isa<llvm::ICmpInst, llvm::SwitchInst>(user)) {
+          continue;
+        }
+        llvm::Instruction *place{user};
+        if (auto *phi{llvm::dyn_cast<llvm::PHINode>(user)}) {
+          place = phi->getIncomingBlock(use)->getTerminator();
+        }
+        use.set(CloneBits(link, place, chain));
+      }
+    }
+    for (llvm::Instruction *link : llvm::reverse(chain)) {
+      if (link->use_empty()) {
+        link->eraseFromParent();
+      }
+    }
+  }
+}
+
 // A comparison with a constant needs only the value's bits, and a move does not
 // change what it says: tags and being non-null stay, and static data does not
 // move. The optimizer folds `(ptrtoint x) < 2` to a comparison of pointers, and
@@ -1529,6 +1676,7 @@ void RewriteForCollector(llvm::Module &module, const TargetInfo &target) {
       MarkLeaves(function);
       RecordTypes(function, known);
       CastAtUses(function);
+      ReadAtUses(function, known);
       ReadBitsEarly(function, known);
       ListLiveRoots(function, known);
       any = true;

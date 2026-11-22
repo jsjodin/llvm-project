@@ -3184,15 +3184,14 @@ void Lowerer::LowerOpenDeref(merk::ForeignCallOp call, mlir::Value word) {
       mlir::ValueRange{}, after, mlir::ValueRange{next},
       std::make_pair(1u, 2000u));
   rewriter_.setInsertionPointToStart(slow);
+  // Heap pointers in and out, where C has words, as the ABI passes both
+  // alike: an integer would be merged with the tag test's, and live past a
+  // safepoint as one no stack map lists (CodeGen/open-construct.m at -O2,
+  // collecting at every allocation).
   mlir::Value followed{mlir::LLVM::CallOp::create(rewriter_, loc,
-      RuntimeFunc("merk_open_deref", i64, {i64}),
-      mlir::ValueRange{
-          mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, next)})
+      RuntimeFunc("merk_open_deref", heap, {heap}), mlir::ValueRange{next})
                            .getResult()};
-  mlir::LLVM::BrOp::create(rewriter_, loc,
-      mlir::ValueRange{
-          mlir::LLVM::IntToPtrOp::create(rewriter_, loc, heap, followed)},
-      after);
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{followed}, after);
 }
 
 // merk_open_bind: the variable's cell is overwritten, and the runtime is
@@ -3240,11 +3239,10 @@ void Lowerer::LowerOpenBind(
   mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{}, after);
   rewriter_.setInsertionPointToStart(slow);
   auto void_{mlir::LLVM::LLVMVoidType::get(module_.getContext())};
+  // Heap pointers, as merk_open_deref's (LowerOpenDeref).
   mlir::LLVM::CallOp::create(rewriter_, loc,
-      RuntimeFunc("merk_open_bind", void_, {i64, i64}),
-      mlir::ValueRange{
-          mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, variable),
-          mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, value)});
+      RuntimeFunc("merk_open_bind", void_, {heap, heap}),
+      mlir::ValueRange{variable, value});
   mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{}, after);
 }
 
@@ -3440,20 +3438,17 @@ void Lowerer::LowerOpenCell(merk::ForeignCallOp call, mlir::Value word) {
   mlir::LLVM::StoreOp::create(rewriter_, loc, word, next, 8);
   mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{cell}, after);
   rewriter_.setInsertionPointToStart(slow);
+  // Heap pointers, as merk_open_deref's (LowerOpenDeref).
   llvm::SmallVector<mlir::Type> types;
   llvm::SmallVector<mlir::Value> arguments;
   if (name == "merk_open_box") {
-    types.push_back(i64);
-    arguments.push_back(
-        mlir::LLVM::PtrToIntOp::create(rewriter_, loc, i64, word));
+    types.push_back(heap);
+    arguments.push_back(word);
   }
   mlir::Value made{mlir::LLVM::CallOp::create(
-      rewriter_, loc, RuntimeFunc(name, i64, types), arguments)
+      rewriter_, loc, RuntimeFunc(name, heap, types), arguments)
                        .getResult()};
-  mlir::LLVM::BrOp::create(rewriter_, loc,
-      mlir::ValueRange{
-          mlir::LLVM::IntToPtrOp::create(rewriter_, loc, heap, made)},
-      after);
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{made}, after);
 }
 
 void Lowerer::LowerForeignCall(merk::ForeignCallOp call) {
