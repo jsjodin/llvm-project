@@ -41,10 +41,11 @@ bool MerkGenerator::MentionsOpenType(const semantics::Type *type) {
   return types_.types().MentionsOpen(type);
 }
 
-// Temporary (open types step 4(d), docs/INPROGRESS.md): by the procedure's
-// variables, rather than by the goals with an `any` nonlocal. A variable
-// whose inst has `any` in it may be bound, whatever its type says, such as
-// one of a type variable that is open(U) at the call.
+// Whether a commit in the procedure releases trail marks without
+// -fopen-types: one whose variables may be bound. A variable whose inst has
+// `any` in it may be, whatever its type says, such as one of a type variable
+// that is open(U) at the call. Choice points mark by their goals instead
+// (BindsOlder).
 bool MerkGenerator::Trails(const ProcedureBody &body) {
   auto [it, inserted]{trails_.try_emplace(&body, false)};
   if (inserted) {
@@ -53,6 +54,43 @@ bool MerkGenerator::Trails(const ProcedureBody &body) {
     });
   }
   return it->second;
+}
+
+bool MerkGenerator::BindsOlder(const Body &goal, const ProcedureBody &body) {
+  if (!Trails(body)) {
+    return false;
+  }
+  llvm::SmallVector<BodyVar> named{
+      goal.arguments.begin(), goal.arguments.end()};
+  if (goal.kind == BodyKind::Unify) {
+    named.push_back(goal.left);
+    if (goal.isVar) {
+      named.push_back(goal.var);
+    }
+  }
+  if (goal.kind == BodyKind::HOCall) {
+    named.push_back(goal.closure);
+  }
+  for (BodyVar var : named) {
+    const semantics::BodyVarInfo &info{body.vars[var]};
+    if (values_.lookup(var) && (info.any || MentionsOpenType(info.type))) {
+      return true;
+    }
+  }
+  if (goal.lambda && BindsOlder(*goal.lambda, body)) {
+    return true;
+  }
+  for (const Body *inner : goal.goals) {
+    if (BindsOlder(*inner, body)) {
+      return true;
+    }
+  }
+  for (const semantics::SwitchCase &c : goal.cases) {
+    if (BindsOlder(*c.goal, body)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 mlir::Value MerkGenerator::TrailMark(mlir::Location loc) {

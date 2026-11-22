@@ -8164,10 +8164,25 @@ the `type_info` back to the open layout (below).
        -fopen-types still does not release, which matters only if it
        commits to a callee that marks: open types are behind the flag
        until then. Test: `CodeGen/open-commit-marks.m`.
-     - **Part 2: marks only around goals with an `any` nonlocal,** from the
-       insts before the goal, rather than in every procedure whose variables'
-       types mention open types. Commits already release whenever open types
-       are in use.
+     - **Part 2, done 2026-11-22: marks only around goals that may bind a
+       variable older than them.** 0.13 s of user time to 0.07 s, and 1057
+       instructions an element at the start of (d) to 130.
+       - A disjunction, an if-then-else's condition or a negation's goal
+         takes a mark only if it names a variable that is bound before it
+         and whose type mentions open types or whose inst has `any` in it
+         somewhere (`BindsOlder`, `MLIRGenOpen.cpp`). What a goal binds of
+         its own variables is unreachable once it has failed. Commits keep
+         their rule: always, with -fopen-types.
+       - **Rejected: a flag on `Body` from the insts before each goal,** set
+         where determinism analysis builds bodies. Switch detection and cse
+         rebuild conjunctions and disjunctions without copying them, so the
+         flag was lost and a disjunction's binding went unundone
+         (`open-terms.m` caught it). Code generation knows which variables
+         are bound before a goal anyway, from its values.
+       - Lowering takes a mark inline too, with the runtime as the slow path
+         when there is no trail or no room in its marks.
+       - Test: `CodeGen/open-trail-marks.m`, where marks go and where they
+         do not, and 1000 marks live at once.
      - **Part 3: a unify procedure per open type,** beside the generic
        walker.
 5. **The collector:** variable cells, trail entries as roots, chains

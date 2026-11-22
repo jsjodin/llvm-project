@@ -6492,6 +6492,7 @@ condition is live, and one heap chunk holds the run, so its page faults, about
 | --- | --- | --- | --- |
 | Step 4(c), commit fd63a79895be | 0.78 | 0.65 | 65 |
 | Step 4(d) part 1, uncommitted on fd63a79895be | 0.28 | 0.15 | 15 |
+| Step 4(d) part 2, uncommitted on 6f258218e85f | 0.19 | 0.07 | 7 |
 
 The spread between runs was under 5%.
 
@@ -6501,9 +6502,12 @@ The spread between runs was under 5%.
 - **`to_open` and `from_open` of an int went through the generic walkers**,
   27% of the instructions; a box and an unbox are inline now. Deref, bind and
   new variables are inline too, each with the runtime as its slow path.
-- **What is left is trail marks** at `build`'s `I > N`, an if-then-else with no
-  open variable in its condition, about 40% of the instructions that remain:
-  step 4(d)'s marks per goal remove them.
+- **Part 1 left trail marks** at `build`'s `I > N`, an if-then-else with no
+  open variable in its condition, about 40% of the instructions that remained.
+  Part 2 takes marks only around goals that may bind an older variable, and
+  inline: 130 instructions an element are left, against 1057 at step 4(c).
+  At 0.07 s the user time is near what one run can resolve; the elapsed time
+  is mostly the chunk's page faults.
 - E5's C model took 11 ns an element for the same shape with every binding
   trailed, on another machine and for 10^6 elements; step 7 compares the two
   properly.

@@ -609,11 +609,13 @@ private:
   // Starts merk.each, for a goal with branches of which one or more has
   // more than one solution, and generates the goal in its generator.
   merk::EachOp BeginEach(mlir::Location);
-  // `condition` generates the condition; `otherwiseGoal` is the goal that
+  // `condition` generates the condition, which takes a trail mark if it may
+  // bind a variable older than it; `otherwiseGoal` is the goal that
   // `otherwise` generates, if it is one.
   void Ite(semantics::TokenRange, llvm::function_ref<void()> condition,
-      const Body *thenPart, llvm::function_ref<void()> otherwise,
-      const ProcedureBody &, const Body *otherwiseGoal = nullptr);
+      bool conditionBindsOlder, const Body *thenPart,
+      llvm::function_ref<void()> otherwise, const ProcedureBody &,
+      const Body *otherwiseGoal = nullptr);
   void Switch(const Body &, const ProcedureBody &);
   // A switch on a string or a float, whose cases are tested in turn: from
   // the case `next` on, each case's constants as `constants` has them.
@@ -708,6 +710,12 @@ private:
   // catch failure mark the trail: whether a variable of its has a type that
   // mentions open(T) or closed(T).
   bool Trails(const ProcedureBody &);
+  // Whether a goal may bind a variable older than it, which its failure
+  // must undo, so that it needs a trail mark: it names a variable bound
+  // before it whose type mentions open types or whose inst has `any` in it
+  // somewhere (BodyVarInfo::any). What it binds of its own variables is
+  // unreachable once it has failed.
+  bool BindsOlder(const Body &goal, const ProcedureBody &body);
   // The trail's operations (runtime/open.h).
   mlir::Value TrailMark(mlir::Location);
   void TrailUndo(mlir::Value mark, mlir::Location);

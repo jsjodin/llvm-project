@@ -182,7 +182,9 @@ void MerkGenerator::IfThenElse(const Body &goal, const ProcedureBody &body) {
     SoftIte(goal, body);
     return;
   }
-  Ite(goal.tokens, [&] { Goal(*goal.goals[0], body); }, goal.goals[1],
+  Ite(
+      goal.tokens, [&] { Goal(*goal.goals[0], body); },
+      BindsOlder(*goal.goals[0], body), goal.goals[1],
       [&] { Goal(*goal.goals[2], body); }, body, goal.goals[2]);
 }
 
@@ -211,7 +213,7 @@ void MerkGenerator::NondetDisjunction(const Body &goal, const ProcedureBody &bod
   merk::EachOp each{BeginEach(loc)};
   // Each branch after the first undoes what the ones before it bound, and
   // the last is the choice point's end.
-  mlir::Value mark{Trails(body) ? TrailMark(loc) : mlir::Value{}};
+  mlir::Value mark{BindsOlder(goal, body) ? TrailMark(loc) : mlir::Value{}};
   auto disj{merk::DisjOp::create(
       builder_, loc, static_cast<unsigned>(goal.goals.size()))};
   llvm::SmallVector<Branch> branches;
@@ -249,7 +251,8 @@ void MerkGenerator::SoftIte(const Body &goal, const ProcedureBody &body) {
   // The else part undoes what a condition without solutions bound. The
   // then part, which the condition's next solution reaches again, leaves
   // the mark to what releases the marks after an earlier one.
-  mlir::Value mark{Trails(body) ? TrailMark(loc) : mlir::Value{}};
+  mlir::Value mark{
+      BindsOlder(*goal.goals[0], body) ? TrailMark(loc) : mlir::Value{}};
   auto ite{merk::SoftIteOp::create(builder_, loc)};
   llvm::SmallVector<Branch, 2> branches;
   {
@@ -439,15 +442,17 @@ void MerkGenerator::DisjunctionFrom(
     Goal(*goal.goals[next], body);
     return;
   }
-  Ite(goal.tokens, [&] { Goal(*goal.goals[next], body); }, nullptr,
+  Ite(
+      goal.tokens, [&] { Goal(*goal.goals[next], body); },
+      BindsOlder(*goal.goals[next], body), nullptr,
       [&] { DisjunctionFrom(goal, next + 1, body); }, body);
 }
 
 // if condition then `then` (or true) else otherwise.
 void MerkGenerator::Ite(semantics::TokenRange tokens,
-    llvm::function_ref<void()> condition, const Body *thenPart,
-    llvm::function_ref<void()> otherwise, const ProcedureBody &body,
-    const Body *otherwiseGoal) {
+    llvm::function_ref<void()> condition, bool conditionBindsOlder,
+    const Body *thenPart, llvm::function_ref<void()> otherwise,
+    const ProcedureBody &body, const Body *otherwiseGoal) {
   mlir::Location loc{Location(tokens)};
   Values before{values_};
   merk::EachOp each;
@@ -456,8 +461,8 @@ void MerkGenerator::Ite(semantics::TokenRange tokens,
     each = BeginEach(loc);
   }
   // The condition's success ends its choice point; its failure undoes what
-  // it bound.
-  mlir::Value mark{Trails(body) ? TrailMark(loc) : mlir::Value{}};
+  // it bound, if it can bind a variable older than it.
+  mlir::Value mark{conditionBindsOlder ? TrailMark(loc) : mlir::Value{}};
   auto ite{merk::IteOp::create(builder_, loc, mlir::TypeRange{})};
   llvm::SmallVector<Branch, 2> branches;
   {
@@ -548,8 +553,10 @@ void MerkGenerator::Trace(const Body &goal, const ProcedureBody &body) {
   mlir::Location loc{Location(goal.tokens)};
   Ite(
       goal.tokens,
-      [&] { merk::GuardOp::create(builder_, loc, RunTimeHolds(*runTime, loc)); },
-      goal.goals.front(), [] {}, body);
+      [&] {
+        merk::GuardOp::create(builder_, loc, RunTimeHolds(*runTime, loc));
+      },
+      /*conditionBindsOlder=*/false, goal.goals.front(), [] {}, body);
 }
 
 // flag(Name) holds with --trace-flag=Name. There is no execution tracing,
@@ -706,7 +713,7 @@ void MerkGenerator::TestCases(const Body &goal, std::size_t next,
         merk::GuardOp::create(
             builder_, loc, IsOneOf(value, constants[next], loc));
       },
-      c.goal,
+      /*conditionBindsOlder=*/false, c.goal,
       [&] { TestCases(goal, next + 1, value, constants, body); }, body);
 }
 
@@ -795,7 +802,8 @@ void MerkGenerator::Not(const Body &goal, const ProcedureBody &body) {
   mlir::Location loc{Location(goal.tokens)};
   Values before{values_};
   // What the goal binds is undone whether it succeeds or fails.
-  mlir::Value mark{Trails(body) ? TrailMark(loc) : mlir::Value{}};
+  mlir::Value mark{
+      BindsOlder(*goal.goals.front(), body) ? TrailMark(loc) : mlir::Value{}};
   auto op{merk::NotOp::create(builder_, loc)};
   {
     mlir::OpBuilder::InsertionGuard guard{builder_};

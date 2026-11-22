@@ -71,7 +71,9 @@ constexpr llvm::StringLiteral kTrailAddressSymbol{"merk.trail_address"};
 // Where MerkTrail keeps the entries in use and the number of live marks
 // (runtime/trail.h).
 constexpr std::int32_t kTrailTopOffset{8};
+constexpr std::int32_t kTrailMarksOffset{24};
 constexpr std::int32_t kTrailLiveOffset{32};
+constexpr std::int32_t kTrailMarkCapacityOffset{40};
 constexpr unsigned kHeapAddressSpace{1};
 
 // Whether a procedure of this determinism returns a success flag (design
@@ -440,6 +442,7 @@ private:
       merk::ForeignCallOp, mlir::Value variable, mlir::Value value);
   void LowerOpenCell(merk::ForeignCallOp, mlir::Value word);
   void LowerTrailMarks(merk::ForeignCallOp);
+  void LowerTrailMark(merk::ForeignCallOp);
   void LowerTrailRelease(merk::ForeignCallOp, mlir::Value mark);
   void LowerEntry(merk::EntryOp);
   void LowerConstructors();
@@ -3097,7 +3100,8 @@ bool Lowerer::LowerOpenCall(merk::ForeignCallOp call) {
       !llvm::is_contained(
           llvm::ArrayRef<llvm::StringRef>{"merk_open_deref", "merk_open_bind",
               "merk_open_new_var", "merk_open_box", "merk_open_unbox",
-              "merk_open_trail_marks", "merk_open_trail_release"},
+              "merk_open_trail_marks", "merk_open_trail_release",
+              "merk_open_trail_mark"},
           name)) {
     return false;
   }
@@ -3111,6 +3115,8 @@ bool Lowerer::LowerOpenCall(merk::ForeignCallOp call) {
     LowerOpenDeref(call, inputs[0]);
   } else if (name == "merk_open_bind") {
     LowerOpenBind(call, inputs[0], inputs[1]);
+  } else if (name == "merk_open_trail_mark") {
+    LowerTrailMark(call);
   } else if (name == "merk_open_trail_marks") {
     LowerTrailMarks(call);
   } else if (name == "merk_open_trail_release") {
@@ -3251,6 +3257,71 @@ void Lowerer::LowerTrailMarks(merk::ForeignCallOp call) {
           trail, llvm::ArrayRef<mlir::LLVM::GEPArg>{kTrailLiveOffset}),
       8)};
   mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{live}, after);
+}
+
+// merk_open_trail_mark: the trail's top in the next mark, which is the
+// result; the runtime makes the trail or grows the marks when there is no
+// room.
+void Lowerer::LowerTrailMark(merk::ForeignCallOp call) {
+  mlir::Location loc{call.getLoc()};
+  auto i64{rewriter_.getI64Type()};
+  auto ptr{mlir::LLVM::LLVMPointerType::get(module_.getContext())};
+  auto i8{rewriter_.getI8Type()};
+  mlir::Block *before{call->getBlock()};
+  mlir::Block *after{rewriter_.splitBlock(before, call->getIterator())};
+  mlir::Value result{after->addArgument(i64, loc)};
+  rewriter_.replaceAllUsesWith(call.getResult(0), result);
+  rewriter_.eraseOp(call);
+  mlir::Block *check{rewriter_.createBlock(after)};
+  mlir::Block *fast{rewriter_.createBlock(after)};
+  mlir::Block *slow{rewriter_.createBlock(after)};
+  rewriter_.setInsertionPointToEnd(before);
+  mlir::Value trail{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr,
+      mlir::LLVM::CallOp::create(
+          rewriter_, loc, TrailAddressFunc(), mlir::ValueRange{})
+          .getResult(),
+      8)};
+  mlir::Value none{
+      mlir::LLVM::ICmpOp::create(rewriter_, loc, mlir::LLVM::ICmpPredicate::eq,
+          trail, mlir::LLVM::ZeroOp::create(rewriter_, loc, ptr))};
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, none, slow, mlir::ValueRange{},
+      check, mlir::ValueRange{}, std::make_pair(1u, 2000u));
+  rewriter_.setInsertionPointToStart(check);
+  mlir::Value liveAddress{mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, i8,
+      trail, llvm::ArrayRef<mlir::LLVM::GEPArg>{kTrailLiveOffset})};
+  mlir::Value live{
+      mlir::LLVM::LoadOp::create(rewriter_, loc, i64, liveAddress, 8)};
+  mlir::Value capacity{mlir::LLVM::LoadOp::create(rewriter_, loc, i64,
+      mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, i8, trail,
+          llvm::ArrayRef<mlir::LLVM::GEPArg>{kTrailMarkCapacityOffset}),
+      8)};
+  mlir::Value full{mlir::LLVM::ICmpOp::create(
+      rewriter_, loc, mlir::LLVM::ICmpPredicate::eq, live, capacity)};
+  mlir::LLVM::CondBrOp::create(rewriter_, loc, full, slow, mlir::ValueRange{},
+      fast, mlir::ValueRange{}, std::make_pair(1u, 2000u));
+  rewriter_.setInsertionPointToStart(fast);
+  mlir::Value marks{mlir::LLVM::LoadOp::create(rewriter_, loc, ptr,
+      mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, i8, trail,
+          llvm::ArrayRef<mlir::LLVM::GEPArg>{kTrailMarksOffset}),
+      8)};
+  mlir::Value top{mlir::LLVM::LoadOp::create(rewriter_, loc, i64,
+      mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, i8, trail,
+          llvm::ArrayRef<mlir::LLVM::GEPArg>{kTrailTopOffset}),
+      8)};
+  mlir::LLVM::StoreOp::create(rewriter_, loc, top,
+      mlir::LLVM::GEPOp::create(rewriter_, loc, ptr, i64, marks,
+          llvm::ArrayRef<mlir::LLVM::GEPArg>{live}),
+      8);
+  mlir::LLVM::StoreOp::create(rewriter_, loc,
+      mlir::LLVM::AddOp::create(rewriter_, loc, live,
+          mlir::LLVM::ConstantOp::create(rewriter_, loc, i64, 1)),
+      liveAddress, 8);
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{live}, after);
+  rewriter_.setInsertionPointToStart(slow);
+  mlir::Value made{mlir::LLVM::CallOp::create(rewriter_, loc,
+      RuntimeFunc("merk_open_trail_mark", i64, {}), mlir::ValueRange{})
+                       .getResult()};
+  mlir::LLVM::BrOp::create(rewriter_, loc, mlir::ValueRange{made}, after);
 }
 
 // merk_open_trail_release: the marks from `mark` on are gone, and the trail
