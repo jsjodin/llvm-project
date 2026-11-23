@@ -76,6 +76,11 @@ for object in "$build"/tools/merkurius/runtime/CMakeFiles/merkrt.dir/*.o; do
   objects+=(-object "$object")
 done
 sources=("$src/lib" "$src/include" "$src/runtime" "$src/tools")
+# llvm-cov warns that some thousands of functions have mismatched data.
+# Each is a translation unit's record, of hash 0, of an inline or template
+# function it could see and did not use; the copy that a unit used is
+# counted, so nothing is lost (checked 2026-11-23: every one has a counted
+# copy, with llvm-cov report -dump).
 cov=("$tools/bin/llvm-cov")
 common=(-instr-profile="$out/merged.profdata" "${objects[@]}")
 

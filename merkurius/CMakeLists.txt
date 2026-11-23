@@ -121,7 +121,13 @@ if(MERKURIUS_COVERAGE)
     message(FATAL_ERROR "MERKURIUS_COVERAGE needs clang's source-based "
       "coverage: configure with CMAKE_CXX_COMPILER set to clang++.")
   endif()
-  add_compile_options(-fprofile-instr-generate -fcoverage-mapping)
+  # A run without LLVM_PROFILE_FILE, which coverage.sh sets, writes its
+  # profile here, in the build, rather than default.profraw wherever it ran,
+  # as in the source tree. The path is compiled in, so programs linking the
+  # runtime have it too.
+  set(MERKURIUS_PROFILE_DEFAULT "${CMAKE_BINARY_DIR}/profiles/%p.profraw")
+  add_compile_options(-fprofile-instr-generate=${MERKURIUS_PROFILE_DEFAULT}
+    -fcoverage-mapping)
   add_link_options(-fprofile-instr-generate)
 endif()
 

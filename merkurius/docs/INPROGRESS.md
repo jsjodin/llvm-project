@@ -8584,20 +8584,22 @@ tested shows.
    with clang found two bugs, fixed first: `open.cpp` lacked
    `<iterator>`, and libstdc++ 12's headers under `_GLIBCXX_ASSERTIONS`
    call a function only libstdc++.so defines, which programs do not link.
-   The coverage build's first run of the existing host tests passes 550 of
-   563 and measures 88% of Merkurius's lines. What is left before the
-   baseline is trusted:
-   - the three Driver `-###` tests see the coverage build's
-     `-fprofile-instr-generate` on the link line, and want a lit feature
-     that marks them unsupported there;
-   - seven Semantics/desugar dumps number goals differently when merkc is
-     built with clang, which looks like code that depends on the order
-     in which a call's arguments are evaluated: a bug, as the numbering
-     should not depend on the host compiler;
-   - pipeline, mandel-places and mandel-recover crash (SIGSEGV) under the
-     coverage build, to be found;
-   - `llvm-cov` warns that 3676 functions have mismatched data, whose
-     counts it drops, to be explained.
+   *The baseline, 2026-11-23:* the coverage build passes every host test
+   (633), and measures 88.3% of Merkurius's lines, 90.3% of its functions
+   and 88.4% of its regions. The first run failed 13; each was fixed:
+   - seven Semantics/desugar dumps numbered goals by the host compiler's
+     order of evaluating a call's arguments, a bug fixed in desugar.cpp;
+   - pipeline, mandel-places and mandel-recover crashed: merk_call_closure
+     did not reserve a tailcc entry's argument area, which a tail call's
+     stack argument then overwrote, a bug GCC's register choice had hidden;
+   - the three Driver `-###` tests' link lines accept the coverage build's
+     `-fprofile-instr-generate`, so that they still run under it.
+   `llvm-cov`'s warning that some 3700 functions have mismatched data is
+   harmless: each is a unit's unused copy of an inline function, whose used
+   copy is counted (coverage.sh says why). A run of an instrumented binary
+   without `LLVM_PROFILE_FILE` writes into `build-cov/profiles`. Coverage
+   is run after a larger piece, such as a chapter, not after each change
+   (the user, the same day).
 2. The chapters, in the order the compiler meets them: syntax, types,
    modes, determinism, unique modes, higher-order, modules, type classes,
    existential types, equality and comparison, type conversions,
