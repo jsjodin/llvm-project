@@ -34,6 +34,7 @@
 #include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Argument.h"
+#include "llvm/IR/Assumptions.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constant.h"
@@ -2057,6 +2058,13 @@ static bool mayHaveRecursiveCallee(Function &F,
   for (const auto &BB : F) {
     for (const auto &I : BB) {
       if (const auto *CB = dyn_cast<CallBase>(&I)) {
+        // Inline assembly calls no function of the module if the function
+        // calls back into none, or if the function or the call promises that
+        // it calls none, as the Attributor's call edges take it.
+        if (CB->isInlineAsm() && (F.hasFnAttribute(Attribute::NoCallback) ||
+                                  hasAssumption(F, "ompx_no_call_asm") ||
+                                  hasAssumption(*CB, "ompx_no_call_asm")))
+          continue;
         const Function *Callee = CB->getCalledFunction();
         if (!Callee || Callee == &F)
           return true;
