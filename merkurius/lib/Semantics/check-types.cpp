@@ -27,6 +27,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
@@ -528,7 +529,10 @@ private:
   const TypeCheckOptions &options_;
   Symbol &error_{result_.error_};
   llvm::DenseMap<const Symbol *, const Type *> equivalences_;
-  llvm::DenseSet<const Symbol *> expanding_;
+  // The equivalences being expanded, innermost last, and those found to be
+  // on a cycle of them, which are reported when their expansion ends.
+  llvm::SetVector<const Symbol *> expanding_;
+  llvm::DenseSet<const Symbol *> circular_;
   // The hidden equivalences' bodies, and the types seen through.
   llvm::DenseMap<const Symbol *, const Type *> hiddenBodies_;
   llvm::DenseMap<const Type *, const Type *> seenThrough_;
@@ -709,7 +713,7 @@ const Type *TypeChecker::Expand(const Symbol &symbol,
   }
   auto [it, inserted]{equivalences_.try_emplace(&symbol, nullptr)};
   if (inserted) {
-    if (!expanding_.insert(&symbol).second) {
+    if (!expanding_.insert(&symbol)) {
       equivalences_.erase(&symbol);
       return types_.Named(symbol, arguments);
     }
@@ -720,13 +724,25 @@ const Type *TypeChecker::Expand(const Symbol &symbol,
     }
     names.closed = true;
     const Type *body{Convert((*defn)->type, names)};
-    expanding_.erase(&symbol);
+    expanding_.remove(&symbol);
+    if (circular_.erase(&symbol)) {
+      // As mmc, each equivalence of a cycle at its own definition.
+      messages_->Say(symbol.source,
+          "the equivalence type %s/%u is circular"_err_en_US,
+          symbol.name.str(), symbol.arity);
+      body = types_.Named(error_, {});
+    }
     it = equivalences_.find(&symbol);
     it->second = body;
   } else if (!it->second) {
-    // Expanding it reached it again.
-    messages_->Say(where, "the equivalence type %s/%u is circular"_err_en_US,
-        symbol.name.str(), symbol.arity);
+    // Expanding it reached it again: it and every equivalence expanded
+    // since are on the cycle.
+    for (const Symbol *on : llvm::reverse(expanding_)) {
+      circular_.insert(on);
+      if (on == &symbol) {
+        break;
+      }
+    }
     return types_.Named(error_, {});
   }
   return types_.Substitute(it->second, [&](unsigned var) {
@@ -2212,11 +2228,58 @@ static std::string SuperVarName(unsigned var, const Signature &own,
       : SignatureVarName(own, var);
 }
 
+// The type names reserved for the implementation (reference manual,
+// "Discriminated unions").
+static bool ReservedType(llvm::StringRef name) {
+  static constexpr llvm::StringLiteral reserved[]{"int", "int8", "int16",
+      "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64",
+      "float", "character", "string", "{}", "=", "=<", "pred", "func",
+      "pure", "semipure", "impure", ""};
+  return llvm::is_contained(reserved, name);
+}
+
+// The library's types that the compiler provides, which the library
+// declares abstractly, as mmc's library defines them by foreign types.
+static bool ProvidedByCompiler(const Symbol &symbol) {
+  struct Provided {
+    llvm::StringLiteral module, name;
+    unsigned arity;
+  };
+  static constexpr Provided provided[]{{"io", "state", 0},
+      {"io", "input_stream", 0}, {"io", "output_stream", 0},
+      {"array", "array", 1}, {"open", "open", 1}};
+  return llvm::any_of(provided, [&](const Provided &type) {
+    return symbol.module == type.module && symbol.name == type.name &&
+        symbol.arity == type.arity;
+  });
+}
+
 void TypeChecker::CheckTypeDefinitions() {
   for (const Symbol *symbol : resolution_.module().symbols()) {
+    if (symbol->kind != SymbolKind::Type) {
+      continue;
+    }
+    if (ReservedType(symbol->name)) {
+      // mmc: "the type name `int' is reserved for the Mercury
+      // implementation".
+      messages_->Say(symbol->source,
+          "the type name %s is reserved for the implementation"_err_en_US,
+          symbol->name.str());
+    }
+    const auto *abstract{
+        std::get_if<const parser::AbstractTypeDecl *>(&symbol->declaration)};
+    if (abstract && !(*abstract)->solver && !ProvidedByCompiler(*symbol)) {
+      // A definition, or a foreign type, would have replaced the abstract
+      // declaration (ModuleSymbols::Add). mmc: "abstract declaration for
+      // type `secret'/0 has no corresponding definition". It accepts an
+      // abstract solver type with none.
+      messages_->Say(symbol->source,
+          "the abstract type %s/%u has no definition"_err_en_US,
+          symbol->name.str(), symbol->arity);
+    }
     const auto *defn{
         std::get_if<const parser::DuTypeDefn *>(&symbol->declaration)};
-    if (symbol->kind != SymbolKind::Type || !defn) {
+    if (!defn) {
       continue;
     }
     InTokensOf in{*this, *symbol};
