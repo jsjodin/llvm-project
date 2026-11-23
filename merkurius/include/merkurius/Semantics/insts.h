@@ -298,6 +298,10 @@ private:
   // The types of a functor's arguments for `type`, or null types if it is
   // not one of the type's.
   std::vector<const Type *> ArgumentTypes(const InstFunctor &, const Type *);
+  // The constructor of `type` that is `functor` of a subtype or supertype of
+  // it: one of the same name and arity, of whichever module, as a subtype's
+  // constructors are of its own module; null if there is none.
+  const ConstructorTypes *Corresponding(const InstFunctor &, const Type *);
   // ground(u) or any(u) as the Bound inst over every constructor of
   // `type`; null if it has no known set.
   const Inst *AsBound(const Inst *, const Type *);

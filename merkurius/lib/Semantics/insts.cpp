@@ -690,6 +690,20 @@ std::vector<const Type *> InstOps::ArgumentTypes(
   return std::vector<const Type *>(functor.arity, nullptr);
 }
 
+const ConstructorTypes *InstOps::Corresponding(
+    const InstFunctor &functor, const Type *type) {
+  if (const std::vector<ConstructorTypes> *constructors{ConstructorsOf(type)}) {
+    for (const ConstructorTypes &constructor : *constructors) {
+      if (constructor.functor.name == functor.name &&
+          constructor.functor.arity == functor.arity &&
+          constructor.functor.literal == functor.literal) {
+        return &constructor;
+      }
+    }
+  }
+  return nullptr;
+}
+
 const Inst *InstOps::AsBound(const Inst *inst, const Type *type) {
   const std::vector<ConstructorTypes> *constructors{ConstructorsOf(type)};
   if (!constructors) {
@@ -902,17 +916,20 @@ const Inst *InstOps::CoerceGround(const Type *x, const Type *y, Uniqueness u,
   }
   types.push_back(x);
   std::vector<std::vector<const Inst *>> arguments;
+  std::vector<InstFunctor> functors;
   for (const ConstructorTypes &constructor : *constructors) {
-    std::vector<const Type *> ys{ArgumentTypes(constructor.functor, y)};
+    const ConstructorTypes *target{Corresponding(constructor.functor, y)};
+    functors.push_back(target ? target->functor : constructor.functor);
     std::vector<const Inst *> &args{arguments.emplace_back()};
     for (std::size_t j{0}; j < constructor.arguments.size(); ++j) {
-      args.push_back(CoerceGround(constructor.arguments[j], ys[j], u, types));
+      args.push_back(CoerceGround(constructor.arguments[j],
+          target ? target->arguments[j] : nullptr, u, types));
     }
   }
   types.pop_back();
   std::vector<BoundAlternative> alternatives;
   for (std::size_t k{0}; k < constructors->size(); ++k) {
-    alternatives.push_back({(*constructors)[k].functor, arguments[k]});
+    alternatives.push_back({functors[k], arguments[k]});
   }
   return Bound(u, alternatives);
 }
@@ -935,18 +952,25 @@ const Inst *InstOps::CoerceInst(const Inst *inst, const Type *x, const Type *y,
     }
     ancestors.push_back(inst);
     std::vector<std::vector<const Inst *>> arguments;
+    std::vector<InstFunctor> functors;
     for (const BoundAlternative &alternative : node->functors) {
-      const std::vector<ConstructorTypes> *constructors{ConstructorsOf(y)};
-      if (x != y &&
-          (!constructors ||
-              llvm::none_of(*constructors, [&](const ConstructorTypes &c) {
-                return SameFunctor(c.functor, alternative.functor);
-              }))) {
-        failure.functor = alternative.functor;
-        return FailCoerce(node, x, y, failure);
+      std::vector<const Type *> xs, ys;
+      if (x == y) {
+        functors.push_back(alternative.functor);
+        xs = ys = ArgumentTypes(alternative.functor, x);
+      } else {
+        // The functor becomes the result type's constructor of its name.
+        const ConstructorTypes *target{Corresponding(alternative.functor, y)};
+        if (!target) {
+          failure.functor = alternative.functor;
+          return FailCoerce(node, x, y, failure);
+        }
+        functors.push_back(target->functor);
+        const ConstructorTypes *source{Corresponding(alternative.functor, x)};
+        xs = source ? source->arguments.vec()
+                    : std::vector<const Type *>(alternative.arguments.size());
+        ys = target->arguments.vec();
       }
-      std::vector<const Type *> xs{ArgumentTypes(alternative.functor, x)};
-      std::vector<const Type *> ys{ArgumentTypes(alternative.functor, y)};
       std::vector<const Inst *> &args{arguments.emplace_back()};
       for (std::size_t j{0}; j < alternative.arguments.size(); ++j) {
         failure.path.push_back({alternative.functor, j});
@@ -962,7 +986,7 @@ const Inst *InstOps::CoerceInst(const Inst *inst, const Type *x, const Type *y,
     ancestors.pop_back();
     std::vector<BoundAlternative> alternatives;
     for (std::size_t k{0}; k < node->functors.size(); ++k) {
-      alternatives.push_back({node->functors[k].functor, arguments[k]});
+      alternatives.push_back({functors[k], arguments[k]});
     }
     return Bound(node->uniqueness, alternatives);
   }
