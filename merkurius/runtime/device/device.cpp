@@ -67,6 +67,32 @@ extern "C" __attribute__((address_space(5))) void *merk_device_stack_save(
 
 extern "C" [[noreturn]] void merk_device_stack_overflow(void);
 
+// Back to the return of merk_place_guard from deep in a GPU process
+// (ProcessJump), with what the guard saved: the exec mask first, which the
+// scalar moves after it do not use, then the stack's pointers and the
+// return address, which the guard's caller finds in s[30:31] as after any
+// return. The values are in registers that the moves do not overwrite
+// before they are read. It calls back into nothing (leaf, which clang gives
+// only a function of external linkage), so neither does its assembly,
+// which keeps it and its callers norecurse and the kernel's stack static
+// (CodeGen/process-kernels.m).
+extern "C" [[noreturn, gnu::noinline, gnu::leaf,
+    gnu::visibility("hidden")]] void
+merk_device_jump_back(uint64_t pc, uint64_t exec, uint32_t stack,
+    uint32_t frame, uint32_t base) {
+  __asm__ volatile("s_mov_b64 exec, %3\n\t"
+                   "s_mov_b32 s32, %0\n\t"
+                   "s_mov_b32 s33, %1\n\t"
+                   "s_mov_b32 s34, %2\n\t"
+                   "s_mov_b64 s[30:31], %4\n\t"
+                   "s_setpc_b64 s[30:31]"
+                   :
+                   : "{s8}"(stack), "{s9}"(frame), "{s10}"(base),
+                   "{s[4:5]}"(exec), "{s[6:7]}"(pc)
+                   : "memory");
+  __builtin_unreachable();
+}
+
 namespace {
 
 int DeviceNumber() {
@@ -112,7 +138,6 @@ using merkurius::runtime::kNoRegionSlot;
 using merkurius::runtime::kPeerInline;
 using merkurius::runtime::kPeerInlineWords;
 using merkurius::runtime::kPeerQueueSlots;
-using merkurius::runtime::kPlaceDead;
 using merkurius::runtime::kPlaceIdle;
 using merkurius::runtime::kPlaceReserved;
 using merkurius::runtime::kPlaceRunning;
@@ -150,6 +175,7 @@ using merkurius::runtime::RingSlots;
 using merkurius::runtime::rpcAttach;
 using merkurius::runtime::rpcChunk;
 using merkurius::runtime::rpcCopyPeer;
+using merkurius::runtime::rpcProcessFailed;
 using merkurius::runtime::rpcDmaBytes;
 using merkurius::runtime::rpcDrain;
 using merkurius::runtime::rpcFail;
@@ -218,6 +244,24 @@ struct Block;
 // it reports.
 struct Route;
 
+// Where a stop or an uncaught exception in a GPU process jumps back to: the
+// return of the kernel's call of merk_place_guard into the process, which
+// merkc makes (Lowering.cpp, AddProcessGuard). The guard keeps no register
+// for its caller, so the jump restores only what the guard had where it
+// called the process: the address it returns to, the exec mask, and the
+// stack, frame and base pointers, which it saved here. `outcome` is how the
+// process ended.
+struct ProcessJump {
+  uint64_t pc;
+  uint64_t exec;
+  uint32_t stack, frame, base;
+  uint32_t outcome;
+};
+
+// A ProcessJump's outcome (place.h).
+using merkurius::runtime::kProcessEndedFailed;
+using merkurius::runtime::kProcessEndedStopped;
+
 struct Arena {
   Bump bump;
   RingEntry *rings[kRingCacheSlots];
@@ -233,10 +277,13 @@ struct Arena {
   uint64_t returnCount;
   uint64_t returnBytes;
   uint64_t returns[merkurius::runtime::kReturnBatch];
+  ProcessJump jump;
 };
 static_assert(sizeof(Arena) == kArenaClearWords * sizeof(uint64_t));
+static_assert(sizeof(ProcessJump) ==
+    merkurius::runtime::kProcessJumpWords * sizeof(uint64_t));
 Arena arena{{nullptr, 0, 0}, {}, nullptr, nullptr, 0, 0, 0, nullptr, {}, 0, 0,
-    0, 0, {}};
+    0, 0, {}, {}};
 
 // In a region's image, by the slot of each region that runs (device-ring.h):
 // where its cells are bumped from, its teams' table if it is a target teams
@@ -480,14 +527,14 @@ Arena *CurrentArena() {
 // bytes of blocks it held at once, and whether it was stopped
 // (rpcProcessEnded).
 void ProcessEnded(
-    PlaceTable *table, uint64_t slot, uint64_t peak, bool stopped) {
+    PlaceTable *table, uint64_t slot, uint64_t peak, uint32_t outcome) {
   rpc::Client::Port port{__llvm_rpc_client.open<rpcProcessEnded>()};
   port.send([&](rpc::Buffer *buffer, uint32_t) {
     buffer->data[0] = static_cast<uint64_t>(DeviceNumber());
     buffer->data[1] = reinterpret_cast<uint64_t>(table);
     buffer->data[2] = slot;
     buffer->data[3] = peak;
-    buffer->data[4] = stopped ? 1 : 0;
+    buffer->data[4] = outcome;
   });
   port.recv([](rpc::Buffer *, uint32_t) {});
 }
@@ -1125,19 +1172,26 @@ extern "C" void merk_device_free(void *bytes) {
 
 namespace {
 
-// Reports an error that ends the program, as the host reports the same:
-// `kind` is 0 for an uncaught exception, 1 for a feature not yet
-// implemented and 2 for a limit of the runtime (rpc-opcodes.h). With no
-// `numbers`, the text is `format` followed by `detail`, which the host
-// joins; with numbers, at most kFailNumbers, the host replaces each %d of
-// `format` by the next of them and %s by `detail`. The host builds the text,
-// so that no buffer on the stack of a GPU process holds it, and ends the
-// program, so this does not return.
+ProcessJump *ProcessJumpHere();
+[[noreturn]] void JumpBack(ProcessJump *jump, uint32_t outcome);
+
+// Reports an error, as the host reports the same: `kind` is 0 for an
+// uncaught exception, 1 for a feature not yet implemented and 2 for a limit
+// of the runtime (rpc-opcodes.h). With no `numbers`, the text is `format`
+// followed by `detail`, which the host joins; with numbers, at most
+// kFailNumbers, the host replaces each %d of `format` by the next of them
+// and %s by `detail`. The host builds the text, so that no buffer on the
+// stack of a GPU process holds it. An uncaught exception in a GPU process,
+// where it may jump back (ProcessJumpHere), ends the process alone, as on
+// the host (rpcProcessFailed); anything else ends the program. Either way
+// this does not return. Cold and not inlined, so that the code that may
+// fail keeps its registers for its own work.
 template <typename... Numbers>
-[[noreturn]] void FailWith(
+[[noreturn, gnu::noinline, gnu::cold]] void FailWith(
     uint64_t kind, const char *format, const char *detail, Numbers... numbers) {
   static_assert(sizeof...(Numbers) <= kFailNumbers,
       "the numbers fit in the words of an RPC buffer");
+  ProcessJump *jump{kind == 0 ? ProcessJumpHere() : nullptr};
   uint64_t size{0};
   while (format[size]) {
     ++size;
@@ -1146,16 +1200,31 @@ template <typename... Numbers>
   while (detail[detailSize]) {
     ++detailSize;
   }
-  rpc::Client::Port port{__llvm_rpc_client.open<rpcFail>()};
-  port.send([&](rpc::Buffer *buffer, uint32_t) {
-    buffer->data[0] = kind;
-    buffer->data[1] = sizeof...(Numbers);
-    uint32_t next{2};
-    ((buffer->data[next++] = static_cast<uint64_t>(numbers)), ...);
-  });
-  port.send_n(format, size + 1);
-  port.send_n(detail, detailSize + 1);
-  port.recv([](rpc::Buffer *, uint32_t) {});
+  {
+    rpc::Client::Port port{jump ? __llvm_rpc_client.open<rpcProcessFailed>()
+                                : __llvm_rpc_client.open<rpcFail>()};
+    if (jump) {
+      uint32_t inTeam{__gpu_thread_id_x() / __gpu_num_lanes()};
+      port.send([&](rpc::Buffer *buffer, uint32_t) {
+        buffer->data[0] = static_cast<uint64_t>(DeviceNumber());
+        buffer->data[1] = reinterpret_cast<uint64_t>(placeTable);
+        buffer->data[2] = placeWaves[inTeam];
+      });
+    }
+    port.send([&](rpc::Buffer *buffer, uint32_t) {
+      buffer->data[0] = kind;
+      buffer->data[1] = sizeof...(Numbers);
+      uint32_t next{2};
+      ((buffer->data[next++] = static_cast<uint64_t>(numbers)), ...);
+    });
+    port.send_n(format, size + 1);
+    port.send_n(detail, detailSize + 1);
+    port.recv([](rpc::Buffer *, uint32_t) {});
+  }
+  // The port is closed, as the jump leaves no destructor to close it.
+  if (jump) {
+    JumpBack(jump, kProcessEndedFailed);
+  }
   // The host ends the program rather than answer, so the wave never gets
   // here. It ends rather than trap: llvm.trap is not nocallback, so no
   // function that calls it is norecurse, and a kernel that calls one has
@@ -1451,6 +1520,15 @@ extern "C" [[noreturn]] void merk_device_stack_overflow(void) {
 // processes (MLIRGenProcesses.cpp).
 extern "C" void merk_process_dispatch(uint64_t kind, uint64_t words);
 
+// What the kernel's whole wave calls each process under, which merkc makes
+// in each image of GPU processes (Lowering.cpp, AddProcessGuard): it keeps
+// no register for its caller, and on lane 0, with a `jump`, saves where a
+// jump comes back to there and calls merk_process_dispatch. Weak, as an
+// image of target regions has no processes, and no merk_device_place, which
+// calls it.
+extern "C" [[gnu::weak]] void merk_place_guard(
+    uint64_t kind, uint64_t words, ProcessJump *jump);
+
 // A thread's share of the module's loop with the number, which runs across a
 // GPU process's teams (MLIRGenProcesses.cpp, GenerateProcessLoops): `rounds`
 // rounds, the iteration `start` in the first and `stride` further in each
@@ -1539,38 +1617,26 @@ uint64_t LoadSlotWord(uint64_t *word) {
   return __gpu_read_first_lane_u64(mask, value);
 }
 
-void EndProcess(PlaceTable *table, uint32_t inTeam, bool stopped);
+void EndProcess(PlaceTable *table, uint32_t inTeam, uint32_t outcome);
 
-// Lane 0 of a wave whose slot the host has set running: the process, which
-// starts its worker teams first if it has any, and ends them after. Only
-// lane 0 runs a process's code, which merk_process_dispatch calls, so the
-// compiler takes its values from the first active lane, which keeps them in
-// scalar registers and makes its branches uniform (Lowering.cpp,
-// MarkProcessCodeSingleLane): a process must never run on more than one lane
-// of a wave.
-[[gnu::noinline]] void RunProcess(
-    PlaceTable *table, PlaceSlot *slot, uint64_t wave, uint32_t inTeam) {
-  // Only lane 0 calls this, while merk_device_place's other lanes wait for
-  // the slot to change, which works only while the call returns to them: the
-  // lanes of a wave make no progress of their own. A process that never ends,
-  // as one that receives with no timeout until the program exits, makes
-  // merk_process_dispatch never return once LTO sees all of it, and this with
-  // it. The backend may then make lane 0's call a way out of
-  // merk_device_place's loop, which it runs for the other lanes first, and
-  // they look at the slot for ever. A return that the compiler cannot
-  // remove, from a call that it cannot inline, keeps lane 0's call where the
-  // other lanes wait for it (CodeGen/process-endless.m): the slot is still
-  // running, but the compiler cannot know it. An empty asm would hide the
-  // value as well, but it keeps this from being norecurse, which gives the
-  // kernel a dynamic stack (CodeGen/process-kernels.m).
+// Lane 0 of a wave whose slot the host has set running: the start of the
+// process, which starts its worker teams first if it has any; its jump,
+// under which the kernel calls merk_place_guard(kind, words, jump), which
+// runs it; or null if the slot is not running. Only lane 0 runs a process's
+// code, which merk_process_dispatch calls, so the compiler takes its values
+// from the first active lane, which keeps them in scalar registers and makes
+// its branches uniform (Lowering.cpp, MarkProcessCodeSingleLane): a process
+// must never run on more than one lane of a wave.
+[[gnu::noinline]] ProcessJump *StartProcess(PlaceTable *table, PlaceSlot *slot,
+    uint64_t wave, uint32_t inTeam, uint64_t &kind, uint64_t &words) {
   if (__scoped_atomic_load_n(&slot->state, __ATOMIC_RELAXED,
           __MEMORY_SCOPE_SYSTEM) != kPlaceRunning) {
-    return;
+    return nullptr;
   }
-  uint64_t kind{__scoped_atomic_load_n(
-      &slot->kind, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
-  uint64_t words{__scoped_atomic_load_n(
-      &slot->words, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
+  kind = __scoped_atomic_load_n(
+      &slot->kind, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
+  words = __scoped_atomic_load_n(
+      &slot->words, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
   uint64_t workers{__scoped_atomic_load_n(
       &slot->workers, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM)};
   // The arena is in the device's memory, which only the device writes
@@ -1624,15 +1690,17 @@ void EndProcess(PlaceTable *table, uint32_t inTeam, bool stopped);
   placeIncarnations[inTeam] = __scoped_atomic_load_n(
       &slot->incarnation, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
   stopReceives[inTeam] = 0;
-  merk_process_dispatch(kind, words);
-  EndProcess(table, inTeam, false);
+  return &arena->jump;
 }
 
 // The end of the process of the wave at `inTeam` in its team, after its body
-// or from the middle of it: its worker teams stop, what it holds goes, and
-// the host is told. A stopped process's slot is dead (place.h), as its wave
-// does not go back to polling it.
-void EndProcess(PlaceTable *table, uint32_t inTeam, bool stopped) {
+// returned, or it jumped back from the middle of it as it was stopped or
+// failed (ProcessJump): its worker teams stop, what it holds goes, the slot
+// is idle for another, and the host is told. Not inlined into the kernel,
+// where what it needs would live across the guard's call, which keeps no
+// register, and its RPC loops would reload it at every turn.
+[[gnu::noinline]] void EndProcess(
+    PlaceTable *table, uint32_t inTeam, uint32_t outcome) {
   ProcessControl *control{placeControls[inTeam]};
   ProcessQueue *queue{placeQueues[inTeam]};
   PeerQueue *peerQueue{placePeerQueues[inTeam]};
@@ -1667,9 +1735,33 @@ void EndProcess(PlaceTable *table, uint32_t inTeam, bool stopped) {
           &arena->teamHeld, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE)};
   FreeProcessBlocks(arena);
   processWaves[inTeam] = 0;
-  __scoped_atomic_store_n(&slot->state, stopped ? kPlaceDead : kPlaceIdle,
-      __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
-  ProcessEnded(table, wave, peak, stopped);
+  __scoped_atomic_store_n(
+      &slot->state, kPlaceIdle, __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+  ProcessEnded(table, wave, peak, outcome);
+}
+
+// Ends the process of the jump with the outcome (place.h), back where its
+// wave called it (merk_device_jump_back).
+[[noreturn]] void JumpBack(ProcessJump *jump, uint32_t outcome) {
+  jump->outcome = outcome;
+  merk_device_jump_back(
+      jump->pc, jump->exec, jump->stack, jump->frame, jump->base);
+}
+
+// The jump of the process of the calling wave, if it may jump back now: a
+// process runs on the wave, and only its lane 0 is active, as where the
+// guard called it, so not in a loop's body. Else null.
+ProcessJump *ProcessJumpHere() {
+  if (!merk_device_process_image) {
+    return nullptr;
+  }
+  uint32_t inTeam{__gpu_thread_id_x() / __gpu_num_lanes()};
+  if (inTeam >= kMostPlaceWaves || !processWaves[inTeam] ||
+      !placeSlots[inTeam]) {
+    return nullptr;
+  }
+  ProcessJump *jump{&placeArenas[inTeam]->jump};
+  return __builtin_amdgcn_read_exec() == jump->exec ? jump : nullptr;
 }
 
 // How many receives a process makes between reads of its slot's `stop`,
@@ -1678,9 +1770,10 @@ void EndProcess(PlaceTable *table, uint32_t inTeam, bool stopped) {
 // message at once in the process's queue should not pay each time.
 constexpr uint32_t kStopReceives{64};
 
-// In a GPU process's receive: if a stop has asked it to end, it ends here,
-// as at the end of its body, and its wave ends with it. `waiting` for a
-// receive that has found no message.
+// In a GPU process's receive: if a stop has asked it to end, it jumps back
+// to where the kernel called it, which ends it as at the end of its body,
+// if it may jump from here (ProcessJumpHere); else a later receive does.
+// `waiting` for a receive that has found no message.
 void StopIfAsked(bool waiting) {
   uint32_t inTeam{__gpu_thread_id_x() / __gpu_num_lanes()};
   if (!merk_device_process_image || !processWaves[inTeam]) {
@@ -1695,10 +1788,9 @@ void StopIfAsked(bool waiting) {
           __MEMORY_SCOPE_SYSTEM) != placeIncarnations[inTeam]) {
     return;
   }
-  EndProcess(placeTable, inTeam, true);
-  // Every lane of the wave, those waiting for lane 0 in merk_device_place
-  // too, as the slot is dead.
-  __builtin_amdgcn_endpgm();
+  if (ProcessJump *jump{ProcessJumpHere()}) {
+    JumpBack(jump, kProcessEndedStopped);
+  }
 }
 
 // The partial results of a loop's reductions of the wave's lanes, at
@@ -2157,7 +2249,7 @@ extern "C" bool merk_device_bulk_copy(
 // the table's end is set while the slot is idle. The table is in host memory,
 // which the host writes while the kernel runs, so it is read at system scope.
 // Each team first counts itself started, which the host waits for.
-extern "C" void merk_device_place(PlaceTable *table) {
+extern "C" [[gnu::always_inline]] void merk_device_place(PlaceTable *table) {
   uint32_t inTeam{__gpu_thread_id_x() / __gpu_num_lanes()};
   uint64_t wave{static_cast<uint64_t>(__gpu_block_id_x()) *
           (kTeamThreads / __gpu_num_lanes()) +
@@ -2224,8 +2316,19 @@ extern "C" void merk_device_place(PlaceTable *table) {
       __scoped_atomic_thread_fence(__ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
     }
     if (state == kPlaceRunning) {
+      uint64_t kind{0}, words{0};
+      ProcessJump *jump{nullptr};
       if (__gpu_lane_id() == 0) {
-        RunProcess(table, slot, wave, inTeam);
+        jump = StartProcess(table, slot, wave, inTeam, kind, words);
+      }
+      // The whole wave calls the guard, which runs the process on lane 0: a
+      // jump back skips the restores of the inactive lanes of the registers
+      // that the process's functions wrote with the whole wave, so the
+      // other lanes keep nothing in registers across the call, which they
+      // would if lane 0 called it alone.
+      merk_place_guard(kind, words, jump);
+      if (__gpu_lane_id() == 0 && jump) {
+        EndProcess(table, inTeam, jump->outcome);
       }
       continue;
     }

@@ -22,8 +22,9 @@
 %   ends, and what is sent after it, as to a closed mailbox.
 % - "closed": the main process closes a waiter's mailbox, which may be
 %   receiving already, before a sender sends it ten words: the waiter's
-%   receive is an error, as a receive from a closed mailbox is. At the host
-%   the error ends the waiter; on the GPU it ends the program.
+%   receive is an error, as a receive from a closed mailbox is, which ends
+%   only the waiter, at the host and on the GPU, where it leaves nothing
+%   allocated (docs/INPROGRESS.md, Exceptions, step 3).
 %
 % The kinds run at the host here, and on the GPU in process-direct-gpu.test,
 % where the sends between them are direct.
@@ -455,7 +456,7 @@ sum_reports(N, Sent, Took, Wrong, Reports, !IO) :-
 % TERMS-NEXT:got(600, 0)
 % SELF:got(200, 0)
 % QUIT:sent 5, took 2, wrong 0
+% CLOSED:Software Error: receive: the mailbox is closed or another node's
 % FREED-NEXT:Merkurius runtime: 0 messages are neither read nor freed
 % FREED-NEXT:Merkurius runtime: 0 chunks of the devices' arenas and 0 rings are allocated
 % FREED-NEXT:Merkurius runtime: 0 blocks of messages between GPU processes are allocated
-% CLOSED:Software Error: receive: the mailbox is closed or another node's

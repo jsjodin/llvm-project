@@ -113,9 +113,10 @@ constexpr uint32_t rpcTeamsStall{RpcOpcode(12)};
 
 // A GPU process has ended, in the kernel of its module's processes
 // (place.h): the buffer's words are the device's number, the kernel's
-// table and the process's slot, which the device has set idle. The host
-// answers once it has taken the process off the slot, which it may then
-// give another.
+// table, the process's slot, which the device has set idle, and how the
+// process ended: 0 at the end of its body, 1 stopped, 2 failed
+// (rpcProcessFailed). The host answers once it has taken the process off
+// the slot, which it may then give another.
 constexpr uint32_t rpcProcessEnded{RpcOpcode(13)};
 
 // The route from a GPU process to a mailbox (docs/INPROGRESS.md, Messages
@@ -168,6 +169,14 @@ constexpr uint32_t rpcCopyPeer{RpcOpcode(18)};
 // the host answers with the bytes, or ~0 for never, and whether a process
 // with worker teams has them copy it instead.
 constexpr uint32_t rpcPeerDmaBytes{RpcOpcode(19)};
+
+// An uncaught exception in a GPU process, which ends it alone
+// (docs/INPROGRESS.md, Exceptions, step 3): the buffer's words are the
+// device's number, the kernel's table and the process's slot; then the
+// error as rpcFail sends it. The host prints the report, keeps the text as
+// the reason that the process's monitors see when it ends, and answers;
+// the process then ends (rpcProcessEnded).
+constexpr uint32_t rpcProcessFailed{RpcOpcode(20)};
 
 } // namespace merkurius::runtime
 

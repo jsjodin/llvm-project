@@ -1,7 +1,8 @@
 % process.stop and the fault injector at a place (docs/INPROGRESS.md,
 % Failure, step 4). On a GPU, a stop sets the process's slot's stop word,
 % which the process reads in its receives: it ends there, as at the end of
-% its body, and its wave and slot with it; its monitors see the reason. The
+% its body, back in its kernel's slot loop, which takes another process in
+% the slot; its monitors see the reason. The
 % first argument is the place, `host` or `gpu`; the second the case.
 %
 % - "waiter": a process blocked in a receive is stopped: killed.

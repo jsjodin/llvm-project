@@ -146,6 +146,9 @@ struct RunningProcess {
   int ringDevice;
   void *copy;
   void (*release)(int device, void *copy);
+  // The text of its uncaught exception, if it had one (rpcProcessFailed),
+  // in a block of Malloc's.
+  char *failure;
   RunningProcess *next;
 };
 
@@ -1054,30 +1057,9 @@ const char *Launch(const Gpu &gpu, const LoadedImage &image, std::uint32_t most,
   return nullptr;
 }
 
-// In a kernel's `owners`, a slot whose wave has ended (place.h, kPlaceDead).
-constexpr std::uint64_t kDeadSlot{~std::uint64_t{0}};
-
 // Whether no process runs in the slot and no process has it as a worker's.
 bool Free(const Place &place, std::uint64_t slot) {
   return !place.processes[slot] && place.owners[slot] == 0;
-}
-
-// For an error that no slot or team is free: how many of the kernel's slots
-// are dead, those of stopped processes, if any. They are free again only
-// when the kernel ends, after its last live process.
-const char *DeadSlotsNote(const Place &place, char *note, std::size_t size) {
-  std::uint64_t dead{0};
-  for (std::uint64_t i{0}; i < place.table->slots; ++i) {
-    dead += place.owners[i] == kDeadSlot;
-  }
-  if (dead == 0) {
-    return "";
-  }
-  std::snprintf(note, size,
-      "; %llu of its slots are those of stopped processes, which are free "
-      "again only when the kernel ends, after its last process",
-      static_cast<unsigned long long>(dead));
-  return note;
 }
 
 // Reserves as worker teams for the process in `slot` the teams of the kernel
@@ -1166,17 +1148,15 @@ const char *TakeSlot(const Gpu &gpu, const LoadedImage &image, const char *kind,
       if (loops) {
         workers = ReserveWorkers(*place, slot, gpuPlace.share);
         if (workers == 0) {
-          char note[160];
           char *text{static_cast<char *>(Malloc(640))};
           std::snprintf(text, 640,
               "GPU %d has no team for the loops of the process kind %s: the "
               "module %s's kernel there has %llu teams, and none is free of "
               "processes, which a kind that runs loops across teams takes as "
-              "its workers%s",
+              "its workers",
               gpu.number, kind, image.module,
               static_cast<unsigned long long>(
-                  place->table->slots / place->teamSlots),
-              DeadSlotsNote(*place, note, sizeof note));
+                  place->table->slots / place->teamSlots));
           return text;
         }
       }
@@ -1194,17 +1174,12 @@ const char *TakeSlot(const Gpu &gpu, const LoadedImage &image, const char *kind,
       return nullptr;
     }
   }
-  // A stopped process's slot is dead until the kernel ends (place.h,
-  // kPlaceDead), so "all running" would not be true.
-  char note[160];
-  const char *dead{DeadSlotsNote(*place, note, sizeof note)};
   char *text{static_cast<char *>(Malloc(640))};
   std::snprintf(text, 640,
       "GPU %d has no room for another process: the module %s's kernel there "
-      "runs %llu processes at once, and %s%s",
+      "runs %llu processes at once, and they are all running",
       gpu.number, image.module,
-      static_cast<unsigned long long>(place->table->slots),
-      *dead ? "no slot is free" : "they are all running", dead);
+      static_cast<unsigned long long>(place->table->slots));
   return text;
 }
 
@@ -1212,11 +1187,36 @@ const char *TakeSlot(const Gpu &gpu, const LoadedImage &image, const char *kind,
 
 namespace merkurius::runtime {
 
+// On the plugin's thread, when the device tells the host that a GPU
+// process has had an uncaught exception (rpcProcessFailed): the report, as
+// the host prints its own, and the text, the reason that its monitors see
+// when it ends, which it does next (rpcProcessEnded).
+void PlaceProcessFailed(
+    int, std::uint64_t table, std::uint64_t slot, char *text) {
+  std::fflush(stdout);
+  std::fprintf(stderr, "Uncaught Merkurius exception:\n%s\n", text);
+  pthread_mutex_lock(&lock);
+  for (Place *place{places}; place; place = place->next) {
+    if (reinterpret_cast<std::uint64_t>(place->table) == table &&
+        slot < place->table->slots) {
+      if (RunningProcess * process{place->processes[slot]}) {
+        std::free(process->failure);
+        process->failure = text;
+        text = nullptr;
+      }
+      break;
+    }
+  }
+  pthread_mutex_unlock(&lock);
+  std::free(text);
+}
+
 // On the plugin's thread, when the device tells the host that the process
-// of the slot has ended (rpcProcessEnded): its mailbox closes, the slot is
-// free for another, and the reaper frees the rest.
+// of the slot has ended (rpcProcessEnded), with how (rpc-opcodes.h): its
+// mailbox closes, the slot is free for another, and the reaper frees the
+// rest.
 void PlaceProcessEnded(
-    int, std::uint64_t table, std::uint64_t slot, bool stopped) {
+    int, std::uint64_t table, std::uint64_t slot, std::uint64_t outcome) {
   RunningProcess *process{nullptr};
   pthread_mutex_lock(&lock);
   for (Place *place{places}; place; place = place->next) {
@@ -1224,11 +1224,6 @@ void PlaceProcessEnded(
         slot < place->table->slots) {
       process = place->processes[slot];
       place->processes[slot] = nullptr;
-      // A stopped process's wave has ended, and its slot with it (place.h):
-      // no process takes it again.
-      if (stopped) {
-        place->owners[slot] = kDeadSlot;
-      }
       // Its worker teams, which have set their slots reserved again before
       // it ended, are free for others.
       for (std::uint64_t i{0}; i < place->table->slots; ++i) {
@@ -1269,10 +1264,21 @@ void PlaceProcessEnded(
   if (record->faultEntry) {
     FaultsEnded(record);
   }
-  auto kind{stopped ? static_cast<DownKind>(
-                          __atomic_load_n(&record->stopKind, __ATOMIC_RELAXED))
-                    : kDownNormal};
-  FireMonitorsOf(record, kind, kind == kDownFailed ? "injected" : "");
+  // A process that failed has its report's text; a stopped one's reason is
+  // the stop's, whose text, if it failed, is the fault injector's.
+  DownKind kind{kDownNormal};
+  const char *text{""};
+  if (outcome == kProcessEndedFailed && process->failure) {
+    kind = kDownFailed;
+    text = process->failure;
+  } else if (outcome == kProcessEndedStopped) {
+    kind = static_cast<DownKind>(
+        __atomic_load_n(&record->stopKind, __ATOMIC_RELAXED));
+    text = kind == kDownFailed ? "injected" : "";
+  }
+  FireMonitorsOf(record, kind, text);
+  std::free(process->failure);
+  process->failure = nullptr;
   pthread_mutex_lock(&lock);
   record->gpuProcess = nullptr;
   pthread_mutex_unlock(&lock);

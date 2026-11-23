@@ -1,10 +1,13 @@
 % The library's errors in a GPU process: require's software errors and the
 % domain errors of float and math, whose foreign code throws through the
 % runtime's merk_library_error, call the device runtime's
-% merk_device_uncaught_exception in a GPU's compile, which the host prints
-% as it prints its own and which ends the program. This file runs the same
-% calls on the host, whose reports process-library-errors-gpu.test checks
-% the GPU's against; the call that does not fail prints its result.
+% merk_device_uncaught_exception in a GPU's compile, an uncaught exception,
+% which the host reports as it reports its own. It ends only the process,
+% back in its kernel's slot loop (docs/INPROGRESS.md, Exceptions, step 3),
+% and a monitor sees it failed with the report's text. This file runs the
+% same calls on the host, where they end the program, and whose reports
+% process-library-errors-gpu.test checks the GPU's against; the call that
+% does not fail prints its result.
 %
 % RUN: merkc -fprocess-declarations %s -o %t
 % RUN: %t host ok | FileCheck %s --check-prefix=OK --match-full-lines --strict-whitespace
@@ -27,6 +30,12 @@
 % POW:Uncaught Merkurius exception:
 % POW-NEXT:domain_error("float.pow: zero base")
 % POW-NOT:{{.}}
+% DOWN-UNEXPECTED:failed: Software Error: process_library_errors: predicate `process_library_errors.compute'/3: Unexpected: no such operation
+% DOWN-UNEXPECTED-NOT:{{.}}
+% DOWN-SQRT:failed: domain_error("math.sqrt")
+% DOWN-SQRT-NOT:{{.}}
+% DOWN-POW:failed: domain_error("float.pow: zero base")
+% DOWN-POW-NOT:{{.}}
 
 :- module process_library_errors.
 :- interface.
@@ -78,19 +87,39 @@ argument(Name) =
     else if Name = "sqrt" then -1.0
     else -1.0 ).
 
+:- func reason(down_info) = string.
+
+reason(down_info(_, normal)) = "normal".
+reason(down_info(_, noproc)) = "noproc".
+reason(down_info(_, killed)) = "killed".
+reason(down_info(_, kernel_ended)) = "kernel_ended".
+reason(down_info(_, noconnection)) = "noconnection".
+reason(down_info(_, failed(Text))) = "failed: " ++ Text.
+
 main(!IO) :-
     io.command_line_arguments(Args, !IO),
     ( if Args = [Where, Name] then
         ( if Where = "gpu" then
             new_mailbox(Me, !IO),
+            new_mailbox(Downs, !IO),
             spawn(gpu(0), worker(op(Name), Me), W, !IO),
+            monitor(W, Downs, reason, _, !IO),
             send(W, argument(Name), !IO),
-            receive(Me, any, infinity, R, !IO),
-            ( if R = message(Y) then
-                io.write_float(Y, !IO),
-                io.nl(!IO)
+            ( if Name = "ok" then
+                receive(Me, any, infinity, R, !IO),
+                ( if R = message(Y) then
+                    io.write_float(Y, !IO),
+                    io.nl(!IO)
+                else
+                    true
+                )
             else
-                true
+                receive(Downs, any, infinity, D, !IO),
+                ( if D = message(Text) then
+                    io.write_string(Text ++ "\n", !IO)
+                else
+                    true
+                )
             )
         else
             compute(op(Name), argument(Name), Y),

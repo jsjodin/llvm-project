@@ -60,8 +60,12 @@ constexpr uint64_t kSmallCacheWords{kSmallClasses + 1};
 // (device/device.cpp, HoldReturn).
 constexpr uint64_t kReturnBatch{8};
 constexpr uint64_t kReturnBatchWords{kReturnBatch + 3};
+// After them, where a stop or an uncaught exception jumps back to from deep
+// in a GPU process (device/device.cpp, ProcessJump).
+constexpr uint64_t kProcessJumpWords{4};
 constexpr uint64_t kArenaClearWords{kBumpWords + kRingCacheSlots +
-    kBlockListWords + kRouteListWords + kSmallCacheWords + kReturnBatchWords};
+    kBlockListWords + kRouteListWords + kSmallCacheWords + kReturnBatchWords +
+    kProcessJumpWords};
 
 // How many regions may run at once, all told. Each running region has a
 // slot, which the host gives it as it starts and takes back as it ends. A

@@ -76,7 +76,10 @@ namespace merkurius::runtime {
 void FreeRing(int device, DeviceRing *ring);
 // A GPU process has ended (rpcProcessEnded, gpu-processes.cpp).
 void PlaceProcessEnded(
-    int device, std::uint64_t table, std::uint64_t slot, bool stopped);
+    int device, std::uint64_t table, std::uint64_t slot, std::uint64_t outcome);
+// A GPU process has failed (rpcProcessFailed, gpu-processes.cpp).
+void PlaceProcessFailed(
+    int device, std::uint64_t table, std::uint64_t slot, char *text);
 std::uint64_t PlaceRoute(const std::uint64_t *handle, int device,
     std::uint64_t table, std::uint64_t *incarnation, std::uint64_t *peerQueue);
 std::int64_t PlaceMessageBlocks();
@@ -739,10 +742,9 @@ char *Format(const char *format, const char *detail,
   return text;
 }
 
-// An error on a device, reported for its first lane that has one, as the
-// host reports the same. A region is running, so the program ends at once
-// (ExitProgram), with the kernel, and the device gets no answer.
-[[noreturn]] void ReportDeviceFailure(rpc::Server::Port &port) {
+// A device's error (rpcFail), for its first lane that has one: its kind
+// (rpc-opcodes.h) and its text, in a block of Malloc's; or null for none.
+char *ReceiveDeviceFailure(rpc::Server::Port &port, std::uint64_t &kind) {
   std::uint64_t kinds[64]{};
   std::uint64_t counts[64]{};
   std::int64_t numbers[64][kFailNumbers]{};
@@ -765,23 +767,56 @@ char *Format(const char *format, const char *detail,
     if (!texts[lane]) {
       continue;
     }
-    char *text{counts[lane] == 0
-            ? Join(static_cast<const char *>(texts[lane]), sizes[lane],
-                  static_cast<const char *>(details[lane]), detailSizes[lane])
-            : Format(static_cast<const char *>(texts[lane]),
-                  static_cast<const char *>(details[lane]), numbers[lane],
-                  counts[lane])};
-    if (kinds[lane] == 0) {
-      merk_uncaught_exception(text);
-    }
-    if (kinds[lane] == 2) {
-      Fail(text);
-    }
-    std::fflush(stdout);
-    std::fprintf(stderr, "Not yet implemented: %s\n", text);
-    ExitProgram(1);
+    kind = kinds[lane];
+    return counts[lane] == 0
+        ? Join(static_cast<const char *>(texts[lane]), sizes[lane],
+              static_cast<const char *>(details[lane]), detailSizes[lane])
+        : Format(static_cast<const char *>(texts[lane]),
+              static_cast<const char *>(details[lane]), numbers[lane],
+              counts[lane]);
   }
-  Fail("a device reported an error with no text");
+  return nullptr;
+}
+
+// An error on a device, reported as the host reports the same. A region is
+// running, so the program ends at once (ExitProgram), with the kernel, and
+// the device gets no answer.
+[[noreturn]] void ReportDeviceFailure(rpc::Server::Port &port) {
+  std::uint64_t kind{0};
+  char *text{ReceiveDeviceFailure(port, kind)};
+  if (!text) {
+    Fail("a device reported an error with no text");
+  }
+  if (kind == 0) {
+    merk_uncaught_exception(text);
+  }
+  if (kind == 2) {
+    Fail(text);
+  }
+  std::fflush(stdout);
+  std::fprintf(stderr, "Not yet implemented: %s\n", text);
+  ExitProgram(1);
+}
+
+// An uncaught exception in a GPU process (rpcProcessFailed), which its lane
+// 0 sends: the process, then its error as rpcFail sends it. The process
+// ends alone, once answered.
+void ReportProcessFailure(rpc::Server::Port &port) {
+  std::uint64_t words[3]{};
+  port.recv([&](rpc::Buffer *buffer, std::uint32_t lane) {
+    if (lane == 0) {
+      for (int i{0}; i < 3; ++i) {
+        words[i] = buffer->data[i];
+      }
+    }
+  });
+  std::uint64_t kind{0};
+  char *text{ReceiveDeviceFailure(port, kind)};
+  if (!text) {
+    Fail("a GPU process reported an error with no text");
+  }
+  PlaceProcessFailed(static_cast<int>(words[0]), words[1], words[2], text);
+  port.send([](rpc::Buffer *, std::uint32_t) {});
 }
 
 unsigned HandleOpcode(void *raw, unsigned) {
@@ -796,8 +831,11 @@ unsigned HandleOpcode(void *raw, unsigned) {
       while (peak > seen && !processPeakBytes.compare_exchange_weak(seen, peak))
         ;
       PlaceProcessEnded(static_cast<int>(buffer->data[0]), buffer->data[1],
-          buffer->data[2], buffer->data[4] != 0);
+          buffer->data[2], buffer->data[4]);
     });
+    return rpc::RPC_SUCCESS;
+  case rpcProcessFailed:
+    ReportProcessFailure(port);
     return rpc::RPC_SUCCESS;
   case rpcTeamsStall:
     port.recv_and_send([](rpc::Buffer *buffer, std::uint32_t) {

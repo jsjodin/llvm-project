@@ -1,11 +1,12 @@
 mandel-recover.m's zoom on the machine's GPU (docs/INPROGRESS.md, Failure,
 step 4, D1): its places, GPU processes with a share of the kernel's teams
 each, give mandel.m's iterations (mandel-gpu.test) with no faults; with
-MERK_FAULTS stopping places at random, which end at their next receive and
-leave their slots dead, while the coordinator gives their chunks back out
-to new places; and with MERK_FAULTS ending the whole kernel, every place at
-once, after which the new places start a new kernel. On 64 pixels square in
-tiles of 8 for 12 frames, and on 512 in tiles of 32 for the whole zoom.
+MERK_FAULTS stopping places at random, which end at their next receive,
+back in the kernel's slot loop, while the coordinator gives their chunks
+back out to new places, in the slots they left; and with MERK_FAULTS
+ending the whole kernel, every place at once, after which the new places
+start a new kernel. On 64 pixels square in tiles of 8 for 12 frames, and on
+512 in tiles of 32 for the whole zoom.
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fopenmp -fdo-loops -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/../../benchmarks/mandel/mandel-recover.m -o %t 2>&1 | FileCheck %s --check-prefix=QUIET --allow-empty

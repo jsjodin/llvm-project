@@ -6719,6 +6719,143 @@ void MarkProcessCodeSingleLane(llvm::Module &module) {
   }
 }
 
+// Gives `function` the kernel's bounds on its threads and waves, which the
+// AMDGPU attributor gives only a function whose callers it all knows, and
+// without which the backend allows a function the registers of a group of
+// 1024 threads, so that a process's code under it spills.
+static void CopyKernelBounds(
+    const llvm::Function *kernel, llvm::Function &function) {
+  if (!kernel) {
+    return;
+  }
+  for (llvm::StringRef name :
+      {"amdgpu-flat-work-group-size", "amdgpu-waves-per-eu"}) {
+    if (kernel->hasFnAttribute(name)) {
+      function.addFnAttr(kernel->getFnAttribute(name));
+    }
+  }
+}
+
+// Stores field `index` of `values` at byte `offset` of `base`.
+static void StoreField(llvm::IRBuilder<> &builder, llvm::Value *values,
+    unsigned index, llvm::Value *base, unsigned offset) {
+  builder.CreateStore(builder.CreateExtractValue(values, index),
+      builder.CreateConstGEP1_64(builder.getInt8Ty(), base, offset));
+}
+
+void AddProcessGuard(llvm::Module &module) {
+  llvm::Function *dispatch{module.getFunction("merk_process_dispatch")};
+  if (!dispatch) {
+    return;
+  }
+  llvm::LLVMContext &context{module.getContext()};
+  llvm::IRBuilder<> builder{context};
+  llvm::Type *i32{builder.getInt32Ty()};
+  llvm::Type *i64{builder.getInt64Ty()};
+  llvm::Type *pointer{builder.getPtrTy()};
+  auto *type{llvm::FunctionType::get(
+      builder.getVoidTy(), {i64, i64, pointer}, /*isVarArg=*/false)};
+  // The jump's words (device.cpp, ProcessJump): the return address, the exec
+  // mask, then the stack, frame and base pointers.
+  constexpr unsigned kPc{0}, kExec{8}, kStack{16}, kFrame{20}, kBase{24};
+  // A call that keeps no register for its caller, as a jump back from deep
+  // in the process restores none.
+  llvm::Attribute keepsNone{
+      llvm::Attribute::get(context, "no_callee_saved_registers")};
+
+  // merk_place_run saves the address its caller returns to, then calls the
+  // process. The guard's call of it keeps no register only if nothing
+  // learns what it really clobbers, which is less than a jump from under it
+  // does, as the jump skips the restores of the functions it leaves: so it
+  // is weak, not exact, which keeps interprocedural register allocation
+  // from giving the call its measured mask, and in llvm.used, which keeps
+  // LTO from making it internal, and exact. Not being exact, it is not
+  // inferred norecurse, which it is, so that the kernel's stack stays
+  // static. Its use in llvm.used also keeps the AMDGPU attributor from
+  // giving it the kernel's attributes, which it would pass on to the
+  // process's code under it: so it has the kernel's bounds, and keepsNone
+  // only if the kernel has, as the attributor would give the process's code
+  // from a kernel with it (driver.cpp).
+  llvm::Function *kernel{module.getFunction("merk_place")};
+  auto *run{llvm::Function::Create(type, llvm::GlobalValue::WeakAnyLinkage,
+      "merk_place_run", module)};
+  run->setVisibility(llvm::GlobalValue::HiddenVisibility);
+  run->addFnAttr(llvm::Attribute::NoInline);
+  run->addFnAttr(llvm::Attribute::NoUnwind);
+  run->addFnAttr(llvm::Attribute::NoRecurse);
+  CopyKernelBounds(kernel, *run);
+  // Nor, not being exact, would the attributor infer that it needs no AGPRs,
+  // nor so the kernel: the kernel would spill to AGPRs that it counts above
+  // the VGPRs of the process's code, a wave less (Benchmarks/
+  // swe-muscl-registers.test). The process's code, which merkc makes, needs
+  // none.
+  run->addFnAttr("amdgpu-agpr-alloc", "0");
+  if (kernel && kernel->hasFnAttribute("no_callee_saved_registers")) {
+    run->addFnAttr(keepsNone);
+  }
+  builder.SetInsertPoint(llvm::BasicBlock::Create(context, "", run));
+  llvm::Value *pc{builder.CreatePtrToInt(
+      builder.CreateIntrinsic(llvm::Intrinsic::returnaddress, {pointer},
+          {builder.getInt32(0)}),
+      i64)};
+  builder.CreateStore(pc,
+      builder.CreateConstGEP1_64(builder.getInt8Ty(), run->getArg(2), kPc));
+  builder.CreateCall(dispatch, {run->getArg(0), run->getArg(1)})
+      ->setCallingConv(dispatch->getCallingConv());
+  builder.CreateRetVoid();
+  llvm::appendToUsed(module, {run});
+
+  // merk_place_guard, which the kernel's whole wave calls, so that the
+  // kernel keeps no lane's values in registers across it: on lane 0, with a
+  // jump, what a jump restores, read where it calls merk_place_run, which
+  // keeps none of its registers. Its assembly calls nothing, which the
+  // assumption promises, so that it stays norecurse and the kernel's stack
+  // static. It returns where the jump is null, and its call of the run is
+  // not known not to return, so that no endless process makes it
+  // noreturn: the call stays where the wave's other lanes wait for lane 0
+  // (device.cpp, merk_device_place).
+  auto *guard{llvm::Function::Create(type, llvm::GlobalValue::ExternalLinkage,
+      "merk_place_guard", module)};
+  guard->setVisibility(llvm::GlobalValue::HiddenVisibility);
+  guard->addFnAttr(llvm::Attribute::NoInline);
+  guard->addFnAttr(llvm::Attribute::NoUnwind);
+  guard->addFnAttr(keepsNone);
+  guard->addFnAttr("llvm.assume", "ompx_no_call_asm");
+  CopyKernelBounds(kernel, *guard);
+  llvm::Argument *jump{guard->getArg(2)};
+  auto *entry{llvm::BasicBlock::Create(context, "", guard)};
+  auto *start{llvm::BasicBlock::Create(context, "start", guard)};
+  auto *done{llvm::BasicBlock::Create(context, "done", guard)};
+  builder.SetInsertPoint(entry);
+  // The lane's number in its wave, of 32 or 64 lanes.
+  llvm::Value *lane{builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_mbcnt_hi,
+      {}, {builder.getInt32(-1),
+          builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_mbcnt_lo, {},
+              {builder.getInt32(-1), builder.getInt32(0)})})};
+  builder.CreateCondBr(
+      builder.CreateAnd(builder.CreateIsNull(lane, "first"),
+          builder.CreateIsNotNull(jump, "jumps")),
+      start, done);
+  builder.SetInsertPoint(start);
+  auto *saved{llvm::StructType::get(context, {i32, i32, i32, i64})};
+  llvm::Value *registers{builder.CreateCall(
+      llvm::InlineAsm::get(llvm::FunctionType::get(saved, false),
+          "s_mov_b32 $0, s32\n\ts_mov_b32 $1, s33\n\ts_mov_b32 $2, s34\n\t"
+          "s_mov_b64 $3, exec",
+          "=s,=s,=s,=s", /*hasSideEffects=*/true))};
+  StoreField(builder, registers, 0, jump, kStack);
+  StoreField(builder, registers, 1, jump, kFrame);
+  StoreField(builder, registers, 2, jump, kBase);
+  StoreField(builder, registers, 3, jump, kExec);
+  llvm::CallInst *call{builder.CreateCall(
+      run, {guard->getArg(0), guard->getArg(1), jump})};
+  call->addFnAttr(keepsNone);
+  call->setTailCallKind(llvm::CallInst::TCK_NoTail);
+  builder.CreateBr(done);
+  builder.SetInsertPoint(done);
+  builder.CreateRetVoid();
+}
+
 void AddDeviceStackChecks(llvm::Module &module) {
   llvm::SmallVector<CallNode> nodes;
   llvm::StringMap<unsigned> numbers;

@@ -2,8 +2,9 @@
 % process.receive has it: at the host, and in a GPU process, which the host
 % tells through the ring it fills for it (device-ring.h, kRingClosed), in
 % process-closed-receive-gpu.test. The waiter may be receiving already when
-% its mailbox closes, or may start after. At the host the error ends the
-% waiter; on the GPU it ends the program.
+% its mailbox closes, or may start after. The error ends only the waiter,
+% at the host and on the GPU (docs/INPROGRESS.md, Exceptions, step 3), and
+% main's receive times out.
 %
 % REQUIRES: amdgpu-registered-target, libomp
 % RUN: merkc -O2 -fprocess-declarations --offload-arch=%offload-archs %libomp-flags %s -o %t2
@@ -44,3 +45,4 @@ main(!IO) :-
     io.write(R, !IO),
     io.nl(!IO).
 % CHECK:Software Error: receive: the mailbox is closed or another node's
+% CHECK:timeout

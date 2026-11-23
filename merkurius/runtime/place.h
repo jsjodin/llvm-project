@@ -47,9 +47,15 @@ constexpr uint64_t kPlaceIdle{0};
 constexpr uint64_t kPlaceRunning{1};
 constexpr uint64_t kPlaceReserved{2};
 constexpr uint64_t kPlaceWorking{3};
-// A slot whose wave has ended, as its process was stopped from the middle of
-// its body (`stop`, below): no process runs there again in the kernel.
-constexpr uint64_t kPlaceDead{4};
+
+// How a GPU process ended, which the device tells the host
+// (rpcProcessEnded): at the end of its body, stopped, or by an uncaught
+// exception (rpcProcessFailed). A stopped or failed process jumps back to
+// where its wave called it (device/device.cpp, ProcessJump), and its slot is
+// idle again, as after its body.
+constexpr uint32_t kProcessEndedNormal{0};
+constexpr uint32_t kProcessEndedStopped{1};
+constexpr uint32_t kProcessEndedFailed{2};
 
 // The words that a loop across a process's teams gives its body, in the
 // process's control block (MLIRGenProcesses.cpp's kProcessLoopWords).
@@ -82,10 +88,10 @@ constexpr uint32_t kPlaceTeamThreads{256};
 // process to process, and in a peer queue from kernel to kernel. `stop` is
 // the incarnation of the process that process.stop, the fault injector or a
 // kernel's end has asked to end (docs/INPROGRESS.md, Failure, step 4), or
-// 0: the process reads it in its receives, and if it is its own, ends where
-// it is, as a normal end would, sets the slot dead, which no process takes
-// again, tells the host that it was stopped, and ends its wave. Being an
-// incarnation, a stop never reaches the slot's next process.
+// 0: the process reads it in its receives, and if it is its own, jumps back
+// to where its wave called it, ends as a normal end would, sets the slot
+// idle, and tells the host that it was stopped (kProcessEndedStopped). Being
+// an incarnation, a stop never reaches the slot's next process.
 struct PlaceSlot {
   uint64_t state;
   uint64_t kind;

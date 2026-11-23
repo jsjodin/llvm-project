@@ -8083,7 +8083,9 @@ Sketched for a later stage:
      running" before, found 2026-11-22). The fix is that a stop returns the
      wave to its slot loop, which the way out of a process that exceptions
      need gives (Exceptions, below); decided 2026-11-22 to fix it that way
-     rather than on its own, as stops are rare.
+     rather than on its own, as stops are rare. *Fixed 2026-11-23*
+     (Exceptions, step 3): a stop jumps back to the slot loop, and the slot
+     takes another process; `kPlaceDead` and `kDeadSlot` are gone.
    - *`kernel_ended`,* the injector's `kernel`: every process of a random
      GPU's kernel gets its stop word with that reason, as a trap would end
      them all. The kernel ends when its last process does, and the next
@@ -8288,6 +8290,69 @@ and the program in `main`, as now.
 3. On a GPU: the save and jump in the device runtime; a GPU process's
    uncaught exception ends it alone; a stop goes back to the slot loop, and
    `kDeadSlot` goes.
+   - *Built 2026-11-23.* The kernel's whole wave calls `merk_place_guard`,
+     which merkc makes (`Lowering.cpp`, `AddProcessGuard`). On lane 0, with
+     a process, it saves the stack, frame and base pointers and the exec
+     mask in the arena's `ProcessJump`, then calls `merk_place_run`, which
+     saves its return address there and calls the dispatch. A stop
+     (`StopIfAsked`) or an uncaught exception (`FailWith`, kind 0, which
+     sends `rpcProcessFailed` before the text) calls
+     `merk_device_jump_back` where only lane 0 is active
+     (`ProcessJumpHere`), which restores them and returns from the run's
+     call in the guard. `EndProcess` then ends the process with its
+     outcome, normal, stopped or failed (`place.h`), and the slot is idle:
+     a monitor sees `failed(Text)` with the report's text, and the program
+     goes on. The jump skips the restores of the frames it leaves, so the
+     guard's call of the run keeps no register
+     (`no_callee_saved_registers`), nor the kernel's call of the guard.
+     Nothing of this costs a process anything until it stops or fails.
+     Tests: `process-library-errors-gpu.test` (each library error ends
+     only its process), `process-closed-receive-gpu.test` and
+     `process-direct-gpu.test`'s `closed` (as at the host; nothing left
+     allocated), `process-stop-places-gpu.test` (`again`: slots reused
+     after stops), `mandel-recover-gpu.test`, `CodeGen/process-kernels.m`
+     (the guard's attributes; a static stack), `CodeGen/process-endless.m`
+     (the guard keeps its return).
+   - *Found on the way:*
+     - *The whole wave calls the guard.* A VGPR's inactive lanes survive a
+       call, as a function that writes them with the whole wave saves and
+       restores them; the jump skips those restores. With lane 0 calling
+       alone, the other lanes kept the slot's address in a VGPR across the
+       call, and a stopped poller left it wrong: a memory fault at the
+       program's end (`process-stop-places-gpu.test`, `poller`, with
+       MERK_CHECK_DEVICE_MEMORY). With every lane active at the call, the
+       kernel spills and reloads all of their values.
+     - *The kernel's stack stays static.* The jump's assembly is in an
+       external function marked `leaf`, which clang gives only an external
+       function, as `nocallback`; FunctionAttrs now takes inline assembly
+       in a `nocallback` function, or under `ompx_no_call_asm`, as calling
+       nothing, as the Attributor does. clang drops `omp::assume` without
+       -fopenmp.
+     - *The run is weak,* so that interprocedural register allocation does
+       not give the guard's call the run's measured clobbers, fewer than a
+       jump's, and in `llvm.used`, so that LTO keeps it so. Being weak, it
+       hides from the AMDGPU attributor what it would infer through it, so
+       merkc gives it the kernel's bounds, `amdgpu-agpr-alloc=0`, and
+       `no_callee_saved_registers` when the kernel has it, and `norecurse`.
+       Without the bounds a process's code had 128 VGPRs on gfx90a, not
+       256; without the AGPRs' 0 the kernel spilled to an AGPR above the
+       process's 256 VGPRs, a wave less.
+     - *Out of line:* `EndProcess`, as in the kernel what it needs lived
+       across the guard's call and was reloaded in its RPC loops (559
+       spills, 1716 reloads in swe-muscl's kernel); and `FailWith`, which
+       also takes `merk_process_swe` from 23 spills and 32 reloads to 4
+       and 6 on gfx1030.
+     - *AMDGPU kept the lanes of SGPR spills in the highest free VGPR* in a
+       function with a call that clobbers every VGPR, and so counted every
+       VGPR (`SIMachineFunctionInfo.cpp`, `shiftWwmVGPRsToLowestRange`);
+       it now moves them down, with their whole-wave save
+       (`CodeGen/AMDGPU/wwm-shift-call-clobbers-all.ll`).
+   - *Registers,* HEAD (31b2f85f4709) against now, static
+     (`gpu-registers.py`): swe-muscl's kernel on gfx90a 256 VGPRs, 0
+     AGPRs, 2 waves both, spills and reloads 10/24 against 12/32; on
+     gfx1030 252 VGPRs, 4 waves both, 0/0 against 11/15, around the
+     guard's call, once a process. process-kernels.m's kernel 67 VGPRs
+     against 55 on gfx1030, 64 against 53 on gfx90a.
 4. The univ's text for `failed(Text)` and the report on the standard error,
    as mmc prints an uncaught exception.
 

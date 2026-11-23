@@ -184,6 +184,16 @@ void AddDeviceStackChecks(llvm::Module &);
 // worker teams runs, and anything a loop also reaches, is not marked.
 void MarkProcessCodeSingleLane(llvm::Module &);
 
+// Adds the guard under which a GPU process image's processes run
+// (docs/INPROGRESS.md, Exceptions, step 3): merk_place_guard(kind, words,
+// jump), which the kernel's wave calls for each process, keeps no register
+// for its caller and saves its stack's pointers and the wave's exec mask in
+// the jump, then calls merk_place_run(kind, words, jump), which saves its
+// own return address there and calls merk_process_dispatch. A stop or an
+// uncaught exception in the process jumps back as from that call
+// (runtime/device/device.cpp, ProcessJump).
+void AddProcessGuard(llvm::Module &);
+
 // Warns of each call in a GPU process image's code of the module that may
 // recurse and is not a tail call, after lowering to the LLVM dialect, where
 // tail calls are known: a GPU process's stack is small.

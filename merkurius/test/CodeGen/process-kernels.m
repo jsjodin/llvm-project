@@ -109,6 +109,22 @@ main(!IO) :-
 % KERNEL0-NEXT:  ret void
 % KERNEL2:define hidden void @merk_process_dispatch(i64 %0, i64 %1) local_unnamed_addr #{{[0-9]+}} {
 
+% The guard that the kernel's lane 0 calls to run a process, so that a stop
+% or an uncaught exception jumps back to its return (docs/INPROGRESS.md,
+% Exceptions, step 3). It saves the stack's pointers, and its call of the
+% run, which saves its return address, keeps no register, so the jump finds
+% all that the guard needs in its frame. The run is weak, so that what it
+% really clobbers, less than a jump does, does not replace the call's mask,
+% and norecurse, as the kernel's stack must stay static. Both have the
+% kernel's bounds, and the run needs no AGPRs, which the AMDGPU attributor
+% does not infer through a weak function.
+% KERNEL2:define weak hidden void @merk_place_run(i64 %0, i64 %1, ptr %2) #[[RUNS:[0-9]+]] {
+% KERNEL2:define hidden void @merk_place_guard(i64 %0, i64 %1, ptr %2) #[[GUARD:[0-9]+]] {
+% KERNEL2:  notail call void @merk_place_run(i64 %0, i64 %1, ptr %2) #[[KEEPSNONE:[0-9]+]]
+% KERNEL2-DAG:attributes #[[RUNS]] = { noinline norecurse nounwind "amdgpu-agpr-alloc"="0" "amdgpu-flat-work-group-size"="256,256" }
+% KERNEL2-DAG:attributes #[[GUARD]] = { noinline nounwind "amdgpu-flat-work-group-size"="256,256" "llvm.assume"="ompx_no_call_asm" "no_callee_saved_registers" }
+% KERNEL2-DAG:attributes #[[KEEPSNONE]] = { "no_callee_saved_registers" }
+
 % The host embeds the image, and registers it, after the message types.
 % HOST:@process_kernels.merk_process_image.module = internal constant [16 x i8] c"process_kernels\00", align 1
 % HOST-NEXT:@process_kernels.merk_process_image.kinds = internal constant [7 x i8] c"summer\00", align 1

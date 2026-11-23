@@ -1130,6 +1130,7 @@ bool CodeGenAction::Emit(llvm::Module &llvmModule,
     codegen::OptimizeLLVMIR(llvmModule, target);
     if (target.options().processKernels) {
       codegen::MarkProcessCodeSingleLane(llvmModule);
+      codegen::AddProcessGuard(llvmModule);
     }
     codegen::AddStackChecks(llvmModule);
     if (target.options().processKernels) {

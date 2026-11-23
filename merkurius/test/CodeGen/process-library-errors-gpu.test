@@ -1,10 +1,14 @@
 process-library-errors.m's calls in a GPU process on the machine's GPU: the
 library's software and domain errors are reported as the host reports them,
-and end the program.
+and end only the process, which its monitor sees failed with the report's
+text; the program goes on and exits with status 0.
 REQUIRES: amdgpu-gpu
 
 RUN: merkc -O2 -fopenmp -fprocess-declarations --offload-arch=%offload-arch %libomp-flags %S/process-library-errors.m -o %t2
 RUN: %gpu-env %t2 gpu ok | FileCheck %S/process-library-errors.m --check-prefix=OK --match-full-lines --strict-whitespace
-RUN: not %gpu-env %t2 gpu unexpected 2>&1 | FileCheck %S/process-library-errors.m --check-prefix=UNEXPECTED --match-full-lines --strict-whitespace
-RUN: not %gpu-env %t2 gpu sqrt 2>&1 | FileCheck %S/process-library-errors.m --check-prefix=SQRT --match-full-lines --strict-whitespace
-RUN: not %gpu-env %t2 gpu pow 2>&1 | FileCheck %S/process-library-errors.m --check-prefix=POW --match-full-lines --strict-whitespace
+RUN: %gpu-env %t2 gpu unexpected 2> %t2.unexpected | FileCheck %S/process-library-errors.m --check-prefix=DOWN-UNEXPECTED --match-full-lines --strict-whitespace
+RUN: FileCheck %S/process-library-errors.m --check-prefix=UNEXPECTED --match-full-lines --strict-whitespace < %t2.unexpected
+RUN: %gpu-env %t2 gpu sqrt 2> %t2.sqrt | FileCheck %S/process-library-errors.m --check-prefix=DOWN-SQRT --match-full-lines --strict-whitespace
+RUN: FileCheck %S/process-library-errors.m --check-prefix=SQRT --match-full-lines --strict-whitespace < %t2.sqrt
+RUN: %gpu-env %t2 gpu pow 2> %t2.pow | FileCheck %S/process-library-errors.m --check-prefix=DOWN-POW --match-full-lines --strict-whitespace
+RUN: FileCheck %S/process-library-errors.m --check-prefix=POW --match-full-lines --strict-whitespace < %t2.pow

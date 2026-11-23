@@ -94,7 +94,8 @@
     ;       failed(string)
             % Ended from outside, by stop.
     ;       killed
-            % Another process of its GPU kernel failed, which ends them all.
+            % Its GPU kernel ended, which ends every process in it, as a
+            % trap does.
     ;       kernel_ended
             % The connection to its node was lost; it may still run.
     ;       noconnection.
