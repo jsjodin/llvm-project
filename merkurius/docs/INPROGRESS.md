@@ -8110,6 +8110,44 @@ Sketched for a later stage:
 `stop` in step 1; D3 in MC-transport-plan.md, with these steps as its
 milestones; separate programs for the demos.
 
+## Spawning from a GPU process: later
+
+Noted 2026-11-22, at the user's request, as a design to do later. A GPU
+process cannot spawn today, neither a host process nor another GPU
+process. `spawn` takes the process as a closure, `helper(Reply)`, and a GPU
+kind's code may make only flat values, so the compiler rejects it ("must
+make only flat values ... is a higher-order type"). The device runtime has
+no spawn either, and the design document leaves spawning from the GPU out
+(GPU processes without omp target).
+
+**The sketch.** The host already spawns a GPU kind by its name and its
+arguments as flat words (`merk_gpu_process_spawn`). A spawn from a GPU can
+take the same shape in the other direction:
+- *In the compiler,* a `spawn` in a GPU kind's code whose process is a kind
+  applied to its arguments, as `spawn(helper(Reply), H, !IO)`, becomes the
+  kind's number and its arguments' words, with no closure made. A kind
+  whose arguments are not all flat cannot be spawned from a GPU, an error
+  at compile time; so cannot a closure that is not a kind's application.
+- *On the device,* an RPC to the host with the kind's number, `spawn`'s
+  place (the host, or `gpu(N)`), and the words. Lane 0 waits for the
+  answer, as for other RPCs that answer.
+- *On the host,* the spawn runs as one from a host process would, by the
+  module's registered kinds, and the answer is the new mailbox's handle,
+  or a spawn's failure, which the device reports as a host spawn reports
+  it.
+
+**To decide when it is taken up:**
+- whether a GPU process may spawn a GPU kind, on its own GPU or another.
+  The host can do it, but a spawn into the caller's own kernel must not
+  wait for a slot that only the caller's end frees;
+- what the spawned process's parent is for its record and its monitors;
+- the cost of an RPC that waits, against a GPU process's other work.
+
+**Shared with step 5 of the failure design** (A watcher on a GPU): a GPU
+process that calls `monitor` needs the same kind of RPC that waits for an
+answer, there the monitor's id. Doing both together gives one path for
+process operations from a GPU.
+
 ## The receive goal: later
 
 The receive goal is done (design document, Processes and mailboxes, "The
