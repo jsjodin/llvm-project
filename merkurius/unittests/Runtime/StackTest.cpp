@@ -164,4 +164,44 @@ TEST(StackTest, ManyTakeTurns) {
   }
 }
 
+#if defined(__x86_64__)
+// An entry as LLVM compiles a tailcc one that tail-calls with a stack
+// argument: it stores the argument in the 8 bytes above its return address,
+// which a tailcc callee owns, and pops them. CallingClosureKeepsRbx calls
+// merk_call_closure with a value in rbx, which it must keep.
+extern "C" void merk_test_tailcc_entry(void);
+extern "C" std::uint64_t merk_test_call_closure_keeping_rbx(const void *cell);
+extern "C" void merk_call_closure(
+    std::uint64_t closure, std::uint64_t argument, std::uint64_t io);
+__asm__(R"(
+    .text
+    .p2align 4
+    .type merk_test_tailcc_entry, @function
+merk_test_tailcc_entry:
+    movq $0, 8(%rsp)
+    retq $8
+    .size merk_test_tailcc_entry, .-merk_test_tailcc_entry
+
+    .p2align 4
+    .type merk_test_call_closure_keeping_rbx, @function
+merk_test_call_closure_keeping_rbx:
+    pushq %rbx
+    movabsq $0x5eed5eed5eed5eed, %rbx
+    xorl %esi, %esi
+    xorl %edx, %edx
+    callq merk_call_closure
+    movq %rbx, %rax
+    popq %rbx
+    retq
+    .size merk_test_call_closure_keeping_rbx, .-merk_test_call_closure_keeping_rbx
+)");
+
+TEST(StackTest, CallingClosureKeepsRbx) {
+  static const void *const cell[1]{
+      reinterpret_cast<const void *>(&merk_test_tailcc_entry)};
+  EXPECT_EQ(merk_test_call_closure_keeping_rbx(cell),
+      std::uint64_t{0x5eed5eed5eed5eed});
+}
+#endif
+
 } // namespace

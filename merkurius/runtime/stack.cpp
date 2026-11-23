@@ -147,8 +147,13 @@ merk_stack_entry:
     .cfi_endproc
     .size merk_stack_entry, .-merk_stack_entry
 
-    # A closure's cell has its entry's code in word 0. The stack pointer is
-    # kept in a callee-saved register, as the callee may pop from the stack.
+    # A closure's cell has its entry's code in word 0. The entry is tailcc,
+    # whose callee owns and pops the 8 bytes above its return address even
+    # with no stack arguments, as LLVM keeps the stack aligned; it stores a
+    # tail call's stack argument there. So they are reserved, as LLVM's own
+    # callers and the try entries reserve them (exception.cpp), or the store
+    # would land on the saved rbx. The stack pointer is kept in a
+    # callee-saved register, as the callee pops from the stack.
     .p2align 4
     .globl merk_call_closure
     .hidden merk_call_closure
@@ -157,6 +162,7 @@ merk_call_closure:
     pushq %rbx
     movq %rsp, %rbx
     andq $-16, %rsp
+    subq $16, %rsp
     callq *(%rdi)
     movq %rbx, %rsp
     popq %rbx
