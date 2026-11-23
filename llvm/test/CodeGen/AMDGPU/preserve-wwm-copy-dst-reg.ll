@@ -385,7 +385,7 @@ define void @preserve_wwm_copy_dstreg(ptr %parg0, ptr %parg1, ptr %parg2) #0 {
 ; GFX908-NEXT:    s_mov_b32 s16, s33
 ; GFX908-NEXT:    s_mov_b32 s33, s32
 ; GFX908-NEXT:    s_xor_saveexec_b64 s[18:19], -1
-; GFX908-NEXT:    buffer_store_dword v39, off, s[0:3], s33 offset:16 ; 4-byte Folded Spill
+; GFX908-NEXT:    buffer_store_dword v36, off, s[0:3], s33 offset:16 ; 4-byte Folded Spill
 ; GFX908-NEXT:    s_mov_b64 exec, s[18:19]
 ; GFX908-NEXT:    v_mov_b32_e32 v2, s16
 ; GFX908-NEXT:    buffer_store_dword v2, off, s[0:3], s33 offset:164 ; 4-byte Folded Spill
@@ -405,27 +405,27 @@ define void @preserve_wwm_copy_dstreg(ptr %parg0, ptr %parg1, ptr %parg2) #0 {
 ; GFX908-NEXT:    s_waitcnt vmcnt(0)
 ; GFX908-NEXT:    s_mov_b64 exec, s[16:17]
 ; GFX908-NEXT:    s_mov_b32 s21, s15
-; GFX908-NEXT:    ; implicit-def: $vgpr39 : SGPR spill to VGPR lane
+; GFX908-NEXT:    ; implicit-def: $vgpr36 : SGPR spill to VGPR lane
 ; GFX908-NEXT:    s_mov_b32 s22, s14
-; GFX908-NEXT:    v_writelane_b32 v39, s21, 0
-; GFX908-NEXT:    v_writelane_b32 v39, s22, 1
+; GFX908-NEXT:    v_writelane_b32 v36, s21, 0
+; GFX908-NEXT:    v_writelane_b32 v36, s22, 1
 ; GFX908-NEXT:    s_mov_b32 s23, s13
-; GFX908-NEXT:    v_writelane_b32 v39, s23, 2
+; GFX908-NEXT:    v_writelane_b32 v36, s23, 2
 ; GFX908-NEXT:    s_mov_b32 s24, s12
-; GFX908-NEXT:    v_writelane_b32 v39, s24, 3
+; GFX908-NEXT:    v_writelane_b32 v36, s24, 3
 ; GFX908-NEXT:    s_mov_b64 s[26:27], s[10:11]
-; GFX908-NEXT:    v_writelane_b32 v39, s26, 4
-; GFX908-NEXT:    v_writelane_b32 v39, s27, 5
-; GFX908-NEXT:    v_writelane_b32 v39, s8, 6
-; GFX908-NEXT:    v_writelane_b32 v39, s9, 7
-; GFX908-NEXT:    v_writelane_b32 v39, s6, 8
-; GFX908-NEXT:    v_writelane_b32 v39, s7, 9
+; GFX908-NEXT:    v_writelane_b32 v36, s26, 4
+; GFX908-NEXT:    v_writelane_b32 v36, s27, 5
+; GFX908-NEXT:    v_writelane_b32 v36, s8, 6
+; GFX908-NEXT:    v_writelane_b32 v36, s9, 7
+; GFX908-NEXT:    v_writelane_b32 v36, s6, 8
+; GFX908-NEXT:    v_writelane_b32 v36, s7, 9
 ; GFX908-NEXT:    buffer_store_dword v0, off, s[0:3], s33 offset:20 ; 4-byte Folded Spill
 ; GFX908-NEXT:    s_nop 0
 ; GFX908-NEXT:    buffer_store_dword v1, off, s[0:3], s33 offset:24 ; 4-byte Folded Spill
-; GFX908-NEXT:    v_writelane_b32 v39, s4, 10
+; GFX908-NEXT:    v_writelane_b32 v36, s4, 10
 ; GFX908-NEXT:    v_mov_b32_e32 v32, v31
-; GFX908-NEXT:    v_writelane_b32 v39, s5, 11
+; GFX908-NEXT:    v_writelane_b32 v36, s5, 11
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def v[0:31]
 ; GFX908-NEXT:    ;;#ASMEND
@@ -468,216 +468,216 @@ define void @preserve_wwm_copy_dstreg(ptr %parg0, ptr %parg1, ptr %parg2) #0 {
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s11
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s11, 12
+; GFX908-NEXT:    v_writelane_b32 v36, s11, 12
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s12
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s12, 13
+; GFX908-NEXT:    v_writelane_b32 v36, s12, 13
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s13
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s13, 14
+; GFX908-NEXT:    v_writelane_b32 v36, s13, 14
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s14
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s14, 15
+; GFX908-NEXT:    v_writelane_b32 v36, s14, 15
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s15
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s15, 16
+; GFX908-NEXT:    v_writelane_b32 v36, s15, 16
 ; GFX908-NEXT:    s_getpc_b64 s[10:11]
 ; GFX908-NEXT:    s_add_u32 s10, s10, foo@gotpcrel32@lo+4
 ; GFX908-NEXT:    s_addc_u32 s11, s11, foo@gotpcrel32@hi+12
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s16
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s16, 17
+; GFX908-NEXT:    v_writelane_b32 v36, s16, 17
 ; GFX908-NEXT:    s_load_dwordx2 s[10:11], s[10:11], 0x0
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s17
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s17, 18
+; GFX908-NEXT:    v_writelane_b32 v36, s17, 18
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s18
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s18, 19
+; GFX908-NEXT:    v_writelane_b32 v36, s18, 19
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s19
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s19, 20
+; GFX908-NEXT:    v_writelane_b32 v36, s19, 20
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s20
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s20, 21
+; GFX908-NEXT:    v_writelane_b32 v36, s20, 21
 ; GFX908-NEXT:    s_waitcnt lgkmcnt(0)
-; GFX908-NEXT:    v_writelane_b32 v39, s10, 22
-; GFX908-NEXT:    v_writelane_b32 v39, s11, 23
+; GFX908-NEXT:    v_writelane_b32 v36, s10, 22
+; GFX908-NEXT:    v_writelane_b32 v36, s11, 23
 ; GFX908-NEXT:    s_or_saveexec_b64 s[34:35], -1
 ; GFX908-NEXT:    s_mov_b64 exec, s[34:35]
 ; GFX908-NEXT:    s_or_saveexec_b64 s[34:35], -1
-; GFX908-NEXT:    buffer_store_dword v39, off, s[0:3], s33 offset:12 ; 4-byte Folded Spill
+; GFX908-NEXT:    buffer_store_dword v36, off, s[0:3], s33 offset:12 ; 4-byte Folded Spill
 ; GFX908-NEXT:    s_mov_b64 exec, s[34:35]
-; GFX908-NEXT:    v_readlane_b32 s16, v39, 22
+; GFX908-NEXT:    v_readlane_b32 s16, v36, 22
 ; GFX908-NEXT:    s_mov_b32 s12, s24
 ; GFX908-NEXT:    s_mov_b32 s13, s23
 ; GFX908-NEXT:    s_mov_b32 s14, s22
 ; GFX908-NEXT:    v_mov_b32_e32 v31, v32
 ; GFX908-NEXT:    s_mov_b32 s15, s21
 ; GFX908-NEXT:    s_mov_b64 s[10:11], s[26:27]
-; GFX908-NEXT:    v_readlane_b32 s17, v39, 23
+; GFX908-NEXT:    v_readlane_b32 s17, v36, 23
 ; GFX908-NEXT:    v_mov_b32_e32 v40, v32
 ; GFX908-NEXT:    s_swappc_b64 s[30:31], s[16:17]
 ; GFX908-NEXT:    s_or_saveexec_b64 s[34:35], -1
-; GFX908-NEXT:    buffer_load_dword v39, off, s[0:3], s33 offset:12 ; 4-byte Folded Reload
+; GFX908-NEXT:    buffer_load_dword v36, off, s[0:3], s33 offset:12 ; 4-byte Folded Reload
 ; GFX908-NEXT:    s_mov_b64 exec, s[34:35]
 ; GFX908-NEXT:    s_waitcnt vmcnt(0)
-; GFX908-NEXT:    v_readlane_b32 s11, v39, 12
+; GFX908-NEXT:    v_readlane_b32 s11, v36, 12
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s11
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s12, v39, 13
+; GFX908-NEXT:    v_readlane_b32 s12, v36, 13
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s12
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s13, v39, 14
+; GFX908-NEXT:    v_readlane_b32 s13, v36, 14
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s13
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s14, v39, 15
+; GFX908-NEXT:    v_readlane_b32 s14, v36, 15
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s14
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s15, v39, 16
+; GFX908-NEXT:    v_readlane_b32 s15, v36, 16
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s15
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s16, v39, 17
+; GFX908-NEXT:    v_readlane_b32 s16, v36, 17
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s16
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s17, v39, 18
+; GFX908-NEXT:    v_readlane_b32 s17, v36, 18
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s17
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s18, v39, 19
+; GFX908-NEXT:    v_readlane_b32 s18, v36, 19
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s18
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s19, v39, 20
+; GFX908-NEXT:    v_readlane_b32 s19, v36, 20
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s19
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s20, v39, 21
+; GFX908-NEXT:    v_readlane_b32 s20, v36, 21
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s20
 ; GFX908-NEXT:    ;;#ASMEND
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s21
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s21, 12
+; GFX908-NEXT:    v_writelane_b32 v36, s21, 12
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s22
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s22, 13
+; GFX908-NEXT:    v_writelane_b32 v36, s22, 13
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s23
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s23, 14
+; GFX908-NEXT:    v_writelane_b32 v36, s23, 14
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s24
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s24, 15
+; GFX908-NEXT:    v_writelane_b32 v36, s24, 15
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s25
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s25, 16
+; GFX908-NEXT:    v_writelane_b32 v36, s25, 16
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s26
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s26, 17
+; GFX908-NEXT:    v_writelane_b32 v36, s26, 17
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s27
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s27, 18
+; GFX908-NEXT:    v_writelane_b32 v36, s27, 18
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s28
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s28, 19
+; GFX908-NEXT:    v_writelane_b32 v36, s28, 19
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; def s29
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_writelane_b32 v39, s29, 20
+; GFX908-NEXT:    v_writelane_b32 v36, s29, 20
 ; GFX908-NEXT:    s_or_saveexec_b64 s[34:35], -1
-; GFX908-NEXT:    buffer_store_dword v39, off, s[0:3], s33 offset:12 ; 4-byte Folded Spill
+; GFX908-NEXT:    buffer_store_dword v36, off, s[0:3], s33 offset:12 ; 4-byte Folded Spill
 ; GFX908-NEXT:    s_mov_b64 exec, s[34:35]
-; GFX908-NEXT:    v_readlane_b32 s4, v39, 10
-; GFX908-NEXT:    v_readlane_b32 s6, v39, 8
-; GFX908-NEXT:    v_readlane_b32 s8, v39, 6
-; GFX908-NEXT:    v_readlane_b32 s10, v39, 4
-; GFX908-NEXT:    v_readlane_b32 s16, v39, 22
-; GFX908-NEXT:    v_readlane_b32 s12, v39, 3
-; GFX908-NEXT:    v_readlane_b32 s13, v39, 2
-; GFX908-NEXT:    v_readlane_b32 s14, v39, 1
+; GFX908-NEXT:    v_readlane_b32 s4, v36, 10
+; GFX908-NEXT:    v_readlane_b32 s6, v36, 8
+; GFX908-NEXT:    v_readlane_b32 s8, v36, 6
+; GFX908-NEXT:    v_readlane_b32 s10, v36, 4
+; GFX908-NEXT:    v_readlane_b32 s16, v36, 22
+; GFX908-NEXT:    v_readlane_b32 s12, v36, 3
+; GFX908-NEXT:    v_readlane_b32 s13, v36, 2
+; GFX908-NEXT:    v_readlane_b32 s14, v36, 1
 ; GFX908-NEXT:    v_mov_b32_e32 v31, v40
-; GFX908-NEXT:    v_readlane_b32 s15, v39, 0
-; GFX908-NEXT:    v_readlane_b32 s5, v39, 11
-; GFX908-NEXT:    v_readlane_b32 s7, v39, 9
-; GFX908-NEXT:    v_readlane_b32 s9, v39, 7
-; GFX908-NEXT:    v_readlane_b32 s11, v39, 5
-; GFX908-NEXT:    v_readlane_b32 s17, v39, 23
+; GFX908-NEXT:    v_readlane_b32 s15, v36, 0
+; GFX908-NEXT:    v_readlane_b32 s5, v36, 11
+; GFX908-NEXT:    v_readlane_b32 s7, v36, 9
+; GFX908-NEXT:    v_readlane_b32 s9, v36, 7
+; GFX908-NEXT:    v_readlane_b32 s11, v36, 5
+; GFX908-NEXT:    v_readlane_b32 s17, v36, 23
 ; GFX908-NEXT:    s_swappc_b64 s[30:31], s[16:17]
 ; GFX908-NEXT:    s_or_saveexec_b64 s[34:35], -1
-; GFX908-NEXT:    buffer_load_dword v39, off, s[0:3], s33 offset:12 ; 4-byte Folded Reload
+; GFX908-NEXT:    buffer_load_dword v36, off, s[0:3], s33 offset:12 ; 4-byte Folded Reload
 ; GFX908-NEXT:    s_mov_b64 exec, s[34:35]
 ; GFX908-NEXT:    s_waitcnt vmcnt(0)
-; GFX908-NEXT:    v_readlane_b32 s4, v39, 10
-; GFX908-NEXT:    v_readlane_b32 s6, v39, 8
-; GFX908-NEXT:    v_readlane_b32 s8, v39, 6
-; GFX908-NEXT:    v_readlane_b32 s10, v39, 4
-; GFX908-NEXT:    v_readlane_b32 s16, v39, 22
-; GFX908-NEXT:    v_readlane_b32 s5, v39, 11
-; GFX908-NEXT:    v_readlane_b32 s7, v39, 9
-; GFX908-NEXT:    v_readlane_b32 s9, v39, 7
-; GFX908-NEXT:    v_readlane_b32 s11, v39, 5
-; GFX908-NEXT:    v_readlane_b32 s12, v39, 3
-; GFX908-NEXT:    v_readlane_b32 s13, v39, 2
-; GFX908-NEXT:    v_readlane_b32 s14, v39, 1
-; GFX908-NEXT:    v_readlane_b32 s15, v39, 0
+; GFX908-NEXT:    v_readlane_b32 s4, v36, 10
+; GFX908-NEXT:    v_readlane_b32 s6, v36, 8
+; GFX908-NEXT:    v_readlane_b32 s8, v36, 6
+; GFX908-NEXT:    v_readlane_b32 s10, v36, 4
+; GFX908-NEXT:    v_readlane_b32 s16, v36, 22
+; GFX908-NEXT:    v_readlane_b32 s5, v36, 11
+; GFX908-NEXT:    v_readlane_b32 s7, v36, 9
+; GFX908-NEXT:    v_readlane_b32 s9, v36, 7
+; GFX908-NEXT:    v_readlane_b32 s11, v36, 5
+; GFX908-NEXT:    v_readlane_b32 s12, v36, 3
+; GFX908-NEXT:    v_readlane_b32 s13, v36, 2
+; GFX908-NEXT:    v_readlane_b32 s14, v36, 1
+; GFX908-NEXT:    v_readlane_b32 s15, v36, 0
 ; GFX908-NEXT:    v_mov_b32_e32 v31, v40
-; GFX908-NEXT:    v_readlane_b32 s17, v39, 23
-; GFX908-NEXT:    v_readlane_b32 s21, v39, 12
+; GFX908-NEXT:    v_readlane_b32 s17, v36, 23
+; GFX908-NEXT:    v_readlane_b32 s21, v36, 12
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s21
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s22, v39, 13
+; GFX908-NEXT:    v_readlane_b32 s22, v36, 13
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s22
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s23, v39, 14
+; GFX908-NEXT:    v_readlane_b32 s23, v36, 14
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s23
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s24, v39, 15
+; GFX908-NEXT:    v_readlane_b32 s24, v36, 15
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s24
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s25, v39, 16
+; GFX908-NEXT:    v_readlane_b32 s25, v36, 16
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s25
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s26, v39, 17
+; GFX908-NEXT:    v_readlane_b32 s26, v36, 17
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s26
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s27, v39, 18
+; GFX908-NEXT:    v_readlane_b32 s27, v36, 18
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s27
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s28, v39, 19
+; GFX908-NEXT:    v_readlane_b32 s28, v36, 19
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s28
 ; GFX908-NEXT:    ;;#ASMEND
-; GFX908-NEXT:    v_readlane_b32 s29, v39, 20
+; GFX908-NEXT:    v_readlane_b32 s29, v36, 20
 ; GFX908-NEXT:    ;;#ASMSTART
 ; GFX908-NEXT:    ; use s29
 ; GFX908-NEXT:    ;;#ASMEND
@@ -765,7 +765,7 @@ define void @preserve_wwm_copy_dstreg(ptr %parg0, ptr %parg1, ptr %parg2) #0 {
 ; GFX908-NEXT:    s_waitcnt vmcnt(0)
 ; GFX908-NEXT:    v_readfirstlane_b32 s35, v0
 ; GFX908-NEXT:    s_xor_saveexec_b64 s[6:7], -1
-; GFX908-NEXT:    buffer_load_dword v39, off, s[0:3], s33 offset:16 ; 4-byte Folded Reload
+; GFX908-NEXT:    buffer_load_dword v36, off, s[0:3], s33 offset:16 ; 4-byte Folded Reload
 ; GFX908-NEXT:    s_mov_b64 exec, s[6:7]
 ; GFX908-NEXT:    s_mov_b32 s33, s4
 ; GFX908-NEXT:    s_waitcnt vmcnt(0) lgkmcnt(0)

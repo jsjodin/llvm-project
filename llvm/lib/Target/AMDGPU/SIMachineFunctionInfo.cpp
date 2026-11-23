@@ -341,19 +341,56 @@ bool SIMachineFunctionInfo::isCalleeSavedReg(const MCPhysReg *CSRegs,
   return false;
 }
 
+// The lowest VGPR below \p Reg that the function does not use and that no
+// call clobbers unless it clobbers \p Reg too, so that it can hold what \p Reg
+// holds. A call that clobbers both does not rule it out: what is live in
+// \p Reg across the call is already spilled around it. Otherwise a function
+// with a call that clobbers every VGPR would keep the highest one that
+// SILowerSGPRSpills picked, and count every VGPR.
+static MCRegister
+findUnusedVGPRForWWM(const MachineRegisterInfo &MRI,
+                     ArrayRef<const uint32_t *> RegMasks, MCRegister Reg) {
+  for (MCRegister NewReg : AMDGPU::VGPR_32RegClass) {
+    if (NewReg >= Reg)
+      break;
+    if (!MRI.isAllocatable(NewReg) ||
+        MRI.isPhysRegUsed(NewReg, /*SkipRegMaskTest=*/true))
+      continue;
+    if (llvm::all_of(RegMasks, [&](const uint32_t *Mask) {
+          return !MachineOperand::clobbersPhysReg(Mask, NewReg) ||
+                 MachineOperand::clobbersPhysReg(Mask, Reg);
+        }))
+      return NewReg;
+  }
+  return MCRegister();
+}
+
 void SIMachineFunctionInfo::shiftWwmVGPRsToLowestRange(
     MachineFunction &MF, SmallVectorImpl<Register> &WWMVGPRs,
     BitVector &SavedVGPRs) {
   const SIRegisterInfo *TRI = MF.getSubtarget<GCNSubtarget>().getRegisterInfo();
   MachineRegisterInfo &MRI = MF.getRegInfo();
+  SmallVector<const uint32_t *> RegMasks;
+  for (const MachineBasicBlock &MBB : MF)
+    for (const MachineInstr &MI : MBB)
+      for (const MachineOperand &MO : MI.operands())
+        if (MO.isRegMask())
+          RegMasks.push_back(MO.getRegMask());
   for (unsigned I = 0, E = WWMVGPRs.size(); I < E; ++I) {
     Register Reg = WWMVGPRs[I];
-    Register NewReg =
-        TRI->findUnusedRegister(MRI, &AMDGPU::VGPR_32RegClass, MF);
-    if (!NewReg || NewReg >= Reg)
+    Register NewReg = findUnusedVGPRForWWM(MRI, RegMasks, Reg);
+    if (!NewReg)
       break;
 
     MRI.replaceRegWith(Reg, NewReg);
+
+    // A whole-wave save that SILowerWWMCopies made for the old register is
+    // the new one's, as the old one is no longer used.
+    if (auto It = WWMSpills.find(Reg); It != WWMSpills.end()) {
+      int FI = It->second;
+      WWMSpills.erase(It);
+      WWMSpills.try_emplace(NewReg, FI);
+    }
 
     // Update various tables with the new VGPR.
     WWMVGPRs[I] = NewReg;
