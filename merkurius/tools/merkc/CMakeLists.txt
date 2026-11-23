@@ -28,3 +28,9 @@ target_link_libraries(merkc
   MerkuriusFrontendTool
   MerkuriusParser
   )
+
+# A program links the instrumented runtime, which needs clang's profile
+# runtime.
+if(MERKURIUS_COVERAGE)
+  target_compile_definitions(merkc PRIVATE MERKURIUS_COVERAGE=1)
+endif()

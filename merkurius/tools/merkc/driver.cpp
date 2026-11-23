@@ -648,6 +648,11 @@ static bool buildJobs(const InputArgList &args, llvm::StringRef executable,
       job.push_back("-lLLVMOffload");
     }
     job.push_back("-lm");
+#ifdef MERKURIUS_COVERAGE
+    // A build with MERKURIUS_COVERAGE instruments the runtime, which then
+    // needs clang's profile runtime, which this adds.
+    job.push_back("-fprofile-instr-generate");
+#endif
     jobs.push_back(std::move(job));
   }
   return ok;

@@ -8477,6 +8477,14 @@ tested shows.
   that the suite also lists what is missing; `differs-` expects our
   behaviour where it differs from mmc for one of the reasons above, which
   its header names, with mmc's.
+- *A known bug is documented, not hidden* (the user, the same day). A
+  `run-` or `reject-` test that merkc gets wrong, silently rather than
+  with an NYI error, says why on a `% KNOWN-BUG:` line; its expectations
+  stay mmc's, and the oracle adds lit's `XFAIL: *`, so that the suite
+  passes while the bug is open, reports XPASS, a failure, once it is
+  fixed, until the line goes, and `matrix.py --known` lists them all. For
+  now every bug found is fixed as it is found, its own commit; the marker
+  is for one that must wait.
 - *A test's header* names the manual's section it tests, on a line of its
   own, `% MANUAL: Types / Field access functions`, and quotes or
   paraphrases the rule. One test checks one rule, or a few closely
@@ -8495,9 +8503,32 @@ tested shows.
 - *The map,* `utils/conformance/matrix.py`, reads the `MANUAL:` lines and
   prints each section of the manual with its tests by class. A section
   with no `run-` or `reject-` test is a gap; the `nyi-` count is what is
-  missing. A run of the compiler built with coverage
-  (`-DLLVM_BUILD_INSTRUMENTED_COVERAGE`) over the suite shows what code no
-  test reaches, the other way round.
+  missing.
+- *Code coverage finds the gaps* (the user, the same day). The map shows
+  which rules have tests; coverage shows which code
+  no test reaches, the other way round, and the two together say where
+  tests are missing. A build of its own, `build-cov`, instruments only
+  Merkurius's code with clang's source-based coverage
+  (`-fprofile-instr-generate -fcoverage-mapping`, a CMake option
+  `MERKURIUS_COVERAGE`), so that LLVM and MLIR are not, and the normal
+  build is never: merkc's front end, semantics and code generation, and
+  the host runtime that test programs link, which writes its profile at
+  exit, including `ExitProgram`'s. A script,
+  `utils/conformance/coverage.sh`, runs lit over a set of tests with
+  `LLVM_PROFILE_FILE`, merges the profiles with `llvm-profdata`, and
+  writes `llvm-cov`'s report by file and function, and its HTML for
+  reading lines. The first run is of the existing tests, as the baseline
+  the suite starts from. Each chapter's tests are written from the manual
+  first, as fully as we can; then coverage of the code that implements it
+  shows what they miss, and what is still unreached is either tested or
+  explained (unreachable, a defensive check, or a feature not done). A
+  report can be limited to files with `llvm-cov`'s `-sources`, and a run to
+  a directory of tests; instrumenting only some files
+  (`-fprofile-list`) would shrink the profiles, but they are a few GB for
+  the whole suite, gone once merged.
+  Coverage is a guide, not a target: a line run is not a rule checked,
+  and the hand-written tests still follow the manual. The device runtime
+  is not measured; GPU code has no profile runtime here.
 - *Interactions* are where compilers break, and the part worth most. Two
   lists: features (unification of each layout, each determinism,
   higher-order calls, type classes, existential types, unique modes,
@@ -8538,9 +8569,35 @@ tested shows.
 
 **Steps:**
 1. The skeleton: the directories, the header and class conventions, the
-   oracle script and the map (which reads `DESIGN:` lines too), with
-   `types/` written in full as the model, and the map run over the
-   existing tests' `MANUAL:` and `DESIGN:` lines.
+   oracle script and the map (which reads `DESIGN:` lines too); the
+   coverage build and script, and the baseline report of the existing
+   tests; then `types/` written in full as the model, from the manual,
+   and its coverage after.
+
+   *Built 2026-11-23, the framework:* `oracle.py` (the classes `run-`,
+   `reject-`, `nyi-`, `differs-`, and `KNOWN-BUG`), `matrix.py` with
+   `manual-sections.txt` (190 nodes of mmc 22.01's manual, from its info
+   files), `coverage.sh`, and the `MERKURIUS_COVERAGE` build
+   (`build_merk.sh`'s help shows how to configure it). The `run-` and
+   `reject-` classes, multi-module tests and `KNOWN-BUG` were checked on
+   draft `types/` tests, kept out of this commit. Building the runtime
+   with clang found two bugs, fixed first: `open.cpp` lacked
+   `<iterator>`, and libstdc++ 12's headers under `_GLIBCXX_ASSERTIONS`
+   call a function only libstdc++.so defines, which programs do not link.
+   The coverage build's first run of the existing host tests passes 550 of
+   563 and measures 88% of Merkurius's lines. What is left before the
+   baseline is trusted:
+   - the three Driver `-###` tests see the coverage build's
+     `-fprofile-instr-generate` on the link line, and want a lit feature
+     that marks them unsupported there;
+   - seven Semantics/desugar dumps number goals differently when merkc is
+     built with clang, which looks like code that depends on the order
+     in which a call's arguments are evaluated: a bug, as the numbering
+     should not depend on the host compiler;
+   - pipeline, mandel-places and mandel-recover crash (SIGSEGV) under the
+     coverage build, to be found;
+   - `llvm-cov` warns that 3676 functions have mismatched data, whose
+     counts it drops, to be explained.
 2. The chapters, in the order the compiler meets them: syntax, types,
    modes, determinism, unique modes, higher-order, modules, type classes,
    existential types, equality and comparison, type conversions,
@@ -8552,8 +8609,8 @@ tested shows.
    do loops and OpenMP, GPU processes, open types, flat records,
    distribution.
 4. The interaction generator, with the features and contexts above.
-5. The coverage run, and tests for what it shows unreached.
-6. The random generators moved under `generated/` and extended.
+5. The random generators moved under `generated/` and extended, with
+   coverage telling which features they should reach next.
 
 ## Spawning from a GPU process: later
 

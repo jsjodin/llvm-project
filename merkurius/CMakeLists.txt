@@ -109,6 +109,22 @@ endif()
 add_custom_target(merkurius-headers)
 set_target_properties(merkurius-headers PROPERTIES FOLDER "Merkurius/Misc")
 
+# Source-based coverage of Merkurius's own code, the compiler and the host
+# runtime that programs link, for the conformance suite (docs/INPROGRESS.md,
+# A conformance suite); LLVM's and MLIR's code is not instrumented. merkc then
+# links programs with clang's profile runtime. For a build of its own, as
+# build-cov: utils/conformance/coverage.sh reports on it.
+option(MERKURIUS_COVERAGE
+  "Instrument Merkurius's compiler and host runtime for llvm-cov" OFF)
+if(MERKURIUS_COVERAGE)
+  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR "MERKURIUS_COVERAGE needs clang's source-based "
+      "coverage: configure with CMAKE_CXX_COMPILER set to clang++.")
+  endif()
+  add_compile_options(-fprofile-instr-generate -fcoverage-mapping)
+  add_link_options(-fprofile-instr-generate)
+endif()
+
 add_subdirectory(include)
 add_subdirectory(lib)
 add_subdirectory(tools)

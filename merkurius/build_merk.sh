@@ -50,6 +50,13 @@ Other settings:
   BUILD_TYPE   $BUILD_TYPE (Release, Debug, RelWithDebInfo; takes effect at
                configure)
   JOBS         $JOBS (parallel compile jobs)
+  EXTRA_CMAKE_ARGS  more CMake options, at configure
+
+The coverage build (docs/INPROGRESS.md, A conformance suite), with this
+build's clang:
+  BUILD_DIR=$WORK_DIR/build-cov EXTRA_CMAKE_ARGS="-DMERKURIUS_COVERAGE=ON
+    -DCMAKE_C_COMPILER=$BUILD_DIR/bin/clang
+    -DCMAKE_CXX_COMPILER=$BUILD_DIR/bin/clang++" $(basename "$0") configure
 
 Example: JOBS=16 BUILD_TYPE=Debug $(basename "$0") configure
 
@@ -88,7 +95,8 @@ do_configure() {
     -DLLVM_ENABLE_ZSTD=OFF \
     -DLLVM_INCLUDE_BENCHMARKS=OFF \
     -DLLVM_INCLUDE_EXAMPLES=OFF \
-    -DLLVM_PARALLEL_LINK_JOBS=8
+    -DLLVM_PARALLEL_LINK_JOBS=8 \
+    ${EXTRA_CMAKE_ARGS:-}
 }
 
 require_configured() {

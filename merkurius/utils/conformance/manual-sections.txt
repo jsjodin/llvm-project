@@ -1,0 +1,190 @@
+0|Introduction
+0|Syntax
+1|Syntax overview
+1|Character set
+1|Whitespace
+1|Tokens
+1|Terms
+1|Builtin operators
+1|Items
+1|Declarations
+1|Facts
+1|Rules
+1|Goals
+1|State variables
+1|DCG-rules
+1|DCG-goals
+1|Data-terms
+2|Data-functors
+2|Record syntax
+2|Unification expressions
+2|Conditional expressions
+2|Lambda expressions
+2|Higher-order function applications
+2|Explicit type qualification
+2|Type conversion expressions
+1|Variable scoping
+1|Implicit quantification
+1|Elimination of double negation
+0|Types
+1|Builtin types
+2|Primitive types
+3|Signed integer types
+3|Unsigned integer types
+3|Floating-point type
+3|Character type
+3|String type
+2|Other builtin types
+3|Predicate and function types
+3|Tuple types
+3|The universal type
+3|The ``state-of-the-world'' type
+1|User-defined types
+2|Discriminated unions
+2|Equivalence types
+2|Abstract types
+2|Subtypes
+1|Predicate and function type declarations
+1|Field access functions
+2|Field selection
+2|Field update
+2|User-supplied field access function declarations
+2|Field access examples
+1|The standard ordering
+0|Modes
+1|Insts modes and mode definitions
+1|Predicate and function mode declarations
+1|Constrained polymorphic modes
+1|Different clauses for different modes
+0|Unique modes
+1|Destructive update
+1|Backtrackable destructive update
+1|Limitations of the current implementation
+0|Determinism
+1|Determinism categories
+1|Determinism checking and inference
+1|Replacing compile-time checking with run-time checking
+1|Interfacing nondeterministic code with the real world
+1|Committed choice nondeterminism
+0|User-defined equality and comparison
+0|Higher-order
+1|Creating higher-order terms
+1|Calling higher-order terms
+1|Higher-order insts and modes
+2|Builtin higher-order insts and modes
+2|Default insts for functions
+2|Combined higher-order types and insts
+0|Modules
+1|The module system
+1|An example module
+1|Submodules
+2|Nested submodules
+2|Separate submodules
+2|Visibility rules
+2|Implementation bugs and limitations
+1|Module initialisation
+1|Module finalisation
+1|Module-local mutable variables
+0|Type classes
+1|Typeclass declarations
+1|Instance declarations
+1|Abstract typeclass declarations
+1|Abstract instance declarations
+1|Type class constraints on predicates and functions
+1|Type class constraints on type class declarations
+1|Type class constraints on instance declarations
+1|Functional dependencies
+0|Existential types
+1|Existentially typed predicates and functions
+2|Syntax for explicit type quantifiers
+2|Semantics of type quantifiers
+2|Examples of correct code using type quantifiers
+2|Examples of incorrect code using type quantifiers
+1|Existential class constraints
+1|Existentially typed data types
+1|Some idioms using existentially quantified types
+0|Type conversions
+0|Exception handling
+0|Semantics
+0|Foreign language interface
+1|Calling foreign code from Mercury
+2|pragma foreign_proc
+2|Foreign code attributes
+1|Calling Mercury from foreign code
+1|Data passing conventions
+2|C data passing conventions
+2|C# data passing conventions
+2|Java data passing conventions
+1|Using foreign types from Mercury
+1|Using foreign enumerations in Mercury code
+1|Using Mercury enumerations in foreign code
+1|Adding foreign declarations
+1|Declaring Mercury exports to other modules
+1|Adding foreign definitions
+1|Language specific bindings
+2|Interfacing with C
+3|Using pragma foreign_type for C
+3|Using pragma foreign_enum for C
+3|Using pragma foreign_export_enum for C
+3|Using pragma foreign_proc for C
+3|Using pragma foreign_export for C
+3|Using pragma foreign_decl for C
+3|Using pragma foreign_code for C
+3|Memory management for C
+3|Linking with C object files
+2|Interfacing with C#
+3|Using pragma foreign_type for C#
+3|Using pragma foreign_enum for C#
+3|Using pragma foreign_export_enum for C#
+3|Using pragma foreign_proc for C#
+3|Using pragma foreign_export for C#
+3|Using pragma foreign_decl for C#
+3|Using pragma foreign_code for C#
+2|Interfacing with Java
+3|Using pragma foreign_type for Java
+3|Using pragma foreign_enum for Java
+3|Using pragma foreign_export_enum for Java
+3|Using pragma foreign_proc for Java
+3|Using pragma foreign_export for Java
+3|Using pragma foreign_decl for Java
+3|Using pragma foreign_code for Java
+0|Impurity
+1|Purity levels
+1|Purity ordering
+1|Impurity semantics
+1|Declaring impurity
+1|Impure goals
+1|Promising purity
+1|Impurity example
+1|Higher-order impurity
+2|Purity annotations on higher-order types
+2|Purity annotations on lambda expressions
+2|Purity annotations on higher-order calls
+0|Solver types
+1|The any inst
+1|Abstract solver type declarations
+1|Solver type definitions
+1|Implementing solver types
+1|Solver types and negated contexts
+0|Trace goals
+0|Pragmas
+1|Inlining
+1|Type specialization
+2|Syntax and semantics of type specialization pragmas
+2|When to use type specialization
+2|Implementation specific details
+1|Obsolescence
+1|No determinism warnings
+1|No dead predicate warnings
+1|Source file name
+0|Implementation-dependent extensions
+1|Fact tables
+1|Tabled evaluation
+1|Termination analysis
+1|Feature sets
+1|Trailing
+2|Choice points
+2|Value trailing
+2|Function trailing
+2|Delayed goals and floundering
+2|Avoiding redundant trailing
