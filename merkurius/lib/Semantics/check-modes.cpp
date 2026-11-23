@@ -247,6 +247,10 @@ private:
     llvm::StringRef freeParameter{}; // the first that is not one
     std::vector<llvm::StringRef> names{};
     std::vector<const Inst *> constraints{}; // explicit ones, or null
+    // Whether each variable's constraint is from the list after `<=`, and
+    // the constraint its first occurrence has.
+    std::vector<bool> listed{};
+    std::vector<const Inst *> occurrence{};
     std::vector<const Inst *> made{};
     llvm::StringRef inconsistent{};
     unsigned id{0}; // a declaration's, numbered from 1
@@ -393,6 +397,8 @@ const Inst *ModeChecker::Parameter(llvm::StringRef name, InstScope &scope) {
   if (it == scope.names.end()) {
     scope.names.push_back(name);
     scope.constraints.push_back(nullptr);
+    scope.listed.push_back(false);
+    scope.occurrence.push_back(nullptr);
   }
   // The variables collected before it may not be converted yet, as `A`
   // in `mode ok(in(A), out(I)) <= I =< ground`, whose constraints name
@@ -419,13 +425,33 @@ void ModeChecker::Collect(const parser::Inst &inst, InstScope &scope) {
             if (it == scope.names.end()) {
               scope.names.push_back(var->name);
               scope.constraints.push_back(nullptr);
+              scope.listed.push_back(false);
+              scope.occurrence.push_back(nullptr);
             }
+            const Inst *own{nullptr};
             if (var->constraint) {
               InstScope inner;
-              const Inst *constraint{Convert(*var->constraint, inner)};
+              own = Convert(*var->constraint, inner);
               if (!scope.constraints[number]) {
-                scope.constraints[number] = constraint;
-              } else if (scope.constraints[number] != constraint &&
+                scope.constraints[number] = own;
+              } else if (scope.constraints[number] != own &&
+                  scope.inconsistent.empty()) {
+                scope.inconsistent = var->name;
+              }
+            }
+            // Each occurrence of a declaration's inst variable has the same
+            // constraint: its own, or the one after `<=`, or else ground,
+            // as an unconstrained one is (reference manual, "Constrained
+            // polymorphic modes"), so `in(I =< bound(yes)), out(I)` is
+            // inconsistent, as in mmc.
+            if (!scope.definition) {
+              if (!own) {
+                own = scope.listed[number] ? scope.constraints[number]
+                                           : insts_.Ground();
+              }
+              if (!scope.occurrence[number]) {
+                scope.occurrence[number] = own;
+              } else if (scope.occurrence[number] != own &&
                   scope.inconsistent.empty()) {
                 scope.inconsistent = var->name;
               }
@@ -865,6 +891,8 @@ ModeChecker::Declared ModeChecker::ConvertDeclaration(
     if (!llvm::is_contained(scope.names, constraint->var)) {
       scope.names.push_back(constraint->var);
       scope.constraints.push_back(inst);
+      scope.listed.push_back(true);
+      scope.occurrence.push_back(nullptr);
     }
   }
   for (const parser::Mode &mode : arguments) {
