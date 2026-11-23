@@ -8607,14 +8607,27 @@ tested shows.
    trace goals, solver types, implementation-dependent; then the library,
    module by module. Each difference triaged as it is found.
 
-   *Types, so far (2026-11-23):* the builtin types, discriminated unions,
-   equivalence, abstract and subtypes. Their bugs were fixed as found:
-   coerce to a supertype of another module, reserved type names, an
-   abstract type with no definition, and a cycle of equivalences reported
-   once for each of its types. Left: predicate and function type
-   declarations, field access and the standard ordering, then the
-   chapter's coverage. Combined higher-order types and insts, which mode
-   analysis does not implement, are fixed next, before the rest.
+   *Types, done (2026-11-23):* every section has tests. Their bugs were
+   fixed as found:
+   - coerce to a supertype of another module;
+   - reserved type names;
+   - an abstract type with no definition;
+   - a cycle of equivalences reported once for each of its types;
+   - combined higher-order types and insts (higher-order/);
+   - a module's own declarations of its field access functions;
+   - field access det where the constructor is known;
+   - a function declaration with a type and no result;
+   - `-fno-infer-types`, which only `-fc1` accepted.
+
+   The chapter's coverage was measured with the conformance tests alone
+   (61 then), to find its rules without tests. The useful measure is
+   the error messages no test reaches. In the code of the types chapter,
+   eight were unreached, and each now has a `reject-` test. The others
+   belong to later chapters: type classes, existential types, loops,
+   state variables, modes. Line coverage says little at this stage: 38%
+   of check-types.cpp, most of the rest being type classes and
+   inference. The coverage build needs its precompiled headers deleted
+   when build-merk's clang changes commit, as they record its version.
 
    *Subtypes have no code generation yet* (`nyi-` tests in
    `types/subtypes/`). The user put it after the fixes to existing
