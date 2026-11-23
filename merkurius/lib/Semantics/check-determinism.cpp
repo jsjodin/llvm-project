@@ -1900,6 +1900,34 @@ private:
 
   // A call in an implied mode tests the argument that is already bound
   // against the callee's output, so it can fail.
+  // Whether a field access or update cannot fail: its term is known to
+  // have the field's constructor, as after a switch on it, or by its inst.
+  // mmc's is a deconstruction, which goes by them so (reference manual,
+  // "Field access functions").
+  bool FieldCannotFail(const Body &goal, const Symbol &callee) {
+    if ((callee.kind != SymbolKind::Field &&
+            callee.kind != SymbolKind::FieldUpdate) ||
+        goal.arguments.empty()) {
+      return false;
+    }
+    const auto *constructor{
+        std::get_if<const parser::Constructor *>(&callee.declaration)};
+    if (!constructor) {
+      return false;
+    }
+    InstFunctor functor{callee.module, (*constructor)->name->name,
+        static_cast<unsigned>((*constructor)->arguments.size()), false};
+    BodyVar term{goal.arguments.front()};
+    if (auto it{known_.find(term)};
+        it != known_.end() && it->second == functor) {
+      return true;
+    }
+    auto x{llvm::find_if(
+        goal.entry, [&](const auto &e) { return e.first == term; })};
+    return x != goal.entry.end() && x->second &&
+        !AllowsOthers(ops_, body_.vars[term].type, x->second, {functor});
+  }
+
   static Components Implied(Components components, const GoalModes &modes) {
     components.canFail = components.canFail || modes.implied;
     return components;
@@ -2107,9 +2135,15 @@ private:
       return {det};
     }
     switch (goal->unify) {
-    case UnifyKind::Call:
-      return {Implied(Callee(*goal->modes->callee), *goal->modes),
+    case UnifyKind::Call: {
+      Inferred r{Implied(Callee(*goal->modes->callee), *goal->modes),
           Impure(*goal->modes->callee->symbol)};
+      if (r.d.canFail && !goal->modes->implied &&
+          FieldCannotFail(*goal, *goal->modes->callee->symbol)) {
+        r.d.canFail = false;
+      }
+      return r;
+    }
     case UnifyKind::Test:
       return {{true, Solutions::One}};
     // Binding an existing variable of an open type may fail, as it may be
