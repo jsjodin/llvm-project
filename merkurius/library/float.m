@@ -67,15 +67,15 @@
 #include <float.h>
 #include <math.h>
 
-/* An exception nothing catches, until exceptions can be caught: the
-   runtime's report, which a GPU's runtime has under its own name. */
+/* An error of the library's, with its text as mmc reports it uncaught,
+   which the runtime throws as its value (runtime/exception.cpp). A GPU's
+   runtime reports it, under its own name, as nothing catches it there. */
 #ifdef __AMDGPU__
 void merk_device_uncaught_exception(const char *exception)
     __attribute__((noreturn));
-#define merk_uncaught_exception merk_device_uncaught_exception
+#define merk_library_error merk_device_uncaught_exception
 #else
-void merk_uncaught_exception(const char *exception)
-    __attribute__((noreturn));
+void merk_library_error(const char *exception) __attribute__((noreturn));
 #endif
 ").
 
@@ -159,7 +159,7 @@ cast_from_uint32(N) = float(uint32.cast_to_int(N)).
     [will_not_call_merkurius, promise_pure, thread_safe],
 "
     if (X == 0.0 && N < 0) {
-        merk_uncaught_exception(\"domain_error(\\\"float.pow: zero base\\\")\");
+        merk_library_error(\"domain_error(\\\"float.pow: zero base\\\")\");
     }
     MR_Integer n = N < 0 ? -N : N;
     MR_Float x = X, p = 1.0;

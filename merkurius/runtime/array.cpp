@@ -38,7 +38,7 @@ extern "C" bool merk_device_bulk_fill_record(uint64_t *to,
 #include <cstdio>
 #include <cstdlib>
 
-extern "C" [[noreturn]] void merk_uncaught_exception(const char *exception);
+extern "C" [[noreturn]] void merk_library_error(const char *exception);
 #endif
 
 using merkurius::runtime::ArrayCodeOf;
@@ -482,6 +482,6 @@ extern "C" [[noreturn]] void merk_index_out_of_bounds(
       "index_out_of_bounds(\"%s: index %" PRId64 " not in range [0, %" PRId64
       "]\")",
       what, index, max);
-  merk_uncaught_exception(exception);
+  merk_library_error(exception);
 }
 #endif

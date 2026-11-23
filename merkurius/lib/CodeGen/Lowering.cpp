@@ -65,7 +65,7 @@ static constexpr llvm::StringLiteral kWordOfBits{"merk.word_of_bits"};
 namespace {
 
 // The runtime's function that reports an uncaught exception and exits.
-constexpr llvm::StringLiteral kThrowSymbol{"merk_uncaught_exception"};
+constexpr llvm::StringLiteral kThrowSymbol{"merk_library_error"};
 constexpr llvm::StringLiteral kHeapAddressSymbol{"merk.heap_address"};
 constexpr llvm::StringLiteral kTrailAddressSymbol{"merk.trail_address"};
 // Where MerkTrail keeps the entries in use and the number of live marks

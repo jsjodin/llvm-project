@@ -28,11 +28,11 @@
 % LLVM-NEXT: %[[IS_ZERO:.*]] = icmp eq i64 %1, 0
 % LLVM-NEXT: br i1 %[[IS_ZERO]], label %[[THROW:.*]], label %[[DIVIDE:.*]]
 % LLVM: [[THROW]]:
-% LLVM-NEXT: call void @merk_uncaught_exception(ptr @merk.str.{{[0-9]+}})
+% LLVM-NEXT: call void @merk_library_error(ptr @merk.str.{{[0-9]+}})
 % LLVM-NEXT: unreachable
 % LLVM: [[DIVIDE]]:
 % LLVM: sdiv i64 %0,
-% LLVM: declare void @merk_uncaught_exception(ptr) #[[ATTRS:[0-9]+]]
+% LLVM: declare void @merk_library_error(ptr) #[[ATTRS:[0-9]+]]
 % LLVM: attributes #[[ATTRS]] = { noreturn nounwind }
 
 % OUTPUT:-3

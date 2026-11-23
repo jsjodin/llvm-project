@@ -117,6 +117,79 @@ extern "C" [[noreturn]] void merk_throw(
 #endif
 }
 
+// The descriptors of the library's own errors, software_error, domain_error
+// and index_out_of_bounds, which exception.m's foreign code lists. Weak: a
+// program that never calls try does not link exception.m, and nothing
+// catches its errors.
+extern "C" const Word merk_library_error_types[] __attribute__((weak));
+
+namespace {
+
+// A quoted string as mmc writes it, from after its opening quote to before
+// its closing one, into a string of its own. False if it is not one.
+bool Unquote(const char *from, const char *end, char *&text) {
+  text = static_cast<char *>(std::malloc(end - from + 1));
+  char *to{text};
+  while (from < end) {
+    char c{*from++};
+    if (c == '\\') {
+      if (from == end) {
+        return false;
+      }
+      c = *from++;
+      c = c == 'n' ? '\n' : c == 't' ? '\t' : c;
+    }
+    *to++ = c;
+  }
+  *to = '\0';
+  return true;
+}
+
+} // namespace
+
+// An error of the library's own, with its text as mmc reports it uncaught:
+// "Software Error: " and the message, domain_error("message"), or
+// index_out_of_bounds("message"). It is thrown as that value, so that a try
+// catches it; if it is none of them, or the program links no try, it is
+// reported. Code generation's checks call it (merk.throw_if), and the
+// library's C, from Merkurius code, which holds no lock a jump would leave
+// held, as a call from the runtime's own C++ may. The univ's cell and the
+// message are outside the heap, which the collector neither moves nor
+// frees: an error's few bytes are not given back.
+extern "C" [[noreturn]] void merk_library_error(const char *text) {
+  static constexpr char kSoftware[]{"Software Error: "};
+  static constexpr char kDomain[]{"domain_error(\""};
+  static constexpr char kIndex[]{"index_out_of_bounds(\""};
+  if (!merk_library_error_types) {
+    merk_uncaught_exception(text);
+  }
+  std::size_t length{std::strlen(text)};
+  Word type{0};
+  char *message{nullptr};
+  if (std::strncmp(text, kSoftware, sizeof kSoftware - 1) == 0) {
+    type = merk_library_error_types[0];
+    message = strdup(text + sizeof kSoftware - 1);
+  } else {
+    for (int kind{1}; kind <= 2; ++kind) {
+      const char *prefix{kind == 1 ? kDomain : kIndex};
+      std::size_t size{std::strlen(prefix)};
+      if (length >= size + 2 && std::strncmp(text, prefix, size) == 0 &&
+          std::strcmp(text + length - 2, "\")") == 0 &&
+          Unquote(text + size, text + length - 2, message)) {
+        type = merk_library_error_types[kind];
+        break;
+      }
+    }
+  }
+  if (!type) {
+    merk_uncaught_exception(text);
+  }
+  auto *univ{static_cast<Word *>(std::malloc(2 * sizeof(Word)))};
+  univ[0] = type;
+  univ[1] = reinterpret_cast<Word>(message);
+  merk_throw(reinterpret_cast<Word>(univ), type, univ[1]);
+}
+
 #if defined(__x86_64__)
 
 // The entries of a try, which the library calls as closures: in the tail

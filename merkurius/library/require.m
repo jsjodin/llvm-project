@@ -40,15 +40,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* An exception nothing catches, until exceptions can be caught: the
-   runtime's report, which a GPU's runtime has under its own name. */
+/* An error of the library's, with its text as mmc reports it uncaught,
+   which the runtime throws as its value (runtime/exception.cpp). A GPU's
+   runtime reports it, under its own name, as nothing catches it there. */
 #ifdef __AMDGPU__
 void merk_device_uncaught_exception(const char *exception)
     __attribute__((noreturn));
-#define merk_uncaught_exception merk_device_uncaught_exception
+#define merk_library_error merk_device_uncaught_exception
 #else
-void merk_uncaught_exception(const char *exception)
-    __attribute__((noreturn));
+void merk_library_error(const char *exception) __attribute__((noreturn));
 #endif
 void merk_not_implemented(const char *what) __attribute__((noreturn));
 ").
@@ -68,7 +68,7 @@ void merk_not_implemented(const char *what) __attribute__((noreturn));
     for (int i = 0; i < 5; ++i) {
         strcat(message, parts[i]);
     }
-    merk_uncaught_exception(message);
+    merk_library_error(message);
 ").
 
 error(Message) :-

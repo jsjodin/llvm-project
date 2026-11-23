@@ -108,7 +108,7 @@ main(!IO) :-
 % MLIR: omp.target kernel_type(generic)
 % MLIR: llvm.call tailcc @omp_target.sum_4_0(
 % MLIR: llvm.cond_br
-% MLIR: llvm.call @merk_uncaught_exception(
+% MLIR: llvm.call @merk_library_error(
 % MLIR: omp.terminator
 % MLIR-LABEL: llvm.func internal tailcc @omp_target.sum_4_0(
 % A procedure only target regions call, and private to the module, is
@@ -136,14 +136,14 @@ main(!IO) :-
 % DEVICE-LABEL: llvm.func internal @omp_target.sum_4_0(
 % DEVICE: llvm.call musttail @omp_target.sum_4_0(
 % DEVICE-NOT: merk_main
-% DEVICE-NOT: merk_uncaught_exception
+% DEVICE-NOT: merk_library_error
 
 % DEVICE-LLVM: target triple = "amdgpu10.30-amd-amdhsa"
 % DEVICE-LLVM-LABEL: define internal i64 @omp_target.sum_4_0(
 % DEVICE-LLVM: musttail call i64 @omp_target.sum_4_0(
 % DEVICE-LLVM-LABEL: define weak_odr protected amdgpu_kernel void @__omp_offloading_{{[0-9a-f]+}}_{{[0-9a-f]+}}_omp_target.compute_6_0_l{{[0-9]+}}(
 % DEVICE-LLVM: call void @merk_device_uncaught_exception(ptr @merk.str.{{[0-9]+}})
-% DEVICE-LLVM-NOT: merk_uncaught_exception
+% DEVICE-LLVM-NOT: merk_library_error
 % DEVICE-LLVM-DAG: !{i32 1, !"amdhsa_code_object_version", i32 600}
 % DEVICE-LLVM-DAG: !{i32 8, !"PIC Level", i32 2}
 

@@ -8208,7 +8208,7 @@ and the program in `main`, as now.
 1. On the host: `throw`, `try`, `try_io`, `rethrow`, in the library and the
    runtime; library errors thrown as their exceptions, so that a catch
    sees them. Tests against mmc's output.
-   - *Built 2026-11-23, but for the library's errors.* A try calls one of
+   - *Built 2026-11-23.* A try calls one of
      three entries in assembly (`runtime/exception.cpp`, x86-64), as a
      closure the library gets from the runtime: for a det or cc_multi
      goal, a semidet or cc_nondet one, and `try_io`'s. So the call is an
@@ -8247,10 +8247,20 @@ and the program in `main`, as now.
      no_determinism_warning`, which the library's `try` needs as it is
      declared `cc_multi` and is `det` here, was read but not applied
      (`Semantics/determinism/goals.m`).
-   - *Left:* the library's own errors as values: `require`'s
-     `software_error`, the `domain_error`s that code generation's checks
-     throw (`merk.throw_if`), and `array`'s `index_out_of_bounds`. Each is
-     still reported by `merk_uncaught_exception`, so nothing catches it.
+   - *The library's own errors,* done 2026-11-23: code generation's checks
+     (`merk.throw_if`), the C of `require`, `math` and `float`, and
+     `array`'s index check give their text, as mmc reports it uncaught, to
+     the runtime's `merk_library_error`, which reads the `software_error`,
+     `domain_error` or `index_out_of_bounds` there and throws it, in a univ
+     outside the heap; any other text, or a program that links no try, is
+     reported as before. The descriptors come from `exception.m`'s foreign
+     code (`merk_library_error_types`), which the runtime names weakly, as
+     only a program that calls `try` links `exception.m`; naming `array`'s
+     links it. Only calls from Merkurius code throw: the runtime's own C++
+     may hold a lock, and keeps `merk_uncaught_exception`. A comparison of
+     NaNs through a type variable stays a fatal error, as in mmc
+     (`CodeGen/exceptions-library.m`, mmc's output). A GPU's code reports
+     them as before, as nothing catches there yet (step 3).
      `det_univ_to_type`'s message lacks the two types' names, which needs
      a type_info's name (step 4).
 2. `try_all` and `finally`, then nondeterministic closures in `try_all`.

@@ -89,10 +89,11 @@ into every program. `exception.m` implements `throw`, `try`, `try_io` and
 `rethrow` on the runtime's entries (`runtime/exception.cpp`;
 docs/INPROGRESS.md, Exceptions), and `univ.m` all of its
 predicates and functions, as an existentially typed cell; both are for the
-host only so far. An exception the library throws itself, such as math's
-`domain_error`, is not yet a value that `try` catches: the runtime's
-`merk_uncaught_exception` reports it; on a GPU, the device runtime's
-`merk_device_uncaught_exception`, which the C names under `__AMDGPU__`. `write_float` writes as mmc
+host only so far. An error the library throws itself, such as math's
+`domain_error`, goes as its text to the runtime's `merk_library_error`,
+which throws it as its value; on a GPU, to the device runtime's
+`merk_device_uncaught_exception`, which reports it and which the C names
+under `__AMDGPU__`. `write_float` writes as mmc
 does, with the fewest significant digits, from 15 to 17, that read back
 as the same float, and `.0` if that has no fraction or exponent; the
 behaviour was found by running mmc's programs, not from its library. So

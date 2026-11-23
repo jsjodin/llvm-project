@@ -1,6 +1,6 @@
 % The library's errors in a GPU process: require's software errors and the
-% domain errors of float and math, whose foreign code reports through the
-% runtime's merk_uncaught_exception, call the device runtime's
+% domain errors of float and math, whose foreign code throws through the
+% runtime's merk_library_error, call the device runtime's
 % merk_device_uncaught_exception in a GPU's compile, which the host prints
 % as it prints its own and which ends the program. This file runs the same
 % calls on the host, whose reports process-library-errors-gpu.test checks

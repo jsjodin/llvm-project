@@ -222,6 +222,23 @@ semidet_result(Kind, Value, Exception, Result) :-
     Entry = (MR_Word) merk_try_io_closure;
 ").
 
+:- pragma foreign_code("C", "
+/* The descriptors of the library's own errors, for the runtime's
+   merk_library_error, which throws them as values. index_out_of_bounds's
+   is array's, which naming it links. */
+extern const char merk_software_error_type[]
+    __asm__(\"merk.type_ctor.exception.software_error/0\");
+extern const char merk_domain_error_type[]
+    __asm__(\"merk.type_ctor.exception.domain_error/0\");
+extern const char merk_index_out_of_bounds_type[]
+    __asm__(\"merk.type_ctor.array.index_out_of_bounds/0\");
+const MR_Word merk_library_error_types[3] = {
+    (MR_Word) merk_software_error_type,
+    (MR_Word) merk_domain_error_type,
+    (MR_Word) merk_index_out_of_bounds_type,
+};
+").
+
 :- pragma foreign_decl("C", local, "
 void merk_throw(MR_Word univ, MR_Word type_info, MR_Word value)
     __attribute__((noreturn));

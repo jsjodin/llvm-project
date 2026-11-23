@@ -176,7 +176,7 @@ module @ops attributes {merk.foreign_code = "#include <stdio.h>\0Along merk_fore
 // LLVM-NEXT: i64 3, label %[[CASE]]
 // LLVM-NEXT: i64 5, label %{{.*}}
 // LLVM-NEXT: ]
-// LLVM: call void @merk_uncaught_exception(ptr @merk.str.{{[0-9]+}})
+// LLVM: call void @merk_library_error(ptr @merk.str.{{[0-9]+}})
 // LLVM-NEXT: unreachable
 // LLVM: [[FAIL]]:
 // LLVM-NEXT: ret { i1, i64 } { i1 false, i64 undef }
